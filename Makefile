@@ -5,6 +5,7 @@
 #   make kext LEVEL=2   # same, probe level 2 (1 default, 2 + display, 3 + graphics core)
 #   make kext SMU=1     # same, plus the SMU queries (src/common/rb_smu.h)
 #   make tools      # build/out/rbdump
+#   make plugin     # build/out/RembrandtGPU.kext, the Lilu plugin (src/plugin)
 #
 # Loading the kext is never done from here; see docs/RULES.md.
 
@@ -46,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools clean
+.PHONY: all hosttest kext tools plugin clean
 
 all: kext tools
 
@@ -91,7 +92,46 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@echo "  KEXT $(KEXT_BUNDLE)"
 	@python3 tools/check_imports.py $(KEXT_BUNDLE)
 
+# The Lilu plugin. Built against Lilu's source (third_party/Lilu, the version
+# loaded on this machine) the way Lilu's own plugins are: plugin_start.cpp
+# supplies the IOService class and the kern_start/kern_stop entry points.
+LILU        := $(PROJ_ROOT)/third_party/Lilu/Lilu
+PLUGIN_SRC  := $(PROJ_ROOT)/src/plugin
+PLUGIN_VER  := 1.0.0
+PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"'
+PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o
+PLUGIN_BUNDLE := $(OUT)/RembrandtGPU.kext
+PLUGIN_BIN    := $(PLUGIN_BUNDLE)/Contents/MacOS/RembrandtGPU
+PLUGIN_CXXFLAGS := $(filter-out -Werror -I$(COMMON),$(KEXT_CXXFLAGS)) -isystem $(LILU) $(PLUGIN_DEFS)
+
+$(BUILD_DIR)/plugin/%.o: $(PLUGIN_SRC)/%.cpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  plugin/$*.cpp"
+	@$(CXX) $(PLUGIN_CXXFLAGS) -Werror -c $< -o $@
+
+$(BUILD_DIR)/plugin/plugin_start.o: $(LILU)/Library/plugin_start.cpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  Lilu/Library/plugin_start.cpp"
+	@$(CXX) $(PLUGIN_CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/plugin/kmod_info.o: $(PLUGIN_SRC)/kmod_info.c
+	@mkdir -p $(dir $@)
+	@$(CC) $(filter-out -I$(COMMON),$(KEXT_CFLAGS)) $(PLUGIN_DEFS) -c $< -o $@
+
+plugin: $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
+	@rm -rf $(PLUGIN_BUNDLE)
+	@mkdir -p $(dir $(PLUGIN_BIN))
+	@sed -e 's/$$(EXECUTABLE_NAME)/RembrandtGPU/g' -e 's/$$(PRODUCT_NAME)/RembrandtGPU/g' \
+	    -e 's/$$(PRODUCT_BUNDLE_IDENTIFIER)/com.rembrandtgpu.plugin/g' \
+	    -e 's/$$(MODULE_VERSION)/$(PLUGIN_VER)/g' $(PLUGIN_SRC)/Info.plist > $(PLUGIN_BUNDLE)/Contents/Info.plist
+	@plutil -lint -s $(PLUGIN_BUNDLE)/Contents/Info.plist
+	@! grep -n '\$$(' $(PLUGIN_BUNDLE)/Contents/Info.plist
+	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
+	    -L$(MKSDK)/Library/x86_64 $(PLUGIN_OBJS) -lkmod -o $(PLUGIN_BIN)
+	@codesign --force --sign - $(PLUGIN_BUNDLE) 2>/dev/null || true
+	@echo "  KEXT $(PLUGIN_BUNDLE)"
+
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(KEXT_OBJS:.o=.d)
+-include $(KEXT_OBJS:.o=.d) $(PLUGIN_OBJS:.o=.d)
