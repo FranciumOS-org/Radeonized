@@ -151,6 +151,53 @@ accelerator, and DCN 3.1 can be done later. The critical path becomes the
 library layer: HWServices loading X6800HWLibs for 0x1681, then PSP, SMU 13,
 GC firmware and golden settings, MMHUB 2.3 and the memory model.
 
+## Start-up path for 0x1681, in order, with what each step needs
+
+Traced statically on 15.8.1 (`tools/re/strxref.py` finds string users,
+`kc_stubs.py annotate` names kernel calls). "Patch" = what our kext / plug-in
+must do at that point; addresses are this build's.
+
+### A. Getting Apple's kexts to start at all
+
+| # | Step in Apple's code | What happens on a 680M today | Patch |
+|---|---|---|---|
+| A1 | HWServices and the accelerator match `IOPCIMatch` lists plus `IOPropertyMatch` `LoadHWServices` / `LoadAccelerator` = true | 0x1681 is in no list; nothing sets the properties | personalities for `AMDRadeonX6000_AMDRadeonHWServicesNavi` and `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` matching 0x16811002; set `LoadHWServices`, then `LoadAccelerator` on the PCI device (Apple's GPU wrangler does it in that order, `AmdGpuWrangler::vendor_doDeviceAttribute`) |
+| A2 | `HWServicesAbstract::readProjectName` reads the PCI device's **`@0,name`**, `getMatchProperty` maps it through `ProjectNameTable` | no `@0,name` -> no HWLibs plug-in | `@0,name = "ATY,Belknap"` (-> Load6800 = X6800HWLibs) |
+| A3 | the accelerator finds its display peer (`initLinkToPeer`) | would pick IONDRVFramebuffer and block forever | our peer in `IOMatchCategory` "ATIFramebuffer", present before A1's accelerator start; answers 0x00 and 0x14, sends 6 then 0x1B |
+
+### B. HWLibs (X6800HWLibs) bring-up
+
+| # | Step | On a 680M | Patch |
+|---|---|---|---|
+| B1 | `AmdTtlServices::AmdTtlServices` looks the device ID up in `deviceTypeTable` (0x128dbd60: 84 `{id, type}`; type 6 = Navi 21 0x73a0-0x73bf) | not found: logs "Unable to find matching firmware device type for device ID", continues without a type | add 0x1681 -> 6 |
+| B2 | `ipconfig_create` reads `IP_DISCOVERY_VERSION` (0x16a00; reads 2 here) -> `hwip_discover_ver2`: waits for C2PMSG_33 bit 31, reads RCC_CONFIG_MEMSIZE, maps MEMSIZE - 64 KB, checks 0x28211407, `parse_ip_discovery_v2_tbl` | **expected to work**: same method as Linux and our probe; the parser checks the IPDS/HARV signatures and no table version | none expected; verify on hardware (IP table v4, 32-bit bases; DBGU_IO and NBIF have 6 bases, the parser may cap at 5) |
+| B3 | `smu_init_function_pointer_list`: `smu_get_hw_version` maps the MP1 version to 0-0x14; only 6/8/9/10 accepted (mask 0x740), all -> `smu_11_0_7_create_function_pointer_list` | MP1 13.0.3 -> **"Unsupported hw version!"**, returns failure | install an SMU 13 function list (the 27 slots of `smu_11_0_7_create_function_pointer_list`: internal sw/hw init, dpm, gfx_off, power_feature_caps, ...), implemented from Linux yellow_carp_ppt.c over the mailbox in rb_smu.c. Largest single item |
+| B4 | `psp_asic_type_init` sets the PSP type from the MP0 version; only `mp0_11_0_0_*` exists | MP0 13.0.3 unmapped (exact failure not traced) | map onto the 11.0 paths: the ring registers match v13, and the secure OS is already running, so the bootloader paths are skipped (`mp0_is_sos_alive` reads C2PMSG_81) |
+| B5 | `sdma_init_function_pointer_list` compares `major<<16 | minor`, has 5.2 (0x50002) | SDMA 5.2.3 likely accepted; `sdma_5_2_3_ucode` slot exists | supply `yellow_carp_sdma.bin` |
+| B6 | GC firmware by device type (only `gc_10_3_*`, Navi 21) | Navi 21 firmware would be loaded into GC 10.3.3 | supply `yellow_carp_{pfp,me,ce,mec,mec2,rlc}.bin` (NootedRED: `populateFirmwareDirectory`, `AmdTtlFwServices::getIpFw`) |
+| B7 | GC golden registers (`gc_10_3_initialize_registers`) | Navi 21 values | Linux `golden_settings_gc_10_3_3` |
+| B8 | `findDeviceAsicCaps` / `isAsicCapEnabled` look up `CAIL_ASIC_CAPS_TABLE` | no 0x1681 entry | add an entry (NootedRED patches the same table) |
+
+### C. Accelerator (AMDRadeonX6000)
+
+| # | Step | On a 680M | Patch |
+|---|---|---|---|
+| C1 | `AMDNavi21Hardware::newGCHub` -> `AMDGCHub_10_3_0` | fits: Linux drives all GC 10.3.x with one gfxhub | none |
+| C2 | `AMDNavi21Hardware::newMMHub` -> `AMDMMHub_2_1_0` | wrong registers: MMHUB 2.3/2.4 moved every VM register, and not by one shift (invalidation engines regrouped per engine: ENG0 REQ/ACK/SEM 0x138e3/0x138f5/0x138d1 -> 0x1aa01/0x1aa02/0x1aa00) | a `MMHub_2_3` class: `fillVMRegisters`, `getValue_VM_INVALIDATE_ENG_REQ` from Linux mmhub_v2_3.c |
+| C3 | `setupAndInitializeHWCapabilities`, `setShaderEngineMemConfig` | Navi 21 layout (4 SE) | 1 SE x 2 SA x 3 WGP, wave32 |
+| C4 | memory model: VRAM behind BAR0 | carve-out 4 GB at phys 0x7_8000_0000, BAR0 256 MB | NootedRED's reserved-VRAM / `adjustVRAMAddress` pattern |
+| C5 | `start()` failure path | page fault in Apple's own error path (Navi48) | guard while bringing up |
+
+### Open, to settle before writing code
+
+1. Loading: A1-A3 and the B/C hooks are a Lilu plug-in's job. Lilu is
+   already loaded on this machine (1.7.3), and the AMD kexts are not loaded
+   until A1's properties appear, so a plug-in loaded after boot might still
+   see them load; whether Lilu accepts a plug-in that late is to be checked.
+   Otherwise the plug-in goes into the EFI, which CLAUDE.md keeps for the
+   user to do.
+2. B2 and B4 need a hardware run to confirm.
+
 ## Summary
 
 The library layer is closer than expected: AMD built Rembrandt-class pieces
