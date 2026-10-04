@@ -84,3 +84,15 @@ between boots (0x139ca7, 0x129d6e): nonzero means "secure OS alive", not a versi
   from 0xF4_0000_0000 = carve-out offset 0 (the GOP framebuffer). OTG1-3 off.
 - DMCUB enabled and idle-waiting; SCRATCH0 = 0x2 (mailbox ready, not DAL fw):
   the GOP/VBIOS DMCUB image is running. Linux's DM reloads its own image.
+
+## Third probe (2026-10-04, level 1 + SMU queries) — first mailbox writes
+
+All four queries answered OK, 12 writes, none refused. Mailbox before: msg 0,
+arg 0, resp 1.
+- SMU firmware 0x04453900: program 4, version 69.57.0.
+- Driver interface version 4 = SMU13_YELLOW_CARP_DRIVER_IF_VERSION: Linux's
+  yellow_carp_ppt.c tables match this firmware.
+- Enabled features 0x1497e1fd_ebfffdff (47), among them GFX_DPM, DS_GFXCLK,
+  GFX_TEMP_VMIN, GFX_DEM, ATHUB_PG, VCN_DPM, DCFCLK_DPM, S0I3, STAPM. Off:
+  ULV, ZSTATES, DS_FCLK, FUSE_PG, CORE_DLDO, RSMU/SMN/MSMU_LOW_POWER, SMART_SHIFT.
+- First answer took 307 us (the SMU waking from deep sleep), later ones 8-12 us.
