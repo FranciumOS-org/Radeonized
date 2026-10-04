@@ -25,6 +25,8 @@ carve-out directly.
 3. Hook Apple's X6000 Navi 21 accelerator from a Lilu plugin: identify the
    Navi 21 code paths that touch PSP 11 / SMU 11 / VRAM, map them against
    NootedRed's X6000FB.cpp, which already does part of this for Renoir.
+   Static analysis done: docs/APPLE-STACK.md. Display (no DCN 3.1 in Apple's
+   framebuffer) decides the route and comes first.
 4. Memory: Apple's driver assumes VRAM; the carve-out (step 0 tells where and
    how large) has to look like it.
 5. Display: Apple's X6000Framebuffer knows DCN 3.0, the 680M has DCN 3.1.2.

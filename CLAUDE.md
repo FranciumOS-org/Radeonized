@@ -21,6 +21,10 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
   Add a case whenever src/common changes, and check a new test fails when the
   code it guards is broken.
 - `docs/linux-ref/` — unmodified Linux files the code follows (UPSTREAM.md).
+- `tools/re/` — static analysis of Apple's AMD kexts: `kc_extract.py` (kext out
+  of the kernel collection as a standalone Mach-O), `machoread.py` (chained
+  pointers, strings, symbols), `dumptable.py`. Output goes to `build/re/`.
+  Findings: docs/APPLE-STACK.md.
 
 ## Workflow
 
