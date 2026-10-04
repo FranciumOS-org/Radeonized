@@ -185,6 +185,27 @@ bool RembrandtProbe::start(IOService *provider)
 
     int rc = rb_probe_run(&hw, static_cast<int>(level), r);
 
+
+    LOG("MEMSIZE %u MB, scratch %#x %#x %#x, C2PMSG_33 %#x, IP_DISCOVERY_VERSION %#x",
+        r->memsize_mb, r->scratch[0], r->scratch[1], r->scratch[2], r->c2pmsg33, r->ipd_version);
+    LOG("discovery table: %s, offset %#llx, %u bytes; BAR0 cross-check %s",
+        source_name(r->disc_source), (unsigned long long)r->disc_offset, r->disc_size,
+        !r->bar0_checked ? "not done" : r->bar0_matches ? "matches" : "DIFFERS");
+    if (rc) {
+        LOG("probe stopped: %s", r->fail ? r->fail : "?");
+    } else {
+        LOG("%u IPs, table v%u, check flags %#x", r->disc.nips, r->disc.ip_table_version, r->disc.check_flags);
+        for (uint32_t i = 0; i < r->disc.nips; i++) {
+            const rb_ip *ip = &r->disc.ips[i];
+            LOG("  %-9s inst %u  v%u.%u.%u  base0 %#x", rb_hwid_name(ip->hw_id), ip->inst,
+                ip->major, ip->minor, ip->revision, ip->nbase ? ip->base[0] : 0);
+        }
+        for (uint32_t i = 0; i < r->nregs; i++)
+            if (r->regs[i].status == RB_REG_OK)
+                LOG("  %-26s [%#07x] = %#010x", r->regs[i].name, r->regs[i].dw, r->regs[i].value);
+    }
+    LOG("index writes %u, refused writes %u", r->index_writes, r->refused_writes);
+
     rb_smu_result *sr = nullptr;
     if (rc == 0 && smu) {
         sr = static_cast<rb_smu_result *>(IOMalloc(sizeof(rb_smu_result)));
@@ -207,26 +228,6 @@ bool RembrandtProbe::start(IOService *provider)
         }
     }
     mmio->release();
-
-    LOG("MEMSIZE %u MB, scratch %#x %#x %#x, C2PMSG_33 %#x, IP_DISCOVERY_VERSION %#x",
-        r->memsize_mb, r->scratch[0], r->scratch[1], r->scratch[2], r->c2pmsg33, r->ipd_version);
-    LOG("discovery table: %s, offset %#llx, %u bytes; BAR0 cross-check %s",
-        source_name(r->disc_source), (unsigned long long)r->disc_offset, r->disc_size,
-        !r->bar0_checked ? "not done" : r->bar0_matches ? "matches" : "DIFFERS");
-    if (rc) {
-        LOG("probe stopped: %s", r->fail ? r->fail : "?");
-    } else {
-        LOG("%u IPs, table v%u, check flags %#x", r->disc.nips, r->disc.ip_table_version, r->disc.check_flags);
-        for (uint32_t i = 0; i < r->disc.nips; i++) {
-            const rb_ip *ip = &r->disc.ips[i];
-            LOG("  %-9s inst %u  v%u.%u.%u  base0 %#x", rb_hwid_name(ip->hw_id), ip->inst,
-                ip->major, ip->minor, ip->revision, ip->nbase ? ip->base[0] : 0);
-        }
-        for (uint32_t i = 0; i < r->nregs; i++)
-            if (r->regs[i].status == RB_REG_OK)
-                LOG("  %-26s [%#07x] = %#010x", r->regs[i].name, r->regs[i].dw, r->regs[i].value);
-    }
-    LOG("index writes %u, refused writes %u", r->index_writes, r->refused_writes);
 
     publish(r, pci, sr);
     IOFree(r, sizeof(*r));
