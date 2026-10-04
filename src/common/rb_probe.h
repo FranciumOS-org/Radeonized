@@ -42,6 +42,9 @@ struct rb_hw {
      * fb_len is the BAR's length. */
     uint64_t fb_len;
     int (*fb_read)(void *ctx, uint64_t byte_off, uint8_t *dst, uint32_t size);
+    /* Busy-wait `us` microseconds. Used by rb_smu.c's polls; the probe
+     * itself never waits. */
+    void (*delay_us)(void *ctx, uint32_t us);
 };
 
 enum rb_reg_status {

@@ -7,7 +7,7 @@ an APU. That is what NootedRed did for Vega APUs with Apple's Vega (X5000)
 driver. Unlike Navi48-MacOS (RX 9070 XT), no command-stream translation should
 be needed: Apple's Metal driver already emits gfx10.3 PM4.
 
-## Step 0 — read-only probe (this commit)
+## Step 0 — read-only probe (done: levels 1 and 2 ran, see docs/RULES.md)
 
 Map the register BAR, read the IP discovery table and the PSP/SMU/memory-hub
 state, change nothing. Answers: is the table where Linux looks for it, which IP
@@ -17,8 +17,9 @@ carve-out directly.
 
 ## Next steps (each its own kext stage, each read-mostly before it writes)
 
-1. SMU messages: ask the SMU its firmware version (first register write, via
-   the mailbox Linux uses; yellow_carp_ppt.c).
+1. SMU messages: ask the SMU its firmware version, driver-interface version
+   and enabled features (first register writes, via the mailbox Linux uses;
+   yellow_carp_ppt.c). Built: rb_smu.c, `make kext SMU=1`.
 2. PSP: check the TOC/TA state Linux checks before loading firmware
    (psp_v13_0.c); load nothing yet.
 3. Hook Apple's X6000 Navi 21 accelerator from a Lilu plugin: identify the

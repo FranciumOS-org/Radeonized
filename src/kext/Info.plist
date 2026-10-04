@@ -36,6 +36,9 @@
 			<!-- 1: PSP/SMU mailboxes and memory hub. 2: + display engine. 3: + graphics core. -->
 			<key>RBProbeLevel</key>
 			<integer>1</integer>
+			<!-- true: after the probe, ask the SMU its versions and feature mask (mailbox writes). -->
+			<key>RBSMUQuery</key>
+			<false/>
 		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>

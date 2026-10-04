@@ -10,8 +10,9 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
 ## Layout
 
 - `src/common/` — freestanding C shared by the kext and host tools: the IP
-  discovery parser (`rb_discovery.c`), the read-only probe (`rb_probe.c`) and
-  the register list (`rb_regs.h`, every offset cites its Linux header).
+  discovery parser (`rb_discovery.c`), the read-only probe (`rb_probe.c`), the
+  register list (`rb_regs.h`, every offset cites its Linux header) and the SMU
+  queries (`rb_smu.c`).
 - `src/kext/` — `RembrandtProbe`, an IOService in its own IOMatchCategory beside
   the boot framebuffer driver. Runs the probe once in start(), publishes
   `RBProbe` properties, unmaps everything.
@@ -30,6 +31,13 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
   mastering, never map BAR0's first 16 MB (the boot framebuffer's), read only
   inside the carve-out. Levels 2 (DCN registers) and 3 (+ GC registers) are
   opt-in: `RBProbeLevel` in src/kext/Info.plist, or boot-arg rbprobe_level=N.
+- The SMU queries' hardware rules (rb_smu.c, opt-in: `make kext SMU=1`, plist
+  RBSMUQuery, boot-arg rbprobe_smu=1): writes only to MP1 C2PMSG_66/82/90 of an
+  MP1 13.x, only allowlisted query messages (GetSmuVersion, GetDriverIfVersion,
+  GetEnabledSmuFeatures), nothing sent unless the response register reads 1,
+  stop at the first non-OK answer. Linux's protocol (smu_msg_v1_send_msg).
+  Adding a message to the allowlist is a decision for the user: say what it
+  changes on the chip.
 - Register gates follow Linux's version grouping, not the exact version: this
   chip reports MMHUB 2.4.0 (Linux: mmhub_v2_3, 2.3.0 offsets) and DMU 3.1.3
   (Linux: DCN_VERSION_3_1, dcn_3_1_2 offsets). Check Linux's grouping before

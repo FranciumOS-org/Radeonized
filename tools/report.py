@@ -15,6 +15,72 @@ import re
 import subprocess
 import sys
 
+# FEATURE_*_BIT of docs/linux-ref/smu_v13_0_1_pmfw.h
+SMU_FEATURES = {
+    0: "CCLK_DPM",
+    1: "FAN_CONTROLLER",
+    2: "DATA_CALCULATION",
+    3: "PPT",
+    4: "TDC",
+    5: "THERMAL",
+    6: "FIT",
+    7: "EDC",
+    8: "PLL_POWER_DOWN",
+    9: "ULV",
+    10: "VDDOFF",
+    11: "VCN_DPM",
+    12: "CSTATE_BOOST",
+    13: "FCLK_DPM",
+    14: "SOCCLK_DPM",
+    15: "MP0CLK_DPM",
+    16: "LCLK_DPM",
+    17: "SHUBCLK_DPM",
+    18: "DCFCLK_DPM",
+    19: "GFX_DPM",
+    20: "DS_GFXCLK",
+    21: "DS_SOCCLK",
+    22: "DS_LCLK",
+    23: "DS_DCFCLK",
+    24: "DS_SHUBCLK",
+    25: "GFX_TEMP_VMIN",
+    26: "ZSTATES",
+    27: "WHISPER_MODE",
+    28: "DS_FCLK",
+    29: "DS_SMNCLK",
+    30: "DS_MP1CLK",
+    31: "DS_MP0CLK",
+    32: "CLK_LOW_POWER",
+    33: "FUSE_PG",
+    34: "GFX_DEM",
+    35: "PSI",
+    36: "PROCHOT",
+    37: "CPUOFF",
+    38: "STAPM",
+    39: "S0I3",
+    40: "DF_LIGHT_CSTATE",
+    41: "PERF_LIMIT",
+    42: "CORE_DLDO",
+    43: "RSMU_LOW_POWER",
+    44: "SMN_LOW_POWER",
+    45: "THM_LOW_POWER",
+    46: "SMUIO_LOW_POWER",
+    47: "MP1_LOW_POWER",
+    48: "DS_VCN",
+    49: "CPPC",
+    50: "CPPC_PREFERRED_CORES",
+    51: "SMART_SHIFT",
+    52: "DF_CSTATES",
+    53: "MSMU_LOW_POWER",
+    54: "SOC_VOLTAGE_MON",
+    55: "ATHUB_PG",
+    56: "VDDOFF_ECO",
+    57: "ZSTATES_ECO",
+    58: "CC6",
+    59: "DS_UMCCLK",
+    60: "DS_HSPCLK",
+}
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -127,6 +193,32 @@ def main():
                 fmt = {8: "ARGB8888", 9: "ABGR8888", 10: "ARGB2101010"}.get(cfg & 0x7F, f"format {cfg & 0x7F}")
                 extra += f" ({fmt})"
             print(f"OTG{i} {on}{extra}")
+
+    smu = p.get("SMU")
+    if smu:
+        mask = lambda v: v & 0xFFFFFFFF if isinstance(v, int) else v
+        print("\n== SMU queries")
+        print(f"result: {smu['Result']}; MP1 {smu['MP1Version'] >> 16}.{(smu['MP1Version'] >> 8) & 0xff}."
+              f"{smu['MP1Version'] & 0xff}; mailbox before: msg {mask(smu['InitialMessage']):#x} "
+              f"arg {mask(smu['InitialArgument']):#x} resp {mask(smu['InitialResponse']):#x}")
+        for line in smu.get("Messages", []):
+            print("  " + line)
+        if "SmuVersion" in smu:
+            v = mask(smu["SmuVersion"])
+            print(f"SMU firmware: program {v >> 24}, version {(v >> 16) & 0xff}.{(v >> 8) & 0xff}.{v & 0xff} ({v:#010x})")
+        if "DriverIfVersion" in smu:
+            iv = mask(smu["DriverIfVersion"])
+            print(f"driver interface version {iv} (Linux yellow_carp expects 4: "
+                  f"{'match' if iv == 4 else 'MISMATCH'})")
+        if "EnabledFeatures" in smu:
+            f = smu["EnabledFeatures"] & 0xFFFFFFFFFFFFFFFF
+            on = [SMU_FEATURES.get(b, f"bit{b}") for b in range(64) if f >> b & 1]
+            print(f"enabled features {f:#018x} ({len(on)}):")
+            for i in range(0, len(on), 4):
+                print("  " + ", ".join(on[i:i + 4]))
+            print(f"graphics clock DPM (GFX_DPM): {'on' if f >> 19 & 1 else 'off'}")
+        print(f"mailbox writes {smu['Writes']}, refused {smu['RefusedWrites']}"
+              + ("  <-- should be 0!" if smu["RefusedWrites"] else ""))
 
     print(f"\nsaved: {run_dir}")
     return 0

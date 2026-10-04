@@ -8,6 +8,10 @@
  *
  * Probe level (rb_probe.h): personality property RBProbeLevel (Info.plist, default 1), or
  * the boot-arg rbprobe_level=N, which wins.
+ *
+ * SMU queries (rb_smu.h), the only mailbox writes: personality property
+ * RBSMUQuery (default false), or boot-arg rbprobe_smu=1. They run after a
+ * successful probe, before the register BAR is unmapped.
  */
 #ifndef REMBRANDT_PROBE_HPP
 #define REMBRANDT_PROBE_HPP
@@ -24,7 +28,7 @@ public:
     void stop(IOService *provider) override;
 
 private:
-    void publish(const struct rb_probe_result *r, IOPCIDevice *pci);
+    void publish(const struct rb_probe_result *r, IOPCIDevice *pci, const struct rb_smu_result *sr);
 };
 
 #endif
