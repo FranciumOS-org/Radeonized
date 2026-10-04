@@ -16,3 +16,15 @@ register offsets in `src/common/rb_regs.h`. Not compiled.
 The large GC 10.3.0, MMHUB 2.3.0 and DCN 3.1.2 offset headers are not copied
 (1.5 MB each); the few registers taken from them are listed with their source in
 `src/common/rb_regs.h`.
+
+Added 2026-10-04, from master at `7704c4c5bb127673b4f0ead839919db573559e38`:
+
+| File | Upstream path |
+|---|---|
+| smu_v13_0_1_ppsmc.h | drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu_v13_0_1_ppsmc.h |
+| smu_v13_0_1_pmfw.h | drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu_v13_0_1_pmfw.h |
+
+The mailbox protocol in `src/common/rb_smu.c` follows `smu_msg_v1_send_msg` in
+drivers/gpu/drm/amd/pm/swsmu/smu_cmn.c and `smu_v13_0_init_msg_ctl` in
+smu13/smu_v13_0.c; `SMU13_YELLOW_CARP_DRIVER_IF_VERSION` (4) is from
+pm/swsmu/inc/pmfw_if/smu13_driver_if_yellow_carp.h.

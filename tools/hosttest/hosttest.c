@@ -22,6 +22,7 @@
 #include "rb_discovery.h"
 #include "rb_probe.h"
 #include "rb_regs.h"
+#include "rb_smu.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -118,7 +119,53 @@ struct fake {
     uint64_t fb_len;
     int all_ones;
     uint32_t bad_writes, hi_writes;
+
+    /* Simulated SMU mailbox (off unless smu_enable() was called). */
+    int smu_on;
+    uint32_t smu_msg, smu_arg, smu_resp;     /* dword offsets */
+    uint32_t smu_latency;                    /* delay_us calls before answering */
+    uint32_t smu_countdown;
+    int smu_pending;
+    uint32_t smu_fail_msg, smu_fail_resp;    /* answer smu_fail_resp to this message */
+    int smu_zeroed, smu_arg_set;             /* protocol order since the last message */
+    uint32_t smu_order_errors, smu_msgs, delays;
 };
+
+#define SMU_NEVER 0xFFFFFFFFu
+#define SMU_VERSION_SIM 0x00410F02u   /* program 0, 65.15.2 */
+
+static void smu_answer(struct fake *f)
+{
+    uint32_t msg = f->mmio[f->smu_msg], arg = f->mmio[f->smu_arg], out = 0, resp = RB_SMU_RESP_OK;
+    switch (msg) {
+    case RB_SMU_MSG_GetSmuVersion:         out = SMU_VERSION_SIM; break;
+    case RB_SMU_MSG_GetDriverIfVersion:    out = 4; break;
+    case RB_SMU_MSG_GetEnabledSmuFeatures: out = arg == 0 ? 0x8C0FFFFFu : 0x000000F1u; break;
+    default:                               resp = RB_SMU_RESP_UNKNOWN_CMD; break;
+    }
+    if (msg == f->smu_fail_msg) resp = f->smu_fail_resp;
+    if (resp == RB_SMU_RESP_OK) f->mmio[f->smu_arg] = out;
+    f->mmio[f->smu_resp] = resp;
+    f->smu_pending = 0;
+}
+
+static void f_delay(void *ctx, uint32_t us)
+{
+    struct fake *f = ctx;
+    f->delays += us;
+    if (f->smu_pending && f->smu_latency != SMU_NEVER) {
+        if (f->smu_countdown <= us) smu_answer(f);
+        else f->smu_countdown -= us;
+    }
+}
+
+static void smu_enable(struct fake *f, uint32_t base, uint32_t initial_resp, uint32_t latency)
+{
+    f->smu_on = 1;
+    f->smu_msg = base + 0x282; f->smu_arg = base + 0x292; f->smu_resp = base + 0x29a;
+    f->mmio[f->smu_msg] = 0; f->mmio[f->smu_arg] = 0; f->mmio[f->smu_resp] = initial_resp;
+    f->smu_latency = latency;
+}
 
 static uint32_t pattern(uint64_t pos) { return (uint32_t)(pos * 2654435761u) ^ 0xA5A5A5A5u; }
 
@@ -155,6 +202,18 @@ static void f_wreg(void *ctx, uint32_t off, uint32_t v)
     f->touched[dw] |= 2;
     if (dw == RB_mmMM_INDEX) f->index = v;
     else if (dw == RB_mmMM_INDEX_HI) { f->index_hi = v; f->hi_writes++; }
+    else if (f->smu_on && dw == f->smu_resp) { f->mmio[dw] = v; if (v == 0) f->smu_zeroed = 1; }
+    else if (f->smu_on && dw == f->smu_arg) { f->mmio[dw] = v; f->smu_arg_set = 1; }
+    else if (f->smu_on && dw == f->smu_msg) {
+        /* Linux order: response cleared, argument written, then the message. */
+        if (!f->smu_zeroed || !f->smu_arg_set || f->smu_pending) f->smu_order_errors++;
+        f->smu_zeroed = f->smu_arg_set = 0;
+        f->mmio[dw] = v;
+        f->smu_msgs++;
+        f->smu_pending = 1;
+        f->smu_countdown = f->smu_latency;
+        if (f->smu_latency == 0) smu_answer(f);
+    }
     else f->bad_writes++;
 }
 
@@ -191,7 +250,7 @@ static struct fake *fake_new(uint32_t memsize_mb, uint64_t blob_pos, uint64_t fb
 
 static struct rb_hw hw_of(struct fake *f)
 {
-    struct rb_hw hw = { f, MMIO_LEN, f_rreg, f_wreg, f->fb_len, f_fb_read };
+    struct rb_hw hw = { f, MMIO_LEN, f_rreg, f_wreg, f->fb_len, f_fb_read, f_delay };
     return hw;
 }
 
@@ -210,7 +269,8 @@ static void check_policy(struct fake *f, const struct rb_probe_result *r)
     CHECK(f->index == 0x1234);
     CHECK(f->index_hi == 0x5);
     for (uint32_t i = 0; i < MMIO_LEN / 4; i++)
-        if ((f->touched[i] & 2) && i != RB_mmMM_INDEX && i != RB_mmMM_INDEX_HI) {
+        if ((f->touched[i] & 2) && i != RB_mmMM_INDEX && i != RB_mmMM_INDEX_HI &&
+            !(f->smu_on && (i == f->smu_msg || i == f->smu_arg || i == f->smu_resp))) {
             printf("  FAIL write to dword 0x%x\n", i); failures++;
         }
 }
@@ -450,8 +510,104 @@ static void test_real_table(const char *path, const uint8_t *bin, uint32_t len)
     CHECK(s && s->dw == 0x1a000 + 0x8ec);
     s = find_sample(r, "RLC_CNTL");
     CHECK(s && s->dw == 0xa000 + 0x4c00);
+
+    smu_enable(f, 0x16000, RB_SMU_RESP_OK, 3);
+    struct rb_smu_result *sm = calloc(1, sizeof(*sm));
+    CHECK(rb_smu_query(&hw, &r->disc, 1000, sm) == 0);
+    CHECK(sm->dw_msg == 0x16282 && sm->dw_arg == 0x16292 && sm->dw_resp == 0x1629a);
+    CHECK(sm->mp1_major == 13 && sm->mp1_minor == 0 && sm->mp1_rev == 3);
+    CHECK(sm->refused_writes == 0 && f->smu_order_errors == 0);
+    free(sm);
     check_policy(f, r);
     free(r); free(f);
+}
+
+/* ------------------------------------------------------------- the SMU --- */
+
+/* Probe at level 1, then the SMU queries; returns the SMU result (caller frees). */
+static struct rb_smu_result *smu_run(struct fake *f, uint32_t timeout_us, int *rc)
+{
+    struct rb_hw hw = hw_of(f);
+    struct rb_probe_result *r = calloc(1, sizeof(*r));
+    struct rb_smu_result *s = calloc(1, sizeof(*s));
+    CHECK(rb_probe_run(&hw, RB_LEVEL_SAFE, r) == 0);
+    *rc = rb_smu_query(&hw, &r->disc, timeout_us, s);
+    check_policy(f, r);
+    CHECK(s->refused_writes == 0);
+    CHECK(f->smu_order_errors == 0);
+    free(r);
+    return s;
+}
+
+#define SMU_FAKE() fake_new(512, (512ull << 20) - RB_DISC_TMR_OFFSET, 0, rembrandt_ips, NIPS)
+
+static void test_smu(void)
+{
+    struct fake *f;
+    struct rb_smu_result *s;
+    int rc;
+
+    printf("SMU: version, interface version, feature mask\n");
+    f = SMU_FAKE(); smu_enable(f, 0x16000, RB_SMU_RESP_OK, 5);
+    s = smu_run(f, 1000, &rc);
+    CHECK(rc == 0 && s->fail == NULL);
+    CHECK(s->dw_msg == 0x16282 && s->dw_arg == 0x16292 && s->dw_resp == 0x1629a);
+    CHECK(s->nxfers == 4 && f->smu_msgs == 4 && s->writes == 12);
+    CHECK(s->have_version && s->smu_version == SMU_VERSION_SIM);
+    CHECK(s->have_if_version && s->if_version == 4);
+    CHECK(s->have_features && s->features == 0x000000F18C0FFFFFull);
+    CHECK(s->x[2].msg == RB_SMU_MSG_GetEnabledSmuFeatures && s->x[2].arg == 0 && s->x[3].arg == 1);
+    CHECK(s->x[0].polls >= 4 && s->x[0].polls <= 6);
+    free(s); free(f);
+
+    printf("SMU: slow answer inside the timeout\n");
+    f = SMU_FAKE(); smu_enable(f, 0x16000, RB_SMU_RESP_OK, 900);
+    s = smu_run(f, 1000, &rc);
+    CHECK(rc == 0 && s->nxfers == 4);
+    free(s); free(f);
+
+    printf("SMU: mailbox not idle (response 0): nothing sent\n");
+    f = SMU_FAKE(); smu_enable(f, 0x16000, RB_SMU_RESP_NONE, 5);
+    s = smu_run(f, 1000, &rc);
+    CHECK(rc == -1 && s->writes == 0 && f->smu_msgs == 0 && s->nxfers == 0);
+    CHECK(s->fail && strstr(s->fail, "not idle"));
+    free(s); free(f);
+
+    printf("SMU: mailbox reports busy (0xFC): nothing sent\n");
+    f = SMU_FAKE(); smu_enable(f, 0x16000, RB_SMU_RESP_REJ_BUSY, 5);
+    s = smu_run(f, 1000, &rc);
+    CHECK(rc == -1 && s->writes == 0 && f->smu_msgs == 0);
+    free(s); free(f);
+
+    printf("SMU: never answers: one message, then stop\n");
+    f = SMU_FAKE(); smu_enable(f, 0x16000, RB_SMU_RESP_OK, SMU_NEVER);
+    s = smu_run(f, 1000, &rc);
+    CHECK(rc == -1 && s->nxfers == 1 && f->smu_msgs == 1);
+    CHECK(s->x[0].status == RB_SMU_X_TIMEOUT && s->x[0].polls == 1000);
+    CHECK(!s->have_version);
+    free(s); free(f);
+
+    printf("SMU: error answer stops the sequence\n");
+    f = SMU_FAKE(); smu_enable(f, 0x16000, RB_SMU_RESP_OK, 5);
+    f->smu_fail_msg = RB_SMU_MSG_GetDriverIfVersion; f->smu_fail_resp = RB_SMU_RESP_UNKNOWN_CMD;
+    s = smu_run(f, 1000, &rc);
+    CHECK(rc == -1 && s->nxfers == 2 && f->smu_msgs == 2);
+    CHECK(s->have_version && !s->have_if_version);
+    CHECK(s->x[1].status == RB_SMU_X_FW_ERROR && s->x[1].resp == RB_SMU_RESP_UNKNOWN_CMD);
+    free(s); free(f);
+
+    printf("SMU: MP1 not version 13: nothing sent\n");
+    {
+        struct ipdesc ips[NIPS];
+        memcpy(ips, rembrandt_ips, sizeof(ips));
+        for (unsigned i = 0; i < NIPS; i++)
+            if (ips[i].hw_id == RB_HWID_MP1) ips[i].major = 12;
+        f = fake_new(512, (512ull << 20) - RB_DISC_TMR_OFFSET, 0, ips, NIPS);
+        smu_enable(f, 0x16000, RB_SMU_RESP_OK, 5);
+        s = smu_run(f, 1000, &rc);
+        CHECK(rc == -1 && s->writes == 0 && f->smu_msgs == 0);
+        free(s); free(f);
+    }
 }
 
 /* ----------------------------------------------------------- the fuzz --- */
@@ -546,6 +702,7 @@ int main(int argc, char **argv)
     test_scratch_path();
     test_no_device();
     test_version_gate();
+    test_smu();
     test_fuzz();
 
     if (failures) {

@@ -14,6 +14,7 @@
 
 extern "C" {
 #include "rb_probe.h"
+#include "rb_smu.h"
 }
 
 #define LOG(fmt, ...) IOLog("RembrandtProbe: " fmt "\n", ##__VA_ARGS__)
@@ -70,6 +71,11 @@ int k_fb_read(void *ctx, uint64_t off, uint8_t *dst, uint32_t size)
     map->release();
     sub->release();
     return 0;
+}
+
+void k_delay(void *, uint32_t us)
+{
+    IODelay(us);
 }
 
 void set_num(OSDictionary *d, const char *key, uint64_t v, unsigned bits)
@@ -140,6 +146,12 @@ bool RembrandtProbe::start(IOService *provider)
     if (OSNumber *n = OSDynamicCast(OSNumber, getProperty("RBProbeLevel")))
         level = n->unsigned32BitValue();
     PE_parse_boot_argn("rbprobe_level", &level, sizeof(level));
+    /* SMU queries: off unless RBSMUQuery is true (make kext SMU=1) or the
+     * boot-arg rbprobe_smu=1 is set. */
+    uint32_t smu = 0;
+    if (OSBoolean *b = OSDynamicCast(OSBoolean, getProperty("RBSMUQuery")))
+        smu = b->isTrue() ? 1 : 0;
+    PE_parse_boot_argn("rbprobe_smu", &smu, sizeof(smu));
     if (level < RB_LEVEL_SAFE || level > RB_LEVEL_MAX)
         level = RB_LEVEL_SAFE;
 
@@ -169,8 +181,31 @@ bool RembrandtProbe::start(IOService *provider)
     hw.wreg = k_wreg;
     hw.fb_len = bar0 ? bar0->getLength() : 0;
     hw.fb_read = bar0 ? k_fb_read : nullptr;
+    hw.delay_us = k_delay;
 
     int rc = rb_probe_run(&hw, static_cast<int>(level), r);
+
+    rb_smu_result *sr = nullptr;
+    if (rc == 0 && smu) {
+        sr = static_cast<rb_smu_result *>(IOMalloc(sizeof(rb_smu_result)));
+        if (sr) {
+            bzero(sr, sizeof(*sr));
+            LOG("SMU: initial mailbox state, then GetSmuVersion, GetDriverIfVersion, GetEnabledSmuFeatures x2");
+            int src = rb_smu_query(&hw, &r->disc, RB_SMU_TIMEOUT_US, sr);
+            LOG("SMU: mailbox at %#x/%#x/%#x was msg %#x arg %#x resp %#x",
+                sr->dw_msg, sr->dw_arg, sr->dw_resp, sr->initial_msg, sr->initial_arg, sr->initial_resp);
+            for (uint32_t i = 0; i < sr->nxfers; i++)
+                LOG("SMU:   msg %#04x arg %u -> resp %#x out %#010x (%u us)", sr->x[i].msg, sr->x[i].arg,
+                    sr->x[i].resp, sr->x[i].out, sr->x[i].polls);
+            if (src)
+                LOG("SMU: stopped: %s", sr->fail ? sr->fail : "?");
+            else
+                LOG("SMU: firmware %u.%u.%u.%u, driver interface %u, features %#llx",
+                    sr->smu_version >> 24, (sr->smu_version >> 16) & 0xff, (sr->smu_version >> 8) & 0xff,
+                    sr->smu_version & 0xff, sr->if_version, (unsigned long long)sr->features);
+            LOG("SMU: mailbox writes %u, refused writes %u", sr->writes, sr->refused_writes);
+        }
+    }
     mmio->release();
 
     LOG("MEMSIZE %u MB, scratch %#x %#x %#x, C2PMSG_33 %#x, IP_DISCOVERY_VERSION %#x",
@@ -193,13 +228,15 @@ bool RembrandtProbe::start(IOService *provider)
     }
     LOG("index writes %u, refused writes %u", r->index_writes, r->refused_writes);
 
-    publish(r, pci);
+    publish(r, pci, sr);
     IOFree(r, sizeof(*r));
+    if (sr)
+        IOFree(sr, sizeof(*sr));
     /* Stay attached so the results remain in the registry until unload. */
     return true;
 }
 
-void RembrandtProbe::publish(const rb_probe_result *r, IOPCIDevice *pci)
+void RembrandtProbe::publish(const rb_probe_result *r, IOPCIDevice *pci, const rb_smu_result *sr)
 {
     OSDictionary *d = OSDictionary::withCapacity(32);
     if (!d)
@@ -262,6 +299,39 @@ void RembrandtProbe::publish(const rb_probe_result *r, IOPCIDevice *pci)
         }
         d->setObject("Registers", regs);
         regs->release();
+    }
+
+    if (sr) {
+        if (OSDictionary *sd = OSDictionary::withCapacity(16)) {
+            set_str(sd, "Result", sr->fail ? sr->fail : "ok");
+            set_num(sd, "MP1Version", (sr->mp1_major << 16) | (sr->mp1_minor << 8) | sr->mp1_rev, 32);
+            set_num(sd, "InitialMessage", sr->initial_msg, 32);
+            set_num(sd, "InitialArgument", sr->initial_arg, 32);
+            set_num(sd, "InitialResponse", sr->initial_resp, 32);
+            if (sr->have_version)
+                set_num(sd, "SmuVersion", sr->smu_version, 32);
+            if (sr->have_if_version)
+                set_num(sd, "DriverIfVersion", sr->if_version, 32);
+            if (sr->have_features)
+                set_num(sd, "EnabledFeatures", sr->features, 64);
+            set_num(sd, "Writes", sr->writes, 32);
+            set_num(sd, "RefusedWrites", sr->refused_writes, 32);
+            if (OSArray *xs = OSArray::withCapacity(RB_SMU_MAX_XFERS)) {
+                for (uint32_t i = 0; i < sr->nxfers; i++) {
+                    char line[96];
+                    snprintf(line, sizeof(line), "msg %#04x arg %u -> resp %#x out %#010x after %u us",
+                             sr->x[i].msg, sr->x[i].arg, sr->x[i].resp, sr->x[i].out, sr->x[i].polls);
+                    if (OSString *o = OSString::withCString(line)) {
+                        xs->setObject(o);
+                        o->release();
+                    }
+                }
+                sd->setObject("Messages", xs);
+                xs->release();
+            }
+            d->setObject("SMU", sd);
+            sd->release();
+        }
     }
 
     setProperty("RBProbe", d);

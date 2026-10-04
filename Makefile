@@ -3,6 +3,7 @@
 #   make hosttest   # src/common against a simulated chip, ASan/UBSan
 #   make kext       # build/out/RembrandtProbe.kext (runs hosttest first)
 #   make kext LEVEL=2   # same, probe level 2 (1 default, 2 + display, 3 + graphics core)
+#   make kext SMU=1     # same, plus the SMU queries (src/common/rb_smu.h)
 #   make tools      # build/out/rbdump
 #
 # Loading the kext is never done from here; see CLAUDE.md.
@@ -21,7 +22,7 @@ CC    := xcrun clang
 CXX   := xcrun clang++
 
 # Freestanding C shared by the kext and the host tools.
-COMMON_SRCS := $(COMMON)/rb_discovery.c $(COMMON)/rb_probe.c
+COMMON_SRCS := $(COMMON)/rb_discovery.c $(COMMON)/rb_probe.c $(COMMON)/rb_smu.c
 COMMON_HDRS := $(wildcard $(COMMON)/*.h)
 
 KEXT_CFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
@@ -40,7 +41,7 @@ KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
 HOST_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -I$(COMMON) \
                -fsanitize=address,undefined -fno-sanitize-recover=all
 
-KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o \
+KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUILD_DIR)/kext/rb_smu.o \
              $(BUILD_DIR)/kext/RembrandtProbe.o $(BUILD_DIR)/kext/kmod_info.o
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
@@ -82,6 +83,8 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@cp $(KEXT_SRC)/Info.plist $(KEXT_BUNDLE)/Contents/Info.plist
 	@if [ -n "$(LEVEL)" ]; then plutil -replace IOKitPersonalities.RembrandtProbe.RBProbeLevel \
 	    -integer $(LEVEL) $(KEXT_BUNDLE)/Contents/Info.plist && echo "  LEVEL $(LEVEL)"; fi
+	@if [ "$(SMU)" = 1 ]; then plutil -replace IOKitPersonalities.RembrandtProbe.RBSMUQuery \
+	    -bool true $(KEXT_BUNDLE)/Contents/Info.plist && echo "  SMU queries on"; fi
 	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
 	    -L$(MKSDK)/Library/x86_64 $(KEXT_OBJS) -lkmod -o $(KEXT_BIN)
 	@codesign --force --sign - $(KEXT_BUNDLE) 2>/dev/null || true
