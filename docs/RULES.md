@@ -23,7 +23,10 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
 - `docs/linux-ref/` — unmodified Linux files the code follows (UPSTREAM.md).
 - `tools/re/` — static analysis of Apple's AMD kexts: `kc_extract.py` (kext out
   of the kernel collection as a standalone Mach-O), `machoread.py` (chained
-  pointers, strings, symbols), `dumptable.py`. Output goes to `build/re/`.
+  pointers, strings, symbols), `dumptable.py`, `kc_stubs.py` (kernel calls
+  through the collection's branch stubs -> names; `annotate` for objdump
+  output), `vtslots.py` (IOService-family vtable offsets -> methods). Output
+  goes to `build/re/`.
   Findings: docs/APPLE-STACK.md.
 
 ## Workflow

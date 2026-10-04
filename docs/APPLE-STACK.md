@@ -94,8 +94,62 @@ Options for the display:
 2. Bring Linux's DC (dcn31 resource, hwseq, DMUB service) into our own
    framebuffer, the way Navi48-MacOS compiled Linux's DCN 4.1 code with a shim
    (`tools/dcn41/linuxshim`). Large but known to work.
-3. Keep the firmware's framebuffer for scan-out and accelerate behind it.
-   Unknown whether Apple's accelerator runs without its framebuffer kext.
+3. Keep the firmware's framebuffer for scan-out and accelerate behind it,
+   with our own peer for the accelerator. Viable: see the next section.
+
+## Can the accelerator run without Apple's framebuffer? (option 3)
+
+Yes, by design, with a small peer object of our own. Traced in
+AMDRadeonX6000 on 15.8.1 (`tools/re/kc_stubs.py` resolves the kernel calls):
+
+- The accelerator does not link against the framebuffer kext; it matches the
+  PCI device itself (`IOMatchCategory` IOAccelerator) and talks to its display
+  driver through one call: `peer->callPlatformFunction("SpecialAMDKey", true,
+  &request, p2, p3, p4)` (the symbol is created in
+  `AMDGraphicsAccelerator::start`).
+- `configureDevice()` finds the peer with `initLinkToPeer()`: the first client
+  of the PCI device whose `IOMatchCategory` is `"ATIFramebuffer"`, else
+  `"IOFramebuffer"`. On this machine the second one is the boot
+  IONDRVFramebuffer (`IOMatchCategory = "IOFramebuffer"`, checked in ioreg).
+- The accelerator supports an NDRV framebuffer peer explicitly:
+  `NDRVGetSurfaceInfo`, `reserveNDRVSpace` (keeps the boot framebuffer's
+  memory out of its allocator), and it sets `ATY,SurfInfo` /
+  `ATY,PageFlipEnable` on the peer.
+- `powerUpHW()` has exactly one caller: the accelerator's own
+  `callPlatformFunction`, request 6. Apple's `AmdRadeonController::powerUp`
+  sends request 6 and then 0x1B ("Controller is enabled, finish
+  initialization"; NootedRED: `IOFBRequestControllerEnabled = 0x1B`);
+  `AmdPowerPlayHelper::powerUp` sends 3, `wake` 6 and 7, `sleep` 0x11, `stop`
+  0x1C (all `messageAccelerator`, vtable slot 0xa00, decoded from the call
+  sites).
+- The accelerator's own message dispatch has 28 cases (`cmpl $0x1b`); request
+  6 reaches `powerUpHW()`, 0x1B the "controller enabled" path.
+
+Navi48-MacOS runs Apple's accelerator this way on real hardware
+(`Navi48AccelPeer`), and its notes give the traps:
+
+1. Without a peer that claims `"ATIFramebuffer"`, the accelerator links to the
+   generic IOFramebuffer, asks it `SpecialAMDKey` with waitForFunction = true,
+   and **blocks forever** (nobody handles the symbol). The peer must exist
+   before the accelerator starts.
+2. Request 0x14 (isDeviceValid): answer `*p2 = 1`, or the accelerator
+   invalidates the device. Request 0x00 (accelerator started, p2 = the
+   accelerator): answer success.
+3. A failure inside `AMDGraphicsAccelerator::start()` on unsupported hardware
+   ends in a page fault in its own error path (stop() clears the event logs,
+   the shared epilogue dereferences one). Any experiment must expect that.
+4. Navi48 never got request 6 sent, so `powerUpHW()` never ran and they
+   rebuilt its tail by hand (enableAllocations, reserveNDRVSpace,
+   setVirtualSpaceReady, createBltMgr). Our peer can instead send 6 and 0x1B
+   as Apple's controller does, so Apple's own code runs in Apple's order.
+5. WindowServer pairs a display with an accelerator through properties
+   (`IOAccelFindAccelerator`); Navi48 publishes them on its framebuffer.
+
+So the display question does not block acceleration: the firmware
+framebuffer keeps scan-out (fixed mode, 1920x1080), a peer kext answers the
+accelerator, and DCN 3.1 can be done later. The critical path becomes the
+library layer: HWServices loading X6800HWLibs for 0x1681, then PSP, SMU 13,
+GC firmware and golden settings, MMHUB 2.3 and the memory model.
 
 ## Summary
 
@@ -110,11 +164,12 @@ compatible. What has to be written is concentrated in four places:
 4. Display: DCN 3.1 does not exist in Apple's framebuffer.
 
 Items 1-3 are NootedRED-shaped work (hooks and patches on Apple's code). Item
-4 decides the route, so it comes first.
+4 no longer blocks: option 3 below lets acceleration come first.
 
 ## Open questions, in order
 
-1. Does Apple's accelerator need Apple's framebuffer kext (option 3 above)?
+1. ~~Does Apple's accelerator need Apple's framebuffer kext?~~ No, with a peer
+   (section above).
 2. Are HWLibs' built-in IP base arrays overwritten at run time from the
    chip, or used as-is?
 3. Is there a DCN 3.1 DMCUB firmware image in HWLibs or the framebuffer?
