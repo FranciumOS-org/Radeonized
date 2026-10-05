@@ -421,3 +421,15 @@ chain, status 4. _IpiSetFwEntry ran once, inside the SMU SW_INIT (fw_id 0
 -> 1). The *_routed diag keys now read 0 although every hook installed (the
 2ac install loop logs instead of setting them). tOS status 0x0011876f. Full
 log: logs/20261005-181648-plugin/peer.plist.
+
+Boot 27 (2026-10-05 18:26, milestone 2ae dry run, UUID 6A1480F0,
+-rbgpusync570 -rbgpuspoofttl): no panic, no hang. Inside _gc_sw_init:
+_gc_get_hw_version -> 0x000A0303; _gc_get_config ran; _gc_get_hw_config_tbl_info
+-> table size (+0xd38) 0x64; _gc_set_fw_entry_info(gc_buf, 0x30000000a, 3,
+p2) called _gc_get_hw_version again and returned 2; _gc_sw_init returned 2.
+_gc_init_fcn_ptr_list was NOT reached, so the 2ae 10.3.3 -> 10.3.0 swap never
+ran: the first GC failure is the firmware-entry step, which comes before the
+function-table step (boot 26 failed here too; the static reading that blamed
+the 0x35 mask was a later check). The RBGPULog ring (256) now drops the
+first lines (log starts at "HWLibs loaded"). tOS status 0x00115136. Full log:
+logs/20261005-182716-plugin/peer.plist.
