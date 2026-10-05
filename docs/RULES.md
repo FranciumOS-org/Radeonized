@@ -390,3 +390,22 @@ asic_type (buf+0x7d44) = 19; _psp_init_pfn_ptr(asic_type 19) returns 1;
 _psp_sw_init returns 2 (_psp_read_config not reached). So HWLibs maps PSP
 13.0.3 to an asic type (19) but _psp_init_pfn_ptr has no function set for
 it. tOS status 0x0012e851. Full log: logs/20261005-151045-plugin/peer.plist.
+
+Boot 25 (2026-10-05 17:32, milestone 2aa dry run, UUID 0782EA5A,
+-rbgpusync570 -rbgpuspoofttl, no -rbgpupsphw): no panic, no hang. The
+asic_type 19 -> 8 swap bound the PSP _11_0 table (ring_init/ring_create/
+is_sos_running _11_0, named by ptrsym.py); _psp_read_config ran (flags +0x28
+= 0); _psp_sw_init returned 0 and PSP (client 6) SW_INIT passed. Client 8
+(SMU) SW_INIT then ran the plugin's own SMU 13 slot table for the first time
+(smu_init_function_pointer_list ver 0xd rev 0x3; slot_internal_sw_init:
+rb_smu13_init, sends nothing; smu_cgs_alloc_memory gpu=0xffffffe0e044a000,
+"carve-out verification FAIL"; the code then allows RB_SMU13_ALLOW_TABLES,
+committed in 40bd4c6 — beyond queries, the user's decision, not given).
+Client 7 (GC) SW_INIT failed after 20 us: logSwipFailure ttl_tls.c:507 "GC
+init/power-up failed"; teardown event 2 for clients 8, 6, 5, 3;
+_ttl_initialize status 4. _ttl_hw_init was never reached, so the dry-run
+gate was not exercised and no PSP/SMU message was sent. HAZARD before any
+-rbgpupsphw boot: slot_internal_hw_init -> rb_smu13_bringup would send
+SetDriverDramAddrHigh/Low with that unverified address and TransferTable
+(the SMU writes a table there). tOS status 0x00116165. Full log:
+logs/20261005-173249-plugin/peer.plist.
