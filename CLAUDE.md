@@ -265,3 +265,10 @@ Failed! Error code: 0xe00002c7". Failure path otherwise unchanged (state
 trace u64AllAccelStart 0x20c5). Whether +0x570 really should hold the
 firmware directory is unverified. tOS status 0x0011d344. Full log:
 logs/20261005-104409-plugin/peer.plist.
+
+Boot 13 (2026-10-05 10:49, milestone 2k, UUID 1CFB2533, -rbgpusync570): no
+panic. _ttl_initialize hooked: entered with rdi=0xffffffaa95beb818 (the
+0xa8-byte block initialize() builds at -0xe8(%rbp)) and rsi=this+0x38, returned
+status 1 about 3 us later. The call site (0x12660232-0x1266023d) loads only
+rdi and rsi, so the hook's arg3..arg6 (1, 0xffffffff, 0x10001, 1) are leftover
+registers. tOS status 0x0011922c. Full log: logs/20261005-104921-plugin/peer.plist.
