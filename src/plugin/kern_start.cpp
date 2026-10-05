@@ -507,34 +507,44 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
 
 static int hooked_AmdTtlServices_initialize(void *this_ptr) {
     rbgpu_diag_inc("ttl_init_calls");
+    rbgpu_diag_set_num("ttl_init_this", reinterpret_cast<uint64_t>(this_ptr));
     rbgpu_log("AmdTtlServices::initialize() entered (this=%p)", this_ptr);
     int ret = 0;
     if (orig_amdtll_initialize) {
         ret = orig_amdtll_initialize(this_ptr);
     }
-    rbgpu_log("AmdTtlServices::initialize() returned 0x%08X", ret);
+    rbgpu_log("AmdTtlServices::initialize() returned 0x%08X (this=%p)", ret, this_ptr);
     rbgpu_diag_set_num("ttl_init_ret", static_cast<uint32_t>(ret));
     return ret;
 }
 
 static void hooked_AmdTtlServices_setFirmwareDirectory(void *this_ptr, void *fw_dir) {
     rbgpu_diag_inc("ttl_set_fw_dir_calls");
-    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p)", this_ptr, fw_dir);
+    rbgpu_diag_set_num("ttl_set_fw_dir_this", reinterpret_cast<uint64_t>(this_ptr));
     rbgpu_diag_set_num("ttl_set_fw_dir_ptr", reinterpret_cast<uint64_t>(fw_dir));
+
+    uint64_t pre_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p) pre +0x570=0x%llx", this_ptr, fw_dir, pre_570);
+
     if (orig_amdtll_set_fw_dir) {
         orig_amdtll_set_fw_dir(this_ptr, fw_dir);
     }
+
+    uint64_t post_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    rbgpu_diag_set_num("ttl_set_fw_dir_post_570", post_570);
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory done: this=%p post +0x570=0x%llx", this_ptr, post_570);
 }
 
 static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
     rbgpu_diag_inc("ttl_init_inp_calls");
+    rbgpu_diag_set_num("ttl_init_inp_this", reinterpret_cast<uint64_t>(this_ptr));
     auto inp = reinterpret_cast<uint64_t *>(input);
 
-    uint64_t f560 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x560);
-    uint64_t f568 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x568);
-    uint64_t f570 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570);
-    uint32_t f578 = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578);
-    uint8_t  f598 = *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x598);
+    uint64_t f560 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x560) : 0;
+    uint64_t f568 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x568) : 0;
+    uint64_t f570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    uint32_t f578 = this_ptr ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) : 0;
+    uint8_t  f598 = this_ptr ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x598) : 0;
 
     rbgpu_diag_set_num("ttl_inp_0", inp ? inp[0] : 0);
     rbgpu_diag_set_num("ttl_inp_1", inp ? inp[1] : 0);
@@ -544,13 +554,13 @@ static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
     rbgpu_diag_set_num("ttl_inp_6", inp ? inp[6] : 0);
     rbgpu_diag_set_num("ttl_this_570", f570);
 
-    rbgpu_log("AmdTtlServices::initialize(input=%p): [0]=0x%llx [1]=0x%llx [2]=0x%llx [4]=0x%llx [5]=0x%llx [6]=0x%llx",
-              input,
+    rbgpu_log("AmdTtlServices::initialize(this=%p, input=%p): [0]=0x%llx [1]=0x%llx [2]=0x%llx [4]=0x%llx [5]=0x%llx [6]=0x%llx",
+              this_ptr, input,
               inp ? inp[0] : 0, inp ? inp[1] : 0, inp ? inp[2] : 0,
               inp ? inp[4] : 0, inp ? inp[5] : 0, inp ? inp[6] : 0);
 
-    rbgpu_log("AmdTtlServices state before: 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x",
-              f560, f568, f570, f578, f598);
+    rbgpu_log("AmdTtlServices state before (this=%p): 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x",
+              this_ptr, f560, f568, f570, f578, f598);
 
     if (g_safe_ttl_mode && f570 == 0) {
         rbgpu_log("AmdTtlServices: -rbgpusafettl active; applying SafeBoot bypass to pass 1265fd3e");
@@ -562,7 +572,7 @@ static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
         ret = orig_amdtll_init_input(this_ptr, input);
     }
 
-    rbgpu_log("AmdTtlServices::initialize(input) returned 0x%08X", ret);
+    rbgpu_log("AmdTtlServices::initialize(this=%p, input) returned 0x%08X", this_ptr, ret);
     rbgpu_diag_set_num("ttl_init_inp_ret", static_cast<uint32_t>(ret));
     return ret;
 }
@@ -702,13 +712,17 @@ void RGPU::init() {
     rbgpu_diag_set_num("dev_type_rb_type", 0);
     rbgpu_diag_set_num("ttl_init_routed", 0);
     rbgpu_diag_set_num("ttl_init_calls", 0);
+    rbgpu_diag_set_num("ttl_init_this", 0);
     rbgpu_diag_set_num("ttl_init_ret", 0);
     rbgpu_diag_set_num("ttl_init_inp_routed", 0);
     rbgpu_diag_set_num("ttl_init_inp_calls", 0);
+    rbgpu_diag_set_num("ttl_init_inp_this", 0);
     rbgpu_diag_set_num("ttl_init_inp_ret", 0);
     rbgpu_diag_set_num("ttl_set_fw_dir_routed", 0);
     rbgpu_diag_set_num("ttl_set_fw_dir_calls", 0);
+    rbgpu_diag_set_num("ttl_set_fw_dir_this", 0);
     rbgpu_diag_set_num("ttl_set_fw_dir_ptr", 0);
+    rbgpu_diag_set_num("ttl_set_fw_dir_post_570", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
