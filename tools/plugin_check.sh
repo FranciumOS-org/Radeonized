@@ -106,6 +106,8 @@ for k, v in sorted((diag or {}).items()):
 for line in (log or []):
     print("  | " + str(line).replace("\n", "\n  |     "))
 PY
+echo "--- logged pointers inside AMD kexts (tools/re/ptrsym.py)"
+python3 "$root/tools/re/ptrsym.py" "$out/peer.plist" 2>&1
 ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -1 | sed 's/^/  newest panic report: /'
 
 [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER" "$out"
