@@ -109,6 +109,10 @@ struct DeviceTypeEntry {
     uint32_t deviceType;
 };
 
+struct CapabilityEntry {
+    uint8_t data[80];
+};
+
 static inline const char *getCallerTag(mach_vm_address_t ret_addr) {
     if (g_kext_addr_hwlibs && ret_addr >= g_kext_addr_hwlibs && ret_addr < g_kext_addr_hwlibs + g_kext_size_hwlibs) {
         return "HWLibs:";
@@ -757,6 +761,86 @@ bool RGPU::patchDeviceTypeTable(KernelPatcher &patcher, size_t id) {
     return false;
 }
 
+static bool patchDeviceCapabilityTableAt(mach_vm_address_t addr, size_t max_entries = 92) {
+    auto table = reinterpret_cast<CapabilityEntry *>(addr);
+
+    for (size_t i = 0; i < max_entries; i++) {
+        uint32_t *dev_id_ptr = reinterpret_cast<uint32_t *>(table[i].data + 0x10);
+        if (*dev_id_ptr == 0x1681) {
+            rbgpu_diag_set_num("cap_tbl_patched", 1);
+            rbgpu_diag_set_num("cap_tbl_idx", i);
+            rbgpu_log("HWLibs: _DeviceCapabilityTbl already contains 0x1681 at index %zu", i);
+            return true;
+        }
+    }
+
+    // Find a Navi 21 template entry (0x73A2) to clone
+    size_t template_idx = SIZE_MAX;
+    for (size_t i = 0; i < max_entries; i++) {
+        uint32_t *dev_id_ptr = reinterpret_cast<uint32_t *>(table[i].data + 0x10);
+        if (*dev_id_ptr == 0x73A2) {
+            template_idx = i;
+            break;
+        }
+    }
+
+    if (template_idx == SIZE_MAX) {
+        rbgpu_log("HWLibs: template device 0x73A2 not found in _DeviceCapabilityTbl; aborting capability patch");
+        return false;
+    }
+
+    // Find target entry 0x7300 to replace
+    size_t target_idx = SIZE_MAX;
+    for (size_t i = 0; i < max_entries; i++) {
+        uint32_t *dev_id_ptr = reinterpret_cast<uint32_t *>(table[i].data + 0x10);
+        if (*dev_id_ptr == 0x7300) {
+            target_idx = i;
+            break;
+        }
+    }
+
+    if (target_idx == SIZE_MAX) {
+        rbgpu_log("HWLibs: target device 0x7300 not found in _DeviceCapabilityTbl; aborting capability patch");
+        return false;
+    }
+
+    MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+    memcpy(&table[target_idx], &table[template_idx], sizeof(CapabilityEntry));
+    *reinterpret_cast<uint32_t *>(table[target_idx].data + 0x10) = 0x1681;
+    MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+    uint32_t rb_id = *reinterpret_cast<uint32_t *>(table[target_idx].data + 0x10);
+    rbgpu_log("HWLibs: patched _DeviceCapabilityTbl at index %zu: cloned from index %zu, set deviceId=0x1681 (readback: 0x%04X)",
+              target_idx, template_idx, rb_id);
+    rbgpu_diag_set_num("cap_tbl_patched", rb_id == 0x1681 ? 1 : 0);
+    rbgpu_diag_set_num("cap_tbl_idx", target_idx);
+
+    return rb_id == 0x1681;
+}
+
+bool RGPU::patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id) {
+    rbgpu_diag_set_num("cap_tbl_patched", 0);
+    rbgpu_diag_set_num("cap_tbl_idx", 0);
+
+    if (!spoofTtlMode) {
+        rbgpu_log("HWLibs: capability table patch skipped (-rbgpuspoofttl not set)");
+        return false;
+    }
+
+    mach_vm_address_t tbl_addr = patcher.solveSymbol(id, "_DeviceCapabilityTbl");
+    if (!tbl_addr) {
+        rbgpu_log("HWLibs: symbol _DeviceCapabilityTbl not resolved; skipping capability table patch");
+        return false;
+    }
+
+    rbgpu_log("HWLibs: resolved _DeviceCapabilityTbl symbol at %p", reinterpret_cast<void *>(tbl_addr));
+    if (patchDeviceCapabilityTableAt(tbl_addr)) {
+        return true;
+    }
+
+    return false;
+}
+
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     static bool s_kernel_hooks_installed = false;
     if (s_kernel_hooks_installed || noLogCapture) {
@@ -798,6 +882,8 @@ void RGPU::init() {
     rbgpu_diag_set_num("dev_type_patched", 0);
     rbgpu_diag_set_num("dev_type_rb_id", 0);
     rbgpu_diag_set_num("dev_type_rb_type", 0);
+    rbgpu_diag_set_num("cap_tbl_patched", 0);
+    rbgpu_diag_set_num("cap_tbl_idx", 0);
     rbgpu_diag_set_num("ttl_init_routed", 0);
     rbgpu_diag_set_num("ttl_init_calls", 0);
     rbgpu_diag_set_num("ttl_init_this", 0);
@@ -869,6 +955,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
 
     patchDeviceTypeTable(patcher, id);
+    patchDeviceCapabilityTable(patcher, id);
 
     KernelPatcher::RouteRequest ttlReqs[] = {
         KernelPatcher::RouteRequest(
