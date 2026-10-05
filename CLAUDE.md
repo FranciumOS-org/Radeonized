@@ -235,3 +235,11 @@ Matches the path Gemini read from the disassembly: input[2]==0 and this+0x570==0
 -> 0xe00002bc before createPciDeviceCache/initialize(). The inner initialize()
 hook again not called. plugin_check now prints RBGPUDiag numbers unsigned
 (ioreg -a gives signed 64-bit). Full log: logs/20261005-095513-plugin/peer.plist.
+
+Boot 10 (2026-10-05 10:06, milestone 2h, UUID B80CDCB5): no panic.
+__ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory IS called,
+once, ~0.7 ms before TTL::initialize(): this=0xffffff9045ac0400,
+dir=0xffffff86adf31e00. initialize(input) still sees +0x570 == 0 and returns
+0xe00002bc. initialize()'s `this` is not logged, so it is open whether it is
+the same object, or whether setFirmwareDirectory stores elsewhere than 0x570.
+tOS status 0x0010ab0d. Full log: logs/20261005-100702-plugin/peer.plist.
