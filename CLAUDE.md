@@ -309,3 +309,15 @@ at power-on), then ASSERTs: ttlSetDeviceCapabilityEntry (ttl_device.c:588)
 "pBgmContext is null!"; TlsSwInit (ttl_tls.c:129) "Failed to create TLS".
 _ttl_initialize status 4 -> 0xe00002bc. _ttl_hw_init did not run. tOS status
 0x00117135. Full log: logs/20261005-130250-plugin/peer.plist.
+
+Boot 18 (2026-10-05 13:28, milestone 2p, UUID 57F7D172, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. _DeviceCapabilityTbl resolved
+(0xffffff7f9d9d7ed0); entry 0 (0x7300) overwritten with a copy of entry 60
+(0x73A2), device ID set to 0x1681, read-back 0x1681. _ttlIsSupportedDevice
+original still 0 (attr 0xA), override -> 1. _ttl_sw_init: same two PCI
+config 0x60 writes, then the SAME assert chain: ttlSetDeviceCapabilityEntry
+(ttl_device.c:588) "Could not find device info table entry!", ipi_bgm_create,
+IpiValidateTopology, TlsSwInit; _ttl_initialize status 4 -> 0xe00002bc.
+So a 0x1681 device ID in _DeviceCapabilityTbl (cloned entry's +0x20 = 0) is
+not what ttlSetDeviceCapabilityEntry looks for. _ttl_hw_init did not run.
+tOS status 0x00116e2e. Full log: logs/20261005-132913-plugin/peer.plist.
