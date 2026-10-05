@@ -78,6 +78,7 @@ typedef int      (*smu_init_function_pointer_list_t)(void *ctx, uint64_t ver, ui
 
 typedef int      (*amdtll_init_input_t)(void *this_ptr, void *input);
 typedef int      (*amdtll_initialize_t)(void *this_ptr);
+typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -90,9 +91,12 @@ static smu_init_function_pointer_list_t orig_smu_init_function_pointer_list = nu
 
 static amdtll_init_input_t              orig_amdtll_init_input              = nullptr;
 static amdtll_initialize_t              orig_amdtll_initialize              = nullptr;
+static amdtll_set_fw_dir_t              orig_amdtll_set_fw_dir              = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
+
+static bool g_safe_ttl_mode = false;
 
 struct DeviceTypeEntry {
     uint32_t deviceId;
@@ -502,6 +506,7 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
 }
 
 static int hooked_AmdTtlServices_initialize(void *this_ptr) {
+    rbgpu_diag_inc("ttl_init_calls");
     rbgpu_log("AmdTtlServices::initialize() entered (this=%p)", this_ptr);
     int ret = 0;
     if (orig_amdtll_initialize) {
@@ -510,6 +515,15 @@ static int hooked_AmdTtlServices_initialize(void *this_ptr) {
     rbgpu_log("AmdTtlServices::initialize() returned 0x%08X", ret);
     rbgpu_diag_set_num("ttl_init_ret", static_cast<uint32_t>(ret));
     return ret;
+}
+
+static void hooked_AmdTtlServices_setFirmwareDirectory(void *this_ptr, void *fw_dir) {
+    rbgpu_diag_inc("ttl_set_fw_dir_calls");
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p)", this_ptr, fw_dir);
+    rbgpu_diag_set_num("ttl_set_fw_dir_ptr", reinterpret_cast<uint64_t>(fw_dir));
+    if (orig_amdtll_set_fw_dir) {
+        orig_amdtll_set_fw_dir(this_ptr, fw_dir);
+    }
 }
 
 static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
@@ -537,6 +551,11 @@ static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
 
     rbgpu_log("AmdTtlServices state before: 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x",
               f560, f568, f570, f578, f598);
+
+    if (g_safe_ttl_mode && f570 == 0) {
+        rbgpu_log("AmdTtlServices: -rbgpusafettl active; applying SafeBoot bypass to pass 1265fd3e");
+        *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) = 1;
+    }
 
     int ret = 0;
     if (orig_amdtll_init_input) {
@@ -671,6 +690,8 @@ void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
     noLogCapture = checkKernelArgument("-rbgpunocapture");
+    safeTtlMode  = checkKernelArgument("-rbgpusafettl");
+    g_safe_ttl_mode = safeTtlMode;
 
     rbgpu_diag_set_num("smu_hook_routed", 0);
     rbgpu_diag_set_num("guard_routed", 0);
@@ -680,15 +701,20 @@ void RGPU::init() {
     rbgpu_diag_set_num("dev_type_rb_id", 0);
     rbgpu_diag_set_num("dev_type_rb_type", 0);
     rbgpu_diag_set_num("ttl_init_routed", 0);
+    rbgpu_diag_set_num("ttl_init_calls", 0);
     rbgpu_diag_set_num("ttl_init_ret", 0);
     rbgpu_diag_set_num("ttl_init_inp_routed", 0);
     rbgpu_diag_set_num("ttl_init_inp_calls", 0);
     rbgpu_diag_set_num("ttl_init_inp_ret", 0);
+    rbgpu_diag_set_num("ttl_set_fw_dir_routed", 0);
+    rbgpu_diag_set_num("ttl_set_fw_dir_calls", 0);
+    rbgpu_diag_set_num("ttl_set_fw_dir_ptr", 0);
 
-    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s)",
+    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
               noTrap3Guard ? "DISABLED" : "ENABLED",
-              noLogCapture ? "DISABLED" : "ENABLED");
+              noLogCapture ? "DISABLED" : "ENABLED",
+              safeTtlMode ? "ENABLED" : "DISABLED");
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
@@ -734,6 +760,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "__ZN14AmdTtlServices10initializeEv",
             hooked_AmdTtlServices_initialize,
             orig_amdtll_initialize
+        ),
+        KernelPatcher::RouteRequest(
+            "__ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory",
+            hooked_AmdTtlServices_setFirmwareDirectory,
+            orig_amdtll_set_fw_dir
         )
     };
 
@@ -751,6 +782,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("ttl_init_routed", 0);
         rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices10initializeEv");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[2], 1, address, size)) {
+        rbgpu_diag_set_num("ttl_set_fw_dir_routed", 1);
+        rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory");
+    } else {
+        rbgpu_diag_set_num("ttl_set_fw_dir_routed", 0);
+        rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory");
     }
 
     if (!noSmuHook) {
