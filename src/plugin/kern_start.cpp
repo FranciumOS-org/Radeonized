@@ -1,4 +1,3 @@
-
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
@@ -1041,6 +1040,14 @@ static int hooked_gc_set_fw_entry_info(void *p1, void *p2, uint32_t rev, void *p
     }
     rbgpu_log("_gc_set_fw_entry_info returned %d", ret);
     rbgpu_diag_set_num("gc_set_fw_info_ret", ret);
+    // 2ag: post-call dump. If the version-check patch let _gc_10_3_get_fw_constants
+    // run, the p4 buffer now holds the firmware entries it registered: this is
+    // the layout the yellow_carp substitution step must replicate.
+    if (p4) {
+        uint32_t *d = reinterpret_cast<uint32_t *>(p4);
+        rbgpu_log("_gc_set_fw_entry_info p4 post dwords: %08x %08x %08x %08x %08x %08x %08x %08x",
+                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+    }
     return ret;
 }
 
@@ -1410,6 +1417,63 @@ bool RGPU::patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id) {
     return patchDeviceCapabilityTableAt(tbl_addr);
 }
 
+// 2ag: _gc_set_fw_entry_info bails at `cmpl $0xa0300` (file 0x126aa1ce;
+// fn file 0x126aa16b, so +0x63) because the chip is GC 10.3.3. Patch the
+// imm32 to 0xa0303 so the Navi 21 firmware-lookup path runs and we can see
+// what _gc_10_3_get_fw_constants fills into the p4 buffer. Gated behind
+// -rbgpuspoofttl like the other version spoofs. Verify-before-write:
+// opcode 0x81, modrm reg field /7, imm 0x000A0300 must all match.
+static bool patchGcFwVersionCheckAt(mach_vm_address_t fn_addr) {
+    const uintptr_t cmpl_site = fn_addr + 0x63;
+    const uintptr_t imm_at    = cmpl_site + 2;
+
+    uint8_t  op    = *reinterpret_cast<uint8_t *>(cmpl_site);
+    uint8_t  modrm = *reinterpret_cast<uint8_t *>(cmpl_site + 1);
+    uint32_t imm   = *reinterpret_cast<uint32_t *>(imm_at);
+
+    rbgpu_diag_set_num("gc_vercheck_patched", 0);
+    if (imm == 0x000A0303) {
+        rbgpu_log("HWLibs: GC fw version check already patched (imm=0x%08X)", imm);
+        rbgpu_diag_set_num("gc_vercheck_patched", 1);
+        return true;
+    }
+    if (op != 0x81 || (modrm & 0x38) != 0x38 || imm != 0x000A0300) {
+        rbgpu_log("HWLibs: GC fw version check site mismatch (op=0x%02X modrm=0x%02X imm=0x%08X), NOT patching",
+                  op, modrm, imm);
+        return false;
+    }
+
+    MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+    *reinterpret_cast<uint32_t *>(imm_at) = 0x000A0303;
+    MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+    uint32_t rb = *reinterpret_cast<uint32_t *>(imm_at);
+    if (rb != 0x000A0303) {
+        rbgpu_log("HWLibs: [CRITICAL] GC fw version check patch FAILED readback: 0x%08X", rb);
+        return false;
+    }
+    rbgpu_diag_set_num("gc_vercheck_patched", 1);
+    rbgpu_log("HWLibs: patched GC fw version check imm 0x000A0300 -> 0x000A0303 at %p",
+              reinterpret_cast<void *>(imm_at));
+    return true;
+}
+
+bool RGPU::patchGcFwVersionCheck(KernelPatcher &patcher, size_t id) {
+    if (!spoofTtlMode) {
+        rbgpu_log("HWLibs: GC fw version check patch skipped (-rbgpuspoofttl not set)");
+        return false;
+    }
+
+    mach_vm_address_t fn_addr = patcher.solveSymbol(id, "_gc_set_fw_entry_info");
+    if (!fn_addr) {
+        rbgpu_log("HWLibs: symbol _gc_set_fw_entry_info not resolved; skipping GC fw version check patch");
+        return false;
+    }
+
+    rbgpu_log("HWLibs: resolved _gc_set_fw_entry_info at %p", reinterpret_cast<void *>(fn_addr));
+    return patchGcFwVersionCheckAt(fn_addr);
+}
+
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     static bool s_kernel_hooks_installed = false;
     if (s_kernel_hooks_installed || noLogCapture) {
@@ -1726,6 +1790,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
 
     patchDeviceTypeTable(patcher, id);
     patchDeviceCapabilityTable(patcher, id);
+    patchGcFwVersionCheck(patcher, id);
 
     routeTTL(patcher, id, address, size);
     routePSPBasics(patcher, id, address, size);

@@ -36,6 +36,7 @@ private:
 
     bool patchDeviceTypeTable(KernelPatcher &patcher, size_t id);
     bool patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id);
+    bool patchGcFwVersionCheck(KernelPatcher &patcher, size_t id);
 };
 
 #endif // KERN_START_HPP
