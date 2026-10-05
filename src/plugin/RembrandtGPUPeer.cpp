@@ -5,7 +5,6 @@
 #include "vbios_data.h"
 
 #define super IOService
-
 #define Log(fmt, ...) IOLog("RembrandtGPUPeer: " fmt "\n", ##__VA_ARGS__)
 
 OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
@@ -16,17 +15,26 @@ bool RembrandtGPUPeer::init(OSDictionary *dictionary) {
     }
 
     symSpecialAMDKey = OSSymbol::withCString("SpecialAMDKey");
-    return symSpecialAMDKey != nullptr;
+    if (!symSpecialAMDKey) {
+        return false;
+    }
+
+    postRegisterCall = thread_call_allocate(postRegisterAction, this);
+    return postRegisterCall != nullptr;
 }
 
 void RembrandtGPUPeer::free() {
+    if (postRegisterCall) {
+        thread_call_cancel(postRegisterCall);
+        thread_call_free(postRegisterCall);
+        postRegisterCall = nullptr;
+    }
     OSSafeReleaseNULL(symSpecialAMDKey);
     OSSafeReleaseNULL(accelerator);
     super::free();
 }
 
 bool RembrandtGPUPeer::start(IOService *provider) {
-    // Safety Switch: Abort without publishing or setting properties
     if (checkKernelArgument("-rbgpuoff")) {
         Log("Disabled by -rbgpuoff; aborting start");
         return false;
@@ -42,29 +50,23 @@ bool RembrandtGPUPeer::start(IOService *provider) {
         return false;
     }
 
-    // A2: Set project name to select X6800HWLibs
     auto name = OSString::withCString("ATY,Belknap");
     if (name) {
         pciDevice->setProperty("@0,name", name);
         name->release();
     }
 
-    // B0: Set VBIOS image for cosGetVbiosRomImage
     auto vbios = OSData::withBytes(vbios_data, vbios_data_size);
     if (vbios) {
         pciDevice->setProperty("ATY,bin_image", vbios);
         vbios->release();
     }
 
-    // A1: Set gating properties for AMDRadeonX6000 match personalities
     pciDevice->setProperty("RBGPULoad", kOSBooleanTrue);
     pciDevice->setProperty("LoadHWServices", kOSBooleanTrue);
     pciDevice->setProperty("LoadAccelerator", kOSBooleanTrue);
 
-    // Register our peer in category ATIFramebuffer
     registerService();
-
-    // Trigger IOKit matching on the PCI device with updated properties
     pciDevice->registerService();
 
     Log("Peer attached to 0x16811002; properties set and service registered");
@@ -72,11 +74,40 @@ bool RembrandtGPUPeer::start(IOService *provider) {
 }
 
 void RembrandtGPUPeer::stop(IOService *provider) {
+    if (postRegisterCall) {
+        thread_call_cancel(postRegisterCall);
+    }
     if (accelerator) {
         accelerator->release();
         accelerator = nullptr;
     }
     super::stop(provider);
+}
+
+void RembrandtGPUPeer::postRegisterAction(thread_call_param_t param0, thread_call_param_t param1) {
+    auto self = static_cast<RembrandtGPUPeer *>(param0);
+    if (self) {
+        self->handlePostRegister();
+    }
+}
+
+void RembrandtGPUPeer::handlePostRegister() {
+    if (!accelerator || !symSpecialAMDKey) {
+        Log("handlePostRegister: missing accelerator or symbol reference");
+        return;
+    }
+
+    uint32_t one = 1;
+
+    Log("handlePostRegister: sending Request 0x06 (PowerPlay Ready)");
+    uint32_t reqPowerPlayReady = 0x06;
+    IOReturn ret = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqPowerPlayReady, &one, nullptr, nullptr);
+    Log("handlePostRegister: Request 0x06 returned 0x%08X", ret);
+
+    Log("handlePostRegister: sending Request 0x1B (Controller Enabled)");
+    uint32_t reqControllerEnabled = 0x1B;
+    ret = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
+    Log("handlePostRegister: Request 0x1B returned 0x%08X", ret);
 }
 
 IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
@@ -99,7 +130,10 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                     accelerator = OSDynamicCast(IOService, reinterpret_cast<OSObject *>(p2));
                     if (accelerator) {
                         accelerator->retain();
-                        Log("Registered accelerator: %s", accelerator->getName());
+                        Log("Registered accelerator instance: %s", accelerator->getName());
+                        if (postRegisterCall) {
+                            thread_call_enter(postRegisterCall);
+                        }
                     }
                 }
                 return kIOReturnSuccess;
