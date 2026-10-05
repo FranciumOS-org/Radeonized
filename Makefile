@@ -23,7 +23,7 @@ CC    := xcrun clang
 CXX   := xcrun clang++
 
 # Freestanding C shared by the kext and the host tools.
-COMMON_SRCS := $(COMMON)/rb_discovery.c $(COMMON)/rb_probe.c $(COMMON)/rb_smu.c
+COMMON_SRCS := $(COMMON)/rb_discovery.c $(COMMON)/rb_probe.c $(COMMON)/rb_smu.c $(COMMON)/rb_smu13.c
 COMMON_HDRS := $(wildcard $(COMMON)/*.h)
 
 KEXT_CFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
@@ -51,9 +51,14 @@ KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
 all: kext tools
 
-hosttest: $(COMMON_SRCS) $(COMMON_HDRS) tools/hosttest/hosttest.c
+# rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
+# docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
+# freestanding; nothing links it yet.
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c
+
+hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o
 	@mkdir -p $(OUT)
-	@$(CC) $(HOST_CFLAGS) tools/hosttest/hosttest.c $(COMMON_SRCS) -o $(OUT)/hosttest
+	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 
 tools: $(OUT)/rbdump
