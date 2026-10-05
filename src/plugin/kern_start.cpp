@@ -53,7 +53,6 @@ static KernelPatcher::KextInfo kextList[] = {
     { "com.apple.kext.AMDRadeonX6000HWServices", &kextPathHWSvc,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded }
 };
 
-// AMD Kext memory bounds for return address inspection
 static mach_vm_address_t g_kext_addr_hwlibs = 0;
 static size_t            g_kext_size_hwlibs = 0;
 
@@ -88,6 +87,11 @@ static smu_init_function_pointer_list_t orig_smu_init_function_pointer_list = nu
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
+
+struct DeviceTypeEntry {
+    uint32_t deviceId;
+    uint32_t deviceType;
+};
 
 static inline const char *getCallerTag(mach_vm_address_t ret_addr) {
     if (g_kext_addr_hwlibs && ret_addr >= g_kext_addr_hwlibs && ret_addr < g_kext_addr_hwlibs + g_kext_size_hwlibs) {
@@ -491,6 +495,71 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
+static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 84) {
+    auto table = reinterpret_cast<DeviceTypeEntry *>(addr);
+
+    for (size_t i = 0; i < max_entries; i++) {
+        if (table[i].deviceId == 0x1681) {
+            rbgpu_diag_set_num("dev_type_patched", 1);
+            rbgpu_diag_set_num("dev_type_idx", i);
+            rbgpu_log("HWLibs: __ZL15deviceTypeTable already contains 0x1681 at index %zu", i);
+            return true;
+        }
+    }
+
+    for (size_t i = 0; i < max_entries; i++) {
+        if (table[i].deviceId == 0 && table[i].deviceType == 0) {
+            MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+            table[i].deviceId   = 0x1681;
+            table[i].deviceType = 6;
+            MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+            rbgpu_diag_set_num("dev_type_patched", 1);
+            rbgpu_diag_set_num("dev_type_idx", i);
+            rbgpu_log("HWLibs: patched __ZL15deviceTypeTable: added 0x1681 -> type 6 at empty index %zu", i);
+            return true;
+        }
+    }
+
+    for (size_t i = 0; i < max_entries; i++) {
+        if (table[i].deviceType == 6 &&
+            table[i].deviceId != 0x73A2 &&
+            table[i].deviceId != 0x73A3 &&
+            table[i].deviceId != 0x73BF) {
+            uint32_t old_id = table[i].deviceId;
+            MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+            table[i].deviceId   = 0x1681;
+            table[i].deviceType = 6;
+            MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+            rbgpu_diag_set_num("dev_type_patched", 1);
+            rbgpu_diag_set_num("dev_type_idx", i);
+            rbgpu_log("HWLibs: patched __ZL15deviceTypeTable: replaced 0x%04X -> 0x1681 (type 6) at index %zu", old_id, i);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool RGPU::patchDeviceTypeTable(KernelPatcher &patcher, size_t id) {
+    rbgpu_diag_set_num("dev_type_patched", 0);
+
+    mach_vm_address_t tbl_addr = patcher.solveSymbol(id, "__ZL15deviceTypeTable");
+    if (!tbl_addr) {
+        rbgpu_log("HWLibs: symbol __ZL15deviceTypeTable not resolved; skipping device type patch");
+        return false;
+    }
+
+    rbgpu_log("HWLibs: resolved __ZL15deviceTypeTable symbol at %p", reinterpret_cast<void *>(tbl_addr));
+    if (patchDeviceTypeTableAt(tbl_addr)) {
+        return true;
+    }
+
+    rbgpu_log("HWLibs: failed to find suitable slot in __ZL15deviceTypeTable");
+    return false;
+}
+
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     static bool s_kernel_hooks_installed = false;
     if (s_kernel_hooks_installed || noLogCapture) {
@@ -523,6 +592,7 @@ void RGPU::init() {
     rbgpu_diag_set_num("guard_routed", 0);
     rbgpu_diag_set_num("smu_hook_calls", 0);
     rbgpu_diag_set_num("guard_calls", 0);
+    rbgpu_diag_set_num("dev_type_patched", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
@@ -560,6 +630,8 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
 
 void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
+
+    patchDeviceTypeTable(patcher, id);
 
     if (!noSmuHook) {
         orig_smu_cgs_alloc_memory = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));
@@ -613,7 +685,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: failed to resolve symbol __ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService");
     }
 
-    mach_vm_address_t stop_sym = patcher.solveSymbol(id, "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService");
+    mach_vm_address_t stop_sym  = patcher.solveSymbol(id, "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService");
     if (!stop_sym) {
         rbgpu_log("X6000: failed to resolve symbol __ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService");
     }
@@ -651,28 +723,24 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
                 if (pop_seq && (pop_seq - post_stop) >= 17) {
                     MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
 
-                    // 1. movabs rax, &g_guard_calls (48 B8 <imm64>)
                     post_stop[0] = 0x48;
                     post_stop[1] = 0xB8;
                     *reinterpret_cast<uint64_t *>(&post_stop[2]) = reinterpret_cast<uint64_t>(&g_guard_calls);
 
-                    // 2. inc qword ptr [rax] (48 FF 00)
                     post_stop[10] = 0x48;
                     post_stop[11] = 0xFF;
                     post_stop[12] = 0x00;
 
-                    // 3. xor eax, eax (31 C0)
                     post_stop[13] = 0x31;
                     post_stop[14] = 0xC0;
 
-                    // 4. Jump directly to pop_seq epilogue
                     int32_t jmp_offset = static_cast<int32_t>(pop_seq - (post_stop + 17));
                     if (jmp_offset >= -128 && jmp_offset <= 127) {
-                        post_stop[15] = 0xEB; // jmp rel8
+                        post_stop[15] = 0xEB;
                         post_stop[16] = static_cast<uint8_t>(jmp_offset);
                         memset(&post_stop[17], 0x90, pop_seq - &post_stop[17]);
                     } else {
-                        post_stop[15] = 0xE9; // jmp rel32
+                        post_stop[15] = 0xE9;
                         int32_t rel32 = static_cast<int32_t>(pop_seq - (post_stop + 20));
                         *reinterpret_cast<int32_t *>(&post_stop[16]) = rel32;
                         memset(&post_stop[20], 0x90, pop_seq - &post_stop[20]);
