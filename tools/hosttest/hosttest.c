@@ -24,6 +24,8 @@
 #include "rb_regs.h"
 #include "rb_smu.h"
 
+int smu13_tests(const struct rb_disc *real_table);   /* smu13_test.c */
+
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
 
@@ -681,6 +683,8 @@ static void test_fuzz(void)
 int main(int argc, char **argv)
 {
     /* Optional: parse real discovery binaries given on the command line. */
+    static struct rb_disc real_disc;
+    int have_real = 0;
     for (int i = 1; i < argc; i++) {
         static uint8_t buf[1 << 16];
         static struct rb_disc d;
@@ -691,8 +695,11 @@ int main(int argc, char **argv)
         int e = rb_disc_parse(buf, (uint32_t)n, &d);
         printf("%s: %s, %u IPs, flags 0x%x\n", argv[i], rb_disc_strerror(e), d.nips, d.check_flags);
         CHECK(e == RB_DISC_OK);
-        if (strstr(argv[i], "rembrandt-680m"))
+        if (strstr(argv[i], "rembrandt-680m")) {
             test_real_table(argv[i], buf, (uint32_t)n);
+            real_disc = d;
+            have_real = e == RB_DISC_OK;
+        }
     }
 
     test_default_path();
@@ -703,6 +710,7 @@ int main(int argc, char **argv)
     test_no_device();
     test_version_gate();
     test_smu();
+    failures += smu13_tests(have_real ? &real_disc : NULL);
     test_fuzz();
 
     if (failures) {

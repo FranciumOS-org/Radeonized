@@ -11,8 +11,13 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
 
 - `src/common/` — freestanding C shared by the kext and host tools: the IP
   discovery parser (`rb_discovery.c`), the read-only probe (`rb_probe.c`), the
-  register list (`rb_regs.h`, every offset cites its Linux header) and the SMU
-  queries (`rb_smu.c`).
+  register list (`rb_regs.h`, every offset cites its Linux header), the SMU
+  queries (`rb_smu.c`) and `rb_smu13.c`, SMU 13 power management ported from
+  Linux yellow_carp_ppt.c for the plugin (not used by the probe kext). Its
+  message groups (RB_SMU13_ALLOW_*) start at queries only; allowing any other
+  group on hardware is the user's decision, like the probe's allowlist.
+  Tested in tools/hosttest/smu13_test.c against a simulated SMU whose tables
+  are Linux's own structs.
 - `src/kext/` — `RembrandtProbe`, an IOService in its own IOMatchCategory beside
   the boot framebuffer driver. Runs the probe once in start(), publishes
   `RBProbe` properties, unmaps everything.
