@@ -253,3 +253,15 @@ initialize(input); +0x570 is 0 before and after setFirmwareDirectory (which
 writes +0x958). So +0x570 can only come from input->field_10, and the
 accelerator (X6000) passes field_10 = 0. tOS status 0x0011cca7. Full log:
 logs/20261005-103402-plugin/peer.plist.
+
+Boot 12 (2026-10-05 10:43, milestone 2j, UUID 5EB49C53, boot-arg
+-rbgpusync570): no panic. setFirmwareDirectory: +0x958 = dir
+0xffffff8baab13500, +0x570 still 0; the plugin copied +0x958 into +0x570 just
+before initialize(input). First time past that check: HWLibs "initialize
+normal", inner __ZN14AmdTtlServices10initializeEv entered (same object), then
+HWLibs "ttl_initialize failed status = 0x00000001"; inner and outer
+initialize return 0xE00002C7 (kIOReturnUnsupported), X6000 "TTL::initialize()
+Failed! Error code: 0xe00002c7". Failure path otherwise unchanged (state
+trace u64AllAccelStart 0x20c5). Whether +0x570 really should hold the
+firmware directory is unverified. tOS status 0x0011d344. Full log:
+logs/20261005-104409-plugin/peer.plist.
