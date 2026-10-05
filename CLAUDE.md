@@ -281,3 +281,11 @@ panic. _ttl_initialize parameter block (0xa8 bytes, read only):
 +0x48..0x60 0; +0x68 0x10000000; +0x70 0x40000000; +0x78 0; +0x80
 0x0000000a00000000; +0x88 0; +0x90 this+0x5a0; +0x98/+0xa0 0. Still status 1.
 tOS status 0x00119c10. Full log: logs/20261005-105923-plugin/peer.plist.
+
+Boot 15 (2026-10-05 11:13, milestone 2m, UUID BE062C1E, -rbgpusync570
+-rbgpuspoofttl): no panic. _ttlIsSupportedDevice(params+0x20): devId 0x1681,
+bus 54; the hook swapped the ID to 0x73BF for the original call and it still
+returned 0. So the check is not the device ID alone (or 0x73BF is not in its
+list). _ttl_initialize -> status 1; _ttl_sw_init / _ttl_hw_init never ran, no
+GPU programming happened. tOS status 0x0011f061. Full log:
+logs/20261005-111348-plugin/peer.plist.
