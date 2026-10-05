@@ -159,6 +159,8 @@ must do at that point; addresses are this build's.
 
 ### A. Getting Apple's kexts to start at all
 
+Detailed spec: docs/SPEC-A-START.md (also adds B0: the VBIOS image, `ATY,bin_image`).
+
 | # | Step in Apple's code | What happens on a 680M today | Patch |
 |---|---|---|---|
 | A1 | HWServices and the accelerator match `IOPCIMatch` lists plus `IOPropertyMatch` `LoadHWServices` / `LoadAccelerator` = true | 0x1681 is in no list; nothing sets the properties | personalities for `AMDRadeonX6000_AMDRadeonHWServicesNavi` and `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` matching 0x16811002; set `LoadHWServices`, then `LoadAccelerator` on the PCI device (Apple's GPU wrangler does it in that order, `AmdGpuWrangler::vendor_doDeviceAttribute`) |
