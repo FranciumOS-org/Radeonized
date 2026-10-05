@@ -1421,15 +1421,34 @@ bool RGPU::patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id) {
 // fn file 0x126aa16b, so +0x63) because the chip is GC 10.3.3. Patch the
 // imm32 to 0xa0303 so the Navi 21 firmware-lookup path runs and we can see
 // what _gc_10_3_get_fw_constants fills into the p4 buffer. Gated behind
-// -rbgpuspoofttl like the other version spoofs. Verify-before-write:
-// opcode 0x81, modrm reg field /7, imm 0x000A0300 must all match.
+// -rbgpuspoofttl like the other version spoofs. Verify-before-write.
+// 2ah: boot 29 showed the encoding is `3D id` (cmpl $imm32, %eax), not
+// `81 /7 id`: the immediate sits at +1, not +2. Handle both forms.
 static bool patchGcFwVersionCheckAt(mach_vm_address_t fn_addr) {
     const uintptr_t cmpl_site = fn_addr + 0x63;
-    const uintptr_t imm_at    = cmpl_site + 2;
 
-    uint8_t  op    = *reinterpret_cast<uint8_t *>(cmpl_site);
-    uint8_t  modrm = *reinterpret_cast<uint8_t *>(cmpl_site + 1);
-    uint32_t imm   = *reinterpret_cast<uint32_t *>(imm_at);
+    uint8_t op = *reinterpret_cast<uint8_t *>(cmpl_site);
+
+    uintptr_t imm_at = 0;
+    if (op == 0x3D) {
+        // cmpl $imm32, %eax : opcode(1) + imm32(4)
+        imm_at = cmpl_site + 1;
+    } else if (op == 0x81) {
+        // cmpl $imm32, r/m32 : opcode(1) + modrm(1) + imm32(4), /7 in modrm
+        uint8_t modrm = *reinterpret_cast<uint8_t *>(cmpl_site + 1);
+        if ((modrm & 0x38) != 0x38) {
+            rbgpu_log("HWLibs: GC fw version check: 0x81 with unexpected modrm 0x%02X, NOT patching",
+                      modrm);
+            return false;
+        }
+        imm_at = cmpl_site + 2;
+    } else {
+        rbgpu_log("HWLibs: GC fw version check: unexpected opcode 0x%02X at %p, NOT patching",
+                  op, reinterpret_cast<void *>(cmpl_site));
+        return false;
+    }
+
+    uint32_t imm = *reinterpret_cast<uint32_t *>(imm_at);
 
     rbgpu_diag_set_num("gc_vercheck_patched", 0);
     if (imm == 0x000A0303) {
@@ -1437,9 +1456,9 @@ static bool patchGcFwVersionCheckAt(mach_vm_address_t fn_addr) {
         rbgpu_diag_set_num("gc_vercheck_patched", 1);
         return true;
     }
-    if (op != 0x81 || (modrm & 0x38) != 0x38 || imm != 0x000A0300) {
-        rbgpu_log("HWLibs: GC fw version check site mismatch (op=0x%02X modrm=0x%02X imm=0x%08X), NOT patching",
-                  op, modrm, imm);
+    if (imm != 0x000A0300) {
+        rbgpu_log("HWLibs: GC fw version check: unexpected imm 0x%08X at %p, NOT patching",
+                  imm, reinterpret_cast<void *>(imm_at));
         return false;
     }
 
