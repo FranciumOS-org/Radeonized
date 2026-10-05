@@ -1,5 +1,4 @@
 
-```cpp
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <Headers/kern_util.hpp>
@@ -508,4 +507,3 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
     return super::callPlatformFunction(functionName, waitForFunction, p1, p2, p3, p4);
 }
 
-```

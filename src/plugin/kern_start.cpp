@@ -1,5 +1,4 @@
 
-```cpp
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
@@ -1866,4 +1865,3 @@ void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_
     rbgpu_log("com.apple.kext.AMDRadeonX6000HWServices matched and monitored");
 }
 
-```
