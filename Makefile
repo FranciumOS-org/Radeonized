@@ -104,15 +104,24 @@ LILU        := $(PROJ_ROOT)/third_party/Lilu/Lilu
 PLUGIN_SRC  := $(PROJ_ROOT)/src/plugin
 PLUGIN_VER  := 1.0.0
 PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"'
-PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o
+PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/RembrandtGPUPeer.o \
+               $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o
+VBIOS_ROM   := firmware/680m-vbios.rom
+VBIOS_HDR   := $(BUILD_DIR)/plugin/gen/vbios_data.h
 PLUGIN_BUNDLE := $(OUT)/RembrandtGPU.kext
 PLUGIN_BIN    := $(PLUGIN_BUNDLE)/Contents/MacOS/RembrandtGPU
-PLUGIN_CXXFLAGS := $(filter-out -Werror -I$(COMMON),$(KEXT_CXXFLAGS)) -isystem $(LILU) $(PLUGIN_DEFS)
+PLUGIN_CXXFLAGS := $(filter-out -Werror -I$(COMMON),$(KEXT_CXXFLAGS)) -isystem $(LILU) $(PLUGIN_DEFS) -I$(BUILD_DIR)/plugin/gen
 
 $(BUILD_DIR)/plugin/%.o: $(PLUGIN_SRC)/%.cpp
 	@mkdir -p $(dir $@)
 	@echo "  CXX  plugin/$*.cpp"
 	@$(CXX) $(PLUGIN_CXXFLAGS) -Werror -c $< -o $@
+
+# The VBIOS (B0) goes in as a generated header; firmware/ and build/ are not committed.
+$(VBIOS_HDR): $(VBIOS_ROM) tools/vbios_header.py
+	@python3 tools/vbios_header.py $< $@
+
+$(BUILD_DIR)/plugin/RembrandtGPUPeer.o: $(VBIOS_HDR)
 
 $(BUILD_DIR)/plugin/plugin_start.o: $(LILU)/Library/plugin_start.cpp
 	@mkdir -p $(dir $@)
