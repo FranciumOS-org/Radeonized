@@ -75,6 +75,7 @@ typedef int      (*smu_cgs_free_memory_t)(void *ctx, void *handle);
 typedef uint32_t (*smu_get_hw_version_t)(uint64_t ver, uint64_t rev);
 typedef int      (*smu_read_config_space_t)(void *ctx);
 typedef int      (*smu_init_function_pointer_list_t)(void *ctx, uint64_t ver, uint64_t rev);
+typedef int      (*amdtll_initialize_t)(void *this_ptr);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -84,6 +85,7 @@ static smu_cgs_free_memory_t            orig_smu_cgs_free_memory            = nu
 static smu_get_hw_version_t             orig_smu_get_hw_version             = nullptr;
 static smu_read_config_space_t          orig_smu_read_config_space          = nullptr;
 static smu_init_function_pointer_list_t orig_smu_init_function_pointer_list = nullptr;
+static amdtll_initialize_t              orig_amdtll_initialize              = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -495,10 +497,21 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
+static int hooked_AmdTtlServices_initialize(void *this_ptr) {
+    rbgpu_log("AmdTtlServices::initialize() entered (this=%p)", this_ptr);
+    int ret = 0;
+    if (orig_amdtll_initialize) {
+        ret = orig_amdtll_initialize(this_ptr);
+    }
+    rbgpu_log("AmdTtlServices::initialize() returned 0x%08X", ret);
+    rbgpu_diag_set_num("ttl_init_ret", static_cast<uint32_t>(ret));
+    return ret;
+}
+
 static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 83) {
     auto table = reinterpret_cast<DeviceTypeEntry *>(addr);
 
-    // 1. Check if 0x1681 already exists
+    // Check if 0x1681 already exists
     for (size_t i = 0; i < max_entries; i++) {
         if (table[i].deviceId == 0x1681) {
             rbgpu_diag_set_num("dev_type_patched", 1);
@@ -510,12 +523,41 @@ static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 
         }
     }
 
-    // 2. Replace an active Navi 21 type 6 entry within 0..82.
-    // Index 66 (0x005D, type 6) is an unused test ID and will be replaced first.
+    // Explicitly target index 66 (+0x210: 0x005D -> 0x1681, type 6)
+    size_t target_idx = 66;
+    if (target_idx < max_entries && table[target_idx].deviceId == 0x005D && table[target_idx].deviceType == 6) {
+        uint32_t old_id = table[target_idx].deviceId;
+
+        MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+        table[target_idx].deviceId   = 0x1681;
+        table[target_idx].deviceType = 6;
+        MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+        uint32_t rb_id   = table[target_idx].deviceId;
+        uint32_t rb_type = table[target_idx].deviceType;
+        rbgpu_diag_set_num("dev_type_patched", 1);
+        rbgpu_diag_set_num("dev_type_idx", target_idx);
+        rbgpu_diag_set_num("dev_type_rb_id", rb_id);
+        rbgpu_diag_set_num("dev_type_rb_type", rb_type);
+
+        if (rb_id != 0x1681) {
+            rbgpu_log("HWLibs: [CRITICAL] write verification FAILED at index %zu! readback: 0x%04X != 0x1681", target_idx, rb_id);
+            return false;
+        }
+
+        rbgpu_log("HWLibs: patched __ZL15deviceTypeTable at index %zu: 0x%04X -> 0x1681 (type 6, verified readback: 0x%04X, type %u)",
+                  target_idx, old_id, rb_id, rb_type);
+        return true;
+    }
+
+    // Fallback: replace any active non-shipping type 6 entry if index 66 is not 0x005D
     for (size_t i = 0; i < max_entries; i++) {
         if (table[i].deviceType == 6 &&
+            table[i].deviceId != 0x73A0 &&
             table[i].deviceId != 0x73A2 &&
             table[i].deviceId != 0x73A3 &&
+            table[i].deviceId != 0x73AB &&
+            table[i].deviceId != 0x73AE &&
             table[i].deviceId != 0x73BF) {
             uint32_t old_id = table[i].deviceId;
 
@@ -542,7 +584,7 @@ static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 
         }
     }
 
-    rbgpu_log("HWLibs: failed to find a replaceable type 6 slot in __ZL15deviceTypeTable");
+    rbgpu_log("HWLibs: failed to find a replaceable slot in __ZL15deviceTypeTable");
     return false;
 }
 
@@ -600,6 +642,8 @@ void RGPU::init() {
     rbgpu_diag_set_num("dev_type_patched", 0);
     rbgpu_diag_set_num("dev_type_rb_id", 0);
     rbgpu_diag_set_num("dev_type_rb_type", 0);
+    rbgpu_diag_set_num("ttl_init_routed", 0);
+    rbgpu_diag_set_num("ttl_init_ret", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
@@ -639,6 +683,19 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
 
     patchDeviceTypeTable(patcher, id);
+
+    KernelPatcher::RouteRequest ttlReq(
+        "__ZN14AmdTtlServices10initializeEv",
+        hooked_AmdTtlServices_initialize,
+        orig_amdtll_initialize
+    );
+    if (patcher.routeMultiple(id, &ttlReq, 1, address, size)) {
+        rbgpu_diag_set_num("ttl_init_routed", 1);
+        rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices10initializeEv");
+    } else {
+        rbgpu_diag_set_num("ttl_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices10initializeEv");
+    }
 
     if (!noSmuHook) {
         orig_smu_cgs_alloc_memory = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));
