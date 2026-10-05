@@ -217,3 +217,11 @@ of the log is unchanged (NULL TTL handle, PSP Ready/POST 0xffffffff, same two
 RSMU timeout events, state trace u64AllAccelStart 0x20c5, nothing past
 initExternalInterfaces). tOS status 0x0011e396. Full log:
 logs/20261005-092629-plugin/peer.plist.
+
+Boot 8 (2026-10-05 09:46, milestone 2f, UUID F8037B38): no panic.
+deviceTypeTable entry 66 (0x005D) -> 0x1681 / type 6, read-back OK.
+__ZN14AmdTtlServices10initializeEv hooked (ttl_init_routed 1) but never
+called: no "entered" line, ttl_init_ret is only the 0 set at install. So the
+0xe00002bc after "Boot mode Normal" comes before the inner initialize(). Rest
+of the log identical to boot 7 (tOS status 0x0011f4a6). Full log:
+logs/20261005-094651-plugin/peer.plist.
