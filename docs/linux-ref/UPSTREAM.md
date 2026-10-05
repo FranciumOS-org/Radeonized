@@ -44,3 +44,9 @@ The smu_v13_0.c / smu_cmn.c helpers rb_smu13 also follows
 (`smu_v13_0_set_driver_table_location`, `smu_v13_0_gfx_off_control`,
 `smu_cmn_update_table`, `smu_cmn_get_enabled_mask`, `smu_cmn_check_fw_version`)
 are cited by name in rb_smu13.h, not copied (2400 and 1700 lines).
+
+Added 2026-10-05, from master at `67f0943b394d920b6c142aad8c6af94340342ae7`:
+
+| File | Upstream path |
+|---|---|
+| amdgpu_ucode.h | drivers/gpu/drm/amd/amdgpu/amdgpu_ucode.h |
