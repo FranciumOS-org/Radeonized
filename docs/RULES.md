@@ -225,3 +225,13 @@ called: no "entered" line, ttl_init_ret is only the 0 set at install. So the
 0xe00002bc after "Boot mode Normal" comes before the inner initialize(). Rest
 of the log identical to boot 7 (tOS status 0x0011f4a6). Full log:
 logs/20261005-094651-plugin/peer.plist.
+
+Boot 9 (2026-10-05 09:54, milestone 2g, UUID 9B0BCC61): no panic. Outer
+__ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput hooked:
+called once, returned 0xE00002BC itself. Input quadwords [0]=0xffffffc085c28690
+[1]=0xffffffc085c286a8 [2]=0 [4]=0x40000000 [5]=doorbell base [6]=0x200000;
+AmdTtlServices state before the call: +0x560/0x568/0x570/0x578/0x598 all 0.
+Matches the path Gemini read from the disassembly: input[2]==0 and this+0x570==0
+-> 0xe00002bc before createPciDeviceCache/initialize(). The inner initialize()
+hook again not called. plugin_check now prints RBGPUDiag numbers unsigned
+(ioreg -a gives signed 64-bit). Full log: logs/20261005-095513-plugin/peer.plist.
