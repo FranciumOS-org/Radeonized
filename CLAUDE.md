@@ -31,7 +31,9 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
   pointers, strings, symbols), `dumptable.py`, `kc_stubs.py` (kernel calls
   through the collection's branch stubs -> names; `annotate` for objdump
   output), `vtslots.py` (IOService-family vtable offsets -> methods), `strxref.py`
-  (functions that use a C string), `switches.py` (jump tables: case -> handler). Output
+  (functions that use a C string), `switches.py` (jump tables: case -> handler),
+  `ptrsym.py` (names every RBGPULog pointer inside a loaded AMD kext; run by
+  plugin_check.sh). Output
   goes to `build/re/`.
   Findings: docs/APPLE-STACK.md.
 
