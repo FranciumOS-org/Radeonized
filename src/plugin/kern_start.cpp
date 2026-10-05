@@ -82,8 +82,8 @@ typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
 typedef uint32_t (*ttl_initialize_fn_t)(void *init_params, void *ttl_context_38);
 typedef uint8_t  (*ttl_is_supported_device_fn_t)(void *dev_info_20);
 typedef uint8_t  (*ipi_execute_swip_entry_point_fn_t)(void *instance, uint32_t swip_client_id, uint32_t event_id, void *context);
-typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
 typedef void*    (*ipi_get_discovery_info_fn_t)(void *instance, uint32_t client_id);
+typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -100,8 +100,8 @@ static amdtll_set_fw_dir_t              orig_amdtll_set_fw_dir              = nu
 static ttl_initialize_fn_t              orig_ttl_initialize                 = nullptr;
 static ttl_is_supported_device_fn_t     orig_ttl_is_supported_device        = nullptr;
 static ipi_execute_swip_entry_point_fn_t orig_ipi_execute_swip_entry_point = nullptr;
-static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
 static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info       = nullptr;
+static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -562,7 +562,12 @@ static uint8_t hooked_ipi_execute_swip_entry_point(void *instance, uint32_t swip
 
 static int hooked_ipi_psp_sw_init(void *dev) {
     rbgpu_diag_inc("psp_sw_init_calls");
-    rbgpu_log("_ipi_psp_sw_init entered: dev=%p", dev);
+    uint64_t *dev_ptr = reinterpret_cast<uint64_t *>(dev);
+    void *fn_ptr = dev_ptr ? reinterpret_cast<void *>(dev_ptr[1]) : nullptr;
+    ptrdiff_t kext_offset = (g_kext_addr_hwlibs && fn_ptr && reinterpret_cast<mach_vm_address_t>(fn_ptr) >= g_kext_addr_hwlibs) ?
+        (reinterpret_cast<mach_vm_address_t>(fn_ptr) - g_kext_addr_hwlibs) : -1;
+
+    rbgpu_log("_ipi_psp_sw_init entered: dev=%p, fn_ptr@+0x8=%p (HWLibs offset +0x%zx)", dev, fn_ptr, static_cast<size_t>(kext_offset));
 
     int ret = 0;
     if (orig_ipi_psp_sw_init) {
