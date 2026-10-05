@@ -31,7 +31,7 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
   pointers, strings, symbols), `dumptable.py`, `kc_stubs.py` (kernel calls
   through the collection's branch stubs -> names; `annotate` for objdump
   output), `vtslots.py` (IOService-family vtable offsets -> methods), `strxref.py`
-  (functions that use a C string). Output
+  (functions that use a C string), `switches.py` (jump tables: case -> handler). Output
   goes to `build/re/`.
   Findings: docs/APPLE-STACK.md.
 
