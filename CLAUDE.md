@@ -358,3 +358,15 @@ then client 5 event 2 -> 1 and client 3 event 2 -> 1 (the two that had
 initialised, in reverse order); _ttl_initialize status 4. The PSP SW_INIT
 failure takes ~21 us, so it is decided without waiting on hardware.
 tOS status 0x00117443. Full log: logs/20261005-135303-plugin/peer.plist.
+
+Boot 22 (2026-10-05 14:18, milestone 2v, UUID 09DC6974, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. _IpiGetDiscoveryInfo logged 12 calls
+(instance 0xffffffd7d8d6b000): a first pass over clients 3, 5, 6, 8, 7, 2,
+14, 9, 15, 10 — client 3 -> NULL, all others non-NULL (consecutive pointers
+0xc64 apart, client 5 at 0xffffffd7d9437ecc); then client 5 again inside its
+SW_INIT, and client 6 inside _ipi_psp_sw_init (dev 0xffffffd7d8ec4000) ->
+0xffffffd7d9438b30, NOT NULL. _ipi_psp_sw_init still returned 0, ~20 us
+after that call. So the PSP SW_INIT failure is after the discovery lookup
+(Gemini's NULL-discovery explanation ruled out). Client 3's SW_INIT succeeds
+although its discovery info is NULL. tOS status 0x0012e33a. Full log:
+logs/20261005-141942-plugin/peer.plist.
