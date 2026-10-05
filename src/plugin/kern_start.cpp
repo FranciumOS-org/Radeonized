@@ -80,6 +80,7 @@ typedef int      (*amdtll_init_input_t)(void *this_ptr, void *input);
 typedef int      (*amdtll_initialize_t)(void *this_ptr);
 typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
 typedef uint32_t (*ttl_initialize_fn_t)(void *init_params, void *ttl_context_38);
+typedef uint8_t  (*ttl_is_supported_device_fn_t)(void *dev_info_20);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -94,12 +95,14 @@ static amdtll_init_input_t              orig_amdtll_init_input              = nu
 static amdtll_initialize_t              orig_amdtll_initialize              = nullptr;
 static amdtll_set_fw_dir_t              orig_amdtll_set_fw_dir              = nullptr;
 static ttl_initialize_fn_t              orig_ttl_initialize                 = nullptr;
+static ttl_is_supported_device_fn_t     orig_ttl_is_supported_device        = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
 
-static bool g_safe_ttl_mode = false;
-static bool g_sync_570_mode = false;
+static bool g_safe_ttl_mode  = false;
+static bool g_sync_570_mode  = false;
+static bool g_spoof_ttl_mode = false;
 
 struct DeviceTypeEntry {
     uint32_t deviceId;
@@ -508,6 +511,35 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
+static uint8_t hooked_ttlIsSupportedDevice(void *dev_info_20) {
+    rbgpu_diag_inc("ttl_is_supp_calls");
+    auto dwords = reinterpret_cast<uint32_t *>(dev_info_20);
+    uint32_t dev_id = dwords ? dwords[0] : 0;
+    uint32_t bus_no = dwords ? dwords[1] : 0;
+
+    rbgpu_log("_ttlIsSupportedDevice(ptr=%p): devId=0x%04X, bus=%u", dev_info_20, dev_id, bus_no);
+
+    uint8_t ret = 0;
+    if (g_spoof_ttl_mode && dwords && dev_id == 0x1681) {
+        // Choice: In-place spoof of dev_id to 0x73BF (Navi 21) across the original call,
+        // ensuring internal descriptor structures and capability flags are populated properly.
+        dwords[0] = 0x73BF;
+        if (orig_ttl_is_supported_device) {
+            ret = orig_ttl_is_supported_device(dev_info_20);
+        }
+        dwords[0] = 0x1681; // Restore real device ID immediately
+        rbgpu_log("_ttlIsSupportedDevice: spoofed 0x1681 -> 0x73BF for original call, result = %u", ret);
+    } else {
+        if (orig_ttl_is_supported_device) {
+            ret = orig_ttl_is_supported_device(dev_info_20);
+        }
+        rbgpu_log("_ttlIsSupportedDevice original returned %u", ret);
+    }
+
+    rbgpu_diag_set_num("ttl_is_supp_ret", ret);
+    return ret;
+}
+
 static uint32_t hooked_ttl_initialize(void *arg1, void *arg2) {
     rbgpu_diag_inc("ttl_raw_init_calls");
     rbgpu_diag_set_num("ttl_raw_init_arg1", reinterpret_cast<uint64_t>(arg1));
@@ -759,8 +791,10 @@ void RGPU::init() {
     noLogCapture = checkKernelArgument("-rbgpunocapture");
     safeTtlMode  = checkKernelArgument("-rbgpusafettl");
     sync570Mode  = checkKernelArgument("-rbgpusync570");
-    g_safe_ttl_mode = safeTtlMode;
-    g_sync_570_mode = sync570Mode;
+    spoofTtlMode = checkKernelArgument("-rbgpuspoofttl");
+    g_safe_ttl_mode  = safeTtlMode;
+    g_sync_570_mode  = sync570Mode;
+    g_spoof_ttl_mode = spoofTtlMode;
 
     rbgpu_diag_set_num("smu_hook_routed", 0);
     rbgpu_diag_set_num("guard_routed", 0);
@@ -789,6 +823,9 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_raw_init_ret", 0);
     rbgpu_diag_set_num("ttl_raw_init_arg1", 0);
     rbgpu_diag_set_num("ttl_raw_init_arg2", 0);
+    rbgpu_diag_set_num("ttl_is_supp_routed", 0);
+    rbgpu_diag_set_num("ttl_is_supp_calls", 0);
+    rbgpu_diag_set_num("ttl_is_supp_ret", 0);
     rbgpu_diag_set_num("ttl_param_q0", 0);
     rbgpu_diag_set_num("ttl_param_q1", 0);
     rbgpu_diag_set_num("ttl_param_q2", 0);
@@ -796,12 +833,13 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_param_q4", 0);
     rbgpu_diag_set_num("ttl_param_q5", 0);
 
-    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s)",
+    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s, SpoofTTL: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
               noTrap3Guard ? "DISABLED" : "ENABLED",
               noLogCapture ? "DISABLED" : "ENABLED",
               safeTtlMode ? "ENABLED" : "DISABLED",
-              sync570Mode ? "ENABLED" : "DISABLED");
+              sync570Mode ? "ENABLED" : "DISABLED",
+              spoofTtlMode ? "ENABLED" : "DISABLED");
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
@@ -857,6 +895,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_ttl_initialize",
             hooked_ttl_initialize,
             orig_ttl_initialize
+        ),
+        KernelPatcher::RouteRequest(
+            "_ttlIsSupportedDevice",
+            hooked_ttlIsSupportedDevice,
+            orig_ttl_is_supported_device
         )
     };
 
@@ -890,6 +933,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("ttl_raw_init_routed", 0);
         rbgpu_log("HWLibs: failed to hook _ttl_initialize");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[4], 1, address, size)) {
+        rbgpu_diag_set_num("ttl_is_supp_routed", 1);
+        rbgpu_log("HWLibs: hooked _ttlIsSupportedDevice");
+    } else {
+        rbgpu_diag_set_num("ttl_is_supp_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _ttlIsSupportedDevice");
     }
 
     if (!noSmuHook) {
