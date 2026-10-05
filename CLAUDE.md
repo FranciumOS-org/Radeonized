@@ -272,3 +272,12 @@ panic. _ttl_initialize hooked: entered with rdi=0xffffffaa95beb818 (the
 status 1 about 3 us later. The call site (0x12660232-0x1266023d) loads only
 rdi and rsi, so the hook's arg3..arg6 (1, 0xffffffff, 0x10001, 1) are leftover
 registers. tOS status 0x0011922c. Full log: logs/20261005-104921-plugin/peer.plist.
+
+Boot 14 (2026-10-05 10:58, milestone 2l, UUID 62DAC5BA, -rbgpusync570): no
+panic. _ttl_initialize parameter block (0xa8 bytes, read only):
++0x00..0x18 pointers into the AmdTtlServices object (this+0x50, +0x3f0, +0x528,
++0x540); +0x20 0x0000003600001681 (device 0x1681, 0x36 = 54 as in "[54:0:0]");
++0x28 0; +0x30 0xffffffd2d7814000; +0x38 doorbell base; +0x40 0x200000;
++0x48..0x60 0; +0x68 0x10000000; +0x70 0x40000000; +0x78 0; +0x80
+0x0000000a00000000; +0x88 0; +0x90 this+0x5a0; +0x98/+0xa0 0. Still status 1.
+tOS status 0x00119c10. Full log: logs/20261005-105923-plugin/peer.plist.
