@@ -30,23 +30,32 @@ fi
 cat "$out/log.txt"
 
 echo
+echo "--- registry"
+# Lilu's plugin_start.cpp: the RembrandtGPU IOService only survives start()
+# when Lilu accepted the plugin and pluginStart() ran (startSuccess). A loaded
+# kext without the instance stopped itself (-rbgpuoff, or Lilu refused it).
+ioreg -w0 -p IOService -c RembrandtGPU -r -l | grep -E '\+-o RembrandtGPU|CFBundleIdentifier"' \
+    | tee "$out/ioreg.txt"
+loaded=0; grep -q com.rembrandtgpu.plugin "$out/kexts.txt" && loaded=1
+running=0; grep -q '+-o RembrandtGPU' "$out/ioreg.txt" && running=1
+
+echo
 echo "--- verdict"
-if grep -q "loaded, doing nothing (milestone 0)" "$out/log.txt"; then
+if [ $running = 1 ]; then
     [ $off = 1 ] && echo "WRONG: plugin ran although -rbgpuoff is set" \
                  || echo "OK: plugin loaded and ran (milestone 0)"
-elif grep -q "should not continue 5" "$out/log.txt"; then
-    [ $off = 1 ] && echo "OK: -rbgpuoff works, the plugin stopped itself" \
-                 || echo "WRONG: plugin says disabled but -rbgpuoff is not set"
-elif grep -q "should not continue 4" "$out/log.txt"; then
-    echo "Lilu refused it: macOS version outside the plugin's range (IncompatibleOS)"
-elif grep -q "should not continue" "$out/log.txt"; then
-    echo "Lilu refused it: $(grep -o 'should not continue [0-9]*' "$out/log.txt" | head -1) (see kern_api.hpp Error)"
-elif grep -q "failed to call parent" "$out/log.txt"; then
-    echo "the plugin could not reach Lilu (is it after Lilu in config.plist?)"
+elif [ $loaded = 1 ]; then
+    if [ $off = 1 ]; then
+        echo "OK: -rbgpuoff works, the plugin stopped itself"
+    else
+        echo "plugin loaded but did not run: Lilu refused it."
+        grep -o 'should not continue [0-9]*\|failed to call parent [0-9]*' "$out/log.txt" | head -1
+        echo "(Lilu errors: 4 = macOS version out of range, 5 = disabled, 6 = too late)"
+    fi
 else
-    echo "no RembrandtGPU messages found."
-    [ "$(id -u)" = 0 ] || echo "try again with sudo (searches the kernel buffer too), then run: sudo tools/efi.sh status"
+    echo "plugin not loaded: OpenCore did not inject it. Run: sudo tools/efi.sh status"
 fi
+echo "(early-boot plugin log lines are usually not kept; the registry is the check)"
 
 [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER" "$out"
 echo
