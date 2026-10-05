@@ -79,7 +79,7 @@ typedef int      (*smu_init_function_pointer_list_t)(void *ctx, uint64_t ver, ui
 typedef int      (*amdtll_init_input_t)(void *this_ptr, void *input);
 typedef int      (*amdtll_initialize_t)(void *this_ptr);
 typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
-typedef uint32_t (*ttl_initialize_fn_t)(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6);
+typedef uint32_t (*ttl_initialize_fn_t)(void *init_params, void *ttl_context_38);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -508,18 +508,40 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
-static uint32_t hooked_ttl_initialize(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6) {
+static uint32_t hooked_ttl_initialize(void *arg1, void *arg2) {
     rbgpu_diag_inc("ttl_raw_init_calls");
     rbgpu_diag_set_num("ttl_raw_init_arg1", reinterpret_cast<uint64_t>(arg1));
     rbgpu_diag_set_num("ttl_raw_init_arg2", reinterpret_cast<uint64_t>(arg2));
-    rbgpu_diag_set_num("ttl_raw_init_arg3", reinterpret_cast<uint64_t>(arg3));
 
-    rbgpu_log("_ttl_initialize entered: arg1=%p arg2=%p arg3=%p arg4=%p arg5=%p arg6=%p",
-              arg1, arg2, arg3, arg4, arg5, arg6);
+    auto params = reinterpret_cast<const uint64_t *>(arg1);
+
+    rbgpu_log("_ttl_initialize entered: params=%p, ctx_38=%p", arg1, arg2);
+
+    if (params) {
+        rbgpu_diag_set_num("ttl_param_q0", params[0]);
+        rbgpu_diag_set_num("ttl_param_q1", params[1]);
+        rbgpu_diag_set_num("ttl_param_q2", params[2]);
+        rbgpu_diag_set_num("ttl_param_q3", params[3]);
+        rbgpu_diag_set_num("ttl_param_q4", params[4]);
+        rbgpu_diag_set_num("ttl_param_q5", params[5]);
+
+        rbgpu_log("ttl_params[0x00..0x18]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[0], params[1], params[2], params[3]);
+        rbgpu_log("ttl_params[0x20..0x38]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[4], params[5], params[6], params[7]);
+        rbgpu_log("ttl_params[0x40..0x58]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[8], params[9], params[10], params[11]);
+        rbgpu_log("ttl_params[0x60..0x78]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[12], params[13], params[14], params[15]);
+        rbgpu_log("ttl_params[0x80..0x98]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[16], params[17], params[18], params[19]);
+        rbgpu_log("ttl_params[0xA0]:      0x%016llx",
+                  params[20]);
+    }
 
     uint32_t ret = 1;
     if (orig_ttl_initialize) {
-        ret = orig_ttl_initialize(arg1, arg2, arg3, arg4, arg5, arg6);
+        ret = orig_ttl_initialize(arg1, arg2);
     }
 
     rbgpu_log("_ttl_initialize returned status = 0x%08x", ret);
@@ -767,7 +789,12 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_raw_init_ret", 0);
     rbgpu_diag_set_num("ttl_raw_init_arg1", 0);
     rbgpu_diag_set_num("ttl_raw_init_arg2", 0);
-    rbgpu_diag_set_num("ttl_raw_init_arg3", 0);
+    rbgpu_diag_set_num("ttl_param_q0", 0);
+    rbgpu_diag_set_num("ttl_param_q1", 0);
+    rbgpu_diag_set_num("ttl_param_q2", 0);
+    rbgpu_diag_set_num("ttl_param_q3", 0);
+    rbgpu_diag_set_num("ttl_param_q4", 0);
+    rbgpu_diag_set_num("ttl_param_q5", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
