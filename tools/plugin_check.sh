@@ -102,8 +102,8 @@ if diag is None and log is None:
     print("  (the peer publishes no RBGPUDiag / RBGPULog)")
 for k, v in sorted((diag or {}).items()):
     print(f"  {k} = {v:#x}" if isinstance(v, int) else f"  {k} = {v}")
-for line in (log or [])[-80:]:
-    print("  | " + str(line))
+for line in (log or []):
+    print("  | " + str(line).replace("\n", "\n  |     "))
 PY
 ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -1 | sed 's/^/  newest panic report: /'
 

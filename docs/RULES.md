@@ -178,3 +178,18 @@ objects newer-or-equal to the 2c sources. No panic. efi.sh install now
 recompiles the plugin sources and prints the installed UUID; plugin_check.sh
 says whether the loaded plugin is build/out. Never swap sources in and out
 of the tree around a build; use a separate checkout.
+
+Boot 5 (2026-10-05 02:11, milestone 2c, UUID B17E6175): no panic. Capture
+works (kprintf/IOLog routed on the kernel, filtered by caller). Apple's own
+log, in order: HWLibs "Unable to find matching firmware device type for device
+ID: 0x1681"; X6000 "Calling TTL::initialize()" (BootLoader 0x00280066, POST
+Code/Ready 0xffffffff, nonlocal mem limit 1 GB, doorbell aperture 2 MB);
+HWLibs "TTL Interface: Boot mode Normal"; X6000 "TTL::initialize() Failed!
+Error code: 0xe00002bc"; then the failure path: NULL TTL Handle, FW
+Attestation not supported, SWIP_Error_msgs null, PSP info (tOS status
+0x0012054f, tOS/BootLoader 0.28.0.66, Sec. Policy 13.24.0.110), m_hTtl NULL,
+hdcp_services terminate 0xe00002c2, queryEngineQueueCount(VIDEO_DECODE)
+failed, driver state trace u64AllAccelStart 0x20c5. Failure path ran without
+a panic although the guard did not install ("failed to locate or patch stop()
+call site in start()"). SMU hook still not reached (TTL init fails first).
+Captured entries are cut at ~256 chars. Full log: logs/20261005-021213-plugin/peer.plist.
