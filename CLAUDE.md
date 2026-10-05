@@ -141,3 +141,18 @@ BAR5 mapping, B1 device-type lookup -> type 9). It logs with kprintf, which
 does not reach `log show`. No IP was initialised: that starts with the
 accelerator. The peer's IOLog lines are not in `log show` either (early boot);
 the registry is the check.
+
+## Milestone 2, first boots (2026-10-05)
+
+Boot 1 froze after the lock screen: panic Kernel-2026-10-05-014447 (uptime
+18 s), "NMIPI for unresponsive processor: TLB flush timeout", CPU 0 inside
+com.rtw89.driver `_rtw89_pci_napi_poll`. No AMD or RembrandtGPU frame. Both
+earlier panics (2026-10-01) are rtw89 double faults in
+AirPort_RTW89::nativeRequest. So the Wi-Fi driver is the known crasher; the
+GPU bring-up as a trigger is not excluded.
+Boot 2 (forced restart) came up: peer, HWServices, and AMDRadeonX6000 +
+X6800HWLibs loaded, but no accelerator instance stays on IGPU@0 (start or
+probe failed without a panic). Nothing from the plugin is in `log show`
+(18k kernel lines this boot) or the dmesg grep, with msgbuf=1048576: IOLog
+from the plugin is not usable as evidence here. Diagnostics have to go into
+registry properties.
