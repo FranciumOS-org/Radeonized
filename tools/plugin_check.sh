@@ -101,7 +101,8 @@ diag, log = node.get("RBGPUDiag"), node.get("RBGPULog")
 if diag is None and log is None:
     print("  (the peer publishes no RBGPUDiag / RBGPULog)")
 for k, v in sorted((diag or {}).items()):
-    print(f"  {k} = {v:#x}" if isinstance(v, int) else f"  {k} = {v}")
+    # ioreg -a writes 64-bit numbers as signed integers; show them as unsigned.
+    print(f"  {k} = {v & 0xffffffffffffffff:#x}" if isinstance(v, int) else f"  {k} = {v}")
 for line in (log or []):
     print("  | " + str(line).replace("\n", "\n  |     "))
 PY
