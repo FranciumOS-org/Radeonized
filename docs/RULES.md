@@ -164,3 +164,10 @@ The accelerator sent the peer request 0x14 (Gpu Status) 7x, answered
 *p2 = 1, never 0x00 Register, and does not stay attached: its start() fails
 early, before Register and before HWLibs reaches SMU init. Next: capture
 Apple's own kprintf/IOLog output into RBGPULog to see why.
+
+Lilu pitfall (found reviewing milestone 2c, 2026-10-05): MachInfo::solveSymbol
+does not skip undefined (imported) symbols; it returns n_value + kaslr_slide,
+the bare slide, and routeMultiple then writes a jump there. Never route a name
+by a kext's id unless `nm -m build/re/<kext>` shows it defined in that kext
+(_kprintf / _IOLog are imports in all AMD kexts; they live in the kernel).
+_smu_cgs_free_memory does not exist in X6800HWLibs (only _smu_cgs_alloc_memory).
