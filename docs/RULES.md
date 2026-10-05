@@ -433,3 +433,12 @@ function-table step (boot 26 failed here too; the static reading that blamed
 the 0x35 mask was a later check). The RBGPULog ring (256) now drops the
 first lines (log starts at "HWLibs loaded"). tOS status 0x00115136. Full log:
 logs/20261005-182716-plugin/peer.plist.
+
+Decision (2026-10-05, after boot 27): Gemini confirmed HWLibs embeds only
+Navi 21 (GC 10.3.0) GC microcode (_gc_10_3_*_ucode descriptors in __DATA,
+loaded through the PSP, which checks the per-ASIC signature), so a version
+swap at _gc_set_fw_entry_info cannot work. The user chose to try the 680M's
+own firmware (Linux linux-firmware amdgpu/yellow_carp_*.bin) in place of the
+embedded images. Firmware stays in firmware/ (gitignored). 2af (ring 512,
+read-only fw hooks) was not committed: its paste dropped the four TTL hooks
+incl. -rbgpusync570.
