@@ -379,3 +379,14 @@ Boot 23 (2026-10-05 14:59, milestone 2w, UUID 1A2123CD, -rbgpusync570
 _ipi_psp_sw_init returned 0 ~13 us after the (non-NULL) discovery lookup, so
 _psp_sw_init returns nonzero. Rest identical to boot 22. tOS status
 0x0012e20d. Full log: logs/20261005-145934-plugin/peer.plist.
+
+Boot 24 (2026-10-05 15:10, milestone 2x, UUID 15B0DDBB, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. Inside the PSP SW_INIT, in order:
+_psp_sw_init(p1 size 0x228, +8 = 1, +218/+220 non-NULL; p2 size 0x10) passes
+its argument checks; _psp_cos_alloc_memory(size 0x7e00) -> 0; 
+_psp_asic_type_init reads the discovery copy as MP0 13.0.3 (+8 = 0xd,
++0xc = 0, +0x10 = 3: the chip's real PSP version) and returns 0 with
+asic_type (buf+0x7d44) = 19; _psp_init_pfn_ptr(asic_type 19) returns 1;
+_psp_sw_init returns 2 (_psp_read_config not reached). So HWLibs maps PSP
+13.0.3 to an asic type (19) but _psp_init_pfn_ptr has no function set for
+it. tOS status 0x0012e851. Full log: logs/20261005-151045-plugin/peer.plist.
