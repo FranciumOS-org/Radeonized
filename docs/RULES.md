@@ -125,3 +125,19 @@ Its SYSLOG line from pluginStart() is in neither `log show --last boot` nor
 dmesg: early-boot plugin messages are not kept, so the registry instance is
 the check (tools/plugin_check.sh). With -rbgpuoff the kext is still injected
 and loaded but no instance exists: the off-switch works. Milestone 0 done.
+
+## Milestone 1 (2026-10-05): peer + HWServices on the 680M
+
+Booted cleanly, no panic. On IGPU@0: RembrandtGPUPeer (ATIFramebuffer),
+AMDSupport, IONDRVFramebuffer (screen unchanged), and
+AMDRadeonX6000_AMDRadeonHWServicesNavi with `LoadPlugIn = Load6800`, whose
+child AMDRadeonX6800_AMDRadeonHWLibsX6800 is attached (!registered). The GPU
+carries @0,name ATY,Belknap, ATY,bin_image (44544 bytes), RBGPULoad,
+LoadHWServices, LoadAccelerator. So A1 (gated matching) and A2 (project name
+-> X6800HWLibs) work on hardware.
+HWServicesNavi derives from HWServicesSWIP, whose start() calls
+createTtlInterface: the AmdTtlServices constructor ran (PCI config reads,
+BAR5 mapping, B1 device-type lookup -> type 9). It logs with kprintf, which
+does not reach `log show`. No IP was initialised: that starts with the
+accelerator. The peer's IOLog lines are not in `log show` either (early boot);
+the registry is the check.
