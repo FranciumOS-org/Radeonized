@@ -5,6 +5,7 @@ version-shaped integers otherwise.
 
     python3 tools/re/dumptable.py build/re/AMDRadeonX6800HWLibs _vm_ip_version_mapping [max_bytes]
 """
+import signal
 import struct
 import sys
 import os
@@ -46,4 +47,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Piped into head/grep -m: stop quietly when the reader goes away.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     sys.exit(main())
