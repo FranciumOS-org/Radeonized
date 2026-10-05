@@ -80,6 +80,24 @@ kmutil showloaded --list-only 2>/dev/null | grep -iE "AMDRadeonX6000|AMDRadeonX6
 [ "$(id -u)" = 0 ] && /sbin/dmesg | grep -iE "RembrandtGPUPeer|AMDRadeon|HWLibs|HWServices|firmware device|Unsupported hw" >> "$out/amd-log.txt"
 echo "  $(wc -l < "$out/amd-log.txt" | tr -d ' ') log lines from the peer and Apple's AMD kexts (first 40):"
 head -40 "$out/amd-log.txt" | sed 's/^/    /'
+echo
+echo "--- plugin diagnostics (RBGPULog / RBGPUDiag on the peer)"
+ioreg -w0 -p IOService -c RembrandtGPUPeer -r -l -a 2>/dev/null > "$out/peer.plist"
+python3 - "$out/peer.plist" <<'PY'
+import plistlib, sys
+try:
+    tree = plistlib.load(open(sys.argv[1], "rb"))
+except Exception:
+    print("  peer not found"); sys.exit(0)
+node = tree[0] if isinstance(tree, list) and tree else tree
+diag, log = node.get("RBGPUDiag"), node.get("RBGPULog")
+if diag is None and log is None:
+    print("  (the peer publishes no RBGPUDiag / RBGPULog)")
+for k, v in sorted((diag or {}).items()):
+    print(f"  {k} = {v:#x}" if isinstance(v, int) else f"  {k} = {v}")
+for line in (log or [])[-80:]:
+    print("  | " + str(line))
+PY
 ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -1 | sed 's/^/  newest panic report: /'
 
 [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER" "$out"
