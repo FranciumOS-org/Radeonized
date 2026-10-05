@@ -297,3 +297,15 @@ did not run. _DeviceCapabilityTbl: 93 entries of 0x50; Navi 21 entries have
 +0x20 = 0 (73a0/a1/a2/a3/ab/ae) or a revision-like value (73a5/73af 0xc0,
 73bf 0x40..0xd3); none matches attr 0xA, Fiji/Vega use 0xdeadcafe.
 tOS status 0x0010b43f. Full log: logs/20261005-130013-plugin/peer.plist.
+
+Boot 17 (2026-10-05 13:02, milestone 2n, UUID D656E607, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. _ttlIsSupportedDevice original 0, override
+-> 1; _ttl_sw_init ran for the first time: HWLibs "AMD TTL COS: [54:0:0]:
+Write PCI Config offset 0x60 size 2 data 0x2930" and "[54:0:1]: ... data
+0x20" (first hardware writes by Apple's code on this chip; config space resets
+at power-on), then ASSERTs: ttlSetDeviceCapabilityEntry (ttl_device.c:588)
+"Could not find device info table entry!"; ipi_bgm_create (ipi_bgm.c:187)
+"Failed to create bgm context"; IpiValidateTopology (ttl_ipi.c:616)
+"pBgmContext is null!"; TlsSwInit (ttl_tls.c:129) "Failed to create TLS".
+_ttl_initialize status 4 -> 0xe00002bc. _ttl_hw_init did not run. tOS status
+0x00117135. Full log: logs/20261005-130250-plugin/peer.plist.
