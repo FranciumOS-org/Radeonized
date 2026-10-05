@@ -81,6 +81,7 @@ typedef int      (*amdtll_initialize_t)(void *this_ptr);
 typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
 typedef uint32_t (*ttl_initialize_fn_t)(void *init_params, void *ttl_context_38);
 typedef uint8_t  (*ttl_is_supported_device_fn_t)(void *dev_info_20);
+typedef uint8_t  (*ipi_execute_swip_entry_point_fn_t)(void *instance, uint32_t swip_client_id, uint32_t event_id, void *context);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -96,6 +97,7 @@ static amdtll_initialize_t              orig_amdtll_initialize              = nu
 static amdtll_set_fw_dir_t              orig_amdtll_set_fw_dir              = nullptr;
 static ttl_initialize_fn_t              orig_ttl_initialize                 = nullptr;
 static ttl_is_supported_device_fn_t     orig_ttl_is_supported_device        = nullptr;
+static ipi_execute_swip_entry_point_fn_t orig_ipi_execute_swip_entry_point = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -539,6 +541,21 @@ static uint8_t hooked_ttlIsSupportedDevice(void *dev_info_20) {
     return ret;
 }
 
+static uint8_t hooked_ipi_execute_swip_entry_point(void *instance, uint32_t swip_client_id, uint32_t event_id, void *context) {
+    rbgpu_diag_inc("ipi_exec_calls");
+    rbgpu_log("_IpiExecuteSwipEntryPoint entered: instance=%p, client_id=%u, event_id=%u, context=%p",
+              instance, swip_client_id, event_id, context);
+
+    uint8_t ret = 0;
+    if (orig_ipi_execute_swip_entry_point) {
+        ret = orig_ipi_execute_swip_entry_point(instance, swip_client_id, event_id, context);
+    }
+
+    rbgpu_log("_IpiExecuteSwipEntryPoint returned %u (client_id=%u, event_id=%u)", ret, swip_client_id, event_id);
+    rbgpu_diag_set_num("ipi_exec_ret", ret);
+    return ret;
+}
+
 static uint32_t hooked_ttl_initialize(void *arg1, void *arg2) {
     rbgpu_diag_inc("ttl_raw_init_calls");
     rbgpu_diag_set_num("ttl_raw_init_arg1", reinterpret_cast<uint64_t>(arg1));
@@ -774,7 +791,6 @@ static bool patchDeviceCapabilityTableAt(mach_vm_address_t addr, size_t max_entr
         }
     }
 
-    // Find a Navi 21 template entry (0x73A2) to clone
     size_t template_idx = SIZE_MAX;
     for (size_t i = 0; i < max_entries; i++) {
         uint32_t *dev_id_ptr = reinterpret_cast<uint32_t *>(table[i].data + 0x10);
@@ -789,7 +805,6 @@ static bool patchDeviceCapabilityTableAt(mach_vm_address_t addr, size_t max_entr
         return false;
     }
 
-    // Find target entry 0x7300 to replace
     size_t target_idx = SIZE_MAX;
     for (size_t i = 0; i < max_entries; i++) {
         uint32_t *dev_id_ptr = reinterpret_cast<uint32_t *>(table[i].data + 0x10);
@@ -807,7 +822,6 @@ static bool patchDeviceCapabilityTableAt(mach_vm_address_t addr, size_t max_entr
     MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
     memcpy(&table[target_idx], &table[template_idx], sizeof(CapabilityEntry));
     *reinterpret_cast<uint32_t *>(table[target_idx].data + 0x10) = 0x1681;
-    // Set both +0x18 and +0x20 to 0xDEADCAFE (wildcard matching for attributes/revisions)
     *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x18) = 0xDEADCAFEULL;
     *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x20) = 0xDEADCAFEULL;
     MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
@@ -912,6 +926,9 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_is_supp_routed", 0);
     rbgpu_diag_set_num("ttl_is_supp_calls", 0);
     rbgpu_diag_set_num("ttl_is_supp_ret", 0);
+    rbgpu_diag_set_num("ipi_exec_routed", 0);
+    rbgpu_diag_set_num("ipi_exec_calls", 0);
+    rbgpu_diag_set_num("ipi_exec_ret", 0);
     rbgpu_diag_set_num("ttl_param_q0", 0);
     rbgpu_diag_set_num("ttl_param_q1", 0);
     rbgpu_diag_set_num("ttl_param_q2", 0);
@@ -987,6 +1004,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_ttlIsSupportedDevice",
             hooked_ttlIsSupportedDevice,
             orig_ttl_is_supported_device
+        ),
+        KernelPatcher::RouteRequest(
+            "_IpiExecuteSwipEntryPoint",
+            hooked_ipi_execute_swip_entry_point,
+            orig_ipi_execute_swip_entry_point
         )
     };
 
@@ -1028,6 +1050,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("ttl_is_supp_routed", 0);
         rbgpu_log("HWLibs: failed to hook _ttlIsSupportedDevice");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[5], 1, address, size)) {
+        rbgpu_diag_set_num("ipi_exec_routed", 1);
+        rbgpu_log("HWLibs: hooked _IpiExecuteSwipEntryPoint");
+    } else {
+        rbgpu_diag_set_num("ipi_exec_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _IpiExecuteSwipEntryPoint");
     }
 
     if (!noSmuHook) {
