@@ -246,3 +246,10 @@ tOS status 0x0010ab0d. Full log: logs/20261005-100702-plugin/peer.plist.
 setFirmwareDirectory (0x12660f40) stores the directory at this+0x958 (returns
 0xe00002bc for a null dir); it does not touch +0x570. In initialize(input),
 +0x570 is only written from input->field_10 (non-null) — boot 9/10 input[2]=0.
+
+Boot 11 (2026-10-05 10:33, milestone 2i, UUID A18DCB2B): no panic. Same
+AmdTtlServices object (0xffffff8bad3a8000) in setFirmwareDirectory and
+initialize(input); +0x570 is 0 before and after setFirmwareDirectory (which
+writes +0x958). So +0x570 can only come from input->field_10, and the
+accelerator (X6000) passes field_10 = 0. tOS status 0x0011cca7. Full log:
+logs/20261005-103402-plugin/peer.plist.
