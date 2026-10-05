@@ -29,6 +29,11 @@ private:
     void processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
     void processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
 
+    void routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    void routePSPBasics(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    void routePSPRingTmr(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    void routeGC(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+
     bool patchDeviceTypeTable(KernelPatcher &patcher, size_t id);
     bool patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id);
 };
