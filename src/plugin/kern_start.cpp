@@ -79,6 +79,7 @@ typedef int      (*smu_init_function_pointer_list_t)(void *ctx, uint64_t ver, ui
 typedef int      (*amdtll_init_input_t)(void *this_ptr, void *input);
 typedef int      (*amdtll_initialize_t)(void *this_ptr);
 typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
+typedef uint32_t (*ttl_initialize_fn_t)(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -92,6 +93,7 @@ static smu_init_function_pointer_list_t orig_smu_init_function_pointer_list = nu
 static amdtll_init_input_t              orig_amdtll_init_input              = nullptr;
 static amdtll_initialize_t              orig_amdtll_initialize              = nullptr;
 static amdtll_set_fw_dir_t              orig_amdtll_set_fw_dir              = nullptr;
+static ttl_initialize_fn_t              orig_ttl_initialize                 = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -506,6 +508,25 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
+static uint32_t hooked_ttl_initialize(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6) {
+    rbgpu_diag_inc("ttl_raw_init_calls");
+    rbgpu_diag_set_num("ttl_raw_init_arg1", reinterpret_cast<uint64_t>(arg1));
+    rbgpu_diag_set_num("ttl_raw_init_arg2", reinterpret_cast<uint64_t>(arg2));
+    rbgpu_diag_set_num("ttl_raw_init_arg3", reinterpret_cast<uint64_t>(arg3));
+
+    rbgpu_log("_ttl_initialize entered: arg1=%p arg2=%p arg3=%p arg4=%p arg5=%p arg6=%p",
+              arg1, arg2, arg3, arg4, arg5, arg6);
+
+    uint32_t ret = 1;
+    if (orig_ttl_initialize) {
+        ret = orig_ttl_initialize(arg1, arg2, arg3, arg4, arg5, arg6);
+    }
+
+    rbgpu_log("_ttl_initialize returned status = 0x%08x", ret);
+    rbgpu_diag_set_num("ttl_raw_init_ret", ret);
+    return ret;
+}
+
 static int hooked_AmdTtlServices_initialize(void *this_ptr) {
     rbgpu_diag_inc("ttl_init_calls");
     rbgpu_diag_set_num("ttl_init_this", reinterpret_cast<uint64_t>(this_ptr));
@@ -741,6 +762,12 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_set_fw_dir_post_570", 0);
     rbgpu_diag_set_num("ttl_set_fw_dir_post_958", 0);
     rbgpu_diag_set_num("ttl_sync_570_applied", 0);
+    rbgpu_diag_set_num("ttl_raw_init_routed", 0);
+    rbgpu_diag_set_num("ttl_raw_init_calls", 0);
+    rbgpu_diag_set_num("ttl_raw_init_ret", 0);
+    rbgpu_diag_set_num("ttl_raw_init_arg1", 0);
+    rbgpu_diag_set_num("ttl_raw_init_arg2", 0);
+    rbgpu_diag_set_num("ttl_raw_init_arg3", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
@@ -798,6 +825,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "__ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory",
             hooked_AmdTtlServices_setFirmwareDirectory,
             orig_amdtll_set_fw_dir
+        ),
+        KernelPatcher::RouteRequest(
+            "_ttl_initialize",
+            hooked_ttl_initialize,
+            orig_ttl_initialize
         )
     };
 
@@ -823,6 +855,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("ttl_set_fw_dir_routed", 0);
         rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[3], 1, address, size)) {
+        rbgpu_diag_set_num("ttl_raw_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _ttl_initialize");
+    } else {
+        rbgpu_diag_set_num("ttl_raw_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _ttl_initialize");
     }
 
     if (!noSmuHook) {
