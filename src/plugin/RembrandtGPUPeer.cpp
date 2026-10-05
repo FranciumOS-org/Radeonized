@@ -15,13 +15,13 @@
 
 OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 
-// Diagnostics & Ring Buffer storage definitions
 #define RBGPU_RING_SIZE 128
 #define RBGPU_LINE_MAX  256
 #define RBGPU_MAX_DIAGS 96
 
 struct LogEntry {
     uint64_t time;
+    uint32_t count;
     char     line[RBGPU_LINE_MAX];
 };
 
@@ -47,7 +47,7 @@ static size_t    g_logCount = 0;
 static DiagEntry g_diags[RBGPU_MAX_DIAGS];
 static size_t    g_diagCount = 0;
 
-// Static snapshot buffers moved off the kernel stack to satisfy -Wframe-larger-than=1024
+// Static buffers moved off the stack to maintain < 1KB stack frame limits
 static LogEntry  s_snapLogs[RBGPU_RING_SIZE];
 static DiagEntry s_snapDiags[RBGPU_MAX_DIAGS];
 static size_t    s_snapHead      = 0;
@@ -82,31 +82,78 @@ static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
     }
 }
 
+static void rbgpu_log_append_locked(const char *line) {
+    uint64_t now = mach_absolute_time();
+
+    // Collapse consecutive duplicate lines
+    if (g_logCount > 0) {
+        size_t lastIdx = (g_logHead - 1 + RBGPU_RING_SIZE) % RBGPU_RING_SIZE;
+        if (strncmp(g_logRing[lastIdx].line, line, sizeof(g_logRing[lastIdx].line)) == 0) {
+            g_logRing[lastIdx].count++;
+            g_logRing[lastIdx].time = now;
+            return;
+        }
+    }
+
+    g_logRing[g_logHead].time  = now;
+    g_logRing[g_logHead].count = 1;
+    strncpy(g_logRing[g_logHead].line, line, sizeof(g_logRing[g_logHead].line) - 1);
+    g_logRing[g_logHead].line[sizeof(g_logRing[g_logHead].line) - 1] = '\0';
+    g_logHead = (g_logHead + 1) % RBGPU_RING_SIZE;
+    if (g_logCount < RBGPU_RING_SIZE) {
+        g_logCount++;
+    }
+}
+
 void rbgpu_log(const char *fmt, ...) {
-    char buf[RBGPU_LINE_MAX];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    IOLog("RembrandtGPU: %s\n", buf);
-
     initDiagLock();
     if (g_diagLock) {
         IOLockLock(g_diagLock);
-        uint64_t now = mach_absolute_time();
-        g_logRing[g_logHead].time = now;
-        strncpy(g_logRing[g_logHead].line, buf, sizeof(g_logRing[g_logHead].line) - 1);
-        g_logRing[g_logHead].line[sizeof(g_logRing[g_logHead].line) - 1] = '\0';
-        g_logHead = (g_logHead + 1) % RBGPU_RING_SIZE;
-        if (g_logCount < RBGPU_RING_SIZE) {
-            g_logCount++;
-        }
+        static char s_formatted[RBGPU_LINE_MAX];
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(s_formatted, sizeof(s_formatted), fmt, args);
+        va_end(args);
+
+        IOLog("RembrandtGPU: %s\n", s_formatted);
+        rbgpu_log_append_locked(s_formatted);
         IOLockUnlock(g_diagLock);
     }
 
     if (g_peer) {
         g_peer->scheduleRefreshDiag();
+    }
+}
+
+void rbgpu_log_captured_va(const char *tag, const char *fmt, va_list va, void (*orig_fn)(const char *, ...)) {
+    char formatted[RBGPU_LINE_MAX - 16];
+    vsnprintf(formatted, sizeof(formatted), fmt, va);
+
+    // Strip trailing line terminators for clean ring log storage
+    size_t len = strnlen(formatted, sizeof(formatted));
+    while (len > 0 && (formatted[len - 1] == '\n' || formatted[len - 1] == '\r')) {
+        formatted[len - 1] = '\0';
+        len--;
+    }
+
+    if (len > 0) {
+        initDiagLock();
+        if (g_diagLock) {
+            IOLockLock(g_diagLock);
+            static char s_tagged[RBGPU_LINE_MAX];
+            snprintf(s_tagged, sizeof(s_tagged), "%s %s", tag, formatted);
+            rbgpu_log_append_locked(s_tagged);
+            IOLockUnlock(g_diagLock);
+        }
+
+        if (g_peer) {
+            g_peer->scheduleRefreshDiag();
+        }
+    }
+
+    // Call orig_fn outside the diagnostic lock to prevent lock inversion/deadlocks
+    if (orig_fn) {
+        orig_fn("%s\n", formatted);
     }
 }
 
@@ -310,7 +357,13 @@ void RembrandtGPUPeer::performRefreshDiag() {
         char lineBuf[RBGPU_LINE_MAX + 32];
         for (size_t i = 0; i < s_snapLogCount; i++) {
             size_t idx = (s_snapHead - s_snapLogCount + i + RBGPU_RING_SIZE) % RBGPU_RING_SIZE;
-            snprintf(lineBuf, sizeof(lineBuf), "[%llu] %s", s_snapLogs[idx].time, s_snapLogs[idx].line);
+            if (s_snapLogs[idx].count > 1) {
+                snprintf(lineBuf, sizeof(lineBuf), "[%llu] (x%u) %s",
+                         s_snapLogs[idx].time, s_snapLogs[idx].count, s_snapLogs[idx].line);
+            } else {
+                snprintf(lineBuf, sizeof(lineBuf), "[%llu] %s",
+                         s_snapLogs[idx].time, s_snapLogs[idx].line);
+            }
             OSString *osLine = OSString::withCString(lineBuf);
             if (osLine) {
                 logArray->setObject(osLine);
@@ -434,3 +487,4 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
 
     return super::callPlatformFunction(functionName, waitForFunction, p1, p2, p3, p4);
 }
+
