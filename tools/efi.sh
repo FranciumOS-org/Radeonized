@@ -10,6 +10,7 @@
 #   sudo tools/efi.sh sysreport-on   # OpenCore dumps ACPI tables (VFCT = VBIOS) at next boot
 #   sudo tools/efi.sh vbios          # after that boot: extract the 680M VBIOS, turn SysReport off
 #   sudo tools/efi.sh sysreport-off
+#   sudo tools/efi.sh bootarg add|remove ARG   # e.g. msgbuf=1048576 (bigger kernel log buffer)
 #
 # Only a person runs this (see docs/RULES.md). Every change first saves the EFI's
 # config.plist to logs/efi-backups/<time>/; edits go through
@@ -20,8 +21,8 @@ set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo tools/efi.sh ${1:-status}" >&2; exit 1; }
 cmd="${1:-}"
-case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios) ;; *)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg) ;; *)
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -110,6 +111,14 @@ off)
 on)
     backup
     edit bootarg remove -rbgpuoff
+    sync
+    ;;
+bootarg)
+    op="${2:-}"; arg="${3:-}"
+    case "$op" in add|remove) ;; *) echo "usage: sudo tools/efi.sh bootarg add|remove ARG" >&2; exit 2 ;; esac
+    [ -n "$arg" ] || { echo "usage: sudo tools/efi.sh bootarg add|remove ARG" >&2; exit 2; }
+    backup
+    edit bootarg "$op" "$arg"
     sync
     ;;
 sysreport-on)
