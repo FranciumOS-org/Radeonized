@@ -16,8 +16,9 @@
 OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 
 #define RBGPU_RING_SIZE 128
-#define RBGPU_LINE_MAX  256
+#define RBGPU_LINE_MAX  384
 #define RBGPU_MAX_DIAGS 96
+#define RBGPU_BUF_SIZE  4096
 
 struct LogEntry {
     uint64_t time;
@@ -47,12 +48,15 @@ static size_t    g_logCount = 0;
 static DiagEntry g_diags[RBGPU_MAX_DIAGS];
 static size_t    g_diagCount = 0;
 
-// Static buffers moved off the stack to maintain < 1KB stack frame limits
 static LogEntry  s_snapLogs[RBGPU_RING_SIZE];
 static DiagEntry s_snapDiags[RBGPU_MAX_DIAGS];
 static size_t    s_snapHead      = 0;
 static size_t    s_snapLogCount  = 0;
 static size_t    s_snapDiagCount = 0;
+
+static char      s_log_buf[RBGPU_BUF_SIZE];
+static char      s_capture_buf[RBGPU_BUF_SIZE];
+static char      s_line_scratch[RBGPU_LINE_MAX];
 
 extern uint64_t g_guard_calls;
 
@@ -85,7 +89,6 @@ static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
 static void rbgpu_log_append_locked(const char *line) {
     uint64_t now = mach_absolute_time();
 
-    // Collapse consecutive duplicate lines
     if (g_logCount > 0) {
         size_t lastIdx = (g_logHead - 1 + RBGPU_RING_SIZE) % RBGPU_RING_SIZE;
         if (strncmp(g_logRing[lastIdx].line, line, sizeof(g_logRing[lastIdx].line)) == 0) {
@@ -105,18 +108,47 @@ static void rbgpu_log_append_locked(const char *line) {
     }
 }
 
+static void rbgpu_process_multiline_locked(const char *tag, char *buffer) {
+    char *cursor = buffer;
+    while (*cursor) {
+        char *eol = strchr(cursor, '\n');
+        if (eol) {
+            *eol = '\0';
+        }
+
+        size_t len = strnlen(cursor, RBGPU_LINE_MAX);
+        while (len > 0 && (cursor[len - 1] == '\r' || cursor[len - 1] == ' ')) {
+            cursor[len - 1] = '\0';
+            len--;
+        }
+
+        if (len > 0) {
+            if (tag && tag[0] != '\0') {
+                snprintf(s_line_scratch, sizeof(s_line_scratch), "%s %s", tag, cursor);
+                rbgpu_log_append_locked(s_line_scratch);
+            } else {
+                rbgpu_log_append_locked(cursor);
+            }
+        }
+
+        if (!eol) {
+            break;
+        }
+        cursor = eol + 1;
+    }
+}
+
 void rbgpu_log(const char *fmt, ...) {
     initDiagLock();
     if (g_diagLock) {
         IOLockLock(g_diagLock);
-        static char s_formatted[RBGPU_LINE_MAX];
         va_list args;
         va_start(args, fmt);
-        vsnprintf(s_formatted, sizeof(s_formatted), fmt, args);
+        vsnprintf(s_log_buf, sizeof(s_log_buf), fmt, args);
         va_end(args);
 
-        IOLog("RembrandtGPU: %s\n", s_formatted);
-        rbgpu_log_append_locked(s_formatted);
+        IOLog("RembrandtGPU: %s\n", s_log_buf);
+        rbgpu_process_multiline_locked(nullptr, s_log_buf);
         IOLockUnlock(g_diagLock);
     }
 
@@ -126,34 +158,20 @@ void rbgpu_log(const char *fmt, ...) {
 }
 
 void rbgpu_log_captured_va(const char *tag, const char *fmt, va_list va, void (*orig_fn)(const char *, ...)) {
-    char formatted[RBGPU_LINE_MAX - 16];
-    vsnprintf(formatted, sizeof(formatted), fmt, va);
-
-    // Strip trailing line terminators for clean ring log storage
-    size_t len = strnlen(formatted, sizeof(formatted));
-    while (len > 0 && (formatted[len - 1] == '\n' || formatted[len - 1] == '\r')) {
-        formatted[len - 1] = '\0';
-        len--;
+    initDiagLock();
+    if (g_diagLock) {
+        IOLockLock(g_diagLock);
+        vsnprintf(s_capture_buf, sizeof(s_capture_buf), fmt, va);
+        rbgpu_process_multiline_locked(tag, s_capture_buf);
+        IOLockUnlock(g_diagLock);
     }
 
-    if (len > 0) {
-        initDiagLock();
-        if (g_diagLock) {
-            IOLockLock(g_diagLock);
-            static char s_tagged[RBGPU_LINE_MAX];
-            snprintf(s_tagged, sizeof(s_tagged), "%s %s", tag, formatted);
-            rbgpu_log_append_locked(s_tagged);
-            IOLockUnlock(g_diagLock);
-        }
-
-        if (g_peer) {
-            g_peer->scheduleRefreshDiag();
-        }
-    }
-
-    // Call orig_fn outside the diagnostic lock to prevent lock inversion/deadlocks
     if (orig_fn) {
-        orig_fn("%s\n", formatted);
+        orig_fn("%s\n", s_capture_buf);
+    }
+
+    if (g_peer) {
+        g_peer->scheduleRefreshDiag();
     }
 }
 
@@ -442,7 +460,7 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
         rbgpu_log("SpecialAMDKey request 0x%02X (wait: %d)", req, waitForFunction);
 
         switch (req) {
-            case 0x00: // Register
+            case 0x00:
                 if (p2) {
                     OSSafeReleaseNULL(accelerator);
                     accelerator = OSDynamicCast(IOService, reinterpret_cast<OSObject *>(p2));
@@ -456,7 +474,7 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                 }
                 return kIOReturnSuccess;
 
-            case 0x0B: // Request Drop Registration
+            case 0x0B:
                 if (accelerator) {
                     rbgpu_log("Dropping registered accelerator: %s", accelerator->getName());
                     accelerator->release();
@@ -464,18 +482,18 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                 }
                 return kIOReturnSuccess;
 
-            case 0x14: // Gpu Status
+            case 0x14:
                 if (p2) {
                     *reinterpret_cast<uint32_t *>(p2) = 1;
                     return kIOReturnSuccess;
                 }
                 return kIOReturnBadArgument;
 
-            case 0x17: // ASIC Reset State
+            case 0x17:
                 rbgpu_log("ASIC Reset State requested (unsupported)");
                 return kIOReturnUnsupported;
 
-            case 0x1A: // Get DCC Capabilities
+            case 0x1A:
                 rbgpu_log("Get DCC Capabilities requested (unsupported)");
                 return kIOReturnUnsupported;
 

@@ -6,7 +6,6 @@
 #include <kern/thread_call.h>
 #include <stdarg.h>
 
-// Global logger and diagnostic functions
 void rbgpu_log(const char *fmt, ...) __printflike(1, 2);
 void rbgpu_log_captured_va(const char *tag, const char *fmt, va_list va, void (*orig_fn)(const char *, ...));
 void rbgpu_diag_set_num(const char *key, uint64_t val);
