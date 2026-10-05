@@ -29,6 +29,7 @@ private:
     void processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
 
     bool patchDeviceTypeTable(KernelPatcher &patcher, size_t id);
+    bool patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id);
 };
 
 #endif // KERN_START_HPP
