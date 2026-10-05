@@ -81,15 +81,27 @@ typedef int      (*amdtll_initialize_t)(void *this_ptr);
 typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
 typedef uint32_t (*ttl_initialize_fn_t)(void *init_params, void *ttl_context_38);
 typedef uint8_t  (*ttl_is_supported_device_fn_t)(void *dev_info_20);
+typedef int      (*ttl_hw_init_fn_t)(void *ctx);
 typedef uint8_t  (*ipi_execute_swip_entry_point_fn_t)(void *instance, uint32_t swip_client_id, uint32_t event_id, void *context);
 typedef void*    (*ipi_get_discovery_info_fn_t)(void *instance, uint32_t client_id);
 typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
+typedef int      (*ipi_psp_hw_init_fn_t)(void *dev);
 
 typedef int      (*psp_sw_init_fn_t)(void *param1, void *param2);
+typedef int      (*psp_hw_init_fn_t)(void *psp_buf, void *arg2, void *arg3);
 typedef int      (*psp_cos_alloc_memory_fn_t)(void *ctx, uint32_t size, uint32_t align, void **out_ptr);
 typedef int      (*psp_asic_type_init_fn_t)(void *psp_buf, void *disc_entry);
 typedef int      (*psp_init_pfn_ptr_fn_t)(void *psp_buf);
 typedef int      (*psp_read_config_fn_t)(void *psp_buf);
+typedef int      (*psp_allocate_private_mem_fn_t)(void *psp_buf);
+typedef int      (*psp_ring_init_fn_t)(void *psp_buf, uint32_t ring_type);
+typedef int      (*psp_ring_create_fn_t)(void *psp_buf, uint32_t ring_type);
+typedef int      (*psp_bootloader_is_sos_running_fn_t)(void *psp_buf);
+typedef int      (*psp_cmd_km_init_fn_t)(void *psp_buf);
+typedef int      (*psp_tmr_init_fn_t)(void *psp_buf);
+typedef int      (*psp_tmr_load_fn_t)(void *psp_buf);
+typedef int      (*psp_dtm_init_fn_t)(void *psp_buf);
+typedef int      (*psp_np_fw_load_fn_t)(void *psp_buf);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -105,15 +117,27 @@ static amdtll_initialize_t              orig_amdtll_initialize              = nu
 static amdtll_set_fw_dir_t              orig_amdtll_set_fw_dir              = nullptr;
 static ttl_initialize_fn_t              orig_ttl_initialize                 = nullptr;
 static ttl_is_supported_device_fn_t     orig_ttl_is_supported_device        = nullptr;
+static ttl_hw_init_fn_t                 orig_ttl_hw_init                    = nullptr;
 static ipi_execute_swip_entry_point_fn_t orig_ipi_execute_swip_entry_point = nullptr;
-static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info       = nullptr;
+static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info         = nullptr;
 static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
+static ipi_psp_hw_init_fn_t             orig_ipi_psp_hw_init                = nullptr;
 
 static psp_sw_init_fn_t                 orig_psp_sw_init                    = nullptr;
+static psp_hw_init_fn_t                 orig_psp_hw_init                    = nullptr;
 static psp_cos_alloc_memory_fn_t        orig_psp_cos_alloc_memory           = nullptr;
 static psp_asic_type_init_fn_t          orig_psp_asic_type_init             = nullptr;
 static psp_init_pfn_ptr_fn_t            orig_psp_init_pfn_ptr               = nullptr;
 static psp_read_config_fn_t             orig_psp_read_config                = nullptr;
+static psp_allocate_private_mem_fn_t    orig_psp_allocate_private_mem       = nullptr;
+static psp_ring_init_fn_t               orig_psp_ring_init                  = nullptr;
+static psp_ring_create_fn_t             orig_psp_ring_create                = nullptr;
+static psp_bootloader_is_sos_running_fn_t orig_psp_bootloader_is_sos_running = nullptr;
+static psp_cmd_km_init_fn_t             orig_psp_cmd_km_init                = nullptr;
+static psp_tmr_init_fn_t                orig_psp_tmr_init                   = nullptr;
+static psp_tmr_load_fn_t                orig_psp_tmr_load                   = nullptr;
+static psp_dtm_init_fn_t                orig_psp_dtm_init                   = nullptr;
+static psp_np_fw_load_fn_t              orig_psp_np_fw_load                 = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -121,6 +145,7 @@ static iolog_t   orig_iolog   = nullptr;
 static bool g_safe_ttl_mode  = false;
 static bool g_sync_570_mode  = false;
 static bool g_spoof_ttl_mode = false;
+static bool g_psp_hw_mode    = false;
 
 struct DeviceTypeEntry {
     uint32_t deviceId;
@@ -557,6 +582,25 @@ static uint8_t hooked_ttlIsSupportedDevice(void *dev_info_20) {
     return ret;
 }
 
+static int hooked_ttl_hw_init(void *ctx) {
+    rbgpu_diag_inc("ttl_hw_init_calls");
+    rbgpu_log("_ttl_hw_init entered: ctx=%p (pspHwMode: %s)", ctx, g_psp_hw_mode ? "ENABLED" : "DISABLED");
+
+    if (!g_psp_hw_mode) {
+        rbgpu_log("_ttl_hw_init: DRY RUN active (-rbgpupsphw not set) -> aborting before hardware writes, returning 0");
+        rbgpu_diag_set_num("ttl_hw_init_ret", 0);
+        return 0;
+    }
+
+    int ret = 0;
+    if (orig_ttl_hw_init) {
+        ret = orig_ttl_hw_init(ctx);
+    }
+    rbgpu_log("_ttl_hw_init returned %d", ret);
+    rbgpu_diag_set_num("ttl_hw_init_ret", ret);
+    return ret;
+}
+
 static uint8_t hooked_ipi_execute_swip_entry_point(void *instance, uint32_t swip_client_id, uint32_t event_id, void *context) {
     rbgpu_diag_inc("ipi_exec_calls");
     rbgpu_log("_IpiExecuteSwipEntryPoint entered: instance=%p, client_id=%u, event_id=%u, context=%p",
@@ -586,6 +630,20 @@ static int hooked_ipi_psp_sw_init(void *dev) {
 
     rbgpu_log("_ipi_psp_sw_init returned %d", ret);
     rbgpu_diag_set_num("psp_sw_init_ret", ret);
+    return ret;
+}
+
+static int hooked_ipi_psp_hw_init(void *dev) {
+    rbgpu_diag_inc("psp_hw_init_calls");
+    rbgpu_log("_ipi_psp_hw_init entered: dev=%p", dev);
+
+    int ret = 0;
+    if (orig_ipi_psp_hw_init) {
+        ret = orig_ipi_psp_hw_init(dev);
+    }
+
+    rbgpu_log("_ipi_psp_hw_init returned %d", ret);
+    rbgpu_diag_set_num("psp_hw_init_ret", ret);
     return ret;
 }
 
@@ -620,6 +678,28 @@ static int hooked_psp_sw_init(void *param1, void *param2) {
     return ret;
 }
 
+static int hooked_psp_hw_init(void *psp_buf, void *arg2, void *arg3) {
+    rbgpu_diag_inc("psp_hw_sub_calls");
+    uint32_t a2_18 = arg2 ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(arg2) + 0x18) : 0;
+    uint8_t  a2_1c = arg2 ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(arg2) + 0x1c) : 0;
+    uint8_t  a2_1d = arg2 ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(arg2) + 0x1d) : 0;
+    uint8_t  a2_38 = arg2 ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(arg2) + 0x38) : 0;
+    uint8_t  a2_39 = arg2 ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(arg2) + 0x39) : 0;
+
+    rbgpu_log("_psp_hw_init entered: psp_buf=%p, arg2=%p (+0x18=0x%x, +0x1c=0x%02x, +0x1d=0x%02x, +0x38=0x%02x, +0x39=0x%02x), arg3=%p",
+              psp_buf, arg2, a2_18, a2_1c, a2_1d, a2_38, a2_39, arg3);
+    rbgpu_diag_set_num("psp_hw_a2_18", a2_18);
+
+    int ret = 1;
+    if (orig_psp_hw_init) {
+        ret = orig_psp_hw_init(psp_buf, arg2, arg3);
+    }
+
+    rbgpu_log("_psp_hw_init returned %d", ret);
+    rbgpu_diag_set_num("psp_hw_sub_ret", ret);
+    return ret;
+}
+
 static int hooked_psp_cos_alloc_memory(void *ctx, uint32_t size, uint32_t align, void **out_ptr) {
     rbgpu_diag_inc("psp_alloc_calls");
     int ret = 1;
@@ -635,8 +715,8 @@ static int hooked_psp_cos_alloc_memory(void *ctx, uint32_t size, uint32_t align,
 
 static int hooked_psp_asic_type_init(void *psp_buf, void *disc_entry) {
     rbgpu_diag_inc("psp_asic_init_calls");
-    uint32_t d_8 = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0x8) : 0;
-    uint32_t d_C = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0xC) : 0;
+    uint32_t d_8  = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0x8) : 0;
+    uint32_t d_C  = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0xC) : 0;
     uint32_t d_10 = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0x10) : 0;
 
     rbgpu_log("_psp_asic_type_init entered: buf=%p, disc=%p (+8=0x%x, +C=0x%x, +10=0x%x)",
@@ -656,13 +736,32 @@ static int hooked_psp_asic_type_init(void *psp_buf, void *disc_entry) {
 
 static int hooked_psp_init_pfn_ptr(void *psp_buf) {
     rbgpu_diag_inc("psp_pfn_calls");
-    uint32_t asic_type = psp_buf ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7d44) : 0;
-    rbgpu_log("_psp_init_pfn_ptr entered: buf=%p (asic_type=%u)", psp_buf, asic_type);
+    uint32_t *asic_type_ptr = psp_buf ? reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7d44) : nullptr;
+    uint32_t orig_asic = asic_type_ptr ? *asic_type_ptr : 0;
+    rbgpu_log("_psp_init_pfn_ptr entered: buf=%p (asic_type=%u)", psp_buf, orig_asic);
+
+    if (g_spoof_ttl_mode && asic_type_ptr && orig_asic == 19) {
+        *asic_type_ptr = 8;
+        rbgpu_log("_psp_init_pfn_ptr: -rbgpuspoofttl active -> spoofing asic_type 19 -> 8 for table binding");
+    }
 
     int ret = 1;
     if (orig_psp_init_pfn_ptr) {
         ret = orig_psp_init_pfn_ptr(psp_buf);
     }
+
+    if (g_spoof_ttl_mode && asic_type_ptr && orig_asic == 19) {
+        *asic_type_ptr = 19;
+        rbgpu_log("_psp_init_pfn_ptr: restored asic_type to 19; ret=%d", ret);
+    }
+
+    uint64_t *pfn_ring_init   = psp_buf ? reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7d50) : nullptr;
+    uint64_t *pfn_ring_create = psp_buf ? reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7d60) : nullptr;
+    uint64_t *pfn_is_sos      = psp_buf ? reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7de8) : nullptr;
+    rbgpu_log("_psp_init_pfn_ptr: pfn_ring_init=%p, pfn_ring_create=%p, pfn_is_sos=%p",
+              pfn_ring_init ? reinterpret_cast<void *>(*pfn_ring_init) : nullptr,
+              pfn_ring_create ? reinterpret_cast<void *>(*pfn_ring_create) : nullptr,
+              pfn_is_sos ? reinterpret_cast<void *>(*pfn_is_sos) : nullptr);
 
     rbgpu_log("_psp_init_pfn_ptr returned %d", ret);
     rbgpu_diag_set_num("psp_pfn_ret", ret);
@@ -675,7 +774,116 @@ static int hooked_psp_read_config(void *psp_buf) {
     if (orig_psp_read_config) {
         ret = orig_psp_read_config(psp_buf);
     }
-    rbgpu_log("_psp_read_config entered/exited: buf=%p, ret=%d", psp_buf, ret);
+    uint64_t flags = psp_buf ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x28) : 0;
+    rbgpu_log("_psp_read_config exited: buf=%p, ret=%d, flags@+0x28=0x%llx", psp_buf, ret, flags);
+    return ret;
+}
+
+static int hooked_psp_allocate_private_mem(void *psp_buf) {
+    rbgpu_diag_inc("psp_alloc_priv_calls");
+    rbgpu_log("_psp_allocate_private_mem entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_allocate_private_mem) {
+        ret = orig_psp_allocate_private_mem(psp_buf);
+    }
+    rbgpu_log("_psp_allocate_private_mem returned %d", ret);
+    rbgpu_diag_set_num("psp_alloc_priv_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_ring_init(void *psp_buf, uint32_t ring_type) {
+    rbgpu_diag_inc("psp_ring_init_calls");
+    rbgpu_log("_psp_ring_init entered: psp_buf=%p, ring_type=%u", psp_buf, ring_type);
+    int ret = 1;
+    if (orig_psp_ring_init) {
+        ret = orig_psp_ring_init(psp_buf, ring_type);
+    }
+    rbgpu_log("_psp_ring_init returned %d (ring_type=%u)", ret, ring_type);
+    rbgpu_diag_set_num("psp_ring_init_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_ring_create(void *psp_buf, uint32_t ring_type) {
+    rbgpu_diag_inc("psp_ring_create_calls");
+    rbgpu_log("_psp_ring_create entered: psp_buf=%p, ring_type=%u", psp_buf, ring_type);
+    int ret = 1;
+    if (orig_psp_ring_create) {
+        ret = orig_psp_ring_create(psp_buf, ring_type);
+    }
+    rbgpu_log("_psp_ring_create returned %d (ring_type=%u)", ret, ring_type);
+    rbgpu_diag_set_num("psp_ring_create_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_bootloader_is_sos_running(void *psp_buf) {
+    rbgpu_diag_inc("psp_is_sos_calls");
+    rbgpu_log("_psp_bootloader_is_sos_running entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_bootloader_is_sos_running) {
+        ret = orig_psp_bootloader_is_sos_running(psp_buf);
+    }
+    rbgpu_log("_psp_bootloader_is_sos_running returned %d", ret);
+    rbgpu_diag_set_num("psp_is_sos_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_cmd_km_init(void *psp_buf) {
+    rbgpu_diag_inc("psp_km_init_calls");
+    rbgpu_log("_psp_cmd_km_init entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_cmd_km_init) {
+        ret = orig_psp_cmd_km_init(psp_buf);
+    }
+    rbgpu_log("_psp_cmd_km_init returned %d", ret);
+    rbgpu_diag_set_num("psp_km_init_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_tmr_init(void *psp_buf) {
+    rbgpu_diag_inc("psp_tmr_init_calls");
+    rbgpu_log("_psp_tmr_init entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_tmr_init) {
+        ret = orig_psp_tmr_init(psp_buf);
+    }
+    rbgpu_log("_psp_tmr_init returned %d", ret);
+    rbgpu_diag_set_num("psp_tmr_init_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_tmr_load(void *psp_buf) {
+    rbgpu_diag_inc("psp_tmr_load_calls");
+    rbgpu_log("_psp_tmr_load entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_tmr_load) {
+        ret = orig_psp_tmr_load(psp_buf);
+    }
+    rbgpu_log("_psp_tmr_load returned %d", ret);
+    rbgpu_diag_set_num("psp_tmr_load_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_dtm_init(void *psp_buf) {
+    rbgpu_diag_inc("psp_dtm_init_calls");
+    rbgpu_log("_psp_dtm_init entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_dtm_init) {
+        ret = orig_psp_dtm_init(psp_buf);
+    }
+    rbgpu_log("_psp_dtm_init returned %d", ret);
+    rbgpu_diag_set_num("psp_dtm_init_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_np_fw_load(void *psp_buf) {
+    rbgpu_diag_inc("psp_np_fw_load_calls");
+    rbgpu_log("_psp_np_fw_load entered: psp_buf=%p", psp_buf);
+    int ret = 1;
+    if (orig_psp_np_fw_load) {
+        ret = orig_psp_np_fw_load(psp_buf);
+    }
+    rbgpu_log("_psp_np_fw_load returned %d", ret);
+    rbgpu_diag_set_num("psp_np_fw_load_ret", ret);
     return ret;
 }
 
@@ -1013,9 +1221,11 @@ void RGPU::init() {
     safeTtlMode  = checkKernelArgument("-rbgpusafettl");
     sync570Mode  = checkKernelArgument("-rbgpusync570");
     spoofTtlMode = checkKernelArgument("-rbgpuspoofttl");
+    pspHwMode    = checkKernelArgument("-rbgpupsphw");
     g_safe_ttl_mode  = safeTtlMode;
     g_sync_570_mode  = sync570Mode;
     g_spoof_ttl_mode = spoofTtlMode;
+    g_psp_hw_mode    = pspHwMode;
 
     rbgpu_diag_set_num("smu_hook_routed", 0);
     rbgpu_diag_set_num("guard_routed", 0);
@@ -1049,17 +1259,27 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_is_supp_routed", 0);
     rbgpu_diag_set_num("ttl_is_supp_calls", 0);
     rbgpu_diag_set_num("ttl_is_supp_ret", 0);
+    rbgpu_diag_set_num("ttl_hw_init_routed", 0);
+    rbgpu_diag_set_num("ttl_hw_init_calls", 0);
+    rbgpu_diag_set_num("ttl_hw_init_ret", 0);
     rbgpu_diag_set_num("ipi_exec_routed", 0);
     rbgpu_diag_set_num("ipi_exec_calls", 0);
     rbgpu_diag_set_num("ipi_exec_ret", 0);
     rbgpu_diag_set_num("psp_sw_init_routed", 0);
     rbgpu_diag_set_num("psp_sw_init_calls", 0);
     rbgpu_diag_set_num("psp_sw_init_ret", 0);
+    rbgpu_diag_set_num("psp_hw_init_routed", 0);
+    rbgpu_diag_set_num("psp_hw_init_calls", 0);
+    rbgpu_diag_set_num("psp_hw_init_ret", 0);
     rbgpu_diag_set_num("ipi_disc_routed", 0);
     rbgpu_diag_set_num("ipi_disc_calls", 0);
     rbgpu_diag_set_num("psp_sw_sub_routed", 0);
     rbgpu_diag_set_num("psp_sw_init_sub_calls", 0);
     rbgpu_diag_set_num("psp_sw_init_sub_ret", 0);
+    rbgpu_diag_set_num("psp_hw_sub_routed", 0);
+    rbgpu_diag_set_num("psp_hw_sub_calls", 0);
+    rbgpu_diag_set_num("psp_hw_sub_ret", 0);
+    rbgpu_diag_set_num("psp_hw_a2_18", 0);
     rbgpu_diag_set_num("psp_alloc_routed", 0);
     rbgpu_diag_set_num("psp_alloc_calls", 0);
     rbgpu_diag_set_num("psp_alloc_ret", 0);
@@ -1072,6 +1292,33 @@ void RGPU::init() {
     rbgpu_diag_set_num("psp_pfn_ret", 0);
     rbgpu_diag_set_num("psp_read_cfg_routed", 0);
     rbgpu_diag_set_num("psp_read_cfg_calls", 0);
+    rbgpu_diag_set_num("psp_alloc_priv_routed", 0);
+    rbgpu_diag_set_num("psp_alloc_priv_calls", 0);
+    rbgpu_diag_set_num("psp_alloc_priv_ret", 0);
+    rbgpu_diag_set_num("psp_ring_init_routed", 0);
+    rbgpu_diag_set_num("psp_ring_init_calls", 0);
+    rbgpu_diag_set_num("psp_ring_init_ret", 0);
+    rbgpu_diag_set_num("psp_ring_create_routed", 0);
+    rbgpu_diag_set_num("psp_ring_create_calls", 0);
+    rbgpu_diag_set_num("psp_ring_create_ret", 0);
+    rbgpu_diag_set_num("psp_is_sos_routed", 0);
+    rbgpu_diag_set_num("psp_is_sos_calls", 0);
+    rbgpu_diag_set_num("psp_is_sos_ret", 0);
+    rbgpu_diag_set_num("psp_km_init_routed", 0);
+    rbgpu_diag_set_num("psp_km_init_calls", 0);
+    rbgpu_diag_set_num("psp_km_init_ret", 0);
+    rbgpu_diag_set_num("psp_tmr_init_routed", 0);
+    rbgpu_diag_set_num("psp_tmr_init_calls", 0);
+    rbgpu_diag_set_num("psp_tmr_init_ret", 0);
+    rbgpu_diag_set_num("psp_tmr_load_routed", 0);
+    rbgpu_diag_set_num("psp_tmr_load_calls", 0);
+    rbgpu_diag_set_num("psp_tmr_load_ret", 0);
+    rbgpu_diag_set_num("psp_dtm_init_routed", 0);
+    rbgpu_diag_set_num("psp_dtm_init_calls", 0);
+    rbgpu_diag_set_num("psp_dtm_init_ret", 0);
+    rbgpu_diag_set_num("psp_np_fw_load_routed", 0);
+    rbgpu_diag_set_num("psp_np_fw_load_calls", 0);
+    rbgpu_diag_set_num("psp_np_fw_load_ret", 0);
     rbgpu_diag_set_num("ttl_param_q0", 0);
     rbgpu_diag_set_num("ttl_param_q1", 0);
     rbgpu_diag_set_num("ttl_param_q2", 0);
@@ -1079,13 +1326,14 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_param_q4", 0);
     rbgpu_diag_set_num("ttl_param_q5", 0);
 
-    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s, SpoofTTL: %s)",
+    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s, SpoofTTL: %s, PSPHW: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
               noTrap3Guard ? "DISABLED" : "ENABLED",
               noLogCapture ? "DISABLED" : "ENABLED",
               safeTtlMode ? "ENABLED" : "DISABLED",
               sync570Mode ? "ENABLED" : "DISABLED",
-              spoofTtlMode ? "ENABLED" : "DISABLED");
+              spoofTtlMode ? "ENABLED" : "DISABLED",
+              pspHwMode ? "ENABLED" : "DISABLED");
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
@@ -1149,6 +1397,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             orig_ttl_is_supported_device
         ),
         KernelPatcher::RouteRequest(
+            "_ttl_hw_init",
+            hooked_ttl_hw_init,
+            orig_ttl_hw_init
+        ),
+        KernelPatcher::RouteRequest(
             "_IpiExecuteSwipEntryPoint",
             hooked_ipi_execute_swip_entry_point,
             orig_ipi_execute_swip_entry_point
@@ -1159,6 +1412,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             orig_ipi_psp_sw_init
         ),
         KernelPatcher::RouteRequest(
+            "_ipi_psp_hw_init",
+            hooked_ipi_psp_hw_init,
+            orig_ipi_psp_hw_init
+        ),
+        KernelPatcher::RouteRequest(
             "_IpiGetDiscoveryInfo",
             hooked_IpiGetDiscoveryInfo,
             orig_ipi_get_discovery_info
@@ -1167,6 +1425,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_psp_sw_init",
             hooked_psp_sw_init,
             orig_psp_sw_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_hw_init",
+            hooked_psp_hw_init,
+            orig_psp_hw_init
         ),
         KernelPatcher::RouteRequest(
             "_psp_cos_alloc_memory",
@@ -1187,6 +1450,51 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_psp_read_config",
             hooked_psp_read_config,
             orig_psp_read_config
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_allocate_private_mem",
+            hooked_psp_allocate_private_mem,
+            orig_psp_allocate_private_mem
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_ring_init",
+            hooked_psp_ring_init,
+            orig_psp_ring_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_ring_create",
+            hooked_psp_ring_create,
+            orig_psp_ring_create
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_bootloader_is_sos_running",
+            hooked_psp_bootloader_is_sos_running,
+            orig_psp_bootloader_is_sos_running
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_cmd_km_init",
+            hooked_psp_cmd_km_init,
+            orig_psp_cmd_km_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_tmr_init",
+            hooked_psp_tmr_init,
+            orig_psp_tmr_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_tmr_load",
+            hooked_psp_tmr_load,
+            orig_psp_tmr_load
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_dtm_init",
+            hooked_psp_dtm_init,
+            orig_psp_dtm_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_np_fw_load",
+            hooked_psp_np_fw_load,
+            orig_psp_np_fw_load
         )
     };
 
@@ -1231,6 +1539,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     }
 
     if (patcher.routeMultiple(id, &ttlReqs[5], 1, address, size)) {
+        rbgpu_diag_set_num("ttl_hw_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _ttl_hw_init");
+    } else {
+        rbgpu_diag_set_num("ttl_hw_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _ttl_hw_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[6], 1, address, size)) {
         rbgpu_diag_set_num("ipi_exec_routed", 1);
         rbgpu_log("HWLibs: hooked _IpiExecuteSwipEntryPoint");
     } else {
@@ -1238,7 +1554,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _IpiExecuteSwipEntryPoint");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[6], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[7], 1, address, size)) {
         rbgpu_diag_set_num("psp_sw_init_routed", 1);
         rbgpu_log("HWLibs: hooked _ipi_psp_sw_init");
     } else {
@@ -1246,7 +1562,15 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _ipi_psp_sw_init");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[7], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[8], 1, address, size)) {
+        rbgpu_diag_set_num("psp_hw_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _ipi_psp_hw_init");
+    } else {
+        rbgpu_diag_set_num("psp_hw_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _ipi_psp_hw_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[9], 1, address, size)) {
         rbgpu_diag_set_num("ipi_disc_routed", 1);
         rbgpu_log("HWLibs: hooked _IpiGetDiscoveryInfo");
     } else {
@@ -1254,7 +1578,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _IpiGetDiscoveryInfo");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[8], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[10], 1, address, size)) {
         rbgpu_diag_set_num("psp_sw_sub_routed", 1);
         rbgpu_log("HWLibs: hooked _psp_sw_init");
     } else {
@@ -1262,7 +1586,15 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _psp_sw_init");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[9], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[11], 1, address, size)) {
+        rbgpu_diag_set_num("psp_hw_sub_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_hw_init");
+    } else {
+        rbgpu_diag_set_num("psp_hw_sub_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_hw_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[12], 1, address, size)) {
         rbgpu_diag_set_num("psp_alloc_routed", 1);
         rbgpu_log("HWLibs: hooked _psp_cos_alloc_memory");
     } else {
@@ -1270,7 +1602,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _psp_cos_alloc_memory");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[10], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[13], 1, address, size)) {
         rbgpu_diag_set_num("psp_asic_routed", 1);
         rbgpu_log("HWLibs: hooked _psp_asic_type_init");
     } else {
@@ -1278,7 +1610,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _psp_asic_type_init");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[11], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[14], 1, address, size)) {
         rbgpu_diag_set_num("psp_pfn_routed", 1);
         rbgpu_log("HWLibs: hooked _psp_init_pfn_ptr");
     } else {
@@ -1286,12 +1618,84 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
         rbgpu_log("HWLibs: failed to hook _psp_init_pfn_ptr");
     }
 
-    if (patcher.routeMultiple(id, &ttlReqs[12], 1, address, size)) {
+    if (patcher.routeMultiple(id, &ttlReqs[15], 1, address, size)) {
         rbgpu_diag_set_num("psp_read_cfg_routed", 1);
         rbgpu_log("HWLibs: hooked _psp_read_config");
     } else {
         rbgpu_diag_set_num("psp_read_cfg_routed", 0);
         rbgpu_log("HWLibs: failed to hook _psp_read_config");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[16], 1, address, size)) {
+        rbgpu_diag_set_num("psp_alloc_priv_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_allocate_private_mem");
+    } else {
+        rbgpu_diag_set_num("psp_alloc_priv_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_allocate_private_mem");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[17], 1, address, size)) {
+        rbgpu_diag_set_num("psp_ring_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_ring_init");
+    } else {
+        rbgpu_diag_set_num("psp_ring_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_ring_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[18], 1, address, size)) {
+        rbgpu_diag_set_num("psp_ring_create_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_ring_create");
+    } else {
+        rbgpu_diag_set_num("psp_ring_create_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_ring_create");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[19], 1, address, size)) {
+        rbgpu_diag_set_num("psp_is_sos_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_bootloader_is_sos_running");
+    } else {
+        rbgpu_diag_set_num("psp_is_sos_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_bootloader_is_sos_running");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[20], 1, address, size)) {
+        rbgpu_diag_set_num("psp_km_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_cmd_km_init");
+    } else {
+        rbgpu_diag_set_num("psp_km_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_cmd_km_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[21], 1, address, size)) {
+        rbgpu_diag_set_num("psp_tmr_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_tmr_init");
+    } else {
+        rbgpu_diag_set_num("psp_tmr_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_tmr_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[22], 1, address, size)) {
+        rbgpu_diag_set_num("psp_tmr_load_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_tmr_load");
+    } else {
+        rbgpu_diag_set_num("psp_tmr_load_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_tmr_load");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[23], 1, address, size)) {
+        rbgpu_diag_set_num("psp_dtm_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_dtm_init");
+    } else {
+        rbgpu_diag_set_num("psp_dtm_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_dtm_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[24], 1, address, size)) {
+        rbgpu_diag_set_num("psp_np_fw_load_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_np_fw_load");
+    } else {
+        rbgpu_diag_set_num("psp_np_fw_load_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_np_fw_load");
     }
 
     if (!noSmuHook) {
