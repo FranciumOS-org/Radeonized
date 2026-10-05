@@ -87,6 +87,12 @@ typedef void*    (*ipi_get_discovery_info_fn_t)(void *instance, uint32_t client_
 typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
 typedef int      (*ipi_psp_hw_init_fn_t)(void *dev);
 typedef int      (*ipi_gc_sw_init_fn_t)(void *dev);
+typedef int      (*ipi_gc_hw_init_fn_t)(void *dev);
+
+typedef int      (*gc_sw_init_fn_t)(void *param1, void *param2);
+typedef int      (*gc_hw_init_fn_t)(void *gc_buf, void *arg2, void *arg3);
+typedef uint8_t  (*ttl_dev_get_doorbell_range_fn_t)(void *dev, uint32_t type, uint32_t idx, void *out_info);
+typedef uint8_t  (*ipi_set_fw_entry_fn_t)(void *instance, void *fw_entry);
 
 typedef int      (*psp_sw_init_fn_t)(void *param1, void *param2);
 typedef int      (*psp_hw_init_fn_t)(void *psp_buf, void *arg2, void *arg3);
@@ -124,6 +130,12 @@ static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info         = nu
 static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
 static ipi_psp_hw_init_fn_t             orig_ipi_psp_hw_init                = nullptr;
 static ipi_gc_sw_init_fn_t              orig_ipi_gc_sw_init                 = nullptr;
+static ipi_gc_hw_init_fn_t              orig_ipi_gc_hw_init                 = nullptr;
+
+static gc_sw_init_fn_t                  orig_gc_sw_init                     = nullptr;
+static gc_hw_init_fn_t                  orig_gc_hw_init                     = nullptr;
+static ttl_dev_get_doorbell_range_fn_t  orig_ttl_dev_get_doorbell_range     = nullptr;
+static ipi_set_fw_entry_fn_t            orig_ipi_set_fw_entry               = nullptr;
 
 static psp_sw_init_fn_t                 orig_psp_sw_init                    = nullptr;
 static psp_hw_init_fn_t                 orig_psp_hw_init                    = nullptr;
@@ -274,7 +286,7 @@ static int slot_internal_sw_init(void *ctx, ...) {
     int alloc_ret = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &g_dma_handle, &g_dma_gpu, &g_dma_cpu);
     rbgpu_diag_set_num("alloc_ret", static_cast<uint64_t>(alloc_ret));
     rbgpu_diag_set_num("fb_mc_addr", g_dma_gpu);
-    rbgpu_log("[Check 2] smu_cgs_alloc_memory ret=%d, handle=%p, gpu=0x%llx, cpu=%p",
+    rbgpu_log("[Check 2] smu_cgs_alloc_memory ret=%d, handle=%p, gpu=0x%llx, cpu=%p (gpu is CGS IOVirtualAddress)",
               alloc_ret, g_dma_handle, g_dma_gpu, g_dma_cpu);
 
     if (alloc_ret != 0 || !g_dma_cpu) {
@@ -617,6 +629,156 @@ static uint8_t hooked_ipi_execute_swip_entry_point(void *instance, uint32_t swip
     return ret;
 }
 
+static void *hooked_IpiGetDiscoveryInfo(void *instance, uint32_t client_id) {
+    rbgpu_diag_inc("ipi_disc_calls");
+    void *ret = nullptr;
+    if (orig_ipi_get_discovery_info) {
+        ret = orig_ipi_get_discovery_info(instance, client_id);
+    }
+    rbgpu_log("_IpiGetDiscoveryInfo(instance=%p, client_id=%u) returned %p", instance, client_id, ret);
+    if (client_id == 7 && ret) {
+        uint32_t num_inst = *reinterpret_cast<uint32_t *>(ret);
+        uint64_t span = static_cast<uint64_t>(num_inst) * 0x210;
+        uint32_t major = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(ret) + 0xC);
+        uint32_t minor = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(ret) + 0x10);
+        uint32_t rev   = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(ret) + 0x14);
+        rbgpu_log("_IpiGetDiscoveryInfo(client_id=7) -> %p (inst=%u, span=0x%llx vs 0x235, major=%u, minor=%u, rev=%u)",
+                  ret, num_inst, span, major, minor, rev);
+        rbgpu_diag_set_num("gc_disc_inst", num_inst);
+        rbgpu_diag_set_num("gc_disc_span", span);
+        rbgpu_diag_set_num("gc_disc_major", major);
+        rbgpu_diag_set_num("gc_disc_minor", minor);
+        rbgpu_diag_set_num("gc_disc_rev", rev);
+    }
+    return ret;
+}
+
+static uint32_t hooked_ttl_initialize(void *arg1, void *arg2) {
+    rbgpu_diag_inc("ttl_raw_init_calls");
+    rbgpu_diag_set_num("ttl_raw_init_arg1", reinterpret_cast<uint64_t>(arg1));
+    rbgpu_diag_set_num("ttl_raw_init_arg2", reinterpret_cast<uint64_t>(arg2));
+
+    auto params = reinterpret_cast<const uint64_t *>(arg1);
+
+    rbgpu_log("_ttl_initialize entered: params=%p, ctx_38=%p", arg1, arg2);
+
+    if (params) {
+        rbgpu_diag_set_num("ttl_param_q0", params[0]);
+        rbgpu_diag_set_num("ttl_param_q1", params[1]);
+        rbgpu_diag_set_num("ttl_param_q2", params[2]);
+        rbgpu_diag_set_num("ttl_param_q3", params[3]);
+        rbgpu_diag_set_num("ttl_param_q4", params[4]);
+        rbgpu_diag_set_num("ttl_param_q5", params[5]);
+
+        rbgpu_log("ttl_params[0x00..0x18]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[0], params[1], params[2], params[3]);
+        rbgpu_log("ttl_params[0x20..0x38]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[4], params[5], params[6], params[7]);
+        rbgpu_log("ttl_params[0x40..0x58]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[8], params[9], params[10], params[11]);
+        rbgpu_log("ttl_params[0x60..0x78]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[12], params[13], params[14], params[15]);
+        rbgpu_log("ttl_params[0x80..0x98]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
+                  params[16], params[17], params[18], params[19]);
+        rbgpu_log("ttl_params[0xA0]:      0x%016llx",
+                  params[20]);
+    }
+
+    uint32_t ret = 1;
+    if (orig_ttl_initialize) {
+        ret = orig_ttl_initialize(arg1, arg2);
+    }
+
+    rbgpu_log("_ttl_initialize returned status = 0x%08x", ret);
+    rbgpu_diag_set_num("ttl_raw_init_ret", ret);
+    return ret;
+}
+
+static int hooked_AmdTtlServices_initialize(void *this_ptr) {
+    rbgpu_diag_inc("ttl_init_calls");
+    rbgpu_diag_set_num("ttl_init_this", reinterpret_cast<uint64_t>(this_ptr));
+    rbgpu_log("AmdTtlServices::initialize() entered (this=%p)", this_ptr);
+    int ret = 0;
+    if (orig_amdtll_initialize) {
+        ret = orig_amdtll_initialize(this_ptr);
+    }
+    rbgpu_log("AmdTtlServices::initialize() returned 0x%08X (this=%p)", ret, this_ptr);
+    rbgpu_diag_set_num("ttl_init_ret", static_cast<uint32_t>(ret));
+    return ret;
+}
+
+static void hooked_AmdTtlServices_setFirmwareDirectory(void *this_ptr, void *fw_dir) {
+    rbgpu_diag_inc("ttl_set_fw_dir_calls");
+    rbgpu_diag_set_num("ttl_set_fw_dir_this", reinterpret_cast<uint64_t>(this_ptr));
+    rbgpu_diag_set_num("ttl_set_fw_dir_ptr", reinterpret_cast<uint64_t>(fw_dir));
+
+    uint64_t pre_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    uint64_t pre_958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p) pre +0x570=0x%llx, pre +0x958=0x%llx",
+              this_ptr, fw_dir, pre_570, pre_958);
+
+    if (orig_amdtll_set_fw_dir) {
+        orig_amdtll_set_fw_dir(this_ptr, fw_dir);
+    }
+
+    uint64_t post_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    uint64_t post_958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
+    rbgpu_diag_set_num("ttl_set_fw_dir_post_570", post_570);
+    rbgpu_diag_set_num("ttl_set_fw_dir_post_958", post_958);
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory done: this=%p post +0x570=0x%llx, post +0x958=0x%llx",
+              this_ptr, post_570, post_958);
+}
+
+static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
+    rbgpu_diag_inc("ttl_init_inp_calls");
+    rbgpu_diag_set_num("ttl_init_inp_this", reinterpret_cast<uint64_t>(this_ptr));
+    auto inp = reinterpret_cast<uint64_t *>(input);
+
+    uint64_t f560 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x560) : 0;
+    uint64_t f568 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x568) : 0;
+    uint64_t f570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    uint32_t f578 = this_ptr ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) : 0;
+    uint8_t  f598 = this_ptr ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x598) : 0;
+    uint64_t f958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
+
+    rbgpu_diag_set_num("ttl_inp_0", inp ? inp[0] : 0);
+    rbgpu_diag_set_num("ttl_inp_1", inp ? inp[1] : 0);
+    rbgpu_diag_set_num("ttl_inp_2", inp ? inp[2] : 0);
+    rbgpu_diag_set_num("ttl_inp_4", inp ? inp[4] : 0);
+    rbgpu_diag_set_num("ttl_inp_5", inp ? inp[5] : 0);
+    rbgpu_diag_set_num("ttl_inp_6", inp ? inp[6] : 0);
+    rbgpu_diag_set_num("ttl_this_570", f570);
+
+    rbgpu_log("AmdTtlServices::initialize(this=%p, input=%p): [0]=0x%llx [1]=0x%llx [2]=0x%llx [4]=0x%llx [5]=0x%llx [6]=0x%llx",
+              this_ptr, input,
+              inp ? inp[0] : 0, inp ? inp[1] : 0, inp ? inp[2] : 0,
+              inp ? inp[4] : 0, inp ? inp[5] : 0, inp ? inp[6] : 0);
+
+    rbgpu_log("AmdTtlServices state before (this=%p): 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x 0x958=0x%llx",
+              this_ptr, f560, f568, f570, f578, f598, f958);
+
+    if (g_sync_570_mode && f570 == 0 && f958 != 0) {
+        *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) = f958;
+        f570 = f958;
+        rbgpu_diag_set_num("ttl_sync_570_applied", 1);
+        rbgpu_log("AmdTtlServices: -rbgpusync570 active; synced +0x570 from +0x958 (0x%llx)", f958);
+    }
+
+    if (g_safe_ttl_mode && f570 == 0) {
+        rbgpu_log("AmdTtlServices: -rbgpusafettl active; applying SafeBoot bypass to pass 1265fd3e");
+        *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) = 1;
+    }
+
+    int ret = 0;
+    if (orig_amdtll_init_input) {
+        ret = orig_amdtll_init_input(this_ptr, input);
+    }
+
+    rbgpu_log("AmdTtlServices::initialize(this=%p, input) returned 0x%08X", this_ptr, ret);
+    rbgpu_diag_set_num("ttl_init_inp_ret", static_cast<uint32_t>(ret));
+    return ret;
+}
+
 static int hooked_ipi_psp_sw_init(void *dev) {
     rbgpu_diag_inc("psp_sw_init_calls");
     uint64_t *dev_ptr = reinterpret_cast<uint64_t *>(dev);
@@ -645,33 +807,6 @@ static int hooked_ipi_psp_hw_init(void *dev) {
 
     rbgpu_log("_ipi_psp_hw_init returned %d", ret);
     rbgpu_diag_set_num("psp_hw_init_ret", ret);
-    return ret;
-}
-
-static int hooked_ipi_gc_sw_init(void *dev) {
-    rbgpu_diag_inc("gc_sw_init_calls");
-    uint64_t *dev_ptr = reinterpret_cast<uint64_t *>(dev);
-    void *fn_ptr = dev_ptr ? reinterpret_cast<void *>(dev_ptr[1]) : nullptr;
-
-    rbgpu_log("_ipi_gc_sw_init entered: dev=%p, fn_ptr@+0x8=%p", dev, fn_ptr);
-
-    int ret = 0;
-    if (orig_ipi_gc_sw_init) {
-        ret = orig_ipi_gc_sw_init(dev);
-    }
-
-    rbgpu_log("_ipi_gc_sw_init returned %d", ret);
-    rbgpu_diag_set_num("gc_sw_init_ret", ret);
-    return ret;
-}
-
-static void *hooked_IpiGetDiscoveryInfo(void *instance, uint32_t client_id) {
-    rbgpu_diag_inc("ipi_disc_calls");
-    void *ret = nullptr;
-    if (orig_ipi_get_discovery_info) {
-        ret = orig_ipi_get_discovery_info(instance, client_id);
-    }
-    rbgpu_log("_IpiGetDiscoveryInfo(instance=%p, client_id=%u) returned %p", instance, client_id, ret);
     return ret;
 }
 
@@ -905,129 +1040,93 @@ static int hooked_psp_np_fw_load(void *psp_buf) {
     return ret;
 }
 
-static uint32_t hooked_ttl_initialize(void *arg1, void *arg2) {
-    rbgpu_diag_inc("ttl_raw_init_calls");
-    rbgpu_diag_set_num("ttl_raw_init_arg1", reinterpret_cast<uint64_t>(arg1));
-    rbgpu_diag_set_num("ttl_raw_init_arg2", reinterpret_cast<uint64_t>(arg2));
+static int hooked_ipi_gc_sw_init(void *dev) {
+    rbgpu_diag_inc("gc_sw_init_calls");
+    uint64_t *dev_ptr = reinterpret_cast<uint64_t *>(dev);
+    void *fn_ptr = dev_ptr ? reinterpret_cast<void *>(dev_ptr[1]) : nullptr;
 
-    auto params = reinterpret_cast<const uint64_t *>(arg1);
+    rbgpu_log("_ipi_gc_sw_init entered: dev=%p, fn_ptr@+0x8=%p", dev, fn_ptr);
 
-    rbgpu_log("_ttl_initialize entered: params=%p, ctx_38=%p", arg1, arg2);
-
-    if (params) {
-        rbgpu_diag_set_num("ttl_param_q0", params[0]);
-        rbgpu_diag_set_num("ttl_param_q1", params[1]);
-        rbgpu_diag_set_num("ttl_param_q2", params[2]);
-        rbgpu_diag_set_num("ttl_param_q3", params[3]);
-        rbgpu_diag_set_num("ttl_param_q4", params[4]);
-        rbgpu_diag_set_num("ttl_param_q5", params[5]);
-
-        rbgpu_log("ttl_params[0x00..0x18]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
-                  params[0], params[1], params[2], params[3]);
-        rbgpu_log("ttl_params[0x20..0x38]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
-                  params[4], params[5], params[6], params[7]);
-        rbgpu_log("ttl_params[0x40..0x58]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
-                  params[8], params[9], params[10], params[11]);
-        rbgpu_log("ttl_params[0x60..0x78]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
-                  params[12], params[13], params[14], params[15]);
-        rbgpu_log("ttl_params[0x80..0x98]: 0x%016llx 0x%016llx 0x%016llx 0x%016llx",
-                  params[16], params[17], params[18], params[19]);
-        rbgpu_log("ttl_params[0xA0]:      0x%016llx",
-                  params[20]);
+    int ret = 0;
+    if (orig_ipi_gc_sw_init) {
+        ret = orig_ipi_gc_sw_init(dev);
     }
 
-    uint32_t ret = 1;
-    if (orig_ttl_initialize) {
-        ret = orig_ttl_initialize(arg1, arg2);
-    }
-
-    rbgpu_log("_ttl_initialize returned status = 0x%08x", ret);
-    rbgpu_diag_set_num("ttl_raw_init_ret", ret);
+    rbgpu_log("_ipi_gc_sw_init returned %d", ret);
+    rbgpu_diag_set_num("gc_sw_init_ret", ret);
     return ret;
 }
 
-static int hooked_AmdTtlServices_initialize(void *this_ptr) {
-    rbgpu_diag_inc("ttl_init_calls");
-    rbgpu_diag_set_num("ttl_init_this", reinterpret_cast<uint64_t>(this_ptr));
-    rbgpu_log("AmdTtlServices::initialize() entered (this=%p)", this_ptr);
+static int hooked_ipi_gc_hw_init(void *dev) {
+    rbgpu_diag_inc("gc_hw_init_calls");
+    rbgpu_log("_ipi_gc_hw_init entered: dev=%p", dev);
+
     int ret = 0;
-    if (orig_amdtll_initialize) {
-        ret = orig_amdtll_initialize(this_ptr);
+    if (orig_ipi_gc_hw_init) {
+        ret = orig_ipi_gc_hw_init(dev);
     }
-    rbgpu_log("AmdTtlServices::initialize() returned 0x%08X (this=%p)", ret, this_ptr);
-    rbgpu_diag_set_num("ttl_init_ret", static_cast<uint32_t>(ret));
+
+    rbgpu_log("_ipi_gc_hw_init returned %d", ret);
+    rbgpu_diag_set_num("gc_hw_init_ret", ret);
     return ret;
 }
 
-static void hooked_AmdTtlServices_setFirmwareDirectory(void *this_ptr, void *fw_dir) {
-    rbgpu_diag_inc("ttl_set_fw_dir_calls");
-    rbgpu_diag_set_num("ttl_set_fw_dir_this", reinterpret_cast<uint64_t>(this_ptr));
-    rbgpu_diag_set_num("ttl_set_fw_dir_ptr", reinterpret_cast<uint64_t>(fw_dir));
+static int hooked_gc_sw_init(void *param1, void *param2) {
+    rbgpu_diag_inc("gc_sw_sub_calls");
+    uint32_t p1_sz = param1 ? *reinterpret_cast<uint32_t *>(param1) : 0;
+    uint32_t p2_sz = param2 ? *reinterpret_cast<uint32_t *>(param2) : 0;
+    uint32_t d_8  = param1 ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(param1) + 0xC) : 0;
+    uint32_t d_C  = param1 ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(param1) + 0x10) : 0;
+    uint32_t d_10 = param1 ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(param1) + 0x14) : 0;
 
-    uint64_t pre_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
-    uint64_t pre_958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
-    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p) pre +0x570=0x%llx, pre +0x958=0x%llx",
-              this_ptr, fw_dir, pre_570, pre_958);
+    rbgpu_log("_gc_sw_init entered: p1=%p (sz=0x%x, +C=0x%x, +10=0x%x, +14=0x%x), p2=%p (sz=0x%x)",
+              param1, p1_sz, d_8, d_C, d_10, param2, p2_sz);
 
-    if (orig_amdtll_set_fw_dir) {
-        orig_amdtll_set_fw_dir(this_ptr, fw_dir);
+    int ret = 1;
+    if (orig_gc_sw_init) {
+        ret = orig_gc_sw_init(param1, param2);
     }
 
-    uint64_t post_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
-    uint64_t post_958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
-    rbgpu_diag_set_num("ttl_set_fw_dir_post_570", post_570);
-    rbgpu_diag_set_num("ttl_set_fw_dir_post_958", post_958);
-    rbgpu_log("AmdTtlServices::setFirmwareDirectory done: this=%p post +0x570=0x%llx, post +0x958=0x%llx",
-              this_ptr, post_570, post_958);
+    rbgpu_log("_gc_sw_init returned %d", ret);
+    rbgpu_diag_set_num("gc_sw_sub_ret", ret);
+    return ret;
 }
 
-static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
-    rbgpu_diag_inc("ttl_init_inp_calls");
-    rbgpu_diag_set_num("ttl_init_inp_this", reinterpret_cast<uint64_t>(this_ptr));
-    auto inp = reinterpret_cast<uint64_t *>(input);
+static int hooked_gc_hw_init(void *gc_buf, void *arg2, void *arg3) {
+    rbgpu_diag_inc("gc_hw_sub_calls");
+    rbgpu_log("_gc_hw_init entered: gc_buf=%p, arg2=%p, arg3=%p", gc_buf, arg2, arg3);
 
-    uint64_t f560 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x560) : 0;
-    uint64_t f568 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x568) : 0;
-    uint64_t f570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
-    uint32_t f578 = this_ptr ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) : 0;
-    uint8_t  f598 = this_ptr ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x598) : 0;
-    uint64_t f958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
-
-    rbgpu_diag_set_num("ttl_inp_0", inp ? inp[0] : 0);
-    rbgpu_diag_set_num("ttl_inp_1", inp ? inp[1] : 0);
-    rbgpu_diag_set_num("ttl_inp_2", inp ? inp[2] : 0);
-    rbgpu_diag_set_num("ttl_inp_4", inp ? inp[4] : 0);
-    rbgpu_diag_set_num("ttl_inp_5", inp ? inp[5] : 0);
-    rbgpu_diag_set_num("ttl_inp_6", inp ? inp[6] : 0);
-    rbgpu_diag_set_num("ttl_this_570", f570);
-
-    rbgpu_log("AmdTtlServices::initialize(this=%p, input=%p): [0]=0x%llx [1]=0x%llx [2]=0x%llx [4]=0x%llx [5]=0x%llx [6]=0x%llx",
-              this_ptr, input,
-              inp ? inp[0] : 0, inp ? inp[1] : 0, inp ? inp[2] : 0,
-              inp ? inp[4] : 0, inp ? inp[5] : 0, inp ? inp[6] : 0);
-
-    rbgpu_log("AmdTtlServices state before (this=%p): 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x 0x958=0x%llx",
-              this_ptr, f560, f568, f570, f578, f598, f958);
-
-    if (g_sync_570_mode && f570 == 0 && f958 != 0) {
-        *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) = f958;
-        f570 = f958;
-        rbgpu_diag_set_num("ttl_sync_570_applied", 1);
-        rbgpu_log("AmdTtlServices: -rbgpusync570 active; synced +0x570 from +0x958 (0x%llx)", f958);
+    int ret = 1;
+    if (orig_gc_hw_init) {
+        ret = orig_gc_hw_init(gc_buf, arg2, arg3);
     }
 
-    if (g_safe_ttl_mode && f570 == 0) {
-        rbgpu_log("AmdTtlServices: -rbgpusafettl active; applying SafeBoot bypass to pass 1265fd3e");
-        *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) = 1;
-    }
+    rbgpu_log("_gc_hw_init returned %d", ret);
+    rbgpu_diag_set_num("gc_hw_sub_ret", ret);
+    return ret;
+}
 
-    int ret = 0;
-    if (orig_amdtll_init_input) {
-        ret = orig_amdtll_init_input(this_ptr, input);
+static uint8_t hooked_ttlDevGetDoorbellRange(void *dev, uint32_t type, uint32_t idx, void *out_info) {
+    rbgpu_diag_inc("gc_doorbell_calls");
+    uint8_t ret = 0;
+    if (orig_ttl_dev_get_doorbell_range) {
+        ret = orig_ttl_dev_get_doorbell_range(dev, type, idx, out_info);
     }
+    rbgpu_log("_ttlDevGetDoorbellRange(dev=%p, type=%u, idx=%u, out=%p) returned %u",
+              dev, type, idx, out_info, ret);
+    rbgpu_diag_set_num("gc_doorbell_ret", ret);
+    return ret;
+}
 
-    rbgpu_log("AmdTtlServices::initialize(this=%p, input) returned 0x%08X", this_ptr, ret);
-    rbgpu_diag_set_num("ttl_init_inp_ret", static_cast<uint32_t>(ret));
+static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
+    rbgpu_diag_inc("gc_set_fw_calls");
+    uint32_t fw_id = fw_entry ? *reinterpret_cast<uint32_t *>(fw_entry) : 0;
+    uint8_t ret = 0;
+    if (orig_ipi_set_fw_entry) {
+        ret = orig_ipi_set_fw_entry(instance, fw_entry);
+    }
+    rbgpu_log("_IpiSetFwEntry(instance=%p, fw_id=%u) returned %u", instance, fw_id, ret);
+    rbgpu_diag_set_num("gc_set_fw_ret", ret);
     return ret;
 }
 
@@ -1292,6 +1391,26 @@ void RGPU::init() {
     rbgpu_diag_set_num("gc_sw_init_routed", 0);
     rbgpu_diag_set_num("gc_sw_init_calls", 0);
     rbgpu_diag_set_num("gc_sw_init_ret", 0);
+    rbgpu_diag_set_num("gc_sw_sub_routed", 0);
+    rbgpu_diag_set_num("gc_sw_sub_calls", 0);
+    rbgpu_diag_set_num("gc_sw_sub_ret", 0);
+    rbgpu_diag_set_num("gc_disc_inst", 0);
+    rbgpu_diag_set_num("gc_disc_span", 0);
+    rbgpu_diag_set_num("gc_disc_major", 0);
+    rbgpu_diag_set_num("gc_disc_minor", 0);
+    rbgpu_diag_set_num("gc_disc_rev", 0);
+    rbgpu_diag_set_num("gc_doorbell_routed", 0);
+    rbgpu_diag_set_num("gc_doorbell_calls", 0);
+    rbgpu_diag_set_num("gc_doorbell_ret", 0);
+    rbgpu_diag_set_num("gc_set_fw_routed", 0);
+    rbgpu_diag_set_num("gc_set_fw_calls", 0);
+    rbgpu_diag_set_num("gc_set_fw_ret", 0);
+    rbgpu_diag_set_num("gc_hw_init_routed", 0);
+    rbgpu_diag_set_num("gc_hw_init_calls", 0);
+    rbgpu_diag_set_num("gc_hw_init_ret", 0);
+    rbgpu_diag_set_num("gc_hw_sub_routed", 0);
+    rbgpu_diag_set_num("gc_hw_sub_calls", 0);
+    rbgpu_diag_set_num("gc_hw_sub_ret", 0);
     rbgpu_diag_set_num("ipi_disc_routed", 0);
     rbgpu_diag_set_num("ipi_disc_calls", 0);
     rbgpu_diag_set_num("psp_sw_sub_routed", 0);
@@ -1385,13 +1504,8 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     }
 }
 
-void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
-    rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
-
-    patchDeviceTypeTable(patcher, id);
-    patchDeviceCapabilityTable(patcher, id);
-
-    KernelPatcher::RouteRequest ttlReqs[] = {
+void RGPU::routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
             "__ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput",
             hooked_AmdTtlServices_initialize_input,
@@ -1428,6 +1542,24 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             orig_ipi_execute_swip_entry_point
         ),
         KernelPatcher::RouteRequest(
+            "_IpiGetDiscoveryInfo",
+            hooked_IpiGetDiscoveryInfo,
+            orig_ipi_get_discovery_info
+        )
+    };
+
+    for (size_t i = 0; i < arrsize(reqs); i++) {
+        if (patcher.routeMultiple(id, &reqs[i], 1, address, size)) {
+            rbgpu_log("HWLibs: hooked %s", reqs[i].symbol);
+        } else {
+            rbgpu_log("HWLibs: failed to hook %s", reqs[i].symbol);
+        }
+    }
+}
+
+void RGPU::routePSPBasics(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest(
             "_ipi_psp_sw_init",
             hooked_ipi_psp_sw_init,
             orig_ipi_psp_sw_init
@@ -1436,11 +1568,6 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_ipi_psp_hw_init",
             hooked_ipi_psp_hw_init,
             orig_ipi_psp_hw_init
-        ),
-        KernelPatcher::RouteRequest(
-            "_IpiGetDiscoveryInfo",
-            hooked_IpiGetDiscoveryInfo,
-            orig_ipi_get_discovery_info
         ),
         KernelPatcher::RouteRequest(
             "_psp_sw_init",
@@ -1471,7 +1598,20 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_psp_read_config",
             hooked_psp_read_config,
             orig_psp_read_config
-        ),
+        )
+    };
+
+    for (size_t i = 0; i < arrsize(reqs); i++) {
+        if (patcher.routeMultiple(id, &reqs[i], 1, address, size)) {
+            rbgpu_log("HWLibs: hooked %s", reqs[i].symbol);
+        } else {
+            rbgpu_log("HWLibs: failed to hook %s", reqs[i].symbol);
+        }
+    }
+}
+
+void RGPU::routePSPRingTmr(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
             "_psp_allocate_private_mem",
             hooked_psp_allocate_private_mem,
@@ -1516,221 +1656,71 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_psp_np_fw_load",
             hooked_psp_np_fw_load,
             orig_psp_np_fw_load
-        ),
+        )
+    };
+
+    for (size_t i = 0; i < arrsize(reqs); i++) {
+        if (patcher.routeMultiple(id, &reqs[i], 1, address, size)) {
+            rbgpu_log("HWLibs: hooked %s", reqs[i].symbol);
+        } else {
+            rbgpu_log("HWLibs: failed to hook %s", reqs[i].symbol);
+        }
+    }
+}
+
+void RGPU::routeGC(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
             "_ipi_gc_sw_init",
             hooked_ipi_gc_sw_init,
             orig_ipi_gc_sw_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_gc_sw_init",
+            hooked_gc_sw_init,
+            orig_gc_sw_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_ttlDevGetDoorbellRange",
+            hooked_ttlDevGetDoorbellRange,
+            orig_ttl_dev_get_doorbell_range
+        ),
+        KernelPatcher::RouteRequest(
+            "_IpiSetFwEntry",
+            hooked_IpiSetFwEntry,
+            orig_ipi_set_fw_entry
+        ),
+        KernelPatcher::RouteRequest(
+            "_ipi_gc_hw_init",
+            hooked_ipi_gc_hw_init,
+            orig_ipi_gc_hw_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_gc_hw_init",
+            hooked_gc_hw_init,
+            orig_gc_hw_init
         )
     };
 
-    if (patcher.routeMultiple(id, &ttlReqs[0], 1, address, size)) {
-        rbgpu_diag_set_num("ttl_init_inp_routed", 1);
-        rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput");
-    } else {
-        rbgpu_diag_set_num("ttl_init_inp_routed", 0);
-        rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput");
+    for (size_t i = 0; i < arrsize(reqs); i++) {
+        if (patcher.routeMultiple(id, &reqs[i], 1, address, size)) {
+            rbgpu_log("HWLibs: hooked %s", reqs[i].symbol);
+        } else {
+            rbgpu_log("HWLibs: failed to hook %s", reqs[i].symbol);
+        }
     }
+}
 
-    if (patcher.routeMultiple(id, &ttlReqs[1], 1, address, size)) {
-        rbgpu_diag_set_num("ttl_init_routed", 1);
-        rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices10initializeEv");
-    } else {
-        rbgpu_diag_set_num("ttl_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices10initializeEv");
-    }
+void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
 
-    if (patcher.routeMultiple(id, &ttlReqs[2], 1, address, size)) {
-        rbgpu_diag_set_num("ttl_set_fw_dir_routed", 1);
-        rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory");
-    } else {
-        rbgpu_diag_set_num("ttl_set_fw_dir_routed", 0);
-        rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices20setFirmwareDirectoryEP20AMDFirmwareDirectory");
-    }
+    patchDeviceTypeTable(patcher, id);
+    patchDeviceCapabilityTable(patcher, id);
 
-    if (patcher.routeMultiple(id, &ttlReqs[3], 1, address, size)) {
-        rbgpu_diag_set_num("ttl_raw_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _ttl_initialize");
-    } else {
-        rbgpu_diag_set_num("ttl_raw_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _ttl_initialize");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[4], 1, address, size)) {
-        rbgpu_diag_set_num("ttl_is_supp_routed", 1);
-        rbgpu_log("HWLibs: hooked _ttlIsSupportedDevice");
-    } else {
-        rbgpu_diag_set_num("ttl_is_supp_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _ttlIsSupportedDevice");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[5], 1, address, size)) {
-        rbgpu_diag_set_num("ttl_hw_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _ttl_hw_init");
-    } else {
-        rbgpu_diag_set_num("ttl_hw_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _ttl_hw_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[6], 1, address, size)) {
-        rbgpu_diag_set_num("ipi_exec_routed", 1);
-        rbgpu_log("HWLibs: hooked _IpiExecuteSwipEntryPoint");
-    } else {
-        rbgpu_diag_set_num("ipi_exec_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _IpiExecuteSwipEntryPoint");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[7], 1, address, size)) {
-        rbgpu_diag_set_num("psp_sw_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _ipi_psp_sw_init");
-    } else {
-        rbgpu_diag_set_num("psp_sw_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _ipi_psp_sw_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[8], 1, address, size)) {
-        rbgpu_diag_set_num("psp_hw_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _ipi_psp_hw_init");
-    } else {
-        rbgpu_diag_set_num("psp_hw_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _ipi_psp_hw_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[9], 1, address, size)) {
-        rbgpu_diag_set_num("ipi_disc_routed", 1);
-        rbgpu_log("HWLibs: hooked _IpiGetDiscoveryInfo");
-    } else {
-        rbgpu_diag_set_num("ipi_disc_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _IpiGetDiscoveryInfo");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[10], 1, address, size)) {
-        rbgpu_diag_set_num("psp_sw_sub_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_sw_init");
-    } else {
-        rbgpu_diag_set_num("psp_sw_sub_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_sw_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[11], 1, address, size)) {
-        rbgpu_diag_set_num("psp_hw_sub_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_hw_init");
-    } else {
-        rbgpu_diag_set_num("psp_hw_sub_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_hw_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[12], 1, address, size)) {
-        rbgpu_diag_set_num("psp_alloc_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_cos_alloc_memory");
-    } else {
-        rbgpu_diag_set_num("psp_alloc_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_cos_alloc_memory");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[13], 1, address, size)) {
-        rbgpu_diag_set_num("psp_asic_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_asic_type_init");
-    } else {
-        rbgpu_diag_set_num("psp_asic_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_asic_type_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[14], 1, address, size)) {
-        rbgpu_diag_set_num("psp_pfn_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_init_pfn_ptr");
-    } else {
-        rbgpu_diag_set_num("psp_pfn_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_init_pfn_ptr");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[15], 1, address, size)) {
-        rbgpu_diag_set_num("psp_read_cfg_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_read_config");
-    } else {
-        rbgpu_diag_set_num("psp_read_cfg_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_read_config");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[16], 1, address, size)) {
-        rbgpu_diag_set_num("psp_alloc_priv_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_allocate_private_mem");
-    } else {
-        rbgpu_diag_set_num("psp_alloc_priv_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_allocate_private_mem");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[17], 1, address, size)) {
-        rbgpu_diag_set_num("psp_ring_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_ring_init");
-    } else {
-        rbgpu_diag_set_num("psp_ring_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_ring_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[18], 1, address, size)) {
-        rbgpu_diag_set_num("psp_ring_create_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_ring_create");
-    } else {
-        rbgpu_diag_set_num("psp_ring_create_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_ring_create");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[19], 1, address, size)) {
-        rbgpu_diag_set_num("psp_is_sos_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_bootloader_is_sos_running");
-    } else {
-        rbgpu_diag_set_num("psp_is_sos_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_bootloader_is_sos_running");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[20], 1, address, size)) {
-        rbgpu_diag_set_num("psp_km_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_cmd_km_init");
-    } else {
-        rbgpu_diag_set_num("psp_km_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_cmd_km_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[21], 1, address, size)) {
-        rbgpu_diag_set_num("psp_tmr_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_tmr_init");
-    } else {
-        rbgpu_diag_set_num("psp_tmr_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_tmr_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[22], 1, address, size)) {
-        rbgpu_diag_set_num("psp_tmr_load_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_tmr_load");
-    } else {
-        rbgpu_diag_set_num("psp_tmr_load_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_tmr_load");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[23], 1, address, size)) {
-        rbgpu_diag_set_num("psp_dtm_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_dtm_init");
-    } else {
-        rbgpu_diag_set_num("psp_dtm_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_dtm_init");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[24], 1, address, size)) {
-        rbgpu_diag_set_num("psp_np_fw_load_routed", 1);
-        rbgpu_log("HWLibs: hooked _psp_np_fw_load");
-    } else {
-        rbgpu_diag_set_num("psp_np_fw_load_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _psp_np_fw_load");
-    }
-
-    if (patcher.routeMultiple(id, &ttlReqs[25], 1, address, size)) {
-        rbgpu_diag_set_num("gc_sw_init_routed", 1);
-        rbgpu_log("HWLibs: hooked _ipi_gc_sw_init");
-    } else {
-        rbgpu_diag_set_num("gc_sw_init_routed", 0);
-        rbgpu_log("HWLibs: failed to hook _ipi_gc_sw_init");
-    }
+    routeTTL(patcher, id, address, size);
+    routePSPBasics(patcher, id, address, size);
+    routePSPRingTmr(patcher, id, address, size);
+    routeGC(patcher, id, address, size);
 
     if (!noSmuHook) {
         orig_smu_cgs_alloc_memory = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));
