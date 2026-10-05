@@ -71,7 +71,8 @@ show_status() {
     edit status
     if [ -d "$oc/Kexts/RembrandtGPU.kext" ]; then
         v="$(plutil -extract CFBundleVersion raw "$oc/Kexts/RembrandtGPU.kext/Contents/Info.plist" 2>/dev/null || echo '?')"
-        echo "EFI/OC/Kexts/RembrandtGPU.kext: present, version $v"
+        u="$(dwarfdump --uuid "$oc/Kexts/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU" 2>/dev/null | awk '{print $2}')"
+        echo "EFI/OC/Kexts/RembrandtGPU.kext: present, version $v, UUID ${u:-?}"
     else
         echo "EFI/OC/Kexts/RembrandtGPU.kext: not present"
     fi
@@ -84,6 +85,9 @@ status)
 install)
     [ -d "$oc/Kexts/Lilu.kext" ] || { echo "no Lilu.kext in EFI/OC/Kexts; stopping" >&2; exit 1; }
     echo "building as $user"
+    # GNU make 3.81 (macOS) compares whole seconds; recompile the plugin's
+    # own sources so a same-second edit can never ship a stale binary.
+    rm -f "$root"/build/plugin/kern_start.o "$root"/build/plugin/RembrandtGPUPeer.o
     sudo -u "$user" make -C "$root" plugin
     plutil -lint -s "$kext/Contents/Info.plist"
     [ -f "$kext/Contents/MacOS/RembrandtGPU" ] || { echo "no binary in $kext" >&2; exit 1; }
