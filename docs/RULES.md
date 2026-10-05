@@ -207,3 +207,13 @@ Addr 0x01ef0 aperture 1. Driver state trace: accelStart_entry/exit 1,
 accelStarted 0, initLinkToPeer 1, createHWHandler 1, initExternalInterfaces 1;
 createHWInterface, configureDevice, hardwareInit, initializeTtl and every
 later step 0; u64AllPowerUp 0. Full log: logs/20261005-023111-plugin/peer.plist.
+
+Boot 7 (2026-10-05 09:25, milestone 2e, UUID DE6217E7): no panic.
+deviceTypeTable entry 60 (0x73A0, type 6) replaced with 0x1681 (Gemini's
+note said index 66 / 0x5D; the code chose 60). Read-back 0x1681 / type 6:
+the write to HWLibs __TEXT,__const sticks. "Unable to find matching firmware
+device type" is gone. TTL::initialize() still fails 0xe00002bc, and the rest
+of the log is unchanged (NULL TTL handle, PSP Ready/POST 0xffffffff, same two
+RSMU timeout events, state trace u64AllAccelStart 0x20c5, nothing past
+initExternalInterfaces). tOS status 0x0011e396. Full log:
+logs/20261005-092629-plugin/peer.plist.
