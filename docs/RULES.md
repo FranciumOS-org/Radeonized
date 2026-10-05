@@ -61,6 +61,11 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
   /private/var/tmp, loads, prints the kernel messages and tools/report.py) and
   `sudo tools/unload.sh`. the assistant never runs these and never asks for the password.
 - Never install into the EFI or /Library/Extensions.
+- The Lilu plugin (src/plugin, `make plugin`) boots from the EFI. The user runs
+  `sudo tools/efi.sh install|off|on|uninstall|status|restore` (saves
+  config.plist to logs/efi-backups/ first; edits via tools/efi_config.py, tested
+  by tools/efi_config_test.py) and `tools/plugin_check.sh` after a reboot.
+  the assistant never runs efi.sh.
 - Before any load, commit so a hang loses nothing. The user allows the assistant to
   commit at any time without asking (2026-10-04); pushing still needs asking.
 - After a reboot: `/Library/Logs/DiagnosticReports/*.panic`, and
