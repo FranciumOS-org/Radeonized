@@ -15,7 +15,7 @@
 
 OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 
-#define RBGPU_RING_SIZE 128
+#define RBGPU_RING_SIZE 256
 #define RBGPU_LINE_MAX  384
 #define RBGPU_MAX_DIAGS 96
 #define RBGPU_BUF_SIZE  4096
@@ -204,7 +204,7 @@ void rbgpu_diag_set_str(const char *key, const char *val) {
         if (g_diagCount < RBGPU_MAX_DIAGS) {
             strncpy(g_diags[g_diagCount].key, key, sizeof(g_diags[g_diagCount].key) - 1);
             g_diags[g_diagCount].key[sizeof(g_diags[g_diagCount].key) - 1] = '\0';
-            g_diags[g_diagCount].type   = DIAG_TYPE_STR;
+            g_diags[g_diagCount].type = DIAG_TYPE_STR;
             strncpy(g_diags[g_diagCount].strVal, val, sizeof(g_diags[g_diagCount].strVal) - 1);
             g_diags[g_diagCount].strVal[sizeof(g_diags[g_diagCount].strVal) - 1] = '\0';
             g_diagCount++;
