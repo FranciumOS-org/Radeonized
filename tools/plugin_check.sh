@@ -19,6 +19,13 @@ echo
 echo "--- loaded kexts"
 kmutil showloaded --list-only 2>/dev/null | grep -E 'as.vit9696.Lilu|com.rembrandtgpu' | tee "$out/kexts.txt"
 grep -q com.rembrandtgpu.plugin "$out/kexts.txt" || echo "  com.rembrandtgpu.plugin is not loaded"
+# Is the loaded plugin the one in build/out? (kmutil prints the binary's UUID)
+built="$(dwarfdump --uuid "$root/build/out/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU" 2>/dev/null | awk '{print $2}')"
+if [ -n "$built" ] && grep -q com.rembrandtgpu.plugin "$out/kexts.txt"; then
+    grep com.rembrandtgpu.plugin "$out/kexts.txt" | grep -q "$built" \
+        && echo "  loaded plugin = build/out (UUID $built)" \
+        || echo "  NOTE: loaded plugin is NOT the current build/out (UUID $built): reinstall with sudo tools/efi.sh install"
+fi
 
 echo
 echo "--- plugin messages this boot"

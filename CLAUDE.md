@@ -171,3 +171,10 @@ the bare slide, and routeMultiple then writes a jump there. Never route a name
 by a kext's id unless `nm -m build/re/<kext>` shows it defined in that kext
 (_kprintf / _IOLog are imports in all AMD kexts; they live in the kernel).
 _smu_cgs_free_memory does not exist in X6800HWLibs (only _smu_cgs_alloc_memory).
+
+Boot 4 (2026-10-05 02:08) ran milestone 2b again (UUID B3D22192), not 2c: macOS's
+GNU make 3.81 compares whole seconds, and a same-second stash/pop left 2b
+objects newer-or-equal to the 2c sources. No panic. efi.sh install now
+recompiles the plugin sources and prints the installed UUID; plugin_check.sh
+says whether the loaded plugin is build/out. Never swap sources in and out
+of the tree around a build; use a separate checkout.
