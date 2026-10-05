@@ -7,9 +7,12 @@ tools/efi.sh; works on any path, so it can be tried on a copy first.
     python3 tools/efi_config.py CONFIG remove-kext
     python3 tools/efi_config.py CONFIG bootarg add -rbgpuoff
     python3 tools/efi_config.py CONFIG bootarg remove -rbgpuoff
+    python3 tools/efi_config.py CONFIG sysreport on|off   # Misc -> Debug -> SysReport
 
-Only these keys are touched: the RembrandtGPU entry of Kernel -> Add, and
-boot-args under NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82.
+Only these keys are touched: the RembrandtGPU entry of Kernel -> Add,
+boot-args under NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82, and
+Misc -> Debug -> SysReport (OpenCore DEBUG builds dump ACPI tables, among
+them the VBIOS table VFCT, to the EFI's SysReport folder at boot).
 Everything else is written back as read (plistlib keeps key order, data and
 types). The new file is written next to the old one, read back, and only
 then moved over it, so an error never leaves a half-written config.
@@ -95,6 +98,17 @@ def bootarg(cfg, op, arg):
     return f"boot-args now: {v['boot-args']}"
 
 
+def sysreport(cfg, on):
+    try:
+        dbg = cfg["Misc"]["Debug"]
+    except (KeyError, TypeError):
+        raise ConfigError("no Misc -> Debug")
+    if not isinstance(dbg, dict) or not isinstance(dbg.get("SysReport"), bool):
+        raise ConfigError("no Misc -> Debug -> SysReport boolean")
+    dbg["SysReport"] = on
+    return f"Misc -> Debug -> SysReport = {on}"
+
+
 def status(cfg):
     out = []
     lst = kext_list(cfg)
@@ -108,6 +122,8 @@ def status(cfg):
         out.append(f"{BUNDLE}: index {i}, Enabled={e.get('Enabled')}, {where}")
     v = boot_vars(cfg)
     out.append(f"boot-args: {v['boot-args']}")
+    sr = cfg.get("Misc", {}).get("Debug", {}).get("SysReport")
+    out.append(f"SysReport: {sr}")
     deletes = cfg.get("NVRAM", {}).get("Delete", {}).get(BOOT_GUID, [])
     if "boot-args" not in deletes:
         out.append("WARNING: NVRAM -> Delete does not list boot-args, so boot-args edits here "
@@ -130,6 +146,8 @@ def main(argv):
             msg = add_kext(cfg)
         elif cmd == "remove-kext":
             msg = remove_kext(cfg)
+        elif cmd == "sysreport" and len(argv) == 4 and argv[3] in ("on", "off"):
+            msg = sysreport(cfg, argv[3] == "on")
         elif cmd == "bootarg" and len(argv) == 5 and argv[3] in ("add", "remove"):
             msg = bootarg(cfg, argv[3], argv[4])
         else:

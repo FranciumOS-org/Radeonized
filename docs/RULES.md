@@ -70,7 +70,9 @@ runs on the firmware framebuffer, IONDRVFramebuffer + AMDSupport attached to
   `sudo tools/efi.sh install|off|on|uninstall|status|restore` (saves
   config.plist to logs/efi-backups/ first; edits via tools/efi_config.py, tested
   by tools/efi_config_test.py) and `tools/plugin_check.sh` after a reboot.
-  the assistant never runs efi.sh.
+  the assistant never runs efi.sh. `efi.sh sysreport-on` + reboot + `efi.sh vbios`
+  pulls the 680M VBIOS out of the ACPI VFCT table (tools/vfct.py, tested by
+  tools/vfct_test.py) into firmware/ (gitignored: AMD/ASUS firmware).
 - Before any load, commit so a hang loses nothing. The user allows the assistant to
   commit at any time without asking (2026-10-04); pushing still needs asking.
 - After a reboot: `/Library/Logs/DiagnosticReports/*.panic`, and
