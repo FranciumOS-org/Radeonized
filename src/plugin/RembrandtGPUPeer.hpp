@@ -3,6 +3,7 @@
 
 #include <IOKit/IOService.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <kern/thread_call.h>
 
 class RembrandtGPUPeer : public IOService {
     OSDeclareDefaultStructors(RembrandtGPUPeer)
@@ -11,6 +12,10 @@ private:
     IOPCIDevice     *pciDevice{nullptr};
     IOService       *accelerator{nullptr};
     const OSSymbol  *symSpecialAMDKey{nullptr};
+    thread_call_t    postRegisterCall{nullptr};
+
+    static void postRegisterAction(thread_call_param_t param0, thread_call_param_t param1);
+    void handlePostRegister();
 
 public:
     bool init(OSDictionary *dictionary = nullptr) override;

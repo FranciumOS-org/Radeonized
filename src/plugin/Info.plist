@@ -70,6 +70,26 @@
             <key>IOProviderClass</key>
             <string>IOPCIDevice</string>
         </dict>
+        <key>RembrandtGPU Accelerator (0x1681)</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.apple.kext.AMDRadeonX6000</string>
+            <key>IOClass</key>
+            <string>AMDRadeonX6000_AMDNavi21GraphicsAccelerator</string>
+            <key>IOMatchCategory</key>
+            <string>IOAccelerator</string>
+            <key>IOPCIMatch</key>
+            <string>0x16811002</string>
+            <key>IOPropertyMatch</key>
+            <dict>
+                <key>LoadAccelerator</key>
+                <true/>
+                <key>RBGPULoad</key>
+                <true/>
+            </dict>
+            <key>IOProviderClass</key>
+            <string>IOPCIDevice</string>
+        </dict>
     </dict>
     <key>OSBundleLibraries</key>
     <dict>
