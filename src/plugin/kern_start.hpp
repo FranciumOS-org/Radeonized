@@ -4,6 +4,8 @@
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_patcher.hpp>
 
+#include "RembrandtGPUPeer.hpp"
+
 #define MODULE_SHORT "rbgpu"
 
 class RGPU {
