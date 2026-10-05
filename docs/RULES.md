@@ -156,3 +156,11 @@ probe failed without a panic). Nothing from the plugin is in `log show`
 (18k kernel lines this boot) or the dmesg grep, with msgbuf=1048576: IOLog
 from the plugin is not usable as evidence here. Diagnostics have to go into
 registry properties.
+Boot 3 (milestone 2b, registry diagnostics): no panic. SMU hook routed but
+never called; the start() guard did not install (it looked up
+`__ZN22AMDGraphicsAccelerator...`; the real names carry the
+`AMDRadeonX6000_` prefix, `__ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService`).
+The accelerator sent the peer request 0x14 (Gpu Status) 7x, answered
+*p2 = 1, never 0x00 Register, and does not stay attached: its start() fails
+early, before Register and before HWLibs reaches SMU init. Next: capture
+Apple's own kprintf/IOLog output into RBGPULog to see why.
