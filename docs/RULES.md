@@ -116,4 +116,5 @@ Empty RembrandtGPU.kext installed with tools/efi.sh: OpenCore injected it,
 Lilu 1.7.3 accepted it, the RembrandtGPU IOService is live under IOResources.
 Its SYSLOG line from pluginStart() is in neither `log show --last boot` nor
 dmesg: early-boot plugin messages are not kept, so the registry instance is
-the check (tools/plugin_check.sh). The -rbgpuoff test is still to do.
+the check (tools/plugin_check.sh). With -rbgpuoff the kext is still injected
+and loaded but no instance exists: the off-switch works. Milestone 0 done.
