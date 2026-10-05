@@ -1,3 +1,5 @@
+
+```cpp
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <Headers/kern_util.hpp>
@@ -15,7 +17,7 @@
 
 OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 
-#define RBGPU_RING_SIZE 256
+#define RBGPU_RING_SIZE 512
 #define RBGPU_LINE_MAX  384
 #define RBGPU_MAX_DIAGS 96
 #define RBGPU_BUF_SIZE  4096
@@ -506,3 +508,4 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
     return super::callPlatformFunction(functionName, waitForFunction, p1, p2, p3, p4);
 }
 
+```

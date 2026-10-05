@@ -1,3 +1,5 @@
+
+```cpp
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
@@ -1026,6 +1028,14 @@ static void hooked_gc_get_hw_config_tbl_info(void *gc_buf, uint32_t hw_version) 
 static int hooked_gc_set_fw_entry_info(void *p1, void *p2, uint32_t rev, void *p4) {
     rbgpu_diag_inc("gc_set_fw_info_calls");
     rbgpu_log("_gc_set_fw_entry_info entered: p1=%p, p2=%p, rev=%u, p4=%p", p1, p2, rev, p4);
+    // 2af: read-only dump of the p4 block (first 8 dwords). p4 is an
+    // Apple-owned pointer; this only reads, to learn the entry format the
+    // yellow_carp firmware-replacement step will need to fabricate.
+    if (p4) {
+        uint32_t *d = reinterpret_cast<uint32_t *>(p4);
+        rbgpu_log("_gc_set_fw_entry_info p4 dwords: %08x %08x %08x %08x %08x %08x %08x %08x",
+                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+    }
     int ret = 1;
     if (orig_gc_set_fw_entry_info) {
         ret = orig_gc_set_fw_entry_info(p1, p2, rev, p4);
@@ -1081,12 +1091,28 @@ static uint8_t hooked_ttlDevGetDoorbellRange(void *dev, uint32_t type, uint32_t 
 
 static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
     rbgpu_diag_inc("gc_set_fw_calls");
-    uint32_t fw_id = fw_entry ? *reinterpret_cast<uint32_t *>(fw_entry) : 0;
     uint8_t ret = 0;
+    // 2af: read-only dump of the firmware entry descriptor (first 8 dwords),
+    // before and after the original call, to learn its layout for the
+    // yellow_carp firmware-replacement step. Nothing here is modified.
+    if (fw_entry) {
+        uint32_t *d = reinterpret_cast<uint32_t *>(fw_entry);
+        rbgpu_log("_IpiSetFwEntry pre : instance=%p entry=%p id=%u dwords: %08x %08x %08x %08x %08x %08x %08x %08x",
+                  instance, fw_entry, d[0],
+                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+    } else {
+        rbgpu_log("_IpiSetFwEntry pre : instance=%p entry=NULL", instance);
+    }
     if (orig_ipi_set_fw_entry) {
         ret = orig_ipi_set_fw_entry(instance, fw_entry);
     }
-    rbgpu_log("_IpiSetFwEntry(instance=%p, fw_id=%u) returned %u", instance, fw_id, ret);
+    if (fw_entry) {
+        uint32_t *d = reinterpret_cast<uint32_t *>(fw_entry);
+        rbgpu_log("_IpiSetFwEntry post: id=%u dwords: %08x %08x %08x %08x %08x %08x %08x %08x ret=%u",
+                  d[0], d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], ret);
+    } else {
+        rbgpu_log("_IpiSetFwEntry post: ret=%u", ret);
+    }
     rbgpu_diag_set_num("gc_set_fw_ret", ret);
     return ret;
 }
@@ -1840,3 +1866,4 @@ void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_
     rbgpu_log("com.apple.kext.AMDRadeonX6000HWServices matched and monitored");
 }
 
+```
