@@ -193,3 +193,17 @@ failed, driver state trace u64AllAccelStart 0x20c5. Failure path ran without
 a panic although the guard did not install ("failed to locate or patch stop()
 call site in start()"). SMU hook still not reached (TTL init fails first).
 Captured entries are cut at ~256 chars. Full log: logs/20261005-021213-plugin/peer.plist.
+
+Boot 6 (2026-10-05 02:30, milestone 2d, UUID F02659D0): no panic. Multi-line
+capture works (PSP block and state trace whole). __ZL15deviceTypeTable resolved
+(0xffffff7fa51c4d60) and 0x1681 -> type 6 written at empty index 83 before
+HWLibs ran; HWLibs still logs "Unable to find matching firmware device type
+for device ID: 0x1681" ~2 ms later, and TTL::initialize() fails 0xe00002bc
+as before. So that error does not come from a lookup that this table entry
+satisfies. PSP: tOS status 0x0011a215 (varies by boot), BootLoader Ready /
+POST code / FW Validation Info 0xffffffff, tOS PC/panic code 0. RSMU timeout
+log: 2 events, [0] ID 0x6 CLKA0 read Addr 0x5b388 aperture 0, [1] GC read
+Addr 0x01ef0 aperture 1. Driver state trace: accelStart_entry/exit 1,
+accelStarted 0, initLinkToPeer 1, createHWHandler 1, initExternalInterfaces 1;
+createHWInterface, configureDevice, hardwareInit, initializeTtl and every
+later step 0; u64AllPowerUp 0. Full log: logs/20261005-023111-plugin/peer.plist.
