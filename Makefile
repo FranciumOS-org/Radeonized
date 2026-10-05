@@ -105,12 +105,13 @@ PLUGIN_SRC  := $(PROJ_ROOT)/src/plugin
 PLUGIN_VER  := 1.0.0
 PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"'
 PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/RembrandtGPUPeer.o \
-               $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o
+               $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o \
+               $(BUILD_DIR)/plugin/rb_smu13.o $(BUILD_DIR)/plugin/rb_discovery.o
 VBIOS_ROM   := firmware/680m-vbios.rom
 VBIOS_HDR   := $(BUILD_DIR)/plugin/gen/vbios_data.h
 PLUGIN_BUNDLE := $(OUT)/RembrandtGPU.kext
 PLUGIN_BIN    := $(PLUGIN_BUNDLE)/Contents/MacOS/RembrandtGPU
-PLUGIN_CXXFLAGS := $(filter-out -Werror -I$(COMMON),$(KEXT_CXXFLAGS)) -isystem $(LILU) $(PLUGIN_DEFS) -I$(BUILD_DIR)/plugin/gen
+PLUGIN_CXXFLAGS := $(filter-out -Werror -I$(COMMON),$(KEXT_CXXFLAGS)) -isystem $(LILU) $(PLUGIN_DEFS) -I$(BUILD_DIR)/plugin/gen -I$(COMMON)
 
 $(BUILD_DIR)/plugin/%.o: $(PLUGIN_SRC)/%.cpp
 	@mkdir -p $(dir $@)
@@ -128,11 +129,17 @@ $(BUILD_DIR)/plugin/plugin_start.o: $(LILU)/Library/plugin_start.cpp
 	@echo "  CXX  Lilu/Library/plugin_start.cpp"
 	@$(CXX) $(PLUGIN_CXXFLAGS) -c $< -o $@
 
+# The shared, host-tested libraries the plugin uses (src/common).
+$(BUILD_DIR)/plugin/%.o: $(COMMON)/%.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   common/$*.c (plugin)"
+	@$(CC) $(KEXT_CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/plugin/kmod_info.o: $(PLUGIN_SRC)/kmod_info.c
 	@mkdir -p $(dir $@)
 	@$(CC) $(filter-out -I$(COMMON),$(KEXT_CFLAGS)) $(PLUGIN_DEFS) -c $< -o $@
 
-plugin: $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
+plugin: hosttest $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
 	@rm -rf $(PLUGIN_BUNDLE)
 	@mkdir -p $(dir $(PLUGIN_BIN))
 	@sed -e 's/$$(EXECUTABLE_NAME)/RembrandtGPU/g' -e 's/$$(PRODUCT_NAME)/RembrandtGPU/g' \
