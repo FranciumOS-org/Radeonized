@@ -109,3 +109,11 @@ arg 0, resp 1.
   GFX_TEMP_VMIN, GFX_DEM, ATHUB_PG, VCN_DPM, DCFCLK_DPM, S0I3, STAPM. Off:
   ULV, ZSTATES, DS_FCLK, FUSE_PG, CORE_DLDO, RSMU/SMN/MSMU_LOW_POWER, SMART_SHIFT.
 - First answer took 307 us (the SMU waking from deep sleep), later ones 8-12 us.
+
+## Lilu plugin milestone 0 (2026-10-05)
+
+Empty RembrandtGPU.kext installed with tools/efi.sh: OpenCore injected it,
+Lilu 1.7.3 accepted it, the RembrandtGPU IOService is live under IOResources.
+Its SYSLOG line from pluginStart() is in neither `log show --last boot` nor
+dmesg: early-boot plugin messages are not kept, so the registry instance is
+the check (tools/plugin_check.sh). The -rbgpuoff test is still to do.
