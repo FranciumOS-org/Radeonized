@@ -75,6 +75,8 @@ typedef int      (*smu_cgs_free_memory_t)(void *ctx, void *handle);
 typedef uint32_t (*smu_get_hw_version_t)(uint64_t ver, uint64_t rev);
 typedef int      (*smu_read_config_space_t)(void *ctx);
 typedef int      (*smu_init_function_pointer_list_t)(void *ctx, uint64_t ver, uint64_t rev);
+
+typedef int      (*amdtll_init_input_t)(void *this_ptr, void *input);
 typedef int      (*amdtll_initialize_t)(void *this_ptr);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
@@ -85,6 +87,8 @@ static smu_cgs_free_memory_t            orig_smu_cgs_free_memory            = nu
 static smu_get_hw_version_t             orig_smu_get_hw_version             = nullptr;
 static smu_read_config_space_t          orig_smu_read_config_space          = nullptr;
 static smu_init_function_pointer_list_t orig_smu_init_function_pointer_list = nullptr;
+
+static amdtll_init_input_t              orig_amdtll_init_input              = nullptr;
 static amdtll_initialize_t              orig_amdtll_initialize              = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
@@ -508,10 +512,45 @@ static int hooked_AmdTtlServices_initialize(void *this_ptr) {
     return ret;
 }
 
+static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
+    rbgpu_diag_inc("ttl_init_inp_calls");
+    auto inp = reinterpret_cast<uint64_t *>(input);
+
+    uint64_t f560 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x560);
+    uint64_t f568 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x568);
+    uint64_t f570 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570);
+    uint32_t f578 = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578);
+    uint8_t  f598 = *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x598);
+
+    rbgpu_diag_set_num("ttl_inp_0", inp ? inp[0] : 0);
+    rbgpu_diag_set_num("ttl_inp_1", inp ? inp[1] : 0);
+    rbgpu_diag_set_num("ttl_inp_2", inp ? inp[2] : 0);
+    rbgpu_diag_set_num("ttl_inp_4", inp ? inp[4] : 0);
+    rbgpu_diag_set_num("ttl_inp_5", inp ? inp[5] : 0);
+    rbgpu_diag_set_num("ttl_inp_6", inp ? inp[6] : 0);
+    rbgpu_diag_set_num("ttl_this_570", f570);
+
+    rbgpu_log("AmdTtlServices::initialize(input=%p): [0]=0x%llx [1]=0x%llx [2]=0x%llx [4]=0x%llx [5]=0x%llx [6]=0x%llx",
+              input,
+              inp ? inp[0] : 0, inp ? inp[1] : 0, inp ? inp[2] : 0,
+              inp ? inp[4] : 0, inp ? inp[5] : 0, inp ? inp[6] : 0);
+
+    rbgpu_log("AmdTtlServices state before: 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x",
+              f560, f568, f570, f578, f598);
+
+    int ret = 0;
+    if (orig_amdtll_init_input) {
+        ret = orig_amdtll_init_input(this_ptr, input);
+    }
+
+    rbgpu_log("AmdTtlServices::initialize(input) returned 0x%08X", ret);
+    rbgpu_diag_set_num("ttl_init_inp_ret", static_cast<uint32_t>(ret));
+    return ret;
+}
+
 static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 83) {
     auto table = reinterpret_cast<DeviceTypeEntry *>(addr);
 
-    // Check if 0x1681 already exists
     for (size_t i = 0; i < max_entries; i++) {
         if (table[i].deviceId == 0x1681) {
             rbgpu_diag_set_num("dev_type_patched", 1);
@@ -523,7 +562,6 @@ static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 
         }
     }
 
-    // Explicitly target index 66 (+0x210: 0x005D -> 0x1681, type 6)
     size_t target_idx = 66;
     if (target_idx < max_entries && table[target_idx].deviceId == 0x005D && table[target_idx].deviceType == 6) {
         uint32_t old_id = table[target_idx].deviceId;
@@ -550,7 +588,6 @@ static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 
         return true;
     }
 
-    // Fallback: replace any active non-shipping type 6 entry if index 66 is not 0x005D
     for (size_t i = 0; i < max_entries; i++) {
         if (table[i].deviceType == 6 &&
             table[i].deviceId != 0x73A0 &&
@@ -644,6 +681,9 @@ void RGPU::init() {
     rbgpu_diag_set_num("dev_type_rb_type", 0);
     rbgpu_diag_set_num("ttl_init_routed", 0);
     rbgpu_diag_set_num("ttl_init_ret", 0);
+    rbgpu_diag_set_num("ttl_init_inp_routed", 0);
+    rbgpu_diag_set_num("ttl_init_inp_calls", 0);
+    rbgpu_diag_set_num("ttl_init_inp_ret", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
@@ -684,12 +724,28 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
 
     patchDeviceTypeTable(patcher, id);
 
-    KernelPatcher::RouteRequest ttlReq(
-        "__ZN14AmdTtlServices10initializeEv",
-        hooked_AmdTtlServices_initialize,
-        orig_amdtll_initialize
-    );
-    if (patcher.routeMultiple(id, &ttlReq, 1, address, size)) {
+    KernelPatcher::RouteRequest ttlReqs[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput",
+            hooked_AmdTtlServices_initialize_input,
+            orig_amdtll_init_input
+        ),
+        KernelPatcher::RouteRequest(
+            "__ZN14AmdTtlServices10initializeEv",
+            hooked_AmdTtlServices_initialize,
+            orig_amdtll_initialize
+        )
+    };
+
+    if (patcher.routeMultiple(id, &ttlReqs[0], 1, address, size)) {
+        rbgpu_diag_set_num("ttl_init_inp_routed", 1);
+        rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput");
+    } else {
+        rbgpu_diag_set_num("ttl_init_inp_routed", 0);
+        rbgpu_log("HWLibs: failed to hook __ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[1], 1, address, size)) {
         rbgpu_diag_set_num("ttl_init_routed", 1);
         rbgpu_log("HWLibs: hooked __ZN14AmdTtlServices10initializeEv");
     } else {
