@@ -85,6 +85,12 @@ typedef uint8_t  (*ipi_execute_swip_entry_point_fn_t)(void *instance, uint32_t s
 typedef void*    (*ipi_get_discovery_info_fn_t)(void *instance, uint32_t client_id);
 typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
 
+typedef int      (*psp_sw_init_fn_t)(void *param1, void *param2);
+typedef int      (*psp_cos_alloc_memory_fn_t)(void *ctx, uint32_t size, uint32_t align, void **out_ptr);
+typedef int      (*psp_asic_type_init_fn_t)(void *psp_buf, void *disc_entry);
+typedef int      (*psp_init_pfn_ptr_fn_t)(void *psp_buf);
+typedef int      (*psp_read_config_fn_t)(void *psp_buf);
+
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
 
@@ -102,6 +108,12 @@ static ttl_is_supported_device_fn_t     orig_ttl_is_supported_device        = nu
 static ipi_execute_swip_entry_point_fn_t orig_ipi_execute_swip_entry_point = nullptr;
 static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info       = nullptr;
 static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
+
+static psp_sw_init_fn_t                 orig_psp_sw_init                    = nullptr;
+static psp_cos_alloc_memory_fn_t        orig_psp_cos_alloc_memory           = nullptr;
+static psp_asic_type_init_fn_t          orig_psp_asic_type_init             = nullptr;
+static psp_init_pfn_ptr_fn_t            orig_psp_init_pfn_ptr               = nullptr;
+static psp_read_config_fn_t             orig_psp_read_config                = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -564,10 +576,8 @@ static int hooked_ipi_psp_sw_init(void *dev) {
     rbgpu_diag_inc("psp_sw_init_calls");
     uint64_t *dev_ptr = reinterpret_cast<uint64_t *>(dev);
     void *fn_ptr = dev_ptr ? reinterpret_cast<void *>(dev_ptr[1]) : nullptr;
-    ptrdiff_t kext_offset = (g_kext_addr_hwlibs && fn_ptr && reinterpret_cast<mach_vm_address_t>(fn_ptr) >= g_kext_addr_hwlibs) ?
-        (reinterpret_cast<mach_vm_address_t>(fn_ptr) - g_kext_addr_hwlibs) : -1;
 
-    rbgpu_log("_ipi_psp_sw_init entered: dev=%p, fn_ptr@+0x8=%p (HWLibs offset +0x%zx)", dev, fn_ptr, static_cast<size_t>(kext_offset));
+    rbgpu_log("_ipi_psp_sw_init entered: dev=%p, fn_ptr@+0x8=%p", dev, fn_ptr);
 
     int ret = 0;
     if (orig_ipi_psp_sw_init) {
@@ -586,6 +596,86 @@ static void *hooked_IpiGetDiscoveryInfo(void *instance, uint32_t client_id) {
         ret = orig_ipi_get_discovery_info(instance, client_id);
     }
     rbgpu_log("_IpiGetDiscoveryInfo(instance=%p, client_id=%u) returned %p", instance, client_id, ret);
+    return ret;
+}
+
+static int hooked_psp_sw_init(void *param1, void *param2) {
+    rbgpu_diag_inc("psp_sw_init_sub_calls");
+    uint32_t p1_0 = param1 ? *reinterpret_cast<uint32_t *>(param1) : 0;
+    uint32_t p1_8 = param1 ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(param1) + 0x8) : 0;
+    uint64_t p1_218 = param1 ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(param1) + 0x218) : 0;
+    uint64_t p1_220 = param1 ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(param1) + 0x220) : 0;
+    uint32_t p2_0 = param2 ? *reinterpret_cast<uint32_t *>(param2) : 0;
+
+    rbgpu_log("_psp_sw_init entered: p1=%p (0x%x, +8=0x%x, +218=%p, +220=%p), p2=%p (0x%x)",
+              param1, p1_0, p1_8, reinterpret_cast<void *>(p1_218), reinterpret_cast<void *>(p1_220), param2, p2_0);
+
+    int ret = 1;
+    if (orig_psp_sw_init) {
+        ret = orig_psp_sw_init(param1, param2);
+    }
+
+    rbgpu_log("_psp_sw_init returned %d", ret);
+    rbgpu_diag_set_num("psp_sw_init_sub_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_cos_alloc_memory(void *ctx, uint32_t size, uint32_t align, void **out_ptr) {
+    rbgpu_diag_inc("psp_alloc_calls");
+    int ret = 1;
+    if (orig_psp_cos_alloc_memory) {
+        ret = orig_psp_cos_alloc_memory(ctx, size, align, out_ptr);
+    }
+    void *allocated = (out_ptr && ret == 0) ? *out_ptr : nullptr;
+    rbgpu_log("_psp_cos_alloc_memory(ctx=%p, size=0x%x, align=%u) -> ret=%d, ptr=%p",
+              ctx, size, align, ret, allocated);
+    rbgpu_diag_set_num("psp_alloc_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_asic_type_init(void *psp_buf, void *disc_entry) {
+    rbgpu_diag_inc("psp_asic_init_calls");
+    uint32_t d_8 = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0x8) : 0;
+    uint32_t d_C = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0xC) : 0;
+    uint32_t d_10 = disc_entry ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(disc_entry) + 0x10) : 0;
+
+    rbgpu_log("_psp_asic_type_init entered: buf=%p, disc=%p (+8=0x%x, +C=0x%x, +10=0x%x)",
+              psp_buf, disc_entry, d_8, d_C, d_10);
+
+    int ret = 1;
+    if (orig_psp_asic_type_init) {
+        ret = orig_psp_asic_type_init(psp_buf, disc_entry);
+    }
+
+    uint32_t asic_type = psp_buf ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7d44) : 0;
+    rbgpu_log("_psp_asic_type_init returned %d (asic_type@+0x7d44 = %u)", ret, asic_type);
+    rbgpu_diag_set_num("psp_asic_ret", ret);
+    rbgpu_diag_set_num("psp_asic_type", asic_type);
+    return ret;
+}
+
+static int hooked_psp_init_pfn_ptr(void *psp_buf) {
+    rbgpu_diag_inc("psp_pfn_calls");
+    uint32_t asic_type = psp_buf ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(psp_buf) + 0x7d44) : 0;
+    rbgpu_log("_psp_init_pfn_ptr entered: buf=%p (asic_type=%u)", psp_buf, asic_type);
+
+    int ret = 1;
+    if (orig_psp_init_pfn_ptr) {
+        ret = orig_psp_init_pfn_ptr(psp_buf);
+    }
+
+    rbgpu_log("_psp_init_pfn_ptr returned %d", ret);
+    rbgpu_diag_set_num("psp_pfn_ret", ret);
+    return ret;
+}
+
+static int hooked_psp_read_config(void *psp_buf) {
+    rbgpu_diag_inc("psp_read_cfg_calls");
+    int ret = 0;
+    if (orig_psp_read_config) {
+        ret = orig_psp_read_config(psp_buf);
+    }
+    rbgpu_log("_psp_read_config entered/exited: buf=%p, ret=%d", psp_buf, ret);
     return ret;
 }
 
@@ -967,6 +1057,21 @@ void RGPU::init() {
     rbgpu_diag_set_num("psp_sw_init_ret", 0);
     rbgpu_diag_set_num("ipi_disc_routed", 0);
     rbgpu_diag_set_num("ipi_disc_calls", 0);
+    rbgpu_diag_set_num("psp_sw_sub_routed", 0);
+    rbgpu_diag_set_num("psp_sw_init_sub_calls", 0);
+    rbgpu_diag_set_num("psp_sw_init_sub_ret", 0);
+    rbgpu_diag_set_num("psp_alloc_routed", 0);
+    rbgpu_diag_set_num("psp_alloc_calls", 0);
+    rbgpu_diag_set_num("psp_alloc_ret", 0);
+    rbgpu_diag_set_num("psp_asic_routed", 0);
+    rbgpu_diag_set_num("psp_asic_init_calls", 0);
+    rbgpu_diag_set_num("psp_asic_ret", 0);
+    rbgpu_diag_set_num("psp_asic_type", 0);
+    rbgpu_diag_set_num("psp_pfn_routed", 0);
+    rbgpu_diag_set_num("psp_pfn_calls", 0);
+    rbgpu_diag_set_num("psp_pfn_ret", 0);
+    rbgpu_diag_set_num("psp_read_cfg_routed", 0);
+    rbgpu_diag_set_num("psp_read_cfg_calls", 0);
     rbgpu_diag_set_num("ttl_param_q0", 0);
     rbgpu_diag_set_num("ttl_param_q1", 0);
     rbgpu_diag_set_num("ttl_param_q2", 0);
@@ -1057,6 +1162,31 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_IpiGetDiscoveryInfo",
             hooked_IpiGetDiscoveryInfo,
             orig_ipi_get_discovery_info
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_sw_init",
+            hooked_psp_sw_init,
+            orig_psp_sw_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_cos_alloc_memory",
+            hooked_psp_cos_alloc_memory,
+            orig_psp_cos_alloc_memory
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_asic_type_init",
+            hooked_psp_asic_type_init,
+            orig_psp_asic_type_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_init_pfn_ptr",
+            hooked_psp_init_pfn_ptr,
+            orig_psp_init_pfn_ptr
+        ),
+        KernelPatcher::RouteRequest(
+            "_psp_read_config",
+            hooked_psp_read_config,
+            orig_psp_read_config
         )
     };
 
@@ -1122,6 +1252,46 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("ipi_disc_routed", 0);
         rbgpu_log("HWLibs: failed to hook _IpiGetDiscoveryInfo");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[8], 1, address, size)) {
+        rbgpu_diag_set_num("psp_sw_sub_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_sw_init");
+    } else {
+        rbgpu_diag_set_num("psp_sw_sub_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_sw_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[9], 1, address, size)) {
+        rbgpu_diag_set_num("psp_alloc_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_cos_alloc_memory");
+    } else {
+        rbgpu_diag_set_num("psp_alloc_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_cos_alloc_memory");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[10], 1, address, size)) {
+        rbgpu_diag_set_num("psp_asic_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_asic_type_init");
+    } else {
+        rbgpu_diag_set_num("psp_asic_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_asic_type_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[11], 1, address, size)) {
+        rbgpu_diag_set_num("psp_pfn_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_init_pfn_ptr");
+    } else {
+        rbgpu_diag_set_num("psp_pfn_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_init_pfn_ptr");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[12], 1, address, size)) {
+        rbgpu_diag_set_num("psp_read_cfg_routed", 1);
+        rbgpu_log("HWLibs: hooked _psp_read_config");
+    } else {
+        rbgpu_diag_set_num("psp_read_cfg_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _psp_read_config");
     }
 
     if (!noSmuHook) {
