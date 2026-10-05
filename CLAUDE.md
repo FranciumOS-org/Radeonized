@@ -289,3 +289,11 @@ returned 0. So the check is not the device ID alone (or 0x73BF is not in its
 list). _ttl_initialize -> status 1; _ttl_sw_init / _ttl_hw_init never ran, no
 GPU programming happened. tOS status 0x0011f061. Full log:
 logs/20261005-111348-plugin/peer.plist.
+
+Boot 16 (2026-10-05 12:59, milestone 2n, UUID D656E607, -rbgpusync570 only):
+no panic. _ttlIsSupportedDevice: devId 0x1681, bus 54, attr (params+0x84) =
+0xA; original returned 0, no override (no -rbgpuspoofttl), so _ttl_hw_init
+did not run. _DeviceCapabilityTbl: 93 entries of 0x50; Navi 21 entries have
++0x20 = 0 (73a0/a1/a2/a3/ab/ae) or a revision-like value (73a5/73af 0xc0,
+73bf 0x40..0xd3); none matches attr 0xA, Fiji/Vega use 0xdeadcafe.
+tOS status 0x0010b43f. Full log: logs/20261005-130013-plugin/peer.plist.
