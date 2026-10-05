@@ -1106,6 +1106,23 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
         rbgpu_log("_IpiSetFwEntry pre : instance=%p entry=%p id=%u dwords: %08x %08x %08x %08x %08x %08x %08x %08x",
                   instance, fw_entry, d[0],
                   d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+        // 2ai: identify the blob. data_ptr (d[2..3]) points at the firmware
+        // image: dump its first 16 bytes for the amdgpu_ucode.h header decode
+        // (docs/linux-ref). aux_ptr (d[6..7]) may hold version/name info.
+        // Read-only; the entry itself is untouched.
+        uint64_t data_ptr = static_cast<uint64_t>(d[2]) | (static_cast<uint64_t>(d[3]) << 32);
+        if (data_ptr) {
+            uint8_t *b = reinterpret_cast<uint8_t *>(data_ptr);
+            rbgpu_log("_IpiSetFwEntry data hdr: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                      b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                      b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+        }
+        uint64_t aux_ptr = static_cast<uint64_t>(d[6]) | (static_cast<uint64_t>(d[7]) << 32);
+        if (aux_ptr) {
+            uint32_t *a = reinterpret_cast<uint32_t *>(aux_ptr);
+            rbgpu_log("_IpiSetFwEntry aux: %08x %08x %08x %08x %08x %08x %08x %08x",
+                      a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+        }
     } else {
         rbgpu_log("_IpiSetFwEntry pre : instance=%p entry=NULL", instance);
     }
