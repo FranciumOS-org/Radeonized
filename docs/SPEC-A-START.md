@@ -194,6 +194,32 @@ here. It can come from:
 The peer then sets `ATY,bin_image` (the VBIOS image from VFCT) before step 1.
 Getting the dump is a step for the user.
 
+### B0 result (2026-10-05)
+
+`sudo tools/efi.sh vbios` found 2 VFCT entries, one for 1002:1681 at bus 54
+device 0 function 0, plus an empty one:
+- 44544 bytes, ATOM check and option-ROM checksum both OK;
+- sha256 `27ed5802eb119409e9711bd7e3a8383c9c5725389960c6eebc154737fd8203d9`;
+- kept in firmware/ (not committed).
+
+`tools/atomdump.py` shows:
+
+- "Rembrandt Generic VBIOS", part 113-REMBRANDT-X37, ATOMBIOSBK-AMD
+  VER032.017.000.055.000000, 04/12/22, config "RmbGenericVb". ROM header v2.3;
+  its subsystem field reads 1002:1002 (the PCI subsystem is 1043:14C3).
+- Data tables present:
+  - firmwareinfo v3.4, smu_info v3.1, gfx_info v2.6;
+  - dce_info v4.4, displayobjectinfo v1.4, lcd_info v3.1;
+  - integratedsysteminfo v2.2 (the APU table), gpio_pin_lut, vram_usagebyfirmware;
+  - and five sw_datatables.
+- Absent (the dGPU tables): powerplayinfo, smc_dpm_info, umc_info, vram_info,
+  asic_profiling_info, voltageobject_info.
+  - Apple's Navi 21 SMU path reads its pptable from powerplayinfo
+    (`smu_svc_read_pptable_from_vbios`). The B3 hook replaces that path.
+  - Any other reader of the missing tables will show up in HWLibs' logs
+    ("Could not retrieve ... from VBIOS").
+- 8 of 81 command tables.
+
 ## Open
 
 1. The site that sends 0x14 Gpu Status: not found statically, so the answer
