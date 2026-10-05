@@ -348,3 +348,13 @@ error log in the failure path now carries this PSP event. PSP registers in
 the dump unchanged (tOS 0.28.0.66, Ready/POST 0xffffffff, PC 0).
 _ttl_hw_init did not run. This is the PSP (MP0 13.0.x vs Navi 21's PSP 11)
 wall. tOS status 0x00113b1b. Full log: logs/20261005-134308-plugin/peer.plist.
+
+Boot 21 (2026-10-05 13:52, milestone 2t, UUID 747C7A65, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. _IpiExecuteSwipEntryPoint logged
+(instance 0xffffffd7b21a0000, context 0 each time), in order:
+client 3 event 0 -> 1 (8 us); client 5 event 0 -> 1 (32 us); client 6 (PSP)
+event 0 (SW_INIT) -> 0 after 21 us; then the PSP assert chain as boot 20;
+then client 5 event 2 -> 1 and client 3 event 2 -> 1 (the two that had
+initialised, in reverse order); _ttl_initialize status 4. The PSP SW_INIT
+failure takes ~21 us, so it is decided without waiting on hardware.
+tOS status 0x00117443. Full log: logs/20261005-135303-plugin/peer.plist.
