@@ -332,3 +332,19 @@ table entry!", ipi_bgm_create, IpiValidateTopology, TlsSwInit); status 4 ->
 0xe00002bc. So ttlSetDeviceCapabilityEntry (0x1264698d) does not find its
 entry by device ID + attr in _DeviceCapabilityTbl. _ttl_hw_init did not run.
 tOS status 0x0011395f. Full log: logs/20261005-133521-plugin/peer.plist.
+
+Boot 20 (2026-10-05 13:42, milestone 2r, UUID A121DF03, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. Capability entry 0 = 0x1681 with
++0x18 = +0x20 = 0xdeadcafe. _ttlIsSupportedDevice original 1. NEW: no
+ttlSetDeviceCapabilityEntry / ipi_bgm / IpiValidateTopology asserts: the
+device info entry is found and the IP topology passes. After the two PCI
+config 0x60 writes, ~0.5 ms later the first IP block's SW init fails:
+"TTL Event source_id=2, event_id=0x900c0401, type 3, hw_id=0,
+swip_client_id 6 (SW_IP_CLIENT_ID__PSP, EVENT__SW_INIT)"; ASSERTs
+logSwipFailure (ttl_tls.c:504) "PSP init/power-up failed",
+TlsExecuteIpEntrySeq (ttl_tls.c:357) "SWIP init/power-up failed", TlsSwInit
+(ttl_tls.c:129) "Failed to create TLS"; status 4 -> 0xe00002bc. The SWIP
+error log in the failure path now carries this PSP event. PSP registers in
+the dump unchanged (tOS 0.28.0.66, Ready/POST 0xffffffff, PC 0).
+_ttl_hw_init did not run. This is the PSP (MP0 13.0.x vs Navi 21's PSP 11)
+wall. tOS status 0x00113b1b. Full log: logs/20261005-134308-plugin/peer.plist.
