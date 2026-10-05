@@ -13,14 +13,18 @@ public:
     void init();
     void deinit();
 
-    void processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size);
+    void processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
 
 private:
     bool noSmuHook{false};
     bool noTrap3Guard{false};
+    bool noLogCapture{false};
 
-    void processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size);
-    void processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size);
+    void installKernelLogHooks(KernelPatcher &patcher);
+    void processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    void processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    void processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
 };
 
 #endif // KERN_START_HPP
+

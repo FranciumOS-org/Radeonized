@@ -39,16 +39,29 @@ PluginConfiguration ADDPR(config) = {
 
 static const char *kextPathHWLibs = "/System/Library/Extensions/AMDRadeonX6000HWServices.kext/Contents/PlugIns/AMDRadeonX6800HWLibs.kext/Contents/MacOS/AMDRadeonX6800HWLibs";
 static const char *kextPathX6000  = "/System/Library/Extensions/AMDRadeonX6000.kext/Contents/MacOS/AMDRadeonX6000";
+static const char *kextPathHWSvc  = "/System/Library/Extensions/AMDRadeonX6000HWServices.kext/Contents/MacOS/AMDRadeonX6000HWServices";
 
 enum KextListIndex {
     KextHWLibs = 0,
-    KextX6000
+    KextX6000,
+    KextHWSvc
 };
 
 static KernelPatcher::KextInfo kextList[] = {
-    { "com.apple.kext.AMDRadeonX6800HWLibs", &kextPathHWLibs, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded },
-    { "com.apple.kext.AMDRadeonX6000",        &kextPathX6000,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded }
+    { "com.apple.kext.AMDRadeonX6800HWLibs",     &kextPathHWLibs, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded },
+    { "com.apple.kext.AMDRadeonX6000",            &kextPathX6000,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded },
+    { "com.apple.kext.AMDRadeonX6000HWServices", &kextPathHWSvc,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded }
 };
+
+// AMD Kext memory bounds for return address inspection
+static mach_vm_address_t g_kext_addr_hwlibs = 0;
+static size_t            g_kext_size_hwlibs = 0;
+
+static mach_vm_address_t g_kext_addr_x6000  = 0;
+static size_t            g_kext_size_x6000  = 0;
+
+static mach_vm_address_t g_kext_addr_hwsvc  = 0;
+static size_t            g_kext_size_hwsvc  = 0;
 
 static struct rb_smu13 g_smu;
 static struct rb_hw    g_hw;
@@ -64,11 +77,60 @@ typedef uint32_t (*smu_get_hw_version_t)(uint64_t ver, uint64_t rev);
 typedef int      (*smu_read_config_space_t)(void *ctx);
 typedef int      (*smu_init_function_pointer_list_t)(void *ctx, uint64_t ver, uint64_t rev);
 
+typedef void     (*kprintf_t)(const char *fmt, ...);
+typedef void     (*iolog_t)(const char *fmt, ...);
+
 static smu_cgs_alloc_memory_t           orig_smu_cgs_alloc_memory           = nullptr;
 static smu_cgs_free_memory_t            orig_smu_cgs_free_memory            = nullptr;
 static smu_get_hw_version_t             orig_smu_get_hw_version             = nullptr;
 static smu_read_config_space_t          orig_smu_read_config_space          = nullptr;
 static smu_init_function_pointer_list_t orig_smu_init_function_pointer_list = nullptr;
+
+static kprintf_t orig_kprintf = nullptr;
+static iolog_t   orig_iolog   = nullptr;
+
+static inline const char *getCallerTag(mach_vm_address_t ret_addr) {
+    if (g_kext_addr_hwlibs && ret_addr >= g_kext_addr_hwlibs && ret_addr < g_kext_addr_hwlibs + g_kext_size_hwlibs) {
+        return "HWLibs:";
+    }
+    if (g_kext_addr_x6000 && ret_addr >= g_kext_addr_x6000 && ret_addr < g_kext_addr_x6000 + g_kext_size_x6000) {
+        return "X6000:";
+    }
+    if (g_kext_addr_hwsvc && ret_addr >= g_kext_addr_hwsvc && ret_addr < g_kext_addr_hwsvc + g_kext_size_hwsvc) {
+        return "HWSvc:";
+    }
+    return nullptr;
+}
+
+static void wrap_kprintf(const char *fmt, ...) {
+    void *ret_addr = __builtin_return_address(0);
+    const char *tag = getCallerTag(reinterpret_cast<mach_vm_address_t>(ret_addr));
+    va_list va;
+    va_start(va, fmt);
+    if (tag) {
+        rbgpu_log_captured_va(tag, fmt, va, orig_kprintf);
+    } else if (orig_kprintf) {
+        char buf[256];
+        vsnprintf(buf, sizeof(buf), fmt, va);
+        orig_kprintf("%s", buf);
+    }
+    va_end(va);
+}
+
+static void wrap_iolog(const char *fmt, ...) {
+    void *ret_addr = __builtin_return_address(0);
+    const char *tag = getCallerTag(reinterpret_cast<mach_vm_address_t>(ret_addr));
+    va_list va;
+    va_start(va, fmt);
+    if (tag) {
+        rbgpu_log_captured_va(tag, fmt, va, orig_iolog);
+    } else if (orig_iolog) {
+        char buf[256];
+        vsnprintf(buf, sizeof(buf), fmt, va);
+        orig_iolog("%s", buf);
+    }
+    va_end(va);
+}
 
 static int smu13ErrToApple(int err) {
     switch (err) {
@@ -429,61 +491,132 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
+void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
+    static bool s_kernel_hooks_installed = false;
+    if (s_kernel_hooks_installed || noLogCapture) {
+        return;
+    }
+
+    KernelPatcher::RouteRequest req_kprintf("_kprintf", wrap_kprintf, orig_kprintf);
+    if (patcher.routeMultiple(KernelPatcher::KernelID, &req_kprintf, 1)) {
+        rbgpu_log("Kernel: routed _kprintf successfully");
+    } else {
+        rbgpu_log("Kernel: failed to route _kprintf");
+    }
+
+    KernelPatcher::RouteRequest req_iolog("_IOLog", wrap_iolog, orig_iolog);
+    if (patcher.routeMultiple(KernelPatcher::KernelID, &req_iolog, 1)) {
+        rbgpu_log("Kernel: routed _IOLog successfully");
+    } else {
+        rbgpu_log("Kernel: failed to route _IOLog");
+    }
+
+    s_kernel_hooks_installed = true;
+}
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
+    noLogCapture = checkKernelArgument("-rbgpunocapture");
 
     rbgpu_diag_set_num("smu_hook_routed", 0);
     rbgpu_diag_set_num("guard_routed", 0);
     rbgpu_diag_set_num("smu_hook_calls", 0);
     rbgpu_diag_set_num("guard_calls", 0);
 
-    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s)",
+    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
-              noTrap3Guard ? "DISABLED" : "ENABLED");
+              noTrap3Guard ? "DISABLED" : "ENABLED",
+              noLogCapture ? "DISABLED" : "ENABLED");
 
-    lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
-        static_cast<RGPU *>(user)->processKext(patcher, id, slide, size);
+    lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+        static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
     }, this);
 }
 
 void RGPU::deinit() {
 }
 
-void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
-    if (kextList[KextHWLibs].loadIndex == id && !noSmuHook) {
-        processHWLibs(patcher, id, slide, size);
-    } else if (kextList[KextX6000].loadIndex == id && !noTrap3Guard) {
-        processX6000(patcher, id, slide, size);
+void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    installKernelLogHooks(patcher);
+
+    if (kextList[KextHWLibs].loadIndex == id) {
+        g_kext_addr_hwlibs = address;
+        g_kext_size_hwlibs = size;
+        rbgpu_log("HWLibs loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
+        processHWLibs(patcher, id, address, size);
+    } else if (kextList[KextX6000].loadIndex == id) {
+        g_kext_addr_x6000 = address;
+        g_kext_size_x6000 = size;
+        rbgpu_log("X6000 loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
+        processX6000(patcher, id, address, size);
+    } else if (kextList[KextHWSvc].loadIndex == id) {
+        g_kext_addr_hwsvc = address;
+        g_kext_size_hwsvc = size;
+        rbgpu_log("HWSvc loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
+        processHWServices(patcher, id, address, size);
     }
 }
 
-void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
+void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
 
-    orig_smu_cgs_alloc_memory  = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));
-    orig_smu_cgs_free_memory   = reinterpret_cast<smu_cgs_free_memory_t>(patcher.solveSymbol(id, "_smu_cgs_free_memory"));
-    orig_smu_get_hw_version    = reinterpret_cast<smu_get_hw_version_t>(patcher.solveSymbol(id, "_smu_get_hw_version"));
-    orig_smu_read_config_space = reinterpret_cast<smu_read_config_space_t>(patcher.solveSymbol(id, "_smu_read_config_space"));
+    if (!noSmuHook) {
+        orig_smu_cgs_alloc_memory = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));
+        if (!orig_smu_cgs_alloc_memory) {
+            rbgpu_log("HWLibs: failed to resolve symbol _smu_cgs_alloc_memory");
+        }
 
-    KernelPatcher::RouteRequest requests[] = {
-        KernelPatcher::RouteRequest("_smu_init_function_pointer_list", hooked_smu_init_function_pointer_list, orig_smu_init_function_pointer_list)
-    };
+        orig_smu_cgs_free_memory = reinterpret_cast<smu_cgs_free_memory_t>(patcher.solveSymbol(id, "_smu_cgs_free_memory"));
+        if (!orig_smu_cgs_free_memory) {
+            rbgpu_log("HWLibs: failed to resolve symbol _smu_cgs_free_memory (expected)");
+        }
 
-    if (patcher.routeMultiple(id, requests, slide, size)) {
-        rbgpu_diag_set_num("smu_hook_routed", 1);
-        rbgpu_log("H-SMU-1: smu_init_function_pointer_list hooked successfully");
-    } else {
-        rbgpu_diag_set_num("smu_hook_routed", 0);
-        rbgpu_log("H-SMU-1: failed to hook smu_init_function_pointer_list");
+        orig_smu_get_hw_version = reinterpret_cast<smu_get_hw_version_t>(patcher.solveSymbol(id, "_smu_get_hw_version"));
+        if (!orig_smu_get_hw_version) {
+            rbgpu_log("HWLibs: failed to resolve symbol _smu_get_hw_version");
+        }
+
+        orig_smu_read_config_space = reinterpret_cast<smu_read_config_space_t>(patcher.solveSymbol(id, "_smu_read_config_space"));
+        if (!orig_smu_read_config_space) {
+            rbgpu_log("HWLibs: failed to resolve symbol _smu_read_config_space");
+        }
+
+        mach_vm_address_t smu_init_sym = patcher.solveSymbol(id, "_smu_init_function_pointer_list");
+        if (!smu_init_sym) {
+            rbgpu_log("HWLibs: failed to resolve symbol _smu_init_function_pointer_list");
+        }
+
+        KernelPatcher::RouteRequest requests[] = {
+            KernelPatcher::RouteRequest("_smu_init_function_pointer_list", hooked_smu_init_function_pointer_list, orig_smu_init_function_pointer_list)
+        };
+
+        if (patcher.routeMultiple(id, requests, address, size)) {
+            rbgpu_diag_set_num("smu_hook_routed", 1);
+            rbgpu_log("H-SMU-1: smu_init_function_pointer_list hooked successfully");
+        } else {
+            rbgpu_diag_set_num("smu_hook_routed", 0);
+            rbgpu_log("H-SMU-1: failed to hook smu_init_function_pointer_list");
+        }
     }
 }
 
-void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
+void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6000 (Trap 3 Failure Guard)");
 
-    mach_vm_address_t start_sym = patcher.solveSymbol(id, "__ZN22AMDGraphicsAccelerator5startEP9IOService");
-    mach_vm_address_t stop_sym  = patcher.solveSymbol(id, "__ZN22AMDGraphicsAccelerator4stopEP9IOService");
+    if (noTrap3Guard) {
+        return;
+    }
+
+    mach_vm_address_t start_sym = patcher.solveSymbol(id, "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService");
+    if (!start_sym) {
+        rbgpu_log("X6000: failed to resolve symbol __ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService");
+    }
+
+    mach_vm_address_t stop_sym = patcher.solveSymbol(id, "__ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService");
+    if (!stop_sym) {
+        rbgpu_log("X6000: failed to resolve symbol __ZN37AMDRadeonX6000_AMDGraphicsAccelerator4stopEP9IOService");
+    }
 
     if (!start_sym || !stop_sym) {
         rbgpu_log("Trap 3 Guard: required start/stop symbols not resolved");
@@ -560,3 +693,8 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t sli
         rbgpu_log("Trap 3 Guard: failed to locate or patch stop() call site in start()");
     }
 }
+
+void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
+    rbgpu_log("com.apple.kext.AMDRadeonX6000HWServices matched and monitored");
+}
+
