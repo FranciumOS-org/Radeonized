@@ -20,6 +20,7 @@ private:
     bool noTrap3Guard{false};
     bool noLogCapture{false};
     bool safeTtlMode{false};
+    bool sync570Mode{false};
 
     void installKernelLogHooks(KernelPatcher &patcher);
     void processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);

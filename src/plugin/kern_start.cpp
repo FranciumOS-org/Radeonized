@@ -97,6 +97,7 @@ static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
 
 static bool g_safe_ttl_mode = false;
+static bool g_sync_570_mode = false;
 
 struct DeviceTypeEntry {
     uint32_t deviceId;
@@ -524,15 +525,20 @@ static void hooked_AmdTtlServices_setFirmwareDirectory(void *this_ptr, void *fw_
     rbgpu_diag_set_num("ttl_set_fw_dir_ptr", reinterpret_cast<uint64_t>(fw_dir));
 
     uint64_t pre_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
-    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p) pre +0x570=0x%llx", this_ptr, fw_dir, pre_570);
+    uint64_t pre_958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory(this=%p, dir=%p) pre +0x570=0x%llx, pre +0x958=0x%llx",
+              this_ptr, fw_dir, pre_570, pre_958);
 
     if (orig_amdtll_set_fw_dir) {
         orig_amdtll_set_fw_dir(this_ptr, fw_dir);
     }
 
     uint64_t post_570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
+    uint64_t post_958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
     rbgpu_diag_set_num("ttl_set_fw_dir_post_570", post_570);
-    rbgpu_log("AmdTtlServices::setFirmwareDirectory done: this=%p post +0x570=0x%llx", this_ptr, post_570);
+    rbgpu_diag_set_num("ttl_set_fw_dir_post_958", post_958);
+    rbgpu_log("AmdTtlServices::setFirmwareDirectory done: this=%p post +0x570=0x%llx, post +0x958=0x%llx",
+              this_ptr, post_570, post_958);
 }
 
 static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
@@ -545,6 +551,7 @@ static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
     uint64_t f570 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) : 0;
     uint32_t f578 = this_ptr ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x578) : 0;
     uint8_t  f598 = this_ptr ? *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x598) : 0;
+    uint64_t f958 = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x958) : 0;
 
     rbgpu_diag_set_num("ttl_inp_0", inp ? inp[0] : 0);
     rbgpu_diag_set_num("ttl_inp_1", inp ? inp[1] : 0);
@@ -559,8 +566,15 @@ static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
               inp ? inp[0] : 0, inp ? inp[1] : 0, inp ? inp[2] : 0,
               inp ? inp[4] : 0, inp ? inp[5] : 0, inp ? inp[6] : 0);
 
-    rbgpu_log("AmdTtlServices state before (this=%p): 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x",
-              this_ptr, f560, f568, f570, f578, f598);
+    rbgpu_log("AmdTtlServices state before (this=%p): 0x560=0x%llx 0x568=0x%llx 0x570=0x%llx 0x578=0x%x 0x598=0x%x 0x958=0x%llx",
+              this_ptr, f560, f568, f570, f578, f598, f958);
+
+    if (g_sync_570_mode && f570 == 0 && f958 != 0) {
+        *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x570) = f958;
+        f570 = f958;
+        rbgpu_diag_set_num("ttl_sync_570_applied", 1);
+        rbgpu_log("AmdTtlServices: -rbgpusync570 active; synced +0x570 from +0x958 (0x%llx)", f958);
+    }
 
     if (g_safe_ttl_mode && f570 == 0) {
         rbgpu_log("AmdTtlServices: -rbgpusafettl active; applying SafeBoot bypass to pass 1265fd3e");
@@ -701,7 +715,9 @@ void RGPU::init() {
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
     noLogCapture = checkKernelArgument("-rbgpunocapture");
     safeTtlMode  = checkKernelArgument("-rbgpusafettl");
+    sync570Mode  = checkKernelArgument("-rbgpusync570");
     g_safe_ttl_mode = safeTtlMode;
+    g_sync_570_mode = sync570Mode;
 
     rbgpu_diag_set_num("smu_hook_routed", 0);
     rbgpu_diag_set_num("guard_routed", 0);
@@ -723,12 +739,15 @@ void RGPU::init() {
     rbgpu_diag_set_num("ttl_set_fw_dir_this", 0);
     rbgpu_diag_set_num("ttl_set_fw_dir_ptr", 0);
     rbgpu_diag_set_num("ttl_set_fw_dir_post_570", 0);
+    rbgpu_diag_set_num("ttl_set_fw_dir_post_958", 0);
+    rbgpu_diag_set_num("ttl_sync_570_applied", 0);
 
-    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s)",
+    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s, SafeTTL: %s, Sync570: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
               noTrap3Guard ? "DISABLED" : "ENABLED",
               noLogCapture ? "DISABLED" : "ENABLED",
-              safeTtlMode ? "ENABLED" : "DISABLED");
+              safeTtlMode ? "ENABLED" : "DISABLED",
+              sync570Mode ? "ENABLED" : "DISABLED");
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
