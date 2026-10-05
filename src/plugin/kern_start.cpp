@@ -495,55 +495,61 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     return 0;
 }
 
-static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 84) {
+static bool patchDeviceTypeTableAt(mach_vm_address_t addr, size_t max_entries = 83) {
     auto table = reinterpret_cast<DeviceTypeEntry *>(addr);
 
+    // 1. Check if 0x1681 already exists
     for (size_t i = 0; i < max_entries; i++) {
         if (table[i].deviceId == 0x1681) {
             rbgpu_diag_set_num("dev_type_patched", 1);
             rbgpu_diag_set_num("dev_type_idx", i);
+            rbgpu_diag_set_num("dev_type_rb_id", table[i].deviceId);
+            rbgpu_diag_set_num("dev_type_rb_type", table[i].deviceType);
             rbgpu_log("HWLibs: __ZL15deviceTypeTable already contains 0x1681 at index %zu", i);
             return true;
         }
     }
 
-    for (size_t i = 0; i < max_entries; i++) {
-        if (table[i].deviceId == 0 && table[i].deviceType == 0) {
-            MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
-            table[i].deviceId   = 0x1681;
-            table[i].deviceType = 6;
-            MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
-
-            rbgpu_diag_set_num("dev_type_patched", 1);
-            rbgpu_diag_set_num("dev_type_idx", i);
-            rbgpu_log("HWLibs: patched __ZL15deviceTypeTable: added 0x1681 -> type 6 at empty index %zu", i);
-            return true;
-        }
-    }
-
+    // 2. Replace an active Navi 21 type 6 entry within 0..82.
+    // Index 66 (0x005D, type 6) is an unused test ID and will be replaced first.
     for (size_t i = 0; i < max_entries; i++) {
         if (table[i].deviceType == 6 &&
             table[i].deviceId != 0x73A2 &&
             table[i].deviceId != 0x73A3 &&
             table[i].deviceId != 0x73BF) {
             uint32_t old_id = table[i].deviceId;
+
             MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
             table[i].deviceId   = 0x1681;
             table[i].deviceType = 6;
             MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
 
+            uint32_t rb_id   = table[i].deviceId;
+            uint32_t rb_type = table[i].deviceType;
             rbgpu_diag_set_num("dev_type_patched", 1);
             rbgpu_diag_set_num("dev_type_idx", i);
-            rbgpu_log("HWLibs: patched __ZL15deviceTypeTable: replaced 0x%04X -> 0x1681 (type 6) at index %zu", old_id, i);
+            rbgpu_diag_set_num("dev_type_rb_id", rb_id);
+            rbgpu_diag_set_num("dev_type_rb_type", rb_type);
+
+            if (rb_id != 0x1681) {
+                rbgpu_log("HWLibs: [CRITICAL] write verification FAILED at index %zu! readback: 0x%04X != 0x1681", i, rb_id);
+                return false;
+            }
+
+            rbgpu_log("HWLibs: patched __ZL15deviceTypeTable at active index %zu: 0x%04X -> 0x1681 (type 6, verified readback: 0x%04X, type %u)",
+                      i, old_id, rb_id, rb_type);
             return true;
         }
     }
 
+    rbgpu_log("HWLibs: failed to find a replaceable type 6 slot in __ZL15deviceTypeTable");
     return false;
 }
 
 bool RGPU::patchDeviceTypeTable(KernelPatcher &patcher, size_t id) {
     rbgpu_diag_set_num("dev_type_patched", 0);
+    rbgpu_diag_set_num("dev_type_rb_id", 0);
+    rbgpu_diag_set_num("dev_type_rb_type", 0);
 
     mach_vm_address_t tbl_addr = patcher.solveSymbol(id, "__ZL15deviceTypeTable");
     if (!tbl_addr) {
@@ -556,7 +562,6 @@ bool RGPU::patchDeviceTypeTable(KernelPatcher &patcher, size_t id) {
         return true;
     }
 
-    rbgpu_log("HWLibs: failed to find suitable slot in __ZL15deviceTypeTable");
     return false;
 }
 
@@ -593,6 +598,8 @@ void RGPU::init() {
     rbgpu_diag_set_num("smu_hook_calls", 0);
     rbgpu_diag_set_num("guard_calls", 0);
     rbgpu_diag_set_num("dev_type_patched", 0);
+    rbgpu_diag_set_num("dev_type_rb_id", 0);
+    rbgpu_diag_set_num("dev_type_rb_type", 0);
 
     rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s, Capture: %s)",
               noSmuHook ? "DISABLED" : "ENABLED",
