@@ -321,3 +321,14 @@ IpiValidateTopology, TlsSwInit; _ttl_initialize status 4 -> 0xe00002bc.
 So a 0x1681 device ID in _DeviceCapabilityTbl (cloned entry's +0x20 = 0) is
 not what ttlSetDeviceCapabilityEntry looks for. _ttl_hw_init did not run.
 tOS status 0x00116e2e. Full log: logs/20261005-132913-plugin/peer.plist.
+
+Boot 19 (2026-10-05 13:35, milestone 2q, UUID CDBE2280, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. Cloned _DeviceCapabilityTbl entry 0 now
+0x1681 with +0x20 = 0xA. _ttlIsSupportedDevice ORIGINAL returned 1 (first
+time without the override): the table entry satisfies _DevIsSupportedDevice.
+_ttl_sw_init: same two PCI config 0x60 writes, then the SAME assert chain
+(ttlSetDeviceCapabilityEntry ttl_device.c:588 "Could not find device info
+table entry!", ipi_bgm_create, IpiValidateTopology, TlsSwInit); status 4 ->
+0xe00002bc. So ttlSetDeviceCapabilityEntry (0x1264698d) does not find its
+entry by device ID + attr in _DeviceCapabilityTbl. _ttl_hw_init did not run.
+tOS status 0x0011395f. Full log: logs/20261005-133521-plugin/peer.plist.
