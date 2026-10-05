@@ -82,7 +82,8 @@ typedef void     (*amdtll_set_fw_dir_t)(void *this_ptr, void *fw_dir);
 typedef uint32_t (*ttl_initialize_fn_t)(void *init_params, void *ttl_context_38);
 typedef uint8_t  (*ttl_is_supported_device_fn_t)(void *dev_info_20);
 typedef uint8_t  (*ipi_execute_swip_entry_point_fn_t)(void *instance, uint32_t swip_client_id, uint32_t event_id, void *context);
-typedef int      (*ipi_psp_sw_init_fn_t)(void *dev, void *hw_info);
+typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
+typedef void*    (*ipi_get_discovery_info_fn_t)(void *instance, uint32_t client_id);
 
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
@@ -100,6 +101,7 @@ static ttl_initialize_fn_t              orig_ttl_initialize                 = nu
 static ttl_is_supported_device_fn_t     orig_ttl_is_supported_device        = nullptr;
 static ipi_execute_swip_entry_point_fn_t orig_ipi_execute_swip_entry_point = nullptr;
 static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
+static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info       = nullptr;
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
@@ -558,17 +560,27 @@ static uint8_t hooked_ipi_execute_swip_entry_point(void *instance, uint32_t swip
     return ret;
 }
 
-static int hooked_ipi_psp_sw_init(void *dev, void *hw_info) {
+static int hooked_ipi_psp_sw_init(void *dev) {
     rbgpu_diag_inc("psp_sw_init_calls");
-    rbgpu_log("_ipi_psp_sw_init entered: dev=%p, hw_info=%p", dev, hw_info);
+    rbgpu_log("_ipi_psp_sw_init entered: dev=%p", dev);
 
     int ret = 0;
     if (orig_ipi_psp_sw_init) {
-        ret = orig_ipi_psp_sw_init(dev, hw_info);
+        ret = orig_ipi_psp_sw_init(dev);
     }
 
     rbgpu_log("_ipi_psp_sw_init returned %d", ret);
     rbgpu_diag_set_num("psp_sw_init_ret", ret);
+    return ret;
+}
+
+static void *hooked_IpiGetDiscoveryInfo(void *instance, uint32_t client_id) {
+    rbgpu_diag_inc("ipi_disc_calls");
+    void *ret = nullptr;
+    if (orig_ipi_get_discovery_info) {
+        ret = orig_ipi_get_discovery_info(instance, client_id);
+    }
+    rbgpu_log("_IpiGetDiscoveryInfo(instance=%p, client_id=%u) returned %p", instance, client_id, ret);
     return ret;
 }
 
@@ -948,6 +960,8 @@ void RGPU::init() {
     rbgpu_diag_set_num("psp_sw_init_routed", 0);
     rbgpu_diag_set_num("psp_sw_init_calls", 0);
     rbgpu_diag_set_num("psp_sw_init_ret", 0);
+    rbgpu_diag_set_num("ipi_disc_routed", 0);
+    rbgpu_diag_set_num("ipi_disc_calls", 0);
     rbgpu_diag_set_num("ttl_param_q0", 0);
     rbgpu_diag_set_num("ttl_param_q1", 0);
     rbgpu_diag_set_num("ttl_param_q2", 0);
@@ -1033,6 +1047,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_ipi_psp_sw_init",
             hooked_ipi_psp_sw_init,
             orig_ipi_psp_sw_init
+        ),
+        KernelPatcher::RouteRequest(
+            "_IpiGetDiscoveryInfo",
+            hooked_IpiGetDiscoveryInfo,
+            orig_ipi_get_discovery_info
         )
     };
 
@@ -1090,6 +1109,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("psp_sw_init_routed", 0);
         rbgpu_log("HWLibs: failed to hook _ipi_psp_sw_init");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[7], 1, address, size)) {
+        rbgpu_diag_set_num("ipi_disc_routed", 1);
+        rbgpu_log("HWLibs: hooked _IpiGetDiscoveryInfo");
+    } else {
+        rbgpu_diag_set_num("ipi_disc_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _IpiGetDiscoveryInfo");
     }
 
     if (!noSmuHook) {
