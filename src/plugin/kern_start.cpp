@@ -86,6 +86,7 @@ typedef uint8_t  (*ipi_execute_swip_entry_point_fn_t)(void *instance, uint32_t s
 typedef void*    (*ipi_get_discovery_info_fn_t)(void *instance, uint32_t client_id);
 typedef int      (*ipi_psp_sw_init_fn_t)(void *dev);
 typedef int      (*ipi_psp_hw_init_fn_t)(void *dev);
+typedef int      (*ipi_gc_sw_init_fn_t)(void *dev);
 
 typedef int      (*psp_sw_init_fn_t)(void *param1, void *param2);
 typedef int      (*psp_hw_init_fn_t)(void *psp_buf, void *arg2, void *arg3);
@@ -122,6 +123,7 @@ static ipi_execute_swip_entry_point_fn_t orig_ipi_execute_swip_entry_point = nul
 static ipi_get_discovery_info_fn_t      orig_ipi_get_discovery_info         = nullptr;
 static ipi_psp_sw_init_fn_t             orig_ipi_psp_sw_init                = nullptr;
 static ipi_psp_hw_init_fn_t             orig_ipi_psp_hw_init                = nullptr;
+static ipi_gc_sw_init_fn_t              orig_ipi_gc_sw_init                 = nullptr;
 
 static psp_sw_init_fn_t                 orig_psp_sw_init                    = nullptr;
 static psp_hw_init_fn_t                 orig_psp_hw_init                    = nullptr;
@@ -339,8 +341,7 @@ static int slot_internal_sw_init(void *ctx, ...) {
         return smu13ErrToApple(init_ret);
     }
 
-    rb_smu13_allow(&g_smu, RB_SMU13_ALLOW_TABLES);
-    rbgpu_log("rb_smu13 initialized with ALLOW_QUERY and ALLOW_TABLES");
+    rbgpu_log("rb_smu13 initialized with ALLOW_QUERY (queries only)");
     rbgpu_log("[Check 5] slot_internal_sw_init succeeded");
     rbgpu_diag_set_num("sw_init_ret", 0);
     return 0;
@@ -644,6 +645,23 @@ static int hooked_ipi_psp_hw_init(void *dev) {
 
     rbgpu_log("_ipi_psp_hw_init returned %d", ret);
     rbgpu_diag_set_num("psp_hw_init_ret", ret);
+    return ret;
+}
+
+static int hooked_ipi_gc_sw_init(void *dev) {
+    rbgpu_diag_inc("gc_sw_init_calls");
+    uint64_t *dev_ptr = reinterpret_cast<uint64_t *>(dev);
+    void *fn_ptr = dev_ptr ? reinterpret_cast<void *>(dev_ptr[1]) : nullptr;
+
+    rbgpu_log("_ipi_gc_sw_init entered: dev=%p, fn_ptr@+0x8=%p", dev, fn_ptr);
+
+    int ret = 0;
+    if (orig_ipi_gc_sw_init) {
+        ret = orig_ipi_gc_sw_init(dev);
+    }
+
+    rbgpu_log("_ipi_gc_sw_init returned %d", ret);
+    rbgpu_diag_set_num("gc_sw_init_ret", ret);
     return ret;
 }
 
@@ -1271,6 +1289,9 @@ void RGPU::init() {
     rbgpu_diag_set_num("psp_hw_init_routed", 0);
     rbgpu_diag_set_num("psp_hw_init_calls", 0);
     rbgpu_diag_set_num("psp_hw_init_ret", 0);
+    rbgpu_diag_set_num("gc_sw_init_routed", 0);
+    rbgpu_diag_set_num("gc_sw_init_calls", 0);
+    rbgpu_diag_set_num("gc_sw_init_ret", 0);
     rbgpu_diag_set_num("ipi_disc_routed", 0);
     rbgpu_diag_set_num("ipi_disc_calls", 0);
     rbgpu_diag_set_num("psp_sw_sub_routed", 0);
@@ -1495,6 +1516,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             "_psp_np_fw_load",
             hooked_psp_np_fw_load,
             orig_psp_np_fw_load
+        ),
+        KernelPatcher::RouteRequest(
+            "_ipi_gc_sw_init",
+            hooked_ipi_gc_sw_init,
+            orig_ipi_gc_sw_init
         )
     };
 
@@ -1696,6 +1722,14 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     } else {
         rbgpu_diag_set_num("psp_np_fw_load_routed", 0);
         rbgpu_log("HWLibs: failed to hook _psp_np_fw_load");
+    }
+
+    if (patcher.routeMultiple(id, &ttlReqs[25], 1, address, size)) {
+        rbgpu_diag_set_num("gc_sw_init_routed", 1);
+        rbgpu_log("HWLibs: hooked _ipi_gc_sw_init");
+    } else {
+        rbgpu_diag_set_num("gc_sw_init_routed", 0);
+        rbgpu_log("HWLibs: failed to hook _ipi_gc_sw_init");
     }
 
     if (!noSmuHook) {
