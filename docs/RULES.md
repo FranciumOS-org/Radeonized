@@ -409,3 +409,15 @@ gate was not exercised and no PSP/SMU message was sent. HAZARD before any
 SetDriverDramAddrHigh/Low with that unverified address and TransferTable
 (the SMU writes a table there). tOS status 0x00116165. Full log:
 logs/20261005-173249-plugin/peer.plist.
+
+Boot 26 (2026-10-05 18:16, milestone 2ad dry run, UUID D15DFDB4,
+-rbgpusync570 -rbgpuspoofttl): no panic, no hang. Same path as boot 25 to
+the GC; SMU slot now "queries only". GC discovery info (client 7): 1
+instance (span 0x210 < 0x235), GC 10.3.3 (major 10, minor 3, rev 3: the
+chip's real GC). _ipi_gc_sw_init's callback = HWLibs 0x126a7f74 _gc_sw_init
+(ptrsym.py), called with p1 size 0x238 (+0xc/+0x10/+0x14 = 0xa/3/3), p2
+size 0x428; it returned 2 after 18 us; _ipi_gc_sw_init -> 0, GC assert
+chain, status 4. _IpiSetFwEntry ran once, inside the SMU SW_INIT (fw_id 0
+-> 1). The *_routed diag keys now read 0 although every hook installed (the
+2ac install loop logs instead of setting them). tOS status 0x0011876f. Full
+log: logs/20261005-181648-plugin/peer.plist.
