@@ -30,6 +30,7 @@ def sample():
             "Add": {ec.BOOT_GUID: {"boot-args": "debug=0x100 keepsyms=1 -wegnoegpu", "csr-active-config": b"\x03\x0a\x00\x00"}},
             "Delete": {ec.BOOT_GUID: ["boot-args", "csr-active-config"]},
         },
+        "Misc": {"Debug": {"AppleDebug": True, "SysReport": False, "Target": 67}},
         "PlatformInfo": {"Generic": {"SystemSerialNumber": "X", "ROM": b"\0" * 6}},
     }
 
@@ -104,6 +105,22 @@ def main():
         del nodelete["NVRAM"]["Delete"]
         plistlib.dump(nodelete, open(p, "wb"), sort_keys=False)
         check("WARNING" in run(p, "status").stdout, "status warns when boot-args is not in NVRAM -> Delete")
+
+        plistlib.dump(sample(), open(p, "wb"), sort_keys=False)
+        r = run(p, "sysreport", "on")
+        cfg = plistlib.load(open(p, "rb"))
+        check(r.returncode == 0 and cfg["Misc"]["Debug"]["SysReport"] is True, "sysreport on")
+        check(cfg["Misc"]["Debug"]["Target"] == 67 and cfg["Misc"]["Debug"]["AppleDebug"] is True,
+              "sysreport leaves the other Debug keys")
+        check("SysReport: True" in run(p, "status").stdout, "status shows SysReport")
+        run(p, "sysreport", "off")
+        check(plistlib.load(open(p, "rb")) == sample(), "sysreport off restores the original exactly")
+        nodbg = sample(); del nodbg["Misc"]["Debug"]["SysReport"]
+        plistlib.dump(nodbg, open(p, "wb"), sort_keys=False)
+        before = open(p, "rb").read()
+        r = run(p, "sysreport", "on")
+        check(r.returncode == 1 and open(p, "rb").read() == before, "no SysReport key: refused, unchanged")
+        check(run(p, "sysreport", "maybe").returncode == 2, "sysreport needs on or off")
 
         r = run(p, "frobnicate")
         check(r.returncode == 2, "unknown command refused")

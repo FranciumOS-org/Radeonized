@@ -7,6 +7,9 @@
 #   sudo tools/efi.sh uninstall   # remove the entry, the kext and -rbgpuoff
 #   sudo tools/efi.sh status      # what the EFI has now
 #   sudo tools/efi.sh restore     # put back the config.plist saved before the last change
+#   sudo tools/efi.sh sysreport-on   # OpenCore dumps ACPI tables (VFCT = VBIOS) at next boot
+#   sudo tools/efi.sh vbios          # after that boot: extract the 680M VBIOS, turn SysReport off
+#   sudo tools/efi.sh sysreport-off
 #
 # Only a person runs this (see CLAUDE.md). Every change first saves the EFI's
 # config.plist to logs/efi-backups/<time>/; edits go through
@@ -17,8 +20,8 @@ set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo tools/efi.sh ${1:-status}" >&2; exit 1; }
 cmd="${1:-}"
-case "$cmd" in install|uninstall|on|off|status|restore) ;; *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios) ;; *)
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -108,6 +111,39 @@ on)
     backup
     edit bootarg remove -rbgpuoff
     sync
+    ;;
+sysreport-on)
+    if [ -d "$efi/SysReport" ]; then
+        echo "note: $efi/SysReport already exists; OpenCore may not overwrite it."
+        echo "      'sudo tools/efi.sh vbios' looks there first."
+    fi
+    backup
+    edit sysreport on
+    sync
+    echo "reboot once (needs the DEBUG OpenCore), then: sudo tools/efi.sh vbios"
+    ;;
+sysreport-off)
+    backup
+    edit sysreport off
+    sync
+    ;;
+vbios)
+    vfct="$(ls "$efi"/SysReport/ACPI/VFCT*.aml 2>/dev/null | head -1)"
+    if [ -z "$vfct" ]; then
+        echo "no SysReport/ACPI/VFCT*.aml on the EFI." >&2
+        ls "$efi/SysReport/ACPI" 2>/dev/null | head -40 >&2 || echo "(no SysReport folder: did the boot use the DEBUG OpenCore with SysReport on?)" >&2
+        exit 1
+    fi
+    out="$root/firmware"
+    mkdir -p "$out"
+    cp "$vfct" "$out/VFCT.aml"
+    python3 "$root/tools/vfct.py" "$out/VFCT.aml" 1002:1681 "$out/680m-vbios.rom"
+    shasum -a 256 "$out/680m-vbios.rom"
+    chown -R "$user" "$out"
+    backup
+    edit sysreport off
+    sync
+    echo "VBIOS in firmware/ (not committed). SysReport is off again."
     ;;
 restore)
     last="$(ls -d "$root"/logs/efi-backups/*/ 2>/dev/null | tail -1)"
