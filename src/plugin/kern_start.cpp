@@ -516,24 +516,19 @@ static uint8_t hooked_ttlIsSupportedDevice(void *dev_info_20) {
     auto dwords = reinterpret_cast<uint32_t *>(dev_info_20);
     uint32_t dev_id = dwords ? dwords[0] : 0;
     uint32_t bus_no = dwords ? dwords[1] : 0;
+    uint32_t attr   = dwords ? dwords[0x64 / 4] : 0;
 
-    rbgpu_log("_ttlIsSupportedDevice(ptr=%p): devId=0x%04X, bus=%u", dev_info_20, dev_id, bus_no);
+    rbgpu_log("_ttlIsSupportedDevice(ptr=%p): devId=0x%04X, bus=%u, attr=0x%08X", dev_info_20, dev_id, bus_no, attr);
 
     uint8_t ret = 0;
-    if (g_spoof_ttl_mode && dwords && dev_id == 0x1681) {
-        // Choice: In-place spoof of dev_id to 0x73BF (Navi 21) across the original call,
-        // ensuring internal descriptor structures and capability flags are populated properly.
-        dwords[0] = 0x73BF;
-        if (orig_ttl_is_supported_device) {
-            ret = orig_ttl_is_supported_device(dev_info_20);
-        }
-        dwords[0] = 0x1681; // Restore real device ID immediately
-        rbgpu_log("_ttlIsSupportedDevice: spoofed 0x1681 -> 0x73BF for original call, result = %u", ret);
-    } else {
-        if (orig_ttl_is_supported_device) {
-            ret = orig_ttl_is_supported_device(dev_info_20);
-        }
-        rbgpu_log("_ttlIsSupportedDevice original returned %u", ret);
+    if (orig_ttl_is_supported_device) {
+        ret = orig_ttl_is_supported_device(dev_info_20);
+    }
+    rbgpu_log("_ttlIsSupportedDevice original returned %u", ret);
+
+    if (g_spoof_ttl_mode && ret == 0 && dev_id == 0x1681) {
+        ret = 1;
+        rbgpu_log("_ttlIsSupportedDevice: -rbgpuspoofttl active -> overriding return to 1 (supported)");
     }
 
     rbgpu_diag_set_num("ttl_is_supp_ret", ret);
