@@ -7,13 +7,12 @@
 #include "kern_start.hpp"
 #include "rb_smu13.h"
 
-#define Log(fmt, ...) IOLog("RembrandtGPU: " fmt "\n", ##__VA_ARGS__)
-
 #ifndef RB_HWID_MP1
 #define RB_HWID_MP1 1
 #endif
 
 static RGPU rgpu;
+uint64_t g_guard_calls = 0;
 
 static const char *bootargOff[]   = { "-rbgpuoff" };
 static const char *bootargDebug[] = { "-rbgpudbg" };
@@ -125,29 +124,37 @@ static void smu13HwDelayUs(void *ctx, uint32_t us) {
 }
 
 static int slot_internal_sw_init(void *ctx, ...) {
-    Log("slot_internal_sw_init entered (ctx=%p)", ctx);
+    rbgpu_log("slot_internal_sw_init entered (ctx=%p)", ctx);
     g_smu_ctx = ctx;
 
     uint32_t mp1_base     = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(ctx) + 0x44);
     uint32_t window_limit = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(ctx) + 0x27C);
-    Log("[Check 1] ctx+0x44[0]=0x%08X (expected 0x16000), window_limit=0x%08X", mp1_base, window_limit);
+
+    rbgpu_diag_set_num("ctx44_0", mp1_base);
+    rbgpu_diag_set_num("window_limit", window_limit);
+    rbgpu_log("[Check 1] ctx+0x44[0]=0x%08X (expected 0x16000), window_limit=0x%08X", mp1_base, window_limit);
 
     if (!orig_smu_cgs_alloc_memory) {
-        Log("smu_cgs_alloc_memory symbol unresolved");
+        rbgpu_log("smu_cgs_alloc_memory symbol unresolved");
+        rbgpu_diag_set_num("sw_init_ret", 2);
         return 2;
     }
 
     int alloc_ret = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &g_dma_handle, &g_dma_gpu, &g_dma_cpu);
-    Log("[Check 2] smu_cgs_alloc_memory ret=%d, handle=%p, gpu=0x%llx, cpu=%p",
-        alloc_ret, g_dma_handle, g_dma_gpu, g_dma_cpu);
+    rbgpu_diag_set_num("alloc_ret", static_cast<uint64_t>(alloc_ret));
+    rbgpu_diag_set_num("fb_mc_addr", g_dma_gpu);
+    rbgpu_log("[Check 2] smu_cgs_alloc_memory ret=%d, handle=%p, gpu=0x%llx, cpu=%p",
+              alloc_ret, g_dma_handle, g_dma_gpu, g_dma_cpu);
 
     if (alloc_ret != 0 || !g_dma_cpu) {
-        Log("Driver table memory allocation failed");
+        rbgpu_log("Driver table memory allocation failed");
+        rbgpu_diag_set_num("sw_init_ret", 2);
         return 2;
     }
 
     bool in_carveout = (g_dma_gpu >= 0xF400000000ULL && g_dma_gpu <= 0xF4FFFFFFFFULL);
-    Log("[Check 2] Carveout verification (0xF4_0000_0000..0xF4_FFFF_FFFF): %s", in_carveout ? "PASS" : "FAIL");
+    rbgpu_diag_set_num("carveout_ok", in_carveout ? 1 : 0);
+    rbgpu_log("[Check 2] Carveout verification (0xF4_0000_0000..0xF4_FFFF_FFFF): %s", in_carveout ? "PASS" : "FAIL");
 
     memset(&g_hw, 0, sizeof(g_hw));
     g_hw.ctx      = ctx;
@@ -166,7 +173,8 @@ static int slot_internal_sw_init(void *ctx, ...) {
     }
 
     if (!g_disc) {
-        Log("Failed to allocate memory for rb_disc");
+        rbgpu_log("Failed to allocate memory for rb_disc");
+        rbgpu_diag_set_num("sw_init_ret", 2);
         return 2;
     }
 
@@ -195,46 +203,67 @@ static int slot_internal_sw_init(void *ctx, ...) {
 
     int init_ret = rb_smu13_init(&g_smu, &g_hw, g_disc, &dma, 0);
     if (init_ret != RB_SMU13_OK) {
-        Log("rb_smu13_init failed: %s (%d)", rb_smu13_strerror(init_ret), init_ret);
+        rbgpu_log("rb_smu13_init failed: %s (%d)", rb_smu13_strerror(init_ret), init_ret);
+        rbgpu_diag_set_num("init_err", static_cast<uint64_t>(init_ret));
+        rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(init_ret));
+        rbgpu_diag_set_num("sw_init_ret", static_cast<uint64_t>(smu13ErrToApple(init_ret)));
         return smu13ErrToApple(init_ret);
     }
 
     rb_smu13_allow(&g_smu, RB_SMU13_ALLOW_TABLES);
-    Log("rb_smu13 initialized with ALLOW_QUERY and ALLOW_TABLES");
-    Log("[Check 5] slot_internal_sw_init succeeded");
+    rbgpu_log("rb_smu13 initialized with ALLOW_QUERY and ALLOW_TABLES");
+    rbgpu_log("[Check 5] slot_internal_sw_init succeeded");
+    rbgpu_diag_set_num("sw_init_ret", 0);
     return 0;
 }
 
 static int slot_internal_hw_init(void *ctx) {
-    Log("slot_internal_hw_init entered (ctx=%p)", ctx);
+    rbgpu_log("slot_internal_hw_init entered (ctx=%p)", ctx);
 
     int err = rb_smu13_bringup(&g_smu);
+    rbgpu_diag_set_num("bringup_err", static_cast<uint64_t>(err));
     if (err != RB_SMU13_OK) {
-        Log("rb_smu13_bringup failed: %s (%d)", rb_smu13_strerror(err), err);
+        rbgpu_log("rb_smu13_bringup failed: %s (%d)", rb_smu13_strerror(err), err);
+        rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(err));
         return smu13ErrToApple(err);
     }
 
-    Log("[Check 3] rb_smu13_bringup succeeded");
+    rbgpu_log("[Check 3] rb_smu13_bringup succeeded");
     if (g_smu.have_clocks) {
-        Log("[Check 3] Clocks: min_gfx=%u MHz, max_gfx=%u MHz, num_soc_levels=%u, num_df_pstates=%u",
-            g_smu.clocks.min_gfx_clk, g_smu.clocks.max_gfx_clk,
-            g_smu.clocks.num_soc_levels, g_smu.clocks.num_df_pstates);
+        rbgpu_diag_set_num("gfx_min", g_smu.clocks.min_gfx_clk);
+        rbgpu_diag_set_num("gfx_max", g_smu.clocks.max_gfx_clk);
+        rbgpu_diag_set_num("num_soc_levels", g_smu.clocks.num_soc_levels);
+        rbgpu_diag_set_num("num_df_pstates", g_smu.clocks.num_df_pstates);
 
+        rbgpu_log("[Check 3] Clocks: min_gfx=%u MHz, max_gfx=%u MHz, num_soc_levels=%u, num_df_pstates=%u",
+                  g_smu.clocks.min_gfx_clk, g_smu.clocks.max_gfx_clk,
+                  g_smu.clocks.num_soc_levels, g_smu.clocks.num_df_pstates);
+
+        char keyBuf[32];
         for (uint8_t i = 0; i < g_smu.clocks.num_soc_levels && i < RB_SMU13_NUM_DPM_LEVELS; i++) {
-            Log("[Check 4] SOC level %u: %u MHz", i, g_smu.clocks.soc_clocks[i]);
+            snprintf(keyBuf, sizeof(keyBuf), "soc_clk_%u", i);
+            rbgpu_diag_set_num(keyBuf, g_smu.clocks.soc_clocks[i]);
+            rbgpu_log("[Check 4] SOC level %u: %u MHz", i, g_smu.clocks.soc_clocks[i]);
         }
         for (uint8_t i = 0; i < g_smu.clocks.num_df_pstates && i < RB_SMU13_NUM_DF_PSTATES; i++) {
-            Log("[Check 4] DF P-state %u: fclk=%u MHz, memclk=%u MHz, volt=%u",
-                i, g_smu.clocks.df_pstate[i].fclk,
-                g_smu.clocks.df_pstate[i].memclk,
-                g_smu.clocks.df_pstate[i].voltage);
+            snprintf(keyBuf, sizeof(keyBuf), "df_pstate_%u_fclk", i);
+            rbgpu_diag_set_num(keyBuf, g_smu.clocks.df_pstate[i].fclk);
+            snprintf(keyBuf, sizeof(keyBuf), "df_pstate_%u_memclk", i);
+            rbgpu_diag_set_num(keyBuf, g_smu.clocks.df_pstate[i].memclk);
+            snprintf(keyBuf, sizeof(keyBuf), "df_pstate_%u_volt", i);
+            rbgpu_diag_set_num(keyBuf, g_smu.clocks.df_pstate[i].voltage);
+
+            rbgpu_log("[Check 4] DF P-state %u: fclk=%u MHz, memclk=%u MHz, volt=%u",
+                      i, g_smu.clocks.df_pstate[i].fclk,
+                      g_smu.clocks.df_pstate[i].memclk,
+                      g_smu.clocks.df_pstate[i].voltage);
         }
     }
     return 0;
 }
 
 static int slot_internal_sw_exit(void *ctx) {
-    Log("slot_internal_sw_exit entered");
+    rbgpu_log("slot_internal_sw_exit entered");
     if (g_dma_handle && orig_smu_cgs_free_memory) {
         orig_smu_cgs_free_memory(ctx, g_dma_handle);
         g_dma_handle = nullptr;
@@ -251,10 +280,12 @@ static int slot_internal_sw_exit(void *ctx) {
 }
 
 static int slot_internal_hw_exit(void *ctx) {
-    Log("slot_internal_hw_exit entered");
+    rbgpu_log("slot_internal_hw_exit entered");
     int err = rb_smu13_prepare_unload(&g_smu);
     if (err != RB_SMU13_OK) {
-        Log("rb_smu13_prepare_unload failed: %s (%d)", rb_smu13_strerror(err), err);
+        rbgpu_log("rb_smu13_prepare_unload failed: %s (%d)", rb_smu13_strerror(err), err);
+        rbgpu_diag_set_num("unload_err", static_cast<uint64_t>(err));
+        rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(err));
     }
     return smu13ErrToApple(err);
 }
@@ -267,12 +298,12 @@ struct smu_event_msg {
 
 static int slot_notify_event(void *ctx, smu_event_msg *msg, ...) {
     if (!msg) {
-        Log("slot_notify_event received NULL message");
+        rbgpu_log("slot_notify_event received NULL message");
         return 1;
     }
 
     uint32_t event = msg->event;
-    Log("slot_notify_event: event %u", event);
+    rbgpu_log("slot_notify_event: event %u", event);
 
     if (event > 11) {
         return 2;
@@ -281,8 +312,9 @@ static int slot_notify_event(void *ctx, smu_event_msg *msg, ...) {
     if (event == 0 || event == 4 || event == 6 || event == 10) {
         int err = rb_smu13_bringup(&g_smu);
         if (err != RB_SMU13_OK) {
-            Log("slot_notify_event: re-bringup for event %u failed: %s (%d)",
-                event, rb_smu13_strerror(err), err);
+            rbgpu_log("slot_notify_event: re-bringup for event %u failed: %s (%d)",
+                      event, rb_smu13_strerror(err), err);
+            rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(err));
             return smu13ErrToApple(err);
         }
         return 0;
@@ -292,7 +324,7 @@ static int slot_notify_event(void *ctx, smu_event_msg *msg, ...) {
 }
 
 static int slot_gfx_off_control(void *ctx, uint32_t op) {
-    Log("slot_gfx_off_control: op %u", op);
+    rbgpu_log("slot_gfx_off_control: op %u", op);
     static bool s_gfxoff_initialized = false;
 
     if (op == 0) {
@@ -301,18 +333,24 @@ static int slot_gfx_off_control(void *ctx, uint32_t op) {
             if (ret == RB_SMU13_OK) {
                 s_gfxoff_initialized = true;
             } else {
-                Log("rb_smu13_enable_gfxoff error: %s (%d)", rb_smu13_strerror(ret), ret);
+                rbgpu_log("rb_smu13_enable_gfxoff error: %s (%d)", rb_smu13_strerror(ret), ret);
+                rbgpu_diag_set_num("gfxoff_init_err", static_cast<uint64_t>(ret));
+                rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(ret));
             }
         }
         int err = rb_smu13_gfx_off_control(&g_smu, 1);
         if (err != RB_SMU13_OK) {
-            Log("rb_smu13_gfx_off_control(1) error: %s (%d)", rb_smu13_strerror(err), err);
+            rbgpu_log("rb_smu13_gfx_off_control(1) error: %s (%d)", rb_smu13_strerror(err), err);
+            rbgpu_diag_set_num("gfxoff_ctrl_err", static_cast<uint64_t>(err));
+            rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(err));
         }
         return smu13ErrToApple(err);
     } else if (op == 1) {
         int err = rb_smu13_gfx_off_control(&g_smu, 0);
         if (err != RB_SMU13_OK) {
-            Log("rb_smu13_gfx_off_control(0) error: %s (%d)", rb_smu13_strerror(err), err);
+            rbgpu_log("rb_smu13_gfx_off_control(0) error: %s (%d)", rb_smu13_strerror(err), err);
+            rbgpu_diag_set_num("gfxoff_ctrl_err", static_cast<uint64_t>(err));
+            rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(err));
         }
         return smu13ErrToApple(err);
     }
@@ -321,12 +359,12 @@ static int slot_gfx_off_control(void *ctx, uint32_t op) {
 }
 
 static int slot_system_features_control(void *ctx, uint64_t *mask) {
-    Log("slot_system_features_control entered");
+    rbgpu_log("slot_system_features_control entered");
     return 0;
 }
 
 static int slot_power_feature_caps(void *ctx, uint64_t *caps) {
-    Log("slot_power_feature_caps entered");
+    rbgpu_log("slot_power_feature_caps entered");
     if (caps) {
         *caps = 0;
     }
@@ -334,16 +372,19 @@ static int slot_power_feature_caps(void *ctx, uint64_t *caps) {
 }
 
 static int slot_unload_smu(void *ctx, ...) {
-    Log("slot_unload_smu entered");
+    rbgpu_log("slot_unload_smu entered");
     int err = rb_smu13_prepare_unload(&g_smu);
     if (err != RB_SMU13_OK) {
-        Log("rb_smu13_prepare_unload error: %s (%d)", rb_smu13_strerror(err), err);
+        rbgpu_log("rb_smu13_prepare_unload error: %s (%d)", rb_smu13_strerror(err), err);
+        rbgpu_diag_set_num("unload_err", static_cast<uint64_t>(err));
+        rbgpu_diag_set_num("last_smu_err", static_cast<uint64_t>(err));
     }
     return smu13ErrToApple(err);
 }
 
 static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64_t rev) {
-    Log("hooked_smu_init_function_pointer_list called (ctx=%p, ver=0x%llx, rev=0x%llx)", ctx, ver, rev);
+    rbgpu_diag_inc("smu_hook_calls");
+    rbgpu_log("hooked_smu_init_function_pointer_list called (ctx=%p, ver=0x%llx, rev=0x%llx)", ctx, ver, rev);
 
     uint32_t index = 0;
     if (orig_smu_get_hw_version) {
@@ -357,7 +398,8 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
         }
     }
 
-    Log("smu_get_hw_version resolved to index 0x%02X", index);
+    rbgpu_diag_set_num("mp1_hw_index", index);
+    rbgpu_log("smu_get_hw_version resolved to index 0x%02X", index);
 
     if (index != 0x10) {
         if (orig_smu_init_function_pointer_list) {
@@ -383,7 +425,7 @@ static int hooked_smu_init_function_pointer_list(void *ctx, uint64_t ver, uint64
     *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(ctx) + 0x6F8) = reinterpret_cast<void *>(slot_power_feature_caps);
     *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(ctx) + 0x720) = reinterpret_cast<void *>(slot_unload_smu);
 
-    Log("H-SMU-1: registered SMU 13 slot table");
+    rbgpu_log("H-SMU-1: registered SMU 13 slot table");
     return 0;
 }
 
@@ -391,9 +433,14 @@ void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
 
-    Log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s)",
-        noSmuHook ? "DISABLED" : "ENABLED",
-        noTrap3Guard ? "DISABLED" : "ENABLED");
+    rbgpu_diag_set_num("smu_hook_routed", 0);
+    rbgpu_diag_set_num("guard_routed", 0);
+    rbgpu_diag_set_num("smu_hook_calls", 0);
+    rbgpu_diag_set_num("guard_calls", 0);
+
+    rbgpu_log("loaded (Milestone 2; SMU Hook: %s, Trap 3 Guard: %s)",
+              noSmuHook ? "DISABLED" : "ENABLED",
+              noTrap3Guard ? "DISABLED" : "ENABLED");
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, slide, size);
@@ -412,7 +459,7 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t slid
 }
 
 void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
-    Log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
+    rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
 
     orig_smu_cgs_alloc_memory  = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));
     orig_smu_cgs_free_memory   = reinterpret_cast<smu_cgs_free_memory_t>(patcher.solveSymbol(id, "_smu_cgs_free_memory"));
@@ -424,20 +471,23 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t sl
     };
 
     if (patcher.routeMultiple(id, requests, slide, size)) {
-        Log("H-SMU-1: smu_init_function_pointer_list hooked successfully");
+        rbgpu_diag_set_num("smu_hook_routed", 1);
+        rbgpu_log("H-SMU-1: smu_init_function_pointer_list hooked successfully");
     } else {
-        Log("H-SMU-1: failed to hook smu_init_function_pointer_list");
+        rbgpu_diag_set_num("smu_hook_routed", 0);
+        rbgpu_log("H-SMU-1: failed to hook smu_init_function_pointer_list");
     }
 }
 
 void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t slide, size_t size) {
-    Log("Patching com.apple.kext.AMDRadeonX6000 (Trap 3 Failure Guard)");
+    rbgpu_log("Patching com.apple.kext.AMDRadeonX6000 (Trap 3 Failure Guard)");
 
     mach_vm_address_t start_sym = patcher.solveSymbol(id, "__ZN22AMDGraphicsAccelerator5startEP9IOService");
     mach_vm_address_t stop_sym  = patcher.solveSymbol(id, "__ZN22AMDGraphicsAccelerator4stopEP9IOService");
 
     if (!start_sym || !stop_sym) {
-        Log("Trap 3 Guard: required start/stop symbols not resolved");
+        rbgpu_log("Trap 3 Guard: required start/stop symbols not resolved");
+        rbgpu_diag_set_num("guard_routed", 0);
         return;
     }
 
@@ -450,7 +500,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t sli
             mach_vm_address_t call_dest = reinterpret_cast<mach_vm_address_t>(&start_bytes[i + 5]) + rel;
             if (call_dest == stop_sym) {
                 uint8_t *post_stop = &start_bytes[i + 5];
-                Log("Trap 3 Guard: located call stop() at %p (offset +0x%zx)", &start_bytes[i], i);
+                rbgpu_log("Trap 3 Guard: located call stop() at %p (offset +0x%zx)", &start_bytes[i], i);
 
                 uint8_t *pop_seq = nullptr;
                 for (size_t j = 0; j < 64; j++) {
@@ -465,26 +515,39 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t sli
                     }
                 }
 
-                if (pop_seq && pop_seq > post_stop) {
+                if (pop_seq && (pop_seq - post_stop) >= 17) {
                     MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
 
-                    post_stop[0] = 0x31;
-                    post_stop[1] = 0xC0;
+                    // 1. movabs rax, &g_guard_calls (48 B8 <imm64>)
+                    post_stop[0] = 0x48;
+                    post_stop[1] = 0xB8;
+                    *reinterpret_cast<uint64_t *>(&post_stop[2]) = reinterpret_cast<uint64_t>(&g_guard_calls);
 
-                    int32_t jmp_offset = static_cast<int32_t>(pop_seq - (post_stop + 4));
+                    // 2. inc qword ptr [rax] (48 FF 00)
+                    post_stop[10] = 0x48;
+                    post_stop[11] = 0xFF;
+                    post_stop[12] = 0x00;
+
+                    // 3. xor eax, eax (31 C0)
+                    post_stop[13] = 0x31;
+                    post_stop[14] = 0xC0;
+
+                    // 4. Jump directly to pop_seq epilogue
+                    int32_t jmp_offset = static_cast<int32_t>(pop_seq - (post_stop + 17));
                     if (jmp_offset >= -128 && jmp_offset <= 127) {
-                        post_stop[2] = 0xEB;
-                        post_stop[3] = static_cast<uint8_t>(pop_seq - (post_stop + 4));
-                        memset(&post_stop[4], 0x90, pop_seq - &post_stop[4]);
+                        post_stop[15] = 0xEB; // jmp rel8
+                        post_stop[16] = static_cast<uint8_t>(jmp_offset);
+                        memset(&post_stop[17], 0x90, pop_seq - &post_stop[17]);
                     } else {
-                        post_stop[2] = 0xE9;
-                        int32_t rel32 = static_cast<int32_t>(pop_seq - (post_stop + 7));
-                        *reinterpret_cast<int32_t *>(&post_stop[3]) = rel32;
-                        memset(&post_stop[7], 0x90, pop_seq - &post_stop[7]);
+                        post_stop[15] = 0xE9; // jmp rel32
+                        int32_t rel32 = static_cast<int32_t>(pop_seq - (post_stop + 20));
+                        *reinterpret_cast<int32_t *>(&post_stop[16]) = rel32;
+                        memset(&post_stop[20], 0x90, pop_seq - &post_stop[20]);
                     }
 
                     MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
-                    Log("Trap 3 Guard: successfully patched start() failure path (jumped to %p)", pop_seq);
+                    rbgpu_log("Trap 3 Guard: successfully patched start() failure path (jumped to %p)", pop_seq);
+                    rbgpu_diag_set_num("guard_routed", 1);
                     patched = true;
                     break;
                 }
@@ -493,6 +556,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t sli
     }
 
     if (!patched) {
-        Log("Trap 3 Guard: failed to locate or patch stop() call site in start()");
+        rbgpu_diag_set_num("guard_routed", 0);
+        rbgpu_log("Trap 3 Guard: failed to locate or patch stop() call site in start()");
     }
 }

@@ -1,13 +1,186 @@
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <Headers/kern_util.hpp>
+#include <mach/mach_time.h>
+#include <libkern/c++/OSArray.h>
+#include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSString.h>
+#include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSBoolean.h>
 
 #include "RembrandtGPUPeer.hpp"
 #include "vbios_data.h"
 
 #define super IOService
-#define Log(fmt, ...) IOLog("RembrandtGPUPeer: " fmt "\n", ##__VA_ARGS__)
 
 OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
+
+// Diagnostics & Ring Buffer storage definitions
+#define RBGPU_RING_SIZE 128
+#define RBGPU_LINE_MAX  256
+#define RBGPU_MAX_DIAGS 96
+
+struct LogEntry {
+    uint64_t time;
+    char     line[RBGPU_LINE_MAX];
+};
+
+enum DiagType {
+    DIAG_TYPE_NUM,
+    DIAG_TYPE_STR
+};
+
+struct DiagEntry {
+    char     key[32];
+    DiagType type;
+    uint64_t numVal;
+    char     strVal[64];
+};
+
+static IOLock           *g_diagLock = nullptr;
+static RembrandtGPUPeer *g_peer     = nullptr;
+
+static LogEntry  g_logRing[RBGPU_RING_SIZE];
+static size_t    g_logHead  = 0;
+static size_t    g_logCount = 0;
+
+static DiagEntry g_diags[RBGPU_MAX_DIAGS];
+static size_t    g_diagCount = 0;
+
+// Static snapshot buffers moved off the kernel stack to satisfy -Wframe-larger-than=1024
+static LogEntry  s_snapLogs[RBGPU_RING_SIZE];
+static DiagEntry s_snapDiags[RBGPU_MAX_DIAGS];
+static size_t    s_snapHead      = 0;
+static size_t    s_snapLogCount  = 0;
+static size_t    s_snapDiagCount = 0;
+
+extern uint64_t g_guard_calls;
+
+static void initDiagLock() {
+    if (!g_diagLock) {
+        IOLock *lock = IOLockAlloc();
+        if (!OSCompareAndSwapPtr(nullptr, lock, reinterpret_cast<void * volatile *>(&g_diagLock))) {
+            IOLockFree(lock);
+        }
+    }
+}
+
+static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
+    for (size_t i = 0; i < g_diagCount; i++) {
+        if (strncmp(g_diags[i].key, key, sizeof(g_diags[i].key)) == 0) {
+            g_diags[i].type   = DIAG_TYPE_NUM;
+            g_diags[i].numVal = val;
+            return;
+        }
+    }
+    if (g_diagCount < RBGPU_MAX_DIAGS) {
+        strncpy(g_diags[g_diagCount].key, key, sizeof(g_diags[g_diagCount].key) - 1);
+        g_diags[g_diagCount].key[sizeof(g_diags[g_diagCount].key) - 1] = '\0';
+        g_diags[g_diagCount].type   = DIAG_TYPE_NUM;
+        g_diags[g_diagCount].numVal = val;
+        g_diagCount++;
+    }
+}
+
+void rbgpu_log(const char *fmt, ...) {
+    char buf[RBGPU_LINE_MAX];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    IOLog("RembrandtGPU: %s\n", buf);
+
+    initDiagLock();
+    if (g_diagLock) {
+        IOLockLock(g_diagLock);
+        uint64_t now = mach_absolute_time();
+        g_logRing[g_logHead].time = now;
+        strncpy(g_logRing[g_logHead].line, buf, sizeof(g_logRing[g_logHead].line) - 1);
+        g_logRing[g_logHead].line[sizeof(g_logRing[g_logHead].line) - 1] = '\0';
+        g_logHead = (g_logHead + 1) % RBGPU_RING_SIZE;
+        if (g_logCount < RBGPU_RING_SIZE) {
+            g_logCount++;
+        }
+        IOLockUnlock(g_diagLock);
+    }
+
+    if (g_peer) {
+        g_peer->scheduleRefreshDiag();
+    }
+}
+
+void rbgpu_diag_set_num(const char *key, uint64_t val) {
+    initDiagLock();
+    if (g_diagLock) {
+        IOLockLock(g_diagLock);
+        rbgpu_diag_set_num_locked(key, val);
+        IOLockUnlock(g_diagLock);
+    }
+    if (g_peer) {
+        g_peer->scheduleRefreshDiag();
+    }
+}
+
+void rbgpu_diag_set_str(const char *key, const char *val) {
+    initDiagLock();
+    if (g_diagLock) {
+        IOLockLock(g_diagLock);
+        for (size_t i = 0; i < g_diagCount; i++) {
+            if (strncmp(g_diags[i].key, key, sizeof(g_diags[i].key)) == 0) {
+                g_diags[i].type = DIAG_TYPE_STR;
+                strncpy(g_diags[i].strVal, val, sizeof(g_diags[i].strVal) - 1);
+                g_diags[i].strVal[sizeof(g_diags[i].strVal) - 1] = '\0';
+                IOLockUnlock(g_diagLock);
+                if (g_peer) g_peer->scheduleRefreshDiag();
+                return;
+            }
+        }
+        if (g_diagCount < RBGPU_MAX_DIAGS) {
+            strncpy(g_diags[g_diagCount].key, key, sizeof(g_diags[g_diagCount].key) - 1);
+            g_diags[g_diagCount].key[sizeof(g_diags[g_diagCount].key) - 1] = '\0';
+            g_diags[g_diagCount].type = DIAG_TYPE_STR;
+            strncpy(g_diags[g_diagCount].strVal, val, sizeof(g_diags[g_diagCount].strVal) - 1);
+            g_diags[g_diagCount].strVal[sizeof(g_diags[g_diagCount].strVal) - 1] = '\0';
+            g_diagCount++;
+        }
+        IOLockUnlock(g_diagLock);
+    }
+    if (g_peer) {
+        g_peer->scheduleRefreshDiag();
+    }
+}
+
+void rbgpu_diag_inc(const char *key) {
+    initDiagLock();
+    if (g_diagLock) {
+        IOLockLock(g_diagLock);
+        for (size_t i = 0; i < g_diagCount; i++) {
+            if (strncmp(g_diags[i].key, key, sizeof(g_diags[i].key)) == 0) {
+                if (g_diags[i].type == DIAG_TYPE_NUM) {
+                    g_diags[i].numVal++;
+                } else {
+                    g_diags[i].type   = DIAG_TYPE_NUM;
+                    g_diags[i].numVal = 1;
+                }
+                IOLockUnlock(g_diagLock);
+                if (g_peer) g_peer->scheduleRefreshDiag();
+                return;
+            }
+        }
+        if (g_diagCount < RBGPU_MAX_DIAGS) {
+            strncpy(g_diags[g_diagCount].key, key, sizeof(g_diags[g_diagCount].key) - 1);
+            g_diags[g_diagCount].key[sizeof(g_diags[g_diagCount].key) - 1] = '\0';
+            g_diags[g_diagCount].type   = DIAG_TYPE_NUM;
+            g_diags[g_diagCount].numVal = 1;
+            g_diagCount++;
+        }
+        IOLockUnlock(g_diagLock);
+    }
+    if (g_peer) {
+        g_peer->scheduleRefreshDiag();
+    }
+}
 
 bool RembrandtGPUPeer::init(OSDictionary *dictionary) {
     if (!super::init(dictionary)) {
@@ -20,14 +193,24 @@ bool RembrandtGPUPeer::init(OSDictionary *dictionary) {
     }
 
     postRegisterCall = thread_call_allocate(postRegisterAction, this);
-    return postRegisterCall != nullptr;
+    refreshDiagCall  = thread_call_allocate(refreshDiagAction, this);
+
+    return postRegisterCall != nullptr && refreshDiagCall != nullptr;
 }
 
 void RembrandtGPUPeer::free() {
+    if (g_peer == this) {
+        g_peer = nullptr;
+    }
     if (postRegisterCall) {
         thread_call_cancel(postRegisterCall);
         thread_call_free(postRegisterCall);
         postRegisterCall = nullptr;
+    }
+    if (refreshDiagCall) {
+        thread_call_cancel(refreshDiagCall);
+        thread_call_free(refreshDiagCall);
+        refreshDiagCall = nullptr;
     }
     OSSafeReleaseNULL(symSpecialAMDKey);
     OSSafeReleaseNULL(accelerator);
@@ -36,7 +219,7 @@ void RembrandtGPUPeer::free() {
 
 bool RembrandtGPUPeer::start(IOService *provider) {
     if (checkKernelArgument("-rbgpuoff")) {
-        Log("Disabled by -rbgpuoff; aborting start");
+        rbgpu_log("Peer: disabled by -rbgpuoff; aborting start");
         return false;
     }
 
@@ -46,9 +229,11 @@ bool RembrandtGPUPeer::start(IOService *provider) {
 
     pciDevice = OSDynamicCast(IOPCIDevice, provider);
     if (!pciDevice) {
-        Log("Provider is not an IOPCIDevice");
+        rbgpu_log("Peer: provider is not an IOPCIDevice");
         return false;
     }
+
+    g_peer = this;
 
     auto name = OSString::withCString("ATY,Belknap");
     if (name) {
@@ -69,19 +254,93 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     registerService();
     pciDevice->registerService();
 
-    Log("Peer attached to 0x16811002; properties set and service registered");
+    rbgpu_log("Peer: attached to 0x16811002; properties set and service registered");
+    scheduleRefreshDiag();
     return true;
 }
 
 void RembrandtGPUPeer::stop(IOService *provider) {
+    if (g_peer == this) {
+        g_peer = nullptr;
+    }
     if (postRegisterCall) {
         thread_call_cancel(postRegisterCall);
+    }
+    if (refreshDiagCall) {
+        thread_call_cancel(refreshDiagCall);
     }
     if (accelerator) {
         accelerator->release();
         accelerator = nullptr;
     }
     super::stop(provider);
+}
+
+void RembrandtGPUPeer::scheduleRefreshDiag() {
+    if (refreshDiagCall) {
+        thread_call_enter(refreshDiagCall);
+    }
+}
+
+void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call_param_t param1) {
+    auto self = static_cast<RembrandtGPUPeer *>(param0);
+    if (self) {
+        self->performRefreshDiag();
+    }
+}
+
+void RembrandtGPUPeer::performRefreshDiag() {
+    if (!g_diagLock) {
+        return;
+    }
+
+    IOLockLock(g_diagLock);
+    rbgpu_diag_set_num_locked("guard_calls", g_guard_calls);
+
+    s_snapHead      = g_logHead;
+    s_snapLogCount  = g_logCount;
+    memcpy(s_snapLogs, g_logRing, sizeof(s_snapLogs));
+
+    s_snapDiagCount = g_diagCount;
+    memcpy(s_snapDiags, g_diags, sizeof(s_snapDiags));
+    IOLockUnlock(g_diagLock);
+
+    OSArray *logArray = OSArray::withCapacity(static_cast<unsigned int>(s_snapLogCount));
+    if (logArray) {
+        char lineBuf[RBGPU_LINE_MAX + 32];
+        for (size_t i = 0; i < s_snapLogCount; i++) {
+            size_t idx = (s_snapHead - s_snapLogCount + i + RBGPU_RING_SIZE) % RBGPU_RING_SIZE;
+            snprintf(lineBuf, sizeof(lineBuf), "[%llu] %s", s_snapLogs[idx].time, s_snapLogs[idx].line);
+            OSString *osLine = OSString::withCString(lineBuf);
+            if (osLine) {
+                logArray->setObject(osLine);
+                osLine->release();
+            }
+        }
+        setProperty("RBGPULog", logArray);
+        logArray->release();
+    }
+
+    OSDictionary *diagDict = OSDictionary::withCapacity(static_cast<unsigned int>(s_snapDiagCount));
+    if (diagDict) {
+        for (size_t i = 0; i < s_snapDiagCount; i++) {
+            if (s_snapDiags[i].type == DIAG_TYPE_NUM) {
+                OSNumber *num = OSNumber::withNumber(s_snapDiags[i].numVal, 64);
+                if (num) {
+                    diagDict->setObject(s_snapDiags[i].key, num);
+                    num->release();
+                }
+            } else {
+                OSString *str = OSString::withCString(s_snapDiags[i].strVal);
+                if (str) {
+                    diagDict->setObject(s_snapDiags[i].key, str);
+                    str->release();
+                }
+            }
+        }
+        setProperty("RBGPUDiag", diagDict);
+        diagDict->release();
+    }
 }
 
 void RembrandtGPUPeer::postRegisterAction(thread_call_param_t param0, thread_call_param_t param1) {
@@ -93,21 +352,23 @@ void RembrandtGPUPeer::postRegisterAction(thread_call_param_t param0, thread_cal
 
 void RembrandtGPUPeer::handlePostRegister() {
     if (!accelerator || !symSpecialAMDKey) {
-        Log("handlePostRegister: missing accelerator or symbol reference");
+        rbgpu_log("handlePostRegister: missing accelerator or symbol reference");
         return;
     }
 
     uint32_t one = 1;
 
-    Log("handlePostRegister: sending Request 0x06 (PowerPlay Ready)");
+    rbgpu_log("handlePostRegister: sending Request 0x06 (PowerPlay Ready)");
     uint32_t reqPowerPlayReady = 0x06;
-    IOReturn ret = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqPowerPlayReady, &one, nullptr, nullptr);
-    Log("handlePostRegister: Request 0x06 returned 0x%08X", ret);
+    IOReturn ret06 = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqPowerPlayReady, &one, nullptr, nullptr);
+    rbgpu_log("handlePostRegister: Request 0x06 returned 0x%08X", ret06);
+    rbgpu_diag_set_num("ret_0x06", static_cast<uint64_t>(ret06));
 
-    Log("handlePostRegister: sending Request 0x1B (Controller Enabled)");
+    rbgpu_log("handlePostRegister: sending Request 0x1B (Controller Enabled)");
     uint32_t reqControllerEnabled = 0x1B;
-    ret = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
-    Log("handlePostRegister: Request 0x1B returned 0x%08X", ret);
+    IOReturn ret1B = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
+    rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
+    rbgpu_diag_set_num("ret_0x1B", static_cast<uint64_t>(ret1B));
 }
 
 IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
@@ -116,12 +377,16 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                                                 void *p3, void *p4) {
     if (functionName && symSpecialAMDKey && functionName->isEqualTo(symSpecialAMDKey)) {
         if (!p1) {
-            Log("SpecialAMDKey received NULL p1");
+            rbgpu_log("SpecialAMDKey received NULL p1");
             return kIOReturnBadArgument;
         }
 
         uint32_t req = *reinterpret_cast<uint32_t *>(p1);
-        Log("SpecialAMDKey request 0x%02X (wait: %d)", req, waitForFunction);
+        char reqKey[16];
+        snprintf(reqKey, sizeof(reqKey), "req_0x%02X", req);
+        rbgpu_diag_inc(reqKey);
+
+        rbgpu_log("SpecialAMDKey request 0x%02X (wait: %d)", req, waitForFunction);
 
         switch (req) {
             case 0x00: // Register
@@ -130,7 +395,7 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                     accelerator = OSDynamicCast(IOService, reinterpret_cast<OSObject *>(p2));
                     if (accelerator) {
                         accelerator->retain();
-                        Log("Registered accelerator instance: %s", accelerator->getName());
+                        rbgpu_log("Registered accelerator instance: %s", accelerator->getName());
                         if (postRegisterCall) {
                             thread_call_enter(postRegisterCall);
                         }
@@ -140,7 +405,7 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
 
             case 0x0B: // Request Drop Registration
                 if (accelerator) {
-                    Log("Dropping registered accelerator: %s", accelerator->getName());
+                    rbgpu_log("Dropping registered accelerator: %s", accelerator->getName());
                     accelerator->release();
                     accelerator = nullptr;
                 }
@@ -154,15 +419,15 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                 return kIOReturnBadArgument;
 
             case 0x17: // ASIC Reset State
-                Log("ASIC Reset State requested (unsupported)");
+                rbgpu_log("ASIC Reset State requested (unsupported)");
                 return kIOReturnUnsupported;
 
             case 0x1A: // Get DCC Capabilities
-                Log("Get DCC Capabilities requested (unsupported)");
+                rbgpu_log("Get DCC Capabilities requested (unsupported)");
                 return kIOReturnUnsupported;
 
             default:
-                Log("Unhandled SpecialAMDKey request 0x%02X", req);
+                rbgpu_log("Unhandled SpecialAMDKey request 0x%02X", req);
                 return kIOReturnUnsupported;
         }
     }
