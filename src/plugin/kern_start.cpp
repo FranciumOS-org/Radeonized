@@ -807,14 +807,16 @@ static bool patchDeviceCapabilityTableAt(mach_vm_address_t addr, size_t max_entr
     MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
     memcpy(&table[target_idx], &table[template_idx], sizeof(CapabilityEntry));
     *reinterpret_cast<uint32_t *>(table[target_idx].data + 0x10) = 0x1681;
-    // Set attribute field at +0x20 to 0x0A to match incoming attr (params+0x84)
-    *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x20) = 0x0A;
+    // Set both +0x18 and +0x20 to 0xDEADCAFE (wildcard matching for attributes/revisions)
+    *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x18) = 0xDEADCAFEULL;
+    *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x20) = 0xDEADCAFEULL;
     MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
 
     uint32_t rb_id = *reinterpret_cast<uint32_t *>(table[target_idx].data + 0x10);
-    uint64_t rb_attr = *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x20);
-    rbgpu_log("HWLibs: patched _DeviceCapabilityTbl at index %zu: cloned from index %zu, set deviceId=0x1681, attr=0x%llx (readback id: 0x%04X)",
-              target_idx, template_idx, rb_attr, rb_id);
+    uint64_t rb_18 = *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x18);
+    uint64_t rb_20 = *reinterpret_cast<uint64_t *>(table[target_idx].data + 0x20);
+    rbgpu_log("HWLibs: patched _DeviceCapabilityTbl at index %zu: cloned from index %zu, set deviceId=0x1681, +0x18=0x%llx, +0x20=0x%llx (readback id: 0x%04X)",
+              target_idx, template_idx, rb_18, rb_20, rb_id);
     rbgpu_diag_set_num("cap_tbl_patched", rb_id == 0x1681 ? 1 : 0);
     rbgpu_diag_set_num("cap_tbl_idx", target_idx);
 
