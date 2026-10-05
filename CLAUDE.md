@@ -372,3 +372,10 @@ after that call. So the PSP SW_INIT failure is after the discovery lookup
 (Gemini's NULL-discovery explanation ruled out). Client 3's SW_INIT succeeds
 although its discovery info is NULL. tOS status 0x0012e33a. Full log:
 logs/20261005-141942-plugin/peer.plist.
+
+Boot 23 (2026-10-05 14:59, milestone 2w, UUID 1A2123CD, -rbgpusync570
+-rbgpuspoofttl): no panic, no hang. _ipi_psp_sw_init's callback at dev+0x8
+= 0xffffff7fb0131430 = HWLibs 0x12648430 _psp_sw_init (named by ptrsym.py).
+_ipi_psp_sw_init returned 0 ~15 us after the (non-NULL) discovery lookup, so
+_psp_sw_init returns nonzero. Rest identical to boot 22. tOS status
+0x0012e20d. Full log: logs/20261005-145934-plugin/peer.plist.
