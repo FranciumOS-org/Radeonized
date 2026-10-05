@@ -243,3 +243,6 @@ dir=0xffffff86adf31e00. initialize(input) still sees +0x570 == 0 and returns
 0xe00002bc. initialize()'s `this` is not logged, so it is open whether it is
 the same object, or whether setFirmwareDirectory stores elsewhere than 0x570.
 tOS status 0x0010ab0d. Full log: logs/20261005-100702-plugin/peer.plist.
+setFirmwareDirectory (0x12660f40) stores the directory at this+0x958 (returns
+0xe00002bc for a null dir); it does not touch +0x570. In initialize(input),
++0x570 is only written from input->field_10 (non-null) — boot 9/10 input[2]=0.
