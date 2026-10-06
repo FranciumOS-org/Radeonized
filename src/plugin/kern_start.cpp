@@ -119,6 +119,14 @@ typedef int      (*psp_np_fw_load_fn_t)(void *psp_buf);
 typedef void     (*kprintf_t)(const char *fmt, ...);
 typedef void     (*iolog_t)(const char *fmt, ...);
 
+// 2bg: submitFrame/createEngine diagnostics for pHandle=0 investigation
+typedef uint32_t (*amdtll_submit_frame_fn_t)(void *this_ptr, uint32_t queue_type, uint32_t index, void *param);
+typedef int      (*amdtll_create_engine_fn_t)(void *this_ptr, uint32_t queue_type, uint32_t index, void *input);
+// 2bh: buildCommand diagnostics
+typedef uint32_t (*amdtll_build_command_fn_t)(void *this_ptr, uint32_t queue_type, uint32_t index, void *info, void *param);
+// 2bm: allocateMemoryResources - the vtable[0x120] that returns false
+typedef uint8_t (*amdrt_allocate_memory_resources_fn_t)(void *this_ptr);
+
 static smu_cgs_alloc_memory_t           orig_smu_cgs_alloc_memory           = nullptr;
 static smu_cgs_free_memory_t            orig_smu_cgs_free_memory            = nullptr;
 static smu_get_hw_version_t             orig_smu_get_hw_version             = nullptr;
@@ -167,6 +175,14 @@ static psp_np_fw_load_fn_t              orig_psp_np_fw_load                 = nu
 
 static kprintf_t orig_kprintf = nullptr;
 static iolog_t   orig_iolog   = nullptr;
+
+// 2bg: orig pointers for submitFrame/createEngine
+static amdtll_submit_frame_fn_t  orig_amdtll_submit_frame  = nullptr;
+static amdtll_create_engine_fn_t orig_amdtll_create_engine = nullptr;
+// 2bh: orig pointer for buildCommand
+static amdtll_build_command_fn_t orig_amdtll_build_command = nullptr;
+// 2bm: orig pointer for allocateMemoryResources
+static amdrt_allocate_memory_resources_fn_t orig_amdrt_allocate_memory_resources = nullptr;
 
 static bool g_safe_ttl_mode  = false;
 static bool g_sync_570_mode  = false;
@@ -1390,6 +1406,109 @@ static void hooked_AmdTtlServices_setFirmwareDirectory(void *this_ptr, void *fw_
               this_ptr, post_570, post_958);
 }
 
+// 2bg: Hook submitFrame to log (queueType, index) when pHandle is NULL.
+// This identifies which queues are missing engines.
+static uint32_t hooked_AmdTtlServices_submitFrame(void *this_ptr, uint32_t queue_type, uint32_t index, void *param) {
+    rbgpu_log("2bg submitFrame: this=%p queueType=%u index=%u param=%p", this_ptr, queue_type, index, param);
+    uint32_t ret = 0xe00002bc;
+    if (orig_amdtll_submit_frame) {
+        ret = orig_amdtll_submit_frame(this_ptr, queue_type, index, param);
+    }
+    rbgpu_log("2bg submitFrame returned 0x%x (queueType=%u index=%u)", ret, queue_type, index);
+    return ret;
+}
+
+// 2bg: Hook createEngine to log when engines are created.
+// 2bi REVERTED (2bj): The (0,1) creation panicked in _TtlRtsCreateEngine (NULL call).
+// Do NOT create extra engines - driver's internal state doesn't support it.
+static int hooked_AmdTtlServices_createEngine(void *this_ptr, uint32_t queue_type, uint32_t index, void *input) {
+    rbgpu_log("2bg createEngine: this=%p queueType=%u index=%u input=%p", this_ptr, queue_type, index, input);
+    int ret = -1;
+    if (orig_amdtll_create_engine) {
+        ret = orig_amdtll_create_engine(this_ptr, queue_type, index, input);
+    }
+    rbgpu_log("2bg createEngine returned %d (queueType=%u index=%u)", ret, queue_type, index);
+    return ret;
+}
+
+// 2bh: Hook buildCommand to log (queueType, index) for pHandle failures.
+// 2bl: Redirect (0,1) -> (0,0). The driver only created (0,0); (0,1) has no engine.
+//      Trying to create (0,1) panics in _TtlRtsCreateEngine (NULL function pointer).
+//      Redirecting the 5 failing commands to the existing (0,0) engine is safe.
+static uint32_t hooked_AmdTtlServices_buildCommand(void *this_ptr, uint32_t queue_type, uint32_t index, void *info, void *param) {
+    uint32_t eff_queue_type = queue_type;
+    uint32_t eff_index = index;
+    // 2bl: Redirect the missing (0,1) to the existing (0,0)
+    if (queue_type == 0 && index == 1) {
+        eff_index = 0;
+        rbgpu_log("2bl: redirecting buildCommand (0,1) -> (0,0)");
+    }
+    rbgpu_log("2bh buildCommand: this=%p queueType=%u index=%u (eff %u,%u) info=%p param=%p",
+              this_ptr, queue_type, index, eff_queue_type, eff_index, info, param);
+    uint32_t ret = 0xe00002bc;
+    if (orig_amdtll_build_command) {
+        ret = orig_amdtll_build_command(this_ptr, eff_queue_type, eff_index, info, param);
+    }
+    rbgpu_log("2bh buildCommand returned 0x%x (queueType=%u index=%u)", ret, queue_type, index);
+    return ret;
+}
+
+// 2bm: Hook AMDRTHardware::allocateMemoryResources (vtable[0x120]).
+// This returns false, causing "Failed to init HW Acelerator resources".
+// Log the failure, then force it to true to see what happens next.
+static uint8_t hooked_AMDRTHardware_allocateMemoryResources(void *this_ptr) {
+    rbgpu_log("2bm allocateMemoryResources: this=%p entered", this_ptr);
+    uint8_t ret = 0;
+    if (orig_amdrt_allocate_memory_resources) {
+        ret = orig_amdrt_allocate_memory_resources(this_ptr);
+    }
+    rbgpu_log("2bm allocateMemoryResources returned %u (0=fail, 1=success)", ret);
+    // 2bm: Force success to get past this barrier and see the next failure
+    if (ret == 0) {
+        rbgpu_log("2bm: FORCING return 1 (was 0)");
+        ret = 1;
+    }
+    return ret;
+}
+
+// 2bn: Hook AMDHWMemory::reserve to diagnose the display_mode_did_change failure.
+// Per Claude's analysis, set_display_mode_and_vram calls mem->reserve() for each
+// display pipe, and it fails, causing the panic. Log the parameters to see why.
+static bool (*orig_amdhw_reserve)(void *this_ptr, void *elem, uint64_t offset, uint64_t size, bool flag, int originator) = nullptr;
+static int reserve_log_count = 0;
+
+static bool hooked_AMDHWMemory_reserve(void *this_ptr, void *elem, uint64_t offset, uint64_t size, bool flag, int originator) {
+    // Log this+0x50 (base) and this+0x68 (allocator)
+    uint64_t base = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x50) : 0;
+    uint64_t allocator = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x68) : 0;
+
+    bool ret = false;
+    if (orig_amdhw_reserve) {
+        ret = orig_amdhw_reserve(this_ptr, elem, offset, size, flag, originator);
+    }
+
+    // Log first few calls (both successes and failures) to see what ranges are accepted
+    if (reserve_log_count < 10) {
+        rbgpu_log("2bn reserve: this=%p elem=%p offset=0x%llx size=0x%llx flag=%d orig=%d -> %d (base=0x%llx alloc=%p)",
+                  this_ptr, elem, offset, size, flag ? 1 : 0, originator, ret ? 1 : 0, base, reinterpret_cast<void *>(allocator));
+        reserve_log_count++;
+    } else if (!ret) {
+        // Always log failures
+        rbgpu_log("2bn reserve FAILED: this=%p offset=0x%llx size=0x%llx (base=0x%llx alloc=%p)",
+                  this_ptr, offset, size, base, reinterpret_cast<void *>(allocator));
+    }
+
+    // 2bo: a failed reserve with originator 0x1e is set_display_mode_and_vram's
+    // framebuffer reservation; display_mode_did_change panics right after it and
+    // the RBGPULog is lost. Panic here instead so the numbers are in the report.
+    if (!ret && originator == 0x1e) {
+        panic("rbgpu reserve fail: off=0x%llx size=0x%llx flag=%d base=0x%llx alloc=%p this=%p elem=%p",
+              offset, size, flag ? 1 : 0, base, reinterpret_cast<void *>(allocator), this_ptr, elem);
+    }
+
+    return ret;
+}
+
 static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
     rbgpu_diag_inc("ttl_init_inp_calls");
     rbgpu_diag_set_num("ttl_init_inp_this", reinterpret_cast<uint64_t>(this_ptr));
@@ -1922,6 +2041,21 @@ void RGPU::routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address
             orig_amdtll_set_fw_dir
         ),
         KernelPatcher::RouteRequest(
+            "__ZN14AmdTtlServices11submitFrameE19AMD_SWIP_QUEUE_TYPEjPv",
+            hooked_AmdTtlServices_submitFrame,
+            orig_amdtll_submit_frame
+        ),
+        KernelPatcher::RouteRequest(
+            "__ZN14AmdTtlServices12createEngineE19AMD_SWIP_QUEUE_TYPEjP21_TtlCreateEngineInput",
+            hooked_AmdTtlServices_createEngine,
+            orig_amdtll_create_engine
+        ),
+        KernelPatcher::RouteRequest(
+            "__ZN14AmdTtlServices12buildCommandE19AMD_SWIP_QUEUE_TYPEjP20_TtlBuildCommandInfoPv",
+            hooked_AmdTtlServices_buildCommand,
+            orig_amdtll_build_command
+        ),
+        KernelPatcher::RouteRequest(
             "_ttl_initialize",
             hooked_ttl_initialize,
             orig_ttl_initialize
@@ -2308,6 +2442,33 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     if (!patched) {
         rbgpu_diag_set_num("guard_routed", 0);
         rbgpu_log("Trap 3 Guard: failed to locate or patch stop() call site in start()");
+    }
+
+    // 2bm: Hook AMDRTHardware::allocateMemoryResources (vtable[0x120]).
+    // This returns false, causing "Failed to init HW Acelerator resources".
+    KernelPatcher::RouteRequest req_alloc(
+        "__ZN28AMDRadeonX6000_AMDRTHardware23allocateMemoryResourcesEv",
+        hooked_AMDRTHardware_allocateMemoryResources,
+        orig_amdrt_allocate_memory_resources
+    );
+    if (patcher.routeMultiple(id, &req_alloc, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDRTHardware::allocateMemoryResources");
+    } else {
+        rbgpu_log("X6000: failed to hook allocateMemoryResources");
+    }
+
+    // 2bn: Hook AMDHWMemory::reserve to diagnose display_mode_did_change failure.
+    // Per Claude's analysis, set_display_mode_and_vram calls reserve() for each
+    // display pipe and it fails. Log-only, no behavior change.
+    KernelPatcher::RouteRequest req_reserve(
+        "__ZN26AMDRadeonX6000_AMDHWMemory7reserveEP16AMDMemoryElementyyb15_eOP_ORIGINATOR",
+        hooked_AMDHWMemory_reserve,
+        orig_amdhw_reserve
+    );
+    if (patcher.routeMultiple(id, &req_reserve, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDHWMemory::reserve (2bn diagnostic)");
+    } else {
+        rbgpu_log("X6000: failed to hook AMDHWMemory::reserve");
     }
 }
 
