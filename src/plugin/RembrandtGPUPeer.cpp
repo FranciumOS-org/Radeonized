@@ -422,7 +422,12 @@ void RembrandtGPUPeer::postRegisterAction(thread_call_param_t param0, thread_cal
     }
 }
 
+volatile uint32_t g_rb_peer_stage = 0;
+volatile uint32_t g_rb_peer_ret06 = 0xFFFFFFFF;
+volatile uint32_t g_rb_peer_ret1B = 0xFFFFFFFF;
+
 void RembrandtGPUPeer::handlePostRegister() {
+    g_rb_peer_stage |= 2;
     if (!accelerator || !symSpecialAMDKey) {
         rbgpu_log("handlePostRegister: missing accelerator or symbol reference");
         return;
@@ -435,12 +440,16 @@ void RembrandtGPUPeer::handlePostRegister() {
     IOReturn ret06 = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqPowerPlayReady, &one, nullptr, nullptr);
     rbgpu_log("handlePostRegister: Request 0x06 returned 0x%08X", ret06);
     rbgpu_diag_set_num("ret_0x06", static_cast<uint64_t>(ret06));
+    g_rb_peer_ret06 = static_cast<uint32_t>(ret06);
+    g_rb_peer_stage |= 4;
 
     rbgpu_log("handlePostRegister: sending Request 0x1B (Controller Enabled)");
     uint32_t reqControllerEnabled = 0x1B;
     IOReturn ret1B = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
     rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
     rbgpu_diag_set_num("ret_0x1B", static_cast<uint64_t>(ret1B));
+    g_rb_peer_ret1B = static_cast<uint32_t>(ret1B);
+    g_rb_peer_stage |= 8;
 }
 
 IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
@@ -468,6 +477,7 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                     if (accelerator) {
                         accelerator->retain();
                         rbgpu_log("Registered accelerator instance: %s", accelerator->getName());
+                        g_rb_peer_stage |= 1;
                         if (postRegisterCall) {
                             thread_call_enter(postRegisterCall);
                         }

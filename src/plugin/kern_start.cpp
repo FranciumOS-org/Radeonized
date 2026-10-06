@@ -1543,8 +1543,9 @@ static bool hooked_AMDHWMemory_reserve(void *this_ptr, void *elem, uint64_t offs
             rr[i][1] = g_reserve_recs[i].size;
             rr[i][2] = static_cast<uint64_t>(g_reserve_recs[i].orig);
         }
-        panic("rbgpu reserve fail: off=0x%llx size=0x%llx base=0x%llx alloc=%p free=0x%llx | seen %d: "
+        panic("rbgpu reserve fail: peer stage=0x%x r06=0x%x r1B=0x%x | off=0x%llx size=0x%llx base=0x%llx alloc=%p free=0x%llx | seen %d: "
               "[0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu]",
+              g_rb_peer_stage, g_rb_peer_ret06, g_rb_peer_ret1B,
               offset, size, base, reinterpret_cast<void *>(allocator),
               allocator ? *reinterpret_cast<uint64_t *>(allocator + 0x50) : 0, g_reserve_rec_count,
               rr[0][0], rr[0][1], rr[0][2], rr[1][0], rr[1][1], rr[1][2],
