@@ -1477,6 +1477,42 @@ static uint8_t hooked_AMDRTHardware_allocateMemoryResources(void *this_ptr) {
 static bool (*orig_amdhw_reserve)(void *this_ptr, void *elem, uint64_t offset, uint64_t size, bool flag, int originator) = nullptr;
 static int reserve_log_count = 0;
 
+// 2br: powerUpHW progress (the accelerator's VRAM pool is filled there).
+// Bits: 1 powerUpHW entered, 2 powerUpHW returned, 4 Navi21Hardware::powerUp
+// entered, 8 it returned true, 0x10 enableAllocations entered, 0x20 it
+// returned true. Read by the reserve panic.
+static volatile uint32_t g_rb_pw_stage = 0;
+static volatile uint32_t g_rb_pw_ret = 0xFFFFFFFF;
+static uint32_t (*orig_accel_powerUpHW)(void *) = nullptr;
+static bool (*orig_navi21_powerUp)(void *) = nullptr;
+static bool (*orig_hwmem_enableAllocations)(void *) = nullptr;
+
+static uint32_t hooked_accel_powerUpHW(void *accel) {
+    g_rb_pw_stage |= 1;
+    rbgpu_log("2br: powerUpHW entered (accel=%p)", accel);
+    uint32_t ret = orig_accel_powerUpHW ? orig_accel_powerUpHW(accel) : 0;
+    g_rb_pw_ret = ret;
+    g_rb_pw_stage |= 2;
+    rbgpu_log("2br: powerUpHW returned 0x%x", ret);
+    return ret;
+}
+
+static bool hooked_navi21_powerUp(void *hw) {
+    g_rb_pw_stage |= 4;
+    bool ret = orig_navi21_powerUp ? orig_navi21_powerUp(hw) : false;
+    if (ret) g_rb_pw_stage |= 8;
+    rbgpu_log("2br: Navi21Hardware::powerUp -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+static bool hooked_hwmem_enableAllocations(void *mem) {
+    g_rb_pw_stage |= 0x10;
+    bool ret = orig_hwmem_enableAllocations ? orig_hwmem_enableAllocations(mem) : false;
+    if (ret) g_rb_pw_stage |= 0x20;
+    rbgpu_log("2br: AMDHWMemory::enableAllocations -> %d", ret ? 1 : 0);
+    return ret;
+}
+
 // 2bp: successful reservations seen so far, so a failure can name what
 // already holds its range (reserveNDRVSpace's boot-framebuffer slot uses
 // originator 0 at the start of VRAM).
@@ -1543,9 +1579,9 @@ static bool hooked_AMDHWMemory_reserve(void *this_ptr, void *elem, uint64_t offs
             rr[i][1] = g_reserve_recs[i].size;
             rr[i][2] = static_cast<uint64_t>(g_reserve_recs[i].orig);
         }
-        panic("rbgpu reserve fail: peer stage=0x%x r06=0x%x r1B=0x%x | off=0x%llx size=0x%llx base=0x%llx alloc=%p free=0x%llx | seen %d: "
+        panic("rbgpu reserve fail: peer stage=0x%x r06=0x%x r1B=0x%x pw=0x%x pwret=0x%x | off=0x%llx size=0x%llx base=0x%llx alloc=%p free=0x%llx | seen %d: "
               "[0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu]",
-              g_rb_peer_stage, g_rb_peer_ret06, g_rb_peer_ret1B,
+              g_rb_peer_stage, g_rb_peer_ret06, g_rb_peer_ret1B, g_rb_pw_stage, g_rb_pw_ret,
               offset, size, base, reinterpret_cast<void *>(allocator),
               allocator ? *reinterpret_cast<uint64_t *>(allocator + 0x50) : 0, g_reserve_rec_count,
               rr[0][0], rr[0][1], rr[0][2], rr[1][0], rr[1][1], rr[1][2],
@@ -2515,6 +2551,18 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked AMDHWMemory::reserve (2bn diagnostic)");
     } else {
         rbgpu_log("X6000: failed to hook AMDHWMemory::reserve");
+    }
+
+    // 2br: powerUpHW and the two calls before reserveNDRVSpace that can fail.
+    KernelPatcher::RouteRequest req_pw[] = {
+        {"__ZN37AMDRadeonX6000_AMDGraphicsAccelerator9powerUpHWEv", hooked_accel_powerUpHW, orig_accel_powerUpHW},
+        {"__ZN32AMDRadeonX6000_AMDNavi21Hardware7powerUpEv", hooked_navi21_powerUp, orig_navi21_powerUp},
+        {"__ZN26AMDRadeonX6000_AMDHWMemory17enableAllocationsEv", hooked_hwmem_enableAllocations, orig_hwmem_enableAllocations},
+    };
+    if (patcher.routeMultiple(id, req_pw, arrsize(req_pw), address, size)) {
+        rbgpu_log("X6000: hooked powerUpHW, Navi21Hardware::powerUp, enableAllocations (2br)");
+    } else {
+        rbgpu_log("X6000: failed to hook the powerUpHW chain (2br)");
     }
 }
 
