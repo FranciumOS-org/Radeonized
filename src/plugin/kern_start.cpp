@@ -1119,6 +1119,7 @@ static uint8_t hooked_ttlDevGetDoorbellRange(void *dev, uint32_t type, uint32_t 
 static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
     rbgpu_diag_inc("gc_set_fw_calls");
     uint8_t ret = 0;
+    bool skip_orig = false; // 2al: set for entries we deliberately do not register
     // 2af: read-only dump of the firmware entry descriptor (first 8 dwords),
     // before and after the original call, to learn its layout for the
     // yellow_carp firmware-replacement step. Nothing here is modified.
@@ -1176,10 +1177,25 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
             rbgpu_log("_IpiSetFwEntry YC-SWAP id=%u -> img=%p size=0x%x", d[0], yc_img, yc_size);
             rbgpu_diag_inc("yc_swapped");
         }
+        // 2al: skip Navi21 TAP_DELAYS (ids 31-35: GLOBAL, SE0-SE3). Boot 35
+        // (first -rbgpupsphw boot) proved the PSP itself initializes and loads
+        // its own firmware on this PSP 13, but _psp_np_fw_load then died on
+        // "SE1 Tap Delays": cmd 0x6 rejected by the TOS with 0xffff0006 x4.
+        // These are Navi21 dGPU PHY tuning blobs; the Rembrandt TOS rejects
+        // them and linux-firmware ships no yellow_carp equivalents. Do not
+        // register them: report success without calling the original, so the
+        // PSP never attempts the load and np_fw_load can proceed to the next
+        // firmware.
+        if (d[0] >= 31 && d[0] <= 35) {
+            rbgpu_log("_IpiSetFwEntry TAP-SKIP id=%u (not registered)", d[0]);
+            rbgpu_diag_inc("tap_skipped");
+            skip_orig = true;
+            ret = 1;
+        }
     } else {
         rbgpu_log("_IpiSetFwEntry pre : instance=%p entry=NULL", instance);
     }
-    if (orig_ipi_set_fw_entry) {
+    if (orig_ipi_set_fw_entry && !skip_orig) {
         ret = orig_ipi_set_fw_entry(instance, fw_entry);
     }
     if (fw_entry) {
