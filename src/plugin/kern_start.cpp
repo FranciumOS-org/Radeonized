@@ -1579,6 +1579,55 @@ bool RGPU::patchGcFwVersionCheck(KernelPatcher &patcher, size_t id) {
     return patchGcFwVersionCheckAt(fn_addr);
 }
 
+// 2am: _gc_fw_autoload_is_completed waits for BOOTLOAD_COMPLETE in
+// RLC_RLCS_BOOTLOAD_STATUS, a latch set only by the RLC's backdoor-autoload
+// bootloader. When the PSP places the firmware itself (our path: boot 36
+// proved _psp_np_fw_load returns 0), nothing sets the latch during the wait,
+// so it times out after 50ms even though the microcode is present. An
+// independent Raphael-iGPU bring-up measured exactly this: RLC_STAT==0x25,
+// BOOTLOAD_COMPLETE clear at both offsets, yet instruction RAM holds real
+// microcode in all five engines. Patch the function entry to return 1
+// immediately (mov eax,1; ret). Gated behind -rbgpupsphw; verify-before-write.
+static bool patchGcAutoloadCheckAt(mach_vm_address_t fn_addr) {
+    uint8_t b0 = *reinterpret_cast<uint8_t *>(fn_addr);
+    if (b0 == 0xC3 || b0 == 0xCC) {
+        rbgpu_log("HWLibs: GC autoload check already patched or stub (b0=0x%02X), skipping", b0);
+        rbgpu_diag_set_num("gc_autoload_patched", 1);
+        return true;
+    }
+    // mov eax, 1; ret
+    static const uint8_t patch[6] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+    for (int i = 0; i < 6; i++)
+        *(reinterpret_cast<uint8_t *>(fn_addr) + i) = patch[i];
+    MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+    for (int i = 0; i < 6; i++) {
+        uint8_t rb = *(reinterpret_cast<uint8_t *>(fn_addr) + i);
+        if (rb != patch[i]) {
+            rbgpu_log("HWLibs: [CRITICAL] GC autoload check patch FAILED readback at +%d: 0x%02X", i, rb);
+            return false;
+        }
+    }
+    rbgpu_diag_set_num("gc_autoload_patched", 1);
+    rbgpu_log("HWLibs: patched _gc_fw_autoload_is_completed entry to return 1 at %p",
+              reinterpret_cast<void *>(fn_addr));
+    return true;
+}
+
+bool RGPU::patchGcAutoloadCheck(KernelPatcher &patcher, size_t id) {
+    if (!g_psp_hw_mode) {
+        rbgpu_log("HWLibs: GC autoload check patch skipped (-rbgpupsphw not set)");
+        return false;
+    }
+    mach_vm_address_t fn_addr = patcher.solveSymbol(id, "_gc_fw_autoload_is_completed");
+    if (!fn_addr) {
+        rbgpu_log("HWLibs: symbol _gc_fw_autoload_is_completed not resolved; skipping patch");
+        return false;
+    }
+    rbgpu_log("HWLibs: resolved _gc_fw_autoload_is_completed at %p", reinterpret_cast<void *>(fn_addr));
+    return patchGcAutoloadCheckAt(fn_addr);
+}
+
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     static bool s_kernel_hooks_installed = false;
     if (s_kernel_hooks_installed || noLogCapture) {
@@ -1896,6 +1945,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     patchDeviceTypeTable(patcher, id);
     patchDeviceCapabilityTable(patcher, id);
     patchGcFwVersionCheck(patcher, id);
+    patchGcAutoloadCheck(patcher, id);
 
     routeTTL(patcher, id, address, size);
     routePSPBasics(patcher, id, address, size);
