@@ -1477,6 +1477,13 @@ static uint8_t hooked_AMDRTHardware_allocateMemoryResources(void *this_ptr) {
 static bool (*orig_amdhw_reserve)(void *this_ptr, void *elem, uint64_t offset, uint64_t size, bool flag, int originator) = nullptr;
 static int reserve_log_count = 0;
 
+// 2bp: successful reservations seen so far, so a failure can name what
+// already holds its range (reserveNDRVSpace's boot-framebuffer slot uses
+// originator 0 at the start of VRAM).
+struct RbReserveRec { void *mem; void *elem; uint64_t off; uint64_t size; int orig; };
+static RbReserveRec g_reserve_recs[8];
+static int g_reserve_rec_count = 0;
+
 static bool hooked_AMDHWMemory_reserve(void *this_ptr, void *elem, uint64_t offset, uint64_t size, bool flag, int originator) {
     // Log this+0x50 (base) and this+0x68 (allocator)
     uint64_t base = this_ptr ? *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(this_ptr) + 0x50) : 0;
@@ -1498,12 +1505,50 @@ static bool hooked_AMDHWMemory_reserve(void *this_ptr, void *elem, uint64_t offs
                   this_ptr, offset, size, base, reinterpret_cast<void *>(allocator));
     }
 
-    // 2bo: a failed reserve with originator 0x1e is set_display_mode_and_vram's
-    // framebuffer reservation; display_mode_did_change panics right after it and
-    // the RBGPULog is lost. Panic here instead so the numbers are in the report.
+    if (ret && g_reserve_rec_count < 8) {
+        g_reserve_recs[g_reserve_rec_count++] = { this_ptr, elem, offset, size, originator };
+    }
+
+    // 2bp: set_display_mode_and_vram (originator 0x1e) reserves the boot
+    // framebuffer at the start of VRAM for the display pipe, after freeing only
+    // the second reserveNDRVSpace slot (+0x1ee0). The first slot (+0x1ed0,
+    // originator 0, same start) still holds the range, so the allocator
+    // refuses. Release that slot through the same AMDHWMemory and retry once.
+    if (!ret && originator == 0x1e && g_psp_hw_mode && this_ptr && orig_amdhw_reserve) {
+        for (int i = 0; i < g_reserve_rec_count; i++) {
+            RbReserveRec &r = g_reserve_recs[i];
+            if (r.mem != this_ptr || r.orig != 0 || r.off != offset || !r.elem ||
+                *reinterpret_cast<void **>(r.elem) == nullptr) {
+                continue;
+            }
+            auto vt = *reinterpret_cast<void ***>(this_ptr);
+            auto safeFree = reinterpret_cast<void (*)(void *, void *)>(vt[0x1a0 / 8]);
+            rbgpu_log("2bp: releasing NDRV reservation elem=%p off=0x%llx size=0x%llx for the display pipe", r.elem, r.off, r.size);
+            safeFree(this_ptr, r.elem);
+            r.elem = nullptr;
+            ret = orig_amdhw_reserve(this_ptr, elem, offset, size, flag, originator);
+            rbgpu_log("2bp: display pipe reserve retry -> %d", ret ? 1 : 0);
+            rbgpu_diag_set_num("ndrv_release_retry", ret ? 1 : 0);
+            break;
+        }
+    }
+
+    // 2bo: still failing: panic with the numbers (the RBGPULog is lost in the
+    // display_mode_did_change panic that would follow) and the first
+    // successful reservations, to show what holds the range.
     if (!ret && originator == 0x1e) {
-        panic("rbgpu reserve fail: off=0x%llx size=0x%llx flag=%d base=0x%llx alloc=%p this=%p elem=%p",
-              offset, size, flag ? 1 : 0, base, reinterpret_cast<void *>(allocator), this_ptr, elem);
+        uint64_t rr[4][3] = {};
+        for (int i = 0; i < 4 && i < g_reserve_rec_count; i++) {
+            rr[i][0] = g_reserve_recs[i].off;
+            rr[i][1] = g_reserve_recs[i].size;
+            rr[i][2] = static_cast<uint64_t>(g_reserve_recs[i].orig);
+        }
+        panic("rbgpu reserve fail: off=0x%llx size=0x%llx base=0x%llx alloc=%p free=0x%llx | seen %d: "
+              "[0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu]",
+              offset, size, base, reinterpret_cast<void *>(allocator),
+              allocator ? *reinterpret_cast<uint64_t *>(allocator + 0x50) : 0, g_reserve_rec_count,
+              rr[0][0], rr[0][1], rr[0][2], rr[1][0], rr[1][1], rr[1][2],
+              rr[2][0], rr[2][1], rr[2][2], rr[3][0], rr[3][1], rr[3][2]);
     }
 
     return ret;
