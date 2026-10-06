@@ -13,6 +13,7 @@ __TEXT.vmaddr + (pointer - load address). Pointers outside every loaded kext
 import os
 import plistlib
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +29,20 @@ LOADED = re.compile(r"\b(HWLibs|X6000|HWSvc) loaded at (0x[0-9a-fA-F]+) \(size (
 POINTER = re.compile(r"0x[0-9a-fA-F]{12,16}\b")
 
 
+KC = "/System/Library/KernelCollections/SystemKernelExtensions.kc"
+
+
+def extracted(kext):
+    """build/re/<kext>, extracted again if `make clean` removed it."""
+    path = os.path.join(ROOT, "build", "re", kext)
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        subprocess.run([sys.executable, os.path.join(ROOT, "tools", "re", "kc_extract.py"),
+                        KC, "com.apple.kext." + kext, path],
+                       check=True, stdout=subprocess.DEVNULL)
+    return path
+
+
 def log_lines(path):
     tree = plistlib.load(open(path, "rb"))
     node = tree[0] if isinstance(tree, list) and tree else tree
@@ -40,7 +55,7 @@ def main():
     for line in lines:
         m = LOADED.search(line)
         if m:
-            macho = Macho(os.path.join(ROOT, "build", "re", KEXTS[m.group(1)]))
+            macho = Macho(extracted(KEXTS[m.group(1)]))
             text = next(s for s in macho.segs if s[0] == "__TEXT")
             ranges.append((int(m.group(2), 16), int(m.group(3), 16), KEXTS[m.group(1)], macho, text[1]))
     if not ranges:
