@@ -12,6 +12,13 @@ void rbgpu_diag_set_num(const char *key, uint64_t val);
 void rbgpu_diag_set_str(const char *key, const char *val);
 void rbgpu_diag_inc(const char *key);
 
+// 2bq: peer progress, readable from hooks (a panic loses RBGPULog/RBGPUDiag).
+// Bits: 1 Register (0x00) received, 2 post-Register thread ran,
+// 4 request 0x06 returned, 8 request 0x1B returned.
+extern volatile uint32_t g_rb_peer_stage;
+extern volatile uint32_t g_rb_peer_ret06;
+extern volatile uint32_t g_rb_peer_ret1B;
+
 class RembrandtGPUPeer : public IOService {
     OSDeclareDefaultStructors(RembrandtGPUPeer)
 
