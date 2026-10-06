@@ -1588,6 +1588,7 @@ bool RGPU::patchGcFwVersionCheck(KernelPatcher &patcher, size_t id) {
 // BOOTLOAD_COMPLETE clear at both offsets, yet instruction RAM holds real
 // microcode in all five engines. Patch the function entry to return 1
 // immediately (mov eax,1; ret). Gated behind -rbgpupsphw; verify-before-write.
+// File-static (no hpp change needed).
 static bool patchGcAutoloadCheckAt(mach_vm_address_t fn_addr) {
     uint8_t b0 = *reinterpret_cast<uint8_t *>(fn_addr);
     if (b0 == 0xC3 || b0 == 0xCC) {
@@ -1614,7 +1615,7 @@ static bool patchGcAutoloadCheckAt(mach_vm_address_t fn_addr) {
     return true;
 }
 
-bool RGPU::patchGcAutoloadCheck(KernelPatcher &patcher, size_t id) {
+static bool patchGcAutoloadCheck(KernelPatcher &patcher, size_t id) {
     if (!g_psp_hw_mode) {
         rbgpu_log("HWLibs: GC autoload check patch skipped (-rbgpupsphw not set)");
         return false;
@@ -1626,6 +1627,54 @@ bool RGPU::patchGcAutoloadCheck(KernelPatcher &patcher, size_t id) {
     }
     rbgpu_log("HWLibs: resolved _gc_fw_autoload_is_completed at %p", reinterpret_cast<void *>(fn_addr));
     return patchGcAutoloadCheckAt(fn_addr);
+}
+
+// 2an: _gc_hw_init calls _gc_check_register_equal_ext (a "wait until register
+// == value" helper used by cosWaitForFunc) several times; boot 37 shows two
+// 500ms timeouts killing the init. The Raphael-iGPU bring-up identified the
+// same pattern in _gc_enter_rlc_safe_mode_10_3: it writes RLC_SAFE_MODE and
+// waits 500ms for the RLC to clear CMD, which never happens on the PSP-load
+// path, while upstream Linux just proceeds after its timeout. Patch the helper
+// entry to return 1 immediately ("condition met"). Gated behind -rbgpupsphw;
+// verify-before-write. File-static (no hpp change needed).
+static bool patchGcRegCheckAt(mach_vm_address_t fn_addr) {
+    uint8_t b0 = *reinterpret_cast<uint8_t *>(fn_addr);
+    if (b0 == 0xC3 || b0 == 0xCC) {
+        rbgpu_log("HWLibs: GC reg-check already patched or stub (b0=0x%02X), skipping", b0);
+        rbgpu_diag_set_num("gc_regcheck_patched", 1);
+        return true;
+    }
+    // mov eax, 1; ret
+    static const uint8_t patch[6] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+    for (int i = 0; i < 6; i++)
+        *(reinterpret_cast<uint8_t *>(fn_addr) + i) = patch[i];
+    MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+    for (int i = 0; i < 6; i++) {
+        uint8_t rb = *(reinterpret_cast<uint8_t *>(fn_addr) + i);
+        if (rb != patch[i]) {
+            rbgpu_log("HWLibs: [CRITICAL] GC reg-check patch FAILED readback at +%d: 0x%02X", i, rb);
+            return false;
+        }
+    }
+    rbgpu_diag_set_num("gc_regcheck_patched", 1);
+    rbgpu_log("HWLibs: patched _gc_check_register_equal_ext entry to return 1 at %p",
+              reinterpret_cast<void *>(fn_addr));
+    return true;
+}
+
+static bool patchGcRegCheck(KernelPatcher &patcher, size_t id) {
+    if (!g_psp_hw_mode) {
+        rbgpu_log("HWLibs: GC reg-check patch skipped (-rbgpupsphw not set)");
+        return false;
+    }
+    mach_vm_address_t fn_addr = patcher.solveSymbol(id, "_gc_check_register_equal_ext");
+    if (!fn_addr) {
+        rbgpu_log("HWLibs: symbol _gc_check_register_equal_ext not resolved; skipping patch");
+        return false;
+    }
+    rbgpu_log("HWLibs: resolved _gc_check_register_equal_ext at %p", reinterpret_cast<void *>(fn_addr));
+    return patchGcRegCheckAt(fn_addr);
 }
 
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
@@ -1946,6 +1995,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     patchDeviceCapabilityTable(patcher, id);
     patchGcFwVersionCheck(patcher, id);
     patchGcAutoloadCheck(patcher, id);
+    patchGcRegCheck(patcher, id);
 
     routeTTL(patcher, id, address, size);
     routePSPBasics(patcher, id, address, size);
