@@ -374,6 +374,20 @@ static int slot_internal_sw_init(void *ctx, ...) {
 static int slot_internal_hw_init(void *ctx) {
     rbgpu_log("slot_internal_hw_init entered (ctx=%p)", ctx);
 
+    // 2ak: SAFETY. g_smu.dma.mc is a CGS IOVirtualAddress that FAILS carve-out
+    // verification (it is a kernel VA, not a GPU-visible address). Letting
+    // rb_smu13_bringup run would send it to the SMU via SetDriverDramAddrHigh/
+    // Low, making the SMU DMA to a bogus address. Skip real bringup until the
+    // DMA address is fixed; report success so _ttl_hw_init can still proceed
+    // to the PSP/GC phases.
+    uint64_t smu_mc = g_smu.dma.mc;
+    bool smu_mc_ok = (smu_mc >= 0xF400000000ULL && smu_mc <= 0xF4FFFFFFFFULL);
+    rbgpu_diag_set_num("smu_dma_mc_ok", smu_mc_ok ? 1 : 0);
+    if (!smu_mc_ok) {
+        rbgpu_log("slot_internal_hw_init: SMU DMA addr 0x%llx NOT carve-out verified -> SKIPPING rb_smu13_bringup (safe no-op)", smu_mc);
+        return 0;
+    }
+
     int err = rb_smu13_bringup(&g_smu);
     rbgpu_diag_set_num("bringup_err", static_cast<uint64_t>(err));
     if (err != RB_SMU13_OK) {
@@ -464,6 +478,13 @@ static int slot_notify_event(void *ctx, smu_event_msg *msg, ...) {
     }
 
     if (event == 0 || event == 4 || event == 6 || event == 10) {
+        // 2ak: same safety guard as slot_internal_hw_init: never re-bringup
+        // with an unverified SMU DMA address.
+        uint64_t smu_mc_ev = g_smu.dma.mc;
+        if (smu_mc_ev < 0xF400000000ULL || smu_mc_ev > 0xF4FFFFFFFFULL) {
+            rbgpu_log("slot_notify_event: skipping re-bringup for event %u (SMU DMA addr 0x%llx unverified)", event, smu_mc_ev);
+            return 0;
+        }
         int err = rb_smu13_bringup(&g_smu);
         if (err != RB_SMU13_OK) {
             rbgpu_log("slot_notify_event: re-bringup for event %u failed: %s (%d)",
@@ -1122,6 +1143,38 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
             uint32_t *a = reinterpret_cast<uint32_t *>(aux_ptr);
             rbgpu_log("_IpiSetFwEntry aux: %08x %08x %08x %08x %08x %08x %08x %08x",
                       a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+        }
+        // 2aj: yellow_carp substitution. Apple's Navi21 images would fail the
+        // Rembrandt PSP's per-ASIC authentication, so swap the entries we have
+        // exact yellow_carp counterparts for (boot-31 symbol map). The swap is
+        // observable in dry-run logs but only consumed if -rbgpupsphw is set.
+        // d[2..3] = data_ptr, d[4] = size. Images are headerless (see
+        // fw_yellow_carp.cpp): data_ptr -> image bytes, size -> image size.
+        extern const uint8_t yc_ce_img[];
+        extern const uint8_t yc_pfp_img[];
+        extern const uint8_t yc_me_img[];
+        extern const uint8_t yc_mec_img[];
+        extern const uint8_t yc_rlc_img[];
+        extern const uint8_t yc_sdma_img[];
+        extern const uint8_t yc_toc_img[];
+        const uint8_t *yc_img = nullptr;
+        uint32_t yc_size = 0;
+        switch (d[0]) {
+            case 1:  yc_img = yc_ce_img;   yc_size = 0x40380; break; // CE
+            case 2:  yc_img = yc_pfp_img;  yc_size = 0x40400; break; // PFP
+            case 3:  yc_img = yc_me_img;   yc_size = 0x40400; break; // ME
+            case 6:  yc_img = yc_mec_img;  yc_size = 0x41680; break; // MEC
+            case 9:  yc_img = yc_rlc_img;  yc_size = 0x06200; break; // RLC
+            case 14: yc_img = yc_sdma_img; yc_size = 0x08400; break; // SDMA0
+            case 36: yc_img = yc_toc_img;  yc_size = 0x00600; break; // PSP TOC
+            default: break;
+        }
+        if (yc_img) {
+            d[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img));
+            d[3] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img) >> 32);
+            d[4] = yc_size;
+            rbgpu_log("_IpiSetFwEntry YC-SWAP id=%u -> img=%p size=0x%x", d[0], yc_img, yc_size);
+            rbgpu_diag_inc("yc_swapped");
         }
     } else {
         rbgpu_log("_IpiSetFwEntry pre : instance=%p entry=NULL", instance);
