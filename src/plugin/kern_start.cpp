@@ -380,11 +380,27 @@ static int slot_internal_hw_init(void *ctx) {
     // Low, making the SMU DMA to a bogus address. Skip real bringup until the
     // DMA address is fixed; report success so _ttl_hw_init can still proceed
     // to the PSP/GC phases.
+    //
+    // 2as: DMA VERIFICATION ONLY (per Claude's safety rules). Log full DMA
+    // struct details and carve-out analysis. DO NOT send anything to SMU.
+    // This boot is for address verification alone.
     uint64_t smu_mc = g_smu.dma.mc;
-    bool smu_mc_ok = (smu_mc >= 0xF400000000ULL && smu_mc <= 0xF4FFFFFFFFULL);
+    void *smu_cpu = g_smu.dma.cpu;
+    uint32_t smu_size = g_smu.dma.size;
+    const uint64_t carve_lo = 0xF400000000ULL;
+    const uint64_t carve_hi = 0xF4FFFFFFFFULL;
+    bool smu_mc_ok = (smu_mc >= carve_lo && smu_mc <= carve_hi);
+    rbgpu_log("2as DMA VERIFY: mc=0x%llx cpu=%p size=0x%x", smu_mc, smu_cpu, smu_size);
+    rbgpu_log("2as DMA VERIFY: carve-out range 0x%llx..0x%llx", carve_lo, carve_hi);
+    rbgpu_log("2as DMA VERIFY: in_range=%d (1=yes, 0=no)", smu_mc_ok ? 1 : 0);
+    rbgpu_log("2as DMA VERIFY: mc_is_kernel_va=%d (0xffffff.. range)", (smu_mc >= 0xFFFFFF0000000000ULL) ? 1 : 0);
+    rbgpu_log("2as DMA VERIFY: size_nonzero=%d size_4k_aligned=%d", (smu_size != 0) ? 1 : 0, (smu_size % 0x1000 == 0) ? 1 : 0);
     rbgpu_diag_set_num("smu_dma_mc_ok", smu_mc_ok ? 1 : 0);
+    rbgpu_diag_set_num("dma_mc_hi", (uint32_t)(smu_mc >> 32));
+    rbgpu_diag_set_num("dma_mc_lo", (uint32_t)smu_mc);
+    rbgpu_diag_set_num("dma_size", smu_size);
     if (!smu_mc_ok) {
-        rbgpu_log("slot_internal_hw_init: SMU DMA addr 0x%llx NOT carve-out verified -> SKIPPING rb_smu13_bringup (safe no-op)", smu_mc);
+        rbgpu_log("2as: SMU DMA addr NOT carve-out verified -> SKIPPING rb_smu13_bringup (safe no-op, verification only)");
         return 0;
     }
 
@@ -999,9 +1015,75 @@ static int hooked_gc_sw_init(void *param1, void *param2) {
     return ret;
 }
 
+// 2ap: Diagnostic register dump. Reads GC engine status registers via the
+// already-mapped MMIO (g_hw.rreg) to verify whether the hardware is ACTUALLY
+// ready, vs our 2am/2an/2ao bypasses which assume it. Raphael-iGPU reference:
+// RLC_STAT==0x25 means firmware IS in instruction RAM but the BOOTLOAD_COMPLETE
+// latch never set (bypass justified). Any other value means our assumption may
+// be wrong. File-static, no hpp change.
+static void rbgpu_dump_gc_regs(const char *tag) {
+    if (!g_hw.ctx || !g_hw.rreg) {
+        rbgpu_log("2ap DIAG [%s]: no HW ctx/rreg, skipping", tag);
+        return;
+    }
+    // 2aw: FIX - RLC registers need BASE_IDX 1, GC seg1 base 0xa000.
+    // Real addr = 0xa000 + offset. Was reading wrong registers!
+    uint32_t rlc_cntl = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4c00); // RLC_CNTL
+    uint32_t rlc_stat = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4c04); // RLC_STAT
+    uint32_t cp_stat  = g_hw.rreg(g_hw.ctx, 0x0f40); // CP_STAT (BASE_IDX 0, keep)
+    // 2av: Read BOOTLOAD_STATUS at both Apple (0x4e8d) and upstream (0x4e7e) offsets.
+    // Per Raphael: latch is 0xc0000001 when RLC FW load completes.
+    // NOTE: 0x4e8d/0x4e7e are DWORD indices; convert to byte offsets (*4).
+    // 2aw: Also add BASE_IDX 1 (0xa000) for RLC_RLCS_BOOTLOAD_STATUS.
+    uint32_t boot_apple = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4e8d * 4);
+    uint32_t boot_upstream = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4e7e * 4);
+    rbgpu_log("2ap DIAG [%s]: RLC_CNTL=0x%08x RLC_STAT=0x%08x CP_STAT=0x%08x",
+              tag, rlc_cntl, rlc_stat, cp_stat);
+    rbgpu_log("2av DIAG [%s]: BOOTLOAD Apple(0x4e8d)=0x%08x Upstream(0x4e7e)=0x%08x",
+              tag, boot_apple, boot_upstream);
+    rbgpu_diag_set_num("diag_rlc_cntl", rlc_cntl);
+    rbgpu_diag_set_num("diag_rlc_stat", rlc_stat);
+    rbgpu_diag_set_num("diag_cp_stat", cp_stat);
+    rbgpu_diag_set_num("diag_boot_apple", boot_apple);
+    rbgpu_diag_set_num("diag_boot_upstream", boot_upstream);
+    if (boot_apple == 0xc0000001) {
+        rbgpu_log("2av DIAG [%s]: BOOTLOAD_STATUS=0xc0000001 (FW load complete!)", tag);
+    }
+    if (rlc_stat == 0x25) {
+        rbgpu_log("2ap DIAG [%s]: RLC_STAT==0x25 MATCHES Raphael (FW present, latch missing)", tag);
+    } else {
+        rbgpu_log("2ap DIAG [%s]: RLC_STAT=0x%08x DIFFERS from Raphael 0x25 - investigate!", tag, rlc_stat);
+    }
+}
+
 static int hooked_gc_hw_init(void *gc_buf, void *arg2, void *arg3) {
     rbgpu_diag_inc("gc_hw_sub_calls");
     rbgpu_log("_gc_hw_init entered: gc_buf=%p, arg2=%p, arg3=%p", gc_buf, arg2, arg3);
+
+    // 2ba: CORRECT offsets (2ay/2az were wrong).
+    // gc_buf+0xae8=0xec04 is the FULL DWORD (already includes 0xa000 base).
+    // gc_buf+0xaec=0xee8d is the FULL DWORD.
+    // BYTE = DWORD * 4. Do NOT add 0xa000 again.
+    if (gc_buf && g_hw.ctx && g_hw.rreg) {
+        uint32_t off_ae8 = *(uint32_t*)((uint8_t*)gc_buf + 0xae8);  // 0xec04
+        uint32_t off_aec = *(uint32_t*)((uint8_t*)gc_buf + 0xaec);  // 0xee8d
+        uint8_t flag_2d6 = *(uint8_t*)((uint8_t*)gc_buf + 0x2d6);
+        uint8_t flag_2d9 = *(uint8_t*)((uint8_t*)gc_buf + 0x2d9);
+
+        // Correct BYTE addresses (DWORD * 4, no extra base)
+        uint32_t rlc_stat_byte = off_ae8 * 4;      // 0xec04 * 4 = 0x3b010
+        uint32_t bootload_byte = off_aec * 4;      // 0xee8d * 4 = 0x3ba34
+        uint32_t rlc_cntl_byte = (0xa000 + 0x4c00) * 4;  // 0x3b000 (offset needs base)
+
+        uint32_t rlc_stat = g_hw.rreg(g_hw.ctx, rlc_stat_byte);
+        uint32_t bootload = g_hw.rreg(g_hw.ctx, bootload_byte);
+        uint32_t rlc_cntl = g_hw.rreg(g_hw.ctx, rlc_cntl_byte);
+
+        rbgpu_log("2ba CORRECT: RLC_CNTL=0x%08x RLC_STAT=0x%08x BOOTLOAD=0x%08x flags=%x/%x",
+                  rlc_cntl, rlc_stat, bootload, flag_2d6, flag_2d9);
+        rbgpu_log("2ba ADDR: stat_byte=0x%x bootload_byte=0x%x cntl_byte=0x%x",
+                  rlc_stat_byte, bootload_byte, rlc_cntl_byte);
+    }
 
     int ret = 1;
     if (orig_gc_hw_init) {
@@ -1010,6 +1092,10 @@ static int hooked_gc_hw_init(void *gc_buf, void *arg2, void *arg3) {
 
     rbgpu_log("_gc_hw_init returned %d", ret);
     rbgpu_diag_set_num("gc_hw_sub_ret", ret);
+    // 2au: 2ar post-init RLC enable REMOVED (see above). Diagnostic read only.
+    // 2ap: dump HW state after GC init (with bypasses active) to verify reality
+    if (g_psp_hw_mode)
+        rbgpu_dump_gc_regs("post-gc-hw-init");
     return ret;
 }
 
@@ -1245,6 +1331,18 @@ static uint32_t hooked_ttl_initialize(void *arg1, void *arg2) {
 
     rbgpu_log("_ttl_initialize returned status = 0x%08x", ret);
     rbgpu_diag_set_num("ttl_raw_init_ret", ret);
+    // 2ap SAFETY: This is a DIAGNOSTIC build. If ttl_initialize succeeded, we
+    // have the register dumps we need. Force failure (same code as boot 36's
+    // GC-timeout path, which is known-safe) so Apple's X6000 start() takes the
+    // graceful failure path instead of proceeding into the code that panicked
+    // on boot 39. The panic investigation needs the diag data, not another panic.
+    // 2bf: DISABLED - trap-3 guard (2be) now protects against the boot-39 panic.
+    // Let ttl_initialize return naturally so start() can proceed.
+    if (false && g_psp_hw_mode && ret == 0) {
+        rbgpu_log("2ap SAFETY: ttl_initialize succeeded, FORCING 0xe00002bc to avoid boot-39 panic");
+        rbgpu_diag_set_num("diag_forced_fail", 1);
+        return 0xe00002bc;
+    }
     return ret;
 }
 
@@ -1258,6 +1356,15 @@ static int hooked_AmdTtlServices_initialize(void *this_ptr) {
     }
     rbgpu_log("AmdTtlServices::initialize() returned 0x%08X (this=%p)", ret, this_ptr);
     rbgpu_diag_set_num("ttl_init_ret", static_cast<uint32_t>(ret));
+    // 2aq SAFETY (same as 2ap): diagnostic build. If init succeeded, force
+    // failure so X6000::start() takes the graceful path, not the panic path.
+    // 2ap only guarded _ttl_initialize; X6000 may use this C++ method instead.
+    // 2bf: DISABLED - trap-3 guard (2be) now protects against the boot-39 panic.
+    if (false && g_psp_hw_mode && ret == 0) {
+        rbgpu_log("2aq SAFETY: AmdTtlServices::initialize succeeded, FORCING 0xe00002bc");
+        rbgpu_diag_set_num("diag_forced_fail_cpp", 1);
+        return 0xe00002bc;
+    }
     return ret;
 }
 
@@ -2040,6 +2147,11 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     patchDeviceTypeTable(patcher, id);
     patchDeviceCapabilityTable(patcher, id);
     patchGcFwVersionCheck(patcher, id);
+    // 2bb: RE-ENABLED the gc_autoload bypass. 2ba PROVED the hardware is healthy:
+    // RLC_STAT=0x25 (matches Raphael healthy), BOOTLOAD=0x1 (bit 0 set).
+    // But bit 31 (BOOTLOAD_COMPLETE) is never set during HW_INIT on PSP path.
+    // Raphael confirmed: latch sets AFTER HW_INIT, not during. Apple's check
+    // is incompatible with PSP firmware loading. Bypass is necessary, not cheating.
     patchGcAutoloadCheck(patcher, id);
     patchGcRegCheck(patcher, id);
     patchSdmaAutoloadCheck(patcher, id);
@@ -2115,7 +2227,28 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     auto start_bytes = reinterpret_cast<uint8_t *>(start_sym);
     bool patched = false;
 
+    // 2be: Claude's analysis - boot-39 panic is on start()'s FAILURE path.
+    // start() calls stop() on failure; stop() clears this+0x1ea0 to 0;
+    // the shared exit then dereferences NULL+0x18 and panics.
+    // 2bd proved the hardcoded offset (0x6b2) doesn't match the loaded kext
+    // (ASLR slide; bytes at 0x6b2 were 48 8b 03, not a CALL).
+    // New approach: patch stop() entry to RET (0xC3). If stop() never runs,
+    // +0x1ea0 is never cleared, the exit can't panic, and start() fails
+    // cleanly with the state trace surviving.
+    {
+        uint8_t *stop_bytes = reinterpret_cast<uint8_t *>(stop_sym);
+        rbgpu_log("Trap 3 Guard 2be: stop_sym=%p, first byte=0x%02x", stop_bytes, stop_bytes[0]);
+        MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+        stop_bytes[0] = 0xC3;  // RET
+        MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+        rbgpu_log("Trap 3 Guard 2be: patched stop() entry to RET");
+        rbgpu_diag_set_num("guard_routed", 1);
+        patched = true;
+    }
+
+    // Fallback: try the old direct-call search if the targeted patch didn't work
     for (size_t i = 0; i < 0x2000; i++) {
+        if (patched) break;  // Skip if targeted patch already succeeded
         if (start_bytes[i] == 0xE8) {
             int32_t rel = *reinterpret_cast<int32_t *>(&start_bytes[i + 1]);
             mach_vm_address_t call_dest = reinterpret_cast<mach_vm_address_t>(&start_bytes[i + 5]) + rel;
