@@ -1677,6 +1677,52 @@ static bool patchGcRegCheck(KernelPatcher &patcher, size_t id) {
     return patchGcRegCheckAt(fn_addr);
 }
 
+// 2ao: _sdma_5_2_1_fw_autoload_is_completed is the SDMA twin of the GC autoload
+// wait: it reads the same BOOTLOAD_COMPLETE latch through the SDMA client, and
+// upstream's sdma_v5_2_start has no such wait at all on the PSP load path.
+// Boot 38 proved GC hw_init now passes (2am+2an worked); SDMA hw_init then
+// timed out here after 50ms. Patch the entry to return 1 immediately.
+// Gated behind -rbgpupsphw; verify-before-write. File-static.
+static bool patchSdmaAutoloadCheckAt(mach_vm_address_t fn_addr) {
+    uint8_t b0 = *reinterpret_cast<uint8_t *>(fn_addr);
+    if (b0 == 0xC3 || b0 == 0xCC) {
+        rbgpu_log("HWLibs: SDMA autoload check already patched or stub (b0=0x%02X), skipping", b0);
+        rbgpu_diag_set_num("sdma_autoload_patched", 1);
+        return true;
+    }
+    // mov eax, 1; ret
+    static const uint8_t patch[6] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock);
+    for (int i = 0; i < 6; i++)
+        *(reinterpret_cast<uint8_t *>(fn_addr) + i) = patch[i];
+    MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+    for (int i = 0; i < 6; i++) {
+        uint8_t rb = *(reinterpret_cast<uint8_t *>(fn_addr) + i);
+        if (rb != patch[i]) {
+            rbgpu_log("HWLibs: [CRITICAL] SDMA autoload check patch FAILED readback at +%d: 0x%02X", i, rb);
+            return false;
+        }
+    }
+    rbgpu_diag_set_num("sdma_autoload_patched", 1);
+    rbgpu_log("HWLibs: patched _sdma_5_2_1_fw_autoload_is_completed entry to return 1 at %p",
+              reinterpret_cast<void *>(fn_addr));
+    return true;
+}
+
+static bool patchSdmaAutoloadCheck(KernelPatcher &patcher, size_t id) {
+    if (!g_psp_hw_mode) {
+        rbgpu_log("HWLibs: SDMA autoload check patch skipped (-rbgpupsphw not set)");
+        return false;
+    }
+    mach_vm_address_t fn_addr = patcher.solveSymbol(id, "_sdma_5_2_1_fw_autoload_is_completed");
+    if (!fn_addr) {
+        rbgpu_log("HWLibs: symbol _sdma_5_2_1_fw_autoload_is_completed not resolved; skipping patch");
+        return false;
+    }
+    rbgpu_log("HWLibs: resolved _sdma_5_2_1_fw_autoload_is_completed at %p", reinterpret_cast<void *>(fn_addr));
+    return patchSdmaAutoloadCheckAt(fn_addr);
+}
+
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     static bool s_kernel_hooks_installed = false;
     if (s_kernel_hooks_installed || noLogCapture) {
@@ -1996,6 +2042,7 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     patchGcFwVersionCheck(patcher, id);
     patchGcAutoloadCheck(patcher, id);
     patchGcRegCheck(patcher, id);
+    patchSdmaAutoloadCheck(patcher, id);
 
     routeTTL(patcher, id, address, size);
     routePSPBasics(patcher, id, address, size);
