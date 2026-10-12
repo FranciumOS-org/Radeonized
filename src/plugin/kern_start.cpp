@@ -2766,6 +2766,47 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     }
 }
 
+// 2da (2026-10-12): per-firmware PSP load results.
+//
+// The whole bring-up now turns on one question: did the PSP accept and start
+// the yellow_carp images? `yc_swapped 7` only proves HWLibs' descriptors were
+// swapped, not that the PSP validated or ran anything, and the KIQ packet
+// going unconsumed (2cx) says the command processor is not running.
+//
+// _ipi_psp_load_fw (HWLibs 0x1264289b) is where each image goes to the PSP:
+//     edi = *(uint32 *)p                      TTL firmware id
+//     _TtlFwIdToCgsFwId(ttl_id)        -> cgs id
+//     _ipiPspCgsFwToPspFw(cgs_id)      -> psp id; == 0x37 means "no mapping",
+//                                         which logs an assert and returns 4
+//     otherwise it builds the command and submits it to the PSP
+// So the TTL id and the return value, per call, say exactly which firmware
+// the PSP took and which it refused. Observe only.
+static int (*orig_ipi_psp_load_fw_2da)(void *, void *) = nullptr;
+static volatile int g_rb_2da_fw_calls = 0;
+static volatile int g_rb_2da_fw_fails = 0;
+static volatile uint32_t g_rb_2da_fw_failmask = 0;
+
+static int hooked_ipi_psp_load_fw_2da(void *dev, void *p) {
+    uint32_t ttl_fw_id = p ? *reinterpret_cast<uint32_t *>(p) : 0xffffffff;
+    g_rb_2da_fw_calls++;
+    rbgpu_log("2da: _ipi_psp_load_fw ENTER (dev=%p ttl_fw_id=%u)", dev, ttl_fw_id);
+
+    int ret = orig_ipi_psp_load_fw_2da ? orig_ipi_psp_load_fw_2da(dev, p) : 4;
+
+    if (ret != 0) {
+        g_rb_2da_fw_fails++;
+        if (ttl_fw_id < 32) {
+            g_rb_2da_fw_failmask |= (1u << ttl_fw_id);
+        }
+    }
+    rbgpu_diag_set_num("fw_calls", static_cast<uint64_t>(g_rb_2da_fw_calls));
+    rbgpu_diag_set_num("fw_fails", static_cast<uint64_t>(g_rb_2da_fw_fails));
+    rbgpu_diag_set_num("fw_failmask", static_cast<uint64_t>(g_rb_2da_fw_failmask));
+    rbgpu_log("2da: _ipi_psp_load_fw(ttl_fw_id=%u) -> %d %s", ttl_fw_id, ret,
+              ret == 0 ? "(PSP ACCEPTED)" : "(REFUSED)");
+    return ret;
+}
+
 void RGPU::routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
@@ -2787,6 +2828,12 @@ void RGPU::routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address
             "__ZN14AmdTtlServices11submitFrameE19AMD_SWIP_QUEUE_TYPEjPv",
             hooked_AmdTtlServices_submitFrame,
             orig_amdtll_submit_frame
+        ),
+        // 2da: per-firmware PSP load results - the open question.
+        KernelPatcher::RouteRequest(
+            "_ipi_psp_load_fw",
+            hooked_ipi_psp_load_fw_2da,
+            orig_ipi_psp_load_fw_2da
         ),
         KernelPatcher::RouteRequest(
             "__ZN14AmdTtlServices12createEngineE19AMD_SWIP_QUEUE_TYPEjP21_TtlCreateEngineInput",
