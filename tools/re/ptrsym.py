@@ -44,7 +44,10 @@ def extracted(kext):
 
 
 def log_lines(path):
-    tree = plistlib.load(open(path, "rb"))
+    try:
+        tree = plistlib.load(open(path, "rb"))
+    except (OSError, plistlib.InvalidFileException):
+        return []  # no peer this boot (-rbgpuoff, or the plugin did not run)
     node = tree[0] if isinstance(tree, list) and tree else tree
     return [str(x) for x in (node.get("RBGPULog") or [])]
 
