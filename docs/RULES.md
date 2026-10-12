@@ -1299,10 +1299,12 @@ RembrandtGPU: slot_internal_sw_exit entered
 ```
 
 7 messages, 21 register writes (3 per message), **0 refused**. `last_msg`
-0x0F is `TransferTableSmu2Dram`. So the SMU answered GetSmuVersion,
-GetDriverIfVersion, GetEnabledSmuFeatures, **SetDriverDramAddrHigh and
-SetDriverDramAddrLow** — and then never answered the table transfer
-(`last_resp=0`, response register still 0, not 1/OK and not an error).
+0x0F is `TransferTableSmu2Dram`, so every earlier message was answered and
+the transfer was not (`last_resp=0`: response register still 0, not 1/OK and
+not an error code). `rb_smu13_bringup`'s own sequence accounts for six
+(GetSmuVersion, GetDriverIfVersion, GetEnabledSmuFeatures,
+SetDriverDramAddrHigh, SetDriverDramAddrLow, TransferTableSmu2Dram); which
+message is the seventh is unresolved and worth confirming from the log.
 
 The address messages only record a value; the transfer is the first time the
 SMU tries to *use* it. It accepted the address and hung on the DMA.
