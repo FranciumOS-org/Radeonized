@@ -947,3 +947,75 @@ absent. The log, not the diag table, is what proved 2da never fired.
 `_TtlRtsLoadFirmware` (0x12630130) is the only caller of `_ipi_psp_load_fw`,
 installed by `_TtlSetRts` (0x1262fad8) at RTS slot +0x358; nothing in HWLibs
 calls that slot, so the per-image path is driven from outside HWLibs.
+
+## 2dc (2026-10-12): everything initialises — the GFX block is never powered up
+
+Second SSH capture (logs/20261012-165744-plugin, UUID 2F57DF20 = build/out,
+147 diag entries so absence is now real). Two of my earlier conclusions were
+wrong and are corrected here:
+
+- **`_ipi_psp_load_fw` never being called is not a fault.** The real load path
+  is `_psp_np_fw_load`, which ran for **111 ms** (12029802247 -> 12141249718)
+  and returned 0. Firmware *is* loaded.
+- **The backdoor-autoload chain never running is not a fault either.** Those
+  symbols are the `_10_1` (Navi 1x) variants; GC 10.3 does not use them. All
+  four 2db hooks installed and none was called, which is expected.
+
+And the return-value convention, which had been read as failure:
+
+```
+_gc_hw_init returned 0                  inner HWLibs status, 0 = success
+_ipi_gc_hw_init returned 0xE188A001     IPI wrapper, bool in AL -> 1 = success
+_ipi_psp_hw_init returned 0x00280001    AL = 1 = success
+_ttl_hw_init returned 0xE1882001        AL = 1 = success
+```
+
+The upper bits are leftover register content, not an error code; the hooks
+print the whole EAX. This matches the older data, where `_gc_sw_init returned
+2` (status 2 = failure) paired with `_ipi_gc_sw_init -> 0` (bool false). So
+**PSP hw init, GC hw init and TTL hw init all SUCCEEDED this boot**, with the
+yellow_carp firmware loaded.
+
+So nothing in Apple's init is failing any more. The one deliberate gap is
+ours:
+
+```
+slot_internal_hw_init entered
+2as DMA VERIFY: carve-out range 0xf400000000..0xf4ffffffff
+2as: SMU DMA addr NOT carve-out verified -> SKIPPING rb_smu13_bringup
+```
+
+`rb_smu13_bringup` never runs, so the SMU is never given its driver table and
+never asked for anything. On this APU the SMU owns GFX power and clocks
+(GFX_DPM, GFXOFF, DS_GFXCLK are all in the enabled-feature mask from the
+third probe), so with no SMU interaction the GFX block stays gated: the CP
+cannot execute the KIQ packet no matter how correctly the ring is set up.
+That is a complete explanation of `waitForHwStamp` timing out, and it is the
+last thing standing.
+
+Why the gate trips, and it is not what the comment assumed: the plugin calls
+
+```c
+smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &g_dma_handle, &g_dma_gpu, &g_dma_cpu)
+    -> handle = 0x0FFFF000
+       gpu    = 0xffffffe0e19f4000
+       cpu    = 0xffffff950d0d3580
+```
+
+and verifies `g_dma_gpu`, which holds a kernel VA. `_smu_cgs_alloc_memory`
+(0x126661aa) takes seven arguments and fills three out-pointers from one
+result struct: out1 <- [-0x50], out2 <- [-0x48], out3 <- [-0x30]. Of the three
+observed values only **out1 = 0x0FFFF000** is not a kernel pointer: it is page
+aligned and sits just under 0x10000000, which is the aperture size the TTL
+input block reports at +0x68. So out1 is very likely the GPU MC address and
+the plugin has been verifying the wrong field since 2ak.
+
+Note also that the carve-out range in the check may itself be the wrong test:
+an SMU driver table on an APU normally lives in GTT with a GART MC address,
+not in the 0xF4_xx carve-out, so "must be inside the carve-out" would reject a
+perfectly valid address.
+
+This is a decision for the user, not an inference to act on: letting
+`rb_smu13_bringup` run sends SetDriverDramAddrHigh/Low and TransferTable, and
+the SMU then DMAs into whatever address it was given. Confirming which field
+is the MC address must come first.
