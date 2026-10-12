@@ -1857,12 +1857,24 @@ static bool (*orig_hwmem_enableAllocations)(void *) = nullptr;
 static bool (*orig_accel_start_2cn)(void *, void *) = nullptr;
 static bool hooked_accel_start_2cn(void *accel, void *provider) {
     rbgpu_log("2cn: accelerator start entered (accel=%p)", accel);
-    if (g_rb_2cn_poweruphw_failed) {
-        rbgpu_log("2cn: powerUpHW failed earlier, failing start cleanly (survive mode)");
-        return false;
-    }
+
+    // 2cr (2026-10-12): the flag check used to be HERE, before the original
+    // call. powerUpHW is called from inside start(), so the flag is always
+    // still 0 at this point and the guard only ever applied to a second
+    // start() that never comes. That is why 2cn was never observed to do
+    // anything. Check it after the original returns instead.
     bool ret = orig_accel_start_2cn ? orig_accel_start_2cn(accel, provider) : false;
     rbgpu_log("2cn: accelerator start returned %d", ret ? 1 : 0);
+
+    if (g_rb_2cn_poweruphw_failed && ret) {
+        // powerUpHW failed during start() yet start() reported success. Refuse
+        // the match so IOKit detaches the accelerator and the screen stays
+        // with IONDRVFramebuffer, instead of leaving a half-started
+        // accelerator registered with IOAcceleratorFamily2.
+        rbgpu_log("2cr: powerUpHW failed during start() -> returning false so the "
+                  "accelerator detaches (survive mode)");
+        return false;
+    }
     return ret;
 }
 
