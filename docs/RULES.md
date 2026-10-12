@@ -1019,3 +1019,17 @@ This is a decision for the user, not an inference to act on: letting
 `rb_smu13_bringup` run sends SetDriverDramAddrHigh/Low and TransferTable, and
 the SMU then DMAs into whatever address it was given. Confirming which field
 is the MC address must come first.
+
+### 2dd (2026-10-12): confirm which output is the MC address, before trusting it
+
+User's decision: prove the field rather than infer it. `slot_internal_sw_init`
+now makes a SECOND 4 KB allocation and logs both result triples plus the
+deltas. An address moves by about the allocation size between two
+allocations; an opaque handle does not. Allocation only — no SMU message is
+sent and nothing else touches hardware, and an armed boot already makes one
+such allocation that is never freed (`_smu_cgs_free_memory` does not exist in
+HWLibs).
+
+Diag keys `a1_handle`, `a2_handle`, `a1_gpu`, `a2_gpu`, `a_dhandle`, `a_dgpu`,
+`a2_ret`. If `a_dhandle` is near 0x1000 and `a_dgpu` is not, out1 is the GPU
+MC address and the 2ak/2as gate has been verifying the wrong field all along.

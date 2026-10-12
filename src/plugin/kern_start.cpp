@@ -334,6 +334,50 @@ static int slot_internal_sw_init(void *ctx, ...) {
         return 2;
     }
 
+    // 2dd (2026-10-12): WHICH of the three outputs is the GPU MC address?
+    //
+    // This matters because slot_internal_hw_init verifies g_dma_gpu, which
+    // holds a kernel VA (0xffffffe0........), so the check has failed since
+    // 2ak and rb_smu13_bringup has never run - which is why the SMU is never
+    // given its driver table, the GFX block stays gated, and the CP never
+    // executes the KIQ packet.
+    //
+    // Of the three values only the first is not a kernel pointer:
+    //     handle = 0x0FFFF000   page aligned, just under the 0x10000000
+    //                           aperture the TTL input reports at +0x68
+    //     gpu    = 0xffffffe0e19f4000
+    //     cpu    = 0xffffff950d0d3580
+    // so out1 is very likely the MC address. "Very likely" is not enough to
+    // hand to the SMU, which will DMA to whatever it is told, so this proves
+    // it instead: allocate a SECOND buffer and compare. An address moves by
+    // roughly the allocation size between two allocations; an opaque handle
+    // does not behave that way. Allocation only - no SMU message is sent and
+    // nothing else touches hardware.
+    //
+    // This runs only on an armed boot, where a 4 KB allocation is already
+    // made and never freed (_smu_cgs_free_memory does not exist in HWLibs).
+    {
+        void *h2 = nullptr, *c2 = nullptr;
+        uint64_t g2 = 0;
+        int r2 = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &h2, &g2, &c2);
+        rbgpu_log("2dd: second alloc ret=%d, handle=%p, gpu=0x%llx, cpu=%p", r2, h2, g2, c2);
+        rbgpu_diag_set_num("a2_ret", static_cast<uint64_t>(r2));
+        rbgpu_diag_set_num("a1_handle", reinterpret_cast<uint64_t>(g_dma_handle));
+        rbgpu_diag_set_num("a2_handle", reinterpret_cast<uint64_t>(h2));
+        rbgpu_diag_set_num("a1_gpu", g_dma_gpu);
+        rbgpu_diag_set_num("a2_gpu", g2);
+        if (r2 == 0) {
+            int64_t dh = static_cast<int64_t>(reinterpret_cast<uint64_t>(h2)) -
+                         static_cast<int64_t>(reinterpret_cast<uint64_t>(g_dma_handle));
+            int64_t dg = static_cast<int64_t>(g2) - static_cast<int64_t>(g_dma_gpu);
+            rbgpu_log("2dd: delta handle=%lld (0x%llx), delta gpu=%lld (0x%llx) - a delta near "
+                      "the 0x1000 allocation size means that field is an ADDRESS",
+                      dh, (uint64_t)dh, dg, (uint64_t)dg);
+            rbgpu_diag_set_num("a_dhandle", static_cast<uint64_t>(dh));
+            rbgpu_diag_set_num("a_dgpu", static_cast<uint64_t>(dg));
+        }
+    }
+
     bool in_carveout = (g_dma_gpu >= 0xF400000000ULL && g_dma_gpu <= 0xF4FFFFFFFFULL);
     rbgpu_diag_set_num("carveout_ok", in_carveout ? 1 : 0);
     rbgpu_log("[Check 2] Carveout verification (0xF4_0000_0000..0xF4_FFFF_FFFF): %s", in_carveout ? "PASS" : "FAIL");
