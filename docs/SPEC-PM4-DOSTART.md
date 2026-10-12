@@ -194,18 +194,51 @@ power management, surface eviction, and whether it can drive the built-in
 panel. It is the right switch for *surviving* the bring-up, and a wrong
 permanent answer. It belongs behind its own boot-arg.
 
-## 6. What to instrument next (log-only, one boot)
+## 6. Implemented 2026-10-12 (2co, 2cp, 2cq)
 
-Revert 2cl first; it cannot pass. Then, in one boot:
+All of this is in src/plugin/kern_start.cpp and src/plugin/RembrandtGPUPeer.cpp,
+and adds no hardware write beyond the ones Apple's own code already makes on
+this path:
 
-1. Force `waitForActiveValue`'s 4th argument to 1 (§4) and log `(ring, read
-   value, return)`.
-2. Log `submitSetResourcesPacket`'s return.
-3. Log `initGraphicsMQD`'s return (it is a different function from
-   `initComputeMQD`, and the late path needs it; nothing has exercised it yet).
-4. Log each `submitMapQueuesPacket(ring, …)` return.
-5. Log the four ring-state values of §3 before the check.
-6. Log `(engine+0xc0)->vtable[0x328]()`'s return.
+- **2co** — `startKIQ` hook is observe-only again. 2cl's forced `1` is gone
+  (§2). New log line reports `0 = SUCCESS` explicitly so the next reader
+  cannot repeat the inversion.
+- **2cp** — `waitForActiveValue`'s third parameter (the one that arms the
+  timeout; `ecx`, the 4th register argument) is forced true, restoring
+  Apple's 1000 x 100 us bound (§4). Logs `(ring, expected, bounded, return)`.
+  Diag keys `wfav_calls`, `wfav_bounded_forced`, `wfav_ret`.
+- **2cq** — observe-only hooks on the three late gates:
+  `submitSetResourcesPacket`, `initGraphicsMQD` (never exercised before), and
+  `submitMapQueuesPacket` per ring. Diag keys `setres_calls`/`setres_ret`,
+  `gfxmqd_calls`/`gfxmqd_ret`, `mapq_calls`/`mapq_fails`. The 2cm survive
+  line carries all of them too, for the case where the reserve path is
+  reached before the properties are refreshed.
+- **`-rbgpunodisppanic`** — the peer publishes `IOPCITunnelled` on the
+  IOPCIDevice, which makes `display_mode_did_change` return false instead of
+  panicking (§5). Off by default.
 
-That sequence names the exact exit without adding a single new hardware write
-beyond the ones Apple's own code already makes on this path.
+Still unhooked, deliberately, because the boot above should say whether they
+are reached at all:
+
+- the four ring-state values of §3 before the check (`CP_RB0_RPTR`,
+  `CP_RB0_WPTR`, `CP_RB0_WPTR_HI`, channel+0x54);
+- `(engine+0xc0)->vtable[0x328]()`'s return.
+
+## 7. The bigger open question
+
+Three bypasses (2am `_gc_fw_autoload_is_completed`, 2an
+`_gc_check_register_equal_ext`, 2ao `_sdma_5_2_1_fw_autoload_is_completed`)
+all mask the same thing: a latch or register state that never arrives on the
+PSP-load path. 2an is the broadest, since it forces *every* caller's
+"wait until register == value" to succeed, including the RLC safe-mode wait.
+
+Nothing so far tests whether the PSP actually accepted and started the
+yellow_carp images. `yc_swapped = 7` proves HWLibs' descriptors were
+swapped, not that the PSP validated the signatures. If the RLC and CP
+microcode are not running, no amount of forcing downstream will bring a
+queue up, and `CP_GFX_HQD_ACTIVE` will stay 0 — which is exactly what §4
+turns from a hang into evidence.
+
+The decisive next measurement is PSP-side: the ring response status for each
+firmware load, not a GC-side latch. 2an should also become per-caller, logging
+register / expected / actual rather than returning a blanket 1.

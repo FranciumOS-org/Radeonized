@@ -529,3 +529,28 @@ Verified against the installed X6000 7.0.25 and IOAcceleratorFamily2 485.2:
 - GC register names for this path come from docs/linux-ref/gc_10_3_0_offset.h
   (added 2026-10-12); Apple's encoded ids are `(dword offset << 32) | 11`,
   11 = GC_HWID.
+
+## 2co-2cq (2026-10-12): fixes implemented, not yet booted
+
+In src/plugin (built, hosttest passes; no boot yet):
+
+- 2co: `startKIQ` hook is observe-only; 2cl's forced `1` removed.
+- 2cp: `waitForActiveValue`'s third parameter forced true, restoring Apple's
+  1000 x 100 us bound. Without this, removing 2cl would expose an unbounded
+  poll of `CP_GFX_HQD_ACTIVE` — a wedged CPU with no panic and no log.
+- 2cq: observe-only hooks on `submitSetResourcesPacket`, `initGraphicsMQD`
+  (never exercised before) and `submitMapQueuesPacket`.
+- `-rbgpunodisppanic` (new, off by default): the peer publishes
+  `IOPCITunnelled`, so `display_mode_did_change` returns false instead of
+  panicking. Changes other behaviour too (Removable, PM, surface eviction);
+  for bring-up survival only.
+
+New diag keys: `wfav_calls`, `wfav_bounded_forced`, `wfav_ret`,
+`setres_calls`, `setres_ret`, `gfxmqd_calls`, `gfxmqd_ret`, `mapq_calls`,
+`mapq_fails`. The 2cm survive line carries them as well.
+
+Next boot: `-rbgpusync570 -rbgpuspoofttl -rbgpupsphw -rbgpunodisppanic`.
+What it answers: which gate after `startKIQ` fails, and whether
+`CP_GFX_HQD_ACTIVE` ever goes active. Open question in
+docs/SPEC-PM4-DOSTART.md section 7: nothing yet tests whether the PSP
+accepted and started the yellow_carp images.
