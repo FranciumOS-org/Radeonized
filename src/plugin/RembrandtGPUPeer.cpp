@@ -19,7 +19,11 @@ OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 
 #define RBGPU_RING_SIZE 512
 #define RBGPU_LINE_MAX  384
-#define RBGPU_MAX_DIAGS 96
+// 2db: was 96, and the 2026-10-12 16:50 capture had exactly 96 entries - the
+// table was full, so every new key (fw_calls, stamp_calls, setres_ret, ...)
+// was silently dropped and read as "absent". Absent must mean absent, not
+// "the table filled up", or the next conclusion drawn from it will be wrong.
+#define RBGPU_MAX_DIAGS 192
 #define RBGPU_BUF_SIZE  4096
 
 struct LogEntry {

@@ -2807,6 +2807,61 @@ static int hooked_ipi_psp_load_fw_2da(void *dev, void *p) {
     return ret;
 }
 
+// 2db (2026-10-12): did the GC firmware autoload buffer ever get prepared?
+//
+// The 16:50 capture showed _ipi_psp_load_fw hooked and NEVER called, so no
+// image is handed to the PSP one at a time. HWLibs has a second path for
+// GC: "backdoor autoload", where the driver allocates a buffer, copies every
+// firmware image into it, configures the registers that point the hardware
+// at it, and then the PSP loads the lot. _gc_fw_autoload_is_completed polls
+// for that to finish — and 2am patches it to report "done" unconditionally,
+// which says nothing about whether the buffer was ever filled.
+//
+// If these four never run, nothing was ever loaded and the command processor
+// could not possibly be executing: that would explain the unconsumed KIQ
+// packet completely, and would mean 2am has been reporting success for a
+// load that never happened. Observe only.
+static uint64_t (*orig_gc_alloc_autoload_2db)(void *, void *) = nullptr;
+static uint64_t (*orig_gc_copy_autoload_2db)(void *, void *) = nullptr;
+static uint64_t (*orig_gc_config_autoload_2db)(void *, void *) = nullptr;
+static uint64_t (*orig_gc_validate_autoload_2db)(void *, void *) = nullptr;
+
+static uint64_t hooked_gc_alloc_autoload_2db(void *a, void *b) {
+    rbgpu_log("2db: _gc_allocate_fw_backdoor_autoload_buffer ENTER (a=%p b=%p)", a, b);
+    uint64_t r = orig_gc_alloc_autoload_2db ? orig_gc_alloc_autoload_2db(a, b) : 1;
+    rbgpu_diag_set_num("al_alloc_ret", r);
+    rbgpu_diag_inc("al_alloc_calls");
+    rbgpu_log("2db: _gc_allocate_fw_backdoor_autoload_buffer -> 0x%llx", r);
+    return r;
+}
+
+static uint64_t hooked_gc_copy_autoload_2db(void *a, void *b) {
+    rbgpu_log("2db: _gc_copy_backdoor_autoload_fw ENTER (a=%p b=%p)", a, b);
+    uint64_t r = orig_gc_copy_autoload_2db ? orig_gc_copy_autoload_2db(a, b) : 1;
+    rbgpu_diag_set_num("al_copy_ret", r);
+    rbgpu_diag_inc("al_copy_calls");
+    rbgpu_log("2db: _gc_copy_backdoor_autoload_fw -> 0x%llx", r);
+    return r;
+}
+
+static uint64_t hooked_gc_config_autoload_2db(void *a, void *b) {
+    rbgpu_log("2db: _gc_fw_backdoor_autoload_config ENTER (a=%p b=%p)", a, b);
+    uint64_t r = orig_gc_config_autoload_2db ? orig_gc_config_autoload_2db(a, b) : 1;
+    rbgpu_diag_set_num("al_config_ret", r);
+    rbgpu_diag_inc("al_config_calls");
+    rbgpu_log("2db: _gc_fw_backdoor_autoload_config -> 0x%llx", r);
+    return r;
+}
+
+static uint64_t hooked_gc_validate_autoload_2db(void *a, void *b) {
+    rbgpu_log("2db: _gc_fw_backdoor_autoload_validate ENTER (a=%p b=%p)", a, b);
+    uint64_t r = orig_gc_validate_autoload_2db ? orig_gc_validate_autoload_2db(a, b) : 1;
+    rbgpu_diag_set_num("al_valid_ret", r);
+    rbgpu_diag_inc("al_valid_calls");
+    rbgpu_log("2db: _gc_fw_backdoor_autoload_validate -> 0x%llx", r);
+    return r;
+}
+
 void RGPU::routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
@@ -2834,6 +2889,28 @@ void RGPU::routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address
             "_ipi_psp_load_fw",
             hooked_ipi_psp_load_fw_2da,
             orig_ipi_psp_load_fw_2da
+        ),
+        // 2db: the GC backdoor-autoload chain, which is the path GC actually
+        // uses and which 2am reports as "completed" without checking.
+        KernelPatcher::RouteRequest(
+            "_gc_allocate_fw_backdoor_autoload_buffer",
+            hooked_gc_alloc_autoload_2db,
+            orig_gc_alloc_autoload_2db
+        ),
+        KernelPatcher::RouteRequest(
+            "_gc_copy_backdoor_autoload_fw_10_1",
+            hooked_gc_copy_autoload_2db,
+            orig_gc_copy_autoload_2db
+        ),
+        KernelPatcher::RouteRequest(
+            "_gc_fw_backdoor_autoload_config_10_1",
+            hooked_gc_config_autoload_2db,
+            orig_gc_config_autoload_2db
+        ),
+        KernelPatcher::RouteRequest(
+            "_gc_fw_backdoor_autoload_validate_10_1",
+            hooked_gc_validate_autoload_2db,
+            orig_gc_validate_autoload_2db
         ),
         KernelPatcher::RouteRequest(
             "__ZN14AmdTtlServices12createEngineE19AMD_SWIP_QUEUE_TYPEjP21_TtlCreateEngineInput",

@@ -891,3 +891,59 @@ and nothing has yet answered. Observe only. Diag keys `fw_calls`, `fw_fails`,
 `fw_failmask` (bit per TTL firmware id). The symbol is a local text symbol
 defined in HWLibs, not an import, so routing it by HWLibs' id is safe under
 the milestone-2c Lilu rule.
+
+## 2db (2026-10-12): `_ipi_psp_load_fw` is NEVER called — GC uses backdoor autoload
+
+First full capture of an armed boot, over SSH with no display
+(logs/20261012-165018-plugin, UUID 81AD2BE6 = build/out). The whole chain is
+in the log, ending exactly as the photographs showed:
+
+```
+2ce: doStart entered (arg=0)
+2co: startKIQ returned 0 (0 = SUCCESS, doStart continues)
+2cx: submitSetResourcesPacket ENTER
+2cx: waitForHwStamp ENTER (stamp=1)
+2cy: skipping the wait -> false
+2cx: waitForHwStamp -> 0 (TIMEOUT - the CP never consumed the packet) (5831 ticks)
+2cq: submitSetResourcesPacket -> 0 ; 2ce: doStart returned 0
+2bv: *** ENGINE 0 FAILED *** ; 2br: powerUpHW returned 0x0
+2cn: powerUpHW failed, will fail start() cleanly (survive mode)
+X6000: [54:0:0]: Controller is enabled, finish initialization
+2ct: found_framebuffer REFUSED -> accelerator adopts no display pipe
+```
+
+`u64AllPowerUp` is now 0xba (accelPowerUpHW_entry/exit, setVirtualSpace,
+hardwarePowerUp_entry/exit all 1), against 0x0 all week.
+
+**The finding:** `HWLibs: hooked _ipi_psp_load_fw` is in the log and `2da:`
+appears **zero** times. The hook installed and the function was never called,
+so no firmware image is ever handed to the PSP one at a time.
+
+That is not the same as "no firmware was loaded". HWLibs has a second path
+for GC — backdoor autoload — and the symbols say so:
+
+```
+_gc_allocate_fw_backdoor_autoload_buffer   126aa32f
+_gc_copy_backdoor_autoload_fw_10_1         126ad312
+_gc_fw_backdoor_autoload_config_10_1       126acbf8
+_gc_fw_backdoor_autoload_validate_10_1     126ace63
+_gc_fw_autoload_is_completed               126ac55a   <- 2am forces this to 1
+```
+
+The driver fills a buffer with every image, points the hardware at it, and
+the PSP loads the lot; `_gc_fw_autoload_is_completed` polls for that to
+finish. 2am patches that poll to report "done" unconditionally, which says
+nothing about whether the buffer was ever filled. 2db hooks the four
+preparation steps (observe only) to find out. If they never run, nothing was
+ever loaded, the command processor cannot be executing, and the unconsumed
+KIQ packet is fully explained — with 2am having reported success for a load
+that never happened.
+
+Also fixed: `RBGPU_MAX_DIAGS` was 96 and the capture contained exactly 96
+entries, so every new key (`fw_calls`, `stamp_calls`, `setres_ret`, ...) was
+silently dropped and read as absent. Raised to 192. Absent has to mean
+absent. The log, not the diag table, is what proved 2da never fired.
+
+`_TtlRtsLoadFirmware` (0x12630130) is the only caller of `_ipi_psp_load_fw`,
+installed by `_TtlSetRts` (0x1262fad8) at RTS slot +0x358; nothing in HWLibs
+calls that slot, so the per-image path is driven from outside HWLibs.
