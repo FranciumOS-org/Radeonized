@@ -1239,3 +1239,40 @@ Two things to change before the next armed boot:
   photograph instead of a report. Without it macOS reboots on panic and writes
   the full panic log, and with the durable disarm above that reboot comes up
   unarmed instead of looping.
+
+### Next boot, decided 2026-10-12
+
+Repeat 2df with the SMU bringup still on, but let the machine panic properly:
+drop `debug=0x100` (= DB_LOG_PI_SCRN, which prints the panic to the screen and
+stays there) so macOS reboots and writes a real `.panic` file with the frames
+above `configureDevice` and the panic string. `keepsyms=1` stays, so the report
+is symbolicated.
+
+Order matters: **install the 2dg build first**. The durable `rbgpu-arm` flush
+is what makes the panic reboot come up unarmed instead of looping, and it only
+exists in this build.
+
+```
+sudo tools/efi.sh install                     # 2dg build, UUID 1687501B
+sudo tools/efi.sh bootarg remove debug=0x100
+sudo tools/efi.sh on                          # drop -rbgpuoff
+sudo tools/efi.sh status                      # check boot-args and the UUID
+```
+
+`rbgpu-arm` is already 1, so the next boot is armed. Expect: panic, automatic
+reboot, desktop on the second boot.
+
+Read it there, **before any further reboot** — the 2cw rotation only keeps two
+boots, and the recovery boot pushes the panic boot's summary into
+`rbgpu-diag-prev`:
+
+```
+ls -lt /Library/Logs/DiagnosticReports/*.panic | head
+nvram rbgpu-diag-prev          # the panic boot's numbers
+tools/plugin_check.sh
+```
+
+Known gap: the diag summary reaches NVRAM through an async thread_call, so if
+the panic follows an SMU message within microseconds the SMU keys may still be
+missing. The `.panic` report is the primary artifact; the NVRAM summary is the
+bonus.
