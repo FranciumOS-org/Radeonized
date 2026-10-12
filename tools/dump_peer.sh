@@ -41,10 +41,16 @@ ioreg -w0 -p IOService -c IOAccelerator -r -l > "$out/accel.txt" 2>/dev/null
 ioreg -w0 -p IOService -c IOFramebuffer -r -l > "$out/framebuffer.txt" 2>/dev/null
 
 nvram boot-args 2>/dev/null | cut -f2- > "$out/boot-args.txt"
+nvram rbgpu-arm > "$out/arm.txt" 2>/dev/null || echo "rbgpu-arm not set" > "$out/arm.txt"
 
 echo
 echo "--- boot-args"
 cat "$out/boot-args.txt" 2>/dev/null
+
+echo
+echo "--- accelerator arming (2cs)"
+cat "$out/arm.txt" 2>/dev/null
+echo "  disarm with: nvram -d rbgpu-arm   (works here in single-user mode)"
 
 echo
 echo "--- what is attached to IGPU@0"
