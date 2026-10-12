@@ -554,3 +554,29 @@ What it answers: which gate after `startKIQ` fails, and whether
 `CP_GFX_HQD_ACTIVE` ever goes active. Open question in
 docs/SPEC-PM4-DOSTART.md section 7: nothing yet tests whether the PSP
 accepted and started the yellow_carp images.
+
+## 2cr (2026-10-12): no panic, but no desktop either
+
+First `-rbgpunodisppanic` boot: **no panic** (the IOPCITunnelled escape hatch
+works), but the desktop never appeared — the screen stayed on the verbose
+console. Expected consequence: `displayModeDidChange` now returns false
+instead of panicking, so the display machine never completes the mode change
+and WindowServer never puts up the UI. The boot's RBGPULog was lost (it only
+lives in that boot's IORegistry), and the user recovered the machine with
+`-rbgpuoff`.
+
+- 2cr: fixed an ordering bug in 2cn. It checked `g_rb_2cn_poweruphw_failed`
+  *before* calling the original `start()`, but `powerUpHW` is called from
+  inside `start()`, so the flag was always still 0 there and the guard only
+  applied to a second `start()` that never comes. That is why 2cn was never
+  observed to do anything. The check now runs after the original returns.
+- Hypothesis, not yet tested: failing `start()` may still not restore the
+  desktop, because 2be patched the accelerator's `stop()` to RET (the trap-3
+  guard), so a refused match never tears down the IOAcceleratorFamily2
+  registration. If 2cr alone does not bring the desktop back, that teardown
+  is the next thing to look at — and the trap that made 2be necessary has to
+  be understood rather than patched away.
+- tools/dump_peer.sh (new): dumps RBGPULog/RBGPUDiag with nothing but `ioreg`
+  and `sh`, so the log can be collected from single-user mode (Cmd+S at the
+  OpenCore picker) on a boot that never reaches a desktop. plugin_check.sh
+  needs python3, `log show` and dwarfdump, none of them reliable there.
