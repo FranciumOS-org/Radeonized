@@ -1122,3 +1122,38 @@ Necessary but possibly not sufficient: `rb_smu13_bringup` does not touch
 GFXOFF. If the GFX block is gated by GFXOFF rather than by a missing driver
 table, a second step (`RB_SMU13_ALLOW_GFXOFF` plus a DisallowGfxOff call)
 would be needed on top.
+
+## 2df (2026-10-12): TABLES allowed — the first SMU write beyond queries
+
+User's decision, asked and given on 2026-10-12: allow `RB_SMU13_ALLOW_TABLES`
+so `rb_smu13_bringup` can actually run. Chosen over probing GFX registers
+first (a read of a gated block can stall the SMN bus — that is what the boot
+6/7 RSMU timeouts were) and over allowing GFXOFF at the same time (nothing
+calls it yet, so it would be permission without a user).
+
+`rb_smu13_allow(&g_smu, RB_SMU13_ALLOW_TABLES)` is called in exactly one
+place, under `-rbgpusmubringup`. In order, the chip sees:
+
+```
+check_fw_version, get_enabled_mask    QUERY, reads only
+SetDriverDramAddrHigh(0)              record the driver table address, high
+SetDriverDramAddrLow(0x0FFFF000)      record the driver table address, low
+TransferTable(DPMCLOCKS)              the SMU DMA-WRITES ~300 bytes of clock
+                                      table there; the plugin reads it back
+```
+
+The address is the one 2dd/2de verified: a GART address pointing at a 4 KB
+page from Apple's own CGS allocator, so the SMU writes into our own buffer.
+The remaining uncertainty is whether the GPU address space is mapped as
+assumed; if not the write lands elsewhere in GPU-visible memory, bounded by
+the GART aperture rather than host kernel memory.
+
+**The step verifies itself.** The clock values logged afterwards
+(`min_gfx`, `max_gfx`, the SOC levels, the DF p-states) can only be plausible
+680M numbers if the SMU really wrote where we expect. Zeros or nonsense mean
+the mapping is wrong — learned in one boot, without damage. New diag keys
+`smu_nmsgs`, `smu_writes`, `smu_refused` record the message accounting.
+
+Necessary but possibly not sufficient: bringup does not touch GFXOFF. If the
+GFX block is gated by GFXOFF rather than by a missing driver table, a second
+step (`RB_SMU13_ALLOW_GFXOFF` plus a DisallowGfxOff call) follows.
