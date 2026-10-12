@@ -1077,3 +1077,48 @@ Next boot (no `-rbgpusmubringup`) should log `2as: MC address verified
 (0x0FFFF000) but -rbgpusmubringup not set`, with `smu_dma_mc_ok 1` and
 `smu_bringup_armed 0` — proving the address path is right with nothing sent.
 Turning the SMU on is then a separate, deliberate step.
+
+### 2de confirmed on hardware (2026-10-12)
+
+logs/20261012-172708-plugin, UUID 770C9F8A = build/out:
+
+```
+[Check 2] smu_cgs_alloc_memory ret=0, mc=0xffff000, cpu=0xffffffe0de4dc000, handle=0xffffff8ba1ff09a0
+2dd: deltas mc=-4096 cpu=4096 handle=96 (expect -0x1000, +0x1000, small)
+2as DMA VERIFY: sane=1 ... mc_is_kernel_va=0 (would be the old wrong field)
+2as: MC address verified (0xffff000) but -rbgpusmubringup not set -> SKIPPING (no SMU message sent)
+```
+
+`mc_sane 1`, `smu_dma_mc_ok 1`, `smu_bringup_armed 0`. The remap holds on a
+second boot with different addresses, `dma.cpu` now points at the real 4 KB
+buffer, and the whole address path is verified with nothing sent to the SMU.
+
+Note for the next step: the plugin never calls `rb_smu13_allow()`, so only
+`RB_SMU13_ALLOW_QUERY` is permitted. With `-rbgpusmubringup` alone,
+`rb_smu13_bringup` would pass its two query steps and then have
+`set_driver_table_location` refused by the policy — safe, but a no-op. Testing
+the hypothesis needs `RB_SMU13_ALLOW_TABLES` as well, which is the user's
+decision under the CLAUDE.md rule.
+
+What `rb_smu13_bringup` actually sends, in order:
+
+1. `check_fw_version` — QUERY, already allowed
+2. `get_enabled_mask` — QUERY, already allowed
+3. `set_driver_table_location` — **SetDriverDramAddrHigh(0)** and
+   **SetDriverDramAddrLow(0x0FFFF000)**: tells the SMU where the driver table
+   lives. TABLES group.
+4. `set_default_dpm_table` -> `update_table(DPMCLOCKS)` — a **TransferTable**,
+   after which the SMU DMA-writes roughly 300 bytes of clock table into that
+   address and the plugin reads it back through `dma.cpu`. TABLES group.
+
+Blast radius, now that the address is verified: 0x0FFFF000 is a GPU address
+inside the GART aperture, pointing at a buffer allocated through Apple's own
+CGS allocator, so the SMU writes into our own 4 KB page. The residual risk is
+that the GPU address space is not mapped as assumed, in which case the write
+lands elsewhere in GPU-visible memory — bounded by the GART aperture, not host
+kernel memory, and no longer the kernel-heap corruption 2de found.
+
+Necessary but possibly not sufficient: `rb_smu13_bringup` does not touch
+GFXOFF. If the GFX block is gated by GFXOFF rather than by a missing driver
+table, a second step (`RB_SMU13_ALLOW_GFXOFF` plus a DisallowGfxOff call)
+would be needed on top.
