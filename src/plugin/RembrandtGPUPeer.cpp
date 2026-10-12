@@ -494,8 +494,12 @@ void RembrandtGPUPeer::saveDiagToNvram() {
 
     // Short "k=v" pairs, only for keys that exist this boot. NVRAM values are
     // size-limited, so this stays well under 512 bytes.
-    char buf[512];
+    // Static, not stack: the kernel caps a frame at 1024 bytes and these
+    // three buffers together are twice that. saveDiagToNvram only ever runs
+    // on the single diag-refresh thread_call, so sharing them is safe.
+    static char buf[512];
     size_t len = 0;
+    buf[0] = '\0';
     for (size_t k = 0; k < sizeof(kRbgpuNvramKeys) / sizeof(kRbgpuNvramKeys[0]); k++) {
         const char *key = kRbgpuNvramKeys[k];
         for (size_t i = 0; i < s_snapDiagCount; i++) {
@@ -526,19 +530,72 @@ void RembrandtGPUPeer::saveDiagToNvram() {
     // so the last two boots are always readable:
     //     nvram rbgpu-diag        this boot
     //     nvram rbgpu-diag-prev   the boot before it
+    // 2cz: rotate with a FRESH copy, and report whether it took. The 2cw
+    // version passed the retained original object straight back to
+    // setProperty under a new name and no `rbgpu-diag-prev` ever appeared in
+    // /options, so something in that path fails silently. Copying the text
+    // into a new OSString removes the only suspicious part; the `rot` diag
+    // key then says on the next boot whether the variable was really created,
+    // instead of leaving it to be guessed again.
     static bool s_rotated = false;
     if (!s_rotated) {
         s_rotated = true;
+        static char oldbuf[sizeof(buf)];
+        oldbuf[0] = '\0';
         if (OSObject *old = options->getProperty("rbgpu-diag")) {
-            old->retain();
-            options->setProperty("rbgpu-diag-prev", old);
-            old->release();
+            if (auto str = OSDynamicCast(OSString, old)) {
+                strlcpy(oldbuf, str->getCStringNoCopy(), sizeof(oldbuf));
+            } else if (auto dat = OSDynamicCast(OSData, old)) {
+                unsigned int n = dat->getLength();
+                if (n >= sizeof(oldbuf)) n = sizeof(oldbuf) - 1;
+                memcpy(oldbuf, dat->getBytesNoCopy(), n);
+                oldbuf[n] = '\0';
+            }
+        }
+        if (oldbuf[0]) {
+            if (auto prev = OSString::withCString(oldbuf)) {
+                options->setProperty("rbgpu-diag-prev", prev);
+                prev->release();
+            }
+            rbgpu_diag_set_num("rot", options->getProperty("rbgpu-diag-prev") ? 1 : 2);
+        } else {
+            rbgpu_diag_set_num("rot", 0);  // nothing stored to rotate
         }
     }
 
     if (auto val = OSString::withCString(buf)) {
         options->setProperty("rbgpu-diag", val);
         val->release();
+    }
+
+    // 2cz: and a tail of the log itself. An armed boot does not reach a
+    // desktop - WindowServer blanks the panel once it starts, so even the
+    // console text is gone and tools/plugin_check.sh cannot run - which has
+    // meant reading results off photographs. The diag numbers alone do not
+    // say which call failed; these lines do. Kept small on purpose: NVRAM
+    // space is shared and limited, so this is the last few lines only.
+    {
+        static char log[1024];
+        size_t llen = 0;
+        log[0] = '\0';
+        size_t want = 8;
+        size_t have = s_snapLogCount < want ? s_snapLogCount : want;
+        for (size_t i = s_snapLogCount - have; i < s_snapLogCount; i++) {
+            size_t idx = (s_snapHead + RBGPU_RING_SIZE - s_snapLogCount + i) % RBGPU_RING_SIZE;
+            int n = snprintf(log + llen, sizeof(log) - llen, "%s%s",
+                             llen ? " | " : "", s_snapLogs[idx].line);
+            if (n > 0 && static_cast<size_t>(n) < sizeof(log) - llen) {
+                llen += static_cast<size_t>(n);
+            } else {
+                break;
+            }
+        }
+        if (llen) {
+            if (auto lv = OSString::withCString(log)) {
+                options->setProperty("rbgpu-log", lv);
+                lv->release();
+            }
+        }
     }
 
     // Flush now: a boot with no desktop ends in a power-cycle.
