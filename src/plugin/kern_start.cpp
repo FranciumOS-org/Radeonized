@@ -1804,7 +1804,18 @@ static bool hooked_hw_allocateMemoryResources_2cb(void *hw) {
             return false;
         }
         auto engAlloc = reinterpret_cast<bool (*)(void *)>(vtable[0x120 / 8]);
-        rbgpu_log("2cb: engine[%d] = %p calling allocateMemoryResources...", i, eng);
+        // 2cw: name the engine. The 2026-10-12 armed boot HUNG inside
+        // engine[4]'s allocateMemoryResources (engines 0-3 returned 1), and
+        // the index alone does not say which IP that is. Every engine is an
+        // OSObject, so its metaclass gives the class name directly.
+        const char *engName = "?";
+        if (auto obj = OSDynamicCast(OSObject, reinterpret_cast<OSObject *>(eng))) {
+            if (auto meta = obj->getMetaClass()) {
+                engName = meta->getClassName();
+            }
+        }
+        rbgpu_log("2cb: engine[%d] = %p (%s) calling allocateMemoryResources...",
+                  i, eng, engName);
         bool eng_ret = engAlloc ? engAlloc(eng) : false;
         rbgpu_log("2cb: engine[%d] allocateMemoryResources -> %d %s", i, eng_ret ? 1 : 0, eng_ret ? "(OK)" : "(FAIL)");
         if (!eng_ret) {

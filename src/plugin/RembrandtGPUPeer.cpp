@@ -519,6 +519,23 @@ void RembrandtGPUPeer::saveDiagToNvram() {
         return;
     }
 
+    // 2cw: rotate, do not clobber. The 2026-10-12 armed boot hung, and the
+    // recovery boot that followed overwrote rbgpu-diag with its own
+    // "armed=0" before the armed boot's numbers were ever read. On the first
+    // write of each boot, move whatever is already stored to rbgpu-diag-prev,
+    // so the last two boots are always readable:
+    //     nvram rbgpu-diag        this boot
+    //     nvram rbgpu-diag-prev   the boot before it
+    static bool s_rotated = false;
+    if (!s_rotated) {
+        s_rotated = true;
+        if (OSObject *old = options->getProperty("rbgpu-diag")) {
+            old->retain();
+            options->setProperty("rbgpu-diag-prev", old);
+            old->release();
+        }
+    }
+
     if (auto val = OSString::withCString(buf)) {
         options->setProperty("rbgpu-diag", val);
         val->release();
@@ -647,7 +664,20 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
         snprintf(reqKey, sizeof(reqKey), "req_0x%02X", req);
         rbgpu_diag_inc(reqKey);
 
-        rbgpu_log("SpecialAMDKey request 0x%02X (wait: %d)", req, waitForFunction);
+        // 2cw: request 0x14 (Gpu Status) is polled continuously by the
+        // accelerator - the 2026-10-12 armed boot filled both the console and
+        // the 512-line RBGPULog ring with it, pushing out the lines that
+        // matter. Log the first few and then only every 64th.
+        if (req != 0x14) {
+            rbgpu_log("SpecialAMDKey request 0x%02X (wait: %d)", req, waitForFunction);
+        } else {
+            static uint32_t s_req14_seen = 0;
+            s_req14_seen++;
+            if (s_req14_seen <= 3 || (s_req14_seen % 64) == 0) {
+                rbgpu_log("SpecialAMDKey request 0x14 (wait: %d) [#%u]",
+                          waitForFunction, s_req14_seen);
+            }
+        }
 
         switch (req) {
             case 0x00:
