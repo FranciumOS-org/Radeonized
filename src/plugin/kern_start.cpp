@@ -77,11 +77,19 @@ static struct rb_smu13 g_smu;
 static struct rb_hw    g_hw;
 static struct rb_disc *g_disc       = nullptr;
 static void           *g_smu_ctx    = nullptr;
-static void           *g_dma_handle = nullptr;
-static uint64_t        g_dma_gpu    = 0;
-static void           *g_dma_cpu    = nullptr;
+// 2de (2026-10-12): named from the 2dd evidence, not from the parameter
+// order. Two 4 KB allocations moved these by -0x1000, +0x1000 and +0x30
+// respectively, so out1 is a GPU address allocated downward from the 256 MB
+// aperture, out2 is the CPU mapping of the buffer, and out3 - 48 bytes apart
+// between two 4 KB allocations - can only be a small descriptor, i.e. the
+// handle. The old names had all three rotated by one position.
+static uint64_t        g_dma_mc     = 0;        // out1: GPU (MC) address
+static void           *g_dma_cpu    = nullptr;  // out2: CPU address of the buffer
+static void           *g_dma_handle = nullptr;  // out3: opaque handle, for free()
 
-typedef int      (*smu_cgs_alloc_memory_t)(void *ctx, uint32_t size, uint32_t align, uint32_t domain, void **handle, uint64_t *gpu_addr, void **cpu_addr);
+// 2de: parameter names from the 2dd deltas, not from a guess at the order.
+// out1 is the GPU (MC) address, out2 the CPU mapping, out3 the handle.
+typedef int      (*smu_cgs_alloc_memory_t)(void *ctx, uint32_t size, uint32_t align, uint32_t domain, uint64_t *mc_addr, void **cpu_addr, void **handle);
 typedef int      (*smu_cgs_free_memory_t)(void *ctx, void *handle);
 typedef uint32_t (*smu_get_hw_version_t)(uint64_t ver, uint64_t rev);
 typedef int      (*smu_read_config_space_t)(void *ctx);
@@ -322,11 +330,11 @@ static int slot_internal_sw_init(void *ctx, ...) {
         return 2;
     }
 
-    int alloc_ret = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &g_dma_handle, &g_dma_gpu, &g_dma_cpu);
+    int alloc_ret = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &g_dma_mc, &g_dma_cpu, &g_dma_handle);
     rbgpu_diag_set_num("alloc_ret", static_cast<uint64_t>(alloc_ret));
-    rbgpu_diag_set_num("fb_mc_addr", g_dma_gpu);
-    rbgpu_log("[Check 2] smu_cgs_alloc_memory ret=%d, handle=%p, gpu=0x%llx, cpu=%p (gpu is CGS IOVirtualAddress)",
-              alloc_ret, g_dma_handle, g_dma_gpu, g_dma_cpu);
+    rbgpu_diag_set_num("fb_mc_addr", g_dma_mc);
+    rbgpu_log("[Check 2] smu_cgs_alloc_memory ret=%d, mc=0x%llx, cpu=%p, handle=%p",
+              alloc_ret, g_dma_mc, g_dma_cpu, g_dma_handle);
 
     if (alloc_ret != 0 || !g_dma_cpu) {
         rbgpu_log("Driver table memory allocation failed");
@@ -336,7 +344,7 @@ static int slot_internal_sw_init(void *ctx, ...) {
 
     // 2dd (2026-10-12): WHICH of the three outputs is the GPU MC address?
     //
-    // This matters because slot_internal_hw_init verifies g_dma_gpu, which
+    // This matters because slot_internal_hw_init verified the wrong field, which
     // holds a kernel VA (0xffffffe0........), so the check has failed since
     // 2ak and rb_smu13_bringup has never run - which is why the SMU is never
     // given its driver table, the GFX block stays gated, and the CP never
@@ -357,28 +365,40 @@ static int slot_internal_sw_init(void *ctx, ...) {
     // This runs only on an armed boot, where a 4 KB allocation is already
     // made and never freed (_smu_cgs_free_memory does not exist in HWLibs).
     {
-        void *h2 = nullptr, *c2 = nullptr;
-        uint64_t g2 = 0;
-        int r2 = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &h2, &g2, &c2);
-        rbgpu_log("2dd: second alloc ret=%d, handle=%p, gpu=0x%llx, cpu=%p", r2, h2, g2, c2);
+        uint64_t mc2 = 0;
+        void *cpu2 = nullptr, *h2 = nullptr;
+        int r2 = orig_smu_cgs_alloc_memory(ctx, 0x1000, 0x1000, 1, &mc2, &cpu2, &h2);
+        rbgpu_log("2dd: second alloc ret=%d, mc=0x%llx, cpu=%p, handle=%p", r2, mc2, cpu2, h2);
         rbgpu_diag_set_num("a2_ret", static_cast<uint64_t>(r2));
-        rbgpu_diag_set_num("a1_handle", reinterpret_cast<uint64_t>(g_dma_handle));
-        rbgpu_diag_set_num("a2_handle", reinterpret_cast<uint64_t>(h2));
-        rbgpu_diag_set_num("a1_gpu", g_dma_gpu);
-        rbgpu_diag_set_num("a2_gpu", g2);
+        rbgpu_diag_set_num("a1_mc", g_dma_mc);
+        rbgpu_diag_set_num("a2_mc", mc2);
         if (r2 == 0) {
+            int64_t dmc = static_cast<int64_t>(mc2) - static_cast<int64_t>(g_dma_mc);
+            int64_t dcpu = static_cast<int64_t>(reinterpret_cast<uint64_t>(cpu2)) -
+                           static_cast<int64_t>(reinterpret_cast<uint64_t>(g_dma_cpu));
             int64_t dh = static_cast<int64_t>(reinterpret_cast<uint64_t>(h2)) -
                          static_cast<int64_t>(reinterpret_cast<uint64_t>(g_dma_handle));
-            int64_t dg = static_cast<int64_t>(g2) - static_cast<int64_t>(g_dma_gpu);
-            rbgpu_log("2dd: delta handle=%lld (0x%llx), delta gpu=%lld (0x%llx) - a delta near "
-                      "the 0x1000 allocation size means that field is an ADDRESS",
-                      dh, (uint64_t)dh, dg, (uint64_t)dg);
+            rbgpu_log("2dd: deltas mc=%lld cpu=%lld handle=%lld (expect -0x1000, +0x1000, small)",
+                      dmc, dcpu, dh);
+            rbgpu_diag_set_num("a_dmc", static_cast<uint64_t>(dmc));
+            rbgpu_diag_set_num("a_dcpu", static_cast<uint64_t>(dcpu));
             rbgpu_diag_set_num("a_dhandle", static_cast<uint64_t>(dh));
-            rbgpu_diag_set_num("a_dgpu", static_cast<uint64_t>(dg));
         }
     }
 
-    bool in_carveout = (g_dma_gpu >= 0xF400000000ULL && g_dma_gpu <= 0xF4FFFFFFFFULL);
+    // 2de: the old test asked whether the address was inside the 0xF4_xx
+    // carve-out. It never could be: this allocation comes back at 0x0FFFF000,
+    // descending from the 0x10000000 aperture the TTL input block reports at
+    // +0x68, which is the GART/VM aperture an APU driver table normally lives
+    // in. Check for a sane GART address instead - nonzero, page aligned, and
+    // inside that aperture.
+    const uint64_t gart_limit = 0x10000000ULL;
+    bool mc_sane = (g_dma_mc != 0) && (g_dma_mc < gart_limit) && ((g_dma_mc & 0xFFF) == 0);
+    rbgpu_log("[Check 2] MC address 0x%llx: nonzero=%d below_gart_limit(0x%llx)=%d page_aligned=%d",
+              g_dma_mc, g_dma_mc != 0, gart_limit, g_dma_mc < gart_limit,
+              (g_dma_mc & 0xFFF) == 0);
+    rbgpu_diag_set_num("mc_sane", mc_sane ? 1 : 0);
+    bool in_carveout = mc_sane;
     rbgpu_diag_set_num("carveout_ok", in_carveout ? 1 : 0);
     rbgpu_log("[Check 2] Carveout verification (0xF4_0000_0000..0xF4_FFFF_FFFF): %s", in_carveout ? "PASS" : "FAIL");
 
@@ -423,8 +443,8 @@ static int slot_internal_sw_init(void *ctx, ...) {
 
     struct rb_smu13_dma dma;
     memset(&dma, 0, sizeof(dma));
-    dma.cpu  = g_dma_cpu;
-    dma.mc   = g_dma_gpu;
+    dma.cpu  = g_dma_cpu;   // out2, the real buffer mapping
+    dma.mc   = g_dma_mc;    // out1, the real GPU address
     dma.size = 0x1000;
 
     int init_ret = rb_smu13_init(&g_smu, &g_hw, g_disc, &dma, 0);
@@ -458,22 +478,48 @@ static int slot_internal_hw_init(void *ctx) {
     uint64_t smu_mc = g_smu.dma.mc;
     void *smu_cpu = g_smu.dma.cpu;
     uint32_t smu_size = g_smu.dma.size;
-    const uint64_t carve_lo = 0xF400000000ULL;
-    const uint64_t carve_hi = 0xF4FFFFFFFFULL;
-    bool smu_mc_ok = (smu_mc >= carve_lo && smu_mc <= carve_hi);
+
+    // 2de: the address test, corrected. The old one asked whether the SMU
+    // driver table sat inside the 0xF4_xx carve-out and so could never pass:
+    // the allocation comes back at 0x0FFFF000, descending from the 0x10000000
+    // aperture the TTL input reports at +0x68, which is where an APU driver
+    // table belongs. More importantly the field being checked was the wrong
+    // one - see 2dd - and `dma.cpu` pointed at a 48-byte handle rather than
+    // the 4 KB buffer, so rb_smu13_bringup would have memcpy'd the driver
+    // table over a small kernel object (rb_smu13.c:311). That gate, written
+    // for a different reason, is what kept it from happening.
+    const uint64_t gart_limit = 0x10000000ULL;
+    bool smu_mc_ok = (smu_mc != 0) && (smu_mc < gart_limit) && ((smu_mc & 0xFFF) == 0);
     rbgpu_log("2as DMA VERIFY: mc=0x%llx cpu=%p size=0x%x", smu_mc, smu_cpu, smu_size);
-    rbgpu_log("2as DMA VERIFY: carve-out range 0x%llx..0x%llx", carve_lo, carve_hi);
-    rbgpu_log("2as DMA VERIFY: in_range=%d (1=yes, 0=no)", smu_mc_ok ? 1 : 0);
-    rbgpu_log("2as DMA VERIFY: mc_is_kernel_va=%d (0xffffff.. range)", (smu_mc >= 0xFFFFFF0000000000ULL) ? 1 : 0);
+    rbgpu_log("2as DMA VERIFY: gart_limit=0x%llx sane=%d (nonzero, below limit, page aligned)",
+              gart_limit, smu_mc_ok ? 1 : 0);
+    rbgpu_log("2as DMA VERIFY: mc_is_kernel_va=%d (would be the old wrong field)",
+              (smu_mc >= 0xFFFFFF0000000000ULL) ? 1 : 0);
     rbgpu_log("2as DMA VERIFY: size_nonzero=%d size_4k_aligned=%d", (smu_size != 0) ? 1 : 0, (smu_size % 0x1000 == 0) ? 1 : 0);
     rbgpu_diag_set_num("smu_dma_mc_ok", smu_mc_ok ? 1 : 0);
     rbgpu_diag_set_num("dma_mc_hi", (uint32_t)(smu_mc >> 32));
     rbgpu_diag_set_num("dma_mc_lo", (uint32_t)smu_mc);
     rbgpu_diag_set_num("dma_size", smu_size);
     if (!smu_mc_ok) {
-        rbgpu_log("2as: SMU DMA addr NOT carve-out verified -> SKIPPING rb_smu13_bringup (safe no-op, verification only)");
+        rbgpu_log("2as: SMU DMA addr still not sane -> SKIPPING rb_smu13_bringup");
         return 0;
     }
+
+    // 2de: the address being right is NOT permission to talk to the SMU.
+    // rb_smu13_bringup sends SetDriverDramAddrHigh/Low and TransferTable,
+    // after which the SMU DMA-writes its table into that address - a message
+    // group beyond the queries the project allows by default, and the user's
+    // decision per CLAUDE.md. Fixing the check must not silently start
+    // sending them, so bringup needs its own opt-in.
+    if (!checkKernelArgument("-rbgpusmubringup")) {
+        rbgpu_log("2as: MC address verified (0x%llx) but -rbgpusmubringup not set "
+                  "-> SKIPPING rb_smu13_bringup (no SMU message sent)", smu_mc);
+        rbgpu_diag_set_num("smu_bringup_armed", 0);
+        return 0;
+    }
+    rbgpu_diag_set_num("smu_bringup_armed", 1);
+    rbgpu_log("2as: -rbgpusmubringup set -> running rb_smu13_bringup with mc=0x%llx cpu=%p",
+              smu_mc, smu_cpu);
 
     int err = rb_smu13_bringup(&g_smu);
     rbgpu_diag_set_num("bringup_err", static_cast<uint64_t>(err));
@@ -523,7 +569,7 @@ static int slot_internal_sw_exit(void *ctx) {
         orig_smu_cgs_free_memory(ctx, g_dma_handle);
         g_dma_handle = nullptr;
         g_dma_cpu = nullptr;
-        g_dma_gpu = 0;
+        g_dma_mc = 0;
     }
     if (g_disc) {
         size_t disc_size = sizeof(struct rb_disc) + 2 * sizeof(struct rb_ip);
