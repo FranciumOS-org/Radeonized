@@ -1401,3 +1401,55 @@ Two separate things, in this order:
    `MMMC_VM_FB_LOCATION` alongside the allocator's value and check whether
    `base + 0x0FFFF000` lands inside the carve-out. Changing the address the
    SMU is given is a new hardware write and the user's decision.
+
+## 2di (2026-10-12): the handle fix, and an absolute MC address
+
+the assistant now writes the hook layer too (the Gemini split ended 2026-10-12), so
+both 2dh findings are implemented rather than specified.
+
+**The panic fix.** `slot_internal_sw_exit` zeroes `ctx+0x340` before
+returning, because Apple's `_smu_internal_sw_exit` releases that handle
+immediately afterwards with no null check (0x12668161). With NULL,
+`cosReleaseMemoryHandle` takes its own `testq %rsi,%rsi` guard, logs its
+assert and returns 2 — Apple's own path. One handle leaks on an init that is
+failing anyway. The old value is logged as `sw_exit_h340` so we can see what
+it actually was.
+
+**The address.** `smu_cgs_alloc_memory`'s out1 is an offset into the local
+frame buffer, not an address the SMU can reach — the 2dg boot sent
+`SetDriverDramAddrHigh(0)` / `Low(0x0FFFF000)` and the SMU hung on the
+transfer. `slot_internal_sw_init` now reads the carve-out out of MMHUB
+instead of assuming it:
+
+```
+MMHUB base_idx 1 = 0x1a000 (discovery, probe 1); offsets from rb_regs.h
+  MMMC_VM_FB_LOCATION_BASE  dword 0x1a8ec  byte 0x6a3b0
+  MMMC_VM_FB_LOCATION_TOP   dword 0x1a8ed  byte 0x6a3b4
+  MMMC_VM_FB_OFFSET         dword 0x1a8d7  byte 0x6a35c
+```
+
+`window_limit` is 0x80000 (512 KB, logged every boot), so these are inside the
+mapped window; the code checks that anyway and reads nothing if they are not.
+The registers hold 16 MB units, so `fb_base = (reg & 0xFFFFFF) << 24`, and
+the address handed to the SMU becomes `fb_base + out1` — expected
+`0xF4_0FFF_F000`, with a high word of 0xF4 instead of the 0 that failed.
+
+`dma.mc` is zero unless the whole 4 KB lies inside the range MMHUB reported,
+so an unreadable or implausible FB_LOCATION stops the bringup rather than
+guessing. The bringup itself still needs `-rbgpusmubringup`.
+
+New diag keys, all in NVRAM: `fb_base_reg`, `fb_top_reg`, `fb_off_reg`,
+`fb_regs_sane`, `fb_regs_oow`, `mc_abs_hi`, `mc_abs_lo`, `mc_abs_ok`,
+`sw_exit_h340`, `sw_exit_h340_cleared`.
+
+Build: UUID CBA2E0AA, hosttest passes.
+
+What the next armed boot decides:
+
+- `TransferTableSmu2Dram` either completes or times out again. If it
+  completes, the clock values print and the offset theory is proven; if it
+  times out with `last_msg=0x0f` again, the address is still not what the SMU
+  wants and the write landed inside the carve-out past the GOP framebuffer,
+  not in host memory.
+- Either way the boot should no longer panic, because the teardown path is
+  fixed. `sw_exit_h340_cleared=1` with no panic is the proof.

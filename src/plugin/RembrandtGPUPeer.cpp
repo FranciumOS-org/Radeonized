@@ -508,6 +508,12 @@ static const char *const kRbgpuNvramKeys[] = {
     "smu_nmsgs", "smu_writes", "smu_refused", "last_smu_err",
     "gfx_min", "gfx_max",
     "stamp_calls", "stamp_ret",
+    // 2di: the carve-out read from MMHUB, the absolute MC address derived
+    // from it, and whether the sw_exit handle fix fired. These decide the
+    // next step, so they have to survive a boot that dies.
+    "fb_base_reg", "fb_top_reg", "fb_regs_sane",
+    "mc_abs_hi", "mc_abs_lo", "mc_abs_ok",
+    "sw_exit_h340", "sw_exit_h340_cleared",
 };
 
 void RembrandtGPUPeer::saveDiagToNvram() {
