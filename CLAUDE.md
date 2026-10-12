@@ -442,3 +442,90 @@ own firmware (Linux linux-firmware amdgpu/yellow_carp_*.bin) in place of the
 embedded images. Firmware stays in firmware/ (gitignored). 2af (ring 512,
 read-only fw hooks) was not committed: its paste dropped the four TTL hooks
 incl. -rbgpusync570.
+
+## 2ag-2bb (2026-10-05/06): past the GC firmware wall, TTL init completes
+
+The yellow_carp firmware substitution worked. With `-rbgpusync570
+-rbgpuspoofttl -rbgpupsphw`, in order: the GC fw version check patched
+(`gc_vercheck_patched 1`, handling the 0x3D encoding), 7 firmware entries
+swapped to the 680M's own images (`yc_swapped 7`), Navi21 TAP_DELAYS skipped
+because the TOS rejects them (`tap_skipped 5`), and three waits bypassed that
+never complete on the PSP-load path: `_gc_fw_autoload_is_completed` (2am),
+`_gc_check_register_equal_ext` (2an, RLC safe mode), and
+`_sdma_5_2_1_fw_autoload_is_completed` (2ao). SMU bringup stays skipped while
+the DMA address is unverified (2ak; `carveout_ok` is still 0).
+
+`_ttl_hw_init` then ran for the first time and **TTL init completed**. The
+accelerator's own state trace goes far past boot 3's `0x20c5`:
+
+```
+u64AllAccelStart 0x00fffffd
+hardwareInit 1 · initializeTtl 1 · hwMemoryInitialized 1 · hwGartInitialized 1
+hwVmmInitialized 1 · allocateHWEngines 1 · initializeHWEngines 1
+initHWDisplay 1 · initHWInfo 1
+u64AllPowerUp 0x0 — ttlPowerUp 0, accelPowerUpHW 0, everything after 0
+```
+
+GART and VMM are up; nothing has powered up. Logs: logs/20261006-*-plugin,
+logs/20261011-*-plugin (174116, 184452, 192548, 204341 are dry runs without
+`-rbgpupsphw`, ending at the old `_ttl_initialize` status 4; the 96-key ones
+are hw boots that ended in a panic, so their return values were never written).
+
+## 2bn-2br, 2cb-2cn (2026-10-06/11): allocateMemoryResources, then powerUp
+
+- Display pipe reserve: `AMDHWMemory::reserve` (originator 0x1e) fails because
+  the allocator is empty — `free=0`, no reservations — because `powerUpHW` has
+  never run (2bq). Releasing `reserveNDRVSpace`'s boot-framebuffer slot and
+  retrying (2bp) did not help; request 0x06 succeeds and 0x1B is unsupported
+  but the VRAM pool stays empty (2br). docs/SPEC-DISPLAY-RESERVE.md has the
+  chain.
+- `AMDHardware::allocateMemoryResources` fails: engine[9], channel[0] passes
+  `vtable[0x2c0]`, channels [1] and [2] return 0 (2cb). `AMDVCN2EncChannel::
+  allocateMemoryResources` stubbed to true, VCN firmware being absent (2cc).
+- 2cf-2cl moved to the PM4 engine: `AMDGFX10PM4Engine::powerUp` runs, `doStart`
+  runs with arg false, the real `initComputeMQD` succeeds, and
+  `AMDGFX10KIQHWChannel::startKIQ` is called and returns 0.
+- 2cm replaced the deliberate reserve-hook panic with a log line; 2cn hooks
+  `AMDGraphicsAccelerator::start` to fail cleanly when `powerUpHW` fails. Not
+  yet confirmed on hardware (the EFI partition filled up).
+- A second panic path remains: `IOAccelDisplayMachine::display_mode_did_change`
+  (Kernel-2026-10-11-215906.panic) — the only Apple panic in that series; the
+  other twelve Oct 11 panics are the plugin's own `rbgpu reserve fail`.
+
+## Correction (2026-10-12, docs/SPEC-PM4-DOSTART.md): 2cl is backwards
+
+Verified against the installed X6000 7.0.25 and IOAcceleratorFamily2 485.2:
+
+- `powerUp` (0xbea1182) is a 14-byte tail jump to its own vtable[0x148], a
+  thunk that calls `doStart(false)`. powerUp has no body and no recovery
+  path: doStart's return value is powerUp's, verbatim.
+- `startKIQ` returns a **status, 0 = success**, not a bool. In doStart,
+  `testl %eax,%eax; je` continues on 0 and aborts on nonzero. `kiqres=0` was
+  success. 2cl forces the return to 1 and so sends doStart down the one
+  branch that always fails; it cannot ever produce a passing boot and must be
+  reverted before the next boot means anything. (The 2ci comment in
+  kern_start.cpp had already derived 0 = success.)
+- doStart **does** have a return-true path (0xbea150e -> 0xbea1280 with
+  r14 = 1); 0xbea1280 is a shared epilogue returning `r14 & 1`, not the false
+  path. The remaining gates after startKIQ are
+  `submitSetResourcesPacket`, `initGraphicsMQD` (never yet exercised),
+  `submitMapQueuesPacket` per ring (`+0x348` = 5), a ring-state check that
+  needs `CP_RB0_RPTR`/`CP_RB0_WPTR`/`CP_RB0_WPTR_HI` and channel+0x54 all
+  zero, `waitForActiveValue`, and `(engine+0xc0)->vtable[0x328]`.
+- HAZARD: doStart calls `waitForActiveValue(0, false, 1, 0)`, and with that
+  4th argument 0 its 1000 x 100 us timeout and its delay are both dead code.
+  It spins on `CP_GFX_HQD_ACTIVE` with no bound unless the register reads
+  0xffffffff. Removing 2cl exposes this on the next boot: force the 4th
+  argument to 1 first (that restores Apple's own 100 ms bound, it is not a
+  bypass).
+- The display panic has a supported escape hatch: `displayModeDidChange`
+  returning false only panics when bit 0x20 of accelerator `+0xc91` is clear,
+  and the one site that sets it (`IOGraphicsAccelerator2::start` 0x14e4e165)
+  does so when `getProperty("IOPCITunnelled", gIOServicePlane, recursive|
+  parents)` finds the property — Apple's eGPU flag. Publishing
+  `IOPCITunnelled` on the 680M's IOPCIDevice sets it with no code patching.
+  It changes other behaviour too (Removable, PM, surface eviction), so it
+  belongs behind its own boot-arg, for survival during bring-up only.
+- GC register names for this path come from docs/linux-ref/gc_10_3_0_offset.h
+  (added 2026-10-12); Apple's encoded ids are `(dword offset << 32) | 11`,
+  11 = GC_HWID.

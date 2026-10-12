@@ -50,3 +50,15 @@ Added 2026-10-05, from master at `67f0943b394d920b6c142aad8c6af94340342ae7`:
 | File | Upstream path |
 |---|---|
 | amdgpu_ucode.h | drivers/gpu/drm/amd/amdgpu/amdgpu_ucode.h |
+
+Added 2026-10-12, from master at `5e213a985d103ecd348ed4e9ae71292d86be9a71`:
+
+| File | Upstream path |
+|---|---|
+| gc_10_3_0_offset.h | drivers/gpu/drm/amd/include/asic_reg/gc/gc_10_3_0_offset.h |
+
+Not compiled: used to name the GC registers that Apple's
+`AMDGFX10PM4Engine::doStart` and `::waitForActiveValue` touch
+(docs/SPEC-PM4-DOSTART.md). Offsets in it are dword offsets with a
+`_BASE_IDX` of 0 for every register named in that spec, which is how
+Apple's encoded register ids `(offset << 32) | 11` resolve.
