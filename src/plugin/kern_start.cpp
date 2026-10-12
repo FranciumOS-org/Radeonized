@@ -40,17 +40,25 @@ PluginConfiguration ADDPR(config) = {
 static const char *kextPathHWLibs = "/System/Library/Extensions/AMDRadeonX6000HWServices.kext/Contents/PlugIns/AMDRadeonX6800HWLibs.kext/Contents/MacOS/AMDRadeonX6800HWLibs";
 static const char *kextPathX6000  = "/System/Library/Extensions/AMDRadeonX6000.kext/Contents/MacOS/AMDRadeonX6000";
 static const char *kextPathHWSvc  = "/System/Library/Extensions/AMDRadeonX6000HWServices.kext/Contents/MacOS/AMDRadeonX6000HWServices";
+static const char *kextPathAccelFamily =
+    "/System/Library/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2";
 
 enum KextListIndex {
     KextHWLibs = 0,
     KextX6000,
-    KextHWSvc
+    KextHWSvc,
+    KextAccelFamily
 };
 
 static KernelPatcher::KextInfo kextList[] = {
     { "com.apple.kext.AMDRadeonX6800HWLibs",     &kextPathHWLibs, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded },
     { "com.apple.kext.AMDRadeonX6000",            &kextPathX6000,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded },
-    { "com.apple.kext.AMDRadeonX6000HWServices", &kextPathHWSvc,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded }
+    { "com.apple.kext.AMDRadeonX6000HWServices", &kextPathHWSvc,  1, {true}, {}, KernelPatcher::KextInfo::Unloaded },
+    // 2ct: for the headless-accelerator hook. IOAcceleratorFamily2 loads as a
+    // dependency of AMDRadeonX6000, so it loads after this plugin and
+    // onKextLoad fires for it.
+    { "com.apple.iokit.IOAcceleratorFamily2", &kextPathAccelFamily, 1, {true}, {},
+      KernelPatcher::KextInfo::Unloaded }
 };
 
 static mach_vm_address_t g_kext_addr_hwlibs = 0;
@@ -61,6 +69,9 @@ static size_t            g_kext_size_x6000  = 0;
 
 static mach_vm_address_t g_kext_addr_hwsvc  = 0;
 static size_t            g_kext_size_hwsvc  = 0;
+
+static mach_vm_address_t g_kext_addr_accelfam = 0;
+static size_t            g_kext_size_accelfam = 0;
 
 static struct rb_smu13 g_smu;
 static struct rb_hw    g_hw;
@@ -2658,6 +2669,11 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         g_kext_size_x6000 = size;
         rbgpu_log("X6000 loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
         processX6000(patcher, id, address, size);
+    } else if (kextList[KextAccelFamily].loadIndex == id) {
+        g_kext_addr_accelfam = address;
+        g_kext_size_accelfam = size;
+        rbgpu_log("AccelFamily loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
+        processAccelFamily(patcher, id, address, size);
     } else if (kextList[KextHWSvc].loadIndex == id) {
         g_kext_addr_hwsvc = address;
         g_kext_size_hwsvc = size;
@@ -3314,6 +3330,82 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         } else {
             rbgpu_log("X6000: FAILED to hook doStart late gate %zu (2cq)", i);
         }
+    }
+}
+
+// 2ct (2026-10-12): headless accelerator - adopt no display pipe.
+//
+// The problem this solves: on an armed boot the accelerator loads, powerUpHW
+// fails, and then WindowServer never gets a desktop. The chain is
+//   IOFramebuffer::open
+//     -> IOAccelDisplayMachine::display_mode_did_change      (family 0x14e2148e)
+//        -> AMDAccelDisplayMachine::displayModeDidChange     (X6000 0xbe48428)
+//           -> set_display_mode_and_vram                     (X6000 0xbe48604)
+// and set_display_mode_and_vram returns false in exactly one place: the loop
+// over adopted display pipes, where it tries to reserve the boot
+// framebuffer's range in a VRAM allocator that is empty because powerUpHW
+// never ran. False there used to panic; with -rbgpunodisppanic it just fails
+// the framebuffer open, which is why the screen stays on the boot console.
+//
+// With ZERO adopted pipes that loop has nothing to fail on, so
+// set_display_mode_and_vram returns true, display_mode_did_change takes its
+// success path (family 0x14e2153f: pipe count 0 -> 0x14e2160c -> return
+// true), IOFramebuffer::open completes, and the desktop comes up on
+// IONDRVFramebuffer as it does on an unarmed boot. The accelerator still
+// loads and still runs powerUp/doStart, so the gate diagnostics are
+// unaffected - it simply drives no display, which is the honest state here.
+//
+// How: IOAccelDisplayMachine::found_framebuffer(IOFramebuffer*) is what
+// adopts a framebuffer as pipe. Apple's own code already refuses when the
+// pipe count has reached accel+0xcb0 (1, from
+// IOGraphicsAccelerator2::initializeConfigStructure 0x14e4d7bf): it logs and
+// returns false at 0x14e21287 without creating a pipe. Returning false from
+// this hook takes exactly that supported path.
+//
+// Note on what NOT to do: the factory result at 0x14e2125d is stored into the
+// pipe array with no NULL check and the count is incremented regardless
+// (0x14e21263-0x14e2127d), so failing the pipe constructor or returning NULL
+// from the factory would leave a NULL pipe behind and crash on the next pipe
+// walk. The refusal has to happen in found_framebuffer, before any of that.
+//
+// -rbgpudisplaypipe restores Apple's behaviour (adopt the framebuffer), for a
+// boot where we want the old path back.
+static bool (*orig_accel_found_framebuffer_2ct)(void *, void *) = nullptr;
+static volatile int g_rb_2ct_found_fb_calls = 0;
+static volatile int g_rb_2ct_found_fb_refused = 0;
+
+static bool hooked_accel_found_framebuffer_2ct(void *machine, void *framebuffer) {
+    g_rb_2ct_found_fb_calls++;
+    if (checkKernelArgument("-rbgpudisplaypipe")) {
+        bool ret = orig_accel_found_framebuffer_2ct
+                       ? orig_accel_found_framebuffer_2ct(machine, framebuffer)
+                       : false;
+        rbgpu_log("2ct: found_framebuffer(fb=%p) passed through (-rbgpudisplaypipe) -> %d",
+                  framebuffer, ret ? 1 : 0);
+        return ret;
+    }
+    g_rb_2ct_found_fb_refused++;
+    rbgpu_diag_set_num("found_fb_calls", static_cast<uint64_t>(g_rb_2ct_found_fb_calls));
+    rbgpu_diag_set_num("found_fb_refused", static_cast<uint64_t>(g_rb_2ct_found_fb_refused));
+    rbgpu_log("2ct: found_framebuffer(fb=%p) REFUSED -> accelerator adopts no display "
+              "pipe, desktop stays on IONDRVFramebuffer", framebuffer);
+    return false;
+}
+
+void RGPU::processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
+                              size_t size) {
+    KernelPatcher::RouteRequest req(
+        "__ZN21IOAccelDisplayMachine17found_framebufferEP13IOFramebuffer",
+        hooked_accel_found_framebuffer_2ct,
+        orig_accel_found_framebuffer_2ct
+    );
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        rbgpu_log("AccelFamily: hooked IOAccelDisplayMachine::found_framebuffer (2ct headless)");
+        rbgpu_diag_set_num("found_fb_routed", 1);
+    } else {
+        rbgpu_log("AccelFamily: FAILED to hook found_framebuffer (2ct) - an armed boot will "
+                  "not reach a desktop");
+        rbgpu_diag_set_num("found_fb_routed", 0);
     }
 }
 

@@ -580,3 +580,38 @@ lives in that boot's IORegistry), and the user recovered the machine with
   and `sh`, so the log can be collected from single-user mode (Cmd+S at the
   OpenCore picker) on a boot that never reaches a desktop. plugin_check.sh
   needs python3, `log show` and dwarfdump, none of them reliable there.
+
+## 2ct (2026-10-12): headless accelerator — a desktop with the accelerator loaded
+
+2cs was built but never installed (the user's last `efi.sh install` predates
+it), so every boot after 2cr still had the accelerator always-on and no way
+back to a desktop except editing config.plist from Windows. Install state has
+to be checked against the built UUID before drawing conclusions from a boot.
+
+Single-user mode is NOT a usable route on macOS 15 here: `mount -uw /` fails
+on the sealed system volume and /Users is a separate Data volume that may not
+be mounted, so tools/dump_peer.sh could not write anything. Deliberate
+diagnostic panics are also off the table by the user's decision (2026-10-12).
+
+2ct makes the accelerator adopt **no display pipe**, so an armed boot reaches
+a normal desktop and `tools/plugin_check.sh` works as usual:
+
+- `IOAccelDisplayMachine::found_framebuffer` (family 0x14e21208) is hooked to
+  return false. That is Apple's own path when the pipe count has reached
+  `accel+0xcb0` (= 1, set by `IOGraphicsAccelerator2::initializeConfigStructure`
+  0x14e4d7bf): it logs and returns false at 0x14e21287 without creating a pipe.
+- With zero pipes, `set_display_mode_and_vram`'s pipe loop — its only false
+  return — does nothing, so `displayModeDidChange` returns true,
+  `display_mode_did_change` takes its success path (0x14e2153f: count 0 ->
+  0x14e2160c -> true), and `IOFramebuffer::open` completes.
+- The accelerator still loads and still runs powerUp/doStart, so every gate
+  diagnostic is unaffected. It just drives no display, which is the honest
+  state while powerUpHW fails.
+- Do NOT instead fail the pipe constructor or return NULL from the factory:
+  at 0x14e2125d the result is stored into the pipe array with no NULL check
+  and the count is incremented regardless (0x14e21263-0x14e2127d), so a NULL
+  pipe would crash on the next pipe walk.
+- `-rbgpudisplaypipe` restores Apple's behaviour. New diag keys
+  `found_fb_routed`, `found_fb_calls`, `found_fb_refused`.
+- IOAcceleratorFamily2 is now in kextList (it loads as a dependency of
+  AMDRadeonX6000, so after this plugin, and onKextLoad fires for it).
