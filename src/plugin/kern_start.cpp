@@ -1581,6 +1581,7 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
         rbgpu_log("2cp: waitForActiveValue(ring=%u, expected=%d, bounded=1) unchanged",
                   ring, expected ? 1 : 0);
     }
+    rbgpu_log("2cx: waitForActiveValue ENTER (ring=%u) - polls CP_GFX_HQD_ACTIVE", ring);
     bool ret = orig_pm4_waitForActiveValue_2cp
                    ? orig_pm4_waitForActiveValue_2cp(pm4, ring, expected, bounded)
                    : false;
@@ -1590,6 +1591,44 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
     rbgpu_diag_set_num("wfav_ret", static_cast<uint64_t>(g_rb_2cp_wfav_ret));
     rbgpu_log("2cp: waitForActiveValue(ring=%u) -> %d %s", ring, ret ? 1 : 0,
               ret ? "(ring ACTIVE)" : "(timed out or register read 0xffffffff)");
+    return ret;
+}
+
+// 2cx (2026-10-12): observe AMDHWChannel::waitForHwStamp, the first point at
+// which this driver asks the GPU to EXECUTE something and waits for the
+// answer. submitKIQFrame (0xbe9572e) commits the KIQ frame and then calls
+// this; it polls with a 0x4C4B40 us (5 s) timeout and re-arms while the
+// channel's vtable[0x2a0] still says to keep waiting (0xbe855c0-0xbe855f0).
+//
+// The 2026-10-12 armed boot stopped exactly here: startKIQ returned 0, then
+// nothing. A stamp that never arrives means the command processor is not
+// executing the packet - i.e. the CP/MEC microcode the PSP was asked to load
+// is not running. Observe only: no override, no skip. The point is to see the
+// return value and the time it took.
+static bool (*orig_hwchannel_waitForHwStamp_2cx)(void *, uint32_t) = nullptr;
+static volatile int g_rb_2cx_stamp_calls = 0;
+static volatile int g_rb_2cx_stamp_ret = -1;
+static volatile uint64_t g_rb_2cx_stamp_us = 0;
+
+static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
+    g_rb_2cx_stamp_calls++;
+    rbgpu_diag_set_num("stamp_calls", static_cast<uint64_t>(g_rb_2cx_stamp_calls));
+    rbgpu_log("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
+              "execute; 5 s timeout per poll", ch, stamp);
+
+    uint64_t t0 = mach_absolute_time();
+    bool ret = orig_hwchannel_waitForHwStamp_2cx
+                   ? orig_hwchannel_waitForHwStamp_2cx(ch, stamp)
+                   : false;
+    uint64_t dt = mach_absolute_time() - t0;
+
+    g_rb_2cx_stamp_ret = ret ? 1 : 0;
+    g_rb_2cx_stamp_us = dt;
+    rbgpu_diag_set_num("stamp_ret", static_cast<uint64_t>(g_rb_2cx_stamp_ret));
+    rbgpu_diag_set_num("stamp_ticks", dt);
+    rbgpu_log("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
+              ret ? "(the GPU executed it)" : "(TIMEOUT - the CP never consumed the packet)",
+              dt);
     return ret;
 }
 
@@ -1609,6 +1648,13 @@ static volatile int g_rb_2cq_mapq_fails = 0;
 
 static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     g_rb_2cq_setres_calls++;
+    // 2cx: log on ENTRY. The 2026-10-12 armed boot stopped here with no line
+    // at all, because every hook logged only after the original returned - a
+    // hang therefore produced nothing. submitSetResourcesPacket tail-calls
+    // submitKIQFrame -> waitForHwStamp, which waits for the GPU to execute
+    // the packet, so "entered with no return" is the signal that matters.
+    rbgpu_log("2cx: submitSetResourcesPacket ENTER (ch=%p spec=%p) - waits for the "
+              "GPU to execute the KIQ packet", ch, spec);
     bool ret = orig_kiq_submitSetResources_2cq
                    ? orig_kiq_submitSetResources_2cq(ch, spec)
                    : false;
@@ -1622,7 +1668,7 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
 
 static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     g_rb_2cq_gfxmqd_calls++;
-    rbgpu_log("2cq: initGraphicsMQD entered (pm4=%p) - first time this path runs", pm4);
+    rbgpu_log("2cx: initGraphicsMQD ENTER (pm4=%p)", pm4);
     bool ret = orig_pm4_initGraphicsMQD_2cq ? orig_pm4_initGraphicsMQD_2cq(pm4) : false;
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
@@ -1635,6 +1681,7 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
 static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, uint64_t b,
                                            const void *spec, uint64_t c) {
     g_rb_2cq_mapq_calls++;
+    rbgpu_log("2cx: submitMapQueuesPacket ENTER (ring=%u)", ring);
     bool ret = orig_kiq_submitMapQueues_2cq
                    ? orig_kiq_submitMapQueues_2cq(ch, ring, a, b, spec, c)
                    : false;
@@ -3333,6 +3380,12 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
             "__ZN35AMDRadeonX6000_AMDGFX10KIQHWChannel21submitMapQueuesPacketE18_eAMD_HW_RING_TYPEjyPK18AMD_PM4_QUEUE_SPECy",
             hooked_kiq_submitMapQueues_2cq,
             orig_kiq_submitMapQueues_2cq
+        ),
+        // 2cx: the actual wait for the GPU to execute a packet.
+        KernelPatcher::RouteRequest(
+            "__ZN27AMDRadeonX6000_AMDHWChannel14waitForHwStampEj",
+            hooked_hwchannel_waitForHwStamp_2cx,
+            orig_hwchannel_waitForHwStamp_2cx
         ),
     };
     for (size_t i = 0; i < arrsize(reqs_late); i++) {
