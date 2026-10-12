@@ -34,6 +34,9 @@ private:
 
     void handlePostRegister();
     void performRefreshDiag();
+    // 2cu: persist a compact summary into NVRAM (`nvram rbgpu-diag`), so a
+    // boot that never reaches a desktop still yields its numbers.
+    void saveDiagToNvram();
 
 public:
     bool init(OSDictionary *dictionary = nullptr) override;
