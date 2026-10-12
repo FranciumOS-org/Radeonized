@@ -1455,7 +1455,8 @@ static uint32_t hooked_AmdTtlServices_buildCommand(void *this_ptr, uint32_t queu
 
 // 2bm: Hook AMDRTHardware::allocateMemoryResources (vtable[0x120]).
 // This returns false, causing "Failed to init HW Acelerator resources".
-// Log the failure, then force it to true to see what happens next.
+// 2bz: REMOVED the force-true hack (per Claude option 2). Now we diagnose
+// WHY it fails legitimately instead of bypassing it.
 static uint8_t hooked_AMDRTHardware_allocateMemoryResources(void *this_ptr) {
     rbgpu_log("2bm allocateMemoryResources: this=%p entered", this_ptr);
     uint8_t ret = 0;
@@ -1463,12 +1464,371 @@ static uint8_t hooked_AMDRTHardware_allocateMemoryResources(void *this_ptr) {
         ret = orig_amdrt_allocate_memory_resources(this_ptr);
     }
     rbgpu_log("2bm allocateMemoryResources returned %u (0=fail, 1=success)", ret);
-    // 2bm: Force success to get past this barrier and see the next failure
-    if (ret == 0) {
-        rbgpu_log("2bm: FORCING return 1 (was 0)");
-        ret = 1;
-    }
+    // 2bz: No longer forcing success. Let it fail naturally so we can diagnose.
     return ret;
+}
+
+// 2cb: REPLACE AMDHardware::allocateMemoryResources with a fully instrumented
+// version. The 2bz boot proved it returns false with 7 engines present, but
+// didn't identify WHICH step fails. This replicates the original's logic
+// step-by-step with logging (from disassembly of 0xbea8de0):
+//   Step 1: obj(hw+0x18)->vtable[0x208](obj, hw+0x510, ((hw+0x530)&0xff)<<12+0x1000, 3, 0, 3)
+//           -> stored at hw+0x518; if NULL, return false.
+//   Step 2: for i in 0..10: eng = hw+0x3b0[i]; if eng: if (!eng->vtable[0x120](eng)) return false.
+//   Return true if all pass.
+// Globals for panic-embedded diagnostics (log is lost on failure path).
+static volatile int g_rb_alloc_fail_step = -1;  // 0 = all OK, 1 = vtable[0x208] NULL, 2 = engine N failed
+static volatile int g_rb_alloc_fail_engine = -1;
+static volatile void *g_rb_alloc_fail_engine_ptr = nullptr;
+// Kept for RouteRequest's signature; 2cb replaces the original and never calls it.
+static bool (*orig_hw_allocateMemoryResources)(void *) = nullptr;
+
+// 2ce: Trace the powerUp -> doStart -> initComputeMQD call chain.
+// 2cd showed initComputeMQD is never called, so the failure is earlier.
+// The powerUp half lives in hooked_pm4_powerUp (2bu): one route per function.
+// 2cf: Call-chain flags stashed for the panic line (RBGPULog is lost on panic).
+static volatile int g_rb_2cf_powerup_called = 0;
+static volatile int g_rb_2cf_dostart_called = 0;
+static volatile int g_rb_2cf_initmqd_called = 0;
+static volatile int g_rb_2cf_initmqd_result = -1;
+// 2ch: Track startKIQ (called by doStart after initComputeMQD).
+static volatile int g_rb_2ch_startkiq_called = 0;
+static volatile int g_rb_2ch_startkiq_result = -1;
+// 2cm survive mode: globals removed (unused).
+
+static bool (*orig_pm4_doStart_2ce)(void *, bool) = nullptr;
+
+static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
+    rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
+    g_rb_2cf_dostart_called = 1;
+    // Call original - our initComputeMQD hook (2cd) will log if it's reached
+    bool ret = orig_pm4_doStart_2ce ? orig_pm4_doStart_2ce(pm4, arg) : false;
+    rbgpu_log("2ce: doStart returned %d", ret ? 1 : 0);
+    return ret;
+}
+
+// 2cd: REPLACE AMDGFX10PM4Engine::initComputeMQD with a fully instrumented
+// step-by-step version. doStart() calls initComputeMQD(4) first; if it returns
+// false, engine 0's powerUp fails. This identifies which of the 5 failure
+// branches triggers.
+// 2ch: Hook AMDGFX10KIQHWChannel::startKIQ to see if doStart fails there.
+static int (*orig_kiq_startKIQ_2ch)(void *, uint64_t, uint64_t, void *, void *) = nullptr;
+
+// 2ci: REPLACE startKIQ with instrumented version. The original:
+//   obj = (this+0x20)->vtable[0x2c0]()
+//   ret = obj->vtable[0x120](obj, 8, 0, &s1, &s2)
+//   if ret != 0: return ret
+//   else: compare queue spec; return 0 (match) or 0xe00002bc (mismatch)
+// 2ch showed it returns 0, meaning vtable[0x120] returned 0 AND spec matched.
+//
+// 2co (2026-10-12): 2cl's forcing of the return to 1 is REVERTED. startKIQ
+// returns a STATUS, not a bool, and 0 is success. doStart (X6000 7.0.25
+// 0xbea126d) does:
+//     testl %eax, %eax
+//     je    0xbea1296        ; eax == 0  -> continue (the long path)
+//     callq *0x138(%r14)     ; eax != 0  -> abort helper
+//     xorl  %r14d, %r14d     ; -> return false
+// So the 2ch/2ck boots were already reporting success, and forcing 1 put
+// doStart on the one branch that always fails. Observe only, never override.
+// docs/SPEC-PM4-DOSTART.md section 2.
+static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void *c, void *d) {
+    g_rb_2ch_startkiq_called = 1;
+    if (!this_ptr) {
+        rbgpu_log("2co: startKIQ called with NULL this -> returning 0 (success) unchanged");
+        g_rb_2ch_startkiq_result = 0;
+        return 0;
+    }
+    int orig_ret = orig_kiq_startKIQ_2ch ? orig_kiq_startKIQ_2ch(this_ptr, a, b, c, d) : 0;
+    g_rb_2ch_startkiq_result = orig_ret;
+    rbgpu_log("2co: startKIQ returned %d (%s)", orig_ret,
+              orig_ret == 0 ? "0 = SUCCESS, doStart continues" : "nonzero = failure");
+    return orig_ret;
+}
+
+// 2cp: AMDGFX10PM4Engine::waitForActiveValue(ring, bool expected, bool bounded).
+// doStart calls it as (0, true, false). The third parameter is the one that
+// arms the timeout: with it false, the counter at 0xbea15fb and the 100 us
+// delay at 0xbea1607 are unreachable, and the poll of CP_GFX_HQD_ACTIVE
+// (GC dword offset 0x1e80) only ends on 1 or 0xffffffff. Force it true so
+// Apple's own 1000 x 100 us bound applies and an inactive ring returns false
+// instead of wedging the CPU. docs/SPEC-PM4-DOSTART.md section 4.
+static bool (*orig_pm4_waitForActiveValue_2cp)(void *, uint32_t, bool, bool) = nullptr;
+static volatile int g_rb_2cp_wfav_calls = 0;
+static volatile int g_rb_2cp_wfav_ret = -1;
+static volatile int g_rb_2cp_wfav_bounded = 0;
+
+static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool expected,
+                                              bool bounded) {
+    g_rb_2cp_wfav_calls++;
+    if (!bounded) {
+        g_rb_2cp_wfav_bounded = 1;
+        rbgpu_log("2cp: waitForActiveValue(ring=%u, expected=%d, bounded=0) -> forcing "
+                  "bounded=1 (unbounded poll of CP_GFX_HQD_ACTIVE would hang)",
+                  ring, expected ? 1 : 0);
+        bounded = true;
+    } else {
+        rbgpu_log("2cp: waitForActiveValue(ring=%u, expected=%d, bounded=1) unchanged",
+                  ring, expected ? 1 : 0);
+    }
+    bool ret = orig_pm4_waitForActiveValue_2cp
+                   ? orig_pm4_waitForActiveValue_2cp(pm4, ring, expected, bounded)
+                   : false;
+    g_rb_2cp_wfav_ret = ret ? 1 : 0;
+    rbgpu_diag_set_num("wfav_calls", static_cast<uint64_t>(g_rb_2cp_wfav_calls));
+    rbgpu_diag_set_num("wfav_bounded_forced", static_cast<uint64_t>(g_rb_2cp_wfav_bounded));
+    rbgpu_diag_set_num("wfav_ret", static_cast<uint64_t>(g_rb_2cp_wfav_ret));
+    rbgpu_log("2cp: waitForActiveValue(ring=%u) -> %d %s", ring, ret ? 1 : 0,
+              ret ? "(ring ACTIVE)" : "(timed out or register read 0xffffffff)");
+    return ret;
+}
+
+// 2cq: the remaining doStart gates after startKIQ, observe-only. Nothing here
+// overrides a return value; the point is to name the exact exit.
+// docs/SPEC-PM4-DOSTART.md section 2 (the table) and section 6.
+static bool (*orig_kiq_submitSetResources_2cq)(void *, const void *) = nullptr;
+static bool (*orig_pm4_initGraphicsMQD_2cq)(void *) = nullptr;
+static bool (*orig_kiq_submitMapQueues_2cq)(void *, uint32_t, uint32_t, uint64_t,
+                                            const void *, uint64_t) = nullptr;
+static volatile int g_rb_2cq_setres_calls = 0;
+static volatile int g_rb_2cq_setres_ret = -1;
+static volatile int g_rb_2cq_gfxmqd_calls = 0;
+static volatile int g_rb_2cq_gfxmqd_ret = -1;
+static volatile int g_rb_2cq_mapq_calls = 0;
+static volatile int g_rb_2cq_mapq_fails = 0;
+
+static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
+    g_rb_2cq_setres_calls++;
+    bool ret = orig_kiq_submitSetResources_2cq
+                   ? orig_kiq_submitSetResources_2cq(ch, spec)
+                   : false;
+    g_rb_2cq_setres_ret = ret ? 1 : 0;
+    rbgpu_diag_set_num("setres_calls", static_cast<uint64_t>(g_rb_2cq_setres_calls));
+    rbgpu_diag_set_num("setres_ret", static_cast<uint64_t>(g_rb_2cq_setres_ret));
+    rbgpu_log("2cq: submitSetResourcesPacket(spec=%p) -> %d %s", spec, ret ? 1 : 0,
+              ret ? "(OK)" : "(FAIL -> doStart exits via vtable[0x150], returns false)");
+    return ret;
+}
+
+static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
+    g_rb_2cq_gfxmqd_calls++;
+    rbgpu_log("2cq: initGraphicsMQD entered (pm4=%p) - first time this path runs", pm4);
+    bool ret = orig_pm4_initGraphicsMQD_2cq ? orig_pm4_initGraphicsMQD_2cq(pm4) : false;
+    g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
+    rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
+    rbgpu_diag_set_num("gfxmqd_ret", static_cast<uint64_t>(g_rb_2cq_gfxmqd_ret));
+    rbgpu_log("2cq: initGraphicsMQD -> %d %s", ret ? 1 : 0,
+              ret ? "(OK)" : "(FAIL -> doStart returns false)");
+    return ret;
+}
+
+static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, uint64_t b,
+                                           const void *spec, uint64_t c) {
+    g_rb_2cq_mapq_calls++;
+    bool ret = orig_kiq_submitMapQueues_2cq
+                   ? orig_kiq_submitMapQueues_2cq(ch, ring, a, b, spec, c)
+                   : false;
+    if (!ret) {
+        g_rb_2cq_mapq_fails++;
+    }
+    rbgpu_diag_set_num("mapq_calls", static_cast<uint64_t>(g_rb_2cq_mapq_calls));
+    rbgpu_diag_set_num("mapq_fails", static_cast<uint64_t>(g_rb_2cq_mapq_fails));
+    rbgpu_log("2cq: submitMapQueuesPacket(ring=%u, a=0x%x, b=0x%llx, spec=%p, c=0x%llx) -> %d %s",
+              ring, a, b, spec, c, ret ? 1 : 0, ret ? "(OK)" : "(FAIL)");
+    return ret;
+}
+
+static bool (*orig_pm4_initComputeMQD_2cd)(void *, uint32_t) = nullptr;
+
+static bool hooked_pm4_initComputeMQD_2cd(void *pm4, uint32_t ring_type) {
+    rbgpu_log("2cd: initComputeMQD entered (pm4=%p ring_type=%u)", pm4, ring_type);
+    g_rb_2cf_initmqd_called = 1;
+    if (!pm4) {
+        rbgpu_log("2cd: pm4 is NULL -> false");
+        g_rb_2cf_initmqd_result = 0;
+        return false;
+    }
+    // rdi = this+0x50[ring_type], cast to AMDRTRing (we skip the cast, just log)
+    void *ring_obj = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(pm4) + 0x50 + ring_type * 8);
+    rbgpu_log("2cd: ring_obj (pm4+0x50[%u]) = %p", ring_type, ring_obj);
+    // r14 = (this+0x18)->vtable[0x2d8]()
+    void *mem_obj = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(pm4) + 0x18);
+    rbgpu_log("2cd: mem_obj (pm4+0x18) = %p", mem_obj);
+    void *r14 = nullptr;
+    if (mem_obj) {
+        void **mem_vtable = *reinterpret_cast<void ***>(mem_obj);
+        if (mem_vtable) {
+            auto fn_2d8 = reinterpret_cast<void *(*)(void *)>(mem_vtable[0x2d8 / 8]);
+            rbgpu_log("2cd: calling mem->vtable[0x2d8] (%p)...", reinterpret_cast<void *>(fn_2d8));
+            r14 = fn_2d8 ? fn_2d8(mem_obj) : nullptr;
+            rbgpu_log("2cd: mem->vtable[0x2d8]() = %p %s", r14, r14 ? "(OK)" : "(NULL -> FAIL1)");
+        } else {
+            rbgpu_log("2cd: mem_obj has NULL vtable -> FAIL1");
+        }
+    } else {
+        rbgpu_log("2cd: mem_obj is NULL -> FAIL1");
+    }
+    if (!r14) {
+        rbgpu_log("2cd: FAIL1 - r14 is NULL");
+        g_rb_2cf_initmqd_result = 0;
+        return false;
+    }
+    // r14->vtable[0x148]()
+    {
+        void **r14_vtable = *reinterpret_cast<void ***>(r14);
+        auto fn_148 = r14_vtable ? reinterpret_cast<bool (*)(void *)>(r14_vtable[0x148 / 8]) : nullptr;
+        rbgpu_log("2cd: calling r14->vtable[0x148] (%p)...", reinterpret_cast<void *>(fn_148));
+        bool ok = fn_148 ? fn_148(r14) : false;
+        rbgpu_log("2cd: r14->vtable[0x148]() -> %d %s", ok ? 1 : 0, ok ? "(OK)" : "(FAIL2)");
+        if (!ok) {
+            rbgpu_log("2cd: FAIL2 - vtable[0x148] returned false");
+            g_rb_2cf_initmqd_result = 0;
+        return false;
+        }
+    }
+    // r12 = this+0x250[ring_type*32]
+    void *r12 = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(pm4) + 0x250 + ring_type * 32);
+    rbgpu_log("2cd: r12 (pm4+0x250[%u*32]) = %p %s", ring_type, r12, r12 ? "(OK)" : "(NULL -> FAIL3)");
+    if (!r12) {
+        rbgpu_log("2cd: FAIL3 - r12 is NULL");
+        g_rb_2cf_initmqd_result = 0;
+        return false;
+    }
+    // r14->vtable[0x210](r12, 0x1000, &local, 0x100)
+    void *local = nullptr;
+    {
+        void **r14_vtable = *reinterpret_cast<void ***>(r14);
+        auto fn_210 = r14_vtable ? reinterpret_cast<bool (*)(void *, void *, uint32_t, void **, uint32_t)>(r14_vtable[0x210 / 8]) : nullptr;
+        rbgpu_log("2cd: calling r14->vtable[0x210] (%p)...", reinterpret_cast<void *>(fn_210));
+        bool ok = fn_210 ? fn_210(r14, r12, 0x1000, &local, 0x100) : false;
+        rbgpu_log("2cd: r14->vtable[0x210]() -> %d local=%p %s", ok ? 1 : 0, local, ok ? "(OK)" : "(FAIL4)");
+        if (!ok) {
+            rbgpu_log("2cd: FAIL4 - vtable[0x210] returned false");
+            g_rb_2cf_initmqd_result = 0;
+        return false;
+        }
+    }
+    // rax = local->vtable[0x118]()
+    void *mqd = nullptr;
+    if (local) {
+        void **local_vtable = *reinterpret_cast<void ***>(local);
+        auto fn_118 = local_vtable ? reinterpret_cast<void *(*)(void *)>(local_vtable[0x118 / 8]) : nullptr;
+        rbgpu_log("2cd: calling local->vtable[0x118] (%p)...", reinterpret_cast<void *>(fn_118));
+        mqd = fn_118 ? fn_118(local) : nullptr;
+        rbgpu_log("2cd: local->vtable[0x118]() = %p %s", mqd, mqd ? "(OK)" : "(NULL -> FAIL5)");
+    } else {
+        rbgpu_log("2cd: local is NULL -> FAIL5");
+    }
+    if (!mqd) {
+        rbgpu_log("2cd: FAIL5 - mqd is NULL");
+        g_rb_2cf_initmqd_result = 0;
+        return false;
+    }
+    rbgpu_log("2cd: all checks passed, calling ORIGINAL initComputeMQD (2cg)");
+    g_rb_2cf_initmqd_result = 1;
+    // 2cg: Call the original to do the real work. If doStart still fails,
+    // the failure is in doStart's later steps (vtable[0x130], startKIQ),
+    // not in initComputeMQD.
+    bool orig_ret = orig_pm4_initComputeMQD_2cd ? orig_pm4_initComputeMQD_2cd(pm4, ring_type) : false;
+    rbgpu_log("2cg: original initComputeMQD returned %d", orig_ret ? 1 : 0);
+    g_rb_2cf_initmqd_result = orig_ret ? 1 : 0;
+    return orig_ret;
+}
+
+// 2cc: Stub AMDVCN2EncChannel::allocateMemoryResources to return true.
+// The VCN 3.1 firmware (ativvaxy_vcn3_1.dat) is missing for 0x1681, so the VCN
+// encode channels fail their allocation. VCN is video encode/decode, not needed
+// for display/Metal bring-up. This lets the rest of the driver initialize.
+static bool hooked_vcn2enc_alloc_2cc(void *ch) {
+    rbgpu_log("2cc: AMDVCN2EncChannel::allocateMemoryResources(%p) stubbed -> true (VCN fw missing)", ch);
+    return true;
+}
+static bool (*orig_vcn2enc_alloc_2cc)(void *) = nullptr;
+
+static bool hooked_hw_allocateMemoryResources_2cb(void *hw) {
+    rbgpu_log("2cb: AMDHardware::allocateMemoryResources entered (hw=%p)", hw);
+    if (!hw) {
+        rbgpu_log("2cb: hw is NULL -> false");
+        return false;
+    }
+    void *obj = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(hw) + 0x18);
+    uint64_t arg_rsi = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(hw) + 0x510);
+    uint8_t b530 = *reinterpret_cast<uint8_t *>(reinterpret_cast<uintptr_t>(hw) + 0x530);
+    uint64_t arg_rdx = (static_cast<uint64_t>(b530) << 12) + 0x1000;
+    rbgpu_log("2cb: step1 obj=%p rsi=0x%llx rdx=0x%llx", obj, arg_rsi, arg_rdx);
+    void *mem_result = nullptr;
+    if (obj) {
+        void **obj_vtable = *reinterpret_cast<void ***>(obj);
+        if (obj_vtable) {
+            auto alloc_fn = reinterpret_cast<void *(*)(void *, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t)>(obj_vtable[0x208 / 8]);
+            rbgpu_log("2cb: step1 alloc_fn=%p", reinterpret_cast<void *>(alloc_fn));
+            if (alloc_fn) {
+                mem_result = alloc_fn(obj, arg_rsi, arg_rdx, 3, 0, 3);
+            } else {
+                rbgpu_log("2cb: step1 alloc_fn is NULL!");
+            }
+        } else {
+            rbgpu_log("2cb: step1 obj has NULL vtable!");
+        }
+    } else {
+        rbgpu_log("2cb: step1 obj (hw+0x18) is NULL!");
+    }
+    *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(hw) + 0x518) = mem_result;
+    rbgpu_log("2cb: step1 result=%p %s", mem_result, mem_result ? "(OK)" : "(NULL -> FAIL)");
+    if (!mem_result) {
+        g_rb_alloc_fail_step = 1;
+        return false;
+    }
+    for (int i = 0; i < 11; i++) {
+        void *eng = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(hw) + 0x3b0 + i * 8);
+        if (!eng) {
+            rbgpu_log("2cb: engine[%d] = NULL (skipped)", i);
+            continue;
+        }
+        void **vtable = *reinterpret_cast<void ***>(eng);
+        if (!vtable) {
+            rbgpu_log("2cb: engine[%d] = %p has NULL vtable -> FAIL", i, eng);
+            g_rb_alloc_fail_step = 2;
+            g_rb_alloc_fail_engine = i;
+            g_rb_alloc_fail_engine_ptr = eng;
+            return false;
+        }
+        auto engAlloc = reinterpret_cast<bool (*)(void *)>(vtable[0x120 / 8]);
+        rbgpu_log("2cb: engine[%d] = %p calling allocateMemoryResources...", i, eng);
+        bool eng_ret = engAlloc ? engAlloc(eng) : false;
+        rbgpu_log("2cb: engine[%d] allocateMemoryResources -> %d %s", i, eng_ret ? 1 : 0, eng_ret ? "(OK)" : "(FAIL)");
+        if (!eng_ret) {
+            g_rb_alloc_fail_step = 2;
+            g_rb_alloc_fail_engine = i;
+            g_rb_alloc_fail_engine_ptr = eng;
+            // 2cb: Drill into the failing engine's channels.
+            // AMDHWEngine::allocateMemoryResources loops count=eng+0x48 channels
+            // at eng+0xc0[j], calling each channel->vtable[0x2c0]().
+            uint32_t ch_count = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(eng) + 0x48);
+            rbgpu_log("2cb: engine[%d] FAILED - drilling into %u channels", i, ch_count);
+            for (uint32_t j = 0; j < ch_count; j++) {
+                void *ch = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(eng) + 0xc0 + j * 8);
+                if (!ch) {
+                    rbgpu_log("2cb:   channel[%u] = NULL (skipped)", j);
+                    continue;
+                }
+                void **ch_vtable = *reinterpret_cast<void ***>(ch);
+                if (!ch_vtable) {
+                    rbgpu_log("2cb:   channel[%u] = %p has NULL vtable", j, ch);
+                    continue;
+                }
+                auto chAlloc = reinterpret_cast<bool (*)(void *)>(ch_vtable[0x2c0 / 8]);
+                rbgpu_log("2cb:   channel[%u] = %p (fn=%p) calling vtable[0x2c0]...", j, ch,
+                          reinterpret_cast<void *>(ch_vtable[0x2c0 / 8]));
+                bool ch_ret = chAlloc ? chAlloc(ch) : false;
+                rbgpu_log("2cb:   channel[%u] vtable[0x2c0] -> %d %s", j, ch_ret ? 1 : 0,
+                          ch_ret ? "(OK)" : "(FAIL)");
+            }
+            return false;
+        }
+    }
+    rbgpu_log("2cb: all steps passed -> true");
+    g_rb_alloc_fail_step = 0;
+    return true;
 }
 
 // 2bn: Hook AMDHWMemory::reserve to diagnose the display_mode_did_change failure.
@@ -1480,12 +1840,31 @@ static int reserve_log_count = 0;
 // 2br: powerUpHW progress (the accelerator's VRAM pool is filled there).
 // Bits: 1 powerUpHW entered, 2 powerUpHW returned, 4 Navi21Hardware::powerUp
 // entered, 8 it returned true, 0x10 enableAllocations entered, 0x20 it
-// returned true. Read by the reserve panic.
+// returned true. 2bs adds: 0x40 powerUpHWEngines entered, 0x80 it returned
+// true, 0x100 startHWEngines entered, 0x200 it returned true.
+// 2bt adds: 0x400 AMDHardware::powerUp entered, 0x800 it returned true,
+// 0x1000 AMDGFX10Hardware::powerUp entered, 0x2000 it returned true.
+// Read by the reserve panic.
 static volatile uint32_t g_rb_pw_stage = 0;
 static volatile uint32_t g_rb_pw_ret = 0xFFFFFFFF;
 static uint32_t (*orig_accel_powerUpHW)(void *) = nullptr;
+// 2cn: Survive mode - flag set when powerUpHW fails, used to fail start() cleanly.
+static volatile int g_rb_2cn_poweruphw_failed = 0;
 static bool (*orig_navi21_powerUp)(void *) = nullptr;
 static bool (*orig_hwmem_enableAllocations)(void *) = nullptr;
+
+// 2cn: Hook AMDGraphicsAccelerator::start to fail cleanly when powerUpHW failed.
+static bool (*orig_accel_start_2cn)(void *, void *) = nullptr;
+static bool hooked_accel_start_2cn(void *accel, void *provider) {
+    rbgpu_log("2cn: accelerator start entered (accel=%p)", accel);
+    if (g_rb_2cn_poweruphw_failed) {
+        rbgpu_log("2cn: powerUpHW failed earlier, failing start cleanly (survive mode)");
+        return false;
+    }
+    bool ret = orig_accel_start_2cn ? orig_accel_start_2cn(accel, provider) : false;
+    rbgpu_log("2cn: accelerator start returned %d", ret ? 1 : 0);
+    return ret;
+}
 
 static uint32_t hooked_accel_powerUpHW(void *accel) {
     g_rb_pw_stage |= 1;
@@ -1494,6 +1873,10 @@ static uint32_t hooked_accel_powerUpHW(void *accel) {
     g_rb_pw_ret = ret;
     g_rb_pw_stage |= 2;
     rbgpu_log("2br: powerUpHW returned 0x%x", ret);
+    if (ret == 0) {
+        rbgpu_log("2cn: powerUpHW failed, will fail start() cleanly (survive mode)");
+        g_rb_2cn_poweruphw_failed = 1;
+    }
     return ret;
 }
 
@@ -1510,6 +1893,168 @@ static bool hooked_hwmem_enableAllocations(void *mem) {
     bool ret = orig_hwmem_enableAllocations ? orig_hwmem_enableAllocations(mem) : false;
     if (ret) g_rb_pw_stage |= 0x20;
     rbgpu_log("2br: AMDHWMemory::enableAllocations -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+// 2bs: Drill into AMDHardware::powerUp to find which engine fails.
+// Per Claude's handoff, Navi21Hardware::powerUp returns false because
+// powerUpHWEngines() or startHWEngines() fails. Hook both, on both the
+// base AMDHardware and the GFX10 variant, to see which returns false.
+// New pw_stage bits: 0x40 powerUpHWEngines entered, 0x80 it returned true,
+// 0x100 startHWEngines entered, 0x200 it returned true.
+static bool (*orig_hw_powerUpHWEngines)(void *) = nullptr;
+static bool (*orig_hw_startHWEngines)(void *) = nullptr;
+static bool (*orig_gfx10_powerUpHWEngines)(void *) = nullptr;
+static bool (*orig_gfx10_startHWEngines)(void *) = nullptr;
+
+// 2bw: Global to carry the failing engine info from powerUpHWEngines
+// to the reserve panic (log lines are lost in the crash).
+static volatile int g_rb_fail_engine_idx = -2;  // -2 = not run, -1 = all OK
+static volatile void *g_rb_fail_engine_ptr = nullptr;
+// 2bx: Additional engine 0 diagnostics for single-boot max info.
+static volatile void *g_rb_fail_engine_vtable = nullptr;
+static volatile void *g_rb_fail_engine_powerup_fn = nullptr;
+static volatile uint64_t g_rb_fail_engine_d0 = 0;
+static volatile uint64_t g_rb_fail_engine_d8 = 0;
+static volatile uint64_t g_rb_fail_engine_d10 = 0;
+static volatile uint64_t g_rb_fail_engine_d18 = 0;
+// 2by: Capture the vtable[0x148] target (the real powerUp implementation
+// that AMDGFX10PM4Engine::powerUp tail-calls to).
+static volatile void *g_rb_fail_engine_real_pu = nullptr;
+static bool hooked_hw_powerUpHWEngines(void *hw) {
+    g_rb_pw_stage |= 0x40;
+    rbgpu_log("2bs: AMDHardware::powerUpHWEngines entered (hw=%p)", hw);
+    // 2bv: Replace the original with a fully instrumented manual loop.
+    // The original iterates 11 engines at hw+0x3b0, calling each engine's
+    // vtable[0x138]() (powerUp), returning false on first failure.
+    // We do the same but log each engine's index, pointer, and result,
+    // so the panic/log shows EXACTLY which engine fails.
+    // We do NOT call the original - this replaces it for diagnosis.
+    bool all_ok = true;
+    int fail_idx = -1;
+    void *fail_ptr = nullptr;
+    if (hw) {
+        for (int i = 0; i < 11; i++) {
+            void *eng = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(hw) + 0x3b0 + i * 8);
+            if (!eng) {
+                rbgpu_log("2bv: engine[%d] = NULL (skipped)", i);
+                continue;
+            }
+            void **vtable = *reinterpret_cast<void ***>(eng);
+            if (!vtable) {
+                rbgpu_log("2bv: engine[%d] = %p has NULL vtable!", i, eng);
+                all_ok = false;
+                fail_idx = i;
+                fail_ptr = eng;
+                break;
+            }
+            auto engPowerUp = reinterpret_cast<bool (*)(void *)>(vtable[0x138 / 8]);
+            rbgpu_log("2bv: engine[%d] = %p (vtable=%p) calling powerUp...", i, eng, vtable);
+            bool ret = engPowerUp ? engPowerUp(eng) : false;
+            rbgpu_log("2bv: engine[%d] powerUp -> %d", i, ret ? 1 : 0);
+            if (!ret) {
+                rbgpu_log("2bv: *** ENGINE %d FAILED ***", i);
+                all_ok = false;
+                fail_idx = i;
+                fail_ptr = eng;
+                // 2bx: Capture max diagnostics for the panic.
+                g_rb_fail_engine_vtable = vtable;
+                g_rb_fail_engine_powerup_fn = reinterpret_cast<void *>(vtable[0x138 / 8]);
+                // 2by: Capture vtable[0x148] - the real target that PM4Engine::powerUp tail-calls.
+                g_rb_fail_engine_real_pu = reinterpret_cast<void *>(vtable[0x148 / 8]);
+                // First 4 qwords of the engine object (state clues).
+                g_rb_fail_engine_d0 = *reinterpret_cast<uint64_t *>(eng);
+                g_rb_fail_engine_d8 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(eng) + 8);
+                g_rb_fail_engine_d10 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(eng) + 0x10);
+                g_rb_fail_engine_d18 = *reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(eng) + 0x18);
+                break;
+            }
+        }
+    } else {
+        rbgpu_log("2bv: hw is NULL!");
+        all_ok = false;
+    }
+    // 2bw: Stash the result for the reserve panic.
+    g_rb_fail_engine_idx = all_ok ? -1 : fail_idx;
+    g_rb_fail_engine_ptr = fail_ptr;
+    if (all_ok) {
+        g_rb_pw_stage |= 0x80;
+        rbgpu_log("2bv: all engines powered up OK");
+    } else {
+        rbgpu_log("2bv: powerUpHWEngines returning false (fail_idx=%d)", fail_idx);
+    }
+    // Update pw_stage bit 0x80 on success (matches original semantics)
+    return all_ok;
+}
+
+static bool hooked_hw_startHWEngines(void *hw) {
+    g_rb_pw_stage |= 0x100;
+    rbgpu_log("2bs: AMDHardware::startHWEngines entered (hw=%p)", hw);
+    bool ret = orig_hw_startHWEngines ? orig_hw_startHWEngines(hw) : false;
+    if (ret) g_rb_pw_stage |= 0x200;
+    rbgpu_log("2bs: AMDHardware::startHWEngines -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+static bool hooked_gfx10_powerUpHWEngines(void *hw) {
+    g_rb_pw_stage |= 0x40;
+    rbgpu_log("2bs: AMDGFX10Hardware::powerUpHWEngines entered (hw=%p)", hw);
+    bool ret = orig_gfx10_powerUpHWEngines ? orig_gfx10_powerUpHWEngines(hw) : false;
+    if (ret) g_rb_pw_stage |= 0x80;
+    rbgpu_log("2bs: AMDGFX10Hardware::powerUpHWEngines -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+static bool hooked_gfx10_startHWEngines(void *hw) {
+    g_rb_pw_stage |= 0x100;
+    rbgpu_log("2bs: AMDGFX10Hardware::startHWEngines entered (hw=%p)", hw);
+    bool ret = orig_gfx10_startHWEngines ? orig_gfx10_startHWEngines(hw) : false;
+    if (ret) g_rb_pw_stage |= 0x200;
+    rbgpu_log("2bs: AMDGFX10Hardware::startHWEngines -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+// 2bt: Also hook AMDHardware::powerUp and AMDGFX10Hardware::powerUp to trace
+// the call chain from Navi21Hardware::powerUp down. New pw bits:
+// 0x400 AMDHardware::powerUp entered, 0x800 it returned true,
+// 0x1000 AMDGFX10Hardware::powerUp entered, 0x2000 it returned true.
+static bool (*orig_hw_powerUp)(void *) = nullptr;
+static bool (*orig_gfx10_powerUp)(void *) = nullptr;
+
+static bool hooked_hw_powerUp(void *hw) {
+    g_rb_pw_stage |= 0x400;
+    rbgpu_log("2bt: AMDHardware::powerUp entered (hw=%p)", hw);
+    bool ret = orig_hw_powerUp ? orig_hw_powerUp(hw) : false;
+    if (ret) g_rb_pw_stage |= 0x800;
+    rbgpu_log("2bt: AMDHardware::powerUp -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+static bool hooked_gfx10_powerUp(void *hw) {
+    g_rb_pw_stage |= 0x1000;
+    rbgpu_log("2bt: AMDGFX10Hardware::powerUp entered (hw=%p)", hw);
+    bool ret = orig_gfx10_powerUp ? orig_gfx10_powerUp(hw) : false;
+    if (ret) g_rb_pw_stage |= 0x2000;
+    rbgpu_log("2bt: AMDGFX10Hardware::powerUp -> %d", ret ? 1 : 0);
+    return ret;
+}
+
+// 2bu: Hook AMDGFX10PM4Engine::powerUp - the only engine with its own powerUp
+// symbol. If this returns false, we've found our culprit.
+static bool (*orig_pm4_powerUp)(void *) = nullptr;
+
+static bool hooked_pm4_powerUp(void *eng) {
+    rbgpu_log("2bu: AMDGFX10PM4Engine::powerUp entered (eng=%p)", eng);
+    // 2ce (merged): log the vtable slot only. Calling it would re-enter this
+    // hook, and a second route on powerUp panics Lilu (short jump multiroute).
+    // 2cf: stash in globals for the panic line.
+    if (eng) {
+        void **vtable = *reinterpret_cast<void ***>(eng);
+        rbgpu_log("2ce: powerUp vtable[0x148] target = %p", vtable ? vtable[0x148 / 8] : nullptr);
+        g_rb_2cf_powerup_called = 1;
+    }
+    bool ret = orig_pm4_powerUp ? orig_pm4_powerUp(eng) : false;
+    rbgpu_log("2bu: AMDGFX10PM4Engine::powerUp -> %d", ret ? 1 : 0);
     return ret;
 }
 
@@ -1579,13 +2124,17 @@ static bool hooked_AMDHWMemory_reserve(void *this_ptr, void *elem, uint64_t offs
             rr[i][1] = g_reserve_recs[i].size;
             rr[i][2] = static_cast<uint64_t>(g_reserve_recs[i].orig);
         }
-        panic("rbgpu reserve fail: peer stage=0x%x r06=0x%x r1B=0x%x pw=0x%x pwret=0x%x | off=0x%llx size=0x%llx base=0x%llx alloc=%p free=0x%llx | seen %d: "
-              "[0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu] [0x%llx+0x%llx o%llu]",
+        // 2cm SURVIVE MODE: Log instead of panic. Let macOS reach desktop.
+        rbgpu_log("2cm SURVIVE: reserve fail: peer stage=0x%x r06=0x%x r1B=0x%x pw=0x%x pwret=0x%x engfail=%d engptr=%p | 2cf: pu=%d ds=%d mqd=%d mqdres=%d | 2ch: kiq=%d kiqres=%d (0 = SUCCESS) | 2cq: setres=%d/%d gfxmqd=%d/%d mapq=%d fail=%d | 2cp: wfav=%d forced=%d ret=%d | off=0x%llx size=0x%llx",
               g_rb_peer_stage, g_rb_peer_ret06, g_rb_peer_ret1B, g_rb_pw_stage, g_rb_pw_ret,
-              offset, size, base, reinterpret_cast<void *>(allocator),
-              allocator ? *reinterpret_cast<uint64_t *>(allocator + 0x50) : 0, g_reserve_rec_count,
-              rr[0][0], rr[0][1], rr[0][2], rr[1][0], rr[1][1], rr[1][2],
-              rr[2][0], rr[2][1], rr[2][2], rr[3][0], rr[3][1], rr[3][2]);
+              g_rb_fail_engine_idx, g_rb_fail_engine_ptr,
+              g_rb_2cf_powerup_called, g_rb_2cf_dostart_called, g_rb_2cf_initmqd_called, g_rb_2cf_initmqd_result,
+              g_rb_2ch_startkiq_called, g_rb_2ch_startkiq_result,
+              g_rb_2cq_setres_calls, g_rb_2cq_setres_ret,
+              g_rb_2cq_gfxmqd_calls, g_rb_2cq_gfxmqd_ret,
+              g_rb_2cq_mapq_calls, g_rb_2cq_mapq_fails,
+              g_rb_2cp_wfav_calls, g_rb_2cp_wfav_bounded, g_rb_2cp_wfav_ret,
+              offset, size);
     }
 
     return ret;
@@ -2558,11 +3107,201 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         {"__ZN37AMDRadeonX6000_AMDGraphicsAccelerator9powerUpHWEv", hooked_accel_powerUpHW, orig_accel_powerUpHW},
         {"__ZN32AMDRadeonX6000_AMDNavi21Hardware7powerUpEv", hooked_navi21_powerUp, orig_navi21_powerUp},
         {"__ZN26AMDRadeonX6000_AMDHWMemory17enableAllocationsEv", hooked_hwmem_enableAllocations, orig_hwmem_enableAllocations},
+        // 2cn: Survive mode - fail start cleanly when powerUpHW fails.
+        {"__ZN37AMDRadeonX6000_AMDGraphicsAccelerator5startEP9IOService", hooked_accel_start_2cn, orig_accel_start_2cn},
     };
     if (patcher.routeMultiple(id, req_pw, arrsize(req_pw), address, size)) {
         rbgpu_log("X6000: hooked powerUpHW, Navi21Hardware::powerUp, enableAllocations (2br)");
     } else {
         rbgpu_log("X6000: failed to hook the powerUpHW chain (2br)");
+    }
+
+    // 2bs: Hook powerUpHWEngines/startHWEngines to find which engine fails.
+    // Try both AMDHardware (base) and AMDGFX10Hardware (GFX10-specific).
+    // Done individually so a missing symbol doesn't break the others.
+    KernelPatcher::RouteRequest req_pue1(
+        "__ZN26AMDRadeonX6000_AMDHardware16powerUpHWEnginesEv",
+        hooked_hw_powerUpHWEngines,
+        orig_hw_powerUpHWEngines
+    );
+    if (patcher.routeMultiple(id, &req_pue1, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDHardware::powerUpHWEngines (2bs)");
+    } else {
+        rbgpu_log("X6000: AMDHardware::powerUpHWEngines not found (2bs)");
+    }
+
+    KernelPatcher::RouteRequest req_she1(
+        "__ZN26AMDRadeonX6000_AMDHardware14startHWEnginesEv",
+        hooked_hw_startHWEngines,
+        orig_hw_startHWEngines
+    );
+    if (patcher.routeMultiple(id, &req_she1, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDHardware::startHWEngines (2bs)");
+    } else {
+        rbgpu_log("X6000: AMDHardware::startHWEngines not found (2bs)");
+    }
+
+    KernelPatcher::RouteRequest req_pue2(
+        "__ZN31AMDRadeonX6000_AMDGFX10Hardware16powerUpHWEnginesEv",
+        hooked_gfx10_powerUpHWEngines,
+        orig_gfx10_powerUpHWEngines
+    );
+    if (patcher.routeMultiple(id, &req_pue2, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10Hardware::powerUpHWEngines (2bs)");
+    } else {
+        rbgpu_log("X6000: AMDGFX10Hardware::powerUpHWEngines not found (2bs)");
+    }
+
+    KernelPatcher::RouteRequest req_she2(
+        "__ZN31AMDRadeonX6000_AMDGFX10Hardware14startHWEnginesEv",
+        hooked_gfx10_startHWEngines,
+        orig_gfx10_startHWEngines
+    );
+    if (patcher.routeMultiple(id, &req_she2, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10Hardware::startHWEngines (2bs)");
+    } else {
+        rbgpu_log("X6000: AMDGFX10Hardware::startHWEngines not found (2bs)");
+    }
+
+    // 2bt: Hook AMDHardware::powerUp and AMDGFX10Hardware::powerUp to trace
+    // the call chain down from Navi21Hardware::powerUp.
+    KernelPatcher::RouteRequest req_pu1(
+        "__ZN26AMDRadeonX6000_AMDHardware7powerUpEv",
+        hooked_hw_powerUp,
+        orig_hw_powerUp
+    );
+    if (patcher.routeMultiple(id, &req_pu1, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDHardware::powerUp (2bt)");
+    } else {
+        rbgpu_log("X6000: AMDHardware::powerUp not found (2bt)");
+    }
+
+    KernelPatcher::RouteRequest req_pu2(
+        "__ZN31AMDRadeonX6000_AMDGFX10Hardware7powerUpEv",
+        hooked_gfx10_powerUp,
+        orig_gfx10_powerUp
+    );
+    if (patcher.routeMultiple(id, &req_pu2, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10Hardware::powerUp (2bt)");
+    } else {
+        rbgpu_log("X6000: AMDGFX10Hardware::powerUp not found (2bt)");
+    }
+
+    // 2bu: Hook AMDGFX10PM4Engine::powerUp - the graphics/compute engine.
+    KernelPatcher::RouteRequest req_pm4(
+        "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine7powerUpEv",
+        hooked_pm4_powerUp,
+        orig_pm4_powerUp
+    );
+    if (patcher.routeMultiple(id, &req_pm4, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10PM4Engine::powerUp (2bu)");
+    } else {
+        rbgpu_log("X6000: AMDGFX10PM4Engine::powerUp not found (2bu)");
+    }
+
+    // 2cb: Replace AMDHardware::allocateMemoryResources with a fully instrumented
+    // step-by-step version + channel drill-down (per Claude option 2).
+    KernelPatcher::RouteRequest req_hw_alloc(
+        "__ZN26AMDRadeonX6000_AMDHardware23allocateMemoryResourcesEv",
+        hooked_hw_allocateMemoryResources_2cb,
+        orig_hw_allocateMemoryResources
+    );
+    if (patcher.routeMultiple(id, &req_hw_alloc, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDHardware::allocateMemoryResources (2cb)");
+    } else {
+        rbgpu_log("X6000: AMDHardware::allocateMemoryResources not found (2bz)");
+    }
+    // 2cc: Stub the VCN encode channel allocation (VCN fw missing).
+    KernelPatcher::RouteRequest req_vcn_alloc(
+        "__ZN32AMDRadeonX6000_AMDVCN2EncChannel23allocateMemoryResourcesEv",
+        hooked_vcn2enc_alloc_2cc,
+        orig_vcn2enc_alloc_2cc
+    );
+    if (patcher.routeMultiple(id, &req_vcn_alloc, 1, address, size)) {
+        rbgpu_log("X6000: stubbed AMDVCN2EncChannel::allocateMemoryResources (2cc)");
+    } else {
+        rbgpu_log("X6000: FAILED to stub AMDVCN2EncChannel::allocateMemoryResources (2cc)");
+    }
+    // 2cd: Instrument initComputeMQD to find why engine 0's powerUp fails.
+    KernelPatcher::RouteRequest req_mqd(
+        "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine14initComputeMQDE18_eAMD_HW_RING_TYPE",
+        hooked_pm4_initComputeMQD_2cd,
+        orig_pm4_initComputeMQD_2cd
+    );
+    if (patcher.routeMultiple(id, &req_mqd, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10PM4Engine::initComputeMQD (2cd)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook initComputeMQD (2cd)");
+    }
+    // 2ce: powerUp is already routed by 2bu above (its logging is merged there);
+    // a second routeMultiple on the same function panics Lilu.
+    KernelPatcher::RouteRequest req_ds(
+        "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine7doStartEb",
+        hooked_pm4_doStart_2ce,
+        orig_pm4_doStart_2ce
+    );
+    if (patcher.routeMultiple(id, &req_ds, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10PM4Engine::doStart (2ce)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook PM4 doStart (2ce)");
+    }
+    // 2ch: Hook startKIQ (doStart calls it after initComputeMQD).
+    KernelPatcher::RouteRequest req_kiq(
+        "__ZN35AMDRadeonX6000_AMDGFX10KIQHWChannel8startKIQEyyPK18AMD_PM4_QUEUE_SPECPj",
+        hooked_kiq_startKIQ_2co,
+        orig_kiq_startKIQ_2ch
+    );
+    if (patcher.routeMultiple(id, &req_kiq, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10KIQHWChannel::startKIQ (2co observe-only)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook startKIQ (2ch)");
+    }
+
+    // 2cp: bound waitForActiveValue. doStart calls it as (ring 0, false, 1, 0),
+    // and with that 4th argument 0 its own timeout counter and its 100 us
+    // delay are both dead code (X6000 0xbea15f4-0xbea1615): it re-reads
+    // CP_GFX_HQD_ACTIVE as fast as it can and only ever leaves the loop when
+    // the register reads 1 or 0xffffffff. A GFX ring that stays inactive while
+    // the register is readable as 0 is an unbounded spin with no panic and no
+    // log. Forcing the 4th argument to 1 restores Apple's own 1000 x 100 us
+    // bound, so a dead ring becomes a logged false instead of a hung CPU.
+    // This is a bounded wait, not a bypass. docs/SPEC-PM4-DOSTART.md section 4.
+    KernelPatcher::RouteRequest req_wfav(
+        "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine18waitForActiveValueE18_eAMD_HW_RING_TYPEbb",
+        hooked_pm4_waitForActiveValue_2cp,
+        orig_pm4_waitForActiveValue_2cp
+    );
+    if (patcher.routeMultiple(id, &req_wfav, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10PM4Engine::waitForActiveValue (2cp bounded)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook waitForActiveValue (2cp) - HANG RISK on the "
+                  "doStart late path");
+    }
+
+    // 2cq: log the remaining doStart gates after startKIQ. All read-only.
+    KernelPatcher::RouteRequest reqs_late[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN35AMDRadeonX6000_AMDGFX10KIQHWChannel24submitSetResourcesPacketEPK18AMD_PM4_QUEUE_SPEC",
+            hooked_kiq_submitSetResources_2cq,
+            orig_kiq_submitSetResources_2cq
+        ),
+        KernelPatcher::RouteRequest(
+            "__ZN32AMDRadeonX6000_AMDGFX10PM4Engine15initGraphicsMQDEv",
+            hooked_pm4_initGraphicsMQD_2cq,
+            orig_pm4_initGraphicsMQD_2cq
+        ),
+        KernelPatcher::RouteRequest(
+            "__ZN35AMDRadeonX6000_AMDGFX10KIQHWChannel21submitMapQueuesPacketE18_eAMD_HW_RING_TYPEjyPK18AMD_PM4_QUEUE_SPECy",
+            hooked_kiq_submitMapQueues_2cq,
+            orig_kiq_submitMapQueues_2cq
+        ),
+    };
+    for (size_t i = 0; i < arrsize(reqs_late); i++) {
+        if (patcher.routeMultiple(id, &reqs_late[i], 1, address, size)) {
+            rbgpu_log("X6000: hooked doStart late gate %zu (2cq)", i);
+        } else {
+            rbgpu_log("X6000: FAILED to hook doStart late gate %zu (2cq)", i);
+        }
     }
 }
 

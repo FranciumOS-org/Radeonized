@@ -317,6 +317,30 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     pciDevice->setProperty("LoadHWServices", kOSBooleanTrue);
     pciDevice->setProperty("LoadAccelerator", kOSBooleanTrue);
 
+    // -rbgpunodisppanic: survive a failed display mode change instead of
+    // panicking. IOAccelDisplayMachine::display_mode_did_change panics when
+    // AMDAccelDisplayMachine::displayModeDidChange returns false, UNLESS bit
+    // 0x20 of the accelerator's +0xc91 is set (IOAcceleratorFamily2 485.2,
+    // 0x14e215c0). The one site that sets it is IOGraphicsAccelerator2::start
+    // (0x14e4e165), when
+    //   getProperty("IOPCITunnelled", gIOServicePlane,
+    //               kIORegistryIterateRecursively|kIORegistryIterateParents)
+    // finds the property: Apple's eGPU/Thunderbolt flag, since a hot-pluggable
+    // GPU must not panic the kernel on a failed mode change. The lookup walks
+    // the registry parents, so setting it here on the IOPCIDevice is enough;
+    // no code patching. See docs/SPEC-PM4-DOSTART.md section 5.
+    //
+    // This is for surviving bring-up, not a permanent answer: IOPCITunnelled
+    // also makes that start() read "Removable", and other code (IOPCIFamily,
+    // AMDSupport, WindowServer) treats a tunnelled GPU differently for power
+    // management, surface eviction and driving the built-in panel. Hence its
+    // own boot-arg, off by default.
+    if (checkKernelArgument("-rbgpunodisppanic")) {
+        pciDevice->setProperty("IOPCITunnelled", kOSBooleanTrue);
+        rbgpu_log("Peer: -rbgpunodisppanic -> IOPCITunnelled set (display_mode_did_change "
+                  "returns false instead of panicking)");
+    }
+
     registerService();
     pciDevice->registerService();
 
