@@ -348,8 +348,21 @@ static bool rbgpuConsumeArming() {
         return false;
     }
 
-    // Consume it before doing anything that can break this boot.
+    // Consume it before doing anything that can break this boot, and FLUSH
+    // the removal to flash immediately.
+    //
+    // 2dg: removeProperty alone only changes IODTNVRAM's in-memory copy. The
+    // flush used to happen later, in saveDiagToNvram's thread_call. The 2df
+    // boot panicked inside the accelerator's start() before that ran, so the
+    // removal never reached flash, the next boot was armed again, and it
+    // panicked again - the boot loop of 2026-10-12 that cost a Windows trip.
+    // An armed boot can panic at any point after this, so the disarm has to
+    // be durable before the accelerator is ever let near the hardware.
     options->removeProperty("rbgpu-arm");
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
     bool cleared = options->getProperty("rbgpu-arm") == nullptr;
     rbgpu_log("Peer: rbgpu-arm set; accelerator ARMED for this boot only; "
               "one-shot clear %s",
@@ -488,6 +501,13 @@ static const char *const kRbgpuNvramKeys[] = {
     "pw_stage", "pw_ret",
     "setres_ret", "gfxmqd_ret", "mapq_calls", "mapq_fails",
     "wfav_calls", "wfav_bounded_forced", "wfav_ret",
+    // 2dg: the SMU bringup's own numbers. 2df's whole purpose was to learn
+    // these and they were not in this list, so the panic boot taught us
+    // nothing about whether the SMU step worked.
+    "smu_dma_mc_ok", "smu_bringup_armed", "bringup_err",
+    "smu_nmsgs", "smu_writes", "smu_refused", "last_smu_err",
+    "gfx_min", "gfx_max",
+    "stamp_calls", "stamp_ret",
 };
 
 void RembrandtGPUPeer::saveDiagToNvram() {
