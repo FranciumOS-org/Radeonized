@@ -681,3 +681,13 @@ EFI hazard (2026-10-12): Spotlight indexed the mounted EFI partition and
 corrupted it; the user restored from logs/efi-backups via Windows. tools/efi.sh
 now creates `.metadata_never_index` at the EFI root and runs `mdutil -i off`
 / `mdutil -X` on it whenever it mounts, best-effort. Keep the backups.
+
+### 2cv confirmed on hardware (2026-10-12)
+
+Baseline boot with UUID 03147907, boot-args `-rbgpusync570 -rbgpuspoofttl
+-rbgpupsphw -nvoff -wegnoegpu` and **no** `-rbgpunodisppanic`, `-rbgpuoff` or
+`-s`: desktop came up normally with the kext live. On IGPU@0:
+RembrandtGPUPeer, AMDSupport, IONDRVFramebuffer, HWServicesNavi; no
+accelerator (`armed=0`); no IOPCITunnelled property. So the milestone 1
+configuration is restored with everything except the accelerator running, and
+IOPCITunnelled is confirmed as the sole cause of the lost UI.
