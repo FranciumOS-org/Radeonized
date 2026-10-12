@@ -53,6 +53,19 @@ for dev in $(diskutil list | awk '$2 == "EFI" { print $NF }'); do
     fi
 done
 [ -n "$efi" ] || { echo "no EFI partition with EFI/OC/config.plist found" >&2; exit 1; }
+
+# Keep Spotlight off the EFI partition. Indexing a mounted FAT32 ESP has
+# corrupted this one once (2026-10-12), which cost a restore from
+# logs/efi-backups. `.metadata_never_index` at the volume root tells Spotlight
+# to skip it, and mdutil turns off any index already running. Both are
+# best-effort: a failure here must not stop an install.
+if [ ! -e "$efi/.metadata_never_index" ]; then
+    touch "$efi/.metadata_never_index" 2>/dev/null \
+        && echo "  (created $efi/.metadata_never_index so Spotlight skips the EFI)"
+fi
+mdutil -i off "$efi" >/dev/null 2>&1 || true
+mdutil -X "$efi" >/dev/null 2>&1 || true
+
 oc="$efi/EFI/OC"
 config="$oc/config.plist"
 echo "OpenCore EFI: $efidev at $efi"

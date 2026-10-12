@@ -651,3 +651,33 @@ desktop, then zero display pipes is not sufficient and the assumption behind
 Lesson recorded: never interpret a boot without checking BOTH the installed
 UUID against build/out AND whether `rbgpu-arm` was still set from an earlier
 attempt. Two boots were wasted on each of those.
+
+## 2cv (2026-10-12): the UI breakage was IOPCITunnelled, not the accelerator
+
+The NVRAM summary from the no-UI boot read `armed=0` and nothing else: that
+boot had **no accelerator at all** (LoadAccelerator withheld), and still
+reached no desktop. So the accelerator was never what broke the UI, and
+2cr/2ct were aimed at the wrong thing.
+
+Milestone 1 ran peer + HWServices + HWLibs with no accelerator and the screen
+was unchanged. The difference now is `-rbgpunodisppanic`, which makes the peer
+publish **`IOPCITunnelled`** on IGPU@0 — Apple's "this GPU is behind
+Thunderbolt" flag. Declaring the GPU that owns the built-in panel to be a
+hot-pluggable external device is why WindowServer never drives the internal
+display. The side effect warned about when 2co added it ("driving the built-in
+panel") was the whole effect.
+
+- `-rbgpunodisppanic` must stay OUT of boot-args. It is not needed once 2ct
+  holds: with zero display pipes `display_mode_did_change` returns true on its
+  own, so there is no false return to turn into a panic.
+- The first 2cu lesson stands and gained a third item: before interpreting a
+  boot, check the installed UUID against build/out, whether `rbgpu-arm` was
+  left set, AND which plugin boot-args are actually in config.plist.
+- `nvram rbgpu-diag` worked exactly as intended on its first try: one line
+  from a dead boot replaced four blind reboots. Keep it as the primary way to
+  read a boot that does not reach a desktop.
+
+EFI hazard (2026-10-12): Spotlight indexed the mounted EFI partition and
+corrupted it; the user restored from logs/efi-backups via Windows. tools/efi.sh
+now creates `.metadata_never_index` at the EFI root and runs `mdutil -i off`
+/ `mdutil -X` on it whenever it mounts, best-effort. Keep the backups.
