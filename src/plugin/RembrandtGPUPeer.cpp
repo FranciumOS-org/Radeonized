@@ -1,6 +1,7 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <Headers/kern_util.hpp>
 #include <mach/mach_time.h>
 #include <libkern/c++/OSArray.h>
@@ -283,6 +284,78 @@ void RembrandtGPUPeer::free() {
     super::free();
 }
 
+// One-shot arming for the accelerator (2cs, 2026-10-12).
+//
+// Why: an armed boot runs the accelerator, and when powerUpHW fails the
+// display machine stays registered with IOAcceleratorFamily2 and WindowServer
+// never puts up a desktop (2cr proved that a refused start() does not undo
+// it). Recovering by editing config.plist from another OS to add -rbgpuoff is
+// not a workable loop. So the accelerator is gated on an NVRAM variable that
+// this function consumes: a boot that breaks the desktop leaves the variable
+// cleared, and the next restart comes up normally with no intervention.
+//
+//   arm:     sudo nvram rbgpu-arm=1    (then reboot)
+//   disarm:  sudo nvram -d rbgpu-arm   (also works in single-user mode)
+//
+// Unarmed, the peer still publishes RBGPULoad and LoadHWServices, so
+// HWServices and HWLibs load and their diagnostics are collected; only
+// LoadAccelerator is withheld, which is what milestone 1 booted with (screen
+// unchanged). -rbgpuarm forces armed without NVRAM, for a boot where the
+// desktop is not wanted anyway.
+//
+// Caveat: if this setup uses OpenCore's emulated NVRAM, a variable cleared
+// here may not survive a forced restart, in which case the next boot is armed
+// again. Recover from single-user mode (Cmd+S) with `nvram -d rbgpu-arm` -
+// no other OS needed. The log line below reports whether the clear took.
+static bool rbgpuConsumeArming() {
+    if (checkKernelArgument("-rbgpuarm")) {
+        rbgpu_log("Peer: -rbgpuarm set; accelerator ARMED by boot-arg (NVRAM untouched)");
+        return true;
+    }
+
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (!options) {
+        rbgpu_log("Peer: /options not found; accelerator NOT armed");
+        return false;
+    }
+
+    OSObject *val = options->getProperty("rbgpu-arm");
+    bool armed = false;
+    if (val) {
+        // Any value counts except a literal "0": `nvram rbgpu-arm=1` stores
+        // an OSData, so check the first byte rather than expecting a string.
+        armed = true;
+        if (auto data = OSDynamicCast(OSData, val)) {
+            if (data->getLength() >= 1 &&
+                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
+                armed = false;
+            }
+        } else if (auto str = OSDynamicCast(OSString, val)) {
+            if (str->isEqualTo("0")) {
+                armed = false;
+            }
+        }
+    }
+
+    if (!armed) {
+        rbgpu_log("Peer: rbgpu-arm not set; accelerator NOT armed (desktop stays on "
+                  "IONDRVFramebuffer). Arm it with: sudo nvram rbgpu-arm=1");
+        options->release();
+        return false;
+    }
+
+    // Consume it before doing anything that can break this boot.
+    options->removeProperty("rbgpu-arm");
+    bool cleared = options->getProperty("rbgpu-arm") == nullptr;
+    rbgpu_log("Peer: rbgpu-arm set; accelerator ARMED for this boot only; "
+              "one-shot clear %s",
+              cleared ? "OK (next boot comes up normally)"
+                      : "FAILED - still set, the next boot will be armed too; "
+                        "disarm with `nvram -d rbgpu-arm` (single-user: Cmd+S)");
+    options->release();
+    return true;
+}
+
 bool RembrandtGPUPeer::start(IOService *provider) {
     if (checkKernelArgument("-rbgpuoff")) {
         rbgpu_log("Peer: disabled by -rbgpuoff; aborting start");
@@ -315,7 +388,15 @@ bool RembrandtGPUPeer::start(IOService *provider) {
 
     pciDevice->setProperty("RBGPULoad", kOSBooleanTrue);
     pciDevice->setProperty("LoadHWServices", kOSBooleanTrue);
-    pciDevice->setProperty("LoadAccelerator", kOSBooleanTrue);
+
+    // 2cs: LoadAccelerator only on an armed boot. Without it Apple's
+    // accelerator personality does not match at all, so nothing can claim the
+    // display and the machine always reaches a desktop.
+    const bool armed = rbgpuConsumeArming();
+    if (armed) {
+        pciDevice->setProperty("LoadAccelerator", kOSBooleanTrue);
+    }
+    rbgpu_diag_set_num("armed", armed ? 1 : 0);
 
     // -rbgpunodisppanic: survive a failed display mode change instead of
     // panicking. IOAccelDisplayMachine::display_mode_did_change panics when
