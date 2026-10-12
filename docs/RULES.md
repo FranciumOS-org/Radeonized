@@ -1033,3 +1033,47 @@ HWLibs).
 Diag keys `a1_handle`, `a2_handle`, `a1_gpu`, `a2_gpu`, `a_dhandle`, `a_dgpu`,
 `a2_ret`. If `a_dhandle` is near 0x1000 and `a_dgpu` is not, out1 is the GPU
 MC address and the 2ak/2as gate has been verifying the wrong field all along.
+
+## 2de (2026-10-12): the three allocation outputs were rotated — and `dma.cpu` pointed at a handle
+
+The 2dd confirm boot (logs/20261012-171153-plugin, UUID DCB971D1) answered
+more than it was asked. Two 4 KB allocations:
+
+| field | first | second | delta | what it is |
+|---|---|---|---|---|
+| out1 "handle" | 0x0FFFF000 | 0x0FFFE000 | **-0x1000** | GPU (MC) address, allocated downward from the 0x10000000 aperture |
+| out2 "gpu" | 0xffffffe0e18c8000 | 0xffffffe0e18c9000 | **+0x1000** | CPU mapping of the 4 KB buffer |
+| out3 "cpu" | 0xffffff950b89c520 | 0xffffff950b89c550 | **+0x30** | a 48-byte descriptor — the handle |
+
+Two separate 4 KB allocations cannot both have "CPU pointers" 48 bytes apart,
+so out3 is not a buffer. All three names were rotated by one position.
+
+**The part that matters for safety:** `dma.cpu = g_dma_cpu` was out3, and
+`rb_smu13.c:311` does `copy(s->dma.cpu, data, want)` — it memcpy's the whole
+driver table through that pointer. Had `rb_smu13_bringup` ever run, it would
+have written hundreds of bytes over a 48-byte kernel object. The 2ak/2as gate
+was added to stop the SMU DMA-ing to a bogus address; what it actually
+prevented was the driver corrupting the kernel heap itself. Confirming the
+field before enabling, rather than trusting the inference, is what caught it.
+
+2de therefore:
+
+- renames the globals to `g_dma_mc` / `g_dma_cpu` / `g_dma_handle` by what the
+  deltas prove, and fixes the typedef's parameter names to match, so the
+  ordering cannot quietly rot again;
+- sets `dma.mc = g_dma_mc` (out1) and `dma.cpu = g_dma_cpu` (out2);
+- replaces the carve-out test with a GART test. The old one could never pass:
+  an APU driver table lives in the GART aperture, not the 0xF4_xx carve-out.
+  The new check is nonzero, page aligned, below the 0x10000000 aperture the
+  TTL input reports at +0x68;
+- gates the bringup itself behind **`-rbgpusmubringup`**, off by default.
+  A correct address is not permission to talk to the SMU:
+  `rb_smu13_bringup` sends SetDriverDramAddrHigh/Low and TransferTable, after
+  which the SMU DMA-writes its table to that address. That is a message group
+  beyond queries and the user's decision per docs/RULES.md, so fixing the check
+  must not silently start sending them.
+
+Next boot (no `-rbgpusmubringup`) should log `2as: MC address verified
+(0x0FFFF000) but -rbgpusmubringup not set`, with `smu_dma_mc_ok 1` and
+`smu_bringup_armed 0` — proving the address path is right with nothing sent.
+Turning the SMU on is then a separate, deliberate step.
