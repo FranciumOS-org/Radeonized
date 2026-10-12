@@ -852,3 +852,42 @@ firmware load) plus CP_STAT / CP_ME_CNTL / RLC_GPM_STAT reads, and the
 2am/2an/2ao bypasses — which force "firmware ready" latches to report
 success — should be made per-caller and logged rather than blanket-true,
 since they have been masking exactly this since 2ag.
+
+## 2cz-2da (2026-10-12): read a displayless boot, and ask the PSP directly
+
+The armed boot never reaches a desktop. The console text continues past the
+GPU failure into Wi-Fi scanning, and then WindowServer starts and blanks the
+panel completely — no desktop, and no text either, so even a photograph stops
+working and `plugin_check.sh` cannot run. (2cv's IOPCITunnelled fault is
+fixed and separate; this is WindowServer driving a framebuffer it cannot
+actually mode-set once an accelerator is present.)
+
+Two ways to read such a boot:
+
+- **SSH (preferred).** The system stays alive — rtw89 reported "scan
+  finished: 92 network(s) heard" — so with Remote Login enabled the machine
+  is reachable at 10.0.0.69 and `tools/plugin_check.sh` can be run from a
+  phone. It writes logs/<time>-plugin/ to disk, so nothing has to be read on
+  the phone; just reboot afterwards and read the files.
+- **NVRAM (fallback, 2cz).** The peer now also writes the last 8 log lines as
+  `rbgpu-log` alongside `rbgpu-diag`. The 2cw rotation never created
+  `rbgpu-diag-prev` at all, so it now copies the text into a fresh OSString
+  and records a `rot` key (1 created, 2 setProperty did not take, 0 nothing
+  to rotate) rather than failing silently again.
+
+2da hooks `_ipi_psp_load_fw` (HWLibs 0x1264289b), the single place where each
+firmware image is handed to the PSP:
+
+```
+edi = *(uint32 *)p                 TTL firmware id
+_TtlFwIdToCgsFwId(ttl_id)   -> cgs id
+_ipiPspCgsFwToPspFw(cgs_id) -> psp id; 0x37 = no mapping -> assert, return 4
+otherwise build the command and submit it to the PSP
+```
+
+Logging the TTL id and the return per call says exactly which images the PSP
+accepted and which it refused — the question SPEC-PM4-DOSTART section 7 asks
+and nothing has yet answered. Observe only. Diag keys `fw_calls`, `fw_fails`,
+`fw_failmask` (bit per TTL firmware id). The symbol is a local text symbol
+defined in HWLibs, not an import, so routing it by HWLibs' id is safe under
+the milestone-2c Lilu rule.
