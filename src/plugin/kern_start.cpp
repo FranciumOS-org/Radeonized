@@ -1616,10 +1616,36 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     rbgpu_log("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
               "execute; 5 s timeout per poll", ch, stamp);
 
+    // 2cy (2026-10-12): do NOT call the original by default.
+    //
+    // waitForHwStamp's 0x4C4B40 us (5 s) timeout is per poll, and the loop at
+    // 0xbe855c0-0xbe855f0 re-arms it for as long as the channel's
+    // vtable[0x2a0] says to keep waiting. With a command processor that never
+    // consumes the packet that is an unbounded wait: the 2026-10-12 armed
+    // boot was still polling request 0x14 at #24640 with the login window up
+    // behind it, and only a power cycle ended it.
+    //
+    // The stamp cannot arrive while the CP microcode is not running, so
+    // waiting is pure cost. Returning false immediately takes Apple's own
+    // failure path - submitKIQFrame logs its error and returns false,
+    // doStart exits through vtable[0x150] and returns false, powerUp and
+    // powerUpHW fail - and with 2ct refusing the display pipe the boot then
+    // COMPLETES to a desktop, where plugin_check.sh can read the whole log.
+    // That turns every armed boot from a power cycle into a usable run.
+    //
+    // -rbgpustampwait restores the real wait, for the boot where the CP
+    // finally does run and the stamp is expected to arrive.
     uint64_t t0 = mach_absolute_time();
-    bool ret = orig_hwchannel_waitForHwStamp_2cx
-                   ? orig_hwchannel_waitForHwStamp_2cx(ch, stamp)
-                   : false;
+    bool ret;
+    if (checkKernelArgument("-rbgpustampwait")) {
+        ret = orig_hwchannel_waitForHwStamp_2cx
+                  ? orig_hwchannel_waitForHwStamp_2cx(ch, stamp)
+                  : false;
+    } else {
+        rbgpu_log("2cy: skipping the wait (-rbgpustampwait not set) -> false, so the "
+                  "boot fails fast instead of polling forever");
+        ret = false;
+    }
     uint64_t dt = mach_absolute_time() - t0;
 
     g_rb_2cx_stamp_ret = ret ? 1 : 0;

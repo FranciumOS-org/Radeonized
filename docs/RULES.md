@@ -789,3 +789,29 @@ accept and start the CP/MEC firmware? That is PSP-side evidence (ring
 response status per load), plus reading CP_STAT / CP_ME_CNTL / RLC_GPM_STAT
 at this point. Note the boot is not wedged forever - waitForHwStamp is
 bounded, so it should eventually fail and, with 2ct, let the desktop come up.
+
+## 2cy (2026-10-12): fail fast instead of waiting forever
+
+A third photo, later in the same situation: request 0x14 at **#24640** and
+still climbing, with HID drivers, IOConsoleUsers and the login window coming
+up behind it. The system is alive; only the accelerator thread is stuck.
+
+That settles the shape of `waitForHwStamp`: the 5 s timeout is **per poll**,
+and the loop at 0xbe855c0-0xbe855f0 re-arms it for as long as the channel's
+`vtable[0x2a0]` says to keep waiting. With a command processor that never
+consumes the packet, the wait is unbounded in practice — the earlier note
+that it "should eventually fail and let the desktop come up" was wrong, and
+only a power cycle ends such a boot.
+
+2cy therefore returns false from `waitForHwStamp` immediately instead of
+calling the original. The stamp cannot arrive while the CP microcode is not
+running, so waiting costs a power cycle and buys nothing. Returning false
+takes Apple's own failure path (submitKIQFrame logs and returns false,
+doStart exits via vtable[0x150], powerUp and powerUpHW fail), and with 2ct
+refusing the display pipe the boot then COMPLETES to a desktop where
+`tools/plugin_check.sh` reads the whole log. Armed boots stop costing a power
+cycle.
+
+`-rbgpustampwait` restores the real wait, for the boot where the CP finally
+runs and the stamp is expected to arrive. That flag is the test for "is the
+command processor alive now".
