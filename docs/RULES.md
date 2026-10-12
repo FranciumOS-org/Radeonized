@@ -691,3 +691,47 @@ RembrandtGPUPeer, AMDSupport, IONDRVFramebuffer, HWServicesNavi; no
 accelerator (`armed=0`); no IOPCITunnelled property. So the milestone 1
 configuration is restored with everything except the accelerator running, and
 IOPCITunnelled is confirmed as the sole cause of the lost UI.
+
+## 2cw (2026-10-12): the armed boot HUNG in engine[4], and TTL init returned 0
+
+A photo of the stuck console (the boot recovered on its own restart, as 2cs
+intends) shows the real state, which NVRAM had already lost:
+
+```
+AmdTtlServices::initialize() returned 0x00000000
+AmdTtlServices::initialize(this, input) returned 0x00000000
+2bm/2cb: AMDHardware::allocateMemoryResources entered
+2cb: step1 result=0xffffff90692db680 (OK)
+2cb: engine[0] allocateMemoryResources -> 1 (OK)
+2cb: engine[1] -> 1 (OK)   engine[2] -> 1 (OK)   engine[3] -> 1 (OK)
+2cb: engine[4] = 0xffffff90692f5300 calling allocateMemoryResources...
+   <console stops here>
+```
+
+- **TTL init returned 0** — the first explicit success, both the inner and the
+  outer `AmdTtlServices::initialize`.
+- The boot did not fail, it **hung** inside engine[4]'s
+  `allocateMemoryResources`. Engines 0-3 now pass; on 2026-10-11 the failure
+  was engine[9] and engines 0-3 never got this far.
+- `-rbgpunodisppanic` was NOT set this boot, so the stuck console is the hang,
+  not the IOPCITunnelled problem of 2cv. Those are two separate faults and
+  both were real.
+- One-shot arming worked exactly as designed: a plain restart came up on the
+  desktop with no rescue.
+
+Three fixes, none of them a guess:
+
+- 2cw rotates the NVRAM summary instead of clobbering it. The recovery boot
+  overwrote rbgpu-diag with its own `armed=0` before the armed boot's numbers
+  were read, which is why the hang left no trace. Now the first write of each
+  boot moves the stored value to `rbgpu-diag-prev`, so the last two boots are
+  both readable (`nvram rbgpu-diag`, `nvram rbgpu-diag-prev`).
+- Request 0x14 (Gpu Status) is polled continuously and flooded both the
+  console and the 512-line ring, pushing out everything else. Now only the
+  first three and every 64th are logged.
+- The 2cb loop names each engine from its OSObject metaclass, so the next boot
+  says what engine[4] actually is rather than just its index.
+
+Next boot answers: which class engine[4] is, and therefore whether it is an IP
+whose resources cannot be allocated on this chip (VCN encode was already
+stubbed in 2cc for exactly that reason).
