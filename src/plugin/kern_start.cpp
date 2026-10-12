@@ -518,10 +518,43 @@ static int slot_internal_hw_init(void *ctx) {
         return 0;
     }
     rbgpu_diag_set_num("smu_bringup_armed", 1);
-    rbgpu_log("2as: -rbgpusmubringup set -> running rb_smu13_bringup with mc=0x%llx cpu=%p",
-              smu_mc, smu_cpu);
+
+    // 2df (2026-10-12): the TABLES group, allowed by the user's decision.
+    //
+    // rb_smu13_init() permits RB_SMU13_ALLOW_QUERY only, so until now
+    // rb_smu13_bringup could not have sent a table message even if it ran:
+    // set_driver_table_location would have been refused by the policy. This
+    // is the one place that widens it, and only under -rbgpusmubringup.
+    //
+    // What the chip then does, in order:
+    //   check_fw_version, get_enabled_mask        QUERY, reads only
+    //   SetDriverDramAddrHigh(0)                  record table address, high
+    //   SetDriverDramAddrLow(0x0FFFF000)          record table address, low
+    //   TransferTable(DPMCLOCKS)                  the SMU DMA-WRITES about
+    //       300 bytes of clock table into that address; the plugin then reads
+    //       it back through dma.cpu.
+    //
+    // The address is the one 2dd/2de verified: a GART address pointing at a
+    // 4 KB page from Apple's own CGS allocator, so the SMU writes into our
+    // own buffer. The remaining uncertainty is whether the GPU address space
+    // is mapped as assumed; if not, the write lands elsewhere in GPU-visible
+    // memory, bounded by the GART aperture rather than host kernel memory.
+    //
+    // This step verifies itself: the clock values logged below are only
+    // plausible 680M numbers if the SMU really wrote where we expect. Zeros
+    // or nonsense mean the mapping is wrong, learned without damage.
+    rb_smu13_allow(&g_smu, RB_SMU13_ALLOW_TABLES);
+    rbgpu_log("2df: RB_SMU13_ALLOW_TABLES granted (user decision 2026-10-12); "
+              "running rb_smu13_bringup with mc=0x%llx cpu=%p", smu_mc, smu_cpu);
 
     int err = rb_smu13_bringup(&g_smu);
+    rbgpu_diag_set_num("smu_nmsgs", g_smu.nmsgs);
+    rbgpu_diag_set_num("smu_writes", g_smu.writes);
+    rbgpu_diag_set_num("smu_refused", g_smu.refused_writes);
+    rbgpu_log("2df: SMU accounting after bringup: msgs=%u writes=%u refused=%u "
+              "last_msg=0x%02x last_resp=0x%x",
+              g_smu.nmsgs, g_smu.writes, g_smu.refused_writes,
+              g_smu.last_msg, g_smu.last_resp);
     rbgpu_diag_set_num("bringup_err", static_cast<uint64_t>(err));
     if (err != RB_SMU13_OK) {
         rbgpu_log("rb_smu13_bringup failed: %s (%d)", rb_smu13_strerror(err), err);
