@@ -1276,3 +1276,126 @@ Known gap: the diag summary reaches NVRAM through an async thread_call, so if
 the panic follows an SMU message within microseconds the SMU keys may still be
 missing. The `.panic` report is the primary artifact; the NVRAM summary is the
 bonus.
+
+## 2dh (2026-10-12): the SMU hung on TransferTable, and the teardown panicked
+
+The 2dg boot (UUID 1687501B, `debug=0x100` removed, `-rbgpusmubringup` on)
+panicked again and **still wrote no `.panic` file**: the panic starts, prints
+its backtrace, and never reaches "Panic in memory stackshot succeeded", so
+nothing is committed to NVRAM for the next boot to write out. Dropping
+`debug=0x100` does not help with a half-panic. The user screen-recorded it
+instead (IMG_5480.MOV, 30 fps); frames pulled with AVFoundation are the
+record. Key frames: logs/20261012-video-panic/ (gitignored).
+
+### What the SMU did — the first answer from the hardware
+
+```
+RembrandtGPU: 2df: SMU accounting after bringup: msgs=7 writes=21 refused=0
+              last_msg=0x0f last_resp=0x0
+RembrandtGPU: rb_smu13_bringup failed: no answer from the SMU (-4)
+RembrandtGPU: slot_internal_hw_exit entered
+RembrandtGPU: rb_smu13_prepare_unload failed: SMU context dead after a timeout (-8)
+RembrandtGPU: slot_internal_sw_exit entered
+```
+
+7 messages, 21 register writes (3 per message), **0 refused**. `last_msg`
+0x0F is `TransferTableSmu2Dram`. So the SMU answered GetSmuVersion,
+GetDriverIfVersion, GetEnabledSmuFeatures, **SetDriverDramAddrHigh and
+SetDriverDramAddrLow** — and then never answered the table transfer
+(`last_resp=0`, response register still 0, not 1/OK and not an error).
+
+The address messages only record a value; the transfer is the first time the
+SMU tries to *use* it. It accepted the address and hung on the DMA.
+
+**Why, and this reverses 2de's reasoning.** Linux allocates every SMU table
+for this exact chip in VRAM, not GTT — docs/linux-ref/yellow_carp_ppt.c:159-164:
+
+```c
+SMU_TABLE_INIT(tables, SMU_TABLE_WATERMARKS, sizeof(Watermarks_t),
+               PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+SMU_TABLE_INIT(tables, SMU_TABLE_DPMCLOCKS,  sizeof(DpmClocks_t),
+               PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+SMU_TABLE_INIT(tables, SMU_TABLE_SMU_METRICS, sizeof(SmuMetrics_t),
+               PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+```
+
+So the driver table belongs in the **carve-out** (MC 0xF4_0000_0000-
+0xF4_FFFF_FFFF), and 2de's claim that "an APU driver table lives in the GART
+aperture, not the 0xF4_xx carve-out" is wrong. 2ak/2as were right about the
+domain and wrong only about which *field* to test; 2de fixed the field and
+then replaced a correct domain test with an incorrect one.
+
+The address we handed the SMU was `0x0FFFF000`, which sits just under
+`0x10000000` — the value the TTL input block reports at +0x68, and the size
+the 2dd deltas showed the allocator counting down from. **Hypothesis, not yet
+proven:** Apple's `smu_cgs_alloc_memory` returns an *offset into the local
+frame buffer*, not an absolute MC address, so the true MC address is
+`FB_LOCATION_BASE + offset` = `0xF4_0FFF_F000`. The SMU was pointed at
+`0x0FFFF000`, which it cannot reach, so the transfer never completed. Worth
+noting the type argument already asks for FB: the plugin passes smu memory
+type 1, and `_convert_smu_memory_type_to_cgs` (0x126660c0) maps 1 -> cgs 0 =
+`CGS_GPU_MEM_TYPE__VISIBLE_FB`.
+
+### Why it panicked — our slot table meets Apple's teardown
+
+The panic is NOT in the bringup. It is in the failure path, which had never
+run before. Faulting frame, from the video:
+
+```
+AMDRadeonX6800HWLibs : __ZN14AmdTtlServices22cosReleaseMemoryHandleEPvS0_ + 0x14
+... -> _ttl_initialize -> AmdTtlServices::initialize(_TtlLibraryInitializationInput*)
+... -> AMDGraphicsAccelerator::configureDevice -> ::start + 0x149
+```
+
+`cosReleaseMemoryHandle` (0x1265d9c0), with +0x14 the faulting instruction:
+
+```
+1265d9c4  testq %rdi,%rdi ; je  -> assert, return 2     cos context non-null
+1265d9c9  testq %rsi,%rsi ; je  -> assert, return 2     handle non-null
+1265d9ce  movq  (%rsi),%rax                             load the handle's table
+1265d9d4  callq *0x28(%rax)      <-- +0x14, THE FAULT
+```
+
+Both null guards passed, so the handle was non-NULL and its contents were
+garbage. It comes from `_smu_internal_sw_exit` (0x1266813e), which runs
+immediately after our slot:
+
+```
+12668148  movq 0x660(%rdi),%rax   ; our slot_internal_sw_exit
+12668157  callq *%rax             ; "slot_internal_sw_exit entered" in the log
+12668161  movq 0x340(%rbx),%rsi   ; NO null check
+1266816b  callq _smu_cos_release_mem_handle   -> cosReleaseMemoryHandle -> PANIC
+12668170  movq 0x348(%rbx),%rsi   ; this one IS null-checked
+```
+
+`ctx+0x340` is written in exactly one place, `_smu_get_fw_constants`
+(0x12666091), from a caller-provided struct. `_smu_sw_init` zeroes `ctx+0x348`
+explicitly but never `ctx+0x340`, so Apple's code assumes its own
+`_smu_internal_sw_init` path always leaves a releasable handle there — and we
+replaced that path with our slot table.
+
+**Fix (hook layer, not yet written):** `slot_internal_sw_exit` should zero
+`ctx+0x340` before returning. Apple's unconditional release then passes NULL,
+`cosReleaseMemoryHandle` takes its own `testq %rsi,%rsi` guard, logs its
+assert and returns 2 — Apple's own path, not a bypass. It leaks one handle on
+a failed init that ends the driver anyway; a leak beats a panic during
+bring-up.
+
+**Correction:** `_smu_cgs_free_memory` really does not exist, but
+**`_smu_cgs_release_memory` (0x1266633a) does**, as does
+`_smu_cos_release_mem_handle` (0x12665b12). `slot_internal_sw_exit`'s
+`orig_smu_cgs_free_memory` is therefore always NULL and it has never freed the
+two 4 KB allocations from 2dd.
+
+### Next step is the user's call
+
+Two separate things, in this order:
+
+1. **Stop the panic** (zero `ctx+0x340` in `slot_internal_sw_exit`). Without
+   it every SMU failure costs a panic and a power cycle, so no further SMU
+   experiment is readable.
+2. **Fix the address**, then retry the transfer. The experiment that settles
+   the offset-vs-MC question without sending anything: log
+   `MMMC_VM_FB_LOCATION` alongside the allocator's value and check whether
+   `base + 0x0FFFF000` lands inside the carve-out. Changing the address the
+   SMU is given is a new hardware write and the user's decision.
