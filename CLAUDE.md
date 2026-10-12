@@ -735,3 +735,57 @@ Three fixes, none of them a guess:
 Next boot answers: which class engine[4] is, and therefore whether it is an IP
 whose resources cannot be allocated on this chip (VCN encode was already
 stubbed in 2cc for exactly that reason).
+
+## 2cx (2026-10-12): the GPU never executes the first packet — located exactly
+
+Second armed-boot photo, with the 2cw build. Everything up to the first real
+GPU command now passes, several of them for the first time ever:
+
+```
+2cb: all steps passed -> true
+2bm allocateMemoryResources returned 1          <- was failing at engine[9]
+Registered accelerator instance: AMDRadeonX6000_AMDNavi21GraphicsAccelerator
+2cn: accelerator start returned 1               <- start() SUCCEEDED
+2ct: found_framebuffer(...) REFUSED -> adopts no display pipe   <- 2ct works
+2br: powerUpHW entered
+2bs: AMDHardware::powerUpHWEngines entered
+2bu: AMDGFX10PM4Engine::powerUp entered -> 2ce: doStart entered (arg=0)
+2cg: original initComputeMQD returned 1
+2co: startKIQ returned 0 (0 = SUCCESS, doStart continues)
+   <nothing further; only request 0x14 polls, up to [#1536]>
+```
+
+So the engine[4] "hang" of the previous boot was **log-induced slowness**, not
+a stall: throttling request 0x14 let allocateMemoryResources run straight
+through. And 2co's correction is confirmed on hardware — startKIQ returns 0
+and doStart continues past it.
+
+Where it actually stops, from the disassembly:
+
+```
+submitSetResourcesPacket (0xbec7404)   builds the SET_RESOURCES packet
+  -> tail call submitKIQFrame (0xbe9572e)
+       commitBlock, ring doorbell (vtable[0x158])
+       -> waitForHwStamp (0xbe85536)
+            timeout 0x4C4B40 us (5 s), poll 0x64, re-armed while
+            channel vtable[0x2a0] says keep waiting (0xbe855c0-0xbe855f0)
+```
+
+`waitForHwStamp` is the first point where this driver asks the GPU to EXECUTE
+something and waits for the answer. The stamp never arrives, so the command
+processor is not consuming the KIQ packet. That is SPEC-PM4-DOSTART section 7
+answered: **the CP/MEC microcode is not running**, so the PSP either did not
+load the yellow_carp images or did not start them. Every bypass in 2am/2an/2ao
+was masking exactly this.
+
+Lesson about the instrumentation itself: all the 2cp/2cq hooks logged only
+AFTER the original returned, so a hang produced no line at all and the stall
+had to be found by disassembly. 2cx adds ENTER logging to each of them and
+hooks `waitForHwStamp` itself (observe only, no override), logging its return
+and elapsed ticks. New diag keys `stamp_calls`, `stamp_ret`, `stamp_ticks`.
+
+Next real question, and it is no longer about Apple's driver: did the PSP
+accept and start the CP/MEC firmware? That is PSP-side evidence (ring
+response status per load), plus reading CP_STAT / CP_ME_CNTL / RLC_GPM_STAT
+at this point. Note the boot is not wedged forever - waitForHwStamp is
+bounded, so it should eventually fail and, with 2ct, let the desktop come up.
