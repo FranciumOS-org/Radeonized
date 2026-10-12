@@ -460,6 +460,78 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
     }
 }
 
+// 2cu (2026-10-12): persist a compact diagnostic summary into NVRAM.
+//
+// Why: RBGPUDiag and RBGPULog live only in the running boot's IORegistry. On
+// a boot that never reaches a desktop they are unreadable and then lost, and
+// every such boot has cost a rescue without producing a single number.
+// Single-user mode cannot write files on macOS 15 here (sealed system volume,
+// Data volume unmounted) and deliberate panics are off the table, so NVRAM is
+// what is left: it survives the boot, and `nvram rbgpu-diag` reads it from
+// the next boot's desktop.
+//
+// Written on every diag refresh, so the last write wins and a boot that dies
+// later still leaves the numbers from however far it got. Keys are the short
+// ones that decide the next step; the full log still goes to the registry for
+// boots that do reach a desktop.
+//
+// IONVRAM-FORCESYNCNOW-PROPERTY asks IODTNVRAM to flush immediately, so the
+// value is committed before a power-cycle rather than sitting in the
+// in-memory copy. Without it a forced restart can lose the write.
+static const char *const kRbgpuNvramKeys[] = {
+    "armed", "found_fb_routed", "found_fb_calls", "found_fb_refused",
+    "ttl_raw_init_ret", "ttl_hw_init_ret", "gc_sw_init_ret",
+    "pw_stage", "pw_ret",
+    "setres_ret", "gfxmqd_ret", "mapq_calls", "mapq_fails",
+    "wfav_calls", "wfav_bounded_forced", "wfav_ret",
+};
+
+void RembrandtGPUPeer::saveDiagToNvram() {
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (!options) {
+        return;
+    }
+
+    // Short "k=v" pairs, only for keys that exist this boot. NVRAM values are
+    // size-limited, so this stays well under 512 bytes.
+    char buf[512];
+    size_t len = 0;
+    for (size_t k = 0; k < sizeof(kRbgpuNvramKeys) / sizeof(kRbgpuNvramKeys[0]); k++) {
+        const char *key = kRbgpuNvramKeys[k];
+        for (size_t i = 0; i < s_snapDiagCount; i++) {
+            if (strncmp(s_snapDiags[i].key, key, sizeof(s_snapDiags[i].key)) != 0) {
+                continue;
+            }
+            if (s_snapDiags[i].type != DIAG_TYPE_NUM) {
+                break;
+            }
+            int n = snprintf(buf + len, sizeof(buf) - len, "%s%s=%llx",
+                             len ? " " : "", key, s_snapDiags[i].numVal);
+            if (n > 0 && static_cast<size_t>(n) < sizeof(buf) - len) {
+                len += static_cast<size_t>(n);
+            }
+            break;
+        }
+    }
+
+    if (len == 0) {
+        options->release();
+        return;
+    }
+
+    if (auto val = OSString::withCString(buf)) {
+        options->setProperty("rbgpu-diag", val);
+        val->release();
+    }
+
+    // Flush now: a boot with no desktop ends in a power-cycle.
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    options->release();
+}
+
 void RembrandtGPUPeer::performRefreshDiag() {
     if (!g_diagLock) {
         return;
@@ -518,6 +590,9 @@ void RembrandtGPUPeer::performRefreshDiag() {
         setProperty("RBGPUDiag", diagDict);
         diagDict->release();
     }
+
+    // 2cu: and into NVRAM, so a boot with no desktop still yields its numbers.
+    saveDiagToNvram();
 }
 
 void RembrandtGPUPeer::postRegisterAction(thread_call_param_t param0, thread_call_param_t param1) {

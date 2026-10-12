@@ -615,3 +615,39 @@ a normal desktop and `tools/plugin_check.sh` works as usual:
   `found_fb_routed`, `found_fb_calls`, `found_fb_refused`.
 - IOAcceleratorFamily2 is now in kextList (it loads as a dependency of
   AMDRadeonX6000, so after this plugin, and onKextLoad fires for it).
+
+## 2cu (2026-10-12): diagnostics survive the boot in NVRAM
+
+2ct was installed (UUID 2801660E) and the boot still showed no UI. That boot
+was **armed**, not unarmed as it looked: `rbgpu-arm` had been set during the
+single-user attempt while 2cs was not yet installed, so nothing consumed it,
+and 2ct's one-shot consume is why `nvram rbgpu-arm` now reads empty. So the
+accelerator did load and 2ct did not deliver a desktop. Whether the
+`found_framebuffer` hook even installed is unknown, because the boot's log
+died with it — which is the real problem, not the UI.
+
+2cu writes a compact summary to NVRAM on every diag refresh, flushed with
+`IONVRAM-FORCESYNCNOW-PROPERTY` so a power-cycle does not lose it. Read it
+from the next boot's desktop:
+
+```
+nvram rbgpu-diag
+```
+
+Values are hex, space-separated `k=v`. Keys: armed, found_fb_routed,
+found_fb_calls, found_fb_refused, ttl_raw_init_ret, ttl_hw_init_ret,
+gc_sw_init_ret, pw_stage, pw_ret, setres_ret, gfxmqd_ret, mapq_calls,
+mapq_fails, wfav_calls, wfav_bounded_forced, wfav_ret. Last write wins, so a
+boot that dies later still leaves what it reached.
+
+Open question for the next armed boot: `found_fb_routed`. If it is 0 or
+absent, the 2ct hook never installed — the likely cause being that
+IOAcceleratorFamily2 was already loaded when the plugin registered its
+kextList, in which case onKextLoad never fires for it and the hook has to go
+in another way. If it is 1 with `found_fb_refused` >= 1 and there is still no
+desktop, then zero display pipes is not sufficient and the assumption behind
+2ct is wrong.
+
+Lesson recorded: never interpret a boot without checking BOTH the installed
+UUID against build/out AND whether `rbgpu-arm` was still set from an earlier
+attempt. Two boots were wasted on each of those.
