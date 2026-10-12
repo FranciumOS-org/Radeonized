@@ -815,3 +815,40 @@ cycle.
 `-rbgpustampwait` restores the real wait, for the boot where the CP finally
 runs and the stamp is expected to arrive. That flag is the test for "is the
 command processor alive now".
+
+### 2cy confirmed on hardware (2026-10-12)
+
+The armed boot now completes. Full chain from the console:
+
+```
+2co: startKIQ returned 0 (0 = SUCCESS, doStart continues)
+2cx: submitSetResourcesPacket ENTER (ch=.. spec=..)
+2cx: waitForHwStamp ENTER (ch=.. stamp=1)
+2cy: skipping the wait (-rbgpustampwait not set) -> false
+2cx: waitForHwStamp -> 0 (TIMEOUT - the CP never consumed the packet)
+2cq: submitSetResourcesPacket -> 0 (FAIL -> doStart exits via vtable[0x150])
+2ce: doStart returned 0
+2bu: AMDGFX10PM4Engine::powerUp -> 0 ; 2bv: *** ENGINE 0 FAILED *** (fail_idx=0)
+2bt: AMDHardware::powerUp -> 0 ; AMDGFX10Hardware::powerUp -> 0
+2br: Navi21Hardware::powerUp -> 0 ; powerUpHW returned 0x0
+2cn: powerUpHW failed, will fail start() cleanly (survive mode)
+handlePostRegister: Request 0x06 returned 0x00000000
+handlePostRegister: Request 0x1B returned 0xE00002C7
+[rtw89] scan finished: 92 network(s) heard
+```
+
+The boot carries on into Wi-Fi scanning: no hang, no power cycle. 2cy, 2cn
+and 2ct all fire in the intended order, and the engine-0 failure is now a
+clean, logged, survivable outcome instead of a wedged machine.
+
+Also new, for later: the accelerator sends the peer requests **0x12** and
+**0x1D**, both currently "Unhandled", and request 0x1B still answers
+0xE00002C7. Neither blocks the current path.
+
+The remaining question is unchanged and is now the only one that matters:
+the CP never consumes the KIQ packet, so the command processor is not
+running. Next evidence to gather is PSP-side (ring response status per
+firmware load) plus CP_STAT / CP_ME_CNTL / RLC_GPM_STAT reads, and the
+2am/2an/2ao bypasses — which force "firmware ready" latches to report
+success — should be made per-caller and logged rather than blanket-true,
+since they have been masking exactly this since 2ag.
