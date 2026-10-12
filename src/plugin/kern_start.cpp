@@ -83,9 +83,17 @@ static void           *g_smu_ctx    = nullptr;
 // aperture, out2 is the CPU mapping of the buffer, and out3 - 48 bytes apart
 // between two 4 KB allocations - can only be a small descriptor, i.e. the
 // handle. The old names had all three rotated by one position.
-static uint64_t        g_dma_mc     = 0;        // out1: GPU (MC) address
+static uint64_t        g_dma_mc     = 0;        // out1: offset into the local FB
 static void           *g_dma_cpu    = nullptr;  // out2: CPU address of the buffer
 static void           *g_dma_handle = nullptr;  // out3: opaque handle, for free()
+
+// 2di: out1 is an OFFSET into the local frame buffer, not an address the SMU
+// can use. The absolute MC address is MMMC_VM_FB_LOCATION_BASE + out1; this
+// holds it, and 0 means the FB registers did not read sanely (then nothing
+// is sent). See the 2di block in slot_internal_sw_init.
+static uint64_t        g_dma_mc_abs = 0;
+static uint64_t        g_fb_base    = 0;        // carve-out MC base  (from MMHUB)
+static uint64_t        g_fb_end     = 0;        // carve-out MC last byte
 
 // 2de: parameter names from the 2dd deltas, not from a guess at the order.
 // out1 is the GPU (MC) address, out2 the CPU mapping, out3 the handle.
@@ -386,21 +394,96 @@ static int slot_internal_sw_init(void *ctx, ...) {
         }
     }
 
-    // 2de: the old test asked whether the address was inside the 0xF4_xx
-    // carve-out. It never could be: this allocation comes back at 0x0FFFF000,
-    // descending from the 0x10000000 aperture the TTL input block reports at
-    // +0x68, which is the GART/VM aperture an APU driver table normally lives
-    // in. Check for a sane GART address instead - nonzero, page aligned, and
-    // inside that aperture.
-    const uint64_t gart_limit = 0x10000000ULL;
-    bool mc_sane = (g_dma_mc != 0) && (g_dma_mc < gart_limit) && ((g_dma_mc & 0xFFF) == 0);
-    rbgpu_log("[Check 2] MC address 0x%llx: nonzero=%d below_gart_limit(0x%llx)=%d page_aligned=%d",
-              g_dma_mc, g_dma_mc != 0, gart_limit, g_dma_mc < gart_limit,
-              (g_dma_mc & 0xFFF) == 0);
-    rbgpu_diag_set_num("mc_sane", mc_sane ? 1 : 0);
-    bool in_carveout = mc_sane;
-    rbgpu_diag_set_num("carveout_ok", in_carveout ? 1 : 0);
-    rbgpu_log("[Check 2] Carveout verification (0xF4_0000_0000..0xF4_FFFF_FFFF): %s", in_carveout ? "PASS" : "FAIL");
+    // 2di (2026-10-12): out1 is an FB OFFSET, and the SMU needs an absolute
+    // MC address. This is what the 2dg boot got wrong.
+    //
+    // The 2df boot sent SetDriverDramAddrHigh(0) / Low(0x0FFFF000) and the
+    // SMU answered both, then never answered TransferTableSmu2Dram
+    // (last_msg=0x0f, last_resp=0). The address messages only record a value;
+    // the transfer is the first time the SMU uses it.
+    //
+    // Linux allocates every SMU table for this exact chip in VRAM, not GTT -
+    // docs/linux-ref/yellow_carp_ppt.c:159-164 uses AMDGPU_GEM_DOMAIN_VRAM
+    // for Watermarks, DpmClocks and SmuMetrics - so the table belongs in the
+    // carve-out, and 2de's "an APU driver table lives in the GART aperture"
+    // was wrong. The allocator agrees: the plugin asks for smu memory type 1,
+    // and _convert_smu_memory_type_to_cgs (0x126660c0) maps 1 -> cgs 0 =
+    // CGS_GPU_MEM_TYPE__VISIBLE_FB. What comes back, 0x0FFFF000 counting down
+    // from the 0x10000000 the TTL input reports at +0x68, is an offset into
+    // that local frame buffer.
+    //
+    // So read the carve-out's real position out of MMHUB rather than assume
+    // it. MMHUB base_idx 1 = 0x1a000 (discovery table, probe 1), and the
+    // offsets are Linux's mmhub_2_3_0_offset.h as recorded in rb_regs.h.
+    // These are plain reads of a block that is up and scanning the display;
+    // they are not the gated-GC reads that caused the boot 6/7 RSMU timeouts.
+    {
+        const uint32_t kMmhubBase = 0x1a000;          // dwords
+        const uint32_t kFbLocBase = kMmhubBase + 0x08ec;
+        const uint32_t kFbLocTop  = kMmhubBase + 0x08ed;
+        const uint32_t kFbOffset  = kMmhubBase + 0x08d7;
+
+        // These sit at byte 0x6a3b0 and up, well past where the MP1 mailbox
+        // lives. Read nothing outside the window Apple mapped: a read past
+        // the end of the BAR mapping is not a diagnostic, it is a fault.
+        uint32_t highest   = (kFbLocTop * 4) + 4;
+        bool     in_window = (window_limit == 0) || (highest <= window_limit);
+        bool     regs_sane = false;
+
+        g_fb_base = 0;
+        g_fb_end  = 0;
+        rbgpu_diag_set_num("fb_regs_oow", in_window ? 0 : 1);
+
+        if (!in_window) {
+            rbgpu_log("2di: MMHUB FB_LOCATION at byte 0x%x is outside the MMIO window "
+                      "(limit 0x%08X) -> not read, carve-out stays unknown",
+                      kFbLocBase * 4, window_limit);
+        } else {
+            uint32_t base_reg = smu13HwRreg(ctx, kFbLocBase * 4);
+            uint32_t top_reg  = smu13HwRreg(ctx, kFbLocTop * 4);
+            uint32_t off_reg  = smu13HwRreg(ctx, kFbOffset * 4);
+
+            rbgpu_diag_set_num("fb_base_reg", base_reg);
+            rbgpu_diag_set_num("fb_top_reg", top_reg);
+            rbgpu_diag_set_num("fb_off_reg", off_reg);
+            rbgpu_log("2di: MMHUB FB_LOCATION_BASE=0x%08X TOP=0x%08X FB_OFFSET=0x%08X",
+                      base_reg, top_reg, off_reg);
+
+            // The registers hold 16 MB units in bits [23:0]: probe 1 read
+            // 0xf400/0xf4ff, i.e. 0xF4_0000_0000..0xF4_FFFF_FFFF.
+            regs_sane = base_reg != 0 && base_reg != 0xFFFFFFFF &&
+                        top_reg != 0xFFFFFFFF &&
+                        (top_reg & 0x00FFFFFF) >= (base_reg & 0x00FFFFFF);
+            if (regs_sane) {
+                g_fb_base = static_cast<uint64_t>(base_reg & 0x00FFFFFF) << 24;
+                g_fb_end  = (static_cast<uint64_t>(top_reg & 0x00FFFFFF) << 24) | 0xFFFFFFULL;
+            }
+        }
+
+        rbgpu_log("2di: carve-out MC range 0x%llx..0x%llx (regs_sane=%d in_window=%d)",
+                  g_fb_base, g_fb_end, regs_sane ? 1 : 0, in_window ? 1 : 0);
+        rbgpu_diag_set_num("fb_regs_sane", regs_sane ? 1 : 0);
+    }
+
+    // The candidate absolute address, and the test that decides whether the
+    // SMU is allowed to see it: the whole 4 KB buffer must lie inside the
+    // carve-out that MMHUB just reported.
+    uint64_t mc_abs = (g_fb_base != 0) ? (g_fb_base + g_dma_mc) : 0;
+    bool mc_ok = (g_fb_base != 0) &&
+                 (g_dma_mc != 0) && ((g_dma_mc & 0xFFF) == 0) &&
+                 (mc_abs >= g_fb_base) &&
+                 (mc_abs + 0x1000 - 1 <= g_fb_end);
+    g_dma_mc_abs = mc_ok ? mc_abs : 0;
+
+    rbgpu_log("2di: alloc offset 0x%llx + fb_base 0x%llx = MC 0x%llx; inside carve-out=%d",
+              g_dma_mc, g_fb_base, mc_abs, mc_ok ? 1 : 0);
+    rbgpu_diag_set_num("mc_abs_hi", static_cast<uint32_t>(mc_abs >> 32));
+    rbgpu_diag_set_num("mc_abs_lo", static_cast<uint32_t>(mc_abs));
+    rbgpu_diag_set_num("mc_abs_ok", mc_ok ? 1 : 0);
+    rbgpu_diag_set_num("mc_sane", mc_ok ? 1 : 0);
+    rbgpu_diag_set_num("carveout_ok", mc_ok ? 1 : 0);
+    rbgpu_log("[Check 2] Carve-out verification (from MMHUB, not assumed): %s",
+              mc_ok ? "PASS" : "FAIL");
 
     memset(&g_hw, 0, sizeof(g_hw));
     g_hw.ctx      = ctx;
@@ -443,8 +526,8 @@ static int slot_internal_sw_init(void *ctx, ...) {
 
     struct rb_smu13_dma dma;
     memset(&dma, 0, sizeof(dma));
-    dma.cpu  = g_dma_cpu;   // out2, the real buffer mapping
-    dma.mc   = g_dma_mc;    // out1, the real GPU address
+    dma.cpu  = g_dma_cpu;      // out2, the real buffer mapping
+    dma.mc   = g_dma_mc_abs;   // 2di: fb_base + out1, or 0 if unverified
     dma.size = 0x1000;
 
     int init_ret = rb_smu13_init(&g_smu, &g_hw, g_disc, &dma, 0);
@@ -479,20 +562,26 @@ static int slot_internal_hw_init(void *ctx) {
     void *smu_cpu = g_smu.dma.cpu;
     uint32_t smu_size = g_smu.dma.size;
 
-    // 2de: the address test, corrected. The old one asked whether the SMU
-    // driver table sat inside the 0xF4_xx carve-out and so could never pass:
-    // the allocation comes back at 0x0FFFF000, descending from the 0x10000000
-    // aperture the TTL input reports at +0x68, which is where an APU driver
-    // table belongs. More importantly the field being checked was the wrong
-    // one - see 2dd - and `dma.cpu` pointed at a 48-byte handle rather than
-    // the 4 KB buffer, so rb_smu13_bringup would have memcpy'd the driver
-    // table over a small kernel object (rb_smu13.c:311). That gate, written
-    // for a different reason, is what kept it from happening.
-    const uint64_t gart_limit = 0x10000000ULL;
-    bool smu_mc_ok = (smu_mc != 0) && (smu_mc < gart_limit) && ((smu_mc & 0xFFF) == 0);
+    // 2de: the field being checked used to be the wrong one - see 2dd - and
+    // `dma.cpu` pointed at a 48-byte handle rather than the 4 KB buffer, so
+    // rb_smu13_bringup would have memcpy'd the driver table over a small
+    // kernel object (rb_smu13.c:311). That gate, written for a different
+    // reason, is what kept it from happening.
+    //
+    // 2de also replaced the carve-out test with a GART test, and that was
+    // wrong: Linux puts these tables in VRAM (yellow_carp_ppt.c:159-164), so
+    // the carve-out was the right domain all along. 2di restores it, reading
+    // the range from MMHUB instead of hardcoding it.
+    // 2di: the test is now the carve-out range MMHUB itself reported in
+    // sw_init, applied to the absolute address. dma.mc is 0 unless the whole
+    // 4 KB buffer was shown to lie inside it, so an unreadable or implausible
+    // FB_LOCATION stops the bringup instead of guessing.
+    bool smu_mc_ok = (smu_mc != 0) && ((smu_mc & 0xFFF) == 0) &&
+                     (g_fb_base != 0) && (smu_mc >= g_fb_base) &&
+                     (smu_mc + 0x1000 - 1 <= g_fb_end);
     rbgpu_log("2as DMA VERIFY: mc=0x%llx cpu=%p size=0x%x", smu_mc, smu_cpu, smu_size);
-    rbgpu_log("2as DMA VERIFY: gart_limit=0x%llx sane=%d (nonzero, below limit, page aligned)",
-              gart_limit, smu_mc_ok ? 1 : 0);
+    rbgpu_log("2as DMA VERIFY: carve-out 0x%llx..0x%llx sane=%d (nonzero, page aligned, inside)",
+              g_fb_base, g_fb_end, smu_mc_ok ? 1 : 0);
     rbgpu_log("2as DMA VERIFY: mc_is_kernel_va=%d (would be the old wrong field)",
               (smu_mc >= 0xFFFFFF0000000000ULL) ? 1 : 0);
     rbgpu_log("2as DMA VERIFY: size_nonzero=%d size_4k_aligned=%d", (smu_size != 0) ? 1 : 0, (smu_size % 0x1000 == 0) ? 1 : 0);
@@ -528,17 +617,19 @@ static int slot_internal_hw_init(void *ctx) {
     //
     // What the chip then does, in order:
     //   check_fw_version, get_enabled_mask        QUERY, reads only
-    //   SetDriverDramAddrHigh(0)                  record table address, high
-    //   SetDriverDramAddrLow(0x0FFFF000)          record table address, low
+    //   SetDriverDramAddrHigh(mc >> 32)           record table address, high
+    //   SetDriverDramAddrLow(mc & 0xffffffff)     record table address, low
     //   TransferTable(DPMCLOCKS)                  the SMU DMA-WRITES about
     //       300 bytes of clock table into that address; the plugin then reads
     //       it back through dma.cpu.
     //
-    // The address is the one 2dd/2de verified: a GART address pointing at a
-    // 4 KB page from Apple's own CGS allocator, so the SMU writes into our
-    // own buffer. The remaining uncertainty is whether the GPU address space
-    // is mapped as assumed; if not, the write lands elsewhere in GPU-visible
-    // memory, bounded by the GART aperture rather than host kernel memory.
+    // 2di: the address is now absolute - fb_base + the allocator's offset -
+    // and is only non-zero when the whole 4 KB lies inside the carve-out
+    // MMHUB reported this boot. The high word is therefore 0xF4 rather than
+    // the 0 the 2dg boot sent, which is the difference that boot was missing.
+    // The page is Apple's own CGS FB allocation, so the SMU writes into our
+    // own buffer; if the offset theory is wrong the write still lands inside
+    // the carve-out, past the GOP framebuffer, not in host memory.
     //
     // This step verifies itself: the clock values logged below are only
     // plausible 680M numbers if the SMU really wrote where we expect. Zeros
@@ -598,6 +689,43 @@ static int slot_internal_hw_init(void *ctx) {
 
 static int slot_internal_sw_exit(void *ctx) {
     rbgpu_log("slot_internal_sw_exit entered");
+
+    // 2di (2026-10-12): THE PANIC FIX. Apple's _smu_internal_sw_exit
+    // (0x1266813e) calls this slot through ctx+0x660 and then, with NO null
+    // check, releases the memory handle at ctx+0x340:
+    //
+    //     12668148  movq 0x660(%rdi),%rax   ; this function
+    //     12668157  callq *%rax
+    //     12668161  movq 0x340(%rbx),%rsi   ; no test, no branch
+    //     1266816b  callq _smu_cos_release_mem_handle
+    //     12668170  movq 0x348(%rbx),%rsi   ; this one IS null-checked
+    //
+    // That reaches cosReleaseMemoryHandle (0x1265d9c0), which checks both
+    // arguments for NULL and then dereferences the handle:
+    //
+    //     1265d9c9  testq %rsi,%rsi ; je -> assert, return 2
+    //     1265d9ce  movq  (%rsi),%rax
+    //     1265d9d4  callq *0x28(%rax)       <-- the 2dg panic, +0x14
+    //
+    // ctx+0x340 has exactly one writer, _smu_get_fw_constants (0x12666091),
+    // and _smu_sw_init zeroes ctx+0x348 but never ctx+0x340: Apple assumes
+    // its own _smu_internal_sw_init path always leaves a releasable handle
+    // there. We replaced that path with this slot table, so the handle is
+    // whatever the context happened to hold - non-NULL and not a handle.
+    //
+    // Zeroing it takes Apple's own guard: the release gets NULL,
+    // cosReleaseMemoryHandle logs its assert and returns 2. It leaks one
+    // handle on an init that is failing anyway, which beats a panic.
+    //
+    // This had never fired before because the SMU teardown had never run:
+    // every earlier boot either skipped bringup or never reached it.
+    if (ctx) {
+        auto p340 = reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(ctx) + 0x340);
+        rbgpu_log("2di: ctx+0x340 = %p -> zeroing (Apple releases it unconditionally)", *p340);
+        rbgpu_diag_set_num("sw_exit_h340", reinterpret_cast<uint64_t>(*p340));
+        *p340 = nullptr;
+        rbgpu_diag_set_num("sw_exit_h340_cleared", 1);
+    }
     if (g_dma_handle && orig_smu_cgs_free_memory) {
         orig_smu_cgs_free_memory(ctx, g_dma_handle);
         g_dma_handle = nullptr;
