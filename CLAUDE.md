@@ -1158,11 +1158,11 @@ Necessary but possibly not sufficient: bringup does not touch GFXOFF. If the
 GFX block is gated by GFXOFF rather than by a missing driver table, a second
 step (`RB_SMU13_ALLOW_GFXOFF` plus a DisallowGfxOff call) follows.
 
-## 2dg (2026-10-12): the 2df boot PANICKED in the accelerator's start()
+## 2dg (2026-10-12): the 2df boot PANICKED inside configureDevice
 
 The 2df boot (SMU TABLES allowed, `-rbgpusmubringup`) panicked. There is no
 `.panic` file: `debug=0x100` halts on the panic screen instead of rebooting,
-so nothing was ever written to /Library/Logs/DiagnosticReports (newest kernel
+so nothing was written to /Library/Logs/DiagnosticReports (the newest kernel
 panic there is 2026-10-11). A photograph of the stuck console is the only
 record, and it shows only the bottom of the backtrace:
 
@@ -1173,36 +1173,63 @@ rembrandtgpu.plugin  : __ZL22hooked_accel_start_2cnPvS_ + 0x37
 mach_kernel          : IOService::startCandidate / probeCandidates / doServiceMatch
 ```
 
-So the panic is **inside** Apple's `IOGraphicsAccelerator2::start`, in a frame
-above what the photo captured. **The panic string and the faulting frame are
-unknown** — nothing below is a diagnosis of the cause.
+**The frame is identifiable even though the panic string is not.** The return
+address `IOGraphicsAccelerator2::start+0x2dc` is 0x14e4de4e in the extracted
+kext, and the instruction before it is
 
-What that boot did record, in `rbgpu-diag-prev`:
+```
+14e4de3f  movq (%r14),%rcx          ; r14 = the accelerator
+14e4de42  movq %r14,%rdi
+14e4de45  movq %rax,%rsi            ; rax = this->0x368, the IOPCIDevice
+14e4de48  callq *0x9c0(%rcx)        ; vtable slot 0x9c0
+```
+
+Slot 0x9c0 is pure virtual in `__ZTV22IOGraphicsAccelerator2` and resolves in
+`__ZTV43AMDRadeonX6000_AMDNavi21GraphicsAccelerator` (dump offset +0x9d0, the
+address point being symbol+0x10) to
+
+```
+AMDRadeonX6000_AMDGraphicsAccelerator::configureDevice(IOPCIDevice *)
+```
+
+So **the panic is inside `configureDevice` or deeper**, in a frame the photo
+cut off. `configureDevice` (0xbe3c938) calls `initLinkToPeer` and
+`createHWInterface(IOPCIDevice *)` — which is where TTL init runs, and
+therefore where `slot_internal_hw_init` and 2df's `rb_smu13_bringup` run.
+That is exactly the code 2df newly enabled, and it is reached before
+`powerUpHW` (which the 2cx log shows running *after* `start()` returns, not
+inside it — the 2cr comment saying otherwise is wrong). The SMU bringup is
+the prime suspect, but nothing yet proves the fault address, so this is a
+located frame, not a diagnosis.
+
+**The NVRAM summary does not belong to that boot.** `rbgpu-diag-prev` reads
 
 ```
 armed=1 found_fb_routed=1 found_fb_calls=2 found_fb_refused=2
 ttl_raw_init_ret=0 ttl_hw_init_ret=ffffffffde370001 gc_sw_init_ret=1 setres_ret=0
 ```
 
-`setres_ret=0` — `submitSetResourcesPacket` still failed, so the SMU bringup
-did not get the command processor running. Every SMU key from 2df
-(`smu_nmsgs`, `smu_writes`, `smu_refused`, `gfx_min`, `gfx_max`, ...) is
-absent because they were never added to `kRbgpuNvramKeys`: **2df's entire
-purpose was to learn those numbers and the boot could not report them.**
+and `setres_ret` is only set during `powerUpHW`, after `start()` returns — a
+point the panic boot never reached. So this is an earlier (2cy/2db-era) armed
+boot, not the 2df one. Do not read it as the panic boot's record.
+
+Every SMU key from 2df (`smu_nmsgs`, `smu_writes`, `smu_refused`, `gfx_min`,
+`gfx_max`, ...) is absent from NVRAM anyway, because they were never added to
+`kRbgpuNvramKeys`: **2df's entire purpose was to learn those numbers and no
+boot could report them.**
 
 Two fixes, both in src/plugin/RembrandtGPUPeer.cpp:
 
 - The 2df SMU keys are now in `kRbgpuNvramKeys`, so the next armed boot
   reports what the SMU step did even if it dies.
-- `rbgpuConsumeArming` now flushes the `rbgpu-arm` removal with
-  `IONVRAM-FORCESYNCNOW-PROPERTY` immediately, instead of relying on the
-  later `saveDiagToNvram` flush. An armed boot can panic at any point after
-  the consume, and the disarm has to be durable before the accelerator is let
-  near the hardware. (Whether the 2df boot's removal really failed to reach
-  flash is not proven — `rbgpu-arm` reads 1 today, but the machine has since
-  been rescued with `-rbgpuoff`, under which the peer never runs and never
-  consumes it, and it may have been re-armed by hand. The flush is correct
-  either way.)
+- `rbgpuConsumeArming` flushes the `rbgpu-arm` removal with
+  `IONVRAM-FORCESYNCNOW-PROPERTY` immediately, instead of relying on the later
+  `saveDiagToNvram` flush. An armed boot can panic at any point after the
+  consume, and the disarm has to be durable before the accelerator is let near
+  the hardware. (Whether the 2df boot's removal really failed to reach flash
+  is not proven; `rbgpu-arm` reads 1 today, but the machine has since been
+  rescued with `-rbgpuoff`, under which the peer never runs and never consumes
+  it, so it may have been re-armed by hand. The flush is correct either way.)
 
 Two things to change before the next armed boot:
 
@@ -1210,5 +1237,5 @@ Two things to change before the next armed boot:
   accelerator.
 - `debug=0x100` should come out of boot-args. It is why this panic left a
   photograph instead of a report. Without it macOS reboots on panic and writes
-  the full panic log to /Library/Logs/DiagnosticReports, and with the durable
-  disarm above that reboot comes up unarmed instead of looping.
+  the full panic log, and with the durable disarm above that reboot comes up
+  unarmed instead of looping.
