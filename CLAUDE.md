@@ -4570,3 +4570,96 @@ What the next armed boot decides, from `nvram rbgpu-gate`:
 endpoint still varies              the dump is not it either, and what is left
                                    in the span is Apple's own code plus our
                                    diag/log calls at 4 us each
+
+### 2fe answered on hardware (2026-10-13): THE DUMP WAS THE STALL — initGraphicsMQD RETURNS
+
+No log dir from the armed boot, so NVRAM is the whole record. Build and arming
+checked first, per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 477D5F0B   == build/out (2fe)
+rbgpu-diag        -> d=0 armed=0                        the recovery boot
+rbgpu-diag-prev   -> d=27 armed=1 ttl_hw_init_ret=dcead001
+                     (2fd read dcf5f001, so this IS a new boot)
+nvram rbgpu-gate  -> "46 49 47 40 101 151 45 50 54 55 60 102 152 70 65 103 153 75
+                      | 75 submitMapQueuesPacket OK"
+nvram rbgpu-beat  -> "n=14 gate=75 skips=0 forced=0 t=18085392836"
+```
+
+Decoded against the numbering (ENTER `60+ring`, OK `70+ring`, FAIL `65+ring`):
+
+```
+46 49 47        the accessor probe at doStart entry
+40 101 151 45   submitSetResourcesPacket + stamp #1 -> OK
+50 54 55        initGraphicsMQD ENTER -> the ORIGINAL -> **RETURNED OK**
+60 102 152 70   submitMapQueuesPacket ring 0 + stamp #2 -> OK
+65 103 153 75   submitMapQueuesPacket ring 5 + stamp #3 -> OK
+```
+
+**2fe's first decision branch, and it is the largest single advance in this
+milestone family.** Three things that eight boots failed to establish:
+
+- **`initGraphicsMQD` RETURNS** - gate 55, never once seen before. So 2eu's
+  "the hang is established to be in Apple's `initGraphicsMQD`" was the
+  **register dump**, not Apple's code. The 4 KB `bzero` at 0xbea25ea, the
+  allocation chain A-F and the regions H-J are all cleared in one boot.
+- **Apple's five RB0 writes completed.** `0x120`/`0x128`/`0x130` on
+  `pm4+0x30` at 0xbea12f2-0xbea1396 are the first writes to the **graphics**
+  ring in this project, and they did not stall. The standing
+  `gfx_min = gfx_max = 0` suspicion (2di onward) did **not** bite - GFX DPM
+  never starting does not stop the ring registers being programmed.
+- **Two `submitMapQueuesPacket` calls succeeded, each with a real GPU stamp.**
+  Stamp waits #2 and #3 both returned TRUE, so the KIQ is executing
+  MAP_QUEUES packets and writing fences for them, not just SET_RESOURCES.
+
+What is NOT claimed: that one boot settles the variance. This is a single
+sample, and reading one as a rule is this project's recurring error. What
+makes it supported rather than inferred is that the jump is qualitative
+(45, 45, 101, 101 -> eighteen gates) and the mechanism was named in a written
+prediction *before* the boot: the register dump was the only hardware access
+left in the varying span, and GC/SMN reads are a documented non-deterministic
+stall on this chip.
+
+`doStart`'s `+0x348` is 5, so **three mapQueues calls remain**, then the
+ring-state check, `waitForActiveValue` (bounded by 2cp) and
+`(engine+0xc0)->vtable[0x328]`.
+
+**A defect in my own numbering, found while decoding.** The fail band
+`65+ring` collides with the enter band `60+ring` for ring >= 5 - and ring 5
+is real, measured in this very trail - so `65` means both "ring 0 FAILED" and
+"ring 5 ENTER". The ordering disambiguates it here (ring 0 had already
+committed 70, and a FAIL cannot follow an OK within one call), but a record
+should not need that.
+
+## 2ff (2026-10-13): the gate last, and bands that cannot collide
+
+- In the mapQueues hook the `rbgpu_log` moves **before** the exit gate, so the
+  gate is the last statement before `return ret` and the span from it to the
+  next ENTER gate holds nothing of ours. That is the move that landed gate 151
+  (2ez) and gate 54 (2eu), and the 2fe trail stopped immediately after gate 75
+  with that one log line the only thing of ours left in the span.
+- The same rule applied to the `initGraphicsMQD` hook's gate 55.
+- Bands are now disjoint: enter `60+(ring&7)` = 60..67, OK `70+(ring&7)` =
+  70..77, fail `80+(ring&7)` = 80..87, clear of the `100+call` / `150+call`
+  stamp bands. The 2fe trail's own values (65 enter, 75 OK for ring 5) are
+  unchanged, so it stays readable against the new encoding.
+
+The two diag sets stay *before* the gate: the thread traversed them this boot
+(gate 152 -> gate 75), so they are measured survivable, and moving them after
+the gate would put them into the span that matters.
+
+Build: UUID 8B7407F6, hosttest passes. Boot-args unchanged, `-rbgpuregdump`
+stays off.
+
+What the next armed boot decides, from `nvram rbgpu-gate`:
+
+```
+three more 6x/1xx/7x triples   all five mapQueues done, and the frontier is
+                               the ring-state check / waitForActiveValue /
+                               vtable[0x328] at the end of doStart
+stops after a 7x again         the stop is inside Apple's next mapQueues call,
+                               with nothing of ours in the span - a hard fact
+                               and a new place to disassemble
+an 8x value                    a mapQueues call FAILED rather than hung, which
+                               is a clean doStart failure and a desktop
+```

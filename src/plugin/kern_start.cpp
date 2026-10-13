@@ -4102,16 +4102,17 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
     rbgpu_diag_set_num("gfxmqd_ret", static_cast<uint64_t>(g_rb_2cq_gfxmqd_ret));
-    rbgpu_gate_2en(ret ? 55 : 51, ret ? "initGraphicsMQD OK" : "initGraphicsMQD FAILED");
     rbgpu_log("2cq: initGraphicsMQD -> %d %s", ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart returns false)");
+    // 2ff: gate last before the return, same rule as the mapQueues hook.
+    rbgpu_gate_2en(ret ? 55 : 51, ret ? "initGraphicsMQD OK" : "initGraphicsMQD FAILED");
     return ret;
 }
 
 static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, uint64_t b,
                                            const void *spec, uint64_t c) {
     g_rb_2cq_mapq_calls++;
-    rbgpu_gate_2en(60 + (ring & 0xf), "submitMapQueuesPacket ENTER - this one also "
+    rbgpu_gate_2en(60 + (ring & 0x7), "submitMapQueuesPacket ENTER - this one also "
                                       "waits for a stamp");
     rbgpu_log("2cx: submitMapQueuesPacket ENTER (ring=%u)", ring);
     bool ret = orig_kiq_submitMapQueues_2cq
@@ -4122,10 +4123,19 @@ static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, 
     }
     rbgpu_diag_set_num("mapq_calls", static_cast<uint64_t>(g_rb_2cq_mapq_calls));
     rbgpu_diag_set_num("mapq_fails", static_cast<uint64_t>(g_rb_2cq_mapq_fails));
-    rbgpu_gate_2en(ret ? (70 + (ring & 0xf)) : (65 + (ring & 0xf)),
-                   ret ? "submitMapQueuesPacket OK" : "submitMapQueuesPacket FAILED");
     rbgpu_log("2cq: submitMapQueuesPacket(ring=%u, a=0x%x, b=0x%llx, spec=%p, c=0x%llx) -> %d %s",
               ring, a, b, spec, c, ret ? 1 : 0, ret ? "(OK)" : "(FAIL)");
+    // 2ff: the gate is the LAST statement before the return, so the span between
+    // this gate and the next ENTER gate holds nothing of ours - the move that
+    // landed gate 151 (2ez) and gate 54 (2eu). The 2fe trail stopped right after
+    // this gate with three mapQueues calls still to come, and the only thing left
+    // in that span was this log line.
+    // The fail band was 65+ring, which COLLIDES with the 60+ring enter band for
+    // ring >= 5 - and ring 5 is real, measured in the 2fe trail. 80+ring instead,
+    // ring masked to 3 bits, so enter 60..67 / OK 70..77 / fail 80..87 are
+    // disjoint and disjoint from the 100+/150+ stamp bands.
+    rbgpu_gate_2en(ret ? (70 + (ring & 0x7)) : (80 + (ring & 0x7)),
+                   ret ? "submitMapQueuesPacket OK" : "submitMapQueuesPacket FAILED");
     return ret;
 }
 
