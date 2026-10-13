@@ -3791,15 +3791,20 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
 
     g_rb_2cx_stamp_ret = ret ? 1 : 0;
     g_rb_2cx_stamp_us = dt;
+    // 2ez (2026-10-13): everything that is not the gate goes BEFORE it, so the
+    // only thing between gate 151 and the `return` is the return. 2ey proved
+    // the machine stays alive while this thread stops, so the trail locates
+    // the thread - and the trail stops here. Emptying the span is the one move
+    // that has ever shifted this frontier (2eu did it for 50->54).
     rbgpu_diag_set_num("stamp_ret", static_cast<uint64_t>(g_rb_2cx_stamp_ret));
-    rbgpu_gate_2en(ret ? (150 + g_rb_2cx_stamp_calls) : (120 + g_rb_2cx_stamp_calls),
-                   ret ? "waitForHwStamp RETURNED TRUE" : "waitForHwStamp returned false");
     rbgpu_diag_set_num("stamp_ticks", dt);
     rbgpu_log("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
               ret ? "(the GPU executed it)"
                   : "(the stamp was not reached - NOT evidence the CP is dead; 2dq "
                     "measured RPTR=WPTR with CP_STAT busy, so it does execute)",
               dt);
+    rbgpu_gate_2en(ret ? (150 + g_rb_2cx_stamp_calls) : (120 + g_rb_2cx_stamp_calls),
+                   ret ? "waitForHwStamp RETURNED TRUE" : "waitForHwStamp returned false");
     return ret;
 }
 
@@ -3839,12 +3844,16 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     bool ret = orig_kiq_submitSetResources_2cq
                    ? orig_kiq_submitSetResources_2cq(ch, spec)
                    : false;
-    g_rb_2cq_setres_ret = ret ? 1 : 0;
-    rbgpu_diag_set_num("setres_calls", static_cast<uint64_t>(g_rb_2cq_setres_calls));
-    rbgpu_diag_set_num("setres_ret", static_cast<uint64_t>(g_rb_2cq_setres_ret));
+    // 2ez: the gate is the FIRST thing after the original returns. Apple's
+    // submitKIQFrame epilogue plus this one call is then the entire span from
+    // gate 151, so a trail that still ends at 151 puts the stop in Apple's
+    // few instructions with nothing of ours left to blame.
     rbgpu_gate_2en(ret ? 45 : 41, ret ? "submitSetResourcesPacket OK - doStart goes on "
                                         "to initGraphicsMQD"
                                       : "submitSetResourcesPacket FAILED");
+    g_rb_2cq_setres_ret = ret ? 1 : 0;
+    rbgpu_diag_set_num("setres_calls", static_cast<uint64_t>(g_rb_2cq_setres_calls));
+    rbgpu_diag_set_num("setres_ret", static_cast<uint64_t>(g_rb_2cq_setres_ret));
     rbgpu_log("2cq: submitSetResourcesPacket(spec=%p) -> %d %s", spec, ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart exits via vtable[0x150], returns false)");
     return ret;

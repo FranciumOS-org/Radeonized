@@ -4053,3 +4053,81 @@ absent / n small      the whole machine stopped within ~250 ms of the trail's
 between the last beat and the gate write is readable.
 
 Build: UUID 76617375, hosttest passes. Boot-args unchanged.
+
+### 2ey answered on hardware (2026-10-13): THE MACHINE IS ALIVE — the trail does locate the thread
+
+logs/20261013-184415-plugin. `plugin_check` ran **in the armed boot** this
+time (`rbgpu-diag` reads `armed=1`, `rbgpu-diag-prev` is the previous recovery
+boot), 42 KB of log, and the build and arming were checked first:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 76617375   == build/out (2ey)
+ttl_hw_init_ret   -> 565a0001   (2ex read ddbee001, so a new boot)
+nvram rbgpu-gate  -> "40 101 151 | 151 waitForHwStamp RETURNED TRUE"
+nvram rbgpu-beat  -> "n=16 gate=151 skips=0 forced=0 t=18649635959"
+log.txt last line -> "[15.393382] 2en: gate 151 - waitForHwStamp RETURNED TRUE"
+pci.txt           -> 0 bytes
+```
+
+**Branch 1 of the 2ey table, decisively.** The heartbeat ran 16 ticks - about
+4 s - after the trail's last gate, the last beat at 18.65 s against gate 151's
+15.39 s, and the machine then stayed up long enough for the user to run
+`plugin_check` in that same boot. So:
+
+- **the whole-machine death is excluded.** The asynchronous-fault alternative
+  that 2ey existed to test - the GPU now being able to reach host memory and
+  raise interrupts since 2em - is not what is happening. The start() thread
+  alone is stuck, and `pci.txt` at 0 bytes says why `ioreg` blocks: that
+  thread holds the IOService lock over the IGPU subtree.
+- **the trail does locate the thread**, which every reading from 2eo to 2ex
+  had assumed and none had tested.
+- **`skips=0 forced=0`**: the heartbeat never once found the gate path holding
+  the NVRAM flag. So the thread is **not** stuck inside the gate's own flash
+  write - the 2eq/2es suspicion, refuted this time by direct measurement
+  rather than by removing it and seeing no change.
+
+So the stop is in the span between gate 151's commit and gate 45's commit, and
+that span is now trustworthy. The published log agrees independently: its last
+line is gate 151, with 3.26 s of proven liveness after it. (That agreement is
+corroboration, not proof - per the 2es withdrawal the published log ends at
+the last *refresh*, and a refresh pass blocked at 15.39 s would end it there
+whatever the thread did.)
+
+Two instrumentation notes from the same capture:
+
+- The 2ey log line exceeded `RBGPU_LINE_MAX` (384) and its published entry
+  **swallowed the entry after it** - gate 40's line is glued onto the tail of
+  the truncated heartbeat line, and the same happened to gate 101 behind the
+  2dy fence line. Long log lines cost the next line. Shortened in 2ez.
+- `make kext tools` does **not** rebuild the plugin; only `make plugin` does.
+  A first build of 2ez reported the unchanged 2ey UUID. Always check the UUID
+  moved, which is the 2cw lesson recurring in a new place.
+
+## 2ez (2026-10-13): empty the one span that is now known to hold the thread
+
+The span from gate 151 to gate 45 holds, in order: one
+`rbgpu_diag_set_num("stamp_ticks")`, one `rbgpu_log`, the return through
+Apple's `submitKIQFrame` epilogue, and two more diag sets. Apple's part is a
+handful of instructions - `waitForHwStamp` is the last call `submitKIQFrame`
+makes, and `submitSetResourcesPacket` tail-calls it, so the return comes
+straight back to our hook. Everything else in the span is ours.
+
+Emptying the span is the single move that has ever shifted this frontier:
+2eu did exactly this for 50->54 and got into Apple's code for the first time.
+
+- In the `waitForHwStamp` hook, the diag sets and the log line move **before**
+  gate 151, so the only thing after that gate is `return ret`.
+- In the `submitSetResourcesPacket` hook, gate 45 becomes the **first**
+  statement after the original returns, ahead of its diag sets and log.
+
+That leaves Apple's epilogue and one call as the entire span.
+
+```
+trail reaches 45      the span was ours, and the frontier moves on to
+                      initGraphicsMQD with the stop no longer in our tail code
+trail still ends 151  the stop is inside Apple's own submitKIQFrame epilogue,
+                      with nothing of ours left in the span to blame - which
+                      would be a hard fact and a new place to disassemble
+```
+
+Build: UUID 91991334, hosttest passes. Boot-args unchanged.
