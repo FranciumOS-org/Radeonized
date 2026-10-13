@@ -518,6 +518,8 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dm: is the KIQ queue live, and is the header dump a pattern?
     "diag_hqd_active", "diag_gfx_hqd_active", "diag_hqd_pq_base",
     "diag_hqd_doorbell", "diag_mec_hdr4",
+    // 2dn: the HQD window selector and the queue the KIQ asked for.
+    "diag_grbm_gfx_cntl", "kiq_spec0", "kiq_spec1", "kiq_spec2",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the
