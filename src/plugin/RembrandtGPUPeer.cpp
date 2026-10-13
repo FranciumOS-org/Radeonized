@@ -622,7 +622,34 @@ static const char *const kRbgpuNvramKeys[] = {
     "sw_exit_h340", "sw_exit_h340_cleared",
 };
 
+// 2et (2026-10-13): once the doStart gate chain starts, the synchronous
+// `rbgpu-gate` breadcrumb is the only NVRAM record that matters, and it must
+// not have to queue behind this thread. The 2es boot proved they contend:
+// a refresh pass published RBGPULog with mark 51 in it and then never
+// finished its own saveDiagToNvram (the summary still reads gate_stage=0x65 =
+// 101, three gates stale), so the refresh thread was sitting inside the NVRAM
+// transaction while the start() thread went on to need it at gate 54.
+static volatile bool g_rbgpuNvramQuiesced = false;
+
+void rbgpu_nvram_quiesce(void) {
+    if (!g_rbgpuNvramQuiesced) {
+        g_rbgpuNvramQuiesced = true;
+        rbgpu_log("2et: NVRAM quiesced - the diag summary stops being flushed "
+                  "here, so the synchronous rbgpu-gate breadcrumb has the "
+                  "NVRAM controller to itself for the rest of the gate chain. "
+                  "Everything already in rbgpu-diag stands; nothing later "
+                  "reaches it.");
+    }
+}
+
 void RembrandtGPUPeer::saveDiagToNvram() {
+    // 2et: the gate chain owns NVRAM from gate 40 onward. The registry
+    // properties (RBGPULog / RBGPUDiag) keep refreshing; only the flash
+    // commit stops.
+    if (g_rbgpuNvramQuiesced) {
+        return;
+    }
+
     IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
     if (!options) {
         return;

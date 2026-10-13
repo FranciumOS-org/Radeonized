@@ -3347,6 +3347,16 @@ static void rbgpu_mark_2es(uint32_t stage, const char *what) {
 }
 
 static void rbgpu_gate_2en(uint32_t stage, const char *what) {
+    // 2et: gate 40 is the first gate of the doStart chain. From here on the
+    // refresh thread stops flushing the diag summary, so these synchronous
+    // writes are the only NVRAM traffic. The 2es boot showed the two writers
+    // contend: a refresh pass published the log with mark 51 in it and then
+    // never finished its own flash commit, leaving the summary three gates
+    // stale - which is the state the start() thread then walked into at
+    // gate 54.
+    if (stage >= 40) {
+        rbgpu_nvram_quiesce();
+    }
     rbgpu_diag_set_num("gate_stage", stage);
     // 2eo: and synchronously, on this thread, because the diag path above
     // can be starved by the hang it is trying to locate.
