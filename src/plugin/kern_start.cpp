@@ -1527,6 +1527,31 @@ static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
 // dump point were answering a settled question at the cost of 45 synchronous
 // NVRAM writes a boot. rbgpu_gate_nvram is still there if a dump stalls again.
 
+static void rbgpu_dump_gc_regs(const char *tag);
+
+// 2fe (2026-10-13): the three dump points AFTER post-startKIQ are retired by
+// default. Every question they were added for is answered: the GPUVM fault is
+// gone at at-stamp-wait (2em), the queue is live with RPTR=WPTR=0x20 at
+// post-stamp-wait (2dq/2do), and the fault latch is clean before the doorbell
+// (2ea). What they still do is read ~40 GC registers and write GRBM_GFX_CNTL
+// inside the one span the trail has been stopping in - and a GC/SMN read that
+// stalls is a documented non-deterministic hazard on this chip (the boot 6/7
+// RSMU timeouts). This is the only hardware access in that span, so it is the
+// only candidate left for an endpoint that varies between 45 and 101 on
+// identical code. -rbgpuregdump puts them back.
+static void rbgpu_dump_gc_regs_late(const char *tag) {
+    static int checked = 0, on = 0;
+    if (!checked) { checked = 1; on = checkKernelArgument("-rbgpuregdump") ? 1 : 0; }
+    if (!on) {
+        rbgpu_log("2fe: [%s] register dump SKIPPED (-rbgpuregdump not set). This is "
+                  "the only hardware access in the span the trail stops in; the "
+                  "questions it answered are recorded and it reads nothing new.",
+                  tag);
+        return;
+    }
+    rbgpu_dump_gc_regs(tag);
+}
+
 static void rbgpu_dump_gc_regs(const char *tag) {
     if (!g_hw.ctx || !g_hw.rreg) {
         rbgpu_log("2ap DIAG [%s]: no HW ctx/rreg, skipping", tag);
@@ -3488,7 +3513,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     // work really is submitted. WPTR here is the discriminator:
     //   WPTR still 0  -> the doorbell/WPTR write never reached the queue
     //   WPTR advanced -> work is queued and the CP is not consuming it
-    rbgpu_dump_gc_regs("at-stamp-wait");
+    rbgpu_dump_gc_regs_late("at-stamp-wait");
 
     // 2dw (2026-10-12): corrected reading of the stamp path, and the fence
     // itself. 2ds/2dt/2du/2dv read ONE BRANCH BACKWARDS and chased a non-bug
@@ -3804,7 +3829,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                                 "a result.");
             }
         }
-        rbgpu_dump_gc_regs("post-stamp-wait");
+        rbgpu_dump_gc_regs_late("post-stamp-wait");
     } else {
         rbgpu_log("2cy: skipping the wait (-rbgpustampwait not set) -> false, so the "
                   "boot fails fast instead of polling forever");
@@ -3902,14 +3927,17 @@ static void rbgpu_probe_regread_2fb(void) {
         rbgpu_gate_2en(48, "probe SKIPPED: vtable[0x148] NULL");
         return;
     }
-    rbgpu_gate_2en(49, "calling Apple's accessor READ of CP_RB0_CNTL");
+    rbgpu_gate_2en(49, "calling accessor vtable[0x148] on the CP_RB0_CNTL id");
     uint32_t v = fn(obj, RB_2FB_CP_RB0_CNTL);
     char done[96];
-    snprintf(done, sizeof(done), "CP_RB0_CNTL read RETURNED 0x%08x", v);
+    snprintf(done, sizeof(done), "vtable[0x148] RETURNED 0x%08x (0x3041 = seg0+off)", v);
     rbgpu_diag_set_num("rb0_cntl_via_accessor", v);
     rbgpu_gate_2en(47, done);
-    rbgpu_log("2fb: CP_RB0_CNTL via Apple's accessor = 0x%08x (2dl read "
-              "0x00a00000 straight through MMIO)", v);
+    rbgpu_log("2fe: accessor vtable[0x148](CP_RB0_CNTL id) = 0x%08x. seg0 0x1260 + "
+              "mmCP_RB0_CNTL 0x1de1 = 0x3041 EXACTLY, so this slot RESOLVES an "
+              "encoded id to a dword offset and does NOT read the register (2dl read "
+              "the contents, 0x00a00000, through MMIO). It confirms seg0 = 0x1260 a "
+              "second, independent way: Apple's accessor computes the same base.", v);
 }
 
 static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
@@ -3929,7 +3957,7 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     // SMU is up and says GFX is not in GFXOFF - and yet the stamp never
     // arrives. Read-only, and the only reading taken while the packet is
     // actually in flight.
-    rbgpu_dump_gc_regs("pre-kiq-submit");
+    rbgpu_dump_gc_regs_late("pre-kiq-submit");
 
     bool ret = orig_kiq_submitSetResources_2cq
                    ? orig_kiq_submitSetResources_2cq(ch, spec)
