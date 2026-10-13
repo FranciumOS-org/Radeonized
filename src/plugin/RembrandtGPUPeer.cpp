@@ -512,6 +512,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dk: the CP/RLC state, read with the corrected addressing.
     "diag_rlc_stat", "diag_rlc_gpm", "diag_cp_stat",
     "diag_cp_me_cntl", "diag_cp_mec_cntl", "diag_cp_stat_seg0",
+    // 2dl: seg0 proof + whether the MEC ever fetched a packet.
+    "diag_rb0_cntl", "diag_rb0_cntl_s0", "diag_rb0_rptr", "diag_rb0_wptr",
+    "diag_mec_hdr", "diag_grbm_status",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the
