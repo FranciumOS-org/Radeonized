@@ -1882,3 +1882,50 @@ The me 0..2 x pipe 0..3 sweep is dropped: it only reprinted the same slot
 through aliased selectors and cost twelve log lines per point.
 
 Build: UUID E34337E3, hosttest passes. Same boot-args, still armed.
+
+### 2dp on hardware (2026-10-12): startKIQ creates the queue — and my read point was wrong
+
+logs/20261012-212642-plugin, UUID E34337E3, armed, no panic.
+
+**Settled: the queue does NOT predate startKIQ.** Same slot, me=2 pipe=1
+queue=0, at two points:
+
+```
+post-gc-hw-init  ACTIVE=0  PQ_BASE=0  DOORBELL=0  CTRL=0x00308509
+post-startKIQ    ACTIVE=1  PQ_BASE=0xffbfe800  DOORBELL=0x40000000  CTRL=0xc030860d
+```
+
+`0x00308509` is exactly what the empty me=1/* slots read in 2do, so before
+startKIQ this slot is genuinely empty and afterwards it is configured.
+**startKIQ really does create the KIQ queue**, which means the TTL/HWLibs
+layer underneath it works on this chip. Doorbell enable is set with offset 0,
+and offset 0 is what amdgpu uses for the KIQ, so that is not a fault either.
+
+**Not settled, and the fault is mine: the measurement was in the wrong place.**
+`pre-kiq-submit` is `submitSetResourcesPacket`'s **ENTRY** hook - it runs
+before the packet is written and before the doorbell is rung - so
+`WPTR = RPTR = 0` there is exactly what should be seen and discriminates
+nothing. The 2dp line "nothing submitted yet (both 0)" is accurate and useless.
+
+## 2dq (2026-10-12): measure after the doorbell, not before it
+
+`waitForHwStamp` is called from `submitKIQFrame` **after** commitBlock and
+after the doorbell write (vtable[0x158]), so the 2cy hook is the first moment
+at which the work genuinely is submitted. The register dump now runs there too,
+tagged `at-stamp-wait`.
+
+That is the discriminator this whole line of boots has been circling:
+
+```
+WPTR still 0   the doorbell / WPTR write never reached the queue - the fault
+               is in submission, and the CP is idle because nothing arrived
+WPTR advanced  work IS queued and the CP is not consuming it - the fault is
+               in execution, with a live queue and a real ring behind it
+```
+
+Everything else about the queue is now measured and healthy: created by
+startKIQ, ACTIVE, doorbell enabled at the offset amdgpu uses, ring allocated
+at a real carve-out MC address, CP unhalted, RLC firmware present.
+
+Build: UUID 53BA2078, hosttest passes. Same boot-args, still armed. All reads
+except the GRBM_GFX_CNTL selector, which is saved and restored.
