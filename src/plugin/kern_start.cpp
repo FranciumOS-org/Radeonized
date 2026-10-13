@@ -1689,6 +1689,70 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     // zero means no class of fault is being reported at all - in which case a
     // zero STATUS says nothing whatever. Say so rather than letting it read
     // as "no fault".
+    // 2eb (2026-10-12): is the ring address inside the VMID's mapped range?
+    //
+    // 2ea dated the fault: STATUS is 0 at post-gc-hw-init, post-startKIQ and
+    // pre-kiq-submit, and becomes 0x9ba at at-stamp-wait - so the KIQ's own
+    // submission raises it, and the "pre-existing fault" escape is closed.
+    // Decoded, 0x9ba is WALKER_ERROR=5, PERMISSION_FAULTS=0xB,
+    // MAPPING_ERROR=1, CID=4, RW=0: a READ whose page walk found NO VALID
+    // MAPPING, at 0xFFBFE80000 = CP_HQD_PQ_BASE << 8, the ring base.
+    //
+    // 2do left exactly this thread hanging: PQ_BASE's GPUVM address
+    // (0xFFBFE80000) is not the ring MC address startKIQ was handed
+    // (0xf40fb28000), and there was no reason those should match. Now the
+    // GPUVM address turns out not to translate to anything, so the question
+    // is whether the page tables are supposed to cover it at all. The queue
+    // runs at VMID 0 (measured in 2do), so GCVM_CONTEXT0_* is its context.
+    //
+    // All reads, BASE_IDX 0, from docs/linux-ref/gc_10_3_0_offset.h. If the
+    // ring address lies outside [START, END] the answer is immediate; if it
+    // lies inside, the range is right and the fault is in the page-table
+    // contents rather than the aperture.
+    {
+        const uint32_t dwL2_CNTL   = 0x15bc;
+        const uint32_t dwC0_CNTL   = 0x15fc;
+        const uint32_t dwC0_PT_LO  = 0x1667, dwC0_PT_HI  = 0x1668;
+        const uint32_t dwC0_ST_LO  = 0x1687, dwC0_ST_HI  = 0x1688;
+        const uint32_t dwC0_EN_LO  = 0x16a7, dwC0_EN_HI  = 0x16a8;
+
+        auto rd = [&](uint32_t dw) {
+            return g_hw.rreg(g_hw.ctx, (kSeg0Conv + dw) * 4);
+        };
+        uint32_t l2c = rd(dwL2_CNTL), c0c = rd(dwC0_CNTL);
+        uint64_t ptb = (static_cast<uint64_t>(rd(dwC0_PT_HI)) << 32) | rd(dwC0_PT_LO);
+        uint64_t st  = (static_cast<uint64_t>(rd(dwC0_ST_HI)) << 32) | rd(dwC0_ST_LO);
+        uint64_t en  = (static_cast<uint64_t>(rd(dwC0_EN_HI)) << 32) | rd(dwC0_EN_LO);
+        uint64_t ring = static_cast<uint64_t>(g_rb_2ea_pq_base) << 8;
+
+        rbgpu_diag_set_num("vm_l2_cntl", l2c);
+        rbgpu_diag_set_num("vm_c0_cntl", c0c);
+        rbgpu_diag_set_num("vm_c0_ptb", ptb);
+        rbgpu_diag_set_num("vm_c0_start", st);
+        rbgpu_diag_set_num("vm_c0_end", en);
+
+        // START/END are page numbers in amdgpu's usage, so both readings are
+        // printed and neither is asserted - the same rule as the fault addr.
+        rbgpu_log("2eb DIAG [%s]: GCVM_L2_CNTL=0x%08x CONTEXT0_CNTL=0x%08x "
+                  "PT_BASE=0x%llx START=0x%llx END=0x%llx "
+                  "(as pages: 0x%llx..0x%llx) ; ring VA = 0x%llx",
+                  tag, l2c, c0c, ptb, st, en, st << 12, en << 12, ring);
+        if (ring != 0) {
+            bool in_raw   = (ring >= st && ring <= en);
+            bool in_pages = (ring >= (st << 12) && ring <= (en << 12));
+            rbgpu_diag_set_num("vm_ring_in_range", (in_raw || in_pages) ? 1 : 0);
+            rbgpu_log("2eb DIAG [%s]: ring VA 0x%llx vs CONTEXT0 range -> %s",
+                      tag, ring,
+                      (in_raw || in_pages)
+                          ? "INSIDE the mapped range, so the aperture is right "
+                            "and the fault is in the page-table contents, not "
+                            "the range"
+                          : "OUTSIDE the mapped range under either reading: the "
+                            "ring GPUVM address the MQD was given is not covered "
+                            "by this VMID's page tables at all");
+        }
+    }
+
     // 2ea (2026-10-12): WHEN did the fault latch, and is it the ring or the
     // fence? The 2dz boot found STATUS=0x881 with CNTL=0x1ffc (reporting on,
     // so the latch is meaningful) and fault page 0x0FFBFE80. Under the
@@ -1728,7 +1792,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   "fence dest = 0x%llx -> %s",
                   tag, vm_status & 1u, vm_status, fpage, fbyte,
                   g_rb_2ea_pq_base, ring, g_rb_2dt_wb_c8,
-                  !(vm_status & 1u)
+                  (vm_status == 0)
                       ? "nothing latched at this point"
                   : (ring != 0 && fbyte == ring)
                       ? "THE FAULT IS AT THE RING BASE - the CP's fetch of the "
@@ -1740,7 +1804,13 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                       : "the fault is at neither the ring nor the fence page");
     }
 
-    if (vm_status & 1u) {
+    // 2eb: a nonzero STATUS is the latch. Bit 0 is MORE_FAULTS ("further
+    // faults beyond the first"), NOT a validity bit - 2dz/2ea tested
+    // `status & 1` and so called the 2ea boot's genuine 0x9ba fault "nothing
+    // latched", while 2dz's 0x881 printed the banner only because
+    // MORE_FAULTS happened to be set that boot. Ninth instance of this
+    // project's recurring error, in the code written to prevent it.
+    if (vm_status != 0) {
         // The address register's units are not independently verified here, so
         // both readings are printed and neither is asserted.
         uint64_t raw  = (static_cast<uint64_t>(vm_hi) << 32) | vm_lo;

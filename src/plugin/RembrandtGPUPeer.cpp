@@ -555,6 +555,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2ea: the fault status per dump point, to date the latch.
     "vmf_st_gc", "vmf_st_kiq", "vmf_st_pre", "vmf_st_wait", "vmf_st_post",
     "vmf_ad_gc", "vmf_ad_kiq", "vmf_ad_pre", "vmf_ad_wait", "vmf_ad_post",
+    // 2eb: the VMID 0 page-table context the ring must live in.
+    "vm_l2_cntl", "vm_c0_cntl", "vm_c0_ptb", "vm_c0_start", "vm_c0_end",
+    "vm_ring_in_range",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

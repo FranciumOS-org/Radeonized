@@ -2611,3 +2611,84 @@ The comparison now names which address it matched - the ring base
 neither - instead of only testing the fence.
 
 Build: UUID 749D33AD, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2ea on hardware (2026-10-12): the fault is OURS — raised by the submission
+
+logs/20261012-225909-plugin, UUID 749D33AD, armed, no panic. 259 diag entries.
+
+```
+point   vmf_st_*     vmf_ad_*      -> byte
+gc      0x00000000   0             -            before startKIQ
+kiq     0x00000000   0             -
+pre     0x00000000   0             -
+wait    0x000009ba   0x0ffbfe80    0xffbfe80000  <- appears HERE
+post    0x000009ba   0x0ffbfe80    0xffbfe80000
+```
+
+STATUS is **zero at all three points before the doorbell** and nonzero from
+`at-stamp-wait` onwards, at the ring base again. So the fault is raised by the
+KIQ's own submission and does **not** predate `startKIQ`: the pre-existing-fault
+escape 2ea was written to test is closed, and the ring-fault lead is real.
+
+**But the 2ea log line printed "nothing latched at this point" while showing a
+nonzero status** - a bug in the classifier, not in the chip. It tested
+`vm_status & 1`, assuming bit 0 was a validity bit. Bit 0 is **MORE_FAULTS**
+("further faults beyond the first"). 2dz's `0x881` printed the fault banner
+only because MORE_FAULTS happened to be set that boot; this boot's genuine
+fault has MORE_FAULTS=0 and the code called it nothing. **A nonzero STATUS is
+the latch.** Ninth instance of this project's recurring error - and the first
+inside the code written to prevent it. Fixed in 2eb (`vm_status != 0`).
+
+Decoded properly, both boots at the same address, same client, same direction:
+
+| field | 0x881 (2dz) | 0x9ba (2ea) |
+|---|---|---|
+| MORE_FAULTS | 1 | 0 |
+| WALKER_ERROR | 0 | **5** |
+| PERMISSION_FAULTS | 0x8 | 0xB |
+| MAPPING_ERROR | 0 | **1** |
+| CID | 4 | 4 |
+| RW | 0 (read) | 0 (read) |
+
+`MAPPING_ERROR=1` with `WALKER_ERROR=5` says the page walk found **no valid
+mapping** for the ring address. `CPF_UTCL1_STATUS` is nonzero both boots
+(0xb0002, 0xb01) while `CPC_UTCL1_STATUS` is 0: the fetcher's translation unit.
+
+So the chain is coherent end to end: the MQD points the CP at GPUVM
+`0xFF_BFE8_0000`, that address does not translate, the fetch faults, RPTR
+advances having discarded the data, the WRITE_DATA inside the frame is never
+executed, the fence never lands, `waitForHwStamp` fails, `powerUpHW` fails.
+
+## 2eb (2026-10-12): is the ring address inside the VMID's mapped range?
+
+This picks up the thread 2do left hanging. `CP_HQD_PQ_BASE << 8` =
+`0xFF_BFE8_0000` is not the ring MC address `startKIQ` was handed
+(`0xf40fb28000`), and 2do correctly said there was no reason those should
+match - a compute HQD holds a GPUVM VA. What is new is that the GPUVM VA
+**does not translate to anything**, so the question is whether the page tables
+are meant to cover it. The queue runs at VMID 0 (measured in 2do), so
+`GCVM_CONTEXT0_*` is its context:
+
+```
+GCVM_L2_CNTL                           0x15bc
+GCVM_CONTEXT0_CNTL                     0x15fc
+GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32/HI32   0x1667 / 0x1668
+GCVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32/HI32  0x1687 / 0x1688
+GCVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32/HI32    0x16a7 / 0x16a8
+```
+
+All reads, BASE_IDX 0. START/END are page numbers in amdgpu's usage, so both
+readings are printed and the range test accepts either - neither is asserted,
+the same rule the fault address gets.
+
+```
+ring VA outside [START, END]   the MQD was given a GPUVM address this VMID's
+                               page tables do not cover at all
+ring VA inside                 the aperture is right and the fault is in the
+                               page-table contents, not the range
+```
+
+Diag keys `vm_l2_cntl`, `vm_c0_cntl`, `vm_c0_ptb`, `vm_c0_start`, `vm_c0_end`,
+`vm_ring_in_range`, in NVRAM.
+
+Build: UUID 3857364D, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
