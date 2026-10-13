@@ -536,6 +536,8 @@ static const char *const kRbgpuNvramKeys[] = {
     "hqd_slot_found",
     // 2ds: the channel's own submitted/completed stamp counters.
     "stamp_submitted", "stamp_completed", "stamp_wb_e0",
+    // 2du: which gate leaves channel+0xe0 at -1.
+    "regchan_calls", "regchan_fails", "addchan_calls", "addchan_fails",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the
