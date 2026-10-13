@@ -530,6 +530,10 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // do its entries carry the same zero vram_base_offset? This is the live
     // question; everything it needs for context comes with it.
     // 2eh: the GART page table's address straight from the TTL layer.
+    // 2ej: where the page directory's own entries point - this decides
+    // whether PT_BASE may be patched at all.
+    "pde_valid", "pde_sys", "pde_low", "pde_sysphys", "pde_carveout",
+    "pde_other", "pde_e0", "pde_e1", "pde_no_va",
     "gart_info_resolved", "gart_info_st", "gart_match_idx", "gart_info_early",
     "gart_info_0", "gart_info_1", "gart_info_2", "gart_info_3", "gart_info_4",
     "vm_c0_ptb", "gc_fb_off",
