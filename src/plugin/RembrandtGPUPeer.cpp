@@ -549,6 +549,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dy: the fence WRITE_DATA packet and the field it targets.
     "fencepkt_calls", "fencepkt_hdr", "fencepkt_ctl", "fencepkt_dst",
     "fencepkt_data", "chan_c8", "chan_c8_matches_wb",
+    // 2dz: did the fence write fault in GPUVM?
+    "vmf_cntl", "vmf_status", "vmf_addr_lo", "vmf_addr_hi",
+    "cp_cpc_status", "cp_cpf_status", "cpc_utcl1_status", "cpf_utcl1_status",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

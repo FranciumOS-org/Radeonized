@@ -1357,6 +1357,7 @@ static uint32_t g_rb_2dt_cmp_before = 0;
 static uint32_t g_rb_2dw_slot_idx   = 0;
 static uint64_t g_rb_2dw_slot_b0    = 0;
 static uint32_t g_rb_2dw_fence_bef  = 0;
+static uint64_t g_rb_2dt_wb_c8      = 0;  // 2dz: the fence destination
 
 // 2dx: AMDHardware::getChannelWriteBackFrameGPUAddr(uint) - the MC address the
 // GPU is told for a writeback frame, the counterpart of the CPU pointer the
@@ -1625,6 +1626,95 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     rbgpu_diag_set_num("diag_rb0_wptr", rb_wptr);
     rbgpu_diag_set_num("diag_mec_hdr", mec_hdr);
     rbgpu_diag_set_num("diag_grbm_status", grbm);
+
+    // 2dz (2026-10-12): did the fence WRITE_DATA fault in GPUVM?
+    //
+    // 2dy proved the packet is correct in every field: WRITE_DATA (0xC0033700),
+    // DST_SEL 5 memory with WR_CONFIRM (0x00100500), destination
+    // 0xFFBFDC0040 = exactly the writeback frame whose CPU VA the driver polls,
+    // data = the asked-for stamp. The CP consumed the block (2dq: RPTR = WPTR =
+    // 0x20 with CP_STAT busy) and the dword never changed.
+    //
+    // This is Apple's shipping KIQ code and it works on Navi 21, so the packet
+    // layout, the 0xFFFF1000 NOP padding and the writeback mechanism are sound
+    // in principle. What is chip-specific is that the destination is a GPUVM
+    // VIRTUAL address translated through the queue's VMID. The CP reads the
+    // ring out of the same 0xFF_BF.. region, but a WRITE that misses the page
+    // tables leaves RPTR advanced and the value never stored - which is
+    // precisely what has been measured.
+    //
+    // All reads, all BASE_IDX 0 (seg0 = 0x1260, proven in 2dl).
+    const uint32_t dwVM_FAULT_CNTL    = 0x15c4;
+    const uint32_t dwVM_FAULT_STATUS  = 0x15c8;
+    const uint32_t dwVM_FAULT_ADDR_LO = 0x15c9;
+    const uint32_t dwVM_FAULT_ADDR_HI = 0x15ca;
+    const uint32_t dwCP_CPC_STATUS    = 0x0e24;
+    const uint32_t dwCP_CPF_STATUS    = 0x0e27;
+    const uint32_t dwCPC_UTCL1_STATUS = 0x1f55;
+    const uint32_t dwCPF_UTCL1_STATUS = 0x1f56;
+    const uint32_t dwGRBM_STATUS2     = 0x0da2;
+
+    uint32_t vm_cntl   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwVM_FAULT_CNTL)    * 4);
+    uint32_t vm_status = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwVM_FAULT_STATUS)  * 4);
+    uint32_t vm_lo     = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwVM_FAULT_ADDR_LO) * 4);
+    uint32_t vm_hi     = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwVM_FAULT_ADDR_HI) * 4);
+    uint32_t cpc_stat  = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_CPC_STATUS)    * 4);
+    uint32_t cpf_stat  = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_CPF_STATUS)    * 4);
+    uint32_t cpc_utcl1 = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCPC_UTCL1_STATUS) * 4);
+    uint32_t cpf_utcl1 = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCPF_UTCL1_STATUS) * 4);
+    uint32_t grbm2     = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwGRBM_STATUS2)     * 4);
+
+    rbgpu_diag_set_num("vmf_cntl", vm_cntl);
+    rbgpu_diag_set_num("vmf_status", vm_status);
+    rbgpu_diag_set_num("vmf_addr_lo", vm_lo);
+    rbgpu_diag_set_num("vmf_addr_hi", vm_hi);
+    rbgpu_diag_set_num("cp_cpc_status", cpc_stat);
+    rbgpu_diag_set_num("cp_cpf_status", cpf_stat);
+    rbgpu_diag_set_num("cpc_utcl1_status", cpc_utcl1);
+    rbgpu_diag_set_num("cpf_utcl1_status", cpf_utcl1);
+    rbgpu_diag_set_num("diag_grbm_status2", grbm2);
+
+    rbgpu_log("2dz DIAG [%s]: GCVM_L2_PROTECTION_FAULT CNTL=0x%08x STATUS=0x%08x "
+              "ADDR_HI=0x%08x LO=0x%08x", tag, vm_cntl, vm_status, vm_hi, vm_lo);
+    rbgpu_log("2dz DIAG [%s]: CP_CPC_STATUS=0x%08x CP_CPF_STATUS=0x%08x "
+              "CPC_UTCL1=0x%08x CPF_UTCL1=0x%08x GRBM_STATUS2=0x%08x",
+              tag, cpc_stat, cpf_stat, cpc_utcl1, cpf_utcl1, grbm2);
+
+    // What would have to be true for a zero STATUS to mean anything: fault
+    // reporting has to be switched on. GCVM_L2_PROTECTION_FAULT_CNTL bit 0 is
+    // ENABLE_INTERRUPTS in amdgpu's layout, and the register being entirely
+    // zero means no class of fault is being reported at all - in which case a
+    // zero STATUS says nothing whatever. Say so rather than letting it read
+    // as "no fault".
+    if (vm_status & 1u) {
+        // The address register's units are not independently verified here, so
+        // both readings are printed and neither is asserted.
+        uint64_t raw  = (static_cast<uint64_t>(vm_hi) << 32) | vm_lo;
+        uint64_t pages = raw << 12;
+        rbgpu_log("2dz DIAG [%s]: *** A GPUVM PROTECTION FAULT IS LATCHED *** "
+                  "STATUS=0x%08x (MORE_FAULTS=%u WALKER_ERROR=%u "
+                  "PERMISSION_FAULTS=0x%x MAPPING_ERROR=%u RW=%u) ; fault addr "
+                  "raw=0x%llx, or 0x%llx if the register counts 4 KB pages ; the "
+                  "fence destination was 0x%llx -> %s",
+                  tag, vm_status, vm_status & 1u, (vm_status >> 1) & 7u,
+                  (vm_status >> 4) & 0xFu, (vm_status >> 8) & 1u,
+                  (vm_status >> 18) & 1u, raw, pages, g_rb_2dt_wb_c8,
+                  ((raw == (g_rb_2dt_wb_c8 >> 12)) || (pages == (g_rb_2dt_wb_c8 & ~0xFFFull)))
+                      ? "THE FAULT IS AT THE FENCE DESTINATION: the GPUVM "
+                        "mapping covers the ring for fetch but not this frame "
+                        "for write"
+                      : "the fault address does not match the fence destination "
+                        "under either reading, so it is a different access");
+    } else if (vm_cntl == 0) {
+        rbgpu_log("2dz DIAG [%s]: STATUS=0 but FAULT_CNTL=0, so no fault class is "
+                  "being reported - this does NOT mean there was no fault",
+                  tag);
+    } else {
+        rbgpu_log("2dz DIAG [%s]: no GPUVM protection fault latched, with "
+                  "FAULT_CNTL=0x%08x so reporting is at least partly on - the "
+                  "write was not refused by the page tables",
+                  tag, vm_cntl);
+    }
 
     bool a_live = (rb_cntl_a != 0 && rb_cntl_a != 0xFFFFFFFF);
     bool b_live = (rb_cntl_b != 0 && rb_cntl_b != 0xFFFFFFFF);
@@ -2637,6 +2727,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             // different functions, so one can be set while the other is not.
             uint64_t c8 = *reinterpret_cast<volatile uint64_t *>(
                 reinterpret_cast<uintptr_t>(ch) + 0xc8);
+            g_rb_2dt_wb_c8 = c8;
             rbgpu_diag_set_num("chan_c8", c8);
             rbgpu_diag_set_num("chan_c8_matches_wb", (c8 == g1) ? 1 : 0);
             rbgpu_log("2dy: channel+0xc8 (what the WRITE_DATA packet targets) = "

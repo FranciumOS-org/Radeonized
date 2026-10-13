@@ -2467,3 +2467,75 @@ Diag keys `fencepkt_calls`, `fencepkt_hdr`, `fencepkt_ctl`, `fencepkt_dst`,
 `fencepkt_data`, `chan_c8`, `chan_c8_matches_wb`, all in NVRAM.
 
 Build: UUID 6DE72A13, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2dy on hardware (2026-10-12): the fence packet is CORRECT in every field
+
+logs/20261012-223450-plugin, UUID 6DE72A13, armed, no panic. 240 diag entries.
+
+```
+fencepkt_hdr=0xc0033700   WRITE_DATA, 5 dwords
+fencepkt_ctl=0x00100500   DST_SEL 5 (memory), WR_CONFIRM
+fencepkt_dst=0xffbfdc0040 == wb_gpu_slot == chan_c8
+fencepkt_data=0x1         == the asked-for stamp
+chan_c8=0xffbfdc0040  chan_c8_matches_wb=1
+fence_val_before=0  fence_val_after=0  wb_cpu_base=0xffffffe0de560000
+```
+
+So `allocateMemoryResources` **did** set `+0xc8`, and it equals
+`getChannelWriteBackFrameGPUAddr(1)` exactly. The GPU is told to write the
+value 1 to the very frame whose CPU VA (`0xffffffe0de560040`) the driver
+polls, with write-confirm on. The CP consumed the block (2dq) and the dword
+never changes. Nothing in the submission is wrong.
+
+(The `2dy` log line was evicted by the ring wrap; the diag keys carried it,
+which is why they exist.)
+
+### The frame layout, and why it is not the suspect
+
+`getKIQFrame` (0xbe957a0) fills all 32 dwords from `vtable[0x1f0]`, which for
+the KIQ is the constant `0xFFFF1000` (0xbec77f8) - PM4 type 3, opcode 0x10
+(NOP), count field 0x3FFF, AMD's standard ring-padding dword. SET_RESOURCES
+then overwrites dwords 0-7 and `writeDataCmdPacket` dwords 16-20, leaving the
+NOP filler between and after them.
+
+RPTR advancing to 0x20 = 32 dwords = the whole committed block is consistent
+with the CP walking all of it. **This is Apple's shipping KIQ bring-up and it
+works on Navi 21**, so the layout, the padding and the writeback mechanism are
+sound in principle; inventing a PM4 parse-drift theory for a path that
+demonstrably works elsewhere would be the eighth instance of the project's
+recurring error, not a finding.
+
+## 2dz (2026-10-12): did the fence write fault in GPUVM?
+
+What IS chip-specific: the destination `0xFFBFDC0040` is a GPUVM **virtual**
+address translated through the queue's VMID. The CP fetches the ring out of
+the same `0xFF_BF..` region, but fetch and write need not be mapped alike, and
+a write that misses the page tables leaves RPTR advanced with the value never
+stored - exactly what is measured. All reads, all BASE_IDX 0 (seg0 = 0x1260,
+proven in 2dl), from docs/linux-ref/gc_10_3_0_offset.h:
+
+```
+GCVM_L2_PROTECTION_FAULT_CNTL     0x15c4
+GCVM_L2_PROTECTION_FAULT_STATUS   0x15c8
+GCVM_L2_PROTECTION_FAULT_ADDR_LO32/HI32  0x15c9 / 0x15ca
+CP_CPC_STATUS 0x0e24   CP_CPF_STATUS 0x0e27
+CPC_UTCL1_STATUS 0x1f55   CPF_UTCL1_STATUS 0x1f56   GRBM_STATUS2 0x0da2
+```
+
+The UTCL1 status registers are the CP's own address-translation units, so they
+report a translation failure even if L2 fault reporting is off.
+
+**What would have to be true for the reading to mean anything**, stated in the
+code and in the log: a zero STATUS only means "no fault" if fault reporting is
+switched on. `FAULT_CNTL == 0` means no fault class is reported at all, and the
+log then says in those words that this does **not** mean there was no fault.
+When a fault IS latched, the address register's units are not independently
+verified, so both the raw value and the 4 KB-page reading are printed and
+compared against the fence destination, with neither asserted.
+
+Diag keys `vmf_cntl`, `vmf_status`, `vmf_addr_lo`, `vmf_addr_hi`,
+`cp_cpc_status`, `cp_cpf_status`, `cpc_utcl1_status`, `cpf_utcl1_status`,
+`diag_grbm_status2`, in NVRAM. Read at every dump point, including
+`post-stamp-wait` after the full 5 s wait.
+
+Build: UUID 0EEDEBBB, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
