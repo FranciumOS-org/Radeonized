@@ -3880,3 +3880,87 @@ gate 50 again           the doStart reads are ALSO enough to cost the thread
                         its progress, which would make the hook layer itself,
                         not its placement, the thing to fix
 ```
+
+### 2ew answered on hardware (2026-10-13): f10 = 0 — THE COMMAND-9 CREATE NEVER RUNS
+
+Read from the recovery boot that followed; build checked first, per the
+2cu/2cv rule.
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 1E39C00A   == build/out (2ew)
+rbgpu-diag        -> d=0 armed=0                        the recovery boot
+rbgpu-diag-prev   -> d=36 armed=1 ttl_hw_init_ret=ffffffffc6ef3001  (new boot)
+     gfxmqd_f10=0  gfxmqd_f310=0
+     gfxmqd_f250=f40fb27000  gfxmqd_f30=ffffffd39ba10000
+nvram rbgpu-gate  -> "151 waitForHwStamp RETURNED TRUE"
+```
+
+**The reads landed and the answer is f10 = 0.** Moving them to the doStart
+hook worked exactly as intended, and the question 2ev could not answer is
+settled:
+
+- **`pm4+0x10 = 0`, so region G is SKIPPED.** Apple's command-9
+  graphics-queue create at `0xbea26a1` **never runs on this chip**. The whole
+  line of suspicion this milestone family is named for is closed.
+- `pm4+0x310 = 0`, so the destroy at `0xbea2626` does not run either - which
+  follows, since it is nested inside G.
+- `pm4+0x250 = 0xF4_0FB2_7000` - a real carve-out MC address, 0x1000 below the
+  ring that `startKIQ` was handed (`0xf40fb28000`). The buffer region D passes
+  to `vtable[0x210]` is allocated where it should be.
+- `pm4+0x30 = 0xffffffd39ba10000` - a kernel object, the register accessor
+  regions I and J use.
+
+So the hang is in **A-F** (the allocation chain and the 4 KB `bzero` at
+`0xbea25ea`) or in **H-J** (`vtable[0x218]`, then the two GC register
+read-modify-writes). And the standing suspicion is now the leading
+explanation rather than a background one: `gfx_min = gfx_max = 0` since 2di,
+GFX DPM never started, and I/J are the first GC register accesses this path
+makes.
+
+**Withdrawal: the 2ev seven-boot table was over-read.** 2ev concluded that
+"whatever this hook does between the two gates decides how far the thread
+gets, and only the empty span reaches Apple's code". 2ew ran with the span
+empty - the exact configuration that gave 54 - and the gate came back **151**,
+which is *before* gates 45, 50 and 54. The prediction failed.
+
+So the stopping points across seven boots (53, 51, 50, 50, **54**, 50, 151)
+are seven single samples of something that varies, and I read their ordering
+as causal. 2eu's gate 54 was one sample, not a control. Sixteenth instance of
+the recurring error, and the first where I built a table out of n=1 rows.
+
+What all seven boots DO agree on: the thread gets into this region and the
+machine wedges hard. Nothing in the seven distinguishes where.
+
+## 2ex (2026-10-13): make one boot say whether the thread stopped or the record did
+
+The overwrite form of `rbgpu-gate` cannot tell "the thread stopped at 151"
+from "45, 50 and 54 were written and the tail was lost". Every conclusion
+drawn from a single gate value has that ambiguity under it, which is how the
+2ev table happened.
+
+`rbgpu_gate_nvram` now keeps a bounded **trail** and rewrites the whole string
+on every gate, so the variable reads e.g.
+
+```
+40 101 151 | 151 waitForHwStamp RETURNED TRUE      the thread stopped there
+40 101 151 45 50 54 | 54 calling the ORIGINAL      it reached Apple's code
+```
+
+Cap is 192 bytes with `CAP` appended rather than silent truncation; the chain
+writes about twenty gates. Same one flash write per gate as before - no new
+mechanism, just a record that does not throw away its own history.
+
+Build: UUID 41E6681D, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides:
+
+```
+trail ends at 151      the thread really does stop right after the first
+                       stamp wait, and the 2eu gate-54 boot is the outlier to
+                       explain - not the rule
+trail reaches 54       the overwrite form was losing the tail all along, every
+                       single-gate reading in 2eo-2ew is suspect, and the
+                       hang is in Apple's A-F or H-J as f10=0 now implies
+trail reaches 55 / 6x  initGraphicsMQD RETURNED and the frontier has moved on
+                       to submitMapQueuesPacket
+```

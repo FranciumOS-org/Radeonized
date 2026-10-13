@@ -857,8 +857,33 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
         }
         g_rbgpuOptions = options;   // retained by fromPath; kept for the boot
     }
-    char buf[80];
-    snprintf(buf, sizeof(buf), "%u %s", stage, what ? what : "");
+    // 2ex (2026-10-13): a TRAIL, not the last value. Seven boots stopped at
+    // seven different gates (53, 51, 50, 50, 54, 50, 151) and the overwrite
+    // form cannot tell "the thread stopped here" from "the later writes were
+    // lost". Appending every gate and rewriting the whole string makes one
+    // boot say which: a trail ending "40 101 151" means the thread stopped
+    // there, while "40 101 151 45 50 54" means it got to Apple's code and the
+    // overwrite form had simply been losing the tail.
+    //
+    // Bounded, and the cap is reported rather than silently truncating: the
+    // doStart chain writes at most ~20 gates.
+    static char trail[192];
+    static size_t trail_len = 0;
+    static bool  trail_full = false;
+    char one[16];
+    int n = snprintf(one, sizeof(one), "%u ", stage);
+    if (n > 0 && trail_len + static_cast<size_t>(n) + 4 < sizeof(trail)) {
+        memcpy(trail + trail_len, one, static_cast<size_t>(n));
+        trail_len += static_cast<size_t>(n);
+        trail[trail_len] = '\0';
+    } else if (!trail_full) {
+        trail_full = true;
+        strlcat(trail, "CAP", sizeof(trail));
+        trail_len = strlen(trail);
+    }
+
+    char buf[280];
+    snprintf(buf, sizeof(buf), "%s| %u %s", trail, stage, what ? what : "");
     if (auto str = OSString::withCString(buf)) {
         options->setProperty("rbgpu-gate", str);
         str->release();
