@@ -2966,6 +2966,7 @@ static bool (*orig_pm4_doStart_2ce)(void *, bool) = nullptr;
 
 // 2fb: the register accessor (pm4+0x30), stashed at doStart entry.
 static void *g_rb_2fb_regobj = nullptr;
+static void rbgpu_probe_regread_2fb(void);
 
 static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
@@ -3002,6 +3003,21 @@ static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
         // the moment Apple does, rather than here at doStart entry. Measuring
         // before the state exists is the 2dp/2eh/2ek mistake.
         g_rb_2fb_regobj = f30;
+        // 2fd (2026-10-13): the probe runs HERE, not after gate 45.
+        //
+        // Three boots (2fa, 2fb, 2fc) ran the gate-45 span with no relevant
+        // code change between them and the trail ended at 45, 45, 101. So the
+        // trail's endpoint still varies boot to boot, exactly as 2ez found,
+        // and a probe placed behind a varying gate inherits that variance -
+        // 2fb and 2fc both spent a boot learning nothing for that reason.
+        //
+        // doStart entry is the one site in this chain that has executed in
+        // every boot since 2ce. 2fb's objection to reading here was that the
+        // chip state would be wrong, but that applies to the WRITES; 2dl read
+        // CP_RB0_CNTL straight through MMIO at post-gc-hw-init - earlier than
+        // this - and got 0x00a00000, so the register is readable before
+        // doStart and a READ here is sound.
+        rbgpu_probe_regread_2fb();
         rbgpu_log("2ew: initGraphicsMQD branch fields at doStart entry: "
                   "pm4+0x10=%u (1 = the command-9 graphics-queue create at "
                   "0xbea26a1 RUNS; 0 = region G is SKIPPED and the hang is in "
@@ -3930,9 +3946,6 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     rbgpu_diag_set_num("setres_ret", static_cast<uint64_t>(g_rb_2cq_setres_ret));
     rbgpu_log("2cq: submitSetResourcesPacket(spec=%p) -> %d %s", spec, ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart exits via vtable[0x150], returns false)");
-    if (ret) {
-        rbgpu_probe_regread_2fb();
-    }
     return ret;
 }
 

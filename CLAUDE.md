@@ -4384,3 +4384,83 @@ complete decision tree:
 ```
 
 Build: UUID 720E1371, hosttest passes. Boot-args unchanged.
+
+### 2fc answered on hardware (2026-10-13): the trail endpoint still varies
+
+logs/20261013-193242-plugin, `plugin_check` ran in the armed boot
+(`armed=1`, `ttl_hw_init_ret=7dc79001`, a new boot), build checked:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 720E1371   == build/out (2fc)
+nvram rbgpu-gate  -> "40 101 | 101 waitForHwStamp ENTER"
+nvram rbgpu-beat  -> "n=17 gate=101 skips=0 forced=0 t=19380922540"
+log.txt           -> 278 lines, last is the post-stamp-wait dump's final line
+```
+
+**The trail went backwards again, and 2fc changed nothing in that span.** Its
+only edit is inside the probe, which runs *after* gate 45. So:
+
+```
+build   relevant code in the 45->151 span   trail reached
+2fa     unchanged                            45
+2fb     unchanged                            45
+2fc     unchanged                            101
+```
+
+Three boots, identical code, three different endpoints. **The gate trail's
+endpoint still varies**, which is 2ez's finding re-confirmed on a build where
+the logging contention was supposed to be gone - and it means the endpoint
+cannot be used to locate the thread even now.
+
+Two things were checked before writing that, because the obvious story was
+tempting and wrong:
+
+- **The logging is slow in this boot, but not where it matters.** 157 of 277
+  gaps exceed 1 ms, all in the channel-init phase from 13.5 s
+  (`createEngine`, `registerChannel`, `addHWChannel`), with the gaps growing
+  monotonically - 4.4, 5.9, 5.1, 6.1, 6.3, 6.5, 6.8, 7.0 ms. The
+  post-stamp-wait tail runs at 3-10 us, exactly as 2fa measured.
+- **It is not an O(n) cost in our log path.** `rbgpu_log_append_locked` is
+  O(1) (it dedupes against the previous entry only) and
+  `rbgpu_diag_set_num_locked` is an O(g_diagCount) scan of 32-byte keys -
+  microseconds at 300 keys, not milliseconds. And one refresh per 250 ms
+  cannot charge 5 ms to each of thirty lines in a 200 ms window. The gaps are
+  between *our hook lines*, so they include Apple's own per-channel work.
+- **Total elapsed logging is comparable**: 2fa 148 lines over 1861 ms, 2fc
+  278 lines over 1640 ms. The thread is not slower in 2fc; the time sits in
+  different places.
+
+I was one step from blaming the 2fa rate limit, or an O(n) scan, on a single
+boot each. Both were checked and neither holds.
+
+## 2fd (2026-10-13): put the probe where the code always reaches
+
+2fb and 2fc each spent a boot and answered nothing, for the same structural
+reason: the probe sat behind gate 45, and whether gate 45 is reached varies
+between boots. A measurement placed behind a varying gate inherits the
+variance.
+
+`rbgpu_probe_regread_2fb()` now runs from the **doStart hook**, immediately
+after the accessor is stashed - the one site in this chain that has executed
+in every boot since 2ce, twenty milestones ago.
+
+2fb's objection to reading here was that the chip state would be wrong. That
+applies to the WRITES; for a plain READ it does not, and the project's own
+data says so: **2dl read `CP_RB0_CNTL` straight through MMIO at
+`post-gc-hw-init`** - earlier than doStart - and got `0x00a00000`. The
+register is readable before doStart, so a read through Apple's accessor there
+is sound.
+
+What the next trail says, and it no longer depends on reaching gate 45:
+
+```
+46 49 47 early in the trail   the accessor READ works and returned a value;
+                              the stop is in one of Apple's WRITES
+                              (0x120/0x128/0x130) at 0xbea12f2 onward
+46 49 (then 40 ...)           the read itself does not return
+46 48                         the probe skipped, and the gate names the NULL
+no 46 at all                  the doStart hook's field-read block did not run,
+                              which would be new and worth its own look
+```
+
+Build: UUID DF573C32, hosttest passes. Boot-args unchanged.
