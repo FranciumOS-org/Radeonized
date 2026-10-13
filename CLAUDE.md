@@ -3396,3 +3396,61 @@ What the next armed boot decides, from `nvram rbgpu-gate`:
            gfxmqd_svc_fn names the function to disassemble
 55/51x     initGraphicsMQD completed and the stop moved on to mapQueues
 ```
+
+### 2ep answered on hardware (2026-10-13): past the service object, and the suspect is MINE
+
+Armed boot, wedged, power-cycled; the plugin_check that followed ran in the
+recovery boot and captured an empty log, so `rbgpu-gate` is the whole record:
+
+```
+nvram rbgpu-gate -> "53 initGraphicsMQD: service object obtained"
+```
+
+Stages 51, 52 and 53 all passed, so Apple's object chain is sound:
+`pm4+0x18` read, `vtable[0x2c0]` called, a service object returned. Gate 54
+was not written.
+
+**Between 53 and 54 there is no Apple code at all** - two vtable-slot reads,
+two diag sets and one log line. That makes the breadcrumb itself a suspect,
+and there is a concrete mechanism rather than a shrug:
+`rbgpu_gate_nvram` called `IORegistryEntry::fromPath("/options", gIODTPlane)`
+on **every** mark, which walks the device-tree plane under the registry lock -
+dozens of times, from inside `IOService::start`, the one thread that must not
+contend for the registry. That is a deadlock shape, and it matches the symptom
+that a wedge takes `ioreg` and `reboot` with it instead of stalling one
+thread. The 2eo boot (nine marks per dump point, the system still alive enough
+to run plugin_check over SSH) against the 2ep boot (four more marks, hard
+wedge) is consistent with it - two boots are a correlation, not a
+demonstration, and it is written here as a suspicion to be removed.
+
+## 2eq (2026-10-13): take the registry lookup out of the breadcrumb
+
+Three changes, all to the instrument.
+
+- `/options` is resolved **once**, lazily, and the entry retained for the
+  boot; later marks only `setProperty` on an entry already in hand. The
+  registry-plane walk is gone from the hot path.
+- The nine per-block dump marks are **retired**. The 2eo boot showed the
+  register dump runs to completion at every point (gate 40 follows it), so
+  they were answering a settled question at the cost of 45 synchronous NVRAM
+  writes a boot.
+- The 53 -> 54 span gets its own marks - `56` dereferencing the service
+  vtable, `57` vtable read, `58` slots read, `59` slots recorded - so the next
+  boot names the instruction rather than the span.
+
+Also fixed in passing: the first version of this change stripped the
+`options->release()` from `saveDiagToNvram` instead of from
+`rbgpu_gate_nvram`, which would have leaked an IORegistryEntry on every diag
+refresh. Caught by reading back which function the edit landed in.
+
+Build: UUID D7713190, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides, from `nvram rbgpu-gate`:
+
+```
+54 or beyond   the span is clear and the fromPath lookup WAS the problem;
+               the hang then moves to Apple's command-9 queue create
+56/57/58/59    the span is real after all and the mark names the read
+53 again       neither - the stop is in rbgpu_gate_nvram itself, and the
+               synchronous NVRAM write has to go
+```
