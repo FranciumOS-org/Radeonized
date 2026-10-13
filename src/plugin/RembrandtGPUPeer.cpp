@@ -949,11 +949,7 @@ void rbgpu_heartbeat_start(void) {
         return;
     }
     g_rbgpuBeatOn = true;
-    rbgpu_log("2ey: heartbeat armed (250 ms, rbgpu-beat). From here the gate trail "
-              "has a control: if the beat keeps advancing after the trail stops, "
-              "the start() thread alone is stuck and the trail locates it; if the "
-              "beat stops at the same moment, the machine died and the last gate "
-              "is incidental.");
+    rbgpu_log("2ey: heartbeat armed (250 ms, rbgpu-beat)");
     uint64_t deadline = 0;
     clock_interval_to_deadline(250, kMillisecondScale, &deadline);
     thread_call_enter_delayed(g_rbgpuBeatCall, deadline);
