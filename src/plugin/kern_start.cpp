@@ -3213,6 +3213,112 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
 // is not running. Observe only: no override, no skip. The point is to see the
 // return value and the time it took.
 static bool (*orig_hwchannel_waitForHwStamp_2cx)(void *, uint32_t) = nullptr;
+// 2en (2026-10-13): the wedge that came AFTER the fix, and the two things
+// that let it happen without leaving a trace.
+//
+// The 2em boot worked. Its NVRAM record: ptb_written=1, ptb_rel_holds=1,
+// ptb_back == ptb_want == 0x78fdfa001, vmf_st_wait=0, vmf_st_post=0 and
+// stamp_ret=1. The GPUVM MAPPING_ERROR that every boot since 2dz latched at
+// the ring is GONE, and the GPU wrote the completion fence, so doStart
+// continued past submitSetResourcesPacket for the first time in this
+// project. Then the machine wedged: tools/plugin_check.sh never returned
+// (ioreg blocks on the IOService lock the wedged start() thread holds),
+// Ctrl-C could not help because the process was in a kernel wait, and
+// `reboot` could not finish for the same reason. No panic, and the console
+// had stopped updating long before, so the photograph showed post-startKIQ
+// while NVRAM showed the boot had reached at-stamp-wait and succeeded.
+//
+// WHY it could wedge. doStart's remaining gates are initGraphicsMQD and five
+// submitMapQueuesPacket calls, and every one of those goes through
+// submitKIQFrame -> waitForHwStamp again. Apple's waitForHwStamp re-arms its
+// 5 s poll for as long as the channel's vtable[0x2a0] says to keep waiting
+// (disassembled in 2cy), so the FIRST wait succeeding does not bound the
+// later ones. A later wait that never completes hangs the boot forever.
+//
+// So the real wait is now BOUNDED. This is not 2cy's skip, which substituted
+// its own value and then narrated it as a hardware result - the poll below
+// is Apple's own, reproduced from the disassembly recorded above: its
+// enabled check (vtable[0x150]), its refresh (vtable[0x1a8]
+// checkForTimestampUpdate, the only thing that moves channel+0x84), its
+// completion test ((int32)(stamp - channel+0x84) <= 0) and its 100 us poll
+// interval. The one difference is a cap in place of the re-arm. A wait that
+// would have completed inside the cap still completes; one that would have
+// spun forever returns false and takes Apple's own failure path, which 2cy
+// already proved is survivable and logged.
+//
+// -rbgpustampraw restores Apple's unbounded wait. That is what wedged the
+// machine on 2026-10-13; it is not a default.
+static bool rbgpu_bounded_stamp_wait_2en(void *ch, uint32_t stamp, uint32_t cap_ms) {
+    if (!ch) return false;
+    void **vt = *reinterpret_cast<void ***>(ch);
+    if (!vt) {
+        rbgpu_log("2en: channel %p has a NULL vtable - cannot wait", ch);
+        return false;
+    }
+    auto fn_enabled = reinterpret_cast<bool (*)(void *)>(vt[0x150 / 8]);
+    auto fn_refresh = reinterpret_cast<void (*)(void *)>(vt[0x1a8 / 8]);
+    if (!fn_enabled || !fn_refresh) {
+        rbgpu_log("2en: vtable[0x150]=%p vtable[0x1a8]=%p - one is NULL, so the "
+                  "bounded wait cannot run and returns false WITHOUT waiting. "
+                  "That is an instrument failure, not a GPU result.",
+                  reinterpret_cast<void *>(fn_enabled),
+                  reinterpret_cast<void *>(fn_refresh));
+        rbgpu_diag_set_num("bwait_vt_bad", 1);
+        return false;
+    }
+
+    auto completed = [ch]() -> uint32_t {
+        return *reinterpret_cast<volatile uint32_t *>(
+            reinterpret_cast<uintptr_t>(ch) + 0x84);
+    };
+
+    if (!fn_enabled(ch)) {
+        rbgpu_log("2en: isEnabled() is false, so Apple's own wait would return "
+                  "false here too");
+        rbgpu_diag_set_num("bwait_disabled", 1);
+        return false;
+    }
+    if (static_cast<int32_t>(stamp - completed()) <= 0) {
+        rbgpu_log("2en: stamp %u was already completed (+0x84=%u) before waiting",
+                  stamp, completed());
+        return true;
+    }
+
+    const uint32_t iters = cap_ms * 10;   // 100 us per iteration
+    uint64_t t0 = mach_absolute_time();
+    for (uint32_t i = 0; i < iters; i++) {
+        fn_refresh(ch);
+        if (static_cast<int32_t>(stamp - completed()) <= 0) {
+            rbgpu_diag_set_num("bwait_iters", i + 1);
+            rbgpu_log("2en: BOUNDED wait satisfied after %u polls (~%u us, cap %u ms): "
+                      "+0x84 reached %u", i + 1, (i + 1) * 100, cap_ms, completed());
+            (void)t0;
+            return true;
+        }
+        IODelay(100);
+    }
+    rbgpu_diag_set_num("bwait_iters", iters);
+    rbgpu_diag_set_num("bwait_timeout", 1);
+    rbgpu_log("2en: BOUNDED wait gave up after %u ms (+0x80=%u +0x84=%u asked %u). "
+              "Apple's wait would have re-armed here and hung the boot; this "
+              "returns false and takes Apple's own failure path instead.",
+              cap_ms,
+              *reinterpret_cast<volatile uint32_t *>(reinterpret_cast<uintptr_t>(ch) + 0x80),
+              completed(), stamp);
+    return false;
+}
+
+// 2en: a breadcrumb that survives a wedge. Every diag set schedules the
+// NVRAM refresh on its own thread_call, which is why ptb_written and
+// stamp_ret reached NVRAM from a thread that then wedged - so a single
+// number updated at each gate says exactly how far the boot got, even when
+// the console has stopped and the IORegistry dies with the boot. The 2em
+// wedge left no such number and cost a power cycle to learn nothing.
+static void rbgpu_gate_2en(uint32_t stage, const char *what) {
+    rbgpu_diag_set_num("gate_stage", stage);
+    rbgpu_log("2en: gate %u - %s", stage, what);
+}
+
 static volatile int g_rb_2cx_stamp_calls = 0;
 static volatile int g_rb_2cx_stamp_ret = -1;
 static volatile uint64_t g_rb_2cx_stamp_us = 0;
@@ -3220,6 +3326,10 @@ static volatile uint64_t g_rb_2cx_stamp_us = 0;
 static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     g_rb_2cx_stamp_calls++;
     rbgpu_diag_set_num("stamp_calls", static_cast<uint64_t>(g_rb_2cx_stamp_calls));
+    // 2en: which wait we are in. The 2em boot succeeded on call 1 and the
+    // wedge was on a later one, so the call index is what names it.
+    rbgpu_diag_set_num("stamp_in_call", static_cast<uint64_t>(g_rb_2cx_stamp_calls));
+    rbgpu_gate_2en(100 + g_rb_2cx_stamp_calls, "waitForHwStamp ENTER");
     rbgpu_log("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
               "execute; 5 s timeout per poll", ch, stamp);
 
@@ -3493,9 +3603,21 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         // written by hardware, so that is the command processor moving, not the
         // driver. The stamp may well already be there; 2cy has simply never let
         // anyone wait for it.
-        ret = orig_hwchannel_waitForHwStamp_2cx
-                  ? orig_hwchannel_waitForHwStamp_2cx(ch, stamp)
-                  : false;
+        // 2en: bounded by default. -rbgpustampraw is Apple's unbounded wait,
+        // which wedged the machine on 2026-10-13 on a LATER call than the one
+        // that succeeded.
+        bool raw = checkKernelArgument("-rbgpustampraw");
+        rbgpu_diag_set_num("bwait_raw", raw ? 1 : 0);
+        if (raw) {
+            rbgpu_log("2en: -rbgpustampraw: calling Apple's UNBOUNDED wait. If the "
+                      "stamp does not arrive this boot hangs with no panic and no "
+                      "log, and only a power cycle ends it.");
+            ret = orig_hwchannel_waitForHwStamp_2cx
+                      ? orig_hwchannel_waitForHwStamp_2cx(ch, stamp)
+                      : false;
+        } else {
+            ret = rbgpu_bounded_stamp_wait_2en(ch, stamp, 2000);
+        }
         rbgpu_log("2dr: the REAL wait returned %d%s", ret ? 1 : 0,
                   ret ? " - THE STAMP ARRIVED; doStart continues past "
                         "submitSetResourcesPacket for the first time"
@@ -3575,6 +3697,8 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     g_rb_2cx_stamp_ret = ret ? 1 : 0;
     g_rb_2cx_stamp_us = dt;
     rbgpu_diag_set_num("stamp_ret", static_cast<uint64_t>(g_rb_2cx_stamp_ret));
+    rbgpu_gate_2en(ret ? (150 + g_rb_2cx_stamp_calls) : (120 + g_rb_2cx_stamp_calls),
+                   ret ? "waitForHwStamp RETURNED TRUE" : "waitForHwStamp returned false");
     rbgpu_diag_set_num("stamp_ticks", dt);
     rbgpu_log("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
               ret ? "(the GPU executed it)"
@@ -3605,6 +3729,7 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     // hang therefore produced nothing. submitSetResourcesPacket tail-calls
     // submitKIQFrame -> waitForHwStamp, which waits for the GPU to execute
     // the packet, so "entered with no return" is the signal that matters.
+    rbgpu_gate_2en(40, "submitSetResourcesPacket ENTER");
     rbgpu_log("2cx: submitSetResourcesPacket ENTER (ch=%p spec=%p) - waits for the "
               "GPU to execute the KIQ packet", ch, spec);
 
@@ -3622,6 +3747,9 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     g_rb_2cq_setres_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("setres_calls", static_cast<uint64_t>(g_rb_2cq_setres_calls));
     rbgpu_diag_set_num("setres_ret", static_cast<uint64_t>(g_rb_2cq_setres_ret));
+    rbgpu_gate_2en(ret ? 45 : 41, ret ? "submitSetResourcesPacket OK - doStart goes on "
+                                        "to initGraphicsMQD"
+                                      : "submitSetResourcesPacket FAILED");
     rbgpu_log("2cq: submitSetResourcesPacket(spec=%p) -> %d %s", spec, ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart exits via vtable[0x150], returns false)");
     return ret;
@@ -3629,11 +3757,13 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
 
 static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     g_rb_2cq_gfxmqd_calls++;
+    rbgpu_gate_2en(50, "initGraphicsMQD ENTER - never once exercised before 2em");
     rbgpu_log("2cx: initGraphicsMQD ENTER (pm4=%p)", pm4);
     bool ret = orig_pm4_initGraphicsMQD_2cq ? orig_pm4_initGraphicsMQD_2cq(pm4) : false;
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
     rbgpu_diag_set_num("gfxmqd_ret", static_cast<uint64_t>(g_rb_2cq_gfxmqd_ret));
+    rbgpu_gate_2en(ret ? 55 : 51, ret ? "initGraphicsMQD OK" : "initGraphicsMQD FAILED");
     rbgpu_log("2cq: initGraphicsMQD -> %d %s", ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart returns false)");
     return ret;
@@ -3642,6 +3772,8 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
 static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, uint64_t b,
                                            const void *spec, uint64_t c) {
     g_rb_2cq_mapq_calls++;
+    rbgpu_gate_2en(60 + (ring & 0xf), "submitMapQueuesPacket ENTER - this one also "
+                                      "waits for a stamp");
     rbgpu_log("2cx: submitMapQueuesPacket ENTER (ring=%u)", ring);
     bool ret = orig_kiq_submitMapQueues_2cq
                    ? orig_kiq_submitMapQueues_2cq(ch, ring, a, b, spec, c)
@@ -3651,6 +3783,8 @@ static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, 
     }
     rbgpu_diag_set_num("mapq_calls", static_cast<uint64_t>(g_rb_2cq_mapq_calls));
     rbgpu_diag_set_num("mapq_fails", static_cast<uint64_t>(g_rb_2cq_mapq_fails));
+    rbgpu_gate_2en(ret ? (70 + (ring & 0xf)) : (65 + (ring & 0xf)),
+                   ret ? "submitMapQueuesPacket OK" : "submitMapQueuesPacket FAILED");
     rbgpu_log("2cq: submitMapQueuesPacket(ring=%u, a=0x%x, b=0x%llx, spec=%p, c=0x%llx) -> %d %s",
               ring, a, b, spec, c, ret ? 1 : 0, ret ? "(OK)" : "(FAIL)");
     return ret;

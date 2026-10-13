@@ -526,30 +526,31 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
-    // 2ee: which candidate physical page holds the real page directory, and
-    // do its entries carry the same zero vram_base_offset? This is the live
-    // question; everything it needs for context comes with it.
-    // 2eh: the GART page table's address straight from the TTL layer.
-    // 2ej: where the page directory's own entries point - this decides
-    // whether PT_BASE may be patched at all.
-    // 2em: the PT_BASE patch - did it fire, and did the fault go away?
-    "ptb_written", "ptb_rel_holds", "ptb_cur", "ptb_want", "ptb_back",
-    "vmf_st_wait", "vmf_st_post", "stamp_ret",
-    "ring_pte", "ring_pte_valid", "ring_pte_sys", "ring_pte_addr", "ring_pte_idx",
-    "ring_pte_oob",
-    "pte_entries", "pde_valid", "pde_sys", "pde_low", "pde_sysphys",
-    "pde_carveout", "pde_other", "pde_no_va",
-    "gart_info_resolved", "gart_info_st", "gart_match_idx", "gart_info_early",
-    "gart_info_0", "gart_info_1", "gart_info_2", "gart_info_3", "gart_info_4",
-    "vm_c0_ptb", "gc_fb_off",
-    // 2ef: the control that invalidated the physical-page reads.
-    "ctl_fb_mapped", "ctl_fb_nonzero",
-    "vmm_alloc_calls",
-    // the fault that sent us here, at the point it appears
-    "vmf_st_wait", "vmf_ad_wait",
-    // 2eb/2ed are ANSWERED (ring VA in range; GC hub programmed and agreeing
-    // with MMHUB) and have moved down into the main list, per the rule above.
+    // 2en: the frontier moved. 2em ANSWERED its question - the PT_BASE patch
+    // took, the GPUVM fault went away and the first stamp arrived - and the
+    // boot then wedged in gates that had never run before. The live question
+    // is now WHERE, so the breadcrumb and the gates after
+    // submitSetResourcesPacket come first. The 2em keys stay because they are
+    // the precondition: if ptb_written is 0 the rest means nothing.
+    "gate_stage",
+    "ptb_written", "ptb_rel_holds", "ptb_back",
+    "vmf_st_wait", "vmf_st_post",
+    "stamp_calls", "stamp_ret", "stamp_in_call",
+    "bwait_raw", "bwait_iters", "bwait_timeout", "bwait_vt_bad", "bwait_disabled",
+    "setres_calls", "setres_ret",
+    "gfxmqd_calls", "gfxmqd_ret",
+    "mapq_calls", "mapq_fails",
+    "wfav_calls", "wfav_bounded_forced", "wfav_ret",
+    "pw_stage", "pw_ret",
+    "stamp_submitted", "stamp_completed",
+    "fence_val_before", "fence_val_after",
+    // the fault, per point, in case it comes back at a later gate
+    "vmf_st_kiq", "vmf_st_pre", "vmf_ad_wait",
+    // 2ei/2ek/2el are ANSWERED (TTL names the table; the ring's PTE is valid
+    // and every entry is SYSTEM) and have moved down into the main list, per
+    // the rule above.
 };
+
 
 static bool rbgpuIsHotKey(const char *key) {
     for (size_t i = 0; i < sizeof(kRbgpuNvramHotKeys) / sizeof(kRbgpuNvramHotKeys[0]); i++) {
