@@ -2539,3 +2539,67 @@ Diag keys `vmf_cntl`, `vmf_status`, `vmf_addr_lo`, `vmf_addr_hi`,
 `post-stamp-wait` after the full 5 s wait.
 
 Build: UUID 0EEDEBBB, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2dz on hardware (2026-10-12): a GPUVM fault IS latched — at the RING, not the fence
+
+logs/20261012-224335-plugin, UUID 0EEDEBBB, armed, no panic. 249 diag entries.
+
+```
+vmf_cntl=0x00001ffc   reporting IS on, so the latch is meaningful
+vmf_status=0x00000881  MORE_FAULTS=1 WALKER_ERROR=0 PERMISSION_FAULTS=0x8
+                       MAPPING_ERROR=0 RW=0 (a READ)
+vmf_addr_hi=0  vmf_addr_lo=0x0ffbfe80
+CP_CPC_STATUS=0xa0000000  CP_CPF_STATUS=0xa8008001
+CPC_UTCL1=0x00000000      CPF_UTCL1=0x000b0002
+GRBM_STATUS2=0x34108008
+```
+
+The `FAULT_CNTL != 0` precondition 2dz insisted on is satisfied, so this is a
+real latched fault and not an unreported-silence artefact.
+
+**The address identifies the ring, and 2dz's own classifier missed it** because
+it compared only against the fence destination:
+
+```
+fault page 0x0FFBFE80 << 12        = 0xFFBFE80000
+CP_HQD_PQ_BASE 0xffbfe800 << 8     = 0xFFBFE80000   <- exact 40-bit match
+fence dest                          = 0xFFBFDC0040  (0xC0000 lower, a different page)
+```
+
+Two independently-read registers agreeing to 40 bits under their own standard
+conventions is not the small-integer coincidence that 2dw's page scan was.
+`RW=0` makes it a **read**; `MAPPING_ERROR=0` with `PERMISSION_FAULTS=0x8` says
+the mapping exists and the access was refused. `CPF_UTCL1_STATUS` nonzero while
+`CPC_UTCL1_STATUS` is zero points at the **fetcher's** translation unit, not the
+compute side - a second, independent signal for the same place.
+
+**This puts 2dq's conclusion in question, not its measurement.** WPTR
+advancing, RPTR catching up and CP_STAT going busy are all still true; but a
+ring fetch that faults can advance RPTR having discarded the data, so "the CP
+executed the packet" may have been "the CP fetched, faulted and discarded".
+2dq is not withdrawn - its reading stands and its interpretation is now open.
+
+## 2ea (2026-10-12): date the latch, and compare against both candidates
+
+The fault registers **latch and stay until cleared**, and `MORE_FAULTS=1` says
+more than one occurred. A fault read at `post-stamp-wait` could therefore have
+been raised at any earlier moment, including before `startKIQ` existed, by
+something that is not ours. Until that is excluded this is a lead, not a
+finding - the same discipline that caught 2dk through 2dv.
+
+So the status and address are now recorded **per dump point** in their own diag
+keys (`vmf_st_gc`, `vmf_st_kiq`, `vmf_st_pre`, `vmf_st_wait`, `vmf_st_post` and
+the matching `vmf_ad_*`), which the ring wrap cannot hide and which the single
+last-write `vmf_status` key could never express.
+
+```
+latched at post-gc-hw-init    pre-existing, raised before any KIQ work - ours
+                              is not the cause and the trail restarts
+first latched at at-stamp-wait the KIQ's own fetch is what GPUVM refused
+```
+
+The comparison now names which address it matched - the ring base
+(`CP_HQD_PQ_BASE << 8`, captured from the HQD probe), the fence page, or
+neither - instead of only testing the fence.
+
+Build: UUID 749D33AD, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
