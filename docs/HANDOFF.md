@@ -28,37 +28,32 @@ display pipe** (2ct) so armed boots reach a desktop.
 
 ---
 
-## 2. The pending experiment — 2ea, build UUID `749D33AD`
+## 2. The pending experiment — 2eb, build UUID `3857364D`
 
-Built, hosttest passes, committed (`98148a5`). An install was run at 22:54 on
-2026-10-12, so this is probably already on the EFI — **verify with
+Built, hosttest passes, committed. **Verify the installed UUID with
 `sudo tools/efi.sh status` against `dwarfdump --uuid
 build/out/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU` before interpreting
 any boot.**
 
-The question: the GPUVM fault registers **latch until cleared**, and
-`MORE_FAULTS=1` says more than one fault occurred, so the fault seen at
-`post-stamp-wait` could have been raised before `startKIQ` ever existed, by
-something that is not ours. 2ea records status and address **per dump point**:
+2ea settled the timing question: the GPUVM fault STATUS is 0 at
+`post-gc-hw-init`, `post-startKIQ` and `pre-kiq-submit`, and becomes 0x9ba at
+`at-stamp-wait`. **The fault is raised by the KIQ's own submission**, at
+`0xFF_BFE8_0000` = `CP_HQD_PQ_BASE << 8` = the ring base, decoding to
+MAPPING_ERROR=1 / WALKER_ERROR=5 / CID 4 / RW=0 — a read whose page walk found
+no valid mapping. The pre-existing-fault escape is closed; the lead is real.
 
-| diag keys | meaning |
+2eb asks whether the page tables are meant to cover that address at all. The
+queue runs at VMID 0, so it reads `GCVM_CONTEXT0_PAGE_TABLE_START/END_ADDR`
+and `_BASE_ADDR` plus `GCVM_L2_CNTL` / `GCVM_CONTEXT0_CNTL`:
+
+| outcome | meaning |
 |---|---|
-| `vmf_st_gc` / `vmf_ad_gc` | at `post-gc-hw-init`, **before** startKIQ |
-| `vmf_st_kiq` / `vmf_ad_kiq` | at `post-startKIQ` |
-| `vmf_st_pre` / `vmf_ad_pre` | at `pre-kiq-submit` |
-| `vmf_st_wait` / `vmf_ad_wait` | at `at-stamp-wait`, after the doorbell |
-| `vmf_st_post` / `vmf_ad_post` | at `post-stamp-wait`, after the 5 s wait |
+| `vm_ring_in_range = 0` | the MQD was given a GPUVM address this VMID's page tables do not cover — the aperture itself is wrong |
+| `vm_ring_in_range = 1` | the range is right and the fault is in the page-table *contents* |
 
-Outcomes:
-
-- **Already latched at `vmf_st_gc`** (bit 0 set) → pre-existing, not caused by
-  the KIQ. The ring-fault lead collapses and the trail restarts. Do not keep
-  arguing for it.
-- **First latched at `vmf_st_wait` or `_post`** → the KIQ's own ring fetch is
-  what GPUVM refused. That is the finding, and the next step is the page
-  tables / VMID for that ring, not more register archaeology.
-
----
+Either way the next lever is likely **source comparison** (§7), not more
+register archaeology: how amdgpu maps the KIQ ring into GPUVM for yellow_carp
+versus what Apple's `startKIQ` command-8 path leaves configured.
 
 ## 3. Verified on hardware — do NOT re-derive these
 
