@@ -1357,6 +1357,12 @@ static uint32_t g_rb_2dt_cmp_before = 0;
 static uint32_t g_rb_2dw_slot_idx   = 0;
 static uint64_t g_rb_2dw_slot_b0    = 0;
 static uint32_t g_rb_2dw_fence_bef  = 0;
+
+// 2dx: AMDHardware::getChannelWriteBackFrameGPUAddr(uint) - the MC address the
+// GPU is told for a writeback frame, the counterpart of the CPU pointer the
+// channel polls. Resolved by symbol, called read-only.
+typedef uint64_t (*wb_gpuaddr_t)(void *hw, uint32_t idx);
+static wb_gpuaddr_t orig_wb_gpuaddr_2dx = nullptr;
 static int      g_rb_2dw_is_self    = 0;
 
 // 2do (2026-10-12): read the CP_HQD_* window at the slot the KIQ actually uses.
@@ -2533,6 +2539,74 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                       ? "-1, the DIRECT path, which is BY DESIGN for a KIQ "
                         "(vtable[0x1c8] is a constant false) and is NOT a fault"
                       : "a scheduler index");
+
+        // 2dx (2026-10-12): the GPU side of the same writeback frame.
+        //
+        //   allocateChannelWriteBackFrame()      return hw->0x20650++
+        //   getChannelWriteBackFrameCPUPtr(i)    return hw->0x510 + (i << 6)
+        //   getChannelWriteBackFrameGPUAddr(i)   return hw->0x518->vt[0x128]()
+        //                                               + (i << 6)
+        //
+        // Frames are 64 bytes apart, and the measured +0xc0 sits at page
+        // offset 0x40 with slot index 1, which is exactly hw->0x510 + (1 << 6)
+        // - so the CPU side is confirmed arithmetically. The GPU side is one
+        // value nobody has read: hw->0x518 vtable[0x128](), the writeback
+        // buffer's GPU base. If it is an FB offset rather than an absolute MC
+        // address, the GPU writes the fence outside the window the CPU polls
+        // and this is the 2dh/2di bug again, in a different allocator.
+        //
+        // startKIQ was handed ring MC 0xf40fb28000 on this same chip, so a
+        // correct GPU address here is expected to be 0xF4-based too; that ring
+        // address is the reference the log compares against.
+        void *hwobj = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(ch) + 0x20);
+        if (orig_wb_gpuaddr_2dx && hwobj) {
+            uint64_t g0 = orig_wb_gpuaddr_2dx(hwobj, 0);
+            uint64_t g1 = orig_wb_gpuaddr_2dx(hwobj, slot_idx);
+            uint64_t cpu_base = *reinterpret_cast<volatile uint64_t *>(
+                reinterpret_cast<uintptr_t>(hwobj) + 0x510);
+            uint32_t next_idx = *reinterpret_cast<volatile uint32_t *>(
+                reinterpret_cast<uintptr_t>(hwobj) + 0x20650);
+            rbgpu_diag_set_num("wb_gpu_frame0", g0);
+            rbgpu_diag_set_num("wb_gpu_slot", g1);
+            rbgpu_diag_set_num("wb_cpu_base", cpu_base);
+            rbgpu_diag_set_num("wb_next_idx", next_idx);
+            bool cpu_ok = (wb_c0 == cpu_base + (static_cast<uint64_t>(slot_idx) << 6));
+            rbgpu_diag_set_num("wb_cpu_arith_ok", cpu_ok ? 1 : 0);
+            rbgpu_log("2dx: writeback frames: hw=%p cpu_base(+0x510)=0x%llx "
+                      "next_idx(+0x20650)=%u ; CPU ptr for slot %u = 0x%llx, "
+                      "measured +0xc0 = 0x%llx -> arithmetic %s",
+                      hwobj, cpu_base, next_idx, slot_idx,
+                      cpu_base + (static_cast<uint64_t>(slot_idx) << 6), wb_c0,
+                      cpu_ok ? "MATCHES" : "DOES NOT match");
+            // 0xF4 is the carve-out base MMHUB reported in 2di. An address
+            // without it cannot be what the ring addresses use.
+            bool g1_carveout = ((g1 >> 32) == 0xF4);
+            bool g1_zero_hi  = ((g1 >> 32) == 0);
+            rbgpu_diag_set_num("wb_gpu_hi", g1 >> 32);
+            rbgpu_diag_set_num("wb_gpu_carveout", g1_carveout ? 1 : 0);
+            rbgpu_log("2dx: GPU addr for frame 0 = 0x%llx, for slot %u = 0x%llx "
+                      "(delta 0x%llx, expected 0x%x) ; ring MC from startKIQ = "
+                      "0x%llx -> %s",
+                      g0, slot_idx, g1, g1 - g0,
+                      static_cast<uint32_t>(slot_idx) << 6, g_rb_kiq_ring_mc,
+                      g1_carveout
+                          ? "high word is 0xF4, the same carve-out the ring "
+                            "lives in, so the address LOOKS right and the fence "
+                            "not landing is something else"
+                      : g1_zero_hi
+                          ? "high word is ZERO while the ring is 0xF4-based: "
+                            "this is an FB offset, not an absolute MC address, "
+                            "and the GPU is writing the fence outside the page "
+                            "the CPU polls - the 2dh/2di bug in the writeback "
+                            "allocator"
+                          : "high word is neither 0xF4 nor 0, so it is some "
+                            "third address space and needs its own reading");
+        } else {
+            rbgpu_log("2dx: no getChannelWriteBackFrameGPUAddr (resolved=%d hw=%p), "
+                      "so the GPU side of the fence was NOT measured this boot",
+                      orig_wb_gpuaddr_2dx != nullptr, hwobj);
+        }
 
         // The value timestampUpdated reads on every poll.
         if (wb_c0 && !is_self) {
@@ -4514,6 +4588,20 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked registerChannel + addHWChannel (2du observe-only)");
     } else {
         rbgpu_log("X6000: FAILED to hook the 2du channel-registration gates");
+    }
+
+    // 2dx: resolve the GPU-address counterpart of the writeback frame the KIQ
+    // channel polls. Defined in X6000 (nm shows it as a T symbol), so looking
+    // it up by this kext's id is safe under the milestone-2c Lilu rule. Not
+    // routed - only called, read-only, from the waitForHwStamp hook.
+    orig_wb_gpuaddr_2dx = reinterpret_cast<wb_gpuaddr_t>(patcher.solveSymbol(
+        id, "__ZNK26AMDRadeonX6000_AMDHardware31getChannelWriteBackFrameGPUAddrEj"));
+    if (!orig_wb_gpuaddr_2dx) {
+        patcher.clearError();
+        rbgpu_log("X6000: 2dx could NOT resolve getChannelWriteBackFrameGPUAddr");
+    } else {
+        rbgpu_log("X6000: 2dx resolved getChannelWriteBackFrameGPUAddr at 0x%llx",
+                  reinterpret_cast<uint64_t>(orig_wb_gpuaddr_2dx));
     }
 
     // 2cp: bound waitForActiveValue. doStart calls it as (ring 0, false, 1, 0),

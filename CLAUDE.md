@@ -2324,3 +2324,67 @@ The log says in those words that a single hit on a small integer can be
 coincidence and is a lead rather than a result - the lesson of 2dk/2dl/2dm.
 
 Build: UUID 8CBC5B64, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2dw on hardware (2026-10-12): a real fence slot, and the GPU never writes it
+
+logs/20261012-222241-plugin, UUID 8CBC5B64, armed, no panic. 226 diag entries.
+
+```
+fence_is_self=0  fence_slot_idx=1  fence_slot_b0=0xffffffc9d0cd9040
+fence_val_before=0  fence_val_after=0
+fence_c0_off=0x40  fence_scan_hits=13  fence_scan_off=0x1c
+```
+
+`fence_is_self=0` confirms the KIQ took the allocated-fence branch at
+0xbe849cb: a genuine hardware writeback slot, index 1, VA
+0xffffffc9d0cd9040. The dword there is 0 before the wait and 0 after it, so
+**the GPU never writes the completion value where the CPU polls**.
+
+**The page scan is noise and is not a finding.** 13 dwords in the page equal
+1, so the "value at a different offset" branch the classifier printed cannot
+be read as evidence - it is exactly the coincidence the 2dw log line warned
+about. The accessors then explained the hit outright (below): `+0x1c` lies
+inside frame 0, another channel's 64-byte writeback frame.
+
+### The writeback frame accessors (`AMDHardware`, 0xbea9a94-0xbea9ae5)
+
+```
+allocateChannelWriteBackFrame()      return hw->0x20650++            0,1,2,...
+getChannelWriteBackFrameCPUPtr(i)    return hw->0x510 + (i << 6)     64-byte frames
+getChannelWriteBackFrameGPUAddr(i)   return hw->0x518->vt[0x128]() + (i << 6)
+```
+
+and they are the three vtable slots `AMDHWChannel::init` uses - call offsets
+0x348 (allocate), 0x350 (GPU addr), 0x358 (CPU ptr), i.e. dump offsets +0x358,
++0x360, +0x368 of `__ZTV32AMDRadeonX6000_AMDNavi21Hardware`.
+
+Slot index 1 at page offset 0x40 is exactly `hw->0x510 + (1 << 6)`, so the CPU
+side is confirmed arithmetically, not assumed. `init` only ever takes the CPU
+pointer; the GPU is told the matching address through `vtable[0x350]`, whose
+value no boot has read.
+
+## 2dx (2026-10-12): read the GPU side of the fence
+
+One value decides this: `hw->0x518->vtable[0x128]()`, the writeback buffer's
+GPU base. `getChannelWriteBackFrameGPUAddr` is a `T` symbol in X6000, so it is
+resolved by symbol (safe under the milestone-2c Lilu rule) and **called
+read-only** - not routed - from the `waitForHwStamp` hook, for frame 0 and for
+the KIQ's own slot. The hook also reads `hw->0x510` and `hw->0x20650` and
+checks the CPU arithmetic it already verified by hand.
+
+The reference is on the same chip: startKIQ was handed ring MC
+`0xf40fb28000`, and 2di read the carve-out base as `0xF4_0000_0000`. So:
+
+```
+high word 0xF4    the address is in the carve-out the ring lives in, so it
+                  looks right and the fence not landing is something else
+high word 0        an FB offset, not an absolute MC address - the GPU is
+                  writing outside the page the CPU polls, which is the
+                  2dh/2di bug again in the writeback allocator
+anything else      a third address space, needing its own reading
+```
+
+Diag keys `wb_gpu_frame0`, `wb_gpu_slot`, `wb_cpu_base`, `wb_next_idx`,
+`wb_cpu_arith_ok`, `wb_gpu_hi`, `wb_gpu_carveout`, all in NVRAM.
+
+Build: UUID A8DD3601, hosttest passes. Same boot-args, `-rbgpustampwait` stays.

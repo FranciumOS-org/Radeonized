@@ -543,6 +543,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dw: the KIQ's real hardware fence slot, and whether the GPU wrote it.
     "fence_slot_idx", "fence_slot_b0", "fence_is_self", "fence_val_before",
     "fence_val_after", "fence_scan_hits", "fence_scan_off", "fence_c0_off",
+    // 2dx: the GPU-side address of the same writeback frame.
+    "wb_gpu_frame0", "wb_gpu_slot", "wb_cpu_base", "wb_next_idx",
+    "wb_cpu_arith_ok", "wb_gpu_hi", "wb_gpu_carveout",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the
