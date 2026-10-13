@@ -1346,33 +1346,94 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         rbgpu_log("2ap DIAG [%s]: no HW ctx/rreg, skipping", tag);
         return;
     }
-    // 2aw: FIX - RLC registers need BASE_IDX 1, GC seg1 base 0xa000.
-    // Real addr = 0xa000 + offset. Was reading wrong registers!
-    uint32_t rlc_cntl = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4c00); // RLC_CNTL
-    uint32_t rlc_stat = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4c04); // RLC_STAT
-    uint32_t cp_stat  = g_hw.rreg(g_hw.ctx, 0x0f40); // CP_STAT (BASE_IDX 0, keep)
-    // 2av: Read BOOTLOAD_STATUS at both Apple (0x4e8d) and upstream (0x4e7e) offsets.
-    // Per Raphael: latch is 0xc0000001 when RLC FW load completes.
-    // NOTE: 0x4e8d/0x4e7e are DWORD indices; convert to byte offsets (*4).
-    // 2aw: Also add BASE_IDX 1 (0xa000) for RLC_RLCS_BOOTLOAD_STATUS.
-    uint32_t boot_apple = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4e8d * 4);
-    uint32_t boot_upstream = g_hw.rreg(g_hw.ctx, 0xa000 + 0x4e7e * 4);
-    rbgpu_log("2ap DIAG [%s]: RLC_CNTL=0x%08x RLC_STAT=0x%08x CP_STAT=0x%08x",
-              tag, rlc_cntl, rlc_stat, cp_stat);
-    rbgpu_log("2av DIAG [%s]: BOOTLOAD Apple(0x4e8d)=0x%08x Upstream(0x4e7e)=0x%08x",
-              tag, boot_apple, boot_upstream);
+
+    // 2dk (2026-10-12): THE ADDRESSING WAS WRONG, and it produced a false alarm.
+    //
+    // This function used to read `0xa000 + 0x4c00` as a BYTE address. The GC
+    // offsets in gc_10_3_0_offset.h are DWORD indices and the segment bases
+    // are DWORD too, so the byte address is (seg + offset) * 4. The 2ba block
+    // in hooked_gc_hw_init already had this right and read, on the same boot,
+    //
+    //     2ba CORRECT: RLC_CNTL=0x00000001 RLC_STAT=0x00000025 BOOTLOAD=0x00000001
+    //
+    // while this function read 0 / 0 / 0 at the same moment and then logged
+    // "RLC_STAT DIFFERS from Raphael 0x25 - investigate!". RLC_STAT really is
+    // 0x25 - the Raphael reference value, firmware present in instruction RAM.
+    // The alarm was our own bug. Likewise CP_STAT read 0xffffffff here, which
+    // is an undecoded address, not a register value.
+    //
+    // Segment bases, in dwords:
+    //   BASE_IDX 1 = 0xa000  - proven on hardware: 0xa000+0x4c04 gives RLC_STAT
+    //                          0x25 and 0xa000+0x4c00 gives RLC_CNTL 1, both
+    //                          sane and both matching the reference.
+    //   BASE_IDX 0 = unproven. The plugin's synthetic discovery table carries
+    //                          only MP0/MP1, so there is no GC base to read.
+    //                          Rather than hardcode one, read CP_STAT at both
+    //                          candidates and let the values say which decodes:
+    //                          0xffffffff is an undecoded address, anything
+    //                          else is a register. AMD's convention for
+    //                          gc_10_3_0 is SEG0 = 0x1260; 0 is what this
+    //                          function assumed before.
+    //
+    // Everything here is a READ. No GC register is written.
+    const uint32_t kSeg1 = 0xa000;          // dwords, proven
+    const uint32_t kSeg0Conv = 0x1260;      // dwords, AMD convention, unproven
+    const uint32_t kSeg0Old  = 0x0000;      // dwords, what this code assumed
+
+    // gc_10_3_0_offset.h dword indices.
+    const uint32_t dwRLC_CNTL     = 0x4c00; // BASE_IDX 1
+    const uint32_t dwRLC_STAT     = 0x4c04; // BASE_IDX 1
+    const uint32_t dwRLC_GPM_STAT = 0x4e6e; // BASE_IDX 1
+    const uint32_t dwCP_STAT      = 0x0f40; // BASE_IDX 0
+    const uint32_t dwCP_MEC_CNTL  = 0x0f55; // BASE_IDX 0
+    const uint32_t dwCP_ME_CNTL   = 0x0f56; // BASE_IDX 0
+
+    uint32_t rlc_cntl = g_hw.rreg(g_hw.ctx, (kSeg1 + dwRLC_CNTL)     * 4);
+    uint32_t rlc_stat = g_hw.rreg(g_hw.ctx, (kSeg1 + dwRLC_STAT)     * 4);
+    uint32_t rlc_gpm  = g_hw.rreg(g_hw.ctx, (kSeg1 + dwRLC_GPM_STAT) * 4);
+
+    uint32_t cp_stat_a = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_STAT)     * 4);
+    uint32_t cp_me_a   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_ME_CNTL)  * 4);
+    uint32_t cp_mec_a  = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_MEC_CNTL) * 4);
+    uint32_t cp_stat_b = g_hw.rreg(g_hw.ctx, (kSeg0Old  + dwCP_STAT)     * 4);
+
+    rbgpu_log("2dk DIAG [%s]: RLC_CNTL=0x%08x RLC_STAT=0x%08x RLC_GPM_STAT=0x%08x (seg1 0xa000, proven)",
+              tag, rlc_cntl, rlc_stat, rlc_gpm);
+    rbgpu_log("2dk DIAG [%s]: seg0=0x1260 -> CP_STAT=0x%08x CP_ME_CNTL=0x%08x CP_MEC_CNTL=0x%08x",
+              tag, cp_stat_a, cp_me_a, cp_mec_a);
+    rbgpu_log("2dk DIAG [%s]: seg0=0x0000 -> CP_STAT=0x%08x (the old assumption)",
+              tag, cp_stat_b);
+
     rbgpu_diag_set_num("diag_rlc_cntl", rlc_cntl);
     rbgpu_diag_set_num("diag_rlc_stat", rlc_stat);
-    rbgpu_diag_set_num("diag_cp_stat", cp_stat);
-    rbgpu_diag_set_num("diag_boot_apple", boot_apple);
-    rbgpu_diag_set_num("diag_boot_upstream", boot_upstream);
-    if (boot_apple == 0xc0000001) {
-        rbgpu_log("2av DIAG [%s]: BOOTLOAD_STATUS=0xc0000001 (FW load complete!)", tag);
-    }
+    rbgpu_diag_set_num("diag_rlc_gpm", rlc_gpm);
+    rbgpu_diag_set_num("diag_cp_stat", cp_stat_a);
+    rbgpu_diag_set_num("diag_cp_me_cntl", cp_me_a);
+    rbgpu_diag_set_num("diag_cp_mec_cntl", cp_mec_a);
+    rbgpu_diag_set_num("diag_cp_stat_seg0", cp_stat_b);
+
+    // What the numbers mean, so a photograph of the console is already an
+    // answer and nothing has to be looked up afterwards.
     if (rlc_stat == 0x25) {
-        rbgpu_log("2ap DIAG [%s]: RLC_STAT==0x25 MATCHES Raphael (FW present, latch missing)", tag);
+        rbgpu_log("2dk DIAG [%s]: RLC_STAT=0x25 matches the Raphael reference "
+                  "(RLC firmware present in instruction RAM)", tag);
     } else {
-        rbgpu_log("2ap DIAG [%s]: RLC_STAT=0x%08x DIFFERS from Raphael 0x25 - investigate!", tag, rlc_stat);
+        rbgpu_log("2dk DIAG [%s]: RLC_STAT=0x%08x is NOT the reference 0x25", tag, rlc_stat);
+    }
+    if (cp_stat_a == 0xFFFFFFFF && cp_stat_b == 0xFFFFFFFF) {
+        rbgpu_log("2dk DIAG [%s]: CP_STAT reads 0xffffffff at BOTH candidate bases - "
+                  "neither decodes, so the GC seg0 base is still unknown and the CP "
+                  "state is NOT measured by this boot", tag);
+    } else if (cp_stat_a != 0xFFFFFFFF) {
+        // CP_ME_CNTL bits 28/26/24 halt PFP/CE/ME; CP_MEC_CNTL bits 30/28 halt MEC1/2.
+        rbgpu_log("2dk DIAG [%s]: seg0=0x1260 decodes. CP_STAT busy bits: 0x%08x; "
+                  "ME_HALT=%u PFP_HALT=%u CE_HALT=%u MEC1_HALT=%u MEC2_HALT=%u",
+                  tag, cp_stat_a,
+                  (cp_me_a  >> 28) & 1, (cp_me_a  >> 26) & 1, (cp_me_a >> 24) & 1,
+                  (cp_mec_a >> 30) & 1, (cp_mec_a >> 28) & 1);
+    } else {
+        rbgpu_log("2dk DIAG [%s]: seg0=0x0000 decodes (CP_STAT=0x%08x) and 0x1260 does not",
+                  tag, cp_stat_b);
     }
 }
 
@@ -1974,6 +2035,15 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     // the packet, so "entered with no return" is the signal that matters.
     rbgpu_log("2cx: submitSetResourcesPacket ENTER (ch=%p spec=%p) - waits for the "
               "GPU to execute the KIQ packet", ch, spec);
+
+    // 2dk: the CP's own state at the one moment it matters. Everything before
+    // this point reports success - PSP, GC and TTL hw_init all return success,
+    // the yellow_carp firmware is loaded, RLC_STAT is the reference 0x25, the
+    // SMU is up and says GFX is not in GFXOFF - and yet the stamp never
+    // arrives. Read-only, and the only reading taken while the packet is
+    // actually in flight.
+    rbgpu_dump_gc_regs("pre-kiq-submit");
+
     bool ret = orig_kiq_submitSetResources_2cq
                    ? orig_kiq_submitSetResources_2cq(ch, spec)
                    : false;
