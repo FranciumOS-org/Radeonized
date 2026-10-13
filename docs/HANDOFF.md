@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-12, after 2ea)
+# RembrandtGPU — handoff state (2026-10-12, after 2eb)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~2600 lines); it is authoritative for *what was measured* and should
@@ -16,12 +16,20 @@ Apple's Navi 21 stack (AMDRadeonX6000 + X6800HWLibs + HWServicesNavi) is
 running on the 680M. PSP, GC and TTL init all succeed, the 680M's own
 yellow_carp firmware is loaded, the SMU link works two-way with real clock
 tables, the accelerator's `start()` returns 1, and the KIQ queue is created,
-active and doorbelled with its ring in the carve-out. `powerUpHW` still fails
-at exactly one point: the KIQ's completion fence never lands, so
-`waitForHwStamp` returns false, `doStart` aborts, engine 0 fails. The latest
-boot found a **latched GPUVM read/permission fault whose address matches the
-ring base exactly**, which is the strongest lead so far and is *not yet
-confirmed to be ours* — that is what the pending build measures.
+active and doorbelled. `powerUpHW` fails at exactly one point: the KIQ's
+completion fence never lands, so `waitForHwStamp` returns false, `doStart`
+aborts, engine 0 fails.
+
+**The cause is now located and dated.** A GPUVM fault is raised by the KIQ's
+own submission (STATUS is 0 before the doorbell, 0x9ba after) at
+`0xFF_BFE8_0000` = `CP_HQD_PQ_BASE << 8` = the ring base, decoding to
+MAPPING_ERROR=1 / WALKER_ERROR=5 / CID 4 / RW=0 — **a read whose page walk
+found no valid mapping**. So: the MQD points the CP at a GPUVM address that
+does not translate; the fetch faults; RPTR advances having discarded the data
+(which is why 2dq's RPTR/CP_STAT reading looked like success); the WRITE_DATA
+fence inside the frame never executes; the stamp never arrives. The open
+question is no longer *what* fails but *why that address is unmapped* — see
+§2 and §7.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct) so armed boots reach a desktop.
@@ -85,6 +93,10 @@ versus what Apple's `startKIQ` command-8 path leaves configured.
 | Frame filler is `0xFFFF1000` = PM4 NOP count 0x3FFF, AMD's standard padding | 2dy |
 | A GPUVM fault IS latched, `CNTL=0x1ffc` so reporting is on | 2dz |
 | Fault addr `0x0FFBFE80 << 12` == `CP_HQD_PQ_BASE 0xffbfe800 << 8` == `0xFFBFE80000` = the ring base | 2dz/2ea |
+| The fault is **raised by the submission**: STATUS 0 at gc/kiq/pre, 0x9ba at wait/post | 2ea |
+| Fault decode: MAPPING_ERROR=1, WALKER_ERROR=5, CID 4, RW=0 (read, no valid mapping) | 2ea |
+| `GCVM_L2_PROTECTION_FAULT_STATUS` bit 0 is **MORE_FAULTS**, not a validity bit — a nonzero STATUS is the latch | 2eb |
+| `CPF_UTCL1_STATUS` nonzero both boots while `CPC_UTCL1_STATUS` is 0 — the fetcher's translation unit | 2dz/2ea |
 
 ### Key addresses (X6000 unless noted)
 
@@ -99,6 +111,27 @@ allocateChannelWriteBackFrame 0xbea9a94  ...GPUAddr 0xbea9aaa  ...CPUPtr 0xbea9a
 HWLibs: _smu_internal_sw_exit 0x1266813e   cosReleaseMemoryHandle 0x1265d9c0
 ```
 
+GC registers (all BASE_IDX 0, seg0 = 0x1260; byte addr = (seg + dword) * 4):
+
+```
+GCVM_L2_CNTL                      0x15bc    GCVM_CONTEXT0_CNTL     0x15fc
+GCVM_L2_PROTECTION_FAULT_CNTL     0x15c4    ..._STATUS             0x15c8
+..._ADDR_LO32 / _HI32             0x15c9 / 0x15ca
+GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32/HI32   0x1667 / 0x1668
+GCVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32/HI32  0x1687 / 0x1688
+GCVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32/HI32    0x16a7 / 0x16a8
+CP_HQD_PQ_BASE 0x1fb1 (ring VA >> 8)   CP_HQD_PQ_RPTR/WPTR_LO 0x1fb4 / 0x1fdf
+CP_HQD_ACTIVE 0x1fab   CP_HQD_PQ_DOORBELL_CONTROL 0x1fb8
+GRBM_GFX_CNTL 0x0dc2 (ME/PIPE/QUEUE/VMID selector for the CP_HQD_* window)
+CP_STAT 0x0f40  CP_CPC_STATUS 0x0e24  CP_CPF_STATUS 0x0e27
+CPC_UTCL1_STATUS 0x1f55  CPF_UTCL1_STATUS 0x1f56
+GRBM_STATUS 0x0da4  GRBM_STATUS2 0x0da2
+```
+
+The KIQ is at ME 2 / pipe 1 / queue 0, VMID 0. Ring MC handed to startKIQ:
+`0xf40fb28000` (carve-out). Ring VA in the MQD: `0xFF_BFE8_0000`. Writeback
+fence frame: GPU `0xffbfdc0040`, same GPUVM region, 0xC0000 lower.
+
 Channel layout: `+0x0c` index, `+0x20` hardware interface, `+0x80` submitted,
 `+0x84` completed, `+0xac` fence slot index, `+0xb0`/`+0xc0` fence CPU VA,
 `+0xc8`/`+0xcc` fence **GPU** address (set in `allocateMemoryResources`, not
@@ -108,12 +141,15 @@ Channel layout: `+0x0c` index, `+0x20` hardware interface, `+0x80` submitted,
 
 ## 4. Open and unexplained
 
-1. **The pending 2ea question** (§2) — is the ring fault ours?
-2. **2dq's interpretation is open.** Its *measurement* stands (WPTR/RPTR/
-   CP_STAT). But a ring fetch that faults can advance RPTR having discarded
-   the data, so "the CP executed the packet" may be "fetched, faulted,
-   discarded". Do not cite 2dq as proof the CP executes PM4 until the fault
-   is dated.
+1. **Why is `0xFF_BFE8_0000` unmapped?** That is the live question. 2eb (§2)
+   asks whether it is even inside VMID 0's page-table range. Note the ring
+   memory itself is fine — `startKIQ` was handed MC `0xf40fb28000` in the
+   carve-out — so this is a mapping problem, not an allocation one.
+2. **2dq's conclusion is withdrawn in substance.** Its *measurement* stands
+   (WPTR advanced, RPTR caught up, CP_STAT busy), but a faulting fetch
+   advances RPTR having discarded the data. **Do not cite 2dq as proof the CP
+   executes PM4.** Whether the CP has ever successfully executed a packet on
+   this chip is currently unproven either way.
 3. **`gfx_min = gfx_max = 0`** from the SMU DPMCLOCKS table, while every
    neighbouring field decodes correctly and GFX is not in GFXOFF. Struct
    layout was checked against Linux and is right, so these are real zeros:
@@ -149,7 +185,13 @@ establishing what makes that value meaningful, and had to be withdrawn:
 equal the MC address), 2dp (measured before the doorbell), 2dq (narrated its
 own hook's substituted value as a hardware result), 2ds–2dv (read a jump
 direction backwards and then hooked gates for a fault that did not exist),
-2dw (13 small-integer hits read as a located write).
+2dw (13 small-integer hits read as a located write), and 2dz/2ea (tested
+`status & 1` as a fault-valid bit when bit 0 is MORE_FAULTS, so a genuine
+0x9ba fault was logged as "nothing latched").
+
+The ninth one happened **inside the code written to prevent the other eight**.
+Writing a precondition into the log does not help if the precondition itself
+is guessed.
 
 Operational rules that actually catch it:
 
@@ -227,12 +269,24 @@ plugin boot-args are actually in config.plist. Boots have been wasted on each.
 
 ---
 
-## 7. If the ring-fault lead collapses
+## 7. The next lever is probably source comparison
 
-If 2ea shows the fault was already latched before `startKIQ`, stop doing
-register archaeology on this path. The cheaper next lever is **source
-comparison**: read how amdgpu sets up the KIQ's VMID, page tables and ring
-mapping for yellow_carp (`gfx_v10_0.c`, `amdgpu_gart.c`, `gmc_v10_0.c`) and
-compare against what Apple's path actually leaves configured. The SMU address
-bug (2dh/2di) was solved exactly that way — by reading
-`yellow_carp_ppt.c:159-164` and noticing Linux puts the tables in VRAM.
+The ring-fault lead did **not** collapse — 2ea dated it to the submission. But
+whichever way 2eb's range test goes, grinding more GC registers is unlikely to
+explain *why* Apple's `startKIQ` command-8 path leaves the KIQ ring at a GPUVM
+address that does not translate on this chip.
+
+The cheaper lever is reading how amdgpu does it for yellow_carp and comparing:
+`gfx_v10_0.c` (KIQ/MQD setup, `gfx_v10_0_kiq_init_queue`, `nv_grbm_select`),
+`amdgpu_gart.c` and `gmc_v10_0.c` (GART aperture, VMID 0 context setup,
+`gmc_v10_0_vm_init`), plus `amdgpu_ring.c` for where the ring is expected to
+live. The question to answer from source: for GC 10.3 on an APU, is the KIQ
+ring addressed through GART/GPUVM or physically, and what sets up the mapping
+Apple is assuming exists.
+
+Precedent: the SMU address bug (2dh/2di) was solved exactly this way, by
+reading `yellow_carp_ppt.c:159-164` and noticing Linux puts the SMU tables in
+VRAM — not by another register probe.
+
+Fetch Linux sources from torvalds/linux and record the commit in
+docs/linux-ref/UPSTREAM.md.
