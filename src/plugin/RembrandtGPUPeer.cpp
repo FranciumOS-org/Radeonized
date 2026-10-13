@@ -531,7 +531,12 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // question; everything it needs for context comes with it.
     "pdbA_valid", "pdbA_nonzero", "pdbA_low", "pdbA_high", "pdbA_e0",
     "pdbB_valid", "pdbB_nonzero", "pdbB_low", "pdbB_high", "pdbB_e0",
-    "pdbB_phys", "vm_c0_ptb", "gc_fb_off",
+    "pdbB_phys", "pdbA_mapped", "pdbB_mapped", "vm_c0_ptb", "gc_fb_off",
+    // 2ef: the control - does reading carve-out physical memory work at all?
+    "ctl_fb_mapped", "ctl_fb_nonzero", "ctl_fb_e0",
+    // 2eg: where Apple's own VM allocator put each page-table block.
+    "vmm_alloc_calls", "vmm_l1_lvl", "vmm_l1_e20", "vmm_l1_e28",
+    "vmm_l2_lvl", "vmm_l2_e20", "vmm_l3_lvl", "vmm_l3_e20",
     // the fault that sent us here, at the point it appears
     "vmf_st_wait", "vmf_ad_wait",
     // 2eb/2ed are ANSWERED (ring VA in range; GC hub programmed and agreeing

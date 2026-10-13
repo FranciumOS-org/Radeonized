@@ -2692,3 +2692,108 @@ Diag keys `vm_l2_cntl`, `vm_c0_cntl`, `vm_c0_ptb`, `vm_c0_start`, `vm_c0_end`,
 `vm_ring_in_range`, in NVRAM.
 
 Build: UUID 3857364D, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+## 2eb/2ed answered (2026-10-12): the range is right, the GC hub is right
+
+logs/20261012-232037-plugin, armed, no panic, 274 diag entries, `d=0`.
+
+```
+2eb: GCVM_L2_CNTL=0x000c0603 CONTEXT0_CNTL=0x01555481 PT_BASE=0xfdfa001
+     START=0xffbfa00 END=0xffffe00 (pages -> 0xffbfa00000..0xffffe00000)
+     ring VA = 0xffbfe80000 -> INSIDE the mapped range
+2ed: GCMC FB_LOCATION base=0x0000f400 top=0x0000f4ff FB_OFFSET=0x00000780
+     AGP bot=0x00ffffff top=0x00000000 SYS lo=0x003d0000 hi=0x003d3fff
+     all_zero=0 fb_agrees_with_mmhub=1
+```
+
+The ~1 GB CONTEXT0 window matches the 0x40000000 the TTL input reports at
++0x68. The GC hub's system aperture is amdgpu's own formula applied to the
+real carve-out — `min(fb,agp) >> 18` = `0xF400000000 >> 18` = 0x3d0000 and
+`0xF4FFFFFFFF >> 18` = 0x3d3fff — and AGP bot 0xffffff / top 0 is amdgpu's
+"AGP disabled" encoding. Two independently-derived numbers agreeing to the
+bit, so both the hub setup and the register decode are sound.
+
+**So the aperture is right and the fault is in the page-table contents.**
+
+### The vram_base_offset reading, and why it did NOT survive
+
+`GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR` = `0x0FDFA001`: high word 0, bit 0
+(AMDGPU_PTE_VALID) set, bit 1 (AMDGPU_PTE_SYSTEM) clear — a page directory
+declared to be in VRAM. Linux says what belongs there (docs/linux-ref/
+UPSTREAM.md, fetched 2026-10-12):
+
+```
+gfxhub_v2_1_init_gart_aperture_regs -> setup_vm_pt_regs(amdgpu_gmc_pd_addr(gart.bo))
+amdgpu_gmc_pd_addr -> gmc_v10_0_get_vm_pde: VRAM -> amdgpu_gmc_vram_mc2pa(addr)
+amdgpu_gmc_vram_mc2pa(mc) = mc - vram_start + vram_base_offset
+vram_base_offset = gfxhub_v2_1_get_mc_fb_offset() = GCMC_VM_FB_OFFSET << 24
+```
+
+We read `GCMC_VM_FB_OFFSET = 0x780`, so `vram_base_offset` should be
+`0x7_8000_0000`. Apple's value is exactly that computation with
+`vram_base_offset = 0` — correct for a Navi 21 dGPU, short by 0x7_8000_0000
+here. The same shape as the SMU address bug of 2dh/2di.
+
+**The register was deliberately NOT patched on that reading.** If Apple's VM
+layer uses offset 0 throughout, the PTEs are low by the same amount and
+making the walk succeed would aim GPU reads *and writes* at host DRAM near
+0x0FDF_A000 — worse than the current clean fault. 2ee read both candidate
+pages instead.
+
+### 2ee on hardware (2026-10-12): NEITHER page is a page directory
+
+logs/20261012-233404-plugin, armed, no panic, 286 diag entries. The 2ee log
+lines were evicted by the ring wrap; the diag keys carried the result, which
+is why they exist.
+
+```
+pdbA phys=0x0fdfa000   nonzero=512/512 valid=251 low=23 high=228
+                       [0]=0x4f8d48fe8949f389
+pdbB phys=0x78fdfa000  nonzero=0 valid=0
+```
+
+`0x...8949f389` little-endian is `89 f3 49 89 fe 48 8d 4f` =
+`mov %esi,%ebx ; mov %rdi,%r14 ; lea ...` — **x86-64 machine code**. Candidate
+A is live macOS kernel memory, and 251/512 "valid" bits is a coin flip on
+noise, not PDEs. Candidate B is 512 zero qwords.
+
+So the `vram_base_offset` reading is **not supported**, and the page
+directory's location is unknown. Worth stating plainly: the GPU's page-table
+walker is currently pointed at live kernel memory, and the MAPPING_ERROR
+fault is what has been protecting the machine.
+
+## 2ef/2eg (2026-10-12): prove the instrument, then ask the driver
+
+Two additions, both read-only.
+
+**2ef, the control.** pdbB's zeros only mean "no directory here" if reading
+carve-out physical memory works at all, and nothing has ever tested that —
+every carve-out read in this project went through BAR0 in the probe kext, not
+through `IOMemoryDescriptor` on the system-physical alias. Probe 2 supplies
+the control: the carve-out is at system-physical `0x7_8000_0000` and HUBP0
+scans the GOP framebuffer from carve-out offset 0, which is the console this
+machine is displaying and so cannot be a page of zeros.
+
+```
+framebuffer page nonzero   carve-out reads work; pdbB's zeros are real
+framebuffer page zero      the instrument does not read carve-out memory and
+                           the whole 2ee result proves nothing
+```
+
+**2eg, the direct question.** Guessing transformations of a register is how
+2ee went wrong; `AMDHWVMM::allocVMBlock(level, GLKMemoryElement *)`
+(0xbe90eea) is where every page-table block actually comes from:
+
+```
+be90efb  movq 0x78(%rdi),%rdi          the allocator
+be90f11  movl 0xac0(%r15,level*32),%r14d
+be90f30  callq <allocator>(elem, r14, 0x1000, 1, 1)
+be90f38  cmpq $0x0,0x20(%rbx)          the result lands at elem+0x20
+```
+
+Hooked observe-only: the original runs first and the element is read back, so
+the log carries the block's real addresses with `level` saying which tier it
+is. The root directory is the one the hub register should be pointing at, and
+comparing it with `0x0FDFA001` says what transformation Apple applied.
+
+Build: UUID 9C57527B, hosttest passes. Same boot-args, still armed.

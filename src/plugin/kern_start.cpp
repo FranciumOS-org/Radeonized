@@ -1816,6 +1816,34 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   tag, all_zero ? 1 : 0, fb_agrees ? 1 : 0);
     }
 
+    // 2ef helper: map one physical page read-only and characterise it.
+    // Returns false if the mapping failed, in which case the counts are
+    // meaningless and the caller must say so.
+    auto scan_phys = [](uint64_t phys, uint32_t *valid, uint32_t *nonzero,
+                        uint32_t *low, uint32_t *high, uint64_t *first4) -> bool {
+        *valid = *nonzero = *low = *high = 0;
+        first4[0] = first4[1] = first4[2] = first4[3] = 0;
+        auto md = IOMemoryDescriptor::withPhysicalAddress(phys, 0x1000, kIODirectionIn);
+        if (!md) return false;
+        IOMemoryMap *map = md->createMappingInTask(kernel_task, 0,
+                                                   kIOMapAnywhere | kIOMapInhibitCache);
+        if (!map) { md->release(); return false; }
+        auto p = reinterpret_cast<volatile uint64_t *>(map->getVirtualAddress());
+        for (uint32_t i = 0; i < 512; i++) {
+            uint64_t e = p[i];
+            if (i < 4) first4[i] = e;
+            if (e != 0) (*nonzero)++;
+            if (e & 1) {
+                (*valid)++;
+                uint64_t a = e & 0x0000FFFFFFFFF000ULL;
+                if (a < 0x10000000ULL) (*low)++; else (*high)++;
+            }
+        }
+        map->release();
+        md->release();
+        return true;
+    };
+
     // 2ee (2026-10-12): WHERE is the page directory really, and are the PTEs
     // wrong the same way?
     //
@@ -1872,52 +1900,65 @@ static void rbgpu_dump_gc_regs(const char *tag) {
             pdb_raw + (static_cast<uint64_t>(g_rb_2ed_fb_off) << 24),
         };
         for (int c = 0; c < 2; c++) {
-            uint32_t valid = 0, nonzero = 0, low = 0, high = 0;
-            uint64_t first[4] = {0, 0, 0, 0};
-            auto md = IOMemoryDescriptor::withPhysicalAddress(cand[c], 0x1000,
-                                                             kIODirectionIn);
-            IOMemoryMap *map = md ? md->createMappingInTask(kernel_task, 0,
-                                        kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
-            if (map) {
-                auto p = reinterpret_cast<volatile uint64_t *>(map->getVirtualAddress());
-                for (uint32_t i = 0; i < 512; i++) {
-                    uint64_t e = p[i];
-                    if (i < 4) first[i] = e;
-                    if (e != 0) nonzero++;
-                    if (e & 1) {
-                        valid++;
-                        uint64_t a = e & 0x0000FFFFFFFFF000ULL;
-                        if (a < 0x10000000ULL) low++;
-                        else high++;
-                    }
-                }
-                map->release();
-            }
-            if (md) md->release();
+            uint32_t valid, nonzero, low, high;
+            uint64_t first[4];
+            bool mapped = scan_phys(cand[c], &valid, &nonzero, &low, &high, first);
 
             rbgpu_log("2ee DIAG [%s]: PDB candidate %c phys=0x%llx -> %s"
                       " valid=%u nonzero=%u low(<0x10000000)=%u high=%u"
                       " [0]=0x%llx [1]=0x%llx [2]=0x%llx [3]=0x%llx",
                       tag, c == 0 ? 'A' : 'B', cand[c],
-                      map ? "mapped" : "MAP FAILED (reading proves nothing)",
+                      mapped ? "mapped" : "MAP FAILED (reading proves nothing)",
                       valid, nonzero, low, high,
                       first[0], first[1], first[2], first[3]);
 
             const char *pfx = c == 0 ? "pdbA" : "pdbB";
             char key[32];
-            snprintf(key, sizeof(key), "%s_valid", pfx);
-            rbgpu_diag_set_num(key, valid);
-            snprintf(key, sizeof(key), "%s_nonzero", pfx);
-            rbgpu_diag_set_num(key, nonzero);
-            snprintf(key, sizeof(key), "%s_low", pfx);
-            rbgpu_diag_set_num(key, low);
-            snprintf(key, sizeof(key), "%s_high", pfx);
-            rbgpu_diag_set_num(key, high);
-            snprintf(key, sizeof(key), "%s_e0", pfx);
-            rbgpu_diag_set_num(key, first[0]);
-            snprintf(key, sizeof(key), "%s_phys", pfx);
-            rbgpu_diag_set_num(key, cand[c]);
+            snprintf(key, sizeof(key), "%s_valid", pfx);   rbgpu_diag_set_num(key, valid);
+            snprintf(key, sizeof(key), "%s_nonzero", pfx); rbgpu_diag_set_num(key, nonzero);
+            snprintf(key, sizeof(key), "%s_low", pfx);     rbgpu_diag_set_num(key, low);
+            snprintf(key, sizeof(key), "%s_high", pfx);    rbgpu_diag_set_num(key, high);
+            snprintf(key, sizeof(key), "%s_e0", pfx);      rbgpu_diag_set_num(key, first[0]);
+            snprintf(key, sizeof(key), "%s_phys", pfx);    rbgpu_diag_set_num(key, cand[c]);
+            snprintf(key, sizeof(key), "%s_mapped", pfx);  rbgpu_diag_set_num(key, mapped ? 1 : 0);
         }
+
+        // 2ef (2026-10-12): THE CONTROL. The 2ee boot read candidate B as 512
+        // zero qwords, and that only means "no page directory here" if reading
+        // carve-out physical memory works at all. Nothing has ever tested
+        // that: every carve-out read this project has done went through BAR0
+        // in the probe kext, not through IOMemoryDescriptor on the
+        // system-physical alias.
+        //
+        // Probe 2 measured the control: MMMC_VM_FB_OFFSET 0x780 puts the
+        // carve-out at system-physical 0x7_8000_0000, and HUBP0 scans the GOP
+        // framebuffer from carve-out offset 0 - which is the console this
+        // machine is displaying, so it cannot be a page of zeros.
+        //
+        //   framebuffer page nonzero   carve-out reads work, and candidate B
+        //                              really holds no page directory
+        //   framebuffer page zero      the instrument does not read carve-out
+        //                              memory and the 2ee result proves
+        //                              NOTHING either way
+        {
+            uint64_t fb_phys = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+            uint32_t valid, nonzero, low, high;
+            uint64_t first[4];
+            bool mapped = scan_phys(fb_phys, &valid, &nonzero, &low, &high, first);
+            rbgpu_diag_set_num("ctl_fb_phys", fb_phys);
+            rbgpu_diag_set_num("ctl_fb_mapped", mapped ? 1 : 0);
+            rbgpu_diag_set_num("ctl_fb_nonzero", nonzero);
+            rbgpu_diag_set_num("ctl_fb_e0", first[0]);
+            rbgpu_log("2ef DIAG [%s]: CONTROL framebuffer page phys=0x%llx -> %s "
+                      "nonzero=%u/512 [0]=0x%llx [1]=0x%llx -- %s",
+                      tag, fb_phys, mapped ? "mapped" : "MAP FAILED",
+                      nonzero, first[0], first[1],
+                      (mapped && nonzero > 0)
+                          ? "carve-out reads WORK, so pdbB's zeros are real"
+                          : "carve-out reads do NOT work here; the 2ee result "
+                            "proves nothing and must not be used");
+        }
+
         rbgpu_log("2ee DIAG [%s]: a page of zeros or of noise is NOT a page "
                   "directory; only 'B valid and A not' supports the "
                   "vram_base_offset reading, and where B's entries POINT "
@@ -2685,6 +2726,52 @@ static bool rb_2dv_seen(void *const *arr, uint32_t n, void *p) {
     for (uint32_t i = 0; i < n; i++)
         if (arr[i] == p) return true;
     return false;
+}
+
+// 2eg (2026-10-12): ask Apple's own VM allocator where the page tables are.
+//
+// 2ee found that NEITHER candidate physical page holds a page directory:
+// 0x0FDFA000 is live macOS kernel memory (its first qword decodes as x86
+// machine code and 251/512 "valid" bits is a coin flip on noise), and
+// 0x78FDFA000 is 512 zero qwords. So guessing transformations of
+// GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR is the wrong approach - ask the driver.
+//
+// AMDHWVMM::allocVMBlock(level, GLKMemoryElement *elem) is where every page
+// table block comes from (0xbe90eea):
+//
+//   be90efb  movq 0x78(%rdi),%rdi          the allocator
+//   be90f11  movl 0xac0(%r15,level*32),%r14d
+//   be90f30  callq <allocator>(elem, r14, 0x1000, 1, 1)
+//   be90f38  cmpq $0x0,0x20(%rbx)          the result lands at elem+0x20
+//
+// So elem+0x20 onwards carries the block's addresses, and `level` says which
+// tier it is - the root directory is the one the hub register should point
+// at. Observe only: the original runs first and the element is read back.
+static bool (*orig_vmm_allocVMBlock_2eg)(void *, uint32_t, void *) = nullptr;
+static uint32_t g_rb_2eg_calls = 0;
+
+static bool hooked_vmm_allocVMBlock_2eg(void *vmm, uint32_t level, void *elem) {
+    bool ret = orig_vmm_allocVMBlock_2eg ? orig_vmm_allocVMBlock_2eg(vmm, level, elem) : false;
+    g_rb_2eg_calls++;
+    rbgpu_diag_set_num("vmm_alloc_calls", g_rb_2eg_calls);
+
+    if (elem && g_rb_2eg_calls <= 8) {
+        auto q = reinterpret_cast<volatile uint64_t *>(elem);
+        rbgpu_log("2eg: allocVMBlock(level=%u) -> %d elem=%p "
+                  "[0]=0x%llx [1]=0x%llx [2]=0x%llx [3]=0x%llx "
+                  "[4]=0x%llx [5]=0x%llx [6]=0x%llx [7]=0x%llx",
+                  level, ret ? 1 : 0, elem,
+                  q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]);
+        char key[32];
+        snprintf(key, sizeof(key), "vmm_l%u_lvl", g_rb_2eg_calls);
+        rbgpu_diag_set_num(key, level);
+        // +0x20 is the field allocVMBlock itself tests for success.
+        snprintf(key, sizeof(key), "vmm_l%u_e20", g_rb_2eg_calls);
+        rbgpu_diag_set_num(key, q[4]);
+        snprintf(key, sizeof(key), "vmm_l%u_e28", g_rb_2eg_calls);
+        rbgpu_diag_set_num(key, q[5]);
+    }
+    return ret;
 }
 
 static bool hooked_hw_registerChannel_2du(void *hw, void *chan) {
@@ -5040,6 +5127,16 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked registerChannel + addHWChannel (2du observe-only)");
     } else {
         rbgpu_log("X6000: FAILED to hook the 2du channel-registration gates");
+    }
+
+    // 2eg: where Apple's VM allocator puts each page-table block.
+    KernelPatcher::RouteRequest req_2eg(
+        "__ZN23AMDRadeonX6000_AMDHWVMM12allocVMBlockE15eAMD_VMPT_LEVELP16GLKMemoryElement",
+        hooked_vmm_allocVMBlock_2eg, orig_vmm_allocVMBlock_2eg);
+    if (patcher.routeMultiple(id, &req_2eg, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDHWVMM::allocVMBlock (2eg observe-only)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook AMDHWVMM::allocVMBlock");
     }
 
     // 2dy: the WRITE_DATA packet that carries the completion fence. Observe
