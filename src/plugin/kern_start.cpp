@@ -1345,6 +1345,70 @@ static int hooked_gc_sw_init(void *param1, void *param2) {
 static uint32_t g_rb_kiq_spec0 = 0xFFFFFFFFu;
 static uint32_t g_rb_kiq_spec1 = 0xFFFFFFFFu;
 static uint32_t g_rb_kiq_spec2 = 0xFFFFFFFFu;
+static uint64_t g_rb_kiq_ring_mc = 0;   // startKIQ's first u64 arg: the ring MC address
+
+// 2do (2026-10-12): read the CP_HQD_* window at the slot the KIQ actually uses.
+//
+// The 2dn boot settled it: startKIQ's AMD_PM4_QUEUE_SPEC is
+// me=2 pipe=1 queue=0, and GRBM_GFX_CNTL reads 0, so every CP_HQD_* value
+// recorded so far was the window pointed at me=0 pipe=0 queue=0 - the WRONG
+// slot. The all-zero readings in 2dm prove nothing, exactly as the 2dn
+// caveat said they would not.
+//
+// Reaching the right slot needs GRBM_GFX_CNTL written, which is this plugin's
+// FIRST write to a GC register. It is an index register: it selects which
+// ME / PIPE / QUEUE / VMID instance the windowed registers address and changes
+// no GPU behaviour by itself. amdgpu does exactly this around every HQD access
+// (nv_grbm_select). The value is saved before and restored after, and nothing
+// else runs concurrently here - this is inside the accelerator's single-
+// threaded start path.
+//
+// The field layout is from amdgpu's nv_grbm_select and is NOT independently
+// verified here, so the probe does not rely on it: it sweeps a small set of
+// slots and recognises the right one by CP_HQD_PQ_BASE matching the ring
+// address startKIQ was given (a = 0xf40fb28000 on the 2dn boot, and
+// CP_HQD_PQ_BASE holds the ring base >> 8). A match proves both the slot and
+// the field layout at once; no match across the sweep means no queue in any of
+// them was pointed at our ring.
+static uint32_t rbgpu_grbm_sel(uint32_t me, uint32_t pipe, uint32_t queue, uint32_t vmid) {
+    return (pipe & 3u) | ((me & 3u) << 2) | ((vmid & 0xFu) << 4) | ((queue & 7u) << 8);
+}
+
+static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
+                                 uint32_t queue, uint32_t expect_pq_base) {
+    const uint32_t kSeg0 = 0x1260;
+    const uint32_t dwGRBM_GFX_CNTL = 0x0dc2;
+    const uint32_t dwACTIVE   = 0x1fab;
+    const uint32_t dwVMID     = 0x1fac;
+    const uint32_t dwPQ_BASE  = 0x1fb1;
+    const uint32_t dwPQ_BASEH = 0x1fb2;
+    const uint32_t dwPQ_RPTR  = 0x1fb3;
+    const uint32_t dwPQ_DBELL = 0x1fb8;
+    const uint32_t dwPQ_CTRL  = 0x1fba;
+
+    uint32_t sel = rbgpu_grbm_sel(me, pipe, queue, 0);
+    g_hw.wreg(g_hw.ctx, (kSeg0 + dwGRBM_GFX_CNTL) * 4, sel);
+    uint32_t sel_rb = g_hw.rreg(g_hw.ctx, (kSeg0 + dwGRBM_GFX_CNTL) * 4);
+
+    uint32_t act   = g_hw.rreg(g_hw.ctx, (kSeg0 + dwACTIVE)   * 4);
+    uint32_t vmid  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwVMID)     * 4);
+    uint32_t base  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_BASE)  * 4);
+    uint32_t baseh = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_BASEH) * 4);
+    uint32_t rptr  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_RPTR)  * 4);
+    uint32_t dbell = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_DBELL) * 4);
+    uint32_t ctrl  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_CTRL)  * 4);
+
+    bool hit = (expect_pq_base != 0) && (base == expect_pq_base);
+    bool any = (act | base | baseh | dbell | ctrl) != 0;
+
+    if (any || hit) {
+        rbgpu_log("2do [%s] me=%u pipe=%u queue=%u (sel=0x%08x rb=0x%08x): ACTIVE=0x%08x "
+                  "PQ_BASE=0x%08x/HI=0x%08x RPTR=0x%08x DOORBELL=0x%08x CTRL=0x%08x VMID=0x%08x%s",
+                  tag, me, pipe, queue, sel, sel_rb, act, base, baseh, rptr, dbell, ctrl, vmid,
+                  hit ? "  <<< PQ_BASE MATCHES THE RING startKIQ WAS GIVEN" : "");
+    }
+    return hit;
+}
 
 static void rbgpu_dump_gc_regs(const char *tag) {
     if (!g_hw.ctx || !g_hw.rreg) {
@@ -1588,6 +1652,42 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                       "KIQ lives at a nonzero me/pipe/queue this read is of the WRONG "
                       "slot and proves nothing; if it lives at 0/0/0 the queue really "
                       "was never programmed.", tag);
+        }
+
+        // 2do: now look where the KIQ actually lives. Only once startKIQ has
+        // run and told us the slot; before that there is nothing to aim at.
+        if (g_rb_kiq_spec0 != 0xFFFFFFFFu && g_hw.wreg) {
+            uint32_t want_base = (uint32_t)(g_rb_kiq_ring_mc >> 8);
+            rbgpu_log("2do [%s]: probing the HQD window. KIQ slot from the spec is "
+                      "me=%u pipe=%u queue=%u; ring MC 0x%llx so CP_HQD_PQ_BASE should "
+                      "read 0x%08x. Saving GRBM_GFX_CNTL=0x%08x and restoring it after.",
+                      tag, g_rb_kiq_spec0, g_rb_kiq_spec1, g_rb_kiq_spec2,
+                      g_rb_kiq_ring_mc, want_base, gfx_cntl);
+
+            bool found = rbgpu_probe_hqd_slot(tag, g_rb_kiq_spec0, g_rb_kiq_spec1,
+                                              g_rb_kiq_spec2, want_base);
+            if (!found) {
+                // The field layout is unverified, so do not conclude from one
+                // encoding. Sweep a small set; a PQ_BASE match identifies both
+                // the slot and the layout at once.
+                for (uint32_t me = 0; me < 3 && !found; me++)
+                    for (uint32_t pipe = 0; pipe < 4 && !found; pipe++)
+                        found = rbgpu_probe_hqd_slot(tag, me, pipe, 0, want_base);
+            }
+            rbgpu_diag_set_num("hqd_slot_found", found ? 1 : 0);
+            if (!found) {
+                rbgpu_log("2do [%s]: no slot in the sweep has CP_HQD_PQ_BASE = 0x%08x. "
+                          "Either no queue was pointed at our ring, or the GRBM_GFX_CNTL "
+                          "field layout is not what amdgpu uses - the sweep cannot tell "
+                          "those apart, so this is not yet proof the queue is missing.",
+                          tag, want_base);
+            }
+
+            // Restore whatever the selector held before we touched it.
+            g_hw.wreg(g_hw.ctx, (kSeg0Conv + dwGRBM_GFX_CNTL) * 4, gfx_cntl);
+            uint32_t back = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwGRBM_GFX_CNTL) * 4);
+            rbgpu_log("2do [%s]: GRBM_GFX_CNTL restored to 0x%08x (read back 0x%08x)",
+                      tag, gfx_cntl, back);
         }
     }
 }
@@ -2082,6 +2182,7 @@ static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void 
         g_rb_kiq_spec0 = spec[0];
         g_rb_kiq_spec1 = spec[1];
         g_rb_kiq_spec2 = spec[2];
+        g_rb_kiq_ring_mc = a;
         rbgpu_log("2dn: startKIQ QUEUE_SPEC[0..2] = 0x%08x 0x%08x 0x%08x "
                   "(the me/pipe/queue the KIQ should occupy); ring args a=0x%llx b=0x%llx",
                   spec[0], spec[1], spec[2], a, b);

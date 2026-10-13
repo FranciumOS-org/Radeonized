@@ -1769,3 +1769,55 @@ The dump is also called from a new third point, `post-startKIQ`, so the window
 is read immediately after the layer below claims the queue exists.
 
 Build: UUID 824205E1, hosttest passes. Same boot-args, still armed. All reads.
+
+### 2dn on hardware (2026-10-12): we have been reading the WRONG HQD slot
+
+logs/20261012-204631-plugin, UUID 824205E1, armed, no panic.
+
+```
+2dn: startKIQ QUEUE_SPEC[0..2] = 0x00000002 0x00000001 0x00000000
+     (me=2 pipe=1 queue=0); ring args a=0xf40fb28000 b=0xf40fb28800
+2dn DIAG [post-startKIQ]: GRBM_GFX_CNTL=0x00000000
+```
+
+The KIQ lives at **ME 2 / pipe 1 / queue 0**, and the `CP_HQD_*` window has
+been pointed at **0 / 0 / 0** for every reading taken so far. So 2dm's
+"the KIQ queue was never programmed" is **withdrawn**: those all-zero values
+were the wrong slot and prove nothing. The 2dn caveat was written for exactly
+this case and it fired.
+
+Also learned, and good news: the ring arguments are `0xf40fb28000` and
+`0xf40fb28800` - real carve-out MC addresses. The ring itself is allocated
+where it should be.
+
+Four claims in a row (2dk "seg0 decodes", 2dl "MEC fetched", 2dm "never
+programmed", and now this) have come from reading a value without first
+proving the thing that makes the value meaningful. The practice that keeps
+catching it is cheap and should stay: say in the code what would have to be
+true for the reading to mean anything, and log when it is not.
+
+## 2do (2026-10-12): point the window at the KIQ's own slot
+
+Reaching ME 2 / pipe 1 / queue 0 needs `GRBM_GFX_CNTL` written - the
+**plugin's first write to a GC register**. It is an index register: it selects
+which ME/PIPE/QUEUE/VMID instance the windowed `CP_HQD_*` registers address
+and changes no GPU behaviour by itself. amdgpu writes it around every HQD
+access (`nv_grbm_select`). The old value is saved, restored immediately after,
+and read back; nothing else runs concurrently, this being inside the
+accelerator's single-threaded start path.
+
+**The field layout is not trusted.** The encoding
+`pipe | me<<2 | vmid<<4 | queue<<8` comes from amdgpu and is not independently
+verified against this chip, so the probe does not depend on it. It reads
+CP_HQD_ACTIVE / PQ_BASE / PQ_BASE_HI / PQ_RPTR / PQ_DOORBELL_CONTROL /
+PQ_CONTROL / VMID at the spec's slot and, failing a hit, sweeps me 0..2 x
+pipe 0..3. The right slot identifies itself: `CP_HQD_PQ_BASE` holds the ring
+base >> 8, and startKIQ was handed ring MC `0xf40fb28000`, so the slot that
+reads `0xf40fb280` is the KIQ's - which proves the slot and the field layout
+together.
+
+If nothing in the sweep matches, the log says in those words that this does
+**not** prove the queue is missing, because a wrong field layout and a missing
+queue look identical from here.
+
+Build: UUID 54D5EF33, hosttest passes. Same boot-args, still armed.
