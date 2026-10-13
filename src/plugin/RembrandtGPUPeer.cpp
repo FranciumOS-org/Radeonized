@@ -508,6 +508,40 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // IONVRAM-FORCESYNCNOW-PROPERTY asks IODTNVRAM to flush immediately, so the
 // value is committed before a power-cycle rather than sitting in the
 // in-memory copy. Without it a forced restart can lose the write.
+// 2ec (2026-10-12): THE HOT LIST, emitted first.
+//
+// The summary is a fixed 512 bytes and every milestone appended its new keys
+// to the END of kRbgpuNvramKeys - which is exactly where truncation eats
+// them. The 2eb boot's summary stopped mid-key at "mc", before every one of
+// `vm_l2_cntl`, `vm_c0_cntl`, `vm_c0_ptb`, `vm_c0_start`, `vm_c0_end`,
+// `vm_ring_in_range`: the six values that boot existed to produce. Same
+// failure as the diag cap of 2db (96) and 2ds (192), in the other buffer.
+//
+// The buffer is NOT being enlarged. It is flushed with FORCESYNCNOW on every
+// refresh, three variables are written per boot, and this project has already
+// had its EFI corrupted once; spending more NVRAM to fix an ordering bug would
+// be the wrong trade. Put the keys that decide the next step first instead.
+//
+// Rule: when a milestone starts, its keys go HERE; when it is answered, they
+// move down into the main list.
+static const char *const kRbgpuNvramHotKeys[] = {
+    "armed",
+    // 2eb: is the ring's GPUVM address inside VMID 0's page tables at all?
+    "vm_ring_in_range", "vm_c0_start", "vm_c0_end", "vm_c0_ptb",
+    "vm_c0_cntl", "vm_l2_cntl",
+    // the fault that sent us here, at the point it appears
+    "vmf_st_wait", "vmf_ad_wait",
+};
+
+static bool rbgpuIsHotKey(const char *key) {
+    for (size_t i = 0; i < sizeof(kRbgpuNvramHotKeys) / sizeof(kRbgpuNvramHotKeys[0]); i++) {
+        if (strcmp(kRbgpuNvramHotKeys[i], key) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static const char *const kRbgpuNvramKeys[] = {
     "armed", "found_fb_routed", "found_fb_calls", "found_fb_refused",
     "ttl_raw_init_ret", "ttl_hw_init_ret", "gc_sw_init_ret",
@@ -578,30 +612,67 @@ void RembrandtGPUPeer::saveDiagToNvram() {
     // Static, not stack: the kernel caps a frame at 1024 bytes and these
     // three buffers together are twice that. saveDiagToNvram only ever runs
     // on the single diag-refresh thread_call, so sharing them is safe.
+    // 2ec: body is built hot-keys-first, and anything that does not fit is
+    // COUNTED rather than silently dropped. `d=N` goes at the front, so a
+    // truncated summary says so instead of just ending mid-key.
+    static char body[512];
     static char buf[512];
     size_t len = 0;
-    buf[0] = '\0';
-    for (size_t k = 0; k < sizeof(kRbgpuNvramKeys) / sizeof(kRbgpuNvramKeys[0]); k++) {
-        const char *key = kRbgpuNvramKeys[k];
-        for (size_t i = 0; i < s_snapDiagCount; i++) {
-            if (strncmp(s_snapDiags[i].key, key, sizeof(s_snapDiags[i].key)) != 0) {
+    unsigned dropped = 0;
+    body[0] = '\0';
+
+    // Reserve room for the "d=NNN " prefix so the marker can never be the
+    // thing that gets cut.
+    const size_t kBodyLimit = sizeof(body) - 8;
+
+    for (size_t pass = 0; pass < 2; pass++) {
+        const char *const *list = pass == 0 ? kRbgpuNvramHotKeys : kRbgpuNvramKeys;
+        size_t count = pass == 0
+            ? sizeof(kRbgpuNvramHotKeys) / sizeof(kRbgpuNvramHotKeys[0])
+            : sizeof(kRbgpuNvramKeys) / sizeof(kRbgpuNvramKeys[0]);
+
+        for (size_t k = 0; k < count; k++) {
+            const char *key = list[k];
+            // The hot keys were already emitted in pass 0.
+            if (pass == 1 && rbgpuIsHotKey(key)) {
                 continue;
             }
-            if (s_snapDiags[i].type != DIAG_TYPE_NUM) {
+            for (size_t i = 0; i < s_snapDiagCount; i++) {
+                if (strncmp(s_snapDiags[i].key, key, sizeof(s_snapDiags[i].key)) != 0) {
+                    continue;
+                }
+                if (s_snapDiags[i].type != DIAG_TYPE_NUM) {
+                    break;
+                }
+                int n = snprintf(body + len, kBodyLimit - len, "%s%s=%llx",
+                                 len ? " " : "", key, s_snapDiags[i].numVal);
+                if (n > 0 && static_cast<size_t>(n) < kBodyLimit - len) {
+                    len += static_cast<size_t>(n);
+                } else {
+                    body[len] = '\0';
+                    dropped++;
+                }
                 break;
             }
-            int n = snprintf(buf + len, sizeof(buf) - len, "%s%s=%llx",
-                             len ? " " : "", key, s_snapDiags[i].numVal);
-            if (n > 0 && static_cast<size_t>(n) < sizeof(buf) - len) {
-                len += static_cast<size_t>(n);
-            }
-            break;
         }
     }
 
     if (len == 0) {
         options->release();
         return;
+    }
+
+    snprintf(buf, sizeof(buf), "d=%u %s", dropped, body);
+
+    // Say it out loud, once, the way 2dt made the diag cap say it. A silent
+    // cap has now cost three debugging rounds across two buffers.
+    static bool s_truncWarned = false;
+    if (dropped != 0 && !s_truncWarned) {
+        s_truncWarned = true;
+        rbgpu_log("*** NVRAM SUMMARY FULL: %u keys did not fit in %zu bytes and were "
+                  "DROPPED. The hot list survived; everything else may not. "
+                  "Read RBGPUDiag from the registry (tools/plugin_check.sh) for "
+                  "the full table.", dropped, sizeof(body));
     }
 
     // 2cw: rotate, do not clobber. The 2026-10-12 armed boot hung, and the
