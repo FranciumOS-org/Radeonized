@@ -2173,3 +2173,56 @@ both named gates pass and `+0xe0` is still -1, that one is the answer by
 elimination and will need its own hook by address.
 
 Build: UUID 9EE6ADFB, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2du on hardware (2026-10-12): both named gates PASS, every time
+
+logs/20261012-220552-plugin, UUID 9EE6ADFB, armed, no panic.
+
+```
+regchan_calls = 25   regchan_fails = ABSENT (zero)
+addchan_calls = 23   addchan_fails = ABSENT (zero)
+stamp_wb_e0   = -1   (unchanged)
+```
+
+Neither `AMDHardware::registerChannel` nor `AMDSWScheduler::addHWChannel` ever
+returns false, for any of the two dozen channels they see - and the KIQ
+channel's `+0xe0` is still -1. So the simple story ("one of the named gates
+refuses") is wrong.
+
+**The 25-vs-23 gap is the lead.** Two channels reached `registerChannel` and
+never reached `addHWChannel`, which is exactly what the middle gate,
+`this->vtable[0x1c8]`, refusing would produce - it sits between the two.
+
+The 2du log lines themselves were lost to the ring wrap again (channel init
+happens early and the 5 s wait evicts ~500 lines), so only the counters
+survived. Having both a counter and a line was what saved this boot.
+
+## 2dv (2026-10-12): ask by pointer, not by count
+
+Counting cannot say whether the KIQ is one of the two that fell out. Both
+hooks now record the channel **pointers** they saw succeed (a small deduped
+array, 48 max), and the `waitForHwStamp` hook - which holds the KIQ channel -
+reports membership:
+
+```
+kiq_in_regchan   was this exact channel registered
+kiq_in_addchan   was this exact channel added to the scheduler
+regchan_seen_n   distinct channels that passed registerChannel
+addchan_seen_n   distinct channels that passed addHWChannel
+```
+
+and names the conclusion:
+
+- **in reg, not in add** - the middle gate `vtable[0x1c8]` is what refuses for
+  the KIQ, and that is why `+0xe0` is -1. It then needs its own hook by
+  address, being an unnamed local.
+- **in neither** - the KIQ never reached `registerChannel` at all, so
+  `AMDHWChannel::init` is failing earlier than any of the three gates.
+- **in both** - both gates passed for this very channel, so `+0xe0` should have
+  been set; either something clears it afterwards, or the object
+  `waitForHwStamp` receives is not the one `init` ran on. All three are
+  different problems and the log says which.
+
+Diag keys, all in NVRAM so the ring wrap cannot hide them again.
+
+Build: UUID 6369CA9E, hosttest passes. Same boot-args, `-rbgpustampwait` stays.

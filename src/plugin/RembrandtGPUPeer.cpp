@@ -538,6 +538,8 @@ static const char *const kRbgpuNvramKeys[] = {
     "stamp_submitted", "stamp_completed", "stamp_wb_e0",
     // 2du: which gate leaves channel+0xe0 at -1.
     "regchan_calls", "regchan_fails", "addchan_calls", "addchan_fails",
+    // 2dv: is the KIQ channel itself among the registered / added ones.
+    "kiq_in_regchan", "kiq_in_addchan", "regchan_seen_n", "addchan_seen_n",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the
