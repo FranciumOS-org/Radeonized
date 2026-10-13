@@ -1821,3 +1821,64 @@ If nothing in the sweep matches, the log says in those words that this does
 queue look identical from here.
 
 Build: UUID 54D5EF33, hosttest passes. Same boot-args, still armed.
+
+### 2do on hardware (2026-10-12): the KIQ queue IS live — 2dm withdrawn
+
+logs/20261012-211900-plugin, UUID 54D5EF33, armed, no panic. At the KIQ's own
+slot, me=2 pipe=1 queue=0, and nowhere else in the sweep:
+
+```
+ACTIVE=0x00000001  PQ_BASE=0xffbfe800/HI=0  RPTR=0x00000000
+DOORBELL=0x40000000  CTRL=0xc030860d  VMID=0
+```
+
+**The queue is programmed, active, and its doorbell is enabled** (bit 30).
+2dm's "the KIQ queue was never programmed" is **definitively withdrawn**: the
+all-zero readings really were nothing but the wrong window. me=1/* and
+me=2 pipe=0/2 read CTRL=0x00308509 with ACTIVE=0, so those are genuinely empty
+slots and the selector is working; me=2 pipe=3 aliases onto the same slot as
+pipe=1.
+
+**`GRBM_GFX_CNTL` reads back 0 even when the write took.** The windowed values
+differ per selector, which proves the write works, so the readback is not a
+failure signal. Noted in the code.
+
+**The PQ_BASE mismatch is not evidence.** The probe expected `ring MC >> 8` =
+0xf40fb280 and got 0xffbfe800, and the "no slot matches" line fired. That test
+rested on an unverified assumption: a compute HQD's `CP_HQD_PQ_BASE` holds a
+**GPUVM virtual address** translated through the queue's VMID, while startKIQ
+was handed a physical MC address. There is no reason those would be the same
+number, so the mismatch says nothing about the ring. Fifth time an assumption
+underneath a reading needed checking before the reading meant anything.
+
+## 2dp (2026-10-12): RPTR vs WPTR, and does the queue predate startKIQ
+
+Two questions left, both cheap.
+
+**Has anything actually been submitted?** `CP_HQD_PQ_RPTR` reads 0 - the CP has
+consumed nothing - but WPTR was never read, and WPTR is what the driver's
+doorbell write advances. The pair is the discriminator:
+
+```
+WPTR == RPTR == 0   nothing was ever submitted; the doorbell write is not
+                    reaching the queue
+WPTR != RPTR        work IS queued and the CP is not consuming it - the
+                    failure is in execution, not submission
+WPTR == RPTR != 0   the CP consumed everything, and the stamp is a different
+                    problem
+```
+
+`CP_HQD_PQ_WPTR_LO` (0x1fdf) is added, and the doorbell is decoded into
+enable (bit 30) and offset (bits 27:2) - the 2do value 0x40000000 is enable
+set with offset 0.
+
+**Is this queue ours?** me=2 pipe=1 queue=0 is now a measured fact rather than
+a guess, so the probe runs at every dump point including `post-gc-hw-init`,
+which is before startKIQ. If the queue is already ACTIVE there, it predates
+startKIQ and belongs to the firmware; if it appears only afterwards, startKIQ
+really did create it.
+
+The me 0..2 x pipe 0..3 sweep is dropped: it only reprinted the same slot
+through aliased selectors and cost twelve log lines per point.
+
+Build: UUID E34337E3, hosttest passes. Same boot-args, still armed.

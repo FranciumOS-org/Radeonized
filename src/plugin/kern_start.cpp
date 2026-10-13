@@ -1386,8 +1386,13 @@ static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
     const uint32_t dwPQ_DBELL = 0x1fb8;
     const uint32_t dwPQ_CTRL  = 0x1fba;
 
+    const uint32_t dwPQ_WPTR = 0x1fdf;   // CP_HQD_PQ_WPTR_LO
+
     uint32_t sel = rbgpu_grbm_sel(me, pipe, queue, 0);
     g_hw.wreg(g_hw.ctx, (kSeg0 + dwGRBM_GFX_CNTL) * 4, sel);
+    // GRBM_GFX_CNTL reads back 0 on this chip even when the write took - the
+    // 2do boot proved the selector works anyway, because the windowed values
+    // differ per slot. Do not read the readback as "the write failed".
     uint32_t sel_rb = g_hw.rreg(g_hw.ctx, (kSeg0 + dwGRBM_GFX_CNTL) * 4);
 
     uint32_t act   = g_hw.rreg(g_hw.ctx, (kSeg0 + dwACTIVE)   * 4);
@@ -1395,6 +1400,7 @@ static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
     uint32_t base  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_BASE)  * 4);
     uint32_t baseh = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_BASEH) * 4);
     uint32_t rptr  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_RPTR)  * 4);
+    uint32_t wptr  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_WPTR)  * 4);
     uint32_t dbell = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_DBELL) * 4);
     uint32_t ctrl  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_CTRL)  * 4);
 
@@ -1403,9 +1409,23 @@ static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
 
     if (any || hit) {
         rbgpu_log("2do [%s] me=%u pipe=%u queue=%u (sel=0x%08x rb=0x%08x): ACTIVE=0x%08x "
-                  "PQ_BASE=0x%08x/HI=0x%08x RPTR=0x%08x DOORBELL=0x%08x CTRL=0x%08x VMID=0x%08x%s",
-                  tag, me, pipe, queue, sel, sel_rb, act, base, baseh, rptr, dbell, ctrl, vmid,
-                  hit ? "  <<< PQ_BASE MATCHES THE RING startKIQ WAS GIVEN" : "");
+                  "PQ_BASE=0x%08x/HI=0x%08x RPTR=0x%08x WPTR=0x%08x DOORBELL=0x%08x "
+                  "CTRL=0x%08x VMID=0x%08x%s",
+                  tag, me, pipe, queue, sel, sel_rb, act, base, baseh, rptr, wptr, dbell, ctrl,
+                  vmid, hit ? "  <<< PQ_BASE equals the ring MC >> 8" : "");
+        // 2dp: the discriminator. WPTR is what the driver's doorbell write
+        // advances; RPTR is what the command processor has consumed.
+        if (act & 1) {
+            rbgpu_log("2dp [%s] me=%u pipe=%u queue=%u ACTIVE: doorbell_en(bit30)=%u "
+                      "doorbell_offset(27:2)=0x%x  RPTR=0x%08x WPTR=0x%08x -> %s",
+                      tag, me, pipe, queue, (dbell >> 30) & 1, (dbell >> 2) & 0x3FFFFFFu,
+                      rptr, wptr,
+                      (wptr == 0 && rptr == 0)
+                          ? "nothing submitted yet (both 0)"
+                          : (wptr != rptr
+                                 ? "WORK IS QUEUED AND THE CP HAS NOT CONSUMED IT"
+                                 : "the CP has consumed everything submitted"));
+        }
     }
     return hit;
 }
@@ -1656,7 +1676,18 @@ static void rbgpu_dump_gc_regs(const char *tag) {
 
         // 2do: now look where the KIQ actually lives. Only once startKIQ has
         // run and told us the slot; before that there is nothing to aim at.
-        if (g_rb_kiq_spec0 != 0xFFFFFFFFu && g_hw.wreg) {
+        // 2dp: me=2 pipe=1 queue=0 is now a measured fact (the 2do boot found
+        // ACTIVE=1, DOORBELL enabled and CTRL=0xc030860d only there), so probe
+        // it at EVERY point - including post-gc-hw-init, before startKIQ runs.
+        // That answers the one thing 2do could not: whether the queue is
+        // something startKIQ created, or was already there from the firmware.
+        if (g_rb_kiq_spec0 == 0xFFFFFFFFu && g_hw.wreg) {
+            rbgpu_log("2dp [%s]: startKIQ has not run yet; probing the known KIQ slot "
+                      "me=2 pipe=1 queue=0 anyway, to see whether the queue predates it",
+                      tag);
+            rbgpu_probe_hqd_slot(tag, 2, 1, 0, 0);
+            g_hw.wreg(g_hw.ctx, (kSeg0Conv + dwGRBM_GFX_CNTL) * 4, gfx_cntl);
+        } else if (g_rb_kiq_spec0 != 0xFFFFFFFFu && g_hw.wreg) {
             uint32_t want_base = (uint32_t)(g_rb_kiq_ring_mc >> 8);
             rbgpu_log("2do [%s]: probing the HQD window. KIQ slot from the spec is "
                       "me=%u pipe=%u queue=%u; ring MC 0x%llx so CP_HQD_PQ_BASE should "
@@ -1666,20 +1697,19 @@ static void rbgpu_dump_gc_regs(const char *tag) {
 
             bool found = rbgpu_probe_hqd_slot(tag, g_rb_kiq_spec0, g_rb_kiq_spec1,
                                               g_rb_kiq_spec2, want_base);
-            if (!found) {
-                // The field layout is unverified, so do not conclude from one
-                // encoding. Sweep a small set; a PQ_BASE match identifies both
-                // the slot and the layout at once.
-                for (uint32_t me = 0; me < 3 && !found; me++)
-                    for (uint32_t pipe = 0; pipe < 4 && !found; pipe++)
-                        found = rbgpu_probe_hqd_slot(tag, me, pipe, 0, want_base);
-            }
             rbgpu_diag_set_num("hqd_slot_found", found ? 1 : 0);
             if (!found) {
-                rbgpu_log("2do [%s]: no slot in the sweep has CP_HQD_PQ_BASE = 0x%08x. "
-                          "Either no queue was pointed at our ring, or the GRBM_GFX_CNTL "
-                          "field layout is not what amdgpu uses - the sweep cannot tell "
-                          "those apart, so this is not yet proof the queue is missing.",
+                // 2dp: the 2do sweep found the slot alive but PQ_BASE =
+                // 0xffbfe800, not the ring MC >> 8. That mismatch is NOT
+                // evidence of a wrong ring: a compute HQD's PQ_BASE holds a
+                // GPUVM virtual address translated through the queue's VMID,
+                // and startKIQ was handed a physical MC address. They are not
+                // the same number and there is no reason they should be. The
+                // sweep is dropped - it only reprinted the same slot through
+                // aliased selectors - and the question is now RPTR vs WPTR.
+                rbgpu_log("2dp [%s]: PQ_BASE != ring MC >> 8 (0x%08x), which is EXPECTED: "
+                          "a compute HQD holds a GPUVM VA, not the physical address "
+                          "startKIQ was given. Not evidence of a wrong ring.",
                           tag, want_base);
             }
 
