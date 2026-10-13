@@ -2008,14 +2008,30 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     //                          which is the 2dh/2di shape a third time
     //   none of these          the register and TTL disagree about which
     //                          table is in use, and neither reading stands
+    //
+    // 2ei (2026-10-12): RETRY until the handle exists. The first 2eh boot
+    // returned the 0xFFFFFFFF sentinel - `this->0x38` read 0 - because the
+    // one shot was spent at `post-gc-hw-init`, which runs INSIDE
+    // `_ttl_initialize`, and `_ttl_initialize(params, &this->0x38)` only
+    // stores the handle into that slot when it finishes. Same mistake as 2dp:
+    // the measurement was taken before the thing it measures exists. The
+    // later dump points (post-startKIQ, pre-kiq-submit, at-stamp-wait,
+    // post-stamp-wait) all run well after TTL init completes, so the done
+    // flag is now set only when the call actually ran.
     if (g_rb_2eh_done == 0 && g_rb_ttl_gart_info && g_rb_ttl_this) {
-        g_rb_2eh_done = 1;
         void *handle = *reinterpret_cast<void **>(
             reinterpret_cast<uintptr_t>(g_rb_ttl_this) + 0x38);
         uint64_t out[5] = {0, 0, 0, 0, 0};
         uint32_t st = 0xFFFFFFFF;
         if (handle) {
+            g_rb_2eh_done = 1;          // only now is the reading meaningful
             st = g_rb_ttl_gart_info(handle, out);
+        } else {
+            rbgpu_log("2eh DIAG [%s]: TTL handle (this->0x38) is still 0 here - "
+                      "TTL init has not stored it yet; retrying at the next "
+                      "dump point rather than recording a sentinel as a result.",
+                      tag);
+            rbgpu_diag_inc("gart_info_early");
         }
         rbgpu_diag_set_num("gart_info_st", st);
         rbgpu_diag_set_num("gart_info_0", out[0]);

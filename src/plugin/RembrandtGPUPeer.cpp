@@ -530,7 +530,7 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // do its entries carry the same zero vram_base_offset? This is the live
     // question; everything it needs for context comes with it.
     // 2eh: the GART page table's address straight from the TTL layer.
-    "gart_info_resolved", "gart_info_st", "gart_match_idx",
+    "gart_info_resolved", "gart_info_st", "gart_match_idx", "gart_info_early",
     "gart_info_0", "gart_info_1", "gart_info_2", "gart_info_3", "gart_info_4",
     "vm_c0_ptb", "gc_fb_off",
     // 2ef: the control that invalidated the physical-page reads.
