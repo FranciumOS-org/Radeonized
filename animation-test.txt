@@ -1,0 +1,300 @@
+Line 001: The Radeon 680M is a Rembrandt APU with twelve compute units.
+Line 002: Each line of this file exists so the animation has something to scroll.
+Line 003: Discovery tables live at a fixed offset near the top of VRAM.
+Line 004: The carve-out on this machine is four gigabytes.
+Line 005: The probe reads only inside the carve-out and never writes outside MM_INDEX.
+Line 006: The SMU mailbox answers queries with a response register of one.
+Line 007: Firmware images come from the yellow_carp set in linux-firmware.
+Line 008: The command processor reads its ring through the KIQ queue.
+Line 009: A stamp that never arrives means the packet was never consumed.
+Line 010: The plugin hooks AmdTtlServices::initialize to log its inputs.
+Line 011: Every hook logs before it calls the original function.
+Line 012: Diagnostics are written to NVRAM so a dead boot still reports.
+Line 013: The rbgpu-diag key holds the summary of the last boot.
+Line 014: The rbgpu-diag-prev key holds the boot before that one.
+Line 015: The panic on teardown came from a handle that was never cleared.
+Line 016: Clearing the handle on sw_exit stops the null dereference.
+Line 017: The frame buffer offset is translated into an MC address.
+Line 018: MMHUB FB_LOCATION_BASE sits at register 0x1a8ec.
+Line 019: FB_LOCATION_TOP sits at register 0x1a8ed.
+Line 020: FB_OFFSET sits at register 0x1a8d7.
+Line 021: The base is in sixteen megabyte units and shifts left by twenty four.
+Line 022: The translated address was inside the carve-out on the armed boot.
+Line 023: TransferTableSmu2Dram completed and the SMU wrote its table.
+Line 024: The SOC levels decoded as 400 600 720 800 900 1028 1028 1200 MHz.
+Line 025: The DF p-state zero reported fclk 1800 and memclk 2400.
+Line 026: GFXOFF status two means the block is powered but not parked.
+Line 027: The GFX clock range read zero even though the SMU answered.
+Line 028: Segment one of the GC register map has base 0xa000 in dwords.
+Line 029: Segment zero of the GC register map has base 0x1260 in dwords.
+Line 030: Byte addresses are the dword index multiplied by four.
+Line 031: RLC_STAT reads 0x25 which matches the reference value.
+Line 032: CP_STAT reads zero at the correct base.
+Line 033: The halt bits for ME, PFP, CE, MEC1 and MEC2 are all clear.
+Line 034: The CP is powered, not halted, and idle at submit time.
+Line 035: CP_RB0_CNTL reads 0x00a00000 at the correct base.
+Line 036: CP_RB0_BASE reads 0xfedcbaef which is a fill pattern.
+Line 037: The MEC header dump steps by 0x00010001 between reads.
+Line 038: A stepping pattern proves nothing about real packets.
+Line 039: The queue state registers are CP_HQD_ACTIVE and CP_HQD_PQ_BASE.
+Line 040: The doorbell control register carries the enable bit at thirty.
+Line 041: Apple's waitForActiveValue polls CP_GFX_HQD_ACTIVE.
+Line 042: Its bounded form restores a one hundred millisecond limit.
+Line 043: Removing the forced return value exposed the unbounded poll.
+Line 044: The fix forces the third parameter to true.
+Line 045: The IOPCITunnelled property hides the built-in panel from WindowServer.
+Line 046: With zero display pipes the mode change returns true on its own.
+Line 047: The found_framebuffer hook refuses the pipe and nothing else.
+Line 048: The accelerator still runs powerUp and doStart with no display.
+Line 049: Request 0x14 is the Gpu Status poll from the peer.
+Line 050: Logging only the first three and every sixty fourth keeps the ring clear.
+Line 051: The ring holds five hundred twelve lines before it drops the oldest.
+Line 052: The EFI partition must never be indexed by Spotlight.
+Line 053: The efi script writes metadata_never_index on every mount.
+Line 054: Backups of config.plist live in logs/efi-backups.
+Line 055: The user restored the EFI from Windows once after an index corruption.
+Line 056: Kexts are never loaded without asking the user first.
+Line 057: The user runs load.sh and unload.sh with sudo, never Claude.
+Line 058: The hosttest must pass before any kext is built or loaded.
+Line 059: ASan and UBSan run on the parser and the probe.
+Line 060: The discovery parser fuzzer runs on random bytes each build.
+Line 061: The real discovery table from the first probe is a test fixture.
+Line 062: The fixture lives in tests/data as a binary file.
+Line 063: Every register offset cites its Linux header in rb_regs.h.
+Line 064: The MMHUB version is 2.4.0 but Linux groups it as mmhub_v2_3.
+Line 065: The DMU version is 3.1.3 and Linux groups it as dcn_3_1_2.
+Line 066: Register gates follow Linux grouping rather than exact versions.
+Line 067: The Linux sources are recorded in docs/linux-ref UPSTREAM.md.
+Line 068: The yellow_carp PPT file is the reference for the SMU tables.
+Line 069: DpmClocks_t is 304 bytes on this chip.
+Line 070: min_gfx_clk sits at offset 296 and max_gfx_clk at 300.
+Line 071: The table copy size equals the struct size exactly.
+Line 072: The SMU message groups start with queries only.
+Line 073: Allowing a new group on hardware is the user's decision.
+Line 074: TABLES was allowed in the 2df boot by explicit user consent.
+Line 075: GFXOFF allowance has not been given and nothing calls it.
+Line 076: The smu_cgs_alloc_memory call returns three outputs in rotated order.
+Line 077: The handle output is a descriptor of about forty eight bytes.
+Line 078: The gpu output is the CPU mapping of the four kilobyte buffer.
+Line 079: The mc output is the frame buffer offset that needs translation.
+Line 080: Two allocations four kilobytes apart prove which field is which.
+Line 081: The deltas were minus 0x1000, plus 0x1000 and plus 0x30.
+Line 082: Writing a 304 byte table through the handle would have corrupted the heap.
+Line 083: The 2de fix renamed the globals to match the proven order.
+Line 084: The typedef parameter names were changed to match the order too.
+Line 085: Apple's CGS allocator hands out memory from the local frame buffer.
+Line 086: The SMU cannot reach a bare frame buffer offset without translation.
+Line 087: The translated address must be page aligned before it is used.
+Line 088: The GART aperture test was wrong and was later reverted in spirit.
+Line 089: Linux allocates SMU tables in VRAM for this chip, not in GTT.
+Line 090: The carve-out is the correct domain for the driver table.
+Line 091: The watermarks table, dpmclocks table and metrics table all use VRAM.
+Line 092: Each table is one page aligned allocation in Linux.
+Line 093: The plugin mirrors that layout with one page for the transfer.
+Line 094: Teardown calls cosReleaseMemoryHandle without a null check.
+Line 095: The null check inside cosReleaseMemoryHandle returns status two.
+Line 096: Zeroing ctx plus 0x340 lets Apple's own guard take the exit path.
+Line 097: One handle leaks on a failed init, which beats a panic.
+Line 098: The old value of the handle is logged as sw_exit_h340.
+Line 099: The cleared flag is logged as sw_exit_h340_cleared.
+Line 100: A boot with no panic and the cleared flag set is the proof.
+Line 101: Armed boots are controlled by an NVRAM variable named rbgpu-arm.
+Line 102: The variable is consumed once so the next boot comes up unarmed.
+Line 103: The consume is flushed with IONVRAM-FORCESYNCNOW-PROPERTY.
+Line 104: Without the flush a panic can leave the variable set.
+Line 105: The rotation keeps the previous summary in rbgpu-diag-prev.
+Line 106: The rbgpu-log key carries the last eight log lines as text.
+Line 107: The NVRAM summary is written by an asynchronous thread call.
+Line 108: A panic within microseconds of a message can lose the newest keys.
+Line 109: The panic file is the primary artifact when it is written.
+Line 110: debug 0x100 halts on the panic screen instead of rebooting.
+Line 111: That setting was removed from boot-args on the armed path.
+Line 112: keepsyms stays on so panic reports are symbolicated.
+Line 113: The user reads hardware results over SSH from a phone.
+Line 114: Remote Login is enabled on the machine for that purpose.
+Line 115: The IP address of the machine is on the home network.
+Line 116: Wi-Fi is handled by an rtw89 driver that has crashed before.
+Line 117: The rtw89 double faults were in AirPort_RTW89 nativeRequest.
+Line 118: A TLB flush timeout earlier pointed at the Wi-Fi driver.
+Line 119: The GPU bring-up as a trigger has not been excluded.
+Line 120: The milestone list runs from zero through the letters of the alphabet.
+Line 121: Milestone one is the peer plus HWServices with no accelerator.
+Line 122: Milestone two is the accelerator bring-up and its diagnostics.
+Line 123: Each boot is logged under logs with a timestamp directory.
+Line 124: plugin_check.sh writes the whole capture into one directory.
+Line 125: The peer plist holds the RBGPULog and RBGPUDiag properties.
+Line 126: The UUID printed at install must match the build output.
+Line 127: Make is GNU make 3.81 and compares whole seconds only.
+Line 128: Stale objects can survive a stash and pop in the same second.
+Line 129: Sources must never be swapped in and out of the tree around a build.
+Line 130: A separate checkout is the safe place for comparisons.
+Line 131: The Lilu pitfall is that solveSymbol returns the bare slide for imports.
+Line 132: Routing an import would write a jump to the kernel slide base.
+Line 133: Names are verified with nm -m against the built kext first.
+Line 134: kprintf and IOLog are imports in every AMD kext.
+Line 135: The hooks are routed through the Lilu patcher at kext load time.
+Line 136: The plugin installs its hooks in start and reports each one.
+Line 137: Hook install failures are logged rather than silently ignored.
+Line 138: The lesson from boot five was that a missing guard can still run.
+Line 139: The X6000 accelerator reports its state in a u64 trace word.
+Line 140: The trace word reached 0x00fffffd after the TTL fix.
+Line 141: GART and VMM initialisation both report success in the trace.
+Line 142: Power up stays at zero until doStart returns true.
+Line 143: doStart returns the value of startKIQ on the failing path.
+Line 144: waitForHwStamp times out after five seconds per poll.
+Line 145: The timeout loop re-arms while the channel asks to keep waiting.
+Line 146: Returning false immediately makes the boot complete to a desktop.
+Line 147: The rbgpustampwait flag restores the real wait for a later test.
+Line 148: The next question is whether the CP microcode executes the packet.
+Line 149: The ring, doorbell and MQD path is the remaining suspect.
+Line 150: Compute queues are driven by MQD plus doorbell, not by the ring alone.
+Line 151: The KIQ is a compute queue that the MEC services.
+Line 152: CP_HQD_PQ_BASE tells whether the queue was ever pointed at a ring.
+Line 153: CP_HQD_ACTIVE bit zero says whether the compute queue is active.
+Line 154: The questions are answered by reads only in the current build.
+Line 155: No GC register is written by any diagnostic in the project.
+Line 156: The probe level two reads DCN registers and is opt-in.
+Line 157: The probe level three also reads GC registers and is opt-in.
+Line 158: The boot-arg rbprobe_level selects the probe depth at load time.
+Line 159: The SMU queries are opt-in through make kext SMU=1.
+Line 160: The SMU queries are enabled with the plist key RBSMUQuery.
+Line 161: Only MP1 C2PMSG 66, 82 and 90 are written by the SMU queries.
+Line 162: Nothing is sent unless the response register reads one first.
+Line 163: The protocol follows Linux smu_msg_v1_send_msg exactly.
+Line 164: The first answer took 307 microseconds while the SMU woke.
+Line 165: Later answers took between eight and twelve microseconds.
+Line 166: The SMU firmware version is 0x04453900 with program four.
+Line 167: The driver interface version four matches yellow_carp_ppt.c.
+Line 168: The enabled feature mask is 0x1497e1fd_ebfffdff with forty seven bits.
+Line 169: GFX_DPM, DS_GFXCLK and VCN_DPM are among the enabled features.
+Line 170: ULV, ZSTATES and DS_FCLK are among the disabled features.
+Line 171: S0I3 and STAPM are enabled on this firmware build.
+Line 172: The PSP secure OS was alive with a nonzero C2PMSG 81 value.
+Line 173: C2PMSG 81 differs between boots, so it is not a version number.
+Line 174: IFWI is reported done by bit thirty one of C2PMSG 33.
+Line 175: The discovery table sits at 0xffff0000 read through MM_INDEX_HI.
+Line 176: The binary is version 1.2 and the IP table is version 4.
+Line 177: There are thirty four IPs and all checksums were good.
+Line 178: The GC version is 10.3.3 and the DMU version is 3.1.3.
+Line 179: The SDMA version is 5.2.3 and the VCN version is 3.1.1.
+Line 180: The HDP version is 5.2.0 and the NBIF version is 7.5.0.
+Line 181: The OSSSYS version is 5.2.1 and the ATHUB version is 2.4.0.
+Line 182: The harvest table lists hw_ids 320 and 321 that Linux ignores.
+Line 183: The GFX topology is one shader engine with two arrays of three WGPs.
+Line 184: That gives twelve compute units in wave32 mode.
+Line 185: The display path scanned ARGB8888 from the GOP framebuffer.
+Line 186: The GOP framebuffer sits at the start of the carve-out.
+Line 187: OTG zero is the only timing generator that was enabled at boot.
+Line 188: DMCUB reported a mailbox ready scratch value of two.
+Line 189: The DMCUB image in use came from the GOP or the VBIOS.
+Line 190: Linux's display manager reloads its own DMCUB image later.
+Line 191: The VBIOS was pulled from the ACPI VFCT table into firmware.
+Line 192: The firmware directory is gitignored because it is AMD and ASUS data.
+Line 193: The VFCT parser has its own tests in tools vfct_test.py.
+Line 194: The efi config editor has tests in tools efi_config_test.py.
+Line 195: Those tests run before any EFI write is attempted.
+Line 196: The efi backup happens before every config change.
+Line 197: The user allows commits at any time without asking.
+Line 198: Pushes still need the user's explicit approval.
+Line 199: The memory index is loaded at the start of each session.
+Line 200: Feedback memories record how the user wants work done.
+Line 201: Claude now writes the hook layer as well as the analysis.
+Line 202: The Gemini split between analysis and hooks ended on 2026-10-12.
+Line 203: Every claim is checked against a log line before it is recorded.
+Line 204: A nonzero test is not a verdict until its value is characterised.
+Line 205: Fill patterns like 0xdef0def0 are poison values, not data.
+Line 206: A header that increments by one in both halves is a FIFO walking a pattern.
+Line 207: The 2dm build added the KIQ queue liveness reads.
+Line 208: Those reads cover CP_HQD_ACTIVE, CP_GFX_HQD_ACTIVE and the PQ base.
+Line 209: They also cover the doorbell control register at 0x1fb8.
+Line 210: Doorbell bit thirty says whether the doorbell is enabled.
+Line 211: If the queue is inactive the packet was never mapped to the MEC.
+Line 212: If the doorbell is off the write never reaches the hardware.
+Line 213: Either result points at a queue setup problem rather than firmware.
+Line 214: The next boot will report those four values in NVRAM.
+Line 215: The user will read the result from rbgpu-diag after the boot.
+Line 216: The plugin_check script reads the full log once SSH is up.
+Line 217: The dump_peer script reads only ioreg and sh for single-user use.
+Line 218: Single-user mode is not usable on this macOS because the root is sealed.
+Line 219: The Data volume may not be mounted in single-user mode.
+Line 220: Diagnostic panics were ruled out by the user on 2026-10-12.
+Line 221: Each armed boot is a deliberate choice, not an accident.
+Line 222: Disarming happens before the accelerator touches hardware.
+Line 223: The peer never consumes the arm flag when running under rbgpuoff.
+Line 224: rbgpuoff leaves the kext injected but creates no peer instance.
+Line 225: The off switch was verified in milestone zero.
+Line 226: Milestone zero installed an empty kext and confirmed the injection.
+Line 227: Lilu 1.7.3 accepted the kext without complaint at that point.
+Line 228: The RembrandtGPU IOService appeared under IOResources as expected.
+Line 229: Early boot plugin messages are not kept in the unified log.
+Line 230: The registry is the reliable place to check for plugin instances.
+Line 231: The peer publishes RBProbe properties and then unmaps everything.
+Line 232: The probe maps BAR0 only inside the carve-out window.
+Line 233: BAR0's first sixteen megabytes belong to the boot framebuffer.
+Line 234: PCI decoding and bus mastering are never enabled by the probe.
+Line 235: The probe asserts that only MM_INDEX writes happen.
+Line 236: Adding a write path requires a new hosttest case that fails without it.
+Line 237: Every change to src/common needs a matching hosttest case.
+Line 238: A new test must be shown to fail when the guarded code is broken.
+Line 239: The simulated chip in tools hosttest models the SMU mailbox.
+Line 240: Its tables are Linux's own structs compiled for the host.
+Line 241: The SMU 13 tests check the power management port directly.
+Line 242: The SMU 13 port was taken from yellow_carp_ppt.c for the plugin.
+Line 243: The probe kext does not use the SMU 13 power management code.
+Line 244: The plugin is the only consumer of the SMU 13 power code.
+Line 245: The SMU policy groups are named RB_SMU13_ALLOW_ with a suffix.
+Line 246: QUERY is allowed, TABLES was allowed, GFXOFF is not allowed.
+Line 247: The rb_smu13_bringup sequence is six messages in order.
+Line 248: The seventh message in the armed boot is still unresolved.
+Line 249: last_msg 0x0f is TransferTableSmu2Dram on this firmware.
+Line 250: Message accounting is kept in smu_nmsgs, smu_writes and smu_refused.
+Line 251: Refused messages are counted so a policy block is visible.
+Line 252: Writes come three per message so twenty one writes was seven messages.
+Line 253: The accounting is reset at the start of every bringup.
+Line 254: SetDriverDramAddrHigh was sent with zero in the high word.
+Line 255: SetDriverDramAddrLow carried the translated address on the good boot.
+Line 256: The translated address on the good boot was 0xf40ffff000.
+Line 257: That address is inside the carve-out from 0xf400000000 to 0xf4ffffffff.
+Line 258: The earlier failing address 0x0ffff000 was missing the frame buffer base.
+Line 259: The base was 0xf400000000 read from FB_LOCATION_BASE sixteen megabyte units.
+Line 260: The offset was 0xffff000 read from the allocation result.
+Line 261: The sum of base and offset gives the MC address the SMU needs.
+Line 262: The sanity check requires the whole four kilobytes to lie inside the range.
+Line 263: An unreadable FB_LOCATION stops the bringup rather than guessing.
+Line 264: That rule was chosen so a bad read cannot send a bad address.
+Line 265: The bringup itself is gated behind the rbgpusmubringup boot-arg.
+Line 266: That boot-arg is off by default in every build.
+Line 267: A correct address is still not permission to talk to the SMU.
+Line 268: The user decides each message group separately.
+Line 269: The current build sends only queries and table transfers when enabled.
+Line 270: No power management message that changes clocks has been sent.
+Line 271: Clock limits are read back and never written by the project.
+Line 272: The SOC clock levels were read from the DPM table after the transfer.
+Line 273: The DF levels came from the same table in the same transfer.
+Line 274: Those values match the expected Rembrandt numbers closely.
+Line 275: That match is how the translation was proven rather than inferred.
+Line 276: Plausible numbers mean the SMU wrote where the plugin expected.
+Line 277: Zeros or nonsense would have meant the mapping was wrong.
+Line 278: gfx_min and gfx_max both read zero after the transfer.
+Line 279: Linux reads the GFX max and min from those same two fields.
+Line 280: The GFXOFF status check showed the block is not parked.
+Line 281: So the zero clock range is real data from the SMU, not a short read.
+Line 282: The conclusion is that GFX DPM has not started its clock range.
+Line 283: The command processor still does not consume the KIQ packet.
+Line 284: That remains the one failing step in the whole bring-up.
+Line 285: Everything upstream of the command processor now passes its checks.
+Line 286: PSP, GC and TTL hardware init all report success in the last armed boot.
+Line 287: The firmware images were loaded through the PSP load path.
+Line 288: The backdoor autoload path is for Navi 1x and was never expected here.
+Line 289: The yellow_carp images replaced the embedded Navi 21 images.
+Line 290: The GC version check was patched to accept the 0x3D encoding.
+Line 291: Seven firmware entries were swapped to the 680M images.
+Line 292: Navi 21 tap delays were skipped because the PSP rejects them.
+Line 293: Three completion waits are bypassed on the PSP load path only.
+Line 294: Those bypasses are masking nothing now that the load is confirmed.
+Line 295: They are kept until each one is measured in isolation.
+Line 296: The next step is to read the queue state at the moment of submit.
+Line 297: The reads are added to the submit hook as an enter log.
+Line 298: The result decides whether the ring, doorbell or MQD is the fault.
+Line 299: Only after that does any new SMU message group come into question.
+Line 300: End of file. Three hundred lines, written for the animation.

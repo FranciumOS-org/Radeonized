@@ -1709,3 +1709,63 @@ fault has to be that the queue was never mapped or the doorbell never routed -
 and these four say so directly.
 
 Build: UUID CD998921, hosttest passes. Same boot-args, still armed. All reads.
+
+### 2dm on hardware (2026-10-12): the KIQ queue was never programmed
+
+logs/20261012-204121-plugin, UUID CD998921, armed, no panic.
+
+**The header dump is settled - it is a pattern.** Reading it four times in a
+row at each point gives `def1 def2 def3 def4` then `def5 def6 def7 def0`: an
+eight-entry circular buffer pre-filled with def0..def7, popping one per read.
+2dl's "MEC fetched a packet: YES" is conclusively withdrawn. (The second
+point printed "varies irregularly" only because the step test met the
+def7 -> def0 wrap; the data itself is unambiguous. The classifier, not the
+chip, was wrong.)
+
+**The finding, at both read points including `pre-kiq-submit`:**
+
+```
+CP_HQD_ACTIVE=0x00000000  CP_GFX_HQD_ACTIVE=0x00000000
+CP_HQD_PQ_BASE=0x00000000 CP_HQD_PQ_DOORBELL_CONTROL=0x00000000
+```
+
+No ring base, no doorbell, not active. The CP is unhalted and idle because
+there is nothing for it to service. That explains `waitForHwStamp` completely
+and moves the fault off the firmware entirely.
+
+## 2dn (2026-10-12): startKIQ writes no register — it asks the layer below
+
+`startKIQ` (0xbec7688) disassembled: it writes **no hardware register at all**.
+It builds a 0x38-byte descriptor on the stack from the channel's own fields
+(+0x84 & ~3, 0x80, +0x48, +0xb8, +0xd0, the two u64 args, 0x200), then
+
+```
+rdi = this+0x20 ; callq *0x2c0(vtable)        -> a service object
+callq *0x120(that vtable) with (8, 0, descriptor, outbuf)
+```
+
+and compares three dwords of the `AMD_PM4_QUEUE_SPEC` (arg c) against the
+first three dwords the callee wrote into outbuf: equal -> return 0, different
+-> 0xE00002BC.
+
+So startKIQ **asks the TTL/HWLibs layer to create the KIQ queue** (command 8)
+and only checks that the me/pipe/queue it got back is the one it asked for. It
+returned 0 on this chip, so the layer below reported a queue it never
+programmed. That is the bug, and it is in the same place as every other one
+this week: Apple's Navi 21 code path running against GC 10.3.3.
+
+**Caveat that has to be settled first.** The `CP_HQD_*` block is a WINDOW:
+`GRBM_GFX_CNTL` (dword 0x0dc2, BASE_IDX 0) selects which ME / PIPE / QUEUE /
+VMID those registers refer to. An all-zero read only means "never mapped" if
+the selector happens to point at the KIQ's own slot. 2dn therefore logs:
+
+- the `AMD_PM4_QUEUE_SPEC`'s first three dwords from inside the existing
+  startKIQ hook - the me/pipe/queue the KIQ is supposed to occupy;
+- `GRBM_GFX_CNTL` in the register dump, beside that spec;
+- a line saying in those words that a zero selector plus a zero window proves
+  nothing if the KIQ lives at a nonzero me/pipe/queue.
+
+The dump is also called from a new third point, `post-startKIQ`, so the window
+is read immediately after the layer below claims the queue exists.
+
+Build: UUID 824205E1, hosttest passes. Same boot-args, still armed. All reads.

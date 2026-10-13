@@ -1341,6 +1341,11 @@ static int hooked_gc_sw_init(void *param1, void *param2) {
 // RLC_STAT==0x25 means firmware IS in instruction RAM but the BOOTLOAD_COMPLETE
 // latch never set (bypass justified). Any other value means our assumption may
 // be wrong. File-static, no hpp change.
+// 2dn: the me/pipe/queue the KIQ asked for, captured in the startKIQ hook.
+static uint32_t g_rb_kiq_spec0 = 0xFFFFFFFFu;
+static uint32_t g_rb_kiq_spec1 = 0xFFFFFFFFu;
+static uint32_t g_rb_kiq_spec2 = 0xFFFFFFFFu;
+
 static void rbgpu_dump_gc_regs(const char *tag) {
     if (!g_hw.ctx || !g_hw.rreg) {
         rbgpu_log("2ap DIAG [%s]: no HW ctx/rreg, skipping", tag);
@@ -1565,6 +1570,25 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         rbgpu_log("2dm DIAG [%s]: KIQ queue active (CP_HQD_ACTIVE bit 0) = %u; "
                   "doorbell enabled (bit 30) = %u",
                   tag, hqd_active & 1, (hqd_doorbell >> 30) & 1);
+
+        // 2dn: the CP_HQD_* block is a WINDOW. GRBM_GFX_CNTL selects which
+        // ME / PIPE / QUEUE / VMID those registers refer to, so an all-zero
+        // read only means "the KIQ was never mapped" if the selector is
+        // pointing at the KIQ's own slot. Report the selector and the spec
+        // side by side instead of assuming they agree.
+        const uint32_t dwGRBM_GFX_CNTL = 0x0dc2;  // BASE_IDX 0
+        uint32_t gfx_cntl = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwGRBM_GFX_CNTL) * 4);
+        rbgpu_diag_set_num("diag_grbm_gfx_cntl", gfx_cntl);
+        rbgpu_log("2dn DIAG [%s]: GRBM_GFX_CNTL=0x%08x (the ME/PIPE/QUEUE/VMID "
+                  "selector the CP_HQD_* window follows); startKIQ spec = "
+                  "0x%08x 0x%08x 0x%08x",
+                  tag, gfx_cntl, g_rb_kiq_spec0, g_rb_kiq_spec1, g_rb_kiq_spec2);
+        if (gfx_cntl == 0 && (hqd_active | hqd_pq_base | hqd_doorbell) == 0) {
+            rbgpu_log("2dn DIAG [%s]: selector is 0 and the window is all zero. If the "
+                      "KIQ lives at a nonzero me/pipe/queue this read is of the WRONG "
+                      "slot and proves nothing; if it lives at 0/0/0 the queue really "
+                      "was never programmed.", tag);
+        }
     }
 }
 
@@ -2034,10 +2058,45 @@ static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void 
         g_rb_2ch_startkiq_result = 0;
         return 0;
     }
+    // 2dn: startKIQ writes NO register itself. Disassembled at 0xbec7688, it
+    // builds a 0x38-byte descriptor on the stack from the channel's own fields
+    // (+0x84 & ~3, 0x80, +0x48, +0xb8, +0xd0, the two u64 args, 0x200), then
+    //
+    //   rdi = this+0x20 ; callq *0x2c0(vtable)      -> some service object
+    //   callq *0x120(that object's vtable) with (8, 0, descriptor, outbuf)
+    //
+    // and finally compares three dwords of the AMD_PM4_QUEUE_SPEC (arg c)
+    // against the first three dwords the callee wrote into outbuf. Equal ->
+    // return 0; different -> 0xE00002BC. So startKIQ ASKS the TTL/HWLibs layer
+    // to create the KIQ queue (command 8) and only checks that the me/pipe/
+    // queue it got back is the one it asked for.
+    //
+    // The 2dm boot shows that call returning success while CP_HQD_PQ_BASE and
+    // CP_HQD_ACTIVE are 0, so the layer below reported a queue it never
+    // programmed. Log the spec so we know which me/pipe/queue the KIQ is
+    // supposed to occupy - the HQD registers are indexed by GRBM_GFX_CNTL, so
+    // without that triple an all-zero HQD read cannot be told apart from
+    // "we read a different queue slot".
+    if (c) {
+        const uint32_t *spec = reinterpret_cast<const uint32_t *>(c);
+        g_rb_kiq_spec0 = spec[0];
+        g_rb_kiq_spec1 = spec[1];
+        g_rb_kiq_spec2 = spec[2];
+        rbgpu_log("2dn: startKIQ QUEUE_SPEC[0..2] = 0x%08x 0x%08x 0x%08x "
+                  "(the me/pipe/queue the KIQ should occupy); ring args a=0x%llx b=0x%llx",
+                  spec[0], spec[1], spec[2], a, b);
+        rbgpu_diag_set_num("kiq_spec0", spec[0]);
+        rbgpu_diag_set_num("kiq_spec1", spec[1]);
+        rbgpu_diag_set_num("kiq_spec2", spec[2]);
+    }
+
     int orig_ret = orig_kiq_startKIQ_2ch ? orig_kiq_startKIQ_2ch(this_ptr, a, b, c, d) : 0;
     g_rb_2ch_startkiq_result = orig_ret;
     rbgpu_log("2co: startKIQ returned %d (%s)", orig_ret,
               orig_ret == 0 ? "0 = SUCCESS, doStart continues" : "nonzero = failure");
+    rbgpu_log("2dn: startKIQ claims the queue exists; the HQD registers below say "
+              "whether anything was actually programmed");
+    rbgpu_dump_gc_regs("post-startKIQ");
     return orig_ret;
 }
 
