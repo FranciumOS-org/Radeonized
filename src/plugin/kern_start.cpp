@@ -2966,6 +2966,42 @@ static bool (*orig_pm4_doStart_2ce)(void *, bool) = nullptr;
 
 static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
+
+    // 2ew: the fields that decide which region of Apple's initGraphicsMQD
+    // can run, read HERE rather than inside that hook - 2ev proved reads and
+    // logs in that span cost the thread its progress. doStart's `this` IS the
+    // PM4 engine initGraphicsMQD is later called on, and this hook's logging
+    // has been safe in every boot since 2ce.
+    //
+    // What these bound and what they do not: `pm4+0x10` is a configuration
+    // byte nothing in this chain writes, so its value here is its value at
+    // 0xbea25f2. `pm4+0x310` IS written by initGraphicsMQD itself (cleared at
+    // 0xbea2634, set at 0xbea26dd), but this is the FIRST call, so the value
+    // here is the one the branch at 0xbea260c tests. `pm4+0x250` and
+    // `pm4+0x30` are read before initComputeMQD runs, so they are a lower
+    // bound on what 0xbea258b sees, not a proof of it.
+    if (pm4) {
+        uint8_t f10  = *reinterpret_cast<volatile uint8_t *>(
+            reinterpret_cast<uintptr_t>(pm4) + 0x10);
+        uint8_t f310 = *reinterpret_cast<volatile uint8_t *>(
+            reinterpret_cast<uintptr_t>(pm4) + 0x310);
+        void *f250 = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(pm4) + 0x250);
+        void *f18  = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(pm4) + 0x18);
+        void *f30  = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(pm4) + 0x30);
+        rbgpu_diag_set_num("gfxmqd_f10", f10);
+        rbgpu_diag_set_num("gfxmqd_f310", f310);
+        rbgpu_diag_set_num("gfxmqd_f250", reinterpret_cast<uint64_t>(f250));
+        rbgpu_diag_set_num("gfxmqd_f30", reinterpret_cast<uint64_t>(f30));
+        rbgpu_log("2ew: initGraphicsMQD branch fields at doStart entry: "
+                  "pm4+0x10=%u (1 = the command-9 graphics-queue create at "
+                  "0xbea26a1 RUNS; 0 = region G is SKIPPED and the hang is in "
+                  "A-F or the GC register pairs H-J) pm4+0x310=%u (1 = the "
+                  "destroy at 0xbea2626 runs first) pm4+0x250=%p pm4+0x18=%p "
+                  "pm4+0x30=%p", f10, f310, f250, f18, f30);
+    }
     g_rb_2cf_dostart_called = 1;
     // Call original - our initComputeMQD hook (2cd) will log if it's reached
     bool ret = orig_pm4_doStart_2ce ? orig_pm4_doStart_2ce(pm4, arg) : false;
@@ -3921,60 +3957,16 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
             }
         }
     }
-    // 2ev (2026-10-13): Apple's initGraphicsMQD, fully disassembled
-    // (0xbea2542-0xbea275b). Gate 54 says the hang is in here, so what
-    // matters now is which region, and one byte decides a third of it:
-    //
-    //   A  bea255d  (pm4+0x18)->vtable[0x2d8]()      -> memobj; NULL -> false
-    //   B  bea257d  memobj->vtable[0x148]()          -> bool;  false -> false
-    //   C  bea258b  pm4+0x250                         NULL -> false
-    //   D  bea25b3  memobj->vtable[0x210](pm4+0x250, 0x1000, &slot, 0x100)
-    //   E  bea25c8  slot->vtable[0x118]()            -> ptr;  NULL -> false
-    //   F  bea25ea  bzero(ptr, 0x1000)               resolved via kc_stubs
-    //   G  bea25f2  IF pm4+0x10 == 1:
-    //        bea2603  (pm4+0x18)->vtable[0x2c0]()    -> service object
-    //        bea2626  IF pm4+0x310 == 1: svc->vtable[0x128](9, 0)   destroy
-    //        bea26a1  svc->vtable[0x120](9, 0, spec, out)  CREATE GRAPHICS Q
-    //   H  bea26f1  memobj->vtable[0x218](&out2)            ALWAYS
-    //   I  bea2713  (pm4+0x30)->vtable[0x148](0xf702000042) -> v
-    //      bea2726  (pm4+0x30)->vtable[0x120](v, 1)         ALWAYS
-    //   J  bea2740  (pm4+0x30)->vtable[0x148](0xe802000042) -> v
-    //      bea2750  (pm4+0x30)->vtable[0x120](v, 0)         ALWAYS
-    //
-    // So region G - the command-9 graphics-queue create, the whole reason
-    // this milestone family exists - runs ONLY when pm4+0x10 == 1. If that
-    // byte is 0 the create is skipped and the hang has to be in A-F or H-J,
-    // which promotes the GC register pairs and the standing gfx_min =
-    // gfx_max = 0 suspicion to the leading explanation.
-    //
-    // These are plain field reads, no virtual calls, so they cannot differ
-    // from what Apple is about to do. The two bytes go into gate 54's own
-    // NVRAM text so a wedge carries them out.
-    uint8_t mqd_f10  = *reinterpret_cast<volatile uint8_t *>(
-        reinterpret_cast<uintptr_t>(pm4) + 0x10);
-    uint8_t mqd_f310 = *reinterpret_cast<volatile uint8_t *>(
-        reinterpret_cast<uintptr_t>(pm4) + 0x310);
-    void *mqd_f250 = *reinterpret_cast<void **>(
-        reinterpret_cast<uintptr_t>(pm4) + 0x250);
-    void *mqd_f18  = *reinterpret_cast<void **>(
-        reinterpret_cast<uintptr_t>(pm4) + 0x18);
-    void *mqd_f30  = *reinterpret_cast<void **>(
-        reinterpret_cast<uintptr_t>(pm4) + 0x30);
-    rbgpu_diag_set_num("gfxmqd_f10", mqd_f10);
-    rbgpu_diag_set_num("gfxmqd_f310", mqd_f310);
-    rbgpu_diag_set_num("gfxmqd_f250", reinterpret_cast<uint64_t>(mqd_f250));
-    rbgpu_diag_set_num("gfxmqd_f30", reinterpret_cast<uint64_t>(mqd_f30));
-    rbgpu_log("2ev: initGraphicsMQD fields before the original: pm4+0x10=%u "
-              "(1 = the command-9 create block RUNS; 0 = it is SKIPPED and "
-              "the hang is in A-F or the GC register pairs H-J) pm4+0x310=%u "
-              "(1 = the destroy at 0xbea2626 runs first) pm4+0x250=%p "
-              "pm4+0x18=%p pm4+0x30=%p",
-              mqd_f10, mqd_f310, mqd_f250, mqd_f18, mqd_f30);
-
-    char gate54[72];
-    snprintf(gate54, sizeof(gate54),
-             "initGraphicsMQD ORIGINAL f10=%u f310=%u", mqd_f10, mqd_f310);
-    rbgpu_gate_2en(54, gate54);
+    // 2ew (2026-10-13): NOTHING between gate 50 and gate 54. The 2ev boot
+    // put four field reads, four diag sets and one log line here and the
+    // breadcrumb went back to 50, where 2eu - with this span empty - reached
+    // 54 and got into Apple's code. Seven boots now agree that whatever this
+    // hook does between the two gates decides how far the thread gets, so the
+    // span stays empty and the field reads moved to the doStart hook, where
+    // logging has been safe since 2ce.
+    rbgpu_gate_2en(54, "initGraphicsMQD: calling the ORIGINAL - anything after "
+                       "this is Apple's command-9 queue create or the GC "
+                       "register pair at the end");
     bool ret = orig_pm4_initGraphicsMQD_2cq ? orig_pm4_initGraphicsMQD_2cq(pm4) : false;
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
