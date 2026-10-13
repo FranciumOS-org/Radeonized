@@ -3,6 +3,7 @@
 #include <Headers/kern_util.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOMemoryDescriptor.h>
 
 #include "kern_start.hpp"
 #include "rb_smu13.h"
@@ -1359,6 +1360,9 @@ static uint64_t g_rb_2dw_slot_b0    = 0;
 static uint32_t g_rb_2dw_fence_bef  = 0;
 static uint64_t g_rb_2dt_wb_c8      = 0;  // 2dz: the fence destination
 static uint32_t g_rb_2ea_pq_base    = 0;  // 2ea: CP_HQD_PQ_BASE (ring VA >> 8)
+static uint64_t g_rb_2eb_pt_base    = 0;  // 2eb: GCVM_CONTEXT0_PAGE_TABLE_BASE
+static uint32_t g_rb_2ed_fb_off     = 0;  // 2ed: GCMC_VM_FB_OFFSET (16 MB units)
+static int      g_rb_2ee_pdb_done   = 0;  // 2ee: map the candidates once per boot
 
 // 2dx: AMDHardware::getChannelWriteBackFrameGPUAddr(uint) - the MC address the
 // GPU is told for a writeback frame, the counterpart of the CPU pointer the
@@ -1728,6 +1732,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         rbgpu_diag_set_num("vm_l2_cntl", l2c);
         rbgpu_diag_set_num("vm_c0_cntl", c0c);
         rbgpu_diag_set_num("vm_c0_ptb", ptb);
+        g_rb_2eb_pt_base = ptb;   // 2ee reads the page it points at
         rbgpu_diag_set_num("vm_c0_start", st);
         rbgpu_diag_set_num("vm_c0_end", en);
 
@@ -1790,6 +1795,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         rbgpu_diag_set_num("gc_fb_base", fb_base);
         rbgpu_diag_set_num("gc_fb_top", fb_top);
         rbgpu_diag_set_num("gc_fb_off", fb_off);
+        g_rb_2ed_fb_off = fb_off;   // 2ee: vram_base_offset = fb_off << 24
         rbgpu_diag_set_num("gc_agp_bot", agp_bot);
         rbgpu_diag_set_num("gc_agp_top", agp_top);
         rbgpu_diag_set_num("gc_sys_lo", sys_lo);
@@ -1808,6 +1814,114 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   "(MMHUB read 0xf400/0xf4ff in 2di; the two hubs are programmed "
                   "independently, so MMHUB being healthy says nothing here)",
                   tag, all_zero ? 1 : 0, fb_agrees ? 1 : 0);
+    }
+
+    // 2ee (2026-10-12): WHERE is the page directory really, and are the PTEs
+    // wrong the same way?
+    //
+    // 2eb/2ed settled that the ring VA is inside VMID 0's range and that the
+    // GC hub's apertures are correct, so the fault is in the page-table
+    // CONTENTS. The contents start at GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR,
+    // which this boot read as 0x0FDFA001 with the high word 0.
+    //
+    // Linux says what that register should hold (fetched 2026-10-12):
+    //   gfxhub_v2_1_init_gart_aperture_regs -> gfxhub_v2_1_setup_vm_pt_regs
+    //     writes lower/upper_32_bits(amdgpu_gmc_pd_addr(gart.bo))
+    //   amdgpu_gmc_pd_addr -> amdgpu_gmc_get_pde_for_bo -> gmc_v10_0_get_vm_pde:
+    //     for VRAM (no AMDGPU_PTE_SYSTEM) *addr = amdgpu_gmc_vram_mc2pa(*addr)
+    //   amdgpu_gmc_vram_mc2pa(mc) = mc - vram_start + vram_base_offset
+    //   vram_base_offset = gfxhub_v2_1_get_mc_fb_offset()
+    //                    = GCMC_VM_FB_OFFSET << 24
+    //
+    // We read GCMC_VM_FB_OFFSET = 0x780 this boot (2ed), so vram_base_offset
+    // should be 0x7_8000_0000 - the carve-out's system-physical base, which
+    // probe 2 measured independently through MMHUB. Apple's value has the low
+    // bit (AMDGPU_PTE_VALID) set, bit 1 (AMDGPU_PTE_SYSTEM) CLEAR - so it is
+    // declaring a page directory in VRAM - yet carries no 0x7_8 high bits.
+    // That is mc2pa computed with vram_base_offset = 0, which is correct for
+    // a Navi 21 dGPU (FB_OFFSET 0) and wrong by exactly 0x7_8000_0000 here.
+    //
+    // DO NOT patch the register on the strength of that. If Apple's whole VM
+    // layer uses offset 0, the PTEs are low by the same amount, and making
+    // the walk succeed would point GPU reads AND WRITES at host DRAM around
+    // 0x0FDF_A000 instead of at the carve-out. That is the one outcome worse
+    // than the current clean fault.
+    //
+    // So read both candidate pages first. This is read-only: map each
+    // physical page in, read the first entries, unmap. A GFX10 PDE is 8
+    // bytes with bit 0 = valid.
+    //
+    //   candidate A = what the GPU is told          (0x0FDFA000)
+    //   candidate B = A + (GCMC_VM_FB_OFFSET << 24) (0x7_8FDFA000)
+    //
+    // What each outcome means, stated before the reading is taken:
+    //   B holds valid entries, A does not   the directory really is in the
+    //       carve-out and the register is short by vram_base_offset
+    //   entries in B point LOW (< 0x1000_0000)   the PTEs carry the same zero
+    //       offset, so the bug is systemic and fixing PT_BASE alone would be
+    //       dangerous, not sufficient
+    //   entries in B point into 0x7_8.. or the carve-out   only the register
+    //       is wrong and patching it is the whole fix
+    //   neither looks like a directory    this reading proves nothing and the
+    //       page-directory location is still unknown
+    if (g_rb_2ee_pdb_done == 0 && g_rb_2ed_fb_off != 0) {
+        g_rb_2ee_pdb_done = 1;
+        uint64_t pdb_raw = g_rb_2eb_pt_base & ~0xFFFULL;
+        uint64_t cand[2] = {
+            pdb_raw,
+            pdb_raw + (static_cast<uint64_t>(g_rb_2ed_fb_off) << 24),
+        };
+        for (int c = 0; c < 2; c++) {
+            uint32_t valid = 0, nonzero = 0, low = 0, high = 0;
+            uint64_t first[4] = {0, 0, 0, 0};
+            auto md = IOMemoryDescriptor::withPhysicalAddress(cand[c], 0x1000,
+                                                             kIODirectionIn);
+            IOMemoryMap *map = md ? md->createMappingInTask(kernel_task, 0,
+                                        kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+            if (map) {
+                auto p = reinterpret_cast<volatile uint64_t *>(map->getVirtualAddress());
+                for (uint32_t i = 0; i < 512; i++) {
+                    uint64_t e = p[i];
+                    if (i < 4) first[i] = e;
+                    if (e != 0) nonzero++;
+                    if (e & 1) {
+                        valid++;
+                        uint64_t a = e & 0x0000FFFFFFFFF000ULL;
+                        if (a < 0x10000000ULL) low++;
+                        else high++;
+                    }
+                }
+                map->release();
+            }
+            if (md) md->release();
+
+            rbgpu_log("2ee DIAG [%s]: PDB candidate %c phys=0x%llx -> %s"
+                      " valid=%u nonzero=%u low(<0x10000000)=%u high=%u"
+                      " [0]=0x%llx [1]=0x%llx [2]=0x%llx [3]=0x%llx",
+                      tag, c == 0 ? 'A' : 'B', cand[c],
+                      map ? "mapped" : "MAP FAILED (reading proves nothing)",
+                      valid, nonzero, low, high,
+                      first[0], first[1], first[2], first[3]);
+
+            const char *pfx = c == 0 ? "pdbA" : "pdbB";
+            char key[32];
+            snprintf(key, sizeof(key), "%s_valid", pfx);
+            rbgpu_diag_set_num(key, valid);
+            snprintf(key, sizeof(key), "%s_nonzero", pfx);
+            rbgpu_diag_set_num(key, nonzero);
+            snprintf(key, sizeof(key), "%s_low", pfx);
+            rbgpu_diag_set_num(key, low);
+            snprintf(key, sizeof(key), "%s_high", pfx);
+            rbgpu_diag_set_num(key, high);
+            snprintf(key, sizeof(key), "%s_e0", pfx);
+            rbgpu_diag_set_num(key, first[0]);
+            snprintf(key, sizeof(key), "%s_phys", pfx);
+            rbgpu_diag_set_num(key, cand[c]);
+        }
+        rbgpu_log("2ee DIAG [%s]: a page of zeros or of noise is NOT a page "
+                  "directory; only 'B valid and A not' supports the "
+                  "vram_base_offset reading, and where B's entries POINT "
+                  "decides whether the PTEs carry the same error.", tag);
     }
 
     // 2ea (2026-10-12): WHEN did the fault latch, and is it the ring or the
