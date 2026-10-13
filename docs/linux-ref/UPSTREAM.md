@@ -62,3 +62,28 @@ Not compiled: used to name the GC registers that Apple's
 (docs/SPEC-PM4-DOSTART.md). Offsets in it are dword offsets with a
 `_BASE_IDX` of 0 for every register named in that spec, which is how
 Apple's encoded register ids `(offset << 32) | 11` resolve.
+
+## 2026-10-12 — consulted for 2ee (not vendored, read via raw.githubusercontent.com master)
+
+- `drivers/gpu/drm/amd/amdgpu/gfxhub_v2_1.c`
+  `gfxhub_v2_1_init_gart_aperture_regs` writes
+  `lower/upper_32_bits(amdgpu_gmc_pd_addr(gart.bo))` to
+  GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR via `setup_vm_pt_regs`, and
+  START/END = `gart_start/gart_end >> 12`.
+  `gfxhub_v2_1_init_system_aperture_regs` writes
+  AGP_BOT/TOP = `agp_start/agp_end >> 24` and
+  SYSTEM_APERTURE_LOW/HIGH = `min/max(fb,agp) >> 18`.
+  `gfxhub_v2_1_get_mc_fb_offset` returns `GCMC_VM_FB_OFFSET << 24`.
+- `drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c`
+  `amdgpu_gmc_pd_addr` -> `amdgpu_gmc_get_pde_for_bo` (VRAM: `amdgpu_bo_gpu_offset`,
+  an MC address) then `|= flags` (AMDGPU_PTE_VALID = bit 0).
+  `amdgpu_gmc_vram_mc2pa(mc) = mc - vram_start + vram_base_offset`.
+- `drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c`
+  `gmc_v10_0_get_vm_pde`: for VRAM (no AMDGPU_PTE_SYSTEM)
+  `*addr = amdgpu_gmc_vram_mc2pa(*addr)`.
+  `gmc_v10_0_vram_gtt_location`: `vm_manager.vram_base_offset =
+  gfxhub.funcs->get_mc_fb_offset(adev)`.
+
+Used to establish that GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR holds a
+*system-physical* address (mc2pa of the page directory's MC address), and that
+on this APU `vram_base_offset` must be `0x780 << 24 = 0x7_8000_0000`.

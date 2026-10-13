@@ -526,13 +526,16 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
-    // 2eb: is the ring's GPUVM address inside VMID 0's page tables at all?
-    "vm_ring_in_range", "vm_c0_start", "vm_c0_end", "vm_c0_ptb",
-    "vm_c0_cntl", "vm_l2_cntl",
-    // 2ed: was the GC hub's aperture programmed at all?
-    "gc_hub_all_zero", "gc_hub_fb_agrees", "gc_fb_base", "gc_fb_top",
+    // 2ee: which candidate physical page holds the real page directory, and
+    // do its entries carry the same zero vram_base_offset? This is the live
+    // question; everything it needs for context comes with it.
+    "pdbA_valid", "pdbA_nonzero", "pdbA_low", "pdbA_high", "pdbA_e0",
+    "pdbB_valid", "pdbB_nonzero", "pdbB_low", "pdbB_high", "pdbB_e0",
+    "pdbB_phys", "vm_c0_ptb", "gc_fb_off",
     // the fault that sent us here, at the point it appears
     "vmf_st_wait", "vmf_ad_wait",
+    // 2eb/2ed are ANSWERED (ring VA in range; GC hub programmed and agreeing
+    // with MMHUB) and have moved down into the main list, per the rule above.
 };
 
 static bool rbgpuIsHotKey(const char *key) {
