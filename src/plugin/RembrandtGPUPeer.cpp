@@ -552,6 +552,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dz: did the fence write fault in GPUVM?
     "vmf_cntl", "vmf_status", "vmf_addr_lo", "vmf_addr_hi",
     "cp_cpc_status", "cp_cpf_status", "cpc_utcl1_status", "cpf_utcl1_status",
+    // 2ea: the fault status per dump point, to date the latch.
+    "vmf_st_gc", "vmf_st_kiq", "vmf_st_pre", "vmf_st_wait", "vmf_st_post",
+    "vmf_ad_gc", "vmf_ad_kiq", "vmf_ad_pre", "vmf_ad_wait", "vmf_ad_post",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

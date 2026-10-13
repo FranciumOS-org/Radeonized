@@ -1358,6 +1358,7 @@ static uint32_t g_rb_2dw_slot_idx   = 0;
 static uint64_t g_rb_2dw_slot_b0    = 0;
 static uint32_t g_rb_2dw_fence_bef  = 0;
 static uint64_t g_rb_2dt_wb_c8      = 0;  // 2dz: the fence destination
+static uint32_t g_rb_2ea_pq_base    = 0;  // 2ea: CP_HQD_PQ_BASE (ring VA >> 8)
 
 // 2dx: AMDHardware::getChannelWriteBackFrameGPUAddr(uint) - the MC address the
 // GPU is told for a writeback frame, the counterpart of the CPU pointer the
@@ -1463,6 +1464,8 @@ static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
     uint32_t act   = g_hw.rreg(g_hw.ctx, (kSeg0 + dwACTIVE)   * 4);
     uint32_t vmid  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwVMID)     * 4);
     uint32_t base  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_BASE)  * 4);
+    if (base != 0 && base != 0xFFFFFFFF)
+        g_rb_2ea_pq_base = base;   // 2ea: the GPUVM ring base, >> 8
     uint32_t baseh = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_BASEH) * 4);
     uint32_t rptr  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_RPTR)  * 4);
     uint32_t wptr  = g_hw.rreg(g_hw.ctx, (kSeg0 + dwPQ_WPTR)  * 4);
@@ -1686,6 +1689,57 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     // zero means no class of fault is being reported at all - in which case a
     // zero STATUS says nothing whatever. Say so rather than letting it read
     // as "no fault".
+    // 2ea (2026-10-12): WHEN did the fault latch, and is it the ring or the
+    // fence? The 2dz boot found STATUS=0x881 with CNTL=0x1ffc (reporting on,
+    // so the latch is meaningful) and fault page 0x0FFBFE80. Under the
+    // standard conventions that is byte 0xFFBFE80000, and CP_HQD_PQ_BASE =
+    // 0xffbfe800 << 8 is the same 0xFFBFE80000 - an exact 40-bit match with
+    // the RING base, not the fence (0xFFBFDC0040, 0xC0000 lower). 2dz only
+    // compared against the fence, so it printed "a different access" and
+    // missed the identification.
+    //
+    // The fault registers LATCH and stay until cleared, and MORE_FAULTS=1
+    // says more than one occurred, so a fault seen at post-stamp-wait could
+    // have been raised at any earlier moment - including before startKIQ, by
+    // something that is not ours at all. Recording the status per dump point
+    // is what distinguishes "the KIQ fetch faulted" from "a fault was already
+    // latched before the KIQ existed". Without that, this is a lead, not a
+    // finding.
+    {
+        const char *shrt = "x";
+        if (tag) {
+            if (!strncmp(tag, "post-gc", 7))        shrt = "gc";
+            else if (!strncmp(tag, "post-startKIQ", 13)) shrt = "kiq";
+            else if (!strncmp(tag, "pre-kiq", 7))   shrt = "pre";
+            else if (!strncmp(tag, "at-stamp", 8))  shrt = "wait";
+            else if (!strncmp(tag, "post-stamp", 10)) shrt = "post";
+        }
+        char kst[48], kad[48];
+        snprintf(kst, sizeof(kst), "vmf_st_%s", shrt);
+        snprintf(kad, sizeof(kad), "vmf_ad_%s", shrt);
+        rbgpu_diag_set_num(kst, vm_status);
+        rbgpu_diag_set_num(kad, (static_cast<uint64_t>(vm_hi) << 32) | vm_lo);
+
+        uint64_t fpage = (static_cast<uint64_t>(vm_hi) << 32) | vm_lo;
+        uint64_t fbyte = fpage << 12;
+        uint64_t ring  = static_cast<uint64_t>(g_rb_2ea_pq_base) << 8;
+        rbgpu_log("2ea DIAG [%s]: fault latched=%u status=0x%08x page=0x%llx "
+                  "-> byte 0x%llx ; ring base (PQ_BASE 0x%08x << 8) = 0x%llx ; "
+                  "fence dest = 0x%llx -> %s",
+                  tag, vm_status & 1u, vm_status, fpage, fbyte,
+                  g_rb_2ea_pq_base, ring, g_rb_2dt_wb_c8,
+                  !(vm_status & 1u)
+                      ? "nothing latched at this point"
+                  : (ring != 0 && fbyte == ring)
+                      ? "THE FAULT IS AT THE RING BASE - the CP's fetch of the "
+                        "ring is what GPUVM refused, so the packets may never "
+                        "have been read validly at all"
+                  : ((fbyte & ~0xFFFull) == (g_rb_2dt_wb_c8 & ~0xFFFull))
+                      ? "THE FAULT IS AT THE FENCE PAGE - the write is what "
+                        "GPUVM refused"
+                      : "the fault is at neither the ring nor the fence page");
+    }
+
     if (vm_status & 1u) {
         // The address register's units are not independently verified here, so
         // both readings are printed and neither is asserted.
