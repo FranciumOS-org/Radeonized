@@ -9,6 +9,8 @@
 void rbgpu_log(const char *fmt, ...) __printflike(1, 2);
 void rbgpu_log_captured_va(const char *tag, const char *fmt, va_list va, void (*orig_fn)(const char *, ...));
 void rbgpu_diag_set_num(const char *key, uint64_t val);
+// 2eo: synchronous NVRAM breadcrumb, written on the calling thread.
+void rbgpu_gate_nvram(uint32_t stage, const char *what);
 void rbgpu_diag_set_str(const char *key, const char *val);
 void rbgpu_diag_inc(const char *key);
 

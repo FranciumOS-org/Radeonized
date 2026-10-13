@@ -777,6 +777,42 @@ void RembrandtGPUPeer::saveDiagToNvram() {
     options->release();
 }
 
+// 2eo (2026-10-13): a breadcrumb that does NOT go through the diag table.
+//
+// 2en's `gate_stage` reached NVRAM through rbgpu_diag_set_num, which only
+// schedules performRefreshDiag on a thread_call. That worked for 2em because
+// the refresh thread kept running after the accelerator thread wedged. The
+// 2en boot shows it is not dependable: its summary is a snapshot of a table
+// holding ~34 fewer keys than the 2em boot's, so the refresh stopped early
+// and the last writes - including every gate_stage - never reached flash. A
+// breadcrumb that can be starved by the very hang it is meant to locate is
+// not a breadcrumb.
+//
+// So this writes one NVRAM variable, `rbgpu-gate`, on the CALLING thread,
+// synchronously, flushed immediately. It overwrites, so what survives is the
+// last gate the boot actually entered. Cost is one flash write per gate, a
+// few dozen per armed boot; a wedge that costs a power cycle and teaches
+// nothing costs more.
+//
+//   nvram rbgpu-gate
+void rbgpu_gate_nvram(uint32_t stage, const char *what) {
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (!options) {
+        return;
+    }
+    char buf[80];
+    snprintf(buf, sizeof(buf), "%u %s", stage, what ? what : "");
+    if (auto str = OSString::withCString(buf)) {
+        options->setProperty("rbgpu-gate", str);
+        str->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    options->release();
+}
+
 void RembrandtGPUPeer::performRefreshDiag() {
     if (!g_diagLock) {
         return;

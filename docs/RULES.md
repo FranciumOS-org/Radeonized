@@ -3242,3 +3242,72 @@ stays, `-rbgpustampwait` stays and is now bounded.
 What the next armed boot decides: `gate_stage` names where the boot stops,
 and the bounded wait means it should not stop at all - it should fail a gate
 cleanly and come up to a desktop, as every boot since 2cy has.
+
+### 2en on hardware (2026-10-13): it wedged again, and the breadcrumb did not survive
+
+Armed boot, wedged, power-cycled. `rbgpu-diag-prev`:
+
+```
+d=34 armed=1 vmf_st_kiq=0 found_fb_routed=1 found_fb_calls=1 found_fb_refused=1
+ttl_raw_init_ret=0 ttl_hw_init_ret=ffffffffcb588001 gc_sw_init_ret=1
+smu_dma_mc_ok=1 smu_bringup_armed=1 bringup_err=0 smu_nmsgs=7 smu_writes=15
+gfx_min=0 gfx_max=0 gfxoff_status=2 diag_rlc_stat=25 diag_rlc_gpm=b40017
+diag_cp_stat=0 diag_rb0_cntl=a00000 diag_mec_hdr=def5def5 kiq_spec0=2
+```
+
+The key order is the 2en hot list, so this IS the 2en build. What it says:
+
+- `kiq_spec0=2` and `vmf_st_kiq=0`: `startKIQ` ran and the `post-startKIQ`
+  register dump got as far as the per-point fault record.
+- `vmf_st_pre`, `stamp_calls`, `setres_calls`, `ptb_written` and
+  **`gate_stage` are all absent**, so `submitSetResourcesPacket` was never
+  entered and the 2em patch never fired this boot.
+- `d=34` against the 2em boot's `d=107`: the summary is a snapshot of a table
+  holding ~70 fewer keys. The refresh stopped much earlier than last time.
+
+**So 2en's breadcrumb failed at exactly the job it was added for.**
+`gate_stage` goes through `rbgpu_diag_set_num`, which only *schedules*
+`performRefreshDiag` on a `thread_call`. That thread kept running through the
+2em wedge, which is why `ptb_written` and `stamp_ret` survived then - and it
+did not this time. A breadcrumb that can be starved by the hang it is meant
+to locate is not a breadcrumb, and reading "`gate_stage` absent" as "the gate
+was never entered" would be the fourteenth instance of this project's
+recurring error: the absence is equally well explained by the refresh never
+running again.
+
+What IS supported: the boot stopped somewhere **inside
+`rbgpu_dump_gc_regs("post-startKIQ")`**, at or after the per-point fault
+record (which is written after the 2eh TTL call, so that call completed) and
+before the function returned. The 2em boot ran this same path to completion,
+so the stop is not deterministic at a fixed instruction - which is itself
+worth knowing and was not knowable before.
+
+## 2eo (2026-10-13): a breadcrumb that does not need the wedged machine's help
+
+`rbgpu_gate_nvram(stage, what)` writes one NVRAM variable, `rbgpu-gate`, **on
+the calling thread, synchronously**, flushed with
+`IONVRAM-FORCESYNCNOW-PROPERTY`. No diag table, no `thread_call`, nothing that
+another thread has to come along and finish. It overwrites, so what survives a
+power cycle is the last point the boot actually reached:
+
+```
+nvram rbgpu-gate
+```
+
+The 2en gates (40/45 setres, 50/55 initGraphicsMQD, 60+ring / 70+ring
+mapQueues, 100+call / 150+call waitForHwStamp) now go through it as well as
+through the diag table, and `rbgpu_dump_gc_regs` is marked at nine points of
+its own, each carrying the dump tag: `1 enter`, `2 after-2dz-fault-regs`,
+`4 after-2ed-gc-hub`, `5 after-2ee-phys-scan`, `6 after-2ea-fault-per-point`,
+`7 after-2do-hqd-probe`, `8 after-2el-ring-pte`, `9 dump-COMPLETE`.
+
+Cost is one flash write per mark, a few dozen per armed boot. A wedge that
+costs a power cycle and teaches nothing costs more.
+
+Build: UUID EDB85AA6, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides: `nvram rbgpu-gate` names the last block the
+boot finished. `6 dump:post-startKIQ:...` points at the HQD probe (the only
+code that writes `GRBM_GFX_CNTL`); `7` at the 2el ring-PTE read; `8` at the
+2em register write; a `4x`/`1xx` value means the dump completed and the stop
+is in a doStart gate after all.
