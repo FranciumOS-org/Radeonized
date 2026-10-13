@@ -1361,6 +1361,8 @@ static uint32_t g_rb_2dw_fence_bef  = 0;
 static uint64_t g_rb_2dt_wb_c8      = 0;  // 2dz: the fence destination
 static uint32_t g_rb_2ea_pq_base    = 0;  // 2ea: CP_HQD_PQ_BASE (ring VA >> 8)
 static uint64_t g_rb_2eb_pt_base    = 0;  // 2eb: GCVM_CONTEXT0_PAGE_TABLE_BASE
+static uint64_t g_rb_2eb_start_pg   = 0;  // 2ek: CONTEXT0 PAGE_TABLE_START (pages)
+static uint64_t g_rb_2eb_end_pg     = 0;  // 2ek: CONTEXT0 PAGE_TABLE_END (pages)
 static uint32_t g_rb_2ed_fb_off     = 0;  // 2ed: GCMC_VM_FB_OFFSET (16 MB units)
 static int      g_rb_2ee_pdb_done   = 0;  // 2ee: map the candidates once per boot
 static void    *g_rb_ttl_this       = nullptr;  // 2eh: the AmdTtlServices object
@@ -1739,6 +1741,8 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         rbgpu_diag_set_num("vm_c0_ptb", ptb);
         g_rb_2eb_pt_base = ptb;   // 2ee reads the page it points at
         rbgpu_diag_set_num("vm_c0_start", st);
+        g_rb_2eb_start_pg = st;   // 2ek: the flat PTE table is indexed from here
+        g_rb_2eb_end_pg   = en;
         rbgpu_diag_set_num("vm_c0_end", en);
 
         // START/END are page numbers in amdgpu's usage, so both readings are
@@ -2059,72 +2063,95 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                 rbgpu_diag_set_num("gart_match_idx", static_cast<uint64_t>(i));
             }
         }
-        // 2ej (2026-10-13): read the page directory through TTL's OWN kernel VA.
+        // 2ek (2026-10-13): read the RING's OWN PTE, not the start of the table.
         //
-        // out[4] is a kernel pointer to the same page out[2] names in carve-out
-        // MC space, so the contents can be read without IOMemoryDescriptor -
-        // the instrument 2ef proved does not reach carve-out memory. Nothing
-        // is mapped and nothing is written; this dereferences a pointer the
-        // TTL layer just handed us.
+        // 2ej read the first 512 qwords at out[4] and found none valid, and
+        // that proves nothing, because of two things it got wrong:
         //
-        // This is the question that decides whether PT_BASE may be patched.
-        // If Apple's VM layer uses vram_base_offset = 0 throughout, the PDEs
-        // carry the same error, and making the walk succeed would aim GPU
-        // reads AND WRITES at host DRAM near 0x0FDF_A000 - worse than the
-        // current clean fault. Where the entries point says which:
+        //   GCVM_CONTEXT0_CNTL = 0x01555481 has PAGE_TABLE_DEPTH (bits 2:1)
+        //   = 0, so what PT_BASE points at is a FLAT PTE ARRAY, not a page
+        //   directory - one 8-byte entry per 4 KB page of the aperture.
         //
-        //   entries point at 0x7_8xxx_xxxx  only PT_BASE is wrong; the table
-        //       itself already uses system-physical addresses and patching
-        //       the register is the whole fix
-        //   entries point LOW (< 0x1000_0000)  the PTEs carry the same zero
-        //       offset; the bug is systemic and patching PT_BASE alone would
-        //       be dangerous, not sufficient
-        //   entries point at 0xF4_xxxx_xxxx  the table holds raw MC addresses,
-        //       a third convention again
-        //   all zero / no valid entries  the directory was never populated,
-        //       and none of the above applies
+        //   The aperture starts at START<<12 = 0xFF_BFA0_0000 and the ring
+        //   sits at 0xFF_BFE8_0000, so the ring's entry is at index
+        //   (ring - start) >> 12 = 1152, byte offset 0x2400. The first 512
+        //   entries cover 0xFF_BFA0_0000..0xFF_BFC0_0000 and do NOT include
+        //   it. "No valid entries" was a statement about empty low aperture,
+        //   not about the ring.
         //
-        // A GFX10 PDE is 8 bytes with bit 0 = valid; bit 1 = AMDGPU_PTE_SYSTEM
-        // marks a system-memory entry, whose address is a bus address and is
-        // counted separately rather than lumped in with the VRAM ones.
+        // The read at +0x2400 is bounded by TWO independently-derived sizes
+        // rather than one guess: out[0]'s low 32 bits (0x201000) and
+        // (END - START) * 8 from the aperture registers (0x202000). The entry
+        // is only read when it fits inside the smaller of the two.
         if (out[4] >= 0xFFFFFF0000000000ULL) {
-            auto pde = reinterpret_cast<volatile uint64_t *>(out[4]);
+            rbgpu_diag_set_num("pde_no_va", 0);   // clear the early-pass sentinel
+
+            uint64_t start_va = g_rb_2eb_start_pg << 12;
+            uint64_t ring_va  = static_cast<uint64_t>(g_rb_2ea_pq_base) << 8;
+            uint64_t size_a   = out[0] & 0xFFFFFFFFULL;
+            uint64_t size_b   = (g_rb_2eb_end_pg - g_rb_2eb_start_pg) * 8ULL;
+            uint64_t limit    = size_a < size_b ? size_a : size_b;
+
+            auto pte = reinterpret_cast<volatile uint64_t *>(out[4]);
+
+            // Count across as much of the table as both sizes allow.
+            uint64_t nent = limit / 8;
+            if (nent > 0x40400ULL) nent = 0x40400ULL;
             uint32_t valid = 0, sys = 0, lo = 0, mid = 0, fb = 0, other = 0;
-            uint64_t first[4] = {0, 0, 0, 0};
-            for (uint32_t i = 0; i < 512; i++) {
-                uint64_t e = pde[i];
-                if (i < 4) first[i] = e;
+            for (uint64_t i = 0; i < nent; i++) {
+                uint64_t e = pte[i];
                 if (!(e & 1)) continue;
                 valid++;
                 if (e & 2) { sys++; continue; }
                 uint64_t a = e & 0x0000FFFFFFFFF000ULL;
-                if (a < 0x10000000ULL)                          lo++;
+                if (a < 0x10000000ULL)                              lo++;
                 else if (a >= 0x780000000ULL && a < 0x800000000ULL) mid++;
                 else if (a >= 0xF400000000ULL && a < 0xF500000000ULL) fb++;
-                else                                            other++;
+                else                                                other++;
             }
+            rbgpu_diag_set_num("pte_entries", nent);
             rbgpu_diag_set_num("pde_valid", valid);
             rbgpu_diag_set_num("pde_sys", sys);
             rbgpu_diag_set_num("pde_low", lo);
             rbgpu_diag_set_num("pde_sysphys", mid);
             rbgpu_diag_set_num("pde_carveout", fb);
             rbgpu_diag_set_num("pde_other", other);
-            rbgpu_diag_set_num("pde_e0", first[0]);
-            rbgpu_diag_set_num("pde_e1", first[1]);
-            rbgpu_log("2ej DIAG [%s]: page directory at TTL kernel VA 0x%llx: "
-                      "valid=%u sys=%u low(<0x10000000)=%u sysphys(0x7_8..)=%u "
-                      "carveout(0xF4_..)=%u other=%u ; "
-                      "[0]=0x%llx [1]=0x%llx [2]=0x%llx [3]=0x%llx",
-                      tag, out[4], valid, sys, lo, mid, fb, other,
-                      first[0], first[1], first[2], first[3]);
-            rbgpu_log("2ej DIAG [%s]: valid=0 means the directory was never "
-                      "populated and none of the readings below apply; "
-                      "sysphys means ONLY the register is wrong; low means the "
-                      "PTEs carry the same zero vram_base_offset and patching "
-                      "the register alone would be unsafe.", tag);
+
+            rbgpu_log("2ek DIAG [%s]: FLAT PTE table (CONTEXT0 depth 0) at kernel VA "
+                      "0x%llx, size_a=0x%llx size_b=0x%llx -> scanned %llu entries: "
+                      "valid=%u sys=%u low=%u sysphys(0x7_8..)=%u carveout(0xF4_..)=%u other=%u",
+                      tag, out[4], size_a, size_b, nent,
+                      valid, sys, lo, mid, fb, other);
+
+            // The one entry that matters.
+            if (ring_va >= start_va) {
+                uint64_t idx  = (ring_va - start_va) >> 12;
+                uint64_t need = (idx + 1) * 8;
+                rbgpu_diag_set_num("ring_pte_idx", idx);
+                if (need <= limit) {
+                    uint64_t e = pte[idx];
+                    uint64_t a = e & 0x0000FFFFFFFFF000ULL;
+                    rbgpu_diag_set_num("ring_pte", e);
+                    rbgpu_diag_set_num("ring_pte_valid", (e & 1) ? 1 : 0);
+                    rbgpu_diag_set_num("ring_pte_addr", a);
+                    rbgpu_log("2ek DIAG [%s]: ring VA 0x%llx -> PTE[%llu] (byte 0x%llx) "
+                              "= 0x%llx  valid=%llu system=%llu addr=0x%llx",
+                              tag, ring_va, idx, idx * 8, e,
+                              (e & 1), (e >> 1) & 1, a);
+                    rbgpu_log("2ek DIAG [%s]: entry 0 means the ring page is genuinely "
+                              "unmapped and the fault is the page table's CONTENTS, not "
+                              "PT_BASE; a valid entry means the table is fine and only "
+                              "PT_BASE is wrong; where addr points says whether the PTEs "
+                              "carry the same zero vram_base_offset.", tag);
+                } else {
+                    rbgpu_diag_set_num("ring_pte_oob", 1);
+                    rbgpu_log("2ek DIAG [%s]: ring PTE needs 0x%llx bytes but the table "
+                              "is bounded at 0x%llx - NOT read, and this says nothing "
+                              "about the ring's mapping.", tag, need, limit);
+                }
+            }
         } else {
-            rbgpu_log("2ej DIAG [%s]: out[4]=0x%llx is not a kernel VA - the "
-                      "page directory was not read and 2ej says nothing.",
+            rbgpu_log("2ek DIAG [%s]: out[4]=0x%llx is not a kernel VA - nothing read.",
                       tag, out[4]);
             rbgpu_diag_set_num("pde_no_va", 1);
         }
