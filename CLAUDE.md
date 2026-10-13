@@ -1993,3 +1993,74 @@ sudo tools/efi.sh bootarg add -rbgpustampwait
 sudo tools/efi.sh install
 sudo nvram rbgpu-arm=1 && sudo reboot
 ```
+
+### 2dr on hardware (2026-10-12): the wait ran, and it is NOT the GPU
+
+logs/20261012-213653-plugin, UUID C68112B7, armed, no panic, no wedge.
+
+```
+2dr: the REAL wait returned 0 - the stamp did not arrive even though the CP
+     consumed the packet, so the fault is in the stamp path, not execution
+2cx: waitForHwStamp -> 0  (5000220287 ticks)
+```
+
+The wait really ran and gave up after **one** 5 s poll rather than re-arming
+forever, so the feared wedge did not happen and the boot completed. Combined
+with 2dq (RPTR = WPTR = 0x20, CP_STAT busy): **the command processor executes
+the packet and the completion stamp still never arrives.**
+
+### What waitForHwStamp actually polls (0xbe85536, disassembled)
+
+```
+waitForHwStamp(this, stamp):
+  if (!isEnabled())                      return false       vtable[0x150]
+  if (stamp - this->0x84 <= 0)           return true        already completed
+  loop { pollWait(5 s, 100)
+         checkForTimestampUpdate()                          vtable[0x1a8]
+         if (this->0x84 - stamp >= 0) break
+         if (chan->vtable[0x2a0]()) continue }
+  return (stamp - this->0x84) <= 0
+```
+
+It polls **`channel+0x84`**, not the GPU. The refresh is
+`AMDHWChannel::checkForTimestampUpdate` (0xbe851d6):
+
+```
+  if (this->0x80 == this->0x84) return 0;      <-- EARLY EXIT, reads nothing
+  vtable[0x2d0](this); timestampUpdated(this)
+
+timestampUpdated (0xbe85214):
+  if (this->0xe0 == -1) return;                <-- no writeback configured
+  ... reads through this->0xc0 / this->0xe0 and writes this->0x84
+```
+
+So **`+0x80` is the submitted stamp and `+0x84` the completed one**. If the
+submit path never incremented `+0x80`, the refresh short-circuits and `+0x84`
+can never move, however well the GPU executed - which is exactly the shape of
+what 2dq measured.
+
+## 2ds (2026-10-12): read the channel's own bookkeeping
+
+The waitForHwStamp hook now logs `+0x80`, `+0x84`, `+0xc0` and `+0xe0` before
+the wait and `+0x80`/`+0x84` after it, with a line naming which of three
+situations the numbers show:
+
+```
++0x80 == +0x84      nothing was marked submitted; checkForTimestampUpdate takes
+                    its early exit and never reads the fence. Bookkeeping, not
+                    the GPU.
++0xe0 == -1         no writeback address configured on the channel, so
+                    timestampUpdated returns before reading anything.
+otherwise           a frame is outstanding and a writeback address is set, so
+                    the fence memory itself is not being updated.
+```
+
+All plain reads of the channel object. New diag keys `stamp_submitted`,
+`stamp_completed`, `stamp_wb_c0`, `stamp_wb_e0`.
+
+Also corrected: the 2cx log line still printed "TIMEOUT - the CP never
+consumed the packet" on every failed wait. That text is now false and was the
+sentence the project read off for fifteen milestones; it now says the stamp
+was not reached and that this is **not** evidence the CP is dead.
+
+Build: UUID 3C0AAE81, hosttest passes. Same boot-args, `-rbgpustampwait` stays.

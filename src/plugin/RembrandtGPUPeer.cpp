@@ -521,6 +521,8 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dn: the HQD window selector and the queue the KIQ asked for.
     "diag_grbm_gfx_cntl", "kiq_spec0", "kiq_spec1", "kiq_spec2",
     "hqd_slot_found",
+    // 2ds: the channel's own submitted/completed stamp counters.
+    "stamp_submitted", "stamp_completed", "stamp_wb_e0",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the
