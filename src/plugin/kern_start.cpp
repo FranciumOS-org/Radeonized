@@ -1753,6 +1753,63 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         }
     }
 
+    // 2ed (2026-10-12): did Apple program the GC hub's apertures at all?
+    //
+    // The fault decodes as MAPPING_ERROR=1 / WALKER_ERROR=5, so the walk RAN
+    // and found no valid PTE - which means the walker had a page-table base
+    // to start from. What it does not say is whether the surrounding GFXHUB
+    // aperture setup is there. GC and MMHUB are separate VM hubs on GFX10
+    // (Linux: gfxhub_v2_1 and mmhub_v2_3, programmed independently), and 2di
+    // has already read MMHUB's copy as a healthy FB_LOCATION 0xF400/0xF4FF -
+    // that hub is driving the display, so it proves nothing about this one.
+    //
+    // Reading the GC-side copies costs one more dword each in the same window
+    // and says whether the GFXHUB was set up at all:
+    //
+    //   all zero       the GC hub's apertures were never programmed; Apple's
+    //                  Navi 21 path set up MMHUB and left GFXHUB alone, and
+    //                  the unmapped ring is a symptom of that, not the cause
+    //   FB matches     the GC hub agrees with MMHUB about where the carve-out
+    //                  is, so the aperture setup is not the problem and the
+    //                  fault really is in the page-table contents
+    //
+    // Neither reading is asserted in the log. All reads, BASE_IDX 0, offsets
+    // from docs/linux-ref/gc_10_3_0_offset.h (3638-3690).
+    {
+        auto rd = [&](uint32_t dw) {
+            return g_hw.rreg(g_hw.ctx, (kSeg0Conv + dw) * 4);
+        };
+        uint32_t fb_base = rd(0x16fc);   // GCMC_VM_FB_LOCATION_BASE
+        uint32_t fb_top  = rd(0x16fd);   // GCMC_VM_FB_LOCATION_TOP
+        uint32_t fb_off  = rd(0x16e7);   // GCMC_VM_FB_OFFSET
+        uint32_t agp_bot = rd(0x16ff);   // GCMC_VM_AGP_BOT
+        uint32_t agp_top = rd(0x16fe);   // GCMC_VM_AGP_TOP
+        uint32_t sys_lo  = rd(0x1701);   // GCMC_VM_SYSTEM_APERTURE_LOW_ADDR
+        uint32_t sys_hi  = rd(0x1702);   // GCMC_VM_SYSTEM_APERTURE_HIGH_ADDR
+
+        rbgpu_diag_set_num("gc_fb_base", fb_base);
+        rbgpu_diag_set_num("gc_fb_top", fb_top);
+        rbgpu_diag_set_num("gc_fb_off", fb_off);
+        rbgpu_diag_set_num("gc_agp_bot", agp_bot);
+        rbgpu_diag_set_num("gc_agp_top", agp_top);
+        rbgpu_diag_set_num("gc_sys_lo", sys_lo);
+        rbgpu_diag_set_num("gc_sys_hi", sys_hi);
+
+        bool all_zero = (fb_base | fb_top | fb_off | agp_bot | agp_top |
+                         sys_lo | sys_hi) == 0;
+        bool fb_agrees = (fb_base == 0xf400) && (fb_top == 0xf4ff);
+        rbgpu_diag_set_num("gc_hub_all_zero", all_zero ? 1 : 0);
+        rbgpu_diag_set_num("gc_hub_fb_agrees", fb_agrees ? 1 : 0);
+
+        rbgpu_log("2ed DIAG [%s]: GCMC FB_LOCATION base=0x%08x top=0x%08x "
+                  "FB_OFFSET=0x%08x AGP bot=0x%08x top=0x%08x SYS lo=0x%08x hi=0x%08x",
+                  tag, fb_base, fb_top, fb_off, agp_bot, agp_top, sys_lo, sys_hi);
+        rbgpu_log("2ed DIAG [%s]: GC hub all_zero=%d fb_agrees_with_mmhub=%d "
+                  "(MMHUB read 0xf400/0xf4ff in 2di; the two hubs are programmed "
+                  "independently, so MMHUB being healthy says nothing here)",
+                  tag, all_zero ? 1 : 0, fb_agrees ? 1 : 0);
+    }
+
     // 2ea (2026-10-12): WHEN did the fault latch, and is it the ring or the
     // fence? The 2dz boot found STATUS=0x881 with CNTL=0x1ffc (reporting on,
     // so the latch is meaningful) and fault page 0x0FFBFE80. Under the

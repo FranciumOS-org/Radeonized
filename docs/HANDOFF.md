@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-12, after 2ec)
+# RembrandtGPU — handoff state (2026-10-12, after 2ed)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~2600 lines); it is authoritative for *what was measured* and should
@@ -36,7 +36,7 @@ display pipe** (2ct) so armed boots reach a desktop.
 
 ---
 
-## 2. The pending experiment — 2eb, RE-RUN as build UUID `24155DB4`
+## 2. The pending experiment — 2eb + 2ed, build UUID `835AD9F7`
 
 **2eb already ran on hardware and its answer was LOST.** `rbgpu-arm` is
 consumed and `rbgpu-diag-prev` is an armed boot with `smu_bringup_armed=1`, so
@@ -66,6 +66,24 @@ and `_BASE_ADDR` plus `GCVM_L2_CNTL` / `GCVM_CONTEXT0_CNTL`:
 |---|---|
 | `vm_ring_in_range = 0` | the MQD was given a GPUVM address this VMID's page tables do not cover — the aperture itself is wrong |
 | `vm_ring_in_range = 1` | the range is right and the fault is in the page-table *contents* |
+
+**2ed rides along in the same boot.** GC and MMHUB are *separate VM hubs* on
+GFX10 — Linux programs them independently as `gfxhub_v2_1` and `mmhub_v2_3` —
+so 2di's healthy MMHUB reading (FB_LOCATION 0xF400/0xF4FF) says nothing about
+the GC side, and nothing has ever read it. 2ed reads the GC-hub copies
+(`GCMC_VM_FB_LOCATION_BASE/TOP`, `FB_OFFSET`, `AGP_BOT/TOP`,
+`SYSTEM_APERTURE_LOW/HIGH`, gc_10_3_0_offset.h:3638-3690, same window, all
+reads):
+
+| outcome | meaning |
+|---|---|
+| `gc_hub_all_zero = 1` | the GFXHUB was never programmed — Apple's path set up MMHUB and left this hub alone, and the unmapped ring is a symptom of that |
+| `gc_hub_fb_agrees = 1` | the GC hub agrees with MMHUB about the carve-out, so the aperture is fine and the fault is in the page-table contents |
+
+Note the fault decodes as MAPPING_ERROR=1 / WALKER_ERROR=5, so the walk *ran*
+and the walker had a page-table base; `vm_c0_ptb` from 2eb says whether that
+base is real. The apertures and the range test together cover the three ways
+this can fail.
 
 Either way the next lever is likely **source comparison** (§7), not more
 register archaeology: how amdgpu maps the KIQ ring into GPUVM for yellow_carp

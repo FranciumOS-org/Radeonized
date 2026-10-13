@@ -529,6 +529,8 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // 2eb: is the ring's GPUVM address inside VMID 0's page tables at all?
     "vm_ring_in_range", "vm_c0_start", "vm_c0_end", "vm_c0_ptb",
     "vm_c0_cntl", "vm_l2_cntl",
+    // 2ed: was the GC hub's aperture programmed at all?
+    "gc_hub_all_zero", "gc_hub_fb_agrees", "gc_fb_base", "gc_fb_top",
     // the fault that sent us here, at the point it appears
     "vmf_st_wait", "vmf_ad_wait",
 };
