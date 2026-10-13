@@ -797,10 +797,36 @@ void RembrandtGPUPeer::saveDiagToNvram() {
 // nothing costs more.
 //
 //   nvram rbgpu-gate
+// 2eq (2026-10-13): resolve /options ONCE and keep it.
+//
+// 2ep's boot stopped between gate 53 and gate 54 - a span that contains no
+// Apple code at all, only two vtable-slot reads, two diag sets and a log
+// line. That makes the breadcrumb itself a suspect, and there is a concrete
+// mechanism: rbgpu_gate_nvram called IORegistryEntry::fromPath on every mark,
+// which walks the device-tree plane under the registry lock. Doing that
+// dozens of times from inside IOService::start - the one thread that must not
+// contend for the registry - is a deadlock shape, and it matches the symptom
+// that a wedge takes `ioreg` and `reboot` down with it rather than stalling
+// one thread. The 2eo boot (nine marks per dump point, system still alive
+// enough to run plugin_check over SSH) and the 2ep boot (four more marks,
+// hard wedge) are consistent with that, though two boots are a correlation
+// and not a demonstration.
+//
+// So the lookup happens once, lazily, and the entry is retained for the life
+// of the boot; later marks only setProperty on an entry already in hand.
+// This is stated as a suspicion being removed, not a diagnosis: if the next
+// boot stops in the same place with the lookup gone, the breadcrumb is
+// exonerated and the fault is in the two pointer reads.
+static IORegistryEntry *g_rbgpuOptions = nullptr;
+
 void rbgpu_gate_nvram(uint32_t stage, const char *what) {
-    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    IORegistryEntry *options = g_rbgpuOptions;
     if (!options) {
-        return;
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            return;
+        }
+        g_rbgpuOptions = options;   // retained by fromPath; kept for the boot
     }
     char buf[80];
     snprintf(buf, sizeof(buf), "%u %s", stage, what ? what : "");
@@ -812,7 +838,7 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
         options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
         sync->release();
     }
-    options->release();
+    // NOT released: g_rbgpuOptions holds the one reference for the boot.
 }
 
 void RembrandtGPUPeer::performRefreshDiag() {
