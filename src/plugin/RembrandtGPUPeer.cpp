@@ -23,7 +23,7 @@ OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 // table was full, so every new key (fw_calls, stamp_calls, setres_ret, ...)
 // was silently dropped and read as "absent". Absent must mean absent, not
 // "the table filled up", or the next conclusion drawn from it will be wrong.
-#define RBGPU_MAX_DIAGS 192
+#define RBGPU_MAX_DIAGS 320
 #define RBGPU_BUF_SIZE  4096
 
 struct LogEntry {
@@ -89,6 +89,19 @@ static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
         g_diags[g_diagCount].type   = DIAG_TYPE_NUM;
         g_diags[g_diagCount].numVal = val;
         g_diagCount++;
+        return;
+    }
+    // 2dt: a full table used to drop new keys in silence, so "absent" became a
+    // lie. 2db hit this at 96 and raised it to 192 with the note "absent has to
+    // mean absent"; the 2ds boot filled 192 exactly and lost stamp_wb_e0 the
+    // same way. Say so once, loudly, instead of letting the next reader infer
+    // that a key was never set.
+    static bool s_warned = false;
+    if (!s_warned) {
+        s_warned = true;
+        rbgpu_log("*** DIAG TABLE FULL at %d entries - '%s' and every later key is "
+                  "being DROPPED. Absent no longer means absent; raise "
+                  "RBGPU_MAX_DIAGS.", RBGPU_MAX_DIAGS, key);
     }
 }
 

@@ -2064,3 +2064,49 @@ sentence the project read off for fifteen milestones; it now says the stamp
 was not reached and that this is **not** evidence the CP is dead.
 
 Build: UUID 3C0AAE81, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2ds on hardware (2026-10-12): the bookkeeping is CORRECT — it is the fence
+
+logs/20261012-214334-plugin, UUID 3C0AAE81, armed, no panic. One line survived
+and it is the one that matters:
+
+```
+2ds: channel stamps AFTER the wait: submitted(+0x80)=1 completed(+0x84)=0 (asked-for=1)
+```
+
+**`+0x80 != +0x84`**, so `checkForTimestampUpdate` does NOT take its early
+exit: the frame is properly marked submitted and the refresh really does run.
+The driver's own bookkeeping is right. That leaves the third branch of the 2ds
+classifier - `timestampUpdated` runs and the **fence writeback is what never
+gets written**, or `+0xe0` is -1 and there is no writeback address at all.
+
+Which of those two it is was not answered, because of two instrumentation
+failures in the same boot:
+
+- **The 512-line ring wrapped during the 5 s wait.** The request-0x14 poll
+  keeps logging throughout, so by the time the log is read the `waitForHwStamp
+  ENTER` line, the whole `at-stamp-wait` register dump and the 2ds BEFORE line
+  are all gone. The ring's oldest entry is timestamped 13918091552 while the
+  wait began near 12509590203 - about 500 lines evicted inside one wait.
+- **The diag table hit 320... no, 192, exactly the cap, again.** 2db raised it
+  from 96 to 192 and wrote "absent has to mean absent"; this boot filled 192
+  and silently dropped `stamp_wb_c0` / `stamp_wb_e0`, the two values the whole
+  step existed to capture. Same bug, same silence, one milestone family later.
+
+## 2dt (2026-10-12): make the instrumentation survive its own experiment
+
+Three fixes, none of them about the GPU.
+
+- `RBGPU_MAX_DIAGS` 192 -> 320, and a **full table now says so**: the first
+  dropped key logs `*** DIAG TABLE FULL at N entries - 'key' and every later
+  key is being DROPPED. Absent no longer means absent.` A silent cap has now
+  cost two debugging rounds; it should never cost a third quietly.
+- The values read before the wait (`+0x80`, `+0x84`, `+0xc0`, `+0xe0`) are
+  held in file statics and **reprinted in the AFTER line**, which is logged
+  once the wait returns and therefore survives the ring wrap.
+- That AFTER line now names the conclusion the numbers support: `+0xe0` of -1
+  means `timestampUpdated` returns without reading any writeback, i.e. no
+  fence address is configured; anything else means a frame is outstanding, an
+  address is set, and the fence memory itself is not being written.
+
+Build: UUID 41D6ABAE, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
