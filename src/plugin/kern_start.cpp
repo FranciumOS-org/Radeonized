@@ -2333,9 +2333,21 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     uint64_t t0 = mach_absolute_time();
     bool ret;
     if (checkKernelArgument("-rbgpustampwait")) {
+        // 2dr: this is now the expected path, not the daring one. The 2dq boot
+        // read RPTR = WPTR = 0x20 at this very point with CP_STAT = 0x88000000,
+        // so the CP fetched and executed the SET_RESOURCES packet. RPTR is
+        // written by hardware, so that is the command processor moving, not the
+        // driver. The stamp may well already be there; 2cy has simply never let
+        // anyone wait for it.
         ret = orig_hwchannel_waitForHwStamp_2cx
                   ? orig_hwchannel_waitForHwStamp_2cx(ch, stamp)
                   : false;
+        rbgpu_log("2dr: the REAL wait returned %d%s", ret ? 1 : 0,
+                  ret ? " - THE STAMP ARRIVED; doStart continues past "
+                        "submitSetResourcesPacket for the first time"
+                      : " - the stamp did not arrive even though the CP consumed "
+                        "the packet, so the fault is in the stamp path, not execution");
+        rbgpu_dump_gc_regs("post-stamp-wait");
     } else {
         rbgpu_log("2cy: skipping the wait (-rbgpustampwait not set) -> false, so the "
                   "boot fails fast instead of polling forever");
