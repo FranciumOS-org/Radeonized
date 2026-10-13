@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-12, after 2eb)
+# RembrandtGPU — handoff state (2026-10-12, after 2ec)
 
 **Read this before CLAUDE.md.** CLAUDE.md is the chronological evidence
 journal (~2600 lines); it is authoritative for *what was measured* and should
@@ -36,7 +36,15 @@ display pipe** (2ct) so armed boots reach a desktop.
 
 ---
 
-## 2. The pending experiment — 2eb, build UUID `3857364D`
+## 2. The pending experiment — 2eb, RE-RUN as build UUID `24155DB4`
+
+**2eb already ran on hardware and its answer was LOST.** `rbgpu-arm` is
+consumed and `rbgpu-diag-prev` is an armed boot with `smu_bringup_armed=1`, so
+the boot happened — but `tools/plugin_check.sh` was not run before rebooting
+out of it, and the NVRAM fallback truncated at 512 bytes, ending mid-key at
+`mc`, before every single `vm_*` key. Nothing about the range test survives.
+2ec fixes the truncation (§5, tenth instance); the experiment itself is
+unchanged and simply needs one more armed boot.
 
 Built, hosttest passes, committed. **Verify the installed UUID with
 `sudo tools/efi.sh status` against `dwarfdump --uuid
@@ -178,8 +186,9 @@ comparable size — do not imply an accelerated desktop is near.
 
 ## 5. The recurring error — read this before concluding anything
 
-**Eight times** a conclusion has been drawn from a value without first
-establishing what makes that value meaningful, and had to be withdrawn:
+**Ten times** a conclusion has been drawn from a value without first
+establishing what makes that value meaningful, or an instrument has dropped
+the very result it was built to capture. Withdrawn or lost:
 2dk ("seg0 decodes" — 0 at both bases), 2dl ("MEC fetched" — a fill pattern),
 2dm ("queue never programmed" — wrong HQD window), 2do (PQ_BASE expected to
 equal the MC address), 2dp (measured before the doorbell), 2dq (narrated its
@@ -192,6 +201,20 @@ direction backwards and then hooked gates for a fault that did not exist),
 The ninth one happened **inside the code written to prevent the other eight**.
 Writing a precondition into the log does not help if the precondition itself
 is guessed.
+
+The tenth is the same silent-cap bug for the third time, in the third buffer:
+the diag table at 96 (2db), at 192 (2ds), and now the **512-byte NVRAM
+summary**, which truncated the 2eb boot mid-key at `mc` and lost all six
+`vm_*` values. Every milestone appends its new keys to the END of the list,
+which is precisely where truncation eats them — so the summary systematically
+drops the one experiment it was written for. 2ec emits a **hot list first**
+and prefixes `d=<n>` with the number of keys that did not fit, so a truncated
+summary says so. When a milestone starts, its keys go in the hot list; when
+it is answered, they move down.
+
+Corollary that is procedural, not technical: **NVRAM is the fallback, not the
+record.** The full 320-entry table lives in the boot's own IORegistry and dies
+with it. Run `tools/plugin_check.sh` while still in the armed boot.
 
 Operational rules that actually catch it:
 
@@ -235,11 +258,21 @@ Arming is **one-shot**: the peer consumes `rbgpu-arm` and flushes the removal
 immediately, so a panic or hang comes back up unarmed. A plain reboot after an
 armed boot is safe.
 
-After the boot, over SSH (10.0.0.69) or at the desktop:
+**While still in the armed boot** — over SSH (10.0.0.69) or at its desktop,
+BEFORE rebooting:
 
 ```
 tools/plugin_check.sh             # writes logs/<timestamp>-plugin/
-nvram rbgpu-diag                  # this boot
+```
+
+This is the step that matters. `RBGPUDiag` (320 entries) and `RBGPULog` live
+only in that boot's IORegistry and die with it; the NVRAM summary is a
+512-byte fallback that cannot hold them. Skipping it is what lost 2eb.
+
+Then, from any later boot:
+
+```
+nvram rbgpu-diag                  # this boot (d=<n> = keys that did not fit)
 nvram rbgpu-diag-prev             # the previous boot (rotation keeps two)
 ```
 
