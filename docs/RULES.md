@@ -2971,3 +2971,59 @@ Reads only — a dereference of a kernel pointer TTL just returned. Diag keys
 `pde_e0`, `pde_e1`, `pde_no_va`, all in the NVRAM hot list.
 
 Build: UUID 57A1E1A6, hosttest passes. Same boot-args, still armed.
+
+### 2ej on hardware (2026-10-13): read the WRONG PART of the table
+
+logs/20261013-000530-plugin, armed, no panic, 310 diag entries.
+
+```
+pde_no_va=1   pde_valid=0   pde_sys=0   pde_low=0   pde_sysphys=0
+gart_info_2=0xf40fdfa000   gart_info_4=0xffffffdbcc659000
+```
+
+`pde_no_va=1` is stale: the early retry pass runs the block with `out[]` all
+zero, sets the sentinel, and nothing clears it on the successful pass.
+`pde_valid=0` really was written by the live read, so the scan did run.
+
+**But the scan was aimed at the wrong offset, and the reading is void.** Two
+things 2ej got wrong:
+
+- `GCVM_CONTEXT0_CNTL = 0x01555481` has **PAGE_TABLE_DEPTH (bits 2:1) = 0**,
+  so what PT_BASE points at is a **flat PTE array**, not a page directory —
+  one 8-byte entry per 4 KB page of the aperture.
+- The aperture starts at `START << 12` = `0xFF_BFA0_0000`, and the ring sits
+  at `0xFF_BFE8_0000`, so the ring's entry is at index
+  `(ring - start) >> 12` = **1152**, byte offset **0x2400**. The 512 entries
+  2ej read cover `0xFF_BFA0_0000..0xFF_BFC0_0000` and do **not** include it.
+
+So "no valid entries" is a statement about an empty low aperture — entirely
+unremarkable — and says nothing about the ring's own mapping. Eleventh
+instance of the recurring error, caught by checking the arithmetic before
+writing it up rather than after.
+
+## 2ek (2026-10-13): read the ring's own PTE
+
+Index 1152, byte offset 0x2400, and the read is bounded by **two
+independently-derived sizes** rather than one guess: `out[0]`'s low 32 bits
+(`0x201000`) and `(END - START) * 8` from the aperture registers
+(`0x202000`). The entry is read only when it fits inside the smaller.
+
+```
+entry 0 / not valid     the ring page is genuinely unmapped: the fault is the
+                        page table's CONTENTS, and fixing PT_BASE alone would
+                        not help
+valid, addr 0x7_8xx     the table is right and ONLY PT_BASE is wrong -
+                        patching the register is the whole fix
+valid, addr LOW         the PTEs carry the same zero vram_base_offset; the bug
+                        is systemic and patching PT_BASE alone is unsafe
+needs more than limit   not read, and the log says it says nothing
+```
+
+The whole-table count is kept too, now bounded by the same limit and labelled
+as a flat PTE table, and `pde_no_va` is cleared on the successful pass so the
+sentinel cannot go stale again.
+
+Diag keys `ring_pte`, `ring_pte_valid`, `ring_pte_addr`, `ring_pte_idx`,
+`ring_pte_oob`, `pte_entries`, plus the existing `pde_*` counts.
+
+Build: UUID 1CD15946, hosttest passes. Same boot-args, still armed.
