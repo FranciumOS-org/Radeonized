@@ -2187,6 +2187,56 @@ static int (*orig_kiq_startKIQ_2ch)(void *, uint64_t, uint64_t, void *, void *) 
 // So the 2ch/2ck boots were already reporting success, and forcing 1 put
 // doStart on the one branch that always fails. Observe only, never override.
 // docs/SPEC-PM4-DOSTART.md section 2.
+// 2du (2026-10-12): which gate leaves channel+0xe0 at -1.
+//
+// The 2dt boot read, at the KIQ channel, submitted(+0x80)=1 completed(+0x84)=0
+// with +0xc0 = 0xffffffa965fcc040 (a real kernel VA) and **+0xe0 = -1**.
+// `timestampUpdated` (0xbe85214) begins `if (this->0xe0 == -1) return;`, so
+// that branch is taken every time and the fence is never read. The frame is
+// correctly marked submitted and the CP really executed it (2dq); the
+// completed counter simply has no path to be updated.
+//
+// +0xe0 is NOT an address - `AMDHWChannel::init` (0xbe848cc) sets it to -1 at
+// 0xbe84974 and to `(int)this->0xc`, the channel index, at 0xbe84ade, and only
+// after three gates all pass:
+//
+//   be84a9d  callq *0x330(this->0x20)    AMDHardware::registerChannel(this)
+//            false -> jump away, +0xe0 stays -1
+//   be84aad  callq *0x1c8(this)          a KIQ-channel method
+//            false -> jump away, +0xe0 stays -1
+//   be84ad1  AMDSWScheduler::addHWChannel(sched, this, this->0xc)
+//            false -> jump away, +0xe0 stays -1
+//   be84ade  this->0xe0 = (int)this->0xc
+//
+// So the index is the channel's slot in the AMDSWScheduler, and -1 means this
+// channel was never registered with it. Both outer gates are named symbols
+// defined in X6000, so hook them observe-only and the next boot names which
+// one refuses.
+static bool (*orig_hw_registerChannel_2du)(void *, void *) = nullptr;
+static bool (*orig_sched_addHWChannel_2du)(void *, void *, uint64_t) = nullptr;
+
+static bool hooked_hw_registerChannel_2du(void *hw, void *chan) {
+    bool ret = orig_hw_registerChannel_2du ? orig_hw_registerChannel_2du(hw, chan) : false;
+    rbgpu_log("2du: AMDHardware::registerChannel(hw=%p chan=%p) -> %d%s",
+              hw, chan, ret ? 1 : 0,
+              ret ? "" : "  <<< FAILS -> AMDHWChannel::init skips the scheduler and "
+                         "leaves channel+0xe0 = -1, so no fence is ever read");
+    rbgpu_diag_inc("regchan_calls");
+    if (!ret) rbgpu_diag_inc("regchan_fails");
+    return ret;
+}
+
+static bool hooked_sched_addHWChannel_2du(void *sched, void *chan, uint64_t idx) {
+    bool ret = orig_sched_addHWChannel_2du ? orig_sched_addHWChannel_2du(sched, chan, idx) : false;
+    rbgpu_log("2du: AMDSWScheduler::addHWChannel(sched=%p chan=%p idx=%llu) -> %d%s",
+              sched, chan, idx, ret ? 1 : 0,
+              ret ? "  (so channel+0xe0 becomes the index and the fence CAN be read)"
+                  : "  <<< FAILS -> channel+0xe0 stays -1");
+    rbgpu_diag_inc("addchan_calls");
+    if (!ret) rbgpu_diag_inc("addchan_fails");
+    return ret;
+}
+
 static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void *c, void *d) {
     g_rb_2ch_startkiq_called = 1;
     if (!this_ptr) {
@@ -4292,6 +4342,22 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked AMDGFX10KIQHWChannel::startKIQ (2co observe-only)");
     } else {
         rbgpu_log("X6000: FAILED to hook startKIQ (2ch)");
+    }
+
+    // 2du: the two named gates in AMDHWChannel::init that decide whether
+    // channel+0xe0 gets the scheduler index or stays -1. Observe only.
+    KernelPatcher::RouteRequest req_2du[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN26AMDRadeonX6000_AMDHardware15registerChannelEP28AMDRadeonX6000_IAMDHWChannel",
+            hooked_hw_registerChannel_2du, orig_hw_registerChannel_2du),
+        KernelPatcher::RouteRequest(
+            "__ZN29AMDRadeonX6000_AMDSWScheduler12addHWChannelEP28AMDRadeonX6000_IAMDHWChannelm",
+            hooked_sched_addHWChannel_2du, orig_sched_addHWChannel_2du),
+    };
+    if (patcher.routeMultiple(id, req_2du, 2, address, size)) {
+        rbgpu_log("X6000: hooked registerChannel + addHWChannel (2du observe-only)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook the 2du channel-registration gates");
     }
 
     // 2cp: bound waitForActiveValue. doStart calls it as (ring 0, false, 1, 0),

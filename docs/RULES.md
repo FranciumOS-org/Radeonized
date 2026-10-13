@@ -2110,3 +2110,66 @@ Three fixes, none of them about the GPU.
   address is set, and the fence memory itself is not being written.
 
 Build: UUID 41D6ABAE, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2dt on hardware (2026-10-12): the fence is never read — `+0xe0` is -1
+
+logs/20261012-215649-plugin, UUID 41D6ABAE, armed, no panic. 212 diag entries,
+so the cap is no longer in the way, and the AFTER line survived the ring wrap
+exactly as 2dt intended:
+
+```
+2ds: channel stamps AFTER the wait: submitted(+0x80)=1 completed(+0x84)=0
+     (asked-for=1) ; BEFORE sub=1 cmp=0 ;
+     writeback +0xc0=0xffffffa965fcc040 +0xe0=0xffffffffffffffff
+     <<< +0xe0 is -1: timestampUpdated returns WITHOUT reading any writeback
+```
+
+`timestampUpdated` (0xbe85214) opens with `if (this->0xe0 == -1) return;`, so
+**that branch is taken every time**. The frame is correctly marked submitted,
+the CP really executed it (2dq), `+0xc0` holds a real kernel VA - and the
+completed counter has no path to be updated at all.
+
+### What `+0xe0` actually is (AMDHWChannel::init, 0xbe848cc)
+
+Not an address. `init` writes -1 at 0xbe84974 and the **channel index** at
+0xbe84ade, and only after three gates all pass:
+
+```
+be84a9d  callq *0x330(this->0x20)   AMDHardware::registerChannel(this)
+         false -> jumps away, +0xe0 stays -1
+be84aad  callq *0x1c8(this)         a KIQ-channel method
+         false -> jumps away, +0xe0 stays -1
+be84ad1  AMDSWScheduler::addHWChannel(sched, this, this->0xc)
+         false -> jumps away, +0xe0 stays -1
+be84ade  this->0xe0 = (int)this->0xc
+```
+
+`timestampUpdated` then calls `this->0x20`'s `vtable[0x3b0]` to get the
+scheduler and passes it `+0xe0` as an index alongside `+0xc0` and `&this->0x84`.
+So **`+0xe0` is the channel's slot in the `AMDSWScheduler`, and -1 means this
+channel was never registered with it.** The fence lives in the scheduler; with
+no slot there is nothing to look up.
+
+That is the same shape as the SMU bug of 2dh/2di: a per-channel registration
+Apple's Navi 21 path performs that ours never completes.
+
+## 2du (2026-10-12): name the gate that refuses
+
+Two of the three gates are named symbols defined in X6000, so both are hooked
+observe-only and the log says which one returns false:
+
+```
+__ZN26AMDRadeonX6000_AMDHardware15registerChannelEP28AMDRadeonX6000_IAMDHWChannel   0xbea9a04
+__ZN29AMDRadeonX6000_AMDSWScheduler12addHWChannelEP28AMDRadeonX6000_IAMDHWChannelm  0xbe93f98
+```
+
+Each logs its arguments and return, and says in the failing case that the
+consequence is `channel+0xe0` staying -1 and the fence never being read. Diag
+keys `regchan_calls`, `regchan_fails`, `addchan_calls`, `addchan_fails`.
+
+The middle gate, `this->vtable[0x1c8]`, resolves inside `startKIQ`'s address
+range rather than to its own symbol, so it is an unnamed local function; if
+both named gates pass and `+0xe0` is still -1, that one is the answer by
+elimination and will need its own hook by address.
+
+Build: UUID 9EE6ADFB, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
