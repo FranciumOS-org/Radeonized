@@ -3546,3 +3546,96 @@ Build: UUID A6474756, hosttest passes. Boot-args unchanged.
 50        the hang is in our walk after all, and the log's last 2es mark names
           the step
 ```
+
+### 2es answered on hardware (2026-10-13): the NVRAM theory is REFUTED, and the log does not locate the thread
+
+logs/20261013-173533-plugin, armed, wedged, power-cycled - but read completely
+for the first time, because 2er's bounded ioreg let plugin_check finish. 460
+log lines (ring size 512, so nothing wrapped) plus nvram.txt.
+
+```
+nvram rbgpu-gate -> "50 initGraphicsMQD ENTER"
+log.txt last line -> "2es: mark 51 - initGraphicsMQD: reading pm4+0x18"
+rbgpu-diag       -> d=76 armed=1 gate_stage=65 ptb_written=1 ptb_back=78fdfa001
+                    vmf_st_wait=0 stamp_calls=1 bwait_iters=1
+                    fence_val_before=1 fence_val_after=1
+```
+
+The 2em/2eo result reproduced a third time: PT_BASE took, no GPUVM fault, the
+fence was already written before the wait began, `submitSetResourcesPacket`
+returned 1.
+
+**Withdrawal 1: the synchronous NVRAM write is not the hazard.** 2es removed
+every NVRAM write from the 51-59 span and the boot stopped in the *same span*,
+at the *same mark* as 2eq. A cause that is removed while the effect stays is
+not the cause. The 2eq conclusion ("what is left is the flash commit itself")
+is withdrawn.
+
+**Withdrawal 2: the log's last line does not locate the thread.** `RBGPULog`
+only reaches the registry through `performRefreshDiag`'s
+`setProperty("RBGPULog", ...)`, so the published ring ends at the last
+*refresh*, not at the thread's stopping point. This is exactly the lesson 2em
+recorded for the console photograph - "console output stops updating long
+before the hang, so it does not locate one" - and I read the log as if it were
+exempt. Fifteenth instance of the recurring error.
+
+**What the two records say when read together, and it is a real finding.**
+`performRefreshDiag` publishes the log first and calls `saveDiagToNvram` last:
+
+- the published log contains mark 51, so a refresh pass ran *after* mark 51;
+- that same pass never finished its flash commit - the summary still reads
+  `gate_stage=0x65` = 101 = `waitForHwStamp ENTER`, three gates stale, where
+  the thread had already passed gates 151, 45 and 50.
+
+So the refresh thread published the log and then **blocked inside the NVRAM
+transaction**, while the start() thread went on to need that same controller at
+gate 54. Two writers, one NVRAM lock, and the one that must not block is the
+one holding up `IOService::start`. Gate 50's write succeeded because it came
+first; gate 54's never appeared.
+
+That also explains the shape of 2ep (died after gate 53's write) and 2eq (died
+after gate 51's write) without needing the flash commit to be intrinsically
+unsafe: every one of those boots died *at a gate write*, with a refresh pass
+in flight. And 2eo, which had no inner marks at all, wrote gate 50 and then
+hung with the system still alive enough for SSH - the one boot where the
+start() thread was plausibly inside Apple's original rather than in an NVRAM
+wait.
+
+Note what is still NOT established: whether Apple's command-9 queue create was
+ever reached. Gate 54 is missing, and a missing synchronous write is equally
+well explained by the write blocking as by the code never getting there. That
+is the question 2et exists to answer.
+
+## 2et (2026-10-13): give the breadcrumb the NVRAM controller to itself
+
+`rbgpu_nvram_quiesce()` sets a flag that makes `saveDiagToNvram` return
+immediately. `rbgpu_gate_2en` calls it at the first gate of the chain
+(stage >= 40), so from `submitSetResourcesPacket` ENTER onward the refresh
+thread stops flushing flash entirely and the synchronous `rbgpu-gate` writes
+are the only NVRAM traffic in the boot.
+
+What is kept and what is given up, deliberately:
+
+- `RBGPULog` and `RBGPUDiag` keep refreshing into the registry, so a boot that
+  stays readable still yields the full log and the whole diag table.
+- `rbgpu-diag` stops advancing at gate 40. Everything that decides the current
+  frontier is already in it by then (`ptb_written`, `ptb_back`, `vmf_st_*`,
+  the SMU keys), and the stamp keys are proven three boots running. The gate
+  breadcrumb replaces them for everything after.
+- `saveDiagToNvram` still does its own `IORegistryEntry::fromPath` walk per
+  call, which 2eq removed from the gate path; quiescing it retires that too
+  for the rest of the boot.
+
+Build: UUID A5A1F416, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides, from `nvram rbgpu-gate`:
+
+```
+54        our walk is clear and the hang is inside Apple's command-9 queue
+          create or the GC register pair after it - established, finally,
+          rather than suspected
+55 / 51   initGraphicsMQD RETURNED and the stop moved on to mapQueues
+50        the write was never the blocker and the stop really is in our walk;
+          the log's last 2es mark then bounds it, with the caveat above that
+          the log lags the thread
+```
