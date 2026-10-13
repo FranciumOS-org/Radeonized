@@ -1364,8 +1364,11 @@ static uint64_t g_rb_2eb_pt_base    = 0;  // 2eb: GCVM_CONTEXT0_PAGE_TABLE_BASE
 static uint64_t g_rb_2eb_start_pg   = 0;  // 2ek: CONTEXT0 PAGE_TABLE_START (pages)
 static uint64_t g_rb_2eb_end_pg     = 0;  // 2ek: CONTEXT0 PAGE_TABLE_END (pages)
 static uint32_t g_rb_2ed_fb_off     = 0;  // 2ed: GCMC_VM_FB_OFFSET (16 MB units)
+static uint32_t g_rb_2ed_fb_base    = 0;  // 2em: GCMC_VM_FB_LOCATION_BASE (16 MB units)
+static int      g_rb_2em_done       = 0;  // 2em: PT_BASE patch, latched on success
 static int      g_rb_2ee_pdb_done   = 0;  // 2ee: map the candidates once per boot
 static uint64_t g_rb_gart_va        = 0;  // 2el: kernel VA of the flat PTE table
+static uint64_t g_rb_gart_mc        = 0;  // 2em: carve-out MC of the same table
 static uint64_t g_rb_gart_limit     = 0;  // 2el: bytes of it both sizes agree on
 static int      g_rb_2ek_done       = 0;  // 2el: ring-PTE read, latched on success
 static uint32_t g_rb_2ek_valid      = 0;  // 2el: valid entries the scan counted
@@ -1806,6 +1809,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         uint32_t sys_hi  = rd(0x1702);   // GCMC_VM_SYSTEM_APERTURE_HIGH_ADDR
 
         rbgpu_diag_set_num("gc_fb_base", fb_base);
+        g_rb_2ed_fb_base = fb_base;   // 2em
         rbgpu_diag_set_num("gc_fb_top", fb_top);
         rbgpu_diag_set_num("gc_fb_off", fb_off);
         g_rb_2ed_fb_off = fb_off;   // 2ee: vram_base_offset = fb_off << 24
@@ -2135,6 +2139,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
             // at the end of the dump, after the HQD probe has run.
             g_rb_gart_va    = out[4];
             g_rb_gart_limit = limit;
+            g_rb_gart_mc    = out[2];   // 2em: the carve-out MC of the table
         } else {
             rbgpu_log("2ek DIAG [%s]: out[4]=0x%llx is not a kernel VA - nothing read.",
                       tag, out[4]);
@@ -2440,6 +2445,84 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         } else {
             rbgpu_log("2el DIAG [%s]: ring VA 0x%llx is below the aperture start "
                       "0x%llx - not read.", tag, ring_va, start_va);
+        }
+    }
+
+    // 2em (2026-10-13): point the hub register at where the table REALLY is.
+    //
+    // This is the plugin's first BEHAVIOURAL write to a GC register -
+    // GRBM_GFX_CNTL (2do) is an index register that is saved and restored and
+    // changes nothing by itself. This one changes how every GPUVM translation
+    // in VMID 0 resolves, and it is left in place. Off unless
+    // `-rbgpuptbase` is in boot-args.
+    //
+    // What is measured, not assumed, before it is allowed to fire:
+    //
+    //   * TTL reports the flat PTE table at carve-out MC 0xF4_0FDF_A000, and
+    //     `GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR` holds exactly that page with
+    //     the carve-out base stripped (2ei: three address spaces, one offset).
+    //     The code re-checks that relationship every boot and refuses if it
+    //     does not hold.
+    //   * Linux: the register wants mc2pa(mc) = mc - vram_start +
+    //     vram_base_offset, with vram_base_offset = GCMC_VM_FB_OFFSET << 24
+    //     (UPSTREAM.md). FB_OFFSET reads 0x780 here, so the value is short by
+    //     0x7_8000_0000 - right for a Navi 21 dGPU where FB_OFFSET is 0.
+    //   * The ring's own PTE at index 1152 is VALID (2el), so the table's
+    //     contents are not the fault.
+    //   * EVERY valid entry in the table is AMDGPU_PTE_SYSTEM (2ek: 1512 of
+    //     1512). A SYSTEM entry holds a bus address and never goes through
+    //     mc2pa, so no PTE here can carry the same zero-offset error. That is
+    //     what makes this safe: the danger that blocked the patch through
+    //     2ej-2el - PTEs low by 0x7_8000_0000, aiming GPU writes at the wrong
+    //     host DRAM - cannot occur in a table with no VRAM entries.
+    //
+    // Residual risk, stated plainly: if the walker wants the BAR0 alias
+    // (0x8_8FDF_A000) rather than the DRAM alias (0x7_8FDF_A000), the write
+    // points it at another wrong page and the same MAPPING_ERROR comes back -
+    // no worse than now. No TLB invalidate is issued, so a stale negative
+    // translation is a second candidate if the fault persists.
+    if (g_rb_2em_done == 0 && checkKernelArgument("-rbgpuptbase") &&
+        g_rb_gart_mc != 0 && g_rb_2ed_fb_base != 0 && g_rb_2ed_fb_off != 0) {
+        const uint32_t dwPTB_LO = 0x1667, dwPTB_HI = 0x1668;
+        uint64_t fb_base = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
+        uint64_t vram_base_offset = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+
+        uint32_t lo = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwPTB_LO) * 4);
+        uint32_t hi = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwPTB_HI) * 4);
+        uint64_t cur = (static_cast<uint64_t>(hi) << 32) | lo;
+        uint64_t flags = cur & 0xFFF;
+        uint64_t fb_off = (g_rb_gart_mc >= fb_base) ? (g_rb_gart_mc - fb_base) : 0;
+
+        bool rel_holds = (fb_off != 0) && ((cur & ~0xFFFULL) == fb_off);
+        rbgpu_diag_set_num("ptb_cur", cur);
+        rbgpu_diag_set_num("ptb_rel_holds", rel_holds ? 1 : 0);
+
+        if (!rel_holds) {
+            rbgpu_log("2em [%s]: REFUSING to patch. PT_BASE=0x%llx but TTL's table "
+                      "MC 0x%llx is FB offset 0x%llx - the stripped-offset "
+                      "relationship 2ei measured does NOT hold this boot, so the "
+                      "replacement value is not derivable.",
+                      tag, cur, g_rb_gart_mc, fb_off);
+        } else {
+            uint64_t want = fb_off + vram_base_offset + flags;
+            g_rb_2em_done = 1;
+            rbgpu_log("2em [%s]: PT_BASE 0x%llx -> 0x%llx (FB offset 0x%llx + "
+                      "vram_base_offset 0x%llx + flags 0x%llx). WRITING.",
+                      tag, cur, want, fb_off, vram_base_offset, flags);
+            g_hw.wreg(g_hw.ctx, (kSeg0Conv + dwPTB_HI) * 4, static_cast<uint32_t>(want >> 32));
+            g_hw.wreg(g_hw.ctx, (kSeg0Conv + dwPTB_LO) * 4, static_cast<uint32_t>(want));
+
+            uint32_t rlo = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwPTB_LO) * 4);
+            uint32_t rhi = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwPTB_HI) * 4);
+            uint64_t back = (static_cast<uint64_t>(rhi) << 32) | rlo;
+            rbgpu_diag_set_num("ptb_want", want);
+            rbgpu_diag_set_num("ptb_back", back);
+            rbgpu_diag_set_num("ptb_written", (back == want) ? 1 : 0);
+            rbgpu_log("2em [%s]: read back 0x%llx -> %s. If the submission now "
+                      "raises no fault (vmf_st_wait 0) and stamp_ret is 1, this "
+                      "was the whole fix; if the same MAPPING_ERROR returns, the "
+                      "walker wants a different alias or the TLB is stale.",
+                      tag, back, (back == want) ? "TOOK" : "DID NOT TAKE");
         }
     }
 }
