@@ -2059,6 +2059,76 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                 rbgpu_diag_set_num("gart_match_idx", static_cast<uint64_t>(i));
             }
         }
+        // 2ej (2026-10-13): read the page directory through TTL's OWN kernel VA.
+        //
+        // out[4] is a kernel pointer to the same page out[2] names in carve-out
+        // MC space, so the contents can be read without IOMemoryDescriptor -
+        // the instrument 2ef proved does not reach carve-out memory. Nothing
+        // is mapped and nothing is written; this dereferences a pointer the
+        // TTL layer just handed us.
+        //
+        // This is the question that decides whether PT_BASE may be patched.
+        // If Apple's VM layer uses vram_base_offset = 0 throughout, the PDEs
+        // carry the same error, and making the walk succeed would aim GPU
+        // reads AND WRITES at host DRAM near 0x0FDF_A000 - worse than the
+        // current clean fault. Where the entries point says which:
+        //
+        //   entries point at 0x7_8xxx_xxxx  only PT_BASE is wrong; the table
+        //       itself already uses system-physical addresses and patching
+        //       the register is the whole fix
+        //   entries point LOW (< 0x1000_0000)  the PTEs carry the same zero
+        //       offset; the bug is systemic and patching PT_BASE alone would
+        //       be dangerous, not sufficient
+        //   entries point at 0xF4_xxxx_xxxx  the table holds raw MC addresses,
+        //       a third convention again
+        //   all zero / no valid entries  the directory was never populated,
+        //       and none of the above applies
+        //
+        // A GFX10 PDE is 8 bytes with bit 0 = valid; bit 1 = AMDGPU_PTE_SYSTEM
+        // marks a system-memory entry, whose address is a bus address and is
+        // counted separately rather than lumped in with the VRAM ones.
+        if (out[4] >= 0xFFFFFF0000000000ULL) {
+            auto pde = reinterpret_cast<volatile uint64_t *>(out[4]);
+            uint32_t valid = 0, sys = 0, lo = 0, mid = 0, fb = 0, other = 0;
+            uint64_t first[4] = {0, 0, 0, 0};
+            for (uint32_t i = 0; i < 512; i++) {
+                uint64_t e = pde[i];
+                if (i < 4) first[i] = e;
+                if (!(e & 1)) continue;
+                valid++;
+                if (e & 2) { sys++; continue; }
+                uint64_t a = e & 0x0000FFFFFFFFF000ULL;
+                if (a < 0x10000000ULL)                          lo++;
+                else if (a >= 0x780000000ULL && a < 0x800000000ULL) mid++;
+                else if (a >= 0xF400000000ULL && a < 0xF500000000ULL) fb++;
+                else                                            other++;
+            }
+            rbgpu_diag_set_num("pde_valid", valid);
+            rbgpu_diag_set_num("pde_sys", sys);
+            rbgpu_diag_set_num("pde_low", lo);
+            rbgpu_diag_set_num("pde_sysphys", mid);
+            rbgpu_diag_set_num("pde_carveout", fb);
+            rbgpu_diag_set_num("pde_other", other);
+            rbgpu_diag_set_num("pde_e0", first[0]);
+            rbgpu_diag_set_num("pde_e1", first[1]);
+            rbgpu_log("2ej DIAG [%s]: page directory at TTL kernel VA 0x%llx: "
+                      "valid=%u sys=%u low(<0x10000000)=%u sysphys(0x7_8..)=%u "
+                      "carveout(0xF4_..)=%u other=%u ; "
+                      "[0]=0x%llx [1]=0x%llx [2]=0x%llx [3]=0x%llx",
+                      tag, out[4], valid, sys, lo, mid, fb, other,
+                      first[0], first[1], first[2], first[3]);
+            rbgpu_log("2ej DIAG [%s]: valid=0 means the directory was never "
+                      "populated and none of the readings below apply; "
+                      "sysphys means ONLY the register is wrong; low means the "
+                      "PTEs carry the same zero vram_base_offset and patching "
+                      "the register alone would be unsafe.", tag);
+        } else {
+            rbgpu_log("2ej DIAG [%s]: out[4]=0x%llx is not a kernel VA - the "
+                      "page directory was not read and 2ej says nothing.",
+                      tag, out[4]);
+            rbgpu_diag_set_num("pde_no_va", 1);
+        }
+
         rbgpu_log("2eh DIAG [%s]: hub register PT_BASE=0x%llx (page 0x%llx); "
                   "reg+FB_OFFSET<<24 = 0x%llx. A qword matching none of these "
                   "means TTL and the hub disagree and neither reading stands.",

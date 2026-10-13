@@ -2902,3 +2902,72 @@ dump points — `post-startKIQ`, `pre-kiq-submit`, `at-stamp-wait`,
 whether the retry was needed rather than leaving it to inference.
 
 Build: UUID 3DA57E40, hosttest passes. Same boot-args, still armed.
+
+### 2ei answered (2026-10-13): TTL names the page table, in three address spaces
+
+logs/20261012-235843-plugin, armed, no panic, 301 diag entries.
+
+```
+gart_info_early=1       one dump point WAS too early - the 2ei retry was needed
+gart_info_st=0          the call succeeded
+gart_match_idx=2
+gart_info_0 = 0x100201000
+gart_info_1 = 0x100000000008
+gart_info_2 = 0xf40fdfa000          <- carve-out MC
+gart_info_3 = 0x88fdfa000           <- BAR0 aperture
+gart_info_4 = 0xffffffe4e017c000    <- kernel VA
+```
+
+Three independently-derived encodings of the **same page**, and every one
+carries the offset `0x0FDF_A000`, which is exactly what the hub register
+holds:
+
+| value | base (probe 2) | offset |
+|---|---|---|
+| 0xF4_0FDF_A000 | carve-out 0xF4_0000_0000 | 0x0FDF_A000 |
+| 0x8_8FDF_A000 | BAR0 0x8_8000_0000 | 0x0FDF_A000 |
+| `GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR` = 0x0FDFA001 | — | 0x0FDF_A000 |
+
+So the GART page directory is at carve-out MC `0xF4_0FDF_A000`, and the hub
+register holds that page **with the base stripped** — `amdgpu_gmc_vram_mc2pa`
+computed with `vram_base_offset = 0`. That is correct for a Navi 21 dGPU,
+where `GCMC_VM_FB_OFFSET` is 0 and the register legitimately ends up holding
+an FB-relative offset, and short by `0x7_8000_0000` on this APU, where
+FB_OFFSET reads 0x780. **The vram_base_offset reading is now supported by
+measurement rather than inferred**, and three numbers agreeing on one offset
+is not the small-integer coincidence 2dw's page scan was.
+
+`gart_info_4` also solves the instrument problem 2ef exposed: it is a kernel
+VA for the page-table page, so its contents can be read through a pointer TTL
+itself supplied, with no `IOMemoryDescriptor` in the way.
+
+## 2ej (2026-10-13): read the directory's own entries before touching PT_BASE
+
+The register is now a known-wrong value with a known-right replacement, and
+patching it is still **not** safe on its own. If Apple's VM layer uses
+`vram_base_offset = 0` throughout, the PDEs carry the same error, and making
+the walk succeed would aim GPU reads *and writes* at host DRAM near
+`0x0FDF_A000` — strictly worse than the current clean MAPPING_ERROR fault,
+which is what has been protecting the machine.
+
+So read the directory at `gart_info_4` and classify where its entries point.
+A GFX10 PDE is 8 bytes, bit 0 = valid, bit 1 = `AMDGPU_PTE_SYSTEM` (a bus
+address, counted separately rather than lumped in with the VRAM entries):
+
+```
+entries at 0x7_8xxx_xxxx    only PT_BASE is wrong; the table already uses
+                            system-physical addresses and patching the
+                            register is the whole fix
+entries LOW (< 0x1000_0000) the PTEs carry the same zero offset; the bug is
+                            systemic and patching PT_BASE alone is unsafe
+entries at 0xF4_xxxx_xxxx   the table holds raw MC addresses, a third
+                            convention again
+valid = 0                   the directory was never populated and none of the
+                            above applies
+```
+
+Reads only — a dereference of a kernel pointer TTL just returned. Diag keys
+`pde_valid`, `pde_sys`, `pde_low`, `pde_sysphys`, `pde_carveout`, `pde_other`,
+`pde_e0`, `pde_e1`, `pde_no_va`, all in the NVRAM hot list.
+
+Build: UUID 57A1E1A6, hosttest passes. Same boot-args, still armed.
