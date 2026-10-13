@@ -4131,3 +4131,97 @@ trail still ends 151  the stop is inside Apple's own submitKIQFrame epilogue,
 ```
 
 Build: UUID 91991334, hosttest passes. Boot-args unchanged.
+
+### 2ez answered on hardware (2026-10-13): the thread is not stuck — it is CRAWLING
+
+logs/20261013-190821-plugin, `plugin_check` ran in the armed boot again
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=a8ef2001`, a new boot), build checked:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 91991334   == build/out (2ez)
+nvram rbgpu-gate  -> "40 101 | 101 waitForHwStamp ENTER"
+nvram rbgpu-beat  -> "n=27 gate=101 skips=0 forced=0 t=21884893126"
+log.txt           -> 52 lines, last is the post-stamp-wait dump's final line
+```
+
+The trail went **backwards** - 2ey reached 151, 2ez only 101 - and emptying
+the span did not help. Taken as another stopping point that would be the
+eighth sample of something varying. It is not: the timestamps say what is
+actually happening.
+
+**The measurement.** Gaps between consecutive RBGPULog lines, same code, same
+dump function, within and across boots:
+
+```
+2ey boot, last 8 gaps:   0.007 0.007 0.009 0.012 0.009 0.009 0.007 0.037 ms
+2ez boot, last 8 gaps:   4.766 4.154 5.197 5.748 5.786 5.856 3.999 7.325 ms
+2ez boot, at-stamp-wait: 9.434 9.417 8.964 10.129 9.340 9.229 9.858 10.476 ms
+2ez boot, the 25 lines between those two runs:  0.002 - 0.048 ms
+```
+
+**Within one boot the same logging code runs at 3 us and at 10 ms**, swinging
+back and forth. That is not a hang and not a code position - it is
+contention, and it is ours.
+
+**The mechanism, from the sizes.** Every `rbgpu_log` call runs
+`scheduleRefreshDiag`, and `performRefreshDiag` memcpy's **235 KB** under
+`g_diagLock` (512 x 400-byte `LogEntry` = 200 KB, plus 320 x 112-byte
+`DiagEntry` = 35 KB) and then builds up to 512 `OSString`s, an `OSArray` and a
+320-entry `OSDictionary` and `setProperty`s both. With log lines arriving back
+to back the refresh runs continuously, and the start() thread blocks on
+`g_diagLock` for the snapshot every time it logs.
+
+**A thread throttled to milliseconds per log line is indistinguishable from a
+wedge.** It holds the IOService lock the whole time - which is exactly why
+`ioreg` blocks and `pci.txt` is 0 bytes - and with hundreds of log lines still
+to come in the doStart chain it would crawl for minutes. It also stops
+wherever it happens to be when the machine is power-cycled, which is a
+complete explanation for the one thing all eight boots agree on and nothing
+distinguished: **the stopping point varies because there is no stopping
+point.**
+
+What this retires, and these were all real observations read the wrong way:
+
+- the 2ev seven-boot table (already withdrawn) and its successor readings;
+- "2eu reached 54 and 2ev did not" as a statement about the span's contents -
+  it is a statement about how much logging each build did before the
+  observation;
+- 2es's "the refresh thread published the log and then blocked inside the
+  NVRAM transaction" - it was not blocked, it was looping;
+- the beat going quiet at n=16 / n=27 while the machine lived: the
+  `thread_call` pool is saturated by back-to-back refresh passes, so the
+  beat's re-arm is starved. Starvation, not death - and 2ey's branch 1
+  ("the machine is ALIVE") stands, which is what made this readable.
+
+Seventeenth instance of the recurring error, and the largest: eight boots of
+this milestone family were measuring the instrument.
+
+## 2fa (2026-10-13): stop the publisher from throttling the thread it observes
+
+Two changes, both in `RembrandtGPUPeer.cpp`, neither touching the GPU.
+
+- `scheduleRefreshDiag` rate-limits to **at most one refresh per 250 ms**.
+  The publisher exists to be read after the fact; nothing needs it sooner.
+- The snapshot copies only the diag entries in use (`g_diagCount` x 112)
+  instead of a flat 35 KB, shortening the `g_diagLock` hold.
+
+The prediction is quantitative, which no step in this family has been able to
+make before, and the next boot's own log checks it:
+
+```
+inter-line gaps back to single-digit us   the contention was the whole of it,
+                                          and the trail should now run far
+                                          past 151 into the mapQueues gates
+gaps still in milliseconds                the rate limit is not where the cost
+                                          is, and the next place to look is
+                                          the two setProperty calls rather
+                                          than the snapshot
+```
+
+Worth stating what this does NOT settle: whether anything in Apple's
+`initGraphicsMQD` is actually wrong on this chip. 2ew's `f10 = 0` stands -
+the command-9 create never runs - but every claim about *where* the thread
+stops inside that function, from 2eo onward, is now withdrawn. The frontier
+is wherever the next boot gets to with the instrument out of the way.
+
+Build: UUID 8CE83E37, hosttest passes. Boot-args unchanged.
