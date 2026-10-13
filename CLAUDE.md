@@ -3797,3 +3797,86 @@ f10=0   the create never runs, so the hang is in A-F (the allocation chain
 ```
 
 Build: UUID 527576AC, hosttest passes. Boot-args unchanged.
+
+### 2ev answered on hardware (2026-10-13): it went BACK to gate 50
+
+No `plugin_check` capture from the armed boot, so the records are NVRAM read
+from the recovery boot that followed. Checked before interpreting, per the
+2cu/2cv rule:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 527576AC   == build/out (2ev)
+rbgpu-diag        -> d=0 armed=0                        this is the recovery boot
+rbgpu-diag-prev   -> d=27 armed=1 ttl_hw_init_ret=ffffffff97f08001
+                     (the 2eu boot read ...b8a33001, so this IS a new boot)
+nvram rbgpu-gate  -> "50 initGraphicsMQD ENTER"
+```
+
+`rbgpu-gate` is a single overwrite variable and an unarmed boot never writes
+it, so the 50 belongs to the armed 2ev boot. **2eu reached 54 and 2ev did
+not**, with the only difference being what 2ev put between them: five field
+reads, four `rbgpu_diag_set_num` calls, one `rbgpu_log`, one `snprintf`.
+
+So the field reads never happened and the question 2ev asked is unanswered.
+What it did answer is a different and more useful thing — the seven-boot
+table, with 2eu as the control:
+
+| build | between gate 50 and gate 54 | gate reached |
+|---|---|---|
+| 2eo | nothing (no inner marks) | 50 |
+| 2ep | 4 NVRAM marks | 53 |
+| 2eq | 4 NVRAM marks, `/options` cached | 51 |
+| 2es | 7 log+diag marks, no NVRAM | 50 |
+| 2et | same, plus the NVRAM quiesce | 50 |
+| **2eu** | **nothing at all** | **54** |
+| 2ev | 4 diag sets + 1 log + 1 snprintf | 50 |
+
+**Whatever this hook does between the two gates decides how far the thread
+gets, and only the empty span reaches Apple's code.** That is not the NVRAM
+flash commit (2es/2et removed it and nothing improved) and not the registry
+walk (2eq removed it and nothing improved); it is the diag/log machinery
+itself being exercised from inside this particular hook. The mechanism is
+still unidentified and is NOT claimed here - what is established is that the
+span must stay empty for the experiment to run at all.
+
+Plain loads from a valid object cannot block, so the suspect is
+`rbgpu_diag_set_num` / `rbgpu_log`: both take `g_diagLock` and schedule
+`performRefreshDiag`, which does `setProperty` on the peer from another
+thread while this one is inside `IOService::start`.
+
+## 2ew (2026-10-13): keep the span empty, read the fields somewhere safe
+
+Two changes, no new hardware access.
+
+- The initGraphicsMQD hook goes back to the 2eu shape: gate 50, gate 54, the
+  original, nothing in between. That is the only configuration that has ever
+  reached Apple's code.
+- 2ev's field reads move into the **doStart** hook, whose `this` IS the same
+  PM4 engine and whose logging has been safe in every boot since 2ce.
+
+What the reads bound, stated rather than assumed:
+
+- `pm4+0x10` - nothing in this chain writes it, so its value at doStart entry
+  is its value at the branch (0xbea25f2). This is the one that matters.
+- `pm4+0x310` - initGraphicsMQD writes it itself (cleared 0xbea2634, set
+  0xbea26dd), but this is the FIRST call, so the value read here is what the
+  branch at 0xbea260c tests.
+- `pm4+0x250` / `pm4+0x30` - read before `initComputeMQD` runs, so a lower
+  bound on what 0xbea258b sees, not a proof of it.
+
+Build: UUID 1E39C00A, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides, from the log plus `nvram rbgpu-gate`:
+
+```
+gate 54 again + f10=1   the create is live; the next step splits region G
+                        from H-J, and it must do so WITHOUT touching the
+                        50->54 span
+gate 54 again + f10=0   region G never runs, so the hang is in A-F (the
+                        allocation chain and the 4 KB bzero) or in the GC
+                        register pairs - and gfx_min = gfx_max = 0 becomes
+                        the leading explanation
+gate 50 again           the doStart reads are ALSO enough to cost the thread
+                        its progress, which would make the hook layer itself,
+                        not its placement, the thing to fix
+```
