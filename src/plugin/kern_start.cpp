@@ -3786,6 +3786,92 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     g_rb_2cq_gfxmqd_calls++;
     rbgpu_gate_2en(50, "initGraphicsMQD ENTER - never once exercised before 2em");
     rbgpu_log("2cx: initGraphicsMQD ENTER (pm4=%p)", pm4);
+
+    // 2ep (2026-10-13): split this function, because the boot stops INSIDE it.
+    //
+    // The 2eo boot got here and no further: `nvram rbgpu-gate` read
+    // "50 initGraphicsMQD ENTER" and the captured log's last line is the same
+    // hook. Everything before it now passes - PT_BASE patched, no GPUVM
+    // fault, the stamp arrived on the bounded wait's FIRST poll, and
+    // submitSetResourcesPacket returned 1 for the first time in this project.
+    //
+    // initGraphicsMQD (0xbea2542) contains no loop of its own, so it is
+    // blocking inside something it calls. Disassembled, its outbound calls
+    // are:
+    //
+    //   bea255d  (this->0x18)->vtable[0x2d8]()        the memory object
+    //   bea257d  r14->vtable[0x148]()                 same pair initComputeMQD
+    //   bea25b3  r14->vtable[0x210](...)              uses (2cd walks these)
+    //   bea2603  (this->0x18)->vtable[0x2c0]()        -> the SERVICE object
+    //   bea2626  svc->vtable[0x128](9, 0)             destroy, if 0x310 set
+    //   bea26a1  svc->vtable[0x120](9, 0, spec, out)  CREATE THE GFX QUEUE
+    //   bea2713  (this->0x30)->vtable[0x148](0xf702000042) then [0x120](...,1)
+    //   bea2740  (this->0x30)->vtable[0x148](0xe802000042) then [0x120](...,0)
+    //
+    // bea26a1 is the same slot and the same shape as startKIQ's call, which
+    // uses command 8 and works; this one is command 9 and is the first thing
+    // that has ever asked the layer below for a GRAPHICS queue. The last pair
+    // are register read-modify-writes, and a read of a gated block can stall
+    // the SMN bus - which is what the boot 6/7 RSMU timeouts were, and would
+    // explain a hang that takes the whole machine rather than one thread.
+    //
+    // Note the standing suspicion this meets: the SMU has reported
+    // gfx_min = gfx_max = 0 since 2di - GFX DPM never started - and this is
+    // the first code to touch the graphics ring. The compute path (KIQ) is
+    // working; the graphics one may have no clock at all.
+    //
+    // So walk Apple's own object chain FIRST, with a synchronous breadcrumb
+    // between each step, and record the service function's address. All reads
+    // of pointers plus one virtual call Apple is about to make anyway
+    // (vtable[0x2c0], which only returns the service object). If the boot
+    // stops at 51/52/53 the fault is in our walk; if it reaches 54 the
+    // preconditions are sound and the hang is inside Apple's command-9 call
+    // or the register pair after it - and `gfxmqd_svc_fn` names the function
+    // to disassemble.
+    if (pm4) {
+        rbgpu_gate_2en(51, "initGraphicsMQD: reading pm4+0x18");
+        void *memobj = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(pm4) + 0x18);
+        rbgpu_diag_set_num("gfxmqd_memobj", reinterpret_cast<uint64_t>(memobj));
+
+        if (memobj) {
+            void **mvt = *reinterpret_cast<void ***>(memobj);
+            auto fn_2c0 = mvt ? reinterpret_cast<void *(*)(void *)>(mvt[0x2c0 / 8])
+                              : nullptr;
+            rbgpu_diag_set_num("gfxmqd_fn2c0", reinterpret_cast<uint64_t>(
+                reinterpret_cast<void *>(fn_2c0)));
+            rbgpu_gate_2en(52, "initGraphicsMQD: calling vtable[0x2c0] for the "
+                               "service object");
+            void *svc = fn_2c0 ? fn_2c0(memobj) : nullptr;
+            rbgpu_diag_set_num("gfxmqd_svc", reinterpret_cast<uint64_t>(svc));
+            rbgpu_gate_2en(53, "initGraphicsMQD: service object obtained");
+
+            if (svc) {
+                void **svt = *reinterpret_cast<void ***>(svc);
+                void *fn120 = svt ? svt[0x120 / 8] : nullptr;
+                void *fn128 = svt ? svt[0x128 / 8] : nullptr;
+                rbgpu_diag_set_num("gfxmqd_svc_fn",
+                                   reinterpret_cast<uint64_t>(fn120));
+                rbgpu_diag_set_num("gfxmqd_svc_fn128",
+                                   reinterpret_cast<uint64_t>(fn128));
+                rbgpu_log("2ep: initGraphicsMQD service object %p: "
+                          "vtable[0x120]=%p (command 9 = create the GRAPHICS "
+                          "queue, the same slot startKIQ uses with command 8) "
+                          "vtable[0x128]=%p ; pm4+0x310=%u (nonzero means the "
+                          "destroy call at 0xbea2626 runs first)",
+                          svc, fn120, fn128,
+                          *reinterpret_cast<volatile uint8_t *>(
+                              reinterpret_cast<uintptr_t>(pm4) + 0x310));
+            } else {
+                rbgpu_log("2ep: vtable[0x2c0] returned NULL - Apple's own code "
+                          "would then call through a null service object, so "
+                          "this is a precondition failure, not a hang");
+            }
+        }
+    }
+    rbgpu_gate_2en(54, "initGraphicsMQD: calling the ORIGINAL - anything after "
+                       "this is Apple's command-9 queue create or the GC "
+                       "register pair at the end");
     bool ret = orig_pm4_initGraphicsMQD_2cq ? orig_pm4_initGraphicsMQD_2cq(pm4) : false;
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
