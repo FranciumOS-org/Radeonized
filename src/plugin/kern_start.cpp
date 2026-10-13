@@ -2330,6 +2330,60 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     //   WPTR advanced -> work is queued and the CP is not consuming it
     rbgpu_dump_gc_regs("at-stamp-wait");
 
+    // 2ds (2026-10-12): the channel's own stamp bookkeeping, which is what
+    // waitForHwStamp actually polls - not the GPU.
+    //
+    //   waitForHwStamp(this, stamp)  (0xbe85536)
+    //     if (stamp - this->0x84 <= 0) return true        already completed
+    //     loop { pollWait(5 s); checkForTimestampUpdate(); ... }
+    //     return (stamp - this->0x84) <= 0
+    //
+    //   checkForTimestampUpdate (0xbe851d6)
+    //     if (this->0x80 == this->0x84) return 0;   <-- EARLY EXIT, reads nothing
+    //     vtable[0x2d0](this); timestampUpdated(this)
+    //
+    //   timestampUpdated (0xbe85214)
+    //     if (this->0xe0 == -1) return;             <-- no writeback configured
+    //     ... reads through this->0xc0 / this->0xe0 and writes this->0x84
+    //
+    // So +0x80 is the SUBMITTED stamp and +0x84 the COMPLETED one. If +0x80
+    // was never incremented, the refresh short-circuits and +0x84 can never
+    // move, no matter what the command processor did - and 2dq proved the CP
+    // did execute the packet. These are plain reads of the channel object.
+    if (ch) {
+        auto u32at = [&](uint32_t off) {
+            return *reinterpret_cast<volatile uint32_t *>(
+                reinterpret_cast<uintptr_t>(ch) + off);
+        };
+        auto u64at = [&](uint32_t off) {
+            return *reinterpret_cast<volatile uint64_t *>(
+                reinterpret_cast<uintptr_t>(ch) + off);
+        };
+        uint32_t submitted = u32at(0x80);
+        uint32_t completed = u32at(0x84);
+        uint64_t wb_c0     = u64at(0xc0);
+        uint64_t wb_e0     = u64at(0xe0);
+        rbgpu_log("2ds: channel stamps BEFORE the wait: submitted(+0x80)=%u "
+                  "completed(+0x84)=%u asked-for=%u ; writeback +0xc0=0x%llx +0xe0=0x%llx",
+                  submitted, completed, stamp, wb_c0, wb_e0);
+        rbgpu_diag_set_num("stamp_submitted", submitted);
+        rbgpu_diag_set_num("stamp_completed", completed);
+        rbgpu_diag_set_num("stamp_wb_c0", wb_c0);
+        rbgpu_diag_set_num("stamp_wb_e0", wb_e0);
+        if (submitted == completed) {
+            rbgpu_log("2ds: +0x80 == +0x84, so checkForTimestampUpdate takes its EARLY "
+                      "EXIT and never reads the fence at all. Nothing marked the frame "
+                      "submitted, so the wait can only ever time out - this is "
+                      "bookkeeping, not the GPU.");
+        } else if (wb_e0 == 0xFFFFFFFFFFFFFFFFull) {
+            rbgpu_log("2ds: +0xe0 is -1, so timestampUpdated returns without reading a "
+                      "writeback location: no fence address is configured on this channel.");
+        } else {
+            rbgpu_log("2ds: a frame IS outstanding and a writeback address is set, so the "
+                      "fence memory itself is what is not being updated.");
+        }
+    }
+
     uint64_t t0 = mach_absolute_time();
     bool ret;
     if (checkKernelArgument("-rbgpustampwait")) {
@@ -2347,6 +2401,14 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                         "submitSetResourcesPacket for the first time"
                       : " - the stamp did not arrive even though the CP consumed "
                         "the packet, so the fault is in the stamp path, not execution");
+        if (ch) {
+            uint32_t sub = *reinterpret_cast<volatile uint32_t *>(
+                reinterpret_cast<uintptr_t>(ch) + 0x80);
+            uint32_t cmp = *reinterpret_cast<volatile uint32_t *>(
+                reinterpret_cast<uintptr_t>(ch) + 0x84);
+            rbgpu_log("2ds: channel stamps AFTER the wait: submitted(+0x80)=%u "
+                      "completed(+0x84)=%u (asked-for=%u)", sub, cmp, stamp);
+        }
         rbgpu_dump_gc_regs("post-stamp-wait");
     } else {
         rbgpu_log("2cy: skipping the wait (-rbgpustampwait not set) -> false, so the "
@@ -2360,7 +2422,9 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     rbgpu_diag_set_num("stamp_ret", static_cast<uint64_t>(g_rb_2cx_stamp_ret));
     rbgpu_diag_set_num("stamp_ticks", dt);
     rbgpu_log("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
-              ret ? "(the GPU executed it)" : "(TIMEOUT - the CP never consumed the packet)",
+              ret ? "(the GPU executed it)"
+                  : "(the stamp was not reached - NOT evidence the CP is dead; 2dq "
+                    "measured RPTR=WPTR with CP_STAT busy, so it does execute)",
               dt);
     return ret;
 }
