@@ -1365,6 +1365,10 @@ static uint64_t g_rb_2eb_start_pg   = 0;  // 2ek: CONTEXT0 PAGE_TABLE_START (pag
 static uint64_t g_rb_2eb_end_pg     = 0;  // 2ek: CONTEXT0 PAGE_TABLE_END (pages)
 static uint32_t g_rb_2ed_fb_off     = 0;  // 2ed: GCMC_VM_FB_OFFSET (16 MB units)
 static int      g_rb_2ee_pdb_done   = 0;  // 2ee: map the candidates once per boot
+static uint64_t g_rb_gart_va        = 0;  // 2el: kernel VA of the flat PTE table
+static uint64_t g_rb_gart_limit     = 0;  // 2el: bytes of it both sizes agree on
+static int      g_rb_2ek_done       = 0;  // 2el: ring-PTE read, latched on success
+static uint32_t g_rb_2ek_valid      = 0;  // 2el: valid entries the scan counted
 static void    *g_rb_ttl_this       = nullptr;  // 2eh: the AmdTtlServices object
 // 2eh: _ttl_get_gart_primary_page_table_info(ttl_handle, out[5]) - the
 // authoritative source for where the GART primary page table lives.
@@ -2086,8 +2090,6 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         if (out[4] >= 0xFFFFFF0000000000ULL) {
             rbgpu_diag_set_num("pde_no_va", 0);   // clear the early-pass sentinel
 
-            uint64_t start_va = g_rb_2eb_start_pg << 12;
-            uint64_t ring_va  = static_cast<uint64_t>(g_rb_2ea_pq_base) << 8;
             uint64_t size_a   = out[0] & 0xFFFFFFFFULL;
             uint64_t size_b   = (g_rb_2eb_end_pg - g_rb_2eb_start_pg) * 8ULL;
             uint64_t limit    = size_a < size_b ? size_a : size_b;
@@ -2111,6 +2113,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
             }
             rbgpu_diag_set_num("pte_entries", nent);
             rbgpu_diag_set_num("pde_valid", valid);
+            g_rb_2ek_valid = valid;
             rbgpu_diag_set_num("pde_sys", sys);
             rbgpu_diag_set_num("pde_low", lo);
             rbgpu_diag_set_num("pde_sysphys", mid);
@@ -2123,33 +2126,15 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                       tag, out[4], size_a, size_b, nent,
                       valid, sys, lo, mid, fb, other);
 
-            // The one entry that matters.
-            if (ring_va >= start_va) {
-                uint64_t idx  = (ring_va - start_va) >> 12;
-                uint64_t need = (idx + 1) * 8;
-                rbgpu_diag_set_num("ring_pte_idx", idx);
-                if (need <= limit) {
-                    uint64_t e = pte[idx];
-                    uint64_t a = e & 0x0000FFFFFFFFF000ULL;
-                    rbgpu_diag_set_num("ring_pte", e);
-                    rbgpu_diag_set_num("ring_pte_valid", (e & 1) ? 1 : 0);
-                    rbgpu_diag_set_num("ring_pte_addr", a);
-                    rbgpu_log("2ek DIAG [%s]: ring VA 0x%llx -> PTE[%llu] (byte 0x%llx) "
-                              "= 0x%llx  valid=%llu system=%llu addr=0x%llx",
-                              tag, ring_va, idx, idx * 8, e,
-                              (e & 1), (e >> 1) & 1, a);
-                    rbgpu_log("2ek DIAG [%s]: entry 0 means the ring page is genuinely "
-                              "unmapped and the fault is the page table's CONTENTS, not "
-                              "PT_BASE; a valid entry means the table is fine and only "
-                              "PT_BASE is wrong; where addr points says whether the PTEs "
-                              "carry the same zero vram_base_offset.", tag);
-                } else {
-                    rbgpu_diag_set_num("ring_pte_oob", 1);
-                    rbgpu_log("2ek DIAG [%s]: ring PTE needs 0x%llx bytes but the table "
-                              "is bounded at 0x%llx - NOT read, and this says nothing "
-                              "about the ring's mapping.", tag, need, limit);
-                }
-            }
+            // 2el: the ring's own PTE cannot be read here. This block runs
+            // BEFORE the HQD probe in the same dump, so `g_rb_2ea_pq_base`
+            // still holds the previous dump point's value - 0 at
+            // post-gc-hw-init - and the ring VA is not yet known. The 2ek
+            // read was silently skipped by its `ring_va >= start_va` guard
+            // for exactly that reason. Cache what the read needs and do it
+            // at the end of the dump, after the HQD probe has run.
+            g_rb_gart_va    = out[4];
+            g_rb_gart_limit = limit;
         } else {
             rbgpu_log("2ek DIAG [%s]: out[4]=0x%llx is not a kernel VA - nothing read.",
                       tag, out[4]);
@@ -2405,6 +2390,56 @@ static void rbgpu_dump_gc_regs(const char *tag) {
             uint32_t back = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwGRBM_GFX_CNTL) * 4);
             rbgpu_log("2do [%s]: GRBM_GFX_CNTL restored to 0x%08x (read back 0x%08x)",
                       tag, gfx_cntl, back);
+        }
+    }
+
+    // 2el (2026-10-13): the ring's own PTE, read AFTER the HQD probe.
+    //
+    // 2ek put this read inside the 2eh block, which runs earlier in this same
+    // function than `rbgpu_probe_hqd_slot` - so `g_rb_2ea_pq_base` still held
+    // the previous dump point's value (0, at post-gc-hw-init), the guard
+    // `ring_va >= start_va` was false, and the whole read was skipped without
+    // a word. `ring_pte_idx` came back ABSENT. Twelfth instance of taking a
+    // measurement before the thing it needs exists, and the third of exactly
+    // this ordering shape (2dp, 2eh, this).
+    //
+    // Its own latch, set only when the read actually happens, so a dump point
+    // that is still too early retries at the next one.
+    if (g_rb_2ek_done == 0 && g_rb_gart_va != 0 && g_rb_2ea_pq_base != 0) {
+        uint64_t start_va = g_rb_2eb_start_pg << 12;
+        uint64_t ring_va  = static_cast<uint64_t>(g_rb_2ea_pq_base) << 8;
+        if (ring_va >= start_va) {
+            uint64_t idx  = (ring_va - start_va) >> 12;
+            uint64_t need = (idx + 1) * 8;
+            rbgpu_diag_set_num("ring_pte_idx", idx);
+            if (need <= g_rb_gart_limit) {
+                g_rb_2ek_done = 1;
+                auto pte = reinterpret_cast<volatile uint64_t *>(g_rb_gart_va);
+                uint64_t e = pte[idx];
+                uint64_t a = e & 0x0000FFFFFFFFF000ULL;
+                rbgpu_diag_set_num("ring_pte", e);
+                rbgpu_diag_set_num("ring_pte_valid", (e & 1) ? 1 : 0);
+                rbgpu_diag_set_num("ring_pte_sys", (e >> 1) & 1);
+                rbgpu_diag_set_num("ring_pte_addr", a);
+                rbgpu_log("2el DIAG [%s]: ring VA 0x%llx -> PTE[%llu] (byte 0x%llx) "
+                          "= 0x%llx  valid=%llu system=%llu addr=0x%llx",
+                          tag, ring_va, idx, idx * 8, e, (e & 1), (e >> 1) & 1, a);
+                rbgpu_log("2el DIAG [%s]: not valid means the ring page is genuinely "
+                          "unmapped and the fault is the table's CONTENTS, so PT_BASE "
+                          "alone would not help; valid means the table is fine and "
+                          "only PT_BASE is wrong. The 2ek scan found %u valid entries "
+                          "and ALL of them AMDGPU_PTE_SYSTEM, so this table maps "
+                          "system pages - a SYSTEM bit here is expected, not a fault.",
+                          tag, g_rb_2ek_valid);
+            } else {
+                rbgpu_diag_set_num("ring_pte_oob", 1);
+                rbgpu_log("2el DIAG [%s]: ring PTE needs 0x%llx bytes but the table is "
+                          "bounded at 0x%llx - NOT read, and this says nothing about "
+                          "the ring's mapping.", tag, need, g_rb_gart_limit);
+            }
+        } else {
+            rbgpu_log("2el DIAG [%s]: ring VA 0x%llx is below the aperture start "
+                      "0x%llx - not read.", tag, ring_va, start_va);
         }
     }
 }

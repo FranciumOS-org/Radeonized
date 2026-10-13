@@ -3027,3 +3027,59 @@ Diag keys `ring_pte`, `ring_pte_valid`, `ring_pte_addr`, `ring_pte_idx`,
 `ring_pte_oob`, `pte_entries`, plus the existing `pde_*` counts.
 
 Build: UUID 1CD15946, hosttest passes. Same boot-args, still armed.
+
+### 2ek on hardware (2026-10-13): the table IS populated — and all of it is SYSTEM
+
+logs/20261013-002405-plugin, armed, no panic, 309 diag entries.
+
+```
+pte_entries=0x40200 (262656 scanned)   pde_valid=0x5e8 (1512)
+pde_sys=0x5e8 (1512)                   pde_low=0  pde_sysphys=0
+pde_carveout=0  pde_other=0            pde_no_va=0
+ring_pte_idx=ABSENT
+```
+
+**The flat PTE table is real and populated**: 1512 valid entries out of
+262656, and **every one of them has `AMDGPU_PTE_SYSTEM` set**. They are bus
+addresses of system pages, which is exactly what a GART does. 1512 pages is
+~6 MB mapped into a 1 GB aperture — a normal sparse GART. 2ej's "no valid
+entries" was reading the empty first 2 MB, as 2ek predicted.
+
+So `pde_low / pde_sysphys / pde_carveout` are all 0 only because SYSTEM
+entries are counted separately and `continue` before the address
+classification — not because nothing points anywhere.
+
+**But the ring's own PTE was still not read.** `ring_pte_idx` is set
+unconditionally inside `if (ring_va >= start_va)`, so `ring_va` was 0: the
+2eh/2ek block runs **earlier in the dump function than
+`rbgpu_probe_hqd_slot`**, which is what sets `g_rb_2ea_pq_base`. At the first
+dump point where the TTL handle exists (`post-startKIQ`), that global still
+held the previous point's value, and `post-gc-hw-init` had measured
+`PQ_BASE = 0`. The guard skipped the read without a word.
+
+Twelfth instance of measuring before the thing it needs exists, and the third
+of exactly this ordering shape — 2dp (before the doorbell), 2eh (before the
+TTL handle), now this (before the HQD probe).
+
+## 2el (2026-10-13): read the ring PTE after the HQD probe
+
+The 2eh block now only **caches** the table's kernel VA and the agreed size
+limit; the ring-PTE read moved to the end of the dump function, after
+`rbgpu_probe_hqd_slot` has run, with **its own latch** set only when the read
+actually happens — so a dump point that is still too early retries at the
+next one instead of burning the shot. Same correction shape as 2ei.
+
+```
+not valid        the ring page is genuinely unmapped: the fault is the table's
+                 CONTENTS and PT_BASE alone would not help
+valid            the table is fine and only PT_BASE is wrong
+```
+
+A `SYSTEM` bit on the ring's entry is **expected**, not a fault — every valid
+entry in this table has it — so `ring_pte_sys` is recorded and the log says so
+rather than leaving it to be misread as the thirteenth instance.
+
+Diag keys `ring_pte`, `ring_pte_valid`, `ring_pte_sys`, `ring_pte_addr`,
+`ring_pte_idx`, `ring_pte_oob`.
+
+Build: UUID 4E2BAA6F, hosttest passes. Same boot-args, still armed.
