@@ -3325,6 +3325,27 @@ static bool rbgpu_bounded_stamp_wait_2en(void *ch, uint32_t stamp, uint32_t cap_
 // number updated at each gate says exactly how far the boot got, even when
 // the console has stopped and the IORegistry dies with the boot. The 2em
 // wedge left no such number and cost a power cycle to learn nothing.
+// 2es (2026-10-13): a mark that does NOT write NVRAM.
+//
+// The 2eq boot stopped at gate 51 where 2ep stopped at 53 - EARLIER, in
+// straight-line code that had worked the boot before. That span is three
+// pointer reads and two diag sets; deterministic code cannot stop at
+// different instructions on different boots, so the non-deterministic thing
+// in it is the only candidate: the synchronous NVRAM write itself. Caching
+// /options (2eq) removed the registry walk and did not help, which rules that
+// mechanism out and leaves the flash commit - a lock and a device transaction
+// taken dozens of times from inside IOService::start.
+//
+// The control already exists: the 2eo boot had the outer gates and NO marks
+// inside this hook, reached gate 50, and left the machine alive enough to run
+// plugin_check over SSH with a 43 KB log. So the outer gates are survivable
+// and the inner ones are not. These become log-only - the diag table and
+// IOLog, both of which that surviving boot captured in full.
+static void rbgpu_mark_2es(uint32_t stage, const char *what) {
+    rbgpu_diag_set_num("gfxmqd_mark", stage);
+    rbgpu_log("2es: mark %u - %s", stage, what);
+}
+
 static void rbgpu_gate_2en(uint32_t stage, const char *what) {
     rbgpu_diag_set_num("gate_stage", stage);
     // 2eo: and synchronously, on this thread, because the diag path above
@@ -3816,7 +3837,7 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     // or the register pair after it - and `gfxmqd_svc_fn` names the function
     // to disassemble.
     if (pm4) {
-        rbgpu_gate_2en(51, "initGraphicsMQD: reading pm4+0x18");
+        rbgpu_mark_2es(51, "initGraphicsMQD: reading pm4+0x18");
         void *memobj = *reinterpret_cast<void **>(
             reinterpret_cast<uintptr_t>(pm4) + 0x18);
         rbgpu_diag_set_num("gfxmqd_memobj", reinterpret_cast<uint64_t>(memobj));
@@ -3827,28 +3848,28 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
                               : nullptr;
             rbgpu_diag_set_num("gfxmqd_fn2c0", reinterpret_cast<uint64_t>(
                 reinterpret_cast<void *>(fn_2c0)));
-            rbgpu_gate_2en(52, "initGraphicsMQD: calling vtable[0x2c0] for the "
+            rbgpu_mark_2es(52, "initGraphicsMQD: calling vtable[0x2c0] for the "
                                "service object");
             void *svc = fn_2c0 ? fn_2c0(memobj) : nullptr;
             rbgpu_diag_set_num("gfxmqd_svc", reinterpret_cast<uint64_t>(svc));
-            rbgpu_gate_2en(53, "initGraphicsMQD: service object obtained");
+            rbgpu_mark_2es(53, "initGraphicsMQD: service object obtained");
 
             if (svc) {
                 // 2eq: the 2ep boot stopped between 53 and 54, a span holding
                 // only these few reads. Mark each one, so the next boot says
                 // which - or says the span is clear and the breadcrumb's own
                 // registry lookup (now cached) was the problem.
-                rbgpu_gate_2en(56, "initGraphicsMQD: dereferencing the service vtable");
+                rbgpu_mark_2es(56, "initGraphicsMQD: dereferencing the service vtable");
                 void **svt = *reinterpret_cast<void ***>(svc);
-                rbgpu_gate_2en(57, "initGraphicsMQD: service vtable read");
+                rbgpu_mark_2es(57, "initGraphicsMQD: service vtable read");
                 void *fn120 = svt ? svt[0x120 / 8] : nullptr;
                 void *fn128 = svt ? svt[0x128 / 8] : nullptr;
-                rbgpu_gate_2en(58, "initGraphicsMQD: service slots read");
+                rbgpu_mark_2es(58, "initGraphicsMQD: service slots read");
                 rbgpu_diag_set_num("gfxmqd_svc_fn",
                                    reinterpret_cast<uint64_t>(fn120));
                 rbgpu_diag_set_num("gfxmqd_svc_fn128",
                                    reinterpret_cast<uint64_t>(fn128));
-                rbgpu_gate_2en(59, "initGraphicsMQD: service slots recorded");
+                rbgpu_mark_2es(59, "initGraphicsMQD: service slots recorded");
                 rbgpu_log("2ep: initGraphicsMQD service object %p: "
                           "vtable[0x120]=%p (command 9 = create the GRAPHICS "
                           "queue, the same slot startKIQ uses with command 8) "

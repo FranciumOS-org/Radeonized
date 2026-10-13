@@ -3494,3 +3494,55 @@ Two changes to tools/plugin_check.sh:
 
 Verified on a healthy boot: completes in 12 s, reports the breadcrumbs, the
 loaded-UUID check and the full milestone-1 registry as before.
+
+### 2eq answered on hardware (2026-10-13): the breadcrumb itself is the hazard
+
+```
+nvram rbgpu-gate -> "51 initGraphicsMQD: reading pm4+0x18"
+```
+
+**Earlier than the 2ep boot's 53**, in the same straight-line code, one build
+later. That span is three pointer reads and two diag sets - deterministic
+code, which cannot stop at different instructions on different boots unless
+something non-deterministic is in it. The only such thing is the synchronous
+NVRAM write.
+
+Caching `/options` (2eq's main change) removed the registry-plane walk and did
+**not** help, which rules that mechanism out and leaves the flash commit
+itself: `setProperty` + `IONVRAM-FORCESYNCNOW-PROPERTY` takes the NVRAM lock
+and runs a device transaction, and 2ep/2eq do that from inside
+`IOService::start` several times inside one hook. Both boots died *at a gate
+write*, just at different gates.
+
+Note what this does NOT say: the write count is not the variable. 2eq removed
+45 dump marks and added 4 inner ones - fewer writes in total - and stopped
+sooner. So this is about doing the commit in that context at all, not about
+how many.
+
+**The control was already run.** The 2eo boot had the outer gates and **no**
+marks inside this hook: it reached gate 50, did not wedge hard, and left the
+machine alive enough to run plugin_check over SSH for a 43 KB log. So the
+handful of outer gates are survivable and the inner ones are not.
+
+## 2es (2026-10-13): mark without writing flash
+
+`rbgpu_mark_2es(stage, what)` sets a diag key and logs - no NVRAM, no commit.
+Marks `51`, `52`, `53`, `56`, `57`, `58`, `59` now use it. Gates `50`
+(initGraphicsMQD ENTER) and `54` (about to call the original) stay on NVRAM:
+two writes bracketing our walk, which is the 2eo configuration plus one.
+
+That gives both records on the next boot. If it behaves like 2eo - no hard
+wedge, system alive - `tools/plugin_check.sh` captures the `2es: mark N` lines
+with the pointer values, and `rbgpu-gate` says whether Apple's call was
+reached. If it wedges anyway, `rbgpu-gate` alone still distinguishes the two
+cases.
+
+Build: UUID A6474756, hosttest passes. Boot-args unchanged.
+
+```
+54        our walk is clear and the hang is inside Apple's command-9 queue
+          create or the GC register pair after it - the first time that would
+          be established rather than suspected
+50        the hang is in our walk after all, and the log's last 2es mark names
+          the step
+```
