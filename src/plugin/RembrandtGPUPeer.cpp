@@ -539,6 +539,8 @@ static const char *const kRbgpuNvramHotKeys[] = {
     "bwait_raw", "bwait_iters", "bwait_timeout", "bwait_vt_bad", "bwait_disabled",
     "setres_calls", "setres_ret",
     "gfxmqd_calls", "gfxmqd_ret",
+    // 2ep: the object chain inside initGraphicsMQD, where the boot now stops.
+    "gfxmqd_memobj", "gfxmqd_svc", "gfxmqd_svc_fn", "gfxmqd_svc_fn128",
     "mapq_calls", "mapq_fails",
     "wfav_calls", "wfav_bounded_forced", "wfav_ret",
     "pw_stage", "pw_ret",

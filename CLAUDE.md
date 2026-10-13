@@ -3311,3 +3311,88 @@ boot finished. `6 dump:post-startKIQ:...` points at the HQD probe (the only
 code that writes `GRBM_GFX_CNTL`); `7` at the 2el ring-PTE read; `8` at the
 2em register write; a `4x`/`1xx` value means the dump completed and the stop
 is in a doStart gate after all.
+
+### 2eo answered on hardware (2026-10-13): the stop is inside `initGraphicsMQD`
+
+The synchronous breadcrumb worked on its first boot, and the boot also left a
+full log (logs/20261013-170451-plugin), so the two can be checked against each
+other:
+
+```
+nvram rbgpu-gate -> "50 initGraphicsMQD ENTER - never once exercised before 2em"
+log.txt last line -> "2cx: initGraphicsMQD ENTER (pm4=0xffffff9085dfdc00)"
+```
+
+They agree exactly. The 2em result reproduced, and the chain is now the
+longest it has ever been:
+
+```
+2em [post-startKIQ]: PT_BASE 0xfdfa001 -> 0x78fdfa001 ... WRITING
+2em [post-startKIQ]: read back 0x78fdfa001 -> TOOK
+2en: gate 40 - submitSetResourcesPacket ENTER
+2dy: WRITE_DATA fence packet #1 ... dst=0xffbfdc0040 data=1
+2en: gate 101 - waitForHwStamp ENTER
+2dr: the REAL wait returned 1 - THE STAMP ARRIVED
+2en: gate 151 - waitForHwStamp RETURNED TRUE
+2en: gate 45 - submitSetResourcesPacket OK - doStart goes on to initGraphicsMQD
+2cq: submitSetResourcesPacket(spec=...) -> 1 (OK)
+2en: gate 50 - initGraphicsMQD ENTER
+   <nothing further>
+```
+
+`bwait_iters=1`: the bounded wait was satisfied on its **first** poll, and
+`fence_val_before=1` - the GPU had already written the fence before the wait
+began. So the 2en cap costs nothing on a working path, and
+**`submitSetResourcesPacket` returned 1 for the first time in this project.**
+
+Also worth recording: `gate_stage=65` in the diag summary is hex 0x65 = 101
+decimal = `waitForHwStamp ENTER`, while the synchronous `rbgpu-gate` reached
+50. The diag-table breadcrumb lagged the real one by three gates on the very
+boot that compared them, which is 2eo's premise demonstrated rather than
+argued.
+
+## 2ep (2026-10-13): split initGraphicsMQD, because it contains no loop
+
+`initGraphicsMQD` (0xbea2542) disassembled: it has no loop of its own, so it
+is blocking inside something it calls. Its outbound calls are
+
+```
+bea255d  (this->0x18)->vtable[0x2d8]()        the memory object
+bea257d  r14->vtable[0x148]()                 the same pair initComputeMQD
+bea25b3  r14->vtable[0x210](...)              uses, which 2cd walks already
+bea2603  (this->0x18)->vtable[0x2c0]()        -> the SERVICE object
+bea2626  svc->vtable[0x128](9, 0)             destroy, only if this->0x310
+bea26a1  svc->vtable[0x120](9, 0, spec, out)  CREATE THE GRAPHICS QUEUE
+bea2713  (this->0x30)->vtable[0x148](0xf702000042) then [0x120](..., 1)
+bea2740  (this->0x30)->vtable[0x148](0xe802000042) then [0x120](..., 0)
+```
+
+`bea26a1` is the same slot and the same shape as `startKIQ`'s call, which uses
+**command 8** and works; this is **command 9**, and it is the first time
+anything has asked the layer below for a *graphics* queue. The last two pairs
+are register read-modify-writes, and a read of a gated block can stall the SMN
+bus - which is what the boot 6/7 RSMU timeouts were, and would explain a hang
+that takes the whole machine rather than one thread.
+
+The standing suspicion this meets: the SMU has reported `gfx_min = gfx_max = 0`
+since 2di - GFX DPM never started - and this is the first code to touch the
+graphics ring. The compute path (KIQ) now works end to end; the graphics one
+may have no clock at all.
+
+So the hook walks Apple's own object chain first, with a synchronous
+breadcrumb between each step, and records the service function's address:
+`51` reading `pm4+0x18`, `52` calling `vtable[0x2c0]`, `53` service object
+obtained, `54` about to call the original. All pointer reads plus the one
+virtual call Apple is about to make anyway.
+
+Build: UUID 3BA80FD7, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides, from `nvram rbgpu-gate`:
+
+```
+51/52/53   the fault is in our own walk, not Apple's call
+54         the preconditions are sound and the hang is inside Apple's
+           command-9 queue create or the GC register pair after it, and
+           gfxmqd_svc_fn names the function to disassemble
+55/51x     initGraphicsMQD completed and the stop moved on to mapQueues
+```
