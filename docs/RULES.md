@@ -3083,3 +3083,77 @@ Diag keys `ring_pte`, `ring_pte_valid`, `ring_pte_sys`, `ring_pte_addr`,
 `ring_pte_idx`, `ring_pte_oob`.
 
 Build: UUID 4E2BAA6F, hosttest passes. Same boot-args, still armed.
+
+### 2el answered (2026-10-13): the ring's PTE is VALID — the table is not the fault
+
+logs/20261013-003209-plugin, armed, no panic, 314 diag entries.
+
+```
+ring_pte_idx   = 0x480 (1152)      exactly the computed index
+ring_pte       = 0x30006badce077
+ring_pte_valid = 1
+ring_pte_sys   = 1
+ring_pte_addr  = 0x6badce000
+```
+
+Low bits `0x77` = VALID | SYSTEM | SNOOPED | EXECUTE | READ | WRITE, pointing
+at bus address `0x6_badce000` — real host DRAM about 27 GB in, plausible on a
+30-34 GiB machine. **The ring page is mapped and the table's contents are
+right.** Of the four outcomes 2ek named, this is "valid: the table is fine and
+only PT_BASE is wrong".
+
+## 2em (2026-10-13): point the hub register at where the table really is
+
+The first **behavioural** write to a GC register this project has made.
+`GRBM_GFX_CNTL` (2do) is an index register, saved and restored, that changes
+nothing by itself; this one changes how every GPUVM translation in VMID 0
+resolves and is left in place. It is off unless **`-rbgpuptbase`** is in
+boot-args.
+
+What is measured rather than assumed, and re-checked every boot before the
+write is allowed:
+
+- TTL reports the flat PTE table at carve-out MC `0xF4_0FDF_A000`, and
+  `GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR` holds exactly that page with the
+  carve-out base stripped (2ei: three address spaces, one offset
+  `0x0FDF_A000`). The code recomputes that relationship and **refuses** if it
+  does not hold.
+- Linux wants `mc2pa(mc) = mc - vram_start + vram_base_offset`, with
+  `vram_base_offset = GCMC_VM_FB_OFFSET << 24` (UPSTREAM.md). FB_OFFSET reads
+  0x780, so the register is short by `0x7_8000_0000` — correct for a Navi 21
+  dGPU where FB_OFFSET is 0.
+- The ring's own PTE is VALID (2el), so the contents are not the fault.
+- **Every** valid entry in the table is `AMDGPU_PTE_SYSTEM` (2ek: 1512 of
+  1512). A SYSTEM entry holds a bus address and never goes through `mc2pa`,
+  so no PTE here can carry the same zero-offset error. **That is what makes
+  the patch safe**: the danger that blocked it through 2ej-2el — PTEs low by
+  `0x7_8000_0000`, aiming GPU writes at the wrong host DRAM — cannot occur in
+  a table with no VRAM entries.
+
+```
+PT_BASE 0x0FDFA001 -> 0x78FDFA001   (LO32 0x8fdfa001, HI32 0x7)
+```
+
+Residual risk, stated plainly: if the walker wants the BAR0 alias
+(`0x8_8FDF_A000`, which TTL also reported) rather than the DRAM alias
+(`0x7_8FDF_A000`), the write points it at another wrong page and the same
+MAPPING_ERROR comes back — no worse than now. No TLB invalidate is issued, so
+a stale negative translation is a second candidate if the fault persists.
+
+The test is clean because `vmf_st_*` is recorded per dump point and is 0 at
+every point before the doorbell on an unpatched boot:
+
+```
+vmf_st_wait = 0 and stamp_ret = 1   the fault is gone and the fence arrived -
+                                    this was the whole fix
+vmf_st_wait nonzero at the ring     the walker wants a different alias, or the
+                                    TLB is stale
+ptb_rel_holds = 0                   the measured relationship did not hold and
+                                    nothing was written
+```
+
+Diag keys `ptb_written`, `ptb_rel_holds`, `ptb_cur`, `ptb_want`, `ptb_back`,
+with `vmf_st_wait`, `vmf_st_post` and `stamp_ret` promoted into the hot list.
+
+Build: UUID EF933186, hosttest passes. **Needs one new boot-arg**, and it is
+the user's call whether to arm it.

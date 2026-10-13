@@ -532,6 +532,9 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // 2eh: the GART page table's address straight from the TTL layer.
     // 2ej: where the page directory's own entries point - this decides
     // whether PT_BASE may be patched at all.
+    // 2em: the PT_BASE patch - did it fire, and did the fault go away?
+    "ptb_written", "ptb_rel_holds", "ptb_cur", "ptb_want", "ptb_back",
+    "vmf_st_wait", "vmf_st_post", "stamp_ret",
     "ring_pte", "ring_pte_valid", "ring_pte_sys", "ring_pte_addr", "ring_pte_idx",
     "ring_pte_oob",
     "pte_entries", "pde_valid", "pde_sys", "pde_low", "pde_sysphys",
