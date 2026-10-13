@@ -3157,3 +3157,88 @@ with `vmf_st_wait`, `vmf_st_post` and `stamp_ret` promoted into the hot list.
 
 Build: UUID EF933186, hosttest passes. **Needs one new boot-arg**, and it is
 the user's call whether to arm it.
+
+### 2em answered on hardware (2026-10-13): THE FAULT IS GONE AND THE STAMP ARRIVED
+
+The armed boot wedged and `tools/plugin_check.sh` never returned, so the
+IORegistry log died with it. NVRAM carried the result out, which is exactly
+what 2cu exists for:
+
+```
+rbgpu-diag-prev: d=107 armed=1
+  ptb_written=1 ptb_rel_holds=1
+  ptb_cur=fdfa001 ptb_want=78fdfa001 ptb_back=78fdfa001
+  vmf_st_wait=0 vmf_st_post=0 stamp_ret=1
+  ring_pte=30006b631d077 ring_pte_valid=1 ring_pte_sys=1 ring_pte_idx=480
+```
+
+That is 2em's own success branch, written before the reading was taken:
+**`vmf_st_wait = 0` and `stamp_ret = 1`.** The register took the value
+(`ptb_back == ptb_want`), the GPUVM `MAPPING_ERROR` that every boot since 2dz
+latched at the ring base is **gone**, and `waitForHwStamp` returned TRUE - the
+GPU executed the SET_RESOURCES packet and wrote the completion fence to the
+writeback slot the CPU polls.
+
+So the chain 2dz-2el reconstructed was right end to end, and the whole fault
+was one register holding `amdgpu_gmc_vram_mc2pa` computed with
+`vram_base_offset = 0`: correct for the Navi 21 dGPU Apple's driver was
+written for, short by `0x7_8000_0000` on this APU. `doStart` continued past
+`submitSetResourcesPacket` for the first time in this project.
+
+**Then the boot wedged**, and it is worth being precise that it wedged AFTER
+succeeding, not instead of succeeding. Symptoms, all one cause: `ioreg`
+(plugin_check) never returned because it blocks on the IOService lock the
+wedged `start()` thread holds; Ctrl-C could not help because the process was
+in a kernel wait; `sudo reboot` could not finish for the same reason. No
+panic. The console photograph showed `post-startKIQ` as its last line while
+NVRAM proved the boot had reached `at-stamp-wait` and passed it - **console
+output stops updating long before the hang, so it does not locate one.**
+
+## 2en (2026-10-13): bound the wait, and leave a breadcrumb through a wedge
+
+Two instrumentation faults, both mine, neither about the GPU.
+
+**The wait had no bound.** `doStart`'s remaining gates are `initGraphicsMQD`
+(never once exercised) and five `submitMapQueuesPacket` calls, and every one
+goes through `submitKIQFrame` -> `waitForHwStamp` again. Apple's
+`waitForHwStamp` re-arms its 5 s poll for as long as the channel's
+`vtable[0x2a0]` says to keep waiting (disassembled in 2cy), so the first wait
+succeeding bounds none of the later ones.
+
+The real wait is now bounded at 2 s. This is **not** 2cy's skip - that
+substituted its own value and then narrated it as a hardware result, which
+cost fifteen milestones. The poll is Apple's own, reproduced from the
+disassembly already recorded here: its enabled check (`vtable[0x150]`), its
+refresh (`vtable[0x1a8]` `checkForTimestampUpdate`, the only thing that moves
+`channel+0x84`), its completion test `(int32)(stamp - channel+0x84) <= 0`,
+and its 100 us interval. The one difference is a cap in place of the re-arm,
+so a wait that would have completed still completes and one that would have
+spun forever returns false into Apple's own failure path. If either vtable
+slot reads NULL the code says in those words that it waited for nothing and
+the false is an instrument failure, not a GPU result.
+
+`-rbgpustampraw` restores Apple's unbounded wait. It is what wedged the
+machine; it is not a default.
+
+**A wedge left no trace.** Every `rbgpu_diag_set_num` schedules the NVRAM
+refresh on its own `thread_call` - which is precisely why `ptb_written` and
+`stamp_ret` reached NVRAM from a thread that then wedged. So a single number
+updated at each gate survives any hang: `gate_stage` is set at the entry and
+exit of `submitSetResourcesPacket` (40/45), `initGraphicsMQD` (50/55), each
+`submitMapQueuesPacket` (60+ring / 70+ring) and each `waitForHwStamp`
+(100+call / 150+call on success). The last value in NVRAM names the gate the
+boot died in.
+
+The NVRAM summary dropped **107** keys that boot (`d=107`), including
+`gfxmqd_*` and `mapq_*` - the keys that would have named the gate. The hot
+list is rewritten for the new frontier: `gate_stage` first, then the gates
+after `submitSetResourcesPacket`, with the 2em keys kept because they are the
+precondition (if `ptb_written` is 0 the rest means nothing). 2ei/2ek/2el are
+answered and move down into the main list.
+
+Build: UUID 2CD55966, hosttest passes. Boot-args unchanged - `-rbgpuptbase`
+stays, `-rbgpustampwait` stays and is now bounded.
+
+What the next armed boot decides: `gate_stage` names where the boot stops,
+and the bounded wait means it should not stop at all - it should fail a gate
+cleanly and come up to a desktop, as every boot since 2cy has.
