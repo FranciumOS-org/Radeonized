@@ -2310,6 +2310,26 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     //
     // -rbgpustampwait restores the real wait, for the boot where the CP
     // finally does run and the stamp is expected to arrive.
+    // 2dq (2026-10-12): read the queue HERE, not at the submit hook's entry.
+    //
+    // The 2dp boot answered one question and exposed a measurement in the
+    // wrong place. What it settled: the KIQ queue does NOT predate startKIQ -
+    // at post-gc-hw-init the slot reads ACTIVE=0 CTRL=0x00308509 (the same
+    // empty value as me=1/*), and at post-startKIQ it reads ACTIVE=1
+    // CTRL=0xc030860d with the doorbell enabled. startKIQ really does create
+    // the queue, so the TTL layer below it works.
+    //
+    // What it did NOT settle: `pre-kiq-submit` is submitSetResourcesPacket's
+    // ENTRY hook, which runs BEFORE the packet is written and before the
+    // doorbell is rung. WPTR = RPTR = 0 there is expected and says nothing.
+    //
+    // waitForHwStamp is called from submitKIQFrame AFTER commitBlock and after
+    // the doorbell (vtable[0x158]), so this is the first moment at which the
+    // work really is submitted. WPTR here is the discriminator:
+    //   WPTR still 0  -> the doorbell/WPTR write never reached the queue
+    //   WPTR advanced -> work is queued and the CP is not consuming it
+    rbgpu_dump_gc_regs("at-stamp-wait");
+
     uint64_t t0 = mach_absolute_time();
     bool ret;
     if (checkKernelArgument("-rbgpustampwait")) {
