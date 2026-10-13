@@ -1585,3 +1585,63 @@ Build: UUID 4524E5FA, hosttest passes. Same boot-args, still armed.
 What it decides: whether the CP microcode is halted (ME/PFP/CE/MEC halt bits
 set) or running but not fetching. Those are different problems, and nothing so
 far distinguishes them.
+
+### 2dk on hardware (2026-10-12): CP not halted, CP_STAT 0 — but the base is unproven
+
+logs/20261012-202627-plugin, UUID 4524E5FA, armed, no panic. Identical at both
+read points, `post-gc-hw-init` and the new `pre-kiq-submit`:
+
+```
+RLC_CNTL=0x00000001  RLC_STAT=0x00000025  RLC_GPM_STAT=0x00b40017
+seg0=0x1260 -> CP_STAT=0x00000000 CP_ME_CNTL=0x00000000 CP_MEC_CNTL=0x00000000
+seg0=0x0000 -> CP_STAT=0x00000000
+ME_HALT=0 PFP_HALT=0 CE_HALT=0 MEC1_HALT=0 MEC2_HALT=0
+```
+
+Taken at face value that is a CP which is powered, **not halted**, and
+completely idle even at the instant the packet is submitted and the doorbell
+rung - a different failure from "the microcode is not running", and it would
+point at the ring/doorbell/MQD rather than at the firmware.
+
+**But the base is not proven, and the 2dk log line overclaimed it.** The test
+was `!= 0xffffffff`, and CP_STAT read `0x00000000` at BOTH candidate bases, so
+it cannot tell a real zero from a dead address that reads 0. The
+"seg0=0x1260 decodes" line is not evidence. Until the base is settled,
+CP_STAT=0 and the halt bits prove nothing.
+
+RLC_GPM_STAT=0x00b40017 is new and nonzero, which at least confirms seg1 keeps
+decoding real data.
+
+## 2dl (2026-10-12): settle the base, and ask whether the MEC ever fetched
+
+Registers that cannot be zero when the block is the right one, all BASE_IDX 0,
+all reads:
+
+```
+CP_RB0_CNTL  0x1de1   ring control - programmed by doStart, and even the reset
+                      value carries RB_BUFSZ, so 0 means this is not the CP
+CP_RB0_BASE  0x1de0   ring base address
+CP_RB0_RPTR  0x0f60   the ring-state check doStart makes after startKIQ
+CP_RB0_WPTR  0x1df4
+GRBM_STATUS  0x0da4
+```
+
+CP_RB0_CNTL is read at both candidate bases and only one may be live; the log
+says CONFIRMED, CONFIRMED-the-other-way, UNKNOWN, or ambiguous in those words,
+and when it is UNKNOWN it says explicitly that CP_STAT and the halt bits prove
+nothing rather than letting them be read as a result.
+
+The one that answers the real question:
+
+```
+CP_MEC_ME1_HEADER_DUMP  0x0e2e   the header of the last packet the MEC FETCHED
+```
+
+Nonzero at `pre-kiq-submit` means the command processor really did read from
+the ring, which moves the fault from "the CP never sees the work" to "the CP
+saw it and did not finish it". Zero means it never fetched anything, and the
+problem is upstream of the CP - doorbell, MQD, or a ring the CP cannot reach,
+the same class of bug as the SMU address in 2dh/2di.
+
+Build: UUID CB818072, hosttest passes. Same boot-args, still armed. All reads,
+no GC register written.

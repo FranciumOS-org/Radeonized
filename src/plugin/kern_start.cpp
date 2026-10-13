@@ -1420,20 +1420,86 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     } else {
         rbgpu_log("2dk DIAG [%s]: RLC_STAT=0x%08x is NOT the reference 0x25", tag, rlc_stat);
     }
-    if (cp_stat_a == 0xFFFFFFFF && cp_stat_b == 0xFFFFFFFF) {
-        rbgpu_log("2dk DIAG [%s]: CP_STAT reads 0xffffffff at BOTH candidate bases - "
-                  "neither decodes, so the GC seg0 base is still unknown and the CP "
-                  "state is NOT measured by this boot", tag);
-    } else if (cp_stat_a != 0xFFFFFFFF) {
+    // 2dl (2026-10-12): which seg0 base is real, settled by registers that
+    // CANNOT be zero when the block is the right one.
+    //
+    // The 2dk boot read CP_STAT = 0x00000000 at BOTH candidate bases, so
+    // "not 0xffffffff" was not enough to tell a real zero from a dead address
+    // that happens to read 0 - the 2dk log line claiming "seg0=0x1260 decodes"
+    // was overclaiming on exactly that. These registers discriminate:
+    //
+    //   CP_RB0_CNTL  - ring control. The driver has programmed the ring by
+    //                  this point and even the reset value carries RB_BUFSZ,
+    //                  so zero means we are not looking at the CP.
+    //   CP_RB0_BASE  - ring base address, programmed by doStart.
+    //
+    // And one that answers the actual question rather than the addressing one:
+    //
+    //   CP_MEC_ME1_HEADER_DUMP - the header of the last packet the MEC
+    //                  FETCHED. Nonzero means the command processor really did
+    //                  read from the ring, which would move the fault from
+    //                  "the CP never sees the work" to "the CP saw it and did
+    //                  not complete it". Zero at the KIQ submit means it never
+    //                  fetched anything.
+    //
+    // CP_RB0_RPTR / WPTR are in the ring-state check doStart makes after
+    // startKIQ, so they are worth having next to the rest.
+    const uint32_t dwCP_RB0_CNTL   = 0x1de1; // BASE_IDX 0
+    const uint32_t dwCP_RB0_BASE   = 0x1de0; // BASE_IDX 0
+    const uint32_t dwCP_RB0_RPTR   = 0x0f60; // BASE_IDX 0
+    const uint32_t dwCP_RB0_WPTR   = 0x1df4; // BASE_IDX 0
+    const uint32_t dwCP_MEC_HDR    = 0x0e2e; // BASE_IDX 0, ME1 header dump
+    const uint32_t dwGRBM_STATUS   = 0x0da4; // BASE_IDX 0
+
+    uint32_t rb_cntl_a = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_RB0_CNTL) * 4);
+    uint32_t rb_cntl_b = g_hw.rreg(g_hw.ctx, (kSeg0Old  + dwCP_RB0_CNTL) * 4);
+    uint32_t rb_base   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_RB0_BASE) * 4);
+    uint32_t rb_rptr   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_RB0_RPTR) * 4);
+    uint32_t rb_wptr   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_RB0_WPTR) * 4);
+    uint32_t mec_hdr   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_MEC_HDR)  * 4);
+    uint32_t grbm      = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwGRBM_STATUS) * 4);
+
+    rbgpu_log("2dl DIAG [%s]: seg0 test - CP_RB0_CNTL @0x1260=0x%08x @0x0000=0x%08x",
+              tag, rb_cntl_a, rb_cntl_b);
+    rbgpu_log("2dl DIAG [%s]: @0x1260 CP_RB0_BASE=0x%08x RPTR=0x%08x WPTR=0x%08x "
+              "MEC_ME1_HEADER_DUMP=0x%08x GRBM_STATUS=0x%08x",
+              tag, rb_base, rb_rptr, rb_wptr, mec_hdr, grbm);
+
+    rbgpu_diag_set_num("diag_rb0_cntl", rb_cntl_a);
+    rbgpu_diag_set_num("diag_rb0_cntl_s0", rb_cntl_b);
+    rbgpu_diag_set_num("diag_rb0_base", rb_base);
+    rbgpu_diag_set_num("diag_rb0_rptr", rb_rptr);
+    rbgpu_diag_set_num("diag_rb0_wptr", rb_wptr);
+    rbgpu_diag_set_num("diag_mec_hdr", mec_hdr);
+    rbgpu_diag_set_num("diag_grbm_status", grbm);
+
+    bool a_live = (rb_cntl_a != 0 && rb_cntl_a != 0xFFFFFFFF);
+    bool b_live = (rb_cntl_b != 0 && rb_cntl_b != 0xFFFFFFFF);
+    if (a_live && !b_live) {
+        rbgpu_log("2dl DIAG [%s]: seg0 = 0x1260 CONFIRMED (CP_RB0_CNTL nonzero there "
+                  "and not at 0) - the CP_STAT/halt-bit readings above are real", tag);
+    } else if (b_live && !a_live) {
+        rbgpu_log("2dl DIAG [%s]: seg0 = 0x0000 CONFIRMED - the 0x1260 readings above "
+                  "are NOT the CP and must be discarded", tag);
+    } else if (!a_live && !b_live) {
+        rbgpu_log("2dl DIAG [%s]: CP_RB0_CNTL is 0/0xffffffff at BOTH bases - seg0 is "
+                  "still UNKNOWN, so CP_STAT=0 and the halt bits prove NOTHING. Do not "
+                  "read them as 'the CP is idle and unhalted'.", tag);
+    } else {
+        rbgpu_log("2dl DIAG [%s]: CP_RB0_CNTL is live at BOTH bases - ambiguous, "
+                  "seg0 not settled", tag);
+    }
+
+    if (a_live) {
         // CP_ME_CNTL bits 28/26/24 halt PFP/CE/ME; CP_MEC_CNTL bits 30/28 halt MEC1/2.
-        rbgpu_log("2dk DIAG [%s]: seg0=0x1260 decodes. CP_STAT busy bits: 0x%08x; "
-                  "ME_HALT=%u PFP_HALT=%u CE_HALT=%u MEC1_HALT=%u MEC2_HALT=%u",
+        rbgpu_log("2dk DIAG [%s]: CP_STAT=0x%08x; ME_HALT=%u PFP_HALT=%u CE_HALT=%u "
+                  "MEC1_HALT=%u MEC2_HALT=%u",
                   tag, cp_stat_a,
                   (cp_me_a  >> 28) & 1, (cp_me_a  >> 26) & 1, (cp_me_a >> 24) & 1,
                   (cp_mec_a >> 30) & 1, (cp_mec_a >> 28) & 1);
-    } else {
-        rbgpu_log("2dk DIAG [%s]: seg0=0x0000 decodes (CP_STAT=0x%08x) and 0x1260 does not",
-                  tag, cp_stat_b);
+        rbgpu_log("2dl DIAG [%s]: MEC fetched a packet: %s",
+                  tag, mec_hdr ? "YES (header nonzero - the CP read the ring)"
+                               : "NO (header 0 - the CP never fetched from the ring)");
     }
 }
 
