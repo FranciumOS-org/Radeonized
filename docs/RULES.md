@@ -2388,3 +2388,82 @@ Diag keys `wb_gpu_frame0`, `wb_gpu_slot`, `wb_cpu_base`, `wb_next_idx`,
 `wb_cpu_arith_ok`, `wb_gpu_hi`, `wb_gpu_carveout`, all in NVRAM.
 
 Build: UUID A8DD3601, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2dx on hardware (2026-10-12): the GPU address is RIGHT — and it is a third space
+
+logs/20261012-222823-plugin, UUID A8DD3601, armed, no panic. 233 diag entries.
+
+```
+wb_cpu_base=0xffffffa9c64f9000   wb_cpu_arith_ok=1
+wb_gpu_frame0=0xffbfdc0000   wb_gpu_slot=0xffbfdc0040   wb_gpu_hi=0xff
+wb_next_idx=0x11                 17 frames handed out
+```
+
+The 2dx classifier's third branch fired: the high word is `0xFF`, neither the
+carve-out `0xF4` nor zero. **But that is not a wrong address space - it is the
+right one.** 2do measured `CP_HQD_PQ_BASE = 0xffbfe800`, i.e. ring base
+`0xFF_BFE8_0000`, in the same `0xFF_BF..` region and only 0xC0000 away. That
+is Apple's GPUVM space; the CP demonstrably fetches the ring from it (2dq), so
+the mapping works for reads and the writeback frame sits right beside the ring.
+
+So the FB-offset hypothesis of 2dh/2di **does not apply here** and the
+writeback address is structurally correct. `wb_cpu_arith_ok=1` confirms the
+CPU side too.
+
+### The fence really is requested — WRITE_DATA, and it uses `+0xc8`
+
+`submitKIQFrame` (0xbe9572e) emits no fence of its own:
+
+```
+callq *0x140(ring)        must be true
+incl 0x80(%rbx)           submitted++  (the 1 that 2ds measured)
+commitBlock(ring, 0x20)   commit the 32-dword block
+callq *0x158(ring)        the doorbell
+waitForHwStamp(this, +0x80)
+```
+
+The fence is inside the block. `submitSetResourcesPacket` (0xbec7404) builds
+SET_RESOURCES in the first half (`frame[0] = 0xC006A000`: PM4 type 3, opcode
+0xA0, 8 dwords), then at 0xbec7463 calls `vtable[0x328]` with `frame + 0x40` =
+`AMDGFX10KIQHWChannel::writeDataCmdPacket` (0xbec7642):
+
+```
+p[0] = 0xC0033700      PM4 type 3, opcode 0x37 = WRITE_DATA, 5 dwords
+p[1] = 0x00100500      DST_SEL 5 (memory), WR_CONFIRM
+p[2] = this->0xc8 & ~3 destination LOW
+p[3] = this->0xcc      destination HIGH
+p[4] = vtable[0x1b0]() data = getCommandSubmitTimestamp()
+```
+
+**The destination is `+0xc8`, not `+0xc0`**, and the two are assigned in
+different functions for the same frame index:
+
+```
+init                    0xbe849f4  +0xc0 = vtable[0x358](idx)    CPU pointer
+allocateMemoryResources 0xbe84f05  +0xc8 = vtable[0x350](+0xac)  GPU address
+```
+
+`allocateMemoryResources` is the function 2cb found failing engine by engine
+and 2cc had to stub for VCN encode, so one of the pair can be set while the
+other is not.
+
+## 2dy (2026-10-12): read the fence packet the driver actually built
+
+`writeDataCmdPacket` is hooked observe-only: the original runs first and the
+five dwords are read back out of the ring block, so this is the packet the GPU
+was handed, not a reconstruction. The `waitForHwStamp` hook also reads
+`+0xc8` and compares it with `getChannelWriteBackFrameGPUAddr(slot)`.
+
+```
+dst == 0                     the GPU is told to write the fence to address 0,
+                             so it can never reach the polled page -
+                             allocateMemoryResources never set +0xc8
+dst == wb_gpu_slot           the packet targets the right frame and the fence
+                             failing is further down
+dst in 0xFF_BF.., different  the packet targets another frame than the CPU polls
+```
+
+Diag keys `fencepkt_calls`, `fencepkt_hdr`, `fencepkt_ctl`, `fencepkt_dst`,
+`fencepkt_data`, `chan_c8`, `chan_c8_matches_wb`, all in NVRAM.
+
+Build: UUID 6DE72A13, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
