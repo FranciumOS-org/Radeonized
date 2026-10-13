@@ -509,6 +509,9 @@ static const char *const kRbgpuNvramKeys[] = {
     "gfx_min", "gfx_max",
     // 2dj: why the GFX clock range is 0 - parked in GFXOFF, or never started.
     "gfxoff_status", "gfxoff_read_err",
+    // 2dk: the CP/RLC state, read with the corrected addressing.
+    "diag_rlc_stat", "diag_rlc_gpm", "diag_cp_stat",
+    "diag_cp_me_cntl", "diag_cp_mec_cntl", "diag_cp_stat_seg0",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

@@ -1515,3 +1515,73 @@ What it decides:
   question.
 - **read error**: rb_smu13_init never located SMUIO, and the question stays
   open.
+
+### 2dj answered (2026-10-12): NOT in GFXOFF — that door is closed
+
+logs/20261012-201650-plugin, UUID C9731AE2, armed, no panic:
+
+```
+[Check 6] GFXOFF status = 2: NOT in GFXOFF
+gfxoff_read_err=0   gfx_min=0   gfx_max=0   stamp_ret=0
+```
+
+The read succeeded, so this is definitive: GFX is **not parked**.
+`RB_SMU13_ALLOW_GFXOFF` + `DisallowGfxOff` would have been a permission spent
+on nothing. One boot, one closed door, no new message sent.
+
+The zeros were checked for the boring explanation and survive it: our
+`struct rb_smu13_dpm_clocks` is 304 bytes with `min_gfx_clk` at +296 and
+`max_gfx_clk` at +300, field-for-field identical to Linux's `DpmClocks_t`
+(smu13_driver_if_yellow_carp.h:120-140, all NUM_* = 8 except NUM_DF_PSTATE 4),
+and `rb_smu13_update_table` copies `table_size()` = `sizeof` = 304 bytes. Both
+fields are inside the copy, so the zeros are real data from the SMU, not a
+short read.
+
+## 2dk (2026-10-12): the GC register dump was reading the wrong addresses
+
+The same boot ran two GC register readers a few ms apart and they disagreed:
+
+```
+2ba CORRECT: RLC_CNTL=0x00000001 RLC_STAT=0x00000025 BOOTLOAD=0x00000001
+2ap DIAG [post-gc-hw-init]: RLC_CNTL=0x00000000 RLC_STAT=0x00000000 CP_STAT=0xffffffff
+2ap DIAG [post-gc-hw-init]: RLC_STAT=0x00000000 DIFFERS from Raphael 0x25 - investigate!
+```
+
+`rbgpu_dump_gc_regs` computed `0xa000 + 0x4c00` as a **byte** address. The
+gc_10_3_0_offset.h offsets are DWORD indices and the segment bases are DWORD
+too, so the byte address is `(seg + offset) * 4`. The 2ba block inside
+`hooked_gc_hw_init` already had this right.
+
+So **RLC_STAT really is 0x25** - the Raphael reference value, RLC firmware
+present in instruction RAM - and the "DIFFERS ... investigate!" line was our
+own bug. `CP_STAT=0xffffffff` was an undecoded address, not a register value.
+Two of the project's own alarms were false, and the firmware-present evidence
+that justifies the 2am bypass was there all along.
+
+Consequence worth stating plainly: **no boot has ever validly read CP_STAT.**
+The CP's actual state is still unmeasured.
+
+2dk rewrites the dump:
+
+- `(seg + dword offset) * 4` throughout. Seg1 = 0xa000 is proven on hardware
+  (it is what yields RLC_STAT 0x25 and RLC_CNTL 1).
+- Seg0 is **not** proven - the plugin's synthetic discovery table carries only
+  MP0/MP1, so there is no GC base to read - so CP_STAT is read at BOTH
+  candidates, AMD's `gc_10_3_0` convention 0x1260 and the old assumption 0,
+  and the values say which decodes. 0xffffffff at both means seg0 is still
+  unknown and the boot measured nothing, which the log says in those words
+  rather than implying a result.
+- Adds RLC_GPM_STAT, CP_ME_CNTL and CP_MEC_CNTL, and decodes the halt bits
+  (ME/PFP/CE from CP_ME_CNTL 28/26/24, MEC1/MEC2 from CP_MEC_CNTL 30/28).
+- Called additionally from the `submitSetResourcesPacket` ENTER hook, so for
+  the first time the CP is read **while the KIQ packet is in flight**.
+
+All reads. No GC register is written. Risk is bounded: an undecoded address
+returns 0xffffffff, which this boot already demonstrated harmlessly, and
+GFXOFF status 2 says the block is powered.
+
+Build: UUID 4524E5FA, hosttest passes. Same boot-args, still armed.
+
+What it decides: whether the CP microcode is halted (ME/PFP/CE/MEC halt bits
+set) or running but not fetching. Those are different problems, and nothing so
+far distinguishes them.
