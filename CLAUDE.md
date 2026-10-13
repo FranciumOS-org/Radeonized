@@ -3639,3 +3639,66 @@ What the next armed boot decides, from `nvram rbgpu-gate`:
           the log's last 2es mark then bounds it, with the caveat above that
           the log lags the thread
 ```
+
+### 2et answered on hardware (2026-10-13): gate 54 is genuinely not reached
+
+logs/20261013-174345-plugin, armed, wedged. `plugin_check` ran **in the armed
+boot** this time and `pci.txt` completed at 401408 bytes, where every previous
+wedge left it at 0 - so the IGPU registry subtree was not locked and the
+machine was in better shape than the 2es wedge.
+
+```
+nvram rbgpu-gate -> "50 initGraphicsMQD ENTER"
+log.txt last line -> "2es: mark 52 - initGraphicsMQD: calling vtable[0x2c0]"
+rbgpu-diag       -> d=27 armed=1, and NO gate_stage / ptb_* / stamp_* at all
+```
+
+**The quiesce fired.** The summary froze far earlier than the 2es boot's
+(which carried `gate_stage=65`, `ptb_written`, `stamp_calls`, `bwait_iters`):
+its last completed flush predates `post-startKIQ`, and nothing after gate 40
+reached flash. That is 2et doing exactly what it was written to do.
+
+**So the missing gate 54 can no longer be blamed on a blocked flash write,
+and that settles it: the thread does not reach gate 54.** The stop is between
+gate 50 and gate 54 - inside the 51-59 walk. Two boots now with the NVRAM
+explanation removed and gate 54 still absent.
+
+The log also reached **mark 52**, one further than 2es's mark 51, which means
+`pm4+0x18` was read, `memobj` was non-NULL, its vtable was dereferenced and
+slot 0x2c0 was read. The only substantive thing left in the span is the call
+itself: `fn_2c0(memobj)` - **Apple's own `vtable[0x2c0]`**, which Apple makes
+for itself at 0xbea2603 a moment later. Per the 2es withdrawal the log lags
+the thread, so mark 52 is an upper bound and not a location; the 2ep boot
+wrote gate 53, so 0x2c0 has returned on at least one boot.
+
+Open instrumentation question, recorded rather than chased: the published
+`RBGPULog` held only **61** lines (11 KB) against the 2es boot's 460 (63 KB),
+starting at 14.4 s with everything before gate 101 absent - which is why the
+`2et:` quiesce line and gate 40 are not in it. The ring is 512 and the same
+script read 460 lines one boot earlier, so this is the publish side, not the
+script.
+
+## 2eu (2026-10-13): take the walk out, so the two gates have nothing between them
+
+The walk is now **off** unless `-rbgpumqdwalk` is set. By default
+`initGraphicsMQD`'s hook is gate 50, gate 54, the original - nothing else at
+all between the two NVRAM writes.
+
+That makes the next boot decisive in a way no previous one has been:
+
+```
+54 written   the span was ours, and the hang is inside Apple's own
+             initGraphicsMQD - the command-9 graphics-queue create at
+             0xbea26a1 or the GC register read-modify-writes at 0xbea2713 /
+             0xbea2740. Established, not suspected.
+50 only      two synchronous NVRAM writes with nothing between them still
+             lose the second, so the gate mechanism itself is the problem and
+             the breadcrumb needs a channel that is not NVRAM.
+```
+
+Worth stating the reframe this makes available either way: our marks were
+never plausibly *causing* a hang in Apple's object chain - at most they reach
+Apple's own `vtable[0x2c0]` a few microseconds before Apple does. If the walk
+hangs there, so would the original.
+
+Build: UUID E1EA8BF0, hosttest passes. Boot-args unchanged.

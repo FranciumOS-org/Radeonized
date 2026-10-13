@@ -3341,6 +3341,16 @@ static bool rbgpu_bounded_stamp_wait_2en(void *ch, uint32_t stamp, uint32_t cap_
 // plugin_check over SSH with a 43 KB log. So the outer gates are survivable
 // and the inner ones are not. These become log-only - the diag table and
 // IOLog, both of which that surviving boot captured in full.
+// 2eu: the initGraphicsMQD object walk, off unless -rbgpumqdwalk is set.
+// Checked once, lazily, so the boot-arg lookup is not repeated per call.
+static bool rbgpu_mqd_walk_2eu(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        cached = checkKernelArgument("-rbgpumqdwalk") ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 static void rbgpu_mark_2es(uint32_t stage, const char *what) {
     rbgpu_diag_set_num("gfxmqd_mark", stage);
     rbgpu_log("2es: mark %u - %s", stage, what);
@@ -3846,7 +3856,23 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     // preconditions are sound and the hang is inside Apple's command-9 call
     // or the register pair after it - and `gfxmqd_svc_fn` names the function
     // to disassemble.
-    if (pm4) {
+    //
+    // 2eu (2026-10-13): the walk is OFF by default now. With the NVRAM
+    // controller quiesced (2et) the missing gate 54 can no longer be blamed
+    // on a blocked flash write, so the stop really is between gate 50 and
+    // gate 54 - and the only substantive thing in that span is Apple's own
+    // vtable[0x2c0] call, which Apple makes itself at 0xbea2603 a moment
+    // later. With the walk gone there is NOTHING between the two gates but
+    // the original call, so gate 54 appearing or not is decisive:
+    //
+    //   54 written  the span was ours; the hang is inside Apple's
+    //               initGraphicsMQD - command-9 queue create or the GC
+    //               register pair at the end
+    //   50 only     two NVRAM writes with nothing between them still lose
+    //               the second, and the gate mechanism itself is the problem
+    //
+    // -rbgpumqdwalk puts the walk back for a boot that wants the pointers.
+    if (pm4 && rbgpu_mqd_walk_2eu()) {
         rbgpu_mark_2es(51, "initGraphicsMQD: reading pm4+0x18");
         void *memobj = *reinterpret_cast<void **>(
             reinterpret_cast<uintptr_t>(pm4) + 0x18);
