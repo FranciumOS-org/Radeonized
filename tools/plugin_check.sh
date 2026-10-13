@@ -11,9 +11,48 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/logs/$(date +%Y%m%d-%H%M%S)-plugin"
 mkdir -p "$out"
 
+# 2er: ioreg can block forever, so never run it unguarded.
+#
+# Every wedged armed boot has stopped this script at the same line - the
+# `ioreg -c IOPCIDevice -r -l` walk - and the two 2026-10-13 runs prove it:
+# ioreg.txt is written, pci.txt is created and stays 0 bytes, igpu.txt is
+# never created at all. That walk recurses IGPU@0's whole subtree and
+# serialises every property, so it is the first command that touches the
+# branch holding the accelerator still inside start(). The earlier
+# `-c RembrandtGPU` lookup finishes because our plugin's own IOService lives
+# under IOResources, nowhere near it.
+#
+# A blocked ioreg is in an uninterruptible kernel wait: Ctrl-C does nothing
+# and it cannot be killed, which is also why `sudo reboot` could not finish.
+# So this does not try to kill it - it starts the walk in the background,
+# waits a bounded time for a completion stamp, and moves on without it. The
+# orphan clears on the next boot.
+rb_ioreg() {   # rb_ioreg <seconds> <outfile> <ioreg args...>
+    _secs="$1"; _dest="$2"; shift 2
+    rm -f "$_dest.done"
+    ( ioreg "$@" > "$_dest" 2>/dev/null; : > "$_dest.done" ) &
+    _i=0
+    while [ ! -f "$_dest.done" ] && [ "$_i" -lt "$_secs" ]; do
+        sleep 1; _i=$((_i + 1))
+    done
+    if [ -f "$_dest.done" ]; then rm -f "$_dest.done"; return 0; fi
+    echo "  *** ioreg $* did not finish in ${_secs}s."
+    echo "      The registry is held by a wedged driver thread, so it cannot be"
+    echo "      interrupted or killed. Skipping it; read 'nvram rbgpu-gate'."
+    return 1
+}
+
 args="$(nvram boot-args 2>/dev/null | cut -f2-)"
 echo "boot-args: $args"
 case " $args " in *" -rbgpuoff "*) off=1; echo "  -rbgpuoff is set: the plugin should report itself disabled" ;; *) off=0 ;; esac
+
+echo
+echo "--- nvram breadcrumbs (the only record a wedged boot leaves)"
+for v in rbgpu-gate rbgpu-diag rbgpu-diag-prev rbgpu-arm; do
+    val="$(nvram "$v" 2>/dev/null | cut -f2-)"
+    echo "  $v = ${val:-<unset>}"
+done > "$out/nvram.txt" 2>&1
+cat "$out/nvram.txt"
 
 echo
 echo "--- loaded kexts"
@@ -41,7 +80,8 @@ echo "--- registry"
 # Lilu's plugin_start.cpp: the RembrandtGPU IOService only survives start()
 # when Lilu accepted the plugin and pluginStart() ran (startSuccess). A loaded
 # kext without the instance stopped itself (-rbgpuoff, or Lilu refused it).
-ioreg -w0 -p IOService -c RembrandtGPU -r -l | grep -E '\+-o RembrandtGPU|CFBundleIdentifier"' \
+rb_ioreg 20 "$out/ioreg-raw.txt" -w0 -p IOService -c RembrandtGPU -r -l
+grep -E '\+-o RembrandtGPU|CFBundleIdentifier"' "$out/ioreg-raw.txt" 2>/dev/null \
     | tee "$out/ioreg.txt"
 loaded=0; grep -q com.rembrandtgpu.plugin "$out/kexts.txt" && loaded=1
 running=0; grep -q '+-o RembrandtGPU' "$out/ioreg.txt" && running=1
@@ -66,10 +106,11 @@ echo "(early-boot plugin log lines are usually not kept; the registry is the che
 
 echo
 echo "--- milestone 1: peer, GPU properties, HWServices"
-ioreg -w0 -p IOService -r -c IOPCIDevice -l 2>/dev/null > "$out/pci.txt"
+rb_ioreg 30 "$out/pci.txt" -w0 -p IOService -r -c IOPCIDevice -l
 # The 680M's IOPCIDevice (IGPU@0) and what is attached to it.
-ioreg -w0 -p IOService -n IGPU@0 -r -d1 -l 2>/dev/null > "$out/igpu.txt"
-ioreg -w0 -p IOService -n IGPU@0 -r -d2 2>/dev/null | grep -- "+-o" | sed 's/<class \([^,]*\),.*/(\1)/' | tee "$out/igpu-children.txt"
+rb_ioreg 30 "$out/igpu.txt" -w0 -p IOService -n IGPU@0 -r -d1 -l
+rb_ioreg 30 "$out/igpu-raw.txt" -w0 -p IOService -n IGPU@0 -r -d2
+grep -- "+-o" "$out/igpu-raw.txt" 2>/dev/null | sed 's/<class \([^,]*\),.*/(\1)/' | tee "$out/igpu-children.txt"
 for k in '"@0,name"' '"RBGPULoad"' '"LoadHWServices"' '"LoadAccelerator"'; do
     v="$(grep -m1 "$k" "$out/igpu.txt" | sed 's/^[ |]*//')"
     echo "  ${v:-$k: not set}"
@@ -89,7 +130,7 @@ echo "  $(wc -l < "$out/amd-log.txt" | tr -d ' ') log lines from the peer and Ap
 head -40 "$out/amd-log.txt" | sed 's/^/    /'
 echo
 echo "--- plugin diagnostics (RBGPULog / RBGPUDiag on the peer)"
-ioreg -w0 -p IOService -c RembrandtGPUPeer -r -l -a 2>/dev/null > "$out/peer.plist"
+rb_ioreg 30 "$out/peer.plist" -w0 -p IOService -c RembrandtGPUPeer -r -l -a
 python3 - "$out/peer.plist" <<'PY'
 import plistlib, sys
 try:

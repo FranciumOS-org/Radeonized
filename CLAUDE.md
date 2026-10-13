@@ -3454,3 +3454,43 @@ What the next armed boot decides, from `nvram rbgpu-gate`:
 53 again       neither - the stop is in rbgpu_gate_nvram itself, and the
                synchronous NVRAM write has to go
 ```
+
+## 2er (2026-10-13): why plugin_check.sh never finishes, and the fix
+
+Located rather than assumed. Both 2026-10-13 wedge runs leave the same
+fingerprint in `logs/<time>-plugin/`:
+
+```
+ioreg.txt   159 bytes   written
+pci.txt       0 bytes   created, never filled
+igpu.txt    absent      the next command never ran
+```
+
+So the script stops at one line, every time:
+
+```
+ioreg -w0 -p IOService -r -c IOPCIDevice -l > "$out/pci.txt"
+```
+
+That walk recurses **IGPU@0's whole subtree and serialises every property**,
+so it is the first command that touches the branch holding the accelerator
+still inside `start()`. The earlier `-c RembrandtGPU` lookup finishes because
+our plugin's own IOService lives under IOResources, nowhere near it - which is
+why the script always got as far as the registry verdict and no further.
+
+And the reason Ctrl-C did nothing: a blocked `ioreg` is in an uninterruptible
+kernel wait. It cannot be interrupted or killed, which is the same reason
+`sudo reboot` could not finish.
+
+Two changes to tools/plugin_check.sh:
+
+- `rb_ioreg <seconds> <outfile> <args...>` runs each ioreg in the background,
+  waits a bounded time for a completion stamp, and moves on without it. It
+  does **not** try to kill the orphan - that cannot work - and says so. The
+  script now always completes and writes everything it did get.
+- It captures the NVRAM breadcrumbs **first**: `rbgpu-gate`, `rbgpu-diag`,
+  `rbgpu-diag-prev`, `rbgpu-arm`, into `nvram.txt`. That is the primary
+  evidence on a wedged boot and the script had never collected it.
+
+Verified on a healthy boot: completes in 12 s, reports the breadcrumbs, the
+loaded-UUID check and the full milestone-1 registry as before.
