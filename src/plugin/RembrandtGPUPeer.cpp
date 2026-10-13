@@ -4,6 +4,7 @@
 #include <IOKit/IODeviceTreeSupport.h>
 #include <Headers/kern_util.hpp>
 #include <mach/mach_time.h>
+#include <kern/clock.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSString.h>
@@ -848,6 +849,116 @@ void RembrandtGPUPeer::saveDiagToNvram() {
 // exonerated and the fault is in the two pointer reads.
 static IORegistryEntry *g_rbgpuOptions = nullptr;
 
+// 2ey (2026-10-13): the control that 2eo-2ex never had.
+//
+// Every gate reading so far assumes "the trail stops where the THREAD stops".
+// Nothing has tested that. The 2ex trail ended at gate 151 while the 2eu boot
+// reached gate 54, which is three gates further on through the same
+// straight-line code - so the stopping point is not located by code position,
+// and an asynchronous death that merely catches the thread wherever it happens
+// to be would produce exactly that. Those two possibilities need different
+// fixes and look identical from a single thread's breadcrumb.
+//
+// So a second thread writes `rbgpu-beat` every 250 ms, independently of the
+// start() thread, carrying its own counter and the last gate it saw the gate
+// path write. The gate path holds g_rbgpuNvramBusy across its own write and
+// has absolute priority; the heartbeat skips rather than block it, because a
+// heartbeat that can stall the thread it is measuring is worse than none.
+//
+// But a heartbeat that goes silent whenever the flag is held cannot tell
+// "the gate path is wedged INSIDE its own flash write" from "the machine is
+// dead", so after three consecutive skips (~750 ms) it writes anyway and says
+// so. Three outcomes, all distinguishable in one variable:
+//
+//   beat advances, skips low   the machine is alive and the start() thread
+//                              alone is stuck; the trail DOES locate it
+//   beat advances, forced=1    the thread is stuck inside the gate's own
+//                              NVRAM write - the 2eq/2es suspicion, with
+//                              direct evidence this time instead of inference
+//   beat absent / frozen       the whole machine stopped, and the gate the
+//                              trail ends at is incidental
+static volatile UInt32  g_rbgpuNvramBusy = 0;
+static volatile uint32_t g_rbgpuLastGate = 0;
+static thread_call_t     g_rbgpuBeatCall = nullptr;
+static volatile bool     g_rbgpuBeatOn   = false;
+static uint32_t          g_rbgpuBeatN    = 0;
+static uint32_t          g_rbgpuBeatSkips = 0;
+static uint32_t          g_rbgpuBeatForced = 0;
+
+static void rbgpu_beat_action(thread_call_param_t, thread_call_param_t) {
+    g_rbgpuBeatN++;
+
+    bool took = OSCompareAndSwap(0, 1, &g_rbgpuNvramBusy);
+    bool forced = false;
+    if (!took) {
+        g_rbgpuBeatSkips++;
+        if (g_rbgpuBeatSkips >= 3) {
+            // The gate path has held the flag for ~750 ms. Either it is wedged
+            // inside its own flash write or it is writing far more often than
+            // the chain should. Either way that IS the finding, so record it.
+            forced = true;
+            g_rbgpuBeatForced++;
+        }
+    } else {
+        g_rbgpuBeatSkips = 0;
+    }
+
+    if (took || forced) {
+        IORegistryEntry *options = g_rbgpuOptions;
+        if (options) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "n=%u gate=%u skips=%u forced=%u t=%llu",
+                     g_rbgpuBeatN, g_rbgpuLastGate, g_rbgpuBeatSkips,
+                     g_rbgpuBeatForced, mach_absolute_time());
+            if (auto str = OSString::withCString(buf)) {
+                options->setProperty("rbgpu-beat", str);
+                str->release();
+            }
+            if (auto sync = OSString::withCString("now")) {
+                options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+                sync->release();
+            }
+        }
+        if (took) {
+            g_rbgpuNvramBusy = 0;
+        }
+    }
+
+    if (g_rbgpuBeatOn && g_rbgpuBeatCall) {
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(250, kMillisecondScale, &deadline);
+        thread_call_enter_delayed(g_rbgpuBeatCall, deadline);
+    }
+}
+
+void rbgpu_heartbeat_start(void) {
+    if (g_rbgpuBeatOn) {
+        return;
+    }
+    // Resolve /options here if the gate path has not already done it, so the
+    // beat does not depend on which write happens first.
+    if (!g_rbgpuOptions) {
+        g_rbgpuOptions = IORegistryEntry::fromPath("/options", gIODTPlane);
+    }
+    g_rbgpuBeatCall = thread_call_allocate(rbgpu_beat_action, nullptr);
+    if (!g_rbgpuBeatCall) {
+        rbgpu_log("2ey: thread_call_allocate FAILED - no heartbeat this boot, so "
+                  "alive-vs-dead stays unanswered and the gate trail keeps its "
+                  "assumption");
+        return;
+    }
+    g_rbgpuBeatOn = true;
+    rbgpu_log("2ey: heartbeat armed (250 ms, rbgpu-beat). From here the gate trail "
+              "has a control: if the beat keeps advancing after the trail stops, "
+              "the start() thread alone is stuck and the trail locates it; if the "
+              "beat stops at the same moment, the machine died and the last gate "
+              "is incidental.");
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(250, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(g_rbgpuBeatCall, deadline);
+}
+
 void rbgpu_gate_nvram(uint32_t stage, const char *what) {
     IORegistryEntry *options = g_rbgpuOptions;
     if (!options) {
@@ -884,6 +995,13 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
 
     char buf[280];
     snprintf(buf, sizeof(buf), "%s| %u %s", trail, stage, what ? what : "");
+
+    // 2ey: hold the flag across the write so the heartbeat never lands in the
+    // middle of it. This thread does NOT wait for the flag - it is the one
+    // that must not block - it simply claims it; the heartbeat is the side
+    // that yields.
+    g_rbgpuLastGate = stage;
+    OSCompareAndSwap(0, 1, &g_rbgpuNvramBusy);
     if (auto str = OSString::withCString(buf)) {
         options->setProperty("rbgpu-gate", str);
         str->release();
@@ -892,6 +1010,7 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
         options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
         sync->release();
     }
+    g_rbgpuNvramBusy = 0;
     // NOT released: g_rbgpuOptions holds the one reference for the boot.
 }
 
