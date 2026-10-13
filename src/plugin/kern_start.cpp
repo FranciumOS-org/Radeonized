@@ -1347,6 +1347,12 @@ static uint32_t g_rb_kiq_spec1 = 0xFFFFFFFFu;
 static uint32_t g_rb_kiq_spec2 = 0xFFFFFFFFu;
 static uint64_t g_rb_kiq_ring_mc = 0;   // startKIQ's first u64 arg: the ring MC address
 
+// 2dt: carried across the 5 s wait, because the log ring wraps during it.
+static uint64_t g_rb_2dt_wb_c0 = 0;
+static uint64_t g_rb_2dt_wb_e0 = 0;
+static uint32_t g_rb_2dt_sub_before = 0;
+static uint32_t g_rb_2dt_cmp_before = 0;
+
 // 2do (2026-10-12): read the CP_HQD_* window at the slot the KIQ actually uses.
 //
 // The 2dn boot settled it: startKIQ's AMD_PM4_QUEUE_SPEC is
@@ -2363,6 +2369,13 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         uint32_t completed = u32at(0x84);
         uint64_t wb_c0     = u64at(0xc0);
         uint64_t wb_e0     = u64at(0xe0);
+        // 2dt: the 5 s wait lets the request-0x14 poll flood evict ~500 lines,
+        // so anything logged BEFORE the wait is gone by the time the log is
+        // read. Keep the values and reprint them in the one line that survives.
+        g_rb_2dt_wb_c0 = wb_c0;
+        g_rb_2dt_wb_e0 = wb_e0;
+        g_rb_2dt_sub_before = submitted;
+        g_rb_2dt_cmp_before = completed;
         rbgpu_log("2ds: channel stamps BEFORE the wait: submitted(+0x80)=%u "
                   "completed(+0x84)=%u asked-for=%u ; writeback +0xc0=0x%llx +0xe0=0x%llx",
                   submitted, completed, stamp, wb_c0, wb_e0);
@@ -2407,7 +2420,15 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             uint32_t cmp = *reinterpret_cast<volatile uint32_t *>(
                 reinterpret_cast<uintptr_t>(ch) + 0x84);
             rbgpu_log("2ds: channel stamps AFTER the wait: submitted(+0x80)=%u "
-                      "completed(+0x84)=%u (asked-for=%u)", sub, cmp, stamp);
+                      "completed(+0x84)=%u (asked-for=%u) ; BEFORE sub=%u cmp=%u ; "
+                      "writeback +0xc0=0x%llx +0xe0=0x%llx%s",
+                      sub, cmp, stamp, g_rb_2dt_sub_before, g_rb_2dt_cmp_before,
+                      g_rb_2dt_wb_c0, g_rb_2dt_wb_e0,
+                      (g_rb_2dt_wb_e0 == 0xFFFFFFFFFFFFFFFFull)
+                          ? "  <<< +0xe0 is -1: timestampUpdated returns WITHOUT reading "
+                            "any writeback, so no fence address is configured"
+                          : "  <<< a writeback address IS set and a frame IS outstanding, "
+                            "so the fence memory itself is not being written");
         }
         rbgpu_dump_gc_regs("post-stamp-wait");
     } else {
