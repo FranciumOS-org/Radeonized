@@ -478,10 +478,39 @@ void RembrandtGPUPeer::stop(IOService *provider) {
     super::stop(provider);
 }
 
+// 2fa (2026-10-13): rate-limit the publisher.
+//
+// Measured, not inferred: in the 2ez boot the gaps between consecutive
+// RBGPULog lines oscillate between 3 us and 10 ms within one boot, on the
+// same straight-line code, while the 2ey boot's tail ran at 7-37 us. Every
+// rbgpu_log call scheduled performRefreshDiag, which memcpy's 235 KB
+// (512 x 400-byte log entries + 320 x 112-byte diag entries) under
+// g_diagLock and then builds up to 512 OSStrings, an OSArray and a 320-entry
+// OSDictionary and setProperty's both - twice per pass. With log lines
+// arriving back to back the refresh runs continuously, and the start() thread
+// blocks on g_diagLock for the snapshot every time it logs.
+//
+// A thread throttled to milliseconds per log line, with hundreds of lines
+// still to come in the doStart chain, is indistinguishable from a wedge: it
+// holds the IOService lock the whole time (which is why ioreg blocks and
+// pci.txt is 0 bytes) and it stops at a different place in every boot.
+//
+// At most one refresh per 250 ms. The publisher exists to be read after the
+// fact, so nothing needs it sooner.
+static uint64_t g_lastRefreshAt = 0;
+
 void RembrandtGPUPeer::scheduleRefreshDiag() {
-    if (refreshDiagCall) {
-        thread_call_enter(refreshDiagCall);
+    if (!refreshDiagCall) {
+        return;
     }
+    uint64_t now = mach_absolute_time();
+    uint64_t interval = 0;
+    nanoseconds_to_absolutetime(250ull * 1000ull * 1000ull, &interval);
+    if (g_lastRefreshAt && (now - g_lastRefreshAt) < interval) {
+        return;
+    }
+    g_lastRefreshAt = now;
+    thread_call_enter(refreshDiagCall);
 }
 
 void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call_param_t param1) {
@@ -1018,12 +1047,18 @@ void RembrandtGPUPeer::performRefreshDiag() {
     IOLockLock(g_diagLock);
     rbgpu_diag_set_num_locked("guard_calls", g_guard_calls);
 
+    // 2fa: copy only what is in use. The ring is indexed modulo its size, so
+    // a partially-filled ring still needs the whole array; a full one needs it
+    // all anyway. The diag table does not - g_diagCount entries of 112 bytes
+    // instead of a flat 35 KB.
     s_snapHead      = g_logHead;
     s_snapLogCount  = g_logCount;
-    memcpy(s_snapLogs, g_logRing, sizeof(s_snapLogs));
+    memcpy(s_snapLogs, g_logRing,
+           (g_logCount >= RBGPU_RING_SIZE) ? sizeof(s_snapLogs)
+                                           : sizeof(s_snapLogs[0]) * RBGPU_RING_SIZE);
 
     s_snapDiagCount = g_diagCount;
-    memcpy(s_snapDiags, g_diags, sizeof(s_snapDiags));
+    memcpy(s_snapDiags, g_diags, sizeof(s_snapDiags[0]) * g_diagCount);
     IOLockUnlock(g_diagLock);
 
     OSArray *logArray = OSArray::withCapacity(static_cast<unsigned int>(s_snapLogCount));
