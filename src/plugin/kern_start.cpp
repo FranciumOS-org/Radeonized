@@ -3921,9 +3921,60 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
             }
         }
     }
-    rbgpu_gate_2en(54, "initGraphicsMQD: calling the ORIGINAL - anything after "
-                       "this is Apple's command-9 queue create or the GC "
-                       "register pair at the end");
+    // 2ev (2026-10-13): Apple's initGraphicsMQD, fully disassembled
+    // (0xbea2542-0xbea275b). Gate 54 says the hang is in here, so what
+    // matters now is which region, and one byte decides a third of it:
+    //
+    //   A  bea255d  (pm4+0x18)->vtable[0x2d8]()      -> memobj; NULL -> false
+    //   B  bea257d  memobj->vtable[0x148]()          -> bool;  false -> false
+    //   C  bea258b  pm4+0x250                         NULL -> false
+    //   D  bea25b3  memobj->vtable[0x210](pm4+0x250, 0x1000, &slot, 0x100)
+    //   E  bea25c8  slot->vtable[0x118]()            -> ptr;  NULL -> false
+    //   F  bea25ea  bzero(ptr, 0x1000)               resolved via kc_stubs
+    //   G  bea25f2  IF pm4+0x10 == 1:
+    //        bea2603  (pm4+0x18)->vtable[0x2c0]()    -> service object
+    //        bea2626  IF pm4+0x310 == 1: svc->vtable[0x128](9, 0)   destroy
+    //        bea26a1  svc->vtable[0x120](9, 0, spec, out)  CREATE GRAPHICS Q
+    //   H  bea26f1  memobj->vtable[0x218](&out2)            ALWAYS
+    //   I  bea2713  (pm4+0x30)->vtable[0x148](0xf702000042) -> v
+    //      bea2726  (pm4+0x30)->vtable[0x120](v, 1)         ALWAYS
+    //   J  bea2740  (pm4+0x30)->vtable[0x148](0xe802000042) -> v
+    //      bea2750  (pm4+0x30)->vtable[0x120](v, 0)         ALWAYS
+    //
+    // So region G - the command-9 graphics-queue create, the whole reason
+    // this milestone family exists - runs ONLY when pm4+0x10 == 1. If that
+    // byte is 0 the create is skipped and the hang has to be in A-F or H-J,
+    // which promotes the GC register pairs and the standing gfx_min =
+    // gfx_max = 0 suspicion to the leading explanation.
+    //
+    // These are plain field reads, no virtual calls, so they cannot differ
+    // from what Apple is about to do. The two bytes go into gate 54's own
+    // NVRAM text so a wedge carries them out.
+    uint8_t mqd_f10  = *reinterpret_cast<volatile uint8_t *>(
+        reinterpret_cast<uintptr_t>(pm4) + 0x10);
+    uint8_t mqd_f310 = *reinterpret_cast<volatile uint8_t *>(
+        reinterpret_cast<uintptr_t>(pm4) + 0x310);
+    void *mqd_f250 = *reinterpret_cast<void **>(
+        reinterpret_cast<uintptr_t>(pm4) + 0x250);
+    void *mqd_f18  = *reinterpret_cast<void **>(
+        reinterpret_cast<uintptr_t>(pm4) + 0x18);
+    void *mqd_f30  = *reinterpret_cast<void **>(
+        reinterpret_cast<uintptr_t>(pm4) + 0x30);
+    rbgpu_diag_set_num("gfxmqd_f10", mqd_f10);
+    rbgpu_diag_set_num("gfxmqd_f310", mqd_f310);
+    rbgpu_diag_set_num("gfxmqd_f250", reinterpret_cast<uint64_t>(mqd_f250));
+    rbgpu_diag_set_num("gfxmqd_f30", reinterpret_cast<uint64_t>(mqd_f30));
+    rbgpu_log("2ev: initGraphicsMQD fields before the original: pm4+0x10=%u "
+              "(1 = the command-9 create block RUNS; 0 = it is SKIPPED and "
+              "the hang is in A-F or the GC register pairs H-J) pm4+0x310=%u "
+              "(1 = the destroy at 0xbea2626 runs first) pm4+0x250=%p "
+              "pm4+0x18=%p pm4+0x30=%p",
+              mqd_f10, mqd_f310, mqd_f250, mqd_f18, mqd_f30);
+
+    char gate54[72];
+    snprintf(gate54, sizeof(gate54),
+             "initGraphicsMQD ORIGINAL f10=%u f310=%u", mqd_f10, mqd_f310);
+    rbgpu_gate_2en(54, gate54);
     bool ret = orig_pm4_initGraphicsMQD_2cq ? orig_pm4_initGraphicsMQD_2cq(pm4) : false;
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
