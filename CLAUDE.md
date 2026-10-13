@@ -3702,3 +3702,98 @@ Apple's own `vtable[0x2c0]` a few microseconds before Apple does. If the walk
 hangs there, so would the original.
 
 Build: UUID E1EA8BF0, hosttest passes. Boot-args unchanged.
+
+### 2eu answered on hardware (2026-10-13): GATE 54 — the hang is in APPLE'S code
+
+logs/20261013-180057-plugin, armed, wedged, power-cycled. With the walk gone
+there is nothing between the two gates but the call to the original, and the
+second gate landed:
+
+```
+nvram rbgpu-gate -> "54 initGraphicsMQD: calling the ORIGINAL - anything
+                     after this is Apple's comma"
+log.txt last line -> "2en: gate 54 - initGraphicsMQD: calling the ORIGINAL"
+```
+
+Both records agree and the log is complete (65916 bytes, 2er's bounded ioreg
+again). So, after four boots of chasing my own instrument:
+
+- **the gate mechanism works** - two synchronous NVRAM writes inside
+  `IOService::start`, back to back, both landed;
+- **the thread reaches Apple's `initGraphicsMQD` and does not come back.**
+
+That is the first time in this milestone family that the hang is established
+to be in Apple's code rather than suspected. `pci.txt` is 0 bytes again
+(against the 2et boot's 401 KB), so the wedge is the hard kind - the start()
+thread is sitting in Apple's function holding the IOService lock.
+
+**And one correction to 2eu's own reframe.** I wrote that our marks "at most
+reach Apple's own `vtable[0x2c0]` a few microseconds before Apple does". The
+disassembly below shows Apple's FIRST call on `pm4+0x18` is `vtable[0x2d8]`,
+and `vtable[0x2c0]` is reached only inside a conditional branch. If that
+branch is not taken, the walk was calling something Apple never calls - a
+real behavioural difference, not a head start. The reframe was not supported.
+
+### Apple's initGraphicsMQD, disassembled end to end (0xbea2542-0xbea275b)
+
+```
+A  bea255d  (pm4+0x18)->vtable[0x2d8]()      -> memobj; NULL -> return false
+B  bea257d  memobj->vtable[0x148]()          -> bool;  false -> return false
+C  bea258b  pm4+0x250                         NULL -> return false
+D  bea25b3  memobj->vtable[0x210](pm4+0x250, 0x1000, &slot, 0x100)
+E  bea25c8  slot->vtable[0x118]()            -> ptr;   NULL -> return false
+F  bea25ea  bzero(ptr, 0x1000)               (stub resolved with kc_stubs.py)
+G  bea25f2  IF pm4+0x10 == 1:
+     bea2603  (pm4+0x18)->vtable[0x2c0]()    -> service object
+     bea2626  IF pm4+0x310 == 1: svc->vtable[0x128](9, 0)      destroy
+     bea26a1  svc->vtable[0x120](9, 0, spec, out)  CREATE THE GRAPHICS QUEUE
+H  bea26f1  memobj->vtable[0x218](&out2)                        ALWAYS
+I  bea2713  (pm4+0x30)->vtable[0x148](0xf702000042) -> v
+   bea2726  (pm4+0x30)->vtable[0x120](v, 1)                     ALWAYS
+J  bea2740  (pm4+0x30)->vtable[0x148](0xe802000042) -> v
+   bea2750  (pm4+0x30)->vtable[0x120](v, 0)                     ALWAYS
+```
+
+The function has no loop, so it is blocking inside one of these. Three things
+worth stating that were not known before:
+
+- **Region G runs only when `pm4+0x10 == 1`.** The command-9 graphics-queue
+  create - the thing this whole milestone family is about - is behind one byte.
+- There is a **4 KB `bzero`** at F, into a pointer that came from
+  `slot->vtable[0x118]()`. If that is a GPU-visible or uncached mapping, a
+  4096-byte store loop through it is a candidate for a stall in its own right.
+- The pairs at I and J are `vtable[0x148](encoded_id)` returning a value that
+  is passed straight to `vtable[0x120](value, flag)` - a read then a write,
+  on `pm4+0x30`, with flag 1 then 0. The ids `0xF702000042` / `0xE802000042`
+  are NOT the `(dword offset << 32) | 11` form recorded earlier in this file
+  (low word here is 0x02000042), so the register they name is **not yet
+  decoded** and nothing should be inferred from the raw value.
+
+## 2ev (2026-10-13): read the byte that decides a third of it
+
+Four plain field reads before calling the original - no virtual calls, so
+nothing Apple is not about to do itself - and the two deciding bytes go into
+gate 54's own NVRAM text so a wedge carries them out:
+
+```
+pm4+0x10    1 -> region G runs; 0 -> the create is SKIPPED
+pm4+0x310   1 -> the destroy at 0xbea2626 runs first
+pm4+0x250   the buffer handed to vtable[0x210]
+pm4+0x30    the register-access object used by I and J
+```
+
+Diag keys `gfxmqd_f10`, `gfxmqd_f310`, `gfxmqd_f250`, `gfxmqd_f30`, promoted
+into the NVRAM hot list right behind `gate_stage`.
+
+What the next armed boot decides, from `nvram rbgpu-gate`:
+
+```
+f10=1   the command-9 create is live, and the next build splits G from H-J
+        by instrumenting the service object's own vtable[0x120]
+f10=0   the create never runs, so the hang is in A-F (the allocation chain
+        and the 4 KB bzero) or in the GC register pairs H-J - and the
+        standing gfx_min = gfx_max = 0 suspicion becomes the leading
+        explanation rather than a background one
+```
+
+Build: UUID 527576AC, hosttest passes. Boot-args unchanged.

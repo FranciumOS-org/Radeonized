@@ -533,6 +533,8 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // submitSetResourcesPacket come first. The 2em keys stay because they are
     // the precondition: if ptb_written is 0 the rest means nothing.
     "gate_stage",
+    // 2ev: which region of Apple's initGraphicsMQD can even run.
+    "gfxmqd_f10", "gfxmqd_f310", "gfxmqd_f250", "gfxmqd_f30",
     "ptb_written", "ptb_rel_holds", "ptb_back",
     "vmf_st_wait", "vmf_st_post",
     "stamp_calls", "stamp_ret", "stamp_in_call",
