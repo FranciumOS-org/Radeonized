@@ -2964,6 +2964,9 @@ static volatile int g_rb_2ch_startkiq_result = -1;
 
 static bool (*orig_pm4_doStart_2ce)(void *, bool) = nullptr;
 
+// 2fb: the register accessor (pm4+0x30), stashed at doStart entry.
+static void *g_rb_2fb_regobj = nullptr;
+
 static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
 
@@ -2995,6 +2998,10 @@ static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
         rbgpu_diag_set_num("gfxmqd_f310", f310);
         rbgpu_diag_set_num("gfxmqd_f250", reinterpret_cast<uint64_t>(f250));
         rbgpu_diag_set_num("gfxmqd_f30", reinterpret_cast<uint64_t>(f30));
+        // 2fb: stash the register accessor so the setres hook can use it at
+        // the moment Apple does, rather than here at doStart entry. Measuring
+        // before the state exists is the 2dp/2eh/2ek mistake.
+        g_rb_2fb_regobj = f30;
         rbgpu_log("2ew: initGraphicsMQD branch fields at doStart entry: "
                   "pm4+0x10=%u (1 = the command-9 graphics-queue create at "
                   "0xbea26a1 RUNS; 0 = region G is SKIPPED and the hang is in "
@@ -3822,6 +3829,58 @@ static volatile int g_rb_2cq_gfxmqd_ret = -1;
 static volatile int g_rb_2cq_mapq_calls = 0;
 static volatile int g_rb_2cq_mapq_fails = 0;
 
+// 2fb (2026-10-13): the five register read-modify-writes Apple's doStart makes
+// between submitSetResourcesPacket and initGraphicsMQD, disassembled:
+//
+//   bea12df  [0x148](0x1DE1..0B = CP_RB0_CNTL)   -> bea12f2 [0x128](v, 0x80000000)
+//   bea130c  [0x148](0x1DE2..0B = CP_RB_RPTR_WR) -> bea131c [0x120](v, ..)
+//   bea132f  [0x148](0x1DF4..0B = CP_RB0_WPTR)   -> bea133f [0x120](v, ..)
+//   bea1359  [0x148](0x1DF5..0B = CP_RB0_WPTR_HI)-> bea1369 [0x120](v, ..)
+//   bea1383  [0x148](0x1DE1..0B = CP_RB0_CNTL)   -> bea1396 [0x130](v, ..)
+//
+// The object is `this->0x30` - the same accessor 2ew measured at
+// 0xffffffd39ba10000 and the same one initGraphicsMQD's regions I and J use.
+// The ids decode in the form CLAUDE.md records, (dword offset << 32) | 11 with
+// 11 = GC_HWID, and the names come from docs/linux-ref/gc_10_3_0_offset.h.
+//
+// These are the GRAPHICS ring registers. The KIQ is compute and works end to
+// end; this is the first time anything in this path touches RB0. Note what is
+// NOT claimed: 2dl read CP_RB0_CNTL directly through MMIO and got 0x00a00000,
+// so the register is readable and "the GFX block is dead so reads stall" is
+// contradicted by our own measurement. What has never been attempted is a
+// WRITE, which is what 0x120/0x128/0x130 do.
+//
+// So the probe is the READ only, through Apple's own accessor, bracketed by
+// gates, microseconds before Apple makes the identical call. No new write.
+
+#define RB_2FB_CP_RB0_CNTL 0x1DE10000000Bull
+
+static void rbgpu_probe_regread_2fb(void) {
+    void *obj = g_rb_2fb_regobj;
+    if (!obj) {
+        rbgpu_log("2fb: no accessor object stashed - doStart's read of pm4+0x30 "
+                  "was 0, so this says nothing about the register");
+        return;
+    }
+    void **vt = *reinterpret_cast<void ***>(obj);
+    if (!vt) {
+        rbgpu_log("2fb: accessor vtable is NULL - nothing probed");
+        return;
+    }
+    auto fn = reinterpret_cast<uint32_t (*)(void *, uint64_t)>(
+        vt[0x148 / sizeof(void *)]);
+    if (!fn) {
+        rbgpu_log("2fb: accessor vtable[0x148] is NULL - nothing probed");
+        return;
+    }
+    rbgpu_gate_2en(46, "about to READ CP_RB0_CNTL through Apple's own accessor");
+    uint32_t v = fn(obj, RB_2FB_CP_RB0_CNTL);
+    rbgpu_diag_set_num("rb0_cntl_via_accessor", v);
+    rbgpu_gate_2en(47, "CP_RB0_CNTL read RETURNED");
+    rbgpu_log("2fb: CP_RB0_CNTL via Apple's accessor = 0x%08x (2dl read "
+              "0x00a00000 straight through MMIO on this chip)", v);
+}
+
 static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     g_rb_2cq_setres_calls++;
     // 2cx: log on ENTRY. The 2026-10-12 armed boot stopped here with no line
@@ -3856,6 +3915,9 @@ static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {
     rbgpu_diag_set_num("setres_ret", static_cast<uint64_t>(g_rb_2cq_setres_ret));
     rbgpu_log("2cq: submitSetResourcesPacket(spec=%p) -> %d %s", spec, ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart exits via vtable[0x150], returns false)");
+    if (ret) {
+        rbgpu_probe_regread_2fb();
+    }
     return ret;
 }
 

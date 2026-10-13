@@ -4225,3 +4225,97 @@ stops inside that function, from 2eo onward, is now withdrawn. The frontier
 is wherever the next boot gets to with the instrument out of the way.
 
 Build: UUID 8CE83E37, hosttest passes. Boot-args unchanged.
+
+### 2fa answered on hardware (2026-10-13): the prediction held, and the trail advanced
+
+logs/20261013-191504-plugin, `plugin_check` in the armed boot
+(`armed=1`, `ttl_hw_init_ret=d0c85001`, a new boot), build checked:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 8CE83E37   == build/out (2fa)
+nvram rbgpu-gate  -> "40 101 151 45 | 45 submitSetResourcesPacket OK"
+nvram rbgpu-beat  -> "n=28 gate=45 skips=0 forced=0 t=21640918143"
+log.txt           -> 148 lines
+```
+
+**The quantitative prediction was right.** Inter-line gaps across the whole
+boot:
+
+```
+min 0.002 ms   median 0.004 ms   p90 0.028 ms
+last 10 gaps: 0.004 0.003 0.004 0.007 0.004 0.003 0.004 0.003 0.011 0.007 ms
+```
+
+against the 2ez boot's 4-10 ms in the same dump function. The contention was
+the whole of it, and 2ez's "the thread is crawling" is confirmed by the fix
+working rather than by the inference alone.
+
+**And the trail moved**: `40 101 151 45`, where 2ez got `40 101`. Gate 151 and
+gate 45 both landed, so 2ez's reorder was also right - that span was ours.
+
+The thread's last log line is at **14.928 s** and the beat's last write at
+**21.641 s**: 6.7 s of proven liveness after it, with the `2cq:` line (which
+2ez moved to *after* gate 45) absent. So the stop is between gate 45's commit
+and gate 50's commit, and this time the instrument is measured to be out of
+the way.
+
+### What is actually in that span: Apple programs the GRAPHICS ring
+
+`doStart` (0xbea1190) between the two calls, disassembled:
+
+```
+bea12a4  callq submitSetResourcesPacket            <- gate 45 is here
+bea12cb  r15 = this->0x30                          the register accessor
+bea12df  [0x148](0x1DE1..0B CP_RB0_CNTL)   -> bea12f2 [0x128](v, 0x80000000)
+bea130c  [0x148](0x1DE2..0B CP_RB_RPTR_WR) -> bea131c [0x120](v, ..)
+bea132f  [0x148](0x1DF4..0B CP_RB0_WPTR)   -> bea133f [0x120](v, ..)
+bea1359  [0x148](0x1DF5..0B CP_RB0_WPTR_HI)-> bea1369 [0x120](v, ..)
+bea1383  [0x148](0x1DE1..0B CP_RB0_CNTL)   -> bea1396 [0x130](v, ..)
+bea13ad  callq initGraphicsMQD                     <- gate 50 is here
+```
+
+Five register read-modify-write pairs, and three things fall out:
+
+- **The ids decode.** They are exactly the `(dword offset << 32) | 11` form
+  this file recorded for Apple's encoded register ids, 11 = GC_HWID, and the
+  dword offsets are `mmCP_RB0_CNTL` 0x1de1, `mmCP_RB_RPTR_WR` 0x1de2,
+  `mmCP_RB0_WPTR` 0x1df4, `mmCP_RB0_WPTR_HI` 0x1df5 from
+  docs/linux-ref/gc_10_3_0_offset.h. (The `0xF702000042` / `0xE802000042` ids
+  inside initGraphicsMQD are still NOT this form and stay undecoded.)
+- **The object is `this->0x30`** - the same accessor 2ew measured at
+  `0xffffffd39ba10000`, and the same one initGraphicsMQD's regions I and J
+  use. So the suspect 2ew named is reached *earlier* than 2ew thought.
+- **These are the GRAPHICS ring (RB0) registers.** The KIQ is a compute queue
+  and works end to end; this is the first thing in this path to touch RB0,
+  and `gfx_min = gfx_max = 0` has stood since 2di.
+
+**What is NOT claimed:** that the GFX block is dead and reads stall. 2dl read
+`CP_RB0_CNTL` straight through MMIO on this chip and got `0x00a00000`, so the
+register is readable, and that measurement contradicts the easy story. What
+has never been attempted is a **write**, which is what `0x120` / `0x128` /
+`0x130` do.
+
+## 2fb (2026-10-13): make the read, and bracket it
+
+One virtual call, read-only, that Apple makes unconditionally a few
+microseconds later on the same object with the same id - `vtable[0x148]` is
+the register *read*. It runs in the `submitSetResourcesPacket` hook right
+after gate 45, so the chip is in the state Apple's own call will see;
+reading it at doStart entry instead would be the 2dp/2eh/2ek mistake of
+measuring before the state exists. The accessor pointer is stashed at doStart
+entry, where reading `pm4+0x30` has been safe since 2ce.
+
+No new hardware write. Gates 46 and 47 bracket the call.
+
+```
+trail ...45 46 47   the accessor READ works, so the stop is in one of Apple's
+                    WRITES (0x120/0x128/0x130) - the first write to the
+                    graphics ring this project has ever caused
+trail ...45 46      the read itself does not return, and the frontier is a
+                    GC register read through Apple's accessor even though the
+                    same register reads fine through direct MMIO (2dl)
+trail ...45 only    our two diag sets and one log line still cost the thread,
+                    despite 4 us measured - the hook layer, not its placement
+```
+
+Build: UUID 0BDB68D1, hosttest passes. Boot-args unchanged.
