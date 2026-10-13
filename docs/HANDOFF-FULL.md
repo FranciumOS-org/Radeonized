@@ -1,3 +1,12 @@
+> **STALE — do not use. Superseded by `docs/HANDOFF.md`.**
+>
+> This file is a verbatim dump of the repo as it stood on 2026-10-05, at boot
+> 27, when TTL init still failed with status 4. Everything after that —
+> the yellow_carp firmware substitution, TTL init succeeding, the SMU link,
+> the whole KIQ/fence investigation (2ag through 2ea) — is absent, and its
+> "where it stands" section is wrong by about a hundred boots. The repo's own
+> files are the current source; `docs/HANDOFF.md` is the current state.
+
 # RembrandtGPU — full project handoff (2026-10-05)
 
 This one file holds the whole project: goal, machine, rules, workflow,
