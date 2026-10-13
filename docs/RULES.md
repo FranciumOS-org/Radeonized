@@ -1645,3 +1645,67 @@ the same class of bug as the SMU address in 2dh/2di.
 
 Build: UUID CB818072, hosttest passes. Same boot-args, still armed. All reads,
 no GC register written.
+
+### 2dl on hardware (2026-10-12): seg0 proven — and the header-dump claim is wrong
+
+logs/20261012-203308-plugin, UUID CB818072, armed, no panic.
+
+**The base is settled.** `CP_RB0_CNTL = 0x00a00000` at seg0 = 0x1260 and
+`0x00000000` at the old base 0, so **seg0 = 0x1260** and the CP readings from
+2dk are real data:
+
+```
+CP_STAT=0x00000000  ME_HALT=0 PFP_HALT=0 CE_HALT=0 MEC1_HALT=0 MEC2_HALT=0
+GRBM_STATUS=0xa0003028
+```
+
+The CP is powered, **not halted**, and idle - including at `pre-kiq-submit`,
+with the packet supposedly in flight.
+
+**But two of the new values are fill patterns, and 2dl's own conclusion was
+wrong:**
+
+```
+CP_RB0_BASE         = 0xfedcbaef
+MEC_ME1_HEADER_DUMP = 0xdef0def0   at post-gc-hw-init
+MEC_ME1_HEADER_DUMP = 0xdef1def1   at pre-kiq-submit
+```
+
+`0xfedcbaef` is not a ring base and `0xdef0def0` is not a PM4 header. The
+header moving `def0 -> def1`, incrementing by exactly one in BOTH halves
+between two reads, is a FIFO walking a pre-filled pattern buffer. So
+`2dl DIAG: MEC fetched a packet: YES` is **not supported** - it was the same
+overclaiming as 2dk's "seg0 decodes", one layer down. Three times now a
+nonzero-or-not test has been treated as a result; the lesson is to make the
+code state the pattern it sees, not a verdict the value cannot carry.
+
+CP_RB0_BASE being a poison value is probably not itself a fault: doStart runs
+with arg 0, the KIQ is a compute queue driven by MQD + doorbell, and
+CP_RB0_RPTR/WPTR both read 0 exactly as doStart's own ring-state check wants.
+
+## 2dm (2026-10-12): characterise the pattern, and ask whether the queue is live
+
+Two read-only additions, no verdict where the data cannot support one.
+
+**Is the header dump a pattern?** `CP_MEC_ME1_HEADER_DUMP` pops the next entry
+on each read, so it is now read four times in a row plus ME2 once. The log
+says which of three things it saw - stepping by 0x00010001 (a pre-filled
+pattern, proving nothing about fetching), constant, or varying irregularly
+(possibly real headers, PM4 type 3 having bits 31:30 = 11) - and says in those
+words that a stepping pattern says nothing.
+
+**Is the KIQ queue live?** This is the direct question and nothing has asked
+it:
+
+```
+CP_HQD_ACTIVE               0x1fab   bit 0 = this compute HQD is active
+CP_GFX_HQD_ACTIVE           0x1e80   the one doStart polls in waitForActiveValue
+CP_HQD_PQ_BASE              0x1fb1   was the queue ever pointed at a ring
+CP_HQD_PQ_DOORBELL_CONTROL  0x1fb8   bit 30 = doorbell enabled
+```
+
+If the CP is unhalted and idle while a packet is supposedly in flight, the
+fault has to be that the queue was never mapped or the doorbell never routed -
+and these four say so directly.
+
+Build: UUID CD998921, hosttest passes. Same boot-args, still armed. All reads.

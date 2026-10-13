@@ -515,6 +515,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dl: seg0 proof + whether the MEC ever fetched a packet.
     "diag_rb0_cntl", "diag_rb0_cntl_s0", "diag_rb0_rptr", "diag_rb0_wptr",
     "diag_mec_hdr", "diag_grbm_status",
+    // 2dm: is the KIQ queue live, and is the header dump a pattern?
+    "diag_hqd_active", "diag_gfx_hqd_active", "diag_hqd_pq_base",
+    "diag_hqd_doorbell", "diag_mec_hdr4",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

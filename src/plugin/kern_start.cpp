@@ -1497,9 +1497,74 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   tag, cp_stat_a,
                   (cp_me_a  >> 28) & 1, (cp_me_a  >> 26) & 1, (cp_me_a >> 24) & 1,
                   (cp_mec_a >> 30) & 1, (cp_mec_a >> 28) & 1);
-        rbgpu_log("2dl DIAG [%s]: MEC fetched a packet: %s",
-                  tag, mec_hdr ? "YES (header nonzero - the CP read the ring)"
-                               : "NO (header 0 - the CP never fetched from the ring)");
+    }
+
+    // 2dm (2026-10-12): do NOT read "header dump nonzero" as "the MEC fetched a
+    // packet". The 2dl boot got 0xdef0def0 at post-gc-hw-init and 0xdef1def1 at
+    // pre-kiq-submit, and CP_RB0_BASE read 0xfedcbaef. Those are fill patterns,
+    // not data, and the header marching from def0 to def1 - incrementing by one
+    // in BOTH halves - is a FIFO walking a pre-filled buffer, not a record of
+    // real packets. A PM4 type-3 header does not step in sequence. The 2dl
+    // "MEC fetched a packet: YES" line was overclaiming, the same way 2dk's
+    // "seg0 decodes" did.
+    //
+    // CP_MEC_ME1_HEADER_DUMP pops the next entry on each read, so reading it
+    // several times in a row characterises it: def2, def3, def4... is a
+    // pre-filled pattern and proves nothing about fetching; varying or
+    // repeating values would be real.
+    {
+        const uint32_t dwCP_MEC_HDR2 = 0x0e2f;  // ME2 header dump
+        uint32_t h[4];
+        for (int i = 0; i < 4; i++)
+            h[i] = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_MEC_HDR) * 4);
+        uint32_t h2 = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_MEC_HDR2) * 4);
+        rbgpu_log("2dm DIAG [%s]: ME1_HEADER_DUMP x4 = 0x%08x 0x%08x 0x%08x 0x%08x ; "
+                  "ME2 = 0x%08x", tag, h[0], h[1], h[2], h[3], h2);
+        rbgpu_diag_set_num("diag_mec_hdr1", h[0]);
+        rbgpu_diag_set_num("diag_mec_hdr4", h[3]);
+        rbgpu_diag_set_num("diag_mec_hdr_me2", h2);
+
+        bool stepping = (h[1] == h[0] + 0x00010001u) && (h[2] == h[1] + 0x00010001u);
+        if (stepping) {
+            rbgpu_log("2dm DIAG [%s]: the header dump STEPS by 0x00010001 per read - "
+                      "a pre-filled pattern buffer, NOT fetched packet headers. It says "
+                      "nothing about whether the CP read the ring.", tag);
+        } else if (h[0] == h[1] && h[1] == h[2]) {
+            rbgpu_log("2dm DIAG [%s]: the header dump is constant across reads (0x%08x) - "
+                      "not a popping FIFO here", tag, h[0]);
+        } else {
+            rbgpu_log("2dm DIAG [%s]: the header dump varies irregularly - these may be "
+                      "real packet headers (PM4 type 3 has bits 31:30 = 11)", tag);
+        }
+    }
+
+    // The direct question, and the one doStart itself asks: is the queue live?
+    // The KIQ is a compute queue, so CP_HQD_ACTIVE bit 0 is "this HQD is
+    // active"; CP_GFX_HQD_ACTIVE is the one doStart polls in waitForActiveValue.
+    // CP_HQD_PQ_BASE and the doorbell control say whether the queue was ever
+    // pointed at a ring and a doorbell at all - which is where the fault must
+    // be if the CP is unhalted and idle while a packet is supposedly in flight.
+    {
+        const uint32_t dwCP_HQD_ACTIVE     = 0x1fab;
+        const uint32_t dwCP_GFX_HQD_ACTIVE = 0x1e80;
+        const uint32_t dwCP_HQD_PQ_BASE    = 0x1fb1;
+        const uint32_t dwCP_HQD_PQ_DOORBELL= 0x1fb8;
+
+        uint32_t hqd_active     = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_HQD_ACTIVE)     * 4);
+        uint32_t gfx_hqd_active = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_GFX_HQD_ACTIVE) * 4);
+        uint32_t hqd_pq_base    = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_HQD_PQ_BASE)    * 4);
+        uint32_t hqd_doorbell   = g_hw.rreg(g_hw.ctx, (kSeg0Conv + dwCP_HQD_PQ_DOORBELL)* 4);
+
+        rbgpu_log("2dm DIAG [%s]: CP_HQD_ACTIVE=0x%08x CP_GFX_HQD_ACTIVE=0x%08x "
+                  "CP_HQD_PQ_BASE=0x%08x CP_HQD_PQ_DOORBELL_CONTROL=0x%08x",
+                  tag, hqd_active, gfx_hqd_active, hqd_pq_base, hqd_doorbell);
+        rbgpu_diag_set_num("diag_hqd_active", hqd_active);
+        rbgpu_diag_set_num("diag_gfx_hqd_active", gfx_hqd_active);
+        rbgpu_diag_set_num("diag_hqd_pq_base", hqd_pq_base);
+        rbgpu_diag_set_num("diag_hqd_doorbell", hqd_doorbell);
+        rbgpu_log("2dm DIAG [%s]: KIQ queue active (CP_HQD_ACTIVE bit 0) = %u; "
+                  "doorbell enabled (bit 30) = %u",
+                  tag, hqd_active & 1, (hqd_doorbell >> 30) & 1);
     }
 }
 
