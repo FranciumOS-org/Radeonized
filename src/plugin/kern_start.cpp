@@ -684,6 +684,48 @@ static int slot_internal_hw_init(void *ctx) {
                       g_smu.clocks.df_pstate[i].voltage);
         }
     }
+
+    // 2dj (2026-10-12): ask the chip whether GFX is parked in GFXOFF.
+    //
+    // The 2di boot brought the SMU up for real - the SOC and DF tables came
+    // back as plausible 680M numbers - but MinGfxClk and MaxGfxClk both read
+    // 0, and the CP still never consumed the KIQ packet (stamp_ret 0). Linux
+    // reads max/min sclk from those same two fields
+    // (yellow_carp_ppt.c:895,925), so the zeros are not a parsing error: the
+    // SMU is reporting that the GFX block has no clock range.
+    //
+    // Two different causes fit that: GFX is powered but parked in GFXOFF, or
+    // GFX DPM was never started at all. They need different fixes, so settle
+    // it before asking for any new message group.
+    //
+    // rb_smu13_get_gfxoff_status is a plain read of SMUIO_GFX_MISC_CNTL - no
+    // message, no mailbox write, so no policy group and nothing new sent to
+    // the chip. SMUIO is alive (the SMU just answered seven messages through
+    // it); this is NOT one of the gated-GC reads that caused the boot 6/7
+    // RSMU timeouts, and no GC register is touched here.
+    //
+    //   0 = in GFXOFF, 1 = leaving GFXOFF, 2 = not in GFXOFF, 3 = entering
+    //   (yellow_carp_get_gfxoff_status)
+    {
+        uint32_t gfxoff = 0xFFFFFFFFu;
+        int gret = rb_smu13_get_gfxoff_status(&g_smu, &gfxoff);
+        rbgpu_diag_set_num("gfxoff_read_err", static_cast<uint64_t>(gret));
+        if (gret == RB_SMU13_OK) {
+            rbgpu_diag_set_num("gfxoff_status", gfxoff);
+            const char *what = (gfxoff == 0) ? "IN GFXOFF (GFX is parked - DisallowGfxOff would be the lever)"
+                             : (gfxoff == 1) ? "LEAVING GFXOFF"
+                             : (gfxoff == 2) ? "NOT in GFXOFF (GFX is powered; the zero clock range means "
+                                               "GFX DPM was never started, not that it is parked)"
+                             : (gfxoff == 3) ? "ENTERING GFXOFF"
+                                             : "unknown encoding";
+            rbgpu_log("[Check 6] GFXOFF status = %u: %s", gfxoff, what);
+        } else {
+            // dw_gfx_misc_cntl is 0 when rb_smu13_init found no SMUIO block.
+            rbgpu_log("[Check 6] GFXOFF status unavailable: %s (%d) - SMUIO register "
+                      "not located, so this boot cannot say why the clock range is 0",
+                      rb_smu13_strerror(gret), gret);
+        }
+    }
     return 0;
 }
 
