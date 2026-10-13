@@ -1929,3 +1929,67 @@ at a real carve-out MC address, CP unhalted, RLC firmware present.
 
 Build: UUID 53BA2078, hosttest passes. Same boot-args, still armed. All reads
 except the GRBM_GFX_CNTL selector, which is saved and restored.
+
+### 2dq on hardware (2026-10-12): THE CP EXECUTES THE PACKET
+
+logs/20261012-213243-plugin, UUID 53BA2078, armed, no panic. At
+`at-stamp-wait`, which is inside `waitForHwStamp` and therefore after
+commitBlock and after the doorbell:
+
+```
+me=2 pipe=1 queue=0: ACTIVE=1 RPTR=0x00000020 WPTR=0x00000020
+                     DOORBELL=0x40000000 CTRL=0xc030860d
+CP_STAT=0x88000000      (0x00000000 at post-gc-hw-init, post-startKIQ and
+                         pre-kiq-submit on this same boot)
+```
+
+**WPTR advanced to 0x20 and RPTR caught up to it.** The driver wrote the
+SET_RESOURCES packet and rang the doorbell; `CP_HQD_PQ_RPTR` is written by
+**hardware**, so the command processor fetched and consumed it. CP_STAT going
+from 0 to busy at exactly this point says the same thing a second way.
+
+**So the premise of 2cx through 2dp is wrong.** "The CP never consumes the KIQ
+packet" / "the CP/MEC microcode is not running" is **withdrawn**. The command
+processor runs, the queue is live, the doorbell is routed, the ring is real.
+
+Why the project believed otherwise for fifteen milestones: **2cy returns false
+from `waitForHwStamp` without ever calling the original.** Every
+"waitForHwStamp -> 0 (TIMEOUT - the CP never consumed the packet)" line since
+2cy is our own hook reporting its own skip, and the log text asserted a cause
+it never measured. The stamp has not timed out; nobody has waited for it.
+
+2cy itself recorded the exit: "`-rbgpustampwait` restores the real wait, for
+the boot where the CP finally runs and the stamp is expected to arrive. That
+flag is the test for 'is the command processor alive now'." It is alive.
+
+Sixth and sharpest instance of the same lesson: a diagnostic that substitutes
+its own value must never narrate that value as a hardware result.
+
+## 2dr (2026-10-12): let the wait actually run
+
+`-rbgpustampwait` is now the expected path rather than the daring one. The hook
+calls the original, logs what it returned in those terms, and dumps the queue
+again as `post-stamp-wait`.
+
+```
+real wait -> 1   the stamp arrived; doStart continues past
+                 submitSetResourcesPacket for the first time in the project
+real wait -> 0   the CP consumed the packet and the stamp still did not land,
+                 so the fault is in the stamp/fence path, not in execution
+```
+
+Residual risk, unchanged from 2cy and worth stating: the wait is unbounded in
+practice (5 s per poll, re-armed while the channel says keep waiting), so if
+the stamp never arrives the boot wedges and costs a power cycle. The evidence
+that it will arrive is RPTR = WPTR with CP_STAT busy. One-shot arming means
+the recovery boot comes up unarmed either way.
+
+Build: UUID C68112B7, hosttest passes.
+
+**Next boot adds one boot-arg:**
+
+```
+sudo tools/efi.sh bootarg add -rbgpustampwait
+sudo tools/efi.sh install
+sudo nvram rbgpu-arm=1 && sudo reboot
+```
