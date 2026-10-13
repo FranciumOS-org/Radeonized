@@ -507,6 +507,8 @@ static const char *const kRbgpuNvramKeys[] = {
     "smu_dma_mc_ok", "smu_bringup_armed", "bringup_err",
     "smu_nmsgs", "smu_writes", "smu_refused", "last_smu_err",
     "gfx_min", "gfx_max",
+    // 2dj: why the GFX clock range is 0 - parked in GFXOFF, or never started.
+    "gfxoff_status", "gfxoff_read_err",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

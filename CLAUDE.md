@@ -1453,3 +1453,65 @@ What the next armed boot decides:
   not in host memory.
 - Either way the boot should no longer panic, because the teardown path is
   fixed. `sw_exit_h340_cleared=1` with no panic is the proof.
+
+### 2di confirmed on hardware (2026-10-12): the SMU link works
+
+logs/20261012-195941-plugin, armed boot, no panic, desktop reached:
+
+```
+2di: MMHUB FB_LOCATION_BASE=0x0000F400 TOP=0x0000F4FF FB_OFFSET=0x00000780
+2di: alloc offset 0xffff000 + fb_base 0xf400000000 = MC 0xf40ffff000; inside carve-out=1
+2df: SMU accounting after bringup: msgs=7 writes=21 refused=0 last_msg=0x0f last_resp=0x1
+[Check 3] rb_smu13_bringup succeeded
+[Check 4] SOC levels: 400 600 720 800 900 1028 1028 1200 MHz
+[Check 4] DF P-state 0: fclk=1800 memclk=2400 volt=3639 ; 1: fclk=500 memclk=1000 volt=2600
+```
+
+`last_resp` is 1 where 2dh had 0, `bringup_err=0`, and the SOC/DF values are
+real Rembrandt numbers, so the FB-offset -> MC translation is proven, not
+inferred. First two-way SMU transaction in the project: the SMU DMA-wrote its
+table into our page at an address derived from MMHUB registers.
+
+Two things the boot did NOT settle:
+
+- **The 2di panic fix is unproven.** `sw_exit_h340` is absent: the bringup
+  succeeded, so the teardown path never ran. Correct by reading, untested on
+  hardware.
+- **`gfx_min` and `gfx_max` are both 0** while every neighbouring field
+  decoded correctly, and `stamp_calls=1 stamp_ret=0` - the CP still does not
+  consume the KIQ packet. Linux reads max/min sclk from those same two fields
+  (yellow_carp_ppt.c:895,925), so this is not a parsing error: the SMU is
+  reporting that the GFX block has no clock range.
+
+So 2dc's hypothesis (no SMU -> GFX gated -> CP dead) was necessary but not
+sufficient, exactly as 2de/2df warned. The SMU is up and the GFX block is
+still not.
+
+## 2dj (2026-10-12): ask the chip why the GFX clock range is 0
+
+Two causes fit `gfx_min=gfx_max=0`: GFX is powered but parked in GFXOFF, or
+GFX DPM was never started. They need different fixes, so settle it before
+asking for a new message group.
+
+`rb_smu13_get_gfxoff_status` (already in rb_smu13.c) is a plain read of
+SMUIO_GFX_MISC_CNTL - no message, no mailbox write, so no policy group and
+nothing new sent to the chip. SMUIO is alive, having just carried seven
+messages; this is not one of the gated-GC reads behind the boot 6/7 RSMU
+timeouts, and no GC register is touched.
+
+Logged as `[Check 6]` after the clock dump. Diag keys `gfxoff_status`
+(0 in GFXOFF, 1 leaving, 2 not in GFXOFF, 3 entering) and `gfxoff_read_err`,
+both in NVRAM so a boot that dies still reports them.
+
+Build: UUID C9731AE2, hosttest passes. Same boot-args as 2di, still armed.
+
+What it decides:
+
+- **status 0 (in GFXOFF)**: GFX is parked. The lever is `DisallowGfxOff`,
+  which needs `RB_SMU13_ALLOW_GFXOFF` - the user's decision.
+- **status 2 (not in GFXOFF)**: GFX is powered and the clock range is 0
+  because GFX DPM was never started. GFXOFF is then the wrong lever and
+  `SetHardMinGfxClk` / `SetSoftMaxGfxClk` (a different group again) is the
+  question.
+- **read error**: rb_smu13_init never located SMUIO, and the question stays
+  open.
