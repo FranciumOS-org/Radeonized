@@ -3856,29 +3856,44 @@ static volatile int g_rb_2cq_mapq_fails = 0;
 #define RB_2FB_CP_RB0_CNTL 0x1DE10000000Bull
 
 static void rbgpu_probe_regread_2fb(void) {
+    // 2fc (2026-10-13): EVERY exit path writes a gate. The 2fb version
+    // returned silently when the accessor was missing, so "gate 46 absent"
+    // could not tell "the thread stopped before the probe" from "the probe
+    // skipped itself" - the ambiguity-of-absence this project has hit at
+    // 2eh, 2ek and 2en, built in fresh.
+    //
+    // Gate 46 is written FIRST, before any check, and carries the accessor
+    // pointer: the trail is synchronous and reliable, while the diag summary
+    // now freezes earlier (a consequence of 2fa's rate limit) and no longer
+    // reports gfxmqd_f30.
     void *obj = g_rb_2fb_regobj;
+    char what[96];
+    snprintf(what, sizeof(what), "setres tail done; accessor=%p", obj);
+    rbgpu_gate_2en(46, what);
+
     if (!obj) {
-        rbgpu_log("2fb: no accessor object stashed - doStart's read of pm4+0x30 "
-                  "was 0, so this says nothing about the register");
+        rbgpu_gate_2en(48, "probe SKIPPED: no accessor stashed at doStart");
         return;
     }
     void **vt = *reinterpret_cast<void ***>(obj);
     if (!vt) {
-        rbgpu_log("2fb: accessor vtable is NULL - nothing probed");
+        rbgpu_gate_2en(48, "probe SKIPPED: accessor vtable NULL");
         return;
     }
     auto fn = reinterpret_cast<uint32_t (*)(void *, uint64_t)>(
         vt[0x148 / sizeof(void *)]);
     if (!fn) {
-        rbgpu_log("2fb: accessor vtable[0x148] is NULL - nothing probed");
+        rbgpu_gate_2en(48, "probe SKIPPED: vtable[0x148] NULL");
         return;
     }
-    rbgpu_gate_2en(46, "about to READ CP_RB0_CNTL through Apple's own accessor");
+    rbgpu_gate_2en(49, "calling Apple's accessor READ of CP_RB0_CNTL");
     uint32_t v = fn(obj, RB_2FB_CP_RB0_CNTL);
+    char done[96];
+    snprintf(done, sizeof(done), "CP_RB0_CNTL read RETURNED 0x%08x", v);
     rbgpu_diag_set_num("rb0_cntl_via_accessor", v);
-    rbgpu_gate_2en(47, "CP_RB0_CNTL read RETURNED");
+    rbgpu_gate_2en(47, done);
     rbgpu_log("2fb: CP_RB0_CNTL via Apple's accessor = 0x%08x (2dl read "
-              "0x00a00000 straight through MMIO on this chip)", v);
+              "0x00a00000 straight through MMIO)", v);
 }
 
 static bool hooked_kiq_submitSetResources_2cq(void *ch, const void *spec) {

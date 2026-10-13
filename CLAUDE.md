@@ -4319,3 +4319,68 @@ trail ...45 only    our two diag sets and one log line still cost the thread,
 ```
 
 Build: UUID 0BDB68D1, hosttest passes. Boot-args unchanged.
+
+### 2fb answered on hardware (2026-10-13): NOTHING — the probe can exit without a gate
+
+No `plugin_check` capture (the armed boot left no new log dir), so NVRAM is
+the whole record. Build and arming checked first:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 0BDB68D1   == build/out (2fb)
+rbgpu-diag        -> armed=0                            the recovery boot
+rbgpu-diag-prev   -> d=23 armed=1                       the armed 2fb boot
+nvram rbgpu-gate  -> "40 101 151 45 | 45 submitSetResourcesPacket OK"
+nvram rbgpu-beat  -> "n=13 gate=45 skips=0 forced=0 t=18711491703"
+```
+
+**The trail is identical to 2fa and gate 46 is absent, and that absence is
+uninterpretable** - because `rbgpu_probe_regread_2fb` returns silently when
+the accessor, its vtable or `vtable[0x148]` reads NULL. So "no gate 46" is
+equally well explained by:
+
+- the thread stopping in the two diag sets and one log line before the probe,
+  which 2fa measured at 4 us each; or
+- the probe reaching its own null check and skipping without a word.
+
+That is the ambiguity-of-absence this project has already hit at 2eh, 2ek and
+2en, built in fresh by me one step after writing that the instrument was
+finally trustworthy. The boot is spent and it answered nothing.
+
+**A second, smaller regression, and it is 2fa's.** The prev summary carries
+`d=23` with **no `ttl_hw_init_ret` and no `gfxmqd_*`**, where every boot
+before 2fa had them. Rate-limiting the refresh to 250 ms means far fewer
+flushes, so the summary now freezes earlier in the boot. The gate trail is
+synchronous and unaffected, but anything that only lives in `rbgpu-diag` is
+now less likely to survive. Values that matter must ride the trail.
+
+So the `g_rb_2fb_regobj` stash could not be confirmed either: it is set inside
+`if (pm4)` in the doStart hook (kern_start.cpp:3004), which the chain does
+reach, but the key that would prove it was dropped.
+
+## 2fc (2026-10-13): no silent exits, and put the value in the trail
+
+Three changes to the probe, all instrument:
+
+- **Gate 46 is written FIRST**, before any null check, and carries the
+  accessor pointer in its text. The trail is synchronous and reliable where
+  the diag summary no longer is.
+- Each null check gets its own **gate 48** naming which pointer was NULL,
+  instead of returning silently.
+- The call itself is bracketed by **gate 49** (about to call) and **gate 47**
+  (returned, with the value in the text).
+
+Every path out of the probe now writes a gate, so the next trail is a
+complete decision tree:
+
+```
+...45 46 49 47   the accessor READ works and returned a value; the stop is in
+                 one of Apple's WRITES (0x120/0x128/0x130) - the first write
+                 to the graphics ring this project would have caused
+...45 46 49      the read itself does not return, even though 2dl read the
+                 same register fine through direct MMIO
+...45 46 48      the probe skipped, and the gate says which pointer was NULL
+...45 only       the thread stops in the two diag sets and one log line
+                 before the probe - the hook layer itself, at 4 us a call
+```
+
+Build: UUID 720E1371, hosttest passes. Boot-args unchanged.
