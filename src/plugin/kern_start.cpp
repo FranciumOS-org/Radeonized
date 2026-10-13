@@ -2215,6 +2215,35 @@ static int (*orig_kiq_startKIQ_2ch)(void *, uint64_t, uint64_t, void *, void *) 
 static bool (*orig_hw_registerChannel_2du)(void *, void *) = nullptr;
 static bool (*orig_sched_addHWChannel_2du)(void *, void *, uint64_t) = nullptr;
 
+// 2dv (2026-10-12): counting is not enough - track WHICH channel.
+//
+// The 2du boot: regchan_calls=25, addchan_calls=23, and NEITHER ever returned
+// false. So both named gates pass for every channel they see, and yet the KIQ
+// channel's +0xe0 is still -1. The 25-vs-23 gap means two channels got
+// registerChannel and never reached addHWChannel - which is precisely the
+// shape of the middle gate, `this->vtable[0x1c8]`, refusing for them.
+//
+// Counters cannot say whether the KIQ is one of those two, and the log lines
+// were lost to the ring wrap, so record the channel POINTERS and answer by
+// membership at waitForHwStamp, where the KIQ channel is in hand.
+#define RB_2DV_MAX_CHAN 48
+static void    *g_rb_2dv_reg[RB_2DV_MAX_CHAN];
+static uint32_t g_rb_2dv_reg_n = 0;
+static void    *g_rb_2dv_add[RB_2DV_MAX_CHAN];
+static uint32_t g_rb_2dv_add_n = 0;
+
+static void rb_2dv_note(void **arr, uint32_t *n, void *p) {
+    if (!p || *n >= RB_2DV_MAX_CHAN) return;
+    for (uint32_t i = 0; i < *n; i++)
+        if (arr[i] == p) return;
+    arr[(*n)++] = p;
+}
+static bool rb_2dv_seen(void *const *arr, uint32_t n, void *p) {
+    for (uint32_t i = 0; i < n; i++)
+        if (arr[i] == p) return true;
+    return false;
+}
+
 static bool hooked_hw_registerChannel_2du(void *hw, void *chan) {
     bool ret = orig_hw_registerChannel_2du ? orig_hw_registerChannel_2du(hw, chan) : false;
     rbgpu_log("2du: AMDHardware::registerChannel(hw=%p chan=%p) -> %d%s",
@@ -2223,6 +2252,7 @@ static bool hooked_hw_registerChannel_2du(void *hw, void *chan) {
                          "leaves channel+0xe0 = -1, so no fence is ever read");
     rbgpu_diag_inc("regchan_calls");
     if (!ret) rbgpu_diag_inc("regchan_fails");
+    else rb_2dv_note(g_rb_2dv_reg, &g_rb_2dv_reg_n, chan);
     return ret;
 }
 
@@ -2234,6 +2264,7 @@ static bool hooked_sched_addHWChannel_2du(void *sched, void *chan, uint64_t idx)
                   : "  <<< FAILS -> channel+0xe0 stays -1");
     rbgpu_diag_inc("addchan_calls");
     if (!ret) rbgpu_diag_inc("addchan_fails");
+    else rb_2dv_note(g_rb_2dv_add, &g_rb_2dv_add_n, chan);
     return ret;
 }
 
@@ -2426,6 +2457,27 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         g_rb_2dt_wb_e0 = wb_e0;
         g_rb_2dt_sub_before = submitted;
         g_rb_2dt_cmp_before = completed;
+
+        // 2dv: was THIS channel registered, and was it added to the scheduler?
+        bool in_reg = rb_2dv_seen(g_rb_2dv_reg, g_rb_2dv_reg_n, ch);
+        bool in_add = rb_2dv_seen(g_rb_2dv_add, g_rb_2dv_add_n, ch);
+        rbgpu_diag_set_num("kiq_in_regchan", in_reg ? 1 : 0);
+        rbgpu_diag_set_num("kiq_in_addchan", in_add ? 1 : 0);
+        rbgpu_diag_set_num("regchan_seen_n", g_rb_2dv_reg_n);
+        rbgpu_diag_set_num("addchan_seen_n", g_rb_2dv_add_n);
+        rbgpu_log("2dv: THIS channel %p: registerChannel seen=%d addHWChannel seen=%d "
+                  "(distinct reg=%u add=%u) -> %s",
+                  ch, in_reg, in_add, g_rb_2dv_reg_n, g_rb_2dv_add_n,
+                  (in_reg && !in_add)
+                      ? "registered but NEVER added to the scheduler: the middle gate "
+                        "this->vtable[0x1c8] is what refuses, and that is why +0xe0 is -1"
+                  : (!in_reg)
+                      ? "never even reached registerChannel"
+                  : (in_add)
+                      ? "BOTH gates passed for this channel, so +0xe0 should have been "
+                        "set - something cleared it afterwards, or this is a different "
+                        "channel object than the one init ran on"
+                      : "unclassified");
         rbgpu_log("2ds: channel stamps BEFORE the wait: submitted(+0x80)=%u "
                   "completed(+0x84)=%u asked-for=%u ; writeback +0xc0=0x%llx +0xe0=0x%llx",
                   submitted, completed, stamp, wb_c0, wb_e0);
