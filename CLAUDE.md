@@ -1,5 +1,13 @@
 # RembrandtGPU — notes for Claude
 
+> **New session / new account: read `docs/HANDOFF.md` FIRST.**
+> It is the current *state* — what is settled, what is open, the pending
+> experiment, the procedure, and the eight withdrawn conclusions this project
+> has produced by reading a value without first establishing what makes it
+> meaningful. The rest of this file is the chronological *evidence journal*:
+> authoritative for what was measured, in order, and not to be trimmed.
+> `docs/HANDOFF-FULL.md` is a stale dump from 2026-10-05 — ignore it.
+
 Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev 0a,
 GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on macOS. Plan:
 docs/PLAN.md. Same machine as ~/Developer/AirPort_RTW89: ASUS TUF A15 FA507NU
