@@ -1353,6 +1353,12 @@ static uint64_t g_rb_2dt_wb_e0 = 0;
 static uint32_t g_rb_2dt_sub_before = 0;
 static uint32_t g_rb_2dt_cmp_before = 0;
 
+// 2dw: the fence slot itself, carried across the wait for the same reason.
+static uint32_t g_rb_2dw_slot_idx   = 0;
+static uint64_t g_rb_2dw_slot_b0    = 0;
+static uint32_t g_rb_2dw_fence_bef  = 0;
+static int      g_rb_2dw_is_self    = 0;
+
 // 2do (2026-10-12): read the CP_HQD_* window at the slot the KIQ actually uses.
 //
 // The 2dn boot settled it: startKIQ's AMD_PM4_QUEUE_SPEC is
@@ -2417,26 +2423,52 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     //   WPTR advanced -> work is queued and the CP is not consuming it
     rbgpu_dump_gc_regs("at-stamp-wait");
 
-    // 2ds (2026-10-12): the channel's own stamp bookkeeping, which is what
-    // waitForHwStamp actually polls - not the GPU.
+    // 2dw (2026-10-12): corrected reading of the stamp path, and the fence
+    // itself. 2ds/2dt/2du/2dv read ONE BRANCH BACKWARDS and chased a non-bug
+    // for four milestones. The real code (0xbe85214) is:
     //
-    //   waitForHwStamp(this, stamp)  (0xbe85536)
-    //     if (stamp - this->0x84 <= 0) return true        already completed
-    //     loop { pollWait(5 s); checkForTimestampUpdate(); ... }
-    //     return (stamp - this->0x84) <= 0
+    //   timestampUpdated(this)
+    //     if (this->0xe0 == -1) {                    <-- the DIRECT path
+    //         this->0x84 = *(uint32 *)this->0xc0;    reads the fence, always
+    //         tail call this->0x38 vtable[0x230](this->0xc)
+    //         return;
+    //     }
+    //     ... scheduler path: AMDSWScheduler::timestampUpdated(sched,
+    //         this->0xe0 as an index, this->0xc0, &this->0x84)
     //
-    //   checkForTimestampUpdate (0xbe851d6)
-    //     if (this->0x80 == this->0x84) return 0;   <-- EARLY EXIT, reads nothing
-    //     vtable[0x2d0](this); timestampUpdated(this)
+    // So +0xe0 is the channel's slot in the AMDSWScheduler and -1 means
+    // "not scheduler-managed, poll my fence directly" - NOT "no writeback".
+    // For a KIQ channel -1 is BY DESIGN: AMDHWChannel::init asks
+    // this->vtable[0x1c8], which in AMDGFX10KIQHWChannel is the constant
+    // thunk 0xbec77c6 (`return !vtable[0x140]()` where vtable[0x140] is
+    // `movb $0x1,%al; retq`) - an unconditional false. init then takes
+    // `je 0xbe84b06` with r14b already 1, so it SUCCEEDS while deliberately
+    // skipping AMDSWScheduler::addHWChannel and the +0xe0 write. 2dv measured
+    // exactly that (kiq_in_regchan 1, kiq_in_addchan 0) and the conclusion it
+    // printed was wrong: nothing refused anything.
     //
-    //   timestampUpdated (0xbe85214)
-    //     if (this->0xe0 == -1) return;             <-- no writeback configured
-    //     ... reads through this->0xc0 / this->0xe0 and writes this->0x84
+    // And the KIQ does get a REAL hardware fence. init's other constant,
+    // vtable[0x148] (= 0xbec77ac, `xorl %eax,%eax`), is also false, so init
+    // takes the allocated-fence branch at 0xbe849cb:
     //
-    // So +0x80 is the SUBMITTED stamp and +0x84 the COMPLETED one. If +0x80
-    // was never incremented, the refresh short-circuits and +0x84 can never
-    // move, no matter what the command processor did - and 2dq proved the CP
-    // did execute the packet. These are plain reads of the channel object.
+    //   +0xac = interface vtable[0x348]()        the fence slot INDEX
+    //   +0xb0 = interface vtable[0x358](idx)     that slot's CPU VA
+    //   +0xc0 = +0xb0                            what timestampUpdated reads
+    //   +0x80 = 0
+    //
+    // (The branch at 0xbe849c2 instead sets +0xc0 = &this->0x84, a channel
+    // with no real fence. Which one this channel took is measurable.)
+    //
+    // So the chain is: the GPU is told some MC address for that slot and
+    // writes the completion value there; the CPU reads the slot's kernel VA.
+    // 2ds measured +0x80 = 1 and +0x84 = 0, so the refresh DOES run and the
+    // dword at +0xc0 is being read on every poll and is not the stamp. That
+    // is the same shape as the SMU bug of 2dh/2di: a correct CPU pointer
+    // paired with an address the hardware cannot reach.
+    //
+    // All plain reads. The page scan is clamped to the single 4 KB page that
+    // contains +0xc0, which timestampUpdated itself dereferences every poll,
+    // so it is mapped.
     if (ch) {
         auto u32at = [&](uint32_t off) {
             return *reinterpret_cast<volatile uint32_t *>(
@@ -2450,6 +2482,10 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         uint32_t completed = u32at(0x84);
         uint64_t wb_c0     = u64at(0xc0);
         uint64_t wb_e0     = u64at(0xe0);
+        uint32_t slot_idx  = u32at(0xac);
+        uint64_t slot_b0   = u64at(0xb0);
+        bool is_self = (wb_c0 == reinterpret_cast<uintptr_t>(ch) + 0x84);
+
         // 2dt: the 5 s wait lets the request-0x14 poll flood evict ~500 lines,
         // so anything logged BEFORE the wait is gone by the time the log is
         // read. Keep the values and reprint them in the one line that survives.
@@ -2457,8 +2493,21 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         g_rb_2dt_wb_e0 = wb_e0;
         g_rb_2dt_sub_before = submitted;
         g_rb_2dt_cmp_before = completed;
+        g_rb_2dw_slot_idx = slot_idx;
+        g_rb_2dw_slot_b0  = slot_b0;
+        g_rb_2dw_is_self  = is_self ? 1 : 0;
 
-        // 2dv: was THIS channel registered, and was it added to the scheduler?
+        rbgpu_diag_set_num("stamp_submitted", submitted);
+        rbgpu_diag_set_num("stamp_completed", completed);
+        rbgpu_diag_set_num("stamp_wb_c0", wb_c0);
+        rbgpu_diag_set_num("stamp_wb_e0", wb_e0);
+        rbgpu_diag_set_num("fence_slot_idx", slot_idx);
+        rbgpu_diag_set_num("fence_slot_b0", slot_b0);
+        rbgpu_diag_set_num("fence_is_self", is_self ? 1 : 0);
+
+        // 2dv's membership facts, with the conclusion corrected: a KIQ channel
+        // being in registerChannel and not in addHWChannel is Apple's own
+        // design, not a refusal. Kept because it is the fact that proves it.
         bool in_reg = rb_2dv_seen(g_rb_2dv_reg, g_rb_2dv_reg_n, ch);
         bool in_add = rb_2dv_seen(g_rb_2dv_add, g_rb_2dv_add_n, ch);
         rbgpu_diag_set_num("kiq_in_regchan", in_reg ? 1 : 0);
@@ -2466,36 +2515,44 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         rbgpu_diag_set_num("regchan_seen_n", g_rb_2dv_reg_n);
         rbgpu_diag_set_num("addchan_seen_n", g_rb_2dv_add_n);
         rbgpu_log("2dv: THIS channel %p: registerChannel seen=%d addHWChannel seen=%d "
-                  "(distinct reg=%u add=%u) -> %s",
-                  ch, in_reg, in_add, g_rb_2dv_reg_n, g_rb_2dv_add_n,
-                  (in_reg && !in_add)
-                      ? "registered but NEVER added to the scheduler: the middle gate "
-                        "this->vtable[0x1c8] is what refuses, and that is why +0xe0 is -1"
-                  : (!in_reg)
-                      ? "never even reached registerChannel"
-                  : (in_add)
-                      ? "BOTH gates passed for this channel, so +0xe0 should have been "
-                        "set - something cleared it afterwards, or this is a different "
-                        "channel object than the one init ran on"
-                      : "unclassified");
+                  "(distinct reg=%u add=%u) - for a KIQ, reg-without-add is EXPECTED",
+                  ch, in_reg, in_add, g_rb_2dv_reg_n, g_rb_2dv_add_n);
+
         rbgpu_log("2ds: channel stamps BEFORE the wait: submitted(+0x80)=%u "
                   "completed(+0x84)=%u asked-for=%u ; writeback +0xc0=0x%llx +0xe0=0x%llx",
                   submitted, completed, stamp, wb_c0, wb_e0);
-        rbgpu_diag_set_num("stamp_submitted", submitted);
-        rbgpu_diag_set_num("stamp_completed", completed);
-        rbgpu_diag_set_num("stamp_wb_c0", wb_c0);
-        rbgpu_diag_set_num("stamp_wb_e0", wb_e0);
+        rbgpu_log("2dw: fence slot: index(+0xac)=%u va(+0xb0)=0x%llx ; +0xc0 %s "
+                  "(%s) ; +0xe0=%s",
+                  slot_idx, slot_b0,
+                  is_self ? "== &this->0x84" : "is a separate location",
+                  is_self ? "init took 0xbe849c2: NO real fence, the channel points at "
+                            "its own completed counter"
+                          : "init took 0xbe849cb: a real hardware fence slot from the "
+                            "interface",
+                  (wb_e0 == 0xFFFFFFFFFFFFFFFFull)
+                      ? "-1, the DIRECT path, which is BY DESIGN for a KIQ "
+                        "(vtable[0x1c8] is a constant false) and is NOT a fault"
+                      : "a scheduler index");
+
+        // The value timestampUpdated reads on every poll.
+        if (wb_c0 && !is_self) {
+            uint32_t fv = *reinterpret_cast<volatile uint32_t *>(wb_c0);
+            g_rb_2dw_fence_bef = fv;
+            rbgpu_diag_set_num("fence_val_before", fv);
+            rbgpu_log("2dw: the fence dword at +0xc0 BEFORE the wait = 0x%08x "
+                      "(asked-for stamp = %u)", fv, stamp);
+        }
+
         if (submitted == completed) {
             rbgpu_log("2ds: +0x80 == +0x84, so checkForTimestampUpdate takes its EARLY "
                       "EXIT and never reads the fence at all. Nothing marked the frame "
                       "submitted, so the wait can only ever time out - this is "
                       "bookkeeping, not the GPU.");
-        } else if (wb_e0 == 0xFFFFFFFFFFFFFFFFull) {
-            rbgpu_log("2ds: +0xe0 is -1, so timestampUpdated returns without reading a "
-                      "writeback location: no fence address is configured on this channel.");
         } else {
-            rbgpu_log("2ds: a frame IS outstanding and a writeback address is set, so the "
-                      "fence memory itself is what is not being updated.");
+            rbgpu_log("2ds: a frame IS outstanding (+0x80 != +0x84), so "
+                      "checkForTimestampUpdate runs and timestampUpdated reads the "
+                      "fence on every poll. If +0x84 still does not move, the fence "
+                      "memory is what is not being written.");
         }
     }
 
@@ -2527,10 +2584,57 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                       sub, cmp, stamp, g_rb_2dt_sub_before, g_rb_2dt_cmp_before,
                       g_rb_2dt_wb_c0, g_rb_2dt_wb_e0,
                       (g_rb_2dt_wb_e0 == 0xFFFFFFFFFFFFFFFFull)
-                          ? "  <<< +0xe0 is -1: timestampUpdated returns WITHOUT reading "
-                            "any writeback, so no fence address is configured"
-                          : "  <<< a writeback address IS set and a frame IS outstanding, "
-                            "so the fence memory itself is not being written");
+                          ? "  (+0xe0 -1 = the direct fence path, by design for a KIQ)"
+                          : "  (+0xe0 = a scheduler index)");
+
+            // 2dw: did the GPU write the completion value ANYWHERE in the fence
+            // page? If the stamp turns up at a different offset, the fence
+            // mechanism works and only the slot address handed to the hardware
+            // is wrong - the 2dh/2di shape. Clamped to the one page that
+            // timestampUpdated dereferences every poll, so it is mapped.
+            if (g_rb_2dt_wb_c0 && !g_rb_2dw_is_self) {
+                uint32_t fv = *reinterpret_cast<volatile uint32_t *>(g_rb_2dt_wb_c0);
+                rbgpu_diag_set_num("fence_val_after", fv);
+                rbgpu_log("2dw: the fence dword at +0xc0 AFTER the wait = 0x%08x "
+                          "(BEFORE 0x%08x, asked-for %u) -> %s",
+                          fv, g_rb_2dw_fence_bef, stamp,
+                          (fv >= stamp)
+                              ? "the GPU DID write the fence; the failure is in the "
+                                "CPU-side pickup, not in the GPU"
+                              : "the GPU never wrote this location");
+
+                uintptr_t page = g_rb_2dt_wb_c0 & ~static_cast<uintptr_t>(0xFFF);
+                uint32_t hits = 0, first_off = 0, first_val = 0;
+                for (uint32_t o = 0; o < 0x1000; o += 4) {
+                    uint32_t v = *reinterpret_cast<volatile uint32_t *>(page + o);
+                    if (v == stamp) {
+                        if (!hits) { first_off = o; first_val = v; }
+                        hits++;
+                    }
+                }
+                uint32_t c0_off = static_cast<uint32_t>(g_rb_2dt_wb_c0 - page);
+                rbgpu_diag_set_num("fence_scan_hits", hits);
+                rbgpu_diag_set_num("fence_scan_off", first_off);
+                rbgpu_diag_set_num("fence_c0_off", c0_off);
+                rbgpu_log("2dw: fence page 0x%llx scan for the value %u: %u hit(s), "
+                          "first at +0x%03x (val 0x%08x); +0xc0 itself is at +0x%03x "
+                          "-> %s",
+                          static_cast<uint64_t>(page), stamp, hits, first_off,
+                          first_val, c0_off,
+                          (hits == 0)
+                              ? "the value is nowhere in this page, so the GPU wrote "
+                                "the fence somewhere else entirely (or never wrote it); "
+                                "a single hit elsewhere would have meant a wrong slot "
+                                "address, and this does not show that"
+                              : (first_off == c0_off)
+                              ? "it IS at +0xc0, so the read path is what is broken"
+                              : "the value is in this page but at a DIFFERENT offset "
+                                "than +0xc0: the fence works and the slot address given "
+                                "to the hardware does not match the one the CPU polls - "
+                                "the 2dh/2di shape. Note a small integer like this can "
+                                "also occur by chance, so treat one hit as a lead, not "
+                                "a result.");
+            }
         }
         rbgpu_dump_gc_regs("post-stamp-wait");
     } else {

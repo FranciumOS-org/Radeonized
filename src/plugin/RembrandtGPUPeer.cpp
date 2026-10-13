@@ -540,6 +540,9 @@ static const char *const kRbgpuNvramKeys[] = {
     "regchan_calls", "regchan_fails", "addchan_calls", "addchan_fails",
     // 2dv: is the KIQ channel itself among the registered / added ones.
     "kiq_in_regchan", "kiq_in_addchan", "regchan_seen_n", "addchan_seen_n",
+    // 2dw: the KIQ's real hardware fence slot, and whether the GPU wrote it.
+    "fence_slot_idx", "fence_slot_b0", "fence_is_self", "fence_val_before",
+    "fence_val_after", "fence_scan_hits", "fence_scan_off", "fence_c0_off",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

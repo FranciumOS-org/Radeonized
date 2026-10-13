@@ -2226,3 +2226,101 @@ and names the conclusion:
 Diag keys, all in NVRAM so the ring wrap cannot hide them again.
 
 Build: UUID 6369CA9E, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
+
+### 2dv answered (2026-10-12): reg-without-add — and it is BY DESIGN
+
+logs/20261012-220950-plugin, UUID 6369CA9E, armed, no panic:
+
+```
+kiq_in_regchan=1  kiq_in_addchan=0  regchan_seen_n=25  addchan_seen_n=23
+stamp_wb_e0=-1
+```
+
+The KIQ channel is one of the two that passed `registerChannel` and never
+reached `addHWChannel`, which 2dv predicted would name `vtable[0x1c8]` as the
+gate that refuses. It does name it - and the gate turns out to be a
+**compile-time constant**:
+
+```
+KIQ vtable[0x140] (dump +0x150) = 0xbec77a4   movb $0x1,%al ; retq      always TRUE
+KIQ vtable[0x1c8] (dump +0x1d8) = 0xbec77c6   return !vtable[0x140]()   always FALSE
+```
+
+`AMDHWChannel::init` then takes `je 0xbe84b06` with `r14b` already 1, so it
+**succeeds** while deliberately skipping `AMDSWScheduler::addHWChannel` and the
+`+0xe0` write. Nothing refused anything: for a KIQ channel `+0xe0 == -1` is
+Apple's design.
+
+## Correction (2026-10-12): 2ds/2dt read `timestampUpdated` backwards
+
+The whole 2ds -> 2dv line rests on one misread branch. `timestampUpdated`
+(0xbe85214):
+
+```
+be8521d  cmpq $-0x1,0xe0(%rdi) ; je 0xbe8525a
+         ... scheduler path: AMDSWScheduler::timestampUpdated(sched,
+             this->0xe0 as an INDEX, this->0xc0, &this->0x84)
+be8525a  movq 0xc0(%rbx),%rax      ; the writeback VA
+be85261  movl (%rax),%edx          ; READ THE FENCE
+be85263  movl %edx,0x84(%rbx)      ; completed = fence value
+be85269  tail call this->0x38 vtable[0x230](this->0xc)
+```
+
+`+0xe0 == -1` is the **direct** path - read the fence dword straight into
+`+0x84` - not "no writeback configured". 2dt's line "`+0xe0` is -1:
+timestampUpdated returns WITHOUT reading any writeback" is **withdrawn**; it
+reads the fence on every poll. 2du and 2dv were hooking gates for a fault that
+does not exist, and 2du's "`+0xe0` is a scheduler index, not an address" was
+right about what the field is and wrong about what -1 means.
+
+Seventh instance of the project's recurring failure, and the first where the
+misreading was a jump direction rather than an unverified assumption.
+
+### Where the fence actually comes from (`AMDHWChannel::init`, 0xbe848cc)
+
+`init`'s other KIQ constant, `vtable[0x148]` (dump +0x158 = 0xbec77ac,
+`xorl %eax,%eax`), is false too, so the KIQ takes the allocated-fence branch:
+
+```
+be849b8  callq *0x148(%rax)        KIQ: always false
+be849c0  je 0xbe849cb              -> taken
+be849c2  (not taken) leaq 0x84(%rbx),%rax     +0xc0 = &this->0x84, no real fence
+be849cb  rdi = this->0x20                     the HW interface
+be849d2  callq *0x348(%rax) -> +0xac           the fence slot INDEX
+be849e7  callq *0x358(%rcx)(idx) -> +0xb0      that slot's CPU VA
+be849f4  movq %rax,0xc0(%rbx)                  +0xc0 = +0xb0
+be849fb  movl $0x0,0x80(%rbx)
+```
+
+So the KIQ polls a genuine hardware fence slot. The GPU is told some MC
+address for that slot and writes the completion value there; the CPU reads the
+slot's kernel VA at `+0xc0`. 2ds measured `+0x80 = 1`, `+0x84 = 0` and
+`+0xc0 = 0xffffffa965fcc040`, so the refresh runs, the dword is read every
+poll, and it is not the stamp. Same shape as the SMU bug of 2dh/2di: a correct
+CPU pointer paired with an address the hardware cannot reach.
+
+## 2dw (2026-10-12): read the fence, and scan its page
+
+All plain reads. The hook now logs, before and after the real wait:
+
+- `+0xac` (fence slot index), `+0xb0`, and whether `+0xc0 == &this->0x84` -
+  which of the two `init` branches this channel took;
+- the fence dword at `+0xc0` itself, which is the value `timestampUpdated`
+  copies into `+0x84`;
+- a scan of the single 4 KB page containing `+0xc0` for the asked-for stamp.
+  `timestampUpdated` dereferences that page every poll, so it is mapped.
+
+```
+value at +0xc0 == stamp     the GPU wrote the fence and the CPU-side pickup is
+                            what fails
+stamp elsewhere in the page the fence works and the slot address given to the
+                            hardware does not match the one the CPU polls -
+                            the 2dh/2di shape
+nowhere in the page         the GPU wrote the fence somewhere else entirely,
+                            or never wrote it
+```
+
+The log says in those words that a single hit on a small integer can be
+coincidence and is a lead rather than a result - the lesson of 2dk/2dl/2dm.
+
+Build: UUID 8CBC5B64, hosttest passes. Same boot-args, `-rbgpustampwait` stays.
