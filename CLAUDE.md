@@ -3964,3 +3964,92 @@ trail reaches 54       the overwrite form was losing the tail all along, every
 trail reaches 55 / 6x  initGraphicsMQD RETURNED and the frontier has moved on
                        to submitMapQueuesPacket
 ```
+
+### 2ex answered on hardware (2026-10-13): the trail ends at 151
+
+Read from the recovery boot that followed; build and arming checked first, per
+the 2cu/2cv rule.
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 41E6681D   == build/out (2ex)
+rbgpu-diag        -> d=0 armed=0                        the recovery boot
+rbgpu-diag-prev   -> d=27 armed=1 ttl_hw_init_ret=ffffffffddbee001
+                     (2ew read ...c6ef3001, so this IS a new boot)
+nvram rbgpu-gate  -> "40 101 151 | 151 waitForHwStamp RETURNED TRUE"
+```
+
+**The trail mechanism works** - three gates accumulated in one variable, so the
+2ex ambiguity is gone for this boot: no gate after 151 committed. And gate 151
+is written *after* `rbgpu_dump_gc_regs("post-stamp-wait")`, so that entire
+register dump ran to completion, which no previous reading could establish.
+
+What the span between gate 151 and gate 45 actually contains: one
+`rbgpu_diag_set_num("stamp_ticks")`, one `rbgpu_log`, the return through
+Apple's `submitKIQFrame` epilogue (`submitSetResourcesPacket` tail-calls it),
+two more diag sets, then gate 45.
+
+**And the 2eu boot reached gate 54**, which is past 45 and past 50 - the same
+straight-line span, traversed successfully there. So the stopping point is
+**not located by code position**, and that is the first thing in this
+milestone family to be established across two trustworthy records rather than
+inferred from an ordering.
+
+A deadlock was checked for and is NOT there: `performRefreshDiag` releases
+`g_diagLock` before its two `setProperty` calls (RembrandtGPUPeer.cpp:912),
+so the lock-inversion shape - start() thread waiting on `g_diagLock` while the
+refresh thread waits on the registry lock that `IOService::start` holds -
+cannot occur. Written down because it was about to be written up as a finding.
+
+## 2ey (2026-10-13): the control every gate reading has assumed
+
+Every reading from 2eo to 2ex rests on one untested premise: **that the trail
+stops where the THREAD stops.** An asynchronous death that merely catches the
+thread wherever it happens to be produces exactly the same record - and
+produces a *varying* stopping point in deterministic code, which is what has
+now been measured twice. The two possibilities need completely different
+fixes and are indistinguishable from a single thread's breadcrumb.
+
+This matters more than any new question about Apple's code, because since 2em
+there IS something asynchronous on this chip for the first time: PT_BASE
+points GPUVM at the real GART, whose 1512 valid PTEs are all
+`AMDGPU_PTE_SYSTEM` host bus addresses, and the CP is live and executing. The
+GPU can now reach host memory and raise interrupts, neither of which it could
+do before 2em - and 2em is the boot where the wedging started.
+
+`rbgpu_heartbeat_start()` arms a 250 ms `thread_call` that writes
+`rbgpu-beat` with its own counter plus the last gate it saw. It is armed at
+gate 40, beside the 2et quiesce, so it costs nothing on a boot that never
+reaches the chain.
+
+The gate path keeps absolute priority: it claims `g_rbgpuNvramBusy` across its
+write without ever waiting for it, and the heartbeat is the side that yields.
+But a heartbeat that goes silent whenever the flag is held could not tell "the
+gate path is wedged inside its own flash write" from "the machine is dead", so
+after three consecutive skips (~750 ms) it writes anyway and records
+`forced`.
+
+```
+nvram rbgpu-beat
+```
+
+Three outcomes, all distinguishable in one variable:
+
+```
+n large, forced=0     the machine is ALIVE and the start() thread alone is
+                      stuck; the trail does locate it, and the span between
+                      gate 151 and gate 45 is where to look
+n large, forced>=1    the thread is stuck INSIDE the gate's own NVRAM write -
+                      the 2eq/2es suspicion back, with direct evidence this
+                      time instead of the inference that 2es refuted
+absent / n small      the whole machine stopped within ~250 ms of the trail's
+                      last gate. The stop is not a thread blocking in Apple's
+                      code at all, every single-gate and trail reading from
+                      2eo to 2ex is measuring where the thread happened to be,
+                      and the next question is what the GPU is doing
+                      asynchronously now that GPUVM resolves
+```
+
+`n` also dates the stop: the beat carries `mach_absolute_time()`, so the gap
+between the last beat and the gate write is readable.
+
+Build: UUID 76617375, hosttest passes. Boot-args unchanged.

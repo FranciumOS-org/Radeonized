@@ -3402,6 +3402,10 @@ static void rbgpu_gate_2en(uint32_t stage, const char *what) {
     // gate 54.
     if (stage >= 40) {
         rbgpu_nvram_quiesce();
+        // 2ey: and arm the independent heartbeat at the same point, so the
+        // trail gets a control without costing anything on a boot that never
+        // reaches the doStart chain.
+        rbgpu_heartbeat_start();
     }
     rbgpu_diag_set_num("gate_stage", stage);
     // 2eo: and synchronously, on this thread, because the diag path above

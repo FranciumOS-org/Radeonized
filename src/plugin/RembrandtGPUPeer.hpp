@@ -12,6 +12,9 @@ void rbgpu_diag_set_num(const char *key, uint64_t val);
 // 2eo: synchronous NVRAM breadcrumb, written on the calling thread.
 void rbgpu_gate_nvram(uint32_t stage, const char *what);
 void rbgpu_nvram_quiesce(void);
+// 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the
+// gate trail can be told apart from a machine that died under it.
+void rbgpu_heartbeat_start(void);
 void rbgpu_diag_set_str(const char *key, const char *val);
 void rbgpu_diag_inc(const char *key);
 
