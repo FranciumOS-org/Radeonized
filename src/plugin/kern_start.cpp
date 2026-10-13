@@ -1516,11 +1516,25 @@ static bool rbgpu_probe_hqd_slot(const char *tag, uint32_t me, uint32_t pipe,
     return hit;
 }
 
+// 2eo: the same synchronous breadcrumb, inside the register dump. The 2en
+// boot's NVRAM shows vmf_st_kiq set (the post-startKIQ dump had started) and
+// vmf_st_pre never set (submitSetResourcesPacket was never entered), so the
+// boot stopped somewhere INSIDE this function - and nothing says where. Each
+// mark overwrites `rbgpu-gate`, so the surviving value names the last block
+// this function finished.
+static void rbgpu_dump_mark(const char *tag, uint32_t n, const char *what) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "dump:%s:%s", tag ? tag : "?", what ? what : "");
+    rbgpu_gate_nvram(n, buf);
+}
+
 static void rbgpu_dump_gc_regs(const char *tag) {
     if (!g_hw.ctx || !g_hw.rreg) {
         rbgpu_log("2ap DIAG [%s]: no HW ctx/rreg, skipping", tag);
         return;
     }
+
+    rbgpu_dump_mark(tag, 1, "enter");
 
     // 2dk (2026-10-12): THE ADDRESSING WAS WRONG, and it produced a false alarm.
     //
@@ -1700,6 +1714,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     rbgpu_log("2dz DIAG [%s]: CP_CPC_STATUS=0x%08x CP_CPF_STATUS=0x%08x "
               "CPC_UTCL1=0x%08x CPF_UTCL1=0x%08x GRBM_STATUS2=0x%08x",
               tag, cpc_stat, cpf_stat, cpc_utcl1, cpf_utcl1, grbm2);
+    rbgpu_dump_mark(tag, 2, "after-2dz-fault-regs");
 
     // What would have to be true for a zero STATUS to mean anything: fault
     // reporting has to be switched on. GCVM_L2_PROTECTION_FAULT_CNTL bit 0 is
@@ -1832,6 +1847,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   "independently, so MMHUB being healthy says nothing here)",
                   tag, all_zero ? 1 : 0, fb_agrees ? 1 : 0);
     }
+    rbgpu_dump_mark(tag, 4, "after-2ed-gc-hub");
 
     // 2ef helper: map one physical page read-only and characterise it.
     // Returns false if the mapping failed, in which case the counts are
@@ -1981,6 +1997,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   "vram_base_offset reading, and where B's entries POINT "
                   "decides whether the PTEs carry the same error.", tag);
     }
+    rbgpu_dump_mark(tag, 5, "after-2ee-phys-scan");
 
     // 2eh (2026-10-12): ASK THE TTL LAYER where the GART page table is.
     //
@@ -2182,6 +2199,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         snprintf(kad, sizeof(kad), "vmf_ad_%s", shrt);
         rbgpu_diag_set_num(kst, vm_status);
         rbgpu_diag_set_num(kad, (static_cast<uint64_t>(vm_hi) << 32) | vm_lo);
+        rbgpu_dump_mark(tag, 6, "after-2ea-fault-per-point");
 
         uint64_t fpage = (static_cast<uint64_t>(vm_hi) << 32) | vm_lo;
         uint64_t fbyte = fpage << 12;
@@ -2398,6 +2416,8 @@ static void rbgpu_dump_gc_regs(const char *tag) {
         }
     }
 
+    rbgpu_dump_mark(tag, 7, "after-2do-hqd-probe");
+
     // 2el (2026-10-13): the ring's own PTE, read AFTER the HQD probe.
     //
     // 2ek put this read inside the 2eh block, which runs earlier in this same
@@ -2447,6 +2467,8 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                       "0x%llx - not read.", tag, ring_va, start_va);
         }
     }
+
+    rbgpu_dump_mark(tag, 8, "after-2el-ring-pte");
 
     // 2em (2026-10-13): point the hub register at where the table REALLY is.
     //
@@ -2525,6 +2547,8 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                       tag, back, (back == want) ? "TOOK" : "DID NOT TAKE");
         }
     }
+
+    rbgpu_dump_mark(tag, 9, "dump-COMPLETE");
 }
 
 static int hooked_gc_hw_init(void *gc_buf, void *arg2, void *arg3) {
@@ -3316,6 +3340,9 @@ static bool rbgpu_bounded_stamp_wait_2en(void *ch, uint32_t stamp, uint32_t cap_
 // wedge left no such number and cost a power cycle to learn nothing.
 static void rbgpu_gate_2en(uint32_t stage, const char *what) {
     rbgpu_diag_set_num("gate_stage", stage);
+    // 2eo: and synchronously, on this thread, because the diag path above
+    // can be starved by the hang it is trying to locate.
+    rbgpu_gate_nvram(stage, what);
     rbgpu_log("2en: gate %u - %s", stage, what);
 }
 
