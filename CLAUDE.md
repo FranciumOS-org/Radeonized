@@ -4464,3 +4464,109 @@ no 46 at all                  the doStart hook's field-read block did not run,
 ```
 
 Build: UUID DF573C32, hosttest passes. Boot-args unchanged.
+
+### 2fd answered on hardware (2026-10-13): the accessor read works — and it is NOT a read
+
+logs/20261013-194149-plugin, `plugin_check` ran in the armed boot
+(`armed=1`, `ttl_hw_init_ret=dcf5f001`, a new boot), build checked:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin DF573C32   == build/out (2fd)
+nvram rbgpu-gate  -> "46 49 47 40 101 | 101 waitForHwStamp ENTER"
+nvram rbgpu-beat  -> "n=16 gate=101 skips=0 forced=0 t=19096530433"
+log.txt           -> 462 lines, last is the post-stamp-wait dump's final line
+```
+
+Moving the probe to doStart entry worked: gates **46 49 47** land first in the
+trail, before gate 40, so the measurement no longer depends on reaching a
+varying gate. 2fd's first decision branch fired - the call returned a value.
+
+**And the value settles something bigger than the question asked.**
+
+```
+2fb: CP_RB0_CNTL via Apple's accessor = 0x00003041
+```
+
+That is not a register's contents:
+
+```
+seg0 (proven in 2dl)            0x1260
+mmCP_RB0_CNTL (gc_10_3_0)       0x1DE1
+                                ------
+                                0x3041   exact
+```
+
+So **`vtable[0x148]` resolves an encoded register id to a dword offset** - it
+does not read the register. 2dl read the same register's contents through
+direct MMIO and got `0x00a00000`; the two numbers were never measuring the
+same thing. A 14-bit sum matching exactly, from two independent sources
+(Apple's own accessor, and gc_10_3_0_offset.h plus the seg0 proven in 2dl), is
+not the small-integer coincidence 2dw's page scan was.
+
+Two consequences:
+
+- **seg0 = 0x1260 is confirmed a second, independent way.** Apple's accessor
+  computes the same base this project measured in 2dl.
+- **The 2fa reading of the doStart span is corrected.** Those five
+  `[0x148]` -> `[0x12x]` pairs are not read-modify-writes: `[0x148]` resolves
+  the id and `[0x120]`/`[0x128]`/`[0x130]` take the resolved offset. So the
+  span contains **no GC register read at all** - it is five writes, and the
+  project has still never caused a write to the graphics ring.
+
+A reading of what the three write slots are, consistent with amdgpu's
+`gfx_v10_0_cp_gfx_resume` and **not** verified by disassembling them: set
+`RB_RPTR_WR_ENA` (bit 31, the `0x80000000` at 0xbea12f2) in CP_RB0_CNTL,
+write CP_RB_RPTR_WR / CP_RB0_WPTR / CP_RB0_WPTR_HI, then clear the bit again -
+so `[0x128]` = set bits, `[0x120]` = write, `[0x130]` = clear bits. Recorded
+as a reading, not a finding.
+
+**The endpoint still varies, and the beat says the thread really does stop.**
+The log shows the stamp arriving (`the REAL wait returned 1`) and the whole
+`post-stamp-wait` dump completing at 15.338954; gate 151 is written after that
+dump and never committed. `rbgpu_gate_nvram` sets `g_rbgpuLastGate` before its
+write, and the last beat - 3.8 s later, `skips=0 forced=0` - still reads
+`gate=101`. So the thread did not reach gate 151's call, while 2fa went
+through that whole span and reached 45.
+
+```
+build   trail endpoint
+2fa     45
+2fb     45
+2fc     101
+2fd     101
+```
+
+## 2fe (2026-10-13): take the only hardware access out of the varying span
+
+With the 2fa logging contention measured gone (this boot's tail gaps are
+0.002-0.008 ms), the span from gate 101 to gate 45 contains exactly one thing
+that touches the chip: `rbgpu_dump_gc_regs`, at `at-stamp-wait` and
+`post-stamp-wait`. It reads ~40 GC registers and writes `GRBM_GFX_CNTL`. **A
+GC/SMN read that stalls is a documented non-deterministic hazard on this
+chip** - it is what the boot 6/7 RSMU timeout events were - which makes it the
+only remaining candidate for an endpoint that varies on identical code.
+
+So the three dump points after `post-startKIQ` are retired unless
+**`-rbgpuregdump`** is set, and each logs that it skipped rather than going
+silent. Every question they were added for is answered and recorded:
+
+```
+at-stamp-wait    the GPUVM fault that used to latch here is gone (2em)
+post-stamp-wait  the queue is live, RPTR=WPTR=0x20 (2dq/2do)
+pre-kiq-submit   the fault latch is clean before the doorbell (2ea)
+```
+
+`post-gc-hw-init` and `post-startKIQ` **stay**, because the 2em PT_BASE write
+lives inside the dump at `post-startKIQ` and the whole frontier depends on it.
+
+Build: UUID 477D5F0B, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides, from `nvram rbgpu-gate`:
+
+```
+46 49 47 40 101 151 45 50 54 ...   the register dump was the stall; the
+                                   frontier moves to Apple's initGraphicsMQD
+                                   with nothing of ours left in the span
+endpoint still varies              the dump is not it either, and what is left
+                                   in the span is Apple's own code plus our
+                                   diag/log calls at 4 us each
