@@ -546,6 +546,9 @@ static const char *const kRbgpuNvramKeys[] = {
     // 2dx: the GPU-side address of the same writeback frame.
     "wb_gpu_frame0", "wb_gpu_slot", "wb_cpu_base", "wb_next_idx",
     "wb_cpu_arith_ok", "wb_gpu_hi", "wb_gpu_carveout",
+    // 2dy: the fence WRITE_DATA packet and the field it targets.
+    "fencepkt_calls", "fencepkt_hdr", "fencepkt_ctl", "fencepkt_dst",
+    "fencepkt_data", "chan_c8", "chan_c8_matches_wb",
     "stamp_calls", "stamp_ret",
     // 2di: the carve-out read from MMHUB, the absolute MC address derived
     // from it, and whether the sw_exit handle fix fired. These decide the

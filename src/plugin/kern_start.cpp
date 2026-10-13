@@ -1363,6 +1363,52 @@ static uint32_t g_rb_2dw_fence_bef  = 0;
 // channel polls. Resolved by symbol, called read-only.
 typedef uint64_t (*wb_gpuaddr_t)(void *hw, uint32_t idx);
 static wb_gpuaddr_t orig_wb_gpuaddr_2dx = nullptr;
+
+// 2dy: AMDGFX10KIQHWChannel::writeDataCmdPacket(uint *) - the WRITE_DATA
+// packet that asks the GPU to write the completion fence. Observe only.
+static void (*orig_kiq_writeDataCmd_2dy)(void *, uint32_t *) = nullptr;
+static uint32_t g_rb_2dy_calls = 0;
+static uint32_t g_rb_2dy_pkt[5] = {0, 0, 0, 0, 0};
+
+static void hooked_kiq_writeDataCmd_2dy(void *ch, uint32_t *p) {
+    if (orig_kiq_writeDataCmd_2dy)
+        orig_kiq_writeDataCmd_2dy(ch, p);
+    g_rb_2dy_calls++;
+    if (!p)
+        return;
+    for (int i = 0; i < 5; i++)
+        g_rb_2dy_pkt[i] = p[i];
+    // The packet Apple just built, read back from the ring block itself.
+    //   p[0] 0xC0033700  PM4 type 3, opcode 0x37 = WRITE_DATA, 5 dwords
+    //   p[1] 0x00100500  DST_SEL 5 (memory), WR_CONFIRM
+    //   p[2] destination low  = channel+0xc8 & ~3
+    //   p[3] destination high = channel+0xcc
+    //   p[4] data             = getCommandSubmitTimestamp()
+    uint64_t dst = (static_cast<uint64_t>(p[3]) << 32) | p[2];
+    uint64_t c8 = 0;
+    if (ch)
+        c8 = *reinterpret_cast<volatile uint64_t *>(
+            reinterpret_cast<uintptr_t>(ch) + 0xc8);
+    rbgpu_diag_set_num("fencepkt_calls", g_rb_2dy_calls);
+    rbgpu_diag_set_num("fencepkt_hdr", p[0]);
+    rbgpu_diag_set_num("fencepkt_ctl", p[1]);
+    rbgpu_diag_set_num("fencepkt_dst", dst);
+    rbgpu_diag_set_num("fencepkt_data", p[4]);
+    rbgpu_diag_set_num("chan_c8", c8);
+    rbgpu_log("2dy: WRITE_DATA fence packet #%u on ch=%p: hdr=0x%08x ctl=0x%08x "
+              "dst=0x%llx data=%u ; channel+0xc8=0x%llx -> %s",
+              g_rb_2dy_calls, ch, p[0], p[1], dst, p[4], c8,
+              (dst == 0)
+                  ? "*** DESTINATION IS ZERO: the GPU is told to write the "
+                    "fence to address 0, so it can never reach the page the "
+                    "CPU polls. +0xc8 is set in allocateMemoryResources, not "
+                    "in init, so that is where to look"
+              : ((dst >> 32) == 0xFF)
+                  ? "destination is in the 0xFF_BF.. GPUVM region, the same one "
+                    "the ring base lives in, so the address looks right"
+                  : "destination is in neither the 0xFF_BF.. GPUVM region nor "
+                    "zero, so it needs its own reading");
+}
 static int      g_rb_2dw_is_self    = 0;
 
 // 2do (2026-10-12): read the CP_HQD_* window at the slot the KIQ actually uses.
@@ -2585,6 +2631,26 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             bool g1_zero_hi  = ((g1 >> 32) == 0);
             rbgpu_diag_set_num("wb_gpu_hi", g1 >> 32);
             rbgpu_diag_set_num("wb_gpu_carveout", g1_carveout ? 1 : 0);
+            // 2dy: the field the fence packet actually uses. init sets +0xc0
+            // (CPU) from vtable[0x358]; allocateMemoryResources sets +0xc8
+            // (GPU) from vtable[0x350] at 0xbe84f05. They are assigned in
+            // different functions, so one can be set while the other is not.
+            uint64_t c8 = *reinterpret_cast<volatile uint64_t *>(
+                reinterpret_cast<uintptr_t>(ch) + 0xc8);
+            rbgpu_diag_set_num("chan_c8", c8);
+            rbgpu_diag_set_num("chan_c8_matches_wb", (c8 == g1) ? 1 : 0);
+            rbgpu_log("2dy: channel+0xc8 (what the WRITE_DATA packet targets) = "
+                      "0x%llx ; getChannelWriteBackFrameGPUAddr(%u) = 0x%llx -> %s",
+                      c8, slot_idx, g1,
+                      (c8 == g1)
+                          ? "they MATCH, so the packet targets the right frame "
+                            "and the fence failing is further down"
+                      : (c8 == 0)
+                          ? "+0xc8 is ZERO: allocateMemoryResources never set it "
+                            "for this channel, so the fence packet writes to "
+                            "address 0"
+                          : "they DIFFER: the packet targets a different frame "
+                            "than the one the CPU polls");
             rbgpu_log("2dx: GPU addr for frame 0 = 0x%llx, for slot %u = 0x%llx "
                       "(delta 0x%llx, expected 0x%x) ; ring MC from startKIQ = "
                       "0x%llx -> %s",
@@ -4588,6 +4654,17 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked registerChannel + addHWChannel (2du observe-only)");
     } else {
         rbgpu_log("X6000: FAILED to hook the 2du channel-registration gates");
+    }
+
+    // 2dy: the WRITE_DATA packet that carries the completion fence. Observe
+    // only - the original runs first and the built packet is read back.
+    KernelPatcher::RouteRequest req_2dy(
+        "__ZN35AMDRadeonX6000_AMDGFX10KIQHWChannel18writeDataCmdPacketEPj",
+        hooked_kiq_writeDataCmd_2dy, orig_kiq_writeDataCmd_2dy);
+    if (patcher.routeMultiple(id, &req_2dy, 1, address, size)) {
+        rbgpu_log("X6000: hooked KIQ writeDataCmdPacket (2dy observe-only)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook writeDataCmdPacket (2dy)");
     }
 
     // 2dx: resolve the GPU-address counterpart of the writeback frame the KIQ
