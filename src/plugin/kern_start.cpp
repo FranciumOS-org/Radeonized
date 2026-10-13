@@ -1363,6 +1363,11 @@ static uint32_t g_rb_2ea_pq_base    = 0;  // 2ea: CP_HQD_PQ_BASE (ring VA >> 8)
 static uint64_t g_rb_2eb_pt_base    = 0;  // 2eb: GCVM_CONTEXT0_PAGE_TABLE_BASE
 static uint32_t g_rb_2ed_fb_off     = 0;  // 2ed: GCMC_VM_FB_OFFSET (16 MB units)
 static int      g_rb_2ee_pdb_done   = 0;  // 2ee: map the candidates once per boot
+static void    *g_rb_ttl_this       = nullptr;  // 2eh: the AmdTtlServices object
+// 2eh: _ttl_get_gart_primary_page_table_info(ttl_handle, out[5]) - the
+// authoritative source for where the GART primary page table lives.
+static uint32_t (*g_rb_ttl_gart_info)(void *, uint64_t *) = nullptr;
+static int      g_rb_2eh_done       = 0;
 
 // 2dx: AMDHardware::getChannelWriteBackFrameGPUAddr(uint) - the MC address the
 // GPU is told for a writeback frame, the counterpart of the CPU pointer the
@@ -1963,6 +1968,85 @@ static void rbgpu_dump_gc_regs(const char *tag) {
                   "directory; only 'B valid and A not' supports the "
                   "vram_base_offset reading, and where B's entries POINT "
                   "decides whether the PTEs carry the same error.", tag);
+    }
+
+    // 2eh (2026-10-12): ASK THE TTL LAYER where the GART page table is.
+    //
+    // 2ef's control came back decisive and negative: the GOP framebuffer page
+    // at system-physical 0x7_8000_0000 read as 512 zero qwords while the
+    // console was displaying on it, and in ARGB8888 even black is 0xFF000000.
+    // So IOMemoryDescriptor maps carve-out memory and does not READ it, and
+    // 2ee's "candidate B is zeros" proved nothing. Reading physical memory is
+    // not a usable instrument here, and the vram_base_offset question is open,
+    // not closed.
+    //
+    // 2eg was meant to answer it by asking AMDHWVMM::allocVMBlock, and that
+    // hook never fired (`vmm_alloc_calls` absent). AMDHWVMM builds per-task VM
+    // contexts via createVMContext(AMDAccelTask *), and an armed boot has no
+    // GPU clients, so there is nothing for it to do. The GART page table for
+    // VMID 0 comes from the TTL layer instead, and HWLibs names the function:
+    //
+    //   __ZN14AmdTtlServices19getGartTableAddressEPPvPy  0x126617f0
+    //     12661800  movq %rdi,%rsi              rsi = this
+    //     1266183f  movq 0x38(%rsi),%rdi        the TTL handle
+    //     12661848  leaq -0x40(%rbp),%rsi       a 5-qword out block
+    //     1266184c  callq _ttl_get_gart_primary_page_table_info
+    //
+    // Rather than hope Apple calls it, call it ourselves with the TTL handle
+    // the initialize() hook already captured. Read-only: it reports an
+    // address, it does not program anything.
+    //
+    // What the answer decides, stated before it is read: one of the returned
+    // qwords should correspond to GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR, which
+    // reads 0x0FDFA001 (0x0FDFA000 plus the VALID bit). If a qword equals
+    //   0x0FDFA000             the register holds exactly what TTL reports,
+    //                          and the question moves to what that number is
+    //   0xF4_0FDF_A000         TTL has the carve-out MC address and the
+    //                          register was written without the MC base
+    //   0x7_8FDF_A000          TTL has the system-physical address and the
+    //                          register was written without vram_base_offset,
+    //                          which is the 2dh/2di shape a third time
+    //   none of these          the register and TTL disagree about which
+    //                          table is in use, and neither reading stands
+    if (g_rb_2eh_done == 0 && g_rb_ttl_gart_info && g_rb_ttl_this) {
+        g_rb_2eh_done = 1;
+        void *handle = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(g_rb_ttl_this) + 0x38);
+        uint64_t out[5] = {0, 0, 0, 0, 0};
+        uint32_t st = 0xFFFFFFFF;
+        if (handle) {
+            st = g_rb_ttl_gart_info(handle, out);
+        }
+        rbgpu_diag_set_num("gart_info_st", st);
+        rbgpu_diag_set_num("gart_info_0", out[0]);
+        rbgpu_diag_set_num("gart_info_1", out[1]);
+        rbgpu_diag_set_num("gart_info_2", out[2]);
+        rbgpu_diag_set_num("gart_info_3", out[3]);
+        rbgpu_diag_set_num("gart_info_4", out[4]);
+        rbgpu_log("2eh DIAG [%s]: _ttl_get_gart_primary_page_table_info(handle=%p) "
+                  "-> status %u ; out = 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx",
+                  tag, handle, st, out[0], out[1], out[2], out[3], out[4]);
+
+        uint64_t reg = g_rb_2eb_pt_base & ~0xFFFULL;
+        uint64_t mc  = reg + (static_cast<uint64_t>(g_rb_2ed_fb_off) << 24);
+        for (int i = 0; i < 5; i++) {
+            uint64_t v = out[i] & ~0xFFFULL;
+            if (v == 0) continue;
+            const char *what = (v == reg)  ? "EQUALS the hub register value"
+                             : (v == mc)   ? "equals reg + (FB_OFFSET<<24): the "
+                                             "register is missing vram_base_offset"
+                             : (v == (reg + 0xF400000000ULL))
+                                           ? "equals reg + carve-out MC base"
+                                           : nullptr;
+            if (what) {
+                rbgpu_log("2eh DIAG [%s]: out[%d]=0x%llx %s", tag, i, out[i], what);
+                rbgpu_diag_set_num("gart_match_idx", static_cast<uint64_t>(i));
+            }
+        }
+        rbgpu_log("2eh DIAG [%s]: hub register PT_BASE=0x%llx (page 0x%llx); "
+                  "reg+FB_OFFSET<<24 = 0x%llx. A qword matching none of these "
+                  "means TTL and the hub disagree and neither reading stands.",
+                  tag, g_rb_2eb_pt_base, reg, mc);
     }
 
     // 2ea (2026-10-12): WHEN did the fault latch, and is it the ring or the
@@ -3886,6 +3970,7 @@ static int hooked_AmdTtlServices_initialize_input(void *this_ptr, void *input) {
     rbgpu_diag_set_num("ttl_inp_5", inp ? inp[5] : 0);
     rbgpu_diag_set_num("ttl_inp_6", inp ? inp[6] : 0);
     rbgpu_diag_set_num("ttl_this_570", f570);
+    g_rb_ttl_this = this_ptr;   // 2eh: needed to ask for the GART table address
 
     rbgpu_log("AmdTtlServices::initialize(this=%p, input=%p): [0]=0x%llx [1]=0x%llx [2]=0x%llx [4]=0x%llx [5]=0x%llx [6]=0x%llx",
               this_ptr, input,
@@ -4781,6 +4866,16 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     routePSPBasics(patcher, id, address, size);
     routePSPRingTmr(patcher, id, address, size);
     routeGC(patcher, id, address, size);
+
+    // 2eh: the GART primary page table's own address, straight from TTL.
+    // A local text symbol defined in HWLibs (nm shows it as 't'), so
+    // resolving it by HWLibs' id is safe under the milestone-2c Lilu rule.
+    // Resolved only - never routed; we call it read-only.
+    g_rb_ttl_gart_info = reinterpret_cast<uint32_t (*)(void *, uint64_t *)>(
+        patcher.solveSymbol(id, "_ttl_get_gart_primary_page_table_info"));
+    rbgpu_diag_set_num("gart_info_resolved", g_rb_ttl_gart_info ? 1 : 0);
+    rbgpu_log("HWLibs: _ttl_get_gart_primary_page_table_info %s",
+              g_rb_ttl_gart_info ? "resolved (2eh)" : "NOT RESOLVED (2eh cannot run)");
 
     if (!noSmuHook) {
         orig_smu_cgs_alloc_memory = reinterpret_cast<smu_cgs_alloc_memory_t>(patcher.solveSymbol(id, "_smu_cgs_alloc_memory"));

@@ -2797,3 +2797,75 @@ is. The root directory is the one the hub register should be pointing at, and
 comparing it with `0x0FDFA001` says what transformation Apple applied.
 
 Build: UUID 9C57527B, hosttest passes. Same boot-args, still armed.
+
+### 2ef/2eg on hardware (2026-10-12): the control FAILED — 2ee is withdrawn
+
+logs/20261012-234107-plugin, armed, no panic, 292 diag entries.
+
+```
+ctl_fb_phys=0x780000000  ctl_fb_mapped=1  ctl_fb_nonzero=0  ctl_fb_e0=0
+pdbA_mapped=1  pdbA_nonzero=0        (was 512/512 nonzero the previous boot)
+pdbB_mapped=1  pdbB_nonzero=0
+vmm_alloc_calls=ABSENT
+```
+
+**The GOP framebuffer page reads as 512 zero qwords** while the console is
+displaying on it, and in ARGB8888 even a black pixel is 0xFF000000, not zero.
+So `IOMemoryDescriptor::withPhysicalAddress` + `createMappingInTask` **maps
+carve-out memory without reading it** — `mapped=1` and every qword zero.
+
+Therefore **2ee's "candidate B holds no page directory" is withdrawn**: B's
+zeros were the instrument, not the chip. The `vram_base_offset` reading is
+back to *unresolved*, neither supported nor refuted. (pdbA reading real kernel
+code one boot and zeros the next is consistent with it being ordinary RAM
+whose contents differ per boot; it is not evidence either way.)
+
+This is the control doing exactly its job, and it is worth noting that the
+conclusion it killed was mine and was already written into CLAUDE.md as a
+finding. Reading physical memory is not a usable instrument in this plugin.
+
+**2eg never fired.** `AMDHWVMM::allocVMBlock` was hooked and never called,
+which on reflection is expected: `AMDHWVMM::createVMContext(AMDAccelTask *)`
+builds **per-task** VM contexts, and an armed boot has no GPU clients at all.
+AMDHWVMM is not what builds the GART page table for VMID 0.
+
+## 2eh (2026-10-12): ask the TTL layer for the GART table's address
+
+HWLibs names the function outright:
+
+```
+__ZN14AmdTtlServices19getGartTableAddressEPPvPy   0x126617f0
+  12661800  movq %rdi,%rsi              rsi = this
+  1266183f  movq 0x38(%rsi),%rdi        the TTL handle
+  12661848  leaq -0x40(%rbp),%rsi       a 5-qword out block
+  1266184c  callq _ttl_get_gart_primary_page_table_info   0x1262f80f
+```
+
+`_ttl_get_gart_primary_page_table_info` is a local text symbol defined in
+HWLibs, so resolving it by HWLibs' id is safe under the milestone-2c Lilu
+rule. It is **resolved only, never routed**: the plugin calls it read-only
+with the TTL handle the `initialize()` hook already captures
+(`this->0x38` — the same value boot 13 saw passed to `_ttl_initialize`),
+rather than hoping Apple calls it. It reports an address; it programs nothing.
+
+What the five returned qwords decide, stated before they are read. The hub
+register `GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR` reads 0x0FDFA001, i.e. page
+0x0FDFA000 plus the VALID bit:
+
+```
+a qword == 0x0FDFA000      the register holds exactly what TTL reports, and
+                           the question becomes what that number means
+a qword == 0xF4_0FDF_A000  TTL has the carve-out MC address and the register
+                           was written without the MC base
+a qword == 0x7_8FDF_A000   TTL has the system-physical address and the
+                           register was written without vram_base_offset -
+                           the 2dh/2di shape a third time
+none of these              TTL and the hub disagree about which table is in
+                           use, and neither reading stands
+```
+
+Diag keys `gart_info_resolved`, `gart_info_st`, `gart_info_0..4`,
+`gart_match_idx`, all in the NVRAM hot list. The physical-page scan and its
+control stay in, now that the control is known to report honestly.
+
+Build: UUID 917A6DC7, hosttest passes. Same boot-args, still armed.
