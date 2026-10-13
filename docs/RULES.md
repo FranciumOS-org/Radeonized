@@ -2869,3 +2869,36 @@ Diag keys `gart_info_resolved`, `gart_info_st`, `gart_info_0..4`,
 control stay in, now that the control is known to report honestly.
 
 Build: UUID 917A6DC7, hosttest passes. Same boot-args, still armed.
+
+### 2eh on hardware (2026-10-12): asked too early — the TTL handle was still 0
+
+logs/20261012-235221-plugin, armed, no panic, 299 diag entries.
+
+```
+gart_info_resolved=1    the symbol resolved
+gart_info_st=0xffffffff the plugin's own "handle was NULL" sentinel
+gart_info_0..4 = 0
+```
+
+So nothing was asked of TTL at all. `g_rb_ttl_this` was captured, but
+`*(this + 0x38)` read 0: the one shot was spent at `post-gc-hw-init`, which
+runs **inside** `_ttl_initialize`, and `_ttl_initialize(params, &this->0x38)`
+only stores the handle into that slot when it finishes. The value cannot exist
+yet at the point it was read.
+
+Tenth instance of the recurring error and a repeat of 2dp exactly: the
+measurement was taken before the thing it measures exists. The sentinel is
+what kept it from being read as "TTL has no GART table".
+
+## 2ei (2026-10-12): retry until the handle exists
+
+One-line shape change: `g_rb_2eh_done` is set **only when the call actually
+runs**, so a dump point that finds `this->0x38` still 0 logs that it is
+retrying and leaves the question open instead of burning the shot. The later
+dump points — `post-startKIQ`, `pre-kiq-submit`, `at-stamp-wait`,
+`post-stamp-wait` — all run well after TTL init completes.
+
+`gart_info_early` counts how many points were too early, so the next boot says
+whether the retry was needed rather than leaving it to inference.
+
+Build: UUID 3DA57E40, hosttest passes. Same boot-args, still armed.
