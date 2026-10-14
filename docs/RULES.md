@@ -6172,3 +6172,84 @@ answer.
 
 Build: UUID 64AEBDD8, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays.
+
+### 2fw answered on hardware (2026-10-14): the timer FIRES, to the millisecond
+
+Two armed boots, both with `plugin_check` run in the boot, build checked
+(64AEBDD8 == build/out):
+
+```
+logs/20261014-172734   ttl_hw_init_ret=c3789001   261 lines  pci.txt 0
+    rbgpu-prog  = s=1 powerUpHW ENTER
+    rbgpu-prog2 = a=1@43832ms          armed at 13826 ms -> +30006 ms
+    log ends 14.293, at ring-0's stamp returning
+
+logs/20261014-172925   ttl_hw_init_ret=d107d001   290 lines  pci.txt 393216
+    rbgpu-prog  = s=2 doStart RETURNED 1
+    rbgpu-prog2 = a=2@43136ms          armed at 13137 ms -> +29999 ms
+    log ends 15.2135, at "2fp: startHWEngines will walk 4 entries"
+```
+
+**The sampler works and the `thread_call` pool is not starved.** Both samples
+fired within 6 ms of their 30 s deadline, from the same pool whose starvation
+2ez inferred when the heartbeat died at `n=13..28`. That inference does not
+hold for this configuration - what killed the beat was its own four-per-second
+flash commits, not the pool.
+
+**What one sample each already says, and it is the first timing of the stall.**
+Boot B reached stage 2 at **15.2 s** and was still at stage 2 at **43.1 s**:
+28 seconds inside `startHWEngines`' four-SDMA walk, which 2fk-era timings put
+at microseconds. Boot A was still at stage 1 at **43.8 s**, 30 s after
+`powerUpHW` ENTER at 13.8 s, with its log ending at ring-0's stamp. So the two
+boots differ by a whole stage at the same wall-clock moment on identical code:
+**the variance is in time taken, not in a position where execution stops.**
+
+**What it does NOT say** - and this is the question 2fm has owed for six
+milestones - is whether either thread ever moves again. One sample cannot;
+`b` never landed in either boot, because +90 s is past when a wedged machine
+gets power-cycled. 2fw asked for the wrong cadence.
+
+**Boot B is also the most complete armed capture this project has taken:**
+`pci.txt` 393216 bytes, `igpu.txt`, `peer.plist`, and the accelerator present
+on IGPU@0 beside the peer, AMDSupport, IONDRVFramebuffer and HWServicesNavi.
+Every previous wedge left `pci.txt` at 0. So the IGPU registry subtree was not
+locked - consistent with 2fr, where the chain runs on the peer's post-register
+thread inside request 0x06 and not inside `IOService::start` at all.
+
+And `amd-log.txt` confirms 2fu's static reading of the engine array with no
+boot spent on it: engine[0] `AMDNavi21PM4Engine`, engines [1..4]
+`AMDSDMAEngine_GC_10_3_0`, engines [8][9] `AMDVCN3HWEngine` - exactly the
+layout that makes `hw+0x3B8` with count 4 the four SDMA engines.
+
+## 2fx (2026-10-14): three samples, and a counter finer than the stage
+
+Two faults in 2fw, both mine, both about the sampler rather than the chip.
+
+**The cadence outlived the boot.** +30 s and +90 s; the first landed twice and
+the second never. Now **+15 s, +35 s, +65 s**, so a boot power-cycled at ~45 s
+still yields two points and the comparison survives.
+
+**The stage is too coarse to answer the question.** There are six stages, and
+the entire `startHWEngines` walk lives between stage 2 and stage 3 - so boot
+B's "stage 2 at 15 s, stage 2 at 43 s" is equally consistent with a thread
+stopped and a thread crawling through four SDMA `start()` calls. Each sample
+now also carries **`g_rbgpuLogSeq`**, a monotonic count bumped on every log
+append *and* every dedupe hit, which never saturates at the ring size the way
+`g_logCount` does.
+
+```
+a=s2/L290@15000ms b=s2/L290@35000ms   stopped - nothing logged in 20 s, and
+                                      the 2fv window is a real location
+a=s2/L290@15000ms b=s2/L461@35000ms   CRAWLING - the stage has not moved but
+                                      the thread is still running code, every
+                                      endpoint reading in this project is void
+                                      for locating anything, and the question
+                                      becomes what costs seconds per step
+```
+
+Cost is unchanged in the place that matters: three flash commits, all long
+after the ~500 us chain region, which still contains **no** commit of ours -
+stage 1 stays at `powerUpHW` ENTER and the timer is armed beside it.
+
+Build: UUID 3B9D0163, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays.
