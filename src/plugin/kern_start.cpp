@@ -4787,7 +4787,7 @@ static bool hooked_hw_powerUpHWEngines(void *hw) {
 //
 //   count = hw->0xc2 * 2 + 2
 //   for (i = 0; i < count; i++) {
-//       e = hw->0x3b8[i];            the SAME engine array 2bv walks
+//       e = hw->0x3b8[i];            NOT the array 2bv walks - see 2fu
 //       if (!e) -> return false
 //       if (!e->vtable[0x148]()) -> os_log, return false
 //   }
@@ -4890,6 +4890,92 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
     rbgpu_prog_2fs(3, g_rb_2fq_map);
 }
 
+// 2fu (2026-10-14): AMDGFX10SDMAEngine::start is what startHWEngines calls.
+//
+// Resolved statically, no boot spent, and it corrects two things I wrote.
+//
+// `powerUpHWEngines` reads hw+0x3B0, 11 entries, vtable[0x138] (verified at
+// 0xbea8ec9-0xbea8ef5, so 2bv's manual loop is faithful). `startHWEngines`
+// reads hw+0x3B8 - EIGHT BYTES LATER - with count = hw->0xc2 * 2 + 2. So the
+// 2fp comment "the SAME engine array 2bv walks" was wrong by one pointer, and
+// the two windows are:
+//
+//   0x3B0[0]      AMDRadeonX6000_AMDNavi21PM4Engine
+//   0x3B0[1..4]   AMDRadeonX6000_AMDSDMAEngine_GC_10_3_0   = 0x3B8[0..3]
+//   0x3B0[8..9]   AMDRadeonX6000_AMDVCN3HWEngine
+//
+// The 2ft boot measured hw->0xc2 = 1, so count = 4 - exactly the number of
+// SDMA engines present, and 0x3B8 is exactly where they start. Two
+// independently-derived numbers agreeing, so `startHWEngines` walks the four
+// SDMA engines and the PM4 engine is NOT in its window.
+//
+// That resolves the 2fo anomaly rather than leaving it: the PM4's
+// vtable[0x148] IS a `doStart(false)` thunk (0xbed2342), so had the PM4 been
+// in range, doStart would have run a second time - and the 2fo log has
+// exactly ONE "doStart entered" with startHWEngines returning 0 ten ms later.
+// It is not in range, so there is no second call to explain.
+//
+// Apple's own start(), disassembled (0xbea4a6a):
+//
+//   if (this->0x10 != 0)            return FALSE      one byte, no work
+//   svc = (this->0x18)->vtable[0x2c0]()
+//   if (this->0x48 == 0)            -> set 0x10 = 1, return TRUE
+//   for (i = 0; i < this->0x48; i++) {
+//       ch   = this->0x50[i]
+//       desc = { 0x40000, ch->0x48, ch->0xd0 }
+//       if (svc->vtable[0x120](this->0x1a0[i], this->0x1a4[i], &desc, &out))
+//                                   -> unmap, return FALSE
+//   }
+//   this->0x10 = 1 ; vtable[0x278] ; return TRUE
+//
+// `0x10` is a "started" flag - set on success, and a second start() refuses at
+// the first instruction. The tempting explanation was that powerUp had already
+// set it, making the FALSE a double-call artefact. **Refuted statically:** the
+// SDMA vtable[0x138] is 0xbed1fac = `movb $0x1,%al ; retq`, a constant TRUE
+// that touches nothing, which is also why 2bv logged engines 1-4 powering up
+// 3 us apart. So 0x10 is 0 on entry and the body really runs.
+//
+// What is left is `svc->vtable[0x120](cmd, ...)` returning nonzero - the SAME
+// service slot `startKIQ` uses with command 8, which works. This is the first
+// time SDMA has asked that layer for a queue on this chip.
+//
+// Observe only: the original runs and its return is reported. The fields are
+// read before the call, so they are what Apple's own gates will test.
+static bool (*orig_sdma_start)(void *) = nullptr;
+static char g_rb_2fu_rec[160];
+static uint32_t g_rb_2fu_calls = 0;
+
+static bool hooked_sdma_start_2fu(void *eng) {
+    uint8_t  f10 = 0;
+    uint32_t f48 = 0;
+    uint32_t cmd = 0, cmd2 = 0;
+    if (eng) {
+        uintptr_t e = reinterpret_cast<uintptr_t>(eng);
+        f10 = *reinterpret_cast<volatile uint8_t *>(e + 0x10);
+        f48 = *reinterpret_cast<volatile uint32_t *>(e + 0x48);
+        cmd  = *reinterpret_cast<volatile uint32_t *>(e + 0x1a0);
+        cmd2 = *reinterpret_cast<volatile uint32_t *>(e + 0x1a4);
+    }
+    rbgpu_log("2fu: SDMAEngine::start #%u eng=%p f10=%u queues(+0x48)=%u "
+              "cmd[0]=0x%x/0x%x", g_rb_2fu_calls, eng, f10, f48, cmd, cmd2);
+
+    bool ret = orig_sdma_start ? orig_sdma_start(eng) : false;
+
+    rbgpu_log("2fu: SDMAEngine::start #%u -> %d %s", g_rb_2fu_calls, ret ? 1 : 0,
+              ret ? "" : (f10 ? "(refused at the 0x10 started-flag)"
+                             : "(a queue create returned nonzero)"));
+    // One compact record for all four calls, carried out of a dead boot by the
+    // single stage-4 note at startHWEngines' exit.
+    int n = static_cast<int>(strlen(g_rb_2fu_rec));
+    if (n >= 0 && n + 24 < static_cast<int>(sizeof(g_rb_2fu_rec))) {
+        snprintf(g_rb_2fu_rec + n, sizeof(g_rb_2fu_rec) - n,
+                 "%s#%u:f10=%u,q=%u,r=%d", n ? " " : "", g_rb_2fu_calls,
+                 f10, f48, ret ? 1 : 0);
+    }
+    g_rb_2fu_calls++;
+    return ret;
+}
+
 static bool hooked_hw_startHWEngines(void *hw) {
     g_rb_pw_stage |= 0x100;
     rbgpu_log("2bs: AMDHardware::startHWEngines entered (hw=%p)", hw);
@@ -4901,8 +4987,9 @@ static bool hooked_hw_startHWEngines(void *hw) {
     // twenty-four - and this one proves the first was not a lucky read of a
     // stale variable, because it carries the return from the same call.
     {
-        char buf[160];
-        snprintf(buf, sizeof(buf), "%s ret=%d", g_rb_2fq_map, ret ? 1 : 0);
+        char buf[300];
+        snprintf(buf, sizeof(buf), "%s ret=%d sdma[%u]{%s}", g_rb_2fq_map,
+                 ret ? 1 : 0, g_rb_2fu_calls, g_rb_2fu_rec);
         rbgpu_prog_2fs(4, buf);
     }
     return ret;
@@ -6180,6 +6267,20 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked AMDHardware::powerUpHWEngines (2bs)");
     } else {
         rbgpu_log("X6000: AMDHardware::powerUpHWEngines not found (2bs)");
+    }
+
+    // 2fu: AMDGFX10SDMAEngine::start - what startHWEngines actually calls on
+    // each of the four SDMA engines. `nm -m` shows it external and defined in
+    // X6000, so routing it by X6000's id is safe under the milestone-2c rule.
+    KernelPatcher::RouteRequest req_sdma(
+        "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv",
+        hooked_sdma_start_2fu,
+        orig_sdma_start
+    );
+    if (patcher.routeMultiple(id, &req_sdma, 1, address, size)) {
+        rbgpu_log("X6000: hooked AMDGFX10SDMAEngine::start (2fu)");
+    } else {
+        rbgpu_log("X6000: AMDGFX10SDMAEngine::start not found (2fu)");
     }
 
     KernelPatcher::RouteRequest req_she1(

@@ -5890,3 +5890,133 @@ calls with their stamps, the ring-state reads, the HQD poll, and
 
 Build: UUID 55F4C6A3, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays.
+
+### 2ft answered on hardware (2026-10-14): the chain completed, and startHWEngines was ENTERED
+
+logs/20261014-163218-plugin, `plugin_check` in the armed boot
+(`armed=1`, `ttl_hw_init_ret=df06a001`, a new boot). Build checked:
+55F4C6A3 == build/out (2ft).
+
+```
+nvram rbgpu-prog -> "s=2 doStart RETURNED 1"
+log.txt          -> 352 lines, ends at the 2fp walk's count line
+ioreg-raw.txt    -> 484 bytes + .done ; ioreg.txt 159 bytes ; pci.txt 0 bytes
+```
+
+```
+[12.718615] 2br: powerUpHW entered
+[12.718665] 2fs: prog s=1 powerUpHW ENTER - before the chain
+[14.797252] 2ce: doStart returned 1
+[14.797271] 2fs: prog s=2 doStart RETURNED 1
+[14.797275] 2bv: engine[0] powerUp -> 1   [1] -> 1  [2] -> 1  [3] -> 1  [4] -> 1
+[14.797296]      [8] -> 1   [9] -> 1
+[14.797301] 2bv: all engines powered up OK
+[14.797303] 2bs: AMDHardware::startHWEngines entered (hw=0xffffff80454f7000)
+[14.797306] 2fp: startHWEngines will walk 4 entries (hw+0xc2 = 1)
+```
+
+**`doStart` returned 1 and stage 2 committed**, so with zero flash commits
+inside the ~500 us region the chain completed - 2fo's result reproduced, which
+2fs (one commit at doStart ENTER) did not manage. Two boots for "no commits in
+the region" against one for "one commit", so the correlation is now worth
+something without being a demonstration.
+
+And the count line is the finding: **`hw->0xc2 = 1`, so count = 4.**
+
+## 2fu (2026-10-14): startHWEngines walks the SDMA engines — resolved with no boot
+
+Two things I wrote are wrong, and the disassembly corrects both.
+
+**The arrays are eight bytes apart.** `powerUpHWEngines` reads `hw+0x3B0`, 11
+entries, `vtable[0x138]` (0xbea8ec9-0xbea8ef5 - so 2bv's manual loop is
+faithful). `startHWEngines` reads `hw+0x3B8`, count `hw->0xc2 * 2 + 2`. The
+2fp comment "the SAME engine array 2bv walks" was off by one pointer:
+
+```
+0x3B0[0]      AMDRadeonX6000_AMDNavi21PM4Engine
+0x3B0[1..4]   AMDRadeonX6000_AMDSDMAEngine_GC_10_3_0   == 0x3B8[0..3]
+0x3B0[8..9]   AMDRadeonX6000_AMDVCN3HWEngine
+```
+
+`hw->0xc2 = 1` gives count 4, which is **exactly** the number of SDMA engines
+present, and 0x3B8 is **exactly** where they begin. Two independently-derived
+numbers agreeing, so `startHWEngines` walks the four SDMA engines and the PM4
+engine is not in its window. All four are non-NULL (2bv powered them up), so
+**the NULL check at 0xbea9068 cannot fire** and the FALSE comes from a
+`vtable[0x148]` call - 2fq's "map all '.'" branch, settled without the walk's
+own per-engine lines ever reaching the log.
+
+**And that resolves the 2fo anomaly instead of leaving it.** Slot 0x148 is
+`start()`, and for the PM4 class it is `0xbed2342` = `xorl %esi,%esi ; jmp
+doStart` - a `doStart(false)` thunk. Had the PM4 been in range, doStart would
+have run twice; the 2fo log has exactly **one** `doStart entered` with
+`startHWEngines -> 0` ten ms later. It is not in range, so there was never a
+second call to explain. For the SDMA class, slot 0x148 is
+`AMDRadeonX6000_AMDGFX10SDMAEngine::start()` (0xbea4a6a).
+
+### Apple's SDMA start(), disassembled end to end (0xbea4a6a)
+
+```
+bea4a6a  if (this->0x10 != 0)   return FALSE        one byte, no work at all
+bea4a87  svc = (this->0x18)->vtable[0x2c0]()
+bea4a94  if (this->0x48 == 0)   -> bea4b49          zero queues: trivial TRUE
+loop i < this->0x48:
+  bea4aa7  ch   = this->0x50[i]
+  bea4ad4  desc = { 0x40000, ch->0x48, ch->0xd0 }
+  bea4b0c  svc->vtable[0x120](this->0x1a0[i], this->0x1a4[i], &desc, &out)
+  bea4b14  if (ret != 0)        -> bea4b5d          unmap, return FALSE
+bea4b49  this->0x10 = 1 ; vtable[0x278]() ; return TRUE
+```
+
+`0x10` is a **"started" flag**: set on success, and a second `start()` refuses
+at the first instruction. The tempting explanation was therefore that
+`powerUp` had already set it, making the FALSE a double-call artefact.
+
+**Refuted statically, before it cost a boot:** the SDMA `vtable[0x138]`
+(powerUp) is `0xbed1fac` = `movb $0x1,%al ; retq` - a constant TRUE that
+touches nothing. That is also why 2bv logged engines 1-4 powering up **3 us
+apart**. So `0x10` is 0 on entry and the body really runs.
+
+**What is left is `svc->vtable[0x120](cmd, ...)` returning nonzero** - the
+same service-object slot `startKIQ` uses with command 8, which works on this
+chip. This is the first time SDMA has asked that layer for a queue here, and
+the command ids come from `this->0x1a0[i]` / `0x1a4[i]`.
+
+Worth noting what now becomes relevant: `_sdma_5_2_1_fw_autoload_is_completed`
+has been forced true since 2ao (one of the three blanket bypasses 2cy said
+were masking something), and this is the first code path that depends on the
+SDMA block actually being up.
+
+### The instrument
+
+`AMDGFX10SDMAEngine::start` is hooked observe-only - `nm -m` shows it external
+and defined in X6000, so routing it by X6000's id is safe under the
+milestone-2c rule. Per call it logs `this`, the `0x10` flag, the queue count
+`0x48` and the two command ids, all read **before** the original so they are
+what Apple's own gates test, then the return.
+
+All four calls also accumulate into one compact string that rides out on the
+single stage-4 note at `startHWEngines`' exit, so a boot with no log still
+answers:
+
+```
+s=4 ... ret=0 sdma[4]{#0:f10=0,q=N,r=1 #1:... #2:... #3:...}
+```
+
+```
+one r=0 with f10=0      that engine's queue create refused - the index names
+                        it and the next step is the command id it sent
+one r=0 with f10=1      it was already started, which the static reading says
+                        cannot happen on the first call, and would mean
+                        start() runs twice
+all r=1 and ret=0       startHWEngines returns 0 for a reason outside the
+                        loop, and 0xbea906b onward is where to look
+q=0 everywhere          every engine takes the trivial-TRUE path and the
+                        FALSE is not in the queue create at all
+```
+
+Stage 1 stays at `powerUpHW` ENTER, so the chain region keeps zero commits;
+stages 3 and 4 are both after it.
+
+Build: UUID 83F2470A, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays.
