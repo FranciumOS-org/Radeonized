@@ -5320,3 +5320,91 @@ the two reads MATCH      the thread genuinely stops, for the first time
 
 2fl stays installed; its gates 32/33 are unanswered and will answer themselves
 on any boot that gets past 152. Boot-args unchanged, build 5CC58C07.
+
+### 2fl/2fm answered on hardware (2026-10-14): GATE 32 — Apple's mapQueues RETURNS
+
+logs/20261014-130311-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=b6c05001`, a new boot). Build checked:
+5CC58C07 == build/out (2fl).
+
+```
+nvram rbgpu-gate -> "46 49 47 40 101 151 45 50 54 55 60 102 152 32
+                     | 32 mapQueues: the ORIGINAL returned [w=14 f=0 t=369 wx=356]"
+```
+
+**Gate 32 landed - the new one - so `submitMapQueuesPacket`'s ORIGINAL returns
+on this chip.** Fourteen gates, the most since 2fi, and the dense-gate
+reversal paid for itself on its first boot: that return was previously buried
+inside the 152 -> 70 span and could only be inferred from the boots that
+reached gate 70.
+
+Per-gate, against the log's own timestamps (`t=369` vs 369.3 ms measured, so
+the instrument agrees a second time):
+
+```
+  46  14.055488
+  49  14.058491    3.003 ms
+  47  14.068117    9.626 ms
+  40  14.424259  356.142 ms   <- wx, the same real-work span as 2fk
+ 101  14.424273    0.014 ms
+ 151  14.424374    0.101 ms
+  45  14.424380    0.006 ms
+  50  14.424405    0.025 ms
+  54  14.424413    0.008 ms
+  55  14.424646    0.233 ms   <- Apple's initGraphicsMQD again (2fk: 0.223)
+  60  14.424652    0.006 ms
+ 102  14.424660    0.008 ms
+ 152  14.424751    0.091 ms
+  32  14.424756    0.005 ms   <- Apple's epilogue + our return: 5 US
+```
+
+- **gate 40 -> gate 32 is 497 us**, a third measurement of the ~480 us
+  frontier, and `initGraphicsMQD` reproduces at 233 us against 223 us.
+- **Apple's `submitKIQFrame` epilogue and the return into our hook cost 5 us.**
+  2fl's branch "the stop is inside Apple's own epilogue" is closed.
+- The in-boot `nvram.txt` is byte-identical to the post-power-cycle read
+  again, so the commit-lag refutation holds on a second boot.
+
+**And the stop is now bounded to two `rbgpu_diag_set_num` calls** - gate 32 to
+gate 33 contains nothing else. That span was read rather than guessed:
+`performRefreshDiag` (RembrandtGPUPeer.cpp:1096) releases `g_diagLock` before
+building any OSString and before both `setProperty` calls, holding it only
+across a ~220 KB memcpy - tens of microseconds, once per 250 ms since 2fa. The
+diag table is not full (no `DIAG TABLE FULL` line, `d=27`). So nothing in
+those two calls can cost what a stop would cost, and 2fe/2fg traversed this
+very span to reach gates 70 and 75.
+
+**Which is the pattern the whole family now shows, stated plainly:** the
+endpoint is always at a boundary of our code, our code is measured at 4-6 us,
+and the frontier is 500 us wide. Those three cannot all describe a thread
+that stops somewhere.
+
+## 2fn (2026-10-14): the 2fm test is still owed, and nothing should be built until it is run
+
+2fm asked for two reads of `rbgpu-gate` a minute apart from the armed boot.
+That was not captured this time - the terminal held nothing and `plugin_check`
+records the trail once - so **the question it exists to settle is still
+open**, and it is prior to every other question here. A thread advancing one
+gate a minute leaves exactly the record above; so does a stopped one.
+
+No build. 2fl stays installed (gate 33 is unanswered and will answer itself
+on any boot that passes it), boot-args unchanged, UUID 5CC58C07. In the armed
+boot:
+
+```
+nvram rbgpu-gate ; sleep 60 ; nvram rbgpu-gate
+```
+
+```
+DIFFER   there is no stopping point - every endpoint from 2eo to 2fm is void
+         for locating anything, and the question becomes what costs minutes
+         per gate in code measured at 6 us
+MATCH    the thread genuinely stops, established rather than assumed for the
+         first time, and the 32 -> 33 span is a real location - which would
+         then be a hard fact about two IOLock round-trips and the next thing
+         to disassemble is the lock, not the GPU
+```
+
+Writing a seventh structural hypothesis before that answer arrives would be
+the same mistake six times over; the six already refuted are listed under
+2fl.
