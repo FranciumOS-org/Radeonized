@@ -5024,3 +5024,84 @@ Build: UUID 1FEC6BCA, hosttest passes. Boot-args unchanged.
 ...96 only      the span was not the diag sets after all, and what remains
                 between the poll and gate 95 is one assignment
 ```
+
+### 2fj answered on hardware (2026-10-13): no — the trail went backwards to 152
+
+Recovery boot; build and arming checked first per the 2cu/2cv rule.
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 1FEC6BCA   == build/out (2fj)
+rbgpu-diag        -> d=0 armed=0                        the recovery boot
+rbgpu-diag-prev   -> d=27 armed=1 ttl_hw_init_ret=cd22c001
+                     (2fi read c553a001, so this IS a new boot)
+nvram rbgpu-gate  -> "46 49 47 40 101 151 45 50 54 55 60 102 152
+                      | 152 waitForHwStamp RETURNED TRUE [w=13 f=0]"
+```
+
+Thirteen gates against 2fi's twenty-four, and **the trail is byte-identical to
+2ff's**: stamp #2 returned TRUE and gate 70 never committed, so this boot did
+not finish even the first `submitMapQueuesPacket`.
+
+**2fj changed nothing in that span.** Its only edits are in the
+`waitForActiveValue` hook (which runs after gate 75) and at `doStart`'s
+return. So this is 2fc again: a build whose relevant code is unchanged,
+landing on a different endpoint.
+
+```
+build   edits in the 152 -> 70 span   trail endpoint   gates
+2fe     -                             75               18
+2ff     log moved before the gate     152              13
+2fg     -                             75               18
+2fh     -                             90               19
+2fi     -                             96               24
+2fj     -                             152              13
+```
+
+Six boots, four of them with no change at all in that span, four different
+endpoints. **The endpoint still varies**, and every structural explanation
+offered for it has now been refuted on hardware: logging contention (2ez,
+fixed in 2fa, variance stayed), the NVRAM write budget (2ff, refuted by 2fg
+at `w=18 f=0`), and the register dump (2fe, which helped once and then did
+not).
+
+## 2fk (2026-10-13): time the trail, because nothing ever has
+
+The one quantity never measured in this family is **how long a gate costs**.
+Each one does a `setProperty` plus `IONVRAM-FORCESYNCNOW-PROPERTY` - a real
+flash commit inside `IOService::start` - and no boot has ever clocked one.
+
+2ez found exactly this shape once already, in the log rather than the trail:
+the same code running at 3 us and at 10 ms per line within one boot, which is
+indistinguishable from a wedge and stops wherever the power cycle lands. That
+diagnosis is what made 2fa work, and the possibility that the gate trail is
+now the slow instrument has never been tested. It also fits what nothing else
+explains: the heartbeat dying at `n=13..28` in every boot while the machine
+demonstrably lives for minutes (2ff), since the beat competes for the same
+NVRAM controller.
+
+`rbgpu_gate_nvram` now carries two numbers in its tail text:
+
+```
+t   ms since the FIRST gate of the boot
+wx  the worst single gate-to-gate gap in ms
+```
+
+No new mechanism and no new hardware access - two statics and one
+`mach_absolute_time()` per gate.
+
+Build: UUID 7C93413F, hosttest passes. Boot-args unchanged.
+
+```
+t tens of ms at the last gate      the thread genuinely stops, the endpoint
+                                   DOES locate it, and the next question is
+                                   what is in that span
+t already seconds, wx in the       the gates are the crawl: the endpoint is
+hundreds                           just where the power cycle landed, every
+                                   endpoint reading from 2fa onward is void,
+                                   and the breadcrumb needs a cheaper channel
+```
+
+One thing only the user can supply, and it matters as much as the numbers:
+**how long each armed boot sat before it was power-cycled.** If the two
+13-gate boots were cut short and the 24-gate boot was left longer, that is
+the second branch without needing another build.
