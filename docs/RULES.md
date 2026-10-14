@@ -5566,3 +5566,87 @@ all non-NULL               the FALSE comes from one of the vtable[0x148]
 
 Gates stay OFF: `-rbgpunogates` is now the configuration that works and the
 boot-args keep it. Build: UUID 88399259, hosttest passes.
+
+### 2fp answered nothing (2026-10-14): the boot ran and left no record
+
+Build and arming checked first, per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 88399259   == build/out (2fp)
+logs/20261014-132756-plugin/nvram.txt
+   rbgpu-diag  = d=27 armed=1 ttl_hw_init_ret=ffffffffdca2e001
+                 (2fo read c3af8001, so this IS a new boot)
+   rbgpu-gate  = unchanged from the 2fl boot - the gates are still off
+log.txt      = 0 bytes
+ioreg-raw.txt = ABSENT                 (the 2fo boot's was 484 bytes + .done)
+```
+
+So the armed 2fp boot happened and produced **no evidence at all**.
+`log show --last boot` returned nothing and `plugin_check` never reached even
+its first bounded ioreg, so the capture is equally consistent with the boot
+wedging and with the script being interrupted - and the log cannot be
+recovered afterwards: the persistent store has nothing for 13:20-13:40 and
+the machine rebooted at 13:28:23, so `--last boot` now covers a different
+boot. No `.panic` was written (the newest is 2026-10-11), so it did not panic.
+
+**And the fallback channel does not work either, which is the part worth
+keeping.** The 2fo and 2fp summaries are *byte-identical* apart from
+`ttl_hw_init_ret`, and both end at `regchan_calls=19` with `d=27`. 2fo is the
+boot that ran the entire chain and reached `handlePostRegister`; its summary
+stops hundreds of log lines before `powerUp` all the same. So `rbgpu-diag`
+has not been reporting the frontier since the gates went off, whatever the
+boot does, and reading a key's absence from it as a fact would be the
+eighteenth instance of the recurring error.
+
+Not claimed: that 2fp's walk caused the loss. It reads the array 2bv already
+walks and adds ~11 log lines; nothing in it writes flash, and a bad pointer
+would have panicked rather than gone quiet.
+
+## 2fq (2026-10-14): give the answer a channel that survives a dead boot
+
+The question is unchanged - which engine `startHWEngines` refuses - and the
+only thing wrong with 2fp was that its answer lived in a log.
+
+`rbgpu_nvram_note(var, text)` writes **one** NVRAM variable, once, on the
+calling thread, with the same FORCESYNCNOW commit the gate trail used. The
+distinction from the trail is the whole point of 2fo's accounting: what
+wedged those boots was ~24 synchronous flash commits threaded through
+`IOService::start`, not one. Gates 50, 54, 55, 70 and 75 each landed on boots
+that went on running, and 2fk measured a gate at ~6 us.
+
+Two writes per boot, both to `rbgpu-starthw`:
+
+```
+after the walk   c2=N n=M map=..... allok | NULL@i | NOFN@i
+after the call   the same string plus ret=0/1
+```
+
+The map is one character per engine - `.` non-NULL with a non-NULL
+`vtable[0x148]`, `f` non-NULL with a NULL slot, `-` NULL - so one variable
+carries the whole array rather than an index whose meaning has to be
+remembered. The second write is what proves the first is this boot's and not
+a stale read.
+
+The NVRAM hot list is also rewritten for this frontier. Everything in it was
+`gate_stage`, `ptb_*`, `stamp_*`, `gfxmqd_*` and `mapq_*` - all belonging to
+questions 2fo answered - and per the 2ec rule they move down into the main
+list behind `starthw_c2`, `starthw_count`, `starthw_null_idx`,
+`starthw_badfn_idx`, `pw_stage`, `pw_ret`. Given the paragraph above, those
+keys are a hope; `rbgpu-starthw` is the record. `tools/plugin_check.sh`
+captures it first.
+
+Build: UUID EA5A3668, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays, it is the configuration that works.
+
+```
+map has a '-'    startHWEngines fails at the NULL check (0xbea9068) and the
+                 position names the engine; 2bv powered that same index up,
+                 so something between powerUp and here removed it
+map all '.'      the FALSE comes from one of the vtable[0x148] CALLS, and
+                 the next step is to resolve that slot per engine class and
+                 disassemble it
+map has an 'f'   Apple calls through a NULL slot unconditionally, which is a
+                 fault and not a FALSE - a different failure from both
+nothing written  the boot does not reach startHWEngines, which would itself
+                 be new: 2fo reached it
+```

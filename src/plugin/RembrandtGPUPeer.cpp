@@ -556,34 +556,28 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
-    // 2en: the frontier moved. 2em ANSWERED its question - the PT_BASE patch
-    // took, the GPUVM fault went away and the first stamp arrived - and the
-    // boot then wedged in gates that had never run before. The live question
-    // is now WHERE, so the breadcrumb and the gates after
-    // submitSetResourcesPacket come first. The 2em keys stay because they are
-    // the precondition: if ptb_written is 0 the rest means nothing.
-    "gate_stage",
-    // 2ev: which region of Apple's initGraphicsMQD can even run.
-    "gfxmqd_f10", "gfxmqd_f310", "gfxmqd_f250", "gfxmqd_f30",
-    "ptb_written", "ptb_rel_holds", "ptb_back",
-    "vmf_st_wait", "vmf_st_post",
-    "stamp_calls", "stamp_ret", "stamp_in_call",
-    "bwait_raw", "bwait_iters", "bwait_timeout", "bwait_vt_bad", "bwait_disabled",
-    "setres_calls", "setres_ret",
-    "gfxmqd_calls", "gfxmqd_ret",
-    // 2ep: the object chain inside initGraphicsMQD, where the boot now stops.
-    "gfxmqd_memobj", "gfxmqd_svc", "gfxmqd_svc_fn", "gfxmqd_svc_fn128",
-    "mapq_calls", "mapq_fails",
-    "wfav_calls", "wfav_bounded_forced", "wfav_ret",
+    // 2fq (2026-10-14): the frontier moved and this list did not follow it.
+    //
+    // Everything that was here - gate_stage, the ptb_*, stamp_*, gfxmqd_* and
+    // mapq_* keys - belongs to a question the 2fo boot ANSWERED by running
+    // the whole chain with the gate trail off: doStart returned 1, every
+    // engine powered up, and the stop is now AMDHardware::startHWEngines
+    // returning 0. Per the rule above they move down into the main list and
+    // the new frontier's keys come first.
+    //
+    // Note what the last two captures say about this channel, because it is
+    // the reason 2fq also writes `rbgpu-starthw` directly: the 2fo and 2fp
+    // summaries are byte-identical and both end at `regchan_calls=19`, which
+    // is hundreds of log lines before powerUp. Whatever stops the summary
+    // advancing, these keys are a hope and the one-shot note is the record.
+    "starthw_c2", "starthw_count", "starthw_null_idx", "starthw_badfn_idx",
     "pw_stage", "pw_ret",
-    "stamp_submitted", "stamp_completed",
-    "fence_val_before", "fence_val_after",
-    // the fault, per point, in case it comes back at a later gate
-    "vmf_st_kiq", "vmf_st_pre", "vmf_ad_wait",
-    // 2ei/2ek/2el are ANSWERED (TTL names the table; the ring's PTE is valid
-    // and every entry is SYSTEM) and have moved down into the main list, per
-    // the rule above.
+    // the preconditions: if these are not right the rest means nothing.
+    "ptb_written", "ptb_back", "vmf_st_wait", "stamp_ret",
+    "setres_ret", "gfxmqd_ret", "mapq_calls", "mapq_fails",
+    "gate_stage",
 };
+
 
 
 static bool rbgpuIsHotKey(const char *key) {
@@ -982,6 +976,44 @@ void rbgpu_heartbeat_start(void) {
     uint64_t deadline = 0;
     clock_interval_to_deadline(250, kMillisecondScale, &deadline);
     thread_call_enter_delayed(g_rbgpuBeatCall, deadline);
+}
+
+// 2fq (2026-10-14): one NVRAM variable, one write, no trail.
+//
+// The 2fp boot answered nothing because its only channel was RBGPULog, and
+// that boot's `log show` came back empty - the same loss that cost 2fb, 2fe
+// and 2ev a boot each. The diag summary is no substitute: both the 2fo and
+// the 2fp capture froze at the identical key (`regchan_calls=19`, d=27), so
+// whatever rbgpu-diag reports, it stops reporting long before powerUp.
+//
+// What 2fo established is that TWENTY-FOUR synchronous flash commits inside
+// IOService::start wedge the boot. It established nothing about one. Gates
+// 50, 54, 55, 70 and 75 each landed on boots that went on running, and 2fk
+// measured a gate at ~6 us, so a single write is not the hazard the trail
+// was; the hazard was doing it two dozen times through the chain. This
+// writes once, from one place, and says so in its own name.
+void rbgpu_nvram_note(const char *var, const char *text) {
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            return;
+        }
+        g_rbgpuOptions = options;   // retained by fromPath; kept for the boot
+    }
+    if (!var || !text) {
+        return;
+    }
+    OSCompareAndSwap(0, 1, &g_rbgpuNvramBusy);
+    if (auto str = OSString::withCString(text)) {
+        options->setProperty(var, str);
+        str->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    g_rbgpuNvramBusy = 0;
 }
 
 void rbgpu_gate_nvram(uint32_t stage, const char *what) {
