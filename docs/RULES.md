@@ -5211,3 +5211,112 @@ Build: UUID 5CC58C07, hosttest passes. Boot-args unchanged.
 endpoint: if boots that stop at different gates all report `t` near 380 ms,
 the stop is a wall-clock moment - a watchdog or an asynchronous arrival - and
 not a place in the code at all.
+
+### 2fl answered on hardware (2026-10-14): gate 102 — and `t` is NOT a fixed moment
+
+No log dir from the armed boot, so NVRAM is the whole record. Build checked:
+5CC58C07 == build/out (2fl), `rbgpu-diag` d=0 armed=0 (the recovery boot).
+
+```
+nvram rbgpu-gate -> "46 49 47 40 101 151 45 50 54 55 60 102
+                     | 102 waitForHwStamp ENTER [w=12 f=0 t=171 wx=171]"
+```
+
+Twelve gates, one EARLIER than 2fj/2ff: the second `waitForHwStamp` was
+entered and gate 152 never committed. So 2fl's new gates 32 and 33 never had
+a chance - they sit after 152 - and the question they were added for is still
+open.
+
+**`t = wx = 171`**, so one gap is the entire elapsed time and every other gate
+rounds to zero. That one gap is 47 -> 40 again, as in 2fk; it was 367 ms there
+and 171 ms here, so even Apple's own work in that span (initComputeMQD,
+startKIQ, the post-startKIQ dump, the 2em PT_BASE write) varies more than
+twofold boot to boot. Everything from gate 40 onward is under a millisecond,
+confirming 2fk's 479 us a second time.
+
+**And `t` answers the question 2fk posed.** 2fk predicted that if boots
+stopping at different gates all reported `t` near 380 ms, the stop would be a
+wall-clock moment - a watchdog or a timeout - rather than a code position.
+They do not: 380 ms at gate 152, 171 ms at gate 102. **The watchdog reading is
+refuted.**
+
+### The commit-lag hypothesis is refuted too, by a record already in hand
+
+Before writing a seventh explanation I checked the one that the 6 us gate cost
+makes tempting: a flash commit cannot take 6 us, so `IONVRAM-FORCESYNCNOW-
+PROPERTY` may not commit synchronously, and the flash copy could lag the
+thread by an unknown number of gates. That would make every endpoint since 2eo
+a measurement of the commit, not the thread - and it would also explain why
+`w` never contradicts the trail, since **`w` rides inside the very string
+whose commit is in question**, so the two can only ever agree. On that reading
+2fg's refutation of the write-budget hypothesis was circular.
+
+It does not hold, and the 2fk boot already said so:
+
+```
+in the ARMED boot   logs/20261014-101920-plugin/nvram.txt
+                    "... 60 102 152 | 152 ... [w=13 f=0 t=380 wx=367]"
+after the power cycle, read directly
+                    "... 60 102 152 | 152 ... [w=13 f=0 t=380 wx=367]"
+```
+
+**Byte-identical.** The in-boot read returns the in-memory value, so if writes
+were being lost to the commit the two would differ. They do not. The trail is
+honest about what the thread wrote.
+
+### Where this leaves the variance, stated without a seventh guess
+
+Six structural explanations have now been offered for the varying endpoint and
+every one has been refuted on hardware:
+
+```
+logging contention        2ez -> fixed in 2fa, variance stayed
+NVRAM write budget        2ff -> refuted by 2fg (w=18 f=0)
+the register dump         2fe -> helped once, then did not
+the gates being the crawl 2fk -> refuted by its own timing (6 us)
+a wall-clock watchdog     2fk -> refuted by this boot (t 380 vs 171)
+NVRAM commit lag          here -> refuted by the 2fk in-boot read
+```
+
+I am not proposing a seventh. What is settled and worth keeping separate from
+the variance:
+
+- the chain runs **end to end in 479 us** when it runs: setres + stamp,
+  initGraphicsMQD (223 us), mapQueues with real GPU stamps, the ring-state
+  reads, and the HQD poll;
+- **`CP_GFX_HQD_ACTIVE` reads 1** (2fi) - the graphics queue is live;
+- all three accessor slots work - `[0x148]` resolve, `[0x118]` read,
+  `[0x120]` write - with seg0 = 0x1260 agreed four independent ways;
+- the trail is a trustworthy, 6 us, honest record of what the thread wrote.
+
+## 2fm (2026-10-14): ask whether the thread stops at all — no build required
+
+Every reading in this family, including 2ey's, assumes the thread has *stopped*
+where the trail ends. 2ey established the machine is alive and `pci.txt` at 0
+bytes shows the start() thread holds the IOService lock; it did **not**
+establish that the thread is no longer making progress. A thread advancing at
+one gate per minute produces exactly the same record as a stopped one, and
+2ez already caught this project mistaking slowness for a hang once.
+
+The test needs no new build and no new code. The trail is in memory and the
+machine is alive, so **read it twice from the armed boot, a minute apart**:
+
+```
+nvram rbgpu-gate ; sleep 60 ; nvram rbgpu-gate
+```
+
+```
+the two reads DIFFER     the thread is still advancing and there is no
+                         stopping point at all - the "endpoint" is just where
+                         the clock was when it was read, every endpoint in
+                         2eo-2fl is void for locating anything, and the real
+                         question is what costs minutes per gate in code
+                         measured at 6 us
+the two reads MATCH      the thread genuinely stops, for the first time
+                         established rather than assumed, and the endpoint is
+                         a real location - so the 102 -> 152 span (our own
+                         bounded wait, 2en) is where to look
+```
+
+2fl stays installed; its gates 32/33 are unanswered and will answer themselves
+on any boot that gets past 152. Boot-args unchanged, build 5CC58C07.
