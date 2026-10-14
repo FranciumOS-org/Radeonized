@@ -3450,10 +3450,30 @@ static void rbgpu_gate_2en(uint32_t stage, const char *what) {
     // gate 54.
     if (stage >= 40) {
         rbgpu_nvram_quiesce();
-        // 2ey: and arm the independent heartbeat at the same point, so the
-        // trail gets a control without costing anything on a boot that never
-        // reaches the doStart chain.
-        rbgpu_heartbeat_start();
+        // 2fg (2026-10-13): the heartbeat is OFF unless -rbgpubeat is set.
+        // Its question is ANSWERED: 2ey branch 1, the machine is alive and
+        // the start() thread alone is stuck. What it still does is write
+        // rbgpu-beat with a FORCESYNCNOW flash commit four times a second,
+        // and from gate 40 the quiesce above means the gate trail and the
+        // beat are the ONLY two NVRAM writers left in the boot.
+        //
+        // And the beat does not survive its own boot. It re-arms itself
+        // unconditionally every 250 ms, so in the boots where plugin_check
+        // ran in the armed boot and the machine demonstrably lived for
+        // minutes (2ey, 2fa, 2fc, 2fd) n should read in the hundreds. It
+        // reads 13-28, every time, across trail endpoints from 101 to 75.
+        // The beat's loop contains exactly one thing that can block: its own
+        // setProperty + IONVRAM-FORCESYNCNOW-PROPERTY. So synchronous flash
+        // commits stop working partway through the boot, and the gate trail
+        // uses the same mechanism.
+        //
+        // That is a candidate cause for the varying endpoint that is NOT the
+        // thread: the trail may stop where the WRITES stop, not where the
+        // thread stops. Taking the beat out roughly doubles what is left for
+        // the gates and tests that directly.
+        if (checkKernelArgument("-rbgpubeat")) {
+            rbgpu_heartbeat_start();
+        }
     }
     rbgpu_diag_set_num("gate_stage", stage);
     // 2eo: and synchronously, on this thread, because the diag path above

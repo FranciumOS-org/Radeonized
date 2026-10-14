@@ -4570,6 +4570,7 @@ What the next armed boot decides, from `nvram rbgpu-gate`:
 endpoint still varies              the dump is not it either, and what is left
                                    in the span is Apple's own code plus our
                                    diag/log calls at 4 us each
+```
 
 ### 2fe answered on hardware (2026-10-13): THE DUMP WAS THE STALL — initGraphicsMQD RETURNS
 
@@ -4663,3 +4664,87 @@ stops after a 7x again         the stop is inside Apple's next mapQueues call,
 an 8x value                    a mapQueues call FAILED rather than hung, which
                                is a clean doStart failure and a desktop
 ```
+
+### 2ff answered on hardware (2026-10-13): the trail went backwards again
+
+Recovery boot; build checked first (`kmutil showloaded` 8B7407F6 == build/out),
+`rbgpu-diag` d=0 armed=0.
+
+```
+nvram rbgpu-gate -> "46 49 47 40 101 151 45 50 54 55 60 102 152
+                     | 152 waitForHwStamp RETURNED TRUE"
+nvram rbgpu-beat -> "n=17 gate=152 skips=0 forced=0 t=18751827333"
+```
+
+Thirteen gates against 2fe's eighteen: stamp #2 returned TRUE and gate 70
+never committed, so this boot did not finish even the FIRST mapQueues call.
+
+And 2ff's own reasoning was wrong on its own terms. Moving the log before the
+exit gate put **more** of our code into the `152 -> 70` span, not less - the
+same total, redistributed. The 2eu/2ez precedent it was reasoning from is
+itself now suspect: 2ez explained the variance as logging contention, 2fa
+measured that contention gone, and the variance stayed.
+
+### The constant nobody had looked at: the heartbeat does not survive its boot
+
+`rbgpu_beat_action` re-arms itself with `thread_call_enter_delayed` **every
+250 ms, unconditionally**, for as long as `g_rbgpuBeatOn`. So in the boots
+where `plugin_check` ran *in the armed boot* and the machine demonstrably
+lived for minutes - 2ey, 2fa, 2fc, 2fd - `n` should read in the hundreds.
+
+```
+2ez n=27   2fa n=28   2fb n=13   2fc n=17   2fd n=16   2fe n=14   2ff n=17
+```
+
+**It reads 13-28 in every boot**, across trail endpoints from 101 to 75. The
+beat stops a few seconds after gate 40 while the machine goes on living, and
+its loop contains exactly one thing that can block: its own `setProperty` +
+`IONVRAM-FORCESYNCNOW-PROPERTY`.
+
+So **synchronous NVRAM flash commits stop working partway through the boot** -
+and the gate trail uses that same mechanism. That is a candidate cause for the
+varying endpoint which is **not** the thread: the trail may stop where the
+WRITES stop, not where the thread stops.
+
+What this does and does not touch:
+
+- 2ey's branch 1 **stands**: the machine is alive and the start() thread holds
+  the IOService lock (`pci.txt` 0 bytes). The thread is genuinely stuck or
+  slow. What is now open is whether the trail's ENDPOINT locates it.
+- `skips=0 forced=0` does not help here. It says the beat never found the gate
+  path holding the flag; it says nothing about whether either write landed.
+- It would also explain 2fe without the register dump being a stall at all:
+  from gate 40 the quiesce means the only NVRAM writers are the gates and the
+  beat, so anything that changes their relative throughput changes how much
+  trail gets recorded. 2fe's finding that `initGraphicsMQD` RETURNS is **not**
+  affected - gates 55, 70 and 75 committed, and a committed gate is positive
+  evidence whatever happens to later ones.
+
+Stated as a hypothesis, not a finding. A seven-row table of one boot each is
+exactly the shape that produced the withdrawn 2ev table and the 2ez
+correction; the per-boot totals (gates + beats = 17..32) are suggestive and
+not tight, and 2fb's 4+13 breaks any clean budget.
+
+## 2fg (2026-10-13): take the other writer out, and make the gate say if it landed
+
+- The heartbeat is **off unless `-rbgpubeat`** is set. Its question is
+  answered, it costs four flash commits a second, and from gate 40 it is the
+  only NVRAM writer besides the gate trail. Removing it roughly doubles what
+  is left for the gates and tests the hypothesis directly.
+- `rbgpu_gate_nvram` now counts its writes and any the registry refuses, and
+  carries both in the text: `[w=N f=M]`.
+
+```
+trail runs much further        writes were the constraint, and every endpoint
+                              from 2fa onward was the record running out
+same endpoints, w climbing,   the writes are landing and the thread really is
+f=0                           what stops - so the stop is in Apple's next
+                              mapQueues and that is a place to disassemble
+f nonzero                     the registry refused a write, which names the
+                              failure outright
+```
+
+Also fixed: the 2fe section left a code fence unterminated in this file.
+
+Build: UUID 9ACF72A0, hosttest passes. Boot-args unchanged (`-rbgpubeat` is
+new and deliberately NOT added; `-rbgpuregdump` stays off).
