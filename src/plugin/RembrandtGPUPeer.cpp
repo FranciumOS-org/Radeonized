@@ -1222,13 +1222,58 @@ void RembrandtGPUPeer::handlePostRegister() {
     g_rb_peer_ret06 = static_cast<uint32_t>(ret06);
     g_rb_peer_stage |= 4;
 
+    // 2fr (2026-10-14): request 0x1B is NOT sent when powerUpHW failed.
+    //
+    // The 2fo boot's log ends at "sending Request 0x1B" with no "returned"
+    // line after it, where the 2cy boot logged both and then carried on into
+    // Wi-Fi scanning. The whole shape of that boot says this is where it
+    // stopped: `pci.txt` came back 0 bytes, so the IGPU registry subtree was
+    // locked by this very thread, and the user power-cycled it minutes later.
+    //
+    // What that thread is doing is now clear from the timestamps, and it is
+    // not what the journal assumed. Request 0x06 was SENT at 14.944 and
+    // RETURNED at 17.229 - so the whole powerUp chain, doStart and all, runs
+    // INSIDE request 0x06 on this thread, long after the accelerator's
+    // start() returned 1 at 14.958. 0x06 then came back 0 and 0x1B never did.
+    //
+    // Why 0x1B behaves differently from 2cy, where it answered 0xE00002C7 at
+    // once: in 2cy powerUpHW failed at the first gate and the hardware was
+    // untouched. Now the engines are powered, the queues are mapped and the
+    // rings are programmed, so "Controller Enabled" reaches code that has
+    // real state to act on - and waits.
+    //
+    // Skipping it is the honest state, not a bypass. powerUpHW returned 0, so
+    // the controller is NOT enabled, and telling the accelerator that it is
+    // would be another blanket-true latch of the kind 2am/2an/2ao already
+    // owe this project an explanation for. `-rbgpuforce1b` sends it anyway,
+    // for the boot where powerUpHW finally succeeds and the answer is
+    // expected to arrive.
+    static int force1b = -1;
+    if (force1b < 0) { force1b = checkKernelArgument("-rbgpuforce1b") ? 1 : 0; }
+    if (!g_rb_poweruphw_ok && !force1b) {
+        rbgpu_log("handlePostRegister: powerUpHW FAILED, so Request 0x1B "
+                  "(Controller Enabled) is NOT sent - the controller is not "
+                  "enabled, and 2fo shows this call does not return in that "
+                  "state (-rbgpuforce1b overrides)");
+        rbgpu_diag_set_num("req1b_skipped", 1);
+        rbgpu_nvram_note("rbgpu-post", "0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)");
+        g_rb_peer_stage |= 0x10;
+        return;
+    }
+
     rbgpu_log("handlePostRegister: sending Request 0x1B (Controller Enabled)");
     uint32_t reqControllerEnabled = 0x1B;
+    rbgpu_nvram_note("rbgpu-post", "0x06 done; 0x1B SENT - no return means it hangs here");
     IOReturn ret1B = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
     rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
     rbgpu_diag_set_num("ret_0x1B", static_cast<uint64_t>(ret1B));
     g_rb_peer_ret1B = static_cast<uint32_t>(ret1B);
     g_rb_peer_stage |= 8;
+    {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "0x1B RETURNED 0x%08X", ret1B);
+        rbgpu_nvram_note("rbgpu-post", buf);
+    }
 }
 
 IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,

@@ -25,6 +25,8 @@ void rbgpu_diag_inc(const char *key);
 // 2bq: peer progress, readable from hooks (a panic loses RBGPULog/RBGPUDiag).
 // Bits: 1 Register (0x00) received, 2 post-Register thread ran,
 // 4 request 0x06 returned, 8 request 0x1B returned.
+// 2fr: 1 only when AMDAccelerator::powerUpHW returned nonzero.
+extern volatile int g_rb_poweruphw_ok;
 extern volatile uint32_t g_rb_peer_stage;
 extern volatile uint32_t g_rb_peer_ret06;
 extern volatile uint32_t g_rb_peer_ret1B;

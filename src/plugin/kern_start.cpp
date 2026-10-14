@@ -4566,6 +4566,10 @@ static volatile uint32_t g_rb_pw_ret = 0xFFFFFFFF;
 static uint32_t (*orig_accel_powerUpHW)(void *) = nullptr;
 // 2cn: Survive mode - flag set when powerUpHW fails, used to fail start() cleanly.
 static volatile int g_rb_2cn_poweruphw_failed = 0;
+// 2fr (2026-10-14): the peer reads this before it sends request 0x1B. It is
+// set from powerUpHW's own return, so "the controller is enabled" is only
+// claimed when the hardware actually powered up.
+volatile int g_rb_poweruphw_ok = 0;
 static bool (*orig_navi21_powerUp)(void *) = nullptr;
 static bool (*orig_hwmem_enableAllocations)(void *) = nullptr;
 
@@ -4604,6 +4608,8 @@ static uint32_t hooked_accel_powerUpHW(void *accel) {
     if (ret == 0) {
         rbgpu_log("2cn: powerUpHW failed, will fail start() cleanly (survive mode)");
         g_rb_2cn_poweruphw_failed = 1;
+    } else {
+        g_rb_poweruphw_ok = 1;
     }
     return ret;
 }
