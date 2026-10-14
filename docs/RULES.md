@@ -5105,3 +5105,109 @@ One thing only the user can supply, and it matters as much as the numbers:
 **how long each armed boot sat before it was power-cycled.** If the two
 13-gate boots were cut short and the 24-gate boot was left longer, that is
 the second branch without needing another build.
+
+### 2fk answered on hardware (2026-10-14): REFUTED by its own number — a gate costs 6 us
+
+logs/20261014-101920-plugin, `plugin_check` ran **in the armed boot**
+(`ttl_hw_init_ret=cfda4001`, a new boot), 58 KB of log, `pci.txt` 0 bytes.
+Build checked: 7C93413F == build/out.
+
+```
+nvram rbgpu-gate -> "46 49 47 40 101 151 45 50 54 55 60 102 152
+                     | 152 waitForHwStamp RETURNED TRUE [w=13 f=0 t=380 wx=367]"
+```
+
+**The instrument verifies against the log to the millisecond** - gate 46 at
+13.968946, gate 152 at 14.349315, difference 380.4 ms, and the trail says
+`t=380`. So the timing is trustworthy, and per-gate it says:
+
+```
+gate    abs s        gap
+  46  13.968946
+  49  13.975077    6.131 ms     <- BEFORE the quiesce
+  47  13.981186    6.109 ms     <- BEFORE the quiesce
+  40  14.348836  367.650 ms     <- wx: initComputeMQD + startKIQ + the
+                                   post-startKIQ dump + the 2em PT_BASE write
+ 101  14.348851    0.015 ms
+ 151  14.348951    0.100 ms
+  45  14.348957    0.006 ms
+  50  14.348982    0.025 ms
+  54  14.348990    0.008 ms
+  55  14.349213    0.223 ms     <- Apple's initGraphicsMQD, timed at last
+  60  14.349219    0.006 ms
+ 102  14.349226    0.007 ms
+ 152  14.349315    0.089 ms
+```
+
+- **A gate costs ~6 US after `rbgpu_nvram_quiesce()` and ~6 MS before it.** The
+  three gates ahead of gate 40 are 6 ms apart; the nine after it, Apple's own
+  work included, span **479 us in total**. A thousandfold difference with the
+  quiesce as the only variable. So 2fk's hypothesis - the gates are the crawl -
+  is **refuted by the very number it added**, and `wx=367` is not a gate cost
+  at all but the real work between the accessor probe and the first gate of the
+  chain.
+- **Apple's `initGraphicsMQD` takes 223 us** (gate 54 -> 55). First time it has
+  been timed, and 2fe's "it RETURNS" now has a duration beside it.
+- **`t` is 380 ms, not seconds**, so branch one: the thread genuinely stops and
+  the endpoint does locate it.
+
+**And that reframes the variance into something new.** The whole frontier -
+gate 40 to gate 152 - is **479 us wide**, traversed at 6 us a gate. The
+endpoints this family has collected (152 at 13 gates, 96 at 24 gates) are a
+few hundred **microseconds** of thread progress apart. Deterministic code
+cannot stop at positions that vary inside a 500 us window; something
+asynchronous arriving at an unpredictable moment can, and the endpoint then
+records where the thread happened to be. That is consistent with 2ey's
+branch 1 rather than against it - the machine is alive, one thread is stuck -
+and it is the first explanation of the variance that the measurements support
+rather than contradict.
+
+Since 2em there is exactly one asynchronous thing on this chip for the first
+time: the GPU reaches host memory and the fences land (`fence_val_after=2`
+this boot, and the wait returned 1). An interrupt or the SW scheduler touching
+the same objects is a candidate; **it is named here as the leading reading,
+not a finding** - nothing yet measures it.
+
+## 2fl (2026-10-14): dense gates, because they are now measured to be cheap
+
+The reversal of 2ff and 2fj is a measurement, not a change of mind. Those
+steps emptied spans on the belief that our code in them cost the thread its
+progress; 2fk measures that cost at **6 us a gate**, so emptying the
+152 -> 70 span was saving microseconds out of 89.
+
+So the span gets gates at every boundary it has, which no span in this family
+has ever had:
+
+```
+152  waitForHwStamp RETURNED TRUE      (existing)
+ 32  mapQueues: the ORIGINAL returned  <- new
+ 33  the two diag sets returned        <- new
+ 70  submitMapQueuesPacket OK          (existing, one log line before it)
+```
+
+Three more gates, ~18 us added to an 89 us span. Band 32/33 is clear of
+30/31 (doStart), 40/45, 46-49, 50/54/55, 60-67/70-77/80-87, 90-96/98/99 and
+100+/150+.
+
+Also corrected: the 2dw fence line still printed "the failure is in the
+CPU-side pickup, not in the GPU" whenever the fence HAD landed. That was true
+while the fence never arrived and has been false since 2em, where the wait
+succeeds on its first poll. It now says the landed fence is the working path.
+
+Build: UUID 5CC58C07, hosttest passes. Boot-args unchanged.
+
+```
+...152 32 33 70 ...   the span is clear and the frontier moves on; with
+                      t per gate, two such boots say whether the stop is a
+                      code position at all
+...152 32 33          the stop is the one log line left in the span
+...152 32             the two diag sets
+...152 (stop)         Apple's own submitKIQFrame epilogue, with nothing of
+                      ours in the span - and 2fi traversed that same epilogue
+                      twice, so it would be a race rather than a position
+```
+
+`t` on the last gate is now the discriminator that matters more than the
+endpoint: if boots that stop at different gates all report `t` near 380 ms,
+the stop is a wall-clock moment - a watchdog or an asynchronous arrival - and
+not a place in the code at all.
