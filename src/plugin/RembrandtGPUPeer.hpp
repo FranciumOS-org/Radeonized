@@ -19,6 +19,10 @@ void rbgpu_nvram_note(const char *var, const char *text);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the
 // gate trail can be told apart from a machine that died under it.
 void rbgpu_heartbeat_start(void);
+// 2fw: two delayed samples of the progress stage, so one boot says whether
+// the chain is stopped or crawling without the user running anything.
+void rbgpu_progwatch_start(void);
+extern volatile uint32_t g_rb_prog_stage;
 void rbgpu_diag_set_str(const char *key, const char *val);
 void rbgpu_diag_inc(const char *key);
 

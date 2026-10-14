@@ -3025,6 +3025,7 @@ static void rbgpu_prog_2fs(uint32_t stage, const char *what) {
     char buf[200];
     snprintf(buf, sizeof(buf), "s=%u %s", stage, what ? what : "");
     rbgpu_nvram_note("rbgpu-prog", buf);
+    g_rb_prog_stage = stage;          // 2fw: what the timer samples
     rbgpu_log("2fs: prog s=%u %s", stage, what ? what : "");
 }
 
@@ -4662,6 +4663,7 @@ static uint32_t hooked_accel_powerUpHW(void *accel) {
     // commits inside it matter; if it stops again, nothing of ours is in
     // that region and the stop is real.
     rbgpu_prog_2fs(1, "powerUpHW ENTER - before the chain");
+    rbgpu_progwatch_start();          // 2fw: +30 s / +90 s stage samples
     uint32_t ret = orig_accel_powerUpHW ? orig_accel_powerUpHW(accel) : 0;
     g_rb_pw_ret = ret;
     g_rb_pw_stage |= 2;
