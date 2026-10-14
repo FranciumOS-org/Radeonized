@@ -12,6 +12,10 @@ void rbgpu_diag_set_num(const char *key, uint64_t val);
 // 2eo: synchronous NVRAM breadcrumb, written on the calling thread.
 void rbgpu_gate_nvram(uint32_t stage, const char *what);
 void rbgpu_nvram_quiesce(void);
+// 2fq: ONE synchronous NVRAM variable, written once where it is called. Not a
+// trail: the gate trail's twenty-four flash commits inside IOService::start
+// were the 2fo wedge, and this is a single write that carries a whole answer.
+void rbgpu_nvram_note(const char *var, const char *text);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the
 // gate trail can be told apart from a machine that died under it.
 void rbgpu_heartbeat_start(void);

@@ -4730,33 +4730,97 @@ static bool hooked_hw_powerUpHWEngines(void *hw) {
 // vtable[0x148] instead of powerUp - and Apple names the failing index in an
 // os_log we do not capture. This reads the array and the slot pointer only;
 // the original still makes every call. No hardware access.
+// 2fq (2026-10-14): the walk's answer rides ONE NVRAM write, not the log.
+//
+// The 2fp boot ran (ttl_hw_init_ret moved) and produced no evidence at all:
+// `log show --last boot` came back empty and plugin_check never got as far
+// as its first bounded ioreg, so the capture is also consistent with that
+// boot wedging. rbgpu-diag is no fallback - the 2fo and 2fp summaries are
+// byte-identical and both stop at `regchan_calls=19`, hundreds of log lines
+// before powerUp. So the one question this step asks needs a channel that
+// survives a boot with no log and no desktop, and NVRAM is the only one this
+// project has that does.
+//
+// The map is one character per engine, written as a single variable:
+//
+//   .  the entry is non-NULL and its vtable[0x148] slot is non-NULL
+//   f  the entry is non-NULL and vtable[0x148] reads NULL - Apple would call
+//      through a null slot, which is a fault, not a FALSE return
+//   -  the entry is NULL: startHWEngines fails at 0xbea9068 right there, and
+//      the position in the map names the engine outright
+static char g_rb_2fq_map[96];
+
 static void rbgpu_walk_starthw_2fp(void *hw) {
-    if (!hw) { return; }
+    int n = 0;
+    if (!hw) {
+        snprintf(g_rb_2fq_map, sizeof(g_rb_2fq_map), "hw=NULL");
+        rbgpu_nvram_note("rbgpu-starthw", g_rb_2fq_map);
+        return;
+    }
     uint8_t c2 = *reinterpret_cast<volatile uint8_t *>(
         reinterpret_cast<uintptr_t>(hw) + 0xc2);
     uint32_t count = static_cast<uint32_t>(c2) * 2u + 2u;
     rbgpu_log("2fp: startHWEngines will walk %u entries (hw+0xc2 = %u)",
               count, c2);
+    rbgpu_diag_set_num("starthw_c2", c2);
+    rbgpu_diag_set_num("starthw_count", count);
     if (count > 32) {
+        // Not walked rather than walked blindly: past the real array the
+        // entries are whatever follows it in the object, and dereferencing
+        // one of those as a vtable pointer is a fault, not a measurement.
+        n = snprintf(g_rb_2fq_map, sizeof(g_rb_2fq_map),
+                     "c2=%u n=%u IMPLAUSIBLE - not walked", c2, count);
         rbgpu_log("2fp: count %u is implausible - not walking", count);
+        rbgpu_nvram_note("rbgpu-starthw", g_rb_2fq_map);
         return;
     }
+
+    n = snprintf(g_rb_2fq_map, sizeof(g_rb_2fq_map), "c2=%u n=%u map=", c2, count);
+    uint32_t first_null = 0xffffffffu;
+    uint32_t first_badfn = 0xffffffffu;
     for (uint32_t i = 0; i < count; i++) {
         void *e = *reinterpret_cast<void **>(
             reinterpret_cast<uintptr_t>(hw) + 0x3b8 + i * 8);
+        char c;
         if (!e) {
+            c = '-';
+            if (first_null == 0xffffffffu) { first_null = i; }
             rbgpu_log("2fp: engine[%u] = NULL -> startHWEngines returns FALSE "
                       "here (0xbea9068), and this is the whole failure", i);
-            rbgpu_diag_set_num("starthw_null_idx", i);
-            return;
+        } else {
+            void **vt = *reinterpret_cast<void ***>(e);
+            void *fn = vt ? vt[0x148 / sizeof(void *)] : nullptr;
+            c = fn ? '.' : 'f';
+            if (!fn && first_badfn == 0xffffffffu) { first_badfn = i; }
+            rbgpu_log("2fp: engine[%u] = %p vtable[0x148] = %p", i, e, fn);
         }
-        void **vt = *reinterpret_cast<void ***>(e);
-        void *fn = vt ? vt[0x148 / sizeof(void *)] : nullptr;
-        rbgpu_log("2fp: engine[%u] = %p vtable[0x148] = %p", i, e, fn);
+        if (n > 0 && static_cast<size_t>(n) + 2 < sizeof(g_rb_2fq_map)) {
+            g_rb_2fq_map[n++] = c;
+            g_rb_2fq_map[n] = '\0';
+        }
     }
-    rbgpu_log("2fp: all %u entries are non-NULL, so a FALSE return comes from "
-              "one of the vtable[0x148] calls and not from the NULL check",
-              count);
+    // 2fp's own decision table, recorded where it is read rather than left to
+    // be remembered: a '-' means the NULL check at 0xbea9068 is the failure
+    // and the index names the engine; an all-'.' map means the FALSE comes
+    // from one of the vtable[0x148] CALLS, which is a different question and
+    // needs the slot disassembled rather than the array read.
+    if (first_null != 0xffffffffu) {
+        rbgpu_diag_set_num("starthw_null_idx", first_null);
+        snprintf(g_rb_2fq_map + n, sizeof(g_rb_2fq_map) - n,
+                 " NULL@%u", first_null);
+    } else if (first_badfn != 0xffffffffu) {
+        rbgpu_diag_set_num("starthw_badfn_idx", first_badfn);
+        snprintf(g_rb_2fq_map + n, sizeof(g_rb_2fq_map) - n,
+                 " NOFN@%u", first_badfn);
+        rbgpu_log("2fp: engine[%u] has a NULL vtable[0x148] - Apple calls "
+                  "through it unconditionally", first_badfn);
+    } else {
+        snprintf(g_rb_2fq_map + n, sizeof(g_rb_2fq_map) - n, " allok");
+        rbgpu_log("2fp: all %u entries are non-NULL with a non-NULL "
+                  "vtable[0x148], so a FALSE return comes from one of the "
+                  "CALLS and not from the array", count);
+    }
+    rbgpu_nvram_note("rbgpu-starthw", g_rb_2fq_map);
 }
 
 static bool hooked_hw_startHWEngines(void *hw) {
@@ -4766,6 +4830,14 @@ static bool hooked_hw_startHWEngines(void *hw) {
     bool ret = orig_hw_startHWEngines ? orig_hw_startHWEngines(hw) : false;
     if (ret) g_rb_pw_stage |= 0x200;
     rbgpu_log("2bs: AMDHardware::startHWEngines -> %d", ret ? 1 : 0);
+    // 2fq: the second and last write. Two per boot, against the trail's
+    // twenty-four - and this one proves the first was not a lucky read of a
+    // stale variable, because it carries the return from the same call.
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s ret=%d", g_rb_2fq_map, ret ? 1 : 0);
+        rbgpu_nvram_note("rbgpu-starthw", buf);
+    }
     return ret;
 }
 
