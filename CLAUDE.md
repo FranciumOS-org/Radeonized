@@ -6020,3 +6020,91 @@ stages 3 and 4 are both after it.
 
 Build: UUID 83F2470A, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays.
+
+### 2fu answered on hardware (2026-10-14): two boots, neither finished the chain
+
+Two armed boots, both captured in-boot, build checked (83F2470A == build/out):
+
+```
+logs/20261014-164916-plugin   ttl_hw_init_ret=ca584001   218 log lines
+logs/20261014-165258-plugin   ttl_hw_init_ret=bec27001   186 log lines
+both: rbgpu-prog = "s=1 powerUpHW ENTER"   pci.txt 0 bytes   no 2fu: lines
+both logs end at: 2cx: waitForHwStamp -> 1 (the GPU executed it)
+```
+
+Different `ttl_hw_init_ret`, so two separate boots and **not** the 2fm
+two-read test - that question is still unrun. Both reached
+`initGraphicsMQD -> 1` and the ring-0 stamp, neither reached `doStart`'s
+return, and the SDMA hook never got a chance to fire.
+
+**So 2ft's correlation is already weakened by its own successor.** Zero flash
+commits inside the region now stands at **two completions out of four boots**
+(2fo, 2ft complete; 2fu's two do not), against one boot for the
+one-commit configuration. That is not a rule, and 2ft said it was "worth
+something without being a demonstration" - this is the demonstration failing.
+The variance 2fo claimed to explain is **not explained**.
+
+## 2fv (2026-10-14): the mapQueues loop runs TWICE, not six times
+
+Found offline, chasing a mismatch rather than assuming either side. The 2fo
+log carries exactly two mapQueues calls, `ring=0` and `ring=5`, while the loop
+I read increments the ring by one - which cannot produce 0 then 5. The loop
+top is eight bytes earlier than where I started reading:
+
+```
+bea139f  cmpl $0x5, %r13d
+bea13a3  je   bea13b4        ring == 5 -> initComputeMQD(5)
+bea13a5  testl %r13d,%r13d
+bea13a8  jne  bea140a        ring 1,2,3,4 -> SKIP STRAIGHT TO THE INCREMENT
+bea13aa  initGraphicsMQD()   ring == 0 only
+bea13c1  testb %al,%al ; je -> fail
+bea13cc..bea1402  submitMapQueuesPacket(ring = r13, ...)
+bea140a  incl %r13d ; cmpl 0x348(%rbx) ; jbe loop
+```
+
+**Rings 1-4 do nothing at all** - the `jne` jumps past both the MQD init and
+the submit. Only ring 0 (graphics) and ring 5 (compute) have work, which is
+exactly the two calls the chip shows. The disassembly and the hardware now
+agree, where before they silently did not.
+
+**Correction: "+0x348 = 5, so five submitMapQueuesPacket calls" (2cl, repeated
+in 2fe as "three mapQueues calls remain") is wrong.** `0x348` is the loop
+BOUND, not a count; the body is gated to two ring values. There are **two**
+mapQueues calls and **both already succeed** on this chip.
+
+Consequence worth stating plainly: **`doStart` has no unexercised step left.**
+setres + stamp, initGraphicsMQD, mapQueues ring 0 + stamp, initComputeMQD(5),
+mapQueues ring 5 + stamp, the ring-state reads, `waitForActiveValue` (HQD
+active, 2fi), `vtable[0x328]` - every one has been observed to complete, and
+2fo and 2ft both ran the whole thing to `doStart returned 1`.
+
+So the wedging boots stop in a narrow, named window: **after ring 0's stamp
+returns and before ring 5's mapQueues completes** - `initComputeMQD(5)` and
+one GPU submit. 2fo and 2ft traversed it; 2fs and both 2fu boots did not.
+
+### No build. The test that is owed, and is free
+
+2fm asked for two reads of the breadcrumb a minute apart from inside the
+armed boot, and it has now gone unrun for four milestones while six
+structural hypotheses were raised and refuted. It is prior to all of them:
+**a thread advancing one step a minute leaves the same record as a stopped
+one**, and 2ez already caught this project mistaking slowness for a hang.
+
+`rbgpu-prog` makes it a one-liner, and it needs no new build - 2fu stays
+installed, boot-args unchanged, UUID 83F2470A. In the **armed** boot, once
+`plugin_check` has shown the wedge:
+
+```
+nvram rbgpu-prog ; sleep 60 ; nvram rbgpu-prog
+```
+
+```
+DIFFER   there is no stopping point - the chain is crawling, every endpoint
+         reading is void, and the question becomes what costs a minute per
+         step in code measured at microseconds
+MATCH    the thread genuinely stops, established for the first time, and the
+         window above (initComputeMQD(5) + one submit) is a real location
+```
+
+Writing a seventh structural hypothesis before that answer arrives would be
+the same mistake six times over.
