@@ -4938,3 +4938,89 @@ A boot that reaches gate 96 with `ret=0` should then fail `doStart` cleanly
 and come up to a desktop, which no boot has done since 2em.
 
 Build: UUID 4E5792D6, hosttest passes. Boot-args unchanged.
+
+### 2fi answered on hardware (2026-10-13): THE GRAPHICS HQD IS ACTIVE — and my own prediction was refuted
+
+logs/20261013-202502-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=c553a001`, a new boot), 486 log lines,
+build checked first per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 4E5792D6   == build/out (2fi)
+nvram rbgpu-gate  -> "46 49 47 40 101 151 45 50 54 55 60 102 152 70 65 103 153
+                      75 90 91 92 93 94 96
+                      | 96 poll done iters=1 last=0x00000001 dead=0 ret=1 [w=24 f=0]"
+log.txt last line -> the 2fi poll line, at 15.347
+pci.txt           -> 0 bytes
+```
+
+**The whole poll ran, and the value is the finding:**
+
+```
+gate 91  GRBM_GFX_CNTL      resolved to dword 0x2022
+gate 92  selector 0 WRITTEN
+gate 93  CP_GFX_HQD_ACTIVE  resolved to dword 0x30e0
+gate 94  first read = 0x00000001
+gate 96  iters=1 last=0x00000001 dead=0 ret=1
+```
+
+- **`CP_GFX_HQD_ACTIVE` reads 1.** The graphics HQD is **active**. `expected`
+  is 1, so Apple's own loop would exit on its first poll and return true: the
+  unbounded-spin hazard that 2cp has been guarding since 2026-10-12 does not
+  bite on this chip in this state.
+- **2fi's own prediction is REFUTED, and it was mine.** I wrote that a false
+  was the expected outcome "because 2ew's `f10 = 0` means the command-9
+  graphics-queue create never runs, so `CP_GFX_HQD_ACTIVE` cannot go active".
+  The chip says it went active anyway. `f10 = 0` stands as a measurement; the
+  inference drawn from it does not. What makes a graphics queue active here is
+  the **MAP_QUEUES** packets - five `submitMapQueuesPacket` calls, two of them
+  confirmed in this very trail with real GPU stamps (gates 70 and 75) - not
+  Apple's command-9 create. The log line now says so in those words.
+- **Both resolutions confirm seg0 a third and fourth time.** `0x1260 + 0x0DC2
+  = 0x2022` and `0x1260 + 0x1E80 = 0x30E0`, exact, against
+  docs/linux-ref/gc_10_3_0_offset.h. Four independent agreements on seg0 now
+  (2dl MMIO, 2fd CP_RB0_CNTL, and these two).
+- **Gate 92 is the first GC register WRITE this project has gated end to end,
+  and it returned.** A write through Apple's `[0x120]` to `GRBM_GFX_CNTL`
+  completed, and the read through `[0x118]` that followed it completed too.
+  So neither slot is the stall, and `[w=24 f=0]` is a twenty-fourth
+  consecutive landing with nothing refused.
+
+**Where it stops: gate 96 committed, gate 95 did not**, and the span between
+them was entirely ours - three `rbgpu_diag_set_num` calls, one `rbgpu_log`,
+one `snprintf`. The 2fi log line is the log's last entry and the `2cp:` line
+after it never appears, which is consistent with the thread stopping in those
+diag sets; per the 2es withdrawal the published log ends at the last refresh,
+so that is corroboration and not a location.
+
+## 2fj (2026-10-13): empty the 96 -> 95 span, and gate doStart's own exit
+
+- **Gate 95 is now the first statement after the poll.** The three `wfav_*`
+  diag sets and the `2cp:` log line are deleted outright: `rbgpu_nvram_quiesce()`
+  fires at gate 40, so nothing written to the diag table after it can reach
+  NVRAM, and gate 95's text already carries the return value. Emptying a span
+  is the only move that has ever advanced this frontier - 2eu at 50->54,
+  2ez at 151->45, 2fe at the register dump.
+- **Gates 30 / 31 at `doStart`'s return**, so the trail states whether the
+  whole chain completed instead of leaving it to be inferred from the last
+  inner gate. The band is clear of 40/45, 46-49, 50/54/55, 60-67/70-77/80-87,
+  90-96/98/99 and 100+/150+.
+
+What is left after gate 95 is Apple's `(engine+0xc0)->vtable[0x328]` at
+0xbea14f7 - **the last call in `doStart`**.
+
+Build: UUID 1FEC6BCA, hosttest passes. Boot-args unchanged.
+
+```
+...96 95 30     doStart RETURNED TRUE. powerUp succeeds, powerUpHWEngines
+                goes on to the next engine, and the 2cn survive guard is no
+                longer the path - the first time this project would have a
+                PM4 engine report success
+...96 95 31     doStart returned FALSE at vtable[0x328], which is a clean
+                failure and a desktop, and names that call as the next thing
+                to disassemble
+...96 95        the stop is inside vtable[0x328] itself, with nothing of ours
+                in the span - a hard fact and a new place to look
+...96 only      the span was not the diag sets after all, and what remains
+                between the poll and gate 95 is one assignment
+```
