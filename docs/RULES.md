@@ -5810,3 +5810,83 @@ commits threaded *through* the chain.
 
 Build: UUID 03CF6E1A, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays.
+
+### 2fs answered on hardware (2026-10-14): the channel WORKS — and 2fo does not reproduce
+
+logs/20261014-135212-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=df06a001`, a new boot). Build checked:
+03CF6E1A == build/out (2fs).
+
+```
+nvram -p | grep rbgpu -> rbgpu-prog NOW EXISTS
+nvram rbgpu-prog      -> "s=1 doStart ENTER"
+log.txt               -> 352 lines, 53 KB
+ioreg-raw.txt         -> 484 bytes + .done   (the first bounded ioreg completed)
+pci.txt               -> absent              (stuck at the IGPU walk, as in every wedge)
+```
+
+**The mechanism is settled.** `rbgpu-prog` was created and read back, so
+`rbgpu_nvram_note` works - and that resolves 2fr's ambiguity in the other
+direction: **neither of 2fq/2fr's call sites was reached**, which is why
+those variables never appeared. One of the two readings is now closed.
+
+**But `s=1 only` does NOT mean the thread stopped at doStart**, and the log
+says so outright:
+
+```
+[12.928153] 2br: powerUpHW entered
+[13.010800] 2fs: prog s=1 doStart ENTER
+[13.464847] 2cq: initGraphicsMQD -> 1 (OK)
+[13.464850] 2cx: submitMapQueuesPacket ENTER (ring=0)
+[13.464907] 2en: BOUNDED wait satisfied after 1 polls: +0x84 reached 2
+[13.464929] 2cx: waitForHwStamp -> 1 (the GPU executed it)
+```
+
+The chain ran **454 ms past stage 1**, through `submitSetResourcesPacket`,
+`initGraphicsMQD -> 1` and into `submitMapQueuesPacket` ring 0 with stamp #2
+arriving - and `s=2`, written at `doStart`'s return, never landed. Stage 1 is
+at doStart ENTER and stage 2 at its return, so the thread is somewhere between
+mapQueues ring 0 and that return: **the same region the gate trail used to
+stop in.**
+
+**So 2fo's "the gate trail was the wedge" does not reproduce, and that
+conclusion has to come down to size.** It rested on one boot. This boot has
+ONE synchronous flash commit instead of twenty-four, no gate trail at all, and
+inter-line gaps of **2-6 us** across the whole tail - no logging contention,
+no trail, and the chain still does not finish. 2fo remains the only boot in
+which it did.
+
+Nineteenth instance of the recurring error and the same shape as the withdrawn
+2ev table: a qualitative jump in a single sample read as a rule. What 2fo
+still establishes, because committed evidence survives: `doStart` CAN return
+1, `AMDGFX10PM4Engine::powerUp` CAN return 1, every engine CAN power up, and
+`startHWEngines` returns 0 when reached. What it does not establish is that
+removing the trail is sufficient.
+
+## 2ft (2026-10-14): zero commits inside the region, with the record still outside it
+
+One variable moved, nothing else. Stage 1 goes from `doStart` ENTER to
+**`powerUpHW` ENTER** - which runs ~80 ms earlier (12.928 against 13.011 in
+this very boot) and has executed in every boot since 2br - so the ~500 us
+chain region now contains **no flash commit at all**, exactly like 2fo, while
+`rbgpu-prog` still proves the channel from outside it.
+
+```
+s=1 then s=2/s=3/s=4   the chain completes with nothing of ours committing
+                       inside it - two boots agreeing, and the engine map
+                       arrives in the same breath
+s=1 only, again        no commit, no trail and no logging contention in the
+                       region, and it still stops: the stop is real, and for
+                       the first time there is nothing of ours left in there
+                       to blame
+```
+
+That second branch is the one worth stating plainly in advance, because six
+structural explanations are already refuted and this would remove the seventh
+candidate (our own one commit) without proposing an eighth. The region would
+then be Apple's code and the GPU alone: three more `submitMapQueuesPacket`
+calls with their stamps, the ring-state reads, the HQD poll, and
+`vtable[0x328]`.
+
+Build: UUID 55F4C6A3, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays.

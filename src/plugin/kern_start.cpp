@@ -3030,12 +3030,6 @@ static void rbgpu_prog_2fs(uint32_t stage, const char *what) {
 
 static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
-    // 2fs stage 1: the always-reached site. Written ONCE per boot, however
-    // many engines call doStart, so the commit count does not scale.
-    {
-        static bool once = false;
-        if (!once) { once = true; rbgpu_prog_2fs(1, "doStart ENTER"); }
-    }
 
     // 2ew: the fields that decide which region of Apple's initGraphicsMQD
     // can run, read HERE rather than inside that hook - 2ev proved reads and
@@ -4648,6 +4642,26 @@ static bool hooked_accel_start_2cn(void *accel, void *provider) {
 static uint32_t hooked_accel_powerUpHW(void *accel) {
     g_rb_pw_stage |= 1;
     rbgpu_log("2br: powerUpHW entered (accel=%p)", accel);
+    // 2ft (2026-10-14): stage 1 moved HERE from doStart ENTER, so the ~500 us
+    // chain region contains ZERO flash commits while the record still exists.
+    //
+    // The 2fs boot settled the mechanism - `rbgpu-prog` read back `s=1`, so
+    // rbgpu_nvram_note works and 2fr's missing variables mean neither of its
+    // call sites was reached. But the chain did NOT finish: its log runs 454
+    // ms past s=1, through initGraphicsMQD -> 1 and into mapQueues ring 0,
+    // with 2-6 us between every line and no gate trail in the boot at all,
+    // and `s=2` (doStart's return) never landed.
+    //
+    // So 2fo's "the gate trail was the wedge" does not reproduce. That was
+    // one boot. This one has ONE synchronous commit instead of twenty-four
+    // and still stops in the same region.
+    //
+    // powerUpHW ENTER runs ~80 ms before doStart and has executed in every
+    // boot since 2br, so stage 1 keeps proving the channel from outside the
+    // region under test. If the chain now completes, two boots agree that
+    // commits inside it matter; if it stops again, nothing of ours is in
+    // that region and the stop is real.
+    rbgpu_prog_2fs(1, "powerUpHW ENTER - before the chain");
     uint32_t ret = orig_accel_powerUpHW ? orig_accel_powerUpHW(accel) : 0;
     g_rb_pw_ret = ret;
     g_rb_pw_stage |= 2;
