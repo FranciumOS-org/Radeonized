@@ -3945,9 +3945,12 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                 rbgpu_log("2dw: the fence dword at +0xc0 AFTER the wait = 0x%08x "
                           "(BEFORE 0x%08x, asked-for %u) -> %s",
                           fv, g_rb_2dw_fence_bef, stamp,
+                          // 2fl: this text asserted a CPU-side failure. Since
+                          // 2em the wait SUCCEEDS on its first poll, so a
+                          // landed fence is the working path, not a fault.
                           (fv >= stamp)
-                              ? "the GPU DID write the fence; the failure is in the "
-                                "CPU-side pickup, not in the GPU"
+                              ? "the GPU wrote the fence where the CPU polls - "
+                                "this is the working path"
                               : "the GPU never wrote this location");
 
                 uintptr_t page = g_rb_2dt_wb_c0 & ~static_cast<uintptr_t>(0xFFF);
@@ -4272,11 +4275,25 @@ static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, 
     bool ret = orig_kiq_submitMapQueues_2cq
                    ? orig_kiq_submitMapQueues_2cq(ch, ring, a, b, spec, c)
                    : false;
+    // 2fl (2026-10-14): DENSE gates, the opposite of 2ff/2fj - and the reversal
+    // is a measurement, not a change of mind. 2fk timed the trail against the
+    // log: after rbgpu_nvram_quiesce() fires at gate 40 a gate costs ~6 US
+    // (gates 40..152 are 479 us apart in total, Apple's own work included),
+    // against ~6 MS for the three before the quiesce. So emptying this span was
+    // saving microseconds, and three more gates here cost ~18 us in a span
+    // measured at 89 us.
+    //
+    // 32 = Apple's original returned (so the stop was NOT in submitKIQFrame's
+    //      epilogue), 33 = the two diag sets returned, then 70+ring as before
+    //      with only the log line between. Every boundary in this span now has
+    //      a gate, which no span in this family has ever had.
+    rbgpu_gate_2en(32, "mapQueues: the ORIGINAL returned");
     if (!ret) {
         g_rb_2cq_mapq_fails++;
     }
     rbgpu_diag_set_num("mapq_calls", static_cast<uint64_t>(g_rb_2cq_mapq_calls));
     rbgpu_diag_set_num("mapq_fails", static_cast<uint64_t>(g_rb_2cq_mapq_fails));
+    rbgpu_gate_2en(33, "mapQueues: the two diag sets returned");
     rbgpu_log("2cq: submitMapQueuesPacket(ring=%u, a=0x%x, b=0x%llx, spec=%p, c=0x%llx) -> %d %s",
               ring, a, b, spec, c, ret ? 1 : 0, ret ? "(OK)" : "(FAIL)");
     // 2ff: the gate is the LAST statement before the return, so the span between
