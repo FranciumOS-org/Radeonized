@@ -2993,6 +2993,9 @@ static bool (*orig_pm4_doStart_2ce)(void *, bool) = nullptr;
 static void *g_rb_2fb_regobj = nullptr;
 static void rbgpu_probe_regread_2fb(void);
 
+// 2fj: the gate helper is defined further down; declare it for this hook.
+static void rbgpu_gate_2en(uint32_t stage, const char *what);
+
 static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
 
@@ -3054,6 +3057,13 @@ static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     // Call original - our initComputeMQD hook (2cd) will log if it's reached
     bool ret = orig_pm4_doStart_2ce ? orig_pm4_doStart_2ce(pm4, arg) : false;
     rbgpu_log("2ce: doStart returned %d", ret ? 1 : 0);
+    // 2fj: doStart's own exit, so the trail says whether the whole chain
+    // completed rather than leaving it to be inferred from the last inner
+    // gate. Band 30 is clear of 40/45, 46-49, 50/54/55, 60-67/70-77/80-87,
+    // 90-96/98/99 and 100+/150+.
+    rbgpu_gate_2en(ret ? 30 : 31,
+                   ret ? "doStart RETURNED TRUE - powerUp succeeds"
+                       : "doStart RETURNED FALSE - clean failure, desktop");
     return ret;
 }
 
@@ -3394,22 +3404,29 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
             rbgpu_gate_2en(96, g96);
             rbgpu_log("2fi: our bounded poll of CP_GFX_HQD_ACTIVE ran %d iterations, "
                       "last value 0x%08x, returning %d. This is OUR value, not a "
-                      "hardware verdict: a false here means the HQD did not go "
-                      "active within 64 polls, which is EXPECTED while 2ew's "
-                      "f10=0 keeps the graphics queue from ever being created.",
+                      "hardware verdict. 2fi predicted a false here because "
+                      "2ew's f10=0 keeps Apple's command-9 create from running; "
+                      "the chip REFUTED that - CP_GFX_HQD_ACTIVE read 1 on the "
+                      "first poll, so MAP_QUEUES made the graphics HQD active "
+                      "without the command-9 path, and Apple's own loop would "
+                      "also exit at once.",
                       iters, v, ret ? 1 : 0);
         }
     }
     g_rb_2cp_wfav_ret = ret ? 1 : 0;
-    rbgpu_diag_set_num("wfav_calls", static_cast<uint64_t>(g_rb_2cp_wfav_calls));
-    rbgpu_diag_set_num("wfav_bounded_forced", static_cast<uint64_t>(g_rb_2cp_wfav_bounded));
-    rbgpu_diag_set_num("wfav_ret", static_cast<uint64_t>(g_rb_2cp_wfav_ret));
-    rbgpu_log("2cp: waitForActiveValue(ring=%u) -> %d %s", ring, ret ? 1 : 0,
-              ret ? "(ring ACTIVE)" : "(timed out or register read 0xffffffff)");
-    // 2fh: gate LAST before the return, so the span to the next gate is Apple's.
-    char wdone[96];
-    snprintf(wdone, sizeof(wdone), "waitForActiveValue RETURNED %d", ret ? 1 : 0);
-    rbgpu_gate_2en(95, wdone);
+    // 2fj (2026-10-13): gate 95 is the FIRST statement after the poll, and the
+    // three wfav_* diag sets and the 2cp log line that used to sit here are
+    // GONE. The 2fi trail reached gate 96 and not gate 95, and the whole span
+    // between them was ours: three rbgpu_diag_set_num calls, one rbgpu_log and
+    // one snprintf. Emptying such a span is the only move that has ever
+    // advanced this frontier (2eu at 50->54, 2ez at 151->45, 2fe at the
+    // register dump).
+    //
+    // The diag sets were dead weight in any case: rbgpu_nvram_quiesce() fires
+    // at gate 40, so nothing written to the diag table after it can reach
+    // NVRAM, and gate 95's own text carries the return value.
+    rbgpu_gate_2en(95, ret ? "waitForActiveValue RETURNED 1 - ring ACTIVE"
+                           : "waitForActiveValue RETURNED 0");
     return ret;
 }
 
