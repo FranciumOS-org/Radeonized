@@ -3315,9 +3315,91 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
     snprintf(wenter, sizeof(wenter), "waitForActiveValue ENTER ring=%u exp=%d bnd=%d",
              ring, expected ? 1 : 0, bounded ? 1 : 0);
     rbgpu_gate_2en(90, wenter);
-    bool ret = orig_pm4_waitForActiveValue_2cp
-                   ? orig_pm4_waitForActiveValue_2cp(pm4, ring, expected, bounded)
-                   : false;
+
+    // 2fi (2026-10-13): run Apple's own poll HERE, with gates inside it.
+    //
+    // The 2fh boot landed gate 90 with bnd=1 and never landed 95. So 2cp DID
+    // force the cap (the counter at 0xbea15fe and the _IODelay(0x64) at
+    // 0xbea160c are both live) and the loop STILL does not return - where a
+    // capped 1000 x 100 us poll owes an answer in about 100 ms. What a
+    // bounded loop cannot explain, a single stalled access inside it can, and
+    // each iteration makes two: a GRBM_GFX_CNTL write and a
+    // CP_GFX_HQD_ACTIVE read through pm4+0x30.
+    //
+    // This is the 2en pattern, not 2cy's. 2cy substituted its own value and
+    // then narrated it as a hardware result. This reproduces Apple's loop
+    // instruction for instruction from the disassembly above - resolve
+    // (vt[0x148]), write the selector (vt[0x120]), read the HQD (vt[0x118]),
+    // exit on 0xffffffff, test (active ^ expected) & 1 - and only replaces
+    // the 1000-iteration count with 64, so the gates can say WHICH access
+    // stalls. If it completes without the ring going active it returns false
+    // into Apple's own failure path, which is the honest outcome: 2ew's
+    // f10 = 0 means the graphics queue is never created, so the HQD cannot
+    // go active and false is what Apple's own code would eventually return.
+    //
+    // -rbgpuwfavraw restores Apple's original, mirroring -rbgpustampraw.
+    static int wfav_raw = -1;
+    if (wfav_raw < 0) { wfav_raw = checkKernelArgument("-rbgpuwfavraw") ? 1 : 0; }
+
+    bool ret = false;
+    void *robj = g_rb_2fb_regobj;
+    if (wfav_raw || !robj || ring != 0) {
+        rbgpu_gate_2en(99, wfav_raw ? "-rbgpuwfavraw: calling Apple's ORIGINAL"
+                                    : "no accessor or ring!=0: Apple's ORIGINAL");
+        ret = orig_pm4_waitForActiveValue_2cp
+                  ? orig_pm4_waitForActiveValue_2cp(pm4, ring, expected, bounded)
+                  : false;
+    } else {
+        void **rvt = *reinterpret_cast<void ***>(robj);
+        auto resolve = reinterpret_cast<uint32_t (*)(void *, uint64_t)>(
+            rvt ? rvt[0x148 / sizeof(void *)] : nullptr);
+        auto rd = reinterpret_cast<uint32_t (*)(void *, uint32_t)>(
+            rvt ? rvt[0x118 / sizeof(void *)] : nullptr);
+        auto wr = reinterpret_cast<void (*)(void *, uint32_t, uint32_t)>(
+            rvt ? rvt[0x120 / sizeof(void *)] : nullptr);
+        if (!resolve || !rd || !wr) {
+            rbgpu_gate_2en(98, "a slot of pm4+0x30 is NULL - polled nothing, "
+                               "the false below is an INSTRUMENT failure");
+        } else {
+            uint32_t sel_off = resolve(robj, 0xDC20000000Bull);   // GRBM_GFX_CNTL
+            char g91[96];
+            snprintf(g91, sizeof(g91), "GRBM_GFX_CNTL resolved to dword 0x%x", sel_off);
+            rbgpu_gate_2en(91, g91);
+
+            wr(robj, sel_off, 0);                                 // ring 0 selector
+            rbgpu_gate_2en(92, "GRBM_GFX_CNTL selector 0 WRITTEN");
+
+            uint32_t act_off = resolve(robj, 0x1E800000000Bull);  // CP_GFX_HQD_ACTIVE
+            char g93[96];
+            snprintf(g93, sizeof(g93), "CP_GFX_HQD_ACTIVE resolved to dword 0x%x", act_off);
+            rbgpu_gate_2en(93, g93);
+
+            uint32_t v = rd(robj, act_off);
+            char g94[96];
+            snprintf(g94, sizeof(g94), "first CP_GFX_HQD_ACTIVE read = 0x%08x", v);
+            rbgpu_gate_2en(94, g94);
+
+            int iters = 1;
+            bool dead = (v == 0xFFFFFFFFu);
+            while (!dead && ((v ^ (expected ? 1u : 0u)) & 1u) && iters < 64) {
+                wr(robj, sel_off, 0);
+                v = rd(robj, act_off);
+                if (v == 0xFFFFFFFFu) { dead = true; break; }
+                iters++;
+            }
+            ret = !dead && (((v ^ (expected ? 1u : 0u)) & 1u) == 0);
+            char g96[96];
+            snprintf(g96, sizeof(g96), "poll done iters=%d last=0x%08x dead=%d ret=%d",
+                     iters, v, dead ? 1 : 0, ret ? 1 : 0);
+            rbgpu_gate_2en(96, g96);
+            rbgpu_log("2fi: our bounded poll of CP_GFX_HQD_ACTIVE ran %d iterations, "
+                      "last value 0x%08x, returning %d. This is OUR value, not a "
+                      "hardware verdict: a false here means the HQD did not go "
+                      "active within 64 polls, which is EXPECTED while 2ew's "
+                      "f10=0 keeps the graphics queue from ever being created.",
+                      iters, v, ret ? 1 : 0);
+        }
+    }
     g_rb_2cp_wfav_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("wfav_calls", static_cast<uint64_t>(g_rb_2cp_wfav_calls));
     rbgpu_diag_set_num("wfav_bounded_forced", static_cast<uint64_t>(g_rb_2cp_wfav_bounded));

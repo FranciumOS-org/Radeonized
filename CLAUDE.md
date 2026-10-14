@@ -4859,3 +4859,82 @@ variable into a question that is finally down to one bit.
 ```
 
 Build: UUID 3A13C496, hosttest passes. Boot-args unchanged.
+
+### 2fh answered on hardware (2026-10-13): inside waitForActiveValue, WITH the cap on
+
+Recovery boot; build checked first (3A13C496 == build/out), `rbgpu-diag`
+d=0 armed=0. logs/20261013-201615-plugin.
+
+```
+nvram rbgpu-gate -> "46 49 47 40 101 151 45 50 54 55 60 102 152 70 65 103 153 75 90
+                     | 90 waitForActiveValue ENTER ring=0 exp=1 bnd=1 [w=19 f=0]"
+```
+
+Gate 90 landed, gate 95 did not, and three things are settled at once:
+
+- **Apple's three GC register READS completed.** The span from gate 75 to
+  gate 90 is `vtable[0x3b8]` plus the ring-state check - `CP_RB0_RPTR`,
+  `CP_RB0_WPTR_HI`, `CP_RB0_WPTR` resolved with `[0x148]` and read with
+  `[0x118]` - so reads through Apple's own accessor work on this chip. The
+  2fg suspicion that those three were the stall is **closed**.
+- **2cp fired.** `bnd=1` in gate 90's own text, so `bounded` was forced true
+  and both the `cmpl $0x3e7` counter (0xbea15fe) and the delay are live. The
+  delay resolves with kc_stubs.py to **`_IODelay(0x64)`**, a 100 us
+  busy-wait, so the capped poll owes an answer in about 100 ms.
+- **And it still does not return.** A bounded 1000 x 100 us loop cannot
+  explain that. What can is a single stalled access inside it - and each
+  iteration makes two, a `GRBM_GFX_CNTL` **write** through `[0x120]` and a
+  `CP_GFX_HQD_ACTIVE` **read** through `[0x118]`, so 1000 iterations is 2000
+  GC register accesses.
+
+Also worth recording: `[w=19 f=0]`, so the write accounting 2fg added holds
+for a nineteenth consecutive landing with nothing refused. The trail is not
+the thing that is failing.
+
+## 2fi (2026-10-13): run Apple's poll ourselves, with gates inside it
+
+Nothing can be instrumented inside Apple's function, so the poll is
+reproduced in the hook - instruction for instruction from the disassembly
+already recorded here, with only the iteration count changed:
+
+```
+resolve GRBM_GFX_CNTL   [0x148](0xDC2..0B)      -> gate 91, with the offset
+write selector 0        [0x120](off, 0)         -> gate 92
+resolve CP_GFX_HQD_ACTIVE [0x148](0x1E80..0B)   -> gate 93, with the offset
+read it                 [0x118](off)            -> gate 94, with the VALUE
+loop while (v ^ expected) & 1, max 64, exit on 0xffffffff
+                                                -> gate 96, iters + last + ret
+```
+
+**This is the 2en pattern, not 2cy's.** 2cy substituted its own value and then
+narrated it as a hardware result, which cost fifteen milestones. This one
+reproduces Apple's own loop and only shortens the count, and when the ring
+does not go active it returns false into **Apple's own failure path** - which
+is the honest outcome here, because 2ew's `f10 = 0` means the command-9
+graphics-queue create never runs, so `CP_GFX_HQD_ACTIVE` cannot go active and
+false is what Apple's capped loop would itself return after 100 ms. The log
+says in those words that the false is ours and not a hardware verdict.
+
+Every exit writes a gate: **98** if a slot of `pm4+0x30` is NULL (and says the
+false is an instrument failure, not a result), **99** if `-rbgpuwfavraw` or a
+non-zero ring sends it to Apple's original instead.
+
+`-rbgpuwfavraw` restores Apple's version, mirroring `-rbgpustampraw`.
+
+```
+...90 91 92 93 94 96 95   the whole poll runs; the stop moved past
+                          waitForActiveValue to vtable[0x328] at 0xbea14f7,
+                          and gate 96 says what the HQD actually read
+...90 91 92               the GRBM_GFX_CNTL WRITE is where it stalls - the
+                          first time a GC register write would be named
+...90 91 92 93 94 (stop)  the first HQD read returned and the loop stalls on
+                          a later iteration, so it is cumulative, not one
+                          access
+...90 91 (stop)           the resolve is fine and the write never returns
+...90 98 / ...90 99       neither - the gate names which
+```
+
+A boot that reaches gate 96 with `ret=0` should then fail `doStart` cleanly
+and come up to a desktop, which no boot has done since 2em.
+
+Build: UUID 4E5792D6, hosttest passes. Boot-args unchanged.
