@@ -4748,3 +4748,114 @@ Also fixed: the 2fe section left a code fence unterminated in this file.
 
 Build: UUID 9ACF72A0, hosttest passes. Boot-args unchanged (`-rbgpubeat` is
 new and deliberately NOT added; `-rbgpuregdump` stays off).
+
+### 2fg answered on hardware (2026-10-13): the write-budget hypothesis is REFUTED
+
+`plugin_check` ran in the armed boot (`rbgpu-diag` armed=1,
+`ttl_hw_init_ret=c1b6b001`, a new boot), though `log.txt` came back empty.
+Build checked: 9ACF72A0 == build/out.
+
+```
+nvram rbgpu-gate -> "46 49 47 40 101 151 45 50 54 55 60 102 152 70 65 103 153 75
+                     | 75 submitMapQueuesPacket OK [w=18 f=0]"
+nvram rbgpu-beat -> stale from the 2ff boot (the beat is off, as intended)
+```
+
+**Eighteen writes, zero refused, and the trail stops at exactly the gate 2fe
+stopped at.** Removing the heartbeat took ~17 competing flash commits out of
+the boot and bought nothing, so the hypothesis that the trail stops where the
+WRITES stop does not hold. 2fg's second branch: the writes land and the thread
+is what stops.
+
+And **gate 75 is the first reproducible endpoint this milestone family has
+had**: 2fe 75, 2ff 152, 2fg 75. Two of three boots agree, where the previous
+twelve agreed on nothing.
+
+### What is actually after gate 75 (doStart 0xbea1416-0xbea14f7, disassembled)
+
+```
+bea1416  testb $1,%r14b ; je bea14cd       skip it all if any mapQueues failed
+bea1420  (this->0x18)->vtable[0x3b8]()      -> this->0x340
+bea143b  [0x148](0xF60..0B   CP_RB0_RPTR)    -> bea1456 [0x118](off)
+bea1469  [0x148](0x1DF5..0B CP_RB0_WPTR_HI) -> bea1481 [0x118](off)
+bea1495  [0x148](0x1DF4..0B CP_RB0_WPTR)    -> bea14ae [0x118](off)
+bea14c5  orl 0x54(%rcx),%r13d                channel+0x54
+bea14d3  waitForActiveValue(0, 1, 0)
+bea14f7  (this->0xc0)->vtable[0x328]()
+```
+
+That is exactly the ring-state check the 2cl correction predicted from the
+branch structure - `CP_RB0_RPTR` / `CP_RB0_WPTR` / `CP_RB0_WPTR_HI` and
+`channel+0x54` all zero - now read instruction by instruction.
+
+**The accessor's slots are settled: `0x148` resolves an id to a dword offset,
+`0x118` READS that offset, `0x120` WRITES it.** `[0x118]` takes only the
+offset and its return value is used (`movl %eax,%r13d`, `orl %r15d,%eax`);
+`[0x120]` takes offset + value (the GRBM_GFX_CNTL selector write inside
+waitForActiveValue at 0xbea15bf proves the shape). So 2fd's "the span contains
+no GC register read at all" was right about the five RB0 pairs and the read
+slot it could not name is 0x118 - and these three are **the first GC register
+READS Apple makes in this path**, the same class of access 2fe measured
+stalling non-deterministically.
+
+### waitForActiveValue is an unbounded spin, and its escape cannot happen here
+
+`waitForActiveValue(_eAMD_HW_RING_TYPE ring, bool b1, bool b2)`, called from
+doStart with `(0, 1, 0)`. With `ring == 0` it selects
+`0x1E80..0B` = **CP_GFX_HQD_ACTIVE** (0xbea1589) and polls:
+
+```
+bea15c5 loop:
+  [0x148](0xDC2..0B GRBM_GFX_CNTL) -> [0x120](off, selector)   write the window
+  [0x148](CP_GFX_HQD_ACTIVE)       -> [0x118](off) -> eax      READ
+  if (eax == -1)            -> return false                    the only escape
+  r14b = (uint8)eax ^ b1
+  al = r14b & b2            ; b2 = 0  ->  al = 0
+  if (al != 1)              -> bea1611   ALWAYS: skips the 0x3e7 counter
+                                         AND the IODelay(0x64)
+bea1611:
+  if (r14b & 1)             -> loop      spin while active == 0
+```
+
+**With `b2 = 0` the 1000-iteration cap and the 100 us delay are both dead
+code**, so this is a tight, delay-free, unbounded spin whose only exit is the
+register reading `0xFFFFFFFF`. And nothing can end it on this chip: 2ew
+measured `pm4+0x10 = 0`, so Apple's command-9 graphics-queue create at
+0xbea26a1 never runs, so the graphics HQD is never made active (2dm/2do read
+`CP_GFX_HQD_ACTIVE = 0` at every point).
+
+That matches every symptom this family has produced - the thread never
+returns, the machine stays alive, `ioreg` blocks on the IGPU subtree,
+`pci.txt` is 0 bytes, no later gate is ever written.
+
+**But 2cp should already prevent it.** `hooked_pm4_waitForActiveValue_2cp`
+forces the 4th C++ parameter (`bounded`) true, and that parameter IS `ecx` =
+`b2` = `-0x34(%rbp)` - the one that gates the counter. So either 2cp is not
+reached, or the stop is earlier.
+
+## 2fh (2026-10-13): one bit, to split the span after gate 75
+
+Two gates in the existing `waitForActiveValue` hook - **90** at entry (carrying
+`ring`, `expected` and the `bounded` value, since the diag table is quiesced
+from gate 40 and cannot report `wfav_*` any more) and **95** after the
+original returns, placed last before the `return` per the 2ff rule. Bands
+90/95 are clear of 60..67 / 70..77 / 80..87 / 100+ / 150+.
+
+Nothing else changes. In particular **no new hardware access**: knowing that
+`[0x118]` is the read slot makes a real `CP_RB0_CNTL` read through Apple's
+accessor possible at last, but adding one in the same boot would put a second
+variable into a question that is finally down to one bit.
+
+```
+...75 90 95       the ring-state reads completed AND waitForActiveValue
+                  returned; the stop moved to vtable[0x328] at 0xbea14f7
+...75 90          the thread is inside waitForActiveValue - and gate 90's text
+                  says whether 2cp forced bounded=1, so it says in the same
+                  breath whether the cap was restored and still hung, or 2cp
+                  never fired and this is the unbounded spin
+...75 only        the stop is in Apple's three GC register READS at
+                  0xbea143b-0xbea14ae, with nothing of ours in the span - a
+                  hard fact, and the same class of access 2fe showed stalling
+```
+
+Build: UUID 3A13C496, hosttest passes. Boot-args unchanged.

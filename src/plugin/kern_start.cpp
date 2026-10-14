@@ -3258,6 +3258,8 @@ static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void 
     return orig_ret;
 }
 
+static void rbgpu_gate_2en(uint32_t stage, const char *what);
+
 // 2cp: AMDGFX10PM4Engine::waitForActiveValue(ring, bool expected, bool bounded).
 // doStart calls it as (0, true, false). The third parameter is the one that
 // arms the timeout: with it false, the counter at 0xbea15fb and the 100 us
@@ -3284,6 +3286,35 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
                   ring, expected ? 1 : 0);
     }
     rbgpu_log("2cx: waitForActiveValue ENTER (ring=%u) - polls CP_GFX_HQD_ACTIVE", ring);
+    // 2fh (2026-10-13): the one bit that splits the span after gate 75.
+    //
+    // doStart after the mapQueues loop (0xbea1416-0xbea14f7), disassembled:
+    //   bea1420  (this->0x18)->vtable[0x3b8]()            -> this->0x340
+    //   bea143b  [0x148](0xF60..0B CP_RB0_RPTR)   -> bea1456 [0x118](off)
+    //   bea1469  [0x148](0x1DF5..0B CP_RB0_WPTR_HI)-> bea1481 [0x118](off)
+    //   bea1495  [0x148](0x1DF4..0B CP_RB0_WPTR)  -> bea14ae [0x118](off)
+    //   bea14c5  orl 0x54(%rcx)                            channel+0x54
+    //   bea14d3  waitForActiveValue(0, 1, 0)
+    // so **vtable[0x118] is the register READ** (0x148 resolves, 0x120 writes),
+    // and those three are the first GC register READS Apple makes in this path -
+    // the same class of access 2fe measured stalling non-deterministically.
+    //
+    // And waitForActiveValue itself is the other candidate. With b2 = 0:
+    //   bea15f4  andb -0x34(%rbp), %al   ; b2 = 0 -> al = 0
+    //   bea15f9  jne bea1611             ; ALWAYS taken: skips the 0x3e7 counter
+    //                                    ; AND the IODelay(0x64)
+    //   bea1611  testb $1,%r14b ; jne    ; spin while (active ^ b1) & 1
+    // a tight delay-free unbounded spin on CP_GFX_HQD_ACTIVE whose only escape
+    // is the register reading 0xffffffff - and 2ew's f10 = 0 means Apple's
+    // command-9 graphics-queue create never runs here, so nothing ever makes
+    // that HQD active. 2cp forces the 4th parameter, which IS b2/ecx, so the
+    // bound should be restored; these gates say whether 2cp is even reached.
+    //
+    // Bands 90/95 are clear of 60..67 / 70..77 / 80..87 / 100+ / 150+.
+    char wenter[96];
+    snprintf(wenter, sizeof(wenter), "waitForActiveValue ENTER ring=%u exp=%d bnd=%d",
+             ring, expected ? 1 : 0, bounded ? 1 : 0);
+    rbgpu_gate_2en(90, wenter);
     bool ret = orig_pm4_waitForActiveValue_2cp
                    ? orig_pm4_waitForActiveValue_2cp(pm4, ring, expected, bounded)
                    : false;
@@ -3293,6 +3324,10 @@ static bool hooked_pm4_waitForActiveValue_2cp(void *pm4, uint32_t ring, bool exp
     rbgpu_diag_set_num("wfav_ret", static_cast<uint64_t>(g_rb_2cp_wfav_ret));
     rbgpu_log("2cp: waitForActiveValue(ring=%u) -> %d %s", ring, ret ? 1 : 0,
               ret ? "(ring ACTIVE)" : "(timed out or register read 0xffffffff)");
+    // 2fh: gate LAST before the return, so the span to the next gate is Apple's.
+    char wdone[96];
+    snprintf(wdone, sizeof(wdone), "waitForActiveValue RETURNED %d", ret ? 1 : 0);
+    rbgpu_gate_2en(95, wdone);
     return ret;
 }
 
