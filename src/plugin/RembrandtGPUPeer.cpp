@@ -1018,8 +1018,18 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
         trail_len = strlen(trail);
     }
 
+    // 2fg: count the writes and any that the registry refuses, and carry both
+    // in the text. If the trail stops while w keeps climbing and f stays 0,
+    // the writes are landing and the thread really is the thing that stopped;
+    // if the last trail the next boot shows is short with f nonzero, the
+    // record ran out rather than the thread.
+    static uint32_t gate_writes = 0;
+    static uint32_t gate_wfails = 0;
+    gate_writes++;
+
     char buf[280];
-    snprintf(buf, sizeof(buf), "%s| %u %s", trail, stage, what ? what : "");
+    snprintf(buf, sizeof(buf), "%s| %u %s [w=%u f=%u]", trail, stage,
+             what ? what : "", gate_writes, gate_wfails);
 
     // 2ey: hold the flag across the write so the heartbeat never lands in the
     // middle of it. This thread does NOT wait for the flag - it is the one
@@ -1028,8 +1038,12 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
     g_rbgpuLastGate = stage;
     OSCompareAndSwap(0, 1, &g_rbgpuNvramBusy);
     if (auto str = OSString::withCString(buf)) {
-        options->setProperty("rbgpu-gate", str);
+        if (!options->setProperty("rbgpu-gate", str)) {
+            gate_wfails++;
+        }
         str->release();
+    } else {
+        gate_wfails++;
     }
     if (auto sync = OSString::withCString("now")) {
         options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
