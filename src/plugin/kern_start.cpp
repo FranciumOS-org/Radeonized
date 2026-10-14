@@ -3575,6 +3575,38 @@ static void rbgpu_mark_2es(uint32_t stage, const char *what) {
 }
 
 static void rbgpu_gate_2en(uint32_t stage, const char *what) {
+    // 2fo (2026-10-14): the whole trail is OFF when -rbgpunogates is set, and
+    // the question that switch asks is the one 24 boots never asked.
+    //
+    // The accounting since 2em: about 7 of those boots produced a fact about
+    // the chip and about 17 went into chasing this instrument, through six
+    // structural hypotheses that were each refuted on hardware. Meanwhile
+    // every measurement inside the chain says it WORKS - setres returns 1,
+    // initGraphicsMQD returns in 223 us, mapQueues returns with real GPU
+    // stamps, the ring-state reads complete, CP_GFX_HQD_ACTIVE reads 1 and
+    // 2fi ran the poll to ret=1. There is no failure anywhere in 500 us of
+    // chain; there is only a thread that does not come back.
+    //
+    // And the one thing present in all 24 and absent from the twenty
+    // milestones before 2eo is ~24 synchronous NVRAM device transactions
+    // inside IOService::start. The heartbeat corroborates that the controller
+    // stops answering partway through every boot (n=13..28 while the machine
+    // lives for minutes, 2ff). The trail has never been removed and the chain
+    // never run without it.
+    //
+    // With the gates off the quiesce below never fires either, so the diag
+    // summary and RBGPULog keep publishing exactly as they did for 2ce-2en -
+    // the configuration that was readable for twenty milestones. The boot
+    // then either reaches a desktop, which no boot has since 2em, or wedges
+    // identically with nothing of ours writing flash, which exonerates the
+    // trail and makes the stop real.
+    static int nogate = -1;
+    if (nogate < 0) { nogate = checkKernelArgument("-rbgpunogates") ? 1 : 0; }
+    if (nogate) {
+        rbgpu_diag_set_num("gate_stage", stage);
+        return;
+    }
+
     // 2et: gate 40 is the first gate of the doStart chain. From here on the
     // refresh thread stops flushing the diag summary, so these synchronous
     // writes are the only NVRAM traffic. The 2es boot showed the two writers
