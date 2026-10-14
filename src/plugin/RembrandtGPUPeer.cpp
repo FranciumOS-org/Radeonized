@@ -1027,9 +1027,49 @@ void rbgpu_gate_nvram(uint32_t stage, const char *what) {
     static uint32_t gate_wfails = 0;
     gate_writes++;
 
-    char buf[280];
-    snprintf(buf, sizeof(buf), "%s| %u %s [w=%u f=%u]", trail, stage,
-             what ? what : "", gate_writes, gate_wfails);
+    // 2fk (2026-10-13): TIME the trail. Ten boots in this family have ended at
+    // ten different gates with the code in the relevant span unchanged, and
+    // every structural explanation offered so far has been refuted on
+    // hardware: logging contention (2ez, fixed in 2fa, variance stayed), the
+    // NVRAM write budget (2ff, refuted by 2fg at w=18 f=0), the register dump
+    // (2fe, which helped once and then did not).
+    //
+    // The one thing never measured is how long a gate itself costs. 2ez found
+    // exactly this shape once already - a thread running at 3 us per line and
+    // at 10 ms per line within one boot, which is indistinguishable from a
+    // wedge and stops wherever the power cycle lands. Each gate here does a
+    // setProperty plus IONVRAM-FORCESYNCNOW-PROPERTY, a real flash commit,
+    // and nothing has ever clocked one.
+    //
+    //   t  = ms since the FIRST gate of the boot
+    //   wx = the worst single gate-to-gate gap in ms
+    //
+    // t small (tens of ms) at the last gate  -> the thread genuinely stops,
+    //                                           and the endpoint locates it
+    // t already seconds, wx in the hundreds  -> the gates are the crawl, the
+    //                                           endpoint is just where the
+    //                                           power cycle landed, and this
+    //                                           whole family has been timing
+    //                                           its own instrument again
+    static uint64_t first_tick = 0;
+    static uint64_t prev_tick  = 0;
+    static uint64_t worst_ns   = 0;
+    uint64_t now_tick = mach_absolute_time();
+    uint64_t total_ns = 0;
+    if (first_tick == 0) {
+        first_tick = now_tick;
+    } else {
+        uint64_t d_ns = 0;
+        absolutetime_to_nanoseconds(now_tick - prev_tick, &d_ns);
+        if (d_ns > worst_ns) { worst_ns = d_ns; }
+        absolutetime_to_nanoseconds(now_tick - first_tick, &total_ns);
+    }
+    prev_tick = now_tick;
+
+    char buf[300];
+    snprintf(buf, sizeof(buf), "%s| %u %s [w=%u f=%u t=%llu wx=%llu]", trail,
+             stage, what ? what : "", gate_writes, gate_wfails,
+             total_ns / 1000000ull, worst_ns / 1000000ull);
 
     // 2ey: hold the flag across the write so the heartbeat never lands in the
     // middle of it. This thread does NOT wait for the flag - it is the one
