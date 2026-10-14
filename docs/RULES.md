@@ -5650,3 +5650,84 @@ map has an 'f'   Apple calls through a NULL slot unconditionally, which is a
 nothing written  the boot does not reach startHWEngines, which would itself
                  be new: 2fo reached it
 ```
+
+## 2fr (2026-10-14): the 2fo boot stopped at request 0x1B, not at startHWEngines
+
+The user ran `plugin_check` in the 2fo boot and it "got stuck at Verdict
+Milestone 1 like always", then power-cycled. That single sentence, checked
+against the 2fo log, settles two things the previous entry got wrong.
+
+**The 2fo boot did NOT reach a desktop.** The `doStart RETURNED 1` entry read
+`handlePostRegister` as "the 2cy shape that completes a boot" and said the
+desktop was suggestive but unconfirmed. It did not happen. `pci.txt` is 0
+bytes in that capture, exactly as in every wedge, so the IGPU registry
+subtree was locked while the log was taken - and the log's true last line is
+not what that entry quoted:
+
+```
+[17.220497] 2cn: powerUpHW failed, will fail start() cleanly (survive mode)
+[17.229666] handlePostRegister: Request 0x06 returned 0x00000000
+[17.238625] handlePostRegister: sending Request 0x1B (Controller Enabled)
+   <nothing further, and the machine sat there for minutes>
+```
+
+The 2cy boot logged `Request 0x1B returned 0xE00002C7` and carried on into
+Wi-Fi scanning. **This boot sent 0x1B and never got an answer.**
+
+**And the timestamps say what that thread is actually doing, which the
+journal had structurally wrong.** Request 0x06 is SENT at 14.944 and RETURNS
+at 17.229, 2.3 s later, while `2cn: accelerator start returned 1` is logged
+at 14.958 in between:
+
+```
+14.938  Registered accelerator instance
+14.944  handlePostRegister: sending Request 0x06        <- the peer's thread
+14.958  2cn: accelerator start returned 1               <- start() is DONE
+...     powerUp, doStart, the whole chain               <- inside 0x06
+17.229  handlePostRegister: Request 0x06 returned 0     <- 2.3 s later
+17.238  handlePostRegister: sending Request 0x1B        <- and it hangs
+```
+
+So the entire powerUp chain runs **on the peer's own post-register thread,
+inside request 0x06**, not on the accelerator's `start()` thread. That also
+retires the 2cn "survive mode" line as anything but a log message: `start()`
+had already returned 1 twenty log lines earlier, so there is no `start()`
+left to fail. (2cx had noted powerUpHW runs after `start()` returns; what is
+new is which thread makes the call and from where.)
+
+Why 0x1B hangs now when 2cy answered it at once: in 2cy powerUpHW failed at
+the very first gate with the hardware untouched. Now the engines are powered,
+the queues are mapped and the rings are programmed, so "Controller Enabled"
+reaches code with real state to act on.
+
+**The change.** Request 0x1B is not sent when powerUpHW returned 0.
+`g_rb_poweruphw_ok` is set from powerUpHW's own return value, so this is the
+honest state and not a bypass: the controller is not enabled, and claiming
+otherwise would be one more blanket-true latch of the kind 2am/2an/2ao
+already owe an explanation for. `-rbgpuforce1b` sends it anyway, for the boot
+where powerUpHW finally succeeds.
+
+`rbgpu-post` records which of the two happened, through the 2fq one-shot
+note, so a boot that still wedges says whether 0x1B was sent:
+
+```
+0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)   the skip took effect
+0x06 done; 0x1B SENT - no return means it hangs here
+0x1B RETURNED 0x........                           it answered after all
+```
+
+Build: UUID 0E64D1C2, hosttest passes. Boot-args unchanged.
+
+What the next armed boot decides, and it is two answers in one boot because
+2fq made the first one independent of the log:
+
+```
+nvram rbgpu-starthw    the engine map: which entry startHWEngines refuses,
+                       or that it refuses none of them and the FALSE comes
+                       from one of the vtable[0x148] calls
+a DESKTOP              0x1B was the wedge, plugin_check runs normally, and
+                       the full log comes out of the same boot - which would
+                       be the first readable complete armed boot since 2em
+wedges anyway, with    the stop is somewhere else again, and rbgpu-post plus
+rbgpu-post = SKIPPED   rbgpu-starthw say how far it got with no log at all
+```
