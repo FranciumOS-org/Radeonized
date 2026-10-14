@@ -4715,9 +4715,54 @@ static bool hooked_hw_powerUpHWEngines(void *hw) {
     return all_ok;
 }
 
+// 2fp (2026-10-14): walk the loop startHWEngines runs, naming the engine that
+// refuses. Disassembled at 0xbea8fea:
+//
+//   count = hw->0xc2 * 2 + 2
+//   for (i = 0; i < count; i++) {
+//       e = hw->0x3b8[i];            the SAME engine array 2bv walks
+//       if (!e) -> return false
+//       if (!e->vtable[0x148]()) -> os_log, return false
+//   }
+//   return true
+//
+// So it is the 2bv shape one function later, on the same array, through
+// vtable[0x148] instead of powerUp - and Apple names the failing index in an
+// os_log we do not capture. This reads the array and the slot pointer only;
+// the original still makes every call. No hardware access.
+static void rbgpu_walk_starthw_2fp(void *hw) {
+    if (!hw) { return; }
+    uint8_t c2 = *reinterpret_cast<volatile uint8_t *>(
+        reinterpret_cast<uintptr_t>(hw) + 0xc2);
+    uint32_t count = static_cast<uint32_t>(c2) * 2u + 2u;
+    rbgpu_log("2fp: startHWEngines will walk %u entries (hw+0xc2 = %u)",
+              count, c2);
+    if (count > 32) {
+        rbgpu_log("2fp: count %u is implausible - not walking", count);
+        return;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        void *e = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(hw) + 0x3b8 + i * 8);
+        if (!e) {
+            rbgpu_log("2fp: engine[%u] = NULL -> startHWEngines returns FALSE "
+                      "here (0xbea9068), and this is the whole failure", i);
+            rbgpu_diag_set_num("starthw_null_idx", i);
+            return;
+        }
+        void **vt = *reinterpret_cast<void ***>(e);
+        void *fn = vt ? vt[0x148 / sizeof(void *)] : nullptr;
+        rbgpu_log("2fp: engine[%u] = %p vtable[0x148] = %p", i, e, fn);
+    }
+    rbgpu_log("2fp: all %u entries are non-NULL, so a FALSE return comes from "
+              "one of the vtable[0x148] calls and not from the NULL check",
+              count);
+}
+
 static bool hooked_hw_startHWEngines(void *hw) {
     g_rb_pw_stage |= 0x100;
     rbgpu_log("2bs: AMDHardware::startHWEngines entered (hw=%p)", hw);
+    rbgpu_walk_starthw_2fp(hw);
     bool ret = orig_hw_startHWEngines ? orig_hw_startHWEngines(hw) : false;
     if (ret) g_rb_pw_stage |= 0x200;
     rbgpu_log("2bs: AMDHardware::startHWEngines -> %d", ret ? 1 : 0);
