@@ -51,6 +51,11 @@ static RembrandtGPUPeer *g_peer     = nullptr;
 static LogEntry  g_logRing[RBGPU_RING_SIZE];
 static size_t    g_logHead  = 0;
 static size_t    g_logCount = 0;
+// 2fx: a monotonic count of every log ACTIVITY (new line or dedupe bump). Unlike
+// g_logCount it never saturates at the ring size, so two samples of it say
+// whether the chain is advancing at all - finer than the 6-value stage number,
+// where the whole startHWEngines walk lives between two stages.
+static volatile uint64_t g_rbgpuLogSeq = 0;
 
 static DiagEntry g_diags[RBGPU_MAX_DIAGS];
 static size_t    g_diagCount = 0;
@@ -108,6 +113,8 @@ static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
 
 static void rbgpu_log_append_locked(const char *line) {
     uint64_t now = mach_absolute_time();
+
+    g_rbgpuLogSeq++;   // 2fx: counts dedupe bumps too, so a repeating line still shows progress
 
     if (g_logCount > 0) {
         size_t lastIdx = (g_logHead - 1 + RBGPU_RING_SIZE) % RBGPU_RING_SIZE;
@@ -1020,23 +1027,36 @@ void rbgpu_heartbeat_start(void) {
 static thread_call_t     g_rbgpuProgCall = nullptr;
 static volatile bool     g_rbgpuProgOn   = false;
 static int               g_rbgpuProgPhase = 0;
-static char              g_rbgpuProgText[96];
+static char              g_rbgpuProgText[192];
 volatile uint32_t        g_rb_prog_stage = 0;
 
 static void rbgpu_prog_action(thread_call_param_t, thread_call_param_t) {
+    // 2fx: three samples, at +15 / +35 / +65 s. 2fw asked for two at +30 and
+    // +90 and only the first ever landed in either boot - the machine was gone
+    // before the second. Three earlier ones mean a boot that is power-cycled at
+    // ~45 s still yields the comparison the whole question turns on.
+    //
+    // Each sample carries the STAGE and the monotonic LOG SEQUENCE. The stage
+    // is coarse (the entire startHWEngines walk sits between stage 2 and 3);
+    // the sequence moves on every log line, so it distinguishes "stopped" from
+    // "crawling" where the stage alone cannot.
+    static const uint32_t kDelaysMs[3] = { 15000, 20000, 30000 };  // +15, +35, +65
     uint64_t now_ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
-    int n = static_cast<int>(strlen(g_rbgpuProgText));
+    size_t n = strlen(g_rbgpuProgText);
     snprintf(g_rbgpuProgText + n, sizeof(g_rbgpuProgText) - n,
-             "%s%c=%u@%llums", n ? " " : "", g_rbgpuProgPhase ? 'b' : 'a',
-             g_rb_prog_stage, now_ns / 1000000ull);
+             "%s%c=s%u/L%llu@%llums", n ? " " : "",
+             static_cast<char>('a' + g_rbgpuProgPhase),
+             g_rb_prog_stage, g_rbgpuLogSeq, now_ns / 1000000ull);
     rbgpu_nvram_note("rbgpu-prog2", g_rbgpuProgText);
-    rbgpu_log("2fw: sample %c stage=%u", g_rbgpuProgPhase ? 'b' : 'a',
-              g_rb_prog_stage);
-    if (g_rbgpuProgPhase == 0 && g_rbgpuProgCall) {
-        g_rbgpuProgPhase = 1;
+    rbgpu_log("2fx: sample %c stage=%u logseq=%llu",
+              static_cast<char>('a' + g_rbgpuProgPhase), g_rb_prog_stage,
+              g_rbgpuLogSeq);
+    g_rbgpuProgPhase++;
+    if (g_rbgpuProgPhase < 3 && g_rbgpuProgCall) {
         uint64_t deadline = 0;
-        clock_interval_to_deadline(60000, kMillisecondScale, &deadline);
+        clock_interval_to_deadline(kDelaysMs[g_rbgpuProgPhase], kMillisecondScale,
+                                   &deadline);
         thread_call_enter_delayed(g_rbgpuProgCall, deadline);
     }
 }
@@ -1050,14 +1070,14 @@ void rbgpu_progwatch_start(void) {
     }
     g_rbgpuProgCall = thread_call_allocate(rbgpu_prog_action, nullptr);
     if (!g_rbgpuProgCall) {
-        rbgpu_log("2fw: thread_call_allocate FAILED - no progress samples this "
+        rbgpu_log("2fx: thread_call_allocate FAILED - no progress samples this "
                   "boot, so stopped-vs-crawling stays unanswered");
         return;
     }
     g_rbgpuProgOn = true;
-    rbgpu_log("2fw: progress watch armed (+30 s, +90 s -> rbgpu-prog2)");
+    rbgpu_log("2fx: progress watch armed (+15 s, +35 s, +65 s -> rbgpu-prog2)");
     uint64_t deadline = 0;
-    clock_interval_to_deadline(30000, kMillisecondScale, &deadline);
+    clock_interval_to_deadline(15000, kMillisecondScale, &deadline);
     thread_call_enter_delayed(g_rbgpuProgCall, deadline);
 }
 
