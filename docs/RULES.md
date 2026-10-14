@@ -5469,3 +5469,100 @@ wedges the same way, nothing of ours writing flash
 
 This supersedes 2fn's hold: the two-read test is cheaper to run on a boot that
 also answers this one, so run both.
+
+### 2fo answered on hardware (2026-10-14): THE GATE TRAIL WAS THE WEDGE — doStart RETURNED 1
+
+logs/20261014-131620-plugin. Build checked: 1AC17A45 == build/out (2fo),
+`ttl_hw_init_ret=c3af8001` so a new boot. **`nvram rbgpu-gate` is unchanged
+from the 2fl boot** (same 14 gates, same `t=369 wx=356`), which is the switch
+confirming itself: with `-rbgpunogates` the gate path writes no flash at all.
+
+And the chain ran to the end:
+
+```
+[14.984808] 2bv: engine[0] = 0xffffff95f52c2800 calling powerUp...
+[14.991579] 2bu: AMDGFX10PM4Engine::powerUp entered
+[15.954263] 2cq: submitSetResourcesPacket -> 1 (OK)
+[16.268503] 2cq: submitMapQueuesPacket(ring=0, ...) -> 1 (OK)
+[16.702248] 2cq: submitMapQueuesPacket(ring=5, ...) -> 1 (OK)
+[16.713816] 2cp: waitForActiveValue(ring=0, expected=1, bounded=0) -> forcing bounded=1
+[16.966970] 2ce: doStart returned 1                       <<<<
+[16.977029] 2bu: AMDGFX10PM4Engine::powerUp -> 1          <<<<
+[16.987527] 2bv: engine[0] powerUp -> 1                   <<<<
+             engine[1] -> 1   [2] -> 1   [3] -> 1   [4] -> 1
+             [5][6][7] NULL   [8] -> 1   [9] -> 1   [10] NULL
+[17.154513] 2bv: all engines powered up OK                <<<<
+[17.163855] 2bs: AMDHardware::startHWEngines entered
+[17.173930] 2bs: AMDHardware::startHWEngines -> 0         <<<< the new frontier
+[17.183125] 2bt: AMDHardware::powerUp -> 0
+[17.211544] 2br: powerUpHW returned 0x0
+[17.220497] 2cn: powerUpHW failed, will fail start() cleanly (survive mode)
+[17.229666] handlePostRegister: Request 0x06 returned 0x00000000
+```
+
+**`doStart` RETURNED 1.** `AMDGFX10PM4Engine::powerUp` returned 1. Every
+engine in the array powered up. None of that has ever happened in this
+project, and the thread did not wedge - it ran on through `powerUpHW`'s
+failure path into `handlePostRegister`, the 2cy shape that completes a boot.
+
+**So 2fo's first branch fired and the accounting in it was right.** The gate
+trail was the wedge. The seven "where does the thread stop" boots from 2fh to
+2fm were measuring a stop that our own breadcrumb caused, and the variance
+that six hypotheses failed to explain had no cause to find: with the
+breadcrumb gone the chain simply completes. The one thing never removed was
+the one thing responsible.
+
+Worth stating precisely what is and is not withdrawn:
+
+- **Withdrawn:** every endpoint reading from 2eo to 2fm as a statement about
+  where the thread stops, and with them the 32 -> 33 span of 2fn. There was
+  no stopping point to locate.
+- **Not withdrawn:** every *committed* gate, because a gate that landed is
+  positive evidence whatever happened after it. 2fe's `initGraphicsMQD`
+  RETURNS, 2fi's `CP_GFX_HQD_ACTIVE = 1`, 2fh's GC reads, 2fl's mapQueues
+  return, 2fk's timings - all still stand, and this boot reproduces the whole
+  chain independently with no gates at all.
+- Also note the logging ran at ~10 ms a line in this boot (17.135, 17.145,
+  17.154 ...), the 2ez contention shape, which is why the chain took 2 s here
+  against the 500 us 2fk measured. It was slow and it still finished.
+
+### The new frontier: `AMDHardware::startHWEngines` (0xbea8fea, disassembled)
+
+```
+bea8ff8  count = hw->0xc2 * 2 + 2
+loop:
+  if (i == count)        -> r12w = 0x200, SUCCESS
+  e = hw->0x3b8[i]       the SAME engine array 2bv walks
+  if (!e)                -> r12 = 0, FAIL            (0xbea9068)
+  if (!e->vtable[0x148]()) -> os_log, r12 = 0, FAIL  (0xbea9030)
+  i++ ; continue
+```
+
+So it is the 2bv shape one function later, over the same array, through
+`vtable[0x148]` instead of `powerUp` - and Apple names the failing index in
+an `__os_log_internal` call we do not capture. It returned 0 in a single log
+line's worth of time, with no inner logging of ours to slow it.
+
+Note it did **not** re-enter `doStart`: the hook logged exactly one
+`doStart returned`, so whatever `vtable[0x148]` is for these engines in this
+context, it is not the `powerUp` thunk path running a second time. Stated as
+an observation; the slot is not yet resolved per class.
+
+## 2fp (2026-10-14): name the engine that refuses
+
+`rbgpu_walk_starthw_2fp` runs from the existing `startHWEngines` ENTER hook
+and walks the array Apple is about to walk - reading `hw->0xc2`, the count,
+each `hw->0x3b8[i]` and each engine's `vtable[0x148]` pointer. Reads only;
+the original still makes every call, and nothing touches hardware. The count
+is refused if it exceeds 32 rather than walking a garbage length.
+
+```
+engine[i] = NULL           startHWEngines fails at the NULL check (0xbea9068)
+                           and the index names the missing engine outright
+all non-NULL               the FALSE comes from one of the vtable[0x148]
+                           calls, and the logged slot pointers say which
+                           function to disassemble
+```
+
+Gates stay OFF: `-rbgpunogates` is now the configuration that works and the
+boot-args keep it. Build: UUID 88399259, hosttest passes.
