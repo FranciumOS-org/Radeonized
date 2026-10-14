@@ -6108,3 +6108,67 @@ MATCH    the thread genuinely stops, established for the first time, and the
 
 Writing a seventh structural hypothesis before that answer arrives would be
 the same mistake six times over.
+
+### 2fu, third boot (2026-10-14): s=1 again, and the test is still unrun
+
+```
+kmutil showloaded -> 83F2470A == build/out (2fu)
+rbgpu-diag-prev   -> armed=1 ttl_hw_init_ret=ffffffffb5583001  (a new boot)
+nvram rbgpu-prog  -> "s=1 powerUpHW ENTER"
+no new logs/ dir  -> no plugin_check capture this time
+```
+
+So "zero flash commits inside the region" now stands at **two completions out
+of five boots** (2fo, 2ft complete; 2fs with one commit and 2fu's three
+without). Whatever decides it, our commit count is not it.
+
+## 2fw (2026-10-14): the plugin runs the 2fm test itself
+
+2fm asked for two reads of the breadcrumb a minute apart from inside the
+armed boot. It has been owed for **five milestones** and has never once been
+run, and the reason is structural rather than anybody's forgetfulness: it
+asks the user to type two commands into a machine that is wedging, while
+`plugin_check` is blocked on `ioreg` and the obvious reflex is to power-cycle.
+
+It is also still prior to every other question here. **A chain advancing one
+step a minute leaves exactly the record a stopped one leaves**, and 2ez
+already caught this project reading slowness as a hang once. Six structural
+explanations for the variance have been refuted; a seventh should not be
+written before this is settled.
+
+So the plugin runs it. Two one-shot `thread_call`s, at **+30 s** and
+**+90 s** from `powerUpHW` ENTER, each appending the stage the chain has
+reached to `rbgpu-prog2`:
+
+```
+a=N@...ms          the stage at +30 s
+a=N@...ms b=M@...  and at +90 s
+```
+
+Both samples land in one variable, so a power cycle still yields the
+comparison, and **no user action is involved at all** - no SSH, no typing
+into a wedged console, no second capture.
+
+```
+b > a    the chain is ADVANCING - there is no stopping point, and every
+         endpoint reading in this project is void for locating anything.
+         The question becomes what costs a minute per step in code measured
+         at microseconds.
+b == a   it is genuinely STOPPED, established rather than assumed for the
+         first time, and the 2fv window (initComputeMQD(5) + one GPU submit)
+         is a real location.
+absent   the timer never fired - which is its own answer, and the one 2ez
+         already saw when the heartbeat died at n=13..28 with the machine
+         demonstrably alive: the thread_call pool is starved.
+```
+
+Cost: two flash commits, both long after the ~500 us chain region, which is
+the budget 2fs/2ft established. **Nothing is written inside the region** -
+stage 1 stays at `powerUpHW` ENTER and the timer is armed beside it.
+
+`tools/plugin_check.sh` captures `rbgpu-prog2` first, but the point is that
+it does not need to: `nvram rbgpu-prog2` from the recovery boot is the whole
+answer.
+
+Build: UUID 64AEBDD8, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays.

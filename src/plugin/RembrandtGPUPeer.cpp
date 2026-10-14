@@ -992,6 +992,75 @@ void rbgpu_heartbeat_start(void) {
 // measured a gate at ~6 us, so a single write is not the hazard the trail
 // was; the hazard was doing it two dozen times through the chain. This
 // writes once, from one place, and says so in its own name.
+// 2fw (2026-10-14): sample the progress stage twice, from a timer.
+//
+// The 2fm test - read the breadcrumb twice a minute apart from inside the
+// armed boot - has been owed for five milestones and has never been run,
+// because it needs the user to type two commands into a machine that is
+// wedging. It is prior to every other question here: a chain advancing one
+// step a minute leaves exactly the record a stopped one leaves, and 2ez
+// already caught this project reading slowness as a hang once.
+//
+// So the plugin runs it itself. Two one-shot `thread_call`s, at +30 s and
+// +90 s from `powerUpHW` ENTER, each writing the stage the chain has reached
+// into `rbgpu-prog2`. Both samples land in one variable, so a power cycle
+// still yields the comparison, and no user action is involved at all.
+//
+//   a=N          the stage at +30 s
+//   a=N b=M      and at +90 s
+//
+//   b > a   the chain is ADVANCING - there is no stopping point, every
+//           endpoint reading in this project is void for locating anything
+//   b == a  it is genuinely stopped, established rather than assumed
+//   absent  the timer never fired, which is its own answer: the thread_call
+//           pool is starved, as 2ez found when the beat died at n=13..28
+//
+// Cost is two flash commits, both long after the ~500 us chain region, which
+// is the budget 2fs/2ft established. Nothing is written inside the region.
+static thread_call_t     g_rbgpuProgCall = nullptr;
+static volatile bool     g_rbgpuProgOn   = false;
+static int               g_rbgpuProgPhase = 0;
+static char              g_rbgpuProgText[96];
+volatile uint32_t        g_rb_prog_stage = 0;
+
+static void rbgpu_prog_action(thread_call_param_t, thread_call_param_t) {
+    uint64_t now_ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+    int n = static_cast<int>(strlen(g_rbgpuProgText));
+    snprintf(g_rbgpuProgText + n, sizeof(g_rbgpuProgText) - n,
+             "%s%c=%u@%llums", n ? " " : "", g_rbgpuProgPhase ? 'b' : 'a',
+             g_rb_prog_stage, now_ns / 1000000ull);
+    rbgpu_nvram_note("rbgpu-prog2", g_rbgpuProgText);
+    rbgpu_log("2fw: sample %c stage=%u", g_rbgpuProgPhase ? 'b' : 'a',
+              g_rb_prog_stage);
+    if (g_rbgpuProgPhase == 0 && g_rbgpuProgCall) {
+        g_rbgpuProgPhase = 1;
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(60000, kMillisecondScale, &deadline);
+        thread_call_enter_delayed(g_rbgpuProgCall, deadline);
+    }
+}
+
+void rbgpu_progwatch_start(void) {
+    if (g_rbgpuProgOn) {
+        return;
+    }
+    if (!g_rbgpuOptions) {
+        g_rbgpuOptions = IORegistryEntry::fromPath("/options", gIODTPlane);
+    }
+    g_rbgpuProgCall = thread_call_allocate(rbgpu_prog_action, nullptr);
+    if (!g_rbgpuProgCall) {
+        rbgpu_log("2fw: thread_call_allocate FAILED - no progress samples this "
+                  "boot, so stopped-vs-crawling stays unanswered");
+        return;
+    }
+    g_rbgpuProgOn = true;
+    rbgpu_log("2fw: progress watch armed (+30 s, +90 s -> rbgpu-prog2)");
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(30000, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(g_rbgpuProgCall, deadline);
+}
+
 void rbgpu_nvram_note(const char *var, const char *text) {
     IORegistryEntry *options = g_rbgpuOptions;
     if (!options) {
