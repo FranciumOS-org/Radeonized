@@ -2996,8 +2996,46 @@ static void rbgpu_probe_regread_2fb(void);
 // 2fj: the gate helper is defined further down; declare it for this hook.
 static void rbgpu_gate_2en(uint32_t stage, const char *what);
 
+// 2fs (2026-10-14): ONE stage-numbered NVRAM variable, `rbgpu-prog`.
+//
+// 2fq put its two writes at startHWEngines and at the 0x1B decision, both of
+// them PAST the frontier whose endpoint has varied in every boot of this
+// family. The 2fr boot then wrote neither, and `nvram -p` shows the variables
+// were never created at all - which is equally well explained by
+//
+//   the thread never reaching either site, or
+//   rbgpu_nvram_note not working (creating a NEW variable, as opposed to
+//     overwriting rbgpu-gate, has never been exercised)
+//
+// and nothing distinguishes them. That is the ambiguity of absence this
+// project has already paid for at 2eh, 2ek, 2en and 2fb, and 2fd named the
+// fix: put the measurement where the code ALWAYS reaches.
+//
+// So stage 1 is written at doStart ENTER - the one site in this chain that
+// has executed in every boot since 2ce, twenty milestones ago, and the same
+// site 2fd moved the accessor probe to for exactly this reason. If
+// `rbgpu-prog` is absent after the next boot, the mechanism is broken and
+// that is settled without a second boot; if it reads `s=1`, the mechanism
+// works and the thread did not get past doStart.
+//
+// Cost: one flash commit inside the ~500 us chain region (stage 1), and the
+// rest only after the chain has finished. 2fo's accounting blamed ~24
+// commits threaded THROUGH the chain for the wedge; this is one.
+static void rbgpu_prog_2fs(uint32_t stage, const char *what) {
+    char buf[200];
+    snprintf(buf, sizeof(buf), "s=%u %s", stage, what ? what : "");
+    rbgpu_nvram_note("rbgpu-prog", buf);
+    rbgpu_log("2fs: prog s=%u %s", stage, what ? what : "");
+}
+
 static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_log("2ce: AMDGFX10PM4Engine::doStart entered (pm4=%p arg=%d)", pm4, arg ? 1 : 0);
+    // 2fs stage 1: the always-reached site. Written ONCE per boot, however
+    // many engines call doStart, so the commit count does not scale.
+    {
+        static bool once = false;
+        if (!once) { once = true; rbgpu_prog_2fs(1, "doStart ENTER"); }
+    }
 
     // 2ew: the fields that decide which region of Apple's initGraphicsMQD
     // can run, read HERE rather than inside that hook - 2ev proved reads and
@@ -3064,6 +3102,15 @@ static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     rbgpu_gate_2en(ret ? 30 : 31,
                    ret ? "doStart RETURNED TRUE - powerUp succeeds"
                        : "doStart RETURNED FALSE - clean failure, desktop");
+    // 2fs stage 2: once, on the FIRST doStart to return. The chain is behind
+    // us here, so this commit is not inside the 500 us region.
+    {
+        static bool once = false;
+        if (!once) {
+            once = true;
+            rbgpu_prog_2fs(2, ret ? "doStart RETURNED 1" : "doStart RETURNED 0");
+        }
+    }
     return ret;
 }
 
@@ -4760,7 +4807,7 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
     int n = 0;
     if (!hw) {
         snprintf(g_rb_2fq_map, sizeof(g_rb_2fq_map), "hw=NULL");
-        rbgpu_nvram_note("rbgpu-starthw", g_rb_2fq_map);
+        rbgpu_prog_2fs(3, g_rb_2fq_map);
         return;
     }
     uint8_t c2 = *reinterpret_cast<volatile uint8_t *>(
@@ -4777,7 +4824,7 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
         n = snprintf(g_rb_2fq_map, sizeof(g_rb_2fq_map),
                      "c2=%u n=%u IMPLAUSIBLE - not walked", c2, count);
         rbgpu_log("2fp: count %u is implausible - not walking", count);
-        rbgpu_nvram_note("rbgpu-starthw", g_rb_2fq_map);
+        rbgpu_prog_2fs(3, g_rb_2fq_map);
         return;
     }
 
@@ -4826,7 +4873,7 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
                   "vtable[0x148], so a FALSE return comes from one of the "
                   "CALLS and not from the array", count);
     }
-    rbgpu_nvram_note("rbgpu-starthw", g_rb_2fq_map);
+    rbgpu_prog_2fs(3, g_rb_2fq_map);
 }
 
 static bool hooked_hw_startHWEngines(void *hw) {
@@ -4840,9 +4887,9 @@ static bool hooked_hw_startHWEngines(void *hw) {
     // twenty-four - and this one proves the first was not a lucky read of a
     // stale variable, because it carries the return from the same call.
     {
-        char buf[128];
+        char buf[160];
         snprintf(buf, sizeof(buf), "%s ret=%d", g_rb_2fq_map, ret ? 1 : 0);
-        rbgpu_nvram_note("rbgpu-starthw", buf);
+        rbgpu_prog_2fs(4, buf);
     }
     return ret;
 }

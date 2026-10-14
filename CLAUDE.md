@@ -5731,3 +5731,82 @@ a DESKTOP              0x1B was the wedge, plugin_check runs normally, and
 wedges anyway, with    the stop is somewhere else again, and rbgpu-post plus
 rbgpu-post = SKIPPED   rbgpu-starthw say how far it got with no log at all
 ```
+
+### 2fr answered nothing either (2026-10-14): the variables were never created
+
+Build and arming checked first, per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> com.rembrandtgpu.plugin 0E64D1C2   == build/out (2fr)
+rbgpu-diag        -> d=0 armed=0                        the recovery boot
+rbgpu-diag-prev   -> d=26 armed=1 ttl_hw_init_ret=ffffffffa0e93001
+                     (2fp read dca2e001, so this IS a new boot)
+nvram rbgpu-starthw -> absent
+nvram rbgpu-post    -> absent
+nvram -p | grep rbgpu -> 6 variables, and NEITHER new one is among them
+no new logs/ dir, no .panic; shutdown stall at 13:39, this boot began 13:41
+```
+
+**The two variables were never created at all**, so the writes did not merely
+land late or get lost - `rbgpu_nvram_note` was never called, or it does not
+work. Those are the only two readings and **nothing in this boot
+distinguishes them**:
+
+```
+the thread never reached either call site - startHWEngines ENTER, or
+  handlePostRegister's 0x1B decision
+rbgpu_nvram_note does not work: it creates a NEW NVRAM variable, which is
+  not what the gate trail does (that overwrites rbgpu-gate, created boots ago)
+  and has never been exercised
+```
+
+And the reason it is ambiguous is mine. All four of 2fq/2fr's call sites sit
+**past** the frontier whose endpoint has varied in every boot from 2fa to
+2fm. 2fd wrote the rule after 2fb and 2fc each spent a boot on it - *a
+measurement placed behind a varying gate inherits the variance* - and 2fq put
+both of its writes there anyway. Fourth time in this project (2eh, 2ek, 2en,
+2fb) that absence has been built in as the answer.
+
+Also worth noting against the diag summary: `regchan_calls=1` here against
+`19` in both 2fo and 2fp. Same keys, same order, a boot that froze even
+earlier. That channel is not reporting the frontier, which 2fq already said.
+
+## 2fs (2026-10-14): one stage-numbered variable, first written where the code always reaches
+
+`rbgpu-prog`, overwritten with a stage number at each milestone, replacing
+`rbgpu-starthw` and `rbgpu-post`:
+
+```
+s=1  doStart ENTER                      <- the always-reached site
+s=2  doStart RETURNED 0/1
+s=3  the startHWEngines engine map
+s=4  the map plus startHWEngines' ret
+s=5  0x1B SKIPPED (powerUpHW failed) | 0x1B SENT
+s=6  0x1B RETURNED 0x........
+```
+
+**Stage 1 is the whole point.** doStart ENTER has executed in every boot since
+2ce, twenty milestones ago, and it is the same site 2fd moved the accessor
+probe to for exactly this reason. So the next boot cannot come back ambiguous:
+
+```
+rbgpu-prog absent        rbgpu_nvram_note does not work - settled in one boot
+                         rather than inferred, and the channel has to change
+s=1 only                 the mechanism works AND the thread did not get past
+                         doStart, which would be a regression against 2fo and
+                         the first direct evidence of the varying stop with
+                         no gate trail in the boot at all
+s=3 / s=4                the engine map, which is the question 2fp and 2fq
+                         were both built to answer
+s=5 / s=6                the 0x1B skip took effect and the boot got past the
+                         point the 2fo boot sat at for minutes
+```
+
+Commit budget, stated because it is the thing 2fo blamed for the wedge:
+**one** flash commit inside the ~500 us chain region (stage 1, guarded by a
+`static bool` so it fires once however many engines call doStart), and the
+rest only after the chain has returned. 2fo's accounting was about ~24
+commits threaded *through* the chain.
+
+Build: UUID 03CF6E1A, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays.
