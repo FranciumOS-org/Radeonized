@@ -5408,3 +5408,64 @@ MATCH    the thread genuinely stops, established rather than assumed for the
 Writing a seventh structural hypothesis before that answer arrives would be
 the same mistake six times over; the six already refuted are listed under
 2fl.
+
+## 2fo (2026-10-14): the user asked whether the restarts are doing anything — the accounting, and the switch
+
+Asked directly, and the honest answer is mostly no. Twenty-four armed boots
+since 2em:
+
+```
+~7   produced a fact about the CHIP
+     2eo  submitSetResourcesPacket returns 1
+     2ew  f10 = 0, the command-9 create never runs
+     2fe  initGraphicsMQD RETURNS; five RB0 writes land; mapQueues succeeds
+          with real GPU stamps
+     2fh  Apple's three GC register reads complete, 2cp's cap is on
+     2fi  CP_GFX_HQD_ACTIVE = 1, and a GC register WRITE through Apple's
+          accessor completes; seg0 agreed a third and fourth way
+     2fk  the chain is ~500 us wide; initGraphicsMQD is 223 us
+     2fl  Apple's submitMapQueuesPacket original returns
+
+~17  produced a fact about MY OWN INSTRUMENT
+     six structural hypotheses, each raised and then refuted on hardware
+     (logging contention, the write budget, the register dump, the gates
+     being the crawl, a wall-clock watchdog, NVRAM commit lag)
+```
+
+Two out of three restarts went into the measuring apparatus, and the frontier
+has not moved in the sense that matters: `doStart` has never completed and no
+boot has reached a desktop with the accelerator powered since 2em.
+
+**What that table makes obvious in hindsight.** Every measurement inside the
+chain says it WORKS. There is no failure anywhere in 500 us - setres returns
+1, initGraphicsMQD returns, mapQueues returns with real stamps, the
+ring-state reads complete, the HQD is active, and 2fi ran the poll through to
+`ret=1`. There is only a thread that does not come back.
+
+And the one thing present in all 24 of those boots and absent from the twenty
+milestones before 2eo is **~24 synchronous NVRAM device transactions inside
+`IOService::start`**. The heartbeat has been saying the controller stops
+answering partway through every one of them (`n=13..28` while the machine
+demonstrably lives for minutes, 2ff). **The trail has never been removed and
+the chain has never been run without it.**
+
+`-rbgpunogates` does that. The gate path returns after one diag set; the 2et
+quiesce is reached only from inside it, so with the gates off the diag summary
+and `RBGPULog` keep publishing exactly as they did for 2ce-2en - the
+configuration that stayed readable for twenty milestones. No GPU behaviour
+changes; `-rbgpuptbase`, `-rbgpustampwait` and the rest are untouched.
+
+Build: UUID 1AC17A45, hosttest passes. **One new boot-arg**, and the boot that
+uses it is the first since 2em with no synchronous flash write in the chain.
+
+```
+a DESKTOP, or rbgpu-diag carrying mapq_calls=5 / pw_ret / the doStart outcome
+        the gate trail was the wedge, and seven boots of "where does the
+        thread stop" were measuring a stop that our own breadcrumb caused
+wedges the same way, nothing of ours writing flash
+        the trail is exonerated, the stop is real, and the 32 -> 33 span
+        stands as a genuine location
+```
+
+This supersedes 2fn's hold: the two-read test is cheaper to run on a boot that
+also answers this one, so run both.
