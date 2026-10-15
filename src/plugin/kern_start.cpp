@@ -6280,17 +6280,51 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     }
 
     // 2fu: AMDGFX10SDMAEngine::start - what startHWEngines actually calls on
-    // each of the four SDMA engines. `nm -m` shows it external and defined in
-    // X6000, so routing it by X6000's id is safe under the milestone-2c rule.
-    KernelPatcher::RouteRequest req_sdma(
-        "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv",
-        hooked_sdma_start_2fu,
-        orig_sdma_start
-    );
-    if (patcher.routeMultiple(id, &req_sdma, 1, address, size)) {
-        rbgpu_log("X6000: hooked AMDGFX10SDMAEngine::start (2fu)");
+    // each of the four SDMA engines.
+    //
+    // 2ga (2026-10-14): OFF unless -rbgpusdmahook. Two armed boots panicked
+    // identically, at different KASLR slides, with this backtrace:
+    //
+    //   Lilu  (Crypto::hash + 0xc12 / +0xc3a, i.e. Lilu+0x1ae22 / +0x1ae4a)
+    //   X6000 AMDHardware::startHWEngines + 0x3e     <- the vtable[0x148] CALL
+    //   plugin hooked_hw_startHWEngines + 0x384
+    //
+    // page fault, error code 0x3 (present | WRITE), with CR2 = RIP - 11 and
+    // both inside Lilu's own __TEXT. So Apple's call through the SDMA engine's
+    // vtable[0x148] lands in Lilu and faults writing to Lilu's own text.
+    //
+    // The milestone-2c rule is NOT what went wrong: `nm -m build/re/
+    // AMDRadeonX6000` shows __ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv
+    // as "external __TEXT,__text" at 0xbea4a6a, so the symbol really is
+    // defined here and solveSymbol cannot have returned a bare slide. That
+    // was checked before writing any of this down.
+    //
+    // WHY Lilu's own code faults is NOT established, and no guess is recorded
+    // here. What this switch decides in one boot:
+    //
+    //   panic GONE      this route is the cause, established rather than
+    //                   suspected, and the question becomes why routing THIS
+    //                   function breaks where twenty others did not
+    //   panic ANYWAY    the route is exonerated and the fault is in Apple's
+    //                   own vtable[0x148] call with nothing of ours in it
+    //
+    // Either way the chain is now known to reach startHWEngines, which is
+    // further than any boot before it.
+    if (checkKernelArgument("-rbgpusdmahook")) {
+        KernelPatcher::RouteRequest req_sdma(
+            "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv",
+            hooked_sdma_start_2fu,
+            orig_sdma_start
+        );
+        if (patcher.routeMultiple(id, &req_sdma, 1, address, size)) {
+            rbgpu_log("X6000: hooked AMDGFX10SDMAEngine::start (2fu, -rbgpusdmahook)");
+        } else {
+            rbgpu_log("X6000: AMDGFX10SDMAEngine::start not found (2fu)");
+        }
     } else {
-        rbgpu_log("X6000: AMDGFX10SDMAEngine::start not found (2fu)");
+        rbgpu_log("2ga: SDMA start route SKIPPED (-rbgpusdmahook not set) - "
+                  "it is the suspect for the 20:24/20:33 panics at "
+                  "startHWEngines+0x3e; a panic without it exonerates it");
     }
 
     KernelPatcher::RouteRequest req_she1(

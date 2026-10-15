@@ -6428,3 +6428,74 @@ released, so no path can re-enter `g_diagLock` on its own thread.
 Build: UUID E16B0804, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays. The chain region still contains no flash commit of ours, and now no
 lock of ours either at the marked points.
+
+## 2ga (2026-10-14): the 2fz boot PANICKED — twice, identically, and it is located
+
+Two `.panic` files, the first real symbolicated reports this project has got
+since 2026-10-11, at **20:24** and **20:33**, both with the 2fz build
+(E16B0804) loaded. The user recovered with `-rbgpuoff`. Different KASLR
+slides, identical backtrace, so this is **reproducible**:
+
+```
+panic(cpu N): Kernel trap, type = 14 = page fault
+  error code 0x3        present | WRITE
+  RIP = Lilu+0x1ae22 (boot A) / Lilu+0x1ae4a (boot B)
+  CR2 = RIP - 11, also inside Lilu ; RAX = CR2 ; RBX=2 RDX=3 both boots
+
+  Lilu   : Crypto::hash + 0xc12            <- the FAULTING frame
+  X6000  : AMDHardware::startHWEngines + 0x3e
+  plugin : hooked_hw_startHWEngines + 0x384
+  X6000  : AMDHardware::powerUp + 0x76
+  X6000  : AMDGFX10Hardware::powerUp + 0x1b
+  X6000  : AMDNavi21Hardware::powerUp + 0x29
+  X6000  : AMDGraphicsAccelerator::powerUpHW + 0x252
+  X6000  : AMDGraphicsAccelerator::callPlatformFunction + 0x21f
+  plugin : RembrandtGPUPeer::handlePostRegister + 0x81
+  kernel : thread_call_delayed_timer
+```
+
+**The good half, and it is large.** `doStart` returned 1, every engine
+powered up, `AMDHardware::powerUp` ran, and the thread reached
+`startHWEngines` — **past the 2fv window** that every stopped boot since 2fs
+died inside. Uptime at panic was 16.26 s, which is why `rbgpu-prog2` shows no
+sample: the first 2fy timer fires at ~29 s. `rbgpu-prog` reads
+`s=1 powerUpHW ENTER`, written by these boots and textually identical to the
+2fy boot's, so there is no contradiction there.
+
+It also confirms 2fr a third way, from Apple's own frames:
+`handlePostRegister` runs on a **`thread_call_delayed_timer`** thread, with
+`callPlatformFunction` -> `powerUpHW` inside it. Not `IOService::start`.
+
+**Where it faults.** `startHWEngines+0x3e` is the `e->vtable[0x148]()` call
+site (the FAIL branch is at +0x46 in the 2fo disassembly). So Apple's call
+through an SDMA engine's `vtable[0x148]` **lands inside Lilu's `__TEXT`** and
+page-faults on a *write* to Lilu's own text 11 bytes behind the instruction
+pointer. `Crypto::hash` is simply the nearest preceding exported symbol; the
+real address is in Lilu's patcher region.
+
+**The milestone-2c rule is NOT what went wrong, and that was checked before
+writing it down:**
+
+```
+$ nm -m build/re/AMDRadeonX6000 | grep GFX10SDMAEngine5startEv
+000000000bea4a6a (__TEXT,__text) external __ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv
+```
+
+External and defined in X6000, so `solveSymbol` cannot have returned a bare
+slide. 2fu's claim that the route was legitimate under that rule holds.
+
+**Why Lilu's own code faults is NOT established and no guess is recorded.**
+The one thing this project added that intercepts `vtable[0x148]` is 2fu's
+route of that exact function, so 2ga puts it behind **`-rbgpusdmahook`**, off
+by default — the 2eu/2fo move of removing the single suspect:
+
+```
+panic GONE     the route is the cause, established rather than suspected,
+               and the question becomes why routing THIS function breaks
+               where twenty others did not
+panic ANYWAY   the route is exonerated and the fault is in Apple's own
+               vtable[0x148] call with nothing of ours in it
+```
+
+Build: UUID 5C7753C4, hosttest passes. Boot-args unchanged; `-rbgpusdmahook`
+is new and deliberately NOT added.
