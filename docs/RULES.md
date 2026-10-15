@@ -6856,3 +6856,96 @@ boots in this family (2ga, 2gb) were readable because `plugin_check` ran **in
 the armed boot**, which yields the full log and a 560 KB `pci.txt`. The three
 unreadable ones had no capture. So: run it in the armed boot, before any
 reboot.
+
+### 2gc/2gd answered on hardware (2026-10-15): the instance index is NOT the discriminator
+
+logs/20261015-011214-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=ffffffffb5a64001`, a new boot), build
+checked: 866EF957 == build/out (2gd). No panic. 64 KB log, `pci.txt` 565795.
+
+**2gd's nonce worked on its first boot and it is what makes this readable:**
+
+```
+rbgpu-boot  = 1
+rbgpu-prog  = b=1 s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)
+rbgpu-prog2 = b=1 a=s5/S90/L849@29577ms b=s5/S90/L850@49576ms
+```
+
+`b=1` is a sequence never recorded before, so both notes are **this** boot's
+with no inference - exactly the ambiguity that made the 2gc boot a write-off.
+
+**The rewrite landed and nothing moved:**
+
+```
+2gc: engine[1] queue[0] arg2 0x1 -> 0x0 (read back 0x0)
+2gc: engine[1] queue[1] arg2 0x1 -> 0x0 (read back 0x0)
+     ... the same for engine[2] and engine[3], six patches, all read back
+2bs: AMDHardware::startHWEngines -> 0
+2gb: pre=0000 post=1000 fail@1          inst0=6
+```
+
+So 2gc's second branch fired: **the instance index is not what engine[1] is
+refused for**, and the three supports it rested on owe an explanation. The
+chip still has one SDMA instance and Apple still builds four engines - those
+measurements stand - but that is not the discriminator.
+
+**And the same boot establishes something stronger than the question asked.**
+Reading every queue pair rather than just the first:
+
+```
+engine[0]  queue[0] = (0x7, 0x0)   queue[1] = (0xa, 0x0)
+engine[1]  queue[0] = (0x7, 0x1)   queue[1] = (0xa, 0x1)   -> both arg2 -> 0
+engine[2]  queue[0] = (0x7, 0x2)   queue[1] = (0xa, 0x2)   -> both arg2 -> 0
+engine[3]  queue[0] = (0x7, 0x3)   queue[1] = (0xa, 0x3)   -> both arg2 -> 0
+```
+
+- **`arg1` is not a constant.** It is 0x7 for queue[0] and 0xa for queue[1] on
+  every engine, so 2gc's "a constant command 7 and the engine index" was an
+  artefact of reading pair[0] alone. Corrected in the log line, which now says
+  `pair[0]=` rather than `cmd=`.
+- **With the rewrite on, engine[1] sent `(0x7,0)` and `(0xa,0)` - byte-identical
+  to engine[0]'s, which succeeded - and still returned FALSE.** Identical
+  arguments, one succeeds, the next fails. **The refusal cannot be about the
+  arguments at all.**
+
+**The confound 2gc created and did not name.** It warned that four engines
+holding queues on instance 0 was a *safety* matter; it is also a confound,
+because a queue-create layer refusing the second request for a queue that
+already exists is expected for reasons that have nothing to do with
+instances. So this boot does not cleanly refute the instance theory either -
+it refutes "arg2 is what decides", which is a different and better-supported
+statement.
+
+## 2ge (2026-10-15): make engine[1] the FIRST to ask
+
+`start()` has a trivial-TRUE path when `this->0x48 == 0` (0xbea4a94 ->
+0xbea4b49): it sets the started flag, calls `vtable[0x278]` and returns TRUE
+**without asking the layer for anything**. So writing 0 into engine[0]'s queue
+count makes **engine[1] the first engine in the boot to create a queue**, with
+its own untouched `(0x7, 1)` and `(0xa, 1)`.
+
+That separates the two readings the duplicate conflated:
+
+```
+post=1100 or further   engine[1] succeeds once it asks FIRST, so the failure
+                       is ORDINAL - the layer allows one SDMA engine's queues
+                       and refuses the next whatever instance it names, and
+                       instance 1 is fine
+post=1000 fail@1 again it fails even asking first with instance 1, so the
+                       instance really is absent and 2gc's supports stand -
+                       the duplicate was masking a genuine refusal
+post=0000 fail@0       the skip broke engine[0], which Apple's own
+                       trivial-TRUE path should make impossible and would say
+                       the field read is wrong
+```
+
+Off unless **`-rbgpusdma0skip`**, and `-rbgpusdmainst0` must come **out** -
+one variable. A field write to Apple's own object like 2gc's and 2di's;
+engine[0] contributing no SDMA queues is tolerable only because an armed boot
+has no GPU clients and nothing submits SDMA work. The old count is logged and
+rides out on the stage-4 note as `skip0=N`.
+
+0x1B stays held: the hold now triggers on either SDMA boot-arg, so a boot that
+finally passes `powerUpHW` does not also become the first to send it.
+
+Build: UUID ABE9CEEF, hosttest passes.

@@ -1448,7 +1448,10 @@ void RembrandtGPUPeer::handlePostRegister() {
     // 2fb/2fc and the withdrawn 2ev table were each made of. Sending it is
     // then a deliberate second step with `-rbgpuforce1b`.
     static int hold1b = -1;
-    if (hold1b < 0) { hold1b = checkKernelArgument("-rbgpusdmainst0") ? 1 : 0; }
+    if (hold1b < 0) {
+        hold1b = (checkKernelArgument("-rbgpusdmainst0") ||
+                  checkKernelArgument("-rbgpusdma0skip")) ? 1 : 0;
+    }
     if ((!g_rb_poweruphw_ok || hold1b) && !force1b) {
         rbgpu_log("handlePostRegister: Request 0x1B (Controller Enabled) is "
                   "NOT sent - powerUpHW_ok=%d, 2gc hold=%d. 2fo shows this "
