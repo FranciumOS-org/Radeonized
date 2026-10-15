@@ -7115,3 +7115,88 @@ post=0000 fail@0       the skip broke engine[0], which Apple's own
                        trivial-TRUE path should make impossible
 skip0 / inst0 absent   a switch did not run and the boot says which
 ```
+
+### 2gg PANICKED on hardware (2026-10-15): my own descriptor read, and the instruction I misread
+
+Kernel-2026-10-15-103535.panic, build `0E9563CF` = build/out (2gg), uptime
+16.87 s. The faulting frame is **ours**:
+
+```
+Kernel trap, type = 14 = page fault
+CR2 = 0x0000000000000049   Error code 0x0   (a READ of a non-present page)
+RBX = 1   RAX = 1
+plugin : hooked_hw_startHWEngines + 0x2d8
+X6000  : AMDHardware::powerUp + 0x76 -> GFX10 -> Navi21 -> powerUpHW
+plugin : RembrandtGPUPeer::handlePostRegister + 0x81
+kernel : thread_call_delayed_timer
+```
+
+**The cause is one misread instruction, and it is the read 2gg added.** Apple's
+channel fetch is
+
+```
+bea4aa7: 4e 8b 6c e3 50    movq 0x50(%rbx,%r12,8), %r13
+```
+
+with `%rbx` = the engine and `%r12` = the queue index — so the channel
+pointers are an **inline array inside the engine object**,
+`ch = *(void **)(engine + 0x50 + qi*8)`. 2gg's comment wrote that as
+`this->0x50[qi]` and the code implemented it as
+`(*(void **)(ep + 0x50))[qi]`: it took the pointer AT +0x50, which is
+channel[0] itself, and then indexed **into channel[0]'s own fields**. For
+`qi=1` that reads `channel[0]+8`, which held **1**, and `1 + 0x48` is exactly
+the `CR2 = 0x49` the report names. Every field of the panic is accounted for.
+
+So the walk's long-standing `chans(+0x50)=0xffffff90...` label was itself
+misleading — that value is **channel[0]'s pointer**, not an array base — and
+the label is what the mistake was built on.
+
+**Two things this also says, neither of them good.** The panic wrote no note
+at all: `rbgpu-boot` still reads **3**, the 2gf boot's, although stage 1
+(`powerUpHW` ENTER) runs ~3 s before the fault — so a panic can lose a
+commit that the 2gd nonce would otherwise have made readable. And
+`rbgpu-arm` read **1** afterwards with no `-rbgpuoff` in boot-args, so the
+machine was left armed for a repeat.
+
+**And the 2gg question is unanswered.** The walk runs in the `startHWEngines`
+ENTER hook, before Apple's original and before the 2gc/2ge field writes for
+that engine, so engine[0]'s own loop faulted: nothing was patched, no
+`post=` flags exist, and the chip's state was not changed by the attempt.
+
+## 2gh (2026-10-15): the read corrected, guarded, and taken off the default path
+
+Three changes, in the order they matter:
+
+- **The arithmetic matches the instruction**: `ch = *(void **)(ep + 0x50 +
+  qi*8)`, read off `bea4aa7` rather than off my own prose.
+- **A NULL check is not a pointer check.** The value that faulted was `1`, so
+  the guard is now "is this a kernel VA" — this chip's are all
+  `0xffffff........`, so anything below `0xffffff8000000000` is logged as
+  **not dereferenced** and as saying nothing, rather than being read.
+- **The whole descriptor read is behind `-rbgpusdmadesc`, off by default.**
+  2gg's own reasoning for putting it in the default path was that it "adds
+  nothing to the outcome being measured". That was true of its effect on the
+  `post=` flags and false of its effect on the boot, which is the thing that
+  actually matters, and it is the second time in this family that an
+  instrument killed the boot it was riding (2fz/2ga was the first). The
+  boot-args 2x2 is the question; it now runs with nothing new in the path.
+
+So the next armed boot is **exactly the 2gg experiment with the new read
+switched off**: `-rbgpusdma0skip` + `-rbgpusdmainst0` together, engine[0]
+asking for nothing and engine[1] asking FIRST for instance 0.
+
+Build: UUID D27034BD, hosttest passes. Boot-args unchanged from the 2gg plan —
+`-rbgpunogates`, `-rbgpusdma0skip`, `-rbgpusdmainst0`; `-rbgpusdmadesc` is new
+and deliberately NOT added, `-rbgpusdmahook` stays out.
+
+```
+post=1100 or further   instance 1 was the whole discriminator; the real fix is
+                       making Apple build one SDMA engine
+post=1000 fail@1       a byte-identical request in the same ordinal position
+                       is still refused, so it is the engine object - and THEN
+                       the descriptor read is worth its own boot, with
+                       -rbgpusdmadesc, now that it is correct and guarded
+post=0000 fail@0       the skip broke engine[0], which Apple's own
+                       trivial-TRUE path should make impossible
+skip0 / inst0 absent   a switch did not run and the boot says which
+```
