@@ -1378,18 +1378,31 @@ void RembrandtGPUPeer::handlePostRegister() {
     // expected to arrive.
     static int force1b = -1;
     if (force1b < 0) { force1b = checkKernelArgument("-rbgpuforce1b") ? 1 : 0; }
-    if (!g_rb_poweruphw_ok && !force1b) {
-        rbgpu_log("handlePostRegister: powerUpHW FAILED, so Request 0x1B "
-                  "(Controller Enabled) is NOT sent - the controller is not "
-                  "enabled, and 2fo shows this call does not return in that "
-                  "state (-rbgpuforce1b overrides)");
+    // 2gc: hold 0x1B back while the SDMA instance rewrite is being tested,
+    // even if powerUpHW now SUCCEEDS. Otherwise the one boot that answers the
+    // SDMA question would also be the first boot ever to send 0x1B with the
+    // hardware fully brought up - two variables at once, which is the mistake
+    // 2fb/2fc and the withdrawn 2ev table were each made of. Sending it is
+    // then a deliberate second step with `-rbgpuforce1b`.
+    static int hold1b = -1;
+    if (hold1b < 0) { hold1b = checkKernelArgument("-rbgpusdmainst0") ? 1 : 0; }
+    if ((!g_rb_poweruphw_ok || hold1b) && !force1b) {
+        rbgpu_log("handlePostRegister: Request 0x1B (Controller Enabled) is "
+                  "NOT sent - powerUpHW_ok=%d, 2gc hold=%d. 2fo shows this "
+                  "call does not return once the hardware has real state "
+                  "(-rbgpuforce1b overrides)",
+                  g_rb_poweruphw_ok, hold1b);
         rbgpu_diag_set_num("req1b_skipped", 1);
+        rbgpu_diag_set_num("req1b_hold_2gc", static_cast<uint64_t>(hold1b));
         // 2gb: set the stage the 2fy samplers read, too. The 00:37 boot wrote
         // s=5 here at 16.58 s while all three samples still reported s=4,
         // because only the kern_start helper was updating g_rb_prog_stage.
         // Harmless, but a record that disagrees with itself is a trap.
         g_rb_prog_stage = 5;
-        rbgpu_nvram_note("rbgpu-prog", "s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)");
+        rbgpu_nvram_note("rbgpu-prog",
+                         g_rb_poweruphw_ok
+                             ? "s=5 powerUpHW OK; 0x1B HELD by -rbgpusdmainst0"
+                             : "s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)");
         g_rb_peer_stage |= 0x10;
         return;
     }

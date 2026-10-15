@@ -4839,6 +4839,81 @@ static char g_rb_2fq_map[96];
 // routing block at the bottom of this file). Plain loads from objects whose
 // pointers we already walk - nothing is written, nothing is routed, and no
 // trampoline exists to be wrong.
+// 2gc (2026-10-15): the chip has ONE SDMA instance and Apple asks for four.
+//
+// 2gb measured `pre=0000 post=1000 fail@1`: engine[0]'s start() returned TRUE
+// and engine[1]'s returned FALSE, so Apple's walk broke at the second SDMA
+// engine. Three independent things say the discriminator is the INSTANCE
+// INDEX, and none of them needed a boot:
+//
+//  1. This machine's own IP discovery table (probe 1, 2026-10-03) lists
+//     exactly `SDMA0(42) inst 0` - while PCIE, SMUIO and UMC each enumerate
+//     inst 0 AND inst 1, so the parser does report multiples when they exist.
+//     ONE SDMA instance.
+//  2. The count is a per-ASIC capability constant, and the second data point
+//     agrees with real silicon:
+//       Navi21Hardware::setupAndInitializeHWCapabilities  0xbeca1d9
+//           movw $0x101, 0xc1(%rbx)      -> +0xc2 = 1 -> count 4   (Navi 21: 4 SDMA)
+//       Navi23Hardware::setupAndInitializeHWCapabilities  0xbed26ad
+//           movw $0x100, 0xc2(%rbx)      -> +0xc2 = 0 -> count 2   (Navi 23: 2 SDMA)
+//     And `Navi21Hardware::allocateHWEngines` (0xbeca1f0) builds two SDMA
+//     engines UNCONDITIONALLY and two more only behind `cmpb $0x1,0xc2`
+//     (0xbeca269) - the allocation side computing the same 0xc2*2+2 from the
+//     other direction.
+//  3. The failing argument IS the instance. From the call site, read rather
+//     than guessed: the pairs at engine+0x1a0 are an array of {u32,u32} with
+//     stride 8 indexed by queue, and pair[0] measured (7, 0) (7, 1) (7, 2)
+//     (7, 3) across engines 0..3 - a constant command 7 and the engine index.
+//
+// Worth stating plainly: `0xc2*2+2` is always even and at least 2, so Apple's
+// Navi 21 path CANNOT walk exactly one SDMA engine. Setting +0xc2 = 0 would
+// halve the problem and still fail at engine[1]. There is no count that fits
+// this chip.
+//
+// So this tests the instance theory with ONE variable: for every engine after
+// the first, rewrite arg2 to 0 so each queue create asks for instance 0. It
+// is a field write to Apple's own objects, not a code patch - the same class
+// as 2di's `ctx+0x340` zero - and it is OFF unless `-rbgpusdmainst0`.
+//
+// What it is NOT: a fix. Four engine objects would each hold queues on SDMA
+// instance 0, which is only safe because an armed boot has no GPU clients and
+// nothing submits SDMA work. If it works, the real fix is to make Apple build
+// one SDMA engine, and that is a separate question.
+//
+//   post=1111 allstarted   the instance index was the whole discriminator,
+//                          established on hardware, and startHWEngines
+//                          returns TRUE for the first time
+//   post=1000 fail@1 again the instance is NOT it, and the refusal is about
+//                          the engine object or its channels - a different
+//                          question, and the three supports above would owe
+//                          an explanation
+//   a partial flip         the per-engine flags say exactly how far it got
+static uint32_t g_rb_2gc_patched = 0;
+static int      g_rb_2gc_on = -1;
+
+static void rbgpu_sdma_inst0_2gc(uint32_t idx, uintptr_t ep, uint32_t queues) {
+    if (g_rb_2gc_on < 0) {
+        g_rb_2gc_on = checkKernelArgument("-rbgpusdmainst0") ? 1 : 0;
+        if (!g_rb_2gc_on) {
+            rbgpu_log("2gc: SDMA instance rewrite OFF (-rbgpusdmainst0 not "
+                      "set); engine[1..3] will ask for instances 1..3, which "
+                      "this chip's discovery table says do not exist");
+        }
+    }
+    if (!g_rb_2gc_on || idx == 0 || queues == 0 || queues > 8) { return; }
+    for (uint32_t qi = 0; qi < queues; qi++) {
+        volatile uint32_t *a2 =
+            reinterpret_cast<volatile uint32_t *>(ep + 0x1a4 + qi * 8);
+        uint32_t was = *a2;
+        if (was == 0) { continue; }
+        *a2 = 0;
+        uint32_t back = *a2;
+        g_rb_2gc_patched++;
+        rbgpu_log("2gc: engine[%u] queue[%u] arg2 0x%x -> 0x%x (read back "
+                  "0x%x) - asking for SDMA instance 0", idx, qi, was, 0u, back);
+    }
+}
+
 static uint8_t g_rb_2gb_pre[32];
 static uint8_t g_rb_2gb_post[32];
 static uint32_t g_rb_2gb_count = 0;
@@ -4895,12 +4970,29 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
             uintptr_t ep = reinterpret_cast<uintptr_t>(e);
             g_rb_2gb_pre[i] = *reinterpret_cast<volatile uint8_t *>(ep + 0x10);
             uint32_t q    = *reinterpret_cast<volatile uint32_t *>(ep + 0x48);
+            void *chans   = *reinterpret_cast<void **>(ep + 0x50);
+            // 2gc: the pairs are an ARRAY, stride 8, indexed by the QUEUE
+            // index - proven from the call site rather than assumed:
+            //   bea4aee  movl 0x1a0(%rbx,%r12,8), %esi    arg1
+            //   bea4af6  movl 0x1a4(%rbx,%r12,8), %edx    arg2
+            // so 2gb's single read happened to be pair[0] and is now read as
+            // such, with every queue's pair logged instead of just the first.
             uint32_t cmd  = *reinterpret_cast<volatile uint32_t *>(ep + 0x1a0);
             uint32_t cmd2 = *reinterpret_cast<volatile uint32_t *>(ep + 0x1a4);
-            void *chans   = *reinterpret_cast<void **>(ep + 0x50);
             rbgpu_log("2gb: engine[%u] started(+0x10)=%u queues(+0x48)=%u "
                       "chans(+0x50)=%p cmd=0x%x/0x%x", i, g_rb_2gb_pre[i],
                       q, chans, cmd, cmd2);
+            if (q <= 8) {
+                for (uint32_t qi = 0; qi < q; qi++) {
+                    uint32_t a1 = *reinterpret_cast<volatile uint32_t *>(
+                        ep + 0x1a0 + qi * 8);
+                    uint32_t a2 = *reinterpret_cast<volatile uint32_t *>(
+                        ep + 0x1a4 + qi * 8);
+                    rbgpu_log("2gc: engine[%u] queue[%u] pair = (0x%x, 0x%x)",
+                              i, qi, a1, a2);
+                }
+            }
+            rbgpu_sdma_inst0_2gc(i, ep, q);
             if (i < 4) {
                 char key[24];
                 snprintf(key, sizeof(key), "sdma%u_q", i);
@@ -5089,13 +5181,15 @@ static bool hooked_hw_startHWEngines(void *hw) {
     if (ret) g_rb_pw_stage |= 0x200;
     rbgpu_log("2bs: AMDHardware::startHWEngines -> %d", ret ? 1 : 0);
     rbgpu_poststarthw_2gb(hw);
+    rbgpu_diag_set_num("sdma_inst0_patched", g_rb_2gc_patched);
     // 2fq: the second and last write. Two per boot, against the trail's
     // twenty-four - and this one proves the first was not a lucky read of a
     // stale variable, because it carries the return from the same call.
     {
         char buf[300];
-        snprintf(buf, sizeof(buf), "%s ret=%d %s sdma[%u]{%s}", g_rb_2fq_map,
-                 ret ? 1 : 0, g_rb_2gb_flags, g_rb_2fu_calls, g_rb_2fu_rec);
+        snprintf(buf, sizeof(buf), "%s ret=%d %s inst0=%u sdma[%u]{%s}",
+                 g_rb_2fq_map, ret ? 1 : 0, g_rb_2gb_flags, g_rb_2gc_patched,
+                 g_rb_2fu_calls, g_rb_2fu_rec);
         rbgpu_prog_2fs(4, buf);
     }
     return ret;

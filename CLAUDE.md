@@ -6633,3 +6633,145 @@ Also fixed: `g_rb_prog_stage` is now set at the stage-5 and stage-6 notes.
 
 Build: UUID E119D29C, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays, `-rbgpusdmahook` stays OUT and is now proven rather than suspected.
+
+### 2gb answered on hardware (2026-10-15): `fail@1` — engine[1] is where Apple's walk breaks
+
+logs/20261015-005032-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=ffffffffc46d3001`, a new boot), build
+checked first per the 2cu/2cv rule: E119D29C == build/out (2gb). No panic
+(newest is still 2026-10-14 20:33). `pci.txt` 567801 bytes, `peer.plist`
+87 KB - a second complete armed capture in a row.
+
+```
+rbgpu-prog  -> s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)
+rbgpu-prog2 -> a=s5/S90/L834@28999ms b=s5/S90/L835@49000ms
+```
+
+```
+[16.204] 2bs: AMDHardware::startHWEngines entered
+[16.214] 2fp: startHWEngines will walk 4 entries (hw+0xc2 = 1)
+[16.244] 2gb: engine[0] started(+0x10)=0 queues(+0x48)=2 chans=0xffffff9042087400 cmd=0x7/0x0
+[16.283] 2gb: engine[1] started(+0x10)=0 queues(+0x48)=2 chans=0xffffff9040c72c00 cmd=0x7/0x1
+[16.321] 2gb: engine[2] started(+0x10)=0 queues(+0x48)=2 chans=0xffffff9042087a00 cmd=0x7/0x2
+[16.357] 2gb: engine[3] started(+0x10)=0 queues(+0x48)=2 chans=0xffffff9042087e00 cmd=0x7/0x3
+[16.401] 2bs: AMDHardware::startHWEngines -> 0
+[16.417] 2gb: pre=0000 post=1000 fail@1
+```
+
+**The started-flag read works and it names the engine.** Three things in one
+boot, none of them needing the route that panicked:
+
+- **`pre=0000`**: all four flags are 0 before the walk, so no engine was
+  pre-started. That confirms **on hardware** what 2fu refuted statically - the
+  SDMA `powerUp` (`vtable[0x138]` = `movb $0x1,%al ; retq`) really does touch
+  nothing, and the FALSE is not a double-call artefact.
+- **`post=1000 fail@1`**: engine[0]'s `start()` returned TRUE and set its own
+  `+0x10`; engine[1]'s returned FALSE and Apple's walk broke there. So **one
+  SDMA engine starts and the second does not.**
+- **`queues(+0x48) = 2` on every engine**, so none takes the trivial-TRUE path
+  at 0xbea4b49 - the loop really runs, and the FALSE is a real refusal from
+  `svc->vtable[0x120]`.
+
+`sdma[0]{}` in the stage-4 note is the 2fu per-call record, empty because that
+route is off by design.
+
+## 2gc (2026-10-15): the chip has ONE SDMA instance and Apple asks for four
+
+The discriminator is the **instance index**, and three independent things say
+so without a single boot spent:
+
+**1. This machine's own IP discovery table says one.** From the first probe,
+2026-10-03 (logs/20261003-184349/probe.plist):
+
+```
+SDMA0(42)  inst 0  v5.2.3.0
+PCIE(70)   inst 0  /  PCIE(70)   inst 1
+SMUIO(4)   inst 0  /  SMUIO(4)   inst 1
+UMC(150)   inst 0  /  UMC(150)   inst 1
+```
+
+The parser does enumerate multiple instances when they exist - three IPs here
+have two each. **SDMA has exactly one.**
+
+**2. The count is a per-ASIC constant, and the second data point matches real
+silicon.** `hw->0xc2` is written by one instruction, and Navi 23 is the
+control:
+
+```
+Navi21Hardware::setupAndInitializeHWCapabilities  0xbeca1d9
+    movw $0x101, 0xc1(%rbx)     -> +0xc2 = 1 -> count 0xc2*2+2 = 4
+Navi23Hardware::setupAndInitializeHWCapabilities  0xbed26ad
+    movw $0x100, 0xc2(%rbx)     -> +0xc2 = 0 -> count = 2
+```
+
+Navi 21 (6800/6900) has 4 SDMA instances; Navi 23 (6600) has 2. The formula
+reproduces both. And the **allocation** side computes the same thing from the
+other direction - `Navi21Hardware::allocateHWEngines` (0xbeca1f0):
+
+```
+beca1ff  new Navi21PM4Engine              -> hw->0x3B0
+beca224  new SDMAEngine_GC_10_3_0         -> hw->0x3B8     UNCONDITIONAL
+beca249  new SDMAEngine_GC_10_3_0                          UNCONDITIONAL
+beca269  cmpb $0x1, 0xc2(%rbx) ; jne 0xbeca2b4
+beca277  new SDMAEngine_GC_10_3_0         only when 0xc2 == 1
+beca298  new SDMAEngine_GC_10_3_0         only when 0xc2 == 1
+beca2b4  new VCN3HWEngine x2
+```
+
+Two unconditional plus two gated - exactly `0xc2*2+2`, from the constructor
+rather than the walk. Also confirms 2fw's `amd-log.txt` layout reading
+(`0x3B0[0]` PM4, `0x3B0[1..4]` = `0x3B8[0..3]` SDMA, `0x3B0[8..9]` VCN) from
+the code that builds it.
+
+**3. The failing argument IS the instance**, read from the call site rather
+than guessed:
+
+```
+bea4aee  movl 0x1a0(%rbx,%r12,8), %esi     arg1
+bea4af6  movl 0x1a4(%rbx,%r12,8), %edx     arg2
+bea4b0c  callq *0x120(%rax)
+bea4b12  testl %eax,%eax ; jne -> FAIL
+```
+
+So `engine+0x1a0` is an array of `{u32,u32}` pairs, **stride 8, indexed by the
+queue index** - 2gb's single read happened to be pair[0], and is now read as
+such. Measured pair[0] across the four engines: `(7,0) (7,1) (7,2) (7,3)` - a
+constant command 7 and the engine index. engine[1] asks the layer below for
+SDMA **instance 1**.
+
+**And a structural fact worth stating plainly: there is no count that fits
+this chip.** `0xc2*2+2` is always even and at least 2, so Apple's Navi 21 path
+cannot walk exactly one SDMA engine. Setting `+0xc2 = 0` would halve the
+problem and still fail at engine[1]. The count is not the lever.
+
+### The test: one variable
+
+For every engine after the first, rewrite arg2 to 0 so each queue create asks
+for instance 0. A field write to Apple's own objects, not a code patch - the
+same class as 2di's `ctx+0x340` zero - and **off unless `-rbgpusdmainst0`**.
+Every queue's pair is logged before and after, with the read-back.
+
+**What it is NOT: a fix.** Four engine objects would each hold queues on SDMA
+instance 0, which is only tolerable because an armed boot has no GPU clients
+and nothing submits SDMA work. If it works, the real fix is to make Apple
+build one SDMA engine, and that is a separate question.
+
+**0x1B is held back for this boot even if `powerUpHW` now succeeds.** Without
+that, the one boot answering the SDMA question would also be the first ever to
+send 0x1B with the hardware fully brought up - two variables at once, which is
+what 2fb/2fc and the withdrawn 2ev table were each made of. Sending it becomes
+a deliberate second step with `-rbgpuforce1b`.
+
+```
+post=1111 allstarted   the instance index was the whole discriminator,
+                       established on hardware, and startHWEngines returns
+                       TRUE for the first time in this project
+post=1000 fail@1 again the instance is NOT it, the refusal is about the engine
+                       object or its channels, and the three supports above
+                       owe an explanation
+a partial flip         the per-engine flags say exactly how far it got
+```
+
+Build: UUID 4C4BA282, hosttest passes. **One new boot-arg**, `-rbgpusdmainst0`,
+and it is the user's call whether to arm it; `-rbgpunogates` stays,
+`-rbgpusdmahook` stays out.
