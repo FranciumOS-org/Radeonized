@@ -4891,6 +4891,66 @@ static char g_rb_2fq_map[96];
 static uint32_t g_rb_2gc_patched = 0;
 static int      g_rb_2gc_on = -1;
 
+// 2ge (2026-10-15): make engine[1] the FIRST to ask, by giving engine[0] no
+// queues.
+//
+// 2gc's rewrite landed - six arg2 fields set to 0, every one read back - and
+// `post=1000 fail@1` did not move. So **the instance index is not the
+// discriminator**, and 2gc's three supports owe an explanation.
+//
+// What the same boot established instead, and it is stronger than the
+// question 2gc asked: with the rewrite on, engine[1]'s two queue creates sent
+// `(0x7, 0)` and `(0xa, 0)` - **byte-identical to engine[0]'s**, which
+// succeeded - and engine[1] still returned FALSE. Identical arguments, one
+// succeeds, the next fails. The refusal therefore cannot be about the
+// arguments at all; it is about the engine object, its channels, or state the
+// layer below holds once a queue exists.
+//
+// The duplicate is also a confound 2gc created and did not name as one: it
+// warned that four engines would each hold queues on instance 0 as a *safety*
+// matter, when it also makes a refusal of the second request expected for a
+// reason that has nothing to do with instances.
+//
+// So test the ordinal directly. `start()` takes a trivial-TRUE path when
+// `this->0x48 == 0` (0xbea4a94 -> 0xbea4b49): it sets the started flag, calls
+// vtable[0x278] and returns TRUE **without asking the layer for anything**.
+// Writing 0 into engine[0]'s queue count therefore makes engine[1] the first
+// engine in the boot to create a queue, with its own untouched `(0x7, 1)` and
+// `(0xa, 1)`.
+//
+//   post=1100 or further   engine[1] succeeds once it asks FIRST, so the
+//                          failure is ordinal - the layer allows one SDMA
+//                          engine's queues and refuses the next, whatever
+//                          instance it names. Instance 1 is fine.
+//   post=1000 fail@1 again engine[1] fails even asking first with instance 1,
+//                          so the instance really is absent and the 2gc
+//                          supports stand after all - the duplicate was
+//                          masking a genuine refusal
+//   post=0000 fail@0       the skip itself broke engine[0], which should be
+//                          impossible on Apple's own trivial-TRUE path and
+//                          would say the field read is wrong
+//
+// Off unless `-rbgpusdma0skip`. A field write to Apple's own object, like
+// 2gc's and 2di's; engine[0] contributing no SDMA queues is tolerable only
+// because an armed boot has no GPU clients and nothing submits SDMA work.
+static int g_rb_2ge_on = -1;
+static uint32_t g_rb_2ge_saved_q = 0xffffffffu;
+
+static void rbgpu_sdma0_skip_2ge(uint32_t idx, uintptr_t ep) {
+    if (g_rb_2ge_on < 0) {
+        g_rb_2ge_on = checkKernelArgument("-rbgpusdma0skip") ? 1 : 0;
+    }
+    if (!g_rb_2ge_on || idx != 0) { return; }
+    volatile uint32_t *q = reinterpret_cast<volatile uint32_t *>(ep + 0x48);
+    g_rb_2ge_saved_q = *q;
+    *q = 0;
+    rbgpu_log("2ge: engine[0] queues(+0x48) %u -> %u (read back %u) - it will "
+              "take Apple's trivial-TRUE path and ask the layer for NOTHING, "
+              "so engine[1] is the first to create a queue",
+              g_rb_2ge_saved_q, 0u, *q);
+    rbgpu_diag_set_num("sdma0_skip_was", g_rb_2ge_saved_q);
+}
+
 static void rbgpu_sdma_inst0_2gc(uint32_t idx, uintptr_t ep, uint32_t queues) {
     if (g_rb_2gc_on < 0) {
         g_rb_2gc_on = checkKernelArgument("-rbgpusdmainst0") ? 1 : 0;
@@ -4979,9 +5039,14 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
             // such, with every queue's pair logged instead of just the first.
             uint32_t cmd  = *reinterpret_cast<volatile uint32_t *>(ep + 0x1a0);
             uint32_t cmd2 = *reinterpret_cast<volatile uint32_t *>(ep + 0x1a4);
+            // 2ge: labelled "pair[0]" rather than "cmd", because reading all
+            // the pairs showed arg1 is NOT a constant 7: queue[0] sends 0x7
+            // and queue[1] sends 0xa on every engine. 2gc's "a constant
+            // command 7 and the engine index" came from reading pair[0]
+            // alone and is corrected here.
             rbgpu_log("2gb: engine[%u] started(+0x10)=%u queues(+0x48)=%u "
-                      "chans(+0x50)=%p cmd=0x%x/0x%x", i, g_rb_2gb_pre[i],
-                      q, chans, cmd, cmd2);
+                      "chans(+0x50)=%p pair[0]=(0x%x,0x%x)", i,
+                      g_rb_2gb_pre[i], q, chans, cmd, cmd2);
             if (q <= 8) {
                 for (uint32_t qi = 0; qi < q; qi++) {
                     uint32_t a1 = *reinterpret_cast<volatile uint32_t *>(
@@ -4993,6 +5058,7 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
                 }
             }
             rbgpu_sdma_inst0_2gc(i, ep, q);
+            rbgpu_sdma0_skip_2ge(i, ep);
             if (i < 4) {
                 char key[24];
                 snprintf(key, sizeof(key), "sdma%u_q", i);
@@ -5190,6 +5256,10 @@ static bool hooked_hw_startHWEngines(void *hw) {
         snprintf(buf, sizeof(buf), "%s ret=%d %s inst0=%u sdma[%u]{%s}",
                  g_rb_2fq_map, ret ? 1 : 0, g_rb_2gb_flags, g_rb_2gc_patched,
                  g_rb_2fu_calls, g_rb_2fu_rec);
+        if (g_rb_2ge_saved_q != 0xffffffffu) {
+            size_t n2 = strlen(buf);
+            snprintf(buf + n2, sizeof(buf) - n2, " skip0=%u", g_rb_2ge_saved_q);
+        }
         rbgpu_prog_2fs(4, buf);
     }
     return ret;
