@@ -6775,3 +6775,84 @@ a partial flip         the per-engine flags say exactly how far it got
 Build: UUID 4C4BA282, hosttest passes. **One new boot-arg**, `-rbgpusdmainst0`,
 and it is the user's call whether to arm it; `-rbgpunogates` stays,
 `-rbgpusdmahook` stays out.
+
+### 2gc answered NOTHING on hardware (2026-10-15): the note channel loses writes
+
+The armed boot ran — build and arming checked first, per the 2cu/2cv rule —
+and its answer was not captured.
+
+```
+kmutil showloaded -> 4C4BA282 == build/out (2gc)
+boot-args          -> ... -rbgpunogates -rbgpusdmainst0     (the arg IS set)
+rbgpu-diag         -> d=0 armed=0                           the recovery boot
+rbgpu-diag-prev    -> d=70 armed=1 ttl_hw_init_ret=ffffffffcd567001
+                      (2gb read c46d3001, so this IS a new boot)
+no new logs/ dir   -> no plugin_check capture from the armed boot
+no .panic          -> newest is still 2026-10-14 20:33
+rbgpu-prog         -> "s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)"
+rbgpu-prog2        -> "a=s1/L671@29535ms b=s1/L671@49535ms c=s1/L671@79535ms"
+```
+
+**`rbgpu-prog2` is the 2fy boot's value — two boots stale — and that is a
+measurement, not a suspicion.** Both of the last two boots captured their own
+prog2 in the armed boot, and both reverted after the power cycle:
+
+```
+2ga in-boot nvram.txt   a=s4/S90/L820@28793ms b=...@48793 c=...@78793
+2gb in-boot nvram.txt   a=s5/S90/L834@28999ms b=...@49000
+live read now           a=s1/L671@29535ms b=...@49535 c=...@79535   (2fy)
+```
+
+So **a note's write can fail to survive the power cycle.** The cause is NOT
+established and no guess is recorded here.
+
+**Which makes `rbgpu-prog` uninterpretable this boot, and that is the whole
+result.** It reads the 2gc build's *failure* text, which this boot could have
+written (the rewrite did not help) or 2gb could have left behind (identical
+text). Nothing in the record distinguishes them. Worth noting the two
+variables are not stale from the same boot — prog2 is 2fy's while prog is
+2ga-or-later — so a single stale-image explanation does not cover it, and the
+honest position is that prog's provenance is simply unknown.
+
+`starthw_c2` is also absent from the prev summary where 2gb's had it, which
+would put the freeze before the walk; but that channel has not reported the
+frontier since 2fa, so it is not evidence.
+
+**Twentieth instance of the recurring error, and it is retroactive.** The 2fu
+third boot read `s=1 powerUpHW ENTER` with no capture and was written up as
+this-boot evidence — while the boot before it had written the same text. That
+reading is now withdrawn too. An overwrite variable read after a power cycle
+is this boot's value only if something establishes it was rewritten this boot,
+and nothing ever did.
+
+## 2gd (2026-10-15): a note that says which boot wrote it
+
+Every note now carries a per-boot sequence number. The first note of a boot
+reads the counter out of `rbgpu-boot`, increments it, writes it back, and all
+notes are prefixed `b=<n>`:
+
+```
+rbgpu-boot  = 38
+rbgpu-prog  = b=38 s=4 c2=1 n=4 map=.... allok ret=1 pre=0000 post=1111 ...
+```
+
+A read whose `b=` equals the one recorded last turn is **stale, full stop** -
+no inference, no ambiguity, and it costs one extra NVRAM property per boot.
+`tools/plugin_check.sh` captures `rbgpu-boot` first.
+
+This does not fix the lost commit; it makes a lost commit detectable, which is
+what the last three boots needed and did not have. It also retires the
+"absent/identical means X" reading for good: from here, a note is evidence
+only when its `b=` is new.
+
+Nothing else changes - the 2gc instance rewrite stays exactly as built, still
+behind `-rbgpusdmainst0`, and the question it asks is unchanged and unanswered.
+
+Build: UUID 866EF957, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+and `-rbgpusdmainst0` both stay.
+
+**And the procedure matters more than the build this time.** Both readable
+boots in this family (2ga, 2gb) were readable because `plugin_check` ran **in
+the armed boot**, which yields the full log and a 560 KB `pci.txt`. The three
+unreadable ones had no capture. So: run it in the armed boot, before any
+reboot.

@@ -1120,6 +1120,66 @@ void rbgpu_progwatch_start(void) {
               "fire, not that the handler failed to re-arm", armed);
 }
 
+// 2gd (2026-10-15): every note carries a per-boot sequence number.
+//
+// Why, and it is a defect in the channel rather than in the chip. An
+// overwrite variable read after a power cycle is only this boot's value if
+// something establishes that it was rewritten this boot, and nothing did.
+// Two records prove the gap rather than suggest it:
+//
+//   the 2ga boot's in-boot capture had rbgpu-prog2 = a=s4/S90/L820@28793...
+//   the 2gb boot's in-boot capture had rbgpu-prog2 = a=s5/S90/L834@28999...
+//   the live read after each power cycle = a=s1/L671@29535 b=... c=...@79535
+//
+// which is the 2fy boot's value, two boots stale, twice. So a note's write
+// can fail to survive the power cycle, and `rbgpu-prog` reading the same text
+// as last time cannot be told from this boot writing the same text again.
+// That is what made the 2gc boot unreadable, and it is the same shape as the
+// 2fr ambiguity and the 2fu third boot (which read "s=1" and was taken as
+// this-boot evidence when the previous boot had also written "s=1").
+//
+// The cause of the lost commit is NOT established and no guess is recorded.
+// The nonce makes it detectable whatever the cause: the first note of each
+// boot reads the counter out of `rbgpu-boot`, increments it and writes it
+// back, and every note is prefixed `b=<n>`. A read whose `b=` equals the one
+// recorded last turn is stale, full stop - no inference needed.
+static uint32_t g_rbgpuBootSeq = 0;
+
+static uint32_t rbgpu_boot_seq(IORegistryEntry *options) {
+    if (g_rbgpuBootSeq != 0) {
+        return g_rbgpuBootSeq;
+    }
+    uint32_t prev = 0;
+    if (OSObject *o = options->getProperty("rbgpu-boot")) {
+        char buf[24] = { 0 };
+        if (OSString *os = OSDynamicCast(OSString, o)) {
+            size_t n = strlen(os->getCStringNoCopy());
+            if (n >= sizeof(buf)) { n = sizeof(buf) - 1; }
+            memcpy(buf, os->getCStringNoCopy(), n);
+        } else if (OSData *od = OSDynamicCast(OSData, o)) {
+            unsigned len = od->getLength();
+            if (len >= sizeof(buf)) { len = sizeof(buf) - 1; }
+            memcpy(buf, od->getBytesNoCopy(), len);
+        }
+        for (const char *c = buf; *c; c++) {
+            if (*c >= '0' && *c <= '9') {
+                prev = prev * 10u + static_cast<uint32_t>(*c - '0');
+                if (prev > 1000000u) { prev = 0; break; }   // garbage, restart
+            } else if (prev != 0) {
+                break;
+            }
+        }
+    }
+    g_rbgpuBootSeq = prev + 1;
+    char out[24];
+    snprintf(out, sizeof(out), "%u", g_rbgpuBootSeq);
+    if (auto str = OSString::withCString(out)) {
+        options->setProperty("rbgpu-boot", str);
+        str->release();
+    }
+    return g_rbgpuBootSeq;
+}
+
 void rbgpu_nvram_note(const char *var, const char *text) {
     IORegistryEntry *options = g_rbgpuOptions;
     if (!options) {
@@ -1133,7 +1193,10 @@ void rbgpu_nvram_note(const char *var, const char *text) {
         return;
     }
     OSCompareAndSwap(0, 1, &g_rbgpuNvramBusy);
-    if (auto str = OSString::withCString(text)) {
+    uint32_t seq = rbgpu_boot_seq(options);
+    char stamped[352];
+    snprintf(stamped, sizeof(stamped), "b=%u %s", seq, text);
+    if (auto str = OSString::withCString(stamped)) {
         options->setProperty(var, str);
         str->release();
     }
