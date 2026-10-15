@@ -4933,6 +4933,7 @@ static int      g_rb_2gc_on = -1;
 // Off unless `-rbgpusdma0skip`. A field write to Apple's own object, like
 // 2gc's and 2di's; engine[0] contributing no SDMA queues is tolerable only
 // because an armed boot has no GPU clients and nothing submits SDMA work.
+static int g_rb_2gh_on = -1;
 static int g_rb_2ge_on = -1;
 static uint32_t g_rb_2ge_saved_q = 0xffffffffu;
 
@@ -5053,41 +5054,55 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
                         ep + 0x1a0 + qi * 8);
                     uint32_t a2 = *reinterpret_cast<volatile uint32_t *>(
                         ep + 0x1a4 + qi * 8);
-                    // 2gg: the DESCRIPTOR Apple builds for this queue, which
-                    // is the only part of the request the arguments do not
-                    // carry. From 0xbea4aa7-0xbea4ad4:
-                    //   ch   = this->0x50[qi]
-                    //   desc = { 0x40000, ch->0x48, ch->0xd0 }
-                    // so if the 2gg boot-arg pair shows engine[1] refused
-                    // while asking FIRST for instance 0 - a byte-identical
-                    // request to engine[0]'s - these two fields are where the
-                    // difference has to be, and they are already in the
-                    // record rather than costing another boot. Reads only.
-                    uint64_t c48 = 0, cd0 = 0;
-                    int chok = 0;
-                    if (chans) {
-                        void *ch = reinterpret_cast<void **>(chans)[qi];
-                        if (ch) {
-                            uintptr_t cp = reinterpret_cast<uintptr_t>(ch);
-                            c48 = *reinterpret_cast<volatile uint64_t *>(
-                                cp + 0x48);
-                            cd0 = *reinterpret_cast<volatile uint64_t *>(
-                                cp + 0xd0);
-                            chok = 1;
-                        }
+                    // 2gh: the DESCRIPTOR read, corrected and gated.
+                    //
+                    // 2gg had this wrong and it PANICKED (page fault, CR2 =
+                    // 0x49, inside this function). Apple's instruction is
+                    //   bea4aa7  movq 0x50(%rbx,%r12,8), %r13
+                    // so the channel pointers are an INLINE ARRAY inside the
+                    // engine - `ch = *(void **)(engine + 0x50 + qi*8)` - not
+                    // a pointer at +0x50 that is then indexed. 2gg read
+                    // `(*(void **)(ep+0x50))[qi]`, which dereferences INTO
+                    // channel[0]'s own fields and used whatever it found
+                    // there as a pointer; +0x48 of the 1 it read is the 0x49
+                    // the fault reports. So the `chans` the walk logs is
+                    // channel[0]'s pointer, not an array base, and that
+                    // label was the whole mistake.
+                    //
+                    // Two guards, because a NULL check was not enough: the
+                    // pointer must be a kernel VA (this chip's are all
+                    // 0xffffff........), and the whole read is behind
+                    // -rbgpusdmadesc so it cannot cost the boot-args
+                    // experiment a second boot. Reads only.
+                    if (g_rb_2gh_on < 0) {
+                        g_rb_2gh_on =
+                            checkKernelArgument("-rbgpusdmadesc") ? 1 : 0;
                     }
-                    if (chok) {
-                        rbgpu_log("2gc: engine[%u] queue[%u] pair = "
-                                  "(0x%x, 0x%x) desc={0x40000, "
-                                  "ch+0x48=0x%llx, ch+0xd0=0x%llx}",
-                                  i, qi, a1, a2,
-                                  static_cast<unsigned long long>(c48),
-                                  static_cast<unsigned long long>(cd0));
+                    if (g_rb_2gh_on) {
+                        void *ch = *reinterpret_cast<void **>(
+                            ep + 0x50 + qi * 8);
+                        uintptr_t cp = reinterpret_cast<uintptr_t>(ch);
+                        if (cp >= 0xffffff8000000000ull) {
+                            uint64_t c48 = *reinterpret_cast<
+                                volatile uint64_t *>(cp + 0x48);
+                            uint64_t cd0 = *reinterpret_cast<
+                                volatile uint64_t *>(cp + 0xd0);
+                            rbgpu_log("2gh: engine[%u] queue[%u] pair = "
+                                      "(0x%x, 0x%x) ch=%p desc={0x40000, "
+                                      "ch+0x48=0x%llx, ch+0xd0=0x%llx}",
+                                      i, qi, a1, a2, ch,
+                                      static_cast<unsigned long long>(c48),
+                                      static_cast<unsigned long long>(cd0));
+                        } else {
+                            rbgpu_log("2gh: engine[%u] queue[%u] pair = "
+                                      "(0x%x, 0x%x) ch=%p is NOT a kernel "
+                                      "pointer - NOT dereferenced, and the "
+                                      "descriptor fields say NOTHING",
+                                      i, qi, a1, a2, ch);
+                        }
                     } else {
                         rbgpu_log("2gc: engine[%u] queue[%u] pair = "
-                                  "(0x%x, 0x%x) desc=UNREAD (channel NULL - "
-                                  "the descriptor fields say nothing)",
-                                  i, qi, a1, a2);
+                                  "(0x%x, 0x%x)", i, qi, a1, a2);
                     }
                 }
             }
