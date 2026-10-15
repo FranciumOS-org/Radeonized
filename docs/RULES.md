@@ -7019,3 +7019,99 @@ skip0 absent           the skip never ran and the boot says so, rather than
 
 Build: UUID 8BBC5A21, hosttest passes. Boot-args unchanged from the 2ge boot —
 `-rbgpunogates` and `-rbgpusdma0skip` stay, `-rbgpusdmainst0` stays out.
+
+### 2gf answered on hardware (2026-10-15): the failure is NOT ordinal
+
+logs/20261015-012845-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, 75 KB log, `pci.txt` 567699), build checked first per
+the 2cu/2cv rule: 8BBC5A21 == build/out (2gf). No panic (newest is still
+2026-10-14 20:33).
+
+```
+rbgpu-boot = 3                                   a sequence never recorded before
+rbgpu-prog = b=3 s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)
+rbgpu-sdma = b=3 c2=1 n=4 map=.... allok ret=0 pre=0000 post=1000 fail@1
+             inst0=0 sdma[0]{} skip0=2
+```
+
+**2gf's one-line fix worked**: the engine map survived the stage-5 note that
+destroyed it last boot, and `b=3` makes it this boot's with no inference. The
+log confirms the same string independently.
+
+```
+[15.543045] 2gc: SDMA instance rewrite OFF (-rbgpusdmainst0 not set)
+[15.543046] 2ge: engine[0] queues(+0x48) 2 -> 0 (read back 0)
+[15.543058] 2gb: engine[1] started=0 queues=2 pair[0]=(0x7,0x1)
+[15.543060] 2gc: engine[1] queue[0] pair = (0x7, 0x1)  queue[1] = (0xa, 0x1)
+[15.543114] 2bs: AMDHardware::startHWEngines -> 0
+[15.543118] 2gb: pre=0000 post=1000 fail@1
+```
+
+`skip0=2` says the skip ran, and `post=1000` is engine[0] taking Apple's own
+trivial-TRUE path (0xbea4b49) and setting its flag without asking the layer
+for anything. So **engine[1] was the first engine in the boot to create a
+queue, asked with its own untouched `(0x7,1)` / `(0xa,1)`, and was still
+refused.** 2ge's second branch: the refusal is **not ordinal** — it is not
+"the layer allows one SDMA engine and refuses the next".
+
+### But the 2x2 is incomplete, and the missing cell is the whole question
+
+Three cells are now measured and **every single-variable change away from the
+working one fails**:
+
+| arg2 (instance) | order | engine | result |
+|---|---|---|---|
+| 0 | first | engine[0] | **TRUE** (every boot) |
+| 0 | second | engine[1] (2gd) | FALSE |
+| 1 | first | engine[1] (2gf) | FALSE |
+| **0** | **first** | **engine[1]** | **never measured** |
+
+That last cell is the one that separates the two surviving explanations, and
+nothing in 2gd or 2gf can stand in for it:
+
+```
+engine[1] asking FIRST for instance 0 SUCCEEDS
+    the discriminator really is the instance index, and 2gd's failure was
+    exactly the duplicate confound 2gc feared - a layer refusing a second
+    queue on an instance that already has one. The fix is then to make Apple
+    build ONE SDMA engine, which is a separate question with a known shape.
+it still FAILS
+    the request is byte-identical to engine[0]'s working one AND in the same
+    ordinal position, so neither the arguments nor the order can be what
+    decides. What is left is the engine OBJECT - its channel array at +0x50,
+    whose ch->0x48 and ch->0xd0 go into the descriptor at 0xbea4ad4.
+```
+
+## 2gg (2026-10-15): the missing cell costs no code, and the fail branch is pre-answered
+
+**The experiment is boot-args only.** Both switches already exist and are
+independent in the code - `rbgpu_sdma0_skip_2ge` returns unless `idx == 0`
+(kern_start.cpp:4943) and `rbgpu_sdma_inst0_2gc` returns unless `idx != 0`
+(:4963) - so setting both makes engine[0] ask for nothing and engine[1] ask
+first for instance 0. The 0x1B hold fires on either arg, so a boot that
+finally passes `powerUpHW` still does not become the first to send 0x1B.
+
+The one code change is **read-only logging in a block that already runs
+identically**, so it adds nothing to the outcome being measured (the `post=`
+flags). Apple builds the queue descriptor from the channel, not from the
+arguments (0xbea4aa7-0xbea4ad4: `ch = this->0x50[qi]`, `desc = { 0x40000,
+ch->0x48, ch->0xd0 }`), and those two fields are the only part of the request
+the pairs do not carry. Logging them per queue means that if the missing cell
+still fails, the next question is already half-answered rather than costing
+another boot. A NULL channel says so in those words instead of printing a
+zero that could be read as a measurement.
+
+Build: UUID 0E9563CF, hosttest passes. **One boot-arg goes back in**, and it
+is the user's call: `-rbgpusdmainst0` alongside `-rbgpusdma0skip`.
+`-rbgpunogates` stays, `-rbgpusdmahook` stays out.
+
+```
+post=1100 or further   instance 1 was the whole discriminator; the real fix is
+                       making Apple build one SDMA engine
+post=1000 fail@1       a byte-identical request in the same ordinal position
+                       is still refused, so it is the engine object, and the
+                       logged ch+0x48 / ch+0xd0 name where to look next
+post=0000 fail@0       the skip broke engine[0], which Apple's own
+                       trivial-TRUE path should make impossible
+skip0 / inst0 absent   a switch did not run and the boot says which
+```
