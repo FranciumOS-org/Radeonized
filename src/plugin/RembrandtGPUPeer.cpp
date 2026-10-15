@@ -1024,41 +1024,40 @@ void rbgpu_heartbeat_start(void) {
 //
 // Cost is two flash commits, both long after the ~500 us chain region, which
 // is the budget 2fs/2ft established. Nothing is written inside the region.
-static thread_call_t     g_rbgpuProgCall = nullptr;
+// 2fy: THREE separate thread_calls, each armed once from rbgpu_progwatch_start.
+// 2fw and 2fx both re-armed the single call from inside its own handler, and in
+// three boots the first shot landed within 6 ms of its deadline while the second
+// never fired - at a 60 s gap and at a 20 s gap alike. Nothing re-arms itself
+// here, so that whole class of failure is gone.
+static thread_call_t     g_rbgpuProgCalls[3] = { nullptr, nullptr, nullptr };
 static volatile bool     g_rbgpuProgOn   = false;
-static int               g_rbgpuProgPhase = 0;
+static IOSimpleLock     *g_rbgpuProgLock = nullptr;
 static char              g_rbgpuProgText[192];
 volatile uint32_t        g_rb_prog_stage = 0;
 
-static void rbgpu_prog_action(thread_call_param_t, thread_call_param_t) {
-    // 2fx: three samples, at +15 / +35 / +65 s. 2fw asked for two at +30 and
-    // +90 and only the first ever landed in either boot - the machine was gone
-    // before the second. Three earlier ones mean a boot that is power-cycled at
-    // ~45 s still yields the comparison the whole question turns on.
-    //
-    // Each sample carries the STAGE and the monotonic LOG SEQUENCE. The stage
-    // is coarse (the entire startHWEngines walk sits between stage 2 and 3);
-    // the sequence moves on every log line, so it distinguishes "stopped" from
-    // "crawling" where the stage alone cannot.
-    static const uint32_t kDelaysMs[3] = { 15000, 20000, 30000 };  // +15, +35, +65
+static void rbgpu_prog_action(thread_call_param_t p0, thread_call_param_t) {
+    // Samples the stage AND the monotonic log sequence. The stage is coarse -
+    // the entire startHWEngines walk sits between stage 2 and stage 3 - so the
+    // sequence, bumped on every log append and dedupe hit, is what tells a
+    // stopped thread from a crawling one.
+    unsigned phase = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
+    if (phase > 2) {
+        return;
+    }
     uint64_t now_ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+
+    IOSimpleLockLock(g_rbgpuProgLock);
     size_t n = strlen(g_rbgpuProgText);
     snprintf(g_rbgpuProgText + n, sizeof(g_rbgpuProgText) - n,
              "%s%c=s%u/L%llu@%llums", n ? " " : "",
-             static_cast<char>('a' + g_rbgpuProgPhase),
-             g_rb_prog_stage, g_rbgpuLogSeq, now_ns / 1000000ull);
+             static_cast<char>('a' + phase), g_rb_prog_stage,
+             g_rbgpuLogSeq, now_ns / 1000000ull);
+    IOSimpleLockUnlock(g_rbgpuProgLock);
+
     rbgpu_nvram_note("rbgpu-prog2", g_rbgpuProgText);
-    rbgpu_log("2fx: sample %c stage=%u logseq=%llu",
-              static_cast<char>('a' + g_rbgpuProgPhase), g_rb_prog_stage,
-              g_rbgpuLogSeq);
-    g_rbgpuProgPhase++;
-    if (g_rbgpuProgPhase < 3 && g_rbgpuProgCall) {
-        uint64_t deadline = 0;
-        clock_interval_to_deadline(kDelaysMs[g_rbgpuProgPhase], kMillisecondScale,
-                                   &deadline);
-        thread_call_enter_delayed(g_rbgpuProgCall, deadline);
-    }
+    rbgpu_log("2fy: sample %c stage=%u logseq=%llu",
+              static_cast<char>('a' + phase), g_rb_prog_stage, g_rbgpuLogSeq);
 }
 
 void rbgpu_progwatch_start(void) {
@@ -1068,17 +1067,30 @@ void rbgpu_progwatch_start(void) {
     if (!g_rbgpuOptions) {
         g_rbgpuOptions = IORegistryEntry::fromPath("/options", gIODTPlane);
     }
-    g_rbgpuProgCall = thread_call_allocate(rbgpu_prog_action, nullptr);
-    if (!g_rbgpuProgCall) {
-        rbgpu_log("2fx: thread_call_allocate FAILED - no progress samples this "
-                  "boot, so stopped-vs-crawling stays unanswered");
-        return;
+    if (!g_rbgpuProgLock) {
+        g_rbgpuProgLock = IOSimpleLockAlloc();
     }
     g_rbgpuProgOn = true;
-    rbgpu_log("2fx: progress watch armed (+15 s, +35 s, +65 s -> rbgpu-prog2)");
-    uint64_t deadline = 0;
-    clock_interval_to_deadline(15000, kMillisecondScale, &deadline);
-    thread_call_enter_delayed(g_rbgpuProgCall, deadline);
+
+    // +15, +35, +65 s. All three armed here, from the calling thread, because
+    // arming from inside the handler is what failed three boots running.
+    static const uint32_t kDelaysMs[3] = { 15000, 35000, 65000 };
+    unsigned armed = 0;
+    for (unsigned i = 0; i < 3; i++) {
+        g_rbgpuProgCalls[i] = thread_call_allocate(
+            rbgpu_prog_action, reinterpret_cast<thread_call_param_t>(
+                                   static_cast<uintptr_t>(i)));
+        if (!g_rbgpuProgCalls[i]) {
+            continue;
+        }
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(kDelaysMs[i], kMillisecondScale, &deadline);
+        thread_call_enter_delayed(g_rbgpuProgCalls[i], deadline);
+        armed++;
+    }
+    rbgpu_log("2fy: progress watch armed, %u of 3 timers (+15 s, +35 s, +65 s "
+              "-> rbgpu-prog2); a missing sample now means the timer did not "
+              "fire, not that the handler failed to re-arm", armed);
 }
 
 void rbgpu_nvram_note(const char *var, const char *text) {
