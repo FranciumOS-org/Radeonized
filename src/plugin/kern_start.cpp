@@ -5053,8 +5053,42 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
                         ep + 0x1a0 + qi * 8);
                     uint32_t a2 = *reinterpret_cast<volatile uint32_t *>(
                         ep + 0x1a4 + qi * 8);
-                    rbgpu_log("2gc: engine[%u] queue[%u] pair = (0x%x, 0x%x)",
-                              i, qi, a1, a2);
+                    // 2gg: the DESCRIPTOR Apple builds for this queue, which
+                    // is the only part of the request the arguments do not
+                    // carry. From 0xbea4aa7-0xbea4ad4:
+                    //   ch   = this->0x50[qi]
+                    //   desc = { 0x40000, ch->0x48, ch->0xd0 }
+                    // so if the 2gg boot-arg pair shows engine[1] refused
+                    // while asking FIRST for instance 0 - a byte-identical
+                    // request to engine[0]'s - these two fields are where the
+                    // difference has to be, and they are already in the
+                    // record rather than costing another boot. Reads only.
+                    uint64_t c48 = 0, cd0 = 0;
+                    int chok = 0;
+                    if (chans) {
+                        void *ch = reinterpret_cast<void **>(chans)[qi];
+                        if (ch) {
+                            uintptr_t cp = reinterpret_cast<uintptr_t>(ch);
+                            c48 = *reinterpret_cast<volatile uint64_t *>(
+                                cp + 0x48);
+                            cd0 = *reinterpret_cast<volatile uint64_t *>(
+                                cp + 0xd0);
+                            chok = 1;
+                        }
+                    }
+                    if (chok) {
+                        rbgpu_log("2gc: engine[%u] queue[%u] pair = "
+                                  "(0x%x, 0x%x) desc={0x40000, "
+                                  "ch+0x48=0x%llx, ch+0xd0=0x%llx}",
+                                  i, qi, a1, a2,
+                                  static_cast<unsigned long long>(c48),
+                                  static_cast<unsigned long long>(cd0));
+                    } else {
+                        rbgpu_log("2gc: engine[%u] queue[%u] pair = "
+                                  "(0x%x, 0x%x) desc=UNREAD (channel NULL - "
+                                  "the descriptor fields say nothing)",
+                                  i, qi, a1, a2);
+                    }
                 }
             }
             rbgpu_sdma_inst0_2gc(i, ep, q);
