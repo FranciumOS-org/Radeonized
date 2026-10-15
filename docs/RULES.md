@@ -6317,3 +6317,114 @@ a only, again           the timers themselves do not survive the boot, which
 
 Build: UUID 3D6F354F, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays. The chain region still contains no flash commit of ours.
+
+### 2fy ANSWERED on hardware (2026-10-14): THE THREAD GENUINELY STOPS
+
+logs/20261014-201620-plugin, armed, build checked (3D6F354F == build/out),
+`ttl_hw_init_ret=a1bb4001` so a new boot. **All three timers fired, on the
+dot** - armed at 14535 ms, samples at +15000 / +35000 / +65000:
+
+```
+rbgpu-prog2 = a=s1/L671@29535ms  b=s1/L671@49535ms  c=s1/L671@79535ms
+rbgpu-prog  = s=1 powerUpHW ENTER
+log.txt     = 254 lines, last at 14.985418
+```
+
+**Identical stage AND identical log sequence at 29.5 s, 49.5 s and 79.5 s.**
+Fifty seconds, and `g_rbgpuLogSeq` - which is bumped by *every* log append and
+every dedupe hit - did not move by one.
+
+**So the thread is STOPPED, not crawling.** That is the question 2fm asked on
+2026-10-14 and that went unrun for six milestones while six structural
+hypotheses were raised and refuted. It is now established by measurement
+rather than assumed, and the alternative 2ez taught the project to fear -
+slowness mistaken for a hang - is excluded here: a crawling thread logs.
+
+Three more things the same variable settles:
+
+- **The machine is alive at 79.5 s** and the `thread_call` pool is healthy -
+  three independent timers fired to the millisecond while the chain thread was
+  frozen. 2ez's pool-starvation reading does not apply to this configuration.
+- **2fy's fix worked.** Three separate timers, none re-arming from its own
+  handler, and all three landed where 2fw and 2fx lost every later shot. The
+  2fx diagnosis (re-entering a `thread_call` from its own callback) is
+  confirmed by the fix rather than by the inference alone.
+- This boot stopped at **stage 1**, with the log's last line
+  `2cx: waitForHwStamp -> 1 (the GPU executed it) (22292 ticks)` following
+  `submitMapQueuesPacket ENTER (ring=0)` sixteen lines earlier. That is the
+  2fv window exactly: after ring 0's stamp returns, before ring 5's mapQueues
+  completes.
+
+So the "endpoint" readings from 2eo onward were not meaningless after all -
+they were recording a real stop. What stays withdrawn is the *location*, since
+the endpoint varies; what is new is that there IS one to find.
+
+### The latent deadlock this made worth reading for — found, and NOT the cause
+
+With "stopped forever, no panic, no log" established as the shape, the hook
+layer was read for anything that can block permanently. There is one:
+
+```
+rbgpu_diag_set_num()            IOLockLock(g_diagLock)
+  rbgpu_diag_set_num_locked()     ... table full ...
+    rbgpu_log()                   IOLockLock(g_diagLock)   <-- SAME THREAD
+```
+
+`g_diagLock` is an **`IOLock`**, which is not recursive: a thread blocking on
+a lock it already holds blocks **forever**, silently. And the trigger fits the
+variance - it is behind `static bool s_warned`, so it can fire at most once
+per boot, and only when the diag table first reaches `RBGPU_MAX_DIAGS`.
+
+**It is not what stopped this boot, and that was checked rather than assumed:**
+the boot's own `RBGPUDiag` holds **246 of 320** entries, and the string
+`DIAG TABLE FULL` appears in **no** log this project has ever captured. So
+this is a live bug found by reading, with the table at 246 and climbing, fixed
+in 2fz before it can fire - not a diagnosis of the frontier.
+
+A second candidate was **refuted statically, before costing a boot**:
+`rbgpu_log` calls `IOLog` while holding `g_diagLock`, and this plugin *routes*
+`_IOLog` (milestone 2c). But `wrap_iolog` tags by `__builtin_return_address`
+against the HWLibs / X6000 / HWSvc ranges only, so our own call gets
+`tag == nullptr` and goes straight to `orig_iolog`. No recursion.
+
+## 2fz (2026-10-14): a breadcrumb that takes no lock at all
+
+Here is what every instrument in this family has had in common, and it took
+"the thread is stopped" to make it worth saying: **every breadcrumb ever
+placed inside the chain went through `rbgpu_log` or `rbgpu_diag_set_num`,
+and both take `g_diagLock`** - or through the gate trail, which wrote flash.
+Not one of them could be placed at a point in the chain without adding a lock
+acquisition to that point.
+
+`RB_STEP(n)` is a bare `volatile uint32_t` store. No lock, no log, no NVRAM,
+no call. It cannot be what stops the thread, and the 2fy timers - now measured
+to fire on the dot while the chain is frozen - read it from outside and carry
+it in each sample as `S<n>`.
+
+Markers, chosen to bracket exactly the span this boot died in:
+
+```
+10/11/12   waitForHwStamp: original returned / diag sets done / log done
+20+ring    mapQueues: about to call Apple's original
+30+ring    mapQueues: Apple's original RETURNED
+40+ring    mapQueues: the two diag sets returned
+50         initGraphicsMQD returned
+90         doStart returned
+```
+
+```
+a=s1/S12  b=s1/S12   the stop is in Apple's submitKIQFrame / mapQueues
+                     epilogue, with nothing of ours in the span at all
+a=s1/S30  b=s1/S30   the stop is in OUR two diag sets - which take g_diagLock,
+                     and the refresh thread is the only other taker
+a=s1/S4x / S50 / S90 it got further than the log did, and the log is what
+                     stops rather than the thread
+```
+
+Also in 2fz: the table-full self-deadlock above is fixed. The warning is
+raised through a `g_diagFullPending` flag and logged **after** the lock is
+released, so no path can re-enter `g_diagLock` on its own thread.
+
+Build: UUID E16B0804, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays. The chain region still contains no flash commit of ours, and now no
+lock of ours either at the marked points.

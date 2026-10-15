@@ -3089,6 +3089,7 @@ static bool hooked_pm4_doStart_2ce(void *pm4, bool arg) {
     g_rb_2cf_dostart_called = 1;
     // Call original - our initComputeMQD hook (2cd) will log if it's reached
     bool ret = orig_pm4_doStart_2ce ? orig_pm4_doStart_2ce(pm4, arg) : false;
+    RB_STEP(90);   // 2fz: Apple's doStart RETURNED
     rbgpu_log("2ce: doStart returned %d", ret ? 1 : 0);
     // 2fj: doStart's own exit, so the trail says whether the whole chain
     // completed rather than leaving it to be inferred from the last inner
@@ -4075,8 +4076,10 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     // the machine stays alive while this thread stops, so the trail locates
     // the thread - and the trail stops here. Emptying the span is the one move
     // that has ever shifted this frontier (2eu did it for 50->54).
+    RB_STEP(10);   // 2fz: the original returned
     rbgpu_diag_set_num("stamp_ret", static_cast<uint64_t>(g_rb_2cx_stamp_ret));
     rbgpu_diag_set_num("stamp_ticks", dt);
+    RB_STEP(11);   // the two diag sets returned
     rbgpu_log("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
               ret ? "(the GPU executed it)"
                   : "(the stamp was not reached - NOT evidence the CP is dead; 2dq "
@@ -4084,6 +4087,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
               dt);
     rbgpu_gate_2en(ret ? (150 + g_rb_2cx_stamp_calls) : (120 + g_rb_2cx_stamp_calls),
                    ret ? "waitForHwStamp RETURNED TRUE" : "waitForHwStamp returned false");
+    RB_STEP(12);   // the log line returned; next is Apple's submitKIQFrame epilogue
     return ret;
 }
 
@@ -4333,6 +4337,7 @@ static bool hooked_pm4_initGraphicsMQD_2cq(void *pm4) {
     g_rb_2cq_gfxmqd_ret = ret ? 1 : 0;
     rbgpu_diag_set_num("gfxmqd_calls", static_cast<uint64_t>(g_rb_2cq_gfxmqd_calls));
     rbgpu_diag_set_num("gfxmqd_ret", static_cast<uint64_t>(g_rb_2cq_gfxmqd_ret));
+    RB_STEP(50);   // 2fz: initGraphicsMQD returned
     rbgpu_log("2cq: initGraphicsMQD -> %d %s", ret ? 1 : 0,
               ret ? "(OK)" : "(FAIL -> doStart returns false)");
     // 2ff: gate last before the return, same rule as the mapQueues hook.
@@ -4346,6 +4351,7 @@ static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, 
     rbgpu_gate_2en(60 + (ring & 0x7), "submitMapQueuesPacket ENTER - this one also "
                                       "waits for a stamp");
     rbgpu_log("2cx: submitMapQueuesPacket ENTER (ring=%u)", ring);
+    RB_STEP(20 + (ring & 0x7));   // 2fz: about to call Apple's original
     bool ret = orig_kiq_submitMapQueues_2cq
                    ? orig_kiq_submitMapQueues_2cq(ch, ring, a, b, spec, c)
                    : false;
@@ -4361,12 +4367,14 @@ static bool hooked_kiq_submitMapQueues_2cq(void *ch, uint32_t ring, uint32_t a, 
     //      epilogue), 33 = the two diag sets returned, then 70+ring as before
     //      with only the log line between. Every boundary in this span now has
     //      a gate, which no span in this family has ever had.
+    RB_STEP(30 + (ring & 0x7));   // 2fz: Apple's original RETURNED
     rbgpu_gate_2en(32, "mapQueues: the ORIGINAL returned");
     if (!ret) {
         g_rb_2cq_mapq_fails++;
     }
     rbgpu_diag_set_num("mapq_calls", static_cast<uint64_t>(g_rb_2cq_mapq_calls));
     rbgpu_diag_set_num("mapq_fails", static_cast<uint64_t>(g_rb_2cq_mapq_fails));
+    RB_STEP(40 + (ring & 0x7));   // 2fz: the two diag sets returned
     rbgpu_gate_2en(33, "mapQueues: the two diag sets returned");
     rbgpu_log("2cq: submitMapQueuesPacket(ring=%u, a=0x%x, b=0x%llx, spec=%p, c=0x%llx) -> %d %s",
               ring, a, b, spec, c, ret ? 1 : 0, ret ? "(OK)" : "(FAIL)");
