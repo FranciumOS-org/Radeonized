@@ -6499,3 +6499,137 @@ panic ANYWAY   the route is exonerated and the fault is in Apple's own
 
 Build: UUID 5C7753C4, hosttest passes. Boot-args unchanged; `-rbgpusdmahook`
 is new and deliberately NOT added.
+
+### 2ga answered on hardware (2026-10-15): NO PANIC, and the chain ran to the END
+
+logs/20261015-003756-plugin, `plugin_check` ran **in the armed boot**
+(`rbgpu-diag` armed=1, `ttl_hw_init_ret=ffffffffe135d001`, a new boot), build
+checked first per the 2cu/2cv rule: 5C7753C4 == build/out (2ga). `pci.txt` is
+**565485 bytes** and `peer.plist` 86 KB - the most complete armed capture this
+project has ever taken.
+
+```
+newest .panic -> Kernel-2026-10-14-203313   (the 2fz boots; nothing new)
+rbgpu-prog    -> s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)
+rbgpu-prog2   -> a=s4/S90/L820@28793ms b=s4/S90/L821@48793ms c=s4/S90/L822@78793ms
+```
+
+**2ga's first branch: the panic is GONE.** With `-rbgpusdmahook` absent the
+2fu route of `AMDGFX10SDMAEngine::start` is not installed, and the two
+identical page faults at `startHWEngines+0x3e` did not recur. So **that route
+was the cause**, established rather than suspected.
+
+And with the route out of the way the whole chain ran, further than any boot
+in this project:
+
+```
+[13.792] handlePostRegister: sending Request 0x06 (PowerPlay Ready)
+[13.792] 2fs: prog s=1 powerUpHW ENTER
+[16.214] 2ce: doStart returned 1
+[16.232] 2bu: AMDGFX10PM4Engine::powerUp -> 1
+[16.241] engine[0] -> 1  [1] -> 1  [2] -> 1  [3] -> 1  [4] -> 1  [8] -> 1  [9] -> 1
+[16.405] 2bv: all engines powered up OK
+[16.414] 2bs: AMDHardware::startHWEngines entered
+[16.424] 2fp: startHWEngines will walk 4 entries (hw+0xc2 = 1)
+[16.444] 2fp: engine[0..3] all non-NULL, vtable[0x148] = 0xffffff7fa4d8da6a (all four)
+[16.493] 2fs: prog s=3 c2=1 n=4 map=.... allok
+[16.502] 2bs: AMDHardware::startHWEngines -> 0
+[16.511] 2fs: prog s=4 ... ret=0 sdma[0]{}
+[16.543] 2br: powerUpHW returned 0x0
+[16.559] handlePostRegister: Request 0x06 returned 0x00000000
+[16.575] handlePostRegister: powerUpHW FAILED, so Request 0x1B is NOT sent
+```
+
+- **`hw->0xc2 = 1`, count 4, all four entries live, and all four share one
+  `vtable[0x148]`** - which confirms 2fu's static reading from the chip: the
+  window holds the four SDMA engines and the slot is their `start()`.
+- The NULL check at 0xbea9068 cannot fire, so the FALSE comes from one of the
+  four **calls**. 2fq's "map all '.'" branch.
+- **2fr's 0x1B skip worked.** The request the 2fo boot sat on for minutes was
+  not sent, and the thread returned instead of wedging.
+- **No stall anywhere.** All three 2fy samplers fired on the dot and read
+  `S90` (doStart returned) with `L820 -> 821 -> 822`: the log counter advancing
+  by one per 20 s, which is the request-0x14 poll's dedupe bump on an idle,
+  living machine. Fifty seconds of proven liveness with the chain complete.
+
+One cosmetic defect of my own, found in the same record: the samples read
+`s=4` while `rbgpu-prog` reads `s=5`, because the 0x1B notes in
+RembrandtGPUPeer.cpp call `rbgpu_nvram_note` without setting
+`g_rb_prog_stage`, which only the kern_start helper updates. Harmless, and
+fixed in 2gb - a record that disagrees with itself is a trap for a later
+reader.
+
+## 2gb (2026-10-15): why routing THAT function panics, and the answer without it
+
+2ga asked, if the panic went away, "why does routing THIS function break where
+twenty others did not". It is in the first six bytes, and no boot is needed:
+
+```
+bea4a6a: 80 7f 10 00   cmpb $0x0, 0x10(%rdi)
+bea4a6e: 74 03         je   0xbea4a73          <- rel8, displacement +3
+bea4a70: 31 c0         xorl %eax, %eax
+bea4a72: c3            retq
+bea4a73: 55            pushq %rbp              <- the branch target
+```
+
+An x86-64 route needs **at least 5 bytes** at the entry for its jump, so the
+patched window covers that `je` at +4, and Lilu copies the displaced
+instructions byte-for-byte into a trampoline so `orig` can be called. `74 03`
+is a **short conditional branch whose displacement is relative to its own
+address**: copied to a trampoline elsewhere it still reads "+3", so it no
+longer lands on `0xbea4a73` but three bytes further into Lilu's own trampoline
+buffer, and whatever is there is executed.
+
+That accounts for **every** field of the two panic reports, which is what
+makes it a finding rather than a seventh hypothesis:
+
+| observed | explained by |
+|---|---|
+| RIP inside Lilu's `__TEXT` (`Crypto::hash+0xc12`, the nearest preceding symbol) | execution inside Lilu's trampoline region |
+| error 0x3 = present \| **WRITE**, CR2 = RIP - 11, also in Lilu | garbage bytes executed as a store |
+| caller `startHWEngines+0x3e`, the `vtable[0x148]` call site | the very first entry into the routed function |
+| identical at two different KASLR slides | a wrong displacement is slide-independent |
+| `nm -m` shows the symbol external and defined in X6000 | the milestone-2c rule was NOT violated, as 2ga already checked |
+
+**And it says why the other routes were fine.** Every one of them begins with
+straight-line setup (`pushq %rbp; movq %rsp,%rbp; ...`). This is the first
+function routed whose prologue carries a relative branch inside the patch
+window. General rule, worth keeping beside the milestone-2c rule: **before
+routing a symbol, disassemble its first 16 bytes and refuse if a rel8/rel32
+branch begins within the first 5.**
+
+### The answer without the route: Apple's own started-flag
+
+The route stays off. The question it was for - which of the four SDMA engines
+refuses - is answered by reading Apple's own bookkeeping, because `start()`
+sets `this->0x10 = 1` **only** on its success path (0xbea4b49) and
+`startHWEngines` breaks out of its walk at the **first** FALSE. So after the
+original returns, the flags name the failing index exactly: the engines before
+it read 1, it and everything after it read 0.
+
+Plain loads from pointers the 2fp walk already reads. Nothing patched, nothing
+routed, no trampoline that can be wrong.
+
+- In the ENTER walk, each engine's `+0x10` (started), `+0x48` (queue count),
+  `+0x50` (channel array) and `+0x1a0`/`+0x1a4` (the command ids) are logged
+  and the first two go into `sdma<i>_q` / `sdma<i>_cmd`. A `+0x48` of 0 means
+  that engine takes the trivial-TRUE path and **cannot** be the one that
+  refuses, which the log says in those words.
+- A new post pass after the original builds `pre=0000 post=1100 fail@2` and
+  rides out on the existing stage-4 note, so a boot that loses its log still
+  answers.
+
+```
+fail@N          engine[N] is the one Apple's walk refused at, and its own
+                queue count and command id are in the same record
+allstarted      every start() returned TRUE and startHWEngines' FALSE comes
+                from OUTSIDE the loop (0xbea906b onward) - a different
+                question, and one nothing has looked at
+q=0 everywhere  every engine takes the trivial-TRUE path, so the FALSE is not
+                in the queue create at all
+```
+
+Also fixed: `g_rb_prog_stage` is now set at the stage-5 and stage-6 notes.
+
+Build: UUID E119D29C, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays, `-rbgpusdmahook` stays OUT and is now proven rather than suspected.

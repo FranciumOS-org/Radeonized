@@ -4827,6 +4827,23 @@ static bool hooked_hw_powerUpHWEngines(void *hw) {
 //      the position in the map names the engine outright
 static char g_rb_2fq_map[96];
 
+// 2gb (2026-10-15): read the SDMA engines' started-flags, not their code.
+//
+// Apple's start() (0xbea4a6a) sets `this->0x10 = 1` only on its success path
+// at 0xbea4b49, and `startHWEngines` breaks out of its walk on the FIRST
+// engine that returns FALSE. So after the original returns, the flags name the
+// failing index exactly: the engines before it read 1, it and everything after
+// it read 0. That is Apple's own bookkeeping, not an inference about it.
+//
+// This replaces 2fu's route of start() itself, which is what panicked (see the
+// routing block at the bottom of this file). Plain loads from objects whose
+// pointers we already walk - nothing is written, nothing is routed, and no
+// trampoline exists to be wrong.
+static uint8_t g_rb_2gb_pre[32];
+static uint8_t g_rb_2gb_post[32];
+static uint32_t g_rb_2gb_count = 0;
+static char g_rb_2gb_flags[96];
+
 static void rbgpu_walk_starthw_2fp(void *hw) {
     int n = 0;
     if (!hw) {
@@ -4870,6 +4887,32 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
             c = fn ? '.' : 'f';
             if (!fn && first_badfn == 0xffffffffu) { first_badfn = i; }
             rbgpu_log("2fp: engine[%u] = %p vtable[0x148] = %p", i, e, fn);
+            // 2gb: Apple's own gate fields, read here instead of from inside a
+            // hook on start() - because routing start() is what panicked (see
+            // the 2gb block below). These are the exact fields the
+            // disassembly at 0xbea4a6a tests, read before Apple's call, so
+            // they are what its gates will see.
+            uintptr_t ep = reinterpret_cast<uintptr_t>(e);
+            g_rb_2gb_pre[i] = *reinterpret_cast<volatile uint8_t *>(ep + 0x10);
+            uint32_t q    = *reinterpret_cast<volatile uint32_t *>(ep + 0x48);
+            uint32_t cmd  = *reinterpret_cast<volatile uint32_t *>(ep + 0x1a0);
+            uint32_t cmd2 = *reinterpret_cast<volatile uint32_t *>(ep + 0x1a4);
+            void *chans   = *reinterpret_cast<void **>(ep + 0x50);
+            rbgpu_log("2gb: engine[%u] started(+0x10)=%u queues(+0x48)=%u "
+                      "chans(+0x50)=%p cmd=0x%x/0x%x", i, g_rb_2gb_pre[i],
+                      q, chans, cmd, cmd2);
+            if (i < 4) {
+                char key[24];
+                snprintf(key, sizeof(key), "sdma%u_q", i);
+                rbgpu_diag_set_num(key, q);
+                snprintf(key, sizeof(key), "sdma%u_cmd", i);
+                rbgpu_diag_set_num(key, cmd);
+            }
+            if (q == 0) {
+                rbgpu_log("2gb: engine[%u] has ZERO queues, so Apple's start() "
+                          "takes its trivial-TRUE path (0xbea4b49) and sets "
+                          "+0x10 - it cannot be the engine that refuses", i);
+            }
         }
         if (n > 0 && static_cast<size_t>(n) + 2 < sizeof(g_rb_2fq_map)) {
             g_rb_2fq_map[n++] = c;
@@ -4897,7 +4940,59 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
                   "vtable[0x148], so a FALSE return comes from one of the "
                   "CALLS and not from the array", count);
     }
+    g_rb_2gb_count = count;
     rbgpu_prog_2fs(3, g_rb_2fq_map);
+}
+
+// 2gb: the post pass. Called after Apple's startHWEngines returns, reading the
+// same +0x10 flag the success path sets. Builds "pre=0000 post=1100 fail@2".
+static void rbgpu_poststarthw_2gb(void *hw) {
+    g_rb_2gb_flags[0] = '\0';
+    if (!hw || g_rb_2gb_count == 0 || g_rb_2gb_count > 32) { return; }
+    uint32_t fail = 0xffffffffu;
+    for (uint32_t i = 0; i < g_rb_2gb_count; i++) {
+        void *e = *reinterpret_cast<void **>(
+            reinterpret_cast<uintptr_t>(hw) + 0x3b8 + i * 8);
+        g_rb_2gb_post[i] = e ? *reinterpret_cast<volatile uint8_t *>(
+            reinterpret_cast<uintptr_t>(e) + 0x10) : 0xff;
+        if (g_rb_2gb_post[i] == 0 && fail == 0xffffffffu) { fail = i; }
+    }
+    // Cursor arithmetic kept in size_t and always re-clamped against the
+    // buffer, rather than relying on 4+32+6+32+11 fitting in 96: a snprintf
+    // return that exceeds the buffer would make `sizeof - n` underflow and
+    // the next call write past the end.
+    const size_t cap = sizeof(g_rb_2gb_flags);
+    size_t n = 0;
+    auto put = [&](const char *lit) {
+        if (n >= cap - 1) { return; }
+        int r = snprintf(g_rb_2gb_flags + n, cap - n, "%s", lit);
+        if (r > 0) { n += static_cast<size_t>(r); }
+        if (n > cap - 1) { n = cap - 1; }
+    };
+    put("pre=");
+    for (uint32_t i = 0; i < g_rb_2gb_count && n + 1 < cap; i++) {
+        g_rb_2gb_flags[n++] = static_cast<char>('0' + (g_rb_2gb_pre[i] & 0xf));
+        g_rb_2gb_flags[n] = '\0';
+    }
+    put(" post=");
+    for (uint32_t i = 0; i < g_rb_2gb_count && n + 1 < cap; i++) {
+        g_rb_2gb_flags[n++] = static_cast<char>('0' + (g_rb_2gb_post[i] & 0xf));
+        g_rb_2gb_flags[n] = '\0';
+    }
+    if (fail != 0xffffffffu) {
+        if (n + 1 < cap) {
+            snprintf(g_rb_2gb_flags + n, cap - n, " fail@%u", fail);
+        }
+        rbgpu_diag_set_num("sdma_fail_idx", fail);
+        rbgpu_log("2gb: %s - engine[%u] is the FIRST whose started-flag is "
+                  "still 0, so it is the one Apple's walk refused at",
+                  g_rb_2gb_flags, fail);
+    } else {
+        put(" allstarted");
+        rbgpu_log("2gb: %s - EVERY engine's started-flag is set, so every "
+                  "start() returned TRUE and startHWEngines' FALSE comes from "
+                  "outside the loop (0xbea906b onward)", g_rb_2gb_flags);
+    }
 }
 
 // 2fu (2026-10-14): AMDGFX10SDMAEngine::start is what startHWEngines calls.
@@ -4993,13 +5088,14 @@ static bool hooked_hw_startHWEngines(void *hw) {
     bool ret = orig_hw_startHWEngines ? orig_hw_startHWEngines(hw) : false;
     if (ret) g_rb_pw_stage |= 0x200;
     rbgpu_log("2bs: AMDHardware::startHWEngines -> %d", ret ? 1 : 0);
+    rbgpu_poststarthw_2gb(hw);
     // 2fq: the second and last write. Two per boot, against the trail's
     // twenty-four - and this one proves the first was not a lucky read of a
     // stale variable, because it carries the return from the same call.
     {
         char buf[300];
-        snprintf(buf, sizeof(buf), "%s ret=%d sdma[%u]{%s}", g_rb_2fq_map,
-                 ret ? 1 : 0, g_rb_2fu_calls, g_rb_2fu_rec);
+        snprintf(buf, sizeof(buf), "%s ret=%d %s sdma[%u]{%s}", g_rb_2fq_map,
+                 ret ? 1 : 0, g_rb_2gb_flags, g_rb_2fu_calls, g_rb_2fu_rec);
         rbgpu_prog_2fs(4, buf);
     }
     return ret;
@@ -6299,17 +6395,41 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     // defined here and solveSymbol cannot have returned a bare slide. That
     // was checked before writing any of this down.
     //
-    // WHY Lilu's own code faults is NOT established, and no guess is recorded
-    // here. What this switch decides in one boot:
+    // 2gb (2026-10-15) ANSWERED, and the mechanism is identified. The armed
+    // boot with this route OFF did not panic - it ran the whole chain to
+    // handlePostRegister. So **this route is the cause**, and the reason is in
+    // the function's own first six bytes:
     //
-    //   panic GONE      this route is the cause, established rather than
-    //                   suspected, and the question becomes why routing THIS
-    //                   function breaks where twenty others did not
-    //   panic ANYWAY    the route is exonerated and the fault is in Apple's
-    //                   own vtable[0x148] call with nothing of ours in it
+    //   bea4a6a: 80 7f 10 00   cmpb $0x0, 0x10(%rdi)
+    //   bea4a6e: 74 03         je   0xbea4a73          <- RELATIVE, rel8 = +3
+    //   bea4a70: 31 c0         xorl %eax, %eax
+    //   bea4a72: c3            retq
+    //   bea4a73: 55            pushq %rbp              <- the branch target
     //
-    // Either way the chain is now known to reach startHWEngines, which is
-    // further than any boot before it.
+    // An x86-64 route needs at least 5 bytes at the entry for its jump, so the
+    // patched window covers the `je` at +4, and Lilu copies the displaced
+    // instructions byte-for-byte into a trampoline so `orig` can be called.
+    // `74 03` is a SHORT conditional branch whose displacement is relative to
+    // the instruction's own address: copied to a trampoline at a different
+    // address it still reads "+3", so it no longer lands on 0xbea4a73 but 3
+    // bytes further into Lilu's own trampoline buffer, and whatever is there
+    // is executed. That accounts for every field of the panic - RIP inside
+    // Lilu's __TEXT, a WRITE fault at RIP-11 also inside Lilu, the caller
+    // being startHWEngines+0x3e (the very first entry into the routed
+    // function), and identical behaviour at two different KASLR slides, since
+    // a wrong displacement is slide-independent.
+    //
+    // **And it says why twenty other routes in this project worked.** Every
+    // one of them begins with straight-line setup (`pushq %rbp; movq
+    // %rsp,%rbp; ...`). This is the first function routed whose prologue
+    // contains a relative branch inside the patch window, and it is a general
+    // rule worth keeping: before routing a symbol, disassemble its first 16
+    // bytes and refuse if a rel8/rel32 branch starts within the first 5.
+    //
+    // The route therefore stays OFF, and the question it was added for - which
+    // SDMA engine refuses - is answered WITHOUT it, by reading Apple's own
+    // started-flag after the walk (rbgpu_poststarthw_2gb above). Plain loads,
+    // no patching, no trampoline that can be wrong.
     if (checkKernelArgument("-rbgpusdmahook")) {
         KernelPatcher::RouteRequest req_sdma(
             "__ZN33AMDRadeonX6000_AMDGFX10SDMAEngine5startEv",
@@ -6322,9 +6442,10 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
             rbgpu_log("X6000: AMDGFX10SDMAEngine::start not found (2fu)");
         }
     } else {
-        rbgpu_log("2ga: SDMA start route SKIPPED (-rbgpusdmahook not set) - "
-                  "it is the suspect for the 20:24/20:33 panics at "
-                  "startHWEngines+0x3e; a panic without it exonerates it");
+        rbgpu_log("2gb: SDMA start route SKIPPED - PROVEN to panic (its "
+                  "prologue has a rel8 `je` inside the patch window, so "
+                  "Lilu's trampoline copy branches into Lilu's own text). "
+                  "The started-flag read in 2gb answers the question instead.");
     }
 
     KernelPatcher::RouteRequest req_she1(
