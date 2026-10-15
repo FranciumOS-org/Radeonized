@@ -1,343 +1,354 @@
-# RembrandtGPU — handoff state (2026-10-12, after 2ed)
+# RembrandtGPU — handoff state (2026-10-15, after 2gh)
 
 **Read this before CLAUDE.md.** CLAUDE.md is the chronological evidence
-journal (~2600 lines); it is authoritative for *what was measured* and should
-not be trimmed. This file is the *current state*: what is settled, what is
-open, what to do next, and the mistakes this project keeps making.
+journal (~4000 lines); it is authoritative for *what was measured*, in order,
+and must not be trimmed. This file is the *current state*: what is settled,
+what is open, what to do next, the procedure, and the mistakes this project
+keeps making.
 
-`docs/HANDOFF-FULL.md` is a stale file-dump from the boot-27 era (2026-10-05).
-Ignore it.
+`docs/HANDOFF-FULL.md` is a stale file-dump from 2026-10-05. Ignore it.
 
 ---
 
 ## 1. One-paragraph state
 
-Apple's Navi 21 stack (AMDRadeonX6000 + X6800HWLibs + HWServicesNavi) is
-running on the 680M. PSP, GC and TTL init all succeed, the 680M's own
-yellow_carp firmware is loaded, the SMU link works two-way with real clock
-tables, the accelerator's `start()` returns 1, and the KIQ queue is created,
-active and doorbelled. `powerUpHW` fails at exactly one point: the KIQ's
-completion fence never lands, so `waitForHwStamp` returns false, `doStart`
-aborts, engine 0 fails.
+Apple's Navi 21 stack (AMDRadeonX6000 + AMDRadeonX6800HWLibs +
+HWServicesNavi) runs on the Radeon 680M. PSP, GC and TTL init all succeed with
+the 680M's own yellow_carp firmware; the SMU link works two-way with real
+clock tables; the accelerator's `start()` returns 1; the KIQ queue is created,
+active and doorbelled; GPUVM translates; the GPU executes PM4 packets and
+writes completion fences the CPU reads. **`AMDGFX10PM4Engine::doStart` returns
+1 and every engine in the array powers up.**
 
-**The cause is now located and dated.** A GPUVM fault is raised by the KIQ's
-own submission (STATUS is 0 before the doorbell, 0x9ba after) at
-`0xFF_BFE8_0000` = `CP_HQD_PQ_BASE << 8` = the ring base, decoding to
-MAPPING_ERROR=1 / WALKER_ERROR=5 / CID 4 / RW=0 — **a read whose page walk
-found no valid mapping**. So: the MQD points the CP at a GPUVM address that
-does not translate; the fetch faults; RPTR advances having discarded the data
-(which is why 2dq's RPTR/CP_STAT reading looked like success); the WRITE_DATA
-fence inside the frame never executes; the stamp never arrives. The open
-question is no longer *what* fails but *why that address is unmapped* — see
-§2 and §7.
+`powerUpHW` now fails at exactly one place: **`AMDHardware::startHWEngines`
+returns 0 because SDMA `engine[1]`'s `start()` returns FALSE.** Apple's Navi 21
+path builds and walks **four** SDMA engines (`hw->0xc2*2+2`); this chip's IP
+discovery table lists **one** SDMA instance. That is the whole current
+frontier.
 
 Nothing about display is started. The accelerator deliberately adopts **no
-display pipe** (2ct) so armed boots reach a desktop.
+display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — 2eb + 2ed, build UUID `835AD9F7`
+## 2. The pending experiment — build UUID `D27034BD` (2gh)
 
-**2eb already ran on hardware and its answer was LOST.** `rbgpu-arm` is
-consumed and `rbgpu-diag-prev` is an armed boot with `smu_bringup_armed=1`, so
-the boot happened — but `tools/plugin_check.sh` was not run before rebooting
-out of it, and the NVRAM fallback truncated at 512 bytes, ending mid-key at
-`mc`, before every single `vm_*` key. Nothing about the range test survives.
-2ec fixes the truncation (§5, tenth instance); the experiment itself is
-unchanged and simply needs one more armed boot.
+**Boot-args only. No code question is open in it.** The experiment completes a
+2x2 whose other three cells are measured:
 
-Built, hosttest passes, committed. **Verify the installed UUID with
-`sudo tools/efi.sh status` against `dwarfdump --uuid
-build/out/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU` before interpreting
-any boot.**
+| arg2 (SDMA instance) | order | engine | result |
+|---|---|---|---|
+| 0 | first | engine[0] | **TRUE** (every boot) |
+| 0 | second | engine[1] (2gd) | FALSE |
+| 1 | first | engine[1] (2gf) | FALSE |
+| **0** | **first** | **engine[1]** | **never measured** |
 
-2ea settled the timing question: the GPUVM fault STATUS is 0 at
-`post-gc-hw-init`, `post-startKIQ` and `pre-kiq-submit`, and becomes 0x9ba at
-`at-stamp-wait`. **The fault is raised by the KIQ's own submission**, at
-`0xFF_BFE8_0000` = `CP_HQD_PQ_BASE << 8` = the ring base, decoding to
-MAPPING_ERROR=1 / WALKER_ERROR=5 / CID 4 / RW=0 — a read whose page walk found
-no valid mapping. The pre-existing-fault escape is closed; the lead is real.
+Both switches already exist and are independent in the code —
+`rbgpu_sdma0_skip_2ge` returns unless `idx == 0`, `rbgpu_sdma_inst0_2gc`
+returns unless `idx != 0` — so setting **both** makes engine[0] ask the layer
+for nothing (Apple's own trivial-TRUE path at `0xbea4b49`) and engine[1] ask
+**first**, for **instance 0**: byte-identical to the request engine[0] makes
+on a working boot, in the same ordinal position.
 
-2eb asks whether the page tables are meant to cover that address at all. The
-queue runs at VMID 0, so it reads `GCVM_CONTEXT0_PAGE_TABLE_START/END_ADDR`
-and `_BASE_ADDR` plus `GCVM_L2_CNTL` / `GCVM_CONTEXT0_CNTL`:
+### Install and arm
 
-| outcome | meaning |
-|---|---|
-| `vm_ring_in_range = 0` | the MQD was given a GPUVM address this VMID's page tables do not cover — the aperture itself is wrong |
-| `vm_ring_in_range = 1` | the range is right and the fault is in the page-table *contents* |
+```
+sudo tools/efi.sh bootarg add -rbgpusdmainst0
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect D27034BD
+sudo tools/efi.sh on && sudo nvram rbgpu-arm=1 && sudo reboot
+```
 
-**2ed rides along in the same boot.** GC and MMHUB are *separate VM hubs* on
-GFX10 — Linux programs them independently as `gfxhub_v2_1` and `mmhub_v2_3` —
-so 2di's healthy MMHUB reading (FB_LOCATION 0xF400/0xF4FF) says nothing about
-the GC side, and nothing has ever read it. 2ed reads the GC-hub copies
-(`GCMC_VM_FB_LOCATION_BASE/TOP`, `FB_OFFSET`, `AGP_BOT/TOP`,
-`SYSTEM_APERTURE_LOW/HIGH`, gc_10_3_0_offset.h:3638-3690, same window, all
-reads):
+Then **in the armed boot, before any reboot**:
 
-| outcome | meaning |
-|---|---|
-| `gc_hub_all_zero = 1` | the GFXHUB was never programmed — Apple's path set up MMHUB and left this hub alone, and the unmapped ring is a symptom of that |
-| `gc_hub_fb_agrees = 1` | the GC hub agrees with MMHUB about the carve-out, so the aperture is fine and the fault is in the page-table contents |
+```
+tools/plugin_check.sh
+```
 
-Note the fault decodes as MAPPING_ERROR=1 / WALKER_ERROR=5, so the walk *ran*
-and the walker had a page-table base; `vm_c0_ptb` from 2eb says whether that
-base is real. The apertures and the range test together cover the three ways
-this can fail.
+### Reading it
 
-Either way the next lever is likely **source comparison** (§7), not more
-register archaeology: how amdgpu maps the KIQ ring into GPUVM for yellow_carp
-versus what Apple's `startKIQ` command-8 path leaves configured.
+```
+nvram rbgpu-boot    a NEW sequence number, or every note below is STALE
+nvram rbgpu-sdma    b=<n> c2=1 n=4 map=.... allok ret=? pre=0000 post=???? ...
+nvram rbgpu-prog    b=<n> s=5 ...
+```
+
+```
+post=1100 or further   instance 1 was the whole discriminator, and 2gd's
+                       failure was the duplicate confound 2gc feared. The fix
+                       is then to make Apple build ONE SDMA engine.
+post=1000 fail@1       a byte-identical request in the same ordinal position
+                       is still refused, so neither the arguments nor the
+                       order decide. What is left is the engine OBJECT - its
+                       channel array at +0x50, whose ch->0x48 and ch->0xd0 go
+                       into the descriptor at 0xbea4ad4. THEN spend a boot on
+                       -rbgpusdmadesc, which logs exactly those two fields.
+post=0000 fail@0       the skip broke engine[0], which Apple's own
+                       trivial-TRUE path should make impossible
+skip0 / inst0 absent   a switch did not run, and the boot says which
+```
+
+### Current boot-args (OpenCore config.plist)
+
+```
+keepsyms=1 -vi2c-force-polling -lilubetaall msgbuf=1048576 -rbgpusync570
+-rbgpuspoofttl amfi_get_out_of_my_way=0x1 amfi=0x80 alcid=66 -v -rbgpupsphw
+-rbgpusmubringup -rbgpustampwait -rbgpuptbase -nvoff -wegnoegpu
+-rbgpunogates -rbgpusdma0skip        (+ -rbgpusdmainst0 for this experiment)
+```
+
+**`-rbgpunodisppanic` must stay OUT** — it publishes `IOPCITunnelled` and that
+alone costs the UI (2cv). **`-rbgpusdmahook` must stay OUT** — proven to panic
+(2gb). `-rbgpusdmadesc` is new and off by default (2gh).
+
+---
 
 ## 3. Verified on hardware — do NOT re-derive these
 
-| fact | evidence |
-|---|---|
-| PSP asic_type 19 → 8 swap binds the `_11_0` table | 2aa |
-| Firmware loads: `_psp_np_fw_load` 111 ms, returns 0 | 2dc |
-| yellow_carp fw substitution works, 7 entries swapped | 2ag |
-| GC sw_init / hw_init / TTL hw_init all succeed | 2dc |
-| Return convention: inner HWLibs = status (0 ok); IPI wrapper = bool in AL, upper EAX is garbage | 2dc |
-| `AmdTtlServices::initialize` returns 0 | 2cw |
-| `allocateMemoryResources` passes all engines | 2cx |
-| `accelerator->start()` returns 1 | 2cx |
-| SMU two-way transfer works; MC = `FB_LOCATION_BASE + alloc offset` | 2di |
-| GFX is **not** in GFXOFF (status 2) | 2dj |
-| GC register maths: byte addr = `(seg + dword offset) * 4` | 2dk |
-| **seg0 = 0x1260**, seg1 = 0xa000 | 2dl (CP_RB0_CNTL nonzero at one, zero at the other) |
-| `CP_MEC_ME1_HEADER_DUMP` is an 8-entry buffer pre-filled `def0..def7` — proves nothing | 2dm |
-| KIQ lives at **ME 2 / pipe 1 / queue 0** | 2dn (QUEUE_SPEC) |
-| `CP_HQD_*` is a window selected by `GRBM_GFX_CNTL`; it reads back 0 even when the write took | 2do |
-| startKIQ **creates** the queue (empty `CTRL=0x00308509` before, configured after) | 2dp |
-| `startKIQ` writes no register — it asks TTL/HWLibs (command 8) | 2dn |
-| WPTR advanced to 0x20, RPTR caught up, CP_STAT busy | 2dq (see §4 — interpretation open) |
-| `+0x80` submitted / `+0x84` completed; bookkeeping is correct | 2ds |
-| `+0xe0 == -1` is the **direct fence path**, and is BY DESIGN for a KIQ | 2dv correction |
-| KIQ polls a real writeback frame, slot 1, `hw->0x510 + (1<<6)` | 2dw/2dx |
-| Writeback GPU addr `0xffbfdc0040` is in the same GPUVM region as the ring — structurally correct | 2dx |
-| Fence packet is correct in **every field** (WRITE_DATA 0xC0033700, DST_SEL 5, WR_CONFIRM, dst = `+0xc8` = the right frame, data = the stamp) | 2dy |
-| Frame filler is `0xFFFF1000` = PM4 NOP count 0x3FFF, AMD's standard padding | 2dy |
-| A GPUVM fault IS latched, `CNTL=0x1ffc` so reporting is on | 2dz |
-| Fault addr `0x0FFBFE80 << 12` == `CP_HQD_PQ_BASE 0xffbfe800 << 8` == `0xFFBFE80000` = the ring base | 2dz/2ea |
-| The fault is **raised by the submission**: STATUS 0 at gc/kiq/pre, 0x9ba at wait/post | 2ea |
-| Fault decode: MAPPING_ERROR=1, WALKER_ERROR=5, CID 4, RW=0 (read, no valid mapping) | 2ea |
-| `GCVM_L2_PROTECTION_FAULT_STATUS` bit 0 is **MORE_FAULTS**, not a validity bit — a nonzero STATUS is the latch | 2eb |
-| `CPF_UTCL1_STATUS` nonzero both boots while `CPC_UTCL1_STATUS` is 0 — the fetcher's translation unit | 2dz/2ea |
+- **The chip.** GC 10.3.3, DMU 3.1.3, MMHUB/ATHUB 2.4.0, MP0/MP1 13.0.3,
+  SDMA 5.2.3 (**one instance**), VCN 3.1.1. 1 SE x 2 SA x 3 WGP = 12 CUs.
+- **Carve-out.** MC `0xF4_0000_0000`-`0xF4_FFFF_FFFF`, system-physical
+  `0x7_8000_0000` (`GCMC_VM_FB_OFFSET` = 0x780), BAR0 256 MB at
+  `0x8_8000_0000`.
+- **seg0 = 0x1260** for GC `BASE_IDX 0`, agreed four independent ways; seg1 =
+  0xa000. Byte address is `(seg + dword_offset) * 4`.
+- **The SMU link works.** `rb_smu13_bringup` succeeds with real Rembrandt SOC
+  and DF values; the MC address is `FB_LOCATION_BASE + alloc_offset`.
+- **GFX is NOT in GFXOFF** (status 2), and `gfx_min = gfx_max = 0` is real
+  data from the SMU: **GFX DPM was never started.** Standing, untouched.
+- **PT_BASE (2em) was the GPUVM fix.** The hub register held
+  `amdgpu_gmc_vram_mc2pa` computed with `vram_base_offset = 0`; writing
+  `0x78FDFA001` removed the MAPPING_ERROR and the fence began landing.
+  Requires `-rbgpuptbase`.
+- **The whole `doStart` chain completes**: setres + stamp, `initGraphicsMQD`
+  (~230 us), mapQueues ring 0 + stamp, `initComputeMQD(5)`, mapQueues ring 5
+  + stamp, the ring-state reads, `waitForActiveValue` with
+  `CP_GFX_HQD_ACTIVE = 1`, `vtable[0x328]`. **No unexercised step remains.**
+- **The powerUp chain runs on the peer's post-register thread inside request
+  0x06**, from `thread_call_delayed_timer` — NOT `IOService::start`. Confirmed
+  three ways including Apple's own panic frames.
+- **Request 0x1B hangs** when powerUpHW has touched the hardware, so it is not
+  sent unless powerUpHW succeeded (`-rbgpuforce1b` overrides).
 
-### Key addresses (X6000 unless noted)
+### Key addresses (AMDRadeonX6000 unless noted)
 
 ```
-waitForHwStamp            0xbe85536     checkForTimestampUpdate  0xbe851d6
-timestampUpdated          0xbe85214     AMDHWChannel::init       0xbe848cc
-submitKIQFrame            0xbe9572e     getKIQFrame              0xbe957a0
-submitSetResourcesPacket  0xbec7404     writeDataCmdPacket       0xbec7642
-startKIQ                  0xbec7688     KIQ frame filler         0xbec77f8
-registerChannel           0xbea9a04     addHWChannel             0xbe93f98
-allocateChannelWriteBackFrame 0xbea9a94  ...GPUAddr 0xbea9aaa  ...CPUPtr 0xbea9ad2
-HWLibs: _smu_internal_sw_exit 0x1266813e   cosReleaseMemoryHandle 0x1265d9c0
+0xbea1190  AMDGFX10PM4Engine::doStart
+0xbea2542  initGraphicsMQD            (region G gated on pm4+0x10, measured 0)
+0xbea8ec9  powerUpHWEngines   walks hw+0x3B0, 11 entries, vtable[0x138]
+0xbea8fea  startHWEngines     walks hw+0x3B8, hw->0xc2*2+2, vtable[0x148]
+0xbea4a6a  AMDGFX10SDMAEngine::start      <- THE FRONTIER
+0xbeca1f0  Navi21Hardware::allocateHWEngines
+0xbeca1d9  Navi21Hardware::setupAndInitializeHWCapabilities  (+0xc2 = 1)
+0xbed26ad  Navi23Hardware::      "       "                   (+0xc2 = 0)
+0xbec7688  startKIQ           (asks the service layer, command 8 - works)
+0xbe85536  waitForHwStamp
+0xbe848cc  AMDHWChannel::init
 ```
 
-GC registers (all BASE_IDX 0, seg0 = 0x1260; byte addr = (seg + dword) * 4):
+Engine array layout, confirmed from the constructor and from `amd-log.txt`:
 
 ```
-GCVM_L2_CNTL                      0x15bc    GCVM_CONTEXT0_CNTL     0x15fc
-GCVM_L2_PROTECTION_FAULT_CNTL     0x15c4    ..._STATUS             0x15c8
-..._ADDR_LO32 / _HI32             0x15c9 / 0x15ca
-GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32/HI32   0x1667 / 0x1668
-GCVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32/HI32  0x1687 / 0x1688
-GCVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32/HI32    0x16a7 / 0x16a8
-CP_HQD_PQ_BASE 0x1fb1 (ring VA >> 8)   CP_HQD_PQ_RPTR/WPTR_LO 0x1fb4 / 0x1fdf
-CP_HQD_ACTIVE 0x1fab   CP_HQD_PQ_DOORBELL_CONTROL 0x1fb8
-GRBM_GFX_CNTL 0x0dc2 (ME/PIPE/QUEUE/VMID selector for the CP_HQD_* window)
-CP_STAT 0x0f40  CP_CPC_STATUS 0x0e24  CP_CPF_STATUS 0x0e27
-CPC_UTCL1_STATUS 0x1f55  CPF_UTCL1_STATUS 0x1f56
-GRBM_STATUS 0x0da4  GRBM_STATUS2 0x0da2
+0x3B0[0]      AMDNavi21PM4Engine
+0x3B0[1..4]   AMDSDMAEngine_GC_10_3_0   == 0x3B8[0..3]
+0x3B0[8..9]   AMDVCN3HWEngine
 ```
 
-The KIQ is at ME 2 / pipe 1 / queue 0, VMID 0. Ring MC handed to startKIQ:
-`0xf40fb28000` (carve-out). Ring VA in the MQD: `0xFF_BFE8_0000`. Writeback
-fence frame: GPU `0xffbfdc0040`, same GPUVM region, 0xC0000 lower.
+### Apple's SDMA `start()`, disassembled (0xbea4a6a)
 
-Channel layout: `+0x0c` index, `+0x20` hardware interface, `+0x80` submitted,
-`+0x84` completed, `+0xac` fence slot index, `+0xb0`/`+0xc0` fence CPU VA,
-`+0xc8`/`+0xcc` fence **GPU** address (set in `allocateMemoryResources`, not
-`init`), `+0xe0` scheduler slot (-1 = direct fence path).
+```
+bea4a6a  if (this->0x10 != 0)   return FALSE        "started" flag
+bea4a87  svc = (this->0x18)->vtable[0x2c0]()
+bea4a94  if (this->0x48 == 0)   -> bea4b49          zero queues: trivial TRUE
+loop qi < this->0x48:
+  bea4aa7  movq 0x50(%rbx,%r12,8), %r13   ch = INLINE ARRAY inside the engine
+  bea4ad4  desc = { 0x40000, ch->0x48, ch->0xd0 }
+  bea4b0c  svc->vtable[0x120](this->0x1a0[qi], this->0x1a4[qi], &desc, &out)
+  bea4b14  if (ret != 0)        -> bea4b5d          unmap, return FALSE
+bea4b49  this->0x10 = 1 ; vtable[0x278]() ; return TRUE
+```
+
+Measured pairs: `queue[0] = (0x7, instance)`, `queue[1] = (0xa, instance)`.
+`+0x50` is an **inline array of channel pointers inside the engine**, not a
+pointer that is then indexed — misreading that caused the 2gg panic.
 
 ---
 
 ## 4. Open and unexplained
 
-1. **Why is `0xFF_BFE8_0000` unmapped?** That is the live question. 2eb (§2)
-   asks whether it is even inside VMID 0's page-table range. Note the ring
-   memory itself is fine — `startKIQ` was handed MC `0xf40fb28000` in the
-   carve-out — so this is a mapping problem, not an allocation one.
-2. **2dq's conclusion is withdrawn in substance.** Its *measurement* stands
-   (WPTR advanced, RPTR caught up, CP_STAT busy), but a faulting fetch
-   advances RPTR having discarded the data. **Do not cite 2dq as proof the CP
-   executes PM4.** Whether the CP has ever successfully executed a packet on
-   this chip is currently unproven either way.
-3. **`gfx_min = gfx_max = 0`** from the SMU DPMCLOCKS table, while every
-   neighbouring field decodes correctly and GFX is not in GFXOFF. Struct
-   layout was checked against Linux and is right, so these are real zeros:
-   GFX DPM was never started. **This is a separate wall from the fence** and
-   may still bite after the fence is fixed.
-4. Peer requests **0x12** and **0x1D** are "Unhandled"; **0x1B** answers
-   0xE00002C7. None blocks the current path.
-5. The 2di teardown panic fix (`ctx+0x340` zeroing) is correct by reading but
-   **never exercised on hardware** — the bringup has succeeded every boot
-   since.
-6. `2am` / `2an` / `2ao` force three "firmware ready" latches to report
-   success unconditionally. They are still blanket-true and should be made
-   per-caller and logged.
+- **Why engine[1]'s queue create is refused.** The 2gh boot decides whether
+  it is the instance index or the engine object.
+- **There is no `hw->0xc2` that fits this chip.** `0xc2*2+2` is always even
+  and >= 2, so Apple's Navi 21 path cannot walk exactly one SDMA engine. If
+  the instance index turns out to be the discriminator, the real fix is making
+  `allocateHWEngines` build one engine, which is a separate change.
+- **`gfx_min = gfx_max = 0`** since 2di — GFX DPM never started. It has not
+  bitten any measured path yet (the RB0 writes and the HQD poll all work), but
+  it is unexplained.
+- **A panic can lose an NVRAM note** that the 2gd nonce would otherwise make
+  readable (2gg: `rbgpu-boot` stayed at 3 although stage 1 ran 3 s earlier).
+  A note's write can also fail to survive a power cycle (2gc, measured by
+  comparing in-boot `nvram.txt` against the post-cycle read). Cause unknown.
+- **`rbgpu-diag` stopped reporting the frontier** after 2fa rate-limited the
+  refresh. Values that matter must ride an NVRAM note, not the diag table.
+- **The published `RBGPULog` and `log.txt` can disagree** within one capture
+  (2fx). Noted, not chased.
+
+### Debts — bypasses that have never been justified
+
+- **2am / 2an / 2ao**: `_gc_fw_autoload_is_completed`,
+  `_gc_check_register_equal_ext` (RLC safe mode) and
+  `_sdma_5_2_1_fw_autoload_is_completed` are all forced true, blanket. The
+  SDMA one is directly relevant to the current frontier.
+- **2cc**: `AMDVCN2EncChannel::allocateMemoryResources` stubbed to true.
+- **2be**: the accelerator's `stop()` patched to RET (a trap-3 guard whose
+  cause was never understood).
+- **2ct**: the display pipe is refused outright.
+- **2cp**: `waitForActiveValue`'s `bounded` parameter forced true. This one is
+  a restoration of Apple's own 100 ms cap, not a bypass, and 2fi measured the
+  poll exiting on its first iteration anyway.
 
 ### Not started at all
 
-Display. DCN 3.1.2 vs Navi 21's DCN 3.0; `IOAccelDisplayMachine::
-found_framebuffer` is hooked to refuse the pipe (2ct) so armed boots survive.
-`-rbgpudisplaypipe` restores Apple's behaviour. This is a second project of
-comparable size — do not imply an accelerated desktop is near.
-
-**`-rbgpunodisppanic` must stay OUT of boot-args.** It publishes
-`IOPCITunnelled`, which is what killed the UI in 2cr–2cv.
+Display, VCN, GFX DPM, any GPU client. No boot has reached a desktop with the
+accelerator powered since 2em.
 
 ---
 
 ## 5. The recurring error — read this before concluding anything
 
-**Ten times** a conclusion has been drawn from a value without first
-establishing what makes that value meaningful, or an instrument has dropped
-the very result it was built to capture. Withdrawn or lost:
-2dk ("seg0 decodes" — 0 at both bases), 2dl ("MEC fetched" — a fill pattern),
-2dm ("queue never programmed" — wrong HQD window), 2do (PQ_BASE expected to
-equal the MC address), 2dp (measured before the doorbell), 2dq (narrated its
-own hook's substituted value as a hardware result), 2ds–2dv (read a jump
-direction backwards and then hooked gates for a fault that did not exist),
-2dw (13 small-integer hits read as a located write), and 2dz/2ea (tested
-`status & 1` as a fault-valid bit when bit 0 is MORE_FAULTS, so a genuine
-0x9ba fault was logged as "nothing latched").
+**Twenty-one recorded instances.** The shape is always the same: *a value is
+read without first establishing what would make it meaningful*, or *absence is
+read as a result*, or *a table is built from n=1 rows*.
 
-The ninth one happened **inside the code written to prevent the other eight**.
-Writing a precondition into the log does not help if the precondition itself
-is guessed.
+Withdrawn conclusions, each once written up as a finding:
 
-The tenth is the same silent-cap bug for the third time, in the third buffer:
-the diag table at 96 (2db), at 192 (2ds), and now the **512-byte NVRAM
-summary**, which truncated the 2eb boot mid-key at `mc` and lost all six
-`vm_*` values. Every milestone appends its new keys to the END of the list,
-which is precisely where truncation eats them — so the summary systematically
-drops the one experiment it was written for. 2ec emits a **hot list first**
-and prefixes `d=<n>` with the number of keys that did not fit, so a truncated
-summary says so. When a milestone starts, its keys go in the hot list; when
-it is answered, they move down.
+```
+2dk  "seg0 = 0x1260 decodes"        tested != 0xffffffff; both bases read 0
+2dl  "the MEC fetched a packet"     0xdef0def0 was a fill pattern
+2dm  "the KIQ queue was never programmed"   wrong HQD window (GRBM_GFX_CNTL)
+2do  "the PQ_BASE mismatch is a fault"      GPUVM VA vs physical MC address
+2dp  "nothing was submitted"        measured before the doorbell
+2dt  "+0xe0 == -1 means no writeback"       the jump was read backwards
+2ee  "neither page is a page directory"     the instrument never read memory
+2eh  "TTL has no GART table"        asked before the handle existed
+2ej  "the page table has no valid entries"  read the wrong 2 MB of it
+2ek  "the ring PTE is unreadable"   read before the HQD probe ran
+2ev  the seven-boot span table      seven single samples read as causal
+2es  "the refresh thread blocked"   it was looping, not blocked
+2eu  "the hang is in initGraphicsMQD"       it was our own register dump
+2dq  "the CP executed the packet"   it fetched, faulted and discarded
+2fo  "the gate trail was the wedge" one boot read as a rule; 2fs refuted it
+2fe  "three mapQueues calls remain" 0x348 is a loop BOUND, not a count
+2gc  "a constant command 7"         read pair[0] only; arg1 is 0x7 then 0xa
+2fu  third boot's `s=1` read as evidence    overwrite var, no nonce
+```
 
-Corollary that is procedural, not technical: **NVRAM is the fallback, not the
-record.** The full 320-entry table lives in the boot's own IORegistry and dies
-with it. Run `tools/plugin_check.sh` while still in the armed boot.
+### The rules this produced, in force
 
-Operational rules that actually catch it:
-
-- State in the code what would have to be true for the reading to mean
-  anything, and **log it when it is not**. This caught the last three.
-- A diagnostic that substitutes its own return value must never narrate that
-  value as a hardware result.
-- `!= 0` and `!= 0xffffffff` are not evidence a register decoded.
-- Prefer a comparison with a second, independently-derived number. The ring
-  fault is credible because two registers agreed to **40 bits** under their
-  own conventions; the 2dw page scan was not, because 13 dwords in a page
-  equalled 1.
-- When Apple's code demonstrably works on Navi 21, a theory that it is
-  structurally broken needs very strong evidence. Prefer chip-specific
-  explanations (addresses, page tables, firmware versions).
-- Diag keys and the log must BOTH carry a result. The 512-line ring wraps
-  during the 5 s stamp wait and evicts ~500 lines; counters in NVRAM are what
-  survive.
+1. **Say in the code what would have to be true for a reading to mean
+   anything, and log it when it is not.**
+2. **Absence is not a result.** Every path out of a probe writes a record
+   naming which path it took.
+3. **A measurement placed behind a varying gate inherits the variance** (2fd).
+   Put probes where the code always reaches.
+4. **A diagnostic that substitutes its own value must never narrate that value
+   as a hardware result** (2cy cost fifteen milestones).
+5. **An overwrite NVRAM variable is this boot's only if `b=` is new** (2gd).
+6. **One variable per boot.**
+7. **The instrument is a suspect.** Two panics and ~17 boots in the 2e/2f
+   family were the measuring apparatus, not the chip.
+8. **Never route a symbol unless `nm -m build/re/<kext>` shows it DEFINED
+   there** (milestone 2c: `solveSymbol` returns a bare KASLR slide for
+   imports).
+9. **Before routing a symbol, disassemble its first 16 bytes and refuse if a
+   rel8/rel32 branch begins within the first 5** (2gb: Lilu copies displaced
+   instructions byte-for-byte into a trampoline, so a short branch keeps its
+   original displacement and lands in Lilu's own buffer).
+10. **A NULL check is not a pointer check.** Validate derived pointers as
+    kernel VAs (`>= 0xffffff8000000000`) before dereferencing (2gh).
 
 ---
 
 ## 6. Procedure — who runs what
 
-**Claude never runs** `tools/load.sh`, `tools/unload.sh`, `tools/efi.sh`, and
-never asks for the password. Claude may commit freely; **pushing needs
-asking**. Deliberate diagnostic panics are off the table (user's decision,
-2026-10-12).
+**Claude never runs `efi.sh`, `load.sh` or `unload.sh`, and never asks for the
+password.** Claude may commit at any time without asking; **pushing needs
+asking**. Loading or unloading a kext needs asking. Deliberate diagnostic
+panics are off the table (user's decision, 2026-10-12). Adding an SMU message
+group is the user's decision.
 
-Claude's loop: implement → `make plugin` (hosttest must pass) → commit → give
-the user the build UUID and the commands below → read the resulting log.
-
-The user runs:
+### Build
 
 ```
-sudo tools/efi.sh install
-sudo tools/efi.sh status          # check the UUID matches build/out
-sudo nvram rbgpu-arm=1 && sudo reboot
+make plugin          # the Lilu plugin. `make kext tools` does NOT rebuild it.
+make hosttest        # must pass before any load
+dwarfdump --uuid build/out/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU
 ```
 
-Arming is **one-shot**: the peer consumes `rbgpu-arm` and flushes the removal
-immediately, so a panic or hang comes back up unarmed. A plain reboot after an
-armed boot is safe.
+**Always check the UUID moved.** Two boots have been lost to a stale build.
 
-**While still in the armed boot** — over SSH (10.0.0.69) or at its desktop,
-BEFORE rebooting:
+### Arm a boot
 
 ```
-tools/plugin_check.sh             # writes logs/<timestamp>-plugin/
+sudo tools/efi.sh install && sudo tools/efi.sh status
+sudo tools/efi.sh on && sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
-This is the step that matters. `RBGPUDiag` (320 entries) and `RBGPULog` live
-only in that boot's IORegistry and die with it; the NVRAM summary is a
-512-byte fallback that cannot hold them. Skipping it is what lost 2eb.
+Arming is one-shot: the peer consumes `rbgpu-arm` and flushes the removal
+immediately, so a panic reboot comes up unarmed. **After a panic, check
+`nvram rbgpu-arm` anyway** — 2gg found it still at 1.
 
-Then, from any later boot:
-
-```
-nvram rbgpu-diag                  # this boot (d=<n> = keys that did not fit)
-nvram rbgpu-diag-prev             # the previous boot (rotation keeps two)
-```
-
-Current boot-args (from the 22:54 install's config.plist backup — verify, do
-not assume):
+### Read a boot — in the ARMED boot, before any reboot
 
 ```
-keepsyms=1 -vi2c-force-polling -lilubetaall msgbuf=1048576 -rbgpusync570
--rbgpuspoofttl amfi_get_out_of_my_way=0x1 amfi=0x80 alcid=66 -v -rbgpupsphw
--nvoff -wegnoegpu -rbgpusmubringup -rbgpustampwait
+tools/plugin_check.sh
 ```
 
-Plugin flags in use: `-rbgpusync570`, `-rbgpuspoofttl`, `-rbgpupsphw`,
-`-rbgpusmubringup`, `-rbgpustampwait`. Off-switch `-rbgpuoff` rescues a
-machine. `-rbgpudisplaypipe` and `-rbgpunodisppanic` are not set and should
-stay that way.
+Every readable boot in the 2g family was readable because this ran in the
+armed boot. It writes `logs/<timestamp>-plugin/` with `nvram.txt`, `log.txt`,
+`pci.txt`, `igpu.txt`, `peer.plist`. A 0-byte `pci.txt` means the IGPU
+registry subtree was locked — the hard-wedge fingerprint.
 
-**Before interpreting ANY boot, check all three:** installed UUID vs
-`build/out`; whether `rbgpu-arm` was left set from an earlier attempt; which
-plugin boot-args are actually in config.plist. Boots have been wasted on each.
+### Before interpreting ANY boot
 
-### Reading a log
+```
+kmutil showloaded | grep rembrandt      vs  dwarfdump --uuid build/out/...
+nvram rbgpu-boot                        a NEW sequence, or the notes are stale
+nvram rbgpu-diag | head -c 60           armed=1 means this boot was armed
+nvram boot-args                         which flags were ACTUALLY set
+ls -lt /Library/Logs/DiagnosticReports/*.panic | head
+```
 
-`logs/<ts>-plugin/peer.plist` holds `RBGPULog` (512-entry ring) and
-`RBGPUDiag` (cap 320, logs loudly when full — absent now really means absent).
-`tools/re/ptrsym.py` names pointers inside loaded AMD kexts.
+### Rescue
+
+`-rbgpuoff` in boot-args: the kext still loads, no peer instance exists.
+
+### NVRAM channels
+
+```
+rbgpu-boot        per-boot sequence counter; every note is prefixed b=<n>
+rbgpu-prog        stage note, overwritten (s=1 powerUpHW ENTER ... s=6)
+rbgpu-sdma        the SDMA engine map, written once at stage 4 (2gf)
+rbgpu-prog2       the +15/+35/+65 s samplers (2fy), stage + log sequence
+rbgpu-gate        the gate trail - OFF while -rbgpunogates is set
+rbgpu-diag/-prev  the diag summary; stops reporting the frontier (see §4)
+rbgpu-arm         one-shot arming
+```
 
 ---
 
-## 7. The next lever is probably source comparison
+## 7. Where to go after the 2gh boot
 
-The ring-fault lead did **not** collapse — 2ea dated it to the submission. But
-whichever way 2eb's range test goes, grinding more GC registers is unlikely to
-explain *why* Apple's `startKIQ` command-8 path leaves the KIQ ring at a GPUVM
-address that does not translate on this chip.
-
-The cheaper lever is reading how amdgpu does it for yellow_carp and comparing:
-`gfx_v10_0.c` (KIQ/MQD setup, `gfx_v10_0_kiq_init_queue`, `nv_grbm_select`),
-`amdgpu_gart.c` and `gmc_v10_0.c` (GART aperture, VMID 0 context setup,
-`gmc_v10_0_vm_init`), plus `amdgpu_ring.c` for where the ring is expected to
-live. The question to answer from source: for GC 10.3 on an APU, is the KIQ
-ring addressed through GART/GPUVM or physically, and what sets up the mapping
-Apple is assuming exists.
-
-Precedent: the SMU address bug (2dh/2di) was solved exactly this way, by
-reading `yellow_carp_ppt.c:159-164` and noticing Linux puts the SMU tables in
-VRAM — not by another register probe.
-
-Fetch Linux sources from torvalds/linux and record the commit in
-docs/linux-ref/UPSTREAM.md.
+- **If `post=1100`**: the instance index decides. Make `allocateHWEngines`
+  build one SDMA engine, or make `startHWEngines` walk one. `hw->0xc2` cannot
+  express 1, so this is a patch to the walk or the constructor, not the
+  constant.
+- **If `post=1000 fail@1`**: the engine object decides. Spend one boot with
+  `-rbgpusdmadesc` to get `ch->0x48` and `ch->0xd0` per queue, then compare
+  engine[0]'s with engine[1]'s — those two fields are the only part of the
+  request the pair arguments do not carry.
+- **Either way, after `startHWEngines` returns TRUE**: `powerUpHW` succeeds
+  for the first time, and `-rbgpuforce1b` becomes the next deliberate step
+  (request 0x1B with the hardware fully brought up has never been sent).
+- **Standing, further out**: `gfx_min = gfx_max = 0`, the 2am/2an/2ao
+  bypasses, and the display path.

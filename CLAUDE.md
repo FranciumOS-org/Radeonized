@@ -1,10 +1,10 @@
 # RembrandtGPU — notes for Claude
 
 > **New session / new account: read `docs/HANDOFF.md` FIRST.**
-> It is the current *state* — what is settled, what is open, the pending
-> experiment, the procedure, and the eight withdrawn conclusions this project
-> has produced by reading a value without first establishing what makes it
-> meaningful. The rest of this file is the chronological *evidence journal*:
+> It is the current *state* (rewritten 2026-10-15 for 2gh) — what is settled,
+> what is open, the pending experiment, the procedure, and the twenty-one
+> instances of this project reading a value without first establishing what
+> makes it meaningful. The rest of this file is the chronological *journal*:
 > authoritative for what was measured, in order, and not to be trimmed.
 > `docs/HANDOFF-FULL.md` is a stale dump from 2026-10-05 — ignore it.
 
