@@ -6948,4 +6948,4 @@ rides out on the stage-4 note as `skip0=N`.
 0x1B stays held: the hold now triggers on either SDMA boot-arg, so a boot that
 finally passes `powerUpHW` does not also become the first to send it.
 
-Build: UUID ABE9CEEF, hosttest passes.
+Build: UUID 2D8B1F7C, hosttest passes.
