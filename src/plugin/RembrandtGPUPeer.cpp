@@ -1384,6 +1384,11 @@ void RembrandtGPUPeer::handlePostRegister() {
                   "enabled, and 2fo shows this call does not return in that "
                   "state (-rbgpuforce1b overrides)");
         rbgpu_diag_set_num("req1b_skipped", 1);
+        // 2gb: set the stage the 2fy samplers read, too. The 00:37 boot wrote
+        // s=5 here at 16.58 s while all three samples still reported s=4,
+        // because only the kern_start helper was updating g_rb_prog_stage.
+        // Harmless, but a record that disagrees with itself is a trap.
+        g_rb_prog_stage = 5;
         rbgpu_nvram_note("rbgpu-prog", "s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)");
         g_rb_peer_stage |= 0x10;
         return;
@@ -1391,6 +1396,7 @@ void RembrandtGPUPeer::handlePostRegister() {
 
     rbgpu_log("handlePostRegister: sending Request 0x1B (Controller Enabled)");
     uint32_t reqControllerEnabled = 0x1B;
+    g_rb_prog_stage = 5;
     rbgpu_nvram_note("rbgpu-prog", "s=5 0x1B SENT - no s=6 means it hangs here");
     IOReturn ret1B = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
     rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
@@ -1399,6 +1405,7 @@ void RembrandtGPUPeer::handlePostRegister() {
     g_rb_peer_stage |= 8;
     {
         char buf[96];
+        g_rb_prog_stage = 6;
         snprintf(buf, sizeof(buf), "s=6 0x1B RETURNED 0x%08X", ret1B);
         rbgpu_nvram_note("rbgpu-prog", buf);
     }
