@@ -23,6 +23,8 @@ void rbgpu_heartbeat_start(void);
 // the chain is stopped or crawling without the user running anything.
 void rbgpu_progwatch_start(void);
 extern volatile uint32_t g_rb_prog_stage;
+extern volatile uint32_t g_rb_step;   // 2fz: lock-free, log-free position marker
+#define RB_STEP(n) do { g_rb_step = (n); } while (0)
 void rbgpu_diag_set_str(const char *key, const char *val);
 void rbgpu_diag_inc(const char *key);
 

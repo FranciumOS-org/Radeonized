@@ -46,6 +46,7 @@ struct DiagEntry {
 };
 
 static IOLock           *g_diagLock = nullptr;
+static volatile bool     g_diagFullPending = false;  // 2fz: logged outside the lock
 static RembrandtGPUPeer *g_peer     = nullptr;
 
 static LogEntry  g_logRing[RBGPU_RING_SIZE];
@@ -102,9 +103,20 @@ static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
     // mean absent"; the 2ds boot filled 192 exactly and lost stamp_wb_e0 the
     // same way. Say so once, loudly, instead of letting the next reader infer
     // that a key was never set.
-    static bool s_warned = false;
-    if (!s_warned) {
-        s_warned = true;
+    // 2fz: this used to call rbgpu_log from here, and every caller of this
+    // function holds g_diagLock. rbgpu_log takes g_diagLock too, and an IOLock
+    // is NOT recursive: the same thread blocking on a lock it already holds
+    // blocks FOREVER, with no panic and no log line. That is a permanent hard
+    // stop of exactly the shape this milestone family has been chasing - and
+    // it fires only when the table first reaches the cap, once per boot, which
+    // would make it look non-deterministic.
+    //
+    // It is NOT what stopped the 2fy boot: that boot's table held 246 of 320
+    // and "DIAG TABLE FULL" has never appeared in any log this project has
+    // captured. It is a live bug found by reading, with the table now at 246
+    // and climbing, and it is fixed here rather than left to fire later.
+    g_diagFullPending = true;
+    if (false) {
         rbgpu_log("*** DIAG TABLE FULL at %d entries - '%s' and every later key is "
                   "being DROPPED. Absent no longer means absent; raise "
                   "RBGPU_MAX_DIAGS.", RBGPU_MAX_DIAGS, key);
@@ -208,6 +220,12 @@ void rbgpu_diag_set_num(const char *key, uint64_t val) {
         IOLockLock(g_diagLock);
         rbgpu_diag_set_num_locked(key, val);
         IOLockUnlock(g_diagLock);
+    }
+    if (g_diagFullPending) {
+        g_diagFullPending = false;
+        rbgpu_log("*** DIAG TABLE FULL at %d entries - keys are being DROPPED. "
+                  "Absent no longer means absent; raise RBGPU_MAX_DIAGS.",
+                  RBGPU_MAX_DIAGS);
     }
     if (g_peer) {
         g_peer->scheduleRefreshDiag();
@@ -1035,6 +1053,14 @@ static IOSimpleLock     *g_rbgpuProgLock = nullptr;
 static char              g_rbgpuProgText[192];
 volatile uint32_t        g_rb_prog_stage = 0;
 
+// 2fz: a bare volatile store - no lock, no log, no NVRAM. Every breadcrumb
+// this project has put inside the chain until now went through rbgpu_log or
+// rbgpu_diag_set_num, and BOTH take g_diagLock; the gate trail wrote flash.
+// A plain store takes nothing, so it cannot itself be what stops the thread,
+// and the 2fy timers - which are measured to fire on the dot while the chain
+// is frozen - read it from outside.
+volatile uint32_t        g_rb_step = 0;
+
 static void rbgpu_prog_action(thread_call_param_t p0, thread_call_param_t) {
     // Samples the stage AND the monotonic log sequence. The stage is coarse -
     // the entire startHWEngines walk sits between stage 2 and stage 3 - so the
@@ -1050,14 +1076,15 @@ static void rbgpu_prog_action(thread_call_param_t p0, thread_call_param_t) {
     IOSimpleLockLock(g_rbgpuProgLock);
     size_t n = strlen(g_rbgpuProgText);
     snprintf(g_rbgpuProgText + n, sizeof(g_rbgpuProgText) - n,
-             "%s%c=s%u/L%llu@%llums", n ? " " : "",
-             static_cast<char>('a' + phase), g_rb_prog_stage,
+             "%s%c=s%u/S%u/L%llu@%llums", n ? " " : "",
+             static_cast<char>('a' + phase), g_rb_prog_stage, g_rb_step,
              g_rbgpuLogSeq, now_ns / 1000000ull);
     IOSimpleLockUnlock(g_rbgpuProgLock);
 
     rbgpu_nvram_note("rbgpu-prog2", g_rbgpuProgText);
-    rbgpu_log("2fy: sample %c stage=%u logseq=%llu",
-              static_cast<char>('a' + phase), g_rb_prog_stage, g_rbgpuLogSeq);
+    rbgpu_log("2fz: sample %c stage=%u step=%u logseq=%llu",
+              static_cast<char>('a' + phase), g_rb_prog_stage, g_rb_step,
+              g_rbgpuLogSeq);
 }
 
 void rbgpu_progwatch_start(void) {
