@@ -5261,6 +5261,14 @@ static bool hooked_hw_startHWEngines(void *hw) {
             snprintf(buf + n2, sizeof(buf) - n2, " skip0=%u", g_rb_2ge_saved_q);
         }
         rbgpu_prog_2fs(4, buf);
+        // 2gf: the SAME string to its own variable. `rbgpu-prog` is a single
+        // overwrite slot tracking progress, so the stage-5 note (the 0x1B
+        // decision, which always follows) destroys the engine map the stage-4
+        // note carried - and the 2ge boot was lost to exactly that: `b=2`
+        // proved the note was this boot's and said only "powerUpHW failed",
+        // which both of 2ge's branches produce. One variable carrying two
+        // purposes, which is the 2fq mistake in a new place.
+        rbgpu_nvram_note("rbgpu-sdma", buf);
     }
     return ret;
 }

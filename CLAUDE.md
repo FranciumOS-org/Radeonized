@@ -6949,3 +6949,73 @@ rides out on the stage-4 note as `skip0=N`.
 finally passes `powerUpHW` does not also become the first to send it.
 
 Build: UUID 2D8B1F7C, hosttest passes.
+
+### 2ge answered HALF on hardware (2026-10-15): startHWEngines still returns 0
+
+Build and arming checked first, per the 2cu/2cv rule. No `plugin_check`
+capture from the armed boot (newest log dir is still the 2gd boot's), so the
+notes are the whole record — and this time the nonce makes one of them count.
+
+```
+kmutil showloaded -> 2D8B1F7C == build/out (2ge)
+boot-args          -> ... -rbgpunogates -rbgpusdma0skip   (and NO -rbgpusdmainst0)
+rbgpu-boot         -> 2
+rbgpu-prog         -> b=2 s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)
+rbgpu-prog2        -> a=s1/L671@29535ms ...   (no b= prefix at all, so pre-2gd)
+no .panic          -> newest is still 2026-10-14 20:33
+```
+
+**`b=2` is a sequence never recorded before, so `rbgpu-prog` IS this boot's**,
+and the boot-arg swap took. What it establishes, with no inference:
+
+- **`powerUpHW` failed, so `startHWEngines` returned 0 again.** Had the skip
+  made the walk succeed, 2gc's hold would have written
+  `s=5 powerUpHW OK; 0x1B HELD` instead. **The engine[0] skip did not make
+  the walk pass.**
+
+**What it does NOT establish, and the fault is mine.** 2ge's decision table
+needs the `post=` flags, and both of its branches — `post=1100` (engine[1]
+succeeded once asking first, engine[2] then failed) and `post=1000 fail@1`
+(engine[1] failed even asking first) — produce `ret=0` and therefore the exact
+same stage-5 text. The map lived in the stage-4 note, and **stage 5 always
+follows and overwrites it**, because `rbgpu-prog` is a single overwrite slot
+carrying both the progress counter and the answer. One variable, two purposes:
+the 2fq mistake in a new place, and it cost this boot's answer.
+
+Not claimed: that `rbgpu-prog2`'s staleness is another lost write. It carries
+no `b=` at all, so it predates 2gd — and the samplers fire at ~29/49/79 s of
+uptime, so a boot rebooted before 29 s simply never writes it. With no in-boot
+capture the two are indistinguishable, unlike the 2gc case where the in-boot
+`nvram.txt` held the new value and the post-cycle read did not.
+
+## 2gf (2026-10-15): the engine map gets its own variable
+
+One line. The stage-4 string now also goes to **`rbgpu-sdma`**, which no later
+stage overwrites, so the map survives the stage-5 note that always follows it:
+
+```
+rbgpu-boot = 3
+rbgpu-prog = b=3 s=5 ...                        the progress counter
+rbgpu-sdma = b=3 c2=1 n=4 map=.... allok ret=0 pre=0000 post=.... skip0=2
+```
+
+`tools/plugin_check.sh` captures it between `rbgpu-prog` and `rbgpu-prog2`.
+
+Nothing else changes: the 2ge skip stays exactly as built behind
+`-rbgpusdma0skip`, the 2gc rewrite stays behind `-rbgpusdmainst0` (still out),
+and the question 2ge asked is unchanged and now answerable from a boot with no
+log at all.
+
+```
+post=1100 or further   engine[1] succeeds once it asks FIRST - the failure is
+                       ORDINAL and instance 1 is fine
+post=1000 fail@1       it fails even asking first, so the instance really is
+                       absent and 2gc's three supports stand
+post=0000 fail@0       the skip broke engine[0], which Apple's own
+                       trivial-TRUE path should make impossible
+skip0 absent           the skip never ran and the boot says so, rather than
+                       leaving it to be inferred
+```
+
+Build: UUID 8BBC5A21, hosttest passes. Boot-args unchanged from the 2ge boot —
+`-rbgpunogates` and `-rbgpusdma0skip` stay, `-rbgpusdmainst0` stays out.
