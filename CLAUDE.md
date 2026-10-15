@@ -6253,3 +6253,67 @@ stage 1 stays at `powerUpHW` ENTER and the timer is armed beside it.
 
 Build: UUID 3B9D0163, hosttest passes. Boot-args unchanged - `-rbgpunogates`
 stays.
+
+### 2fx answered on hardware (2026-10-14): the SECOND sample never fires
+
+logs/20261014-200821-plugin, `plugin_check` in the armed boot, build checked
+(3B9D0163 == build/out), `rbgpu-diag` armed=1 `d=1`:
+
+```
+rbgpu-prog  = s=2 doStart RETURNED 1          <- the FOURTH chain completion
+rbgpu-prog2 = a=s2/L748@27786ms               <- one sample, again
+log.txt     = 139 lines, ends at "2fp: startHWEngines will walk 4 entries"
+pci.txt     = 389120 bytes                    <- healthy, as in the 2fw boot
+```
+
+The sample carries `L748`, so the log-sequence counter works; the stage is 2,
+so `doStart` had already returned by 27.8 s. **And the `b` sample at +35 s did
+not land** - 20 seconds after the one that did.
+
+**That is three boots now, and it is the finding.** 2fw armed +30/+90 and lost
+the second; 2fx armed +15/+35/+65 and lost the second and third. Every FIRST
+shot landed within 6 ms of its deadline; no later shot has ever landed, at a
+60 s gap or a 20 s gap alike. The interval is not the variable.
+
+The one structural difference between the shot that works and the shots that
+do not: **the later ones are armed by `thread_call_enter_delayed` called from
+inside that same `thread_call`'s own handler.** Re-entering a thread_call from
+its own callback is exactly where that call is already marked running, and the
+completion path can clear the deadline the handler just set. So this is a
+mechanism, not a guess, and three boots at two intervals are its evidence.
+
+Worth recording separately: the published `RBGPULog` and `log.txt` disagree in
+this capture - the plist holds 394 entries ending at 12.72 s while log.txt
+holds 139 ending at 14.75 s. Two snapshots of one ring cannot both be right,
+so one of plugin_check's two reads is partial. Noted, not chased; it changes
+no conclusion here because `rbgpu-prog2` is NVRAM and neither is involved.
+
+Also reproducible across all four completing boots (2ft, 2fw-B, 2fx): the log
+ends at the `2fp` count line, with the per-engine lines never published.
+
+## 2fy (2026-10-14): three timers, none of which re-arms itself
+
+`rbgpu_progwatch_start` allocates **three separate `thread_call`s** and arms
+all three from the calling thread at +15 / +35 / +65 s, each carrying its own
+phase index as its parameter. The handler samples, writes and returns -
+nothing re-arms anything, so the failure mode that cost 2fw and 2fx their
+second samples cannot occur. The shared text buffer gets an `IOSimpleLock`,
+since three independent timers can now land close together.
+
+The log line says so in those words: with this shape, a missing sample means
+**the timer did not fire**, which is a different and much stronger statement
+than 2fx could make.
+
+```
+a=s2/L748  b=s2/L748    STOPPED - nothing logged in 20 s, and the 2fv window
+                        (initComputeMQD(5) + one GPU submit) is a real location
+a=s2/L748  b=s2/L961    CRAWLING - the stage has not moved but the thread is
+                        still running code, and every endpoint reading in this
+                        project is void for locating anything
+a only, again           the timers themselves do not survive the boot, which
+                        is then its own finding and needs a channel that is
+                        not a thread_call
+```
+
+Build: UUID 3D6F354F, hosttest passes. Boot-args unchanged - `-rbgpunogates`
+stays. The chain region still contains no flash commit of ours.
