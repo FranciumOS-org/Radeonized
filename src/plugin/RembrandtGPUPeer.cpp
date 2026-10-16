@@ -72,7 +72,13 @@ static char      s_capture_buf[RBGPU_BUF_SIZE];
 static char      s_line_scratch[RBGPU_LINE_MAX];
 
 extern uint64_t g_guard_calls;
-extern volatile int g_rb_2gn_in1b;   // 2gn: 0x1B post-gate record armed
+extern volatile int g_rb_2gn_in1b;
+// 2gp: the event machine's stamp-wait counters (kern_start.cpp).
+extern volatile uint32_t g_rb_2gp_fas_n;
+extern volatile uint32_t g_rb_2gp_wfs_calls;
+extern volatile uint32_t g_rb_2gp_wfs_first;
+extern volatile uint32_t g_rb_2gp_wfs_last;
+extern volatile uint32_t g_rb_2gp_restarts;   // 2gn: 0x1B post-gate record armed
 
 static void initDiagLock() {
     if (!g_diagLock) {
@@ -1051,7 +1057,7 @@ void rbgpu_heartbeat_start(void) {
 static thread_call_t     g_rbgpuProgCalls[3] = { nullptr, nullptr, nullptr };
 static volatile bool     g_rbgpuProgOn   = false;
 static IOSimpleLock     *g_rbgpuProgLock = nullptr;
-static char              g_rbgpuProgText[192];
+static char              g_rbgpuProgText[384];   // 2gp: three samples now carry the event-machine counters
 volatile uint32_t        g_rb_prog_stage = 0;
 
 // 2fz: a bare volatile store - no lock, no log, no NVRAM. Every breadcrumb
@@ -1076,10 +1082,17 @@ static void rbgpu_prog_action(thread_call_param_t p0, thread_call_param_t) {
 
     IOSimpleLockLock(g_rbgpuProgLock);
     size_t n = strlen(g_rbgpuProgText);
+    // 2gp: the event-machine counters ride out here rather than on marks of
+    // their own - waitForStamp runs thousands of times a second, so a write
+    // per call would be the 2ez contention and the 2fo wedge at once. This
+    // sampler is measured to fire while that thread spins (2gk).
     snprintf(g_rbgpuProgText + n, sizeof(g_rbgpuProgText) - n,
-             "%s%c=s%u/S%u/L%llu@%llums", n ? " " : "",
+             "%s%c=s%u/S%u/L%llu@%llums W=%u r0=%#x rN=%#x R=%u N=%u",
+             n ? " " : "",
              static_cast<char>('a' + phase), g_rb_prog_stage, g_rb_step,
-             g_rbgpuLogSeq, now_ns / 1000000ull);
+             g_rbgpuLogSeq, now_ns / 1000000ull,
+             g_rb_2gp_wfs_calls, g_rb_2gp_wfs_first, g_rb_2gp_wfs_last,
+             g_rb_2gp_restarts, g_rb_2gp_fas_n);
     IOSimpleLockUnlock(g_rbgpuProgLock);
 
     rbgpu_nvram_note("rbgpu-prog2", g_rbgpuProgText);

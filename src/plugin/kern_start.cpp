@@ -3174,6 +3174,12 @@ static void (*orig_uqm_setSchedulerResources_2go)(void *, uint16_t, uint32_t,
                                                   uint32_t, uint32_t) = nullptr;
 static bool (*orig_hiq_submitSetResourcesPacket_2go)(void *, uint16_t, uint32_t) = nullptr;
 static bool (*orig_hiq_submitFrame_2go)(void *, bool) = nullptr;
+// 2gp: the event machine's stamp wait, which the 2go trail localised by
+// elimination. waitForStamp runs at thousands of calls a second, so it gets
+// counters and NOT a log line or an NVRAM write (the 2ez contention).
+static uint32_t (*orig_evm_finishAllStamps_2gp)(void *) = nullptr;
+static uint32_t (*orig_evm_waitForStamp_2gp)(void *, int, uint32_t, uint32_t *) = nullptr;
+static void (*orig_evm_handleFinishChannelRestart_2gp)(void *, int, int, uint64_t) = nullptr;
 
 // 2dv (2026-10-12): counting is not enough - track WHICH channel.
 //
@@ -3457,6 +3463,115 @@ static bool hooked_hiq_submitFrame_2go(void *ch, bool submit) {
     // `stw:` marks split those three.
     rbgpu_2gn_mark(ret ? "hsf:R=1" : "hsf:R=0");
     return ret;
+}
+
+// 2gp (2026-10-16): the 2go trail named the hang by elimination, and the
+// chain under it is now read end to end.
+//
+// `rbgpu-1b` = `b=10 perf:E perf:R hds:E rt:E vmm:E vmm:R rt:R
+//               ssr:E(0,0x3b,0,0xc) hiq:E hsf:E(1) stw:E stw:R=1 hsf:R=1
+//               hiq:R=1 ssr:R hds:R` - every mark returned, `ei:E` absent.
+// So hardwareDidStart RETURNS and the stop is the one call between it and
+// enableInterrupts: `(accel->0x380)->vtable[0x158]()` at 0xbe418b1.
+//
+// That object and that slot resolve with no boot spent:
+//
+//   accel->0x380 = this->vtable[0x880]() in IOGraphicsAccelerator2::start
+//                  (0x14e4e4be) -> IOGraphicsAccelerator2::createEventMachine
+//                  -> vtable[0x888] = AMDGraphicsAccelerator::newEventMachine
+//                  -> new AMDRadeonX6000_AMDAccelEventMachine (0xd58 bytes)
+//   call offset 0x158 -> dump +0x168 = AMDAccelEventMachine::finishAllStamps
+//
+// AMDAccelEventMachine::finishAllStamps (0xbe4b2c2) is a tracing wrapper: a
+// kdebug pair around a NON-virtual call through the pointer at 0xbf90278 ->
+// __ZTV24IOAccelEventMachineFast2, dump +0x168 (its sibling finishStamp uses
+// +0x160 the same way, which is what proves these are dump offsets and not
+// address-point offsets). The body is
+// IOAccelEventMachineFast2::finishAllStamps (0x14e43a1e):
+//
+//   for (i = 0; i < this->0x30; i++)  sum += this->vt[0x150](i)
+//
+// - a BOUNDED loop over the stamp slots, calling finishStamp(i). And
+// IOAccelEventMachineFast2::finishStamp (0x14e438c6) is where the loop is:
+//
+//   submitted = this->[0xfc + i*24] ; completed = this->[0xf8 + i*24]
+//   if (submitted - completed <= 0)        return 0
+//   completed = *(this->0x28[i])           read the channel's fence
+//   if (submitted - completed <= 0)        return 0
+//   14e43975:  r = this->vt[0x238](i, submitted, &completed)
+//              if (r != 0) { handleFinishChannelRestart(r, i, 1); goto 975; }
+//
+// **The retry at 0x14e439a0 is unconditional and has no counter**, so any
+// nonzero return spins forever - and `vt[0x238]` (dump +0x248) is
+// AMDAccelEventMachine::waitForStamp (0xbe4b588), whose first two bails are
+// nonzero before touching anything:
+//
+//   this->0xd38 == 0                 -> 0xE0000001
+//   idx < 0, idx >= hw->0x1e78, or hw->0x1a78[idx] == NULL  -> 0xE00002C2
+//
+// That is a complete mechanism for 2gk's ~5600/s request-0x14 flood with no
+// progress: a wait that errors immediately, a channel restart that touches
+// registers (each register read going through isDeviceValid -> request 0x14,
+// 2gm), and a retry with nothing to break it.
+//
+// **NOT established, and this is what the boot decides:** which return code,
+// and therefore which of the two bails. Asserting one from the shape would be
+// the 2gc mistake; the counters name it.
+//
+// All three targets checked before a line was written: `nm -m` shows each
+// external and defined in its OWN kext's __TEXT (so routing by that kext's id
+// is legitimate under the milestone-2c rule, and handleFinishChannelRestart
+// is routed under IOAcceleratorFamily2, already in kextList since 2ct), and
+// rule 9 is clean on all three - pushes and movs for the first 16 bytes, the
+// first relative branch far outside the 5-byte patch window.
+//
+// **The channel is the prog2 sampler, not a mark.** waitForStamp runs
+// thousands of times a second, so a log line or an NVRAM write per call would
+// be the 2ez contention and the 2fo wedge at once. It gets plain counters;
+// the +15/+35/+65 s samplers carry them out, and those are measured to fire
+// while this very thread spins (2gk: all three landed with L advancing).
+volatile uint32_t g_rb_2gp_fas_n      = 0;   // this->0x30, the stamp count
+volatile uint32_t g_rb_2gp_wfs_calls  = 0;
+volatile uint32_t g_rb_2gp_wfs_first  = 0;
+volatile uint32_t g_rb_2gp_wfs_last   = 0;
+volatile uint32_t g_rb_2gp_restarts   = 0;
+
+static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {
+    if (evm) {
+        g_rb_2gp_fas_n = *reinterpret_cast<volatile uint32_t *>(
+            reinterpret_cast<uintptr_t>(evm) + 0x30);
+    }
+    char t[32];
+    snprintf(t, sizeof(t), "fas:E(n=%u)", g_rb_2gp_fas_n);
+    rbgpu_2gn_mark(t);
+    uint32_t ret = orig_evm_finishAllStamps_2gp
+                       ? orig_evm_finishAllStamps_2gp(evm)
+                       : 0;
+    // The 0 when orig is NULL is OURS; the mark carries the value either way.
+    char r[40];
+    snprintf(r, sizeof(r), "fas:R=%#x", ret);
+    rbgpu_2gn_mark(r);
+    return ret;
+}
+
+static uint32_t hooked_evm_waitForStamp_2gp(void *evm, int idx, uint32_t stamp,
+                                            uint32_t *out) {
+    uint32_t ret = orig_evm_waitForStamp_2gp
+                       ? orig_evm_waitForStamp_2gp(evm, idx, stamp, out)
+                       : 0;
+    // No log, no NVRAM: this is called thousands of times a second.
+    if (g_rb_2gp_wfs_calls == 0) { g_rb_2gp_wfs_first = ret; }
+    g_rb_2gp_wfs_last = ret;
+    g_rb_2gp_wfs_calls++;
+    return ret;
+}
+
+static void hooked_evm_handleFinishChannelRestart_2gp(void *evm, int a, int b,
+                                                      uint64_t c) {
+    g_rb_2gp_restarts++;
+    if (orig_evm_handleFinishChannelRestart_2gp) {
+        orig_evm_handleFinishChannelRestart_2gp(evm, a, b, c);
+    }
 }
 
 static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void *c, void *d) {
@@ -6774,11 +6889,18 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
         KernelPatcher::RouteRequest(
             "__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel11submitFrameEb",
             hooked_hiq_submitFrame_2go, orig_hiq_submitFrame_2go),
+        // 2gp: the event machine's stamp wait, where the 2go trail ends.
+        KernelPatcher::RouteRequest(
+            "__ZN35AMDRadeonX6000_AMDAccelEventMachine15finishAllStampsEv",
+            hooked_evm_finishAllStamps_2gp, orig_evm_finishAllStamps_2gp),
+        KernelPatcher::RouteRequest(
+            "__ZN35AMDRadeonX6000_AMDAccelEventMachine12waitForStampEijPj",
+            hooked_evm_waitForStamp_2gp, orig_evm_waitForStamp_2gp),
     };
-    if (patcher.routeMultiple(id, req_2go, 5, address, size)) {
+    if (patcher.routeMultiple(id, req_2go, 7, address, size)) {
         rbgpu_log("X6000: hooked RTHardware::hardwareDidStart + AMDHWVMM::postInit "
                   "+ setSchedulerResources + HIQ submitSetResourcesPacket + "
-                  "HIQ submitFrame (2go observe-only)");
+                  "HIQ submitFrame + finishAllStamps + waitForStamp (2go/2gp)");
     } else {
         rbgpu_log("X6000: FAILED to hook the 2go hardwareDidStart chain");
     }
@@ -7351,6 +7473,20 @@ void RGPU::processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address
         rbgpu_log("AccelFamily: FAILED to hook found_framebuffer (2ct) - an armed boot will "
                   "not reach a desktop");
         rbgpu_diag_set_num("found_fb_routed", 0);
+    }
+
+    // 2gp: count the channel restarts that finishStamp's unconditional retry
+    // at 0x14e439a0 drives. External and defined in this kext's __TEXT, and
+    // rule-9 clean (pushes and movs through +0xe).
+    KernelPatcher::RouteRequest req_2gp(
+        "__ZN20IOAccelEventMachine226handleFinishChannelRestartEiij",
+        hooked_evm_handleFinishChannelRestart_2gp,
+        orig_evm_handleFinishChannelRestart_2gp
+    );
+    if (patcher.routeMultiple(id, &req_2gp, 1, address, size)) {
+        rbgpu_log("AccelFamily: hooked handleFinishChannelRestart (2gp counter)");
+    } else {
+        rbgpu_log("AccelFamily: FAILED to hook handleFinishChannelRestart (2gp)");
     }
 }
 
