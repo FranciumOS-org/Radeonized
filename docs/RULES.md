@@ -7521,3 +7521,93 @@ record on this frontier, exactly as 2gd/2gf built them to be.
 Next step is a **reading job, not a boot**: disassemble what 0x1B does in
 `callPlatformFunction`'s dispatch, which HANDOFF §7 already named as the
 branch to take if 0x1B hung. No build, no boot-arg, no hardware.
+
+## 2gl (2026-10-16): request 0x1B disassembled — no boot spent
+
+`AMDGraphicsAccelerator::callPlatformFunction` (0xbe4154e) dispatches on
+`(*(uint32 *)p1) - 1` through a jump table at **0xbe41ad4**, bounded at 0x1b
+so requests 0x01-0x1C are live and everything else takes the
+`0xE00002C7` default set at 0xbe415a7.
+
+**The table decode is cross-checked, not assumed.** It gives request 0x06 ->
+`0xbe41717`, and the 2ga panic frame reads `callPlatformFunction+0x21f` =
+`0xbe4176d`, which is the `callq powerUpHW` inside that case. An independent
+record landing inside the case the table predicts is what makes the rest of
+this readable.
+
+```
+req    target       what
+0x06   0xbe41717    powerUpHW            <- works, returns 0
+0x1B   0xbe417d0    Controller Enabled   <- does not return
+0x1C   0xbe4163c    the 0x1B sibling (power-manager request 0xB, not 0xA)
+0x02, 0x0B-0x0F, 0x12-0x18, 0x1A  ->  0xbe41aa8, the 0xE00002C7 default
+```
+
+### 0x06 against 0x1B, side by side
+
+Both open with the **same** four steps - a lock triple on `this+0x90` /
+`this->0x88`, a call into IOAcceleratorFamily2 at `0x14e551a6`, and
+`vtable[0x850]` with the same string - and then diverge completely:
+
+```
+0x06 (0xbe41717)                      0x1B (0xbe417d0)
+  r14 = 0          success up front     r14 = 0xE00002D8   a BAIL value
+  callq powerUpHW                       if (this->0x1f40)
+  this->0x1eb8 = 1                        sendRequestToPowerManager(
+  if (this->0x1a70)                           this->0x1ea0, 0xA, 0)
+    (0x1a70)->vtable[0x130](1)          <formatted call>(str, this->0x1e80+4)
+  vtable[0x858](str, 0)                 hw = this->0x1a38
+  callq 0x14e551b8   (family)           if (!hw)            -> 0xE00002D8
+  <stub>(this->0x88)                    if (!hw->vt[0x2a0]()) -> 0xE00002D8
+  vtable[0xae8]()                       hw->vt[0x4c8]()
+  jmp -> return 0                       hw->vt[0x130]()
+                                        (this->0x380)->vt[0x158]()
+                                        hw->vt[0x218]()
+```
+
+Four things this settles:
+
+- **0x1B's case contains no loop.** It is straight-line, so the ~5600/s
+  request-0x14 poll 2gk measured is inside one of these callees, not in the
+  dispatch.
+- **0x06 never touches `this->0x1a38`** (the `AMDHardware`); 0x1B makes four
+  calls on it. So the two requests are not variations on one path — 0x1B is
+  the first and only request that drives the hardware object from this
+  dispatch.
+- **0x06 sets its return to 0 before doing any work**, which is why it
+  answered `0x00000000` on every boot that reached it even while `powerUpHW`
+  failed. Its success is not evidence about anything downstream.
+- **`hw->vtable[0x2a0]()` is a gate that has never been exercised.** The same
+  slot appears at 0xbe416c4, but that is inside request **0x1C**'s case, and
+  our peer has only ever sent 0x06 and 0x1B — so no boot has run it. (I was
+  one step from reading 0x06's success as validating that gate. It is in a
+  different case.)
+
+### The leading candidate, named as a candidate
+
+`sendRequestToPowerManager(this->0x1ea0, 0xA, 0)` is the first substantive
+thing 0x1B does that 0x06 does not, and it is a **named symbol**
+(`__ZN37AMDRadeonX6000_AMDGraphicsAccelerator25sendRequestToPowerManagerE26_eAMD_PWR_MGR_REQUEST_TYPEbPvS1_S1_`),
+so it can be hooked observe-only for the cost of one boot.
+
+Why it is the leading reading: a power manager that asks the GPU for status
+until it reaches a requested state is exactly the 6 kHz shape, and
+**`gfx_min = gfx_max = 0` has stood since 2di** - the SMU reports no GFX clock
+range, so a wait for a clock state could never be satisfied. That would make
+the oldest unexplained debt in this project the cause of the newest frontier.
+
+**NOT established, and three things have to hold first:** that the poll is on
+this thread at all (the log carries no thread ids); that `this->0x1f40` is
+nonzero so the call even runs; and that it is this call rather than one of the
+five `hw` vtable slots, none of which is named yet.
+
+### Tooling debt found while doing this
+
+`dumptable.py` and `vtslots.py` could not resolve the `AMDNavi21Hardware`
+vtable slots, and the two string operands (`0xbf3d503`, `0xbf3d3db`) and the
+kernel stubs (`0x10132`, `0x10012`, `0x1012c`, `0x10114`, `0x10018`) do not
+resolve inside the extracted Mach-O - they point outside the sections
+`kc_extract.py` carries. `vtslots.py` reads the BOOT collection, where an
+auxiliary kext's vtable is not present. So the five slot names are unresolved
+**because the tools cannot reach them**, not because the step was skipped;
+naming them is a prerequisite for the next boot to be worth spending.
