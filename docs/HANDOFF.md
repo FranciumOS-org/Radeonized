@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gj)
+# RembrandtGPU — handoff state (2026-10-16, after 2gl)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -28,69 +28,67 @@ trivial-TRUE path and engine[0] alone asks. The whole bring-up chain —
 firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every engine's
 powerUp, and the SDMA walk — completes.
 
-**The frontier is now request 0x1B (Controller Enabled)**, deliberately held
-back and never yet sent in this state. See §2.
+**The frontier is request 0x1B (Controller Enabled), and it does not
+return.** Sent with `powerUpHW` succeeding (2gk) it never answered — but the
+machine stays alive and request 0x14 (Gpu Status) is serviced at **~5600/s**
+against 18/s on the otherwise identical boot with 0x1B held, so it **spins
+rather than blocking**. 0x1B is disassembled (2gl); the next step is naming
+what inside it loops. See §2.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — request 0x1B, build `BE087B5D` (2gj)
+## 2. The pending work — no boot yet, and no build
 
-**Boot-args only, and it is the user's call** — this one can cost a power
-cycle, unlike every step since 2ga.
+2gk spent the 0x1B boot and 2gl disassembled the answer. **The next boot is
+not worth spending until the tooling debt below is paid**, because the five
+candidate calls have no names yet.
 
-`powerUpHW` succeeding makes `-rbgpuforce1b` the deliberate second step the
-0x1B hold has been deferring since 2gc. What is known, and it is not
-encouraging:
+### What 0x1B is (2gl, `0xbe417d0`)
 
-| boot | state when 0x1B was sent | result |
-|---|---|---|
-| 2cy | hardware untouched (powerUpHW failed at the first gate) | answered `0xE00002C7` at once |
-| 2fo | engines powered, queues mapped, rings programmed | **never returned**; minutes, then a power cycle |
-
-2fr's skip was built from that second row. The next boot sends it in the state
-2fo hung in, with one difference: `startHWEngines` now succeeds, so the
-controller really is enabled rather than half-way. Whether that is the
-difference that makes 0x1B answer is exactly the open question.
-
-### Arm it
+`AMDGraphicsAccelerator::callPlatformFunction` (0xbe4154e) dispatches on
+`req - 1` through a jump table at `0xbe41ad4`. The decode is cross-checked:
+req 0x06 -> `0xbe41717`, which contains the `powerUpHW` call the 2ga panic
+frame independently names at `callPlatformFunction+0x21f`.
 
 ```
-sudo tools/efi.sh bootarg add -rbgpuforce1b
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect BE087B5D
-sudo nvram rbgpu-arm=1 && sudo reboot
+0x1B (0xbe417d0), straight-line - NO loop, so the poll is in a callee:
+  lock triple (this+0x90, this->0x88); family call 0x14e551a6; vtable[0x850]
+  if (this->0x1f40)  sendRequestToPowerManager(this->0x1ea0, 0xA, 0)
+  hw = this->0x1a38 ; r14 = 0xE00002D8
+  if (!hw || !hw->vt[0x2a0]())   -> return 0xE00002D8
+  hw->vt[0x4c8]() ; hw->vt[0x130]() ; (this->0x380)->vt[0x158]() ; hw->vt[0x218]()
 ```
 
-Then **in the armed boot, before any reboot** — and give it 40 s first, so the
-2fy samplers fire:
+**Leading candidate, not established:** `sendRequestToPowerManager(.., 0xA, 0)`
+— the first substantive thing 0x1B does that the working 0x06 does not, and a
+**named symbol** so it is hookable observe-only. A power manager polling for a
+clock state it can never reach is exactly the 6 kHz shape, and
+`gfx_min = gfx_max = 0` has stood since 2di. That would make the oldest debt
+in this project the cause of the newest frontier.
 
-```
-tools/plugin_check.sh
-```
+Three things must hold before that reading means anything: the poll being on
+this thread (the log has no thread ids), `this->0x1f40` being nonzero so the
+call runs at all, and it being this call rather than one of the five unnamed
+`hw` slots.
 
-If it hangs instead, power-cycle and read NVRAM: the stage note answers
-without a log.
+### Blocking: tooling debt (2gl)
 
-### Reading it
+`dumptable.py` and `vtslots.py` cannot resolve the `AMDNavi21Hardware` vtable
+slots, and the string operands (`0xbf3d503`, `0xbf3d3db`) and kernel stubs
+(`0x10132`, `0x10012`, `0x1012c`, `0x10114`, `0x10018`) point outside the
+sections `kc_extract.py` carries; `vtslots.py` reads the BOOT collection,
+where an auxiliary kext's vtable is absent. Fix the reach, name
+`hw->vt[0x2a0/0x4c8/0x130/0x218]` and `(this->0x380)->vt[0x158]`, and the
+next boot becomes worth one variable.
 
-```
-nvram rbgpu-boot    a NEW sequence, or every note below is STALE
-nvram rbgpu-prog    b=<n> s=5 ... 0x1B SENT   |   b=<n> s=6 0x1B RETURNED 0x...
-nvram rbgpu-sdma    b=<n> ... ret=1 post=1111 allstarted ... one=3
-```
+### Then, and only then: one observe-only hook
 
-```
-s=6 0x1B RETURNED        it answers in this state. The hold can come off, and
-                         the frontier moves to the display path.
-s=5 ... 0x1B SENT        it hangs here, as in 2fo, and the difference
-                         startHWEngines made is not enough. Then the question
-                         is what 0x1B does - IOAccelerator's "controller
-                         enabled" path has never been disassembled.
-ret=0 / post not 1111    the 2gi result did not reproduce a third time, and
-                         0x1B is not the question this boot answers
-```
+`sendRequestToPowerManager` is external and defined in X6000. **Before routing
+it, disassemble its first 16 bytes and refuse if a rel8/rel32 branch starts
+within the first 5** — rule 9, which the 2gb panic bought.
 
 ### Current boot-args (OpenCore config.plist)
 
@@ -98,20 +96,30 @@ ret=0 / post not 1111    the 2gi result did not reproduce a third time, and
 keepsyms=1 -vi2c-force-polling -lilubetaall msgbuf=1048576 -rbgpusync570
 -rbgpuspoofttl amfi_get_out_of_my_way=0x1 amfi=0x80 alcid=66 -v -rbgpupsphw
 -rbgpusmubringup -rbgpustampwait -rbgpuptbase -nvoff -wegnoegpu
--rbgpunogates -rbgpusdmaone -broadtekdbg      (+ -rbgpuforce1b to send 0x1B)
+-rbgpunogates -rbgpusdmaone -rbgpuforce1b -broadtekdbg
 ```
 
 **`-rbgpusdmaone` must stay IN** — it is what makes `powerUpHW` succeed.
-**`-rbgpunodisppanic` must stay OUT** (IOPCITunnelled costs the UI, 2cv).
-**`-rbgpusdmahook` must stay OUT** (proven to panic, 2gb). `-rbgpusdmainst0`
-and `-rbgpusdma0skip` are retired — 2gi needs neither, and leaving them in
-makes the boot two variables. `-rbgpusdmadesc` and `-rbgpuregdump` stay off.
+**`-rbgpuforce1b` should come OUT** until there is a reason to send 0x1B
+again: it costs a power cycle and the question it answered is answered.
+**`-rbgpunodisppanic`** (IOPCITunnelled costs the UI, 2cv) and
+**`-rbgpusdmahook`** (proven to panic, 2gb) must stay OUT. `-rbgpusdmainst0`,
+`-rbgpusdma0skip` are retired. `-rbgpusdmadesc` / `-rbgpuregdump` stay off.
+`-broadtekdbg` + `BroadTek.kext` are new since 2gg — a separate project's
+kext, so rule it out first if a boot behaves oddly in a way the question does
+not explain.
 
-**`-broadtekdbg` and `BroadTek.kext` are new to the GPU boots** — the EFI
-backups show BroadTek was NOT enabled during any boot up to and including
-2gg. A separate project's kext, so a background variable rather than part of
-the experiment; rule it out first if a boot behaves oddly in a way the
-question does not explain.
+### Reading an 0x1B boot
+
+The 512-line ring is **useless** on one: at 5600 req/s the every-64th
+throttle still writes ~87 lines/s, so the whole chain is evicted within six
+seconds and `grep 0x1B log.txt` finds nothing. The NVRAM notes are the record.
+
+```
+nvram rbgpu-boot    a NEW sequence, or every note is STALE
+nvram rbgpu-prog    s=5 ... 0x1B SENT   |   s=6 0x1B RETURNED 0x...
+nvram rbgpu-sdma    ret=1 post=1111 allstarted one=3
+```
 
 ## 3. Verified on hardware — do NOT re-derive these
 
@@ -137,6 +145,15 @@ question does not explain.
 - **The powerUp chain runs on the peer's post-register thread inside request
   0x06**, from `thread_call_delayed_timer` — NOT `IOService::start`. Confirmed
   three ways including Apple's own panic frames.
+- **`powerUpHW` SUCCEEDS (2gi), reproduced on three boots** (b=6, b=7, b=8):
+  `startHWEngines` returns TRUE with `ret=1 post=1111 allstarted one=3`.
+- **Request 0x1B does not return, and it SPINS (2gk).** Sent with powerUpHW
+  succeeding; the machine stays alive (log sequence advancing ~4000/20 s, all
+  three samplers firing, `pci.txt` complete at 401 KB where 2fo's was 0) and
+  request 0x14 runs at ~5600/s against 18/s on the boot with 0x1B held. Our
+  0x14 handler answers a **constant 1** (RembrandtGPUPeer.cpp:1553).
+- **0x1B is at `0xbe417d0` and contains no loop (2gl)** — so the poll is in a
+  callee. See §2 for the disassembly and the candidate.
 - **One SDMA engine asking is sufficient (2gi).** `startHWEngines` returns
   TRUE and **`powerUpHW` succeeds** with engines [1..3] on Apple's
   trivial-TRUE path and engine[0] alone asking. Reproduced on two consecutive
@@ -371,25 +388,28 @@ rbgpu-arm         one-shot arming
 
 ---
 
-## 7. Where to go after the 0x1B boot
+## 7. Where to go next
 
-- **If 0x1B returns**: the hold comes off and the frontier is the **display
-  path**, which is untouched. 2ct refuses the pipe outright so armed boots
-  reach a desktop; undoing that is the next real piece of work, and 2bq's
-  reserve chain is now unblocked (see §3). Expect `IOAccelDisplayMachine`,
-  `found_framebuffer` and the 2cv IOPCITunnelled trap to all be live again.
-- **If 0x1B hangs**: disassemble what it actually does. `callPlatformFunction`
-  dispatches it into IOAcceleratorFamily2's "controller enabled" path, which
-  no boot or static pass in this project has ever looked at. That is a reading
-  job, not a boot job, and it should be done before spending another boot.
-- **Standing, in rough order of how much they will matter:**
-  - `gfx_min = gfx_max = 0` — GFX DPM never started. It has not bitten any
-    measured path, but a display driving real pixels is the first thing that
-    would need a sustained GFX clock.
-  - the **2am / 2an / 2ao** blanket bypasses. `_sdma_5_2_1_fw_autoload_is_
-    completed` is forced true and SDMA now genuinely starts, so that one is
-    worth re-examining rather than banking.
-  - **2cc** (VCN encode stubbed), **2be** (`stop()` patched to RET, cause
-    never understood), **2ct** (the display pipe refused).
-  - `hw->0xc2*2+2` cannot express 1, so if a real fix is ever wanted instead
-    of a zeroed queue count it is a patch to `allocateHWEngines` or the walk.
+1. **Pay the tooling debt (no boot, no build).** Name the five calls 0x1B
+   makes — `hw->vt[0x2a0/0x4c8/0x130/0x218]` and `(this->0x380)->vt[0x158]` —
+   plus the two strings and five kernel stubs. `kc_extract.py` does not carry
+   the sections they live in and `vtslots.py` reads the BOOT collection, where
+   an auxiliary kext's vtable is absent. Until this is done, a boot cannot be
+   aimed at anything.
+2. **Then one observe-only hook on `sendRequestToPowerManager`**, honouring
+   rule 9 (disassemble the first 16 bytes; refuse a rel8/rel32 branch inside
+   the patch window). It is the first substantive thing 0x1B does that the
+   working 0x06 does not.
+3. **If the power manager is the loop**, the question becomes
+   `gfx_min = gfx_max = 0` — GFX DPM never started, standing since 2di. That
+   is an SMU message group beyond TABLES and therefore **the user's decision**
+   under the docs/RULES.md rule; say what it changes on the chip before asking.
+4. **If it is not**, the five `hw` slots are next, in the order 0x1B calls
+   them, with `hw->vt[0x2a0]` first — it is a gate no boot has ever exercised
+   (the identical slot at 0xbe416c4 is in request **0x1C**'s case, which this
+   project has never sent).
+5. **Standing, unchanged:** the 2am / 2an / 2ao blanket bypasses (the SDMA one
+   is adjacent to a path that now genuinely starts), 2cc (VCN encode stubbed),
+   2be (`stop()` patched to RET, cause never understood), 2ct (the display
+   pipe refused outright). The display path is untouched, and 2bq's reserve
+   chain is now unblocked (§3), so it is the frontier after 0x1B.
