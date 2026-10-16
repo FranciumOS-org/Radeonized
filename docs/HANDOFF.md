@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gi)
+# RembrandtGPU — handoff state (2026-10-16, after 2gj)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -20,82 +20,77 @@ active and doorbelled; GPUVM translates; the GPU executes PM4 packets and
 writes completion fences the CPU reads. **`AMDGFX10PM4Engine::doStart` returns
 1 and every engine in the array powers up.**
 
-`powerUpHW` now fails at exactly one place: **`AMDHardware::startHWEngines`
-returns 0** because Apple's Navi 21 path builds and walks **four** SDMA
-engines (`hw->0xc2*2+2`) while this chip's IP discovery table lists **one**
-SDMA instance. The 2gh boot closed the 2x2 and settled the shape: **exactly
-one engine may ask the layer for queues** — engine[1] starts when it asks
-first for instance 0, and whichever engine asks second is refused. 2gi makes
-engines [1..3] take Apple's own trivial-TRUE path so only engine[0] asks.
-That is the whole current frontier.
+**`powerUpHW` SUCCEEDS.** `AMDHardware::startHWEngines` returns TRUE once
+exactly one SDMA engine asks the layer for queues (2gi, `-rbgpusdmaone`,
+reproduced on two consecutive boots). Apple's Navi 21 path builds four SDMA
+engines while this chip has one instance; engines [1..3] now take Apple's own
+trivial-TRUE path and engine[0] alone asks. The whole bring-up chain —
+firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every engine's
+powerUp, and the SDMA walk — completes.
+
+**The frontier is now request 0x1B (Controller Enabled)**, deliberately held
+back and never yet sent in this state. See §2.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — build UUID `B8D742D4` (2gi)
+## 2. The pending experiment — request 0x1B, build `BE087B5D` (2gj)
 
-**Boot-args only. No code question is open in it.** The 2gh boot closed the
-2x2; 2gi applies the fix it implies.
+**Boot-args only, and it is the user's call** — this one can cost a power
+cycle, unlike every step since 2ga.
 
-Engines [1..3] get a zero queue count, so Apple's own `start()` takes its
-trivial-TRUE path at `0xbea4b49` — sets the started flag, calls
-`vtable[0x278]`, returns TRUE **without asking the layer for anything**. That
-path is proven on hardware twice (2ge on engine[0]; the 2gh boot's
-`post=1100` with `skip0=2`). **engine[0] is left completely alone**: it
-natively asks for instance 0 in the first ordinal position, the one
-combination measured TRUE on every boot.
+`powerUpHW` succeeding makes `-rbgpuforce1b` the deliberate second step the
+0x1B hold has been deferring since 2gc. What is known, and it is not
+encouraging:
 
-The counts are **not** restored. Those engines really have no queues on this
-chip, so zero is the honest state; restoring it would be a latch reporting
-hardware that is not there.
+| boot | state when 0x1B was sent | result |
+|---|---|---|
+| 2cy | hardware untouched (powerUpHW failed at the first gate) | answered `0xE00002C7` at once |
+| 2fo | engines powered, queues mapped, rings programmed | **never returned**; minutes, then a power cycle |
 
-### Install and arm
+2fr's skip was built from that second row. The next boot sends it in the state
+2fo hung in, with one difference: `startHWEngines` now succeeds, so the
+controller really is enabled rather than half-way. Whether that is the
+difference that makes 0x1B answer is exactly the open question.
+
+### Arm it
 
 ```
-sudo tools/efi.sh bootarg remove -rbgpusdma0skip
-sudo tools/efi.sh bootarg remove -rbgpusdmainst0
-sudo tools/efi.sh bootarg add -rbgpusdmaone
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect B8D742D4
-sudo tools/efi.sh on && sudo nvram rbgpu-arm=1 && sudo reboot
+sudo tools/efi.sh bootarg add -rbgpuforce1b
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect BE087B5D
+sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
-Both old switches must come out: one variable. 2gi needs neither.
-
-Then **in the armed boot, before any reboot**:
+Then **in the armed boot, before any reboot** — and give it 40 s first, so the
+2fy samplers fire:
 
 ```
 tools/plugin_check.sh
 ```
 
+If it hangs instead, power-cycle and read NVRAM: the stage note answers
+without a log.
+
 ### Reading it
 
 ```
-nvram rbgpu-boot    a NEW sequence number, or every note below is STALE
-nvram rbgpu-sdma    b=<n> ... ret=? pre=0000 post=???? ... one=?
-nvram rbgpu-prog    b=<n> s=5 ...
+nvram rbgpu-boot    a NEW sequence, or every note below is STALE
+nvram rbgpu-prog    b=<n> s=5 ... 0x1B SENT   |   b=<n> s=6 0x1B RETURNED 0x...
+nvram rbgpu-sdma    b=<n> ... ret=1 post=1111 allstarted ... one=3
 ```
 
 ```
-post=1111 allstarted one=3   startHWEngines returns TRUE and powerUpHW
-                             SUCCEEDS for the first time in this project.
-                             Next step is request 0x1B, held by design.
-post=1111 one<3              a switch did not take, and the note says so
-                             rather than letting this read as the answer
-post=1000 fail@1             engine[0] alone is not enough either, so the
-                             refusal is neither the instance nor the ordinal
-                             and the engine OBJECT is back: spend the next
-                             boot on -rbgpusdmadesc
-allstarted but ret=0         every start() returned TRUE and the FALSE comes
-                             from OUTSIDE the loop (0xbea906b onward), which
-                             nothing has yet looked at
+s=6 0x1B RETURNED        it answers in this state. The hold can come off, and
+                         the frontier moves to the display path.
+s=5 ... 0x1B SENT        it hangs here, as in 2fo, and the difference
+                         startHWEngines made is not enough. Then the question
+                         is what 0x1B does - IOAccelerator's "controller
+                         enabled" path has never been disassembled.
+ret=0 / post not 1111    the 2gi result did not reproduce a third time, and
+                         0x1B is not the question this boot answers
 ```
-
-`-rbgpusdmaone` also joins the **0x1B hold**, which is the point of the hold
-rather than a formality: this boot is expected to be the first on which
-`powerUpHW` succeeds, and 2fo measured request 0x1B never returning once the
-hardware has real state. `-rbgpuforce1b` is the deliberate second step.
 
 ### Current boot-args (OpenCore config.plist)
 
@@ -103,19 +98,20 @@ hardware has real state. `-rbgpuforce1b` is the deliberate second step.
 keepsyms=1 -vi2c-force-polling -lilubetaall msgbuf=1048576 -rbgpusync570
 -rbgpuspoofttl amfi_get_out_of_my_way=0x1 amfi=0x80 alcid=66 -v -rbgpupsphw
 -rbgpusmubringup -rbgpustampwait -rbgpuptbase -nvoff -wegnoegpu
--rbgpunogates -broadtekdbg        (+ -rbgpusdmaone for this experiment)
+-rbgpunogates -rbgpusdmaone -broadtekdbg      (+ -rbgpuforce1b to send 0x1B)
 ```
 
-**`-rbgpunodisppanic` must stay OUT** — it publishes `IOPCITunnelled` and that
-alone costs the UI (2cv). **`-rbgpusdmahook` must stay OUT** — proven to panic
-(2gb). `-rbgpusdmadesc` is off by default and is the *next* boot's tool, not
-this one's (2gh).
+**`-rbgpusdmaone` must stay IN** — it is what makes `powerUpHW` succeed.
+**`-rbgpunodisppanic` must stay OUT** (IOPCITunnelled costs the UI, 2cv).
+**`-rbgpusdmahook` must stay OUT** (proven to panic, 2gb). `-rbgpusdmainst0`
+and `-rbgpusdma0skip` are retired — 2gi needs neither, and leaving them in
+makes the boot two variables. `-rbgpusdmadesc` and `-rbgpuregdump` stay off.
 
 **`-broadtekdbg` and `BroadTek.kext` are new to the GPU boots** — the EFI
 backups show BroadTek was NOT enabled during any boot up to and including
-2gg. It is a separate kext for another project, so it is a background
-variable rather than part of this experiment; if a boot behaves oddly in a
-way the SDMA question does not explain, rule it out first.
+2gg. A separate project's kext, so a background variable rather than part of
+the experiment; rule it out first if a boot behaves oddly in a way the
+question does not explain.
 
 ## 3. Verified on hardware — do NOT re-derive these
 
@@ -141,14 +137,21 @@ way the SDMA question does not explain, rule it out first.
 - **The powerUp chain runs on the peer's post-register thread inside request
   0x06**, from `thread_call_delayed_timer` — NOT `IOService::start`. Confirmed
   three ways including Apple's own panic frames.
-- **The SDMA 2x2 is closed (2gh).** Exactly one engine may ask the layer for
-  queues. engine[1] STARTS when it asks first for instance 0 (`post=1100`);
-  it is refused asking second for instance 0 (2gd) or first for instance 1
-  (2gf), and engine[2] asking second for instance 0 is refused in the same
-  boot. Both the instance index and the ordinal are necessary — but this chip
-  has one SDMA instance, so "second asker" and "duplicate create on instance
-  0" are the SAME event in every cell and **nothing measured separates them**.
-  Open, and it does not block the fix: both readings imply one engine.
+- **One SDMA engine asking is sufficient (2gi).** `startHWEngines` returns
+  TRUE and **`powerUpHW` succeeds** with engines [1..3] on Apple's
+  trivial-TRUE path and engine[0] alone asking. Reproduced on two consecutive
+  boots (`b=6`, `b=7`), both `ret=1 post=1111 allstarted one=3`.
+- **The SDMA 2x2 is closed (2gh), but its two conditions are NOT separable.**
+  engine[1] STARTS asking first for instance 0; it is refused asking second
+  for instance 0 (2gd) or first for instance 1 (2gf). Both the instance index
+  and the ordinal are necessary — but this chip has one SDMA instance, so
+  "second asker" and "duplicate create on instance 0" are the SAME event in
+  every cell measured, and 2gi removes the second asker entirely rather than
+  discriminating them. Open, and it does not block anything.
+- **The display-pipe reserve now PASSES (2gi).** Seven `2bn reserve` calls,
+  all seven returning 1, at real carve-out offsets. 2bq's reading — the
+  allocator was empty because `powerUpHW` had never run — is confirmed by the
+  cause being removed. docs/SPEC-DISPLAY-RESERVE.md's chain is unblocked.
 - **Apple's trivial-TRUE path works** (`start()` with `+0x48 == 0` →
   `0xbea4b49`): used on engine[0] in 2ge and again in the 2gh boot.
 - **Request 0x1B hangs** when powerUpHW has touched the hardware, so it is not
@@ -368,24 +371,25 @@ rbgpu-arm         one-shot arming
 
 ---
 
-## 7. Where to go after the 2gi boot
+## 7. Where to go after the 0x1B boot
 
-- **If `post=1111 one=3`**: `startHWEngines` returns TRUE and **`powerUpHW`
-  succeeds for the first time in this project**. The next deliberate step is
-  `-rbgpuforce1b` — request 0x1B with the hardware fully brought up has never
-  been sent, and 2fo measured it never returning when powerUpHW had touched
-  the hardware. Expect it to need its own boot and possibly its own fix.
-  After that: the display path, which is untouched (2ct refuses the pipe).
-- **If `post=1000 fail@1`**: engine[0] alone is not enough, so the refusal is
-  neither the instance nor the ordinal. Spend one boot with `-rbgpusdmadesc`
-  (already built, off by default) to get `ch->0x48` and `ch->0xd0` per queue
-  and compare engine[0]'s with engine[1]'s — those two fields are the only
-  part of the request the pair arguments do not carry.
-- **If `allstarted` but `ret=0`**: every `start()` returned TRUE and
-  `startHWEngines`' FALSE comes from outside the loop, at `0xbea906b` onward.
-  Nothing has looked there; it needs disassembling before a boot is spent.
-- **Standing, further out**: `gfx_min = gfx_max = 0` (GFX DPM never started),
-  the 2am/2an/2ao blanket bypasses — the SDMA one is directly adjacent to
-  this frontier — and the fact that `hw->0xc2*2+2` cannot express 1, so if a
-  real fix is ever wanted rather than a zeroed queue count, it is a patch to
-  `allocateHWEngines` or to the walk.
+- **If 0x1B returns**: the hold comes off and the frontier is the **display
+  path**, which is untouched. 2ct refuses the pipe outright so armed boots
+  reach a desktop; undoing that is the next real piece of work, and 2bq's
+  reserve chain is now unblocked (see §3). Expect `IOAccelDisplayMachine`,
+  `found_framebuffer` and the 2cv IOPCITunnelled trap to all be live again.
+- **If 0x1B hangs**: disassemble what it actually does. `callPlatformFunction`
+  dispatches it into IOAcceleratorFamily2's "controller enabled" path, which
+  no boot or static pass in this project has ever looked at. That is a reading
+  job, not a boot job, and it should be done before spending another boot.
+- **Standing, in rough order of how much they will matter:**
+  - `gfx_min = gfx_max = 0` — GFX DPM never started. It has not bitten any
+    measured path, but a display driving real pixels is the first thing that
+    would need a sustained GFX clock.
+  - the **2am / 2an / 2ao** blanket bypasses. `_sdma_5_2_1_fw_autoload_is_
+    completed` is forced true and SDMA now genuinely starts, so that one is
+    worth re-examining rather than banking.
+  - **2cc** (VCN encode stubbed), **2be** (`stop()` patched to RET, cause
+    never understood), **2ct** (the display pipe refused).
+  - `hw->0xc2*2+2` cannot express 1, so if a real fix is ever wanted instead
+    of a zeroed queue count it is a patch to `allocateHWEngines` or the walk.
