@@ -7434,3 +7434,90 @@ answer is exactly the open question, and a hang costs a power cycle.
 `rbgpu-prog` stage 6 is already wired to record the return, so a boot that
 hangs says `s=5 ... 0x1B SENT` and one that answers says `s=6 0x1B RETURNED
 0x........`, from NVRAM, with the `b=` nonce making it this boot's.
+
+## 2gk (2026-10-16): 0x1B still does not return — but it SPINS, it does not block
+
+logs/20261016-021917-plugin, `plugin_check` ran **in the armed boot**, build
+and args checked first per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> BE087B5D == build/out (2gj)
+boot-args         -> ... -rbgpunogates -rbgpusdmaone -rbgpuforce1b
+rbgpu-boot        -> 8        a sequence never recorded before
+rbgpu-sdma        -> b=8 c2=1 n=4 map=.... allok ret=1 pre=0000
+                     post=1111 allstarted inst0=0 sdma[0]{} one=3
+rbgpu-prog        -> b=8 s=5 0x1B SENT - no s=6 means it hangs here
+rbgpu-prog2       -> b=8 a=s5/S12/L3112@30138ms
+                          b=s5/S12/L7133@50138ms
+                          c=s5/S12/L12389@80139ms
+no new .panic     -> newest is still 2026-10-15 10:35 (2gg's)
+```
+
+**The 2gi result reproduced a third time** (`ret=1 post=1111 one=3`), so
+`powerUpHW` succeeding is now solid across three consecutive boots.
+
+**And the hypothesis the hold was deferring is REFUTED.** The 0x1B entry
+predicted that `startHWEngines` now succeeding might be the difference that
+makes request 0x1B answer, since 2cy got `0xE00002C7` at once with the
+hardware untouched and 2fo got nothing with it half-way. It is not: `s=5` with
+no `s=6` means 0x1B was sent and did not return, in the one state it had never
+been sent in.
+
+### But it is not 2fo's wedge, and that is the new part
+
+```
+pci.txt           -> 401408 bytes   (2fo's was 0: the IGPU subtree was locked)
+rbgpu-prog2       -> L3112 -> L7133 -> L12389 across 30/50/80 s
+log.txt           -> 1004 lines, ALL from 122.8 s onward, 934 of them 0x14
+```
+
+The log-sequence counter advances by ~4000 per 20 s and all three samplers
+fire, so **the machine is alive and code is running** — the opposite of 2fy's
+`S12/L671` frozen triple. 2fo's "it never returned" was right about 0x1B and
+wrong to call the machine wedged; with `pci.txt` completing, nothing holds the
+IOService lock this time.
+
+### The control, run before claiming anything
+
+Request 0x14 (Gpu Status) is a peer request Apple's accelerator makes of us.
+Its rate across the last three boots, where the only variable is the boot-arg:
+
+| boot | 0x1B | last 0x14 | rate |
+|---|---|---|---|
+| 2gf (b=3) | powerUpHW failed, not sent | #64 at 15.0 s | 4/s |
+| 2gi (b=6) | **HELD** | #320 at 17.1 s | 18/s |
+| **2gk (b=8)** | **SENT** | **#738688 at 132.5 s** | **~5600/s** |
+
+A 300x change against the 2gi boot, which is the same build family with
+`powerUpHW` equally successful and `-rbgpuforce1b` the only difference. So
+**request 0x1B's path is what polls GPU status, and it spins rather than
+blocking** — established by the control, not inferred from the one boot.
+
+And our answer to it is a **constant**
+(`RembrandtGPUPeer.cpp:1553`, unchanged since milestone 2b):
+
+```c
+case 0x14:
+    if (p2) { *(uint32_t *)p2 = 1; return kIOReturnSuccess; }
+```
+
+**Reading, NOT established:** Apple's controller-enabled path polls GPU status
+through the peer and our invariant `1` never satisfies its exit condition.
+What the record does **not** carry: whether the poll is on the same thread as
+0x1B (the log has no thread ids), and what value or state that loop actually
+wants — 0x1B's handler has never been disassembled. Writing the mechanism up
+as a finding on a rate correlation alone would be the 2gc shape; it is a lead
+with a strong control under it.
+
+### Consequence for the instrument
+
+The 512-line ring is now useless on an 0x1B boot: at 5600 requests/s the
+every-64th throttle 2cw added still writes ~87 lines/s, so the whole chain —
+`startHWEngines`, the SDMA lines, the 0x1B send itself — is evicted within
+six seconds. That is why `grep 0x1B log.txt` finds nothing while
+`rbgpu-sdma` and `rbgpu-prog` carry the answer. The NVRAM notes are the
+record on this frontier, exactly as 2gd/2gf built them to be.
+
+Next step is a **reading job, not a boot**: disassemble what 0x1B does in
+`callPlatformFunction`'s dispatch, which HANDOFF §7 already named as the
+branch to take if 0x1B hung. No build, no boot-arg, no hardware.
