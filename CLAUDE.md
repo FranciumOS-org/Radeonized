@@ -7200,3 +7200,122 @@ post=0000 fail@0       the skip broke engine[0], which Apple's own
                        trivial-TRUE path should make impossible
 skip0 / inst0 absent   a switch did not run and the boot says which
 ```
+
+### 2gh answered on hardware (2026-10-16): `post=1100` — engine[1] STARTED
+
+Read from the recovery boot that followed; no `plugin_check` capture, so the
+NVRAM notes are the whole record — and the 2gd nonce is what makes them
+count. Build and arming checked first, per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> D27034BD == build/out (2gh)
+boot-args         -> ... -rbgpunogates -rbgpusdma0skip -rbgpusdmainst0
+                     (no -rbgpuoff: the boot WAS armed)
+rbgpu-boot        -> 4        a sequence never recorded before
+rbgpu-sdma        -> b=4 c2=1 n=4 map=.... allok ret=0 pre=0000 post=1100
+                     fail@2 inst0=6 sdma[0]{} skip0=2
+rbgpu-prog        -> b=4 s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)
+rbgpu-prog2       -> b=4 a=s5/S90/L852@27688ms
+no new .panic     -> newest is still 2026-10-15 10:35 (which is 2gg's)
+```
+
+**The bit order was checked against the code that writes it before the value
+was read**, because reading a map backwards is exactly the 2dt shape:
+`rbgpu_poststarthw_2gb` emits `post` left-to-right in index order, one digit
+per engine's own `+0x10` started-flag. So `post=1100 fail@2` is engine[0] and
+**engine[1]** both started, engine[2] the first with its flag still 0.
+
+`skip0=2` says engine[0]'s queue count was zeroed and it took Apple's
+trivial-TRUE path; `inst0=6` says six arg2 rewrites landed (engines 1-3, two
+queues each). So **engine[1] was the first engine in the boot to ask the
+layer for a queue, asked for instance 0, and SUCCEEDED.**
+
+**And one note of mine from the 2gg panic is corrected by the record rather
+than by argument.** The 10:35 panic report carries plugin UUID `0E9563CF` =
+2gg, and the EFI backups show 2gh installed at 10:40 — five minutes *after*
+it. `-rbgpuoff` went into boot-args in the same window and stayed through
+every later install, so **2gh had never run armed until now**: the panic that
+prompted the rescue was 2gg's, which is the one 2gh was written to fix.
+
+### The 2x2 is closed, and the two conditions are NOT separable
+
+| engine | instance | asks | result |
+|---|---|---|---|
+| [0] | 0 | first | **TRUE** (every boot) |
+| [1] | 0 | second (2gd) | FALSE |
+| [1] | 1 | first (2gf) | FALSE |
+| **[1]** | **0** | **first** (2gh) | **TRUE** |
+| [2] | 0 | second (2gh) | FALSE |
+
+Cell 4 against cell 3 — same engine, same order, instance differs — makes the
+**instance index** matter. Cell 4 against cell 2 — same engine, same
+instance, order differs — makes the **ordinal** matter. Both are necessary,
+and engine[2] reproducing cell 2's shape in the same boot is a fifth,
+internally-consistent point.
+
+**What is NOT claimed: that these are two independent conditions.** This chip
+has one SDMA instance, so "the second engine to ask" and "a duplicate create
+on instance 0" are the **same event** in every cell measured, and nothing
+here separates them. No experiment that leaves the engine count at four can:
+there is no second instance to ask for. Recorded as open rather than
+resolved — the 2gc confound was also named in advance and still cost a boot
+to clear — and it does not block the fix, because both readings imply the
+same one.
+
+So HANDOFF §7's `post=1100` branch is the live one: **make exactly one SDMA
+engine ask.** `hw->0xc2*2+2` is always even and >= 2, so the count cannot
+express 1 and the constant is not the lever.
+
+## 2gi (2026-10-16): exactly one SDMA engine asks
+
+Engines [1..3] get a zero queue count, so Apple's own `start()` takes its
+trivial-TRUE path at `0xbea4b49` — sets the started flag, calls
+`vtable[0x278]`, returns TRUE without asking the layer for anything. That
+path is proven on hardware twice: 2ge used it on engine[0], and the 2gh
+boot's `post=1100` has engine[0] passing through it with `skip0=2`.
+
+**engine[0] is left completely alone.** It natively asks for instance 0 (the
+pairs are `(0x7, idx)` / `(0xa, idx)`, measured in 2gd) in the first ordinal
+position — the one combination measured TRUE on every boot. So 2gi needs
+**neither** `-rbgpusdmainst0` **nor** `-rbgpusdma0skip`, and both must come
+out: one variable.
+
+**The counts are not restored afterwards.** Those three engine objects really
+do have no queues on this chip — the instance behind them does not exist — so
+zero is the honest state, and restoring it would be a latch reporting
+hardware that is not there, which is the debt 2am/2an/2ao already owe. It is
+tolerable for the same reason 2ge's was: an armed boot has no GPU clients and
+nothing submits SDMA work.
+
+Two instrument details, both rule 2:
+
+- A write that does not read back zero is logged as *failed*, and that
+  engine's later `post=` digit is said to mean nothing — otherwise a switch
+  that did not take and a layer that accepted all four look identical.
+- **`one=N`** rides out on `rbgpu-sdma`, so `post=1111` is only readable as
+  the one-engine answer when N is 3.
+
+And `-rbgpusdmaone` joins the **0x1B hold**, which is the point of the hold
+rather than a formality: this boot is expected to be the first on which
+`powerUpHW` succeeds, so without it the same boot would also be the first
+ever to send request 0x1B with the hardware fully brought up — and 2fo
+measured that call never returning. `-rbgpuforce1b` is the deliberate second
+step.
+
+Build: UUID B8D742D4, hosttest passes. **Boot-args change**: add
+`-rbgpusdmaone`, remove `-rbgpusdma0skip` and `-rbgpusdmainst0`.
+
+```
+post=1111 allstarted one=3   startHWEngines returns TRUE and powerUpHW
+                             SUCCEEDS for the first time in this project; the
+                             next step is 0x1B, held by design
+post=1111 one<3              a switch did not take, and the note says so
+                             rather than letting this read as the answer
+post=1000 fail@1             engine[0] alone is not enough either, so the
+                             layer refuses something that is not the instance
+                             and not the ordinal - and the engine OBJECT is
+                             back, with -rbgpusdmadesc the next boot
+allstarted but ret=0         every start() returned TRUE and startHWEngines'
+                             FALSE comes from OUTSIDE the loop (0xbea906b
+                             onward), which nothing has yet looked at
+```
