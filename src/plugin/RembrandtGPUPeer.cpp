@@ -72,6 +72,7 @@ static char      s_capture_buf[RBGPU_BUF_SIZE];
 static char      s_line_scratch[RBGPU_LINE_MAX];
 
 extern uint64_t g_guard_calls;
+extern volatile int g_rb_2gn_in1b;   // 2gn: 0x1B post-gate record armed
 
 static void initDiagLock() {
     if (!g_diagLock) {
@@ -1483,7 +1484,12 @@ void RembrandtGPUPeer::handlePostRegister() {
     uint32_t reqControllerEnabled = 0x1B;
     g_rb_prog_stage = 5;
     rbgpu_nvram_note("rbgpu-prog", "s=5 0x1B SENT - no s=6 means it hangs here");
+    // 2gn: arm the 0x1B post-gate record only across this call. All three
+    // hooked functions are also called from powerUpHW's own path, and an
+    // ungated note would be overwritten by calls that are not the question.
+    g_rb_2gn_in1b = 1;
     IOReturn ret1B = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
+    g_rb_2gn_in1b = 0;
     rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
     rbgpu_diag_set_num("ret_0x1B", static_cast<uint64_t>(ret1B));
     g_rb_peer_ret1B = static_cast<uint32_t>(ret1B);
