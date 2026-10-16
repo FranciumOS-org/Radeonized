@@ -5247,7 +5247,7 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
 
 // 2gb: the post pass. Called after Apple's startHWEngines returns, reading the
 // same +0x10 flag the success path sets. Builds "pre=0000 post=1100 fail@2".
-static void rbgpu_poststarthw_2gb(void *hw) {
+static void rbgpu_poststarthw_2gb(void *hw, bool walk_ret) {
     g_rb_2gb_flags[0] = '\0';
     if (!hw || g_rb_2gb_count == 0 || g_rb_2gb_count > 32) { return; }
     uint32_t fail = 0xffffffffu;
@@ -5290,9 +5290,21 @@ static void rbgpu_poststarthw_2gb(void *hw) {
                   g_rb_2gb_flags, fail);
     } else {
         put(" allstarted");
-        rbgpu_log("2gb: %s - EVERY engine's started-flag is set, so every "
-                  "start() returned TRUE and startHWEngines' FALSE comes from "
-                  "outside the loop (0xbea906b onward)", g_rb_2gb_flags);
+        // 2gi: this branch is now reachable with startHWEngines returning
+        // TRUE, which it never was when the message was written. Saying
+        // "startHWEngines' FALSE comes from outside the loop" on a boot that
+        // SUCCEEDED is a record that contradicts itself - the 2ga trap - so
+        // the two cases say what they are.
+        if (walk_ret) {
+            rbgpu_log("2gb: %s - EVERY engine's started-flag is set AND "
+                      "startHWEngines returned TRUE: the walk passed",
+                      g_rb_2gb_flags);
+        } else {
+            rbgpu_log("2gb: %s - EVERY engine's started-flag is set, so every "
+                      "start() returned TRUE and startHWEngines' FALSE comes "
+                      "from outside the loop (0xbea906b onward)",
+                      g_rb_2gb_flags);
+        }
     }
 }
 
@@ -5389,7 +5401,7 @@ static bool hooked_hw_startHWEngines(void *hw) {
     bool ret = orig_hw_startHWEngines ? orig_hw_startHWEngines(hw) : false;
     if (ret) g_rb_pw_stage |= 0x200;
     rbgpu_log("2bs: AMDHardware::startHWEngines -> %d", ret ? 1 : 0);
-    rbgpu_poststarthw_2gb(hw);
+    rbgpu_poststarthw_2gb(hw, ret);
     rbgpu_diag_set_num("sdma_inst0_patched", g_rb_2gc_patched);
     // 2fq: the second and last write. Two per boot, against the trail's
     // twenty-four - and this one proves the first was not a lucky read of a
