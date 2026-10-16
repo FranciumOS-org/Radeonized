@@ -7319,3 +7319,118 @@ allstarted but ret=0         every start() returned TRUE and startHWEngines'
                              FALSE comes from OUTSIDE the loop (0xbea906b
                              onward), which nothing has yet looked at
 ```
+
+### 2gi answered on hardware (2026-10-16): `powerUpHW` SUCCEEDS — and it reproduced
+
+**Two consecutive armed boots, both complete, both identical.** The capture is
+boot `b=6` (logs/20261016-020353-plugin, `plugin_check` run **in the armed
+boot**: 41 KB log, `pci.txt` 611143 bytes, the healthiest armed capture this
+project has taken); the live notes read afterwards are boot `b=7`. Build and
+args checked first per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> B8D742D4 == build/out (2gi)
+boot-args         -> ... -rbgpunogates -rbgpusdmaone
+                     (-rbgpusdma0skip and -rbgpusdmainst0 both OUT: one variable)
+b=6 (in-boot)  rbgpu-sdma = c2=1 n=4 map=.... allok ret=1 pre=0000
+                            post=1111 allstarted inst0=0 sdma[0]{} one=3
+               rbgpu-prog = s=5 powerUpHW OK; 0x1B HELD by an SDMA arg
+b=7 (live)     byte-identical in both variables
+no new .panic  -> newest is still 2026-10-15 10:35 (2gg's)
+```
+
+**2gi's first branch, with its own precondition satisfied.** `one=3` says
+exactly three engines were zeroed and read back zero, which is what makes
+`post=1111` readable as the one-engine answer rather than as a switch that
+did not take — the distinction 2gi wrote into the note in advance. From the
+log, independently:
+
+```
+[16.747] 2bs: AMDHardware::startHWEngines entered
+[16.756] 2fp: startHWEngines will walk 4 entries (hw+0xc2 = 1)
+[16.784] 2gb: engine[0] started=0 queues=2 pair[0]=(0x7,0x0)   <- LEFT ALONE
+[16.870] 2gi: engine[1] queues(+0x48) 2 -> 0 (read back 0)
+[16.934] 2gi: engine[2] queues(+0x48) 2 -> 0 (read back 0)
+[16.992] 2gi: engine[3] queues(+0x48) 2 -> 0 (read back 0)
+[17.033] 2bs: AMDHardware::startHWEngines -> 1                 <<<< TRUE
+[17.038] 2gb: pre=0000 post=1111 allstarted
+[17.152] 2br: powerUpHW returned 0x5d97bc01                    <<<< AL=1 = OK
+[17.157] handlePostRegister: Request 0x06 returned 0x00000000
+[17.169] handlePostRegister: Request 0x1B is NOT sent - powerUpHW_ok=1, hold=1
+```
+
+So, for the first time in this project:
+
+- **`AMDHardware::startHWEngines` returns TRUE.** Letting exactly one SDMA
+  engine ask the layer for queues is sufficient, and Apple's own trivial-TRUE
+  path at `0xbea4b49` carries the other three.
+- **`powerUpHW` SUCCEEDS.** `0x5d97bc01` is the 2dc convention — upper bits
+  are leftover register content, `AL = 1` is the bool — and the peer's own
+  `powerUpHW_ok=1` in the 0x1B line confirms it from the other side.
+- **The 2gc/2ge 0x1B hold did its job on the boot it was written for.** This
+  is exactly the boot it was built to protect: the first on which `powerUpHW`
+  succeeded would otherwise also have been the first ever to send request 0x1B
+  with the hardware fully brought up. It was held, and the thread returned.
+
+**And a side effect that answers 2bq without a boot of its own.** The display
+pipe reserve now PASSES — seven `2bn reserve` calls, all seven returning 1,
+at real carve-out offsets (`0xf4fb000000 size=0x4400000` and
+`0xf40fb27000 size=0x3000`):
+
+```
+2bq  "AMDHWMemory::reserve fails because the allocator is empty - free=0,
+      no reservations - because powerUpHW has never run"
+```
+
+That reading was right, and it is confirmed by the cause being removed rather
+than by argument. docs/SPEC-DISPLAY-RESERVE.md's chain is unblocked.
+
+Still standing, unchanged: `gfx_min = gfx_max = 0` (GFX DPM never started),
+and `2ct` still refuses the display pipe by design, so the desktop stays on
+IONDRVFramebuffer.
+
+**What is NOT claimed.** The 2gh entry recorded that "the second engine to ask"
+and "a duplicate create on instance 0" are the same event in every cell
+measured and that nothing separates them. This boot does not separate them
+either — it was never going to, since it removes the second asker entirely.
+Both readings predicted this result; it discriminates neither, and that stays
+open.
+
+## 2gj (2026-10-16): two instrument defects the successful boot exposed
+
+Neither touches behaviour, and both are the kind that make a later record
+unreadable.
+
+- **`RBGPU_MAX_DIAGS` 320 -> 448.** The 2dt warning fired for the first time
+  ever, **20 times in one boot**, so keys really were being dropped and
+  "absent" had stopped meaning absent. Third raise (96 in 2db, 192 in 2dt,
+  320, now 448) — and the warning 2dt added is what caught it unprompted,
+  which is the first time that guard has paid for itself.
+- **The `allstarted` log line contradicted the boot it described.** It printed
+  "startHWEngines' FALSE comes from outside the loop" on a boot where
+  `startHWEngines` returned TRUE, because that branch was unreachable with
+  `ret=1` when the message was written. `rbgpu_poststarthw_2gb` now takes the
+  walk's return and the two cases say what they are. A record that disagrees
+  with itself is the 2ga trap.
+
+Build: UUID BE087B5D, hosttest passes. Boot-args unchanged.
+
+## The next step is request 0x1B, and it is the user's call
+
+`powerUpHW` succeeding makes `-rbgpuforce1b` the deliberate second step the
+hold was always deferring. What is known about it, and it is not encouraging:
+
+- 2cy sent 0x1B with the hardware **untouched** (powerUpHW failed at the first
+  gate) and it answered `0xE00002C7` at once.
+- 2fo sent it with the engines powered, the queues mapped and the rings
+  programmed, and **it never returned** — the machine sat for minutes and had
+  to be power-cycled. That is what 2fr's skip was built from.
+
+So this is the first boot that would send it in the state 2fo hung in, with
+one difference: `startHWEngines` now succeeds, so the controller really is
+enabled rather than half-way. Whether that is the difference that makes 0x1B
+answer is exactly the open question, and a hang costs a power cycle.
+
+`rbgpu-prog` stage 6 is already wired to record the return, so a boot that
+hangs says `s=5 ... 0x1B SENT` and one that answers says `s=6 0x1B RETURNED
+0x........`, from NVRAM, with the `b=` nonce making it this boot's.
