@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gm)
+# RembrandtGPU — handoff state (2026-10-16, after 2gn)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -78,22 +78,55 @@ But 56 sites call it through slot 0x2a0, including **`AMDHWRegisters::read()`**
 primitive). So 2gk's ~5600/s is ~5600 register reads a second: **the loop is
 inside one of the four post-gate calls.**
 
-### The experiment
+### The experiment — build `CD191ED5` (2gn), ready to arm
 
-Hook the four observe-only, logging ENTER and RETURN for each. The one entered
-that never returns is the answer; the ones before it returning is positive
-evidence either way. All four are external and defined in X6000, so routing is
-legitimate under the milestone-2c rule.
+Three observe-only hooks on the named calls, and the unnamed one localised by
+elimination. **Rule 9 was applied before the code was written:** all three
+open `pushq %rbp ; movq %rsp,%rbp ; pushq %r14`, straight-line past the
+5-byte window (`startGlobalPerfCounters` 0xbeae2e2, `hardwareDidStart`
+0xbeacf08, `enableInterrupts` 0xbea9558), and `nm -m` shows all three external
+and defined in X6000's `__TEXT`. Apple ignores all three return values, so
+they route through a `void` thunk — nothing is substituted.
 
-**Rule 9 is not optional here.** Disassemble each one's first 16 bytes and
-refuse any whose prologue carries a rel8/rel32 branch inside the 5-byte patch
-window — that is what the 2gb panic bought. `isDeviceValid` is the cautionary
-example: it opens `cmpb $0x1, 0x30d(%rdi) ; jne <rel32>`, a branch at +7 that
-happens to clear the window.
+The fourth call has no symbol: `this->0x380` is loaded in eight accelerator
+methods and stored in none, and it is **not** an `AMDSWScheduler` (that vtable
+is 0x148 bytes, so slot 0x158 is past its end — checked, not assumed). It
+sits between `hardwareDidStart` and `enableInterrupts`, so `hds:R` with no
+`ei:E` names it.
 
-Because the ring is useless on an 0x1B boot (below), the per-call record has
-to ride an NVRAM note, in the shape 2gf established: one variable the later
-stages do not overwrite.
+### Install and arm
+
+Boot-args are already correct — `-rbgpuforce1b` is in and is what sends 0x1B.
+
+```
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect CD191ED5
+sudo nvram rbgpu-arm=1 && sudo reboot
+```
+
+**Expect it to hang and cost a power cycle.** `plugin_check` in the armed boot
+is still worth trying, but the log is useless here (below) and `rbgpu-1b` is
+the answer either way.
+
+### Reading it
+
+```
+nvram rbgpu-boot    a NEW sequence, or every note is STALE
+nvram rbgpu-1b      the post-gate trail
+nvram rbgpu-prog    s=5 ... 0x1B SENT  |  s=6 0x1B RETURNED 0x...
+```
+
+```
+perf:E perf:R hds:E hds:R ei:E ei:R   all four returned; the hang is in 0x1B's
+                                      own epilogue (0xbe418cb onward)
+... hds:R ei:E                        enableInterrupts - an interrupt path,
+                                      reachable only since 2em
+... hds:R                             the UNNAMED (this->0x380)->vt[0x158]
+... hds:E                             hardwareDidStart
+perf:E                                startGlobalPerfCounters
+absent                                isDeviceValid() refused and 0x1B
+                                      returned 0xE00002D8 - `rbgpu-prog` s=6
+                                      would confirm it
+```
 
 ### Current boot-args (OpenCore config.plist)
 
