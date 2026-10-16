@@ -3325,7 +3325,7 @@ static bool hooked_sched_addHWChannel_2du(void *sched, void *chan, uint64_t idx)
 // Six commits at most, and all of them AFTER the ~500 us chain region that
 // 2fo/2ft showed must stay clear.
 volatile int g_rb_2gn_in1b = 0;
-static char g_rb_2gn_trail[320];   // 2go: room for the split chain
+static char g_rb_2gn_trail[512];   // 2gq: room for the stamp table too
 static uint32_t g_rb_2gn_n = 0;
 
 static void rbgpu_2gn_mark(const char *tag) {
@@ -3535,15 +3535,77 @@ volatile uint32_t g_rb_2gp_wfs_calls  = 0;
 volatile uint32_t g_rb_2gp_wfs_first  = 0;
 volatile uint32_t g_rb_2gp_wfs_last   = 0;
 volatile uint32_t g_rb_2gp_restarts   = 0;
+volatile uint32_t g_rb_2gq_in_fas     = 0;   // 2gq: suppress per-call stw: marks
+volatile uint32_t g_rb_2gq_stw        = 0;   // ... and count them instead
+
+// 2gq: the stamp table itself, read before Apple walks it.
+//
+// finishStamp(i) takes its decision from three fields and nothing else
+// (0x14e438da-0x14e43912, read instruction by instruction):
+//
+//   submitted = *(uint32 *)(evm + 0xfc + i*24)
+//   completed = *(uint32 *)(evm + 0xf8 + i*24)
+//   fence     = **(uint32 **)(evm->0x28 + i*8)
+//
+// and it waits only while `submitted - completed > 0` survives re-reading the
+// fence. So the slots with work outstanding are exactly the ones that can
+// reach waitForStamp, and Apple's own `GPURestartDeferred stampIdx=25` names
+// one of them. At 0x1B time nothing of ours has submitted GPU work through
+// the event machine at all, so a nonzero `submitted` here is either real work
+// Apple issued or bookkeeping that was never initialised - and those need
+// different fixes.
+//
+// Read-only, bounded at 64 slots, and every fence pointer is checked for the
+// kernel-VA range before it is dereferenced (the 2gh rule, after the 2gg
+// panic read `1 + 0x48`). A pointer that fails is printed as `?` rather than
+// as a value that could be mistaken for a measurement.
+static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
+    out[0] = 0;
+    if (!evm) { snprintf(out, cap, "noevm"); return; }
+    uintptr_t e = reinterpret_cast<uintptr_t>(evm);
+    uint32_t n = *reinterpret_cast<volatile uint32_t *>(e + 0x30);
+    if (n > 64) { snprintf(out, cap, "n=%u REFUSED(>64)", n); return; }
+    void **fences = *reinterpret_cast<void ***>(e + 0x28);
+    uint32_t outstanding = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t cmp = *reinterpret_cast<volatile uint32_t *>(e + 0xf8 + i * 24);
+        uint32_t sub = *reinterpret_cast<volatile uint32_t *>(e + 0xfc + i * 24);
+        if (static_cast<int32_t>(sub - cmp) <= 0) { continue; }
+        outstanding++;
+        // The fence is what finishStamp re-reads before it decides to wait.
+        char fv[24];
+        snprintf(fv, sizeof(fv), "?");
+        if (fences) {
+            void *fp = fences[i];
+            if (reinterpret_cast<uintptr_t>(fp) >= 0xffffff8000000000ULL) {
+                snprintf(fv, sizeof(fv), "%u",
+                         *reinterpret_cast<volatile uint32_t *>(fp));
+            }
+        }
+        size_t k = strlen(out);
+        if (k + 24 < cap) {
+            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s",
+                     k ? "," : "", i, sub, cmp, fv);
+        }
+    }
+    size_t k = strlen(out);
+    snprintf(out + k, cap - k, "%s out=%u", k ? "" : "none", outstanding);
+}
 
 static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {
     if (evm) {
         g_rb_2gp_fas_n = *reinterpret_cast<volatile uint32_t *>(
             reinterpret_cast<uintptr_t>(evm) + 0x30);
     }
-    char t[32];
-    snprintf(t, sizeof(t), "fas:E(n=%u)", g_rb_2gp_fas_n);
+    char st[160];
+    rbgpu_dump_stamps_2gq(evm, st, sizeof(st));
+    char t[200];
+    snprintf(t, sizeof(t), "fas:E(n=%u|%s)", g_rb_2gp_fas_n, st);
     rbgpu_2gn_mark(t);
+    // 2gq: from here the restart loop resubmits KIQ work forever, so the
+    // per-call stw: marks stop being evidence and start being the thing that
+    // overflows the trail. They are counted instead; prog2 carries the count.
+    g_rb_2gq_in_fas = 1;
     uint32_t ret = orig_evm_finishAllStamps_2gp
                        ? orig_evm_finishAllStamps_2gp(evm)
                        : 0;
@@ -4018,7 +4080,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     // 2go: and in the 0x1B trail, so the HIQ's own wait is distinguishable
     // from commitBlock and the doorbell before it. Writes nothing unless
     // 0x1B is in flight.
-    rbgpu_2gn_mark("stw:E");
+    if (g_rb_2gq_in_fas) { g_rb_2gq_stw++; } else { rbgpu_2gn_mark("stw:E"); }
     rbgpu_log("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
               "execute; 5 s timeout per poll", ch, stamp);
 
@@ -4405,7 +4467,9 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     rbgpu_gate_2en(ret ? (150 + g_rb_2cx_stamp_calls) : (120 + g_rb_2cx_stamp_calls),
                    ret ? "waitForHwStamp RETURNED TRUE" : "waitForHwStamp returned false");
     RB_STEP(12);   // the log line returned; next is Apple's submitKIQFrame epilogue
-    rbgpu_2gn_mark(ret ? "stw:R=1" : "stw:R=0");   // 2go, 0x1B-gated
+    if (!g_rb_2gq_in_fas) {
+        rbgpu_2gn_mark(ret ? "stw:R=1" : "stw:R=0");   // 2go, 0x1B-gated
+    }
     return ret;
 }
 
