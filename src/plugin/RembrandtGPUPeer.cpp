@@ -24,7 +24,7 @@ OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 // table was full, so every new key (fw_calls, stamp_calls, setres_ret, ...)
 // was silently dropped and read as "absent". Absent must mean absent, not
 // "the table filled up", or the next conclusion drawn from it will be wrong.
-#define RBGPU_MAX_DIAGS 320
+#define RBGPU_MAX_DIAGS 448
 #define RBGPU_BUF_SIZE  4096
 
 struct LogEntry {
