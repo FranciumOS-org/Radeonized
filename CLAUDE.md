@@ -7767,3 +7767,158 @@ Build: UUID CD191ED5, hosttest passes. **Boot-args unchanged** —
 
 Expect the boot to hang again and cost a power cycle; `rbgpu-1b` is read from
 the recovery boot, with `rbgpu-boot` proving the nonce is new.
+
+### 2gn answered on hardware (2026-10-16): `hardwareDidStart` is where 0x1B hangs
+
+No `plugin_check` capture from the armed boot, so NVRAM is the whole record -
+and the 2gd nonce is what makes it count. Build and args checked first, per
+the 2cu/2cv rule:
+
+```
+kmutil showloaded -> CD191ED5 == build/out (2gn)
+boot-args         -> ... -rbgpunogates -rbgpusdmaone -rbgpuforce1b -rbgpustampwait
+rbgpu-boot        -> 9        a sequence never recorded before
+rbgpu-1b          -> b=9 perf:E perf:R hds:E
+rbgpu-prog        -> b=9 s=5 0x1B SENT - no s=6 means it hangs here
+rbgpu-sdma        -> b=9 c2=1 n=4 map=.... allok ret=1 pre=0000 post=1111
+                     allstarted inst0=0 sdma[0]{} one=3
+rbgpu-prog2       -> b=4, two boots stale: the samplers fire at ~29/49/79 s
+                     and this boot was cut short, so nothing is missing
+no new .panic     -> newest is still 2026-10-15 10:35 (2gg's)
+```
+
+Against the decode table 2gn wrote before the boot:
+
+- **`isDeviceValid()` PASSED.** The gate at 0xbe41858 let 0x1B through, which
+  no boot had ever established - the alternative branch was an immediate
+  `0xE00002D8`, and `s=5` with no `s=6` rules it out from the other side too.
+- **`startGlobalPerfCounters` entered and RETURNED.**
+- **`hardwareDidStart` entered and did not return**, so the unnamed
+  `(accel->0x380)->vt[0x158]` and `enableInterrupts` are never reached and are
+  both cleared.
+- **`powerUpHW` succeeded a fourth consecutive time** (`ret=1 post=1111
+  one=3`). The 2gi result is solid.
+
+One caveat, stated because the trail is a single overwrite slot: `rbgpu-1b`
+accumulates in one string, so a *lost* final commit (which 2gc proved can
+happen) looks exactly like a mark that was never written. `hds:E` being last
+is therefore "hds:R did not commit", and whether that is because it never ran
+is settled by the next boot's marks rather than asserted here. `rbgpu-prog`'s
+missing `s=6` and 2gk's 100-second request-0x14 flood both corroborate that
+the thread genuinely does not come back.
+
+## 2go (2026-10-16): hardwareDidStart's chain, every member of it named — no boot spent
+
+`AMDGFX10Hardware::hardwareDidStart` (0xbeacf08) is 40 instructions with **no
+loop**, and so is the base-class `AMDRTHardware::hardwareDidStart` (0xbe97920)
+it calls first. So the stop is in a callee, and all of them resolve:
+
+```
+hardwareDidStart (GFX10, 0xbeacf08)
+  A  AMDRTHardware::hardwareDidStart(this)        non-virtual, via
+                                  __ZTV28...AMDRTHardware +0x140 (= vt[0x130],
+                                  the slot Apple dispatched on: consistent)
+     A1  peer->callPlatformFunction(0x12, wait=1, .., &out, 0)
+         our peer answers kIOReturnUnsupported, so `this->0x206c0 = 0` and the
+         `vtable[0x3e8]` branch at 0xbe9797c is NOT taken
+     A2  (hw->0x380)->vt[0x120]()                 first time only
+  B  peer->callPlatformFunction(0x1D, wait=1, .., &out, 0)
+     also Unsupported here, so it is a bool store into `this->0x2084c`
+  C  (hw->0x368)->vt[0x118]((hw->0x20838)->0x64)  ONE register read
+  D  (hw->0x20820)->vt[0x160](0, C, 0, hw->0x20844)
+```
+
+**The two unresolved fields, resolved from the code that fills them:**
+
+- `hw->0x380 = this->vtable[0x5f0]()` in `AMDHardware::init` (0xbea8012), and
+  Navi21Hardware's dump +0x600 is `GFX10Hardware::allocateAMDHWVMM`, whose
+  body `new`s an **`AMDGFX10VMM`** (0xbead25a). Call offset 0x120 -> dump
+  +0x130 = **`AMDHWVMM::postInit`** (0xbe90746). Disassembled: it registers
+  two `vmFaultInterruptCallback` handlers for interrupt sources `0xFF0000E9`
+  and `0xFF0000EA` and tail-jumps out. **No loop, no register access.**
+- `hw->0x20820 = new AMDGFX10UserQueueManager` in `GFX10Hardware::init`
+  (0xbeace13). Call offset 0x160 -> dump +0x170 =
+  **`setSchedulerResources(ushort, uint, uint, uint)`** (0xbec86a6), whose
+  four-argument signature matches the call site's `(0, C, 0, hw->0x20844)`
+  exactly.
+
+**And `setSchedulerResources` is the finding.** It stores five fields and
+**tail-jumps** into `AMDGFX10HIQHWChannel::submitSetResourcesPacket`
+(0xbec7b6c) on `this->0x4e8` - the **HIQ**, the user-queue scheduler's own
+channel - which is the KIQ's path with a different ring:
+
+```
+getHIQFrame      getRingBlock(0x20) + 32 filler dwords from vt[0x1f0]
+                 (0xbe6c39e is three instructions; commitBlock is four -
+                  neither can block, so the frame fetch is not a wait)
+frame[0] = 0xC006A000    SET_RESOURCES, PM4 type 3 opcode 0xA0, 8 dwords
+vt[0x328](frame + 0x40)  the HIQ's writeDataCmdPacket
+submitFrame(true) (0xbec7c18):
+    vt[0x140] must be true
+    incl +0x80 ; commitBlock(0x20) ; doorbell vt[0x158]
+    tail jump -> AMDHWChannel::waitForHwStamp (0xbe85536)
+```
+
+So **the HIQ submits a SET_RESOURCES packet and waits for a GPU fence, exactly
+as the KIQ does** - and 2gm established that `AMDHWRegisters::read()` and
+`AMDHardware::MCIL_WaitFor()` both reach our peer as request 0x14. A poll in
+here is the ~5600/s flood 2gk measured.
+
+**What does NOT fit that story, which is why this is a split and not a
+diagnosis.** `-rbgpustampwait` is in boot-args and `-rbgpustampraw` is not, so
+our 2en bounded wait caps at **2000 ms** and returns false into Apple's own
+failure path. A 2 s cap cannot produce a flood that ran for 100+ seconds in
+the 2gk boot. Either the stop is before `waitForHwStamp`, or the bounded wait
+is not reached on this channel. Only marks can say which, and asserting the
+HIQ stamp wait as the cause on the strength of the shape alone would be the
+2gc shape again.
+
+### The instrument
+
+Five observe-only routes, every one of them a named symbol, plus `stw:` marks
+in the `waitForHwStamp` hook that already exists. All checked before a line
+was written:
+
+```
+nm -m   all five external and defined in X6000's __TEXT (milestone-2c rule)
+rule 9  first 16 bytes of each are pushes and movs; the first relative branch
+        is at +0x15, +0x12, +0x45, +0x12 and +0x1c - every one far outside the
+        5-byte patch window, so no displaced rel8 can land in Lilu's
+        trampoline (the fault 2gb diagnosed and 2ga measured)
+```
+
+Apple ignores the first three return values; the two HIQ ones are propagated,
+and `hiq:R=` / `hsf:R=` carry the value so a false that is OURS (a NULL orig)
+cannot be read as a hardware verdict. The marks are gated on `g_rb_2gn_in1b`
+exactly as 2gn's are, so `powerUpHW`'s own calls to these functions write
+nothing. `setSchedulerResources`' mark carries its four arguments, so `C` -
+the one register read in the chain - rides out in the trail.
+
+`req_2go` lives in its own `noinline` function: five more `RouteRequest`s on
+`processX6000`'s frame broke `-Wframe-larger-than` at 1176 bytes, and `static`
+locals need a guard variable the kernel does not support.
+
+Build: UUID 71E5F5F6, hosttest passes. Boot-args unchanged.
+
+```
+rt:E vmm:E vmm:R rt:R ... ssr:E(..) hiq:E hsf:E(1) stw:E (stop)
+        the HIQ's stamp wait does not return even bounded, which would mean
+        our own 2en cap is not reached on this channel - and that is a bug in
+        the instrument, not the chip
+... hsf:E(1) (stop), no stw:E
+        the stop is in commitBlock or the doorbell vt[0x158] - the first
+        doorbell ring on the HIQ ring this project has ever caused
+... ssr:E(..) (stop), no hiq:E
+        setSchedulerResources' own five field stores, or the tail dispatch
+rt:R then nothing
+        request 0x1D into OUR OWN peer, or the single register read C - and
+        0x1D reaching our `default:` means our own handler is in the path
+rt:E then nothing, no vmm:E
+        request 0x12 into our peer, same shape one step earlier
+vmm:E then nothing
+        AMDHWVMM::postInit - an interrupt registration, and the two sources
+        it registers are VM FAULT handlers, newly meaningful since 2em
+hds:R lands
+        the 2gn boot's trail had simply lost its last commit, and the stop is
+        the unnamed (accel->0x380)->vt[0x158] after all
+```
