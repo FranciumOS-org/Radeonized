@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2go)
+# RembrandtGPU — handoff state (2026-10-16, after 2gp)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -28,135 +28,118 @@ trivial-TRUE path and engine[0] alone asks. The whole bring-up chain —
 firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every engine's
 powerUp, and the SDMA walk — completes.
 
-**The frontier is inside request 0x1B (Controller Enabled), and it is now
-located to one function.** 0x1B passes its `isDeviceValid()` gate, runs
-`startGlobalPerfCounters` to completion, and then enters
-`AMDGFX10Hardware::hardwareDidStart` and **does not return** (2gn, `rbgpu-1b`
-= `b=9 perf:E perf:R hds:E`). The machine stays alive and request 0x14 is
-serviced at ~5600/s against 18/s with 0x1B held, so it **spins rather than
-blocking**, and 2gm established that `AMDHWRegisters::read()` and
-`MCIL_WaitFor()` both reach the peer as 0x14 — so that rate is a register-poll
-meter, ~5600 reads a second.
+**The frontier is inside request 0x1B, and it is now one call wide.** 0x1B
+passes `isDeviceValid()`, runs `startGlobalPerfCounters`, and runs
+`hardwareDidStart` **to completion** — sixteen paired marks (2go, `rbgpu-1b` =
+`b=10 perf:E perf:R hds:E rt:E vmm:E vmm:R rt:R ssr:E(0,0x3b,0,0xc) hiq:E
+hsf:E(1) stw:E stw:R=1 hsf:R=1 hiq:R=1 ssr:R hds:R`). On the way it registered
+the two VM-fault interrupt handlers, read its one GC register (`C = 0x3b`),
+and **the HIQ ring submitted a SET_RESOURCES packet whose GPU fence came
+back** (`stw:R=1`) — a ring that had never run.
 
-`hardwareDidStart` has no loop and neither does the base-class
-`hardwareDidStart` it calls first, so the stop is in a callee, and 2go
-resolved every one of them without spending a boot. The lead is
-`UserQueueManager::setSchedulerResources`, which tail-jumps into the **HIQ**
-channel's `submitSetResourcesPacket` — the KIQ's own path on a different ring,
-ending in `waitForHwStamp`. What does not fit: our 2en bounded wait caps at
-2 s, and a 2 s cap cannot produce a flood that ran 100+ seconds. See §2.
+`ei:E` is absent, so the stop is the single call between `hardwareDidStart`
+and `enableInterrupts`: `(accel->0x380)->vtable[0x158]()` at `0xbe418b1`.
+2gp resolved it with no boot — it is
+**`AMDAccelEventMachine::finishAllStamps`** — and found the loop under it:
+`IOAccelEventMachineFast2::finishStamp` retries `waitForStamp`
+**unconditionally** on any nonzero return, with no counter, no delay, and no
+re-read of the fence, while `waitForStamp`'s first two bails return nonzero
+before touching hardware. Every register read in the retry reaches our peer as
+request 0x14 (2gm), which is 2gk's ~5600/s flood. **Which return code it is
+decides the fix and is not yet measured.** See §2.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — one boot, five observe-only hooks
+## 2. The pending experiment — one boot, three observe-only routes
 
-Build **`71E5F5F6`** (2go). Boot-args unchanged. Expect the boot to hang and
-cost a power cycle; `nvram rbgpu-1b` is the answer and survives it.
+Build **`F49A2AEA`** (2gp). Boot-args unchanged. Expect the boot to hang and
+cost a power cycle; `nvram rbgpu-prog2` is the answer and survives it.
 
-### What 2gn settled (`rbgpu-1b` = `b=9 perf:E perf:R hds:E`)
-
-- `isDeviceValid()` **passed** — the gate at 0xbe41858 let 0x1B through, which
-  no boot had established before. `s=5` with no `s=6` says the same from the
-  other side (the refusal path returns `0xE00002D8` at once).
-- `startGlobalPerfCounters` entered and **returned**.
-- `hardwareDidStart` entered and **did not return**, so the unnamed
-  `(accel->0x380)->vt[0x158]` and `enableInterrupts` are never reached.
-- `powerUpHW` succeeded a **fourth** consecutive time (`ret=1 post=1111
-  one=3`).
-
-Caveat, because `rbgpu-1b` is one overwrite slot holding a cumulative string:
-a lost final commit (2gc proved those happen) looks identical to a mark that
-never ran. The next boot's marks settle it rather than an assertion here.
-
-### `hardwareDidStart`'s chain, every member named (2go, no boot spent)
+### The chain, every link read off the code that fills it
 
 ```
-hardwareDidStart (GFX10, 0xbeacf08) — 40 instructions, NO loop
-  A  AMDRTHardware::hardwareDidStart (0xbe97920) — also no loop
-     A1  peer->callPlatformFunction(0x12, wait=1)   OUR peer: Unsupported,
-         so this->0x206c0 = 0 and the vt[0x3e8] branch is NOT taken
-     A2  (hw->0x380 = AMDGFX10VMM)->postInit() (0xbe90746), first time only
-         two vmFaultInterruptCallback registrations, sources 0xFF0000E9/EA.
-         No loop, no register access.
-  B  peer->callPlatformFunction(0x1D, wait=1)       OUR peer: Unsupported,
-     so it is a bool store into this->0x2084c and nothing more
-  C  (hw->0x368)->vt[0x118]((hw->0x20838)->0x64)    ONE register read
-  D  (hw->0x20820 = AMDGFX10UserQueueManager)
-         ->setSchedulerResources(0, C, 0, hw->0x20844)  (0xbec86a6)
-      -> tail jump: AMDGFX10HIQHWChannel::submitSetResourcesPacket (0xbec7b6c)
-           getHIQFrame: getRingBlock(0x20) + 32 filler dwords — both trivial,
-                        three and four instructions, neither can block
-           frame[0] = 0xC006A000 SET_RESOURCES ; vt[0x328](frame + 0x40)
-        -> submitFrame(true) (0xbec7c18): vt[0x140], commitBlock(0x20),
-           doorbell vt[0x158]
-        -> tail jump: AMDHWChannel::waitForHwStamp (0xbe85536)   <- the SAME
-                      function our 2en hook already routes
+accel->0x380 = this->vtable[0x880]()      IOGraphicsAccelerator2::start 0x14e4e4be
+  dump +0x890 -> IOGraphicsAccelerator2::createEventMachine 0x14e51c2a
+    -> vtable[0x888] = AMDGraphicsAccelerator::newEventMachine 0xbe3c4ca
+       -> new AMDRadeonX6000_AMDAccelEventMachine (0xd58 bytes)
+call offset 0x158 -> dump +0x168 = AMDAccelEventMachine::finishAllStamps 0xbe4b2c2
+  a kdebug pair around a NON-virtual call through 0xbf90278
+  -> __ZTV24IOAccelEventMachineFast2 dump +0x168
+
+IOAccelEventMachineFast2::finishAllStamps  0x14e43a1e
+    for (i = 0; i < this->0x30; i++)  sum += this->vt[0x150](i)   BOUNDED
+        vt[0x150] -> dump +0x160 = finishStamp(int)
+
+IOAccelEventMachineFast2::finishStamp(i)   0x14e438c6
+    submitted = this->[0xfc + i*24] ; completed = this->[0xf8 + i*24]
+    if (submitted - completed <= 0)        return 0
+    completed = *(this->0x28[i])           read the channel's fence
+    if (submitted - completed <= 0)        return 0
+ 14e43975:  r = this->vt[0x238](i, submitted, &completed)
+            if (r != 0) { handleFinishChannelRestart(r, i, 1); goto 14e43975 }
 ```
 
-How the two unknown fields were resolved, from the code that fills them:
-`hw->0x380 = vtable[0x5f0]()` in `AMDHardware::init` (0xbea8012), and
-Navi21Hardware dump +0x600 is `allocateAMDHWVMM`, which `new`s an
-`AMDGFX10VMM`; `hw->0x20820 = new AMDGFX10UserQueueManager` in
-`GFX10Hardware::init` (0xbeace13), and dump +0x170 is
-`setSchedulerResources(ushort,uint,uint,uint)`, whose signature matches the
-call site's four arguments exactly.
+**The retry at `0x14e439a0` is unconditional — no counter, no delay, and
+nothing inside it re-reads the fence**, so a wait that errors can never become
+satisfied. `vt[0x238]` -> dump +0x248 =
+**`AMDAccelEventMachine::waitForStamp`** (0xbe4b588), whose first two bails
+return nonzero before touching hardware:
 
-### The experiment
+```
+this->0xd38 == 0                                        -> 0xE0000001
+idx < 0, idx >= hw->0x1e78, or hw->0x1a78[idx] == NULL   -> 0xE00002C2
+```
 
-Five observe-only routes — `RTHardware::hardwareDidStart`,
-`AMDHWVMM::postInit`, `setSchedulerResources`, HIQ
-`submitSetResourcesPacket`, HIQ `submitFrame` — plus `stw:` marks in the
-`waitForHwStamp` hook that already exists. All five checked first: `nm -m`
-external and defined in X6000's `__TEXT` (milestone-2c), and rule 9 clean
-(first relative branch at +0x15 / +0x12 / +0x45 / +0x12 / +0x1c, all far
-outside the 5-byte patch window). Marks are gated on 0x1B being in flight, as
-2gn's are, so `powerUpHW`'s own calls to these write nothing.
-`setSchedulerResources`' mark carries its four arguments, so `C` — the single
-register read in the chain — rides out in the trail.
+### The instrument
+
+Three observe-only routes. `nm -m` shows each external and defined in its
+**own** kext's `__TEXT` (milestone-2c), and rule 9 is clean on all three.
+`handleFinishChannelRestart` is routed under IOAcceleratorFamily2, in kextList
+since 2ct.
+
+```
+AMDAccelEventMachine::finishAllStamps     marks fas:E(n=this->0x30) / fas:R=
+AMDAccelEventMachine::waitForStamp        COUNTERS ONLY (thousands/second)
+IOAccelEventMachine2::handleFinishChannelRestart   a counter
+```
+
+A log line or NVRAM write per `waitForStamp` call would be the 2ez contention
+and the 2fo wedge at once, so the counters ride out on the **+15/+35/+65 s
+prog2 samplers** — measured to fire while this thread spins (2gk).
+`g_rbgpuProgText` is 384 bytes now so three samples are not truncated.
 
 ### Install and arm
 
 ```
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect 71E5F5F6
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect F49A2AEA
 sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
-Run `tools/plugin_check.sh` **in the armed boot** if it is reachable — but it
-is not needed: the 512-line ring is useless on an 0x1B boot (at ~5600 req/s
-the every-64th throttle still writes ~87 lines/s and evicts the chain within
-six seconds), so the NVRAM notes are the record.
+`plugin_check` is not needed — the 512-line ring is useless on an 0x1B boot
+(the 0x14 poll evicts the chain within six seconds), so NVRAM is the record.
+**Leave the machine up past ~80 s** so all three samplers land.
 
 ### Reading it
 
 ```
-nvram rbgpu-boot    must be 10 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b      the trail
+nvram rbgpu-boot    must be 11 — a NEW sequence, or every note is STALE
+nvram rbgpu-prog2   W=<waitForStamp calls> r0=<first ret> rN=<last ret>
+                    R=<restarts> N=<stamp count>
+nvram rbgpu-1b      ... hds:E ... fas:E(n=..), and whether fas:R lands
 nvram rbgpu-prog    s=5 ... 0x1B SENT   |   s=6 0x1B RETURNED 0x...
-nvram rbgpu-sdma    ret=1 post=1111 allstarted one=3
 ```
 
-| `rbgpu-1b` ends at | means |
+| reading | means |
 |---|---|
-| `stw:E` | the HIQ's stamp wait does not return **even bounded** — our own 2en cap is not reached on this channel, which is a bug in the instrument, not the chip |
-| `hsf:E(1)` | `commitBlock` or the doorbell `vt[0x158]` — the first doorbell ring on the HIQ ring this project has caused |
-| `ssr:E(..)` | `setSchedulerResources`' own field stores or its tail dispatch |
-| `rt:R` | request **0x1D into our own peer**, or the single register read C |
-| `rt:E` | request **0x12 into our own peer**, the same shape one step earlier |
-| `vmm:E` | `AMDHWVMM::postInit` — an interrupt registration, and both sources it registers are **VM fault** handlers, newly meaningful since 2em |
-| `hds:R` lands | the 2gn trail had simply lost its last commit, and the stop is the unnamed `(accel->0x380)->vt[0x158]` after all |
-
-Two of these would put the hang in **our own peer**: 0x12 and 0x1D both reach
-`RembrandtGPUPeer::callPlatformFunction`'s `default:` and return
-`kIOReturnUnsupported`. That is cheap by inspection, but it is our code in the
-path and the trail tests it rather than assuming it.
-
-If the trail reaches `stw:E`, the next step is in the hook layer, not the
-chip: `rbgpu_bounded_stamp_wait_2en` is called with a 2000 ms cap and its
-termination needs reading against the HIQ channel's `vt[0x150]` / `vt[0x1a8]`,
-either of which reading NULL makes it return a false that is **ours**.
+| `r0=rN=0xe0000001`, R climbing | `evm->0xd38` is NULL — the event machine has no wait source and the retry is infinite. The fix is whatever sets that field. |
+| `r0=rN=0xe00002c2`, R climbing | the index or `hw->0x1a78[idx]` is bad — a channel/stamp-slot mismatch, with `N` saying how many slots the loop walks |
+| `r0` nonzero, `rN=0` | it eventually succeeds, so `fas:R` should land and the stop moves past `finishAllStamps` |
+| `W` large, `R=0` | the retry is NOT the loop; `waitForStamp` polls internally, and its deeper path (0xbe4b602 onward) is the next read |
+| `W=0` | `finishAllStamps` never reaches the wait — the stop is the bounded loop or the fence read, bounded by `N` |
+| `fas:E` absent | the stop is before `finishAllStamps`, which would contradict 2go's `hds:R` |
 
 ## 3. Verified on hardware — do NOT re-derive these
 
@@ -178,6 +161,15 @@ either of which reading NULL makes it return a false that is **ours**.
   `[0x120]` WRITES it. Apple's encoded ids are `(dword offset << 32) | 11`.
 - **`hw->0x380` is an `AMDGFX10VMM`** and `hw->0x20820` an
   `AMDGFX10UserQueueManager`, both from `init`'s own allocations (2go).
+- **Request 0x1B's `hardwareDidStart` completes** (2go), including
+  `AMDHWVMM::postInit`'s two VM-fault interrupt registrations and the single
+  GC register read (`C = 0x3b`).
+- **The HIQ ring works.** `AMDGFX10HIQHWChannel::submitSetResourcesPacket` ->
+  `submitFrame(true)` -> doorbell -> `waitForHwStamp` returned **1**: the GPU
+  executed the HIQ's SET_RESOURCES packet and wrote its fence (2go).
+- **`accel->0x380` is an `AMDAccelEventMachine`** (via
+  `IOGraphicsAccelerator2::createEventMachine`), and call offset 0x158 on it
+  is `finishAllStamps` (2gp).
 - **GFX is NOT in GFXOFF** (status 2), and `gfx_min = gfx_max = 0` is real
   data from the SMU: **GFX DPM was never started.** Standing, untouched.
 - **PT_BASE (2em) was the GPUVM fix.** The hub register held
