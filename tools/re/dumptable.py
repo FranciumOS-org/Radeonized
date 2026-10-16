@@ -37,7 +37,7 @@ def main():
     later = [a for a, _, _ in m.syms() if a > t]
     size = (min(later) - t) if later else 512
     if len(sys.argv) > 3:
-        size = min(size, int(sys.argv[3]))
+        size = min(size, int(sys.argv[3], 0))   # 0: accept 0x-prefixed
     o = m.off(t)
     print(f"{sys.argv[2]} at {t:#x}, {size} bytes")
     for i in range(0, size, 8):
