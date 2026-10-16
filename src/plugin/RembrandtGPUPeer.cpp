@@ -1447,10 +1447,16 @@ void RembrandtGPUPeer::handlePostRegister() {
     // hardware fully brought up - two variables at once, which is the mistake
     // 2fb/2fc and the withdrawn 2ev table were each made of. Sending it is
     // then a deliberate second step with `-rbgpuforce1b`.
+    // 2gi: `-rbgpusdmaone` joins the hold, and it is the one that makes the
+    // hold matter. That boot is expected to be the FIRST on which powerUpHW
+    // succeeds, so without this the same boot would also be the first ever to
+    // send 0x1B with the hardware fully brought up - and 2fo measured that
+    // call never returning. One variable.
     static int hold1b = -1;
     if (hold1b < 0) {
         hold1b = (checkKernelArgument("-rbgpusdmainst0") ||
-                  checkKernelArgument("-rbgpusdma0skip")) ? 1 : 0;
+                  checkKernelArgument("-rbgpusdma0skip") ||
+                  checkKernelArgument("-rbgpusdmaone")) ? 1 : 0;
     }
     if ((!g_rb_poweruphw_ok || hold1b) && !force1b) {
         rbgpu_log("handlePostRegister: Request 0x1B (Controller Enabled) is "
@@ -1467,7 +1473,7 @@ void RembrandtGPUPeer::handlePostRegister() {
         g_rb_prog_stage = 5;
         rbgpu_nvram_note("rbgpu-prog",
                          g_rb_poweruphw_ok
-                             ? "s=5 powerUpHW OK; 0x1B HELD by -rbgpusdmainst0"
+                             ? "s=5 powerUpHW OK; 0x1B HELD by an SDMA arg"
                              : "s=5 0x06 done ret=0; 0x1B SKIPPED (powerUpHW failed)");
         g_rb_peer_stage |= 0x10;
         return;

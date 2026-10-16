@@ -4975,6 +4975,99 @@ static void rbgpu_sdma_inst0_2gc(uint32_t idx, uintptr_t ep, uint32_t queues) {
     }
 }
 
+// 2gi (2026-10-16): let exactly ONE SDMA engine ask the layer for queues.
+//
+// The 2gh boot closed the 2x2 and the answer is `post=1100 fail@2`: engine[1]
+// STARTED. Five cells are now measured, and the bit order was checked against
+// `rbgpu_poststarthw_2gb` before any of this was read - `post` is written
+// left-to-right in index order, one digit per engine's own +0x10 flag:
+//
+//   engine   instance   asks     result
+//   [0]      0          first    TRUE   (every boot)
+//   [1]      0          second   FALSE  (2gd)
+//   [1]      1          first    FALSE  (2gf)
+//   [1]      0          first    TRUE   (2gh)   <- the cell that was missing
+//   [2]      0          second   FALSE  (2gh)
+//
+// Cell 4 against cell 3 (same engine, same order, instance differs) makes the
+// instance index matter. Cell 4 against cell 2 (same engine, same instance,
+// order differs) makes the ordinal matter. Both are necessary.
+//
+// What is NOT claimed: that these are two separate conditions. This chip has
+// ONE SDMA instance, so "the second engine to ask" and "a duplicate create on
+// instance 0" are the SAME EVENT in every cell measured, and nothing here
+// separates them. They are not separable by any experiment that leaves the
+// engine count at four, and they imply the same fix, so the distinction is
+// recorded as open rather than resolved - cf. the 2gc confound, which was
+// named in advance and still cost a boot to clear.
+//
+// The fix follows from either reading: exactly one engine may ask. Mechanism
+// is Apple's own trivial-TRUE path at 0xbea4b49 - `start()` with
+// `this->0x48 == 0` sets the started flag, calls vtable[0x278] and returns
+// TRUE without asking the layer for anything. That path is now proven on
+// hardware twice: 2ge used it on engine[0], and the 2gh boot's `post=1100`
+// has engine[0] passing through it with `skip0=2`.
+//
+// So engines [1..3] get a zero queue count and engine[0] is left completely
+// alone - it natively asks for instance 0 (the pairs are `(0x7, idx)` and
+// `(0xa, idx)`, measured in 2gd) and in the first ordinal position, which is
+// the one combination that has returned TRUE on every boot. 2gi therefore
+// needs NEITHER `-rbgpusdmainst0` NOR `-rbgpusdma0skip`: both must come out,
+// so the boot carries one variable.
+//
+// The counts are NOT restored afterwards. Those three engine objects really
+// do have no queues on this chip - the instance behind them does not exist -
+// so zero is the honest state and restoring it would be a latch reporting
+// hardware that is not there, which is the debt 2am/2an/2ao already owe. It
+// is tolerable for the same reason 2ge's was: an armed boot has no GPU
+// clients and nothing submits SDMA work. If anything later submits to
+// engines [1..3], it finds no queues rather than a queue that silently is
+// not backed.
+//
+// Off unless `-rbgpusdmaone`.
+static int g_rb_2gi_on = -1;
+static uint32_t g_rb_2gi_zeroed = 0;
+
+static void rbgpu_sdma_one_2gi(uint32_t idx, uintptr_t ep) {
+    if (g_rb_2gi_on < 0) {
+        g_rb_2gi_on = checkKernelArgument("-rbgpusdmaone") ? 1 : 0;
+        if (!g_rb_2gi_on) {
+            rbgpu_log("2gi: one-SDMA-engine mode OFF (-rbgpusdmaone not set); "
+                      "all four engines will ask the layer and engine[1] is "
+                      "expected to be refused for instance 1");
+        }
+    }
+    // engine[0] is left untouched on purpose: instance 0, asking first, is
+    // the only combination measured TRUE on every boot.
+    if (!g_rb_2gi_on || idx == 0) { return; }
+    volatile uint32_t *q = reinterpret_cast<volatile uint32_t *>(ep + 0x48);
+    uint32_t was = *q;
+    if (was == 0) {
+        rbgpu_log("2gi: engine[%u] already has ZERO queues - nothing written, "
+                  "and it takes the trivial-TRUE path on its own", idx);
+        return;
+    }
+    *q = 0;
+    uint32_t back = *q;
+    if (back != 0) {
+        // Absence is not a result (rule 2): say the write did not take rather
+        // than letting a later `post=` digit be read as the layer's answer.
+        rbgpu_log("2gi: engine[%u] queues(+0x48) %u -> 0 FAILED, reads back "
+                  "%u - this engine will still ask the layer, so its "
+                  "started-flag says nothing about the one-engine theory",
+                  idx, was, back);
+        return;
+    }
+    g_rb_2gi_zeroed++;
+    rbgpu_log("2gi: engine[%u] queues(+0x48) %u -> 0 (read back %u) - it will "
+              "take Apple's trivial-TRUE path (0xbea4b49) and ask the layer "
+              "for NOTHING, so engine[0] is the only engine that asks",
+              idx, was, back);
+    char key[24];
+    snprintf(key, sizeof(key), "sdma%u_zeroed_was", idx);
+    rbgpu_diag_set_num(key, was);
+}
+
 static uint8_t g_rb_2gb_pre[32];
 static uint8_t g_rb_2gb_post[32];
 static uint32_t g_rb_2gb_count = 0;
@@ -5108,6 +5201,7 @@ static void rbgpu_walk_starthw_2fp(void *hw) {
             }
             rbgpu_sdma_inst0_2gc(i, ep, q);
             rbgpu_sdma0_skip_2ge(i, ep);
+            rbgpu_sdma_one_2gi(i, ep);
             if (i < 4) {
                 char key[24];
                 snprintf(key, sizeof(key), "sdma%u_q", i);
@@ -5308,6 +5402,14 @@ static bool hooked_hw_startHWEngines(void *hw) {
         if (g_rb_2ge_saved_q != 0xffffffffu) {
             size_t n2 = strlen(buf);
             snprintf(buf + n2, sizeof(buf) - n2, " skip0=%u", g_rb_2ge_saved_q);
+        }
+        // 2gi: `one=N` says how many of engines [1..3] really were zeroed, so
+        // a `post=1111` is only readable as the one-engine answer when N is 3.
+        // Without it, a switch that did not run and a layer that accepted all
+        // four would look identical in the note - rule 2.
+        if (g_rb_2gi_on > 0) {
+            size_t n2 = strlen(buf);
+            snprintf(buf + n2, sizeof(buf) - n2, " one=%u", g_rb_2gi_zeroed);
         }
         rbgpu_prog_2fs(4, buf);
         // 2gf: the SAME string to its own variable. `rbgpu-prog` is a single
