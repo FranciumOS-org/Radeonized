@@ -7601,13 +7601,100 @@ this thread at all (the log carries no thread ids); that `this->0x1f40` is
 nonzero so the call even runs; and that it is this call rather than one of the
 five `hw` vtable slots, none of which is named yet.
 
-### Tooling debt found while doing this
+### Correction (same day): there was NO tooling debt — it was my invocation
 
-`dumptable.py` and `vtslots.py` could not resolve the `AMDNavi21Hardware`
-vtable slots, and the two string operands (`0xbf3d503`, `0xbf3d3db`) and the
-kernel stubs (`0x10132`, `0x10012`, `0x1012c`, `0x10114`, `0x10018`) do not
-resolve inside the extracted Mach-O - they point outside the sections
-`kc_extract.py` carries. `vtslots.py` reads the BOOT collection, where an
-auxiliary kext's vtable is not present. So the five slot names are unresolved
-**because the tools cannot reach them**, not because the step was skipped;
-naming them is a prerequisite for the next boot to be worth spending.
+The paragraph this section originally carried claimed `dumptable.py` and
+`vtslots.py` "could not reach" the vtable, the strings and the stubs, and
+recorded that as a finding. **It is withdrawn.** The truth, checked rather
+than assumed one step later:
+
+```
+dumptable.py ... __ZTV32AMDRadeonX6000_AMDNavi21Hardware 0x600
+  ValueError: invalid literal for int() with base 10: '0x600'
+```
+
+`int(sys.argv[3])` parses base 10, so passing a hex size raised before the
+tool ever looked at the file. Without the size argument it works perfectly —
+the vtable is at `0xbfbc100`, inside `__DATA` (vmaddr 0xbf90000, filesize
+0x36000), and `Macho.off()` maps it correctly. The strings are in `__cstring`
+(0xbf3c521 + 0xc6de), which the extracted file also carries; my reader for
+them was mis-parsing `objdump -s` output, not hitting a missing section.
+
+**Twenty-second instance of the recurring error**, and the first where the
+thing I blamed was my own tooling rather than the chip. The shape is identical
+to all the others: a failure was read as evidence about the world without
+establishing what would make it mean that. One line of `int(x, 0)` in
+`dumptable.py` is the only real defect, now fixed so the trap cannot recur.
+
+## 2gm (2026-10-16): request 0x1B named end to end, and the 0x14 flood explained
+
+With the tools working, every call in 0x1B's case resolves:
+
+```
+0x1B (0xbe417d0)
+  lock triple (this+0x90, this->0x88) ; family call 0x14e551a6 ; vtable[0x850]
+  if (this->0x1f40)  sendRequestToPowerManager(this->0x1ea0, 0xA, 0)
+  log("%s: Controller is enabled, finish initialization", this->0x1e80 + 4)
+  hw = this->0x1a38 ; r14 = 0xE00002D8
+  if (!hw)                            -> return 0xE00002D8
+  if (!hw->isDeviceValid())           -> return 0xE00002D8      [0x2a0]
+  hw->startGlobalPerfCounters()                                 [0x4c8]
+  hw->hardwareDidStart()                                        [0x130]
+  (this->0x380)->vtable[0x158]()
+  hw->enableInterrupts()                                        [0x218]
+```
+
+**That log string dates the case.** `"Controller is enabled, finish
+initialization"` is in the **2db** log (2026-10-12), when `powerUpHW` failed
+and 0x1B answered `0xE00002C7` at once. So 0x1B's case used to run start to
+finish and now does not — the difference is that the hardware is actually
+powered up, so the four calls after the gate do real work instead of finding
+nothing to do.
+
+### What issues request 0x14, and why its rate is a poll meter
+
+`AMDHardware::isDeviceValid()` (0xbea98ae) **is** the request-0x14 sender:
+
+```
+bea98ce  rdi = this->0x18         the peer
+bea98d5  esi = 0x14               the request
+bea98da  edx = 1                  waitForFunction = TRUE
+bea98e5  callq *0x2a8(vtable)     callPlatformFunction
+```
+
+Our own log line reads `SpecialAMDKey request 0x14 (wait: 1)`, and `wait: 1`
+is that `edx = 1` — an independent confirmation from two directions.
+
+It is **one call per invocation, not a loop**, so 2gk's ~5600/s is 5600
+*invocations* per second. And the 56 call sites through vtable slot 0x2a0
+include the two that matter:
+
+```
+AMDHWRegisters::read(uint)          0xbe8d266   <- EVERY register read
+AMDHardware::MCIL_WaitFor(..)       0xbeab526/0xbeab54f   a polling primitive
+AMDHWChannel::waitForHwStamp        0xbe855e8   (already known to poll)
+AMDGFX10PM4Engine::isIdle           0xbea17f2
+```
+
+**So the 0x14 flood is a register-poll loop, and the counter is a free poll
+meter** — ~5600 register reads a second, each one validating the device
+through the peer first. That reframes 2gk: the rate was never about GPU status
+as such.
+
+So the loop is inside one of 0x1B's four post-gate calls, and
+`startGlobalPerfCounters` / `hardwareDidStart` / `enableInterrupts` are each
+plausible places to wait on a register. **Not established:** which one. 2gl's
+`sendRequestToPowerManager` candidate is **weakened** — it runs before the
+logging call, and that log line is absent from the 2gk capture only because
+the ring had wrapped, so it cannot be used either way.
+
+### The next boot, now precisely aimed
+
+Hook the four observe-only and log ENTER and RETURN for each; the one entered
+without returning is the answer, and the three before it returning is positive
+evidence either way. All four are external and defined in X6000, so routing
+is legitimate under the milestone-2c rule — **and rule 9 applies: disassemble
+each one's first 16 bytes and refuse any whose prologue carries a rel8/rel32
+branch inside the 5-byte patch window.** `isDeviceValid` itself is an example
+of why: it opens `cmpb $0x1, 0x30d(%rdi) ; jne` — a rel32 branch at +7, which
+is outside the window, but the check is not optional.
