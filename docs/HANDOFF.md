@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gl)
+# RembrandtGPU — handoff state (2026-10-16, after 2gm)
 
 **Read this before CLAUDE.md.** CLAUDE.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -40,55 +40,60 @@ display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending work — no boot yet, and no build
+## 2. The pending experiment — one boot, four observe-only hooks
 
-2gk spent the 0x1B boot and 2gl disassembled the answer. **The next boot is
-not worth spending until the tooling debt below is paid**, because the five
-candidate calls have no names yet.
+**No build yet.** Request 0x1B is now named end to end (2gm) and the next boot
+has a precise target.
 
-### What 0x1B is (2gl, `0xbe417d0`)
-
-`AMDGraphicsAccelerator::callPlatformFunction` (0xbe4154e) dispatches on
-`req - 1` through a jump table at `0xbe41ad4`. The decode is cross-checked:
-req 0x06 -> `0xbe41717`, which contains the `powerUpHW` call the 2ga panic
-frame independently names at `callPlatformFunction+0x21f`.
+### What 0x1B is (`0xbe417d0`, every call resolved)
 
 ```
-0x1B (0xbe417d0), straight-line - NO loop, so the poll is in a callee:
-  lock triple (this+0x90, this->0x88); family call 0x14e551a6; vtable[0x850]
+  lock triple (this+0x90, this->0x88) ; family 0x14e551a6 ; vtable[0x850]
   if (this->0x1f40)  sendRequestToPowerManager(this->0x1ea0, 0xA, 0)
+  log("%s: Controller is enabled, finish initialization", this->0x1e80 + 4)
   hw = this->0x1a38 ; r14 = 0xE00002D8
-  if (!hw || !hw->vt[0x2a0]())   -> return 0xE00002D8
-  hw->vt[0x4c8]() ; hw->vt[0x130]() ; (this->0x380)->vt[0x158]() ; hw->vt[0x218]()
+  if (!hw || !hw->isDeviceValid())  -> return 0xE00002D8        [0x2a0]
+  hw->startGlobalPerfCounters()                                 [0x4c8]
+  hw->hardwareDidStart()                                        [0x130]
+  (this->0x380)->vtable[0x158]()
+  hw->enableInterrupts()                                        [0x218]
 ```
 
-**Leading candidate, not established:** `sendRequestToPowerManager(.., 0xA, 0)`
-— the first substantive thing 0x1B does that the working 0x06 does not, and a
-**named symbol** so it is hookable observe-only. A power manager polling for a
-clock state it can never reach is exactly the 6 kHz shape, and
-`gfx_min = gfx_max = 0` has stood since 2di. That would make the oldest debt
-in this project the cause of the newest frontier.
+The dispatch is from `callPlatformFunction` (0xbe4154e) through a jump table
+at `0xbe41ad4` indexed by `req - 1`; the decode is cross-checked by req 0x06
+-> `0xbe41717` holding the `powerUpHW` call the 2ga panic frame names at
+`+0x21f`.
 
-Three things must hold before that reading means anything: the poll being on
-this thread (the log has no thread ids), `this->0x1f40` being nonzero so the
-call runs at all, and it being this call rather than one of the five unnamed
-`hw` slots.
+**0x1B used to complete.** Its log string is in the 2db capture, when
+`powerUpHW` failed and 0x1B answered `0xE00002C7` at once. The difference now
+is that the hardware really is powered, so the four post-gate calls do real
+work instead of finding nothing to do.
 
-### Blocking: tooling debt (2gl)
+### The 0x14 rate is a poll meter, not a status question
 
-`dumptable.py` and `vtslots.py` cannot resolve the `AMDNavi21Hardware` vtable
-slots, and the string operands (`0xbf3d503`, `0xbf3d3db`) and kernel stubs
-(`0x10132`, `0x10012`, `0x1012c`, `0x10114`, `0x10018`) point outside the
-sections `kc_extract.py` carries; `vtslots.py` reads the BOOT collection,
-where an auxiliary kext's vtable is absent. Fix the reach, name
-`hw->vt[0x2a0/0x4c8/0x130/0x218]` and `(this->0x380)->vt[0x158]`, and the
-next boot becomes worth one variable.
+`AMDHardware::isDeviceValid()` (0xbea98ae) **is** the request-0x14 sender
+(`esi=0x14, edx=1`, matching our log's `wait: 1`), one call per invocation.
+But 56 sites call it through slot 0x2a0, including **`AMDHWRegisters::read()`**
+(every register read) and **`AMDHardware::MCIL_WaitFor()`** (a polling
+primitive). So 2gk's ~5600/s is ~5600 register reads a second: **the loop is
+inside one of the four post-gate calls.**
 
-### Then, and only then: one observe-only hook
+### The experiment
 
-`sendRequestToPowerManager` is external and defined in X6000. **Before routing
-it, disassemble its first 16 bytes and refuse if a rel8/rel32 branch starts
-within the first 5** — rule 9, which the 2gb panic bought.
+Hook the four observe-only, logging ENTER and RETURN for each. The one entered
+that never returns is the answer; the ones before it returning is positive
+evidence either way. All four are external and defined in X6000, so routing is
+legitimate under the milestone-2c rule.
+
+**Rule 9 is not optional here.** Disassemble each one's first 16 bytes and
+refuse any whose prologue carries a rel8/rel32 branch inside the 5-byte patch
+window — that is what the 2gb panic bought. `isDeviceValid` is the cautionary
+example: it opens `cmpb $0x1, 0x30d(%rdi) ; jne <rel32>`, a branch at +7 that
+happens to clear the window.
+
+Because the ring is useless on an 0x1B boot (below), the per-call record has
+to ride an NVRAM note, in the shape 2gf established: one variable the later
+stages do not overwrite.
 
 ### Current boot-args (OpenCore config.plist)
 
@@ -100,20 +105,20 @@ keepsyms=1 -vi2c-force-polling -lilubetaall msgbuf=1048576 -rbgpusync570
 ```
 
 **`-rbgpusdmaone` must stay IN** — it is what makes `powerUpHW` succeed.
-**`-rbgpuforce1b` should come OUT** until there is a reason to send 0x1B
-again: it costs a power cycle and the question it answered is answered.
+**`-rbgpuforce1b` stays IN for this experiment** (it is what sends 0x1B), and
+should come out again afterwards: an 0x1B boot costs a power cycle.
 **`-rbgpunodisppanic`** (IOPCITunnelled costs the UI, 2cv) and
-**`-rbgpusdmahook`** (proven to panic, 2gb) must stay OUT. `-rbgpusdmainst0`,
-`-rbgpusdma0skip` are retired. `-rbgpusdmadesc` / `-rbgpuregdump` stay off.
-`-broadtekdbg` + `BroadTek.kext` are new since 2gg — a separate project's
-kext, so rule it out first if a boot behaves oddly in a way the question does
-not explain.
+**`-rbgpusdmahook`** (proven to panic, 2gb) must stay OUT. `-rbgpusdmainst0`
+and `-rbgpusdma0skip` are retired; `-rbgpusdmadesc` / `-rbgpuregdump` off.
+`-broadtekdbg` + `BroadTek.kext` are new since 2gg — another project's kext,
+so rule it out first if a boot behaves oddly in a way the question does not
+explain.
 
 ### Reading an 0x1B boot
 
-The 512-line ring is **useless** on one: at 5600 req/s the every-64th
-throttle still writes ~87 lines/s, so the whole chain is evicted within six
-seconds and `grep 0x1B log.txt` finds nothing. The NVRAM notes are the record.
+The 512-line ring is **useless**: at ~5600 req/s the every-64th throttle still
+writes ~87 lines/s, so the whole chain is evicted within six seconds and
+`grep 0x1B log.txt` finds nothing. The NVRAM notes are the record.
 
 ```
 nvram rbgpu-boot    a NEW sequence, or every note is STALE
@@ -390,26 +395,21 @@ rbgpu-arm         one-shot arming
 
 ## 7. Where to go next
 
-1. **Pay the tooling debt (no boot, no build).** Name the five calls 0x1B
-   makes — `hw->vt[0x2a0/0x4c8/0x130/0x218]` and `(this->0x380)->vt[0x158]` —
-   plus the two strings and five kernel stubs. `kc_extract.py` does not carry
-   the sections they live in and `vtslots.py` reads the BOOT collection, where
-   an auxiliary kext's vtable is absent. Until this is done, a boot cannot be
-   aimed at anything.
-2. **Then one observe-only hook on `sendRequestToPowerManager`**, honouring
-   rule 9 (disassemble the first 16 bytes; refuse a rel8/rel32 branch inside
-   the patch window). It is the first substantive thing 0x1B does that the
-   working 0x06 does not.
-3. **If the power manager is the loop**, the question becomes
-   `gfx_min = gfx_max = 0` — GFX DPM never started, standing since 2di. That
-   is an SMU message group beyond TABLES and therefore **the user's decision**
+1. **Build the four observe-only hooks** (§2) and spend one boot. The answer
+   is which of `startGlobalPerfCounters`, `hardwareDidStart`,
+   `(this->0x380)->vt[0x158]` or `enableInterrupts` is entered and does not
+   return.
+2. **If it is `enableInterrupts`**, the question becomes an interrupt storm —
+   the GPU has been able to reach host memory and raise interrupts only since
+   2em, which 2fk already flagged as the one new asynchronous thing on this
+   chip.
+3. **If it is `startGlobalPerfCounters` or `hardwareDidStart`**, it is a
+   register wait on the GFX block, and `gfx_min = gfx_max = 0` — GFX DPM never
+   started, standing since 2di — becomes the leading explanation. Acting on it
+   needs an SMU message group beyond TABLES, which is **the user's decision**
    under the CLAUDE.md rule; say what it changes on the chip before asking.
-4. **If it is not**, the five `hw` slots are next, in the order 0x1B calls
-   them, with `hw->vt[0x2a0]` first — it is a gate no boot has ever exercised
-   (the identical slot at 0xbe416c4 is in request **0x1C**'s case, which this
-   project has never sent).
-5. **Standing, unchanged:** the 2am / 2an / 2ao blanket bypasses (the SDMA one
+4. **Standing, unchanged:** the 2am / 2an / 2ao blanket bypasses (the SDMA one
    is adjacent to a path that now genuinely starts), 2cc (VCN encode stubbed),
    2be (`stop()` patched to RET, cause never understood), 2ct (the display
-   pipe refused outright). The display path is untouched, and 2bq's reserve
+   pipe refused outright). The display path is untouched and 2bq's reserve
    chain is now unblocked (§3), so it is the frontier after 0x1B.
