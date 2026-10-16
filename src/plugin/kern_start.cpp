@@ -3166,6 +3166,14 @@ static bool (*orig_sched_addHWChannel_2du)(void *, void *, uint64_t) = nullptr;
 static void (*orig_hw_startGlobalPerfCounters_2gn)(void *) = nullptr;
 static void (*orig_hw_hardwareDidStart_2gn)(void *) = nullptr;
 static void (*orig_hw_enableInterrupts_2gn)(void *) = nullptr;
+// 2go: hardwareDidStart's own chain, every member of it a named symbol.
+// Apple ignores the first three returns; the two HIQ ones are propagated.
+static void (*orig_rt_hardwareDidStart_2go)(void *) = nullptr;
+static void (*orig_vmm_postInit_2go)(void *) = nullptr;
+static void (*orig_uqm_setSchedulerResources_2go)(void *, uint16_t, uint32_t,
+                                                  uint32_t, uint32_t) = nullptr;
+static bool (*orig_hiq_submitSetResourcesPacket_2go)(void *, uint16_t, uint32_t) = nullptr;
+static bool (*orig_hiq_submitFrame_2go)(void *, bool) = nullptr;
 
 // 2dv (2026-10-12): counting is not enough - track WHICH channel.
 //
@@ -3311,7 +3319,7 @@ static bool hooked_sched_addHWChannel_2du(void *sched, void *chan, uint64_t idx)
 // Six commits at most, and all of them AFTER the ~500 us chain region that
 // 2fo/2ft showed must stay clear.
 volatile int g_rb_2gn_in1b = 0;
-static char g_rb_2gn_trail[192];
+static char g_rb_2gn_trail[320];   // 2go: room for the split chain
 static uint32_t g_rb_2gn_n = 0;
 
 static void rbgpu_2gn_mark(const char *tag) {
@@ -3345,6 +3353,110 @@ static void hooked_hw_enableInterrupts_2gn(void *hw) {
     rbgpu_2gn_mark("ei:E");
     if (orig_hw_enableInterrupts_2gn) { orig_hw_enableInterrupts_2gn(hw); }
     rbgpu_2gn_mark("ei:R");
+}
+
+// 2go (2026-10-16): the 2gn boot answered - `b=9 perf:E perf:R hds:E`, so
+// AMDGFX10Hardware::hardwareDidStart is entered and does not return. It is
+// 40 instructions with no loop (0xbeacf08), and so is the base-class
+// hardwareDidStart it calls first (0xbe97920), so the stop is in a callee.
+// Every one of them is now a named symbol, read off the disassembly:
+//
+//   hardwareDidStart (GFX10, 0xbeacf08)
+//     A  AMDRTHardware::hardwareDidStart(this)       non-virtual, via the
+//        A1  peer->callPlatformFunction(0x12, wait=1, .., &out, 0)
+//            our peer answers kIOReturnUnsupported, so `this->0x206c0 = 0`
+//            and the vtable[0x3e8] branch at 0xbe9797c is NOT taken
+//        A2  (hw->0x380 = AMDGFX10VMM)->postInit()   first time only
+//            two vmFaultInterruptCallback registrations (0xFF0000E9/EA).
+//            No loop and no register access.
+//     B  peer->callPlatformFunction(0x1D, wait=1, .., &out, 0)
+//        also Unsupported here, so it is a bool store and nothing more
+//     C  (hw->0x368)->vt[0x118]((hw->0x20838)->0x64)   ONE register read
+//     D  (hw->0x20820 = AMDGFX10UserQueueManager)
+//            ->setSchedulerResources(0, C, 0, hw->0x20844)
+//          -> AMDGFX10HIQHWChannel::submitSetResourcesPacket   (tail jump)
+//               getHIQFrame: getRingBlock(0x20) + 32 filler dwords, both
+//                            trivial (0xbe6c39e has no loop at all)
+//               SET_RESOURCES 0xC006A000, then vt[0x328] at frame+0x40
+//            -> submitFrame(true): commitBlock(0x20), doorbell vt[0x158],
+//            -> AMDHWChannel::waitForHwStamp        <- the SAME function our
+//                                                      2en hook already routes
+//
+// So the HIQ - the user-queue scheduler's own channel - submits a
+// SET_RESOURCES packet exactly as the KIQ does, and 2gm established that
+// AMDHWRegisters::read() and MCIL_WaitFor() reach the peer as request 0x14.
+// A poll in here is the ~5600/s flood 2gk measured.
+//
+// What does NOT fit that story, and is why this is a split and not a fix:
+// -rbgpustampwait is set and -rbgpustampraw is not, so our 2en bounded wait
+// caps at 2000 ms and returns false into Apple's own failure path. A 2 s cap
+// cannot produce a flood that ran for 100+ seconds in the 2gk boot. Either
+// the stop is before waitForHwStamp, or the bounded wait is not reached on
+// this channel, and only marks can say which.
+//
+// All five targets checked before writing a line:
+//   nm -m: all external and defined in X6000's __TEXT (milestone-2c rule)
+//   rule 9: first 16 bytes of each are pushes and movs - the first relative
+//           branch is at +0x15 / +0x12 / +0x45 / +0x12 / +0x1c, every one
+//           far outside the 5-byte patch window, so no displaced rel8 can
+//           land in Lilu's trampoline (the 2gb/2ga panic)
+//
+// Observe-only. The marks are gated on 0x1B being in flight exactly as 2gn's
+// are, so powerUpHW's own calls to these functions write nothing, and all of
+// them land in the stage-5/6 region where notes are proven - not the ~500 us
+// chain region 2fo/2ft showed must stay clear.
+static void hooked_rt_hardwareDidStart_2go(void *hw) {
+    rbgpu_diag_inc("rt_hds_calls");
+    rbgpu_2gn_mark("rt:E");
+    if (orig_rt_hardwareDidStart_2go) { orig_rt_hardwareDidStart_2go(hw); }
+    // rt:R present with ssr:E absent puts the stop in request 0x1D (our own
+    // peer), the single register read C, or the dispatch to D.
+    rbgpu_2gn_mark("rt:R");
+}
+
+static void hooked_vmm_postInit_2go(void *vmm) {
+    rbgpu_diag_inc("vmm_postinit_calls");
+    rbgpu_2gn_mark("vmm:E");
+    if (orig_vmm_postInit_2go) { orig_vmm_postInit_2go(vmm); }
+    rbgpu_2gn_mark("vmm:R");
+}
+
+static void hooked_uqm_setSchedulerResources_2go(void *uqm, uint16_t a,
+                                                 uint32_t b, uint32_t c,
+                                                 uint32_t d) {
+    rbgpu_diag_inc("ssr_calls");
+    char t[48];
+    snprintf(t, sizeof(t), "ssr:E(%u,%#x,%u,%#x)", a, b, c, d);
+    rbgpu_2gn_mark(t);
+    if (orig_uqm_setSchedulerResources_2go) {
+        orig_uqm_setSchedulerResources_2go(uqm, a, b, c, d);
+    }
+    rbgpu_2gn_mark("ssr:R");
+}
+
+static bool hooked_hiq_submitSetResourcesPacket_2go(void *ch, uint16_t a,
+                                                    uint32_t b) {
+    rbgpu_diag_inc("hiq_setres_calls");
+    rbgpu_2gn_mark("hiq:E");
+    bool ret = orig_hiq_submitSetResourcesPacket_2go
+                   ? orig_hiq_submitSetResourcesPacket_2go(ch, a, b)
+                   : false;
+    // The false when orig is NULL is OURS, not a hardware verdict - and the
+    // mark says so by carrying the value.
+    rbgpu_2gn_mark(ret ? "hiq:R=1" : "hiq:R=0");
+    return ret;
+}
+
+static bool hooked_hiq_submitFrame_2go(void *ch, bool submit) {
+    rbgpu_diag_inc("hiq_submitframe_calls");
+    rbgpu_2gn_mark(submit ? "hsf:E(1)" : "hsf:E(0)");
+    bool ret = orig_hiq_submitFrame_2go ? orig_hiq_submitFrame_2go(ch, submit)
+                                        : false;
+    // hsf:E present with hsf:R absent means the stop is inside commitBlock,
+    // the doorbell vt[0x158], or waitForHwStamp - and our own stamp hook's
+    // `stw:` marks split those three.
+    rbgpu_2gn_mark(ret ? "hsf:R=1" : "hsf:R=0");
+    return ret;
 }
 
 static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void *c, void *d) {
@@ -3788,6 +3900,10 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     // wedge was on a later one, so the call index is what names it.
     rbgpu_diag_set_num("stamp_in_call", static_cast<uint64_t>(g_rb_2cx_stamp_calls));
     rbgpu_gate_2en(100 + g_rb_2cx_stamp_calls, "waitForHwStamp ENTER");
+    // 2go: and in the 0x1B trail, so the HIQ's own wait is distinguishable
+    // from commitBlock and the doorbell before it. Writes nothing unless
+    // 0x1B is in flight.
+    rbgpu_2gn_mark("stw:E");
     rbgpu_log("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
               "execute; 5 s timeout per poll", ch, stamp);
 
@@ -4174,6 +4290,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     rbgpu_gate_2en(ret ? (150 + g_rb_2cx_stamp_calls) : (120 + g_rb_2cx_stamp_calls),
                    ret ? "waitForHwStamp RETURNED TRUE" : "waitForHwStamp returned false");
     RB_STEP(12);   // the log line returned; next is Apple's submitKIQFrame epilogue
+    rbgpu_2gn_mark(ret ? "stw:R=1" : "stw:R=0");   // 2go, 0x1B-gated
     return ret;
 }
 
@@ -6632,6 +6749,41 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
     }
 }
 
+// 2go: its own function, so the five RouteRequests do not sit on
+// processX6000's frame (-Wframe-larger-than is 1024 bytes there).
+static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, size_t id,
+                            mach_vm_address_t address, size_t size) {
+    // 2go: split hardwareDidStart's chain. Every one of these is a named
+    // symbol read off the disassembly, external and defined in X6000's
+    // __TEXT, and rule-9 clean (first relative branch at +0x15 / +0x12 /
+    // +0x45 / +0x12 / +0x1c, all far outside the 5-byte patch window).
+    KernelPatcher::RouteRequest req_2go[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN28AMDRadeonX6000_AMDRTHardware16hardwareDidStartEv",
+            hooked_rt_hardwareDidStart_2go, orig_rt_hardwareDidStart_2go),
+        KernelPatcher::RouteRequest(
+            "__ZN23AMDRadeonX6000_AMDHWVMM8postInitEv",
+            hooked_vmm_postInit_2go, orig_vmm_postInit_2go),
+        KernelPatcher::RouteRequest(
+            "__ZN39AMDRadeonX6000_AMDGFX10UserQueueManager21setSchedulerResourcesEtjjj",
+            hooked_uqm_setSchedulerResources_2go, orig_uqm_setSchedulerResources_2go),
+        KernelPatcher::RouteRequest(
+            "__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel24submitSetResourcesPacketEtj",
+            hooked_hiq_submitSetResourcesPacket_2go,
+            orig_hiq_submitSetResourcesPacket_2go),
+        KernelPatcher::RouteRequest(
+            "__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel11submitFrameEb",
+            hooked_hiq_submitFrame_2go, orig_hiq_submitFrame_2go),
+    };
+    if (patcher.routeMultiple(id, req_2go, 5, address, size)) {
+        rbgpu_log("X6000: hooked RTHardware::hardwareDidStart + AMDHWVMM::postInit "
+                  "+ setSchedulerResources + HIQ submitSetResourcesPacket + "
+                  "HIQ submitFrame (2go observe-only)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook the 2go hardwareDidStart chain");
+    }
+}
+
 void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6000 (Trap 3 Failure Guard)");
 
@@ -7034,6 +7186,8 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     } else {
         rbgpu_log("X6000: FAILED to hook the 2gn 0x1B post-gate calls");
     }
+
+    rbgpu_route_2go(patcher, id, address, size);
 
     // 2eg: where Apple's VM allocator puts each page-table block.
     KernelPatcher::RouteRequest req_2eg(
