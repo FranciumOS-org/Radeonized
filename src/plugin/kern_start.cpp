@@ -3161,6 +3161,11 @@ static int (*orig_kiq_startKIQ_2ch)(void *, uint64_t, uint64_t, void *, void *) 
 // one refuses.
 static bool (*orig_hw_registerChannel_2du)(void *, void *) = nullptr;
 static bool (*orig_sched_addHWChannel_2du)(void *, void *, uint64_t) = nullptr;
+// 2gn: request 0x1B's three named post-gate calls. Apple ignores every
+// return value (no test follows any of the three call sites), so void.
+static void (*orig_hw_startGlobalPerfCounters_2gn)(void *) = nullptr;
+static void (*orig_hw_hardwareDidStart_2gn)(void *) = nullptr;
+static void (*orig_hw_enableInterrupts_2gn)(void *) = nullptr;
 
 // 2dv (2026-10-12): counting is not enough - track WHICH channel.
 //
@@ -3259,6 +3264,87 @@ static bool hooked_sched_addHWChannel_2du(void *sched, void *chan, uint64_t idx)
     if (!ret) rbgpu_diag_inc("addchan_fails");
     else rb_2dv_note(g_rb_2dv_add, &g_rb_2dv_add_n, chan);
     return ret;
+}
+
+// 2gn (2026-10-16): which of request 0x1B's four post-gate calls does not
+// return.
+//
+// 0x1B's case (0xbe417d0, named end to end in 2gm) is straight-line, so
+// 2gk's ~5600/s request-0x14 rate is a loop inside a callee - and 0x14 is
+// sent by `AMDHardware::isDeviceValid()`, which `AMDHWRegisters::read()` and
+// `AMDHardware::MCIL_WaitFor()` both call, so that rate is a REGISTER-POLL
+// METER. After the gate, 0x1B does exactly four things:
+//
+//   hw->startGlobalPerfCounters()            [0x4c8]
+//   hw->hardwareDidStart()                   [0x130]
+//   (this->0x380)->vtable[0x158]()           <- class UNRESOLVED
+//   hw->enableInterrupts()                   [0x218]
+//
+// Three are named symbols; the third is not. `this->0x380` is loaded in eight
+// AMDGraphicsAccelerator methods and stored in none of them, so a base class
+// sets it, and it is **not** an AMDSWScheduler - that vtable is 0x148 bytes,
+// so slot 0x158 is past its end (checked, because `swTimestampCallback`
+// loading the same field made it the obvious guess).
+//
+// So the unnamed call is localised **by elimination** rather than hooked:
+// it sits between `hardwareDidStart` and `enableInterrupts`, so
+// `hds:R` present with `ei:E` absent names it with no fourth symbol.
+//
+// Rule 9 was applied to all three before writing this. Each opens
+// `pushq %rbp ; movq %rsp,%rbp ; pushq %r14`, straight-line well past the
+// 5-byte patch window:
+//
+//   startGlobalPerfCounters 0xbeae2e2   55 / 48 89 e5 / 41 56 ...
+//   hardwareDidStart        0xbeacf08   55 / 48 89 e5 / 41 56 ...   (its
+//       rip-relative leaq is at +0xe, outside the window)
+//   enableInterrupts        0xbea9558   55 / 48 89 e5 / 41 56 / 53 / cmpb,
+//       and its `je` is at +0x14 - far outside
+//
+// Apple ignores all three return values (no test follows any of the three
+// call sites), so they are called through a void thunk and nothing is
+// substituted: observe only.
+//
+// The record is its own NVRAM variable, `rbgpu-1b`, which no later stage
+// overwrites - the 2gf lesson. It is written only while 0x1B is in flight,
+// because all three functions are also called from powerUpHW's own path and
+// an ungated note would be overwritten by calls that are not the question.
+// Six commits at most, and all of them AFTER the ~500 us chain region that
+// 2fo/2ft showed must stay clear.
+volatile int g_rb_2gn_in1b = 0;
+static char g_rb_2gn_trail[192];
+static uint32_t g_rb_2gn_n = 0;
+
+static void rbgpu_2gn_mark(const char *tag) {
+    if (!g_rb_2gn_in1b) { return; }
+    size_t n = strlen(g_rb_2gn_trail);
+    snprintf(g_rb_2gn_trail + n, sizeof(g_rb_2gn_trail) - n,
+             "%s%s", n ? " " : "", tag);
+    g_rb_2gn_n++;
+    rbgpu_nvram_note("rbgpu-1b", g_rb_2gn_trail);
+    rbgpu_log("2gn: %s", g_rb_2gn_trail);
+}
+
+static void hooked_hw_startGlobalPerfCounters_2gn(void *hw) {
+    rbgpu_diag_inc("perf_calls");
+    rbgpu_2gn_mark("perf:E");
+    if (orig_hw_startGlobalPerfCounters_2gn) { orig_hw_startGlobalPerfCounters_2gn(hw); }
+    rbgpu_2gn_mark("perf:R");
+}
+
+static void hooked_hw_hardwareDidStart_2gn(void *hw) {
+    rbgpu_diag_inc("hds_calls");
+    rbgpu_2gn_mark("hds:E");
+    if (orig_hw_hardwareDidStart_2gn) { orig_hw_hardwareDidStart_2gn(hw); }
+    // If this RETURN lands and `ei:E` never does, the stop is the unnamed
+    // (this->0x380)->vtable[0x158]() between them.
+    rbgpu_2gn_mark("hds:R");
+}
+
+static void hooked_hw_enableInterrupts_2gn(void *hw) {
+    rbgpu_diag_inc("ei_calls");
+    rbgpu_2gn_mark("ei:E");
+    if (orig_hw_enableInterrupts_2gn) { orig_hw_enableInterrupts_2gn(hw); }
+    rbgpu_2gn_mark("ei:R");
 }
 
 static int hooked_kiq_startKIQ_2co(void *this_ptr, uint64_t a, uint64_t b, void *c, void *d) {
@@ -6924,6 +7010,29 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
         rbgpu_log("X6000: hooked registerChannel + addHWChannel (2du observe-only)");
     } else {
         rbgpu_log("X6000: FAILED to hook the 2du channel-registration gates");
+    }
+
+    // 2gn: the three named calls request 0x1B makes after its isDeviceValid
+    // gate. Observe only; the unnamed (this->0x380)->vtable[0x158] between
+    // hardwareDidStart and enableInterrupts is localised by elimination.
+    // Rule 9 checked on all three: each opens pushq %rbp / movq %rsp,%rbp /
+    // pushq %r14, with no relative branch inside the 5-byte patch window.
+    KernelPatcher::RouteRequest req_2gn[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN31AMDRadeonX6000_AMDGFX10Hardware23startGlobalPerfCountersEv",
+            hooked_hw_startGlobalPerfCounters_2gn, orig_hw_startGlobalPerfCounters_2gn),
+        KernelPatcher::RouteRequest(
+            "__ZN31AMDRadeonX6000_AMDGFX10Hardware16hardwareDidStartEv",
+            hooked_hw_hardwareDidStart_2gn, orig_hw_hardwareDidStart_2gn),
+        KernelPatcher::RouteRequest(
+            "__ZN26AMDRadeonX6000_AMDHardware16enableInterruptsEv",
+            hooked_hw_enableInterrupts_2gn, orig_hw_enableInterrupts_2gn),
+    };
+    if (patcher.routeMultiple(id, req_2gn, 3, address, size)) {
+        rbgpu_log("X6000: hooked startGlobalPerfCounters + hardwareDidStart + "
+                  "enableInterrupts (2gn observe-only)");
+    } else {
+        rbgpu_log("X6000: FAILED to hook the 2gn 0x1B post-gate calls");
     }
 
     // 2eg: where Apple's VM allocator puts each page-table block.

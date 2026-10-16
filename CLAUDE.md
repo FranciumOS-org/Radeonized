@@ -7698,3 +7698,72 @@ each one's first 16 bytes and refuse any whose prologue carries a rel8/rel32
 branch inside the 5-byte patch window.** `isDeviceValid` itself is an example
 of why: it opens `cmpb $0x1, 0x30d(%rdi) ; jne` — a rel32 branch at +7, which
 is outside the window, but the check is not optional.
+
+## 2gn (2026-10-16): which of 0x1B's four post-gate calls does not return
+
+Three observe-only hooks, and the fourth call localised by elimination.
+
+**The rule-9 check, done before any code was written.** Each target's first
+16 bytes disassembled; the patch window is the first 5:
+
+```
+startGlobalPerfCounters 0xbeae2e2  55 / 48 89 e5 / 41 56 / 48 89 fb ...
+hardwareDidStart        0xbeacf08  55 / 48 89 e5 / 41 56 / 53 / 48 83 ec 10
+                                   (its rip-relative leaq is at +0xe)
+enableInterrupts        0xbea9558  55 / 48 89 e5 / 41 56 / 53 / cmpb ...
+                                   (its `je` is at +0x14)
+```
+
+All three open `pushq %rbp ; movq %rsp,%rbp ; pushq %r14`, straight-line well
+past the window, so no relative branch is displaced into Lilu's trampoline —
+the fault 2gb diagnosed. And `nm -m` shows all three **external and defined
+in `__TEXT`** of X6000, so the milestone-2c rule holds too.
+
+Apple ignores every one of the three return values (no test follows any of the
+three call sites at 0xbe41889 / 0xbe4189d / 0xbe418c5), so they are routed
+through a `void (*)(void *)` thunk. Nothing is substituted.
+
+**The fourth call is not hooked, because it has no symbol.**
+`(this->0x380)->vtable[0x158]()` sits between `hardwareDidStart` and
+`enableInterrupts`; `this->0x380` is loaded in eight `AMDGraphicsAccelerator`
+methods and stored in none of them, so a base class sets it. It is **not** an
+`AMDSWScheduler` — that vtable is 0x148 bytes, so slot 0x158 is past its end.
+(That was the obvious guess, since `swTimestampCallback` loads the same field;
+it was checked rather than assumed.) So `hds:R` present with `ei:E` absent
+names it with no fourth symbol needed.
+
+**The record is `rbgpu-1b`**, its own NVRAM variable that no later stage
+overwrites — the 2gf lesson — holding a progressive trail:
+
+```
+perf:E perf:R hds:E hds:R ei:E ei:R     every call returned; 0x1B's hang is
+                                        after enableInterrupts, in the
+                                        epilogue at 0xbe418cb onward
+perf:E perf:R hds:E hds:R ei:E          enableInterrupts does not return -
+                                        an interrupt path, newly reachable
+                                        since 2em
+perf:E perf:R hds:E hds:R               the UNNAMED (this->0x380)->vt[0x158]
+perf:E perf:R hds:E                     hardwareDidStart
+perf:E                                  startGlobalPerfCounters
+absent                                  the gate refused: isDeviceValid()
+                                        returned false and 0x1B returned
+                                        0xE00002D8 - which `rbgpu-prog` s=6
+                                        would then confirm
+```
+
+It is written **only while 0x1B is in flight** (`g_rb_2gn_in1b`, set by the
+peer across that one `callPlatformFunction`). All three functions are also
+called from `powerUpHW`'s own path, so an ungated note would be overwritten
+by calls that are not the question — and `perf_calls` / `hds_calls` /
+`ei_calls` still count every invocation either way.
+
+Six flash commits at most, all of them **after** the ~500 us chain region that
+2fo and 2ft showed has to stay clear; 0x1B is sent once 0x06 has returned
+(2fr's timeline), so this is the stage-5/6 region where notes are already
+proven safe.
+
+Build: UUID CD191ED5, hosttest passes. **Boot-args unchanged** —
+`-rbgpuforce1b` is already in, and it is what sends 0x1B.
+
+Expect the boot to hang again and cost a power cycle; `rbgpu-1b` is read from
+the recovery boot, with `rbgpu-boot` proving the nonce is new.
