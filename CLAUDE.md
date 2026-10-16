@@ -7922,3 +7922,166 @@ hds:R lands
         the 2gn boot's trail had simply lost its last commit, and the stop is
         the unnamed (accel->0x380)->vt[0x158] after all
 ```
+
+### 2go answered on hardware (2026-10-16): `hardwareDidStart` RETURNS — the stop is the unnamed call
+
+No `plugin_check` capture, so NVRAM is the whole record; the 2gd nonce makes
+it count. Build and args checked first per the 2cu/2cv rule:
+
+```
+kmutil showloaded -> 71E5F5F6 == build/out (2go)
+rbgpu-boot        -> 10       a sequence never recorded before
+rbgpu-1b          -> b=10 perf:E perf:R hds:E rt:E vmm:E vmm:R rt:R
+                     ssr:E(0,0x3b,0,0xc) hiq:E hsf:E(1) stw:E stw:R=1
+                     hsf:R=1 hiq:R=1 ssr:R hds:R
+rbgpu-prog        -> b=10 s=5 0x1B SENT - no s=6 means it hangs here
+rbgpu-sdma        -> b=10 ... ret=1 post=1111 allstarted one=3
+rbgpu-prog2       -> b=4, stale: the samplers fire at ~29/49/79 s and this
+                     boot was cut short before the first one
+no new .panic     -> newest is still 2026-10-15 10:35 (2gg's)
+```
+
+**Sixteen marks, every one of them paired, and the trail reads inside-out:**
+
+- `rt:E ... vmm:E vmm:R ... rt:R` - the base `AMDRTHardware::hardwareDidStart`
+  and `AMDHWVMM::postInit` both returned, so the two `vmFaultInterruptCallback`
+  registrations for sources `0xFF0000E9`/`0xFF0000EA` completed, and request
+  0x12 into our own peer returned (its `Unsupported` is the honest answer).
+- `ssr:E(0,0x3b,0,0xc)` - `setSchedulerResources`, carrying its four
+  arguments. **`C = 0x3b`**: the one GC register read in the chain, through
+  `(hw->0x368)->vt[0x118]((hw->0x20838)->0x64)`. The `0xc` is `hw->0x20844`,
+  which `0xbeae52a` sets with `movl $0xc` - so the argument block decodes
+  against the code that fills it, and the single register read completed.
+- `hiq:E hsf:E(1) stw:E **stw:R=1** hsf:R=1 hiq:R=1` - **the HIQ's stamp wait
+  returned TRUE.** The GPU executed the HIQ's SET_RESOURCES packet and wrote
+  its completion fence. That ring had never run; `submitFrame(true)` committed
+  the block, rang the doorbell and got its fence back, and
+  `submitSetResourcesPacket` returned 1.
+- `ssr:R hds:R` - and `hardwareDidStart` RETURNED.
+
+**So 2go's leading candidate is refuted by its own instrument.** The HIQ
+SET_RESOURCES submit was named as the lead and the stamp wait as the suspect;
+both work. The 2 s cap on our 2en bounded wait never even came into it -
+`stw:R=1` says the fence arrived.
+
+**`ei:E` is absent**, so of 2gn's decode table this is the "`... hds:R`"
+branch: the stop is the one call between `hardwareDidStart` and
+`enableInterrupts` - the unnamed `(accel->0x380)->vtable[0x158]()` at
+`0xbe418b1`.
+
+And it retires the 2gn caveat in the direction that matters: `hds:R` lands
+here, so whether the 2gn boot lost that commit or genuinely stopped inside
+`hardwareDidStart` no longer gates anything. Both boots sent 0x1B and neither
+returned; this one says where.
+
+## 2gp (2026-10-16): the unnamed call named, and the loop found — no boot spent
+
+Every link resolves from the code that fills it:
+
+```
+accel->0x380 = this->vtable[0x880]()     IOGraphicsAccelerator2::start 0x14e4e4be
+  vtable dump +0x890 -> IOGraphicsAccelerator2::createEventMachine 0x14e51c2a
+    -> vtable[0x888] = AMDGraphicsAccelerator::newEventMachine 0xbe3c4ca
+       -> new AMDRadeonX6000_AMDAccelEventMachine (0xd58 bytes)
+call offset 0x158 -> dump +0x168 = AMDAccelEventMachine::finishAllStamps
+```
+
+(The earlier store to `accel+0x380` at `0x14e4dc74` is in the same function's
+zeroing block, `rax = 0`, so it is not the one that matters - checked before
+reading the other.)
+
+**2gn's guess was right to be refused.** It said `accel->0x380` is not an
+`AMDSWScheduler` because that vtable is only 0x148 bytes. It is the
+**event machine**, and the slot is `finishAllStamps` - a name that fits a
+5600/s poll exactly.
+
+### The chain under it, and the loop
+
+`AMDAccelEventMachine::finishAllStamps` (0xbe4b2c2) is a tracing wrapper: a
+kdebug pair around a **non-virtual** call through the pointer at `0xbf90278`
+-> `__ZTV24IOAccelEventMachineFast2`, dump +0x168. Its sibling `finishStamp`
+uses +0x160 on the same pointer, and the derived vtable has those two at the
+same dump offsets - which is what proves these are dump offsets applied to the
+vtable *symbol*, not call offsets on an address point. So the body is
+
+```
+IOAccelEventMachineFast2::finishAllStamps  0x14e43a1e
+    for (i = 0; i < this->0x30; i++)  sum += this->vt[0x150](i)
+        BOUNDED, and vt[0x150] -> dump +0x160 = finishStamp(int)
+
+IOAccelEventMachineFast2::finishStamp(i)   0x14e438c6
+    submitted = this->[0xfc + i*24] ; completed = this->[0xf8 + i*24]
+    if (submitted - completed <= 0)        return 0
+    completed = *(this->0x28[i])           read the channel's fence
+    if (submitted - completed <= 0)        return 0
+ 14e43975:  r = this->vt[0x238](i, submitted, &completed)
+            if (r != 0) { handleFinishChannelRestart(r, i, 1); goto 14e43975 }
+            ... kdebug, accumulate elapsed, return
+```
+
+**The retry at `0x14e439a0` is unconditional and carries no counter and no
+delay.** Any nonzero return spins forever, and nothing inside the retry
+re-reads the fence - so a wait that errors can never become satisfied.
+
+`vt[0x238]` -> dump +0x248 = **`AMDAccelEventMachine::waitForStamp(int, uint,
+uint *)`** (0xbe4b588), and its first two bails return nonzero before touching
+hardware at all:
+
+```
+this->0xd38 == 0                                        -> 0xE0000001
+idx < 0, idx >= hw->0x1e78, or hw->0x1a78[idx] == NULL   -> 0xE00002C2
+```
+
+So the mechanism is complete and internally consistent with everything 2gk
+measured: a stamp wait that errors immediately, a channel restart that touches
+registers, every register read going through `isDeviceValid` to our peer as
+request 0x14 (2gm), and a retry with nothing to break it. ~5600 of those a
+second for 100+ seconds, with the machine alive and `pci.txt` completing.
+
+**NOT established, and it is exactly what the boot decides:** which return
+code, and therefore which bail. Both are plausible and they need different
+fixes - `0xd38` being NULL is a missing event-source setup, an invalid index
+is a channel/stamp-slot mismatch. Asserting one from the shape would be the
+2gc mistake.
+
+### The instrument, and why it is counters rather than marks
+
+Three observe-only routes. All checked before a line was written: `nm -m`
+shows each **external and defined in its OWN kext's `__TEXT`**, so routing by
+that kext's id is legitimate under the milestone-2c rule (and
+`handleFinishChannelRestart` is routed under IOAcceleratorFamily2, in kextList
+since 2ct); rule 9 is clean on all three - pushes and movs for the first 16
+bytes, the first relative branch far outside the 5-byte patch window.
+
+```
+AMDAccelEventMachine::finishAllStamps     marks fas:E(n=this->0x30) / fas:R=
+AMDAccelEventMachine::waitForStamp        COUNTERS ONLY
+IOAccelEventMachine2::handleFinishChannelRestart   a counter
+```
+
+`waitForStamp` runs thousands of times a second, so a log line or an NVRAM
+write per call would be the 2ez logging contention and the 2fo flash-commit
+wedge at once. It gets plain `volatile uint32_t` increments - first return,
+last return, call count - and **the +15/+35/+65 s prog2 samplers carry them
+out**, a channel measured to fire while this very thread spins (2gk: all three
+landed with `L` advancing by ~4000 per 20 s).
+
+`g_rbgpuProgText` 192 -> 384 bytes, because three samples now carry the
+counters and would have been truncated.
+
+Build: UUID F49A2AEA, hosttest passes. Boot-args unchanged.
+
+```
+nvram rbgpu-prog2   W=<waitForStamp calls> r0=<first ret> rN=<last ret>
+                    R=<restarts> N=<stamp count>
+nvram rbgpu-1b      ... hds:E ... fas:E(n=..) and whether fas:R lands
+```
+
+| reading | means |
+|---|---|
+| `r0=rN=0xe0000001`, R climbing | `evm->0xd38` is NULL - the event machine has no wait source, and the retry is infinite. The oldest candidate fix is whatever sets that field. |
+| `r0=rN=0xe00002c2`, R climbing | the index or `hw->0x1a78[idx]` is bad - a channel/stamp-slot mismatch, and `N` says how many slots the loop walks |
+| `r0` nonzero, `rN=0` | it eventually succeeds and the spin is elsewhere, so `fas:R` should land and the stop moves past `finishAllStamps` |
+| `W` large, `R=0` | the retry is NOT the loop - `waitForStamp` itself polls internally, and its deeper path (0xbe4b602 onward) is the next read |
+| `W=0` | `finishAllStamps` never reaches the wait, so the stop is in the bounded loop or the fence read, and `N` bounds it |
+| `fas:E` absent | the stop is before `finishAllStamps` after all, which would contradict this boot's `hds:R` |
