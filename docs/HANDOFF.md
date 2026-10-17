@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gt)
+# RembrandtGPU — handoff state (2026-10-17, after 2gu)
 
 **Read this first.** `docs/RULES.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -35,7 +35,10 @@ it is the only stamp the driver has ever issued.** Request 0x1B reaches
 has work outstanding, **slot 25**, `submitted=1 completed=0 fence=0`. The
 same index Apple's own `GPURestartDeferred stampIdx=25` names from a
 different source. `accel->0xa0`, the driver-wide `incrementStamp` count,
-reads **1** (2gs).
+reads **1** (2gs). **Slot 25 is the `"VMPT"` channel** — it names itself
+(2gt) — so the one stamp this driver has ever issued is a page-table
+update, and VMPT is backed by SDMA engine index 2, one of the three
+engines `-rbgpusdmaone` zeroes (2gu, §2).
 
 ```
 finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
@@ -57,68 +60,74 @@ display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — what is slot 25?
 
-Build **`E30F88B8`** (2gt). Boot-args unchanged. Expect the boot to hang.
+## 2. The pending experiment — does VMPT have a hardware channel?
 
-### Where slot 25 comes from (read from Apple's constructor, no boot)
+Build **`62631971`** (2gu). Boot-args unchanged. Expect the boot to hang.
 
-`AMDGraphicsAccelerator::createAccelChannels` (0xbe3b478) fills
-`accel->0x1a78[]` and is the only writer of `accel->0x1e78`:
-
-```
-0xbe3b522   one per HARDWARE channel, i = 0 .. hw->vt[0x340]()-1
-0xbe3b547   accel->0x1e7c = that count
-0xbe3b57d   "VMPT"            at index == the count
-0xbe3b774   a third group
-0xbe3b940   "DisplayPipe%d"   last
-```
-
-2dv measures **25 distinct hardware channels** every boot. If `vt[0x340]` is
-that same 25, slot 25 is **VMPT**, the VM page-table channel — which would
-tie the frontier to the 2em PT_BASE write and `AMDHWVMM::postInit`'s two
-VM-fault interrupt registrations. **A candidate, not a finding:** two counts
-agreeing at 25 is the 2dw page-scan shape until `accel->0x1e7c` is read.
-
-### The instrument
-
-`AMDAccelChannel::init` (0xbe443dd) does `strlcpy(this + 0x188, name, 0x10)`,
-so **the channel carries its own name**. 2gt prints it (printable-ASCII only,
-`"?"` otherwise) and reads `accel->0x1e7c` as `hwn=`. Reads only, same
-kernel-VA guard, no new NVRAM write.
-
-### Install and arm
+**2gt answered what slot 25 is.** The channel names itself — `init`
+(0xbe443dd) does `strlcpy(this + 0x188, name, 0x10)` — and boot 15 read
+**`"VMPT"`**, with `hwn=25` agreeing (VMPT is created at index == the
+hardware-channel count) and 2dv's 25 hardware channels agreeing again:
 
 ```
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect E30F88B8
-sudo nvram rbgpu-arm=1 && sudo reboot
+fas:E(n=63|25:s1/c0/f0[AccelChannel "VMPT"] out=1 tot=1 nch=63 hwn=25 nz=0)
 ```
 
-**Leave it up past ~80 s, then run `tools/plugin_check.sh` IN the armed
-boot.** Not optional: the 2gp boot's live read after the power cycle showed
-`b=11 s=1` where the in-boot capture held `b=11 s=5`.
+So the one stamp this driver has ever issued is a **page-table update**.
 
-### Reading it
+**Where VMPT submits, resolved from Apple's code with no boot** (full chain
+in `docs/JOURNAL.md`, tag 2gu). `createAccelChannels` asks
+`hw->vt[0x320](2, 0, 0)` = `GFX10Hardware::getHWChannel(CHANNEL_TYPE=2,
+prio=0, idx=0)`, which falls through `RTHardware::getHWChannel` — where
+`ENGINE_TYPE = ((caps->0x92 * 2 + 1) & 1) + 1 = 2` unconditionally — into
+`AMDHardware::getHWChannel(engine, ring)`, which indexes
+`hw->[0x3b0 + engine*8]`. `Navi21Hardware::allocateHWEngines` fills that
+array `[0]=Navi21PM4Engine`, `[1..4]=SDMAEngine_GC_10_3_0`.
+
+**VMPT is engine index 2 — the second SDMA engine.** This chip has one SDMA
+instance, and `-rbgpusdmaone` (2gi) zeroes the queue count of engines
+[1..3]; `one=3` says all three took the write. 2gi's own comment named this
+risk when it was added: *"an armed boot has no GPU clients and nothing
+submits SDMA work. If anything later submits to engines [1..3], it finds no
+queues."* The accelerator submits VMPT itself, during startup.
+
+**That is a chain of reasoning, not a measurement, and it does not yet
+convict 2gi.** `AMDAccelChannel::init` stores the hardware channel at
+`this->0xe8` and then *branches on it being NULL* (0xbe4438e): a NULL
+channel allocates `0x90 * 1` instead of `0x190 * 0x400`, `init` returns
+TRUE, and the array entry is named, in range and non-NULL. Every reading so
+far — `s1/c0/f0`, `nch=63`, `hwn=25`, `"VMPT"` — is equally true of a
+channel with `0xe8 == 0`. That is why none of them settle it.
+
+2gu adds the two reads that do:
 
 ```
-nvram rbgpu-boot   must be 15 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[AccelChannel "<name>"]
-                       out=1 tot=1 nch=63 hwn=N nz=0)
+nvram rbgpu-boot   must be 16 — a NEW sequence, or every note is STALE
+nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[AccelChannel "VMPT" h=H]
+                       out=1 tot=1 nch=63 hwn=25 nz=0 e2=E e2q=Q)
 ```
 
-| reading | means |
-|---|---|
-| `"VMPT"`, `hwn=25` | the one stamp this driver ever issued was a page-table update that never completed — the frontier ties to the oldest live patch in the project |
-| a hardware channel's name | slot 25 is an ordinary ring channel and the name says which engine |
-| `"DisplayPipe0"` | the outstanding work is the display path, and 2ct's zero-pipe choice stops being a side note |
-| `"?"` | `+0x188` is not the name buffer; the class name still stands |
+- `h=` — slot 25's `ch->0xe8`: `0` for no hardware channel, else the class
+  name, `BAD` for a non-kernel pointer.
+- `e2=` / `e2q=` — `hw->0x3c0` read exactly as `AMDHardware::getHWChannel`
+  reads it, and its queue count at `+0x48`, the field 2gi writes zero to.
+  `e2=1` object present, `0` NULL slot, `2` bad pointer, `3` no hw
+  interface.
+
+**Written before the boot, so it cannot be read into the convenient row:**
+
+| `h=` | `e2q=` | means |
+|---|---|---|
+| `0` | `0` | 2gi's bypass denied VMPT its channel; the stamp can never complete. The fix is to stop zeroing engine 2, or to point VMPT at engine 1 |
+| `0` | non-0 | engine 2 has queues and VMPT still got nothing — **2gi is exonerated** and the fault is in `getHWChannel`'s ring argument (`caps->0x8f`) |
+| class | `0` | VMPT has a channel on a queueless engine — exactly the "silently not backed" case 2gi hoped to avoid |
+| class | non-0 | channel and engine both fine; the fault is downstream, in the submit or the doorbell |
 
 **Still open and not guessed: who calls `incrementStamp(25)`.** The
 slot-0x1d8 shortlist was checked and does not hold (`signalStamp`'s call is
 on `evm->0x78`, and the base vtable has +0x1d0..+0x210 all pointing at one
-pure-virtual stub). With `tot=1` it is a single call somewhere in the boot.
-
----
+pure-virtual stub). With `tot=1` it is a single call somewhere in startup.
 
 ## 3. Verified on hardware — do NOT re-derive these
 

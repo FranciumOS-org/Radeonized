@@ -3639,15 +3639,64 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
             }
             nm[w] = 0;
         }
+        // 2gu: the one field that says whether this channel has hardware
+        // behind it at all. AMDAccelChannel::init (0xbe44380) does
+        // `this->0xe8 = hwChannel` and then BRANCHES ON IT BEING NULL
+        // (0xbe4438e): a backed channel allocates 0x190 * 0x400, a NULL one
+        // allocates 0x90 * 1 and sets the same flag the index mismatch sets.
+        // So init SUCCEEDS with no hardware channel, create returns the
+        // object, and the array entry looks exactly like a real one - named,
+        // in range, non-NULL. Every reading taken so far (s1/c0/f0, nch=63,
+        // hwn=25, the "VMPT" name) is equally true of a channel with
+        // `0xe8 == 0`, which is why none of them could settle this.
+        //
+        // Why it is the question: createAccelChannels asks for VMPT with
+        //   hw->vt[0x320](2, 0, 0) = GFX10Hardware::getHWChannel(
+        //                              _eAMD_CHANNEL_TYPE=2, prio=0, idx=0)
+        // which falls to RTHardware::getHWChannel (0xbe973fa), computes
+        // ENGINE_TYPE = ((caps->0x92 * 2 + 1) & 1) + 1 = 2 unconditionally,
+        // and ends in AMDHardware::getHWChannel(engine, ring) (0xbea9994):
+        //   `rdi = hw->[0x3b0 + engine*8]; if (!rdi) return NULL;`
+        // Navi21Hardware::allocateHWEngines (0xbeca1ff) fills that array
+        // [0]=Navi21PM4Engine, [1..4]=SDMAEngine_GC_10_3_0. Engine 2 is
+        // therefore the SECOND SDMA engine - one of the three that
+        // `-rbgpusdmaone` (2gi) deliberately gives ZERO queues. 2gi's own
+        // comment said it: "if anything later submits to engines [1..3], it
+        // finds no queues". VMPT is that submitter, and it submits during
+        // startup, not from a GPU client.
+        char hv[20];
+        snprintf(hv, sizeof(hv), "?");
+        if (reinterpret_cast<uintptr_t>(ch) >= 0xffffff8000000000ULL) {
+            void *hwc = *reinterpret_cast<void **>(
+                reinterpret_cast<uintptr_t>(ch) + 0xe8);
+            if (!hwc) {
+                snprintf(hv, sizeof(hv), "0");
+            } else if (reinterpret_cast<uintptr_t>(hwc) >= 0xffffff8000000000ULL) {
+                const char *hn = "?";
+                if (auto o = OSDynamicCast(OSObject, reinterpret_cast<OSObject *>(hwc))) {
+                    if (auto m = o->getMetaClass()) { hn = m->getClassName(); }
+                }
+                const char *hs = hn;
+                for (const char *q = hn; *q; q++) {
+                    if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { hs = q + 1; }
+                }
+                snprintf(hv, sizeof(hv), "%s", hs);
+            } else {
+                // Absence is not a result: a non-kernel pointer is neither
+                // "no hardware channel" nor a usable one, and must not be
+                // read as either.
+                snprintf(hv, sizeof(hv), "BAD");
+            }
+        }
         // Only the tail of the class name fits, and it is the distinctive
         // part (AMDRadeonX6000_AMD... is shared by all of them).
         const char *shortn = cn;
         for (const char *q = cn; *q; q++) { if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { shortn = q + 1; } }
         size_t k = strlen(out);
-        if (k + 48 < cap) {
-            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s \"%s\"]",
+        if (k + 64 < cap) {
+            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s \"%s\" h=%s]",
                      k ? "," : "", i, sub, cmp, fv, shortn,
-                     nm[0] ? nm : "?");
+                     nm[0] ? nm : "?", hv);
         }
     }
     // 2gs: three numbers that are defined by Apple's own code rather than
@@ -3665,7 +3714,8 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
     //                 `i*4` (0x14e25ae0), so the fences are one flat block
     //                 of n dwords at evm->0x20. Counting the nonzero ones
     //                 says whether the GPU has EVER written a stamp there.
-    uint32_t tot = 0, nch = 0, nz = 0, hwn = 0;
+    uint32_t tot = 0, nch = 0, nz = 0, hwn = 0, e2q = 0;
+    int have_e2 = 3;
     void *accel = *reinterpret_cast<void **>(e + 0x10);
     if (reinterpret_cast<uintptr_t>(accel) >= 0xffffff8000000000ULL) {
         uintptr_t a = reinterpret_cast<uintptr_t>(accel);
@@ -3676,6 +3726,29 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         // and the DisplayPipe channels after it. So hwn says where the
         // boundary is, and whether slot 25 is a hardware channel at all.
         hwn = *reinterpret_cast<volatile uint32_t *>(a + 0x1e7c);
+        // 2gu: engine[2] itself, read the same way AMDHardware::getHWChannel
+        // reads it (hw->[0x3b0 + engine*8]), and its queue count at +0x48 -
+        // the exact field 2gi writes zero to. `e2=` says the engine object
+        // exists; `e2q=` says how many queues it has NOW. This is what makes
+        // `h=` above mean something: h=0 with e2q=0 is 2gi's bypass denying
+        // VMPT its channel, while h=0 with e2q!=0 would be a different
+        // failure entirely and 2gi would be exonerated.
+        void *hw = *reinterpret_cast<void **>(a + 0x1a38);
+        if (reinterpret_cast<uintptr_t>(hw) >= 0xffffff8000000000ULL) {
+            void *e2 = *reinterpret_cast<void **>(
+                reinterpret_cast<uintptr_t>(hw) + 0x3c0);
+            if (reinterpret_cast<uintptr_t>(e2) >= 0xffffff8000000000ULL) {
+                have_e2 = 1;
+                e2q = *reinterpret_cast<volatile uint32_t *>(
+                    reinterpret_cast<uintptr_t>(e2) + 0x48);
+            } else if (!e2) {
+                have_e2 = 0;   // the array slot is NULL: getHWChannel returns NULL
+            } else {
+                have_e2 = 2;   // neither; says nothing, and must not be read as either
+            }
+        } else {
+            have_e2 = 3;       // no hw interface to ask
+        }
     }
     void *base = *reinterpret_cast<void **>(e + 0x20);
     if (reinterpret_cast<uintptr_t>(base) >= 0xffffff8000000000ULL) {
@@ -3683,8 +3756,9 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         for (uint32_t i = 0; i < n; i++) { if (b[i]) { nz++; } }
     }
     size_t k = strlen(out);
-    snprintf(out + k, cap - k, "%s out=%u tot=%u nch=%u hwn=%u nz=%u",
-             k ? "" : "none", outstanding, tot, nch, hwn, nz);
+    snprintf(out + k, cap - k,
+             "%s out=%u tot=%u nch=%u hwn=%u nz=%u e2=%d e2q=%u",
+             k ? "" : "none", outstanding, tot, nch, hwn, nz, have_e2, e2q);
 }
 
 static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {

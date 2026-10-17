@@ -199,5 +199,8 @@ Navi 21 stack runs on the 680M with the chip's own yellow_carp firmware;
 PSP, GC, TTL and the SMU all initialise; GPUVM translates since the 2em
 PT_BASE fix; the KIQ executes PM4 and writes fences; **`powerUpHW`
 succeeds** (2gi, eight consecutive boots). The frontier is request 0x1B
-spinning in a GPU-restart loop over **one** outstanding stamp — slot 25, the
-only stamp the driver has ever issued.
+spinning in a GPU-restart loop over **one** outstanding stamp — slot 25,
+the only stamp the driver has ever issued. Slot 25 is the **"VMPT"**
+channel (2gt, it names itself), a page-table update, and VMPT is backed by
+SDMA **engine index 2** — one of the three engines `-rbgpusdmaone` gives
+zero queues (2gu). Whether that is the cause is the pending measurement.
