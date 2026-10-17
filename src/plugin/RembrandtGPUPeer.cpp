@@ -73,6 +73,8 @@ static char      s_line_scratch[RBGPU_LINE_MAX];
 
 extern uint64_t g_guard_calls;
 extern volatile int g_rb_2gn_in1b;
+extern void rbgpu_2gx_req(uint32_t req, int refused);
+extern void rbgpu_2gx_flush(void);
 // 2gp: the event machine's stamp-wait counters (kern_start.cpp).
 extern volatile uint32_t g_rb_2gp_fas_n;
 extern volatile uint32_t g_rb_2gp_wfs_calls;
@@ -1503,6 +1505,10 @@ void RembrandtGPUPeer::handlePostRegister() {
     // ungated note would be overwritten by calls that are not the question.
     g_rb_2gn_in1b = 1;
     IOReturn ret1B = accelerator->callPlatformFunction(symSpecialAMDKey, true, &reqControllerEnabled, &one, nullptr, nullptr);
+    // 2gx: commit the request trail while the window is still open (the
+    // mark is gated on it), then close it. One NVRAM write, not one per
+    // request.
+    rbgpu_2gx_flush();
     g_rb_2gn_in1b = 0;
     rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
     rbgpu_diag_set_num("ret_0x1B", static_cast<uint64_t>(ret1B));
@@ -1560,6 +1566,7 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                         }
                     }
                 }
+                rbgpu_2gx_req(req, 0);
                 return kIOReturnSuccess;
 
             case 0x0B:
@@ -1568,9 +1575,11 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                     accelerator->release();
                     accelerator = nullptr;
                 }
+                rbgpu_2gx_req(req, 0);
                 return kIOReturnSuccess;
 
             case 0x14:
+                rbgpu_2gx_req(req, 0);
                 if (p2) {
                     *reinterpret_cast<uint32_t *>(p2) = 1;
                     return kIOReturnSuccess;
@@ -1579,14 +1588,17 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
 
             case 0x17:
                 rbgpu_log("ASIC Reset State requested (unsupported)");
+                rbgpu_2gx_req(req, 1);
                 return kIOReturnUnsupported;
 
             case 0x1A:
                 rbgpu_log("Get DCC Capabilities requested (unsupported)");
+                rbgpu_2gx_req(req, 1);
                 return kIOReturnUnsupported;
 
             default:
                 rbgpu_log("Unhandled SpecialAMDKey request 0x%02X", req);
+                rbgpu_2gx_req(req, 1);
                 return kIOReturnUnsupported;
         }
     }
