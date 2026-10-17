@@ -95,6 +95,30 @@ before, where 2ct refuses it by design.
 17 `getHWChannel(engine=2)` substitutions, returning two real engine-1
 channels. Engine 2 is asked seventeen times, not once.
 
+### 2gx — the instrument for it (build 63983BA1)
+
+The peer's `default:`, `0x17` and `0x1A` all return **exactly**
+`0xE00002C7`, so the code 0x1B came back with is consistent with both
+candidates and settles neither. 2gx records, in order, every request the
+peer is asked for inside the 0x1B window, with `!` on the ones we refuse:
+
+```
+rbgpu-1b   ... ei:E ei:R q[17!,1D!,...|14xN]
+```
+
+Accumulated in a buffer and committed **once**, after 0x1B returns — a
+write per request inside that window would be the 2ez contention and the
+2fo wedge at once. `0x14` is counted, not listed (it reached #1,506,624 in
+2gq). A full buffer appends `+DROPPED` rather than truncating silently.
+
+**Written before the boot:**
+
+| reading | means |
+|---|---|
+| `q[...]` ends in a refused request | Apple propagates OUR refusal; implementing that request is the next step |
+| `q[none\|14xN]` or no refusals | nothing was asked of us — Apple's own 0x1B handler ends in Unsupported, and the answer is in its code, not our peer |
+| `+DROPPED` | the trail is incomplete and the LAST entry is not necessarily the refusal |
+
 ### The new frontier
 
 **Request 0x1B returns `kIOReturnUnsupported` (0xE00002C7).** Every stage

@@ -3329,6 +3329,52 @@ volatile int g_rb_2gn_in1b = 0;
 static char g_rb_2gn_trail[512];   // 2gq: room for the stamp table too
 static uint32_t g_rb_2gn_n = 0;
 
+// 2gx: which request our peer is asked for inside the 0x1B window, and
+// which ones it refuses.
+//
+// 2gw left 0x1B returning kIOReturnUnsupported (0xE00002C7) AFTER every
+// stage of the chain returned, so the refusal comes from the tail of
+// Apple's handling. Two possibilities that the return code alone cannot
+// separate: Apple's own 0x1B handler ends in Unsupported, or Apple asks our
+// peer something late and propagates OUR refusal back out. The peer's
+// `default:`, 0x17 and 0x1A all return exactly 0xE00002C7, so the code we
+// see is consistent with both and settles neither.
+//
+// This records the request numbers in order, with `!` on the ones we
+// refused. It does NOT write NVRAM per request: `rbgpu_2gn_mark` commits on
+// every call, and a request storm inside this window would be the 2ez
+// logging contention and the 2fo wedge at once. Requests accumulate in a
+// buffer and the whole trail is committed ONCE, after 0x1B returns.
+//
+// 0x14 is counted rather than listed - it is the register-poll meter and
+// reached #1,506,624 in 2gq.
+static char g_rb_2gx_reqs[112];
+static uint32_t g_rb_2gx_n14 = 0;
+static uint32_t g_rb_2gx_dropped = 0;
+
+static void rbgpu_2gn_mark(const char *tag);
+
+void rbgpu_2gx_req(uint32_t req, int refused) {
+    if (!g_rb_2gn_in1b) { return; }
+    if (req == 0x14) { g_rb_2gx_n14++; return; }
+    size_t n = strlen(g_rb_2gx_reqs);
+    // Leave room for the longest entry plus the terminator; when it is full
+    // say so at flush rather than silently truncating (absence is not a
+    // result).
+    if (n + 6 >= sizeof(g_rb_2gx_reqs)) { g_rb_2gx_dropped++; return; }
+    snprintf(g_rb_2gx_reqs + n, sizeof(g_rb_2gx_reqs) - n, "%s%02X%s",
+             n ? "," : "", req, refused ? "!" : "");
+}
+
+void rbgpu_2gx_flush(void) {
+    char t[160];
+    snprintf(t, sizeof(t), "q[%s|14x%u%s]",
+             g_rb_2gx_reqs[0] ? g_rb_2gx_reqs : "none",
+             g_rb_2gx_n14,
+             g_rb_2gx_dropped ? " +DROPPED" : "");
+    rbgpu_2gn_mark(t);
+}
+
 static void rbgpu_2gn_mark(const char *tag) {
     if (!g_rb_2gn_in1b) { return; }
     size_t n = strlen(g_rb_2gn_trail);
