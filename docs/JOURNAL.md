@@ -8493,3 +8493,162 @@ fas:E(n=63|25:s1/c0/f0[AccelChannel "<name>"] out=1 tot=1 nch=63 hwn=N nz=0)
 | `"DisplayPipe0"` | the outstanding work is the display path, and 2ct's deliberate zero-pipe choice stops being a side note |
 | `"?"` | `+0x188` is not the name buffer and the offset reading is wrong — the class name still stands |
 | `hwn != 25` | the VMPT-at-25 arithmetic does not hold and the name is the only evidence |
+
+## 2gu — slot 25 is VMPT, and VMPT asks for the second SDMA engine
+
+**Boot 15 (E30F88B8, 2gt) answered it.** `b=15` is new on `rbgpu-boot`,
+`rbgpu-prog`, `rbgpu-sdma` and `rbgpu-1b`:
+
+```
+fas:E(n=63|25:s1/c0/f0[AccelChannel "VMPT"] out=1 tot=1 nch=63 hwn=25 nz=0)
+```
+
+The nonce check needed care this time. The capture was read in a LATER,
+UNARMED boot: the live log says `armed = 0x0`, "rbgpu-arm not set", and
+`rbgpu-diag` = `d=0 armed=0` with the armed boot's `d=72 armed=1` rotated
+into `rbgpu-diag-prev`. That is consistent and not a stale read, because
+`rbgpu_boot_seq` (RembrandtGPUPeer.cpp) bumps the counter lazily on the
+**first note of a boot**, and the diag writer uses `setProperty` directly
+with no `b=` prefix. An unarmed boot therefore rotates diag and writes no
+note, leaving `rbgpu-boot` at 15. The b=15 notes are boot 15's, the 2gt
+armed run. (This is the 2gd rule working as intended rather than against
+us, but it is worth recording that "unarmed boot since" is a state the
+nonce handles correctly only because of that laziness.)
+
+### The channel names itself
+
+`AMDAccelChannel::init` (0xbe443dd) does `strlcpy(this + 0x188, name, 0x10)`,
+so the 2gt read is the string `createAccelChannels` passed in: **"VMPT"**.
+Three independent agreements that slot 25 is the VMPT channel:
+
+- the name buffer read straight off the object,
+- `hwn=25` — `accel->0x1e7c` is the hardware-channel count, and
+  `createAccelChannels` (0xbe3b547) stores it and then creates VMPT at
+  exactly that index, so index == count,
+- 2dv's measurement of 25 distinct hardware channels.
+
+This replaces the 2gs candidate ("slot 25 **may** be VMPT, held as a
+candidate, not a finding") with a measurement.
+
+### What VMPT submits through, resolved from Apple's code with no boot
+
+`createAccelChannels` at 0xbe3b54e:
+
+```
+movq  0x1a38(%r14), %rdi        ; accel->0x1a38 = the HW interface
+movl  $0x2, %esi                ; _eAMD_CHANNEL_TYPE = 2
+xorl  %edx, %edx                ; SS_PRIORITY = 0
+xorl  %ecx, %ecx                ; idx = 0
+callq *0x320(%rax)
+leaq  "VMPT", %rcx
+callq AMDAccelChannel::create(accel, thatChannel, index, "VMPT", 0)
+```
+
+Call offset 0x320 is dump offset **0x330** (2gp's `−0x10` rule), which in
+`__ZTV32AMDRadeonX6000_AMDNavi21Hardware` is
+`AMDGFX10Hardware::getHWChannel(_eAMD_CHANNEL_TYPE, SS_PRIORITY, unsigned)`
+— three arguments, matching the call site exactly. That is an independent
+confirmation of the −0x10 rule itself.
+
+The chain:
+
+1. `GFX10Hardware::getHWChannel` (0xbeaff68): type 1 goes to `this->0x3b0`
+   (engine 0, GFX). **Anything else** tail-jumps through the
+   `AMDRTHardware` vtable symbol at dump offset 0x330 — a non-virtual call
+   through a vtable symbol, so dump offsets apply directly (2gp) —
+   i.e. `RTHardware::getHWChannel`.
+2. `RTHardware::getHWChannel` (0xbe973fa), for type 2:
+   ```
+   callq  *0x158(%rax)          ; caps struct
+   movb   0x92(%rax), %r12b
+   ... prio == 0 -> ebx = 1
+   movzbl 0x8f(%rax), %edx      ; RING_TYPE = caps->0x8f
+   leal   0x1(,%rax,2), %esi    ; caps->0x92 * 2 + 1   (always odd)
+   andl   %ebx, %esi            ; & 1                  (always 1)
+   incl   %esi                  ; ENGINE_TYPE = 2      (unconditionally)
+   jmpq   *AMDHardware_vt[0x328] ; getHWChannel(engine, ring)
+   ```
+   The caps byte cannot change the engine: `x*2+1` is odd, so `&1` is 1 and
+   the result is 2 whatever `caps->0x92` holds.
+3. `AMDHardware::getHWChannel(engine, ring)` (0xbea9994):
+   ```
+   movq 0x3b0(%rdi,%rax,8), %rdi    ; hw->[0x3b0 + engine*8]
+   testq %rdi, %rdi
+   je    -> return NULL
+   jmpq  *engine->vt[0x1a8]         ; (ring)
+   ```
+4. `Navi21Hardware::allocateHWEngines` (0xbeca1ff) fills that array:
+   ```
+   hw+0x3b0 [0] = AMDRadeonX6000_AMDNavi21PM4Engine          (GFX)
+   hw+0x3b8 [1] = AMDRadeonX6000_AMDSDMAEngine_GC_10_3_0
+   hw+0x3c0 [2] = AMDRadeonX6000_AMDSDMAEngine_GC_10_3_0
+   hw+0x3c8 [3] = AMDRadeonX6000_AMDSDMAEngine_GC_10_3_0
+   hw+0x3d0 [4] = AMDRadeonX6000_AMDSDMAEngine_GC_10_3_0
+   ```
+   (Navi23 at 0xbed2794 has the same shape with `_GC_10_3_4` and fewer.)
+   Four SDMA engines — the `hw->0xc2 * 2 + 2 = 4` of 2gc/2gi, now with the
+   objects named.
+
+**So VMPT is backed by engine index 2: the second SDMA engine.** This chip
+has one SDMA instance, and `-rbgpusdmaone` (2gi) zeroes the queue count of
+engines [1..3] — `one=3` in this boot's `rbgpu-sdma` says all three took
+the write.
+
+### The debt 2gi wrote down in advance
+
+2gi's own comment, when that bypass was added:
+
+> "It is tolerable for the same reason 2ge's was: an armed boot has no GPU
+> clients and nothing submits SDMA work. **If anything later submits to
+> engines [1..3], it finds no queues** rather than a queue that silently is
+> not backed."
+
+The premise is false. The accelerator submits VMPT itself during startup —
+a page-table operation, not client work — and VMPT is engine 2, one of the
+three. `tot=1` says that submit is the only stamp the driver has ever
+issued in the whole boot, and `nz=0` says no fence was ever written for it.
+
+### Why none of the readings so far could settle it, and the one that can
+
+`AMDAccelChannel::init` stores the hardware channel and then **branches on
+it being NULL** (0xbe44380, 0xbe4438e):
+
+```
+movq  %rdx, 0xe8(%rdi)     ; this->0xe8 = hwChannel
+testq %rdx, %rdx
+je    0xbe443cd
+  movl $0x190, %r12d / $0x400, %r15d    ; backed:   0x190 * 0x400
+0xbe443cd:
+  movl $0x90,  %r12d / $0x1,   %r15d    ; unbacked: 0x90 * 1
+  movb $0x1, -0x29(%rbp)
+```
+
+A NULL hardware channel is a **supported path**: `init` returns TRUE,
+`create` returns the object, and the array entry is named, in range and
+non-NULL. Every reading taken so far — `s1/c0/f0`, `nch=63`, `hwn=25`, the
+"VMPT" name — is equally true of a channel with `0xe8 == 0`. That is why
+none of them could decide this, and saying so here rather than treating the
+engine-2 chain as proof is the point.
+
+**2gu's instrument** (build 62631971) adds two defined reads:
+
+- `h=` — slot 25's `ch->0xe8`: `0` for no hardware channel, else the class
+  name, `BAD` for a non-kernel pointer (absence is not a result).
+- `e2=` / `e2q=` — `hw->0x3c0` read exactly as `AMDHardware::getHWChannel`
+  reads it, and its queue count at `+0x48`, the field 2gi writes zero to.
+
+What each outcome would mean, stated before the boot:
+
+| `h=` | `e2q=` | reading |
+|---|---|---|
+| `0` | `0` | 2gi's bypass denied VMPT its channel; the stamp can never complete |
+| `0` | non-0 | engine 2 has queues and VMPT still got nothing — 2gi exonerated, different fault |
+| class | `0` | VMPT has a channel on a queueless engine — the "silently not backed" case 2gi hoped to avoid |
+| class | non-0 | the channel and engine are both fine and the fault is downstream |
+
+Only the first row would make 2gi the cause. The table is written down now
+so the boot cannot be read into whichever row is convenient.
+
+**Still open:** who calls `incrementStamp(25)`. `tot=1` says it is a single
+call somewhere in startup; the 2gs shortlist did not hold and nothing has
+replaced it.
