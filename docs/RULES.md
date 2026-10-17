@@ -8239,3 +8239,111 @@ one slot, f=?         the fence pointer is not a kernel VA, so the table was
 many slots            the event machine thinks a lot is in flight, which at
                       0x1B time would itself be the finding
 ```
+
+### 2gq answered on hardware (2026-10-16): ONE slot outstanding, and it is slot 25
+
+logs/20261016-202748-plugin, `plugin_check` run **in the armed boot**, build
+and nonce checked first per the 2cu/2cv rule: DEEF00AF == build/out (2gq),
+`rbgpu-boot` = **12**, a sequence never recorded before. No new `.panic`.
+
+```
+rbgpu-1b    = b=12 perf:E perf:R hds:E rt:E vmm:E vmm:R rt:R ssr:E(0,0x3b,0,0xc)
+              hiq:E hsf:E(1) stw:E stw:R=1 hsf:R=1 hiq:R=1 ssr:R hds:R
+              fas:E(n=63|25:s1/c0/f0 out=1)
+rbgpu-prog2 = b=12  a=W=1 r0=rN=0xe00002d6 R=1 N=63 T=4
+                    b=W=3 ...                R=3 N=63 T=12
+                    c=W=6 ...                R=6 N=63 T=22
+rbgpu-sdma  = b=12 ... ret=1 post=1111 allstarted one=3     (a SIXTH time)
+```
+
+**`out=1`.** Of 63 stamp slots exactly one has work outstanding, and it is
+**slot 25** — the same index Apple's own `GPURestartDeferred stampIdx=25`
+named in the previous boot, from a completely different source. Two
+independent records agreeing on one number.
+
+```
+slot 25:  submitted = 1   completed = 0   fence = 0
+```
+
+So of 2gq's four branches this is **`f == completed`: the GPU never wrote
+that fence.** The pointer dereferenced cleanly (it printed `0`, not the `?`
+the kernel-VA guard emits), so the slot is initialised and the fence memory
+is readable — this is one real submit that never completed, not uninitialised
+bookkeeping. `submitted = 1` is the *first* stamp on that slot.
+
+The 2gq suppression worked too: `T=4 -> 12 -> 22` counts the KIQ's
+resubmissions (about four per retry iteration) without the trail overflowing,
+and the stamp list fitted in the same string.
+
+## 2gr (2026-10-16): name the channel behind slot 25 — no boot spent
+
+Apple's own index-to-channel lookup is `AMDAccelEventMachine::eventTimeout`
+(0xbe4b92e), which `restart_channel` calls through `vt[0x220]`:
+
+```
+accel = evm->0x10
+if (idx < 0 || idx >= accel->0x1e78)   -> NULL
+ch = accel->0x1a78[idx]                   0xbe4b991
+```
+
+**And that corrects 2gp's reading of `waitForStamp`'s second bail.** I wrote
+it as `hw->0x1e78` / `hw->0x1a78`; it is the **accelerator's** array, the same
+one `eventTimeout` uses. The correction also makes the 2gq result sharper:
+`waitForStamp` returned `kIOReturnTimeout`, not `0xE00002C2`, so that bail did
+*not* fire — which already proves index 25 is inside the bound and
+`accel->0x1a78[25]` is non-NULL. The channel exists.
+
+### What else the restart path turns out to consult
+
+`handleFinishChannelRestart` (0x14e25edc) begins:
+
+```
+IOAccelDisplayMachine::waitForStampTimeout(stampIdx)    via accel->0x378
+    if (TRUE)  return   <- no restart at all
+```
+
+and that function (0x14e220aa) is
+
+```
+if (this->0x108 == 0)  return FALSE          <- 0x108 is the PIPE COUNT
+for (p = 0; p < this->0x108; p++)
+    if (this->0x88[p]->waitForStampTimeout(i)) return TRUE
+return FALSE
+```
+
+**2ct makes that count zero**, so Apple's own defer-the-restart escape can
+never fire on this machine. Worth recording as an interaction between our
+instrument and the frontier — but **not** as a fix: a pipe saying "I am
+waiting on that stamp" only defers the restart, and the stamp still would not
+complete. It changes who spins, not whether.
+
+It then ends at `IOAccelEventMachine2::restart_channel` (0x14e25fe8), whose
+`this->0x94 == 2` early path is `checkChannelProgress` (dump +0x228) — so the
+`type=2` in Apple's log line and the `type=4` this path sets are different
+entries into the same machinery.
+
+### The instrument
+
+The 2gq slot dump now also carries, for every outstanding slot, the channel
+`accel->0x1a78[i]` with its **class name** (every channel is an OSObject, the
+2cw idiom) and its own `AMDHWChannel` bookkeeping — the fields 2ds/2dw/2dy
+established: `+0x80` submitted, `+0x84` completed, `+0xc8` the GPU address the
+WRITE_DATA fence packet targets.
+
+Reads only, both pointers checked against the kernel-VA range first (the 2gh
+rule), and the class name is trimmed to its distinctive tail because every one
+of them starts `AMDRadeonX6000_AMD`.
+
+Build: UUID 6F1F006B, hosttest passes. Boot-args unchanged.
+
+```
+fas:E(n=63|25:s1/c0/f0[<class> subN cmpM c8=0x...] out=1)
+```
+
+| reading | means |
+|---|---|
+| `c8` a real `0xFF_BF..` GPUVM address, `sub=1 cmp=0` | the channel genuinely submitted one frame and the GPU never wrote its fence — the same shape 2dy measured on the KIQ before 2em fixed PT_BASE, now on a different channel, and the next question is that channel's ring and doorbell |
+| `c8 = 0` | `allocateMemoryResources` never gave this channel a fence GPU address, so the WRITE_DATA had nowhere to land — a per-channel setup gap, and 2dx/2dy name the two slots that fill it |
+| `sub = 0` while the event machine says submitted=1 | the event machine's stamp was recorded without the channel ever submitting — bookkeeping, and `writeStampCommand` (0x14e43477) is where to look |
+| the class is a **display** or **VCN** channel | the outstanding work is not the GFX path at all, and the standing `2ct` zero-pipe choice becomes directly relevant |
+| the class is the KIQ or a GFX ring | it is the path already proven to work, which would make slot 25's single stamp the odd one out and worth comparing against the stamps 70-72 that do complete |

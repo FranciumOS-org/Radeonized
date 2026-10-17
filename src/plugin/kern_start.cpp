@@ -3582,10 +3582,51 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
                          *reinterpret_cast<volatile uint32_t *>(fp));
             }
         }
+        // 2gr: name the channel behind this slot and read its own
+        // bookkeeping. `AMDAccelEventMachine::eventTimeout` (0xbe4b991)
+        // does the lookup Apple itself uses, and it is the accelerator's
+        // array, not the hardware's:
+        //
+        //   accel = evm->0x10
+        //   if (idx < 0 || idx >= accel->0x1e78) -> NULL
+        //   ch = accel->0x1a78[idx]
+        //
+        // which is the SAME array and bound `waitForStamp`'s second bail
+        // tests - so a Timeout rather than 0xE00002C2 already proves this
+        // index is in range and the pointer non-NULL (2gp). The fields are
+        // AMDHWChannel's, established in 2ds/2dw/2dy: +0x80 submitted,
+        // +0x84 completed, +0xc0 the fence CPU VA, +0xc8 the GPU address
+        // the WRITE_DATA packet targets, +0xe0 the scheduler slot.
+        const char *cn = "?";
+        uint32_t c80 = 0, c84 = 0;
+        uint64_t cc8 = 0;
+        void *ch = nullptr;
+        void *accel = *reinterpret_cast<void **>(e + 0x10);
+        if (reinterpret_cast<uintptr_t>(accel) >= 0xffffff8000000000ULL) {
+            uintptr_t a = reinterpret_cast<uintptr_t>(accel);
+            uint32_t nch = *reinterpret_cast<volatile uint32_t *>(a + 0x1e78);
+            if (i < nch) {
+                ch = *reinterpret_cast<void **>(a + 0x1a78 + i * 8);
+            }
+        }
+        if (reinterpret_cast<uintptr_t>(ch) >= 0xffffff8000000000ULL) {
+            uintptr_t c = reinterpret_cast<uintptr_t>(ch);
+            c80 = *reinterpret_cast<volatile uint32_t *>(c + 0x80);
+            c84 = *reinterpret_cast<volatile uint32_t *>(c + 0x84);
+            cc8 = *reinterpret_cast<volatile uint64_t *>(c + 0xc8);
+            if (auto o = OSDynamicCast(OSObject, reinterpret_cast<OSObject *>(ch))) {
+                if (auto m = o->getMetaClass()) { cn = m->getClassName(); }
+            }
+        }
+        // Only the tail of the class name fits, and it is the distinctive
+        // part (AMDRadeonX6000_AMD... is shared by all of them).
+        const char *shortn = cn;
+        for (const char *q = cn; *q; q++) { if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { shortn = q + 1; } }
         size_t k = strlen(out);
-        if (k + 24 < cap) {
-            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s",
-                     k ? "," : "", i, sub, cmp, fv);
+        if (k + 80 < cap) {
+            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s sub%u cmp%u c8=%#llx]",
+                     k ? "," : "", i, sub, cmp, fv, shortn, c80, c84,
+                     static_cast<unsigned long long>(cc8));
         }
     }
     size_t k = strlen(out);
@@ -3597,7 +3638,7 @@ static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {
         g_rb_2gp_fas_n = *reinterpret_cast<volatile uint32_t *>(
             reinterpret_cast<uintptr_t>(evm) + 0x30);
     }
-    char st[160];
+    char st[256];   // 2gr: each slot now carries its channel
     rbgpu_dump_stamps_2gq(evm, st, sizeof(st));
     char t[200];
     snprintf(t, sizeof(t), "fas:E(n=%u|%s)", g_rb_2gp_fas_n, st);
