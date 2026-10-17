@@ -122,6 +122,15 @@ under the tag in brackets.
 - Run `tools/plugin_check.sh` **in the armed boot**. A note's later commits
   can be lost across a power cycle while an earlier one survives — the 2gp
   boot read `s=5` in-boot and `s=1` live, same nonce. [2gq]
+- **Look in `logs/<timestamp>-plugin/` before reading live NVRAM.** The
+  armed boot's capture may already be saved there (ssh in while the screen
+  is black). `plugin_check.sh` only READS nvram, so a later run destroys
+  nothing. A capture is the armed boot's only if its `rbgpu-diag` reads
+  `armed=1` **live**, not in `-prev`. [2gw]
+- A stale note is **no evidence about where a boot got to** — not weak
+  evidence of an early stop. Never assemble several stale notes into a
+  story; a user rebooting a black screen looks exactly like a hang. [2gw,
+  the 24th instance]
 - The published `RBGPULog` ends at the last *refresh*, not at the thread's
   stopping point, so its last line does not locate a hang. Nor does console
   output. [2es, 2em]
@@ -175,8 +184,9 @@ anything, and log it when it is not.
 -rbgpuforce1b                                sends request 0x1B
 ```
 
-Pending, not yet proven: `-rbgpuvmpteng1` sends VMPT's SDMA engine 2 to
-engine 1 (2gv). Add it with `sudo tools/efi.sh bootarg add -rbgpuvmpteng1`.
+`-rbgpuvmpteng1` is now IN and proven (2gw): it sends the engine-2
+`getHWChannel` requests to engine 1, the one SDMA instance this chip has.
+It is what broke the GPU-restart loop.
 
 **Must stay OUT**, each proven:
 
@@ -207,10 +217,13 @@ PSP, GC, TTL and the SMU all initialise; GPUVM translates since the 2em
 PT_BASE fix; the KIQ executes PM4 and writes fences; **`powerUpHW`
 succeeds** (2gi, eight consecutive boots). The frontier is request 0x1B
 spinning in a GPU-restart loop over **one** outstanding stamp — slot 25,
-the only stamp the driver has ever issued. Slot 25 is the **"VMPT"**
-channel (2gt, it names itself), a page-table update. It holds a real
-`AMDSDMAChannel` on hw engine index **2**, and that engine has **zero
-queues** (2gu) — nothing refuses the submit, nothing can complete it.
-Engine 2 is the first engine `-rbgpusdmaone` switches off; the one working
-SDMA is index 1. 2gv sends engine 2 to engine 1 behind
-`-rbgpuvmpteng1`.
+the only stamp the driver has ever issued. That stamp was slot 25, the
+**"VMPT"** channel, holding a real `AMDSDMAChannel` on hw engine **2** — an
+engine `-rbgpusdmaone` had emptied of queues (2gt, 2gu).
+**`-rbgpuvmpteng1` fixed it** (2gw): engine-2 channel requests go to engine
+1, the one SDMA instance this chip has. `waitForStamp` now runs **once** and
+returns **Success**, restarts are **0**, `finishAllStamps` and
+`enableInterrupts` both return, and the accelerator reaches framebuffer
+adoption. The new frontier is request 0x1B returning
+**`kIOReturnUnsupported`** — late, after every stage returned — and a black
+screen with SSH alive.

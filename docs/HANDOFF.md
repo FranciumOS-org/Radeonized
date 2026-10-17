@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-17, after 2gv)
+# RembrandtGPU — handoff state (2026-10-17, after 2gw)
 
 **Read this first.** `docs/RULES.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -29,19 +29,22 @@ engine asks the layer for queues (2gi, `-rbgpusdmaone`): Apple's Navi 21 path
 builds four SDMA engines while this chip has one instance, so engines [1..3]
 take Apple's own trivial-TRUE path and engine[0] alone asks.
 
-**The frontier is a GPU-restart loop driven by ONE outstanding stamp — and
-it is the only stamp the driver has ever issued.** Request 0x1B reaches
+**The GPU-restart loop is BROKEN as of 2gw** (`-rbgpuvmpteng1`); what
+follows describes the frontier as it stood through 2gu, and §2 has the
+current one. It was driven by ONE outstanding stamp, the only stamp the
+driver had ever issued. Request 0x1B reaches
 `AMDAccelEventMachine::finishAllStamps`, which walks 63 slots; exactly one
 has work outstanding, **slot 25**, `submitted=1 completed=0 fence=0`. The
 same index Apple's own `GPURestartDeferred stampIdx=25` names from a
 different source. `accel->0xa0`, the driver-wide `incrementStamp` count,
 reads **1** (2gs). **Slot 25 is the `"VMPT"` channel** — it names itself
-(2gt) — so the one stamp this driver has ever issued is a page-table
-update. **It holds a real `AMDSDMAChannel` on hw engine index 2, and that
-engine has zero queues** (2gu: `h=AMDSDMAChannel e2=1 e2q=0`): nothing
-refuses the submit, nothing can complete it. Engine 2 is the first engine
-`-rbgpusdmaone` switches off, while the one working SDMA sits at index 1
-(2gv, §2).
+(2gt) — so that stamp was a page-table update. **It held a real
+`AMDSDMAChannel` on hw engine index 2, and that engine had zero queues**
+(2gu: `h=AMDSDMAChannel e2=1 e2q=0`): nothing refused the submit, nothing
+could complete it. Engine 2 is the first engine `-rbgpusdmaone` switches
+off, while the one working SDMA sits at index 1. **Sending engine-2 channel
+requests to engine 1 (`-rbgpuvmpteng1`) made the stamp complete on the
+first wait** — see §2.
 
 ```
 finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
@@ -64,82 +67,68 @@ display pipe** (2ct), so armed boots can reach a desktop.
 ---
 
 
-## 2. The pending experiment — send VMPT to the SDMA engine that exists
+## 2. The pending experiment — why does 0x1B return Unsupported?
 
-Build **`CF1786D5`** (2gv). **Boot-arg to ADD this once:**
-
-```
-sudo tools/efi.sh bootarg add -rbgpuvmpteng1
-```
-
-### What is settled
-
-Slot 25 is the **`"VMPT"`** channel — it names itself (2gt) — so the one
-stamp this driver has ever issued is a page-table update. Boot 16 (2gu)
-then measured what is behind it:
+**2gw broke the GPU-restart loop.** Boot 17 (CF1786D5, `-rbgpuvmpteng1`),
+captured over SSH **in the armed boot** (`logs/20261017-032220-plugin/`):
 
 ```
-25:s1/c0/f0[AccelChannel "VMPT" h=AMDSDMAChannel]
-   out=1 tot=1 nch=63 hwn=25 nz=0 e2=1 e2q=0
+rbgpu-prog  = b=17 s=6 0x1B RETURNED 0xE00002C7
+rbgpu-1b    = b=17 ... hds:R fas:E(n=65|n=65 REFUSED(>64)) fas:R=0x26b4 ei:E ei:R
+rbgpu-prog2 = b=17 a/b/c = s6/S12/L875,876,877 @31/51/81s
+                     W=1 r0=0 rN=0 R=0 N=65 T=0   (identical in all three)
+rbgpu-diag  = d=72 armed=1 ...
 ```
 
-**The channel exists and its engine has zero queues.** Nothing refuses the
-submit; nothing can complete it. That was row three of the table written
-before the boot.
+| | 2gu | 2gw |
+|---|---|---|
+| `waitForStamp` calls | 1 → 3 → 6, climbing | **1, flat** |
+| its return | `kIOReturnTimeout` | **`kIOReturnSuccess`** |
+| restarts | 1 → 3 → 6, climbing | **0** |
 
-The index bases differ, and that is the finding. The SDMA walk reads
-`hw + 0x3b8 + i*8` while `getHWChannel` indexes `hw + 0x3b0 + engine*8`, so
-**2gi's `engine[i]` is hw array index `i + 1`**:
+The VMPT stamp completed; the GPU wrote the fence. `finishAllStamps`
+returned, `enableInterrupts` returned, 0x1B returned, and the log sequence
+advanced by exactly one per sample — the machine was quiet, not spinning.
+The accelerator then reached framebuffer adoption, further than any boot
+before, where 2ct refuses it by design.
 
-```
-hw[0] = Navi21PM4Engine        GFX
-hw[1] = SDMAEngine_GC_10_3_0   2gi's engine[0] - LEFT ALONE, keeps queues
-hw[2] = SDMAEngine_GC_10_3_0   2gi's engine[1] - zeroed        <- VMPT
-hw[3] = SDMAEngine_GC_10_3_0   2gi's engine[2] - zeroed
-hw[4] = SDMAEngine_GC_10_3_0   2gi's engine[3] - zeroed
-```
+17 `getHWChannel(engine=2)` substitutions, returning two real engine-1
+channels. Engine 2 is asked seventeen times, not once.
 
-VMPT asks for the **first** engine `-rbgpusdmaone` switches off, while the
-one working SDMA sits at index 1. `one=3` says all three writes took, and
-2gi only counts an engine whose count was non-zero first — so hw[2] had
-queues and 2gi removed them. 2gi's own comment predicted exactly this:
-*"if anything later submits to engines [1..3], it finds no queues."*
+### The new frontier
 
-Apple's arithmetic makes hw[2] unavoidable:
-`ENGINE_TYPE = ((caps->0x92 * 2 + 1) & idx) + 1`, with `prio=0` forcing
-`idx = 1`, and `x*2+1` always odd — so the answer is 2 whatever the caps
-byte holds.
+**Request 0x1B returns `kIOReturnUnsupported` (0xE00002C7).** Every stage
+of the chain returned first, so this comes from the *tail* of Apple's
+handling, not from a stage that hung. The obvious candidate is our own
+peer's `default:` answering a request Apple makes late in 0x1B — the same
+shape as the 0x17 refusal in 2gq — but **which request is not established
+and must not be guessed.** That is the next thing to measure: log every
+`callPlatformFunction` request number our peer sees between `ei:R` and the
+0x1B return.
 
-### The experiment
+### Also open
 
-Hook `AMDHardware::getHWChannel(engine, ring)` (0xbea9994) and send
-**engine 2 to engine 1**. Milestone 2c checked (external *defined* symbol,
-not an import); rule 9 checked (`55 48 89 e5 89 f0 …`, no relative branch
-in the patch window). The route happens every boot; the **substitution** is
-gated on `-rbgpuvmpteng1`, so a boot without the arg still reports the
-remap OFF rather than leaving it ambiguous whether the route took. Every
-remap is logged as a substitution — a stamp that completes after this
-proves the remap works, **not** that engine 2 exists (2cy).
+- **`n` went 63 → 65** and the dump's own `n > 64` guard refused to walk
+  it, so the boot that broke the loop is the one whose stamp table went
+  unread. Guard raised to 256. Why the table grew by two is not guessed.
+- **The screen went black while SSH stayed up**, on a boot where 2ct still
+  refused the display pipe (`found_fb_calls=2 found_fb_refused=2`). New
+  behaviour and unexplained. The machine was otherwise healthy.
+- Who calls `incrementStamp(25)` — unchanged.
 
-```
-nvram rbgpu-boot   must be 17 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b     ... fas:E(n=63|... "VMPT" h=H] out=O tot=T nch=63
-                       hwn=25 nz=Z e2=1 e2q=0 e1q=Q)
-RBGPULog           one "2gv: ... SUBSTITUTED to engine=1" line
-```
+### What 2gw cost, and the rules it bought
 
-**Written before the boot:**
+I read the *following, unarmed* boot and concluded the build hung in
+`powerUpHW`. It did not. Stale notes plus a power cycle produced a
+coherent-looking story that was false in every part; the user asking "did
+you overwrite the armed boot?" is what surfaced the real capture.
 
-| reading | means |
-|---|---|
-| `e1q=0` | the remap target has no queues either — **nothing** about this boot may be read as being about engine 1, and the whole approach is wrong |
-| no `2gv:` substitution line | the route or the boot-arg did not take; the rest of the note says nothing about the hypothesis |
-| `out=0`, `nz` non-zero, no restart loop | VMPT completed — the frontier moves, and 2gi's blanket zeroing becomes the thing to fix properly |
-| `out=1` still, `h=AMDSDMAChannel` | VMPT has a backed channel and still never completes; the fault is in the submit or the doorbell, not the engine |
-
-**Still open and not guessed: who calls `incrementStamp(25)`.** The
-slot-0x1d8 shortlist was checked and does not hold. With `tot=1` it is a
-single call somewhere in startup.
+- **Look in `logs/<timestamp>-plugin/` before reading live NVRAM.**
+  `plugin_check.sh` only reads, so a later run destroys nothing.
+- A capture is the armed boot's **only if `rbgpu-diag` reads `armed=1`
+  live**, not in `-prev`.
+- A stale note is no evidence about where a boot got to. Never assemble
+  several into a story.
 
 
 ## 3. Verified on hardware — do NOT re-derive these

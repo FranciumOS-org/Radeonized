@@ -3658,7 +3658,14 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
     if (!evm) { snprintf(out, cap, "noevm"); return; }
     uintptr_t e = reinterpret_cast<uintptr_t>(evm);
     uint32_t n = *reinterpret_cast<volatile uint32_t *>(e + 0x30);
-    if (n > 64) { snprintf(out, cap, "n=%u REFUSED(>64)", n); return; }
+    // 2gw: the bound was 64 and the 2gv boot came back with n=65, so the one
+    // boot that finally broke the restart loop is the one whose stamp table
+    // went unread. 64 was an arbitrary round number, not a fact about the
+    // structure; the guard's real job is to refuse a count that would make
+    // this walk read past the allocation, and 256 does that just as well
+    // while leaving room for the table to grow again. The refusal still
+    // SAYS so rather than returning quietly (rule: absence is not a result).
+    if (n > 256) { snprintf(out, cap, "n=%u REFUSED(>256)", n); return; }
     void **fences = *reinterpret_cast<void ***>(e + 0x28);
     uint32_t outstanding = 0;
     for (uint32_t i = 0; i < n; i++) {
