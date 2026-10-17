@@ -8935,3 +8935,122 @@ Written before the boot:
 
 **Open:** who calls `incrementStamp(25)`; why the stamp table grew by two;
 the `/options` race; and whether 0x1B's `Unsupported` is ours or Apple's.
+
+## 2gz / 2ha — 0x1B does not fail: 0xE00002C7 is its SUCCESS path
+
+**Boot 19 (F9623A20, 2gz).** Captured **in the armed boot**
+(`logs/20261017-191725-plugin/`, `rbgpu-diag = d=72 armed=1` live).
+
+### What 2gz measured
+
+```
+2gz: req 0x12 args p2=0xfffffff2f514fd38 p3=0xfffffff2f514fd3c p4=0
+2gz:   *p2 = 0x00000000 0x00000000
+2gz:   *p3 = 0x00000000 0xDE118000
+2gz:   p4 not a kernel pointer - NOT read
+2gz: req 0x1D args p2=0xfffffff2f514fd88 p3=0xfffffff2f514fd8c p4=0
+     (identical shape)
+```
+
+`p3` is exactly `p2 + 4`: two adjacent dwords on the caller's stack, both
+zeroed, `p4` null. The same shape as request 0x14, where the peer writes
+its answer into `p2`. Row two of 2gy's table — they look like
+out-parameters. **That turned out not to be the question worth answering.**
+
+### WITHDRAWN: "the new frontier is 0x1B returning kIOReturnUnsupported"
+
+Recorded in 2gw and repeated in 2gy and in `docs/HANDOFF.md`. It is wrong.
+
+`AMDGraphicsAccelerator::callPlatformFunction` (0xbe4154e) preloads its
+return before dispatching:
+
+```
+movl  (%r14), %eax           ; req = *p1
+movl  $0xe00002c7, %r14d     ; DEFAULT return = kIOReturnUnsupported
+decl  %eax
+cmpl  $0x1b, %eax
+ja    0xbe41aa8              ; out of range -> return the default
+leaq  0x515(%rip), %rcx      ; jump table at 0xbe41ad4, index req-1
+jmpq  *%rax
+```
+
+and the common exit at 0xbe41aa8 is `movl %r14d, %eax; ...; retq`.
+
+The jump table (decoded from the binary, index `req-1`, base 0xbe41ad4)
+gives 0x1B a real case at **0xbe417d0**, while 0x02, 0x0B-0x0F, 0x12-0x18
+and 0x1A all land on the default.
+
+Inside the 0x1B case, after printing
+`"%s: Controller is enabled, finish initialization\n"`:
+
+```
+0xbe41863  movl  $0xe00002d8, %r14d   ; kIOReturnNotReady - the FAILURE value
+0xbe4186c  je    0xbe418d5            ; hw interface NULL -> NotReady
+0xbe41871  callq *0x2a0(%rax)         ; isDeviceValid
+0xbe4187d  je    0xbe418d5            ; FALSE -> NotReady
+0xbe41889  callq *0x4c8(%rax)         ; startGlobalPerfCounters
+0xbe4189d  callq *0x130(%rax)         ; hardwareDidStart
+0xbe418b1  callq *0x158(%rax)         ; (accel->0x380)->finishAllStamps
+0xbe418c5  callq *0x218(%rax)         ; enableInterrupts
+0xbe418cf  movl  $0xe00002c7, %r14d   ; <-- the COMPLETED path sets this
+0xbe418d5  ... cleanup ... jmp 0xbe41aa8
+```
+
+**Both bail paths return 0xE00002D8. Only the path that executes all five
+hardware calls restores 0xE00002C7.** So the code we have been reading as
+a failure is the one value that *proves* the whole body ran. Apple reuses
+the preloaded constant as "done, nothing further"; whatever the intent,
+the control flow is not ambiguous.
+
+Every slot resolves, and they reproduce the 2gn trail exactly:
+
+| call | method | trail mark |
+|---|---|---|
+| `hw->vt[0x2a0]` | `isDeviceValid` | — |
+| `hw->vt[0x4c8]` | `startGlobalPerfCounters` | `perf:E perf:R` |
+| `hw->vt[0x130]` | `hardwareDidStart` | `hds:E … hds:R` |
+| `(accel->0x380)->vt[0x158]` | `finishAllStamps` | `fas:E … fas:R` |
+| `hw->vt[0x218]` | `enableInterrupts` | `ei:E ei:R` |
+
+Two independent sources — the live trail and the disassembly — give the
+same five calls in the same order, all returning. This also names 2gn's
+"unnamed `(accel->0x380)->vt[0x158]`" as `finishAllStamps`, agreeing with
+2gp.
+
+**Request 0x1B completes.** Since 2gw broke the restart loop, the
+accelerator has been finishing its initialisation every boot.
+
+### What that costs, and what it saves
+
+The error: 2gw took a numeric return code and assigned it a meaning —
+"Unsupported, therefore a failure" — without reading the code that
+produces it. The constant's *name* was treated as its *role*. The peer's
+own `default:` returning the same value made the story fit, and 2gy then
+built a second milestone on top of it. **Twenty-fifth instance of the
+recurring error.** The rule it adds:
+
+- A return code is not a result until the code that sets it has been
+  read. A named constant tells you what the name means, not what the
+  function meant by it — and an error-shaped value on a success path is
+  exactly the case where the name misleads.
+
+What it saves: 0x12 and 0x1D are **incidental**. They arrive in the first
+~120 µs of the 0x1B case, before the hardware sequence, we refuse both,
+and Apple runs the entire path anyway. Answering them is **not** required
+for 0x1B to complete, and the 2gz follow-up that was about to be built is
+unnecessary. They remain unexplained, but they are not blocking anything.
+
+### Where this actually leaves the project
+
+Nothing in the 0x1B path is now known to fail. The accelerator initialises,
+the GPU executes and fences, the restart loop is gone. What has never
+happened is the accelerator driving anything: **2ct refuses the display
+pipe by design** (`found_fb_calls=2 found_fb_refused=2`), so the desktop
+stays on IONDRVFramebuffer and no boot has run with the accelerator
+adopting the panel. That refusal, not 0x1B, is the next thing in the way —
+and lifting it is a decision with a real cost (it is what keeps the UI
+alive), so it is the user's call, not a step to take unasked.
+
+Still open: who calls `incrementStamp(25)`; why the stamp table grew
+63 → 65; the `/options` race; the one black-screen boot; and what 0x12 and
+0x1D are for.

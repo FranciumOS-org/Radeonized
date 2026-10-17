@@ -127,6 +127,12 @@ under the tag in brackets.
   is black). `plugin_check.sh` only READS nvram, so a later run destroys
   nothing. A capture is the armed boot's only if its `rbgpu-diag` reads
   `armed=1` **live**, not in `-prev`. [2gw]
+- **A return code is not a result until the code that sets it has been
+  read.** A named constant tells you what the NAME means, not what the
+  function meant by it. Request 0x1B's *success* path returns
+  `kIOReturnUnsupported`; both its failure paths return
+  `kIOReturnNotReady`. Two milestones were built on the opposite reading.
+  [2ha, the 25th instance]
 - A stale note is **no evidence about where a boot got to** — not weak
   evidence of an early stop. Never assemble several stale notes into a
   story; a user rebooting a black screen looks exactly like a hang. [2gw,
@@ -231,9 +237,13 @@ engine `-rbgpusdmaone` had emptied of queues (2gt, 2gu).
 1, the one SDMA instance this chip has. `waitForStamp` now runs **once** and
 returns **Success**, restarts are **0**, `finishAllStamps` and
 `enableInterrupts` both return, and the accelerator reaches framebuffer
-adoption. The new frontier is request 0x1B returning
-**`kIOReturnUnsupported`** — late, after every stage returned — and a black
-screen with SSH alive. 2gy localised that: inside the 0x1B window Apple
-asks the peer **only** 0x12 and 0x1D, we refuse both with
-`kIOReturnUnsupported`, and 0x1B returns the same code. 2gz looks at what
-those two requests carry before anything answers them.
+adoption. **Request 0x1B then COMPLETES** (2ha): its `0xE00002C7` is the value its
+*success* path sets at 0xbe418cf, after `isDeviceValid`,
+`startGlobalPerfCounters`, `hardwareDidStart`, `finishAllStamps` and
+`enableInterrupts` have all run — both failure paths return
+`0xE00002D8` instead. The live 2gn trail and the disassembly agree call
+for call. The 0x12/0x1D refusals are incidental: Apple runs the whole
+path despite them. Nothing in the 0x1B path is now known to fail. What has
+never happened is the accelerator driving anything — **2ct refuses the
+display pipe by design**, and lifting that is the next thing in the way
+and the user's decision, since it is what keeps the UI alive.
