@@ -1599,6 +1599,49 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
             default:
                 rbgpu_log("Unhandled SpecialAMDKey request 0x%02X", req);
                 rbgpu_2gx_req(req, 1);
+                // 2gz: 0x12 and 0x1D are the ONLY two requests Apple makes
+                // inside the 0x1B window, we refuse both, and 0x1B then
+                // returns the same kIOReturnUnsupported we gave them (2gy).
+                // The obvious next move is to answer them - but answering
+                // means deciding what to write through p2, and nothing so
+                // far says whether p2 is an out-parameter at all. Writing a
+                // value we invented and then reading the consequence as a
+                // hardware result is exactly the 2cy failure and the debt
+                // 2am/2an/2ao still owe.
+                //
+                // So look first. This prints the three argument pointers
+                // and, for each that is a kernel pointer, the first two
+                // dwords behind it. Observe-only, no boot-arg: 0x12 and
+                // 0x1D arrive once each per boot (2gy timestamps), so there
+                // is no storm to cause.
+                if (req == 0x12 || req == 0x1D) {
+                    uintptr_t a2 = reinterpret_cast<uintptr_t>(p2);
+                    uintptr_t a3 = reinterpret_cast<uintptr_t>(p3);
+                    uintptr_t a4 = reinterpret_cast<uintptr_t>(p4);
+                    rbgpu_log("2gz: req 0x%02X args p2=%p p3=%p p4=%p",
+                              req, p2, p3, p4);
+                    const uintptr_t kmin = 0xffffff8000000000ULL;
+                    // Each path SAYS something - a pointer that is not read
+                    // must not look the same as one that read zero.
+                    if (a2 >= kmin) {
+                        volatile uint32_t *q = reinterpret_cast<volatile uint32_t *>(a2);
+                        rbgpu_log("2gz:   *p2 = 0x%08X 0x%08X", q[0], q[1]);
+                    } else {
+                        rbgpu_log("2gz:   p2 not a kernel pointer - NOT read");
+                    }
+                    if (a3 >= kmin) {
+                        volatile uint32_t *q = reinterpret_cast<volatile uint32_t *>(a3);
+                        rbgpu_log("2gz:   *p3 = 0x%08X 0x%08X", q[0], q[1]);
+                    } else {
+                        rbgpu_log("2gz:   p3 not a kernel pointer - NOT read");
+                    }
+                    if (a4 >= kmin) {
+                        volatile uint32_t *q = reinterpret_cast<volatile uint32_t *>(a4);
+                        rbgpu_log("2gz:   *p4 = 0x%08X 0x%08X", q[0], q[1]);
+                    } else {
+                        rbgpu_log("2gz:   p4 not a kernel pointer - NOT read");
+                    }
+                }
                 return kIOReturnUnsupported;
         }
     }

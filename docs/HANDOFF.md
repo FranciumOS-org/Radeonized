@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-17, after 2gw)
+# RembrandtGPU — handoff state (2026-10-17, after 2gy)
 
 **Read this first.** `CLAUDE.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -67,92 +67,69 @@ display pipe** (2ct), so armed boots can reach a desktop.
 ---
 
 
-## 2. The pending experiment — why does 0x1B return Unsupported?
+## 2. The pending experiment — what do 0x12 and 0x1D want?
 
-**2gw broke the GPU-restart loop.** Boot 17 (CF1786D5, `-rbgpuvmpteng1`),
-captured over SSH **in the armed boot** (`logs/20261017-032220-plugin/`):
+**Build `F9623A20` (2gz).** Boot-args unchanged. Observe-only.
 
-```
-rbgpu-prog  = b=17 s=6 0x1B RETURNED 0xE00002C7
-rbgpu-1b    = b=17 ... hds:R fas:E(n=65|n=65 REFUSED(>64)) fas:R=0x26b4 ei:E ei:R
-rbgpu-prog2 = b=17 a/b/c = s6/S12/L875,876,877 @31/51/81s
-                     W=1 r0=0 rN=0 R=0 N=65 T=0   (identical in all three)
-rbgpu-diag  = d=72 armed=1 ...
-```
+### What 2gy settled
 
-| | 2gu | 2gw |
-|---|---|---|
-| `waitForStamp` calls | 1 → 3 → 6, climbing | **1, flat** |
-| its return | `kIOReturnTimeout` | **`kIOReturnSuccess`** |
-| restarts | 1 → 3 → 6, climbing | **0** |
-
-The VMPT stamp completed; the GPU wrote the fence. `finishAllStamps`
-returned, `enableInterrupts` returned, 0x1B returned, and the log sequence
-advanced by exactly one per sample — the machine was quiet, not spinning.
-The accelerator then reached framebuffer adoption, further than any boot
-before, where 2ct refuses it by design.
-
-17 `getHWChannel(engine=2)` substitutions, returning two real engine-1
-channels. Engine 2 is asked seventeen times, not once.
-
-### 2gx — the instrument for it (build 63983BA1)
-
-The peer's `default:`, `0x17` and `0x1A` all return **exactly**
-`0xE00002C7`, so the code 0x1B came back with is consistent with both
-candidates and settles neither. 2gx records, in order, every request the
-peer is asked for inside the 0x1B window, with `!` on the ones we refuse:
+Boot 18, captured **in the armed boot** (`logs/20261017-183233-plugin/`,
+`rbgpu-diag = d=72 armed=1` live):
 
 ```
-rbgpu-1b   ... ei:E ei:R q[17!,1D!,...|14xN]
+[6128026444] handlePostRegister: sending Request 0x1B (Controller Enabled)
+[6128119588] SpecialAMDKey request 0x12 (wait: 1)
+[6128121843] Unhandled SpecialAMDKey request 0x12
+[6128142712] SpecialAMDKey request 0x1D (wait: 1)
+[6128144315] Unhandled SpecialAMDKey request 0x1D
+[6128889602] handlePostRegister: Request 0x1B returned 0xE00002C7
 ```
 
-Accumulated in a buffer and committed **once**, after 0x1B returns — a
-write per request inside that window would be the 2ez contention and the
-2fo wedge at once. `0x14` is counted, not listed (it reached #1,506,624 in
-2gq). A full buffer appends `+DROPPED` rather than truncating silently.
+and the 2gx trail `q[12!,1D!|14x1]`. Inside the 0x1B window Apple asks the
+peer **exactly two** things, we refuse both with `kIOReturnUnsupported`,
+and 0x1B returns that same code. Nothing else is asked of us.
+
+**Still correlation, from one boot.** Apple works for ~745 µs after the
+0x1D refusal before returning, and nothing yet shows the code is ours
+rather than its own.
+
+Also confirmed: **`e1q=2`** (the 2gv remap target really has queues, so
+the remap no longer rests on `one=3` arithmetic), the class name prints
+correctly (`AMDGFX10SDMAChannel`), and `n`/`nch` are both 65 while `hwn`
+is still 25 — the two extra channels are past VMPT, not hardware ones.
+
+### Why they are not simply answered
+
+Answering means deciding what to write through `p2`, and nothing says
+whether `p2` is an out-parameter at all. Inventing a value and reading the
+consequence as a hardware result is the 2cy failure, and the debt
+2am/2an/2ao still owe. So 2gz looks first: for 0x12 and 0x1D it logs `p2`,
+`p3`, `p4` and the first two dwords behind each that is a kernel pointer,
+and says explicitly when one is not read.
+
+```
+RBGPULog    2gz: req 0x12 args p2=... p3=... p4=...
+            2gz:   *p2 = 0x........ 0x........      (or "not a kernel pointer - NOT read")
+```
 
 **Written before the boot:**
 
 | reading | means |
 |---|---|
-| `q[...]` ends in a refused request | Apple propagates OUR refusal; implementing that request is the next step |
-| `q[none\|14xN]` or no refusals | nothing was asked of us — Apple's own 0x1B handler ends in Unsupported, and the answer is in its code, not our peer |
-| `+DROPPED` | the trail is incomplete and the LAST entry is not necessarily the refusal |
-
-### The new frontier
-
-**Request 0x1B returns `kIOReturnUnsupported` (0xE00002C7).** Every stage
-of the chain returned first, so this comes from the *tail* of Apple's
-handling, not from a stage that hung. The obvious candidate is our own
-peer's `default:` answering a request Apple makes late in 0x1B — the same
-shape as the 0x17 refusal in 2gq — but **which request is not established
-and must not be guessed.** That is the next thing to measure: log every
-`callPlatformFunction` request number our peer sees between `ei:R` and the
-0x1B return.
+| `p2` a kernel pointer holding plausible input | Apple is asking a question; the answer must be computed, not invented |
+| `p2` a kernel pointer holding zeros | likely a pure out-parameter; the next question is what value it wants |
+| `p2` null or not a pointer | the request takes no data, and `kIOReturnSuccess` alone may be the whole answer |
 
 ### Also open
 
-- **`n` went 63 → 65** and the dump's own `n > 64` guard refused to walk
-  it, so the boot that broke the loop is the one whose stamp table went
-  unread. Guard raised to 256. Why the table grew by two is not guessed.
-- **The screen went black while SSH stayed up**, on a boot where 2ct still
-  refused the display pipe (`found_fb_calls=2 found_fb_refused=2`). New
-  behaviour and unexplained. The machine was otherwise healthy.
+- **The `/options` race cost a boot.** The peer logged
+  `/options not found; accelerator NOT armed` at 0.52 s (the 2gw boot's
+  peer ran at 1.9 s). The lookup is tried **once**. It fails silently in
+  the worst way — indistinguishable from the user forgetting to arm — and
+  leaves `rbgpu-arm` set, so a plain reboot recovers with no reinstall. A
+  bounded retry is owed.
+- Why the stamp table grew 63 → 65. Not guessed.
 - Who calls `incrementStamp(25)` — unchanged.
-
-### What 2gw cost, and the rules it bought
-
-I read the *following, unarmed* boot and concluded the build hung in
-`powerUpHW`. It did not. Stale notes plus a power cycle produced a
-coherent-looking story that was false in every part; the user asking "did
-you overwrite the armed boot?" is what surfaced the real capture.
-
-- **Look in `logs/<timestamp>-plugin/` before reading live NVRAM.**
-  `plugin_check.sh` only reads, so a later run destroys nothing.
-- A capture is the armed boot's **only if `rbgpu-diag` reads `armed=1`
-  live**, not in `-prev`.
-- A stale note is no evidence about where a boot got to. Never assemble
-  several into a story.
 
 
 ## 3. Verified on hardware — do NOT re-derive these
