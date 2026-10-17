@@ -1,8 +1,11 @@
 # RembrandtGPU — handoff state (2026-10-16, after 2gt)
 
-**Read this before CLAUDE.md.** CLAUDE.md is the chronological evidence
-journal (~4000 lines); it is authoritative for *what was measured*, in order,
-and must not be trimmed. This file is the *current state*: what is settled,
+**Read this first.** `CLAUDE.md` is now short — the project rules, the rules
+that cost boots to learn, and the chip facts — and is auto-loaded every
+session. `docs/JOURNAL.md` is the chronological evidence journal (~8500
+lines): authoritative for *what was measured*, in order, including every
+withdrawn reading, and must not be trimmed; grep it by milestone tag rather
+than reading it whole. This file is the *current state*: what is settled,
 what is open, what to do next, the procedure, and the mistakes this project
 keeps making.
 
