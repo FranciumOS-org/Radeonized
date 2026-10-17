@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-17, after 2gy)
+# RembrandtGPU — handoff state (2026-10-17, after 2ha)
 
 **Read this first.** `CLAUDE.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -64,72 +64,72 @@ inside `waitForStamp`, each read reaching our peer — and macOS spawns a
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
+**Current outcome (2gw, 2ha):** with `-rbgpuvmpteng1` the VMPT stamp
+completes on the first wait, the restart loop is gone, and request 0x1B
+runs its whole body and returns `0xE00002C7` — which is its *success*
+value, not a failure (§2). Nothing in that path is known to fail. The 2ct
+refusal above is what is now in the way.
+
 ---
 
 
-## 2. The pending experiment — what do 0x12 and 0x1D want?
+## 2. The decision — lift 2ct and let the accelerator take the panel?
 
-**Build `F9623A20` (2gz).** Boot-args unchanged. Observe-only.
+**Nothing in the 0x1B path is known to fail any more.** There is no
+pending instrument; the next move is a choice, and it is the user's.
 
-### What 2gy settled
+### 2ha: request 0x1B succeeds (and two milestones were wrong)
 
-Boot 18, captured **in the armed boot** (`logs/20261017-183233-plugin/`,
-`rbgpu-diag = d=72 armed=1` live):
-
-```
-[6128026444] handlePostRegister: sending Request 0x1B (Controller Enabled)
-[6128119588] SpecialAMDKey request 0x12 (wait: 1)
-[6128121843] Unhandled SpecialAMDKey request 0x12
-[6128142712] SpecialAMDKey request 0x1D (wait: 1)
-[6128144315] Unhandled SpecialAMDKey request 0x1D
-[6128889602] handlePostRegister: Request 0x1B returned 0xE00002C7
-```
-
-and the 2gx trail `q[12!,1D!|14x1]`. Inside the 0x1B window Apple asks the
-peer **exactly two** things, we refuse both with `kIOReturnUnsupported`,
-and 0x1B returns that same code. Nothing else is asked of us.
-
-**Still correlation, from one boot.** Apple works for ~745 µs after the
-0x1D refusal before returning, and nothing yet shows the code is ours
-rather than its own.
-
-Also confirmed: **`e1q=2`** (the 2gv remap target really has queues, so
-the remap no longer rests on `one=3` arithmetic), the class name prints
-correctly (`AMDGFX10SDMAChannel`), and `n`/`nch` are both 65 while `hwn`
-is still 25 — the two extra channels are past VMPT, not hardware ones.
-
-### Why they are not simply answered
-
-Answering means deciding what to write through `p2`, and nothing says
-whether `p2` is an out-parameter at all. Inventing a value and reading the
-consequence as a hardware result is the 2cy failure, and the debt
-2am/2an/2ao still owe. So 2gz looks first: for 0x12 and 0x1D it logs `p2`,
-`p3`, `p4` and the first two dwords behind each that is a kernel pointer,
-and says explicitly when one is not read.
+`AMDGraphicsAccelerator::callPlatformFunction` (0xbe4154e) preloads
+`r14 = 0xE00002C7` before its jump table and returns `r14` at 0xbe41aa8.
+Inside the 0x1B case (0xbe417d0):
 
 ```
-RBGPULog    2gz: req 0x12 args p2=... p3=... p4=...
-            2gz:   *p2 = 0x........ 0x........      (or "not a kernel pointer - NOT read")
+movl  $0xe00002d8, %r14d   ; kIOReturnNotReady - the FAILURE value
+je    ...                  ; hw NULL        -> NotReady
+callq *0x2a0(%rax)         ; isDeviceValid
+je    ...                  ; FALSE          -> NotReady
+callq *0x4c8(%rax)         ; startGlobalPerfCounters
+callq *0x130(%rax)         ; hardwareDidStart
+callq *0x158(%rax)         ; (accel->0x380)->finishAllStamps
+callq *0x218(%rax)         ; enableInterrupts
+movl  $0xe00002c7, %r14d   ; <-- only the COMPLETED path sets this
 ```
 
-**Written before the boot:**
+So `0xE00002C7` **proves the whole body ran**; both bail paths return
+`0xE00002D8`. The live 2gn trail
+(`perf:E perf:R … hds:R fas:E … fas:R ei:E ei:R`) reproduces those five
+calls in order, independently.
 
-| reading | means |
-|---|---|
-| `p2` a kernel pointer holding plausible input | Apple is asking a question; the answer must be computed, not invented |
-| `p2` a kernel pointer holding zeros | likely a pure out-parameter; the next question is what value it wants |
-| `p2` null or not a pointer | the request takes no data, and `kIOReturnSuccess` alone may be the whole answer |
+**2gw and 2gy recorded this code as "the new frontier". That is withdrawn.**
+The error was assigning a meaning to a return code without reading the
+code that sets it — the 25th instance of the recurring error.
 
-### Also open
+Consequence: **0x12 and 0x1D are incidental.** They arrive in the first
+~120 µs, we refuse both, and Apple completes the path regardless.
+Answering them is not required; the instrument that was about to be built
+for them is unnecessary. They stay unexplained but block nothing.
 
-- **The `/options` race cost a boot.** The peer logged
-  `/options not found; accelerator NOT armed` at 0.52 s (the 2gw boot's
-  peer ran at 1.9 s). The lookup is tried **once**. It fails silently in
-  the worst way — indistinguishable from the user forgetting to arm — and
-  leaves `rbgpu-arm` set, so a plain reboot recovers with no reinstall. A
-  bounded retry is owed.
-- Why the stamp table grew 63 → 65. Not guessed.
-- Who calls `incrementStamp(25)` — unchanged.
+### So what is actually left
+
+The accelerator initialises, the GPU executes PM4 and writes fences, the
+restart loop is gone (2gw), and 0x1B completes. **No boot has ever run
+with the accelerator driving the panel**, because 2ct refuses the display
+pipe by design (`found_fb_calls=2 found_fb_refused=2`) so that armed
+boots keep a usable desktop on IONDRVFramebuffer.
+
+That refusal is now the thing in the way. Lifting it is a real decision:
+it is what has kept the UI alive through this whole project, and the one
+boot that went black (2gw) is an unexplained warning sign. It should be
+taken deliberately, with SSH ready, and not as a routine next step.
+
+### Open, none of them blocking
+
+- Who calls `incrementStamp(25)`.
+- Why the stamp table grew 63 → 65 after the 2gv remap.
+- The `/options` race (standing debt; a bounded retry is owed).
+- The one black-screen boot, with SSH alive.
+- What 0x12 and 0x1D are for.
 
 
 ## 3. Verified on hardware — do NOT re-derive these
