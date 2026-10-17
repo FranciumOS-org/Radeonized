@@ -3582,10 +3582,10 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
                          *reinterpret_cast<volatile uint32_t *>(fp));
             }
         }
-        // 2gr: name the channel behind this slot and read its own
-        // bookkeeping. `AMDAccelEventMachine::eventTimeout` (0xbe4b991)
-        // does the lookup Apple itself uses, and it is the accelerator's
-        // array, not the hardware's:
+        // 2gr/2gs: name the channel behind this slot.
+        // `AMDAccelEventMachine::eventTimeout` (0xbe4b991) does the lookup
+        // Apple itself uses, and it is the accelerator's array, not the
+        // hardware's:
         //
         //   accel = evm->0x10
         //   if (idx < 0 || idx >= accel->0x1e78) -> NULL
@@ -3593,13 +3593,17 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         //
         // which is the SAME array and bound `waitForStamp`'s second bail
         // tests - so a Timeout rather than 0xE00002C2 already proves this
-        // index is in range and the pointer non-NULL (2gp). The fields are
-        // AMDHWChannel's, established in 2ds/2dw/2dy: +0x80 submitted,
-        // +0x84 completed, +0xc0 the fence CPU VA, +0xc8 the GPU address
-        // the WRITE_DATA packet targets, +0xe0 the scheduler slot.
+        // index is in range and the pointer non-NULL (2gp).
+        //
+        // 2gs: the channel's OWN fields are NOT read any more. 2gr read
+        // +0x80/+0x84/+0xc8 here, which are `AMDHWChannel`'s layout
+        // (2ds/2dw/2dy) - and the class that came back is
+        // AMDRadeonX6000_AMDAccelChannel, whose vtable (0xbf92998, 0x278
+        // bytes) sits in the IOAccelChannel2 hierarchy and not in the
+        // IAMDHWChannel one (0xbfa8a80+, ~0x3d0-0x440). Those three numbers
+        // were a different class's offsets and meant nothing. Reading the
+        // fields in the same step that named the class is what allowed it.
         const char *cn = "?";
-        uint32_t c80 = 0, c84 = 0;
-        uint64_t cc8 = 0;
         void *ch = nullptr;
         void *accel = *reinterpret_cast<void **>(e + 0x10);
         if (reinterpret_cast<uintptr_t>(accel) >= 0xffffff8000000000ULL) {
@@ -3610,10 +3614,6 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
             }
         }
         if (reinterpret_cast<uintptr_t>(ch) >= 0xffffff8000000000ULL) {
-            uintptr_t c = reinterpret_cast<uintptr_t>(ch);
-            c80 = *reinterpret_cast<volatile uint32_t *>(c + 0x80);
-            c84 = *reinterpret_cast<volatile uint32_t *>(c + 0x84);
-            cc8 = *reinterpret_cast<volatile uint64_t *>(c + 0xc8);
             if (auto o = OSDynamicCast(OSObject, reinterpret_cast<OSObject *>(ch))) {
                 if (auto m = o->getMetaClass()) { cn = m->getClassName(); }
             }
@@ -3623,14 +3623,41 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         const char *shortn = cn;
         for (const char *q = cn; *q; q++) { if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { shortn = q + 1; } }
         size_t k = strlen(out);
-        if (k + 80 < cap) {
-            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s sub%u cmp%u c8=%#llx]",
-                     k ? "," : "", i, sub, cmp, fv, shortn, c80, c84,
-                     static_cast<unsigned long long>(cc8));
+        if (k + 48 < cap) {
+            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s]",
+                     k ? "," : "", i, sub, cmp, fv, shortn);
         }
     }
+    // 2gs: three numbers that are defined by Apple's own code rather than
+    // by a guessed layout, and that bound the question the slot cannot.
+    //
+    //   accel->0xa0   incrementStamp(i) does `evm[0xfc+i*24]++` AND
+    //                 `evm->0x10->0xa0++` (0x14e4345a), so this is the total
+    //                 number of stamps the whole driver has ever submitted.
+    //                 If it is 1, slot 25's single submit is the only one.
+    //   accel->0x1e78 the channel-array bound eventTimeout and waitForStamp
+    //                 both test, so it says whether 25 is a real registered
+    //                 channel or merely in range.
+    //   nz            setStampBaseAddress (0x14e25aea) fills evm->0x28[i]
+    //                 with `base + getStampOffset(i)` and getStampOffset is
+    //                 `i*4` (0x14e25ae0), so the fences are one flat block
+    //                 of n dwords at evm->0x20. Counting the nonzero ones
+    //                 says whether the GPU has EVER written a stamp there.
+    uint32_t tot = 0, nch = 0, nz = 0;
+    void *accel = *reinterpret_cast<void **>(e + 0x10);
+    if (reinterpret_cast<uintptr_t>(accel) >= 0xffffff8000000000ULL) {
+        uintptr_t a = reinterpret_cast<uintptr_t>(accel);
+        tot = *reinterpret_cast<volatile uint32_t *>(a + 0xa0);
+        nch = *reinterpret_cast<volatile uint32_t *>(a + 0x1e78);
+    }
+    void *base = *reinterpret_cast<void **>(e + 0x20);
+    if (reinterpret_cast<uintptr_t>(base) >= 0xffffff8000000000ULL) {
+        volatile uint32_t *b = reinterpret_cast<volatile uint32_t *>(base);
+        for (uint32_t i = 0; i < n; i++) { if (b[i]) { nz++; } }
+    }
     size_t k = strlen(out);
-    snprintf(out + k, cap - k, "%s out=%u", k ? "" : "none", outstanding);
+    snprintf(out + k, cap - k, "%s out=%u tot=%u nch=%u nz=%u",
+             k ? "" : "none", outstanding, tot, nch, nz);
 }
 
 static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {

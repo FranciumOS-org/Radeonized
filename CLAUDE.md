@@ -8347,3 +8347,123 @@ fas:E(n=63|25:s1/c0/f0[<class> subN cmpM c8=0x...] out=1)
 | `sub = 0` while the event machine says submitted=1 | the event machine's stamp was recorded without the channel ever submitting — bookkeeping, and `writeStampCommand` (0x14e43477) is where to look |
 | the class is a **display** or **VCN** channel | the outstanding work is not the GFX path at all, and the standing `2ct` zero-pipe choice becomes directly relevant |
 | the class is the KIQ or a GFX ring | it is the path already proven to work, which would make slot 25's single stamp the odd one out and worth comparing against the stamps 70-72 that do complete |
+
+### 2gr answered on hardware (2026-10-16): the channel is an `AMDAccelChannel` — and the fields I read with it are VOID
+
+logs/20261016-204728-plugin, `plugin_check` run **in the armed boot** at ~156 s
+of uptime. Build and nonce checked first per the 2cu/2cv rule: 6F1F006B ==
+build/out (2gr), `rbgpu-boot` = **13**, a sequence never recorded before. No
+new `.panic`.
+
+```
+rbgpu-1b = b=13 perf:E perf:R hds:E rt:E vmm:E vmm:R rt:R ssr:E(0,0x3b,0,0xc)
+           hiq:E hsf:E(1) stw:E stw:R=1 hsf:R=1 hiq:R=1 ssr:R hds:R
+           fas:E(n=63|25:s1/c0/f0[AccelChannel sub3461091728 cmp4294967246 c8=0] out=1)
+rbgpu-sdma = b=13 ... ret=1 post=1111 allstarted one=3        (a SEVENTH time)
+rbgpu-prog2 = b=13 W=1->3->6  r0=rN=0xe00002d6  R=1->3->6  N=63  T=3->10->22
+```
+
+**The class landed and it is a third thing.** Neither branch of 2gr's table
+fired: the channel behind stamp slot 25 is **`AMDRadeonX6000_AMDAccelChannel`**
+(the trim strips the shared `AMDRadeonX6000_AMD` prefix), which is the
+accelerator's per-client software channel — the same class whose
+`resetHardwareAndReplay` (0xbe45549) 2gp found sending request 0x17. So the
+restart loop's victim and the restart's agent are one class, which is
+coherent, and the pointer yielding a clean metaclass name proves it is a live
+OSObject rather than a stale entry.
+
+**And the three numbers beside it mean nothing.** Checked after the fact, from
+the vtable extents:
+
+```
+__ZTV30AMDRadeonX6000_AMDAccelChannel  0xbf92998, 0x278 bytes
+__ZTV15IOAccelChannel2                 0x14e7f088, 0x1b8 bytes   its base
+__ZTV28AMDRadeonX6000_IAMDHWChannel    0xbfa8a80  }  a different
+__ZTV35AMDRadeonX6000_AMDGFX10KIQHWChannel 0xbfbb5b8 }  hierarchy entirely
+```
+
+`+0x80` submitted, `+0x84` completed and `+0xc8` the fence GPU address are
+**`AMDHWChannel`'s** layout, established in 2ds/2dw/2dy for the KIQ. An
+`AMDAccelChannel` is an `IOAccelChannel2` subclass and has no such fields, so
+`sub=3461091728` (0xCE4C1190), `cmp=4294967246` (-50) and `c8=0` are three
+unrelated bytes of a different object. **Twenty-third instance of the
+recurring error**, and its particular shape is worth naming: the step named
+the class and read its fields *in the same breath*, so the fields were read
+before the thing that gives them meaning was known. 2gs removes them.
+
+### The stamp table resolved end to end, from Apple's own code — no boot spent
+
+```
+getStampOffset(i)            0x14e25ae0   return i * 4
+setStampBaseAddress(base)    0x14e25aea
+    evm->0x20 = base ; n = evm->0x30
+    evm->0x28 = kalloc(n * 8)
+    for (i = 0; i < n; i++) evm->0x28[i] = base + vt[0x138](i)
+incrementStamp(i)            0x14e43416
+    evm[0xfc + i*24]++  ;  evm->0x10->0xa0++        a SOFTWARE counter
+writeStampCommand(i, q, rec) 0x14e4346c
+    reads evm[0xfc + i*24], tail-jumps evm->vt[0x2a0] to emit it
+```
+
+Three things fall out, and two of them close open questions:
+
+- **A "stamp slot" is not per-channel.** The fences are one flat block of `n`
+  dwords at `evm->0x20`, slot `i` at `base + i*4`; `evm->0x28` is just an
+  array of pointers into it. So slot 25's fence reading 0 means dword 25 of a
+  shared block was never written — the slot is initialised and readable, and
+  nothing wrote it.
+- **`submitted` is a pure software counter.** `incrementStamp` bumps it with
+  no hardware involved at all, and the emit is a separate call. So
+  `s1/c0/f0` is exactly: `incrementStamp(25)` ran **once**, and no stamp value
+  ever landed in dword 25.
+- **The vtable convention is confirmed a second way.** `finishStamp` is at
+  dump +0x160 and `finishAllStamps` at +0x168, i.e. call offsets 0x150 and
+  0x158 — independently re-confirming 2gp's `vt[0x150]` and 2go's
+  by-elimination naming of `(accel->0x380)->vt[0x158]`.
+
+Also in this capture, both new: macOS spawned a **`DumpGPURestart[604]`**
+process, so userspace sees the restart and not only our log; and request 0x14
+reached **#1,107,904** — over a million register polls through the peer, two
+request-0x17 ASIC-reset refusals 6 s apart matching `R` climbing.
+
+**Not found: who calls `incrementStamp(25)`.** The slot-0x1d8 shortlist was
+checked and does not hold — `signalStamp`'s call at 0x14e26283 is on
+`evm->0x78`, a different object, and the base `IOAccelEventMachine2` vtable
+has every slot from +0x1d0 to +0x210 pointing at one pure-virtual stub
+(0x975800), so the base cannot name them either. Recorded as open rather than
+guessed.
+
+## 2gs (2026-10-16): read what Apple's code defines, not what another class has
+
+The per-slot channel fields are gone; the class name stays, because that is
+what the lookup actually establishes. In their place, three numbers each read
+off an instruction rather than off an assumed layout:
+
+```
+accel->0xa0      the total incrementStamp count for the WHOLE driver
+                 (0x14e4345a). If it is 1, slot 25's single submit is the
+                 only stamp this driver has ever issued - which would make it
+                 Apple's own one-off and not a leftover from a client.
+accel->0x1e78    the channel-array bound eventTimeout and waitForStamp both
+                 test, so it says whether 25 is a registered channel or
+                 merely in range of an array that is mostly empty.
+nz               how many of the n stamp dwords at evm->0x20 are nonzero -
+                 i.e. whether the GPU has EVER written a stamp into that
+                 block, on any slot.
+```
+
+`nz` is the one that splits the frontier, and it is free:
+
+| reading | means |
+|---|---|
+| `nz=0` | the GPU has never written **any** stamp — the stamp block's GPU address is wrong or nothing was ever emitted, and this is one bug for all 63 slots rather than something about slot 25. The same shape as 2dh/2di and 2em: a correct CPU pointer paired with an address the hardware cannot reach. |
+| `nz>0` with slot 25 still 0 | other slots complete and 25 alone does not, so the block is reachable and the question really is that one submit |
+| `tot=1` | slot 25's submit is the only stamp the driver ever issued |
+| `tot>1` with `out=1` | others were issued and completed, which would contradict `nz=0` and say the block is fine |
+| `nch` small, 25 near it | the channel array is barely populated and index 25 being valid is worth its own look |
+
+Reads only, same bounds and the same kernel-VA guard (the 2gh rule). Nothing
+new touches hardware and no new NVRAM write: it rides the existing `fas:E`
+mark on `rbgpu-1b`.
+
+Build: UUID CD40814D, hosttest passes. Boot-args unchanged.
