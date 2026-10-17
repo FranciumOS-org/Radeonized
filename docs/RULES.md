@@ -216,9 +216,12 @@ It is what broke the GPU-restart loop.
   matter.
 - The 2am/2an/2ao blanket firmware-ready bypasses still owe the explanation
   2cy demanded.
-- 2ct refuses the display pipe **by design**, so the desktop stays on
-  IONDRVFramebuffer and no boot has ever run with the accelerator driving
-  the panel.
+- 2ct refuses the display pipe **by design**, so no boot has ever run with
+  the accelerator driving the panel. Its rationale says this keeps the
+  desktop on IONDRVFramebuffer — but in practice **armed boots have no
+  display at all** and never have. Why the panel dies even with the pipe
+  refused is unexplained and is a separate problem from 2ct. [user,
+  2026-10-17]
 - 2gh: "the second engine to ask" and "a duplicate create on instance 0" are
   the same event on this chip and nothing separates them.
 
@@ -243,7 +246,12 @@ adoption. **Request 0x1B then COMPLETES** (2ha): its `0xE00002C7` is the value i
 `enableInterrupts` have all run — both failure paths return
 `0xE00002D8` instead. The live 2gn trail and the disassembly agree call
 for call. The 0x12/0x1D refusals are incidental: Apple runs the whole
-path despite them. Nothing in the 0x1B path is now known to fail. What has
-never happened is the accelerator driving anything — **2ct refuses the
-display pipe by design**, and lifting that is the next thing in the way
-and the user's decision, since it is what keeps the UI alive.
+path despite them. Nothing in the 0x1B path is now known to fail.
+
+**No armed boot has ever reached a desktop** (user, 2026-10-17): since
+roughly milestone 2c every armed boot has shown verbose log lines and
+then nothing, and all work in them has been done over SSH. 2ct's stated
+rationale — refuse the display pipe "so armed boots can reach a desktop"
+— is therefore NOT achieved, and any note calling a black armed boot new,
+intermittent or a warning sign is wrong. The machine stays healthy and
+reachable; only the panel is dead.

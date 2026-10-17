@@ -64,6 +64,10 @@ inside `waitForStamp`, each read reaching our peer — and macOS spawns a
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
+**Armed boots have no display** and never have (since ~2c); everything is
+done over SSH, and the machine stays healthy. Treat that as the baseline,
+not as a symptom of any recent change.
+
 **Current outcome (2gw, 2ha):** with `-rbgpuvmpteng1` the VMPT stamp
 completes on the first wait, the restart loop is gone, and request 0x1B
 runs its whole body and returns `0xE00002C7` — which is its *success*
@@ -118,17 +122,27 @@ with the accelerator driving the panel**, because 2ct refuses the display
 pipe by design (`found_fb_calls=2 found_fb_refused=2`) so that armed
 boots keep a usable desktop on IONDRVFramebuffer.
 
-That refusal is now the thing in the way. Lifting it is a real decision:
-it is what has kept the UI alive through this whole project, and the one
-boot that went black (2gw) is an unexplained warning sign. It should be
-taken deliberately, with SSH ready, and not as a routine next step.
+That refusal is now the thing in the way — but the premise under it is
+false. **No armed boot has ever reached a desktop** (user, 2026-10-17):
+since roughly 2c every armed boot shows verbose log lines and then
+nothing, and all work in them is done over SSH. 2ct's rationale says
+refusing the pipe keeps the desktop on IONDRVFramebuffer; it does not.
+The machine stays healthy and reachable — only the panel is dead.
+
+So lifting 2ct costs much less than previously written (there is no
+working UI to lose), but it also gains less than hoped: something already
+kills the panel with the pipe refused, and that cause is unknown. Finding
+*that* comes first. Any earlier note calling a black armed boot new,
+intermittent or a warning sign — including in 2gw and 2ha — is wrong.
 
 ### Open, none of them blocking
 
 - Who calls `incrementStamp(25)`.
 - Why the stamp table grew 63 → 65 after the 2gv remap.
 - The `/options` race (standing debt; a bounded retry is owed).
-- The one black-screen boot, with SSH alive.
+- **Why armed boots have no display at all**, even with 2ct refusing the
+  pipe. Long-standing (since ~2c), not intermittent, and the real display
+  question.
 - What 0x12 and 0x1D are for.
 
 
