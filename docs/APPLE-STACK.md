@@ -3,7 +3,7 @@
 Static analysis, 2026-10-04. Nothing here was loaded. Binaries come from
 `/System/Library/KernelCollections/SystemKernelExtensions.kc` of this
 machine (macOS 15.8.1, 24H32; AMD kexts 7.0.25). The hardware facts come
-from the probes recorded in docs/RULES.md, the Linux facts from torvalds/linux
+from the probes recorded in docs/JOURNAL.md, the Linux facts from torvalds/linux
 (docs/linux-ref/UPSTREAM.md).
 
 Status marks: **have** = Apple's code already covers the 680M's version;

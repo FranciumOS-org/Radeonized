@@ -7,7 +7,7 @@ an APU. That is what NootedRed did for Vega APUs with Apple's Vega (X5000)
 driver. Unlike Navi48-MacOS (RX 9070 XT), no command-stream translation should
 be needed: Apple's Metal driver already emits gfx10.3 PM4.
 
-## Step 0 — read-only probe (done: levels 1 and 2 ran, see docs/RULES.md)
+## Step 0 — read-only probe (done: levels 1 and 2 ran, see docs/JOURNAL.md)
 
 Map the register BAR, read the IP discovery table and the PSP/SMU/memory-hub
 state, change nothing. Answers: is the table where Linux looks for it, which IP
