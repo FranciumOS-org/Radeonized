@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gq)
+# RembrandtGPU — handoff state (2026-10-16, after 2gr)
 
 **Read this before CLAUDE.md.** CLAUDE.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -28,125 +28,117 @@ trivial-TRUE path and engine[0] alone asks. The whole bring-up chain —
 firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every engine's
 powerUp, and the SDMA walk — completes.
 
-**The frontier is a GPU-RESTART LOOP inside request 0x1B.** 0x1B passes
-`isDeviceValid()`, runs `startGlobalPerfCounters`, runs `hardwareDidStart` to
-completion (2go) — including the HIQ ring submitting a SET_RESOURCES packet
-whose GPU fence came back — and then enters
-`AMDAccelEventMachine::finishAllStamps` and never returns. 2gq named every
-link, and 2gp measured it:
+**The frontier is a GPU-restart loop driven by ONE outstanding stamp.**
+Request 0x1B reaches `AMDAccelEventMachine::finishAllStamps`, which walks 63
+stamp slots; **exactly one has work outstanding — slot 25** (2gq), the same
+index Apple's own `GPURestartDeferred stampIdx=25` named from a different
+source. Its state is `submitted=1 completed=0 fence=0`, with the fence
+pointer dereferencing cleanly — **one real submit whose fence the GPU never
+wrote**, not uninitialised bookkeeping.
 
 ```
-finishAllStamps (63 slots) -> finishStamp(i) -> waitForStamp
-  -> kIOReturnTimeout after ~10 s (~5600 register polls/s inside it, each
-     reaching our peer as request 0x14)
+finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
   -> handleFinishChannelRestart
-     -> IOAccelEventMachine2::hardwareErrorEvent: GPURestartDeferred
-        stampIdx=25 type=2                            <- Apple's own os_log
-     -> AMDAccelChannel::resetHardwareAndReplay
-        -> request 0x17 (ASIC Reset State) -> OUR PEER -> Unsupported
-  -> retry, UNCONDITIONALLY, forever
+       IOAccelDisplayMachine::waitForStampTimeout -> FALSE (pipe count is 0)
+       hardwareErrorEvent: GPURestartDeferred stampIdx=25
+       AMDAccelChannel::resetHardwareAndReplay -> request 0x17 -> our peer:
+                                                   Unsupported
+  -> retry, UNCONDITIONALLY, forever   (W and R climb 1:1 across 3 samples)
 ```
 
-The counters prove the loop: `W` (waitForStamp calls) and `R` (restarts)
-climb in lockstep 1:1 across three samples. **And the GPU is not hung** — the
-KIQ completed stamps 70, 71, 72 in the same window with real fences landing
-where the CPU polls. **Why stamp slot 25 has work outstanding at 0x1B time is
-the open question**, and real dropped work versus uninitialised bookkeeping
-need different fixes. See §2.
+Meanwhile the GPU is **not** hung: the KIQ completes stamps 70, 71, 72 with
+real fences in the same window, and `T=4,12,22` counts it resubmitting
+throughout. **Which channel slot 25 is, and whether it ever reached the GPU,
+is the open question** — 2gr names it. See §2.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — one boot, read the stamp table
+## 2. The pending experiment — name slot 25's channel
 
-Build **`DEEF00AF`** (2gq). Boot-args unchanged. Expect the boot to hang;
-`nvram rbgpu-1b` and `rbgpu-prog2` are the answer.
+Build **`6F1F006B`** (2gr). Boot-args unchanged. Expect the boot to hang.
 
-### What 2gp settled
-
-```
-rbgpu-prog2 = b=11
-  a=s5/S12/L2981@30820ms   W=1 r0=0xe00002d6 rN=0xe00002d6 R=1 N=63
-  b=s5/S12/L6984@50820ms   W=3 r0=0xe00002d6 rN=0xe00002d6 R=3 N=63
-  c=s5/S12/L12178@80821ms  W=5 r0=0xe00002d6 rN=0xe00002d6 R=5 N=63
-```
-
-- **The retry loop runs** — `W` and `R` in lockstep, which only
-  `finishStamp`'s unconditional retry at `0x14e439a0` produces. 63 slots.
-- **`0xE00002D6` is `kIOReturnTimeout`** — neither bail 2gp named.
-  `waitForStamp` genuinely waits ~10 s and times out; the 5600/s request-0x14
-  flood is the register polling inside one wait.
-- **Apple raises a GPU restart** and names the slot: `GPURestartDeferred
-  stampIdx=25 type=2`, its own `os_log`, captured through the milestone-2c
-  route.
-- **The restart asks our peer to reset the ASIC** — request 0x17 from
-  `AMDAccelChannel::resetHardwareAndReplay` (0xbe45549) through
-  `sendRequestToController(_eAMDAccelIOFBRequestType, …)`, which confirms from
-  Apple's own symbol that these request numbers are its enum. We answer
-  `kIOReturnUnsupported` and never write `p2`, so Apple reads a reset state
-  of 0.
-- **The GPU is alive.** Stamps 70/71/72 completed with real fences in the
-  same window.
-
-### The experiment
-
-`finishStamp(i)` decides from three fields and nothing else
-(0x14e438da-0x14e43912):
+### What 2gq settled
 
 ```
-submitted = *(uint32 *)(evm + 0xfc + i*24)
-completed = *(uint32 *)(evm + 0xf8 + i*24)
-fence     = **(uint32 **)(evm->0x28 + i*8)
+fas:E(n=63|25:s1/c0/f0 out=1)
+W=1/3/6  r0=rN=0xe00002d6  R=1/3/6  N=63  T=4/12/22
 ```
 
-2gq dumps every slot with `submitted - completed > 0` before Apple's walk,
-from the existing `finishAllStamps` hook — bounded at 64 slots, refusing a
-larger count, and checking each fence pointer against the kernel-VA range
-before dereferencing (the 2gh rule, after the 2gg panic read `1 + 0x48`); a
-pointer that fails prints `?`.
+- **One slot outstanding of 63, and it is slot 25** — matching Apple's own
+  `stampIdx=25` from the previous boot's `os_log`.
+- `submitted=1 completed=0 fence=0`, fence pointer valid → **the GPU never
+  wrote that fence.** One real submit, the first on that slot.
+- `W` and `R` climb 1:1, so `finishStamp`'s unconditional retry really is the
+  loop; `0xE00002D6` is `kIOReturnTimeout`, so `waitForStamp` waits ~10 s and
+  times out rather than bailing on an argument check.
 
-Also fixed: the `stw:` marks became the flood once the restart loop starts
-(overflowing `RBGPU_LINE_MAX` and swallowing the next published line, the 2ey
-defect in a new place), so they are suppressed from `fas:E` onward and
-counted into prog2 as `T=`; the trail grew to 512 bytes; and
-`tools/plugin_check.sh` now captures **`rbgpu-1b`**, which it never did.
+### The lookup, from Apple's own code
+
+`AMDAccelEventMachine::eventTimeout` (0xbe4b92e), called by `restart_channel`
+through `vt[0x220]`:
+
+```
+accel = evm->0x10
+if (idx < 0 || idx >= accel->0x1e78)   -> NULL
+ch = accel->0x1a78[idx]
+```
+
+This **corrects §2's earlier note**, which attributed that array to the
+hardware object: it is the **accelerator's**. And it sharpens 2gq, because
+`waitForStamp` returning Timeout rather than `0xE00002C2` means that bail did
+not fire — so index 25 is in range and `accel->0x1a78[25]` is non-NULL
+already.
+
+### Also found, and it is an interaction with our own instrument
+
+`handleFinishChannelRestart` first calls
+`IOAccelDisplayMachine::waitForStampTimeout`, which opens
+`if (this->0x108 == 0) return FALSE` — and `0x108` is the **pipe count**,
+which 2ct deliberately makes zero. So Apple's own defer-the-restart escape
+can never fire here. **Not a fix**: deferring the restart would not make the
+stamp complete; it would change who spins.
+
+### The instrument
+
+The slot dump now carries, per outstanding slot, the channel from
+`accel->0x1a78[i]` with its **class name** (the 2cw OSObject idiom) and its
+own `AMDHWChannel` fields — `+0x80` submitted, `+0x84` completed, `+0xc8` the
+GPU address the WRITE_DATA fence packet targets (2ds/2dw/2dy). Reads only,
+both pointers checked against the kernel-VA range first (the 2gh rule).
 
 ### Install and arm
 
 ```
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect DEEF00AF
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect 6F1F006B
 sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
-**Run `tools/plugin_check.sh` IN the armed boot, and leave the machine up
-past ~80 s first** so all three samplers land. This is not optional any more:
-the 2gp boot's in-boot capture read `rbgpu-prog = b=11 s=5` while the live
-read after the power cycle read `b=11 s=1` — the same boot's nonce with an
-*earlier* stage, so later commits are lost across a power cycle. The live
-read is not a substitute for the capture.
+**Leave it up past ~80 s, then run `tools/plugin_check.sh` IN the armed
+boot.** This is not optional: the 2gp boot's live read after the power cycle
+showed `b=11 s=1` where the in-boot capture held `b=11 s=5` — the same boot's
+nonce with an earlier stage, so later commits are lost across a power cycle.
 
 ### Reading it
 
 ```
-nvram rbgpu-boot    must be 12 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b      ... fas:E(n=63|<slot list>)
-nvram rbgpu-prog2   W= r0= rN= R= N= T=
+nvram rbgpu-boot   must be 13 — a NEW sequence, or every note is STALE
+nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[<class> subN cmpM c8=0x..] out=1)
 ```
 
-| `fas:E`'s slot list | means |
+| reading | means |
 |---|---|
-| `out=0` | nothing outstanding, so `finishAllStamps` should not wait — which contradicts W climbing, and would mean the table changes between our read and Apple's |
-| one slot, `f` == submitted | the fence already holds the asked-for value and the CPU-side pickup is what fails — the 2dw shape |
-| one slot, `f` == completed | the GPU never wrote that fence: real outstanding work the chip dropped, and the channel behind slot 25 is the next thing to name |
-| one slot, `f=?` | the fence pointer is not a kernel VA, so that slot was never initialised — bookkeeping, and the fix is upstream of the GPU entirely |
-| many slots | the event machine thinks a lot is in flight, which at 0x1B time is itself the finding |
+| `c8` a real `0xFF_BF..` address, `sub=1 cmp=0` | the channel genuinely submitted one frame and the GPU never wrote its fence — the 2dy shape on a new channel, and that channel's ring and doorbell are next |
+| `c8 = 0` | `allocateMemoryResources` never gave this channel a fence GPU address, so the WRITE_DATA had nowhere to land — a per-channel setup gap |
+| `sub = 0` | the event machine recorded a stamp the channel never submitted — bookkeeping, and `writeStampCommand` (0x14e43477) is where to look |
+| a **display** or **VCN** channel | the outstanding work is not the GFX path, and 2ct's zero-pipe choice becomes directly relevant |
+| the KIQ or a GFX ring | the path already proven to work, so slot 25's stamp is the odd one out against the 70-72 that complete |
 
-**Not taken, and it is the user's call:** answering request 0x17 differently
-instead of `kIOReturnUnsupported`. It is the tempting move and it treats the
-symptom — the restart exists because a stamp timed out, and nothing yet says
-why. It is also a behavioural change to our peer.
+**Still not taken, still the user's call:** answering request 0x17 (ASIC Reset
+State) instead of `kIOReturnUnsupported`. It treats the symptom — the restart
+exists because a stamp timed out — and it is a behavioural change to our peer.
 
 ## 3. Verified on hardware — do NOT re-derive these
 
@@ -183,6 +175,11 @@ why. It is also a behavioural change to our peer.
 - **Request numbers are Apple's `_eAMDAccelIOFBRequestType`**, from the symbol
   `AMDGraphicsAccelerator::sendRequestToController` (2gp).
 - **`powerUpHW` succeeds**, now five consecutive boots.
+- **`accel->0x1a78[]` is the channel array**, bounded by `accel->0x1e78` —
+  Apple's own `eventTimeout` lookup, and the same array `waitForStamp` bounds
+  against (2gr).
+- **Exactly one stamp slot is outstanding at 0x1B time**: slot 25,
+  `submitted=1 completed=0 fence=0` (2gq).
 - **GFX is NOT in GFXOFF** (status 2), and `gfx_min = gfx_max = 0` is real
   data from the SMU: **GFX DPM was never started.** Standing, untouched.
 - **PT_BASE (2em) was the GPUVM fix.** The hub register held
