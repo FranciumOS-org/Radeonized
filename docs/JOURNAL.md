@@ -8652,3 +8652,91 @@ so the boot cannot be read into whichever row is convenient.
 **Still open:** who calls `incrementStamp(25)`. `tot=1` says it is a single
 call somewhere in startup; the 2gs shortlist did not hold and nothing has
 replaced it.
+
+## 2gv — VMPT holds a real SDMA channel on an engine with zero queues
+
+**Boot 16 (62631971, 2gu).** `b=16` new on all four note channels; read in
+the following unarmed boot, which is sound for the reason 2gu set out (the
+nonce bumps on the first *note*, and an unarmed boot writes none).
+
+```
+fas:E(n=63|25:s1/c0/f0[AccelChannel "VMPT" h=MAChannel]
+      out=1 tot=1 nch=63 hwn=25 nz=0 e2=1 e2q=0)
+```
+
+This is **row three** of the table 2gu wrote down before the boot:
+
+| `h=` | `e2q=` | means |
+|---|---|---|
+| class | `0` | VMPT has a channel on a queueless engine — the "silently not backed" case 2gi hoped to avoid |
+
+So: the channel exists, which is why nothing ever refuses the submit, and
+the engine behind it has no queues, which is why nothing can ever complete
+it. `tot=1` and `nz=0` from the same note bound it — one stamp ever issued,
+no fence ever written.
+
+**2gi is implicated, but not in the form 2gu's first row described.** The
+bypass did not deny VMPT a channel; it left VMPT holding one whose engine
+it had emptied.
+
+### A mangled class name, caught here rather than later
+
+`h=MAChannel` is not a class. The short-name loop walked to the *last* `'D'`
+followed by an uppercase letter, so it ate into `"SDMAChannel"` itself. The
+real class is **`AMDRadeonX6000_AMDSDMAChannel`**. Replaced with
+`rbgpu_shortclass_2gv`, which strips only the fixed `"AMDRadeonX6000_"`
+prefix and cannot over-trim. Recorded because a mangled name is a reading
+that cannot be checked afterwards, which is the same failure mode as the
+recurring error even though nothing was concluded from it.
+
+### The index bases differ, and that is the finding
+
+`rbgpu_walk_starthw_2fp` walks `hw + 0x3b8 + i*8`, while
+`AMDHardware::getHWChannel` indexes `hw + 0x3b0 + engine*8`. So **2gi's
+`engine[i]` is hw array index `i + 1`**:
+
+```
+hw[0] = Navi21PM4Engine        GFX
+hw[1] = SDMAEngine_GC_10_3_0   2gi's engine[0] - LEFT ALONE, keeps queues
+hw[2] = SDMAEngine_GC_10_3_0   2gi's engine[1] - zeroed        <- VMPT
+hw[3] = SDMAEngine_GC_10_3_0   2gi's engine[2] - zeroed
+hw[4] = SDMAEngine_GC_10_3_0   2gi's engine[3] - zeroed
+```
+
+VMPT's engine 2 is the **first** engine 2gi switches off, and the one
+working SDMA sits at index 1. `one=3` says all three writes took, and
+`rbgpu_sdma_one_2gi` only counts an engine whose count was non-zero
+beforehand — so hw[2] *had* queues and 2gi removed them.
+
+Apple's arithmetic makes hw[2] unavoidable: `RTHardware::getHWChannel`
+computes `ENGINE_TYPE = ((caps->0x92 * 2 + 1) & idx) + 1`, and the VMPT
+call site passes `prio=0`, which forces `idx = 1`. `x*2+1` is odd, so `&1`
+is 1 and the answer is 2 whatever the caps byte holds. On a part with two
+or more SDMA instances that is correct; here it names the engine that was
+switched off.
+
+### 2gv's experiment — build CF1786D5
+
+Hook `AMDHardware::getHWChannel(engine, ring)` (0xbea9994) and send
+**engine 2 to engine 1**, the single SDMA instance this chip has.
+
+- Milestone 2c: `nm -m build/re/AMDRadeonX6000` shows the symbol as
+  external **defined** at 0xbea9994, not an import.
+- Rule 9: prologue `55 48 89 e5 89 f0 48 8b …` — `pushq %rbp`,
+  `movq %rsp,%rbp`, `movl %esi,%eax`. No rel8 or rel32 branch begins inside
+  the 5-byte patch window.
+- Routed unconditionally; the **substitution** is gated on
+  `-rbgpuvmpteng1`, so a boot without the arg still says the remap is OFF
+  rather than leaving it ambiguous whether the route took.
+- Every remap is logged as a substitution (2cy): a stamp that completes
+  after this proves the remap works, **not** that engine 2 exists.
+- `e1q` added to the note — engine 1's queue count, read the same way — so
+  the remap target's state is measured rather than inferred from `one=3`.
+
+Expected if the hypothesis holds: `e1q` non-zero, one `2gv:` substitution
+logged, and slot 25 either completing (`nz` non-zero, `out=0`, the restart
+loop gone) or failing somewhere new. If `e1q` reads 0 the remap target is
+wrong and nothing about the result may be read as being about engine 1.
+
+**Still open:** who calls `incrementStamp(25)`. Unchanged; `tot=1` still
+says it is one call somewhere in startup.

@@ -159,6 +159,10 @@ anything, and log it when it is not.
   `0xFF_BF..`.
 - **One** SDMA instance; Apple's Navi 21 path builds four engines
   (`hw->0xc2 * 2 + 2`). [2gc, 2gi]
+- The hw engine array is `hw + 0x3b0 + engine*8`: `[0]` PM4/GFX, `[1..4]`
+  the four SDMA engines. The SDMA *walk* bases at `hw + 0x3b8`, so **2gi's
+  `engine[i]` is hw index `i + 1`** — 2gi keeps hw[1] and empties hw[2..4].
+  [2gu, 2gv]
 
 ## Boot-args — what must stay in and out
 
@@ -170,6 +174,9 @@ anything, and log it when it is not.
 -rbgpusdmaone                                what makes powerUpHW succeed
 -rbgpuforce1b                                sends request 0x1B
 ```
+
+Pending, not yet proven: `-rbgpuvmpteng1` sends VMPT's SDMA engine 2 to
+engine 1 (2gv). Add it with `sudo tools/efi.sh bootarg add -rbgpuvmpteng1`.
 
 **Must stay OUT**, each proven:
 
@@ -201,6 +208,9 @@ PT_BASE fix; the KIQ executes PM4 and writes fences; **`powerUpHW`
 succeeds** (2gi, eight consecutive boots). The frontier is request 0x1B
 spinning in a GPU-restart loop over **one** outstanding stamp — slot 25,
 the only stamp the driver has ever issued. Slot 25 is the **"VMPT"**
-channel (2gt, it names itself), a page-table update, and VMPT is backed by
-SDMA **engine index 2** — one of the three engines `-rbgpusdmaone` gives
-zero queues (2gu). Whether that is the cause is the pending measurement.
+channel (2gt, it names itself), a page-table update. It holds a real
+`AMDSDMAChannel` on hw engine index **2**, and that engine has **zero
+queues** (2gu) — nothing refuses the submit, nothing can complete it.
+Engine 2 is the first engine `-rbgpusdmaone` switches off; the one working
+SDMA is index 1. 2gv sends engine 2 to engine 1 behind
+`-rbgpuvmpteng1`.
