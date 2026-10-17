@@ -9054,3 +9054,64 @@ alive), so it is the user's call, not a step to take unasked.
 Still open: who calls `incrementStamp(25)`; why the stamp table grew
 63 → 65; the `/options` race; the one black-screen boot; and what 0x12 and
 0x1D are for.
+
+## 2hb — correction: armed boots have NEVER had a display
+
+Stated by the user on 2026-10-17, from direct observation across the
+whole project:
+
+> every boot from when we made from like 2c... went black with only log
+> lines... or no display... ive been doing SSH since... no boot had a
+> display in armed at all
+
+This corrects several things written in 2gw, 2gy and 2ha:
+
+- **"The screen went black while SSH stayed up" is not new behaviour.**
+  2gw recorded it as a new, unexplained symptom of that boot. It has been
+  the case for every armed boot since roughly milestone 2c.
+- **It is not intermittent.** Shortly before this correction I said boots
+  17 and 20 went black while 18 and 19 were fine. That was inferred from
+  gaps in `last reboot` — a reboot with no preceding shutdown record — and
+  it was wrong. Boots 18 and 19 were read in the *unarmed* boot that
+  followed; the user's "the screen didn't stay black this time" referred
+  to that unarmed boot, not to the armed one. Every armed boot is black.
+  Same error shape as 2gw: reading reboot bookkeeping as if it reported
+  what the user saw, when only the user could say.
+- **2ct's stated rationale is not achieved.** Its comment says the pipe is
+  refused "so armed boots can reach a desktop", and `found_fb_refused=2`
+  confirms the refusal happens — but the desktop does not come up anyway.
+  Whatever kills the panel is a *separate* cause from display-pipe
+  adoption, and it is unidentified.
+
+What is NOT in doubt: the machine stays healthy in an armed boot. SSH
+works, `plugin_check.sh` runs, `system_profiler` runs, the 0x1B chain
+completes. Only the panel is dead.
+
+### Boot 20 (F9623A20, armed)
+
+`b=20 s=6 0x1B RETURNED 0xE00002C7` — the 2ha success value, so the whole
+0x1B body ran again. No capture was saved before the power cycle, so only
+the NVRAM notes survive.
+
+In that boot the user ran `system_profiler SPDisplaysDataType` over SSH
+and reported **`Metal: Supported`**. The control is good: the same command
+in the *unarmed* boot prints the plain IONDRVFramebuffer entry (`VRAM
+(Total): 7 MB`, device 0x1681) with **no `Metal:` line at all**, so the
+line is attributable to our accelerator and not to the firmware
+framebuffer.
+
+**It is still a reported line, not a measurement I have seen, and
+`Metal: Supported` does not establish that any GPU work executes.** The
+armed registry (2gz capture) shows the accelerator published in the
+`IOAccelerator` category with `MetalPluginName = AMDRadeonX6000MTLDriver`,
+`MetalPluginClassName = AMDMTLGFX10Device`, `IOGLBundleName =
+AMDRadeonX6000GLDriver`, `IOAccelRevision = 2`, `dpm = 1`, plus a live
+`AMDAccelSharedUserClient` whose `API` property reads `Metal` and whose
+`IOUserClientCreator` is `pid 162`. A client attaching is not a kernel
+dispatching, and neither is a capability string.
+
+### What the next armed boot must do differently
+
+These boots end in a power cycle and take their logs with them, so the
+procedure changes: **write every result to a file under `logs/` as it is
+produced**, rather than reading it on screen. Milestone 2hc builds that.
