@@ -8849,3 +8849,89 @@ request is **not established** and must not be guessed.
 Open, unchanged: who calls `incrementStamp(25)`; and now, why the screen
 went black while SSH stayed up, on a boot where 2ct still refused the
 display pipe.
+
+## 2gy — 0x12 and 0x1D are the two requests we refuse inside 0x1B
+
+**Boot 18 (63983BA1, 2gx).** Captured **in the armed boot**
+(`logs/20261017-183233-plugin/`, `rbgpu-diag = d=72 armed=1` live — the
+2gw rule applied and satisfied this time).
+
+```
+rbgpu-prog = b=18 s=6 0x1B RETURNED 0xE00002C7
+rbgpu-1b   = b=18 ... fas:E(n=65|25:s1/c0/f0[AMDAccelChannel "VMPT"
+             h=AMDGFX10SDMAChannel] out=1 tot=1 nch=65 hwn=25 nz=0
+             e2=1 e2q=0 e1q=2) fas:R=0x2ecf ei:E ei:R q[12!,1D!|14x1]
+```
+
+The 2gx trail reads **`q[12!,1D!|14x1]`** and the log has the whole chain
+in order, in one boot:
+
+```
+[6128026444] handlePostRegister: sending Request 0x1B (Controller Enabled)
+[6128119588] SpecialAMDKey request 0x12 (wait: 1)
+[6128121843] Unhandled SpecialAMDKey request 0x12
+[6128142712] SpecialAMDKey request 0x1D (wait: 1)
+[6128144315] Unhandled SpecialAMDKey request 0x1D
+[6128889602] handlePostRegister: Request 0x1B returned 0xE00002C7
+```
+
+Inside the 0x1B window Apple asks the peer for **exactly two** things,
+0x12 at +93 µs and 0x1D at +116 µs, we refuse both with
+`kIOReturnUnsupported`, and 0x1B returns **that same code** at +863 µs.
+Nothing else is asked of us in the window (`14x1` is one poll).
+
+That is row one of the table 2gx wrote down before the boot: the trail
+ends on a refused request. **It is still one boot and still correlation** —
+Apple does something for ~745 µs after the 0x1D refusal before returning,
+and nothing yet shows the return value is ours rather than its own.
+
+0x12 and 0x1D are not new. They were seen "Unhandled" as far back as the
+2cy-era boot, and 2gn localised where they arrive (0x12 around `rt:E`,
+0x1D after `rt:R`). What is new is that they are the **only** two in the
+window and that 0x1B's code equals the one we hand them.
+
+### Confirmations that came with it
+
+- **`e1q=2`** — engine 1 has two queues. The 2gv remap target is real, and
+  the remap is no longer resting on `one=3` arithmetic.
+- **`h=AMDGFX10SDMAChannel`** — the class prints correctly now; 2gw's
+  `MAChannel` was the over-trimming bug, as recorded.
+- **`n` and `nch` are both 65** while **`hwn` is still 25**, so the two
+  channels the table gained since 2gu are past VMPT, not hardware ones.
+  Why it grew is still not guessed.
+- Slot 25 reads `out=1` at `fas:E` — that is *entry*, before the wait, and
+  is consistent with 2gw: the stamp is outstanding on entry, the wait
+  succeeds, `fas` returns (`0x2ecf` here, `0x26b4` in 2gw).
+
+### A boot lost to a race, worth recording
+
+The first attempt did not arm. The peer logged
+`Peer: /options not found; accelerator NOT armed` at **0.52 s**, where the
+2gw boot's peer ran at 1.9 s: `IORegistryEntry::fromPath("/options", ...)`
+is tried **once**, and that boot it lost the race with the registry. The
+failure is silent in the worst way — it looks exactly like "the user forgot
+to arm", and `rbgpu-arm` is left set, so the next reboot armed with no
+reinstall. A bounded retry around that lookup is owed.
+
+### Why 0x12/0x1D are not simply answered yet
+
+Answering means deciding what to write through `p2`, and nothing so far
+says whether `p2` is an out-parameter at all. Inventing a value and then
+reading the consequence as a hardware result is the 2cy failure exactly,
+and the debt 2am/2an/2ao still owe.
+
+**2gz (build F9623A20)** therefore looks before it answers: for 0x12 and
+0x1D it logs `p2`, `p3`, `p4` and the first two dwords behind each that is
+a kernel pointer, saying so explicitly when one is not read. Observe-only,
+no boot-arg — each request arrives once per boot, so there is no storm.
+
+Written before the boot:
+
+| reading | means |
+|---|---|
+| `p2` a kernel pointer holding plausible input | Apple is asking a question; the answer must be computed, not invented |
+| `p2` a kernel pointer holding zeros | likely a pure out-parameter, and the next step is what value it wants |
+| `p2` null or not a pointer | the request takes no data and `kIOReturnSuccess` alone may be the whole answer |
+
+**Open:** who calls `incrementStamp(25)`; why the stamp table grew by two;
+the `/options` race; and whether 0x1B's `Unsupported` is ours or Apple's.

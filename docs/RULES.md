@@ -198,6 +198,13 @@ It is what broke the GPU-restart loop.
 
 ## Standing debts
 
+- The peer's `/options` lookup is tried **once**
+  (`IORegistryEntry::fromPath`). On a boot where the peer runs early
+  (0.52 s vs the usual 1.9 s) it loses the race, logs `/options not
+  found`, and silently does not arm — indistinguishable from the user
+  forgetting. `rbgpu-arm` stays set, so a plain reboot recovers with no
+  reinstall. A bounded retry is owed. [2gy]
+
 - `gfx_min = gfx_max = 0` since **2di** (2026-10-12): the SMU reports no GFX
   clock range, GFX DPM never started. Never explained; not yet shown to
   matter.
@@ -226,4 +233,7 @@ returns **Success**, restarts are **0**, `finishAllStamps` and
 `enableInterrupts` both return, and the accelerator reaches framebuffer
 adoption. The new frontier is request 0x1B returning
 **`kIOReturnUnsupported`** — late, after every stage returned — and a black
-screen with SSH alive.
+screen with SSH alive. 2gy localised that: inside the 0x1B window Apple
+asks the peer **only** 0x12 and 0x1D, we refuse both with
+`kIOReturnUnsupported`, and 0x1B returns the same code. 2gz looks at what
+those two requests carry before anything answers them.
