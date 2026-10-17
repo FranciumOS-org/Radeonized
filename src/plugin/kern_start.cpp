@@ -3613,10 +3613,31 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
                 ch = *reinterpret_cast<void **>(a + 0x1a78 + i * 8);
             }
         }
+        // 2gt: the channel NAMES ITSELF. AMDAccelChannel::init (0xbe443dd)
+        // does `strlcpy(this + 0x188, name, 0x10)`, so every one of these
+        // carries the string createAccelChannels passed it - the hardware
+        // channel's own `vt[0x200]` name, or the literals "VMPT" and
+        // "DisplayPipe%d". That beats inferring the slot from array
+        // arithmetic, which is what the 2gr field read did wrong.
+        char nm[20];
+        nm[0] = 0;
         if (reinterpret_cast<uintptr_t>(ch) >= 0xffffff8000000000ULL) {
             if (auto o = OSDynamicCast(OSObject, reinterpret_cast<OSObject *>(ch))) {
                 if (auto m = o->getMetaClass()) { cn = m->getClassName(); }
             }
+            const volatile char *p188 =
+                reinterpret_cast<const volatile char *>(
+                    reinterpret_cast<uintptr_t>(ch) + 0x188);
+            size_t w = 0;
+            for (size_t q = 0; q < 16 && w < sizeof(nm) - 1; q++) {
+                char c = p188[q];
+                if (!c) { break; }
+                // Only printable ASCII: anything else means this is not the
+                // 16-byte name buffer and the reading says nothing.
+                if (c < 0x20 || c > 0x7e) { w = 0; break; }
+                nm[w++] = c;
+            }
+            nm[w] = 0;
         }
         // Only the tail of the class name fits, and it is the distinctive
         // part (AMDRadeonX6000_AMD... is shared by all of them).
@@ -3624,8 +3645,9 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         for (const char *q = cn; *q; q++) { if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { shortn = q + 1; } }
         size_t k = strlen(out);
         if (k + 48 < cap) {
-            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s]",
-                     k ? "," : "", i, sub, cmp, fv, shortn);
+            snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s \"%s\"]",
+                     k ? "," : "", i, sub, cmp, fv, shortn,
+                     nm[0] ? nm : "?");
         }
     }
     // 2gs: three numbers that are defined by Apple's own code rather than
@@ -3643,12 +3665,17 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
     //                 `i*4` (0x14e25ae0), so the fences are one flat block
     //                 of n dwords at evm->0x20. Counting the nonzero ones
     //                 says whether the GPU has EVER written a stamp there.
-    uint32_t tot = 0, nch = 0, nz = 0;
+    uint32_t tot = 0, nch = 0, nz = 0, hwn = 0;
     void *accel = *reinterpret_cast<void **>(e + 0x10);
     if (reinterpret_cast<uintptr_t>(accel) >= 0xffffff8000000000ULL) {
         uintptr_t a = reinterpret_cast<uintptr_t>(accel);
         tot = *reinterpret_cast<volatile uint32_t *>(a + 0xa0);
         nch = *reinterpret_cast<volatile uint32_t *>(a + 0x1e78);
+        // 2gt: createAccelChannels (0xbe3b547) stores the HARDWARE channel
+        // count at accel+0x1e7c, then creates "VMPT" at exactly that index
+        // and the DisplayPipe channels after it. So hwn says where the
+        // boundary is, and whether slot 25 is a hardware channel at all.
+        hwn = *reinterpret_cast<volatile uint32_t *>(a + 0x1e7c);
     }
     void *base = *reinterpret_cast<void **>(e + 0x20);
     if (reinterpret_cast<uintptr_t>(base) >= 0xffffff8000000000ULL) {
@@ -3656,8 +3683,8 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         for (uint32_t i = 0; i < n; i++) { if (b[i]) { nz++; } }
     }
     size_t k = strlen(out);
-    snprintf(out + k, cap - k, "%s out=%u tot=%u nch=%u nz=%u",
-             k ? "" : "none", outstanding, tot, nch, nz);
+    snprintf(out + k, cap - k, "%s out=%u tot=%u nch=%u hwn=%u nz=%u",
+             k ? "" : "none", outstanding, tot, nch, hwn, nz);
 }
 
 static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {

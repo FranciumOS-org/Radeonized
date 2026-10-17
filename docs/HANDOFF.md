@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gs)
+# RembrandtGPU — handoff state (2026-10-16, after 2gt)
 
 **Read this before CLAUDE.md.** CLAUDE.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -14,25 +14,25 @@ keeps making.
 
 Apple's Navi 21 stack (AMDRadeonX6000 + AMDRadeonX6800HWLibs +
 HWServicesNavi) runs on the Radeon 680M. PSP, GC and TTL init all succeed with
-the 680M's own yellow_carp firmware; the SMU link works two-way with real
-clock tables; the accelerator's `start()` returns 1; the KIQ queue is created,
-active and doorbelled; GPUVM translates; the GPU executes PM4 packets and
-writes completion fences the CPU reads. **`AMDGFX10PM4Engine::doStart` returns
-1 and every engine in the array powers up.**
+the 680M's own yellow_carp firmware; the SMU link works two-way; the
+accelerator's `start()` returns 1; the KIQ is created, active and doorbelled;
+GPUVM translates; the GPU executes PM4 packets and writes completion fences
+the CPU reads. **`AMDGFX10PM4Engine::doStart` returns 1 and every engine
+powers up.**
 
-**`powerUpHW` SUCCEEDS**, now on seven consecutive boots (`ret=1 post=1111
+**`powerUpHW` SUCCEEDS**, now on eight consecutive boots (`ret=1 post=1111
 one=3`). `AMDHardware::startHWEngines` returns TRUE once exactly one SDMA
-engine asks the layer for queues (2gi, `-rbgpusdmaone`). Apple's Navi 21 path
-builds four SDMA engines while this chip has one instance; engines [1..3] take
-Apple's own trivial-TRUE path and engine[0] alone asks. The whole bring-up
-chain — firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every
-engine's powerUp, and the SDMA walk — completes.
+engine asks the layer for queues (2gi, `-rbgpusdmaone`): Apple's Navi 21 path
+builds four SDMA engines while this chip has one instance, so engines [1..3]
+take Apple's own trivial-TRUE path and engine[0] alone asks.
 
-**The frontier is a GPU-restart loop driven by ONE outstanding stamp.**
-Request 0x1B reaches `AMDAccelEventMachine::finishAllStamps`, which walks 63
-stamp slots; **exactly one has work outstanding — slot 25** (2gq), the same
-index Apple's own `GPURestartDeferred stampIdx=25` named from a different
-source. Its state is `submitted=1 completed=0 fence=0`.
+**The frontier is a GPU-restart loop driven by ONE outstanding stamp — and
+it is the only stamp the driver has ever issued.** Request 0x1B reaches
+`AMDAccelEventMachine::finishAllStamps`, which walks 63 slots; exactly one
+has work outstanding, **slot 25**, `submitted=1 completed=0 fence=0`. The
+same index Apple's own `GPURestartDeferred stampIdx=25` names from a
+different source. `accel->0xa0`, the driver-wide `incrementStamp` count,
+reads **1** (2gs).
 
 ```
 finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
@@ -44,93 +44,76 @@ finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
   -> retry, UNCONDITIONALLY, forever   (W and R climb 1:1 across 3 samples)
 ```
 
-Meanwhile the GPU is **not** hung: the KIQ completes stamps 70, 71, 72 with
-real fences in the same window, and `T` counts it resubmitting throughout.
-Request 0x14 reached **#1,107,904** in the 2gr boot — over a million register
-polls through the peer — and macOS spawned a `DumpGPURestart` process, so
-userspace sees the restart too.
+The GPU is **not** hung: the KIQ completes stamps 69, 70, 71 with real fences
+in the same window. Request 0x14 reached **#1,506,624** — the register poll
+inside `waitForStamp`, each read reaching our peer — and macOS spawns a
+`DumpGPURestart` process, so userspace sees the restart too.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — has the GPU EVER written a stamp?
+## 2. The pending experiment — what is slot 25?
 
-Build **`CD40814D`** (2gs). Boot-args unchanged. Expect the boot to hang.
+Build **`E30F88B8`** (2gt). Boot-args unchanged. Expect the boot to hang.
 
-### What 2gr settled, and what it got wrong
+### Where slot 25 comes from (read from Apple's constructor, no boot)
 
-The channel behind slot 25 is **`AMDRadeonX6000_AMDAccelChannel`** — the
-accelerator's per-client software channel, the same class whose
-`resetHardwareAndReplay` sends request 0x17. The pointer yielded a clean
-metaclass name, so it is a live object, not a stale entry.
-
-**The three fields read beside it are VOID.** `+0x80`/`+0x84`/`+0xc8` are
-`AMDHWChannel`'s layout (2ds/2dw/2dy); `AMDAccelChannel`'s vtable (0xbf92998,
-0x278 bytes) is in the `IOAccelChannel2` hierarchy, not the `IAMDHWChannel`
-one (0xbfa8a80+). 2gr named the class and read its fields in the same step,
-so the fields were read before the thing that gives them meaning was known.
-Twenty-third instance of the recurring error. 2gs removes them.
-
-### The stamp table, resolved from Apple's own code (no boot)
+`AMDGraphicsAccelerator::createAccelChannels` (0xbe3b478) fills
+`accel->0x1a78[]` and is the only writer of `accel->0x1e78`:
 
 ```
-getStampOffset(i)         0x14e25ae0   return i * 4
-setStampBaseAddress(base) 0x14e25aea   evm->0x28[i] = base + i*4, one flat block
-incrementStamp(i)         0x14e43416   evm[0xfc+i*24]++ ; evm->0x10->0xa0++
-writeStampCommand(i,..)   0x14e4346c   reads it, tail-jumps evm->vt[0x2a0]
+0xbe3b522   one per HARDWARE channel, i = 0 .. hw->vt[0x340]()-1
+0xbe3b547   accel->0x1e7c = that count
+0xbe3b57d   "VMPT"            at index == the count
+0xbe3b774   a third group
+0xbe3b940   "DisplayPipe%d"   last
 ```
 
-- A "stamp slot" is **not per-channel**: the fences are one flat block of `n`
-  dwords at `evm->0x20`. Slot 25's fence reading 0 means dword 25 of a shared
-  block was never written.
-- `submitted` is a **pure software counter** with no hardware involved; the
-  emit is a separate call. So `s1/c0/f0` is exactly `incrementStamp(25)` ran
-  once and nothing ever landed in dword 25.
-- `finishStamp` at dump +0x160 and `finishAllStamps` at +0x168 confirm the
-  call-offset convention (0x150 / 0x158) a second, independent way.
-
-**Open, and not guessed: who calls `incrementStamp(25)`.** The slot-0x1d8
-shortlist was checked and does not hold (`signalStamp`'s call is on
-`evm->0x78`, and the base vtable has +0x1d0..+0x210 all pointing at one
-pure-virtual stub).
+2dv measures **25 distinct hardware channels** every boot. If `vt[0x340]` is
+that same 25, slot 25 is **VMPT**, the VM page-table channel — which would
+tie the frontier to the 2em PT_BASE write and `AMDHWVMM::postInit`'s two
+VM-fault interrupt registrations. **A candidate, not a finding:** two counts
+agreeing at 25 is the 2dw page-scan shape until `accel->0x1e7c` is read.
 
 ### The instrument
 
-The per-slot channel fields are gone; the class name stays. Three numbers
-replace them, each read off an instruction rather than an assumed layout:
-`accel->0xa0` (the driver's total `incrementStamp` count), `accel->0x1e78`
-(the channel-array bound), and `nz` (how many of the `n` stamp dwords at
-`evm->0x20` are nonzero). Reads only, same kernel-VA guard, no new NVRAM
-write — it rides the existing `fas:E` mark.
+`AMDAccelChannel::init` (0xbe443dd) does `strlcpy(this + 0x188, name, 0x10)`,
+so **the channel carries its own name**. 2gt prints it (printable-ASCII only,
+`"?"` otherwise) and reads `accel->0x1e7c` as `hwn=`. Reads only, same
+kernel-VA guard, no new NVRAM write.
 
 ### Install and arm
 
 ```
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect CD40814D
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect E30F88B8
 sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
 **Leave it up past ~80 s, then run `tools/plugin_check.sh` IN the armed
 boot.** Not optional: the 2gp boot's live read after the power cycle showed
-`b=11 s=1` where the in-boot capture held `b=11 s=5` — the same boot's nonce
-with an earlier stage, so later commits are lost across a power cycle.
+`b=11 s=1` where the in-boot capture held `b=11 s=5`.
 
 ### Reading it
 
 ```
-nvram rbgpu-boot   must be 14 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[AccelChannel] out=1 tot=N nch=M nz=K)
+nvram rbgpu-boot   must be 15 — a NEW sequence, or every note is STALE
+nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[AccelChannel "<name>"]
+                       out=1 tot=1 nch=63 hwn=N nz=0)
 ```
 
 | reading | means |
 |---|---|
-| `nz=0` | the GPU has never written **any** stamp — one bug for all 63 slots, not something about slot 25. The 2dh/2di/2em shape: a correct CPU pointer paired with an address the hardware cannot reach, and the stamp block's GPU address is the next thing to find. |
-| `nz>0`, slot 25 still 0 | the block is reachable and others complete, so the question really is that one submit |
-| `tot=1` | slot 25's submit is the only stamp this driver has ever issued |
-| `tot>1` with `nz=0` | contradictory — the instrument is wrong before the chip is |
-| `nch` small | the channel array is barely populated and index 25 being valid deserves its own look |
+| `"VMPT"`, `hwn=25` | the one stamp this driver ever issued was a page-table update that never completed — the frontier ties to the oldest live patch in the project |
+| a hardware channel's name | slot 25 is an ordinary ring channel and the name says which engine |
+| `"DisplayPipe0"` | the outstanding work is the display path, and 2ct's zero-pipe choice stops being a side note |
+| `"?"` | `+0x188` is not the name buffer; the class name still stands |
+
+**Still open and not guessed: who calls `incrementStamp(25)`.** The
+slot-0x1d8 shortlist was checked and does not hold (`signalStamp`'s call is
+on `evm->0x78`, and the base vtable has +0x1d0..+0x210 all pointing at one
+pure-virtual stub). With `tot=1` it is a single call somewhere in the boot.
 
 ---
 

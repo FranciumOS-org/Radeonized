@@ -8467,3 +8467,103 @@ new touches hardware and no new NVRAM write: it rides the existing `fas:E`
 mark on `rbgpu-1b`.
 
 Build: UUID CD40814D, hosttest passes. Boot-args unchanged.
+
+### 2gs answered on hardware (2026-10-16): `tot=1` — ONE stamp in the whole boot
+
+logs/20261016-212858-plugin, `plugin_check` run **in the armed boot** at
+~204 s of uptime. Build and nonce checked first per the 2cu/2cv rule:
+CD40814D == build/out (2gs), `rbgpu-boot` = **14**, a sequence never recorded
+before. No new `.panic`.
+
+```
+rbgpu-1b = b=14 ... ssr:R hds:R
+           fas:E(n=63|25:s1/c0/f0[AccelChannel] out=1 tot=1 nch=63 nz=0)
+rbgpu-sdma = b=14 ... ret=1 post=1111 allstarted one=3     (an EIGHTH time)
+rbgpu-prog2 = b=14 W=1->3->6  r0=rN=0xe00002d6  R=1->3->6  N=63  T=4->10->22
+```
+
+**`tot=1`.** `accel->0xa0` is bumped by every `incrementStamp` in the whole
+driver (0x14e4345a), and across the entire boot it reads **one**. So slot
+25's single submit is not one of many — it is the *only* stamp this driver
+has ever issued, through powerUpHW, every engine, and 0x1B. The event
+machine's stamp table was touched exactly once.
+
+**`nch=63`**, equal to the stamp count, so the channel array is fully
+populated rather than mostly empty and index 25 is a real entry.
+
+**And `nz=0` turns out to carry no information, which is my error in the
+table rather than in the chip.** With `tot=1` at most one of the 63 dwords
+could ever have been nonzero, so `nz=0` is exactly `f=0` restated. 2gs called
+it "the one that splits the frontier, and it is free" and gave it a row
+reading "the GPU has never written **any** stamp — one bug for all 63 slots";
+that reading needs `tot>1` to mean anything, and the table listed `tot` as a
+separate row instead of as the precondition it is. The branch did not fire;
+it was never able to.
+
+The KIQ meanwhile completes stamps **69, 70, 71** in the same window with
+real fences (`+0x80`/`+0x84` advancing in step, the fence dword matching), so
+the GPU is executing and signalling normally. Those are `AMDHWChannel` stamps
+— a different mechanism entirely, which is why they do not appear in `tot`.
+
+### Where slot 25 comes from, read out of Apple's own constructor — no boot
+
+`AMDGraphicsAccelerator::createAccelChannels(bool)` (0xbe3b478) is what fills
+`accel->0x1a78[]` and writes `accel->0x1e78` (0xbe3b995, the only writer).
+Four `AMDAccelChannel::create` sites, in this order:
+
+```
+0xbe3b522   one per HARDWARE channel, i = 0 .. hw->vt[0x340]()-1
+            name from the hw channel's own vt[0x200]
+0xbe3b547   accel->0x1e7c = that count
+0xbe3b57d   "VMPT"            at index == the count
+0xbe3b774   a third group
+0xbe3b940   "DisplayPipe%d"   last
+```
+
+**So the array is hardware channels first, then VMPT, then the rest** — and
+2dv has measured **25 distinct hardware channels** on this chip, every boot,
+including this one (`distinct reg=25 add=23`). If `hw->vt[0x340]()` is that
+same 25, index 25 is **VMPT**, the VM page-table channel.
+
+**Named as a candidate, not a finding.** Two independent counts agreeing at
+25 is suggestive and is exactly the shape that produced the withdrawn 2dw
+page scan: `registerChannel`'s distinct count and `vt[0x340]`'s return are
+not established to be the same number. `accel->0x1e7c` is that number
+directly and 2gt reads it.
+
+**And the channel names itself, which settles it outright.**
+`AMDAccelChannel::init` (0xbe443dd) does `strlcpy(this + 0x188, name, 0x10)`,
+so every one of the 63 carries its own string in a 16-byte buffer. Also read
+off the same function: `+0xe8` the IAMDHWChannel, `+0x1a4` the SS_PRIORITY,
+`+0x198` initialised to -1, `+0x1a0` = `hwch->vt[0x1c8]()` — the same slot
+2dv found is a compile-time constant for a KIQ.
+
+## 2gt (2026-10-16): let the channel say its own name
+
+Two reads, both off an instruction rather than an inference:
+
+```
+ch+0x188   the 16-byte name buffer, printed only if every byte is printable
+           ASCII - anything else means this is not that buffer and the log
+           says "?" rather than a value that could be mistaken for one
+accel+0x1e7c   the hardware-channel count, so the VMPT boundary is a
+               measurement instead of 2dv's count standing in for it
+```
+
+The class name stays beside it, since the two answer different questions.
+Reads only, same bounds, same kernel-VA guard (the 2gh rule), no new NVRAM
+write — it rides the existing `fas:E` mark.
+
+Build: UUID E30F88B8, hosttest passes. Boot-args unchanged.
+
+```
+fas:E(n=63|25:s1/c0/f0[AccelChannel "<name>"] out=1 tot=1 nch=63 hwn=N nz=0)
+```
+
+| reading | means |
+|---|---|
+| `"VMPT"` with `hwn=25` | slot 25 is the VM page-table channel, and the one stamp this driver ever issued was a page-table update that never completed. The 2em PT_BASE write and `AMDHWVMM::postInit`'s two VM-fault interrupt registrations are both in that territory, so this would tie the frontier to the oldest live patch in the project. |
+| a hardware channel's name, `hwn>25` | slot 25 is an ordinary ring channel and the name says which engine |
+| `"DisplayPipe0"` | the outstanding work is the display path, and 2ct's deliberate zero-pipe choice stops being a side note |
+| `"?"` | `+0x188` is not the name buffer and the offset reading is wrong — the class name still stands |
+| `hwn != 25` | the VMPT-at-25 arithmetic does not hold and the name is the only evidence |
