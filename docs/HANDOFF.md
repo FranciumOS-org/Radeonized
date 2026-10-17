@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-16, after 2gr)
+# RembrandtGPU — handoff state (2026-10-16, after 2gs)
 
 **Read this before docs/RULES.md.** docs/RULES.md is the chronological evidence
 journal (~4000 lines); it is authoritative for *what was measured*, in order,
@@ -20,21 +20,19 @@ active and doorbelled; GPUVM translates; the GPU executes PM4 packets and
 writes completion fences the CPU reads. **`AMDGFX10PM4Engine::doStart` returns
 1 and every engine in the array powers up.**
 
-**`powerUpHW` SUCCEEDS.** `AMDHardware::startHWEngines` returns TRUE once
-exactly one SDMA engine asks the layer for queues (2gi, `-rbgpusdmaone`,
-reproduced on two consecutive boots). Apple's Navi 21 path builds four SDMA
-engines while this chip has one instance; engines [1..3] now take Apple's own
-trivial-TRUE path and engine[0] alone asks. The whole bring-up chain —
-firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every engine's
-powerUp, and the SDMA walk — completes.
+**`powerUpHW` SUCCEEDS**, now on seven consecutive boots (`ret=1 post=1111
+one=3`). `AMDHardware::startHWEngines` returns TRUE once exactly one SDMA
+engine asks the layer for queues (2gi, `-rbgpusdmaone`). Apple's Navi 21 path
+builds four SDMA engines while this chip has one instance; engines [1..3] take
+Apple's own trivial-TRUE path and engine[0] alone asks. The whole bring-up
+chain — firmware, PSP, GC, TTL, SMU, GPUVM, the command processor, every
+engine's powerUp, and the SDMA walk — completes.
 
 **The frontier is a GPU-restart loop driven by ONE outstanding stamp.**
 Request 0x1B reaches `AMDAccelEventMachine::finishAllStamps`, which walks 63
 stamp slots; **exactly one has work outstanding — slot 25** (2gq), the same
 index Apple's own `GPURestartDeferred stampIdx=25` named from a different
-source. Its state is `submitted=1 completed=0 fence=0`, with the fence
-pointer dereferencing cleanly — **one real submit whose fence the GPU never
-wrote**, not uninitialised bookkeeping.
+source. Its state is `submitted=1 completed=0 fence=0`.
 
 ```
 finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
@@ -47,98 +45,94 @@ finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
 ```
 
 Meanwhile the GPU is **not** hung: the KIQ completes stamps 70, 71, 72 with
-real fences in the same window, and `T=4,12,22` counts it resubmitting
-throughout. **Which channel slot 25 is, and whether it ever reached the GPU,
-is the open question** — 2gr names it. See §2.
+real fences in the same window, and `T` counts it resubmitting throughout.
+Request 0x14 reached **#1,107,904** in the 2gr boot — over a million register
+polls through the peer — and macOS spawned a `DumpGPURestart` process, so
+userspace sees the restart too.
 
 Nothing about display is started. The accelerator deliberately adopts **no
 display pipe** (2ct), so armed boots can reach a desktop.
 
 ---
 
-## 2. The pending experiment — name slot 25's channel
+## 2. The pending experiment — has the GPU EVER written a stamp?
 
-Build **`6F1F006B`** (2gr). Boot-args unchanged. Expect the boot to hang.
+Build **`CD40814D`** (2gs). Boot-args unchanged. Expect the boot to hang.
 
-### What 2gq settled
+### What 2gr settled, and what it got wrong
 
-```
-fas:E(n=63|25:s1/c0/f0 out=1)
-W=1/3/6  r0=rN=0xe00002d6  R=1/3/6  N=63  T=4/12/22
-```
+The channel behind slot 25 is **`AMDRadeonX6000_AMDAccelChannel`** — the
+accelerator's per-client software channel, the same class whose
+`resetHardwareAndReplay` sends request 0x17. The pointer yielded a clean
+metaclass name, so it is a live object, not a stale entry.
 
-- **One slot outstanding of 63, and it is slot 25** — matching Apple's own
-  `stampIdx=25` from the previous boot's `os_log`.
-- `submitted=1 completed=0 fence=0`, fence pointer valid → **the GPU never
-  wrote that fence.** One real submit, the first on that slot.
-- `W` and `R` climb 1:1, so `finishStamp`'s unconditional retry really is the
-  loop; `0xE00002D6` is `kIOReturnTimeout`, so `waitForStamp` waits ~10 s and
-  times out rather than bailing on an argument check.
+**The three fields read beside it are VOID.** `+0x80`/`+0x84`/`+0xc8` are
+`AMDHWChannel`'s layout (2ds/2dw/2dy); `AMDAccelChannel`'s vtable (0xbf92998,
+0x278 bytes) is in the `IOAccelChannel2` hierarchy, not the `IAMDHWChannel`
+one (0xbfa8a80+). 2gr named the class and read its fields in the same step,
+so the fields were read before the thing that gives them meaning was known.
+Twenty-third instance of the recurring error. 2gs removes them.
 
-### The lookup, from Apple's own code
-
-`AMDAccelEventMachine::eventTimeout` (0xbe4b92e), called by `restart_channel`
-through `vt[0x220]`:
+### The stamp table, resolved from Apple's own code (no boot)
 
 ```
-accel = evm->0x10
-if (idx < 0 || idx >= accel->0x1e78)   -> NULL
-ch = accel->0x1a78[idx]
+getStampOffset(i)         0x14e25ae0   return i * 4
+setStampBaseAddress(base) 0x14e25aea   evm->0x28[i] = base + i*4, one flat block
+incrementStamp(i)         0x14e43416   evm[0xfc+i*24]++ ; evm->0x10->0xa0++
+writeStampCommand(i,..)   0x14e4346c   reads it, tail-jumps evm->vt[0x2a0]
 ```
 
-This **corrects §2's earlier note**, which attributed that array to the
-hardware object: it is the **accelerator's**. And it sharpens 2gq, because
-`waitForStamp` returning Timeout rather than `0xE00002C2` means that bail did
-not fire — so index 25 is in range and `accel->0x1a78[25]` is non-NULL
-already.
+- A "stamp slot" is **not per-channel**: the fences are one flat block of `n`
+  dwords at `evm->0x20`. Slot 25's fence reading 0 means dword 25 of a shared
+  block was never written.
+- `submitted` is a **pure software counter** with no hardware involved; the
+  emit is a separate call. So `s1/c0/f0` is exactly `incrementStamp(25)` ran
+  once and nothing ever landed in dword 25.
+- `finishStamp` at dump +0x160 and `finishAllStamps` at +0x168 confirm the
+  call-offset convention (0x150 / 0x158) a second, independent way.
 
-### Also found, and it is an interaction with our own instrument
-
-`handleFinishChannelRestart` first calls
-`IOAccelDisplayMachine::waitForStampTimeout`, which opens
-`if (this->0x108 == 0) return FALSE` — and `0x108` is the **pipe count**,
-which 2ct deliberately makes zero. So Apple's own defer-the-restart escape
-can never fire here. **Not a fix**: deferring the restart would not make the
-stamp complete; it would change who spins.
+**Open, and not guessed: who calls `incrementStamp(25)`.** The slot-0x1d8
+shortlist was checked and does not hold (`signalStamp`'s call is on
+`evm->0x78`, and the base vtable has +0x1d0..+0x210 all pointing at one
+pure-virtual stub).
 
 ### The instrument
 
-The slot dump now carries, per outstanding slot, the channel from
-`accel->0x1a78[i]` with its **class name** (the 2cw OSObject idiom) and its
-own `AMDHWChannel` fields — `+0x80` submitted, `+0x84` completed, `+0xc8` the
-GPU address the WRITE_DATA fence packet targets (2ds/2dw/2dy). Reads only,
-both pointers checked against the kernel-VA range first (the 2gh rule).
+The per-slot channel fields are gone; the class name stays. Three numbers
+replace them, each read off an instruction rather than an assumed layout:
+`accel->0xa0` (the driver's total `incrementStamp` count), `accel->0x1e78`
+(the channel-array bound), and `nz` (how many of the `n` stamp dwords at
+`evm->0x20` are nonzero). Reads only, same kernel-VA guard, no new NVRAM
+write — it rides the existing `fas:E` mark.
 
 ### Install and arm
 
 ```
-sudo tools/efi.sh install && sudo tools/efi.sh status     # expect 6F1F006B
+sudo tools/efi.sh install && sudo tools/efi.sh status     # expect CD40814D
 sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
 **Leave it up past ~80 s, then run `tools/plugin_check.sh` IN the armed
-boot.** This is not optional: the 2gp boot's live read after the power cycle
-showed `b=11 s=1` where the in-boot capture held `b=11 s=5` — the same boot's
-nonce with an earlier stage, so later commits are lost across a power cycle.
+boot.** Not optional: the 2gp boot's live read after the power cycle showed
+`b=11 s=1` where the in-boot capture held `b=11 s=5` — the same boot's nonce
+with an earlier stage, so later commits are lost across a power cycle.
 
 ### Reading it
 
 ```
-nvram rbgpu-boot   must be 13 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[<class> subN cmpM c8=0x..] out=1)
+nvram rbgpu-boot   must be 14 — a NEW sequence, or every note is STALE
+nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[AccelChannel] out=1 tot=N nch=M nz=K)
 ```
 
 | reading | means |
 |---|---|
-| `c8` a real `0xFF_BF..` address, `sub=1 cmp=0` | the channel genuinely submitted one frame and the GPU never wrote its fence — the 2dy shape on a new channel, and that channel's ring and doorbell are next |
-| `c8 = 0` | `allocateMemoryResources` never gave this channel a fence GPU address, so the WRITE_DATA had nowhere to land — a per-channel setup gap |
-| `sub = 0` | the event machine recorded a stamp the channel never submitted — bookkeeping, and `writeStampCommand` (0x14e43477) is where to look |
-| a **display** or **VCN** channel | the outstanding work is not the GFX path, and 2ct's zero-pipe choice becomes directly relevant |
-| the KIQ or a GFX ring | the path already proven to work, so slot 25's stamp is the odd one out against the 70-72 that complete |
+| `nz=0` | the GPU has never written **any** stamp — one bug for all 63 slots, not something about slot 25. The 2dh/2di/2em shape: a correct CPU pointer paired with an address the hardware cannot reach, and the stamp block's GPU address is the next thing to find. |
+| `nz>0`, slot 25 still 0 | the block is reachable and others complete, so the question really is that one submit |
+| `tot=1` | slot 25's submit is the only stamp this driver has ever issued |
+| `tot>1` with `nz=0` | contradictory — the instrument is wrong before the chip is |
+| `nch` small | the channel array is barely populated and index 25 being valid deserves its own look |
 
-**Still not taken, still the user's call:** answering request 0x17 (ASIC Reset
-State) instead of `kIOReturnUnsupported`. It treats the symptom — the restart
-exists because a stamp timed out — and it is a behavioural change to our peer.
+---
 
 ## 3. Verified on hardware — do NOT re-derive these
 
