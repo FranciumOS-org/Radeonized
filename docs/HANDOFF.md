@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-17, after 2gu)
+# RembrandtGPU — handoff state (2026-10-17, after 2gv)
 
 **Read this first.** `CLAUDE.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -37,8 +37,11 @@ same index Apple's own `GPURestartDeferred stampIdx=25` names from a
 different source. `accel->0xa0`, the driver-wide `incrementStamp` count,
 reads **1** (2gs). **Slot 25 is the `"VMPT"` channel** — it names itself
 (2gt) — so the one stamp this driver has ever issued is a page-table
-update, and VMPT is backed by SDMA engine index 2, one of the three
-engines `-rbgpusdmaone` zeroes (2gu, §2).
+update. **It holds a real `AMDSDMAChannel` on hw engine index 2, and that
+engine has zero queues** (2gu: `h=AMDSDMAChannel e2=1 e2q=0`): nothing
+refuses the submit, nothing can complete it. Engine 2 is the first engine
+`-rbgpusdmaone` switches off, while the one working SDMA sits at index 1
+(2gv, §2).
 
 ```
 finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
@@ -61,73 +64,83 @@ display pipe** (2ct), so armed boots can reach a desktop.
 ---
 
 
-## 2. The pending experiment — does VMPT have a hardware channel?
+## 2. The pending experiment — send VMPT to the SDMA engine that exists
 
-Build **`62631971`** (2gu). Boot-args unchanged. Expect the boot to hang.
-
-**2gt answered what slot 25 is.** The channel names itself — `init`
-(0xbe443dd) does `strlcpy(this + 0x188, name, 0x10)` — and boot 15 read
-**`"VMPT"`**, with `hwn=25` agreeing (VMPT is created at index == the
-hardware-channel count) and 2dv's 25 hardware channels agreeing again:
+Build **`CF1786D5`** (2gv). **Boot-arg to ADD this once:**
 
 ```
-fas:E(n=63|25:s1/c0/f0[AccelChannel "VMPT"] out=1 tot=1 nch=63 hwn=25 nz=0)
+sudo tools/efi.sh bootarg add -rbgpuvmpteng1
 ```
 
-So the one stamp this driver has ever issued is a **page-table update**.
+### What is settled
 
-**Where VMPT submits, resolved from Apple's code with no boot** (full chain
-in `docs/JOURNAL.md`, tag 2gu). `createAccelChannels` asks
-`hw->vt[0x320](2, 0, 0)` = `GFX10Hardware::getHWChannel(CHANNEL_TYPE=2,
-prio=0, idx=0)`, which falls through `RTHardware::getHWChannel` — where
-`ENGINE_TYPE = ((caps->0x92 * 2 + 1) & 1) + 1 = 2` unconditionally — into
-`AMDHardware::getHWChannel(engine, ring)`, which indexes
-`hw->[0x3b0 + engine*8]`. `Navi21Hardware::allocateHWEngines` fills that
-array `[0]=Navi21PM4Engine`, `[1..4]=SDMAEngine_GC_10_3_0`.
-
-**VMPT is engine index 2 — the second SDMA engine.** This chip has one SDMA
-instance, and `-rbgpusdmaone` (2gi) zeroes the queue count of engines
-[1..3]; `one=3` says all three took the write. 2gi's own comment named this
-risk when it was added: *"an armed boot has no GPU clients and nothing
-submits SDMA work. If anything later submits to engines [1..3], it finds no
-queues."* The accelerator submits VMPT itself, during startup.
-
-**That is a chain of reasoning, not a measurement, and it does not yet
-convict 2gi.** `AMDAccelChannel::init` stores the hardware channel at
-`this->0xe8` and then *branches on it being NULL* (0xbe4438e): a NULL
-channel allocates `0x90 * 1` instead of `0x190 * 0x400`, `init` returns
-TRUE, and the array entry is named, in range and non-NULL. Every reading so
-far — `s1/c0/f0`, `nch=63`, `hwn=25`, `"VMPT"` — is equally true of a
-channel with `0xe8 == 0`. That is why none of them settle it.
-
-2gu adds the two reads that do:
+Slot 25 is the **`"VMPT"`** channel — it names itself (2gt) — so the one
+stamp this driver has ever issued is a page-table update. Boot 16 (2gu)
+then measured what is behind it:
 
 ```
-nvram rbgpu-boot   must be 16 — a NEW sequence, or every note is STALE
-nvram rbgpu-1b     ... fas:E(n=63|25:s1/c0/f0[AccelChannel "VMPT" h=H]
-                       out=1 tot=1 nch=63 hwn=25 nz=0 e2=E e2q=Q)
+25:s1/c0/f0[AccelChannel "VMPT" h=AMDSDMAChannel]
+   out=1 tot=1 nch=63 hwn=25 nz=0 e2=1 e2q=0
 ```
 
-- `h=` — slot 25's `ch->0xe8`: `0` for no hardware channel, else the class
-  name, `BAD` for a non-kernel pointer.
-- `e2=` / `e2q=` — `hw->0x3c0` read exactly as `AMDHardware::getHWChannel`
-  reads it, and its queue count at `+0x48`, the field 2gi writes zero to.
-  `e2=1` object present, `0` NULL slot, `2` bad pointer, `3` no hw
-  interface.
+**The channel exists and its engine has zero queues.** Nothing refuses the
+submit; nothing can complete it. That was row three of the table written
+before the boot.
 
-**Written before the boot, so it cannot be read into the convenient row:**
+The index bases differ, and that is the finding. The SDMA walk reads
+`hw + 0x3b8 + i*8` while `getHWChannel` indexes `hw + 0x3b0 + engine*8`, so
+**2gi's `engine[i]` is hw array index `i + 1`**:
 
-| `h=` | `e2q=` | means |
-|---|---|---|
-| `0` | `0` | 2gi's bypass denied VMPT its channel; the stamp can never complete. The fix is to stop zeroing engine 2, or to point VMPT at engine 1 |
-| `0` | non-0 | engine 2 has queues and VMPT still got nothing — **2gi is exonerated** and the fault is in `getHWChannel`'s ring argument (`caps->0x8f`) |
-| class | `0` | VMPT has a channel on a queueless engine — exactly the "silently not backed" case 2gi hoped to avoid |
-| class | non-0 | channel and engine both fine; the fault is downstream, in the submit or the doorbell |
+```
+hw[0] = Navi21PM4Engine        GFX
+hw[1] = SDMAEngine_GC_10_3_0   2gi's engine[0] - LEFT ALONE, keeps queues
+hw[2] = SDMAEngine_GC_10_3_0   2gi's engine[1] - zeroed        <- VMPT
+hw[3] = SDMAEngine_GC_10_3_0   2gi's engine[2] - zeroed
+hw[4] = SDMAEngine_GC_10_3_0   2gi's engine[3] - zeroed
+```
+
+VMPT asks for the **first** engine `-rbgpusdmaone` switches off, while the
+one working SDMA sits at index 1. `one=3` says all three writes took, and
+2gi only counts an engine whose count was non-zero first — so hw[2] had
+queues and 2gi removed them. 2gi's own comment predicted exactly this:
+*"if anything later submits to engines [1..3], it finds no queues."*
+
+Apple's arithmetic makes hw[2] unavoidable:
+`ENGINE_TYPE = ((caps->0x92 * 2 + 1) & idx) + 1`, with `prio=0` forcing
+`idx = 1`, and `x*2+1` always odd — so the answer is 2 whatever the caps
+byte holds.
+
+### The experiment
+
+Hook `AMDHardware::getHWChannel(engine, ring)` (0xbea9994) and send
+**engine 2 to engine 1**. Milestone 2c checked (external *defined* symbol,
+not an import); rule 9 checked (`55 48 89 e5 89 f0 …`, no relative branch
+in the patch window). The route happens every boot; the **substitution** is
+gated on `-rbgpuvmpteng1`, so a boot without the arg still reports the
+remap OFF rather than leaving it ambiguous whether the route took. Every
+remap is logged as a substitution — a stamp that completes after this
+proves the remap works, **not** that engine 2 exists (2cy).
+
+```
+nvram rbgpu-boot   must be 17 — a NEW sequence, or every note is STALE
+nvram rbgpu-1b     ... fas:E(n=63|... "VMPT" h=H] out=O tot=T nch=63
+                       hwn=25 nz=Z e2=1 e2q=0 e1q=Q)
+RBGPULog           one "2gv: ... SUBSTITUTED to engine=1" line
+```
+
+**Written before the boot:**
+
+| reading | means |
+|---|---|
+| `e1q=0` | the remap target has no queues either — **nothing** about this boot may be read as being about engine 1, and the whole approach is wrong |
+| no `2gv:` substitution line | the route or the boot-arg did not take; the rest of the note says nothing about the hypothesis |
+| `out=0`, `nz` non-zero, no restart loop | VMPT completed — the frontier moves, and 2gi's blanket zeroing becomes the thing to fix properly |
+| `out=1` still, `h=AMDSDMAChannel` | VMPT has a backed channel and still never completes; the fault is in the submit or the doorbell, not the engine |
 
 **Still open and not guessed: who calls `incrementStamp(25)`.** The
-slot-0x1d8 shortlist was checked and does not hold (`signalStamp`'s call is
-on `evm->0x78`, and the base vtable has +0x1d0..+0x210 all pointing at one
-pure-virtual stub). With `tot=1` it is a single call somewhere in startup.
+slot-0x1d8 shortlist was checked and does not hold. With `tot=1` it is a
+single call somewhere in startup.
+
 
 ## 3. Verified on hardware — do NOT re-derive these
 

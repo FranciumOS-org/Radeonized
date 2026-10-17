@@ -3163,6 +3163,7 @@ static bool (*orig_hw_registerChannel_2du)(void *, void *) = nullptr;
 static bool (*orig_sched_addHWChannel_2du)(void *, void *, uint64_t) = nullptr;
 // 2gn: request 0x1B's three named post-gate calls. Apple ignores every
 // return value (no test follows any of the three call sites), so void.
+static void *(*orig_hw_getHWChannel_2gv)(void *, uint32_t, uint32_t) = nullptr;
 static void (*orig_hw_startGlobalPerfCounters_2gn)(void *) = nullptr;
 static void (*orig_hw_hardwareDidStart_2gn)(void *) = nullptr;
 static void (*orig_hw_enableInterrupts_2gn)(void *) = nullptr;
@@ -3336,6 +3337,86 @@ static void rbgpu_2gn_mark(const char *tag) {
     g_rb_2gn_n++;
     rbgpu_nvram_note("rbgpu-1b", g_rb_2gn_trail);
     rbgpu_log("2gn: %s", g_rb_2gn_trail);
+}
+
+
+// 2gv: VMPT asks for an SDMA engine this chip does not have, and gets a
+// channel anyway.
+//
+// Measured (boot 16, build 62631971):
+//   25:s1/c0/f0[AccelChannel "VMPT" h=AMDSDMAChannel]
+//              out=1 tot=1 nch=63 hwn=25 nz=0 e2=1 e2q=0
+//
+// which is row three of the table 2gu wrote down BEFORE the boot: the
+// channel exists, so nothing refuses the submit, and the engine behind it
+// has zero queues, so nothing can complete it. `tot=1` says this is the
+// only stamp the driver has ever issued and `nz=0` says no fence was ever
+// written for it.
+//
+// The index bases differ and that is the whole point. The SDMA walk in
+// rbgpu_walk_starthw_2fp reads `hw + 0x3b8 + i*8`, so 2gi's `engine[i]` is
+// hw array index `i + 1`:
+//
+//   hw[0] = Navi21PM4Engine         GFX
+//   hw[1] = SDMAEngine_GC_10_3_0    2gi's engine[0] - LEFT ALONE, has queues
+//   hw[2] = SDMAEngine_GC_10_3_0    2gi's engine[1] - zeroed   <- VMPT
+//   hw[3] = SDMAEngine_GC_10_3_0    2gi's engine[2] - zeroed
+//   hw[4] = SDMAEngine_GC_10_3_0    2gi's engine[3] - zeroed
+//
+// `one=3` says all three really took the write, and each had a NON-zero
+// count before it (rbgpu_sdma_one_2gi only counts that case). So hw[2] had
+// queues, 2gi removed them to stop a second engine asking the layer for an
+// instance that does not exist, and VMPT then asked hw[2] for a channel.
+//
+// Apple's own arithmetic makes hw[2] unavoidable. RTHardware::getHWChannel
+// (0xbe973fa) computes `ENGINE_TYPE = ((caps->0x92 * 2 + 1) & idx) + 1`,
+// and the VMPT call site passes prio=0, which forces `idx = 1`. Since
+// `x * 2 + 1` is odd, `& 1` is 1 and the answer is 2 whatever the caps byte
+// holds - on a part with two or more SDMA instances that is correct, and
+// here it names the one engine that was switched off.
+//
+// What this hook does: in AMDHardware::getHWChannel(engine, ring)
+// (0xbea9994), which is where `hw->[0x3b0 + engine*8]` is indexed, send
+// engine 2 to engine 1 - the single SDMA instance this chip actually has.
+// It is a SUBSTITUTION and it is logged as one every time, because 2cy's
+// rule is that a substituted value must never be narrated as a hardware
+// result: a stamp that completes after this proves the remap works, not
+// that engine 2 exists.
+//
+// Rule 9 checked: 55 48 89 e5 89 f0 48 8b ... - pushq %rbp, movq %rsp,%rbp,
+// movl %esi,%eax. No rel8 or rel32 branch begins inside the 5-byte patch
+// window. Milestone 2c checked: `nm -m build/re/AMDRadeonX6000` shows
+// __ZN26AMDRadeonX6000_AMDHardware12getHWChannelE20_eAMD_HW_ENGINE_TYPE18_eAMD_HW_RING_TYPE
+// as an external DEFINED symbol at 0xbea9994, not an import.
+//
+// Off unless `-rbgpuvmpteng1`.
+static int g_rb_2gv_on = -1;
+static uint32_t g_rb_2gv_remaps = 0;
+
+static void *hooked_hw_getHWChannel_2gv(void *hw, uint32_t engine, uint32_t ring) {
+    if (g_rb_2gv_on < 0) {
+        g_rb_2gv_on = checkKernelArgument("-rbgpuvmpteng1") ? 1 : 0;
+        rbgpu_log("2gv: VMPT engine remap %s", g_rb_2gv_on ? "ON (2 -> 1)" : "OFF");
+    }
+    uint32_t use = engine;
+    if (g_rb_2gv_on && engine == 2) {
+        use = 1;
+        g_rb_2gv_remaps++;
+        rbgpu_diag_set_num("vmpt_remaps", g_rb_2gv_remaps);
+        rbgpu_log("2gv: getHWChannel(engine=2, ring=%u) SUBSTITUTED to "
+                  "engine=1 - this is the plugin's value, not the chip's",
+                  ring);
+    }
+    void *ch = orig_hw_getHWChannel_2gv
+                   ? orig_hw_getHWChannel_2gv(hw, use, ring)
+                   : nullptr;
+    if (g_rb_2gv_on && engine == 2) {
+        // Absence is not a result: say what came back, so a later `h=` can
+        // be tied to this call rather than assumed to follow from it.
+        rbgpu_log("2gv: engine=1 returned channel %p", ch);
+        rbgpu_diag_set_num("vmpt_ch_nonnull", ch ? 1 : 0);
+    }
+    return ch;
 }
 
 static void hooked_hw_startGlobalPerfCounters_2gn(void *hw) {
@@ -3559,6 +3640,19 @@ volatile uint32_t g_rb_2gq_stw        = 0;   // ... and count them instead
 // kernel-VA range before it is dereferenced (the 2gh rule, after the 2gg
 // panic read `1 + 0x48`). A pointer that fails is printed as `?` rather than
 // as a value that could be mistaken for a measurement.
+// 2gv: strip only the shared "AMDRadeonX6000_" prefix. The 2gu note printed
+// `h=MAChannel`, because the old loop walked to the LAST 'D' followed by an
+// uppercase letter and so ate into "SDMAChannel" itself. The real class was
+// AMDRadeonX6000_AMDSDMAChannel, and a mangled class name is exactly the
+// kind of reading that cannot be checked later. A fixed prefix cannot
+// over-trim.
+static const char *rbgpu_shortclass_2gv(const char *cn) {
+    static const char pfx[] = "AMDRadeonX6000_";
+    size_t n = sizeof(pfx) - 1;
+    if (!strncmp(cn, pfx, n)) { return cn + n; }
+    return cn;
+}
+
 static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
     out[0] = 0;
     if (!evm) { snprintf(out, cap, "noevm"); return; }
@@ -3676,11 +3770,7 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
                 if (auto o = OSDynamicCast(OSObject, reinterpret_cast<OSObject *>(hwc))) {
                     if (auto m = o->getMetaClass()) { hn = m->getClassName(); }
                 }
-                const char *hs = hn;
-                for (const char *q = hn; *q; q++) {
-                    if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { hs = q + 1; }
-                }
-                snprintf(hv, sizeof(hv), "%s", hs);
+                snprintf(hv, sizeof(hv), "%s", rbgpu_shortclass_2gv(hn));
             } else {
                 // Absence is not a result: a non-kernel pointer is neither
                 // "no hardware channel" nor a usable one, and must not be
@@ -3690,10 +3780,9 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         }
         // Only the tail of the class name fits, and it is the distinctive
         // part (AMDRadeonX6000_AMD... is shared by all of them).
-        const char *shortn = cn;
-        for (const char *q = cn; *q; q++) { if (*q == 'D' && q[1] >= 'A' && q[1] <= 'Z') { shortn = q + 1; } }
+        const char *shortn = rbgpu_shortclass_2gv(cn);
         size_t k = strlen(out);
-        if (k + 64 < cap) {
+        if (k + 80 < cap) {
             snprintf(out + k, cap - k, "%s%u:s%u/c%u/f%s[%s \"%s\" h=%s]",
                      k ? "," : "", i, sub, cmp, fv, shortn,
                      nm[0] ? nm : "?", hv);
@@ -3714,7 +3803,7 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
     //                 `i*4` (0x14e25ae0), so the fences are one flat block
     //                 of n dwords at evm->0x20. Counting the nonzero ones
     //                 says whether the GPU has EVER written a stamp there.
-    uint32_t tot = 0, nch = 0, nz = 0, hwn = 0, e2q = 0;
+    uint32_t tot = 0, nch = 0, nz = 0, hwn = 0, e2q = 0, e1q = 0;
     int have_e2 = 3;
     void *accel = *reinterpret_cast<void **>(e + 0x10);
     if (reinterpret_cast<uintptr_t>(accel) >= 0xffffff8000000000ULL) {
@@ -3735,6 +3824,19 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
         // failure entirely and 2gi would be exonerated.
         void *hw = *reinterpret_cast<void **>(a + 0x1a38);
         if (reinterpret_cast<uintptr_t>(hw) >= 0xffffff8000000000ULL) {
+            // 2gv: engine[1] too - the remap target. The SDMA walk's base
+            // is `hw + 0x3b8 + i*8` (rbgpu_walk_starthw_2fp), so 2gi's
+            // engine[0], the ONE it deliberately leaves alone, is hw array
+            // index 1; its engines [1..3] are hw indices [2..4]. VMPT's
+            // engine 2 is therefore the FIRST engine 2gi disables, and the
+            // working SDMA sits at index 1. `e1q` is what makes that
+            // sentence checkable instead of arithmetic.
+            void *e1 = *reinterpret_cast<void **>(
+                reinterpret_cast<uintptr_t>(hw) + 0x3b8);
+            if (reinterpret_cast<uintptr_t>(e1) >= 0xffffff8000000000ULL) {
+                e1q = *reinterpret_cast<volatile uint32_t *>(
+                    reinterpret_cast<uintptr_t>(e1) + 0x48);
+            }
             void *e2 = *reinterpret_cast<void **>(
                 reinterpret_cast<uintptr_t>(hw) + 0x3c0);
             if (reinterpret_cast<uintptr_t>(e2) >= 0xffffff8000000000ULL) {
@@ -3757,8 +3859,9 @@ static void rbgpu_dump_stamps_2gq(void *evm, char *out, size_t cap) {
     }
     size_t k = strlen(out);
     snprintf(out + k, cap - k,
-             "%s out=%u tot=%u nch=%u hwn=%u nz=%u e2=%d e2q=%u",
-             k ? "" : "none", outstanding, tot, nch, hwn, nz, have_e2, e2q);
+             "%s out=%u tot=%u nch=%u hwn=%u nz=%u e2=%d e2q=%u e1q=%u",
+             k ? "" : "none", outstanding, tot, nch, hwn, nz, have_e2, e2q,
+             e1q);
 }
 
 static uint32_t hooked_evm_finishAllStamps_2gp(void *evm) {
@@ -7139,6 +7242,26 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
     }
 }
 
+// 2gv: routed unconditionally; the substitution itself is gated on
+// `-rbgpuvmpteng1` inside the hook, so a boot without the arg still logs
+// that the remap is OFF rather than leaving it ambiguous whether the route
+// took.
+static void rbgpu_route_getHWChannel_2gv(KernelPatcher &patcher, size_t id,
+                                         mach_vm_address_t address,
+                                         size_t size) {
+    KernelPatcher::RouteRequest req(
+        "__ZN26AMDRadeonX6000_AMDHardware12getHWChannelE20_eAMD_HW_ENGINE_TYPE18_eAMD_HW_RING_TYPE",
+        hooked_hw_getHWChannel_2gv, orig_hw_getHWChannel_2gv);
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        rbgpu_log("2gv: hooked AMDHardware::getHWChannel(engine, ring)");
+    } else {
+        rbgpu_log("2gv: FAILED to hook AMDHardware::getHWChannel - the VMPT "
+                  "engine remap CANNOT happen this boot, whatever boot-args "
+                  "say");
+        patcher.clearError();
+    }
+}
+
 void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6000 (Trap 3 Failure Guard)");
 
@@ -7524,6 +7647,10 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     // hardwareDidStart and enableInterrupts is localised by elimination.
     // Rule 9 checked on all three: each opens pushq %rbp / movq %rsp,%rbp /
     // pushq %r14, with no relative branch inside the 5-byte patch window.
+    // 2gv: the engine index VMPT resolves to. In its own function so it
+    // does not grow processX6000's stack frame past the 1024-byte limit.
+    rbgpu_route_getHWChannel_2gv(patcher, id, address, size);
+
     KernelPatcher::RouteRequest req_2gn[] = {
         KernelPatcher::RouteRequest(
             "__ZN31AMDRadeonX6000_AMDGFX10Hardware23startGlobalPerfCountersEv",
