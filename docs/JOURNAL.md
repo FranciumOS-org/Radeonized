@@ -8740,3 +8740,112 @@ wrong and nothing about the result may be read as being about engine 1.
 
 **Still open:** who calls `incrementStamp(25)`. Unchanged; `tot=1` still
 says it is one call somewhere in startup.
+
+## 2gw — the remap works: one stamp, Success, zero restarts
+
+**Boot 17 (CF1786D5, 2gv, `-rbgpuvmpteng1` IN).** Captured over SSH **in the
+armed boot** — the 2gq procedure, followed properly for the first time in
+this stretch, and the only reason this milestone is readable at all.
+`logs/20261017-032220-plugin/`.
+
+```
+rbgpu-prog  = b=17 s=6 0x1B RETURNED 0xE00002C7
+rbgpu-1b    = b=17 ... hds:R fas:E(n=65|n=65 REFUSED(>64)) fas:R=0x26b4 ei:E ei:R
+rbgpu-prog2 = b=17 a=s6/S12/L875@31694ms W=1 r0=0 rN=0 R=0 N=65 T=0
+                   b=s6/S12/L876@51694ms W=1 r0=0 rN=0 R=0 N=65 T=0
+                   c=s6/S12/L877@81694ms W=1 r0=0 rN=0 R=0 N=65 T=0
+rbgpu-diag  = d=72 armed=1 ... (the full key set)
+```
+
+`rbgpu-diag` reading `armed=1` *in the live variable* (not `-prev`) is what
+proves this capture is the armed boot's own.
+
+### The frontier is broken
+
+From `rbgpu_prog_action`: `W` is `waitForStamp`'s **call count**, `r0`/`rN`
+its first and last return, `R` the **restart count**.
+
+| | 2gu (boot 16) | 2gv (boot 17) |
+|---|---|---|
+| `waitForStamp` calls | 1 → 3 → 6, climbing | **1, flat across all three samples** |
+| its return | `0xE00002D6` `kIOReturnTimeout` | **`0` `kIOReturnSuccess`** |
+| restarts | 1 → 3 → 6, climbing | **0** |
+| request 0x14 | reached #1,506,624 | — |
+
+Both codes resolved from the SDK's own `IOReturn.h`, not from memory:
+`iokit_common_err(0x2d6)` is `kIOReturnTimeout` and `(0x2c7)` is
+`kIOReturnUnsupported`.
+
+**The VMPT stamp completed.** `waitForStamp` ran once and the GPU wrote the
+fence. `finishAllStamps` RETURNED (`fas:R=0x26b4`) instead of retrying
+forever, `enableInterrupts` ran and returned (`ei:E ei:R`), and request 0x1B
+returned. The GPU-restart loop that has been the frontier since 2gn is gone.
+
+The log tail shows the machine **quiet**, not spinning: `logseq` advances
+875 → 876 → 877 across the 31 s, 51 s and 81 s samples — one line per
+sample, which is the sampler's own.
+
+The accelerator then got FURTHER than any previous boot, reaching
+framebuffer adoption, where 2ct refuses it by design:
+
+```
+2ct: found_framebuffer(fb=0xffffff8ba0777300) REFUSED -> accelerator adopts
+     no display pipe, desktop stays on IONDRVFramebuffer
+```
+
+### The remap itself
+
+17 substitutions, every one logged as a substitution (2cy), all from
+`getHWChannel(engine=2, ring=0)`, returning two distinct real channels from
+engine 1 (`0xffffff9539527000` and `0xffffff953952a800`). So engine 2 is
+asked for a channel **seventeen times**, not once — VMPT is one caller among
+several, and all of them were being handed an engine with no queues.
+
+### WITHDRAWN: "2gv hangs the machine well before the frontier"
+
+I read the *following, unarmed* boot's NVRAM, saw `rbgpu-prog = b=17 s=1
+powerUpHW ENTER`, `rbgpu-sdma`/`rbgpu-1b`/`rbgpu-prog2` still at `b=16`, and
+`rbgpu-diag-prev = d=27` with no `starthw_*` keys, and concluded the build
+hung inside `powerUpHW`. **Every part of that is wrong.** The armed boot
+reached `s=6`, wrote all four notes at `b=17`, and left a full `d=72` diag.
+
+What I actually had was a power cycle eating the later commits — the exact
+failure 2gq is written about, which I quoted in the same breath before
+reasoning past it. I then took `last reboot` showing no clean shutdown
+before 03:22 as corroboration, but a user rebooting a machine whose screen
+has gone black looks identical to a hang, so it corroborated nothing.
+
+**Twenty-fourth instance of the recurring error**, and the first caught by
+the user rather than by the practice: the question "did you overwrite the
+armed boot?" is what surfaced the SSH capture. Two concrete rules come out
+of it:
+
+- A stale note is not weak evidence of an early stop; it is **no evidence
+  about where the boot got to**, and must not be combined with other stale
+  notes into a story. Only `rbgpu-diag` reading `armed=1` *live* identifies
+  a capture as the armed boot's.
+- `plugin_check.sh` only reads NVRAM — there is no write in it — so running
+  it in a later boot destroys nothing. The armed boot's capture survives in
+  `logs/<timestamp>-plugin/` and should be looked for **before** reading
+  live variables.
+
+### The guard that cost the table
+
+`fas:E(n=65|n=65 REFUSED(>64))`. The stamp count went 63 → **65** and the
+dump's own bound refused to walk it, so the one boot that finally broke the
+loop is the one whose stamp table went unread. 64 was an arbitrary round
+number, not a fact about the structure. Raised to 256, still refusing out
+loud. Why the table grew by two is **not guessed**.
+
+### Where it stands now
+
+Request 0x1B returns **`kIOReturnUnsupported`**. That is a new and much
+later frontier: every stage of the chain returned, so the Unsupported comes
+from the tail of Apple's handling, not from a stage that hung. The obvious
+candidate is our own peer's `default:` answering some request Apple makes
+late in 0x1B — the same shape as the 0x17 refusal 2gq recorded — but which
+request is **not established** and must not be guessed.
+
+Open, unchanged: who calls `incrementStamp(25)`; and now, why the screen
+went black while SSH stayed up, on a boot where 2ct still refused the
+display pipe.
