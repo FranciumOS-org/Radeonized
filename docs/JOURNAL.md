@@ -9775,3 +9775,157 @@ the `bounded()` helper added in 2hi, leaving a file that says so in
 words. Without that bound the capture would have stalled there and never
 reached the Metal probe — the whole result above would have been lost to
 a hang in a diagnostic.
+
+## 2hl — the CP is clocked, fetched 689 dwords, and stopped: 2di is not the cause
+
+Boot of 2026-10-18 ~01:47, armed, build `01ADE600`, boot-args
+`-rbgpuforceenable wdt=-1 -rbgpuringprobe`. `state.txt` has `rbgpu-diag`
+= `d=73 armed=1` live and `rbgpu-boot = 26`; capture in
+`logs/20261018-014904-metal/`. No panic; the box froze and stayed
+reachable, as 2hj established it would.
+
+**The 2hk probe ran and returned real values, both times.** The in-boot
+capture holds the +100 s sample and live NVRAM holds the +160 s one, so
+for once we have the pair rather than an overwrite:
+
+```
+p=0 (+100s)  cntl=00a00e10 rptr=000002b1 wptr=00000380 wptr_hi=00000000
+             cp_stat=90038600 grbm=a0003028
+p=1 (+160s)  cntl=00a00e10 rptr=000002b1 wptr=00000380 wptr_hi=00000000
+             cp_stat=90038600 grbm=a0003028
+```
+
+**Byte for byte identical across sixty seconds.**
+
+### None of the three predicted outcomes
+
+2hk was written expecting one of: rptr frozen at zero with wptr moved;
+both advancing; or wptr never moving. What came back is a fourth:
+**rptr is frozen at 0x2b1, which is neither zero nor equal to wptr.**
+
+- `rptr = 0x2b1` = 689 dwords. The CP **fetched and consumed 689 dwords
+  of this ring** and then stopped.
+- `wptr = 0x380` = 896 dwords. **207 dwords sit unconsumed.**
+- Both are frozen for a minute, so this is a stall, not slow progress.
+
+### What the status registers say
+
+Decoded against `docs/linux-ref/gc_10_3_0_sh_mask.h`, fetched for this
+(see UPSTREAM.md — the commit could not be resolved from this
+environment, the bytes are pinned by sha256 instead):
+
+```
+GRBM_STATUS = 0xa0003028
+    CP_BUSY                = 1
+    GUI_ACTIVE             = 1
+    DB_CLEAN               = 1
+    CB_CLEAN               = 1
+    ME0PIPE0_CMDFIFO_AVAIL = 8
+    (bit 0x20 is set and the header does not name it)
+
+CP_STAT = 0x90038600
+    CP_BUSY            = 1
+    PFP_BUSY           = 1
+    ME_BUSY            = 1
+    MEQ_BUSY           = 1
+    ROQ_RING_BUSY      = 1
+    ROQ_INDIRECT1_BUSY = 1
+    ROQ_CE_RING_BUSY   = 1
+
+CP_RB0_CNTL = 0x00a00e10
+    RB_BUFSZ = 16, RB_BLKSZ = 14, MIN_AVAILSZ = 2, MIN_IB_AVAILSZ = 2
+```
+
+The CP's **front end** is the busy part: the read-order queues hold data
+(`ROQ_RING_BUSY`, `ROQ_INDIRECT1_BUSY`, `ROQ_CE_RING_BUSY`), and the
+prefetch parser and micro-engine are both busy (`PFP_BUSY`, `ME_BUSY`,
+`MEQ_BUSY`). Meanwhile `DB_CLEAN` and `CB_CLEAN` are both set: the depth
+and colour blocks have nothing in flight. **The work never reached the
+shader cores.** The CP is holding fetched packets it cannot retire.
+
+### 2di is not the cause — stated carefully
+
+`gfx_min = gfx_max = 0` has been the leading suspect since 2hh, on the
+reasoning that a GFX ring with no clock range would accept packets and
+never retire them. **That reasoning is now contradicted by measurement.**
+
+A CP with no clock does not advance `rptr` to 0x2b1, does not raise
+`GUI_ACTIVE`, and does not report six separate front-end blocks busy.
+The GFX block is clocked and executing. Whatever `gfx_min = gfx_max = 0`
+means, it is not "the GFX engine is switched off".
+
+What this does **not** say: it does not say the clock is correct, that
+DPM is healthy, or that 2di is harmless. It says 2di is not the
+mechanism of this hang. The debt stands; its promotion to prime suspect
+(CLAUDE.md, after 2hh) is **withdrawn**.
+
+This is the measurement doing its job. The hypothesis was explicitly
+labelled, never built on, and is now dropped on evidence rather than
+carried forward because it was plausible.
+
+### What the frontier now is
+
+The CP consumed 689 dwords of the GFX ring and stalled with 207
+remaining, front-end queues full, nothing downstream active. That is the
+shape of a command processor waiting on something that never arrives —
+a `WAIT_REG_MEM` whose condition never becomes true, a fence or
+semaphore, or a fetch that never returns because its address does not
+translate.
+
+The last of those is worth naming because this project has history with
+it: GPUVM. The 2em `PT_BASE` fix made translation work for the ranges
+tested, and the KIQ executes PM4 and writes fences — but the KIQ is a
+different ring with a different VMID, and nothing has established that
+the **client** ring's addresses translate.
+
+### What the Metal dispatch did and did not do
+
+The probe hung at commit again, as in 2hj. Its timing matters: the
+`+100 s` sample fell **before** the dispatch was submitted and the
+`+160 s` one **after**, and the two are identical. So the Metal
+submission **did not touch RB0 at all** — its compute work goes to an
+MQD-based user queue (`AMDUserQueue::prepareQueue` in 2hj's stack), not
+to the kernel GFX ring.
+
+**RB0 was already stalled before any Metal client ran.** This is the
+driver's own work, wedged early, and it is what the event-machine thread
+has been polling for all along. One correction to how 2hj was framed:
+"the ring is full" from `waitForRingBufferSpace` is a *consequence* two
+levels removed, not the client's own ring filling up.
+
+`rbgpu-prog2` agrees: `W=1` throughout — **one** `waitForStamp` call,
+with timeouts climbing `T=0 -> 6 -> 34` across the three samples. One
+wait, never satisfied.
+
+### Next measurement, and what it must not assume
+
+Read, at the stall:
+
+1. **The ring contents around `rptr`** — the actual dwords at 0x2b1.
+   The PM4 opcode there names the packet the CP stopped on, and that is
+   a single decisive fact rather than another inference.
+2. **`GCVM_L2_PROTECTION_FAULT_STATUS` and the companion address
+   registers.** A VM fault stalls a CP in exactly this shape, and these
+   registers say outright whether one happened, with the faulting
+   address and VMID.
+3. **`CP_ME_CNTL`** to confirm nothing is halted, and `GRBM_STATUS2` for
+   the blocks `GRBM_STATUS` does not cover.
+
+(2) is the cheapest and the highest-value: it is a handful of register
+reads through the accessor already proven to work here, and a nonzero
+fault status would name the mechanism outright. It is a question that
+can come back "no fault", which is what makes it worth asking.
+
+### The probe itself
+
+No stall. The six reads went through the accessor cleanly at both
+samples, which also answers the 2fe worry for this access pattern: a
+fixed six-register read at a single point is not what stalled in 2fe.
+That is evidence about the instrument, not a licence to reinstate
+`-rbgpuregdump`, which swept.
+
+One defect found: `rbgpu-ring` is a single NVRAM variable, so `p=1`
+overwrote `p=0`. The pair survived only because `metal_check.sh`
+happened to capture `state.txt` between the two samples. That was luck.
+The note must accumulate both samples in one string, the way
+`rbgpu-prog2` does — owed.

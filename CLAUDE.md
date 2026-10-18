@@ -229,11 +229,12 @@ It is what broke the GPU-restart loop.
   reinstall. A bounded retry is owed. [2gy]
 
 - `gfx_min = gfx_max = 0` since **2di** (2026-10-12): the SMU reports no GFX
-  clock range, GFX DPM never started. Still unexplained, and still the
-  **leading suspect** for the 2hh/2hj frontier — but **unmeasured**, and
-  nothing is built on it. The next step is to read the client ring's
-  rptr/wptr and the GFX clock at the moment of the wait, not to assume the
-  clock is the reason.
+  clock range, GFX DPM never started. Still unexplained. **Its promotion to
+  prime suspect after 2hh is WITHDRAWN** — 2hl measured the CP clocked and
+  executing (rptr advanced to 0x2b1, `GUI_ACTIVE`, six front-end blocks
+  busy), which a switched-off GFX engine cannot do. 2di is not the
+  mechanism of this hang. Whether it matters for anything else is still
+  open.
 - The 2am/2an/2ao blanket firmware-ready bypasses still owe the explanation
   2cy demanded.
 - 2ct refuses the display pipe **by design**. 2hf traced the Metal hang to
@@ -328,3 +329,25 @@ SDMA. Stacks: `logs/20261018-010521-metal/` (2hj, live) and
 
 The reproducer is now a 4096-thread compute kernel with no compositor,
 no surface and no display in the path.
+
+**The CP is clocked and stalled mid-stream** (2hl, the 2hk ring probe).
+Two samples sixty seconds apart, byte for byte identical:
+`rptr=000002b1 wptr=00000380 cp_stat=90038600 grbm=a0003028`. So the CP
+**consumed 689 dwords of the GFX ring and stopped with 207 left**.
+`GRBM_STATUS` says `CP_BUSY` + `GUI_ACTIVE` with `DB_CLEAN` and
+`CB_CLEAN`; `CP_STAT` says `PFP_BUSY`, `ME_BUSY`, `MEQ_BUSY` and all
+three `ROQ_*_BUSY`. The command processor's front end is holding fetched
+packets it cannot retire, and **nothing reached the shader cores**.
+
+Two consequences. **2di is out as the cause** (see Standing debts).
+And RB0 was already stalled **before** any Metal client ran — the
+`+100 s` sample predates the dispatch and matches the `+160 s` one — so
+the wedged work is the driver's own, and Metal's compute goes to an
+MQD user queue, not RB0. 2hj's "the ring is full" is a consequence two
+levels removed, not the client ring filling.
+
+Next: the PM4 opcode in the ring at `rptr`, and
+`GCVM_L2_PROTECTION_FAULT_STATUS` — a VM fault stalls a CP in exactly
+this shape, and that register answers yes or no outright. Owed: the
+`rbgpu-ring` note overwrites itself, so the two samples must accumulate
+in one string the way `rbgpu-prog2` does.
