@@ -11299,3 +11299,92 @@ whose note records exactly what it would have written.
 | `REFUSED no ctx3` | `assignVMID` never bound a context to VMID 3 **in this boot** |
 | `OFF` | the arg is missing; the dry run still names the value |
 
+
+## 2ig result (2026-10-18) — the register was never a leftover. It was TRUNCATED.
+
+Eleventh consecutive armed boot, `logs/20261018-172635-metal/`, `armed=1`
+live at capture, UUID `376E6F1C-A373-3B75-955D-28AF641A7234` = `build/out`,
+and `-rbgpuptwrite` present in the live `kern.bootargs`.
+
+```
+rbgpu-ptw = b=39 arm=1 ctx3=ffffff8b6de37980 nroot=3
+            r0=f4fb000000/fff r1=f4fb00b000/fff r2=f4fb015000/fff
+            m@b8=f4fb015000 o=28cd/28ce
+            was=fb015000/0 new=fb015001/f4 back=fb015001/f4
+```
+
+The strict match fired. Apple's allocator handed out **three** level-0
+roots - `0xF4_FB00_0000`, `0xF4_FB00_B000`, `0xF4_FB01_5000` - all MC
+addresses in the carve-out (`0xF4_0000_0000`, a chip fact since 2dl), one
+per VM context, agreeing with 2if's three level-0 `getPDEValue` calls and
+three VMIDs handed out. The VMID-3 context holds `0xF4_FB01_5000` at
+`ctx+0xb8`.
+
+### The finding, and a withdrawal
+
+Context 3's register held **`0xFB015000` with HI32 = 0**. That is the low
+32 bits of *that very context's own root directory*, with the carve-out
+high bits `0xF4` missing and bit 0 clear. Context 1 is the same shape:
+register `0xFB00B000`, root `0xF4_FB00_B000`.
+
+**So 2ie's inference is WITHDRAWN.** I wrote that nothing writes these
+registers and they therefore hold leftovers. The measurements behind that
+(2ic/2id/2ie) stand and are not in question - but the inference does not.
+A leftover cannot coincidentally equal the low half of its own context's
+root, and certainly not twice. **Something writes them on a fourth path
+none of the three hooks sees**, and finding it is now owed.
+
+And the shape of the corruption is one this project has already paid for:
+**it is 2em's bug again** - an MC address losing its carve-out high bits,
+`0xF4_FB01_5000` written as `0x0_FB01_5000`. 2em fixed exactly this for
+CONTEXT0. Contexts 1..15 have the same defect and nothing has ever fixed
+it there.
+
+So the four-milestone frame of "the missing VALID bit" was aimed at the
+smaller half of the problem. Bit 0 is missing, yes - but so are the top
+eight bits of the address, and a page-directory base pointing at
+`0x0_FB01_5000` instead of `0xF4_FB01_5000` would fault regardless of what
+bit 0 said. `WALKER_ERROR` is a walker complaint, and this is what the
+walker was given.
+
+### What the write settled
+
+`back = fb015001/f4`: the register **accepted both** the VALID bit and
+`HI32 = 0xF4`. **2hr's first caveat is dead** - the hardware does not
+ignore bit 0 in this field, and it does not ignore the high dword either.
+
+### After the write
+
+The in-boot capture ran at +115 s, before the +160 s sample, so phase 2
+exists only in NVRAM. Its nonce `b=39` matches `state.txt`'s, which is what
+makes it this boot's (2gd); `armed=0` live only says a later boot has since
+started.
+
+```
+p=2 vmf=40953 vmalo=0 vmahi=0 r=2b1 w=380 cps=94038600 grbm=a0003028
+    g2=74200008 me=15000000
+rbgpu-fault  c=14 f=14 r=7
+  s3009bb   h0 n=2 va=400280000 v3 R c4
+  sffffffff h1 n=7
+  s40953    h0 n=5 v0 W c4
+```
+
+In the **six polls after the write, the VMID-3 CPF fault did not recur
+once**, while the hub-1 phantom went 4 -> 7 and `s40953` went 2 -> 5. That
+is a real signal and a **weak** one: n=2 over fourteen polls against n=1-3
+over eight in earlier boots is nowhere near the bar 2hv set, and calling it
+confirmation would be the recurring error. It is recorded as suggestive,
+nothing more.
+
+The CP is still halted (`me=15000000`), `rptr`/`wptr` are unmoved and
+`0x40953` still latches - all expected. A write at +100 s cannot revive
+work the reset discarded at +160 s in 2hp's boot; the hang was ninety
+seconds old before the probe touched anything. This boot was never going
+to recover and was not built to.
+
+**The test that matters is the same write at bind time**, before any work
+is submitted - and 2ig has established everything that test needs: where
+the value lives (`ctx+0xb8`, matched against Apple's own allocator), that
+the register takes it, and that the correction is the carve-out high bits
+as well as bit 0.
+
