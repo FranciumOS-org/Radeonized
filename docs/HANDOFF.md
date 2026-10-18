@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-17, after 2hd)
+# RembrandtGPU — handoff state (2026-10-18, after 2hf)
 
 **Read this first.** `docs/RULES.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -77,89 +77,86 @@ refusal above is what is now in the way.
 ---
 
 
-## 2. The frontier — newCommandQueue does not return
+## 2. The cause is identified: `fEnabled` is never set, because of 2ct
 
-**2hd: Metal enumerates the 680M.** Boot 22, five captures all taken in
-the armed boot (`metal_check.sh` writes `armed=1` into `state.txt` first,
-so the 2gw rule is satisfied by construction).
-
-```
-MTLCopyAllDevices: 1 device(s)
-device: AMD Radeon HD GFX10 Family Unknown Prototype
-  registryID = 0x10000054f   maxThreadsPerTG = 1024
-  recommendedMax = 4096 MB   headless = 0   unifiedMemory = 0
-```
-
-Control, measured unarmed: **0 devices**, and `system_profiler` shows the
-plain IONDRVFramebuffer entry with no `Metal:` line. So the device is this
-project's accelerator and nothing else. The "Unknown Prototype" name is
-Apple's generic GFX10 fallback for an unrecognised id, not a fault.
-
-**The `--dispatch` run ends mid-step:**
+**2hf.** Boot 23, armed (`state.txt` records `d=72 armed=1` live),
+`logs/20261018-001306-metal/`. The 2hd hang reproduced, and under `sudo`
+both the userspace and kernel stacks were captured.
 
 ```
-  dispatch: creating queue      <- fflushed immediately before newCommandQueue
-                                <- no "compiling shader", no "metal_probe exit="
+newCommandQueue → blit manager init → CpuLoadInitialShaders
+  → first buffer allocation → IOAccelResourceCreate → into the kernel:
+
+  IOAccelSharedUserClient2::externalMethod          +0x82
+  IOAccelSharedUserClient2::s_new_resource          +0xa7
+  IOAccelSharedUserClient2::new_resource            +0x1fd
+  IOGraphicsAccelerator2::acceleratorWaitEnabled    +0x8f
+  waiting_for_fEnabled(_IOLock*, IOGraphicsAccelerator2*)
+  ... kernel sleep
 ```
 
-The probe **never returned from `[dev newCommandQueue]`**. No panic
-report, so a hang rather than a crash.
+`acceleratorWaitEnabled` tests **bit 0x2 of the flags at `accel+0xc78`**
+and returns at once if set. The only setter is
+`IOGraphicsAccelerator2::enableAccelerator()` (`orb $0x2, 0xc78`), and its
+only two callers are `IOAccelDisplayMachine::display_mode_did_change` and
+the Legacy variant.
 
-**2he — settled by asking the user:** only that command hung. SSH stayed
-up and other commands ran. So the machine does not wedge; one client
-thread blocks in the kernel while everything else keeps working.
+**So: 2ct refuses the display pipe → no mode change → `enableAccelerator()`
+never called → `fEnabled` never set → every `IOAccelResourceCreate` sleeps
+forever → Metal hangs on its first allocation.** Every link read from
+Apple's code. It also explains 2gq's `waitForStampTimeout -> FALSE (pipe
+count 0)`.
 
-That means the blocked thread can be **sampled**, and its stack names the
-call instead of leaving us to guess. `metal_check.sh --dispatch` now runs
-the probe in the background, waits 25 s, and if it is still alive writes
-`sample.txt` (userspace) and, under `sudo`, `spindump.txt` (kernel
-stacks), leaving the probe running.
+2hd's "client-facing GFX ring" guess is **withdrawn** — the thread never
+reaches hardware. It was labelled a hypothesis and not acted on, which is
+why it cost nothing.
 
-**Do this next, before touching the kext:**
+### The two ways forward
 
-```bash
-cd ~/Developer/RembrandtGPU && sudo ./tools/metal_check.sh --dispatch
+**(2) is recommended: enable without the panel.** Leave 2ct refusing and
+call `enableAccelerator()` once after start. If allocation then proceeds,
+Metal works headlessly and DCN is never touched. It is smaller, more
+informative, and does not foreclose (1).
+
+`enableAccelerator` (0x14e55570) is short and **not** display-specific:
+
+```
+testb $0x8, 0xc92(%rdi)
+jne   skip
+  (accel->0x380)->startHardwareProgressTimerUnlocked()
+skip:
+orb   $0x2, 0xc78(%rbx)
 ```
 
-It is free, non-invasive, needs no rebuild, and should name the
-IOConnect selector and the kernel function the thread waits in — which
-is where any hook belongs. Only after that is the kext worth changing.
+Two constraints on doing it:
 
-### Hypothesis for the next milestone — write predictions BEFORE measuring
+- **It is a substitution** and must be logged as one (2cy). A Metal
+  allocation succeeding afterwards proves the flag gated it — **not** that
+  a display exists.
+- **`...Unlocked` means a lock is expected.** Both real callers run inside
+  `display_mode_did_change` holding the accelerator lock, and
+  `acceleratorWaitEnabled` sleeps on `accel->0x88`. Calling it without
+  that lock is the shape that caused the 2fz/2ga and 2gg panics. Take
+  `accel->0x88` first, release after, and log all three steps.
 
-A command queue is the first thing needing a *client-facing* ring rather
-than the KIQ. Everything proven so far goes through SDMA and the KIQ:
-`powerUpHW` (2gi), the VMPT stamp on SDMA engine 1 (2gv/2gw), the PM4
-fences. The GFX engine has never been shown to execute anything, and the
-2di debt — `gfx_min = gfx_max = 0`, GFX DPM never started, open since
-2026-10-12 — has sat unexplained precisely because nothing had ever asked
-the GFX pipe to work. A command queue asks.
+`enableAccelerator` is an external **defined** symbol in
+IOAcceleratorFamily2, so milestone 2c is satisfied by routing/solving
+against *that* kext id — and calling Apple's function is preferable to
+setting bit 0x2 ourselves, since the function also starts the progress
+timer.
 
-That is a hypothesis. It is **not** a finding, and the next step is to
-instrument the path rather than act on it:
-
-- Hook `AMDAccelCommandQueue::initSubmitChannels` — 2ha's scan already
-  found it calling `getHWChannel(engine, ring)` twice, so it is on this
-  path and its engine arguments are measurable.
-- Mark entry/return of each stage the way 2gn marked the 0x1B chain, so
-  the stopping point is located rather than guessed.
-- Check whether the 2gv remap fires again here, and for which engines.
-
-### Procedure that is now proven and should be kept
-
-`metal_check.sh` writes each step to `logs/<ts>-metal/` and `sync`s before
-the next, and splits enumerate from dispatch. Five captures survived a
-hang that took the machine down, and the four clean enumerate runs are
-what reduce the truncated file to a single failing call. One combined
-probe would have yielded "it hung somewhere".
+**(1) Lift 2ct** — adopt the display pipe so a real mode change enables
+it. Riskiest: Apple's Navi 21 display code is DCN 3.0, this chip is DCN
+3.1.2, and nothing here has ever initialised DCN.
 
 ### Also open
 
-- Whether the 2hd hang is machine-wide.
+- What else `enableAccelerator` implies — whether a headless-enabled
+  accelerator can actually allocate.
 - **Why armed boots have no display at all** (since ~2c, not intermittent).
-- Who calls `incrementStamp(25)`; why the stamp table grew 63 → 65.
 - The `/options` race (standing debt; a bounded retry is owed).
-- What 0x12 and 0x1D are for — incidental to 0x1B, but unexplained.
+- Who calls `incrementStamp(25)`; why the stamp table grew 63 → 65.
+- The 2di debt (`gfx_min = gfx_max = 0`) — untouched by 2hf, still open.
 
 
 ## 3. Verified on hardware — do NOT re-derive these

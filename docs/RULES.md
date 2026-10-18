@@ -216,8 +216,11 @@ It is what broke the GPU-restart loop.
   matter.
 - The 2am/2an/2ao blanket firmware-ready bypasses still owe the explanation
   2cy demanded.
-- 2ct refuses the display pipe **by design**, so no boot has ever run with
-  the accelerator driving the panel. Its rationale says this keeps the
+- 2ct refuses the display pipe **by design** — and **2hf shows this is
+  what hangs Metal**: no display pipe means no `display_mode_did_change`,
+  which is the only caller of `enableAccelerator()`, so `fEnabled` is
+  never set and every `IOAccelResourceCreate` sleeps forever. No boot has
+  ever run with Its rationale says this keeps the
   desktop on IONDRVFramebuffer — but in practice **armed boots have no
   display at all** and never have. Why the panel dies even with the pipe
   refused is unexplained and is a separate problem from 2ct. [user,
@@ -253,12 +256,19 @@ path despite them. Nothing in the 0x1B path is now known to fail.
 Unknown Prototype", 1024 threads/TG, 4 GB working set — against **0
 devices** unarmed. The frontier is now **`newCommandQueue`**, the first
 operation a Metal client asks for: the probe never returns from it, with
-no panic. **The hang is process-local** (2he, asked of the user): SSH and
-the rest of the machine stay responsive, so the GPU is not hard-hung and
-the blocked thread can be sampled for its stack. Hypothesis to test, not a finding: everything proven so far
-runs through SDMA and the KIQ, and a command queue is the first thing to
-need a client-facing GFX ring — which ties to the 2di debt
-(`gfx_min = gfx_max = 0`, GFX DPM never started).
+no panic. **The hang is process-local** (2he): SSH stays up, so the blocked thread
+was sampled — and **2hf identified the cause outright**. The stacks give
+`newCommandQueue` → the blit manager's initial shaders → the first buffer
+allocation → `IOAccelResourceCreate` → in the kernel,
+`IOAccelSharedUserClient2::new_resource` →
+`IOGraphicsAccelerator2::acceleratorWaitEnabled` → asleep in
+`waiting_for_fEnabled`. `fEnabled` is **bit 0x2 at accel+0xc78**; its only
+setter is `IOGraphicsAccelerator2::enableAccelerator()`, whose only two
+callers are `IOAccelDisplayMachine::display_mode_did_change` and the
+Legacy variant. **2ct refuses the display pipe, so no mode change ever
+happens, so the accelerator is never enabled, so every resource creation
+blocks forever.** 2hd's GFX-ring guess is withdrawn — the thread never
+reaches hardware.
 
 **No armed boot has ever reached a desktop** (user, 2026-10-17): since
 roughly milestone 2c every armed boot has shown verbose log lines and
