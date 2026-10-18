@@ -150,3 +150,23 @@ Used by 2hr for one fact: `amdgpu_gmc_pd_addr()` for Vega10+ does
 and `AMDGPU_PTE_VALID` is `(1ULL << 0)` — so every page-directory base
 Linux writes to GCVM_CONTEXT*_PAGE_TABLE_BASE_ADDR has bit 0 set, at every
 table depth. Apple's `AMDGFX10VMM::getPDEValue` agrees (it ends `incq %rax`).
+
+## nvd.h, gfx_v10_0.c
+
+    drivers/gpu/drm/amd/amdgpu/nvd.h
+    drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+
+Fetched 2026-10-18; same commit caveat as the entries above.
+sha256 `0a4de0b61f8be33d83e7dc1af4b96370898af36d211f296daf018e72820ea0eb` and `3b2013dcb603845c3785fe02fc9aeee848b391f10d462e9384a1e4f370a4fb1b`.
+
+Used by 2hw for the PM4 format:
+
+- `PACKET3(op, n) = (3 << 30) | ((op & 0xFF) << 8) | ((n & 0x3FFF) << 16)`,
+  so a type-3 header is `(dw >> 30) == 3` and the opcode is `(dw >> 8) & 0xFF`.
+- `PACKET3_RELEASE_MEM = 0x49` (also NOP 0x10, WAIT_REG_MEM 0x3C,
+  INDIRECT_BUFFER 0x3F).
+- `gfx_v10_0_ring_emit_fence` gives the RELEASE_MEM dword layout:
+  dw0 header, dw1 event/GCR, dw2 DATA_SEL/INT_SEL/DST_SEL,
+  **dw3 lower_32_bits(addr), dw4 upper_32_bits(addr)**, dw5/dw6 seq,
+  dw7 ctx_id. dw3/dw4 is the end-of-pipe timestamp writeback address 2hw
+  exists to read.
