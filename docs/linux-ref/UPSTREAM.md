@@ -106,3 +106,33 @@ with the real commit when the network allows.
 Used by 2hl to decode GRBM_STATUS, CP_STAT and CP_RB0_CNTL from the armed
 boot's ring probe. The companion offsets header gc_10_3_0_offset.h, already
 here, supplies the register addresses.
+
+## gmc_v10_0.c, gfxhub_v2_1.c
+
+    drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+    drivers/gpu/drm/amd/amdgpu/gfxhub_v2_1.c
+
+Fetched 2026-10-18 from raw.githubusercontent.com/torvalds/linux/master/.
+sha256 `69b5db518f67697d15cdac885a93718d6e1b93386522ca4e323145c2fbb2a344` and `94b1a294f030020ba2e71849a0762430e6d66839e3ddeee1129bb9862369fe86`. The commit is not recorded for the same reason
+as gc_10_3_0_sh_mask.h above — the API and `git ls-remote` are unreachable
+from here. Replace with the real commit when the network allows.
+
+Used by 2hp for three things:
+
+- `gfxhub_client_ids[]` in gfxhub_v2_1.c names the `CID` field of
+  GCVM_L2_PROTECTION_FAULT_STATUS. **CID 4 = "CPF"**, the command
+  processor's fetcher.
+- `gmc_v10_0_process_interrupt` reads the status register and then does
+  `WREG32_P(hub->vm_l2_pro_fault_cntl, 1, ~1)` — the driver **clears and
+  re-arms** the fault status after each fault. That is why two reads a
+  minute apart return different values: each catches a different, more
+  recent fault.
+- `gfxhub_v2_1_get_invalidate_req` sets
+  `CLEAR_PROTECTION_FAULT_STATUS_ADDR` in the invalidate request, which
+  is why GCVM_L2_PROTECTION_FAULT_ADDR_LO32 can read back 0 after a TLB
+  invalidation.
+
+Note what Linux does NOT do: it takes the faulting address from the
+interrupt vector (`entry->src_data[0] << 12`), **not** from
+GCVM_L2_PROTECTION_FAULT_ADDR_LO32. So this source does not establish how
+to convert that register to an address, and 2hp does not claim one.

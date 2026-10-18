@@ -359,20 +359,50 @@ chip's. `CP_RB0_BASE = 0xffbfde00` puts the GFX ring at VA
 `0xFF_BFDE_0000`, inside Apple's GPUVM space — reached through the
 translation that is faulting.
 
-**The fault register is LATCHED and carries no timestamp.** It says at
-least one fault happened since the last clear, not that this fault
-caused this hang; `MORE_FAULTS` means there were several. Treat the
-chain (fault -> no timestamp -> timeout -> reset halts the CP -> replay
-waits on the same timestamp) as inference until the next step closes
-it. Reading it without that caveat would be the recurring error again.
+**2hp settles when, and names the client.** The two fault reads return
+**different** values, so the register is being cleared and re-armed —
+Linux's `gmc_v10_0_process_interrupt` does exactly that
+(`WREG32_P(vm_l2_pro_fault_cntl, 1, ~1)`) after each fault. So Apple is
+taking VM fault interrupts and **the faults are ongoing**, not one
+historical latch. 2hn's caveat is retired.
 
-Next, and read-only: sample `GCVM_L2_PROTECTION_FAULT_STATUS` **early**
-(the `+15 s` prog sample) as well as at `+100 s` and `+160 s`. Clean
-early and faulted later establishes the chain; already faulted at
-`+15 s` means an earlier GPUVM problem that has been walked past since
-bring-up. Clearing the status to re-arm it would be stronger but is a
-register *write*, and this probe is read-only by design (2cy).
+**`CID = 4` is `CPF`** (`gfxhub_client_ids[]`, gfxhub_v2_1.c) — the
+command processor's *fetcher*, the block that reads the command stream.
+`CPF_BUSY` is set in every sample of every boot, including ones where
+everything else went idle.
 
-Owed: `vmalo`/`vmahi` both read 0 — either the faulting page really is
-VA 0 (consistent with `MAPPING_ERROR`, the shape of an uninitialised
-pointer) or the address did not latch. Resolve before using it.
+**The +12 s sample is already faulted**, with the CP already halted. So
+this is not something a Metal client triggers: it is present before any
+client, and every client hang is downstream. Two *different* faults were
+caught — `VMID=3` on a read at +12 s, `VMID=0` on a write at +100 s —
+so it is not one context or one access.
+
+**The GPU recovers and the software does not.** At +160 s `me=0`
+(CP un-halted), `cps=0` (CP idle), `r == w == 0x180` (ring empty,
+pointers rewound): the reset completed and **threw the pending work
+away**. The timestamp the waiting thread needs was part of that work, so
+it can never arrive. The machine was still hung. The bug is no longer
+"the GPU is wedged" — at +160 s the GPU is fine.
+
+Revises 2hl: the ring is not simply frozen. `rptr` advanced
+`0xb1 -> 0x2b1` between +12 s and +100 s. 2hl caught a stopped window.
+
+**Distrust `GRBM_STATUS`.** It reads `a0003028` in all five samples
+across two boots, including where `CP_STAT = 0` and the CP is un-halted
+yet it still claims `CP_BUSY` + `GUI_ACTIVE`. Either it is not read live
+through the accessor or it means something else. Nothing in 2hp rests on
+it and 2hl's use of it is weaker than it looked. Owed.
+
+Owed also: `vmalo = 0x400300` at +12 s is a real latched value (the
+later zeros are TLB invalidations, which set
+`CLEAR_PROTECTION_FAULT_STATUS_ADDR`), but **Linux never converts this
+register to an address** — it takes the address from the interrupt
+vector. `0x400300 << 12` is the obvious reading and is unsourced. Do not
+use it until it is.
+
+**Next: why does CPF fail to translate, from the start of the boot?**
+Read-only, through the proven accessor: the GCVM context registers for
+VMID 0 and VMID 3 — `PAGE_TABLE_BASE_ADDR_LO32/HI32`,
+`PAGE_TABLE_START/END_ADDR` — against what 2em's `PT_BASE` fix actually
+wrote. 2em made translation work for what it tested; a CPF fetch of the
+ring at `0xFF_BFDE_0000` is not necessarily inside that.
