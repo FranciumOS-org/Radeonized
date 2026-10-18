@@ -8080,19 +8080,25 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // faulting address - and no further inference is needed. Reading them
     // does not clear them; the fault status is cleared by a write, which this
     // probe never does.
-    struct { const char *name; uint64_t id; } regs[] = {
-        { "vmf",     RB_2HM_VMFAULT_STATUS },
-        { "vmalo",   RB_2HM_VMFAULT_LO32   },
-        { "vmahi",   RB_2HM_VMFAULT_HI32   },
-        { "vmfc",    RB_2HM_VMFAULT_CNTL   },
-        { "r",       RB_2HK_CP_RB0_RPTR    },
-        { "w",       RB_2HK_CP_RB0_WPTR    },
-        { "cps",     RB_2HK_CP_STAT        },
-        { "grbm",    RB_2HK_GRBM_STATUS    },
-        { "g2",      RB_2HM_GRBM_STATUS2   },
-        { "me",      RB_2HM_CP_ME_CNTL     },
-        { "rbb",     RB_2HM_CP_RB0_BASE    },
-        { "rbbhi",   RB_2HM_CP_RB0_BASE_HI },
+    //
+    // 2ho: `once` marks the registers that cannot change during a boot - the
+    // fault-enable mask and the ring's base address. They are read and logged
+    // on phase 0 only. Three samples of everything would not fit the note,
+    // and a note that silently truncates is worse than one that is explicit
+    // about what it carries.
+    struct { const char *name; uint64_t id; bool once; } regs[] = {
+        { "vmf",     RB_2HM_VMFAULT_STATUS, false },
+        { "vmalo",   RB_2HM_VMFAULT_LO32,   false },
+        { "vmahi",   RB_2HM_VMFAULT_HI32,   false },
+        { "vmfc",    RB_2HM_VMFAULT_CNTL,   true  },
+        { "r",       RB_2HK_CP_RB0_RPTR,    false },
+        { "w",       RB_2HK_CP_RB0_WPTR,    false },
+        { "cps",     RB_2HK_CP_STAT,        false },
+        { "grbm",    RB_2HK_GRBM_STATUS,    false },
+        { "g2",      RB_2HM_GRBM_STATUS2,   false },
+        { "me",      RB_2HM_CP_ME_CNTL,     false },
+        { "rbb",     RB_2HM_CP_RB0_BASE,    true  },
+        { "rbbhi",   RB_2HM_CP_RB0_BASE_HI, true  },
     };
 
     char one[288];
@@ -8100,6 +8106,9 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     int w = snprintf(one, sizeof(one), "p=%u", phase);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
     for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        if (regs[i].once && phase != 0) {
+            continue;
+        }
         uint32_t off = resolve(obj, regs[i].id);
         uint32_t val = rd(obj, off);
         rbgpu_log("2hk: %s dword 0x%x = 0x%08x", regs[i].name, off, val);

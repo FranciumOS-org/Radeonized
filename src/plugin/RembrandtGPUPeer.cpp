@@ -1062,7 +1062,7 @@ static thread_call_t     g_rbgpuProgCalls[3] = { nullptr, nullptr, nullptr };
 // 2hk: two more, for the ring probe. Separate calls, armed AFTER all three
 // prog2 samples are due, so that if a GC register read stalls the way 2fe's
 // dump did, it takes only itself down and not the progress samples.
-static thread_call_t     g_rbgpuRingCalls[2] = { nullptr, nullptr };
+static thread_call_t     g_rbgpuRingCalls[3] = { nullptr, nullptr, nullptr };
 extern void rbgpu_ring_probe_2hk(unsigned phase);
 
 static void rbgpu_ring_action(thread_call_param_t p0, thread_call_param_t) {
@@ -1146,18 +1146,34 @@ void rbgpu_progwatch_start(void) {
               "-> rbgpu-prog2); a missing sample now means the timer did not "
               "fire, not that the handler failed to re-arm", armed);
 
-    // 2hk: the ring probe, at +100 s and +160 s. Two samples, because one
-    // decides nothing: a frozen rptr is only meaningful against a wptr that
-    // moved, and both are only meaningful across time. By +100 s the 2hj hang
-    // is long underway (WindowServer wedges at login), and +160 s leaves room
-    // to start a Metal dispatch over SSH between the two.
+    // 2hk: the ring probe. 2ho adds the EARLY sample, and it is the one the
+    // next question turns on.
+    //
+    // 2hn read GCVM_L2_PROTECTION_FAULT_STATUS = 0x40953 - WALKER_ERROR,
+    // MAPPING_ERROR, MORE_FAULTS - but that register is LATCHED and carries
+    // no timestamp. It says a fault happened, not when, and not that it is
+    // the fault the CP died on. Reading it once and calling it the cause
+    // would be the recurring error for the twenty-sixth time.
+    //
+    // +12 s answers it read-only. rbgpu-prog2 puts the first waitForTimestamp
+    // timeout AFTER +21 s (T=0 at the +15 s sample, T=8 at +35 s), so +12 s
+    // is before the hang develops:
+    //
+    //   clean at +12 s, faulted at +100 s -> the fault happens in the window
+    //       where the hang develops, and 2hn's chain is established
+    //   already faulted at +12 s          -> an earlier GPUVM problem that
+    //       bring-up has been walking past, which is a bigger finding
+    //
+    // +100 s and +160 s stay as they were: by +100 s the hang is long
+    // underway, and +160 s leaves room to start a Metal dispatch over SSH
+    // between the two.
     //
     // The probe itself is off unless -rbgpuringprobe; these timers are armed
     // either way so that a boot WITHOUT the arg still logs "ring probe OFF"
     // and cannot be mistaken for a timer that failed to fire.
-    static const uint32_t kRingMs[2] = { 100000, 160000 };
+    static const uint32_t kRingMs[3] = { 12000, 100000, 160000 };
     unsigned rarmed = 0;
-    for (unsigned i = 0; i < 2; i++) {
+    for (unsigned i = 0; i < 3; i++) {
         g_rbgpuRingCalls[i] = thread_call_allocate(
             rbgpu_ring_action, reinterpret_cast<thread_call_param_t>(
                                    static_cast<uintptr_t>(i)));
@@ -1169,8 +1185,9 @@ void rbgpu_progwatch_start(void) {
         thread_call_enter_delayed(g_rbgpuRingCalls[i], rd);
         rarmed++;
     }
-    rbgpu_log("2hk: ring probe armed, %u of 2 timers (+100 s, +160 s -> "
-              "rbgpu-ring)", rarmed);
+    rbgpu_log("2ho: ring probe armed, %u of 3 timers (+12 s, +100 s, +160 s "
+              "-> rbgpu-ring). The +12 s sample is the one that time-bounds "
+              "the latched VM fault 2hn found.", rarmed);
 }
 
 // 2gd (2026-10-15): every note carries a per-boot sequence number.
