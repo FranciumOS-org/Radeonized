@@ -10527,3 +10527,107 @@ wrong page and believing it. Whatever it maps must be checked against
 something known before any dword of it is interpreted: a PM4 packet
 stream has a recognisable `0xC0` type-3 header pattern, and a buffer
 that does not look like PM4 is a failed mapping, not a finding.
+
+## 2hx — the ring maps, and the timestamp-target hypothesis is REFUTED
+
+Boot of 2026-10-18 ~14:44, armed, build `1035EE1A` (matches `build/out`),
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 32`, boot-args plus
+`-rbgpuringdump`. Capture in `logs/20261018-144648-metal/`.
+
+```
+rbgpu-pm4 = b=32 pa=6c8911000 t3=799 r=2b1 w=380
+            | rm@1e  a=ffbfdc0000 s=3
+            | rm@8e  a=ffbfdc0000 s=4
+            | rm@10e a=ffbfdc0000 s=5
+```
+
+### The mapping is real
+
+`t3=799` — **799 PM4 type-3 headers in 1024 dwords.** The gate 2hw was
+built around did not just pass, it passed overwhelmingly; nothing but a
+command ring looks like that. So the route works: ring VA -> CONTEXT0's
+flat PTE table -> PTE -> physical page `0x6_C891_1000` -> one page
+mapped read-only. The bus-vs-physical worry is answered for this path.
+
+**This is the first time this project has read GPU-visible memory.** It
+is worth saying that the thing which made it safe was the refusal
+branch, not the success: had the PTE held a bus address that was not the
+CPU physical address, `t3` would have come back near zero and the dump
+would have said "failed mapping" instead of inventing a finding.
+
+### The hypothesis is dead
+
+Three `RELEASE_MEM` packets, at ring dwords `0x1e`, `0x8e` and `0x10e`,
+every one with
+
+```
+dw3/dw4  ADDR = 0xFF_BFDC_0000
+dw5/dw6  seq  = 3, 4, 5
+```
+
+**The end-of-pipe timestamp writeback address is `0xFF_BFDC_0000`, not
+zero.** 2ht's hypothesis — "the CP is told to write its timestamp to VA
+0, so the write faults and the timestamp never lands" — is **refuted**.
+It was labelled a hypothesis in 2ht, 2hu and 2hv and never built on, and
+it is now dropped on direct evidence from the command stream.
+
+By elimination this also resolves 2hp/2hv's ambiguity the other way: the
+`VA 0` in `status 0x40953` is the **cleared-register artifact**, not a
+null target. `CLEAR_PROTECTION_FAULT_STATUS_ADDR` had wiped the address
+before anyone read it, exactly as the alternative predicted. (Strictly
+this is inference from the refutation, not an independent measurement of
+the clear — but no reading now supports a genuine null.)
+
+`0xFF_BFDC_0000` sits inside CONTEXT0's window
+(`0xFF_BFA0_0000 .. 0xFF_FFE0_0000`, 2hr) and 128 KB below the ring
+itself at `0xFF_BFDE_0000`. Its page index into the flat table is
+`0xFFBFDC0 - 0xFFBFA00 = 0x3C0` = **960**, against the ring's 992.
+
+### What the CP actually did
+
+All three fence packets sit **before** `rptr = 0x2b1` (689), so the CP
+fetched past all of them. It was handed three completion fences for
+sequence numbers 3, 4 and 5, aimed at a sane in-window address — and the
+driver still waits forever.
+
+That splits cleanly into two remaining possibilities, and they are
+distinguished by reading one page:
+
+1. **the writes faulted** — `0xFF_BFDC_0000`'s PTE is bad, so the
+   timestamp never reached memory. This is now the natural reading of
+   the CPF *write* fault under VMID 0 (2ht #3), and it would make the
+   fault address `0xFF_BFDC_0000` rather than 0.
+2. **the writes landed and the driver reads elsewhere** — the memory at
+   `0xFF_BFDC_0000` contains 5, and `waitForTimestamp` is polling a
+   different address.
+
+### Next, and it reuses everything already built
+
+Read PTE[960] for the fence buffer (the 2el machinery, already in the
+plugin), and **map `0xFF_BFDC_0000` and dump its first dwords**.
+
+- contents hold `5` -> the fences landed; the bug is on the driver's
+  read side, and this becomes a question about where `waitForTimestamp`
+  looks rather than about the GPU at all
+- contents hold `0` or junk, PTE[960] invalid -> the write faulted, and
+  the VM fault finally has its real address
+
+One page, the same proven route, the same sanity discipline — though the
+gate has to change, because a fence buffer is not full of PM4 headers.
+What makes a fence buffer recognisable is far weaker evidence than
+`t3=799`, so the dump must report the raw dwords and the PTE and let the
+reading be argued from those, not assert a verdict in-kernel.
+
+### Two incidental findings
+
+**The RBGPULog had rotated past the dump.** The raw dwords around `rptr`
+were logged and are gone: the buffer held roughly **994,000 entries of
+`SpecialAMDKey request 0x14`**, one every ~7 ms, which flushed
+everything else out. 2es said the published log ends at the last refresh
+and cannot locate a hang; this is the same defect costing a
+deliberately-captured measurement. Anything that must survive goes to
+NVRAM, which is why the packet addresses did survive.
+
+**The driver polls request 0x14 about 994,000 times.** Not investigated
+here and not obviously part of the hang, but a driver issuing a million
+of anything while wedged is worth a note.
