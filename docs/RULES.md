@@ -521,22 +521,46 @@ its flat-table page index is **960** (the ring's is 992). All three
 fence packets sit **before** `rptr = 0x2b1`, so the CP fetched past all
 of them and the driver still waits.
 
-**Two possibilities left, and one page separates them:**
+**2hz: the fence writes LAND, and neither possibility was right.**
 
-1. the writes **faulted** — PTE[960] is bad, the timestamp never
-   reached memory, and the CPF *write* fault under VMID 0 is really at
-   `0xFF_BFDC_0000`
-2. the writes **landed** — the memory holds 5 and `waitForTimestamp`
-   polls somewhere else, making this a driver-side bug, not a GPU one
+```
+rbgpu-fence = fv=ffbfdc0000 idx=3c0 pte=30006c835d077 v=1 s=1
+              pa=6c835d000 rpa=6c7c05000 seq=8 o=0
+              d: 6 0 280 0 380 0 2 1 0 0 0 0
+```
 
-**Next:** read PTE[960] (2el machinery, already present) and map
-`0xFF_BFDC_0000` to dump its first dwords. The `t3` gate does not
-transfer — a fence buffer is not full of PM4 — so this one reports the
-raw dwords and the PTE and leaves the verdict to be argued from them
-rather than asserting it in-kernel.
+`PTE[960] = 0x3_0006_C835_D077` — **VALID, SYSTEM, SNOOPED, READABLE,
+WRITEABLE**. The fence page is mapped and writeable, so "the writes
+faulted" is dead. And the page holds **6** at `+0x00`, inside the exact
+range of sequence numbers the ring's RELEASE_MEM packets carry (3, 4,
+5 … up to `seq=8`). **The GPU's timestamp writes land. The fence
+mechanism works end to end.**
 
-Incidental from 2hx: the RBGPULog had rotated past the dump's raw
-dwords, flushed by roughly **994,000 `SpecialAMDKey request 0x14`
-entries**, one every ~7 ms. 2es again — anything that must survive goes
-to NVRAM. The million polls are unexplained and not obviously part of
-the hang.
+But only *up to 6*: fences 7 and 8 were submitted and never completed.
+So it is not a broken fence path and not a driver reading the wrong
+address — **the GPU executes the stream, signals six fences correctly,
+then stops partway**, which is 2hl's frozen `rptr` seen from the other
+side. (`+0x08`/`+0x10` hold `0x280`/`0x380`, the ring pointer shadows —
+`0x380` is the live `wptr`. Noted, not interpreted.)
+
+**So context 3 is back at the centre, on much firmer ground.** The
+fence machinery is exonerated; the `0x40953` VMID-0 write now looks
+like a consequence of the reset path; the hub-1 pair are phantoms. The
+one unexplained fault left is **2ht #1: a CPF READ at VA
+`0x4_0030_0000` under VMID 3** — whose window covers that address and
+whose page-directory base is the one missing the `VALID` bit that both
+Linux and Apple's own `getPDEValue` set unconditionally (2hr).
+
+Still not proven, and 2hr's three caveats stand unchanged: the hardware
+may ignore bit 0 there, the values may not come from `getPDEValue`, and
+the addresses may be wrong independently of the flag. What changed is
+that **nothing else is competing with it any more**.
+
+**Next:** find what writes `GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR`. 2hr
+could not locate the write path; that is now the question worth a boot.
+Options: hook `getPDEValue` to see what Apple computes versus what
+lands in the register, or find the register write statically. Setting
+the bit by hand remains the obvious experiment and remains awkward —
+contexts 1-15 are reprogrammed per VM bind, so a one-shot timer write
+would be overwritten before it could be tested; it needs a hook on the
+write, not a timer.
