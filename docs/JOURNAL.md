@@ -10055,3 +10055,147 @@ explaining before the address is used for anything.
 Hung at commit again, identically to 2hj and 2hl. Three boots, same
 place. `rbgpu-prog2`: `W=1` throughout — one `waitForStamp` call,
 timeouts climbing `T=0 -> 8 -> 36`.
+
+## 2hp — the faulting client is CPF, the faults are ongoing, and the GPU recovers while the software does not
+
+Boot of 2026-10-18 ~02:30, armed, build `8EB5C8DF` (matches `build/out`),
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 28`. Capture in
+`logs/20261018-023219-metal/`; the third sample came from live NVRAM,
+which this time carried all three.
+
+```
+p=0 (+12s)   vmf=3009bb vmalo=400300 vmahi=0 vmfc=1ffc
+             r=b1  w=280 cps=94078600 grbm=a0003028 g2=54204008 me=15000000
+             rbb=ffbfde00 rbbhi=0
+p=1 (+100s)  vmf=40953  vmalo=0      vmahi=0
+             r=2b1 w=380 cps=90038600 grbm=a0003028 g2=54204008 me=15000000
+p=2 (+160s)  vmf=40953  vmalo=0      vmahi=0
+             r=180 w=180 cps=0       grbm=a0003028 g2=14200008 me=0
+```
+
+### 1. The faults are ongoing, not one latched event — 2hn's caveat retires
+
+2hn could not say *when* the fault happened, because the status register
+latches. **The two reads return different values**, which settles it:
+something clears the register between them.
+
+Linux says what. `gmc_v10_0_process_interrupt` reads
+`vm_l2_pro_fault_status` and then does
+`WREG32_P(hub->vm_l2_pro_fault_cntl, 1, ~1)` — the driver clears and
+re-arms after every fault it handles. So Apple's driver is **taking VM
+fault interrupts and clearing them**, and each of our samples caught a
+*different, more recent* fault.
+
+The faults are **recurring throughout the boot**, not a single historical
+event. That is stronger than 2hn's reading and it is measured, not
+inferred.
+
+It also explains `vmalo` going to 0: `gfxhub_v2_1_get_invalidate_req`
+sets `CLEAR_PROTECTION_FAULT_STATUS_ADDR` in the invalidate request, so a
+TLB invalidation clears the address register. The `0x400300` captured at
++12 s is a real latched value; the later zeros mean an invalidation ran
+in between, not that the address is zero.
+
+**What is still not established:** how to turn `vmalo` into an address.
+Linux takes the faulting address from the *interrupt vector*
+(`entry->src_data[0] << 12`), never from this register. `0x400300 << 12`
+= `0x4_0030_0000` is the obvious reading and it is **not** sourced. Not
+used for anything here.
+
+### 2. The faulting client is the CP's fetcher
+
+`CID = 4` in both samples. `gfxhub_client_ids[]` in `gfxhub_v2_1.c`:
+
+```
+[0] CB/DB  [1] Reserved  [2] GE1  [3] GE2  [4] CPF  [5] CPC  [6] CPG  [7] RLC ...
+```
+
+**CID 4 = CPF**, the command processor's *fetcher* — the block that
+fetches command buffers and indirect buffers. The client that cannot
+translate is the one reading the command stream.
+
+And `GRBM_STATUS2` has **`CPF_BUSY` set in all three samples**, including
+`p=2` where everything else has gone idle. The fetcher is the one thing
+that never comes back.
+
+### 3. Two different faults, not one repeated
+
+```
+p=0  WALKER_ERROR=5  PERMISSION_FAULTS=0xb  MAPPING_ERROR=1  CID=4  VMID=3  (a READ)
+p=1  WALKER_ERROR=1  PERMISSION_FAULTS=5    MAPPING_ERROR=1  CID=4  VMID=0  (RW=1, a WRITE)
+```
+
+Different VMIDs, different directions, different error codes. **VMID 3**
+at +12 s is a client context, not the kernel's VMID 0. So the problem is
+not confined to one context or one access.
+
+### 4. The early sample is already faulted — and that is the answer to 2ho
+
+2ho asked: clean at +12 s and faulted later, or faulted already? **Faulted
+already**, and with the CP already halted (`me=15000000`) twelve seconds
+in.
+
+By 2ho's own pre-written table that is the second branch: *an earlier
+GPUVM problem that bring-up has been walking past.* The frontier is
+therefore **not** something that begins when a Metal client submits. It
+is present before any client, and the client hang is downstream of it.
+
+This also revises 2hl. The ring is not simply frozen: between +12 s and
++100 s `rptr` advanced `0xb1 -> 0x2b1` and `wptr` `0x280 -> 0x380`. Work
+*was* progressing, in bursts, while faulting. 2hl's two identical samples
+caught a window where it happened to be stopped.
+
+### 5. The GPU recovers; the software does not
+
+`p=2` is the most surprising reading of the night:
+
+```
+me = 0           CE_HALT, PFP_HALT, ME_HALT all CLEARED - the CP is running again
+cps = 0          CP_STAT entirely idle
+r = w = 0x180    rptr == wptr: the ring is EMPTY and the pointers were REWOUND
+g2: CPG_BUSY and RLC_RQ_PENDING gone (CPF_BUSY remains)
+```
+
+Between +100 s and +160 s the reset **completed**. The CP was un-halted,
+the ring reset to an empty state, and the pending work discarded rather
+than replayed — `rptr == wptr` at an offset lower than either previous
+sample.
+
+**And the machine was still hung.** Metal still blocked in
+`waitUntilCompleted`, WindowServer still blocked, the event-machine
+thread still polling. So the shape of the bug is now:
+
+> the hardware faults, the driver resets it, the reset succeeds and
+> throws the work away — and the timestamp that the waiting thread needs
+> was part of the work that was thrown away, so it never arrives and
+> nothing ever wakes.
+
+That is a different problem from "the GPU is wedged". The GPU is fine at
++160 s. The software is waiting for a completion that can no longer
+happen.
+
+### 6. One reading to distrust
+
+`GRBM_STATUS` reads **`a0003028` in all three samples, and in both
+samples of the previous boot.** Five identical reads across two boots,
+including at `p=2` where `CP_STAT` is 0 and the CP is un-halted — yet
+`GRBM_STATUS` still claims `CP_BUSY` and `GUI_ACTIVE`.
+
+That constancy is suspicious. Either this register is not being read
+live through the accessor, or it means something other than the obvious.
+**Nothing in this milestone rests on `GRBM_STATUS`**, and 2hl's use of it
+should be treated as weaker than it looked. Resolving it is owed.
+
+### Next
+
+The question has moved. It is no longer "why does the GPU not retire the
+timestamp" but **"why does CPF fail to translate, from the very start of
+the boot"**.
+
+Cheapest next reads, all through the proven accessor and still
+read-only: the GCVM context registers for the faulting contexts —
+`GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32/HI32`,
+`GCVM_CONTEXT0_PAGE_TABLE_START/END_ADDR`, and the VMID 3 equivalents —
+compared against what 2em's `PT_BASE` fix actually wrote. 2em made
+translation work for what it tested; the ring base at
+`0xFF_BFDE_0000` and a CPF fetch are not necessarily inside that.
