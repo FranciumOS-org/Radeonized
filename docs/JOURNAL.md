@@ -9252,3 +9252,167 @@ likely.
 
 Doing (1) first is the point: it is free, it is non-invasive, and it tells
 us where to put the hook that (2) would otherwise have to guess.
+
+## 2hf — the hang is `fEnabled`, and 2ct is why it is never set
+
+**Boot 23 (F9623A20, armed).** `logs/20261018-001306-metal/`, `state.txt`
+recording `d=72 armed=1` live. The 2hd hang reproduced exactly
+(`dispatch: creating queue`, nothing after), 2he's sampler fired, and the
+user ran it under `sudo`, so both stacks are present.
+
+### The userspace stack names the call
+
+```
+newCommandQueue
+ → amdMtl_Device_LazyInit → GFX10_MtlDevice amdMtl_LazyInit
+  → amdMtl_InitUBMInterface → UBMCreate
+   → BltMgrContainer::Create → BltMgr::Init → Gfx10BltMgr::HwlInit
+    → Gfx10ShaderVidMemMgr::CpuLoadInitialShaders
+     → ShaderVidMemMgr::AllocVidMemForShaders → BltMgrBase::AllocVidMem
+      → amdMtlAllocateBuffer → MTLIOAccelBuffer → MTLIOAccelResource
+       → IOAccelResourceCreate → IOConnectCallMethod → mach_msg2_trap
+```
+
+`newCommandQueue` lazily builds the blit manager, which loads its initial
+shaders, which needs video memory. The first buffer allocation a Metal
+client ever makes goes into the kernel and does not come back.
+
+### The kernel stack names the reason
+
+`spindump` gave unsymbolicated frames; resolved against
+`build/re/IOAcceleratorFamily2` (`__TEXT` vmaddr 0x14e13000, offsets as
+spindump prints them):
+
+```
++187908  IOAccelSharedUserClient2::externalMethod                  +0x82
++187401  IOAccelSharedUserClient2::s_new_resource                  +0xa7
++179561  IOAccelSharedUserClient2::new_resource                    +0x1fd
++271009  IOGraphicsAccelerator2::acceleratorWaitEnabled            +0x8f
++271091  waiting_for_fEnabled(_IOLock*, IOGraphicsAccelerator2*)   +0xb
+         ... kernel sleep primitives
+```
+
+`acceleratorWaitEnabled` (0x14e55212):
+
+```
+movl  0xc78(%rdi), %eax     ; flags word at accel+0xc78
+testb $0x2, %al             ; bit 0x2 == enabled
+jne   0x14e552c0            ; set -> return at once
+...
+callq waiting_for_fEnabled  ; 0x14e5529c; +0x8f is the return address here
+```
+
+The `+0x8f` frame is 0x14e552a1, the instruction after that call, so this
+is the plain `waiting_for_fEnabled` path — not the
+`_after_poweredOffByAGC` or `_after_displayModeChange` variants.
+
+### What sets the bit, and who calls it
+
+A scan of every write to `0xc78` in IOAcceleratorFamily2 gives exactly one
+setter of bit 0x2:
+
+```
+IOGraphicsAccelerator2::enableAccelerator()   0x14e5558e  orb $0x2, 0xc78(%rbx)
+IOGraphicsAccelerator2::disableAccelerator()  0x14e555ba  andb $-0x3, 0xc78(%rbx)
+```
+
+and `enableAccelerator` has exactly **two** callers in the kext:
+
+```
+IOAccelDisplayMachine::display_mode_did_change(unsigned int)
+IOAccelLegacyDisplayMachine::display_mode_did_change(unsigned int)
+```
+
+**The accelerator is enabled by a display mode change, and nothing else.**
+
+### The chain, end to end
+
+```
+2ct refuses found_framebuffer  (by design, found_fb_refused=2)
+ → the accelerator adopts no display pipe
+  → no IOAccelDisplayMachine ever sees a mode change
+   → enableAccelerator() is never called
+    → fEnabled (bit 0x2 at accel+0xc78) is never set
+     → acceleratorWaitEnabled() sleeps in waiting_for_fEnabled
+      → IOAccelSharedUserClient2::new_resource never returns
+       → Metal's first buffer allocation hangs
+        → newCommandQueue hangs
+```
+
+Every link is read out of Apple's code; none is inferred from a return
+code or a timing coincidence. It also retroactively explains 2gq's
+`IOAccelDisplayMachine::waitForStampTimeout -> FALSE (pipe count 0)` — the
+same absent display machine, seen from the other side.
+
+### 2hd's hypothesis is withdrawn
+
+2hd guessed the stop would be a client-facing **GFX ring**, tied to the
+2di debt (`gfx_min = gfx_max = 0`). It is not. Nothing in the stack
+touches a ring, an engine or a queue; the thread never reaches hardware at
+all. It was labelled a hypothesis and not acted on, which is the only
+reason it cost nothing — had 2hd hooked
+`AMDAccelCommandQueue::initSubmitChannels` on the strength of it, the hook
+would have been in a function the thread never enters.
+
+The 2di debt is untouched by this and remains open on its own terms.
+
+### What this changes about 2ct
+
+2ct has been carried as a *standing debt* and, in the 2ha handoff, as "the
+next thing in the way" with the caveat that lifting it "gains less than
+hoped". That caveat was wrong. 2ct is not merely in the way of the panel;
+it is the identified cause of the Metal hang.
+
+Two directions, and they are genuinely different:
+
+1. **Lift 2ct** — let the accelerator adopt the display pipe, so a real
+   mode change enables it. Also the riskiest: Apple's Navi 21 display code
+   is DCN 3.0 and this chip is DCN 3.1.2, and nothing here has ever
+   initialised DCN.
+2. **Enable without the panel** — call `enableAccelerator()` once after
+   start, leaving 2ct refusing. If resource creation then proceeds, Metal
+   works headlessly and DCN is never touched. This is a substitution and
+   owes 2cy's discipline: it must be logged as one, and a stamp completing
+   afterwards proves the flag gated it, **not** that a display exists.
+
+(2) is the smaller, more informative step and does not foreclose (1).
+`enableAccelerator` is an external **defined** symbol in
+IOAcceleratorFamily2 (milestone 2c satisfied by the right kext id), so it
+can be called rather than faked — preferable to writing bit 0x2 ourselves,
+since Apple's function may do more than set the flag.
+
+**Open:** what else `enableAccelerator` does besides the `orb`; whether a
+headless-enabled accelerator can actually allocate; why armed boots have
+no display; the `/options` race; `incrementStamp(25)`; the 63 → 65 table.
+
+### Addendum — what `enableAccelerator` actually does, and the lock
+
+```
+__ZN22IOGraphicsAccelerator217enableAcceleratorEv:   0x14e55570
+  testb $0x8, 0xc92(%rdi)
+  jne   0x14e5558e
+  movq  0x380(%rbx), %rdi
+  callq IOAccelEventMachine2::startHardwareProgressTimerUnlocked()
+  orb   $0x2, 0xc78(%rbx)
+  retq
+```
+
+Two facts that matter for option (2):
+
+- **It is not display-specific.** It starts the event machine's hardware
+  progress timer (`accel->0x380` is the AMDAccelEventMachine, per 2gp) and
+  sets the bit. Nothing in it touches a pipe, a panel or DCN. That is what
+  makes enabling headlessly plausible rather than merely convenient.
+- **`...Unlocked` means a lock is expected to be held already.** Both real
+  callers are inside `display_mode_did_change`, which holds the
+  accelerator lock; `acceleratorWaitEnabled` sleeps on `accel->0x88`, so
+  that is the lock in question. Calling `enableAccelerator` from a hook
+  without holding `accel->0x88` would be calling an unlocked-variant
+  function with no lock — the shape that produced the 2fz/2ga and 2gg
+  panics. **Any attempt must take `accel->0x88` first**, and must say in
+  the log whether it got it.
+
+So option (2) is not a one-line call. It is: take `accel->0x88`, call
+`enableAccelerator()`, release, and log all three steps — with the
+substitution named as one (2cy), since a Metal allocation succeeding
+afterwards proves the flag gated it and nothing more.
