@@ -346,8 +346,33 @@ the wedged work is the driver's own, and Metal's compute goes to an
 MQD user queue, not RB0. 2hj's "the ring is full" is a consequence two
 levels removed, not the client ring filling.
 
-Next: the PM4 opcode in the ring at `rptr`, and
-`GCVM_L2_PROTECTION_FAULT_STATUS` — a VM fault stalls a CP in exactly
-this shape, and that register answers yes or no outright. Owed: the
-`rbgpu-ring` note overwrites itself, so the two samples must accumulate
-in one string the way `rbgpu-prog2` does.
+**A GPUVM page-table walk is failing, and the CP is halted** (2hn).
+`GCVM_L2_PROTECTION_FAULT_STATUS = 0x40953`: `WALKER_ERROR`,
+`MAPPING_ERROR`, `MORE_FAULTS`, `PERMISSION_FAULTS=5`, `CID=4`, `RW=1`
+(a write). Fault reporting is fully enabled (`CNTL = 0x1ffc`), so this
+is a chip reporting a fault, not one configured to ignore them. And
+`CP_ME_CNTL = 0x15000000` — `CE_HALT`, `PFP_HALT`, `ME_HALT` all set:
+the command processor is **halted**, which is why `rptr` is frozen with
+the front-end queues still full. The halt is almost certainly
+`resetHardwareAndReplay`'s own doing (2hj's stuck thread), not the
+chip's. `CP_RB0_BASE = 0xffbfde00` puts the GFX ring at VA
+`0xFF_BFDE_0000`, inside Apple's GPUVM space — reached through the
+translation that is faulting.
+
+**The fault register is LATCHED and carries no timestamp.** It says at
+least one fault happened since the last clear, not that this fault
+caused this hang; `MORE_FAULTS` means there were several. Treat the
+chain (fault -> no timestamp -> timeout -> reset halts the CP -> replay
+waits on the same timestamp) as inference until the next step closes
+it. Reading it without that caveat would be the recurring error again.
+
+Next, and read-only: sample `GCVM_L2_PROTECTION_FAULT_STATUS` **early**
+(the `+15 s` prog sample) as well as at `+100 s` and `+160 s`. Clean
+early and faulted later establishes the chain; already faulted at
+`+15 s` means an earlier GPUVM problem that has been walked past since
+bring-up. Clearing the status to re-arm it would be stronger but is a
+register *write*, and this probe is read-only by design (2cy).
+
+Owed: `vmalo`/`vmahi` both read 0 — either the faulting page really is
+VA 0 (consistent with `MAPPING_ERROR`, the shape of an uninitialised
+pointer) or the address did not latch. Resolve before using it.

@@ -9929,3 +9929,129 @@ overwrote `p=0`. The pair survived only because `metal_check.sh`
 happened to capture `state.txt` between the two samples. That was luck.
 The note must accumulate both samples in one string, the way
 `rbgpu-prog2` does — owed.
+
+## 2hn — a GPUVM page-table walk is failing, and the CP is halted
+
+Boot of 2026-10-18 ~02:19, armed, build `888D121C` (matches `build/out`),
+boot-args `-rbgpuforceenable wdt=-1 -rbgpuringprobe`. `state.txt` has
+`rbgpu-diag` = `d=73 armed=1` live and `rbgpu-boot = 27`; capture in
+`logs/20261018-022144-metal/`. The in-boot note:
+
+```
+rbgpu-ring = b=27 p=0 vmf=40953 vmalo=0 vmahi=0 vmfc=1ffc
+             r=2b1 w=380 cps=90038600 grbm=a0003028
+             g2=54200008 me=15000000 rbb=ffbfde00 rbbhi=0
+```
+
+(Live NVRAM still reads the `b=26` note — the `p=1` commit was lost across
+the power cycle while the `p=0` one survived. Exactly 2gq. The in-boot
+capture is the evidence; the live variable is not.)
+
+### The fault register is not zero
+
+Decoded against `docs/linux-ref/gc_10_3_0_sh_mask.h`:
+
+```
+GCVM_L2_PROTECTION_FAULT_STATUS = 0x00040953
+    MORE_FAULTS       = 1
+    WALKER_ERROR      = 1
+    PERMISSION_FAULTS = 5
+    MAPPING_ERROR     = 1
+    CID               = 4
+    RW                = 1       (a WRITE)
+```
+
+**`WALKER_ERROR` + `MAPPING_ERROR`: the page-table walker could not
+resolve an address.** On a write, from client 4, and `MORE_FAULTS` says
+it happened more than once.
+
+`GCVM_L2_PROTECTION_FAULT_CNTL = 0x1ffc` — every fault class is enabled,
+so this is not a chip configured to ignore faults; it is a chip reporting
+one.
+
+### And the CP is halted
+
+```
+CP_ME_CNTL = 0x15000000
+    CE_HALT = 1   PFP_HALT = 1   ME_HALT = 1
+```
+
+All three command-processor micro-engines are **halted**. That is why
+`rptr` is frozen at 0x2b1 with 207 dwords pending, and it reconciles the
+2hl reading: the front-end queues still hold fetched data
+(`ROQ_*_BUSY`, `PFP_BUSY`, `ME_BUSY` in `CP_STAT`) because the engines
+were stopped mid-stream rather than drained.
+
+**The halt is almost certainly the driver's doing, not the chip's.**
+`resetHardwareAndReplay` is exactly where the stuck thread sits (2hj),
+and halting PFP/ME/CE is what a channel reset does first. So the
+ordering that fits every reading so far is:
+
+1. a GPUVM write faults — the walker cannot map the address
+2. the work never completes, so the timestamp is never written
+3. `waitForTimestamp` times out (`rbgpu-prog2`: `T=0 -> 8 -> 36`)
+4. the event machine calls `resetHardwareAndReplay`, which **halts the CP**
+5. the replay waits for the same timestamp, which still never arrives
+6. everything queues behind it — WindowServer on the mutex, Metal on the
+   restart
+
+That is a chain, and steps 4-6 are measured. Step 1 is measured as *a
+fault having happened*; that it is **this** fault causing **this** hang
+is inference, and the next section says how to close it.
+
+```
+GRBM_STATUS2 = 0x54200008    CPF_BUSY, CPG_BUSY, RLC_BUSY, SDMA_BUSY
+CP_RB0_BASE  = 0xffbfde00 -> ring VA 0xFF_BFDE_0000
+```
+
+The ring base confirms the GFX ring lives in Apple's GPUVM space
+(`0xFF_BF..`, CLAUDE.md), reached through the same translation that is
+faulting.
+
+### What this does NOT establish, stated plainly
+
+**The fault status register is latched and carries no timestamp.** It
+says at least one fault occurred since the last clear; it does not say
+when, or that it was caused by the work the CP died on. `MORE_FAULTS`
+makes it certain there was more than one, and nothing distinguishes an
+early bring-up fault from a fault at the frontier.
+
+This is precisely the recurring error this project keeps paying for:
+reading a value without establishing what makes it meaningful. The
+reading is real and it is the best lead this project has had on this
+hang, but "a fault is latched" is not yet "the fault is the cause".
+
+**`vmalo = 0` and `vmahi = 0`.** Either the faulting page genuinely is
+VA 0 — consistent with `MAPPING_ERROR`, and the shape of an
+uninitialised pointer in a descriptor — or the address did not latch
+into those registers. Both are worth resolving and neither is assumed
+here.
+
+### The next measurement, and it is read-only
+
+Time-bound the fault **without writing anything**: read
+`GCVM_L2_PROTECTION_FAULT_STATUS` at an **early** point, before any
+client work — the existing `+15 s` prog sample is already there — and
+again at `+100 s` and `+160 s`.
+
+- clean early, faulted later -> the fault happens in the window where
+  the hang develops, and the chain above is established rather than
+  inferred
+- already faulted at `+15 s` -> there is an earlier GPUVM problem this
+  project has been walking past since bring-up, and that is a different
+  and larger finding
+- either way the question is answered by three reads of one register
+
+Clearing the status to re-arm it would be stronger, but that is a
+register **write**, and this probe has been read-only by design (2cy).
+The early-read version answers the same question and costs nothing, so
+it goes first.
+
+Also owed, unchanged from 2hl: `vmalo`/`vmahi` reading zero needs
+explaining before the address is used for anything.
+
+### The Metal probe
+
+Hung at commit again, identically to 2hj and 2hl. Three boots, same
+place. `rbgpu-prog2`: `W=1` throughout — one `waitForStamp` call,
+timeouts climbing `T=0 -> 8 -> 36`.
