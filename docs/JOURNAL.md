@@ -10199,3 +10199,141 @@ read-only: the GCVM context registers for the faulting contexts —
 compared against what 2em's `PT_BASE` fix actually wrote. 2em made
 translation work for what it tested; the ring base at
 `0xFF_BFDE_0000` and a CPF fetch are not necessarily inside that.
+
+## 2hr — the client contexts' page-directory base registers have no VALID bit
+
+Boot of 2026-10-18 ~02:47, armed, build `2066830F` (matches `build/out`),
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 29`. Capture in
+`logs/20261018-024701-metal/`.
+
+```
+rbgpu-vm = b=29
+  p=0  c0:cn=1555481,b=78fdfa001,s=ffbfa00,e=ffffe00
+       c1:cn=3b,     b=fb00b000, s=400000, e=23fffff
+       c3:cn=3b,     b=fb015000, s=400000, e=23fffff
+  p=1  c0:cn=1555481,b=78fdfa001  c1:cn=3b,b=fb00b000  c3:cn=3b,b=fb015000
+```
+
+Unchanged between +12 s and +100 s, so these are not a transient
+mid-programming state.
+
+### The windows are fine, and the contexts are enabled
+
+`GCVM_CONTEXT*_PAGE_TABLE_START/END_ADDR` hold a `LOGICAL_PAGE_NUMBER`
+(the sh_mask header names the field), so the windows are:
+
+```
+c0   VA 0xFF_BFA0_0000 .. 0xFF_FFE0_0000
+c1   VA 0x4_0000_0000  .. 0x23_FFFF_F000
+c3   VA 0x4_0000_0000  .. 0x23_FFFF_F000
+```
+
+- The **GFX ring at `0xFF_BFDE_0000`** (2hn) is inside c0's window. ✓
+- The **+12 s faulting page `0x400300`** = VA `0x4_0030_0000` is inside
+  c3's window, 3 MB past its start. ✓
+
+So two hypotheses from 2hq's pre-written list are **dead**: context 3 was
+not left unprogrammed, and this is not a range fault. `ENABLE_CONTEXT` is
+set in all three.
+
+### The anomaly: c1 and c3 have no VALID bit
+
+```
+c0  PDE = 0x7_8FDF_A001      bit 0 SET      <- 2em's patched value
+c1  PDE = 0x0_FB00B000       bit 0 CLEAR
+c3  PDE = 0x0_FB015000       bit 0 CLEAR    <- the context that faulted
+```
+
+The register field is literally named `PAGE_DIRECTORY_ENTRY_LO32`, so it
+carries a PDE, flags and all. Two independent sources say bit 0 must be
+set:
+
+- **Linux.** `amdgpu_gmc_pd_addr()` (amdgpu_gmc.c) for Vega10+ does
+  `flags = AMDGPU_PTE_VALID; ...; pd_addr |= flags`, and
+  `AMDGPU_PTE_VALID` is `(1ULL << 0)` (amdgpu_vm.h). Every page-directory
+  base Linux writes to this register has bit 0 set, at every depth.
+- **Apple's own code**, which matters more here.
+  `AMDRadeonX6000_AMDGFX10VMM::getPDEValue` (0xbe9b9de) ends:
+
+```
+    movabsq $0xffffffffffc0, %rdi
+    andq    %rdi, %rdx            ; address, 64-byte aligned
+    ...
+    shlq    $0x38, %rdi           ; bit 56 when level > depth
+    orq     %rdx, %rdi
+    leaq    (%rcx,%rdi), %rax     ; + the block-size field at bit 59
+    incq    %rax                  ; <<<< +1: the VALID bit
+    retq
+```
+
+**Every PDE Apple builds has bit 0 set.** A base register ending in
+`000` is therefore anomalous by Apple's own convention, not only by
+Linux's.
+
+`AMDGCHub_10_3_0::fillVMRegisters` (0xbed0cae) builds the offset table
+for all sixteen contexts with exactly the strides the header gives
+(`0x1667 + 2N`, `0x1687 + 2N`, `0x16a7 + 2N`, `0x15fc + N`), so Apple
+addresses context 3 and the offsets this probe used are Apple's own.
+
+### Also different: the table depth
+
+```
+c0    PAGE_TABLE_DEPTH = 0            flat - matches 2em's flat PTE array
+c1/c3 PAGE_TABLE_DEPTH = 1, BLOCK_SIZE = 7
+```
+
+So the client contexts expect a two-level walk. `WALKER_ERROR` is a
+walker complaint, and a depth-1 walk beginning at a directory entry the
+hardware does not consider valid is a coherent way to produce one.
+
+### What is NOT established
+
+This is a lead, not a cause, and the alternatives have not been excluded:
+
+1. **The hardware may ignore bit 0 in this register.** Linux and Apple
+   both set it, which is good evidence it is load-bearing, but neither
+   proves the walker checks it.
+2. **These values may not come from `getPDEValue` at all.** Something
+   wrote two distinct values (`0xfb00b000`, `0xfb015000`), but whether
+   that was Apple's VM code, firmware, or a leftover is not established.
+   The write path was not found: `programAndInvalidateVM` (0xbe9b7a2) is
+   the invalidate side, and the base-register write was not located in
+   this pass.
+3. **The addresses themselves may be wrong**, independently of the flag.
+   `0xFB00B000` and `0xFB015000` are ~4.2 GB, plausible system DRAM and
+   *not* shaped like the stripped carve-out offset 2em corrected for
+   context 0 (that was `0x0FDF_A000`, inside a 512 MB carve-out). So this
+   is probably **not** a second instance of the 2em bug — but "probably
+   not" is not "not".
+
+Setting the bit and seeing whether the fault clears is the obvious
+experiment, and 2em is the precedent for a single targeted write behind
+its own boot-arg. It is **not** the next step, because contexts 1-15 are
+client contexts that the driver reprograms per VM bind, so a one-shot
+write from a timer would likely be overwritten before it is tested.
+
+### The better next step: Apple already decodes these faults
+
+`AMDRadeonX6000_AMDGFX10VMM` has `getVMFaultInfo`,
+`getVmFaultMemoryClientName`, `writeVmFaultProtectionString` and
+`clearVMFault`, and the kext carries this format string:
+
+```
+%s: %s VM_FAULT %u %s VA: %#llx, pages: %u, op: %s, vmid: %u, pasid: %u,
+memClient: %#x, Task %d %s, VA status: %s, Closest good VA: %#llx
+```
+
+Apple records the faulting **VA** directly — ending the `vmalo`
+interpretation debt outright — plus the op, the vmid, the pasid, the
+memory client and a **closest good VA**, which would say immediately
+whether the fault is just past the end of a real mapping.
+
+It is not reaching us: no `VM_FAULT` text in the captured `ioreg.txt` of
+any armed boot, and nothing in the unified log for the boot window. So
+it is gated behind a log level or lands in a buffer we are not reading.
+
+Hooking `getVMFaultInfo` and logging the `VM_FAULT_INFO` it fills gives
+Apple's own per-fault record, at the moment of each fault, instead of our
+sampled snapshots. Rule 9 (2gb) applies: disassemble the first 16 bytes
+and refuse if a rel8/rel32 branch starts within the first 5, before
+routing anything.

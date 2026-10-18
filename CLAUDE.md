@@ -400,9 +400,45 @@ register to an address** — it takes the address from the interrupt
 vector. `0x400300 << 12` is the obvious reading and is unsourced. Do not
 use it until it is.
 
-**Next: why does CPF fail to translate, from the start of the boot?**
-Read-only, through the proven accessor: the GCVM context registers for
-VMID 0 and VMID 3 — `PAGE_TABLE_BASE_ADDR_LO32/HI32`,
-`PAGE_TABLE_START/END_ADDR` — against what 2em's `PT_BASE` fix actually
-wrote. 2em made translation work for what it tested; a CPF fetch of the
-ring at `0xFF_BFDE_0000` is not necessarily inside that.
+**The client contexts' page-directory bases have no VALID bit** (2hr).
+The GCVM context registers, read at +12 s and unchanged at +100 s:
+
+```
+c0  cn=1555481  PDE=0x7_8FDF_A001  window VA 0xFF_BFA0_0000..0xFF_FFE0_0000
+c1  cn=3b       PDE=0x0_FB00B000   window VA 0x4_0000_0000 ..0x23_FFFF_F000
+c3  cn=3b       PDE=0x0_FB015000   window VA 0x4_0000_0000 ..0x23_FFFF_F000
+```
+
+Two 2hq hypotheses are **dead**: context 3 is programmed and enabled, and
+the faulting page (`0x400300` -> VA `0x4_0030_0000`) is *inside* its
+window, so it is not a range fault. The GFX ring at `0xFF_BFDE_0000` is
+inside c0's window too.
+
+What is left is **bit 0**. The field is `PAGE_DIRECTORY_ENTRY_LO32`, a
+PDE with flags. c0 (2em's patched value) ends in 1; **c1 and c3 end in
+0**. Linux always ORs `AMDGPU_PTE_VALID` (bit 0) into this register
+(`amdgpu_gmc_pd_addr`, Vega10+, every depth) — and so does Apple:
+`AMDGFX10VMM::getPDEValue` (0xbe9b9de) ends `incq %rax`. **Every PDE
+Apple builds has bit 0 set**, so these two registers are anomalous by
+Apple's own convention. c0 is also `PAGE_TABLE_DEPTH=0` (flat, as 2em
+found) while c1/c3 are depth 1 — and `WALKER_ERROR` is a walker
+complaint.
+
+**Not yet a cause.** Unexcluded: the hardware may ignore bit 0 here;
+these values may not come from `getPDEValue` at all (the write path was
+not located); the addresses may be wrong independently of the flag
+(though `0xFB0..` is not shaped like the stripped carve-out offset 2em
+fixed, so this is probably not a second 2em). Setting the bit is the
+obvious experiment but contexts 1-15 are reprogrammed per VM bind, so a
+one-shot timer write would be overwritten before it is tested.
+
+**Next: Apple already decodes these faults.** `AMDGFX10VMM` has
+`getVMFaultInfo`, `getVmFaultMemoryClientName`,
+`writeVmFaultProtectionString` and `clearVMFault`, and the kext carries
+`"... VM_FAULT %u %s VA: %#llx, pages: %u, op: %s, vmid: %u, pasid: %u,
+memClient: %#x, ... Closest good VA: %#llx"`. That record has the
+faulting **VA** (ending the `vmalo` debt) and a **closest good VA**. It
+reaches neither `ioreg` nor the unified log in any armed boot, so it is
+gated or buffered elsewhere. Hook `getVMFaultInfo` and log what it
+fills — **rule 9 first** (disassemble the first 16 bytes, refuse on a
+rel8/rel32 branch in the first 5).
