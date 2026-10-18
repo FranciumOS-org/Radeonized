@@ -105,10 +105,25 @@ Apple's generic GFX10 fallback for an unrecognised id, not a fault.
 The probe **never returned from `[dev newCommandQueue]`**. No panic
 report, so a hang rather than a crash.
 
-**Not established, deliberately:** whether the whole machine wedged or
-only the process blocked. The user power-cycled, and `last reboot` cannot
-distinguish those — that inference is exactly the 2gw/2hb error. **Ask the
-user; do not infer it.**
+**2he — settled by asking the user:** only that command hung. SSH stayed
+up and other commands ran. So the machine does not wedge; one client
+thread blocks in the kernel while everything else keeps working.
+
+That means the blocked thread can be **sampled**, and its stack names the
+call instead of leaving us to guess. `metal_check.sh --dispatch` now runs
+the probe in the background, waits 25 s, and if it is still alive writes
+`sample.txt` (userspace) and, under `sudo`, `spindump.txt` (kernel
+stacks), leaving the probe running.
+
+**Do this next, before touching the kext:**
+
+```bash
+cd ~/Developer/RembrandtGPU && sudo ./tools/metal_check.sh --dispatch
+```
+
+It is free, non-invasive, needs no rebuild, and should name the
+IOConnect selector and the kernel function the thread waits in — which
+is where any hook belongs. Only after that is the kext worth changing.
 
 ### Hypothesis for the next milestone — write predictions BEFORE measuring
 

@@ -253,8 +253,9 @@ path despite them. Nothing in the 0x1B path is now known to fail.
 Unknown Prototype", 1024 threads/TG, 4 GB working set — against **0
 devices** unarmed. The frontier is now **`newCommandQueue`**, the first
 operation a Metal client asks for: the probe never returns from it, with
-no panic. Whether the hang is machine-wide or only the process is NOT
-established. Hypothesis to test, not a finding: everything proven so far
+no panic. **The hang is process-local** (2he, asked of the user): SSH and
+the rest of the machine stay responsive, so the GPU is not hard-hung and
+the blocked thread can be sampled for its stack. Hypothesis to test, not a finding: everything proven so far
 runs through SDMA and the KIQ, and a command queue is the first thing to
 need a client-facing GFX ring — which ties to the 2di debt
 (`gfx_min = gfx_max = 0`, GFX DPM never started).
