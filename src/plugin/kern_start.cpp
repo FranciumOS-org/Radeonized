@@ -7863,6 +7863,171 @@ static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
     }
 }
 
+// ---------------------------------------------------------------------------
+// 2if (2026-10-18): the VMID handout, and the PD value Apple computes.
+//
+// 2ie closed the question 2hr opened. Two register-write paths exist and
+// both are now instrumented, and between them:
+//
+//               CNTL        BASE      START     END
+//   X6000       ctx 1-15    -         -         -
+//   HWLibs      ctx 0-15    ctx 0     ctx 0     ctx 0
+//
+// Nothing writes BASE, START or END for contexts 1..15. So c1 and c3's
+// page-directory bases are not values anyone computed and got wrong -
+// nothing ever wrote them, and 2hr read leftovers. The missing VALID bit is
+// an ABSENT WRITE, not a bad value. HWLibs' own context-0 write proves the
+// convention holds where it does write: bf=0xFDFA001, bit 0 set (and
+// missing the carve-out offset, which is 2em's bug seen from its source).
+//
+// In Linux the base for contexts 1..15 is programmed per job, by
+// amdgpu_vm_flush -> ring->emit_vm_flush, at the moment a VMID is handed to
+// a VM. Apple's programAndInvalidateVM invalidates without programming
+// (2id: pivm=336, bm=0000), so the handout is the next place to look.
+//
+//   AMDHWVMM::assignVMID(IAMDHWVMContext*, uint &vmid, AMDAccelChannel*,
+//                        IOAccelEvent**, bool*)      0xbe91376
+//   AMDGFX10VMM::getPDEValue(eAMD_VMPT_LEVEL, uint64) 0xbe9b9de
+//
+// Rule 9 (2gb), checked on both: assignVMID opens
+// `55 48 89 e5 41 57 41 56 41 55 41 54 53` - pushes and a movq. getPDEValue
+// opens `55 48 89 e5 ff c6 8b 87 34` - the `ff c6` at byte 4 is `incl %esi`,
+// not a branch, and the first branch is a `jne` 0xe bytes in. Neither has a
+// rel8 or rel32 branch beginning in the first five bytes. Both are DEFINED
+// in AMDRadeonX6000 per `nm -m`, so the milestone-2c rule holds.
+//
+// getPDEValue is the function 2hr wanted and could not justify hooking
+// until now. It is the one place Apple computes a page-directory entry, and
+// its tail is `incq %rax` - it ORs the VALID bit unconditionally. So:
+//
+//   assignVMID hands out 3 and getPDEValue produced a good value
+//                 -> the value exists and the WRITE is missing. That is a
+//                    gap in Apple's path on this chip, and the fix is to
+//                    perform the write Apple never performs.
+//   assignVMID hands out 3 and getPDEValue was never called for it
+//                 -> Apple never computes a base for that context either,
+//                    and the gap is further upstream than the write
+//   assignVMID never hands out 3
+//                 -> VMID 3 was never assigned, and the CPF read at
+//                    0x4_0030_0000 under VMID 3 (2ht #1) is the chip using
+//                    a VMID the driver never bound - a different bug
+//   av=0          -> no VMID was ever assigned this boot; the hook is the
+//                    silence, not the driver
+//
+// Observe only. getPDEValue is called per page-table level per bind, so it
+// records a per-level digest rather than every call, and never logs from
+// inside. assignVMID's out-parameter is read AFTER the original runs, which
+// is the only moment it holds the assigned VMID.
+// ---------------------------------------------------------------------------
+
+#define RB_2IF_LVLS 4
+
+static uint32_t g_rb_2if_av = 0;            // assignVMID calls
+static uint16_t g_rb_2if_vmids = 0;         // bit n = VMID n was handed out
+static uint32_t g_rb_2if_av_fail = 0;       // calls that returned nonzero
+static uint32_t g_rb_2if_pde[RB_2IF_LVLS];  // getPDEValue calls, per level
+static uint64_t g_rb_2if_pde_first[RB_2IF_LVLS];
+static uint64_t g_rb_2if_pde_last[RB_2IF_LVLS];
+static uint32_t g_rb_2if_pde_other = 0;     // levels past the table
+static uint32_t g_rb_2if_pde_novalid = 0;   // returns with bit 0 CLEAR
+static int      g_rb_2if_hooked = 0;
+
+static uint32_t (*orig_assignVMID_2if)(void *, void *, uint32_t *, void *,
+                                       void *, void *) = nullptr;
+static uint64_t (*orig_getPDEValue_2if)(void *, uint32_t, uint64_t) = nullptr;
+
+static uint32_t hooked_assignVMID_2if(void *vmm, void *ctx, uint32_t *vmid,
+                                      void *chan, void *ev, void *flag) {
+    uint32_t r = orig_assignVMID_2if
+                     ? orig_assignVMID_2if(vmm, ctx, vmid, chan, ev, flag)
+                     : 0;
+    g_rb_2if_av++;
+    if (r != 0) g_rb_2if_av_fail++;
+    // Read AFTER the original: this is the only moment it holds the answer.
+    if (vmid && *vmid < 16) {
+        g_rb_2if_vmids = static_cast<uint16_t>(g_rb_2if_vmids | (1u << *vmid));
+    }
+    return r;
+}
+
+static uint64_t hooked_getPDEValue_2if(void *vmm, uint32_t level, uint64_t a) {
+    uint64_t v = orig_getPDEValue_2if ? orig_getPDEValue_2if(vmm, level, a) : 0;
+    if (level < RB_2IF_LVLS) {
+        if (g_rb_2if_pde[level] == 0) g_rb_2if_pde_first[level] = v;
+        g_rb_2if_pde_last[level] = v;
+        g_rb_2if_pde[level]++;
+    } else {
+        g_rb_2if_pde_other++;
+    }
+    if ((v & 1) == 0) g_rb_2if_pde_novalid++;
+    return v;
+}
+
+void rbgpu_vmid_flush_2if(void) {
+    if (!g_rb_2if_hooked) {
+        rbgpu_nvram_note("rbgpu-vmid",
+                         "hk=0 the assignVMID/getPDEValue hooks did NOT take "
+                         "this boot - silence here is the hook, not the driver");
+        return;
+    }
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note),
+                     "hk=1 av=%u fail=%u vmids=%04x | pde nv=%u o=%u",
+                     g_rb_2if_av, g_rb_2if_av_fail, g_rb_2if_vmids,
+                     g_rb_2if_pde_novalid, g_rb_2if_pde_other);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (unsigned i = 0; i < RB_2IF_LVLS; i++) {
+        if (g_rb_2if_pde[i] == 0) continue;
+        if (n >= sizeof(note) - 56) break;
+        w = snprintf(note + n, sizeof(note) - n, " | L%u c%u f%llx l%llx",
+                     i, g_rb_2if_pde[i], g_rb_2if_pde_first[i],
+                     g_rb_2if_pde_last[i]);
+        if (w > 0) {
+            n += static_cast<size_t>(w);
+            if (n >= sizeof(note)) { n = sizeof(note) - 1; break; }
+        }
+    }
+    rbgpu_nvram_note("rbgpu-vmid", note);
+    rbgpu_log("2if: %s", note);
+    rbgpu_log("2if: vmids is the question. A bit set for 3 with a good L0/L1 "
+              "value means Apple COMPUTED a page-directory base for the "
+              "faulting context and never wrote it - the write is the gap, "
+              "and performing it is the fix. vmids with bit 3 clear means the "
+              "chip faulted under a VMID this driver never bound, which is a "
+              "different bug entirely. nv counts returns with the VALID bit "
+              "clear: getPDEValue ends `incq %%rax`, so nv should be 0, and "
+              "anything else means that reading of the tail is wrong.");
+}
+
+static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
+                                 mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuringprobe")) {
+        rbgpu_log("2if: -rbgpuringprobe not set, assignVMID/getPDEValue left "
+                  "alone");
+        return;
+    }
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN23AMDRadeonX6000_AMDHWVMM10assignVMIDEP30AMDRadeonX6000_IAMDHWVMContextRjP30AMDRadeonX6000_AMDAccelChannelPP12IOAccelEventPb",
+            hooked_assignVMID_2if, orig_assignVMID_2if),
+        KernelPatcher::RouteRequest(
+            "__ZN26AMDRadeonX6000_AMDGFX10VMM11getPDEValueE15eAMD_VMPT_LEVELy",
+            hooked_getPDEValue_2if, orig_getPDEValue_2if),
+    };
+    if (patcher.routeMultiple(id, reqs, 2, address, size)) {
+        rbgpu_log("2if: hooked AMDHWVMM::assignVMID + AMDGFX10VMM::getPDEValue "
+                  "(observe only)");
+        g_rb_2if_hooked = 1;
+    } else {
+        rbgpu_log("2if: FAILED to hook the VMID handout - rbgpu-vmid will say "
+                  "hk=0 so an empty note is not mistaken for a driver that "
+                  "never assigned a VMID");
+        g_rb_2if_hooked = 0;
+        patcher.clearError();
+    }
+}
+
 static void (*orig_programAndInvalidateVM_2id)(void *, const void *) = nullptr;
 
 static void hooked_programAndInvalidateVM_2id(void *vmm, const void *info) {
@@ -8460,6 +8625,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     rbgpu_route_getHWChannel_2gv(patcher, id, address, size);
     rbgpu_route_vmfault_2hs(patcher, id, address, size);
     rbgpu_route_hwregwrite_2ic(patcher, id, address, size);
+    rbgpu_route_vmid_2if(patcher, id, address, size);
 
     KernelPatcher::RouteRequest req_2gn[] = {
         KernelPatcher::RouteRequest(
@@ -9425,6 +9591,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // 2ic: who wrote the context page-directory bases, same discipline.
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
+    rbgpu_vmid_flush_2if();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and
