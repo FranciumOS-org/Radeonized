@@ -7957,6 +7957,156 @@ static uint32_t (*orig_assignVMID_2if)(void *, void *, uint32_t *, void *,
                                        void *, void *) = nullptr;
 static uint64_t (*orig_getPDEValue_2if)(void *, uint32_t, uint64_t) = nullptr;
 
+// ---------------------------------------------------------------------------
+// 2ih (2026-10-18): correct the page-directory base AT BIND TIME.
+//
+// 2ig found the defect and it is not the one four milestones were aimed at.
+// Context 3's register held 0xFB015000 with HI32 = 0, and that is the LOW
+// 32 BITS of that context's own root directory, 0xF4_FB01_5000 - the
+// carve-out high bits dropped, and bit 0 along with them. Context 1 is the
+// same shape. **This is 2em's bug**, which stripped exactly these high bits
+// from CONTEXT0's base, reappearing on contexts 1..15 where nothing has
+// ever fixed it.
+//
+// So the base is not absent and is not a leftover; it is TRUNCATED. A
+// walker handed 0x0_FB01_5000 instead of 0xF4_FB01_5000 faults whatever
+// bit 0 says, which is what WALKER_ERROR has been reporting for eleven
+// boots.
+//
+// 2ig also proved the register accepts the correction: writing
+// 0xFB015001 / 0xF4 read back 0xFB015001 / 0xF4 unchanged. What it could
+// not do is help, because by +100 s the CP had been halted for ninety
+// seconds and the work owing the timestamp was long discarded (2hp). This
+// is the same write at the only moment it can matter - immediately after
+// assignVMID binds the context, before any work is submitted under it.
+//
+// THE VALUE IS STILL NOT GUESSED. Same strict match as 2ig: ctx+0xb8 must
+// equal one of the level-0 roots Apple's own allocVMBlock handed out
+// (recorded from elem+0x20 / elem+0x28, the fields allocVMBlock itself
+// tests). No match, no write, and the refusal is counted and reported.
+// ctx+0xb8 is used as the candidate OFFSET only; the match is what makes it
+// a value, so a context whose layout differs is refused rather than
+// misread.
+//
+// WHAT IT DOES TO THE CHIP, per bind:
+//
+//     GCVM_CONTEXT<vmid>_PAGE_TABLE_BASE_ADDR_LO32 = (root & 0xFFFFFFFF) | 1
+//     GCVM_CONTEXT<vmid>_PAGE_TABLE_BASE_ADDR_HI32 = root >> 32
+//
+// dword = 0x1667 + 2*vmid raw, which socRegOffset turns into 0x28C7 + 2*vmid.
+// VMID 0 is NEVER touched: 2em already owns context 0 and c0 reads
+// 0x7_8FDF_A001, correct and valid. Only contexts 1..15 are corrected, and
+// only ones whose root matched.
+//
+// Gated on -rbgpuptfix, its own boot-arg, separate from 2ig's
+// -rbgpuptwrite so the two experiments can never be confused in a capture.
+// Without it the hook identifies and counts and writes nothing, which is a
+// dry run whose note still names every value.
+//
+// Risk, stated plainly: this writes a live GPU register during normal
+// operation, on every bind, where 2ig wrote twice at a known-dead moment.
+// If the value were wrong it could fault differently rather than less. The
+// strict match is what bounds that - the only values written are addresses
+// Apple's own allocator produced for that very context - and the before and
+// after of every write is recorded so a worse outcome is legible rather
+// than mysterious.
+// ---------------------------------------------------------------------------
+
+#define RB_2IH_CTX_ROOT_OFF 0xb8u      // where 2ig found the root, matched not assumed
+
+static uint32_t g_rb_2ih_calls   = 0;   // binds seen for VMID 1..15
+static uint32_t g_rb_2ih_wrote   = 0;
+static uint32_t g_rb_2ih_nomatch = 0;
+static uint32_t g_rb_2ih_noobj   = 0;
+static uint32_t g_rb_2ih_badback = 0;   // read-back did not equal what we wrote
+static uint16_t g_rb_2ih_mask    = 0;   // VMIDs corrected
+static uint64_t g_rb_2ih_first_root = 0;
+static uint32_t g_rb_2ih_first_was_lo = 0, g_rb_2ih_first_was_hi = 0;
+static uint32_t g_rb_2ih_first_new_lo = 0, g_rb_2ih_first_new_hi = 0;
+static uint32_t g_rb_2ih_first_bk_lo = 0, g_rb_2ih_first_bk_hi = 0;
+static int      g_rb_2ih_armed   = -1;
+
+static void rbgpu_ptfix_2ih(void *ctx, uint32_t vmid) {
+    if (vmid == 0 || vmid > 15 || !ctx) {
+        return;                      // 2em owns context 0; leave it alone
+    }
+    if (g_rb_2ih_armed < 0) {
+        g_rb_2ih_armed = checkKernelArgument("-rbgpuptfix") ? 1 : 0;
+    }
+    g_rb_2ih_calls++;
+
+    void *obj = g_rb_2fb_regobj;
+    if (!obj) { g_rb_2ih_noobj++; return; }
+    void **rvt = *reinterpret_cast<void ***>(obj);
+    auto resolve = reinterpret_cast<uint32_t (*)(void *, uint64_t)>(
+        rvt ? rvt[0x148 / sizeof(void *)] : nullptr);
+    auto rd = reinterpret_cast<uint32_t (*)(void *, uint32_t)>(
+        rvt ? rvt[0x118 / sizeof(void *)] : nullptr);
+    auto wr = reinterpret_cast<void (*)(void *, uint32_t, uint32_t)>(
+        rvt ? rvt[0x120 / sizeof(void *)] : nullptr);
+    if (!resolve || !rd || !wr) { g_rb_2ih_noobj++; return; }
+
+    uint64_t root = *reinterpret_cast<volatile uint64_t *>(
+        reinterpret_cast<uintptr_t>(ctx) + RB_2IH_CTX_ROOT_OFF);
+
+    int matched = 0;
+    for (unsigned i = 0; i < g_rb_2ig_nroot; i++) {
+        if (root != 0 &&
+            (root == g_rb_2ig_root[i].a20 || root == g_rb_2ig_root[i].a28)) {
+            matched = 1;
+            break;
+        }
+    }
+    if (!matched) { g_rb_2ih_nomatch++; return; }
+
+    uint64_t id_lo = ((0x1667ull + 2ull * vmid) << 32) | 0xB;
+    uint64_t id_hi = ((0x1668ull + 2ull * vmid) << 32) | 0xB;
+    uint32_t off_lo = resolve(obj, id_lo);
+    uint32_t off_hi = resolve(obj, id_hi);
+    uint32_t was_lo = rd(obj, off_lo);
+    uint32_t was_hi = rd(obj, off_hi);
+    uint32_t new_lo = static_cast<uint32_t>(root & 0xFFFFFFFFu) | 1u;
+    uint32_t new_hi = static_cast<uint32_t>(root >> 32);
+
+    if (g_rb_2ih_wrote == 0) {
+        g_rb_2ih_first_root   = root;
+        g_rb_2ih_first_was_lo = was_lo;  g_rb_2ih_first_was_hi = was_hi;
+        g_rb_2ih_first_new_lo = new_lo;  g_rb_2ih_first_new_hi = new_hi;
+    }
+    if (!g_rb_2ih_armed) {
+        return;                      // dry run: identified, counted, not written
+    }
+
+    wr(obj, off_lo, new_lo);
+    wr(obj, off_hi, new_hi);
+    uint32_t bk_lo = rd(obj, off_lo);
+    uint32_t bk_hi = rd(obj, off_hi);
+    if (g_rb_2ih_wrote == 0) { g_rb_2ih_first_bk_lo = bk_lo; g_rb_2ih_first_bk_hi = bk_hi; }
+    if (bk_lo != new_lo || bk_hi != new_hi) g_rb_2ih_badback++;
+    g_rb_2ih_wrote++;
+    g_rb_2ih_mask = static_cast<uint16_t>(g_rb_2ih_mask | (1u << vmid));
+}
+
+void rbgpu_ptfix_flush_2ih(void) {
+    char note[352];
+    snprintf(note, sizeof(note),
+             "arm=%d binds=%u wrote=%u nomatch=%u noobj=%u badback=%u "
+             "vmids=%04x | first root=%llx was=%x/%x new=%x/%x back=%x/%x",
+             g_rb_2ih_armed, g_rb_2ih_calls, g_rb_2ih_wrote,
+             g_rb_2ih_nomatch, g_rb_2ih_noobj, g_rb_2ih_badback,
+             g_rb_2ih_mask, g_rb_2ih_first_root,
+             g_rb_2ih_first_was_lo, g_rb_2ih_first_was_hi,
+             g_rb_2ih_first_new_lo, g_rb_2ih_first_new_hi,
+             g_rb_2ih_first_bk_lo, g_rb_2ih_first_bk_hi);
+    rbgpu_nvram_note("rbgpu-ptfix", note);
+    rbgpu_log("2ih: %s", note);
+    rbgpu_log("2ih: wrote=0 with binds>0 and nomatch=binds means ctx+0xb8 is "
+              "not the root for these contexts and NOTHING was written - the "
+              "offset 2ig matched once is not general, and the boot says so "
+              "rather than writing a wrong value. badback>0 means a register "
+              "refused the value, which 2ig's single write did not see.");
+}
+
 static uint32_t hooked_assignVMID_2if(void *vmm, void *ctx, uint32_t *vmid,
                                       void *chan, void *ev, void *flag) {
     uint32_t r = orig_assignVMID_2if
@@ -7968,6 +8118,7 @@ static uint32_t hooked_assignVMID_2if(void *vmm, void *ctx, uint32_t *vmid,
     if (vmid && *vmid < 16) {
         g_rb_2if_vmids = static_cast<uint16_t>(g_rb_2if_vmids | (1u << *vmid));
         g_rb_2ig_ctx[*vmid] = ctx;      // 2ig: which object owns this VMID
+        rbgpu_ptfix_2ih(ctx, *vmid);    // 2ih: the write, at the right moment
     }
     return r;
 }
@@ -9806,6 +9957,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
     rbgpu_vmid_flush_2if();
+    rbgpu_ptfix_flush_2ih();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and
