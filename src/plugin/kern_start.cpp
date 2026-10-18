@@ -8687,6 +8687,77 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     int w = snprintf(note, sizeof(note), "pa=%llx t3=%u r=%x w=%x", pa, t3, rptr, wptr);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
 
+    // 2ia: the register WRITES in the stream, which is how the page-directory
+    // base is programmed at all.
+    //
+    // 2hr could not find anything in the kext that writes
+    // GCVM_CONTEXT*_PAGE_TABLE_BASE_ADDR by MMIO, and 2ia's static search
+    // found none either - because there is none. Linux's
+    // gmc_v10_0_emit_flush_gpu_tlb programs it with
+    // `amdgpu_ring_emit_wreg(ring, hub->ctx0_ptb_addr_lo32 + ctx_addr_distance*vmid, ...)`:
+    // **the ring writes it, with a PM4 packet.** Apple has no MMIO path for
+    // the same reason.
+    //
+    // gfx_v10_0_write_data_to_reg gives the layout:
+    //     dw0  PACKET3(PACKET3_WRITE_DATA=0x37, 3)
+    //     dw1  ENGINE_SEL | DST_SEL(0) | WR_CONFIRM
+    //     dw2  reg      (absolute dword offset)
+    //     dw3  0
+    //     dw4  val
+    //
+    // The context bases live at seg0 + 0x1667 + 2*vmid = 0x28C7 + 2*vmid,
+    // so VMID 0 is 0x28C7 and the VMID 3 that faults is **0x28CD**. Scanning
+    // for WRITE_DATA into 0x28C7..0x28E6 shows the value the CP was actually
+    // told to put there - including whether bit 0, the VALID flag Apple's own
+    // getPDEValue always sets, was present in the packet.
+    //
+    // Three outcomes, all useful:
+    //   a write to 0x28CD with bit 0 SET    the packet was right and the
+    //                                       register lost it, or we misread
+    //                                       the register in 2hr
+    //   a write to 0x28CD with bit 0 CLEAR  the packet itself is wrong, and
+    //                                       the bug is upstream in whatever
+    //                                       built the value
+    //   no write to 0x28CD at all           context 3 was NEVER programmed by
+    //                                       this ring; the register holds
+    //                                       whatever it held before
+    unsigned nwd = 0;
+    for (unsigned i = 0; i + 4 < 1024; i++) {
+        uint32_t h = dw[i];
+        if ((h >> 30) != 3 || ((h >> 8) & 0xFF) != 0x37) {   // PACKET3_WRITE_DATA
+            continue;
+        }
+        uint32_t reg = dw[i + 2];
+        if (reg < 0x28C7 || reg > 0x28E6) {
+            continue;
+        }
+        uint32_t val = dw[i + 4];
+        unsigned vmid = (reg - 0x28C7) / 2;
+        int is_hi = ((reg - 0x28C7) & 1) != 0;
+        nwd++;
+        rbgpu_log("2ia: WRITE_DATA @%03x reg 0x%x = 0x%08x  -> CONTEXT%u "
+                  "PAGE_TABLE_BASE_ADDR_%s%s", i, reg, val, vmid,
+                  is_hi ? "HI32" : "LO32",
+                  (!is_hi && !(val & 1)) ? "  <<<< VALID BIT NOT SET IN THE PACKET" : "");
+        if (n < sizeof(note) - 32) {
+            w = snprintf(note + n, sizeof(note) - n, " | wd%x=%x", reg, val);
+            if (w > 0) {
+                n += static_cast<size_t>(w);
+                if (n >= sizeof(note)) n = sizeof(note) - 1;
+            }
+        }
+    }
+    if (nwd == 0) {
+        rbgpu_log("2ia: NO WRITE_DATA to any GCVM context base register in this "
+                  "page. Either the programming happens elsewhere in the ring, "
+                  "or context 3 is never programmed by this ring at all - this "
+                  "page alone cannot tell those apart.");
+        if (n < sizeof(note) - 12) {
+            w = snprintf(note + n, sizeof(note) - n, " | nowd");
+            if (w > 0) n += static_cast<size_t>(w);
+        }
+    }
+
     unsigned found = 0;
     for (unsigned i = 0; i < 1024; i++) {
         uint32_t h = dw[i];
