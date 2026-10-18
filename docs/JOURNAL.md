@@ -10808,3 +10808,141 @@ phantom, and `s40953 h0 va=0 v0 W c4`. The GCVM context registers are also
 unchanged: c0 `b=78fdfa001` (bit 0 set), c1 `b=fb00b000` and c3
 `b=fb015000` (bit 0 clear). Deterministic.
 
+
+## 2ic (2026-10-18) — the accessor is NAMED, and it never writes the base
+
+Static half of the user's request, done properly at last.
+
+`AMDRadeonX6000_AMDHWRegisters` is the register accessor this project has
+been calling blind since 2fd. Its vtable
+(`__ZTV29AMDRadeonX6000_AMDHWRegisters`, 0xbfab6a0) decodes under the 2gp
+convention -- a CALL offset is the DUMP offset minus 0x10 -- to exactly the
+slots five earlier milestones inferred from disassembly alone:
+
+```
+call [0x118] = dump +0x128 = AMDHWRegisters::read(uint)          2fd: "0x118 READS"
+call [0x120] = dump +0x130 = AMDHWRegisters::write(uint, uint)   2fg: "0x120 WRITES"
+call [0x128] = dump +0x138 = readOrModifyWrite(uint, uint)       the (v, 0x80000000) call
+call [0x130] = dump +0x140 = readAndModifyWrite(uint, uint)
+call [0x148] = dump +0x158 = socRegOffset(SOCRegister)           2fd: "0x148 resolves"
+```
+
+Five independent confirmations of a convention that was inferred, not read.
+`[0x128]`'s name even explains the one call site that passed `0x80000000` as
+its second argument: it ORs a bit in.
+
+`write` is the single choke point for GC MMIO. Its body ends
+`movl %ebx,(%rax,%rcx)` with rax = this+0x38 (the aperture) and rcx = reg*4,
+and **both** read-modify-write entries tail-jump through the virtual
+`[0x120]` slot (`movq 0x120(%rax),%rax` ... `jmpq *%rax`) rather than
+storing themselves. So one hook sees every write, RMW included.
+`IAMDHWRegisters`' own vtable points every one of those slots at a single
+pure-virtual stub (0x975800), so `AMDHWRegisters` is the only
+implementation and the class coverage is complete.
+
+Milestone-2c rule: `nm -m` shows
+`__ZN29AMDRadeonX6000_AMDHWRegisters5writeEjj` **defined** at 0xbe8d28a.
+Rule 9 (2gb): it opens `55 48 89 e5 41 57 41 56 53` and its first branch is
+a `jne` at +0x11, outside the five-byte window. Both checked, not assumed.
+
+### The boot
+
+Seventh consecutive armed boot, `logs/20261018-160133-metal/`. Verified
+first: `armed=1` **live**, loaded UUID `7DDCC43B-AE8E-347A-BC09-6A3464627948`
+= `build/out`.
+
+```
+rbgpu-ctxw = hk=1 calls=34657 hits=0 | none
+```
+
+The hook took, the accessor performed **34,657** writes, and **not one** was
+to 0x28C7..0x28E6, the context 0..15 `PAGE_TABLE_BASE_ADDR` registers.
+
+So all three paths this project could name are now closed by measurement:
+
+| path | result |
+|---|---|
+| MMIO via a displacement into the VMM object | 2ia: nothing in the kext touches the region |
+| the GFX ring, as a PM4 `WRITE_DATA` | 2ib: `nowd`, across the ring's whole written extent |
+| the register accessor, by encoded id | **2ic: 0 of 34,657** |
+
+And the disassembly of `AMDGFX10VMM::programAndInvalidateVM` (0xbe9b7a2),
+Apple's `emit_flush_gpu_tlb`, shows the flush path really does go through
+the hooked function: it takes the accessor from `(this->0x10)->vt[0x2d0]`,
+has `vt[0x220]` fill a nine-entry `{reg, val}` array on its stack, then
+loops over the nonzero entries with `callq *0x120(%rax)`.
+
+### What this boot does NOT establish, named before it is built on
+
+**`hits=0` has no positive control.** 34,657 calls proves the hook ran. It
+proves nothing about whether the hook covers the code that programs GCVM
+contexts, because the only range watched is the one range nothing wrote.
+Reading `hits=0` as "nothing writes the base" without that control would be
+the recurring error in its purest form, and it is not read that way here.
+
+### Two real changes in this boot, not instrument noise
+
+`rbgpu-fault` has only **two** signatures, not three: `c=6 f=6 r=3`, with
+`s3009bb h0 va=400300000 v3 R c4` (n=3) and the `sffffffff h1` phantom
+(n=3). **The `s40953` VMID-0 WRITE to VA 0 did not happen at all this
+boot.** That is direct support for 2hx/2hz's inference that it was a
+consequence of the reset path rather than a primary fault -- it is the first
+boot of seven where it is absent. The CPF read at `0x4_0030_0000` under
+VMID 3 is now the **only** real fault in the boot.
+
+`rbgpu-fence`: `fv=ffbfdc0000 ... seq=5 d: 1 0 80 0 280 0 0 1 0 0 0 0`.
+The fence page holds **1** where 2hz's boot held 6, and the ring's packets
+carry seq 1/2/3 where 2hx's carried 3/4/5. So the GPU completed **one**
+fence this boot against six in 2hz. Progress before the stall varies boot
+to boot; the stall does not. (`+0x08`/`+0x10` hold `0x80`/`0x280`, the ring
+pointer shadows, `0x280` being this boot's live `wptr`. Noted, not
+interpreted, as in 2hz.)
+
+The ring and context readings are otherwise identical to every boot since
+2hl: `r=b1 w=280 cps=90038600 me=15000000` in both samples, c0
+`b=78fdfa001`, c1 `b=fb00b000`, c3 `b=fb015000`.
+
+## 2id (2026-10-18) — the positive control, and Linux's answer
+
+Linux settles what Apple's init is *supposed* to do, and it is decisive.
+`gfxhub_v2_1_setup_vmid_config` loops `i = 0..14` and writes
+`GCVM_CONTEXT1_CNTL`, `PAGE_TABLE_START_ADDR_LO32/HI32` and
+`PAGE_TABLE_END_ADDR_LO32/HI32` -- and **never** `PAGE_TABLE_BASE_ADDR`.
+The base for contexts 1..15 is written in exactly one place upstream:
+`gmc_v10_0_emit_flush_gpu_tlb`, per job, on a ring. So there is no
+init-time writer of the base in the upstream design either, and 2ic's
+negative is what upstream predicts.
+
+That reframes the question. 2hr read c1 and c3 with `cn=0x3b`,
+`s=400000`, `e=23fffff` -- CNTL, START and END all carry
+programmed-looking values. Those registers sit just outside 2ic's filter:
+
+```
+CNTL  = 0x1260 + 0x15FC + n    = 0x285C + n
+BASE  = 0x1260 + 0x1667 + 2n   = 0x28C7 + 2n     <- all 2ic watched
+START = 0x1260 + 0x1687 + 2n   = 0x28E7 + 2n
+END   = 0x1260 + 0x16A7 + 2n   = 0x2907 + 2n
+```
+
+2id widens the same hook to `0x285C..0x2926` and reports a 16-bit mask per
+group -- which *contexts* were written -- because that is what fits in an
+NVRAM note. It also hooks `programAndInvalidateVM` and counts calls.
+Rule 9 on that one: it opens `55 48 89 e5 41 57 41 56 41 55 41 54 53`,
+pushes and a movq, first branch 0x9a bytes in. Checked.
+
+The note gains `cm= sm= em= bm=` plus per-group counts and `pivm=<calls>/<hooked>`.
+
+What a reading would mean, written down before the boot:
+
+| reading | means |
+|---|---|
+| `cm`/`sm`/`em` set, `bm=0000` | the hook DOES reach the code that programs GCVM contexts, and that code writes CNTL/START/END and never the base -- exactly Linux. c1/c3's bases were then never written by anything, and 2hr read whatever the registers held, not a value any code chose. |
+| all four masks `0000` | the hook does not reach that code and 2ic's `hits=0` is worth nothing |
+| `bm` has a bit set | something does write a base through the accessor and 2ic's filter or counting was wrong |
+| `pivm=0` with `bm=0000` | the VM flush never ran. Then nothing has even tried to program a base, and the missing VALID bit is not a wrong value but an absent write. |
+| `pivm>0` with `bm=0000` | the flush ran and its request array contains no base register -- Apple's flush invalidates without programming, and the base must come from somewhere else again |
+
+The last two rows are the point. 2hr's "the value is missing bit 0" and
+"the register was never written" look identical from a register read, and
+`pivm` is the first thing that separates them.
+

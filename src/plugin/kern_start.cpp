@@ -7517,20 +7517,100 @@ struct rb_2ic_slot {
 };
 static struct rb_2ic_slot g_rb_2ic[RB_2IC_N];
 static uint64_t g_rb_2ic_calls  = 0;    // every write the accessor performed
-static uint32_t g_rb_2ic_hits   = 0;    // writes inside the range
+static uint32_t g_rb_2ic_hits   = 0;    // writes inside the BASE range
 static int      g_rb_2ic_hooked = 0;
 static int      g_rb_2ic_armed  = 0;
+
+// 2id (2026-10-18): the positive control 2ic lacked.
+//
+// 2ic measured calls=34657 hits=0 and that is a real negative only if the
+// hook would have CAUGHT a write to those registers had one happened. 34657
+// calls proves the hook ran; it proves nothing about whether it covers the
+// code that programs GCVM contexts, because the only range it watched is the
+// one register nothing wrote. That is the recurring error in its purest
+// form - a reading with nothing established to make it meaningful.
+//
+// The neighbours fix it. Seg-included dword offsets, GC seg0 = 0x1260 and
+// raw offsets from gc_10_3_0_offset.h via the 2hq macros:
+//
+//     CNTL  = 0x1260 + 0x15FC + n    = 0x285C + n       (contexts 0..15)
+//     BASE  = 0x1260 + 0x1667 + 2n   = 0x28C7 + 2n      (2ic's range)
+//     START = 0x1260 + 0x1687 + 2n   = 0x28E7 + 2n
+//     END   = 0x1260 + 0x16A7 + 2n   = 0x2907 + 2n
+//
+// 2hr read contexts 1 and 3 with cn=0x3b, s=400000, e=23fffff - CNTL,
+// START and END all carry programmed-looking values, so SOMETHING writes
+// them. If this boot sees those writes through the same hook and still sees
+// no BASE write, the negative is airtight: the hook reaches the code that
+// programs GCVM contexts and that code does not write the base.
+//
+// And that is exactly Linux's behaviour. gfxhub_v2_1_setup_vmid_config
+// writes CONTEXT1_CNTL, PAGE_TABLE_START_ADDR and PAGE_TABLE_END_ADDR for
+// contexts 0..14 and NEVER writes PAGE_TABLE_BASE_ADDR; the base for
+// contexts 1..15 is written only by gmc_v10_0_emit_flush_gpu_tlb, per job,
+// on the ring. So the expected shape of this reading is masks full for
+// CNTL/START/END and empty for BASE - which would mean c1 and c3's bases
+// were never written at all this boot and 2hr read whatever the registers
+// held, not a value any code chose.
+//
+// A bitmask per group says which CONTEXTS were touched in 32 characters,
+// which is what fits in an NVRAM note.
+#define RB_2ID_CNTL_FIRST  0x285Cu
+#define RB_2ID_CNTL_LAST   0x286Bu
+#define RB_2ID_START_FIRST 0x28E7u
+#define RB_2ID_START_LAST  0x2906u
+#define RB_2ID_END_FIRST   0x2907u
+#define RB_2ID_END_LAST    0x2926u
+
+static uint16_t g_rb_2id_cm = 0;        // contexts whose CNTL was written
+static uint16_t g_rb_2id_bm = 0;        // contexts whose BASE was written
+static uint16_t g_rb_2id_sm = 0;        // contexts whose START was written
+static uint16_t g_rb_2id_em = 0;        // contexts whose END was written
+static uint32_t g_rb_2id_c_cntl = 0;
+static uint32_t g_rb_2id_c_start = 0;
+static uint32_t g_rb_2id_c_end = 0;
+static uint32_t g_rb_2id_c_mid = 0;     // 0x286C..0x28C6, the unnamed gap
+
+// The VM flush itself. programAndInvalidateVM (0xbe9b7a2) is Apple's
+// emit_flush_gpu_tlb: it takes the accessor from (this->0x10)->vt[0x2d0],
+// has vt[0x220] fill a nine-entry {reg, val} array on its stack, then loops
+// `callq *0x120(%rax)` over the nonzero entries - AMDHWRegisters::write, the
+// function already hooked. So if this ran and wrote no base, the base is not
+// in its request array; if it never ran, hits=0 says nothing at all. One
+// counter separates those, and it is the difference between a result and a
+// coincidence.
+static uint32_t g_rb_2id_pivm = 0;
+static uint16_t g_rb_2id_pivm_hubs = 0;   // bit n set = hub n seen
+static int      g_rb_2id_pivm_hooked = 0;
 
 static void (*orig_hwreg_write_2ic)(void *, uint32_t, uint32_t) = nullptr;
 
 static void hooked_hwreg_write_2ic(void *self, uint32_t reg, uint32_t val) {
     g_rb_2ic_calls++;
-    if (reg >= RB_2IC_FIRST && reg <= RB_2IC_LAST) {
-        struct rb_2ic_slot *sl = &g_rb_2ic[reg - RB_2IC_FIRST];
-        if (sl->count == 0) sl->first = val;
-        sl->last = val;
-        sl->count++;
-        g_rb_2ic_hits++;
+    if (reg >= RB_2ID_CNTL_FIRST && reg <= RB_2ID_END_LAST) {
+        if (reg <= RB_2ID_CNTL_LAST) {
+            g_rb_2id_cm = static_cast<uint16_t>(
+                g_rb_2id_cm | (1u << (reg - RB_2ID_CNTL_FIRST)));
+            g_rb_2id_c_cntl++;
+        } else if (reg < RB_2IC_FIRST) {
+            g_rb_2id_c_mid++;
+        } else if (reg <= RB_2IC_LAST) {
+            struct rb_2ic_slot *sl = &g_rb_2ic[reg - RB_2IC_FIRST];
+            if (sl->count == 0) sl->first = val;
+            sl->last = val;
+            sl->count++;
+            g_rb_2id_bm = static_cast<uint16_t>(
+                g_rb_2id_bm | (1u << ((reg - RB_2IC_FIRST) >> 1)));
+            g_rb_2ic_hits++;
+        } else if (reg <= RB_2ID_START_LAST) {
+            g_rb_2id_sm = static_cast<uint16_t>(
+                g_rb_2id_sm | (1u << ((reg - RB_2ID_START_FIRST) >> 1)));
+            g_rb_2id_c_start++;
+        } else {
+            g_rb_2id_em = static_cast<uint16_t>(
+                g_rb_2id_em | (1u << ((reg - RB_2ID_END_FIRST) >> 1)));
+            g_rb_2id_c_end++;
+        }
     }
     if (orig_hwreg_write_2ic) {
         orig_hwreg_write_2ic(self, reg, val);
@@ -7554,8 +7634,14 @@ void rbgpu_ctxwrite_flush_2ic(void) {
 
     char note[352];
     size_t n = 0;
-    int w = snprintf(note, sizeof(note), "hk=1 calls=%llu hits=%u",
-                     g_rb_2ic_calls, g_rb_2ic_hits);
+    int w = snprintf(note, sizeof(note),
+                     "hk=1 calls=%llu hits=%u | cm=%04x sm=%04x em=%04x "
+                     "bm=%04x nc=%u ns=%u ne=%u mid=%u | pivm=%u/%u h=%04x",
+                     g_rb_2ic_calls, g_rb_2ic_hits,
+                     g_rb_2id_cm, g_rb_2id_sm, g_rb_2id_em, g_rb_2id_bm,
+                     g_rb_2id_c_cntl, g_rb_2id_c_start, g_rb_2id_c_end,
+                     g_rb_2id_c_mid,
+                     g_rb_2id_pivm, g_rb_2id_pivm_hooked, g_rb_2id_pivm_hubs);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
 
     unsigned shown = 0, skipped = 0;
@@ -7580,6 +7666,17 @@ void rbgpu_ctxwrite_flush_2ic(void) {
 
     rbgpu_nvram_note("rbgpu-ctxw", note);
     rbgpu_log("2ic: %s", note);
+    rbgpu_log("2id: cm/sm/em are the POSITIVE CONTROL. A context bit set in "
+              "cm, sm or em and clear in bm means this hook does reach the "
+              "code that programs GCVM contexts and that code writes CNTL, "
+              "START and END but never the page-directory BASE - which is "
+              "what Linux's gfxhub_v2_1_setup_vmid_config does, and would "
+              "mean c1/c3's bases were never written by anything. All four "
+              "masks 0000 means the hook does NOT reach that code and 2ic's "
+              "hits=0 is worth nothing. pivm=%u is the VM flush, the only "
+              "thing that writes a base in Linux: pivm=0 with bm=0000 is a "
+              "flush that never ran, not a flush that wrote the wrong value.",
+              g_rb_2id_pivm);
     if (g_rb_2ic_hits == 0) {
         rbgpu_log("2ic: the accessor performed %llu writes this boot and NONE "
                   "of them was to 0x%x..0x%x. If calls is large this is a "
@@ -7588,6 +7685,22 @@ void rbgpu_ctxwrite_flush_2ic(void) {
                   "this project has not read. If calls is 0 the hook took but "
                   "the accessor never ran, and this says nothing about the "
                   "chip.", g_rb_2ic_calls, RB_2IC_FIRST, RB_2IC_LAST);
+    }
+}
+
+static void (*orig_programAndInvalidateVM_2id)(void *, const void *) = nullptr;
+
+static void hooked_programAndInvalidateVM_2id(void *vmm, const void *info) {
+    g_rb_2id_pivm++;
+    if (info) {
+        uint32_t hub = *reinterpret_cast<const uint32_t *>(info);
+        if (hub < 16) {
+            g_rb_2id_pivm_hubs = static_cast<uint16_t>(
+                g_rb_2id_pivm_hubs | (1u << hub));
+        }
+    }
+    if (orig_programAndInvalidateVM_2id) {
+        orig_programAndInvalidateVM_2id(vmm, info);
     }
 }
 
@@ -7613,6 +7726,24 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
                   "say hk=0 so the empty note is not mistaken for a chip that "
                   "never wrote the registers");
         g_rb_2ic_hooked = 0;
+        patcher.clearError();
+    }
+
+    // 2id: the VM flush. Rule 9 (2gb): programAndInvalidateVM at 0xbe9b7a2
+    // opens `55 48 89 e5 41 57 41 56 41 55 41 54 53` - pushes, a movq and
+    // nothing else; the first branch is 0x9a bytes in. Checked, not assumed.
+    KernelPatcher::RouteRequest pivm(
+        "__ZN26AMDRadeonX6000_AMDGFX10VMM22programAndInvalidateVMEPK22AMD_VM_INVALIDATE_INFO",
+        hooked_programAndInvalidateVM_2id, orig_programAndInvalidateVM_2id);
+    if (patcher.routeMultiple(id, &pivm, 1, address, size)) {
+        rbgpu_log("2id: hooked AMDGFX10VMM::programAndInvalidateVM (observe "
+                  "only) - counts the VM flush, which is the only thing that "
+                  "writes a context page-directory base in Linux");
+        g_rb_2id_pivm_hooked = 1;
+    } else {
+        rbgpu_log("2id: FAILED to hook programAndInvalidateVM - pivm=0 in the "
+                  "note will mean the hook, not a flush that never ran");
+        g_rb_2id_pivm_hooked = 0;
         patcher.clearError();
     }
 }
