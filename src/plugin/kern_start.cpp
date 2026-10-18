@@ -8002,8 +8002,27 @@ void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_
 #define RB_2HK_CP_RB0_WPTR_HI 0x1DF50000000Bull
 #define RB_2HK_CP_STAT        0x0F400000000Bull
 #define RB_2HK_GRBM_STATUS    0x0DA40000000Bull
+// 2hm: the registers 2hl's reading made worth asking for. Every BASE_IDX is
+// 0 in gc_10_3_0_offset.h, the same segment as CP_RB0_CNTL, whose resolution
+// through this accessor is proven (2fe, and seg0 = 0x1260 agreed four ways).
+#define RB_2HM_GRBM_STATUS2   0x0DA20000000Bull
+#define RB_2HM_CP_ME_CNTL     0x0F560000000Bull
+#define RB_2HM_VMFAULT_STATUS 0x15C80000000Bull
+#define RB_2HM_VMFAULT_LO32   0x15C90000000Bull
+#define RB_2HM_VMFAULT_HI32   0x15CA0000000Bull
+#define RB_2HM_VMFAULT_CNTL   0x15C40000000Bull
+#define RB_2HM_CP_RB0_BASE    0x1DE00000000Bull
+#define RB_2HM_CP_RB0_BASE_HI 0x1E510000000Bull
 
 static int g_rb_2hk_on = -1;
+
+// 2hm: both samples accumulate here and the WHOLE buffer is written every
+// time. 2hl got its pair only because metal_check.sh happened to snapshot
+// state.txt between the two writes - p=1 had already overwritten p=0 in
+// NVRAM. That was luck, and a measurement whose two halves depend on luck is
+// not a measurement. Same shape as rbgpu-prog2, which has carried three
+// samples in one variable since 2fy.
+static char g_rb_2hm_ring[352];
 
 void rbgpu_ring_probe_2hk(unsigned phase) {
     if (g_rb_2hk_on < 0) {
@@ -8040,56 +8059,74 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
         return;
     }
 
-    // Committed BEFORE the first read. If this is all that survives, the read
-    // stalled - which is a result, not an absence.
-    char enter[64];
-    snprintf(enter, sizeof(enter), "ENTER p=%u (reading; a lone ENTER = STALL)", phase);
-    rbgpu_nvram_note("rbgpu-ring", enter);
-    rbgpu_log("2hk: ENTER phase=%u - about to resolve and read six registers. "
-              "If rbgpu-ring still reads ENTER after this boot, the accessor "
+    // Committed BEFORE the first read, and it carries whatever earlier phases
+    // already recorded. If this is all that survives, the read stalled - which
+    // is a result, not an absence.
+    {
+        char enter[400];
+        snprintf(enter, sizeof(enter), "%s%sENTER p=%u (reading; a lone ENTER = STALL)",
+                 g_rb_2hm_ring, g_rb_2hm_ring[0] ? " " : "", phase);
+        rbgpu_nvram_note("rbgpu-ring", enter);
+    }
+    rbgpu_log("2hk: ENTER phase=%u - about to resolve and read the register set. "
+              "If rbgpu-ring still ends in ENTER after this boot, the accessor "
               "stalled and THAT is the finding (2fe's failure, reproduced).",
               phase);
 
+    // 2hm: the order matters only in that the VM fault registers come FIRST.
+    // 2hl showed the CP front end holding packets it cannot retire with
+    // nothing downstream active, which is the shape of a fetch that never
+    // returns. If a fault is latched, these name it outright - with the
+    // faulting address - and no further inference is needed. Reading them
+    // does not clear them; the fault status is cleared by a write, which this
+    // probe never does.
     struct { const char *name; uint64_t id; } regs[] = {
-        { "cntl",    RB_2FB_CP_RB0_CNTL    },
-        { "rptr",    RB_2HK_CP_RB0_RPTR    },
-        { "wptr",    RB_2HK_CP_RB0_WPTR    },
-        { "wptr_hi", RB_2HK_CP_RB0_WPTR_HI },
-        { "cp_stat", RB_2HK_CP_STAT        },
+        { "vmf",     RB_2HM_VMFAULT_STATUS },
+        { "vmalo",   RB_2HM_VMFAULT_LO32   },
+        { "vmahi",   RB_2HM_VMFAULT_HI32   },
+        { "vmfc",    RB_2HM_VMFAULT_CNTL   },
+        { "r",       RB_2HK_CP_RB0_RPTR    },
+        { "w",       RB_2HK_CP_RB0_WPTR    },
+        { "cps",     RB_2HK_CP_STAT        },
         { "grbm",    RB_2HK_GRBM_STATUS    },
+        { "g2",      RB_2HM_GRBM_STATUS2   },
+        { "me",      RB_2HM_CP_ME_CNTL     },
+        { "rbb",     RB_2HM_CP_RB0_BASE    },
+        { "rbbhi",   RB_2HM_CP_RB0_BASE_HI },
     };
 
-    char out[256];
+    char one[288];
     size_t n = 0;
-    // snprintf returns int and can be negative; adding it to a size_t would
-    // wrap and then write past the buffer. Clamp every append.
-    int w = snprintf(out, sizeof(out), "p=%u", phase);
+    int w = snprintf(one, sizeof(one), "p=%u", phase);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
     for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
         uint32_t off = resolve(obj, regs[i].id);
         uint32_t val = rd(obj, off);
         rbgpu_log("2hk: %s dword 0x%x = 0x%08x", regs[i].name, off, val);
-        if (n >= sizeof(out) - 24) {
+        if (n >= sizeof(one) - 24) {
             break;
         }
-        w = snprintf(out + n, sizeof(out) - n, " %s=%08x", regs[i].name, val);
+        w = snprintf(one + n, sizeof(one) - n, " %s=%x", regs[i].name, val);
         if (w > 0) {
             n += static_cast<size_t>(w);
-            if (n >= sizeof(out)) {
-                n = sizeof(out) - 1;
+            if (n >= sizeof(one)) {
+                n = sizeof(one) - 1;
             }
         }
     }
-    rbgpu_nvram_note("rbgpu-ring", out);
-    rbgpu_log("2hk: %s", out);
 
-    // The one comparison the whole probe exists for, stated in the log so a
-    // reader does not have to do it by hand - and stated as a QUESTION, since
-    // a single sample cannot tell a frozen pointer from a ring that is simply
-    // idle because nothing was submitted this second.
-    rbgpu_log("2hk: compare rptr against wptr ACROSS the two phases. rptr frozen "
-              "while wptr moved = the CP is not fetching. Both moved = the GPU "
-              "ran and the completion path is what is broken. wptr never moved "
-              "= nothing was ever submitted to this ring. One sample decides "
-              "NOTHING; the pair does.");
+    size_t have = strlen(g_rb_2hm_ring);
+    snprintf(g_rb_2hm_ring + have, sizeof(g_rb_2hm_ring) - have,
+             "%s%s", have ? " | " : "", one);
+    rbgpu_nvram_note("rbgpu-ring", g_rb_2hm_ring);
+    rbgpu_log("2hk: %s", one);
+
+    // The comparison the probe exists for, stated as a question because a
+    // single sample decides nothing (2fs: no tables from n=1 rows).
+    rbgpu_log("2hk: vmf NONZERO = a VM protection fault is latched and vmalo/vmahi "
+              "name the address - that is the mechanism, no further inference "
+              "needed. vmf ZERO = no fault was ever latched, and the CP is "
+              "stalled on something inside the packet stream instead, which "
+              "the dwords at rptr would name. r and w ACROSS the two samples "
+              "say whether anything moved at all.");
 }
