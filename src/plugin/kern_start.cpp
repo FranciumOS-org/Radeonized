@@ -8397,6 +8397,204 @@ static void rbgpu_vmctx_probe_2hq(void *obj,
 // samples in one variable since 2fy.
 static char g_rb_2hm_ring[352];
 
+// ---------------------------------------------------------------------------
+// 2hw (2026-10-18): read the ring's PM4 and find what address the CP was
+// told to write its timestamp to.
+//
+// 2hv ran the fault-register line of attack to its limit. `status 0x40953`
+// carried VA 0 three times, but Apple polls getVMFaultInfo only eight times
+// in two and a half minutes, so the sample can never reach the size 2hu said
+// it needed, and "the address is zero" stays indistinguishable from "an
+// invalidate cleared the register first" (2hp).
+//
+// So stop asking the hardware what faulted and ask the command stream what
+// the CP was ASKED to do. The end-of-pipe timestamp target is a field in the
+// PM4 RELEASE_MEM packet, confirmed against Linux's own emitter
+// (gfx_v10_0_ring_emit_fence, docs/linux-ref/gfx_v10_0.c):
+//
+//     dw0  PACKET3(PACKET3_RELEASE_MEM=0x49, 6)   (3<<30)|(op<<8)|(n<<16)
+//     dw1  event/GCR control
+//     dw2  DATA_SEL / INT_SEL / DST_SEL
+//     dw3  lower_32_bits(addr)      <<<< the timestamp writeback address
+//     dw4  upper_32_bits(addr)
+//     dw5  lower_32_bits(seq)
+//     dw6  upper_32_bits(seq)
+//     dw7  ctx_id
+//
+// Zero in dw3/dw4 establishes 2ht's hypothesis outright; a sane address
+// kills it. Either way the fault-register ambiguity stops mattering.
+//
+// Only ONE page is needed. CP_RB0_CNTL has RB_BUFSZ=16 so the ring is large,
+// but rptr (0xb1 -> 0x2b1) and wptr (0x280 -> 0x380) are both dword indices
+// inside the first 4 KB (dwords 0..1023). Mapping one page covers the whole
+// region between them.
+//
+// **This is the first time the plugin maps GPU-visible memory, and that is
+// the risk.** The route is: ring VA -> index into CONTEXT0's flat PTE table
+// (already mapped at g_rb_gart_va by 2ek/2el, Apple's own pointer) -> the
+// PTE -> a physical page. Every valid entry in that table is
+// AMDGPU_PTE_SYSTEM (2ek: 1512 of 1512), so the address in it is a
+// bus/DMA address; on this machine with no IOMMU translation in play that
+// equals the CPU physical address, but **it is not guaranteed to**.
+//
+// That is exactly why the sanity gate is not optional. A wrong mapping
+// returns a page of something, and a page of something looks like data.
+// Before any dword is interpreted this counts PM4 type-3 headers
+// ((dw >> 30) == 3) across the page; a ring buffer is full of them. Below
+// the threshold the dump REFUSES and says the mapping is unconvincing -
+// a failed mapping is a failed mapping, not a finding (2cy).
+//
+// Read-only, one page, unmapped immediately. Off unless -rbgpuringdump.
+#define RB_2HW_PM4_MIN 8
+
+static int g_rb_2hw_on   = -1;
+static int g_rb_2hw_done = 0;
+
+static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
+    if (g_rb_2hw_on < 0) {
+        g_rb_2hw_on = checkKernelArgument("-rbgpuringdump") ? 1 : 0;
+        rbgpu_log("2hw: ring PM4 dump %s", g_rb_2hw_on ? "ON" : "OFF (-rbgpuringdump)");
+    }
+    if (!g_rb_2hw_on || g_rb_2hw_done) {
+        return;
+    }
+
+    // Each refusal names its own check and lands in NVRAM. Silence here must
+    // never be mistaken for "the ring looked fine".
+    if (!g_rb_gart_va || !g_rb_2eb_start_pg) {
+        rbgpu_nvram_note("rbgpu-pm4", "SKIP: no PTE table (gart_va/start unset)");
+        rbgpu_log("2hw: SKIPPED - gart_va=0x%llx start_pg=0x%llx; the 2ek/2el "
+                  "table is not available, nothing was read",
+                  g_rb_gart_va, g_rb_2eb_start_pg);
+        return;
+    }
+    uint64_t start_va = g_rb_2eb_start_pg << 12;
+    if (ring_va < start_va) {
+        char b[96];
+        snprintf(b, sizeof(b), "SKIP: ring va %llx below aperture %llx", ring_va, start_va);
+        rbgpu_nvram_note("rbgpu-pm4", b);
+        rbgpu_log("2hw: SKIPPED - %s", b);
+        return;
+    }
+    uint64_t idx = (ring_va - start_va) >> 12;
+    if ((idx + 1) * 8 > g_rb_gart_limit) {
+        rbgpu_nvram_note("rbgpu-pm4", "SKIP: ring PTE index past the table");
+        rbgpu_log("2hw: SKIPPED - PTE[%llu] is past the %llu-byte table",
+                  idx, g_rb_gart_limit);
+        return;
+    }
+
+    uint64_t e  = reinterpret_cast<volatile uint64_t *>(g_rb_gart_va)[idx];
+    uint64_t pa = e & 0x0000FFFFFFFFF000ULL;
+    if (!(e & 1) || pa == 0) {
+        char b[96];
+        snprintf(b, sizeof(b), "SKIP: ring PTE[%llu]=%llx not valid", idx, e);
+        rbgpu_nvram_note("rbgpu-pm4", b);
+        rbgpu_log("2hw: SKIPPED - ring PTE[%llu] = 0x%llx, valid=%d. The ring "
+                  "page is unmapped, which is itself a finding and a different "
+                  "one from a bad dump.", idx, e, (e & 1) ? 1 : 0);
+        return;
+    }
+    g_rb_2hw_done = 1;   // one attempt per boot, whatever happens below
+
+    rbgpu_log("2hw: ring VA 0x%llx -> PTE[%llu] = 0x%llx -> phys 0x%llx "
+              "(sys=%llu). Mapping one page, read-only.",
+              ring_va, idx, e, pa, (e >> 1) & 1);
+
+    IOMemoryDescriptor *md =
+        IOMemoryDescriptor::withPhysicalAddress(static_cast<IOPhysicalAddress>(pa),
+                                                4096, kIODirectionIn);
+    if (!md) {
+        rbgpu_nvram_note("rbgpu-pm4", "SKIP: withPhysicalAddress returned NULL");
+        rbgpu_log("2hw: SKIPPED - could not describe phys 0x%llx", pa);
+        return;
+    }
+    IOMemoryMap *mp = md->map(kIOMapAnywhere | kIOMapInhibitCache);
+    if (!mp) {
+        md->release();
+        rbgpu_nvram_note("rbgpu-pm4", "SKIP: map() returned NULL");
+        rbgpu_log("2hw: SKIPPED - could not map phys 0x%llx", pa);
+        return;
+    }
+    auto dw = reinterpret_cast<volatile uint32_t *>(mp->getVirtualAddress());
+
+    // THE GATE. Count type-3 headers before believing any of this is a ring.
+    uint32_t t3 = 0, nonzero = 0;
+    for (unsigned i = 0; i < 1024; i++) {
+        uint32_t v = dw[i];
+        if (v) nonzero++;
+        if ((v >> 30) == 3) t3++;
+    }
+    if (t3 < RB_2HW_PM4_MIN) {
+        char b[160];
+        snprintf(b, sizeof(b), "REFUSED pa=%llx t3=%u nz=%u (not PM4)", pa, t3, nonzero);
+        rbgpu_nvram_note("rbgpu-pm4", b);
+        rbgpu_log("2hw: REFUSING to interpret. phys 0x%llx has only %u type-3 "
+                  "headers in 1024 dwords (%u nonzero). A ring buffer is full "
+                  "of them, so this mapping is not the ring - most likely the "
+                  "PTE holds a bus address that is not the CPU physical "
+                  "address. This is a FAILED MAPPING, not a finding about the "
+                  "ring.", pa, t3, nonzero);
+        mp->release();
+        md->release();
+        return;
+    }
+
+    rbgpu_log("2hw: mapping looks like PM4 (%u type-3 headers, %u nonzero of "
+              "1024 dwords). rptr=0x%x wptr=0x%x", t3, nonzero, rptr, wptr);
+
+    // Walk the packets and find every RELEASE_MEM. Its dw3/dw4 is the answer.
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note), "pa=%llx t3=%u r=%x w=%x", pa, t3, rptr, wptr);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+
+    unsigned found = 0;
+    for (unsigned i = 0; i < 1024; i++) {
+        uint32_t h = dw[i];
+        if ((h >> 30) != 3) {
+            continue;
+        }
+        uint32_t op = (h >> 8) & 0xFF;
+        if (op != 0x49 || i + 7 >= 1024) {       // PACKET3_RELEASE_MEM
+            continue;
+        }
+        uint64_t addr = (static_cast<uint64_t>(dw[i + 4]) << 32) | dw[i + 3];
+        uint64_t seq  = (static_cast<uint64_t>(dw[i + 6]) << 32) | dw[i + 5];
+        found++;
+        rbgpu_log("2hw: RELEASE_MEM at dword 0x%x: hdr=%08x c1=%08x c2=%08x "
+                  "ADDR=0x%llx seq=0x%llx ctx=%08x %s",
+                  i, h, dw[i + 1], dw[i + 2], addr, seq, dw[i + 7],
+                  addr ? "" : "<<<< THE TIMESTAMP TARGET IS ZERO");
+        if (found <= 3 && n < sizeof(note) - 48) {
+            w = snprintf(note + n, sizeof(note) - n, " | rm@%x a=%llx s=%llx",
+                         i, addr, seq);
+            if (w > 0) {
+                n += static_cast<size_t>(w);
+                if (n >= sizeof(note)) n = sizeof(note) - 1;
+            }
+        }
+    }
+    if (!found && n < sizeof(note) - 24) {
+        snprintf(note + n, sizeof(note) - n, " | NO RELEASE_MEM in page");
+        rbgpu_log("2hw: no RELEASE_MEM packet in the first page. The timestamp "
+                  "packet is elsewhere in the ring or inside an indirect "
+                  "buffer, so this says NOTHING about its address.");
+    }
+    rbgpu_nvram_note("rbgpu-pm4", note);
+
+    // The dwords the CP actually stopped on, logged raw so the decode can be
+    // redone offline against nvd.h without another boot.
+    unsigned from = (rptr >= 4) ? (rptr - 4) : 0;
+    for (unsigned i = from; i < from + 24 && i < 1024; i += 4) {
+        rbgpu_log("2hw: ring[%03x] %08x %08x %08x %08x", i,
+                  dw[i], dw[i + 1], dw[i + 2], dw[i + 3]);
+    }
+
+    mp->release();
+    md->release();
+}
+
 void rbgpu_ring_probe_2hk(unsigned phase) {
     if (g_rb_2hk_on < 0) {
         g_rb_2hk_on = checkKernelArgument("-rbgpuringprobe") ? 1 : 0;
@@ -8511,6 +8709,19 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // with no faults and a boot where the hooks never took must not look the
     // same in NVRAM.
     rbgpu_fault_flush_2hu();
+
+    // 2hw: the PM4 itself, at the phase where the hang is established. Last,
+    // after every other note is committed, because it is the newest and
+    // riskiest thing here (2fo: when a measurement and a suspect are both
+    // new, the suspect goes last).
+    if (phase == 1) {
+        uint64_t rb_lo = rd(obj, resolve(obj, RB_2HM_CP_RB0_BASE));
+        uint64_t rb_hi = rd(obj, resolve(obj, RB_2HM_CP_RB0_BASE_HI));
+        uint64_t ring_va = ((rb_hi << 32) | rb_lo) << 8;
+        uint32_t rp = rd(obj, resolve(obj, RB_2HK_CP_RB0_RPTR));
+        uint32_t wp = rd(obj, resolve(obj, RB_2HK_CP_RB0_WPTR));
+        rbgpu_ringdump_2hw(ring_va, rp, wp);
+    }
 
     // The comparison the probe exists for, stated as a question because a
     // single sample decides nothing (2fs: no tables from n=1 rows).
