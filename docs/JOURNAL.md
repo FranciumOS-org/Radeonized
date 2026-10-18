@@ -11437,3 +11437,95 @@ The decisive reading is the **+12 s** sample, which in every one of eleven
 boots has already shown `vmf=3009bb`, VMID 3, CPF, `WALKER_ERROR`. If that
 sample comes back clean, the eleven-boot signature is broken.
 
+
+## 2ih result (2026-10-18) — the write lands perfectly and changes nothing
+
+Twelfth consecutive armed boot, `logs/20261018-173507-metal/`, `armed=1`
+live, UUID `42B30D91-0F24-3110-A548-700916CA7D4E` = `build/out`,
+`-rbgpuptfix` present and `-rbgpuptwrite` removed.
+
+```
+rbgpu-ptfix = b=40 arm=1 binds=41 wrote=41 nomatch=0 noobj=0 badback=0
+              vmids=000e | first root=f4fb000000 was=0/0
+              new=fb000001/f4 back=fb000001/f4
+rbgpu-vm    = c1:cn=3b,b=f4fb00b001  c3:cn=3b,b=f4fb015001   (both samples)
+```
+
+Mechanically flawless: 41 binds, 41 writes, no refusals, no bad read-backs,
+and the corrected values **persist** through +100 s - nothing overwrote
+them. The instrument did exactly what it was built to do.
+
+And `+12 s` is byte-identical to the eleven boots before it: `vmf=3009bb`,
+VMID 3, CPF, `WALKER_ERROR`, VA `0x4_0030_0000`, `me=15000000`. Metal still
+hangs at commit. Row 2 of 2ih's table.
+
+### `was=0/0` - the mystery writer runs INSIDE assignVMID
+
+The first bind found the register **zero**, not `0xFB000000`. So the
+truncated value is not there before binding: it is written at or during the
+bind, on a path none of 2ic/2id/2ie's hooks sees, and 2ih's write - which
+runs after the original returns - lands last and sticks. The fourth writer
+is still unidentified but now has a time window, and the fact that our
+later write is never clobbered means the mechanism of 2ih is sound.
+
+### Why it changed nothing: the wrong address space
+
+2em established what this register wants and verified it on context 0:
+
+```
+pa = (mc - fb_base) + vram_base_offset
+     fb_base          = GCMC_VM_FB_LOCATION_BASE << 24 = 0xF4_0000_0000
+     vram_base_offset = GCMC_VM_FB_OFFSET        << 24 = 0x7_8000_0000
+```
+
+TTL's table is at MC `0xF4_0FDF_A000`; `0x0FDF_A000 + 0x7_8000_0000` =
+`0x7_8FDF_A000`, which is what c0 holds and what translates. **2ih wrote an
+MC address into a register that wants a physical one.** The read-back
+verified, the walker still had nonsense, and `badback=0` was never evidence
+about correctness - only about the register accepting bits.
+
+The truncated values say the same thing from the other side, and this is
+the part worth keeping. The three roots are MC `0xF4_FB00_0000`,
+`0xF4_FB00_B000`, `0xF4_FB01_5000`; the registers held `0xFB000000`,
+`0xFB00B000`, `0xFB015000` - **exactly `root - fb_base`**, with
+`vram_base_offset` omitted. So this was never a generic truncation of high
+bits. It is **2em's defect**, the same missing `vram_base_offset`, on
+contexts 1..15 where nothing has ever corrected it. 2ig's "the carve-out
+high bits were dropped" was the right observation with the wrong arithmetic
+behind it, and the correction it implied was therefore wrong too.
+
+## 2ii (2026-10-18) — 2em's arithmetic, applied per context, self-checking
+
+Same hook, same bind-time moment, same strict root match. Only the value
+changes:
+
+```
+want = (root - fb_base) + vram_base_offset
+GCVM_CONTEXT<vmid>_PAGE_TABLE_BASE_ADDR = want | 1
+```
+
+For context 3: `0xFB01_5000 + 0x7_8000_0000` = **`0x8_7B01_5001`**, where
+2ih wrote `0xF4_FB01_5001`.
+
+The write is now **self-checking**, which is the part that makes it worth a
+boot. If the register already holds a nonzero value it must equal
+`root - fb_base`; when it does, the root, the transform and the defect all
+agree *before* anything is written. When it does not, the write is
+**refused** and counted (`relbad`) rather than guessed - and the note
+records the value it refused on. `relok` counts the confirmations. Refused
+also if `FB_LOCATION_BASE` or `FB_OFFSET` have not been read yet
+(`nofb`), since the transform is not derivable without them.
+
+| `rbgpu-ptfix` reading | means |
+|---|---|
+| `relok>0 wrote>0` and the +12 s fault gone | 2em's defect on contexts 1..15 was the cause, and this is the fix |
+| `relok>0 wrote>0`, fault unchanged | the base is now in the right space with the right value and the walk still fails - the page tables it points at become the next question |
+| `relbad>0` | the `root - fb_base` relationship does not hold; the arithmetic is wrong and the note names the value |
+| `nofb=binds` | the FB registers were not read before the first bind; ordering problem, not a chip result |
+
+2em's own residual risk applies unchanged and is worth repeating: if the
+walker wants the BAR0 alias (`0x8_8000_0000` + offset) rather than the DRAM
+alias, this points at another wrong page and the same `MAPPING_ERROR`
+returns - no worse than now. And no TLB invalidation is issued, so a stale
+negative translation remains a second candidate if the fault persists.
+

@@ -8019,6 +8019,9 @@ static uint32_t g_rb_2ih_wrote   = 0;
 static uint32_t g_rb_2ih_nomatch = 0;
 static uint32_t g_rb_2ih_noobj   = 0;
 static uint32_t g_rb_2ih_badback = 0;   // read-back did not equal what we wrote
+static uint32_t g_rb_2ih_nofb    = 0;   // FB_LOCATION_BASE / FB_OFFSET not read yet
+static uint32_t g_rb_2ih_relok   = 0;   // 2em relationship held on a nonzero register
+static uint32_t g_rb_2ih_relbad  = 0;   // it did not, and the write was refused
 static uint16_t g_rb_2ih_mask    = 0;   // VMIDs corrected
 static uint64_t g_rb_2ih_first_root = 0;
 static uint32_t g_rb_2ih_first_was_lo = 0, g_rb_2ih_first_was_hi = 0;
@@ -8059,14 +8062,66 @@ static void rbgpu_ptfix_2ih(void *ctx, uint32_t vmid) {
     }
     if (!matched) { g_rb_2ih_nomatch++; return; }
 
+    // 2ii (2026-10-18): the MC address is NOT what this register wants.
+    //
+    // 2ih wrote `root | 1` and it took - badback=0, and c1/c3 read back
+    // 0xF4_FB00_B001 / 0xF4_FB01_5001 and stayed - and the walker faulted
+    // exactly as before. The reason is address space. 2em established what
+    // this register wants, and verified it on context 0:
+    //
+    //     pa = (mc - fb_base) + vram_base_offset
+    //          fb_base          = GCMC_VM_FB_LOCATION_BASE << 24
+    //          vram_base_offset = GCMC_VM_FB_OFFSET        << 24  (0x780 here)
+    //
+    // Context 0 is the proof: TTL's table sits at MC 0xF4_0FDF_A000, and
+    // 0x0FDF_A000 + 0x7_8000_0000 = 0x7_8FDF_A000, which is what c0 holds
+    // and what translates. An MC address in this register is simply wrong,
+    // and 2ih put one there.
+    //
+    // The truncated values 2ig found say the same thing from the other side.
+    // The three roots are MC 0xF4_FB00_0000, 0xF4_FB00_B000, 0xF4_FB01_5000,
+    // and the registers held 0xFB000000, 0xFB00B000, 0xFB015000 - exactly
+    // `root - fb_base`, with vram_base_offset omitted. So this was never a
+    // generic truncation: it is **2em's defect**, the same missing
+    // vram_base_offset, on contexts 1..15. 2ig's "the carve-out high bits
+    // were dropped" was the right observation with the wrong arithmetic
+    // behind it.
+    //
+    // That makes the write self-checking. If the register already holds a
+    // nonzero value it must equal `root - fb_base`; when it does, the root,
+    // the transform and the defect all agree before anything is written, and
+    // when it does not the write is refused rather than guessed.
+    if (g_rb_2ed_fb_base == 0 || g_rb_2ed_fb_off == 0) {
+        g_rb_2ih_nofb++;
+        return;
+    }
+    uint64_t fb_base = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
+    uint64_t vram_base_offset = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+    if (root < fb_base) { g_rb_2ih_nomatch++; return; }
+    uint64_t fb_off = root - fb_base;
+    uint64_t want = fb_off + vram_base_offset;
+
     uint64_t id_lo = ((0x1667ull + 2ull * vmid) << 32) | 0xB;
     uint64_t id_hi = ((0x1668ull + 2ull * vmid) << 32) | 0xB;
     uint32_t off_lo = resolve(obj, id_lo);
     uint32_t off_hi = resolve(obj, id_hi);
     uint32_t was_lo = rd(obj, off_lo);
     uint32_t was_hi = rd(obj, off_hi);
-    uint32_t new_lo = static_cast<uint32_t>(root & 0xFFFFFFFFu) | 1u;
-    uint32_t new_hi = static_cast<uint32_t>(root >> 32);
+    uint32_t new_lo = static_cast<uint32_t>(want & 0xFFFFFFFFu) | 1u;
+    uint32_t new_hi = static_cast<uint32_t>(want >> 32);
+
+    // The self-check: a nonzero register must already be `root - fb_base`.
+    uint64_t cur = (static_cast<uint64_t>(was_hi) << 32) | was_lo;
+    if (cur != 0 && (cur & ~0xFFFULL) != fb_off) {
+        g_rb_2ih_relbad++;
+        if (g_rb_2ih_relbad == 1) {
+            g_rb_2ih_first_root = root;
+            g_rb_2ih_first_was_lo = was_lo; g_rb_2ih_first_was_hi = was_hi;
+            g_rb_2ih_first_new_lo = new_lo; g_rb_2ih_first_new_hi = new_hi;
+        }
+        return;      // the 2em relationship does not hold; do not guess
+    }
+    if (cur != 0) g_rb_2ih_relok++;
 
     if (g_rb_2ih_wrote == 0) {
         g_rb_2ih_first_root   = root;
@@ -8091,15 +8146,23 @@ void rbgpu_ptfix_flush_2ih(void) {
     char note[352];
     snprintf(note, sizeof(note),
              "arm=%d binds=%u wrote=%u nomatch=%u noobj=%u badback=%u "
-             "vmids=%04x | first root=%llx was=%x/%x new=%x/%x back=%x/%x",
+             "nofb=%u relok=%u relbad=%u vmids=%04x | first root=%llx "
+             "was=%x/%x new=%x/%x back=%x/%x",
              g_rb_2ih_armed, g_rb_2ih_calls, g_rb_2ih_wrote,
              g_rb_2ih_nomatch, g_rb_2ih_noobj, g_rb_2ih_badback,
+             g_rb_2ih_nofb, g_rb_2ih_relok, g_rb_2ih_relbad,
              g_rb_2ih_mask, g_rb_2ih_first_root,
              g_rb_2ih_first_was_lo, g_rb_2ih_first_was_hi,
              g_rb_2ih_first_new_lo, g_rb_2ih_first_new_hi,
              g_rb_2ih_first_bk_lo, g_rb_2ih_first_bk_hi);
     rbgpu_nvram_note("rbgpu-ptfix", note);
     rbgpu_log("2ih: %s", note);
+    rbgpu_log("2ii: relok counts binds where the register already held "
+              "`root - fb_base`, which is 2em's defect confirmed per context "
+              "before the write. relbad counts binds where it held something "
+              "else and the write was REFUSED rather than guessed - a nonzero "
+              "relbad means the arithmetic is wrong somewhere and the note's "
+              "first was= shows for which value.");
     rbgpu_log("2ih: wrote=0 with binds>0 and nomatch=binds means ctx+0xb8 is "
               "not the root for these contexts and NOTHING was written - the "
               "offset 2ig matched once is not general, and the boot says so "
