@@ -10438,3 +10438,92 @@ That is exactly the ambiguity-of-absence this project keeps paying for
 zero. The counts belong **in the `rbgpu-fault` note itself**, not in the
 shared diag table. Owed, and it blocks the "is Apple's reporting path
 even running" question 2hs was partly built to answer.
+
+## 2hv — Apple's fault reporting runs; VA 0 held across three faults, which is not enough
+
+Boot of 2026-10-18 ~14:26, armed, build `A77DD014` (matches `build/out`),
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 31`. Capture in
+`logs/20261018-142827-metal/`. Fifth consecutive armed boot; ring, VM
+contexts and Metal all identical to 2hp/2hr/2ht.
+
+```
+rbgpu-fault = b=31 hk=1 c=8 f=8 r=4 o=0
+  s3009bb   h0  n=1  va=400300000     mx=400300000     v3  R  c4
+  sffffffff h1  n=4  va=fffffffff000  mx=fffffffff000  v15 W  c511
+  s40953    h0  n=3  va=0             mx=0             v0  W  c4
+```
+
+### What this settles
+
+**The instrument is honest now.** `hk=1` proves the hooks took, and the
+counters survived in the note instead of being truncated out of
+`rbgpu-diag` as in 2ht. A boot with no faults and a boot where the hooks
+failed can no longer look the same.
+
+**Apple's fault reporting path RUNS.** `r=4` —
+`AMDHWVMM::fillFaultAccelInfo` was called four times. Apple is not merely
+latching faults in hardware: it is assembling four complete fault
+reports, with VA, op, vmid, pasid, memClient and closest-good-VA, and
+handing each to `kprintf`, where nothing can read them (2hs). Apple's own
+driver considers this a real, reportable GPU fault condition, every boot.
+
+**Every single poll found a fault.** `c=8 f=8` — eight calls to
+`getVMFaultInfo`, eight faults. Apple never once looked and found the
+chip clean.
+
+**The hub-1 phantoms dominate.** Four of the eight are the all-ones
+dead-register reads 2ht identified. Half of what Apple's fault path
+processes on this chip is noise from a register that does not decode.
+
+### What this does NOT settle, and I said beforehand what would
+
+2hu was built to answer one question: does a `status 0x40953` fault ever
+carry a nonzero VA? The answer here is **no — across three faults.**
+
+**Three is not enough, and 2hu's own text set the bar at "hundreds".**
+Writing `mx=0` down as confirmation would be the recurring error again:
+a reading that only means something at a sample size this boot did not
+reach. The honest statement is that `s40953` was seen three times, every
+time with VA 0, and that this is consistent with both live hypotheses —
+a genuine null target, and an address register cleared by
+`CLEAR_PROTECTION_FAULT_STATUS_ADDR` before anyone read it (2hp).
+
+Worse, the sample size cannot be raised this way. **Apple polls
+`getVMFaultInfo` only eight times in two and a half minutes**, so more
+waiting buys almost nothing, and the five-boot record (`o=0`, same
+signatures, same order) says the behaviour is deterministic rather than
+sampled thinly from a varied population.
+
+So the end-of-pipe-timestamp hypothesis from 2ht is **neither supported
+nor refuted** by this boot. It stands exactly where it did.
+
+### The discriminator that does not depend on the fault registers at all
+
+Stop asking the hardware what address faulted and ask the **command
+stream what address the CP was told to write**. The EOP timestamp target
+is a field in the PM4 `RELEASE_MEM` packet sitting in the ring, and we
+now know everything needed to find it:
+
+- ring VA `0xFF_BFDE_0000` (`CP_RB0_BASE << 8`, 2hn)
+- `rptr` 0xb1 early, 0x2b1 at the hang; `wptr` 0x280 / 0x380 (2hl, 2hp)
+- context 0's window covers it and its PDE is valid (2hr)
+
+Decoding the dwords around `rptr` names the packet the CP stopped on
+**and** shows its writeback address directly. If that field is zero, the
+hypothesis is established outright and the fault-register ambiguity
+never needs resolving. If it is a sane address, the hypothesis dies and
+the VA 0 really was a cleared register.
+
+That is the mapping step deliberately deferred in 2hm ("a register read
+may settle it first, and bundling a new memory mapping into the same
+boot would mean two new things at once"). The register reads have now
+been run to their limit, and they did not settle it.
+
+The risk is real and new: this needs the plugin to map GPU-visible
+memory, which it has never done. The ring is at a GPUVM address, so the
+CPU-side route is the carve-out alias — the same address-space
+translation 2ei/2em worked out — and getting it wrong means reading the
+wrong page and believing it. Whatever it maps must be checked against
+something known before any dword of it is interpreted: a PM4 packet
+stream has a recognisable `0xC0` type-3 header pattern, and a buffer
+that does not look like PM4 is a failed mapping, not a finding.

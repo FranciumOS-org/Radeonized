@@ -468,12 +468,43 @@ the timestamp write, nor that VA 0 is real rather than an artifact of
 anyone read it (2hp). Apple reads the same registers, so Apple's zero is
 equally susceptible.
 
-**Next, and it is cheap:** raise the four-fault NVRAM cap and see
-whether a `status 0x40953` fault EVER carries a nonzero VA. If none
-does across many faults, VA 0 is real and the timestamp hypothesis gets
-its test. Owed at the same time: the `vmfault_hooked` / `vmfaults_seen`
-/ `vmfault_calls` / `vmfault_reports` counters were **truncated out of
-`rbgpu-diag`** (it caps at `mapq_ca`), so this boot cannot say how many
-faults there were or whether `fillFaultAccelInfo` ran at all — missing
-looks the same as zero (2eh, 2ek, 2fb). The counts belong in the
-`rbgpu-fault` note itself.
+**2hv ran that test and it came back short.** Fifth consecutive armed
+boot, everything else identical:
+
+```
+hk=1 c=8 f=8 r=4 o=0
+  s3009bb   h0 n=1 va=400300000    mx=400300000    v3 R  c4
+  sffffffff h1 n=4 va=fffffffff000 mx=fffffffff000 v15W  c511
+  s40953    h0 n=3 va=0            mx=0            v0 W  c4
+```
+
+Settled: the hooks took (`hk=1`) and the counters now survive in the
+note. **Apple's fault reporting path RUNS** — `r=4`,
+`fillFaultAccelInfo` assembled four complete reports and kprintf'd them
+where nothing can read them. **Every poll found a fault** (`c=8 f=8`);
+Apple never once saw the chip clean. Half of what it processes is the
+hub-1 phantom.
+
+**Not settled: whether VA 0 is real.** `s40953` was seen three times,
+VA 0 every time — but 2hu set the bar at *hundreds*, and three is not
+it. Calling `mx=0` confirmation would be the recurring error. It is
+consistent with BOTH live hypotheses (genuine null target, or
+`CLEAR_PROTECTION_FAULT_STATUS_ADDR` wiping the register first), and
+the sample size **cannot be raised this way** — Apple polls
+`getVMFaultInfo` only eight times in two and a half minutes. The
+end-of-pipe-timestamp hypothesis is neither supported nor refuted.
+
+**Next: stop asking the hardware what faulted and ask the command
+stream what the CP was told to write.** The EOP timestamp target is a
+field in the PM4 `RELEASE_MEM` packet in the ring, and everything
+needed to find it is known: ring VA `0xFF_BFDE_0000`, `rptr` 0xb1 ->
+0x2b1, `wptr` 0x280 -> 0x380, context 0 valid and covering it. A zero
+in that field establishes the hypothesis outright; a sane address kills
+it. This is the memory mapping deliberately deferred in 2hm — the
+register reads have now been run to their limit and did not settle it.
+**New risk:** the plugin has never mapped GPU-visible memory. The ring
+is at a GPUVM address, so the CPU route is the carve-out alias (the
+2ei/2em address-space work), and a wrong mapping reads the wrong page
+and looks like data. Check the buffer against the type-3 PM4 `0xC0`
+header pattern BEFORE interpreting any dword; a buffer that does not
+look like PM4 is a failed mapping, not a finding.
