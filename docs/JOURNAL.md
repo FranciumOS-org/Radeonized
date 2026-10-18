@@ -9416,3 +9416,59 @@ So option (2) is not a one-line call. It is: take `accel->0x88`, call
 `enableAccelerator()`, release, and log all three steps — with the
 substitution named as one (2cy), since a Metal allocation succeeding
 afterwards proves the flag gated it and nothing more.
+
+## 2hg — enable the accelerator without a display pipe (build 23B6A724)
+
+The experiment 2hf pointed at, option (2): leave 2ct refusing and set the
+gate directly, so Metal can allocate without ever touching DCN.
+
+**Solved, not routed** (`processAccelFamily`, under IOAcceleratorFamily2's
+own kext id per milestone 2c — the symbol is external and defined there,
+not in X6000):
+
+```
+__ZN22IOGraphicsAccelerator217enableAcceleratorEv  ->  g_rb_enableAccelerator_2hg
+```
+
+Apple's function is called rather than the bit being written, because it
+does more than the `orb`: it starts the event machine's hardware progress
+timer first.
+
+**Where:** in the peer's `handlePostRegister`, immediately after request
+0x1B returns. That is outside Apple's call stack, on our own thread, at
+the latest point in the sequence 2ha mapped — so there is no reentrancy
+into a path that is mid-flight.
+
+**The lock is taken.** `enableAccelerator` tail-calls
+`startHardwareProgressTimerUnlocked`, and `Unlocked` means the caller
+holds the lock; both real callers run inside `display_mode_did_change`,
+which does. `acceleratorWaitEnabled` sleeps on `accel->0x88`, so that is
+the lock. The hook reads it, and **refuses to call** if it is not a kernel
+pointer — calling an unlocked-variant function with no lock is the shape
+that produced the 2fz/2ga and 2gg panics.
+
+**Every path says something** (absence is not a result): symbol unsolved,
+no accelerator, implausible lock, and already-enabled each log a distinct
+line and set `ea_called=0`, so a boot that changes nothing cannot be read
+as "enabling did not help".
+
+**It is a substitution and is logged as one** (2cy). The log line says in
+words that this is the plugin setting the gate, not a display. If a Metal
+allocation succeeds afterwards it proves the FLAG was the gate — nothing
+more, and nothing downstream may be narrated as if a display exists.
+
+Off unless `-rbgpuforceenable`. New note `rbgpu-ea` carries
+`ea:<before>-><after>` for the flags word; `plugin_check.sh` now reads it.
+
+### Written before the boot
+
+| reading | means |
+|---|---|
+| `ea_solved=0` | the symbol never resolved; the boot-arg did nothing and the Metal result is unrelated to this hook |
+| `ea_called=0` with "already enabled" | something else set bit 0x2 first — and that would itself be news, since 2hf says only `display_mode_did_change` can |
+| `ea_called=0` with "lock is not a kernel pointer" | `+0x88` is not what 2hf read it as; the offset is wrong and nothing was called |
+| `ea:XXXXXXX0->XXXXXXX2`, Metal still hangs | the flag was not the only gate; the stack from the next `--dispatch` says where it moved to |
+| `ea:...->...2`, Metal allocates | **the flag was the gate.** Headless Metal, with 2ct still refusing and DCN untouched |
+
+The last row is the one worth having: it would mean compute works without
+the display problem being solved at all.

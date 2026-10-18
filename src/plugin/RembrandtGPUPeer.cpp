@@ -75,6 +75,7 @@ extern uint64_t g_guard_calls;
 extern volatile int g_rb_2gn_in1b;
 extern void rbgpu_2gx_req(uint32_t req, int refused);
 extern void rbgpu_2gx_flush(void);
+extern void (*g_rb_enableAccelerator_2hg)(void *);
 // 2gp: the event machine's stamp-wait counters (kern_start.cpp).
 extern volatile uint32_t g_rb_2gp_fas_n;
 extern volatile uint32_t g_rb_2gp_wfs_calls;
@@ -1511,6 +1512,71 @@ void RembrandtGPUPeer::handlePostRegister() {
     rbgpu_2gx_flush();
     g_rb_2gn_in1b = 0;
     rbgpu_log("handlePostRegister: Request 0x1B returned 0x%08X", ret1B);
+
+    // 2hg: enable the accelerator WITHOUT a display pipe.
+    //
+    // 2hf: Metal's first buffer allocation sleeps in
+    // IOGraphicsAccelerator2::acceleratorWaitEnabled because bit 0x2 of
+    // accel+0xc78 is clear, and the only thing that sets it is
+    // enableAccelerator(), whose only callers are the display machines'
+    // display_mode_did_change. 2ct refuses the pipe, so it never runs and
+    // every IOAccelResourceCreate blocks forever.
+    //
+    // THIS IS A SUBSTITUTION (2cy). If a Metal allocation succeeds after
+    // this, that proves the FLAG was the gate - it does not prove a
+    // display exists, and nothing downstream may be narrated as if one
+    // does. Every step below says what it did, so a boot that changes
+    // nothing cannot be mistaken for a boot where enabling did not help.
+    //
+    // The lock is not optional. enableAccelerator tail-calls
+    // IOAccelEventMachine2::startHardwareProgressTimerUnlocked, and the
+    // `Unlocked` suffix means the caller holds the lock; both real callers
+    // run inside display_mode_did_change, which does. acceleratorWaitEnabled
+    // sleeps on accel->0x88, so that is the lock. Calling an unlocked-variant
+    // function with no lock held is the shape that produced the 2fz/2ga and
+    // 2gg panics, so if the lock pointer is not plausible we do NOT call.
+    if (checkKernelArgument("-rbgpuforceenable")) {
+        if (!g_rb_enableAccelerator_2hg) {
+            rbgpu_log("2hg: -rbgpuforceenable set but enableAccelerator was "
+                      "never solved - nothing done");
+            rbgpu_diag_set_num("ea_called", 0);
+        } else if (!accelerator) {
+            rbgpu_log("2hg: -rbgpuforceenable set but no accelerator "
+                      "registered - nothing done");
+            rbgpu_diag_set_num("ea_called", 0);
+        } else {
+            uintptr_t a = reinterpret_cast<uintptr_t>(accelerator);
+            volatile uint32_t *flags = reinterpret_cast<volatile uint32_t *>(a + 0xc78);
+            uint32_t before = *flags;
+            IOLock *l = *reinterpret_cast<IOLock **>(a + 0x88);
+            rbgpu_log("2hg: accel=%p flags(+0xc78)=0x%08X enabled=%d lock(+0x88)=%p",
+                      accelerator, before, (before & 2) ? 1 : 0, l);
+            rbgpu_diag_set_num("ea_flags_before", before);
+            if (reinterpret_cast<uintptr_t>(l) < 0xffffff8000000000ULL) {
+                rbgpu_log("2hg: lock at +0x88 is not a kernel pointer - REFUSING "
+                          "to call enableAccelerator unlocked (2fz/2ga/2gg)");
+                rbgpu_diag_set_num("ea_called", 0);
+            } else if (before & 2) {
+                rbgpu_log("2hg: already enabled - nothing to do, and any Metal "
+                          "result this boot says nothing about this hook");
+                rbgpu_diag_set_num("ea_called", 0);
+            } else {
+                IOLockLock(l);
+                g_rb_enableAccelerator_2hg(accelerator);
+                IOLockUnlock(l);
+                uint32_t after = *flags;
+                rbgpu_log("2hg: enableAccelerator CALLED under the lock - "
+                          "flags 0x%08X -> 0x%08X, enabled=%d (SUBSTITUTED: this "
+                          "is the plugin setting the gate, not a display)",
+                          before, after, (after & 2) ? 1 : 0);
+                rbgpu_diag_set_num("ea_called", 1);
+                rbgpu_diag_set_num("ea_flags_after", after);
+                char buf[48];
+                snprintf(buf, sizeof(buf), "ea:%08X->%08X", before, after);
+                rbgpu_nvram_note("rbgpu-ea", buf);
+            }
+        }
+    }
     rbgpu_diag_set_num("ret_0x1B", static_cast<uint64_t>(ret1B));
     g_rb_peer_ret1B = static_cast<uint32_t>(ret1B);
     g_rb_peer_stage |= 8;

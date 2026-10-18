@@ -190,6 +190,12 @@ anything, and log it when it is not.
 -rbgpuforce1b                                sends request 0x1B
 ```
 
+Pending, not yet proven: `-rbgpuforceenable` calls
+`IOGraphicsAccelerator2::enableAccelerator()` under `accel->0x88` after
+0x1B returns, to set the `fEnabled` gate 2hf identified without a display
+pipe (2hg). Add it with
+`sudo tools/efi.sh bootarg add -rbgpuforceenable`.
+
 `-rbgpuvmpteng1` is now IN and proven (2gw): it sends the engine-2
 `getHWChannel` requests to engine 1, the one SDMA instance this chip has.
 It is what broke the GPU-restart loop.

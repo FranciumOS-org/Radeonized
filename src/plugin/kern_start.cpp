@@ -7872,8 +7872,49 @@ static bool hooked_accel_found_framebuffer_2ct(void *machine, void *framebuffer)
     return false;
 }
 
+// 2hg: the address of IOGraphicsAccelerator2::enableAccelerator, solved
+// out of IOAcceleratorFamily2 so the peer can CALL it rather than set the
+// flag itself.
+//
+// 2hf established the whole chain: Metal's first buffer allocation enters
+// IOAccelSharedUserClient2::new_resource, which calls
+// acceleratorWaitEnabled, which tests bit 0x2 of accel+0xc78 and sleeps in
+// waiting_for_fEnabled when it is clear. The ONLY setter of that bit is
+// enableAccelerator (0x14e55570, `orb $0x2, 0xc78`), and its only two
+// callers are IOAccelDisplayMachine::display_mode_did_change and the
+// Legacy variant. 2ct refuses the display pipe, so neither ever runs.
+//
+// Calling Apple's function rather than writing the bit, because it also
+// starts the event machine's hardware progress timer:
+//
+//   testb $0x8, 0xc92(%rdi)
+//   jne   skip
+//     (accel->0x380)->startHardwareProgressTimerUnlocked()
+//   skip:
+//   orb   $0x2, 0xc78(%rbx)
+//
+// Milestone 2c: external and DEFINED in IOAcceleratorFamily2, so it is
+// solved under THIS kext's id, not X6000's.
+void (*g_rb_enableAccelerator_2hg)(void *) = nullptr;
+
 void RGPU::processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                               size_t size) {
+    // Solved, not routed: we want to call it, not intercept it.
+    auto ea = patcher.solveSymbol(id, "__ZN22IOGraphicsAccelerator217enableAcceleratorEv",
+                                  address, size);
+    if (ea) {
+        g_rb_enableAccelerator_2hg = reinterpret_cast<void (*)(void *)>(ea);
+        rbgpu_log("2hg: enableAccelerator solved at %p", reinterpret_cast<void *>(ea));
+        rbgpu_diag_set_num("ea_solved", 1);
+    } else {
+        // Absence is not a result: say it, so a boot with -rbgpuforceenable
+        // that changes nothing is not read as "enabling did not help".
+        patcher.clearError();
+        rbgpu_log("2hg: FAILED to solve enableAccelerator - -rbgpuforceenable "
+                  "CANNOT do anything this boot, whatever the boot-args say");
+        rbgpu_diag_set_num("ea_solved", 0);
+    }
+
     KernelPatcher::RouteRequest req(
         "__ZN21IOAccelDisplayMachine17found_framebufferEP13IOFramebuffer",
         hooked_accel_found_framebuffer_2ct,
