@@ -8016,6 +8016,116 @@ void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_
 
 static int g_rb_2hk_on = -1;
 
+// ---------------------------------------------------------------------------
+// 2hq (2026-10-18): the GCVM context registers, for the contexts that faulted.
+//
+// 2hp found the faulting client is CPF and caught two faults: VMID 3 on a
+// read at +12 s, VMID 0 on a write at +100 s. **2em only ever patched
+// CONTEXT0** - its `dwPTB_LO = 0x1667` is GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR,
+// VMID 0. Nothing in this project has ever looked at context 3, let alone
+// written it.
+//
+// 2em also wrote down, a week before the evidence arrived, exactly what to
+// check if this happened: "if the same MAPPING_ERROR returns, the walker
+// wants a different alias or the TLB is stale", and "No TLB invalidate is
+// issued, so a stale negative translation is a second candidate". The
+// MAPPING_ERROR did return. This reads the registers that say which.
+//
+// Offsets from docs/linux-ref/gc_10_3_0_offset.h, each one checked in the
+// header rather than extrapolated from a stride, and every BASE_IDX is 0 -
+// the same segment as CP_RB0_CNTL, whose resolution here is proven.
+//
+//   CNTL                  0x15fc + N          (stride 1)
+//   PAGE_TABLE_BASE_ADDR  0x1667 + 2N (LO), +1 (HI)
+//   PAGE_TABLE_START_ADDR 0x1687 + 2N (LO), +1 (HI)
+//   PAGE_TABLE_END_ADDR   0x16a7 + 2N (LO), +1 (HI)
+//
+// Read-only, like the rest of this probe. What it can say:
+//
+//   context 3 BASE = 0        it was never programmed, and a CPF fetch under
+//                             VMID 3 cannot translate. That would be the
+//                             whole answer.
+//   context 3 BASE set, but   the ring at 0xFF_BFDE_0000 is outside the
+//     START/END excludes      window the context covers - a range fault,
+//     the ring                which is what PERMISSION_FAULTS would mean.
+//   context 3 looks right     the table CONTENTS or a stale TLB, and 2em's
+//                             second candidate is the one left standing.
+//
+// Its own note (rbgpu-vm) rather than rbgpu-ring: twenty-one values do not
+// fit beside the ring data, and a note that silently truncates is worse than
+// one that is explicit (2ho).
+#define RB_2HQ_CTX_CNTL(n)  ((0x15FCull + (n)) << 32 | 0xB)
+#define RB_2HQ_CTX_BASE(n)  ((0x1667ull + 2 * (n)) << 32 | 0xB)
+#define RB_2HQ_CTX_START(n) ((0x1687ull + 2 * (n)) << 32 | 0xB)
+#define RB_2HQ_CTX_END(n)   ((0x16A7ull + 2 * (n)) << 32 | 0xB)
+
+static char g_rb_2hq_vm[320];
+
+static void rbgpu_vmctx_probe_2hq(void *obj,
+                                  uint32_t (*resolve)(void *, uint64_t),
+                                  uint32_t (*rd)(void *, uint32_t),
+                                  unsigned phase) {
+    // Phase 0 gets the full dump; phase 1 gets a digest, so the note stays
+    // inside its budget while still showing whether anything was reprogrammed
+    // between bring-up and the hang. Phase 2 adds nothing: by then the reset
+    // has run and the contexts are whatever it left.
+    if (phase > 1) {
+        return;
+    }
+    static const unsigned kCtx[] = { 0, 1, 3 };   // VMID 0, the 1..15 template, and the VMID 3 that faulted
+
+    char buf[288];
+    size_t n = 0;
+    int w = snprintf(buf, sizeof(buf), "%sp=%u", g_rb_2hq_vm[0] ? " | " : "", phase);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+
+    for (unsigned i = 0; i < sizeof(kCtx) / sizeof(kCtx[0]); i++) {
+        unsigned c = kCtx[i];
+        uint32_t cntl = rd(obj, resolve(obj, RB_2HQ_CTX_CNTL(c)));
+        uint64_t base = (static_cast<uint64_t>(rd(obj, resolve(obj, RB_2HQ_CTX_BASE(c) + (1ull << 32)))) << 32)
+                      | rd(obj, resolve(obj, RB_2HQ_CTX_BASE(c)));
+        uint64_t st = 0, en = 0;
+        if (phase == 0) {
+            st = (static_cast<uint64_t>(rd(obj, resolve(obj, RB_2HQ_CTX_START(c) + (1ull << 32)))) << 32)
+               | rd(obj, resolve(obj, RB_2HQ_CTX_START(c)));
+            en = (static_cast<uint64_t>(rd(obj, resolve(obj, RB_2HQ_CTX_END(c) + (1ull << 32)))) << 32)
+               | rd(obj, resolve(obj, RB_2HQ_CTX_END(c)));
+            rbgpu_log("2hq: ctx%u cntl=0x%08x base=0x%llx start=0x%llx end=0x%llx",
+                      c, cntl, base, st, en);
+        } else {
+            rbgpu_log("2hq: ctx%u cntl=0x%08x base=0x%llx", c, cntl, base);
+        }
+
+        if (n >= sizeof(buf) - 72) {
+            break;
+        }
+        if (phase == 0) {
+            w = snprintf(buf + n, sizeof(buf) - n, " c%u:cn=%x,b=%llx,s=%llx,e=%llx",
+                         c, cntl, base, st, en);
+        } else {
+            w = snprintf(buf + n, sizeof(buf) - n, " c%u:cn=%x,b=%llx", c, cntl, base);
+        }
+        if (w > 0) {
+            n += static_cast<size_t>(w);
+            if (n >= sizeof(buf)) {
+                n = sizeof(buf) - 1;
+            }
+        }
+    }
+
+    size_t have = strlen(g_rb_2hq_vm);
+    snprintf(g_rb_2hq_vm + have, sizeof(g_rb_2hq_vm) - have, "%s", buf);
+    rbgpu_nvram_note("rbgpu-vm", g_rb_2hq_vm);
+    rbgpu_log("2hq: %s", buf);
+    if (phase == 0) {
+        rbgpu_log("2hq: the GFX ring is at VA 0xFF_BFDE_0000 (CP_RB0_BASE << 8, "
+                  "2hn). A context whose base is 0, or whose start/end window "
+                  "excludes that VA, cannot translate a CPF fetch of it. 2em "
+                  "patched CONTEXT0 ONLY - context 3 has never been touched by "
+                  "this project.");
+    }
+}
+
 // 2hm: both samples accumulate here and the WHOLE buffer is written every
 // time. 2hl got its pair only because metal_check.sh happened to snapshot
 // state.txt between the two writes - p=1 had already overwritten p=0 in
@@ -8129,6 +8239,10 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
              "%s%s", have ? " | " : "", one);
     rbgpu_nvram_note("rbgpu-ring", g_rb_2hm_ring);
     rbgpu_log("2hk: %s", one);
+
+    // 2hq: the context registers, after the ring note is safely committed so
+    // that a stall in the new reads cannot cost us the old ones.
+    rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
 
     // The comparison the probe exists for, stated as a question because a
     // single sample decides nothing (2fs: no tables from n=1 rows).
