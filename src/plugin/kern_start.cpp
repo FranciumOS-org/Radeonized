@@ -7183,8 +7183,13 @@ void RGPU::routeGC(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
     }
 }
 
+// 2ie: defined below, beside the rest of the context-write instrumentation.
+static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
+                                     mach_vm_address_t address, size_t size);
+
 void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
+    rbgpu_route_gvmwrite_2ie(patcher, id, address, size);
 
     patchDeviceTypeTable(patcher, id);
     patchDeviceCapabilityTable(patcher, id);
@@ -7685,6 +7690,176 @@ void rbgpu_ctxwrite_flush_2ic(void) {
                   "this project has not read. If calls is 0 the hook took but "
                   "the accessor never ran, and this says nothing about the "
                   "chip.", g_rb_2ic_calls, RB_2IC_FIRST, RB_2IC_LAST);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2ie (2026-10-18): the OTHER register-write path.
+//
+// 2id's masks are a real positive control - cm=fffe, contexts 1..15, bit 0
+// clear, which is exactly Linux's setup_vmid_config loop (i = 0..14 over
+// CONTEXT1_CNTL + i). So the hook reaches code that programs GCVM contexts,
+// and sm=em=bm=0000 says that code wrote no START, END or BASE. But 2hr
+// reads c1/c3 with s=400000 and e=23fffff, values nothing chose.
+//
+// AMDRadeonX6800HWLibs is the second path, and it is Apple's port of the
+// very Linux file this is being compared against: it defines
+// _vm_10_1_setup_vmid_config, _vm_10_1_initialize_page_table_registers,
+// _vm_10_1_enable_virtual_domain and its own _vm_10_1_write_register, by
+// those names.
+//
+//     _vm_10_1_write_register(dev, hubmask, reg_id, index, value)
+//       -> _vm_10_1_get_register_offset(dev, 1, reg_id, index)   = offset
+//       -> _gvm_write_register((dev->0), offset, value, 0xB)     0xB = GC_HWID
+//       -> _gvm_cgs_write_register(ctx, offset, value, hwid)
+//
+// _gvm_write_register is a five-byte thunk (`55 48 89 e5 5d e9 ...`) whose
+// `jmp rel32` begins at byte 5 - right at the edge of rule 9's window, so it
+// is NOT the hook site. Its target is, and the target is where the resolved
+// offset arrives: _gvm_cgs_write_register at 0x126779ed opens
+// `55 48 89 e5 4c 8b 87 68 0c` - pushes, a movq, then a seven-byte movq,
+// with no branch in the first five bytes. Rule 9 checked, not assumed, on
+// both. Both are local symbols (`nm` prints `t`), defined in HWLibs, so the
+// milestone-2c rule is satisfied - they are not imports.
+//
+// What that function's body shows matters more than the hook:
+//
+//     movq 0xc68(%rdi), %r8 ; movq 0x38(%r8), %rax ; jmpq *%rax
+//
+// HWLibs does not touch MMIO itself. It tail-jumps to a callback the HOST
+// driver registered. So HWLibs' writes may already be arriving at X6000's
+// AMDHWRegisters::write - the function 2ic/2id hooked - and 2id's cm=fffe
+// may BE setup_vmid_config seen from the other end.
+//
+// That is the ambiguity this probe removes, and it is removed by comparing
+// the two hooks' masks rather than by reasoning about the callback:
+//
+//   gvm cm=fffe as well           one path, two views. 2id already covered
+//                                  HWLibs, and NOTHING programs START, END
+//                                  or BASE for contexts 1..15 anywhere.
+//   gvm cm=0000, gvm calls large  two separate paths; HWLibs writes plenty
+//                                  but not the context block, and the
+//                                  START/END values come from neither
+//   gvm bm nonzero                HWLibs DOES write the base, on a path
+//                                  X6000's accessor never sees, and the
+//                                  value it writes is in this note
+//   gvm calls=0                   HWLibs never wrote a register this boot;
+//                                  the silence is HWLibs, not the chip
+//
+// One more thing is deliberately not assumed. X6000's accessor returns a
+// SEGMENT-INCLUDED dword offset (2fe: 0x3041 for CP_RB0_CNTL, raw 0x1DE1,
+// GC seg0 0x1260). HWLibs passes a hwid alongside the offset, which is
+// exactly how a design that applies the segment DOWNSTREAM looks, so the
+// offset here may be raw. Both framings are therefore counted, and the note
+// says which one matched. Guessing it would be the recurring error on a
+// register offset, which this project has paid for before.
+// ---------------------------------------------------------------------------
+
+#define RB_2IE_RAW_BASE 0x15FCu       // CONTEXT0_CNTL, raw
+#define RB_2IE_SEG_BASE 0x285Cu       // the same, GC seg0 0x1260 added
+
+struct rb_2ie_view {
+    uint16_t cm, bm, sm, em;
+    uint32_t n_cntl, n_base, n_start, n_end, n_mid;
+    uint32_t base_first, base_last;
+};
+static struct rb_2ie_view g_rb_2ie_raw;   // offsets read as raw
+static struct rb_2ie_view g_rb_2ie_seg;   // offsets read as seg-included
+static uint64_t g_rb_2ie_calls = 0;
+static uint64_t g_rb_2ie_gc    = 0;       // calls whose hwid was GC (0xB)
+static int      g_rb_2ie_hooked = 0;
+
+// Classify one offset under one framing. `b` is that framing's CONTEXT0_CNTL.
+static void rbgpu_2ie_class(struct rb_2ie_view *v, uint32_t b, uint32_t off,
+                            uint32_t val) {
+    if (off < b || off > b + 0xCA) return;         // 0x15FC..0x16C6 span
+    uint32_t d = off - b;
+    if (d <= 0xF) {                                 // CNTL, one per context
+        v->cm = static_cast<uint16_t>(v->cm | (1u << d));
+        v->n_cntl++;
+    } else if (d < 0x6B) {                          // the invalidation block
+        v->n_mid++;
+    } else if (d <= 0x8A) {                         // BASE, two per context
+        if (v->n_base == 0) v->base_first = val;
+        v->base_last = val;
+        v->bm = static_cast<uint16_t>(v->bm | (1u << ((d - 0x6B) >> 1)));
+        v->n_base++;
+    } else if (d <= 0xAA) {                         // START
+        v->sm = static_cast<uint16_t>(v->sm | (1u << ((d - 0x8B) >> 1)));
+        v->n_start++;
+    } else {                                        // END
+        v->em = static_cast<uint16_t>(v->em | (1u << ((d - 0xAB) >> 1)));
+        v->n_end++;
+    }
+}
+
+static void (*orig_gvm_cgs_write_2ie)(void *, uint32_t, uint32_t, uint32_t) = nullptr;
+
+static void hooked_gvm_cgs_write_2ie(void *ctx, uint32_t off, uint32_t val,
+                                     uint32_t hwid) {
+    g_rb_2ie_calls++;
+    if (hwid == 0xB) {
+        g_rb_2ie_gc++;
+        rbgpu_2ie_class(&g_rb_2ie_raw, RB_2IE_RAW_BASE, off, val);
+        rbgpu_2ie_class(&g_rb_2ie_seg, RB_2IE_SEG_BASE, off, val);
+    }
+    if (orig_gvm_cgs_write_2ie) {
+        orig_gvm_cgs_write_2ie(ctx, off, val, hwid);
+    }
+}
+
+void rbgpu_gvmwrite_flush_2ie(void) {
+    if (!g_rb_2ie_hooked) {
+        rbgpu_nvram_note("rbgpu-gvmw",
+                         "hk=0 the HWLibs write hook did NOT take this boot - "
+                         "silence here is the hook, not HWLibs");
+        return;
+    }
+    char note[352];
+    snprintf(note, sizeof(note),
+             "hk=1 calls=%llu gc=%llu | raw cm=%04x bm=%04x sm=%04x em=%04x "
+             "n=%u/%u/%u/%u m=%u bf=%x bl=%x | seg cm=%04x bm=%04x sm=%04x "
+             "em=%04x n=%u/%u/%u/%u m=%u bf=%x bl=%x",
+             g_rb_2ie_calls, g_rb_2ie_gc,
+             g_rb_2ie_raw.cm, g_rb_2ie_raw.bm, g_rb_2ie_raw.sm, g_rb_2ie_raw.em,
+             g_rb_2ie_raw.n_cntl, g_rb_2ie_raw.n_base, g_rb_2ie_raw.n_start,
+             g_rb_2ie_raw.n_end, g_rb_2ie_raw.n_mid,
+             g_rb_2ie_raw.base_first, g_rb_2ie_raw.base_last,
+             g_rb_2ie_seg.cm, g_rb_2ie_seg.bm, g_rb_2ie_seg.sm, g_rb_2ie_seg.em,
+             g_rb_2ie_seg.n_cntl, g_rb_2ie_seg.n_base, g_rb_2ie_seg.n_start,
+             g_rb_2ie_seg.n_end, g_rb_2ie_seg.n_mid,
+             g_rb_2ie_seg.base_first, g_rb_2ie_seg.base_last);
+    rbgpu_nvram_note("rbgpu-gvmw", note);
+    rbgpu_log("2ie: %s", note);
+    rbgpu_log("2ie: compare cm here with 2id's cm=fffe. The SAME mask from "
+              "both hooks means one path seen twice, so 2id already covered "
+              "HWLibs and nothing anywhere programs the context base. A large "
+              "calls with cm=0000 in both framings means two separate paths "
+              "and the START/END values 2hr read come from neither. Exactly "
+              "one framing should match at all; if both do the offsets are "
+              "ambiguous and neither reading is safe.");
+}
+
+static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
+                                     mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuringprobe")) {
+        rbgpu_log("2ie: -rbgpuringprobe not set, _gvm_cgs_write_register left "
+                  "alone");
+        return;
+    }
+    KernelPatcher::RouteRequest req("_gvm_cgs_write_register",
+                                    hooked_gvm_cgs_write_2ie,
+                                    orig_gvm_cgs_write_2ie);
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        rbgpu_log("2ie: hooked _gvm_cgs_write_register (observe only) - every "
+                  "HWLibs register write, with the offset already resolved");
+        g_rb_2ie_hooked = 1;
+    } else {
+        rbgpu_log("2ie: FAILED to hook _gvm_cgs_write_register - rbgpu-gvmw "
+                  "will say hk=0 so an empty note is not mistaken for HWLibs "
+                  "writing nothing");
+        g_rb_2ie_hooked = 0;
+        patcher.clearError();
     }
 }
 
@@ -9249,6 +9424,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
 
     // 2ic: who wrote the context page-directory bases, same discipline.
     rbgpu_ctxwrite_flush_2ic();
+    rbgpu_gvmwrite_flush_2ie();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and

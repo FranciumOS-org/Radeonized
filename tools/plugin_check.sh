@@ -48,7 +48,7 @@ case " $args " in *" -rbgpuoff "*) off=1; echo "  -rbgpuoff is set: the plugin s
 
 echo
 echo "--- nvram breadcrumbs (the only record a wedged boot leaves)"
-for v in rbgpu-boot rbgpu-prog rbgpu-sdma rbgpu-1b rbgpu-prog2 rbgpu-gate rbgpu-ea rbgpu-ctxw rbgpu-ring rbgpu-vm rbgpu-fault rbgpu-pm4 rbgpu-fence rbgpu-diag rbgpu-diag-prev rbgpu-arm; do
+for v in rbgpu-boot rbgpu-prog rbgpu-sdma rbgpu-1b rbgpu-prog2 rbgpu-gate rbgpu-ea rbgpu-ctxw rbgpu-gvmw rbgpu-ring rbgpu-vm rbgpu-fault rbgpu-pm4 rbgpu-fence rbgpu-diag rbgpu-diag-prev rbgpu-arm; do
     val="$(nvram "$v" 2>/dev/null | cut -f2-)"
     echo "  $v = ${val:-<unset>}"
 done > "$out/nvram.txt" 2>&1
