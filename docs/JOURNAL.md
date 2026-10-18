@@ -10946,3 +10946,110 @@ The last two rows are the point. 2hr's "the value is missing bit 0" and
 "the register was never written" look identical from a register read, and
 `pivm` is the first thing that separates them.
 
+
+## 2id (2026-10-18) — the positive control lands, and the flush does not program
+
+Eighth consecutive armed boot, `logs/20261018-161037-metal/`. `armed=1`
+**live**, loaded UUID `76A82E0A-AD25-39EA-8F35-F5AAB741B776` = `build/out`.
+
+```
+rbgpu-ctxw = hk=1 calls=35016 hits=0
+             | cm=fffe sm=0000 em=0000 bm=0000 nc=15 ns=0 ne=0 mid=504
+             | pivm=336/1 h=0003 | none
+```
+
+**`cm=fffe`: the positive control.** Contexts **1 through 15**, fifteen
+writes, context 0's bit clear. That is precisely Linux's
+`gfxhub_v2_1_setup_vmid_config` loop - `i = 0..14` over `CONTEXT1_CNTL + i`,
+which is contexts 1..15 and never context 0. So the hook demonstrably
+reaches the code that programs GCVM contexts, and 2ic's `hits=0` is a real
+negative rather than an untested range. The control 2ic lacked is supplied,
+and it did not have to be argued for - the mask matched upstream's loop
+bounds exactly.
+
+**`pivm=336`, hubs 0 and 1.** `programAndInvalidateVM` ran **336 times** and
+wrote **no page-table base, ever**. That is the fifth row of 2id's table:
+Apple's flush *invalidates* without *programming*. The 504 `mid` writes
+land between `CONTEXT15_CNTL` and the base block, which is the invalidation
+request/ack/range registers - the flush's own traffic, exactly where 336
+flushes should put it. So the two possibilities 2hr could not separate are
+separated: this is **not** a flush writing a wrong value. It is a base that
+nothing writes.
+
+**The result that was not predicted: `sm=0000 em=0000`.** 2hr reads c1 and
+c3 with `s=400000` and `e=23fffff` - programmed-looking START/END values,
+identical across both contexts, the shape of a loop that writes all fifteen
+alike. Linux writes START and END in the same loop as CNTL. **Apple's X6000
+writes CNTL and nothing else.** So for contexts 1..15 this driver sets the
+enable word and leaves START, END and BASE holding values it never wrote.
+
+`initializeTlbRegs` (0xbeae6c6) does write through `[0x120]`, so it was
+inside the 35,016 and whatever it wrote was seen. The negative is not a
+coverage gap in that direction.
+
+Everything else reproduces: `rbgpu-fault` back to three signatures
+(`c=8 f=8 r=4`, the `s40953` row present again after its absence in 2ic),
+`rbgpu-pm4` `t3=799 r=2b1 w=380` with RELEASE_MEM seq 3/4/5, `rbgpu-fence`
+holding **6** with `seq=8` - the 2hx/2hz "far" variant of the stall, where
+2ic's boot was the "near" one (`r=b1`, one fence). Progress before the
+stall varies; the stall does not. Contexts unchanged: c0 `b=78fdfa001`,
+c1 `b=fb00b000`, c3 `b=fb015000`.
+
+## 2ie (2026-10-18) — the other write path, and why the callback matters
+
+`AMDRadeonX6800HWLibs` is Apple's port of the very Linux file this is being
+compared against, and it says so in its symbol names:
+`_vm_10_1_setup_vmid_config`, `_vm_10_1_initialize_page_table_registers`,
+`_vm_10_1_enable_virtual_domain`, `_vm_10_1_initialize_tlb_registers`, and
+its own `_vm_10_1_write_register`. The chain:
+
+```
+_vm_10_1_write_register(dev, hubmask, reg_id, index, value)
+  -> _vm_10_1_get_register_offset(dev, 1, reg_id, index)   = offset
+  -> _gvm_write_register((dev->0), offset, value, 0xB)     0xB = GC_HWID
+  -> _gvm_cgs_write_register(ctx, offset, value, hwid)
+```
+
+`_vm_10_1_enable_virtual_domain` calls, in order, `setup_fragment_size`,
+`enable_tlb`, `setup_vmid_config(dev, hub, vmid, ..., 1)` and
+`program_default_page_addr` - and no base write among them, which is
+consistent with 2id.
+
+Rule 9 (2gb) on both candidates, checked: `_gvm_write_register` is a
+five-byte thunk `55 48 89 e5 5d e9 ...` whose `jmp rel32` begins at byte
+**5**, at the very edge of the window - so it is NOT the hook site.
+`_gvm_cgs_write_register` (0x126779ed) opens `55 48 89 e5 4c 8b 87 68 0c`,
+pushes and movqs with no branch in the first five bytes, and it is where
+the resolved offset arrives. Both are local symbols (`nm` prints `t`)
+**defined** in HWLibs, so the milestone-2c rule is satisfied.
+
+Its body is the reason this probe exists:
+
+```
+movq 0xc68(%rdi), %r8 ; movq 0x38(%r8), %rax ; jmpq *%rax
+```
+
+**HWLibs does not touch MMIO itself.** It tail-jumps to a callback the host
+driver registered. So HWLibs' writes may already be arriving at X6000's
+`AMDHWRegisters::write` - the hooked function - and 2id's `cm=fffe` may BE
+`setup_vmid_config` seen from the other end. That would be a tidy story and
+it is not assumed; it is measured, by comparing the two hooks' masks.
+
+| reading | means |
+|---|---|
+| gvm `cm=fffe` too | one path, two views. 2id already covered HWLibs, and **nothing anywhere** programs START, END or BASE for contexts 1..15 |
+| gvm `cm=0000`, calls large | two separate paths; HWLibs writes plenty but not the context block, and 2hr's START/END values come from neither |
+| gvm `bm` nonzero | HWLibs DOES write the base, on a path X6000's accessor never sees, and the value is in this note |
+| gvm `calls=0` | HWLibs wrote no register this boot; the silence is HWLibs, not the chip |
+
+One thing is deliberately not assumed. X6000's accessor returns a
+**segment-included** offset (2fe: 0x3041 for CP_RB0_CNTL, raw 0x1DE1, GC
+seg0 0x1260), but HWLibs passes a hwid *alongside* the offset, which is how
+a design that applies the segment downstream looks. So the offset here may
+be raw. **Both framings are counted** and the note says which matched;
+exactly one should. Guessing would be the recurring error on a register
+offset, and this project has paid for that before.
+
+Note `rbgpu-gvmw`, gated on `-rbgpuringprobe` (already in the boot-args),
+flushed from the same thread_call as 2ic/2id. No config.plist change.
+
