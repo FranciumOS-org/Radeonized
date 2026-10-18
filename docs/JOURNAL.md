@@ -11163,3 +11163,64 @@ What a reading would mean, before the boot:
 Note `rbgpu-vmid`, gated on `-rbgpuringprobe`, flushed from the same
 thread_call. No config.plist change.
 
+
+## 2if result (2026-10-18) — VMID 3 IS bound, and Apple computes no base for it
+
+Tenth consecutive armed boot, `logs/20261018-171436-metal/`. `armed=1`
+**live**, loaded UUID `0980B50B-A3AF-3A19-B090-252F6CC62702` = `build/out`.
+
+```
+rbgpu-vmid = hk=1 av=41 fail=41 vmids=000e | pde nv=0 o=0
+             | L0 c3   f=2000000000000001 l=2000000000000001
+             | L1 c111 f=0100000000000001 l=0100000000000001
+```
+
+### `fail=41` is a MISLABEL, caught before it was built on
+
+The counter increments on `r != 0`, named `fail` on the assumption that a
+nonzero return means failure. That assumption was never checked, and
+docs/RULES.md names this exact mistake: *a return code is not a result until
+the code that sets it has been read* (2ha, the 25th instance).
+
+So it was read. `AMDHWVMM::assignVMID` sets its return value in **one**
+place in the entire function:
+
+```
+be914e3:  movb $0x1, %al
+be914f3:  retq
+```
+
+One writer, and it writes **1**. The function returns true. So `r != 0` is
+**success**, and the correct reading is `success=41`: **all 41 VMID
+assignments succeeded.** Nothing failed. Had this gone into a conclusion
+unchecked it would have been the 26th instance; it is instead the first one
+caught by the rule rather than by a later boot.
+
+### What the note actually says
+
+**`vmids=000e`** - bits 1, 2 and 3. **VMID 3 was handed out**, successfully,
+to a real VM context. So the chip is not faulting under a VMID the driver
+never bound; 2if's third table row is excluded and the main line survives.
+
+**`nv=0`** - not one of the 114 `getPDEValue` returns had bit 0 clear. The
+`incq %rax` reading of its tail is now **measured**, not inferred from
+disassembly, and 2hr's "every PDE Apple builds has VALID set" is confirmed
+on hardware.
+
+**The PDE values carry no address.** `L1` was called 111 times and `L0`
+three times, and every call at a given level returned the identical value:
+`0x0100000000000001` and `0x2000000000000001`. Bit 0 set, a
+block-fragment-size field, and an **address field of zero**. These are
+page-table *content* entries, not a page-directory base for a context.
+
+So this is row 2 of 2if's table: **VMID 3 is assigned, and `getPDEValue`
+never produces a base for it.** Apple has no code that computes a
+page-directory base for contexts 1..15 - which is exactly consistent with
+2ic/2id/2ie finding nothing that writes one. The gap is not a write that
+was skipped; there is no value, and no write, anywhere in the path.
+
+Everything else reproduces for the tenth time, byte for byte: `ctxw` and
+`gvmw` identical to the previous boot (`calls=35021` against 35027, the
+only difference), three fault signatures, `t3=799 r=2b1 w=380`, fence
+holding 6 with `seq=8`, c1 `b=fb00b000`, c3 `b=fb015000`.
+
