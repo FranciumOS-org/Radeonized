@@ -10631,3 +10631,103 @@ NVRAM, which is why the packet addresses did survive.
 **The driver polls request 0x14 about 994,000 times.** Not investigated
 here and not obviously part of the hang, but a driver issuing a million
 of anything while wedged is worth a note.
+
+## 2hz — the fence writes LAND. The GPU completes six, then stops
+
+Boot of 2026-10-18 ~14:55, armed, build `EB823959` (matches `build/out`),
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 33`. Capture in
+`logs/20261018-145747-metal/`.
+
+```
+rbgpu-pm4   = pa=6c7c05000 t3=799 r=2b1 w=380
+              | rm@1e a=ffbfdc0000 s=3 | rm@8e a=ffbfdc0000 s=4
+              | rm@10e a=ffbfdc0000 s=5
+rbgpu-fence = fv=ffbfdc0000 idx=3c0 pte=30006c835d077 v=1 s=1
+              pa=6c835d000 rpa=6c7c05000 seq=8 o=0
+              d: 6 0 280 0 380 0 2 1 0 0 0 0   f=0 nz=1
+```
+
+### The fence page is mapped, writeable, and has real data in it
+
+```
+PTE[960] = 0x0003_0006_C835_D077
+    VALID=1  SYSTEM=1  SNOOPED=1  EXECUTABLE=1  READABLE=1  WRITEABLE=1
+    phys = 0x6_C835_D000
+```
+
+Valid **and writeable**, exactly what a fence target needs. The ring page
+this boot is `0x6_C7C0_5000` from the same table, and that one is
+independently corroborated by `t3=799`. So possibility 1 of 2hx — "the
+writes faulted because PTE[960] is bad" — is **dead**.
+
+Read as 64-bit values, the page holds:
+
+```
++0x00 = 0x6
++0x08 = 0x280
++0x10 = 0x380
++0x18 = 0x1_0000_0002
+```
+
+**`+0x00` is 6.** The RELEASE_MEM packets carry sequence numbers 3, 4,
+5 … up to **8** (`seq=8`; the note caps the listing at three packets, so
+there are at least six in the page). The fence buffer contains **6**.
+
+**The GPU's timestamp writes LAND.** The address is right, the page is
+mapped writeable, and the hardware wrote a real sequence number into it.
+The entire fence mechanism works.
+
+### A third outcome, which was not in the table
+
+2hx wrote down two possibilities: the writes faulted, or the writes
+landed and `waitForTimestamp` reads the wrong place. **Neither is what
+happened.**
+
+The writes land — *up to 6* — and then stop, while 7 and 8 were
+submitted and never completed. So this is not a broken fence path and
+not a driver reading the wrong address. **The GPU executes the command
+stream, signals six fences correctly, and then stops partway.**
+
+That is exactly 2hl's measurement seen from the other side: `rptr` frozen
+at 0x2b1 with 207 dwords pending. Now we know the CP got *through* six
+fence packets before it stopped, and that everything it did up to that
+point worked.
+
+`+0x08 = 0x280` and `+0x10 = 0x380` are worth noting without being
+over-read: `0x380` is exactly this boot's live `wptr`, and `0x280` was
+the `wptr` at the +12 s sample. The page evidently also holds ring
+pointer shadows. Not interpreted further here — the fence value is the
+finding and the rest is context.
+
+### What this does to the suspect list
+
+The fence machinery is exonerated. What remains is: **what stops the CP
+mid-stream after fence 6?**
+
+And there is exactly one unexplained fault left pointing at it — 2ht's
+**#1: a CPF READ at VA `0x4_0030_0000` under VMID 3**. The other GFXHUB
+fault (`status 0x40953`, a VMID 0 write) now looks like a plausible
+consequence of the reset path rather than a cause, and the hub-1 pair
+are the all-ones phantoms (2ht).
+
+**That puts context 3 back at the centre, on much firmer ground than in
+2hr.** Context 3 is the VMID the surviving fault names; its window
+covers the faulting address; and its page-directory base is the one that
+lacks the `VALID` bit that both Linux and Apple's own `getPDEValue` set
+unconditionally. In 2hr that was a suggestive anomaly among several
+candidates. With the fence path exonerated and the other faults
+explained away, it is now the only live explanation on the table.
+
+It is still not proven. The three caveats of 2hr stand unchanged: the
+hardware may ignore bit 0 in that register, the values may not come from
+`getPDEValue`, and the addresses may be wrong independently of the flag.
+What has changed is that nothing else is competing with it any more.
+
+### Instrument note
+
+The 2hy dump carried no strong sanity gate by design, and said so. In
+the event it did not need one: the PTE came back valid with sensible
+permission bits, its physical address sits beside the ring's from the
+same table, and the page contains a value inside the exact range of
+sequence numbers the ring's own packets carry. Three independent things
+agreeing is what makes this readable — not the dwords on their own.
