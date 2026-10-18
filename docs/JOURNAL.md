@@ -11529,3 +11529,89 @@ alias, this points at another wrong page and the same `MAPPING_ERROR`
 returns - no worse than now. And no TLB invalidation is issued, so a stale
 negative translation remains a second candidate if the fault persists.
 
+
+## 2ii result (2026-10-18) — the transform is confirmed and the address does not exist
+
+Thirteenth consecutive armed boot, `logs/20261018-174223-metal/`, UUID
+`BB031957-5027-38F8-A309-F6AEF09B9482` = `build/out`.
+
+```
+rbgpu-ptfix = b=41 arm=1 binds=41 wrote=6 nomatch=0 noobj=0 badback=0
+              nofb=0 relok=3 relbad=35 vmids=000e
+rbgpu-vm    = c1:b=87b00b001  c3:b=87b015001     (both samples)
+```
+
+**`relok=3` is a real result.** Three binds found the register already
+holding exactly `root - fb_base`. So whoever programs it performs precisely
+that subtraction and omits `vram_base_offset` - 2em's defect on contexts
+1..15, established rather than inferred.
+
+**`relbad=35` is a bug in my own check**, not a fact about the chip: after
+the first corrected write the register holds `0x8_7B00_0001`, which the
+check compares against `fb_off` and refuses. It refused its own correct
+value. Fixed in 2ij by treating "already holds what we would write" as a
+distinct, counted outcome.
+
+**And the fault is identical for the thirteenth time**: `vmf=3009bb`, VMID
+3, CPF, `WALKER_ERROR`, VA `0x4_0030_0000`, `me=15000000`, Metal hanging at
+commit.
+
+### Why: the address written does not exist
+
+A free host check settled it. `hw.memsize` is **32 GB**. The carve-out's
+system-physical base is `0x7_8000_0000` = **30 GB**, so the aperture is at
+most **2 GB**. But `fb_off` for these roots is `0xFB01_5000` = **4.2 GB** -
+more than twice the entire carve-out - and 2ii's target
+`0x8_7B01_5000` is **~33 GB, past the end of installed RAM.**
+
+Context 0 is the contrast that proves the rule: its `fb_off` is
+`0x0FDF_A000` = 250 MB, inside the aperture, target `0x7_8FDF_A000` = 30.2
+GB, real memory, and it translates.
+
+So `mc2pa` applies to c0's table and **not** to these roots: they are not
+VRAM addresses. That agrees with 2hz, which found the page tables carrying
+`AMDGPU_PTE_SYSTEM`, and with 2em's own note that *a SYSTEM entry holds a
+bus address and never goes through mc2pa*. 2ii put a non-existent address
+in the register, the register accepted it (`badback=0`, which was never
+evidence about correctness), and the walker had nonsense of a new kind.
+
+`relok=3` survives this and sharpens it: the driver really does subtract
+`fb_base` from these roots, which now reads as **the driver applying a VRAM
+transform to a non-VRAM address**. That would be the defect one level above
+the register, and it is the first explanation in this series that accounts
+for both the truncated value and the fact that correcting it the obvious
+way cannot work.
+
+### The check that should have run before the write
+
+`fb_off` must lie inside the FB aperture. I had every number needed to see
+that and did not look - the same shape of error as reading a value without
+establishing what makes it meaningful, committed on a write rather than a
+read. 2ij adds the gate, measured from the chip:
+
+## 2ij (2026-10-18) — refuse what is outside the aperture
+
+```
+fb_top = GCMC_VM_FB_LOCATION_TOP (dword 0x16FD) << 24 | 0xFFFFFF
+refuse unless fb_base < fb_top and root <= fb_top
+```
+
+Read from the chip rather than inferred from the host's `hw.memsize`, so
+the gate holds whatever the firmware configured. Three counters added:
+`out` (root outside the aperture - the write refused), `alr` (register
+already holds the value we would write - idempotent, replacing 2ii's 35
+false refusals), and `fbtop` (the register as read, so the aperture extent
+is in the record).
+
+| `rbgpu-ptfix` reading | means |
+|---|---|
+| `out=binds wrote=0` | these page tables are **not** in the carve-out. The register wants their bus address and the value must come from somewhere other than this subtraction - which is then the next thing to find. |
+| `out=0 relok>0 wrote>0`, fault gone | the aperture gate was the only thing wrong and the correction stands |
+| `out=0 relok>0 wrote>0`, fault unchanged | the base is right in the right space and the walk still fails; the page tables it points at become the question |
+| `alr=binds` | nothing needed changing this boot |
+
+The expected reading is `out=binds wrote=0`, i.e. the probe refusing
+everything it wrote last boot. That is the point: a boot that writes
+nothing and says why is worth more than one that writes an address past the
+end of RAM.
+

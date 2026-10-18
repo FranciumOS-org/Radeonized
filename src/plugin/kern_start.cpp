@@ -8022,6 +8022,9 @@ static uint32_t g_rb_2ih_badback = 0;   // read-back did not equal what we wrote
 static uint32_t g_rb_2ih_nofb    = 0;   // FB_LOCATION_BASE / FB_OFFSET not read yet
 static uint32_t g_rb_2ih_relok   = 0;   // 2em relationship held on a nonzero register
 static uint32_t g_rb_2ih_relbad  = 0;   // it did not, and the write was refused
+static uint32_t g_rb_2ih_outside = 0;   // 2ij: root outside the FB aperture
+static uint32_t g_rb_2ih_already = 0;   // 2ij: already holds what we would write
+static uint32_t g_rb_2ih_fbtop   = 0;   // 2ij: GCMC_VM_FB_LOCATION_TOP as read
 static uint16_t g_rb_2ih_mask    = 0;   // VMIDs corrected
 static uint64_t g_rb_2ih_first_root = 0;
 static uint32_t g_rb_2ih_first_was_lo = 0, g_rb_2ih_first_was_hi = 0;
@@ -8110,8 +8113,52 @@ static void rbgpu_ptfix_2ih(void *ctx, uint32_t vmid) {
     uint32_t new_lo = static_cast<uint32_t>(want & 0xFFFFFFFFu) | 1u;
     uint32_t new_hi = static_cast<uint32_t>(want >> 32);
 
-    // The self-check: a nonzero register must already be `root - fb_base`.
+    // 2ij (2026-10-18): REFUSE a value outside the FB aperture.
+    //
+    // 2ii wrote 0x8_7B01_5001 and the register took it and the walker still
+    // faulted - because that address does not exist. The machine has 32 GB;
+    // the carve-out starts at 30 GB (system-physical 0x7_8000_0000), so the
+    // aperture is at most 2 GB. fb_off for these roots is 0xFB01_5000 =
+    // 4.2 GB, more than twice the whole carve-out, and the result lands at
+    // ~33 GB, past the end of installed RAM.
+    //
+    // Context 0 is the contrast that proves the rule: its fb_off is
+    // 0x0FDF_A000 = 250 MB, inside the aperture, target 0x7_8FDF_A000, and
+    // it translates. So mc2pa applies to c0's table and NOT to these roots:
+    // they are not VRAM addresses. That fits 2hz finding the page tables
+    // with AMDGPU_PTE_SYSTEM set, and 2em's own note that a SYSTEM entry
+    // holds a bus address and never goes through mc2pa.
+    //
+    // relok=3 still stands - the driver really does subtract fb_base - but
+    // it now reads as the driver applying a VRAM transform to a non-VRAM
+    // address, which would be the defect one level above the register.
+    //
+    // So the gate: fb_off must be inside the aperture, measured from
+    // GCMC_VM_FB_LOCATION_TOP rather than assumed. Writing past the end of
+    // RAM is what 2ii did and it must not happen again.
+    uint32_t fb_top_raw = rd(obj, resolve(obj, (0x16FDull << 32) | 0xB));
+    g_rb_2ih_fbtop = fb_top_raw;
+    uint64_t fb_top = (static_cast<uint64_t>(fb_top_raw) << 24) | 0xFFFFFFull;
+    if (fb_top <= fb_base || root > fb_top) {
+        g_rb_2ih_outside++;
+        if (g_rb_2ih_outside == 1) {
+            g_rb_2ih_first_root = root;
+            g_rb_2ih_first_was_lo = was_lo; g_rb_2ih_first_was_hi = was_hi;
+            g_rb_2ih_first_new_lo = static_cast<uint32_t>(want & 0xFFFFFFFFu) | 1u;
+            g_rb_2ih_first_new_hi = static_cast<uint32_t>(want >> 32);
+        }
+        return;      // the root is not in the FB aperture; mc2pa is wrong for it
+    }
+
+    // The self-check: a nonzero register must already be `root - fb_base`,
+    // OR already be the corrected value we would write (idempotent - 2ii
+    // counted 35 refusals of its own correct writes, which was a bug in the
+    // check and not a fact about the chip).
     uint64_t cur = (static_cast<uint64_t>(was_hi) << 32) | was_lo;
+    if (cur != 0 && (cur & ~0xFFFULL) == (want & ~0xFFFULL)) {
+        g_rb_2ih_already++;
+        return;
+    }
     if (cur != 0 && (cur & ~0xFFFULL) != fb_off) {
         g_rb_2ih_relbad++;
         if (g_rb_2ih_relbad == 1) {
@@ -8146,17 +8193,27 @@ void rbgpu_ptfix_flush_2ih(void) {
     char note[352];
     snprintf(note, sizeof(note),
              "arm=%d binds=%u wrote=%u nomatch=%u noobj=%u badback=%u "
-             "nofb=%u relok=%u relbad=%u vmids=%04x | first root=%llx "
+             "nofb=%u relok=%u relbad=%u out=%u alr=%u fbtop=%x "
+             "vmids=%04x | first root=%llx "
              "was=%x/%x new=%x/%x back=%x/%x",
              g_rb_2ih_armed, g_rb_2ih_calls, g_rb_2ih_wrote,
              g_rb_2ih_nomatch, g_rb_2ih_noobj, g_rb_2ih_badback,
              g_rb_2ih_nofb, g_rb_2ih_relok, g_rb_2ih_relbad,
+             g_rb_2ih_outside, g_rb_2ih_already, g_rb_2ih_fbtop,
              g_rb_2ih_mask, g_rb_2ih_first_root,
              g_rb_2ih_first_was_lo, g_rb_2ih_first_was_hi,
              g_rb_2ih_first_new_lo, g_rb_2ih_first_new_hi,
              g_rb_2ih_first_bk_lo, g_rb_2ih_first_bk_hi);
     rbgpu_nvram_note("rbgpu-ptfix", note);
     rbgpu_log("2ih: %s", note);
+    rbgpu_log("2ij: out=%u is the gate 2ii lacked - a root outside the FB "
+              "aperture, where mc2pa does not apply. out=binds with wrote=0 "
+              "means these page tables are NOT in the carve-out, so the "
+              "register wants their bus address and the value must come from "
+              "somewhere other than this subtraction. fbtop=0x%x is "
+              "GCMC_VM_FB_LOCATION_TOP as read, so the aperture extent is "
+              "measured here rather than inferred from hw.memsize on the "
+              "host.", g_rb_2ih_outside, g_rb_2ih_fbtop);
     rbgpu_log("2ii: relok counts binds where the register already held "
               "`root - fb_base`, which is 2em's defect confirmed per context "
               "before the write. relbad counts binds where it held something "
