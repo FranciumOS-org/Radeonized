@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-17, after 2ha)
+# RembrandtGPU — handoff state (2026-10-17, after 2hd)
 
 **Read this first.** `docs/RULES.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -77,73 +77,74 @@ refusal above is what is now in the way.
 ---
 
 
-## 2. The decision — lift 2ct and let the accelerator take the panel?
+## 2. The frontier — newCommandQueue does not return
 
-**Nothing in the 0x1B path is known to fail any more.** There is no
-pending instrument; the next move is a choice, and it is the user's.
-
-### 2ha: request 0x1B succeeds (and two milestones were wrong)
-
-`AMDGraphicsAccelerator::callPlatformFunction` (0xbe4154e) preloads
-`r14 = 0xE00002C7` before its jump table and returns `r14` at 0xbe41aa8.
-Inside the 0x1B case (0xbe417d0):
+**2hd: Metal enumerates the 680M.** Boot 22, five captures all taken in
+the armed boot (`metal_check.sh` writes `armed=1` into `state.txt` first,
+so the 2gw rule is satisfied by construction).
 
 ```
-movl  $0xe00002d8, %r14d   ; kIOReturnNotReady - the FAILURE value
-je    ...                  ; hw NULL        -> NotReady
-callq *0x2a0(%rax)         ; isDeviceValid
-je    ...                  ; FALSE          -> NotReady
-callq *0x4c8(%rax)         ; startGlobalPerfCounters
-callq *0x130(%rax)         ; hardwareDidStart
-callq *0x158(%rax)         ; (accel->0x380)->finishAllStamps
-callq *0x218(%rax)         ; enableInterrupts
-movl  $0xe00002c7, %r14d   ; <-- only the COMPLETED path sets this
+MTLCopyAllDevices: 1 device(s)
+device: AMD Radeon HD GFX10 Family Unknown Prototype
+  registryID = 0x10000054f   maxThreadsPerTG = 1024
+  recommendedMax = 4096 MB   headless = 0   unifiedMemory = 0
 ```
 
-So `0xE00002C7` **proves the whole body ran**; both bail paths return
-`0xE00002D8`. The live 2gn trail
-(`perf:E perf:R … hds:R fas:E … fas:R ei:E ei:R`) reproduces those five
-calls in order, independently.
+Control, measured unarmed: **0 devices**, and `system_profiler` shows the
+plain IONDRVFramebuffer entry with no `Metal:` line. So the device is this
+project's accelerator and nothing else. The "Unknown Prototype" name is
+Apple's generic GFX10 fallback for an unrecognised id, not a fault.
 
-**2gw and 2gy recorded this code as "the new frontier". That is withdrawn.**
-The error was assigning a meaning to a return code without reading the
-code that sets it — the 25th instance of the recurring error.
+**The `--dispatch` run ends mid-step:**
 
-Consequence: **0x12 and 0x1D are incidental.** They arrive in the first
-~120 µs, we refuse both, and Apple completes the path regardless.
-Answering them is not required; the instrument that was about to be built
-for them is unnecessary. They stay unexplained but block nothing.
+```
+  dispatch: creating queue      <- fflushed immediately before newCommandQueue
+                                <- no "compiling shader", no "metal_probe exit="
+```
 
-### So what is actually left
+The probe **never returned from `[dev newCommandQueue]`**. No panic
+report, so a hang rather than a crash.
 
-The accelerator initialises, the GPU executes PM4 and writes fences, the
-restart loop is gone (2gw), and 0x1B completes. **No boot has ever run
-with the accelerator driving the panel**, because 2ct refuses the display
-pipe by design (`found_fb_calls=2 found_fb_refused=2`) so that armed
-boots keep a usable desktop on IONDRVFramebuffer.
+**Not established, deliberately:** whether the whole machine wedged or
+only the process blocked. The user power-cycled, and `last reboot` cannot
+distinguish those — that inference is exactly the 2gw/2hb error. **Ask the
+user; do not infer it.**
 
-That refusal is now the thing in the way — but the premise under it is
-false. **No armed boot has ever reached a desktop** (user, 2026-10-17):
-since roughly 2c every armed boot shows verbose log lines and then
-nothing, and all work in them is done over SSH. 2ct's rationale says
-refusing the pipe keeps the desktop on IONDRVFramebuffer; it does not.
-The machine stays healthy and reachable — only the panel is dead.
+### Hypothesis for the next milestone — write predictions BEFORE measuring
 
-So lifting 2ct costs much less than previously written (there is no
-working UI to lose), but it also gains less than hoped: something already
-kills the panel with the pipe refused, and that cause is unknown. Finding
-*that* comes first. Any earlier note calling a black armed boot new,
-intermittent or a warning sign — including in 2gw and 2ha — is wrong.
+A command queue is the first thing needing a *client-facing* ring rather
+than the KIQ. Everything proven so far goes through SDMA and the KIQ:
+`powerUpHW` (2gi), the VMPT stamp on SDMA engine 1 (2gv/2gw), the PM4
+fences. The GFX engine has never been shown to execute anything, and the
+2di debt — `gfx_min = gfx_max = 0`, GFX DPM never started, open since
+2026-10-12 — has sat unexplained precisely because nothing had ever asked
+the GFX pipe to work. A command queue asks.
 
-### Open, none of them blocking
+That is a hypothesis. It is **not** a finding, and the next step is to
+instrument the path rather than act on it:
 
-- Who calls `incrementStamp(25)`.
-- Why the stamp table grew 63 → 65 after the 2gv remap.
+- Hook `AMDAccelCommandQueue::initSubmitChannels` — 2ha's scan already
+  found it calling `getHWChannel(engine, ring)` twice, so it is on this
+  path and its engine arguments are measurable.
+- Mark entry/return of each stage the way 2gn marked the 0x1B chain, so
+  the stopping point is located rather than guessed.
+- Check whether the 2gv remap fires again here, and for which engines.
+
+### Procedure that is now proven and should be kept
+
+`metal_check.sh` writes each step to `logs/<ts>-metal/` and `sync`s before
+the next, and splits enumerate from dispatch. Five captures survived a
+hang that took the machine down, and the four clean enumerate runs are
+what reduce the truncated file to a single failing call. One combined
+probe would have yielded "it hung somewhere".
+
+### Also open
+
+- Whether the 2hd hang is machine-wide.
+- **Why armed boots have no display at all** (since ~2c, not intermittent).
+- Who calls `incrementStamp(25)`; why the stamp table grew 63 → 65.
 - The `/options` race (standing debt; a bounded retry is owed).
-- **Why armed boots have no display at all**, even with 2ct refusing the
-  pipe. Long-standing (since ~2c), not intermittent, and the real display
-  question.
-- What 0x12 and 0x1D are for.
+- What 0x12 and 0x1D are for — incidental to 0x1B, but unexplained.
 
 
 ## 3. Verified on hardware — do NOT re-derive these
