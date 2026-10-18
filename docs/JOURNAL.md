@@ -11224,3 +11224,78 @@ Everything else reproduces for the tenth time, byte for byte: `ctxw` and
 only difference), three fault signatures, `t3=799 r=2b1 w=380`, fence
 holding 6 with `seq=8`, c1 `b=fb00b000`, c3 `b=fb015000`.
 
+
+## 2ig (2026-10-18) — the first write to a GCVM context register
+
+Everything that leads here is measured, not argued. Nothing writes BASE,
+START or END for contexts 1..15: not X6000's accessor (2ic/2id, 0 of
+~35,000 writes, with cm=fffe as the positive control), not HWLibs (2ie,
+context 0 only), not RB0 (2ib, `nowd` across the ring's whole written
+extent). Apple's flush ran **336 times** and invalidated without
+programming (2id). `getPDEValue` returns page-table content entries with a
+zero address field and no base for any context (2if). And yet VMID 3 is
+bound - successfully, 41 assignments deep - and the chip faults on a CPF
+read at `0x4_0030_0000` under exactly that VMID, identically, in ten
+consecutive boots.
+
+So the register holds a leftover. 2ig asks whether giving it a real root
+directory stops the fault. User approved the write (2026-10-18), choosing
+the self-gating one-boot form over an extra observe-only boot.
+
+### The strict match — the value is not guessed
+
+Apple's own allocator hands out the root directories.
+`allocVMBlock(level 0)` is called three times, once per VM context, which
+agrees with 2if's three level-0 `getPDEValue` calls and three VMIDs handed
+out; level 1 is the page-table tier (111 calls). 2ig records each level-0
+block's `elem+0x20` and `elem+0x28` - the fields `allocVMBlock` itself
+tests for success (2eg). The context object bound to VMID 3, captured from
+`assignVMID`'s own argument, is then scanned for a qword **equal** to one of
+those roots.
+
+A match means the object really holds that root at an offset Apple chose.
+No match means the probe **refuses and only dumps**, which is why the boot
+pays for itself either way: the dump is what a value-finding pass would
+start from. The refusal is logged as *the probe could not identify a value
+it was willing to write* - not as evidence about the register.
+
+### What it does to the chip
+
+Two writes at the +100 s sample, after the hang is long established (the
++12 s sample has shown it in every boot):
+
+```
+GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR_LO32  dword 0x28CD = root | 1
+GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR_HI32  dword 0x28CE = root >> 32
+```
+
+Bit 0 is `AMDGPU_PTE_VALID`. Linux ORs it unconditionally
+(`amdgpu_gmc_pd_addr`, Vega10+); Apple's `getPDEValue` ends `incq %rax`;
+and 2if **measured** `nv=0` across 114 calls. So setting it follows both
+conventions rather than inventing one. Nothing else is touched - no
+invalidation, no other context - and the previous values are read back and
+committed to NVRAM **before** the write, so a hang inside the write still
+leaves the before-state and the intended value on record.
+
+It cannot un-hang this boot, and is not expected to: by +100 s the CP has
+been halted for ninety seconds and the work owing the timestamp was thrown
+away by the reset (2hp). What it can show is whether the write **sticks**,
+whether the CPF fault stops recurring, and whether `CP_ME_CNTL` clears -
+read at +160 s by the same instruments that read +12 s. If those say yes,
+the next boot does this at bind time, where it can prevent the hang.
+
+Gated on its own boot-arg `-rbgpuptwrite` (added with
+`efi.sh bootarg add`), so no ordinary `-rbgpuringprobe` boot ever writes a
+register by accident and it can be removed without a rebuild. Without the
+arg the probe does the whole identification and writes nothing - a dry run
+whose note records exactly what it would have written.
+
+| `rbgpu-ptw` reading | means |
+|---|---|
+| `GO ... back=<new>` and the +160 s fault gone | the base was the fault's cause and the write is the fix to generalise |
+| `GO ... back=<new>` and the fault unchanged | the base takes the value and is not, by itself, enough |
+| `GO ... back=<old>` | the register refused the write - 2hr's first caveat, the hardware ignoring this field, answered directly |
+| `REFUSED nomatch` + dump | no root in the scanned window; the dump feeds the next pass |
+| `REFUSED no ctx3` | `assignVMID` never bound a context to VMID 3 **in this boot** |
+| `OFF` | the arg is missing; the dry run still names the value |
+

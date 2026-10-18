@@ -3233,10 +3233,30 @@ static bool rb_2dv_seen(void *const *arr, uint32_t n, void *p) {
 static bool (*orig_vmm_allocVMBlock_2eg)(void *, uint32_t, void *) = nullptr;
 static uint32_t g_rb_2eg_calls = 0;
 
+// 2ig (2026-10-18): remember the ROOT blocks, not just the first eight calls.
+// 2if counted getPDEValue at level 0 three times and level 1 one hundred and
+// eleven times, and three VMIDs were handed out - so level 0 is the root
+// directory, one per VM context, and level 1 is the page-table tier. These
+// are the only addresses a context page-directory base could legitimately
+// hold, which is what makes them a STRICT match criterion rather than a
+// guess at a struct field.
+#define RB_2IG_ROOTS 8
+struct rb_2ig_root { void *elem; uint64_t a20, a28; };
+static struct rb_2ig_root g_rb_2ig_root[RB_2IG_ROOTS];
+static uint32_t g_rb_2ig_nroot = 0;
+
 static bool hooked_vmm_allocVMBlock_2eg(void *vmm, uint32_t level, void *elem) {
     bool ret = orig_vmm_allocVMBlock_2eg ? orig_vmm_allocVMBlock_2eg(vmm, level, elem) : false;
     g_rb_2eg_calls++;
     rbgpu_diag_set_num("vmm_alloc_calls", g_rb_2eg_calls);
+
+    if (elem && level == 0 && g_rb_2ig_nroot < RB_2IG_ROOTS) {
+        auto r = reinterpret_cast<volatile uint64_t *>(elem);
+        g_rb_2ig_root[g_rb_2ig_nroot].elem = elem;
+        g_rb_2ig_root[g_rb_2ig_nroot].a20  = r[4];
+        g_rb_2ig_root[g_rb_2ig_nroot].a28  = r[5];
+        g_rb_2ig_nroot++;
+    }
 
     if (elem && g_rb_2eg_calls <= 8) {
         auto q = reinterpret_cast<volatile uint64_t *>(elem);
@@ -7922,6 +7942,7 @@ static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
 
 #define RB_2IF_LVLS 4
 
+static void *g_rb_2ig_ctx[16];              // 2ig: VMID -> the bound context
 static uint32_t g_rb_2if_av = 0;            // assignVMID calls
 static uint16_t g_rb_2if_vmids = 0;         // bit n = VMID n was handed out
 static uint32_t g_rb_2if_av_fail = 0;       // calls that returned nonzero
@@ -7946,6 +7967,7 @@ static uint32_t hooked_assignVMID_2if(void *vmm, void *ctx, uint32_t *vmid,
     // Read AFTER the original: this is the only moment it holds the answer.
     if (vmid && *vmid < 16) {
         g_rb_2if_vmids = static_cast<uint16_t>(g_rb_2if_vmids | (1u << *vmid));
+        g_rb_2ig_ctx[*vmid] = ctx;      // 2ig: which object owns this VMID
     }
     return r;
 }
@@ -8984,6 +9006,184 @@ static int g_rb_2hk_on = -1;
 
 static char g_rb_2hq_vm[320];
 
+// ---------------------------------------------------------------------------
+// 2ig (2026-10-18): WRITE context 3's page-directory base. The first write
+// this project has ever made to a GCVM context register.
+//
+// Everything that led here is a measurement, not an argument. Nothing writes
+// BASE, START or END for contexts 1..15 - not X6000's accessor (2ic/2id:
+// 0 of ~35,000), not HWLibs (2ie: context 0 only), not RB0 (2ib: nowd), and
+// Apple's own flush ran 336 times and invalidated without programming (2id).
+// getPDEValue produces page-table CONTENT entries with a zero address field
+// and no base for any context (2if). Yet VMID 3 is bound, successfully, 41
+// assignments deep (2if), and the chip faults on a CPF read at
+// 0x4_0030_0000 under exactly that VMID, in ten consecutive boots.
+//
+// So the register holds a leftover, and the question is whether giving it a
+// real root directory stops the fault.
+//
+// THE STRICT MATCH. The value is not guessed and not computed here. Apple's
+// own allocator hands out the root directories - allocVMBlock(level 0),
+// three of them, one per VM context - and 2ig records each one's addresses
+// from elem+0x20 and elem+0x28, the fields allocVMBlock itself tests. The
+// context object bound to VMID 3 is then scanned for a qword EQUAL to one of
+// those recorded roots. A match means the object genuinely holds that root,
+// at an offset Apple chose, and that is the value written. No match means
+// the probe REFUSES and only dumps, which is why this boot is worth having
+// either way - the dump is what the next one would need.
+//
+// WHAT IT DOES TO THE CHIP. Two register writes at the +100 s sample, after
+// the hang is already established (the +12 s sample has always shown it):
+//
+//     GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR_LO32  (dword 0x28CD) = root | 1
+//     GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR_HI32  (dword 0x28CE) = root >> 32
+//
+// Bit 0 is AMDGPU_PTE_VALID. Linux ORs it unconditionally (amdgpu_gmc_pd_addr,
+// Vega10+), Apple's getPDEValue ends `incq %rax`, and 2if measured nv=0 over
+// 114 calls - so setting it follows both conventions rather than inventing
+// one. Nothing else is touched. No invalidation is issued, no other context
+// is written, and the original values are read back and recorded first so
+// the change is reversible in evidence even though it is not undone.
+//
+// It cannot un-hang this boot: by +100 s the CP has been halted for ninety
+// seconds and the work that owed the timestamp was discarded (2hp). What it
+// can show is whether the write STICKS, whether the CPF fault stops
+// recurring, and whether CP_ME_CNTL clears - all of which the +160 s sample
+// reads with the same instruments that read the +12 s one. If those say yes,
+// the next boot does this at bind time, where it can prevent the hang.
+//
+// Gated on its own boot-arg, -rbgpuptwrite, so no ordinary -rbgpuringprobe
+// boot ever writes a register by accident, and so it can be removed with
+// `efi.sh bootarg remove` without a rebuild.
+// ---------------------------------------------------------------------------
+
+#define RB_2IG_CTX3_LO 0x166Dull        // 0x1667 + 2*3, raw; seg0 makes 0x28CD
+#define RB_2IG_CTX3_HI 0x166Eull
+#define RB_2IG_SCAN    0x300u           // bytes of the context object to scan
+
+static int g_rb_2ig_done = 0;
+
+static void rbgpu_ptwrite_2ig(void *obj,
+                              uint32_t (*resolve)(void *, uint64_t),
+                              uint32_t (*rd)(void *, uint32_t),
+                              void (*wr)(void *, uint32_t, uint32_t),
+                              unsigned phase) {
+    if (phase != 1 || g_rb_2ig_done) {
+        return;
+    }
+    g_rb_2ig_done = 1;
+
+    int armed = checkKernelArgument("-rbgpuptwrite") ? 1 : 0;
+    void *ctx = g_rb_2ig_ctx[3];
+
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note), "arm=%d ctx3=%llx nroot=%u",
+                     armed, reinterpret_cast<uint64_t>(ctx), g_rb_2ig_nroot);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+
+    // The roots, so a refusal still says what was being looked for.
+    for (unsigned i = 0; i < g_rb_2ig_nroot && i < 3; i++) {
+        if (n >= sizeof(note) - 48) break;
+        w = snprintf(note + n, sizeof(note) - n, " r%u=%llx/%llx", i,
+                     g_rb_2ig_root[i].a20, g_rb_2ig_root[i].a28);
+        if (w > 0) { n += static_cast<size_t>(w); if (n >= sizeof(note)) { n = sizeof(note) - 1; break; } }
+    }
+
+    if (!ctx || g_rb_2ig_nroot == 0) {
+        snprintf(note + n, sizeof(note) - n,
+                 " REFUSED no %s", ctx ? "root" : "ctx3");
+        rbgpu_nvram_note("rbgpu-ptw", note);
+        rbgpu_log("2ig: REFUSED - %s. Nothing was written. This is not "
+                  "evidence about the register; it is the probe saying it "
+                  "could not identify a value it was willing to write.",
+                  ctx ? "allocVMBlock recorded no level-0 root"
+                      : "assignVMID never bound a context to VMID 3");
+        return;
+    }
+
+    // The strict match: a qword in the context object equal to a root.
+    auto q = reinterpret_cast<volatile uint64_t *>(ctx);
+    uint64_t root = 0;
+    unsigned moff = 0;
+    int found = 0;
+    for (unsigned o = 0; o < RB_2IG_SCAN / 8 && !found; o++) {
+        uint64_t v = q[o];
+        if (v == 0) continue;
+        for (unsigned i = 0; i < g_rb_2ig_nroot; i++) {
+            if (v == g_rb_2ig_root[i].a20 || v == g_rb_2ig_root[i].a28) {
+                root = v; moff = o * 8; found = 1; break;
+            }
+        }
+    }
+
+    // The dump goes to the log either way; the log is captured in-boot.
+    rbgpu_log("2ig: ctx3=%p first qwords: %llx %llx %llx %llx %llx %llx "
+              "%llx %llx %llx %llx %llx %llx",
+              ctx, q[0], q[1], q[2], q[3], q[4], q[5],
+              q[6], q[7], q[8], q[9], q[10], q[11]);
+
+    if (!found) {
+        if (n < sizeof(note) - 24) {
+            snprintf(note + n, sizeof(note) - n, " REFUSED nomatch");
+        }
+        rbgpu_nvram_note("rbgpu-ptw", note);
+        rbgpu_log("2ig: REFUSED - no qword in the first 0x%x bytes of the "
+                  "VMID-3 context equals any recorded level-0 root. Nothing "
+                  "was written. The dump above is what a value-finding pass "
+                  "would start from; it does NOT mean the context holds no "
+                  "root, only that none is in the scanned window in a form "
+                  "that matches allocVMBlock's own fields.", RB_2IG_SCAN);
+        return;
+    }
+
+    uint32_t off_lo = resolve(obj, (RB_2IG_CTX3_LO << 32) | 0xB);
+    uint32_t off_hi = resolve(obj, (RB_2IG_CTX3_HI << 32) | 0xB);
+    uint32_t was_lo = rd(obj, off_lo);
+    uint32_t was_hi = rd(obj, off_hi);
+    uint32_t new_lo = static_cast<uint32_t>(root & 0xFFFFFFFFu) | 1u;
+    uint32_t new_hi = static_cast<uint32_t>(root >> 32);
+
+    if (n < sizeof(note) - 96) {
+        w = snprintf(note + n, sizeof(note) - n,
+                     " m@%x=%llx o=%x/%x was=%x/%x new=%x/%x",
+                     moff, root, off_lo, off_hi, was_lo, was_hi,
+                     new_lo, new_hi);
+        if (w > 0) { n += static_cast<size_t>(w); if (n >= sizeof(note)) n = sizeof(note) - 1; }
+    }
+
+    if (!armed) {
+        if (n < sizeof(note) - 12) snprintf(note + n, sizeof(note) - n, " OFF");
+        rbgpu_nvram_note("rbgpu-ptw", note);
+        rbgpu_log("2ig: -rbgpuptwrite is NOT set. A value was identified and "
+                  "NOTHING was written. The note records what would have been "
+                  "written, which is the whole dry run.");
+        return;
+    }
+
+    // Commit the pre-write note FIRST, so a hang inside the write still
+    // leaves the before-state and the intended value on record.
+    if (n < sizeof(note) - 12) snprintf(note + n, sizeof(note) - n, " GO");
+    rbgpu_nvram_note("rbgpu-ptw", note);
+
+    wr(obj, off_lo, new_lo);
+    wr(obj, off_hi, new_hi);
+    uint32_t back_lo = rd(obj, off_lo);
+    uint32_t back_hi = rd(obj, off_hi);
+
+    if (n < sizeof(note) - 32) {
+        snprintf(note + n, sizeof(note) - n, " back=%x/%x", back_lo, back_hi);
+    }
+    rbgpu_nvram_note("rbgpu-ptw", note);
+    rbgpu_log("2ig: WROTE CONTEXT3 base lo=0x%08x hi=0x%08x (was 0x%08x/"
+              "0x%08x), read back 0x%08x/0x%08x. back != new means the "
+              "register did not take the value, which is itself the answer "
+              "to 2hr's first caveat. The +160 s sample reads the fault "
+              "status, CP_ME_CNTL and all three contexts with the same "
+              "instruments that read +12 s.",
+              new_lo, new_hi, was_lo, was_hi, back_lo, back_hi);
+}
+
 static void rbgpu_vmctx_probe_2hq(void *obj,
                                   uint32_t (*resolve)(void *, uint64_t),
                                   uint32_t (*rd)(void *, uint32_t),
@@ -9582,6 +9782,20 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
+
+    // 2ig: the write, after the contexts have been read at this phase so the
+    // before-state is on record from the same sample.
+    {
+        void **rvt2 = *reinterpret_cast<void ***>(obj);
+        auto wrfn = reinterpret_cast<void (*)(void *, uint32_t, uint32_t)>(
+            rvt2 ? rvt2[0x120 / sizeof(void *)] : nullptr);
+        if (wrfn) {
+            rbgpu_ptwrite_2ig(obj, resolve, rd, wrfn, phase);
+        } else if (phase == 1) {
+            rbgpu_nvram_note("rbgpu-ptw", "REFUSED the accessor write slot is "
+                                          "NULL - nothing was written");
+        }
+    }
 
     // 2hu: commit the fault tally at a known time, whatever happened. A boot
     // with no faults and a boot where the hooks never took must not look the
