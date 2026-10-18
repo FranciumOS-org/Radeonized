@@ -494,17 +494,49 @@ the sample size **cannot be raised this way** — Apple polls
 `getVMFaultInfo` only eight times in two and a half minutes. The
 end-of-pipe-timestamp hypothesis is neither supported nor refuted.
 
-**Next: stop asking the hardware what faulted and ask the command
-stream what the CP was told to write.** The EOP timestamp target is a
-field in the PM4 `RELEASE_MEM` packet in the ring, and everything
-needed to find it is known: ring VA `0xFF_BFDE_0000`, `rptr` 0xb1 ->
-0x2b1, `wptr` 0x280 -> 0x380, context 0 valid and covering it. A zero
-in that field establishes the hypothesis outright; a sane address kills
-it. This is the memory mapping deliberately deferred in 2hm — the
-register reads have now been run to their limit and did not settle it.
-**New risk:** the plugin has never mapped GPU-visible memory. The ring
-is at a GPUVM address, so the CPU route is the carve-out alias (the
-2ei/2em address-space work), and a wrong mapping reads the wrong page
-and looks like data. Check the buffer against the type-3 PM4 `0xC0`
-header pattern BEFORE interpreting any dword; a buffer that does not
-look like PM4 is a failed mapping, not a finding.
+**2hx did that, and the hypothesis is REFUTED.** The ring maps and the
+dump is unambiguous:
+
+```
+rbgpu-pm4 = pa=6c8911000 t3=799 r=2b1 w=380
+            | rm@1e a=ffbfdc0000 s=3 | rm@8e a=ffbfdc0000 s=4
+            | rm@10e a=ffbfdc0000 s=5
+```
+
+`t3=799` type-3 headers in 1024 dwords — nothing but a command ring
+looks like that, so the route (ring VA -> CONTEXT0 flat PTE table ->
+PTE -> physical page `0x6_C891_1000`) is sound and the bus-vs-physical
+worry is answered. **First GPU-visible memory this project has read.**
+
+**The end-of-pipe timestamp address is `0xFF_BFDC_0000`, not zero.**
+Three `RELEASE_MEM` packets, seq 3/4/5, all aimed there. 2ht's
+timestamp-target hypothesis is dropped on direct evidence. By
+elimination the `VA 0` of `status 0x40953` was the
+`CLEAR_PROTECTION_FAULT_STATUS_ADDR` artifact after all, not a null
+target — inference from the refutation, not an independent measurement
+of the clear, but nothing now supports a genuine null.
+
+`0xFF_BFDC_0000` is inside CONTEXT0's window and 128 KB below the ring;
+its flat-table page index is **960** (the ring's is 992). All three
+fence packets sit **before** `rptr = 0x2b1`, so the CP fetched past all
+of them and the driver still waits.
+
+**Two possibilities left, and one page separates them:**
+
+1. the writes **faulted** — PTE[960] is bad, the timestamp never
+   reached memory, and the CPF *write* fault under VMID 0 is really at
+   `0xFF_BFDC_0000`
+2. the writes **landed** — the memory holds 5 and `waitForTimestamp`
+   polls somewhere else, making this a driver-side bug, not a GPU one
+
+**Next:** read PTE[960] (2el machinery, already present) and map
+`0xFF_BFDC_0000` to dump its first dwords. The `t3` gate does not
+transfer — a fence buffer is not full of PM4 — so this one reports the
+raw dwords and the PTE and leaves the verdict to be argued from them
+rather than asserting it in-kernel.
+
+Incidental from 2hx: the RBGPULog had rotated past the dump's raw
+dwords, flushed by roughly **994,000 `SpecialAMDKey request 0x14`
+entries**, one every ~7 ms. 2es again — anything that must survive goes
+to NVRAM. The million polls are unexplained and not obviously part of
+the hang.
