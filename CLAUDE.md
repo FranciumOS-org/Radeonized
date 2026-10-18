@@ -248,6 +248,17 @@ adoption. **Request 0x1B then COMPLETES** (2ha): its `0xE00002C7` is the value i
 for call. The 0x12/0x1D refusals are incidental: Apple runs the whole
 path despite them. Nothing in the 0x1B path is now known to fail.
 
+**Metal enumerates the GPU** (2hd): in an armed boot
+`MTLCopyAllDevices` returns **1 device** — "AMD Radeon HD GFX10 Family
+Unknown Prototype", 1024 threads/TG, 4 GB working set — against **0
+devices** unarmed. The frontier is now **`newCommandQueue`**, the first
+operation a Metal client asks for: the probe never returns from it, with
+no panic. Whether the hang is machine-wide or only the process is NOT
+established. Hypothesis to test, not a finding: everything proven so far
+runs through SDMA and the KIQ, and a command queue is the first thing to
+need a client-facing GFX ring — which ties to the 2di debt
+(`gfx_min = gfx_max = 0`, GFX DPM never started).
+
 **No armed boot has ever reached a desktop** (user, 2026-10-17): since
 roughly milestone 2c every armed boot has shown verbose log lines and
 then nothing, and all work in them has been done over SSH. 2ct's stated

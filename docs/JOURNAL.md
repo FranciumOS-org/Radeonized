@@ -9115,3 +9115,88 @@ dispatching, and neither is a capability string.
 These boots end in a power cycle and take their logs with them, so the
 procedure changes: **write every result to a file under `logs/` as it is
 produced**, rather than reading it on screen. Milestone 2hc builds that.
+
+## 2hd — the first Metal device, and newCommandQueue is where it stops
+
+**Boot 22 (F9623A20, armed).** Five captures, all taken **in the armed
+boot** — each `state.txt` records `d=72 armed=1` live, the 2gw rule
+satisfied by construction this time because `metal_check.sh` writes it
+first. `logs/20261017-2001*-metal/` and `logs/20261017-200249-metal/`.
+
+### Metal enumerates the 680M
+
+Four enumerate-only runs, identical, `exit=0`:
+
+```
+MTLCopyAllDevices: 1 device(s)
+
+device: AMD Radeon HD GFX10 Family Unknown Prototype
+  registryID      = 0x10000054f
+  lowPower        = 0
+  removable       = 0
+  headless        = 0
+  unifiedMemory   = 0
+  maxThreadsPerTG = 1024
+  recommendedMax  = 4096 MB
+```
+
+Against the control measured in the unarmed boot: **`MTLCopyAllDevices: 0
+device(s)`**, and `system_profiler` printing the plain IONDRVFramebuffer
+entry with no `Metal:` line at all. So the device is attributable to this
+project's accelerator and nothing else, and 2hb's reported
+`Metal: Supported` is confirmed by a second, independent route.
+
+The name is Apple's generic GFX10 fallback — "Unknown Prototype" — which
+is what an unrecognised device id yields; it is not a sign of anything
+being wrong. `maxThreadsPerTG = 1024` and a 4 GB recommended working set
+are plausible and come from the driver, not from us.
+
+### Where it stops
+
+The `--dispatch` run ends mid-step:
+
+```
+  dispatch: creating queue
+```
+
+and nothing after it — no `dispatch: compiling shader`, and no
+`metal_probe exit=` line, which `metal_check.sh` appends only after the
+probe returns. That print is `fflush`ed immediately before
+`[dev newCommandQueue]` and the next print happens immediately after it,
+so the probe **never returned from `newCommandQueue`**. First real GPU
+operation a client asks for, and it does not come back.
+
+No panic report was written (newest is 2026-10-15), so this is a hang, not
+a crash.
+
+**Not established:** whether the whole machine wedged or only the process
+blocked. The user power-cycled, and `last reboot` cannot tell those apart
+— which is exactly the 2hb/2gw error, so it is left open rather than
+inferred.
+
+### Why this is a plausible place to stop
+
+A command queue is the first thing that needs a *client-facing* ring, as
+opposed to the KIQ this project has been driving. Everything proven so far
+runs through SDMA and the KIQ: `powerUpHW` (2gi), the VMPT stamp on SDMA
+engine 1 (2gv/2gw), the PM4 fences. The GFX engine has never been shown to
+execute anything, and the standing 2di debt — `gfx_min = gfx_max = 0`, GFX
+DPM never started — has sat unexplained since 2026-10-12 precisely because
+nothing had ever asked the GFX pipe to do work. A command queue asks.
+
+That is a hypothesis, not a finding. What it predicts and what would
+distinguish it is for the next milestone to write down before measuring.
+
+### The procedure worked
+
+Five captures survived a hang that took the machine down, because
+`metal_check.sh` writes each step to `logs/` and `sync`s before the next.
+The enumerate/dispatch split is what makes the stopping point legible: the
+four clean runs establish that everything up to queue creation works, so
+the one truncated file locates the failure to a single call. Had this been
+one combined probe, the result would have been "it hung somewhere".
+
+**Open:** whether the hang is machine-wide; what `newCommandQueue` is
+waiting on; who calls `incrementStamp(25)`; why the stamp table grew
+63 → 65; the `/options` race; why armed boots have no display; what 0x12
+and 0x1D are for.
