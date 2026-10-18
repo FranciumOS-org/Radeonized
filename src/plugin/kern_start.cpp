@@ -7295,6 +7295,157 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
     }
 }
 
+// ---------------------------------------------------------------------------
+// 2hs (2026-10-18): Apple's OWN per-fault record, which it has been printing
+// into a void all along.
+//
+// 2hr left the faulting VA as an interpretation debt. Reading
+// `AMDGFX10VMM::getVMFaultInfo` (0xbe9b1e2) settles it statically - Apple
+// reconstructs the address exactly as Linux does:
+//
+//     r13 = HI32 & 0xf ; shlq $0x2c   -> << 44
+//     r12 = LO32       ; shlq $0xc    -> << 12
+//     orq %r13, %r12                  -> the faulting VA
+//
+// and then fills a caller-provided struct, each field cross-checked against
+// the shifts in gc_10_3_0_sh_mask.h:
+//
+//     VM_FAULT_INFO +0x00  u64  faulting VA
+//                   +0x08  u32  (status >> 20) & 0xf     VMID
+//                   +0x0c  u8   (status >> 18) & 1       RW
+//                   +0x10  u32  (status >> 9)  & 0x1ff   CID
+//                   +0x14  u32  raw GCVM_L2_PROTECTION_FAULT_STATUS
+//
+// It fills the struct ONLY when (addr != 0 || status != 0), so an untouched
+// struct means "Apple saw no fault", which is a different answer from "the
+// hook did not run" - this code keeps them apart by pre-poisoning the struct
+// and saying which happened.
+//
+// Why hook it at all, when the probe already samples the same three
+// registers: the samples are snapshots at +12/+100/+160 s, and this is
+// per-fault and per-call. It answers whether Apple NOTICES the faults, how
+// often, and at which addresses - none of which a snapshot can say.
+//
+// And `AMDHWVMM::fillFaultAccelInfo` (0xbe91c6a) is the one that assembles
+// the full report, including "Closest good VA", and hands it to **kprintf**
+// (resolved through build/re/stubs.json). kprintf does not reach the unified
+// log or the IO registry, which is exactly why no armed boot has ever shown
+// a VM fault message despite the faults being real. Here it is only
+// COUNTED - its data is in locals this hook cannot reach - but a nonzero
+// count proves Apple's fault reporting path runs, and a zero count with
+// faults latched proves it does not.
+//
+// Both targets pass rule 9 (2gb): first 16 bytes of each are frame setup and
+// pushes, no rel8/rel32 branch anywhere near the first 5. Both are shown
+// **defined** in (__TEXT,__text) of AMDRadeonX6000 by `nm -m`, so routing by
+// this kext's id is safe (milestone 2c). Observe-only: both call the
+// original and change nothing.
+static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
+static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
+static uint32_t g_rb_2hs_calls = 0;
+static uint32_t g_rb_2hs_faults = 0;
+static uint32_t g_rb_2hs_fill = 0;
+static char     g_rb_2hs_note[320];
+
+static void hooked_getVMFaultInfo_2hs(void *vmm, uint32_t hub, void *info) {
+    g_rb_2hs_calls++;
+
+    // Poison first: Apple only writes the struct when it has a fault, so an
+    // unchanged struct must be distinguishable from one it filled with
+    // zeroes. Absence is not a result (2eh, 2ek, 2fb).
+    const uint64_t kPoison = 0xDEADBEEFDEADBEEFull;
+    if (info) {
+        *reinterpret_cast<uint64_t *>(info) = kPoison;
+        *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(info) + 0x14) = 0xDEADBEEF;
+    }
+
+    if (orig_getVMFaultInfo_2hs) {
+        orig_getVMFaultInfo_2hs(vmm, hub, info);
+    }
+    if (!info) {
+        return;
+    }
+
+    uintptr_t p = reinterpret_cast<uintptr_t>(info);
+    uint64_t va  = *reinterpret_cast<uint64_t *>(p);
+    uint32_t st  = *reinterpret_cast<uint32_t *>(p + 0x14);
+    if (va == kPoison && st == 0xDEADBEEF) {
+        // Apple looked and found nothing. Worth saying once, and only once:
+        // this runs on every poll and a line per call would be the 2ez
+        // logging contention.
+        if (g_rb_2hs_calls == 1) {
+            rbgpu_log("2hs: getVMFaultInfo(hub=%u) called and reported NO fault "
+                      "(struct untouched). Apple is polling; it just saw "
+                      "nothing this time.", hub);
+        }
+        return;
+    }
+
+    g_rb_2hs_faults++;
+    uint32_t vmid = *reinterpret_cast<uint32_t *>(p + 0x08);
+    uint8_t  rw   = *reinterpret_cast<uint8_t  *>(p + 0x0c);
+    uint32_t cid  = *reinterpret_cast<uint32_t *>(p + 0x10);
+
+    rbgpu_log("2hs: VM FAULT #%u hub=%u VA=0x%llx vmid=%u %s cid=%u status=0x%08x "
+              "(cid 4 = CPF, the command processor's fetcher)",
+              g_rb_2hs_faults, hub, va, vmid, rw ? "WRITE" : "READ", cid, st);
+
+    // Only the first few go to NVRAM. The faults recur all boot (2hp), so a
+    // commit per fault would be the 2fo wedge; the first ones are the ones
+    // that say where this starts.
+    if (g_rb_2hs_faults <= 4) {
+        size_t have = strlen(g_rb_2hs_note);
+        snprintf(g_rb_2hs_note + have, sizeof(g_rb_2hs_note) - have,
+                 "%s#%u h%u va=%llx v%u%s c%u s=%x",
+                 have ? " | " : "", g_rb_2hs_faults, hub, va, vmid,
+                 rw ? "W" : "R", cid, st);
+        rbgpu_nvram_note("rbgpu-fault", g_rb_2hs_note);
+    }
+    rbgpu_diag_set_num("vmfaults_seen", g_rb_2hs_faults);
+    rbgpu_diag_set_num("vmfault_calls", g_rb_2hs_calls);
+}
+
+static void hooked_fillFaultAccelInfo_2hs(void *vmm) {
+    g_rb_2hs_fill++;
+    // The record it builds goes to kprintf, which we cannot read. Counting it
+    // still answers a real question: whether Apple's fault REPORTING path
+    // runs at all, as opposed to the fault merely being latched in hardware.
+    if (g_rb_2hs_fill <= 3) {
+        rbgpu_log("2hs: fillFaultAccelInfo #%u - Apple IS assembling a fault "
+                  "report (it goes to kprintf, which reaches neither the "
+                  "unified log nor ioreg, which is why no armed boot has ever "
+                  "shown one)", g_rb_2hs_fill);
+    }
+    rbgpu_diag_set_num("vmfault_reports", g_rb_2hs_fill);
+    if (orig_fillFaultAccelInfo_2hs) {
+        orig_fillFaultAccelInfo_2hs(vmm);
+    }
+}
+
+// Its own function: processX6000's frame is already near the 1024-byte limit
+// and an inline RouteRequest pushed it over once (2gv).
+static void rbgpu_route_vmfault_2hs(KernelPatcher &patcher, size_t id,
+                                    mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN26AMDRadeonX6000_AMDGFX10VMM14getVMFaultInfoE16eAMD_VM_HUB_TYPEPN23AMDRadeonX6000_AMDHWVMM13VM_FAULT_INFOE",
+            hooked_getVMFaultInfo_2hs, orig_getVMFaultInfo_2hs),
+        KernelPatcher::RouteRequest(
+            "__ZN23AMDRadeonX6000_AMDHWVMM18fillFaultAccelInfoEv",
+            hooked_fillFaultAccelInfo_2hs, orig_fillFaultAccelInfo_2hs),
+    };
+    if (patcher.routeMultiple(id, reqs, 2, address, size)) {
+        rbgpu_log("2hs: hooked getVMFaultInfo + fillFaultAccelInfo (observe only)");
+        rbgpu_diag_set_num("vmfault_hooked", 1);
+    } else {
+        rbgpu_log("2hs: FAILED to hook the VM fault path - rbgpu-fault will "
+                  "stay empty this boot for that reason, NOT because there "
+                  "were no faults");
+        rbgpu_diag_set_num("vmfault_hooked", 0);
+        patcher.clearError();
+    }
+}
+
 // 2gv: routed unconditionally; the substitution itself is gated on
 // `-rbgpuvmpteng1` inside the hook, so a boot without the arg still logs
 // that the remap is OFF rather than leaving it ambiguous whether the route
@@ -7703,6 +7854,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     // 2gv: the engine index VMPT resolves to. In its own function so it
     // does not grow processX6000's stack frame past the 1024-byte limit.
     rbgpu_route_getHWChannel_2gv(patcher, id, address, size);
+    rbgpu_route_vmfault_2hs(patcher, id, address, size);
 
     KernelPatcher::RouteRequest req_2gn[] = {
         KernelPatcher::RouteRequest(
