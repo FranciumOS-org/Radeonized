@@ -136,3 +136,17 @@ Note what Linux does NOT do: it takes the faulting address from the
 interrupt vector (`entry->src_data[0] << 12`), **not** from
 GCVM_L2_PROTECTION_FAULT_ADDR_LO32. So this source does not establish how
 to convert that register to an address, and 2hp does not claim one.
+
+## amdgpu_gmc.c, amdgpu_gmc.h, amdgpu_vm.h
+
+    drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.{c,h}
+    drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h
+
+Fetched 2026-10-18, same caveat as above: the commit could not be resolved
+from this environment.
+
+Used by 2hr for one fact: `amdgpu_gmc_pd_addr()` for Vega10+ does
+`flags = AMDGPU_PTE_VALID; amdgpu_gmc_get_pde_for_bo(...); pd_addr |= flags`,
+and `AMDGPU_PTE_VALID` is `(1ULL << 0)` — so every page-directory base
+Linux writes to GCVM_CONTEXT*_PAGE_TABLE_BASE_ADDR has bit 0 set, at every
+table depth. Apple's `AMDGFX10VMM::getPDEValue` agrees (it ends `incq %rax`).
