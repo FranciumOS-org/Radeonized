@@ -10,6 +10,11 @@
 #   tools/metal_check.sh              enumerate only - dispatches nothing
 #   tools/metal_check.sh --dispatch   also run and VERIFY a compute kernel
 #
+# 2hi: run it under sudo. Root is what produces the kernel stacks, and the
+# kernel stacks are what located the fEnabled gate (2hf) and the GFX-ring
+# stamp (2hh). Without root this script still runs and says so in the file,
+# but it cannot see the frontier.
+#
 # --dispatch is the one that can hang the GPU. It is separate for that
 # reason: run the plain form first, and only add --dispatch once its output
 # is safely on disk.
@@ -21,6 +26,36 @@ echo "saving to $out"
 
 say() { echo "=== $1 ==="; }
 
+# 2hi: anything that walks the IO registry or asks about displays can itself
+# block on a wedged accelerator - and a capture that stalls before the Metal
+# probe tells us nothing (absence is not a result). Run such a step in the
+# background with a bounded wait, and if it does not finish, SAY SO in its
+# own file rather than leaving a truncated one that reads like an answer.
+#   bounded <seconds> <outfile> <command...>
+bounded() {
+  _secs=$1; _file=$2; shift 2
+  "$@" > "$_file" 2>&1 &
+  _pid=$!
+  _w=0
+  while [ "$_w" -lt "$_secs" ]; do
+    kill -0 "$_pid" 2>/dev/null || break
+    sleep 1
+    _w=$((_w + 1))
+  done
+  if kill -0 "$_pid" 2>/dev/null; then
+    kill -9 "$_pid" 2>/dev/null
+    echo "" >> "$_file"
+    echo "*** $* DID NOT FINISH in ${_secs}s - killed." >> "$_file"
+    echo "*** Anything above this line is partial. This is itself a result:" >> "$_file"
+    echo "*** the command blocked, which points at the wedged stack." >> "$_file"
+    sync
+    return 1
+  fi
+  wait "$_pid" 2>/dev/null
+  sync
+  return 0
+}
+
 {
   say "armed?"
   # The 2gw rule: a capture is the armed boot's only if rbgpu-diag reads
@@ -31,18 +66,53 @@ say() { echo "=== $1 ==="; }
   kmutil showloaded 2>/dev/null | grep -i -E 'rembrandt|lilu'
   say "accelerator in registry"
   ioreg -c AMDRadeonX6000_AMDNavi21GraphicsAccelerator -d1 2>/dev/null | head -60
+  # 2hi: the live boot-args, not config.plist's. This is what says whether
+  # wdt=-1 and -rbgpuforceenable actually took effect this boot; a capture
+  # that does not record it cannot be read later.
+  say "live boot-args"
+  sysctl -n kern.bootargs 2>/dev/null
+  # 2hi: every note channel, in the armed boot, so this capture does not
+  # depend on plugin_check.sh having been run separately (2gq).
+  say "nvram notes"
+  for v in rbgpu-arm rbgpu-boot rbgpu-diag rbgpu-diag-prev rbgpu-ea \
+           rbgpu-prog rbgpu-prog2 rbgpu-gate rbgpu-1b rbgpu-sdma; do
+    printf '%s = ' "$v"
+    nvram "$v" 2>/dev/null | sed 's/.*	//' || echo "(unset)"
+  done
 } > "$out/state.txt" 2>&1
 sync
 
 say "state saved"
 
-system_profiler SPDisplaysDataType > "$out/displays.txt" 2>&1
+# 2hi: with -rbgpuforceenable the gate is open, WindowServer composites and
+# then hangs on a surface sync whose stamp never retires (2hh). THAT hang is
+# the frontier, so capture it whether or not the Metal probe hangs too - and
+# capture it before the probe, which may add load of its own.
+if [ "$(id -u)" = "0" ]; then
+  if spindump WindowServer 3 -file "$out/ws-spindump.txt" >/dev/null 2>&1; then
+    say "WindowServer spindump saved"
+  else
+    echo "spindump WindowServer failed - not running, or already killed" \
+      > "$out/ws-spindump.txt"
+    say "WindowServer spindump FAILED (recorded)"
+  fi
+else
+  echo "needs root for kernel stacks; rerun with sudo" > "$out/ws-spindump.txt"
+  say "WindowServer spindump skipped (not root) - recorded"
+fi
 sync
-say "displays saved"
 
-ioreg -l -w0 > "$out/ioreg.txt" 2>&1
-sync
-say "ioreg saved"
+if bounded 30 "$out/displays.txt" system_profiler SPDisplaysDataType; then
+  say "displays saved"
+else
+  say "displays BLOCKED (recorded)"
+fi
+
+if bounded 30 "$out/ioreg.txt" ioreg -l -w0; then
+  say "ioreg saved"
+else
+  say "ioreg BLOCKED (recorded)"
+fi
 
 if [ ! -x build/out/metal_probe ]; then
   echo "build/out/metal_probe missing - build it with:" > "$out/metal.txt"
