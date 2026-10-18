@@ -10731,3 +10731,80 @@ permission bits, its physical address sits beside the ring's from the
 same table, and the page contains a value inside the exact range of
 sequence numbers the ring's own packets carry. Three independent things
 agreeing is what makes this readable — not the dwords on their own.
+
+## 2ib (2026-10-18) — `nowd`: RB0 never programs a GCVM context base
+
+Sixth consecutive armed boot, capture `logs/20261018-151147-metal/`.
+Verified before reading: `rbgpu-diag` reads `armed=1` **live** (not in
+`-prev`), and the loaded kext UUID `5E02FBCC-27AB-347E-A97C-46289A9E7655`
+matches `build/out`. Boot-args carry `-rbgpuforceenable wdt=-1
+-rbgpuringprobe -rbgpuringdump`.
+
+```
+rbgpu-pm4 = b=34 pa=6c1e7a000 t3=525 r=b1 w=280 | nowd
+            | rm@1e a=ffbfdc0000 s=2 | rm@c5 a=ffbfdc0000 s=3 | rm@145 a=ffbfdc0000 s=4
+```
+
+`t3=525` type-3 headers in 1024 dwords, so the route (ring VA -> CONTEXT0
+flat PTE -> physical page) is sound again and this is a real command ring
+page. **No `WRITE_DATA` packet targets any register in `0x28C7..0x28E6`**,
+the GCVM context 0..15 `PAGE_TABLE_BASE_ADDR_LO32/HI32` range. Third row of
+2ia's pre-written table.
+
+2ia's code logs the `nowd` case as **not** distinguishing "programmed
+elsewhere in the ring" from "never programmed", because one page cannot
+tell those apart in general. **In this boot the numbers close that gap.**
+`wptr = 0x280` = 640 dwords and the dump covers 1024, so the entire written
+extent of RB0 since boot lies inside the page that was read; `wptr` has
+never exceeded `0x380` in any boot of this series, so nothing has wrapped.
+Therefore **RB0 has emitted no VM flush for any context this boot.**
+
+Caveat, owed: `CP_RB0_CNTL` was not read, so the ring's size is inferred
+from the pointers rather than measured. One register; fold it into the next
+ring probe.
+
+Why it matters. In Linux the only writer of contexts 1-15's page-directory
+base is `gmc_v10_0_emit_flush_gpu_tlb`, emitted on **whatever ring the job
+runs on** (`amdgpu_ring_emit_wreg`). RB0 is not emitting it. So either
+Apple's client work runs on a different ring -- the compute MQD user queue,
+which 2hl already argued Metal uses, since RB0 was stalled before any Metal
+client existed -- or something programs those registers by a path 2ia's
+static search did not cover.
+
+2ia's static search did miss one shape. It looked for a displacement into
+the VMM object. Apple's register accessor takes an **encoded id**, and slot
+`[0x120]` is the WRITE entry (2fd, 2fg); a write whose id comes from a
+runtime table never looks like a struct field access and no displacement
+search can find it. That is the hook the user's request asked for, and it
+is now specific: hook the accessor's write path and report every write
+whose resolved dword offset falls in `0x1667..0x1686`.
+
+Two further readings from this boot, recorded and **not** interpreted:
+
+```
+rbgpu-ring  p=0 and p=1 both: r=b1 w=280 cps=90038600 me=15000000
+rbgpu-fence fv=ffbfdc0018 idx=3c0 pte=30006c3ca8077 v=1 s=1
+            pa=6c3ca8000 rpa=6c1e7a000 seq=5 o=6
+            d: 0 0 0 0 0 0 0 0 0 0 31 0  f=0 nz=1
+```
+
+The CP is halted (`CP_ME_CNTL = 0x15000000`) in **both** samples this boot;
+2hp's +160 s recovery is not visible here (the accumulating note carries two
+samples, so this is as likely a note-capacity limit as a behavioural
+difference -- do not read a difference into it).
+
+The fence target moved to `0xFF_BFDC_0018` this boot, six dwords into the
+page, and **nothing landed there** (`f=0`; the twelve dwords from that
+offset are zero except `0x31` eleven dwords on, which is some other slot and
+is not interpreted). This does **not** contradict 2hz, where `+0x00` held 6:
+this boot stalled at `rptr = 0xb1`, before the first RELEASE_MEM at `@0x1e`
+could retire, where 2hz's boot reached `0x2b1` and had passed three of them.
+An earlier stop, not a different mechanism. 2hz's finding -- that the fence
+writes land when the CP reaches them -- stands.
+
+The fault signature is unchanged for the sixth boot running: `hk=1 c=8 f=8
+r=4 o=0`, with `s3009bb h0 va=400300000 v3 R c4`, the `sffffffff h1`
+phantom, and `s40953 h0 va=0 v0 W c4`. The GCVM context registers are also
+unchanged: c0 `b=78fdfa001` (bit 0 set), c1 `b=fb00b000` and c3
+`b=fb015000` (bit 0 clear). Deterministic.
+
