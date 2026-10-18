@@ -9472,3 +9472,149 @@ Off unless `-rbgpuforceenable`. New note `rbgpu-ea` carries
 
 The last row is the one worth having: it would mean compute works without
 the display problem being solved at all.
+
+## 2hh — the flag WAS the gate: a display, a login, and the real frontier
+
+Boot of 2026-10-18 00:41, armed, build `23B6A724`, first boot ever with
+`-rbgpuforceenable`. **The user had a display.** Lock screen drawn,
+password accepted, the session-loading indicator appeared — then it
+froze. The machine panicked ~2m43s in, before SSH could be reached.
+
+This is the **first armed boot with a panel since roughly 2c** (2hb),
+and it did not come from touching DCN, the display pipe or 2ct. It came
+from setting one bit.
+
+### What the boot recorded
+
+`rbgpu-ea` = `b=24 ea:00000000->00000002`. The bottom row of 2hg's
+pre-written table, exactly: `enableAccelerator()` solved, the lock at
+`accel+0x88` was a plausible kernel pointer, the call was made under it,
+and `accel+0xc78` went `0x00000000 -> 0x00000002`. **`fEnabled` is
+settable with no display pipe.**
+
+The rest of the trail is 2ha's unchanged: `rbgpu-prog` `s=6 0x1B
+RETURNED 0xE00002C7` (the success value), `rbgpu-diag-prev` `d=73
+armed=1`, `fas:R=0x2104c`, `ei:E ei:R`. Boot-args in the spin report's
+own header, untruncated, confirm `-rbgpuvmpteng1 -rbgpuforceenable`.
+
+`rbgpu-prog2` is the one that moved: `W=2 ... T=12` @21s, `W=6 ... T=34`
+@41s, `W=11 ... T=56` @71s, `R=0`, `N=65` throughout. Waits and timeouts
+climbing linearly against a flat stamp table and **zero restarts at
+those sample points** — a client issuing stamps that never retire.
+
+### Why no armed boot ever had a display — answered
+
+2hf found WindowServer's first `IOAccelResourceCreate` asleep in
+`waiting_for_fEnabled` forever. That is not merely "Metal hangs": it is
+**WindowServer's first allocation**, so WindowServer never drew
+anything. The black screen of every armed boot since 2c was the same
+`fEnabled` gate, not a DCN or panel fault. With the bit set,
+WindowServer allocated, composited and drew the lock screen on
+IONDRVFramebuffer.
+
+2ct's rationale is therefore *half* restored: refusing the display pipe
+does leave the desktop usable — it was the unset gate, downstream of the
+refusal, that killed it. The rationale was right about the mechanism it
+intended and wrong about the outcome, for a reason two milestones away.
+
+### The new frontier, fully symbolicated
+
+`watchdogd` panicked on `no successful checkins from WindowServer
+(2 induced crashes) in 120 seconds`. Two
+`userspace_watchdog_timeout.spin` reports were saved (00:43:19 and
+00:43:58) and are in `logs/20261018-004318-WSHANG-ARMED-2hg/`.
+
+Seventeen of WindowServer's eighteen threads — the main thread and every
+`com.apple.root.default-qos` worker — are in the same place:
+
+```
+QuartzCore (CA render tree) -> IOSurface.framework -> IOKit
+  iokit_user_client_trap
+  IOSurfaceRootUserClient::lock_surface      +0x89
+  IOSurface::lockSurface                     +0xb1
+  IOSurface::synchronize_device_caches       +0x8a
+  lck_mtx_sleep -> thread_block -> asleep
+```
+
+`+0x8a` is the return address of the `IOLockSleep` inside
+
+```c
+while (surface->0x210 != 0) {        // device-cache work in flight
+    surface->0x214++;                // waiter count
+    IOLockSleep(surface->0x50, surface, THREAD_UNINT);
+    surface->0x214--;
+}
+```
+
+so those seventeen are merely queued. **One** thread holds it, at
+`IOSurface + 34448` = `synchronize_device_caches +0x13a`, the return
+address after `IOSurfaceDeviceCache::wait()` in the busy section:
+
+```c
+surface->0x210++;  IOLockUnlock(surface->0x50);
+cache->pageOff();  cache->wait(flag);  cache->accelRelease();
+IOLockLock(surface->0x50);  surface->0x210--;  IOLockWakeup(...);
+```
+
+Below `wait()`, in the first spin:
+
+```
+AMDRadeonX6000_AMDAccelEventMachine::finishEventUnlocked  +0x56
+IOAccelEventMachineFast2::finishEventUnlocked             +0xe7
+[0x0]
+AMDRadeonX6000_AMDAccelEventMachine::waitForStamp         +0x230
+  7/12 samples:
+    AMDRadeonX6000_AMDAccelChannel::waitForTimestamp      +0x121
+    AMDRadeonX6000_IAMDHWInterface::pollWait              +0x71
+    thread_block -> machine_switch_context
+  1/12 sample:
+    AMDRadeonX6000_AMDAccelChannel::waitForTimestamp      +0x240
+    AMDRadeonX6000_AMDGFX10PM4Engine::verifyThreadsActive +0x2c
+    AMDRadeonX6000_AMDGFX10PM4Engine::QueryQueueStatus    +0x163
+```
+
+and in the second spin, 40 s later, the same thread has moved on to
+
+```
+IOAccelEventMachine2::hardwareErrorEvent  +0x1b4
+IOAccelEventMachine2::restart_channel     +0x73 / +0xeb
+IOAccelFIFOChannel2::restart              +0x322
+AMDRadeonX6000_AMDAccelChannel::resetHardwareAndReplay +0x212
+```
+
+**So: `waitForStamp` times out on a real client stamp, and the event
+machine enters the GPU-restart path.** This is 2gq's restart loop again
+— but this time on the client-facing GFX/PM4 path, not the VMPT/SDMA one
+`-rbgpuvmpteng1` fixed, and issued by WindowServer rather than by the
+driver's own bring-up.
+
+### What the frontier now is, stated narrowly
+
+A surface the compositor asks to sync needs a device-cache operation;
+that operation is submitted and its stamp never retires; `waitForStamp`
+times out; the channel restarts; it never recovers; every other
+WindowServer thread piles up behind `surface+0x210`; at 120 s the
+userspace watchdog panics the machine.
+
+`QueryQueueStatus` and `verifyThreadsActive` on `AMDGFX10PM4Engine` put
+this on the **PM4/GFX ring** — hw engine `[0]`, untouched by
+`-rbgpusdmaone` and by `-rbgpuvmpteng1`. That is the first time this
+project has had a client submit to the GFX ring at all, and it is the
+first evidence that bears on the **2di debt** (`gfx_min = gfx_max = 0`
+since 2026-10-12, GFX DPM never started). 2di is no longer "never
+explained; not yet shown to matter" — a GFX ring that does not retire
+stamps is exactly what a GPU with no GFX clock range would look like.
+That is a hypothesis, labelled as one, and nothing is to be built on it
+until a measurement supports it.
+
+### Operational consequence
+
+`-rbgpuforceenable` makes the machine **self-panic in under three
+minutes**, with no SSH window in practice. It is not safe to leave armed
+unattended. It stays a deliberate, supervised experiment, not a
+permanent boot-arg, until the stamp that hangs is understood.
+
+The clean way to use it again is to pair it with something that makes
+the boot survive the watchdog — or to accept the panic and read the
+spin reports, which is what produced this milestone and cost nothing
+but a reboot.

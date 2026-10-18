@@ -190,11 +190,15 @@ anything, and log it when it is not.
 -rbgpuforce1b                                sends request 0x1B
 ```
 
-Pending, not yet proven: `-rbgpuforceenable` calls
+`-rbgpuforceenable` is **proven and dangerous** (2hh). It calls
 `IOGraphicsAccelerator2::enableAccelerator()` under `accel->0x88` after
-0x1B returns, to set the `fEnabled` gate 2hf identified without a display
-pipe (2hg). Add it with
-`sudo tools/efi.sh bootarg add -rbgpuforceenable`.
+0x1B returns; `accel+0xc78` goes `0 -> 2` and **the machine gets a
+display**: lock screen drawn, password accepted — the first panel in an
+armed boot since ~2c. Then WindowServer hangs on a surface sync and the
+userspace watchdog **panics the box in under three minutes**, with no
+usable SSH window. Supervised experiment only; do NOT leave it armed
+unattended. Add with `sudo tools/efi.sh bootarg add -rbgpuforceenable`,
+and remove it again before any boot you need to stay up.
 
 `-rbgpuvmpteng1` is now IN and proven (2gw): it sends the engine-2
 `getHWChannel` requests to engine 1, the one SDMA instance this chip has.
@@ -218,19 +222,22 @@ It is what broke the GPU-restart loop.
   reinstall. A bounded retry is owed. [2gy]
 
 - `gfx_min = gfx_max = 0` since **2di** (2026-10-12): the SMU reports no GFX
-  clock range, GFX DPM never started. Never explained; not yet shown to
-  matter.
+  clock range, GFX DPM never started. Still unexplained, but **2hh makes it
+  a suspect**: the first client submission to the PM4/GFX ring produced a
+  stamp that never retires (`QueryQueueStatus`, `verifyThreadsActive` on
+  `AMDGFX10PM4Engine`). A GFX ring with no clock range is what that would
+  look like. Hypothesis only — nothing is built on it yet.
 - The 2am/2an/2ao blanket firmware-ready bypasses still owe the explanation
   2cy demanded.
-- 2ct refuses the display pipe **by design** — and **2hf shows this is
-  what hangs Metal**: no display pipe means no `display_mode_did_change`,
-  which is the only caller of `enableAccelerator()`, so `fEnabled` is
-  never set and every `IOAccelResourceCreate` sleeps forever. No boot has
-  ever run with Its rationale says this keeps the
-  desktop on IONDRVFramebuffer — but in practice **armed boots have no
-  display at all** and never have. Why the panel dies even with the pipe
-  refused is unexplained and is a separate problem from 2ct. [user,
-  2026-10-17]
+- 2ct refuses the display pipe **by design**. 2hf traced the Metal hang to
+  the `fEnabled` gate that the refusal leaves unset; **2hh closes it**:
+  that same unset gate is why every armed boot was black, because
+  WindowServer's own first `IOAccelResourceCreate` slept on it and
+  WindowServer therefore never drew. Setting the bit directly
+  (`-rbgpuforceenable`) produced a lock screen and an accepted login. So
+  the black panel was never a DCN or display fault and is no longer a
+  separate problem. 2ct itself is unchanged and still refuses the pipe.
+  [2hf, 2hh]
 - 2gh: "the second engine to ask" and "a duplicate create on instance 0" are
   the same event on this chip and nothing separates them.
 
@@ -273,13 +280,29 @@ setter is `IOGraphicsAccelerator2::enableAccelerator()`, whose only two
 callers are `IOAccelDisplayMachine::display_mode_did_change` and the
 Legacy variant. **2ct refuses the display pipe, so no mode change ever
 happens, so the accelerator is never enabled, so every resource creation
-blocks forever.** 2hd's GFX-ring guess is withdrawn — the thread never
-reaches hardware.
+blocks forever.** 2hd's GFX-ring guess is withdrawn at this point in the
+story — that thread never reached hardware. **2hh then set the bit and
+the gate opened** (see below); only after it opens does a client reach
+the GFX ring, where the guess turns out to have been aimed at the right
+engine for the wrong reason.
 
-**No armed boot has ever reached a desktop** (user, 2026-10-17): since
-roughly milestone 2c every armed boot has shown verbose log lines and
-then nothing, and all work in them has been done over SSH. 2ct's stated
-rationale — refuse the display pipe "so armed boots can reach a desktop"
-— is therefore NOT achieved, and any note calling a black armed boot new,
-intermittent or a warning sign is wrong. The machine stays healthy and
-reachable; only the panel is dead.
+**An armed boot reached the login screen** (2hh, 2026-10-18). Until then
+no armed boot had shown a panel since roughly 2c — verbose log lines and
+then nothing, all work over SSH (user, 2026-10-17). The cause was the
+`fEnabled` gate, not the panel: `-rbgpuforceenable` set it and the lock
+screen drew, the password was accepted, session load began. **Then the
+machine froze and the userspace watchdog panicked it at 120 s.** So a
+black armed boot is still the norm without that boot-arg, and is still
+never to be called new, intermittent or a warning sign.
+
+The frontier is now **a client stamp on the PM4/GFX ring that never
+retires** (2hh). WindowServer's `IOSurface::synchronize_device_caches`
+calls `IOSurfaceDeviceCache::wait()`, which lands in
+`AMDAccelEventMachine::waitForStamp` -> `waitForTimestamp` ->
+`IAMDHWInterface::pollWait`; it times out, `restart_channel` /
+`resetHardwareAndReplay` run, nothing recovers, and the other seventeen
+WindowServer threads queue behind `surface+0x210` until the watchdog
+fires. Stacks and reports: `logs/20261018-004318-WSHANG-ARMED-2hg/`.
+This is the restart loop of 2gq again, on the GFX ring this time —
+untouched by `-rbgpusdmaone` and `-rbgpuvmpteng1`, both of which act on
+SDMA.

@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-18, after 2hf)
+# RembrandtGPU — handoff state (2026-10-18, after 2hh)
 
 **Read this first.** `docs/RULES.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -77,7 +77,7 @@ refusal above is what is now in the way.
 ---
 
 
-## 2. The cause is identified: `fEnabled` is never set, because of 2ct
+## 2. The gate was real: setting `fEnabled` gives a display, and moves the frontier to the GFX ring
 
 **2hf.** Boot 23, armed (`state.txt` records `d=72 armed=1` live),
 `logs/20261018-001306-metal/`. The 2hd hang reproduced, and under `sudo`
@@ -153,10 +153,65 @@ it. Riskiest: Apple's Navi 21 display code is DCN 3.0, this chip is DCN
 
 - What else `enableAccelerator` implies — whether a headless-enabled
   accelerator can actually allocate.
-- **Why armed boots have no display at all** (since ~2c, not intermittent).
 - The `/options` race (standing debt; a bounded retry is owed).
 - Who calls `incrementStamp(25)`; why the stamp table grew 63 → 65.
-- The 2di debt (`gfx_min = gfx_max = 0`) — untouched by 2hf, still open.
+- The 2di debt (`gfx_min = gfx_max = 0`) — now a **suspect** for 2hh's
+  non-retiring GFX stamp, not yet shown to be the cause.
+
+### 2hh — the bit was set, and what happened
+
+Boot of **2026-10-18 00:41**, armed, build `23B6A724`, the first boot with
+`-rbgpuforceenable`. `rbgpu-ea` = `ea:00000000->00000002`: the hook solved
+`enableAccelerator`, found a plausible lock at `accel+0x88`, called it
+under the lock, and `accel+0xc78` went `0 -> 2`.
+
+**The machine drew a lock screen, accepted the password, and began loading
+the session** — the first panel in an armed boot since roughly 2c. It then
+froze, and `watchdogd` panicked it at 120 s on
+`no successful checkins from WindowServer (2 induced crashes)`.
+
+That answers "why armed boots have no display at all": it was never a DCN
+or panel fault. WindowServer's *own* first `IOAccelResourceCreate` slept on
+`fEnabled`, so WindowServer never drew anything. Same gate, one layer up
+from the Metal probe of 2hf.
+
+**The new frontier.** Two `.spin` reports in
+`logs/20261018-004318-WSHANG-ARMED-2hg/`, fully symbolicated. Seventeen of
+WindowServer's eighteen threads are queued in
+`IOSurface::synchronize_device_caches +0x8a`, the `IOLockSleep` of
+
+```c
+while (surface->0x210 != 0) { surface->0x214++;
+    IOLockSleep(surface->0x50, surface, THREAD_UNINT); surface->0x214--; }
+```
+
+One thread holds the busy section, at `+0x13a`, the return address after
+`IOSurfaceDeviceCache::wait()`:
+
+```
+IOSurface::synchronize_device_caches                      +0x13a
+AMDRadeonX6000_AMDAccelEventMachine::finishEventUnlocked  +0x56
+IOAccelEventMachineFast2::finishEventUnlocked             +0xe7
+AMDRadeonX6000_AMDAccelEventMachine::waitForStamp         +0x230
+  AMDAccelChannel::waitForTimestamp +0x121 → IAMDHWInterface::pollWait +0x71
+  AMDAccelChannel::waitForTimestamp +0x240
+    → AMDGFX10PM4Engine::verifyThreadsActive +0x2c
+    → AMDGFX10PM4Engine::QueryQueueStatus    +0x163
+```
+
+and 40 s later, in the second spin, the same thread has moved to
+`IOAccelEventMachine2::hardwareErrorEvent` → `restart_channel` →
+`IOAccelFIFOChannel2::restart` → `AMDAccelChannel::resetHardwareAndReplay`.
+
+**A client stamp on the PM4/GFX ring does not retire.** This is 2gq's
+restart loop again, on hw engine `[0]` — the engine neither
+`-rbgpusdmaone` nor `-rbgpuvmpteng1` touches, both of which act on SDMA.
+`rbgpu-prog2` agrees from the kernel side: waits `2 → 6 → 11` and timeouts
+`12 → 34 → 56` over 21s/41s/71s against a flat `N=65`.
+
+**Operationally:** `-rbgpuforceenable` self-panics the machine in under
+three minutes with no usable SSH window. Supervised experiment only; take
+it out of boot-args before any boot that needs to stay up.
 
 
 ## 3. Verified on hardware — do NOT re-derive these
