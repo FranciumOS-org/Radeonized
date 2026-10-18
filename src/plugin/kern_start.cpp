@@ -7430,6 +7430,193 @@ void rbgpu_fault_flush_2hu(void) {
     rbgpu_fault_note_2hu();
 }
 
+// ---------------------------------------------------------------------------
+// 2ic (2026-10-18): who writes GCVM_CONTEXT*_PAGE_TABLE_BASE_ADDR.
+//
+// 2ia asked this statically and found nothing: no displacement into the VMM
+// object touches the descriptor region, so no struct-field search can find
+// the write. 2ib then ruled out the other candidate - RB0 emitted no
+// WRITE_DATA to 0x28C7..0x28E6 at all, and since wptr (0x280 dwords) lies
+// inside the single 1024-dword page that was dumped, and nothing has
+// wrapped, that is the whole written extent of the ring this boot.
+//
+// What both searches miss is the same thing: Apple's register writes go
+// through an accessor that takes an ENCODED ID, so the dword offset is a
+// runtime value and the write looks like nothing in particular.
+//
+// The accessor is now NAMED. AMDRadeonX6000_AMDHWRegisters's vtable
+// (__ZTV29AMDRadeonX6000_AMDHWRegisters at 0xbfab6a0) decodes, under the 2gp
+// convention that a CALL offset is the DUMP offset minus 0x10, to exactly
+// the slots five earlier milestones inferred from disassembly:
+//
+//     call [0x118] = dump +0x128 = AMDHWRegisters::read(uint)         (2fd)
+//     call [0x120] = dump +0x130 = AMDHWRegisters::write(uint, uint)  (2fg)
+//     call [0x128] = dump +0x138 = readOrModifyWrite(uint, uint)
+//     call [0x130] = dump +0x140 = readAndModifyWrite(uint, uint)
+//     call [0x148] = dump +0x158 = socRegOffset(SOCRegister)          (2fd)
+//
+// `write` is the single choke point for GC MMIO: its body ends
+// `movl %ebx,(%rax,%rcx)` with rax = this+0x38 (the aperture) and
+// rcx = reg*4, and BOTH read-modify-write entries tail-jump through the
+// virtual [0x120] slot (`movq 0x120(%rax),%rax` ... `jmpq *%rax`) rather
+// than storing themselves. So one hook sees every write, RMW included.
+//
+// Milestone-2c rule: `nm -m build/re/AMDRadeonX6000` shows
+// __ZN29AMDRadeonX6000_AMDHWRegisters5writeEjj DEFINED at 0xbe8d28a, not
+// imported. Rule 9 (2gb): its first bytes are `55 48 89 e5 41 57 41 56 53`
+// - pushes and a mov; the first branch is a `jne` at +0x11, well outside
+// the five-byte patch window. Checked, not assumed.
+//
+// The filter. socRegOffset returns a SEGMENT-INCLUDED dword offset (2fe
+// measured 0x3041 for CP_RB0_CNTL, whose raw offset is 0x1DE1: GC seg0
+// 0x1260 + 0x1DE1). The context page-directory base registers are
+// seg0 0x1260 + 0x1667 + 2*vmid, so VMID n's LO32 is 0x28C7 + 2n and its
+// HI32 is 0x28C8 + 2n. The faulting context 3 is 0x28CD / 0x28CE.
+//
+// Cost. This is the hottest function in the driver, so the hook does one
+// range compare and, inside the range, one array store. No logging and no
+// NVRAM from the hook itself - 2ez's crawl was caused by logging in a hot
+// path, not by a branch. The note is built and committed from the ring
+// probe's thread_call, the 2hu pattern.
+//
+// What a reading would mean, written down before the boot (the recurring
+// error, stated 25 times in docs/RULES.md):
+//
+//   a write to 0x28CD with bit 0 SET      the register lost the bit after
+//                                          the write, or 2hr misread it
+//   a write to 0x28CD with bit 0 CLEAR    the VALUE is wrong at its source,
+//                                          and the bug is in whatever built
+//                                          it - the first thing this project
+//                                          could actually fix
+//   writes to 0x28C7 but none to 0x28CD   context 0 is programmed this way
+//                                          and contexts 1-15 are not, which
+//                                          would mean c1/c3's bases were
+//                                          never written at all and 2hr read
+//                                          reset values
+//   n=0 with calls>0                      the hook ran, the accessor ran,
+//                                          and NOTHING writes these registers
+//                                          through it - the write is on some
+//                                          third path (firmware, PSP, or a
+//                                          ring this project has not read)
+//   calls=0                               the hook took but the accessor was
+//                                          never called; the silence is the
+//                                          instrument, not the chip
+//
+// Gated on -rbgpuringprobe, which is already in the boot-args and already
+// drives the thread_call that flushes this note. No config.plist change.
+// ---------------------------------------------------------------------------
+
+#define RB_2IC_FIRST 0x28C7u          // CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32
+#define RB_2IC_LAST  0x28E6u          // CONTEXT15_..._HI32
+#define RB_2IC_N     (RB_2IC_LAST - RB_2IC_FIRST + 1u)
+
+struct rb_2ic_slot {
+    uint32_t count;
+    uint32_t first;
+    uint32_t last;
+};
+static struct rb_2ic_slot g_rb_2ic[RB_2IC_N];
+static uint64_t g_rb_2ic_calls  = 0;    // every write the accessor performed
+static uint32_t g_rb_2ic_hits   = 0;    // writes inside the range
+static int      g_rb_2ic_hooked = 0;
+static int      g_rb_2ic_armed  = 0;
+
+static void (*orig_hwreg_write_2ic)(void *, uint32_t, uint32_t) = nullptr;
+
+static void hooked_hwreg_write_2ic(void *self, uint32_t reg, uint32_t val) {
+    g_rb_2ic_calls++;
+    if (reg >= RB_2IC_FIRST && reg <= RB_2IC_LAST) {
+        struct rb_2ic_slot *sl = &g_rb_2ic[reg - RB_2IC_FIRST];
+        if (sl->count == 0) sl->first = val;
+        sl->last = val;
+        sl->count++;
+        g_rb_2ic_hits++;
+    }
+    if (orig_hwreg_write_2ic) {
+        orig_hwreg_write_2ic(self, reg, val);
+    }
+}
+
+// Committed from the ring probe's thread_call, never from the hook.
+void rbgpu_ctxwrite_flush_2ic(void) {
+    if (!g_rb_2ic_armed) {
+        rbgpu_nvram_note("rbgpu-ctxw",
+                         "off - -rbgpuringprobe was not set, so the accessor "
+                         "was never hooked. Silence here is the boot-arg.");
+        return;
+    }
+    if (!g_rb_2ic_hooked) {
+        rbgpu_nvram_note("rbgpu-ctxw",
+                         "hk=0 the AMDHWRegisters::write hook did NOT take "
+                         "this boot - silence here is the hook, not the chip");
+        return;
+    }
+
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note), "hk=1 calls=%llu hits=%u",
+                     g_rb_2ic_calls, g_rb_2ic_hits);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+
+    unsigned shown = 0, skipped = 0;
+    for (unsigned i = 0; i < RB_2IC_N; i++) {
+        if (g_rb_2ic[i].count == 0) continue;
+        if (n >= sizeof(note) - 48) { skipped++; continue; }
+        unsigned reg = RB_2IC_FIRST + i;
+        w = snprintf(note + n, sizeof(note) - n, " | %x c%u f%x l%x",
+                     reg, g_rb_2ic[i].count, g_rb_2ic[i].first,
+                     g_rb_2ic[i].last);
+        if (w > 0) {
+            n += static_cast<size_t>(w);
+            if (n >= sizeof(note)) { n = sizeof(note) - 1; break; }
+        }
+        shown++;
+    }
+    if (shown == 0 && n < sizeof(note) - 16) {
+        snprintf(note + n, sizeof(note) - n, " | none");
+    } else if (skipped && n < sizeof(note) - 12) {
+        snprintf(note + n, sizeof(note) - n, " +%u", skipped);
+    }
+
+    rbgpu_nvram_note("rbgpu-ctxw", note);
+    rbgpu_log("2ic: %s", note);
+    if (g_rb_2ic_hits == 0) {
+        rbgpu_log("2ic: the accessor performed %llu writes this boot and NONE "
+                  "of them was to 0x%x..0x%x. If calls is large this is a "
+                  "real negative - the page-directory bases are not written "
+                  "through AMDHWRegisters at all - and the write is on a path "
+                  "this project has not read. If calls is 0 the hook took but "
+                  "the accessor never ran, and this says nothing about the "
+                  "chip.", g_rb_2ic_calls, RB_2IC_FIRST, RB_2IC_LAST);
+    }
+}
+
+static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
+                                       mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuringprobe")) {
+        rbgpu_log("2ic: -rbgpuringprobe not set, AMDHWRegisters::write left "
+                  "alone");
+        return;
+    }
+    g_rb_2ic_armed = 1;
+    KernelPatcher::RouteRequest req(
+        "__ZN29AMDRadeonX6000_AMDHWRegisters5writeEjj",
+        hooked_hwreg_write_2ic, orig_hwreg_write_2ic);
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        rbgpu_log("2ic: hooked AMDHWRegisters::write (observe only) - every GC "
+                  "register write, read-modify-writes included, now passes "
+                  "through a range compare on 0x%x..0x%x",
+                  RB_2IC_FIRST, RB_2IC_LAST);
+        g_rb_2ic_hooked = 1;
+    } else {
+        rbgpu_log("2ic: FAILED to hook AMDHWRegisters::write - rbgpu-ctxw will "
+                  "say hk=0 so the empty note is not mistaken for a chip that "
+                  "never wrote the registers");
+        g_rb_2ic_hooked = 0;
+        patcher.clearError();
+    }
+}
+
 static void hooked_getVMFaultInfo_2hs(void *vmm, uint32_t hub, void *info) {
     g_rb_2hs_calls++;
 
@@ -7966,6 +8153,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     // does not grow processX6000's stack frame past the 1024-byte limit.
     rbgpu_route_getHWChannel_2gv(patcher, id, address, size);
     rbgpu_route_vmfault_2hs(patcher, id, address, size);
+    rbgpu_route_hwregwrite_2ic(patcher, id, address, size);
 
     KernelPatcher::RouteRequest req_2gn[] = {
         KernelPatcher::RouteRequest(
@@ -8927,6 +9115,9 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // with no faults and a boot where the hooks never took must not look the
     // same in NVRAM.
     rbgpu_fault_flush_2hu();
+
+    // 2ic: who wrote the context page-directory bases, same discipline.
+    rbgpu_ctxwrite_flush_2ic();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and
