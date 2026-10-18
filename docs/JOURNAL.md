@@ -11053,3 +11053,113 @@ offset, and this project has paid for that before.
 Note `rbgpu-gvmw`, gated on `-rbgpuringprobe` (already in the boot-args),
 flushed from the same thread_call as 2ic/2id. No config.plist change.
 
+
+## 2ie result (2026-10-18) — two paths, and NOTHING writes the base
+
+Ninth consecutive armed boot, `logs/20261018-165514-metal/`. `armed=1`
+**live**, loaded UUID `8FC92114-46EC-3CDD-A569-15B2BE64C308` = `build/out`.
+
+```
+rbgpu-gvmw = hk=1 calls=462 gc=323
+  | raw cm=0000 bm=0000 sm=0000 em=0000 n=0/0/0/0 m=0 bf=0 bl=0
+  | seg cm=ffff bm=0001 sm=0001 em=0001 n=17/2/2/2 m=63 bf=fdfa001 bl=0
+rbgpu-ctxw = hk=1 calls=35027 hits=0 | cm=fffe sm=0000 em=0000 bm=0000
+             nc=15 ns=0 ne=0 mid=504 | pivm=336/1 h=0003 | none
+```
+
+**The framing question is answered and it was worth asking.** The `seg`
+view matched everything and the `raw` view matched nothing at all, so
+HWLibs passes segment-included dword offsets too and the hwid is not a
+segment selector. Exactly one framing matched, which is what made the
+reading safe; had both matched, neither would have been.
+
+**The two paths are SEPARATE.** HWLibs' `cm=ffff` includes context 0 and
+counts 17 writes; X6000's `cm=fffe` excludes context 0 and counts 15. Had
+HWLibs' writes flowed through the callback into `AMDHWRegisters::write`,
+X6000's mask would carry bit 0 and its count would be the larger. It does
+not. So the callback at `ctx->0xc68+0x38` is **not** X6000's accessor, the
+two hooks cover different traffic, and 2ie's first table row is excluded.
+
+Coverage of HWLibs is complete, checked rather than assumed: all ten call
+sites into `_gvm_cgs_write_register` are hooked by hooking it, and
+`_gvm_write_register_virt` - the one sibling entry point - funnels into the
+same function at six separate sites. Only a direct MMIO store inside
+HWLibs would be invisible, and none is known.
+
+**`bm=0001`: HWLibs writes a page-directory base for context 0 and no
+other.** `bf=0xFDFA001`, and that value is the probe's own corroboration -
+bit 0 **set**, and missing the carve-out offset, which is exactly the bug
+2em found and patched (`rbgpu-diag` still reads `ptb_written=1
+ptb_back=78fdfa001`, our corrected value written over it). So this probe
+is reading real HWLibs output, and **Apple's code sets VALID wherever it
+writes a base**, as `getPDEValue`'s closing `incq %rax` says it must.
+
+Both boots together:
+
+| path | CNTL | BASE | START | END |
+|---|---|---|---|---|
+| X6000 `AMDHWRegisters::write` | ctx 1-15 | - | - | - |
+| HWLibs `_gvm_cgs_write_register` | ctx 0-15 | **ctx 0** | ctx 0 | ctx 0 |
+
+**No path writes BASE, START or END for contexts 1 through 15.**
+
+### This closes 2hr
+
+2hr found contexts 1 and 3 holding page-directory bases with bit 0 clear
+and listed three caveats: the hardware might ignore bit 0, the values might
+not come from `getPDEValue`, and the addresses might be wrong independently
+of the flag. The third is now moot and the second is answered in the
+strongest way: **those values come from nowhere.** Nothing wrote them.
+
+So the missing VALID bit was never a wrong value. It is an **absent
+write** - c1/c3's registers hold whatever they held, and reading them as
+"a base Apple computed badly" was the wrong frame for four milestones.
+2hr's own reading stands; its implied cause does not.
+
+Combined with 2id, the shape of the defect is now specific: in Linux the
+base for contexts 1..15 is written per job by
+`amdgpu_vm_flush -> ring->emit_vm_flush`, at the moment a VMID is bound to
+a VM. Apple's `programAndInvalidateVM` ran 336 times and invalidated
+without programming (2id), RB0 carries no such packet (2ib), neither
+register path writes it (2ic/2id/2ie) - **and the chip then faults on a CPF
+read under VMID 3**, which is a VMID whose translation base was never
+established.
+
+Boot otherwise reproduces the "far" variant exactly: `t3=799 r=2b1 w=380`,
+RELEASE_MEM seq 3/4/5, fence page holding 6 with `seq=8`, three fault
+signatures, contexts unchanged.
+
+## 2if (2026-10-18) — the VMID handout and the value Apple computes
+
+Two hooks, both rule-9 checked and both defined in AMDRadeonX6000:
+
+```
+AMDHWVMM::assignVMID(IAMDHWVMContext*, uint &vmid, AMDAccelChannel*,
+                     IOAccelEvent**, bool*)        0xbe91376
+  prologue 55 48 89 e5 41 57 41 56 41 55 41 54 53   pushes and a movq
+AMDGFX10VMM::getPDEValue(eAMD_VMPT_LEVEL, uint64)  0xbe9b9de
+  prologue 55 48 89 e5 ff c6 8b 87 34               the ff c6 at byte 4 is
+                                                    `incl %esi`, not a branch;
+                                                    first branch is a jne at +0xe
+```
+
+`getPDEValue` is the function 2hr wanted and could not justify hooking
+until the write path was understood. It is the one place Apple computes a
+page-directory entry and its tail is `incq %rax`, so it ORs VALID
+unconditionally; `nv` counts any return with bit 0 clear and should be 0.
+`assignVMID`'s out-parameter is read **after** the original runs, the only
+moment it holds the assigned VMID.
+
+What a reading would mean, before the boot:
+
+| reading | means |
+|---|---|
+| `vmids` has bit 3, and a good L0/L1 value | Apple COMPUTED a base for the faulting context and never wrote it. The write is the gap, and performing it is the fix. |
+| `vmids` has bit 3, no getPDEValue for it | Apple never computes a base for that context either; the gap is further upstream than the write |
+| `vmids` bit 3 clear | the chip faulted under a VMID this driver never bound - a different bug, and the CPF read at 0x4_0030_0000 needs another explanation |
+| `av=0` | no VMID was assigned this boot; the silence is the hook, not the driver |
+| `nv` nonzero | the `incq %rax` reading of getPDEValue's tail is wrong, and 2hr's Apple-convention argument falls with it |
+
+Note `rbgpu-vmid`, gated on `-rbgpuringprobe`, flushed from the same
+thread_call. No config.plist change.
+
