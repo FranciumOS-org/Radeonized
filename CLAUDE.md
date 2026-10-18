@@ -432,13 +432,48 @@ fixed, so this is probably not a second 2em). Setting the bit is the
 obvious experiment but contexts 1-15 are reprogrammed per VM bind, so a
 one-shot timer write would be overwritten before it is tested.
 
-**Next: Apple already decodes these faults.** `AMDGFX10VMM` has
-`getVMFaultInfo`, `getVmFaultMemoryClientName`,
-`writeVmFaultProtectionString` and `clearVMFault`, and the kext carries
-`"... VM_FAULT %u %s VA: %#llx, pages: %u, op: %s, vmid: %u, pasid: %u,
-memClient: %#x, ... Closest good VA: %#llx"`. That record has the
-faulting **VA** (ending the `vmalo` debt) and a **closest good VA**. It
-reaches neither `ioreg` nor the unified log in any armed boot, so it is
-gated or buffered elsewhere. Hook `getVMFaultInfo` and log what it
-fills — **rule 9 first** (disassemble the first 16 bytes, refuse on a
-rel8/rel32 branch in the first 5).
+**Apple's own fault records** (2ht, the 2hs hooks). Four, in order,
+reproducing identically across four consecutive armed boots — this is
+deterministic, not a race:
+
+```
+#1  hub 0  VA 0x4_0030_0000    vmid 3   READ   cid 4 (CPF)  st 0x3009bb
+#2  hub 1  VA 0xFFFFFFFFF000   vmid 15  WRITE  cid 511      st 0xffffffff
+#3  hub 0  VA 0                vmid 0   WRITE  cid 4 (CPF)  st 0x40953
+#4  hub 1  VA 0xFFFFFFFFF000   vmid 15  WRITE  cid 511      st 0xffffffff
+```
+
+**#1 closes the `vmalo` debt.** 2hs derived `VA = (HI32 & 0xf) << 44 |
+(LO32 << 12)` from Apple's disassembly *before* the boot; Apple's own
+code produced the identical value. CPF reads VA `0x4_0030_0000`, 3 MB
+into context 3's window — the context whose PDE has no VALID bit (2hr).
+
+**#2/#4 are phantoms, and that is a new defect.** `status = 0xffffffff`
+is a dead-register read; `vmid 15`, `cid 511`, `VA 0xFFFFFFFFF000` are
+just the all-ones bits decoded. **MMHUB's fault status register reads
+all-ones on this chip**, and since `getVMFaultInfo` fills its struct
+whenever `(addr != 0 || status != 0)`, Apple reports a phantom hub-1
+fault on every poll and feeds it to the real fault path. Never treat an
+Apple hub-1 fault report on this chip as real. Whether that phantom
+stream provokes resets is open.
+
+**#3 is the lead: a CPF WRITE to VA 0**, vmid 0, the same `0x40953` the
+samples caught at +100 s. An uninitialised pointer shape — and the
+candidate that would explain everything is the **end-of-pipe timestamp
+writeback address**: told to write the completion timestamp to VA 0, the
+write faults, the timestamp never lands, `waitForTimestamp` polls
+forever. **Hypothesis, not established** — neither that CPF's write is
+the timestamp write, nor that VA 0 is real rather than an artifact of
+`CLEAR_PROTECTION_FAULT_STATUS_ADDR` zeroing the address register before
+anyone read it (2hp). Apple reads the same registers, so Apple's zero is
+equally susceptible.
+
+**Next, and it is cheap:** raise the four-fault NVRAM cap and see
+whether a `status 0x40953` fault EVER carries a nonzero VA. If none
+does across many faults, VA 0 is real and the timestamp hypothesis gets
+its test. Owed at the same time: the `vmfault_hooked` / `vmfaults_seen`
+/ `vmfault_calls` / `vmfault_reports` counters were **truncated out of
+`rbgpu-diag`** (it caps at `mapq_ca`), so this boot cannot say how many
+faults there were or whether `fillFaultAccelInfo` ran at all — missing
+looks the same as zero (2eh, 2ek, 2fb). The counts belong in the
+`rbgpu-fault` note itself.

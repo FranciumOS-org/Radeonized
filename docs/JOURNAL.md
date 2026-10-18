@@ -10337,3 +10337,104 @@ Apple's own per-fault record, at the moment of each fault, instead of our
 sampled snapshots. Rule 9 (2gb) applies: disassemble the first 16 bytes
 and refuse if a rel8/rel32 branch starts within the first 5, before
 routing anything.
+
+## 2ht — Apple's own fault records: a CPF read at 0x4_0030_0000, a CPF write to VA 0, and two phantoms
+
+Boot of 2026-10-18 ~03:01, armed, build `A187A307` (matches `build/out`),
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 30`. Capture in
+`logs/20261018-030337-metal/`. The 2hs hooks took and Apple's own
+`VM_FAULT_INFO` records came out:
+
+```
+#1  hub 0  VA 0x4_0030_0000    vmid 3   READ   cid 4    status 0x3009bb
+#2  hub 1  VA 0xFFFFFFFFF000   vmid 15  WRITE  cid 511  status 0xffffffff
+#3  hub 0  VA 0                vmid 0   WRITE  cid 4    status 0x40953
+#4  hub 1  VA 0xFFFFFFFFF000   vmid 15  WRITE  cid 511  status 0xffffffff
+```
+
+### #1 confirms the static derivation exactly
+
+2hs computed VA `0x4_0030_0000` from `(HI32 & 0xf) << 44 | (LO32 << 12)`
+by reading Apple's disassembly, before this boot ran. Apple's own code
+produced the identical value. VMID 3, a **read**, client **CPF** — the
+command processor's fetcher — three megabytes into context 3's window,
+the context whose page-directory base has no VALID bit (2hr).
+
+The `vmalo` interpretation debt from 2hn/2hp is **closed**: the shift is
+Apple's own, and the number agrees.
+
+### #2 and #4 are not faults. MMHUB reads back all-ones
+
+`status = 0xffffffff` is the classic dead-register read. Every decoded
+field is simply the all-ones bits: `vmid 15` (0xf), `cid 511` (0x1ff),
+`VA 0xFFFFFFFFF000` (`0xfffffff << 12 | 0xf << 44`). Nothing faulted.
+
+**Apple cannot tell.** `getVMFaultInfo` fills its struct whenever
+`(addr != 0 || status != 0)`, and all-ones satisfies that. So on this
+chip Apple reports a **phantom MMHUB fault on every poll of hub 1**, with
+garbage in every field, and feeds it to the same fault-handling path as
+a real one.
+
+That is a new defect, independent of the hang, and it means any reasoning
+that treats Apple's hub-1 fault reports as real is reasoning about
+nothing. It also raises a question not yet answered: whether this phantom
+stream is itself provoking resets.
+
+Why hub 1's register reads all-ones is not established here. The GFXHUB
+(hub 0) registers read fine through the same accessor.
+
+### #3 is the one that matters: a CPF WRITE to VA 0
+
+`hub 0, VA 0, vmid 0, WRITE, cid 4 (CPF), status 0x40953` — the same
+status 2hn and 2hp caught at +100 s, now with Apple's own decode
+attached.
+
+A **write** by the command processor to **virtual address zero** is the
+shape of an uninitialised pointer in a descriptor. And the most
+interesting candidate pointer in this story is the **end-of-pipe
+timestamp writeback address**: if the CP is told to write its completion
+timestamp to VA 0, the write faults, the timestamp never lands, and
+`waitForTimestamp` polls forever — which is precisely the hang of 2hj,
+2hl and 2hp.
+
+**That is a hypothesis and is labelled as one.** It is not established
+that CPF's write is the timestamp write, and it is not established that
+VA 0 is real rather than an artifact:
+
+> `gfxhub_v2_1_get_invalidate_req` sets
+> `CLEAR_PROTECTION_FAULT_STATUS_ADDR`, so a TLB invalidation between the
+> fault and the read zeroes the address register (2hp). Apple reads the
+> same registers this probe does, so Apple's `VA 0` is equally
+> susceptible. "The address was zero" and "the address was cleared before
+> anyone looked" are not distinguished by this reading.
+
+The discriminator is cheap: capture **more** faults and see whether a
+`status 0x40953` fault ever carries a nonzero VA. If none ever does
+across many faults, VA 0 is real. The current cap of four, chosen to
+avoid the 2fo wedge, is what prevents that today.
+
+### The rest of the boot is unchanged
+
+```
+ring p=0  vmf=3009bb vmalo=400300 r=b1  w=280 cps=90078600 me=15000000
+ring p=1  vmf=40953  vmalo=0      r=2b1 w=380 cps=90038600 me=15000000
+```
+
+Identical to 2hp and 2hr boot-for-boot, which is itself worth having:
+**four consecutive armed boots now reproduce the same two faults in the
+same order at the same addresses.** This is deterministic, not a race.
+Metal hung at commit for the fourth boot running.
+
+### Instrument defect found
+
+The `vmfault_hooked`, `vmfaults_seen`, `vmfault_calls` and
+`vmfault_reports` diag keys **did not survive** — `rbgpu-diag` is length
+capped and truncates at `mapq_ca`, well before them. So this boot cannot
+say how many times `getVMFaultInfo` was called, how many faults there
+were in total, or whether `fillFaultAccelInfo` ran at all.
+
+That is exactly the ambiguity-of-absence this project keeps paying for
+(2eh, 2ek, 2fb): the counters are missing, and missing looks the same as
+zero. The counts belong **in the `rbgpu-fault` note itself**, not in the
+shared diag table. Owed, and it blocks the "is Apple's reporting path
+even running" question 2hs was partly built to answer.
