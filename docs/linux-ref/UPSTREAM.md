@@ -87,3 +87,22 @@ Apple's encoded register ids `(offset << 32) | 11` resolve.
 Used to establish that GCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR holds a
 *system-physical* address (mc2pa of the page directory's MC address), and that
 on this APU `vram_base_offset` must be `0x780 << 24 = 0x7_8000_0000`.
+
+## gc_10_3_0_sh_mask.h
+
+    drivers/gpu/drm/amd/include/asic_reg/gc/gc_10_3_0_sh_mask.h
+
+Fetched 2026-10-18 from
+`https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/amd/include/asic_reg/gc/gc_10_3_0_sh_mask.h`
+sha256 `96352168616063a2715ee676e8290b99e9fd0596ad442434ab08687450ecbda5`, 49396 lines.
+
+**The commit is NOT recorded, and that is a gap, not an omission.** The
+GitHub API and `git ls-remote` are both unreachable from this environment;
+only raw.githubusercontent resolved. The hash above pins the exact bytes
+used, so the decode in 2hl can be rechecked against them, but "master on
+2026-10-18" is weaker than this project's own rule asks for. Replace it
+with the real commit when the network allows.
+
+Used by 2hl to decode GRBM_STATUS, CP_STAT and CP_RB0_CNTL from the armed
+boot's ring probe. The companion offsets header gc_10_3_0_offset.h, already
+here, supplies the register addresses.
