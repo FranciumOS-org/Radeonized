@@ -7345,7 +7345,90 @@ static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
 static uint32_t g_rb_2hs_faults = 0;
 static uint32_t g_rb_2hs_fill = 0;
-static char     g_rb_2hs_note[320];
+static int      g_rb_2hs_hooked = 0;
+static char     g_rb_2hs_note[384];
+
+// 2hu (2026-10-18): aggregate by fault SIGNATURE instead of logging the
+// first four.
+//
+// 2ht asked one question it could not answer: does a `status 0x40953` fault
+// EVER carry a nonzero VA? If it never does, the CPF write really is aimed
+// at virtual address zero and the end-of-pipe-timestamp hypothesis gets its
+// test; if some do, the zero was `CLEAR_PROTECTION_FAULT_STATUS_ADDR` wiping
+// the address register before anyone looked (2hp), and the hypothesis dies.
+//
+// Raising the four-fault cap is the obvious answer and the wrong one: the
+// faults recur all boot (2hp), so a commit per fault is the 2fo wedge. What
+// the question actually needs is, per distinct (hub, status): how many, the
+// first VA, and **the largest VA ever seen**. `mx=0` after hundreds of
+// faults is the finding; one nonzero `mx` kills the hypothesis outright.
+// That is bounded storage and bounded writes.
+//
+// The hub-1 all-ones phantoms (2ht) are counted like anything else rather
+// than filtered out. Dropping them silently would make "Apple polls hub 1
+// and gets garbage" invisible, and that is its own defect.
+//
+// The counters live IN this note. 2ht put them in `rbgpu-diag`, which is
+// length-capped and truncated them away, leaving no way to tell "no faults"
+// from "the hook never ran" - the ambiguity of absence again (2eh, 2ek, 2fb).
+#define RB_2HU_SIGS 5
+#define RB_2HU_MAX_COMMITS 16
+
+struct rb_2hu_sig {
+    uint32_t status;
+    uint32_t hub;
+    uint32_t count;
+    uint64_t first_va;
+    uint64_t max_va;     // the whole point: stays 0 only if every VA was 0
+    uint32_t vmid;
+    uint32_t cid;
+    uint8_t  rw;
+    uint8_t  used;
+};
+static struct rb_2hu_sig g_rb_2hu[RB_2HU_SIGS];
+static uint32_t g_rb_2hu_other = 0;      // faults past the signature table
+static uint32_t g_rb_2hu_commits = 0;
+
+static void rbgpu_fault_note_2hu(void) {
+    size_t n = 0;
+    int w = snprintf(g_rb_2hs_note, sizeof(g_rb_2hs_note),
+                     "hk=%d c=%u f=%u r=%u o=%u",
+                     g_rb_2hs_hooked, g_rb_2hs_calls, g_rb_2hs_faults,
+                     g_rb_2hs_fill, g_rb_2hu_other);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (unsigned i = 0; i < RB_2HU_SIGS; i++) {
+        if (!g_rb_2hu[i].used || n >= sizeof(g_rb_2hs_note) - 72) {
+            continue;
+        }
+        w = snprintf(g_rb_2hs_note + n, sizeof(g_rb_2hs_note) - n,
+                     " | s%x h%u n=%u va=%llx mx=%llx v%u%s c%u",
+                     g_rb_2hu[i].status, g_rb_2hu[i].hub, g_rb_2hu[i].count,
+                     g_rb_2hu[i].first_va, g_rb_2hu[i].max_va,
+                     g_rb_2hu[i].vmid, g_rb_2hu[i].rw ? "W" : "R",
+                     g_rb_2hu[i].cid);
+        if (w > 0) {
+            n += static_cast<size_t>(w);
+            if (n >= sizeof(g_rb_2hs_note)) {
+                n = sizeof(g_rb_2hs_note) - 1;
+            }
+        }
+    }
+    rbgpu_nvram_note("rbgpu-fault", g_rb_2hs_note);
+    g_rb_2hu_commits++;
+}
+
+// Called from the ring probe at +12/+100/+160 s, so the note is committed at
+// known times even if no signature changed - "the hook ran and saw nothing"
+// must be writable, not just inferable.
+void rbgpu_fault_flush_2hu(void) {
+    if (!g_rb_2hs_hooked) {
+        rbgpu_nvram_note("rbgpu-fault", "hk=0 the VM fault hooks did NOT take "
+                                        "this boot - silence here is the hook, "
+                                        "not the chip");
+        return;
+    }
+    rbgpu_fault_note_2hu();
+}
 
 static void hooked_getVMFaultInfo_2hs(void *vmm, uint32_t hub, void *info) {
     g_rb_2hs_calls++;
@@ -7370,15 +7453,7 @@ static void hooked_getVMFaultInfo_2hs(void *vmm, uint32_t hub, void *info) {
     uint64_t va  = *reinterpret_cast<uint64_t *>(p);
     uint32_t st  = *reinterpret_cast<uint32_t *>(p + 0x14);
     if (va == kPoison && st == 0xDEADBEEF) {
-        // Apple looked and found nothing. Worth saying once, and only once:
-        // this runs on every poll and a line per call would be the 2ez
-        // logging contention.
-        if (g_rb_2hs_calls == 1) {
-            rbgpu_log("2hs: getVMFaultInfo(hub=%u) called and reported NO fault "
-                      "(struct untouched). Apple is polling; it just saw "
-                      "nothing this time.", hub);
-        }
-        return;
+        return;   // Apple looked and found nothing; the call is counted above
     }
 
     g_rb_2hs_faults++;
@@ -7386,23 +7461,60 @@ static void hooked_getVMFaultInfo_2hs(void *vmm, uint32_t hub, void *info) {
     uint8_t  rw   = *reinterpret_cast<uint8_t  *>(p + 0x0c);
     uint32_t cid  = *reinterpret_cast<uint32_t *>(p + 0x10);
 
-    rbgpu_log("2hs: VM FAULT #%u hub=%u VA=0x%llx vmid=%u %s cid=%u status=0x%08x "
-              "(cid 4 = CPF, the command processor's fetcher)",
-              g_rb_2hs_faults, hub, va, vmid, rw ? "WRITE" : "READ", cid, st);
-
-    // Only the first few go to NVRAM. The faults recur all boot (2hp), so a
-    // commit per fault would be the 2fo wedge; the first ones are the ones
-    // that say where this starts.
-    if (g_rb_2hs_faults <= 4) {
-        size_t have = strlen(g_rb_2hs_note);
-        snprintf(g_rb_2hs_note + have, sizeof(g_rb_2hs_note) - have,
-                 "%s#%u h%u va=%llx v%u%s c%u s=%x",
-                 have ? " | " : "", g_rb_2hs_faults, hub, va, vmid,
-                 rw ? "W" : "R", cid, st);
-        rbgpu_nvram_note("rbgpu-fault", g_rb_2hs_note);
+    // Find or add the (hub, status) signature.
+    int slot = -1;
+    for (unsigned i = 0; i < RB_2HU_SIGS; i++) {
+        if (g_rb_2hu[i].used && g_rb_2hu[i].status == st && g_rb_2hu[i].hub == hub) {
+            slot = static_cast<int>(i);
+            break;
+        }
     }
-    rbgpu_diag_set_num("vmfaults_seen", g_rb_2hs_faults);
-    rbgpu_diag_set_num("vmfault_calls", g_rb_2hs_calls);
+    bool is_new = false, first_nonzero = false;
+    if (slot < 0) {
+        for (unsigned i = 0; i < RB_2HU_SIGS; i++) {
+            if (!g_rb_2hu[i].used) {
+                slot = static_cast<int>(i);
+                g_rb_2hu[i].used = 1;
+                g_rb_2hu[i].status = st;
+                g_rb_2hu[i].hub = hub;
+                g_rb_2hu[i].first_va = va;
+                g_rb_2hu[i].vmid = vmid;
+                g_rb_2hu[i].cid = cid;
+                g_rb_2hu[i].rw = rw;
+                is_new = true;
+                break;
+            }
+        }
+    }
+    if (slot < 0) {
+        g_rb_2hu_other++;     // table full: counted, never silently dropped
+        return;
+    }
+    g_rb_2hu[slot].count++;
+    if (va > g_rb_2hu[slot].max_va) {
+        first_nonzero = (g_rb_2hu[slot].max_va == 0 && va != 0);
+        g_rb_2hu[slot].max_va = va;
+    }
+
+    if (is_new) {
+        rbgpu_log("2hu: NEW fault signature hub=%u status=0x%08x VA=0x%llx "
+                  "vmid=%u %s cid=%u (cid 4 = CPF; status 0xffffffff on hub 1 "
+                  "is a dead-register read, not a fault - 2ht)",
+                  hub, st, va, vmid, rw ? "WRITE" : "READ", cid);
+    }
+    if (first_nonzero) {
+        rbgpu_log("2hu: signature 0x%08x hub %u produced its FIRST NONZERO VA "
+                  "0x%llx after %u faults - the zero was the address register "
+                  "being cleared, not a null target",
+                  st, hub, va, g_rb_2hu[slot].count);
+    }
+
+    // Commit only on a change that matters, and never more than
+    // RB_2HU_MAX_COMMITS times: the faults recur all boot and a write per
+    // fault is the 2fo wedge.
+    if ((is_new || first_nonzero) && g_rb_2hu_commits < RB_2HU_MAX_COMMITS) {
+        rbgpu_fault_note_2hu();
+    }
 }
 
 static void hooked_fillFaultAccelInfo_2hs(void *vmm) {
@@ -7416,7 +7528,6 @@ static void hooked_fillFaultAccelInfo_2hs(void *vmm) {
                   "unified log nor ioreg, which is why no armed boot has ever "
                   "shown one)", g_rb_2hs_fill);
     }
-    rbgpu_diag_set_num("vmfault_reports", g_rb_2hs_fill);
     if (orig_fillFaultAccelInfo_2hs) {
         orig_fillFaultAccelInfo_2hs(vmm);
     }
@@ -7436,12 +7547,12 @@ static void rbgpu_route_vmfault_2hs(KernelPatcher &patcher, size_t id,
     };
     if (patcher.routeMultiple(id, reqs, 2, address, size)) {
         rbgpu_log("2hs: hooked getVMFaultInfo + fillFaultAccelInfo (observe only)");
-        rbgpu_diag_set_num("vmfault_hooked", 1);
+        g_rb_2hs_hooked = 1;
     } else {
         rbgpu_log("2hs: FAILED to hook the VM fault path - rbgpu-fault will "
                   "stay empty this boot for that reason, NOT because there "
                   "were no faults");
-        rbgpu_diag_set_num("vmfault_hooked", 0);
+        g_rb_2hs_hooked = 0;
         patcher.clearError();
     }
 }
@@ -8395,6 +8506,11 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
+
+    // 2hu: commit the fault tally at a known time, whatever happened. A boot
+    // with no faults and a boot where the hooks never took must not look the
+    // same in NVRAM.
+    rbgpu_fault_flush_2hu();
 
     // The comparison the probe exists for, stated as a question because a
     // single sample decides nothing (2fs: no tables from n=1 rows).
