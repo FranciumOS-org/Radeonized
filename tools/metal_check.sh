@@ -75,7 +75,7 @@ bounded() {
   # depend on plugin_check.sh having been run separately (2gq).
   say "nvram notes"
   for v in rbgpu-arm rbgpu-boot rbgpu-diag rbgpu-diag-prev rbgpu-ea \
-           rbgpu-prog rbgpu-prog2 rbgpu-gate rbgpu-1b rbgpu-sdma; do
+           rbgpu-ring rbgpu-prog rbgpu-prog2 rbgpu-gate rbgpu-1b rbgpu-sdma; do
     printf '%s = ' "$v"
     nvram "$v" 2>/dev/null | sed 's/.*	//' || echo "(unset)"
   done

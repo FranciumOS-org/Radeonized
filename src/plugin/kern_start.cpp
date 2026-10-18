@@ -7948,3 +7948,148 @@ void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_
     rbgpu_log("com.apple.kext.AMDRadeonX6000HWServices matched and monitored");
 }
 
+
+// ---------------------------------------------------------------------------
+// 2hk (2026-10-18): the ring's own pointers, read while the wait is happening.
+//
+// 2hj left one question that decides the whole next direction. A kernel thread
+// named AMDRadeonX6000_AMDAccelEventMachine sits in resetHardwareAndReplay ->
+// waitForTimestamp -> pollWait, polling for a timestamp that never arrives;
+// WindowServer blocks on its mutex and the Metal submit blocks behind the same
+// restart, reaching it through waitForRingBufferSpace. So the GPU is handed
+// work and nothing retires. Three things could be true, and they send the work
+// in three different directions:
+//
+//   wptr advanced, rptr frozen   the GPU is not FETCHING. The ring is set up
+//                                and the doorbell rang, but the CP is not
+//                                consuming. 2di (gfx_min = gfx_max = 0) becomes
+//                                a real lead rather than a guess.
+//   both advanced, no timestamp  the GPU EXECUTED and the completion path is
+//                                broken - fence address, writeback, or
+//                                interrupts. 2di is eliminated.
+//   wptr never advanced          the driver never rang the doorbell at all. The
+//                                bug is upstream of the hardware entirely.
+//
+// Nothing in this project has read those pointers. Until one of the three is
+// picked by a measurement, any work on 2di is a guess with a name on it.
+//
+// How this is done, and why it is not -rbgpuregdump (which is permanently OUT,
+// 2fe: the GC register dump stalled non-deterministically):
+//
+//   - SIX registers at ONE point, a fixed list, no sweep and no loop.
+//   - Through the accessor this project already uses and has measured working:
+//     vtable[0x148] resolves an encoded id to a dword offset, vtable[0x118]
+//     reads it (2fd, 2fg; resolved twice in 2fi). Offsets agree TWO ways -
+//     Linux's gc_10_3_0_offset.h and Apple's own disassembly at 0xbea143b,
+//     where doStart reads exactly CP_RB0_RPTR, CP_RB0_WPTR_HI and CP_RB0_WPTR
+//     through the same slots.
+//   - Behind its own boot-arg, off by default.
+//   - On its own thread_call, armed AFTER all three prog2 samples have fired,
+//     so if a read does stall (2fe's failure) it cannot cost us those.
+//   - An ENTER note is committed to NVRAM BEFORE the first read. A stall and a
+//     zero must not look alike (2eh, 2ek, 2fb): if `rbgpu-ring` reads
+//     "ENTER..." and nothing else, the read is what stalled, and that is
+//     itself the answer about this accessor.
+//   - Every refusal path says which check failed. No silent return.
+//
+// This reads only. It writes no register, rings no doorbell and touches no
+// queue - unlike 2fi's waitForActiveValue reproduction, which had to write a
+// selector. Read-only is what keeps it clear of the 2cy rule: nothing here is
+// substituted, so nothing here can be narrated as a hardware result that is
+// not one.
+#define RB_2HK_CP_RB0_RPTR    0x0F600000000Bull
+#define RB_2HK_CP_RB0_WPTR    0x1DF40000000Bull
+#define RB_2HK_CP_RB0_WPTR_HI 0x1DF50000000Bull
+#define RB_2HK_CP_STAT        0x0F400000000Bull
+#define RB_2HK_GRBM_STATUS    0x0DA40000000Bull
+
+static int g_rb_2hk_on = -1;
+
+void rbgpu_ring_probe_2hk(unsigned phase) {
+    if (g_rb_2hk_on < 0) {
+        g_rb_2hk_on = checkKernelArgument("-rbgpuringprobe") ? 1 : 0;
+        rbgpu_log("2hk: ring probe %s", g_rb_2hk_on ? "ON" : "OFF (-rbgpuringprobe)");
+    }
+    if (!g_rb_2hk_on) {
+        return;
+    }
+
+    // Every refusal below is distinct and lands in NVRAM, because "the probe
+    // read nothing" and "the probe never ran" have looked identical three
+    // times in this project.
+    void *obj = g_rb_2fb_regobj;
+    if (!obj) {
+        rbgpu_nvram_note("rbgpu-ring", "SKIP: no accessor stashed at doStart");
+        rbgpu_log("2hk: SKIPPED - g_rb_2fb_regobj is NULL, nothing was read");
+        return;
+    }
+    void **vt = *reinterpret_cast<void ***>(obj);
+    if (!vt) {
+        rbgpu_nvram_note("rbgpu-ring", "SKIP: accessor vtable NULL");
+        rbgpu_log("2hk: SKIPPED - accessor vtable NULL, nothing was read");
+        return;
+    }
+    auto resolve = reinterpret_cast<uint32_t (*)(void *, uint64_t)>(
+        vt[0x148 / sizeof(void *)]);
+    auto rd = reinterpret_cast<uint32_t (*)(void *, uint32_t)>(
+        vt[0x118 / sizeof(void *)]);
+    if (!resolve || !rd) {
+        rbgpu_nvram_note("rbgpu-ring", "SKIP: vtable[0x148] or [0x118] NULL");
+        rbgpu_log("2hk: SKIPPED - resolve=%p read=%p, nothing was read",
+                  reinterpret_cast<void *>(resolve), reinterpret_cast<void *>(rd));
+        return;
+    }
+
+    // Committed BEFORE the first read. If this is all that survives, the read
+    // stalled - which is a result, not an absence.
+    char enter[64];
+    snprintf(enter, sizeof(enter), "ENTER p=%u (reading; a lone ENTER = STALL)", phase);
+    rbgpu_nvram_note("rbgpu-ring", enter);
+    rbgpu_log("2hk: ENTER phase=%u - about to resolve and read six registers. "
+              "If rbgpu-ring still reads ENTER after this boot, the accessor "
+              "stalled and THAT is the finding (2fe's failure, reproduced).",
+              phase);
+
+    struct { const char *name; uint64_t id; } regs[] = {
+        { "cntl",    RB_2FB_CP_RB0_CNTL    },
+        { "rptr",    RB_2HK_CP_RB0_RPTR    },
+        { "wptr",    RB_2HK_CP_RB0_WPTR    },
+        { "wptr_hi", RB_2HK_CP_RB0_WPTR_HI },
+        { "cp_stat", RB_2HK_CP_STAT        },
+        { "grbm",    RB_2HK_GRBM_STATUS    },
+    };
+
+    char out[256];
+    size_t n = 0;
+    // snprintf returns int and can be negative; adding it to a size_t would
+    // wrap and then write past the buffer. Clamp every append.
+    int w = snprintf(out, sizeof(out), "p=%u", phase);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        uint32_t off = resolve(obj, regs[i].id);
+        uint32_t val = rd(obj, off);
+        rbgpu_log("2hk: %s dword 0x%x = 0x%08x", regs[i].name, off, val);
+        if (n >= sizeof(out) - 24) {
+            break;
+        }
+        w = snprintf(out + n, sizeof(out) - n, " %s=%08x", regs[i].name, val);
+        if (w > 0) {
+            n += static_cast<size_t>(w);
+            if (n >= sizeof(out)) {
+                n = sizeof(out) - 1;
+            }
+        }
+    }
+    rbgpu_nvram_note("rbgpu-ring", out);
+    rbgpu_log("2hk: %s", out);
+
+    // The one comparison the whole probe exists for, stated in the log so a
+    // reader does not have to do it by hand - and stated as a QUESTION, since
+    // a single sample cannot tell a frozen pointer from a ring that is simply
+    // idle because nothing was submitted this second.
+    rbgpu_log("2hk: compare rptr against wptr ACROSS the two phases. rptr frozen "
+              "while wptr moved = the CP is not fetching. Both moved = the GPU "
+              "ran and the completion path is what is broken. wptr never moved "
+              "= nothing was ever submitted to this ring. One sample decides "
+              "NOTHING; the pair does.");
+}

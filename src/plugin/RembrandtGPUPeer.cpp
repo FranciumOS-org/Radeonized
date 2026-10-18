@@ -1059,6 +1059,15 @@ void rbgpu_heartbeat_start(void) {
 // never fired - at a 60 s gap and at a 20 s gap alike. Nothing re-arms itself
 // here, so that whole class of failure is gone.
 static thread_call_t     g_rbgpuProgCalls[3] = { nullptr, nullptr, nullptr };
+// 2hk: two more, for the ring probe. Separate calls, armed AFTER all three
+// prog2 samples are due, so that if a GC register read stalls the way 2fe's
+// dump did, it takes only itself down and not the progress samples.
+static thread_call_t     g_rbgpuRingCalls[2] = { nullptr, nullptr };
+extern void rbgpu_ring_probe_2hk(unsigned phase);
+
+static void rbgpu_ring_action(thread_call_param_t p0, thread_call_param_t) {
+    rbgpu_ring_probe_2hk(static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0)));
+}
 static volatile bool     g_rbgpuProgOn   = false;
 static IOSimpleLock     *g_rbgpuProgLock = nullptr;
 static char              g_rbgpuProgText[384];   // 2gp: three samples now carry the event-machine counters
@@ -1136,6 +1145,32 @@ void rbgpu_progwatch_start(void) {
     rbgpu_log("2fy: progress watch armed, %u of 3 timers (+15 s, +35 s, +65 s "
               "-> rbgpu-prog2); a missing sample now means the timer did not "
               "fire, not that the handler failed to re-arm", armed);
+
+    // 2hk: the ring probe, at +100 s and +160 s. Two samples, because one
+    // decides nothing: a frozen rptr is only meaningful against a wptr that
+    // moved, and both are only meaningful across time. By +100 s the 2hj hang
+    // is long underway (WindowServer wedges at login), and +160 s leaves room
+    // to start a Metal dispatch over SSH between the two.
+    //
+    // The probe itself is off unless -rbgpuringprobe; these timers are armed
+    // either way so that a boot WITHOUT the arg still logs "ring probe OFF"
+    // and cannot be mistaken for a timer that failed to fire.
+    static const uint32_t kRingMs[2] = { 100000, 160000 };
+    unsigned rarmed = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        g_rbgpuRingCalls[i] = thread_call_allocate(
+            rbgpu_ring_action, reinterpret_cast<thread_call_param_t>(
+                                   static_cast<uintptr_t>(i)));
+        if (!g_rbgpuRingCalls[i]) {
+            continue;
+        }
+        uint64_t rd = 0;
+        clock_interval_to_deadline(kRingMs[i], kMillisecondScale, &rd);
+        thread_call_enter_delayed(g_rbgpuRingCalls[i], rd);
+        rarmed++;
+    }
+    rbgpu_log("2hk: ring probe armed, %u of 2 timers (+100 s, +160 s -> "
+              "rbgpu-ring)", rarmed);
 }
 
 // 2gd (2026-10-15): every note carries a per-boot sequence number.
