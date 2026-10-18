@@ -51,8 +51,44 @@ if [ ! -x build/out/metal_probe ]; then
 else
   # metal_probe fflushes before each step that can hang, so a wedge still
   # leaves everything up to that point in the file (macOS has no stdbuf).
-  ./build/out/metal_probe "$@" > "$out/metal.txt" 2>&1
-  echo "metal_probe exit=$?" >> "$out/metal.txt"
+  #
+  # 2he: the 2hd hang is process-local - SSH and the rest of the machine
+  # stay responsive while newCommandQueue never returns. So the blocked
+  # thread can be SAMPLED, and its stack names what it is waiting on
+  # instead of leaving us to guess. Run the probe in the background, give
+  # it a bounded wait, and sample it if it is still alive.
+  ./build/out/metal_probe "$@" > "$out/metal.txt" 2>&1 &
+  probe=$!
+  waited=0
+  while [ "$waited" -lt 25 ]; do
+    kill -0 "$probe" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if kill -0 "$probe" 2>/dev/null; then
+    echo "metal_probe STILL RUNNING after ${waited}s - sampling it" >> "$out/metal.txt"
+    sync
+    say "probe is hung - sampling pid $probe"
+    # Userspace stacks: shows the frames down to the trap, which names the
+    # call the thread is blocked in.
+    sample "$probe" 3 -file "$out/sample.txt" >/dev/null 2>&1
+    sync
+    say "sample saved"
+    # Kernel stacks need root; skipped rather than silently producing
+    # nothing (absence is not a result).
+    if [ "$(id -u)" = "0" ]; then
+      spindump "$probe" 3 -file "$out/spindump.txt" >/dev/null 2>&1
+      say "spindump saved"
+    else
+      echo "spindump needs root; rerun with sudo for kernel stacks" > "$out/spindump.txt"
+    fi
+    sync
+    echo "--- hung; left running. kill it with: kill $probe" >> "$out/metal.txt"
+  else
+    wait "$probe"
+    echo "metal_probe exit=$?" >> "$out/metal.txt"
+  fi
 fi
 sync
 say "metal saved"

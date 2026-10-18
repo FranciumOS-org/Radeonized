@@ -9200,3 +9200,55 @@ one combined probe, the result would have been "it hung somewhere".
 waiting on; who calls `incrementStamp(25)`; why the stamp table grew
 63 → 65; the `/options` race; why armed boots have no display; what 0x12
 and 0x1D are for.
+
+## 2he — the hang is process-local, so it can be sampled
+
+Asked rather than inferred, because 2gw and 2hb were both cases of
+inferring exactly this kind of thing from reboot bookkeeping. The user:
+
+> Only that command hung; SSH still worked and I could run other things.
+
+So 2hd's open question is settled: **the whole machine does not wedge.**
+`newCommandQueue` blocks one client thread in the kernel while the rest of
+the system stays responsive.
+
+That is a better position than 2hd assumed, in three ways:
+
+- **The GPU is not hard-hung.** A wedged GPU would take the KIQ and the
+  rest of the stack with it; nothing else was disturbed.
+- **No power cycle is needed to study it.** The boot survives, so a hung
+  probe can be left in place and examined while it hangs.
+- **The blocked thread has a stack, and the stack names the call.** A
+  thread sitting in the kernel still shows its userspace frames down to
+  the trap, which identifies the exact selector into the accelerator
+  rather than leaving "somewhere in newCommandQueue".
+
+### What changed in the instrument
+
+`metal_check.sh --dispatch` now runs the probe in the background with a
+bounded 25 s wait, and if it is still alive:
+
+- `sample <pid> 3` into `sample.txt` — userspace stacks, no root needed.
+- `spindump <pid> 3` into `spindump.txt` for kernel stacks **when run as
+  root**; when not root it writes a line saying so rather than leaving an
+  empty file, because an empty file and "spindump found nothing" must not
+  look alike.
+- Leaves the probe running and prints the pid, so the state is still there
+  to poke at.
+
+Everything is still `sync`ed step by step, since the earlier reason for
+that (a boot that may not survive) has not changed, only become less
+likely.
+
+### Next, in order
+
+1. An armed boot, `sudo ./tools/metal_check.sh --dispatch`, for the
+   userspace **and** kernel stacks of the blocked thread. Zero kext
+   changes; the stack should name the IOConnect selector and the kernel
+   function it waits in.
+2. Only then instrument the kext, with the stack saying where — rather
+   than hooking `AMDAccelCommandQueue::initSubmitChannels` on the strength
+   of 2hd's GFX-ring hypothesis, which remains a hypothesis.
+
+Doing (1) first is the point: it is free, it is non-invasive, and it tells
+us where to put the hook that (2) would otherwise have to guess.
