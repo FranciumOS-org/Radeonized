@@ -8450,6 +8450,144 @@ static char g_rb_2hm_ring[352];
 static int g_rb_2hw_on   = -1;
 static int g_rb_2hw_done = 0;
 
+// 2hy (2026-10-18): the fence buffer the RELEASE_MEM packets point at.
+//
+// 2hx refuted the timestamp-target hypothesis: the address is
+// 0xFF_BFDC_0000, not zero, and the CP fetched past all three fence packets
+// (seq 3, 4, 5) while the driver waited forever. Two things can still be
+// true, and one page separates them:
+//
+//   the page holds 5         the writes LANDED. waitForTimestamp is polling
+//                            somewhere else, and this is a driver-side bug,
+//                            not a GPU one.
+//   the page holds 0 / junk  the writes FAULTED, and the CPF write fault
+//   or PTE[idx] invalid      under VMID 0 is really at this address, with
+//                            the register cleared before anyone read it.
+//
+// The address is NOT hardcoded. It comes from dw3/dw4 of a RELEASE_MEM
+// packet decoded out of the ring in the same pass, so if Apple ever aims the
+// fence somewhere else this follows it instead of reading a stale constant.
+//
+// **There is no strong sanity gate here, and that is stated rather than
+// papered over.** 2hw could demand 799 PM4 headers because a ring is full of
+// them; a fence buffer is a handful of counters and mostly zero, which is
+// exactly what a wrong mapping also looks like. So this reports the PTE, the
+// physical address and the raw dwords and leaves the verdict to be argued
+// from them. The only corroboration available is indirect: this page comes
+// from the same flat table as the ring page, whose mapping 2hx verified, so
+// both physical addresses are printed for comparison. A reading built on
+// this page alone, without the PTE agreeing, is not a finding (2cy).
+static uint64_t g_rb_2hy_fence_va = 0;
+static uint64_t g_rb_2hy_seq      = 0;
+
+static void rbgpu_fencedump_2hy(uint64_t ring_pa) {
+    if (g_rb_2hy_fence_va == 0) {
+        rbgpu_nvram_note("rbgpu-fence", "SKIP: no RELEASE_MEM address found in the ring");
+        rbgpu_log("2hy: SKIPPED - no fence address was decoded, so nothing was "
+                  "read. This says nothing about the fence buffer.");
+        return;
+    }
+    uint64_t fva = g_rb_2hy_fence_va;
+    uint64_t start_va = g_rb_2eb_start_pg << 12;
+    if (fva < start_va) {
+        char b[112];
+        snprintf(b, sizeof(b), "SKIP: fence va %llx below aperture %llx", fva, start_va);
+        rbgpu_nvram_note("rbgpu-fence", b);
+        rbgpu_log("2hy: SKIPPED - %s", b);
+        return;
+    }
+    uint64_t idx = (fva - start_va) >> 12;
+    if ((idx + 1) * 8 > g_rb_gart_limit) {
+        rbgpu_nvram_note("rbgpu-fence", "SKIP: fence PTE index past the table");
+        rbgpu_log("2hy: SKIPPED - PTE[%llu] is past the %llu-byte table",
+                  idx, g_rb_gart_limit);
+        return;
+    }
+
+    uint64_t e  = reinterpret_cast<volatile uint64_t *>(g_rb_gart_va)[idx];
+    uint64_t pa = e & 0x0000FFFFFFFFF000ULL;
+    uint32_t valid = (e & 1) ? 1 : 0;
+    uint32_t sys   = (e >> 1) & 1;
+
+    rbgpu_log("2hy: fence VA 0x%llx -> PTE[%llu] = 0x%llx valid=%u sys=%u "
+              "phys=0x%llx (the RING's page was phys 0x%llx from the same "
+              "table - compare them)",
+              fva, idx, e, valid, sys, pa, ring_pa);
+
+    // An invalid PTE is the whole answer and needs no mapping.
+    if (!valid || pa == 0) {
+        char b[160];
+        snprintf(b, sizeof(b), "fv=%llx idx=%llx pte=%llx INVALID - the fence page "
+                               "is UNMAPPED, so the timestamp write could not land",
+                 fva, idx, e);
+        rbgpu_nvram_note("rbgpu-fence", b);
+        rbgpu_log("2hy: PTE[%llu] = 0x%llx is NOT VALID. The page the CP was told "
+                  "to write its timestamp to is unmapped, which is a complete "
+                  "explanation of the hang and matches the CPF WRITE fault of "
+                  "2ht #3 - and means that fault's real address is 0x%llx.",
+                  idx, e, fva);
+        return;
+    }
+
+    IOMemoryDescriptor *md =
+        IOMemoryDescriptor::withPhysicalAddress(static_cast<IOPhysicalAddress>(pa),
+                                                4096, kIODirectionIn);
+    if (!md) {
+        rbgpu_nvram_note("rbgpu-fence", "SKIP: withPhysicalAddress NULL");
+        rbgpu_log("2hy: SKIPPED - could not describe phys 0x%llx", pa);
+        return;
+    }
+    IOMemoryMap *mp = md->map(kIOMapAnywhere | kIOMapInhibitCache);
+    if (!mp) {
+        md->release();
+        rbgpu_nvram_note("rbgpu-fence", "SKIP: map() NULL");
+        rbgpu_log("2hy: SKIPPED - could not map phys 0x%llx", pa);
+        return;
+    }
+    auto dw = reinterpret_cast<volatile uint32_t *>(mp->getVirtualAddress());
+
+    // The fence lives at the START of the page only if the VA is page
+    // aligned; it may be anywhere within it. Report the offset so the dump
+    // can be read correctly either way.
+    uint32_t off_dw = static_cast<uint32_t>((fva & 0xFFF) >> 2);
+
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note),
+                     "fv=%llx idx=%llx pte=%llx v=%u s=%u pa=%llx rpa=%llx seq=%llu o=%u d:",
+                     fva, idx, e, valid, sys, pa, ring_pa, g_rb_2hy_seq, off_dw);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+
+    int found = 0, anynz = 0;
+    for (unsigned i = 0; i < 12; i++) {
+        uint32_t v = dw[off_dw + i];
+        if (v) anynz = 1;
+        if (g_rb_2hy_seq != 0 && v == static_cast<uint32_t>(g_rb_2hy_seq)) found = 1;
+        if (n < sizeof(note) - 12) {
+            w = snprintf(note + n, sizeof(note) - n, " %x", v);
+            if (w > 0) {
+                n += static_cast<size_t>(w);
+                if (n >= sizeof(note)) n = sizeof(note) - 1;
+            }
+        }
+    }
+    if (n < sizeof(note) - 10) {
+        snprintf(note + n, sizeof(note) - n, " f=%d nz=%d", found, anynz);
+    }
+    rbgpu_nvram_note("rbgpu-fence", note);
+    rbgpu_log("2hy: %s", note);
+    rbgpu_log("2hy: a dword equal to seq %llu means the GPU's timestamp write "
+              "LANDED and waitForTimestamp is reading the wrong place - a "
+              "driver-side bug. All zero, with the PTE valid, means the write "
+              "never arrived. Neither reading is safe unless the PTE above "
+              "agrees, because this page has no PM4-style signature to check "
+              "the mapping against (2hw had 799 headers; this has none).",
+              g_rb_2hy_seq);
+
+    mp->release();
+    md->release();
+}
+
 static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     if (g_rb_2hw_on < 0) {
         g_rb_2hw_on = checkKernelArgument("-rbgpuringdump") ? 1 : 0;
@@ -8566,6 +8704,10 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
                   "ADDR=0x%llx seq=0x%llx ctx=%08x %s",
                   i, h, dw[i + 1], dw[i + 2], addr, seq, dw[i + 7],
                   addr ? "" : "<<<< THE TIMESTAMP TARGET IS ZERO");
+        if (addr != 0) {
+            g_rb_2hy_fence_va = addr;      // derived, never hardcoded
+            if (seq > g_rb_2hy_seq) g_rb_2hy_seq = seq;
+        }
         if (found <= 3 && n < sizeof(note) - 48) {
             w = snprintf(note + n, sizeof(note) - n, " | rm@%x a=%llx s=%llx",
                          i, addr, seq);
@@ -8593,6 +8735,11 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
 
     mp->release();
     md->release();
+
+    // 2hy: now the fence buffer those packets point at. After the ring page
+    // is unmapped and rbgpu-pm4 is committed, so a failure here cannot cost
+    // the result that is already in hand.
+    rbgpu_fencedump_2hy(pa);
 }
 
 void rbgpu_ring_probe_2hk(unsigned phase) {
