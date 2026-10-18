@@ -11388,3 +11388,52 @@ the value lives (`ctx+0xb8`, matched against Apple's own allocator), that
 the register takes it, and that the correction is the carve-out high bits
 as well as bit 0.
 
+
+## 2ih (2026-10-18) — the same write, at the only moment it can matter
+
+2ig established everything this needs: where the value lives (`ctx+0xb8`,
+matched against Apple's own allocator rather than assumed), that the
+register accepts both the VALID bit and the carve-out high dword, and that
+the defect is **truncation** - `0xF4_FB01_5000` held as `0x0_FB01_5000` -
+which is 2em's bug on contexts 1..15.
+
+2ih writes the correction immediately after `assignVMID` binds a context,
+before any work is submitted under that VMID. Per bind:
+
+```
+GCVM_CONTEXT<vmid>_PAGE_TABLE_BASE_ADDR_LO32 = (root & 0xFFFFFFFF) | 1
+GCVM_CONTEXT<vmid>_PAGE_TABLE_BASE_ADDR_HI32 = root >> 32
+dword = 0x1667 + 2*vmid raw  ->  0x28C7 + 2*vmid through socRegOffset
+```
+
+**VMID 0 is never touched.** 2em already owns context 0 and it reads
+`0x7_8FDF_A001`, correct and valid. Only contexts 1..15, and only ones
+whose `ctx+0xb8` equals a level-0 root `allocVMBlock` actually handed out.
+`0xb8` is a candidate *offset*; the match is what turns it into a value, so
+a context laid out differently is refused and counted, never misread.
+
+Gated on `-rbgpuptfix`, deliberately a different arg from 2ig's
+`-rbgpuptwrite` so the two experiments can never be confused in a capture.
+Without the arg the hook identifies, counts and records every value and
+writes nothing.
+
+Risk, stated plainly: this writes a live GPU register during normal
+operation on every bind, where 2ig wrote twice at a moment already known to
+be dead. A wrong value could fault differently rather than less. The strict
+match bounds that - the only values written are addresses Apple's own
+allocator produced for that very context - and every write's before, after
+and read-back is recorded so a worse outcome is legible rather than
+mysterious.
+
+| `rbgpu-ptfix` reading | means |
+|---|---|
+| `wrote>0 badback=0` and the VMID-3 fault gone at +12 s | the truncation was the cause and the correction is the fix |
+| `wrote>0` and the fault unchanged | the base is right and something else also breaks the walk |
+| `wrote>0 badback>0` | a register refused the value, which 2ig's single write did not see |
+| `wrote=0 nomatch=binds` | `ctx+0xb8` is not the root in general; 2ig matched once and that offset does not generalise. Nothing written. |
+| `noobj>0` | the accessor was not available at bind time; the write could not be attempted and the silence is that |
+
+The decisive reading is the **+12 s** sample, which in every one of eleven
+boots has already shown `vmf=3009bb`, VMID 3, CPF, `WALKER_ERROR`. If that
+sample comes back clean, the eleven-boot signature is broken.
+
