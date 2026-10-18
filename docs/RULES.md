@@ -190,15 +190,22 @@ anything, and log it when it is not.
 -rbgpuforce1b                                sends request 0x1B
 ```
 
-`-rbgpuforceenable` is **proven and dangerous** (2hh). It calls
-`IOGraphicsAccelerator2::enableAccelerator()` under `accel->0x88` after
-0x1B returns; `accel+0xc78` goes `0 -> 2` and **the machine gets a
-display**: lock screen drawn, password accepted — the first panel in an
-armed boot since ~2c. Then WindowServer hangs on a surface sync and the
-userspace watchdog **panics the box in under three minutes**, with no
-usable SSH window. Supervised experiment only; do NOT leave it armed
-unattended. Add with `sudo tools/efi.sh bootarg add -rbgpuforceenable`,
-and remove it again before any boot you need to stay up.
+`-rbgpuforceenable` + `wdt=-1` are the current experiment pair, both IN
+and both proven (2hh, 2hj).
+
+`-rbgpuforceenable` calls `IOGraphicsAccelerator2::enableAccelerator()`
+under `accel->0x88` after 0x1B returns; `accel+0xc78` goes `0 -> 2` and
+**the machine gets an accelerated display**: lock screen drawn, password
+accepted, and WindowServer compositing through Metal on
+`AMDRadeonX6000MTLDriver` (2hj proves the last part from the stack, not
+from the screen). The boot then freezes on the 2hj hang.
+
+`wdt=-1` disables Apple's userspace watchdog — read, not assumed:
+`IOWatchdog::start` tests bit 0 of `wdt`, logs "watchdog disabled by
+boot-arg" and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
+Without it the frozen boot **panics at 120 s** with no usable SSH window
+(2hh); with it the box freezes and stays reachable, which is what made
+2hj measurable at all. **Never arm `-rbgpuforceenable` without `wdt=-1`.**
 
 `-rbgpuvmpteng1` is now IN and proven (2gw): it sends the engine-2
 `getHWChannel` requests to engine 1, the one SDMA instance this chip has.
@@ -222,11 +229,11 @@ It is what broke the GPU-restart loop.
   reinstall. A bounded retry is owed. [2gy]
 
 - `gfx_min = gfx_max = 0` since **2di** (2026-10-12): the SMU reports no GFX
-  clock range, GFX DPM never started. Still unexplained, but **2hh makes it
-  a suspect**: the first client submission to the PM4/GFX ring produced a
-  stamp that never retires (`QueryQueueStatus`, `verifyThreadsActive` on
-  `AMDGFX10PM4Engine`). A GFX ring with no clock range is what that would
-  look like. Hypothesis only — nothing is built on it yet.
+  clock range, GFX DPM never started. Still unexplained, and still the
+  **leading suspect** for the 2hh/2hj frontier — but **unmeasured**, and
+  nothing is built on it. The next step is to read the client ring's
+  rptr/wptr and the GFX clock at the moment of the wait, not to assume the
+  clock is the reason.
 - The 2am/2an/2ao blanket firmware-ready bypasses still owe the explanation
   2cy demanded.
 - 2ct refuses the display pipe **by design**. 2hf traced the Metal hang to
@@ -295,14 +302,29 @@ machine froze and the userspace watchdog panicked it at 120 s.** So a
 black armed boot is still the norm without that boot-arg, and is still
 never to be called new, intermittent or a warning sign.
 
-The frontier is now **a client stamp on the PM4/GFX ring that never
-retires** (2hh). WindowServer's `IOSurface::synchronize_device_caches`
-calls `IOSurfaceDeviceCache::wait()`, which lands in
-`AMDAccelEventMachine::waitForStamp` -> `waitForTimestamp` ->
-`IAMDHWInterface::pollWait`; it times out, `restart_channel` /
-`resetHardwareAndReplay` run, nothing recovers, and the other seventeen
-WindowServer threads queue behind `surface+0x210` until the watchdog
-fires. Stacks and reports: `logs/20261018-004318-WSHANG-ARMED-2hg/`.
-This is the restart loop of 2gq again, on the GFX ring this time —
+**Metal dispatches for real** (2hj, with `wdt=-1` so the boot survives).
+`newCommandQueue` **succeeds** — the 2hd frontier and the 2hf cause are
+both gone. The probe creates a queue, compiles a shader at runtime,
+encodes 4096 threads and commits; it then hangs in `waitUntilCompleted`.
+And WindowServer composites through Metal on `AMDRadeonX6000MTLDriver`
+(`CaptureSurfaceMetal::Populate` -> `GFXAAMD_MtlDevice
+newTextureWithDescriptor:iosurface:`), which is what the user saw as a
+grey translucent password field instead of a black one.
+
+**The frontier is one stuck kernel thread** (2hj). A thread named
+`AMDRadeonX6000_AMDAccelEventMachine` sits in
+`hardwareErrorEvent` -> `restart_channel` -> `IOAccelFIFOChannel2::restart`
+-> `AMDAccelChannel::resetHardwareAndReplay` -> `waitForTimestamp` ->
+`IAMDHWInterface::pollWait`, polling for a timestamp that never arrives.
+WindowServer blocks on the mutex it holds (the spindump names the
+turnstile); the Metal submit blocks behind the same restart, reached via
+`waitForRingBufferSpace` — the ring is full. **Three hangs across two
+boots, one cause: the GPU retires no timestamps on the client channel,
+and the restart path cannot recover because it waits on the same
+timestamp.** It is the restart loop of 2gq again, on the client ring —
 untouched by `-rbgpusdmaone` and `-rbgpuvmpteng1`, both of which act on
-SDMA.
+SDMA. Stacks: `logs/20261018-010521-metal/` (2hj, live) and
+`logs/20261018-004318-WSHANG-ARMED-2hg/` (2hh, from the panic).
+
+The reproducer is now a 4096-thread compute kernel with no compositor,
+no surface and no display in the path.

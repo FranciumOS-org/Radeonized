@@ -9618,3 +9618,160 @@ The clean way to use it again is to pair it with something that makes
 the boot survive the watchdog — or to accept the panic and read the
 spin reports, which is what produced this milestone and cost nothing
 but a reboot.
+
+## 2hj — one stuck thread: the compositor was accelerated, and the GPU retires nothing
+
+Boot of 2026-10-18 ~01:03, armed, build `23B6A724`, boot-args
+`-rbgpuforceenable wdt=-1`. `state.txt` records `rbgpu-diag` = `d=73
+armed=1` **live** and `rbgpu-boot = 25`, so this capture is the armed
+boot's by the 2gw rule. Captured under `sudo` from SSH:
+`logs/20261018-010521-metal/`.
+
+`wdt=-1` did what reading `IOWatchdog::start` said it would: bit 0 of the
+`wdt` boot-arg takes the "watchdog disabled by boot-arg" path and zeroes
+the monitoring config at `+0x89/+0xa8/+0xac`. **No panic.** The machine
+froze and stayed up, SSH stayed usable, and for the first time the
+frontier could be measured live instead of reconstructed from a crash
+report.
+
+### The gate is open — confirmed, not assumed
+
+2hf found WindowServer's `IOAccelSharedUserClient2::new_resource` asleep
+at **+0x1fd** in `acceleratorWaitEnabled` -> `waiting_for_fEnabled`. In
+this boot the same function is at **+0x1cc**, and the spindump annotates
+it `blocked by turnstile waiting for kernel_task [0] thread 0x9a7` — an
+ordinary mutex with a named holder, not the `fEnabled` sleep. `rbgpu-ea`
+reads `b=25 ea:00000000->00000002`.
+
+So 2hh's reading holds on a second boot and from a different angle: the
+bit is set, the gate is open, and what blocks now blocks for a different
+reason.
+
+### The compositor was running on the GPU
+
+The user reported the lock screen's password field rendering **grey and
+translucent** rather than the flat black of an unarmed boot. The
+WindowServer spindump says why, in its own frames:
+
+```
+_XHWCaptureDesktop
+WS::Capture::create_iosurface_for_window_list
+CaptureSurfaceMetal::Populate
+MetalBacking::CreateCompositeDestination
+MetalIOSurfaceBacking::PrepareForUse
+-[GFXAAMD_MtlDevice newTextureWithDescriptor:iosurface:plane:]   <- AMDRadeonX6000MTLDriver
+-[GFXAAMD_MtlTexture initIOSurfaceWithDevice:...]
+-[MTLIOAccelTexture initWithDevice:...]
+IOAccelResourceCreate
+```
+
+**WindowServer is compositing through Metal on `AMDRadeonX6000MTLDriver`
+— this GPU's own driver.** That is the measurement; the translucency is
+what that looks like on screen. Stated separately on purpose: the stack
+is the evidence, the colour is the user's observation of its effect, and
+neither is being used to prove the other.
+
+### Metal reached the actual dispatch
+
+`metal.txt`, in order, every line written before the step it names:
+
+```
+MTLCopyAllDevices: 1 device(s)
+device: AMD Radeon HD GFX10 Family Unknown Prototype
+  dispatch: creating queue        <- returned
+  dispatch: compiling shader      <- returned
+  dispatch: encoding 4096 threads <- returned
+  dispatch: committing - IF THE GPU HANGS, IT HANGS HERE
+metal_probe STILL RUNNING after 25s
+```
+
+**`newCommandQueue` succeeds.** The 2hd frontier and the 2hf cause are
+both gone. The probe's main thread sits in
+`-[_MTLCommandBuffer waitUntilCompleted]`, and the work was genuinely
+submitted — its `com.Metal.CommandQueueDispatch` thread is down in the
+kernel:
+
+```
+IOAccelCommandQueue::s_submit_command_buffers          +0xfc
+IOAccelCommandQueue::submit_command_buffers            +0x314
+IOAccelCommandQueue::submit_command_buffer             +0x102
+IOAccelCommandQueue::process_command_buffer            +0x402
+AMDAccelCommandQueue::processCommandBuffer             +0x62
+IOAccelCommandQueue::processCommandBuffer              +0x565
+IOAccelCommandQueue::processAndSubmitCoalescedSegments +0x6a
+AMDAccelCommandQueue::endCoalescedSegment              +0xe
+AMDAccelCommandQueue::submitCommands                   +0x93
+AMDAccelChannel::submitCommands                        +0x1d
+IOAccelFIFOChannel2::submitCommands                    +0x8f
+AMDAccelChannel::waitForRingBufferSpace                +0x163   <- the ring is FULL
+AMDUserQueue::prepareQueue                             +0x9f
+AMDAccelEventMachine::finishEvent                      +0x56
+IOAccelEventMachineFast2::finishEvent                  +0xee
+IOAccelEventMachine2::handleFinishChannelRestart       +0xf7
+IOAccelEventMachine2::restart_channel                  +0xeb
+IOAccelFIFOChannel2::restart                           +0x322
+AMDAccelChannel::resetHardwareAndReplay                +0x212
+AMDAccelChannel::waitForTimestamp                      +0x121
+IAMDHWInterface::pollWait                              +0x71
+thread_block                                            (291/301 samples)
+```
+
+The remaining 4 samples catch it in the poll itself —
+`waitForTimestamp +0x151` -> `AMDSWScheduler::checkTimestamps` ->
+`AMDHWChannel::checkForTimestampUpdate` -> `AMDSWScheduler::timestampUpdated`
+— so this is a live poll for a timestamp, not a dead sleep. The GPU is
+being asked, repeatedly, and never answers.
+
+### One cause, three victims
+
+The turnstile named the holder, and it is a dedicated kernel thread:
+
+```
+Thread 0x9a7  "AMDRadeonX6000_AMDAccelEventMachine"  priority 81
+  IOAccelEventMachine2::hardwareErrorEvent  +0x1b4
+  IOAccelEventMachine2::restart_channel     +0xeb
+  IOAccelFIFOChannel2::restart              +0x322
+  AMDAccelChannel::resetHardwareAndReplay   +0x212
+  AMDAccelChannel::waitForTimestamp         +0x121
+  IAMDHWInterface::pollWait                 +0x71
+  thread_block                               (286/300 samples)
+```
+
+The same five frames as the Metal submit thread, and the same five frames
+as 2hh's WindowServer surface-sync holder. So:
+
+- the **event-machine thread** is stuck in `resetHardwareAndReplay`
+  waiting for a timestamp,
+- **WindowServer** is stuck on the lock that thread holds,
+- the **Metal probe** is stuck behind the same restart, reached through a
+  full ring.
+
+Three separate hangs across two boots, one root cause: **the GPU does not
+retire timestamps on the client channel, and the channel-restart path
+cannot recover because it waits on the same timestamp.**
+
+This is a far better reproducer than 2hh's. A 4096-thread compute kernel
+writing `out[i] = i*3+7` involves no compositor, no surface, no display —
+and reaches the identical five frames.
+
+### What this does and does not say about 2di
+
+`AMDGFX10PM4Engine::QueryQueueStatus` and `verifyThreadsActive` appeared
+in 2hh under the same `waitForTimestamp`; here the submit arrives via
+`AMDUserQueue::prepareQueue`. Both are the client ring. 2di
+(`gfx_min = gfx_max = 0`, GFX DPM never started) remains the leading
+suspect and remains **unmeasured**. Nothing here establishes it. The next
+step is to read the ring's rptr/wptr and the GFX clock state at the
+moment of the wait, not to assume the clock is why.
+
+Also unexplained, and not to be folded into the above: this boot's
+`rbgpu-prog2` reads `W=1 T=0` @21s and `W=1 T=8` @41s, against the 2hh
+boot's `W=2/6/11, T=12/34/56`. Two boots is not a table (2fs).
+
+### The instrument earned its keep
+
+`system_profiler SPDisplaysDataType` **blocked** and was killed at 30 s by
+the `bounded()` helper added in 2hi, leaving a file that says so in
+words. Without that bound the capture would have stalled there and never
+reached the Metal probe — the whole result above would have been lost to
+a hang in a diagnostic.

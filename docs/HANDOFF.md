@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-18, after 2hh)
+# RembrandtGPU — handoff state (2026-10-18, after 2hj)
 
 **Read this first.** `docs/RULES.md` is now short — the project rules, the rules
 that cost boots to learn, and the chip facts — and is auto-loaded every
@@ -77,7 +77,7 @@ refusal above is what is now in the way.
 ---
 
 
-## 2. The gate was real: setting `fEnabled` gives a display, and moves the frontier to the GFX ring
+## 2. The gate was real; the frontier is one thread polling for a timestamp
 
 **2hf.** Boot 23, armed (`state.txt` records `d=72 armed=1` live),
 `logs/20261018-001306-metal/`. The 2hd hang reproduced, and under `sudo`
@@ -209,9 +209,63 @@ restart loop again, on hw engine `[0]` — the engine neither
 `rbgpu-prog2` agrees from the kernel side: waits `2 → 6 → 11` and timeouts
 `12 → 34 → 56` over 21s/41s/71s against a flat `N=65`.
 
-**Operationally:** `-rbgpuforceenable` self-panics the machine in under
-three minutes with no usable SSH window. Supervised experiment only; take
-it out of boot-args before any boot that needs to stay up.
+**Operationally:** `-rbgpuforceenable` alone self-panics the machine in
+under three minutes with no usable SSH window. **Pair it with `wdt=-1`**,
+which disables Apple's userspace watchdog (read from `IOWatchdog::start`:
+bit 0 of `wdt` takes the "watchdog disabled by boot-arg" path and zeroes
+`+0x89/+0xa8/+0xac`; it touches nothing on the chip). With the pair the
+boot freezes and stays reachable over SSH indefinitely.
+
+### 2hj — the live capture
+
+Boot of ~01:03 with `-rbgpuforceenable wdt=-1`, armed (`state.txt` has
+`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 25`), captured under
+sudo from SSH into `logs/20261018-010521-metal/`. No panic.
+
+**The gate is confirmed open.** WindowServer's
+`IOAccelSharedUserClient2::new_resource` is now at `+0x1cc`, `blocked by
+turnstile waiting for kernel_task thread 0x9a7` — an ordinary mutex, not
+2hf's `+0x1fd` sleep in `waiting_for_fEnabled`.
+
+**The compositor runs on the GPU.** `_XHWCaptureDesktop` ->
+`CaptureSurfaceMetal::Populate` -> `MetalBacking::CreateCompositeDestination`
+-> `-[GFXAAMD_MtlDevice newTextureWithDescriptor:iosurface:plane:]` in
+`AMDRadeonX6000MTLDriver`. The grey translucent password field the user
+saw is what that looks like; the stack is the evidence, not the colour.
+
+**Metal reaches the dispatch.** `newCommandQueue` **succeeds**; queue,
+runtime shader compile and a 4096-thread encode all return. The probe
+hangs in `waitUntilCompleted`, and its submit thread is in the kernel at
+`IOAccelCommandQueue::s_submit_command_buffers` -> ... ->
+`AMDAccelChannel::waitForRingBufferSpace +0x163` (**the ring is full**)
+-> `AMDUserQueue::prepareQueue` -> `finishEvent` ->
+`handleFinishChannelRestart` -> `restart_channel` ->
+`IOAccelFIFOChannel2::restart` -> `resetHardwareAndReplay` ->
+`waitForTimestamp` -> `pollWait` -> `thread_block`.
+
+**One cause, three victims.** The turnstile names the holder: a kernel
+thread `AMDRadeonX6000_AMDAccelEventMachine` (priority 81) in
+`hardwareErrorEvent` -> `restart_channel` -> `IOAccelFIFOChannel2::restart`
+-> `resetHardwareAndReplay` -> `waitForTimestamp` -> `pollWait`, for
+286/300 samples. Four samples catch the poll itself
+(`AMDSWScheduler::checkTimestamps` -> `AMDHWChannel::checkForTimestampUpdate`),
+so it is a live poll, not a dead sleep. WindowServer blocks on its mutex;
+the Metal submit blocks behind the same restart. 2hh's WindowServer
+surface-sync holder had the identical five frames.
+
+**So: the GPU retires no timestamps on the client channel, and the
+channel-restart path cannot recover because it waits on the same
+timestamp.** The reproducer is now a 4096-thread compute kernel — no
+compositor, no surface, no display in the path.
+
+**Next measurement.** Read the client ring's rptr/wptr and the GFX clock
+state at the moment of the wait. 2di (`gfx_min = gfx_max = 0`) is the
+leading suspect and is still unmeasured; do not assume it.
+
+One instrument note: `system_profiler SPDisplaysDataType` blocked and was
+killed at 30 s by 2hi's `bounded()` helper. Without that bound the
+capture would have stalled before the Metal probe and this milestone
+would not exist.
 
 
 ## 3. Verified on hardware — do NOT re-derive these
