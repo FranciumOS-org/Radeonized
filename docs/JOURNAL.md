@@ -13109,3 +13109,34 @@ Testing it means either supplying that firmware or reading
 `_gc_10_3_rlc_toc` to see what the bundle actually lists.
 
 Reading the TOC is static, free, and costs no boot. That is next.
+
+### 2je addendum — the static `_gc_10_3_rlc_toc` read did not pay off
+
+Attempted while the machine sat in the 2je boot; costs no boot, so it was
+free to try and is recorded so the next attempt starts further along.
+
+`_gc_10_3_rlc_toc` is at `0x12e97760` in `__DATA,__data`. The obvious
+reading — that it is the 16-byte-strided table
+`_gc_parse_rlc_toc_10_3` walks — is **wrong**. That function strides 0x10
+over a buffer handed to it in `r14`, which is the *runtime* TOC read out of
+firmware, not this static symbol.
+
+What the symbol actually holds is a repeating **0x38-byte** record:
+
+```
++000  chained ptr   010000005274e990 -> 0x1274e990   (lands in __cstring)
++00c  0x00000600                                     (a size)
++020  chained ptr   00c0000052fdfb60                 (different fixup form)
++030  0x40
+```
+
+with the next records at +0x038, +0x070, +0x0a8, sizes `0x600`, `0x250`,
+`0x600`, `0x47a0`. The `+000` pointers decode six bytes apart
+(`0x1274e990`, `...96`, `...96`) into short strings, which does not look
+like firmware names, so the field is probably not a name pointer and the
+record layout is not yet understood.
+
+Not established: what any field means. No conclusion is drawn from the
+sizes. The useful residue is the 0x38 stride and the two distinct pointer
+forms; the obvious-but-wrong 0x10 reading is now on record so it is not
+tried twice.
