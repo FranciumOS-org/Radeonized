@@ -10779,24 +10779,60 @@ static void rbgpu_ibdump_2kc(void) {
         if (h) nz++;
         if ((h >> 30) == 3) t3++;
     }
-    // Same three packet forms as 2jz.
-    for (unsigned i = 0; i + 4 < 1024; i++) {
-        uint32_t h = dw[i];
-        if ((h >> 30) != 3) continue;
-        uint32_t op = (h >> 8) & 0xFF, reg = 0xFFFFFFFFu, val = 0;
-        if      (op == 0x37) { reg = dw[i + 2];           val = dw[i + 4]; }
-        else if (op == 0x68) { reg = dw[i + 1] + 0x2000u; val = dw[i + 2]; }
-        else if (op == 0x79) { reg = dw[i + 1] + 0xc000u; val = dw[i + 2]; }
-        else continue;
-        if (reg != 0x0F56u) continue;
-        nme++;
-        if (nme == 1) { meval = val; meat = i; }
-        rbgpu_log("2kc: IB writes CP_ME_CNTL @%03x = 0x%08x %s", i, val,
-                  (val & 0x15000000u) ? "<<<< THIS IS THE HALT" : "");
+    // 2kd (2026-10-19): CHAIN-WALK, because 2kc's t3 count was too weak a
+    // validity test to carry the conclusion.
+    //
+    // Boot 80: `sz=952 t3=59 nz=183`. The ring gives t3=799 of 1024, far above
+    // the 25% you get from random data, which is why 2hx called that mapping
+    // unambiguous. Here 59 type-3 among 183 nonzero is ~32% - essentially the
+    // random baseline - and the packet declares 952 dwords while only 183 are
+    // nonzero. So 2kc's own table ("t3 high -> it IS a command buffer") was
+    // NOT satisfied, and `noME-in-IB` could not be read as a clean negative.
+    //
+    // A real command buffer chains: each type-3 header's COUNT field gives the
+    // body length, so header + 2 + count lands exactly on the next header, all
+    // the way to the declared size. Garbage breaks within a packet or two.
+    // Walking the chain also reads register writes only where a packet really
+    // is, instead of mistaking data for a header - which is what the brute
+    // scan above does.
+    unsigned chain = 0, walked = 0;
+    {
+        unsigned i = 0;
+        unsigned lim = (g_rb_2kc_ib_sz && g_rb_2kc_ib_sz < 1024)
+                           ? g_rb_2kc_ib_sz : 1024u;
+        while (i < lim) {
+            uint32_t h = dw[i];
+            uint32_t type = h >> 30;
+            unsigned len;
+            if (type == 3)       { len = ((h >> 16) & 0x3FFFu) + 2u; }
+            else if (type == 2)  { len = 1u; }        // NOP filler
+            else break;                               // not a packet: stop
+            if (len == 0 || i + len > lim) break;
+            if (type == 3) {
+                uint32_t op = (h >> 8) & 0xFFu, reg = 0xFFFFFFFFu, val = 0;
+                if      (op == 0x37 && len >= 5) { reg = dw[i + 2];           val = dw[i + 4]; }
+                else if (op == 0x68 && len >= 3) { reg = dw[i + 1] + 0x2000u; val = dw[i + 2]; }
+                else if (op == 0x79 && len >= 3) { reg = dw[i + 1] + 0xc000u; val = dw[i + 2]; }
+                if (reg == 0x0F56u) {
+                    nme++;
+                    if (nme == 1) { meval = val; meat = i; }
+                    rbgpu_log("2kd: chained packet @%03x op=%02x writes "
+                              "CP_ME_CNTL = 0x%08x %s", i, op, val,
+                              (val & 0x15000000u) ? "<<<< THIS IS THE HALT" : "");
+                }
+                if (chain < 3) {
+                    rbgpu_log("2kd: chain[%u] @%03x hdr=%08x op=%02x len=%u",
+                              chain, i, h, op, len);
+                }
+                chain++;
+            }
+            i += len;
+            walked = i;
+        }
     }
     snprintf(note, sizeof(note),
-             "mc=%llx pa=%llx sz=%u t3=%u nz=%u | %s",
-             g_rb_2kc_ib_mc, pa, g_rb_2kc_ib_sz, t3, nz,
+             "mc=%llx pa=%llx sz=%u t3=%u nz=%u chain=%u walked=%u | %s",
+             g_rb_2kc_ib_mc, pa, g_rb_2kc_ib_sz, t3, nz, chain, walked,
              nme ? "" : "noME-in-IB");
     if (nme) {
         size_t at = strlen(note);
@@ -10804,10 +10840,11 @@ static void rbgpu_ibdump_2kc(void) {
     }
     rbgpu_nvram_note("rbgpu-ib", note);
     rbgpu_log("2kc: %s", note);
-    rbgpu_log("2kc: t3 near zero means this is NOT a command buffer and the "
-              "conversion or the address is wrong - read nothing into "
-              "noME-in-IB in that case (2eh). This is also ONE page and ONE "
-              "of the four IBs.");
+    rbgpu_log("2kd: `walked` reaching sz is the validity test, not t3. A real "
+              "command buffer chains exactly to its declared length; a wrong "
+              "page breaks in the first packet or two. walked << sz means the "
+              "mapping or the address is wrong and noME-in-IB means NOTHING "
+              "(2eh). This is also ONE page and ONE of the IBs.");
     mp->release();
     md->release();
 }
