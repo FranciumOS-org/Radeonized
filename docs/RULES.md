@@ -125,8 +125,17 @@ under the tag in brackets.
 - **Look in `logs/<timestamp>-plugin/` before reading live NVRAM.** The
   armed boot's capture may already be saved there (ssh in while the screen
   is black). `plugin_check.sh` only READS nvram, so a later run destroys
-  nothing. A capture is the armed boot's only if its `rbgpu-diag` reads
-  `armed=1` **live**, not in `-prev`. [2gw]
+  nothing. [2gw]
+- **Read `rbgpu-boot` FIRST, before anything else in NVRAM.** If it has not
+  increased since the last capture, the boot was never armed and *nothing*
+  in NVRAM is this boot's. 2gw's old test - "`rbgpu-diag` reads `armed=1`
+  live" - **certifies a stale capture**: `rbgpu-diag` carries no `b=`
+  nonce, so an unarmed boot leaves the previous armed boot's `armed=1`
+  sitting there, live. Twenty minutes of 2ix's numbers were read as 2iy's.
+  [2iz]
+- **`rbgpu-arm` is one-shot** - the peer consumes it and deletes it. Every
+  armed boot needs `sudo nvram rbgpu-arm=1` set again, and an install that
+  only replaces the kext and edits boot-args does **not** arm. [2iz]
 - **A return code is not a result until the code that sets it has been
   read.** A named constant tells you what the NAME means, not what the
   function meant by it. Request 0x1B's *success* path returns
