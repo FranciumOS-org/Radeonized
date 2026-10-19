@@ -204,7 +204,15 @@ anything, and log it when it is not.
 -rbgpunogates                                the configuration that works
 -rbgpusdmaone                                what makes powerUpHW succeed
 -rbgpuforce1b                                sends request 0x1B
+-rbgpurlcsub                                 what makes the RLC autoload COMPLETE
 ```
+
+`-rbgpurlcsub` is IN and proven (2jq): it supplies the five RLC
+sub-images 2aj never did - `srlist_cntl`/`gpm`/`srm` and the **LX6
+iram/dram**, ids 26/27/28/29/30, carved out of `yellow_carp_rlc.bin`.
+Without it the RLC boots Navi 21's LX6 firmware and
+`BOOTLOAD_COMPLETE` never sets; with it the latch sets and the CP is
+un-halted. Never remove it without expecting `complete=0` back.
 
 `-rbgpuforceenable` + `wdt=-1` are the current experiment pair, both IN
 and both proven (2hh, 2hj).
@@ -274,7 +282,22 @@ It is what broke the GPU-restart loop.
   Also refuted separately (2je): Apple's 10_3 path has **no backdoor
   fallback** - told the latch is clear, bring-up stops before the SMU
   rather than taking another route, so the 2am patch is load-bearing.
-- **`CP_ME_CNTL` is READ-ONLY to the host, and the autoload is the only
+- **PAID (2jq, 2026-10-19): `BOOTLOAD_COMPLETE = 1`.** `rbgpu-bl` reads
+  `bl=c0000001 iram=1 complete=1` in both phases of boot 63, after
+  twelve boots of `complete=0`, and `diag_cp_me_cntl` / `diag_cp_mec_cntl`
+  both read **0** where they read `15000000` / `50000000`. The cause was
+  **2jp**: Apple's `_gc_10_3_get_fw_constants` asks for 21 firmware
+  entries and 2aj supplied 7, so the RLC had been booting Navi 21's
+  `rlc_lx6_iram`/`rlc_lx6_dram` - the firmware for the processor inside
+  the RLC that runs the autoload - plus Navi 21's three save/restore
+  lists. yellow_carp's own are in `yellow_carp_rlc.bin` (v2.2, ip 10.3)
+  as sub-images; `-rbgpurlcsub` supplies them as ids 26/27/28/29/30.
+  **2ix's conclusion is confirmed and the debt below is closed:** the
+  halt is cleared by the autoload and by nothing the host can do.
+  **New frontier: something re-halts the CP after bring-up** (`me` back
+  to `15000000` by +12 s with `h=0`, so not Apple's 10_3 halt path), and
+  `ttl_hw_init_ret` now returns `0xffffffffe3623001` where it read 0.
+- **(CLOSED by 2jq) `CP_ME_CNTL` is READ-ONLY to the host, and the autoload is the only
   thing that clears it.** 2jl: `CE_STEP` (bit 25), an ordinary R/W debug
   bit, **will not stick**, and eight tight-loop reads after writing 0
   never showed one changed bit. So "the CP re-halts itself" is dead too.
