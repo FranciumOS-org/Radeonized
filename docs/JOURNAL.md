@@ -12038,3 +12038,75 @@ on record.
 | all three written, `s40953` remains | the VMID-0 fault is independent of this defect, as 2hz guessed when it attributed it to the reset path |
 | a context with `nq=0` | its root is not where context 3's was; nothing written for it and the counts say what its four pages looked like |
 
+
+## 2ip result (2026-10-18) — the fix reproduces, and the CP halt is what is left
+
+Nineteenth armed boot, `logs/20261018-211423-metal/`, `armed=1`, UUID
+`A54EA8E1-DA00-369C-9FC7-A3275D980509` = `build/out`.
+
+```
+rbgpu-pdc   = v1 fbo=fb00b000 | a ... ffffffffffffffff | b pa=87b00b000 m=1
+              nz=1 v=1 f=20000000fb00c001 OK | c ... | d ... | W b 7b00b001/8
+rbgpu-vm    = c1:b=87b00b001   c3:b=87b015001
+rbgpu-fault = c=8 f=7 r=4 fw=7 | sffffffff h1 n=4 | s40953 h0 n=3
+rbgpu-ring  = r=b1 w=280 me=15000000   (both samples)
+```
+
+**`s3009bb` is absent for the second consecutive boot.** The page-directory
+correction reproducibly eliminates the VMID-3 fault - not a one-off.
+
+**Context 1's candidate test passed independently.** `b pa=87b00b000` holds
+exactly one valid PDE, `0x2000_0000_FB00_C001` - the same shape as context
+3's, pointing at its own next page - while a, c and d read all-ones. So the
+transform is not a fact about context 3; it generalises, and each context
+was tested rather than assumed.
+
+**`s40953` survives unchanged.** The VMID-0 fault is therefore independent
+of this defect, exactly as 2hz suspected when it attributed that one to the
+reset path. Its `va=0` also remains untrustworthy: Apple fills the struct
+whenever `(addr != 0 || status != 0)`, so a latched status with a cleared
+address register reads as VA 0 regardless.
+
+**Instrument bug:** `rbgpu-pdc` shows `v1` twice. 2ip appends once before
+the write and once after, so each context doubles and the 768-byte buffer
+filled before `v3` landed - context 2 was never visible. Fixed in 2iq by
+replacing the current entry instead of adding a second copy.
+
+### What is left is the halt
+
+`CP_ME_CNTL = 0x15000000` at the **+12 s** sample: CE_HALT, PFP_HALT and
+ME_HALT all set, before any Metal client exists, and now with the VMID-3
+fault gone. That is the one condition that has never varied across
+nineteen boots and has never been explained.
+
+## 2iq (2026-10-18) — hook the restart TRIGGER, not the consequence
+
+2hn guessed the halt is `resetHardwareAndReplay`'s own doing rather than
+the chip's. That guess has never been tested, and every reading so far has
+been of the consequence.
+
+```
+AMDAccelChannel::resetHardwareAndReplay()  0xbe45288
+  55 48 89 e5 41 57 41 56 41 55 41 54 53      pushes and a movq
+AMDAccelCPContext::setGPURestart()         0xbe64864
+  55 48 89 e5 c6 87 33 01 00 00 01 5d c3
+```
+
+Both **defined** in AMDRadeonX6000 per `nm -m`; rule 9 (2gb) checked on
+both, no branch in the first five bytes.
+
+`setGPURestart` is the valuable one and the reason this is cheap: three
+instructions, `movb $0x1, 0x133(%rdi)`. It **requests** a restart rather
+than performing one, so hooking it catches the trigger - the thing that
+has never been observed.
+
+Timing matters as much as counting, so a baseline is taken when the hooks
+are routed and each first call is recorded as milliseconds after it.
+
+| `rbgpu-rst` reading | means |
+|---|---|
+| first `setGPURestart` before 12000 ms | software halted the CP before any client ran; the question becomes what that first restart was reacting to |
+| `setr=0 reset=0`, CP still halted | the halt is **not** the reset path. 2hn's guess dies and this goes back to what programs `CP_ME_CNTL` directly. |
+| `setr` large | a restart storm, and the count says how fast |
+| `hk=0` | the hooks did not take; zero counts are the instrument, not the driver |
+

@@ -8354,6 +8354,112 @@ static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
     }
 }
 
+// ---------------------------------------------------------------------------
+// 2iq (2026-10-18): WHO halts the CP, and when.
+//
+// Two boots now confirm the page-directory correction: s3009bb - CPF under
+// VMID 3 - is gone and stays gone, and contexts 1 and 3 both hold corrected
+// bases whose candidate tests passed independently. The GPUVM story for
+// contexts 1..15 is closed.
+//
+// What is left is the thing that was there before any of it:
+// CP_ME_CNTL = 0x15000000 at the +12 s sample. CE_HALT, PFP_HALT and
+// ME_HALT, all set, before any Metal client exists and now with the VMID-3
+// fault gone. 2hn guessed the halt is resetHardwareAndReplay's own doing
+// rather than the chip's, and that guess has never been tested. It is now
+// the only thing between here and a submission that retires.
+//
+// Two hooks, both DEFINED in AMDRadeonX6000 per `nm -m` and both rule-9
+// checked (2gb):
+//
+//   AMDAccelChannel::resetHardwareAndReplay()   0xbe45288
+//     55 48 89 e5 41 57 41 56 41 55 41 54 53   pushes and a movq
+//   AMDAccelCPContext::setGPURestart()          0xbe64864
+//     55 48 89 e5 c6 87 33 01 00 00 01 5d c3
+//
+// setGPURestart is the better of the two and the reason this probe is cheap:
+// it is three instructions, `movb $0x1, 0x133(%rdi)`, so it REQUESTS a
+// restart rather than performing one. Hooking it catches the trigger, and
+// the trigger is what has never been seen - every reading so far has been
+// of the consequence.
+//
+// Timing matters as much as counting. A baseline is taken when the hooks
+// are routed, and the first call of each is recorded as milliseconds after
+// that. If the first setGPURestart lands before the +12 s sample, the CP was
+// halted by software before any client ran, and the question becomes what
+// that first restart was reacting to. If neither fires at all and the CP is
+// still halted, the halt is NOT the reset path and 2hn's guess dies.
+//
+// Observe only. Both originals run.
+// ---------------------------------------------------------------------------
+
+static uint64_t g_rb_2iq_t0 = 0;
+static uint32_t g_rb_2iq_reset = 0, g_rb_2iq_setr = 0;
+static uint64_t g_rb_2iq_first_reset_ms = 0, g_rb_2iq_first_setr_ms = 0;
+static int      g_rb_2iq_hooked = 0;
+
+static uint64_t rbgpu_2iq_ms(void) {
+    if (g_rb_2iq_t0 == 0) return 0;
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - g_rb_2iq_t0, &ns);
+    return ns / 1000000ull;
+}
+
+static void (*orig_resetHWAndReplay_2iq)(void *) = nullptr;
+static void (*orig_setGPURestart_2iq)(void *) = nullptr;
+
+static void hooked_resetHWAndReplay_2iq(void *ch) {
+    if (g_rb_2iq_reset == 0) g_rb_2iq_first_reset_ms = rbgpu_2iq_ms();
+    g_rb_2iq_reset++;
+    if (orig_resetHWAndReplay_2iq) orig_resetHWAndReplay_2iq(ch);
+}
+
+static void hooked_setGPURestart_2iq(void *cp) {
+    if (g_rb_2iq_setr == 0) g_rb_2iq_first_setr_ms = rbgpu_2iq_ms();
+    g_rb_2iq_setr++;
+    if (orig_setGPURestart_2iq) orig_setGPURestart_2iq(cp);
+}
+
+void rbgpu_restart_flush_2iq(void) {
+    char note[352];
+    snprintf(note, sizeof(note),
+             "hk=%d setr=%u @%llums | reset=%u @%llums",
+             g_rb_2iq_hooked, g_rb_2iq_setr, g_rb_2iq_first_setr_ms,
+             g_rb_2iq_reset, g_rb_2iq_first_reset_ms);
+    rbgpu_nvram_note("rbgpu-rst", note);
+    rbgpu_log("2iq: %s", note);
+    rbgpu_log("2iq: setr=0 reset=0 with the CP still halted means the halt is "
+              "NOT the reset path and 2hn's guess is dead - which would send "
+              "this back to what programs CP_ME_CNTL directly. A first "
+              "setGPURestart before 12000 ms means software halted the CP "
+              "before any client ran, and the next question is what that "
+              "first restart was reacting to.");
+}
+
+static void rbgpu_route_restart_2iq(KernelPatcher &patcher, size_t id,
+                                    mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuringprobe")) return;
+    g_rb_2iq_t0 = mach_absolute_time();
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN30AMDRadeonX6000_AMDAccelChannel22resetHardwareAndReplayEv",
+            hooked_resetHWAndReplay_2iq, orig_resetHWAndReplay_2iq),
+        KernelPatcher::RouteRequest(
+            "__ZN32AMDRadeonX6000_AMDAccelCPContext13setGPURestartEv",
+            hooked_setGPURestart_2iq, orig_setGPURestart_2iq),
+    };
+    if (patcher.routeMultiple(id, reqs, 2, address, size)) {
+        rbgpu_log("2iq: hooked resetHardwareAndReplay + setGPURestart "
+                  "(observe only)");
+        g_rb_2iq_hooked = 1;
+    } else {
+        rbgpu_log("2iq: FAILED to hook the restart path - rbgpu-rst will say "
+                  "hk=0, so zero counts are the hook and not the driver");
+        g_rb_2iq_hooked = 0;
+        patcher.clearError();
+    }
+}
+
 static void (*orig_programAndInvalidateVM_2id)(void *, const void *) = nullptr;
 
 static void hooked_programAndInvalidateVM_2id(void *vmm, const void *info) {
@@ -8952,6 +9058,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     rbgpu_route_vmfault_2hs(patcher, id, address, size);
     rbgpu_route_hwregwrite_2ic(patcher, id, address, size);
     rbgpu_route_vmid_2if(patcher, id, address, size);
+    rbgpu_route_restart_2iq(patcher, id, address, size);
 
     KernelPatcher::RouteRequest req_2gn[] = {
         KernelPatcher::RouteRequest(
@@ -9569,11 +9676,18 @@ struct rb_2il_cand { uint64_t pa; uint32_t nz, v; uint64_t first; uint8_t mapped
 // variable, so a hang partway still leaves every context handled so far on
 // record rather than losing the lot.
 static char g_rb_2ip_note[768];
-static void rbgpu_2ip_append(const char *one) {
-    size_t have = strlen(g_rb_2ip_note);
+static size_t g_rb_2ip_mark = 0;    // where the current context's entry starts
+
+// 2iq: REPLACE the current context's entry rather than appending a second
+// copy. 2ip called this once before the write and once after, so every
+// context appeared twice and the buffer filled before v3 could land -
+// context 2 was never visible. `commit` closes the entry and moves the mark.
+static void rbgpu_2ip_append(const char *one, bool commit) {
+    size_t have = g_rb_2ip_mark;
     if (have > sizeof(g_rb_2ip_note) - 80) return;
     snprintf(g_rb_2ip_note + have, sizeof(g_rb_2ip_note) - have,
              "%s%s", have ? " || " : "", one);
+    if (commit) g_rb_2ip_mark = strlen(g_rb_2ip_note);
     rbgpu_nvram_note("rbgpu-pdc", g_rb_2ip_note);
 }
 
@@ -9785,7 +9899,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
         if (n < sizeof(note) - 16) {
             snprintf(note + n, sizeof(note) - n, " | nq=%d NOWRITE", nqual);
         }
-        rbgpu_2ip_append(note);
+        rbgpu_2ip_append(note, true);
         rbgpu_log("2il: %s", note);
         rbgpu_log("2il: %d candidates qualified, so NOTHING was written. "
                   "Zero means none of these four is context 3's page "
@@ -9808,7 +9922,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
     if (g_rb_2im_f_at_write == 0xFFFFFFFFu) {
         g_rb_2im_f_at_write = g_rb_2hs_faults;   // 2im: countable post-write
     }
-    rbgpu_2ip_append(note);                  // commit BEFORE writing
+    rbgpu_2ip_append(note, false);           // commit BEFORE writing
 
     wr(obj, off_lo, new_lo);
     wr(obj, off_hi, new_hi);
@@ -9817,7 +9931,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
         snprintf(note + n, sizeof(note) - n, " bk=%x/%x clr=%x", b_lo, b_hi,
                  g_rb_2io_st_after_clear);
     }
-    rbgpu_2ip_append(note);
+    rbgpu_2ip_append(note, true);
     // 2io: CLEAR the fault status after correcting the base.
     //
     // fw=8 last boot looked like "every fault happened after the write", but
@@ -10514,6 +10628,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_gvmwrite_flush_2ie();
     rbgpu_vmid_flush_2if();
     rbgpu_ptfix_flush_2ih();
+    rbgpu_restart_flush_2iq();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and
