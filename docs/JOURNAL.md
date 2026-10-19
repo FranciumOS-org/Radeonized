@@ -14537,3 +14537,53 @@ probe are on different schedules (11.6 s vs 12/100/160 s) and a note's
 nonce being fresh for one does not make it fresh for the other.
 
 The next boot repeats 2jz unchanged, captured past 160 s.
+
+## 2ka (2026-10-19) — the instrument was the fault: 2jv's GFXOFF read killed the late ring phases
+
+Boot 76 captured past 160 s and `rbgpu-pm4` **still read `b=67`**, with
+`rbgpu-ring` carrying only `p=0`. Second boot in a row where 2jz's answer
+could not be collected. The cause is ours.
+
+**The eliminating check.** `rbgpu-diag`'s `d=` is **constant at 72-73 in
+every boot**, including 66 and 68 where the +100 s and +160 s phases
+demonstrably fired. So `d=73` is the refresh loop's own stopping point and
+says nothing about when the capture was taken - the first explanation
+reached for ("the capture was early") is wrong, and the log ending at
+73.178 s is 2es's trap, not a hang locator.
+
+What the captures actually show:
+
+| boot | build | `rbgpu-ring` phases |
+|---|---|---|
+| 66 | 2jt | `p=0, p=1, p=2` |
+| 68 | 2ju (`-rbgpunocgcg` in) | `p=0, p=1, p=2` |
+| **69** | **2jv - GFXOFF read added** | `p=0` only |
+| 70, 71, 74, 76 | 2jv and later | `p=0` only |
+
+A clean break at the build that added an `SMUIO_GFX_MISC_CNTL` read to the
+2jt sampler - 40, then 60, SMUIO reads from a thread_call. Two boots before
+it have all three phases; five after it have one. `-rbgpunocgcg` entered at
+boot 68, which still had all three, so the CGCG writes are **exonerated**,
+and the sample count is not the variable either (boot 68 ran 40 samples and
+was fine; boot 69 ran 40 samples **plus the read** and was not).
+
+**`-rbgpuregdump` is already permanently OUT for this exact failure mode** -
+"the GC register dump stalls non-deterministically" (2fe). The standing
+rule says that when a measurement and a suspect are both new, remove the
+suspect rather than reason about it. Removed.
+
+**Nothing is lost.** `gfxoff` read **2** ("NOT in GFXOFF") at both samples
+straddling the halt in all five of those boots, so GFXOFF is excluded and
+that measurement is finished. The field stays in the struct and the note,
+now reading `0xFFFFFFFF` for "not read".
+
+**What this costs in confidence, stated plainly.** Boots 69-76 ran with an
+instrument that provably destabilised the boot after ~73 s. The readings
+those boots produced *before* that point are still the readings - the halt
+reproduced at 8634-8865 ms in every one of them, `rbb`/`rbc` were unchanged
+across the halt in three independent boots (74, 75, 76), and `gfxoff=2`
+appeared in five. None of that is in the damaged window. But 2jv, 2jw, 2jx,
+2jy and 2jz were all designed while a self-inflicted fault was in the
+build, and the late-phase notes they would have used were never available.
+
+Build `A0182834`. 2jz is otherwise unchanged and gets its boot next.

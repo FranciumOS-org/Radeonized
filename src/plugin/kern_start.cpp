@@ -11183,14 +11183,26 @@ void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     e->cgcg = g_hw.rreg(g_hw.ctx, (S1 + 0x4C49u) * 4);
     e->pg   = g_hw.rreg(g_hw.ctx, (S1 + 0x4C43u) * 4);
     e->srm  = g_hw.rreg(g_hw.ctx, (S1 + 0x4C80u) * 4);
-    // 2jv: 0xFFFFFFFF stands for "no SMUIO dword resolved", so an unavailable
-    // read never reads as GFXOFF (2eh - absence is not a result).
-    if (g_smu.dw_gfx_misc_cntl) {
-        uint32_t misc = g_hw.rreg(g_hw.ctx, g_smu.dw_gfx_misc_cntl * 4);
-        e->gfxoff = (misc & 0x6u) >> 1;
-    } else {
-        e->gfxoff = 0xFFFFFFFFu;
-    }
+    // 2ka (2026-10-19): the GFXOFF read is REMOVED, and it was the fault.
+    //
+    // `rbgpu-ring` carried p=0|p=1|p=2 in boots 66 and 68 and has carried
+    // **p=0 only** in boots 69, 70, 71, 74 and 76 - a clean break at the 2jv
+    // build, the one that added an SMUIO_GFX_MISC_CNTL read to this sampler
+    // 40 (then 60) times from a thread_call. -rbgpunocgcg entered at boot 68,
+    // which still had all three phases, so the CGCG writes are exonerated.
+    // `d=73` is constant in every boot including 66 and 68, so it is the
+    // refresh loop's own stopping point and NOT the capture time - it was not
+    // the explanation.
+    //
+    // So the instrument was killing the +100 s and +160 s ring phases, which
+    // is why 2jz's `rbgpu-pm4` read `b=67` twice. -rbgpuregdump is already
+    // permanently OUT for this exact failure mode (2fe). Removed rather than
+    // reasoned about, per the standing rule.
+    //
+    // Nothing is lost: gfxoff read **2** at both samples straddling the halt
+    // in all five of those boots, so GFXOFF is excluded and the measurement
+    // is complete. 0xFFFFFFFF now means "not read" rather than "unresolved".
+    e->gfxoff = 0xFFFFFFFFu;
     e->cps  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F40u) * 4);
     e->grbm = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA4u) * 4);
     e->rbb  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x1DE0u) * 4);   // CP_RB0_BASE
