@@ -12787,3 +12787,58 @@ This supersedes the planned RLC-stop experiment for this boot: it is
 observe-only, costs no chip state, and if the answer is `uh=0` the fix is
 to call a function Apple already wrote.
 
+
+## 2iz (2026-10-19) — the boot counter is the only honest freshness test
+
+The 2iy boot never happened. The machine rebooted at 23:53:20 into a normal
+unaccelerated desktop, and for twenty minutes afterwards every reading taken
+from NVRAM was the **2ix boot's**, read back as if it were new.
+
+What made it look armed:
+
+```
+rbgpu-diag      d=25 armed=1 ... diag_cp_me_cntl=15000000 ...
+rbgpu-1b        b=55 ... fas:R=0x47ce9 ei:E ei:R
+rbgpu-ea        b=55 ea:00000000->00000002
+rbgpu-prog      b=55 s=6 0x1B RETURNED 0xE00002C7
+```
+
+All four are 2ix's. `rbgpu-boot` read **55**, and `b=55` is the nonce this
+journal already records for 2ix at line 12623 (`rbgpu-bl = b=55 p0 bl=1
+iram=1 complete=0`). The counter increments on the first note of each armed
+boot, so an unchanged counter is proof the plugin wrote nothing.
+
+**docs/RULES.md's 2gw rule is insufficient and is amended here.** It says a
+capture is the armed boot's only if `rbgpu-diag` reads `armed=1` live.
+`rbgpu-diag` carries **no `b=` nonce**, so it survives a power cycle intact
+and an unarmed boot that never reaches the diag flush leaves the previous
+armed boot's `armed=1` sitting in place, live. The rule as written certifies
+a stale capture. The test that works:
+
+> **Read `rbgpu-boot` FIRST. If it has not increased since the last capture,
+> nothing else in NVRAM is this boot's — including `rbgpu-diag`.**
+
+Cause of the unarmed boot: `rbgpu-arm` is one-shot. The peer consumes it and
+calls `options->removeProperty("rbgpu-arm")` (RembrandtGPUPeer.cpp:441), so
+every armed boot needs it set again. The 23:52 install replaced the kext and
+edited the boot-args but never re-set it. This is **not** the 2gy `/options`
+race that 2in fixed — there was nothing to lose the race for.
+
+Two readings withdrawn from the twenty minutes before this was caught:
+
+- "three diagnostic boot-args are missing from live NVRAM" — an artifact of
+  `cut -c1-400` in my own command truncating the 444-byte `boot-args` line.
+  The instrument was the fault, for the second time this session. EFI and
+  live NVRAM both carry `-rbgpuringprobe -rbgpuringdump -rbgpuptfix`.
+- "the ring probe did not fire" / "the thread_call pool is starved" — there
+  was no armed boot for a timer to fire in.
+
+Unexplained and left open: this boot did not rotate `rbgpu-diag` into
+`rbgpu-diag-prev` either (`diag` still holds 2ix's `armed=1`, `diag-prev`
+holds an older `armed=0`), so the unarmed path's diag flush did not run.
+Noted, not chased — it does not change what the next boot measures.
+
+State going into the retry: 2iy kext installed and loaded
+(`63329EB2-2EDC-34B1-92D8-86E366551FBF`), `-rbgpucpfw` removed,
+`-rbgpuforceenable` paired with `wdt=-1`, `rbgpu-arm=1` set at 00:09.
+**First thing to read next boot: `rbgpu-boot` must be 56.**
