@@ -14008,3 +14008,72 @@ Discipline, each from a rule this project paid for:
 | `NEVER HALTED` | the re-halt is later than +12 s |
 
 Build `3DBD8CAF-2582-3F18-87FF-DA003DDF118A`.
+
+## 2js result / 2jt (2026-10-19) — the halt is bracketed to 500 ms, and the RLC stops with it
+
+Boot 65, `-rbgpumewatch`. Fresh nonce.
+
+```
+rbgpu-mew = b=65 n=24
+  OK   i=15 @8328ms  me=0         cps=0         rlcs=25  bl=c0000001  srst=0
+  HALT i=16 @8829ms  me=15000000  cps=94038600  rlcs=0   bl=c0000001  srst=0
+```
+
+**The re-halt happens between 8328 ms and 8829 ms**, and three things move
+together inside that window:
+
+- `CP_ME_CNTL` `0 -> 0x15000000` - the halt itself.
+- `RLC_STAT` **`0x25 -> 0`** - the RLC stops in the same 500 ms.
+- `CP_STAT` `0 -> 0x94038600` - the CP had gone **busy** first, so work was
+  submitted and it was executing when it was halted. That matches 2hl's
+  "front end holding fetched packets it cannot retire" exactly, now with a
+  timestamp.
+
+And two things that do **not** move, which kills two explanations outright:
+
+- `GRBM_SOFT_RESET = 0` at both samples - **it is not a soft reset.**
+- `RLC_RLCS_BOOTLOAD_STATUS = c0000001` at both - **the autoload latch is
+  not being cleared.** The 2jq fix holds right through the halt.
+
+Combined with `rbgpu-me` (all four `CP_ME_CNTL` writes this boot wrote
+**0**), nothing in software writes the halt value on any path we watch.
+The halt coincides with the RLC stopping.
+
+**Which direction that runs is the open question**, and 500 ms is too
+coarse to answer it.
+
+### 2jt (built)
+
+Forty samples, **50 ms** apart, 7.5 s .. 9.5 s - ten times the resolution,
+centred on the bracket - reading what the RLC was actually doing:
+
+| register | seg1 offset | why |
+|---|---|---|
+| `RLC_STAT` | `0x4c04` | the transition |
+| `RLC_GPM_STAT` | `0x4e6e` | what the GPM is executing |
+| `RLC_SAFE_MODE` | `0x4ca0` | 2iv found this stuck with CMD set |
+| `RLC_CGCG_CGLS_CTRL` | `0x4c49` | clock gating |
+| `RLC_PG_CNTL` | `0x4c43` | power gating |
+| `RLC_SRM_CNTL` | `0x4c80` | the save/restore machine |
+
+The last two are the reason this might be cheap. **`gfx_v10_0_rlc_resume`'s
+non-PSP branch explicitly writes `RLC_CGCG_CGLS_CTRL = 0` and
+`RLC_PG_CNTL = 0` before starting the RLC. The PSP+autoload branch - ours -
+never does.** So CG and PG are left wherever the firmware put them, and if
+the RLC gates GFX off under us that is a one-register fix.
+
+| `rbgpu-mew2` | means |
+|---|---|
+| `cgcg` or `pg` non-zero at the halt | the RLC is gating GFX under us - Linux's own non-PSP path prevents exactly this, and the fix is small |
+| `gpm` changes at the same sample | the GPM is doing it, not a gating sequence |
+| `safe` non-zero | 2iv's stuck `RLC_SAFE_MODE` is back and relevant |
+| `NO TRANSITION` | the halt moved outside 7.5-9.5 s; the note still prints the RLC state so the window is not wasted |
+
+Same discipline as 2js: no logging in the sampler (2ez), all 40 timers
+armed once from the calling thread (2fy), explicit no-transition output
+(2eh). Rides `-rbgpumewatch`, so no new boot-arg.
+
+Build `02E028B6-23F1-3394-BE92-354254ACDA3D`.
+
+**n=1.** The 8328/8829 bracket is one boot. If 2jt's window misses, that
+is itself evidence the timing varies and the coarse bank will say so.

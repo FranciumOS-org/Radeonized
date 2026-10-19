@@ -11029,6 +11029,102 @@ void rbgpu_mewatch_flush_2js(void) {
               "NEVER HALTED means the re-halt is later than +12 s.");
 }
 
+// ---------------------------------------------------------------------------
+// 2jt (2026-10-19): the RLC's own registers across the 500 ms the halt lands in.
+//
+// 2js bracketed it on boot 65:
+//
+//   OK   i=15 @8328ms me=0        cps=0        rlcs=25 bl=c0000001 srst=0
+//   HALT i=16 @8829ms me=15000000 cps=94038600 rlcs=0  bl=c0000001 srst=0
+//
+// Three things move together - the CP halts, the CP had just gone BUSY, and
+// **RLC_STAT drops 0x25 -> 0**. Two do not: `srst=0` so it is not a soft
+// reset, and `bl` stays `c0000001` so the autoload latch is not being
+// cleared. Whatever halts the CP, the RLC stops in the same 500 ms.
+//
+// Which way round that runs is what this measures, at 50 ms instead of
+// 500 ms across 7.5 s .. 9.5 s, with the registers that say what the RLC
+// was doing:
+//
+//   RLC_STAT          0x4c04   the transition itself
+//   RLC_GPM_STAT      0x4e6e   what the GPM is executing
+//   RLC_SAFE_MODE     0x4ca0   2iv found this stuck with CMD set
+//   RLC_CGCG_CGLS_CTRL 0x4c49  clock gating - Linux's NON-PSP path writes 0
+//   RLC_PG_CNTL       0x4c43   power gating - likewise
+//   RLC_SRM_CNTL      0x4c80   the save/restore machine
+//
+// All seg1. The last two matter because `gfx_v10_0_rlc_resume`'s non-PSP
+// branch explicitly disables CG and PG before starting the RLC, and the
+// PSP+autoload branch - ours - never does. If CGCG or PG is enabled and the
+// RLC gates GFX off under us, that is a one-register fix. If instead the
+// GPM stops at a fault, it is not.
+//
+// Same discipline as 2js: no logging in the sampler, all timers armed once
+// from the calling thread (2fy), and an explicit "no transition" note so
+// absence reads as a result (2eh). Rides -rbgpumewatch - no new arg.
+#define RB_2JT_N 40u
+struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm; };
+static struct rb_2jt_s g_rb_2jt[RB_2JT_N];
+static uint32_t        g_rb_2jt_got = 0;
+
+void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
+    if (g_rb_2js_on != 1 || idx >= RB_2JT_N || !g_hw.rreg) {
+        return;
+    }
+    const uint32_t S1 = 0xa000u;
+    struct rb_2jt_s *e = &g_rb_2jt[idx];
+    e->ms   = static_cast<uint32_t>(rbgpu_2iq_ms());
+    e->me   = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+    e->rlcs = g_hw.rreg(g_hw.ctx, (S1 + 0x4C04u) * 4);
+    e->gpm  = g_hw.rreg(g_hw.ctx, (S1 + 0x4E6Eu) * 4);
+    e->safe = g_hw.rreg(g_hw.ctx, (S1 + 0x4CA0u) * 4);
+    e->cgcg = g_hw.rreg(g_hw.ctx, (S1 + 0x4C49u) * 4);
+    e->pg   = g_hw.rreg(g_hw.ctx, (S1 + 0x4C43u) * 4);
+    e->srm  = g_hw.rreg(g_hw.ctx, (S1 + 0x4C80u) * 4);
+    if (idx + 1 > g_rb_2jt_got) { g_rb_2jt_got = idx + 1; }
+}
+
+void rbgpu_rlcwatch_flush_2jt(void) {
+    if (g_rb_2js_on != 1) {
+        return;
+    }
+    int last_ok = -1, first_bad = -1;
+    for (unsigned i = 0; i < g_rb_2jt_got; i++) {
+        if (g_rb_2jt[i].ms == 0) continue;
+        if (g_rb_2jt[i].me == 0) { last_ok = static_cast<int>(i); }
+        else if (first_bad < 0)  { first_bad = static_cast<int>(i); }
+    }
+    char n[352];
+    if (first_bad < 0 || last_ok < 0) {
+        // Still say what the RLC looked like - a window with no transition
+        // is a result about WHERE the halt is, not a dead probe.
+        const struct rb_2jt_s *z = (g_rb_2jt_got > 0) ? &g_rb_2jt[0] : nullptr;
+        snprintf(n, sizeof(n),
+                 "n=%u NO TRANSITION in 7.5-9.5s (ok=%d bad=%d) | first "
+                 "me=%x rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x",
+                 g_rb_2jt_got, last_ok, first_bad,
+                 z ? z->me : 0, z ? z->rlcs : 0, z ? z->gpm : 0,
+                 z ? z->safe : 0, z ? z->cgcg : 0, z ? z->pg : 0,
+                 z ? z->srm : 0);
+    } else {
+        const struct rb_2jt_s *a = &g_rb_2jt[last_ok];
+        const struct rb_2jt_s *b = &g_rb_2jt[first_bad];
+        snprintf(n, sizeof(n),
+                 "OK @%ums rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x || "
+                 "HALT @%ums me=%x rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x",
+                 a->ms, a->rlcs, a->gpm, a->safe, a->cgcg, a->pg, a->srm,
+                 b->ms, b->me, b->rlcs, b->gpm, b->safe, b->cgcg, b->pg,
+                 b->srm);
+    }
+    rbgpu_nvram_note("rbgpu-mew2", n);
+    rbgpu_log("2jt: %s", n);
+    rbgpu_log("2jt: cgcg or pg non-zero at the halt points at the RLC gating "
+              "GFX under us, which Linux's non-PSP path prevents by writing "
+              "both to 0 - and that would be a one-register fix. gpm "
+              "changing at the same sample points at the GPM instead. safe "
+              "non-zero revives 2iv.");
+}
+
 void rbgpu_ring_probe_2hk(unsigned phase) {
     if (g_rb_2hk_on < 0) {
         g_rb_2hk_on = checkKernelArgument("-rbgpuringprobe") ? 1 : 0;
