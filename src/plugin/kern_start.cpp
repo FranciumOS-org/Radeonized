@@ -11063,7 +11063,11 @@ void rbgpu_mewatch_flush_2js(void) {
 // from the calling thread (2fy), and an explicit "no transition" note so
 // absence reads as a result (2eh). Rides -rbgpumewatch - no new arg.
 #define RB_2JT_N 40u
-struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm; };
+// 2jv (2026-10-19) adds `gfxoff`: SMUIO_GFX_MISC_CNTL's PWR_GFXOFF_STATUS,
+// 0=GFXOFF 1=transition out 2=NOT in GFXOFF 3=transition into GFXOFF
+// (yellow_carp_ppt.c:625-628). Read as a raw dword through the offset
+// rb_smu13_init already resolved, so no SMU protocol runs in the sampler.
+struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm, gfxoff; };
 static struct rb_2jt_s g_rb_2jt[RB_2JT_N];
 static uint32_t        g_rb_2jt_got = 0;
 
@@ -11081,6 +11085,14 @@ void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     e->cgcg = g_hw.rreg(g_hw.ctx, (S1 + 0x4C49u) * 4);
     e->pg   = g_hw.rreg(g_hw.ctx, (S1 + 0x4C43u) * 4);
     e->srm  = g_hw.rreg(g_hw.ctx, (S1 + 0x4C80u) * 4);
+    // 2jv: 0xFFFFFFFF stands for "no SMUIO dword resolved", so an unavailable
+    // read never reads as GFXOFF (2eh - absence is not a result).
+    if (g_smu.dw_gfx_misc_cntl) {
+        uint32_t misc = g_hw.rreg(g_hw.ctx, g_smu.dw_gfx_misc_cntl * 4);
+        e->gfxoff = (misc & 0x6u) >> 1;
+    } else {
+        e->gfxoff = 0xFFFFFFFFu;
+    }
     if (idx + 1 > g_rb_2jt_got) { g_rb_2jt_got = idx + 1; }
 }
 
@@ -11101,23 +11113,31 @@ void rbgpu_rlcwatch_flush_2jt(void) {
         const struct rb_2jt_s *z = (g_rb_2jt_got > 0) ? &g_rb_2jt[0] : nullptr;
         snprintf(n, sizeof(n),
                  "n=%u NO TRANSITION in 7.5-9.5s (ok=%d bad=%d) | first "
-                 "me=%x rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x",
+                 "me=%x rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x "
+                 "gfxoff=%x",
                  g_rb_2jt_got, last_ok, first_bad,
                  z ? z->me : 0, z ? z->rlcs : 0, z ? z->gpm : 0,
                  z ? z->safe : 0, z ? z->cgcg : 0, z ? z->pg : 0,
-                 z ? z->srm : 0);
+                 z ? z->srm : 0, z ? z->gfxoff : 0xFFFFFFFFu);
     } else {
         const struct rb_2jt_s *a = &g_rb_2jt[last_ok];
         const struct rb_2jt_s *b = &g_rb_2jt[first_bad];
         snprintf(n, sizeof(n),
-                 "OK @%ums rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x || "
-                 "HALT @%ums me=%x rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x",
+                 "OK @%ums rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x "
+                 "gfxoff=%x || HALT @%ums me=%x rlcs=%x gpm=%x safe=%x "
+                 "cgcg=%x pg=%x srm=%x gfxoff=%x",
                  a->ms, a->rlcs, a->gpm, a->safe, a->cgcg, a->pg, a->srm,
+                 a->gfxoff,
                  b->ms, b->me, b->rlcs, b->gpm, b->safe, b->cgcg, b->pg,
-                 b->srm);
+                 b->srm, b->gfxoff);
     }
     rbgpu_nvram_note("rbgpu-mew2", n);
     rbgpu_log("2jt: %s", n);
+    rbgpu_log("2jv: gfxoff=0 or 3 at the halt is GFXOFF, and 2ix's exclusion "
+              "of it was unsound on timing - gfxoff_status=2 was read in the "
+              "LATE diag, after the +160s recovery, never at the halt. "
+              "gfxoff=2 at both samples excludes it properly for the first "
+              "time. gfxoff=ffffffff means no SMUIO dword resolved.");
     rbgpu_log("2jt: cgcg or pg non-zero at the halt points at the RLC gating "
               "GFX under us, which Linux's non-PSP path prevents by writing "
               "both to 0 - and that would be a one-register fix. gpm "
@@ -11222,6 +11242,8 @@ void rbgpu_nocgcg_flush_2ju(void) {
     // What each of the three failure modes looks like, counted separately.
     unsigned refused = 0;    // post != 0: the write did not take
     unsigned restored = 0;   // pre != 0 on a tick after one that took
+    int      first_restore = -1;  // 2jv: boot 68 reported restored=1 and the
+                                  // note could not say WHERE - fixed here
     int      first_halt = -1;
     int      last_tick  = -1;
     bool     took_once  = false;
@@ -11230,7 +11252,10 @@ void rbgpu_nocgcg_flush_2ju(void) {
         last_tick = static_cast<int>(i);
         if (g_rb_2ju[i].post != 0) { refused++; }
         else                       { took_once = true; }
-        if (took_once && g_rb_2ju[i].pre != 0) { restored++; }
+        if (took_once && g_rb_2ju[i].pre != 0) {
+            restored++;
+            if (first_restore < 0) { first_restore = static_cast<int>(i); }
+        }
         if (g_rb_2ju[i].me != 0 && first_halt < 0) {
             first_halt = static_cast<int>(i);
         }
@@ -11250,13 +11275,19 @@ void rbgpu_nocgcg_flush_2ju(void) {
                           l->ms, l->pre, l->post, l->me);
         if (n1 < 0) { n1 = 0; }
         if (first_halt < 0) {
-            snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
-                     "NO HALT in 2.0-11.2s");
+            n1 += snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
+                           "NO HALT in 2.0-11.2s");
         } else {
             const struct rb_2ju_s *h = &g_rb_2ju[first_halt];
+            n1 += snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
+                           "HALT @%ums me=%x pre=%x post=%x",
+                           h->ms, h->me, h->pre, h->post);
+        }
+        if (first_restore >= 0 && n1 > 0 &&
+            static_cast<size_t>(n1) < sizeof(n)) {
+            const struct rb_2ju_s *r = &g_rb_2ju[first_restore];
             snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
-                     "HALT @%ums me=%x pre=%x post=%x",
-                     h->ms, h->me, h->pre, h->post);
+                     " | restore1 @%ums pre=%x", r->ms, r->pre);
         }
     }
     rbgpu_nvram_note("rbgpu-cgcg", n);

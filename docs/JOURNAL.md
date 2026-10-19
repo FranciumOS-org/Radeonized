@@ -14172,3 +14172,89 @@ less likely of the two failure modes.
 
 Build `5695E063-B181-3BB8-84AC-EC17E92B114D`. New note `rbgpu-cgcg`, added
 to `plugin_check.sh` and `metal_check.sh`.
+
+## 2jv (2026-10-19) — CGCG is REFUTED, and the halt value is the CP's reset state
+
+Boot 68, nonce fresh, build `5695E063` loaded (`kexts.txt`).
+
+```
+rbgpu-cgcg = b=68 n=24 refused=0 restored=1
+  first @2334ms  pre=363f post=0 me=0
+  HALT  @9135ms  pre=0    post=0 me=15000000
+  last  @11535ms pre=0    post=0 me=15000000
+
+rbgpu-mew  = b=68 OK i=15 @8335ms me=0 cps=0 rlcs=0 bl=c0000001 srst=0
+                || HALT i=16 @8835ms me=15000000 cps=90038600 rlcs=0 bl=c0000001 srst=0
+rbgpu-mew2 = b=68 OK   @8785ms rlcs=0 gpm=140016 safe=0 cgcg=0 pg=0 srm=3
+                || HALT @8835ms rlcs=0 gpm=140016 safe=0 cgcg=0 pg=0 srm=3 me=15000000
+```
+
+**`refused = 0`: the write took.** `pre=363f -> post=0` on the first tick,
+and `0` at every later read including the halt sample and the last tick at
+11535 ms. So `RLC_CGCG_CGLS_CTRL` is host-writable — a lever that works,
+where `CP_ME_CNTL` refuses everything (2jl). RLC registers are not
+host-locked as a class.
+
+**And the CP halted anyway, at 8835 ms** — boot 66's 8827 ms, boot 65's
+8829 ms. **2ju's hypothesis is refuted on its own pre-registered terms.**
+
+The refutation is stronger than "we turned it off and it still happened".
+`RLC_GPM_STAT` reads `0x140016` at **both** samples, so
+`CNTX_IDLE_BEING_PROCESSED` never sets at all this boot: disabling CGCG
+stopped the idle handler from running, and the halt did not move. 2jt's
+bit 5 was a **correlate**, eliminated by positive control rather than by
+argument. `RLC_BUSY` is also clear and `RLC_STAT = 0` at the halt, where
+boot 66 had the RLC busy with `rlcs = 0x25` — so the halt lands at ~8.8 s
+whether the RLC is busy or quiet, which argues the RLC is not the agent.
+
+Defect in the 2ju note, fixed here: `restored=1` was a bare count, so it
+could not say which tick or what value. It now prints `restore1 @<ms>
+pre=<v>`.
+
+### What `0x15000000` actually is, which reframes everything
+
+Decoded against `gc_10_3_0_sh_mask.h`: bits 24/26/28 =
+`CE_HALT|PFP_HALT|ME_HALT`, and **bits 16-21 — every `CE/PFP/ME_PIPE*_RESET`
+— are clear.** It is the CP's power-on state, and the exact value
+`gfx_v10_0_cp_gfx_enable(adev, false)` writes. Boot 65 established that all
+four `CP_ME_CNTL` writes that boot wrote **0**, so no software on this
+machine writes `0x15000000`.
+
+A GFX block that has been **powered down** presents its reset defaults and
+drops writes. That single mechanism accounts for every observation that has
+been treated as separate:
+
+| observation | under a powered-down GFX |
+|---|---|
+| `me = 0x15000000` with no reset bits | the register's own default |
+| every write to it refused (2ix) | writes to an unpowered block are dropped |
+| `CE_STEP` will not stick (2jl) | same |
+| `RLC_STAT = 0`, `RLC_BUSY` clear | the RLC quiesced after saving state |
+| `srst = 0` | correct — this is not a soft reset |
+| deterministic ~8.8 s, three boots | an idle timer after the last work |
+| 2hp's +160 s `me=0 cps=0`, ring rewound | the exit, restoring saved state |
+
+So the live candidate is **GFXOFF**, and 2ix's exclusion of it does not
+hold: `gfxoff_status = 2` ("Not in GFXOFF") was read in the **late diag**,
+after the +160 s recovery, and never at 8.8 s. A value read without
+establishing when it was meaningful — the recurring error, 26th instance.
+
+### The measurement
+
+2jv adds `gfxoff` to the 2jt fine bank: `SMUIO_GFX_MISC_CNTL`'s
+`PWR_GFXOFF_STATUS`, **0 = GFXOFF, 1 = transition out, 2 = NOT in GFXOFF,
+3 = transition into GFXOFF** (`yellow_carp_ppt.c:625-628`). Read as a raw
+dword through the offset `rb_smu13_init` already resolved, so no SMU
+protocol runs inside the sampler — one MMIO read per sample, alongside the
+seven already there. `0xFFFFFFFF` stands for "no SMUIO dword resolved", so
+an unavailable read can never be mistaken for GFXOFF (2eh).
+
+| `rbgpu-mew2` gfxoff | means |
+|---|---|
+| `0` or `3` at the halt | GFXOFF is the mechanism; 2ix's exclusion falls and the fix is an SMU `DisallowGfxOff`-shaped one |
+| `2` at both samples | GFXOFF excluded **properly** for the first time, at the moment that matters |
+| `ffffffff` | SMUIO never resolved; the read is unavailable, not negative |
+
+`-rbgpunocgcg` stays IN for this boot: it changes the RLC's behaviour
+measurably (the idle handler stops) and holding it constant keeps boot 68
+comparable. It is not a fix and must not be described as one.
