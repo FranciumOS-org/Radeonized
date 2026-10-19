@@ -11075,8 +11075,29 @@ void rbgpu_mewatch_flush_2js(void) {
 // the 500 ms bank shows CP_STAT 0 -> 0x90038600, so the CP went BUSY and then
 // halted. Whether a fault state appears BEFORE the halt or only with it is
 // what 50 ms resolution can answer and 500 ms cannot.
+// 2jy (2026-10-19) adds `rbb` (CP_RB0_BASE, dword 0x1DE0 seg0) and `rbc`
+// (CP_RB0_CNTL, 0x1DE1): a discriminator between two hypotheses this project
+// has conflated throughout, mine included.
+//
+// Boot 71 put the whole transition inside one 50 ms sample: CP_STAT
+// 0 -> 0x90038600, GRBM_STATUS 0x3028 -> 0xa0003028 (GUI_ACTIVE + CP_BUSY)
+// and CP_ME_CNTL -> 0x15000000, all together, from a CP that was COMPLETELY
+// idle (cps=0, so even CPF_BUSY clear - the first genuinely clean "before"
+// this project has captured).
+//
+// So either (a) something sets the halt bits on a live CP block, or (b) the
+// CP block hangs and the register simply READS BACK its power-on value. (b)
+// explains the refused writes and 2jl's CE_STEP without any agent at all,
+// and nothing measured so far separates the two.
+//
+// CP_RB0_BASE separates them. It reads 0xffbfe000 at p0 - a value Apple
+// PROGRAMMED, not a default. At the halt:
+//   rbb still 0xffbfe000  -> the block answers reads correctly, so
+//                            CP_ME_CNTL's value is real and something set it
+//   rbb 0 or garbage      -> the whole block reverted or stopped answering,
+//                            and the halt bits are a SYMPTOM, not a cause
 struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm, gfxoff,
-                           cps, grbm; };
+                           cps, grbm, rbb, rbc; };
 static struct rb_2jt_s g_rb_2jt[RB_2JT_N];
 static uint32_t        g_rb_2jt_got = 0;
 
@@ -11104,6 +11125,8 @@ void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     }
     e->cps  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F40u) * 4);
     e->grbm = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA4u) * 4);
+    e->rbb  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x1DE0u) * 4);   // CP_RB0_BASE
+    e->rbc  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x1DE1u) * 4);   // CP_RB0_CNTL
     if (idx + 1 > g_rb_2jt_got) { g_rb_2jt_got = idx + 1; }
 }
 
@@ -11143,12 +11166,20 @@ void rbgpu_rlcwatch_flush_2jt(void) {
                  b->srm, b->gfxoff);
         size_t at = strlen(n);
         if (at < sizeof(n)) {
-            snprintf(n + at, sizeof(n) - at, " | cps %x->%x grbm %x->%x",
-                     a->cps, b->cps, a->grbm, b->grbm);
+            snprintf(n + at, sizeof(n) - at,
+                     " | cps %x->%x grbm %x->%x rbb %x->%x rbc %x->%x",
+                     a->cps, b->cps, a->grbm, b->grbm,
+                     a->rbb, b->rbb, a->rbc, b->rbc);
         }
     }
     rbgpu_nvram_note("rbgpu-mew2", n);
     rbgpu_log("2jt: %s", n);
+    rbgpu_log("2jy: rbb unchanged across the halt means the CP block answers "
+              "reads, so CP_ME_CNTL's 0x15000000 is a real value something "
+              "SET. rbb going to 0 or garbage means the block reverted or "
+              "stopped answering and the halt bits are a SYMPTOM - which "
+              "would explain the refused writes and 2jl's CE_STEP with no "
+              "agent at all.");
     rbgpu_log("2jv: gfxoff=0 or 3 at the halt is GFXOFF, and 2ix's exclusion "
               "of it was unsound on timing - gfxoff_status=2 was read in the "
               "LATE diag, after the +160s recovery, never at the halt. "
