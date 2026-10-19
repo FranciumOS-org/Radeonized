@@ -14502,3 +14502,38 @@ means "not in this page" and **not** "the ring does not write it" (2eh).
 A hit is strong; a miss is weak.
 
 Build `1BF08136`.
+
+### 2jz addendum (2026-10-19) — boot 75 confirms 2jy at n=2, and the capture-timing advice was wrong
+
+Boot 75 ran armed while the desktop app was down, so no in-boot capture was
+taken. Live NVRAM afterwards, read nonce-first (2iz):
+
+```
+rbgpu-mew  = b=75 OK i=15 @8330ms me=0 cps=0 || HALT i=16 @8830ms me=15000000 cps=90038600
+rbgpu-mew2 = b=75 OK @8630ms ... || HALT @8680ms me=15000000 ...
+             | cps 0->90038600 grbm 3028->a0003028
+             | rbb ffbfe000->ffbfe000 rbc a00e10->a00e10
+rbgpu-ring = b=75 p=0 ... (no p=1, no p=2)
+rbgpu-pm4  = b=67 ...                      <-- STALE
+```
+
+**2jy is confirmed at n=2.** `rbb`/`rbc` unchanged across the halt in two
+independent boots, halt at 8680/8830 ms against boot 74's 8765/8865 ms. The
+CP block is alive and something wrote `0x15000000`.
+
+**2jz's answer is NOT in, and the cause was my own advice.** `rbgpu-pm4` is
+written by `rbgpu_ringdump_2hw`, called under `if (phase == 1)` -
+`kRingMs[3] = { 12000, 100000, 160000 }`, so **phase 1 is +100 s**. The
+"~30 s past the lock screen is enough" guidance given earlier in this
+session was derived from the 2jt/2ju timer banks, which finish at ~11.6 s,
+and it is correct **only for `rbgpu-mew2` and `rbgpu-cgcg`**. Any note
+written by the ring probe's later phases - `rbgpu-pm4`, `rbgpu-ring` p1/p2,
+`rbgpu-fence` - needs the capture **past 160 s**. Boot 75's `p=0`-only ring
+note is the evidence.
+
+**Rule, so this is not re-learned:** before shortening the wait, check which
+phase writes the note the experiment reads. The timer banks and the ring
+probe are on different schedules (11.6 s vs 12/100/160 s) and a note's
+nonce being fresh for one does not make it fresh for the other.
+
+The next boot repeats 2jz unchanged, captured past 160 s.
