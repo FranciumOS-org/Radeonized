@@ -14439,3 +14439,66 @@ Apple *programmed*, not a default.
 2jy adds `rbb` (`CP_RB0_BASE`, dword 0x1DE0 seg0) and `rbc`
 (`CP_RB0_CNTL`, 0x1DE1) to the 50 ms bank. Read-only, two more MMIO reads
 per sample. No boot-arg change. Build `4663E8C8`.
+
+## 2jz (2026-10-19) — the CP block is ALIVE, so something wrote the halt; scan the ring for the write
+
+Boot 74 (`rbgpu-boot = 74`, two extra armed boots happened; this one has
+the right build `4663E8C8` and a fresh nonce, so the data stands).
+
+```
+rbgpu-mew2 = b=74 OK @8715ms ... || HALT @8765ms me=15000000 ...
+             | cps 0->90038600  grbm 3028->a0003028
+             | rbb ffbfe000->ffbfe000   rbc a00e10->a00e10
+```
+
+**2jy's discriminator comes down on (a).** `CP_RB0_BASE` and `CP_RB0_CNTL`
+are **unchanged across the halt** and still hold Apple's programmed values.
+The CP block answers the register bus and retains state, so
+`CP_ME_CNTL = 0x15000000` is a **real value something wrote**. Hypothesis
+(b) - a hung block reading back its power-on defaults - is **REFUTED**, and
+with it the suggestion that the elimination chain since 2ix was chasing a
+ghost. It was not.
+
+This is the longer of the two branches, as 2jy said it would be. But it
+sharpens the statement a long way past where it was:
+
+> It is not that the CP block is unresponsive. **`CP_ME_CNTL` specifically
+> is arbitrated away from the host while its neighbours in the same block
+> are not.** `CP_RB0_BASE`/`CP_RB0_CNTL` keep their programmed values right
+> through the halt, while every write to `CP_ME_CNTL` is refused (2ix) and
+> `CE_STEP` will not stick (2jl).
+
+2ix counted every host write path - `g_hw`, Apple's accessor, Apple's own
+driver code - and **every one wrote 0**. So the writer is on the chip. Two
+candidates, and they are distinguishable:
+
+1. **The CP writes it itself**, executing a PM4 packet from the ring. This
+   fits without strain: the value is real, a write caused it, and no host
+   counter could ever see it.
+2. **The RLC writes it.** 2jh stopped the RLC outright and `CP_ME_CNTL` was
+   still refused, which 2jo narrowed to "not a *running* RLC actively
+   holding it" - so this is not excluded.
+
+### The measurement
+
+2jz extends 2hx's ring scan - a page already mapped and already validated
+as PM4 by the `t3` check - to look for the write itself. Three packet forms
+can reach a GC register and all three are scanned:
+
+| packet | op | register field |
+|---|---|---|
+| `WRITE_DATA` | 0x37 | `dw2`, absolute dword offset |
+| `SET_CONFIG_REG` | 0x68 | `dw1 + 0x2000` |
+| `SET_UCONFIG_REG` | 0x79 | `dw1 + 0xc000` |
+
+`CP_ME_CNTL` is dword **0x0F56**, inside `SET_CONFIG_REG`'s range. Any hit
+prints the form, the dword index in the page, the value, and flags it when
+`val & 0x15000000`. Read-only, no new risk over 2hx, no boot-arg change.
+
+**Stated before the boot, so it cannot be read as a result afterwards:**
+this is **one 1024-dword page** of the ring. The halt could be written from
+an indirect buffer, or from further along the ring, or by the RLC. `noME`
+means "not in this page" and **not** "the ring does not write it" (2eh).
+A hit is strong; a miss is weak.
+
+Build `1BF08136`.
