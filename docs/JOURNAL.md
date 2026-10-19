@@ -13658,3 +13658,94 @@ never MEC2 (`firmware/linux/yellow_carp_mec2.bin` is on disk, unused),
 RLCV, the RLC SR list, or MEC JT. Whether GC 10.3 wants those as separate
 entries is unverified and is the next thing to read in
 `_gc_10_3_get_fw_constants`.
+
+## 2jp (2026-10-19) — the RLC has been booting Navi 21's LX6 firmware
+
+Static work, no boot spent. The user asked to read
+`_gc_10_3_get_fw_constants` and compare its entry set against 2aj's.
+
+**Apple's GC 10.3 path asks for 21 firmware entries.** The jump table at
+`0x126b4624` dispatches `r12d` 0..0x14, and each case stores a descriptor
+and passes an index in `esi`:
+
+```
+0x0  rlc_srlist_cntl      0x8  mec_jt_ucode        0x10 global_tap_delays
+0x1  rlc_srlist_gpm_mem   0x9  mec_jt_ucode (2)    0x11 se0_tap_delays
+0x2  rlc_srlist_srm_mem   0xc  rlcp_ucode          0x12 se1_tap_delays
+0x3  rlc_ucode            0xd  rlc_lx6_iram_ucode  0x13 se2_tap_delays
+0x4  me_ucode             0xe  rlc_lx6_dram_ucode  0x14 se3_tap_delays
+0x5  ce_ucode             0xf  rlc_toc
+0x6  pfp_ucode
+0x7  mec_ucode
+```
+
+**2aj substitutes seven of them.** The rest are Apple's **Navi 21**
+images - including all three RLC save/restore lists and, critically,
+`rlc_lx6_iram`/`rlc_lx6_dram`: the firmware for the processor *inside the
+RLC*, which is what runs the autoload.
+
+**And every missing piece is already in a file we have.**
+`firmware/linux/yellow_carp_rlc.bin` is header **v2.2, ip 10.3** - this
+chip - and an `rlc_firmware_header_v2_2` describes **six** payloads in the
+one blob:
+
+```
+main rlc ucode  size 0x6200   off 0x100     <- the only one 2aj swaps
+srlist_cntl     size 0x250    off 0x6300
+srlist_gpm      size 0x600    off 0x6550
+srlist_srm      size 0x4880   off 0x6b50
+rlc_iram (LX6)  size 0x10200  off 0xb3d0
+rlc_dram (LX6)  size 0x10200  off 0x1b5d0
+```
+
+`0x1b5d0 + 0x10200 = 0x2b7d0`, exactly the file length, so the parse is
+self-checking.
+
+**The TTL ids are identified from our own log, with three EXACT size
+matches.** `_IpiSetFwEntry` registered 21 entries in the
+`logs/20261019-001216-plugin` capture:
+
+| id | Apple's size | ours | |
+|---|---|---|---|
+| 26 | `0x250` | srlist_cntl `0x250` | **exact** |
+| 27 | `0x600` | srlist_gpm `0x600` | **exact** |
+| 28 | `0x47a0` | srlist_srm `0x4880` | same role, ours larger |
+| 9 | `0x6200` | rlc main `0x6200` | exact - already swapped |
+| 29 | `0x10200` | rlc_iram `0x10200` | **exact** |
+| 30 | `0x4200` | rlc_dram `0x10200` | same role, ours larger |
+
+Three exact matches on ids never touched before is strong identification,
+not a guess.
+
+**It also vindicates 2al.** `rlcp`, `rlcv` and the five tap-delay payloads
+are *not* in this file - the header is v2.2 and stops before those fields -
+so "linux-firmware ships no yellow_carp equivalents", which 2al asserted
+when it decided to skip the Navi21 TAP_DELAYS, is now checked and true.
+
+### What was built
+
+- `tools/fw_extract_rlc.py` - parses the v2.2 header, verifies `ip 10.3`,
+  carves the five payloads and emits C arrays with their sizes. Refuses a
+  header that is not v2.2/10.3 rather than guessing offsets.
+- `src/plugin/fw_yellow_carp_rlc.cpp` - generated, 934 KB of source.
+- 2aj's switch extended with ids 26/27/28/29/30, behind **`-rbgpurlcsub`**,
+  OUT by default. The gate resolves lazily at the first `_IpiSetFwEntry`
+  because the entries are registered before any initialiser of ours could
+  run, and it logs both ways so "off" cannot be read as "failed".
+
+Build `BDAE8495-C541-3517-9B6F-B2AFCD75AAC2`.
+
+### Risk, stated rather than buried
+
+Two of the five are size mismatches where **ours is larger** - id 28
+(`0x4880` vs `0x47a0`) and id 30 (`0x10200` vs `0x4200`). 2aj writes
+pointer *and* size together so the PSP is told the truth, but whether the
+PSP accepts a larger image for these entries is unknown, and a rejected
+entry could fail `_psp_np_fw_load` the way the Navi21 TAP_DELAYS did
+before 2al skipped them. If that happens, `rbgpu-prog` will stop earlier
+than `s=6` and the arg comes straight back out.
+
+**Not claimed:** that this fixes anything. What is established is that the
+RLC has been running Navi 21's LX6 image and Navi 21's save/restore lists
+on a GC 10.3.3 part, that correct ones for this chip exist in a file we
+already ship, and that Apple asks for them by ids we can now name.
