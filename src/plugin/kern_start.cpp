@@ -11374,6 +11374,82 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "elimination list stands.");
     }
 
+    // 2jf (2026-10-19): STOP THE RLC, THEN WRITE. The deferred experiment,
+    // now due.
+    //
+    // Deferred before 2iy on the grounds that the un-halt might never run.
+    // 2jb settled that: it runs once at 236 ms, through Apple's own ext2
+    // write path, and CP_ME_CNTL does not move. So the question is no
+    // longer "does anyone try" but "who is holding the register", and this
+    // is the test that names them.
+    //
+    // Linux's direct-load path does not merely enter safe mode - it STOPS
+    // the RLC. gfx_v10_0_rlc_stop writes RLC_CNTL = 0, clearing
+    // RLC_ENABLE_F32, and only then does cp_gfx_enable touch CP_ME_CNTL.
+    // 2iv forced RLC_SAFE_MODE to 0 and the write was still refused, but
+    // safe mode is a handshake with a RUNNING RLC; this switches the F32
+    // engine off entirely. Different thing, never tried.
+    //
+    //   me 15000000 -> 0   the RLC owned it. The link 2ix INFERRED from
+    //                      Linux is then MEASURED on this chip, and the
+    //                      road is a full host-side CP load.
+    //   me unchanged       the RLC is not the gate. 2ix's root cause is
+    //                      well-supported and wrong about the mechanism,
+    //                      which redirects everything.
+    //
+    // Honest about the risk: this switches off the RLC's F32 engine on a
+    // live GPU. Gating is already off (-rbgpunogates), the GPU retires no
+    // work as it is, and DCN is a separate block - but it is a chip-state
+    // change, so it is behind its own arg and OUT by default. RLC_CNTL is
+    // restored before the function returns, and the restore is read back
+    // so a failed restore cannot be mistaken for a clean one.
+    //
+    // seg1 g_hw writes are PROVEN to work here: 2iw's control cell A wrote
+    // SCRATCH_REG0 (seg1 0x2040) and it took. RLC_CNTL is seg1 too, so the
+    // stop itself is on a path with a positive control behind it.
+    if (phase == 0 && g_hw.rreg && g_hw.wreg &&
+        checkKernelArgument("-rbgpurlcstop")) {
+        const uint32_t kRLCC = (0xa000u + 0x4c00u) * 4;
+        const uint32_t kMEb  = (0x1260u + 0x0F56u) * 4;
+
+        uint32_t rlc_was = g_hw.rreg(g_hw.ctx, kRLCC);
+        uint32_t me_was  = g_hw.rreg(g_hw.ctx, kMEb);
+
+        g_hw.wreg(g_hw.ctx, kRLCC, 0);
+        uint32_t rlc_off = g_hw.rreg(g_hw.ctx, kRLCC);
+
+        void **wvt = *reinterpret_cast<void ***>(obj);
+        auto wracc = reinterpret_cast<void (*)(void *, uint32_t, uint32_t)>(
+            wvt ? wvt[0x120 / sizeof(void *)] : nullptr);
+        uint32_t me_off = resolve(obj, RB_2HM_CP_ME_CNTL);
+
+        if (wracc) wracc(obj, me_off, 0);
+        uint32_t me_acc = g_hw.rreg(g_hw.ctx, kMEb);
+        g_hw.wreg(g_hw.ctx, kMEb, 0);
+        uint32_t me_dir = g_hw.rreg(g_hw.ctx, kMEb);
+
+        g_hw.wreg(g_hw.ctx, kRLCC, rlc_was);          // restore
+        uint32_t rlc_back = g_hw.rreg(g_hw.ctx, kRLCC);
+        uint32_t me_after = g_hw.rreg(g_hw.ctx, kMEb);
+
+        char r[320];
+        snprintf(r, sizeof(r),
+                 "rlc %x->%x %s | me %x acc=%x dir=%x %s | "
+                 "restore %x %s | me_after %x",
+                 rlc_was, rlc_off, (rlc_off == 0) ? "STOPPED" : "REFUSED",
+                 me_was, me_acc, me_dir,
+                 (me_acc == 0 || me_dir == 0) ? "TOOK" : "STILL REFUSED",
+                 rlc_back, (rlc_back == rlc_was) ? "OK" : "FAILED",
+                 me_after);
+        rbgpu_nvram_note("rbgpu-rstop", r);
+        rbgpu_log("2jf: %s", r);
+        rbgpu_log("2jf: me TOOK with the RLC stopped means the RLC was "
+                  "holding CE/PFP/ME and 2ix's inferred link is measured. "
+                  "STILL REFUSED means the RLC is not the gate and the "
+                  "root cause needs rethinking. rlc REFUSED means the stop "
+                  "itself did not land and the cell says nothing.");
+    }
+
     // 2ix (2026-10-18): did the RLC autoload handshake ever COMPLETE?
     //
     // 2iw closed the confound and vindicated the instrument:
