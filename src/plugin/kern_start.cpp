@@ -11374,6 +11374,79 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "elimination list stands.");
     }
 
+    // 2jk (2026-10-19): the four RLC_HYP registers nobody has read.
+    //
+    // Straight from Linux's own gfx_v10_0.c, which this project may use
+    // freely (GPL, docs/linux-ref, UPSTREAM.md). Two things in it change
+    // the picture, and both are READ-ONLY to check.
+    //
+    // 1. gfx_v10_0_wait_for_rlc_autoload_complete waits on TWO conditions:
+    //
+    //        cp_status == 0  AND  BOOTLOAD_COMPLETE == 1
+    //
+    //    Every boot of ours reads CP_STAT at 0x90078600 / 0x94038600.
+    //    Not zero. So the wait's FIRST half fails too, and "the latch
+    //    never sets" may be the second symptom rather than the cause.
+    //
+    // 2. gfx_v10_0_rlc_backdoor_autoload_enable - the AMDGPU_FW_LOAD_
+    //    RLC_BACKDOOR_AUTO path, a third load type neither 2am nor 2ix
+    //    considered - programs the RLC to fetch the bundle itself:
+    //
+    //        RLC_HYP_BOOTLOAD_ADDR_LO/HI = autoload buffer + RLC_G offset
+    //        RLC_HYP_BOOTLOAD_SIZE       = RLC_G size
+    //
+    //    and REFUSES to proceed unless
+    //
+    //        RLC_HYP_RESET_VECTOR & (COLD_BOOT_EXIT | VDDGFX_EXIT)
+    //        RLC_CNTL.RLC_ENABLE_F32 == 0   ("RLC ROM should halt itself")
+    //
+    //    Boot 60 read RLC_CNTL = 1. Our RLC is RUNNING, which is the
+    //    PSP-autoload state, not the backdoor state.
+    //
+    // So: if BOOTLOAD_ADDR reads 0, nothing ever pointed the RLC at an
+    // autoload bundle and `complete=0` needs no further explanation. If
+    // it is non-zero, something did, and the address is a lead of its own.
+    // And RESET_VECTOR says whether the backdoor path is even available
+    // on this part before a single byte is written.
+    //
+    // Offsets, all seg1, from docs/linux-ref/gc_10_3_0_offset.h:
+    //   RLC_HYP_RESET_VECTOR     0x5b54   bit0 COLD_BOOT_EXIT
+    //   RLC_HYP_BOOTLOAD_SIZE    0x5b5c   bit1 VDDGFX_EXIT
+    //   RLC_HYP_BOOTLOAD_ADDR_LO 0x5b5d
+    //   RLC_HYP_BOOTLOAD_ADDR_HI 0x5b5e
+    //
+    // READ-ONLY. No arg, no gate, no chip-state change - it costs four
+    // register reads in a function that already reads a dozen, and it
+    // rides every armed boot from here.
+    if (phase == 0 && g_hw.rreg) {
+        const uint32_t kS1 = 0xa000u;
+        uint32_t rv  = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b54u) * 4);
+        uint32_t bsz = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b5cu) * 4);
+        uint32_t blo = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b5du) * 4);
+        uint32_t bhi = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b5eu) * 4);
+        uint32_t cnt = g_hw.rreg(g_hw.ctx, (kS1 + 0x4c00u) * 4);
+        uint32_t cps = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0f40u) * 4);
+
+        char h[288];
+        snprintf(h, sizeof(h),
+                 "rv=%x cold=%u vddgfx=%u | bootload %llx sz=%x %s | "
+                 "rlc_cntl=%x f32=%u | cp_stat=%x %s",
+                 rv, rv & 1u, (rv >> 1) & 1u,
+                 ((unsigned long long)bhi << 32) | blo, bsz,
+                 (blo || bhi) ? "SET" : "ZERO - nothing pointed the RLC anywhere",
+                 cnt, cnt & 1u,
+                 cps, (cps == 0) ? "idle (Linux's wait would pass this half)"
+                                 : "NOT ZERO - Linux's wait fails here too");
+        rbgpu_nvram_note("rbgpu-hyp", h);
+        rbgpu_log("2jk: %s", h);
+        rbgpu_log("2jk: bootload ZERO means no autoload bundle was ever "
+                  "pointed at and complete=0 is explained. cold/vddgfx "
+                  "both 0 means Linux's backdoor path would refuse this "
+                  "part outright. f32=1 means the RLC is running, which "
+                  "is the PSP-autoload state and NOT what the backdoor "
+                  "path expects.");
+    }
+
     // 2ji (2026-10-19): is CP_ME_CNTL write-PROTECTED, or does the CP
     // RE-HALT itself?
     //

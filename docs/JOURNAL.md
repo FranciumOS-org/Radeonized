@@ -13366,3 +13366,63 @@ switch. Whether GC 10.3 wants a MEC2 entry at all is unverified. Also
 noted, nothing resting on it: Apple's static `_gc_10_3_rlc_toc` first
 record carries a size field of `0x600`, and our injected `yc_toc_img` is
 `0x600` bytes.
+
+## 2jk (2026-10-19) — Linux names a third load path, and two registers nobody read
+
+The user asked for NootRX; its licence forbids AI use (2jj), so the
+question went to the source this project has always been entitled to use:
+`docs/linux-ref/gfx_v10_0.c`, GPL, recorded in UPSTREAM.md.
+
+**Two findings, both read-only to check.**
+
+**1. The autoload wait has TWO conditions, and we only ever watched one.**
+
+```c
+static int gfx_v10_0_wait_for_rlc_autoload_complete(...)
+    cp_status      = RREG32(mmCP_STAT);
+    bootload_status= RREG32(mmRLC_RLCS_BOOTLOAD_STATUS);
+    if ((cp_status == 0) && BOOTLOAD_COMPLETE == 1) break;
+```
+
+Every boot of ours reads `CP_STAT` at `0x90078600` / `0x94038600`. **Not
+zero.** So Linux's wait fails on its *first* half too, and `complete=0`
+may be the second symptom rather than the cause. Twelve milestones have
+treated the latch as the sole condition.
+
+**2. There is a THIRD load type: `AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO`.**
+Neither 2am nor 2ix considered it. `gfx_v10_0_rlc_backdoor_autoload_enable`
+builds the bundle from the TOC and points the RLC at it itself:
+
+```c
+WREG32(mmRLC_HYP_BOOTLOAD_ADDR_HI/LO, autoload_gpu_addr + RLC_G offset);
+WREG32(mmRLC_HYP_BOOTLOAD_SIZE,       RLC_G size);
+if (!(RREG32(mmRLC_HYP_RESET_VECTOR) & (COLD_BOOT_EXIT|VDDGFX_EXIT)))
+        return -EINVAL;
+if (RREG32(mmRLC_CNTL) & RLC_ENABLE_F32)   /* "RLC ROM should halt itself" */
+        return -EINVAL;
+```
+
+**Boot 60 read `RLC_CNTL = 1`.** Our RLC is *running* — the PSP-autoload
+state, and precisely what the backdoor path refuses to start from. (It
+also recontextualises 2jh: stopping the RLC was the right instinct, but
+the stop belongs at the *start* of a load sequence, not as an isolated
+poke at a register.)
+
+**We have never read `RLC_HYP_RESET_VECTOR`, `RLC_HYP_BOOTLOAD_ADDR_LO/HI`
+or `RLC_HYP_BOOTLOAD_SIZE`.** All seg1, from `gc_10_3_0_offset.h`:
+`0x5b54`, `0x5b5d`, `0x5b5e`, `0x5b5c`; masks `COLD_BOOT_EXIT 0x1`,
+`VDDGFX_EXIT 0x2`.
+
+`rbgpu-hyp`, read-only, no boot-arg, on every armed boot from here:
+
+| reading | means |
+|---|---|
+| `bootload ... ZERO` | nothing ever pointed the RLC at an autoload bundle — `complete=0` is explained, and the fix is to point it |
+| `bootload ... SET` | something did, and the address is a lead of its own |
+| `cold=0 vddgfx=0` | Linux's backdoor path would refuse this part outright |
+| `f32=1` | the RLC is running — PSP-autoload state, not backdoor state |
+| `cp_stat` ≠ 0 | Linux's wait fails on the half we never watched |
+
+Build `47B561A5-164B-3BF5-BC47-F8B000DC663C`. It rides alongside 2ji,
+which is still worth having for the same boot: 2ji says whether
+`CP_ME_CNTL` is worth any further effort at all.
