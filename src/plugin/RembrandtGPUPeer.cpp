@@ -1102,8 +1102,9 @@ extern void rbgpu_ring_probe_2hk(unsigned phase);
 static thread_call_t     g_rbgpuMeCalls[RB_2JS_CALLS] = { nullptr };
 extern void rbgpu_mewatch_sample_2js(unsigned idx);
 extern void rbgpu_mewatch_flush_2js(void);
-// 2jt: the fine bank - 40 samples, 50 ms apart, 7.5 s .. 9.5 s.
-#define RB_2JT_CALLS 40
+// 2jt: the fine bank - 2jx widened it to 60 samples, 50 ms apart,
+// 6.5 s .. 9.5 s, after boot 70's halt at 7345 ms fell outside 7.5 s.
+#define RB_2JT_CALLS 60
 static thread_call_t     g_rbgpuRlcCalls[RB_2JT_CALLS] = { nullptr };
 extern void rbgpu_rlcwatch_sample_2jt(unsigned idx);
 extern void rbgpu_rlcwatch_flush_2jt(void);
@@ -1283,8 +1284,8 @@ void rbgpu_progwatch_start(void) {
               "un-halt at ~341 ms and the +12 s ring probe.",
               marmed, RB_2JS_CALLS);
 
-    // 2jt: 7.5 s .. 9.5 s in 50 ms steps, around the 8328/8829 ms bracket
-    // boot 65 found.
+    // 2jt: 6.5 s .. 9.5 s in 50 ms steps (2jx widened it) - covers boot 70's
+    // 7345 ms halt as well as the 8827/8835/8839 ms baseline.
     unsigned rarmed2 = 0;
     for (unsigned i = 0; i < RB_2JT_CALLS; i++) {
         g_rbgpuRlcCalls[i] = thread_call_allocate(
@@ -1294,11 +1295,11 @@ void rbgpu_progwatch_start(void) {
             continue;
         }
         uint64_t rd2 = 0;
-        clock_interval_to_deadline(7500 + i * 50, kMillisecondScale, &rd2);
+        clock_interval_to_deadline(6500 + i * 50, kMillisecondScale, &rd2);
         thread_call_enter_delayed(g_rbgpuRlcCalls[i], rd2);
         rarmed2++;
     }
-    rbgpu_log("2jt: RLC watch armed, %u of %u timers (7.5 s .. 9.5 s, 50 ms "
+    rbgpu_log("2jt: RLC watch armed, %u of %u timers (6.5 s .. 9.5 s, 50 ms "
               "apart -> rbgpu-mew2).", rarmed2, RB_2JT_CALLS);
 
     // 2ju: 2.0 s .. 11.2 s in 400 ms steps. Every tick writes

@@ -11062,7 +11062,11 @@ void rbgpu_mewatch_flush_2js(void) {
 // Same discipline as 2js: no logging in the sampler, all timers armed once
 // from the calling thread (2fy), and an explicit "no transition" note so
 // absence reads as a result (2eh). Rides -rbgpumewatch - no new arg.
-#define RB_2JT_N 40u
+// 2jx (2026-10-19): widened 40 -> 60 and the window 7.5-9.5 s -> 6.5-9.5 s.
+// Boot 70 moved the halt to 7345 ms with -rbgpunosrm and the fixed 7.5 s
+// start missed it entirely (NO TRANSITION), so cps/grbm were never captured
+// at 50 ms. 6.5-9.5 s covers both the 7.35 s and the 8.84 s halt.
+#define RB_2JT_N 60u
 // 2jv (2026-10-19) adds `gfxoff`: SMUIO_GFX_MISC_CNTL's PWR_GFXOFF_STATUS,
 // 0=GFXOFF 1=transition out 2=NOT in GFXOFF 3=transition into GFXOFF
 // (yellow_carp_ppt.c:625-628). Read as a raw dword through the offset
@@ -11119,7 +11123,7 @@ void rbgpu_rlcwatch_flush_2jt(void) {
         // is a result about WHERE the halt is, not a dead probe.
         const struct rb_2jt_s *z = (g_rb_2jt_got > 0) ? &g_rb_2jt[0] : nullptr;
         snprintf(n, sizeof(n),
-                 "n=%u NO TRANSITION in 7.5-9.5s (ok=%d bad=%d) | first "
+                 "n=%u NO TRANSITION in 6.5-9.5s (ok=%d bad=%d) | first "
                  "me=%x rlcs=%x gpm=%x safe=%x cgcg=%x pg=%x srm=%x "
                  "gfxoff=%x",
                  g_rb_2jt_got, last_ok, first_bad,

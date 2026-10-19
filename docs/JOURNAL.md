@@ -14325,3 +14325,54 @@ SRM itself, not which list it replayed.
 | `3->0` and **NO HALT** | the SRM was writing the halt back; the fix is to keep `CP_ME_CNTL` out of the restored list |
 | `3->0` and HALT | the SRM is excluded too, and nothing on the host side is left — the next move is the RLC's own firmware behaviour, not a register |
 | `3->3` | the write was refused; no result either way |
+
+## 2jx (2026-10-19) — the SRM is not the writer, but it moves the halt 1.5 s
+
+Boot 70, nonce fresh, build `B1EBAA98` loaded, `-rbgpunosrm` added.
+
+```
+rbgpu-mew  = b=70 n=24 | OK i=12 @6845ms me=0 cps=0 rlcs=0 bl=c0000001 srst=0
+                || HALT i=13 @7345ms me=15000000 cps=94038600 rlcs=0 bl=c0000001 srst=0
+rbgpu-mew2 = b=70 n=40 NO TRANSITION in 7.5-9.5s (ok=-1 bad=0)
+                | first me=15000000 rlcs=0 gpm=140016 safe=0 cgcg=0 pg=0 srm=0 gfxoff=2
+rbgpu-cgcg = b=70 n=24 refused=0 restored=0 | first @2344ms pre=363f post=0 me=0
+                | last @11545ms pre=0 post=0 me=15000000 | HALT @7544ms | srm 0->0
+```
+
+**The write took.** `rbgpu-mew2`'s first sample reads `srm=0` where boots
+66, 68 and 69 all read `srm=3`. Independent of the diag, which did not
+record `nosrm_on` - the diag table is full at `d=73`, which is itself a
+small debt now.
+
+**The SRM is NOT what writes the halt.** The CP still halts,
+`refused=0 restored=0`. 2jw's pre-registered outcome: SRM excluded.
+
+**But the halt MOVED: 7345 ms, against 8827 / 8835 / 8839 ms.** Those three
+boots spread **12 ms**; this is **1494 ms** earlier, two orders of magnitude
+outside the observed variance. So switching the save/restore machine off
+does not stop the halt and demonstrably changes *when* it lands. The RLC is
+in the mechanism even though no RLC register tried so far stops it.
+
+**Stated as the weaker claim it is:** n=1, and the honest alternative is
+that disabling the SRM mid-flight destabilised something else and brought
+forward an unrelated failure. "The SRM delays the halt" is **not**
+established. What is established is that `RLC_SRM_CNTL` is one of the few
+writes that changes the chip's behaviour at all.
+
+Also: `cps = 0x94038600` here against `0x90038600` in the baseline boots -
+one bit, **`CE_BUSY`** (bit 26). Noted, not interpreted.
+
+**Two instrument defects this exposed.**
+
+1. The 50 ms bank was hardwired to 7.5-9.5 s, so the earlier halt fell
+   outside it and `NO TRANSITION` fired. The note did its job (2eh) - it
+   still printed the RLC state and said where it had looked - but the
+   measurement was lost. **2jx widens it to 6.5-9.5 s, 60 samples**, which
+   covers both the 7.35 s and the 8.84 s halt.
+2. Because of (1), 2jw's whole reason for adding `cps` and `grbm` to the
+   fine bank went uncollected. Still owed.
+
+**Next boot: `-rbgpunosrm` comes OUT.** The baseline halt at ~8.83 s
+reproduces to 12 ms across four boots and is the better place to measure;
+the SRM question is answered as far as this experiment can answer it.
+Build `65DDACD9`.
