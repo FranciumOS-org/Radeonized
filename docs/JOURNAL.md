@@ -12241,3 +12241,81 @@ This is the cheapest decisive measurement available and it gates
 everything downstream, which is why it comes before any further work on
 the CP.
 
+
+## 2is result (2026-10-18) — the reads agree. The CP really is halted.
+
+Twenty-second armed boot, `logs/20261018-215855-metal/`, `armed=1`, UUID
+`F3624F84-3680-3E8B-B2C1-A1AD41D07446` = `build/out`.
+
+```
+rbgpu-rd2 = b=50
+  p0 me d=15000000 a=15000000 OK | cps d=90078600 a=90078600 OK | grbm d=a0003028 a=a0003028 OK
+  p1 me d=15000000 a=15000000 OK | cps d=94018600 a=94018600 OK | grbm d=a0003028 a=a0003028 OK
+rbgpu-me  = b=50 x6k n=2 o=0 last=0 [0@17321] [0@89486] | hwl n=1 o=0 [0@246]
+```
+
+**Both paths agree exactly, on all three registers, at both phases.** The
+accessor read is sound, and **the CP really is halted**. The earlier
+`diag_cp_me_cntl = 0` was timing after all - that probe runs just after
+HWLibs' 246 ms enable, where `0` was correct.
+
+A side result: `GRBM_STATUS = a0003028` is **not** a read-path artifact
+either, since both paths return it. So that debt is a genuine register
+value being misread rather than a bad mechanism, and it stays owed.
+
+### The timeline that points somewhere specific
+
+```
+  246 ms   HWLibs writes CP_ME_CNTL = 0      (enable)
+ <12000 ms the halt appears, with NO driver write
+12000 ms   reads 0x15000000
+17321 ms   X6000 writes CP_ME_CNTL = 0       (enable again)
+100000 ms  STILL reads 0x15000000
+```
+
+**The driver writes zero and the bits do not clear - twice.** That is not
+something re-halting the CP at random intervals; that is hardware refusing
+to clear them.
+
+On gfx10 there is one standard reason: `CE_HALT`, `PFP_HALT` and `ME_HALT`
+cannot be cleared until the **CP microcode is loaded and valid**.
+`gfx_v10_0_cp_gfx_enable(adev, true)` only takes effect once the ucode is
+in place, and on this part the PSP loads it.
+
+## 2it (2026-10-18) — read the CP instruction RAM, and settle 2am's debt
+
+This lands on the **oldest unexplained debt in the project**. 2am patches
+`_gc_fw_autoload_is_completed` to return 1 unconditionally, reasoning that
+the PSP places the firmware so the RLC's autoload latch never sets, and
+citing an independent Raphael-iGPU bring-up that found real microcode in
+instruction RAM. **That was never verified on this chip** - exactly the
+explanation 2cy demanded and docs/RULES.md still lists as owed under
+"2am/2an/2ao blanket firmware-ready bypasses".
+
+A CP whose halt bits will not clear is what an unloaded CP looks like.
+
+So read the RAM. `BASE_IDX 1` on all of these, i.e. seg1 `0xa000`, which
+the project already proves with its RLC reads, so this goes through
+`g_hw` rather than the accessor (whose encoded ids are seg0):
+
+```
+0x5814 CP_PFP_UCODE_ADDR     0x5815 CP_PFP_UCODE_DATA
+0x5816 CP_ME_RAM_RADDR       0x5817 CP_ME_RAM_DATA
+0x5818 CP_CE_UCODE_ADDR      0x5819 CP_CE_UCODE_DATA
+0x581a CP_MEC_ME1_UCODE_ADDR 0x581b CP_MEC_ME1_UCODE_DATA
+```
+
+**What it does to the chip:** writes 0 to each engine's `UCODE_ADDR` - a
+read *pointer* into instruction RAM, the same class of register as
+`GRBM_GFX_CNTL` (2do), which this project already treats as benign because
+it selects rather than acts - then reads `DATA` 64 times, which
+auto-increments. Nothing is written to the RAM and no engine state
+changes. It is safe here precisely because the CP is halted, which is the
+premise under test. Gated on `-rbgpucpfw`, its own boot-arg.
+
+| `rbgpu-cpfw` reading | means |
+|---|---|
+| `nz` near 64, varied values | the microcode **is** loaded, 2am's assumption holds, and the halt needs another explanation |
+| `nz=0`, or `f1=64` (all-ones) | the RAM is **empty**. The PSP never loaded the CP microcode, 2am has been reporting success for firmware that was never placed, and the halted CP follows directly - as does every stalled `rptr` since 2hl. |
+| some engines loaded, others not | partial load, and the note names which - likely the most informative outcome of the three |
+
