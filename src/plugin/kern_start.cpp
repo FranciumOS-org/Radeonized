@@ -10731,6 +10731,97 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                                       "unavailable, so nothing was compared");
     }
 
+    // 2it (2026-10-18): IS THE CP MICROCODE ACTUALLY THERE?
+    //
+    // 2is settled the read: both paths agree exactly on CP_ME_CNTL, CP_STAT
+    // and GRBM_STATUS at both phases, so the accessor is sound and **the CP
+    // really is halted**. The earlier diag_cp_me_cntl=0 was timing - that
+    // probe runs just after HWLibs' 246 ms enable, where 0 was correct.
+    //
+    // Which leaves a timeline that points at one thing:
+    //
+    //     246 ms    HWLibs writes CP_ME_CNTL = 0   (enable)
+    //    <12000 ms  the halt appears, with NO driver write
+    //    12000 ms   reads 0x15000000
+    //    17321 ms   X6000 writes CP_ME_CNTL = 0    (enable again)
+    //   100000 ms   STILL reads 0x15000000
+    //
+    // The driver writes zero and the bits do not clear - twice. On gfx10
+    // there is a standard reason for exactly that: CE_HALT, PFP_HALT and
+    // ME_HALT cannot be cleared until the CP microcode is loaded and valid.
+    // gfx_v10_0_cp_gfx_enable(adev, true) only takes effect after the ucode
+    // is in place; on this part the PSP loads it.
+    //
+    // And that lands on the oldest debt in this project. 2am patches
+    // _gc_fw_autoload_is_completed to return 1 unconditionally, reasoning
+    // that the PSP placed the firmware so the RLC's autoload latch never
+    // sets. An independent Raphael-iGPU bring-up found real microcode in
+    // instruction RAM - but **that was never verified on THIS chip**, which
+    // is precisely the explanation 2cy demanded and CLAUDE.md still lists as
+    // owed. A halted CP whose halt bits will not clear is what an unloaded
+    // CP looks like.
+    //
+    // So read the instruction RAM. BASE_IDX 1 for these, i.e. seg1 0xa000,
+    // which the project already proves with the RLC reads, so this uses
+    // g_hw directly rather than the accessor (whose encoded ids are seg0).
+    //
+    //   0x5814 CP_PFP_UCODE_ADDR   0x5815 CP_PFP_UCODE_DATA
+    //   0x5816 CP_ME_RAM_RADDR     0x5817 CP_ME_RAM_DATA
+    //   0x5818 CP_CE_UCODE_ADDR    0x5819 CP_CE_UCODE_DATA
+    //   0x581a CP_MEC_ME1_UCODE_ADDR 0x581b CP_MEC_ME1_UCODE_DATA
+    //
+    // WHAT THIS DOES TO THE CHIP: writes 0 to each engine's UCODE_ADDR - a
+    // read POINTER into instruction RAM, the same class of register as
+    // GRBM_GFX_CNTL (2do), which this project already treats as benign
+    // because it selects rather than acts - then reads DATA 64 times, which
+    // auto-increments. Nothing is written to the RAM itself and no engine
+    // state changes. It is safe here precisely because the CP is halted,
+    // which is the premise under test. Gated on -rbgpucpfw, its own arg.
+    //
+    //   nz near 64 with varied values  the microcode IS loaded, 2am's
+    //                                  assumption holds, and the halt needs
+    //                                  another explanation
+    //   nz = 0, or all-ones            the RAM is EMPTY. The PSP did not
+    //                                  load the CP microcode, 2am has been
+    //                                  reporting success for firmware that
+    //                                  was never placed, and the halted CP
+    //                                  follows directly - as does every
+    //                                  stalled rptr since 2hl.
+    if (phase == 0 && g_hw.rreg && g_hw.wreg &&
+        checkKernelArgument("-rbgpucpfw")) {
+        static const struct { uint32_t a, d; const char *n; } kE[] = {
+            { 0x5814, 0x5815, "pfp" }, { 0x5816, 0x5817, "me" },
+            { 0x5818, 0x5819, "ce" },  { 0x581a, 0x581b, "mec" },
+        };
+        char fw[352];
+        size_t fn = 0;
+        for (unsigned e = 0; e < 4; e++) {
+            g_hw.wreg(g_hw.ctx, (0xa000u + kE[e].a) * 4, 0);
+            uint32_t nz = 0, ones = 0, first = 0;
+            for (unsigned k = 0; k < 64; k++) {
+                uint32_t v = g_hw.rreg(g_hw.ctx, (0xa000u + kE[e].d) * 4);
+                if (k == 0) first = v;
+                if (v == 0xFFFFFFFFu) ones++;
+                else if (v) nz++;
+            }
+            if (fn >= sizeof(fw) - 56) break;
+            int fwr = snprintf(fw + fn, sizeof(fw) - fn,
+                               "%s%s nz=%u f1=%u d0=%x", fn ? " | " : "",
+                               kE[e].n, nz, ones, first);
+            if (fwr > 0) { fn += static_cast<size_t>(fwr); if (fn >= sizeof(fw)) { fn = sizeof(fw) - 1; break; } }
+        }
+        rbgpu_nvram_note("rbgpu-cpfw", fw);
+        rbgpu_log("2it: %s", fw);
+        rbgpu_log("2it: nz near 64 with varied values means the CP microcode "
+                  "IS loaded and the halt needs another explanation. nz=0 or "
+                  "all-ones means the RAM is EMPTY - the PSP never loaded it, "
+                  "2am has been reporting success for firmware that was never "
+                  "placed, and the halted CP follows directly.");
+    } else if (phase == 0 && !checkKernelArgument("-rbgpucpfw")) {
+        rbgpu_nvram_note("rbgpu-cpfw", "off - -rbgpucpfw not set, the "
+                                       "instruction RAM was not read");
+    }
+
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
