@@ -11615,3 +11615,80 @@ everything it wrote last boot. That is the point: a boot that writes
 nothing and says why is worth more than one that writes an address past the
 end of RAM.
 
+
+## 2ij result (2026-10-18) — the gate was right and the geometry is impossible
+
+Fourteenth consecutive armed boot, `logs/20261018-202320-metal/`, UUID
+`B2A7FD10-9BAF-347E-92CA-0C6A292C1534` = `build/out`.
+
+```
+rbgpu-ptfix = b=42 arm=1 binds=41 wrote=6 nomatch=0 noobj=0 badback=0
+              nofb=0 relok=3 relbad=0 out=0 alr=35 fbtop=f4ff vmids=000e
+```
+
+The idempotency fix worked: `relbad` 35 -> **0**, `alr=35`. The check no
+longer refuses its own correct value.
+
+**`out=0`, and that is the result.** `fbtop=0xF4FF` makes the FB aperture
+MC `0xF4_0000_0000 .. 0xF4_FFFF_FFFF` - a full **4 GB** - so the roots at
+`0xF4_FB01_5000`, 3.92 GB in, are inside it. The gate passed them
+correctly. My host-side reasoning last milestone said the aperture was 2 GB
+and it was wrong; the chip says 4 GB.
+
+(Also correcting my own arithmetic: `0xFB01_5000` is 3.92 GB, not the
+4.2 GB I wrote. The conclusion that 2ii's target lies past installed RAM is
+unchanged - `0x8_7B01_5000` is ~33.9 GB against 32 GB of RAM - but the
+figure was wrong and is corrected here rather than left in the record.)
+
+So the geometry is contradictory, and the contradiction is the finding:
+
+| | |
+|---|---|
+| FB aperture (MC) | 4 GB, `0xF4_0000_0000`-`0xF4_FFFF_FFFF` |
+| carve-out system-physical base | `0x7_8000_0000` = 30 GB |
+| installed RAM | 32 GB |
+| aperture's top 2 GB maps to | 32-34 GB, which is nothing |
+| the roots sit at | ~33.9 GB, in that overhang |
+
+**The FB aperture is twice the memory behind it, and the page-table roots
+are in the unbacked half.** Either `vram_base_offset = FB_OFFSET << 24` is
+not the right base on an APU, or these roots are reached through a
+different aperture entirely.
+
+And the fault is identical for the fourteenth time: `vmf=3009bb`, VMID 3,
+CPF, `WALKER_ERROR`, VA `0x4_0030_0000`, `me=15000000`.
+
+## 2ik (2026-10-18) — stop writing, read the aperture map
+
+Three writes have now been attempted at this register, each assuming a
+transform: 2ih the raw MC address, 2ii `mc2pa`, 2ij the same behind a gate
+that turned out to permit it. The gate was correct and the answer is still
+wrong, which means the assumption underneath all three is the thing to
+test, not the next variant of it.
+
+What has never been read is where the **other** apertures are. 2ik reads
+nine registers at the +12 s sample, offsets from `gc_10_3_0_offset.h`:
+
+```
+0x16FC FB_LOCATION_BASE   0x16FD FB_LOCATION_TOP
+0x16FE AGP_TOP            0x16FF AGP_BOT          0x1700 AGP_BASE
+0x1701 SYSTEM_APERTURE_LOW_ADDR    0x1702 SYSTEM_APERTURE_HIGH_ADDR
+0x16E8/0x16E9 SYSTEM_APERTURE_DEFAULT_ADDR LSB/MSB
+```
+
+In Linux an MC address inside `[AGP_BOT, AGP_TOP]` is **system memory
+reached without mc2pa**, and the system-aperture bounds say which MC
+addresses the hub resolves to host DRAM directly. The roots are MC
+`0xF4_FB00_0000`, `0xF4_FB00_B000`, `0xF4_FB01_5000`.
+
+| `rbgpu-aper` reading | means |
+|---|---|
+| `agpb..agpt` covers the roots | they are SYSTEM memory, reached without `mc2pa`, and all three transforms tried were the wrong *family* of answer - one explanation for three boots |
+| only `fbb..fbt` covers them | the FB aperture really is 4 GB over 2 GB of backing, and the question becomes what `vram_base_offset` should be on an APU |
+| the roots are in neither | the MC addresses are not hub-resolvable at all and `ctx+0xb8` is not what 2ig took it for |
+
+**This boot writes nothing.** The bind-time write is held back
+(`unres=` counts it), the register is left exactly as Apple programmed it,
+and the baseline that 2ih and 2ii perturbed is restored. Guessing a third
+transform before reading the map would be the same error a fourth time.
+
