@@ -12842,3 +12842,56 @@ State going into the retry: 2iy kext installed and loaded
 (`63329EB2-2EDC-34B1-92D8-86E366551FBF`), `-rbgpucpfw` removed,
 `-rbgpuforceenable` paired with `wdt=-1`, `rbgpu-arm=1` set at 00:09.
 **First thing to read next boot: `rbgpu-boot` must be 56.**
+
+## 2ja (2026-10-19) — the 2iy hooks stopped the boot before powerUpHW
+
+First properly armed boot with 2iy (boot counter still read 55 afterwards,
+which is the finding). What ran:
+
+```
+_psp_np_fw_load returned 0
+_psp_hw_init returned 0
+2iy: hooked _gc_(un)halt_micro_engines_10_3 (observe only)
+```
+
+`rbgpu-arm` was consumed, so the peer armed. The hooks installed. And then
+**no NVRAM note was written at all** — `rbgpu-boot` never incremented, which
+means `rbgpu_prog_2fs(1, "powerUpHW ENTER")` never ran. That call has fired
+in every boot since 2br. **The accelerator never reached `powerUpHW`.** Boot
+55 — the same build minus these two hooks — reached request 0x1B and
+returned `0xE00002C7`.
+
+This is located without the log: the boot-counter write happens at a
+specific early point and did not happen. 2es' warning (the published
+`RBGPULog` ends at the last refresh, not the stopping point) means the log
+tail ending at `_psp_hw_init` is *consistent* with this but does not
+establish it; the absent counter does.
+
+**Cause: the instrument, for the third recorded time.** Both hooks called
+`rbgpu_2iy_me()` before and after the original — a raw
+`g_hw.rreg(ctx, (0x1260 + 0x0F56) * 4)` from inside HWLibs' GC init, on
+Apple's own start thread. That is 2fe exactly: GC register reads from this
+path stall non-deterministically, which is why `-rbgpuregdump` is
+permanently OUT. docs/RULES.md's standing rule — "when a measurement and a
+suspect are both new, remove the suspect rather than reasoning about it" —
+applies directly.
+
+**Fix (2ja build):** the hooks now touch nothing. Two counter increments
+and one `rbgpu_2iq_ms()`, which 2iq already runs from inside Apple's
+restart path. The single `CP_ME_CNTL` read moved into
+`rbgpu_microengine_flush_2iy`, which runs from the ring probe where GC
+reads have been safe since 2hk. What is lost is the before→after
+transition across the call; what the question actually turns on — `uh=0`
+versus `uh>0` — is untouched.
+
+Not excluded: the removal of `-rbgpucpfw` in the same install. It is a
+weak suspect because it makes the boot do strictly less, but it is a
+difference and it is recorded here rather than dismissed.
+
+Outcome table, unchanged except for the last column:
+
+| `rbgpu-ume` | means |
+|---|---|
+| `uh=0` | Apple never calls its own un-halt; the fix is to call it |
+| `uh>0`, `me=15000000` | refused even through Apple's ext2 path; the RLC owns it |
+| `uh>0`, `me=0` | it works, and `h` dates whatever re-halts it |

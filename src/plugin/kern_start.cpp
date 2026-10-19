@@ -7966,6 +7966,28 @@ void rbgpu_gvmwrite_flush_2ie(void) {
 // 2iu's "RLCG eliminated" - which I drew from Linux having an empty RLCG
 // range - would not apply to Apple's own implementation of it.
 //
+// 2ja (2026-10-19) - THE 2iy HOOKS STOPPED THE BOOT, AND THE INSTRUMENT
+// WAS THE FAULT FOR THE THIRD TIME.
+//
+// The first armed boot with these hooks: PSP came all the way up
+// (_psp_np_fw_load 0, _psp_hw_init 0), the hooks installed, and then
+// rbgpu-boot never incremented - so rbgpu_prog_2fs(1) at powerUpHW ENTER
+// never ran, and that call has fired in every boot since 2br. The
+// accelerator never reached powerUpHW. Boot 55, the same build minus
+// these hooks, got all the way to request 0x1B.
+//
+// The hooks read CP_ME_CNTL through g_hw.rreg from inside HWLibs' GC
+// init, on Apple's own start thread. That is the 2fe failure exactly -
+// GC register reads from this path stall non-deterministically, which is
+// why -rbgpuregdump is permanently OUT - and docs/RULES.md's standing rule
+// says to remove a new suspect rather than reason about it.
+//
+// So the hooks now touch NOTHING: two counters and one clock read. The
+// before/after values are gone from the hook and the single CP_ME_CNTL
+// read moved to the flush, which runs in the ring probe where GC reads
+// are proven. This costs only the `->` transition across the call; the
+// uh=0 / uh>0 decision - which is the whole question - is unaffected.
+
 // So: hook both, observe only, before changing anything.
 // Rule 9 (2gb) checked on both: unhalt opens
 // `55 48 89 e5 41 57 41 56 41 54 53`, halt opens
@@ -7987,58 +8009,54 @@ void rbgpu_gvmwrite_flush_2ie(void) {
 // ---------------------------------------------------------------------------
 
 static uint32_t g_rb_2iy_uh = 0, g_rb_2iy_h = 0;
-static uint32_t g_rb_2iy_uh_before = 0xDEAD, g_rb_2iy_uh_after = 0xDEAD;
-static uint32_t g_rb_2iy_h_before = 0xDEAD, g_rb_2iy_h_after = 0xDEAD;
 static uint64_t g_rb_2iy_uh_ms = 0, g_rb_2iy_h_ms = 0;
 static int      g_rb_2iy_hooked = 0;
 
 static void (*orig_unhalt_me_2iy)(void *) = nullptr;
 static void (*orig_halt_me_2iy)(void *) = nullptr;
 
-static uint32_t rbgpu_2iy_me(void) {
-    if (!g_hw.rreg) return 0xDEAD;
-    return g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
-}
-
+// 2ja: the hooks TOUCH NOTHING. See the 2ja note above - the 2iy version
+// read CP_ME_CNTL through g_hw.rreg from inside HWLibs' GC init and the
+// accelerator never reached powerUpHW. A pure counter cannot do that: no
+// MMIO, no lock, no allocation, nothing but two adds and a clock read.
+//
+// rbgpu_2iq_ms() is absolutetime_to_nanoseconds on mach_absolute_time(),
+// which 2iq already runs from inside Apple's restart path. It is the one
+// thing here that is not a plain store, and it is proven in that position.
 static void hooked_unhalt_me_2iy(void *dev) {
-    uint32_t b = rbgpu_2iy_me();
-    if (orig_unhalt_me_2iy) orig_unhalt_me_2iy(dev);
-    uint32_t a = rbgpu_2iy_me();
     if (g_rb_2iy_uh == 0) {
-        g_rb_2iy_uh_before = b;
-        g_rb_2iy_uh_after  = a;
-        g_rb_2iy_uh_ms     = rbgpu_2iq_ms();
+        g_rb_2iy_uh_ms = rbgpu_2iq_ms();
     }
     g_rb_2iy_uh++;
+    if (orig_unhalt_me_2iy) orig_unhalt_me_2iy(dev);
 }
 
 static void hooked_halt_me_2iy(void *dev) {
-    uint32_t b = rbgpu_2iy_me();
-    if (orig_halt_me_2iy) orig_halt_me_2iy(dev);
-    uint32_t a = rbgpu_2iy_me();
     if (g_rb_2iy_h == 0) {
-        g_rb_2iy_h_before = b;
-        g_rb_2iy_h_after  = a;
-        g_rb_2iy_h_ms     = rbgpu_2iq_ms();
+        g_rb_2iy_h_ms = rbgpu_2iq_ms();
     }
     g_rb_2iy_h++;
+    if (orig_halt_me_2iy) orig_halt_me_2iy(dev);
 }
 
 void rbgpu_microengine_flush_2iy(void) {
+    // The ONE register read, here rather than in the hook. This runs from
+    // the ring probe, which has read GC registers through g_hw in every
+    // boot since 2hk without ever stopping one.
+    uint32_t me = g_hw.rreg ? g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4)
+                            : 0xDEADu;
     char note[352];
     snprintf(note, sizeof(note),
-             "hk=%d uh=%u @%llums %x->%x | h=%u @%llums %x->%x",
+             "hk=%d uh=%u @%llums | h=%u @%llums | me=%x",
              g_rb_2iy_hooked, g_rb_2iy_uh, g_rb_2iy_uh_ms,
-             g_rb_2iy_uh_before, g_rb_2iy_uh_after,
-             g_rb_2iy_h, g_rb_2iy_h_ms,
-             g_rb_2iy_h_before, g_rb_2iy_h_after);
+             g_rb_2iy_h, g_rb_2iy_h_ms, me);
     rbgpu_nvram_note("rbgpu-ume", note);
     rbgpu_log("2iy: %s", note);
     rbgpu_log("2iy: uh=0 means Apple never calls its own un-halt and THAT is "
-              "the missing step. uh>0 with the value unchanged means even "
+              "the missing step. uh>0 with me still 15000000 means even "
               "Apple's ext2 write path is refused and the RLC really does "
-              "own the register. uh>0 with 15000000->0 means it works and "
-              "something re-halts later, which the halt counter dates.");
+              "own the register. uh>0 with me=0 means it works. h counts "
+              "and dates the deliberate halts.");
 }
 
 static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
