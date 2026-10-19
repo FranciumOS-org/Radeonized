@@ -1107,6 +1107,20 @@ extern void rbgpu_mewatch_flush_2js(void);
 static thread_call_t     g_rbgpuRlcCalls[RB_2JT_CALLS] = { nullptr };
 extern void rbgpu_rlcwatch_sample_2jt(unsigned idx);
 extern void rbgpu_rlcwatch_flush_2jt(void);
+// 2ju: the CGCG/PG disable - 24 ticks, 400 ms apart, 2.0 s .. 11.2 s. It
+// writes, so it is behind -rbgpunocgcg; see 2ju in kern_start.cpp.
+#define RB_2JU_CALLS 24
+static thread_call_t     g_rbgpuCgcgCalls[RB_2JU_CALLS] = { nullptr };
+extern void rbgpu_nocgcg_tick_2ju(unsigned idx);
+extern void rbgpu_nocgcg_flush_2ju(void);
+
+static void rbgpu_nocgcg_action(thread_call_param_t p0, thread_call_param_t) {
+    unsigned i = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
+    rbgpu_nocgcg_tick_2ju(i);
+    if (i == RB_2JU_CALLS - 1) {
+        rbgpu_nocgcg_flush_2ju();
+    }
+}
 
 static void rbgpu_rlcwatch_action(thread_call_param_t p0, thread_call_param_t) {
     unsigned i = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
@@ -1286,6 +1300,29 @@ void rbgpu_progwatch_start(void) {
     }
     rbgpu_log("2jt: RLC watch armed, %u of %u timers (7.5 s .. 9.5 s, 50 ms "
               "apart -> rbgpu-mew2).", rarmed2, RB_2JT_CALLS);
+
+    // 2ju: 2.0 s .. 11.2 s in 400 ms steps. Every tick writes
+    // RLC_CGCG_CGLS_CTRL = 0 and RLC_PG_CNTL = 0 and reads both back, so a
+    // value that gets restored between ticks shows up as `restored>0` rather
+    // than as a silent failure. Armed unconditionally here; the tick itself
+    // returns at once unless -rbgpunocgcg is set, so no write happens without
+    // the arg. All armed once from this thread (2fy).
+    unsigned carmed = 0;
+    for (unsigned i = 0; i < RB_2JU_CALLS; i++) {
+        g_rbgpuCgcgCalls[i] = thread_call_allocate(
+            rbgpu_nocgcg_action, reinterpret_cast<thread_call_param_t>(
+                                     static_cast<uintptr_t>(i)));
+        if (!g_rbgpuCgcgCalls[i]) {
+            continue;
+        }
+        uint64_t cd = 0;
+        clock_interval_to_deadline(2000 + i * 400, kMillisecondScale, &cd);
+        thread_call_enter_delayed(g_rbgpuCgcgCalls[i], cd);
+        carmed++;
+    }
+    rbgpu_log("2ju: CGCG disable armed, %u of %u timers (2.0 s .. 11.2 s, "
+              "400 ms apart -> rbgpu-cgcg). Writes only with -rbgpunocgcg.",
+              carmed, RB_2JU_CALLS);
 }
 
 // 2gd (2026-10-15): every note carries a per-boot sequence number.

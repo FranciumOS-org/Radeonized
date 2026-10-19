@@ -11125,6 +11125,150 @@ void rbgpu_rlcwatch_flush_2jt(void) {
               "non-zero revives 2iv.");
 }
 
+
+// ---------------------------------------------------------------------------
+// 2ju (2026-10-19): turn coarse-grain clock gating off, and measure it.
+//
+// 2jt bracketed the re-halt to 49 ms on boot 66 and exactly one bit moves
+// with it:
+//
+//   OK   @8678ms rlcs=25 gpm=140037 safe=0 cgcg=363f pg=0 srm=3
+//   HALT @8727ms rlcs=25 gpm=140017 safe=0 cgcg=363f pg=0 srm=3 me=15000000
+//
+// RLC_GPM_STAT 0x140037 -> 0x140017 clears bit 5,
+// CNTX_IDLE_BEING_PROCESSED: at 8678 ms the GPM is running its context-idle
+// handler and 49 ms later the handler has finished and CE/PFP/ME are halted.
+// `rlcs` is still 0x25 AT the halt, so 2js's RLC_STAT 0x25 -> 0 is later and
+// downstream - the RLC did not stop and take the CP with it. `pg=0`,
+// `safe=0` and (2js) `srst=0` rule out power gating, safe mode and a soft
+// reset.
+//
+// RLC_CGCG_CGLS_CTRL = 0x363f decodes to CGCG_EN=1, CGLS_EN=1,
+// CGLS_REP_COMPANSAT_DELAY=15, CGCG_GFX_IDLE_THRESHOLD=54. Halting the CP is
+// how CGCG entry gates the GFX clock, so the configuration and the observed
+// handler agree.
+//
+// It is Apple's default, not a leftover: `_gc_set_clock_gating_feature_flag_10_3`
+// (0x126b4231) computes
+//     dev+0xd48 = (dev+0x2dc & dev+0x2e0) | (0x7cf & ~dev+0x2e0)
+// and 0x7cf has bit 1 (AMD_CG_SUPPORT_GFX_CGCG) and bit 2 (CGLS) set.
+// HWLibs ships `_gc_update_coarse_grain_clock_gating_10_1` and **no _10_3**,
+// the same gap 2ix found for the autoload config - so nothing on the 10_3
+// path ever turns it back off.
+//
+// NOTE a wrong premise in our own comments, corrected here: `-rbgpunogates`
+// turns off the 2fo gate TRAIL, an instrument of ours. It has never touched
+// the chip's clock gating. Boot 66 proves it - `cgcg=0x363f` with
+// -rbgpunogates in boot-args.
+//
+// So: write RLC_CGCG_CGLS_CTRL = 0 and RLC_PG_CNTL = 0, which is exactly
+// what `gfx_v10_0_rlc_resume`'s non-PSP branch does before starting the RLC.
+// Written directly, with no RLC_SAFE_MODE bracket, for two reasons: Linux's
+// own non-PSP branch writes them bare, and 2iv found RLC_SAFE_MODE stuck
+// with CMD set and Linux's exit sequence unable to clear it across 1000
+// polls, so the bracket is the less trustworthy half.
+//
+// This is a fix AND a measurement, because three things can go wrong and the
+// note has to separate them (2eh - absence is not a result):
+//
+//   1. the write is refused, like CP_ME_CNTL is (2jl)    -> `post` != 0
+//   2. it sticks but something restores it               -> a later `pre` != 0
+//   3. it sticks and holds and the CP still halts        -> gating was not
+//                                                           the mechanism
+//
+// so every tick records the value BEFORE our write, the value read back
+// AFTER it, and CP_ME_CNTL. 24 ticks, 400 ms apart, 2.0 s .. 11.2 s - the
+// 8.7 s halt with margin either side, and the idle threshold of 54 is short
+// enough that one write at bring-up could not be assumed to hold.
+//
+// Behind -rbgpunocgcg. Writes to a live GPU, so it is opt-in.
+#define RB_2JU_N 24u
+struct rb_2ju_s { uint32_t ms, pre, post, me; };
+static struct rb_2ju_s g_rb_2ju[RB_2JU_N];
+static uint32_t        g_rb_2ju_got = 0;
+static int             g_rb_2ju_on  = -1;
+
+static bool rbgpu_2ju_enabled(void) {
+    if (g_rb_2ju_on < 0) {
+        g_rb_2ju_on = checkKernelArgument("-rbgpunocgcg") ? 1 : 0;
+        rbgpu_log("2ju: CGCG/PG disable %s",
+                  g_rb_2ju_on ? "ARMED (-rbgpunocgcg)" : "off");
+        rbgpu_diag_set_num("nocgcg_on", static_cast<uint32_t>(g_rb_2ju_on));
+    }
+    return g_rb_2ju_on == 1;
+}
+
+void rbgpu_nocgcg_tick_2ju(unsigned idx) {
+    if (!rbgpu_2ju_enabled() || idx >= RB_2JU_N || !g_hw.rreg || !g_hw.wreg) {
+        return;
+    }
+    const uint32_t S1   = 0xa000u;
+    const uint32_t CGCG = (S1 + 0x4C49u) * 4;   // RLC_CGCG_CGLS_CTRL
+    const uint32_t PGC  = (S1 + 0x4C43u) * 4;   // RLC_PG_CNTL
+    struct rb_2ju_s *e = &g_rb_2ju[idx];
+    e->ms   = static_cast<uint32_t>(rbgpu_2iq_ms());
+    e->pre  = g_hw.rreg(g_hw.ctx, CGCG);
+    g_hw.wreg(g_hw.ctx, CGCG, 0);
+    g_hw.wreg(g_hw.ctx, PGC,  0);
+    e->post = g_hw.rreg(g_hw.ctx, CGCG);
+    e->me   = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+    if (idx + 1 > g_rb_2ju_got) { g_rb_2ju_got = idx + 1; }
+}
+
+void rbgpu_nocgcg_flush_2ju(void) {
+    if (g_rb_2ju_on != 1) {
+        return;
+    }
+    // What each of the three failure modes looks like, counted separately.
+    unsigned refused = 0;    // post != 0: the write did not take
+    unsigned restored = 0;   // pre != 0 on a tick after one that took
+    int      first_halt = -1;
+    int      last_tick  = -1;
+    bool     took_once  = false;
+    for (unsigned i = 0; i < g_rb_2ju_got; i++) {
+        if (g_rb_2ju[i].ms == 0) continue;
+        last_tick = static_cast<int>(i);
+        if (g_rb_2ju[i].post != 0) { refused++; }
+        else                       { took_once = true; }
+        if (took_once && g_rb_2ju[i].pre != 0) { restored++; }
+        if (g_rb_2ju[i].me != 0 && first_halt < 0) {
+            first_halt = static_cast<int>(i);
+        }
+    }
+    char n[352];
+    if (last_tick < 0) {
+        snprintf(n, sizeof(n), "n=0 NO TICKS RAN - timers never fired");
+    } else {
+        const struct rb_2ju_s *f = &g_rb_2ju[0];
+        const struct rb_2ju_s *l = &g_rb_2ju[last_tick];
+        int n1 = snprintf(n, sizeof(n),
+                          "n=%u refused=%u restored=%u | first @%ums "
+                          "pre=%x post=%x me=%x | last @%ums pre=%x post=%x "
+                          "me=%x | ",
+                          g_rb_2ju_got, refused, restored,
+                          f->ms, f->pre, f->post, f->me,
+                          l->ms, l->pre, l->post, l->me);
+        if (n1 < 0) { n1 = 0; }
+        if (first_halt < 0) {
+            snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
+                     "NO HALT in 2.0-11.2s");
+        } else {
+            const struct rb_2ju_s *h = &g_rb_2ju[first_halt];
+            snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
+                     "HALT @%ums me=%x pre=%x post=%x",
+                     h->ms, h->me, h->pre, h->post);
+        }
+    }
+    rbgpu_nvram_note("rbgpu-cgcg", n);
+    rbgpu_log("2ju: %s", n);
+    rbgpu_log("2ju: refused>0 means RLC_CGCG_CGLS_CTRL is host-read-only like "
+              "CP_ME_CNTL (2jl) and this lever does not exist. restored>0 "
+              "means the write takes but something puts 0x363f back - the "
+              "save/restore machine is live (srm=3), so that is the one to "
+              "expect. NO HALT with refused=0 restored=0 is the fix. A HALT "
+              "with refused=0 restored=0 refutes CGCG as the mechanism and "
+              "sends 2jt's gpm bit 5 back to being a coincidence.");
+}
 void rbgpu_ring_probe_2hk(unsigned phase) {
     if (g_rb_2hk_on < 0) {
         g_rb_2hk_on = checkKernelArgument("-rbgpuringprobe") ? 1 : 0;
@@ -11497,9 +11641,14 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     //      in the same note
     //
     // Every value written is one Linux writes at the same register. Nothing
-    // is invented. -rbgpunogates is already in boot-args so clock gating is
-    // off, which is the state safe mode exists to protect - the main reason
-    // this is a reasonable thing to poke at all.
+    // is invented.
+    //
+    // WRONG PREMISE, corrected 2ju (2026-10-19): this said "-rbgpunogates is
+    // already in boot-args so clock gating is off". It is not.
+    // -rbgpunogates turns off the 2fo gate TRAIL, an instrument of ours, and
+    // has never touched the chip. Boot 66 read RLC_CGCG_CGLS_CTRL = 0x363f -
+    // CGCG_EN and CGLS_EN both set - with -rbgpunogates in boot-args. So the
+    // stated reason this was a reasonable register to poke did not hold.
     //
     // Gated on -rbgpurlcexit. Phase 0 only, before any client.
     if (phase == 0 && g_hw.rreg && g_hw.wreg &&
@@ -11979,8 +12128,8 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     //                      which redirects everything.
     //
     // Honest about the risk: this switches off the RLC's F32 engine on a
-    // live GPU. Gating is already off (-rbgpunogates), the GPU retires no
-    // work as it is, and DCN is a separate block - but it is a chip-state
+    // live GPU. The GPU retires no work as it is and DCN is a separate
+    // block - but it is a chip-state
     // change, so it is behind its own arg and OUT by default. RLC_CNTL is
     // restored before the function returns, and the restore is read back
     // so a failed restore cannot be mistaken for a clean one.

@@ -14077,3 +14077,98 @@ Build `02E028B6-23F1-3394-BE92-354254ACDA3D`.
 
 **n=1.** The 8328/8829 bracket is one boot. If 2jt's window misses, that
 is itself evidence the timing varies and the coarse bank will say so.
+
+## 2ju (2026-10-19) — the re-halt is coarse-grain clock gating, and Apple's 10_3 path never turns it off
+
+Boot 66, nonce fresh (`rbgpu-boot = 66`). First, the 500 ms bracket
+**reproduced**: boot 66's `rbgpu-mew` reads `OK i=15 @8327ms` /
+`HALT i=16 @8827ms` against boot 65's `8328` / `8829` — 1–2 ms apart. The
+re-halt is deterministic, not a race, so 2js is no longer n=1.
+
+2jt's 50 ms window, and exactly one bit moves with the halt:
+
+```
+rbgpu-mew2 = b=66
+  OK   @8678ms            rlcs=25 gpm=140037 safe=0 cgcg=363f pg=0 srm=3
+  HALT @8727ms me=15000000 rlcs=25 gpm=140017 safe=0 cgcg=363f pg=0 srm=3
+```
+
+`RLC_GPM_STAT 0x140037 -> 0x140017` clears **bit 5,
+`CNTX_IDLE_BEING_PROCESSED`** (`gc_10_3_0_sh_mask.h`). Decoded in full,
+both samples hold `RLC_BUSY`, `GFX_POWER_STATUS`, `GFX_CLOCK_STATUS`,
+`GFX_PIPELINE_POWER_STATUS`, `CMP_power_status` and
+`GFX_CLOCK_STATUS_3D`; the idle-being-processed bit is the only difference.
+So at 8678 ms the RLC's GPM is running its context-idle handler, and 49 ms
+later the handler has finished and CE/PFP/ME are halted.
+
+`RLC_CGCG_CGLS_CTRL = 0x363f` decodes to **`CGCG_EN = 1`, `CGLS_EN = 1`**,
+`CGLS_REP_COMPANSAT_DELAY = 15`, `CGCG_GFX_IDLE_THRESHOLD = 54`. Halting
+CE/PFP/ME is how CGCG entry gates the GFX clock, so the configuration and
+the observed handler agree.
+
+**Three things this eliminates.** `rlcs` is still `0x25` **at** the halt, so
+2js's `RLC_STAT 0x25 -> 0` happens later in that 500 ms and is downstream —
+the RLC did not stop and take the CP with it. `pg = 0` and `safe = 0`, with
+2js's `srst = 0`, rule out power gating, safe mode and a soft reset.
+`GFX_POWER_STATUS` and `GFX_CLOCK_STATUS` are both still 1, so this is
+caught at CGCG *entry*, before the clock actually drops.
+
+**2jt's own outcome table was a false dichotomy, and this is the
+correction.** It offered "cgcg or pg non-zero" and "gpm changes at the same
+sample" as alternatives. They are not: the GPM is the block that *runs* the
+gating sequence, and `CNTX_IDLE_BEING_PROCESSED` is that sequence's trigger.
+Row 2 fired and row 1's substance (`cgcg` non-zero) is true at the same
+time. Recorded because writing an exclusive table from a guess about the
+mechanism is the same error as building one from n=1 rows.
+
+**It is Apple's default, not a leftover.**
+`_gc_set_clock_gating_feature_flag_10_3` (0x126b4231) is nine instructions:
+
+```
+dev+0xd48 = (dev+0x2dc & dev+0x2e0) | (0x7cf & ~dev+0x2e0)
+```
+
+`0x7cf` = bits 0,1,2,3,6,7,8,9,10 — in Linux's `AMD_CG_SUPPORT_*` that is
+MGCG, **CGCG (bit 1)**, **CGLS (bit 2)**, CGTS, RLC_LS, MC_LS, MC_MGCG,
+SDMA_LS, SDMA_MGCG. And HWLibs ships
+`_gc_update_coarse_grain_clock_gating_10_1` with **no `_10_3` variant** —
+the same gap 2ix found for `_gc_fw_backdoor_autoload_config_10_1`. So the
+10_3 path defaults CGCG+CGLS on and has no function that turns them off.
+
+**A wrong premise of ours, corrected.** Two comments in `kern_start.cpp`
+asserted "gating is already off (`-rbgpunogates`)". `-rbgpunogates` turns
+off the **2fo gate trail**, an instrument of ours; it has never touched the
+chip. Boot 66 read `cgcg = 0x363f` with it in boot-args. One of those
+comments was the stated reason 2jf's safe-mode poke was reasonable, so the
+premise was load-bearing. Both corrected in place.
+
+### The experiment: 2ju, behind `-rbgpunocgcg`
+
+Writes `RLC_CGCG_CGLS_CTRL = 0` and `RLC_PG_CNTL = 0`, which is what
+`gfx_v10_0_rlc_resume`'s non-PSP branch does before starting the RLC and the
+PSP+autoload branch never does. Written **bare, with no `RLC_SAFE_MODE`
+bracket**: Linux's non-PSP branch writes them bare, and 2iv found
+`RLC_SAFE_MODE` stuck with CMD set and Linux's own exit sequence unable to
+clear it across 1000 polls, so the bracket is the less trustworthy half.
+
+24 ticks, 400 ms apart, 2.0 s .. 11.2 s — the 8.7 s halt with margin either
+side. Repeated rather than one-shot because `CGCG_GFX_IDLE_THRESHOLD = 54`
+is short and `srm = 3` (`SRM_ENABLE` + `AUTO_INCR_ADDR`) says the
+save/restore machine is live, so one write at bring-up could not be assumed
+to hold. Every tick records the value **before** the write, the value read
+**back** after it, and `CP_ME_CNTL`, so the three failure modes separate
+(2eh):
+
+| `rbgpu-cgcg` | means |
+|---|---|
+| `refused > 0` (`post != 0`) | `RLC_CGCG_CGLS_CTRL` is host-read-only like `CP_ME_CNTL` (2jl) and this lever does not exist |
+| `restored > 0` (a later `pre != 0`) | the write takes but something puts `0x363f` back — the save/restore machine is live, so this is the one to expect |
+| `NO HALT`, `refused=0 restored=0` | **the fix** |
+| `HALT`, `refused=0 restored=0` | CGCG refuted as the mechanism; 2jt's gpm bit 5 goes back to being a coincidence |
+
+Note that 2jf already wrote `RLC_CNTL` 1 -> 0 and restored it cleanly, so RLC
+registers are not host-locked as a class — which is why `refused` is the
+less likely of the two failure modes.
+
+Build `5695E063-B181-3BB8-84AC-EC17E92B114D`. New note `rbgpu-cgcg`, added
+to `plugin_check.sh` and `metal_check.sh`.
