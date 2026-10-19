@@ -7414,12 +7414,17 @@ static struct rb_2hu_sig g_rb_2hu[RB_2HU_SIGS];
 static uint32_t g_rb_2hu_other = 0;      // faults past the signature table
 static uint32_t g_rb_2hu_commits = 0;
 
+extern uint32_t g_rb_2im_f_at_write;   // 2im: defined with the 2il probe
+
 static void rbgpu_fault_note_2hu(void) {
     size_t n = 0;
     int w = snprintf(g_rb_2hs_note, sizeof(g_rb_2hs_note),
-                     "hk=%d c=%u f=%u r=%u o=%u",
+                     "hk=%d c=%u f=%u r=%u o=%u fw=%d",
                      g_rb_2hs_hooked, g_rb_2hs_calls, g_rb_2hs_faults,
-                     g_rb_2hs_fill, g_rb_2hu_other);
+                     g_rb_2hs_fill, g_rb_2hu_other,
+                     (g_rb_2im_f_at_write == 0xFFFFFFFFu)
+                         ? -1
+                         : static_cast<int>(g_rb_2hs_faults - g_rb_2im_f_at_write));
     n = (w > 0) ? static_cast<size_t>(w) : 0;
     for (unsigned i = 0; i < RB_2HU_SIGS; i++) {
         if (!g_rb_2hu[i].used || n >= sizeof(g_rb_2hs_note) - 72) {
@@ -9560,8 +9565,87 @@ static void rbgpu_ptwrite_2ig(void *obj,
 
 struct rb_2il_cand { uint64_t pa; uint32_t nz, v; uint64_t first; uint8_t mapped; };
 
-static int g_rb_2il_done = 0;
+__attribute__((noinline))
+static void rbgpu_walk_2im(uint64_t pd_pa, uint64_t vbo) {
+    // 2im (2026-10-18): the walk. The directory has ONE valid entry and 2il
+    // recorded its VALUE but not its INDEX, which is what says whether it
+    // covers the faulting VA at all. Dump the nonzero (index, value) pairs,
+    // then follow the first one to its page table and dump that too. The
+    // geometry (depth 1, PAGE_TABLE_BLOCK_SIZE from cn=0x3b) is then derived
+    // from the data rather than computed from a field decode I have not
+    // verified on this chip.
+    {
+        IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(
+            static_cast<IOPhysicalAddress>(pd_pa), 0x1000, kIODirectionIn);
+        IOMemoryMap *mp = md ? md->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+        if (mp) {
+            auto q = reinterpret_cast<volatile uint64_t *>(mp->getVirtualAddress());
+            char w2[352];
+            size_t m = 0;
+            int x = snprintf(w2, sizeof(w2), "pd=%llx", pd_pa);
+            m = (x > 0) ? static_cast<size_t>(x) : 0;
+            uint64_t pte_pa = 0;
+            unsigned shown = 0;
+            for (unsigned k = 0; k < 512 && shown < 6; k++) {
+                if (q[k] == 0) continue;
+                if (pte_pa == 0) pte_pa = (q[k] & 0x0000FFFFFFFFF000ull) + vbo;
+                if (m < sizeof(w2) - 40) {
+                    x = snprintf(w2 + m, sizeof(w2) - m, " [%u]=%llx", k, q[k]);
+                    if (x > 0) { m += static_cast<size_t>(x); if (m >= sizeof(w2)) { m = sizeof(w2) - 1; break; } }
+                }
+                shown++;
+            }
+            mp->release();
+            if (md) md->release();
 
+            // Follow it. The PTE page's address goes through the same mc2pa
+            // that 2il just PROVED for the directory, so this is the first
+            // step of this walk that is not a guess.
+            if (pte_pa) {
+                IOMemoryDescriptor *m2 = IOMemoryDescriptor::withPhysicalAddress(
+                    static_cast<IOPhysicalAddress>(pte_pa), 0x1000, kIODirectionIn);
+                IOMemoryMap *p2 = m2 ? m2->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+                if (p2) {
+                    auto t = reinterpret_cast<volatile uint64_t *>(p2->getVirtualAddress());
+                    uint32_t nz = 0, v = 0; uint64_t f1 = 0; unsigned i1 = 0;
+                    for (unsigned k = 0; k < 512; k++) {
+                        if (t[k] == 0) continue;
+                        if (nz == 0) { f1 = t[k]; i1 = k; }
+                        nz++; if (t[k] & 1) v++;
+                    }
+                    if (m < sizeof(w2) - 64) {
+                        snprintf(w2 + m, sizeof(w2) - m,
+                                 " | pt=%llx nz=%u v=%u [%u]=%llx",
+                                 pte_pa, nz, v, i1, f1);
+                    }
+                    p2->release();
+                } else if (m < sizeof(w2) - 24) {
+                    snprintf(w2 + m, sizeof(w2) - m, " | pt=%llx UNMAPPED", pte_pa);
+                }
+                if (m2) m2->release();
+            }
+            rbgpu_nvram_note("rbgpu-walk", w2);
+            rbgpu_log("2im: %s", w2);
+            rbgpu_log("2im: the faulting VA is 0x4_0030_0000, which is page "
+                      "0x300 above this context's window start 0x4_0000_0000. "
+                      "If the only valid PDE's index cannot reach page 0x300, "
+                      "the directory does not map the address the CPF reads "
+                      "and the base being right changes nothing - which would "
+                      "move the question from the base to who populates the "
+                      "table.");
+        } else if (md) {
+            md->release();
+        }
+    }
+
+}
+
+
+
+static int g_rb_2il_done = 0;
+uint32_t g_rb_2im_f_at_write = 0xFFFFFFFFu;   // 2im: fault count when 2il wrote
+
+__attribute__((noinline))
 static void rbgpu_pdcandidates_2il(void *obj,
                                    uint32_t (*resolve)(void *, uint64_t),
                                    uint32_t (*rd)(void *, uint32_t),
@@ -9644,6 +9728,8 @@ static void rbgpu_pdcandidates_2il(void *obj,
         return;
     }
 
+    rbgpu_walk_2im(c[qual].pa, vbo);
+
     uint64_t winner = c[qual].pa;
     uint32_t new_lo = static_cast<uint32_t>(winner & 0xFFFFFFFFu) | 1u;
     uint32_t new_hi = static_cast<uint32_t>(winner >> 32);
@@ -9652,6 +9738,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
                  new_lo, new_hi);
         n = strlen(note);
     }
+    g_rb_2im_f_at_write = g_rb_2hs_faults;   // 2im: so post-write faults are countable
     rbgpu_nvram_note("rbgpu-pdc", note);     // commit BEFORE writing
 
     wr(obj, off_lo, new_lo);
@@ -9668,6 +9755,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
               'a' + qual, winner, c[qual].nz, new_lo, new_hi, b_lo, b_hi);
 }
 
+__attribute__((noinline))
 static void rbgpu_aperture_probe_2ik(void *obj,
                                      uint32_t (*resolve)(void *, uint64_t),
                                      uint32_t (*rd)(void *, uint32_t),
