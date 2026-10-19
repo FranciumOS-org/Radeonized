@@ -10084,6 +10084,7 @@ static void rbgpu_aperture_probe_2ik(void *obj,
 
 static char g_rb_2is_note[352];   // 2is: the two read paths, side by side
 static char g_rb_2iu_note[512];   // 2iu: power, reset and the write-readback
+static char g_rb_2ix_note[256];   // 2ix: the RLC bootload latch
 
 static void rbgpu_vmctx_probe_2hq(void *obj,
                                   uint32_t (*resolve)(void *, uint64_t),
@@ -11084,6 +11085,69 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "were the PATH, not the register. A TOOK with B and C both "
                   "REFUSED means CP_ME_CNTL is genuinely protected and the "
                   "elimination list stands.");
+    }
+
+    // 2ix (2026-10-18): did the RLC autoload handshake ever COMPLETE?
+    //
+    // 2iw closed the confound and vindicated the instrument:
+    //   A  g_hw -> SCRATCH_REG0        0 -> 0xa5a5a5a5   TOOK
+    //   B  accessor -> CP_ME_CNTL      refused, confirmed on both reads
+    //   C  g_hw -> CP_ME_CNTL          refused
+    // and the seg0 control comes free from 2il/2ip, whose accessor writes
+    // to the GCVM context bases at 0x28C7 took with verified read-back in
+    // these same boots. Same path, same segment, two registers: one
+    // accepts, one refuses. So CP_ME_CNTL genuinely refuses writes from
+    // EVERYBODY, Apple included, and 2iu/2iv's eliminations stand -
+    // power, soft reset, RLCG and safe mode are all out.
+    //
+    // Which leaves the one mechanism that owns those bits on an APU.
+    // The CP here is not started by the host: the PSP places the microcode
+    // and then the RLC runs a bootload handshake, and **the RLC** releases
+    // CE/PFP/ME. Until that handshake completes the RLC owns the halt bits
+    // and host writes are ignored - by anyone, which is exactly what
+    // 2iw measured.
+    //
+    // 2am patched away the wait for BOOTLOAD_COMPLETE in
+    // RLC_RLCS_BOOTLOAD_STATUS because it was timing out. 2it proved the
+    // microcode IS present, so 2am was right that the firmware arrives -
+    // but "the firmware arrived" and "the handshake that releases the CP
+    // finished" are different claims, and only the first was ever checked.
+    // We told the driver the second was true as well.
+    //
+    // That is also a textbook Navi21-versus-Rembrandt difference: a dGPU
+    // does not start its CP this way, and Apple's PSP path is Navi21's.
+    //
+    //   0x4e8d RLC_RLCS_BOOTLOAD_STATUS   seg1, BASE_IDX 1
+    //     bit 0  RLC_RLCG_IRAM_LOADED
+    //     bit 31 BOOTLOAD_COMPLETE
+    //
+    //   iram=1 complete=0  the PSP loaded the instruction RAM and the
+    //                      bootload NEVER completed. The RLC still owns the
+    //                      CP, which is why no one can un-halt it, and 2am
+    //                      has been reporting a handshake that never
+    //                      happened. Root cause.
+    //   complete=1         the handshake finished and the RLC released the
+    //                      CP, so the refusal is something else again and
+    //                      this line is dead too
+    //   iram=0 complete=0  the RLC never even saw the microcode the CP
+    //                      instruction RAM demonstrably contains, which
+    //                      would mean the PSP bypassed the RLC entirely
+    if (g_hw.rreg) {
+        uint32_t bl = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4E8Du) * 4);
+        char y[96];
+        snprintf(y, sizeof(y), "p%u bl=%x iram=%u complete=%u",
+                 phase, bl, bl & 1u, (bl >> 31) & 1u);
+        size_t yh = strlen(g_rb_2ix_note);
+        snprintf(g_rb_2ix_note + yh, sizeof(g_rb_2ix_note) - yh,
+                 "%s%s", yh ? " | " : "", y);
+        rbgpu_nvram_note("rbgpu-bl", g_rb_2ix_note);
+        rbgpu_log("2ix: %s", y);
+        rbgpu_log("2ix: complete=0 means the RLC never finished the bootload "
+                  "handshake, still owns CE/PFP/ME, and ignores every write "
+                  "to CP_ME_CNTL including Apple's - which is every symptom "
+                  "since 2hl from one cause, and makes 2am's bypass the "
+                  "place the truth was lost rather than the place it was "
+                  "found.");
     }
 
     // 2hq: the context registers, after the ring note is safely committed so
