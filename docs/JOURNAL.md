@@ -13497,3 +13497,67 @@ to be harmful, and they would say whether Apple calls
 `_gc_fw_initialize_backdoor_loading_register_set_10_3` - the function
 whose disassembly writes `RLC_CNTL` - which is now directly on the
 question of why `f32=1`.
+
+## 2jn (2026-10-19) — the GRBM may be routing every CP access to a shader engine that does not exist
+
+Static work, no boot spent. The user asked for a cause before rebooting.
+
+**2jl is what forces this.** `CE_STEP` (bit 25) is an ordinary read/write
+single-step debug bit sitting in `CP_ME_CNTL` beside the halt bits, and it
+**would not stick**. Eight tight-loop reads after writing 0 and not one bit
+ever differed. A register that reads a constant and accepts *nothing* -
+not even an unrelated debug bit - is not a protected register. **It is a
+register nobody is addressing.**
+
+**`GRBM_GFX_CNTL` (seg0 `0x0dc2`) routes CP register access.** Its fields
+are `PIPEID` [1:0], `MEID` [3:2], `VMID` [7:4], `QUEUEID` [10:8].
+**`GRBM_GFX_INDEX` (seg1 `0x2200`)** carries `INSTANCE_INDEX` [7:0],
+`SA_INDEX` [15:8], `SE_INDEX` [23:16] and the broadcast bits
+`SA 0x20000000`, `INSTANCE 0x40000000`, `SE 0x80000000`.
+
+Linux brackets **every** MQD programming with
+`nv_grbm_select(adev, me, pipe, queue, 0)` … `nv_grbm_select(adev, 0,0,0,0)`
+— `gfx_v10_0.c` 3832/3867, 5214/5219, 6865/6876, 7164/7166 — and
+`gfx_v10_0_select_se_sh` builds **`0xE0000000`** as the all-broadcast value.
+Leaving either set misroutes everything after it.
+
+**Apple programmed MQDs this boot.** `rbgpu-gate` records
+`32 mapQueues: the ORIGINAL returned`.
+
+**And the Navi21 angle is this project's recurring bug shape: Navi 21 has
+four shader engines, Rembrandt has one.** If Apple's code walks SE 0..3 and
+leaves `SE_INDEX` at 1, 2 or 3, every SE-indexed GC register is addressed
+on a shader engine that is not present on this die — reads return a
+constant, writes go nowhere. That is 2gi/2gu's four-SDMA-engines bug in a
+different block.
+
+**It explains every observation at once**, which nothing else has:
+
+| observation | explained |
+|---|---|
+| `CP_ME_CNTL` constant `0x15000000`, no bit ever moves | yes |
+| `CE_STEP` refused (2jl) | yes |
+| GCVM seg0 writes land with matching readback | yes — GFXHUB is not SE-indexed |
+| `SCRATCH_REG0` seg1 write took (2iw cell A) | yes — not SE-indexed |
+| **Apple's own un-halt refused** (2jb) | yes — same misrouted path |
+| stopping the RLC changed nothing (2jh) | yes — the RLC was never the gate |
+| `GRBM_STATUS` = `a0003028` in every sample of every boot | yes — **and this retires the debt open since 2hp** |
+
+**`rbgpu-grbm`.** Read half unconditional and read-only: both registers,
+every field decoded, and a verdict line. Write half only under
+**`-rbgpugrbmfix`**: set `GRBM_GFX_INDEX = 0xE0000000` and
+`GRBM_GFX_CNTL = 0` (Linux's own defaults), re-read `CP_ME_CNTL`, write 0,
+read back, then restore both GRBM registers to whatever Apple had.
+
+`me sel` — `CP_ME_CNTL` re-read *after* the GRBM reset but *before* the
+write — is the sharpest cell: if it differs from `me before`, the
+misrouting is demonstrated directly, with no write involved at all.
+
+**`CP_ME_CNTL` is deliberately NOT restored if the write lands.** An
+un-halted CP is the entire point; hiding that in a restore would make the
+experiment meaningless. Stated here rather than buried.
+
+Build `D6E8725B-DE1F-3B96-9832-53DC3FFB2F36`.
+
+Honest about what this is: a hypothesis with unusually good fit and no
+measurement behind it yet. The read half costs nothing and settles it.

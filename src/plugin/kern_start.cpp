@@ -11374,6 +11374,98 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "elimination list stands.");
     }
 
+    // 2jn (2026-10-19): IS THE GRBM ROUTING THE WRITES SOMEWHERE ELSE?
+    //
+    // 2jl closed the "CP re-halts itself" idea: CE_STEP - an ordinary R/W
+    // debug bit - would not stick either, and across eight tight-loop reads
+    // no bit of CP_ME_CNTL ever moved. A register that reads a constant and
+    // accepts nothing is not a protected register. It is a register nobody
+    // is actually addressing.
+    //
+    // GRBM_GFX_CNTL (seg0 0x0dc2) carries MEID/PIPEID/QUEUEID/VMID and
+    // ROUTES CP register access. GRBM_GFX_INDEX (seg1 0x2200) carries
+    // SE_INDEX/SA_INDEX/INSTANCE_INDEX and three broadcast bits. Linux
+    // brackets EVERY MQD programming with nv_grbm_select(me,pipe,queue,0)
+    // ... nv_grbm_select(0,0,0,0) - gfx_v10_0.c lines 3832/3867,
+    // 5214/5219, 6865/6876, 7164/7166 - because leaving it set misroutes
+    // everything after it. And gfx_v10_0_select_se_sh builds
+    // 0xE0000000 (SE | INSTANCE | SA broadcast) as the "all" value.
+    //
+    // We KNOW Apple programmed MQDs this boot: rbgpu-gate records
+    // "32 mapQueues: the ORIGINAL returned".
+    //
+    // And the Navi21 angle, which is this project's recurring bug shape:
+    // **Navi 21 has 4 shader engines. Rembrandt has 1.** If Apple's code
+    // walks SE 0..3 and leaves SE_INDEX at 1, 2 or 3, every SE-indexed GC
+    // register is addressed on a shader engine that does not exist here -
+    // reads return a constant, writes go nowhere. That is 2gi/2gu's
+    // four-SDMA-engines bug in a different block.
+    //
+    // It explains every observation at once: CP_ME_CNTL constant and
+    // unwritable; CE_STEP refused; GCVM seg0 writes landing (GFXHUB is not
+    // SE-indexed); SCRATCH_REG0 seg1 taking (not SE-indexed); APPLE'S OWN
+    // un-halt refused (same misrouted path); the RLC stop changing nothing;
+    // and GRBM_STATUS reading a0003028 in every sample of every boot, which
+    // has been an open debt since 2hp.
+    //
+    // READ half: unconditional, read-only, two registers.
+    // WRITE half: only under -rbgpugrbmfix. Sets GRBM_GFX_INDEX to
+    // 0xE0000000 and GRBM_GFX_CNTL to 0 - Linux's own "select everything,
+    // select nothing special" defaults - re-reads CP_ME_CNTL, writes 0 to
+    // it, and reads back. The GRBM registers are then restored to whatever
+    // Apple had, because changing what Apple's later code sees is not part
+    // of this question.
+    //
+    // CP_ME_CNTL is deliberately NOT restored if the write lands: an
+    // un-halted CP is the entire point. Say so plainly rather than hiding
+    // a chip-state change in a restore.
+    if (phase == 0 && g_hw.rreg && g_hw.wreg) {
+        const uint32_t kGCNTL = (0x1260u + 0x0dc2u) * 4;   // seg0
+        const uint32_t kGIDX  = (0xa000u + 0x2200u) * 4;   // seg1
+        const uint32_t kMEb   = (0x1260u + 0x0F56u) * 4;   // seg0
+
+        uint32_t gc = g_hw.rreg(g_hw.ctx, kGCNTL);
+        uint32_t gi = g_hw.rreg(g_hw.ctx, kGIDX);
+
+        char g[352];
+        int n = snprintf(g, sizeof(g),
+                 "cntl=%x me=%u pipe=%u q=%u vm=%u | idx=%x se=%u sa=%u inst=%u "
+                 "bcast se=%u sa=%u inst=%u | %s",
+                 gc, (gc >> 2) & 3u, gc & 3u, (gc >> 8) & 7u, (gc >> 4) & 0xfu,
+                 gi, (gi >> 16) & 0xffu, (gi >> 8) & 0xffu, gi & 0xffu,
+                 (gi >> 31) & 1u, (gi >> 29) & 1u, (gi >> 30) & 1u,
+                 (gc == 0 && gi == 0xE0000000u)
+                     ? "DEFAULT - routing is not the problem"
+                     : "NOT DEFAULT - CP access is being misrouted");
+
+        if (checkKernelArgument("-rbgpugrbmfix")) {
+            uint32_t me_before = g_hw.rreg(g_hw.ctx, kMEb);
+            g_hw.wreg(g_hw.ctx, kGIDX, 0xE0000000u);
+            g_hw.wreg(g_hw.ctx, kGCNTL, 0);
+            uint32_t gi2 = g_hw.rreg(g_hw.ctx, kGIDX);
+            uint32_t gc2 = g_hw.rreg(g_hw.ctx, kGCNTL);
+            uint32_t me_sel = g_hw.rreg(g_hw.ctx, kMEb);
+            g_hw.wreg(g_hw.ctx, kMEb, 0);
+            uint32_t me_after = g_hw.rreg(g_hw.ctx, kMEb);
+            g_hw.wreg(g_hw.ctx, kGIDX, gi);                // restore Apple's
+            g_hw.wreg(g_hw.ctx, kGCNTL, gc);
+            snprintf(g + n, sizeof(g) - static_cast<size_t>(n),
+                     " || FIX idx->%x cntl->%x | me %x sel=%x wrote0=%x %s",
+                     gi2, gc2, me_before, me_sel, me_after,
+                     (me_after == 0) ? "*** TOOK ***" : "still refused");
+        }
+
+        rbgpu_nvram_note("rbgpu-grbm", g);
+        rbgpu_log("2jn: %s", g);
+        rbgpu_log("2jn: cntl!=0 or idx!=E0000000 means Apple left the GRBM "
+                  "selecting a specific ME/pipe/queue or a specific shader "
+                  "engine, and every CP register access since has gone "
+                  "there. On a 1-SE part addressed as a 4-SE part that is "
+                  "nowhere. me sel differing from me before would show the "
+                  "misrouting directly. TOOK means the CP is un-halted and "
+                  "it was never protected at all.");
+    }
+
     // 2jm (2026-10-19): what is actually AT the bootload address?
     //
     // 2jk found RLC_HYP_BOOTLOAD_ADDR already programmed - 0x8_7F80_0000,
