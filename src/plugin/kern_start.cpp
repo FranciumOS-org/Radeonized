@@ -10083,6 +10083,7 @@ static void rbgpu_aperture_probe_2ik(void *obj,
 }
 
 static char g_rb_2is_note[352];   // 2is: the two read paths, side by side
+static char g_rb_2iu_note[512];   // 2iu: power, reset and the write-readback
 
 static void rbgpu_vmctx_probe_2hq(void *obj,
                                   uint32_t (*resolve)(void *, uint64_t),
@@ -10820,6 +10821,90 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     } else if (phase == 0 && !checkKernelArgument("-rbgpucpfw")) {
         rbgpu_nvram_note("rbgpu-cpfw", "off - -rbgpucpfw not set, the "
                                        "instruction RAM was not read");
+    }
+
+    // 2iu (2026-10-18): WHY the halt bits will not clear. Four candidates,
+    // one sample, at the moment the CP is actually halted.
+    //
+    // 2it closed the firmware question: pfp/me/ce/mec all read 64 of 64
+    // nonzero dwords of instruction RAM with distinct plausible first words,
+    // so the CP microcode IS loaded and 2am's bypass is vindicated - the
+    // oldest debt in docs/RULES.md, verified on this chip at last. The halt is
+    // not an unloaded CP.
+    //
+    // The decodes are also now checked against gc_10_3_0_sh_mask.h rather
+    // than carried from memory, which they had been for ten milestones:
+    //   CP_ME_CNTL bits 0x18/0x1a/0x1c = CE_HALT/PFP_HALT/ME_HALT, so
+    //     0x15000000 is exactly those three. Confirmed.
+    //   GRBM_STATUS 0xa0003028 = CMDFIFO_AVAIL 0x28, DB_CLEAN, CB_CLEAN,
+    //     CP_BUSY, GUI_ACTIVE. Confirmed - the graphics pipe claims
+    //     outstanding work while its ME is halted.
+    //   RLC_GPM_STAT 0xb40017 = RLC_BUSY, GFX_POWER_STATUS,
+    //     GFX_CLOCK_STATUS, GFX_PIPELINE_POWER_STATUS, CMP_power_status,
+    //     GFX_CLOCK_STATUS_3D, MGCG/FGCG overrides.
+    //
+    // That last one is the point. It says GFX is powered and clocked - but
+    // it comes from the EARLY diag pass, the same pass that read
+    // CP_ME_CNTL = 0 before the halt appeared. Every "GFX is healthy"
+    // reading this project owns is from bring-up, and every "CP is halted"
+    // reading is from later. Nobody has looked at the power state at the
+    // moment the CP is halted, and if GFX were power-gated then the halt
+    // bits would read at their reset default, writes would be dropped, the
+    // ring would never advance and the status registers would be stale -
+    // which is every symptom at once, and would also explain 2di's
+    // gfx_min = gfx_max = 0, unexplained since 2026-10-12.
+    //
+    // Four discriminators, all reads but one:
+    //
+    //   RLC_GPM_STAT bit 1 clear   GFX is POWER-GATED. One cause for the
+    //                              halt, the stale GRBM_STATUS and 2di.
+    //   GRBM_SOFT_RESET nonzero    the CP is held in reset, so writes to
+    //                              its control register do nothing
+    //   CP_MEC_CNTL                the compute pipe's state beside the
+    //                              graphics one - Apple drives clients
+    //                              through MEC/KIQ, so a running MEC with a
+    //                              halted ME may be normal and the halt a
+    //                              red herring
+    //   write-readback             write 0 to CP_ME_CNTL and read it back
+    //                              IMMEDIATELY. Back as 0 means something
+    //                              re-asserts it later; back as 0x15000000
+    //                              means the write is refused right now.
+    //
+    // The one write is 0 to CP_ME_CNTL - byte for byte what HWLibs writes at
+    // 246 ms and X6000 writes twice more. It asks the chip nothing the
+    // driver is not already asking it.
+    if (g_hw.rreg && g_hw.wreg) {
+        uint32_t rlc_cnt = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4C00u) * 4);
+        uint32_t rlc_st  = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4C04u) * 4);
+        uint32_t rlc_gpm = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4E6Eu) * 4);
+        uint32_t rlc_sfm = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4CA0u) * 4);
+        uint32_t soft_rs = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA8u) * 4);
+        uint32_t mec_cnt = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F55u) * 4);
+
+        uint32_t me_before = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+        g_hw.wreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4, 0);
+        uint32_t me_now = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+
+        char u[224];
+        snprintf(u, sizeof(u),
+                 "p%u gpm=%x pwr=%u clk=%u pipe=%u | rlc c=%x s=%x sfm=%x | "
+                 "srst=%x mec=%x | me %x->%x %s",
+                 phase, rlc_gpm, (rlc_gpm >> 1) & 1, (rlc_gpm >> 2) & 1,
+                 (rlc_gpm >> 4) & 1, rlc_cnt, rlc_st, rlc_sfm,
+                 soft_rs, mec_cnt, me_before, me_now,
+                 (me_now == 0) ? "TOOK" : "REFUSED");
+        size_t uh = strlen(g_rb_2iu_note);
+        snprintf(g_rb_2iu_note + uh, sizeof(g_rb_2iu_note) - uh,
+                 "%s%s", uh ? " | " : "", u);
+        rbgpu_nvram_note("rbgpu-pwr", g_rb_2iu_note);
+        rbgpu_log("2iu: %s", u);
+        rbgpu_log("2iu: pwr=0 means the GFX block is power-gated and one "
+                  "cause explains the halt, the stale GRBM_STATUS and 2di "
+                  "together. srst nonzero means the CP is held in reset. "
+                  "me TOOK means the write lands and something re-asserts it "
+                  "later; me REFUSED means it is being dropped right now, "
+                  "which with pwr=1 and srst=0 would leave RLC safe mode - "
+                  "2an's unverified bypass - as the remaining candidate.");
     }
 
     // 2hq: the context registers, after the ring note is safely committed so

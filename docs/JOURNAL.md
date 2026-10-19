@@ -12319,3 +12319,75 @@ premise under test. Gated on `-rbgpucpfw`, its own boot-arg.
 | `nz=0`, or `f1=64` (all-ones) | the RAM is **empty**. The PSP never loaded the CP microcode, 2am has been reporting success for firmware that was never placed, and the halted CP follows directly - as does every stalled `rptr` since 2hl. |
 | some engines loaded, others not | partial load, and the note names which - likely the most informative outcome of the three |
 
+
+## 2it result (2026-10-18) — the CP microcode IS loaded. 2am's debt is PAID.
+
+Twenty-third armed boot, `logs/20261018-220951-metal/`, `armed=1`, UUID
+`AFB6658B-FEC5-30AF-8C66-14F5878BC7F2` = `build/out`.
+
+```
+rbgpu-cpfw = b=51 pfp nz=64 f1=0 d0=1002fd | me  nz=64 f1=0 d0=100ca0
+                | ce  nz=64 f1=0 d0=100098 | mec nz=64 f1=0 d0=403e2d
+```
+
+All four engines: **64 of 64 dwords nonzero, zero all-ones reads, four
+distinct plausible first words.** The CP microcode is present in PFP, ME,
+CE and MEC alike.
+
+**2am is vindicated and its debt is closed.** The bypass of
+`_gc_fw_autoload_is_completed` was correct: the PSP really does place the
+firmware, the RLC's autoload latch really is the wrong thing to wait on,
+and this is now **verified on this chip** rather than borrowed from the
+Raphael bring-up. docs/RULES.md's oldest standing debt - "the 2am/2an/2ao
+blanket firmware-ready bypasses still owe the explanation 2cy demanded" -
+is discharged for 2am. 2an and 2ao are untouched and still owed.
+
+And the hypothesis it was built to test is **dead**: the halt is not an
+unloaded CP.
+
+### Decodes verified against the header, not memory
+
+Three values this project has carried for ten milestones were checked
+against `gc_10_3_0_sh_mask.h` rather than recalled:
+
+- `CP_ME_CNTL` bits `0x18`/`0x1a`/`0x1c` are `CE_HALT`/`PFP_HALT`/`ME_HALT`,
+  so `0x15000000` is exactly those three. **Correct as stated.**
+- `GRBM_STATUS 0xa0003028` = `CMDFIFO_AVAIL 0x28`, `DB_CLEAN`, `CB_CLEAN`,
+  `CP_BUSY`, `GUI_ACTIVE`. **Correct** - and the combination matters: the
+  graphics pipe claims outstanding work while its ME is halted.
+- `RLC_GPM_STAT 0xb40017` = `RLC_BUSY`, `GFX_POWER_STATUS`,
+  `GFX_CLOCK_STATUS`, `GFX_PIPELINE_POWER_STATUS`, `CMP_power_status`,
+  `GFX_CLOCK_STATUS_3D`, `MGCG_OVERRIDE_STATUS`, `FGCG_OVERRIDE_STATUS`.
+
+## 2iu (2026-10-18) — the sampling bias nobody had noticed
+
+That last decode says GFX is powered and clocked. **But it comes from the
+early diag pass** - the same pass that read `CP_ME_CNTL = 0` before the
+halt appeared.
+
+That is the shape of the whole problem, stated plainly for the first time:
+**every "GFX is healthy" reading this project owns is from bring-up, and
+every "CP is halted" reading is from later.** Nobody has looked at the
+power state at the moment the CP is halted. A sampling bias, not a missing
+register.
+
+And if GFX were power-gated at that moment, the halt bits would read at
+their reset default, writes to them would be dropped, the ring would never
+advance, and the status registers would be stale - **every symptom at
+once**, including `GRBM_STATUS`'s constant value, and it would also explain
+2di's `gfx_min = gfx_max = 0`, unexplained since 2026-10-12.
+
+So: four discriminators, one sample, at every phase.
+
+| reading | means |
+|---|---|
+| `pwr=0` (RLC_GPM_STAT bit 1 clear) | GFX is **power-gated**. One cause for the halt, the stale GRBM_STATUS and 2di together. |
+| `srst` nonzero | the CP is held in `GRBM_SOFT_RESET`, so writes to its control register do nothing |
+| `mec=0` with ME halted | the compute pipe runs while the graphics pipe does not - and since Apple drives clients through MEC/KIQ, the ME halt may be **normal** and this whole line a red herring |
+| `me ... TOOK` | the write lands; something re-asserts the halt later, and the question is what |
+| `me ... REFUSED` | the write is dropped **now**. With `pwr=1` and `srst=0` that leaves RLC safe mode - **2an's still-unverified bypass** - as the remaining candidate. |
+
+The single write is `0` to `CP_ME_CNTL`, byte for byte what HWLibs writes
+at 246 ms and X6000 writes twice more. It asks the chip nothing the driver
+is not already asking it.
+
