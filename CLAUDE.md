@@ -126,6 +126,13 @@ under the tag in brackets.
   armed boot's capture may already be saved there (ssh in while the screen
   is black). `plugin_check.sh` only READS nvram, so a later run destroys
   nothing. [2gw]
+- **In an armed boot, run `sudo tools/plugin_check.sh` over SSH BEFORE
+  rebooting.** It saves the whole capture to `logs/<timestamp>-plugin/`
+  on disk, which survives the power cycle; live NVRAM read after a
+  reboot does not. Boots 57, 58 and 59 each wrote `rbgpu-prog` (early)
+  and lost every ring-probe note (late) - the 2gq pattern - and three
+  experiments were spent blaming the code for it. The user cannot run
+  Claude from an armed boot, so the capture has to be a file. [2jg]
 - **Read `rbgpu-boot` FIRST, before anything else in NVRAM.** If it has not
   increased since the last capture, the boot was never armed and *nothing*
   in NVRAM is this boot's. 2gw's old test - "`rbgpu-diag` reads `armed=1`
