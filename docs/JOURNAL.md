@@ -13561,3 +13561,100 @@ Build `D6E8725B-DE1F-3B96-9832-53DC3FFB2F36`.
 
 Honest about what this is: a hypothesis with unusually good fit and no
 measurement behind it yet. The read half costs nothing and settles it.
+
+## 2jo (2026-10-19) — boot 62: 2jn refuted, three more eliminations, and 2jh walked back
+
+Boot 62, captured in-boot. The user asked for a cause before rebooting
+again; this is static work plus one boot's readings.
+
+```
+rbgpu-grbm  = b=62 cntl=0 me=0 pipe=0 q=0 vm=0 | idx=0 se=0 sa=0 inst=0
+                   bcast se=0 sa=0 inst=0 | "NOT DEFAULT" (see below)
+                   || FIX idx->0 cntl->0 | me 15000000 sel=15000000
+                   wrote0=15000000 still refused
+rbgpu-blbuf = b=62 pa=87f800000 sz=6000 nz=1024/1024 ymatch=0 | ffffffff x8
+rbgpu-hyp   = b=62 rv=1 cold=1 vddgfx=0 | bootload 87f800000 sz=6000 SET
+                   | rlc_cntl=1 f32=1 | cp_stat=94078600
+```
+
+**2jn is REFUTED.** `GRBM_GFX_CNTL = 0` - nothing selected. `GRBM_GFX_INDEX
+= 0` with `SE_INDEX = 0`, and SE0 exists on this die. Nothing was being
+misrouted to a shader engine Rembrandt lacks. **My verdict string was also
+mis-specified**: it compared against `0xE0000000` and printed "NOT DEFAULT
+- CP access is being misrouted" for `idx=0`, which is not misrouting. The
+note said something the data did not.
+
+**Still unexplained from that cell:** writing `0xE0000000` to
+`GRBM_GFX_INDEX` read back `0`. A second GC register that does not take a
+write. Recorded as a fact, not built on.
+
+### Eliminations, each with its source
+
+- **GFXOFF is OUT.** `yellow_carp_ppt.c:627` - Linux's own comment -
+  `Returns 2 = Not in GFXOFF`. Our diag reads `gfxoff_status=2` in every
+  boot. GFX is powered and awake, so "the registers are in a sleeping
+  power domain" is dead before it cost a boot.
+- **RLCG is OUT, properly this time.** docs/RULES.md eliminated it from
+  `gfx_v10_0_is_rlcg_access_range` passing `NULL/0`, which was weak.
+  The real reason: `WREG32_SOC15_RLC` dispatches through
+  `adev->gfx.rlc.reg_funcs->wreg32`, and `amdgpu_init_rlc_reg_funcs`
+  picks the RLCG implementation **only** `if (amdgpu_sriov_vf(adev))`.
+  Bare metal gets `amdgpu_rlc_wreg`, whose entire body is
+  `amdgpu_device_wreg(adev, reg, value, 0)` - a plain MMIO write.
+  **I briefly claimed the opposite** on seeing
+  `WREG32_SOC15_RLC(GC, 0, mmCP_ME_CNTL, tmp)` at `gfx_v10_0.c:6093`;
+  that claim is withdrawn. Chasing the macro to its implementation is
+  what caught it.
+- **Apple's write path does not filter.**
+  `AMDRadeonX6000_AMDHWRegisters::write` (0xbe8d28a) disassembled in
+  full. With `this+0x44 == 1` it computes `byte_off = dword*4` and, if
+  `byte_off < this+0x40` (the mapped window), does a direct
+  `movl %ebx,(%rax,%rcx)`; otherwise it takes `this+0x20`, writes
+  `MM_INDEX = byte_off` and `MM_DATA = value` at the window base, and
+  unlocks. No whitelist, no register filter, 32-bit index so no 64 KB
+  aliasing. **The writes reach the register and the hardware ignores
+  them.** (`this+0x44 != 1` skips the write entirely, but that is a
+  per-object field and the GCVM writes through the same object land, so
+  it is 1.)
+
+### 2jh over-claimed, and I wrote the over-claim
+
+2jh concluded "the RLC is not the gate" from stopping it and seeing no
+release. **Stopping the RLC is not the same as completing the bootload.**
+If the halt bits are cleared only by the autoload sequence - set at reset,
+released when the bundle boots - then switching the RLC's F32 engine off
+cannot clear them, and 2jh's result is exactly what that predicts.
+
+So the correct, narrower statement: **a *running* RLC is not actively
+holding the register.** 2ix's conclusion - that the halt is released by
+the autoload and by nothing the host can do - **survives**, and 2jl's
+"write-protected, not self-re-halting" fits it precisely. docs/RULES.md's
+standing-debt wording ("the chain that followed is REFUTED") is too
+strong and should be softened to name only the mechanism, not the
+conclusion.
+
+### The bootload buffer is probably the PSP's TMR, not an empty page
+
+`rbgpu-blbuf` reads `0xffffffff` across all 1024 dwords at
+`0x8_7F80_0000`. That is 8 MB below the top of the carve-out
+(`0x7_8000_0000 .. 0x8_8000_0000`), which is where the PSP's Trusted
+Memory Region is carved - and `_psp_tmr_init` and `_psp_tmr_load` both
+returned 0 in our logs. A TMR reads all-ones from the CPU **by design**.
+
+So "nz=1024/1024 all-ones" is consistent with a correctly-placed,
+CPU-protected autoload bundle *and* with an unbacked page, and the probe
+cannot tell them apart. **No conclusion drawn.** 2jm's table had
+`nz=0 -> empty`; the case that actually occurred was not in the table.
+
+### Where that leaves it
+
+The autoload is pointed somewhere (`BOOTLOAD_ADDR` set, `COLD_BOOT_EXIT`
+set), the firmware is substituted (2jj: seven images incl. the TOC), the
+CP's IRAM holds microcode (2it), GFX is awake, the RLC is running - and
+`BOOTLOAD_COMPLETE` never sets while `CP_STAT` never reaches 0.
+
+The untested gap is the **entry set**: we supply ids 1/2/3/6/9/14/36 and
+never MEC2 (`firmware/linux/yellow_carp_mec2.bin` is on disk, unused),
+RLCV, the RLC SR list, or MEC JT. Whether GC 10.3 wants those as separate
+entries is unverified and is the next thing to read in
+`_gc_10_3_get_fw_constants`.
