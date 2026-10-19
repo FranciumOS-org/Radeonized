@@ -10801,7 +10801,7 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
               "1024 dwords). rptr=0x%x wptr=0x%x", t3, nonzero, rptr, wptr);
 
     // Walk the packets and find every RELEASE_MEM. Its dw3/dw4 is the answer.
-    char note[352];
+    char note[448];
     size_t n = 0;
     int w = snprintf(note, sizeof(note), "pa=%llx t3=%u r=%x w=%x", pa, t3, rptr, wptr);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
@@ -10874,6 +10874,74 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
         if (n < sizeof(note) - 12) {
             w = snprintf(note + n, sizeof(note) - n, " | nowd");
             if (w > 0) n += static_cast<size_t>(w);
+        }
+    }
+
+    // 2jz (2026-10-19): does the ring itself write CP_ME_CNTL?
+    //
+    // Boot 74 settled 2jy's discriminator: `rbb ffbfe000->ffbfe000` and
+    // `rbc a00e10->a00e10` ACROSS the halt. The CP block is alive on the
+    // register bus and keeps Apple's programmed values, so `0x15000000` is a
+    // real value something WROTE - hypothesis (b), a hung block reading back
+    // its defaults, is refuted.
+    //
+    // 2ix counted every host write path (g_hw, Apple's accessor, Apple's own
+    // driver code) and every one wrote **0**. So the writer is on the chip,
+    // and the CP writing it ITSELF from the command stream fits exactly: the
+    // value is real, a write caused it, and no host counter can see it.
+    //
+    // Three packet forms can reach a GC register, and all three are scanned:
+    //   WRITE_DATA      (0x37) dst_sel=0, dw2 = absolute dword offset
+    //   SET_CONFIG_REG  (0x68) dw1 = offset - 0x2000 (PACKET3_SET_CONFIG_REG_START)
+    //   SET_UCONFIG_REG (0x79) dw1 = offset - 0xc000 (PACKET3_SET_UCONFIG_REG_START)
+    // CP_ME_CNTL is dword 0x0F56, which falls in SET_CONFIG_REG's range.
+    //
+    // Read-only, on a page already mapped and already validated as PM4 by the
+    // t3 check above - no new risk over 2hx.
+    //
+    // NOT a result either way on its own: this is ONE page of the ring
+    // (1024 dwords) and the halt could be written from an indirect buffer or
+    // from further along. "No packet here" does not mean "no packet" (2eh).
+    {
+        const uint32_t ME_CNTL_DW = 0x0F56u;
+        unsigned nme = 0;
+        for (unsigned i = 0; i + 4 < 1024; i++) {
+            uint32_t h = dw[i];
+            if ((h >> 30) != 3) continue;
+            uint32_t op = (h >> 8) & 0xFF;
+            uint32_t reg = 0xFFFFFFFFu, val = 0;
+            const char *form = nullptr;
+            if (op == 0x37) {                       // WRITE_DATA
+                reg = dw[i + 2]; val = dw[i + 4]; form = "WRITE_DATA";
+            } else if (op == 0x68) {                // SET_CONFIG_REG
+                reg = dw[i + 1] + 0x2000u; val = dw[i + 2]; form = "SET_CONFIG_REG";
+            } else if (op == 0x79) {                // SET_UCONFIG_REG
+                reg = dw[i + 1] + 0xc000u; val = dw[i + 2]; form = "SET_UCONFIG_REG";
+            } else {
+                continue;
+            }
+            if (reg != ME_CNTL_DW) continue;
+            nme++;
+            rbgpu_log("2jz: %s @%03x writes CP_ME_CNTL (dword 0x%x) = 0x%08x "
+                      "%s", form, i, reg, val,
+                      (val & 0x15000000u) ? "<<<< THIS IS THE HALT" : "");
+            if (n < sizeof(note) - 40) {
+                w = snprintf(note + n, sizeof(note) - n, " | ME@%x=%x", i, val);
+                if (w > 0) {
+                    n += static_cast<size_t>(w);
+                    if (n >= sizeof(note)) n = sizeof(note) - 1;
+                }
+            }
+        }
+        if (nme == 0) {
+            rbgpu_log("2jz: no packet in THIS page writes CP_ME_CNTL. That is "
+                      "not 'the ring does not write it' - this is one 1024-dword "
+                      "page and the write could be in an indirect buffer or "
+                      "further along the ring.");
+            if (n < sizeof(note) - 12) {
+                w = snprintf(note + n, sizeof(note) - n, " | noME");
+                if (w > 0) n += static_cast<size_t>(w);
+            }
         }
     }
 
