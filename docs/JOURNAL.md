@@ -13140,3 +13140,39 @@ Not established: what any field means. No conclusion is drawn from the
 sizes. The useful residue is the 0x38 stride and the two distinct pointer
 forms; the obvious-but-wrong 0x10 reading is now on record so it is not
 tried twice.
+
+## 2jf (2026-10-19) — stop the RLC, then write. The deferred test, now due.
+
+Deferred before 2iy because the un-halt might never have run. 2jb settled
+that: it runs once at 236 ms, through Apple's own ext2 path, and
+`CP_ME_CNTL` does not move. The question is no longer "does anyone try" but
+"who is holding the register", and this names them.
+
+Linux's direct-load path does not merely enter safe mode — it **stops** the
+RLC. `gfx_v10_0_rlc_stop` writes `RLC_CNTL = 0`, clearing `RLC_ENABLE_F32`,
+and only then does `cp_gfx_enable` touch `CP_ME_CNTL`. 2iv forced
+`RLC_SAFE_MODE` to 0 and the write was still refused — but safe mode is a
+handshake with a *running* RLC. Switching the F32 engine off is a different
+thing and has never been tried.
+
+Sequence, all in ring-probe phase 0 where GC access is proven: read
+`RLC_CNTL` and `CP_ME_CNTL`; write `RLC_CNTL = 0`; read back; write
+`CP_ME_CNTL = 0` through **both** Apple's accessor and `g_hw`; read back;
+restore `RLC_CNTL` and read back the restore; read `CP_ME_CNTL` once more.
+
+| `rbgpu-rstop` | means |
+|---|---|
+| `me ... TOOK` | the RLC owned CE/PFP/ME. 2ix's link, inferred from Linux, is **measured** on this chip, and the road is a full host-side CP load |
+| `me ... STILL REFUSED` | the RLC is not the gate; 2ix's root cause is well-supported but wrong about the mechanism, which redirects everything |
+| `rlc ... REFUSED` | the stop itself did not land and the cell says nothing |
+
+The seg1 path has a positive control behind it: 2iw's cell A wrote
+`SCRATCH_REG0` (seg1 0x2040) through `g_hw` and it took. `RLC_CNTL` is
+seg1, so a refused stop would be a fact about the register, not the path.
+
+**This is a chip-state change, not an observation** — it switches off the
+RLC's F32 engine on a live GPU. It is behind **`-rbgpurlcstop`**, OUT by
+default. Mitigations: gating is already off (`-rbgpunogates`), the GPU
+retires no work as it is, DCN is a separate block, `RLC_CNTL` is restored
+before return, and the restore is read back so a failed restore cannot be
+reported as a clean one. Worst case is a hang; SSH survives on `wdt=-1`.
