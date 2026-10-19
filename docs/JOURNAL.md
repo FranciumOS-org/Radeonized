@@ -14587,3 +14587,54 @@ appeared in five. None of that is in the damaged window. But 2jv, 2jw, 2jx,
 build, and the late-phase notes they would have used were never available.
 
 Build `A0182834`. 2jz is otherwise unchanged and gets its boot next.
+
+## 2kb (2026-10-19) — 2ka confirmed by positive control; the ring does not write the halt in the page we can see; and the +160 s reset has stopped happening
+
+Boot 77, nonce fresh, build `A0182834`.
+
+```
+rbgpu-ring = b=77 p=0 ... | p=1 vmf=40953 r=2b1 w=380 cps=90018600 me=15000000
+                         | p=2 vmf=40953 r=2b1 w=380 cps=94018600 g2=70200008 me=15000000
+rbgpu-pm4  = b=77 pa=6c7edb000 t3=799 r=2b1 w=380 | nowd | noME
+                         | rm@1e a=ffbfde0000 s=3 | rm@8e a=ffbfde0000 s=4 | rm@10e a=ffbfde0000 s=5
+rbgpu-mew2 = b=77 OK @8637ms ... gfxoff=ffffffff || HALT @8688ms me=15000000 ...
+                         | cps 0->90038600 grbm 3028->a0003028 rbb ffbfe000->ffbfe000 rbc a00e10->a00e10
+```
+
+**2ka is CONFIRMED by positive control.** All three ring phases returned
+the moment the GFXOFF read came out - `p=0 | p=1 | p=2` after five boots of
+`p=0` alone. The instrument was the fault, and that is now demonstrated
+rather than inferred from a correlation across builds. `gfxoff=ffffffff`
+confirms the read is genuinely gone.
+
+**`noME`: no packet in the dumped page writes `CP_ME_CNTL`.** 2jz
+pre-registered a miss as weak. It is stronger than that allowed for:
+`CP_RB0_BASE = 0xffbfe000` means the ring base is **page-aligned**, and
+`wptr = 0x380` is **896 dwords**, so the whole submitted stream fits inside
+the 1024 dwords scanned. 2hx's three `RELEASE_MEM` packets at 0x1e, 0x8e
+and 0x10e are all below `wptr`, consistent with that.
+
+The one real gap left is **`INDIRECT_BUFFER`** (op 0x3f), which sends the CP
+to memory this page does not cover. 2kb counts them and prints the first
+addresses:
+
+| `rbgpu-pm4` | means |
+|---|---|
+| `ib=0` | nothing is delegated, the scan saw the whole stream, and **`noME` becomes strong**: the CP does not write its own halt, leaving the **RLC**, which 2jo never excluded |
+| `ib>0` | the addresses say where to look next and `noME` stays weak exactly as pre-registered |
+
+**A finding that makes CLAUDE.md stale.** 2hp recorded `+160 s` as
+`me=0 cps=0 r == w == 0x180` - the GPU resetting, the ring rewound, pending
+work discarded - and CLAUDE.md records that as "the KNOWN post-reset state".
+Boot 77's `p=2` reads **`me=15000000 cps=94018600 r=2b1 w=380`**: the CP is
+still halted, `rptr`/`wptr` are **not** rewound, and `g2` reads `70200008`
+against the usual `50200008`. **The reset no longer fires.** `rptr` also
+stops advancing between p=1 and p=2 (both `0x2b1`), where 2hp saw
+`0xb1 -> 0x2b1`.
+
+Not progress by itself - the CP is halted either way - but the failure's
+shape has changed under the current configuration, and the handoff text on
+2hp's +160 s recovery should not be relied on until this is re-checked
+across another boot. Recorded as n=1.
+
+Build `2936D944`. Read-only, no boot-arg change.
