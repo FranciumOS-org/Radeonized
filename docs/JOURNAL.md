@@ -14700,3 +14700,55 @@ on a particular packet being present.
 
 Build `48DFFF05`. New note `rbgpu-ib`, added to `plugin_check.sh` and
 `metal_check.sh`. Read-only, no boot-arg change.
+
+## 2kd (2026-10-19) — the IB maps, but 2kc's validity test was too weak to carry its own conclusion
+
+Boot 80, nonce fresh, build `48DFFF05`.
+
+```
+rbgpu-ib  = b=80 mc=f40fbe9000 pa=78fbe9000 sz=952 t3=59 nz=183 | noME-in-IB
+rbgpu-pm4 = b=80 pa=6c3762000 t3=799 r=2b1 w=380 | nowd | ib=3@f40fbe9000 | noME
+```
+
+**The conversion worked and is confirmed.** `mc=f40fbe9000 -> pa=78fbe9000`
+is exactly `mc - (0xF40 << 24) + (0x780 << 24)`, the `mc2pa` derived from
+registers before the boot. `withPhysicalAddress` mapped it, no SKIP, no
+REFUSED. And **the IB address is identical in boots 78 and 80**
+(`f40fbe9000`) while the IB *count* varies (4 then 3), so the allocation is
+stable across boots.
+
+**But `noME-in-IB` cannot be read as a clean negative, and that is 2kc's
+fault.** The table said "`t3` high -> it IS a command buffer". `t3=59` of
+1024 does not satisfy it:
+
+- the ring gives `t3=799` of 1024 - far above the ~25% that random data
+  produces, which is precisely why 2hx called that mapping unambiguous;
+- here, 59 type-3 among 183 nonzero dwords is **~32%, essentially the
+  random baseline**;
+- the packet declares **952 dwords** and only **183** are nonzero.
+
+So this page does not look like a dense command buffer, the precondition
+for interpreting `noME-in-IB` was never met, and calling the IB clean would
+be the recurring error - reading a value without establishing what makes it
+meaningful. **No conclusion is drawn about whether the IB writes
+`CP_ME_CNTL`.** 2kc's own table anticipated this case; what it got wrong was
+making `t3` the test when `t3` cannot distinguish sparse-but-real from
+wrong-page.
+
+### The right test: chain-walk
+
+A type-3 header's `COUNT` field gives its body length, so
+`header + 2 + count` lands exactly on the next header. A real command buffer
+chains to its declared size; a wrong page breaks within a packet or two.
+2kd walks the chain, reports `chain` (packets walked) and `walked` (dword
+reached), and reads register writes **only where a packet really is** -
+instead of the brute scan above, which can mistake data for a header and
+is as capable of a false positive as a false negative.
+
+| `rbgpu-ib` | means |
+|---|---|
+| `walked` ≈ `sz` (952) | the page IS the IB and the walk saw every packet - `noME-in-IB` becomes a real negative, and the remaining IBs are next |
+| `walked` small (< ~20) | the mapping or the address is wrong; `noME-in-IB` means **nothing** and the IB route needs rethinking |
+| `ME@<i>=<v>` with the halt bits | **found it** - the CP halts itself from a chained packet |
+
+Build `5CF81551`. Read-only, no boot-arg change.
