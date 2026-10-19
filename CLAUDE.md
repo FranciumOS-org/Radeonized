@@ -235,8 +235,24 @@ It is what broke the GPU-restart loop.
   busy), which a switched-off GFX engine cannot do. 2di is not the
   mechanism of this hang. Whether it matters for anything else is still
   open.
-- The 2am/2an/2ao blanket firmware-ready bypasses still owe the explanation
-  2cy demanded.
+- **2am is now a MISDIAGNOSIS, and it is the root cause (2ix).** 2it
+  verified on this chip what 2am assumed: the CP microcode IS present
+  (pfp/me/ce/mec each read 64/64 nonzero dwords of instruction RAM), so
+  that half of the debt is PAID. But 2am's *reasoning* - "the PSP places
+  the firmware, so nothing sets BOOTLOAD_COMPLETE and the wait times out
+  spuriously" - is wrong for this part. Linux's `gfx_v10_0_rlc_resume`
+  waits on that latch and **fails bring-up without it** whenever
+  `load_type == PSP && psp.autoload_supported`, which is Rembrandt's path:
+  on a PSP+autoload part the autoload is *precisely* what sets the latch.
+  The timeout was a true negative and we patched it away. `rbgpu-bl` reads
+  `iram=1 complete=0` at +12 s and +100 s. **The RLC therefore never
+  releases CE/PFP/ME, which is why `CP_ME_CNTL` refuses writes from
+  everyone including Apple (2iw), why RB0 never executes, and why no
+  stamp ever retires.** Not yet proven: that completing autoload un-halts
+  the CP.
+- 2an and 2ao still owe the explanation 2cy demanded. 2an is *not*
+  vindicated: 2iv found `RLC_SAFE_MODE` stuck with CMD set and Linux's own
+  exit sequence unable to clear it across 1000 polls.
 - 2ct refuses the display pipe **by design**. 2hf traced the Metal hang to
   the `fEnabled` gate that the refusal leaves unset; **2hh closes it**:
   that same unset gate is why every armed boot was black, because
@@ -556,7 +572,36 @@ may ignore bit 0 there, the values may not come from `getPDEValue`, and
 the addresses may be wrong independently of the flag. What changed is
 that **nothing else is competing with it any more**.
 
-**Next:** find what writes `GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR`. 2hr
+**THE FRONTIER MOVED (2ix, 2026-10-18).** The GPUVM line is closed and
+the CP line replaced it. Two results, in order:
+
+1. **The page-directory base defect is real and FIXED.** Apple's value for
+   contexts 1-15 omits `vram_base_offset`, so the register points at
+   unmapped memory (`0xFB01_5000` reads all-ones; `mc2pa` of it,
+   `0x8_7B01_5000`, holds a genuine depth-1 directory with one valid PDE
+   carrying Apple's own L0 template). Writing the corrected value at bind
+   time **eliminates the VMID-3 CPF fault**, reproducibly, and it stays
+   gone. The fence/ring/GPUVM machinery is sound.
+2. **It changed nothing about the hang, and 2ix found why.**
+   `CP_ME_CNTL = 0x15000000` (CE/PFP/ME halted) and **every write to it is
+   refused** - from `g_hw`, from Apple's accessor, and from Apple's own
+   driver code, which writes 0 three times a boot. Eliminated at the
+   moment of the halt: GFX power-gating (`pwr=1 clk=1 pipe=1`), soft reset
+   (`srst=0`), RLCG (statically - gfx10 has an empty RLCG range), RLC safe
+   mode (forced to 0, write still refused), and the instrument itself
+   (`SCRATCH_REG0` took a write in the same function). What remains is
+   `BOOTLOAD_COMPLETE = 0`: **the RLC never finished the bootload
+   handshake and so never handed the CP to the host.**
+
+**Next:** establish whether Apple's 10_3 autoload path is wired. HWLibs
+ships `_gc_10_3_rlc_toc` and `_gc_parse_rlc_toc_10_3`, but
+`_gc_fw_backdoor_autoload_config_10_1` / `_copy_` / `_validate_` exist
+only as `_10_1`, and the PSP bootloader path is `_11_0` (Navi21). Zero
+direct callers proves nothing - HWLibs dispatches through
+`*_init_function_pointer_list`, so the tables must be walked.
+
+**Older, now closed:** find what writes
+`GCVM_CONTEXT3_PAGE_TABLE_BASE_ADDR`. 2hr
 could not locate the write path; that is now the question worth a boot.
 Options: hook `getPDEValue` to see what Apple computes versus what
 lands in the register, or find the register write statically. Setting
