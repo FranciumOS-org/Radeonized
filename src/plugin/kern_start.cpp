@@ -10082,6 +10082,8 @@ static void rbgpu_aperture_probe_2ik(void *obj,
               "question becomes what vram_base_offset should be on an APU.");
 }
 
+static char g_rb_2is_note[352];   // 2is: the two read paths, side by side
+
 static void rbgpu_vmctx_probe_2hq(void *obj,
                                   uint32_t (*resolve)(void *, uint64_t),
                                   uint32_t (*rd)(void *, uint32_t),
@@ -10676,6 +10678,58 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
              "%s%s", have ? " | " : "", one);
     rbgpu_nvram_note("rbgpu-ring", g_rb_2hm_ring);
     rbgpu_log("2hk: %s", one);
+
+    // 2is (2026-10-18): read CP_ME_CNTL and CP_STAT BOTH WAYS, same instant.
+    //
+    // 2ir found that nobody writes 0x15000000. All three writes to
+    // CP_ME_CNTL are ZERO - HWLibs un-halts at 239 ms, X6000 writes zero
+    // again at 43.6 s and 88.6 s - and the ring probe still reads
+    // 0x15000000. Worse, the SAME register reads 0 in the diag probe
+    // (diag_cp_me_cntl=0, diag_cp_stat=0) in the same boot.
+    //
+    // Two explanations and nothing yet separating them:
+    //
+    //   TIMING   the diag probe runs early, during bring-up, shortly after
+    //            HWLibs' 239 ms enable. 0 would be correct then, and the
+    //            halt would be something that happens later - and since no
+    //            driver write sets it, that something is firmware or the
+    //            hardware.
+    //   THE READ the accessor path is returning a value that is not this
+    //            register. docs/RULES.md already distrusts GRBM_STATUS for
+    //            exactly this - it reads a0003028 in every sample of every
+    //            boot, including ones where CP_STAT says the CP is idle.
+    //
+    // The difference between the two paths is the mechanism, not the
+    // offset: the diag probe uses g_hw.rreg (the plugin's own BAR0 mapping)
+    // at (0x1260 + dword) * 4, the ring probe uses socRegOffset + [0x118].
+    // So read both, here, microseconds apart, on the same register.
+    //
+    // Disagreement means the accessor read is not to be trusted, and with
+    // it goes "the CP is halted" - the claim 2hn, 2hp and everything since
+    // rests on. Agreement means the halt is real, arrived after 239 ms, and
+    // no driver code did it.
+    if (g_hw.rreg) {
+        uint32_t d_me  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+        uint32_t d_cps = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F40u) * 4);
+        uint32_t d_grb = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA4u) * 4);
+        uint32_t a_me  = rd(obj, resolve(obj, RB_2HM_CP_ME_CNTL));
+        uint32_t a_cps = rd(obj, resolve(obj, RB_2HK_CP_STAT));
+        uint32_t a_grb = rd(obj, resolve(obj, RB_2HK_GRBM_STATUS));
+        char b2[160];
+        snprintf(b2, sizeof(b2),
+                 "p%u me d=%x a=%x %s| cps d=%x a=%x %s| grbm d=%x a=%x %s",
+                 phase, d_me, a_me, (d_me == a_me) ? "OK " : "DIFF ",
+                 d_cps, a_cps, (d_cps == a_cps) ? "OK " : "DIFF ",
+                 d_grb, a_grb, (d_grb == a_grb) ? "OK " : "DIFF ");
+        size_t hv = strlen(g_rb_2is_note);
+        snprintf(g_rb_2is_note + hv, sizeof(g_rb_2is_note) - hv,
+                 "%s%s", hv ? " | " : "", b2);
+        rbgpu_nvram_note("rbgpu-rd2", g_rb_2is_note);
+        rbgpu_log("2is: %s", b2);
+    } else if (phase == 0) {
+        rbgpu_nvram_note("rbgpu-rd2", "g_hw.rreg is NULL - the direct path is "
+                                      "unavailable, so nothing was compared");
+    }
 
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
