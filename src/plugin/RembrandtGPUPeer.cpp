@@ -1102,6 +1102,19 @@ extern void rbgpu_ring_probe_2hk(unsigned phase);
 static thread_call_t     g_rbgpuMeCalls[RB_2JS_CALLS] = { nullptr };
 extern void rbgpu_mewatch_sample_2js(unsigned idx);
 extern void rbgpu_mewatch_flush_2js(void);
+// 2jt: the fine bank - 40 samples, 50 ms apart, 7.5 s .. 9.5 s.
+#define RB_2JT_CALLS 40
+static thread_call_t     g_rbgpuRlcCalls[RB_2JT_CALLS] = { nullptr };
+extern void rbgpu_rlcwatch_sample_2jt(unsigned idx);
+extern void rbgpu_rlcwatch_flush_2jt(void);
+
+static void rbgpu_rlcwatch_action(thread_call_param_t p0, thread_call_param_t) {
+    unsigned i = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
+    rbgpu_rlcwatch_sample_2jt(i);
+    if (i == RB_2JT_CALLS - 1) {
+        rbgpu_rlcwatch_flush_2jt();
+    }
+}
 
 static void rbgpu_mewatch_action(thread_call_param_t p0, thread_call_param_t) {
     unsigned i = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
@@ -1255,6 +1268,24 @@ void rbgpu_progwatch_start(void) {
               "500 ms apart -> rbgpu-mew). Brackets the window between the "
               "un-halt at ~341 ms and the +12 s ring probe.",
               marmed, RB_2JS_CALLS);
+
+    // 2jt: 7.5 s .. 9.5 s in 50 ms steps, around the 8328/8829 ms bracket
+    // boot 65 found.
+    unsigned rarmed2 = 0;
+    for (unsigned i = 0; i < RB_2JT_CALLS; i++) {
+        g_rbgpuRlcCalls[i] = thread_call_allocate(
+            rbgpu_rlcwatch_action, reinterpret_cast<thread_call_param_t>(
+                                       static_cast<uintptr_t>(i)));
+        if (!g_rbgpuRlcCalls[i]) {
+            continue;
+        }
+        uint64_t rd2 = 0;
+        clock_interval_to_deadline(7500 + i * 50, kMillisecondScale, &rd2);
+        thread_call_enter_delayed(g_rbgpuRlcCalls[i], rd2);
+        rarmed2++;
+    }
+    rbgpu_log("2jt: RLC watch armed, %u of %u timers (7.5 s .. 9.5 s, 50 ms "
+              "apart -> rbgpu-mew2).", rarmed2, RB_2JT_CALLS);
 }
 
 // 2gd (2026-10-15): every note carries a per-boot sequence number.
