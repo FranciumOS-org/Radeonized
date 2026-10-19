@@ -12543,3 +12543,73 @@ the comparison lives inside one sample instead of across boots.
 Both `CP_ME_CNTL` writes are `0`, the same value HWLibs writes at 246 ms
 and X6000 writes twice more.
 
+
+## 2iw result (2026-10-18) — the instrument is clean. CP_ME_CNTL refuses everybody.
+
+Twenty-sixth armed boot, `logs/20261018-231039-metal/`, `armed=1`, UUID
+`7FDB70B7-6A10-31F0-A2A6-E3ACD946B57A` = `build/out`.
+
+```
+rbgpu-wtest = b=54 A scr 0->a5a5a5a5 TOOK
+              | B acc me 15000000->15000000 (dir 15000000) REFUSED
+              | C dir 15000000 REFUSED
+```
+
+- **A TOOK.** The `g_hw` write mechanism works; `SCRATCH_REG0` took
+  `0xA5A5A5A5` and was restored.
+- **B REFUSED.** Apple's **own accessor path**, on `CP_ME_CNTL`, read back
+  through both paths. Never tried before this boot.
+- **C REFUSED.** `g_hw` on the same register.
+
+And the seg0 control comes free: 2il/2ip's accessor writes to the GCVM
+context bases at `0x28C7` **took, with verified read-back, in these same
+boots**. Same path, same segment, two registers - one accepts, one
+refuses.
+
+So the confound is closed the other way: **the refusals are real.**
+`CP_ME_CNTL` refuses writes from everybody, Apple included, and 2iu's and
+2iv's eliminations stand. Power ✗, soft reset ✗, RLCG ✗, safe mode ✗, and
+now instrument ✗.
+
+The withdrawal I was braced for did not happen - but the control was still
+the right call, because without it "the register is protected" rested on a
+comparison across two different write paths and would have been exactly
+the recurring error.
+
+## 2ix (2026-10-18) — the handshake, not the firmware
+
+One mechanism owns those bits on an APU and it is not the host. The PSP
+places the microcode; then **the RLC** runs a bootload handshake and
+releases CE/PFP/ME. Until it completes, the RLC owns the halt bits and
+host writes are ignored - by anyone - which is precisely what 2iw
+measured.
+
+2am patched away the wait for `BOOTLOAD_COMPLETE` in
+`RLC_RLCS_BOOTLOAD_STATUS` because it timed out. 2it proved the microcode
+**is** present, so 2am was right that the firmware arrives. But **"the
+firmware arrived" and "the handshake that releases the CP finished" are
+two different claims, and only the first was ever checked.** We told the
+driver the second was true as well.
+
+It is also a textbook Navi21-versus-Rembrandt difference: a dGPU does not
+start its CP this way, and Apple's PSP path is Navi21's.
+
+```
+0x4e8d RLC_RLCS_BOOTLOAD_STATUS   seg1 (BASE_IDX 1)
+  bit 0   RLC_RLCG_IRAM_LOADED
+  bit 31  BOOTLOAD_COMPLETE
+```
+
+Read at every phase. A pure read.
+
+| `rbgpu-bl` reading | means |
+|---|---|
+| `iram=1 complete=0` | the PSP loaded the instruction RAM and the bootload **never completed**. The RLC still owns the CP, nobody can un-halt it, and 2am's bypass is where the truth was lost rather than where it was found. **Root cause.** |
+| `complete=1` | the handshake finished and the RLC released the CP; the refusal is something else again and this line dies too |
+| `iram=0 complete=0` | the RLC never saw the microcode the CP instruction RAM demonstrably contains, i.e. the PSP bypassed the RLC entirely |
+
+If `complete=0`, the fix is not another register poke: it is making the
+autoload handshake actually happen, which is PSP/TOC territory and the
+first time this project would be fixing a **bring-up sequence** rather
+than a value.
+
