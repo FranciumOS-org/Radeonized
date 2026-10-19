@@ -10707,6 +10707,111 @@ static void rbgpu_fencedump_2hy(uint64_t ring_pa) {
     md->release();
 }
 
+// ---------------------------------------------------------------------------
+// 2kc (2026-10-19): read the indirect buffer and look for the halt there.
+//
+// Boot 78: `ib=4@f40fbe9000`. Four INDIRECT_BUFFER packets, so 2jz's `noME`
+// stays weak exactly as pre-registered - the CP is delegated off-page and
+// the write to CP_ME_CNTL can be inside an IB.
+//
+// The address is the useful part. `0xF4_0FBE_9000` is in the **carve-out MC**
+// range (`0xF4_0000_0000`), not GPUVM space like the ring at `0xFF_BF..`, so
+// it needs no page-table walk: Linux's own `amdgpu_gmc_vram_mc2pa` applies,
+//     pa = mc - vram_start + vram_base_offset
+// with `vram_start = GCMC_VM_FB_LOCATION_BASE << 24` and
+// `vram_base_offset = GCMC_VM_FB_OFFSET << 24`, both already read on this
+// chip (2ed/2ee) and both used for the context bases in 2ip.
+//
+// Every value is derived: the MC address comes from the packet the CP is
+// actually executing, and the two bases from the registers. Nothing is
+// hardcoded - 2cy.
+static uint64_t g_rb_2kc_ib_mc = 0;
+static uint32_t g_rb_2kc_ib_sz = 0;
+
+static void rbgpu_ibdump_2kc(void) {
+    char note[288];
+    if (g_rb_2kc_ib_mc == 0) {
+        rbgpu_nvram_note("rbgpu-ib", "SKIP: no INDIRECT_BUFFER seen in the ring page");
+        return;
+    }
+    if (g_rb_2ed_fb_base == 0 || g_rb_2ed_fb_off == 0) {
+        snprintf(note, sizeof(note),
+                 "SKIP mc=%llx: FB_LOCATION_BASE or FB_OFFSET unknown, no "
+                 "conversion possible", g_rb_2kc_ib_mc);
+        rbgpu_nvram_note("rbgpu-ib", note);
+        return;
+    }
+    uint64_t vstart = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
+    uint64_t vbo    = static_cast<uint64_t>(g_rb_2ed_fb_off)  << 24;
+    // Refuse rather than convert an address that is not in the carve-out:
+    // mc2pa is only valid for VRAM, and a wrong conversion would map some
+    // unrelated page and be read as a finding (2cy).
+    if (g_rb_2kc_ib_mc < vstart) {
+        snprintf(note, sizeof(note),
+                 "REFUSED mc=%llx below vram_start=%llx - not a carve-out "
+                 "address, mc2pa does not apply", g_rb_2kc_ib_mc, vstart);
+        rbgpu_nvram_note("rbgpu-ib", note);
+        return;
+    }
+    uint64_t pa = g_rb_2kc_ib_mc - vstart + vbo;
+    auto md = IOMemoryDescriptor::withPhysicalAddress(pa & ~0xFFFULL, 0x1000,
+                                                      kIODirectionIn);
+    if (!md) {
+        snprintf(note, sizeof(note), "SKIP mc=%llx pa=%llx: withPhysicalAddress "
+                 "returned NULL", g_rb_2kc_ib_mc, pa);
+        rbgpu_nvram_note("rbgpu-ib", note);
+        return;
+    }
+    IOMemoryMap *mp = md->createMappingInTask(kernel_task, 0,
+                                              kIOMapAnywhere | kIOMapInhibitCache);
+    if (!mp) {
+        md->release();
+        snprintf(note, sizeof(note), "SKIP mc=%llx pa=%llx: map() returned NULL",
+                 g_rb_2kc_ib_mc, pa);
+        rbgpu_nvram_note("rbgpu-ib", note);
+        return;
+    }
+    auto dw = reinterpret_cast<volatile uint32_t *>(mp->getVirtualAddress());
+    unsigned t3 = 0, nz = 0, nme = 0;
+    uint32_t meval = 0, meat = 0;
+    for (unsigned i = 0; i < 1024; i++) {
+        uint32_t h = dw[i];
+        if (h) nz++;
+        if ((h >> 30) == 3) t3++;
+    }
+    // Same three packet forms as 2jz.
+    for (unsigned i = 0; i + 4 < 1024; i++) {
+        uint32_t h = dw[i];
+        if ((h >> 30) != 3) continue;
+        uint32_t op = (h >> 8) & 0xFF, reg = 0xFFFFFFFFu, val = 0;
+        if      (op == 0x37) { reg = dw[i + 2];           val = dw[i + 4]; }
+        else if (op == 0x68) { reg = dw[i + 1] + 0x2000u; val = dw[i + 2]; }
+        else if (op == 0x79) { reg = dw[i + 1] + 0xc000u; val = dw[i + 2]; }
+        else continue;
+        if (reg != 0x0F56u) continue;
+        nme++;
+        if (nme == 1) { meval = val; meat = i; }
+        rbgpu_log("2kc: IB writes CP_ME_CNTL @%03x = 0x%08x %s", i, val,
+                  (val & 0x15000000u) ? "<<<< THIS IS THE HALT" : "");
+    }
+    snprintf(note, sizeof(note),
+             "mc=%llx pa=%llx sz=%u t3=%u nz=%u | %s",
+             g_rb_2kc_ib_mc, pa, g_rb_2kc_ib_sz, t3, nz,
+             nme ? "" : "noME-in-IB");
+    if (nme) {
+        size_t at = strlen(note);
+        snprintf(note + at, sizeof(note) - at, "ME@%x=%x n=%u", meat, meval, nme);
+    }
+    rbgpu_nvram_note("rbgpu-ib", note);
+    rbgpu_log("2kc: %s", note);
+    rbgpu_log("2kc: t3 near zero means this is NOT a command buffer and the "
+              "conversion or the address is wrong - read nothing into "
+              "noME-in-IB in that case (2eh). This is also ONE page and ONE "
+              "of the four IBs.");
+    mp->release();
+    md->release();
+}
+
 static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     if (g_rb_2hw_on < 0) {
         g_rb_2hw_on = checkKernelArgument("-rbgpuringdump") ? 1 : 0;
@@ -10954,7 +11059,11 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
             if ((h >> 30) != 3) continue;
             if (((h >> 8) & 0xFF) != 0x3fu) continue;      // INDIRECT_BUFFER
             uint64_t a2 = (static_cast<uint64_t>(dw[i + 2]) << 32) | dw[i + 1];
-            if (nib == 0) ib0 = a2;
+            if (nib == 0) {
+                ib0 = a2;
+                g_rb_2kc_ib_mc = a2;                      // 2kc, never hardcoded
+                g_rb_2kc_ib_sz = dw[i + 3] & 0xFFFFFu;
+            }
             nib++;
             if (nib <= 2) {
                 rbgpu_log("2kb: INDIRECT_BUFFER @%03x addr=0x%llx size=%u", i,
@@ -11018,6 +11127,7 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
                   "buffer, so this says NOTHING about its address.");
     }
     rbgpu_nvram_note("rbgpu-pm4", note);
+    rbgpu_ibdump_2kc();      // 2kc: the IB the ring just told us about
 
     // The dwords the CP actually stopped on, logged raw so the decode can be
     // redone offline against nvd.h without another boot.

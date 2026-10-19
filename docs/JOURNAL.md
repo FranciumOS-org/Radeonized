@@ -14638,3 +14638,65 @@ shape has changed under the current configuration, and the handoff text on
 across another boot. Recorded as n=1.
 
 Build `2936D944`. Read-only, no boot-arg change.
+
+## 2kc (2026-10-19) — four indirect buffers, and the first one is in the carve-out
+
+Boot 78, nonce fresh, build `2936D944`.
+
+```
+rbgpu-pm4  = b=78 pa=6c5b70000 t3=525 r=b1 w=280 | nowd | ib=4@f40fbe9000 | noME
+                  | rm@1e a=ffbfde0000 s=2 | rm@c5 ... s=3 | rm@145 ... s=4
+rbgpu-ring = b=78 p=0 r=b1  w=280 cps=94038600 me=15000000
+                | p=1 r=b1  w=280 cps=90018600 me=15000000
+                | p=2 r=231 w=300 cps=90018600 me=15000000
+```
+
+**`ib=4`: four `INDIRECT_BUFFER` packets.** So 2jz's `noME` stays **weak**,
+exactly as pre-registered - the CP is delegated off-page and the write to
+`CP_ME_CNTL` can live inside an IB. 2kb's own table said `ib>0` keeps it
+weak, so the pre-registration holds and nothing is re-interpreted after the
+fact.
+
+**The address is the useful part.** `0xF4_0FBE_9000` is in the **carve-out
+MC** range (`0xF4_0000_0000`), not GPUVM space like the ring at
+`0xFF_BF..`. So it needs no page-table walk: Linux's own
+`amdgpu_gmc_vram_mc2pa` applies,
+
+```
+pa = mc - vram_start + vram_base_offset
+     vram_start       = GCMC_VM_FB_LOCATION_BASE << 24   (0xF4_0000_0000)
+     vram_base_offset = GCMC_VM_FB_OFFSET       << 24   (0x7_8000_0000)
+```
+
+both already read on this chip (2ed/2ee) and both already used for the
+context bases in 2ip. For this address that gives pa `0x7_8FBE_9000`.
+
+2kc maps it and runs 2jz's three-form scan inside it. Every value is
+derived: the MC address from the packet the CP is actually executing, the
+two bases from the registers. Nothing hardcoded (2cy). It **refuses** an
+address below `vram_start` rather than converting it, because `mc2pa` is
+only valid for VRAM and a wrong conversion would map an unrelated page and
+be read as a finding.
+
+| `rbgpu-ib` | means |
+|---|---|
+| `ME@<i>=<v>` with the halt bits | **found it** - the CP halts itself from an IB, and the next question is what emits that packet |
+| `noME-in-IB` with `t3` high | this IB is a command buffer and does not write it; three more IBs and later ring content remain |
+| `t3` near zero | **not** a command buffer - the conversion or the address is wrong and `noME-in-IB` means nothing (2eh) |
+| `SKIP`/`REFUSED` | said explicitly, with which precondition failed |
+
+**2kb's `+160 s` finding firms to n=2.** No reset in boot 78 either -
+`me=15000000` at all three phases and never `r == w == 0x180`. But `rptr`
+behaviour differs between the two boots: boot 77 sat at `0x2b1` across p=1
+and p=2, while boot 78 advanced `0xb1 -> 0x231` with more work submitted
+(`w 0x280 -> 0x300`). So **the reset being gone is n=2; the ring's progress
+is not stable** and no table should be built from it (the withdrawn-2ev
+rule).
+
+Also varying per boot: `t3=525` here against `799` in boots 67 and 77, and
+the fence sequence starts at 2 rather than 3. The ring's contents are not
+identical boot to boot, which is worth knowing before any claim that rests
+on a particular packet being present.
+
+Build `48DFFF05`. New note `rbgpu-ib`, added to `plugin_check.sh` and
+`metal_check.sh`. Read-only, no boot-arg change.
