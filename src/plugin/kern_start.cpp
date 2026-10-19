@@ -11067,7 +11067,12 @@ void rbgpu_mewatch_flush_2js(void) {
 // 0=GFXOFF 1=transition out 2=NOT in GFXOFF 3=transition into GFXOFF
 // (yellow_carp_ppt.c:625-628). Read as a raw dword through the offset
 // rb_smu13_init already resolved, so no SMU protocol runs in the sampler.
-struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm, gfxoff; };
+// 2jw adds `cps` (CP_STAT 0x0F40 seg0) and `grbm` (GRBM_STATUS 0x0DA4 seg0):
+// the 500 ms bank shows CP_STAT 0 -> 0x90038600, so the CP went BUSY and then
+// halted. Whether a fault state appears BEFORE the halt or only with it is
+// what 50 ms resolution can answer and 500 ms cannot.
+struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm, gfxoff,
+                           cps, grbm; };
 static struct rb_2jt_s g_rb_2jt[RB_2JT_N];
 static uint32_t        g_rb_2jt_got = 0;
 
@@ -11093,6 +11098,8 @@ void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     } else {
         e->gfxoff = 0xFFFFFFFFu;
     }
+    e->cps  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F40u) * 4);
+    e->grbm = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA4u) * 4);
     if (idx + 1 > g_rb_2jt_got) { g_rb_2jt_got = idx + 1; }
 }
 
@@ -11106,7 +11113,7 @@ void rbgpu_rlcwatch_flush_2jt(void) {
         if (g_rb_2jt[i].me == 0) { last_ok = static_cast<int>(i); }
         else if (first_bad < 0)  { first_bad = static_cast<int>(i); }
     }
-    char n[352];
+    char n[416];
     if (first_bad < 0 || last_ok < 0) {
         // Still say what the RLC looked like - a window with no transition
         // is a result about WHERE the halt is, not a dead probe.
@@ -11130,6 +11137,11 @@ void rbgpu_rlcwatch_flush_2jt(void) {
                  a->gfxoff,
                  b->ms, b->me, b->rlcs, b->gpm, b->safe, b->cgcg, b->pg,
                  b->srm, b->gfxoff);
+        size_t at = strlen(n);
+        if (at < sizeof(n)) {
+            snprintf(n + at, sizeof(n) - at, " | cps %x->%x grbm %x->%x",
+                     a->cps, b->cps, a->grbm, b->grbm);
+        }
     }
     rbgpu_nvram_note("rbgpu-mew2", n);
     rbgpu_log("2jt: %s", n);
@@ -11203,7 +11215,8 @@ void rbgpu_rlcwatch_flush_2jt(void) {
 //
 // Behind -rbgpunocgcg. Writes to a live GPU, so it is opt-in.
 #define RB_2JU_N 24u
-struct rb_2ju_s { uint32_t ms, pre, post, me; };
+struct rb_2ju_s { uint32_t ms, pre, post, me, srm_pre, srm_post; };
+static int g_rb_2jw_on = -1;   // 2jw: -rbgpunosrm
 static struct rb_2ju_s g_rb_2ju[RB_2JU_N];
 static uint32_t        g_rb_2ju_got = 0;
 static int             g_rb_2ju_on  = -1;
@@ -11225,6 +11238,7 @@ void rbgpu_nocgcg_tick_2ju(unsigned idx) {
     const uint32_t S1   = 0xa000u;
     const uint32_t CGCG = (S1 + 0x4C49u) * 4;   // RLC_CGCG_CGLS_CTRL
     const uint32_t PGC  = (S1 + 0x4C43u) * 4;   // RLC_PG_CNTL
+    const uint32_t SRMC = (S1 + 0x4C80u) * 4;   // RLC_SRM_CNTL
     struct rb_2ju_s *e = &g_rb_2ju[idx];
     e->ms   = static_cast<uint32_t>(rbgpu_2iq_ms());
     e->pre  = g_hw.rreg(g_hw.ctx, CGCG);
@@ -11232,6 +11246,38 @@ void rbgpu_nocgcg_tick_2ju(unsigned idx) {
     g_hw.wreg(g_hw.ctx, PGC,  0);
     e->post = g_hw.rreg(g_hw.ctx, CGCG);
     e->me   = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+    // 2jw (2026-10-19): the save/restore machine, behind its own arg.
+    //
+    // Every host-visible agent is now excluded with a positive control -
+    // power gating, soft reset, RLC safe mode, a running RLC, GRBM routing,
+    // RLCG, Apple's write path, CGCG (2jv) and GFXOFF (boot 69: gfxoff=2 at
+    // BOTH samples straddling the halt). The halt value is the CP's power-on
+    // state with every *_PIPE*_RESET bit clear, and no host path wrote it.
+    //
+    // One agent is left that can write a GC register without passing through
+    // any host path: the RLC's SRM, which replays a saved register list.
+    // `srm = 3` (SRM_ENABLE + AUTO_INCR_ADDR) in every sample of every boot,
+    // and those lists are exactly what -rbgpurlcsub started supplying as ids
+    // 26/27/28. If CP_ME_CNTL is in a restored list carrying its reset value,
+    // the RLC writes 0x15000000 back and no counter of ours ever sees it.
+    //
+    // Honest about what this cannot settle: the re-halt is only OBSERVABLE
+    // since 2jq un-halted the CP, so "-rbgpurlcsub introduced it" is not
+    // testable by removing rlcsub - that puts complete=0 back and the CP is
+    // halted from the start for a different reason. This tests the SRM
+    // itself, not which list it came from.
+    if (g_rb_2jw_on < 0) {
+        g_rb_2jw_on = checkKernelArgument("-rbgpunosrm") ? 1 : 0;
+        rbgpu_diag_set_num("nosrm_on", static_cast<uint32_t>(g_rb_2jw_on));
+    }
+    if (g_rb_2jw_on == 1) {
+        e->srm_pre = g_hw.rreg(g_hw.ctx, SRMC);
+        g_hw.wreg(g_hw.ctx, SRMC, 0);
+        e->srm_post = g_hw.rreg(g_hw.ctx, SRMC);
+    } else {
+        e->srm_pre  = g_hw.rreg(g_hw.ctx, SRMC);
+        e->srm_post = e->srm_pre;
+    }
     if (idx + 1 > g_rb_2ju_got) { g_rb_2ju_got = idx + 1; }
 }
 
@@ -11252,7 +11298,11 @@ void rbgpu_nocgcg_flush_2ju(void) {
         last_tick = static_cast<int>(i);
         if (g_rb_2ju[i].post != 0) { refused++; }
         else                       { took_once = true; }
-        if (took_once && g_rb_2ju[i].pre != 0) {
+        // 2jw fix: `took_once` is set in THIS iteration when the write
+        // takes, so the old test counted tick 0's own pre-write 0x363f as a
+        // restore. Boots 68 and 69 both reported restored=1 and both meant
+        // ZERO restores - `restore1 @2339ms pre=363f` is the first tick.
+        if (took_once && i > 0 && g_rb_2ju[i].pre != 0) {
             restored++;
             if (first_restore < 0) { first_restore = static_cast<int>(i); }
         }
@@ -11260,7 +11310,7 @@ void rbgpu_nocgcg_flush_2ju(void) {
             first_halt = static_cast<int>(i);
         }
     }
-    char n[352];
+    char n[416];
     if (last_tick < 0) {
         snprintf(n, sizeof(n), "n=0 NO TICKS RAN - timers never fired");
     } else {
@@ -11282,6 +11332,12 @@ void rbgpu_nocgcg_flush_2ju(void) {
             n1 += snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
                            "HALT @%ums me=%x pre=%x post=%x",
                            h->ms, h->me, h->pre, h->post);
+        }
+        if (n1 > 0 && static_cast<size_t>(n1) < sizeof(n)) {
+            const struct rb_2ju_s *h =
+                (first_halt >= 0) ? &g_rb_2ju[first_halt] : &g_rb_2ju[last_tick];
+            n1 += snprintf(n + n1, sizeof(n) - static_cast<size_t>(n1),
+                           " | srm %x->%x", h->srm_pre, h->srm_post);
         }
         if (first_restore >= 0 && n1 > 0 &&
             static_cast<size_t>(n1) < sizeof(n)) {

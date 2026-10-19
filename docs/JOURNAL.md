@@ -14258,3 +14258,70 @@ an unavailable read can never be mistaken for GFXOFF (2eh).
 `-rbgpunocgcg` stays IN for this boot: it changes the RLC's behaviour
 measurably (the idle handler stops) and holding it constant keeps boot 68
 comparable. It is not a fix and must not be described as one.
+
+## 2jw (2026-10-19) — GFXOFF is excluded properly, a counter of ours was wrong, and the SRM is the last agent left
+
+Boot 69, nonce fresh, build `D497F25D` loaded.
+
+```
+rbgpu-mew2 = b=69 OK   @8689ms rlcs=0 gpm=140016 safe=0 cgcg=0 pg=0 srm=3 gfxoff=2
+                || HALT @8738ms rlcs=0 gpm=140016 safe=0 cgcg=0 pg=0 srm=3 gfxoff=2
+                   me=15000000
+rbgpu-mew  = b=69 OK i=15 @8338ms me=0 ... || HALT i=16 @8839ms me=15000000 cps=90038600
+rbgpu-cgcg = b=69 n=24 refused=0 restored=1 | first @2339ms pre=363f post=0 me=0
+                | last @11539ms pre=0 post=0 me=15000000 | HALT @8738ms
+                | restore1 @2339ms pre=363f
+```
+
+**`gfxoff = 2` at BOTH samples, 49 ms apart, straddling the halt.** 2 is
+Linux's "NOT in GFXOFF" (`yellow_carp_ppt.c:627`). **GFXOFF is excluded, on
+sound timing, for the first time** — 2ix's exclusion rested on the late diag
+and 2jv's unifying "the GFX block is powered down" hypothesis is therefore
+**REFUTED on its own pre-registered terms**. It was a good hypothesis and it
+is wrong.
+
+**A counter of ours was wrong, and it mattered.** `restore1 @2339ms
+pre=363f` is the **first** tick: the loop sets `took_once` when the write
+takes and then tests `pre != 0` in the same iteration, so tick 0's own
+pre-write `0x363f` counted as a restore. **Boots 68 and 69 both reported
+`restored=1` and both meant ZERO restores.** The write takes and nothing
+ever puts `0x363f` back. Consequence: 2ju met its clean
+`refused=0 restored=0` condition after all, so 2jv's refutation of CGCG is
+the unambiguous one, not the hedged one. Fixed with `i > 0`.
+
+### Where this leaves it
+
+The halt reproduces across four boots: **8827, 8835, 8839 ms** (500 ms bank)
+and **8727, 8835, 8738 ms** (50 ms bank). `CP_STAT` goes `0 ->
+0x90038600`, so the CP went BUSY and then halted. `me = 0x15000000` is the
+CP's power-on state with every `*_PIPE*_RESET` bit clear, and no host path
+wrote it (boot 65: all four `CP_ME_CNTL` writes wrote 0).
+
+Excluded with positive controls, each at the moment of the halt: power
+gating, soft reset (`srst=0`), RLC safe mode, a running RLC, GRBM routing,
+RLCG, Apple's write path, **CGCG (2jv)**, **GFXOFF (this boot)**.
+
+**One agent is left** that can write a GC register without passing through
+any host path: the RLC's **save/restore machine**. `srm = 3` (`SRM_ENABLE` +
+`AUTO_INCR_ADDR`) in every sample of every boot, and the save/restore lists
+are exactly what `-rbgpurlcsub` started supplying as ids 26/27/28. If
+`CP_ME_CNTL` sits in a restored register list carrying its reset value, the
+RLC writes `0x15000000` back and nothing of ours is in the path to see it.
+
+2jw writes **`RLC_SRM_CNTL = 0`** on the same 24-tick schedule, behind
+`-rbgpunosrm`, recording `srm_pre -> srm_post` at the halt tick so a refused
+write cannot read as a negative result. It also adds `cps` (`CP_STAT`) and
+`grbm` (`GRBM_STATUS`) to the 50 ms bank, to see whether a fault state
+appears *before* the halt or only with it — 500 ms cannot tell those apart.
+
+**What this cannot settle, stated up front:** the re-halt is only
+*observable* since 2jq un-halted the CP, so "`-rbgpurlcsub` introduced it"
+is **not** testable by removing `-rbgpurlcsub` — that restores `complete=0`
+and the CP is halted from the start for an unrelated reason. 2jw tests the
+SRM itself, not which list it replayed.
+
+| `rbgpu-cgcg` srm | means |
+|---|---|
+| `3->0` and **NO HALT** | the SRM was writing the halt back; the fix is to keep `CP_ME_CNTL` out of the restored list |
+| `3->0` and HALT | the SRM is excluded too, and nothing on the host side is left — the next move is the RLC's own firmware behaviour, not a register |
+| `3->3` | the write was refused; no result either way |
