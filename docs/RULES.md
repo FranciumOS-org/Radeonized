@@ -205,7 +205,29 @@ anything, and log it when it is not.
 -rbgpusdmaone                                what makes powerUpHW succeed
 -rbgpuforce1b                                sends request 0x1B
 -rbgpurlcsub                                 what makes the RLC autoload COMPLETE
+-rbgpunocgcg                                 CGCG off - takes, but NOT a fix (2jv)
+-rbgpumewatch                                the timed CP/RLC/GFXOFF sample banks
 ```
+
+`-rbgpunocgcg` is IN but is **NOT a fix** (2jv). It writes
+`RLC_CGCG_CGLS_CTRL = 0` and `RLC_PG_CNTL = 0`; the write **takes**
+(`refused=0`, `0x363f -> 0`, held to 11535 ms), so RLC registers are
+host-writable unlike `CP_ME_CNTL`. It stops the RLC's context-idle
+handler running at all (`RLC_GPM_STAT` `0x140016` at both samples) and
+**the CP still halts at 8835 ms**. Kept IN only to hold boot 68's
+configuration constant. CGCG as the re-halt mechanism is REFUTED.
+
+**GFXOFF is live again, and 2ix's exclusion of it was unsound.**
+`0x15000000` is `CE/PFP/ME_HALT` with every `*_PIPE*_RESET` bit **clear**
+- the CP's power-on state, and what `gfx_v10_0_cp_gfx_enable(false)`
+writes. No software here writes it (boot 65: all four writes wrote 0). A
+powered-down GFX block presents its defaults and drops writes, which
+accounts in one mechanism for the halt value, the refused writes, 2jl's
+`CE_STEP`, `RLC_STAT = 0`, `srst = 0`, the deterministic ~8.8 s across
+three boots, and 2hp's +160 s recovery. 2ix excluded GFXOFF on
+`gfxoff_status = 2`, but that is read in the **late diag**, after the
++160 s recovery, never at 8.8 s - the recurring error, 26th instance.
+2jv samples it in the 50 ms window. [2jv]
 
 `-rbgpurlcsub` is IN and proven (2jq): it supplies the five RLC
 sub-images 2aj never did - `srlist_cntl`/`gpm`/`srm` and the **LX6
