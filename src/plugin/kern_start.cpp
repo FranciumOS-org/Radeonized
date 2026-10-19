@@ -11008,6 +11008,84 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                                        "was not touched");
     }
 
+    // 2iw (2026-10-18): the POSITIVE CONTROL the write probe never had.
+    //
+    // 2iv eliminated safe mode: Linux's exit never cleared CMD across 1000
+    // polls, and forcing RLC_SAFE_MODE = 0 DID take - yet CP_ME_CNTL still
+    // refused. Which looked like "that one register is protected", until
+    // the obvious confound: RLC_SAFE_MODE is seg1 and CP_ME_CNTL is seg0,
+    // and every CP_ME_CNTL write this project has tried went through
+    // g_hw.wreg, while the context-base writes that demonstrably TOOK at
+    // the same instant went through the ACCESSOR - Apple's own path.
+    //
+    // So I have been comparing a refused write on one path against
+    // successful writes on another and drawing conclusions about the
+    // register. "seg1 writes work, seg0 g_hw writes do not" fits the data
+    // exactly as well as "CP_ME_CNTL is protected" - and if it is the
+    // former, 2iu's and 2iv's REFUSED is an INSTRUMENT ARTIFACT, not a fact
+    // about the chip. That is 2id's missing positive control again, in a
+    // new place: a write probe needs one as much as a hook does.
+    //
+    // The matrix, one sample, three cells:
+    //
+    //   A  g_hw -> SCRATCH_REG0 (seg1 0x2040), write 0xA5A5A5A5
+    //        Does the g_hw write mechanism work at all right now?
+    //        SCRATCH_REG0 exists to be scribbled on; nothing reads it.
+    //   B  accessor -> CP_ME_CNTL, write 0, read back BOTH ways
+    //        Apple's own path on the target register. Never tried.
+    //   C  g_hw -> CP_ME_CNTL, write 0, read back
+    //        The cell 2iu/2iv measured, repeated beside the others so the
+    //        comparison is within one sample rather than across boots.
+    //
+    //   A fails                 g_hw writes are broken here and 2iu/2iv's
+    //                           conclusion is withdrawn entirely
+    //   A takes, B takes        the CP CAN be un-halted - the refusals were
+    //                           the path, not the register, and the fix is
+    //                           to use the accessor
+    //   A takes, B and C refuse CP_ME_CNTL really is protected, by
+    //                           something still unidentified, and the
+    //                           elimination list stands
+    //
+    // SCRATCH_REG0 is restored to its original value immediately. The
+    // CP_ME_CNTL writes are 0, which is what HWLibs and X6000 both write.
+    if (phase == 0 && g_hw.rreg && g_hw.wreg) {
+        const uint32_t kSCR = (0xa000u + 0x2040u) * 4;
+        const uint32_t kMEb = (0x1260u + 0x0F56u) * 4;
+        uint32_t scr_was = g_hw.rreg(g_hw.ctx, kSCR);
+        g_hw.wreg(g_hw.ctx, kSCR, 0xA5A5A5A5u);
+        uint32_t scr_now = g_hw.rreg(g_hw.ctx, kSCR);
+        g_hw.wreg(g_hw.ctx, kSCR, scr_was);          // put it back
+
+        void **wvt = *reinterpret_cast<void ***>(obj);
+        auto wracc = reinterpret_cast<void (*)(void *, uint32_t, uint32_t)>(
+            wvt ? wvt[0x120 / sizeof(void *)] : nullptr);
+        uint32_t me_off = resolve(obj, RB_2HM_CP_ME_CNTL);
+        uint32_t b_before = rd(obj, me_off);
+        if (wracc) wracc(obj, me_off, 0);             // ACCESSOR write
+        uint32_t b_acc = rd(obj, me_off);
+        uint32_t b_dir = g_hw.rreg(g_hw.ctx, kMEb);
+
+        g_hw.wreg(g_hw.ctx, kMEb, 0);                 // g_hw write
+        uint32_t c_dir = g_hw.rreg(g_hw.ctx, kMEb);
+
+        char x[320];
+        snprintf(x, sizeof(x),
+                 "A scr %x->%x %s | B acc me %x->%x (dir %x) %s | C dir %x %s",
+                 scr_was, scr_now,
+                 (scr_now == 0xA5A5A5A5u) ? "TOOK" : "FAILED",
+                 b_before, b_acc, b_dir, (b_acc == 0) ? "TOOK" : "REFUSED",
+                 c_dir, (c_dir == 0) ? "TOOK" : "REFUSED");
+        rbgpu_nvram_note("rbgpu-wtest", x);
+        rbgpu_log("2iw: %s", x);
+        rbgpu_log("2iw: A FAILED means the g_hw write mechanism is broken "
+                  "here and 2iu/2iv's REFUSED is withdrawn as an instrument "
+                  "artifact. A TOOK with B TOOK means the CP can be "
+                  "un-halted through Apple's own accessor and the refusals "
+                  "were the PATH, not the register. A TOOK with B and C both "
+                  "REFUSED means CP_ME_CNTL is genuinely protected and the "
+                  "elimination list stands.");
+    }
+
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);

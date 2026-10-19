@@ -12472,3 +12472,74 @@ is a reasonable register to touch at all. Gated on `-rbgpurlcexit`, phase
 | both still `15000000 REFUSED` | safe mode is not what refuses the write. With power, reset and RLCG all eliminated, the refusal has **no candidate left** and needs a different kind of search. |
 | `r` advancing | the CP consuming the ring for the first time in this project |
 
+
+## 2iv result (2026-10-18) — safe mode eliminated, and a confound exposed
+
+Twenty-fifth armed boot, `logs/20261018-223159-metal/`, `armed=1`, UUID
+`4B34993C-22CE-3A9C-944F-2F324C222762` = `build/out`.
+
+```
+rbgpu-rlcx = b=53 sfm 1->1 sp=1000 | me1=15000000 still
+             | force sfm=0 me2=15000000 REFUSED | r=b1 w=280 cps=94078600
+```
+
+Linux's exit sequence wrote `RLC_SAFE_MODE = CMD_MASK` and **CMD never
+cleared** across 1000 bounded polls. Forcing `RLC_SAFE_MODE = 0` **did**
+take - the register read back 0 - and with safe mode demonstrably off
+`CP_ME_CNTL` **still refused the write**.
+
+**Safe mode is eliminated.** So is every other candidate: power ✗, soft
+reset ✗, RLCG ✗ (statically), safe mode ✗.
+
+### The confound I walked into
+
+That same line contains a positive result I initially read as a negative:
+`RLC_SAFE_MODE` **accepted a write** in the same function, microseconds
+from where `CP_ME_CNTL` refused one. I took that as proof the write path
+works and the register is specifically protected.
+
+It is not proof. `RLC_SAFE_MODE` and `SCRATCH_REG0` are **seg1**;
+`CP_ME_CNTL` is **seg0**. And every `CP_ME_CNTL` write this project has
+ever attempted went through `g_hw.wreg`, while the context-base writes
+that demonstrably **took** at the same instant (2il/2ip, verified by
+read-back) went through the **accessor** - Apple's own path.
+
+So I have been comparing a refused write on one path against successful
+writes on another and concluding things about the register. **"seg1 writes
+work, seg0 `g_hw` writes do not" fits every observation exactly as well as
+"`CP_ME_CNTL` is protected"** - and if it is the former, then 2iu's and
+2iv's `REFUSED` is an **instrument artifact**, not a fact about the chip,
+and two milestones of elimination rest on nothing.
+
+This is 2id's missing positive control again, in a new place. A write
+probe needs one as much as a hook does, and I did not give it one.
+
+Also unexplained and recorded: `rptr` advanced `0xb1 -> 0x231` between the
+two samples **while `ME_HALT` was set the whole time**. Something is
+consuming ring content despite the halt. Noted, not interpreted - but it
+is hard to reconcile with a graphics pipe that is genuinely stopped, and
+is further reason not to trust the current picture.
+
+## 2iw (2026-10-18) — the write-path control, three cells, one sample
+
+```
+A  g_hw     -> SCRATCH_REG0 (seg1 0x2040)  write 0xA5A5A5A5, then restore
+B  accessor -> CP_ME_CNTL                  write 0, read back BOTH ways
+C  g_hw     -> CP_ME_CNTL                  write 0, read back
+```
+
+A asks whether the `g_hw` write mechanism works at all right now;
+`SCRATCH_REG0` exists to be scribbled on and nothing reads it, and it is
+restored immediately. B is **Apple's own path on the target register,
+never once tried**. C repeats what 2iu/2iv measured, beside the others, so
+the comparison lives inside one sample instead of across boots.
+
+| reading | means |
+|---|---|
+| A `FAILED` | `g_hw` writes are broken here; 2iu's and 2iv's `REFUSED` is **withdrawn** as an artifact and the eliminations with it |
+| A `TOOK`, B `TOOK` | the CP **can** be un-halted through the accessor. The refusals were the path, not the register, and the fix is simply to use the right one. |
+| A `TOOK`, B and C `REFUSED` | `CP_ME_CNTL` really is protected by something unidentified, and the elimination list stands |
+
+Both `CP_ME_CNTL` writes are `0`, the same value HWLibs writes at 246 ms
+and X6000 writes twice more.
+
