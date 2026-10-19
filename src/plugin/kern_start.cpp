@@ -11374,6 +11374,83 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "elimination list stands.");
     }
 
+    // 2jm (2026-10-19): what is actually AT the bootload address?
+    //
+    // 2jk found RLC_HYP_BOOTLOAD_ADDR already programmed - 0x8_7F80_0000,
+    // size 0x6000, a real address 8 MB below the top of the carve-out
+    // (0x7_8000_0000 .. 0x8_8000_0000), with COLD_BOOT_EXIT set. So
+    // something DID point the RLC at an autoload bundle and the machinery
+    // is half-configured rather than absent. `complete=0` is therefore NOT
+    // "nobody pointed it anywhere".
+    //
+    // The next question is whether the buffer it points at holds anything.
+    // The RLC fetches its own G ucode from there; if the page is empty or
+    // holds something that is not microcode, the RLC has nothing to boot
+    // from and the latch can never set - and that WOULD be a complete
+    // explanation with a clear fix.
+    //
+    // Read-only. Maps the page named by the registers - never a hardcoded
+    // address - with the same IOMemoryDescriptor::withPhysicalAddress +
+    // kIOMapInhibitCache route 2hx and 2hy already use to read GPU-visible
+    // memory successfully. Dumps the first eight dwords, counts nonzero
+    // over the page, and compares the opening bytes against our own
+    // yc_rlc_img so "is this OUR blob" is answered rather than guessed.
+    //
+    //   nz=0            the RLC is pointed at an empty buffer - nothing to
+    //                   boot, and the latch cannot set
+    //   nz>0, ymatch=1  our yellow_carp RLC image is in place and the
+    //                   buffer is NOT the problem
+    //   nz>0, ymatch=0  something else is there - whose, and why, becomes
+    //                   the question
+    if (phase == 0 && g_hw.rreg) {
+        const uint32_t kS1 = 0xa000u;
+        uint32_t blo = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b5du) * 4);
+        uint32_t bhi = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b5eu) * 4);
+        uint32_t bsz = g_hw.rreg(g_hw.ctx, (kS1 + 0x5b5cu) * 4);
+        uint64_t bpa = (static_cast<uint64_t>(bhi) << 32) | blo;
+
+        char n[288];
+        if (bpa == 0) {
+            snprintf(n, sizeof(n), "bootload addr is 0 - nothing to map");
+        } else {
+            IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(
+                static_cast<IOPhysicalAddress>(bpa), 4096, kIODirectionIn);
+            IOMemoryMap *mp = md ? md->map(kIOMapAnywhere | kIOMapInhibitCache)
+                                 : nullptr;
+            if (!mp) {
+                snprintf(n, sizeof(n), "pa=%llx sz=%x MAP FAILED (md=%d)",
+                         bpa, bsz, md ? 1 : 0);
+                if (md) md->release();
+            } else {
+                auto dw = reinterpret_cast<volatile uint32_t *>(
+                    mp->getVirtualAddress());
+                uint32_t d[8];
+                for (int i = 0; i < 8; i++) d[i] = dw[i];
+                unsigned nz = 0;
+                for (int i = 0; i < 1024; i++) if (dw[i]) nz++;
+
+                extern const uint8_t yc_rlc_img[];
+                auto yw = reinterpret_cast<const uint32_t *>(yc_rlc_img);
+                int ymatch = 1;
+                for (int i = 0; i < 8; i++) if (d[i] != yw[i]) { ymatch = 0; break; }
+
+                snprintf(n, sizeof(n),
+                         "pa=%llx sz=%x nz=%u/1024 ymatch=%d | "
+                         "%08x %08x %08x %08x %08x %08x %08x %08x",
+                         bpa, bsz, nz, ymatch,
+                         d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+                mp->release();
+                md->release();
+            }
+        }
+        rbgpu_nvram_note("rbgpu-blbuf", n);
+        rbgpu_log("2jm: %s", n);
+        rbgpu_log("2jm: nz=0 means the RLC is pointed at an empty buffer and "
+                  "the latch CANNOT set. ymatch=1 means our yellow_carp RLC "
+                  "image is in place and the buffer is not the problem. "
+                  "ymatch=0 with nz>0 means something else is there.");
+    }
+
     // 2jk (2026-10-19): the four RLC_HYP registers nobody has read.
     //
     // Straight from Linux's own gfx_v10_0.c, which this project may use

@@ -13426,3 +13426,74 @@ or `RLC_HYP_BOOTLOAD_SIZE`.** All seg1, from `gc_10_3_0_offset.h`:
 Build `47B561A5-164B-3BF5-BC47-F8B000DC663C`. It rides alongside 2ji,
 which is still worth having for the same boot: 2ji says whether
 `CP_ME_CNTL` is worth any further effort at all.
+
+## 2jl (2026-10-19) — CP_ME_CNTL is write-protected, and the RLC is already aimed
+
+Boot 61, captured in-boot. Fresh nonce on every note.
+
+```
+rbgpu-mehold = b=61 was=15000000 | A 15000000 x8 moved=-1
+                    | B step 15000000 did not stick | restore 15000000 OK
+rbgpu-hyp    = b=61 rv=1 cold=1 vddgfx=0 | bootload 87f800000 sz=6000 SET
+                    | rlc_cntl=1 f32=1 | cp_stat=90038600 NOT ZERO
+rbgpu-bl     = b=61 p0 bl=1 iram=1 complete=0
+rbgpu-ume    = b=61 hk=1 uh=1 @257ms | h=0 @0ms | me=15000000
+```
+
+**2ji settles it: the register is PROTECTED, not self-re-halting.**
+`CE_STEP` (bit 25) is an ordinary R/W single-step debug bit beside the
+halt bits, and it **did not stick**. Across eight tight-loop reads after
+writing 0, not one bit of `CP_ME_CNTL` ever differed from the entry value
+(`moved=-1`). So the "the CP re-halts itself" hypothesis from 2jh is
+**dead**, and so is any plan that involves the host writing this register.
+**That line is closed. Stop poking it.**
+
+**2jk is the opening.** `RLC_HYP_BOOTLOAD_ADDR = 0x8_7F80_0000`, size
+`0x6000` - a real physical address 8 MB below the top of the carve-out
+(`0x7_8000_0000 .. 0x8_8000_0000`), and `RLC_HYP_RESET_VECTOR = 1`
+(`COLD_BOOT_EXIT` set). **Something already pointed the RLC at an autoload
+bundle.** So `complete=0` is not "nobody configured it" - the machinery is
+half-configured, and the half that is missing is now a much narrower
+question.
+
+Two readings diverge from Linux's backdoor path:
+- `RLC_CNTL = 1`, `RLC_ENABLE_F32` set, where
+  `gfx_v10_0_rlc_backdoor_autoload_enable` errors out unless it is 0
+  ("RLC ROM should halt itself").
+- `CP_STAT = 0x90038600`, where `wait_for_rlc_autoload_complete` needs 0.
+  **This half of the wait has never been watched** and fails in every
+  boot on record.
+
+`VDDGFX_EXIT` is clear while `COLD_BOOT_EXIT` is set - consistent with a
+cold boot rather than a GFXOFF exit. Noted, not interpreted.
+
+### 2jm (built) — what is in the buffer?
+
+The RLC fetches its G ucode from that address. If the page is empty, it
+has nothing to boot from and the latch can never set - a complete
+explanation with an obvious fix.
+
+`rbgpu-blbuf`, read-only, no boot-arg. Maps the page **named by the
+registers**, never a hardcoded address, via the same
+`withPhysicalAddress` + `kIOMapInhibitCache` route 2hx and 2hy already
+used successfully to read GPU-visible memory. Dumps eight dwords, counts
+nonzero over the page, and compares the opening bytes against our own
+`yc_rlc_img` so "is this OUR blob" is answered rather than guessed.
+
+| `rbgpu-blbuf` | means |
+|---|---|
+| `nz=0` | the RLC is aimed at an empty buffer; the latch cannot set |
+| `nz>0 ymatch=1` | our yellow_carp RLC image is in place; the buffer is not the problem |
+| `nz>0 ymatch=0` | something else is there, and whose becomes the question |
+
+Build `D2DB11F6-C1CC-3AB6-900E-052771A1E5FC`.
+
+**`-rbgpumehold` should come OUT** - 2ji answered it and there is nothing
+left to ask that register.
+
+Worth re-arming alongside: **`-rbgpualdprobe`**. 2jd blamed those three
+routes for the blank boots and 2jg withdrew that, so they are not known
+to be harmful, and they would say whether Apple calls
+`_gc_fw_initialize_backdoor_loading_register_set_10_3` - the function
+whose disassembly writes `RLC_CNTL` - which is now directly on the
+question of why `f32=1`.
