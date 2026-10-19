@@ -13833,3 +13833,56 @@ capture *late enough*, after +160 s.
 **The frontier has moved for the first time since 2ix.** It is no longer
 "the RLC never hands over the CP". It is "the CP is handed over, runs,
 and something halts it again".
+
+### 2jq addendum — the re-halt is dated, and the 2am/2an patches are now suspect
+
+```
+rbgpu-rst = b=63 hk=1 setr=0 @0ms | reset=4 @14558ms
+rbgpu-me  = b=63 x6k n=3 o=0 last=0 [0@12393] [0@43605] [0@92315]
+                 | hwl n=1 o=0 [0@311]
+rbgpu-pwr = b=63 p0 gpm=140016 pwr=1 clk=1 pipe=1 | rlc c=1 s=0 sfm=0
+                 | srst=0 mec=0 | me 15000000->15000000 REFUSED
+```
+
+**HWLibs wrote `CP_ME_CNTL = 0` at 311 ms and it TOOK** - that is the
+un-halt `rbgpu-ume uh=1 @311ms` records and the diag caught as
+`diag_cp_me_cntl=0`. By +12 s the halt bits are back and writes are
+refused again.
+
+**`resetHardwareAndReplay` ran 4 times, first at 14558 ms** - *after* the
+re-halt at/under +12 s. So the resets are downstream of it, not its
+cause. (In boot 60 `reset=0`; the reset path is newly active because the
+CP now runs far enough to fail.)
+
+`RLC_STAT = 0` where it read `0x25` for twelve boots, with `RLC_CNTL = 1`:
+once the autoload completes, the RLC goes **idle**.
+
+**The lead: `ttl_hw_init_ret = 0xffffffffe3623001`.** Every prior boot read
+0. Linux's `gfx_v10_0_rlc_resume` does not stop at the latch - on the
+`PSP && autoload_supported` path it continues with `gfx_v10_0_init_csb`,
+`gfx_v10_0_update_spm_vmid_internal(0xf)` and
+`gfx_v10_0_rlc_enable_srm`. Those steps only now run against a chip that
+actually completed its bootload, and GC hw_init now reports a failure.
+
+**So 2am and 2an's patches have changed meaning.** Both were installed
+when the latch genuinely never set:
+
+- 2am patches `_gc_fw_autoload_is_completed` to `return 1`. **The latch
+  now sets, so the real function would return 1 by itself** and the patch
+  is at best redundant. 2je showed removing it broke bring-up - but that
+  was measured with `complete=0`, and that premise is gone.
+- 2an patches `_gc_check_register_equal_ext` to `return 1`, i.e. every
+  "wait until register == value" inside `_gc_hw_init` succeeds
+  immediately. With the autoload real, those waits have something true
+  to wait *for*, and skipping them makes Apple proceed before the
+  hardware is ready - a candidate for exactly the new `ttl_hw_init`
+  failure.
+
+**Next experiment, and it needs no new code:** keep `-rbgpurlcsub` and
+re-arm **`-rbgpuautoloadtruth`**. 2je's refutation was premised on
+`complete=0` and must be re-run now that the premise is false. If Apple
+proceeds on a true latch read, that is strictly better than proceeding
+on a lie, and `ttl_hw_init_ret` is the field to watch.
+
+2ao (`_sdma_5_2_1_fw_autoload_is_completed -> return 1`) is in the same
+position and is owed the same re-test, separately.
