@@ -12391,3 +12391,84 @@ The single write is `0` to `CP_ME_CNTL`, byte for byte what HWLibs writes
 at 246 ms and X6000 writes twice more. It asks the chip nothing the driver
 is not already asking it.
 
+
+## 2iu result (2026-10-18) — three candidates dead, one register left standing
+
+Twenty-fourth armed boot, `logs/20261018-222147-metal/`, `armed=1`, UUID
+`F6E98837-C32C-3EA1-8133-C9ECF22EADF2` = `build/out`.
+
+```
+rbgpu-pwr = b=52
+  p0 gpm=b40017 pwr=1 clk=1 pipe=1 | rlc c=1 s=25 sfm=1 | srst=0 mec=0
+     | me 15000000->15000000 REFUSED
+  p1 identical
+```
+
+The sampling bias is closed, and the answer is not what I expected.
+
+- **GFX is powered and clocked AT THE HALT.** `GFX_POWER_STATUS`,
+  `GFX_CLOCK_STATUS` and `GFX_PIPELINE_POWER_STATUS` all set at +12 s and
+  +100 s, not just during bring-up. **Power-gating is dead**, and 2di's
+  `gfx_min = gfx_max = 0` stays unexplained - it is not this.
+- **`GRBM_SOFT_RESET = 0`.** The CP is not held in reset.
+- **`CP_MEC_CNTL = 0`.** The compute pipe is *not* halted. Only the
+  graphics front end is.
+- **The write is REFUSED in the same breath.** Write 0, read back
+  `0x15000000` microseconds later. Nothing re-asserts it later; it is
+  dropped **now**. That single fact kills every "something resets it
+  afterwards" theory at once.
+
+### RLCG eliminated without spending a boot
+
+The natural next suspect was the RLCG indirect path - GC registers the RLC
+owns, where direct MMIO is dropped and writes must go through
+`SCRATCH_REG0/1` + `RLC_SPARE_INT`. It would have explained everything,
+including why Apple's own writes fail, and it is exactly the sort of
+Navi21-versus-Rembrandt difference this project hunts.
+
+It is wrong, and `gfx_v10_0.c` says so directly:
+`gfx_v10_0_is_rlcg_access_range` calls `check_rlcg_range` with
+`entries = NULL, arr_size = 0`, and that function returns `false`
+immediately when `entries` is NULL. **No gfx10 GC register uses the RLCG
+path.** Eliminated statically, at the cost of one grep.
+
+### What is left
+
+The RLC. It is running (`RLC_CNTL = RLC_ENABLE_F32`), busy
+(`RLC_STAT 0x25 = RLC_BUSY | RLC_GPM_BUSY | RLC_THREAD_0_BUSY`), and
+**`RLC_SAFE_MODE = 1`** - `CMD` set, `MESSAGE` and `RESPONSE` clear, i.e.
+a safe-mode command the RLC has never acknowledged. In safe mode the RLC
+quiesces the graphics pipe and takes its registers, which is what a
+silently dropped `CP_ME_CNTL` write looks like from outside.
+
+**This is 2an's debt coming due.** 2am's bypass was vindicated by 2it;
+2an patched `_gc_check_register_equal_ext` precisely because
+`_gc_enter_rlc_safe_mode_10_3` was timing out on a register wait, and
+nothing has ever checked what state that left the RLC in. This reading
+says: pending, permanently.
+
+## 2iv (2026-10-18) — the first attempt to actually un-halt the CP
+
+Not a measurement. Linux's own exit sequence
+(`amdgpu_gfx_rlc_exit_safe_mode` -> `WREG32(RLC_SAFE_MODE, CMD_MASK)`),
+then retry the write:
+
+1. write `RLC_SAFE_MODE = 1` (CMD set, MESSAGE clear) - the exit
+2. poll CMD for up to 1000 reads, bounded, no sleeping
+3. write `CP_ME_CNTL = 0`, read back
+4. if still refused, force `RLC_SAFE_MODE = 0` and try once more
+5. read `rptr`/`wptr`/`CP_STAT` into the same note, so a CP that starts
+   consuming the ring is visible immediately
+
+Every value written is one Linux writes to that same register; nothing is
+invented. `-rbgpunogates` is already in boot-args, so clock gating - the
+thing safe mode exists to protect - is off, which is the main reason this
+is a reasonable register to touch at all. Gated on `-rbgpurlcexit`, phase
+0, before any client.
+
+| `rbgpu-rlcx` reading | means |
+|---|---|
+| `me1=0 TOOK` or `me2=0 TOOK` | the CP accepts the un-halt once the RLC releases it. **The blocker since 2hl**, and a fix to generalise into the bring-up path. |
+| both still `15000000 REFUSED` | safe mode is not what refuses the write. With power, reset and RLCG all eliminated, the refusal has **no candidate left** and needs a different kind of search. |
+| `r` advancing | the CP consuming the ring for the first time in this project |
+

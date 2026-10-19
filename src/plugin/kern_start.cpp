@@ -10907,6 +10907,107 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "2an's unverified bypass - as the remaining candidate.");
     }
 
+    // 2iv (2026-10-18): try to UN-HALT the CP. First real fix attempt at the
+    // thing that has blocked every boot since 2hl.
+    //
+    // 2iu narrowed it to one hard fact and eliminated three candidates at
+    // the moment of the halt: GFX is powered and clocked (pwr=1 clk=1
+    // pipe=1), GRBM_SOFT_RESET is 0, the MEC is NOT halted (mec=0), and the
+    // write to CP_ME_CNTL is **REFUSED** - 0 written, 0x15000000 read back
+    // microseconds later. Not re-asserted later: dropped now.
+    //
+    // RLCG is eliminated statically, without a boot:
+    // gfx_v10_0_is_rlcg_access_range calls check_rlcg_range with
+    // entries = NULL and arr_size = 0, which returns false for every
+    // register. No gfx10 GC register uses the RLCG indirect path, so that
+    // is not why the write vanishes.
+    //
+    // What is left is the RLC. It is running (RLC_CNTL = RLC_ENABLE_F32),
+    // busy (RLC_STAT 0x25 = RLC_BUSY | RLC_GPM_BUSY | RLC_THREAD_0_BUSY) -
+    // and RLC_SAFE_MODE reads 1, i.e. CMD set with MESSAGE and RESPONSE
+    // clear: **an unacknowledged safe-mode command**. In safe mode the RLC
+    // quiesces the graphics pipe and owns its registers, which is what a
+    // silently dropped CP_ME_CNTL write looks like from outside.
+    //
+    // And that is 2an's debt coming due. 2am's bypass was vindicated by
+    // 2it; 2an patched _gc_check_register_equal_ext precisely because
+    // _gc_enter_rlc_safe_mode_10_3 was timing out waiting on a register,
+    // and nothing has ever verified what state that left the RLC in. This
+    // reading says: pending, forever.
+    //
+    // THE ATTEMPT, in Linux's own sequence
+    // (amdgpu_gfx_rlc_exit_safe_mode -> WREG32(RLC_SAFE_MODE, CMD_MASK)):
+    //
+    //   1. write RLC_SAFE_MODE = 1 (CMD set, MESSAGE clear) - the exit
+    //   2. poll CMD for up to 1000 reads, bounded, no sleeping
+    //   3. write CP_ME_CNTL = 0 and read back
+    //   4. if still refused, force RLC_SAFE_MODE = 0 and try once more
+    //   5. report rptr/wptr after, so a CP that starts consuming is visible
+    //      in the same note
+    //
+    // Every value written is one Linux writes at the same register. Nothing
+    // is invented. -rbgpunogates is already in boot-args so clock gating is
+    // off, which is the state safe mode exists to protect - the main reason
+    // this is a reasonable thing to poke at all.
+    //
+    // Gated on -rbgpurlcexit. Phase 0 only, before any client.
+    if (phase == 0 && g_hw.rreg && g_hw.wreg &&
+        checkKernelArgument("-rbgpurlcexit")) {
+        const uint32_t kSFM = (0xa000u + 0x4CA0u) * 4;
+        const uint32_t kME  = (0x1260u + 0x0F56u) * 4;
+        char v[352];
+        size_t vn = 0;
+
+        uint32_t sfm0 = g_hw.rreg(g_hw.ctx, kSFM);
+        g_hw.wreg(g_hw.ctx, kSFM, 1u);              // Linux's exit: CMD only
+        uint32_t spins = 0, sfm1 = 0;
+        for (; spins < 1000; spins++) {
+            sfm1 = g_hw.rreg(g_hw.ctx, kSFM);
+            if ((sfm1 & 1u) == 0) break;
+        }
+        g_hw.wreg(g_hw.ctx, kME, 0);
+        uint32_t me1 = g_hw.rreg(g_hw.ctx, kME);
+
+        int w1 = snprintf(v, sizeof(v), "sfm %x->%x sp=%u | me1=%x %s",
+                          sfm0, sfm1, spins, me1,
+                          (me1 == 0) ? "TOOK" : "still");
+        vn = (w1 > 0) ? static_cast<size_t>(w1) : 0;
+
+        uint32_t me2 = me1;
+        if (me1 != 0) {
+            g_hw.wreg(g_hw.ctx, kSFM, 0);           // force the CMD bit down
+            uint32_t sfm2 = g_hw.rreg(g_hw.ctx, kSFM);
+            g_hw.wreg(g_hw.ctx, kME, 0);
+            me2 = g_hw.rreg(g_hw.ctx, kME);
+            if (vn < sizeof(v) - 48) {
+                int w2 = snprintf(v + vn, sizeof(v) - vn,
+                                  " | force sfm=%x me2=%x %s", sfm2, me2,
+                                  (me2 == 0) ? "TOOK" : "REFUSED");
+                if (w2 > 0) vn += static_cast<size_t>(w2);
+            }
+        }
+
+        uint32_t rp = rd(obj, resolve(obj, RB_2HK_CP_RB0_RPTR));
+        uint32_t wp = rd(obj, resolve(obj, RB_2HK_CP_RB0_WPTR));
+        uint32_t cs = rd(obj, resolve(obj, RB_2HK_CP_STAT));
+        if (vn < sizeof(v) - 40) {
+            snprintf(v + vn, sizeof(v) - vn, " | r=%x w=%x cps=%x", rp, wp, cs);
+        }
+        rbgpu_nvram_note("rbgpu-rlcx", v);
+        rbgpu_log("2iv: %s", v);
+        rbgpu_log("2iv: me1=0 or me2=0 means the CP accepted the un-halt once "
+                  "the RLC released it - the blocker since 2hl, and a fix to "
+                  "generalise into the bring-up path. Both still 0x15000000 "
+                  "means safe mode is NOT what refuses the write, and with "
+                  "power, reset and RLCG all eliminated the refusal has no "
+                  "candidate left and needs a different kind of search. "
+                  "r advancing past 0x%x in the same note would be the CP "
+                  "consuming the ring for the first time.", RB_2HW_PM4_MIN);
+    } else if (phase == 0 && !checkKernelArgument("-rbgpurlcexit")) {
+        rbgpu_nvram_note("rbgpu-rlcx", "off - -rbgpurlcexit not set, the RLC "
+                                       "was not touched");
+    }
+
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
