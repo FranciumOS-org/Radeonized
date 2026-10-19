@@ -294,9 +294,15 @@ It is what broke the GPU-restart loop.
   as sub-images; `-rbgpurlcsub` supplies them as ids 26/27/28/29/30.
   **2ix's conclusion is confirmed and the debt below is closed:** the
   halt is cleared by the autoload and by nothing the host can do.
-  **New frontier: something re-halts the CP after bring-up** (`me` back
-  to `15000000` by +12 s with `h=0`, so not Apple's 10_3 halt path), and
-  `ttl_hw_init_ret` now returns `0xffffffffe3623001` where it read 0.
+  **New frontier: something re-halts the CP after bring-up** - `me` back
+  to `15000000` by +12 s and +100 s with `h=0`, so not Apple's 10_3 halt
+  path, and the resets (`reset=6 @15241ms`) come *after* it. Boot 64
+  confirms the latch holds at all three phases. **`p2`'s `me=0 cps=0
+  r==w==0x180` is the KNOWN post-reset state from 2hp, not a fix.**
+  (2jq's "`ttl_hw_init_ret` now fails" is **WITHDRAWN** by 2jr: it was
+  already nonzero in boot 62, before `-rbgpurlcsub`, and varies per boot
+  like a handle. The `0` it was compared against came from a stale
+  boot-55 diag - the 2iz trap.)
 - **(CLOSED by 2jq) `CP_ME_CNTL` is READ-ONLY to the host, and the autoload is the only
   thing that clears it.** 2jl: `CE_STEP` (bit 25), an ordinary R/W debug
   bit, **will not stick**, and eight tight-loop reads after writing 0
@@ -462,11 +468,13 @@ it can never arrive. The machine was still hung. The bug is no longer
 Revises 2hl: the ring is not simply frozen. `rptr` advanced
 `0xb1 -> 0x2b1` between +12 s and +100 s. 2hl caught a stopped window.
 
-**Distrust `GRBM_STATUS`.** It reads `a0003028` in all five samples
-across two boots, including where `CP_STAT = 0` and the CP is un-halted
-yet it still claims `CP_BUSY` + `GUI_ACTIVE`. Either it is not read live
-through the accessor or it means something else. Nothing in 2hp rests on
-it and 2hl's use of it is weaker than it looked. Owed.
+**`GRBM_STATUS` - DEBT CLOSED (2jr).** 2hp said to distrust it: it read
+`a0003028` in every sample of every boot, including ones with
+`CP_STAT = 0` and the CP un-halted, so it was unclear whether it was
+read live at all. **Boot 64 reads `3028` at +160 s** (and `g2`
+`200008`), the first non-`a0003028` value this project has seen. It was
+live all along; the chip had simply never reached a clean idle before
+the RLC autoload started completing. 2hl's use of it is sound after all.
 
 Owed also: `vmalo = 0x400300` at +12 s is a real latched value (the
 later zeros are TLB invalidations, which set
