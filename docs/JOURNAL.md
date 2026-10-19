@@ -13282,3 +13282,30 @@ that touches a *reserved* bit alongside the halt bits:
 
 Nothing about the GPU working follows from either. This names what holds
 the register, which is the question that has been mis-answered twice.
+
+### 2ji (2026-10-19) — protected, or re-halting? (built)
+
+The 2jh discriminator. Behind `-rbgpumehold`, OUT by default. UUID
+`C0DD5715-B869-3D24-90C6-88DF3031403D`.
+
+- **A** write 0, then read back **eight** times in a tight loop. Any
+  sample differing from the entry value answers it outright and the index
+  dates the re-assert.
+- **B** write `was | CE_STEP` (bit 25) — an ordinary R/W single-step debug
+  bit in the same register, and nothing steps a halted engine. **This is
+  the cell that settles it, because it needs no timing luck.**
+
+| `rbgpu-mehold` | means |
+|---|---|
+| `B step ... STUCK` | the register accepts writes; only the halt bits are forced, so the CP re-halts itself. The fix is Linux's order: ucode through `CP_*_UCODE_ADDR`/`DATA`, *then* un-halt |
+| B not stuck, `moved=-1` | the whole register is protected by something still unnamed |
+| any A sample ≠ `was` | settled outright, with the re-assert dated |
+
+Restores the entry value and reads back the restore.
+
+Noted in passing from boot 60, not chased: `rbgpu-ptfix b=60 arm=1
+binds=41 wrote=0 ... unres=41` — 2ih's bind-time fix wrote nothing this
+boot, all 41 binds unresolved, while the corrected bases were written by
+2il instead (`rbgpu-pdc ... W b 7b00b001/8 bk=7b00b001/8`) and
+`rbgpu-ctxw` shows them landing. Two mechanisms for one fix and only one
+of them firing is worth tidying, but it changes no reading here.
