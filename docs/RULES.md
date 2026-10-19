@@ -261,11 +261,28 @@ It is what broke the GPU-restart loop.
   `load_type == PSP && psp.autoload_supported`, which is Rembrandt's path:
   on a PSP+autoload part the autoload is *precisely* what sets the latch.
   The timeout was a true negative and we patched it away. `rbgpu-bl` reads
-  `iram=1 complete=0` at +12 s and +100 s. **The RLC therefore never
-  releases CE/PFP/ME, which is why `CP_ME_CNTL` refuses writes from
-  everyone including Apple (2iw), why RB0 never executes, and why no
-  stamp ever retires.** Not yet proven: that completing autoload un-halts
-  the CP.
+  `iram=1 complete=0` in every boot. **But the chain that followed is
+  REFUTED (2jh): stopping the RLC outright - `RLC_CNTL` 1 -> 0,
+  confirmed, with a clean restore - does NOT release `CP_ME_CNTL`.** The
+  write is still refused through Apple's accessor and through `g_hw`. So
+  "the RLC holds CE/PFP/ME until bootload completes" is measured and
+  false on this chip. `complete=0` is real and unexplained; it is no
+  longer the identified cause of the halt, and 2jb's "Apple calls the
+  correct un-halt and is refused" no longer has an owner.
+  Also refuted separately (2je): Apple's 10_3 path has **no backdoor
+  fallback** - told the latch is clear, bring-up stops before the SMU
+  rather than taking another route, so the 2am patch is load-bearing.
+- **What holds `CP_ME_CNTL` is now unidentified.** Excluded, each with
+  the positive control it needed: power gating (`pwr=1 clk=1 pipe=1`),
+  soft reset (`srst=0`), RLC safe mode (2iv forced it to 0), RLCG, the
+  write mechanism (2iw cell A, seg1 `SCRATCH_REG0`, took), the seg0 path
+  (`rbgpu-ctxw`/`rbgpu-pdc` show seg0 GCVM writes landing with matching
+  readback in the same boot), the instrument, and the RLC (2jh). The
+  live hypothesis is that **the CP re-halts itself** - the write takes
+  and hardware re-asserts the halt before any readback - which a CP with
+  no valid firmware entry point would do and which is indistinguishable
+  from a refusal. Discriminator: tight-loop readback, and a write that
+  touches a reserved bit beside the halt bits. [2jh]
 - 2an and 2ao still owe the explanation 2cy demanded. 2an is *not*
   vindicated: 2iv found `RLC_SAFE_MODE` stuck with CMD set and Linux's own
   exit sequence unable to clear it across 1000 polls.
