@@ -10933,11 +10933,47 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
                 }
             }
         }
+        // 2kb (2026-10-19): how much of the stream is NOT in this page?
+        //
+        // Boot 77 returned `noME`, and 2jz pre-registered that as weak. It is
+        // stronger than that allowed for: CP_RB0_BASE reads 0xffbfe000, so
+        // the ring base is page-aligned, and wptr = 0x380 = 896 dwords, so
+        // the whole submitted stream fits inside the 1024 dwords scanned.
+        // The one real gap left is INDIRECT_BUFFER (0x3f), which sends the CP
+        // somewhere this page does not cover.
+        //
+        //   ib=0  -> nothing is delegated, the scan saw the whole stream, and
+        //            `noME` becomes strong: the CP does not write its own
+        //            halt, leaving the RLC (2jo never excluded it)
+        //   ib>0  -> the addresses say where to look next, and `noME` stays
+        //            weak exactly as pre-registered
+        unsigned nib = 0;
+        uint64_t ib0 = 0;
+        for (unsigned i = 0; i + 3 < 1024; i++) {
+            uint32_t h = dw[i];
+            if ((h >> 30) != 3) continue;
+            if (((h >> 8) & 0xFF) != 0x3fu) continue;      // INDIRECT_BUFFER
+            uint64_t a2 = (static_cast<uint64_t>(dw[i + 2]) << 32) | dw[i + 1];
+            if (nib == 0) ib0 = a2;
+            nib++;
+            if (nib <= 2) {
+                rbgpu_log("2kb: INDIRECT_BUFFER @%03x addr=0x%llx size=%u", i,
+                          a2, dw[i + 3] & 0xFFFFFu);
+            }
+        }
+        rbgpu_log("2kb: %u INDIRECT_BUFFER packets in the page. 0 means the "
+                  "scan saw the whole stream and `noME` is strong.", nib);
+        if (n < sizeof(note) - 40) {
+            w = snprintf(note + n, sizeof(note) - n, " | ib=%u@%llx", nib, ib0);
+            if (w > 0) {
+                n += static_cast<size_t>(w);
+                if (n >= sizeof(note)) n = sizeof(note) - 1;
+            }
+        }
         if (nme == 0) {
-            rbgpu_log("2jz: no packet in THIS page writes CP_ME_CNTL. That is "
-                      "not 'the ring does not write it' - this is one 1024-dword "
-                      "page and the write could be in an indirect buffer or "
-                      "further along the ring.");
+            rbgpu_log("2jz: no packet in THIS page writes CP_ME_CNTL. Weight "
+                      "that against the ib= count above: with ib=0 the page is "
+                      "the whole stream.");
             if (n < sizeof(note) - 12) {
                 w = snprintf(note + n, sizeof(note) - n, " | noME");
                 if (w > 0) n += static_cast<size_t>(w);
