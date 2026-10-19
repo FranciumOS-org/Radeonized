@@ -11374,6 +11374,82 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                   "elimination list stands.");
     }
 
+    // 2ji (2026-10-19): is CP_ME_CNTL write-PROTECTED, or does the CP
+    // RE-HALT itself?
+    //
+    // 2jh killed the owner. Stopping the RLC - RLC_CNTL 1 -> 0, confirmed,
+    // clean restore - did not release the register. Every candidate with a
+    // positive control behind it is excluded, including the seg0 write path
+    // (rbgpu-ctxw and rbgpu-pdc show seg0 GCVM writes landing with matching
+    // readback in the same boot and the same function).
+    //
+    // What is left splits in two, and the two are indistinguishable from
+    // everything measured so far:
+    //
+    //   PROTECTED    the write never reaches the register
+    //   RE-HALTS     the write lands and hardware re-asserts CE/PFP/ME
+    //                before any readback sees it. A CP with no valid
+    //                firmware entry point would do precisely this, and it
+    //                fits 2it - instruction RAM holds nonzero dwords, but
+    //                nothing ever established a usable entry point.
+    //
+    // Two cells, and cell B does not depend on catching a race:
+    //
+    //   A  write 0, then read back EIGHT times in a tight loop. If any
+    //      sample reads 0, or anything other than the entry value, the
+    //      write reached the register and the question is answered
+    //      outright - and the sample index dates the re-assert.
+    //   B  write `was | CE_STEP`. Bit 25 is an ordinary R/W single-step
+    //      debug bit sitting beside the halt bits in the same register,
+    //      and nothing steps a halted engine. If bit 25 STICKS while the
+    //      halt bits do not, the register accepts writes and the halt
+    //      bits specifically are being forced - which is RE-HALTS. If
+    //      bit 25 does not stick either, the whole register is
+    //      PROTECTED.
+    //
+    // B is the one that settles it, because it needs no timing luck.
+    //
+    // Chip-state cost: one write of a step bit to a halted engine, and a
+    // write of 0 to the halt bits that Apple and HWLibs both perform
+    // three times a boot anyway. The entry value is restored and the
+    // restore is read back, so a failed restore cannot pass as a clean
+    // one. Behind -rbgpumehold, OUT by default.
+    if (phase == 0 && g_hw.rreg && g_hw.wreg &&
+        checkKernelArgument("-rbgpumehold")) {
+        const uint32_t kMEb = (0x1260u + 0x0F56u) * 4;
+        const uint32_t kSTEP = 0x02000000u;          // CE_STEP, bit 25
+        uint32_t was = g_hw.rreg(g_hw.ctx, kMEb);
+
+        uint32_t a[8];
+        g_hw.wreg(g_hw.ctx, kMEb, 0);
+        for (int i = 0; i < 8; i++) a[i] = g_hw.rreg(g_hw.ctx, kMEb);
+        int moved = -1;
+        for (int i = 0; i < 8; i++) if (a[i] != was) { moved = i; break; }
+
+        g_hw.wreg(g_hw.ctx, kMEb, was | kSTEP);
+        uint32_t b = g_hw.rreg(g_hw.ctx, kMEb);
+
+        g_hw.wreg(g_hw.ctx, kMEb, was);
+        uint32_t back = g_hw.rreg(g_hw.ctx, kMEb);
+
+        char m[320];
+        snprintf(m, sizeof(m),
+                 "was=%x | A %x %x %x %x %x %x %x %x moved=%d | "
+                 "B step %x %s | restore %x %s",
+                 was, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], moved,
+                 b, (b & kSTEP) ? "STUCK" : "did not stick",
+                 back, (back == was) ? "OK" : "FAILED");
+        rbgpu_nvram_note("rbgpu-mehold", m);
+        rbgpu_log("2ji: %s", m);
+        rbgpu_log("2ji: B STUCK means the register ACCEPTS writes and only "
+                  "the halt bits are forced - the CP re-halts itself, and "
+                  "the fix is Linux's order: load ucode through "
+                  "CP_*_UCODE_ADDR/DATA, THEN un-halt. B not stuck with "
+                  "A never moving means the whole register is protected by "
+                  "something still unnamed. Any A sample differing from was "
+                  "answers it outright and dates the re-assert.");
+    }
+
     // 2jf (2026-10-19): STOP THE RLC, THEN WRITE. The deferred experiment,
     // now due.
     //
