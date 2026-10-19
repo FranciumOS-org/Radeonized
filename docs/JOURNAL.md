@@ -11896,3 +11896,68 @@ is its own kind of absent result.
 Cost of the debt, for the record: one boot here, plus the earlier boot 2gy
 itself was written up from. Two boots to avoid a twenty-line retry.
 
+
+## 2im result (2026-10-18) — the walk is real, and the retry works
+
+Seventeenth armed boot, `logs/20261018-205452-metal/`, `armed=1` live, UUID
+`F29D6C28-4FC9-3A02-B909-C6A71ADA5E44` = `build/out`. **2in's `/options`
+retry did its job** - this is the first boot after the race bit us, and it
+armed.
+
+```
+rbgpu-walk = b=45 pd=87b015000 [0]=20000000fb016001
+             | pt=87b016000 nz=195 v=195 [0]=1000000fb01e001
+rbgpu-fault = ... fw=8 | s3009bb h0 n=1 va=400300000 v3R c4 | ...
+```
+
+**The structure is sound all the way down.** The directory's single PDE is
+at **index 0**; following it reaches a page table with **195 entries, all
+195 valid**, whose first is `0x0100_0000_FB01_E001` - bit 0 set and the
+`0x0100...` top bits exactly the L1 template 2if measured on this chip. So
+the base 2il wrote points at a real directory, which points at a real,
+populated page table. Nothing about the structure is broken.
+
+**And the geometry says the directory does cover the faulting VA.**
+`cn=0x3b` decodes as depth 1 with `PAGE_TABLE_BLOCK_SIZE` field 7, i.e.
+block size 16, so PDE[0] spans 2^16 pages - far beyond the 768 needed to
+reach `0x4_0030_0000`. 2im's first hypothesis, that the one PDE could not
+reach page 0x300, is therefore **dead**.
+
+But a 2^16-entry block is **128 pages of PTEs** and 2im read only the
+first. Page 768's entry sits at byte `768*8 = 0x1800` into the block - the
+**second** PTE page, index 256 - and has never been looked at. That one
+entry is the remaining question about translation.
+
+### `fw=8` is not the result it looks like
+
+It says all eight faults were counted after the write. But the fault status
+register **latches**: a fault raised at +5 s and read at +20 s counts as
+post-write too. `fw` cannot distinguish a new fault from an old latch, and
+reading it as if it could would be the recurring error in a fresh costume.
+It is recorded and not relied on.
+
+## 2io (2026-10-18) — read the entry that matters, and clear the latch
+
+Two additions, both small, both closing a gap the last boot exposed.
+
+**The faulting entry.** Map `pte_block + 0x1000`, read index 256, report it
+as ZERO / NOTVALID / VALID with its value. If it is valid and points
+somewhere real, translation should succeed and the fault means something
+other than a missing mapping - which would move this off GPUVM entirely.
+
+**Clear the fault status after correcting the base.** Linux does exactly
+this after every fault
+(`gmc_v10_0_process_interrupt`: `WREG32_P(vm_l2_pro_fault_cntl, 1, ~1)`),
+so setting bit 0 of `GCVM_L2_PROTECTION_FAULT_CNTL` is Apple's and Linux's
+own mechanism rather than an invention. The status is read back
+immediately and reported as `clr=`. After it, **anything the +100 s sample
+reads is a fault raised after the base was corrected** - the question
+`fw=` could not answer.
+
+| reading | means |
+|---|---|
+| `F ...=... VALID` and +100 s `vmf` clean | the correction worked; the remaining hang is downstream of translation |
+| `F ... VALID` and `vmf=3009bb` returns | the mapping is present and the walk still faults - GPUVM is not the cause and several milestones have been aimed wrong |
+| `F ... ZERO` | the page the CPF reads is genuinely unmapped; the question becomes who was supposed to map it |
+| `clr=` still showing a fault | the clear did not take, and the +100 s reading cannot be trusted either way |
+

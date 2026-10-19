@@ -9614,15 +9614,50 @@ static void rbgpu_walk_2im(uint64_t pd_pa, uint64_t vbo) {
                         nz++; if (t[k] & 1) v++;
                     }
                     if (m < sizeof(w2) - 64) {
-                        snprintf(w2 + m, sizeof(w2) - m,
-                                 " | pt=%llx nz=%u v=%u [%u]=%llx",
-                                 pte_pa, nz, v, i1, f1);
+                        x = snprintf(w2 + m, sizeof(w2) - m,
+                                     " | pt=%llx nz=%u v=%u [%u]=%llx",
+                                     pte_pa, nz, v, i1, f1);
+                        if (x > 0) { m += static_cast<size_t>(x); if (m >= sizeof(w2)) m = sizeof(w2) - 1; }
                     }
                     p2->release();
                 } else if (m < sizeof(w2) - 24) {
                     snprintf(w2 + m, sizeof(w2) - m, " | pt=%llx UNMAPPED", pte_pa);
                 }
                 if (m2) m2->release();
+
+                // 2io (2026-10-18): the entry that actually covers the fault.
+                //
+                // cn=0x3b decodes to depth 1 with PAGE_TABLE_BLOCK_SIZE field
+                // 7, i.e. block size 16, so PDE[0] spans 2^16 pages - far more
+                // than the 768 needed to reach the faulting VA, and the
+                // directory DOES cover 0x4_0030_0000. But a 2^16-entry block
+                // is 128 pages of PTEs and 2im read only the first. The
+                // faulting VA is page 0x300 = 768 above this context's window
+                // start 0x4_0000_0000, so its entry is at byte 768*8 = 0x1800
+                // into the block: the SECOND PTE page, index 256.
+                //
+                // That one entry is the whole question. If it is valid and
+                // points somewhere real, translation should succeed and the
+                // fault means something other than a missing mapping.
+                const uint64_t kFaultPage = 0x300;
+                uint64_t e_pa = pte_pa + ((kFaultPage * 8) & ~0xFFFull);
+                unsigned e_ix = static_cast<unsigned>(kFaultPage % 512);
+                IOMemoryDescriptor *m3 = IOMemoryDescriptor::withPhysicalAddress(
+                    static_cast<IOPhysicalAddress>(e_pa), 0x1000, kIODirectionIn);
+                IOMemoryMap *p3 = m3 ? m3->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+                if (p3) {
+                    auto u = reinterpret_cast<volatile uint64_t *>(p3->getVirtualAddress());
+                    uint64_t ent = u[e_ix];
+                    if (m < sizeof(w2) - 56) {
+                        snprintf(w2 + m, sizeof(w2) - m, " | F pa=%llx[%u]=%llx %s",
+                                 e_pa, e_ix, ent,
+                                 (ent == 0) ? "ZERO" : ((ent & 1) ? "VALID" : "NOTVALID"));
+                    }
+                    p3->release();
+                } else if (m < sizeof(w2) - 24) {
+                    snprintf(w2 + m, sizeof(w2) - m, " | F pa=%llx UNMAPPED", e_pa);
+                }
+                if (m3) m3->release();
             }
             rbgpu_nvram_note("rbgpu-walk", w2);
             rbgpu_log("2im: %s", w2);
@@ -9644,6 +9679,7 @@ static void rbgpu_walk_2im(uint64_t pd_pa, uint64_t vbo) {
 
 static int g_rb_2il_done = 0;
 uint32_t g_rb_2im_f_at_write = 0xFFFFFFFFu;   // 2im: fault count when 2il wrote
+static uint32_t g_rb_2io_st_after_clear = 0xFFFFFFFFu;  // 2io: status right after the clear
 
 __attribute__((noinline))
 static void rbgpu_pdcandidates_2il(void *obj,
@@ -9745,9 +9781,35 @@ static void rbgpu_pdcandidates_2il(void *obj,
     wr(obj, off_hi, new_hi);
     uint32_t b_lo = rd(obj, off_lo), b_hi = rd(obj, off_hi);
     if (n < sizeof(note) - 24) {
-        snprintf(note + n, sizeof(note) - n, " bk=%x/%x", b_lo, b_hi);
+        snprintf(note + n, sizeof(note) - n, " bk=%x/%x clr=%x", b_lo, b_hi,
+                 g_rb_2io_st_after_clear);
     }
     rbgpu_nvram_note("rbgpu-pdc", note);
+    // 2io: CLEAR the fault status after correcting the base.
+    //
+    // fw=8 last boot looked like "every fault happened after the write", but
+    // the status register LATCHES, so a fault from +5 s read at +20 s counts
+    // as post-write too. fw cannot distinguish a new fault from an old latch,
+    // and reading it as if it could would be the recurring error.
+    //
+    // Linux clears it the same way after each fault
+    // (gmc_v10_0_process_interrupt: WREG32_P(vm_l2_pro_fault_cntl, 1, ~1)),
+    // so setting bit 0 of GCVM_L2_PROTECTION_FAULT_CNTL is Apple's and
+    // Linux's own mechanism, not an invention. After this, anything the
+    // +100 s sample reads is a fault raised AFTER the base was corrected.
+    {
+        uint32_t coff = resolve(obj, (0x15C4ull << 32) | 0xB);
+        uint32_t cval = rd(obj, coff);
+        wr(obj, coff, cval | 1u);
+        uint32_t soff = resolve(obj, (0x15C8ull << 32) | 0xB);
+        g_rb_2io_st_after_clear = rd(obj, soff);
+        rbgpu_log("2io: cleared GCVM_L2_PROTECTION_FAULT_CNTL (0x%08x -> "
+                  "0x%08x); status immediately after reads 0x%08x. The +100 s "
+                  "sample now answers a question fw= could not: whether the "
+                  "VMID-3 fault RE-ARMS with a correct page-directory base.",
+                  cval, cval | 1u, g_rb_2io_st_after_clear);
+    }
+
     rbgpu_log("2il: candidate %c at 0x%llx is the only page shaped like a "
               "page directory (nz=%u, all valid). Wrote 0x%08x/0x%08x, read "
               "back 0x%08x/0x%08x. This is +12 s, before the Metal client, "
