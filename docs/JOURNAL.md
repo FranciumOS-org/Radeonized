@@ -11862,3 +11862,37 @@ Also fixed: `rbgpu_ring_probe_2hk`'s frame hit the 1024-byte limit again
 (1336). The walk and both new probes are now `noinline`, which is the same
 remedy the 2hs/2gv routing split used.
 
+
+## 2in (2026-10-18) — the 2gy debt paid, after it cost a boot
+
+The 2im boot came up with a **working desktop** and the user asked whether
+they were imagining it. They were not, and it was not acceleration:
+
+```
+rbgpu-diag = d=0 armed=0      the plugin did not arm
+rbgpu-arm  = 1                still set, never consumed
+kextstat   = 78B35483-...     the 2im build, loaded
+ioreg      = "options not found"  x2
+```
+
+So the plugin loaded and did nothing, and the desktop was the ordinary
+firmware framebuffer. This is **2gy** exactly, a debt standing since
+2026-10-16: `rbgpuConsumeArming` calls
+`IORegistryEntry::fromPath("/options", gIODTPlane)` **once**, and on a boot
+where the peer runs early it loses the race, logs "not found" and returns
+false - indistinguishable from the user forgetting to arm. Because
+`rbgpu-arm` is left set, a plain reboot recovers with no reinstall, which
+is why it has been survivable enough to keep owing.
+
+It is now paid: ten tries, 100 ms apart, at most one second. `IOSleep` is
+safe there - the peer's own `start()` thread, not an interrupt context -
+and one second is nothing against the 1.9 s the peer usually starts at.
+
+The try count is **logged either way**, so a boot that armed on the seventh
+attempt is distinguishable from one that armed immediately, and a boot that
+still fails reports how long it waited. A success whose cost is invisible
+is its own kind of absent result.
+
+Cost of the debt, for the record: one boot here, plus the earlier boot 2gy
+itself was written up from. Two boots to avoid a twenty-line retry.
+
