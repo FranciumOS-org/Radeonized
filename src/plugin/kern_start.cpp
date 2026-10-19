@@ -180,6 +180,24 @@ static gc_get_hw_version_fn_t           orig_gc_get_hw_version              = nu
 static gc_get_config_fn_t               orig_gc_get_config                  = nullptr;
 static gc_get_hw_config_tbl_info_fn_t   orig_gc_get_hw_config_tbl_info      = nullptr;
 static gc_set_fw_entry_info_fn_t        orig_gc_set_fw_entry_info           = nullptr;
+
+// 2jp: the RLC sub-image substitution is opt-in, and resolved LAZILY at the
+// first _IpiSetFwEntry rather than from an init hook, because the entries
+// are registered before anything of ours would get a chance to run an
+// initialiser. Absence is not a result (2eh): it logs either way, so a boot
+// where the arg is off cannot be mistaken for one where the swap failed.
+static int g_rb_2jp_on = -1;
+static bool rbgpu_2jp_enabled(void) {
+    if (g_rb_2jp_on < 0) {
+        g_rb_2jp_on = checkKernelArgument("-rbgpurlcsub") ? 1 : 0;
+        rbgpu_log("2jp: RLC sub-image substitution %s - ids 26/27/28/29/30, "
+                  "the srlist cntl/gpm/srm lists and the LX6 iram/dram that "
+                  "2aj left as Apple's Navi21 images",
+                  g_rb_2jp_on ? "ON" : "OFF (-rbgpurlcsub not set)");
+        rbgpu_diag_set_num("rlcsub_on", static_cast<uint32_t>(g_rb_2jp_on));
+    }
+    return g_rb_2jp_on == 1;
+}
 static gc_init_fcn_ptr_list_fn_t        orig_gc_init_fcn_ptr_list           = nullptr;
 static gc_get_doorbell_requirements_fn_t orig_gc_get_doorbell_requirements  = nullptr;
 static ttl_dev_get_doorbell_range_fn_t  orig_ttl_dev_get_doorbell_range     = nullptr;
@@ -2744,6 +2762,41 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
         // observable in dry-run logs but only consumed if -rbgpupsphw is set.
         // d[2..3] = data_ptr, d[4] = size. Images are headerless (see
         // fw_yellow_carp.cpp): data_ptr -> image bytes, size -> image size.
+        // 2jp: the five RLC sub-images 2aj never supplied. Apple's
+        // _gc_10_3_get_fw_constants registers rlc_srlist_cntl/gpm/srm and
+        // rlc_lx6_iram/dram as separate firmware entries (switch indices
+        // 0,1,2,0xd,0xe); 2aj swapped only the main ucode, so the RLC has
+        // been booting with NAVI 21 save/restore lists and, worse, a Navi21
+        // LX6 image - the firmware for the processor INSIDE the RLC that
+        // runs the autoload. That is a mechanical candidate for
+        // BOOTLOAD_COMPLETE never setting while the RLC otherwise looks
+        // alive (RLC_STAT 0x25, f32=1).
+        //
+        // Identified from our own _IpiSetFwEntry log against the v2.2
+        // header of yellow_carp_rlc.bin, with THREE exact size matches:
+        //   id 26 = 0x250   == srlist_cntl  0x250
+        //   id 27 = 0x600   == srlist_gpm   0x600
+        //   id 29 = 0x10200 == rlc_iram     0x10200
+        // and two same-role size mismatches, where ours is the bigger:
+        //   id 28  Apple 0x47a0  ours (srm)  0x4880
+        //   id 30  Apple 0x4200  ours (dram) 0x10200
+        //
+        // The mismatches are the risk in this step and are not hidden: 2aj
+        // writes ptr AND size together, so the PSP is told the real size,
+        // but whether it accepts a larger image for these two entries is
+        // unknown. -rbgpurlcsub gates all five so a bad outcome is one
+        // boot-arg away from reverted.
+        extern const uint8_t yc_rlc_srlist_cntl_img[];
+        extern const uint8_t yc_rlc_srlist_gpm_img[];
+        extern const uint8_t yc_rlc_srlist_srm_img[];
+        extern const uint8_t yc_rlc_iram_img[];
+        extern const uint8_t yc_rlc_dram_img[];
+        extern const uint32_t yc_rlc_srlist_cntl_img_size;
+        extern const uint32_t yc_rlc_srlist_gpm_img_size;
+        extern const uint32_t yc_rlc_srlist_srm_img_size;
+        extern const uint32_t yc_rlc_iram_img_size;
+        extern const uint32_t yc_rlc_dram_img_size;
+
         extern const uint8_t yc_ce_img[];
         extern const uint8_t yc_pfp_img[];
         extern const uint8_t yc_me_img[];
@@ -2762,6 +2815,23 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
             case 14: yc_img = yc_sdma_img; yc_size = 0x08400; break; // SDMA0
             case 36: yc_img = yc_toc_img;  yc_size = 0x00600; break; // PSP TOC
             default: break;
+        }
+        // 2jp: the RLC sub-images, opt-in.
+        if (!yc_img && rbgpu_2jp_enabled()) {
+            switch (d[0]) {
+                case 26: yc_img = yc_rlc_srlist_cntl_img;
+                         yc_size = yc_rlc_srlist_cntl_img_size; break;
+                case 27: yc_img = yc_rlc_srlist_gpm_img;
+                         yc_size = yc_rlc_srlist_gpm_img_size;  break;
+                case 28: yc_img = yc_rlc_srlist_srm_img;
+                         yc_size = yc_rlc_srlist_srm_img_size;  break;
+                case 29: yc_img = yc_rlc_iram_img;
+                         yc_size = yc_rlc_iram_img_size;        break;
+                case 30: yc_img = yc_rlc_dram_img;
+                         yc_size = yc_rlc_dram_img_size;        break;
+                default: break;
+            }
+            if (yc_img) { rbgpu_diag_inc("yc_rlc_swapped"); }
         }
         if (yc_img) {
             d[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img));
