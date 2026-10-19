@@ -13176,3 +13176,45 @@ default. Mitigations: gating is already off (`-rbgpunogates`), the GPU
 retires no work as it is, DCN is a separate block, `RLC_CNTL` is restored
 before return, and the restore is read back so a failed restore cannot be
 reported as a clean one. Worst case is a hang; SSH survives on `wdt=-1`.
+
+## 2jg (2026-10-19) — 2jd is WITHDRAWN. The blank boots are a reading defect.
+
+Boot 59 ran the 2jf build (installed 01:46, two minutes after it was built)
+with `-rbgpurlcstop` live in boot-args and the 2jc routes gated **out** by
+2jd's `-rbgpualdprobe`. It armed: `rbgpu-boot` 59, `rbgpu-prog b=59 s=6
+0x1B RETURNED 0xE00002C7`.
+
+And it wrote **no** ring-probe note. Not `rbgpu-rstop`, not `rbgpu-ume`,
+not `rbgpu-bl`, not `rbgpu-ring` — all still `b=56`, alongside
+`rbgpu-wtest b=56` from the same last good boot.
+
+**So 2jd's conclusion is withdrawn.** The three 2jc routes were gated out
+and the probe still produced nothing, so they were never the cause. 2jd
+read two blank boots, named the only new thing, and was wrong — the same
+shape of error as 2am, and it is recorded rather than quietly dropped.
+
+Three candidates for boots 57, 58 and 59:
+
+1. **The notes were written and LOST on the power cycle.** This is 2gq
+   exactly: `rbgpu-prog` is written early and survives, the ring-probe
+   notes are written late and do not. It is the only candidate that covers
+   all three boots.
+2. 2jf's RLC stop wedged the probe thread in boot 59 — it runs before the
+   flushes, so a hang there loses everything including `rbgpu-rstop`
+   itself. Does not explain 57 or 58.
+3. 2fe non-determinism.
+
+Candidate 1 is the one that fits, and it indicts the procedure rather than
+the chip. All three boots were read **after** a reboot, from live NVRAM,
+because the user cannot run Claude from an armed boot. CLAUDE.md has said
+since 2gq to run `plugin_check.sh` **in** the armed boot; that was not
+done, and three experiments were spent on it.
+
+**Procedure change, from here on:** in the armed boot, over SSH,
+`sudo tools/plugin_check.sh`. It writes the whole capture to
+`logs/<timestamp>-plugin/` **on disk**, which survives the power cycle.
+Read the file afterwards, never live NVRAM, unless the boot being read is
+the boot being used.
+
+Nothing is concluded about `-rbgpurlcstop` — 2jf has not yet produced a
+reading. Its result is still owed.
