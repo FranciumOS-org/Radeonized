@@ -8025,6 +8025,7 @@ static uint32_t g_rb_2ih_relbad  = 0;   // it did not, and the write was refused
 static uint32_t g_rb_2ih_outside = 0;   // 2ij: root outside the FB aperture
 static uint32_t g_rb_2ih_already = 0;   // 2ij: already holds what we would write
 static uint32_t g_rb_2ih_fbtop   = 0;   // 2ij: GCMC_VM_FB_LOCATION_TOP as read
+static uint32_t g_rb_2ih_unresolved = 0;  // 2ik: write held back, aperture unknown
 static uint16_t g_rb_2ih_mask    = 0;   // VMIDs corrected
 static uint64_t g_rb_2ih_first_root = 0;
 static uint32_t g_rb_2ih_first_was_lo = 0, g_rb_2ih_first_was_hi = 0;
@@ -8138,6 +8139,32 @@ static void rbgpu_ptfix_2ih(void *ctx, uint32_t vmid) {
     // RAM is what 2ii did and it must not happen again.
     uint32_t fb_top_raw = rd(obj, resolve(obj, (0x16FDull << 32) | 0xB));
     g_rb_2ih_fbtop = fb_top_raw;
+
+    // 2ik (2026-10-18): STOP WRITING until the aperture map is read.
+    //
+    // 2ij's gate passed everything (out=0) because fbtop=0xF4FF makes the FB
+    // aperture a full 4 GB, MC 0xF4_0000_0000..0xF4_FFFF_FFFF, and the roots
+    // at 0xF4_FB01_5000 sit 3.92 GB inside it. The gate was right and the
+    // geometry is still contradictory:
+    //
+    //   FB aperture        4 GB of MC space
+    //   carve-out base     system-physical 0x7_8000_0000 = 30 GB
+    //   installed RAM      32 GB
+    //   aperture top 2 GB  maps to 32..34 GB, which is nothing
+    //   the roots          land at ~33.9 GB, in that overhang
+    //
+    // So the FB aperture is twice the memory behind it and the page-table
+    // roots are in the unbacked half. Either vram_base_offset
+    // (= GCMC_VM_FB_OFFSET << 24) is not the right base on an APU, or these
+    // roots are reached through a DIFFERENT aperture - AGP or the system
+    // aperture - whose registers this project has never read.
+    //
+    // Writing again before knowing which would be guessing a third time, so
+    // this boot writes nothing and reads the map instead. The register is
+    // left exactly as Apple programmed it, which also restores the baseline
+    // that 2ih and 2ii perturbed.
+    g_rb_2ih_unresolved++;
+    return;
     uint64_t fb_top = (static_cast<uint64_t>(fb_top_raw) << 24) | 0xFFFFFFull;
     if (fb_top <= fb_base || root > fb_top) {
         g_rb_2ih_outside++;
@@ -8193,13 +8220,14 @@ void rbgpu_ptfix_flush_2ih(void) {
     char note[352];
     snprintf(note, sizeof(note),
              "arm=%d binds=%u wrote=%u nomatch=%u noobj=%u badback=%u "
-             "nofb=%u relok=%u relbad=%u out=%u alr=%u fbtop=%x "
+             "nofb=%u relok=%u relbad=%u out=%u alr=%u unres=%u fbtop=%x "
              "vmids=%04x | first root=%llx "
              "was=%x/%x new=%x/%x back=%x/%x",
              g_rb_2ih_armed, g_rb_2ih_calls, g_rb_2ih_wrote,
              g_rb_2ih_nomatch, g_rb_2ih_noobj, g_rb_2ih_badback,
              g_rb_2ih_nofb, g_rb_2ih_relok, g_rb_2ih_relbad,
-             g_rb_2ih_outside, g_rb_2ih_already, g_rb_2ih_fbtop,
+             g_rb_2ih_outside, g_rb_2ih_already, g_rb_2ih_unresolved,
+             g_rb_2ih_fbtop,
              g_rb_2ih_mask, g_rb_2ih_first_root,
              g_rb_2ih_first_was_lo, g_rb_2ih_first_was_hi,
              g_rb_2ih_first_new_lo, g_rb_2ih_first_new_hi,
@@ -9455,6 +9483,69 @@ static void rbgpu_ptwrite_2ig(void *obj,
               new_lo, new_hi, was_lo, was_hi, back_lo, back_hi);
 }
 
+// ---------------------------------------------------------------------------
+// 2ik (2026-10-18): read the aperture map before guessing a transform again.
+//
+// Three writes have now been attempted at this register and each assumed a
+// transform: 2ih the raw MC address, 2ii mc2pa with vram_base_offset, 2ij
+// the same with a gate that turned out to permit it. The gate was correct
+// and the geometry is still impossible - a 4 GB FB aperture over 2 GB of
+// backing, with the roots in the overhang.
+//
+// What has never been read is where the OTHER apertures are. Offsets from
+// gc_10_3_0_offset.h, GC seg0 0x1260 applied by socRegOffset:
+//
+//   0x16FC  GCMC_VM_FB_LOCATION_BASE        << 24
+//   0x16FD  GCMC_VM_FB_LOCATION_TOP         << 24 | 0xFFFFFF
+//   0x16FE  GCMC_VM_AGP_TOP                 << 24 | 0xFFFFFF
+//   0x16FF  GCMC_VM_AGP_BOT                 << 24
+//   0x1700  GCMC_VM_AGP_BASE
+//   0x1701  GCMC_VM_SYSTEM_APERTURE_LOW_ADDR   << 18
+//   0x1702  GCMC_VM_SYSTEM_APERTURE_HIGH_ADDR  << 18
+//   0x16E8/0x16E9 GCMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR LSB/MSB
+//
+// In Linux, an MC address inside [AGP_BOT, AGP_TOP] is SYSTEM memory reached
+// without mc2pa, and the system aperture bounds say which MC addresses the
+// hub resolves to host DRAM directly. If 0xF4_FB01_5000 falls in the AGP
+// window, the register wants its bus address and every transform tried so
+// far was the wrong family of answer - which would explain all three boots
+// at once.
+//
+// Observe only. The write above is held back this boot.
+// ---------------------------------------------------------------------------
+
+static void rbgpu_aperture_probe_2ik(void *obj,
+                                     uint32_t (*resolve)(void *, uint64_t),
+                                     uint32_t (*rd)(void *, uint32_t),
+                                     unsigned phase) {
+    if (phase != 0) {
+        return;
+    }
+    static const struct { uint64_t dw; const char *n; } kR[] = {
+        { 0x16FC, "fbb" }, { 0x16FD, "fbt" },
+        { 0x16FE, "agpt" }, { 0x16FF, "agpb" }, { 0x1700, "agpbase" },
+        { 0x1701, "sysl" }, { 0x1702, "sysh" },
+        { 0x16E8, "dfl" },  { 0x16E9, "dfm" },
+    };
+    char note[352];
+    size_t n = 0;
+    for (unsigned i = 0; i < sizeof(kR) / sizeof(kR[0]); i++) {
+        uint32_t v = rd(obj, resolve(obj, (kR[i].dw << 32) | 0xB));
+        if (n >= sizeof(note) - 24) break;
+        int w = snprintf(note + n, sizeof(note) - n, "%s%s=%x",
+                         n ? " " : "", kR[i].n, v);
+        if (w > 0) { n += static_cast<size_t>(w); if (n >= sizeof(note)) { n = sizeof(note) - 1; break; } }
+    }
+    rbgpu_nvram_note("rbgpu-aper", note);
+    rbgpu_log("2ik: %s", note);
+    rbgpu_log("2ik: the roots are MC 0xF4_FB00_0000 / 0xF4_FB00_B000 / "
+              "0xF4_FB01_5000. If agpb..agpt covers them they are SYSTEM "
+              "memory reached without mc2pa and every transform tried so far "
+              "is the wrong family of answer. If only fbb..fbt covers them, "
+              "the FB aperture really is 4 GB over 2 GB of backing and the "
+              "question becomes what vram_base_offset should be on an APU.");
+}
+
 static void rbgpu_vmctx_probe_2hq(void *obj,
                                   uint32_t (*resolve)(void *, uint64_t),
                                   uint32_t (*rd)(void *, uint32_t),
@@ -10053,6 +10144,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // 2hq: the context registers, after the ring note is safely committed so
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
+    rbgpu_aperture_probe_2ik(obj, resolve, rd, phase);
 
     // 2ig: the write, after the contexts have been read at this phase so the
     // before-state is on record from the same sample.
