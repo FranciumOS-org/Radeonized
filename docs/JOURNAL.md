@@ -13012,3 +13012,43 @@ or the same bring-up plus one 50 ms wait.
 
 Both are opt-in. The autoload hooks ride `-rbgpuringprobe` (already in);
 `-rbgpuautoloadtruth` is new and OUT until armed deliberately.
+
+## 2jd (2026-10-19) — the 2jc hooks blank the ring probe, unexplained; out
+
+Two armed boots on the 2jc build, 57 and 58. Both reached the accelerator
+in full — `rbgpu-prog b=57 s=6` and `b=58 s=6`, both `0x1B RETURNED
+0xE00002C7`, `rbgpu-1b` fresh in both. And both wrote **zero** ring-probe
+notes: `rbgpu-ald` never created, `rbgpu-ume` / `rbgpu-ring` / `rbgpu-bl`
+still reading `b=56` afterwards. Boot 58 was left ~10 minutes, far past the
++160 s phase.
+
+Boot 56 is the identical build minus three routes and it wrote all three
+phases. n=2 against n=1 is past 2fe's known non-determinism.
+
+**The mechanism is not identified, and the obvious one is refuted.** All
+three symbols are defined in HWLibs and pass rule 9.
+`_gc_fw_backdoor_loading_disable_10_3` is 20 bytes end to end
+(0x126b4732..0x126b4746) with instruction boundaries at offsets 12 and 18,
+so Lilu's absolute jump cannot spill into
+`_gc_fw_initialize_backdoor_loading_register_set_10_3`. The hooks
+themselves are single counter increments — 2ja's lesson was applied and
+they touch no hardware. So the 2ja explanation does not transfer, and
+nothing replaces it.
+
+Per the standing rule — when a measurement and a suspect are both new,
+remove the suspect rather than reasoning about it — the routes are now
+behind **`-rbgpualdprobe`**, OUT by default. The default build is boot 56's
+behaviour exactly. This is the fourth time an instrument has been the
+fault on this project (2fo, 2ez, 2fz/2ga/2gg, 2ja) and the first where no
+mechanism was found.
+
+Also recorded, since it was raised and then dismissed as a hypothesis: the
+user has logged in on **every** armed boot so far, so the frozen session is
+a constant across 56, 57 and 58 and cannot be the difference. It remains
+worth removing as a variable, but it explains nothing here.
+
+**Next boot is `-rbgpuautoloadtruth` alone.** It needs no new routes at
+all: it only skips the 2am patch so Apple sees `BOOTLOAD_COMPLETE = 0` as
+it really is. That is the question 2jb left — what Apple does when told the
+truth about the latch — and it is now reachable without the thing that
+blanked two boots.

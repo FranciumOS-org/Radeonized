@@ -8171,6 +8171,18 @@ static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
 
 static void rbgpu_route_autoload_2jc(KernelPatcher &patcher, size_t id,
                                      mach_vm_address_t address, size_t size) {
+    // 2jd: behind its OWN arg, and OUT by default. Two consecutive armed
+    // boots with these three routes (57, 58) wrote not one ring-probe note,
+    // while boot 56 - the identical build minus them - wrote all three
+    // phases. The mechanism is NOT identified: all three pass rule 9, and
+    // _gc_fw_backdoor_loading_disable_10_3's 20 bytes have instruction
+    // boundaries at 12 and 18, so Lilu's jump cannot spill into the next
+    // function. Unexplained, reproducible, and therefore out.
+    if (!checkKernelArgument("-rbgpualdprobe")) {
+        rbgpu_log("2jc: autoload trio NOT hooked (-rbgpualdprobe not set) - "
+                  "2jd took them out after two blank boots");
+        return;
+    }
     if (!checkKernelArgument("-rbgpuringprobe")) return;
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest("_gc_parse_rlc_toc_10_3",
