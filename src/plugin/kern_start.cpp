@@ -7206,10 +7206,14 @@ void RGPU::routeGC(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
 // 2ie: defined below, beside the rest of the context-write instrumentation.
 static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
                                      mach_vm_address_t address, size_t size);
+// 2iy: likewise.
+static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
+                                        mach_vm_address_t address, size_t size);
 
 void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
     rbgpu_route_gvmwrite_2ie(patcher, id, address, size);
+    rbgpu_route_microengine_2iy(patcher, id, address, size);
 
     patchDeviceTypeTable(patcher, id);
     patchDeviceCapabilityTable(patcher, id);
@@ -7916,6 +7920,145 @@ void rbgpu_gvmwrite_flush_2ie(void) {
               "and the START/END values 2hr read come from neither. Exactly "
               "one framing should match at all; if both do the offsets are "
               "ambiguous and neither reading is safe.");
+}
+
+// ---------------------------------------------------------------------------
+// 2iy (2026-10-18): is Apple's own un-halt ever CALLED?
+//
+// 2ix found the root cause - BOOTLOAD_COMPLETE never sets, so the RLC
+// never releases the CP - and walking HWLibs' dispatch found the function
+// that is supposed to do the releasing. _gc_init_fcn_ptr_list has two
+// branches, and the 10_3 one (ours) assigns:
+//
+//   _gc_halt_micro_engines_10_3      0x126b3616
+//   _gc_unhalt_micro_engines_10_3    0x126b36df
+//   _gc_parse_rlc_toc_10_3, _gc_fw_backdoor_loading_disable_10_3,
+//   _gc_fw_initialize_backdoor_loading_register_set_10_3,
+//   _gc_enter/exit_rlc_safe_mode_10_3
+//
+// and, unlike the 10_1 branch, assigns NO _gc_fw_backdoor_autoload_config,
+// NO _validate, NO _check_ucode_loaded and NO _load_ucode. The 10_3 path
+// has no firmware-loading machinery at all: it delegates entirely to the
+// PSP. Which is exactly consistent with an autoload handshake nobody
+// drives.
+//
+// _gc_unhalt_micro_engines_10_3 is precisely right for this chip:
+//
+//   read  CP_ME_CNTL  (0xf56), AND 0xEAFFFFFF  -> clears bits 24/26/28,
+//                                                 CE_HALT/PFP_HALT/ME_HALT
+//   write CP_ME_CNTL
+//   read  CP_MEC_CNTL (0xf55), AND 0xBFFFFFFF  -> clears bit 30, MEC_ME1_HALT
+//   write CP_MEC_CNTL
+//
+// The mask is exactly ~0x15000000, the value we have been reading for
+// twelve boots. Apple has the correct un-halt for our exact version.
+//
+// AND IT WRITES THROUGH A PATH I HAVE NEVER WATCHED.
+// _gc_cgs_write_register_ext2(dev, off, val, hwid=0xB, flag=1) tail-jumps
+// through a host callback at ctx->0x8 -> +0x120, where
+// _gvm_cgs_write_register - the one 2ie hooked - uses +0xc68 -> +0x38. A
+// third write path. So 2ie's "hwl [0@239]" was some other write entirely,
+// and **there is no evidence _gc_unhalt_micro_engines_10_3 has ever run.**
+//
+// That trailing flag of 1 also matters: it may select an indirect or
+// RLC-assisted write. If CP_ME_CNTL needs that mechanism, then 2iw's
+// refusals were the wrong MECHANISM rather than an owned register, and
+// 2iu's "RLCG eliminated" - which I drew from Linux having an empty RLCG
+// range - would not apply to Apple's own implementation of it.
+//
+// So: hook both, observe only, before changing anything.
+// Rule 9 (2gb) checked on both: unhalt opens
+// `55 48 89 e5 41 57 41 56 41 54 53`, halt opens
+// `55 48 89 e5 41 56 53 50`, pushes and a movq, no branch in the first
+// five bytes. Both are DEFINED in HWLibs (`nm` prints `t`).
+//
+// Each hook reads CP_ME_CNTL before and after the original runs, so the
+// question is answered in one line: called or not, and effective or not.
+//
+//   uh=0                 Apple NEVER calls its own un-halt. That is the
+//                        missing step, and the fix is to call it.
+//   uh>0, me unchanged    it runs and the write is refused even through
+//                        Apple's own ext2 path - the RLC-ownership story
+//                        stands and the handshake is the only way out
+//   uh>0, me -> 0, later 15000000
+//                        it works and something re-halts afterwards, and
+//                        the halt hook says what
+//   h>0                  something deliberately halts the CP, and when
+// ---------------------------------------------------------------------------
+
+static uint32_t g_rb_2iy_uh = 0, g_rb_2iy_h = 0;
+static uint32_t g_rb_2iy_uh_before = 0xDEAD, g_rb_2iy_uh_after = 0xDEAD;
+static uint32_t g_rb_2iy_h_before = 0xDEAD, g_rb_2iy_h_after = 0xDEAD;
+static uint64_t g_rb_2iy_uh_ms = 0, g_rb_2iy_h_ms = 0;
+static int      g_rb_2iy_hooked = 0;
+
+static void (*orig_unhalt_me_2iy)(void *) = nullptr;
+static void (*orig_halt_me_2iy)(void *) = nullptr;
+
+static uint32_t rbgpu_2iy_me(void) {
+    if (!g_hw.rreg) return 0xDEAD;
+    return g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+}
+
+static void hooked_unhalt_me_2iy(void *dev) {
+    uint32_t b = rbgpu_2iy_me();
+    if (orig_unhalt_me_2iy) orig_unhalt_me_2iy(dev);
+    uint32_t a = rbgpu_2iy_me();
+    if (g_rb_2iy_uh == 0) {
+        g_rb_2iy_uh_before = b;
+        g_rb_2iy_uh_after  = a;
+        g_rb_2iy_uh_ms     = rbgpu_2iq_ms();
+    }
+    g_rb_2iy_uh++;
+}
+
+static void hooked_halt_me_2iy(void *dev) {
+    uint32_t b = rbgpu_2iy_me();
+    if (orig_halt_me_2iy) orig_halt_me_2iy(dev);
+    uint32_t a = rbgpu_2iy_me();
+    if (g_rb_2iy_h == 0) {
+        g_rb_2iy_h_before = b;
+        g_rb_2iy_h_after  = a;
+        g_rb_2iy_h_ms     = rbgpu_2iq_ms();
+    }
+    g_rb_2iy_h++;
+}
+
+void rbgpu_microengine_flush_2iy(void) {
+    char note[352];
+    snprintf(note, sizeof(note),
+             "hk=%d uh=%u @%llums %x->%x | h=%u @%llums %x->%x",
+             g_rb_2iy_hooked, g_rb_2iy_uh, g_rb_2iy_uh_ms,
+             g_rb_2iy_uh_before, g_rb_2iy_uh_after,
+             g_rb_2iy_h, g_rb_2iy_h_ms,
+             g_rb_2iy_h_before, g_rb_2iy_h_after);
+    rbgpu_nvram_note("rbgpu-ume", note);
+    rbgpu_log("2iy: %s", note);
+    rbgpu_log("2iy: uh=0 means Apple never calls its own un-halt and THAT is "
+              "the missing step. uh>0 with the value unchanged means even "
+              "Apple's ext2 write path is refused and the RLC really does "
+              "own the register. uh>0 with 15000000->0 means it works and "
+              "something re-halts later, which the halt counter dates.");
+}
+
+static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
+                                        mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuringprobe")) return;
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest("_gc_unhalt_micro_engines_10_3",
+                                    hooked_unhalt_me_2iy, orig_unhalt_me_2iy),
+        KernelPatcher::RouteRequest("_gc_halt_micro_engines_10_3",
+                                    hooked_halt_me_2iy, orig_halt_me_2iy),
+    };
+    if (patcher.routeMultiple(id, reqs, 2, address, size)) {
+        rbgpu_log("2iy: hooked _gc_(un)halt_micro_engines_10_3 (observe only)");
+        g_rb_2iy_hooked = 1;
+    } else {
+        rbgpu_log("2iy: FAILED to hook the micro-engine halt pair - rbgpu-ume "
+                  "will say hk=0, so uh=0 would be the hook and not Apple");
+        g_rb_2iy_hooked = 0;
+        patcher.clearError();
+    }
 }
 
 static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
@@ -11183,6 +11326,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // 2ic: who wrote the context page-directory bases, same discipline.
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
+    rbgpu_microengine_flush_2iy();
     rbgpu_vmid_flush_2if();
     rbgpu_ptfix_flush_2ih();
     rbgpu_restart_flush_2iq();

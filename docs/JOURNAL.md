@@ -12712,3 +12712,78 @@ reachable, the question becomes what selects it; if it is not, the
 question becomes whether the `_10_1` machinery can be driven with the
 `_10_3` TOC.
 
+
+## 2iy (2026-10-18) — Apple HAS the un-halt. Is it ever called?
+
+Static work, no boot. Walking HWLibs' dispatch found what 2ix's root
+cause implies should exist.
+
+`_gc_init_fcn_ptr_list` (0x126a9079) has a per-version branch. The **10_3**
+branch - ours - assigns:
+
+```
+_gc_halt_micro_engines_10_3              0x126b3616
+_gc_unhalt_micro_engines_10_3            0x126b36df
+_gc_parse_rlc_toc_10_3
+_gc_fw_backdoor_loading_disable_10_3
+_gc_fw_initialize_backdoor_loading_register_set_10_3
+_gc_enter_rlc_safe_mode_10_3 / _gc_exit_rlc_safe_mode_10_3
+```
+
+and, unlike the **10_1** branch, assigns **no**
+`_gc_fw_backdoor_autoload_config`, **no** `_validate`, **no**
+`_check_ucode_loaded` and **no** `_load_ucode`. The 10_3 path carries no
+firmware-loading machinery at all and delegates entirely to the PSP -
+exactly consistent with an autoload handshake that nobody drives.
+
+(The earlier "zero direct callers" observation is now explained and
+retired: these are reached through this dispatch table, as predicted.)
+
+### The un-halt is correct for this chip
+
+```
+read  CP_ME_CNTL  (0xf56), AND 0xEAFFFFFF   clears bits 24/26/28 =
+                                            CE_HALT | PFP_HALT | ME_HALT
+write CP_ME_CNTL
+read  CP_MEC_CNTL (0xf55), AND 0xBFFFFFFF   clears bit 30 = MEC_ME1_HALT
+write CP_MEC_CNTL
+```
+
+The mask is exactly `~0x15000000` - the value read for twelve boots.
+Apple ships the right un-halt for our exact version.
+
+### And it writes through a path never watched
+
+`_gc_cgs_write_register_ext2(dev, off, val, hwid=0xB, flag=1)` tail-jumps
+through a host callback at `ctx->0x8 -> +0x120`, where
+`_gvm_cgs_write_register` - the function 2ie hooked - uses
+`+0xc68 -> +0x38`. **A third write path.**
+
+Two consequences, both uncomfortable:
+
+1. **2ie's `hwl n=1 [0@239]` was some other write entirely.** There is
+   **no evidence** `_gc_unhalt_micro_engines_10_3` has ever run, and I had
+   been assuming the 239 ms write was it.
+2. The trailing `flag = 1` may select an indirect or RLC-assisted write.
+   If `CP_ME_CNTL` requires that mechanism, then **2iw's refusals were the
+   wrong MECHANISM, not an owned register** - and 2iu's "RLCG eliminated",
+   which I drew from Linux having an empty RLCG range, says nothing about
+   Apple's own implementation of the same idea.
+
+So before changing anything: hook both, observe only. Rule 9 checked -
+unhalt opens `55 48 89 e5 41 57 41 56 41 54 53`, halt opens
+`55 48 89 e5 41 56 53 50`; both defined in HWLibs. Each hook reads
+`CP_ME_CNTL` before and after the original, so one line answers both
+halves.
+
+| `rbgpu-ume` reading | means |
+|---|---|
+| `uh=0` | Apple **never calls its own un-halt**. That is the missing step and the fix is to call it. |
+| `uh>0`, value unchanged | it runs and is refused even through Apple's ext2 path; the RLC really owns the register and the handshake is the only way out |
+| `uh>0`, `15000000 -> 0` | it works, and something re-halts afterwards - the halt counter dates it |
+| `h>0` | something deliberately halts the CP, and when |
+
+This supersedes the planned RLC-stop experiment for this boot: it is
+observe-only, costs no chip state, and if the answer is `uh=0` the fix is
+to call a function Apple already wrote.
+
