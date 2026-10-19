@@ -6645,6 +6645,26 @@ static bool patchGcAutoloadCheck(KernelPatcher &patcher, size_t id) {
         rbgpu_log("HWLibs: GC autoload check patch skipped (-rbgpupsphw not set)");
         return false;
     }
+    // 2jc: -rbgpuautoloadtruth stops the 2am lie.
+    //
+    // 2am patched this function to `return 1` on the reasoning that the PSP
+    // places the firmware so the latch is never set during the wait and the
+    // timeout is spurious. 2ix showed the reasoning is wrong for this part:
+    // on a PSP+autoload chip the autoload is PRECISELY what sets the latch,
+    // Linux's gfx_v10_0_rlc_resume fails bring-up without it, and 2jb has
+    // now watched the consequence from the other end - Apple calls the
+    // correct un-halt and the RLC refuses it, forever.
+    //
+    // So the patch is a true negative we silenced. With this arg Apple is
+    // told the truth and we find out what Apple does about it: a different
+    // error path, a backdoor fallback, or the same bring-up with one more
+    // 50 ms wait. It costs one boot and no chip state of ours.
+    if (checkKernelArgument("-rbgpuautoloadtruth")) {
+        rbgpu_log("2jc: GC autoload check NOT patched (-rbgpuautoloadtruth) - "
+                  "Apple will see BOOTLOAD_COMPLETE=0 as it really is");
+        rbgpu_diag_set_num("gc_autoload_patched", 0);
+        return false;
+    }
     mach_vm_address_t fn_addr = patcher.solveSymbol(id, "_gc_fw_autoload_is_completed");
     if (!fn_addr) {
         rbgpu_log("HWLibs: symbol _gc_fw_autoload_is_completed not resolved; skipping patch");
@@ -7209,11 +7229,81 @@ static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
 // 2iy: likewise.
 static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
                                         mach_vm_address_t address, size_t size);
+// 2jc (2026-10-19): is the 10_3 autoload path wired at all?
+//
+// 2jb settled that the host cannot un-halt the CP: Apple calls the correct
+// _gc_unhalt_micro_engines_10_3 once at 236 ms, through its own ext2 write
+// path, and CP_ME_CNTL does not move for 160 s. The only lever left is to
+// make the autoload actually complete, so the question is which parts of
+// the 10_3 autoload machinery Apple runs.
+//
+// The _10_1 hooks have existed for milestones and have never logged a call;
+// but ours is the _10_3 branch and those were never hooked. Three symbols,
+// all DEFINED in HWLibs (nm prints `t`), all passing rule 9 - each opens
+// `55 48 89 e5` with the next instruction a push or a mov:
+//
+//   _gc_parse_rlc_toc_10_3                           0x126b4678
+//   _gc_fw_backdoor_loading_disable_10_3             0x126b4732
+//   _gc_fw_initialize_backdoor_loading_register_set_10_3  0x126b4746
+//
+// Read statically first, because it changes what the counts will mean:
+//
+//   _disable_10_3 is NOT a stub. It stores 1 to dev+0x930 and dev+0x948 -
+//   two flags that say "backdoor loading is off". If Apple calls it, Apple
+//   has deliberately chosen the PSP path and the backdoor is closed by
+//   decision, not by omission.
+//
+//   _initialize_backdoor_loading_register_set_10_3 writes RLC_CNTL (0x4c00,
+//   seg1) with 1 through dev+0xc0. That is real backdoor register setup and
+//   it is the function that would have to run for a host-side load.
+//
+// So the counts separate two very different worlds: Apple deciding against
+// the backdoor, versus Apple never considering it.
+//
+// 2ja's lesson is applied from the start: these hooks touch NO hardware.
+// Three counter increments, nothing else, no register read anywhere near
+// Apple's init thread.
+static uint32_t g_rb_2jc_toc = 0, g_rb_2jc_dis = 0, g_rb_2jc_reg = 0;
+static int      g_rb_2jc_hooked = 0;
+
+static void (*orig_toc_2jc)(void *) = nullptr;
+static void (*orig_dis_2jc)(void *) = nullptr;
+static void (*orig_reg_2jc)(void *) = nullptr;
+
+static void hooked_toc_2jc(void *d) {
+    g_rb_2jc_toc++;
+    if (orig_toc_2jc) orig_toc_2jc(d);
+}
+static void hooked_dis_2jc(void *d) {
+    g_rb_2jc_dis++;
+    if (orig_dis_2jc) orig_dis_2jc(d);
+}
+static void hooked_reg_2jc(void *d) {
+    g_rb_2jc_reg++;
+    if (orig_reg_2jc) orig_reg_2jc(d);
+}
+
+void rbgpu_autoload_flush_2jc(void) {
+    char note[192];
+    snprintf(note, sizeof(note),
+             "hk=%d toc=%u dis=%u reg=%u",
+             g_rb_2jc_hooked, g_rb_2jc_toc, g_rb_2jc_dis, g_rb_2jc_reg);
+    rbgpu_nvram_note("rbgpu-ald", note);
+    rbgpu_log("2jc: %s", note);
+    rbgpu_log("2jc: toc=0 means Apple never even parses the RLC TOC for our "
+              "version. dis>0 with reg=0 means Apple deliberately closed the "
+              "backdoor and committed to the PSP. reg>0 means the backdoor "
+              "register set runs and a host-side load is already half wired.");
+}
+
+static void rbgpu_route_autoload_2jc(KernelPatcher &patcher, size_t id,
+                                     mach_vm_address_t address, size_t size);
 
 void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
     rbgpu_route_gvmwrite_2ie(patcher, id, address, size);
     rbgpu_route_microengine_2iy(patcher, id, address, size);
+    rbgpu_route_autoload_2jc(patcher, id, address, size);
 
     patchDeviceTypeTable(patcher, id);
     patchDeviceCapabilityTable(patcher, id);
@@ -8075,6 +8165,30 @@ static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
         rbgpu_log("2iy: FAILED to hook the micro-engine halt pair - rbgpu-ume "
                   "will say hk=0, so uh=0 would be the hook and not Apple");
         g_rb_2iy_hooked = 0;
+        patcher.clearError();
+    }
+}
+
+static void rbgpu_route_autoload_2jc(KernelPatcher &patcher, size_t id,
+                                     mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuringprobe")) return;
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest("_gc_parse_rlc_toc_10_3",
+                                    hooked_toc_2jc, orig_toc_2jc),
+        KernelPatcher::RouteRequest("_gc_fw_backdoor_loading_disable_10_3",
+                                    hooked_dis_2jc, orig_dis_2jc),
+        KernelPatcher::RouteRequest(
+            "_gc_fw_initialize_backdoor_loading_register_set_10_3",
+            hooked_reg_2jc, orig_reg_2jc),
+    };
+    if (patcher.routeMultiple(id, reqs, 3, address, size)) {
+        rbgpu_log("2jc: hooked the 10_3 autoload trio (observe only)");
+        g_rb_2jc_hooked = 1;
+    } else {
+        rbgpu_log("2jc: FAILED to hook the 10_3 autoload trio - rbgpu-ald "
+                  "will say hk=0, so three zeros would be the hooks and not "
+                  "Apple");
+        g_rb_2jc_hooked = 0;
         patcher.clearError();
     }
 }
@@ -11345,6 +11459,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
     rbgpu_microengine_flush_2iy();
+    rbgpu_autoload_flush_2jc();
     rbgpu_vmid_flush_2if();
     rbgpu_ptfix_flush_2ih();
     rbgpu_restart_flush_2iq();

@@ -12968,3 +12968,47 @@ PSP itself reported success.
 Also still on the table, and unaffected by the above: 2am's
 `_gc_fw_autoload_is_completed -> return 1` patch is still installed and
 still lying to Apple about this exact latch.
+
+## 2jc (2026-10-19) — is the 10_3 autoload path wired at all? (built, not yet run)
+
+2jb closed the host-side lever: Apple calls the correct un-halt and the RLC
+refuses it through every path there is. What is left is to make the autoload
+complete, so the question is which parts of the 10_3 machinery Apple runs.
+
+The `_10_1` backdoor hooks have existed for milestones and have never logged
+a call — but ours is the `_10_3` branch and those were never hooked. Three
+symbols, all defined in HWLibs (`nm` prints `t`), all passing rule 9 (each
+opens `55 48 89 e5` with a push or mov next):
+
+```
+_gc_parse_rlc_toc_10_3                                0x126b4678
+_gc_fw_backdoor_loading_disable_10_3                  0x126b4732
+_gc_fw_initialize_backdoor_loading_register_set_10_3  0x126b4746
+```
+
+**Read statically first, because it changes what the counts mean.**
+`_disable_10_3` is **not a stub**: it stores 1 to `dev+0x930` and `dev+0x948`,
+two flags saying backdoor loading is off. `_initialize_backdoor_loading_
+register_set_10_3` writes **RLC_CNTL (0x4c00, seg1) = 1** through `dev+0xc0` —
+real backdoor register setup, and the function a host-side load would need.
+
+So the counts separate two different worlds:
+
+| `rbgpu-ald` | means |
+|---|---|
+| `toc=0` | Apple never even parses the RLC TOC for our version |
+| `dis>0 reg=0` | Apple deliberately closed the backdoor and committed to the PSP |
+| `reg>0` | the backdoor register set runs and a host load is half wired already |
+
+2ja's lesson applied from the start: the hooks touch **no** hardware — three
+counter increments, no register read anywhere near Apple's init thread.
+
+**Second, independent lever in the same build: `-rbgpuautoloadtruth`.** It
+skips the 2am patch so Apple sees `BOOTLOAD_COMPLETE = 0` as it really is.
+2am silenced a true negative; 2jb watched the consequence from the far end.
+Telling Apple the truth costs one boot and no chip state of ours, and the
+outcomes are all informative: a different error path, a backdoor fallback,
+or the same bring-up plus one 50 ms wait.
+
+Both are opt-in. The autoload hooks ride `-rbgpuringprobe` (already in);
+`-rbgpuautoloadtruth` is new and OUT until armed deliberately.
