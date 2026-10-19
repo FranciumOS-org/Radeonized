@@ -11961,3 +11961,80 @@ reads is a fault raised after the base was corrected** - the question
 | `F ... ZERO` | the page the CPF reads is genuinely unmapped; the question becomes who was supposed to map it |
 | `clr=` still showing a fault | the clear did not take, and the +100 s reading cannot be trusted either way |
 
+
+## 2io result (2026-10-18) — THE VMID-3 FAULT IS GONE
+
+Eighteenth armed boot, `logs/20261018-210618-metal/`, `armed=1`, UUID
+`C99FFA77-54D2-3BB2-8F8C-AAF913FE0271` = `build/out`.
+
+```
+rbgpu-fault = b=46 hk=1 c=8 f=7 r=4 o=0 fw=7
+              | sffffffff h1 n=4 va=fffffffff000 v15W c511
+              | s40953    h0 n=3 va=0            v0W  c4
+rbgpu-walk  = pd=87b015000 [0]=20000000fb016001
+              | pt=87b016000 nz=195 v=195 [0]=1000000fb01e001
+              | F pa=87b017000[256]=0 ZERO
+```
+
+**`s3009bb` is absent.** CPF reading `0x4_0030_0000` under VMID 3 - the
+signature present in **every boot since 2hn**, across seventeen boots,
+identical every time - does not appear. And `c=8 f=7`: for the first time
+in this series a poll found the chip **clean**.
+
+**This is not the clear masking it.** The clear fires once, at +12 s. The
+seven polls after it still reported the hub-1 phantom and `s40953`, so the
+reporting path is demonstrably live and a VMID-3 fault would have
+re-latched and been seen. It was not.
+
+### So the base correction works - and worked two boots ago
+
+2il and 2im wrote the same corrected base and saw no change, and the
+reason is now clear: the fault status **latches**, the old status kept
+being re-read, and `fw=` could not tell a new fault from a stale latch -
+which 2io said in advance and is why the clear was added. The fix was
+working and invisible. Two boots were spent not seeing it.
+
+### The ZERO PTE fits rather than contradicts
+
+`F pa=87b017000[256]=0 ZERO` - the entry for page 0x300 is unmapped. With
+the broken base pointing at all-ones memory the walker was reading garbage
+PDEs, so **the VA `0x4_0030_0000` in those fault reports was itself an
+artifact of a nonsense walk**. Nothing ever needed that page. The address
+that drove four milestones of reasoning was never a real target, which is
+worth remembering the next time a fault VA looks like a lead.
+
+(`clr=ffffffff` - the status read immediately after the clear returns
+all-ones. Noted, not interpreted; the same dead-register value the hub-1
+phantom shows, and nothing here rests on it.)
+
+### What is left
+
+Two signatures: the hub-1 phantom (known defect, 2ht) and **`s40953`,
+VMID 0, CPF, a WRITE to VA 0, n=3**. That is now the only real fault on
+the chip. The CP is still halted (`me=15000000`), the ring still stalls -
+`r=b1 w=280` at **both** samples this boot - and Metal still hangs.
+
+## 2ip (2026-10-18) — correct every bound context, not just the one that faulted
+
+`rbgpu-vmid` reports `vmids=000e`: VMIDs **1, 2 and 3** are all bound to
+real contexts. `rbgpu-vm` reports `c1:b=fb00b000` - still Apple's broken
+value - against `c3:b=87b015001`. **2il only ever corrected context 3,
+because that is where the fault happened to be.** Two of the three bound
+contexts still aim their walker at unmapped memory.
+
+2ip runs the same procedure for VMIDs 1, 2 and 3. Each gets its **own**
+candidate check: its own register read, its own four pages mapped, its own
+single-qualifier rule. "The transform worked for context 3" is a reason to
+test the others the same way, not a reason to skip testing them - a
+shortcut there would be assuming exactly what 2il was built to measure.
+
+The note accumulates (`v1 ... || v2 ... || v3 ...`) and is committed after
+each context, so a hang partway still leaves every context handled so far
+on record.
+
+| `rbgpu-pdc` reading | means |
+|---|---|
+| all three `W b`, and `rbgpu-fault` loses `s40953` too | the broken base was the whole GPUVM story |
+| all three written, `s40953` remains | the VMID-0 fault is independent of this defect, as 2hz guessed when it attributed it to the reset path |
+| a context with `nq=0` | its root is not where context 3's was; nothing written for it and the counts say what its four pages looked like |
+

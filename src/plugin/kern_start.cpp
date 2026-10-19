@@ -9565,6 +9565,18 @@ static void rbgpu_ptwrite_2ig(void *obj,
 
 struct rb_2il_cand { uint64_t pa; uint32_t nz, v; uint64_t first; uint8_t mapped; };
 
+// 2ip: one note for all three contexts. Each append replaces the whole
+// variable, so a hang partway still leaves every context handled so far on
+// record rather than losing the lot.
+static char g_rb_2ip_note[768];
+static void rbgpu_2ip_append(const char *one) {
+    size_t have = strlen(g_rb_2ip_note);
+    if (have > sizeof(g_rb_2ip_note) - 80) return;
+    snprintf(g_rb_2ip_note + have, sizeof(g_rb_2ip_note) - have,
+             "%s%s", have ? " || " : "", one);
+    rbgpu_nvram_note("rbgpu-pdc", g_rb_2ip_note);
+}
+
 __attribute__((noinline))
 static void rbgpu_walk_2im(uint64_t pd_pa, uint64_t vbo) {
     // 2im (2026-10-18): the walk. The directory has ONE valid entry and 2il
@@ -9692,19 +9704,38 @@ static void rbgpu_pdcandidates_2il(void *obj,
     }
     g_rb_2il_done = 1;
 
-    // Context 3's root, from the register Apple itself programmed - no
-    // dependence on ctx+0xb8 this time, so the two are cross-checked.
-    uint32_t off_lo = resolve(obj, ((0x1667ull + 6ull) << 32) | 0xB);
-    uint32_t off_hi = resolve(obj, ((0x1668ull + 6ull) << 32) | 0xB);
+    // 2ip (2026-10-18): every bound VMID, not just the one that faulted.
+    //
+    // 2io is the first boot in seventeen where the fault signature changed:
+    // s3009bb - CPF reading 0x4_0030_0000 under VMID 3 - is GONE, and one
+    // poll found the chip clean (c=8 f=7). It was not the clear masking it:
+    // the seven polls after the clear still reported the phantom and
+    // s40953, so the path was live and a VMID-3 fault would have re-latched.
+    // **The base correction works.** It worked in 2il and 2im too and was
+    // invisible because the latched status kept being re-read, which is
+    // exactly what fw= could not escape.
+    //
+    // But 2il only ever corrected CONTEXT 3, because that is where the fault
+    // happened to be. rbgpu-vmid reports vmids=000e - VMIDs 1, 2 AND 3 are
+    // all bound to real contexts - and rbgpu-vm shows c1 still holding
+    // Apple's broken 0xFB00_B000. Two of the three bound contexts still
+    // point their walker at unmapped memory.
+    //
+    // So do all of them. Each gets its OWN candidate check - its own
+    // register read, its own four pages mapped, its own single-qualifier
+    // rule - because "the transform that worked for context 3" is a reason
+    // to test the others the same way, not a reason to skip testing them.
+    for (unsigned vm = 1; vm <= 3; vm++) {
+    uint32_t off_lo = resolve(obj, ((0x1667ull + 2ull * vm) << 32) | 0xB);
+    uint32_t off_hi = resolve(obj, ((0x1668ull + 2ull * vm) << 32) | 0xB);
     uint32_t cur_lo = rd(obj, off_lo);
     uint32_t cur_hi = rd(obj, off_hi);
     uint64_t fb_off = ((static_cast<uint64_t>(cur_hi) << 32) | cur_lo) & ~0xFFFULL;
 
     if (fb_off == 0 || g_rb_2ed_fb_off == 0) {
-        rbgpu_nvram_note("rbgpu-pdc",
-                         "SKIP: context 3 base reads 0 or FB_OFFSET unknown - "
-                         "no candidate could be formed");
-        return;
+        rbgpu_log("2ip: context %u base reads 0 or FB_OFFSET unknown - no "
+                  "candidate could be formed, nothing written for it", vm);
+        continue;
     }
     uint64_t vbo = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
     uint64_t fbb = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
@@ -9737,7 +9768,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
 
     char note[352];
     size_t n = 0;
-    int w = snprintf(note, sizeof(note), "fbo=%llx", fb_off);
+    int w = snprintf(note, sizeof(note), "v%u fbo=%llx", vm, fb_off);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
     int qual = -1, nqual = 0;
     for (unsigned i = 0; i < 4; i++) {
@@ -9754,14 +9785,14 @@ static void rbgpu_pdcandidates_2il(void *obj,
         if (n < sizeof(note) - 16) {
             snprintf(note + n, sizeof(note) - n, " | nq=%d NOWRITE", nqual);
         }
-        rbgpu_nvram_note("rbgpu-pdc", note);
+        rbgpu_2ip_append(note);
         rbgpu_log("2il: %s", note);
         rbgpu_log("2il: %d candidates qualified, so NOTHING was written. "
                   "Zero means none of these four is context 3's page "
                   "directory and the counts above are the next lead; more "
                   "than one means the discriminator cannot separate them and "
                   "choosing would be a guess.", nqual);
-        return;
+        continue;
     }
 
     rbgpu_walk_2im(c[qual].pa, vbo);
@@ -9774,8 +9805,10 @@ static void rbgpu_pdcandidates_2il(void *obj,
                  new_lo, new_hi);
         n = strlen(note);
     }
-    g_rb_2im_f_at_write = g_rb_2hs_faults;   // 2im: so post-write faults are countable
-    rbgpu_nvram_note("rbgpu-pdc", note);     // commit BEFORE writing
+    if (g_rb_2im_f_at_write == 0xFFFFFFFFu) {
+        g_rb_2im_f_at_write = g_rb_2hs_faults;   // 2im: countable post-write
+    }
+    rbgpu_2ip_append(note);                  // commit BEFORE writing
 
     wr(obj, off_lo, new_lo);
     wr(obj, off_hi, new_hi);
@@ -9784,7 +9817,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
         snprintf(note + n, sizeof(note) - n, " bk=%x/%x clr=%x", b_lo, b_hi,
                  g_rb_2io_st_after_clear);
     }
-    rbgpu_nvram_note("rbgpu-pdc", note);
+    rbgpu_2ip_append(note);
     // 2io: CLEAR the fault status after correcting the base.
     //
     // fw=8 last boot looked like "every fault happened after the write", but
@@ -9815,6 +9848,7 @@ static void rbgpu_pdcandidates_2il(void *obj,
               "back 0x%08x/0x%08x. This is +12 s, before the Metal client, "
               "so unlike 2ig it is early enough to matter.",
               'a' + qual, winner, c[qual].nz, new_lo, new_hi, b_lo, b_hi);
+    }   // 2ip: next bound VMID
 }
 
 __attribute__((noinline))
