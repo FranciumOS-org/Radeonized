@@ -12110,3 +12110,64 @@ are routed and each first call is recorded as milliseconds after it.
 | `setr` large | a restart storm, and the count says how fast |
 | `hk=0` | the hooks did not take; zero counts are the instrument, not the driver |
 
+
+## 2iq result (2026-10-18) — the CP is halted BEFORE any reset. 2hn's guess is dead.
+
+Twentieth armed boot, `logs/20261018-214004-metal/`, `armed=1`, UUID
+`08008A33-DB02-3C5A-A78E-6602573B8933` = `build/out`.
+
+```
+rbgpu-rst = b=48 hk=1 setr=0 @0ms | reset=4 @15015ms
+```
+
+**`setGPURestart` is never called.** Not once. And
+`resetHardwareAndReplay` runs four times, the first at **15015 ms** after
+the X6000 hooks were routed - while `CP_ME_CNTL = 0x15000000` is already
+set at the **+12 s** sample.
+
+The two baselines differ (`t0` is taken when X6000 loads; the ring phases
+count from the peer's earlier start), and that difference only strengthens
+the conclusion: X6000 loads *after* the peer, so 15015 ms on its clock is
+later still in peer time. **The CP is halted before any reset happens.**
+
+So 2hn's guess - that the halt is `resetHardwareAndReplay`'s own doing -
+is **withdrawn on evidence**. The restart loop that has dominated this
+diagnosis since 2hj is a *consequence* of a CP that was already halted,
+not its cause. That is the fourth hypothesis of mine this project has
+killed with a measurement, and the first one that was load-bearing for
+several milestones.
+
+(The 2ip note bug is fixed: `rbgpu-pdc` now shows `v1` and `v2` as separate
+entries, `v2 fbo=fb000000`, rather than `v1` twice.)
+
+## 2ir (2026-10-18) — who writes CP_ME_CNTL
+
+In Linux those three bits - `CE_HALT`, `PFP_HALT`, `ME_HALT` - are set by
+`gfx_v10_0_cp_gfx_enable(adev, false)` during GC bring-up and cleared by
+`cp_gfx_enable(adev, true)` when the GFX ring is brought up. **If Apple
+performs the disable and never the enable, RB0 simply cannot execute** -
+which explains the frozen `rptr` of 2hl, the 689-dword stall, and every
+stalled sample since, without needing a fault at all.
+
+`CP_ME_CNTL` is dword `0x0F56` raw, `0x21B6` with GC seg0 `0x1260`. Both
+write paths are already hooked, so watching it costs one comparison on
+each:
+
+- X6000's `AMDHWRegisters::write` (2ic/2id)
+- HWLibs' `_gvm_cgs_write_register` (2ie)
+
+2ie proved these are genuinely separate paths, so watching only one would
+leave the obvious hole - **HWLibs is where the Linux-derived GC bring-up
+lives**, and it is the likelier writer of the two.
+
+Every write is recorded with its value and the milliseconds since routing,
+so the **order** of a disable and any later enable is visible rather than
+inferred. Six per path, with an overflow count.
+
+| `rbgpu-me` reading | means |
+|---|---|
+| `[15000000@t]` and no later `[0@t']` | Apple halts the CP during bring-up and **never un-halts it**. RB0 cannot execute and everything since 2hl follows from one missing call. |
+| a disable then an enable, CP still halted | something re-halts it after the enable, and the timestamps say when |
+| no writes on either path | firmware or the PSP left it halted and no driver code is responsible - which would make this a bring-up sequencing problem, not a missing call |
+| writes only on `hwl` | confirms HWLibs owns GC bring-up, and the fix belongs there |
+
