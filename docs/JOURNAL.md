@@ -13886,3 +13886,76 @@ on a lie, and `ttl_hw_init_ret` is the field to watch.
 
 2ao (`_sdma_5_2_1_fw_autoload_is_completed -> return 1`) is in the same
 position and is owed the same re-test, separately.
+
+## 2jr (2026-10-19) — boot 64: the latch holds, GRBM is live, and a 2jq claim is withdrawn
+
+Boot 64: `-rbgpurlcsub` + `-rbgpuautoloadtruth`. Captured in-boot and late
+enough for all three phases.
+
+```
+rbgpu-bl   = b=64 p0/p1/p2 bl=c0000001 iram=1 complete=1
+rbgpu-ring = p0 r=b1  w=280 cps=90078600 grbm=a0003028 me=15000000
+             p1 r=2b1 w=380 cps=90018600 grbm=a0003028 me=15000000
+             p2 r=180 w=180 cps=0        grbm=3028     me=0
+rbgpu-rst  = b=64 setr=0 | reset=6 @15241ms
+diag: gate_stage=11f  mapq_calls=8 mapq_fails=0  d=73
+```
+
+**The latch holds across all three phases** - `complete=1` at +12 s,
++100 s and +160 s, not just at bring-up. 2jq's result reproduces.
+
+**`GRBM_STATUS` is live, and the 2hp debt is CLOSED.** It reads `3028` at
+p2 where every sample of every previous boot read `a0003028`, including
+samples with `cps=0` and `me=0`. docs/RULES.md's "distrust `GRBM_STATUS` -
+either it is not read live through the accessor or it means something
+else" is answered: it was live all along, and the chip had simply never
+reached a clean idle before. `g2` likewise drops to `200008`.
+
+**Bring-up goes further:** `gate_stage` `0x9b -> 0x11f` and `mapq_calls`
+2 -> 8 against boot 63. **n=1 against n=1**, so per docs/RULES.md's own rule
+this is not yet a table: it may be the boot-arg or it may be variation,
+and it needs a repeat before it is called an effect of
+`-rbgpuautoloadtruth`.
+
+### Withdrawn: 2jq's "ttl_hw_init now fails"
+
+2jq's addendum said `ttl_hw_init_ret = 0xffffffffe3623001` "where every
+previous boot read 0", and made that the lead that motivated this boot.
+**That is wrong.**
+
+```
+boot 62  ttl_hw_init_ret=ffffffffbcffc001   (BEFORE -rbgpurlcsub)
+boot 63  ttl_hw_init_ret=ffffffffe3623001
+boot 64  ttl_hw_init_ret=7a823001
+```
+
+It was already nonzero before the RLC sub-images went in, and the value
+**varies every boot** in the shape of a handle or address rather than a
+status code. The `0` I compared against came from the **stale boot-55
+diag** read much earlier in the session - the 2iz trap, committed by me
+in the same session that added the rule against it. The 25th-instance
+rule applies squarely: a return code is not a result until the code that
+sets it has been read, and this one never was.
+
+So the premise of boot 64 - "2am's lie is breaking `ttl_hw_init`" - did
+not hold. The boot is still worth having for the latch and GRBM results,
+but it did not test what it was meant to test.
+
+### Where it stands
+
+Still no acceleration: no `IOAccelerator` in the capture's registry walk,
+though `rbgpu-ea ea:00000000->00000002` shows `-rbgpuforceenable` fired.
+
+**The CP is still re-halted between p0 and p1** (`me=15000000` at both,
+`h=0`), and `reset=6 @15241ms`. `p2`'s `me=0 cps=0 r==w==0x180` is the
+**known post-reset state** that 2hp already recorded - the reset completes
+and discards the pending work - not evidence of a fix. Reading it as
+progress would be the recurring error.
+
+**Open, in order:**
+1. What re-halts the CP between bring-up and +12 s, given `h=0` rules out
+   Apple's 10_3 halt path and the resets at ~15 s come after it.
+2. Whether `gate_stage 11f` / `mapq 8` is an effect of
+   `-rbgpuautoloadtruth` or variation - one repeat boot settles it.
+3. What `ttl_hw_init_ret` actually is. It has never been read from the
+   code that sets it.
