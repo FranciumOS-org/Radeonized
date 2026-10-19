@@ -9514,6 +9514,160 @@ static void rbgpu_ptwrite_2ig(void *obj,
 // Observe only. The write above is held back this boot.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 2il (2026-10-18): let the PAGE decide which address is the page directory.
+//
+// Three transforms have been written and each was a guess dressed as an
+// argument. 2ik's aperture map removes one family of answer - AGP is
+// DISABLED (AGP_BOT 0xFFFFFF<<24 sits above AGP_TOP 0, which is how
+// amdgpu_gmc_agp_location switches the window off), and the system aperture
+// equals the FB aperture (sysl<<18 = 0xF4_0000_0000, sysh<<18 =
+// 0xF4_FFFC_0000, programmed from vram_start/vram_end). So the roots are in
+// the VRAM range and mc2pa is the right FAMILY. The contradiction is back
+// on the arithmetic:
+//
+//   mc2pa(0xF4_FB01_5000) = 0xFB01_5000 + 0x7_8000_0000 = ~33.9 GB   no RAM
+//   Apple's own value      = 0xFB01_5000                = 3.92 GB    real
+//
+// And that is the experiment never run. 2hr's original proposal - leave
+// Apple's value alone and set ONLY bit 0 - was never tested, because 2ig
+// reframed the problem as truncation and the next three boots chased the
+// reframing. The MC address was tested, mc2pa was tested, the obvious one
+// was not.
+//
+// So stop choosing. Map each candidate page and ask which one LOOKS like a
+// page directory. This is 2ee's method, which already distinguished live
+// kernel memory from a real table for context 0, applied to four addresses:
+//
+//   a  fb_off                 0x0_FB01_5000   Apple's own value
+//   b  fb_off + FB_OFFSET<<24 0x8_7B01_5000   mc2pa (2ii wrote this)
+//   c  the raw MC address     0xF4_FB01_5000  (2ih wrote this)
+//   d  fb_off + BAR0 base     0x9_7B01_5000   the aperture alias 2em named
+//                                             as its residual risk
+//
+// THE DISCRIMINATOR, written down before the boot. A depth-1 page directory
+// for a sparse VM is mostly zero with a few valid entries, and every
+// nonzero entry has bit 0 set. Noise does not look like that - 2ee measured
+// 251 of 512 "valid" bits on live kernel memory, a coin flip. So per
+// candidate: nz = nonzero qwords, v = qwords with bit 0 set. A page
+// qualifies only if nz > 0 AND v == nz AND nz <= 64. All-ones (unmapped)
+// gives nz = 512, v = 512 and fails the nz cap. Live code gives v < nz.
+//
+// The write happens only if EXACTLY ONE candidate qualifies. Two qualifying
+// is ambiguous and is refused; zero means none of these is the directory
+// and the counts say what each page looked like, which is the next lead.
+// ---------------------------------------------------------------------------
+
+struct rb_2il_cand { uint64_t pa; uint32_t nz, v; uint64_t first; uint8_t mapped; };
+
+static int g_rb_2il_done = 0;
+
+static void rbgpu_pdcandidates_2il(void *obj,
+                                   uint32_t (*resolve)(void *, uint64_t),
+                                   uint32_t (*rd)(void *, uint32_t),
+                                   void (*wr)(void *, uint32_t, uint32_t),
+                                   unsigned phase) {
+    if (phase != 0 || g_rb_2il_done) {
+        return;
+    }
+    g_rb_2il_done = 1;
+
+    // Context 3's root, from the register Apple itself programmed - no
+    // dependence on ctx+0xb8 this time, so the two are cross-checked.
+    uint32_t off_lo = resolve(obj, ((0x1667ull + 6ull) << 32) | 0xB);
+    uint32_t off_hi = resolve(obj, ((0x1668ull + 6ull) << 32) | 0xB);
+    uint32_t cur_lo = rd(obj, off_lo);
+    uint32_t cur_hi = rd(obj, off_hi);
+    uint64_t fb_off = ((static_cast<uint64_t>(cur_hi) << 32) | cur_lo) & ~0xFFFULL;
+
+    if (fb_off == 0 || g_rb_2ed_fb_off == 0) {
+        rbgpu_nvram_note("rbgpu-pdc",
+                         "SKIP: context 3 base reads 0 or FB_OFFSET unknown - "
+                         "no candidate could be formed");
+        return;
+    }
+    uint64_t vbo = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+    uint64_t fbb = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
+
+    struct rb_2il_cand c[4];
+    c[0].pa = fb_off;                 // Apple's own value
+    c[1].pa = fb_off + vbo;           // mc2pa
+    c[2].pa = fb_off + fbb;           // the raw MC address
+    c[3].pa = fb_off + 0x880000000ull; // the BAR0 alias 2em flagged
+
+    for (unsigned i = 0; i < 4; i++) {
+        c[i].nz = 0; c[i].v = 0; c[i].first = 0; c[i].mapped = 0;
+        IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(
+            static_cast<IOPhysicalAddress>(c[i].pa), 0x1000, kIODirectionIn);
+        if (!md) continue;
+        IOMemoryMap *mp = md->map(kIOMapAnywhere | kIOMapInhibitCache);
+        if (!mp) { md->release(); continue; }
+        auto q = reinterpret_cast<volatile uint64_t *>(mp->getVirtualAddress());
+        c[i].mapped = 1;
+        for (unsigned k = 0; k < 512; k++) {
+            uint64_t e = q[k];
+            if (e == 0) continue;
+            if (c[i].nz == 0) c[i].first = e;
+            c[i].nz++;
+            if (e & 1) c[i].v++;
+        }
+        mp->release();
+        md->release();
+    }
+
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note), "fbo=%llx", fb_off);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+    int qual = -1, nqual = 0;
+    for (unsigned i = 0; i < 4; i++) {
+        int ok = c[i].mapped && c[i].nz > 0 && c[i].v == c[i].nz && c[i].nz <= 64;
+        if (ok) { qual = static_cast<int>(i); nqual++; }
+        if (n >= sizeof(note) - 56) continue;
+        w = snprintf(note + n, sizeof(note) - n, " | %c pa=%llx m=%u nz=%u v=%u f=%llx%s",
+                     'a' + i, c[i].pa, c[i].mapped, c[i].nz, c[i].v,
+                     c[i].first, ok ? " OK" : "");
+        if (w > 0) { n += static_cast<size_t>(w); if (n >= sizeof(note)) { n = sizeof(note) - 1; break; } }
+    }
+
+    if (nqual != 1) {
+        if (n < sizeof(note) - 16) {
+            snprintf(note + n, sizeof(note) - n, " | nq=%d NOWRITE", nqual);
+        }
+        rbgpu_nvram_note("rbgpu-pdc", note);
+        rbgpu_log("2il: %s", note);
+        rbgpu_log("2il: %d candidates qualified, so NOTHING was written. "
+                  "Zero means none of these four is context 3's page "
+                  "directory and the counts above are the next lead; more "
+                  "than one means the discriminator cannot separate them and "
+                  "choosing would be a guess.", nqual);
+        return;
+    }
+
+    uint64_t winner = c[qual].pa;
+    uint32_t new_lo = static_cast<uint32_t>(winner & 0xFFFFFFFFu) | 1u;
+    uint32_t new_hi = static_cast<uint32_t>(winner >> 32);
+    if (n < sizeof(note) - 40) {
+        snprintf(note + n, sizeof(note) - n, " | W %c %x/%x", 'a' + qual,
+                 new_lo, new_hi);
+        n = strlen(note);
+    }
+    rbgpu_nvram_note("rbgpu-pdc", note);     // commit BEFORE writing
+
+    wr(obj, off_lo, new_lo);
+    wr(obj, off_hi, new_hi);
+    uint32_t b_lo = rd(obj, off_lo), b_hi = rd(obj, off_hi);
+    if (n < sizeof(note) - 24) {
+        snprintf(note + n, sizeof(note) - n, " bk=%x/%x", b_lo, b_hi);
+    }
+    rbgpu_nvram_note("rbgpu-pdc", note);
+    rbgpu_log("2il: candidate %c at 0x%llx is the only page shaped like a "
+              "page directory (nz=%u, all valid). Wrote 0x%08x/0x%08x, read "
+              "back 0x%08x/0x%08x. This is +12 s, before the Metal client, "
+              "so unlike 2ig it is early enough to matter.",
+              'a' + qual, winner, c[qual].nz, new_lo, new_hi, b_lo, b_hi);
+}
+
 static void rbgpu_aperture_probe_2ik(void *obj,
                                      uint32_t (*resolve)(void *, uint64_t),
                                      uint32_t (*rd)(void *, uint32_t),
@@ -10145,6 +10299,12 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // that a stall in the new reads cannot cost us the old ones.
     rbgpu_vmctx_probe_2hq(obj, resolve, rd, phase);
     rbgpu_aperture_probe_2ik(obj, resolve, rd, phase);
+    {
+        void **rv3 = *reinterpret_cast<void ***>(obj);
+        auto wr3 = reinterpret_cast<void (*)(void *, uint32_t, uint32_t)>(
+            rv3 ? rv3[0x120 / sizeof(void *)] : nullptr);
+        if (wr3) rbgpu_pdcandidates_2il(obj, resolve, rd, wr3, phase);
+    }
 
     // 2ig: the write, after the contexts have been read at this phase so the
     // before-state is on record from the same sample.

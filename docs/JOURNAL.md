@@ -11692,3 +11692,89 @@ addresses the hub resolves to host DRAM directly. The roots are MC
 and the baseline that 2ih and 2ii perturbed is restored. Guessing a third
 transform before reading the map would be the same error a fourth time.
 
+
+## 2ik result (2026-10-18) — AGP is disabled, and the roots really are in VRAM
+
+Fifteenth consecutive armed boot, `logs/20261018-203059-metal/`, UUID
+`7E1F8475-F6EA-3F3D-8224-A37D4791BA86` = `build/out`.
+
+```
+rbgpu-aper  = b=43 fbb=f400 fbt=f4ff agpt=0 agpb=ffffff agpbase=0
+              sysl=3d0000 sysh=3d3fff dfl=fffd dfm=0
+rbgpu-ptfix = b=43 binds=41 wrote=0 unres=41 relok=0 relbad=0 out=0 alr=0
+rbgpu-vm    = c1:b=fb00b000  c3:b=fb015000
+```
+
+Baseline restored exactly as intended: nothing written, and the contexts
+read Apple's own values again.
+
+**AGP is DISABLED.** `AGP_BOT = 0xFFFFFF << 24` sits *above*
+`AGP_TOP = 0`, which is precisely how `amdgpu_gmc_agp_location` switches
+the window off. So the "these are system-memory addresses reached through
+AGP" explanation is dead.
+
+**The system aperture equals the FB aperture.** `sysl << 18 =
+0xF4_0000_0000`, `sysh << 18 = 0xF4_FFFC_0000`. Linux programs these from
+`vram_start`/`vram_end` (`gmc_v10_0_init_system_aperture_regs`), so this
+independently confirms VRAM is MC `0xF4_0000_0000 .. 0xF4_FFFF_FFFF` and
+nothing else claims that range.
+
+So the roots are in the VRAM range, `mc2pa` is the right **family**, and
+the contradiction is back on the arithmetic:
+
+```
+mc2pa(0xF4_FB01_5000) = 0xFB01_5000 + 0x7_8000_0000 = ~33.9 GB   no RAM there
+Apple's own value      = 0xFB01_5000                = 3.92 GB    real address
+```
+
+### The experiment never run
+
+**2hr's original proposal - leave Apple's value alone and set only bit 0 -
+has never been tested.** 2ig reframed the problem as truncation and the
+three boots after it chased the reframing: 2ih wrote the raw MC address,
+2ii wrote `mc2pa`, 2ij gated `mc2pa`. The obvious candidate, and the one
+that is a real physical address on this machine, was skipped. That is a
+different failure from the recurring error - not reading without meaning,
+but letting a new frame retire a live hypothesis that had not been
+disproved.
+
+## 2il (2026-10-18) — let the page decide, not me
+
+Four addresses are now in play for context 3's directory, and rather than
+argue for a fourth, 2il maps each and asks which one **looks** like a page
+directory. This is 2ee's method, which already told live kernel memory from
+a real table for context 0.
+
+```
+a  fb_off                   0x0_FB01_5000   Apple's own value
+b  fb_off + FB_OFFSET<<24   0x8_7B01_5000   mc2pa          (2ii wrote this)
+c  fb_off + FB_BASE<<24     0xF4_FB01_5000  raw MC         (2ih wrote this)
+d  fb_off + 0x8_8000_0000   0x9_7B01_5000   the BAR0 alias 2em named as its
+                                            residual risk
+```
+
+`fb_off` comes from the **register Apple programmed**, not from
+`ctx+0xb8`, so 2ig's offset and this read cross-check each other.
+
+**The discriminator, fixed before the boot.** A depth-1 directory for a
+sparse VM is mostly zero, and every nonzero entry has bit 0 set. Noise is
+not like that - 2ee measured 251 of 512 "valid" bits on live kernel memory,
+a coin flip. Per candidate: `nz` = nonzero qwords, `v` = qwords with bit 0
+set. A page qualifies only if `nz > 0 && v == nz && nz <= 64`. All-ones
+(unmapped) gives `nz = v = 512` and fails the cap; live code gives
+`v < nz`.
+
+**The write happens only if exactly one candidate qualifies**, at the +12 s
+sample - early, before the Metal client, unlike 2ig's +100 s write which
+could never have helped. Two qualifying is ambiguous and refused; zero
+means none of these is the directory, and the four pages' counts are then
+the lead.
+
+| `rbgpu-pdc` reading | means |
+|---|---|
+| one `OK`, write lands, +100 s fault gone | that address was the directory and the register had the wrong one |
+| one `OK`, fault unchanged | the base is right and the walk fails for another reason |
+| `nq=0` | none of the four is a page directory; `ctx+0xb8` and the register agree on a number that points at nothing recognisable |
+| `nq>1` | the discriminator cannot separate them; choosing would be a guess and none was made |
+| `m=0` on a candidate | that physical address could not be mapped at all - itself an answer about whether it exists |
+
