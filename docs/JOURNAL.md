@@ -12613,3 +12613,102 @@ autoload handshake actually happen, which is PSP/TOC territory and the
 first time this project would be fixing a **bring-up sequence** rather
 than a value.
 
+
+## 2ix result (2026-10-18) — ROOT CAUSE: the RLC bootload never completes
+
+Twenty-seventh armed boot, `logs/20261018-232010-metal/`, `armed=1`, UUID
+`D08BAE48-EBCA-3E47-A1FF-A5A4EDECFC03` = `build/out`.
+
+```
+rbgpu-bl = b=55 p0 bl=1 iram=1 complete=0 | p1 bl=1 iram=1 complete=0
+```
+
+`RLC_RLCG_IRAM_LOADED = 1`. **`BOOTLOAD_COMPLETE = 0`**, at +12 s and at
++100 s, long after any timeout could matter. Exactly the row written down
+as root cause before the boot.
+
+### Linux says complete=0 is FATAL on this path
+
+```c
+if (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP &&
+    adev->psp.autoload_supported) {
+        r = gfx_v10_0_wait_for_rlc_autoload_complete(adev);
+        if (r)
+                return r;          /* rlc_resume ABORTS */
+        gfx_v10_0_init_csb(adev);
+        ...
+```
+
+On the **PSP** load path with autoload supported - Rembrandt's path -
+Linux waits for `BOOTLOAD_COMPLETE` and **fails bring-up without it**.
+
+**So 2am's premise was wrong.** 2am reasoned that "when the PSP places the
+firmware itself, nothing sets the latch, so the wait times out even though
+the microcode is present". On a PSP **plus autoload** part, the PSP's
+autoload is precisely what sets that latch. The timeout was a **true
+negative**, and we patched it away. 2it's result stands unchanged and is
+not in conflict: the microcode really is present. "The firmware arrived"
+and "the handshake that releases the CP finished" were always two claims,
+and 2am verified only the first.
+
+### One cause, every symptom
+
+| step | evidence |
+|---|---|
+| the PSP loads the CP microcode | `iram=1`; 2it reads real ucode in pfp/me/ce/mec |
+| the RLC bootload sequence never runs to completion | **`complete=0`, permanently** |
+| so the RLC keeps CE/PFP/ME and ignores host writes | 2iw: refused via `g_hw` **and** via Apple's own accessor, while a seg0 accessor write to `0x28C7` took in the same boots |
+| so RB0 can never execute | `rptr` stalls; 2hl onward |
+| so no stamp ever retires | `waitForTimestamp` polls forever; 2hj |
+| so the restart loop fires and WindowServer blocks | 2hj's three hangs |
+| and bring-up proceeded as if none of this happened | 2am |
+
+This is the first single cause that accounts for the whole chain, and it
+is exactly the class of defect this project exists to find: **a dGPU
+driver that does not perform the APU's bring-up handshake.**
+
+### Not proven
+
+That making autoload complete un-halts the CP. Nothing here demonstrates
+it; the argument is mechanism plus elimination (power ✗, soft reset ✗,
+RLCG ✗, safe mode ✗, instrument ✗). Until a boot shows
+`complete=1` and a `CP_ME_CNTL` write that takes, this is the best
+explanation and not a proven cause.
+
+### The seam in Apple's code
+
+`nm` on AMDRadeonX6800HWLibs:
+
+```
+_gc_10_3_rlc_toc                      a 10_3 RLC TOC, for THIS chip
+_gc_parse_rlc_toc_10_3                10_3 parser present
+_gc_convert_toc_firmware_id_10_3
+
+_gc_fw_backdoor_autoload_config_10_1  config / copy / validate exist
+_gc_copy_backdoor_autoload_fw_10_1    ONLY as _10_1
+_gc_fw_backdoor_autoload_validate_10_1
+_gc_allocate_fw_backdoor_autoload_buffer
+
+_psp_bootloader_load_11_0             the PSP path is 11.0 = Navi21
+_psp_bootloader_is_sos_running_11_0
+```
+
+Apple ships a **10_3 TOC and a 10_3 TOC parser**, but the backdoor-autoload
+config, copy and validate exist only in `_10_1` form, and the whole PSP
+bootloader path is `_11_0`. The data for this chip is present; the
+mechanism that would drive the RLC bootload for it may not be wired.
+
+**Caveat, stated so it is not misread later:** both
+`_gc_fw_backdoor_autoload_config_10_1` and `_gc_parse_rlc_toc_10_3` have
+**zero direct callers**, and that proves nothing - HWLibs dispatches
+through `*_init_function_pointer_list` tables, so absence of a `callq` is
+expected for almost everything in it. Whether the 10_3 autoload path is
+reachable requires walking those tables, which is real static work and
+has not been done.
+
+**Next:** determine whether the 10_3 autoload path is wired, by walking
+the GC function-pointer tables rather than by grepping for calls. If it is
+reachable, the question becomes what selects it; if it is not, the
+question becomes whether the `_10_1` machinery can be driven with the
+`_10_3` TOC.
+
