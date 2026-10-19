@@ -13749,3 +13749,87 @@ than `s=6` and the arg comes straight back out.
 RLC has been running Navi 21's LX6 image and Navi 21's save/restore lists
 on a GC 10.3.3 part, that correct ones for this chip exist in a file we
 already ship, and that Apple asks for them by ids we can now name.
+
+## 2jq (2026-10-19) — BOOTLOAD_COMPLETE = 1. The RLC autoload finishes.
+
+Boot 63, the first boot with `-rbgpurlcsub`. Loaded UUID
+`BDAE8495-C541-3517-9B6F-B2AFCD75AAC2`, confirmed in the capture's
+`kexts.txt`.
+
+```
+rbgpu-bl = b=63 p0 bl=c0000001 iram=1 complete=1
+                p1 bl=c0000001 iram=1 complete=1
+```
+
+**Twelve boots read `bl=1 iram=1 complete=0`. This one reads
+`0xc0000001` - bit 31 set - in both phases.** `RLC_RLCS_BOOTLOAD_STATUS`
+has never had `BOOTLOAD_COMPLETE` set in this project until now.
+
+**And the CP was released.** From the diag, sampled during bring-up:
+
+```
+            boot 62                      boot 63
+diag_cp_me_cntl   15000000               0
+diag_cp_mec_cntl  50000000               0
+diag_rlc_stat     25                     0
+diag_rlc_gpm      b40017                 c0016
+diag_cp_stat      0                      0
+```
+
+`CE_HALT`, `PFP_HALT`, `ME_HALT` and `MEC_ME1_HALT` all clear, at the
+same sampling point that has read `0x15000000` for twelve boots.
+
+**This confirms 2ix's conclusion and the 2jo walk-back of 2jh.** The halt
+is cleared by the autoload and by nothing the host can do - 2jl's
+read-only register, 2jb's refused un-halt from Apple's own code, 2jh's
+futile RLC stop, and 2jn's dead GRBM theory are all consistent with
+exactly this. The cause was **2jp**: Apple's GC 10.3 path asks for 21
+firmware entries and 2aj supplied 7, so the RLC had been booting Navi
+21's `rlc_lx6_iram`/`rlc_lx6_dram` - the firmware for the processor
+inside the RLC that runs the autoload - plus Navi 21's three save/restore
+lists. Given yellow_carp's own (ids 26/27/28/29/30 out of
+`yellow_carp_rlc.bin` v2.2), the handshake completes.
+
+**The oversized-entry risk did not land.** ids 28 and 30 are larger than
+Apple's Navi21 images (`0x4880` vs `0x47a0`, `0x10200` vs `0x4200`) and
+the PSP accepted them: `rbgpu-prog b=63 s=6 0x1B RETURNED 0xE00002C7`,
+so `_psp_np_fw_load` did not fail the way the Navi21 TAP_DELAYS did
+before 2al.
+
+### What is NOT fixed, and three new facts
+
+1. **Something re-halts the CP after bring-up.** `rbgpu-ume b=63 hk=1
+   uh=1 @311ms | h=0 | me=15000000` and `rbgpu-ring p=0 me=15000000`:
+   by +12 s the halt bits are back, and `h=0` means Apple's
+   `_gc_halt_micro_engines_10_3` was never called. So it is not Apple's
+   10_3 halt path. `resetHardwareAndReplay` was 2hn's original guess and
+   is now the obvious suspect again.
+2. **The ring is executing.** `r=b1 w=280` at p0 and `r=2b1 w=380` at
+   p1 - `rptr` advanced 512 dwords between phases, where boots 60-62 sat
+   frozen at `0xb1` across all three.
+3. **`ttl_hw_init_ret = 0xffffffffe3623001`**, where every previous boot
+   read 0. A new TTL failure, unexplained, and it did not stop the
+   accelerator: `starthw_count=4`, `mapq_calls=2 mapq_fails=0`,
+   `gfxmqd_ret=1`, `setres_ret=1`, `stamp_ret=1`, `gate_stage=9b`, and
+   0x1B still returned its success value. Also new: `rbb=ffbfe000`
+   (ring base moved from `ffbfde00`) and `g2=50200008`.
+
+`rbgpu-hyp b=63` still reads `rlc_cntl=1 f32=1` and `cp_stat=90038600`
+at +12 s, so Linux's *other* autoload condition (`cp_status == 0`) is
+still false at that point even though the latch is set. `diag_cp_stat=0`
+early, so CP_STAT is 0 during bring-up and non-zero later - consistent
+with the re-halt rather than in conflict with it.
+
+### Procedure note
+
+The in-boot capture (`logs/20261019-025207-plugin`, 02:52) shows
+`rbgpu-bl` at **`b=56`** - it was taken before phase 0 flushed. The
+`b=63` values above are **live** NVRAM read in the following boot, and
+they are unambiguous precisely because the capture read `b=56`: the
+nonce moved. This is the first time the late notes survived a power
+cycle since boot 56. 2jg's rule still stands - capture in-boot - but
+capture *late enough*, after +160 s.
+
+**The frontier has moved for the first time since 2ix.** It is no longer
+"the RLC never hands over the CP". It is "the CP is handed over, runs,
+and something halts it again".
