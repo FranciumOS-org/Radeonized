@@ -13959,3 +13959,52 @@ progress would be the recurring error.
    `-rbgpuautoloadtruth` or variation - one repeat boot settles it.
 3. What `ttl_hw_init_ret` actually is. It has never been read from the
    code that sets it.
+
+## 2js (2026-10-19) — bracket the CP re-halt (built)
+
+The window between HWLibs writing `CP_ME_CNTL = 0` at ~341 ms (which now
+takes) and the +12 s ring probe finding `0x15000000` again has never been
+sampled. This brackets it.
+
+**What is already excluded.** `rbgpu-me b=64` caught **four** writes to
+`CP_ME_CNTL` this boot - `hwl [0@311]`, `x6k [0@12393] [0@43605]
+[0@92315]` - and **every one wrote 0**. Nothing writes the halt value
+through Apple's register accessor or through the `_gvm_cgs_write_register`
+path. So the re-halt is either a write on a path we do not watch, or the
+hardware re-asserting it, and a timestamped transition is what separates
+those.
+
+**Twenty-four samples, 500 ms apart, 0.5 s .. 12 s.** Each reads:
+
+| register | why |
+|---|---|
+| `CP_ME_CNTL` | the transition itself |
+| `CP_STAT` | was the CP still executing when it halted? |
+| `RLC_STAT` | boots 63/64 show `0x25 -> 0` after the autoload |
+| `RLC_RLCS_BOOTLOAD_STATUS` | does the latch drop back with it? |
+| `GRBM_SOFT_RESET` | is the GFX block being reset under us? |
+
+`rbgpu-mew` reports the **last clean** sample and the **first halted**
+one with all five co-values, bracketing the transition to 500 ms.
+
+Discipline, each from a rule this project paid for:
+- **No logging inside the sampler.** 2ez turned logging contention into a
+  hang that read as a stall. Plain stores only; one note at the end.
+- **All 24 timers armed once**, from `rbgpu_progwatch_start` on the
+  calling thread. 2fy: re-arming a `thread_call` from inside its own
+  handler failed in three consecutive boots.
+- **Absence is a result** (2eh). If the register never goes non-zero the
+  note says `NEVER HALTED`, which would place the re-halt after +12 s and
+  make the ring probe's p0 the thing that catches it.
+- Behind **`-rbgpumewatch`**, OUT by default, and the sampler checks the
+  arg itself and returns immediately when off - so on a normal boot the
+  timers cost one function call each.
+
+| `rbgpu-mew` | means |
+|---|---|
+| `bl` drops from `c0000001` at the same sample | the autoload latch is being cleared and the halt follows it |
+| `srst` non-zero | the GFX block is being soft-reset under us |
+| `cps` still busy at the halt | it stopped mid-stream rather than at an idle point |
+| `NEVER HALTED` | the re-halt is later than +12 s |
+
+Build `3DBD8CAF-2582-3F18-87FF-DA003DDF118A`.
