@@ -14376,3 +14376,66 @@ one bit, **`CE_BUSY`** (bit 26). Noted, not interpreted.
 reproduces to 12 ms across four boots and is the better place to measure;
 the SRM question is answered as far as this experiment can answer it.
 Build `65DDACD9`.
+
+## 2jy (2026-10-19) — the whole transition is inside one 50 ms sample, and that splits the question in two
+
+Boot 71, nonce fresh, build `65DDACD9`, `-rbgpunosrm` out (`srm 3->3`
+confirms it), halt back at the baseline.
+
+```
+rbgpu-mew  = b=71 OK i=15 @8348ms me=0 cps=0 || HALT i=16 @8848ms me=15000000 cps=90038600
+rbgpu-mew2 = b=71 OK   @8748ms rlcs=0 gpm=140016 safe=0 cgcg=0 pg=0 srm=3 gfxoff=2
+                || HALT @8798ms me=15000000 (all the same)
+                 | cps 0->90038600  grbm 3028->a0003028
+```
+
+The widened 6.5-9.5 s bank worked and `cps`/`grbm` are finally captured at
+50 ms. **Three things happen together inside one 50 ms sample:**
+
+- `CP_STAT` **`0 -> 0x90038600`**: `CP_BUSY`, `ROQ_CE_RING_BUSY`, `ME_BUSY`,
+  `MEQ_BUSY`, `PFP_BUSY`, `ROQ_RING_BUSY`, `ROQ_INDIRECT1_BUSY`.
+- `GRBM_STATUS` **`0x3028 -> 0xa0003028`**: `DB_CLEAN` + `CB_CLEAN` +
+  CMDFIFO available, **plus `GUI_ACTIVE` (bit 31) and `CP_BUSY` (bit 29)**.
+- `CP_ME_CNTL` -> `0x15000000`.
+
+Two things this settles. **`0xa0003028` is the familiar wedged value** -
+every +12 s and +100 s sample of every boot - and `0x3028` is 2jr's clean
+idle. So this sample is the exact moment the machine goes from clean to
+permanently wedged. And **`cps = 0` at 8748 ms means even `CPF_BUSY` was
+clear**, against CLAUDE.md's "`CPF_BUSY` is set in every sample of every
+boot": the chip reaches a genuinely clean state 50 ms before it wedges.
+That is the first clean "before" picture this project has had.
+
+And it **withdraws a reading of mine.** From the 500 ms bank I wrote that
+"the CP had gone busy first, so work was submitted and it was executing
+when halted" (2js) - a sequence. At 50 ms the busy transition and the halt
+are in the **same** sample and nothing orders them. The sequence was an
+artifact of 500 ms resolution.
+
+### The question splits in two, and nothing measured so far separates them
+
+Either
+
+(a) something **sets** the halt bits on a live CP block, or
+(b) the CP block **hangs** and `CP_ME_CNTL` simply **reads back its
+    power-on value**.
+
+(b) needs no agent at all, and it explains what the long chain of
+eliminations has been struggling with: every write refused (2ix), `CE_STEP`
+refusing to stick (2jl), and the value being exactly the reset default with
+every `*_PIPE*_RESET` bit clear. A block that has stopped answering the
+register bus does all of that for free. **This project - this session
+included - has been assuming (a) throughout.** Every positive-control
+elimination since 2ix was hunting an agent that may not exist.
+
+**`CP_RB0_BASE` separates them.** It reads `0xffbfe000` at p0: a value
+Apple *programmed*, not a default.
+
+| at the halt | means |
+|---|---|
+| `rbb` still `ffbfe000` | the block answers reads correctly, so `0x15000000` is a real value something SET - hypothesis (a), and the agent hunt resumes with the host side exhausted |
+| `rbb` `0` or garbage | the block reverted or stopped answering; the halt bits are a **symptom**, and the refused writes and `CE_STEP` need no further explanation - hypothesis (b) |
+
+2jy adds `rbb` (`CP_RB0_BASE`, dword 0x1DE0 seg0) and `rbc`
+(`CP_RB0_CNTL`, 0x1DE1) to the 50 ms bank. Read-only, two more MMIO reads
+per sample. No boot-arg change. Build `4663E8C8`.
