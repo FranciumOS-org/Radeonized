@@ -13218,3 +13218,67 @@ the boot being used.
 
 Nothing is concluded about `-rbgpurlcstop` — 2jf has not yet produced a
 reading. Its result is still owed.
+
+## 2jh (2026-10-19) — THE RLC IS NOT THE GATE. 2ix is refuted.
+
+Boot 60, captured properly: `sudo tools/plugin_check.sh` run over SSH in
+the armed boot, saved to `logs/20261019-020716-plugin/`. **2jg's candidate
+1 is confirmed** — the capture holds the complete ring-probe set, so the
+probe was writing its notes in boots 57/58/59 all along and the power cycle
+was eating them. Nothing was ever wrong with the code. 2jd stays withdrawn.
+
+```
+rbgpu-rstop = b=60 rlc 1->0 STOPPED
+                   me 15000000 acc=15000000 dir=15000000 STILL REFUSED
+                   restore 1 OK | me_after 15000000
+rbgpu-bl    = b=60 p0 bl=1 iram=1 complete=0
+rbgpu-ume   = b=60 hk=1 uh=1 @247ms | h=0 @0ms | me=15000000
+rbgpu-wtest = b=60 A scr 0->a5a5a5a5 TOOK | B acc me REFUSED | C dir REFUSED
+rbgpu-ald   = b=60 hk=0 toc=0 dis=0 reg=0      (hk=0: the gate, not Apple)
+```
+
+**The stop landed.** `RLC_CNTL` went `1 -> 0` and the restore read back
+`1`, so this is not a refused write misread as a successful stop. With
+`RLC_ENABLE_F32` cleared, `CP_ME_CNTL` still refused through Apple's
+accessor *and* through `g_hw`.
+
+**So 2ix's mechanism is dead.** "The RLC never finishes the bootload
+handshake, therefore never releases CE/PFP/ME, therefore `CP_ME_CNTL`
+refuses every write" — the second arrow is now measured and false. Switch
+the RLC off entirely and the register still will not move. 2ix's
+*observations* all stand (`complete=0`, the halt, the universal refusal);
+its causal chain does not. Linux's `gfx_v10_0_rlc_resume` treating the
+latch as fatal remains true of Linux and is no longer evidence about what
+holds this register.
+
+This also retires the status of 2am's reinterpretation. `complete=0` is
+real and still unexplained, but it is no longer the identified cause of
+the halt.
+
+**What is excluded now, with the positive control each needed:**
+power gating (`pwr=1 clk=1 pipe=1`), soft reset (`srst=0`), RLC safe mode
+(2iv forced it to 0), RLCG, the write mechanism (2iw cell A: seg1
+`SCRATCH_REG0` took), the seg0 path (`rbgpu-ctxw` and `rbgpu-pdc` show
+seg0 GCVM context writes landing with matching readback **in this boot**),
+the instrument, and now the RLC itself.
+
+**The hypothesis that fits what is left: the CP re-halts itself.** Not
+"the register is protected" but "the write takes and hardware re-asserts
+the halt before anything reads it back". A CP with no valid firmware entry
+point would do exactly that, and it would look identical to a refusal
+through every path, which is what we have. It also fits 2it: instruction
+RAM holds nonzero dwords, but nothing established that the engines have a
+usable entry point.
+
+**The discriminator is cheap and is the next experiment.** Write
+`CP_ME_CNTL` and read back in a tight loop, and separately write a pattern
+that touches a *reserved* bit alongside the halt bits:
+
+| result | means |
+|---|---|
+| some bit changes, halt bits snap back | the CP re-halts itself; the fix is Linux's order - load ucode via `CP_*_UCODE_ADDR`/`DATA`, *then* un-halt |
+| no bit of the register ever changes | genuinely write-protected by something still unnamed |
+| a readback catches 0 before it reverts | settles it outright and dates the re-assert |
+
+Nothing about the GPU working follows from either. This names what holds
+the register, which is the question that has been mis-answered twice.
