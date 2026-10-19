@@ -7536,6 +7536,16 @@ void rbgpu_fault_flush_2hu(void) {
 // drives the thread_call that flushes this note. No config.plist change.
 // ---------------------------------------------------------------------------
 
+// 2ir: CP_ME_CNTL, watched on BOTH write paths.
+#define RB_2IR_ME_CNTL 0x21B6u        // GC seg0 0x1260 + dword 0x0F56
+#define RB_2IR_MAX 6
+static uint32_t g_rb_2ir_val[RB_2IR_MAX], g_rb_2ir_h_val[RB_2IR_MAX];
+static uint64_t g_rb_2ir_ms[RB_2IR_MAX],  g_rb_2ir_h_ms[RB_2IR_MAX];
+static uint32_t g_rb_2ir_n = 0, g_rb_2ir_h_n = 0;
+static uint32_t g_rb_2ir_over = 0, g_rb_2ir_h_over = 0;
+static uint32_t g_rb_2ir_last = 0xDEADu;
+static uint64_t rbgpu_2iq_ms(void);   // 2iq, defined with the restart hooks
+
 #define RB_2IC_FIRST 0x28C7u          // CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32
 #define RB_2IC_LAST  0x28E6u          // CONTEXT15_..._HI32
 #define RB_2IC_N     (RB_2IC_LAST - RB_2IC_FIRST + 1u)
@@ -7617,6 +7627,37 @@ static void (*orig_hwreg_write_2ic)(void *, uint32_t, uint32_t) = nullptr;
 
 static void hooked_hwreg_write_2ic(void *self, uint32_t reg, uint32_t val) {
     g_rb_2ic_calls++;
+    // 2ir (2026-10-18): who halts the command processor.
+    //
+    // 2iq killed 2hn's guess. setGPURestart is NEVER called, and the first
+    // resetHardwareAndReplay lands at 15015 ms after the X6000 hooks were
+    // routed - strictly after the +12 s sample that already read
+    // CP_ME_CNTL = 0x15000000. The two baselines differ (t0 is X6000 load,
+    // the ring phases count from the peer's earlier start), which only makes
+    // the conclusion stronger: the CP is halted BEFORE any reset. The
+    // restart loop that has dominated this diagnosis since 2hj is a
+    // consequence.
+    //
+    // In Linux those three bits are set by
+    // gfx_v10_0_cp_gfx_enable(adev, false) during GC bring-up, and cleared
+    // by cp_gfx_enable(adev, true) when the GFX ring is brought up. If Apple
+    // performs the disable and never the enable, RB0 cannot execute - which
+    // explains the frozen rptr of 2hl better than any fault did.
+    //
+    // CP_ME_CNTL is dword 0x0F56 raw, GC seg0 0x1260, so 0x21B6
+    // seg-included. Every write to it is recorded with its value and the
+    // milliseconds since the hooks were routed, so the ORDER of a disable
+    // and any later enable is visible rather than inferred.
+    if (reg == RB_2IR_ME_CNTL) {
+        if (g_rb_2ir_n < RB_2IR_MAX) {
+            g_rb_2ir_val[g_rb_2ir_n] = val;
+            g_rb_2ir_ms[g_rb_2ir_n] = rbgpu_2iq_ms();
+            g_rb_2ir_n++;
+        } else {
+            g_rb_2ir_over++;
+        }
+        g_rb_2ir_last = val;
+    }
     if (reg >= RB_2ID_CNTL_FIRST && reg <= RB_2ID_END_LAST) {
         if (reg <= RB_2ID_CNTL_LAST) {
             g_rb_2id_cm = static_cast<uint16_t>(
@@ -7823,6 +7864,18 @@ static void (*orig_gvm_cgs_write_2ie)(void *, uint32_t, uint32_t, uint32_t) = nu
 static void hooked_gvm_cgs_write_2ie(void *ctx, uint32_t off, uint32_t val,
                                      uint32_t hwid) {
     g_rb_2ie_calls++;
+    if (hwid == 0xB && off == RB_2IR_ME_CNTL) {
+        // 2ir: the same register, the other path. 2ie proved these are two
+        // separate write paths, so watching only one would leave the obvious
+        // hole - HWLibs is where the Linux-derived GC bring-up lives.
+        if (g_rb_2ir_h_n < RB_2IR_MAX) {
+            g_rb_2ir_h_val[g_rb_2ir_h_n] = val;
+            g_rb_2ir_h_ms[g_rb_2ir_h_n] = rbgpu_2iq_ms();
+            g_rb_2ir_h_n++;
+        } else {
+            g_rb_2ir_h_over++;
+        }
+    }
     if (hwid == 0xB) {
         g_rb_2ie_gc++;
         rbgpu_2ie_class(&g_rb_2ie_raw, RB_2IE_RAW_BASE, off, val);
@@ -8418,6 +8471,37 @@ static void hooked_setGPURestart_2iq(void *cp) {
     if (g_rb_2iq_setr == 0) g_rb_2iq_first_setr_ms = rbgpu_2iq_ms();
     g_rb_2iq_setr++;
     if (orig_setGPURestart_2iq) orig_setGPURestart_2iq(cp);
+}
+
+void rbgpu_mecntl_flush_2ir(void) {
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note), "x6k n=%u o=%u last=%x",
+                     g_rb_2ir_n, g_rb_2ir_over, g_rb_2ir_last);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (uint32_t i = 0; i < g_rb_2ir_n && n < sizeof(note) - 32; i++) {
+        w = snprintf(note + n, sizeof(note) - n, " [%x@%llu]",
+                     g_rb_2ir_val[i], g_rb_2ir_ms[i]);
+        if (w > 0) { n += static_cast<size_t>(w); if (n >= sizeof(note)) { n = sizeof(note) - 1; break; } }
+    }
+    if (n < sizeof(note) - 24) {
+        w = snprintf(note + n, sizeof(note) - n, " | hwl n=%u o=%u",
+                     g_rb_2ir_h_n, g_rb_2ir_h_over);
+        if (w > 0) n += static_cast<size_t>(w);
+    }
+    for (uint32_t i = 0; i < g_rb_2ir_h_n && n < sizeof(note) - 32; i++) {
+        w = snprintf(note + n, sizeof(note) - n, " [%x@%llu]",
+                     g_rb_2ir_h_val[i], g_rb_2ir_h_ms[i]);
+        if (w > 0) { n += static_cast<size_t>(w); if (n >= sizeof(note)) { n = sizeof(note) - 1; break; } }
+    }
+    rbgpu_nvram_note("rbgpu-me", note);
+    rbgpu_log("2ir: %s", note);
+    rbgpu_log("2ir: a write of 0x15000000 and no later write of 0 is the "
+              "answer - Apple halts the CP during bring-up and never "
+              "un-halts it, so RB0 cannot execute and every stalled rptr "
+              "since 2hl follows. Writes on NEITHER path with the register "
+              "still reading 0x15000000 means firmware or the PSP left it "
+              "that way and no driver code is responsible.");
 }
 
 void rbgpu_restart_flush_2iq(void) {
@@ -10629,6 +10713,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_vmid_flush_2if();
     rbgpu_ptfix_flush_2ih();
     rbgpu_restart_flush_2iq();
+    rbgpu_mecntl_flush_2ir();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and
