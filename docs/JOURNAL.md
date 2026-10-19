@@ -13309,3 +13309,59 @@ boot, all 41 binds unresolved, while the corrected bases were written by
 2il instead (`rbgpu-pdc ... W b 7b00b001/8 bk=7b00b001/8`) and
 `rbgpu-ctxw` shows them landing. Two mechanisms for one fix and only one
 of them firing is worth tidying, but it changes no reading here.
+
+## 2jj (2026-10-19) — what the sister projects say, read from source
+
+Prompted by the user asking whether NootedRed and friends help. Read
+`ChefKissInc/NootedRed`'s `NootedRed/HWLibs.cpp` and listed `NootRX`'s
+sources. No boots spent.
+
+**NootedRed never un-halts the command processor.** The only halt bit it
+clears anywhere is `SDMA0_F32_CNTL_HALT` (`sdma412StartEngine`). It never
+touches `CP_ME_CNTL`, `BOOTLOAD_COMPLETE`, autoload, or RLC control
+registers. What it does instead: route `_gc_set_fw_entry_info`, and supply
+the GC firmware entries through `gc91/92/93GetFwConstants` and
+`processGCFWEntries` (entries at init-struct +0x18, count at +0x10, MEC
+payload offset 0x1000) — CE, ME, PFP, MEC, MEC JT, RLC, RLCV and the RLC
+SR list. Apple's own loader then brings the CP up.
+
+**That is the load-bearing finding: on a sister chip, correct firmware
+alone is sufficient and the host does nothing to the CP.** It fits 2jh
+(the RLC was never holding the register) and fits `CP_ME_CNTL` simply not
+being host-writable on a PSP+autoload part. It makes "why does autoload
+not complete, given the right blobs" the whole question, and makes
+poking `CP_ME_CNTL` the wrong tree.
+
+**A claim of mine, made and withdrawn inside ten minutes:** "we never give
+Apple the firmware". **Wrong.** 2aj has substituted yellow_carp images at
+`_IpiSetFwEntry` since boot 31, one level below NootedRed's entry point,
+and the `logs/20261019-001216-plugin` capture shows it firing: **`YC-SWAP:
+7`**, **`TAP-SKIP: 5`** — CE(1), PFP(2), ME(3), MEC(6), RLC(9), SDMA0(14)
+and the **PSP TOC(36)** all swapped, Navi21 TAP_DELAYS 31-35 skipped. The
+boot-60 capture shows zero of these lines only because its `RBGPULog`
+window starts at 71 s and they had scrolled out — 2es again, the log
+window rather than the absence of the event. Checking one capture and
+concluding from it was the error.
+
+**Gaps against NootedRed's entry set, unverified as gaps:** we substitute
+ids 1/2/3/6/9/14/36 and do **not** supply RLCV, the RLC SR list, MEC JT,
+or MEC2 — and `firmware/linux/yellow_carp_mec2.bin` sits on disk unused.
+On GFX10.3 the RLC blob may carry RLCV and the SR list internally, so
+these may not be separate entries at all. Not established either way;
+worth reading `_gc_10_3_get_fw_constants` against NootedRed's GFX9 list.
+
+Consistent detail, noted not concluded: Apple's static
+`_gc_10_3_rlc_toc` first record carries a size field of **0x600**, and
+our injected `yc_toc_img` is **0x600** bytes. Nothing rests on it.
+
+**NootRX** (RDNA2 *discrete*, Navi 22/23, same `AMDRadeonX6000` +
+`X6800HWLibs`) is the closer structural match and has not been read yet.
+Its files: `HWLibs.cpp`, `X6000.cpp`, `X6000FB.cpp`, `DYLDPatches.cpp`,
+`PatcherPlus.cpp`, `Firmware.hpp`, `Model.hpp`. A dGPU has its own VBIOS
+and a working PSP autoload, so it may simply never meet this problem —
+which would itself be informative.
+
+Not useful, and said rather than guessed: no specific macOS NVIDIA RTX or
+RDNA4 driver was identified. NVIDIA would not transfer at the register
+level regardless — different IP blocks, different firmware model, nothing
+shared with `gc_10_3_0` offsets.
