@@ -13052,3 +13052,60 @@ all: it only skips the 2am patch so Apple sees `BOOTLOAD_COMPLETE = 0` as
 it really is. That is the question 2jb left — what Apple does when told the
 truth about the latch — and it is now reachable without the thing that
 blanked two boots.
+
+## 2je (2026-10-19) — the 2am patch is LOAD-BEARING. Apple has no fallback.
+
+`-rbgpuautoloadtruth` armed, confirmed live in boot-args. The boot armed —
+`rbgpu-diag` freshly written with `armed=1`, and `rbgpu-diag-prev` rotated
+in the previous unarmed boot's `d=0 armed=0`, which is the rotation only an
+armed boot performs.
+
+`rbgpu-boot` stayed **58**. Not one NVRAM note was written, so
+`rbgpu_prog_2fs(1, "powerUpHW ENTER")` never ran. No `rbgpu-1b`, no
+`rbgpu-ea`, and **no lock screen** — the user confirmed the panel never
+accelerated.
+
+The whole diag:
+
+```
+d=0 armed=1 found_fb_routed=1 gc_sw_init_ret=1
+    fb_base_reg=f400 fb_top_reg=f4ff fb_regs_sane=1
+    mc_abs_hi=f4 mc_abs_lo=ffff000 mc_abs_ok=1
+```
+
+Every working boot carries seven `smu_*` fields and a dozen `diag_*`
+registers. None are here, and `d=0` says nothing was dropped for space, so
+those keys were never set. Bring-up stopped before the SMU link.
+
+**Result: row 4 of 2jc's table.** Told that `BOOTLOAD_COMPLETE` is 0,
+Apple's 10_3 path does not fall back to a backdoor load, does not retry,
+and does not take a different branch. It stops. The 2am patch is not
+cosmetic cover over a spurious timeout — it is what lets bring-up proceed
+at all, which is consistent with 2ix's reading of
+`gfx_v10_0_rlc_resume` and inconsistent with 2am's own reasoning.
+
+So "let the autoload fail honestly and watch Apple recover" is dead. There
+is nothing to recover with.
+
+**Not established, and it bothers me:** `gc_autoload_patched` should have
+been set to 0 by the new branch in `patchGcAutoloadCheck` and is absent
+from the diag entirely, although `gc_sw_init_ret=1` proves `processHWLibs`
+ran. So the stop is located as "before SMU bring-up" and no more precisely
+than that. Resolving it needs a diag key set on each side of the branch,
+which costs nothing and is owed before this is cited as a precise location.
+
+**Where that leaves the fix.** Two roads, and the host-side one is closed:
+
+1. 2jb proved the host cannot un-halt the CP — Apple's own correct call
+   through its own write path is refused, and so is every path we have.
+2. 2je proves Apple will not proceed without being told the latch set.
+
+So the autoload has to genuinely complete. The open lead remains the one
+2jb noted: `ativvaxy_vcn3_1.dat not found in directory, for deviceId
+0x1681`, against a PSP that loads a TOC-described bundle and sets the
+latch when the bundle is in place. Still a hypothesis — it is not shown
+that VCN is in the GC autoload bundle, and `_psp_np_fw_load` returned 0.
+Testing it means either supplying that firmware or reading
+`_gc_10_3_rlc_toc` to see what the bundle actually lists.
+
+Reading the TOC is static, free, and costs no boot. That is next.
