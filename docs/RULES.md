@@ -261,28 +261,31 @@ It is what broke the GPU-restart loop.
   `load_type == PSP && psp.autoload_supported`, which is Rembrandt's path:
   on a PSP+autoload part the autoload is *precisely* what sets the latch.
   The timeout was a true negative and we patched it away. `rbgpu-bl` reads
-  `iram=1 complete=0` in every boot. **But the chain that followed is
-  REFUTED (2jh): stopping the RLC outright - `RLC_CNTL` 1 -> 0,
-  confirmed, with a clean restore - does NOT release `CP_ME_CNTL`.** The
-  write is still refused through Apple's accessor and through `g_hw`. So
-  "the RLC holds CE/PFP/ME until bootload completes" is measured and
-  false on this chip. `complete=0` is real and unexplained; it is no
-  longer the identified cause of the halt, and 2jb's "Apple calls the
-  correct un-halt and is refused" no longer has an owner.
+  `iram=1 complete=0` in every boot. **2jh's refutation is NARROWER than
+  2jh claimed (2jo):** stopping the RLC outright - `RLC_CNTL` 1 -> 0,
+  confirmed, clean restore - does not release `CP_ME_CNTL`, which rules
+  out a *running* RLC actively holding it. It does **not** rule out a
+  latch set at reset and cleared only by the autoload completing, which
+  an RLC stop cannot clear either. **So 2ix's conclusion stands - the
+  halt is released by the autoload and by nothing the host can do - and
+  only its mechanism was wrong.** 2jl fits it exactly: `CE_STEP`, an
+  ordinary R/W debug bit, will not stick, so the register is read-only
+  to the host rather than being fought over.
   Also refuted separately (2je): Apple's 10_3 path has **no backdoor
   fallback** - told the latch is clear, bring-up stops before the SMU
   rather than taking another route, so the 2am patch is load-bearing.
-- **What holds `CP_ME_CNTL` is now unidentified.** Excluded, each with
-  the positive control it needed: power gating (`pwr=1 clk=1 pipe=1`),
-  soft reset (`srst=0`), RLC safe mode (2iv forced it to 0), RLCG, the
-  write mechanism (2iw cell A, seg1 `SCRATCH_REG0`, took), the seg0 path
-  (`rbgpu-ctxw`/`rbgpu-pdc` show seg0 GCVM writes landing with matching
-  readback in the same boot), the instrument, and the RLC (2jh). The
-  live hypothesis is that **the CP re-halts itself** - the write takes
-  and hardware re-asserts the halt before any readback - which a CP with
-  no valid firmware entry point would do and which is indistinguishable
-  from a refusal. Discriminator: tight-loop readback, and a write that
-  touches a reserved bit beside the halt bits. [2jh]
+- **`CP_ME_CNTL` is READ-ONLY to the host, and the autoload is the only
+  thing that clears it.** 2jl: `CE_STEP` (bit 25), an ordinary R/W debug
+  bit, **will not stick**, and eight tight-loop reads after writing 0
+  never showed one changed bit. So "the CP re-halts itself" is dead too.
+  Excluded with positive controls: power gating (`pwr=1 clk=1 pipe=1`),
+  soft reset (`srst=0`), RLC safe mode (2iv), a running RLC (2jh),
+  GRBM misrouting (2jn: `cntl=0`, `idx=0`, SE0 exists), **GFXOFF**
+  (`gfxoff_status=2` is Linux's "NOT in GFXOFF",
+  `yellow_carp_ppt.c:627`), **RLCG** (SRIOV-only: `amdgpu_rlc_wreg` is a
+  plain `amdgpu_device_wreg`), and **Apple's write path** (0xbe8d28a
+  disassembled: direct store below the window, `MM_INDEX`/`MM_DATA`
+  above, no filter - the writes reach the register). [2jl, 2jn, 2jo]
 - 2an and 2ao still owe the explanation 2cy demanded. 2an is *not*
   vindicated: 2iv found `RLC_SAFE_MODE` stuck with CMD set and Linux's own
   exit sequence unable to clear it across 1000 polls.
