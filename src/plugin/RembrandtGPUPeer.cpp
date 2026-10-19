@@ -1095,6 +1095,22 @@ static thread_call_t     g_rbgpuProgCalls[3] = { nullptr, nullptr, nullptr };
 static thread_call_t     g_rbgpuRingCalls[3] = { nullptr, nullptr, nullptr };
 extern void rbgpu_ring_probe_2hk(unsigned phase);
 
+// 2js: twenty-four samplers, 500 ms apart, bracketing the CP re-halt.
+// All armed ONCE from rbgpu_progwatch_start - 2fy established that
+// re-arming a thread_call from inside its own handler does not fire.
+#define RB_2JS_CALLS 24
+static thread_call_t     g_rbgpuMeCalls[RB_2JS_CALLS] = { nullptr };
+extern void rbgpu_mewatch_sample_2js(unsigned idx);
+extern void rbgpu_mewatch_flush_2js(void);
+
+static void rbgpu_mewatch_action(thread_call_param_t p0, thread_call_param_t) {
+    unsigned i = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
+    rbgpu_mewatch_sample_2js(i);
+    if (i == RB_2JS_CALLS - 1) {
+        rbgpu_mewatch_flush_2js();
+    }
+}
+
 static void rbgpu_ring_action(thread_call_param_t p0, thread_call_param_t) {
     rbgpu_ring_probe_2hk(static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0)));
 }
@@ -1218,6 +1234,27 @@ void rbgpu_progwatch_start(void) {
     rbgpu_log("2ho: ring probe armed, %u of 3 timers (+12 s, +100 s, +160 s "
               "-> rbgpu-ring). The +12 s sample is the one that time-bounds "
               "the latched VM fault 2hn found.", rarmed);
+
+    // 2js: 0.5 s .. 12 s in 500 ms steps. Read-only; the sampler itself
+    // checks -rbgpumewatch and returns immediately when it is off, so the
+    // timers cost a function call each on a normal boot.
+    unsigned marmed = 0;
+    for (unsigned i = 0; i < RB_2JS_CALLS; i++) {
+        g_rbgpuMeCalls[i] = thread_call_allocate(
+            rbgpu_mewatch_action, reinterpret_cast<thread_call_param_t>(
+                                      static_cast<uintptr_t>(i)));
+        if (!g_rbgpuMeCalls[i]) {
+            continue;
+        }
+        uint64_t md = 0;
+        clock_interval_to_deadline((i + 1) * 500, kMillisecondScale, &md);
+        thread_call_enter_delayed(g_rbgpuMeCalls[i], md);
+        marmed++;
+    }
+    rbgpu_log("2js: CP re-halt watch armed, %u of %u timers (0.5 s .. 12 s, "
+              "500 ms apart -> rbgpu-mew). Brackets the window between the "
+              "un-halt at ~341 ms and the +12 s ring probe.",
+              marmed, RB_2JS_CALLS);
 }
 
 // 2gd (2026-10-15): every note carries a per-boot sequence number.

@@ -10932,6 +10932,103 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     rbgpu_fencedump_2hy(pa);
 }
 
+// ---------------------------------------------------------------------------
+// 2js (2026-10-19): WHEN does the CP get re-halted, and what moves with it?
+//
+// 2jq/2jr: the autoload now completes, HWLibs writes CP_ME_CNTL = 0 at
+// ~341 ms and it TAKES (diag reads 0). By the +12 s ring probe it is back
+// to 0x15000000 and writes are refused again. That window has never been
+// sampled.
+//
+// And `rbgpu-me` already rules out the obvious: FOUR writes to CP_ME_CNTL
+// were caught this boot - hwl [0@311], x6k [0@12393] [0@43605] [0@92315] -
+// and every one wrote **0**. Nothing writes the halt value through Apple's
+// accessor or through the gvm path. So the re-halt is either a write on a
+// path we do not watch, or the hardware re-asserting it.
+//
+// Twenty-four samples, 500 ms apart, covering 0.5 s .. 12 s. Each reads
+// CP_ME_CNTL and the four things most likely to move with it:
+//
+//   CP_STAT          is the CP still executing when it halts?
+//   RLC_STAT         boot 63/64 show this going 0x25 -> 0 after autoload
+//   RLC_RLCS_BOOTLOAD_STATUS   does the latch drop back?
+//   GRBM_SOFT_RESET  is the GFX block being reset under us?
+//
+// The note reports the LAST clean sample and the FIRST halted one, so the
+// transition is bracketed to 500 ms, plus the co-values at that instant.
+//
+// Discipline: NO logging inside the sampler - 2ez turned logging contention
+// into a hang that looked like a stall. Plain stores only. And the timers
+// are armed ONCE, all of them, from the calling thread (2fy: re-arming from
+// inside a handler failed in three consecutive boots). Absence is a result
+// here too: if the register never goes non-zero in 24 samples the note says
+// so, which would mean the re-halt happens after +12 s and the ring probe's
+// p0 catches it rather than this.
+#define RB_2JS_N 24u
+struct rb_2js_s { uint32_t ms, me, cps, rlcs, bl, srst; };
+static struct rb_2js_s g_rb_2js[RB_2JS_N];
+static uint32_t        g_rb_2js_got = 0;
+static int             g_rb_2js_on  = -1;
+
+void rbgpu_mewatch_sample_2js(unsigned idx) {
+    if (g_rb_2js_on < 0) {
+        g_rb_2js_on = checkKernelArgument("-rbgpumewatch") ? 1 : 0;
+    }
+    if (g_rb_2js_on != 1 || idx >= RB_2JS_N || !g_hw.rreg) {
+        return;
+    }
+    struct rb_2js_s *e = &g_rb_2js[idx];
+    e->ms   = static_cast<uint32_t>(rbgpu_2iq_ms());
+    e->me   = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
+    e->cps  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F40u) * 4);
+    e->rlcs = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4C04u) * 4);
+    e->bl   = g_hw.rreg(g_hw.ctx, (0xa000u + 0x4E8Du) * 4);
+    e->srst = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA8u) * 4);
+    if (idx + 1 > g_rb_2js_got) { g_rb_2js_got = idx + 1; }
+}
+
+void rbgpu_mewatch_flush_2js(void) {
+    if (g_rb_2js_on != 1) {
+        rbgpu_nvram_note("rbgpu-mew", "off - -rbgpumewatch not set");
+        return;
+    }
+    // last sample with me == 0, and the first with me != 0
+    int last_ok = -1, first_bad = -1;
+    for (unsigned i = 0; i < g_rb_2js_got; i++) {
+        if (g_rb_2js[i].ms == 0) continue;            // never fired
+        if (g_rb_2js[i].me == 0) { last_ok = static_cast<int>(i); }
+        else if (first_bad < 0)  { first_bad = static_cast<int>(i); }
+    }
+    char n[352];
+    if (first_bad < 0) {
+        snprintf(n, sizeof(n),
+                 "n=%u NEVER HALTED in 0.5-12s | last ok i=%d @%ums "
+                 "cps=%x rlcs=%x bl=%x",
+                 g_rb_2js_got, last_ok,
+                 last_ok >= 0 ? g_rb_2js[last_ok].ms : 0,
+                 last_ok >= 0 ? g_rb_2js[last_ok].cps : 0,
+                 last_ok >= 0 ? g_rb_2js[last_ok].rlcs : 0,
+                 last_ok >= 0 ? g_rb_2js[last_ok].bl : 0);
+    } else {
+        const struct rb_2js_s *a = (last_ok >= 0) ? &g_rb_2js[last_ok] : nullptr;
+        const struct rb_2js_s *b = &g_rb_2js[first_bad];
+        snprintf(n, sizeof(n),
+                 "n=%u | OK i=%d @%ums me=%x cps=%x rlcs=%x bl=%x srst=%x "
+                 "|| HALT i=%d @%ums me=%x cps=%x rlcs=%x bl=%x srst=%x",
+                 g_rb_2js_got,
+                 last_ok, a ? a->ms : 0, a ? a->me : 0, a ? a->cps : 0,
+                 a ? a->rlcs : 0, a ? a->bl : 0, a ? a->srst : 0,
+                 first_bad, b->ms, b->me, b->cps, b->rlcs, b->bl, b->srst);
+    }
+    rbgpu_nvram_note("rbgpu-mew", n);
+    rbgpu_log("2js: %s", n);
+    rbgpu_log("2js: bl dropping from c0000001 at the same sample means the "
+              "autoload latch is being cleared and the halt follows it. "
+              "srst non-zero means the GFX block is being soft-reset. "
+              "cps still busy at the halt means it stopped mid-stream. "
+              "NEVER HALTED means the re-halt is later than +12 s.");
+}
+
 void rbgpu_ring_probe_2hk(unsigned phase) {
     if (g_rb_2hk_on < 0) {
         g_rb_2hk_on = checkKernelArgument("-rbgpuringprobe") ? 1 : 0;
