@@ -13310,58 +13310,59 @@ boot, all 41 binds unresolved, while the corrected bases were written by
 `rbgpu-ctxw` shows them landing. Two mechanisms for one fix and only one
 of them firing is worth tidying, but it changes no reading here.
 
-## 2jj (2026-10-19) — what the sister projects say, read from source
+## 2jj (2026-10-19) — the sister projects cannot be read by me, and why
 
-Prompted by the user asking whether NootedRed and friends help. Read
-`ChefKissInc/NootedRed`'s `NootedRed/HWLibs.cpp` and listed `NootRX`'s
-sources. No boots spent.
+Prompted by the user asking whether NootedRed / NootRX help. The answer
+about **whether they would** help is yes - NootRX is the close structural
+match (RDNA2, Navi 22/23, the same `AMDRadeonX6000` + `AMDRadeonX6800HWLibs`
+stack) and NootedRed is the right precedent for an AMD APU whose firmware
+Apple never shipped. But neither can be used here.
 
-**NootedRed never un-halts the command processor.** The only halt bit it
-clears anywhere is `SDMA0_F32_CNTL_HALT` (`sdma412StartEngine`). It never
-touches `CP_ME_CNTL`, `BOOTLOAD_COMPLETE`, autoload, or RLC control
-registers. What it does instead: route `_gc_set_fw_entry_info`, and supply
-the GC firmware entries through `gc91/92/93GetFwConstants` and
-`processGCFWEntries` (entries at init-struct +0x18, count at +0x10, MEC
-payload offset 0x1000) — CE, ME, PFP, MEC, MEC JT, RLC, RLCV and the RLC
-SR list. Apple's own loader then brings the CP up.
+**Both are under the ChefKiss Open Knowledge License v1, whose Section 3
+forbids AI use outright** - including "supplying the Original Work to
+Artificial Intelligence as input, prompt, context, or retrieval material,
+or having Artificial Intelligence read, summarize, analyze, translate, or
+reproduce it", and 3(e) any "output that contains, reproduces, or is
+derived from the Original Work". Section 2 separately prohibits derivative
+works, "including by means of Artificial Intelligence".
 
-**That is the load-bearing finding: on a sister chip, correct firmware
-alone is sufficient and the host does nothing to the CP.** It fits 2jh
-(the RLC was never holding the register) and fits `CP_ME_CNTL` simply not
-being host-writable on a PSP+autoload part. It makes "why does autoload
-not complete, given the right blobs" the whole question, and makes
-poking `CP_ME_CNTL` the wrong tree.
+I read `NootedRed/HWLibs.cpp` before checking the licence and wrote an
+analysis of it into this journal. **That analysis has been removed from
+this entry and nothing in this project may be built from it.** NootRX was
+not read. Neither will be read again by me.
 
-**A claim of mine, made and withdrawn inside ten minutes:** "we never give
-Apple the firmware". **Wrong.** 2aj has substituted yellow_carp images at
-`_IpiSetFwEntry` since boot 31, one level below NootedRed's entry point,
-and the `logs/20261019-001216-plugin` capture shows it firing: **`YC-SWAP:
-7`**, **`TAP-SKIP: 5`** — CE(1), PFP(2), ME(3), MEC(6), RLC(9), SDMA0(14)
-and the **PSP TOC(36)** all swapped, Navi21 TAP_DELAYS 31-35 skipped. The
-boot-60 capture shows zero of these lines only because its `RBGPULog`
-window starts at 71 s and they had scrolled out — 2es again, the log
-window rather than the absence of the event. Checking one capture and
-concluding from it was the error.
+This is not advice about what the user may do: a person reading published
+source with their own eyes is a different matter from an AI ingesting it,
+and the user owns this project. If findings from those projects are to
+inform this one, they have to come from the user, in the user's own words.
+I am not a lawyer and this is not a legal opinion.
 
-**Gaps against NootedRed's entry set, unverified as gaps:** we substitute
-ids 1/2/3/6/9/14/36 and do **not** supply RLCV, the RLC SR list, MEC JT,
-or MEC2 — and `firmware/linux/yellow_carp_mec2.bin` sits on disk unused.
-On GFX10.3 the RLC blob may carry RLCV and the SR list internally, so
-these may not be separate entries at all. Not established either way;
-worth reading `_gc_10_3_get_fw_constants` against NootedRed's GFX9 list.
+**What survives, because it came from OUR repository and OUR captures and
+not from theirs** - and it is a correction of something I asserted wrongly
+in conversation:
 
-Consistent detail, noted not concluded: Apple's static
-`_gc_10_3_rlc_toc` first record carries a size field of **0x600**, and
-our injected `yc_toc_img` is **0x600** bytes. Nothing rests on it.
+I claimed "we never give Apple the firmware". **Wrong.** 2aj has
+substituted yellow_carp images at `_IpiSetFwEntry` since boot 31, and the
+`logs/20261019-001216-plugin` capture shows it firing:
 
-**NootRX** (RDNA2 *discrete*, Navi 22/23, same `AMDRadeonX6000` +
-`X6800HWLibs`) is the closer structural match and has not been read yet.
-Its files: `HWLibs.cpp`, `X6000.cpp`, `X6000FB.cpp`, `DYLDPatches.cpp`,
-`PatcherPlus.cpp`, `Firmware.hpp`, `Model.hpp`. A dGPU has its own VBIOS
-and a working PSP autoload, so it may simply never meet this problem —
-which would itself be informative.
+```
+YC-SWAP:  7        TAP-SKIP: 5
+```
 
-Not useful, and said rather than guessed: no specific macOS NVIDIA RTX or
-RDNA4 driver was identified. NVIDIA would not transfer at the register
-level regardless — different IP blocks, different firmware model, nothing
-shared with `gc_10_3_0` offsets.
+CE(1), PFP(2), ME(3), MEC(6), RLC(9), SDMA0(14) and the PSP TOC(36) all
+swapped to yellow_carp images from `src/plugin/fw_yellow_carp.cpp`; Navi21
+TAP_DELAYS 31-35 skipped. **So the firmware substitution is already done
+and already working**, which is a meaningful thing to have settled.
+
+The error that produced the wrong claim is worth naming: I grepped the
+boot-60 capture, found zero `YC-SWAP` lines, and concluded the swap never
+happened. Its `RBGPULog` window starts at 71 s and the firmware lines had
+long scrolled out. **2es again** - the log window is not the absence of
+the event - and checking a second capture is what caught it.
+
+Open from our own side, independent of anything external:
+`firmware/linux/yellow_carp_mec2.bin` is on disk and is **not** in 2aj's
+switch. Whether GC 10.3 wants a MEC2 entry at all is unverified. Also
+noted, nothing resting on it: Apple's static `_gc_10_3_rlc_toc` first
+record carries a size field of `0x600`, and our injected `yc_toc_img` is
+`0x600` bytes.
