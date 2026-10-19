@@ -12895,3 +12895,76 @@ Outcome table, unchanged except for the last column:
 | `uh=0` | Apple never calls its own un-halt; the fix is to call it |
 | `uh>0`, `me=15000000` | refused even through Apple's ext2 path; the RLC owns it |
 | `uh>0`, `me=0` | it works, and `h` dates whatever re-halts it |
+
+## 2jb (2026-10-19) — Apple CALLS the un-halt. The register does not move.
+
+Boot 56, fresh nonce on every note, all three ring-probe phases present.
+The 2ja build (pure-counter hooks) left the boot intact: `rbgpu-prog b=56
+s=6 0x1B RETURNED 0xE00002C7`, so the 2ja diagnosis was right and the
+hooks were the only thing that had stopped boot 55's successor.
+
+```
+rbgpu-ume = b=56 hk=1 uh=1 @236ms | h=0 @0ms | me=15000000
+rbgpu-bl  = b=56 p0 bl=1 iram=1 complete=0
+                 p1 bl=1 iram=1 complete=0
+                 p2 bl=1 iram=1 complete=0
+rbgpu-ring= b=56 p0 r=b1 w=280 me=15000000
+                 p1 r=b1 w=280 me=15000000
+                 p2 r=b1 w=280 me=15000000
+```
+
+**Row 2 of the 2iy table, and it closes the last alternative.**
+`_gc_unhalt_micro_engines_10_3` is called **exactly once, at 236 ms**.
+`_gc_halt_micro_engines_10_3` is called **never** (`h=0`), so nothing in
+Apple's 10_3 path re-halts the CP afterwards. And `CP_ME_CNTL` reads
+`0x15000000` — CE_HALT, PFP_HALT, ME_HALT — at +12 s, +100 s and +160 s.
+
+Apple runs the correct un-halt for this exact chip version, through
+`_gc_cgs_write_register_ext2(dev, off, val, hwid=0xB, flag=1)` — the third
+write path, the one 2iy identified as never having been watched and the
+only mechanism 2iw had not tested. **The write is refused there too.**
+2iy's "2iw may have had the wrong mechanism" caveat is dead. The register
+is not owned by any path the host has.
+
+`complete=0` at all three phases, on a fresh boot. **2ix's root cause is
+confirmed, not merely consistent:** the RLC never finishes the bootload
+handshake, never releases CE/PFP/ME, and refuses the release to Apple's
+own correct call. `r=b1 w=280` unchanged across 160 s — the CP never
+executes a dword this boot (earlier boots at least advanced `0xb1 ->
+0x2b1`).
+
+**The page-directory fix holds.** `rbgpu-vm` p1 reads `c1:b=87b00b001`
+and `c3:b=87b015001` — both carrying `vram_base_offset` and both with
+bit 0 — against p0's uncorrected `fb00b000` / `fb015000`. The VMID-3 CPF
+fault (`s3009bb`) that dominated every previous boot is **absent from
+`rbgpu-fault` entirely**. (`rbgpu-ptw` reads `arm=0 ... OFF`: that is
+2ig's superseded one-shot timer write, not 2ih's bind-time fix, which is
+what actually wrote the values above.)
+
+New and small: `sb0093b h0 n=1 va=400400000 v11R c4` — one CPF read under
+**VMID 11** at VA `0x4_0040_0000`. Seen once in 37 polls. Noted, not
+chased. The rest of `rbgpu-fault` is the known pair: `s40953 v0W c4` ×17
+(the reset-path artifact 2hx reduced to an artifact) and the hub-1
+phantom ×18.
+
+**Where this leaves the fix.** The host cannot un-halt the CP by writing
+`CP_ME_CNTL` — that is now tested from four directions and refused from
+all four. The only remaining lever is to make the autoload actually
+complete, and one unexplained thing sits right next to it:
+
+```
+HWLibs: Firmware ativvaxy_vcn3_1.dat not found in directory, for deviceId 0x1681
+HWLibs: Unable to get firmware ativvaxy_vcn3_1.dat
+```
+
+On a PSP+autoload part the PSP loads a *bundle* described by the RLC TOC
+and sets `BOOTLOAD_COMPLETE` when the bundle is in place. A missing
+member is a candidate for a bundle that never completes. **This is a
+hypothesis and nothing more** — it is not established that VCN is in the
+GC autoload bundle, nor that Apple's loader treats a missing optional
+firmware as fatal to the handshake. `_psp_np_fw_load returned 0`, so the
+PSP itself reported success.
+
+Also still on the table, and unaffected by the above: 2am's
+`_gc_fw_autoload_is_completed -> return 1` patch is still installed and
+still lying to Apple about this exact latch.
