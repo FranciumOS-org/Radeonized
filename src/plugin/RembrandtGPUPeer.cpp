@@ -367,10 +367,40 @@ static bool rbgpuConsumeArming() {
         return true;
     }
 
-    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    // 2in (2026-10-18): a BOUNDED RETRY, the 2gy debt paid.
+    //
+    // This lookup was tried exactly once. On a boot where the peer runs
+    // early it loses the race against /options appearing in the IODT plane,
+    // logs "not found", and silently does not arm - which looks exactly like
+    // the user forgetting to set the flag. It cost a boot tonight: the
+    // machine came up with a working unaccelerated desktop, `armed=0` live,
+    // and `rbgpu-arm` still 1 because it was never consumed.
+    //
+    // Ten tries, 100 ms apart, so at most one second. IOSleep is safe here:
+    // this runs on the peer's own start() thread, not an interrupt context,
+    // and a second is nothing against the 1.9 s the peer usually starts at.
+    // The count is logged either way, so a boot that armed on the seventh
+    // try is distinguishable from one that armed immediately - absence is
+    // not a result, and neither is a success whose cost is invisible.
+    IORegistryEntry *options = nullptr;
+    unsigned tries = 0;
+    for (; tries < 10; tries++) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (options) {
+            break;
+        }
+        IOSleep(100);
+    }
     if (!options) {
-        rbgpu_log("Peer: /options not found; accelerator NOT armed");
+        rbgpu_log("Peer: /options not found after %u tries over %u ms; "
+                  "accelerator NOT armed. rbgpu-arm is untouched, so a plain "
+                  "reboot retries - no reinstall needed.", tries, tries * 100);
         return false;
+    }
+    if (tries > 0) {
+        rbgpu_log("Peer: /options appeared on try %u (%u ms of waiting) - the "
+                  "2gy race is real and the retry caught it.",
+                  tries + 1, tries * 100);
     }
 
     OSObject *val = options->getProperty("rbgpu-arm");
