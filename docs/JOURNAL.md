@@ -12171,3 +12171,73 @@ inferred. Six per path, with an overflow count.
 | no writes on either path | firmware or the PSP left it halted and no driver code is responsible - which would make this a bring-up sequencing problem, not a missing call |
 | writes only on `hwl` | confirms HWLibs owns GC bring-up, and the fix belongs there |
 
+
+## 2ir result (2026-10-18) — nobody halts the CP, and two reads disagree
+
+Twenty-first armed boot, `logs/20261018-214750-metal/`, `armed=1`, UUID
+`8BDDF829-D83A-3A29-8709-E5DED59B61AC` = `build/out`.
+
+```
+rbgpu-me   = b=49 x6k n=2 o=0 last=0 [0@43621] [0@88641] | hwl n=1 o=0 [0@239]
+rbgpu-rst  = b=49 hk=1 setr=0 @0ms | reset=4 @14589ms
+rbgpu-ring = ... me=15000000  cps=90078600   (both samples)
+rbgpu-diag = ... diag_cp_stat=0 diag_cp_me_cntl=0 diag_cp_mec_cntl=0
+```
+
+**No write of `0x15000000` exists on either path.** Every write to
+`CP_ME_CNTL` is **zero**: HWLibs un-halts the CP at **239 ms**, and X6000
+writes zero twice more at 43.6 s and 88.6 s. The driver performs the
+enable, repeatedly. So the fourth row of 2ir's table is the one that came
+up, in a stronger form than written - not "no writes", but "only enables".
+
+### And the same register reads two different values in one boot
+
+`diag_cp_me_cntl = 0` against the ring probe's `me = 0x15000000`.
+`diag_cp_stat = 0` against `cps = 0x90078600`. Same boot, same offsets
+(`0x1260 + 0x0F56`), **different read mechanisms**: the diag probe uses
+`g_hw.rreg`, the plugin's own BAR0 mapping; the ring probe uses
+`socRegOffset` + `[0x118]`.
+
+Two explanations, and nothing yet separating them:
+
+- **Timing.** The diag probe runs early, shortly after HWLibs' 239 ms
+  enable, where `0` would be correct - and the halt would then be something
+  that happens later, which no driver write does, i.e. firmware or hardware.
+- **The read.** The accessor path returns something that is not this
+  register. CLAUDE.md already distrusts `GRBM_STATUS` for precisely this:
+  it reads `a0003028` in every sample of every boot, including ones where
+  `CP_STAT = 0`.
+
+**"The CP is halted" is the claim 2hn, 2hp, 2hl and everything since rests
+on, and it is now in question.** Nothing further gets built on it until
+this is settled.
+
+### A new fault, and it is a good sign
+
+```
+s101b3b h0 n=1 va=400080000 mx=400080000 v1R c13
+```
+
+A **new signature**, VMID **1**, client 13, a read at `0x4_0008_0000` -
+appearing only after context 1 was corrected in 2ip. A context that was
+pointing its walker at unmapped memory now produces a specific fault from
+a specific client at a specific address, which is what a context that is
+actually being walked looks like.
+
+## 2is (2026-10-18) — read it both ways, in the same instant
+
+`CP_ME_CNTL`, `CP_STAT` and `GRBM_STATUS`, each read through **both**
+paths microseconds apart inside the ring probe, at every phase, with an
+explicit `OK` / `DIFF` per register.
+
+| `rbgpu-rd2` reading | means |
+|---|---|
+| `DIFF` on me/cps | the accessor read is not to be trusted. "The CP is halted" collapses, and so does the GRBM_STATUS debt - one explanation for both. |
+| `OK` on all three, `me=15000000` | the halt is real, arrived after HWLibs' 239 ms enable, and **no driver code did it** - firmware or hardware re-asserts it, which is a different and much more interesting problem |
+| `OK`, `me=0` at +12 s | the CP is not halted at all and every reading of it since 2hn was the accessor misleading us |
+| `DIFF` on grbm only | the long-standing GRBM_STATUS debt is a read-path artifact and the CP readings stand |
+
+This is the cheapest decisive measurement available and it gates
+everything downstream, which is why it comes before any further work on
+the CP.
+
