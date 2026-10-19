@@ -11778,3 +11778,87 @@ the lead.
 | `nq>1` | the discriminator cannot separate them; choosing would be a guess and none was made |
 | `m=0` on a candidate | that physical address could not be mapped at all - itself an answer about whether it exists |
 
+
+## 2il result (2026-10-18) — the page decided, and mc2pa was right all along
+
+Sixteenth consecutive armed boot, `logs/20261018-203926-metal/`, UUID
+`D3D30EC3-3FB1-3C39-95B0-EF36582E72B6` = `build/out`.
+
+```
+rbgpu-pdc = b=44 fbo=fb015000
+  a pa=fb015000   m=1 nz=512 v=512 f=ffffffffffffffff
+  b pa=87b015000  m=1 nz=1   v=1   f=20000000fb016001   OK
+  c pa=f4fb015000 m=1 nz=512 v=512 f=ffffffffffffffff
+  d pa=97b015000  m=1 nz=512 v=512 f=ffffffffffffffff
+  W b 7b015001/8  bk=7b015001/8
+```
+
+**Candidate b is a page directory and the other three are nothing.**
+a, c and d read `0xFFFFFFFFFFFFFFFF` across all 512 qwords - unmapped.
+b holds exactly **one** nonzero entry, `0x2000_0000_FB01_6001`: bit 0 set,
+address field `0xFB01_6000` (the next page), and top bits `0x2000...`
+which are **precisely the L0 PDE template 2if measured on this hardware**
+(`0x2000000000000001`). A textbook depth-1 root with one populated entry,
+built by Apple's own `getPDEValue`.
+
+### Two corrections
+
+**`mc2pa` was right all along, and 2ii's value was correct.** My argument
+that `0x8_7B01_5000` lies past installed RAM was **wrong**: the carve-out
+sits *above* the OS-visible 32 GB in physical address space, the page maps,
+and it contains real data. `hw.memsize` does not bound physical addresses
+here, and using it as if it did is the same shape of error as reading a
+register without establishing what makes the reading meaningful - applied
+to a host-side number this time.
+
+**And Apple's own value really is the broken one.** `0xFB01_5000` reads
+all-ones: it points at unmapped memory. That is now measured directly
+rather than inferred from arithmetic, which is what the whole 2ig-2ik
+detour was trying and failing to establish.
+
+So the defect stands as 2ii framed it - the driver omits
+`vram_base_offset` - and the correction is `fb_off + 0x7_8000_0000 | 1`.
+2il wrote it at **+12 s**, early, before the Metal client, where 2ig's
++100 s write could never have mattered.
+
+### And the fault is unchanged
+
+`rbgpu-vm` confirms `c3:b=87b015001` at +100 s, so the write stuck. The
++100 s ring sample still reads `vmf=40953`, `me=15000000`, `r=2b1 w=380`,
+and Metal still hangs at commit. `s3009bb n=2` is cumulative and cannot
+say which side of the write those two faults fell on.
+
+**No clean post-write sample exists for this boot.** Live NVRAM reads
+`b=39` - the 2ig boot's nonce, not 2il's `b=44` - so phase 2 never reached
+NVRAM and, by the 2gd rule, those live notes are not evidence about this
+boot. That is a gap in the instrument, not a result, and 2im closes it.
+
+## 2im (2026-10-18) — follow the walk, and count faults after the write
+
+Two instrument fixes and one new measurement.
+
+**Count post-write faults.** 2il snapshots the fault counter at the moment
+it writes; `rbgpu-fault` gains `fw=`, the number of faults seen *after*
+the write (`-1` if no write happened). This is what 2ig and 2il both
+needed and neither had.
+
+**Follow the walk.** 2il recorded the single PDE's value but not its
+**index**, which is exactly what says whether it covers the faulting
+address. The faulting VA `0x4_0030_0000` is page `0x300` above this
+context's window start `0x4_0000_0000`. 2im dumps the nonzero
+`(index, value)` pairs of the directory, then follows the first to its
+page table - through the same `mc2pa` 2il just proved - and reports that
+page's `nz`/`v` and first entry. The geometry is read out of the data
+rather than computed from a `PAGE_TABLE_BLOCK_SIZE` decode never verified
+on this chip.
+
+| `rbgpu-walk` reading | means |
+|---|---|
+| the valid PDE's index cannot reach page 0x300 | the directory does not map the address CPF reads. The base being right changes nothing, and the question moves from the base to **who populates the table**. |
+| it can, and the PTE for 0x300 is valid | the translation should work and the fault is not a missing mapping at all |
+| `pt=... UNMAPPED` | the PDE points at a page that does not exist, i.e. the same defect one level down |
+
+Also fixed: `rbgpu_ring_probe_2hk`'s frame hit the 1024-byte limit again
+(1336). The walk and both new probes are now `noinline`, which is the same
+remedy the 2hs/2gv routing split used.
+
