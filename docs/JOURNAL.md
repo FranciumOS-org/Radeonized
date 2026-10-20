@@ -14932,3 +14932,108 @@ decode can be checked independently.
 
 Build `240F4E75`. New note `rbgpu-cph`; raw hex goes to the log. Read-only,
 no boot-arg change.
+
+## 2kh (2026-10-20) — THE HALT IS A CONSEQUENCE: the CP's IB1 fetch faults, and 2ix's fix lands too late
+
+Boot 81, nonce fresh, build `240F4E75`. The sweep landed.
+
+```
+rbgpu-cph = b=81 halt@8883ms int=0 intc=3c0000
+  | hdr me=c0033700 pfp=ffff1000 ce=ffff1000
+  | ip  me=121 pfp=986 ce=68f
+  | ib1=400300000 sz=0 cmd=1f0 | ib2=0 sz=0 cmd=0 | ceib1=0 sz=0
+  | vmf=3009bb va=000400300
+  || +50ms@8934ms ip me=121 pfp=986 ce=68f PARKED
+```
+
+### The chain, end to end
+
+1. **`CP_IB1_BASE = 0x4_0030_0000`** at the halt sample.
+2. **`GCVM_L2_PROTECTION_FAULT_STATUS = 0x3009bb`,
+   `_ADDR_LO32 = 0x400300`.** Through 2hs's derivation
+   (`VA = (HI32 & 0xf) << 44 | (LO32 << 12)`) that is VA **`0x4_0030_0000`**.
+   **The faulting address IS the CP's IB1 base.** Same register sample, same
+   boot, no inference between them.
+3. `CID = 4` = **CPF**, the command processor's *fetcher*
+   (`gfxhub_client_ids[]`, gfxhub_v2_1.c), on a **READ**, under **VMID 3** -
+   byte-for-byte the fault 2ht recorded as #1 across four boots.
+4. **All three engines are PARKED.** `CP_ME_INSTR_PNTR`, `_PFP_`, `_CE_` read
+   `121 / 986 / 68f` at the halt and the *same* three values 50 ms later.
+   They are not looping; they stopped.
+5. `CP_ME_HEADER_DUMP = 0xc0033700` decodes as type 3, `COUNT = 3` → **5
+   dwords**, opcode **`0x37` = `PACKET3_WRITE_DATA`** - the exact 5-dword
+   shape of `gfx_v10_0_write_data_to_reg`. PFP and CE both read `0xffff1000`,
+   which is not a plausible header (COUNT `0x3fff`, op `0x10`) and is read as
+   an unarmed/sentinel value, not a packet.
+
+**So `CP_ME_CNTL = 0x15000000` is a CONSEQUENCE, not an act.** The CP points
+IB1 at a VA it cannot translate, the fetch faults at CPF, and the engines
+park. That is the reviewer's hypothesis - "the CP is halting itself on
+something it fetched" - confirmed on this chip, with the faulting address and
+the CP's own IB1 base being the same number.
+
+### WITHDRAWN, and it is load-bearing: 2ix did not eliminate this fault
+
+CLAUDE.md states 2ix's PDE correction "**eliminates the VMID-3 CPF fault**,
+reproducibly, and it stays gone". **It does not.** Boot 81 reads
+`vmf=3009bb va=400300` at the halt sample with `-rbgpuptfix` in boot-args.
+
+`rbgpu-vm` shows why, and the two phases disagree:
+
+```
+p=0 (+12 s)  c3: b=fb015000     <- Apple's value. NO vram_base_offset, NO VALID bit
+p=1 (+100 s) c3: b=87b015001    <- the corrected value, offset AND valid bit
+```
+
+**The halt is at 8.88 s, before both.** 2ix's write happens at VM *bind*
+time, and at the halt VMID 3's page-directory base is still Apple's broken
+`0xfb015000`. The fix is real and it works - it simply **lands after the CP
+has already tried to fetch**. Every later sample shows it corrected, which is
+exactly why "it stays gone" looked true for four milestones: we only ever
+looked at +12 s and later, and +12 s is already too late.
+
+This retires the puzzle in 2ke's closing note (why `vmf=3009bb` kept
+appearing with `-rbgpuptfix` in). The answer is timing, not a regression.
+
+### `int=0` means NOTHING, and the guard caught it
+
+`CP_INT_CNTL_RING0 = 0x3c0000` = bits 18-21 = `CMP_BUSY`, `CNTX_BUSY`,
+`CNTX_EMPTY`, `GFX_IDLE`. **`PRIV_INSTR` (22), `PRIV_REG` (23),
+`OPCODE_ERROR` (24) and `RESERVED_BIT_ERROR` (27) are all DISABLED.** So
+`CP_INT_STATUS_RING0 = 0` says nothing about privileged-register or opcode
+errors. 2kf captured the enable register beside the status precisely so this
+zero could not be read as a clean negative, and it was the right call.
+
+### The reviewer's item 1 is answered, and 2kc's mapping was right after all
+
+`rbgpu-ib = b=81 mc=f40fbe9000 pa=78fbe9000 sz=952 vmid=0 ctl=800003b8
+t3=59 nz=183 chain=14 walked=952 | noME-in-IB`
+
+- **`vmid=0`** (control dword `0x800003b8`, bits 27:24 = 0), so the address
+  **is** a carve-out MC address and `mc2pa` was correct. The reviewer's
+  wrong-translation hypothesis is refuted for this IB.
+- **`chain=14 walked=952`** - the chain walk reached the declared size
+  **exactly**. So it IS a genuine command buffer, merely a sparse one, and
+  2kd's validator did its job where 2kc's `t3` count could not.
+  **`noME-in-IB` is now a REAL negative** for that buffer.
+
+But that buffer is **not the one that matters**: the ring's `INDIRECT_BUFFER`
+packets point at `0xf4_0fbe_9000` under VMID 0, while **`CP_IB1_BASE` reads
+`0x4_0030_0000`** - a different address in a different space. So RB0's own
+IBs are fine, and the IB that killed the CP was submitted under VMID 3 by
+something other than the ring page we have been scanning.
+
+### Flagged, not explained
+
+`rbgpu-vmid = b=81 hk=1 av=41 fail=41 vmids=000e` - **all 41 `assignVMID`
+calls report failure.** `vmids=000e` still says VMIDs 1, 2 and 3 were handed
+out. Not interpreted here: `fail` is the hook's own criterion and has not been
+re-read against the code that sets it, which is the 2ha rule. Recorded so it
+is not lost.
+
+### What this makes the fix
+
+Not a CP register. **VMID 3's page-directory base has to be correct before
+the first IB fetch under it**, which is earlier than VM bind time. The
+candidates are to correct it at the point Apple programs the context rather
+than at bind, or to find why the first fetch happens before any bind.
