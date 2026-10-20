@@ -7544,6 +7544,22 @@ static uint64_t g_rb_2ki_first_was = 0;
 static uint64_t g_rb_2ki_first_now = 0;
 static uint32_t g_rb_2ki_first_vmid = 0xFFFFFFFFu;
 static uint32_t g_rb_2ki_first_ms  = 0;
+// 2kj (2026-10-20): per-VMID, because boot 82's note could not answer the one
+// question that matters. It read `calls=353 fixed=3 zero=334 above=16` with
+// `first vmid=2` - so the site runs, the rewrite works and nothing breaks, but
+// whether **VMID 3** ever comes through with a base was unrecorded. VMID 3 is
+// the one the CP faults on (`ib1 = 0x4_0030_0000`, `vmf = 3009bb`).
+//
+// `zero=334` is explained and is not a bug: the PD-programming block in
+// prepareVMInvalidateRequest sits behind `cmpb $0x1, 0x24(%rdx); jne`, so
+// Apple writes a base only when `info->0x24 == 1`. The other calls are
+// invalidate-only and carry no base, and programAndInvalidateVM zeroes the
+// request struct before the call - hence a zero read. The guard was right to
+// skip them.
+#define RB_2KJ_VMIDS 16u
+struct rb_2kj_s { uint32_t fixed, zero, above, valid; uint64_t was, now; };
+static struct rb_2kj_s g_rb_2kj[RB_2KJ_VMIDS];
+static uint32_t g_rb_2kj_oob = 0;   // vmid outside 0..15, if that ever happens
 
 static void hooked_prepareVMInvalidateRequest_2ki(void *vmm, void *req,
                                                   const void *info, bool flag) {
@@ -7564,12 +7580,14 @@ static void hooked_prepareVMInvalidateRequest_2ki(void *vmm, void *req,
     uint32_t vmid = info ?
         reinterpret_cast<const uint32_t *>(info)[1] : 0xFFFFFFFFu;
 
-    if (was == 0)                 { g_rb_2ki_zero++;    return; }
-    if (was & 1)                  { g_rb_2ki_already++; return; }
+    struct rb_2kj_s *v = (vmid < RB_2KJ_VMIDS) ? &g_rb_2kj[vmid] : nullptr;
+    if (!v) { g_rb_2kj_oob++; }
+    if (was == 0)   { g_rb_2ki_zero++;    if (v) v->zero++;  return; }
+    if (was & 1)    { g_rb_2ki_already++; if (v) v->valid++; return; }
     if (g_rb_2ed_fb_off == 0)     { return; }   // no offset known: do nothing
     uint64_t vstart = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
     uint64_t vbo    = static_cast<uint64_t>(g_rb_2ed_fb_off)  << 24;
-    if (vstart && was >= vstart)  { g_rb_2ki_above++;   return; }
+    if (vstart && was >= vstart) { g_rb_2ki_above++; if (v) v->above++; return; }
 
     uint64_t now = (was + vbo) | 1ull;
     if (g_rb_2ki_first_vmid == 0xFFFFFFFFu) {
@@ -7585,10 +7603,11 @@ static void hooked_prepareVMInvalidateRequest_2ki(void *vmm, void *req,
     r[1] = static_cast<uint32_t>(now);
     r[3] = static_cast<uint32_t>(now >> 32);
     g_rb_2ki_fixed++;
+    if (v) { v->fixed++; if (v->was == 0) { v->was = was; v->now = now; } }
 }
 
 void rbgpu_pdefix_flush_2ki(void) {
-    char n[352];
+    char n[608];
     if (!g_rb_2ki_hooked) {
         rbgpu_nvram_note("rbgpu-pde",
                          "hk=0 the prepareVMInvalidateRequest hook did NOT "
@@ -7602,8 +7621,30 @@ void rbgpu_pdefix_flush_2ki(void) {
              g_rb_2ki_already, g_rb_2ki_zero, g_rb_2ki_above,
              g_rb_2ki_first_vmid, g_rb_2ki_first_ms,
              g_rb_2ki_first_was, g_rb_2ki_first_now);
+    size_t at = strlen(n);
+    for (unsigned i = 0; i < RB_2KJ_VMIDS && at < sizeof(n) - 40; i++) {
+        const struct rb_2kj_s *v = &g_rb_2kj[i];
+        if (!v->fixed && !v->zero && !v->above && !v->valid) continue;
+        int w2 = snprintf(n + at, sizeof(n) - at,
+                          " | v%u f=%u z=%u a=%u V=%u", i, v->fixed, v->zero,
+                          v->above, v->valid);
+        if (w2 > 0) at += static_cast<size_t>(w2);
+    }
+    // VMID 3 is the one the CP faults on, so it gets its values spelled out.
+    if (g_rb_2kj[3].was && at < sizeof(n) - 48) {
+        snprintf(n + at, sizeof(n) - at, " | v3 %llx->%llx",
+                 g_rb_2kj[3].was, g_rb_2kj[3].now);
+    } else if (at < sizeof(n) - 24) {
+        snprintf(n + at, sizeof(n) - at, " | v3 NEVER CARRIED A BASE");
+    }
     rbgpu_nvram_note("rbgpu-pde", n);
     rbgpu_log("2ki: %s", n);
+    rbgpu_log("2kj: `v3 NEVER CARRIED A BASE` means Apple does not program "
+              "context 3's page-table base through this path at all, which "
+              "matches 2hr failing to find any write path - and then the "
+              "writer is somewhere else and this hook can never fix it. "
+              "`v3 f>0` means we DID correct it and it was still too late or "
+              "still wrong.");
     rbgpu_log("2ki: calls=0 means the request is never prepared and this is "
               "the wrong site. fixed=0 with calls>0 means every value already "
               "passed a guard - read `left:` to see which. The test is "
