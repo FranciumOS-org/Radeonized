@@ -7529,6 +7529,111 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
 // **defined** in (__TEXT,__text) of AMDRadeonX6000 by `nm -m`, so routing by
 // this kext's id is safe (milestone 2c). Observe-only: both call the
 // original and change nothing.
+// 2ki: see the route site for the full derivation.
+static uint64_t rbgpu_2iq_ms(void);   // defined with the 2iq restart hooks
+static void (*orig_prepareVMInvalidateRequest_2ki)(void *, void *, const void *,
+                                                   bool) = nullptr;
+static int      g_rb_2ki_hooked = 0;
+static int      g_rb_2ki_on     = -1;
+static uint32_t g_rb_2ki_calls  = 0;
+static uint32_t g_rb_2ki_fixed  = 0;
+static uint32_t g_rb_2ki_already = 0;   // bit 0 already set: left alone
+static uint32_t g_rb_2ki_zero   = 0;    // zero PD address: left alone
+static uint32_t g_rb_2ki_above  = 0;    // already >= vram_start: left alone
+static uint64_t g_rb_2ki_first_was = 0;
+static uint64_t g_rb_2ki_first_now = 0;
+static uint32_t g_rb_2ki_first_vmid = 0xFFFFFFFFu;
+static uint32_t g_rb_2ki_first_ms  = 0;
+
+static void hooked_prepareVMInvalidateRequest_2ki(void *vmm, void *req,
+                                                  const void *info, bool flag) {
+    if (orig_prepareVMInvalidateRequest_2ki) {
+        orig_prepareVMInvalidateRequest_2ki(vmm, req, info, flag);
+    }
+    if (g_rb_2ki_on < 0) {
+        g_rb_2ki_on = checkKernelArgument("-rbgpupdefix") ? 1 : 0;
+        rbgpu_log("2ki: PD-address correction %s",
+                  g_rb_2ki_on ? "ARMED (-rbgpupdefix)" : "OFF (observe only)");
+    }
+    if (!req) { return; }
+    g_rb_2ki_calls++;
+
+    auto *r = reinterpret_cast<volatile uint32_t *>(req);
+    // request+0x04 = PD address LO32, +0x0c = HI32 (from the disassembly).
+    uint64_t was = (static_cast<uint64_t>(r[3]) << 32) | r[1];
+    uint32_t vmid = info ?
+        reinterpret_cast<const uint32_t *>(info)[1] : 0xFFFFFFFFu;
+
+    if (was == 0)                 { g_rb_2ki_zero++;    return; }
+    if (was & 1)                  { g_rb_2ki_already++; return; }
+    if (g_rb_2ed_fb_off == 0)     { return; }   // no offset known: do nothing
+    uint64_t vstart = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
+    uint64_t vbo    = static_cast<uint64_t>(g_rb_2ed_fb_off)  << 24;
+    if (vstart && was >= vstart)  { g_rb_2ki_above++;   return; }
+
+    uint64_t now = (was + vbo) | 1ull;
+    if (g_rb_2ki_first_vmid == 0xFFFFFFFFu) {
+        g_rb_2ki_first_was  = was;
+        g_rb_2ki_first_now  = now;
+        g_rb_2ki_first_vmid = vmid;
+        g_rb_2ki_first_ms   = static_cast<uint32_t>(rbgpu_2iq_ms());
+        rbgpu_log("2ki: vmid %u PD %llx -> %llx (+vram_base_offset %llx, "
+                  "VALID) %s", vmid, was, now, vbo,
+                  g_rb_2ki_on ? "WRITTEN" : "not written, observe only");
+    }
+    if (g_rb_2ki_on != 1) { return; }
+    r[1] = static_cast<uint32_t>(now);
+    r[3] = static_cast<uint32_t>(now >> 32);
+    g_rb_2ki_fixed++;
+}
+
+void rbgpu_pdefix_flush_2ki(void) {
+    char n[352];
+    if (!g_rb_2ki_hooked) {
+        rbgpu_nvram_note("rbgpu-pde",
+                         "hk=0 the prepareVMInvalidateRequest hook did NOT "
+                         "take - silence is the hook, not the driver");
+        return;
+    }
+    snprintf(n, sizeof(n),
+             "hk=1 on=%d calls=%u fixed=%u | left: valid=%u zero=%u above=%u | "
+             "first vmid=%u @%ums %llx -> %llx",
+             g_rb_2ki_on, g_rb_2ki_calls, g_rb_2ki_fixed,
+             g_rb_2ki_already, g_rb_2ki_zero, g_rb_2ki_above,
+             g_rb_2ki_first_vmid, g_rb_2ki_first_ms,
+             g_rb_2ki_first_was, g_rb_2ki_first_now);
+    rbgpu_nvram_note("rbgpu-pde", n);
+    rbgpu_log("2ki: %s", n);
+    rbgpu_log("2ki: calls=0 means the request is never prepared and this is "
+              "the wrong site. fixed=0 with calls>0 means every value already "
+              "passed a guard - read `left:` to see which. The test is "
+              "whether rbgpu-cph still reports vmf=3009bb at the halt and "
+              "whether the halt happens at all.");
+}
+
+// 2ki: routed from its own function - folding it into processX6000 pushed
+// that frame past the 1024-byte -Wframe-larger-than limit.
+__attribute__((noinline))
+static void rbgpu_route_pdefix_2ki(KernelPatcher &patcher, size_t id,
+                                   mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest pvir(
+        "__ZN26AMDRadeonX6000_AMDGFX10VMM26prepareVMInvalidateRequestEP25AMD_VM_INVALIDATE_REQUESTPK22AMD_VM_INVALIDATE_INFOb",
+        hooked_prepareVMInvalidateRequest_2ki,
+        orig_prepareVMInvalidateRequest_2ki);
+    if (patcher.routeMultiple(id, &pvir, 1, address, size)) {
+        rbgpu_log("2ki: hooked AMDGFX10VMM::prepareVMInvalidateRequest - the "
+                  "page-directory address is corrected in the request, before "
+                  "the CP's WRITE_DATA packet is built");
+        g_rb_2ki_hooked = 1;
+    } else {
+        rbgpu_log("2ki: FAILED to hook prepareVMInvalidateRequest - hk=0 in "
+                  "rbgpu-pde means the hook, not a request that never ran");
+        g_rb_2ki_hooked = 0;
+        patcher.clearError();
+    }
+
+}
+
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
 static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
@@ -8941,6 +9046,57 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
         g_rb_2ic_hooked = 0;
         patcher.clearError();
     }
+
+    // 2ki (2026-10-20): correct the page-directory address IN the invalidate
+    // request, which is the last place it is touched before it becomes packets.
+    //
+    // 2kh located the halt: CP_IB1_BASE = 0x4_0030_0000 and the GCHUB fault
+    // address are the SAME number in the same sample, CID=4 (CPF) READ under
+    // VMID 3. The CP fetches an IB through a page directory it cannot
+    // translate and parks all three engines - CP_ME_CNTL = 0x15000000 is the
+    // result, not the act.
+    //
+    // 2ix's fix was right and lands too late: it writes at VM *bind* time,
+    // and rbgpu-vm reads c3 = fb015000 (Apple's) at +12 s against 87b015001
+    // at +100 s, while the halt is at 8.88 s - before both.
+    //
+    // Why a host register write cannot win that race, and this is the part
+    // 2hr/2ia already found independently: on gfx10 the context page-table
+    // base for VMIDs 1-15 is **not written by host MMIO at all**. Linux's
+    // `gmc_v10_0_emit_flush_gpu_tlb` emits it with `amdgpu_ring_emit_wreg` -
+    // the CP writes it from the ring. 2hr could not find an MMIO write path
+    // because there is none. And 2kh's `CP_ME_HEADER_DUMP = 0xc0033700` is a
+    // 5-dword WRITE_DATA, the exact shape of `gfx_v10_0_write_data_to_reg`.
+    //
+    // So the value must be corrected BEFORE the packet is built.
+    // `prepareVMInvalidateRequest` (0xbe9b4b4) is where it is assembled, and
+    // the disassembly shows the defect plainly:
+    //
+    //     be9b505: movq 0x18(%r14), %rcx     ; info->0x18 = the PD address
+    //     be9b509: movl %ecx, 0x4(%rbx)      ; LO32 -> request+0x04
+    //     be9b50c: shrq $0x20, %rcx
+    //     be9b510: movl %ecx, 0xc(%rbx)      ; HI32 -> request+0x0c
+    //
+    // Copied through verbatim: no `vram_base_offset`, no VALID bit - while
+    // the START/END addresses immediately below ARE processed (>>12, >>44).
+    // On Navi 21 `vram_base_offset` is 0 so the omission is invisible; on an
+    // APU with FB_OFFSET 0x780 it points at unmapped memory.
+    //
+    // The correction is Linux's own: `amdgpu_gmc_pd_addr` ORs
+    // `AMDGPU_PTE_VALID` for Vega10+ at every depth, and
+    // `amdgpu_gmc_vram_mc2pa` adds `vram_base_offset`. Apple's own
+    // `getPDEValue` (0xbe9b9de) ends `incq %rax`, so every PDE Apple builds
+    // has bit 0 set - these registers are anomalous by Apple's own convention.
+    //
+    // GUARDED, because a blind add would corrupt a correct value (2cy):
+    // the rewrite happens only when the value is nonzero, has bit 0 CLEAR,
+    // and is BELOW vram_start. Apple's `0xfb015000` satisfies all three;
+    // an already-correct `0x87b015001` satisfies none and is left alone.
+    // Every decision is logged, including the ones that decline.
+    //
+    // Behind -rbgpupdefix. It writes a value the GPU will use, so it is
+    // opt-in.
+    rbgpu_route_pdefix_2ki(patcher, id, address, size);
 
     // 2id: the VM flush. Rule 9 (2gb): programAndInvalidateVM at 0xbe9b7a2
     // opens `55 48 89 e5 41 57 41 56 41 55 41 54 53` - pushes, a movq and
@@ -12832,6 +12988,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // 2ic: who wrote the context page-directory bases, same discipline.
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
+    rbgpu_pdefix_flush_2ki();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
     rbgpu_vmid_flush_2if();
