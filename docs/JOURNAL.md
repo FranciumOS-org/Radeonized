@@ -15803,3 +15803,98 @@ Build `C4D04957-2002-3266-BE2A-E61966648BBA`.
 | `L1 ok`, `L0` bad | the leaf tier needs the same, one level down |
 | `L1 BAD:above carve-out` again | mc2pa is not the transform the walker wants |
 | `nofb>0` in `rbgpu-adj` | fb_off unknown at table-build time; the fix needs an earlier source for it |
+
+## 2ks CONFIRMED (2026-10-20, boot 89) — THE HALT IS GONE
+
+`b=89`, UUID `C4D04957`, no panic. Every indicator this project has used
+to describe the hang flipped in one boot.
+
+```
+rbgpu-mew   = b=89 n=24 NEVER HALTED in 0.5-12s | last ok i=23 @12331ms cps=0
+rbgpu-mew2  = b=89 n=60 NO TRANSITION in 6.5-9.5s (ok=59 bad=-1)
+rbgpu-cph   = b=89 NO HALT SAMPLE - the sweep never latched
+rbgpu-pdw   = b=89 SKIP va=0 - nothing to walk
+rbgpu-adj   = b=89 hk=1 on=1 calls=150 inmap=147 fixed=147 nostrip=0 nofb=0
+              | first f410001000 -> 10001000 -> 790001000
+rbgpu-ring  = b=89 p=0 vmf=0 vmalo=0 vmahi=0 vmfc=1ffc r=500 w=500 cps=0
+                       grbm=3028 g2=8 me=0 rbb=ffbfe000
+                   p=1 vmf=0 r=880 w=880 cps=0 grbm=3028 g2=4000008 me=0
+                   p=2 vmf=0 r=880 w=880 cps=0 grbm=3028 g2=8 me=0
+rbgpu-fault = b=89 hk=1 c=0 f=0 r=0 o=0 fw=0
+rbgpu-fence = b=89 fv=ffbfde0000 ... seq=8 o=0 d: a 0 500 0 500 0 0 1 ... nz=1
+rbgpu-pm4   = b=89 ph=0 pa=6c88ed000 t3=783 r=500 w=500 | ib=8@f40fbe9000
+```
+
+**The fix is one addition.** `adjustVRAMAddress` hands back
+`mc - vram_start`; 2ks returns `mc - vram_start + vram_base_offset`
+(`amdgpu_gmc_vram_mc2pa`), applied only to the 147 calls from inside
+`mapVMPT`. `0x10001000 + 0x780000000 = 0x790001000`.
+
+**What changed, item by item, against the record:**
+
+- **The halt.** 24 ticks over 0.5-12 s and 60 at 50 ms through the window
+  that halted at 8835/8844/8851/8897/8947 ms in five consecutive boots.
+  Nothing halted. The 2kf sweep never latched because `me` never went
+  nonzero.
+- **The ring drains.** `r == w` at all three phases, and `w` advanced
+  `0x500 -> 0x880` between them with `r` keeping up. 2hl's two samples
+  sixty seconds apart read `rptr=2b1 wptr=380`, byte for byte identical,
+  207 dwords unread.
+- **`GRBM_STATUS = 0x3028`** at every phase: no `GUI_ACTIVE`, no
+  `CP_BUSY`. Every earlier boot read `a0003028` except boot 64's single
+  late sample (2jr).
+- **Apple sees no faults at all.** `c=0 f=0 r=0 o=0`. 2hv read
+  `c=8 f=8 r=4` - every poll found one. **Even the MMHUB hub-1 phantom
+  is gone** (`fw=0`), which 2ht called a separate defect; so the phantom
+  was downstream of the fault stream, not independent of it.
+- **The fences pass the submissions.** The fence page holds `0xa` = 10
+  with `seq=8`. 2hz read **6** with fences 7 and 8 submitted and never
+  completed, and called that "the GPU executes the stream, signals six
+  fences correctly, then stops partway". It no longer stops.
+- **`vmfc=1ffc`** - fault reporting is still fully enabled, so `vmf=0`
+  is a chip reporting no fault, not one configured to ignore them. The
+  2hn guard holds in the positive direction too.
+
+**And the machine did not freeze.** The user logged in after running
+`plugin_check.sh` and the screen filled with artifacts "like it tried to
+render the homescreen" instead of hanging. Every armed boot since 2hh had
+frozen at exactly that point (2hj: `AMDAccelEventMachine` stuck in
+`resetHardwareAndReplay -> waitForTimestamp -> pollWait`). That thread
+polls for a timestamp; the timestamps now arrive, which is the fence
+count above seen from userspace.
+
+**The causal chain, complete, from 2kh to here:**
+
+1. `allocVMBlock` hands out a page-table block as an MC address
+   (`elem+0x20`).
+2. `mapVMPT` passes it through `adjustVRAMAddress`, which strips the MC
+   base `0xF4_0000_0000` and returns a carve-out-relative offset.
+3. `getPDEValue(level, 0)` supplies flags only - the address argument is
+   deliberately zeroed.
+4. The composed entry therefore carries a carve-out-relative address
+   where the walker needs a system-physical one, short by
+   `vram_base_offset` = `0x7_8000_0000`.
+5. The walk fails, CPF cannot fetch the IB at the VA it was given, and
+   the CP's engines park: `CP_ME_CNTL = 0x15000000`, which is the power-on
+   value, not something anyone wrote (2kh).
+6. The timestamp never retires, `resetHardwareAndReplay` waits for it
+   forever, WindowServer blocks on the mutex it holds, and the machine
+   freezes (2hj).
+
+**Retroactively explained.** 2em (CONTEXT0's PT_BASE) and 2ki (the
+per-VMID page-directory base) were each undoing step 2 at one downstream
+site, after the fact. That is why 2ki was "necessary and not sufficient"
+and why its correction always landed at 2.9 s, after a fetch at 8.9 s
+that used an entry it never touched. One function, three symptoms, and
+the project had been patching the symptoms since 2em.
+
+**Still open, and now the frontier:** the artifacts. The GPU executes and
+writes pixels; where it writes them is wrong. That is tiling/swizzle,
+surface layout or DCN - a rendering problem, the first this project has
+had. `-rbgpuptbase` and `-rbgpupdefix` are now probably redundant, since
+they correct downstream of 2ks, but they are harmless and removing them
+is a separate experiment.
+
+Not claimed: that nothing else is wrong, that this boot would survive
+longer than the capture, or that the artifacts are unrelated to the page
+tables. n=1 on everything above.
