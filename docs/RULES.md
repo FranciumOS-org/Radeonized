@@ -703,6 +703,21 @@ making `noME-in-IB` a real negative **for that buffer**. But
 `CP_IB1_BASE` names a different address in a different space, so the IB
 that killed the CP was never in the ring page being scanned.
 
+**`getPDEValue` RETURNS FLAGS ONLY, and 2km is REFUTED (2ko, boot 85).**
+Over 108 calls in one boot, 2if's own record is `L0
+f=2000000000000001` and `L1 f=100000000000001` - address bits 47:12
+**zero**, first value identical to last. So `getPDEValue` is a template
+builder; the address in a PDE is ORed in by its CALLER, from a block the
+allocator hands out as an MC address (`allocVMBlock` -> `elem+0x20`).
+2hr's "`getPDEValue` ends `incq %rax`, so every PDE Apple builds has bit
+0 set" is true and says nothing about the address. Do not hook
+`getPDEValue` or `getPTEValue` to correct an address - there is none
+there. The defective entry is composed:
+`0x20000000fb016001` = `0x2000000000000001` (template, VALID included)
+`| 0xfb016000` (the block, never passed through `mc2pa`). **The fix site
+is that composition**, and 2ko names it by recording Apple's call site
+from inside the hook that already exists. [2ko]
+
 Open, flagged, not interpreted: `rbgpu-vmid` reads `av=41 fail=41` -
 every `assignVMID` call reports failure while `vmids=000e` says 1, 2 and
 3 were handed out. `fail` is the hook's own criterion and has not been
