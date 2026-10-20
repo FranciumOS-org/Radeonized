@@ -15130,3 +15130,79 @@ one level down. If the fault moves rather than disappears, the next step is
 `decodePTE` (0xbe9bab6) to read them with.
 
 Build `CF394FD9`. New note `rbgpu-pde`. New boot-arg `-rbgpupdefix`.
+
+## 2kj (2026-10-20) — the fix fires and the mechanism is proven in one window; VMID 3 is the gap
+
+Boot 82, nonce fresh, build `CF394FD9`, `-rbgpupdefix` in.
+
+```
+rbgpu-pde  = b=82 hk=1 on=1 calls=353 fixed=3 | left: valid=0 zero=334 above=16
+                 | first vmid=2 @2689ms fb000000 -> 87b000001
+rbgpu-mew2 = b=82 OK @8649ms ... || HALT @8698ms me=15000000 ...
+                 | int 0->0  meh c0001700->c0004200  pfph ffff1000->ffff1000
+                 | ib1 fbe9000/0 -> 300000/0   vmf 0->3009bb
+rbgpu-cph  = b=82 halt@8698ms ib1=400300000 sz=0 cmd=1f0 vmf=3009bb va=000400300
+                 | ip me=121 pfp=986 ce=70a || +50ms PARKED
+```
+
+**Still halts.** 8849 ms (500 ms bank) / 8698 ms (50 ms bank).
+
+### The hook works, and the site is right
+
+`hk=1 on=1 calls=353 fixed=3`. The function runs 353 times, the rewrite
+`0xfb000000 -> 0x87b000001` is exactly the transform, it landed three times,
+and **nothing broke** - so correcting a page-directory base in flight is
+safe. First fix at **2689 ms**, well before the halt, so timing is not the
+obstacle either.
+
+### The causal chain, now proven inside one 49 ms window
+
+```
+OK   @8649ms  ib1 lo=fbe9000   vmf=0
+HALT @8698ms  ib1 lo=300000    vmf=3009bb   me=15000000
+```
+
+`0xfbe9000` is the LO32 of **`0xf40_fbe9000`** - the VMID-0 carve-out IB that
+2kh verified chains to its declared 952 dwords, i.e. a known-good command
+buffer. **`vmf = 0`: no fault.** Then `CP_IB1_BASE` switches to `0x300000`
+(full `0x4_0030_0000`, VMID 3's VA), the fault appears **in the same
+sample**, and all three engines park.
+
+So the before/after is captured: the CP was fetching a translatable IB with
+a clean fault register, then moved to an untranslatable one and stopped.
+2kh's conclusion no longer rests on a single post-hoc sample.
+
+### Why the fix did not take: `zero=334`, and it is not a bug
+
+The PD-programming block in `prepareVMInvalidateRequest` sits behind
+`cmpb $0x1, 0x24(%rdx); jne 0xbe9b568` - **Apple writes a base only when
+`info->0x24 == 1`.** The other calls are invalidate-only and carry no base,
+and `programAndInvalidateVM` zeroes the request struct before the call, so
+the field reads 0. The guard was right to skip them.
+
+Of 353 calls, **19 carried a base**: 16 already `>= vram_start` (passed as MC
+addresses, correctly left alone) and **3 corrected**. The first was **VMID 2**.
+
+**Whether VMID 3 ever comes through with a base is unrecorded** - the note
+captured only the first fix. That is a gap in the instrument, not in the
+chip, and it is the one question that decides the next move. 2kj adds a
+per-VMID tally (`f=` fixed, `z=` zero, `a=` above, `V=` already valid) and
+spells out VMID 3's before/after.
+
+| `rbgpu-pde` | means |
+|---|---|
+| `v3 f>0` with a `v3 <was>-><now>` | we corrected it and it was **still** wrong or still late - the base is not the whole defect, and the reviewer's predicted PDE/PTE gap one level down is next |
+| `v3 NEVER CARRIED A BASE` | Apple does not program context 3's base through this path at all. That matches 2hr failing to find any write path, means this hook can never fix it, and makes finding the real writer the whole task |
+
+### Noted, not interpreted
+
+- `meh c0001700 -> c0004200` - the ME header dump *changes* across the halt,
+  and differs from boot 81's `c0033700`. It is "last packet processed" and
+  varies per boot, so it is not a stable signal and no opcode claim is made
+  from it here.
+- `ip ce=70a` against boot 81's `68f`; `me`/`pfp` identical at `121`/`986` in
+  both boots. The CE pointer moves between boots, the other two do not.
+- `int 0->0` with `intc=3c0000` - still masked, still no evidence either way
+  about `PRIV_REG`.
+
+Build `0CB5B943`. Read-only change to the note; `-rbgpupdefix` stays in.
