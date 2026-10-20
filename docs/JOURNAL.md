@@ -16328,3 +16328,59 @@ render fully; Electron (the assistant Code) does not, and "only non-moving
 things render good". Safari being fine is important - it is a client
 process doing its own GPU work, so "client process" is not the
 discriminator, and 2kw's AppKit-versus-Electron framing is too coarse.
+
+## 2ky (2026-10-20) — the compute kernel PASSES, so the fault is tiled surfaces only
+
+Run live in boot 93, no reboot, and it did **not** hang:
+
+```
+dispatch: creating queue
+dispatch: compiling shader
+dispatch: encoding 4096 threads
+dispatch: committing - IF THE GPU HANGS, IT HANGS HERE
+dispatch: command buffer status = 4
+PASS: all 4096 elements correct - the GPU executed the kernel
+```
+
+Status 4 is `MTLCommandBufferStatusCompleted`, and **every one of 4096
+elements verified correct**. So shader cores execute, the command buffer
+submits and completes, fences retire, and **linear buffer memory reads
+back exactly right**.
+
+**This also retires the 2hj frontier.** That milestone's defining
+symptom was `waitUntilCompleted` never returning, with
+`AMDAccelEventMachine` stuck in `resetHardwareAndReplay -> waitForTimestamp
+-> pollWait`. The same dispatch now returns, verified. The restart loop
+is gone with the faults.
+
+**What it isolates.** The corruption cannot be in the shaders, the
+submission path, the fence path, or plain memory - all four just passed
+with a bit-exact result. It is confined to **tiled 2D surfaces**, which
+matches the screen exactly: the Dock's icons and the menu-bar text are
+perfect, body-text glyphs are scrambled, and large smooth regions look
+right.
+
+**The hypothesis this revives, from a different angle than 2kx killed.**
+2kx refuted "Apple reads the wrong GB_ADDR_CONFIG" - `_gc_get_tiling_params_10_1`
+reads it straight off the chip, so the KERNEL has the right value. But
+this stack **spoofs Navi 21**, and the userspace Metal driver picks its
+AddrLib geometry from the family it believes it is on. If AddrLib
+swizzles for Navi 21's pipe/packer/shader-engine configuration while the
+chip is configured per its own GB_ADDR_CONFIG, every tiled surface is
+read with the wrong equation while linear buffers are untouched - which
+is precisely the split measured above. Rembrandt has **one** shader
+engine; Navi 21 has four.
+
+2ky reads `GB_ADDR_CONFIG` (dword 0x13de, BASE_IDX 0) once per boot in
+the ring probe, where GC reads are proven, and logs the fields decoded
+(`NUM_PIPES`, `PIPE_INTERLEAVE_SIZE`, `MAX_COMPRESSED_FRAGS`,
+`NUM_PKRS`, `NUM_SHADER_ENGINES`, `NUM_RB_PER_SE`, per
+gc_10_3_0_sh_mask.h) rather than leaving a raw word for the arithmetic
+to be done later and wrong. It appears as `gbac=` in `rbgpu-ring`.
+Nothing is written.
+
+This is a measurement, not a fix. It establishes whether a mismatch
+exists; what to do about it - and whether the AddrLib geometry can be
+influenced from the kernel at all - is the question after it.
+
+Build `DCB99254-201F-3C25-BF39-34AB60309BCB`.
