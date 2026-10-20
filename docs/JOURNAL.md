@@ -15607,3 +15607,117 @@ One difference, noted and not interpreted: at the halt `rlcs=25` and
 `gpm=140017`, where boot 85 read `rlcs=0 gpm=140016`. n=1 each.
 
 Build `09F0A58D-2275-3E17-9B01-E5989132C089`.
+
+## 2kq/2kr (2026-10-20) — the stripping function, found statically
+
+Boot 87 (`b=87`, UUID `09F0A58D`) recorded the short note again:
+`rbgpu-pdv = b=87 hk=1 on=1 calls=114 fixed=0 | left: inrange=0 zero=114`,
+no `anchor=`/`sites=`. 2kp built the call sites into `n` **below** a
+`rbgpu_nvram_note` that had already run - I anchored the insertion on the
+`rbgpu_log` line instead of the note write. The full string went to
+`rbgpu_log`, where the 2es rule means the published log does not keep it
+either, so the boot bought nothing. **Second consecutive boot lost to the
+same instrument**, both times by reporting absence as silence. 2kq moves
+the note write after the appends.
+
+Then the question was answered **statically, for free**, and no boot was
+needed at all.
+
+**The chain, end to end.** `getPDEValue` sits at vtable dump offset
+`+0x1e8` in `__ZTV26AMDRadeonX6000_AMDGFX10VMM`, so its call offset is
+`0x1d8` (dump − 0x10, the 2gp rule). Nine `callq *0x1d8(%reg)` exist in
+AMDRadeonX6000; mapping each to its containing symbol leaves exactly one
+in a VM class:
+
+```
+be8da88  AMDHWRing::disable()                       (coincident slot)
+be8ea67  AMDHWVMContext::mapVMPT(...)               <-- the one
+be90bf4  AMDHWVMM::setMemoryAllocationsEnabled(bool)
+be9441f  AMDSWScheduler::submitCommandBuffer(...)
+be94dd1  AMDSWScheduler::timestampUpdated(...)
+be97043  AMDRTHardware::reserveExternalReservations()
+be97160  AMDRTHardware::setVirtualSpaceReady(bool)
+be986f8  AMDRTRing::initialize(...)
+be9a709  AMDGFX10HWMemory::prepare(...)
+```
+
+`mapVMPT`, around the call:
+
+```
+be8ea32  addq 0x20(%rax), %rbx     ; the block, from allocVMBlock (2eg/2ig)
+be8ea42  callq *0x2d8(%rax)        ; -> the HWMemory object
+be8ea51  callq *0x200(%rcx)        ; adjustVRAMAddress(block)
+be8ea57  movq %rax, %r12           ; and THAT is the entry's address
+be8ea65  xorl %edx, %edx           ; getPDEValue's address argument = 0
+be8ea67  callq *0x1d8(%rax)        ; getPDEValue(level, 0) -> flags
+be8ea7f  movq %rax, %r8
+be8ea85  callq updateContiguousPTEsWithDMAUsingAddr(this, rbx, 1, r12, r8, 0)
+```
+
+**2ko is confirmed from Apple's side:** the address argument is zeroed
+deliberately, so flags-only is by design, and 2km could never have had
+anything to correct.
+
+**`*0x200` is `AMDHWMemory::adjustVRAMAddress(unsigned long long)`**
+(0xbe8cb90; dump +0x210 in both `__ZTV26AMDRadeonX6000_AMDHWMemory` and
+`__ZTV31AMDRadeonX6000_AMDGFX10HWMemory` - **GFX10 does not override
+it**). Nine instructions:
+
+```
+rcx = this->0x60                       ; the VRAM window base
+if (rcx > a) return a;                 ; below the window: unchanged
+rdx = this->0x1b8 * this->0x40 + rcx   ; the window end
+rsi = (rdx > a) ? rcx : 0
+return a - rsi;                        ; STRIP the base inside the window
+```
+
+**It subtracts**, and the arithmetic matches every stripped address this
+project has chased:
+
+```
+0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000   the L1 entry (2ko)
+0x8_7B01_5000 - 0x7_8000_0000 = 0xFB01_5000   c3's PD base (2hr, 2ki)
+0x8_7B00_B000 - 0x7_8000_0000 = 0xFB00_B000   c1's PD base
+0x7_8000_0000 - 0x7_8000_0000 = 0            `fb000000` shape (2ki, v2)
+```
+
+So `this->0x60` is `vram_base_offset` on this chip, and **one function
+produces all of them**. 2em's CONTEXT0 fix and 2ki's per-VMID correction
+have each been undoing this one subtraction after the fact, at one call
+site at a time, which is why 2ki was "necessary and not sufficient" and
+why its correction always landed after the 8.9 s fetch.
+
+Why it is right on Apple's own parts and wrong here: a discrete Navi 21
+keeps its VRAM at the start of its own aperture, so window-relative and
+what the GPUVM walker wants are the same number. This APU's carve-out is
+at system-physical `0x7_8000_0000`, and the walker needs the absolute
+form - which is precisely what 2em measured when it fixed CONTEXT0.
+
+**2kr, built: the hook is surgical.** `adjustVRAMAddress` serves callers
+beyond the page tables, and the stripped form is presumably right for
+them, so the subtraction is neutralised **only when the return address
+falls inside `mapVMPT`** - `[0xbe8e624, 0xbe8f08c)` at runtime, both
+bounds from `solveSymbol`, no literal addresses trusted. Observe-only
+without `-rbgpuvramadj`; armed, it returns the argument unstripped.
+Reports `rbgpu-adj`: `calls`, `inmap`, `fixed`, `nostrip`, the bounds,
+and the first in/out pair.
+
+Gates checked before writing it: **defined** in AMDRadeonX6000 (`nm -m`
+prints `external`, milestone 2c); **routed nowhere else** in this plugin
+(2kn); **rule 9 clean** - `55 48 89 e5 48 89 f0 48 8b 4f 60 48 39 f1`,
+first branch is the `ja` fourteen bytes in (2gb). The two `mapVMPT`
+mangled names were **hand-written wrong** (`8mapVMPT` for `7mapVMPT`,
+`10unmapVMPT` for `9unmapVMPT`) and caught by cross-checking each
+against `nm` before the boot - the check is now part of the procedure.
+
+Pre-registered outcomes:
+
+| `rbgpu-adj` / `rbgpu-pdw` | means |
+|---|---|
+| `inmap>0 fixed>0`, `L1 ... ok`, no halt | done |
+| `inmap>0 fixed>0`, `L1 ok`, `L0` bad | one tier lower; same function, PTE path |
+| `inmap=0` with `calls>0` | mapVMPT is not where the address is adjusted; this reading of be8ea51 is wrong |
+| `nostrip>0` | the argument was already below the window, so `+0x60` is not `vram_base_offset` and the arithmetic does not apply |
+
+Build `DBF1D203-33F9-39F8-A102-2260B23F6D98`. New boot-arg
+`-rbgpuvramadj`.
