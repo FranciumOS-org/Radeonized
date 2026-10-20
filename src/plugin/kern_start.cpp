@@ -8191,6 +8191,132 @@ static void rbgpu_route_vramadj_2kr(KernelPatcher &patcher, size_t id,
               (unsigned long long)g_rb_2kr_self);
 }
 
+// ---------------------------------------------------------------------------
+// 2kz (2026-10-20): does AddrLib get THIS chip's geometry, or Navi 21's?
+//
+// Boot 94 read the chip: `gbac=242`. Decoded against gc_10_3_0_sh_mask.h that
+// is NUM_PIPES=2 (4 pipes), PIPE_INTERLEAVE_SIZE=0 (256B),
+// MAX_COMPRESSED_FRAGS=1, NUM_PKRS=2 (4 packers), NUM_SHADER_ENGINES=0
+// (**one** shader engine) and NUM_RB_PER_SE=0. Navi 21 has **four** shader
+// engines, so that field alone differs - 0 here against 2 there - and the
+// pipe and packer counts differ too.
+//
+// GFX10's swizzle equations pick which address bits to XOR directly from the
+// pipe and packer counts, so an AddrLib configured for Navi 21 reading a
+// surface laid out for this chip scrambles it in blocks while leaving linear
+// buffers untouched. That is exactly the split boot 93 measured: the compute
+// kernel returned PASS on all 4096 elements, and tiled surfaces are the only
+// thing corrupt on screen.
+//
+// But whether a mismatch EXISTS is still unmeasured, and this stack spoofs
+// Navi 21 in several places. `AMDHWAlignManager2::init` (0xbe99342) builds
+// AddrLib's `ADDR_CREATE_INPUT` on its stack:
+//
+//   be993fd  movl $0x70, (%r14)              ; size
+//   be9940f  callq *0x140(%rax) -> +0x04     ; chipFamily
+//   be99420  callq *0x1b8(%rax) -> +0x08     ; chipRevision
+//   be99431  callq *0x1a8(%rax) -> +0x0c
+//   be9943b..be99458                         ; the three AddrLib callbacks
+//   be993ed  callq *0x1c0(%rax) -> r15       ; the register-value source
+//   be9945c  movl 0xa0(%r15) -> +0x30        ; regValue[0]
+//   be99467  movl 0xa8(%r15) -> +0x34        ; regValue[1]
+//   be99472  movl 0xb0(%r15) -> +0x38        ; regValue[2]
+//   be9947d  movl 0xb8(%r15) -> +0x3c        ; regValue[3]
+//
+// So this hook calls the SAME getters, immediately after the original has
+// run, and records what they returned. No guessing about the plumbing and
+// nothing substituted - 2cy's rule. Observe only: the original's result is
+// returned untouched and nothing is written.
+//
+// Gates: DEFINED in AMDRadeonX6000 (`nm -m`: external, __TEXT,__text,
+// milestone 2c); routed nowhere else (2kn); rule 9 clean - `55 48 89 e5 41
+// 57 41 56 41 54 53`, pushes and a movq, no branch in the first five bytes
+// (2gb); mangled name cross-checked against `nm` (2kr).
+static uint32_t (*orig_align_init_2kz)(void *, void *) = nullptr;
+static int      g_rb_2kz_hooked = 0;
+static uint32_t g_rb_2kz_calls  = 0;
+static uint32_t g_rb_2kz_ret    = 0xFFFFFFFFu;
+static uint32_t g_rb_2kz_family = 0xFFFFFFFFu;
+static uint32_t g_rb_2kz_rev    = 0xFFFFFFFFu;
+static uint32_t g_rb_2kz_third  = 0xFFFFFFFFu;
+static uint32_t g_rb_2kz_reg[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                    0xFFFFFFFFu, 0xFFFFFFFFu };
+static int      g_rb_2kz_read   = 0;   // 0 = the getters were never called
+
+// A vtable call on an Apple object, by the same byte offset the disassembly
+// shows. Returns 0 and leaves `ok` false if anything on the way is NULL, so
+// a missing value can never be mistaken for a measured zero (2eh).
+static uint64_t rbgpu_vcall_2kz(void *obj, unsigned off, bool *ok) {
+    *ok = false;
+    if (!obj) { return 0; }
+    auto vt = *reinterpret_cast<void ***>(obj);
+    if (!vt) { return 0; }
+    auto fn = reinterpret_cast<uint64_t (*)(void *)>(vt[off / 8]);
+    if (!fn) { return 0; }
+    *ok = true;
+    return fn(obj);
+}
+
+static uint32_t hooked_align_init_2kz(void *mgr, void *hw) {
+    uint32_t r = orig_align_init_2kz ? orig_align_init_2kz(mgr, hw) : 0;
+    g_rb_2kz_calls++;
+    if (g_rb_2kz_read) { return r; }
+    g_rb_2kz_ret = r;
+
+    bool ok = false;
+    uint64_t v = rbgpu_vcall_2kz(hw, 0x140, &ok);
+    if (ok) { g_rb_2kz_family = static_cast<uint32_t>(v); }
+    v = rbgpu_vcall_2kz(hw, 0x1b8, &ok);
+    if (ok) { g_rb_2kz_rev = static_cast<uint32_t>(v); }
+    v = rbgpu_vcall_2kz(hw, 0x1a8, &ok);
+    if (ok) { g_rb_2kz_third = static_cast<uint32_t>(v); }
+
+    v = rbgpu_vcall_2kz(hw, 0x1c0, &ok);
+    if (ok && v) {
+        auto cfg = reinterpret_cast<volatile uint8_t *>(v);
+        static const unsigned kOff[4] = { 0xa0, 0xa8, 0xb0, 0xb8 };
+        for (unsigned i = 0; i < 4; i++) {
+            g_rb_2kz_reg[i] =
+                *reinterpret_cast<volatile uint32_t *>(cfg + kOff[i]);
+        }
+    }
+    g_rb_2kz_read = 1;
+    rbgpu_log("2kz: ADDR_CREATE_INPUT family=%x rev=%x third=%x | "
+              "reg a0=%x a8=%x b0=%x b8=%x | init returned %x",
+              g_rb_2kz_family, g_rb_2kz_rev, g_rb_2kz_third,
+              g_rb_2kz_reg[0], g_rb_2kz_reg[1], g_rb_2kz_reg[2],
+              g_rb_2kz_reg[3], r);
+    return r;
+}
+
+void rbgpu_align_flush_2kz(void) {
+    if (!g_rb_2kz_hooked) {
+        rbgpu_nvram_note("rbgpu-addr", "hk=0 the AlignManager2::init hook did "
+                                       "NOT take - silence is the hook");
+        return;
+    }
+    char n[288];
+    snprintf(n, sizeof(n),
+             "hk=1 calls=%u read=%d ret=%x | fam=%x rev=%x third=%x | "
+             "a0=%x a8=%x b0=%x b8=%x",
+             g_rb_2kz_calls, g_rb_2kz_read, g_rb_2kz_ret,
+             g_rb_2kz_family, g_rb_2kz_rev, g_rb_2kz_third,
+             g_rb_2kz_reg[0], g_rb_2kz_reg[1], g_rb_2kz_reg[2],
+             g_rb_2kz_reg[3]);
+    rbgpu_nvram_note("rbgpu-addr", n);
+    rbgpu_log("2kz: %s", n);
+    rbgpu_log("2kz: one of a0/a8/b0/b8 should be GB_ADDR_CONFIG. If one "
+              "reads 242 it matches the chip (rbgpu-ring `gbac`) and the "
+              "KERNEL's AddrLib is configured correctly - the mismatch would "
+              "then be userspace-side, in the Metal driver's own AddrLib, "
+              "which this plugin cannot reach the same way. If none reads "
+              "242, the value AddrLib is given is NOT this chip's and that "
+              "is the defect, fixable here. `ffffffff` means a getter was "
+              "never reached, not a measured value. `calls=0` means the "
+              "align manager is initialised somewhere this hook does not "
+              "see.");
+}
+
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
 static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
@@ -9671,6 +9797,19 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
     rbgpu_route_pdefix_2ki(patcher, id, address, size);
     rbgpu_route_vramadj_2kr(patcher, id, address, size);   // 2kr
     rbgpu_route_disp_2kt(patcher, id, address, size);      // 2kt
+    {   // 2kz: observe-only, the AddrLib geometry
+        KernelPatcher::RouteRequest req(
+            "__ZN33AMDRadeonX6000_AMDHWAlignManager24initEP30AMDRadeonX6000_IAMDHWInterface",
+            hooked_align_init_2kz, orig_align_init_2kz);
+        if (patcher.routeMultiple(id, &req, 1, address, size)) {
+            g_rb_2kz_hooked = 1;
+            rbgpu_log("2kz: hooked AMDHWAlignManager2::init");
+        } else {
+            g_rb_2kz_hooked = 0;
+            patcher.clearError();
+            rbgpu_log("2kz: FAILED to hook AMDHWAlignManager2::init");
+        }
+    }
 
     // 2id: the VM flush. Rule 9 (2gb): programAndInvalidateVM at 0xbe9b7a2
     // opens `55 48 89 e5 41 57 41 56 41 55 41 54 53` - pushes, a movq and
@@ -13877,6 +14016,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_pdefix_flush_2ki();
     rbgpu_vramadj_flush_2kr();
     rbgpu_disp_flush_2kt();
+    rbgpu_align_flush_2kz();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
