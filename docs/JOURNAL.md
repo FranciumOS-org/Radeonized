@@ -16202,3 +16202,71 @@ misreading a path that is not the only one. Unread against the code that
 sets it (2ha).
 
 Build `6B05D788-4853-34A5-A85D-803A56492370`.
+
+## 2kw CONFIRMED (2026-10-20, boot 93) — A USABLE ACCELERATED DESKTOP
+
+The user is **inside an armed boot**, using the machine, and sent this
+capture from it. Six minutes of uptime, no freeze. Capture taken live
+from the armed boot itself (`logs/20261020-185641-plugin`), per 2jg.
+
+```
+rbgpu-boot  = 93, UUID 6B05D788
+rbgpu-fault = b=93 hk=1 c=0 f=0 r=0 o=0 fw=0
+rbgpu-adj   = b=93 calls=12126 inmap=12126 fixed=12126 nostrip=0 nofb=0
+              | map=12086 asg=11 mes=29
+rbgpu-mew   = b=93 n=24 NEVER HALTED in 0.5-12s
+rbgpu-cph   = b=93 NO HALT SAMPLE
+rbgpu-ring  = p=0 vmf=0 r=f80 w=f80 cps=0 grbm=3028 me=0
+              p=1 vmf=0 r=11931 w=11a80 cps=94018200 grbm=a0003028
+              p=2 vmf=0 r=c900 w=6c900 cps=0 grbm=3028
+rbgpu-vmid  = b=93 av=11039 vmids=01fe
+rbgpu-pde   = b=93 on=0 fixed=0 | above=27 | v1..v8 all `a`
+rbgpu-disp  = b=93 true=2 false=0 forced=0 | pipe: fb_calls=2 refused=0
+```
+
+**`mes=29`, and the v10 fault is GONE.** `c=0 f=0 r=0 o=0 fw=0` - Apple's
+fault poller found the chip clean on every poll, for the first time in
+this project's history. `vmfc=1ffc` still has reporting fully enabled,
+so that is a chip with nothing to report.
+
+**Every call is now in scope.** `calls=12126 inmap=12126` with no `oN`
+row at all: after mapVMPT, assignVMID and fillMapProcessPacket there are
+no remaining `adjustVRAMAddress` callers that strip a page-table
+address. The recording that named `fillMapProcessPacket` now names
+nothing, which is the result it was built to be able to give.
+
+**`vmids=01fe`** - VMIDs 1 through 8, against `000e` in every previous
+boot. The MES is handing out contexts and they all translate. The ring's
+write pointer reached `0x6c900` across the phases with `rptr` keeping
+up, and the fourth consecutive boot never halted.
+
+**What the screen shows.** The Dock renders **perfectly** - every icon
+crisp and correctly coloured, Calendar showing the right date. The menu
+bar text ("Claude File Edit View Go Window Help") is fully legible.
+Window chrome, traffic lights, panel backgrounds and the sidebar's
+coloured legend squares are all correct. What is wrong is **body text
+glyphs**, scrambled into text-shaped noise, plus large white garbage
+blocks at the top-right and along the right edge. The user reports
+static content renders and moving content mostly does not, with iMessage
+an exception that renders correctly even while moving.
+
+**So the remaining defect is a DATA LAYOUT problem, not an addressing
+one.** There is no fault to chase: the GPU reads and writes exactly
+where it is told. Large and/or linear surfaces come out right; small
+tiled ones - glyph atlases, render targets - come out shuffled. That is
+the signature of a swizzle/tiling or DCC-metadata mismatch, and it is a
+different class of bug from everything in this journal before it.
+
+**The line to pull next, already half-found.** 2kt noted in passing that
+HWLibs has `_gc_read_hw_configuration_10_3` (which reads
+`mmGB_ADDR_CONFIG`, dword 0x13de, at `126b1b7f`) but that
+`_gc_get_tiling_params` exists **only** as `_10_1` - there is no `_10_3`
+variant, exactly the shape of the 2jp firmware-table defect. The chip's
+own geometry is read; whether the tiling derivation applied to it is the
+right generation's is unexamined, and is now the obvious question.
+
+Not claimed: that tiling is the cause. That is a hypothesis from a
+symbol list and a photograph, and it has not been measured.
+
+The CP halt, the VM faults, the restart loop, the frozen ring and the
+freeze are all gone. The machine is usable.
