@@ -14752,3 +14752,110 @@ is as capable of a false positive as a false negative.
 | `ME@<i>=<v>` with the halt bits | **found it** - the CP halts itself from a chained packet |
 
 Build `5CF81551`. Read-only, no boot-arg change.
+
+## 2ke (2026-10-20) — an external review's reads, checked against what we actually have
+
+A reviewer's hypothesis: **the CP halts itself on something it fetched**, not
+on a timer or an outside write - in the one transition sample `CP_STAT` gains
+`ROQ_INDIRECT1_BUSY`, so new work had arrived and the CP halted while
+fetching it. Four points, audited honestly below. Two land, one we already
+have, one is a hit on our method.
+
+### 1. The IB control dword's VMID — WE NEVER READ IT. Real gap.
+
+`gfx_v10_0_ring_emit_ib_gfx` ORs `vmid << 24` into the `INDIRECT_BUFFER`
+control dword, so dw3 bits 27:24 are the VMID. **2kc read only
+`dw[i+3] & 0xFFFFF` (the size) and assumed the address was a carve-out MC
+address.** If VMID != 0, `0xF4_0FBE_9000` is that context's GPU VA, `mc2pa`
+maps an unrelated page, and 2kc's sparse content (952 declared, 183 nonzero)
+is explained outright.
+
+Counter-evidence worth stating: the address *shape* argues MC. `0xF40..`
+matches `FB_LOCATION_BASE << 24` exactly, and our own 2dx log line recorded
+`ring MC from startKIQ = 0xf40fb28000` with the same prefix. Apple's GPUVM
+windows are `0xFF_BF..` (CONTEXT0) and `0x4_..0x23_..` (contexts 1/3) -
+neither contains `0xF4_0F..`. But shape is not the field, and the field is
+one AND away. 2ke reads it, plus the whole control dword.
+
+The reviewer's corollary is the sharp part: **an unprivileged IB (VMID > 0)
+writing a privileged register should FAULT, not succeed** - which connects
+directly to point 2.
+
+### 2. The CP's own error and header registers — WE HAVE NONE OF THESE.
+
+All present in `gc_10_3_0_offset.h`, all verified before building:
+
+| register | dword | seg |
+|---|---|---|
+| `CP_INT_STATUS_RING0` | `0x1e0d` | 0 |
+| `CP_ME_HEADER_DUMP` | `0x0f41` | 0 |
+| `CP_PFP_HEADER_DUMP` | `0x0f42` | 0 |
+| `CP_IB1_BASE_LO` / `_HI` | `0x20cc` / `0x20cd` | **1** |
+| `CP_IB1_BUFSZ` | `0x20ce` | **1** |
+
+`CP_INT_STATUS_RING0` fields: `PRIV_INSTR_INT_STAT` (22),
+`PRIV_REG_INT_STAT` (23), `OPCODE_ERROR_INT_STAT` (24),
+`RESERVED_BIT_ERROR_INT_STAT` (27), `CP_ECC_ERROR_INT_STAT` (14).
+
+**`CP_ME_HEADER_DUMP` is `0x0f41` - one dword from `CP_STAT` (`0x0f40`),
+which this sampler has been reading since 2jw.** The register that names the
+packet the ME last processed was adjacent to the one already being read, for
+seven boots. `CP_IB1_BUFSZ` counts dwords *remaining*, so
+`base + (size - bufsz)` locates the exact packet.
+
+All six added to the 50 ms bank.
+
+### 3. The MMHUB phantom as an offset bug — consistent with our own data.
+
+The reviewer attributes the all-ones reads to Apple using Navi 21's MMHUB
+layout. Our independent finding agrees: this chip reports **MMHUB 2.4.0**,
+which Linux groups as `mmhub_v2_3` (2.3.0 offsets), while Apple's stack is
+Navi 21. So the mechanism is plausible on our evidence, not just theirs.
+
+Their proposed action - make `getVMFaultInfo` ignore `status == 0xFFFFFFFF` -
+is cheap and worth doing, and goes further than our standing rule (which only
+says *we* must never read a hub-1 report as real; this would stop Apple
+feeding it to the fault path, which may stop spurious resets). **Not done in
+2ke**: it changes Apple's behaviour rather than observing it, and it belongs
+in its own boot with its own control.
+
+Their second half is free and we should have thought of it: **timestamp the
+first `hardwareErrorEvent` and compare it against the 8.7 s halt.** Which
+comes first decides whether the halt is cause or consequence. Owed.
+
+### 4. "Don't trust post-halt snapshots" — this is a HIT, and it is conceded.
+
+Our `rbgpu-pm4` ring dump runs at **phase 1 = +100 s**, roughly 91 s after
+the halt. So the ring we scanned is **not** established to be the ring the CP
+was executing at 8.7 s, and `noME` is weaker than even 2kb allowed. That is a
+genuine methodological error on our side, independent of the IB question.
+
+They also note `rptr` moving `0xb1 -> 0x231` implies a replay rewrote the
+ring. Their inference is not the only one, but they have found a real
+contradiction we had not: **`rptr` advanced between p=1 and p=2 while
+`CP_ME_CNTL` read `15000000` at both ends.** A halted CP should not consume
+packets, so either something un-halted and re-halted it in that window, or
+the pointers were reset. We recorded both values and never noticed they
+cannot both be true. Unexplained, and now on the record.
+
+### Score
+
+| point | us |
+|---|---|
+| IB VMID field | **never read** - real gap, fixed in 2ke |
+| CP error/header registers | **none of them read** - all six added |
+| GCVM fault status + CID | **have it**: `CID = 4 = CPF` (the command-processor *fetcher*), statuses `0x3009bb` (VMID 3, read) and `0x40953` (VMID 0, write). Supports their hypothesis. But only ever read from **+12 s onward**, never at the halt - now in the 50 ms bank |
+| MMHUB offset bug | consistent with our MMHUB 2.4.0 finding; the `getVMFaultInfo` filter is owed, separately |
+| post-halt snapshots | **conceded** - the ring dump is +100 s and `noME` is weaker than stated |
+
+Also noted: `vmf=3009bb` still appears at p=0 in boots 77, 78 and 80 with
+`-rbgpuptfix` in. docs/RULES.md records 2ix as having **eliminated** the VMID-3
+CPF fault "reproducibly, and it stays gone". Either that claim is stale or
+the p=0 read is a latch from before the fix binds. **Flagged, not resolved** -
+and it must not be quietly dropped, because a live CPF fetch fault is exactly
+what the reviewer's hypothesis needs.
+
+Build `8CCDA0C1`. Read-only, no boot-arg change. (One slip caught before the
+boot: the first draft read the fault status at dword `0x0B6A`; the header
+gives `0x15C8`, `BASE_IDX 0`, which is what the existing ring probe already
+used. Corrected and rebuilt.)

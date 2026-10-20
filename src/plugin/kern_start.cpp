@@ -10727,6 +10727,8 @@ static void rbgpu_fencedump_2hy(uint64_t ring_pa) {
 // hardcoded - 2cy.
 static uint64_t g_rb_2kc_ib_mc = 0;
 static uint32_t g_rb_2kc_ib_sz = 0;
+static uint32_t g_rb_2kc_ib_vmid = 0;   // 2ke
+static uint32_t g_rb_2kc_ib_ctl  = 0;   // 2ke
 
 static void rbgpu_ibdump_2kc(void) {
     char note[288];
@@ -10831,8 +10833,10 @@ static void rbgpu_ibdump_2kc(void) {
         }
     }
     snprintf(note, sizeof(note),
-             "mc=%llx pa=%llx sz=%u t3=%u nz=%u chain=%u walked=%u | %s",
-             g_rb_2kc_ib_mc, pa, g_rb_2kc_ib_sz, t3, nz, chain, walked,
+             "mc=%llx pa=%llx sz=%u vmid=%u ctl=%x t3=%u nz=%u chain=%u "
+             "walked=%u | %s",
+             g_rb_2kc_ib_mc, pa, g_rb_2kc_ib_sz, g_rb_2kc_ib_vmid,
+             g_rb_2kc_ib_ctl, t3, nz, chain, walked,
              nme ? "" : "noME-in-IB");
     if (nme) {
         size_t at = strlen(note);
@@ -11100,6 +11104,16 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
                 ib0 = a2;
                 g_rb_2kc_ib_mc = a2;                      // 2kc, never hardcoded
                 g_rb_2kc_ib_sz = dw[i + 3] & 0xFFFFFu;
+                // 2ke: dw3 bits 27:24 are VMID (gfx_v10_0_ring_emit_ib_gfx
+                // ORs `vmid << 24` into the control dword). 2kc read only the
+                // size field and assumed the address was a carve-out MC
+                // address. If VMID != 0 it is that context's GPU VA instead,
+                // mc2pa maps an unrelated page, and 2kc's sparse content is
+                // explained. The address shape argues MC (0xF40.. matches
+                // FB_LOCATION_BASE, and startKIQ's ring MC has the same
+                // prefix), but shape is not the field.
+                g_rb_2kc_ib_vmid = (dw[i + 3] >> 24) & 0xFu;
+                g_rb_2kc_ib_ctl  = dw[i + 3];
             }
             nib++;
             if (nib <= 2) {
@@ -11347,8 +11361,32 @@ void rbgpu_mewatch_flush_2js(void) {
 //                            CP_ME_CNTL's value is real and something set it
 //   rbb 0 or garbage      -> the whole block reverted or stopped answering,
 //                            and the halt bits are a SYMPTOM, not a cause
+// 2ke (2026-10-20): the registers that name the packet the CP stopped on.
+//
+// All offsets from gc_10_3_0_offset.h, all verified present:
+//   CP_INT_STATUS_RING0 0x1e0d seg0  PRIV_INSTR(22) PRIV_REG(23)
+//                                    OPCODE_ERROR(24) RESERVED_BIT_ERROR(27)
+//                                    CP_ECC_ERROR(14)
+//   CP_ME_HEADER_DUMP   0x0f41 seg0  last header the ME processed
+//   CP_PFP_HEADER_DUMP  0x0f42 seg0  last header the PFP processed
+//   CP_IB1_BASE_LO/HI   0x20cc/0x20cd seg1
+//   CP_IB1_BUFSZ        0x20ce seg1  dwords REMAINING, so base+(size-bufsz)
+//                                    locates the exact packet
+//   GCVM_L2_PROTECTION_FAULT_STATUS  already read, but only from +12 s on
+//
+// CP_ME_HEADER_DUMP sits ONE DWORD from CP_STAT (0x0f40), which this sampler
+// has been reading since 2jw. The register that names the packet was next to
+// the one we were already looking at.
+//
+// Why these: an external review's hypothesis is that the CP halts itself on
+// something it fetched - in the one transition sample CP_STAT gains
+// ROQ_INDIRECT1_BUSY, so new work had arrived and the CP halted while
+// fetching it. If a privileged-register write arrives in an unprivileged IB,
+// PRIV_REG is exactly what the CP raises. That is testable and we had never
+// read the register.
 struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm, gfxoff,
-                           cps, grbm, rbb, rbc; };
+                           cps, grbm, rbb, rbc,
+                           cpint, mehdr, pfphdr, ib1lo, ib1sz, vmf; };
 static struct rb_2jt_s g_rb_2jt[RB_2JT_N];
 static uint32_t        g_rb_2jt_got = 0;
 
@@ -11390,6 +11428,13 @@ void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     e->grbm = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0DA4u) * 4);
     e->rbb  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x1DE0u) * 4);   // CP_RB0_BASE
     e->rbc  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x1DE1u) * 4);   // CP_RB0_CNTL
+    // 2ke
+    e->cpint  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x1E0Du) * 4);  // CP_INT_STATUS_RING0
+    e->mehdr  = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F41u) * 4);  // CP_ME_HEADER_DUMP
+    e->pfphdr = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F42u) * 4);  // CP_PFP_HEADER_DUMP
+    e->ib1lo  = g_hw.rreg(g_hw.ctx, (S1 + 0x20CCu) * 4);       // CP_IB1_BASE_LO
+    e->ib1sz  = g_hw.rreg(g_hw.ctx, (S1 + 0x20CEu) * 4);       // CP_IB1_BUFSZ
+    e->vmf    = g_hw.rreg(g_hw.ctx, (0x1260u + 0x15C8u) * 4);  // GCVM_L2_PROTECTION_FAULT_STATUS, seg0 (BASE_IDX 0)
     if (idx + 1 > g_rb_2jt_got) { g_rb_2jt_got = idx + 1; }
 }
 
@@ -11403,7 +11448,7 @@ void rbgpu_rlcwatch_flush_2jt(void) {
         if (g_rb_2jt[i].me == 0) { last_ok = static_cast<int>(i); }
         else if (first_bad < 0)  { first_bad = static_cast<int>(i); }
     }
-    char n[416];
+    char n[640];
     if (first_bad < 0 || last_ok < 0) {
         // Still say what the RLC looked like - a window with no transition
         // is a result about WHERE the halt is, not a dead probe.
@@ -11429,10 +11474,19 @@ void rbgpu_rlcwatch_flush_2jt(void) {
                  b->srm, b->gfxoff);
         size_t at = strlen(n);
         if (at < sizeof(n)) {
-            snprintf(n + at, sizeof(n) - at,
+            at += static_cast<size_t>(snprintf(n + at, sizeof(n) - at,
                      " | cps %x->%x grbm %x->%x rbb %x->%x rbc %x->%x",
                      a->cps, b->cps, a->grbm, b->grbm,
-                     a->rbb, b->rbb, a->rbc, b->rbc);
+                     a->rbb, b->rbb, a->rbc, b->rbc));
+            if (at < sizeof(n)) {
+                snprintf(n + at, sizeof(n) - at,
+                         " | int %x->%x meh %x->%x pfph %x->%x ib1 %x/%x->%x/%x "
+                         "vmf %x->%x",
+                         a->cpint, b->cpint, a->mehdr, b->mehdr,
+                         a->pfphdr, b->pfphdr,
+                         a->ib1lo, a->ib1sz, b->ib1lo, b->ib1sz,
+                         a->vmf, b->vmf);
+            }
         }
     }
     rbgpu_nvram_note("rbgpu-mew2", n);
