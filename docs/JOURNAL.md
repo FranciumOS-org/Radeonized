@@ -16270,3 +16270,61 @@ symbol list and a photograph, and it has not been measured.
 
 The CP halt, the VM faults, the restart loop, the frozen ring and the
 freeze are all gone. The machine is usable.
+
+## 2kx (2026-10-20) — the "usable" claim is WITHDRAWN; two leads settled without a boot
+
+**Correction first.** 2kw called the desktop "usable". The user's reply:
+"Its unusable in this state, nothing can be read from main desktop and
+only the finder, imessage and safari have fully rendering screens". That
+is the accurate description and 2kw's wording is withdrawn. What is
+established is narrower and still large: an armed boot reaches a
+composited desktop and stays up, with zero VM faults.
+
+**The 7 MB is COSMETIC, measured in the live boot:**
+
+```
+Metal              recommendedMax = 4096 MB
+System Profiler    VRAM (Total): 7 MB
+IONDRVFramebuffer  IOFBMemorySize = 8294400   (= 1920 x 1080 x 4)
+```
+
+Metal sees the whole 4 GB carve-out and allocates against it. System
+Profiler reports **the boot framebuffer's own memory size**, because
+`.Display_boot (IONDRVFramebuffer)` drives the panel and no AMD
+framebuffer publishes a VRAM property. Nothing is constrained to 7 MB;
+it is a reporting artifact of the display half of the driver not
+existing yet. Also confirmed there: `Metal: Supported`, Type GPU, Bus
+PCIe x16, AMD 0x1002:0x1681 rev 0a - the system recognises the 680M as a
+Metal GPU.
+
+**The tiling lead is REFUTED, statically, for free.** 2kw flagged that
+`_gc_get_tiling_params` exists only as `_10_1` and called it the shape
+of the 2jp defect. Disassembled, it is nine instructions:
+
+```
+126b0050  addq $0xc0, %rdi
+126b0057  movl $0x13de, %esi          ; mmGB_ADDR_CONFIG
+126b005e  callq _gc_reg_offset
+126b0072  callq _gc_cgs_read_register_ext2
+126b0077  movl %eax, (%rbx)           ; *out = the chip's own value
+```
+
+It reads `GB_ADDR_CONFIG` from the hardware and stores it. There is no
+generation-specific arithmetic, so the `_10_1` suffix carries no meaning
+here and Apple's swizzle equations are fed the chip's real
+configuration. Not the cause. Withdrawn before it cost a boot.
+
+**So there is no strong hypothesis for the glyph corruption yet**, and
+the honest next step is a measurement rather than another guess. The
+discriminator available is `tools/metal_check.sh --dispatch`, which runs
+and **verifies** a compute kernel: correct results would put the shader
+and memory paths out of scope and isolate the fault to image-surface
+layout; wrong results would mean something deeper. It can hang the GPU,
+which is why it is a separate flag and why it costs the live boot if it
+goes badly.
+
+Evidence to carry forward, from the user: Finder, Safari and Messages
+render fully; Electron (Claude Code) does not, and "only non-moving
+things render good". Safari being fine is important - it is a client
+process doing its own GPU work, so "client process" is not the
+discriminator, and 2kw's AppKit-versus-Electron framing is too coarse.
