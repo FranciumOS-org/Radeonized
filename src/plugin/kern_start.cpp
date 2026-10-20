@@ -7984,6 +7984,10 @@ static uint64_t hooked_adjustVRAM_2kr(void *mem, uint64_t a) {
     return nv;
 }
 
+// 2kt: defined further down, beside the 2ct counters its flush reads.
+static void rbgpu_route_disp_2kt(KernelPatcher &patcher, size_t id,
+                                 mach_vm_address_t address, size_t size);
+
 void rbgpu_vramadj_flush_2kr(void) {
     if (!g_rb_2kr_hooked) {
         rbgpu_nvram_note("rbgpu-adj", "hk=0 the adjustVRAMAddress hook did "
@@ -9529,6 +9533,7 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
     // opt-in.
     rbgpu_route_pdefix_2ki(patcher, id, address, size);
     rbgpu_route_vramadj_2kr(patcher, id, address, size);   // 2kr
+    rbgpu_route_disp_2kt(patcher, id, address, size);      // 2kt
 
     // 2id: the VM flush. Rule 9 (2gb): programAndInvalidateVM at 0xbe9b7a2
     // opens `55 48 89 e5 41 57 41 56 41 55 41 54 53` - pushes, a movq and
@@ -10238,6 +10243,132 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
 static bool (*orig_accel_found_framebuffer_2ct)(void *, void *) = nullptr;
 static volatile int g_rb_2ct_found_fb_calls = 0;
 static volatile int g_rb_2ct_found_fb_refused = 0;
+
+// ---------------------------------------------------------------------------
+// 2kt (2026-10-20): 2ct's PREMISE IS OBSOLETE - adopt the display pipe.
+//
+// The halt is fixed (2ks) and the artifacts are the new frontier: the user
+// logged in and the screen filled with block artifacts "like it tried to
+// render the homescreen" instead of freezing. Boot 89's capture says the
+// panel is still driven by `IONDRVFramebuffer` (`.Display_boot`) with no AMD
+// framebuffer attached - because 2ct refuses the display pipe, so DCN is
+// never programmed, so WindowServer's TILED Metal composite reaches a
+// framebuffer the firmware scans out LINEARLY. Block-scrambled output is
+// exactly what that looks like.
+//
+// And 2ct's reason no longer holds. Quoting its own comment:
+//
+//   set_display_mode_and_vram returns false in exactly one place: the loop
+//   over adopted display pipes, where it tries to reserve the boot
+//   framebuffer's range in a VRAM allocator that is empty BECAUSE POWERUPHW
+//   NEVER RAN.
+//
+// `powerUpHW` has succeeded since 2gi and in every boot since, so the
+// allocator is not empty any more. The precondition 2ct was built around is
+// gone, and `-rbgpudisplaypipe` (which 2ct already provides) restores
+// Apple's adoption.
+//
+// THE RISK, stated: 2ct records that a false there "used to panic", and
+// `-rbgpunodisppanic` must stay OUT (2cv - it publishes IOPCITunnelled and
+// costs the UI). So adopting the pipe on the bare argument risks a panic
+// that teaches nothing.
+//
+// This hook is that risk's guard, and it is not a second experiment: it
+// exists only to make the first one survivable. `set_display_mode_and_vram`
+// (0xbe48604) is the function that returns the false. The hook calls the
+// original, RECORDS WHAT IT REALLY RETURNED, and then returns true - so a
+// false reaches the note instead of Apple's panic path. If the real value is
+// true, the forcing is a no-op and the boot is clean; if it is false, we
+// learn the allocator still fails and keep the machine to read why.
+//
+// Gated on `-rbgpudisplaypipe`: without it the hook observes and passes
+// Apple's value through unchanged, since with zero adopted pipes the loop
+// has nothing to fail on anyway.
+//
+// Gates checked: DEFINED in AMDRadeonX6000 (`nm -m`: external, __TEXT,__text
+// - note that `IOAccelDisplayPipe::displayModeDidChange` is an IMPORT and
+// must never be routed, milestone 2c); routed nowhere else (2kn - both names
+// appear only in comments); rule 9 clean - `55 48 89 e5 41 57 41 56 41 55 41
+// 54 53`, pushes and a movq, no branch in the first five bytes (2gb).
+static bool (*orig_set_display_mode_2kt)(void *) = nullptr;
+static int      g_rb_2kt_hooked = 0;
+static int      g_rb_2kt_on     = -1;
+static uint32_t g_rb_2kt_calls  = 0;
+static uint32_t g_rb_2kt_true   = 0;   // Apple really returned true
+static uint32_t g_rb_2kt_false  = 0;   // Apple really returned false
+static uint32_t g_rb_2kt_forced = 0;   // and we returned true anyway
+static uint32_t g_rb_2kt_first_ms = 0;
+
+static bool hooked_set_display_mode_2kt(void *machine) {
+    bool real = orig_set_display_mode_2kt ? orig_set_display_mode_2kt(machine)
+                                          : false;
+    if (g_rb_2kt_on < 0) {
+        g_rb_2kt_on = checkKernelArgument("-rbgpudisplaypipe") ? 1 : 0;
+        rbgpu_log("2kt: set_display_mode_and_vram guard %s",
+                  g_rb_2kt_on ? "ARMED (a false cannot panic the machine)"
+                              : "observe only (-rbgpudisplaypipe not set)");
+    }
+    g_rb_2kt_calls++;
+    if (g_rb_2kt_first_ms == 0) {
+        g_rb_2kt_first_ms = static_cast<uint32_t>(rbgpu_2iq_ms());
+    }
+    if (real) { g_rb_2kt_true++; return true; }
+    g_rb_2kt_false++;
+    rbgpu_log("2kt: set_display_mode_and_vram returned FALSE at %u ms - the "
+              "VRAM reservation over the adopted pipes still fails. %s",
+              (unsigned)rbgpu_2iq_ms(),
+              g_rb_2kt_on ? "forcing true so the machine survives to report it"
+                          : "passing it through");
+    if (g_rb_2kt_on != 1) { return false; }
+    g_rb_2kt_forced++;
+    return true;
+}
+
+void rbgpu_disp_flush_2kt(void) {
+    if (!g_rb_2kt_hooked) {
+        rbgpu_nvram_note("rbgpu-disp", "hk=0 the set_display_mode_and_vram "
+                                       "hook did NOT take - silence is the hook");
+        return;
+    }
+    char n[288];
+    snprintf(n, sizeof(n),
+             "hk=1 on=%d calls=%u true=%u false=%u forced=%u first=%ums | "
+             "pipe: fb_calls=%d refused=%d",
+             g_rb_2kt_on, g_rb_2kt_calls, g_rb_2kt_true, g_rb_2kt_false,
+             g_rb_2kt_forced, g_rb_2kt_first_ms,
+             g_rb_2ct_found_fb_calls, g_rb_2ct_found_fb_refused);
+    rbgpu_nvram_note("rbgpu-disp", n);
+    rbgpu_log("2kt: %s", n);
+    rbgpu_log("2kt: `refused=0` with `fb_calls>0` means the pipe WAS adopted, "
+              "so 2ct is no longer in the way. `true>0 false=0` means the VRAM "
+              "reservation now succeeds and 2ct's premise is dead on the "
+              "record - the artifacts then have to be explained by something "
+              "else. `false>0` means the allocator still fails even with "
+              "powerUpHW succeeding, which is a finding of its own and the "
+              "machine survived to say so. `calls=0` means the mode change "
+              "never reached this function and the pipe adoption is not what "
+              "gates it.");
+}
+
+// 2kt: routed from X6000 (where the symbol is defined), its own function for
+// the frame-size limit.
+__attribute__((noinline))
+static void rbgpu_route_disp_2kt(KernelPatcher &patcher, size_t id,
+                                 mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest req(
+        "__ZN37AMDRadeonX6000_AMDAccelDisplayMachine25set_display_mode_and_vramEv",
+        hooked_set_display_mode_2kt, orig_set_display_mode_2kt);
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        g_rb_2kt_hooked = 1;
+        rbgpu_log("2kt: hooked AMDAccelDisplayMachine::set_display_mode_and_vram");
+    } else {
+        g_rb_2kt_hooked = 0;
+        patcher.clearError();
+        rbgpu_log("2kt: FAILED to hook set_display_mode_and_vram - hk=0 in "
+                  "rbgpu-disp. Do NOT arm -rbgpudisplaypipe without this "
+                  "guard: a false return panics (2ct).");
+    }
+}
 
 static bool hooked_accel_found_framebuffer_2ct(void *machine, void *framebuffer) {
     g_rb_2ct_found_fb_calls++;
@@ -13568,6 +13699,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_gvmwrite_flush_2ie();
     rbgpu_pdefix_flush_2ki();
     rbgpu_vramadj_flush_2kr();
+    rbgpu_disp_flush_2kt();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
