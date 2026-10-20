@@ -15343,3 +15343,72 @@ One build note: the 560-byte note plus the walk pushed
 walk is `noinline`.
 
 Build `53A07E09`. Read-only, no boot-arg change.
+
+## 2km (2026-10-20) — the walk names the fix site: getPDEValue omits vram_base_offset
+
+Boot 84, nonce fresh, build `53A07E09`.
+
+```
+rbgpu-pdw = b=84 va=400300000 base=87b015001 start=400000000 d=1 bs=7
+            off=300000 vram=[780000000,880000000)
+            | L1[0]=20000000fb016001  BAD:no vram_base_offset
+            | L0[768]@87b016000=0     BAD:no VALID
+```
+
+**L1 is unambiguous.** `0x2000_0000_fb01_6001` has `VALID` set (Apple's own
+`incq %rax`) and an address of **`0xfb016000`** - below the carve-out window
+`[0x7_8000_0000, 0x8_8000_0000)`. A VRAM PDE cannot point below the carve-out
+under any reading, so this is not a judgement call. And it is the **identical
+shape** to the base defect 2ki corrects, one page along from `0xfb015000`.
+
+**2kl's correction #2 was load-bearing.** `bs=7`, so `leaf_bits = 16` and the
+L1 shift is `12 + 16 = 28`, giving index **0**. 2kk's hardcoded `>> 21` would
+have read **L1[1]** - the wrong entry - and a conclusion would have been drawn
+from an unrelated qword. Without the reviewer's point the walk would have
+produced a confident wrong answer.
+
+**L0 is provisional, and is recorded as such.** `L0[768]@87b016000 = 0` was
+read at an address produced by *our own* hypothesis (`0xfb016000 + vbo`),
+because the PDE is broken and the walk adds the offset to continue. If the
+missing-offset reading is right the table is there and the zero is real - a
+*second*, different defect: an **absent** entry, not a stripped one. If not,
+the location is a guess. Either way it cannot be settled until L1 is correct.
+
+### The fix
+
+`getPDEValue` (0xbe9b9de) ends:
+
+```
+be9ba22: leaq (%rcx,%rdi), %rax
+be9ba26: incq %rax
+```
+
+so it assembles address + flags and ORs bit 0 - and never adds
+`vram_base_offset`. Linux's `amdgpu_vm_bo_update` adds it to every PDE and PTE
+pointing at VRAM; on Navi 21 the offset is 0, so the omission is invisible
+there and fatal here.
+
+2km hooks it behind **`-rbgpupdeenc`** and adds `vbo` when the address is
+nonzero and below it. Adding `0x7_8000_0000` (bits 34:31) to a carve-out
+address **cannot carry past bit 47**, so every flag bit above 47 is preserved
+- checked against the observed `0x2000_0000_....` high bits, not assumed.
+Guarded as 2ki is: an address already in range is left alone and counted, so
+`fixed=0` can never read as "never ran".
+
+Rule 9 checked at the bytes: `55 48 89 e5 ff c6` (push, movq, `incl %esi`),
+first branch a `jne` **14 bytes in**. Defined in AMDRadeonX6000, which we
+already route (milestone 2c).
+
+**`getPTEValue` is deliberately NOT hooked in this boot.** The L0 reading is
+an absent entry rather than a stripped one, it is provisional, and two new
+things in one boot is the 2fo failure mode. If L1 goes `ok` and L0 then shows
+a *stripped* address, `getPTEValue` (0xbe9ba2c) is next.
+
+| next `rbgpu-pdw` | means |
+|---|---|
+| `L1 ... ok` and **no halt** | done - the chain translates |
+| `L1 ... ok`, `L0 BAD:no vram_base_offset` | same gap one level down; `getPTEValue` is the site |
+| `L1 ... ok`, `L0 ... =0 BAD:no VALID` | the leaf really is unmapped - a mapping problem, not an encode one, and a different investigation |
+| `L1` still `BAD` | the hook did not reach this PDE; check `rbgpu-pdv` `calls`/`fixed` |
+
+Build `79A28A81`. New note `rbgpu-pdv`. New boot-arg `-rbgpupdeenc`.
