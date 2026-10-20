@@ -7929,6 +7929,8 @@ static uint32_t g_rb_2kr_fixed  = 0;   // calls where we returned the input
 static uint32_t g_rb_2kr_nostrip = 0;  // in mapVMPT but orig did not strip
 static uint64_t g_rb_2kr_in     = 0;   // first in-mapVMPT argument
 static uint64_t g_rb_2kr_out    = 0;   // and what Apple returned for it
+static uint64_t g_rb_2kr_new    = 0;   // 2ks: and what mc2pa makes of it
+static uint32_t g_rb_2kr_nofb   = 0;   // 2ks: fb_off unknown, nothing done
 
 static uint64_t hooked_adjustVRAM_2kr(void *mem, uint64_t a) {
     uint64_t v = orig_adjustVRAM_2kr ? orig_adjustVRAM_2kr(mem, a) : a;
@@ -7947,15 +7949,39 @@ static uint64_t hooked_adjustVRAM_2kr(void *mem, uint64_t a) {
 
     g_rb_2kr_inmap++;
     if (v == a) { g_rb_2kr_nostrip++; return v; }   // nothing was stripped
+
+    // 2ks (2026-10-20): boot 88 measured what 2kr only inferred, and the
+    // inferred part was wrong. `first f410001000 -> 10001000` makes
+    // `this->0x60` the carve-out's **MC** base `0xF4_0000_0000`, not the
+    // system-physical `0x7_8000_0000`. 2kr's arithmetic
+    // (`0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000`) lands on the right
+    // digits by coincidence: the block MC address is `0xF4_FB01_6000`, and
+    // stripping `0xF4_0000_0000` is what produces `0xFB01_6000`.
+    //
+    // So returning the INPUT hands back the raw MC address, and boot 88's
+    // walk says exactly that: `L1[0]=200000f4fb016001 BAD:above carve-out`,
+    // with `L0[768]@f4fb016000` reading all-ones.
+    //
+    // What the walker needs is `mc2pa` (`amdgpu_gmc_vram_mc2pa`):
+    //   mc - vram_start + vram_base_offset
+    // Apple has already done `mc - vram_start`, so the correction is one
+    // addition on its own answer:
+    //   0xFB01_6000 + 0x7_8000_0000 = 0x8_7B01_6000
+    // which is the form 2ki writes for the page-directory base, measured
+    // and confirmed there.
+    if (g_rb_2ed_fb_off == 0) { g_rb_2kr_nofb++; return v; }
+    uint64_t vbo = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+    uint64_t nv  = v + vbo;
     if (g_rb_2kr_in == 0) {
-        g_rb_2kr_in = a; g_rb_2kr_out = v;
-        rbgpu_log("2kr: mapVMPT asked for %llx and Apple answered %llx - a "
-                  "%llx subtraction. %s", a, v, a - v,
-                  g_rb_2kr_on ? "RETURNING THE INPUT" : "passing it through");
+        g_rb_2kr_in = a; g_rb_2kr_out = v; g_rb_2kr_new = nv;
+        rbgpu_log("2kr/2ks: mapVMPT asked for %llx, Apple answered %llx (a "
+                  "%llx subtraction = the MC base), mc2pa is %llx. %s",
+                  a, v, a - v, nv,
+                  g_rb_2kr_on ? "RETURNING mc2pa" : "passing Apple's through");
     }
     if (g_rb_2kr_on != 1) { return v; }
     g_rb_2kr_fixed++;
-    return a;
+    return nv;
 }
 
 void rbgpu_vramadj_flush_2kr(void) {
@@ -7966,15 +7992,21 @@ void rbgpu_vramadj_flush_2kr(void) {
     }
     char n[320];
     snprintf(n, sizeof(n),
-             "hk=1 on=%d calls=%u inmap=%u fixed=%u nostrip=%u | "
-             "bounds=%llx..%llx | first %llx -> %llx",
+             "hk=1 on=%d calls=%u inmap=%u fixed=%u nostrip=%u nofb=%u | "
+             "bounds=%llx..%llx | first %llx -> %llx -> %llx",
              g_rb_2kr_on, g_rb_2kr_calls, g_rb_2kr_inmap, g_rb_2kr_fixed,
-             g_rb_2kr_nostrip,
+             g_rb_2kr_nostrip, g_rb_2kr_nofb,
              (unsigned long long)g_rb_2kr_map_lo,
              (unsigned long long)g_rb_2kr_map_hi,
-             g_rb_2kr_in, g_rb_2kr_out);
+             g_rb_2kr_in, g_rb_2kr_out, g_rb_2kr_new);
     rbgpu_nvram_note("rbgpu-adj", n);
     rbgpu_log("2kr: %s", n);
+    rbgpu_log("2ks: the three numbers are Apple's input (an MC address), "
+              "Apple's stripped answer, and mc2pa of it. The middle one "
+              "minus the first is the MC base 0xF400000000; the last must "
+              "land inside the carve-out window or rbgpu-pdw will say "
+              "`above carve-out` again. nofb>0 means fb_off was not known "
+              "yet when the tables were built and nothing was corrected.");
     rbgpu_log("2kr: inmap=0 with calls>0 means mapVMPT is not where the "
               "entry's address is adjusted and this reading of be8ea51 is "
               "wrong. nostrip>0 with inmap>0 means the argument was already "
