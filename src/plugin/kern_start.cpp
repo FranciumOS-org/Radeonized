@@ -7531,6 +7531,84 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
 // **defined** in (__TEXT,__text) of AMDRadeonX6000 by `nm -m`, so routing by
 // this kext's id is safe (milestone 2c). Observe-only: both call the
 // original and change nothing.
+// 2km (2026-10-20): the PDE encode, one level below 2ki.
+//
+// Boot 84's walk named the site outright:
+//   L1[0] = 0x2000_0000_fb01_6001  BAD:no vram_base_offset
+// VALID is set (Apple's `incq %rax`), the address is `0xfb016000` - below the
+// carve-out window [0x7_8000_0000, 0x8_8000_0000) - and it is the identical
+// shape to the base defect 2ki fixes, one page along from `0xfb015000`. A VRAM
+// PDE cannot point below the carve-out under any reading, so that verdict is
+// not a judgement call.
+//
+// `getPDEValue` (0xbe9b9de) ends `leaq (%rcx,%rdi), %rax ; incq %rax`, so it
+// builds address+flags and ORs bit 0 - and never adds `vram_base_offset`.
+// Linux's `amdgpu_vm_bo_update` adds it to every PDE and PTE pointing at VRAM.
+// On Navi 21 the offset is 0, so the omission is invisible there.
+//
+// Adding `vbo` (0x7_8000_0000, bits 34:31) to the returned value cannot carry
+// past bit 47 for any carve-out address, so the flag bits above 47 are
+// preserved untouched - checked, not assumed.
+//
+// Guarded like 2ki: only a nonzero address below `vbo`. An address already in
+// range is left alone and counted, so `fixed=0` can never read as "never ran".
+//
+// NOT hooking getPTEValue in the same boot. The walk's L0 reading
+// (`L0[768]=0`) is an ABSENT entry, not a stripped one - a different defect -
+// and it was read at an address derived from the broken PDE, so it is
+// provisional until L1 is correct. Two new things in one boot is 2fo.
+static uint64_t (*orig_getPDEValue_2km)(void *, uint32_t, uint64_t) = nullptr;
+static int      g_rb_2km_hooked = 0;
+static int      g_rb_2km_on     = -1;
+static uint32_t g_rb_2km_calls  = 0;
+static uint32_t g_rb_2km_fixed  = 0;
+static uint32_t g_rb_2km_inrange = 0;
+static uint32_t g_rb_2km_zero   = 0;
+static uint64_t g_rb_2km_was    = 0;
+static uint64_t g_rb_2km_now    = 0;
+static uint32_t g_rb_2km_lvl    = 0xFFFFFFFFu;
+
+static uint64_t hooked_getPDEValue_2km(void *vmm, uint32_t level, uint64_t a) {
+    uint64_t v = orig_getPDEValue_2km ? orig_getPDEValue_2km(vmm, level, a) : 0;
+    if (g_rb_2km_on < 0) {
+        g_rb_2km_on = checkKernelArgument("-rbgpupdeenc") ? 1 : 0;
+        rbgpu_log("2km: PDE encode correction %s",
+                  g_rb_2km_on ? "ARMED (-rbgpupdeenc)" : "OFF (observe only)");
+    }
+    g_rb_2km_calls++;
+    const uint64_t ADDRM = 0x0000FFFFFFFFF000ULL;
+    uint64_t addr = v & ADDRM;
+    if (addr == 0 || g_rb_2ed_fb_off == 0) { g_rb_2km_zero++; return v; }
+    uint64_t vbo = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+    if (addr >= vbo) { g_rb_2km_inrange++; return v; }
+    uint64_t nv = v + vbo;
+    if (g_rb_2km_lvl == 0xFFFFFFFFu) {
+        g_rb_2km_was = v; g_rb_2km_now = nv; g_rb_2km_lvl = level;
+        rbgpu_log("2km: level %u PDE %llx -> %llx %s", level, v, nv,
+                  g_rb_2km_on ? "WRITTEN" : "not written, observe only");
+    }
+    if (g_rb_2km_on != 1) { return v; }
+    g_rb_2km_fixed++;
+    return nv;
+}
+
+void rbgpu_pdeenc_flush_2km(void) {
+    char n[352];
+    if (!g_rb_2km_hooked) {
+        rbgpu_nvram_note("rbgpu-pdv", "hk=0 the getPDEValue hook did NOT take "
+                                      "- silence is the hook, not the driver");
+        return;
+    }
+    snprintf(n, sizeof(n),
+             "hk=1 on=%d calls=%u fixed=%u | left: inrange=%u zero=%u | "
+             "first lvl=%u %llx -> %llx",
+             g_rb_2km_on, g_rb_2km_calls, g_rb_2km_fixed,
+             g_rb_2km_inrange, g_rb_2km_zero,
+             g_rb_2km_lvl, g_rb_2km_was, g_rb_2km_now);
+    rbgpu_nvram_note("rbgpu-pdv", n);
+    rbgpu_log("2km: %s", n);
+}
+
 // 2ki: see the route site for the full derivation.
 static uint64_t rbgpu_2iq_ms(void);   // defined with the 2iq restart hooks
 static void (*orig_prepareVMInvalidateRequest_2ki)(void *, void *, const void *,
@@ -7663,6 +7741,23 @@ static void rbgpu_route_pdefix_2ki(KernelPatcher &patcher, size_t id,
         "__ZN26AMDRadeonX6000_AMDGFX10VMM26prepareVMInvalidateRequestEP25AMD_VM_INVALIDATE_REQUESTPK22AMD_VM_INVALIDATE_INFOb",
         hooked_prepareVMInvalidateRequest_2ki,
         orig_prepareVMInvalidateRequest_2ki);
+    // 2km: rule 9 checked at the bytes - getPDEValue opens
+    // `55 48 89 e5 ff c6` (push, movq, incl %esi); the first branch is a jne
+    // 14 bytes in. Defined in AMDRadeonX6000 (milestone 2c).
+    KernelPatcher::RouteRequest pdev(
+        "__ZN26AMDRadeonX6000_AMDGFX10VMM11getPDEValueE15eAMD_VMPT_LEVELy",
+        hooked_getPDEValue_2km, orig_getPDEValue_2km);
+    if (patcher.routeMultiple(id, &pdev, 1, address, size)) {
+        rbgpu_log("2km: hooked AMDGFX10VMM::getPDEValue - every PDE Apple "
+                  "builds gets vram_base_offset added when it points below "
+                  "the carve-out");
+        g_rb_2km_hooked = 1;
+    } else {
+        rbgpu_log("2km: FAILED to hook getPDEValue - hk=0 in rbgpu-pdv");
+        g_rb_2km_hooked = 0;
+        patcher.clearError();
+    }
+
     if (patcher.routeMultiple(id, &pvir, 1, address, size)) {
         rbgpu_log("2ki: hooked AMDGFX10VMM::prepareVMInvalidateRequest - the "
                   "page-directory address is corrected in the request, before "
@@ -13178,6 +13273,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
     rbgpu_pdefix_flush_2ki();
+    rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
     rbgpu_vmid_flush_2if();
