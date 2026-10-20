@@ -15968,3 +15968,104 @@ unexamined.
 
 Build `E76DEC6D-8ACD-3996-8466-C5EA39C19EB6`. New boot-arg for this
 experiment: `-rbgpudisplaypipe` (2ct's own, never yet armed).
+
+## 2ku (2026-10-20) — boot 90: the pipe adopts cleanly, and the same defect one call site over
+
+Boot 90, `b=90`, UUID `E76DEC6D`. Three results.
+
+**1. The halt stays gone - n=2.**
+
+```
+rbgpu-mew  = b=90 n=24 NEVER HALTED in 0.5-12s
+rbgpu-mew2 = b=90 n=60 NO TRANSITION in 6.5-9.5s (ok=59 bad=-1)
+rbgpu-cph  = b=90 NO HALT SAMPLE
+```
+
+2ks reproduces. The fence page now holds **0x20 = 32** completions
+(boot 89: 10) and `rbgpu-adj` corrected **526** page-table addresses
+(boot 89: 147), so far more work is flowing.
+
+**2. 2ct's premise is dead on the record.**
+
+```
+rbgpu-disp = b=90 hk=1 on=1 calls=2 true=2 false=0 forced=0 first=1276ms
+             | pipe: fb_calls=2 refused=0
+```
+
+`refused=0` - the pipe was adopted. `true=2 false=0 forced=0` -
+`set_display_mode_and_vram` returned **true both times**, so the VRAM
+allocator is no longer empty and the 2kt guard was never needed. 2ct
+was right in 2026-10-12 and wrong from 2gi onward.
+
+The screen then showed the desktop **rendering**: the user's photo has
+the wallpaper drawn **correctly**, smooth gradients across the whole
+panel. That alone refutes a global tiling/swizzle mismatch, which would
+shred everything. What is broken is narrow - small rectangular garbage
+blocks in two clusters, a band of blocks along the bottom edge where the
+Dock sits, and a spinning-wait cursor. Text- and small-surface shaped.
+The artifacts then stop changing, the spinner keeps turning, and the
+machine freezes.
+
+**3. A VM fault remains, under a VMID nothing here had ever touched.**
+
+```
+rbgpu-ring  = p=0 vmf=a0093a vmalo=401400 r=1000 w=1000 me=0
+              p=1 vmf=a0093b r=0 w=0 grbm=a0003028
+rbgpu-fault = c=2 f=2 r=1 o=0 fw=2 | sa0093b h0 va=401400000 mx=401400000 v10 R c4
+rbgpu-vmid  = av=105 fail=105 vmids=000e
+rbgpu-pde   = calls=357 fixed=3 | left: valid=0 zero=338 above=16
+```
+
+`0xa0093b` = `MORE_FAULTS`, `WALKER_ERROR=5`, `PERMISSION_FAULTS=3`,
+`MAPPING_ERROR`, `CID=4` (CPF), READ, **`VMID=10`**. The same shape as
+the original defect - CPF cannot translate a command-buffer VA - but the
+CP did **not** halt (`me=0` at both phases), and the fault count fell
+from 2hv's `c=8 f=8` to `c=2 f=2`. `vmids=000e` is bits 1/2/3: our
+instrumentation has only ever seen three VMIDs, and 2ki corrected
+exactly those three. **Nothing ever corrected VMID 10.**
+
+**The site, found statically.** `adjustVRAMAddress` is vtable call offset
+`0x200`; among the sites in this kext, `AMDHWVMM::assignVMID` (0xbe91376)
+has one, and the surrounding code is unambiguous:
+
+```
+be914f4  leaq -0x68(%rbp), %rbx    ; the local AMD_VM_INVALIDATE_INFO
+be914f8  movb $0x1, 0x24(%rbx)     ; info->0x24 = 1  - 2ki's PD-block guard
+be91507  callq *0x158(%rax)        ; get the page-directory address
+be91514  movq %rax, %rsi
+be91517  callq *0x200(%rcx)        ; adjustVRAMAddress(PD address) - STRIPS IT
+be9151d  movq %rax, 0x18(%rbx)     ; info->0x18 = THE PD ADDRESS
+```
+
+`info->0x18` is exactly the field 2ki's disassembly labelled "THE PD
+ADDRESS", which `prepareVMInvalidateRequest` copies verbatim into the
+request that programs `GCVM_CONTEXT<n>_PAGE_TABLE_BASE_ADDR`. **So every
+context's base is stripped at assignment**, and 2ki has only ever patched
+it back for the VMIDs it happened to observe. `rbgpu-adj`'s
+`calls=532 inmap=526` says six calls came from outside mapVMPT and were
+left alone by 2kr's scoping - this is one of them.
+
+**2ku widens the scope to `assignVMID`**, so the base is correct for
+every VMID at the source, before any invalidate is prepared. The scope is
+now a set of named ranges resolved by `solveSymbol`, and a range that
+fails to resolve or looks implausible (> 0x4000) is **dropped rather than
+used** - a wrong range would silently correct the wrong callers, which is
+2kr's mangled-name trap one step on. Every remaining out-of-scope caller
+is recorded as an offset from `adjustVRAMAddress` itself (`oN +off`, add
+to 0xbe8cb90), so the next one names itself instead of being guessed at.
+
+Pre-registered:
+
+| reading | means |
+|---|---|
+| `asg>0`, v10 fault gone | the base is fixed at the source for every VMID |
+| `asg>0`, fault remains | the base was not the whole of it; read the new `vmf` |
+| `asg=0` | the scope did not resolve, or that call is not adjustVRAMAddress |
+| `rbgpu-pde fixed` falls to 0, `above` rises | 2ki now finds the values already correct - the expected signature of success, and it makes 2ki redundant |
+
+Also noted, not acted on: `av=105 fail=105` - every `assignVMID` call
+still reports failure by the hook's own criterion while VMIDs are plainly
+handed out. That flag has been open since 2kh and is now load-bearing
+enough to read against the code that sets it (2ha).
+
+Build `6055F184-7B5B-3E0D-B700-FAD0A0946313`.
