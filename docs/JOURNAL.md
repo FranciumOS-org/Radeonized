@@ -16133,3 +16133,72 @@ right.
 
 Build `3B88C80A-B7BF-3874-AF74-357DF63B4EB2`. Boot-args: remove
 `-rbgpupdefix`, keep `-rbgpuvramadj` and `-rbgpudisplaypipe`.
+
+## 2kw (2026-10-20) — boot 92: the regression is undone, and the measurement names the last site
+
+Boot 92, `b=92`, UUID `3B88C80A`. Boot 90 reproduced exactly, with 2kv's
+two corrections no longer stacking.
+
+```
+rbgpu-mew  = b=92 n=24 NEVER HALTED in 0.5-12s
+rbgpu-cph  = b=92 NO HALT SAMPLE
+rbgpu-pde  = b=92 hk=1 on=0 calls=357 fixed=0 | left: zero=338 above=19
+rbgpu-adj  = b=92 calls=531 inmap=530 fixed=530 nostrip=0 nofb=0
+             | map=527 asg=3 | o0 +3b2d9 n=1
+rbgpu-disp = b=92 true=2 false=0 forced=0 | pipe: fb_calls=2 refused=0
+rbgpu-fault= b=92 c=2 f=2 r=1 | sa0093b h0 va=401400000 v10 R c4
+rbgpu-vmid = b=92 av=106 fail=106 vmids=000e
+```
+
+**The halt is gone for a third boot**, and 2kv is confirmed from the
+other side: `rbgpu-pde` reads `on=0 fixed=0 above=19`, so with
+`-rbgpupdefix` out 2ki does nothing, and had it run it would have found
+**19** values already correct. The stacking is structurally impossible
+now as well, since its guard refuses anything at or above
+`vram_base_offset`.
+
+**And the v10 fault is byte-identical to boot 90** - `sa0093b
+va=401400000 v10 R c4`. 2ku's `assignVMID` correction fired (`asg=3`)
+and could not possibly have helped, because **`vmids=000e`**: bits 1/2/3,
+the only VMIDs `AMDHWVMM::assignVMID` has ever handed out in any boot.
+**VMID 10 does not come from that function.**
+
+**The one remaining out-of-scope caller names where it does come from.**
+2ku's `oN` recording - added precisely so the next site would not have to
+be guessed - reports `o0 +3b2d9 n=1`, and
+`0xbe8cb90 + 0x3b2d9 = 0xbec7e69` lands in
+`AMDGFX10HIQHWChannel::fillMapProcessPacket(PM4_MES_MAP_PROCESS*, ...)`
+(0xbec7de6), at +0x83:
+
+```
+bec7e63  callq *0x200(%rcx)      ; adjustVRAMAddress(page-directory address)
+bec7e69  movq %rax, 0x8(%rbx)    ; -> the PM4_MES_MAP_PROCESS packet
+```
+
+`MAP_PROCESS` is the MES/HIQ packet that programs a process's page-table
+base for its VMID. Metal's compute runs on MQD user queues managed by the
+MES - which 2hl already noted, as the reason RB0 was not the client ring
+- so those VMIDs are the MES's to hand out, not `assignVMID`'s. That is
+why `vmids` has only ever shown three, and why VMID 10's base has been
+stripped in every boot since the desktop first rendered.
+
+**2kw adds that site to the scope**, and nothing else: the measurement
+named one function, so one function goes in. Bounds
+`[0xbec7de6, 0xbec7eb0)`, end bound `fillMapProcessVMPacket`, both names
+cross-checked against `nm` (2kr). `rbgpu-adj` now reports `mes=` beside
+`map=` and `asg=`.
+
+| reading | means |
+|---|---|
+| `mes>0` and the v10 fault gone | the MAP_PROCESS base is the last of it |
+| `mes>0`, fault remains | the packet's base was not what VMID 10 faults on |
+| `mes=0` | the scope did not resolve, or that call is not adjustVRAMAddress |
+| a new `oN` | another site, named rather than guessed |
+
+Still open and now twice relevant: `av=106 fail=106` - every
+`assignVMID` call reports failure by the hook's own criterion. With VMID
+10 shown to come from elsewhere, "fail" may simply be this hook
+misreading a path that is not the only one. Unread against the code that
+sets it (2ha).
+
+Build `6B05D788-4853-34A5-A85D-803A56492370`.
