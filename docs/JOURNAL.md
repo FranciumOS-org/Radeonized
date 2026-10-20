@@ -16384,3 +16384,73 @@ exists; what to do about it - and whether the AddrLib geometry can be
 influenced from the kernel at all - is the question after it.
 
 Build `DCB99254-201F-3C25-BF39-34AB60309BCB`.
+
+## 2kz (2026-10-20) — boot 94: the chip's tiling geometry, measured
+
+`b=94`, UUID `DCB99254`, read live from the armed boot (which is still
+up, still fault-free, ring to `w=0x93480`).
+
+```
+rbgpu-ring  = b=94 p=0 ... gbac=242
+rbgpu-adj   = b=94 calls=13488 inmap=13488 fixed=13488 | map=13447 asg=13 mes=28
+rbgpu-fault = b=94 hk=1 c=0 f=0 r=0 o=0 fw=0
+```
+
+**`GB_ADDR_CONFIG = 0x242`**, decoded against gc_10_3_0_sh_mask.h:
+
+| field | bits | raw | meaning |
+|---|---|---|---|
+| NUM_PIPES | 2:0 | 2 | 4 pipes |
+| PIPE_INTERLEAVE_SIZE | 5:3 | 0 | 256 B |
+| MAX_COMPRESSED_FRAGS | 7:6 | 1 | 2 |
+| NUM_PKRS | 10:8 | 2 | 4 packers |
+| NUM_SHADER_ENGINES | 21:19 | 0 | **1** |
+| NUM_RB_PER_SE | 27:26 | 0 | 1 |
+
+Navi 21 has **four** shader engines, so that field alone differs - 0 here
+against 2 there - and the pipe and packer counts differ as well. GFX10's
+swizzle equations select which address bits to XOR directly from the pipe
+and packer counts, so an AddrLib configured for Navi 21 reading a surface
+laid out for this chip scrambles it in blocks and leaves linear buffers
+untouched: precisely the split 2ky measured.
+
+**But a mismatch is still not demonstrated**, and saying "Navi 21's
+geometry is being used" without reading what AddrLib was actually handed
+would be the recurring error again. `AMDHWAlignManager2::init`
+(0xbe99342) builds `ADDR_CREATE_INPUT`:
+
+```
+be993fd  movl $0x70, (%r14)            ; size
+be9940f  callq *0x140(%rax) -> +0x04   ; chipFamily
+be99420  callq *0x1b8(%rax) -> +0x08   ; chipRevision
+be99431  callq *0x1a8(%rax) -> +0x0c
+be9943b..be99458                       ; AddrLibAllocSysMem / Free / DebugPrint
+be993ed  callq *0x1c0(%rax) -> r15     ; the register-value source
+be9945c  movl 0xa0(%r15) -> +0x30      ; regValue[0]
+be99467  movl 0xa8(%r15) -> +0x34
+be99472  movl 0xb0(%r15) -> +0x38
+be9947d  movl 0xb8(%r15) -> +0x3c
+```
+
+**AddrLib runs in the KERNEL here** - `AMDHWAlignManager2` owns it, with
+`AddrLibAllocSysMem`/`FreeSysMem`/`DebugPrint` as its callbacks and
+`getPreferredSwizzleMode2`, `getDccInfo2`, `getCMaskInfo2` on top of
+`_ADDR2_*` structs. So this is reachable from this plugin, if the value
+turns out to be wrong.
+
+2kz hooks that init, lets it run untouched, then calls **the same
+getters by the same vtable offsets** and records what they returned. No
+substitution, no inference about the plumbing (2cy). `rbgpu_vcall_2kz`
+returns `ok=false` on any NULL along the way so an unreached getter is
+`ffffffff` and can never be read as a measured zero (2eh).
+
+| `rbgpu-addr` | means |
+|---|---|
+| one of `a0/a8/b0/b8` reads **242** | the kernel's AddrLib has the chip's real geometry; the mismatch is then userspace-side, in the Metal driver's own AddrLib, which this plugin does not reach the same way |
+| none reads 242 | AddrLib is configured with something that is not this chip - the defect, and fixable here |
+| `ffffffff` | that getter was never reached; not a value |
+| `calls=0` | the align manager is initialised somewhere this hook does not see |
+
+Observe only. Nothing written, the original's return passed through.
+
+Build `F7112B3D-01C3-3D6E-B0D3-9881C716D687`.
