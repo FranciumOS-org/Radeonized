@@ -122,6 +122,11 @@ under the tag in brackets.
   routed function's address, call `solveSymbol` yourself. A doc comment
   is not a measurement - the same error as the return code in [2ha].
   [2kp]
+- **Cross-check every hand-written mangled name against `nm` before the
+  boot.** 2kr's two `mapVMPT` names were both wrong in the length prefix
+  (`8mapVMPT` for `7mapVMPT`, `10unmapVMPT` for `9unmapVMPT`); each would
+  have made `solveSymbol` return 0 and silently unscoped the fix. One
+  `grep -o` of the literals piped through `nm` catches it. [2kr]
 - vtable dumps: **call offset = dump offset − 0x10** (the address point is
   symbol + 0x10). A *non-virtual* call through a vtable **symbol** uses dump
   offsets directly. [2gp]
@@ -222,6 +227,8 @@ anything, and log it when it is not.
 -rbgpurlcsub                                 what makes the RLC autoload COMPLETE
 -rbgpunocgcg                                 CGCG off - takes, but NOT a fix (2jv)
 -rbgpumewatch                                the timed CP/RLC/GFXOFF sample banks
+-rbgpuvramadj                                2kr: stop adjustVRAMAddress stripping
+                                             vram_base_offset inside mapVMPT
 ```
 
 `-rbgpunocgcg` is IN but is **NOT a fix** (2jv). It writes
@@ -723,6 +730,27 @@ there. The defective entry is composed:
 `| 0xfb016000` (the block, never passed through `mc2pa`). **The fix site
 is that composition**, and 2ko names it by recording Apple's call site
 from inside the hook that already exists. [2ko]
+
+**THE STRIPPING FUNCTION HAS A NAME: `AMDHWMemory::adjustVRAMAddress`
+(0xbe8cb90) (2kr, static).** `getPDEValue`'s only VM-class caller is
+`AMDHWVMContext::mapVMPT` (0xbe8e624), which calls
+`getPDEValue(level, 0)` with the address **deliberately zeroed**
+(`xorl %edx, %edx`, be8ea65) and takes the entry's address from
+`adjustVRAMAddress(block)` two instructions earlier (be8ea51), the block
+coming from `allocVMBlock` -> `elem+0x20`. `adjustVRAMAddress` is nine
+instructions and **subtracts** `this->0x60` from any address inside
+`[0x60, 0x60 + 0x1b8*0x40)`. `AMDGFX10HWMemory` does not override it.
+The arithmetic reproduces every stripped address this project has chased:
+`0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000` (the L1 entry),
+`0x8_7B01_5000 -> 0xFB01_5000` (c3's PD base), `0x8_7B00_B000 ->
+0xFB00_B000` (c1's). **So 2em and 2ki have each been undoing this one
+subtraction after the fact**, one call site at a time, always too late
+for the 8.9 s fetch. It is correct on a discrete Navi 21, whose VRAM
+starts at its own aperture; this APU's carve-out is at
+`0x7_8000_0000` and the walker needs the absolute form, which is what
+2em measured. `-rbgpuvramadj` neutralises it **only** for callers inside
+mapVMPT (bounds from `solveSymbol`), since other callers presumably want
+the stripped form. [2kr]
 
 Open, flagged, not interpreted: `rbgpu-vmid` reads `av=41 fail=41` -
 every `assignVMID` call reports failure while `vmids=000e` says 1, 2 and
