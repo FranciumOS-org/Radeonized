@@ -7921,8 +7921,49 @@ static void rbgpu_route_pdefix_2ki(KernelPatcher &patcher, size_t id,
 static uint64_t (*orig_adjustVRAM_2kr)(void *, uint64_t) = nullptr;
 static int      g_rb_2kr_hooked = 0;
 static int      g_rb_2kr_on     = -1;
-static mach_vm_address_t g_rb_2kr_map_lo = 0;   // mapVMPT
-static mach_vm_address_t g_rb_2kr_map_hi = 0;   // unmapVMPT
+// 2ku (2026-10-20): the SAME defect one call site over, and it is why boot
+// 90 still faulted - under VMID 10, a context nothing here had ever touched.
+//
+// `AMDHWVMM::assignVMID` (0xbe91376) builds the invalidate info on its own
+// stack and fills in the page-directory address:
+//
+//   be914f4  leaq -0x68(%rbp), %rbx     ; the local AMD_VM_INVALIDATE_INFO
+//   be914f8  movb $0x1, 0x24(%rbx)      ; info->0x24 = 1, 2ki's PD-block guard
+//   be91507  callq *0x158(%rax)         ; get the page-directory address
+//   be91514  movq %rax, %rsi
+//   be91517  callq *0x200(%rcx)         ; adjustVRAMAddress(PD address)
+//   be9151d  movq %rax, 0x18(%rbx)      ; info->0x18 = THE PD ADDRESS
+//
+// `info->0x18` is precisely the field 2ki's disassembly labelled "THE PD
+// ADDRESS", which `prepareVMInvalidateRequest` copies verbatim into the
+// request that programs `GCVM_CONTEXT<n>_PAGE_TABLE_BASE_ADDR`. So **every**
+// context's base is stripped at assignment, and 2ki only ever patched it
+// back for the VMIDs it happened to observe - `rbgpu-pde` reads
+// `fixed=3` and `rbgpu-vmid` reads `vmids=000e`, bits 1/2/3. Boot 90's
+// fault is `v10`, which no correction ever reached.
+//
+// Correcting it here fixes the base for every VMID at the source, before
+// any invalidate is prepared, and makes 2ki redundant (left in, untouched,
+// since removing it is its own experiment).
+//
+// The scope is now a small set of named ranges rather than one, and every
+// call from outside them is RECORDED as an offset from adjustVRAMAddress
+// itself, so the next out-of-scope site names itself instead of being
+// guessed at (2ko's lesson).
+#define RB_2KR_SCOPES 2
+static mach_vm_address_t g_rb_2kr_lo[RB_2KR_SCOPES];
+static mach_vm_address_t g_rb_2kr_hi[RB_2KR_SCOPES];
+static uint32_t g_rb_2kr_hit[RB_2KR_SCOPES];
+static mach_vm_address_t g_rb_2kr_self = 0;   // adjustVRAMAddress, as solved
+#define RB_2KR_OUT 4
+static int64_t  g_rb_2kr_out_off[RB_2KR_OUT];
+static uint32_t g_rb_2kr_out_cnt[RB_2KR_OUT];
+static uint32_t g_rb_2kr_out_n   = 0;
+static uint32_t g_rb_2kr_out_over = 0;
+
+// kept for the note's wording; index 0 is mapVMPT, 1 is assignVMID
+static mach_vm_address_t g_rb_2kr_map_lo = 0;
+static mach_vm_address_t g_rb_2kr_map_hi = 0;
 static uint32_t g_rb_2kr_calls  = 0;
 static uint32_t g_rb_2kr_inmap  = 0;   // calls from inside mapVMPT
 static uint32_t g_rb_2kr_fixed  = 0;   // calls where we returned the input
@@ -7942,11 +7983,35 @@ static uint64_t hooked_adjustVRAM_2kr(void *mem, uint64_t a) {
     }
     g_rb_2kr_calls++;
 
-    // Only the page-table builder. Bounds unknown -> never claim a site.
-    if (g_rb_2kr_map_lo == 0 || g_rb_2kr_map_hi == 0) { return v; }
+    // Only the named page-table sites. No bounds -> never claim a site.
     auto ret = reinterpret_cast<mach_vm_address_t>(__builtin_return_address(0));
-    if (ret < g_rb_2kr_map_lo || ret >= g_rb_2kr_map_hi) { return v; }
-
+    int scope = -1;
+    for (unsigned i = 0; i < RB_2KR_SCOPES; i++) {
+        if (g_rb_2kr_lo[i] == 0 || g_rb_2kr_hi[i] == 0) { continue; }
+        if (ret >= g_rb_2kr_lo[i] && ret < g_rb_2kr_hi[i]) { scope = (int)i; break; }
+    }
+    if (scope < 0) {
+        // 2ku: record it rather than letting it vanish (2ko).
+        if (g_rb_2kr_self != 0) {
+            int64_t off = static_cast<int64_t>(ret)
+                        - static_cast<int64_t>(g_rb_2kr_self);
+            bool seen = false;
+            for (uint32_t i = 0; i < g_rb_2kr_out_n; i++) {
+                if (g_rb_2kr_out_off[i] == off) { g_rb_2kr_out_cnt[i]++; seen = true; break; }
+            }
+            if (!seen) {
+                if (g_rb_2kr_out_n < RB_2KR_OUT) {
+                    g_rb_2kr_out_off[g_rb_2kr_out_n] = off;
+                    g_rb_2kr_out_cnt[g_rb_2kr_out_n] = 1;
+                    g_rb_2kr_out_n++;
+                } else {
+                    g_rb_2kr_out_over++;
+                }
+            }
+        }
+        return v;
+    }
+    g_rb_2kr_hit[scope]++;
     g_rb_2kr_inmap++;
     if (v == a) { g_rb_2kr_nostrip++; return v; }   // nothing was stripped
 
@@ -7997,14 +8062,36 @@ void rbgpu_vramadj_flush_2kr(void) {
     char n[320];
     snprintf(n, sizeof(n),
              "hk=1 on=%d calls=%u inmap=%u fixed=%u nostrip=%u nofb=%u | "
-             "bounds=%llx..%llx | first %llx -> %llx -> %llx",
+             "map=%u asg=%u | first %llx -> %llx -> %llx",
              g_rb_2kr_on, g_rb_2kr_calls, g_rb_2kr_inmap, g_rb_2kr_fixed,
              g_rb_2kr_nostrip, g_rb_2kr_nofb,
-             (unsigned long long)g_rb_2kr_map_lo,
-             (unsigned long long)g_rb_2kr_map_hi,
+             g_rb_2kr_hit[0], g_rb_2kr_hit[1],
              g_rb_2kr_in, g_rb_2kr_out, g_rb_2kr_new);
+    size_t at = strlen(n);
+    for (uint32_t i = 0; i < g_rb_2kr_out_n && at < sizeof(n) - 40; i++) {
+        int w = snprintf(n + at, sizeof(n) - at, " | o%u %c%llx n=%u", i,
+                         g_rb_2kr_out_off[i] < 0 ? '-' : '+',
+                         (unsigned long long)(g_rb_2kr_out_off[i] < 0
+                                              ? -g_rb_2kr_out_off[i]
+                                              :  g_rb_2kr_out_off[i]),
+                         g_rb_2kr_out_cnt[i]);
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    if (g_rb_2kr_out_over && at < sizeof(n) - 16) {
+        snprintf(n + at, sizeof(n) - at, " | +%u more", g_rb_2kr_out_over);
+    }
     rbgpu_nvram_note("rbgpu-adj", n);
     rbgpu_log("2kr: %s", n);
+    rbgpu_log("2ku: `asg>0` means assignVMID's page-directory address is now "
+              "corrected at the source, for EVERY vmid, before any invalidate "
+              "is prepared - so rbgpu-pde's `fixed` should fall to 0 with "
+              "`above` rising, because 2ki will find the values already "
+              "correct. `asg=0` means the scope did not resolve or that call "
+              "is not adjustVRAMAddress after all. Each `oN +off` is a "
+              "remaining caller OUTSIDE both scopes, as an offset from "
+              "adjustVRAMAddress itself: add it to 0xbe8cb90 for the static "
+              "address. The test is whether the v10 fault "
+              "(`sa0093b va=401400000`) is gone from rbgpu-fault.");
     rbgpu_log("2ks: the three numbers are Apple's input (an MC address), "
               "Apple's stripped answer, and mc2pa of it. The middle one "
               "minus the first is the MC base 0xF400000000; the last must "
@@ -8038,20 +8125,43 @@ static void rbgpu_route_vramadj_2kr(KernelPatcher &patcher, size_t id,
         return;
     }
     // 2kp: solveSymbol, because RouteRequest::from is never written back.
-    g_rb_2kr_map_lo = patcher.solveSymbol(
-        id,
+    // Every name here was cross-checked against `nm` before the boot (2kr).
+    static const char *kScopeLo[RB_2KR_SCOPES] = {
         "__ZN29AMDRadeonX6000_AMDHWVMContext7mapVMPTEP12AMD_VMPT_CTL15eAMD_VMPT_LEVELjyyy",
-        address, size);
-    patcher.clearError();
-    g_rb_2kr_map_hi = patcher.solveSymbol(
-        id,
+        "__ZN23AMDRadeonX6000_AMDHWVMM10assignVMIDEP30AMDRadeonX6000_IAMDHWVMContextRjP30AMDRadeonX6000_AMDAccelChannelPP12IOAccelEventPb",
+    };
+    // the symbol that immediately follows each, as its end bound
+    static const char *kScopeHi[RB_2KR_SCOPES] = {
         "__ZN29AMDRadeonX6000_AMDHWVMContext9unmapVMPTEP12AMD_VMPT_CTL15eAMD_VMPT_LEVELjyyy",
+        "__ZN23AMDRadeonX6000_AMDHWVMM17getContextForVMIDEj16eAMD_VM_HUB_TYPE",
+    };
+    for (unsigned i = 0; i < RB_2KR_SCOPES; i++) {
+        g_rb_2kr_lo[i] = patcher.solveSymbol(id, kScopeLo[i], address, size);
+        patcher.clearError();
+        g_rb_2kr_hi[i] = patcher.solveSymbol(id, kScopeHi[i], address, size);
+        patcher.clearError();
+        if (g_rb_2kr_lo[i] == 0 || g_rb_2kr_hi[i] >= g_rb_2kr_lo[i] + 0x4000 ||
+            g_rb_2kr_hi[i] <= g_rb_2kr_lo[i]) {
+            // A bound that did not resolve, or is implausibly far, is DROPPED
+            // rather than used - a wrong range would silently fix the wrong
+            // callers (2kr's mangled-name trap, one step on).
+            rbgpu_log("2ku: scope %u REJECTED lo=%llx hi=%llx", i,
+                      (unsigned long long)g_rb_2kr_lo[i],
+                      (unsigned long long)g_rb_2kr_hi[i]);
+            g_rb_2kr_lo[i] = 0; g_rb_2kr_hi[i] = 0;
+        }
+    }
+    g_rb_2kr_map_lo = g_rb_2kr_lo[0];
+    g_rb_2kr_map_hi = g_rb_2kr_hi[0];
+    g_rb_2kr_self = patcher.solveSymbol(
+        id, "__ZN26AMDRadeonX6000_AMDHWMemory17adjustVRAMAddressEy",
         address, size);
     patcher.clearError();
-    rbgpu_log("2kr: mapVMPT bounds %llx..%llx (0 means the fix cannot be "
-              "scoped and nothing will be changed)",
-              (unsigned long long)g_rb_2kr_map_lo,
-              (unsigned long long)g_rb_2kr_map_hi);
+    rbgpu_log("2ku: scopes mapVMPT=%llx..%llx assignVMID=%llx..%llx self=%llx "
+              "(a zero pair means that site is NOT corrected this boot)",
+              (unsigned long long)g_rb_2kr_lo[0], (unsigned long long)g_rb_2kr_hi[0],
+              (unsigned long long)g_rb_2kr_lo[1], (unsigned long long)g_rb_2kr_hi[1],
+              (unsigned long long)g_rb_2kr_self);
 }
 
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
