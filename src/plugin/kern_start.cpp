@@ -7587,22 +7587,37 @@ static int      g_rb_2km_on     = -1;
 // 0xbe9b9de gives the static address to disassemble. The candidates from
 // `nm` are AMDHWVMContext::getVMPT (0xbe8f5c8) and ::mapVA (0xbe8ee7a),
 // but a guess is not a measurement.
+// 2kp (2026-10-20): boot 86 recorded NOTHING, and the instrument was the
+// fault for the fourth time. The anchor came from `reqs[1].from` after
+// `routeMultiple`, because kern_patcher.hpp documents `from` as "solved
+// symbol (assigned by routeMultiple)". **Lilu 1.7.3 does not write it
+// back.** It stayed 0, every call took the early return, and the note
+// printed no rows at all - indistinguishable from "getPDEValue has no
+// caller", which is absurd on 114 calls. CLAUDE.md's rule: every path out
+// of a probe must say something.
+//
+// So the RAW return address is recorded unconditionally and the anchor is
+// used only to present it. `solveSymbol` supplies the anchor - a read-only
+// resolve of a symbol this plugin already routes, so no second route and no
+// rule-9 question - and when it fails the note says `anchor=0` and prints
+// the raw addresses, which are still comparable against each other and
+// against the kext slide in the same capture.
 #define RB_2KO_CALLERS 4
-static mach_vm_address_t g_rb_2ko_from = 0;   // getPDEValue, as routed
-static int64_t  g_rb_2ko_off[RB_2KO_CALLERS];
+static mach_vm_address_t g_rb_2ko_from = 0;   // getPDEValue, solved
+static mach_vm_address_t g_rb_2ko_raw[RB_2KO_CALLERS];
 static uint32_t g_rb_2ko_cnt[RB_2KO_CALLERS];
 static uint32_t g_rb_2ko_n    = 0;
 static uint32_t g_rb_2ko_over = 0;   // callers past the fourth
+static uint32_t g_rb_2ko_null = 0;   // a null return address, if it happens
 
 static void rbgpu_pdeenc_caller_2ko(void *ret) {
-    if (g_rb_2ko_from == 0 || ret == nullptr) { return; }
-    int64_t off = static_cast<int64_t>(reinterpret_cast<mach_vm_address_t>(ret))
-                - static_cast<int64_t>(g_rb_2ko_from);
+    if (ret == nullptr) { g_rb_2ko_null++; return; }
+    mach_vm_address_t a = reinterpret_cast<mach_vm_address_t>(ret);
     for (uint32_t i = 0; i < g_rb_2ko_n; i++) {
-        if (g_rb_2ko_off[i] == off) { g_rb_2ko_cnt[i]++; return; }
+        if (g_rb_2ko_raw[i] == a) { g_rb_2ko_cnt[i]++; return; }
     }
     if (g_rb_2ko_n >= RB_2KO_CALLERS) { g_rb_2ko_over++; return; }
-    g_rb_2ko_off[g_rb_2ko_n] = off;
+    g_rb_2ko_raw[g_rb_2ko_n] = a;
     g_rb_2ko_cnt[g_rb_2ko_n] = 1;
     g_rb_2ko_n++;
 }
@@ -7655,17 +7670,30 @@ void rbgpu_pdeenc_flush_2km(void) {
              g_rb_2km_lvl, g_rb_2km_was, g_rb_2km_now);
     rbgpu_nvram_note("rbgpu-pdv", n);
     size_t at4 = strlen(n);
-    for (uint32_t i = 0; i < g_rb_2ko_n && at4 < sizeof(n) - 40; i++) {
-        int w4 = snprintf(n + at4, sizeof(n) - at4, " | c%u %c%llx n=%u", i,
-                          g_rb_2ko_off[i] < 0 ? '-' : '+',
-                          (unsigned long long)(g_rb_2ko_off[i] < 0
-                                               ? -g_rb_2ko_off[i]
-                                               :  g_rb_2ko_off[i]),
+    int w4 = snprintf(n + at4, sizeof(n) - at4, " | anchor=%llx sites=%u",
+                      (unsigned long long)g_rb_2ko_from, g_rb_2ko_n);
+    if (w4 > 0) at4 += static_cast<size_t>(w4);
+    for (uint32_t i = 0; i < g_rb_2ko_n && at4 < sizeof(n) - 48; i++) {
+        if (g_rb_2ko_from != 0) {
+            int64_t off = static_cast<int64_t>(g_rb_2ko_raw[i])
+                        - static_cast<int64_t>(g_rb_2ko_from);
+            w4 = snprintf(n + at4, sizeof(n) - at4, " | c%u %c%llx n=%u", i,
+                          off < 0 ? '-' : '+',
+                          (unsigned long long)(off < 0 ? -off : off),
                           g_rb_2ko_cnt[i]);
+        } else {
+            w4 = snprintf(n + at4, sizeof(n) - at4, " | c%u raw=%llx n=%u", i,
+                          (unsigned long long)g_rb_2ko_raw[i],
+                          g_rb_2ko_cnt[i]);
+        }
         if (w4 > 0) at4 += static_cast<size_t>(w4);
     }
     if (g_rb_2ko_over && at4 < sizeof(n) - 16) {
-        snprintf(n + at4, sizeof(n) - at4, " | +%u more", g_rb_2ko_over);
+        w4 = snprintf(n + at4, sizeof(n) - at4, " | +%u more", g_rb_2ko_over);
+        if (w4 > 0) at4 += static_cast<size_t>(w4);
+    }
+    if (g_rb_2ko_null && at4 < sizeof(n) - 16) {
+        snprintf(n + at4, sizeof(n) - at4, " | null=%u", g_rb_2ko_null);
     }
     rbgpu_log("2km: %s", n);
     rbgpu_log("2ko: each `cN +off` is a CALL SITE of getPDEValue as a signed "
@@ -9036,6 +9064,9 @@ void rbgpu_vmid_flush_2if(void) {
               "anything else means that reading of the tail is wrong.");
 }
 
+// 2kp: noinline - folding this into processX6000 pushes that frame past the
+// 1024-byte -Wframe-larger-than limit (the same trap 2ki hit).
+__attribute__((noinline))
 static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
                                  mach_vm_address_t address, size_t size) {
     if (!checkKernelArgument("-rbgpuringprobe")) {
@@ -9056,7 +9087,13 @@ static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
                   "- and 2km's PDE correction rides in the same hook");
         g_rb_2if_hooked = 1;
         g_rb_2km_hooked = 1;    // 2kn: one route, two experiments
-        g_rb_2ko_from   = reqs[1].from;   // 2ko: getPDEValue, as solved
+        // 2kp: solveSymbol, not reqs[1].from - Lilu does not write that back.
+        g_rb_2ko_from = patcher.solveSymbol(
+            id, "__ZN26AMDRadeonX6000_AMDGFX10VMM11getPDEValueE15eAMD_VMPT_LEVELy",
+            address, size);
+        patcher.clearError();
+        rbgpu_log("2kp: getPDEValue anchor = %llx (0 means the call sites are "
+                  "reported raw)", (unsigned long long)g_rb_2ko_from);
     } else {
         rbgpu_log("2if: FAILED to hook the VMID handout - rbgpu-vmid will say "
                   "hk=0 so an empty note is not mistaken for a driver that "
