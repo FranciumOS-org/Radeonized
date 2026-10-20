@@ -16069,3 +16069,67 @@ handed out. That flag has been open since 2kh and is now load-bearing
 enough to read against the code that sets it (2ha).
 
 Build `6055F184-7B5B-3E0D-B700-FAD0A0946313`.
+
+## 2kv (2026-10-20) — boot 91: I stacked two corrections, and it is my error
+
+Boot 91 went **backwards**: the Apple logo stopped halfway, the machine
+never reached a desktop, and the halt returned.
+
+```
+rbgpu-pde  = b=91 calls=352 fixed=2 | first vmid=1 @1325ms 87b000000 -> ffb000001
+rbgpu-adj  = b=91 calls=75 inmap=75 fixed=75 nostrip=0 nofb=0 | map=73 asg=2
+rbgpu-mew  = b=91 | OK i=15 @8393ms me=0 || HALT i=16 @8894ms me=15000000
+rbgpu-cph  = b=91 halt@8594ms ... ib1=400300000 vmf=101b3b va=000400880
+rbgpu-fault= b=91 c=2 f=2 r=1 | s101b3a h0 va=400880000 v1 R c13
+rbgpu-vmid = b=91 av=15 fail=15 vmids=0006
+```
+
+**2ku worked.** `asg=2` - the `assignVMID` scope resolved and fired, so
+`prepareVMInvalidateRequest` received the **already-correct**
+`0x87b000000`. Then 2ki added `vram_base_offset` a second time:
+
+```
+0x8_7B00_0000 + 0x7_8000_0000 = 0xF_FB00_0000   (| 1 -> ffb000001)
+```
+
+VMID 1's page-directory base then pointed nowhere, VMID 1 faulted
+(`s101b3a`, `c13`, a client id we had not seen), and the CP halted at
+8894 ms. `vmids=0006` - the boot died before VMID 3 was even handed out.
+
+**The error is mine and it is recorded plainly.** The 2ku entry says the
+fix "makes 2ki redundant (left in, untouched, since removing it is its
+own experiment)". Leaving a redundant correction in is **not** neutral
+when both apply the same addition; redundant and inert are different
+things, and I treated them as the same.
+
+**And 2ki's guard tested the wrong threshold**, which is why nothing
+caught it:
+
+```c
+uint64_t vstart = g_rb_2ed_fb_base << 24;   // the MC base, 0xF4_0000_0000
+if (vstart && was >= vstart) { above; return; }
+```
+
+A value this hook has already corrected sits around `0x8_7B00_0000` -
+far **below** the MC base - so `was >= vstart` never fired. The guard
+could never recognise an already-correct value, and was harmless only
+while nothing upstream produced one. 2ku was the first thing that did.
+
+**2kv fixes both.** The guard now also refuses anything already at or
+above `vram_base_offset`, which is the window the walker wants whoever
+put it there, so the two can never stack again. And `-rbgpupdefix` comes
+**OUT** of boot-args: 2ku corrects the base at its source for every VMID,
+which is what 2ki was approximating downstream for three of them.
+
+Everything else in boot 91 held: `rbgpu-disp` read
+`true=2 false=0 forced=0 refused=0` again (n=2 for 2ct's premise being
+dead), and `rbgpu-adj` corrected 75 of 75 in-scope calls with
+`nostrip=0 nofb=0`.
+
+Rule, earned here: **when a fix moves upstream, the downstream patch it
+replaces must be removed in the same change, not "left in, untouched".**
+Two corrections of the same quantity compose; only one of them can be
+right.
+
+Build `3B88C80A-B7BF-3874-AF74-357DF63B4EB2`. Boot-args: remove
+`-rbgpupdefix`, keep `-rbgpuvramadj` and `-rbgpudisplaypipe`.

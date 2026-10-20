@@ -127,6 +127,14 @@ under the tag in brackets.
   (`8mapVMPT` for `7mapVMPT`, `10unmapVMPT` for `9unmapVMPT`); each would
   have made `solveSymbol` return 0 and silently unscoped the fix. One
   `grep -o` of the literals piped through `nm` catches it. [2kr]
+- **When a fix moves upstream, REMOVE the downstream patch it replaces,
+  in the same change.** "Redundant" and "inert" are different things:
+  2ku corrected the page-directory base at its source in `assignVMID`,
+  2ki was left in to correct it again downstream, and the two additions
+  composed - `87b000000 -> ffb000001`, VMID 1's directory pointing
+  nowhere and the halt back at 8894 ms. 2ki's own guard could not catch
+  it because it tested `was >= vstart` against the **MC** base while a
+  corrected value sits below it, near `vram_base_offset`. [2kv]
 - vtable dumps: **call offset = dump offset − 0x10** (the address point is
   symbol + 0x10). A *non-virtual* call through a vtable **symbol** uses dump
   offsets directly. [2gp]
@@ -227,8 +235,12 @@ anything, and log it when it is not.
 -rbgpurlcsub                                 what makes the RLC autoload COMPLETE
 -rbgpunocgcg                                 CGCG off - takes, but NOT a fix (2jv)
 -rbgpumewatch                                the timed CP/RLC/GFXOFF sample banks
--rbgpuvramadj                                2ks: THE HALT FIX - mc2pa on
-                                             adjustVRAMAddress inside mapVMPT
+-rbgpuvramadj                                2ks/2ku: THE HALT FIX - mc2pa on
+                                             adjustVRAMAddress, inside mapVMPT
+                                             AND assignVMID
+-rbgpudisplaypipe                            2kt: adopt the display pipe; 2ct's
+                                             premise died when powerUpHW began
+                                             succeeding (true=2 false=0, n=2)
 ```
 
 `-rbgpunocgcg` is IN but is **NOT a fix** (2jv). It writes
