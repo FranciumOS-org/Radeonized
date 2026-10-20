@@ -15206,3 +15206,75 @@ spells out VMID 3's before/after.
   about `PRIV_REG`.
 
 Build `0CB5B943`. Read-only change to the note; `-rbgpupdefix` stays in.
+
+## 2kk (2026-10-20) — the base is necessary and NOT sufficient; the gap is one level down
+
+Boot 83, nonce fresh, build `0CB5B943`.
+
+```
+rbgpu-pde = b=83 hk=1 on=1 calls=353 fixed=3 | left: valid=0 zero=334 above=16
+            | first vmid=2 @2861ms fb000000 -> 87b000001
+            | v0 f=0 z=334 a=0 V=0 | v1 f=1 z=0 a=16 V=0
+            | v2 f=1 z=0 a=0 V=0  | v3 f=1 z=0 a=0 V=0
+            | v3 fb015000->87b015001
+rbgpu-cph = b=83 halt@8900ms ib1=400300000 vmf=3009bb va=000400300 ... PARKED
+```
+
+**2kj's question is answered: `v3 f=1`, `v3 fb015000->87b015001`.** VMID 3
+comes through `prepareVMInvalidateRequest` exactly once, and we corrected its
+page-directory base to precisely the intended value - the same value
+`-rbgpuptfix` produces at p=1, now written *before* the fetch instead of
+after.
+
+**And the CP still faults at `0x4_0030_0000`.** `ib1=400300000` and
+`vmf=3009bb` are unchanged from boot 81 and 82.
+
+So **the base fix is necessary and not sufficient**, which is exactly what
+the reviewer predicted before the boot: Linux adds
+`vm_manager.vram_base_offset` to every PDE **and** PTE pointing at VRAM
+(`amdgpu_vm_bo_update`), so Apple's page-table writer plausibly has the same
+gap one level down. That prediction is now the live hypothesis rather than a
+guess, because the level above it has been eliminated by correcting it.
+
+The per-VMID tally also maps the structure cleanly:
+
+| VMID | fixed | zero | above | reading |
+|---|---|---|---|---|
+| 0 | 0 | **334** | 0 | context 0's invalidates carry no base - its base is set elsewhere |
+| 1 | 1 | 0 | **16** | one bind, plus 16 invalidates already in MC space |
+| 2 | 1 | 0 | 0 | one bind |
+| 3 | 1 | 0 | 0 | one bind - the one that matters |
+
+So VMIDs 1-3 each carry a base **exactly once**, at bind, and all three were
+corrected. Nothing is being missed at this level.
+
+### The walk
+
+2kk walks the faulting VA through the corrected base and prints every level
+raw. The VA comes from `CP_IB1_BASE` latched at the halt, the base from the
+value we actually wrote, and the window and depth from context 3's own
+`PAGE_TABLE_START_ADDR` and `CNTL` registers - nothing hardcoded (2cy).
+
+A level is called **BAD** only on a stated test: `VALID` clear, or a VRAM
+address that does not carry `vram_base_offset`. Each level prints its raw
+entry either way, so a level that is fine shows as fine rather than as
+silence (2eh). A `PTE` with `AMDGPU_PTE_SYSTEM` is reported `ok(system)`,
+because the offset does not apply to a system page.
+
+| `rbgpu-pdw` | means |
+|---|---|
+| `L1 ... BAD:no vram_base_offset` | `getPDEValue` (0xbe9b9de) omits the offset - that is the fix site |
+| `L1 ... BAD:no VALID` | it omits bit 0 at that depth, same function |
+| `L0 ... BAD:...` | `getPTEValue` (0xbe9ba2c) is the fix site instead |
+| all levels `ok` | the tables are correct and the fault is something else - the base/PDE/PTE line is then closed and the question reopens |
+| `L1 MAP FAILED` / `SKIP` | said explicitly, with which precondition failed |
+
+### Noted, not interpreted
+
+The halt moved: `8900 ms` here against `8698 ms` (boot 82) and `8765 ms`
+(boot 74). The spread across boots 74-81 was ~12 ms, so a 200 ms shift is
+outside it - plausibly the three base rewrites doing real work, but n=1 and
+not claimed. `ip ce=70b` continues to drift per boot while `me=121` and
+`pfp=986` stay identical in every boot.
+
+Build `D47A0F6E` pending. New note `rbgpu-pdw`. Read-only, no boot-arg change.
