@@ -7557,7 +7557,18 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
 // (`L0[768]=0`) is an ABSENT entry, not a stripped one - a different defect -
 // and it was read at an address derived from the broken PDE, so it is
 // provisional until L1 is correct. Two new things in one boot is 2fo.
-static uint64_t (*orig_getPDEValue_2km)(void *, uint32_t, uint64_t) = nullptr;
+//
+// 2kn (2026-10-20, paid for with a panic): getPDEValue is ALREADY ROUTED, by
+// 2if, whenever `-rbgpuringprobe` is in - which it always is. Adding a second
+// RouteRequest for the same symbol panicked boot 85 outright:
+//
+//   Lilu patcher: previous plugin had short jump type on a multiroute
+//   function, this is not allowed
+//
+// Lilu's `readChain` found 2if's 5-byte `E9` jmp already sitting in the
+// prologue and refuses to build a second trampoline over it. So the
+// correction is NOT a hook of its own - it is a transform applied inside the
+// one hook that already exists.
 static int      g_rb_2km_hooked = 0;
 static int      g_rb_2km_on     = -1;
 static uint32_t g_rb_2km_calls  = 0;
@@ -7568,8 +7579,9 @@ static uint64_t g_rb_2km_was    = 0;
 static uint64_t g_rb_2km_now    = 0;
 static uint32_t g_rb_2km_lvl    = 0xFFFFFFFFu;
 
-static uint64_t hooked_getPDEValue_2km(void *vmm, uint32_t level, uint64_t a) {
-    uint64_t v = orig_getPDEValue_2km ? orig_getPDEValue_2km(vmm, level, a) : 0;
+// Called from hooked_getPDEValue_2if with the value Apple just computed;
+// returns the value to hand back to the driver.
+static uint64_t rbgpu_pdeenc_apply_2km(uint32_t level, uint64_t v) {
     if (g_rb_2km_on < 0) {
         g_rb_2km_on = checkKernelArgument("-rbgpupdeenc") ? 1 : 0;
         rbgpu_log("2km: PDE encode correction %s",
@@ -7741,23 +7753,8 @@ static void rbgpu_route_pdefix_2ki(KernelPatcher &patcher, size_t id,
         "__ZN26AMDRadeonX6000_AMDGFX10VMM26prepareVMInvalidateRequestEP25AMD_VM_INVALIDATE_REQUESTPK22AMD_VM_INVALIDATE_INFOb",
         hooked_prepareVMInvalidateRequest_2ki,
         orig_prepareVMInvalidateRequest_2ki);
-    // 2km: rule 9 checked at the bytes - getPDEValue opens
-    // `55 48 89 e5 ff c6` (push, movq, incl %esi); the first branch is a jne
-    // 14 bytes in. Defined in AMDRadeonX6000 (milestone 2c).
-    KernelPatcher::RouteRequest pdev(
-        "__ZN26AMDRadeonX6000_AMDGFX10VMM11getPDEValueE15eAMD_VMPT_LEVELy",
-        hooked_getPDEValue_2km, orig_getPDEValue_2km);
-    if (patcher.routeMultiple(id, &pdev, 1, address, size)) {
-        rbgpu_log("2km: hooked AMDGFX10VMM::getPDEValue - every PDE Apple "
-                  "builds gets vram_base_offset added when it points below "
-                  "the carve-out");
-        g_rb_2km_hooked = 1;
-    } else {
-        rbgpu_log("2km: FAILED to hook getPDEValue - hk=0 in rbgpu-pdv");
-        g_rb_2km_hooked = 0;
-        patcher.clearError();
-    }
-
+    // 2kn: getPDEValue is NOT routed here. 2if already routes it, and a
+    // second route of the same symbol panics Lilu (see rbgpu_pdeenc_apply_2km).
     if (patcher.routeMultiple(id, &pvir, 1, address, size)) {
         rbgpu_log("2ki: hooked AMDGFX10VMM::prepareVMInvalidateRequest - the "
                   "page-directory address is corrected in the request, before "
@@ -8939,7 +8936,9 @@ static uint64_t hooked_getPDEValue_2if(void *vmm, uint32_t level, uint64_t a) {
         g_rb_2if_pde_other++;
     }
     if ((v & 1) == 0) g_rb_2if_pde_novalid++;
-    return v;
+    // 2kn: the 2km correction rides in here. The counters above record what
+    // Apple computed, so rbgpu-vmid keeps meaning exactly what it meant.
+    return rbgpu_pdeenc_apply_2km(level, v);
 }
 
 void rbgpu_vmid_flush_2if(void) {
@@ -8996,8 +8995,9 @@ static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
     };
     if (patcher.routeMultiple(id, reqs, 2, address, size)) {
         rbgpu_log("2if: hooked AMDHWVMM::assignVMID + AMDGFX10VMM::getPDEValue "
-                  "(observe only)");
+                  "- and 2km's PDE correction rides in the same hook");
         g_rb_2if_hooked = 1;
+        g_rb_2km_hooked = 1;    // 2kn: one route, two experiments
     } else {
         rbgpu_log("2if: FAILED to hook the VMID handout - rbgpu-vmid will say "
                   "hk=0 so an empty note is not mistaken for a driver that "
