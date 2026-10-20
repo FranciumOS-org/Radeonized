@@ -10729,6 +10729,8 @@ static uint64_t g_rb_2kc_ib_mc = 0;
 static uint32_t g_rb_2kc_ib_sz = 0;
 static uint32_t g_rb_2kc_ib_vmid = 0;   // 2ke
 static uint32_t g_rb_2kc_ib_ctl  = 0;   // 2ke
+static uint64_t g_rb_2kf_ib1_va  = 0;   // 2kf: CP_IB1_BASE at the halt
+static unsigned g_rb_2kg_phase   = 9;   // 2kg: which phase wrote rbgpu-pm4
 
 static void rbgpu_ibdump_2kc(void) {
     char note[288];
@@ -10949,7 +10951,8 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     // Walk the packets and find every RELEASE_MEM. Its dw3/dw4 is the answer.
     char note[448];
     size_t n = 0;
-    int w = snprintf(note, sizeof(note), "pa=%llx t3=%u r=%x w=%x", pa, t3, rptr, wptr);
+    int w = snprintf(note, sizeof(note), "ph=%u pa=%llx t3=%u r=%x w=%x",
+                     g_rb_2kg_phase, pa, t3, rptr, wptr);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
 
     // 2ia: the register WRITES in the stream, which is how the page-directory
@@ -11123,6 +11126,26 @@ static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
         }
         rbgpu_log("2kb: %u INDIRECT_BUFFER packets in the page. 0 means the "
                   "scan saw the whole stream and `noME` is strong.", nib);
+        // 2kg: the raw dwords, because a decode is an interpretation and the
+        // reviewer asked for hex. Window 0x90..0xc0 brackets rptr=0xb1, and
+        // every IB packet's four dwords go out verbatim so the VMID and
+        // length can be read independently of our decode.
+        for (unsigned q = 0x90; q < 0xc0; q += 8) {
+            rbgpu_log("2kg: RB0[%03x] %08x %08x %08x %08x %08x %08x %08x %08x",
+                      q, dw[q], dw[q+1], dw[q+2], dw[q+3],
+                      dw[q+4], dw[q+5], dw[q+6], dw[q+7]);
+        }
+        {
+            unsigned seen = 0;
+            for (unsigned i = 0; i + 3 < 1024 && seen < 4; i++) {
+                uint32_t h = dw[i];
+                if ((h >> 30) != 3 || ((h >> 8) & 0xFF) != 0x3fu) continue;
+                seen++;
+                rbgpu_log("2kg: IB[%u] @%03x raw %08x %08x %08x %08x "
+                          "(vmid=%u len=%u)", seen, i, h, dw[i+1], dw[i+2],
+                          dw[i+3], (dw[i+3] >> 24) & 0xFu, dw[i+3] & 0xFFFFFu);
+            }
+        }
         if (n < sizeof(note) - 40) {
             w = snprintf(note + n, sizeof(note) - n, " | ib=%u@%llx", nib, ib0);
             if (w > 0) {
@@ -11390,6 +11413,90 @@ struct rb_2jt_s { uint32_t ms, me, rlcs, gpm, safe, cgcg, pg, srm, gfxoff,
 static struct rb_2jt_s g_rb_2jt[RB_2JT_N];
 static uint32_t        g_rb_2jt_got = 0;
 
+// ---------------------------------------------------------------------------
+// 2kf (2026-10-20): the full CP fault sweep, latched at the FIRST halt sample.
+//
+// A reviewer asked for ~25 registers "from the first halt sample of one boot,
+// before any replay". Every name they gave exists in gc_10_3_0_offset.h -
+// nothing had to be skipped - and all are listed with their dword and segment
+// in the journal under 2kf.
+//
+// It is NOT added to every sample. 2jv is the reason: ONE extra MMIO read per
+// sample, 60 samples, destabilised the boot after ~73 s and cost five
+// experiments. So the sweep fires **once**, on the first sample where `me`
+// goes nonzero, and a second short sweep fires on the sample after that -
+// which is exactly what item 6 wants, instruction pointers from two samples
+// to show whether they are parked.
+#define RB_2KF_SEG0 0x1260u
+#define RB_2KF_SEG1 0xa000u
+struct rb_2kf_s {
+    uint32_t ms, cpint, cpintc, mehdr, pfphdr, cehdr;
+    uint32_t meip, pfpip, ceip;
+    uint32_t ib1lo, ib1hi, ib1sz, ib1cmd;
+    uint32_t ib2lo, ib2hi, ib2sz, ib2cmd;
+    uint32_t ceib1lo, ceib1hi, ceib1sz;
+    uint32_t vmf, vmalo, vmahi;
+};
+static struct rb_2kf_s g_rb_2kf[2];
+static int             g_rb_2kf_got = 0;
+
+static void rbgpu_cpsweep_2kf(unsigned which) {
+    if (which > 1 || !g_hw.rreg) return;
+    struct rb_2kf_s *e = &g_rb_2kf[which];
+    auto r0 = [](uint32_t d) { return g_hw.rreg(g_hw.ctx, (RB_2KF_SEG0 + d) * 4); };
+    auto r1 = [](uint32_t d) { return g_hw.rreg(g_hw.ctx, (RB_2KF_SEG1 + d) * 4); };
+    e->ms     = static_cast<uint32_t>(rbgpu_2iq_ms());
+    e->meip   = r0(0x0F46);  e->pfpip = r0(0x0F45);  e->ceip = r0(0x0F47);
+    if (which == 1) { return; }   // 2nd sample: pointers only, keep it cheap
+    e->cpint  = r0(0x1E0D);  e->cpintc = r0(0x1E0A);
+    e->mehdr  = r0(0x0F41);  e->pfphdr = r0(0x0F42);  e->cehdr = r0(0x0F44);
+    e->ib1lo  = r1(0x20CC);  e->ib1hi = r1(0x20CD);
+    e->ib1sz  = r1(0x20CE);  e->ib1cmd = r1(0x20C0);
+    e->ib2lo  = r1(0x20CF);  e->ib2hi = r1(0x20D0);
+    e->ib2sz  = r1(0x20D1);  e->ib2cmd = r1(0x20C1);
+    e->ceib1lo = r1(0x20C6); e->ceib1hi = r1(0x20C7); e->ceib1sz = r1(0x20C8);
+    e->vmf    = r0(0x15C8);  e->vmalo = r0(0x15C9);   e->vmahi = r0(0x15CA);
+    // Hand the IB1 base to the deferred dump. Derived from the register the
+    // CP itself is using, never hardcoded (2cy).
+    g_rb_2kf_ib1_va = ((static_cast<uint64_t>(e->ib1hi) << 32) | e->ib1lo);
+}
+
+void rbgpu_cpsweep_flush_2kf(void) {
+    if (g_rb_2kf_got == 0) {
+        rbgpu_nvram_note("rbgpu-cph", "NO HALT SAMPLE - the sweep never latched");
+        return;
+    }
+    const struct rb_2kf_s *a = &g_rb_2kf[0];
+    const struct rb_2kf_s *b = &g_rb_2kf[1];
+    char n[608];
+    int w = snprintf(n, sizeof(n),
+        "halt@%ums int=%x intc=%x | hdr me=%x pfp=%x ce=%x | ip me=%x pfp=%x "
+        "ce=%x | ib1=%x%08x sz=%x cmd=%x | ib2=%x%08x sz=%x cmd=%x | "
+        "ceib1=%x%08x sz=%x | vmf=%x va=%x%08x",
+        a->ms, a->cpint, a->cpintc, a->mehdr, a->pfphdr, a->cehdr,
+        a->meip, a->pfpip, a->ceip,
+        a->ib1hi, a->ib1lo, a->ib1sz, a->ib1cmd,
+        a->ib2hi, a->ib2lo, a->ib2sz, a->ib2cmd,
+        a->ceib1hi, a->ceib1lo, a->ceib1sz,
+        a->vmf, a->vmahi, a->vmalo);
+    if (w > 0 && g_rb_2kf_got > 1 && static_cast<size_t>(w) < sizeof(n)) {
+        snprintf(n + w, sizeof(n) - static_cast<size_t>(w),
+                 " || +50ms@%ums ip me=%x pfp=%x ce=%x %s",
+                 b->ms, b->meip, b->pfpip, b->ceip,
+                 (b->meip == a->meip && b->pfpip == a->pfpip) ? "PARKED" : "MOVING");
+    }
+    rbgpu_nvram_note("rbgpu-cph", n);
+    rbgpu_log("2kf: %s", n);
+    rbgpu_log("2kf: int bit 23 PRIV_REG / 22 PRIV_INSTR / 24 OPCODE_ERROR / "
+              "27 RESERVED_BIT_ERROR / 14 CP_ECC. PRIV_REG set would mean an "
+              "unprivileged packet tried a privileged register - the "
+              "reviewer's hypothesis, confirmed. intc=0 means those "
+              "interrupts are MASKED and int reading 0 proves nothing (2eh). "
+              "ib1 base + (cmd_bufsz - bufsz) locates the packet. PARKED "
+              "instruction pointers mean the engines stopped, MOVING means "
+              "they are still running something.");
+}
+
 void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     if (g_rb_2js_on != 1 || idx >= RB_2JT_N || !g_hw.rreg) {
         return;
@@ -11435,6 +11542,15 @@ void rbgpu_rlcwatch_sample_2jt(unsigned idx) {
     e->ib1lo  = g_hw.rreg(g_hw.ctx, (S1 + 0x20CCu) * 4);       // CP_IB1_BASE_LO
     e->ib1sz  = g_hw.rreg(g_hw.ctx, (S1 + 0x20CEu) * 4);       // CP_IB1_BUFSZ
     e->vmf    = g_hw.rreg(g_hw.ctx, (0x1260u + 0x15C8u) * 4);  // GCVM_L2_PROTECTION_FAULT_STATUS, seg0 (BASE_IDX 0)
+    // 2kf: one-shot sweep on the first halted sample, and pointers again on
+    // the next one. Costs nothing on the other 58 samples.
+    if (e->me != 0 && g_rb_2kf_got == 0) {
+        rbgpu_cpsweep_2kf(0);
+        g_rb_2kf_got = 1;
+    } else if (g_rb_2kf_got == 1) {
+        rbgpu_cpsweep_2kf(1);
+        g_rb_2kf_got = 2;
+    }
     if (idx + 1 > g_rb_2jt_got) { g_rb_2jt_got = idx + 1; }
 }
 
@@ -11490,6 +11606,7 @@ void rbgpu_rlcwatch_flush_2jt(void) {
         }
     }
     rbgpu_nvram_note("rbgpu-mew2", n);
+    rbgpu_cpsweep_flush_2kf();
     rbgpu_log("2jt: %s", n);
     rbgpu_log("2jy: rbb unchanged across the halt means the CP block answers "
               "reads, so CP_ME_CNTL's 0x15000000 is a real value something "
@@ -12726,7 +12843,17 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     // after every other note is committed, because it is the newest and
     // riskiest thing here (2fo: when a measurement and a suspect are both
     // new, the suspect goes last).
-    if (phase == 1) {
+    // 2kg (2026-10-20): ALSO at phase 0.
+    //
+    // Conceded to the reviewer: this dump ran only at phase 1 = +100 s,
+    // roughly 91 s after the 8.7 s halt, so the ring it scanned was never
+    // established to be the ring the CP was executing - which makes 2jz's
+    // `noME` weaker than even 2kb allowed. Phase 0 is +12 s: still after the
+    // halt, but 88 s closer, and before the later phases where rptr was seen
+    // to move. The note records which phase wrote it so the two can never be
+    // confused.
+    if (phase == 0 || phase == 1) {
+        g_rb_2kg_phase = phase;
         uint64_t rb_lo = rd(obj, resolve(obj, RB_2HM_CP_RB0_BASE));
         uint64_t rb_hi = rd(obj, resolve(obj, RB_2HM_CP_RB0_BASE_HI));
         uint64_t ring_va = ((rb_hi << 32) | rb_lo) << 8;
