@@ -740,17 +740,27 @@ from inside the hook that already exists. [2ko]
 coming from `allocVMBlock` -> `elem+0x20`. `adjustVRAMAddress` is nine
 instructions and **subtracts** `this->0x60` from any address inside
 `[0x60, 0x60 + 0x1b8*0x40)`. `AMDGFX10HWMemory` does not override it.
-The arithmetic reproduces every stripped address this project has chased:
-`0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000` (the L1 entry),
-`0x8_7B01_5000 -> 0xFB01_5000` (c3's PD base), `0x8_7B00_B000 ->
-0xFB00_B000` (c1's). **So 2em and 2ki have each been undoing this one
-subtraction after the fact**, one call site at a time, always too late
-for the 8.9 s fetch. It is correct on a discrete Navi 21, whose VRAM
-starts at its own aperture; this APU's carve-out is at
-`0x7_8000_0000` and the walker needs the absolute form, which is what
-2em measured. `-rbgpuvramadj` neutralises it **only** for callers inside
-mapVMPT (bounds from `solveSymbol`), since other callers presumably want
-the stripped form. [2kr]
+
+**Boot 88 measured which base it strips, and 2kr's guess was wrong
+(2ks).** `rbgpu-adj` reads `first f410001000 -> 10001000`, a
+`0xF4_0000_0000` subtraction - the carve-out's **MC** base, not the
+system-physical `0x7_8000_0000`. 2kr had reasoned from
+`0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000`; the block's MC address is
+actually `0xF4_FB01_6000` and stripping the MC base gives the same
+digits. **So Apple computes `mc - vram_start` and the missing term is
+`+ vram_base_offset` - the fix is `amdgpu_gmc_vram_mc2pa`, one addition
+on Apple's own answer**, which is the form 2em wrote for CONTEXT0 and
+2ki writes per VMID. Returning the input unstripped instead put a raw MC
+address in the entry and the walk read `BAD:above carve-out` - a clean
+negative control proving the hook's value reaches the entry.
+`-rbgpuvramadj` applies mc2pa **only** for callers inside mapVMPT
+(bounds from `solveSymbol`), since other callers presumably want the
+stripped form.
+
+Confirmed in the same boot: **`getPDEValue` has exactly one caller**,
+`anchor - 0xcf71` = static `0xbe8ea6d`, the instruction after
+`callq *0x1d8` in mapVMPT, 114 calls; and the hook corrected **147 of
+147** in-scope calls with `nostrip=0`. [2kr, 2ks]
 
 Open, flagged, not interpreted: `rbgpu-vmid` reads `av=41 fail=41` -
 every `assignVMID` call reports failure while `vmids=000e` says 1, 2 and
