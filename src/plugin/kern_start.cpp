@@ -7768,6 +7768,19 @@ static void hooked_prepareVMInvalidateRequest_2ki(void *vmm, void *req,
     if (g_rb_2ed_fb_off == 0)     { return; }   // no offset known: do nothing
     uint64_t vstart = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
     uint64_t vbo    = static_cast<uint64_t>(g_rb_2ed_fb_off)  << 24;
+    // 2kv (2026-10-20): this guard tested the WRONG THRESHOLD and boot 91
+    // paid for it. `vstart` is the MC base (0xF4_0000_0000); a value this
+    // hook has already corrected sits in the system-physical window
+    // [vbo, vbo + carve-out), around 0x8_7B00_0000 - far BELOW the MC base,
+    // so `was >= vstart` never fired and an already-correct base was
+    // corrected a second time: `87b000000 -> ffb000001`. VMID 1's directory
+    // then pointed nowhere, and the halt came back at 8894 ms.
+    //
+    // It was latent until 2ku started correcting the base at its source in
+    // assignVMID, which is exactly when a correct value first reached here.
+    // The test that matters is whether the address is ALREADY in the window
+    // the walker wants, whoever put it there.
+    if (vbo && was >= vbo)       { g_rb_2ki_above++; if (v) v->above++; return; }
     if (vstart && was >= vstart) { g_rb_2ki_above++; if (v) v->above++; return; }
 
     uint64_t now = (was + vbo) | 1ull;
