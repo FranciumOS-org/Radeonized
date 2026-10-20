@@ -116,6 +116,12 @@ under the tag in brackets.
   since boot 71 and boot 85 panicked at kext load, before any measurement.
   A new transform on an already-hooked function goes **inside the existing
   hook**, not beside it. [2kn]
+- **`RouteRequest::from` is NOT written back** by Lilu 1.7.3, although
+  `kern_patcher.hpp` documents it as "solved symbol (assigned by
+  routeMultiple)". It reads 0 after a route that succeeded. To get a
+  routed function's address, call `solveSymbol` yourself. A doc comment
+  is not a measurement - the same error as the return code in [2ha].
+  [2kp]
 - vtable dumps: **call offset = dump offset − 0x10** (the address point is
   symbol + 0x10). A *non-virtual* call through a vtable **symbol** uses dump
   offsets directly. [2gp]
