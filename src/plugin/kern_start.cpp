@@ -10660,6 +10660,25 @@ void RGPU::processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_
 // through this accessor is proven (2fe, and seg0 = 0x1260 agreed four ways).
 #define RB_2HM_GRBM_STATUS2   0x0DA20000000Bull
 #define RB_2HM_CP_ME_CNTL     0x0F560000000Bull
+// 2ky (2026-10-20): GB_ADDR_CONFIG, dword 0x13de, BASE_IDX 0
+// (docs/linux-ref/gc_10_3_0_offset.h:2912). The surface-tiling geometry.
+//
+// Boot 93's `--dispatch` returned **PASS: all 4096 elements correct**, so
+// shader cores, submission, completion and LINEAR buffer memory are all
+// sound. What is corrupt is confined to tiled 2D surfaces - the Dock's
+// icons and the menu-bar text render perfectly while body-text glyphs are
+// scrambled.
+//
+// 2kx refuted "Apple reads the wrong GB_ADDR_CONFIG": `_gc_get_tiling_params_10_1`
+// reads it straight off the chip. But this stack **spoofs Navi 21**, and the
+// userspace Metal driver picks its AddrLib geometry from the family it
+// believes it is on. If AddrLib swizzles for Navi 21's pipe/packer
+// configuration while the chip is configured per its own GB_ADDR_CONFIG,
+// every tiled surface is read with the wrong equation and linear buffers
+// are untouched - exactly the split just measured.
+//
+// This read settles whether there is a mismatch at all. Nothing is written.
+#define RB_2KY_GB_ADDR_CONFIG 0x13DE0000000Bull
 #define RB_2HM_VMFAULT_STATUS 0x15C80000000Bull
 #define RB_2HM_VMFAULT_LO32   0x15C90000000Bull
 #define RB_2HM_VMFAULT_HI32   0x15CA0000000Bull
@@ -12902,6 +12921,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
         { "me",      RB_2HM_CP_ME_CNTL,     false },
         { "rbb",     RB_2HM_CP_RB0_BASE,    true  },
         { "rbbhi",   RB_2HM_CP_RB0_BASE_HI, true  },
+        { "gbac",    RB_2KY_GB_ADDR_CONFIG, true  },   // 2ky
     };
 
     char one[288];
@@ -12915,6 +12935,26 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
         uint32_t off = resolve(obj, regs[i].id);
         uint32_t val = rd(obj, off);
         rbgpu_log("2hk: %s dword 0x%x = 0x%08x", regs[i].name, off, val);
+        if (regs[i].id == RB_2KY_GB_ADDR_CONFIG) {
+            // 2ky: fields per gc_10_3_0_sh_mask.h. Logged decoded because a
+            // raw word invites the arithmetic to be done later and wrong.
+            rbgpu_log("2ky: GB_ADDR_CONFIG=%08x | NUM_PIPES=%u "
+                      "PIPE_INTERLEAVE=%u MAX_COMPRESSED_FRAGS=%u "
+                      "NUM_PKRS=%u NUM_SHADER_ENGINES=%u NUM_RB_PER_SE=%u",
+                      val,
+                      (val >> 0x0)  & 0x7,
+                      (val >> 0x3)  & 0x7,
+                      (val >> 0x6)  & 0x3,
+                      (val >> 0x8)  & 0x7,
+                      (val >> 0x13) & 0x7,
+                      (val >> 0x1a) & 0x3);
+            rbgpu_log("2ky: each field is log2 of the count. This chip is one "
+                      "shader engine; Navi 21 is four. If NUM_SHADER_ENGINES "
+                      "or NUM_PKRS here differs from what AddrLib assumes for "
+                      "the spoofed Navi 21, every tiled surface is swizzled "
+                      "with the wrong equation - which is the measured split: "
+                      "linear buffers PASS, tiled images scramble.");
+        }
         if (n >= sizeof(one) - 24) {
             break;
         }
