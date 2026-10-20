@@ -75,7 +75,7 @@ bounded() {
   # depend on plugin_check.sh having been run separately (2gq).
   say "nvram notes"
   for v in rbgpu-arm rbgpu-boot rbgpu-diag rbgpu-diag-prev rbgpu-ea \
-           rbgpu-ctxw rbgpu-gvmw rbgpu-vmid rbgpu-ptw rbgpu-ptfix rbgpu-aper rbgpu-pdc rbgpu-walk rbgpu-rst rbgpu-me rbgpu-rd2 rbgpu-cpfw rbgpu-pwr rbgpu-rlcx rbgpu-wtest rbgpu-bl rbgpu-ume rbgpu-ald rbgpu-rstop rbgpu-mehold rbgpu-hyp rbgpu-blbuf rbgpu-grbm rbgpu-mew rbgpu-mew2 rbgpu-cgcg rbgpu-ib rbgpu-cph rbgpu-pde rbgpu-pdw rbgpu-pdv rbgpu-ring rbgpu-vm rbgpu-fault rbgpu-pm4 rbgpu-fence rbgpu-prog rbgpu-prog2 rbgpu-gate rbgpu-1b rbgpu-sdma; do
+           rbgpu-ctxw rbgpu-gvmw rbgpu-vmid rbgpu-ptw rbgpu-ptfix rbgpu-aper rbgpu-pdc rbgpu-walk rbgpu-rst rbgpu-me rbgpu-rd2 rbgpu-cpfw rbgpu-pwr rbgpu-rlcx rbgpu-wtest rbgpu-bl rbgpu-ume rbgpu-ald rbgpu-rstop rbgpu-mehold rbgpu-hyp rbgpu-blbuf rbgpu-grbm rbgpu-mew rbgpu-mew2 rbgpu-cgcg rbgpu-ib rbgpu-cph rbgpu-pde rbgpu-pdw rbgpu-pdv rbgpu-adj rbgpu-ring rbgpu-vm rbgpu-fault rbgpu-pm4 rbgpu-fence rbgpu-prog rbgpu-prog2 rbgpu-gate rbgpu-1b rbgpu-sdma; do
     printf '%s = ' "$v"
     nvram "$v" 2>/dev/null | sed 's/.*	//' || echo "(unset)"
   done

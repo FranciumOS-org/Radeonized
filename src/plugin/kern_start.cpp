@@ -7668,7 +7668,11 @@ void rbgpu_pdeenc_flush_2km(void) {
              g_rb_2km_on, g_rb_2km_calls, g_rb_2km_fixed,
              g_rb_2km_inrange, g_rb_2km_zero,
              g_rb_2km_lvl, g_rb_2km_was, g_rb_2km_now);
-    rbgpu_nvram_note("rbgpu-pdv", n);
+    // 2kq: the note is written AFTER the call sites are appended. 2kp built
+    // them into `n` below a `rbgpu_nvram_note` that had already run, so boot
+    // 87 recorded the short string again and the full one went only to
+    // rbgpu_log - where the 2es rule means it is not in the published log
+    // either. Absence reported as silence, twice on the same instrument.
     size_t at4 = strlen(n);
     int w4 = snprintf(n + at4, sizeof(n) - at4, " | anchor=%llx sites=%u",
                       (unsigned long long)g_rb_2ko_from, g_rb_2ko_n);
@@ -7695,6 +7699,7 @@ void rbgpu_pdeenc_flush_2km(void) {
     if (g_rb_2ko_null && at4 < sizeof(n) - 16) {
         snprintf(n + at4, sizeof(n) - at4, " | null=%u", g_rb_2ko_null);
     }
+    rbgpu_nvram_note("rbgpu-pdv", n);
     rbgpu_log("2km: %s", n);
     rbgpu_log("2ko: each `cN +off` is a CALL SITE of getPDEValue as a signed "
               "offset from getPDEValue itself. Add it to 0xbe9b9de for the "
@@ -7851,6 +7856,166 @@ static void rbgpu_route_pdefix_2ki(KernelPatcher &patcher, size_t id,
         patcher.clearError();
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// 2kr (2026-10-20): THE STRIPPING FUNCTION, FOUND STATICALLY.
+//
+// 2ko said the address in a PDE is ORed in by getPDEValue's caller. The
+// caller is `AMDHWVMContext::mapVMPT` (0xbe8e624) - the only VM-class site
+// among the nine `callq *0x1d8(%reg)` in this kext, where 0x1d8 is
+// getPDEValue's vtable call offset (dump +0x1e8 minus 0x10, the 2gp rule).
+// It calls `getPDEValue(level, 0)` with the address argument deliberately
+// zeroed (`xorl %edx, %edx` at be8ea65), which is why 2km found nothing to
+// correct: Apple asks for a template on purpose.
+//
+// Two instructions earlier, mapVMPT computes the address it will put in the
+// entry:
+//
+//   be8ea32  addq 0x20(%rax), %rbx        ; the block, from allocVMBlock
+//   be8ea3b  movq 0x10(%r13), %rdi
+//   be8ea42  callq *0x2d8(%rax)           ; -> the HWMemory object
+//   be8ea51  callq *0x200(%rcx)           ; adjustVRAMAddress(block)
+//   be8ea57  movq %rax, %r12              ; and THAT is the entry's address
+//
+// `*0x200` on AMDHWMemory's vtable is
+// `AMDHWMemory::adjustVRAMAddress(unsigned long long)` (0xbe8cb90), which
+// AMDGFX10HWMemory does NOT override. Nine instructions:
+//
+//   rcx = this->0x60                       ; the VRAM window base
+//   if (rcx > a) return a;                 ; below the window: unchanged
+//   rdx = this->0x1b8 * this->0x40 + rcx   ; the window end
+//   rsi = (rdx > a) ? rcx : 0
+//   return a - rsi;                        ; STRIP the base inside the window
+//
+// It SUBTRACTS. `this->0x60` is `vram_base_offset` on this chip, and the
+// arithmetic matches every stripped address this project has chased:
+//
+//   0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000   the L1 entry (2ko)
+//   0x8_7B01_5000 - 0x7_8000_0000 = 0xFB01_5000   c3's PD base (2hr, 2ki)
+//   0x8_7B00_B000 - 0x7_8000_0000 = 0xFB00_B000   c1's PD base
+//
+// So one function produces all of them, and 2em's PT_BASE fix and 2ki's
+// per-VMID correction have both been undoing this subtraction after the
+// fact, one call site at a time, always too late for the 8.9 s fetch.
+//
+// Why it is wrong here and right on Apple's own parts: a discrete Navi 21
+// has its VRAM at the start of its own aperture, so window-relative and
+// what the GPUVM walker wants are the same number. On this APU the carve-out
+// sits at system-physical 0x7_8000_0000 and the walker needs the absolute
+// form - which is exactly what 2em measured when it fixed CONTEXT0.
+//
+// The hook is SURGICAL, not global. `adjustVRAMAddress` is used for more
+// than page tables, and the stripped form is presumably correct for those
+// callers, so the subtraction is neutralised ONLY when the return address
+// lands inside mapVMPT - the page-table builder. Both bounds come from
+// solveSymbol, so no literal addresses are trusted at runtime.
+//
+// Gates checked before writing this: DEFINED in AMDRadeonX6000 (`nm -m`
+// prints `external`, milestone 2c); routed nowhere else in this plugin
+// (2kn); rule 9 clean - `55 48 89 e5 48 89 f0 48 8b 4f 60 48 39 f1` and the
+// first branch is the `ja` fourteen bytes in (2gb).
+//
+// Observe-only without `-rbgpuvramadj`: the note then says what WOULD have
+// been returned, and the chip is untouched.
+static uint64_t (*orig_adjustVRAM_2kr)(void *, uint64_t) = nullptr;
+static int      g_rb_2kr_hooked = 0;
+static int      g_rb_2kr_on     = -1;
+static mach_vm_address_t g_rb_2kr_map_lo = 0;   // mapVMPT
+static mach_vm_address_t g_rb_2kr_map_hi = 0;   // unmapVMPT
+static uint32_t g_rb_2kr_calls  = 0;
+static uint32_t g_rb_2kr_inmap  = 0;   // calls from inside mapVMPT
+static uint32_t g_rb_2kr_fixed  = 0;   // calls where we returned the input
+static uint32_t g_rb_2kr_nostrip = 0;  // in mapVMPT but orig did not strip
+static uint64_t g_rb_2kr_in     = 0;   // first in-mapVMPT argument
+static uint64_t g_rb_2kr_out    = 0;   // and what Apple returned for it
+
+static uint64_t hooked_adjustVRAM_2kr(void *mem, uint64_t a) {
+    uint64_t v = orig_adjustVRAM_2kr ? orig_adjustVRAM_2kr(mem, a) : a;
+    if (g_rb_2kr_on < 0) {
+        g_rb_2kr_on = checkKernelArgument("-rbgpuvramadj") ? 1 : 0;
+        rbgpu_log("2kr: VRAM-address stripping %s",
+                  g_rb_2kr_on ? "NEUTRALISED in mapVMPT (-rbgpuvramadj)"
+                              : "left alone (observe only)");
+    }
+    g_rb_2kr_calls++;
+
+    // Only the page-table builder. Bounds unknown -> never claim a site.
+    if (g_rb_2kr_map_lo == 0 || g_rb_2kr_map_hi == 0) { return v; }
+    auto ret = reinterpret_cast<mach_vm_address_t>(__builtin_return_address(0));
+    if (ret < g_rb_2kr_map_lo || ret >= g_rb_2kr_map_hi) { return v; }
+
+    g_rb_2kr_inmap++;
+    if (v == a) { g_rb_2kr_nostrip++; return v; }   // nothing was stripped
+    if (g_rb_2kr_in == 0) {
+        g_rb_2kr_in = a; g_rb_2kr_out = v;
+        rbgpu_log("2kr: mapVMPT asked for %llx and Apple answered %llx - a "
+                  "%llx subtraction. %s", a, v, a - v,
+                  g_rb_2kr_on ? "RETURNING THE INPUT" : "passing it through");
+    }
+    if (g_rb_2kr_on != 1) { return v; }
+    g_rb_2kr_fixed++;
+    return a;
+}
+
+void rbgpu_vramadj_flush_2kr(void) {
+    if (!g_rb_2kr_hooked) {
+        rbgpu_nvram_note("rbgpu-adj", "hk=0 the adjustVRAMAddress hook did "
+                                      "NOT take - silence is the hook");
+        return;
+    }
+    char n[320];
+    snprintf(n, sizeof(n),
+             "hk=1 on=%d calls=%u inmap=%u fixed=%u nostrip=%u | "
+             "bounds=%llx..%llx | first %llx -> %llx",
+             g_rb_2kr_on, g_rb_2kr_calls, g_rb_2kr_inmap, g_rb_2kr_fixed,
+             g_rb_2kr_nostrip,
+             (unsigned long long)g_rb_2kr_map_lo,
+             (unsigned long long)g_rb_2kr_map_hi,
+             g_rb_2kr_in, g_rb_2kr_out);
+    rbgpu_nvram_note("rbgpu-adj", n);
+    rbgpu_log("2kr: %s", n);
+    rbgpu_log("2kr: inmap=0 with calls>0 means mapVMPT is not where the "
+              "entry's address is adjusted and this reading of be8ea51 is "
+              "wrong. nostrip>0 with inmap>0 means the argument was already "
+              "below the window, so this chip's HWMemory does not hold "
+              "vram_base_offset at +0x60 and the arithmetic above does not "
+              "apply. The test is rbgpu-pdw: L1 must read `ok`, and the "
+              "halt must be gone from rbgpu-mew.");
+}
+
+// Its own function: folding the route into processX6000 pushes that frame
+// past the 1024-byte -Wframe-larger-than limit (2ki, 2kp).
+__attribute__((noinline))
+static void rbgpu_route_vramadj_2kr(KernelPatcher &patcher, size_t id,
+                                    mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest req(
+        "__ZN26AMDRadeonX6000_AMDHWMemory17adjustVRAMAddressEy",
+        hooked_adjustVRAM_2kr, orig_adjustVRAM_2kr);
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        g_rb_2kr_hooked = 1;
+        rbgpu_log("2kr: hooked AMDHWMemory::adjustVRAMAddress");
+    } else {
+        g_rb_2kr_hooked = 0;
+        patcher.clearError();
+        rbgpu_log("2kr: FAILED to hook adjustVRAMAddress - hk=0 in rbgpu-adj");
+        return;
+    }
+    // 2kp: solveSymbol, because RouteRequest::from is never written back.
+    g_rb_2kr_map_lo = patcher.solveSymbol(
+        id,
+        "__ZN29AMDRadeonX6000_AMDHWVMContext7mapVMPTEP12AMD_VMPT_CTL15eAMD_VMPT_LEVELjyyy",
+        address, size);
+    patcher.clearError();
+    g_rb_2kr_map_hi = patcher.solveSymbol(
+        id,
+        "__ZN29AMDRadeonX6000_AMDHWVMContext9unmapVMPTEP12AMD_VMPT_CTL15eAMD_VMPT_LEVELjyyy",
+        address, size);
+    patcher.clearError();
+    rbgpu_log("2kr: mapVMPT bounds %llx..%llx (0 means the fix cannot be "
+              "scoped and nothing will be changed)",
+              (unsigned long long)g_rb_2kr_map_lo,
+              (unsigned long long)g_rb_2kr_map_hi);
 }
 
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
@@ -9331,6 +9496,7 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
     // Behind -rbgpupdefix. It writes a value the GPU will use, so it is
     // opt-in.
     rbgpu_route_pdefix_2ki(patcher, id, address, size);
+    rbgpu_route_vramadj_2kr(patcher, id, address, size);   // 2kr
 
     // 2id: the VM flush. Rule 9 (2gb): programAndInvalidateVM at 0xbe9b7a2
     // opens `55 48 89 e5 41 57 41 56 41 55 41 54 53` - pushes, a movq and
@@ -13369,6 +13535,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_ctxwrite_flush_2ic();
     rbgpu_gvmwrite_flush_2ie();
     rbgpu_pdefix_flush_2ki();
+    rbgpu_vramadj_flush_2kr();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
