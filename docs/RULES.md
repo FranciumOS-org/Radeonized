@@ -661,16 +661,60 @@ may ignore bit 0 there, the values may not come from `getPDEValue`, and
 the addresses may be wrong independently of the flag. What changed is
 that **nothing else is competing with it any more**.
 
+**THE HALT IS A CONSEQUENCE (2kh, 2026-10-20).** Boot 81's halt-sample
+sweep closes the question the whole 2j* series was chasing.
+`CP_IB1_BASE = 0x4_0030_0000` and `GCVM_L2_PROTECTION_FAULT_STATUS` /
+`_ADDR_LO32` give VA `0x4_0030_0000` **in the same sample** - the
+faulting address IS the CP's IB1 base. `CID = 4` = CPF (the command
+processor's *fetcher*), READ, VMID 3. All three instruction pointers read
+identically at the halt and 50 ms later: **PARKED**, not looping.
+`CP_ME_HEADER_DUMP = 0xc0033700` = type 3, 5 dwords, opcode `0x37`
+`WRITE_DATA`.
+
+So nothing "writes the halt". **The CP points IB1 at a VA it cannot
+translate, the fetch faults at CPF, and the engines park** -
+`CP_ME_CNTL = 0x15000000` is the result. Every elimination in the 2j*
+series was hunting an agent that does not exist; the measurements stand,
+the framing was wrong.
+
+`int=0` is NOT evidence of no error: `CP_INT_CNTL_RING0 = 0x3c0000`
+enables only `CMP_BUSY`, `CNTX_BUSY`, `CNTX_EMPTY` and `GFX_IDLE` -
+`PRIV_INSTR`, `PRIV_REG`, `OPCODE_ERROR` and `RESERVED_BIT_ERROR` are all
+**disabled**.
+
+**The fix is therefore not a CP register.** VMID 3's page-directory base
+has to be correct **before the first IB fetch under it**, which is earlier
+than VM bind time. Either correct it where Apple programs the context, or
+find why a fetch happens before any bind. [2kh]
+
+Also settled by 2kh: the ring's own `INDIRECT_BUFFER` is **VMID 0**
+(control dword `0x800003b8`), so 2kc's carve-out `mc2pa` was correct, and
+the chain walk reached the declared size exactly (`chain=14 walked=952`),
+making `noME-in-IB` a real negative **for that buffer**. But
+`CP_IB1_BASE` names a different address in a different space, so the IB
+that killed the CP was never in the ring page being scanned.
+
+Open, flagged, not interpreted: `rbgpu-vmid` reads `av=41 fail=41` -
+every `assignVMID` call reports failure while `vmids=000e` says 1, 2 and
+3 were handed out. `fail` is the hook's own criterion and has not been
+read against the code that sets it (2ha).
+
 **THE FRONTIER MOVED (2ix, 2026-10-18).** The GPUVM line is closed and
 the CP line replaced it. Two results, in order:
 
-1. **The page-directory base defect is real and FIXED.** Apple's value for
-   contexts 1-15 omits `vram_base_offset`, so the register points at
-   unmapped memory (`0xFB01_5000` reads all-ones; `mc2pa` of it,
-   `0x8_7B01_5000`, holds a genuine depth-1 directory with one valid PDE
-   carrying Apple's own L0 template). Writing the corrected value at bind
-   time **eliminates the VMID-3 CPF fault**, reproducibly, and it stays
-   gone. The fence/ring/GPUVM machinery is sound.
+1. **The page-directory base defect is real and the correction works, but
+   "the fault is gone" is WITHDRAWN (2kh).** Apple's value for contexts 1-15
+   omits `vram_base_offset`, so the register points at unmapped memory
+   (`0xFB01_5000` reads all-ones; `mc2pa` of it, `0x8_7B01_5000`, holds a
+   genuine depth-1 directory with one valid PDE carrying Apple's own L0
+   template). Writing the corrected value at bind time does take.
+   **But it lands too late.** Boot 81 reads `vmf=3009bb va=400300` at the
+   halt sample with `-rbgpuptfix` in, and `rbgpu-vm` shows `c3:b=fb015000`
+   - Apple's uncorrected value - at p=0 (+12 s) and `c3:b=87b015001` at
+   p=1. The halt is at **8.88 s, before both**. The claim "it stays gone"
+   survived four milestones only because every sample was taken at +12 s or
+   later, and +12 s is already after the CP has fetched. The
+   fence/ring/GPUVM machinery is still sound. [2kh]
 2. **It changed nothing about the hang, and 2ix found why.**
    `CP_ME_CNTL = 0x15000000` (CE/PFP/ME halted) and **every write to it is
    refused** - from `g_hw`, from Apple's accessor, and from Apple's own
