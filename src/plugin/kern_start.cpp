@@ -7571,6 +7571,41 @@ static __attribute__((noinline)) void rbgpu_route_2go(KernelPatcher &patcher, si
 // one hook that already exists.
 static int      g_rb_2km_hooked = 0;
 static int      g_rb_2km_on     = -1;
+
+// 2ko (2026-10-20): 2km was aimed at the wrong function and boot 85 proved
+// it. `getPDEValue` returns FLAGS ONLY - 2if's own record for that boot is
+// `L0 f=2000000000000001` and `L1 f=100000000000001`, and bits 47:12 are
+// zero in all 108 returns, which is why 2km's guard counted `zero=108
+// fixed=0`. The address in the defective entry
+// (`L1[0]=20000000fb016001`, address `0xfb016000`, below the carve-out) is
+// ORed in by whoever CALLS getPDEValue, from a block the allocator handed
+// out as an MC address and nobody passed through `mc2pa`.
+//
+// So the fix site is the composition, and naming it costs nothing: the
+// hook already runs there, so record its RETURN ADDRESS. Reported as a
+// signed offset from getPDEValue's own routed address, which added to
+// 0xbe9b9de gives the static address to disassemble. The candidates from
+// `nm` are AMDHWVMContext::getVMPT (0xbe8f5c8) and ::mapVA (0xbe8ee7a),
+// but a guess is not a measurement.
+#define RB_2KO_CALLERS 4
+static mach_vm_address_t g_rb_2ko_from = 0;   // getPDEValue, as routed
+static int64_t  g_rb_2ko_off[RB_2KO_CALLERS];
+static uint32_t g_rb_2ko_cnt[RB_2KO_CALLERS];
+static uint32_t g_rb_2ko_n    = 0;
+static uint32_t g_rb_2ko_over = 0;   // callers past the fourth
+
+static void rbgpu_pdeenc_caller_2ko(void *ret) {
+    if (g_rb_2ko_from == 0 || ret == nullptr) { return; }
+    int64_t off = static_cast<int64_t>(reinterpret_cast<mach_vm_address_t>(ret))
+                - static_cast<int64_t>(g_rb_2ko_from);
+    for (uint32_t i = 0; i < g_rb_2ko_n; i++) {
+        if (g_rb_2ko_off[i] == off) { g_rb_2ko_cnt[i]++; return; }
+    }
+    if (g_rb_2ko_n >= RB_2KO_CALLERS) { g_rb_2ko_over++; return; }
+    g_rb_2ko_off[g_rb_2ko_n] = off;
+    g_rb_2ko_cnt[g_rb_2ko_n] = 1;
+    g_rb_2ko_n++;
+}
 static uint32_t g_rb_2km_calls  = 0;
 static uint32_t g_rb_2km_fixed  = 0;
 static uint32_t g_rb_2km_inrange = 0;
@@ -7581,7 +7616,8 @@ static uint32_t g_rb_2km_lvl    = 0xFFFFFFFFu;
 
 // Called from hooked_getPDEValue_2if with the value Apple just computed;
 // returns the value to hand back to the driver.
-static uint64_t rbgpu_pdeenc_apply_2km(uint32_t level, uint64_t v) {
+static uint64_t rbgpu_pdeenc_apply_2km(uint32_t level, uint64_t v, void *ret) {
+    rbgpu_pdeenc_caller_2ko(ret);   // 2ko: Apple's call site, from the hook
     if (g_rb_2km_on < 0) {
         g_rb_2km_on = checkKernelArgument("-rbgpupdeenc") ? 1 : 0;
         rbgpu_log("2km: PDE encode correction %s",
@@ -7618,7 +7654,27 @@ void rbgpu_pdeenc_flush_2km(void) {
              g_rb_2km_inrange, g_rb_2km_zero,
              g_rb_2km_lvl, g_rb_2km_was, g_rb_2km_now);
     rbgpu_nvram_note("rbgpu-pdv", n);
+    size_t at4 = strlen(n);
+    for (uint32_t i = 0; i < g_rb_2ko_n && at4 < sizeof(n) - 40; i++) {
+        int w4 = snprintf(n + at4, sizeof(n) - at4, " | c%u %c%llx n=%u", i,
+                          g_rb_2ko_off[i] < 0 ? '-' : '+',
+                          (unsigned long long)(g_rb_2ko_off[i] < 0
+                                               ? -g_rb_2ko_off[i]
+                                               :  g_rb_2ko_off[i]),
+                          g_rb_2ko_cnt[i]);
+        if (w4 > 0) at4 += static_cast<size_t>(w4);
+    }
+    if (g_rb_2ko_over && at4 < sizeof(n) - 16) {
+        snprintf(n + at4, sizeof(n) - at4, " | +%u more", g_rb_2ko_over);
+    }
     rbgpu_log("2km: %s", n);
+    rbgpu_log("2ko: each `cN +off` is a CALL SITE of getPDEValue as a signed "
+              "offset from getPDEValue itself. Add it to 0xbe9b9de for the "
+              "static address, then disassemble: that function ORs the block "
+              "address into this template and is where vram_base_offset is "
+              "missing. getPDEValue returns FLAGS ONLY (2if: L0 "
+              "2000000000000001, L1 100000000000001 - address bits 47:12 all "
+              "zero over 108 calls), so nothing can be corrected here.");
 }
 
 // 2ki: see the route site for the full derivation.
@@ -8938,7 +8994,9 @@ static uint64_t hooked_getPDEValue_2if(void *vmm, uint32_t level, uint64_t a) {
     if ((v & 1) == 0) g_rb_2if_pde_novalid++;
     // 2kn: the 2km correction rides in here. The counters above record what
     // Apple computed, so rbgpu-vmid keeps meaning exactly what it meant.
-    return rbgpu_pdeenc_apply_2km(level, v);
+    // __builtin_return_address(0) here is APPLE's call site: Lilu routes the
+    // original address to this function, so our caller is Apple's caller.
+    return rbgpu_pdeenc_apply_2km(level, v, __builtin_return_address(0));
 }
 
 void rbgpu_vmid_flush_2if(void) {
@@ -8998,6 +9056,7 @@ static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
                   "- and 2km's PDE correction rides in the same hook");
         g_rb_2if_hooked = 1;
         g_rb_2km_hooked = 1;    // 2kn: one route, two experiments
+        g_rb_2ko_from   = reqs[1].from;   // 2ko: getPDEValue, as solved
     } else {
         rbgpu_log("2if: FAILED to hook the VMID handout - rbgpu-vmid will say "
                   "hk=0 so an empty note is not mistaken for a driver that "

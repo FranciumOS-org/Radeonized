@@ -15467,3 +15467,80 @@ the existing hook.
 Build `309F09D1-AEA4-331D-844F-B42D551B3196`. Boot 85 is void; the next
 armed boot re-runs the 2km test with the pre-registered outcome table of
 the 2km entry unchanged.
+
+## 2ko (2026-10-20) — boot 85: 2km was aimed at the wrong function
+
+The 2kn build ran. `rbgpu-boot = 85`, and that **is** this boot's nonce:
+the panicked boot never wrote a note, so it never consumed a number, and
+the counter went 84 -> 85 here. Every note below carries `b=85`.
+
+**The hook fired and corrected nothing, for a reason that refutes 2km:**
+
+```
+rbgpu-pdv  = b=85 hk=1 on=1 calls=108 fixed=0 | left: inrange=0 zero=108
+             | first lvl=4294967295 0 -> 0
+rbgpu-vmid = b=85 ... | L0 c3 f2000000000000001 l2000000000000001
+                      | L1 c105 f100000000000001 l100000000000001
+```
+
+`getPDEValue` **returns flags only.** Masking `0x0000FFFFFFFFF000`
+against `0x2000000000000001` and `0x0100000000000001` gives **zero** -
+and 2if's first and last values per level are identical, over 108 calls.
+So the address field is not Apple's to get wrong here; it is ORed in by
+the CALLER. 2km's `zero=108` is the guard working correctly, not a
+disarmed instrument.
+
+This was already written down. `kern_start.cpp:10163` says "getPDEValue
+produces page-table CONTENT entries with a zero address field", and 2if
+had measured `nv=0`. 2km was built anyway, on 2hr's reading that
+`getPDEValue` "ends `incq %rax`, so every PDE Apple builds has bit 0
+set" - which is true and says nothing about the address. **The 27th
+instance of the recurring error**, and this one was recorded in our own
+source before the boot.
+
+**What the defect actually is.** The entry is composed:
+
+```
+L1[0] = 0x20000000fb016001
+        0x2000000000000001   <- getPDEValue's template, incl. VALID
+        0x00000000fb016000   <- the block address, ORed in by the caller
+```
+
+`0xfb016000` is below the carve-out (`vram=[780000000,880000000)`), the
+same shape as the base 2ki corrects. The allocator hands blocks out as MC
+addresses (2eg/2ig: `allocVMBlock` -> `elem+0x20`) and the composing
+function never passes them through `mc2pa`. **That composition is the fix
+site.**
+
+**Everything else reproduced, third boot running.**
+
+```
+rbgpu-mew = b=85 OK i=16 @8897ms me=0 || HALT i=17 @9397ms me=15000000
+rbgpu-cph = b=85 halt@8947ms ... ib1=400280000 ...
+rbgpu-pdw = b=85 va=400280000 base=87b015001 start=400000000 d=1 bs=7
+            off=280000 | L1[0]=20000000fb016001 BAD:no vram_base_offset
+            | L0[640]@87b016000=0 BAD:no VALID
+```
+
+`CP_IB1_BASE` and the faulting VA agree again (`0x4_0028_0000`), so 2kh
+holds for a third boot. The VA **moved** - `0x4_0030_0000` in boot 84,
+`0x4_0028_0000` here - so it is an allocation, not a fixed address.
+
+2ki is healthy and lands earlier than before: `calls=353 fixed=3`, first
+fix at 2926 ms, and `rbgpu-vm` now reads `c1:b=87b00b001
+c3:b=87b015001` **already at p=0**, where boot 81 still read Apple's
+`fb015000` there. Necessary, still not sufficient, exactly as 2kk said.
+
+**2ko, built, measurement only:** the hook records its own
+`__builtin_return_address(0)` - which is Apple's call site, since Lilu
+routes the original address to us - as a signed offset from
+`getPDEValue`'s routed address, up to four distinct sites with counts, in
+`rbgpu-pdv`. Add the offset to `0xbe9b9de` for the static address. No new
+route, no hardware access, nothing changed in Apple's behaviour.
+
+`nm` makes `AMDHWVMContext::getVMPT` (0xbe8f5c8) and `::mapVA`
+(0xbe8ee7a) the candidates - neither is recorded as a finding, because a
+guess from a symbol list is not a measurement and 2ko costs one boot to
+settle it.
+
+Build `DE06BF80-C888-3CD6-A968-7E9A9B231934`.
