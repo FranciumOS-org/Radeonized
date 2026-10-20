@@ -311,3 +311,101 @@ staying set. The whole host side is eliminated with positive controls. Is
 there a known GC 10.3 mechanism — RLC firmware behaviour, a PSP action, a CP
 microcode fail-safe on a fetch fault — that halts CE/PFP/ME this way and that
 a host cannot clear?
+
+---
+
+# RESULTS — your capture list, one boot (boot 81)
+
+**Your hypothesis is confirmed. The CP is halting on something it fetched,
+and the faulting address is the CP's own IB1 base.** Every register name you
+gave exists in `gc_10_3_0_offset.h` — nothing had to be skipped.
+
+```
+halt@8883ms  int=0  intc=3c0000
+  hdr  me=c0033700  pfp=ffff1000  ce=ffff1000
+  ip   me=121  pfp=986  ce=68f
+  ib1=0x400300000  sz=0  cmd=1f0
+  ib2=0            sz=0  cmd=0
+  ceib1=0          sz=0
+  vmf=3009bb  va_lo=400300
+  +50ms@8934ms  ip me=121 pfp=986 ce=68f   PARKED
+```
+
+### The chain
+
+- **`CP_IB1_BASE = 0x4_0030_0000`.**
+- **`GCVM_L2_PROTECTION_FAULT_STATUS = 0x3009bb`, `_ADDR_LO32 = 0x400300`** →
+  VA `0x4_0030_0000`. **Same number, same register sample.** `CID = 4` =
+  **CPF**, READ, **VMID 3**.
+- **All three instruction pointers are PARKED** — `121 / 986 / 68f` at the
+  halt and identical 50 ms later. The engines stopped, they are not looping.
+- `CP_ME_HEADER_DUMP = 0xc0033700` → type 3, `COUNT = 3` (5 dwords),
+  opcode **`0x37` `WRITE_DATA`** — the 5-dword `gfx_v10_0_write_data_to_reg`
+  shape. PFP and CE both read `0xffff1000`, which is not a valid header
+  (`COUNT 0x3fff`, op `0x10`); we read that as unarmed, not as a packet.
+
+So `CP_ME_CNTL = 0x15000000` is a **consequence**. No agent writes it.
+
+### Your item 4 caveat was the right one to insist on
+
+**`int=0` proves nothing here.** `CP_INT_CNTL_RING0 = 0x3c0000` = bits 18–21
+= `CMP_BUSY`, `CNTX_BUSY`, `CNTX_EMPTY`, `GFX_IDLE`. **`PRIV_INSTR` (22),
+`PRIV_REG` (23), `OPCODE_ERROR` (24) and `RESERVED_BIT_ERROR` (27) are all
+disabled.** We captured the enable register beside the status for this
+reason. Unmasking them is a register write, so it gets its own boot — say if
+you want it.
+
+### Your item 1 is refuted for the ring's IB — our translation was right
+
+```
+ib: mc=f40fbe9000 pa=78fbe9000 sz=952 vmid=0 ctl=800003b8
+    t3=59 nz=183 chain=14 walked=952 | noME-in-IB
+```
+
+**VMID field (ctl bits 27:24) is 0**, so `0xF4_0FBE_9000` *is* a carve-out MC
+address and `mc2pa` was correct. A packet chain-walk reached **exactly** the
+declared 952 dwords, so it is a genuine command buffer — just a sparse one,
+which is why the raw `t3` count looked like noise. `noME-in-IB` is a real
+negative **for that buffer**.
+
+But it is not the buffer that matters: the ring's `INDIRECT_BUFFER` packets
+point at `0xF4_0FBE_9000` (VMID 0) while **`CP_IB1_BASE` reads
+`0x4_0030_0000`** — different address, different space. RB0's own IBs are
+fine. The IB that killed the CP was submitted under VMID 3 and was never in
+the ring page.
+
+### The cause, and a claim of ours that this falsifies
+
+VMID 3's page-directory base is **still Apple's broken value at the halt.**
+
+```
+p=0 (+12 s)  c3: b=fb015000     Apple's: no vram_base_offset, no VALID bit
+p=1 (+100 s) c3: b=87b015001    our corrected value
+```
+
+The halt is at **8.88 s — before both**. We had a fix for this (Apple omits
+`vram_base_offset` for contexts 1–15) applied at VM *bind* time, and our own
+notes claimed it eliminated this exact fault "reproducibly, and it stays
+gone". **Withdrawn.** It only looked gone because every sample we had was at
++12 s or later, and by then the correction has landed — but the CP already
+fetched at 8.88 s.
+
+**So the fix is not a CP register.** VMID 3's page-directory base has to be
+correct *before the first IB fetch under it*, which is earlier than bind.
+Two directions: correct it where Apple programs the context register, or
+work out why a fetch happens under VMID 3 before any bind.
+
+### Still open from your list
+
+- **Item 10** (the failing IB's 64 dwords). Now buildable: the VMID is 3, so
+  it needs a `GCVM_CONTEXT3` walk, not `mc2pa`. But with `c3` holding
+  `0xfb015000` at the halt there is nothing valid to walk — the page
+  directory is the thing that is wrong. Translating through the *corrected*
+  base would show what the IB should have been.
+- **Item 9** (`hardwareErrorEvent` timestamp + reason code).
+  `IOAccelEventMachine2::signalHardwareError` (carries the reason code) and
+  `::hardwareErrorEvent` are both routable and prologue-clean; not hooked yet
+  because we don't put a new route and a new measurement in the same boot.
+- `assignVMID`: **41 calls, 41 reporting failure**, while VMIDs 1, 2 and 3
+  are handed out anyway. Flagged, not interpreted — the failure flag is our
+  hook's own criterion and we haven't re-read the code that sets it.
