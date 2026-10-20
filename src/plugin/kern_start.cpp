@@ -1382,6 +1382,7 @@ static uint64_t g_rb_2eb_pt_base    = 0;  // 2eb: GCVM_CONTEXT0_PAGE_TABLE_BASE
 static uint64_t g_rb_2eb_start_pg   = 0;  // 2ek: CONTEXT0 PAGE_TABLE_START (pages)
 static uint64_t g_rb_2eb_end_pg     = 0;  // 2ek: CONTEXT0 PAGE_TABLE_END (pages)
 static uint32_t g_rb_2ed_fb_off     = 0;  // 2ed: GCMC_VM_FB_OFFSET (16 MB units)
+static uint32_t g_rb_2ed_fb_top     = 0;  // 2kl: GCMC_VM_FB_LOCATION_TOP
 static uint32_t g_rb_2ed_fb_base    = 0;  // 2em: GCMC_VM_FB_LOCATION_BASE (16 MB units)
 static int      g_rb_2em_done       = 0;  // 2em: PT_BASE patch, latched on success
 static int      g_rb_2ee_pdb_done   = 0;  // 2ee: map the candidates once per boot
@@ -1864,6 +1865,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
 
         rbgpu_diag_set_num("gc_fb_base", fb_base);
         g_rb_2ed_fb_base = fb_base;   // 2em
+        g_rb_2ed_fb_top  = fb_top;    // 2kl: needed for the carve-out RANGE
         rbgpu_diag_set_num("gc_fb_top", fb_top);
         rbgpu_diag_set_num("gc_fb_off", fb_off);
         g_rb_2ed_fb_off = fb_off;   // 2ee: vram_base_offset = fb_off << 24
@@ -11073,9 +11075,12 @@ static void rbgpu_ibdump_2kc(void) {
 // A level is called BAD only on a stated test: VALID bit clear, or a VRAM
 // address that does not carry `vram_base_offset`. Each level prints its raw
 // entry either way, so a level that looks fine is visible as fine.
+// noinline: the 560-byte note plus the walk pushed rbgpu_ring_probe_2hk's
+// frame to 1064 against the 1024 -Wframe-larger-than limit when inlined.
+__attribute__((noinline))
 static void rbgpu_pdwalk_2kk(void *obj, uint32_t (*resolve)(void *, uint64_t),
                              uint32_t (*rd)(void *, uint32_t)) {
-    char n[416];
+    char n[560];
     uint64_t va   = g_rb_2kf_ib1_va;        // CP_IB1_BASE at the halt
     uint64_t base = g_rb_2kj[3].now;        // the corrected v3 base we wrote
     if (va == 0 || base == 0) {
@@ -11091,26 +11096,42 @@ static void rbgpu_pdwalk_2kk(void *obj, uint32_t (*resolve)(void *, uint64_t),
         return;
     }
     const uint64_t vbo = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+    // 2kl: the carve-out RANGE, not just a lower bound. A review pointed out
+    // that `>= vbo` gives a false OK for any large wrong value; a VRAM address
+    // is good only inside [vbo, vbo + size). Size from the registers:
+    // (FB_LOCATION_TOP - FB_LOCATION_BASE + 1) << 24. On this chip
+    // 0xf4ff - 0xf400 + 1 = 0x100, so 4 GB, and vbo + size = 0x8_8000_0000 -
+    // exactly where BAR0 begins, which is an independent check that the two
+    // register readings agree.
+    uint64_t vsize = 0;
+    if (g_rb_2ed_fb_top >= g_rb_2ed_fb_base) {
+        vsize = (static_cast<uint64_t>(g_rb_2ed_fb_top - g_rb_2ed_fb_base) + 1)
+                << 24;
+    }
+    const uint64_t ADDRM = 0x0000FFFFFFFFF000ULL;   // bits 47:12
+    const uint64_t PDE_PTE = 1ULL << 54;            // amdgpu_vm.h: huge page
+    const uint64_t PTE_SYSTEM = 1ULL << 1;
 
-    // Context 3's own window and depth, read not assumed.
+    // Context 3's own window and geometry, read not assumed.
     uint32_t s_lo  = rd(obj, resolve(obj, ((0x1687ull + 2 * 3) << 32) | 0xB));
     uint32_t cntl  = rd(obj, resolve(obj, ((0x15FCull + 3) << 32) | 0xB));
     uint64_t start = static_cast<uint64_t>(s_lo) << 12;
-    unsigned depth = (cntl >> 1) & 0x3u;    // GCVM_CONTEXT*_CNTL PAGE_TABLE_DEPTH
-
+    unsigned depth = (cntl >> 1) & 0x3u;            // PAGE_TABLE_DEPTH
+    unsigned bs    = (cntl >> 3) & 0xFu;            // PAGE_TABLE_BLOCK_SIZE
+    unsigned leaf_bits = 9u + bs;                   // leaf PTB width
     uint64_t off = (va >= start) ? (va - start) : 0;
-    unsigned i1  = static_cast<unsigned>((off >> 21) & 0x1FFu);   // 2 MB stride
-    unsigned i0  = static_cast<unsigned>((off >> 12) & 0x1FFu);
 
     int w = snprintf(n, sizeof(n),
-                     "va=%llx base=%llx start=%llx depth=%u off=%llx i1=%u i0=%u",
-                     va, base, start, depth, off, i1, i0);
+                     "va=%llx base=%llx start=%llx d=%u bs=%u off=%llx "
+                     "vram=[%llx,%llx)",
+                     va, base, start, depth, bs, off, vbo, vbo + vsize);
     size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
 
-    // Level 1: the directory at the corrected base.
-    auto read_entry = [](uint64_t phys, unsigned idx, uint64_t *out) -> bool {
-        auto md = IOMemoryDescriptor::withPhysicalAddress(phys & ~0xFFFULL,
-                                                          0x1000,
+    // One entry, from a table that may span more than one page when
+    // leaf_bits > 9 (then idx >= 512 and the page must be selected).
+    auto read_entry = [](uint64_t tbl, unsigned idx, uint64_t *out) -> bool {
+        uint64_t pg = (tbl & ~0xFFFULL) + (static_cast<uint64_t>(idx >> 9) << 12);
+        auto md = IOMemoryDescriptor::withPhysicalAddress(pg, 0x1000,
                                                           kIODirectionIn);
         if (!md) return false;
         IOMemoryMap *mp = md->createMappingInTask(kernel_task, 0,
@@ -11122,47 +11143,61 @@ static void rbgpu_pdwalk_2kk(void *obj, uint32_t (*resolve)(void *, uint64_t),
         md->release();
         return true;
     };
+    // The stated test, in one place so the verdict cannot drift between levels.
+    auto verdict = [&](uint64_t e, bool leaf) -> const char * {
+        if (!(e & 1)) return "BAD:no VALID";
+        uint64_t a2 = e & ADDRM;
+        if (leaf && (e & PTE_SYSTEM)) {
+            // The offset does not apply to a system page; the useful check is
+            // that it is a plausible DMA address rather than a stripped one.
+            return (a2 != 0 && a2 < vbo) ? "ok(system)" : "system?CHECK";
+        }
+        if (vsize == 0) return "range unknown";
+        if (a2 < vbo)          return "BAD:no vram_base_offset";
+        if (a2 >= vbo + vsize) return "BAD:above carve-out";
+        return "ok";
+    };
 
-    uint64_t pde = 0;
-    if (!read_entry(base, i1, &pde)) {
-        snprintf(n + at, sizeof(n) - at, " | L1 MAP FAILED");
-        rbgpu_nvram_note("rbgpu-pdw", n);
-        return;
+    uint64_t tbl = base & ADDRM;
+    bool stop = false;
+    for (unsigned lvl = depth; lvl >= 1 && !stop && at < sizeof(n) - 72; lvl--) {
+        unsigned shift = 12u + leaf_bits + 9u * (lvl - 1u);
+        unsigned idx   = static_cast<unsigned>((off >> shift) & 0x1FFu);
+        uint64_t e = 0;
+        if (!read_entry(tbl, idx, &e)) {
+            at += static_cast<size_t>(snprintf(n + at, sizeof(n) - at,
+                    " | L%u MAP FAILED @%llx", lvl, tbl));
+            stop = true;
+            break;
+        }
+        bool huge = (e & PDE_PTE) != 0;
+        at += static_cast<size_t>(snprintf(n + at, sizeof(n) - at,
+                " | L%u[%u]=%llx %s%s", lvl, idx, e,
+                verdict(e, huge), huge ? " HUGE(leaf)" : ""));
+        if (huge || !(e & 1)) { stop = true; break; }
+        uint64_t nxt = e & ADDRM;
+        if (vsize && nxt < vbo) { nxt += vbo; }   // read it where it SHOULD be
+        tbl = nxt;
     }
-    uint64_t pde_addr = pde & 0x0000FFFFFFFFF000ULL;
-    bool pde_v   = (pde & 1) != 0;
-    bool pde_vbo = (pde_addr >= vbo);
-    at += static_cast<size_t>(snprintf(n + at, sizeof(n) - at,
-            " | L1[%u]=%llx v=%d a=%llx %s", i1, pde, pde_v ? 1 : 0, pde_addr,
-            !pde_v ? "BAD:no VALID" : (!pde_vbo ? "BAD:no vram_base_offset" : "ok")));
-
-    if (pde_v && at < sizeof(n) - 80) {
-        uint64_t l0 = pde_addr;
-        if (!pde_vbo) { l0 += vbo; }   // read it where it SHOULD be
-        uint64_t pte = 0;
-        if (read_entry(l0, i0, &pte)) {
-            uint64_t pte_addr = pte & 0x0000FFFFFFFFF000ULL;
-            bool pte_v   = (pte & 1) != 0;
-            bool pte_sys = (pte & (1ull << 1)) != 0;   // AMDGPU_PTE_SYSTEM
-            bool pte_vbo = (pte_addr >= vbo);
-            snprintf(n + at, sizeof(n) - at,
-                     " | L0[%u]@%llx=%llx v=%d sys=%d a=%llx %s",
-                     i0, l0, pte, pte_v ? 1 : 0, pte_sys ? 1 : 0, pte_addr,
-                     !pte_v ? "BAD:no VALID"
-                            : (pte_sys ? "ok(system)"
-                                       : (!pte_vbo ? "BAD:no vram_base_offset"
-                                                   : "ok")));
+    if (!stop && at < sizeof(n) - 72) {
+        unsigned idx = static_cast<unsigned>((off >> 12) &
+                                             ((1ull << leaf_bits) - 1ull));
+        uint64_t e = 0;
+        if (read_entry(tbl, idx, &e)) {
+            snprintf(n + at, sizeof(n) - at, " | L0[%u]@%llx=%llx %s",
+                     idx, tbl, e, verdict(e, true));
         } else {
-            snprintf(n + at, sizeof(n) - at, " | L0 MAP FAILED @%llx", l0);
+            snprintf(n + at, sizeof(n) - at, " | L0 MAP FAILED @%llx", tbl);
         }
     }
     rbgpu_nvram_note("rbgpu-pdw", n);
     rbgpu_log("2kk: %s", n);
-    rbgpu_log("2kk: a BAD level names the fix site - no VALID means Apple's "
-              "encode omits bit 0 there, no vram_base_offset means it omits "
-              "the offset, and either one is getPDEValue (0xbe9b9de) or "
-              "getPTEValue (0xbe9ba2c). All levels ok would mean the tables "
-              "are right and the fault is something else entirely.");
+    rbgpu_log("2kk/2kl: a BAD level names the fix site - getPDEValue "
+              "(0xbe9b9de) for an L1+ level, getPTEValue (0xbe9ba2c) for L0. "
+              "The fault's WALKER_ERROR=5 is nonzero, which hints the walk "
+              "failed fetching a TABLE rather than at a leaf, so a PDE is the "
+              "expected culprit - a hint, not a decode we can source. All "
+              "levels ok would close this line and reopen the question.");
 }
 
 static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {

@@ -15278,3 +15278,68 @@ not claimed. `ip ce=70b` continues to drift per boot while `me=121` and
 `pfp=986` stay identical in every boot.
 
 Build `AB5B9056`. New note `rbgpu-pdw`. Read-only, no boot-arg change.
+
+## 2kl (2026-10-20) — the walk, with a review's corrections applied
+
+A reviewer sent six corrections for 2kk before it ran. **Two were already
+right; four were real gaps.** Audited one at a time rather than applied
+wholesale.
+
+| their point | us |
+|---|---|
+| 1. index from `VA - (START << 12)`, page units | **already correct** |
+| 2. widths from `CNTL`: 9 bits per PDB level, leaf is `9 + PAGE_TABLE_BLOCK_SIZE` | **gap** - 2kk hardcoded 9/9 and ignored block size |
+| 3. bit 54 `PDE_PTE` = huge page, stop and check as a leaf | **gap** - not checked |
+| 4. mask flags first, address is bits 47:12 | **already correct** (`0x0000FFFFFFFFF000`) |
+| 5. make the test a *range* check, not a lower bound | **gap** - 2kk used `>= vbo`, which gives a false OK for any large wrong value |
+| 6. a `PTE_SYSTEM` leaf needs a DMA-sanity check, not the offset test | **gap** - 2kk returned `ok(system)` unconditionally |
+
+**Their decode of `0x3009bb` checks out** - verified field by field against
+`gc_10_3_0_sh_mask.h`: `MORE_FAULTS=1`, `WALKER_ERROR=5`,
+`PERMISSION_FAULTS=11` (they did not mention this one), `MAPPING_ERROR=1`,
+`CID=4` (CPF), `RW=0` (read), `VMID=3`. Their inference - a nonzero
+`WALKER_ERROR` hints the walk failed fetching a **table** rather than at a
+leaf, so expect a PDE to be the culprit - is recorded **as a hint**, which is
+how they offered it; we have no sourced decode of the walker error codes.
+
+**`AMDGPU_PDE_PTE = 1ULL << 54`** confirmed in `amdgpu_vm.h`.
+
+### The corrections, as built
+
+- **Generic depth.** `PAGE_TABLE_DEPTH` (CNTL bits 2:1) and
+  `PAGE_TABLE_BLOCK_SIZE` (bits 6:3) are read, `leaf_bits = 9 + bs`, and the
+  walk runs `depth` PDB levels at `12 + leaf_bits + 9*(lvl-1)` then the leaf
+  at `off >> 12` masked to `leaf_bits`. A leaf wider than 9 bits spans more
+  than one page, so `read_entry` selects the page (`idx >> 9`) as well as the
+  slot (`idx & 0x1ff`).
+- **Huge pages.** `PDE_PTE` set stops the walk and the entry is judged as a
+  leaf, tagged `HUGE(leaf)`.
+- **Range, not lower bound.** The carve-out size comes from the registers:
+  `(FB_LOCATION_TOP - FB_LOCATION_BASE + 1) << 24`. On this chip
+  `0xf4ff - 0xf400 + 1 = 0x100`, so 4 GB, and the good VRAM window is
+  **`[0x7_8000_0000, 0x8_8000_0000)`** - ending exactly where BAR0 begins,
+  which is an independent check that the two register readings agree.
+  `BAD:above carve-out` is now distinguishable from
+  `BAD:no vram_base_offset`.
+- **System leaves.** A `PTE_SYSTEM` leaf reports `ok(system)` only when the
+  address is nonzero and below `vbo`; otherwise `system?CHECK`, so a stripped
+  or absurd DMA address is not waved through.
+
+The verdict is computed in **one** lambda used by every level, so the test
+cannot drift between levels - and each level prints its raw entry whether it
+passes or fails, so a good level is visible as good rather than as silence
+(2eh).
+
+### Their route-timing point, answered empirically
+
+They warned that tables written before the route is live stay broken. For the
+base that is already settled: 2kj's `-rbgpupdefix` caught VMID 3's bind at
+**2861 ms**, against a fetch at 8.9 s, so the EFI-loaded plugin is live well
+before the first VM. The same will hold for `getPDEValue` / `getPTEValue`
+when those are routed.
+
+One build note: the 560-byte note plus the walk pushed
+`rbgpu_ring_probe_2hk`'s frame to 1064 bytes against the 1024 limit, so the
+walk is `noinline`.
+
+Build `53A07E09`. Read-only, no boot-arg change.
