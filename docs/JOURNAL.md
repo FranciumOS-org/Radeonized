@@ -15277,4 +15277,4 @@ outside it - plausibly the three base rewrites doing real work, but n=1 and
 not claimed. `ip ce=70b` continues to drift per boot while `me=121` and
 `pfp=986` stay identical in every boot.
 
-Build `D47A0F6E` pending. New note `rbgpu-pdw`. Read-only, no boot-arg change.
+Build `AB5B9056`. New note `rbgpu-pdw`. Read-only, no boot-arg change.
