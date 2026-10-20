@@ -15544,3 +15544,66 @@ guess from a symbol list is not a measurement and 2ko costs one boot to
 settle it.
 
 Build `DE06BF80-C888-3CD6-A968-7E9A9B231934`.
+
+## 2kp (2026-10-20) — boot 86: the anchor was never set, and the note said nothing
+
+Boot 86 is a clean repeat of 85 in every respect that was already settled,
+and 2ko measured **nothing**.
+
+```
+rbgpu-pdv  = b=86 hk=1 on=1 calls=114 fixed=0 | left: inrange=0 zero=114
+             | first lvl=4294967295 0 -> 0
+```
+
+No `cN` rows. The hook ran 114 times and recorded no call site, because
+`rbgpu_pdeenc_caller_2ko` opened with
+`if (g_rb_2ko_from == 0 || ret == nullptr) return;` and the anchor was 0.
+
+**`KernelPatcher::RouteRequest::from` is not written back by Lilu 1.7.3.**
+`kern_patcher.hpp` documents the field as "solved symbol (assigned by
+routeMultiple)" and 2ko took that at face value - a doc comment read as a
+measurement, which is the same error as [2ha]'s return code. The field
+stayed 0 past a `routeMultiple` that succeeded (`hk=1`, and the hook
+demonstrably fired).
+
+**And the note printed nothing at all**, which is indistinguishable from
+"getPDEValue has no caller" - absurd at 114 calls, and exactly the failure
+docs/RULES.md forbids: every path out of a probe must say something. The
+instrument was the fault for the fourth time in this project.
+
+**2kp fixes both.** The raw return address is recorded unconditionally;
+the anchor is used only for presentation, and the note now always carries
+`anchor=<n> sites=<n>` plus `cN +off` (anchor known) or `cN raw=<addr>`
+(anchor 0), with `+N more` and `null=N` for the paths that used to be
+silent. The anchor comes from `patcher.solveSymbol` on the same symbol
+2if already routes - a read-only resolve, so no second route (2kn) and no
+rule-9 question. `rbgpu_route_vmid_2if` is now `noinline`; inlining it
+pushed `processX6000` to 1048 bytes against the 1024 limit, the trap 2ki
+hit.
+
+**What boot 86 did confirm**, all with `b=86`:
+
+```
+rbgpu-mew  = OK i=16 @8844ms me=0 || HALT i=17 @9344ms me=15000000 cps=94038600
+rbgpu-cph  = halt@8943ms | ip me=121 pfp=986 ce=622 | ib1=400300000
+             | vmf=3009bb va=000400300 || +50ms ip me=121 pfp=986 ce=622 PARKED
+rbgpu-pdw  = va=400300000 base=87b015001 d=1 bs=7 off=300000
+             | L1[0]=20000000fb016001 BAD:no vram_base_offset
+             | L0[768]@87b016000=0 BAD:no VALID
+rbgpu-pde  = calls=353 fixed=3 | first vmid=2 @2894ms fb000000 -> 87b000001
+             | v3 fb015000->87b015001
+rbgpu-vmid = L0 c3 f2000000000000001 | L1 c111 f100000000000001
+```
+
+Fourth boot in which `CP_IB1_BASE` equals the faulting VA and the
+instruction pointers are identical across 50 ms (PARKED), so 2kh is as
+solid as anything in this project. The VA is back to `0x4_0030_0000`
+(boot 85 had `0x4_0028_0000`), confirming it is allocation-dependent
+rather than fixed. `L1[0]` is byte-identical to boot 85's across a power
+cycle, and `getPDEValue`'s per-level values are identical again over 114
+calls - the 2ko refutation reproduces.
+
+One difference, noted and not interpreted: at the halt `rlcs=25` and
+`gpm=140017`, where boot 85 read `rlcs=0 gpm=140016`. n=1 each.
+
+Build `09F0A58D-2275-3E17-9B01-E5989132C089`.
