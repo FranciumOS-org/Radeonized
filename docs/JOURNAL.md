@@ -14859,3 +14859,76 @@ Build `8CCDA0C1`. Read-only, no boot-arg change. (One slip caught before the
 boot: the first draft read the fault status at dword `0x0B6A`; the header
 gives `0x15C8`, `BASE_IDX 0`, which is what the existing ring probe already
 used. Corrected and rebuilt.)
+
+## 2kf / 2kg (2026-10-20) — the reviewer's capture list, built
+
+**Every register name they gave exists in `gc_10_3_0_offset.h`. Nothing had
+to be skipped.** Verified before writing any code:
+
+| register | dword | seg | | register | dword | seg |
+|---|---|---|---|---|---|---|
+| `CP_INT_STATUS_RING0` | `0x1e0d` | 0 | | `CP_IB1_BASE_LO/HI` | `0x20cc/cd` | 1 |
+| `CP_INT_CNTL_RING0` | `0x1e0a` | 0 | | `CP_IB1_BUFSZ` | `0x20ce` | 1 |
+| `CP_ME_HEADER_DUMP` | `0x0f41` | 0 | | `CP_IB1_CMD_BUFSZ` | `0x20c0` | 1 |
+| `CP_PFP_HEADER_DUMP` | `0x0f42` | 0 | | `CP_IB2_BASE_LO/HI` | `0x20cf/d0` | 1 |
+| `CP_CE_HEADER_DUMP` | `0x0f44` | 0 | | `CP_IB2_BUFSZ/CMD` | `0x20d1/c1` | 1 |
+| `CP_ME_INSTR_PNTR` | `0x0f46` | 0 | | `CP_CE_IB1_BASE_LO/HI` | `0x20c6/c7` | 1 |
+| `CP_PFP_INSTR_PNTR` | `0x0f45` | 0 | | `CP_CE_IB1_BUFSZ` | `0x20c8` | 1 |
+| `CP_CE_INSTR_PNTR` | `0x0f47` | 0 | | `GCVM_L2_PROT_FAULT_STATUS` | `0x15c8` | 0 |
+| | | | | `_ADDR_LO32/HI32` | `0x15c9/ca` | 0 |
+
+GCHUB context registers, per-VMID strides confirmed against the header:
+`PAGE_TABLE_BASE_ADDR_LO32` `0x1667 + 2*vmid`, `START_ADDR_LO32`
+`0x1687 + 2*vmid`, `END_ADDR_LO32` `0x16a7 + 2*vmid`, `CNTL` `0x15fc + vmid`.
+
+### How it is sampled, and why not the obvious way
+
+**The sweep is NOT added to every sample.** 2jv is why: one extra MMIO read
+per sample across 60 samples destabilised the boot after ~73 s and cost five
+experiments. So the sweep fires **once**, on the first sample where `me` goes
+nonzero - the first halt sample, before any replay, which is what was asked -
+and a second, pointers-only sweep fires on the sample 50 ms later. That
+second sweep *is* item 6: `PARKED` if `CP_ME_INSTR_PNTR` and
+`CP_PFP_INSTR_PNTR` are unchanged, `MOVING` if not.
+
+One guard recorded in the code because it would otherwise be read wrongly:
+**if `CP_INT_CNTL_RING0` is 0 those interrupts are masked, and
+`CP_INT_STATUS_RING0` reading 0 proves nothing** (2eh). That is why the
+enable register is captured beside the status.
+
+### Conceded and acted on: the dump was 91 s late
+
+The ring dump ran **only** at phase 1 = +100 s, about 91 s after the halt, so
+the ring it scanned was never established to be the ring the CP was
+executing. 2kg runs it at **phase 0 (+12 s)** as well - still after the halt,
+but 88 s closer, and before the phase where `rptr` was seen to move - and the
+note now carries `ph=` so the two can never be confused.
+
+Raw hex, as asked, rather than only our decode: `RB0[0x90..0xc0]` eight
+dwords per line (bracketing `rptr = 0xb1`), and **every `INDIRECT_BUFFER`
+packet's four dwords verbatim** with the VMID and length broken out, so the
+decode can be checked independently.
+
+### What is NOT in this build, stated plainly
+
+- **Item 10, the IB's first 64 dwords through the VMID's page table.** The
+  VMID is only known at run time, from item 2. `CP_IB1_BASE` is latched at
+  the halt and handed to a global for it, but translating a *user* VA needs a
+  walk of `GCVM_CONTEXT<vmid>` rather than the carve-out `mc2pa` 2kc used -
+  and if the VMID comes back 0 the carve-out path is already correct and the
+  walk is unnecessary. Deferred one boot deliberately: the VMID decides which
+  translation to write, and writing both on a guess is how 2kc went wrong.
+- **Item 9's `hardwareErrorEvent` timestamp and reason code.** The symbol
+  exists and is routable: `IOAccelEventMachine2::signalHardwareError`
+  (0x14e2634c, carries the reason code in `esi`/`edx`) and
+  `::hardwareErrorEvent` (0x14e25612), both **defined** in
+  IOAcceleratorFamily2 - which we already route, so milestone-2c holds - and
+  both prologues are `55 48 89 e5 41 ...`, clean under rule 9. Not routed in
+  this build because a new route and a new measurement in the same boot is
+  the 2fo failure mode; it goes in the next one, alone.
+- **The `getVMFaultInfo` filter for `status == 0xFFFFFFFF`.** Worth doing and
+  owed, but it changes Apple's behaviour rather than observing it, so it gets
+  its own boot and its own control.
+
+Build `240F4E75`. New note `rbgpu-cph`; raw hex goes to the log. Read-only,
+no boot-arg change.
