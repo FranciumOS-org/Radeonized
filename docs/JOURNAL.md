@@ -15721,3 +15721,85 @@ Pre-registered outcomes:
 
 Build `DBF1D203-33F9-39F8-A102-2260B23F6D98`. New boot-arg
 `-rbgpuvramadj`.
+
+## 2ks (2026-10-20) — boot 88: the hook is right, the arithmetic was wrong by one term
+
+`b=88`, UUID `DBF1D203`. Three things measured, two confirmations and one
+refutation of my own reasoning.
+
+**1. The call site is confirmed at runtime.**
+
+```
+rbgpu-pdv = b=88 ... | anchor=ffffff7f9db849de sites=1 | c0 -cf71 n=114
+```
+
+One site, 114 calls. `anchor - 0xcf71` is static `0xbe8ea6d` - the
+instruction immediately after `callq *0x1d8(%rax)` at `be8ea67` inside
+`mapVMPT`. So 2kr's static reading of the vtable slot, the nine candidate
+call sites and the symbol mapping are all correct, and `getPDEValue` has
+exactly one caller on this chip.
+
+**2. The hook took and the scoping works.**
+
+```
+rbgpu-adj = b=88 hk=1 on=1 calls=150 inmap=147 fixed=147 nostrip=0
+            | bounds=ffffff7f9db77624..ffffff7f9db7808c
+            | first f410001000 -> 10001000
+```
+
+150 calls, 147 from inside mapVMPT, all 147 corrected, `nostrip=0` - so
+every one of them was a VRAM address inside the window, none a
+pass-through. The `solveSymbol` bounds resolved.
+
+**3. And `this->0x60` is the MC base, not the system-physical base.**
+
+`0xF4_1000_1000 -> 0x1000_1000` is a `0xF4_0000_0000` subtraction - the
+carve-out's **MC** base (docs/RULES.md's "Carve-out MC `0xF4_0000_0000`"),
+not `0x7_8000_0000`. **2kr's arithmetic was a coincidence.** It read
+`0x8_7B01_6000 - 0x7_8000_0000 = 0xFB01_6000` and concluded the function
+subtracts `vram_base_offset`; in fact the block's MC address is
+`0xF4_FB01_6000` and stripping `0xF4_0000_0000` is what produces
+`0xFB01_6000`. Same output digits, different operand, and the difference
+decides the fix.
+
+So "return the input unstripped" hands back a raw MC address, and the
+walk says so:
+
+```
+rbgpu-pdw = b=88 ... | L1[0]=200000f4fb016001  BAD:above carve-out
+                     | L0[768]@f4fb016000=ffffffffffffffff system?CHECK
+```
+
+The entry now carries `0xf4fb016000`, above the window
+`[780000000,880000000)`, and the all-ones read at that address is an
+unmapped page. Wrong in the opposite direction from Apple's value, which
+is itself a useful control: **the hook's write reaches the entry**, so
+the only open question was ever which value to put there.
+
+The halt is unchanged, as expected with a still-wrong entry:
+`HALT i=17 @9350ms me=15000000`, `ib1=400300000 vmf=3009bb`, PARKED at
++50 ms. Fifth boot.
+
+**2ks: the correction is `mc2pa`.** Apple has already done
+`mc - vram_start`; `amdgpu_gmc_vram_mc2pa` is
+`mc - vram_start + vram_base_offset`, so the fix is one addition on
+Apple's own answer:
+
+```
+0xFB01_6000 + 0x7_8000_0000 = 0x8_7B01_6000
+```
+
+which is exactly the form 2ki writes for the page-directory base and
+2em wrote for CONTEXT0 - both measured, both confirmed. The note now
+prints all three numbers (input, Apple's answer, mc2pa) and counts
+`nofb` for the case where `fb_off` is not yet known when the tables are
+built, so a silent no-op cannot be read as a correction.
+
+Build `C4D04957-2002-3266-BE2A-E61966648BBA`.
+
+| next `rbgpu-pdw` | means |
+|---|---|
+| `L1 ... ok` and no halt | done |
+| `L1 ok`, `L0` bad | the leaf tier needs the same, one level down |
+| `L1 BAD:above carve-out` again | mc2pa is not the transform the walker wants |
+| `nofb>0` in `rbgpu-adj` | fb_off unknown at table-build time; the fix needs an earlier source for it |
