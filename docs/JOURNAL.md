@@ -15898,3 +15898,73 @@ is a separate experiment.
 Not claimed: that nothing else is wrong, that this boot would survive
 longer than the capture, or that the artifacts are unrelated to the page
 tables. n=1 on everything above.
+
+## 2kt (2026-10-20) — the artifacts: 2ct's premise is obsolete
+
+With the halt gone, the artifacts are the frontier. Boot 89's capture
+names the mechanism without a new measurement:
+
+```
+igpu-children.txt:  +-o .Display_boot  (IONDRVFramebuffer)
+```
+
+**No AMD framebuffer is attached.** The panel is still driven by the
+firmware framebuffer, because 2ct refuses the display pipe - so DCN is
+never programmed by Apple's driver, and WindowServer's **tiled** Metal
+composite reaches a buffer the firmware scans out **linearly**.
+Block-scrambled output is precisely what that produces, and it is a
+consequence of our own code rather than a new chip problem.
+
+**And 2ct's reason no longer holds.** Its own comment:
+
+> `set_display_mode_and_vram` returns false in exactly one place: the
+> loop over adopted display pipes, where it tries to reserve the boot
+> framebuffer's range in a VRAM allocator that is empty **because
+> powerUpHW never ran**.
+
+`powerUpHW` has succeeded since 2gi and in every boot since. The
+precondition is gone, and 2ct already ships `-rbgpudisplaypipe` to
+restore Apple's adoption.
+
+**The risk, and the guard.** 2ct records that a false there "used to
+panic", and `-rbgpunodisppanic` must stay OUT (2cv). So arming
+`-rbgpudisplaypipe` alone risks a panic that teaches nothing. 2kt hooks
+`AMDAccelDisplayMachine::set_display_mode_and_vram` (0xbe48604) - the
+function that returns the false - calls the original, **records what it
+really returned**, and then returns true. A false therefore reaches the
+note instead of Apple's panic path. This is not a second experiment; it
+exists only to make the first survivable, and because it records the
+real value it cannot hide the answer.
+
+Gates: **defined** in AMDRadeonX6000 (`nm -m`: external, `__TEXT,__text`
+- and note `IOAccelDisplayPipe::displayModeDidChange` is an **import**,
+never to be routed, milestone 2c); routed nowhere else, both names
+appeared only in comments (2kn); rule 9 clean - `55 48 89 e5 41 57 41 56
+41 55 41 54 53` (2gb); mangled name cross-checked against `nm` (2kr).
+Routed from the same site as 2kr, which reported `hk=1` in boots 88 and
+89.
+
+Pre-registered outcomes, from `rbgpu-disp`:
+
+| reading | means |
+|---|---|
+| `refused=0 fb_calls>0` | the pipe WAS adopted; 2ct is out of the way |
+| `true>0 false=0` | the VRAM reservation now succeeds - 2ct's premise is dead on the record |
+| `false>0` | the allocator still fails even with powerUpHW succeeding; a finding of its own, and the machine survived to report it |
+| `calls=0` | the mode change never reached this function; pipe adoption is not what gates it |
+
+And the real test is the screen: if an AMD framebuffer attaches and the
+artifacts clear, hypothesis A is confirmed and the display path is the
+remaining work. If the artifacts persist with the pipe adopted, the
+swizzle is wrong inside the GPU's own writes and `GB_ADDR_CONFIG` /
+tiling params become the next line.
+
+Noted, not a finding: HWLibs has `_gc_read_hw_configuration_10_3`
+(which reads `mmGB_ADDR_CONFIG`, dword 0x13de, at `126b1b7f`) but
+`_gc_get_tiling_params` exists **only** as `_10_1`. The 10_3 path reads
+the chip's own geometry, which is what matters for now; whether the
+`_10_1` tiling derivation is reached, and whether it differs, is
+unexamined.
+
+Build `E76DEC6D-8ACD-3996-8466-C5EA39C19EB6`. New boot-arg for this
+experiment: `-rbgpudisplaypipe` (2ct's own, never yet armed).
