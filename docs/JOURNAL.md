@@ -15037,3 +15037,96 @@ Not a CP register. **VMID 3's page-directory base has to be correct before
 the first IB fetch under it**, which is earlier than VM bind time. The
 candidates are to correct it at the point Apple programs the context rather
 than at bind, or to find why the first fetch happens before any bind.
+
+## 2ki (2026-10-20) — the fix, at the site the disassembly names
+
+An external reviewer's reply matched 2kh and added the mechanism. Two of
+their claims check out against records we already had:
+
+- **The arithmetic.** `0xfb015000 + 0x7_8000_0000 = 0x8_7b01_5000`, and our
+  own corrected value at p=1 reads `87b015001`. 2ix independently found that
+  address holds a genuine depth-1 directory carrying Apple's own L0 template.
+  On Navi 21 `vram_base_offset` is 0, so Apple's omission is invisible; on an
+  APU with `FB_OFFSET = 0x780` it points at unmapped memory.
+- **"The CP writes the base, not host MMIO."** 2hr could not find an MMIO
+  write path for `GCVM_CONTEXT*_PAGE_TABLE_BASE_ADDR`, and 2ia's static
+  search found none either, recording the reason as exactly theirs:
+  `gmc_v10_0_emit_flush_gpu_tlb` uses `amdgpu_ring_emit_wreg`, so the ring
+  writes it. We reached their conclusion before they stated it and then did
+  not act on it. 2kh's `CP_ME_HEADER_DUMP = 0xc0033700` - a **5-dword
+  `WRITE_DATA`** - is that packet's exact shape.
+
+**Their verification step has already been run, five times, and came back
+negative.** `rbgpu-pm4` reads `nowd` in boots 67, 77, 78, 80 and 81 - no
+`WRITE_DATA` into `0x28C7..0x28E6` (`seg0 + 0x1667 + 2*vmid`) anywhere in the
+page. Three caveats, all real: it is **one** 1024-dword page of **RB0**; the
+faulting IB is not RB0's (`CP_IB1_BASE` names a different address in a
+different space); and the dump is at +12 s, after the halt. So the packet is
+elsewhere, not absent.
+
+### The defect, located
+
+`AMDGFX10VMM::prepareVMInvalidateRequest` (0xbe9b4b4), called from
+`programAndInvalidateVM` through vtable `0x220`:
+
+```
+be9b4ce: movl (%rdx), %eax            ; info->0 = hub
+be9b4d3: imulq $0x358, %rax, %rax     ; per-hub stride 0x358
+be9b4de: addq $0xba0, %r15            ; block base this+0xba0
+be9b4d0: movl 0x4(%rdx), %esi         ; info->4 = vmid
+be9b4eb..f3:                          ; rax = vmid * 28  (per-VMID stride 0x1c)
+be9b505: movq 0x18(%r14), %rcx        ; info->0x18 = THE PD ADDRESS
+be9b509: movl %ecx, 0x4(%rbx)         ; LO32 -> request+0x04
+be9b50c: shrq $0x20, %rcx
+be9b510: movl %ecx, 0xc(%rbx)         ; HI32 -> request+0x0c
+```
+
+**Copied through verbatim** - no `vram_base_offset`, no `VALID` bit - while
+the START/END addresses immediately below it *are* processed (`>>12`, `>>44`,
+and `decq` for END, matching the `s=400000 e=23fffff` we read live).
+
+This is the last place the value is touched before it becomes packets, and it
+runs on **every** submit - which is what a bind-time fix cannot do, since the
+halt is at 8.88 s before any bind lands.
+
+### The hook
+
+`-rbgpupdefix` rewrites `request+0x04`/`+0x0c` after the original returns:
+`now = (was + vram_base_offset) | 1`. That is Linux's own correction -
+`amdgpu_gmc_vram_mc2pa` adds the offset, `amdgpu_gmc_pd_addr` ORs
+`AMDGPU_PTE_VALID` for Vega10+ at every depth - and Apple's own
+`getPDEValue` (0xbe9b9de) ends `incq %rax`, so **every PDE Apple builds has
+bit 0 set**. These two registers are anomalous by Apple's own convention.
+
+**Guarded, because a blind add would corrupt a correct value (2cy).** It
+rewrites only when the value is nonzero, has bit 0 **clear**, and is **below
+`vram_start`**. Apple's `0xfb015000` satisfies all three; an already-correct
+`0x87b015001` satisfies none. Declines are counted separately (`valid=`,
+`zero=`, `above=`) so `fixed=0` can never be read as "it never ran".
+
+Rule 9 re-checked at the real bytes: `55 48 89 e5 41 57 41 56 41 55 41 54` -
+pushes and a `movq`, no branch in the first five. Symbol **defined** in
+AMDRadeonX6000, which we already route (milestone 2c).
+
+One build note: folding the `RouteRequest` into `processX6000` pushed that
+frame to 1032 bytes against the 1024 `-Wframe-larger-than` limit, so the
+route lives in its own `noinline` function.
+
+### What decides it
+
+| `rbgpu-pde` / `rbgpu-cph` | means |
+|---|---|
+| `fixed>0` and **no halt** in `rbgpu-mew`/`mew2` | **the fix** - the IB fetch translates and the CP never parks |
+| `fixed>0` but `vmf=3009bb` still at the halt | the correction is right and still too late, or a *second* gap one level down |
+| `calls=0` | wrong site - the request is never prepared on this path |
+| `fixed=0`, `calls>0` | read `left:` - every value passed a guard, so Apple's value is not what we think on this path |
+| `hk=0` | the hook, not the driver |
+
+**The reviewer's closing warning is on the record before the boot:** Linux
+adds `vram_base_offset` to every PDE *and* PTE pointing at VRAM
+(`amdgpu_vm_bo_update`), so Apple's page-table writer likely has the same gap
+one level down. If the fault moves rather than disappears, the next step is
+`getPTEValue` (0xbe9ba2c) and `getPDEValue` (0xbe9b9de), and we already have
+`decodePTE` (0xbe9bab6) to read them with.
+
+Build `CF394FD9`. New note `rbgpu-pde`. New boot-arg `-rbgpupdefix`.
