@@ -235,9 +235,9 @@ anything, and log it when it is not.
 -rbgpurlcsub                                 what makes the RLC autoload COMPLETE
 -rbgpunocgcg                                 CGCG off - takes, but NOT a fix (2jv)
 -rbgpumewatch                                the timed CP/RLC/GFXOFF sample banks
--rbgpuvramadj                                2ks/2ku: THE HALT FIX - mc2pa on
-                                             adjustVRAMAddress, inside mapVMPT
-                                             AND assignVMID
+-rbgpuvramadj                                2ks/2ku/2kw: THE FIX - mc2pa on
+                                             adjustVRAMAddress inside mapVMPT,
+                                             assignVMID and fillMapProcessPacket
 -rbgpudisplaypipe                            2kt: adopt the display pipe; 2ct's
                                              premise died when powerUpHW began
                                              succeeding (true=2 false=0, n=2)
@@ -298,6 +298,11 @@ It is what broke the GPU-restart loop.
 - `-rbgpustampraw` — Apple's unbounded wait; it wedged the machine. [2en]
 - `-rbgpuregdump` — the GC register dump stalls non-deterministically. [2fe]
 - `debug=0x100` — halts on the panic screen instead of writing a report.
+- `-rbgpupdefix` — 2ki, now REDUNDANT and harmful: 2ku corrects the same
+  page-directory base at its source, and the two additions compose.
+  Boot 91 read `87b000000 -> ffb000001` and the halt came back. Its
+  guard now refuses anything at or above `vram_base_offset`, so it is
+  inert if re-armed, but it has no job left. [2kv]
 
 ## Standing debts
 
@@ -385,6 +390,48 @@ It is what broke the GPU-restart loop.
   [2hf, 2hh]
 - 2gh: "the second engine to ask" and "a duplicate create on instance 0" are
   the same event on this chip and nothing separates them.
+
+## THE DESKTOP WORKS (2kw, boot 93, 2026-10-20)
+
+**An armed boot is a usable machine.** The user is in it, using it,
+texting from it. No halt, no freeze, and **zero VM faults** - Apple's
+poller reads `c=0 f=0 r=0 o=0 fw=0`, with `vmfc=1ffc` so reporting is
+still fully on. First clean chip in this project's history.
+
+The whole defect was one subtraction, applied at three sites. Apple's
+`AMDHWMemory::adjustVRAMAddress` (0xbe8cb90) returns `mc - vram_start`;
+the GPUVM walker needs `mc - vram_start + vram_base_offset`
+(`amdgpu_gmc_vram_mc2pa`). `-rbgpuvramadj` adds that term for callers
+inside three named functions, and after the third there are **no
+stripped page-table addresses left anywhere**:
+
+| site | what it programs | boot 93 |
+|---|---|---|
+| `AMDHWVMContext::mapVMPT` (0xbe8e624) | page-table tier entries | `map=12086` |
+| `AMDHWVMM::assignVMID` (0xbe91376) | `info->0x18`, the PD base in the invalidate request | `asg=11` |
+| `AMDGFX10HIQHWChannel::fillMapProcessPacket` (0xbec7de6) | the PD base in the MES `PM4_MES_MAP_PROCESS` packet | `mes=29` |
+
+`calls=12126 inmap=12126 fixed=12126`, no out-of-scope callers left.
+**VMIDs 1-8 all translate** (`vmids=01fe`, against `000e` before) - the
+third site matters because the MES hands out its own VMIDs and
+`assignVMID` never sees them, which is why VMID 10 faulted for three
+boots after the halt was fixed.
+
+**`-rbgpupdefix` must stay OUT** and `-rbgpudisplaypipe` must stay IN;
+see the boot-args section.
+
+**THE FRONTIER IS RENDERING.** The Dock renders perfectly, menu-bar text
+is legible, window chrome and icons are correct; **body text glyphs are
+scrambled** and some screen regions are white noise. With no faults
+left, the GPU writes exactly where it is told - so this is **data
+layout**, not addressing: swizzle/tiling or DCC metadata on small tiled
+surfaces. First rendering problem this project has had.
+
+The lead, unmeasured: HWLibs has `_gc_read_hw_configuration_10_3`
+(reading `mmGB_ADDR_CONFIG`, dword 0x13de, at `126b1b7f`) but
+`_gc_get_tiling_params` exists **only** as `_10_1` - the shape of the
+2jp firmware-table defect. Whether the 10_1 derivation is reached, and
+whether it differs, is unexamined.
 
 ## THE CP HALT IS FIXED (2ks, boot 89, 2026-10-20)
 
