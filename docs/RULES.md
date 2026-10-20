@@ -107,6 +107,15 @@ under the tag in brackets.
   instructions into a trampoline byte-for-byte, so a short branch keeps its
   original displacement and lands in Lilu's own buffer. Two identical page
   faults at two KASLR slides. [2gb, "rule 9"]
+- **Grep the mangled symbol across the whole plugin before adding a route.**
+  A second `RouteRequest` for a function this plugin already routed panics
+  the machine outright: Lilu's `readChain` finds the first route's 5-byte
+  `E9` jmp in the prologue and refuses to build a second trampoline over it
+  — `patcher: previous plugin had short jump type on a multiroute function,
+  this is not allowed`. 2km added a `getPDEValue` hook that 2if had routed
+  since boot 71 and boot 85 panicked at kext load, before any measurement.
+  A new transform on an already-hooked function goes **inside the existing
+  hook**, not beside it. [2kn]
 - vtable dumps: **call offset = dump offset − 0x10** (the address point is
   symbol + 0x10). A *non-virtual* call through a vtable **symbol** uses dump
   offsets directly. [2gp]

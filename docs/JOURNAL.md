@@ -15412,3 +15412,58 @@ a *stripped* address, `getPTEValue` (0xbe9ba2c) is next.
 | `L1` still `BAD` | the hook did not reach this PDE; check `rbgpu-pdv` `calls`/`fixed` |
 
 Build `79A28A81`. New note `rbgpu-pdv`. New boot-arg `-rbgpupdeenc`.
+
+## 2kn (2026-10-20) — boot 85 panicked: getPDEValue was already routed
+
+Boot 85 never measured anything. It panicked at kext load:
+
+```
+panic(cpu 2 caller 0xffffff801601645e): Lilu
+  patcher: previous plugin had short jump type on a multiroute function,
+  this is not allowed
+  as.vit9696.Lilu : KernelPatcher::routeMultiple + 0x1e
+  com.rembrandtgpu.plugin : RGPU::processX6000 + 0xe4d
+```
+
+Build UUID `79A28A81` in the backtrace, so this is the 2km build. Uptime
+5.53 s. The user recovered by adding `-rbgpuoff`.
+
+**Cause: 2km routed a function 2if has routed since it was written.**
+`__ZN26AMDRadeonX6000_AMDGFX10VMM11getPDEValueE15eAMD_VMPT_LEVELy` is in
+`rbgpu_route_vmid_2if`'s two-request array (gated on `-rbgpuringprobe`,
+which has been in boot-args throughout). 2km added a second
+`RouteRequest` for the same symbol from `rbgpu_route_pdefix_2ki`, which
+runs later in `processX6000`. Lilu's `readChain` found 2if's 5-byte `E9`
+jmp sitting in the prologue and panics rather than trampolining over a
+route it cannot unwind.
+
+Nothing about the 2km *hypothesis* is touched by this. The defect boot
+84's walk named — `getPDEValue` returning `0x20000000fb016001`, an
+address below the carve-out — is unchanged, and so is the correction.
+What was wrong was the delivery.
+
+**The fix: one route, two experiments.** `hooked_getPDEValue_2km` is gone;
+its body is now `rbgpu_pdeenc_apply_2km(level, v)`, called from the tail of
+`hooked_getPDEValue_2if` after 2if's own bookkeeping has recorded what
+Apple computed. So `rbgpu-vmid`'s `L0/L1` first/last values still report
+Apple's values, not corrected ones, and `rbgpu-pdv` reports the
+correction. `g_rb_2km_hooked` is set from 2if's route result.
+
+**Consequence worth stating: `-rbgpupdeenc` now depends on
+`-rbgpuringprobe`.** Without it 2if does not route, so 2km cannot fire and
+`rbgpu-pdv` reads `hk=0`. `-rbgpuringprobe` is in and has been for many
+boots, so this costs nothing today, but removing it silently disarms the
+PDE correction.
+
+A whole-file sweep for mangled symbols appearing twice now comes back
+clean: the only duplicate is
+`AMDGraphicsAccelerator::start`, once as a `solveSymbol` for the 2cn byte
+patch and once as a route — not a double route.
+
+Rule added to docs/RULES.md: grep the mangled symbol across the plugin before
+adding a route; a new transform on an already-hooked function goes inside
+the existing hook.
+
+Build `309F09D1-AEA4-331D-844F-B42D551B3196`. Boot 85 is void; the next
+armed boot re-runs the 2km test with the pre-registered outcome table of
+the 2km entry unchanged.
