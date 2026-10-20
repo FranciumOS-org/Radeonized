@@ -227,8 +227,8 @@ anything, and log it when it is not.
 -rbgpurlcsub                                 what makes the RLC autoload COMPLETE
 -rbgpunocgcg                                 CGCG off - takes, but NOT a fix (2jv)
 -rbgpumewatch                                the timed CP/RLC/GFXOFF sample banks
--rbgpuvramadj                                2kr: stop adjustVRAMAddress stripping
-                                             vram_base_offset inside mapVMPT
+-rbgpuvramadj                                2ks: THE HALT FIX - mc2pa on
+                                             adjustVRAMAddress inside mapVMPT
 ```
 
 `-rbgpunocgcg` is IN but is **NOT a fix** (2jv). It writes
@@ -374,7 +374,65 @@ It is what broke the GPU-restart loop.
 - 2gh: "the second engine to ask" and "a duplicate create on instance 0" are
   the same event on this chip and nothing separates them.
 
-## Where the work stands
+## THE CP HALT IS FIXED (2ks, boot 89, 2026-10-20)
+
+Everything below this heading was written while the halt was the
+frontier. It is still the evidence trail and still accurate as history,
+but **the hang it describes is gone** and several of its open questions
+are closed by the fix. Read this section first.
+
+**The fix is one addition**, in `hooked_adjustVRAM_2kr`
+(`-rbgpuvramadj`): `AMDHWMemory::adjustVRAMAddress` returns
+`mc - vram_start`, and the GPUVM walker needs
+`mc - vram_start + vram_base_offset` (`amdgpu_gmc_vram_mc2pa`). Applied
+only to calls from inside `AMDHWVMContext::mapVMPT`, 147 of 147 in boot
+89, `nostrip=0 nofb=0`.
+
+**The chain it closed:** `allocVMBlock` hands out a page-table block as
+an MC address -> `mapVMPT` strips the MC base through
+`adjustVRAMAddress` -> `getPDEValue(level, 0)` adds flags only -> the
+entry carries a carve-out-relative address short by `0x7_8000_0000` ->
+the walk fails -> CPF cannot fetch the IB -> the CP's engines park at
+`CP_ME_CNTL = 0x15000000` (the power-on value, not a write) -> the
+timestamp never retires -> `resetHardwareAndReplay` waits forever ->
+WindowServer blocks on its mutex -> the machine freezes.
+
+**Boot 89, every indicator flipped at once:**
+
+```
+rbgpu-mew   = n=24 NEVER HALTED in 0.5-12s
+rbgpu-mew2  = n=60 NO TRANSITION in 6.5-9.5s (ok=59 bad=-1)
+rbgpu-cph   = NO HALT SAMPLE - the sweep never latched
+rbgpu-ring  = vmf=0 me=0 cps=0 grbm=3028, r==w at all three phases,
+              w advancing 0x500 -> 0x880
+rbgpu-fault = c=0 f=0 r=0 o=0 fw=0
+rbgpu-fence = seq=8, page holds 0xa
+```
+
+Five consecutive boots had halted at 8835-8947 ms. `vmfc=1ffc` says
+fault reporting is still fully enabled, so `vmf=0` is a chip reporting
+no fault. **Apple's MMHUB hub-1 phantom is gone too** (`fw=0`), so 2ht
+was wrong to call it an independent defect - it was downstream of the
+fault stream. 2hz's fence count went 6 -> 10 against `seq=8`, so the
+"stops partway" of 2hz is gone. And the user logged in and got
+**artifacts instead of a freeze**.
+
+**2em and 2ki are retroactively explained.** Both were undoing this one
+subtraction at a single downstream site, after the fact - which is why
+2ki was "necessary and not sufficient" and why its 2.9 s correction
+never helped an 8.9 s fetch. One function, three symptoms, patched at
+the symptoms since 2em. They are now probably redundant; removing them
+is its own experiment.
+
+**THE NEW FRONTIER: the artifacts.** The GPU executes and writes pixels;
+where it writes them is wrong. Tiling/swizzle, surface layout or DCN -
+a rendering problem, the first this project has had. Nothing below
+addresses it.
+
+Not claimed: that nothing else is wrong, that the boot survives past the
+capture, or that the artifacts are unrelated to the page tables. n=1.
+
+## Where the work stands (as of the halt, kept as history)
 
 `docs/HANDOFF.md` is authoritative and current. In one paragraph: Apple's
 Navi 21 stack runs on the 680M with the chip's own yellow_carp firmware;
