@@ -7963,7 +7963,7 @@ static int      g_rb_2kr_on     = -1;
 // call from outside them is RECORDED as an offset from adjustVRAMAddress
 // itself, so the next out-of-scope site names itself instead of being
 // guessed at (2ko's lesson).
-#define RB_2KR_SCOPES 2
+#define RB_2KR_SCOPES 3
 static mach_vm_address_t g_rb_2kr_lo[RB_2KR_SCOPES];
 static mach_vm_address_t g_rb_2kr_hi[RB_2KR_SCOPES];
 static uint32_t g_rb_2kr_hit[RB_2KR_SCOPES];
@@ -8075,10 +8075,10 @@ void rbgpu_vramadj_flush_2kr(void) {
     char n[320];
     snprintf(n, sizeof(n),
              "hk=1 on=%d calls=%u inmap=%u fixed=%u nostrip=%u nofb=%u | "
-             "map=%u asg=%u | first %llx -> %llx -> %llx",
+             "map=%u asg=%u mes=%u | first %llx -> %llx -> %llx",
              g_rb_2kr_on, g_rb_2kr_calls, g_rb_2kr_inmap, g_rb_2kr_fixed,
              g_rb_2kr_nostrip, g_rb_2kr_nofb,
-             g_rb_2kr_hit[0], g_rb_2kr_hit[1],
+             g_rb_2kr_hit[0], g_rb_2kr_hit[1], g_rb_2kr_hit[2],
              g_rb_2kr_in, g_rb_2kr_out, g_rb_2kr_new);
     size_t at = strlen(n);
     for (uint32_t i = 0; i < g_rb_2kr_out_n && at < sizeof(n) - 40; i++) {
@@ -8095,6 +8095,12 @@ void rbgpu_vramadj_flush_2kr(void) {
     }
     rbgpu_nvram_note("rbgpu-adj", n);
     rbgpu_log("2kr: %s", n);
+    rbgpu_log("2kw: `mes>0` means the MAP_PROCESS packet now carries a "
+              "page-table base the walker can follow. VMID 10 is handed out "
+              "by the MES, not by AMDHWVMM::assignVMID - which is why "
+              "`vmids` has only ever shown 1/2/3 and why correcting "
+              "assignVMID could not reach it. The test is whether "
+              "`sa0093b va=401400000 v10` is gone from rbgpu-fault.");
     rbgpu_log("2ku: `asg>0` means assignVMID's page-directory address is now "
               "corrected at the source, for EVERY vmid, before any invalidate "
               "is prepared - so rbgpu-pde's `fixed` should fall to 0 with "
@@ -8142,11 +8148,17 @@ static void rbgpu_route_vramadj_2kr(KernelPatcher &patcher, size_t id,
     static const char *kScopeLo[RB_2KR_SCOPES] = {
         "__ZN29AMDRadeonX6000_AMDHWVMContext7mapVMPTEP12AMD_VMPT_CTL15eAMD_VMPT_LEVELjyyy",
         "__ZN23AMDRadeonX6000_AMDHWVMM10assignVMIDEP30AMDRadeonX6000_IAMDHWVMContextRjP30AMDRadeonX6000_AMDAccelChannelPP12IOAccelEventPb",
+        // 2kw: named by boot 92's own measurement - `o0 +3b2d9 n=1` resolved
+        // to 0xbe8cb90 + 0x3b2d9 = 0xbec7e69, inside this function, where
+        // `movq %rax, 0x8(%rbx)` writes the adjusted address into the
+        // PM4_MES_MAP_PROCESS packet as the process's page-table base.
+        "__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel20fillMapProcessPacketEP19PM4_MES_MAP_PROCESSyyjjj",
     };
     // the symbol that immediately follows each, as its end bound
     static const char *kScopeHi[RB_2KR_SCOPES] = {
         "__ZN29AMDRadeonX6000_AMDHWVMContext9unmapVMPTEP12AMD_VMPT_CTL15eAMD_VMPT_LEVELjyyy",
         "__ZN23AMDRadeonX6000_AMDHWVMM17getContextForVMIDEj16eAMD_VM_HUB_TYPE",
+        "__ZN35AMDRadeonX6000_AMDGFX10HIQHWChannel22fillMapProcessVMPacketEP22PM4_MES_MAP_PROCESS_VM",
     };
     for (unsigned i = 0; i < RB_2KR_SCOPES; i++) {
         g_rb_2kr_lo[i] = patcher.solveSymbol(id, kScopeLo[i], address, size);
@@ -8170,10 +8182,12 @@ static void rbgpu_route_vramadj_2kr(KernelPatcher &patcher, size_t id,
         id, "__ZN26AMDRadeonX6000_AMDHWMemory17adjustVRAMAddressEy",
         address, size);
     patcher.clearError();
-    rbgpu_log("2ku: scopes mapVMPT=%llx..%llx assignVMID=%llx..%llx self=%llx "
-              "(a zero pair means that site is NOT corrected this boot)",
+    rbgpu_log("2kw: scopes mapVMPT=%llx..%llx assignVMID=%llx..%llx "
+              "fillMapProcess=%llx..%llx self=%llx (a zero pair means that "
+              "site is NOT corrected this boot)",
               (unsigned long long)g_rb_2kr_lo[0], (unsigned long long)g_rb_2kr_hi[0],
               (unsigned long long)g_rb_2kr_lo[1], (unsigned long long)g_rb_2kr_hi[1],
+              (unsigned long long)g_rb_2kr_lo[2], (unsigned long long)g_rb_2kr_hi[2],
               (unsigned long long)g_rb_2kr_self);
 }
 
