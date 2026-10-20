@@ -11052,6 +11052,119 @@ static void rbgpu_ibdump_2kc(void) {
     md->release();
 }
 
+// ---------------------------------------------------------------------------
+// 2kk (2026-10-20): walk the faulting VA through the CORRECTED base.
+//
+// Boot 83 settled 2kj's question: `v3 f=1 ... v3 fb015000->87b015001`. VMID 3
+// came through `prepareVMInvalidateRequest` exactly once, we corrected its
+// page-directory base to precisely the intended value - and the CP still
+// faults at `0x4_0030_0000` (`ib1=400300000`, `vmf=3009bb`, unchanged).
+//
+// So the base was necessary and is not sufficient, which is what the reviewer
+// predicted before the boot: Linux adds `vm_manager.vram_base_offset` to
+// every PDE **and** PTE that points at VRAM (`amdgpu_vm_bo_update`), so
+// Apple's page-table writer plausibly has the same gap one level down.
+//
+// This walks it and reports each level raw. Depth and window come from the
+// context's own registers; the VA comes from `CP_IB1_BASE` latched at the
+// halt and the base from the value we actually wrote - nothing hardcoded
+// (2cy).
+//
+// A level is called BAD only on a stated test: VALID bit clear, or a VRAM
+// address that does not carry `vram_base_offset`. Each level prints its raw
+// entry either way, so a level that looks fine is visible as fine.
+static void rbgpu_pdwalk_2kk(void *obj, uint32_t (*resolve)(void *, uint64_t),
+                             uint32_t (*rd)(void *, uint32_t)) {
+    char n[416];
+    uint64_t va   = g_rb_2kf_ib1_va;        // CP_IB1_BASE at the halt
+    uint64_t base = g_rb_2kj[3].now;        // the corrected v3 base we wrote
+    if (va == 0 || base == 0) {
+        snprintf(n, sizeof(n),
+                 "SKIP va=%llx base=%llx - one is zero, so there is nothing "
+                 "to walk and this says nothing about the tables",
+                 va, base);
+        rbgpu_nvram_note("rbgpu-pdw", n);
+        return;
+    }
+    if (g_rb_2ed_fb_off == 0) {
+        rbgpu_nvram_note("rbgpu-pdw", "SKIP: FB_OFFSET unknown");
+        return;
+    }
+    const uint64_t vbo = static_cast<uint64_t>(g_rb_2ed_fb_off) << 24;
+
+    // Context 3's own window and depth, read not assumed.
+    uint32_t s_lo  = rd(obj, resolve(obj, ((0x1687ull + 2 * 3) << 32) | 0xB));
+    uint32_t cntl  = rd(obj, resolve(obj, ((0x15FCull + 3) << 32) | 0xB));
+    uint64_t start = static_cast<uint64_t>(s_lo) << 12;
+    unsigned depth = (cntl >> 1) & 0x3u;    // GCVM_CONTEXT*_CNTL PAGE_TABLE_DEPTH
+
+    uint64_t off = (va >= start) ? (va - start) : 0;
+    unsigned i1  = static_cast<unsigned>((off >> 21) & 0x1FFu);   // 2 MB stride
+    unsigned i0  = static_cast<unsigned>((off >> 12) & 0x1FFu);
+
+    int w = snprintf(n, sizeof(n),
+                     "va=%llx base=%llx start=%llx depth=%u off=%llx i1=%u i0=%u",
+                     va, base, start, depth, off, i1, i0);
+    size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
+
+    // Level 1: the directory at the corrected base.
+    auto read_entry = [](uint64_t phys, unsigned idx, uint64_t *out) -> bool {
+        auto md = IOMemoryDescriptor::withPhysicalAddress(phys & ~0xFFFULL,
+                                                          0x1000,
+                                                          kIODirectionIn);
+        if (!md) return false;
+        IOMemoryMap *mp = md->createMappingInTask(kernel_task, 0,
+                                       kIOMapAnywhere | kIOMapInhibitCache);
+        if (!mp) { md->release(); return false; }
+        auto q = reinterpret_cast<volatile uint64_t *>(mp->getVirtualAddress());
+        *out = q[idx & 0x1FFu];
+        mp->release();
+        md->release();
+        return true;
+    };
+
+    uint64_t pde = 0;
+    if (!read_entry(base, i1, &pde)) {
+        snprintf(n + at, sizeof(n) - at, " | L1 MAP FAILED");
+        rbgpu_nvram_note("rbgpu-pdw", n);
+        return;
+    }
+    uint64_t pde_addr = pde & 0x0000FFFFFFFFF000ULL;
+    bool pde_v   = (pde & 1) != 0;
+    bool pde_vbo = (pde_addr >= vbo);
+    at += static_cast<size_t>(snprintf(n + at, sizeof(n) - at,
+            " | L1[%u]=%llx v=%d a=%llx %s", i1, pde, pde_v ? 1 : 0, pde_addr,
+            !pde_v ? "BAD:no VALID" : (!pde_vbo ? "BAD:no vram_base_offset" : "ok")));
+
+    if (pde_v && at < sizeof(n) - 80) {
+        uint64_t l0 = pde_addr;
+        if (!pde_vbo) { l0 += vbo; }   // read it where it SHOULD be
+        uint64_t pte = 0;
+        if (read_entry(l0, i0, &pte)) {
+            uint64_t pte_addr = pte & 0x0000FFFFFFFFF000ULL;
+            bool pte_v   = (pte & 1) != 0;
+            bool pte_sys = (pte & (1ull << 1)) != 0;   // AMDGPU_PTE_SYSTEM
+            bool pte_vbo = (pte_addr >= vbo);
+            snprintf(n + at, sizeof(n) - at,
+                     " | L0[%u]@%llx=%llx v=%d sys=%d a=%llx %s",
+                     i0, l0, pte, pte_v ? 1 : 0, pte_sys ? 1 : 0, pte_addr,
+                     !pte_v ? "BAD:no VALID"
+                            : (pte_sys ? "ok(system)"
+                                       : (!pte_vbo ? "BAD:no vram_base_offset"
+                                                   : "ok")));
+        } else {
+            snprintf(n + at, sizeof(n) - at, " | L0 MAP FAILED @%llx", l0);
+        }
+    }
+    rbgpu_nvram_note("rbgpu-pdw", n);
+    rbgpu_log("2kk: %s", n);
+    rbgpu_log("2kk: a BAD level names the fix site - no VALID means Apple's "
+              "encode omits bit 0 there, no vram_base_offset means it omits "
+              "the offset, and either one is getPDEValue (0xbe9b9de) or "
+              "getPTEValue (0xbe9ba2c). All levels ok would mean the tables "
+              "are right and the fault is something else entirely.");
+}
+
 static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     if (g_rb_2hw_on < 0) {
         g_rb_2hw_on = checkKernelArgument("-rbgpuringdump") ? 1 : 0;
@@ -13058,6 +13171,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
         uint32_t rp = rd(obj, resolve(obj, RB_2HK_CP_RB0_RPTR));
         uint32_t wp = rd(obj, resolve(obj, RB_2HK_CP_RB0_WPTR));
         rbgpu_ringdump_2hw(ring_va, rp, wp);
+        if (phase == 0) { rbgpu_pdwalk_2kk(obj, resolve, rd); }   // 2kk
     }
 
     // The comparison the probe exists for, stated as a question because a
