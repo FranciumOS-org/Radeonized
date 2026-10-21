@@ -17541,3 +17541,33 @@ testable one at a time rather than blanket.
 
 Not claimed: that mode 22 or 27 is the defect, or that `-rbgpulinear` is or
 is not still earning its place. The second needs the screen, not a note.
+
+## 2ln (boot 104, the screen) — TWO SEPARATE PROBLEMS, confirmed
+
+User's report of boot 104, with `-rbgpulinear` OUT: "Artifacts are there on
+widget and etc again but text is same".
+
+So, measured on the screen rather than inferred:
+
+1. **`-rbgpulinear` still earns its place.** The widget/Dock/chrome artifacts
+   it fixed in boot 98 come straight back when it is removed, on a chip that
+   now has the halt fixed and zero VM faults. Its ~80 % was not an artefact
+   of the broken boot it was first measured in. It goes back IN.
+2. **The text is unchanged by it, in either direction.** Boot 103 (all client
+   resources forced to `m0`) and boot 104 (190 of 4788 tiled) render glyphs
+   identically scrambled.
+
+**These are two different defects, and only one of them is layout.** Every
+layout intervention this project has made - kernel chooser, kernel
+`getSurfaceInfo2`, rotation remap, and the natural per-resource modes - moves
+the widget/chrome class and leaves the text class untouched. The text defect
+is not a swizzle mode, on either side of the kernel boundary.
+
+That retires the whole layout line for the text, and with it 2lm: forcing
+`DetermineSwizzleMode` to LINEAR in userspace would be a fifth swing at a
+parameter already shown not to matter for glyphs. It stays built and
+unarmed, and is no longer the next step.
+
+Boot 104 also re-dated the 2ld finding: what `-rbgpulinear` fixes and what it
+does not are now measured on a healthy chip, which no earlier boot could
+claim.
