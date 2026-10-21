@@ -29,8 +29,11 @@
 #import <objc/runtime.h>
 #import <stdatomic.h>
 
-static int gLog = 0;
+static int gLog = 0, gAnyUsage = 0;
 static atomic_long gSwapped, gFellThrough;
+// Why a descriptor the law flagged was declined - so that a run which fixes
+// nothing still says what the application actually asked for.
+static atomic_long gDeclUsage, gDeclFormat, gDeclStruct, gLawClean;
 static IMP gOrigNewTexture;
 
 #define LOG(fmt, ...) do { if (gLog) fprintf(stderr, "iosurftex: " fmt "\n", ##__VA_ARGS__); } while (0)
@@ -57,17 +60,21 @@ static bool lawPredictsFailure(id<MTLDevice> dev, MTLTextureDescriptor *d, size_
     return sa.align == 65536 && sa.size > pixels;
 }
 
-static bool qualifies(MTLTextureDescriptor *d)
+static bool structureOk(MTLTextureDescriptor *d)
 {
     return d.textureType == MTLTextureType2D
         && d.mipmapLevelCount == 1
         && d.arrayLength == 1
         && d.sampleCount == 1
-        && d.depth == 1
-        // An IOSurface-backed texture cannot be a render target or be written by
-        // a shader on this driver; those paths are not the CPU-upload path the
-        // law is about anyway.
-        && (d.usage & ~(MTLTextureUsageShaderRead)) == 0;
+        && d.depth == 1;
+}
+
+// An IOSurface-backed texture is served for a read-only sampled texture, which
+// is what a glyph atlas is. RBGPU_IOSURFTEX_ANYUSAGE=1 lifts this if a real
+// application turns out to ask for more.
+static bool usageOk(MTLTextureDescriptor *d)
+{
+    return gAnyUsage || (d.usage & ~(MTLTextureUsageShaderRead)) == 0;
 }
 
 static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
@@ -75,8 +82,39 @@ static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
     id (*orig)(id, SEL, MTLTextureDescriptor *) = (void *)gOrigNewTexture;
     uint32_t cc; size_t bpe;
 
-    if (!desc || !qualifies(desc) || !fourccFor(desc.pixelFormat, &cc, &bpe)) goto fallthrough;
-    if (!lawPredictsFailure((id<MTLDevice>)self, desc, bpe)) goto fallthrough;
+    if (!desc) goto fallthrough;
+
+    // The law is evaluated first, with a nominal 4 bytes per element when the
+    // format is one we do not serve, so that declines can be counted against
+    // the descriptors that would actually have been corrupted.
+    {
+        bool known = fourccFor(desc.pixelFormat, &cc, &bpe);
+        if (!lawPredictsFailure((id<MTLDevice>)self, desc, known ? bpe : 4)) {
+            atomic_fetch_add(&gLawClean, 1);
+            goto fallthrough;
+        }
+        if (!structureOk(desc)) {
+            atomic_fetch_add(&gDeclStruct, 1);
+            if (gLog >= 2) LOG("DECLINED(structure) %lux%lu type=%lu mips=%lu",
+                (unsigned long)desc.width, (unsigned long)desc.height,
+                (unsigned long)desc.textureType, (unsigned long)desc.mipmapLevelCount);
+            goto fallthrough;
+        }
+        if (!usageOk(desc)) {
+            atomic_fetch_add(&gDeclUsage, 1);
+            if (gLog >= 2) LOG("DECLINED(usage) %lux%lu usage=0x%lx fmt=%lu",
+                (unsigned long)desc.width, (unsigned long)desc.height,
+                (unsigned long)desc.usage, (unsigned long)desc.pixelFormat);
+            goto fallthrough;
+        }
+        if (!known) {
+            atomic_fetch_add(&gDeclFormat, 1);
+            if (gLog >= 2) LOG("DECLINED(format) %lux%lu fmt=%lu usage=0x%lx",
+                (unsigned long)desc.width, (unsigned long)desc.height,
+                (unsigned long)desc.pixelFormat, (unsigned long)desc.usage);
+            goto fallthrough;
+        }
+    }
 
     {
         // bytesPerRow must be set explicitly. Left to IOSurface's own default a
@@ -109,6 +147,17 @@ fallthrough:
     return orig(self, _cmd, desc);
 }
 
+// Printed once per process at exit, so a single run answers whether this
+// application's textures come through here at all.
+static void report(void)
+{
+    fprintf(stderr, "iosurftex: pid %d summary: swapped=%ld  declined(usage)=%ld "
+            "declined(format)=%ld declined(structure)=%ld  law-clean=%ld  fellthrough=%ld\n",
+            getpid(), atomic_load(&gSwapped), atomic_load(&gDeclUsage),
+            atomic_load(&gDeclFormat), atomic_load(&gDeclStruct),
+            atomic_load(&gLawClean), atomic_load(&gFellThrough));
+}
+
 static void installOnce(id<MTLDevice> dev)
 {
     static atomic_flag done = ATOMIC_FLAG_INIT;
@@ -120,7 +169,9 @@ static void installOnce(id<MTLDevice> dev)
 
     gOrigNewTexture = method_getImplementation(m);
     method_setImplementation(m, (IMP)swizzledNewTexture);
-    LOG("installed on %s (device \"%s\")", class_getName(cls), dev.name.UTF8String);
+    atexit(report);
+    LOG("pid %d installed on %s (device \"%s\")", getpid(), class_getName(cls),
+        dev.name.UTF8String);
 }
 
 // Interposed, not swizzled, so the driver bundle is certainly loaded by the time
@@ -149,6 +200,9 @@ static const struct { const void *replacement, *replacee; } gInterposers[] = {
 __attribute__((constructor)) static void init(void)
 {
     const char *l = getenv("RBGPU_IOSURFTEX_LOG");
-    gLog = l && atoi(l) != 0;
-    LOG("loaded");
+    gLog = l ? atoi(l) : 0;
+    const char *a = getenv("RBGPU_IOSURFTEX_ANYUSAGE");
+    gAnyUsage = a && atoi(a) != 0;
+    LOG("loaded in pid %d (%s)%s", getpid(), getprogname(),
+        gAnyUsage ? " anyusage" : "");
 }
