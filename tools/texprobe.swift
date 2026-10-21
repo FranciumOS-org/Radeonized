@@ -270,7 +270,10 @@ for w in [256, 1000] {
     let (want, _) = glyphBitmap(w, h)
     let ink = want.filter { $0 != 0xff000000 }.count
     print("reference w=\(w) h=\(h): \(ink) non-background pixels")
-    for p in paths where p.name != "linear-buffer-tex" {
+    // `replace(region:)` is illegal on a .private texture - those paths are
+    // uploaded by blit instead. Calling replace on one segfaults, which is
+    // what truncated 2mf's first run.
+    for p in paths where p.name != "linear-buffer-tex" && !p.name.hasPrefix("private-") {
         guard let (t, _) = p.make(w, h, false) else { print("  \(p.name) UNSUPPORTED"); continue }
         // upload the glyph bitmap through this path's own mechanism
         want.withUnsafeBytes { src in
@@ -287,7 +290,18 @@ for w in [256, 1000] {
         let same = got1 == got2
         print(String(format: "  %-22s w=%4d  rows-wrong now=%2d later=%2d  stable=%@",
                      (p.name as NSString).utf8String!, w, bad1, bad2, same ? "YES" : "NO"))
-        if bad1 > 0 { print("      now:   \(mv1.joined(separator: " "))") }
+        if bad1 > 0 {
+            print("      now:   \(mv1.joined(separator: " "))")
+            // rule 16: the instrument is a suspect. The synthetic matrix says
+            // this very path round-trips exactly, so before reading a glyph
+            // mismatch as a hardware result, show the actual pixels.
+            var shown = 0
+            for i in 0..<(w * h) where got1[i] != want[i] && shown < 6 {
+                print(String(format: "      px (%d,%d) got=%08x want=%08x",
+                             i % w, i / w, got1[i], want[i]))
+                shown += 1
+            }
+        }
         if bad2 > 0 && !same { print("      later: \(mv2.joined(separator: " "))") }
     }
 }

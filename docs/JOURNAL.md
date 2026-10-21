@@ -18974,3 +18974,97 @@ nothing kernel-side.
 
 **The glyph measurement must be taken on a boot with the overrides removed.**
 Until then nothing from this phase is evidence about anything.
+
+---
+
+## 2mg (2026-10-21, boot 111, baseline): the defect is CONTENT-DEPENDENT, not layout-dependent
+
+Boot 111, UUID `A3DDC2C8`, overrides removed (`pkrs_arg = pipes_arg = -1`),
+`GB_ADDR_CONFIG` reported as the chip has it. A true baseline.
+`tools/texprobe.swift` run to completion (the segfault was mine -
+`replace(region:)` is illegal on a `.private` texture; those paths are now
+excluded from the glyph phase).
+
+### The synthetic matrix at baseline - sharper than 2lo
+
+```
+bgra8 w=256 managed-replace-full   OK
+bgra8 w=256 managed-replace-tiles  BAD 12288/12288 moved=8192 d(0,32)x4096 d(0,-32)x4096
+bgra8 w=256 private-blit-full/tiles OK
+bgra8 w=256 iosurface              OK
+```
+
+Six BAD out of the whole matrix, and **only `managed-replace-tiles`**.
+2lo's `y ^ 32` reproduces exactly - but `managed-replace-**full**` is
+**clean**. So the synthetic defect is specific to `replace(region:)` on
+**sub-rectangles**, not to `replace` as such. 2lo and 2lp both spoke of
+"replaceRegion" without that distinction.
+
+### The glyph phase - and the finding
+
+Real CoreText text, same upload paths, compared against the exact buffer
+uploaded:
+
+```
+                        w=256                    w=1000
+managed-replace-full    46/48 rows wrong         48/48 rows wrong
+managed-replace-tiles   46/48 rows wrong         48/48 rows wrong
+iosurface                0/48  CLEAN              0/48  CLEAN
+```
+
+`iosurface` being clean at both widths is the control that makes the rest
+readable: the reference bitmap, the comparison and the readback shader are
+all sound, so the mismatches are real.
+
+**`managed-replace-full` is CLEAN for synthetic content and WRONG for glyph
+content, at the same width, same path, same texture type.** The only
+difference is what the pixels contain.
+
+And the failing pixels are not displaced content:
+
+```
+px (0,0) got=00000000 want=ff000000
+px (1,0) got=00000000 want=ff000000      (w=1000, managed-replace-full)
+```
+
+**Alpha zero.** Not a wrong-but-valid pixel from elsewhere - *absent*
+content. Where glyph rows do carry ink, it appears at coordinates the
+reference has none (`px (118,0) got=ff7a7a7a want=ff000000`), and
+`compareRows` finds **no** reference row that matches exactly (`0<-?`), so
+this is not a row permutation either.
+
+### What distinguishes the two contents
+
+The synthetic pattern is `(tag<<24) | (y<<12) | x` - **every pixel differs
+from its neighbours**, maximum entropy. The glyph bitmap is overwhelmingly a
+single repeated value, `0xff000000`, with thin antialiased text on it -
+**highly compressible**.
+
+That is the signature of a **colour-compression (DCC) metadata** problem,
+not a tiling problem: uniform regions are exactly what DCC encodes as "one
+clear value" in metadata, and uniform regions are exactly what comes back as
+zeros here. It would also explain the whole of 2me - every geometry lever
+failed because geometry was never the variable - and it fits the user's own
+observation, where re-rendering (which rewrites the metadata) repairs the
+image.
+
+Supporting, not conclusive: `rbgpu-surf` has reported `dcc calls=0` with
+`hk=1` since 2ll - the kernel's DCC surface path is hooked and **never
+called** - while the hardware may still consult DCC metadata for these
+surfaces.
+
+### What did NOT reproduce
+
+`stable=YES` on every case. The 2 s idle re-read is byte-identical to the
+immediate one, so the user's unfocused/refocused recovery did **not**
+reproduce in texprobe. Either it needs the compositor rather than a direct
+readback, or it needs a longer or different idle. The focus effect remains
+unexplained and is still the best clue for the *recoverable* class.
+
+### Next
+
+Test the content hypothesis directly, with no boot: upload bitmaps of
+**graded entropy** through `managed-replace-full` - solid colour, two
+colours, coarse blocks, fine noise - and find where it breaks. If solid
+fails and noise passes, the defect is compression, and the search moves to
+DCC metadata, which is kernel-reachable in a way userspace layout never was.
