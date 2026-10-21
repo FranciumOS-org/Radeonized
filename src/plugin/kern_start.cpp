@@ -8390,6 +8390,9 @@ static struct rb_2la_s g_rb_2la[RB_2LA_N];
 // 2la shipped, and `rot=0` says so.
 static uint32_t g_rb_2lb_on  = 0;
 static uint32_t g_rb_2lb_hit = 0;
+// 2ld: see the remap below.
+static uint32_t g_rb_2ld_on  = 0;
+static uint32_t g_rb_2ld_hit = 0;
 
 static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
     uint32_t r = orig_swizmode_2la ? orig_swizmode_2la(mgr, in) : 0;
@@ -8399,6 +8402,12 @@ static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
         rbgpu_log("2lb: rotation remap %s",
                   g_rb_2lb_on == 1 ? "ARMED 64KB_R_X -> 64KB_S_X"
                                    : "OFF (observe only)");
+    }
+    if (g_rb_2ld_on == 0) {
+        g_rb_2ld_on = checkKernelArgument("-rbgpulinear") ? 1u : 2u;
+        rbgpu_log("2ld: linear force %s",
+                  g_rb_2ld_on == 1 ? "ARMED - every surface ADDR_SW_LINEAR"
+                                   : "OFF");
     }
     if (in && g_rb_2la_n < RB_2LA_N) {
         auto p32 = reinterpret_cast<volatile uint32_t *>(in);
@@ -8424,6 +8433,16 @@ static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
         g_rb_2lb_hit++;
         return 25;
     }
+    // 2ld: force ADDR_SW_LINEAR. The decisive test of the whole swizzle
+    // line: linear has NO swizzle, so a CPU writer and a GPU reader agree
+    // trivially. If the glyphs and the Wikipedia image come back correct,
+    // the fault is a CPU/GPU disagreement about tiling and the direction of
+    // the fix is settled. If they are still scrambled with every surface
+    // linear, swizzle is excluded ENTIRELY and the cause is elsewhere.
+    if (g_rb_2ld_on == 1 && r != 0) {
+        g_rb_2ld_hit++;
+        return 0;
+    }
     return r;
 }
 
@@ -8438,10 +8457,10 @@ void rbgpu_surf_flush_2la(void) {
     char n[352];
     int w = snprintf(n, sizeof(n),
                      "swz hk=%d calls=%u | dcc hk=%d calls=%u ok=%u | "
-                     "rot=%u remapped=%u",
+                     "rot=%u remapped=%u lin=%u forced=%u",
                      g_rb_2la_hk_swz, g_rb_2la_swz_calls,
                      g_rb_2la_hk_dcc, g_rb_2la_dcc_calls, g_rb_2la_dcc_ok,
-                     g_rb_2lb_on, g_rb_2lb_hit);
+                     g_rb_2lb_on, g_rb_2lb_hit, g_rb_2ld_on, g_rb_2ld_hit);
     size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
     for (uint32_t i = 0; i < g_rb_2la_n && at < sizeof(n) - 56; i++) {
         const struct rb_2la_s *e = &g_rb_2la[i];
