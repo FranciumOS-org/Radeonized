@@ -19998,3 +19998,64 @@ buffer blit rather than the CPU `replace()` the law is about - its usage
 includes `RenderTarget`, which is a hint in that direction. If the atlas is
 swapped and the text is still wrong, the upload path is the next thing to read,
 not the layout.
+
+## 2mt - the fix works and the app is unchanged: 2ms's inference withdrawn
+
+Boot 114, armed, the assistant launched under the interposer with the widened filter.
+The log shows the glyph atlas being served:
+
+```
+iosurftex: swapped 1024x128 fmt=10 bpr=1024  (total 1)
+iosurftex: swapped  320x832 fmt=80 bpr=1280  (total 3)
+iosurftex: swapped 1024x128 fmt=10 bpr=1024  (total 4)
+```
+
+and the remaining declines are all correct - `fmt=250` is `Depth16Unorm` and
+`type=4` is multisample, neither of which is text. The app is stable. **The
+text is unchanged.**
+
+### Withdrawn
+
+2ms said the atlas being in the failing class was "the first direct evidence
+that this defect is what makes *this application's* text unreadable". That is
+withdrawn. Being in the failing class is necessary, not sufficient, and the
+experiment that distinguishes them has now been run: the atlas is served from
+an IOSurface, the class is corrected, and nothing on screen moved.
+
+What still stands, because it was measured and not inferred: the law (2mn,
+16/16 predicted in advance, extended in 2ms to R8 and to render-target usage),
+the IOSurface result (2mo), and the fix inside our own instruments (2mp, 2ms -
+36/72 to 0/72, real CoreText glyphs 46 and 48 wrong rows to 0). Those are
+facts about this driver. What is *not* established is that this defect is what
+the user sees.
+
+The likely reading: Skia fills that atlas with a GPU render pass or a buffer
+blit, and GPU writes were correct in **every** test from 2lo onward. A texture
+that was never corrupt cannot be fixed.
+
+### The instrument that decides it
+
+The law is about one specific operation - a CPU `replaceRegion` into a
+driver-allocated tiled texture. So count them. `iosurftex` now swizzles
+`replaceRegion` on `GFXAAMD_MtlTexture` and logs the destination geometry of
+every CPU upload.
+
+A trap on the way: the class has **two** separate implementations,
+`replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:` and
+`replaceRegion:mipmapLevel:withBytes:bytesPerRow:`, and the 4-argument one is
+not a forwarder. With only the 6-argument form swizzled, `lawtest`'s 192 known
+uploads counted as **zero** - a confident wrong negative that would have been
+read as "the assistant never uploads by CPU" if it had been pointed at the assistant first.
+Rule 21 in a new costume: the counter was checked against a case known to be
+present before being believed. Both are swizzled now and `lawtest` reports
+`cpu-uploads=192`, matching its call count exactly.
+
+### What each outcome will mean
+
+- **No CPU upload into the 1024x128 R8 atlas** - the atlas is GPU-filled, was
+  never corrupted, and this entire line of work cannot fix application text.
+  The law remains a real driver bug that nothing user-visible depends on, and
+  the text cause is somewhere we have not looked.
+- **CPU uploads into it** - the atlas *is* filled the broken way, our swap
+  should have fixed it and did not, and the swap itself becomes the suspect: an
+  IOSurface-backed render-target texture may not behave as the driver expects.
