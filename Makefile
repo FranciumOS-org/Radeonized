@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe lawtest noop clean
 
 all: kext tools
 
@@ -70,6 +70,17 @@ iosurftex: $(OUT)/iosurftex.dylib
 $(OUT)/iosurftex.dylib: tools/iosurftex.m | $(OUT)
 	clang -dynamiclib -O2 -fobjc-arc -o $@ $< \
 	      -framework Metal -framework IOSurface -framework Foundation
+
+# lawtest (2mn): the law in one fast instrument - six geometries, n=12, ~1.5 s.
+lawtest: $(OUT)/lawtest
+$(OUT)/lawtest: tools/lawtest.swift | $(OUT)
+	swiftc -O $< -o $@ -framework Metal
+
+# noop-insert (2mr): an inserted dylib that does nothing, as the control for
+# "does this app refuse ANY insertion, or only ours?"
+noop: $(OUT)/noop-insert.dylib
+$(OUT)/noop-insert.dylib: tools/noop-insert.c | $(OUT)
+	clang -dynamiclib -O2 -o $@ $<
 
 # texprobe: the userspace texture-upload probe the text work is measured with.
 texprobe: $(OUT)/texprobe

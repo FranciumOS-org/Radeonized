@@ -30,6 +30,11 @@
 #import <stdatomic.h>
 
 static int gLog = 0, gAnyUsage = 0;
+// RBGPU_IOSURFTEX=0 is authoritative off - it used to be overridden by having
+// logging on, which made "off" not off. RBGPU_IOSURFTEX_INERT=1 loads and
+// interposes but never swizzles, to separate "loading this dylib breaks the
+// app" from "swizzling the device breaks the app".
+static int gEnabled = 1, gInert = 0;
 // An app launched by launchd has no terminal, so stderr goes nowhere useful.
 // RBGPU_IOSURFTEX_LOGFILE names a file every process appends to instead.
 static FILE *gLogFile;
@@ -190,15 +195,14 @@ static void installOnce(id<MTLDevice> dev)
 static id<MTLDevice> my_MTLCreateSystemDefaultDevice(void)
 {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-    if (gLog || getenv("RBGPU_IOSURFTEX") == NULL || atoi(getenv("RBGPU_IOSURFTEX")) != 0)
-        installOnce(dev);
+    if (gEnabled && !gInert) installOnce(dev);
     return dev;
 }
 
 static NSArray<id<MTLDevice>> *my_MTLCopyAllDevices(void)
 {
     NSArray<id<MTLDevice>> *a = MTLCopyAllDevices();
-    if (a.count) installOnce(a[0]);
+    if (gEnabled && !gInert && a.count) installOnce(a[0]);
     return a;
 }
 
@@ -214,11 +218,16 @@ __attribute__((constructor)) static void init(void)
     gLog = l ? atoi(l) : 0;
     const char *a = getenv("RBGPU_IOSURFTEX_ANYUSAGE");
     gAnyUsage = a && atoi(a) != 0;
+    const char *en = getenv("RBGPU_IOSURFTEX");
+    gEnabled = !en || atoi(en) != 0;
+    const char *in = getenv("RBGPU_IOSURFTEX_INERT");
+    gInert = in && atoi(in) != 0;
     const char *lf = getenv("RBGPU_IOSURFTEX_LOGFILE");
     if (lf && *lf) {
         gLogFile = fopen(lf, "a");       // every process appends; each line carries its pid
         if (gLogFile && !gLog) gLog = 1; // naming a file is asking for logging
     }
-    LOG("loaded in pid %d (%s)%s", getpid(), getprogname(),
+    LOG("loaded in pid %d (%s)%s%s%s", getpid(), getprogname(),
+        gEnabled ? "" : " DISABLED", gInert ? " INERT" : "",
         gAnyUsage ? " anyusage" : "");
 }
