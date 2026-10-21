@@ -18612,3 +18612,85 @@ ground, and it is where a `y ^ 32` - a tile-index error rather than a
 within-tile swizzle error - would live. **y5 selects the tile for a 4 KB
 block at 32 bpp**, which makes a tile-index defect the better-fitting
 hypothesis for 2lo's measurement than anything inside the pattern.
+
+---
+
+## 2mb (2026-10-21, static): the tile address assembled, and where its final XOR comes from
+
+`GFX10_GenerateTileAddresses` is `0x7ffb08c9876e..0x7ffb08c99278` (0xb0a
+bytes). The part that matters is the per-tile epilogue at
+`0x7ffb08c99107..0x7ffb08c99202`.
+
+### How a tile address is built
+
+Two parity loops over the same pattern entries 2ma decoded, one per axis:
+
+```
+; Y, from f1 (qword+2)                  ; X, from f0 (qword+0)
+c = tileY << shY                        c = tileX << shX
+for i in 0..n-1:                        for i in 0..n-1:
+    m  = pat[i].f1                          m  = pat[i].f0
+    b  = popcount(m & c) & 1                b  = popcount(m & c) & 1
+    if (m == 0) b = dflt                    if (m == 0) b = dflt
+    yp |= b << i                            xp |= b << i
+
+xp ^= yp                     ; the two axes combine by XOR
+addr  = base + ((xp << 8) ^ lowbits)
+addr ^= TERM                 ; 0x7ffb08c991e5  xorq -0x210(%rbp), %rdi
+call  tileWriter(addr, ...)  ; 0x7ffb08c99202
+```
+
+The `<< 8` places the pattern bits at address bit 8 and up, which agrees
+with 2ma: 256 B is linear, and mode 22's four pattern bits occupy bits
+8..11, the 4 KB block. The `cmovel` default - when a pattern mask is zero
+the bit is taken from a register rather than the parity - is worth knowing
+about but not yet traced.
+
+`GFX10_PartialTileCallback` (`0x7ffb08c99278`) is the other half: it clamps
+the tile rect against the surface, computes
+`src = data[0x08] + y*data[0x44] + (x << data[0x48])`, and hands the writer
+at `data[0x10]` the tile address plus `&tbl_x[x & (2^xbits-1)]` and
+`&tbl_y[y & (2^ybits-1)]`. So **within-tile position comes from the low
+coordinate bits only** - confirming 2ma's point that `y5` of a 48-row BGRA8
+surface selects the *tile*, not the offset inside it.
+
+### The final XOR term, and one suspicious instruction
+
+`-0x210(%rbp)` is built once, at `0x7ffb08c98953`:
+
+```
+al  = rec[0x02]          ; pipeInterleaveLog2   (8 for 256 B)
+cl  = rec[0x03]          ; pipesLog2            (2 on this chip)
+ecx = 1 << cl                               ; = 4
+ecx = bzhi(saved_r9d, ecx)                  ; keep low ECX bits
+eax = ecx << al
+eax = bzhi(eax, ebx)
+-0x210(%rbp) = eax
+```
+
+**`bzhi`'s second operand is a bit INDEX, and the value passed is
+`1 << pipesLog2` rather than `pipesLog2`.** AddrLib masks a pipe/bank xor
+with `(1 << pipeBits) - 1`, i.e. it keeps `pipeBits` low bits; this keeps
+`2^pipesLog2` low bits. On this chip that is 4 bits kept where 2 would be
+expected; on Navi 21 (`pipesLog2 = 4`) it would keep 16.
+
+**This is a suspicion, not a finding, and it is explicitly not claimed as
+the defect.** Two things are unresolved and either could make it correct:
+
+1. `saved_r9d` is `0xffffffff << (%rbx)`, a *mask* rather than a value, so
+   the whole expression may be constructing a mask whose semantics make the
+   `1 <<` deliberate. What `(%rbx)` holds - it comes out of
+   `ComputeMicroTileDimensionsLog2` - has not been read.
+2. The final `bzhi(eax, ebx)` clamps the result again, which could render
+   the wider mask harmless for small surfaces.
+
+Resolving (1) is the next step and it is static: read
+`ComputeMicroTileDimensionsLog2` (`0x7ffb08c98307`) and
+`ComputeBlockDimensionsLog2` (`0x7ffb08c9818a`) and establish what the two
+dwords at `(%rbx)` and `0x4(%rbx)` are. Only then is it decidable whether
+`1 << pipesLog2` is a count/log2 confusion or the intended expression.
+
+Stated plainly because the pattern has bitten repeatedly in this session: an
+instruction that *looks* like an off-by-a-log2 is exactly the kind of thing
+that reads as a smoking gun and turns out to be a misread operand. It gets
+tested, not announced.
