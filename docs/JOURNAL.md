@@ -19415,3 +19415,135 @@ predictor we have had, and it says the boot-arg is not neutral but **causal**.
 If the sweep goes clean, the ~80 % widget/chrome win `-rbgpulinear` buys has
 been paid for with the text all along, and the real fix is to make the kernel
 agree with the client rather than override it.
+
+## 2mn (boot 113) — the boot-arg test was INERT, and the defect obeys a law
+
+Boot 113, armed, UUID `A3DDC2C8` matching `build/out`, `-rbgpulinear`
+**removed**, and the kernel confirms it stopped forcing: `rbgpu-surf b=113 swz
+hk=1 calls=61 | lin=2 forced=0` against boot 112's `calls=38 forced=38`.
+
+### The test did not test what 2mm claimed
+
+The height sweep came back **bit-identical** to boot 112 — h=48 `0x2 16x6
+48x8`, h=64 `0x8 64x8`, h=96 `0x4 32x12`, h=192 `0x8 64x8`, every cell. That
+reads as a refutation and is not one:
+
+```
+rbgpu-surf before a full texprobe run:  swz calls=63
+rbgpu-surf after  a full texprobe run:  swz calls=63
+```
+
+**Hundreds of textures, zero hook calls.** The kernel's swizzle hook never
+sees a client Metal texture, so `-rbgpulinear` could not have changed one, in
+this boot or in 112. The mismatch hypothesis of 2mm is **untested**, not
+refuted, and boot 113 was spent on an experiment whose reach I had not
+checked. `forced=38` in boot 112 was 38 *display-class* surfaces and none of
+ours; I read a non-zero counter as evidence the lever was engaged. Rule 20
+again, one level out: a counter proving the hook ran is not evidence it ran on
+the thing being measured.
+
+(The UUID line in that check was also misread — a `sed -n 2p` over
+`kmutil showloaded` picked another kext's UUID. The plugin's own UUID matches.
+Rule 21.)
+
+### What boot 113 does establish, which is worth more
+
+**The layout of a client Metal texture is decided entirely in userspace.** The
+kernel is never consulted. That is a structural fact and it retroactively
+explains the whole dead end:
+
+- 2ln: boots 103 and 104 rendered glyphs identically because neither boot's
+  kernel setting ever reached a glyph surface.
+- 2me: every kernel lever — row 22/12/7, TERM `0xc00`/`0`, pipes, packers —
+  was inert for exactly the same reason.
+- `rbgpu-surf`'s 63 calls are the display/scanout class (`s9->1b`, `s0->1b`),
+  which is why kernel levers move the widget/Dock/chrome artifacts and have
+  never once moved the text.
+
+There is no kernel-side lever on client texture layout. The layout line of
+work from the kernel side was never going to reach the frontier.
+
+### 2mn — a law, predicted before measuring, 16/16
+
+2mm's candidate was stated as a rule and then tested against sixteen
+geometries whose predictions were printed **before** their measurements:
+
+```
+  w     h    align   ratio  predict  measured              verdict
+  256   16     4096   2.00x  clean    fail  0/12 (0x12)              ok
+  256   32     4096   1.00x  clean    fail  0/12 (0x12)              ok
+  256   48    65536   2.67x  FAIL     fail 11/12 (0x1  16x5  48x6)   ok
+  256   64    65536   2.00x  FAIL     fail  6/12 (0x6  64x6)         ok
+  256   96    65536   1.33x  FAIL     fail  9/12 (0x3  32x9)         ok
+  256   128   65536   1.00x  clean    fail  0/12 (0x12)              ok
+  256   192   65536   1.33x  FAIL     fail  6/12 (0x6  64x6)         ok
+  256   256   65536   1.00x  clean    fail  0/12 (0x12)              ok
+  128   48    65536   2.67x  FAIL     fail 11/12 (0x1  16x5  48x6)   ok
+  512   48    65536   2.67x  FAIL     fail 10/12 (0x2  16x4  48x6)   ok
+  1024  48    65536   2.67x  FAIL     fail 11/12 (0x1  16x5  48x6)   ok
+  64    64     4096   1.00x  clean    fail  0/12 (0x12)              ok
+  64    48     4096   1.33x  clean    fail  0/12 (0x12)              ok
+  192   48     4096   1.33x  clean    fail  0/12 (0x12)              ok
+  256   80    65536   1.60x  FAIL     fail 11/12 (0x1  16x5  48x6)   ok
+  320   64     4096   1.00x  clean    fail  0/12 (0x12)              ok
+  law held in 16/16 geometries
+```
+
+> **A CPU `replace()` is corrupted if and only if the surface is in a 64 KB
+> tiled mode (`align == 65536`) AND its footprint exceeds its pixel bytes.**
+
+Neither condition suffices alone, and the table contains the cases that prove
+it: `256x16` pads 2.00x at align 4096 and is clean; `256x128` and `256x256`
+are align 65536 at ratio 1.00 and are clean. So the defect is **Apple's 64 KB
+tiled CPU upload path for a surface that does not exactly fill its tiles.**
+
+### The align map, and why the symptom is *text*
+
+`.` = align 4096, `#` = 64 KB tiled with padding (fails), `=` = 64 KB tiled
+exact (clean):
+
+```
+  w\h      16   32   48   64   80   96  112  128  160  192  256
+  64        .    .    .    .    .    .    #    #    .    .    #
+  100       .    .    #    #    #    #    #    #    #    #    #
+  128       .    .    #    #    #    #    #    =    #    #    =
+  192       .    .    .    .    #    #    #    #    .    #    #
+  256       .    .    #    #    #    #    #    =    #    #    =
+  500       .    .    #    #    #    #    #    #    #    #    #
+  1000      .    .    #    #    #    #    #    #    #    #    #
+  1920      .    .    #    #    #    #    #    =    #    #    =
+  2560      .    .    #    #    #    #    #    =    #    #    =
+```
+
+Almost every realistic geometry is in the failing class. The clean cells are
+surfaces at most 32 rows tall, and the exact-fit column at h=128/256 for
+power-of-two widths. A text strip or text layer of ordinary height at any
+ordinary width is `#`, and 2mf's own glyph strips are both `#`:
+`256x48` 2.67x and `1000x48` 2.73x, 46 and 48 rows wrong, `stable=YES`.
+
+**This closes the symptom.** Window and layer backing stores reach the GPU as
+IOSurfaces, and the `iosurface` path has been clean in every single trial
+across 2mg, 2mh, 2mi, 2mj, 2ml and 2mn — so the desktop, the chrome and the
+images composite correctly. Glyphs go into driver-allocated textures filled by
+CPU `replace()`, which is the `#` class. An accelerated desktop with
+unreadable body text is exactly what this law predicts, and it is why the
+defect never looked like a global layout error: it is a *per-surface-class*
+error.
+
+It also fits the user's observation that an unfocused icon or iMessage image
+is scrambled and a click fixes it, while the assistant and Safari images never
+recover: a redraw re-allocates, and whether the new surface lands in the `#`
+class depends on its geometry, not on the redraw.
+
+### Next, without a boot
+
+The broken path is the CPU tiler; the GPU blit path (`private-blit-full`) and
+IOSurfaces are clean. 2lo's original reading — that forcing `ShouldUseSwBlt`
+false would route `replaceRegion` through the GPU blit engine — is therefore
+the right *shape* of fix, and 2lq/2lr established it cannot be patched in
+userspace on this macOS (stub bundle, binary only in the dyld shared cache).
+
+So the question is whether any input to that decision, or to the swizzle-mode
+choice, comes from the **kernel** — the `getHardwareInfo` buffer we already
+hook, an IORegistry property, or a user-client request. That is static
+analysis on Apple's kexts and the shared cache, no hardware needed.

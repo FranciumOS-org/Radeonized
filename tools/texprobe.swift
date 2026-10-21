@@ -708,3 +708,46 @@ for (w, h) in [(256, 16), (256, 32), (256, 48), (256, 64), (256, 96), (256, 128)
     print(String(format: "  %-5d %-4d %8d  %9d  %6d  %5.2fx  %@",
                  w, h, px, sa.size, sa.align, r, sa.size == px ? "no (linear)" : "YES"))
 }
+
+// ---------------------------------------------------------------- 2mn
+// Boot 113 removed -rbgpulinear and the height sweep came back bit-identical.
+// That is NOT a refutation of the mismatch hypothesis: rbgpu-surf read
+// calls=63 before a full texprobe run and calls=63 after, so the kernel's
+// swizzle hook never saw one of these textures. The boot-arg could not have
+// changed them. The test was inert and the hypothesis is untested.
+//
+// What it does establish is better than what it was built to test: the layout
+// of a client texture is decided entirely in userspace. So characterise the
+// userspace rule properly. 2mm's candidate law is
+//
+//     fails  <=>  align == 65536  AND  footprint > w*h*4
+//
+// which both exceptions in 2mm support - h=16 is align 4096 with ratio 2.00
+// and is clean, h=128 is align 65536 with ratio 1.00 and is clean. Put it to
+// a real test: predict every geometry BEFORE measuring it, then measure.
+print("")
+print("=== 2mn: the law, predicted first, then measured (n=12 each) ===")
+print("  law: fails <=> align 65536 AND footprint > pixels")
+print("  w     h    align   ratio  predict  measured              verdict")
+var agree = 0, total = 0
+for (w, h) in [(256, 16), (256, 32), (256, 48), (256, 64), (256, 96), (256, 128), (256, 192), (256, 256),
+               (128, 48), (512, 48), (1024, 48), (64, 64), (64, 48), (192, 48), (256, 80), (320, 64)] {
+    let px = w * h * 4
+    let sa = dev.heapTextureSizeAndAlign(descriptor: desc(.bgra8Unorm, w, h, .shared))
+    let predictFail = (sa.align == 65536) && (sa.size > px)
+    var ws: [Int] = []
+    for _ in 0..<12 {
+        let (wrong, _) = evictTrial(w, h, 0xffffffff, .none)
+        if wrong >= 0 { ws.append(wrong / w) }
+    }
+    let failed = ws.filter { $0 > 0 }.count
+    let observedFail = failed > 0
+    let ok = observedFail == predictFail
+    total += 1; if ok { agree += 1 }
+    let pred = (predictFail ? "FAIL" : "clean").padding(toLength: 7, withPad: " ", startingAt: 0)
+    let meas = ("(" + hist(ws) + ")").padding(toLength: 20, withPad: " ", startingAt: 0)
+    print(String(format: "  %-5d %-4d %6d  %5.2fx  ", w, h, sa.align, Double(sa.size) / Double(px))
+          + pred + String(format: "  fail %2d/12 ", failed) + meas
+          + (ok ? "ok" : "*** WRONG ***"))
+}
+print("  law held in \(agree)/\(total) geometries")
