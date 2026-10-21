@@ -16836,3 +16836,62 @@ five bytes (2gb); mangled name cross-checked against `nm` (2kr).
 
 Build `18EA0E63-AB04-3F6A-8E27-1372BB1A2B4B`. No new boot-arg -
 `-rbgpulinear` arms both forces.
+
+## 2lg (2026-10-20) — boot 100: client texture layout is computed in USERSPACE
+
+Two captures from the same live boot, the second after the applications
+were up:
+
+```
+early  rbgpu-res = calls=551  | rbgpu-surf = calls=26 | rbgpu-si = calls=26 forced=0 already=26 modes=00000001
+later  rbgpu-res = calls=5458 | rbgpu-surf = calls=68 | rbgpu-si = calls=68 forced=0 already=68 modes=00000001
+```
+
+User: "texts are the same still".
+
+**`getSurfaceInfo2` was called 68 times - exactly as many as
+`getPreferredSwizzleMode2` - against 5458 client resources.** Every
+single call already carried `swizzleMode = 0`, because our own force on
+the chooser fed it; `modes=00000001` is bit 0 alone, so **no other mode
+ever arrived**, and `forced=0` because there was never anything to
+force.
+
+The counts being *equal* is the finding: every `getSurfaceInfo2` follows
+a `getPreferredSwizzleMode2` on the same kernel-allocated surface. The
+other ~5400 client resources never touch the kernel's align manager at
+all.
+
+**So client texture layout is computed entirely in userspace, in
+`AMDRadeonX6000MTLDriver`, and the kernel is never asked.** This is the
+branch 2lf pre-registered as "out of this plugin's reach", and it
+explains the whole pattern: every kernel-side value measured correct
+(2kx, 2kz, 2la, the UBM tables, the HW capabilities) and every
+kernel-side force changed only what the kernel owned - WindowServer's
+surfaces, the 80% that came right in boot 98.
+
+The second capture matters methodologically: the first was taken three
+minutes in, before the applications had created their textures, and
+`calls=551` could have been read as "clients do not use this path" when
+it only meant "not yet". Re-capturing live in the same boot turned a
+weak reading into a settled one, and cost nothing - the boot was already
+running. Worth repeating whenever a count is the evidence.
+
+**The remaining in-kernel avenue**, before anything drastic: userspace
+must learn the chip's geometry somehow, and if it asks the kernel the
+answer can be corrected there. `IOAccelDevice2::get_config(IOAccelDeviceConfigData*)`
+(0x14e20282, IOAcceleratorFamily2) is that channel, with
+`IOAccelDevice2::get_device_info(IOAccelDeviceInfoReturnData*)`
+(0x14e2072e) beside it.
+
+Two outcomes to keep apart, and neither is established:
+
+- if `IOAccelDeviceConfigData` carries tiling geometry, correcting it is
+  reachable and safe-ish
+- if it carries only a chip/family identifier that userspace uses to
+  select hardcoded AddrLib parameters, then changing it collides with
+  the Navi 21 spoof the whole stack depends on, and the honest options
+  narrow to patching the userspace driver with Lilu's user patcher - a
+  different and much larger undertaking
+
+**`-rbgpulinear` stays IN.** It is 80% of the corruption gone and costs
+only bandwidth.
