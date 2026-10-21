@@ -8366,9 +8366,40 @@ static uint32_t g_rb_2la_dcc_ok    = 0;   // returned ADDR_OK (0)
 static uint32_t g_rb_2la_n = 0;
 static struct rb_2la_s g_rb_2la[RB_2LA_N];
 
+// 2lb (2026-10-20): isolate the ROTATION, one variable.
+//
+// Boot 96 named the modes. `AddrSwizzleMode` 0x1b = 27 = ADDR_SW_64KB_R_X
+// and 0x16 = 22 = ADDR_SW_4KB_D_X; the inputs are 0 (LINEAR) and 9
+// (ADDR_SW_64KB_S). Everything large - including an **8192x4320** surface,
+// the shape of a glyph atlas - is given 64KB_R_X.
+//
+// `_X` means the swizzle XORs in pipe and packer bits; `_R_` means ROTATED,
+// which on GFX10 distributes across shader engines. This chip has **one**
+// shader engine (GB_ADDR_CONFIG NUM_SHADER_ENGINES=0, 2kz); Navi 21, which
+// this stack spoofs, has four. That is the one geometry field that genuinely
+// differs and the only suspect so far that is per-surface rather than global
+// - which is what the screen demands, since icons and the wallpaper are
+// perfect while glyphs are shredded.
+//
+// The test changes ONE variable: 64KB_R_X (27) -> 64KB_S_X (25). Both are
+// 64 KB, both are `_X`, so the pipe/packer arithmetic is identical and only
+// the rotation differs. Text clearing would name rotation; nothing moving
+// would rule it out and cost one boot.
+//
+// Behind `-rbgpunorotate`. Without it this remains the observe-only probe
+// 2la shipped, and `rot=0` says so.
+static uint32_t g_rb_2lb_on  = 0;
+static uint32_t g_rb_2lb_hit = 0;
+
 static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
     uint32_t r = orig_swizmode_2la ? orig_swizmode_2la(mgr, in) : 0;
     g_rb_2la_swz_calls++;
+    if (g_rb_2lb_on == 0) {
+        g_rb_2lb_on = checkKernelArgument("-rbgpunorotate") ? 1u : 2u;
+        rbgpu_log("2lb: rotation remap %s",
+                  g_rb_2lb_on == 1 ? "ARMED 64KB_R_X -> 64KB_S_X"
+                                   : "OFF (observe only)");
+    }
     if (in && g_rb_2la_n < RB_2LA_N) {
         auto p32 = reinterpret_cast<volatile uint32_t *>(in);
         struct rb_2la_s *e = &g_rb_2la[g_rb_2la_n++];
@@ -8386,6 +8417,13 @@ static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
                   e->w, e->h, e->bpp, e->fmt, e->restype, e->flags,
                   e->swz, e->frags, r);
     }
+    // 2lb: 27 = ADDR_SW_64KB_R_X -> 25 = ADDR_SW_64KB_S_X. Only this one
+    // value is touched; every other mode passes through untouched, so a
+    // change on screen can only come from the rotation.
+    if (g_rb_2lb_on == 1 && r == 27) {
+        g_rb_2lb_hit++;
+        return 25;
+    }
     return r;
 }
 
@@ -8399,9 +8437,11 @@ static uint32_t hooked_dccinfo_2la(void *mgr, void *in, void *out) {
 void rbgpu_surf_flush_2la(void) {
     char n[352];
     int w = snprintf(n, sizeof(n),
-                     "swz hk=%d calls=%u | dcc hk=%d calls=%u ok=%u",
+                     "swz hk=%d calls=%u | dcc hk=%d calls=%u ok=%u | "
+                     "rot=%u remapped=%u",
                      g_rb_2la_hk_swz, g_rb_2la_swz_calls,
-                     g_rb_2la_hk_dcc, g_rb_2la_dcc_calls, g_rb_2la_dcc_ok);
+                     g_rb_2la_hk_dcc, g_rb_2la_dcc_calls, g_rb_2la_dcc_ok,
+                     g_rb_2lb_on, g_rb_2lb_hit);
     size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
     for (uint32_t i = 0; i < g_rb_2la_n && at < sizeof(n) - 56; i++) {
         const struct rb_2la_s *e = &g_rb_2la[i];
