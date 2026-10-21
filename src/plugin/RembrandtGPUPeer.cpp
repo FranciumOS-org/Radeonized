@@ -1849,7 +1849,11 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
         } else {
             static uint32_t s_req14_seen = 0;
             s_req14_seen++;
-            if (s_req14_seen <= 3 || (s_req14_seen % 64) == 0) {
+            // 2ls: every 64th still meant a line every ~1.3 s at ~50
+            // polls/s, which wrapped the kernel buffer in about two minutes
+            // and cost three captures the plugin's own boot-time lines. The
+            // exact count is in rbgpu-diag as req_0x14, which does not wrap.
+            if (s_req14_seen <= 3 || (s_req14_seen % 4096) == 0) {
                 rbgpu_log("SpecialAMDKey request 0x14 (wait: %d) [#%u]",
                           waitForFunction, s_req14_seen);
             }

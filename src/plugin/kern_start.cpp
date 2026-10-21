@@ -1410,6 +1410,19 @@ static void (*orig_kiq_writeDataCmd_2dy)(void *, uint32_t *) = nullptr;
 static uint32_t g_rb_2dy_calls = 0;
 static uint32_t g_rb_2dy_pkt[5] = {0, 0, 0, 0, 0};
 
+// 2ls (2026-10-21): the stamp chain is settled and it was destroying every
+// capture. Boot 107's kernel buffer began at 130 s because these tags emit
+// ~140 lines per two minutes, so the plugin's own boot-time lines - including
+// whether a user patch armed - had always wrapped out by the time
+// plugin_check.sh ran. The facts they established (the stamp arrives, the
+// fence lands at +0xc0, slot arithmetic matches) are recorded in JOURNAL
+// 2cx/2ds/2dw/2dx/2dy and do not need restating every 1.5 s. Log the first
+// four cycles in full, then go quiet. The per-request counts stay in
+// rbgpu-diag, which does not wrap.
+static uint32_t g_rb_stampchain_cycles = 0;
+#define rbgpu_log_stamp(...) \
+    do { if (g_rb_stampchain_cycles <= 4) { rbgpu_log(__VA_ARGS__); } } while (0)
+
 static void hooked_kiq_writeDataCmd_2dy(void *ch, uint32_t *p) {
     if (orig_kiq_writeDataCmd_2dy)
         orig_kiq_writeDataCmd_2dy(ch, p);
@@ -1435,7 +1448,7 @@ static void hooked_kiq_writeDataCmd_2dy(void *ch, uint32_t *p) {
     rbgpu_diag_set_num("fencepkt_dst", dst);
     rbgpu_diag_set_num("fencepkt_data", p[4]);
     rbgpu_diag_set_num("chan_c8", c8);
-    rbgpu_log("2dy: WRITE_DATA fence packet #%u on ch=%p: hdr=0x%08x ctl=0x%08x "
+    rbgpu_log_stamp("2dy: WRITE_DATA fence packet #%u on ch=%p: hdr=0x%08x ctl=0x%08x "
               "dst=0x%llx data=%u ; channel+0xc8=0x%llx -> %s",
               g_rb_2dy_calls, ch, p[0], p[1], dst, p[4], c8,
               (dst == 0)
@@ -1563,7 +1576,7 @@ static void rbgpu_dump_gc_regs_late(const char *tag) {
     static int checked = 0, on = 0;
     if (!checked) { checked = 1; on = checkKernelArgument("-rbgpuregdump") ? 1 : 0; }
     if (!on) {
-        rbgpu_log("2fe: [%s] register dump SKIPPED (-rbgpuregdump not set). This is "
+        rbgpu_log_stamp("2fe: [%s] register dump SKIPPED (-rbgpuregdump not set). This is "
                   "the only hardware access in the span the trail stops in; the "
                   "questions it answered are recorded and it reads nothing new.",
                   tag);
@@ -4499,7 +4512,8 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     // from commitBlock and the doorbell before it. Writes nothing unless
     // 0x1B is in flight.
     if (g_rb_2gq_in_fas) { g_rb_2gq_stw++; } else { rbgpu_2gn_mark("stw:E"); }
-    rbgpu_log("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
+    g_rb_stampchain_cycles++;
+    rbgpu_log_stamp("2cx: waitForHwStamp ENTER (ch=%p stamp=%u) - waiting for the GPU to "
               "execute; 5 s timeout per poll", ch, stamp);
 
     // 2cy (2026-10-12): do NOT call the original by default.
@@ -4632,14 +4646,14 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         rbgpu_diag_set_num("kiq_in_addchan", in_add ? 1 : 0);
         rbgpu_diag_set_num("regchan_seen_n", g_rb_2dv_reg_n);
         rbgpu_diag_set_num("addchan_seen_n", g_rb_2dv_add_n);
-        rbgpu_log("2dv: THIS channel %p: registerChannel seen=%d addHWChannel seen=%d "
+        rbgpu_log_stamp("2dv: THIS channel %p: registerChannel seen=%d addHWChannel seen=%d "
                   "(distinct reg=%u add=%u) - for a KIQ, reg-without-add is EXPECTED",
                   ch, in_reg, in_add, g_rb_2dv_reg_n, g_rb_2dv_add_n);
 
-        rbgpu_log("2ds: channel stamps BEFORE the wait: submitted(+0x80)=%u "
+        rbgpu_log_stamp("2ds: channel stamps BEFORE the wait: submitted(+0x80)=%u "
                   "completed(+0x84)=%u asked-for=%u ; writeback +0xc0=0x%llx +0xe0=0x%llx",
                   submitted, completed, stamp, wb_c0, wb_e0);
-        rbgpu_log("2dw: fence slot: index(+0xac)=%u va(+0xb0)=0x%llx ; +0xc0 %s "
+        rbgpu_log_stamp("2dw: fence slot: index(+0xac)=%u va(+0xb0)=0x%llx ; +0xc0 %s "
                   "(%s) ; +0xe0=%s",
                   slot_idx, slot_b0,
                   is_self ? "== &this->0x84" : "is a separate location",
@@ -4685,7 +4699,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             rbgpu_diag_set_num("wb_next_idx", next_idx);
             bool cpu_ok = (wb_c0 == cpu_base + (static_cast<uint64_t>(slot_idx) << 6));
             rbgpu_diag_set_num("wb_cpu_arith_ok", cpu_ok ? 1 : 0);
-            rbgpu_log("2dx: writeback frames: hw=%p cpu_base(+0x510)=0x%llx "
+            rbgpu_log_stamp("2dx: writeback frames: hw=%p cpu_base(+0x510)=0x%llx "
                       "next_idx(+0x20650)=%u ; CPU ptr for slot %u = 0x%llx, "
                       "measured +0xc0 = 0x%llx -> arithmetic %s",
                       hwobj, cpu_base, next_idx, slot_idx,
@@ -4706,7 +4720,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             g_rb_2dt_wb_c8 = c8;
             rbgpu_diag_set_num("chan_c8", c8);
             rbgpu_diag_set_num("chan_c8_matches_wb", (c8 == g1) ? 1 : 0);
-            rbgpu_log("2dy: channel+0xc8 (what the WRITE_DATA packet targets) = "
+            rbgpu_log_stamp("2dy: channel+0xc8 (what the WRITE_DATA packet targets) = "
                       "0x%llx ; getChannelWriteBackFrameGPUAddr(%u) = 0x%llx -> %s",
                       c8, slot_idx, g1,
                       (c8 == g1)
@@ -4718,7 +4732,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                             "address 0"
                           : "they DIFFER: the packet targets a different frame "
                             "than the one the CPU polls");
-            rbgpu_log("2dx: GPU addr for frame 0 = 0x%llx, for slot %u = 0x%llx "
+            rbgpu_log_stamp("2dx: GPU addr for frame 0 = 0x%llx, for slot %u = 0x%llx "
                       "(delta 0x%llx, expected 0x%x) ; ring MC from startKIQ = "
                       "0x%llx -> %s",
                       g0, slot_idx, g1, g1 - g0,
@@ -4736,7 +4750,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                           : "high word is neither 0xF4 nor 0, so it is some "
                             "third address space and needs its own reading");
         } else {
-            rbgpu_log("2dx: no getChannelWriteBackFrameGPUAddr (resolved=%d hw=%p), "
+            rbgpu_log_stamp("2dx: no getChannelWriteBackFrameGPUAddr (resolved=%d hw=%p), "
                       "so the GPU side of the fence was NOT measured this boot",
                       orig_wb_gpuaddr_2dx != nullptr, hwobj);
         }
@@ -4746,17 +4760,17 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             uint32_t fv = *reinterpret_cast<volatile uint32_t *>(wb_c0);
             g_rb_2dw_fence_bef = fv;
             rbgpu_diag_set_num("fence_val_before", fv);
-            rbgpu_log("2dw: the fence dword at +0xc0 BEFORE the wait = 0x%08x "
+            rbgpu_log_stamp("2dw: the fence dword at +0xc0 BEFORE the wait = 0x%08x "
                       "(asked-for stamp = %u)", fv, stamp);
         }
 
         if (submitted == completed) {
-            rbgpu_log("2ds: +0x80 == +0x84, so checkForTimestampUpdate takes its EARLY "
+            rbgpu_log_stamp("2ds: +0x80 == +0x84, so checkForTimestampUpdate takes its EARLY "
                       "EXIT and never reads the fence at all. Nothing marked the frame "
                       "submitted, so the wait can only ever time out - this is "
                       "bookkeeping, not the GPU.");
         } else {
-            rbgpu_log("2ds: a frame IS outstanding (+0x80 != +0x84), so "
+            rbgpu_log_stamp("2ds: a frame IS outstanding (+0x80 != +0x84), so "
                       "checkForTimestampUpdate runs and timestampUpdated reads the "
                       "fence on every poll. If +0x84 still does not move, the fence "
                       "memory is what is not being written.");
@@ -4778,7 +4792,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         bool raw = checkKernelArgument("-rbgpustampraw");
         rbgpu_diag_set_num("bwait_raw", raw ? 1 : 0);
         if (raw) {
-            rbgpu_log("2en: -rbgpustampraw: calling Apple's UNBOUNDED wait. If the "
+            rbgpu_log_stamp("2en: -rbgpustampraw: calling Apple's UNBOUNDED wait. If the "
                       "stamp does not arrive this boot hangs with no panic and no "
                       "log, and only a power cycle ends it.");
             ret = orig_hwchannel_waitForHwStamp_2cx
@@ -4787,7 +4801,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
         } else {
             ret = rbgpu_bounded_stamp_wait_2en(ch, stamp, 2000);
         }
-        rbgpu_log("2dr: the REAL wait returned %d%s", ret ? 1 : 0,
+        rbgpu_log_stamp("2dr: the REAL wait returned %d%s", ret ? 1 : 0,
                   ret ? " - THE STAMP ARRIVED; doStart continues past "
                         "submitSetResourcesPacket for the first time"
                       : " - the stamp did not arrive even though the CP consumed "
@@ -4797,7 +4811,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                 reinterpret_cast<uintptr_t>(ch) + 0x80);
             uint32_t cmp = *reinterpret_cast<volatile uint32_t *>(
                 reinterpret_cast<uintptr_t>(ch) + 0x84);
-            rbgpu_log("2ds: channel stamps AFTER the wait: submitted(+0x80)=%u "
+            rbgpu_log_stamp("2ds: channel stamps AFTER the wait: submitted(+0x80)=%u "
                       "completed(+0x84)=%u (asked-for=%u) ; BEFORE sub=%u cmp=%u ; "
                       "writeback +0xc0=0x%llx +0xe0=0x%llx%s",
                       sub, cmp, stamp, g_rb_2dt_sub_before, g_rb_2dt_cmp_before,
@@ -4814,7 +4828,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
             if (g_rb_2dt_wb_c0 && !g_rb_2dw_is_self) {
                 uint32_t fv = *reinterpret_cast<volatile uint32_t *>(g_rb_2dt_wb_c0);
                 rbgpu_diag_set_num("fence_val_after", fv);
-                rbgpu_log("2dw: the fence dword at +0xc0 AFTER the wait = 0x%08x "
+                rbgpu_log_stamp("2dw: the fence dword at +0xc0 AFTER the wait = 0x%08x "
                           "(BEFORE 0x%08x, asked-for %u) -> %s",
                           fv, g_rb_2dw_fence_bef, stamp,
                           // 2fl: this text asserted a CPU-side failure. Since
@@ -4838,7 +4852,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
                 rbgpu_diag_set_num("fence_scan_hits", hits);
                 rbgpu_diag_set_num("fence_scan_off", first_off);
                 rbgpu_diag_set_num("fence_c0_off", c0_off);
-                rbgpu_log("2dw: fence page 0x%llx scan for the value %u: %u hit(s), "
+                rbgpu_log_stamp("2dw: fence page 0x%llx scan for the value %u: %u hit(s), "
                           "first at +0x%03x (val 0x%08x); +0xc0 itself is at +0x%03x "
                           "-> %s",
                           static_cast<uint64_t>(page), stamp, hits, first_off,
@@ -4877,7 +4891,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
     rbgpu_diag_set_num("stamp_ret", static_cast<uint64_t>(g_rb_2cx_stamp_ret));
     rbgpu_diag_set_num("stamp_ticks", dt);
     RB_STEP(11);   // the two diag sets returned
-    rbgpu_log("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
+    rbgpu_log_stamp("2cx: waitForHwStamp -> %d %s (%llu ticks)", ret ? 1 : 0,
               ret ? "(the GPU executed it)"
                   : "(the stamp was not reached - NOT evidence the CP is dead; 2dq "
                     "measured RPTR=WPTR with CP_STAT busy, so it does execute)",
@@ -6973,6 +6987,7 @@ static void rbgpu_register_mtllinear_2lm(void) {
     // does not even read the target file, while onProcLoad still returns
     // NoError - so "ARMED" alone is not evidence that anything is patched.
     // 2lp shipped inert for exactly this reason. Say the section out loud.
+    rbgpu_diag_set_num("mtllinear_section", kRb2lmPatch.section);
     if (kRb2lmPatch.section == UserPatcher::ProcInfo::SectionDisabled) {
         rbgpu_log("2lm: INERT - patch section is SectionDisabled, so Lilu "
                   "will skip it and never read the Metal driver. Nothing is "
@@ -7126,6 +7141,11 @@ static void rbgpu_register_hwblt_2lp(void) {
     // does not even read the target file, while onProcLoad still returns
     // NoError - so "ARMED" alone is not evidence that anything is patched.
     // 2lp shipped inert for exactly this reason. Say the section out loud.
+    // 2ls: the arming fact belongs in the diag table, which does not wrap.
+    // Three captures in a row could not say whether this patch applied
+    // because the kernel buffer had already rolled past the ARMED line.
+    rbgpu_diag_set_num("hwblt_section", kRb2lpPatch.section);
+    rbgpu_diag_set_str("hwblt_scope", kRb2lrProcPath);
     if (kRb2lpPatch.section == UserPatcher::ProcInfo::SectionDisabled) {
         rbgpu_log("2lp: INERT - patch section is SectionDisabled, so Lilu "
                   "will skip it and never read the Metal driver. Nothing is "
@@ -7135,6 +7155,7 @@ static void rbgpu_register_hwblt_2lp(void) {
     UserPatcher::ProcInfo *procs[] { &kRb2lpProc };
     UserPatcher::BinaryModInfo *mods[] { &kRb2lpMod };
     auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
+    rbgpu_diag_set_num("hwblt_onprocload", static_cast<uint64_t>(err));
     if (err == LiluAPI::Error::NoError) {
         rbgpu_log("2lp/2lr: ARMED (patch section=%u) - ShouldUseSwBlt forced "
                   "FALSE in the Claude app's helpers only (Terminal is the "
