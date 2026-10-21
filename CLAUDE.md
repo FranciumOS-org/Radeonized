@@ -176,10 +176,16 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
 18. **Do not build a table from n=1 rows.** [2ev, 2fs]
 19. **A NULL check is not a pointer check.** Validate derived pointers as
     kernel VAs (`>= 0xffffff8000000000`) before dereferencing. [2gh]
+20. **A registration that reports success is not evidence that a patch
+    applied.** A Lilu `BinaryModPatch` with `section == 0`
+    (`SectionDisabled`) is skipped and its file never read, while
+    `onProcLoad` still returns `NoError` - so the hook logged `ARMED` and
+    patched nothing. Log the enabling field itself and refuse when it is
+    disabled. [2lq]
 
 **The recurring error, stated once**
 
-Twenty-six recorded instances of reading a value without first establishing
+Twenty-seven recorded instances of reading a value without first establishing
 what makes it meaningful. The practice that keeps catching it: **say in the
 code what would have to be true for the reading to mean anything, and log it
 when it is not.** The 2kx/2la/2lc trio adds a variant worth naming — **read

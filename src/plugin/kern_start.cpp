@@ -6944,7 +6944,10 @@ static UserPatcher::BinaryModPatch kRb2lmPatch {
     0,                                  // skip none
     1,                                  // one occurrence, and it is unique
     UserPatcher::FileSegment::SegmentTextText,
-    0
+    1                                   // section: MUST be non-zero.
+                                        // Lilu skips any patch whose
+                                        // section == SectionDisabled (0)
+                                        // and does not even read the file.
 };
 
 static UserPatcher::BinaryModInfo kRb2lmMod {
@@ -6964,6 +6967,16 @@ static void rbgpu_register_mtllinear_2lm(void) {
     if (!checkKernelArgument("-rbgpumtllinear")) {
         rbgpu_log("2lm: NOT armed - -rbgpumtllinear absent, no user patcher "
                   "registered and no userspace image is touched");
+        return;
+    }
+    // Lilu skips any BinaryModPatch whose section == SectionDisabled (0) and
+    // does not even read the target file, while onProcLoad still returns
+    // NoError - so "ARMED" alone is not evidence that anything is patched.
+    // 2lp shipped inert for exactly this reason. Say the section out loud.
+    if (kRb2lmPatch.section == UserPatcher::ProcInfo::SectionDisabled) {
+        rbgpu_log("2lm: INERT - patch section is SectionDisabled, so Lilu "
+                  "will skip it and never read the Metal driver. Nothing is "
+                  "patched; do not read a rendering change as this hook's.");
         return;
     }
     UserPatcher::ProcInfo *procs[] { &kRb2lmProc };
@@ -7066,7 +7079,10 @@ static UserPatcher::BinaryModPatch kRb2lpPatch {
     0,
     1,                                  // one occurrence; unique at 8 bytes
     UserPatcher::FileSegment::SegmentTextText,
-    0
+    1                                   // section: MUST be non-zero.
+                                        // Lilu skips any patch whose
+                                        // section == SectionDisabled (0)
+                                        // and does not even read the file.
 };
 
 static UserPatcher::BinaryModInfo kRb2lpMod {
@@ -7085,16 +7101,28 @@ static void rbgpu_register_hwblt_2lp(void) {
                   "registered and no userspace image is touched");
         return;
     }
+    // Lilu skips any BinaryModPatch whose section == SectionDisabled (0) and
+    // does not even read the target file, while onProcLoad still returns
+    // NoError - so "ARMED" alone is not evidence that anything is patched.
+    // 2lp shipped inert for exactly this reason. Say the section out loud.
+    if (kRb2lpPatch.section == UserPatcher::ProcInfo::SectionDisabled) {
+        rbgpu_log("2lp: INERT - patch section is SectionDisabled, so Lilu "
+                  "will skip it and never read the Metal driver. Nothing is "
+                  "patched; do not read a rendering change as this hook's.");
+        return;
+    }
     UserPatcher::ProcInfo *procs[] { &kRb2lpProc };
     UserPatcher::BinaryModInfo *mods[] { &kRb2lpMod };
     auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
     if (err == LiluAPI::Error::NoError) {
-        rbgpu_log("2lp: ARMED - ShouldUseSwBlt forced FALSE in Terminal only, "
+        rbgpu_log("2lp: ARMED (patch section=%u) - ShouldUseSwBlt forced "
+                  "FALSE in Terminal only, "
                   "so replaceRegion uploads go through the GPU blit engine "
                   "that texprobe measured correct. Readable text in Terminal "
                   "confirms 2lo's diagnosis; unchanged text means the "
                   "hardware path is not correct for a managed destination "
-                  "and the software tiler's XOR must be fixed instead.");
+                  "and the software tiler's XOR must be fixed instead.",
+                  kRb2lpPatch.section);
     } else {
         rbgpu_log("2lp: onProcLoad FAILED with %d - nothing is patched",
                   static_cast<int>(err));
