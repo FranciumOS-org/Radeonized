@@ -93,12 +93,15 @@ static bool structureOk(MTLTextureDescriptor *d)
         && d.depth == 1;
 }
 
-// An IOSurface-backed texture is served for a read-only sampled texture, which
-// is what a glyph atlas is. RBGPU_IOSURFTEX_ANYUSAGE=1 lifts this if a real
-// application turns out to ask for more.
+// Sampled and render-target textures are served; an IOSurface backs both, and
+// the assistant's glyph atlas is RenderTarget|ShaderRead (2ms). ShaderWrite,
+// PixelFormatView and ShaderAtomic are not served: they carry layout
+// constraints of their own and none of them is a glyph atlas.
+// RBGPU_IOSURFTEX_ANYUSAGE=1 lifts the restriction entirely.
+#define IOSURFTEX_OK_USAGE (MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget)
 static bool usageOk(MTLTextureDescriptor *d)
 {
-    return gAnyUsage || (d.usage & ~(MTLTextureUsageShaderRead)) == 0;
+    return gAnyUsage || (d.usage & ~(MTLTextureUsage)IOSURFTEX_OK_USAGE) == 0;
 }
 
 static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)

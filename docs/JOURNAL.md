@@ -19913,3 +19913,88 @@ then told the user it was safe for arbitrary applications, twice, and the
 second time through a launchd environment that took the whole GUI down. A fix
 verified on one hand-written caller has been verified against one caller, not
 against the API contract.
+
+## 2ms — what the assistant actually asks for, and the law holds for R8 and render targets
+
+Boot 114, armed. With 2mr's crash fixed, all five bisect variants stay up:
+
+```
+  A  nothing inserted   STAYED UP      D  iosurftex, INERT=1   STAYED UP
+  B  noop-insert.dylib  STAYED UP      E  iosurftex, full      STAYED UP
+  C  iosurftex, =0      STAYED UP
+```
+
+Text in variant E was **still unreadable**, and `swapped=0` - but not because
+the assistant avoids the failing class. It asked for **27 textures the law flags** and
+my own qualification rules refused every one:
+
+```
+   4 DECLINED(structure) 64x64 type=4 mips=1
+   4 DECLINED(structure) 1536x256 type=4 mips=1
+   2 DECLINED(structure) 1536x128 / 128x128 / 16x16 type=4
+   2 DECLINED(usage) 512x32 / 32x32 / 25x25 / 16x16  usage=0x4 fmt=250
+   1 DECLINED(usage) 256x32 / 192x64 / 128x64 / 128x32  usage=0x4 fmt=250
+   1 DECLINED(usage) 1024x128 usage=0x5 fmt=10
+```
+
+Decoded: `type=4` is `MTLTextureType2DMultisample` - MSAA render targets, which
+cannot be IOSurface-backed and are not text. `usage=0x4 fmt=250` is
+`RenderTarget` with `MTLPixelFormatDepth16Unorm` - depth buffers. Both are
+correctly refused.
+
+The last line is the one that matters: **`1024x128`, `fmt=10` =
+`MTLPixelFormatR8Unorm`, `usage=0x5` = `RenderTarget|ShaderRead`.** That is a
+glyph atlas, and `usageOk` only ever allowed `ShaderRead`, so it was thrown
+away.
+
+### The law on a format and a usage it had never been measured on
+
+The law and the fix were established on `bgra8Unorm` with `shaderRead` alone.
+the assistant's atlas is neither, so `lawtest` grew both axes before any claim was
+made about them:
+
+```
+=== r8Unorm, RenderTarget|ShaderRead (the assistant's glyph atlas shape)
+  1024x128  align 65536 ratio 2.00x   fail  6/12
+  1024x48   align  4096 ratio 1.33x   fail  0/12
+   512x128  align 65536 ratio 2.00x   fail  6/12
+   256x48   align  4096 ratio 1.33x   fail  0/12
+  1024x256  align 65536 ratio 1.00x   fail  0/12
+=== bgra8Unorm, RenderTarget|ShaderRead
+   256x48   align 65536 ratio 2.67x   fail 11/12
+   256x96   align 65536 ratio 1.33x   fail  9/12
+```
+
+The law is unchanged across both: **align 65536 and footprint > pixels, or it
+is clean.** `1024x48` and `256x48` at R8 land at align 4096 and are clean,
+`1024x256` is an exact fit and is clean, and **`1024x128` - the real atlas -
+fails 6/12.** So the glyph atlas is genuinely in the failing class, which is
+the first direct evidence that this defect is what makes *this application's*
+text unreadable rather than something that merely resembles it.
+
+### Filter widened, and everything re-measured
+
+`usageOk` now serves `ShaderRead|RenderTarget` - an IOSurface backs both, and
+that is what the atlas asks for - while still refusing `ShaderWrite`,
+`PixelFormatView` and `ShaderAtomic`, none of which is a glyph atlas and each
+of which carries layout constraints of its own. With that one change:
+
+```
+  r8Unorm, RenderTarget|ShaderRead      0/60
+  r8Unorm, ShaderRead only              0/36
+  bgra8Unorm, RenderTarget|ShaderRead   0/24
+  bgra8Unorm, ShaderRead only           0/72   (was 36/72)
+  swapped=108  declined: none           law-clean=84
+```
+
+Nothing is declined any more, and `make ownership-test` still passes all three
+cases, which is now run before the dylib is put anywhere near an application.
+
+### Still not claimed
+
+That the assistant's text will be readable. The atlas is in the failing class and the
+fix corrects that class, but Skia may fill that atlas by a GPU render pass or a
+buffer blit rather than the CPU `replace()` the law is about - its usage
+includes `RenderTarget`, which is a hint in that direction. If the atlas is
+swapped and the text is still wrong, the upload path is the next thing to read,
+not the layout.
