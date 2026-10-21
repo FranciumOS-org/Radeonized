@@ -18785,3 +18785,61 @@ Disentangling needs an override of `rec[0x02]`/`rec[0x03]` **after**
 userspace record, not the kernel's report. That is the userspace the
 project cannot patch (2lt). Recorded as the sharpest open question the text
 defect has produced, with no cheap experiment behind it yet.
+
+---
+
+## 2md (2026-10-21): NUM_PIPES override - the empirical sweep the user asked for
+
+Build UUID `A3DDC2C8`, hosttest passes, unarmed.
+
+The user's instruction (2026-10-21): *"anything that fixes the text and
+glitches"*. That is a decision to prefer a working screen over a clean
+attribution, and it is recorded because it changes what counts as a good
+result for the next few boots.
+
+`rbgpu_pipes=N` rewrites bits 2:0 of `_sAMD_GET_HW_INFO_VALUES + 0xa0`,
+alongside 2ly's `rbgpu_pkrs=N` on bits 10:8. Both go through the same
+existing 2lk hook, both write on every call, both record to the diag table:
+`pipes_arg`, `pipes_writes` beside `pkrs_arg`, `pkrs_was_gbac`,
+`pkrs_now_gbac`, `pkrs_writes`.
+
+### Why NUM_PIPES is the motivated candidate
+
+2mc: `TERM = bits[microTileWidthLog2, 1 << pipesLog2) << pipeInterleaveLog2`
+is XORed into **every** tile address. On this chip that is `bits[2,4) << 8`
+= `0xc00` = address bits 10/11 = pattern bits 2/3, and 2ma decodes row 22's
+pattern bit 3 as **`y3` alone**. 2lo measured a **pure-Y** displacement.
+Reporting `NUM_PIPES <= 1` makes the range empty and `TERM = 0`.
+
+| `rbgpu_pipes` | `1 << pipesLog2` | TERM |
+|---|---|---|
+| 0 | 1 | **0** |
+| 1 | 2 | **0** |
+| (none) = 2 | 4 | 0xc00 |
+| 3 | 8 | 0xfc00 |
+
+### The confound, stated before the boot rather than after
+
+`pipesLog2` moves three things at once:
+
+1. `TERM`, as above.
+2. The pattern **row**, through `K = pipesLog2 + 2*numPkrs - 2` - at
+   `pipes=1`, `K = 1 + 4 - 2 = 3`, so row 17 instead of 22.
+3. Userspace **AddrLib's own surface layout**, which 2lz proved has real
+   teeth - `rbgpu_pkrs=1` produced whole-surface destruction.
+
+So a good result is a working screen and **not** evidence about `TERM`.
+Attribution, if it works, comes afterwards by moving `pkrs` to hold `K`
+constant while `pipes` changes - at `pipes=1, pkrs=2` K is 3, but
+`pipes=1, pkrs=3` gives `K = 1 + 6 - 2 = 5`, and `pipes=2, pkrs=1` gives
+`K = 2` - a small grid that separates row from TERM once something works.
+
+### Order to try
+
+`rbgpu_pipes=1` first - it zeroes TERM while moving the row by one group,
+the smaller perturbation of the two zeroing values. `rbgpu_pipes=0` second.
+`rbgpu_pipes=3` is a widening and is not recommended.
+
+Failure mode is pixels, not a hang; removing the boot-arg undoes it and
+`-rbgpuoff` remains the rescue. The chip's own `GB_ADDR_CONFIG` is never
+written - only what `getHardwareInfo` reports.
