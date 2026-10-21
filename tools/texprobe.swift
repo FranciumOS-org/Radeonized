@@ -4,6 +4,7 @@
 // BGRA pixels encode their own (x,y), so wrong-but-valid data tells you WHERE it came from.
 import Foundation
 import Metal
+import Dispatch
 import IOSurface
 
 setvbuf(stdout, nil, _IONBF, 0)
@@ -491,7 +492,7 @@ enum Settle { case none, blit, wait, both, twice, pre }
 // and the wrong-row ranges.
 func managedTrial(_ w: Int, _ h: Int, _ v: UInt32, _ s: Settle,
                   heap: MTLHeap? = nil, offset: Int = 0) -> (Int, [(Int, Int)]) {
-    let d = desc(.bgra8Unorm, w, h, .managed)
+    let d = desc(.bgra8Unorm, w, h, heap == nil ? .managed : .shared)
     var t: MTLTexture?
     if let hp = heap { t = hp.makeTexture(descriptor: d, offset: offset) } else { t = dev.makeTexture(descriptor: d) }
     guard let tex = t else { return (-1, []) }
@@ -555,26 +556,155 @@ for h in [16, 32, 48, 64, 96, 128, 192] {
 }
 
 print("")
-print("=== 2mk-2: does it track the allocation offset? (w=256 h=48, 48 KB) ===")
+print("=== 2mk-2: allocation-offset sweep - NOT POSSIBLE on this device ===")
 do {
-    let d = desc(.bgra8Unorm, 256, 48, .managed)
-    let sa = dev.heapTextureSizeAndAlign(descriptor: d)
-    print("  heapTextureSizeAndAlign: size=\(sa.size) align=\(sa.align)")
-    let hd = MTLHeapDescriptor()
-    hd.type = .placement; hd.storageMode = .managed
-    hd.size = 64 * 1024 * 1024
-    guard let heap = dev.makeHeap(descriptor: hd) else { print("  no placement heap"); exit(0) }
-    for k in 0..<12 {
-        let off = k * 64 * 1024                 // 64 KB apart, all aligned
-        var ws: [Int] = [], shapes: [String] = []
-        for _ in 0..<8 {
-            let (wrong, rows) = managedTrial(256, 48, 0xffffffff, .none, heap: heap, offset: off)
-            if wrong < 0 { continue }
-            ws.append(wrong / 256); if wrong > 0 { shapes.append(rowsStr(rows)) }
-        }
-        if ws.isEmpty { print(String(format: "  off=0x%06x  (alloc failed)", off)); continue }
-        print(String(format: "  off=0x%06x  wrong-rows: %@   %@", off,
-                     hist(ws).padding(toLength: 30, withPad: " ", startingAt: 0),
-                     Set(shapes).sorted().prefix(2).joined(separator: " | ")))
+    let sa = dev.heapTextureSizeAndAlign(descriptor: desc(.bgra8Unorm, 256, 48, .private))
+    print("  heapTextureSizeAndAlign(256x48 bgra8): size=\(sa.size) align=\(sa.align)")
+    print("  A placement heap here rejects BOTH .managed (\"Invalid storageMode\") and")
+    print("  .shared (\"Shared storage mode disallowed\"); only .private is accepted, and a")
+    print("  .private texture cannot take the CPU replace() that is the failing path.")
+    print("  So the offset of the failing allocation cannot be controlled from here.")
+    print("  2mk-1 gives the same answer another way: all six settle variants returned")
+    print("  IDENTICAL histograms, so the outcome is fixed by the allocation sequence.")
+}
+
+// ---------------------------------------------------------------- 2ml
+// nullarc (2mk) found, on this same memory topology - an APU whose VRAM is a
+// carve-out of system RAM - that the carve-out's mapping "maps write-back
+// whatever cache mode it asks for, and plain stores left the frame in the CPU
+// cache while the panel scanned the stale DRAM under it, in stripes". If
+// replace() leaves its bytes in the CPU's cache and the GPU reads the stale
+// DRAM beneath, every 2mj property follows.
+//
+// The failing path (managed-replace-full) gives no CPU pointer, so clflush is
+// out. Instead evict the whole cache by touching a buffer far larger than it,
+// between the upload and the read. If the dirty lines are the problem, the
+// failure rate must collapse.
+//
+// Thrashing also takes time, so a sleep of the SAME measured duration is the
+// control. Without it this test cannot tell eviction from delay.
+
+let thrashBytes = 128 << 20                    // >> any L2/L3 on this part
+var thrashBuf = [UInt8](repeating: 1, count: thrashBytes)
+
+@inline(never) func thrashWrite() {
+    thrashBuf.withUnsafeMutableBytes { p in
+        let n = p.count, q = p.baseAddress!.assumingMemoryBound(to: UInt64.self)
+        for i in stride(from: 0, to: n / 8, by: 8) { q[i] = q[i] &+ 1 }   // one store per 64 B line
     }
+}
+@inline(never) func thrashRead() -> UInt64 {
+    var s: UInt64 = 0
+    thrashBuf.withUnsafeBytes { p in
+        let n = p.count, q = p.baseAddress!.assumingMemoryBound(to: UInt64.self)
+        for i in stride(from: 0, to: n / 8, by: 8) { s = s &+ q[i] }
+    }
+    return s
+}
+
+func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }
+
+enum Evict { case none, write, read, sleepEq }
+
+var sinkG: UInt64 = 0
+var thrashSecs = 0.0
+
+func evictTrial(_ w: Int, _ h: Int, _ v: UInt32, _ e: Evict) -> (Int, [(Int, Int)]) {
+    guard let t = dev.makeTexture(descriptor: desc(.bgra8Unorm, w, h, .managed)) else { return (-1, []) }
+    let want = fill(w, h, { _, _ in v })
+    want.withUnsafeBytes { src in
+        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                  withBytes: src.baseAddress!, bytesPerRow: w * 4)
+    }
+    switch e {
+    case .none:    break
+    case .write:   let t0 = now(); thrashWrite();          thrashSecs = now() - t0
+    case .read:    let t0 = now(); sinkG &+= thrashRead(); thrashSecs = now() - t0
+    case .sleepEq: usleep(UInt32(max(1.0, thrashSecs * 1e6)))
+    }
+    let got = readTex(t, false)
+    let wrong = (0..<(w * h)).reduce(0) { $0 + (got[$1] != v ? 1 : 0) }
+    return (wrong, badRows(got, w, h, v))
+}
+
+print("")
+print("=== 2ml: does evicting the CPU cache fix the upload? (w=256 h=48, n=24) ===")
+print("  thrash buffer \(thrashBytes >> 20) MB; sleep-equal is the time-only control")
+for (nm, e) in [("baseline (nothing)", Evict.none),
+                ("evict by WRITING 128 MB", Evict.write),
+                ("evict by READING 128 MB", Evict.read),
+                ("sleep, same duration", Evict.sleepEq)] {
+    var ws: [Int] = [], shapes: [String] = []
+    for _ in 0..<24 {
+        let (wrong, rows) = evictTrial(256, 48, 0xffffffff, e)
+        ws.append(wrong / 256); if wrong > 0 { shapes.append(rowsStr(rows)) }
+    }
+    let failed = ws.filter { $0 > 0 }.count
+    print("  " + nm.padding(toLength: 26, withPad: " ", startingAt: 0)
+          + "fail \(failed)/24  wrong-rows: " + hist(ws).padding(toLength: 26, withPad: " ", startingAt: 0)
+          + (shapes.isEmpty ? "" : "bands: " + Set(shapes).sorted().prefix(2).joined(separator: " | ")))
+    if e == .write || e == .read { print(String(format: "      (thrash took %.1f ms)", thrashSecs * 1e3)) }
+}
+
+// Where WE own the backing store, both sides can be compared: write with plain
+// CPU stores, then read the same bytes with the GPU and with the CPU. CPU
+// correct while the GPU sees whole bands wrong is a coherency gap and nothing
+// else. Both wrong would rule it out.
+print("")
+print("=== 2ml-b: CPU view vs GPU view of one buffer-backed texture (n=24) ===")
+do {
+    let f = MTLPixelFormat.bgra8Unorm
+    let al = dev.minimumLinearTextureAlignment(for: f)
+    let w = 256, h = 48, bpr = (w * 4 + al - 1) / al * al
+    var gpuFail = 0, cpuFail = 0, both = 0, disagree = 0
+    var ex = ""
+    for i in 0..<24 {
+        let v: UInt32 = 0xff000000 | UInt32(i * 7 + 1)
+        guard let buf = dev.makeBuffer(length: bpr * h, options: .storageModeManaged),
+              let t = buf.makeTexture(descriptor: desc(f, w, h, .managed), offset: 0, bytesPerRow: bpr)
+        else { continue }
+        let p = buf.contents().assumingMemoryBound(to: UInt32.self)
+        for y in 0..<h { let row = p + y * (bpr / 4); for x in 0..<w { row[x] = v } }
+        buf.didModifyRange(0..<buf.length)
+        let got = readTex(t, false)                            // GPU's view
+        let gWrong = (0..<(w * h)).reduce(0) { $0 + (got[$1] != v ? 1 : 0) }
+        var cWrong = 0                                         // CPU's own view
+        for y in 0..<h { let row = p + y * (bpr / 4); for x in 0..<w where row[x] != v { cWrong += 1 } }
+        if gWrong > 0 { gpuFail += 1 }
+        if cWrong > 0 { cpuFail += 1 }
+        if gWrong > 0 && cWrong > 0 { both += 1 }
+        if (gWrong > 0) != (cWrong > 0) {
+            disagree += 1
+            if ex.isEmpty { ex = "trial \(i): gpu=\(gWrong) cpu=\(cWrong) bands=\(rowsStr(badRows(got, w, h, v)))" }
+        }
+    }
+    print("  GPU view wrong: \(gpuFail)/24   CPU view wrong: \(cpuFail)/24   both: \(both)   disagreed: \(disagree)")
+    if !ex.isEmpty { print("  first disagreement -> " + ex) }
+    if gpuFail == 0 && cpuFail == 0 { print("  buffer-backed linear is clean on both sides - the defect needs the driver's own allocation") }
+}
+
+// ---------------------------------------------------------------- 2mm
+// 2mk-3 says the failing heights are not arbitrary: h=16, 32 and 128 were
+// clean 16 times out of 16, while 48, 96 and 192 failed in bands that are
+// exactly a THIRD of the surface (16, 32 and 64 rows) and 64 failed whole.
+// And heapTextureSizeAndAlign put a 256x48 BGRA texture - 48 KB of pixels -
+// in 128 KB with 64 KB alignment, which is a tiled footprint, not a linear
+// one, even though the kernel is forcing LINEAR this boot (-rbgpulinear,
+// rbgpu-surf forced=38 lin=1).
+//
+// So ask the driver what footprint it intends for each geometry and line that
+// up against which geometries fail. If the clean heights are the ones whose
+// footprint equals w*h*4 and the failing ones are padded, the defect is a
+// DISAGREEMENT between the client's layout and the kernel's, not a bug in
+// either alone.
+print("")
+print("=== 2mm: the driver's intended footprint per geometry ===")
+print("  w     h    pixels    footprint   align   ratio  padded?")
+for (w, h) in [(256, 16), (256, 32), (256, 48), (256, 64), (256, 96), (256, 128), (256, 192),
+               (256, 256), (128, 48), (512, 48), (64, 64), (1024, 48)] {
+    let px = w * h * 4
+    let sa = dev.heapTextureSizeAndAlign(descriptor: desc(.bgra8Unorm, w, h, .shared))
+    let r = Double(sa.size) / Double(px)
+    print(String(format: "  %-5d %-4d %8d  %9d  %6d  %5.2fx  %@",
+                 w, h, px, sa.size, sa.align, r, sa.size == px ? "no (linear)" : "YES"))
 }
