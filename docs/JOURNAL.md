@@ -18524,3 +18524,91 @@ stayed `0x242` throughout - so removing `rbgpu_pkrs` restores boot 108's
 behaviour exactly. 2ly stays in the tree, unarmed, because it is the only
 demonstrated lever from the kernel into client texture layout and the next
 hypothesis may want it.
+
+---
+
+## 2ma (2026-10-21, static): the pattern format decoded, and the row hypothesis closed from the static side too
+
+Full read of `UpdateTileCoord2IdxTableIfNeeded` (`0x7ffb08c98578`), the
+function `GFX10_GenerateTileAddresses` calls to turn a swizzle pattern into
+the coordinate->index tables the CPU tiler actually walks.
+
+### The pattern format, proven
+
+**2lx decoded the entries wrong.** The builder reads them with an **8-byte
+stride** (`movzwl (%rax,%rdi,8)`), so a 64-byte entry is **8 qwords**, one
+per swizzled address bit - not 32 uint16s. Each qword is four uint16 masks,
+and the two build loops prove what the first two are:
+
+```
+X table:  for x in 0..2^xbits-1:
+              for i in 0..n-1:  bit_i = popcount(pattern[i].f0 & x) & 1
+              tbl_x[x] |= (bits << 8)        ; f0 at qword offset 0
+Y table:  for y in 0..2^ybits-1:
+              for i in 0..n-1:  bit_i = popcount(pattern[i].f1 & y) & 1
+              tbl_y[y] |= (bits << 8)        ; f1 at qword offset 2
+```
+
+So **f0 is the X mask and f1 is the Y mask**, and each address bit is the
+**parity** of the selected coordinate bits - an XOR equation, exactly
+AddrLib's form. Decoded, this chip's row 22 reads:
+
+```
+bit0 = x6 ^ y4 ^ y6      bit4 = x2
+bit1 = x4 ^ y4           bit5 = (f2 bit3)
+bit2 = (f2 bit2)         bit6 = x3
+bit3 = y3                bit7 = x5 ^ y2 ^ y5
+```
+
+### How many of those bits are used
+
+`n = rec[6 + swizzleMode] - 8`, and `rec[6..]` is the per-mode block-size
+table `AllocCpuTexInterface` writes as constants: modes 0/1/2 -> 8,
+5/6/21/**22** -> **0x0c**, 9/10/17/18/24/25/26/27 -> 0x10, everything else
+0. So **mode 22 (4KB_D_X) uses only the first FOUR** pattern bits - block
+`2^12` = 4 KB, 256 B linear below. Note `y5` does not appear in those four
+at all; it selects the tile, not the position within it.
+
+There is also a hard guard: `blockLog2 < 9` returns **without building
+anything**, leaving the previous tables in place. That is only hit by the
+linear/256 B modes, which need no swizzle, but it is a stale-state path
+worth remembering.
+
+### The row selection is correct - AddrLib uses the same arithmetic
+
+AddrLib's own `Gfx10Lib::HwlInitGlobalParams` (`0x7ffb08d952d0`) builds its
+pattern-index base as
+
+```
+0x5b20 += pipesLog2 * 5
+if (numPkrs > 1)  0x5b20 += 10*numPkrs - 10
+```
+
+and `Gfx10Lib::GetSwizzlePatternInfo` (`0x7ffb08d96ce0`) adds that base to
+`elemLog2` (`addl 0x5b20(%r14), %ebx`). Apple's CPU tiler computes
+
+```
+rec[0x28] = 0x4b*interleaveLog2 - 0x258 + 5*(pipesLog2 + 2*numPkrs - 2)
+          = 5*pipesLog2 + 10*numPkrs - 10            (at 256 B interleave)
+```
+
+**The same formula.** The hand-written CPU tiler picks its row with
+AddrLib's own index arithmetic, so row 22 is not a wrong guess - it is what
+AddrLib would select for this chip. (Not verified: that both sides share the
+same additive base constant, only that the pipes/packers terms are
+identical.)
+
+**So the static reading now agrees with 2lz's hardware result.** The row is
+right; the row hypothesis is closed from both directions.
+
+### Where that leaves the glyph defect
+
+Not in pattern selection, and not in the parity tables, whose construction
+is straightforward and matches the equation form. What has **not** been read
+is how `GFX10_GenerateTileAddresses` combines `tbl_x`, `tbl_y` and the tile
+index into a final address, and `GFX10_TextureReplaceTiles` /
+`GFX10_TextureAccessRegion` above it. That is the remaining unexamined
+ground, and it is where a `y ^ 32` - a tile-index error rather than a
+within-tile swizzle error - would live. **y5 selects the tile for a 4 KB
+block at 32 bpp**, which makes a tile-index defect the better-fitting
+hypothesis for 2lo's measurement than anything inside the pattern.
