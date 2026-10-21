@@ -18458,3 +18458,69 @@ agree.
   pushed.
 
 Removing the boot-arg undoes all of it. `-rbgpuoff` remains the rescue.
+
+---
+
+## 2lz (2026-10-21, boot 109): `rbgpu_pkrs=1` is MUCH worse - and that is the most informative result in this stretch
+
+Boot 109, UUID `BF5F3738` (2ly), `rbgpu-boot` = 109, armed, boot-args
+`-rbgpulinear -rbgpuhwblt rbgpu_pkrs=1`. Read live from `RBGPUDiag`:
+
+```
+pkrs_arg      = 1
+pkrs_was_gbac = 578   = 0x242   (the chip's real register)
+pkrs_now_gbac = 322   = 0x142   (NUM_PKRS 2 -> 1)
+pkrs_writes   = 46
+```
+
+The override applied, on all 46 `getHardwareInfo` calls. Group moves from 4
+to 2, BGRA8 row from 22 to 12, exactly as 2lx predicted.
+
+### What it looked like
+
+**Qualitatively worse, and a different class of corruption.** Not glyph
+scramble: whole-window blocky noise in bands - dense green/blue speckle with
+a regular block grid, the Dock strip shredded, large regions reading as
+garbage (user's photographs, boot 109). Then **restarting the the assistant app
+brought it back to the familiar glyph scramble.**
+
+### What it proves
+
+1. **The kernel CAN reach client texture layout through `hwInfo+0xa0`.**
+   This is the first time anything the kernel reports has visibly changed
+   app-owned rendering. 2lg/2lh's "out of this plugin's reach" is dead for
+   good, and 2lk's channel is live, not just readable.
+2. **Group 2 is not the fix.** Row 12 is far worse than row 22.
+3. The restart behaviour is consistent with surfaces laid out under one
+   geometry being read under another: the app's pre-restart textures were
+   mixed with post-change compositing, and recreating them removed the
+   mixture. **Not asserted** - no measurement distinguishes that from other
+   explanations, and n=1.
+
+### What it argues about 2lx's locus
+
+The chip's real value (`NUM_PKRS = 2`, group 4, row 22) produces **only**
+the glyph defect, while one step away produces whole-surface destruction.
+That asymmetry is hard to reconcile with "the row is simply wrong". If row
+22 were wrong in the way 2lo's `y ^ 32` suggests, a neighbouring row would
+be expected to be comparably wrong, not catastrophically worse; and the
+large clean regions at `0x242` say the CPU tiler and the GPU already agree
+for most surfaces.
+
+So **2lx's locus is weakened by its own experiment.** The row selection
+looks right, and the residual glyph defect is narrower than "wrong swizzle
+pattern" - which points back at (2), the code downstream of pattern
+selection, that 2lx called thin on a partial read.
+
+`rbgpu_pkrs=3` (group 6, row 32) would complete the enumeration, but the
+prior is now poor: it is a larger step in the same direction that just
+failed, and the expected result is more of the same destruction. Recorded
+as available, not recommended.
+
+### Status
+
+Boot-arg reverted. The chip itself was never touched - `GB_ADDR_CONFIG`
+stayed `0x242` throughout - so removing `rbgpu_pkrs` restores boot 108's
+behaviour exactly. 2ly stays in the tree, unarmed, because it is the only
+demonstrated lever from the kernel into client texture layout and the next
+hypothesis may want it.
