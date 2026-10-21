@@ -1,0 +1,75 @@
+#!/bin/sh
+# Relaunch a GUI app under the IOSurface texture interposer (2mo/2mp).
+#
+#   tools/iosurftex-app.sh Claude
+#   tools/iosurftex-app.sh Safari
+#
+# An Electron app holds a single-instance lock: a second copy started while the
+# first is still shutting down forwards its arguments to the first and exits
+# immediately - which looks exactly like a crash, and is what happened on the
+# first attempt at Claude (2026-10-21, no crash report, clean exit). So quit the
+# app and WAIT for every one of its processes to go before starting it again.
+#
+# The app must be exec'd directly: `open -a` goes through launchd, which does not
+# pass DYLD_INSERT_LIBRARIES on.
+#
+# Env: RBGPU_IOSURFTEX_LOG=1 (or 2) is forwarded. ANYUSAGE=1 likewise.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+dylib="$root/build/out/iosurftex.dylib"
+[ -f "$dylib" ] || { echo "build it first:  make iosurftex" >&2; exit 1; }
+[ $# -ge 1 ] || { echo "usage: tools/iosurftex-app.sh <AppName>   (e.g. Claude)" >&2; exit 2; }
+
+name=$1; shift
+app="/Applications/$name.app"
+[ -d "$app" ] || app="$HOME/Applications/$name.app"
+[ -d "$app" ] || { echo "no such app: $name" >&2; exit 1; }
+exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+[ -x "$exe" ] || { echo "not executable: $exe" >&2; exit 1; }
+
+log="$root/logs/iosurftex-$(echo "$name" | tr 'A-Z ' 'a-z-').log"
+mkdir -p "$root/logs"
+
+# Everything under the bundle, so helpers count too.
+running() { pgrep -f "^$app/" 2>/dev/null; }
+
+if running >/dev/null 2>&1; then
+    echo "quitting $name ..."
+    osascript -e "quit app \"$name\"" 2>/dev/null || true
+    i=0
+    while running >/dev/null 2>&1; do
+        i=$((i + 1))
+        if [ $i -gt 40 ]; then          # 20 s of grace, then insist
+            echo "still running after 20s, sending TERM"
+            pids=$(running || true)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+            sleep 2
+            pids=$(running || true)
+            [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
+            break
+        fi
+        sleep 0.5
+    done
+fi
+sleep 1                                  # let the single-instance lock clear
+if running >/dev/null 2>&1; then
+    echo "ERROR: $name is still running; not starting a second copy" >&2
+    exit 1
+fi
+
+echo "starting $name under iosurftex"
+echo "  log: $log"
+: > "$log"
+DYLD_INSERT_LIBRARIES="$dylib" \
+RBGPU_IOSURFTEX_LOG="${RBGPU_IOSURFTEX_LOG:-1}" \
+RBGPU_IOSURFTEX_ANYUSAGE="${RBGPU_IOSURFTEX_ANYUSAGE:-0}" \
+nohup "$exe" "$@" >> "$log" 2>&1 &
+disown 2>/dev/null || true
+sleep 3
+if running >/dev/null 2>&1; then
+    echo "up. Use it, then:    grep -cE '^iosurftex: swapped' $log"
+else
+    echo "it exited again - the log's last lines:" >&2
+    tail -15 "$log" >&2
+    exit 1
+fi
