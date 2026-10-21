@@ -18149,3 +18149,78 @@ That leaves three levers, in order of how much is already known:
 
 Lever 2 is the next step: static, cheap, and it either hands us a one-bit
 fix or rules one out before anything touches a GC register.
+
+---
+
+## 2lv (2026-10-21, static, no boot): lever 2 resolved - the fork bit is NOT kernel-reachable
+
+2lu left one thing unresolved: the CPU tiler's packer-aware fork comes from
+`(%r15)->0xa0` bit 1 at `0x7ffb08c16918` in
+`-[GFXAAMD_MtlDevice amdMtl_LazyInit]`, and `(%r15)` was a different object
+from the `hwInfo` passed alongside it. Resolved now, in the device
+constructor at `0x7ffb08d09e7e`:
+
+```
+7ffb08d09ece   leaq (%rbx,%r12), %r13          ; r12 = ivar off 0x7ffb434b2010
+7ffb08d09edc   movq %r13, (%rbx,%r14)          ; DeviceMembersRec+0x00 = r13
+7ffb08d09f81   movq 0x1a0(%rbx,%r14), %rsi     ; _sAMD_GET_HW_INFO_VALUES*
+7ffb08d09f89   movq %r13, %rdi
+7ffb08d09f8f   callq gfx10_HwInfoInitData       ; (GFX10_HwInfoRec*, vals*, u32)
+7ffb08d09fac   testb $0x40, 0xa0(%rbx,%r12)     ; same dword, bit 6
+7ffb08d09fd4   callq 0x7ffb08d2d700             ; InitDeviceSettings(settings, r13)
+```
+
+**`DeviceMembersRec+0x00` is a `GFX10_HwInfoRec` embedded as an ivar of
+`GFXAAMD_MtlDevice`** (`r13 = self + ivarOffset`), not a kernel-filled
+buffer. So the fork bit is **bit 1 of `GFX10_HwInfoRec + 0xa0`**, a
+userspace flags dword.
+
+### What `gfx10_HwInfoInitData` does and does not do
+
+```
+7ffb08cb40ce   movl 0xa0(%rdi), %r9d        ; READS the flags dword on entry
+...
+7ffb08cb420d   andl $-0x41, %r9d            ; conditionally clears bit 6 only
+7ffb08cb4211   movl %r9d, 0xa0(%rdi)
+7ffb08cb4218   movl 0xa0(%rsi), %r9d        ; vals+0xa0 = GB_ADDR_CONFIG
+7ffb08cb421f   movl %r9d, 0xa4(%rdi)        ; -> GFX10_HwInfoRec+0xa4
+```
+
+It reads `+0xa0` already populated, touches **bit 6 and nothing else**, and
+never writes bit 1. Bit 1 is set before this call, by code not yet located -
+plausibly a static per-ASIC template, since no store to that ivar's `+0xa0`
+appears in the obvious addressing form anywhere in `__text`.
+
+**Answer to lever 2: no. The fork bit is not copied from
+`_sAMD_GET_HW_INFO_VALUES`, so the kernel cannot set it.** Lever 2 does not
+yield a one-bit fix; it rules one out, which is what a cheap static check is
+for.
+
+### Three things confirmed on the way
+
+1. **`GFX10_HwInfoRec + 0xa4` = GB_ADDR_CONFIG, copied verbatim from
+   `_sAMD_GET_HW_INFO_VALUES + 0xa0`.** 2lk's channel is exact, and it
+   remains the only geometry input the kernel controls.
+2. **`InitDeviceSettings`'s second argument is the `GFX10_HwInfoRec`**
+   (`0x7ffb08d09fd4` passes `r13`), so its reads of `0xa0`/`0xcc`/`0xcd`
+   are fields of that record. 2lp's comment calling it `AMDCommonHwInfoRec`
+   was imprecise, which is part of why the bit-23 trace was hard to place.
+3. **Bit 6 of the same dword gates whether `InitDeviceSettings` runs at
+   all** (`testb $0x40, 0xa0(%rbx,%r12)`; `je` skips it). A flags dword that
+   both selects swizzle patterns and gates device-settings init is worth
+   knowing about before anything perturbs it.
+
+### Where this leaves the text defect
+
+Of 2lu's three levers: lever 3 was already dead (needs userspace), lever 2
+is now dead (not kernel-reachable), and **lever 1 is what is left** -
+program the chip's own `GB_ADDR_CONFIG` (dword `0x13de`, BASE_IDX 0) to a
+geometry Apple's CPU tiler has a correct pattern for, and report the same
+value through `hwInfo+0xa0`, so the CPU tiler and the GPU agree. That is a
+global memory-layout change and the riskiest step since 2ks.
+
+One cheaper thing comes first, and it is still static: **find where
+`GFX10_HwInfoRec+0xa0` is initialized.** If any part of it derives from a
+kernel-supplied value, lever 2 comes back from the dead at a fraction of
+lever 1's risk. If it is a hardcoded per-ASIC constant, that is worth
+knowing before touching a GC register.
