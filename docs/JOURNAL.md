@@ -18694,3 +18694,94 @@ Stated plainly because the pattern has bitten repeatedly in this session: an
 instruction that *looks* like an off-by-a-log2 is exactly the kind of thing
 that reads as a smoking gun and turns out to be a misread operand. It gets
 tested, not announced.
+
+---
+
+## 2mc (2026-10-21, static): TERM computed - `0xc00`, and it flips the pattern bit whose equation is `y3`
+
+2mb left `(%rbx)` unidentified. Resolved.
+
+### `ComputeMicroTileDimensionsLog2` (`0x7ffb08c98307`)
+
+Signature `(rec, resourceType, swizzleMode, elemLog2, uint *out)`. For
+`resourceType == 2` **and** a mode in the `0x6660666` set (22 and 25 are in
+it), it indexes a 3-byte-per-element table at `0x7ffb08fbb40a`; otherwise a
+2-byte-per-element table at `0x7ffb08fbb400`. It writes
+`out[0] = microTileWidthLog2`, `out[1] = microTileHeightLog2`,
+`out[2] = third`. One special case: mode 27 with `elemLog2 == 0`,
+`rec[0x03] != 0` and `!(rec[0x2c] & 2)` forces `out[1] = 5`.
+
+```
+0x7ffb08fbb400 (non-2D)      0x7ffb08fbb40a (2D + pattern)
+ elem0  W=4 H=4               elem0  W=3 H=2 third=3
+ elem1  W=4 H=3               elem1  W=2 H=2 third=3
+ elem2  W=3 H=3               elem2  W=2 H=2 third=2
+ elem3  W=3 H=2               elem3  W=2 H=1 third=2
+ elem4  W=2 H=2               elem4  W=1 H=1 third=2
+```
+
+**Mode 22, 2D, BGRA8 (`elemLog2 = 2`) -> W = 2, H = 2.** So
+`-0x1c8(%rbp) = 0xffffffff << 2 = 0xfffffffc`.
+
+### TERM, numerically
+
+```
+idx  = 1 << rec[0x03]            = 1 << pipesLog2(2)      = 4
+ecx  = bzhi(0xfffffffc, 4)       = 0xfffffffc & 0xf       = 0xc
+eax  = 0xc << rec[0x02]          = 0xc << 8               = 0xc00
+TERM = bzhi(0xc00, ebx)          = 0xc00
+```
+
+Generally: **`TERM = bits[microTileWidthLog2, 1 << pipesLog2) << pipeInterleaveLog2`.**
+
+`0xc00` is address bits 10 and 11 - pattern bits **2 and 3**, since the
+pattern bits sit at address bit 8 and up (2mb). From 2ma's decode of row 22:
+
+```
+pattern bit 2 = (f2 bit 2)      -> no x, no y term
+pattern bit 3 = y3              -> pure Y
+```
+
+So the term XORed into **every** tile address flips one bit whose equation
+is **`y3` and nothing else**. 2lo measured a displacement that is pure Y
+(`y ^ 32`) with no X component. That is a close fit in shape.
+
+### Whether the `1 <<` is a bug is NOT decided
+
+The tempting reading is that `bzhi`'s index should be a bit count and
+`1 << pipesLog2` should be `pipesLog2`, which would make `TERM = 0` - no
+XOR at all. Two things argue against announcing that:
+
+1. The mask being narrowed is `bits >= microTileWidthLog2`, so the
+   expression is "pipe bits above the micro tile", and a sensible intended
+   form would be `microTileWidthLog2 + pipesLog2 = 2 + 2 = 4` - which is
+   **exactly what `1 << pipesLog2` evaluates to on this chip**. The
+   expression may be correct here by construction or by coincidence.
+2. On Navi 21 (`pipesLog2 = 4`) the same expression gives
+   `bits[2,16) << 8`, a far wider mask than any of the candidate "intended"
+   forms. Apple ships this code working on Navi 21, so a reading that makes
+   it obviously broken there is probably the wrong reading, not a discovered
+   bug (the same reasoning that stopped the PM4 parse-drift theory in 2dq).
+
+### What is now testable
+
+`TERM` depends only on `rec[0x02]` and `rec[0x03]` - `PIPE_INTERLEAVE_SIZE`
+and `NUM_PIPES` of `GB_ADDR_CONFIG` - which 2ly already rewrites:
+
+| reported NUM_PIPES | `1 << pipesLog2` | TERM |
+|---|---|---|
+| 0 or 1 | 1 or 2 | **0** (empty range) |
+| **2 (actual)** | 4 | **0xc00** |
+| 3 | 8 | 0xfc00 |
+
+So reporting `NUM_PIPES <= 1` removes the XOR entirely. **Confounded**, and
+badly: `pipesLog2` also feeds the pattern row through
+`K = pipesLog2 + 2*numPkrs - 2`, and feeds userspace AddrLib's own surface
+layout, which 2lz showed has teeth. A `NUM_PIPES` boot would move three
+things at once and could not attribute the result to any of them.
+
+Disentangling needs an override of `rec[0x02]`/`rec[0x03]` **after**
+`AllocCpuTexInterface` has consumed `GB_ADDR_CONFIG` - i.e. inside the
+userspace record, not the kernel's report. That is the userspace the
+project cannot patch (2lt). Recorded as the sharpest open question the text
+defect has produced, with no cheap experiment behind it yet.
