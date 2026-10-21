@@ -19284,3 +19284,134 @@ And `/Library/GPUBundles/NVMTLDriver.bundle` plus `nvmtl/libvulkan_nouveau.dylib
 are **already installed on this machine** (2026-10-09, for the laptop's RTX 4050,
 which `-wegnoegpu` disables), so the third-party Metal plugin mechanism is
 present on macOS 15.8.1 and not a Tahoe-only facility.
+
+## 2ml — the coherency hypothesis is dead, and 2mj's "non-deterministic" was wrong
+
+Boot 112, armed, UUID `A3DDC2C8` matching `build/out`, baseline boot-args
+(`-rbgpulinear` IN, no `rbgpu_pkrs`/`rbgpu_pipes`).
+
+### The nullarc coherency hypothesis (2mk) is refuted
+
+If `replace()` left its bytes in the CPU's cache and the GPU read the stale
+DRAM beneath, evicting the cache between the upload and the read would fix it.
+It does not. A 128 MB touch - far larger than any cache on this part - changes
+nothing, and an equal-duration sleep as the time-only control changes nothing
+either:
+
+```
+  baseline (nothing)        fail 21/24  wrong-rows: 0x3  16x9  48x12
+  evict by WRITING 128 MB   fail 21/24  wrong-rows: 0x3  16x9  48x12   (9.3 ms)
+  evict by READING 128 MB   fail 21/24  wrong-rows: 0x3  16x9  48x12   (5.0 ms)
+  sleep, same duration      fail 21/24  wrong-rows: 0x3  16x9  48x12
+```
+
+Four variants, bit-identical histograms. **Withdrawn.** nullarc's stripes are a
+real defect of theirs on the same topology, but they are not this defect. It
+was proposed in 2mk on the strength of a predicted-property table and no
+measurement, which is the recurring error wearing a new hat: the table in 2mk
+listed five properties coherency "predicts" without testing the one experiment
+that separates it from everything else. Instance 30.
+
+Where we own the backing store, both sides agree perfectly - 24/24 clean on the
+GPU's view *and* the CPU's view of the same buffer-backed linear texture. The
+defect needs the driver's own allocation.
+
+### 2mj's "non-deterministic" was wrong: it is deterministic
+
+2mk-1 ran six settle variants - plain, `synchronize`+wait, 50 ms sleep, both,
+double `replace`, and a pre-idled queue - at n=16 each:
+
+```
+  replace -> read             0x2  4096x6  12288x8     rows: 0-15 | 0-47 | 16-31 | 32-47
+  replace -> synchronize+wait 0x2  4096x6  12288x8     rows: 0-15 | 0-47 | 16-31 | 32-47
+  replace -> 50ms sleep       0x2  4096x6  12288x8     rows: 0-15 | 0-47 | 16-31 | 32-47
+  replace -> sync + 50ms      0x2  4096x6  12288x8     rows: 0-15 | 0-47 | 16-31 | 32-47
+  replace twice -> read       0x2  4096x6  12288x8     rows: 0-15 | 0-47 | 16-31 | 32-47
+  idle cb -> replace -> read  0x2  4096x6  12288x8     rows: 0-15 | 0-47 | 16-31 | 32-47
+```
+
+Six independent runs returning the same histogram to the trial is not a
+stochastic process. The outcome is **fixed by the allocation**, and the same
+allocation sequence reproduces it exactly. 2mj saw spread because it varied
+allocations, not because anything is random. Nothing about the upload races:
+no amount of settling, synchronising or repeating moves a single trial.
+
+### The bands are thirds of the surface, and some heights never fail
+
+2mk-3, n=16 per height, w=256 so one row is 1 KB:
+
+| h | wrong rows | bands |
+|---|---|---|
+| 16 | 0 x16 | clean |
+| 32 | 0 x16 | clean |
+| 48 | 0x2, 16x6, 48x8 | `0-15`, `16-31`, `32-47`, `0-47` |
+| 64 | 0x8, 64x8 | `0-63` |
+| 96 | 0x4, 32x12 | `0-31`, `32-63`, `64-95` |
+| 128 | 0 x16 | clean |
+| 192 | 0x8, 64x8 | `128-191` |
+
+The band is always exactly a third of the surface - 16 of 48, 32 of 96, 64 of
+192 - never a partial row, and the boundaries are aligned. The 16 KB quantum of
+2mj was an artefact of only ever testing h=48.
+
+### 2mm — the predictor: the client's footprint, not the content and not the clock
+
+`heapTextureSizeAndAlign` reports what the **userspace** driver intends to
+occupy for a geometry. Against the pass/fail column above:
+
+| w | h | pixels | footprint | align | ratio | 2mk-3 |
+|---|---|---|---|---|---|---|
+| 256 | 16 | 16384 | 32768 | 4096 | 2.00x | clean |
+| 256 | 32 | 32768 | 32768 | 4096 | 1.00x | clean |
+| 256 | 48 | 49152 | 131072 | 65536 | 2.67x | **fails** |
+| 256 | 64 | 65536 | 131072 | 65536 | 2.00x | **fails** |
+| 256 | 96 | 98304 | 131072 | 65536 | 1.33x | **fails** |
+| 256 | 128 | 131072 | 131072 | 65536 | 1.00x | clean |
+| 256 | 192 | 196608 | 262144 | 65536 | 1.33x | **fails** |
+| 256 | 256 | 262144 | 262144 | 65536 | 1.00x | - |
+| 64 | 64 | 16384 | 16384 | 4096 | 1.00x | - |
+
+**Every failing geometry has align 65536 and ratio > 1.00. Every clean
+geometry has either align 4096 or ratio exactly 1.00.** No exception in the
+data.
+
+Align 65536 is a 64 KB tiled swizzle mode; align 4096 is 4 KB or linear. So
+the client lays these textures out **tiled**, in 64 KB tiles, padding 48 KB of
+pixels into 128 KB - while this boot's kernel is forcing every client surface
+to **LINEAR** (`-rbgpulinear`, `rbgpu-surf hk=1 calls=38 forced=38 lin=1`).
+
+That is a **disagreement between the two halves of the driver**, and it
+accounts for everything the single-sided stories could not:
+
+- Where the tiled footprint happens to equal the linear one (ratio 1.00), the
+  two layouts coincide and the surface is correct. That is h=32, h=128, h=256.
+- Where it does not, whole aligned bands of rows are addressed as if tiled and
+  stored as if linear, or the reverse.
+- It is deterministic per geometry, as 2mk-1 found, because a footprint is.
+- It is invisible to every *kernel-side* lever (2me: row, TERM, pipes,
+  packers), because the kernel's own arithmetic was never wrong - it is being
+  told LINEAR and doing LINEAR correctly.
+- `iosurface` is clean throughout because an IOSurface's layout is agreed
+  between the halves by construction.
+- Buffer-backed linear textures are clean on both sides (2ml-b) because we
+  supply the layout.
+
+### The prediction, and it is a reboot test
+
+If the defect is this mismatch, then **removing `-rbgpulinear` must make the
+padded geometries clean**, because the kernel would stop overriding the mode
+the client already laid out for. The sweep is already in `texprobe`, so the
+prediction is sharp and falsifiable in one boot:
+
+> With `-rbgpulinear` out, 2mk-3's h=48, 64, 96 and 192 must go clean, and
+> 2mm's ratios must be unchanged (the client does not know about the boot-arg).
+
+`sudo tools/efi.sh bootarg remove -rbgpulinear && sudo nvram rbgpu-arm=1`
+
+HANDOFF currently says `-rbgpulinear` "belongs IN" and that 2ln showed it does
+not affect the text either way. 2ln compared kernel-side tiled counts across
+boots 103 and 104 on a whole-screen judgement; this is the first per-geometry
+predictor we have had, and it says the boot-arg is not neutral but **causal**.
+If the sweep goes clean, the ~80 % widget/chrome win `-rbgpulinear` buys has
+been paid for with the text all along, and the real fix is to make the kernel
+agree with the client rather than override it.
