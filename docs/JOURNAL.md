@@ -18843,3 +18843,78 @@ the smaller perturbation of the two zeroing values. `rbgpu_pipes=0` second.
 Failure mode is pixels, not a hang; removing the boot-arg undoes it and
 `-rbgpuoff` remains the rescue. The chip's own `GB_ADDR_CONFIG` is never
 written - only what `getHardwareInfo` reports.
+
+---
+
+## 2me (2026-10-21, boot 110): TERM = 0 and the text is unchanged - 2mc's hypothesis is dead
+
+Boot 110, UUID `A3DDC2C8`, `rbgpu-boot` = 110, armed. **Both** overrides
+were in boot-args - `rbgpu_pkrs=1` was not removed before `rbgpu_pipes=1`
+was added - so this boot reported `NUM_PIPES = 1` **and** `NUM_PKRS = 1`.
+Read live from `RBGPUDiag`:
+
+```
+pkrs_arg = 1   pipes_arg = 1
+pkrs_was_gbac = 578 = 0x242      (the chip's real register)
+pkrs_now_gbac = 321 = 0x141      (pipes 2->1, pkrs 2->1)
+pkrs_writes = pipes_writes = 35
+```
+
+Derived for what userspace saw: `numPkrs = 1 <= 1`, so `K = pipesLog2 = 1`,
+pattern row `= elemLog2 + 5K = 7`; and
+
+```
+TERM = bits[microTileWidthLog2(2), 1 << pipesLog2(1) = 2) << 8 = EMPTY = 0
+```
+
+**TERM was zero this boot, and the text is unchanged.** So the constant
+`0xc00` XOR is not what displaces glyph rows, and 2mc's hypothesis - the
+best-fitting one the static read produced - is **dead**. Its shape matched
+(a single pure-`y3` term against a measured pure-Y displacement) and it was
+still wrong.
+
+### The other result, which is larger
+
+Boot 110 reports a **completely false geometry** - 2 pipes and 2 packers
+where the chip has 4 and 4 - and renders **the same as baseline**. Boot 109
+reported `pkrs=1` alone and produced whole-surface destruction. So:
+
+| boot | reported | row | TERM | result |
+|---|---|---|---|---|
+| 108 | 0x242 (true) | 22 | 0xc00 | glyph scramble only |
+| 109 | 0x142 | 12 | 0xc00 | **whole-surface destruction** |
+| 110 | 0x141 | 7 | 0 | glyph scramble only |
+
+A *more* wrong geometry rendering *better* than a less wrong one is not a
+layout story. It weakens 2lz's reading that this field drives client surface
+layout generally - what boot 109 may actually have hit is an **inconsistent**
+pair (`pkrs=1` with `pipes=2`) rather than a wrong one, since boot 110's
+pair is self-consistent. **Not asserted**; two variables moved and n=1 each.
+
+### What this costs the whole line of attack
+
+Every lever the kernel has over client texture geometry has now been
+exercised - pattern row (12, 7, 22), the per-tile XOR (0xc00, 0), packer
+count, pipe count - and **none of them moves the glyph defect in either
+direction.** The text looks the same at row 22 with TERM 0xc00 as at row 7
+with TERM 0.
+
+That is 2ln's original position arriving from the other side: **the glyph
+defect is not a layout problem.** 2lo's texprobe matrix stands as a real
+measurement of `replaceRegion` on tiled BGRA8, but **the chain from that
+defect to the on-screen glyphs has never been established** - it was assumed
+in 2lp and never tested. Apps may not upload glyph atlases through that path
+at all.
+
+### The next step that is actually in reach
+
+`tools/texprobe.swift` is our own program, so it can be instrumented
+completely - which userspace Metal in other apps cannot (2lt). Extend it to
+**rasterise real text** (CoreText into a CPU buffer, uploaded the several
+ways texprobe already distinguishes) and see whether the scramble
+reproduces. If it does, the defect is in a path we can measure end to end.
+If it does not, `replaceRegion` is a real but **unrelated** bug and the
+glyph defect needs a different hypothesis entirely.
+
+Either answer is worth more than another geometry boot, and it costs no
+boot at all.
