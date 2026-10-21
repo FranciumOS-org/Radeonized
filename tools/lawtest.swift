@@ -31,15 +31,30 @@ kernel void rd(texture2d<float, access::read> t [[texture(0)]],
 let pso = try! dev.makeComputePipelineState(
     function: try! dev.makeLibrary(source: src, options: nil).makeFunction(name: "rd")!)
 
+// 2ms: the law and the fix were only ever measured on bgra8Unorm. Claude's
+// glyph atlas is R8Unorm with RenderTarget|ShaderRead, so both the format and
+// the usage have to be measured before anything is claimed about them.
+var gFormat = MTLPixelFormat.bgra8Unorm
+var gBpe = 4
+var gUsage: MTLTextureUsage = [.shaderRead]
+
 func trial(_ w: Int, _ h: Int, _ v: UInt32) -> Int {
-    let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+    let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: gFormat,
                                                      width: w, height: h, mipmapped: false)
-    d.storageMode = .managed; d.usage = [.shaderRead]
+    d.storageMode = .managed; d.usage = gUsage
     guard let t = dev.makeTexture(descriptor: d) else { return -1 }
-    let want = [UInt32](repeating: v, count: w*h)
-    want.withUnsafeBytes { s in
-        t.replace(region: MTLRegionMake2D(0,0,w,h), mipmapLevel: 0,
-                  withBytes: s.baseAddress!, bytesPerRow: w*4)
+    if gBpe == 1 {
+        let want = [UInt8](repeating: UInt8(v & 0xff), count: w*h)
+        want.withUnsafeBytes { s in
+            t.replace(region: MTLRegionMake2D(0,0,w,h), mipmapLevel: 0,
+                      withBytes: s.baseAddress!, bytesPerRow: w)
+        }
+    } else {
+        let want = [UInt32](repeating: v, count: w*h)
+        want.withUnsafeBytes { s in
+            t.replace(region: MTLRegionMake2D(0,0,w,h), mipmapLevel: 0,
+                      withBytes: s.baseAddress!, bytesPerRow: w*4)
+        }
     }
     let out = dev.makeBuffer(length: w*h*4, options: .storageModeShared)!
     memset(out.contents(), 0xEE, w*h*4)
@@ -52,9 +67,48 @@ func trial(_ w: Int, _ h: Int, _ v: UInt32) -> Int {
     e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
     let g = UnsafeBufferPointer(start: out.contents().bindMemory(to: UInt32.self,
                                                                 capacity: w*h), count: w*h)
+    if gBpe == 1 {
+        // The shader returns the red channel in bits 16-23 for an r8 texture.
+        let want = (v & 0xff) << 16
+        return (0..<(w*h)).reduce(0) { $0 + ((g[$1] & 0x00ff0000) != want ? 1 : 0) }
+    }
     return (0..<(w*h)).reduce(0) { $0 + (g[$1] != v ? 1 : 0) }
 }
 
+func sweep(_ label: String, _ fmt: MTLPixelFormat, _ bpe: Int, _ usage: MTLTextureUsage,
+           _ geoms: [(Int, Int)]) {
+    gFormat = fmt; gBpe = bpe; gUsage = usage
+    print("")
+    print("=== \(label)")
+    var fail = 0, runs = 0
+    for (w, h) in geoms {
+        var fails = 0
+        let n = 12
+        for i in 0..<n { if trial(w, h, 0xff000000 | UInt32(i*11+1)) > 0 { fails += 1 } }
+        fail += fails; runs += n
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: fmt, width: w,
+                                                         height: h, mipmapped: false)
+        d.storageMode = .shared; d.usage = usage
+        let sa = dev.heapTextureSizeAndAlign(descriptor: d)
+        print(String(format: "  %4dx%-4d align %5d ratio %.2fx   fail %2d/%d",
+                     w, h, sa.align, Double(sa.size)/Double(w*h*bpe), fails, n))
+    }
+    print("  subtotal \(fail)/\(runs)")
+}
+
+// The atlas geometry Claude actually asked for, and its neighbours.
+sweep("r8Unorm, RenderTarget|ShaderRead (Claude's glyph atlas shape)",
+      .r8Unorm, 1, [.shaderRead, .renderTarget],
+      [(1024,128), (1024,48), (512,128), (256,48), (1024,256)])
+sweep("r8Unorm, ShaderRead only", .r8Unorm, 1, [.shaderRead],
+      [(1024,128), (1024,48), (256,48)])
+sweep("bgra8Unorm, RenderTarget|ShaderRead", .bgra8Unorm, 4, [.shaderRead, .renderTarget],
+      [(256,48), (256,96)])
+
+// The original bgra8 shaderRead sweep, unchanged, as the stable baseline.
+gFormat = .bgra8Unorm; gBpe = 4; gUsage = [.shaderRead]
+print("")
+print("=== bgra8Unorm, ShaderRead only (the 36/72 baseline)")
 var totalFail = 0, totalRuns = 0
 for (w, h) in [(256,48), (256,64), (256,96), (1000,48), (256,128), (256,32)] {
     var fails = 0
