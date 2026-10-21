@@ -189,3 +189,105 @@ for r8 in [false, true] {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 2mf: REAL GLYPHS, and the focus/redraw effect.
+//
+// Everything above uses a synthetic pattern whose pixels encode their own
+// (x,y), which is what made 2lo's `y ^ 32` readable. But no measurement has
+// ever connected that defect to the glyphs actually on screen - 2lp assumed
+// the link and 2me killed every layout explanation for the glyphs.
+//
+// So: rasterise real text with CoreText into a CPU BGRA buffer, push it
+// through the same upload paths, read it back on the GPU and compare to the
+// buffer we drew. A mismatch is the on-screen defect reproduced inside a
+// program we can instrument completely (2lt: other apps' Metal cannot be).
+//
+// It also tests the user's observation (2026-10-21): desktop icons and
+// iMessage pictures render scrambled while their window is UNFOCUSED and
+// correct once clicked, while the Claude app and Safari images do not
+// recover. A redraw fixing content means the stored bytes were right and
+// something about reading them later was wrong - so each case is read back
+// immediately, then again after the GPU has been idle.
+//
+// Row attribution: for every readback row that does not match its own
+// reference row, the nearest matching reference row is reported, so a
+// permutation prints as `12->44` rather than just "wrong".
+import CoreGraphics
+import CoreText
+
+func glyphBitmap(_ w: Int, _ h: Int) -> ([UInt32], Int) {
+    let bpr = w * 4
+    var px = [UInt32](repeating: 0xff000000, count: w * h)
+    px.withUnsafeMutableBytes { raw in
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let bi = CGImageAlphaInfo.premultipliedFirst.rawValue
+              | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: bpr,
+                                  space: cs, bitmapInfo: bi) else { return }
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        let font = CTFontCreateWithName("Menlo" as CFString, 13, nil)
+        let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        let attrs: CFDictionary = [
+            kCTFontAttributeName as String: font,
+            kCTForegroundColorAttributeName as String: white] as CFDictionary
+        var y = h - 14
+        while y > 0 {
+            let str = "The quick brown fox 0123456789 #\(y)" as CFString
+            let a = CFAttributedStringCreate(nil, str, attrs)!
+            let line = CTLineCreateWithAttributedString(a)
+            ctx.textPosition = CGPoint(x: 2, y: CGFloat(y))
+            CTLineDraw(line, ctx)
+            y -= 14
+        }
+    }
+    return (px, bpr)
+}
+
+func compareRows(_ got: [UInt32], _ want: [UInt32], _ w: Int, _ h: Int) -> (Int, [String]) {
+    var bad = 0
+    var moves: [String] = []
+    for y in 0..<h {
+        let g = Array(got[y * w ..< (y + 1) * w])
+        let r = Array(want[y * w ..< (y + 1) * w])
+        if g == r { continue }
+        bad += 1
+        var from = -1
+        for c in 0..<h where Array(want[c * w ..< (c + 1) * w]) == g { from = c; break }
+        if moves.count < 12 {
+            moves.append(from >= 0 ? "\(y)<-\(from)" : "\(y)<-?")
+        }
+    }
+    return (bad, moves)
+}
+
+print("")
+print("=== 2mf: real CoreText glyphs ===")
+for w in [256, 1000] {
+    let h = 48
+    let (want, _) = glyphBitmap(w, h)
+    let ink = want.filter { $0 != 0xff000000 }.count
+    print("reference w=\(w) h=\(h): \(ink) non-background pixels")
+    for p in paths where p.name != "linear-buffer-tex" {
+        guard let (t, _) = p.make(w, h, false) else { print("  \(p.name) UNSUPPORTED"); continue }
+        // upload the glyph bitmap through this path's own mechanism
+        want.withUnsafeBytes { src in
+            t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                      withBytes: src.baseAddress!, bytesPerRow: w * 4)
+        }
+        let got1 = readTex(t, false)
+        let (bad1, mv1) = compareRows(got1, want, w, h)
+        // let the GPU go idle, then read the SAME texture again - the user's
+        // unfocused/refocused observation says a later read can differ.
+        Thread.sleep(forTimeInterval: 2.0)
+        let got2 = readTex(t, false)
+        let (bad2, mv2) = compareRows(got2, want, w, h)
+        let same = got1 == got2
+        print(String(format: "  %-22s w=%4d  rows-wrong now=%2d later=%2d  stable=%@",
+                     (p.name as NSString).utf8String!, w, bad1, bad2, same ? "YES" : "NO"))
+        if bad1 > 0 { print("      now:   \(mv1.joined(separator: " "))") }
+        if bad2 > 0 && !same { print("      later: \(mv2.joined(separator: " "))") }
+    }
+}
