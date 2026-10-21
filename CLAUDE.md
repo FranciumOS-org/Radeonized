@@ -17,10 +17,10 @@ Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev
 
 **An armed boot is a usable, accelerated Mac** — the CP halt is fixed
 (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute bit-exact.
-**The frontier is readable text.** The kernel DOES supply userspace its
-geometry and both AddrLibs are configured identically (2lk), so layout
-*configuration* is exonerated. Of ~4788 client resources, **190 are tiled**
-(125 mode 22, 57 mode 27, 8 mode 2) and the rest are linear already (2ll).
+**The frontier is readable text, and it is NOT a layout problem** (2ln):
+boots 103 and 104 render glyphs identically scrambled with client resources
+all-linear and with 190 of 4788 tiled. Every layout lever moves the
+widget/chrome class and leaves text untouched. See `docs/PROBLEM-TEXT.md`.
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
 
@@ -224,11 +224,11 @@ The two that bite hardest:
   `-rbgpupdefix` (composes with the upstream fix, halt returns),
   `-rbgpunodisppanic`, `-rbgpusdmahook`, `-rbgpustampraw`, `-rbgpuregdump`,
   `debug=0x100`.
-- **`-rbgpulinear` is currently OUT** (removed before boot 104, to settle
-  2ll). It is a blanket force that costs bandwidth on all ~4788 client
-  resources to correct the ~190 that are tiled. Re-add it to get back to the
-  boot-93..103 desktop:
+- **`-rbgpulinear` belongs IN and is currently OUT.** Boot 104 removed it and
+  the widget/Dock/chrome artifacts came straight back on a healthy chip, so
+  its ~80 % is real and not an artefact of boot 98's broken state. Restore:
   `sudo tools/efi.sh bootarg add -rbgpulinear && sudo nvram rbgpu-arm=1`
+  It does **not** affect the text in either direction (2ln).
 - **`-rbgpumtllinear`** (2lm) is built but OUT: a Lilu user patch forcing
   `DetermineSwizzleMode` to LINEAR in **Terminal only**. Not armed; 2ll's
   result must be read first.
