@@ -17416,3 +17416,68 @@ Not claimed: that forcing userspace to LINEAR will fix the text. That is the
 experiment, and its negative - text still scrambled with mode 0 on both sides
 - would exonerate layout entirely and send the search downstream, which is
 worth as much as the positive.
+
+## 2ll measured (boot 103) — AMBIGUOUS, and the ambiguity is the finding
+
+```
+rbgpu-mode = b=103 hk=1 seen=12224 bad=0 | m0=12224 | hi 0/12224/0/0 | lin=1
+rbgpu-res  = b=103 hk=1 calls=12224 null=333 rows=4
+```
+
+`b=103` against boot 102, `rbgpu-arm` consumed, loaded UUID
+`652BFDC8-D935-3B1A-879F-1D43FD0DBE88` == `build/out`. `seen` equals
+`rbgpu-res calls` exactly and `bad=0`, so every resource was inspected and no
+pointer was refused. The boot is healthy: `rbgpu-fault c=0 f=0 r=0 o=0 fw=0`,
+`rbgpu-mew NEVER HALTED`, `rbgpu-adj fixed=8947/8947`.
+
+**Every client resource reads mode 0, and bits 5:6 read 1, across all 12224.**
+
+### Why that is not yet "client resources are linear"
+
+Perfect uniformity across 12224 samples is **evidence against the field being
+per-resource at all.** Client textures differ in type, size and format; a
+genuine per-texture layout choice should vary. Two readings fit the data
+equally:
+
+1. every client resource really is laid out linear, or
+2. `res + 0x1dc` is a device-level constant read 12224 times, carrying nothing
+   about an individual texture.
+
+Declaring (1) would be the recurring error again - a value read without first
+establishing what makes it meaningful - and this time the trap is uniformity
+masquerading as unanimity.
+
+### One confound IS excluded
+
+`res + 0x1dc` is filled from `(res->0x250)->vt[0x1b8]()`. If that slot were
+the `getPreferredSwizzleMode2` that `-rbgpulinear` forces, `m0=12224` would be
+this plugin's own patch reflected back. It is not: 2la's hook on that function
+counted **70** calls this boot (`rbgpu-surf calls=70`), against 12224
+resources. A hook taken 70 times cannot be what answered 12224 queries, so
+`vt[0x1b8]` is a different, unhooked accessor and `m0` is Apple's own value.
+
+That rescues the measurement from being circular. It does not separate (1)
+from (2).
+
+### The discriminator, and it is cheap
+
+Read the same note with **`-rbgpulinear` OUT**. If the histogram still reads
+`m0=` everything, the field is a constant and 2ll is retired as an instrument.
+If it spreads - `m27` (64KB_R_X), `m25`, `m9` - then it IS per-resource, it
+was linear only because of the force, and the question becomes why linear
+client resources still render scrambled glyphs.
+
+That boot also answers something the user has not seen since 2ld: what the
+desktop looks like with no linear crutch at all, now that the halt is fixed
+and faults are zero. It removes a boot-arg rather than adding one, which is
+the cheapest possible experiment.
+
+### What 2lm's status becomes
+
+Unchanged - still built, still unarmed, still OUT. Forcing userspace to LINEAR
+is only meaningful once it is known whether the resources reaching the kernel
+are already linear, and that is exactly what reading (1) vs (2) decides. Had
+2lm been armed this boot alongside 2ll, neither note could have been read.
+
+Not claimed: that the glyph corruption is or is not a layout problem. Both
+readings above remain open.
