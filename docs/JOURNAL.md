@@ -17735,3 +17735,96 @@ Not claimed: that forcing the hardware blit is safe for every format, or
 that `ShouldUseSwBlt` has no correctness reason to be true for some surfaces
 (a format the blit engine cannot handle would be one). Terminal-only scoping
 is the guard against finding that out the expensive way.
+
+---
+
+## 2lq (2026-10-21, boot 105): 2lp SHIPPED INERT - `section = 0` disables a Lilu user patch
+
+Boot 105 ran with `-rbgpulinear` **and** `-rbgpuhwblt` in boot-args, kext
+UUID `E29F22DF`, confirmed loaded by `kextstat`.
+`rbgpu-boot` = 105, live and in `logs/20261021-023804-plugin/` (rule 8
+satisfied). Chip state unchanged from 2ll: `stamp_ret=1`, `mapq_fails=0`,
+zero VM faults, `gfx_min=gfx_max=0`.
+
+**Observation (the user, by eye): Terminal's text is READABLE. The the assistant
+desktop app's text is fully unreadable.**
+
+I read that as 2lp confirmed, and as the Terminal-only scoping proving
+itself. **That was wrong, and withdrawn.** 2lp's patch was never applied.
+
+### The defect
+
+`UserPatcher::BinaryModPatch`'s last field is `section`. Lilu 1.7.3,
+`kern_user.cpp:824` and `:850` (commit `0515f40b`, the version loaded here):
+
+```c
+for (size_t p = 0; p < binaryMod[i]->count; p++)
+    if (binaryMod[i]->patches[p].section != ProcInfo::SectionDisabled) {
+        hasPatches = true; break;
+    }
+if (!hasPatches) { DBGLOG("ignoring file %s ... no mods apply"); continue; }
+...
+if (patch.section == ProcInfo::SectionDisabled) {
+    DBGLOG("skipping not requested patch %s for %lu", ...); continue;
+}
+```
+
+`kern_user.hpp`: `static constexpr uint32_t SectionDisabled {0};`
+
+**Both `kRb2lmPatch` and `kRb2lpPatch` were written with `section = 0`.** So
+Lilu skipped the patch and never even read
+`AMDRadeonX6000MTLDriver.bundle/.../AMDRadeonX6000MTLDriver`. Worse,
+`onProcLoad` still returns `NoError`, so the hook logged **`2lp: ARMED`**
+while patching nothing. `ProcInfo::section` is never read by Lilu at all -
+only `BinaryModPatch::section` matters, and it must be non-zero.
+
+### What boot 105 therefore measured
+
+Nothing of 2lp. The kext was functionally identical to boot 104's
+(`git diff 2464a9b..bf6d96b -- src/` is 122 added lines, all of them the
+inert 2lp registration). The only effective delta from boot 104 is
+`-rbgpulinear` back **IN**.
+
+So the live reading is:
+
+| Boot | `-rbgpulinear` | Terminal text |
+|---|---|---|
+| 103 | IN | recorded scrambled (`docs/PROBLEM-TEXT.md`, from a photograph) |
+| 104 | OUT | scrambled |
+| 105 | IN | **readable** |
+
+Boot 103 and boot 105 had the same effective configuration and are recorded
+with opposite results, so **one of those two rows is wrong**, and the
+photograph that row 103 rests on is the older, boot-98-era one (docs/RULES.md
+already warns that boot 98 was a broken-chip state). The honest position:
+`-rbgpulinear` IN gives readable text in Terminal and does not in the the assistant
+desktop app, and the earlier "all apps scramble identically" claim is
+unreliable because it was never taken app-by-app on a healthy chip.
+
+2lo's software-tiler diagnosis is **untested**, not confirmed. It remains
+the best-supported theory - texprobe's 72-case matrix is unaffected by this
+- but no boot has exercised the stub.
+
+### The recurring error, instance 27
+
+This is the same error in its purest form yet: **a reading taken without
+establishing what makes it meaningful.** The precondition - "the patch is
+actually applied" - was checkable in Lilu's own source at any time, and the
+hook's own log asserted the opposite of the truth. Rule 14 ("absence is not
+a result") was written for the case where an instrument says nothing; this
+is the case where **the instrument says ARMED and is lying.**
+
+New rule, 20: **a registration that reports success is not evidence that a
+patch applied.** Log the enabling field itself, and refuse when it is
+disabled.
+
+### The fix
+
+`section = 1` on both patches, plus a guard in both
+`rbgpu_register_mtllinear_2lm` and `rbgpu_register_hwblt_2lp` that logs
+`INERT` and returns if the section is `SectionDisabled`, and an `ARMED
+(patch section=%u)` that prints the value it depends on. Build UUID
+`AD2476B6`, hosttest passes.
+
+Boot 106 is 2lp's first real test, and it is also the first boot that tests
+`-rbgpulinear`'s effect app-by-app rather than from one photograph.
