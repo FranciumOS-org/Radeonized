@@ -16781,3 +16781,58 @@ cursor - and eventually tiled scanout, which matters because
 `-rbgpulinear` is currently paying bandwidth for linear surfaces.
 
 Build `D2B77001-49B4-3FBE-8279-E8443B9255FA`.
+
+## 2lf (2026-10-20) — boot 99 names the entry client textures actually use
+
+```
+rbgpu-res  = b=99 hk=1 calls=2495 null=335 rows=4
+             | r0 40,0,10001,1,1a000,0,1a000,0
+             | r1 40,0,10001,1,1000,0,1000,0
+rbgpu-surf = b=99 swz hk=1 calls=61 | lin=1 forced=61
+```
+
+**`calls=2495` against 61.** Client resources are forty times more
+numerous than the surfaces that pass `getPreferredSwizzleMode2`, so they
+are the bulk of the system's textures **and they are not getting their
+layout from that path**. The first four rows are plain buffers - `0x1a000`
+and `0x1000` repeated as a size pair, no width or height - so the early
+resources are allocations, not the glyph atlases; the full 24-dword rows
+went only to the log, which the 2es rule means did not survive.
+
+**The two align-manager entries differ in kind, and that is the answer:**
+
+```
+getPreferredSwizzleMode2(in)     CHOOSES a mode               61 calls
+getSurfaceInfo2(in, out)         COMPUTES the layout for the mode
+                                 ALREADY SET in in->swizzleMode
+```
+
+Client textures arrive with their mode **already chosen** - by userspace -
+and only ever pass `getSurfaceInfo2` (0xbe99638). Forcing the chooser
+could never reach them, which is precisely what boot 98 showed:
+WindowServer's surfaces came right, app glyphs did not. The 80/20 split
+was not a coincidence, it was these two code paths.
+
+**2lf hooks the one they use.** `+0x08` is `swizzleMode` in
+`_ADDR2_COMPUTE_SURFACE_INFO_INPUT` **on evidence, not assumption** - 2la
+logged that field for five surfaces and read coherent values (0 = LINEAR,
+9 = 64KB_S). Under `-rbgpulinear` the hook rewrites it to 0 **before**
+the original runs, so the layout is computed for linear and the CPU and
+GPU agree. Without the arg it counts and records only.
+
+`rbgpu-si` carries `modes=`, a bitmask of every mode arriving (bit 27 =
+64KB_R_X, bit 0 = LINEAR), so what userspace is choosing is recorded
+whether or not the force is armed.
+
+| outcome | means |
+|---|---|
+| `forced>0`, glyphs readable | the fix; and the CPU/GPU tiling disagreement is fully characterised |
+| `forced>0`, still scrambled | the layout was not what corrupted them; the CPU-side tiling is computed wholly in userspace, out of this plugin's reach |
+| `calls=0` | client textures do not use Addr2's align manager either |
+
+Gates: defined in AMDRadeonX6000 (2c); routed nowhere else (2kn); rule 9
+clean - `48 85 f6 0f 94 c1`, testq and sete with no branch in the first
+five bytes (2gb); mangled name cross-checked against `nm` (2kr).
+
+Build `18EA0E63-AB04-3F6A-8E27-1372BB1A2B4B`. No new boot-arg -
+`-rbgpulinear` arms both forces.
