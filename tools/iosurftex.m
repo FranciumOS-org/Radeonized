@@ -16,8 +16,18 @@
 // will fail is served from an IOSurface. Everything else falls through
 // untouched, and any failure at all falls through untouched.
 //
-//   clang -dynamiclib -O2 -fobjc-arc -o build/out/iosurftex.dylib \
+//   clang -dynamiclib -O2 -fno-objc-arc -o build/out/iosurftex.dylib \
 //         tools/iosurftex.m -framework Metal -framework IOSurface -framework Foundation
+//
+// ARC MUST BE OFF (2mr). Metal declares MTLCreateSystemDefaultDevice and
+// MTLCopyAllDevices NS_RETURNS_RETAINED, and -newTextureWithDescriptor: is in
+// the `new` family, so all three hand the caller a +1 reference. Built with
+// -fobjc-arc, ARC inserted a release on the way out of each replacement while
+// the caller still owned its reference, and every application that enumerates
+// Metal devices died in objc_release at the next autorelease-pool pop - the assistant,
+// Terminal and Mail alike, whether the interposer was enabled or not. An
+// interposer must pass ownership straight through and touch no retain count.
+// tools/ownership-test.m is the regression test.
 //   DYLD_INSERT_LIBRARIES=build/out/iosurftex.dylib <program>
 //
 // RBGPU_IOSURFTEX=0    off
@@ -135,18 +145,25 @@ static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
         // 1000-wide surface hung the probe during 2mo, so it is pinned to the
         // 256-byte alignment the blit engine wants.
         size_t bpr = (desc.width * bpe + 255) & ~(size_t)255;
-        IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)@{
-            (__bridge NSString *)kIOSurfaceWidth:           @(desc.width),
-            (__bridge NSString *)kIOSurfaceHeight:          @(desc.height),
-            (__bridge NSString *)kIOSurfaceBytesPerElement: @(bpe),
-            (__bridge NSString *)kIOSurfaceBytesPerRow:     @(bpr),
-            (__bridge NSString *)kIOSurfacePixelFormat:     @(cc),
-        });
+        IOSurfaceRef surf = NULL;
+        // The literals are autoreleased, and this can run on a thread with no
+        // pool of its own, so it gets one. The texture is created after it
+        // drains, since it is +1 and must not be autoreleased here.
+        @autoreleasepool {
+            surf = IOSurfaceCreate((CFDictionaryRef)@{
+                (NSString *)kIOSurfaceWidth:           @(desc.width),
+                (NSString *)kIOSurfaceHeight:          @(desc.height),
+                (NSString *)kIOSurfaceBytesPerElement: @(bpe),
+                (NSString *)kIOSurfaceBytesPerRow:     @(bpr),
+                (NSString *)kIOSurfacePixelFormat:     @(cc),
+            });
+        }
         if (!surf) { LOG("IOSurfaceCreate failed for %lux%lu", (unsigned long)desc.width,
                          (unsigned long)desc.height); goto fallthrough; }
 
+        // `new` family: +1, returned to the caller as its own reference.
         id tex = [(id<MTLDevice>)self newTextureWithDescriptor:desc iosurface:surf plane:0];
-        CFRelease(surf);
+        CFRelease(surf);                       // the texture holds its own reference
         if (!tex) { LOG("newTextureWithDescriptor:iosurface: failed for %lux%lu",
                         (unsigned long)desc.width, (unsigned long)desc.height); goto fallthrough; }
 
@@ -192,16 +209,18 @@ static void installOnce(id<MTLDevice> dev)
 
 // Interposed, not swizzled, so the driver bundle is certainly loaded by the time
 // the class is looked up.
+__attribute__((ns_returns_retained))
 static id<MTLDevice> my_MTLCreateSystemDefaultDevice(void)
 {
-    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();   // +1, passed straight on
     if (gEnabled && !gInert) installOnce(dev);
     return dev;
 }
 
+__attribute__((ns_returns_retained))
 static NSArray<id<MTLDevice>> *my_MTLCopyAllDevices(void)
 {
-    NSArray<id<MTLDevice>> *a = MTLCopyAllDevices();
+    NSArray<id<MTLDevice>> *a = MTLCopyAllDevices();      // +1, passed straight on
     if (gEnabled && !gInert && a.count) installOnce(a[0]);
     return a;
 }

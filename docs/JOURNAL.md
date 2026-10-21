@@ -19826,3 +19826,90 @@ Per-process injection remains correct in principle, but:
 2. Only then consider a real application. Never through launchd.
 3. The accelerator work needs `sudo nvram rbgpu-arm=1 && sudo reboot` again;
    the current boot has no Metal device at all.
+
+## 2mr — the crash was mine: ARC released Metal's +1 out from under every caller
+
+Boot 114, armed. The user's control settled the question I had got backwards:
+exec'ing `/Applications/<app>.app/Contents/MacOS/<app>` with nothing inserted
+**works**. So the launch method was never the problem and the dylib was.
+
+### The bisect
+
+`tools/iosurftex-bisect.sh`, five variants, 10 s each:
+
+```
+  A  nothing inserted (control)        STAYED UP
+  B  noop-insert.dylib                 STAYED UP
+  C  iosurftex, RBGPU_IOSURFTEX=0      EXITED   Segmentation fault: 11
+  D  iosurftex, INERT=1                EXITED   Segmentation fault: 11
+  E  iosurftex, full                   EXITED   Segmentation fault: 11
+```
+
+A do-nothing dylib is fine, so insertion is not refused. Ours kills it **even
+fully disabled**, so nothing in the fix logic is involved - and in variant E
+the log stops before any Metal device is created, which is why no `swapped`
+line ever appeared.
+
+### The crash
+
+The launchd episode of 2mq left crash reports for `Terminal`, `Mail` and
+`Tips`, so that was not apps failing to launch - it was apps **crashing**, the
+same way. Their backtrace:
+
+```
+objc_release
+AutoreleasePoolPage::releaseUntil(objc_object**)
+objc_autoreleasePoolPop
+_dispatch_lane_serial_drain
+...
+EXC_BAD_ACCESS (SIGSEGV)  KERN_INVALID_ADDRESS at 0x3770eecf9670
+```
+
+An over-release. Metal declares
+
+```objc
+id<MTLDevice>            MTLCreateSystemDefaultDevice(void) NS_RETURNS_RETAINED;
+NSArray<id<MTLDevice>> *MTLCopyAllDevices(void)             NS_RETURNS_RETAINED;
+```
+
+and `-newTextureWithDescriptor:` is in the `new` family: all three hand the
+caller a **+1** reference. The interposers were compiled `-fobjc-arc` and were
+not declared `ns_returns_retained`, so ARC inserted a release on the way out of
+each one while the caller still owned its reference. Every process that
+enumerates Metal devices then double-freed a device or a device array at its
+next pool pop. That is why `Terminal` and `Mail` died in 2mq and not only
+the assistant, and why the disabled variant died too: the interposers are active
+whatever the knobs say.
+
+### Fixed, and tested before anyone is asked to launch anything
+
+`tools/ownership-test.m` calls both functions and the swizzled method 200 times
+inside autorelease pools. It reproduced the bug on demand - `rc=139` with the
+dylib, `rc=139` with it disabled, clean without it - which is the test that
+should have existed before the user was ever asked to insert this into an
+application.
+
+The fix: build with **`-fno-objc-arc`**, since an interposer must pass
+ownership through and touch no retain count; declare both replacements
+`ns_returns_retained` so the intent is in the signature; and give the IOSurface
+property literals their own `@autoreleasepool`, with the +1 texture created
+after it drains. `make ownership-test` now runs all three cases:
+
+```
+  control (no dylib):          200 iterations, no crash
+  with iosurftex:              200 iterations, no crash   (swapped=200)
+  with iosurftex disabled:     200 iterations, no crash
+```
+
+And the result it exists for is unchanged - the law instrument still goes
+36/72 to 0/72.
+
+### The lesson, which is rule 16 again
+
+The dylib had been run against exactly one program: a test binary I wrote,
+which calls `MTLCreateSystemDefaultDevice` **once** and never pops a pool that
+contains the result. That is the one shape of program the bug cannot kill. I
+then told the user it was safe for arbitrary applications, twice, and the
+second time through a launchd environment that took the whole GUI down. A fix
+verified on one hand-written caller has been verified against one caller, not
+against the API contract.
