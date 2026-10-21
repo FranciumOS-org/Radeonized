@@ -19707,11 +19707,21 @@ by `texprobe`'s 2mf phase, Menlo 13, both widths, both upload paths:
 
 ### Cost
 
-On an uncontended machine the law instrument runs 1.46 s without the
-interposer and 7.7 s with it. That loop does nothing but allocate 72 textures,
-so it is an upper bound on allocation cost, not a frame-rate cost - a glyph
-atlas is allocated once and uploaded to many times. (A timing taken while a
-backgrounded `texprobe` still held the GPU gave 93 s and is discarded.)
+**Corrected.** The first figures recorded here - 1.46 s against 7.7 s - were
+both taken while a backgrounded `texprobe` was still draining the GPU, and the
+7.7 s was attributed to the interposer. Four runs in order on a genuinely idle
+GPU, two without and two with:
+
+```
+  without:  36.31 s   1.26 s        <- the first is the contaminated one
+  with:      1.36 s   1.96 s
+```
+
+So the cost is **not 5x; it is close to nothing** - 1.26 s baseline against
+1.36-1.96 s with the interposer, on a loop that does nothing but allocate 72
+textures. The lesson is the one already in the rules: the first timing after a
+background job is a measurement of the background job. Both the 93 s and the
+7.7 s are discarded.
 
 ### What this does and does not claim
 
