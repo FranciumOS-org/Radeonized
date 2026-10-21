@@ -17951,3 +17951,102 @@ the `replaceRegion` path at all, in which case 2lp could not have fixed it
 and the negative says nothing about 2lo's measurement.
 
 Build UUID `76774D6D`, hosttest passes.
+
+---
+
+## 2lt (2026-10-21, boot 108): the user patches can NEVER have applied - the dylib is not on disk
+
+Boot 108, UUID `76774D6D` (2ls), `rbgpu-boot` = 108, armed. 2ls worked
+exactly as intended: the arming facts survived in `RBGPUDiag`, read out of
+`logs/20261021-030629-plugin/peer.plist`:
+
+```
+hwblt_section     = 1
+hwblt_onprocload  = 0        (LiluAPI::Error::NoError)
+hwblt_scope       = /the assistant Helper
+```
+
+So the registration was accepted, enabled and scoped as designed. **The
+the assistant app's text is still broken.**
+
+Note in passing: `rbgpu-diag`'s leading `d=70` is **dropped keys**, not a
+count - 70 keys did not fit the NVRAM buffer, and the `*** NVRAM SUMMARY
+FULL` line that says so had itself wrapped out of the log. The full table is
+in the registry, which `plugin_check.sh` captures. Four boots were read
+with that number misunderstood.
+
+### The real reason, and it is structural
+
+```
+$ ls /System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/MacOS/
+(empty)
+```
+
+On macOS 13+ the Metal driver bundles are stubs: the binary exists **only
+inside the dyld shared cache**. Lilu's `BinaryModInfo` finds its patterns by
+reading the file at `path` (`loadFilesForPatching`, `kern_user.cpp:838`
+`FileIO::readFileToBuffer`). There is no file, so no lookups are built and
+nothing is ever patched - and `onProcLoad` still returns `NoError`, exactly
+as with the section bug.
+
+Lilu *can* patch the shared cache: `loadDyldSharedCacheMapping` reads
+`/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h.map`,
+which exists here and does list our path at line 8413 - so the TEXT range
+is discoverable. But the pattern **offsets** still come from the absent
+file, and the `.map` key is that same absent path, so pointing
+`BinaryModInfo::path` at an extracted copy would make `mapAddresses` match
+nothing and fail `registerPatches` outright.
+
+**Therefore 2lm, 2lp and 2lr were all inert from the start, for a second
+and independent reason.** Fixing `section` in 2lq removed only the first of
+two blockers. Nothing has ever been measured about `ShouldUseSwBlt` on this
+machine.
+
+Writing the binary into `/System/Library/Extensions` is not an option: it
+is the sealed system volume, and this project does not install there.
+
+### What this costs and what survives
+
+Withdrawn: every reading attributed to 2lm/2lp/2lr, and the framing in
+`docs/PROBLEM-TEXT.md` §"the fork is one bit".
+
+Survives: 2lo's texprobe matrix (72 cases, boot 104) - `replaceRegion` on a
+tiled BGRA8 destination displaces rows by exactly `y ^ 32`, while
+`private-blit`, `linear-buffer-tex` and `iosurface` are clean at all three
+widths. That is a measurement of the chip, not of a hook.
+
+Also worth recording against the hypothesis itself: the static trace of
+`InitDeviceSettings` (0x7ffb08d2d700) says bit 23 of the settings qword -
+the bit `ShouldUseSwBlt` returns - is **cleared** by step 5's mask
+(`0xFFFFFFFD_FF7CDFFF + 0x880000` = `0xFFFFFFFE_0004DFFF`) and never set
+again outside `getenv` overrides and a per-bit debug dispatcher at
+`0x7ffb08d01xxx`. A grep of all 953k disassembly lines for `$0x800000` ors
+and `0xFF7FFFFF` masks finds no other writer. If that reading is right,
+`ShouldUseSwBlt` was already returning false and 2lp would have been a
+no-op even if it had applied - which means the software tiler is the wrong
+mechanism for 2lo's displacement, and the corruption lives elsewhere in
+`replaceRegion`.
+
+### The one route left
+
+Userspace cannot be patched. The kernel can, and 2lk already found the
+channel that reaches the code laying out every client texture:
+
+```
+getHardwareInfo(_sAMD_GET_HW_INFO_VALUES*)  ->  +0xa0  ->  gfx10_HwInfoInitData
+  -> amdMtl_HWL_InitAddrLibHwRegFields: regValue.gbAddrConfig = hwInfo->0xa4
+  -> AddrCreate -> Addr2ComputeSurfaceInfo -> every client texture
+```
+
+`getHardwareInfo` is **already hooked** (2lk, observe-only), so changing
+what userspace is told needs no new `RouteRequest` (rule 3). `a0=242` was
+called "correct" because it matches the chip - 4 pipes, 4 packers, 1 SE -
+but correct-for-the-chip is not the same as the value Apple's Navi 21
+AddrLib needs in order to compute the pipe/bank XOR the hardware actually
+performs. A single-bit row displacement is precisely a pipe-XOR mismatch.
+
+Next step, and it is static work with no boot: read the swizzle equation
+out of `amdMtl_HWL_InitAddrLibHwRegFields` and `Addr2ComputeSurfaceInfo` in
+`build/re/AMDRadeonX6000MTLDriver` and determine which `GB_ADDR_CONFIG`
+field, at which value, removes a `y ^ 32` term. Guess-and-check at one boot
+per candidate is the fallback, not the plan.
