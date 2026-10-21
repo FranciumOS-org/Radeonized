@@ -52,10 +52,59 @@ accelerator attached, which is why *About This Mac* still reads 7 MB.
 | compute PASS, bit-exact, 4096 elements | the shader cores and the memory path are fine |
 | the photo: correct window chrome **and** scrambled glyphs in one surface | not a global layout parameter |
 
-**Conclusion (2lg/2lh): client texture layout is computed in userspace, in
-`AMDRadeonX6000MTLDriver`, from values the kernel never supplies.** The driver
-carries its own AddrLib and its own notion of the chip's geometry — almost
-certainly Navi 21's, since every table it reaches is Navi 21's.
+**2lg/2lh concluded "computed in userspace, out of this plugin's reach".
+2lk REFUTES that.** 2lh read one channel — `IOAccelDevice2::get_config`, a
+0x40-byte struct with no geometry — and generalised. There is a second
+channel, and it carries exactly the geometry AddrLib needs:
+
+```
+AMDRadeonX6000_AMDAccelDevice::getHardwareInfo(_sAMD_GET_HW_INFO_VALUES*)
+  0xbe47ca4   memcpy(vals, (hw->0x1a38)->vtable[0x1c0](), 0x204)
+
+gfx10_HwInfoInitData          0x7ffb08cb4218  movl 0xa0(%rsi), %r9d
+  (userspace)                 0x7ffb08cb421f  movl %r9d, 0xa4(%rdi)
+amdMtl_InitAddrLibInterface   0x7ffb08c9409f  chipFamily   = hwInfo->0x00
+                                              chipRevision = hwInfo->0x10
+amdMtl_HWL_InitAddrLibHwRegFields
+                              0x7ffb08bfde4d  regValue.gbAddrConfig
+                                                = hwInfo->0xa4
+  -> AddrCreate -> Addr2ComputeSurfaceInfo -> every client texture
+```
+
+**The swizzle equation every client texture uses comes from one dword:
+`_sAMD_GET_HW_INFO_VALUES + 0xa0`**, copied verbatim with no transformation
+from a struct this plugin can reach. The struct's fields are named by Apple's
+own validation strings (0xbf3deda, 0xbf3df56):
+
+```
++0x00  uint16  deviceID            +0xc0  uint64  refClkFreq
++0x08  uint32  (-> chipFamily)     +0xc8  uint64  sysClkFreq
++0x18  uint64  numRasterPipe       +0xd0  uint64  memClkFreq
++0x20  uint64  numShaderPipes      +0xd8  uint64  cgRefClkFreq
++0xa0  uint32  GB_ADDR_CONFIG
+```
+
+Apple **rejects its own record** with `0xE00002BC` if any of those is zero,
+which makes this one boot answer a second question too: `gfx_min = gfx_max =
+0` has been standing since 2di, so `sysClkFreq = 0` is live and would mean
+userspace never gets a valid record at all.
+
+**2lk is the measurement, observe-only** — `rbgpu-hwi` records the whole
+sample beside the chip's own `GB_ADDR_CONFIG` (`0x242`, 2ky) and states the
+verdict in words. No correction is written: which one is right depends on
+what `+0xa0` holds, and 2kr cost a boot to reasoning out an arithmetic fix
+before measuring the value it operates on.
+
+Reading the result: **DIFFER → the remaining corruption is one wrong dword in
+a kernel struct and the fix is in this plugin after all.** MATCH kills the
+hypothesis and sends the search to `chipFamily`/`chipRevision`, which AddrLib
+also keys its HWL selection on. `ret=e00002bc` → read `sys=` first.
+
+Tooling, new and reusable: `tools/re/dyldcache.py` reads any image out of the
+dyld shared cache (no Xcode on this machine, no `dyld_shared_cache_util`) and
+writes a compact Mach-O `objdump` reads at the cache's own VM addresses;
+`tools/re/mtldis.sh` disassembles one symbol by regex.
+`build/re/mtl-syms.txt` holds all 20 282 symbols.
 
 ### Three hypotheses already refuted — do not re-run them
 
@@ -69,21 +118,9 @@ evidence already in hand before designing the next experiment.**
 
 ### The next step
 
-Patch `AMDRadeonX6000MTLDriver` in **userspace**, via Lilu's user patcher, so
-its AddrLib computes the 680M's geometry instead of Navi 21's. The kernel-side
-`GB_ADDR_CONFIG` value the chip reports is `0x242`-shaped (4 pipes, 4 packers,
-1 SE); whatever constant or table the userspace driver uses in its place is the
-thing to find and correct.
-
-Unexamined, in order:
-
-1. Locate the dylib on disk and its AddrLib entry points
-   (`AddrCreate` / `Addr2ComputeSurfaceInfo`).
-2. Find where it obtains pipe/packer/SE counts — a hardcoded table keyed by
-   family/revision, or a value it asks the kernel for by another route than
-   `get_config`.
-3. Decide patch shape: Lilu `UserPatcher` binary patch, or a kernel-side hook
-   on whatever request does supply it, if one exists after all.
+**Spend one boot on 2lk and read `rbgpu-hwi`.** The hook is already built and
+observe-only; the only thing missing is the measurement. Lilu's user patcher
+is no longer needed unless `+0xa0` turns out to be correct.
 
 `-rbgpulinear` stays IN meanwhile. It is a diagnostic crutch that costs
 bandwidth; the proper fix keeps tiling.
@@ -481,9 +518,9 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
 
 ## 10. Where to go next
 
-1. **Readable text (the user's stated priority).** §2: find where
-   `AMDRadeonX6000MTLDriver` gets its tiling geometry and correct it in
-   userspace. No boot is needed to start — it is static analysis of a dylib.
+1. **Readable text (the user's stated priority).** §2: one boot, read
+   `rbgpu-hwi`. The channel is found and the hook is built; what remains is
+   the measurement and, if it DIFFERs, a one-dword correction.
 2. **The display chain.** §4: answer the linkability question **statically**
    before spending a boot. If `AMDRadeonX6000Framebuffer` cannot be linked
    from an EFI-loaded kext, this becomes an OpenCore personality patch and

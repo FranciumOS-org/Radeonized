@@ -8656,6 +8656,185 @@ void rbgpu_surfinfo_flush_2lf(void) {
               "wholly in userspace, out of this plugin's reach.");
 }
 
+// 2lk: the chip's own GB_ADDR_CONFIG, as the ring probe read it. 0 until
+// phase 0 of the ring probe runs, so 2lk reports `hw=0` rather than a
+// comparison it cannot make.
+static uint32_t g_rb_2ky_gbac = 0;
+
+// 2lk (2026-10-20): the kernel -> userspace hardware-info channel, which is
+// where client texture tiling is actually decided.
+//
+// 2lg/2lh concluded "client texture layout is computed in userspace, out of
+// this plugin's reach". That conclusion was drawn from ONE channel - 2lh read
+// `IOAccelDevice2::get_config` (a 0x40-byte struct), found no geometry in it,
+// and generalised. There is a second channel and it carries exactly the
+// geometry AddrLib needs. The recurring error, 27th instance: absence in one
+// place read as absence everywhere.
+//
+// The chain, established statically and end to end:
+//
+//   AMDRadeonX6000_AMDAccelDevice::getHardwareInfo(_sAMD_GET_HW_INFO_VALUES*)
+//     0xbe47ca4   -> memcpy(vals, (hw->0x1a38)->vtable[0x1c0](), 0x204)
+//
+//   AMDRadeonX6000MTLDriver (userspace, in the dyld shared cache):
+//     gfx10_HwInfoInitData(GFX10_HwInfoRec*, _sAMD_GET_HW_INFO_VALUES*, uint)
+//       0x7ffb08cb4218  movl 0xa0(%rsi), %r9d
+//       0x7ffb08cb421f  movl %r9d, 0xa4(%rdi)      <- the ONLY write to +0xa4
+//     amdMtl_InitAddrLibInterface(AMD_AddrLibInterfaceRec*, AMDCommonHwInfoRec*)
+//       0x7ffb08c9409f  in.chipFamily   = hwInfo->0x00
+//                       in.chipRevision = hwInfo->0x10
+//     amdMtl_HWL_InitAddrLibHwRegFields(_ADDR_CREATE_INPUT*, AMDCommonHwInfoRec*)
+//       0x7ffb08bfde4d  in->chipEngine        = 0xd
+//                       in->regValue.gbAddrConfig = hwInfo->0xa4
+//     -> AddrCreate() -> Addr2ComputeSurfaceInfo() -> every client texture
+//
+// So the swizzle equation userspace uses for app textures comes from ONE
+// dword: `_sAMD_GET_HW_INFO_VALUES + 0xa0`. If that dword is Navi 21's
+// GB_ADDR_CONFIG rather than this chip's `0x242`, every client-laid-out
+// surface is tiled with the wrong pipe/packer equation while every
+// kernel-laid-out surface is correct - which is precisely the measured split
+// (window chrome right, glyphs scrambled, in the same surface).
+//
+// The struct's field names are Apple's own, from the two format strings
+// `getHardwareInfo` kprintfs when it rejects a value (0xbf3deda, 0xbf3df56):
+//
+//   +0x00  uint16  deviceID            +0xc0  uint64  refClkFreq
+//   +0x08  uint32  (-> chipFamily)     +0xc8  uint64  sysClkFreq
+//   +0x18  uint64  numRasterPipe       +0xd0  uint64  memClkFreq
+//   +0x20  uint64  numShaderPipes      +0xd8  uint64  cgRefClkFreq
+//   +0xa0  uint32  GB_ADDR_CONFIG
+//
+// Apple VALIDATES deviceID/numRasterPipe/numShaderPipes and the four clocks,
+// and returns 0xE00002BC if any is zero. `gfx_min = gfx_max = 0` has been a
+// standing debt since 2di, so `sysClkFreq = 0` is a live possibility and
+// would mean userspace never gets a valid record at all. That is a second,
+// independent reason to read this struct and is why the return code is
+// recorded beside the fields.
+//
+// OBSERVE ONLY. No correction is written. Which correction is right depends
+// entirely on what `+0xa0` turns out to hold, and 2kr already cost a boot to
+// the habit of reasoning out an arithmetic fix before measuring the value it
+// operates on. If `+0xa0` already reads 0x242 this whole hypothesis is dead
+// and a fix written now would have been wrong.
+//
+// Gates: DEFINED in AMDRadeonX6000 (`nm -m`: external, __TEXT,__text, 2c);
+// routed nowhere else - grepped (2kn); rule 9 clean - opens
+// `55 48 89 e5 41 57 41 56 41 54 53 48 85 f6`, first branch at +0x0e (2gb);
+// mangled name cross-checked against `nm` (2kr).
+static uint32_t (*orig_gethwinfo_2lk)(void *, void *) = nullptr;
+static int      g_rb_2lk_hooked = 0;
+static uint32_t g_rb_2lk_calls  = 0;
+static uint32_t g_rb_2lk_null   = 0;   // Apple's own NULL-struct path
+static int      g_rb_2lk_have   = 0;   // a sample was captured
+// the first call's sample, recorded whole rather than summarised
+static uint32_t g_rb_2lk_ret    = 0;
+static uint32_t g_rb_2lk_devid  = 0;
+static uint32_t g_rb_2lk_family = 0;
+static uint64_t g_rb_2lk_raster = 0;
+static uint64_t g_rb_2lk_shader = 0;
+static uint32_t g_rb_2lk_gbac   = 0;
+static uint64_t g_rb_2lk_refclk = 0;
+static uint64_t g_rb_2lk_sysclk = 0;
+static uint64_t g_rb_2lk_memclk = 0;
+static uint64_t g_rb_2lk_cgclk  = 0;
+
+static uint32_t hooked_gethwinfo_2lk(void *dev, void *vals) {
+    uint32_t r = orig_gethwinfo_2lk ? orig_gethwinfo_2lk(dev, vals) : 0;
+    g_rb_2lk_calls++;
+    if (!vals) {
+        // Apple returns 0xE00002C2 here without touching anything; say so
+        // rather than letting a missing sample look like a hook that failed.
+        g_rb_2lk_null++;
+        return r;
+    }
+    if (!g_rb_2lk_have) {
+        auto p8  = reinterpret_cast<volatile uint8_t  *>(vals);
+        auto p16 = reinterpret_cast<volatile uint16_t *>(vals);
+        auto p32 = reinterpret_cast<volatile uint32_t *>(vals);
+        auto p64 = reinterpret_cast<volatile uint64_t *>(vals);
+        (void)p8;
+        g_rb_2lk_ret    = r;
+        g_rb_2lk_devid  = p16[0x00 / 2];
+        g_rb_2lk_family = p32[0x08 / 4];
+        g_rb_2lk_raster = p64[0x18 / 8];
+        g_rb_2lk_shader = p64[0x20 / 8];
+        g_rb_2lk_gbac   = p32[0xa0 / 4];
+        g_rb_2lk_refclk = p64[0xc0 / 8];
+        g_rb_2lk_sysclk = p64[0xc8 / 8];
+        g_rb_2lk_memclk = p64[0xd0 / 8];
+        g_rb_2lk_cgclk  = p64[0xd8 / 8];
+        g_rb_2lk_have   = 1;
+        rbgpu_log("2lk: getHardwareInfo ret=%08x devID=%04x family=%08x "
+                  "raster=%llu shader=%llu GB_ADDR_CONFIG=%08x",
+                  g_rb_2lk_ret, g_rb_2lk_devid, g_rb_2lk_family,
+                  g_rb_2lk_raster, g_rb_2lk_shader, g_rb_2lk_gbac);
+        rbgpu_log("2lk: clocks ref=%llu sys=%llu mem=%llu cgref=%llu",
+                  g_rb_2lk_refclk, g_rb_2lk_sysclk,
+                  g_rb_2lk_memclk, g_rb_2lk_cgclk);
+        rbgpu_log("2lk: GB_ADDR_CONFIG decoded | NUM_PIPES=%u "
+                  "PIPE_INTERLEAVE=%u MAX_COMPRESSED_FRAGS=%u NUM_PKRS=%u "
+                  "NUM_SHADER_ENGINES=%u NUM_RB_PER_SE=%u",
+                  (g_rb_2lk_gbac >> 0x0)  & 0x7,
+                  (g_rb_2lk_gbac >> 0x3)  & 0x7,
+                  (g_rb_2lk_gbac >> 0x6)  & 0x3,
+                  (g_rb_2lk_gbac >> 0x8)  & 0x7,
+                  (g_rb_2lk_gbac >> 0x13) & 0x7,
+                  (g_rb_2lk_gbac >> 0x1a) & 0x3);
+    }
+    return r;
+}
+
+void rbgpu_hwinfo_flush_2lk(void) {
+    if (!g_rb_2lk_hooked) {
+        rbgpu_nvram_note("rbgpu-hwi", "hk=0 the getHardwareInfo hook did NOT "
+                                      "take - silence is the hook, not the "
+                                      "channel");
+        return;
+    }
+    if (!g_rb_2lk_have) {
+        char n[192];
+        snprintf(n, sizeof(n),
+                 "hk=1 calls=%u null=%u NO SAMPLE - userspace never asked the "
+                 "kernel for hardware info this boot",
+                 g_rb_2lk_calls, g_rb_2lk_null);
+        rbgpu_nvram_note("rbgpu-hwi", n);
+        rbgpu_log("2lk: %s", n);
+        return;
+    }
+    // `hw=` is the chip's own register as the ring probe read it; `gbac=` is
+    // the copy userspace will tile with. The verdict is the comparison, and
+    // it is spelled out so it cannot be done later and wrong.
+    const char *verdict;
+    if (g_rb_2ky_gbac == 0) {
+        verdict = "UNCOMPARABLE(ring probe never read the register)";
+    } else if (g_rb_2ky_gbac == g_rb_2lk_gbac) {
+        verdict = "MATCH(hypothesis dead)";
+    } else {
+        verdict = "DIFFER(this is the defect)";
+    }
+    char n[400];
+    snprintf(n, sizeof(n),
+             "hk=1 calls=%u null=%u ret=%08x dev=%04x fam=%08x ras=%llu "
+             "shd=%llu gbac=%08x hw=%08x %s | ref=%llu sys=%llu mem=%llu "
+             "cg=%llu",
+             g_rb_2lk_calls, g_rb_2lk_null, g_rb_2lk_ret, g_rb_2lk_devid,
+             g_rb_2lk_family, g_rb_2lk_raster, g_rb_2lk_shader,
+             g_rb_2lk_gbac, g_rb_2ky_gbac, verdict,
+             g_rb_2lk_refclk, g_rb_2lk_sysclk, g_rb_2lk_memclk,
+             g_rb_2lk_cgclk);
+    rbgpu_nvram_note("rbgpu-hwi", n);
+    rbgpu_log("2lk: %s", n);
+    rbgpu_log("2lk: `gbac` is the dword userspace AddrLib tiles every client "
+              "texture with; `hw` is what this chip's own GB_ADDR_CONFIG "
+              "reads. DIFFER means the remaining corruption is one wrong "
+              "dword in a kernel struct and the fix is in this plugin after "
+              "all. MATCH kills the hypothesis and sends the search back to "
+              "chipFamily/chipRevision, which AddrLib also keys its HWL on. "
+              "`ret=e00002bc` means Apple REJECTED its own record for a zero "
+              "field - read sys= first, since gfx_min=gfx_max=0 has been "
+              "standing since 2di.");
+}
+
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
 static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
@@ -10147,6 +10326,20 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
             g_rb_2lf_hooked = 0;
             patcher.clearError();
             rbgpu_log("2lf: FAILED to hook getSurfaceInfo2");
+        }
+    }
+
+    {   // 2lk: the kernel -> userspace hardware-info channel
+        KernelPatcher::RouteRequest rhi(
+            "__ZN29AMDRadeonX6000_AMDAccelDevice15getHardwareInfoEP24_sAMD_GET_HW_INFO_VALUES",
+            hooked_gethwinfo_2lk, orig_gethwinfo_2lk);
+        if (patcher.routeMultiple(id, &rhi, 1, address, size)) {
+            g_rb_2lk_hooked = 1;
+            rbgpu_log("2lk: hooked AMDAccelDevice::getHardwareInfo");
+        } else {
+            g_rb_2lk_hooked = 0;
+            patcher.clearError();
+            rbgpu_log("2lk: FAILED to hook getHardwareInfo");
         }
     }
 
@@ -13458,6 +13651,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
         uint32_t val = rd(obj, off);
         rbgpu_log("2hk: %s dword 0x%x = 0x%08x", regs[i].name, off, val);
         if (regs[i].id == RB_2KY_GB_ADDR_CONFIG) {
+            g_rb_2ky_gbac = val;   // 2lk compares the hw-info copy against this
             // 2ky: fields per gc_10_3_0_sh_mask.h. Logged decoded because a
             // raw word invites the arithmetic to be done later and wrong.
             rbgpu_log("2ky: GB_ADDR_CONFIG=%08x | NUM_PIPES=%u "
@@ -14403,6 +14597,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_surf_flush_2la();
     rbgpu_res_flush_2le();
     rbgpu_surfinfo_flush_2lf();
+    rbgpu_hwinfo_flush_2lk();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();

@@ -17079,3 +17079,139 @@ is OpenCore's job rather than this plugin's.
 
 `-rbgpufbmatch` goes **OUT**. The code stays, gated and inert, with this
 entry as the reason.
+
+## 2lk (2026-10-20) — the kernel DOES supply the geometry, and 2lh was wrong
+
+2lg/2lh concluded "client texture layout is computed in userspace, out of
+this plugin's reach". **That is refuted.** The conclusion rested on one
+channel: 2lh read `IOAccelDevice2::get_config`, found its 0x40-byte struct
+carried no geometry, and generalised to "the kernel never supplies it". There
+is a second channel, it carries exactly the geometry AddrLib needs, and it is
+a single `memcpy` in a function whose name says so.
+
+**The recurring error, 27th instance: absence in one place read as absence
+everywhere.** The same shape as 2kx/2la/2lc three milestones earlier, and the
+same cost - two milestones spent concluding the fix was unreachable.
+
+### How the channel was found
+
+`AMDRadeonX6000MTLDriver` lives in the dyld shared cache, and this machine has
+no extractor (no Xcode, `dyld_shared_cache_util` absent). `tools/re/dyldcache.py`
+is new: it builds a vm->file map from all seven subcaches' mappings, finds an
+image by path in `imagesText`, parses its Mach-O load commands in place, and
+writes a compact Mach-O (5.5 MB of the 155 MB image) whose file offsets are
+repacked so `objdump` reads it at the cache's own VM addresses. `LC_SYMTAB`
+survives in the cache, so 20 282 symbols come out by name;
+`tools/re/mtldis.sh` disassembles one by regex.
+
+789 of those symbols mention `Addr`. The driver carries **its own complete
+AddrLib** - `AddrCreate`, `Addr2ComputeSurfaceInfo`, `Addr2ComputeDccInfo`,
+the Gfx10 HWL.
+
+### The chain, end to end, all static
+
+```
+AMDRadeonX6000_AMDAccelDevice::getHardwareInfo(_sAMD_GET_HW_INFO_VALUES*)
+  0xbe47ca4
+    movq  0x108(%rbx), %rax          ; hw
+    movq  0x1a38(%rax), %rdi
+    movq  (%rdi), %rax
+    callq *0x1c0(%rax)               ; -> a cached struct pointer
+    movl  $0x204, %edx               ; 516 bytes
+    callq memcpy                     ; -> the caller's buffer
+```
+
+then, in userspace:
+
+```
+gfx10_HwInfoInitData(GFX10_HwInfoRec*, _sAMD_GET_HW_INFO_VALUES*, uint)
+  0x7ffb08cb4218  movl 0xa0(%rsi), %r9d
+  0x7ffb08cb421f  movl %r9d, 0xa4(%rdi)     <- the ONLY write to +0xa4
+                                               in the whole function
+
+amdMtl_InitAddrLibInterface(AMD_AddrLibInterfaceRec*, AMDCommonHwInfoRec const*)
+  0x7ffb08c9409f  in.size         = 0x70
+                  in.chipFamily   = hwInfo->0x00
+                  in.chipRevision = hwInfo->0x10
+                  in.hClient      = the interface rec
+                  -> AddrCreate(&in, &out)
+
+amdMtl_HWL_InitAddrLibHwRegFields(_ADDR_CREATE_INPUT*, AMDCommonHwInfoRec const*)
+  0x7ffb08bfde4d  six instructions, the whole function:
+                    movl $0xd, 0x4(%rdi)        ; chipEngine = 0xd
+                    movl 0xa4(%rsi), %eax
+                    movl %eax, 0x30(%rdi)       ; regValue.gbAddrConfig
+```
+
+**So the swizzle equation every client texture is tiled with comes from one
+dword: `_sAMD_GET_HW_INFO_VALUES + 0xa0`.** It is copied verbatim, twice, with
+no transformation, from a kernel struct this plugin can reach.
+
+### The struct, named by Apple's own error strings
+
+`getHardwareInfo` validates the record and kprintfs one of two format strings
+before returning `0xE00002BC`. They name the fields:
+
+```
+0xbf3deda  "Invalid values - refClkFreq: 0x%llx sysClkFreq: 0x%llx
+            memClkFreq: 0x%llx cgRefClkFreq: 0x%llx"
+0xbf3df56  "Invalid values - deviceID: 0x%x numRasterPipe: 0x%llx
+            numShaderPipes: 0x%llx"
+```
+
+against the offsets the compares use:
+
+```
++0x00  uint16  deviceID            +0xc0  uint64  refClkFreq
++0x08  uint32  (-> chipFamily)     +0xc8  uint64  sysClkFreq
++0x18  uint64  numRasterPipe       +0xd0  uint64  memClkFreq
++0x20  uint64  numShaderPipes      +0xd8  uint64  cgRefClkFreq
++0xa0  uint32  GB_ADDR_CONFIG
+```
+
+This is a derivation of field names from Apple's own diagnostic text, not an
+assumption about struct layout.
+
+### Why this fits the symptom exactly
+
+The measured split has been stable for four boots: window chrome, Dock,
+menu-bar text and widgets correct; app body-text glyphs scrambled, in the
+**same surface** as correct chrome. Kernel-laid-out surfaces pass through
+`AMDHWAlignManager2::getSurfaceInfo2`, which uses the chip's real
+`GB_ADDR_CONFIG` (`a0=242`, 2ky - 4 pipes, 4 packers, 1 SE). Client textures
+never touch it (2lf: 68 kernel surfaces against 5458 client resources). If
+`+0xa0` carries Navi 21's config instead - 4 shader engines where this chip
+has 1 - the two halves of one screen are tiled with two different equations,
+which is what the photograph shows.
+
+### A second, independent reason to read this struct
+
+Apple rejects its own record if any clock is zero. **`gfx_min = gfx_max = 0`
+has been standing since 2di**, so `sysClkFreq = 0` is live, and would mean
+userspace never receives a valid hardware-info record at all. The return code
+is recorded beside the fields so one boot answers both questions.
+
+### What was built
+
+`hooked_gethwinfo_2lk`, **observe only**. It calls the original first, then
+records the first call's whole sample - return code, deviceID, family,
+numRasterPipe, numShaderPipes, `+0xa0`, and the four clocks - to `rbgpu-hwi`,
+beside the chip's own `GB_ADDR_CONFIG` as the ring probe read it
+(`g_rb_2ky_gbac`, newly captured at phase 0). The note states the verdict in
+words - `MATCH(hypothesis dead)`, `DIFFER(this is the defect)` or
+`UNCOMPARABLE` - so the comparison cannot be done later and wrong.
+
+**No correction is written.** Which correction is right depends entirely on
+what `+0xa0` holds, and 2kr already cost a boot to reasoning out an
+arithmetic fix before measuring the value it operates on. If `+0xa0` reads
+`0x242` the hypothesis is dead and a fix written now would have been wrong.
+
+Gates: defined in AMDRadeonX6000 (`nm -m`, 2c); routed nowhere else, grepped
+(2kn); rule 9 clean - opens `55 48 89 e5 41 57 41 56 41 54 53 48 85 f6`, first
+branch at +0x0e (2gb); mangled name cross-checked against `nm` (2kr).
+
+Every path out says something (rule 14): `hk=0` for a hook that did not take,
+`NO SAMPLE` for a boot where userspace never asked, `null=` for Apple's own
+NULL-struct path.
+
+Not claimed: that `+0xa0` is wrong. That is what the boot measures.
