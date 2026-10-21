@@ -17320,3 +17320,99 @@ it should have been used for first.
 Not claimed: that the layout is correct for client textures. Only that the
 AddrLib *configuration* is identical on both sides, which removes the reason
 to expect it to be wrong.
+
+## 2ll / 2lm (2026-10-21) — observing userspace's choice, and the one lever
+
+The request was a userspace observation hook on `DetermineSwizzleMode` and
+`Addr2ComputeSurfaceInfo`. **That hook cannot exist.** Lilu's user patcher
+(`kern_user.hpp`) offers `BinaryModInfo` / `BinaryModPatch`: a find/replace of
+bytes in a loaded image, with `onProcLoad`'s callback firing once per binary
+load in the kernel, not per call in userspace. There is no mechanism for
+userspace code to report back into the kext. So userspace can be **forced**
+but not **read**.
+
+Observation therefore moved kernel-side, where userspace's choice arrives
+anyway, and the userspace lever was built as what it actually is.
+
+### 2ll — the mode client resources end up with
+
+`AMDAccelResourceAddr2::initialize` (0xbe56894) builds a client resource, and
+its own code names the field:
+
+```
+be569b4  movl $0x0, 0x1dc(%r15)
+be569bf  movq 0x250(%r15), %rdi
+be569cb  callq *0x1b8(%rax)
+be569d8  andl $0x1f, %eax          <- 5 bits, an AddrSwizzleMode's full range
+be569de  orl  %eax, %ecx
+be569e0  movl %ecx, 0x1dc(%r15)
+be569f3  callq *0x1c8(%rax)
+be569f9  shll $0x5, %eax
+be569fc  andl $0x60, %eax          <- bits 5:6, a second field beside it
+```
+
+So `res + 0x1dc` bits 0:4 hold the resource's swizzle mode. The offset is
+read off Apple's instructions and the 5-bit width is what identifies it as a
+mode; neither was chosen from a struct name (2cy).
+
+**It rides inside the existing 2le hook.** 2le already routes `initialize`,
+and a second `RouteRequest` on a function this plugin has already routed
+panics Lilu outright (2kn) - so `rbgpu_resmode_record_2ll` is called from
+inside `hooked_resinit_2le` rather than from a route of its own.
+
+A **histogram over every call**, not a few rows: 2le dumped four resources'
+args and the note truncated them to eight dwords, while the log it also wrote
+did not survive, because the published RBGPULog ends at the last refresh
+(2es). Counting 4287 resources cannot be truncated into a wrong reading the
+way two rows of dwords can. New note `rbgpu-mode`; `res` is validated as a
+kernel VA before dereference (rule 19); seen=0 and hk=0 each say so in words
+(rule 14).
+
+### 2lm — the userspace force, unarmed
+
+`amdMtl_HWL_DetermineSwizzleMode` (0x7ffb08d35a11) is the client-side chooser,
+the userspace counterpart of the `getPreferredSwizzleMode2` that
+`-rbgpulinear` forces. Two things had to be measured before a patch could be
+written, and both were:
+
+**1. The return value IS the mode, not a status.** All nine call sites were
+located by scanning `__text` for `e8` displacements to the function; each does
+`movl %eax, %ebx` and passes `%eax` onward as a mode (0x7ffb08d5f22a, then
+`movl %eax, %edx` into the following call). The `uint&` seventh parameter is a
+separate out-field, and at entry the first stack argument is at `rsp+8` -
+confirmed from the callee's own `0x10(%rbp)`/`0x18(%rbp)`/`0x20(%rbp)` reads
+after it pushes `%rbp`, and from the caller pushing the `leaq`'d reference
+last. So the stub returns 0 in `%eax` **and** writes 0 through the
+out-reference, which the caller's frame would otherwise leave uninitialised.
+
+**2. A short find pattern would have patched the wrong function.** Measured
+against the driver's own `__text`:
+
+```
+14 bytes (the bare prologue)  2099 occurrences
+20 bytes                        97 occurrences
+24 bytes                         1 occurrence
+32 bytes                         1 occurrence
+```
+
+The 14-byte prologue `55 48 89 e5 41 57 41 56 41 55 41 54 53 48` is 2099
+functions in a system Metal driver. The pattern is 32 bytes.
+
+**Scoped to Terminal alone**, and **OUT of boot-args**. This rewrites a system
+driver in every process it reaches, and a wrong stub there costs the login
+session; Terminal is both the reported symptom and a blast radius that cannot
+take down the desktop. Nothing is registered unless `-rbgpumtllinear` is set,
+so an unarmed boot carries no user patcher at all.
+
+### Why they are not armed together
+
+One variable per boot. 2ll is observe-only and answers a question 2lm's
+result would be read against: if client resources already read `m0` with
+`-rbgpulinear` in, the kernel's resources are linear and the scrambled glyphs
+are not a kernel-side layout choice, which changes what forcing userspace
+would even mean. 2lm is built, documented and left for the boot after.
+
+Not claimed: that forcing userspace to LINEAR will fix the text. That is the
+experiment, and its negative - text still scrambled with mode 0 on both sides
+- would exonerate layout entirely and send the search downstream, which is
+worth as much as the positive.
