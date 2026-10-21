@@ -16895,3 +16895,63 @@ Two outcomes to keep apart, and neither is established:
 
 **`-rbgpulinear` stays IN.** It is 80% of the corruption gone and costs
 only bandwidth.
+
+## 2lh (2026-10-20) — `get_config` carries no geometry; the remaining fix is userspace
+
+`IOAccelDevice2::get_config(IOAccelDeviceConfigData*)` (0x14e20282)
+disassembled in full. The struct it fills is 0x40 bytes:
+
+```
++0x00  accel->0xc90, munged: (lo16) | ((v >> 9) & 0x1000)
++0x04  accel->0xc98
++0x08  accel->vtable[0x868]()        (64-bit)
++0x10  accel->0xca8                  (64-bit)
++0x18  accel->0x178
++0x20  accel->vtable[0x990]()        (64-bit)
++0x28  accel->vtable[0xa90]()        (64-bit)
++0x30  accel->0xd10                  (64-bit)
++0x38  accel->0xd18                  (u16 -> u32)
++0x3c  accel->0xd1a                  (u16 -> u32)
+```
+
+**No tiling geometry in it** - no pipe count, no packer count, no shader
+engine count, no `GB_ADDR_CONFIG`. It is generic accelerator
+configuration. And the accelerator publishes no geometry property in the
+IORegistry either (checked against the live capture: the only matches
+are `RBGPULoad` and `assigned-addresses`).
+
+**So nothing in the kernel tells userspace this chip's geometry**, and
+userspace computes client texture layout itself (2lg). The remaining
+conclusion is that `AMDRadeonX6000MTLDriver` derives its AddrLib
+parameters from the chip family it believes it is on - and this stack
+spoofs **Navi 21**, which has four shader engines against this part's
+one (2kz).
+
+**What is established, and what is not.** Established: the kernel is
+never asked, via `get_config` or the IORegistry. Not established: that
+userspace hardcodes per family rather than obtaining the geometry
+through some other external method not yet examined. The conclusion
+above is the best reading of the evidence, not a measurement, and it
+should be labelled as such until something confirms it.
+
+**Options from here, none of them small:**
+
+1. **Patch the userspace driver** with Lilu's user patcher, correcting
+   the AddrLib parameters inside `AMDRadeonX6000MTLDriver`. The direct
+   route, and a new phase of the project - a userspace graphics driver
+   is delicate and nothing in this plugin has touched one yet.
+2. **Spoof a closer part.** Apple ships `AMDRadeonX6000_AMDNavi23Hardware`
+   and `AMDNavi23Display` beside the Navi 21 classes. If some supported
+   Navi 2x part's AddrLib geometry matches this chip's 4 pipes / 4
+   packers / 1 SE, spoofing that instead would fix userspace tiling with
+   no userspace patching at all. Cheap to state, expensive to try: the
+   entire bring-up - firmware, PSP, SMU, the RLC sub-images, every fix in
+   this journal - is built on the Navi 21 path.
+3. **Leave `-rbgpulinear` in and move to DCN 3.1.2.** 80% of the
+   corruption is already gone for a bandwidth cost, and the display half
+   of the driver is untouched, independently valuable, and does not
+   depend on any of this.
+
+Nothing here changes the standing results: the CP halt is fixed, VM
+faults are zero across five boots, and an armed boot reaches a
+composited desktop that stays up.
