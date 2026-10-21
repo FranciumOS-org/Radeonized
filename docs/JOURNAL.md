@@ -18317,3 +18317,97 @@ that **a search is an instrument too**. When a grep returns nothing, check
 it against a case known to be present before reporting the absence - here,
 `movl %ecx, 0xa0(%rdi)` at `0x7ffb08cb40db` was known to exist and would
 have failed the pattern immediately.
+
+---
+
+## 2lx (2026-10-21, static): the pattern tables are fine - the GROUP SELECTION is the suspect, and the kernel can move it
+
+### (1) The tables are populated
+
+`GFX10_GetSwizzlePattern`'s mode dispatch, decoded from the bitmasks:
+
+| mask | meaning | modes |
+|---|---|---|
+| `0x6660666` | "2D with pattern" set | 1,2,5,6,9,10,17,18,21,**22**,**25**,26 - **not 27** |
+| `0x4440444` | takes the `0x99609` arm | 2,6,10,18,**22**,26 |
+| `0x600060` | takes the `0x99646` arm | 5,6,21,22 |
+
+So **mode 22 (4KB_D_X)** -> `0x99609`, and with `rec[0x2c] & 2` set - which
+2lw established it is on this chip - `jne 0x9965d` -> table
+**`0x7ffb08fbb6f0`**. **Mode 25 (64KB_S_X)** -> table `0x7ffb08fc1870`,
+packer-unaware. Mode 27 is dispatched elsewhere.
+
+Dumped `0x7ffb08fbb6f0` as 64-byte / 32 x uint16 rows (section
+`__TEXT,__const`, base `0x7ffb08fb46a0`). Rows 0-30 are all real equations,
+10-12 non-zero terms each, **grouped in fives** - group `g` occupying rows
+`5g .. 5g+4`, one row per `elemLog2` 0..4:
+
+```
+ 17  0020 0030 0000 0000 0010 0010 0000 0000 0020 0000 0004 ...   group 3, elem 2
+ 22  0040 0050 0000 0000 0010 0010 0000 0000 0000 0000 0004 ...   group 4, elem 2
+```
+
+**Possibility (1) as stated is dead: there is no missing or zeroed entry.**
+And note the shape of the difference between adjacent groups - `0020 0030`
+versus `0040 0050`, a one-bit shift in the leading terms. That is exactly
+what a `y ^ 32` displacement looks like: not a wrong table, **a wrong row**.
+
+### Which row this chip uses
+
+Correcting 2lu on one point: on the packer-aware arm the pipes/interleave
+index in `eax` is **discarded**. `0x9965d` does `addl 0x28(%rdi), %ecx` on
+the raw 4th argument, so
+
+```
+index = elemLog2 + rec[0x28]
+rec[0x28] = 0x4b * interleaveLog2 - 0x258 + 5 * K
+K         = (numPkrs <= 1) ? pipesLog2 : pipesLog2 + 2*numPkrs - 2
+```
+
+This chip: interleaveLog2 8 -> `0x4b*8 - 0x258 = 0`; numPkrs 2 > 1 ->
+`K = 2 + 4 - 2 = 4`; so `rec[0x28] = 20` and **index = 22** for BGRA8 -
+group 4, which is the row dumped above.
+
+### The lever this opens
+
+**Every input to `K` comes from `GB_ADDR_CONFIG`, which reaches userspace
+only through `hwInfo+0xa0` - the field the kernel fills and 2lk already
+hooks.** So the kernel can move the CPU tiler to a different row *without
+touching any GC register*. The candidate set is small and enumerable,
+varying only `NUM_PKRS` (bits 10:8):
+
+| reported numPkrs | K | group | index (BGRA8) |
+|---|---|---|---|
+| 0 or 1 | 2 | 2 | 12 |
+| **2 (actual)** | **4** | **4** | **22** |
+| 3 | 6 | 6 | 32 |
+
+`numPkrs <= 1` is additionally interesting because index 12 is also what the
+**packer-unaware** arm computes from 2lu's formula, so that candidate makes
+the two arms agree.
+
+**Not claimed:** that any of these is correct. `NUM_PKRS` as reported also
+feeds userspace AddrLib's own pattern choice for client *surface layout*,
+while the GPU reads those surfaces per the **real** hardware register. A
+candidate that fixes `replaceRegion` could therefore break the agreement
+that currently holds for everything else. This is a real experiment with a
+visible failure mode - worse corruption, not a hang - and it is undone by
+removing the boot-arg.
+
+### (2) Downstream is thin
+
+`GFX10_GenerateTileAddresses` (`0x7ffb08c9876e`) takes the swizzle mode and
+resource type out of the mipmap header at `0x3c(%rsi)`
+(`>>4 & 0x3f` and `>>0xa & 3`), zeroes a 0x140-byte stack workspace and
+calls into the coord->index table builder with
+`(rec, resourceType, swizzleMode, ...)`. Everything about layout arrives
+through the pattern; there is no second source of address math to be wrong
+on its own. So **(2) is thin and (1)'s row selection is the locus.**
+
+### Next
+
+Implement the `NUM_PKRS` override inside the existing 2lk `getHardwareInfo`
+hook - no new `RouteRequest` (rule 3) - behind a boot-arg that carries the
+value, so the three candidates are three boots and an unarmed boot changes
+nothing. Record the reported and real values in `rbgpu-hwi` and in the diag
+table so the capture can prove which value userspace actually got (rule 20).
