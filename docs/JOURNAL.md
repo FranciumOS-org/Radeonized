@@ -16622,3 +16622,65 @@ a client writes a texture. Candidates already visible in `nm`:
 
 Not claimed: that the upload path is the cause. It is where the evidence
 points, and the next step is to measure it rather than to change it.
+
+## 2ld (2026-10-20) — the split is WHO WRITES THE PIXELS, and linear is the decisive test
+
+The user's app test killed 2lc's framing and produced much better
+evidence. Safari on Wikipedia: **every glyph correct** - article body,
+links, sidebar, the Appearance panel. Terminal, which is **native**:
+scrambled. So "native versus Electron" is dead.
+
+And in the same Safari window, **the Wikipedia globe image in the
+infobox is shredded into blocks** while the text around it is perfect.
+
+That re-cuts the evidence along a line that fits everything:
+
+| who writes the pixels | result |
+|---|---|
+| **the GPU** - Safari's text via CoreGraphics, window chrome, the wallpaper, compositing | correct |
+| **the CPU** - a decoded PNG uploaded with `replaceRegion`, Terminal's own glyph atlas | scrambled |
+
+The GPU applies the swizzle in hardware, so anything it writes is
+self-consistent. A CPU upload into a tiled surface is tiled **in
+software by the userspace Metal driver**. If that software uses Navi 21's
+pipe/packer geometry while the surface is laid out for this chip's, CPU
+writes land shuffled and GPU writes do not - within one surface, which is
+the only hypothesis so far that produces correct rectangles beside
+scrambled glyphs.
+
+**It also explains why four kernel-side findings all measured correct**
+(2kx tiling params, 2kz AddrLib geometry, 2lb rotation, and the UBM
+tables below): the kernel is right, and the disagreement is in
+userspace, in `AMDRadeonX6000MTLDriver`.
+
+Checked and clean on the way, so neither is a suspect:
+`AMDGFX10Hardware::getUbmSwizzleMode` tail-jumps to
+`AMDGFX10AlignManager::getAddrSwizzleMode` (0xbec184a), a 32-entry table
+at `0xbf4efa0` which is **identity for every supported mode** (27 -> 27)
+with `0x21` meaning unsupported; `AMDNavi21Hardware::setupAndInitializeHWCapabilities`
+(0xbeca1a8) sets only a handful of flags (`0x11ec` at `+0x20840`, three
+bytes/words), no geometry.
+
+**2ld is the decisive test and it needs no new theory.** `-rbgpulinear`
+forces every surface to `ADDR_SW_LINEAR` (0) through the hook 2la already
+installed. Linear has **no swizzle at all**, so a CPU writer and a GPU
+reader agree trivially.
+
+| outcome | means |
+|---|---|
+| glyphs and the image come back correct | the fault IS a CPU/GPU tiling disagreement; direction of the fix settled |
+| still scrambled with every surface linear | **swizzle is excluded entirely** and the cause is elsewhere |
+| no desktop | linear is not accepted for these surfaces; revert the arg |
+
+Either answer is worth the boot, which is more than could be said for
+2lb. `forced=` counts the substitutions so an unarmed boot cannot be
+read as a null result.
+
+Caveat recorded before the boot: if the userspace driver computes its own
+mode rather than taking the kernel's, forcing the kernel's value creates
+a *different* disagreement rather than removing one - in which case the
+result is "worse or unchanged", and that too distinguishes the
+hypotheses.
+
+Build `1905E486-807D-3407-AF84-9EE979F7436F`. New boot-arg:
+`-rbgpulinear`.
