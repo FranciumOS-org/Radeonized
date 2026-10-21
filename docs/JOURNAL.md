@@ -17888,3 +17888,66 @@ dies, the assistant Code in Terminal still works, and removing `-rbgpuhwblt` or
 setting `-rbgpuoff` undoes it.
 
 Build UUID `3AA5C1C3`, hosttest passes.
+
+---
+
+## 2ls (2026-10-21, boot 107): the capture could not answer, for the third time - fix the instrument
+
+Boot 107 ran UUID `3AA5C1C3` (2lr, the assistant-helper scope), `rbgpu-boot` = 107,
+`rbgpu-arm` consumed, uptime 3 min at capture. **The the assistant app's text is
+still broken.**
+
+That is the "unchanged" row of 2lr's table, which would retire
+`ShouldUseSwBlt` - except the capture again cannot say whether the patch
+applied. `logs/20261021-025825-plugin/log.txt` begins at **130 s**, and
+`RGPU::init()` runs at boot. Tag census over that window:
+
+```
+34 2dw   25 2ds   17 2fe   17 2cx   16 2dx   9 2dr   8 2en   8 2dy   8 2dv
+```
+
+~140 lines per two minutes from one settled chain. The kernel buffer holds
+about two minutes of it, so the plugin's own boot-time lines had wrapped
+before `plugin_check.sh` ever ran - in boots 105, 106 and 107 alike. **Three
+consecutive experiments were unreadable for the same mechanical reason, and
+none of them was the hypothesis' fault.**
+
+Rule 16 says the instrument is a suspect. Here the instrument was not wrong,
+it was *loud*, and volume destroyed the evidence just as effectively.
+
+### What 2ls changes
+
+1. **The stamp chain goes quiet after four cycles.**
+   `g_rb_stampchain_cycles` is incremented in
+   `hooked_hwchannel_waitForHwStamp_2cx`, and 19 call sites across
+   2cx/2ds/2dw/2dx/2dy/2dr/2en/2dv/2fe now go through
+   `rbgpu_log_stamp(...)`, which drops past cycle 4. Everything they
+   established is in JOURNAL under its own tag; none of it needs restating
+   every 1.5 s.
+2. **`SpecialAMDKey` 0x14 throttles from every 64th to every 4096th.** At
+   ~50 polls/s, "every 64th" was still a line every 1.3 s. The exact count
+   was already in `rbgpu-diag` as `req_0x14`, which does not wrap.
+3. **The arming fact moves into the diag table**, which does not wrap:
+   `hwblt_section`, `hwblt_scope`, `hwblt_onprocload` and
+   `mtllinear_section`. A future boot can be read for whether a user patch
+   applied without depending on a ring buffer surviving.
+
+This is the general lesson behind rule 20, made operational: **a fact that
+decides whether an experiment is interpretable belongs in storage that does
+not wrap, not in a log.**
+
+### Status of the hypothesis
+
+Undecided, not refuted. Boot 108 is the first boot that can actually read
+out whether the patch armed and scoped correctly. If `hwblt_section=1`,
+`hwblt_onprocload=0` and `hwblt_scope=/the assistant Helper` all appear *and* the
+the assistant app's text is still scrambled, **then** `ShouldUseSwBlt` is retired
+and 2ln's "not a layout problem" position stands.
+
+Worth stating now, before that boot: texprobe measured `iosurface` and
+`private-blit` **clean**. Electron composites through IOSurface-backed
+textures, so there is a real possibility the the assistant app's glyphs never take
+the `replaceRegion` path at all, in which case 2lp could not have fixed it
+and the negative says nothing about 2lo's measurement.
+
+Build UUID `76774D6D`, hosttest passes.
