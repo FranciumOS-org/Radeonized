@@ -18411,3 +18411,50 @@ hook - no new `RouteRequest` (rule 3) - behind a boot-arg that carries the
 value, so the three candidates are three boots and an unarmed boot changes
 nothing. Record the reported and real values in `rbgpu-hwi` and in the diag
 table so the capture can prove which value userspace actually got (rule 20).
+
+---
+
+## 2ly (2026-10-21): the NUM_PKRS override - built, not armed
+
+Implemented inside the existing 2lk `getHardwareInfo` hook, so no new
+`RouteRequest` (rule 3). Build UUID `BF5F3738`, hosttest passes.
+
+`rbgpu_pkrs=N` (N in 0..7, via `PE_parse_boot_argn`) rewrites bits 10:8 of
+`_sAMD_GET_HW_INFO_VALUES + 0xa0` on **every** call, after the 2lk sample is
+taken so `rbgpu-hwi`'s `gbac=` still records the value the kernel was given.
+Absent or out of range, nothing is written and the hook stays 2lk's
+observer, which it says in the log.
+
+Per rule 20 the arming facts go to the diag table, which does not wrap:
+`pkrs_arg` (the value, or -1 for unarmed), `pkrs_was_gbac`, `pkrs_now_gbac`,
+`pkrs_writes`. A capture must be able to prove which value userspace got
+without depending on a log that has already rolled.
+
+### The experiment
+
+One boot per candidate. The chip's own `GB_ADDR_CONFIG` stays `0x242`
+throughout; only the reported copy moves.
+
+| boot-arg | reported numPkrs | group | BGRA8 row |
+|---|---|---|---|
+| none | 2 | 4 | 22 - today's behaviour |
+| `rbgpu_pkrs=1` | 1 | 2 | 12 |
+| `rbgpu_pkrs=3` | 3 | 6 | 32 |
+
+`rbgpu_pkrs=1` first: group 2 is also what the packer-unaware arm computes,
+so it is the one candidate where both arms of `GFX10_GetSwizzlePattern`
+agree.
+
+### What each outcome means
+
+- **App text becomes readable** - the row was the defect, 2lo's `y ^ 32` is
+  explained, and the remaining question is whether client surface layout
+  still agrees with the GPU (watch chrome and widgets, not just text).
+- **Text unchanged, everything else fine** - the row is not the defect;
+  2lx's locus is wrong and (2) deserves the full read after all.
+- **Everything gets worse** - the reported value does feed client surface
+  layout, which is itself worth knowing: it would prove userspace AddrLib
+  takes its geometry from this field, and bound how far this lever can be
+  pushed.
+
+Removing the boot-arg undoes all of it. `-rbgpuoff` remains the rescue.

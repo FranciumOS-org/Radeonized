@@ -4,6 +4,7 @@
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_user.hpp>
 #include <IOKit/IOLib.h>
+#include <pexpert/pexpert.h>
 #include <IOKit/IOMemoryDescriptor.h>
 
 #include "kern_start.hpp"
@@ -7173,6 +7174,8 @@ static void rbgpu_register_hwblt_2lp(void) {
 }
 
 
+static void rbgpu_pkrs_init_2ly(void);
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
@@ -7195,6 +7198,7 @@ void RGPU::init() {
               spoofTtlMode ? "ENABLED" : "DISABLED",
               pspHwMode ? "ENABLED" : "DISABLED");
 
+    rbgpu_pkrs_init_2ly();
     rbgpu_register_mtllinear_2lm();
     rbgpu_register_hwblt_2lp();
 
@@ -9154,6 +9158,61 @@ static uint64_t g_rb_2lk_sysclk = 0;
 static uint64_t g_rb_2lk_memclk = 0;
 static uint64_t g_rb_2lk_cgclk  = 0;
 
+// 2ly (2026-10-21): move the CPU tiler's swizzle ROW by what we report.
+//
+// 2lx read the row selection out of Apple's hand-written GFX10 tiler. On the
+// packer-aware arm - the one this chip takes (2lw) - the pattern row is
+//
+//   index    = elemLog2 + rec[0x28]
+//   rec[0x28] = 0x4b * interleaveLog2 - 0x258 + 5 * K
+//   K        = (numPkrs <= 1) ? pipesLog2 : pipesLog2 + 2*numPkrs - 2
+//
+// and every term comes from GB_ADDR_CONFIG, which reaches userspace ONLY
+// through `_sAMD_GET_HW_INFO_VALUES + 0xa0` - this hook's own buffer. So
+// changing NUM_PKRS (bits 10:8) in what we hand userspace moves the row
+// without touching a single GC register. The candidates, for BGRA8:
+//
+//   reported numPkrs   K   group   index
+//        0 or 1        2     2      12     (also what the packer-UNAWARE
+//        2 (actual)    4     4      22      arm computes, so both agree)
+//        3            6     6      32
+//
+// Adjacent groups differ by a one-bit shift in their leading terms
+// (row 17 `0020 0030 ...` vs row 22 `0040 0050 ...`), which is the shape of
+// 2lo's measured `y ^ 32` displacement.
+//
+// NOT a safe-by-construction fix. The value we report also feeds userspace
+// AddrLib's own pattern choice for client SURFACE layout, while the GPU
+// reads those surfaces per the REAL register, which is untouched. So a
+// candidate that fixes replaceRegion can break the agreement that currently
+// holds for everything else. The failure mode is worse corruption, not a
+// hang, and removing the boot-arg undoes it.
+//
+// Armed only by `rbgpu_pkrs=N` with N in 0..7. Absent, nothing is written
+// and the hook stays the observer 2lk built. The reported and real values
+// both go to the diag table, which does not wrap (rule 20) - a capture must
+// be able to prove which value userspace actually got.
+static int      g_rb_2ly_on   = 0;   // -1 = absent, else the value
+static uint32_t g_rb_2ly_hits = 0;
+static uint32_t g_rb_2ly_was  = 0;
+static uint32_t g_rb_2ly_now  = 0;
+
+static void rbgpu_pkrs_init_2ly(void) {
+    uint32_t v = 0xffffffffu;
+    if (PE_parse_boot_argn("rbgpu_pkrs", &v, sizeof(v)) && v <= 7) {
+        g_rb_2ly_on = static_cast<int>(v);
+        rbgpu_log("2ly: ARMED - NUM_PKRS reported to userspace will be forced "
+                  "to %u (bits 10:8 of GB_ADDR_CONFIG). The chip's own "
+                  "register is NOT touched; only what getHardwareInfo hands "
+                  "userspace changes.", v);
+    } else {
+        g_rb_2ly_on = -1;
+        rbgpu_log("2ly: not armed - rbgpu_pkrs absent or out of range, "
+                  "getHardwareInfo is observed and never modified");
+    }
+    rbgpu_diag_set_num("pkrs_arg", static_cast<uint64_t>(g_rb_2ly_on));
+}
+
 static uint32_t hooked_gethwinfo_2lk(void *dev, void *vals) {
     uint32_t r = orig_gethwinfo_2lk ? orig_gethwinfo_2lk(dev, vals) : 0;
     g_rb_2lk_calls++;
@@ -9196,6 +9255,32 @@ static uint32_t hooked_gethwinfo_2lk(void *dev, void *vals) {
                   (g_rb_2lk_gbac >> 0x8)  & 0x7,
                   (g_rb_2lk_gbac >> 0x13) & 0x7,
                   (g_rb_2lk_gbac >> 0x1a) & 0x3);
+    }
+    // 2ly: the write, every call - userspace may ask more than once, and a
+    // sample taken on call 1 must not leave calls 2..n unmodified.
+    if (g_rb_2ly_on >= 0) {
+        auto slot = reinterpret_cast<volatile uint32_t *>(
+            reinterpret_cast<uintptr_t>(vals) + 0xa0);
+        uint32_t was = *slot;
+        uint32_t now = (was & ~(0x7u << 8)) |
+                       ((static_cast<uint32_t>(g_rb_2ly_on) & 0x7u) << 8);
+        if (now != was) { *slot = now; }
+        if (g_rb_2ly_hits == 0) {
+            g_rb_2ly_was = was;
+            g_rb_2ly_now = now;
+            rbgpu_diag_set_num("pkrs_was_gbac", was);
+            rbgpu_diag_set_num("pkrs_now_gbac", now);
+            rbgpu_log("2ly: GB_ADDR_CONFIG handed to userspace rewritten "
+                      "%08x -> %08x (NUM_PKRS %u -> %u). Row for BGRA8 moves "
+                      "from group %u to group %u.",
+                      was, now, (was >> 8) & 0x7, (now >> 8) & 0x7,
+                      (((was >> 8) & 0x7) <= 1) ? ((was) & 0x7)
+                          : ((was & 0x7) + 2 * ((was >> 8) & 0x7) - 2),
+                      (((now >> 8) & 0x7) <= 1) ? ((now) & 0x7)
+                          : ((now & 0x7) + 2 * ((now >> 8) & 0x7) - 2));
+        }
+        g_rb_2ly_hits++;
+        rbgpu_diag_set_num("pkrs_writes", g_rb_2ly_hits);
     }
     return r;
 }
