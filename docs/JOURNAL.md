@@ -19150,3 +19150,137 @@ partial row, never an odd count. Whatever goes wrong goes wrong in whole
    a pattern. A 16 KB quantum against a 4 KB tile is suggestive.
 3. **Does the failure rate move with surface height?** If 16 rows is really
    16 KB, a 96-row surface should fail in 16-row units too.
+
+## 2mk — nullarc: an independent project on the same memory topology, and a new hypothesis for the glyph defect
+
+The user pointed at `luuumi-dev/nullarc` (HEAD `cbb08dd`, 2026-10-21 — active
+today): "Metal on AMD Radeon 780M for macOS Tahoe", by way of
+`Almosst-DEV/Cobalt64` (Navi 48 / RDNA 4). Phoenix / Hawk Point, RDNA 3,
+GC 11.0.1, gfx1103, DCN 3.1.4.
+
+**Licence first, because this is what blocked NootedRed.** nullarc is MIT or
+GPL-2.0-only for its own code, PolyForm Noncommercial 1.0.0 for the parts
+derived from NullMoth's driver (`src/phxaccel`, `src/nmplugin`,
+`tools/nvmtl-patches`), MIT for the Mesa patches. **There is no clause
+restricting AI reading or analysis.** Reading it is permitted; the ChefKiss
+prohibition does not apply here. Anything *copied* would carry GPL-2.0 or
+PolyForm-NC, and PolyForm-NC forbids commercial use — irrelevant for this
+project but worth stating.
+
+### What it actually is
+
+Not a patch of Apple's stack — a **replacement** of it, in four echelons:
+
+| Echelon | What | Size |
+|---|---|---|
+| `PhxBringup.kext` | PSP 13 firmware load, SMU/IMU power-up, MES scheduler, GPUVM per process, the BO/submit ABI RADV calls | 85 KB of one `.cpp` |
+| `PhxAccel.kext` | `NMXAccel` IOAccelerator + `PhxAMDFB` framebuffer + `PhxAGDC` | ~5 700 lines |
+| `NVMTLDriver.bundle` | NullMoth's Metal-on-Vulkan plugin, in `/Library/GPUBundles` | ~29 000 lines |
+| Mesa RADV | `libvulkan_radeon.dylib`, Darwin winsys, 6 patches | upstream |
+
+Apple's `AMDRadeonX6000` is not in the picture at all. Their reason is in
+their own architecture doc: Apple's driver stops at RDNA 2 (Navi 21/23), so
+for gfx1103 there is nothing to reuse. **Our chip is gfx1033 — inside the
+generation Apple still supports.** That is why our approach exists and theirs
+could not.
+
+### The three things that bear on us
+
+**1. The display half may not need DCN bring-up at all.** `src/amd/rdna3_dcn314_scanout.cpp`
+programs OTG/HUBP directly, but a grep for its callers shows it is reached only
+from `src/kext/RDNA3Driver.cpp` and a unit test — **not from either shipping
+kext**. The shipping path is `src/phxaccel/accel/phxfb.cpp`, whose own header
+comment says it "takes over the mode the firmware (GOP) already lit, at boot in
+place of the firmware framebuffer (IONDRV), and **writes nothing to the display
+engine**". It reads OTG0's H/V totals and frame counter read-only, purely to
+measure the refresh, and stands a `thread_call` timer in for the VBL interrupt.
+HANDOFF §"the display half has never started" has been treating DCN bring-up as
+the price of an accelerated desktop. An independent project got WindowServer
+compositing at 120 Hz without writing one display register.
+
+**2. A concrete, dated, non-obvious finding we would have paid boots for:**
+CoreDisplay reads the **GPU vendor out of the framebuffer's class name**
+(Intel / AMD / NVDA / AppleParavirt) and turns IOPresentment off for any other
+name — hence their class is called `PhxAMDFB`
+(`GetGPUVendorForFramebufferService -> 1`, 2026-10-20).
+
+**3. The one that touches our actual frontier.** Their scan-out copy hit a
+defect of our defect's class, on our memory topology — an APU whose VRAM is a
+carve-out of system RAM, which is exactly this chip (MC `0xF4_0000_0000`,
+system-physical `0x7_8000_0000`). Verbatim, `nvrm-accel.cpp:1206`:
+
+> the scan-out's system-RAM view (PhxFB) maps write-back whatever cache mode it
+> asks for, and plain stores left the frame in the CPU cache while the panel
+> scanned the stale DRAM under it, in stripes (2026-10-20)
+
+and `phxfb.cpp:63` says the same mapping "comes out write-back although it asks
+for write-combined (frames copied with plain stores stayed in the CPU cache:
+stripes)". Their fix is non-temporal stores (`movnti`, `movntdq`) plus
+streaming loads for the write-combined source side.
+
+### The hypothesis this gives us
+
+**The glyph defect is a cache-coherency gap on the carve-out, not a layout
+error.** CPU stores from `replace(region:)` land in the CPU's cache; the GPU
+reads the stale DRAM under them.
+
+It predicts, and 2mj already measured, every property that defeated the layout
+story:
+
+| 2mj / 2mg observation | What coherency predicts |
+|---|---|
+| non-deterministic per allocation | whether a line is still dirty depends on cache pressure, not on content |
+| re-reads byte-identical | DRAM is stably wrong; nothing drifts |
+| whole 16-row bands, never partial rows | eviction granularity, not pixel geometry |
+| `iosurface` clean in **every** case | IOSurface pages come with their own caching attributes |
+| every geometry lever inert (2me) | layout was never the variable |
+
+It also explains the user's observation that an unfocused window is scrambled
+and a click fixes it: a redraw re-uploads, and by then the lines have been
+evicted.
+
+### Status of the texprobe work
+
+`tools/texprobe.swift` grew the three 2mj follow-ups — settle variants
+(`synchronize`, sleep, double replace, pre-idle), a placement-`MTLHeap` offset
+sweep, and a height sweep from 16 to 192 rows, all at n>=8 per row after rule
+18 was broken twice in 2mg. **None of it has run**: the current boot is
+unarmed (`rbgpu-diag d=0 armed=0`, `rbgpu-boot` still 111, and the peer's own
+note says "rbgpu-arm not set; accelerator NOT armed"), so there is no Metal
+device. `MTLCreateSystemDefaultDevice()!` force-unwrapped and trapped with
+SIGILL and an empty log — rule 14, an instrument that says nothing. It now
+prints the unarmed diagnosis and exits 2.
+
+### Next, on the next armed boot
+
+The coherency hypothesis is falsifiable in userspace with no kext change:
+
+1. **Does the CPU see what the GPU does not?** For `linear-buffer-tex` the
+   backing address is known (`buf.contents()`). Write it, read it back with the
+   GPU, and read the same bytes with the CPU. CPU correct + GPU wrong in whole
+   bands is coherency; both wrong is not.
+2. **Does a flush fix it?** `clflush` + `sfence` over the range between the
+   write and the GPU read. 2mj showed re-reads never change — a re-read *after
+   a flush* is a different question.
+3. **Do non-temporal stores avoid it?** Write the backing store with `movnti`
+   as nullarc does, instead of `memcpy`.
+
+If 1 or 2 comes back positive, the fix is in the kernel: the carve-out's
+caching attributes, not Apple's tiler, and the whole `-rbgpulinear` /
+swizzle-mode line of work is beside the point.
+
+### Architecture, stated honestly
+
+nullarc is not a part we can drop in. Its bringup is gfx11 + MES; ours would be
+gfx10.3 CP/MEC with HQDs, and no MES exists on this chip. What is portable is
+what their own comparison table calls generation-independent: the user-client
+ABI shape (`src/uapi/r3n_native_abi.h`, 15 selectors, 369 lines in all), the
+RADV Darwin winsys, and the Metal-on-Vulkan plugin — and RADV's gfx1033 support
+is mature. The strategic point is the one we did not have before: a working
+endpoint exists for an APU of this family on macOS, reached without Apple's
+driver and without programming the display engine.
+
+And `/Library/GPUBundles/NVMTLDriver.bundle` plus `nvmtl/libvulkan_nouveau.dylib`
+are **already installed on this machine** (2026-10-09, for the laptop's RTX 4050,
+which `-wegnoegpu` disables), so the third-party Metal plugin mechanism is
+present on macOS 15.8.1 and not a Tahoe-only facility.
