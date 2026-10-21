@@ -8576,6 +8576,86 @@ void rbgpu_res_flush_2le(void) {
               "before anything is changed.");
 }
 
+// ---------------------------------------------------------------------------
+// 2lf (2026-10-20): the entry client textures actually use.
+//
+// Boot 99 settles where the remaining corruption lives.
+// `AMDAccelResourceAddr2::initialize` ran **2495** times against
+// `rbgpu-surf`'s **61** calls to `getPreferredSwizzleMode2` - forty times as
+// many - so client resources are the bulk of the system's textures and they
+// are NOT getting their layout from the "preferred" path.
+//
+// The two entry points differ in kind, and that is the whole answer:
+//
+//   getPreferredSwizzleMode2(in)        CHOOSES a mode  - 61 calls
+//   getSurfaceInfo2(in, out)            COMPUTES the layout for the mode
+//                                       ALREADY SET in `in->swizzleMode`
+//
+// So client textures arrive with a mode chosen elsewhere - by userspace -
+// and only ever pass through `getSurfaceInfo2`. Forcing the chooser could
+// never reach them, which is exactly what boot 98 showed: WindowServer's
+// surfaces came right and app glyphs did not.
+//
+// The input is the same `_ADDR2_COMPUTE_SURFACE_INFO_INPUT` 2la already
+// reads, so `+0x08` is `swizzleMode` on evidence, not assumption - 2la
+// logged that field for five surfaces and the values (0 = LINEAR,
+// 9 = 64KB_S) were coherent.
+//
+// Under `-rbgpulinear` this rewrites `in->swizzleMode` to 0 BEFORE the
+// original runs, so the layout is computed for linear and the CPU and GPU
+// agree. Without the arg it only counts and records, changing nothing.
+//
+// Gates: DEFINED in AMDRadeonX6000 (`nm -m`: external, __TEXT,__text, 2c);
+// routed nowhere else (2kn); rule 9 clean - opens `48 85 f6 0f 94 c1`
+// (testq, sete; no branch in the first five bytes) (2gb); mangled name
+// cross-checked against `nm` (2kr).
+static uint32_t (*orig_surfinfo_2lf)(void *, void *, void *) = nullptr;
+static int      g_rb_2lf_hooked = 0;
+static uint32_t g_rb_2lf_calls  = 0;
+static uint32_t g_rb_2lf_forced = 0;
+static uint32_t g_rb_2lf_already = 0;   // already linear, nothing to do
+static uint32_t g_rb_2lf_seen   = 0;    // bitmask of modes seen, 0..31
+
+static uint32_t hooked_surfinfo_2lf(void *mgr, void *in, void *out) {
+    if (in) {
+        auto p32 = reinterpret_cast<volatile uint32_t *>(in);
+        uint32_t m = p32[0x08 / 4];
+        if (m < 32) { g_rb_2lf_seen |= (1u << m); }
+        g_rb_2lf_calls++;
+        if (m == 0) {
+            g_rb_2lf_already++;
+        } else if (g_rb_2ld_on == 1) {
+            p32[0x08 / 4] = 0;          // ADDR_SW_LINEAR
+            g_rb_2lf_forced++;
+        }
+    } else {
+        g_rb_2lf_calls++;
+    }
+    return orig_surfinfo_2lf ? orig_surfinfo_2lf(mgr, in, out) : 0;
+}
+
+void rbgpu_surfinfo_flush_2lf(void) {
+    if (!g_rb_2lf_hooked) {
+        rbgpu_nvram_note("rbgpu-si", "hk=0 the getSurfaceInfo2 hook did NOT "
+                                     "take - silence is the hook");
+        return;
+    }
+    char n[288];
+    snprintf(n, sizeof(n),
+             "hk=1 calls=%u forced=%u already=%u modes=%08x | lin=%u",
+             g_rb_2lf_calls, g_rb_2lf_forced, g_rb_2lf_already,
+             g_rb_2lf_seen, g_rb_2ld_on);
+    rbgpu_nvram_note("rbgpu-si", n);
+    rbgpu_log("2lf: %s", n);
+    rbgpu_log("2lf: `modes` is a bitmask of the swizzle modes arriving here, "
+              "bit N for mode N - bit 27 is 64KB_R_X, bit 0 LINEAR. `calls` "
+              "far above rbgpu-surf's is the proof these are the client "
+              "textures. `forced>0` with the glyphs readable is the fix; "
+              "`forced>0` with them still scrambled means the layout was not "
+              "what corrupted them and the CPU-side tiling is computed "
+              "wholly in userspace, out of this plugin's reach.");
+}
+
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
 static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
@@ -10056,6 +10136,20 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
     rbgpu_route_pdefix_2ki(patcher, id, address, size);
     rbgpu_route_vramadj_2kr(patcher, id, address, size);   // 2kr
     rbgpu_route_disp_2kt(patcher, id, address, size);      // 2kt
+    {   // 2lf: the entry client textures use
+        KernelPatcher::RouteRequest rsi(
+            "__ZN33AMDRadeonX6000_AMDHWAlignManager215getSurfaceInfo2EP33_ADDR2_COMPUTE_SURFACE_INFO_INPUTP34_ADDR2_COMPUTE_SURFACE_INFO_OUTPUT",
+            hooked_surfinfo_2lf, orig_surfinfo_2lf);
+        if (patcher.routeMultiple(id, &rsi, 1, address, size)) {
+            g_rb_2lf_hooked = 1;
+            rbgpu_log("2lf: hooked AMDHWAlignManager2::getSurfaceInfo2");
+        } else {
+            g_rb_2lf_hooked = 0;
+            patcher.clearError();
+            rbgpu_log("2lf: FAILED to hook getSurfaceInfo2");
+        }
+    }
+
     {   // 2le: observe-only, the client resource path
         KernelPatcher::RouteRequest rr(
             "__ZN36AMDRadeonX6000_AMDAccelResourceAddr210initializeEP22IOAccelNewResourceArgsy",
@@ -14308,6 +14402,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_align_flush_2kz();
     rbgpu_surf_flush_2la();
     rbgpu_res_flush_2le();
+    rbgpu_surfinfo_flush_2lf();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
