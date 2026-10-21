@@ -19068,3 +19068,85 @@ Test the content hypothesis directly, with no boot: upload bitmaps of
 colours, coarse blocks, fine noise - and find where it breaks. If solid
 fails and noise passes, the defect is compression, and the search moves to
 DCC metadata, which is kernel-reachable in a way userspace layout never was.
+
+---
+
+## 2mj (2026-10-21, boot 111): the defect is NON-DETERMINISTIC and per-allocation. 2mg is withdrawn.
+
+### The measurement
+
+Same value, same path, same size, 20 fresh textures each:
+
+```
+0xff000000 : 0 wrong x3   4096 wrong x7   12288 wrong x10
+0xffffffff : 0 wrong x2   4096 wrong x8   12288 wrong x10
+```
+
+And re-reading one texture three times:
+
+```
+trial 0: read1= 4096 read2= 4096 read3= 4096  identical
+trial 1: read1=12288 read2=12288 read3=12288  identical
+trial 2: read1=12288 read2=12288 read3=12288  identical
+trial 3: read1=    0 read2=    0 read3=    0  identical
+trial 4: read1= 4096 read2= 4096 read3= 4096  identical
+```
+
+**The outcome is fixed at upload time, per texture, and then perfectly
+stable.** The same bytes written to a fresh texture land correctly, lose 16
+rows, or lose all 48, and which of the three happens varies between
+allocations.
+
+### 2mg is withdrawn
+
+2mg concluded the defect is content-dependent from the entropy ladder
+(2mh) and the channel sweep (2mi). Those two tables disagree with each
+other on **identical input** - `solid-black` is 0 wrong in one and 4096 in
+the next, inside a single process run. Neither table measured content;
+both measured allocation luck, one sample per row.
+
+**Rule 18 exactly - "do not build a table from n=1 rows" - and I built two
+of them, then wrote a conclusion on top.** The content story was invented
+to explain variance that was never shown to be real. Instance 29 of the
+recurring error, and the first in this session where the fix was simply to
+run the same thing twice.
+
+What survives from 2mg: `iosurface` was clean in **every** case across all
+of 2mg, 2mh and 2mi - dozens of allocations - while `managed-replace-full`
+fails roughly 85 % of the time. That difference is large enough to survive
+the variance, so the **path** distinction is real even though the content
+distinction was not.
+
+### What this explains
+
+- **The user's observation.** A window's surface is uploaded once; if that
+  upload lands badly the window stays scrambled, and anything that forces a
+  fresh upload - clicking, refocusing, a redraw - gets a new roll of the
+  dice. Content that recovers on click and content that does not are the
+  same bug with different redraw behaviour, not two bugs.
+- **Why every geometry lever in 2me did nothing.** Row, TERM, pipes,
+  packers - none of them is the variable. The variable is the allocation.
+- **Why 2ll/2ln's layout experiments kept producing "identically scrambled"
+  photographs.** Identical-looking, not identical.
+
+It also puts a caveat on **2lo**: its `d(0,+-32)` signature is one sample of
+a stochastic process. The measurement stands, its uniqueness does not.
+
+### The quantisation is the next clue
+
+Failures are exactly `0`, `4096` or `12288` pixels at w=256 h=48 - that is
+0, 16 or 48 rows, i.e. **0 KB, 16 KB or 48 KB** of a 48 KB surface. Never a
+partial row, never an odd count. Whatever goes wrong goes wrong in whole
+16-row units.
+
+### Next, all without a boot
+
+1. **Is it a race or a placement?** Re-read is stable, so nothing drifts
+   after upload - but the upload itself may race. Test an explicit
+   `synchronizeResource` blit and a `waitUntilCompleted` between
+   `replace()` and the read.
+2. **Does it correlate with address or alignment?** Allocate from an
+   `MTLHeap` at controlled offsets and see whether the failing offsets form
+   a pattern. A 16 KB quantum against a 4 KB tile is suggestive.
+3. **Does the failure rate move with surface height?** If 16 rows is really
+   16 KB, a 96-row surface should fail in 16-row units too.

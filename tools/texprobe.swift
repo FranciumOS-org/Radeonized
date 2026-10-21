@@ -305,3 +305,137 @@ for w in [256, 1000] {
         if bad2 > 0 && !same { print("      later: \(mv2.joined(separator: " "))") }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 2mh: the entropy ladder.
+//
+// 2mg found the defect is content-dependent, not layout-dependent: the SAME
+// path (`managed-replace-full`, w=256) round-trips a maximum-entropy
+// synthetic pattern exactly and mangles a CoreText glyph bitmap, returning
+// `00000000` where `ff000000` was written - absent content, not displaced
+// content. The glyph bitmap's distinguishing property is that it is
+// overwhelmingly ONE repeated value, i.e. highly compressible.
+//
+// This walks content from perfectly uniform to pure noise through the same
+// path, with `iosurface` beside it as the control that 2mg showed clean.
+// If the failure tracks compressibility the defect is colour compression
+// (DCC) metadata, which the kernel can reach - unlike userspace layout
+// (2lt). If it tracks something else, this says what.
+func fill(_ w: Int, _ h: Int, _ f: (Int, Int) -> UInt32) -> [UInt32] {
+    var a = [UInt32](repeating: 0, count: w * h)
+    for y in 0..<h { for x in 0..<w { a[y * w + x] = f(x, y) } }
+    return a
+}
+
+var rng: UInt32 = 0x12345678
+func rnd() -> UInt32 {                      // deterministic, so runs compare
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng
+}
+
+let ladder: [(String, (Int, Int) -> UInt32)] = [
+    ("solid-black",   { _, _ in 0xff000000 }),
+    ("solid-white",   { _, _ in 0xffffffff }),
+    ("two-halves",    { x, _ in x < 128 ? 0xff000000 : 0xffffffff }),
+    ("blocks-16",     { x, y in ((x >> 4) ^ (y >> 4)) & 1 == 0 ? 0xff000000 : 0xffffffff }),
+    ("blocks-4",      { x, y in ((x >> 2) ^ (y >> 2)) & 1 == 0 ? 0xff000000 : 0xffffffff }),
+    ("checker-1",     { x, y in (x ^ y) & 1 == 0 ? 0xff000000 : 0xffffffff }),
+    ("lowbit-noise",  { _, _ in 0xff000000 | (rnd() & 0x0f0f0f) }),
+    ("full-noise",    { _, _ in 0xff000000 | (rnd() & 0xffffff) }),
+    ("xy-pattern",    { x, y in 0xA5000000 | (UInt32(y) << 12) | UInt32(x) }),
+]
+
+print("")
+print("=== 2mh: entropy ladder (w=256 h=48, bgra8) ===")
+let lw = 256, lh = 48
+for (name, gen) in ladder {
+    rng = 0x12345678
+    let want = fill(lw, lh, gen)
+    var line = String(format: "  %-14s", (name as NSString).utf8String!)
+    for p in paths where p.name == "managed-replace-full" || p.name == "iosurface" {
+        guard let (t, _) = p.make(lw, lh, false) else { line += "  \(p.name)=UNSUP"; continue }
+        want.withUnsafeBytes { src in
+            t.replace(region: MTLRegionMake2D(0, 0, lw, lh), mipmapLevel: 0,
+                      withBytes: src.baseAddress!, bytesPerRow: lw * 4)
+        }
+        let got = readTex(t, false)
+        let wrong = (0..<(lw * lh)).reduce(0) { $0 + (got[$1] != want[$1] ? 1 : 0) }
+        let zeros = (0..<(lw * lh)).reduce(0) { $0 + (got[$1] == 0 && want[$1] != 0 ? 1 : 0) }
+        let tag = p.name == "iosurface" ? "iosurf" : "replace"
+        line += String(format: "  %@=%5d/%d(z%d)", tag, wrong, lw * lh, zeros)
+    }
+    print(line)
+}
+
+// 2mi: the ladder refuted the compressibility reading - `full-noise` fails
+// while `xy-pattern` (equally high entropy) passes, and `solid-black`
+// passes while `solid-white` fails. Neither compressibility nor
+// displacement explains that. The two passing cases differ from the failing
+// ones in their CONSTANT bits, so vary one channel at a time.
+print("")
+print("=== 2mi: single-channel sweep (w=256 h=48, managed-replace-full) ===")
+let probes: [(String, UInt32)] = [
+    ("A=ff RGB=000000", 0xff000000), ("A=ff RGB=000001", 0xff000001),
+    ("A=ff RGB=0000ff", 0xff0000ff), ("A=ff RGB=00ff00", 0xff00ff00),
+    ("A=ff RGB=ff0000", 0xffff0000), ("A=ff RGB=ffffff", 0xffffffff),
+    ("A=00 RGB=000000", 0x00000000), ("A=01 RGB=000000", 0x01000000),
+    ("A=7f RGB=000000", 0x7f000000), ("A=a5 RGB=000000", 0xa5000000),
+    ("A=fe RGB=000000", 0xfe000000), ("A=a5 RGB=ffffff", 0xa5ffffff),
+]
+for (name, v) in probes {
+    let want = fill(lw, lh, { _, _ in v })
+    guard let p = paths.first(where: { $0.name == "managed-replace-full" }),
+          let (t, _) = p.make(lw, lh, false) else { continue }
+    want.withUnsafeBytes { src in
+        t.replace(region: MTLRegionMake2D(0, 0, lw, lh), mipmapLevel: 0,
+                  withBytes: src.baseAddress!, bytesPerRow: lw * 4)
+    }
+    let got = readTex(t, false)
+    let wrong = (0..<(lw * lh)).reduce(0) { $0 + (got[$1] != v ? 1 : 0) }
+    var sample: UInt32 = v
+    for i in 0..<(lw * lh) where got[i] != v { sample = got[i]; break }
+    print(String(format: "  %-18s wrong=%5d/%d   first-bad=%08x",
+                 (name as NSString).utf8String!, wrong, lw * lh, sample))
+}
+
+// 2mj: repeatability. 2mh and 2mi disagreed on IDENTICAL inputs inside one
+// process run - `solid-black` 0 wrong in one table, 4096 in the next - so
+// neither table measured content. Rule 18 says do not build a table from
+// n=1 rows; two were. Run one value many times and report the spread before
+// any reading is attached to any of it.
+print("")
+print("=== 2mj: repeatability, same value 20x (w=256 h=48) ===")
+for (name, v) in [("0xff000000", UInt32(0xff000000)), ("0xffffffff", UInt32(0xffffffff))] {
+    var hist: [Int: Int] = [:]
+    for _ in 0..<20 {
+        let want = fill(lw, lh, { _, _ in v })
+        guard let p = paths.first(where: { $0.name == "managed-replace-full" }),
+              let (t, _) = p.make(lw, lh, false) else { continue }
+        want.withUnsafeBytes { src in
+            t.replace(region: MTLRegionMake2D(0, 0, lw, lh), mipmapLevel: 0,
+                      withBytes: src.baseAddress!, bytesPerRow: lw * 4)
+        }
+        let got = readTex(t, false)
+        let wrong = (0..<(lw * lh)).reduce(0) { $0 + (got[$1] != v ? 1 : 0) }
+        hist[wrong, default: 0] += 1
+    }
+    let keys = hist.keys.sorted()
+    print("  \(name): " + keys.map { "\($0)x\(hist[$0]!)" }.joined(separator: "  "))
+}
+// Does a second read of the SAME texture agree with the first?
+print("  same-texture re-read agreement:")
+for trial in 0..<5 {
+    let v: UInt32 = 0xffffffff
+    let want = fill(lw, lh, { _, _ in v })
+    guard let p = paths.first(where: { $0.name == "managed-replace-full" }),
+          let (t, _) = p.make(lw, lh, false) else { continue }
+    want.withUnsafeBytes { src in
+        t.replace(region: MTLRegionMake2D(0, 0, lw, lh), mipmapLevel: 0,
+                  withBytes: src.baseAddress!, bytesPerRow: lw * 4)
+    }
+    let a = readTex(t, false), b = readTex(t, false), c = readTex(t, false)
+    let wa = (0..<(lw * lh)).reduce(0) { $0 + (a[$1] != v ? 1 : 0) }
+    let wb = (0..<(lw * lh)).reduce(0) { $0 + (b[$1] != v ? 1 : 0) }
+    let wc = (0..<(lw * lh)).reduce(0) { $0 + (c[$1] != v ? 1 : 0) }
+    print(String(format: "    trial %d: read1=%5d read2=%5d read3=%5d  %@",
+                 trial, wa, wb, wc, (a == b && b == c) ? "identical" : "DIFFER"))
+}
