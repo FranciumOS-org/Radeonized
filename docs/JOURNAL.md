@@ -16684,3 +16684,59 @@ hypotheses.
 
 Build `1905E486-807D-3407-AF84-9EE979F7436F`. New boot-arg:
 `-rbgpulinear`.
+
+## 2ld CONFIRMED (2026-10-20, boot 98) — forcing linear fixes ~80%
+
+```
+rbgpu-surf = b=98 swz hk=1 calls=66 | dcc hk=1 calls=0 ok=0
+             | rot=2 remapped=0 lin=1 forced=66
+rbgpu-fault= b=98 c=0 f=0 r=0 o=0 fw=0
+```
+
+`lin=1 forced=66` - every one of 66 surfaces forced to `ADDR_SW_LINEAR`,
+with `rot=2 remapped=0` so rotation was off and this was a clean single
+variable.
+
+The user: "it worked 80%... the widgets render good... the top has no
+artifacts the top dock is visible now with only one artifact near an app
+icon". **Text is still unreadable**, in Claude Code and in Terminal.
+
+**So the swizzle line is CONFIRMED.** Linear removes any possible
+CPU/GPU disagreement about tiling, and with it goes most of the
+corruption. 2ld's hypothesis - that CPU-written pixels are tiled in
+software with the wrong geometry while GPU-written pixels are not - is
+supported by direct experiment, not argument.
+
+**And the pattern of what was fixed locates the rest.** The things that
+came right - widgets, Dock, menu bar, the desktop's artifact regions -
+are **WindowServer-drawn surfaces**, which are allocated through the
+kernel and so pass `getPreferredSwizzleMode2`, the hook that was forced.
+The things still wrong - Claude Code's and Terminal's glyphs - live in
+**app-owned textures**. Sixty-six surfaces is far too few to be every
+texture in the system, so client textures are taking their layout
+somewhere this hook never sees.
+
+**The reachable candidate is the client resource path.**
+`AMDAccelResourceAddr2::initialize(IOAccelNewResourceArgs*, unsigned long
+long)` (0xbe56894) is what runs when an application creates a texture -
+`IOAccelNewResourceArgs` is the struct userspace passes in. If the
+tiling/swizzle is dictated there by userspace and honoured by the
+kernel, that is both the explanation and a place this plugin can reach.
+
+Checked clean on the way, so neither is a suspect:
+`AMDGFX10Hardware::setupAndInitializeHWCapabilities` (0xbead3e0) reads
+`GB_ADDR_CONFIG` (0x13de), 0x13df, 0xd4 and 0xd5 from the chip and
+derives its counts with popcount code (`0x55555555`, `0x33333333`,
+`0x0f0f0f0f`, `imull $0x1010101`, `shrl $0x18`) - from hardware, not
+hardcoded; and `AMDNavi21Hardware`'s override adds only flags.
+
+**`-rbgpulinear` should stay IN for now.** It is a real and large
+improvement. It is also a performance cost - linear surfaces defeat the
+tiling the hardware wants - so it is a diagnostic crutch, not the final
+answer. The final answer is to make the CPU-side tiling agree with the
+chip, which keeps tiling and its performance.
+
+Still unexplained: why text specifically, rather than every client
+texture. Terminal and Claude Code both draw glyphs through an atlas they
+own; whether other client textures are also wrong and simply less
+visible is not established.
