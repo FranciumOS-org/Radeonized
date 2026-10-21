@@ -17018,3 +17018,64 @@ Also extracted for this phase, neither previously analysed:
 
 Build `BDF97C50-EA4B-3700-876E-85A12C4E4A7E`. New boot-arg:
 `-rbgpufbmatch`.
+
+## 2lj (2026-10-20) — boot 101: the device-id route is INCOMPATIBLE with this stack
+
+`-rbgpufbmatch` cost the accelerator and bought no framebuffer. Read live
+from the boot:
+
+```
+device-id              = <a0730000>          (the spoof applied)
+rbgpu-arm              = consumed, LoadAccelerator = Yes   (the boot armed)
+rbgpu-boot             = 100                 (NO note written - nothing
+                                              reached powerUpHW)
+instantiated on IGPU   = RembrandtGPUPeer, AMDSupport, .Display_boot,
+                         AMDRadeonX6000_AMDRadeonHWServicesNavi
+NOT instantiated       = AMDRadeonX6000_AMDNavi21GraphicsAccelerator
+AtiFbStub / AMDFramebuffer = still none
+```
+
+The user: "its unaccelerated... back to like when the kext was off".
+
+**The cause is this plugin's own design.** The stack does not pretend to
+be another device - it makes Apple **accept 0x1681**:
+
+```
+kern_start.cpp:977   if (g_spoof_ttl_mode && ret == 0 && dev_id == 0x1681)
+kern_start.cpp:6452  table[target_idx].deviceId = 0x1681;   // deviceTypeTable
+kern_start.cpp:6568  *(uint32_t *)(table[...].data + 0x10) = 0x1681;
+                                                          // DeviceCapabilityTbl
+```
+
+Every one of those patches inserts or keys on **0x1681**. With the
+IOKit `device-id` reporting `0x73A0`, Apple's stack asked about a device
+our patches had never prepared, the TTL spoof hook did not fire, and the
+accelerator could not come up. HWServicesNavi still matched - it is the
+chooser - but it built nothing.
+
+**So `device-id` injection is the wrong instrument here**, and the
+pre-registered "accelerator breaks / drop the arg" row is the one that
+came up. The finding is worth the boot: it rules out the obvious route
+and names the right one.
+
+**The right shape, by the project's own convention:** make Apple's
+*personality* accept this device, rather than making the device claim to
+be Apple's. `AMDRadeonNavi21Controller` is a personality in
+`AMDRadeonX6000Framebuffer.kext` with
+`IOClass = AMDRadeonX6000_AmdRadeonControllerNavi21`,
+`IOProviderClass = IOPCIDevice`, `IOMatchCategory = ATIFramebuffer`. A
+personality declared by THIS kext with the same `IOClass` and
+`IOPCIMatch 0x16811002` would instantiate Apple's controller against our
+device with the device id untouched - the same philosophy as patching
+`deviceTypeTable` to contain 0x1681 rather than lying about the chip.
+
+Unexamined, and required before trying it: whether the controller class
+is reachable from another kext's personality (it needs
+`OSBundleLibraries` on `com.apple.kext.AMDRadeonX6000Framebuffer`, which
+lives in **SystemKernelExtensions.kc**, not the boot collection - an
+EFI-loaded kext may not be able to link against it at all). If it cannot,
+the route is patching the personality in the prelinked collection, which
+is OpenCore's job rather than this plugin's.
+
+`-rbgpufbmatch` goes **OUT**. The code stays, gated and inert, with this
+entry as the reason.
