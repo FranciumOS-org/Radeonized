@@ -17481,3 +17481,63 @@ are already linear, and that is exactly what reading (1) vs (2) decides. Had
 
 Not claimed: that the glyph corruption is or is not a layout problem. Both
 readings above remain open.
+
+## 2ll SETTLED (boot 104, -rbgpulinear OUT) — per-resource, and 4% are tiled
+
+```
+rbgpu-mode = b=104 hk=1 seen=4788 bad=0 | m0=4598 m2=8 m22=125 m27=57
+             | hi 0/4788/0/0 | lin=2
+rbgpu-si   = b=104 hk=1 calls=83 forced=0 already=0 modes=08400004 | lin=2
+rbgpu-surf = b=104 swz calls=83 | rot=2 remapped=0 lin=2 forced=0
+```
+
+Gates: `rbgpu-boot` 103 -> 104, `rbgpu-arm` consumed, `-rbgpulinear` absent
+from live boot-args (`grep -c` = 0), loaded UUID
+`652BFDC8-D935-3B1A-879F-1D43FD0DBE88` == `build/out`. Health unchanged:
+`c=0 f=0 r=0 o=0 fw=0`, `NEVER HALTED`, `adj fixed=10386/10386`,
+`hwi gbac=242 hw=242`.
+
+**The histogram spreads, so `res + 0x1dc` IS per-resource.** Boot 103's
+reading (2) - a device-level constant read 12224 times - is dead, and 2ll
+stands as an instrument. `rbgpu-si modes=08400004` is bits 2, 22 and 27,
+exactly the non-zero modes the histogram counts, from an independent hook.
+
+**190 of 4788 client resources carry a tiled layout:** 125 in mode 22
+(4KB_D_X), 57 in mode 27 (64KB_R_X), 8 in mode 2. The other 4598 are linear
+without anything forcing them.
+
+### A correction: boot 103's "confound excluded" was WRONG
+
+2ll's boot-103 writeup argued that `-rbgpulinear` could not be reaching
+`res + 0x1dc`, because 2la's hook on `getPreferredSwizzleMode2` counted 70
+calls against 12224 resources, and "a hook taken 70 times cannot be what
+answered 12224 queries".
+
+That does not follow, and the data refutes it. Boot 103 recorded **zero**
+non-`m0` out of 12224. If ~96% of client resources were natively linear - the
+proportion boot 104 measures - roughly 500 tiled ones should have appeared.
+They did not, so the arg **does** drive client resources to linear.
+`vt[0x1b8]` is therefore reading a mode the align manager has **cached**,
+which those 70 calls set and many resources then share, rather than a fresh
+per-call answer.
+
+The error was treating a call-count mismatch as proof of independence. A
+cache between the hook and the reader breaks that inference completely, and
+nothing had established there was no cache. Twenty-eighth instance, and the
+first one caught by its own follow-up boot rather than by a later milestone.
+
+### What it buys
+
+The fix shape changes, and improves. `-rbgpulinear` is a blanket force that
+costs bandwidth on all 4788 resources to correct 190 of them. If the glyph
+atlas is among those 190, the proper fix touches ~4% of resources and keeps
+tiling everywhere else - which is what "the proper fix keeps tiling" has
+meant since 2ld, now with a number attached.
+
+What is still unknown is whether those 190 are the scrambled ones. The user's
+own report of this boot's screen is the other half of the measurement, and
+the modes named - 22 and 27, both `_X` (pipe/bank-xor) variants - are
+testable one at a time rather than blanket.
+
+Not claimed: that mode 22 or 27 is the defect, or that `-rbgpulinear` is or
+is not still earning its place. The second needs the screen, not a note.
