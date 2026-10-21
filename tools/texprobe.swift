@@ -6,8 +6,22 @@ import Foundation
 import Metal
 import IOSurface
 
-let dev = MTLCreateSystemDefaultDevice()!
-let q = dev.makeCommandQueue()!
+setvbuf(stdout, nil, _IONBF, 0)
+
+// Rule 14: absence is not a result. A nil device used to be a force-unwrap
+// trap - SIGILL with an empty log, which looks exactly like a crash in the
+// measurement. On an UNARMED boot there is no Metal device at all, so say so.
+guard let dev = MTLCreateSystemDefaultDevice() else {
+    print("NO METAL DEVICE - this boot has no accelerator.")
+    print("  Almost certainly an unarmed boot. Check:")
+    print("    nvram -p | grep rbgpu-log      # the peer says if arm was unset")
+    print("    nvram -p | grep rbgpu-boot     # must have increased since the last capture")
+    print("  Arm it with:  sudo nvram rbgpu-arm=1 && sudo reboot")
+    exit(2)
+}
+guard let q = dev.makeCommandQueue() else {
+    print("device:", dev.name, "- but makeCommandQueue() returned nil"); exit(2)
+}
 print("device:", dev.name)
 
 let src = """
@@ -438,4 +452,129 @@ for trial in 0..<5 {
     let wc = (0..<(lw * lh)).reduce(0) { $0 + (c[$1] != v ? 1 : 0) }
     print(String(format: "    trial %d: read1=%5d read2=%5d read3=%5d  %@",
                  trial, wa, wb, wc, (a == b && b == c) ? "identical" : "DIFFER"))
+}
+
+// ---------------------------------------------------------------- 2mk
+// 2mj established that the outcome is fixed at upload time, per allocation,
+// and then stable. Three questions follow, none of which need a boot.
+//   1. Does the upload RACE? Re-read is stable, but the upload itself may
+//      not have landed when the read was encoded.
+//   2. Does the outcome track the ALLOCATION ADDRESS? Placement heaps give
+//      a controlled offset.
+//   3. Does the 16-row quantum track SURFACE HEIGHT, or is it 16 KB?
+// Every row below is n>=12, because rule 18 was broken twice in 2mg.
+
+// Which rows are wrong, as ranges, so the shape is visible and not just a
+// count. A count of 4096 could be 16 contiguous rows or 4096 scattered px.
+func badRows(_ got: [UInt32], _ w: Int, _ h: Int, _ v: UInt32) -> [(Int, Int)] {
+    var rows: [Int] = []
+    for y in 0..<h {
+        var bad = false
+        for x in 0..<w where got[y * w + x] != v { bad = true; break }
+        if bad { rows.append(y) }
+    }
+    var out: [(Int, Int)] = []
+    for y in rows {
+        if let l = out.last, l.1 + 1 == y { out[out.count - 1].1 = y } else { out.append((y, y)) }
+    }
+    return out
+}
+
+func rowsStr(_ r: [(Int, Int)]) -> String {
+    r.isEmpty ? "-" : r.map { $0.0 == $0.1 ? "\($0.0)" : "\($0.0)-\($0.1)" }.joined(separator: ",")
+}
+
+enum Settle { case none, blit, wait, both, twice, pre }
+
+// One upload of a constant value into a fresh managed texture, with the
+// chosen settling step between replace() and the read. Returns wrong px
+// and the wrong-row ranges.
+func managedTrial(_ w: Int, _ h: Int, _ v: UInt32, _ s: Settle,
+                  heap: MTLHeap? = nil, offset: Int = 0) -> (Int, [(Int, Int)]) {
+    let d = desc(.bgra8Unorm, w, h, .managed)
+    var t: MTLTexture?
+    if let hp = heap { t = hp.makeTexture(descriptor: d, offset: offset) } else { t = dev.makeTexture(descriptor: d) }
+    guard let tex = t else { return (-1, []) }
+    if s == .pre {                              // settle BEFORE the upload
+        let cb = q.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted()
+    }
+    let want = fill(w, h, { _, _ in v })
+    let put = { want.withUnsafeBytes { src in
+        tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                    withBytes: src.baseAddress!, bytesPerRow: w * 4) } }
+    put()
+    if s == .twice { put() }
+    if s == .blit || s == .both {
+        let cb = q.makeCommandBuffer()!, b = cb.makeBlitCommandEncoder()!
+        b.synchronize(resource: tex)
+        b.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    }
+    if s == .wait || s == .both { usleep(50_000) }
+    let got = readTex(tex, false)
+    let wrong = (0..<(w * h)).reduce(0) { $0 + (got[$1] != v ? 1 : 0) }
+    return (wrong, badRows(got, w, h, v))
+}
+
+func hist(_ xs: [Int]) -> String {
+    var h: [Int: Int] = [:]
+    for x in xs { h[x, default: 0] += 1 }
+    return h.keys.sorted().map { "\($0)x\(h[$0]!)" }.joined(separator: "  ")
+}
+
+print("")
+print("=== 2mk-1: does the upload race? (w=256 h=48, 0xffffffff, n=16) ===")
+for (nm, s) in [("replace -> read", Settle.none),
+                ("replace -> synchronize+wait", Settle.blit),
+                ("replace -> 50ms sleep", Settle.wait),
+                ("replace -> sync + 50ms", Settle.both),
+                ("replace twice -> read", Settle.twice),
+                ("idle cb -> replace -> read", Settle.pre)] {
+    var ws: [Int] = [], shapes: [String] = []
+    for _ in 0..<16 {
+        let (wrong, rows) = managedTrial(256, 48, 0xffffffff, s)
+        ws.append(wrong); if wrong > 0 { shapes.append(rowsStr(rows)) }
+    }
+    print("  " + nm.padding(toLength: 28, withPad: " ", startingAt: 0) + hist(ws))
+    if !shapes.isEmpty {
+        print("      rows: " + Set(shapes).sorted().prefix(4).joined(separator: " | "))
+    }
+}
+
+print("")
+print("=== 2mk-3: does the quantum track height? (0xffffffff, n=16 each) ===")
+print("  w=256, so one row = 1 KB. 16 rows = 16 KB.")
+for h in [16, 32, 48, 64, 96, 128, 192] {
+    var ws: [Int] = [], shapes: [String] = []
+    for _ in 0..<16 {
+        let (wrong, rows) = managedTrial(256, h, 0xffffffff, .none)
+        ws.append(wrong / 256); if wrong > 0 { shapes.append(rowsStr(rows)) }
+    }
+    print("  h=\(String(h).padding(toLength: 4, withPad: " ", startingAt: 0)) wrong-rows: "
+          + hist(ws).padding(toLength: 34, withPad: " ", startingAt: 0)
+          + "shapes: " + Set(shapes).sorted().prefix(3).joined(separator: " | "))
+}
+
+print("")
+print("=== 2mk-2: does it track the allocation offset? (w=256 h=48, 48 KB) ===")
+do {
+    let d = desc(.bgra8Unorm, 256, 48, .managed)
+    let sa = dev.heapTextureSizeAndAlign(descriptor: d)
+    print("  heapTextureSizeAndAlign: size=\(sa.size) align=\(sa.align)")
+    let hd = MTLHeapDescriptor()
+    hd.type = .placement; hd.storageMode = .managed
+    hd.size = 64 * 1024 * 1024
+    guard let heap = dev.makeHeap(descriptor: hd) else { print("  no placement heap"); exit(0) }
+    for k in 0..<12 {
+        let off = k * 64 * 1024                 // 64 KB apart, all aligned
+        var ws: [Int] = [], shapes: [String] = []
+        for _ in 0..<8 {
+            let (wrong, rows) = managedTrial(256, 48, 0xffffffff, .none, heap: heap, offset: off)
+            if wrong < 0 { continue }
+            ws.append(wrong / 256); if wrong > 0 { shapes.append(rowsStr(rows)) }
+        }
+        if ws.isEmpty { print(String(format: "  off=0x%06x  (alloc failed)", off)); continue }
+        print(String(format: "  off=0x%06x  wrong-rows: %@   %@", off,
+                     hist(ws).padding(toLength: 30, withPad: " ", startingAt: 0),
+                     Set(shapes).sorted().prefix(2).joined(separator: " | ")))
+    }
 }
