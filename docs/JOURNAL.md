@@ -18918,3 +18918,59 @@ glyph defect needs a different hypothesis entirely.
 
 Either answer is worth more than another geometry boot, and it costs no
 boot at all.
+
+---
+
+## 2mf (2026-10-21): texprobe grows real glyphs - and boot 110 proves it must be re-run at baseline
+
+### The user's observation, recorded in their words (2026-10-21)
+
+> "for icons on desktop or pictures on iMessage when the window is unfocused
+> theyre scrambled.. when i click on the window or themselves they get
+> fixed... that doesnt work for the assistant app or safari pictures though"
+
+This is the most diagnostic report the text defect has produced, because
+**a redraw fixing content means the stored bytes can be right and the later
+read of them wrong.** A pure layout error cannot behave that way: rewriting
+the same content into the same surface with the same layout would scramble
+identically. It corroborates 2me from a completely independent direction and
+splits the symptom in two - a recoverable class (desktop icons, iMessage)
+and a non-recoverable one (the assistant app, Safari).
+
+### What was added to `tools/texprobe.swift`
+
+A second phase, after the existing synthetic matrix:
+
+- `glyphBitmap()` rasterises **real text** with CoreText/CoreGraphics into a
+  CPU BGRA buffer (Menlo 13, several lines, numbered per row).
+- Each upload path pushes that exact buffer, the GPU reads it back through
+  the existing compute shader, and `compareRows` reports **row attribution**
+  - a readback row that matches a *different* reference row prints as
+  `12<-44`, so a permutation is measured rather than inferred.
+- Each case is read back **twice**, with a 2 s idle between, and reports
+  `stable=YES/NO`. That is the direct test of the user's
+  unfocused/refocused observation: if a later read of an unchanged texture
+  differs, the defect is in reading, not writing.
+
+Builds with the documented line
+(`swiftc -O tools/texprobe.swift -o texprobe -framework Metal -framework IOSurface`).
+
+### Why its first run proves nothing yet
+
+Run on **boot 110**, which is still reporting the false geometry from 2me
+(`rbgpu_pkrs=1` and `rbgpu_pipes=1`, `GB_ADDR_CONFIG` reported as `0x141`
+against the chip's real `0x242`). Under that configuration:
+
+- **Every R8 case is now BAD** - `r8 w=37/256/1000 managed-replace-*`,
+  thousands of foreign pixels. In 2lo's boot-104 run **every R8 case was
+  clean.**
+- The process **segfaults** at `r8 w=1000 private-blit-full #2`, inside the
+  *original* matrix, before the new glyph phase runs at all.
+
+So the false geometry does real damage in userspace - which is further
+evidence it reaches client texture layout, and a reminder that boot 110 is
+not a baseline. The segfault is a userspace crash in our own test program;
+nothing kernel-side.
+
+**The glyph measurement must be taken on a boot with the overrides removed.**
+Until then nothing from this phase is evidence about anything.
