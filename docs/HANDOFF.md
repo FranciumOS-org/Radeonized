@@ -1,502 +1,361 @@
-# RembrandtGPU — handoff state (2026-10-18, after 2hj)
+# RembrandtGPU — handoff state (2026-10-20, after 2lj)
 
-**Read this first.** `docs/RULES.md` is now short — the project rules, the rules
-that cost boots to learn, and the chip facts — and is auto-loaded every
-session. `docs/JOURNAL.md` is the chronological evidence journal (~8500
-lines): authoritative for *what was measured*, in order, including every
-withdrawn reading, and must not be trimmed; grep it by milestone tag rather
-than reading it whole. This file is the *current state*: what is settled,
-what is open, what to do next, the procedure, and the mistakes this project
-keeps making.
+Apple's Navi 21 macOS GPU stack drives a **Radeon 680M** (Rembrandt APU,
+`1002:1681` rev 0a, GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on
+macOS 15.8.1 (24H32), ASUS TUF A15 FA507NU, via a Lilu plugin booted from the
+EFI.
 
-`docs/HANDOFF-FULL.md` is a stale file-dump from 2026-10-05. Ignore it.
-
----
-
-## 1. One-paragraph state
-
-Apple's Navi 21 stack (AMDRadeonX6000 + AMDRadeonX6800HWLibs +
-HWServicesNavi) runs on the Radeon 680M. PSP, GC and TTL init all succeed with
-the 680M's own yellow_carp firmware; the SMU link works two-way; the
-accelerator's `start()` returns 1; the KIQ is created, active and doorbelled;
-GPUVM translates; the GPU executes PM4 packets and writes completion fences
-the CPU reads. **`AMDGFX10PM4Engine::doStart` returns 1 and every engine
-powers up.**
-
-**`powerUpHW` SUCCEEDS**, now on eight consecutive boots (`ret=1 post=1111
-one=3`). `AMDHardware::startHWEngines` returns TRUE once exactly one SDMA
-engine asks the layer for queues (2gi, `-rbgpusdmaone`): Apple's Navi 21 path
-builds four SDMA engines while this chip has one instance, so engines [1..3]
-take Apple's own trivial-TRUE path and engine[0] alone asks.
-
-**The GPU-restart loop is BROKEN as of 2gw** (`-rbgpuvmpteng1`); what
-follows describes the frontier as it stood through 2gu, and §2 has the
-current one. It was driven by ONE outstanding stamp, the only stamp the
-driver had ever issued. Request 0x1B reaches
-`AMDAccelEventMachine::finishAllStamps`, which walks 63 slots; exactly one
-has work outstanding, **slot 25**, `submitted=1 completed=0 fence=0`. The
-same index Apple's own `GPURestartDeferred stampIdx=25` names from a
-different source. `accel->0xa0`, the driver-wide `incrementStamp` count,
-reads **1** (2gs). **Slot 25 is the `"VMPT"` channel** — it names itself
-(2gt) — so that stamp was a page-table update. **It held a real
-`AMDSDMAChannel` on hw engine index 2, and that engine had zero queues**
-(2gu: `h=AMDSDMAChannel e2=1 e2q=0`): nothing refused the submit, nothing
-could complete it. Engine 2 is the first engine `-rbgpusdmaone` switches
-off, while the one working SDMA sits at index 1. **Sending engine-2 channel
-requests to engine 1 (`-rbgpuvmpteng1`) made the stamp complete on the
-first wait** — see §2.
-
-```
-finishStamp(25) -> waitForStamp -> kIOReturnTimeout after ~10 s
-  -> handleFinishChannelRestart
-       IOAccelDisplayMachine::waitForStampTimeout -> FALSE (pipe count is 0)
-       hardwareErrorEvent: GPURestartDeferred stampIdx=25
-       AMDAccelChannel::resetHardwareAndReplay -> request 0x17 -> our peer:
-                                                   Unsupported
-  -> retry, UNCONDITIONALLY, forever   (W and R climb 1:1 across 3 samples)
-```
-
-The GPU is **not** hung: the KIQ completes stamps 69, 70, 71 with real fences
-in the same window. Request 0x14 reached **#1,506,624** — the register poll
-inside `waitForStamp`, each read reaching our peer — and macOS spawns a
-`DumpGPURestart` process, so userspace sees the restart too.
-
-Nothing about display is started. The accelerator deliberately adopts **no
-display pipe** (2ct), so armed boots can reach a desktop.
-
-**Armed boots have no display** and never have (since ~2c); everything is
-done over SSH, and the machine stays healthy. Treat that as the baseline,
-not as a symptom of any recent change.
-
-**Current outcome (2gw, 2ha):** with `-rbgpuvmpteng1` the VMPT stamp
-completes on the first wait, the restart loop is gone, and request 0x1B
-runs its whole body and returns `0xE00002C7` — which is its *success*
-value, not a failure (§2). Nothing in that path is known to fail. The 2ct
-refusal above is what is now in the way.
+This file is the current **state**. `docs/JOURNAL.md` (~17 000 lines) is the
+chronological evidence journal — authoritative for what was measured, in
+order, including every withdrawn reading, and **not to be trimmed**. Grep it by
+milestone tag (`2ks`, `2lg`) for the history of one step; never read it whole.
+`docs/HANDOFF-FULL.md` is a stale dump from 2026-10-05 — ignore it.
 
 ---
 
+## 1. State in one paragraph
 
-## 2. The gate was real; the frontier is one thread polling for a timestamp
+**An armed boot is a usable, accelerated Mac.** The user logs in, uses the
+desktop, and texts from it. The CP halt that blocked this project for its
+entire 2e–2k history is **fixed** (2ks/2ku/2kw, boot 89 onward): one missing
+addition, `vram_base_offset`, applied to Apple's `adjustVRAMAddress` at three
+call sites. Zero VM faults, no halt, no freeze, VMIDs 1–8 all translate.
+WindowServer composites through Metal on `AMDRadeonX6000MTLDriver`; a
+4096-element compute kernel returns **bit-exact** results.
 
-**2hf.** Boot 23, armed (`state.txt` records `d=72 armed=1` live),
-`logs/20261018-001306-metal/`. The 2hd hang reproduced, and under `sudo`
-both the userspace and kernel stacks were captured.
+**The one remaining defect is rendering: body text is unreadable.**
+`-rbgpulinear` forces linear surfaces and fixed ~80 % of the corruption
+(widgets, Dock, menu bar, desktop). What it did not fix is **app-owned
+textures**, whose layout is computed entirely in **userspace** by
+`AMDRadeonX6000MTLDriver` — the kernel is never asked. That is the frontier.
 
-```
-newCommandQueue → blit manager init → CpuLoadInitialShaders
-  → first buffer allocation → IOAccelResourceCreate → into the kernel:
+The **display half has never started**: no framebuffer kext loads, because
+Apple's controller personality matches on Navi 21 PCI IDs and ours is
+`0x16811002`. The desktop we have runs on the boot framebuffer with the
+accelerator attached, which is why *About This Mac* still reads 7 MB.
 
-  IOAccelSharedUserClient2::externalMethod          +0x82
-  IOAccelSharedUserClient2::s_new_resource          +0xa7
-  IOAccelSharedUserClient2::new_resource            +0x1fd
-  IOGraphicsAccelerator2::acceleratorWaitEnabled    +0x8f
-  waiting_for_fEnabled(_IOLock*, IOGraphicsAccelerator2*)
-  ... kernel sleep
-```
+---
 
-`acceleratorWaitEnabled` tests **bit 0x2 of the flags at `accel+0xc78`**
-and returns at once if set. The only setter is
-`IOGraphicsAccelerator2::enableAccelerator()` (`orb $0x2, 0xc78`), and its
-only two callers are `IOAccelDisplayMachine::display_mode_did_change` and
-the Legacy variant.
+## 2. THE FRONTIER — userspace texture tiling
 
-**So: 2ct refuses the display pipe → no mode change → `enableAccelerator()`
-never called → `fEnabled` never set → every `IOAccelResourceCreate` sleeps
-forever → Metal hangs on its first allocation.** Every link read from
-Apple's code. It also explains 2gq's `waitForStampTimeout -> FALSE (pipe
-count 0)`.
+### What is established
 
-2hd's "client-facing GFX ring" guess is **withdrawn** — the thread never
-reaches hardware. It was labelled a hypothesis and not acted on, which is
-why it cost nothing.
+| Evidence | Reading |
+|---|---|
+| `-rbgpulinear` fixes widgets/Dock/menu bar/chrome, not app text | two different layout paths |
+| `getSurfaceInfo2 calls=68` == `getPreferredSwizzleMode2 calls=68`, against `rbgpu-res calls=5458` | the kernel lays out 68 surfaces; clients create 5458 |
+| `modes=00000001` | every kernel-side surface is mode 0 (LINEAR) under the flag |
+| `IOAccelDevice2::get_config` is a 0x40-byte struct with **no geometry** (2lh) | userspace does not learn the tiling config from the kernel |
+| `dcc calls=0` with `hk=1` | DCC metadata excluded |
+| `a0=242` — the chip's own `GB_ADDR_CONFIG`: 4 pipes, 4 packers, 1 SE | kernel AddrLib geometry is **correct** |
+| rotation remap 27→25, `remapped=9`, no visual change (2lc) | rotation excluded |
+| compute PASS, bit-exact, 4096 elements | the shader cores and the memory path are fine |
+| the photo: correct window chrome **and** scrambled glyphs in one surface | not a global layout parameter |
 
-### The two ways forward
+**Conclusion (2lg/2lh): client texture layout is computed in userspace, in
+`AMDRadeonX6000MTLDriver`, from values the kernel never supplies.** The driver
+carries its own AddrLib and its own notion of the chip's geometry — almost
+certainly Navi 21's, since every table it reaches is Navi 21's.
 
-**(2) is recommended: enable without the panel.** Leave 2ct refusing and
-call `enableAccelerator()` once after start. If allocation then proceeds,
-Metal works headlessly and DCN is never touched. It is smaller, more
-informative, and does not foreclose (1).
+### Three hypotheses already refuted — do not re-run them
 
-`enableAccelerator` (0x14e55570) is short and **not** display-specific:
+Each aimed at a *global* layout parameter, which the photo had already
+excluded. This is the recurring error in a new dress: **failing to read the
+evidence already in hand before designing the next experiment.**
 
-```
-testb $0x8, 0xc92(%rdi)
-jne   skip
-  (accel->0x380)->startHardwareProgressTimerUnlocked()
-skip:
-orb   $0x2, 0xc78(%rbx)
-```
+- **2kx** tiling params — correct.
+- **2la** AddrLib geometry (kernel side) — correct.
+- **2lc** rotation — no effect.
 
-Two constraints on doing it:
+### The next step
 
-- **It is a substitution** and must be logged as one (2cy). A Metal
-  allocation succeeding afterwards proves the flag gated it — **not** that
-  a display exists.
-- **`...Unlocked` means a lock is expected.** Both real callers run inside
-  `display_mode_did_change` holding the accelerator lock, and
-  `acceleratorWaitEnabled` sleeps on `accel->0x88`. Calling it without
-  that lock is the shape that caused the 2fz/2ga and 2gg panics. Take
-  `accel->0x88` first, release after, and log all three steps.
+Patch `AMDRadeonX6000MTLDriver` in **userspace**, via Lilu's user patcher, so
+its AddrLib computes the 680M's geometry instead of Navi 21's. The kernel-side
+`GB_ADDR_CONFIG` value the chip reports is `0x242`-shaped (4 pipes, 4 packers,
+1 SE); whatever constant or table the userspace driver uses in its place is the
+thing to find and correct.
 
-`enableAccelerator` is an external **defined** symbol in
-IOAcceleratorFamily2, so milestone 2c is satisfied by routing/solving
-against *that* kext id — and calling Apple's function is preferable to
-setting bit 0x2 ourselves, since the function also starts the progress
-timer.
+Unexamined, in order:
 
-**(1) Lift 2ct** — adopt the display pipe so a real mode change enables
-it. Riskiest: Apple's Navi 21 display code is DCN 3.0, this chip is DCN
-3.1.2, and nothing here has ever initialised DCN.
+1. Locate the dylib on disk and its AddrLib entry points
+   (`AddrCreate` / `Addr2ComputeSurfaceInfo`).
+2. Find where it obtains pipe/packer/SE counts — a hardcoded table keyed by
+   family/revision, or a value it asks the kernel for by another route than
+   `get_config`.
+3. Decide patch shape: Lilu `UserPatcher` binary patch, or a kernel-side hook
+   on whatever request does supply it, if one exists after all.
 
-### Also open
+`-rbgpulinear` stays IN meanwhile. It is a diagnostic crutch that costs
+bandwidth; the proper fix keeps tiling.
 
-- What else `enableAccelerator` implies — whether a headless-enabled
-  accelerator can actually allocate.
-- The `/options` race (standing debt; a bounded retry is owed).
-- Who calls `incrementStamp(25)`; why the stamp table grew 63 → 65.
-- The 2di debt (`gfx_min = gfx_max = 0`) — now a **suspect** for 2hh's
-  non-retiring GFX stamp, not yet shown to be the cause.
+---
 
-### 2hh — the bit was set, and what happened
+## 3. THE FIX THAT MADE THE DESKTOP WORK (2ks/2ku/2kw)
 
-Boot of **2026-10-18 00:41**, armed, build `23B6A724`, the first boot with
-`-rbgpuforceenable`. `rbgpu-ea` = `ea:00000000->00000002`: the hook solved
-`enableAccelerator`, found a plausible lock at `accel+0x88`, called it
-under the lock, and `accel+0xc78` went `0 -> 2`.
+Apple's `AMDHWMemory::adjustVRAMAddress` (0xbe8cb90, nine instructions)
+returns `mc - vram_start`. The GPUVM walker needs
+`mc - vram_start + vram_base_offset` — Linux's `amdgpu_gmc_vram_mc2pa`.
+`-rbgpuvramadj` adds that term, **only** for callers inside three named
+functions:
 
-**The machine drew a lock screen, accepted the password, and began loading
-the session** — the first panel in an armed boot since roughly 2c. It then
-froze, and `watchdogd` panicked it at 120 s on
-`no successful checkins from WindowServer (2 induced crashes)`.
+| site | what it programs | boot 93 |
+|---|---|---|
+| `AMDHWVMContext::mapVMPT` (0xbe8e624) | page-table tier entries | `map=12086` |
+| `AMDHWVMM::assignVMID` (0xbe91376) | `info->0x18`, the PD base in the invalidate request | `asg=11` |
+| `AMDGFX10HIQHWChannel::fillMapProcessPacket` (0xbec7de6) | the PD base in the MES `PM4_MES_MAP_PROCESS` packet | `mes=29` |
 
-That answers "why armed boots have no display at all": it was never a DCN
-or panel fault. WindowServer's *own* first `IOAccelResourceCreate` slept on
-`fEnabled`, so WindowServer never drew anything. Same gate, one layer up
-from the Metal probe of 2hf.
+`calls=12126 inmap=12126 fixed=12126`, no out-of-scope callers.
+**The third site matters because the MES hands out its own VMIDs** and
+`assignVMID` never sees them — `vmids` went `000e` → `01fe`.
 
-**The new frontier.** Two `.spin` reports in
-`logs/20261018-004318-WSHANG-ARMED-2hg/`, fully symbolicated. Seventeen of
-WindowServer's eighteen threads are queued in
-`IOSurface::synchronize_device_caches +0x8a`, the `IOLockSleep` of
+The chain it closed: `allocVMBlock` hands out a page-table block as an MC
+address → `mapVMPT` strips the MC base through `adjustVRAMAddress` →
+`getPDEValue(level, 0)` adds **flags only** → the entry carries a
+carve-out-relative address short by `0x7_8000_0000` → the walk fails → CPF
+cannot fetch the IB → the CP's engines park at `CP_ME_CNTL = 0x15000000` (the
+power-on value, never a write) → the timestamp never retires →
+`resetHardwareAndReplay` waits forever → WindowServer blocks on its mutex →
+freeze.
 
-```c
-while (surface->0x210 != 0) { surface->0x214++;
-    IOLockSleep(surface->0x50, surface, THREAD_UNINT); surface->0x214--; }
-```
-
-One thread holds the busy section, at `+0x13a`, the return address after
-`IOSurfaceDeviceCache::wait()`:
+Boot 93, every indicator clean:
 
 ```
-IOSurface::synchronize_device_caches                      +0x13a
-AMDRadeonX6000_AMDAccelEventMachine::finishEventUnlocked  +0x56
-IOAccelEventMachineFast2::finishEventUnlocked             +0xe7
-AMDRadeonX6000_AMDAccelEventMachine::waitForStamp         +0x230
-  AMDAccelChannel::waitForTimestamp +0x121 → IAMDHWInterface::pollWait +0x71
-  AMDAccelChannel::waitForTimestamp +0x240
-    → AMDGFX10PM4Engine::verifyThreadsActive +0x2c
-    → AMDGFX10PM4Engine::QueryQueueStatus    +0x163
+rbgpu-fault = c=0 f=0 r=0 o=0 fw=0      vmfc=1ffc (reporting fully on)
+rbgpu-mew   = n=24 NEVER HALTED 0.5-12s
+rbgpu-ring  = r==w at all phases, w advancing
 ```
 
-and 40 s later, in the second spin, the same thread has moved to
-`IOAccelEventMachine2::hardwareErrorEvent` → `restart_channel` →
-`IOAccelFIFOChannel2::restart` → `AMDAccelChannel::resetHardwareAndReplay`.
+**2em and 2ki are retroactively explained**: both were undoing this one
+subtraction downstream, after the fact. 2ki (`-rbgpupdefix`) is now harmful —
+it composes with the upstream fix (`87b000000 -> ffb000001`, boot 91) and
+brings the halt back. It must stay OUT.
 
-**A client stamp on the PM4/GFX ring does not retire.** This is 2gq's
-restart loop again, on hw engine `[0]` — the engine neither
-`-rbgpusdmaone` nor `-rbgpuvmpteng1` touches, both of which act on SDMA.
-`rbgpu-prog2` agrees from the kernel side: waits `2 → 6 → 11` and timeouts
-`12 → 34 → 56` over 21s/41s/71s against a flat `N=65`.
+---
 
-**Operationally:** `-rbgpuforceenable` alone self-panics the machine in
-under three minutes with no usable SSH window. **Pair it with `wdt=-1`**,
-which disables Apple's userspace watchdog (read from `IOWatchdog::start`:
-bit 0 of `wdt` takes the "watchdog disabled by boot-arg" path and zeroes
-`+0x89/+0xa8/+0xac`; it touches nothing on the chip). With the pair the
-boot freezes and stays reachable over SSH indefinitely.
+## 4. The display half
 
-### 2hj — the live capture
+`AMDFramebuffer` matches `IOProviderClass = AtiFbStub`. No `AtiFbStub` is ever
+published, because no controller personality matches our device:
 
-Boot of ~01:03 with `-rbgpuforceenable wdt=-1`, armed (`state.txt` has
-`rbgpu-diag` = `d=73 armed=1` live, `rbgpu-boot = 25`), captured under
-sudo from SSH into `logs/20261018-010521-metal/`. No panic.
+```
+AMDRadeonNavi21Controller  IOPCIMatch 0x73A01002 0x73A21002 0x73A31002
+                                      0x73AB1002 0x73AE1002 0x73AF1002 0x73BF1002
+ours                                  0x16811002
+```
 
-**The gate is confirmed open.** WindowServer's
-`IOAccelSharedUserClient2::new_resource` is now at `+0x1cc`, `blocked by
-turnstile waiting for kernel_task thread 0x9a7` — an ordinary mutex, not
-2hf's `+0x1fd` sleep in `waiting_for_fEnabled`.
+Chain: **controller → `AtiFbStub` → `AMDFramebuffer` → DCN.** `AMDSupport` has
+no children; no framebuffer kext is loaded.
 
-**The compositor runs on the GPU.** `_XHWCaptureDesktop` ->
-`CaptureSurfaceMetal::Populate` -> `MetalBacking::CreateCompositeDestination`
--> `-[GFXAAMD_MtlDevice newTextureWithDescriptor:iosurface:plane:]` in
-`AMDRadeonX6000MTLDriver`. The grey translucent password field the user
-saw is what that looks like; the stack is the evidence, not the colour.
+**Spoofing `device-id` does NOT work** (2lj, boot 101). `-rbgpufbmatch`
+injected `device-id = 0x73A0`; HWServicesNavi matched, and **the accelerator
+never instantiated**. This plugin works by making Apple **ACCEPT** `0x1681`
+(`deviceTypeTable`, `DeviceCapabilityTbl`, the TTL spoof's `dev_id == 0x1681`
+gate); reporting another id bypasses every one of those patches. It also
+produced no `AtiFbStub`, so it bought nothing. **Must stay OUT.**
 
-**Metal reaches the dispatch.** `newCommandQueue` **succeeds**; queue,
-runtime shader compile and a 4096-thread encode all return. The probe
-hangs in `waitUntilCompleted`, and its submit thread is in the kernel at
-`IOAccelCommandQueue::s_submit_command_buffers` -> ... ->
-`AMDAccelChannel::waitForRingBufferSpace +0x163` (**the ring is full**)
--> `AMDUserQueue::prepareQueue` -> `finishEvent` ->
-`handleFinishChannelRestart` -> `restart_channel` ->
-`IOAccelFIFOChannel2::restart` -> `resetHardwareAndReplay` ->
-`waitForTimestamp` -> `pollWait` -> `thread_block`.
+The route that remains is making Apple's *personality* accept `0x16811002`.
+**Unexamined prerequisite:** whether a personality with
+`IOClass = AMDRadeonX6000_AmdRadeonControllerNavi21` is reachable from an
+EFI-loaded kext at all — `AMDRadeonX6000Framebuffer.kext` lives in
+`SystemKernelExtensions.kc` and may need `OSBundleLibraries` that cannot link.
+**Establish that before spending a boot.** If it cannot link, this is an
+OpenCore-level personality patch, not this plugin's job.
 
-**One cause, three victims.** The turnstile names the holder: a kernel
-thread `AMDRadeonX6000_AMDAccelEventMachine` (priority 81) in
-`hardwareErrorEvent` -> `restart_channel` -> `IOAccelFIFOChannel2::restart`
--> `resetHardwareAndReplay` -> `waitForTimestamp` -> `pollWait`, for
-286/300 samples. Four samples catch the poll itself
-(`AMDSWScheduler::checkTimestamps` -> `AMDHWChannel::checkForTimestampUpdate`),
-so it is a live poll, not a dead sleep. WindowServer blocks on its mutex;
-the Metal submit blocks behind the same restart. 2hh's WindowServer
-surface-sync holder had the identical five frames.
+The 7 MB is cosmetic: Metal reports `recommendedMax = 4096 MB`; System
+Profiler reads `IOFBMemorySize = 8294400` (1920×1080×4) from the boot
+framebuffer.
 
-**So: the GPU retires no timestamps on the client channel, and the
-channel-restart path cannot recover because it waits on the same
-timestamp.** The reproducer is now a 4096-thread compute kernel — no
-compositor, no surface, no display in the path.
+---
 
-**Next measurement.** Read the client ring's rptr/wptr and the GFX clock
-state at the moment of the wait. 2di (`gfx_min = gfx_max = 0`) is the
-leading suspect and is still unmeasured; do not assume it.
-
-One instrument note: `system_profiler SPDisplaysDataType` blocked and was
-killed at 30 s by 2hi's `bounded()` helper. Without that bound the
-capture would have stalled before the Metal probe and this milestone
-would not exist.
-
-
-## 3. Verified on hardware — do NOT re-derive these
+## 5. Verified on hardware — do NOT re-derive
 
 - **The chip.** GC 10.3.3, DMU 3.1.3, MMHUB/ATHUB 2.4.0, MP0/MP1 13.0.3,
-  SDMA 5.2.3 (**one instance**), VCN 3.1.1. 1 SE x 2 SA x 3 WGP = 12 CUs.
-- **Carve-out.** MC `0xF4_0000_0000`-`0xF4_FFFF_FFFF`, system-physical
-  `0x7_8000_0000` (`GCMC_VM_FB_OFFSET` = 0x780), BAR0 256 MB at
-  `0x8_8000_0000`.
-- **seg0 = 0x1260** for GC `BASE_IDX 0`, agreed four independent ways; seg1 =
-  0xa000. Byte address is `(seg + dword_offset) * 4`.
-- **The SMU link works.** `rb_smu13_bringup` succeeds with real Rembrandt SOC
-  and DF values; the MC address is `FB_LOCATION_BASE + alloc_offset`.
-- **`powerUpHW` SUCCEEDS**, four consecutive boots (`ret=1 post=1111 one=3`),
-  with `-rbgpusdmaone` letting exactly one SDMA engine ask for queues.
-- **Request 0x1B passes its `isDeviceValid()` gate** and
-  `startGlobalPerfCounters` returns; `hardwareDidStart` does not (2gn).
-- **The accessor slots.** On `pm4+0x30` / `hw->0x368`: `[0x148]` resolves an
-  encoded register id to a dword offset, `[0x118]` READS that offset,
-  `[0x120]` WRITES it. Apple's encoded ids are `(dword offset << 32) | 11`.
-- **`hw->0x380` is an `AMDGFX10VMM`** and `hw->0x20820` an
-  `AMDGFX10UserQueueManager`, both from `init`'s own allocations (2go).
-- **Request 0x1B's `hardwareDidStart` completes** (2go), including
-  `AMDHWVMM::postInit`'s two VM-fault interrupt registrations and the single
-  GC register read (`C = 0x3b`).
-- **The HIQ ring works.** `AMDGFX10HIQHWChannel::submitSetResourcesPacket` ->
-  `submitFrame(true)` -> doorbell -> `waitForHwStamp` returned **1**: the GPU
-  executed the HIQ's SET_RESOURCES packet and wrote its fence (2go).
-- **`accel->0x380` is an `AMDAccelEventMachine`** (via
-  `IOGraphicsAccelerator2::createEventMachine`), and call offset 0x158 on it
-  is `finishAllStamps` (2gp).
-- **The GPU executes and signals normally at 0x1B time** — the KIQ completed
-  stamps 70/71/72 with fences landing where the CPU polls (2gp), while the
-  event machine was declaring a hang.
-- **Request numbers are Apple's `_eAMDAccelIOFBRequestType`**, from the symbol
-  `AMDGraphicsAccelerator::sendRequestToController` (2gp).
-- **`powerUpHW` succeeds**, now five consecutive boots.
-- **`accel->0x1a78[]` is the channel array**, bounded by `accel->0x1e78` —
-  Apple's own `eventTimeout` lookup, and the same array `waitForStamp` bounds
-  against (2gr).
-- **Exactly one stamp slot is outstanding at 0x1B time**: slot 25,
-  `submitted=1 completed=0 fence=0` (2gq).
-- **GFX is NOT in GFXOFF** (status 2), and `gfx_min = gfx_max = 0` is real
-  data from the SMU: **GFX DPM was never started.** Standing, untouched.
-- **PT_BASE (2em) was the GPUVM fix.** The hub register held
-  `amdgpu_gmc_vram_mc2pa` computed with `vram_base_offset = 0`; writing
-  `0x78FDFA001` removed the MAPPING_ERROR and the fence began landing.
-  Requires `-rbgpuptbase`.
-- **The whole `doStart` chain completes**: setres + stamp, `initGraphicsMQD`
-  (~230 us), mapQueues ring 0 + stamp, `initComputeMQD(5)`, mapQueues ring 5
-  + stamp, the ring-state reads, `waitForActiveValue` with
-  `CP_GFX_HQD_ACTIVE = 1`, `vtable[0x328]`. **No unexercised step remains.**
-- **The powerUp chain runs on the peer's post-register thread inside request
-  0x06**, from `thread_call_delayed_timer` — NOT `IOService::start`. Confirmed
-  three ways including Apple's own panic frames.
-- **`powerUpHW` SUCCEEDS (2gi), reproduced on three boots** (b=6, b=7, b=8):
-  `startHWEngines` returns TRUE with `ret=1 post=1111 allstarted one=3`.
-- **Request 0x1B does not return, and it SPINS (2gk).** Sent with powerUpHW
-  succeeding; the machine stays alive (log sequence advancing ~4000/20 s, all
-  three samplers firing, `pci.txt` complete at 401 KB where 2fo's was 0) and
-  request 0x14 runs at ~5600/s against 18/s on the boot with 0x1B held. Our
-  0x14 handler answers a **constant 1** (RembrandtGPUPeer.cpp:1553).
-- **0x1B is at `0xbe417d0` and contains no loop (2gl)** — so the poll is in a
-  callee. See §2 for the disassembly and the candidate.
-- **One SDMA engine asking is sufficient (2gi).** `startHWEngines` returns
-  TRUE and **`powerUpHW` succeeds** with engines [1..3] on Apple's
-  trivial-TRUE path and engine[0] alone asking. Reproduced on two consecutive
-  boots (`b=6`, `b=7`), both `ret=1 post=1111 allstarted one=3`.
-- **The SDMA 2x2 is closed (2gh), but its two conditions are NOT separable.**
-  engine[1] STARTS asking first for instance 0; it is refused asking second
-  for instance 0 (2gd) or first for instance 1 (2gf). Both the instance index
-  and the ordinal are necessary — but this chip has one SDMA instance, so
-  "second asker" and "duplicate create on instance 0" are the SAME event in
-  every cell measured, and 2gi removes the second asker entirely rather than
-  discriminating them. Open, and it does not block anything.
-- **The display-pipe reserve now PASSES (2gi).** Seven `2bn reserve` calls,
-  all seven returning 1, at real carve-out offsets. 2bq's reading — the
-  allocator was empty because `powerUpHW` had never run — is confirmed by the
-  cause being removed. docs/SPEC-DISPLAY-RESERVE.md's chain is unblocked.
-- **Apple's trivial-TRUE path works** (`start()` with `+0x48 == 0` →
-  `0xbea4b49`): used on engine[0] in 2ge and again in the 2gh boot.
-- **Request 0x1B hangs** when powerUpHW has touched the hardware, so it is not
-  sent unless powerUpHW succeeded (`-rbgpuforce1b` overrides).
+  SDMA 5.2.3 (**one instance**), VCN 3.1.1. 1 SE × 2 SA × 3 WGP = 12 CUs.
+- **Carve-out.** MC `0xF4_0000_0000`, system-physical `0x7_8000_0000`
+  (`GCMC_VM_FB_OFFSET` = 0x780), BAR0 256 MB at `0x8_8000_0000`.
+  Apple's GPUVM space is `0xFF_BF..`. `mc2pa(mc) = mc - vram_start +
+  vram_base_offset`.
+- **seg0 = 0x1260** for GC `BASE_IDX 0`, agreed four independent ways;
+  seg1 = 0xa000. Byte address is `(seg + dword_offset) * 4`. Apple's encoded
+  register ids are `(dword offset << 32) | 11`, 11 = GC_HWID.
+- **The accessor slots** on `pm4+0x30` / `hw->0x368`: `[0x148]` resolves an
+  encoded id to a dword offset, `[0x118]` READS it, `[0x120]` WRITES it.
+- **The hw engine array** is `hw + 0x3b0 + engine*8`: `[0]` PM4/GFX,
+  `[1..4]` the four SDMA engines. The SDMA *walk* bases at `hw + 0x3b8`, so
+  `engine[i]` is hw index `i + 1`.
+- **`GB_ADDR_CONFIG`** is dword `0x13de`, BASE_IDX 0; this chip reads `0x242`.
+  Fields per `gc_10_3_0_sh_mask.h`: NUM_PIPES[2:0], PIPE_INTERLEAVE_SIZE[5:3],
+  MAX_COMPRESSED_FRAGS[7:6], NUM_PKRS[10:8], NUM_SHADER_ENGINES[21:19],
+  NUM_RB_PER_SE[27:26].
+- **`AddrSwizzleMode`**: 0 = LINEAR, 9 = 64KB_S, 22 = 4KB_D_X, 25 = 64KB_S_X,
+  27 = 64KB_R_X. Apple's `getAddrSwizzleMode` table (0xbf4efa0) is identity
+  for supported modes, `0x21` = unsupported.
+- **`getPDEValue` returns FLAGS ONLY** (2ko): over 108 calls,
+  `L0 f=2000000000000001`, `L1 f=100000000000001`, address bits 47:12 zero.
+  The address is ORed in by the caller. Never hook it to correct an address.
+- **`BOOTLOAD_COMPLETE = 1`** since 2jq: Apple's `_gc_10_3_get_fw_constants`
+  asks for 21 firmware entries and 2aj supplied 7, so the RLC had been booting
+  **Navi 21's** `rlc_lx6_iram`/`rlc_lx6_dram`. `-rbgpurlcsub` supplies
+  yellow_carp's own as sub-image ids 26/27/28/29/30. Never remove it.
+- **`powerUpHW` succeeds**, eight consecutive boots.
+- **Request 0x1B completes** (2ha): its `0xE00002C7` is set on the *success*
+  path at 0xbe418cf. Both failure paths return `0xE00002D8`.
+- **Metal works.** `MTLCopyAllDevices` returns 1 device; `newCommandQueue`
+  succeeds; a runtime-compiled 4096-thread kernel returns correct results.
+- **`-rbgpuforceenable`** sets `fEnabled` (bit 0x2 at `accel+0xc78`), whose
+  only setter is `IOGraphicsAccelerator2::enableAccelerator()` — unreachable
+  because 2ct refuses the display pipe, which is why every armed boot was
+  black before 2hh.
 
 ### Key addresses (AMDRadeonX6000 unless noted)
 
 ```
+0xbe8cb90  AMDHWMemory::adjustVRAMAddress        <- THE FIX SITE
+0xbe8e624  AMDHWVMContext::mapVMPT
+0xbe91376  AMDHWVMM::assignVMID
+0xbec7de6  AMDGFX10HIQHWChannel::fillMapProcessPacket
+0xbe9b9de  AMDGFX10VMM::getPDEValue              (flags only)
+0xbe99342  AMDHWAlignManager2::init
+0xbf4efa0  getAddrSwizzleMode table
 0xbea1190  AMDGFX10PM4Engine::doStart
-0xbea2542  initGraphicsMQD            (region G gated on pm4+0x10, measured 0)
-0xbea8ec9  powerUpHWEngines   walks hw+0x3B0, 11 entries, vtable[0x138]
-0xbea8fea  startHWEngines     walks hw+0x3B8, hw->0xc2*2+2, vtable[0x148]
-0xbea4a6a  AMDGFX10SDMAEngine::start      <- THE FRONTIER
+0xbea8ec9  powerUpHWEngines      walks hw+0x3B0, 11 entries, vtable[0x138]
+0xbea8fea  startHWEngines        walks hw+0x3B8, hw->0xc2*2+2, vtable[0x148]
 0xbeca1f0  Navi21Hardware::allocateHWEngines
-0xbeca1d9  Navi21Hardware::setupAndInitializeHWCapabilities  (+0xc2 = 1)
-0xbed26ad  Navi23Hardware::      "       "                   (+0xc2 = 0)
-0xbec7688  startKIQ           (asks the service layer, command 8 - works)
 0xbe85536  waitForHwStamp
-0xbe848cc  AMDHWChannel::init
+0x126b002e _gc_get_tiling_params_10_1            (HWLibs; reads GB_ADDR_CONFIG)
+0x14e20282 IOAccelDevice2::get_config            (IOAcceleratorFamily2)
 ```
 
-Engine array layout, confirmed from the constructor and from `amd-log.txt`:
-
-```
-0x3B0[0]      AMDNavi21PM4Engine
-0x3B0[1..4]   AMDSDMAEngine_GC_10_3_0   == 0x3B8[0..3]
-0x3B0[8..9]   AMDVCN3HWEngine
-```
-
-### Apple's SDMA `start()`, disassembled (0xbea4a6a)
-
-```
-bea4a6a  if (this->0x10 != 0)   return FALSE        "started" flag
-bea4a87  svc = (this->0x18)->vtable[0x2c0]()
-bea4a94  if (this->0x48 == 0)   -> bea4b49          zero queues: trivial TRUE
-loop qi < this->0x48:
-  bea4aa7  movq 0x50(%rbx,%r12,8), %r13   ch = INLINE ARRAY inside the engine
-  bea4ad4  desc = { 0x40000, ch->0x48, ch->0xd0 }
-  bea4b0c  svc->vtable[0x120](this->0x1a0[qi], this->0x1a4[qi], &desc, &out)
-  bea4b14  if (ret != 0)        -> bea4b5d          unmap, return FALSE
-bea4b49  this->0x10 = 1 ; vtable[0x278]() ; return TRUE
-```
-
-Measured pairs: `queue[0] = (0x7, instance)`, `queue[1] = (0xa, instance)`.
-`+0x50` is an **inline array of channel pointers inside the engine**, not a
-pointer that is then indexed — misreading that caused the 2gg panic.
+Extracted kexts in `build/re/`: `AMDRadeonX6000`, `AMDRadeonX6800HWLibs`,
+`AMDRadeonX6000HWServicesNavi`, `IOAcceleratorFamily2`, plus (from
+`SystemKernelExtensions.kc`, not the boot collection) `AMDFramebuffer`,
+`AMDSupport`, `AMDRadeonX6000Framebuffer`.
 
 ---
 
-## 4. Open and unexplained
+## 6. Open, unexplained, owed
 
-- **Why engine[1]'s queue create is refused.** The 2gh boot decides whether
-  it is the instance index or the engine object.
-- **There is no `hw->0xc2` that fits this chip.** `0xc2*2+2` is always even
-  and >= 2, so Apple's Navi 21 path cannot walk exactly one SDMA engine. If
-  the instance index turns out to be the discriminator, the real fix is making
-  `allocateHWEngines` build one engine, which is a separate change.
-- **`gfx_min = gfx_max = 0`** since 2di — GFX DPM never started. It has not
-  bitten any measured path yet (the RB0 writes and the HQD poll all work), but
-  it is unexplained.
-- **A panic can lose an NVRAM note** that the 2gd nonce would otherwise make
-  readable (2gg: `rbgpu-boot` stayed at 3 although stage 1 ran 3 s earlier).
-  A note's write can also fail to survive a power cycle (2gc, measured by
-  comparing in-boot `nvram.txt` against the post-cycle read). Cause unknown.
-- **`rbgpu-diag` stopped reporting the frontier** after 2fa rate-limited the
-  refresh. Values that matter must ride an NVRAM note, not the diag table.
-- **The published `RBGPULog` and `log.txt` can disagree** within one capture
-  (2fx). Noted, not chased.
+- **`rbgpu-vmid` reads `av=N fail=N` equal** — every `assignVMID` reports
+  failure by the hook's own criterion while VMIDs are plainly handed out.
+  `fail` has never been read against the code that sets it. The 2ha rule
+  applies: a return code is not a result until the code that sets it has been
+  read.
+- **`gfx_min = gfx_max = 0`** since 2di: the SMU reports no GFX clock range,
+  GFX DPM never started. 2hl measured the CP clocked and executing, so this is
+  **not** the mechanism of anything currently broken. Why it reads zero is
+  still open.
+- **The diag table is full at `d=73`** — new `rbgpu_diag_set_num` entries
+  silently do not appear. Values that matter must ride an NVRAM note.
+- **MMHUB's fault status register reads all-ones** on this chip, and Apple's
+  `getVMFaultInfo` fills its struct whenever `(addr != 0 || status != 0)`, so
+  Apple reports a **phantom hub-1 fault** on every poll. Never treat an Apple
+  hub-1 fault report on this chip as real. (Downstream of the fault stream;
+  gone since 2kw, `fw=0`.)
+- **The peer's `/options` lookup is tried once** (`IORegistryEntry::fromPath`).
+  On a boot where the peer runs early (0.52 s vs the usual 1.9 s) it loses the
+  race, logs `/options not found`, and silently does not arm —
+  indistinguishable from the user forgetting. `rbgpu-arm` stays set, so a plain
+  reboot recovers. A bounded retry is owed. [2gy]
+- **A panic can lose an NVRAM note** whose nonce would otherwise make it
+  readable (2gg), and a note's write can fail to survive a power cycle (2gc).
+  Cause unknown.
 
-### Debts — bypasses that have never been justified
+### Bypasses never justified
 
-- **2am / 2an / 2ao**: `_gc_fw_autoload_is_completed`,
+- **2am / 2an / 2ao** — `_gc_fw_autoload_is_completed`,
   `_gc_check_register_equal_ext` (RLC safe mode) and
-  `_sdma_5_2_1_fw_autoload_is_completed` are all forced true, blanket. The
-  SDMA one is directly relevant to the current frontier.
-- **2cc**: `AMDVCN2EncChannel::allocateMemoryResources` stubbed to true.
-- **2be**: the accelerator's `stop()` patched to RET (a trap-3 guard whose
-  cause was never understood).
-- **2ct**: the display pipe is refused outright.
-- **2cp**: `waitForActiveValue`'s `bounded` parameter forced true. This one is
-  a restoration of Apple's own 100 ms cap, not a bypass, and 2fi measured the
-  poll exiting on its first iteration anyway.
+  `_sdma_5_2_1_fw_autoload_is_completed` forced true, blanket. 2jq largely
+  explains the first (the firmware tables were wrong, not the latch), and 2iv
+  found `RLC_SAFE_MODE` genuinely stuck with Linux's own exit sequence unable
+  to clear it across 1000 polls. 2an is **not** vindicated.
+- **2cc** — `AMDVCN2EncChannel::allocateMemoryResources` stubbed true.
+- **2be** — the accelerator's `stop()` patched to RET; the trap-3 guard it
+  silences was never understood.
+- **2ct** — the display pipe refused outright. `-rbgpudisplaypipe` (2kt) now
+  adopts it instead; 2ct's premise died when `powerUpHW` began succeeding.
 
-### Not started at all
+### Not started
 
-Display, VCN, GFX DPM, any GPU client. No boot has reached a desktop with the
-accelerator powered since 2em.
+VCN, GFX DPM, DCN 3.1.2 proper, the real framebuffer.
 
 ---
 
-## 5. The recurring error — read this before concluding anything
+## 7. The recurring error — read before concluding anything
 
-**Twenty-one recorded instances.** The shape is always the same: *a value is
+**Twenty-six recorded instances.** The shape is always the same: *a value is
 read without first establishing what would make it meaningful*, or *absence is
-read as a result*, or *a table is built from n=1 rows*.
+read as a result*, or *a table is built from n=1 rows*. The 2kx/2la/2lc trio
+above is the most recent, and is the variant worth naming:
 
-Withdrawn conclusions, each once written up as a finding:
+> **Read the evidence already in hand before designing the next experiment.**
+> All three experiments tested a *global* layout parameter that the user's
+> photograph — correct chrome and scrambled glyphs in the same surface — had
+> already excluded.
 
-```
-2dk  "seg0 = 0x1260 decodes"        tested != 0xffffffff; both bases read 0
-2dl  "the MEC fetched a packet"     0xdef0def0 was a fill pattern
-2dm  "the KIQ queue was never programmed"   wrong HQD window (GRBM_GFX_CNTL)
-2do  "the PQ_BASE mismatch is a fault"      GPUVM VA vs physical MC address
-2dp  "nothing was submitted"        measured before the doorbell
-2dt  "+0xe0 == -1 means no writeback"       the jump was read backwards
-2ee  "neither page is a page directory"     the instrument never read memory
-2eh  "TTL has no GART table"        asked before the handle existed
-2ej  "the page table has no valid entries"  read the wrong 2 MB of it
-2ek  "the ring PTE is unreadable"   read before the HQD probe ran
-2ev  the seven-boot span table      seven single samples read as causal
-2es  "the refresh thread blocked"   it was looping, not blocked
-2eu  "the hang is in initGraphicsMQD"       it was our own register dump
-2dq  "the CP executed the packet"   it fetched, faulted and discarded
-2fo  "the gate trail was the wedge" one boot read as a rule; 2fs refuted it
-2fe  "three mapQueues calls remain" 0x348 is a loop BOUND, not a count
-2gc  "a constant command 7"         read pair[0] only; arg1 is 0x7 then 0xa
-2fu  third boot's `s=1` read as evidence    overwrite var, no nonce
-```
-
-### The rules this produced, in force
+### The rules in force
 
 1. **Say in the code what would have to be true for a reading to mean
    anything, and log it when it is not.**
 2. **Absence is not a result.** Every path out of a probe writes a record
-   naming which path it took.
-3. **A measurement placed behind a varying gate inherits the variance** (2fd).
-   Put probes where the code always reaches.
+   naming which path it took. A silent `return`, a full diag table and a
+   missing NVRAM write all look identical to "the code never got there".
+3. **A measurement behind a varying gate inherits the variance.** Put probes
+   where the code always reaches.
 4. **A diagnostic that substitutes its own value must never narrate that value
-   as a hardware result** (2cy cost fifteen milestones).
-5. **An overwrite NVRAM variable is this boot's only if `b=` is new** (2gd).
+   as a hardware result.** [2cy, which cost fifteen milestones]
+5. **An overwrite NVRAM variable is this boot's only if `b=` is new.** [2gd]
 6. **One variable per boot.**
-7. **The instrument is a suspect.** Two panics and ~17 boots in the 2e/2f
-   family were the measuring apparatus, not the chip.
-8. **Never route a symbol unless `nm -m build/re/<kext>` shows it DEFINED
-   there** (milestone 2c: `solveSymbol` returns a bare KASLR slide for
-   imports).
-9. **Before routing a symbol, disassemble its first 16 bytes and refuse if a
-   rel8/rel32 branch begins within the first 5** (2gb: Lilu copies displaced
-   instructions byte-for-byte into a trampoline, so a short branch keeps its
-   original displacement and lands in Lilu's own buffer).
+7. **The instrument is a suspect.** When a measurement and a suspect are both
+   new, remove the suspect rather than reasoning about it.
+8. **A return code is not a result until the code that sets it has been
+   read.** A named constant tells you what the NAME means, not what the
+   function meant by it. [2ha]
+9. **A stale note is no evidence about where a boot got to** — not weak
+   evidence of an early stop. A user rebooting a black screen looks exactly
+   like a hang. [2gw]
 10. **A NULL check is not a pointer check.** Validate derived pointers as
-    kernel VAs (`>= 0xffffff8000000000`) before dereferencing (2gh).
+    kernel VAs (`>= 0xffffff8000000000`) before dereferencing. [2gh]
+11. **When a fix moves upstream, REMOVE the downstream patch it replaces, in
+    the same change.** "Redundant" and "inert" are different things. [2kv]
+
+### Routing Apple's code — five rules, each paid for on hardware
+
+1. **Never route a name unless `nm -m build/re/<kext>` shows it DEFINED
+   there.** `solveSymbol` does not skip imports; it returns the bare slide and
+   `routeMultiple` writes a jump there. [2c]
+2. **Disassemble the first 16 bytes and refuse if a rel8/rel32 branch begins
+   within the first 5.** Lilu copies displaced instructions byte-for-byte into
+   a trampoline, so a short branch keeps its original displacement and lands in
+   Lilu's own buffer. [2gb, "rule 9"]
+3. **Grep the mangled symbol across the whole plugin before adding a route.**
+   A second `RouteRequest` for an already-routed function **panics the machine
+   outright** — Lilu finds the first route's `E9` jmp and refuses. A new
+   transform goes **inside the existing hook**. [2kn]
+4. **`RouteRequest::from` is NOT written back** by Lilu 1.7.3, despite
+   `kern_patcher.hpp` documenting it as such. Call `solveSymbol` yourself.
+   [2kp]
+5. **Cross-check every hand-written mangled name against `nm`.** Three length
+   prefixes were wrong in one change; each would have made `solveSymbol`
+   return 0 and silently unscope the fix. [2kr]
+
+vtable dumps: **call offset = dump offset − 0x10** (the address point is
+symbol + 0x10). A *non-virtual* call through a vtable **symbol** uses dump
+offsets directly. [2gp]
 
 ---
 
-## 6. Procedure — who runs what
+## 8. Procedure — who runs what
 
 **the assistant never runs `efi.sh`, `load.sh` or `unload.sh`, and never asks for the
 password.** the assistant may commit at any time without asking; **pushing needs
-asking**. Loading or unloading a kext needs asking. Deliberate diagnostic
+asking**. **Loading or unloading a kext needs asking.** Deliberate diagnostic
 panics are off the table (user's decision, 2026-10-12). Adding an SMU message
-group is the user's decision.
+group is the user's decision — say what it changes on the chip.
+
+**License constraint:** NootedRed and NootRX are under the ChefKiss Open
+Knowledge License v1, whose §2 and §3 forbid AI reading, summarizing,
+analyzing or deriving output from the work. **Do not read or analyze them.**
+Findings from those projects must come from the user in their own words.
 
 ### Build
 
@@ -515,72 +374,119 @@ sudo tools/efi.sh install && sudo tools/efi.sh status
 sudo tools/efi.sh on && sudo nvram rbgpu-arm=1 && sudo reboot
 ```
 
-Arming is one-shot: the peer consumes `rbgpu-arm` and flushes the removal
-immediately, so a panic reboot comes up unarmed. **After a panic, check
-`nvram rbgpu-arm` anyway** — 2gg found it still at 1.
+**`rbgpu-arm` is one-shot** — the peer consumes it and deletes it. Every armed
+boot needs it set again, and an install that only replaces the kext and edits
+boot-args does **not** arm. After a panic, check `nvram rbgpu-arm` anyway
+(2gg found it still at 1).
 
 ### Read a boot — in the ARMED boot, before any reboot
 
 ```
-tools/plugin_check.sh
+sudo tools/plugin_check.sh
 ```
 
-Every readable boot in the 2g family was readable because this ran in the
-armed boot. It writes `logs/<timestamp>-plugin/` with `nvram.txt`, `log.txt`,
-`pci.txt`, `igpu.txt`, `peer.plist`. A 0-byte `pci.txt` means the IGPU
-registry subtree was locked — the hard-wedge fingerprint.
+It writes `logs/<timestamp>-plugin/` to **disk**, which survives the power
+cycle; live NVRAM read after a reboot does not. Boots 57/58/59 each wrote an
+early note and lost every late one, and three experiments were spent blaming
+the code. The user cannot run the assistant from an armed boot, so the capture has to
+be a file. **Look in `logs/<timestamp>-plugin/` before reading live NVRAM.**
+A 0-byte `pci.txt` means the IGPU registry subtree was locked — the hard-wedge
+fingerprint.
 
 ### Before interpreting ANY boot
 
 ```
-kmutil showloaded | grep rembrandt      vs  dwarfdump --uuid build/out/...
-nvram rbgpu-boot                        a NEW sequence, or the notes are stale
-nvram rbgpu-diag | head -c 60           armed=1 means this boot was armed
+nvram rbgpu-boot                        FIRST. If it has not increased since
+                                        the last capture, the boot was never
+                                        armed and NOTHING in NVRAM is this
+                                        boot's. `rbgpu-diag` carries no nonce,
+                                        so "armed=1 reads live" certifies a
+                                        STALE capture. [2iz]
+kmutil showloaded | grep rembrandt      vs dwarfdump --uuid build/out/...
 nvram boot-args                         which flags were ACTUALLY set
 ls -lt /Library/Logs/DiagnosticReports/*.panic | head
 grep -o 'com.rembrandtgpu.plugin(1.0)\[[0-9A-F-]*\]' <the .panic>
-                                        WHICH BUILD panicked - not your memory
-                                        of it. The 2gg panic was read as a
-                                        2gh panic for a day, and the EFI
-                                        backups (boot-args per operation) are
-                                        what settled it.
+                                        WHICH BUILD panicked — not your memory
+                                        of it.
 ```
 
 ### Rescue
 
 `-rbgpuoff` in boot-args: the kext still loads, no peer instance exists.
 
-### NVRAM channels
+### NVRAM channels (the ones that matter now)
 
 ```
-rbgpu-boot        per-boot sequence counter; every note is prefixed b=<n>
-rbgpu-prog        stage note, overwritten (s=1 powerUpHW ENTER ... s=6)
-rbgpu-sdma        the SDMA engine map, written once at stage 4 (2gf)
-rbgpu-prog2       the +15/+35/+65 s samplers (2fy), stage + log sequence
-rbgpu-gate        the gate trail - OFF while -rbgpunogates is set
-rbgpu-diag/-prev  the diag summary; stops reporting the frontier (see §4)
-rbgpu-arm         one-shot arming
+rbgpu-boot    per-boot sequence counter; every note is prefixed b=<n>
+rbgpu-arm     one-shot arming
+rbgpu-adj     the mc2pa fix: calls / inmap / fixed / out-of-scope callers
+rbgpu-fault   Apple's own VM fault records (c/f/r/o/fw)
+rbgpu-ring    ring pointers, CP_ME_CNTL, GRBM_STATUS at three phases
+rbgpu-surf    getSurfaceInfo2 / swizzle modes
+rbgpu-res     IOAccelNewResourceArgs dumps
+rbgpu-si      the surface-info rewrite counters
+rbgpu-addr    GB_ADDR_CONFIG, decoded
+rbgpu-disp    the display-pipe adoption
+rbgpu-diag    the diag summary — FULL at d=73, carries no nonce
 ```
 
 ---
 
-## 7. Where to go next
+## 9. Boot-args — what must stay IN and OUT
 
-1. **Build the four observe-only hooks** (§2) and spend one boot. The answer
-   is which of `startGlobalPerfCounters`, `hardwareDidStart`,
-   `(this->0x380)->vt[0x158]` or `enableInterrupts` is entered and does not
-   return.
-2. **If it is `enableInterrupts`**, the question becomes an interrupt storm —
-   the GPU has been able to reach host memory and raise interrupts only since
-   2em, which 2fk already flagged as the one new asynchronous thing on this
-   chip.
-3. **If it is `startGlobalPerfCounters` or `hardwareDidStart`**, it is a
-   register wait on the GFX block, and `gfx_min = gfx_max = 0` — GFX DPM never
-   started, standing since 2di — becomes the leading explanation. Acting on it
-   needs an SMU message group beyond TABLES, which is **the user's decision**
-   under the docs/RULES.md rule; say what it changes on the chip before asking.
-4. **Standing, unchanged:** the 2am / 2an / 2ao blanket bypasses (the SDMA one
-   is adjacent to a path that now genuinely starts), 2cc (VCN encode stubbed),
-   2be (`stop()` patched to RET, cause never understood), 2ct (the display
-   pipe refused outright). The display path is untouched and 2bq's reserve
-   chain is now unblocked (§3), so it is the frontier after 0x1B.
+**IN**, each proven:
+
+```
+-rbgpusync570 -rbgpuspoofttl -rbgpupsphw     the TTL/PSP path
+-rbgpusmubringup -rbgpuptbase                the SMU link and the GART fix
+-rbgpustampwait                              the bounded (2en) real wait
+-rbgpunogates                                the configuration that works
+-rbgpusdmaone                                what makes powerUpHW succeed
+-rbgpuvmpteng1                               engine-2 requests -> engine 1,
+                                             the one SDMA instance (2gw)
+-rbgpuforce1b                                sends request 0x1B
+-rbgpurlcsub                                 what makes the RLC autoload
+                                             COMPLETE (2jq) — never remove
+-rbgpunocgcg                                 CGCG off; takes, but NOT a fix
+-rbgpumewatch                                the timed CP/RLC/GFXOFF samples
+-rbgpuforceenable + wdt=-1                   the accelerated display.
+                                             NEVER arm the first without
+                                             the second — without it the
+                                             frozen boot panics at 120 s with
+                                             no SSH window (2hh)
+-rbgpuvramadj                                2ks/2ku/2kw: THE FIX
+-rbgpudisplaypipe                            2kt: adopt the display pipe
+-rbgpulinear                                 ~80 % of the rendering; a
+                                             bandwidth-costing crutch until
+                                             the userspace fix lands
+```
+
+**OUT**, each proven:
+
+| flag | why |
+|---|---|
+| `-rbgpufbmatch` | spoofs `device-id`; **kills the accelerator** (2lj) |
+| `-rbgpupdefix` | 2ki; composes with the upstream fix, halt returns (2kv) |
+| `-rbgpunodisppanic` | publishes `IOPCITunnelled`, costs the UI (2cv) |
+| `-rbgpusdmahook` | routes a function whose prologue breaks rule 9 (2gb) |
+| `-rbgpustampraw` | Apple's unbounded wait; wedged the machine (2en) |
+| `-rbgpuregdump` | the GC register dump stalls non-deterministically (2fe) |
+| `debug=0x100` | halts on the panic screen instead of writing a report |
+
+`wdt=-1` disables Apple's **userspace** watchdog — read, not assumed:
+`IOWatchdog::start` tests bit 0 of `wdt`, logs "watchdog disabled by boot-arg"
+and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
+
+---
+
+## 10. Where to go next
+
+1. **Readable text (the user's stated priority).** §2: find where
+   `AMDRadeonX6000MTLDriver` gets its tiling geometry and correct it in
+   userspace. No boot is needed to start — it is static analysis of a dylib.
+2. **The display chain.** §4: answer the linkability question **statically**
+   before spending a boot. If `AMDRadeonX6000Framebuffer` cannot be linked
+   from an EFI-loaded kext, this becomes an OpenCore personality patch and
+   leaves this repo.
+3. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
+4. **Drop `-rbgpulinear`** once 1 lands, and re-measure.
