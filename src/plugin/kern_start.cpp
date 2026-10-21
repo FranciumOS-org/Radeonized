@@ -8317,6 +8317,112 @@ void rbgpu_align_flush_2kz(void) {
               "see.");
 }
 
+// ---------------------------------------------------------------------------
+// 2la (2026-10-20): what surface layouts is Apple actually choosing?
+//
+// Two hypotheses have now been refuted by measurement rather than argument -
+// 2kx killed "the tiling params are the wrong generation" (they are read off
+// the chip) and 2kz killed "AddrLib is given Navi 21's geometry"
+// (`a0=242` is the chip's own GB_ADDR_CONFIG, and `ret=0` is ADDR_OK). A
+// third guess would be the pattern CLAUDE.md warns about, so this measures
+// instead.
+//
+// It also no longer fits the photograph. A wrong global swizzle would
+// scramble EVERYTHING tiled; the Dock's icons, the wallpaper and the
+// menu-bar text are pixel-correct while body-text glyphs are shredded. What
+// is broken is SELECTIVE, which is the shape of a per-surface decision -
+// a swizzle mode chosen per surface, or DCC applied to some surfaces and
+// not others.
+//
+// So: record the decisions. `getPreferredSwizzleMode2` is handed AddrLib's
+// `ADDR2_COMPUTE_SURFACE_INFO_INPUT`, whose layout is fixed by AddrLib:
+//
+//   +0x00 size   +0x04 flags  +0x08 swizzleMode  +0x0c resourceType
+//   +0x10 format +0x14 bpp    +0x18 width        +0x1c height
+//   +0x20 numSlices +0x24 numMipLevels +0x28 numSamples +0x2c numFrags
+//
+// and `getDccInfo2` is only called when DCC is being laid out at all - so
+// its call count alone settles whether compression is even in the picture.
+//
+// Observe only: both originals run, their results are returned untouched,
+// and nothing is written.
+//
+// Gates: both DEFINED in AMDRadeonX6000 (milestone 2c); routed nowhere else
+// (2kn); rule 9 clean - getDccInfo2 opens `48 85 f6 0f 94 c1` (testq, sete -
+// no branch in the first five bytes) and getPreferredSwizzleMode2 opens
+// `55 48 89 e5 41 56 53` (2gb); both mangled names cross-checked against
+// `nm`, which caught a wrong length prefix (31 for 33) before the boot (2kr).
+#define RB_2LA_N 5
+struct rb_2la_s {
+    uint32_t flags, swz, restype, fmt, bpp, w, h, frags, ret;
+};
+static uint32_t (*orig_swizmode_2la)(void *, void *) = nullptr;
+static uint32_t (*orig_dccinfo_2la)(void *, void *, void *) = nullptr;
+static int      g_rb_2la_hk_swz = 0;
+static int      g_rb_2la_hk_dcc = 0;
+static uint32_t g_rb_2la_swz_calls = 0;
+static uint32_t g_rb_2la_dcc_calls = 0;
+static uint32_t g_rb_2la_dcc_ok    = 0;   // returned ADDR_OK (0)
+static uint32_t g_rb_2la_n = 0;
+static struct rb_2la_s g_rb_2la[RB_2LA_N];
+
+static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
+    uint32_t r = orig_swizmode_2la ? orig_swizmode_2la(mgr, in) : 0;
+    g_rb_2la_swz_calls++;
+    if (in && g_rb_2la_n < RB_2LA_N) {
+        auto p32 = reinterpret_cast<volatile uint32_t *>(in);
+        struct rb_2la_s *e = &g_rb_2la[g_rb_2la_n++];
+        e->flags   = p32[0x04 / 4];
+        e->swz     = p32[0x08 / 4];
+        e->restype = p32[0x0c / 4];
+        e->fmt     = p32[0x10 / 4];
+        e->bpp     = p32[0x14 / 4];
+        e->w       = p32[0x18 / 4];
+        e->h       = p32[0x1c / 4];
+        e->frags   = p32[0x2c / 4];
+        e->ret     = r;
+        rbgpu_log("2la: surface %ux%u bpp=%u fmt=%u restype=%u flags=%08x "
+                  "swz(in)=%u frags=%u -> %x",
+                  e->w, e->h, e->bpp, e->fmt, e->restype, e->flags,
+                  e->swz, e->frags, r);
+    }
+    return r;
+}
+
+static uint32_t hooked_dccinfo_2la(void *mgr, void *in, void *out) {
+    uint32_t r = orig_dccinfo_2la ? orig_dccinfo_2la(mgr, in, out) : 0;
+    g_rb_2la_dcc_calls++;
+    if (r == 0) { g_rb_2la_dcc_ok++; }
+    return r;
+}
+
+void rbgpu_surf_flush_2la(void) {
+    char n[352];
+    int w = snprintf(n, sizeof(n),
+                     "swz hk=%d calls=%u | dcc hk=%d calls=%u ok=%u",
+                     g_rb_2la_hk_swz, g_rb_2la_swz_calls,
+                     g_rb_2la_hk_dcc, g_rb_2la_dcc_calls, g_rb_2la_dcc_ok);
+    size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (uint32_t i = 0; i < g_rb_2la_n && at < sizeof(n) - 56; i++) {
+        const struct rb_2la_s *e = &g_rb_2la[i];
+        w = snprintf(n + at, sizeof(n) - at,
+                     " | %ux%u b%u f%u t%u fl%x s%u->%x",
+                     e->w, e->h, e->bpp, e->fmt, e->restype, e->flags,
+                     e->swz, e->ret);
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    rbgpu_nvram_note("rbgpu-surf", n);
+    rbgpu_log("2la: %s", n);
+    rbgpu_log("2la: `dcc calls=0` means compression is NOT in the picture "
+              "and DCC is excluded as the cause. `dcc calls>0` makes it a "
+              "live suspect and the next step is forcing it off for one "
+              "boot. The per-surface rows are AddrLib's own "
+              "ADDR2_COMPUTE_SURFACE_INFO_INPUT: width x height, bpp, "
+              "format, resourceType, flags, the swizzle mode going in and "
+              "what the call returned. `hk=0` on either means that hook did "
+              "not take and its zero is the hook, not the driver.");
+}
+
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
 static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
@@ -9797,6 +9903,22 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
     rbgpu_route_pdefix_2ki(patcher, id, address, size);
     rbgpu_route_vramadj_2kr(patcher, id, address, size);   // 2kr
     rbgpu_route_disp_2kt(patcher, id, address, size);      // 2kt
+    {   // 2la: observe-only, the per-surface layout decisions
+        KernelPatcher::RouteRequest rs(
+            "__ZN33AMDRadeonX6000_AMDHWAlignManager224getPreferredSwizzleMode2EP33_ADDR2_COMPUTE_SURFACE_INFO_INPUT",
+            hooked_swizmode_2la, orig_swizmode_2la);
+        if (patcher.routeMultiple(id, &rs, 1, address, size)) {
+            g_rb_2la_hk_swz = 1;
+        } else { g_rb_2la_hk_swz = 0; patcher.clearError(); }
+        KernelPatcher::RouteRequest rd2(
+            "__ZN33AMDRadeonX6000_AMDHWAlignManager211getDccInfo2EP28_ADDR2_COMPUTE_DCCINFO_INPUTP29_ADDR2_COMPUTE_DCCINFO_OUTPUT",
+            hooked_dccinfo_2la, orig_dccinfo_2la);
+        if (patcher.routeMultiple(id, &rd2, 1, address, size)) {
+            g_rb_2la_hk_dcc = 1;
+        } else { g_rb_2la_hk_dcc = 0; patcher.clearError(); }
+        rbgpu_log("2la: swizzle hk=%d dcc hk=%d", g_rb_2la_hk_swz, g_rb_2la_hk_dcc);
+    }
+
     {   // 2kz: observe-only, the AddrLib geometry
         KernelPatcher::RouteRequest req(
             "__ZN33AMDRadeonX6000_AMDHWAlignManager24initEP30AMDRadeonX6000_IAMDHWInterface",
@@ -14017,6 +14139,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_vramadj_flush_2kr();
     rbgpu_disp_flush_2kt();
     rbgpu_align_flush_2kz();
+    rbgpu_surf_flush_2la();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();

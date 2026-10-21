@@ -16454,3 +16454,62 @@ returns `ok=false` on any NULL along the way so an unreached getter is
 Observe only. Nothing written, the original's return passed through.
 
 Build `F7112B3D-01C3-3D6E-B0D3-9881C716D687`.
+
+## 2la (2026-10-20) — boot 95: the AddrLib geometry is CORRECT; 2kz's hypothesis is refuted
+
+```
+rbgpu-addr = b=95 hk=1 calls=1 read=1 ret=0 | fam=d rev=8f third=28
+             | a0=242 a8=0 b0=0 b8=0
+rbgpu-ring = b=95 ... gbac=242
+rbgpu-fault= b=95 c=0 f=0 r=0 o=0 fw=0
+```
+
+`a0` is `regValue.gbAddrConfig` and it reads **242 - identical to the
+chip's own register**. Mapped onto AddrLib's `ADDR_CREATE_INPUT`
+(`size`, `chipEngine`, `chipFamily`, `chipRevision`, three callbacks,
+flags, `regValue` at +0x30) the rest reads `chipEngine=0xd`,
+`chipFamily=0x8f` - AddrLib's `FAMILY_NV`, correct for Navi 21 **and**
+for this part - `chipRevision=0x28`, and the init returned `0` = ADDR_OK.
+
+**So the kernel's AddrLib is configured with this chip's real geometry.**
+Gfx10's AddrLib derives pipes, packers and shader-engine counts from
+`gbAddrConfig`, not from the family, so "AddrLib swizzles for Navi 21" is
+dead. Third hypothesis about this corruption, third refutation by
+measurement - and each one was cheap because it was measured rather than
+argued.
+
+**It never fitted the photograph either, and that should have been said
+sooner.** A wrong global swizzle scrambles everything tiled. The Dock's
+icons, the wallpaper and the menu-bar text are pixel-correct while
+body-text glyphs are shredded. The corruption is **selective**, which is
+the shape of a per-surface decision, not a global parameter.
+
+**2la records the decisions themselves.** Two observe-only hooks:
+
+- `AMDHWAlignManager2::getPreferredSwizzleMode2` (0xbe9957e) is handed
+  AddrLib's `ADDR2_COMPUTE_SURFACE_INFO_INPUT`, whose layout is fixed:
+  `+0x04 flags`, `+0x08 swizzleMode`, `+0x0c resourceType`, `+0x10
+  format`, `+0x14 bpp`, `+0x18 width`, `+0x1c height`, `+0x2c numFrags`.
+  The first five surfaces are recorded with the mode the call returned.
+- `AMDHWAlignManager2::getDccInfo2` (0xbe99750) is called **only** when
+  DCC is being laid out, so its call count alone settles whether
+  compression is in the picture at all.
+
+| `rbgpu-surf` | means |
+|---|---|
+| `dcc calls=0` | compression is not in use; DCC excluded |
+| `dcc calls>0` | live suspect, and forcing it off is the next boot |
+| per-surface rows | the actual layout decisions, to compare against what the chip supports |
+| `hk=0` on either | that hook did not take; its zero is the hook, not the driver |
+
+Both originals run and their results pass through untouched; nothing is
+written.
+
+Gates: both defined in AMDRadeonX6000 (2c); routed nowhere else (2kn);
+rule 9 clean - `getDccInfo2` opens `48 85 f6 0f 94 c1` (testq, sete, no
+branch in the first five bytes), `getPreferredSwizzleMode2` opens
+`55 48 89 e5 41 56 53` (2gb). **The `nm` cross-check earned its keep
+again**: both names were first written with a 31 length prefix where the
+class needs 33, and `solveSymbol` would have returned 0 for both (2kr).
+
+Build `78B2F3A5-84B0-39E3-AB91-C4063BBC1087`.
