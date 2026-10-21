@@ -495,6 +495,55 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     }
     rbgpu_diag_set_num("armed", armed ? 1 : 0);
 
+    // 2li (2026-10-20): THE DISPLAY HALF WAS NEVER ASKED TO START.
+    //
+    // There is no AMD framebuffer because the chain that builds one never
+    // begins. `AMDRadeonX6000Framebuffer.kext` carries the per-generation
+    // controllers, and `AMDRadeonNavi21Controller` matches on real Navi 21
+    // PCI ids:
+    //
+    //   IOPCIMatch 0x73A01002 0x73A21002 0x73A31002 0x73AB1002
+    //              0x73AE1002 0x73AF1002 0x73BF1002
+    //
+    // This GPU is `0x16811002` and matches none of them, so the controller
+    // never matches, no `AtiFbStub` is published, `AMDFramebuffer` (which
+    // matches `IOProviderClass = AtiFbStub`, `IONameMatch = display`) has no
+    // provider, and DCN is never programmed. That - not a DCN fault - is why
+    // the panel is still on `IONDRVFramebuffer` and why System Profiler
+    // reports the boot framebuffer's 7 MB (2kx).
+    //
+    // Confirmed live: `AMDSupport` is matched and active with **no
+    // children** and `busy 0 (1 ms)`, no `AtiFbStub` instance exists, and
+    // `kextstat` shows no framebuffer kext loaded at all.
+    //
+    // So the display half needs the same treatment the accelerator half
+    // already gets: make Apple's personality match. IOPCIFamily honours a
+    // `device-id` property injected on the device node, which is the
+    // established technique for exactly this.
+    //
+    // OPT-IN and reversible, because it changes what matches on this node -
+    // potentially including things that work today. `-rbgpufbmatch`.
+    if (checkKernelArgument("-rbgpufbmatch")) {
+        // 0x73A0, little-endian, the first id AMDRadeonNavi21Controller
+        // accepts. Four bytes, the width IOPCIFamily reads.
+        static const uint8_t kNavi21Id[4] = { 0xA0, 0x73, 0x00, 0x00 };
+        if (auto did = OSData::withBytes(kNavi21Id, sizeof(kNavi21Id))) {
+            pciDevice->setProperty("device-id", did);
+            did->release();
+            rbgpu_log("2li: device-id spoofed to 0x73A0 so "
+                      "AMDRadeonNavi21Controller can match - the display "
+                      "chain is AtiFbStub -> AMDFramebuffer -> DCN");
+            rbgpu_diag_set_num("fbmatch", 1);
+        } else {
+            rbgpu_log("2li: FAILED to allocate the device-id override");
+            rbgpu_diag_set_num("fbmatch", 0);
+        }
+    } else {
+        rbgpu_log("2li: -rbgpufbmatch not set, device-id left at 0x1681 and "
+                  "no AMD framebuffer will be built");
+        rbgpu_diag_set_num("fbmatch", 2);
+    }
+
     // -rbgpunodisppanic: survive a failed display mode change instead of
     // panicking. IOAccelDisplayMachine::display_mode_did_change panics when
     // AMDAccelDisplayMachine::displayModeDidChange returns false, UNLESS bit

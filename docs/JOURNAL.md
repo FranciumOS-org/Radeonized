@@ -16955,3 +16955,66 @@ should be labelled as such until something confirms it.
 Nothing here changes the standing results: the CP halt is fixed, VM
 faults are zero across five boots, and an armed boot reaches a
 composited desktop that stays up.
+
+## 2li (2026-10-20) — THE DISPLAY HALF WAS NEVER ASKED TO START
+
+Decision recorded first: the user chose option 3 (DCN) over re-spoofing
+as Navi 23 - "our setup is too stable to ditch for Navi23" - and ranked
+userspace patching (option 1) second for later. Option 2 is parked, not
+dead.
+
+**And DCN turns out not to be the first problem.** Four facts, all read
+live:
+
+- `kextstat` shows **no framebuffer kext loaded at all**
+- `AMDSupport` is `matched, active, busy 0 (1 ms)` with **no children**
+- **no `AtiFbStub` instance exists** (the only hit in ioreg is a zero
+  count in `IOKitDiagnostics`)
+- `AMDFramebuffer.kext` matches `IOProviderClass = AtiFbStub`,
+  `IONameMatch = display` - so with no stub it can never match
+
+The chain that should build a display is
+**controller -> `AtiFbStub` -> `AMDFramebuffer` -> DCN**, and it never
+begins. `AMDRadeonX6000Framebuffer.kext` carries the controllers, and
+their personalities match on **real PCI ids**:
+
+```
+AMDRadeonNavi21Controller  IOPCIMatch 0x73A01002 0x73A21002 0x73A31002
+                                      0x73AB1002 0x73AE1002 0x73AF1002 0x73BF1002
+AMDRadeonNavi23Controller  IOPCIMatch 0x73E01002 0x73E31002 0x73FF1002
+AMDGPUWrangler             the same Navi ids, score 60000, IOFramebuffer
+```
+
+This GPU is **`0x16811002`** (`device-id = <81160000>` live) and matches
+none of them. So the controller never matches, nothing publishes a stub,
+and **DCN is never programmed because nothing ever asks it to**. That -
+not a DCN fault - is why the panel is still on `IONDRVFramebuffer` and
+why System Profiler reports the boot framebuffer's 7 MB (2kx).
+
+**2li gives the display half the same treatment the accelerator half
+already gets:** make Apple's personality match. IOPCIFamily honours a
+`device-id` property injected on the device node, so the peer sets it to
+**0x73A0**, the first id `AMDRadeonNavi21Controller` accepts.
+
+**Opt-in and reversible (`-rbgpufbmatch`)**, because it changes what
+matches on that node - potentially including things that work today. The
+accelerator reaches its personality through `LoadAccelerator`,
+`LoadHWServices` and `ATY,Belknap` rather than the device id, so it
+should be unaffected; that is a reading of the existing code, not a
+measurement, and this boot tests it.
+
+| outcome | means |
+|---|---|
+| an `AtiFbStub` and `AMDFramebuffer` appear | the chain starts; DCN work proper begins |
+| controller matches but no stub | the controller runs and fails later - a real DCN question at last |
+| nothing matches | the id is not what gates it; read `fbmatch` in the diag |
+| accelerator breaks / no desktop | the device id was load-bearing elsewhere; drop the arg |
+
+Also extracted for this phase, neither previously analysed:
+`build/re/AMDFramebuffer` (7.0 MB), `build/re/AMDSupport` (7.9 MB) and
+`build/re/AMDRadeonX6000Framebuffer` (10.1 MB), all from
+**SystemKernelExtensions.kc** - not the boot collection, which is why
+`kc_extract.py` found nothing there at first.
+
+Build `BDF97C50-EA4B-3700-876E-85A12C4E4A7E`. New boot-arg:
+`-rbgpufbmatch`.
