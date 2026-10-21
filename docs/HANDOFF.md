@@ -171,13 +171,34 @@ So observation moved kernel-side, to where userspace's choice arrives anyway:
   that driver. Scoped to Terminal alone, since a wrong stub in a system Metal
   driver costs the login session. Behind `-rbgpumtllinear`, OUT by default.
 
-Reading `rbgpu-mode`: **`m0` only, with `-rbgpulinear` in → the kernel's
-resources are linear and the scrambled glyphs are not a kernel-side layout
-choice at all.** A spread with `m27` (64KB_R_X) or `m25` dominating → client
-textures keep a tiled layout, and 2lm is the test that follows.
+**Boot 104 settled it with `-rbgpulinear` OUT: the histogram SPREADS**, so
+`res + 0x1dc` is genuinely per-resource.
 
-`-rbgpulinear` stays IN meanwhile. It is a diagnostic crutch that costs
-bandwidth; the proper fix keeps tiling.
+```
+rbgpu-mode = b=104 seen=4788 bad=0 | m0=4598 m2=8 m22=125 m27=57 | lin=2
+rbgpu-si   = b=104 calls=83 forced=0 already=0 modes=08400004
+```
+
+`0x08400004` is bits 2, 22 and 27 — exactly the histogram's non-zero modes,
+from an independent hook. **190 of 4788 client resources are tiled**: 125 in
+mode 22 (4KB_D_X), 57 in mode 27 (64KB_R_X), 8 in mode 2. The other 4598 are
+linear with nothing forcing them.
+
+This also **corrects boot 103's writeup**, which argued `-rbgpulinear` could
+not reach this field because 2la's hook fired 70 times against 12224
+resources. Boot 103 recorded *zero* non-`m0` out of 12224; at boot 104's
+proportion ~500 tiled should have appeared. So the arg does drive client
+resources linear, and `vt[0x1b8]` reads a mode the align manager **cached**,
+which those 70 calls set and many resources share. A call-count mismatch is
+not proof of independence when an unexcluded cache sits between.
+
+**The fix shape improves:** the proper fix touches ~4% of resources and keeps
+tiling everywhere else, instead of forcing all 4788.
+
+`-rbgpulinear` is currently **OUT**. Whether it is still earning its place
+needs the screen, not a note — it bought ~80 % in boot 98, before the halt
+fix was complete at three sites and before faults reached zero, and has never
+been retested on a healthy chip.
 
 ---
 
@@ -547,9 +568,10 @@ rbgpu-diag    the diag summary — FULL at d=73, carries no nonce
                                              no SSH window (2hh)
 -rbgpuvramadj                                2ks/2ku/2kw: THE FIX
 -rbgpudisplaypipe                            2kt: adopt the display pipe
--rbgpulinear                                 ~80 % of the rendering; a
-                                             bandwidth-costing crutch until
-                                             the userspace fix lands
+(-rbgpulinear was REMOVED before boot 104 to settle 2ll; it is a
+ blanket force on all ~4788 client resources to correct the ~190
+ that are tiled. Re-add with:
+   sudo tools/efi.sh bootarg add -rbgpulinear && sudo nvram rbgpu-arm=1)
 ```
 
 **OUT**, each proven:
@@ -581,4 +603,5 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
    from an EFI-loaded kext, this becomes an OpenCore personality patch and
    leaves this repo.
 3. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
-4. **Drop `-rbgpulinear`** once 1 lands, and re-measure.
+4. **`-rbgpulinear` is already dropped** (boot 104). Re-add it only if the
+   screen says it still earns its bandwidth.
