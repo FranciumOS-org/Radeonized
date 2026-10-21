@@ -19755,3 +19755,74 @@ RBGPU_IOSURFTEX=0 ...                                # disable without rebuildin
 It needs the relaxed AMFI this machine already boots with (`amfi=0x80`,
 `amfi_get_out_of_my_way=0x1`); library validation would otherwise refuse the
 insertion.
+
+## 2mq — the launchd injection broke every newly launched app and forced a reboot
+
+What I told the user to run, and what happened: `tools/iosurftex-launchd.sh on`
+set `DYLD_INSERT_LIBRARIES` in the Aqua launchd environment. Then the assistant would
+not open - it bounced in the Dock and stopped. Then Terminal would not open.
+Then Mail would not open. The already-running Terminal still worked and its
+text was unreadable (an unarmed-boot symptom, unrelated), so it was quit - and
+with it the last usable shell. An SSH session was opened and `off` was run from
+there, which **changed nothing**, and the machine had to be rebooted to get a
+usable GUI back. The reboot came up unarmed, so the session also lost the
+accelerator.
+
+### Two distinct errors
+
+**1. `launchctl setenv` is not a per-app switch.** It applies to every GUI
+process started afterwards. And dyld *kills* a process that cannot load an
+inserted dylib - it does not warn and continue - so every sandboxed app (Mail,
+most App Store apps), which cannot read a dylib out of `~/Developer`, died
+before a single line of our code ran. I had written "Your Terminal is already
+running, so it stays clean as an escape hatch", which was true of that one
+process and false of the act of launching a new one. I presented a system-wide
+switch as scoped, and listed its reversal as if that made it safe.
+
+**2. The escape hatch could not work, and I did not test it.** `launchctl
+unsetenv` over SSH acts on a different launchd domain than the Aqua session, so
+the documented undo unset something that had never been set. The command that
+would have saved the reboot is
+
+```sh
+sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES
+```
+
+Rule 16 says the instrument is a suspect. A recovery procedure is an
+instrument, and this one was never run in the context where it would be needed
+- from outside the GUI session, which is exactly the situation it existed for.
+
+### Done about it
+
+`tools/iosurftex-launchd.sh on` now **refuses**, with the reason and this tag
+in its output. The file keeps `off` and `status` for recovery, and carries the
+`asuser` form in a comment at the top. Nothing persisted: the reboot cleared
+the variable, and `status` on the current boot reads "not set".
+
+### What still stands, and what does not
+
+Unaffected: 2mn's law, 2mo's IOSurface result, and 2mp's fix measured inside a
+process we launch ourselves - 36/72 to 0/72, and real CoreText glyphs from 46
+and 48 wrong rows to 0. None of that involved launchd.
+
+Withdrawn: the claim that this fix can be delivered to arbitrary applications.
+Per-process injection remains correct in principle, but:
+
+- Direct exec of the assistant's binary fails for a reason still unknown: the main
+  process exits cleanly about a second in, twice, with the dylib loaded in all
+  five processes and installed in two, and no crash report either time. The
+  control that separates the launch method from the dylib - running
+  `/Applications/<app>.app/Contents/MacOS/<app>` with nothing injected - has
+  still not been run.
+- Sandboxed applications cannot read a dylib from a home directory at all, so
+  for those the file would have to live somewhere a sandbox permits before
+  injection is even possible.
+
+### Next, in this order
+
+1. Run the control, on any boot, armed or not: does the assistant's binary exit
+   immediately when exec'd directly with **nothing** injected? That is one
+   command and it decides whether per-app injection is possible for the assistant.
+2. Only then consider a real application. Never through launchd.
+3. The accelerator work needs `sudo nvram rbgpu-arm=1 && sudo reboot` again;
+   the current boot has no Metal device at all.
