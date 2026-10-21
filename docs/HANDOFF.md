@@ -89,16 +89,40 @@ which makes this one boot answer a second question too: `gfx_min = gfx_max =
 0` has been standing since 2di, so `sysClkFreq = 0` is live and would mean
 userspace never gets a valid record at all.
 
-**2lk is the measurement, observe-only** — `rbgpu-hwi` records the whole
-sample beside the chip's own `GB_ADDR_CONFIG` (`0x242`, 2ky) and states the
-verdict in words. No correction is written: which one is right depends on
-what `+0xa0` holds, and 2kr cost a boot to reasoning out an arithmetic fix
-before measuring the value it operates on.
+**Boot 102 measured it, and the geometry is RIGHT on both sides.**
 
-Reading the result: **DIFFER → the remaining corruption is one wrong dword in
-a kernel struct and the fix is in this plugin after all.** MATCH kills the
-hypothesis and sends the search to `chipFamily`/`chipRevision`, which AddrLib
-also keys its HWL selection on. `ret=e00002bc` → read `sys=` first.
+```
+rbgpu-hwi = b=102 hk=1 calls=40 null=0 ret=00000000 dev=1681 fam=00000028
+            ras=4 shd=6 gbac=00000242 hw=00000242 MATCH(hypothesis dead)
+            | ref=10000 sys=20000 mem=20000 cg=10000
+```
+
+`gbac = hw = 0x242` — userspace receives the chip's own `GB_ADDR_CONFIG`.
+The fallback lead (`chipFamily`/`chipRevision`) died statically in the same
+step: `gfx10_HwInfoInitData`'s family selection is a `cmpl N / ja` **range**
+cascade, and `kernel->0x08 = 0x28` takes the `<= 0x31` arm, which writes
+`chipFamily = 0x8f` — AddrLib's `FAMILY_NV`, exactly what 2kz measured the
+kernel's own AddrLib getting. All four inputs agree:
+
+| input | kernel (2kz) | userspace (2lk) |
+|---|---|---|
+| chipEngine | 0xd | 0xd (hardcoded) |
+| chipFamily | 0x8f | 0x8f (immediate) |
+| chipRevision | 0x28 | 0x28 |
+| gbAddrConfig | 0x242 | 0x242 |
+
+**There is no AddrLib configuration difference anywhere in this stack.**
+
+Settled for free: `ret=00000000` means Apple **accepts** its own record and
+all four clocks are nonzero, so `gfx_min = gfx_max = 0` (2di) does not reach
+this struct — that path is closed. And `ras=4 shd=6` is the 680M's real
+topology (6 WGPs = 12 CUs), not Navi 21's.
+
+**That is the fourth global-parameter hypothesis to die** — 2kx tiling
+params, 2la kernel AddrLib geometry, 2lc rotation, 2lk userspace geometry —
+and all four were excluded in advance by the same photograph: correct chrome
+and scrambled glyphs *in one surface*. The frontier is not a global layout
+parameter and never was.
 
 Tooling, new and reusable: `tools/re/dyldcache.py` reads any image out of the
 dyld shared cache (no Xcode on this machine, no `dyld_shared_cache_util`) and
@@ -118,9 +142,19 @@ evidence already in hand before designing the next experiment.**
 
 ### The next step
 
-**Spend one boot on 2lk and read `rbgpu-hwi`.** The hook is already built and
-observe-only; the only thing missing is the measurement. Lilu's user patcher
-is no longer needed unless `+0xa0` turns out to be correct.
+Both AddrLibs agree, so a client texture is written by the CPU and read by
+the GPU through the **same** equation. A self-consistent surface cannot
+scramble from a layout mismatch. So either the surfaces that scramble are not
+laid out through AddrLib at all, or they are laid out correctly and corrupted
+by something else — the glyph atlas's producer, a blit/compute path's own
+addressing, or DCC metadata on a render target (`dcc calls=0` excluded DCC
+for the 74 **kernel** surfaces only, never for client ones).
+
+The next measurement is this project's first **userspace observation**: log
+what `amdMtl_HWL_DetermineSwizzleMode` (0x7ffb08d35a11) picks per client
+texture and what `Addr2ComputeSurfaceInfo` returns for it, via Lilu's user
+patcher — used for observation, which is what it should have been used for
+first.
 
 `-rbgpulinear` stays IN meanwhile. It is a diagnostic crutch that costs
 bandwidth; the proper fix keeps tiling.
@@ -518,9 +552,10 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
 
 ## 10. Where to go next
 
-1. **Readable text (the user's stated priority).** §2: one boot, read
-   `rbgpu-hwi`. The channel is found and the hook is built; what remains is
-   the measurement and, if it DIFFERs, a one-dword correction.
+1. **Readable text (the user's stated priority).** §2: the AddrLib
+   configuration is now proven identical on both sides, so the next step is a
+   userspace *observation* of what client textures actually get — not another
+   global parameter.
 2. **The display chain.** §4: answer the linkability question **statically**
    before spending a boot. If `AMDRadeonX6000Framebuffer` cannot be linked
    from an EFI-loaded kext, this becomes an OpenCore personality patch and

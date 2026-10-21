@@ -17215,3 +17215,108 @@ Every path out says something (rule 14): `hk=0` for a hook that did not take,
 NULL-struct path.
 
 Not claimed: that `+0xa0` is wrong. That is what the boot measures.
+
+## 2lk CONFIRMED-NEGATIVE (boot 102) — the geometry is right on BOTH sides
+
+The hypothesis is dead, and the fallback it named is dead too. Both closed in
+one boot plus one static read.
+
+```
+rbgpu-hwi = b=102 hk=1 calls=40 null=0 ret=00000000 dev=1681 fam=00000028
+            ras=4 shd=6 gbac=00000242 hw=00000242 MATCH(hypothesis dead)
+            | ref=10000 sys=20000 mem=20000 cg=10000
+```
+
+`b=102` is a new nonce (2gd) and `rbgpu-boot` went 101 -> 102, so this is
+this boot's evidence. `hk=1 calls=40 null=0` - the hook took and userspace
+asked forty times, so `MATCH` is a measurement and not silence.
+
+**`gbac = hw = 0x242`.** Userspace receives this chip's own
+`GB_ADDR_CONFIG`, byte for byte what the ring probe reads off the register.
+The one-dword theory of 2lk is refuted on direct evidence.
+
+### Two things settled for free
+
+1. **`ret=00000000` - Apple ACCEPTS its own record**, and all four clocks are
+   nonzero (`ref=0x10000 sys=0x20000 mem=0x20000 cg=0x10000`). So
+   `gfx_min = gfx_max = 0`, standing since 2di, does **not** propagate into
+   the hardware-info struct and does not deny userspace a valid record. That
+   half of 2lk's reason for existing is closed as a negative.
+2. **`ras=4 shd=6`** - numRasterPipe 4, numShaderPipes 6. Six WGPs is this
+   chip's 12 CUs. The kernel is reporting the 680M's real topology, not Navi
+   21's.
+
+### The fallback lead, killed statically
+
+2lk said MATCH "sends the search to chipFamily/chipRevision, which AddrLib
+also keys its HWL selection on". `rbgpu-hwi` gives `fam=00000028` for the
+kernel struct's `+0x08`, and 2kz measured the **kernel's** AddrLib create
+input as `fam=d rev=8f third=28` - chipEngine 0xd, chipFamily 0x8f
+(AddrLib's `FAMILY_NV`), chipRevision 0x28. `0x28` is not a family value, so
+for one moment it looked like userspace was being handed 0x28 as its family.
+
+It is not. `gfx10_HwInfoInitData`'s family selection is a cascade of
+`cmpl $N, %r10d ; ja next` - **ranges**, not exact matches - over
+`N = 0x9, 0x13, 0x27, 0x31, 0x3b, 0x45`, with `r10d = kernel->0x08 = 0x28`:
+
+```
+cmpl $0x27 -> ja   (0x28 > 0x27, skip)
+cmpl $0x31 -> fall through, 0x28 <= 0x31, TAKE:
+  0x7ffb08cb4411  movabsq $0x80000008f, %r10
+  0x7ffb08cb441b  movq    %r10, (%rdi)      ; chipFamily = 0x8f, +0x04 = 0x8
+  0x7ffb08cb441e  movl    $0x1, 0x8(%rdi)
+```
+
+and `chipRevision` is `hwInfo+0x10`, written at `0x7ffb08cb40eb` from the same
+`kernel->0x08` = **0x28**.
+
+So the four values AddrLib is created with:
+
+| input | kernel (2kz) | userspace (2lk + static) |
+|---|---|---|
+| chipEngine | 0xd | 0xd (hardcoded, `0x7ffb08bfde51`) |
+| chipFamily | 0x8f | 0x8f (immediate, the `<=0x31` arm) |
+| chipRevision | 0x28 | 0x28 (`kernel->0x08`) |
+| gbAddrConfig | 0x242 | 0x242 (`kernel->0xa0`, measured) |
+
+**Identical on both sides.** There is no AddrLib configuration difference
+anywhere in this stack, and `movq $0x0, (%rdi)` - the `family = 0` fallback
+arm that would have been the defect - is not reached.
+
+### What this costs and what it buys
+
+It costs the whole 2lg -> 2lh -> 2lk line: the remaining corruption is **not**
+a global layout parameter, on either side of the kernel boundary. That is now
+the fourth global-parameter hypothesis to die (2kx tiling params, 2la kernel
+AddrLib geometry, 2lc rotation, 2lk userspace geometry), and all four were
+excluded in advance by the same evidence - the photograph showing correct
+window chrome and scrambled glyphs **in one surface**. The variant named in
+2lk's own writeup ("read the evidence already in hand before designing the
+next experiment") applies to 2lk itself.
+
+It buys four facts that are now settled rather than assumed: userspace's
+AddrLib inputs, Apple's acceptance of the hw-info record, the real topology
+the kernel reports, and the exclusion of 2di from this path. And it buys
+`tools/re/dyldcache.py`, which makes the userspace driver readable at all.
+
+### Where that leaves the frontier
+
+Both AddrLibs agree, so a client texture is written by the CPU and read by
+the GPU through the *same* layout equation. Self-consistent surfaces cannot
+scramble from a layout mismatch. So either
+
+- the surfaces that scramble are not laid out through AddrLib at all, or
+- they are laid out correctly and corrupted by something else - the glyph
+  atlas's producer, a blit/compute path's own addressing, or DCC metadata on
+  a render target (`dcc calls=0` excluded DCC for the 74 *kernel* surfaces
+  only, never for client ones).
+
+The next measurement is the first userspace observation this project has
+made: log what `amdMtl_HWL_DetermineSwizzleMode` (0x7ffb08d35a11) picks for
+each client texture, and what `Addr2ComputeSurfaceInfo` returns for it.
+Lilu's user patcher is back on the table - for **observation**, which is what
+it should have been used for first.
+
+Not claimed: that the layout is correct for client textures. Only that the
+AddrLib *configuration* is identical on both sides, which removes the reason
+to expect it to be wrong.
