@@ -150,11 +150,31 @@ by something else — the glyph atlas's producer, a blit/compute path's own
 addressing, or DCC metadata on a render target (`dcc calls=0` excluded DCC
 for the 74 **kernel** surfaces only, never for client ones).
 
-The next measurement is this project's first **userspace observation**: log
-what `amdMtl_HWL_DetermineSwizzleMode` (0x7ffb08d35a11) picks per client
-texture and what `Addr2ComputeSurfaceInfo` returns for it, via Lilu's user
-patcher — used for observation, which is what it should have been used for
-first.
+**A userspace observation hook cannot exist.** Lilu's user patcher offers
+only `BinaryModInfo`/`BinaryModPatch` — a byte find/replace, with
+`onProcLoad`'s callback firing once per binary load in the kernel, never per
+call in userspace. Userspace can be **forced**, not **read**.
+
+So observation moved kernel-side, to where userspace's choice arrives anyway:
+
+- **2ll** (built, observe-only, this boot): `res + 0x1dc` bits 0:4 are a
+  client resource's swizzle mode, read off Apple's own
+  `andl $0x1f` at `be569d8` in `AMDAccelResourceAddr2::initialize`. A
+  histogram over all ~4287 resources, in note `rbgpu-mode`. It rides **inside
+  the existing 2le hook**, because a second route on an already-routed
+  function panics Lilu (2kn).
+- **2lm** (built, **unarmed**): force `amdMtl_HWL_DetermineSwizzleMode`
+  (0x7ffb08d35a11) to return LINEAR — the userspace counterpart of
+  `-rbgpulinear`. The return value *is* the mode (all nine call sites pass
+  `%eax` on as one), the `uint&` is a separate out-field at `rsp+8` on entry,
+  and the find pattern is 32 bytes because 14 matches **2099** functions in
+  that driver. Scoped to Terminal alone, since a wrong stub in a system Metal
+  driver costs the login session. Behind `-rbgpumtllinear`, OUT by default.
+
+Reading `rbgpu-mode`: **`m0` only, with `-rbgpulinear` in → the kernel's
+resources are linear and the scrambled glyphs are not a kernel-side layout
+choice at all.** A spread with `m27` (64KB_R_X) or `m25` dominating → client
+textures keep a tiled layout, and 2lm is the test that follows.
 
 `-rbgpulinear` stays IN meanwhile. It is a diagnostic crutch that costs
 bandwidth; the proper fix keeps tiling.

@@ -2,6 +2,7 @@
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
 #include <Headers/kern_patcher.hpp>
+#include <Headers/kern_user.hpp>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 
@@ -6863,6 +6864,123 @@ void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     s_kernel_hooks_installed = true;
 }
 
+// ---------------------------------------------------------------------------
+// 2lm (2026-10-21): the userspace force - ARMED ONLY BY BOOT-ARG, and only
+// for one application.
+//
+// Lilu's user patcher can do exactly one thing: replace bytes in a loaded
+// image. It has no per-call callback into the kext, so a userspace function
+// CANNOT be made to log what it computed. Observation of userspace therefore
+// happens kernel-side (2ll); this is the only userspace action available, and
+// it is a force, not a measurement.
+//
+// Target: `amdMtl_HWL_DetermineSwizzleMode` at 0x7ffb08d35a11 in
+// AMDRadeonX6000MTLDriver, the client-side chooser - the userspace
+// counterpart of the kernel's `getPreferredSwizzleMode2` that `-rbgpulinear`
+// forces. Signature (9 params):
+//
+//   amdMtl_HWL_DetermineSwizzleMode(AMDCommonHwInfoRec*, void*,
+//     MTLTextureDescriptorPrivate const*, AMD_DeviceSettings const*,
+//     uint, uint, uint&, bool, bool)
+//
+// **The return value IS the mode**, not a status: every one of the nine call
+// sites does `movl %eax, %ebx` and passes `%eax` on as a mode (e.g.
+// 0x7ffb08d5f22a then `movl %eax, %edx` into the next call). The `uint&` 7th
+// parameter is a separate out-field. At function entry the first stack
+// argument sits at `rsp+8`, confirmed from the callee's own
+// `0x10(%rbp)`/`0x18(%rbp)`/`0x20(%rbp)` reads after it pushes `%rbp`, and
+// from the caller pushing the `leaq`'d reference last.
+//
+// So the stub returns 0 (ADDR_SW_LINEAR) in `%eax` and writes 0 through the
+// out-reference, which the caller's frame would otherwise leave
+// uninitialised:
+//
+//   48 8b 44 24 08        mov  rax, [rsp+8]      ; the uint& out-param
+//   c7 00 00 00 00 00     mov  dword [rax], 0
+//   31 c0                 xor  eax, eax          ; return mode 0 = LINEAR
+//   c3                    ret
+//
+// padded with 0x90 to the length of the find pattern, which `ret` means is
+// never executed.
+//
+// **The find pattern is 32 bytes because shorter is not unique.** Measured
+// against the driver's own `__text`: the bare 14-byte prologue
+// `55 48 89 e5 41 57 41 56 41 55 41 54 53 48` occurs **2099** times, 20
+// bytes occurs 97 times, and 24 bytes occurs once. 32 bytes is one
+// occurrence with margin. A short pattern would have patched an arbitrary
+// function in a system driver.
+//
+// **Scoped to Terminal alone.** This rewrites a system Metal driver in every
+// process it is applied to; a wrong stub there costs the login session. The
+// reported symptom is Terminal's and the assistant Code's glyphs, so Terminal is
+// both the symptom and a blast radius that cannot take down the desktop.
+// Widening it is a later decision, after this one is seen to work.
+//
+// OUT of boot-args by default. Nothing is registered unless
+// `-rbgpumtllinear` is set, so an unarmed boot carries no user patcher at
+// all.
+static const uint8_t kRb2lmFind[32] = {
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+    0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC,
+    0x88, 0x00, 0x00, 0x00, 0x45, 0x89, 0xCD, 0x44,
+    0x89, 0xC3, 0x48, 0x89, 0x4D, 0xD0, 0x49, 0x89,
+};
+static const uint8_t kRb2lmRepl[32] = {
+    0x48, 0x8B, 0x44, 0x24, 0x08,               // mov rax, [rsp+8]
+    0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,         // mov dword [rax], 0
+    0x31, 0xC0,                                 // xor eax, eax
+    0xC3,                                       // ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90,
+};
+
+static UserPatcher::BinaryModPatch kRb2lmPatch {
+    CPU_TYPE_X86_64,
+    0,
+    kRb2lmFind,
+    kRb2lmRepl,
+    sizeof(kRb2lmFind),
+    0,                                  // skip none
+    1,                                  // one occurrence, and it is unique
+    UserPatcher::FileSegment::SegmentTextText,
+    0
+};
+
+static UserPatcher::BinaryModInfo kRb2lmMod {
+    "/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/MacOS/AMDRadeonX6000MTLDriver",
+    &kRb2lmPatch, 1, 0, 0, 0, 0
+};
+
+static const char kRb2lmProcPath[] =
+    "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal";
+
+static UserPatcher::ProcInfo kRb2lmProc {
+    kRb2lmProcPath, sizeof(kRb2lmProcPath) - 1, 1,
+    UserPatcher::ProcInfo::MatchExact
+};
+
+static void rbgpu_register_mtllinear_2lm(void) {
+    if (!checkKernelArgument("-rbgpumtllinear")) {
+        rbgpu_log("2lm: NOT armed - -rbgpumtllinear absent, no user patcher "
+                  "registered and no userspace image is touched");
+        return;
+    }
+    UserPatcher::ProcInfo *procs[] { &kRb2lmProc };
+    UserPatcher::BinaryModInfo *mods[] { &kRb2lmMod };
+    auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
+    if (err == LiluAPI::Error::NoError) {
+        rbgpu_log("2lm: ARMED - DetermineSwizzleMode will return LINEAR in "
+                  "Terminal only. If Terminal's text becomes readable the "
+                  "corruption IS client texture layout; if it does not, "
+                  "layout is exonerated and the cause is downstream.");
+    } else {
+        rbgpu_log("2lm: onProcLoad FAILED with %d - nothing is patched",
+                  static_cast<int>(err));
+    }
+}
+
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
@@ -6884,6 +7002,8 @@ void RGPU::init() {
               sync570Mode ? "ENABLED" : "DISABLED",
               spoofTtlMode ? "ENABLED" : "DISABLED",
               pspHwMode ? "ENABLED" : "DISABLED");
+
+    rbgpu_register_mtllinear_2lm();
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
@@ -8483,6 +8603,60 @@ void rbgpu_surf_flush_2la(void) {
 }
 
 // ---------------------------------------------------------------------------
+// 2ll (2026-10-21): what swizzle mode do CLIENT resources actually END UP
+// with? Read off the resource the kernel just built, not off a guess.
+//
+// 2lk closed the configuration question: the kernel's AddrLib and the
+// userspace one are created with identical chipEngine/chipFamily/
+// chipRevision/gbAddrConfig, so neither side is misconfigured and the
+// remaining corruption is not a global layout parameter. What was never
+// measured is the per-resource answer: which mode a client texture is
+// actually laid out with.
+//
+// `AMDAccelResourceAddr2::initialize` (0xbe56894) builds it, and the mode
+// lands in the resource itself. From the disassembly at be569b4..be56a0d:
+//
+//   be569b4  movl $0x0, 0x1dc(%r15)
+//   be569bf  movq 0x250(%r15), %rdi
+//   be569cb  callq *0x1b8(%rax)
+//   be569d8  andl $0x1f, %eax            <- 5 bits: a swizzle mode, 0..31
+//   be569db  andl $-0x20, %ecx
+//   be569de  orl  %eax, %ecx
+//   be569e0  movl %ecx, 0x1dc(%r15)
+//   be569f3  callq *0x1c8(%rax)
+//   be569f9  shll $0x5, %eax
+//   be569fc  andl $0x60, %eax            <- bits 5:6, a second 2-bit field
+//
+// So `res + 0x1dc` bits 0:4 are the resource's swizzle mode and bits 5:6 a
+// second field beside it. The 5-bit width matching `AddrSwizzleMode`'s 0..31
+// range is what identifies the field; the offset is read off Apple's own
+// code, not chosen from a struct name (2cy).
+//
+// A histogram across EVERY call, not a few rows: 2le's four-row dump was
+// truncated by the note and the log it also wrote does not survive, because
+// the published RBGPULog ends at the last refresh (2es). Counting is cheap
+// and a histogram of 4287 resources cannot be truncated into a wrong
+// reading the way two rows of dwords can.
+//
+// Observe only. Nothing is written to the resource.
+#define RB_2LL_MODES 32
+static uint32_t g_rb_2ll_seen  = 0;   // resources inspected
+static uint32_t g_rb_2ll_bad   = 0;   // res pointer refused
+static uint32_t g_rb_2ll_hist[RB_2LL_MODES];
+static uint32_t g_rb_2ll_hi[4];       // bits 5:6
+
+static void rbgpu_resmode_record_2ll(void *res) {
+    // rule 19: a NULL check is not a pointer check. This is a kernel object
+    // and anything that is not a kernel VA is refused rather than read.
+    auto a = reinterpret_cast<uintptr_t>(res);
+    if (a < 0xffffff8000000000ull) { g_rb_2ll_bad++; return; }
+    uint32_t v = *reinterpret_cast<volatile uint32_t *>(a + 0x1dc);
+    g_rb_2ll_hist[v & 0x1f]++;
+    g_rb_2ll_hi[(v >> 5) & 0x3]++;
+    g_rb_2ll_seen++;
+}
+
+
 // 2le (2026-10-20): where do CLIENT textures get their layout?
 //
 // Boot 98 confirmed the swizzle line by experiment: forcing every surface to
@@ -8527,6 +8701,10 @@ static uint32_t g_rb_2le_dw[RB_2LE_N][RB_2LE_DW];
 static uint32_t hooked_resinit_2le(void *res, void *args, uint64_t x) {
     uint32_t r = orig_resinit_2le ? orig_resinit_2le(res, args, x) : 0;
     g_rb_2le_calls++;
+    // 2ll rides in here: a second RouteRequest on this function would panic
+    // Lilu outright (2kn), so the new recording goes inside the hook that
+    // already exists.
+    rbgpu_resmode_record_2ll(res);
     if (!args) { g_rb_2le_null++; return r; }
     if (g_rb_2le_n < RB_2LE_N) {
         auto p = reinterpret_cast<volatile uint32_t *>(args);
@@ -8542,6 +8720,51 @@ static uint32_t hooked_resinit_2le(void *res, void *args, uint64_t x) {
                   d[18], d[19], d[20], d[21], d[22], d[23], r);
     }
     return r;
+}
+
+void rbgpu_resmode_flush_2ll(void) {
+    if (!g_rb_2le_hooked) {
+        rbgpu_nvram_note("rbgpu-mode", "hk=0 the resource hook did NOT take, "
+                                       "so no mode was read - silence is the "
+                                       "hook, not the resources");
+        return;
+    }
+    if (g_rb_2ll_seen == 0) {
+        char z[192];
+        snprintf(z, sizeof(z),
+                 "hk=1 seen=0 bad=%u NO RESOURCE INSPECTED - initialize ran "
+                 "%u times and every `res` was refused as a non-kernel "
+                 "pointer", g_rb_2ll_bad, g_rb_2le_calls);
+        rbgpu_nvram_note("rbgpu-mode", z);
+        rbgpu_log("2ll: %s", z);
+        return;
+    }
+    char n[400];
+    int w = snprintf(n, sizeof(n), "hk=1 seen=%u bad=%u |",
+                     g_rb_2ll_seen, g_rb_2ll_bad);
+    size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (uint32_t m = 0; m < RB_2LL_MODES && at < sizeof(n) - 60; m++) {
+        if (g_rb_2ll_hist[m] == 0) { continue; }
+        w = snprintf(n + at, sizeof(n) - at, " m%u=%u", m, g_rb_2ll_hist[m]);
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    if (at < sizeof(n) - 40) {
+        w = snprintf(n + at, sizeof(n) - at, " | hi %u/%u/%u/%u | lin=%u",
+                     g_rb_2ll_hi[0], g_rb_2ll_hi[1], g_rb_2ll_hi[2],
+                     g_rb_2ll_hi[3], g_rb_2ld_on);
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    rbgpu_nvram_note("rbgpu-mode", n);
+    rbgpu_log("2ll: %s", n);
+    rbgpu_log("2ll: `mN=count` is how many client resources ended up in "
+              "swizzle mode N. m0 only, with -rbgpulinear in, means the "
+              "kernel's resources ARE linear and the scrambled glyphs are "
+              "not a kernel-side layout choice at all. A spread with m27 "
+              "(64KB_R_X) or m25 dominating means client textures keep a "
+              "tiled layout the compositor then reads differently, and the "
+              "userspace force (2lm) is the test that follows. Compare "
+              "`seen` against rbgpu-res `calls`: a large gap means most "
+              "resources never reach this field.");
 }
 
 void rbgpu_res_flush_2le(void) {
@@ -14596,6 +14819,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_align_flush_2kz();
     rbgpu_surf_flush_2la();
     rbgpu_res_flush_2le();
+    rbgpu_resmode_flush_2ll();
     rbgpu_surfinfo_flush_2lf();
     rbgpu_hwinfo_flush_2lk();
     rbgpu_pdeenc_flush_2km();
