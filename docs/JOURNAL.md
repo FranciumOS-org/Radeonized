@@ -17663,3 +17663,75 @@ Not claimed: that the XOR bits are exactly `y^32`/`x^48` in general - those
 are this geometry's instance of it. Nor that fixing `replaceRegion` fixes
 every scrambled surface; only that this path is measurably broken and is the
 path glyph atlases take.
+
+## 2lp (2026-10-21) — the fork is ONE BIT: `ShouldUseSwBlt`
+
+Following 2lo's measurement straight to the branch.
+
+`-[GFXAAMD_MtlTexture replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:
+bytesPerImage:]` (0x7ffb08d60cd7) calls
+`amdMtl_HWL_ShouldUseSwBlt(AMD_DeviceSettings const*,
+ATIMipmapBufferHeader const*)` at **0x7ffb08d36966**, which is the whole
+decision in six instructions:
+
+```
+55              push %rbp
+48 89 e5        mov  %rsp, %rbp
+8a 47 02        mov  0x2(%rdi), %al      ; AMD_DeviceSettings + 0x02
+c0 e8 07        shr  $0x7, %al           ; bit 7
+5d              pop  %rbp
+c3              ret
+```
+
+**One bit — bit 7 of `AMD_DeviceSettings + 0x02` — chooses a software blit
+over the hardware one.** True means the CPU tiles the data itself, and that
+software tiler is what computes the wrong pipe/bank XOR. Four call sites.
+
+This closes the loop on 2lo's matrix with a mechanism: `private-blit` went
+through the GPU blit engine and was clean at all three widths;
+`replaceRegion` took the software path and was wrong by `y ^ 32`. Same
+destination tiling, two different tilers, one of them broken.
+
+### 2lp, built and unarmed
+
+Stub over all twelve bytes:
+
+```
+31 c0    xor %eax, %eax      ; never use the SW blit
+c3       ret
+90 x9                        ; never executed
+```
+
+The first **8** bytes of this function are already unique in the driver's
+`__text` (measured) - against 2lm, where a 14-byte prologue matched 2099
+functions. All twelve are the find pattern. Behind `-rbgpuhwblt`, scoped to
+Terminal alone, nothing registered unless the arg is set.
+
+**Preferred over 2lm.** 2lm forces every client texture LINEAR: it avoids the
+broken tiler but pays tiling bandwidth on everything. 2lp keeps tiling and
+routes the upload through the engine already measured correct.
+
+### What is NOT proven
+
+texprobe measured the hardware blit correct writing a **`.private`** texture
+from a staging buffer. `replaceRegion` on a **`.managed`** texture taking the
+hardware path is a different combination and was never measured. So 2lp is a
+well-motivated inference, not a demonstrated fix, and the boot is the test:
+
+- **Terminal's text becomes readable** -> 2lo's diagnosis is confirmed and
+  this is a usable workaround.
+- **Unchanged** -> the hardware path is not correct for a managed
+  destination either, and the software tiler's XOR has to be fixed directly.
+
+Also unknown: **why bit 7 is set on this chip.**
+`amdMtl_HWL_InitDeviceSettings` (0x7ffb08d2d700) and
+`amdMtl_HWL_OverrideDeviceSettings` (0x7ffb08d2da8d) derive the settings from
+`AMDCommonHwInfoRec`. Reading which condition sets that bit is the **proper**
+fix - overriding the answer is a workaround over a decision that is itself
+probably keyed on a Navi 21 assumption, the same shape as 2jp and 2lk. 2lp
+is the fast confirmation; that reading is the fix.
+
+Not claimed: that forcing the hardware blit is safe for every format, or
+that `ShouldUseSwBlt` has no correctness reason to be true for some surfaces
+(a format the blit engine cannot handle would be one). Terminal-only scoping
+is the guard against finding that out the expensive way.

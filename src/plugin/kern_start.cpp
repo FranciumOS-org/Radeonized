@@ -6981,6 +6981,127 @@ static void rbgpu_register_mtllinear_2lm(void) {
 }
 
 
+// ---------------------------------------------------------------------------
+// 2lp (2026-10-21): force the HARDWARE blit path. ARMED ONLY BY BOOT-ARG.
+//
+// 2lo located the text defect by measurement (tools/texprobe.swift, 72 cases
+// on boot 104). Only `MTLTexture.replace(region:)` on a tiled BGRA8 surface
+// corrupts, and it corrupts by DISPLACEMENT, not staleness:
+//
+//   bgra8 w=256  managed-replace-tiles  moved=8192 d(0,+-32)  foreign=4096
+//   bgra8 w=1000 managed-replace-*      moved=31232 d(+-48,+-16)
+//
+// The w=256 case decodes exactly as `y ^ 32`: with h=48, rows 0-15 and 32-47
+// swap (32 x 256 = 8192 moved) and rows 16-31 map to 48-63, outside the
+// texture, reading unwritten data (16 x 256 = 4096 foreign). No residue. A
+// single-bit-flip displacement in the row index is a **pipe/bank XOR** - the
+// `_X` in 4KB_D_X (22) and 64KB_R_X (27), the two tiled modes this chip uses.
+//
+// Clean in the same run, at all three widths: `linear-buffer-tex` (also
+// `.managed`, CPU write + `didModifyRange`), **`private-blit` full and
+// tiled**, and `iosurface`. Every R8 case is clean, and `w=37` BGRA is clean
+// (small enough to be linear). So it is not storage mode, not managed
+// memory, not sysmem coherency (`stale=0` throughout, which exonerates
+// snoop/MTYPE bits on the system-page PTEs), and **not the GPU blit engine**.
+//
+// `-[GFXAAMD_MtlTexture replaceRegion:...]` (0x7ffb08d60cd7) calls
+// `amdMtl_HWL_ShouldUseSwBlt(AMD_DeviceSettings const*,
+// ATIMipmapBufferHeader const*)` at 0x7ffb08d36966, which is six
+// instructions and returns **one bit**:
+//
+//   55              push %rbp
+//   48 89 e5        mov  %rsp, %rbp
+//   8a 47 02        mov  0x2(%rdi), %al     ; AMD_DeviceSettings + 0x02
+//   c0 e8 07        shr  $0x7, %al          ; bit 7
+//   5d              pop  %rbp
+//   c3              ret
+//
+// True selects a SOFTWARE blit - the CPU tiles the data itself - and that
+// software tiler is what computes the wrong XOR. Returning false sends the
+// same upload through the GPU blit engine, which texprobe measured as
+// correct on this chip.
+//
+// Stub, replacing all twelve bytes:
+//
+//   31 c0           xor %eax, %eax     ; always "do not use the SW blit"
+//   c3              ret
+//   90 x9                              ; never executed, `ret` precedes
+//
+// The whole function is 12 bytes and its first **8** are already unique in
+// the driver's `__text` (measured; cf. 2lm, where a 14-byte prologue matched
+// 2099 functions). All twelve are used as the find pattern. Four call sites.
+//
+// **Why this is preferred over 2lm.** 2lm forces every client texture to
+// LINEAR, which avoids the broken tiler but pays tiling bandwidth on
+// everything. 2lp keeps tiling and routes the upload through the engine that
+// is already correct.
+//
+// **What is NOT proven.** texprobe showed the hardware blit correct writing
+// a `.private` texture from a staging buffer. `replaceRegion` on a
+// `.managed` texture taking the hardware path is a different combination and
+// was not measured, so this is a well-motivated inference, not a
+// demonstrated fix. The boot is the test. Nor is it known why bit 7 is set
+// on this chip - `amdMtl_HWL_InitDeviceSettings` (0x7ffb08d2d700) and
+// `amdMtl_HWL_OverrideDeviceSettings` (0x7ffb08d2da8d) derive the settings
+// from `AMDCommonHwInfoRec`, and reading which condition sets it is the
+// proper fix rather than overriding the answer.
+//
+// Scoped to Terminal alone and OUT of boot-args, for 2lm's reasons: this
+// rewrites a system Metal driver in every process it reaches.
+static const uint8_t kRb2lpFind[12] = {
+    0x55, 0x48, 0x89, 0xE5, 0x8A, 0x47, 0x02, 0xC0, 0xE8, 0x07, 0x5D, 0xC3,
+};
+static const uint8_t kRb2lpRepl[12] = {
+    0x31, 0xC0,                         // xor eax, eax  -> never SW blit
+    0xC3,                               // ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+};
+
+static UserPatcher::BinaryModPatch kRb2lpPatch {
+    CPU_TYPE_X86_64,
+    0,
+    kRb2lpFind,
+    kRb2lpRepl,
+    sizeof(kRb2lpFind),
+    0,
+    1,                                  // one occurrence; unique at 8 bytes
+    UserPatcher::FileSegment::SegmentTextText,
+    0
+};
+
+static UserPatcher::BinaryModInfo kRb2lpMod {
+    "/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/MacOS/AMDRadeonX6000MTLDriver",
+    &kRb2lpPatch, 1, 0, 0, 0, 0
+};
+
+static UserPatcher::ProcInfo kRb2lpProc {
+    kRb2lmProcPath, sizeof(kRb2lmProcPath) - 1, 1,
+    UserPatcher::ProcInfo::MatchExact
+};
+
+static void rbgpu_register_hwblt_2lp(void) {
+    if (!checkKernelArgument("-rbgpuhwblt")) {
+        rbgpu_log("2lp: NOT armed - -rbgpuhwblt absent, no user patcher "
+                  "registered and no userspace image is touched");
+        return;
+    }
+    UserPatcher::ProcInfo *procs[] { &kRb2lpProc };
+    UserPatcher::BinaryModInfo *mods[] { &kRb2lpMod };
+    auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
+    if (err == LiluAPI::Error::NoError) {
+        rbgpu_log("2lp: ARMED - ShouldUseSwBlt forced FALSE in Terminal only, "
+                  "so replaceRegion uploads go through the GPU blit engine "
+                  "that texprobe measured correct. Readable text in Terminal "
+                  "confirms 2lo's diagnosis; unchanged text means the "
+                  "hardware path is not correct for a managed destination "
+                  "and the software tiler's XOR must be fixed instead.");
+    } else {
+        rbgpu_log("2lp: onProcLoad FAILED with %d - nothing is patched",
+                  static_cast<int>(err));
+    }
+}
+
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
@@ -7004,6 +7125,7 @@ void RGPU::init() {
               pspHwMode ? "ENABLED" : "DISABLED");
 
     rbgpu_register_mtllinear_2lm();
+    rbgpu_register_hwblt_2lp();
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
