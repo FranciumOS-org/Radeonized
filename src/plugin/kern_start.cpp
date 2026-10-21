@@ -9197,7 +9197,43 @@ static uint32_t g_rb_2ly_hits = 0;
 static uint32_t g_rb_2ly_was  = 0;
 static uint32_t g_rb_2ly_now  = 0;
 
+// 2md (2026-10-21): the same override for NUM_PIPES (bits 2:0).
+//
+// 2mc computed the constant the CPU tiler XORs into EVERY tile address:
+//
+//   TERM = bits[microTileWidthLog2, 1 << pipesLog2) << pipeInterleaveLog2
+//        = bits[2, 4) << 8 = 0xc00                  on this chip
+//
+// 0xc00 is address bits 10 and 11, which are pattern bits 2 and 3, and
+// 2ma's decode of row 22 gives pattern bit 3 = `y3` alone - a pure-Y term.
+// 2lo measured a pure-Y displacement. Reporting NUM_PIPES <= 1 makes the
+// range empty and TERM zero.
+//
+// CONFOUNDED, and said plainly: pipesLog2 also selects the pattern row
+// through K = pipesLog2 + 2*numPkrs - 2, and feeds userspace AddrLib's own
+// surface layout, which 2lz proved has teeth. A boot with this set moves
+// three things at once, so a good result is a WORKING MACHINE and not an
+// attribution. The user asked for the former first (2026-10-21).
+static int      g_rb_2md_on   = 0;
+static uint32_t g_rb_2md_hits = 0;
+
 static void rbgpu_pkrs_init_2ly(void) {
+    uint32_t p = 0xffffffffu;
+    if (PE_parse_boot_argn("rbgpu_pipes", &p, sizeof(p)) && p <= 7) {
+        g_rb_2md_on = static_cast<int>(p);
+        rbgpu_log("2md: ARMED - NUM_PIPES reported to userspace will be "
+                  "forced to %u. On this chip that moves the CPU tiler's "
+                  "per-tile XOR TERM from 0xc00 to %s, and ALSO moves the "
+                  "pattern row and userspace AddrLib's surface layout - a "
+                  "good result here is a working screen, not an attribution.",
+                  p, p <= 1 ? "0" : "another value");
+    } else {
+        g_rb_2md_on = -1;
+        rbgpu_log("2md: not armed - rbgpu_pipes absent or out of range, "
+                  "NUM_PIPES is reported as the chip has it");
+    }
+    rbgpu_diag_set_num("pipes_arg", static_cast<uint64_t>(g_rb_2md_on));
+
     uint32_t v = 0xffffffffu;
     if (PE_parse_boot_argn("rbgpu_pkrs", &v, sizeof(v)) && v <= 7) {
         g_rb_2ly_on = static_cast<int>(v);
@@ -9258,12 +9294,20 @@ static uint32_t hooked_gethwinfo_2lk(void *dev, void *vals) {
     }
     // 2ly: the write, every call - userspace may ask more than once, and a
     // sample taken on call 1 must not leave calls 2..n unmodified.
-    if (g_rb_2ly_on >= 0) {
+    if (g_rb_2ly_on >= 0 || g_rb_2md_on >= 0) {
         auto slot = reinterpret_cast<volatile uint32_t *>(
             reinterpret_cast<uintptr_t>(vals) + 0xa0);
         uint32_t was = *slot;
-        uint32_t now = (was & ~(0x7u << 8)) |
-                       ((static_cast<uint32_t>(g_rb_2ly_on) & 0x7u) << 8);
+        uint32_t now = was;
+        if (g_rb_2ly_on >= 0) {
+            now = (now & ~(0x7u << 8)) |
+                  ((static_cast<uint32_t>(g_rb_2ly_on) & 0x7u) << 8);
+        }
+        if (g_rb_2md_on >= 0) {
+            now = (now & ~0x7u) | (static_cast<uint32_t>(g_rb_2md_on) & 0x7u);
+            g_rb_2md_hits++;
+            rbgpu_diag_set_num("pipes_writes", g_rb_2md_hits);
+        }
         if (now != was) { *slot = now; }
         if (g_rb_2ly_hits == 0) {
             g_rb_2ly_was = was;
