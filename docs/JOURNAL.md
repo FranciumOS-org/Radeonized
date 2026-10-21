@@ -16570,3 +16570,55 @@ DCC here); this one is a test, not a conclusion.
 
 Build `58BAC460-ECD2-322F-8C20-1FE7D021B0AB`. New boot-arg:
 `-rbgpunorotate`.
+
+## 2lc (2026-10-20) — boot 97: rotation excluded, and SURFACE LAYOUT is excluded by the photograph
+
+```
+rbgpu-surf = b=97 swz hk=1 calls=21 | dcc hk=1 calls=0 ok=0 | rot=1 remapped=9
+             | 1920x1080 b32 f26 t1 fl20 s0->1b | ... | 64x64 b32 f26 t1 fl0 s9->16
+rbgpu-fault= b=97 c=0 f=0 r=0 o=0 fw=0
+```
+
+`rot=1 remapped=9` - the remap was armed and **fired on nine surfaces**,
+swapping `ADDR_SW_64KB_R_X` for `ADDR_SW_64KB_S_X`. The user: "text is
+unreadable still same artifacts too". **Rotation is excluded**, with the
+positive control in the same note. (The recorded rows still read `->1b`
+because `e->ret` is stored before the remap; `remapped=` counts the
+changes.)
+
+**And surface layout is excluded outright - by the photograph, not by a
+boot.** In boot 93's picture the Claude Code window's dark background,
+its sidebar, the traffic lights and the sidebar's coloured legend squares
+are all correct, while the body text **inside that same window** is
+shredded. Those pixels are in **one surface**. A wrong swizzle or tiling
+mode corrupts a surface uniformly; correct rectangles and scrambled
+glyphs cannot come out of the same buffer from a layout error.
+
+So 2lb's negative was predictable and the boot was avoidable. Recorded
+as such: the deduction was available in the image from the moment it
+arrived, and three hypotheses (2kx tiling params, 2kz AddrLib geometry,
+2lb rotation) were all aimed at a global layout parameter that the
+evidence already ruled out. **The recurring error in a new dress - not
+reading a value without establishing its meaning, but failing to read the
+evidence already in hand before designing the next experiment.**
+
+**What the evidence actually supports.** The fault is in the DRAWING
+operation, not the destination:
+
+- compute kernels PASS bit-exact (2ky), so shaders and linear memory work
+- zero VM faults, so addressing is right
+- rectangles, gradients, icons and the wallpaper draw correctly
+- Finder, Safari and Messages render text **fully** - so glyph drawing
+  through Apple's own text path works
+- Claude Code (Electron/Skia) does not - and Skia rasterises its own
+  glyphs and **uploads them as textures**
+
+The one mechanism in play for Skia and not for the native apps is the
+**client texture upload path** - the linear-to-tiled conversion done when
+a client writes a texture. Candidates already visible in `nm`:
+`AMDAccelResource::pageTextureWithStretchNoVendBuf`,
+`AMDAccelResource::MSAATextureWrite` / `MSAATextureRead`,
+`AMDBltMgr::MetadataRetiling`, `AMDAtomicBlitManager::doMetadataRetiling`.
+
+Not claimed: that the upload path is the cause. It is where the evidence
+points, and the next step is to measure it rather than to change it.
