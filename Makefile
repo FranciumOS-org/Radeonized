@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe lawtest noop clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -68,13 +68,24 @@ tools: $(OUT)/rbdump
 # workaround, loaded per process with DYLD_INSERT_LIBRARIES, and needs no kext.
 iosurftex: $(OUT)/iosurftex.dylib
 $(OUT)/iosurftex.dylib: tools/iosurftex.m | $(OUT)
-	clang -dynamiclib -O2 -fobjc-arc -o $@ $< \
+	clang -dynamiclib -O2 -fno-objc-arc -o $@ $< \
 	      -framework Metal -framework IOSurface -framework Foundation
 
 # lawtest (2mn): the law in one fast instrument - six geometries, n=12, ~1.5 s.
 lawtest: $(OUT)/lawtest
 $(OUT)/lawtest: tools/lawtest.swift | $(OUT)
 	swiftc -O $< -o $@ -framework Metal
+
+# ownership-test (2mr): crashes if the interposers break Metal's +1 ownership.
+# Run it before inserting the dylib into anything.
+ownership-test: $(OUT)/iosurftex.dylib $(OUT)/ownership-test
+	@echo "  control (no dylib):" && $(OUT)/ownership-test
+	@echo "  with iosurftex:" && \
+	  DYLD_INSERT_LIBRARIES=$(OUT)/iosurftex.dylib $(OUT)/ownership-test
+	@echo "  with iosurftex disabled:" && \
+	  DYLD_INSERT_LIBRARIES=$(OUT)/iosurftex.dylib RBGPU_IOSURFTEX=0 $(OUT)/ownership-test
+$(OUT)/ownership-test: tools/ownership-test.m | $(OUT)
+	clang -O1 -fobjc-arc -o $@ $< -framework Metal -framework Foundation
 
 # noop-insert (2mr): an inserted dylib that does nothing, as the control for
 # "does this app refuse ANY insertion, or only ours?"
