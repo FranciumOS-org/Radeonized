@@ -7090,9 +7090,30 @@ static UserPatcher::BinaryModInfo kRb2lpMod {
     &kRb2lpPatch, 1, 0, 0, 0, 0
 };
 
+// 2lr (2026-10-21): re-scoped away from Terminal.
+//
+// 2lp was scoped to Terminal because that was where the scramble had been
+// recorded. Boot 105 then showed Terminal's text READABLE with 2lp inert
+// (2lq) - `-rbgpulinear` alone fixes it. So Terminal can no longer test
+// this patch: it was already good, and staying good proves nothing.
+//
+// The surface still broken on boot 106, by the user's own eye, is the
+// Claude desktop app, an Electron app whose Metal work happens in its
+// helper processes. `MatchAny` is `strstr(path, p->path)` (Lilu 1.7.3
+// kern_user.cpp:285), so one entry matching "/Claude Helper" covers
+// `Claude Helper`, `(GPU)`, `(Renderer)` and `(Plugin)`:
+//
+//   /Applications/Claude.app/Contents/Frameworks/
+//       Claude Helper (GPU).app/Contents/MacOS/Claude Helper (GPU)
+//
+// Terminal is deliberately NOT in the list any more. That makes it the
+// control: unpatched and already readable, so if it changes, the change
+// came from something other than this patch.
+static const char kRb2lrProcPath[] = "/Claude Helper";
+
 static UserPatcher::ProcInfo kRb2lpProc {
-    kRb2lmProcPath, sizeof(kRb2lmProcPath) - 1, 1,
-    UserPatcher::ProcInfo::MatchExact
+    kRb2lrProcPath, sizeof(kRb2lrProcPath) - 1, 1,
+    UserPatcher::ProcInfo::MatchAny
 };
 
 static void rbgpu_register_hwblt_2lp(void) {
@@ -7115,8 +7136,9 @@ static void rbgpu_register_hwblt_2lp(void) {
     UserPatcher::BinaryModInfo *mods[] { &kRb2lpMod };
     auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
     if (err == LiluAPI::Error::NoError) {
-        rbgpu_log("2lp: ARMED (patch section=%u) - ShouldUseSwBlt forced "
-                  "FALSE in Terminal only, "
+        rbgpu_log("2lp/2lr: ARMED (patch section=%u) - ShouldUseSwBlt forced "
+                  "FALSE in the Claude app's helpers only (Terminal is the "
+                  "unpatched control), "
                   "so replaceRegion uploads go through the GPU blit engine "
                   "that texprobe measured correct. Readable text in Terminal "
                   "confirms 2lo's diagnosis; unchanged text means the "
