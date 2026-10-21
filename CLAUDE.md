@@ -298,6 +298,14 @@ It is what broke the GPU-restart loop.
 - `-rbgpustampraw` — Apple's unbounded wait; it wedged the machine. [2en]
 - `-rbgpuregdump` — the GC register dump stalls non-deterministically. [2fe]
 - `debug=0x100` — halts on the panic screen instead of writing a report.
+- `-rbgpufbmatch` — injects `device-id = 0x73A0` so Apple's framebuffer
+  controller matches. **It kills the accelerator.** This plugin works by
+  making Apple ACCEPT 0x1681 (`deviceTypeTable`, `DeviceCapabilityTbl`,
+  and the TTL spoof's `dev_id == 0x1681` gate); reporting another id
+  bypasses every one of those patches. Boot 101: armed, HWServicesNavi
+  matched, the accelerator never instantiated, `rbgpu-boot` never
+  incremented - and no `AtiFbStub` appeared either, so it bought
+  nothing. [2lj]
 - `-rbgpupdefix` — 2ki, now REDUNDANT and harmful: 2ku corrects the same
   page-directory base at its source, and the two additions compose.
   Boot 91 read `87b000000 -> ffb000001` and the halt came back. Its
