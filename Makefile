@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe clean
 
 all: kext tools
 
@@ -62,6 +62,19 @@ hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_sm
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 
 tools: $(OUT)/rbdump
+
+# iosurftex (2mo/2mp): backs the textures Apple's driver lays out wrongly with
+# IOSurfaces, in the client process. Not part of `all` - it is a userspace
+# workaround, loaded per process with DYLD_INSERT_LIBRARIES, and needs no kext.
+iosurftex: $(OUT)/iosurftex.dylib
+$(OUT)/iosurftex.dylib: tools/iosurftex.m | $(OUT)
+	clang -dynamiclib -O2 -fobjc-arc -o $@ $< \
+	      -framework Metal -framework IOSurface -framework Foundation
+
+# texprobe: the userspace texture-upload probe the text work is measured with.
+texprobe: $(OUT)/texprobe
+$(OUT)/texprobe: tools/texprobe.swift | $(OUT)
+	swiftc -O $< -o $@ -framework Metal -framework IOSurface
 
 $(OUT)/rbdump: tools/rbdump.c $(COMMON)/rb_discovery.c $(COMMON_HDRS)
 	@mkdir -p $(OUT)

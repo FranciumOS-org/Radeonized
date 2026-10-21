@@ -19648,3 +19648,100 @@ single-mip, and need a matching `bytesPerElement`/`pixelFormat`, so the
 interposer must fall through for anything that does not qualify. A 1000-wide
 IOSurface without an explicit `bytesPerRow` hung the probe once - alignment
 must be set explicitly, not left to default.
+
+## 2mp — the fix: `iosurftex`, and the text defect is gone in userspace
+
+Boot 113, armed, no kext change, no reboot, no `sudo`.
+
+`tools/iosurftex.m` (`make iosurftex`) is a `DYLD_INSERT_LIBRARIES` interposer.
+It wraps `MTLCreateSystemDefaultDevice` - interposed rather than swizzled, so
+the driver bundle is certainly loaded before its class is looked up - then
+swizzles `-newTextureWithDescriptor:` on the returned device's class
+(`GFX10_MtlDevice`) and serves any descriptor the 2mn law predicts will fail
+from an IOSurface instead. Everything else, and any failure at any step, falls
+through to the original untouched.
+
+The guard is the law itself, asked of the driver rather than reimplemented:
+
+```c
+MTLSizeAndAlign sa = [dev heapTextureSizeAndAlignWithDescriptor:d];
+return sa.align == 65536 && sa.size > d.width * d.height * bpe;
+```
+
+plus structural qualification - 2D, single mip, single slice, single sample,
+`shaderRead` only - and a format whitelist (`BGRA8`, `RGBA8`, `R8`), because a
+wrong `bytesPerElement` would corrupt worse than the bug does.
+
+### Measured
+
+The law instrument, same binary, with and without the interposer:
+
+```
+                      WITHOUT          WITH
+  256x48   2.67x      fail 10/12      fail 0/12
+  256x64   2.00x      fail  6/12      fail 0/12
+  256x96   1.33x      fail  9/12      fail 0/12
+  1000x48  2.73x      fail 11/12      fail 0/12
+  256x128  1.00x      fail  0/12      fail 0/12
+  256x32   1.00x      fail  0/12      fail 0/12
+  TOTAL              36/72 failed     0/72 failed
+```
+
+And the thing the whole frontier was about - real CoreText glyphs rasterised
+by `texprobe`'s 2mf phase, Menlo 13, both widths, both upload paths:
+
+```
+  reference w=256 h=48:  3939 non-background pixels
+    managed-replace-full   rows-wrong now= 0 later= 0  stable=YES   (was 46)
+    managed-replace-tiles  rows-wrong now= 0 later= 0  stable=YES   (was 46)
+  reference w=1000 h=48: 4151 non-background pixels
+    managed-replace-full   rows-wrong now= 0 later= 0  stable=YES   (was 48)
+    managed-replace-tiles  rows-wrong now= 0 later= 0  stable=YES   (was 48)
+```
+
+46 and 48 rows wrong, to zero, without touching texprobe's code.
+
+`1000x48` is worth noting: a bare `IOSurfaceCreate` without an explicit
+`bytesPerRow` hung during 2mo at that width. The interposer pins it to the
+256-byte alignment the blit engine wants, and the width that hung is now clean.
+
+### Cost
+
+On an uncontended machine the law instrument runs 1.46 s without the
+interposer and 7.7 s with it. That loop does nothing but allocate 72 textures,
+so it is an upper bound on allocation cost, not a frame-rate cost - a glyph
+atlas is allocated once and uploaded to many times. (A timing taken while a
+backgrounded `texprobe` still held the GPU gave 93 s and is discarded.)
+
+### What this does and does not claim
+
+Claimed: for a texture the law flags, an IOSurface-backed replacement is
+correct where the driver's own allocation is not, at every geometry tested, on
+synthetic fills and on real rasterised text.
+
+**Not** claimed: that any particular application's text goes through
+`-newTextureWithDescriptor:`. CoreText and CoreAnimation may reach the GPU by
+paths this never sees - IOSurfaces already (which is why the desktop composites
+correctly), a buffer-backed texture, or a private texture filled by blit. The
+interposer is proven on the path `texprobe` exercises; whether it reaches a
+given app's glyph atlas is the next measurement, and
+`RBGPU_IOSURFTEX_LOG=1` answers it per process by printing each swap.
+
+Also not claimed: safety in `WindowServer`. The interposer is per process and
+has only been run against test binaries. Injecting it into `WindowServer` would
+reach the Dock and the menu bar, and a fault there takes the GUI with it.
+Per-app first.
+
+### How to use it
+
+```sh
+make iosurftex
+tools/iosurftex.sh /Applications/Some.app            # a bundle
+tools/iosurftex.sh ./build/out/texprobe              # a binary
+RBGPU_IOSURFTEX_LOG=1 tools/iosurftex.sh ...         # log every decision
+RBGPU_IOSURFTEX=0 ...                                # disable without rebuilding
+```
+
+It needs the relaxed AMFI this machine already boots with (`amfi=0x80`,
+`amfi_get_out_of_my_way=0x1`); library validation would otherwise refuse the
+insertion.
