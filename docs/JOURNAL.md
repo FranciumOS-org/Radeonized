@@ -16740,3 +16740,44 @@ Still unexplained: why text specifically, rather than every client
 texture. Terminal and the assistant Code both draw glyphs through an atlas they
 own; whether other client textures are also wrong and simply less
 visible is not established.
+
+## 2le (2026-10-20) — find where client textures get their layout
+
+Boot 98 located the remainder: what `-rbgpulinear` fixed is
+WindowServer-drawn and passes the kernel's `getPreferredSwizzleMode2`;
+what it did not fix is app-owned textures, and 66 surfaces cannot be
+every texture in the system.
+
+`AMDAccelResourceAddr2::initialize(IOAccelNewResourceArgs*, uint64)`
+(0xbe56894) is what runs when an application creates a resource, and
+`IOAccelNewResourceArgs` is the struct **userspace** passes in.
+
+**2le does not guess the field.** The offset of any tiling or swizzle
+member is unknown, so the hook dumps the first 24 dwords of the args for
+the first four resources and the layout is read off the data. Choosing
+an offset from a struct name and acting on it is exactly 2cy's error;
+this boot is to FIND the field, not to change it. Observe only - the
+original runs first and its result passes through.
+
+| `rbgpu-res` | means |
+|---|---|
+| `calls=0` | client textures do not come through Addr2; the Addr1 variant is in use |
+| `calls` far above `rbgpu-surf`'s 66 | this IS the path app textures take |
+| the dwords | width, height, format and - the question - a userspace-chosen tiling field |
+| `hk=0` | the hook did not take; the zero is the hook, not the driver |
+
+Gates: defined in AMDRadeonX6000 (2c); routed nowhere else (2kn); rule 9
+clean - `55 48 89 e5 41 57 41 56 53 50` (2gb); mangled name
+cross-checked against `nm` (2kr).
+
+**Asked and answered: does DCN 3.1.2 fix the text?** No. The corruption
+happens when an application writes glyph pixels into its own texture,
+long before anything reaches the display controller; DCN scans out the
+already-composited framebuffer at the end of the chain and cannot repair
+bytes written wrong upstream. What DCN would bring is separate and real:
+a genuine AMD framebuffer, the 7 MB VRAM figure corrected (2kx), mode
+setting, external outputs, brightness, multiple displays, a hardware
+cursor - and eventually tiled scanout, which matters because
+`-rbgpulinear` is currently paying bandwidth for linear surfaces.
+
+Build `D2B77001-49B4-3FBE-8279-E8443B9255FA`.

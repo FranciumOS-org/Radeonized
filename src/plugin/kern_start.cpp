@@ -8482,6 +8482,100 @@ void rbgpu_surf_flush_2la(void) {
               "not take and its zero is the hook, not the driver.");
 }
 
+// ---------------------------------------------------------------------------
+// 2le (2026-10-20): where do CLIENT textures get their layout?
+//
+// Boot 98 confirmed the swizzle line by experiment: forcing every surface to
+// ADDR_SW_LINEAR fixed the widgets, the Dock, the menu bar and the desktop's
+// artifact regions - about 80% of the corruption - while the assistant Code's and
+// Terminal's glyphs stayed scrambled.
+//
+// What was fixed is WindowServer-drawn, allocated through the kernel, so it
+// passed `getPreferredSwizzleMode2`, the hook that was forced. What is still
+// wrong is app-owned textures, and `calls=66` is far too few to be every
+// texture in the system - so client textures take their layout somewhere
+// that hook never sees.
+//
+// `AMDAccelResourceAddr2::initialize(IOAccelNewResourceArgs*, uint64)`
+// (0xbe56894) is what runs when an application creates one.
+// `IOAccelNewResourceArgs` is the struct **userspace** passes in. If the
+// tiling is dictated there and honoured by the kernel, that is both the
+// explanation and somewhere this plugin can reach - the same shape of fix
+// that just worked for the compositor.
+//
+// The field offset is NOT known, so nothing is guessed: this dumps the first
+// 24 dwords of the args for the first few resources and the layout is read
+// off the data. Picking an offset from a struct name and acting on it would
+// be the recurring error (2cy); the point of this boot is to find the field,
+// not to change it.
+//
+// Observe only. The original runs first and its result is returned
+// untouched.
+//
+// Gates: DEFINED in AMDRadeonX6000 (`nm -m`: external, __TEXT,__text, 2c);
+// routed nowhere else (2kn); rule 9 clean - `55 48 89 e5 41 57 41 56 53 50`,
+// pushes and a movq (2gb); mangled name cross-checked against `nm` (2kr).
+#define RB_2LE_N    4
+#define RB_2LE_DW  24
+static uint32_t (*orig_resinit_2le)(void *, void *, uint64_t) = nullptr;
+static int      g_rb_2le_hooked = 0;
+static uint32_t g_rb_2le_calls  = 0;
+static uint32_t g_rb_2le_null   = 0;
+static uint32_t g_rb_2le_n      = 0;
+static uint32_t g_rb_2le_dw[RB_2LE_N][RB_2LE_DW];
+
+static uint32_t hooked_resinit_2le(void *res, void *args, uint64_t x) {
+    uint32_t r = orig_resinit_2le ? orig_resinit_2le(res, args, x) : 0;
+    g_rb_2le_calls++;
+    if (!args) { g_rb_2le_null++; return r; }
+    if (g_rb_2le_n < RB_2LE_N) {
+        auto p = reinterpret_cast<volatile uint32_t *>(args);
+        uint32_t *d = g_rb_2le_dw[g_rb_2le_n++];
+        for (unsigned i = 0; i < RB_2LE_DW; i++) { d[i] = p[i]; }
+        rbgpu_log("2le: resource %u args %08x %08x %08x %08x %08x %08x "
+                  "%08x %08x %08x %08x %08x %08x",
+                  g_rb_2le_n - 1, d[0], d[1], d[2], d[3], d[4], d[5],
+                  d[6], d[7], d[8], d[9], d[10], d[11]);
+        rbgpu_log("2le: resource %u args+12 %08x %08x %08x %08x %08x %08x "
+                  "%08x %08x %08x %08x %08x %08x -> ret %x",
+                  g_rb_2le_n - 1, d[12], d[13], d[14], d[15], d[16], d[17],
+                  d[18], d[19], d[20], d[21], d[22], d[23], r);
+    }
+    return r;
+}
+
+void rbgpu_res_flush_2le(void) {
+    if (!g_rb_2le_hooked) {
+        rbgpu_nvram_note("rbgpu-res", "hk=0 the client-resource hook did NOT "
+                                      "take - silence is the hook");
+        return;
+    }
+    char n[352];
+    int w = snprintf(n, sizeof(n), "hk=1 calls=%u null=%u rows=%u",
+                     g_rb_2le_calls, g_rb_2le_null, g_rb_2le_n);
+    size_t at = (w > 0) ? static_cast<size_t>(w) : 0;
+    // Only the first eight dwords of the first two resources fit a note; the
+    // rest is in the log, which the ring probe's phase keeps alive.
+    for (uint32_t i = 0; i < g_rb_2le_n && i < 2 && at < sizeof(n) - 80; i++) {
+        w = snprintf(n + at, sizeof(n) - at,
+                     " | r%u %x,%x,%x,%x,%x,%x,%x,%x", i,
+                     g_rb_2le_dw[i][0], g_rb_2le_dw[i][1], g_rb_2le_dw[i][2],
+                     g_rb_2le_dw[i][3], g_rb_2le_dw[i][4], g_rb_2le_dw[i][5],
+                     g_rb_2le_dw[i][6], g_rb_2le_dw[i][7]);
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    rbgpu_nvram_note("rbgpu-res", n);
+    rbgpu_log("2le: %s", n);
+    rbgpu_log("2le: `calls=0` means client textures do NOT come through "
+              "Addr2 and the Addr1 variant (0xbe54...) is the one in use. "
+              "`calls` far above `rbgpu-surf`'s 66 means this IS the path "
+              "the app textures take, and the dwords should carry width, "
+              "height, format and - the question - a tiling or swizzle "
+              "field chosen by userspace. Compare the rows against the "
+              "surfaces in rbgpu-surf to identify which dword is which "
+              "before anything is changed.");
+}
+
 static void (*orig_getVMFaultInfo_2hs)(void *, uint32_t, void *) = nullptr;
 static void (*orig_fillFaultAccelInfo_2hs)(void *) = nullptr;
 static uint32_t g_rb_2hs_calls = 0;
@@ -9962,6 +10056,20 @@ static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
     rbgpu_route_pdefix_2ki(patcher, id, address, size);
     rbgpu_route_vramadj_2kr(patcher, id, address, size);   // 2kr
     rbgpu_route_disp_2kt(patcher, id, address, size);      // 2kt
+    {   // 2le: observe-only, the client resource path
+        KernelPatcher::RouteRequest rr(
+            "__ZN36AMDRadeonX6000_AMDAccelResourceAddr210initializeEP22IOAccelNewResourceArgsy",
+            hooked_resinit_2le, orig_resinit_2le);
+        if (patcher.routeMultiple(id, &rr, 1, address, size)) {
+            g_rb_2le_hooked = 1;
+            rbgpu_log("2le: hooked AMDAccelResourceAddr2::initialize");
+        } else {
+            g_rb_2le_hooked = 0;
+            patcher.clearError();
+            rbgpu_log("2le: FAILED to hook AMDAccelResourceAddr2::initialize");
+        }
+    }
+
     {   // 2la: observe-only, the per-surface layout decisions
         KernelPatcher::RouteRequest rs(
             "__ZN33AMDRadeonX6000_AMDHWAlignManager224getPreferredSwizzleMode2EP33_ADDR2_COMPUTE_SURFACE_INFO_INPUT",
@@ -14199,6 +14307,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_disp_flush_2kt();
     rbgpu_align_flush_2kz();
     rbgpu_surf_flush_2la();
+    rbgpu_res_flush_2le();
     rbgpu_pdeenc_flush_2km();
     rbgpu_microengine_flush_2iy();
     rbgpu_autoload_flush_2jc();
