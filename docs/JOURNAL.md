@@ -18050,3 +18050,102 @@ out of `amdMtl_HWL_InitAddrLibHwRegFields` and `Addr2ComputeSurfaceInfo` in
 `build/re/AMDRadeonX6000MTLDriver` and determine which `GB_ADDR_CONFIG`
 field, at which value, removes a `y ^ 32` term. Guess-and-check at one boot
 per candidate is the fallback, not the plan.
+
+---
+
+## 2lu (2026-10-21, static, no boot): the CPU tiler's inputs, mapped end to end
+
+With userspace unpatchable (2lt), the question became what the kernel can
+change. Read out of `build/re/AMDRadeonX6000MTLDriver`; every address is a
+symbol from `build/re/mtl-syms.txt`.
+
+### Apple has a second, hand-written GFX10 tiler, and it is not AddrLib
+
+`replaceRegion`'s CPU path does not go through AddrLib. There is a separate
+file-local family keyed on a `CpuTexInterfaceRec`:
+
+```
+amdMtl_HWL_AllocCpuTexInterface(const _sAMD_GET_HW_INFO_VALUES*, unsigned)  0x7ffb08c98237
+amdMtl_HWL_TextureReplaceRegion(const CpuTexInterfaceRec*, ...)             0x7ffb08c97268
+  GFX10_TextureReplaceTiles / GFX10_TextureReplacePixels                    0x7ffb08c97a72 / 0x7ffb08c97832
+  GFX10_GenerateTileAddresses                                              0x7ffb08c9876e
+  GFX10_GetSwizzlePattern(const CpuTexInterfaceRec*, AddrSwizzleMode,
+                          AddrResourceType, unsigned)                      0x7ffb08c99543
+```
+
+`GFX10_GetSwizzlePattern` returns `table + (index << 6)` - 64-byte entries,
+16 dwords, the shape of an AddrLib swizzle-equation bit-id array - from one
+of several tables (`0x7ffb08fc1730`, `0x7ffb08fc6870`, `0x7ffb08fbef30`, ...)
+selected by swizzle mode. The index is
+
+```
+index = rec[0x02] * 0x23 + rec[0x03] * 5 - 0x118 + elemLog2
+      = (pipeInterleaveLog2 - 8) * 35 + pipesLog2 * 5 + elemLog2
+```
+
+### Every input comes from `hwInfo + 0xa0`
+
+`amdMtl_HWL_AllocCpuTexInterface` builds the whole record from that one
+dword - GB_ADDR_CONFIG, the field 2lk identified:
+
+```
+rcx = hwInfo->0xa0
+rec[0x00] = 0x100 << ((rcx >> 3) & 7)     pipeInterleaveBytes
+rec[0x02] = ((rcx >> 3) & 7) | 8          pipeInterleaveLog2
+rec[0x03] = rcx & 7                       pipesLog2
+rec[0x04] = (rcx >> 0x13) & 3             NUM_SHADER_ENGINES
+rec[0x05] = (rcx >> 8) & 7                numPkrsLog2
+rec[0x28] = 0x4b * rec[0x02] - 0x258 + 5 * K
+            K = (numPkrs <= 1) ? pipesLog2 : pipesLog2 + 2*numPkrs - 2
+```
+
+For this chip's `0x242`: interleaveLog2 = 8 (256 B), pipesLog2 = 2 (4 pipes),
+SEs = 0 (1 SE), pkrsLog2 = 2 (4 packers). Pattern index = 0*35 + 2*5 + 2 =
+**12** for BGRA8. **All four derivations are faithful to the register.**
+
+`rec[0x28]` - the only packer-dependent term - is added only for certain
+modes and only when `rec[0x2c] & 2`, which comes from the second argument:
+
+```
+movq (%r15), %rax ; movl 0xa0(%rax), %esi ; shrl %esi ; andl $1
+```
+
+a single bit of a `+0xa0` field. **Not asserted to be GB_ADDR_CONFIG**: the
+pointer is `(%r15)`, a different object from the `0x1a0(%r15)` passed as
+`hwInfo`. `InitDeviceSettings` reads `AMDCommonHwInfoRec+0xa0` with the same
+`shrl/andl $1` expression, so the two may or may not be the same struct.
+Unresolved, and it matters: that bit is what switches the CPU tiler between
+packer-unaware and packer-aware patterns.
+
+### The uncomfortable conclusion
+
+The inputs are correct, and they are the only thing the kernel can reach. So
+either the pattern **table** has no correct entry for a 4-pipe / 4-packer /
+1-SE GFX10.3 part, or the packer-aware fork is being taken wrongly. Feeding
+a *false* GB_ADDR_CONFIG cannot be the fix on its own: the GPU reads tiled
+surfaces according to the real hardware register, so lying to userspace
+would break the agreement that currently holds for everything except this
+path.
+
+That leaves three levers, in order of how much is already known:
+
+1. **Make the two agree by moving the hardware**, not the report.
+   `GB_ADDR_CONFIG` (dword `0x13de`, BASE_IDX 0) is a GC register the driver
+   programs. If Apple's CPU tiler has a correct pattern for some
+   (pipes, pkrs) the chip can actually be configured with, setting both the
+   register and `hwInfo+0xa0` to it makes CPU and GPU agree. This is the
+   only kernel-side route that does not require lying to one side, and it
+   is also the riskiest thing in this project since 2ks - a wrong
+   `GB_ADDR_CONFIG` is a global memory-layout change.
+2. **Confirm the fork bit first**, since it is cheap: resolve what object
+   `(%r15)` is at `0x7ffb08c16918` and whether its `+0xa0` is reachable
+   from the kernel. If it is, one bit decides packer-aware vs not, with no
+   geometry change at all.
+3. Keep client surfaces off the tiled path entirely. `-rbgpulinear` already
+   forces the kernel's 76 surfaces linear and `rbgpu-mode` reports every
+   client resource as mode 0, yet app text stays broken - consistent with
+   2lk's finding that userspace lays out its own textures regardless. So
+   this needs the *userspace* mode forced, which 2lt proved unpatchable.
+
+Lever 2 is the next step: static, cheap, and it either hands us a one-bit
+fix or rules one out before anything touches a GC register.
