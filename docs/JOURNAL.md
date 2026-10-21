@@ -19547,3 +19547,104 @@ So the question is whether any input to that decision, or to the swizzle-mode
 choice, comes from the **kernel** — the `getHardwareInfo` buffer we already
 hook, an IORegistry property, or a user-client request. That is static
 analysis on Apple's kexts and the shared cache, no hardware needed.
+
+## 2mo — every kernel lever is closed by measurement, and the fix is IOSurface
+
+Boot 113, armed. All of this is userspace analysis plus `texprobe`-class
+measurement; no boot was spent.
+
+### The input chain, read rather than guessed
+
+`amdMtl_HWL_AllocCpuTexInterface(const _sAMD_GET_HW_INFO_VALUES*, unsigned)`
+builds the CPU tiler's whole state, and the hw-info buffer it reads is the one
+at `DeviceMembersRec+0x1a0` that 2lk already hooks. Disassembled in full, it
+reads **exactly one field** - `hwinfo+0xa0`, GB_ADDR_CONFIG - and derives:
+
+| rec | value here | from |
+|---|---|---|
+| `[0x00]` word | 256 | `0x100 << PIPE_INTERLEAVE_SIZE` |
+| `[0x02]` | 8 | pipeInterleaveLog2 |
+| `[0x03]` | 2 | pipesLog2 (4 pipes) |
+| `[0x04]` | 0 | seLog2 (1 SE) |
+| `[0x05]` | 2 | pkrsLog2 (4 packers) |
+| `[0x06..0x21]` | 8/12/16 table | **immediates in the code** (256 B / 4 KB / 64 KB) |
+| `[0x28]` | **20** | `0x4b*8 - 0x258 + 5*(pipesLog2 + 2*pkrsLog2 - 2)` |
+| `[0x2c]` bit 1 | 0 | bit 1 of the family flags dword |
+
+The row index on this chip is **20**. And that retires the row-index line of
+work (2lx-2mb) from a new direction: if the pattern row were wrong, the
+*unpadded* 64 KB surfaces would be scrambled too, and 2mn measured them clean
+0/12. The pattern is right.
+
+`amdMtl_HWL_InitAddrLibHwRegFields(_ADDR_CREATE_INPUT*, const AMDCommonHwInfoRec*)`
+is six instructions:
+
+```
+movl $0xd, 0x4(%rdi)        ; chipFamily: a HARDCODED constant
+movl 0xa4(%rsi), %eax       ; GB_ADDR_CONFIG, which HwInfoInitData copied from hwinfo+0xa0
+movl %eax, 0x30(%rdi)
+```
+
+**Only two things reach AddrLib**, and `rbgpu-hwi` certifies the one that
+varies: `gbac=00000242 hw=00000242 MATCH`. So AddrLib's footprint and the CPU
+tiler's geometry derive from the *same single correct register*, and the two
+halves cannot disagree because of anything the kernel said.
+
+`gfx10_HwInfoInitData` has a six-way cascade on `hwinfo+0x08` (thresholds
+0x9/0x13/0x27/0x31/0x3b/0x45, matching the six `AMD_GFX10_NAVI*` family-name
+strings), which picks the AddrLib family/revision qword (`0x7_0000008f` or
+`0x8_0000008f`), a constant at `rec+0x94` (16, 12 or 8 - the block-size log2
+trio), and flags bits [1:0]. `hwinfo+0x08` **is** ours to set. But
+`InitAddrLibHwRegFields` proves the cascade's output never reaches AddrLib, so
+a family override cannot move the footprint. **That fix was designed and
+discarded before it cost a boot** - the one time in this project that chain
+ran the right way round.
+
+### Everything reachable, closed by measurement
+
+| Lever | Result |
+|---|---|
+| kernel swizzle hook | **never called** for a client texture: `swz calls=63` before a full texprobe run and 63 after (2mn) |
+| kernel → AddrLib | only GB_ADDR_CONFIG, verified `MATCH` |
+| family cascade (`hwinfo+0x08`) | does not reach the layout |
+| all **42** `AMD_*` env knobs, 0 and 1 | inert. Baseline 36/72 on six runs; only `AMD_MTL_DEVELOPER_MODE=1` moved it, to 35/72 on four runs - one allocation shifted, reproducible, not a fix |
+| `AMD_MTL_ALLOW_VAR_SWIZZLE_MODES` | reads via `getenv`, clears bit 59 of DeviceSettings, and changes **nothing** at 0 or 1 |
+| API layers (`AMD_MTL_API_LAYERS`) | Sqtt / Frame / Overlay / Tokeniser / VirtualRT - instrumentation only |
+| storage mode | `.shared` fails **identically** to `.managed`: 10/12, 6/12, 9/12, 11/12 in both |
+| userspace patching | impossible (2lq: stub bundle, binary only in the dyld cache) |
+
+Also measured: **`hasUnifiedMemory = false`.** Apple's driver believes this APU
+is a discrete GPU, which is why a CPU upload is tiled at all.
+
+### The fix
+
+IOSurface has been clean in every trial of every milestone. 2mo asks the sharp
+version of that: the **same** `replace()`, the **same** geometry, the **same**
+`.managed` mode, differing only in who owns the backing store.
+
+```
+replace() into an IOSurface-backed texture, at the geometries that fail when
+driver-allocated (n=12 each)
+   256x48    fail 0/12      (driver-allocated: 10/12)
+   256x64    fail 0/12      (driver-allocated:  6/12)
+   256x96    fail 0/12      (driver-allocated:  9/12)
+```
+
+Zero. The defect is not in `replace()`, not in the tiler's parameters and not
+in the kernel: it is in the layout the driver gives **its own** allocations,
+and an IOSurface's layout is agreed between the halves by construction.
+
+So the fix does not need Apple's driver patched, a kext, or a reboot: back the
+affected textures with IOSurfaces. AMFI is already relaxed on this machine
+(`amfi=0x80 amfi_get_out_of_my_way=0x1`), so a `DYLD_INSERT_LIBRARIES`
+interposer can swap texture creation per process.
+
+### Next
+
+Build that interposer and demonstrate it end to end: inject it into `texprobe`
+and watch the failing rows go to 0/12 without touching texprobe's code. Then a
+real app. Known constraints to respect: IOSurface-backed textures are 2D,
+single-mip, and need a matching `bytesPerElement`/`pixelFormat`, so the
+interposer must fall through for anything that does not qualify. A 1000-wide
+IOSurface without an explicit `bytesPerRow` hung the probe once - alignment
+must be set explicitly, not left to default.
