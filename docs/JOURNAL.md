@@ -17571,3 +17571,95 @@ unarmed, and is no longer the next step.
 Boot 104 also re-dated the 2ld finding: what `-rbgpulinear` fixes and what it
 does not are now measured on a healthy chip, which no earlier boot could
 claim.
+
+## 2lo (2026-10-21) — FOUND IT: replaceRegion's CPU-side tiling XOR is wrong
+
+`tools/texprobe.swift` (user-supplied, run on boot 104, no reboot needed).
+Full output: `logs/20261021-texprobe/texprobe-out.txt`. 72 cases: three
+widths (37, 256, 1000) x h=48 x six upload paths x BGRA8 and R8, each written
+twice so a stale read is distinguishable, with every BGRA pixel encoding its
+own (x,y) and the write's tag.
+
+**Seven BAD, and they are all the same defect:**
+
+```
+bgra8 w=256  managed-replace-tiles #1  stale=4096  foreign=0      moved=8192  d(0,32)x4096 d(0,-32)x4096
+bgra8 w=256  managed-replace-tiles #2  stale=0     foreign=4096   moved=8192  d(0,-32)x4096 d(0,32)x4096
+bgra8 w=1000 managed-replace-full  #1  stale=16768 foreign=0      moved=31232 d(48,16)x3968 d(-48,16)x3968 d(48,-16)x3968 d(-48,-16)x3968
+bgra8 w=1000 managed-replace-full  #2  stale=0     foreign=16768  moved=31232 (same four deltas)
+bgra8 w=1000 managed-replace-tiles #1  stale=16768 foreign=0      moved=31232 (same four deltas)
+bgra8 w=1000 managed-replace-tiles #2  stale=0     foreign=16768  moved=31232 (same four deltas)
+```
+
+### It is displacement, not coherency
+
+`stale=0` on every second write. The GPU never read the previous write's
+data, so snoop/MTYPE bits on the system-page PTEs are **exonerated** - which
+was the leading APU-specific hypothesis going in. `foreign` appears only
+where the displacement maps a row outside the texture, so it is unwritten
+memory being read, not a foreign mapping.
+
+### The w=256 case decodes exactly: `y ^ 32`
+
+`h=48`, `w=256`, 12288 pixels. Under a `y ^ 32` row mapping:
+
+- rows 0-15 <-> rows 32-47 swap: 32 rows x 256 = **8192 moved by ±32** ✓
+- rows 16-31 map to 48-63, outside a 48-row texture, so they read unwritten
+  data: 16 rows x 256 = **4096 foreign** ✓
+
+Exactly the measured split, with no residue. w=1000 is the same mechanism
+with two x bits and one y bit (`x ^ 48` = `x ^ (16|32)`, `y ^ 16`), giving
+four equal delta groups of 3968.
+
+**A single-bit-flip displacement in the row/column index is a pipe/bank XOR**
+- the `_X` in `4KB_D_X` (22) and `64KB_R_X` (27), the two tiled modes
+`rbgpu-mode` counts on this chip. The CPU-side tiling computes a different
+XOR than the GPU reads with.
+
+### What the matrix narrows it to
+
+| axis | result |
+|---|---|
+| **Format** | BGRA8 fails; **R8 is clean at all three widths, every path** |
+| **Path** | only `replaceRegion`; `linear-buffer-tex` (also `.managed`, CPU write + `didModifyRange`), `private-blit` full and tiled, and `iosurface` are all OK |
+| **Width** | `w=37` BGRA passes (small enough to be linear); 256 and 1000 fail |
+
+So it is not storage mode, not managed memory, not the blit engine, not
+IOSurface, and not sysmem coherency. It is specifically **the CPU-side
+tiling routine that `MTLTexture.replace(region:)` uses for a tiled,
+multi-byte-per-pixel surface.**
+
+### Why this is the glyph defect
+
+Glyph atlases and decoded images are CPU-produced bitmaps uploaded through
+exactly that call. Window chrome, icons and anything IOSurface-backed are
+not. That is the user's Safari photograph precisely: text and an image in
+**one window**, different upload paths, different outcomes.
+
+### It also resolves 2ln's tension, and REVIVES 2lm
+
+Boot 103 forced client resources to `m0` and the text stayed broken, which
+2ln read as "layout is exonerated for text". The narrower truth: `res +
+0x1dc` is **kernel-side bookkeeping**, and a Metal client texture's real
+layout is decided by the **userspace** AddrLib, which no kernel-side forcing
+ever reached. Both observations stand together.
+
+**2lm is therefore back on**, and now with a mechanism rather than as a sixth
+swing at a parameter: forcing `amdMtl_HWL_DetermineSwizzleMode` to return
+LINEAR makes client textures linear, and `w=37` plus every R8 case shows
+linear BGRA uploads are **clean**. It is a workaround, not the fix - it costs
+tiling bandwidth on client textures - but it is the direct test of this
+diagnosis and it is already built.
+
+The real fix is to find what XOR the CPU-side tiling path uses. 2lk proved
+both AddrLibs are created with identical chipFamily/chipRevision/chipEngine/
+`GB_ADDR_CONFIG = 0x242`, so if `replaceRegion`'s tiling went through AddrLib
+it would agree. It does not agree, so that path is **not** using the AddrLib
+configuration - a hand-rolled routine with Navi 21 pipe/packer constants is
+the shape to look for, and it is the same shape as 2jp's firmware-table
+defect and 2lk's dead end.
+
+Not claimed: that the XOR bits are exactly `y^32`/`x^48` in general - those
+are this geometry's instance of it. Nor that fixing `replaceRegion` fixes
+every scrambled surface; only that this path is measurably broken and is the
+path glyph atlases take.
