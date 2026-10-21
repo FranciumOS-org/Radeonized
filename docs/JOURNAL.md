@@ -17828,3 +17828,63 @@ disabled.
 
 Boot 106 is 2lp's first real test, and it is also the first boot that tests
 `-rbgpulinear`'s effect app-by-app rather than from one photograph.
+
+---
+
+## 2lr (2026-10-21, boot 106): the test surface was wrong, not just the patch
+
+Boot 106, UUID `AD2476B6`, `rbgpu-boot` = 106, `b=106` on every counter,
+`logs/20261021-025036-plugin/`. Chip healthy and unchanged: `stamp_ret=1`,
+`mapq_fails=0`, zero VM faults, `gfx_min=gfx_max=0`.
+
+`rbgpu-surf: forced=76` - `-rbgpulinear` active on all 76 kernel surfaces.
+`rbgpu-mode: seen=4923 m0=4923 lin=1` - every client resource's
+`res+0x1dc` bits 0:4 reads 0.
+
+**`m0=4923` is NOT evidence that client textures are linear in memory.**
+Boot 103 (`-rbgpulinear` IN) gave all-m0; boot 104 (OUT) gave 190 tiled of
+4788; boot 106 (IN) gives all-m0 again. The counter tracks the flag, so it
+is at least partly reading back our own forcing (rule 17). What it can
+still say is consistent with 2lg/2lh/2lk: the kernel records LINEAR and
+**userspace AddrLib lays the bytes out itself** from `hwInfo+0xa0`, never
+asking the kernel. That is why forcing the kernel field fixes everything
+the kernel lays out - chrome, Dock, widgets - and leaves app text alone.
+
+### The capture could not test 2lp, for a reason that is not the section bug
+
+No `2lp` line: the kernel buffer starts at 166 s and the boot-time lines had
+wrapped, and `plugin_check.sh`'s nvram dump does not include `rbgpu-log`.
+But even with the line, boot 106 could not have decided anything:
+
+**2lp was scoped to Terminal, and Terminal's text is already readable
+without it.** Boot 105 established that (2lq). The scoping that made 2lp
+safe to try also made it unmeasurable - a fixed surface cannot show a fix.
+
+### What is still broken, by the user's eye on boot 106
+
+The **the assistant desktop app**: body text fully unreadable. Terminal readable.
+
+So 2lr re-points the patch at the the assistant app's helper processes and drops
+Terminal from the list entirely. `MatchAny` is `strstr(path, p->path)`
+(Lilu 1.7.3 `kern_user.cpp:285`), so one entry, `"/the assistant Helper"`, covers
+`the assistant Helper`, `(GPU)`, `(Renderer)` and `(Plugin)` under
+`/Applications/<app>.app/Contents/Frameworks/`. Electron does its Metal
+work in those helpers.
+
+Dropping Terminal is deliberate: unpatched and already readable, it becomes
+the **control**. If Terminal changes, the change did not come from this
+patch.
+
+### The two outcomes
+
+| the assistant app text on boot 107 | Reading |
+|---|---|
+| readable | 2lo's software tiler confirmed, and the fix generalises by widening the proc list |
+| unchanged | the hardware blit is not correct for a `.managed` destination either, or the scramble is not tiling at all (2ln's original position), and `ShouldUseSwBlt` is a dead end |
+
+Risk: this rewrites a system Metal driver inside the app the user talks to
+the assistant through. Blast radius is that app alone; if it renders worse or
+dies, the assistant Code in Terminal still works, and removing `-rbgpuhwblt` or
+setting `-rbgpuoff` undoes it.
+
+Build UUID `3AA5C1C3`, hosttest passes.
