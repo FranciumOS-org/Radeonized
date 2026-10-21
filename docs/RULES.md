@@ -182,10 +182,15 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     `onProcLoad` still returns `NoError` - so the hook logged `ARMED` and
     patched nothing. Log the enabling field itself and refuse when it is
     disabled. [2lq]
+21. **A search is an instrument too.** A grep that returns nothing is not
+    evidence of absence until it has been checked against a case known to
+    be present. `objdump` separates mnemonic and operands with a **tab**, so
+    a space-based pattern silently matched nothing and produced a confident
+    wrong negative. [2lw]
 
 **The recurring error, stated once**
 
-Twenty-seven recorded instances of reading a value without first establishing
+Twenty-eight recorded instances of reading a value without first establishing
 what makes it meaningful. The practice that keeps catching it: **say in the
 code what would have to be true for the reading to mean anything, and log it
 when it is not.** The 2kx/2la/2lc trio adds a variant worth naming — **read

@@ -18224,3 +18224,96 @@ One cheaper thing comes first, and it is still static: **find where
 kernel-supplied value, lever 2 comes back from the dead at a fraction of
 lever 1's risk. If it is a hardcoded per-ASIC constant, that is worth
 knowing before touching a GC register.
+
+---
+
+## 2lw (2026-10-21, static): 2lv's conclusion corrected - the fork bit IS set, and every tiler input is right
+
+2lv said the CPU tiler's packer-aware fork bit "is not kernel-reachable" and
+that `gfx10_HwInfoInitData` "touches bit 6 and nothing else". **Both are
+wrong.** The grep that supported it missed every store, because objdump
+separates mnemonic and operands with a tab and the pattern used spaces.
+There are **nine** writes to `GFX10_HwInfoRec+0xa0` in that function, and
+they are a per-ASIC cascade dispatched on `chipFamily`.
+
+### The cascade
+
+`gfx10_HwInfoInitData(GFX10_HwInfoRec *rdi, _sAMD_GET_HW_INFO_VALUES *rsi,
+uint32 edx)`:
+
+```
+7ffb08cb40ce  movl 0xa0(%rdi), %r9d      ; keep the original
+7ffb08cb40d8  orl  $0x40, %ecx           ; set bit 6 = "hw info usable"
+7ffb08cb40db  movl %ecx, 0xa0(%rdi)
+7ffb08cb40e7  movl 0x8(%rsi), %r10d      ; chipFamily  -> rec+0x10
+7ffb08cb424a  testl $0x3f0000, %eax      ; edx = 3rd arg, masked 0xfff0000
+7ffb08cb4255  movl 0xa0(%rdi), %eax ; orl $0xc, %eax
+7ffb08cb426f  cmpl $0x9,  %r10d ; ja ...     -> family cascade
+7ffb08cb4311  cmpl $0x13, %r10d ; ja ...
+7ffb08cb438f  cmpl $0x27, %r10d ; ja ...
+7ffb08cb440b  cmpl $0x31, %r10d ; ja ...
+7ffb08cb448a  cmpl $0x3b, %r10d ; ja ...
+```
+
+Each arm writes AddrLib's family/revision at `rec+0x00`, a constant block at
+`rec+0x84`/`0x94`/`0xb4`, a caps word, and the low two bits of `rec+0xa0`:
+
+| family | AddrLib fam/rev | `rec+0xa0` bits 0:1 |
+|---|---|---|
+| <= 0x09 | 0x8F rev 7 | `&= ~3` -> **0** |
+| 0x0a..0x13 | 0x8F rev 7 | `&= ~3; incl` -> **1** |
+| 0x14..0x27 | 0x8F rev 7 | `&= ~3` -> **0** |
+| **0x28..0x31** | **0x8F rev 8** | `&= ~3; orl $2` -> **2** |
+| 0x32..0x3b | 0x8F rev 8 | `&= ~3; orl $2` -> **2** |
+
+**This chip measured `fam = 0x28`** (boot 108, `rbgpu-hwi`:
+`dev=1681 fam=00000028 ras=4 shd=6 gbac=00000242 hw=00000242`), so it takes
+the `0x7ffb08cb4411` arm: AddrLib family `0x8F` **revision 8**,
+`rec+0x08 = 1`, and `rec+0xa0` bits 0:1 = **2 - bit 1 SET**.
+
+### So the fork is already on the packer-aware side
+
+`AllocCpuTexInterface` sets `rec[0x2c] = (rec[0x2c] & ~2) | ((flag & 1) << 1)`
+with `flag = (hwInfoRec->0xa0 >> 1) & 1 = 1`, and `GFX10_GetSwizzlePattern`
+tests `0x2c & 2` before adding the packer-dependent offset `rec[0x28]`. With
+bit 1 set, **the packer-aware path is taken.**
+
+Corrected reading of lever 2: the bit **is** kernel-reachable - `chipFamily`
+comes from `_sAMD_GET_HW_INFO_VALUES+0x08`, which the kernel fills - but it
+is **already set the way it should be**, so flipping it is not a fix. And a
+family override is not a one-bit change: it would also move AddrLib's
+revision 8 -> 7 and three constant blocks. Lever 2 stays closed, for the
+opposite reason to the one 2lv gave.
+
+### What that leaves, stated precisely
+
+Every input Apple's CPU tiler takes is **correct for this chip**: 4 pipes,
+4 packers, 1 SE, 256 B interleave (2lu, all four faithful to `GB_ADDR_CONFIG
+= 0x242`), AddrLib family 0x8F revision 8, and the packer-aware fork on. So
+2lo's `y ^ 32` row displacement is **not a configuration error**. It is
+either
+
+(a) the pattern **tables** having no correct entry for a 4-pipe / 4-packer
+    GFX10.3 part, or
+(b) a defect downstream of pattern selection, in
+    `GFX10_GenerateTileAddresses` (`0x7ffb08c9876e`) or
+    `GFX10_TextureReplaceTiles` (`0x7ffb08c97a72`).
+
+Both are decidable statically, and (a) first because it is cheaper: 2lu
+already fixed the selected index at **12** for BGRA8
+(`(interleaveLog2-8)*35 + pipesLog2*5 + elemLog2 = 0 + 10 + 2`). Read the
+64-byte equation at `table + (12 << 6)` for the mode-22/25/27 tables
+(`0x7ffb08fc1730`, `0x7ffb08fc6870`, `0x7ffb08fbef30`), decode the bit-ids,
+and compare with the equation AddrLib itself uses for the same config - the
+one the **GPU** follows through the kernel's AddrLib. A difference in a
+single y bit is the whole defect, located exactly.
+
+### Method note
+
+This is the second time in one session that a wrong regex produced a
+confident negative (2lv here, and the `rbgpu-diag d=70` misreading in 2lt).
+Rule 16 covers an instrument that is a suspect; the variant worth naming is
+that **a search is an instrument too**. When a grep returns nothing, check
+it against a case known to be present before reporting the absence - here,
+`movl %ecx, 0xa0(%rdi)` at `0x7ffb08cb40db` was known to exist and would
+have failed the pattern immediately.
