@@ -21,4 +21,13 @@ case "$target" in
 esac
 [ -x "$target" ] || { echo "not executable: $target" >&2; exit 1; }
 
-exec env DYLD_INSERT_LIBRARIES="$DYLIB" "$target" "$@"
+# Log to a file as well as the terminal: asking for logs/iosurftex-<app>.log
+# after running this script used to find an empty file, because only the
+# -app.sh and -launchd.sh variants wrote one.
+base=$(basename "$target" | tr 'A-Z ' 'a-z-')
+log="$(cd "$(dirname "$0")/.." && pwd)/logs/iosurftex-$base.log"
+mkdir -p "$(dirname "$log")"
+echo "logging to $log" >&2
+exec env DYLD_INSERT_LIBRARIES="$DYLIB" \
+         RBGPU_IOSURFTEX_LOGFILE="${RBGPU_IOSURFTEX_LOGFILE:-$log}" \
+         "$target" "$@"
