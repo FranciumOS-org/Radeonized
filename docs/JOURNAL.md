@@ -16513,3 +16513,60 @@ again**: both names were first written with a 31 length prefix where the
 class needs 33, and `solveSymbol` would have returned 0 for both (2kr).
 
 Build `78B2F3A5-84B0-39E3-AB91-C4063BBC1087`.
+
+## 2lb (2026-10-20) — boot 96: DCC is EXCLUDED, and the modes are named
+
+```
+rbgpu-surf = b=96 swz hk=1 calls=50 | dcc hk=1 calls=0 ok=0
+ | 1920x1080 b32 f26 t1 fl20 s0->1b
+ | 1920x1080 b32 f26 t1 fl20 s0->1b
+ | 8192x4320 b32 f26 t1 fl0  s9->1b
+ | 1920x1080 b32 f26 t1 fl0  s9->1b
+ | 64x64     b32 f26 t1 fl0  s9->16
+```
+
+**`dcc calls=0` with `hk=1` and 50 swizzle calls in the same boot: DCC is
+never laid out at all.** Compression is excluded as the cause, and the
+positive control is in the same note - the DCC hook took, it simply was
+never called. One suspect dead without a guess.
+
+**The modes, decoded against AddrLib's `AddrSwizzleMode`:**
+
+- `0x1b` = 27 = **`ADDR_SW_64KB_R_X`** - 64 KB **rotated**, X variant
+- `0x16` = 22 = `ADDR_SW_4KB_D_X` - 4 KB displayable, X variant
+- inputs: `s0` = `ADDR_SW_LINEAR`, `s9` = `ADDR_SW_64KB_S`
+
+Everything large gets `64KB_R_X`, **including an 8192x4320 surface** -
+141 MB at 32 bpp, the shape of a glyph/texture atlas. The 64x64 surface
+gets a different mode, which is itself the per-surface variation the
+screen demands.
+
+`_X` means the swizzle XORs pipe and packer bits into the address; `_R_`
+means **rotated**, which on GFX10 distributes across shader engines. This
+chip has **one** shader engine (2kz: `NUM_SHADER_ENGINES=0`); Navi 21,
+which this stack spoofs, has four. That is the single geometry field that
+genuinely differs, and rotation is the first suspect that is per-surface
+rather than global - which is what the photograph requires, with icons
+and wallpaper perfect and glyphs shredded.
+
+**2lb tests it with one variable changed.** `-rbgpunorotate` remaps
+**27 -> 25** (`ADDR_SW_64KB_R_X` -> `ADDR_SW_64KB_S_X`). Both are 64 KB
+and both are `_X`, so the pipe/packer arithmetic is bit-for-bit
+identical; only the rotation differs. No other mode is touched, so any
+change on screen can only come from that.
+
+| outcome | means |
+|---|---|
+| text renders | rotation is the fault, on a 1-SE part |
+| nothing changes | rotation excluded; `remapped=` proves the swap happened |
+| worse / no desktop | `_S_X` is not a valid substitute here; revert |
+
+`rbgpu-surf` now carries `rot=` (1 armed, 2 observe-only) and
+`remapped=`, so an unarmed boot cannot be read as a null result (2eh).
+
+Still not claimed: that rotation IS the cause. Three hypotheses about
+this corruption have been refuted by measurement already (2kx, 2kz, and
+DCC here); this one is a test, not a conclusion.
+
+Build `58BAC460-ECD2-322F-8C20-1FE7D021B0AB`. New boot-arg:
+`-rbgpunorotate`.
