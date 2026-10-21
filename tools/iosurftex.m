@@ -54,6 +54,15 @@ static atomic_long gSwapped, gFellThrough;
 static atomic_long gDeclUsage, gDeclFormat, gDeclStruct, gLawClean;
 static IMP gOrigNewTexture;
 
+// 2mu: the decisive question. Our law is about a CPU upload - replaceRegion -
+// into a driver-allocated tiled texture. Claude's glyph atlas IS in the failing
+// class and IS being swapped, and its text did not change, so either the atlas
+// is not filled by CPU at all (a GPU render pass or blit, both of which were
+// correct in every test) or the text comes from elsewhere. Count the CPU
+// uploads and say which textures get them.
+static atomic_long gReplaceCalls;
+static IMP gOrigReplace;
+
 #define LOG(fmt, ...) do { \
     if (gLog) { \
         FILE *f = gLogFile ? gLogFile : stderr; \
@@ -102,6 +111,66 @@ static bool structureOk(MTLTextureDescriptor *d)
 static bool usageOk(MTLTextureDescriptor *d)
 {
     return gAnyUsage || (d.usage & ~(MTLTextureUsage)IOSURFTEX_OK_USAGE) == 0;
+}
+
+typedef void (*ReplaceIMP)(id, SEL, MTLRegion, NSUInteger, NSUInteger,
+                           const void *, NSUInteger, NSUInteger);
+
+static void swizzledReplace(id self, SEL _cmd, MTLRegion region, NSUInteger level,
+                            NSUInteger slice, const void *bytes, NSUInteger bpr,
+                            NSUInteger bpi)
+{
+    long n = atomic_fetch_add(&gReplaceCalls, 1) + 1;
+    if (gLog) {
+        id<MTLTexture> t = (id<MTLTexture>)self;
+        LOG("CPU UPLOAD #%ld into %lux%lu fmt=%lu  region %lux%lu at (%lu,%lu)",
+            n, (unsigned long)t.width, (unsigned long)t.height,
+            (unsigned long)t.pixelFormat,
+            (unsigned long)region.size.width, (unsigned long)region.size.height,
+            (unsigned long)region.origin.x, (unsigned long)region.origin.y);
+    }
+    ((ReplaceIMP)gOrigReplace)(self, _cmd, region, level, slice, bytes, bpr, bpi);
+}
+
+// The 4-argument selector is a SEPARATE implementation, not a forwarder: with
+// only the 6-argument one swizzled, lawtest's 192 uploads were counted as zero.
+typedef void (*Replace4IMP)(id, SEL, MTLRegion, NSUInteger, const void *, NSUInteger);
+static IMP gOrigReplace4;
+
+static void swizzledReplace4(id self, SEL _cmd, MTLRegion region, NSUInteger level,
+                             const void *bytes, NSUInteger bpr)
+{
+    long n = atomic_fetch_add(&gReplaceCalls, 1) + 1;
+    if (gLog) {
+        id<MTLTexture> t = (id<MTLTexture>)self;
+        LOG("CPU UPLOAD #%ld into %lux%lu fmt=%lu  region %lux%lu at (%lu,%lu)",
+            n, (unsigned long)t.width, (unsigned long)t.height,
+            (unsigned long)t.pixelFormat,
+            (unsigned long)region.size.width, (unsigned long)region.size.height,
+            (unsigned long)region.origin.x, (unsigned long)region.origin.y);
+    }
+    ((Replace4IMP)gOrigReplace4)(self, _cmd, region, level, bytes, bpr);
+}
+
+static void installReplaceCounter(void)
+{
+    Class tc = objc_getClass("GFXAAMD_MtlTexture");
+    if (!tc) { LOG("no GFXAAMD_MtlTexture class - cannot count CPU uploads"); return; }
+
+    SEL s6 = @selector(replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:);
+    Method m6 = class_getInstanceMethod(tc, s6);
+    if (m6) {
+        gOrigReplace = method_getImplementation(m6);
+        method_setImplementation(m6, (IMP)swizzledReplace);
+    }
+    SEL s4 = @selector(replaceRegion:mipmapLevel:withBytes:bytesPerRow:);
+    Method m4 = class_getInstanceMethod(tc, s4);
+    if (m4) {
+        gOrigReplace4 = method_getImplementation(m4);
+        method_setImplementation(m4, (IMP)swizzledReplace4);
+    }
+    LOG("counting CPU uploads on GFXAAMD_MtlTexture (6-arg %s, 4-arg %s)",
+        m6 ? "yes" : "no", m4 ? "yes" : "no");
 }
 
 static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
@@ -187,10 +256,12 @@ static void report(void)
 {
     FILE *f = gLogFile ? gLogFile : stderr;
     fprintf(f, "iosurftex: pid %d summary: swapped=%ld  declined(usage)=%ld "
-            "declined(format)=%ld declined(structure)=%ld  law-clean=%ld  fellthrough=%ld\n",
+            "declined(format)=%ld declined(structure)=%ld  law-clean=%ld  fellthrough=%ld "
+            "cpu-uploads=%ld\n",
             getpid(), atomic_load(&gSwapped), atomic_load(&gDeclUsage),
             atomic_load(&gDeclFormat), atomic_load(&gDeclStruct),
-            atomic_load(&gLawClean), atomic_load(&gFellThrough));
+            atomic_load(&gLawClean), atomic_load(&gFellThrough),
+            atomic_load(&gReplaceCalls));
     fflush(f);
 }
 
@@ -205,6 +276,7 @@ static void installOnce(id<MTLDevice> dev)
 
     gOrigNewTexture = method_getImplementation(m);
     method_setImplementation(m, (IMP)swizzledNewTexture);
+    installReplaceCounter();
     atexit(report);
     LOG("pid %d installed on %s (device \"%s\")", getpid(), class_getName(cls),
         dev.name.UTF8String);
