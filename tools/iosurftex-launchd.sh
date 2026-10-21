@@ -1,51 +1,41 @@
 #!/bin/sh
-# Put the IOSurface interposer into the GUI launch environment, so apps started
-# the NORMAL way (Dock, Spotlight, Finder) load it.
+# RECOVERY ONLY. The `on` path of this script has been REMOVED.
 #
-#   tools/iosurftex-launchd.sh on     then launch the app from the Dock
-#   tools/iosurftex-launchd.sh off    then quit and relaunch it to go back
-#   tools/iosurftex-launchd.sh status
+# What it used to do, and what that cost (2026-10-21, logged as 2mq):
+#   `launchctl setenv DYLD_INSERT_LIBRARIES <dylib>` is NOT a per-app switch. It
+#   applies to every GUI process started afterwards. dyld KILLS a process that
+#   cannot load an inserted dylib, and a sandboxed app (Mail, most App Store
+#   apps) cannot read one out of a home directory - so it dies before any of our
+#   code runs. Claude would not open, then Terminal would not open, then Mail
+#   would not open, and the machine had to be rebooted to get a usable GUI back.
 #
-# Why this rather than exec'ing the binary: `open -a` and the Dock go through
-# launchd, which does not pass a DYLD_INSERT_LIBRARIES set in a shell on to the
-# app. Exec'ing Claude's binary directly made it exit cleanly after one second,
-# twice, with the dylib loaded and installed and no crash report - so direct
-# exec is itself suspect, and this route avoids it.
+# And the escape hatch did not work: `launchctl unsetenv` over SSH acts on a
+# DIFFERENT launchd domain than the Aqua session, so it unsets nothing. To reach
+# the GUI session from SSH or a non-GUI shell you must say so explicitly:
 #
-# Scope and reversal: this affects GUI processes started AFTER `on`, in this
-# login session only. Already-running processes are untouched, nothing is
-# written to disk, and it does not survive a reboot. `off` removes it; apps
-# already running keep it until they are quit.
+#   sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES
+#
+# Rule: never put DYLD_INSERT_LIBRARIES in a launchd environment. Inject per
+# process, where the blast radius is one process you started on purpose.
 set -e
-root=$(cd "$(dirname "$0")/.." && pwd)
-dylib="$root/build/out/iosurftex.dylib"
-log="$root/logs/iosurftex-launchd.log"
-
 case "${1:-}" in
-on)
-    [ -f "$dylib" ] || { echo "build it first:  make iosurftex" >&2; exit 1; }
-    mkdir -p "$root/logs"
-    launchctl setenv DYLD_INSERT_LIBRARIES "$dylib"
-    launchctl setenv RBGPU_IOSURFTEX_LOG "${RBGPU_IOSURFTEX_LOG:-2}"
-    launchctl setenv RBGPU_IOSURFTEX_LOGFILE "$log"
-    [ "${RBGPU_IOSURFTEX_ANYUSAGE:-0}" = 0 ] || launchctl setenv RBGPU_IOSURFTEX_ANYUSAGE 1
-    echo "on. Now QUIT the app and launch it again from the Dock."
-    echo "  log: $log"
-    echo "  turn it off with: tools/iosurftex-launchd.sh off"
-    ;;
 off)
-    launchctl unsetenv DYLD_INSERT_LIBRARIES
-    launchctl unsetenv RBGPU_IOSURFTEX_LOG
-    launchctl unsetenv RBGPU_IOSURFTEX_LOGFILE
-    launchctl unsetenv RBGPU_IOSURFTEX_ANYUSAGE
-    echo "off. Apps already running keep it until you quit them."
+    launchctl unsetenv DYLD_INSERT_LIBRARIES   || true
+    launchctl unsetenv RBGPU_IOSURFTEX_LOG     || true
+    launchctl unsetenv RBGPU_IOSURFTEX_LOGFILE || true
+    launchctl unsetenv RBGPU_IOSURFTEX_ANYUSAGE || true
+    echo "unset in THIS session's launchd domain."
+    echo "If you are over SSH this did nothing to the GUI session. Use:"
+    echo "  sudo launchctl asuser \$(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES"
     ;;
 status)
     v=$(launchctl getenv DYLD_INSERT_LIBRARIES || true)
-    [ -n "$v" ] && echo "DYLD_INSERT_LIBRARIES=$v" || echo "not set"
-    f=$(launchctl getenv RBGPU_IOSURFTEX_LOGFILE || true)
-    [ -n "$f" ] && echo "logfile=$f" || true
+    [ -n "$v" ] && echo "DYLD_INSERT_LIBRARIES=$v" || echo "not set in this domain"
     ;;
+on)
+    echo "REFUSED. This broke every newly launched app and cost a reboot." >&2
+    echo "See the comment at the top of this file, and docs/JOURNAL.md 2mq." >&2
+    exit 1 ;;
 *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

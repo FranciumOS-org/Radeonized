@@ -182,7 +182,17 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     `onProcLoad` still returns `NoError` - so the hook logged `ARMED` and
     patched nothing. Log the enabling field itself and refuse when it is
     disabled. [2lq]
-21. **A search is an instrument too.** A grep that returns nothing is not
+21. **Never put `DYLD_INSERT_LIBRARIES` in a launchd environment, and test a
+    recovery procedure in the situation it exists for.** `launchctl setenv` is
+    system-wide, not per-app, and dyld **kills** any process that cannot load
+    an inserted dylib - including every sandboxed app, which cannot read one
+    from a home directory. Every newly launched app died; the machine needed a
+    reboot. The documented undo, `launchctl unsetenv` over SSH, addresses a
+    different domain than the Aqua session and did nothing - the working form
+    is `sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES`.
+    Inject per process, where the blast radius is one process started on
+    purpose. [2mq]
+22. **A search is an instrument too.** A grep that returns nothing is not
     evidence of absence until it has been checked against a case known to
     be present. `objdump` separates mnemonic and operands with a **tab**, so
     a space-based pattern silently matched nothing and produced a confident
