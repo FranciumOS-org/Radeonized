@@ -190,7 +190,7 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
 
 **The recurring error, stated once**
 
-Twenty-eight recorded instances of reading a value without first establishing
+Thirty recorded instances of reading a value without first establishing
 what makes it meaningful. The practice that keeps catching it: **say in the
 code what would have to be true for the reading to mean anything, and log it
 when it is not.** The 2kx/2la/2lc trio adds a variant worth naming — **read
@@ -235,6 +235,12 @@ The two that bite hardest:
   `-rbgpupdefix` (composes with the upstream fix, halt returns),
   `-rbgpunodisppanic`, `-rbgpusdmahook`, `-rbgpustampraw`, `-rbgpuregdump`,
   `debug=0x100`.
+- **`-rbgpulinear` is now a SUSPECT in the text defect (2mm), not neutral.**
+  It forces client surfaces to LINEAR while the userspace driver lays them out
+  in 64 KB tiles; every geometry whose tiled footprint exceeds its pixel bytes
+  renders wrong and every geometry where the two agree renders correctly. Test
+  pending: remove it and the height sweep must go clean. The note below is the
+  pre-2mm reading and its ~80 % widget win still stands.
 - **`-rbgpulinear` belongs IN and is currently OUT.** Boot 104 removed it and
   the widget/Dock/chrome artifacts came straight back on a healthy chip, so
   its ~80 % is real and not an artefact of boot 98's broken state. Restore:
