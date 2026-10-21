@@ -30,13 +30,22 @@
 #import <stdatomic.h>
 
 static int gLog = 0, gAnyUsage = 0;
+// An app launched by launchd has no terminal, so stderr goes nowhere useful.
+// RBGPU_IOSURFTEX_LOGFILE names a file every process appends to instead.
+static FILE *gLogFile;
 static atomic_long gSwapped, gFellThrough;
 // Why a descriptor the law flagged was declined - so that a run which fixes
 // nothing still says what the application actually asked for.
 static atomic_long gDeclUsage, gDeclFormat, gDeclStruct, gLawClean;
 static IMP gOrigNewTexture;
 
-#define LOG(fmt, ...) do { if (gLog) fprintf(stderr, "iosurftex: " fmt "\n", ##__VA_ARGS__); } while (0)
+#define LOG(fmt, ...) do { \
+    if (gLog) { \
+        FILE *f = gLogFile ? gLogFile : stderr; \
+        fprintf(f, "iosurftex: " fmt "\n", ##__VA_ARGS__); \
+        fflush(f); \
+    } \
+} while (0)
 
 // Only formats whose IOSurface equivalent is unambiguous. Anything else falls
 // through: a wrong bytesPerElement would corrupt worse than the bug does.
@@ -151,11 +160,13 @@ fallthrough:
 // application's textures come through here at all.
 static void report(void)
 {
-    fprintf(stderr, "iosurftex: pid %d summary: swapped=%ld  declined(usage)=%ld "
+    FILE *f = gLogFile ? gLogFile : stderr;
+    fprintf(f, "iosurftex: pid %d summary: swapped=%ld  declined(usage)=%ld "
             "declined(format)=%ld declined(structure)=%ld  law-clean=%ld  fellthrough=%ld\n",
             getpid(), atomic_load(&gSwapped), atomic_load(&gDeclUsage),
             atomic_load(&gDeclFormat), atomic_load(&gDeclStruct),
             atomic_load(&gLawClean), atomic_load(&gFellThrough));
+    fflush(f);
 }
 
 static void installOnce(id<MTLDevice> dev)
@@ -203,6 +214,11 @@ __attribute__((constructor)) static void init(void)
     gLog = l ? atoi(l) : 0;
     const char *a = getenv("RBGPU_IOSURFTEX_ANYUSAGE");
     gAnyUsage = a && atoi(a) != 0;
+    const char *lf = getenv("RBGPU_IOSURFTEX_LOGFILE");
+    if (lf && *lf) {
+        gLogFile = fopen(lf, "a");       // every process appends; each line carries its pid
+        if (gLogFile && !gLog) gLog = 1; // naming a file is asking for logging
+    }
     LOG("loaded in pid %d (%s)%s", getpid(), getprogname(),
         gAnyUsage ? " anyusage" : "");
 }
