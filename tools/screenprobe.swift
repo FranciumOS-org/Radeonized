@@ -485,7 +485,21 @@ func makeWindow(_ x: Int, _ y: Int) -> NSWindow {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// 2nl: this probe is not a real app - a bare binary with no bundle, running
+// as .accessory. Terminal is an AppKit window drawn with CoreGraphics and is
+// CRISP on this machine, while this probe's identical-looking window scrambles
+// about half the time. That contradiction decides whether any of this matters:
+// if CoreAnimation treats a non-bundled accessory process differently, the
+// reproducer is an artefact of what it is rather than of what it draws.
+//
+// RB_REGULAR=1 makes it a regular, activated app instead.
+if ProcessInfo.processInfo.environment["RB_REGULAR"] == "1" {
+    app.setActivationPolicy(.regular)
+    app.activate(ignoringOtherApps: true)
+    print("activation policy: regular")
+} else {
+    app.setActivationPolicy(.accessory)
+}
 
 guard let screen = NSScreen.main else { print("no screen"); exit(2) }
 let sh = Int(screen.frame.height)

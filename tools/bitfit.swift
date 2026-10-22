@@ -36,9 +36,13 @@ let WIDE = Int(a[6])!, TALL = Int(a[7])!
 // (0.0% miss) over the top three quarters and failing only in the last 128-row
 // band, which is two populations rather than one map with a missing term. This
 // lets each band be fitted on its own.
-let yLo = a.count > 8 ? Int(a[8])! : 20
-let yHi = a.count > 9 ? Int(a[9])! : TALL
-if a.count > 8 { print("restricted to destination rows \(yLo)..<\(yHi)") }
+// Parse these only when they are actually numbers: a flag such as --identity
+// also lands in argv[8], and force-unwrapping Int("--identity") exits the
+// process silently with no output at all - which looks exactly like the tool
+// doing nothing (rule 14).
+let yLo = (a.count > 8 ? Int(a[8]) : nil) ?? 20
+let yHi = (a.count > 9 ? Int(a[9]) : nil) ?? TALL
+if yLo != 20 || yHi != TALL { print("restricted to destination rows \(yLo)..<\(yHi)") }
 
 guard let isrc = CGImageSourceCreateWithURL(URL(fileURLWithPath: a[1]) as CFURL, nil),
       let img = CGImageSourceCreateImageAtIndex(isrc, 0, nil) else { print("cannot read png"); exit(2) }
@@ -73,7 +77,21 @@ func invert(_ fwd: [Int]) -> [Int] {
         return best
     }
 }
-let rInv = invert(med(rS)), gInv = invert(med(gS)), bInv = invert(med(bS))
+// The LUT is normally measured from the window given as the reference, which
+// must be CLEAN. On a boot with -rbgpulinear removed NEITHER window is clean,
+// and a LUT built from a scrambled window is meaningless - that is how a run
+// of this tool came back "0.38%", a void number rather than a finding.
+//
+// The colour transform on this display measured as the IDENTITY when it could
+// be measured honestly, so --identity decodes raw values and skips the LUT.
+// Its own check is the bijection rate printed below: a correct decode makes
+// the mapping nearly one-to-one, and a wrong one does not.
+let IDENTITY = CommandLine.arguments.contains("--identity")
+let idLUT = Array(0..<256)
+let rInv = IDENTITY ? idLUT : invert(med(rS))
+let gInv = IDENTITY ? idLUT : invert(med(gS))
+let bInv = IDENTITY ? idLUT : invert(med(bS))
+if IDENTITY { print("colour LUT: identity (no clean reference window in this frame)") }
 
 // p -> q, or -1 where the pixel was not decodable
 var q = [Int](repeating: -1, count: WIDE * TALL)
@@ -83,13 +101,21 @@ for y in yLo..<yHi where y % 64 != 0 && y % 256 != 0 {
         let (r, g, b) = px(cpuX + x, cpuY + y)
         let lx = rInv[r], ly = gInv[g], hi = bInv[b]
         if lx < 0 || ly < 0 || hi < 0 { continue }
-        let sx = lx | ((hi & 3) << 8), sy = ly | (((hi >> 2) & 3) << 8)
+        let combo = IDENTITY ? Int((Double(b) - 8.0) / 15.0 + 0.5) : hi
+        if combo < 0 || combo > 15 { continue }
+        let sx = lx | ((combo & 3) << 8), sy = ly | (((combo >> 2) & 3) << 8)
         if sx >= WIDE || sy >= TALL { continue }
         q[y * WIDE + x] = sy * WIDE + sx
         decoded += 1
     }
 }
-print("decoded \(decoded) pixels")
+var used = [Int](repeating: 0, count: WIDE * TALL)
+for p in 0..<(WIDE * TALL) where q[p] >= 0 { used[q[p]] += 1 }
+let once = used.filter { $0 == 1 }.count
+print("decoded \(decoded) pixels; \(decoded == 0 ? 0 : once * 100 / decoded)% of the mapping is one-to-one")
+if decoded > 0 && once * 100 / decoded < 70 {
+    print("  -> under 70% one-to-one: the decode is NOT trustworthy, treat what follows as void")
+}
 let NBITS = Int(ceil(log2(Double(WIDE * TALL))))
 print("pixel index is \(NBITS) bits")
 print("")
