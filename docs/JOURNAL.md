@@ -20304,3 +20304,70 @@ the assistant's own shell does not have.
 Four instrument defects against one hardware finding is the ratio rule 16 is
 about. A negative from an instrument that has not been checked against a case
 known to be present is not a negative.
+
+## 2mz (2026-10-21) — the probe's own bug, and what survived killing it
+
+### Half of what 2my measured was this repo's bug
+
+`CPUView` built a `CGImage` over a Swift array's memory inside
+`withUnsafeMutableBytes`, so the backing buffer died when the closure exited. A
+`CGImage` over caller-supplied bytes may reference rather than copy them, and
+CoreGraphics may defer the draw - so it was reading freed memory. It explained
+every property of what 2my reported: CPU window only, intermittent, worse on
+redraw.
+
+Rebuilt so the pattern is rendered once into a buffer that lives for the life
+of the process and is never freed. The effect is unambiguous:
+
+    signature        before the fix              after
+    72 row jumps     swap 4/4, refresh 4/4       GONE, 0/16
+    84 row jumps     static 2/4, direct 1/4      static 1/4, refresh 3/4, direct 1/4
+
+So the `swap` result that refuted "drawn once" was itself partly an artifact,
+and the hypothesis it refuted was never properly on trial. Both are withdrawn.
+What remains is the 84/92 signature, in 5 of 16 runs, always on the CPU window.
+
+### What survived, and why it is not memory corruption
+
+The scrambled window holds the probe's own pattern rearranged into blocks, and
+the rearrangement is **identical every single time it occurs** - 84 row jumps
+and 92 column jumps, run after run, capture after capture. Memory corruption
+does not repeat byte for byte. A wrong address mapping does.
+
+`tools/permute.swift` reads the permutation off directly, which the pattern
+makes possible because every pixel carries its own coordinates. Colour
+management is not guessed at: the CLEAN GPU window in the same capture supplies
+the measured intended-to-captured mapping for all 256 levels, and inverting it
+makes the scrambled window exactly decodable. On this capture that transform
+came out identity, and 251904/251904 pixels decoded.
+
+The displacement is not a constant shift - the histogram is flat at 0.1% per
+bucket. It is structured. Reconstructing the source column per 8-pixel block:
+
+    dest x:  0   8  16  24  32  40  48  56  64  72  80  88  96 104 112 120
+    src  x: 32  32  48  48  40  40  56  56  48  48  32  32  56  56  40  40
+
+Every displacement is a multiple of 8, bounded inside a tile, repeating on a
+64-pixel period. That is a bit permutation of the low address bits: a
+**tiled-versus-linear swizzle mismatch** on the window's backing store, one
+layout written and another read. The intermittency fits - the backing store
+lands tiled on some runs and linear on others.
+
+This is the first reproducible, on-demand, exactly-decodable instance of the
+family of defect the user actually sees, and it happens with `-rbgpulinear`
+already in boot-args, which is direct evidence that lever does not reach these
+surfaces.
+
+### Standing
+
+Five instrument defects were found today against one hardware finding, and two
+hypotheses (DCC, "drawn once") were raised and withdrawn. The surviving
+measurement is 2mz's permutation. Nothing about a fix is claimed yet.
+
+Next, in order, all userspace and needing no boot:
+1. Decode the permutation as a bit map of the linear address - take source and
+   destination byte offsets inside one tile and look at the XOR - and compare
+   it against the GFX10 64KB_S / 64KB_R_X patterns in `rb_regs.h` and the
+   AddrLib notes in `docs/APPLE-STACK.md`. Naming the mode names the fix.
+2. Find what decides tiled versus linear for a window backing store, since the
+   same window is clean in 11 of 16 runs.
