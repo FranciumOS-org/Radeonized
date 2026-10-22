@@ -40,6 +40,15 @@ let MODE = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "direct"
 let READY = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
 let SECONDS = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 12.0 : 12.0
 
+// A per-run stamp, written into the BLUE channel of every pixel of both
+// windows. Blue is then constant across the whole window, so it survives any
+// rearrangement of the pixels: a scrambled window still reports the tag of the
+// run that PRODUCED it. If a scrambled capture carries the previous run's tag
+// it is a stale surface left behind by a process that has exited - this
+// harness's fault, like the four instrument defects before it - and if it
+// carries the current run's tag the corruption is live.
+let TAG = CommandLine.arguments.count > 4 ? (Int(CommandLine.arguments[4]) ?? 64) & 0xff : 64
+
 let BIG = (MODE == "big" || MODE == "bigmsaa" || MODE == "bigcpu")
 let WIDE = BIG ? 900 : 512
 let TALL = BIG ? 880 : 512
@@ -81,8 +90,7 @@ let GPU_ONCE = (MODE == "static" || MODE == "swap")
     if (x % 256 == 0) || (y % 256 == 0) { return 0xffff_ffff }
     if (x % 64 == 0) || (y % 64 == 0) { return 0xff80_8080 }
     let r = UInt32(x & 0xff), g = UInt32(y & 0xff)
-    let b = UInt32(((x >> 8) & 0xf) | (((y >> 8) & 0xf) << 4))
-    return 0xff00_0000 | (r << 16) | (g << 8) | b
+    return 0xff00_0000 | (r << 16) | (g << 8) | UInt32(TAG)
 }
 
 // --- the CPU window ---------------------------------------------------------
@@ -138,15 +146,15 @@ vertex float4 vs(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2);
     return float4(p * 2.0 - 1.0, 0.0, 1.0);
 }
-fragment float4 fs(float4 pos [[position]], constant uint &wide [[buffer(0)]]) {
+fragment float4 fs(float4 pos [[position]], constant uint &wide [[buffer(0)]],
+                   constant uint &tag [[buffer(1)]]) {
     uint x = uint(pos.x), y = uint(pos.y);
     if (y < 16u) { float v = float(min(255u, x * 256u / wide)) / 255.0; return float4(v, v, v, 1); }
     if ((x % 256u == 0u) || (y % 256u == 0u)) return float4(1, 1, 1, 1);
     if ((x % 64u  == 0u) || (y % 64u  == 0u)) return float4(0.5020, 0.5020, 0.5020, 1);
     float r = float(x & 0xffu) / 255.0;
     float g = float(y & 0xffu) / 255.0;
-    float b = float(((x >> 8) & 0xfu) | (((y >> 8) & 0xfu) << 4)) / 255.0;
-    return float4(r, g, b, 1);
+    return float4(r, g, float(tag) / 255.0, 1);
 }
 """
 
@@ -198,6 +206,8 @@ func renderPattern(into target: MTLTexture, present: MTLDrawable?) {
     e.setRenderPipelineState(pso)
     var w = UInt32(WIDE)
     e.setFragmentBytes(&w, length: 4, index: 0)
+    var tg = UInt32(TAG)
+    e.setFragmentBytes(&tg, length: 4, index: 1)
     e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     e.endEncoding()
     if target.storageMode == .managed {
@@ -324,7 +334,7 @@ print("decode with: build/out/decodescreen <png> \(leftX) \(topY) \(rightX) \(to
 // Only now is the pattern actually on screen, so only now may it be captured.
 if !READY.isEmpty { try? "ready\n".write(toFile: READY, atomically: true, encoding: .utf8) }
 
-print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE)")
+print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE), tag \(TAG)")
 
 Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
     if CPU_REDRAW { cpuView.needsDisplay = true }
