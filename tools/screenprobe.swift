@@ -86,26 +86,47 @@ let GPU_ONCE = (MODE == "static" || MODE == "swap")
 }
 
 // --- the CPU window ---------------------------------------------------------
+//
+// The first version of this built a CGImage over a Swift array's memory inside
+// withUnsafeMutableBytes, so the backing buffer died when the closure exited.
+// A CGImage made over caller-supplied bytes may reference them rather than
+// copy them, and CoreGraphics may defer the draw - which reads freed memory
+// and looks exactly like the corruption this tool exists to find. Rule 16: the
+// instrument is a suspect, and that one had to be cleared before anything it
+// reported could be believed.
+//
+// The pattern is constant, so it is rendered once into a buffer that lives for
+// the life of the process and is never freed, and drawRect only blits it.
 final class CPUView: NSView {
-    override func draw(_ dirty: NSRect) {
-        var px = [UInt32](repeating: 0, count: WIDE * TALL)
-        for y in 0..<TALL { for x in 0..<WIDE { px[y * WIDE + x] = patternPixel(x, y) } }
-        px.withUnsafeMutableBytes { raw in
-            let bi = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-            guard let ctx = CGContext(data: raw.baseAddress, width: WIDE, height: TALL,
-                                      bitsPerComponent: 8, bytesPerRow: WIDE * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bi),
-                  let img = ctx.makeImage(),
-                  let cg = NSGraphicsContext.current?.cgContext else { return }
-            // CoreGraphics draws images bottom-up. The first version of this
-            // tool produced a vertically flipped control because of it.
-            cg.saveGState()
-            cg.translateBy(x: 0, y: CGFloat(TALL))
-            cg.scaleBy(x: 1, y: -1)
-            cg.interpolationQuality = .none
-            cg.draw(img, in: CGRect(x: 0, y: 0, width: WIDE, height: TALL))
-            cg.restoreGState()
+    static let image: CGImage = {
+        let bytes = WIDE * TALL * 4
+        let mem = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: 64)
+        for y in 0..<TALL {
+            let row = mem + y * WIDE * 4
+            for x in 0..<WIDE {
+                row.storeBytes(of: patternPixel(x, y).littleEndian,
+                               toByteOffset: x * 4, as: UInt32.self)
+            }
         }
+        let bi = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        let provider = CGDataProvider(dataInfo: nil, data: mem, size: bytes,
+                                      releaseData: { _, _, _ in })!   // never released
+        return CGImage(width: WIDE, height: TALL, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: WIDE * 4, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: bi), provider: provider,
+                       decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    }()
+
+    override func draw(_ dirty: NSRect) {
+        guard let cg = NSGraphicsContext.current?.cgContext else { return }
+        // CoreGraphics draws images bottom-up; an earlier version produced a
+        // vertically flipped control because of it.
+        cg.saveGState()
+        cg.translateBy(x: 0, y: CGFloat(TALL))
+        cg.scaleBy(x: 1, y: -1)
+        cg.interpolationQuality = .none
+        cg.draw(CPUView.image, in: CGRect(x: 0, y: 0, width: WIDE, height: TALL))
+        cg.restoreGState()
     }
 }
 
