@@ -38,11 +38,36 @@ install)
     # Checksum the backup so a restore can be trusted later.
     [ -f "$ORIG.sha256" ] || shasum -a 256 "$ORIG" > "$ORIG.sha256"
 
+    # The cryptex path carries the 'restricted' flag and the first install
+    # attempt failed with EROFS creating the staging file - even though the
+    # Preboot mount is read-write (statvfs ST_RDONLY False) and SIP reports
+    # "Filesystem Protections: disabled" with ALLOW_UNRESTRICTED_FS set. The
+    # flag is enforced by the sealed-OS policy, not by the CSR bits. Clear it
+    # for the duration and put it back on every exit path, including failure.
+    DFLAGS=$(stat -f %Sf "$DIR")
+    FFLAGS=$(stat -f %Sf "$SUB")
+    echo "directory flags: ${DFLAGS:-none}   file flags: ${FFLAGS:-none}"
+    restore_flags() {
+        case "$DFLAGS" in *restricted*) chflags restricted "$DIR" 2>/dev/null || true ;; esac
+    }
+    trap 'restore_flags' EXIT INT TERM
+    case "$DFLAGS" in
+        *restricted*)
+            echo "clearing the 'restricted' flag on the dyld directory (restored on exit) ..."
+            chflags norestricted "$DIR" || {
+                echo "chflags failed - cannot stage. See docs/CACHE-RECOVERY.md for" >&2
+                echo "the Recovery-boot route, where these flags are not enforced." >&2
+                exit 1; }
+            ;;
+    esac
+
     echo "staging on the same volume (753 MB) ..."
     if ! cp "$NEW" "$SUB.new"; then
         echo "STAGING COPY FAILED - nothing was changed. df:" >&2
         df -h /System/Volumes/Preboot >&2
-        rm -f "$SUB.new"
+        rm -f "$SUB.new" 2>/dev/null || true
+        echo "If this is still 'Read-only file system', use the Recovery route" >&2
+        echo "in docs/CACHE-RECOVERY.md - flags are not enforced there." >&2
         exit 1
     fi
     chown root:admin "$SUB.new" || { echo "chown failed" >&2; rm -f "$SUB.new"; exit 1; }
@@ -50,6 +75,7 @@ install)
     sync
     echo "staged $(stat -f %z "$SUB.new") bytes; renaming into place ..."
     mv -f "$SUB.new" "$SUB" || { echo "RENAME FAILED" >&2; exit 1; }
+    case "$FFLAGS" in *restricted*) chflags restricted "$SUB" 2>/dev/null || true ;; esac
     sync
 
     # Rule 20, which the first version of this script broke: a script saying
