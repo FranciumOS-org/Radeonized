@@ -21648,3 +21648,74 @@ of inferring it a fourth time.
 Boot B, only if A succeeds: add the detour.
 
 One variable per boot, and the first one cannot break anything.
+
+## 2ob (boot 124) — Boot A measured: Lilu registered, and nothing was patched
+
+The inert stage ran. Every precondition checked before reading anything
+(rule 15), because "not patched" has three boring explanations and only one
+interesting one:
+
+    rbgpu-boot            124, up from 123          -> armed boot
+    boot-args             -rbgpumtlcave PRESENT
+    loaded kext UUID      AC21E22C-EFCC-31BD-BB10-50C8A448EE3C
+    built kext UUID       AC21E22C-EFCC-31BD-BB10-50C8A448EE3C  -> not stale
+    Metal                 device present
+
+And the registration itself, read out of the IORegistry rather than NVRAM
+(the NVRAM diag string is truncated - `d=70` keys, about 40 survive the
+write - while `ioreg` carries the whole table):
+
+    mtlcave_section     = 1              not SectionDisabled (rule 20)
+    mtlcave_npatches    = 1              cave only, detour withheld
+    mtlcave_onprocload  = 0              LiluAPI::Error::NoError
+    mtlcave_stage       = "cave only"
+
+**So Lilu accepted the registration and the bytes never arrived.**
+`tools/cavecheck` on the live process:
+
+    driver: .../AMDRadeonX6000MTLDriver   slide 0xb1d7000
+    cave at 0x7ffb1418e5a0    in memory: 00 00 00 00 ...  expected: 55 48 89 e5 ...
+    function at 0x7ffb13f0ca11 in memory: 55 48 89 e5 41  (the original prologue)
+    VERDICT: NEITHER
+
+That is the same observation 2nn made from inside a process, now with the
+registration proven good and the stale-build and unarmed-boot explanations
+ruled out. **2lm/2nb/2nm were not inert because of rule 22's story about
+files on disk; they were inert for this reason, whatever it is.**
+
+`mtlcave_startTEXT`/`endTEXT` both read 0, but that is **not** evidence: they
+are written once, immediately after `onProcLoad`, long before Lilu would
+resolve anything from the cache map. Logging a value at a moment when it
+cannot yet be meaningful is the recurring error in miniature, and the line is
+useless as written.
+
+### Two searches that proved nothing, and were checked
+
+Rule 26, twice, and both times the control saved a wrong conclusion:
+
+* no `2oa` lines in `log show` - but **no `RBGPU` lines at all** appear
+  there, and the call site sits in `RGPU::init()` between
+  `rbgpu_register_mtllinear_2lm()` and `rbgpu_register_hwblt_2lp()`, which are
+  known to run. The absence was the log channel, not the code.
+* no Lilu lines either - and the control shows **zero kernel messages of any
+  kind** reach `log show` on this machine. Kernel diagnostics here live in
+  NVRAM and the IORegistry, nowhere else.
+
+### What is still open
+
+Registration succeeds; the patch does not land. Two candidates remain and
+they need different fixes:
+
+1. Lilu 1.7.3's user patcher does not function on macOS 15.8.1 at all - its
+   `cs_validate_page` hooks never install.
+2. It functions, but cannot reach shared-cache images here - the map is not
+   parsed, or `SegmentTextConst` is not resolved for a cached image.
+
+These are separable by a control that does not involve the shared cache: a
+patch on an ordinary on-disk binary of our own, with a marker in `__const`
+and a function in `__text`. If the marker changes, the patcher is alive and
+the cache is the problem; if it does not, the patcher is dead here and no
+amount of work on the cache side matters.
+
+Cheaper first, and it needs no boot: Lilu's own SYSLOG lines are in the
+kernel buffer, which `sudo dmesg` can read.
