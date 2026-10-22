@@ -6973,9 +6973,38 @@ static UserPatcher::BinaryModInfo kRb2lmMod {
 static const char kRb2lmProcPath[] =
     "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal";
 
-static UserPatcher::ProcInfo kRb2lmProc {
-    kRb2lmProcPath, sizeof(kRb2lmProcPath) - 1, 1,
-    UserPatcher::ProcInfo::MatchExact
+// 2nb: and `screenprobe`, by suffix so no home directory is baked in.
+//
+// 2lm scoped this to Terminal because Terminal was the reported symptom and a
+// blast radius that cannot take down the desktop. 2lq then removed Terminal's
+// value as a test: `-rbgpulinear` alone makes its text readable, so arming
+// this there changes nothing observable and proves nothing.
+//
+// `tools/screenprobe.swift` is a better target than Terminal ever was. It
+// reproduces the defect on demand in about half of its runs (2na), its
+// corruption is measured rather than judged by eye, and the exact permutation
+// is known: the 8x8 micro tiles come out INTACT - x0..x2 and y0..y2 are
+// identity in the measured address matrix - and only their placement is
+// wrong. Data written correctly and addressed with the wrong layout is
+// precisely what forcing LINEAR here would remove.
+//
+// Its blast radius is one throwaway binary that nothing depends on, which is
+// what makes it safe to arm before anything the desktop needs.
+//
+// If screenprobe's CPU window stops scrambling with this armed, the cause IS
+// client surface layout chosen in userspace, the kernel-side `-rbgpulinear`
+// simply never reached these surfaces, and widening the list is the fix. If
+// it still scrambles, layout chosen here is exonerated and the cause is
+// downstream of it.
+static const char kRb2lmProcProbe[] = "/screenprobe";
+
+static UserPatcher::ProcInfo kRb2lmProcs[] {
+    { kRb2lmProcPath,  sizeof(kRb2lmProcPath) - 1,  1,
+      UserPatcher::ProcInfo::MatchExact },
+    // section must be 1 on every entry: Lilu applies a BinaryModPatch only to
+    // processes whose section matches the patch's, and kRb2lmPatch.section is 1.
+    { kRb2lmProcProbe, sizeof(kRb2lmProcProbe) - 1, 1,
+      UserPatcher::ProcInfo::MatchSuffix },
 };
 
 static void rbgpu_register_mtllinear_2lm(void) {
@@ -6995,14 +7024,16 @@ static void rbgpu_register_mtllinear_2lm(void) {
                   "patched; do not read a rendering change as this hook's.");
         return;
     }
-    UserPatcher::ProcInfo *procs[] { &kRb2lmProc };
-    UserPatcher::BinaryModInfo *mods[] { &kRb2lmMod };
-    auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
+    const size_t nprocs = sizeof(kRb2lmProcs) / sizeof(kRb2lmProcs[0]);
+    rbgpu_diag_set_num("mtllinear_procs", static_cast<uint32_t>(nprocs));
+    auto err = lilu.onProcLoad(kRb2lmProcs, nprocs, nullptr, nullptr, &kRb2lmMod, 1);
     if (err == LiluAPI::Error::NoError) {
-        rbgpu_log("2lm: ARMED - DetermineSwizzleMode will return LINEAR in "
-                  "Terminal only. If Terminal's text becomes readable the "
-                  "corruption IS client texture layout; if it does not, "
-                  "layout is exonerated and the cause is downstream.");
+        rbgpu_log("2nb: ARMED - DetermineSwizzleMode returns LINEAR in %zu "
+                  "processes (Terminal, and any binary named screenprobe). "
+                  "Read it with tools/screenprobe.sh: if its CPU window stops "
+                  "scrambling, the cause IS client surface layout chosen in "
+                  "userspace and -rbgpulinear never reached these surfaces. "
+                  "If it still scrambles, layout here is exonerated.", nprocs);
     } else {
         rbgpu_log("2lm: onProcLoad FAILED with %d - nothing is patched",
                   static_cast<int>(err));
