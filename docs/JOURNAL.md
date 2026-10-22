@@ -20059,3 +20059,82 @@ present before being believed. Both are swizzled now and `lawtest` reports
 - **CPU uploads into it** - the atlas *is* filled the broken way, our swap
   should have fixed it and did not, and the swap itself becomes the suspect: an
   IOSurface-backed render-target texture may not behave as the driver expects.
+
+## 2mu — the GPU write path is clean, and a premise of mine was false
+
+Boot 114, armed, `-rbgpulinear` **out** (removed in boot 113 for 2mn's test,
+which turned out inert).
+
+### The correction, from the user
+
+I had been reasoning from "Terminal's text is readable, Claude's and Safari's
+are not", and built a hypothesis on it: CPU-rasterised text works, GPU-
+rasterised text does not. The user states plainly that **Terminal is not
+readable on this boot either** - it was readable *only* with `-rbgpulinear`,
+which I had them remove two boots ago.
+
+So the split never existed in the form I used it. What exists is: with
+`-rbgpulinear` in, Terminal's text is readable and Claude's and Safari's are
+not. On this boot nothing is readable, which is a regression I caused.
+
+### 2mn's conclusion needs qualifying
+
+2mn said "there is no kernel-side lever on client texture layout", from
+`rbgpu-surf` reading `swz calls=63` before a full `texprobe` run and 63 after.
+That is correct **for texprobe's textures** and I generalised it to all
+surfaces. It is false for the ~63 surfaces the hook *does* see - the
+display/scanout class - and a window's backing store is one of them. Forcing
+those linear demonstrably makes Terminal's text readable. The lever exists;
+it just does not reach a `newTextureWithDescriptor:` allocation.
+
+Which also means the evidence already in hand had answered this: HANDOFF has
+said all along that `-rbgpulinear` buys ~80 % of the widget/Dock/chrome class,
+and the user had said Terminal was readable *with it*. The 2kx/2la/2lc variant
+of the recurring error - read the evidence in hand before designing the next
+experiment - again.
+
+### 2mu, which stands regardless
+
+Does the GPU writing a render target land correctly? A render pass draws a
+full-screen quad whose fragment shader writes each pixel's **own coordinates**,
+so a displaced row shows up as a wrong value rather than a wrong colour; the
+result is read back with the same compute kernel used throughout. A clear would
+have been useless here - one value everywhere makes a layout disagreement
+invisible.
+
+```
+  geometry     align  ratio   driver-private  driver-managed  iosurface
+   256x48    65536  2.67x    0/6            0/6            0/6
+   256x64    65536  2.00x    0/6            0/6            0/6
+   256x96    65536  1.33x    0/6            0/6            0/6
+  1024x128   65536  1.00x    0/6            0/6            0/6
+   256x128   65536  1.00x    0/6            0/6            0/6
+   256x32     4096  1.00x    0/6            0/6            0/6
+   512x256   65536  1.00x    0/6            0/6            0/6
+```
+
+**Zero failures anywhere**, including the geometries where a CPU `replace()`
+fails 11 times in 12. So:
+
+- The GPU write path is correct, for private, managed and IOSurface-backed
+  destinations alike.
+- The defect the law describes is specific to **CPU uploads**.
+- And a render target being in the "failing" class costs nothing when the GPU
+  is the one writing it.
+
+### Where that leaves the text
+
+2ms corrected Claude's glyph atlas - the right descriptor, `1024x128` R8Unorm,
+confirmed swapped in the log - and the text did not change. 2mu says the GPU
+path that fills such an atlas is clean. Together these say the CPU-upload
+defect, which is real and now fixable, is **not what scrambles Claude's text**.
+
+What does remains open. The one thing known to move on-screen text is
+`-rbgpulinear`, acting on the surfaces that pass through the kernel hook, and
+that is where the next look belongs - not in the client-texture path this
+session has spent itself on.
+
+### Restored
+
+`-rbgpulinear` goes back in. Removing it was my doing, for 2mn's test, and that
+test could not have worked.
