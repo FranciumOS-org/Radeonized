@@ -20649,3 +20649,67 @@ coin flip: with one allocation there is only one draw.
 The question is now what differs between the first allocation and the later
 ones. An address or alignment threshold would fit: the first lands somewhere
 acceptable, later ones do not, and adding allocations moves the first as well.
+
+## 2ni (2026-10-22, boot 118) — three more triggers excluded, and where the layout really comes from
+
+### Not an address or pressure threshold
+
+2nh's "later allocations are wrong" suggested the first backing store lands
+somewhere acceptable and later ones do not. If that were about addresses or
+memory pressure, allocating before the window would poison it. One window at
+512x512, 8 rounds each:
+
+    nothing pre-allocated          3 of 8 scrambled
+    16 plain IOSurfaces first      2 of 8
+    256 MB of ordinary memory      4 of 8
+
+All within noise of each other. **Pre-allocation does not poison the first
+window.** The trigger is specific to CoreAnimation's own backing-store
+creation, not to where things land in memory.
+
+### Not bytesPerRow
+
+The one property of a surface this probe can vary freely. Surfaces allocated
+here are clean at every stride tried - 2048 (natural), 2176, 2304, 3072, 4096 -
+0 of 8 captures scrambled in each case.
+
+### CoreAnimation's surfaces cannot be read from outside
+
+`tools/surfdump.c` walks the IOSurface id space and dumps the properties of
+anything it can reach, to compare a CoreAnimation backing store against one
+allocated by hand. **0 of 20000 ids resolved**: `IOSurfaceLookup` only reaches
+surfaces the calling process may use, and CoreAnimation's are not global. The
+tool says so rather than printing an empty table (rule 14).
+
+### Where an IOSurface-backed texture's layout actually comes from
+
+This matters because it explains 2nd's negative. The Metal driver has a
+separate entry point for them:
+
+    AMD_device_layer::NewTextureWithDescriptor2(objc_object*,
+        MTLTextureDescriptor*, __IOSurface*, unsigned long)
+
+A texture made over an existing IOSurface does not get its tiling from
+`amdMtl_HWL_DetermineSwizzleMode` - that is the chooser for textures created
+from a descriptor alone. So forcing that function to return LINEAR in-process
+was never going to touch a layer backing store, and its null result is
+explained rather than mysterious.
+
+Two other symbols are worth recording for whoever picks this up:
+`amdMtl_HWL_FillInUBMSurfaceInfo`, which carries a static table literally named
+`hw2ubmSwizzleMode`, and `amdMtl_HWL_CheckAlignment`.
+
+(The many `...Swizzle...` symbols in this driver are ObjC method-swizzling
+machinery - `AMD_InterposedSelector` - and have nothing to do with address
+swizzle. Checked rather than assumed; rule 22.)
+
+### Standing
+
+Excluded today, each by measurement: allocation pressure, pre-allocation,
+bytesPerRow. Excluded earlier: drawing path, CPU versus GPU, geometry as a
+cause rather than a modifier, window style, window level, timing, and the
+userspace swizzle chooser.
+
+What remains: the layout of a CoreAnimation layer backing store, decided
+somewhere this plugin has not yet reached, and worsening with each additional
+backing store a process allocates.
