@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -148,6 +148,11 @@ $(OUT)/mtlswizzle.dylib: tools/mtlswizzle.c | $(OUT)
 # usageprobe (2nq): which descriptor field is Metal's `usage`?
 usageprobe: $(OUT)/usageprobe
 $(OUT)/usageprobe: tools/usageprobe.m | $(OUT)
+	clang -O2 -Wall -o $@ $< -framework Metal -framework Foundation
+
+# cavecheck (2oa): did Lilu's page patch actually land in the shared cache?
+cavecheck: $(OUT)/cavecheck
+$(OUT)/cavecheck: tools/cavecheck.m src/plugin/rbgpu_mtlcave.h | $(OUT)
 	clang -O2 -Wall -o $@ $< -framework Metal -framework Foundation
 
 # surfdump (2ni): what does a CoreAnimation backing store carry that a
