@@ -17,28 +17,50 @@ Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev
 
 **An armed boot is a usable, accelerated Mac** — the CP halt is fixed
 (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute bit-exact.
-**APP TEXT IS FIXED (2np, 2026-10-22).** Forcing
-`amdMtl_HWL_DetermineSwizzleMode` to return `ADDR_SW_LINEAR` **inside the
-application process** makes Claude's text readable and accelerated. Run it with
-`tools/mtllinear-app.sh Claude`; the launcher prints whether the patch actually
-applied and a run without `mtllinear: PATCHED` measured nothing.
+**APP TEXT IS FIXED (2np/2nr, 2026-10-22), in Claude AND IntelliJ IDEA.**
 The defect is the swizzle mode the **userspace** Metal driver picks for client
 textures - 2lg found that place on 2026-10-20 and filed it "out of this
 plugin's reach", which was right about the place and wrong about the reach.
 **Lilu's user patcher can never do it** (rule 22): the driver is in the dyld
 shared cache with no file on disk, so 2lm/2nb/2nm were inert while reporting
-success. `tools/mtllinear.c` works because it edits the in-memory image with
-`vm_protect(VM_PROT_COPY)` and re-reads the bytes.
+success. The patch has to edit the in-memory image from inside the process.
+
+Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
+constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
+JetBrains, because JBR renders every Swing surface into a plain MTLTexture and
+a linear surface is not a legal render target (Electron survives it only
+because Skia's render targets are IOSurface-backed and never reach this
+chooser). Policy `RBGPU_SWIZZLE=fix` is the one to use: LINEAR for
+non-render-targets, and render targets mapped **off the `_X` family**
+(22->6, 26->10, 27->10; Z modes untouched). `_X` means a pipe-bank XOR built
+from the pipe/bank config, and this chip reads GB_ADDR_CONFIG 0x242 against a
+driver built for Navi 21 - which is exactly 2na's "8x8 micro tiles intact,
+only their placement wrong". So `fix` keeps the surfaces **tiled** and is a
+better answer than 2np's LINEAR, not merely a wider one.
+
+`usage` is at descriptor **+0x68 as requested and +0xb0 as resolved** - always
+OR them. JBR leaves usage unset, so +0x68 reads 0 on a render target.
+
+Persist it per app with `tools/rbgpu-app.sh install "<App>"`, which builds a
+Dock-able `~/Applications/<App> (GPU).app`. Never a launchd environment
+(rule 21). **Apple platform binaries (Safari, Finder, WindowServer) strip
+DYLD_INSERT_LIBRARIES and cannot be reached this way at all.**
+
+**texprobe is NOT an oracle for this defect** - it is clean at baseline (0/12,
+every footprint 1.00x) because its round trip is self-consistent. Only a real
+application tells you anything.
+
 **Still open, and a SEPARATE defect:** a CoreAnimation layer backing store
 comes out rearranged in about half of allocations (`tools/screenprobe.sh`
-reproduces it on demand; 2na has the exact permutation, 8x8 micro tiles intact
-and only their placement wrong). Forcing the function above does NOT fix it
-(2nd, every run recording `patch state: PATCHED`), because those surfaces reach
-neither this path nor the kernel's align manager (2nj). Do not conflate the
-two.
-**Not yet done:** the fix is per process and does not survive a relaunch, and
-LINEAR is a correction rather than the right answer - making the chosen mode
-match what this chip does would keep tiling's performance.
+reproduces it on demand; 2na has the exact permutation). Forcing the chooser
+does NOT fix it (2nd), because those surfaces reach neither this path nor the
+kernel's align manager (2nj). Do not conflate the two.
+
+**The lead for a GLOBAL fix** is argument four of the chooser,
+`const AMD_DeviceSettings*`, which comes from the kext. If a field in it
+steers the chooser off the `_X` family, changing it kernel-side reaches every
+process with no injection - platform binaries included. Worth a boot.
+
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
 
