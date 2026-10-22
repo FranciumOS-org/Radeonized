@@ -102,13 +102,25 @@ for MODE in $MODES; do
     done
     sleep 0.6
 
+    # screencapture fails transiently with "could not create image from
+    # display" even when permission is granted - one capture succeeds and the
+    # next does not. Retry rather than abort the sweep, and say so if it never
+    # succeeds, so a missing capture is never silently read as a clean run.
     for n in a b; do
-        screencapture -x "$OUT/$TAG$n.png" || {
-            echo "screencapture failed - this shell lacks Screen Recording permission."
-            echo "Grant it in System Settings > Privacy & Security >"
-            echo "Screen & System Audio Recording, then run this again."
-            exit 1
-        }
+        got=0
+        try=0
+        while [ $try -lt 6 ]; do
+            if screencapture -x "$OUT/$TAG$n.png" 2>/dev/null && [ -s "$OUT/$TAG$n.png" ]; then
+                got=1
+                break
+            fi
+            try=$((try + 1))
+            sleep 0.7
+        done
+        if [ $got -eq 0 ]; then
+            echo "  capture $n: FAILED after $try attempts (no image; not counted)" | tee -a "$REPORT"
+            rm -f "$OUT/$TAG$n.png"
+        fi
         sleep 0.8
     done
 
@@ -122,6 +134,7 @@ for MODE in $MODES; do
         sed -n 's/^mtl-patch: -> /  patch state: /p' "$OUT/geom-$TAG.txt"
         if [ -n "$ARGS" ]; then
             for n in a b; do
+                [ -s "$OUT/$TAG$n.png" ] || continue
                 printf '  capture %s: ' "$n"
                 ./build/out/decodescreen "$OUT/$TAG$n.png" $ARGS \
                   | sed -n 's/^window state: //p' \
