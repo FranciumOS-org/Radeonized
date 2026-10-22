@@ -65,11 +65,28 @@ let BIG = (MODE == "big" || MODE == "bigmsaa" || MODE == "bigcpu")
 let WIDE = BIG ? 900 : 512
 let TALL = BIG ? 880 : 512
 let MSAA = (MODE == "msaa" || MODE == "bigmsaa")
-let VIA_IOSURFACE = (MODE == "iosurface")
+let VIA_IOSURFACE = (MODE == "iosurface" || MODE == "cpusurface")
 // bigcpu draws BOTH windows with CoreGraphics and never touches Metal, which
 // separates "a large window backing store corrupts" from "allocating a large
 // GPU texture corrupts something else".
 let CPUONLY = (MODE == "bigcpu")
+
+// 2nd: the discriminator the table of results now points at.
+//
+//   CAMetalLayer, GPU-written                 never corrupts
+//   explicit IOSurface -> contents, GPU-written  never corrupts
+//   AppKit's own backing store, CPU-written   corrupts about half the time
+//
+// Everything the GPU writes is written AND read with the same tiling, so the
+// two sides agree whatever that tiling is. A CPU write is linear by
+// construction. If the compositor reads such a surface as tiled, the result is
+// exactly the measured permutation: 8x8 micro tiles intact, placement wrong.
+//
+// So write an explicit IOSurface with the CPU and hand it to a CALayer. If it
+// scrambles, the defect is "a CPU-written surface read as tiled" and has
+// nothing to do with AppKit; if it stays clean, something about AppKit's own
+// backing store is special and that is where to look.
+let CPU_SURFACE = (MODE == "cpusurface")
 
 // 2my. Across the first sweep the CPU window was intermittently shredded and
 // the GPU window never was - in direct-1 and msaa-2 but not in direct-2 or
@@ -267,8 +284,24 @@ final class SurfaceView: NSView {
         return tex != nil
     }
     func render() {
-        guard let t = tex else { return }
-        renderPattern(into: t, present: nil)
+        if CPU_SURFACE {
+            // CPU write, straight into the surface's own bytes
+            guard let s = surface else { return }
+            IOSurfaceLock(s, [], nil)
+            let base = IOSurfaceGetBaseAddress(s)
+            let bpr = IOSurfaceGetBytesPerRow(s)
+            for y in 0..<TALL {
+                let row = base + y * bpr
+                for x in 0..<WIDE {
+                    row.storeBytes(of: patternPixel(x, y).littleEndian,
+                                   toByteOffset: x * 4, as: UInt32.self)
+                }
+            }
+            IOSurfaceUnlock(s, [], nil)
+        } else {
+            guard let t = tex else { return }
+            renderPattern(into: t, present: nil)
+        }
         layer?.contents = surface
         layer?.contentsGravity = .topLeft
     }
