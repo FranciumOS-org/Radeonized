@@ -32,6 +32,13 @@ let a = CommandLine.arguments
 guard a.count >= 8 else { print("usage: bitfit <png> cpuX cpuY gpuX gpuY wide tall"); exit(1) }
 let cpuX = Int(a[2])!, cpuY = Int(a[3])!, gpuX = Int(a[4])!, gpuY = Int(a[5])!
 let WIDE = Int(a[6])!, TALL = Int(a[7])!
+// Optional destination row band. The residual analysis showed the model exact
+// (0.0% miss) over the top three quarters and failing only in the last 128-row
+// band, which is two populations rather than one map with a missing term. This
+// lets each band be fitted on its own.
+let yLo = a.count > 8 ? Int(a[8])! : 20
+let yHi = a.count > 9 ? Int(a[9])! : TALL
+if a.count > 8 { print("restricted to destination rows \(yLo)..<\(yHi)") }
 
 guard let isrc = CGImageSourceCreateWithURL(URL(fileURLWithPath: a[1]) as CFURL, nil),
       let img = CGImageSourceCreateImageAtIndex(isrc, 0, nil) else { print("cannot read png"); exit(2) }
@@ -71,7 +78,7 @@ let rInv = invert(med(rS)), gInv = invert(med(gS)), bInv = invert(med(bS))
 // p -> q, or -1 where the pixel was not decodable
 var q = [Int](repeating: -1, count: WIDE * TALL)
 var decoded = 0
-for y in 20..<TALL where y % 64 != 0 && y % 256 != 0 {
+for y in yLo..<yHi where y % 64 != 0 && y % 256 != 0 {
     for x in 0..<WIDE where x % 64 != 0 && x % 256 != 0 {
         let (r, g, b) = px(cpuX + x, cpuY + y)
         let lx = rInv[r], ly = gInv[g], hi = bInv[b]
@@ -122,15 +129,92 @@ print("\(consistent)/\(NBITS) bits behave consistently")
 // the real test: predict every decoded pixel from the matrix
 var p0 = -1
 for p in 0..<(WIDE * TALL) where q[p] >= 0 { p0 = p; break }
+// A source pixel that lies on one of the pattern's grid lines is grey
+// 0x808080 and carries no coordinates at all - it decodes to the meaningless
+// (128,128). Grid lines are excluded from the DESTINATION but a destination
+// pixel can still be fed by one, and those are undecodable no matter how right
+// the model is. Grid lines are 2/64 of the surface, which is 3.1% - the exact
+// baseline miss rate. So score both ways and let the numbers say which it is.
+@inline(__always) func isGridSource(_ s: Int) -> Bool {
+    let sx = s % WIDE, sy = s / WIDE
+    return sx % 64 == 0 || sy % 64 == 0
+}
 if p0 >= 0 {
-    var hit = 0, n = 0
+    var hit = 0, n = 0, hitD = 0, nD = 0
     for p in 0..<(WIDE * TALL) where q[p] >= 0 {
         var pred = q[p0]
         let d = p ^ p0
         for i in 0..<NBITS where (d >> i) & 1 == 1 { pred ^= col[i] }
         n += 1; if pred == q[p] { hit += 1 }
+        if !isGridSource(pred) {
+            nD += 1; if pred == q[p] { hitD += 1 }
+        }
     }
-    print(String(format: "XOR-linear model predicts %.2f%% of decoded pixels", 100.0 * Double(hit) / Double(n)))
+    print(String(format: "XOR-linear model predicts %.2f%% of all decoded pixels", 100.0 * Double(hit) / Double(n)))
+    print(String(format: "                          %.2f%% of the %d whose predicted source is decodable",
+                 100.0 * Double(hitD) / Double(max(1, nD)), nD))
 } else {
     print("no decoded reference pixel; cannot test a prediction")
+}
+
+// --- where does the residual live? ------------------------------------------
+// A model that explains 94% is either missing a term (the misses will be
+// spread evenly, following some bit) or describing only part of the surface
+// (the misses will be concentrated in regions). Those need different fixes, so
+// find out which rather than assume.
+if p0 >= 0 {
+    func predict(_ p: Int) -> Int {
+        var r = q[p0]; let d = p ^ p0
+        for i in 0..<NBITS where (d >> i) & 1 == 1 { r ^= col[i] }
+        return r
+    }
+    var missByRegion = [[Int]](repeating: [Int](repeating: 0, count: 4), count: 4)
+    var totByRegion = [[Int]](repeating: [Int](repeating: 0, count: 4), count: 4)
+    var missByMod8 = [[Int]](repeating: [Int](repeating: 0, count: 8), count: 8)
+    var totByMod8 = [[Int]](repeating: [Int](repeating: 0, count: 8), count: 8)
+    var missByBit = [Int](repeating: 0, count: NBITS)
+    var totMiss = 0
+    for p in 0..<(WIDE * TALL) where q[p] >= 0 {
+        // a predicted source on a grid line carries no coordinates, so it can
+        // never be scored; leaving it in hides whatever else is left
+        if isGridSource(predict(p)) { continue }
+        let x = p % WIDE, y = p / WIDE
+        let rx = min(3, x * 4 / WIDE), ry = min(3, y * 4 / TALL)
+        totByRegion[ry][rx] += 1; totByMod8[y & 7][x & 7] += 1
+        if predict(p) != q[p] {
+            totMiss += 1
+            missByRegion[ry][rx] += 1; missByMod8[y & 7][x & 7] += 1
+            // which bits does the miss differ in?
+            let e = predict(p) ^ q[p]
+            for i in 0..<NBITS where (e >> i) & 1 == 1 { missByBit[i] += 1 }
+        }
+    }
+    print("")
+    print("residual: \(totMiss) mispredicted pixels")
+    print("")
+    print("  by quarter of the surface (miss rate %):")
+    for ry in 0..<4 {
+        var line = "   "
+        for rx in 0..<4 {
+            let t = totByRegion[ry][rx]
+            line += String(format: "%7.1f", t == 0 ? 0 : 100.0 * Double(missByRegion[ry][rx]) / Double(t))
+        }
+        print(line)
+    }
+    print("")
+    print("  by position within an 8x8 micro tile (miss rate %):")
+    for yy in 0..<8 {
+        var line = "   "
+        for xx in 0..<8 {
+            let t = totByMod8[yy][xx]
+            line += String(format: "%6.1f", t == 0 ? 0 : 100.0 * Double(missByMod8[yy][xx]) / Double(t))
+        }
+        print(line)
+    }
+    print("")
+    print("  which source bits the misses are wrong in:")
+    for i in 0..<NBITS where missByBit[i] > 0 {
+        print(String(format: "   bit %2d wrong in %6d of %d misses (%4.1f%%)", i, missByBit[i],
+                     totMiss, 100.0 * Double(missByBit[i]) / Double(max(1, totMiss))))
+    }
 }
