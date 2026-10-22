@@ -18,9 +18,18 @@ on the **Data** volume, deliberately not on Preboot, with a `.sha256` beside it.
 
 ## If it does not boot
 
-1. Power on holding **Cmd-R** (Intel) for Recovery.
-2. **Utilities -> Terminal**.
-3. Find the volumes - Recovery mounts them under `/Volumes`:
+1. Reboot. **This machine is a hackintosh: Cmd-R does nothing**, because
+   `Misc/Boot/PollAppleHotKeys` is `False`. Recovery is an entry in the
+   OpenCore picker instead.
+2. The picker appears at every boot (`ShowPicker` true) with a **3 second**
+   timeout. Press **SPACE** - that both stops the countdown and reveals the
+   hidden entries, because `Misc/Boot/HideAuxiliary` is `True` and Recovery
+   counts as auxiliary. `ScanPolicy` is 0, so it is scanned and will be there.
+   Arrow to **macOS Recovery**, press Enter.
+3. **Utilities -> Terminal**.
+3. Find the volumes - Recovery mounts them under `/Volumes`. On this
+   machine the APFS Recovery volume is `disk2s3`, the Data volume is named
+   **MACOS - Data** and the system volume **MACOS**:
 
         diskutil list
         diskutil mount <the Preboot volume identifier>
@@ -30,7 +39,7 @@ on the **Data** volume, deliberately not on Preboot, with a `.sha256` beside it.
    point, so check with `ls` before copying:
 
         ls /Volumes/Preboot/Cryptexes/OS/System/Library/dyld/
-        cp "/Volumes/Macintosh HD - Data/Users/you/rbgpu-cache-backup/dyld_shared_cache_x86_64h.03.orig" \
+        cp "/Volumes/MACOS - Data/Users/you/rbgpu-cache-backup/dyld_shared_cache_x86_64h.03.orig" \
            /Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h.03.restore
         mv -f /Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h.03.restore \
               /Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h.03
@@ -39,9 +48,10 @@ on the **Data** volume, deliberately not on Preboot, with a `.sha256` beside it.
 
 ## If Recovery itself will not come up
 
-Recovery has its own cache and is not affected by this file. Failing that, an
-**external macOS installer USB** boots independently and its Terminal can do
-exactly the same copy.
+Recovery lives on its own APFS volume (`disk2s3`) with its own cache and is
+not affected by this file. Failing that, an **external macOS installer USB**
+boots independently and its Terminal can do exactly the same copy. The
+OpenCore picker will list either one.
 
 ## Why this is recoverable at all
 
@@ -75,13 +85,15 @@ in force.
 
 ## Steps
 
-1. Reboot holding **Cmd-R** (Intel) to enter Recovery.
+1. Reboot and, at the **OpenCore picker**, press **SPACE** to stop the 3 s
+   countdown and un-hide the auxiliary entries; arrow to **macOS Recovery**
+   and press Enter. Cmd-R does nothing here - `PollAppleHotKeys` is `False`.
 2. **Utilities -> Terminal**.
 3. Find and mount the two volumes. Names vary, so look first:
 
         diskutil list
         diskutil mount Preboot
-        diskutil mount "Macintosh HD - Data"      # whatever your Data volume is called
+        diskutil mount "MACOS - Data"             # this machine's Data volume name
 
 4. Confirm both paths exist before copying anything:
 
@@ -91,7 +103,7 @@ in force.
 5. Copy the patched subcache in. Use the real Data mount point from step 4:
 
         D=/Volumes/Preboot/Cryptexes/OS/System/Library/dyld
-        S="/Volumes/Macintosh HD - Data/Users/you/rbgpu-cache-backup"
+        S="/Volumes/MACOS - Data/Users/you/rbgpu-cache-backup"
         chflags norestricted "$D" 2>/dev/null
         cp "$S/patched.03" "$D/dyld_shared_cache_x86_64h.03.new"
         chown 0:80 "$D/dyld_shared_cache_x86_64h.03.new"
