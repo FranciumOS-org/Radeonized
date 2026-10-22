@@ -52,8 +52,19 @@ exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable
 log="$root/logs/mtllinear-$(echo "$name" | tr 'A-Z ' 'a-z-').log"
 mkdir -p "$root/logs"
 
+# pgrep is NOT usable here: BSD pgrep never matches the invoking process or
+# its ancestors, so a script run from inside the assistant Code cannot see the the assistant
+# app at all. That is what made 2no's first attempt at the assistant "exit cleanly
+# with no crash report" - running() said no, the quit-and-wait was skipped,
+# and the second copy forwarded into the single-instance lock and died. ps has
+# no such exclusion.
+procs_under() {
+    ps -axo pid=,command= | awk -v pre="$1/" '
+        { pid = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (index($0, pre) == 1) print pid }'
+}
+
 # Everything under the bundle, so helpers count too.
-running() { pgrep -f "^$app/" 2>/dev/null; }
+running() { procs_under "$app"; }
 
 if running >/dev/null 2>&1; then
     echo "quitting $name ..."
@@ -68,6 +79,11 @@ if running >/dev/null 2>&1; then
             sleep 2
             pids=$(running || true)
             [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
+            # A KILL is not instant. Checking straight away used to see the
+            # dying process, declare "still running" and refuse to start -
+            # which left the app simply GONE rather than relaunched.
+            j=0
+            while running >/dev/null 2>&1 && [ $j -lt 20 ]; do j=$((j + 1)); sleep 0.5; done
             break
         fi
         sleep 0.5
