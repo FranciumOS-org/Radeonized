@@ -7196,6 +7196,129 @@ static UserPatcher::ProcInfo kRb2lpProc {
     UserPatcher::ProcInfo::MatchAny
 };
 
+// ---------------------------------------------------------------------------
+// 2oa: the swizzle fix for EVERY process, through the shared cache
+//
+// 2ny established that the cache cannot be edited on disk: it lives inside a
+// grafted, Apple-signed cryptex. Lilu does not edit it on disk. It hooks
+// cs_validate_page, resolves shared-cache images through the cache's own .map
+// file, and rewrites page contents in kernel memory as they are validated -
+// so the file is never touched, the seal is irrelevant, and the patch reaches
+// every process including the platform binaries that strip
+// DYLD_INSERT_LIBRARIES.
+//
+// 2nz withdrew rule 22, which had claimed this was impossible. The map is
+// present and lists this driver at __TEXT 0x7FFB08BF3000 -> 0x7FFB090F59AE,
+// exactly what tools/re/dyldcache.py derived.
+//
+// What is STILL unknown is whether Lilu 1.7.3's user patcher functions on
+// macOS 15.8.1 at all. 2lm/2nb/2nm failed and the reason was never measured.
+// So this ships in two stages and the first cannot break anything:
+//
+//   -rbgpumtlcave   writes the 163-byte cave into __const padding that
+//                   NOTHING CALLS. Functionally inert by construction. Its
+//                   only purpose is for tools/cavecheck.m to read those bytes
+//                   back out of a process's own memory and say whether Lilu's
+//                   page patching works here.
+//   -rbgpumtlfix    additionally installs the 5-byte detour at
+//                   amdMtl_HWL_DetermineSwizzleMode, which is what actually
+//                   applies the policy. Do NOT set this until the cave has
+//                   been seen in a live process.
+//
+// The cave is in __const rather than __text because the shared cache builder
+// packs __text so tightly that this driver has no run of 32 identical bytes
+// anywhere in it; __const is inside the r-x __TEXT segment, so code placed
+// there executes, and it has 27 runs of >= 200 zero bytes.
+#include "rbgpu_mtlcave.h"
+
+static UserPatcher::BinaryModPatch kRbCavePatch {
+    CPU_TYPE_X86_64,
+    0,
+    kRbMtlCaveFind,
+    kRbMtlCaveRepl,
+    sizeof(kRbMtlCaveFind),
+    0,
+    1,                                  // unique in __const, checked by the generator
+    UserPatcher::FileSegment::SegmentTextConst,
+    1                                   // section: MUST be non-zero (2lq)
+};
+
+static UserPatcher::BinaryModPatch kRbFnPatch {
+    CPU_TYPE_X86_64,
+    0,
+    kRbMtlFnFind,
+    kRbMtlFnRepl,
+    sizeof(kRbMtlFnFind),
+    0,
+    1,                                  // the prologue is unique in __TEXT (2lm)
+    UserPatcher::FileSegment::SegmentTextText,
+    1
+};
+
+// Both patches, or just the cave, depending on the stage.
+static UserPatcher::BinaryModPatch kRbBothPatches[2] {};
+static UserPatcher::BinaryModInfo kRbCaveMod {
+    RBGPU_MTL_PATH, kRbBothPatches, 1, 0, 0, 0, 0
+};
+
+// MatchAny is strstr(path, p->path) in Lilu 1.7.3, so "/" matches every
+// process. That is deliberate: the point is to reach the platform binaries
+// nothing else can, and at this stage the payload is inert.
+static const char kRbCaveProcPath[] = "/";
+static UserPatcher::ProcInfo kRbCaveProc {
+    kRbCaveProcPath, sizeof(kRbCaveProcPath) - 1, 1,
+    UserPatcher::ProcInfo::MatchAny
+};
+
+static void rbgpu_register_mtlcave_2oa(void) {
+    bool cave = checkKernelArgument("-rbgpumtlcave");
+    bool fix  = checkKernelArgument("-rbgpumtlfix");
+    if (!cave && !fix) {
+        rbgpu_log("2oa: NOT armed - neither -rbgpumtlcave nor -rbgpumtlfix, "
+                  "no user patcher registered and no userspace image touched");
+        return;
+    }
+    // Rule 20: say the enabling field itself, and refuse when it is disabled.
+    rbgpu_diag_set_num("mtlcave_section", kRbCavePatch.section);
+    if (kRbCavePatch.section == UserPatcher::ProcInfo::SectionDisabled) {
+        rbgpu_log("2oa: INERT - cave patch section is SectionDisabled");
+        return;
+    }
+
+    kRbBothPatches[0] = kRbCavePatch;
+    size_t n = 1;
+    if (fix) {
+        kRbBothPatches[1] = kRbFnPatch;
+        n = 2;
+    }
+    kRbCaveMod.count = n;
+    rbgpu_diag_set_num("mtlcave_npatches", n);
+    rbgpu_diag_set_str("mtlcave_stage", fix ? "cave+detour" : "cave only");
+
+    UserPatcher::ProcInfo *procs[] { &kRbCaveProc };
+    UserPatcher::BinaryModInfo *mods[] { &kRbCaveMod };
+    auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
+    rbgpu_diag_set_num("mtlcave_onprocload", static_cast<uint64_t>(err));
+    if (err != LiluAPI::Error::NoError) {
+        rbgpu_log("2oa: onProcLoad FAILED with %d - nothing is patched",
+                  static_cast<int>(err));
+        return;
+    }
+    // Lilu fills startTEXT/endTEXT from the cache .map once it resolves the
+    // image. Non-zero here, or later in the diag table, means the map was
+    // parsed and this dylib was found in it - which is the single fact that
+    // 2lm/2nb/2nm never established.
+    rbgpu_diag_set_num("mtlcave_startTEXT", kRbCaveMod.startTEXT);
+    rbgpu_diag_set_num("mtlcave_endTEXT", kRbCaveMod.endTEXT);
+    rbgpu_log("2oa: ARMED, %lu patch(es), stage=%s. startTEXT=0x%llx "
+              "endTEXT=0x%llx (0 here is expected before Lilu resolves the "
+              "map). ARMED IS NOT EVIDENCE - run tools/cavecheck and read "
+              "the bytes out of a live process (rule 20, 2nn).",
+              n, fix ? "cave+detour" : "cave only",
+              (unsigned long long)kRbCaveMod.startTEXT,
+              (unsigned long long)kRbCaveMod.endTEXT);
+}
+
 static void rbgpu_register_hwblt_2lp(void) {
     if (!checkKernelArgument("-rbgpuhwblt")) {
         rbgpu_log("2lp: NOT armed - -rbgpuhwblt absent, no user patcher "
@@ -7265,6 +7388,7 @@ void RGPU::init() {
     rbgpu_pkrs_init_2ly();
     rbgpu_register_mtllinear_2lm();
     rbgpu_register_hwblt_2lp();
+    rbgpu_register_mtlcave_2oa();
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
