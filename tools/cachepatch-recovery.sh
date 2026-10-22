@@ -6,13 +6,17 @@
 # disabled, Authenticated Root disabled and ALLOW_UNRESTRICTED_FS set. Both
 # `cp` and `chflags` return EROFS. Recovery is not under that policy.
 #
+# Getting there on THIS machine: it is a hackintosh, so Cmd-R does nothing
+# (PollAppleHotKeys is False). At the OpenCore picker press SPACE - that stops
+# the 3 s countdown and un-hides auxiliary entries, where macOS Recovery is
+# (HideAuxiliary is True, ScanPolicy is 0 so it is scanned).
+#
 # In Recovery:  Utilities -> Terminal, then
 #
 #   diskutil mount Preboot
-#   diskutil list                      # find your Data volume's name
-#   diskutil mount "Macintosh HD - Data"
-#   sh "/Volumes/<Data>/Users/ehsan/Developer/RembrandtGPU/tools/cachepatch-recovery.sh" install
-#   sh "/Volumes/<Data>/Users/ehsan/Developer/RembrandtGPU/tools/cachepatch-recovery.sh" restore
+#   diskutil mount "MACOS - Data"
+#   sh "/Volumes/MACOS - Data/Users/ehsan/Developer/RembrandtGPU/tools/cachepatch-recovery.sh" install
+#   sh "/Volumes/MACOS - Data/Users/ehsan/Developer/RembrandtGPU/tools/cachepatch-recovery.sh" restore
 #
 # No python and no perl: Recovery has neither. Verification is dd + od, which
 # it does have. Rule 20 still applies here - the script reads the bytes back
