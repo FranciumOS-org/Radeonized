@@ -38,16 +38,36 @@ install)
     # Checksum the backup so a restore can be trusted later.
     [ -f "$ORIG.sha256" ] || shasum -a 256 "$ORIG" > "$ORIG.sha256"
 
-    echo "staging on the same volume ..."
-    cp "$NEW" "$SUB.new"
-    chown root:admin "$SUB.new"
-    chmod 0755 "$SUB.new"
+    echo "staging on the same volume (753 MB) ..."
+    if ! cp "$NEW" "$SUB.new"; then
+        echo "STAGING COPY FAILED - nothing was changed. df:" >&2
+        df -h /System/Volumes/Preboot >&2
+        rm -f "$SUB.new"
+        exit 1
+    fi
+    chown root:admin "$SUB.new" || { echo "chown failed" >&2; rm -f "$SUB.new"; exit 1; }
+    chmod 0755 "$SUB.new"       || { echo "chmod failed" >&2; rm -f "$SUB.new"; exit 1; }
     sync
-    echo "atomic rename into place ..."
-    mv -f "$SUB.new" "$SUB"
+    echo "staged $(stat -f %z "$SUB.new") bytes; renaming into place ..."
+    mv -f "$SUB.new" "$SUB" || { echo "RENAME FAILED" >&2; exit 1; }
     sync
+
+    # Rule 20, which the first version of this script broke: a script saying
+    # "installed" is not evidence that anything changed. Read the live file
+    # back and say what is actually there.
     echo
-    echo "installed. REBOOT for it to take effect."
+    echo "verifying the LIVE file after the rename:"
+    if python3 "$(dirname "$0")/cachepatch.py" verify "$SUB"; then
+        echo
+        echo "INSTALLED AND VERIFIED ON DISK. REBOOT for it to take effect."
+    else
+        echo
+        echo "THE LIVE FILE DOES NOT CARRY THE PATCH - restoring and aborting." >&2
+        cp "$ORIG" "$SUB.restore" && chown root:admin "$SUB.restore" \
+            && chmod 0755 "$SUB.restore" && sync && mv -f "$SUB.restore" "$SUB" && sync
+        echo "original restored. Nothing to reboot for." >&2
+        exit 1
+    fi
     echo "If the machine does not boot, see docs/CACHE-RECOVERY.md -"
     echo "the backup is $ORIG"
     ;;
