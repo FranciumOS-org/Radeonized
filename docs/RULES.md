@@ -17,10 +17,18 @@ Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev
 
 **An armed boot is a usable, accelerated Mac** — the CP halt is fixed
 (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute bit-exact.
-**The frontier is readable text, and it is NOT a layout problem** (2ln):
-boots 103 and 104 render glyphs identically scrambled with client resources
-all-linear and with 190 of 4788 tiled. Every layout lever moves the
-widget/chrome class and leaves text untouched. See `docs/PROBLEM-TEXT.md`.
+**The frontier is readable text, and it is NOT a layout problem** (2ln, and
+confirmed from the register state in 2mw: boot 115 reports every client
+resource LINEAR, `m0=5553`, with the text still scrambled). Every layout lever
+moves the widget/chrome class and leaves text untouched.
+**The CPU-upload line of work is FINISHED and did not reach the symptom** - do
+not re-run it. 2mn found a real defect with a law that predicted 16/16
+geometries, `tools/iosurftex.m` fixes it, and 2mw proved it cannot be the cause:
+the assistant issues **zero** `replaceRegion` calls and all 101 of its texture
+descriptors are `MTLStorageModePrivate`, which cannot take a CPU upload.
+What is still unmeasured, and where to look next: **MSAA resolve** (20 of those
+101 are `type=4`), texture-to-texture blit, mipmapped sampling, sRGB.
+See `docs/PROBLEM-TEXT.md`.
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
 
