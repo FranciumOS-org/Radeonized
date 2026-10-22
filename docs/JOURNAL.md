@@ -21168,3 +21168,106 @@ which on this machine has no `Contents` at all.
 and not without injecting per process.** The decision is made in the userspace
 Metal driver, one copy per process, and the kernel's only input to it is
 already correct.
+
+## 2nt (2026-10-22) — the kext route is closed, and 2lo already said why
+
+The question: can the fix be universal, from the kext, with no injection?
+Three more measurements, and then the one already in the journal.
+
+### 1. Feeding AddrLib a different gbAddrConfig does NOT help
+
+2ns closed this route for the wrong reason - "gbAddrConfig is already correct,
+so there is nothing for the kext to correct". That is the wrong test. The kext
+does not need to *correct* it; it needs to make userspace *compute*
+differently, and gbAddrConfig is the single value that configures every
+swizzle equation AddrLib builds.
+
+`amdMtl_HWL_InitAddrLibHwRegFields` is 22 bytes and self-contained, so
+`tools/mtlswizzle.c` gained `RBGPU_GBADDRCONFIG`, which replaces it with
+`movl $0xd, 0x4(%rdi); movl $IMM, 0x30(%rdi); ret`. That is a faithful dry run
+of changing the value kernel-side: it reaches AddrLib by exactly the path
+`AMDRadeonX6000_AMDAccelDevice::getHardwareInfo` controls, so a value that
+works in one process would work in every process.
+
+Identity control first - forcing 0x242, the value the kernel already reports -
+reproduced the unpatched modes exactly. Then 0x040: **1 pipe, 1 packer**,
+which makes the pipe-bank XOR degenerate, with `RBGPU_SWIZZLE=log` so the
+chooser was untouched and still returning `_X` modes.
+
+**IntelliJ came up completely garbled.** Native AppKit chrome ("Welcome to
+IntelliJ IDEA", the menu bar) was sharp; every pixel JBR renders was noise.
+Zero mode overrides were applied, so `_X` with a degenerate pipe config is
+still broken.
+
+A sweep of 0x242/0x040/0x042/0x240 also showed the **chosen mode never
+changes** with gbAddrConfig - 22 stays 22, 27 stays 27. The config changes the
+math, not the choice, and changing the math this way does not fix it.
+
+So the pipe/packer parameters are not the lever, and the kext has no other
+field in that struct.
+
+### 2. The kernel's swizzle translation tables are identity where it matters
+
+`AMDRadeonX6000_AMDHardware::getUbmSwizzleMode` is literally `mov eax, esi;
+ret`. `AMDGFX10AlignManager::getAddrSwizzleMode` (table 0xbf4efa0) and
+`::getSwizzleMode` (table 0xbf4f120) are identity for every mode the kernel
+supports - 0, 1, 2, 5, 6, 9, 10, 17, 18, 21, 22, 24, 25, 26, 27 - and map the
+rest to invalid (33) or LINEAR. **Every mode actually in play round-trips
+unchanged**: the ones userspace picks (2, 22, 24, 26, 27) and the ones `fix`
+maps them to (6, 10). There is no kernel/userspace enum mismatch to exploit.
+
+Worth keeping: this also proves the kernel accepts non-X modes, so a
+kernel-side non-X choice is legal. It just does not reach the defect.
+
+### 3. pipeBankXor is userspace-only
+
+`amdMtl_ComputePipeBankXor`, `amdMtl_HWL_ValidatePipeBankXor`,
+`Addr2ComputePipeBankXor`, `Gfx10Lib::HwlComputePipeBankXor` - all in the MTL
+driver. `nm` on AMDRadeonX6000 and AMDRadeonX6800HWLibs finds none. Rule 23
+control: the same `nm` returns 6048 symbols and finds 5 swizzle symbols in
+that kext, so the empty result is a real absence and not a broken search.
+
+### 4. And 2lo had already settled it on 2026-10-21
+
+> "It is specifically **the CPU-side tiling routine that
+> `MTLTexture.replace(region:)` uses for a tiled, multi-byte-per-pixel
+> surface.**" - decoded exactly as `y ^ 32` at w=256 and `x ^ 48, y ^ 16` at
+> w=1000, BGRA8 failing where R8 is clean, and no other upload path affected.
+
+**That is a memcpy inside the application's own process.** The kernel never
+sees those pixels, never computes that XOR, and cannot change the code that
+does. 2ln had already measured the other half on hardware: `-rbgpulinear`,
+which forces the kernel's own chooser to LINEAR, leaves the text *identically
+scrambled in both directions*. The kernel's mode choice does not reach the
+userspace CPU tiling path at all.
+
+### The answer
+
+**There is no kext-side universal fix for defect A, and six independent levers
+now say so:**
+
+| lever | closed by |
+|---|---|
+| kernel's own swizzle choice (`-rbgpulinear`) | 2ln, on hardware, both directions |
+| AddrLib's hardware config (gbAddrConfig) | 2nt, forced to 1 pipe/1 pkr, still garbled |
+| `AMD_DeviceSettings` | 2ns, built in userspace from hwInfo |
+| kernel/userspace mode enum translation | 2nt, identity for every mode in play |
+| `pipeBankXor` | 2nt, no such code in any kext |
+| `LSEnvironment` in the app bundle | 2ns, LaunchServices refuses, error -54 |
+
+The broken code is in the dyld shared cache, runs once per process, and is
+reached only from inside that process. Injection is the only lever, which
+leaves Apple platform binaries and sandboxed App Store apps permanently out of
+reach by this route.
+
+### A boot lost to a charger, and rule 8 earning its place again
+
+The machine restarted mid-session (charger swap). `rbgpu-boot` still read
+**121**, unchanged, so the new boot never armed - `rbgpu-arm` is one-shot
+(rule 9) and boot 121 had consumed it. `MTLCopyAllDevices` returned **0
+devices**: no accelerator at all. The launcher's "the dylib never loaded"
+was therefore correct and meant nothing about the dylib - there was no AMD
+Metal driver in the process to patch. Caught by an IntelliJ pid of 1236 being
+*lower* than the 5856 from ten minutes earlier, which is the only reason the
+reboot was noticed before something was read as a result. Boot-args survived
+intact (40 of them).
