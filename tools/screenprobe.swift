@@ -65,7 +65,7 @@ let BIG = (MODE == "big" || MODE == "bigmsaa" || MODE == "bigcpu")
 let WIDE = BIG ? 900 : 512
 let TALL = BIG ? 880 : 512
 let MSAA = (MODE == "msaa" || MODE == "bigmsaa")
-let VIA_IOSURFACE = (MODE == "iosurface" || MODE == "cpusurface")
+let VIA_IOSURFACE = (MODE == "iosurface" || MODE == "cpusurface" || MODE == "cgsurface")
 // bigcpu draws BOTH windows with CoreGraphics and never touches Metal, which
 // separates "a large window backing store corrupts" from "allocating a large
 // GPU texture corrupts something else".
@@ -87,6 +87,23 @@ let CPUONLY = (MODE == "bigcpu")
 // nothing to do with AppKit; if it stays clean, something about AppKit's own
 // backing store is special and that is where to look.
 let CPU_SURFACE = (MODE == "cpusurface")
+
+// 2nf: the sweep killed the CPU-versus-GPU reading.
+//
+//   right window, CAMetalLayer, GPU-written        0 of 4 scrambled
+//   right window, IOSurface, GPU-written           0 of 4
+//   right window, IOSurface, CPU-written           0 of 4
+//   left window,  AppKit's own backing store       7 of 12
+//
+// A CPU write is not what breaks it. What breaks it is AppKit's own layer
+// backing store, and the probe had two differences rolled into one: the
+// SURFACE (AppKit's, versus an IOSurface allocated here) and the DRAWING PATH
+// (NSGraphicsContext into a view, versus raw stores into memory).
+//
+// cgsurface separates them: a CGContext over an IOSurface allocated here, drawn
+// with the same CoreGraphics call the view uses. Clean means the surface is
+// what matters; scrambled means CoreGraphics' drawing path is.
+let CG_SURFACE = (MODE == "cgsurface")
 
 // 2my. Across the first sweep the CPU window was intermittently shredded and
 // the GPU window never was - in direct-1 and msaa-2 but not in direct-2 or
@@ -284,6 +301,29 @@ final class SurfaceView: NSView {
         return tex != nil
     }
     func render() {
+        if CG_SURFACE {
+            // the same CoreGraphics draw the view does, but into a surface
+            // allocated here instead of AppKit's backing store
+            guard let s = surface else { return }
+            IOSurfaceLock(s, [], nil)
+            let bi = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            if let ctx = CGContext(data: IOSurfaceGetBaseAddress(s), width: WIDE, height: TALL,
+                                   bitsPerComponent: 8, bytesPerRow: IOSurfaceGetBytesPerRow(s),
+                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bi) {
+                // No flip here. A CGBitmapContext over an IOSurface already
+                // has the surface's first row at the context's own origin, so
+                // the transform the VIEW needs is one flip too many here - it
+                // produced an upside-down window that the jump metric scored
+                // as SCRAMBLED (6 row jumps, 0 column jumps), which was this
+                // tool's bug and not the machine's.
+                ctx.interpolationQuality = .none
+                ctx.draw(CPUView.image, in: CGRect(x: 0, y: 0, width: WIDE, height: TALL))
+            }
+            IOSurfaceUnlock(s, [], nil)
+            layer?.contents = surface
+            layer?.contentsGravity = .topLeft
+            return
+        }
         if CPU_SURFACE {
             // CPU write, straight into the surface's own bytes
             guard let s = surface else { return }

@@ -20448,3 +20448,75 @@ Next, in order:
    three hand-coded candidates.
 3. Only then: whether the lever that forces LINEAR can be made to reach window
    backing stores.
+
+## 2nf (2026-10-22) — it is the SURFACE, not the drawing path, and not CPU vs GPU
+
+### Two of this session's readings were wrong and are withdrawn
+
+**"The corruption follows a CPU write."** Withdrawn. The probe had the CPU/GPU
+difference confounded with which surface was used. An interleaved sweep
+separates them:
+
+    right window: my IOSurface, raw CPU stores      0 of 8 scrambled
+    right window: my IOSurface, CoreGraphics draw   0 of 4
+    right window: my IOSurface, Metal render        0 of 4
+    right window: CAMetalLayer                      0 of 8
+    left window:  AppKit's own layer backing store  scrambles, ~60% of runs
+
+A CPU write is fine. CoreGraphics drawing is fine. What breaks is **the
+surface CoreAnimation allocates for a layer's backing store**, and nothing
+else.
+
+**"A CPU-written IOSurface scrambles (2ne)."** Withdrawn, and it was a
+misreading of this tool's own output: in the report `cpu` is always the LEFT
+window (AppKit's backing store) and `gpu` is the right one, which is what the
+mode changes. `cpusurface-1 cpu SCRAMBLED` was the AppKit window, as it is in
+every mode. The right window was clean in that run and in every other.
+
+### An instrument bug that scored as a hardware defect
+
+`cgsurface` first reported SCRAMBLED in 4 of 4 runs with a signature of 6 row
+jumps and 0 column jumps - nothing like the 84/92 the real defect produces.
+Looking at the pixels instead of the metric: the window was simply drawn
+**upside down**, and the 6 jumps were the single discontinuity where the grey
+calibration strip met the pattern. A `CGBitmapContext` over an IOSurface
+already has the surface's first row at its own origin, so the flip the view
+context needs is one flip too many there. With it removed, `cgsurface` is
+clean 4 of 4.
+
+Had the metric been trusted without looking, this would have been reported as
+"CoreGraphics drawing is the trigger" - the exact opposite of the truth.
+
+### What stands
+
+- The defect is in CoreAnimation's own layer backing store. Every surface this
+  process allocates itself is correct, however it is written.
+- `DetermineSwizzleMode` forced to LINEAR in the app changes nothing: every
+  run above carries `patch state: PATCHED` (2nc/2nd).
+- The permutation is unchanged and deterministic: 84 row jumps, 92 column
+  jumps, the exact map of 2na, with 8x8 micro tiles intact and only their
+  placement wrong.
+
+### The caveat that has to stay visible
+
+It is still NOT established that this is the user's symptom. Terminal is drawn
+into an AppKit backing store and is **crisp** on this machine, while the assistant's
+text is GPU-composited through IOSurfaces and is broken - which is the
+opposite way round from what this reproducer does. This may be the same
+mechanism seen from the other side, or a second defect found on the way. The
+honest statement is that a real, reproducible, exactly-characterised bug has
+been cornered and its connection to the presenting symptom is unproven.
+
+### Next
+
+The reader of a layer backing store is the WindowServer, not the app, which is
+why patching the app's swizzle chooser did nothing. Injecting into the
+WindowServer is NOT an option: it is launchd-started, so it would mean exactly
+the launchd `DYLD_INSERT_LIBRARIES` that rule 21 forbids and that already cost
+this project a desktop.
+
+That leaves the kernel side. `-rbgpulinear` hooks
+`getPreferredSwizzleMode2` and sees only ~61 calls, all display-class, so
+CoreAnimation's backing stores are not going through it. Finding the
+allocation path that decides their layout is the next step, and it needs
+boots.
