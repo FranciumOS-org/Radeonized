@@ -48,6 +48,11 @@
 //   RBGPU_USAGE_OFF=0x68    byte offset of `usage` (measured, see below)
 //   RBGPU_USAGE_RT=4        bit mask meaning "render target"
 //   RBGPU_SWIZZLE_DUMP=N    hexdump the descriptor for the first N distinct calls
+//   RBGPU_GBADDRCONFIG=0x.. feed AddrLib this GB_ADDR_CONFIG instead of the
+//                           kernel's. This is the dry run for a kext-side fix:
+//                           the value reaches AddrLib by exactly the path the
+//                           kext controls, so a value that works here would
+//                           work in every process without any injection.
 //
 // The descriptor layout, from the disassembly and then CONFIRMED by
 // tools/usageprobe.m creating one texture per usage value (2nq):
@@ -102,6 +107,27 @@ static const unsigned char kFind[32] = {
 // mov r13d,r9d / mov ebx,r8d / mov [rbp-0x30],rcx   == exactly 30 bytes.
 #define PROLOGUE_COPY 30
 
+// amdMtl_HWL_InitAddrLibHwRegFields in full - 22 bytes, self-contained:
+//     push rbp; mov rbp,rsp
+//     movl $0xd, 0x4(%rdi)          ADDR_CREATE_INPUT.chipFamily = GFX10
+//     movl 0xa4(%rsi),%eax
+//     movl %eax, 0x30(%rdi)         regValue.gbAddrConfig
+//     pop rbp; ret
+// This is the ONLY place AddrLib is told anything about the hardware, and the
+// value comes from AMDCommonHwInfoRec+0xa4, which the kext fills via
+// AMDRadeonX6000_AMDAccelDevice::getHardwareInfo. Replacing it with a
+// constant here is a faithful dry run of changing it kernel-side: whatever
+// value works in this process would work in EVERY process if the kext
+// reported it, platform binaries included - which is the only route to a fix
+// that needs no injection at all (2nt).
+static const unsigned char kAddrFind[22] = {
+    0x55, 0x48, 0x89, 0xE5,
+    0xC7, 0x47, 0x04, 0x0D, 0x00, 0x00, 0x00,
+    0x8B, 0x86, 0xA4, 0x00, 0x00, 0x00,
+    0x89, 0x47, 0x30,
+    0x5D, 0xC3,
+};
+
 typedef unsigned int (*swz_fn)(void *hw, void *addrlib, const void *desc,
                               const void *settings, unsigned int samples,
                               unsigned int frags, unsigned int *out,
@@ -118,6 +144,7 @@ static int gDumpBudget = 8;
 static swz_fn gTramp;
 static int gDone;
 static int gSaidHw;
+static long gGbAddrConfig = -1;        // RBGPU_GBADDRCONFIG, -1 = leave alone
 
 // ---- dedup table so a per-draw function does not flood the log ----------
 struct key { uint64_t type, fmt, w, h, mip, smp, arr; unsigned int mode; };
@@ -231,11 +258,10 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     if (getenv("RBGPU_SWIZZLE_DUMP")) gDumpBudget = atoi(getenv("RBGPU_SWIZZLE_DUMP"));
     if (getenv("RBGPU_SWIZZLE_NONRT")) gNonRT = atoi(getenv("RBGPU_SWIZZLE_NONRT"));
     if (getenv("RBGPU_SWIZZLE_RT"))    gRT    = atoi(getenv("RBGPU_SWIZZLE_RT"));
-    if (gMode == M_OFF) {
-        fprintf(stderr, "swz: mode=off - driver found, deliberately NOT patched\n");
-        gDone = 1;
-        return;
-    }
+    if (getenv("RBGPU_GBADDRCONFIG"))
+        gGbAddrConfig = strtol(getenv("RBGPU_GBADDRCONFIG"), 0, 0);
+    if (gMode == M_OFF)
+        fprintf(stderr, "swz: mode=off - the chooser is deliberately NOT patched\n");
 
     const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
     const unsigned char *cmd = (const unsigned char *)mh + sizeof(*h);
@@ -264,6 +290,48 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
                         "expected exactly 1. Nothing patched.\n", hits);
         gDone = 1; return;
     }
+
+    // ---- the gbAddrConfig override, installed BEFORE anything creates
+    // AddrLib. It is independent of the chooser policy, so the two can be
+    // tested one at a time (one variable per experiment).
+    if (gGbAddrConfig >= 0) {
+        unsigned char *af = NULL; int ahits = 0;
+        for (unsigned long o = 0; o + sizeof kAddrFind <= size; o++)
+            if (!memcmp(base + o, kAddrFind, sizeof kAddrFind)) { ahits++; af = base + o; }
+        if (ahits != 1) {
+            fprintf(stderr, "swz: REFUSING the gbAddrConfig override - %d "
+                            "occurrences of InitAddrLibHwRegFields, expected 1\n", ahits);
+        } else {
+            unsigned char st[sizeof kAddrFind];
+            memset(st, 0x90, sizeof st);
+            unsigned int v = (unsigned int)gGbAddrConfig;
+            unsigned char *q = st;
+            *q++ = 0xC7; *q++ = 0x47; *q++ = 0x04;            // movl $0xd, 0x4(%rdi)
+            *q++ = 0x0D; *q++ = 0x00; *q++ = 0x00; *q++ = 0x00;
+            *q++ = 0xC7; *q++ = 0x47; *q++ = 0x30;            // movl $v, 0x30(%rdi)
+            memcpy(q, &v, 4); q += 4;
+            *q++ = 0xC3;                                      // ret
+            vm_address_t ap = (vm_address_t)af & ~(vm_address_t)(getpagesize() - 1);
+            vm_size_t asp = ((vm_address_t)af + sizeof st) - ap;
+            kern_return_t akr = vm_protect(mach_task_self(), ap, asp, FALSE,
+                                           VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+            if (akr != KERN_SUCCESS) {
+                fprintf(stderr, "swz: vm_protect(rw) for gbAddrConfig failed with %d - "
+                                "AddrLib keeps the kernel's value\n", akr);
+            } else {
+                memcpy(af, st, sizeof st);
+                vm_protect(mach_task_self(), ap, asp, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+                fprintf(stderr, "swz: gbAddrConfig FORCED to 0x%x at %p (verify %s)"
+                                "  pipes=%u pkrs=%u se=%u interleave=%u\n",
+                        v, (void *)af,
+                        memcmp(af, st, sizeof st) == 0 ? "ok" : "FAILED",
+                        1u << (v & 7), 1u << ((v >> 8) & 7),
+                        1u << ((v >> 19) & 3), 256u << ((v >> 3) & 7));
+            }
+        }
+    }
+
+    if (gMode == M_OFF) { gDone = 1; return; }
 
     // ---- trampoline: original prologue + absolute jump past the detour ----
     size_t tsz = (size_t)getpagesize();
