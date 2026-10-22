@@ -54,10 +54,23 @@ install)
     case "$DFLAGS" in
         *restricted*)
             echo "clearing the 'restricted' flag on the dyld directory (restored on exit) ..."
-            chflags norestricted "$DIR" || {
-                echo "chflags failed - cannot stage. See docs/CACHE-RECOVERY.md for" >&2
-                echo "the Recovery-boot route, where these flags are not enforced." >&2
-                exit 1; }
+            if ! chflags norestricted "$DIR" 2>/dev/null; then
+                # chflags itself returning EROFS means the running kernel will
+                # not let the cryptex subtree be touched at all, which neither
+                # ST_RDONLY, "Filesystem Protections: disabled" nor
+                # "Authenticated Root: disabled" accounts for. One thing left
+                # to try from a running system: an explicit rw remount.
+                echo "chflags refused; trying an explicit rw remount of Preboot ..."
+                mount -uw /System/Volumes/Preboot 2>/dev/null || true
+                if ! chflags norestricted "$DIR" 2>/dev/null; then
+                    echo >&2
+                    echo "The cryptex path cannot be modified from a running system." >&2
+                    echo "This is NOT a failure of the patch - the patched file verifies." >&2
+                    echo "Use the Recovery route: docs/CACHE-RECOVERY.md, section" >&2
+                    echo "'Installing from Recovery'." >&2
+                    exit 1
+                fi
+            fi
             ;;
     esac
 
