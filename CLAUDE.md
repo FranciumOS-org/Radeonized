@@ -220,7 +220,17 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     is `sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES`.
     Inject per process, where the blast radius is one process started on
     purpose. [2mq]
-22. **A search is an instrument too.** A grep that returns nothing is not
+22. **A Lilu `BinaryModInfo` can only patch a file that EXISTS.**
+    `AMDRadeonX6000MTLDriver` is in the dyld shared cache and has no file on
+    disk, so its pages are never mapped from the path the patch names:
+    `onProcLoad` returns `NoError`, the hook logs ARMED, and nothing is ever
+    patched. Three milestones of user patches (2lm, 2nb, 2nm) were inert by
+    construction and one boot was spent on it. **`ls` the file named in the
+    `BinaryModInfo` before building anything on it**, and verify from the
+    target process's own memory, which is the only thing that revealed it.
+    `tools/mtllinear.c` works where Lilu cannot, because it edits the
+    in-memory image with `vm_protect(VM_PROT_COPY)`. [2nn]
+23. **A search is an instrument too.** A grep that returns nothing is not
     evidence of absence until it has been checked against a case known to
     be present. `objdump` separates mnemonic and operands with a **tab**, so
     a space-based pattern silently matched nothing and produced a confident
