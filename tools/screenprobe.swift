@@ -336,7 +336,15 @@ final class SurfaceView: NSView {
     var tex: MTLTexture?
     func prepare() -> Bool {
         guard let dev = dev else { return false }
-        let bpr = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, WIDE * 4)
+        // 2ni: bytesPerRow is the one property of a backing store this probe
+        // can vary freely. Surfaces allocated here with the system's preferred
+        // alignment are clean in every run; CoreAnimation's are not, and its
+        // stride is not observable from outside the process. So sweep it: if
+        // some stride reproduces the defect in a surface allocated here, that
+        // names the trigger.
+        let natural = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, WIDE * 4)
+        let bpr = ProcessInfo.processInfo.environment["RB_BPR"].flatMap { Int($0) } ?? natural
+        if bpr != natural { print("surface: bytesPerRow \(bpr) (natural would be \(natural))") }
         let props: [IOSurfacePropertyKey: Any] = [
             .width: WIDE, .height: TALL, .bytesPerElement: 4,
             .bytesPerRow: bpr, .pixelFormat: 0x42475241]
@@ -487,7 +495,44 @@ let leftX = BIG ? 40 : 100
 let rightX = leftX + WIDE + gap
 
 if GRID {
-    // eight 256x256 CPU-drawn windows, 4 across and 2 down
+    // 2ni: does merely ALLOCATING before the window is created poison it?
+    //
+    // 2nh showed the first backing store a process allocates is often right
+    // and every later one is wrong. If that is an address or pressure
+    // threshold rather than something about CoreAnimation's own bookkeeping,
+    // then allocating plain IOSurfaces FIRST - nothing to do with a layer -
+    // should push the first window into the bad region too.
+    //
+    //   RB_PREIOSURF=N   N plain IOSurfaces of the same size, before any window
+    //   RB_PREBYTES=N    N megabytes of ordinary memory, touched, before any window
+    //
+    // If the IOSurfaces poison it and the plain memory does not, the threshold
+    // is in the surface allocator rather than in memory pressure at large.
+    var keepAlive: [IOSurface] = []
+    if let n = ProcessInfo.processInfo.environment["RB_PREIOSURF"].flatMap({ Int($0) }), n > 0 {
+        let bpr = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, GRID_SIDE * 4)
+        for _ in 0..<n {
+            if let s = IOSurface(properties: [.width: GRID_SIDE, .height: GRID_SIDE,
+                                              .bytesPerElement: 4, .bytesPerRow: bpr,
+                                              .pixelFormat: 0x42475241]) {
+                _ = s.lock(options: [], seed: nil)
+                memset(s.baseAddress, 0x40, s.allocationSize)
+                _ = s.unlock(options: [], seed: nil)
+                keepAlive.append(s)
+            }
+        }
+        print("grid: pre-allocated \(keepAlive.count) IOSurfaces of \(GRID_SIDE)x\(GRID_SIDE)")
+    }
+    var ballast: [UnsafeMutableRawPointer] = []
+    if let mb = ProcessInfo.processInfo.environment["RB_PREBYTES"].flatMap({ Int($0) }), mb > 0 {
+        for _ in 0..<mb {
+            let p = UnsafeMutableRawPointer.allocate(byteCount: 1 << 20, alignment: 4096)
+            memset(p, 0x41, 1 << 20)
+            ballast.append(p)
+        }
+        print("grid: pre-allocated \(ballast.count) MB of ordinary memory")
+    }
+
     var wins: [NSWindow] = []
     for i in 0..<GRID_N {
         // origin overridable, so the grid can be put exactly where the
