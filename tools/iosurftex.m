@@ -38,13 +38,15 @@
 #import <IOSurface/IOSurface.h>
 #import <objc/runtime.h>
 #import <stdatomic.h>
+#import <os/lock.h>
 
 static int gLog = 0, gAnyUsage = 0;
 // RBGPU_IOSURFTEX=0 is authoritative off - it used to be overridden by having
 // logging on, which made "off" not off. RBGPU_IOSURFTEX_INERT=1 loads and
 // interposes but never swizzles, to separate "loading this dylib breaks the
 // app" from "swizzling the device breaks the app".
-static int gEnabled = 1, gInert = 0;
+static int gEnabled = 1, gInert = 0, gTrace = 0;
+static IMP gOrigNewTextureIOSurface;
 // An app launched by launchd has no terminal, so stderr goes nowhere useful.
 // RBGPU_IOSURFTEX_LOGFILE names a file every process appends to instead.
 static FILE *gLogFile;
@@ -62,6 +64,26 @@ static IMP gOrigNewTexture;
 // uploads and say which textures get them.
 static atomic_long gReplaceCalls;
 static IMP gOrigReplace;
+
+// 2mv: an inventory of every texture the application creates, deduplicated by
+// descriptor, so a run says what the app actually asks for instead of only what
+// we chose to act on. Swapping ONE 1024x128 atlas changed nothing on screen,
+// and a ten-second sample of startup is not evidence about the page that backs
+// the text being read.
+#define TRACE_MAX 512
+struct traceRow {
+    unsigned long w, h, fmt, usage, type, mips, storage, align;
+    double ratio;
+    int iosurf;          // created over an IOSurface by the app itself
+    int flagged;         // the law predicts corruption
+    int swapped;         // we served it
+    unsigned long count;
+};
+static struct traceRow gTraceRows[TRACE_MAX];
+static int gTraceN;
+static os_unfair_lock gTraceLock = OS_UNFAIR_LOCK_INIT;
+static void traceRecord(id<MTLDevice> dev, MTLTextureDescriptor *d,
+                        int iosurf, int flagged, int swapped);
 
 #define LOG(fmt, ...) do { \
     if (gLog) { \
@@ -177,6 +199,7 @@ static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
 {
     id (*orig)(id, SEL, MTLTextureDescriptor *) = (void *)gOrigNewTexture;
     uint32_t cc; size_t bpe;
+    int flagged = 0;
 
     if (!desc) goto fallthrough;
 
@@ -189,6 +212,7 @@ static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
             atomic_fetch_add(&gLawClean, 1);
             goto fallthrough;
         }
+        flagged = 1;
         if (!structureOk(desc)) {
             atomic_fetch_add(&gDeclStruct, 1);
             if (gLog >= 2) LOG("DECLINED(structure) %lux%lu type=%lu mips=%lu",
@@ -240,6 +264,7 @@ static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
                         (unsigned long)desc.width, (unsigned long)desc.height); goto fallthrough; }
 
         long n = atomic_fetch_add(&gSwapped, 1) + 1;
+        traceRecord((id<MTLDevice>)self, desc, 0, 1, 1);
         LOG("swapped %lux%lu fmt=%lu bpr=%zu  (total %ld)", (unsigned long)desc.width,
             (unsigned long)desc.height, (unsigned long)desc.pixelFormat, bpr, n);
         return tex;
@@ -247,7 +272,73 @@ static id swizzledNewTexture(id self, SEL _cmd, MTLTextureDescriptor *desc)
 
 fallthrough:
     atomic_fetch_add(&gFellThrough, 1);
+    traceRecord((id<MTLDevice>)self, desc, 0, flagged, 0);
     return orig(self, _cmd, desc);
+}
+
+// Traced only, never swapped: a texture the application has already put over
+// its own IOSurface is in the class every measurement found clean, and it is
+// worth knowing how much of the app's work arrives this way.
+static id swizzledNewTextureIOSurface(id self, SEL _cmd, MTLTextureDescriptor *desc,
+                                      IOSurfaceRef surf, NSUInteger plane)
+{
+    id (*orig)(id, SEL, MTLTextureDescriptor *, IOSurfaceRef, NSUInteger) =
+        (void *)gOrigNewTextureIOSurface;
+    traceRecord((id<MTLDevice>)self, desc, 1, 0, 0);
+    return orig(self, _cmd, desc, surf, plane);
+}
+
+static void traceRecord(id<MTLDevice> dev, MTLTextureDescriptor *d,
+                        int iosurf, int flagged, int swapped)
+{
+    if (!gTrace || !d) return;
+    MTLSizeAndAlign sa = [dev heapTextureSizeAndAlignWithDescriptor:d];
+    unsigned long px = d.width * d.height;   // ratio against pixels, bpe folded in by size
+    os_unfair_lock_lock(&gTraceLock);
+    for (int i = 0; i < gTraceN; i++) {
+        struct traceRow *r = &gTraceRows[i];
+        if (r->w == d.width && r->h == d.height && r->fmt == (unsigned long)d.pixelFormat
+            && r->usage == (unsigned long)d.usage && r->type == (unsigned long)d.textureType
+            && r->mips == d.mipmapLevelCount && r->storage == (unsigned long)d.storageMode
+            && r->iosurf == iosurf) {
+            r->count++; r->swapped += swapped;
+            os_unfair_lock_unlock(&gTraceLock);
+            return;
+        }
+    }
+    if (gTraceN < TRACE_MAX) {
+        struct traceRow *r = &gTraceRows[gTraceN++];
+        r->w = d.width; r->h = d.height; r->fmt = (unsigned long)d.pixelFormat;
+        r->usage = (unsigned long)d.usage; r->type = (unsigned long)d.textureType;
+        r->mips = d.mipmapLevelCount; r->storage = (unsigned long)d.storageMode;
+        r->align = sa.align; r->ratio = px ? (double)sa.size / (double)px : 0;
+        r->iosurf = iosurf; r->flagged = flagged; r->swapped = swapped; r->count = 1;
+        os_unfair_lock_unlock(&gTraceLock);
+        LOG("NEW %lux%lu fmt=%lu usage=0x%lx type=%lu mips=%lu storage=%lu "
+            "align=%lu size/px=%.2f%s%s", r->w, r->h, r->fmt, r->usage, r->type,
+            r->mips, r->storage, r->align, r->ratio,
+            iosurf ? " APP-IOSURFACE" : "", flagged ? " FLAGGED" : "");
+        return;
+    }
+    os_unfair_lock_unlock(&gTraceLock);
+}
+
+static void traceReport(void)
+{
+    if (!gTrace) return;
+    FILE *f = gLogFile ? gLogFile : stderr;
+    os_unfair_lock_lock(&gTraceLock);
+    fprintf(f, "iosurftex: pid %d inventory, %d distinct descriptors:\n", getpid(), gTraceN);
+    for (int i = 0; i < gTraceN; i++) {
+        struct traceRow *r = &gTraceRows[i];
+        fprintf(f, "iosurftex:   n=%-5lu %4lux%-5lu fmt=%-4lu usage=0x%-2lx type=%lu mips=%lu "
+                "store=%lu align=%-6lu size/px=%.2f%s%s swapped=%lu\n",
+                r->count, r->w, r->h, r->fmt, r->usage, r->type, r->mips, r->storage,
+                r->align, r->ratio, r->iosurf ? " APP-IOSURFACE" : "",
+                r->flagged ? " FLAGGED" : "", (unsigned long)r->swapped);
+    }
+    os_unfair_lock_unlock(&gTraceLock);
+    fflush(f);
 }
 
 // Printed once per process at exit, so a single run answers whether this
@@ -263,6 +354,7 @@ static void report(void)
             atomic_load(&gLawClean), atomic_load(&gFellThrough),
             atomic_load(&gReplaceCalls));
     fflush(f);
+    traceReport();
 }
 
 static void installOnce(id<MTLDevice> dev)
@@ -316,12 +408,14 @@ __attribute__((constructor)) static void init(void)
     gEnabled = !en || atoi(en) != 0;
     const char *in = getenv("RBGPU_IOSURFTEX_INERT");
     gInert = in && atoi(in) != 0;
+    const char *tr = getenv("RBGPU_IOSURFTEX_TRACE");
+    gTrace = tr && atoi(tr) != 0;
     const char *lf = getenv("RBGPU_IOSURFTEX_LOGFILE");
     if (lf && *lf) {
         gLogFile = fopen(lf, "a");       // every process appends; each line carries its pid
         if (gLogFile && !gLog) gLog = 1; // naming a file is asking for logging
     }
-    LOG("loaded in pid %d (%s)%s%s%s", getpid(), getprogname(),
+    LOG("loaded in pid %d (%s)%s%s%s%s", getpid(), getprogname(),
         gEnabled ? "" : " DISABLED", gInert ? " INERT" : "",
-        gAnyUsage ? " anyusage" : "");
+        gTrace ? " TRACE" : "", gAnyUsage ? " anyusage" : "");
 }
