@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -116,6 +116,11 @@ $(OUT)/screenprobe: tools/screenprobe.swift | $(OUT)
 decodescreen: $(OUT)/decodescreen
 $(OUT)/decodescreen: tools/decodescreen.swift | $(OUT)
 	swiftc -O $< -o $@
+
+# vramprobe (2my): do two surfaces ever land on the same memory?
+vramprobe: $(OUT)/vramprobe
+$(OUT)/vramprobe: tools/vramprobe.swift | $(OUT)
+	swiftc -O $< -o $@ -framework Metal
 
 # texprobe: the userspace texture-upload probe the text work is measured with.
 texprobe: $(OUT)/texprobe
