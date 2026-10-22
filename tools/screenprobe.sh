@@ -41,6 +41,14 @@ OUT="logs/$(date +%Y%m%d-%H%M%S)-screenprobe"
 mkdir -p "$OUT"
 REPORT="$OUT/report.txt"
 
+# Keep the display awake for the whole sweep. A sleeping display makes
+# screencapture fail with "could not create image from display", which looked
+# exactly like a revoked Screen Recording permission and was misdiagnosed as
+# one. caffeinate -d exits when this script does (-w on our own pid).
+caffeinate -d -w $$ &
+CAFFEINE=$!
+trap 'kill $CAFFEINE 2>/dev/null' EXIT
+
 [ -x build/out/screenprobe ] || make screenprobe
 [ -x build/out/decodescreen ] || make decodescreen
 
