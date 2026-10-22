@@ -12,6 +12,8 @@
 #   tools/rbgpu-app.sh install "IntelliJ IDEA"
 #   tools/rbgpu-app.sh install Claude
 #   tools/rbgpu-app.sh install-all          every injectable app in /Applications
+#   tools/rbgpu-app.sh verify               which RUNNING apps are really patched
+#   tools/rbgpu-app.sh relaunch <AppName>   quit and restart it patched, detached
 #   tools/rbgpu-app.sh list
 #   tools/rbgpu-app.sh remove "IntelliJ IDEA"
 #   tools/rbgpu-app.sh remove-all
@@ -42,6 +44,17 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 dylib="$root/build/out/mtlswizzle.dylib"
 policy="${RBGPU_SWIZZLE:-fix}"
 dest="$HOME/Applications"
+
+# pgrep is NOT usable here: BSD pgrep never matches the invoking process or
+# its ancestors, so a script run from inside Claude Code cannot see the Claude
+# app at all. That is what made 2no's first attempt at Claude "exit cleanly
+# with no crash report" - running() said no, the quit-and-wait was skipped,
+# and the second copy forwarded into the single-instance lock and died. ps has
+# no such exclusion.
+procs_under() {
+    ps -axo pid=,command= | awk -v pre="$1/" '
+        { pid = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (index($0, pre) == 1) print pid }'
+}
 
 real_app() {
     for p in "/Applications/$1.app" "$HOME/Applications/$1.app"; do
@@ -98,7 +111,7 @@ PLIST
 APP="$app"
 EXE="$exe"
 DYLIB="$dylib"
-if pgrep -f "^\$APP/" >/dev/null 2>&1; then
+if ps -axo command= | grep -q "^\$APP/"; then
     osascript -e "tell application \"$name\" to activate" >/dev/null 2>&1 || true
     exit 0
 fi
@@ -151,6 +164,49 @@ remove-all)
         rm -rf "$w"; n=$((n+1))
     done
     echo "removed $n wrapper(s)"
+    ;;
+verify)
+    # Rule 20: a wrapper existing is not evidence that anything was patched.
+    # Ask the running process itself, via vmmap, which is the only thing that
+    # revealed the inert Lilu patches of 2nn.
+    acc=$(ioreg -rc IOAccelerator -k IOClass 2>/dev/null | grep -c IOAccelerator || true)
+    [ "${acc:-0}" -gt 0 ] || echo "WARNING: no IOAccelerator in the registry - this boot looks UNARMED."
+    printf '%-26s %-9s %s\n' APP STATE DETAIL
+    for w in "$dest"/*\ \(GPU\).app; do
+        [ -d "$w" ] || continue
+        app=$(sed -n 's/^APP="\(.*\)"$/\1/p' "$w/Contents/MacOS/launch")
+        n=$(basename "$w" .app); n=${n% (GPU)}
+        pid=$(procs_under "$app/Contents/MacOS" | head -1)
+        if [ -z "$pid" ]; then
+            printf '%-26s %-9s %s\n' "$n" "-" "not running"
+        elif vmmap "$pid" 2>/dev/null | grep -q mtlswizzle.dylib; then
+            printf '%-26s %-9s %s\n' "$n" "PATCHED" "pid $pid"
+        else
+            printf '%-26s %-9s %s\n' "$n" "UNPATCHED" "pid $pid - quit it and open the (GPU) wrapper"
+        fi
+    done
+    ;;
+relaunch)
+    [ -n "${2:-}" ] || { echo "usage: $0 relaunch <AppName>" >&2; exit 2; }
+    # Detached on purpose. Relaunching the app this script is RUNNING INSIDE
+    # (Claude, when Claude Code drives it) would otherwise kill the script
+    # halfway and leave no app at all, so double-fork into a new session first.
+    python3 - "$root" "$2" <<'DETACH'
+import os, sys, subprocess
+root, name = sys.argv[1], sys.argv[2]
+if os.fork(): sys.exit(0)
+os.setsid()
+if os.fork(): sys.exit(0)
+env = dict(os.environ)
+env.pop("DYLD_INSERT_LIBRARIES", None)
+env["RBGPU_INJECT"] = "build/out/mtlswizzle.dylib"
+env.setdefault("RBGPU_SWIZZLE", "fix")
+log = open(os.path.join(root, "logs", "rbgpu-relaunch.log"), "w")
+subprocess.call(["/bin/sh", "tools/mtllinear-app.sh", name],
+                cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
+log.close()
+DETACH
+    echo "relaunching $2 detached; verdict lands in logs/rbgpu-relaunch.log"
     ;;
 list)
     found=0

@@ -21271,3 +21271,70 @@ Metal driver in the process to patch. Caught by an IntelliJ pid of 1236 being
 *lower* than the 5856 from ten minutes earlier, which is the only reason the
 reboot was noticed before something was read as a result. Boot-args survived
 intact (40 of them).
+
+## 2nu (2026-10-22, boot 122) — everything wrapped, and why 2no's first attempt "exited cleanly"
+
+Boot 122 is armed (`rbgpu-boot` 122, one Metal device). Claude relaunched
+under `RBGPU_SWIZZLE=fix`, verified from its own memory rather than assumed:
+**8 processes HOOKED**, and the overrides are the intended ones -
+
+    override 22 -> 6    (4KB_D_X  -> 4KB_D)              x21
+    override 27 -> 10   (64KB_R_X -> 64KB_D)             x7
+    override 26 -> 10   (64KB_D_X -> 64KB_D)             x3
+    override 27 -> 0    non-render-target -> LINEAR      x3
+    override  2 -> 0    non-render-target -> LINEAR      x4
+
+Render targets stayed tiled; only non-render-targets went linear. The user
+confirms it reads correctly.
+
+### pgrep cannot see the app a script is running inside
+
+`tools/rbgpu-app.sh verify` reported Claude "not running" while Claude Code
+was executing inside it. ps showed pid 1227 as
+`/Applications/Claude.app/Contents/MacOS/Claude`; `pgrep -f` with that exact
+string, and even `pgrep -x Claude`, returned nothing, while every Claude
+*helper* matched. Walking the ancestor chain of the shell settled it:
+
+    1789 (zsh) -> 1409 (claude-code) -> 1408 (disclaimer) -> 1227 (Claude.app)
+    every one of them INVISIBLE to pgrep; pgrep -l . never lists them
+
+**BSD pgrep never matches the invoking process or its ancestors.** It is not
+a broken search in the rule-23 sense - the search works, and deliberately
+excludes exactly the process we needed.
+
+**This explains 2no.** The first attempt to launch Claude under the patch
+(2026-10-21) "exited immediately, no crash report, clean exit", and the
+journal put it down to the Electron single-instance lock. That was the
+mechanism but not the cause: `running()` is built on `pgrep -f "^$app/"`, the
+script was a descendant of the Claude app, so pgrep said not running, the
+quit-and-wait was skipped entirely, and the second copy forwarded into the
+lock and died. The lock was the symptom of a check that could not see.
+
+Both tools now use `ps -axo pid=,command=` with a prefix match, which has no
+such exclusion. Claude immediately reported `PATCHED pid 1227`.
+
+### Two more fixes the audit forced
+
+* **A KILL is not instant.** After `kill -9` the launcher checked straight
+  away, saw the dying process, declared "still running" and refused to start -
+  leaving boringNotch simply *gone* rather than relaunched. It now waits for
+  the processes to actually disappear.
+* **`relaunch` has to detach.** Relaunching the app the script is running
+  inside would kill the script halfway and leave no app at all, so
+  `rbgpu-app.sh relaunch` double-forks into its own session first. This is how
+  Claude was restarted onto `fix` from inside Claude.
+
+### State
+
+    11 wrappers, all mtlswizzle.dylib + policy fix
+    Claude       PATCHED  pid 1227
+    boringNotch  PATCHED  pid 2349
+    Happ         UNPATCHED - left alone deliberately: it runs a `happd`
+                 daemon and restarting it would drop the user's tunnel
+    Safari       no wrapper possible, Apple platform binary
+    uBlock Origin Lite   App Store, sandboxed, cannot read the dylib
+
+`tools/rbgpu-app.sh verify` answers "is it really patched" from vmmap on the
+live process, which is the only form of that answer worth having (rule 20),
+and warns when no IOAccelerator is in the registry, because on an unarmed boot
+every reading is void.

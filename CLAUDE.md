@@ -255,7 +255,16 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     target process's own memory, which is the only thing that revealed it.
     `tools/mtllinear.c` works where Lilu cannot, because it edits the
     in-memory image with `vm_protect(VM_PROT_COPY)`. [2nn]
-23. **A search is an instrument too.** A grep that returns nothing is not
+23. **`pgrep` cannot see the process a script is running inside.** BSD
+    `pgrep` never matches the invoking process or **its ancestors**, so a
+    script run from Claude Code cannot see the Claude app: `pgrep -x Claude`
+    returns nothing while `ps` lists it. This is what made 2no's first launch
+    of Claude "exit cleanly with no crash report" - the launcher's
+    `running()` said no, the quit-and-wait was skipped, and the second copy
+    forwarded into Electron's single-instance lock and died. The lock was the
+    symptom; the blind check was the cause. Use
+    `ps -axo pid=,command=` with a prefix match. [2nu]
+24. **A search is an instrument too.** A grep that returns nothing is not
     evidence of absence until it has been checked against a case known to
     be present. `objdump` separates mnemonic and operands with a **tab**, so
     a space-based pattern silently matched nothing and produced a confident
