@@ -20878,3 +20878,58 @@ safely on this machine (2mv/2mw ran Claude under an injected dylib for a full
 trace). Forcing `DetermineSwizzleMode` to LINEAR inside the app is a direct
 test of whether the app's own texture layout is part of its symptom, costs no
 boot, and has a blast radius of one restartable application.
+
+## 2np (2026-10-22, boot 121) — **CLAUDE'S TEXT IS FIXED**
+
+    tools/mtllinear-app.sh Claude
+
+    mtllinear: PATCHED DetermineSwizzleMode at 0x7ffb21f25a11 (verify ok)  x5
+    user: "CLAUDE IS WORKING ... AND IS ACCELERATED"
+
+Five processes - the browser process and its helpers - every one patched and
+verified by re-reading the bytes after writing them. Boot 121, armed, with
+`-rbgpulinear` and `-rbgpumtllinear` both in boot-args.
+
+**Forcing `amdMtl_HWL_DetermineSwizzleMode` to return ADDR_SW_LINEAR inside the
+application makes its text readable.** The defect is the swizzle mode the
+userspace Metal driver chooses for client textures, and this chip does not
+address surfaces the way that choice assumes.
+
+### Why it took this long, stated plainly
+
+2lg had the answer in 2026-10-20: "client texture layout is computed entirely
+in userspace, in `AMDRadeonX6000MTLDriver`, and the kernel is never asked",
+and it filed that under "out of this plugin's reach". It was right about the
+place and wrong that it was out of reach. Three later attempts to reach it
+(2lm, 2nb, 2nm) all used Lilu's user patcher, which **cannot** touch this
+driver: it lives in the dyld shared cache with no file on disk, so a path-based
+`BinaryModInfo` patches pages that are never mapped while `onProcLoad` reports
+success (2nn). Every one of them was inert, and the only thing that ever
+revealed it was reading the target process's own memory.
+
+`tools/mtllinear.c` works because it edits the in-memory image with
+`vm_protect(..., VM_PROT_COPY)` and verifies the bytes afterwards.
+
+### Two defects, not one
+
+This also settles a caveat carried since 2mx and never dropped: the
+`screenprobe` reproducer is **not** this symptom. 2nd forced the same function
+LINEAR in that probe with every run recording `patch state: PATCHED` and the
+scrambling was unchanged - because that probe's defect is an **AppKit layer
+backing store**, which bypasses this path entirely (2nj: no IOSurfaceCreate in
+process, nothing by mach port, kernel align manager unchanged at calls=59).
+
+    defect A  client texture layout, chosen by DetermineSwizzleMode
+              -> FIXED by forcing LINEAR per process (this milestone)
+    defect B  CoreAnimation layer backing store, ~50% of allocations wrong,
+              permutation measured exactly in 2na -> STILL OPEN
+
+Keeping those apart is why the null result in 2nd did not derail this.
+
+### What is NOT yet done
+
+The fix is per-process and does not survive a relaunch: Claude has to be
+started through the launcher. Making it permanent cannot use Lilu for the
+reason above. And LINEAR is a correction, not the right answer - the proper
+fix is to make the chosen mode match what this chip actually does, which would
+also keep tiling's performance.
