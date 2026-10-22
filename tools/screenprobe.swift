@@ -62,8 +62,13 @@ let SECONDS = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3])
 }
 
 let BIG = (MODE == "big" || MODE == "bigmsaa" || MODE == "bigcpu")
-let WIDE = BIG ? 900 : 512
-let TALL = BIG ? 880 : 512
+// 2ng: geometry is the remaining difference between this reproducer and
+// Terminal, which is crisp on this machine while ordinary windows here
+// scramble about half the time. This project already has a law in which
+// corruption depends on geometry (2mn), so sweep it: RB_W and RB_H override
+// the window size.
+let WIDE = ProcessInfo.processInfo.environment["RB_W"].flatMap { Int($0) } ?? (BIG ? 900 : 512)
+let TALL = ProcessInfo.processInfo.environment["RB_H"].flatMap { Int($0) } ?? (BIG ? 880 : 512)
 let MSAA = (MODE == "msaa" || MODE == "bigmsaa")
 let VIA_IOSURFACE = (MODE == "iosurface" || MODE == "cpusurface" || MODE == "cgsurface")
 // bigcpu draws BOTH windows with CoreGraphics and never touches Metal, which
@@ -104,6 +109,25 @@ let CPU_SURFACE = (MODE == "cpusurface")
 // with the same CoreGraphics call the view uses. Clean means the surface is
 // what matters; scrambled means CoreGraphics' drawing path is.
 let CG_SURFACE = (MODE == "cgsurface")
+
+// 2ng: is this reproducer even representative?
+//
+// Terminal draws into an AppKit backing store and is CRISP on this machine,
+// while this probe's AppKit window scrambles. Same kind of surface, opposite
+// outcomes - so something about these windows differs from a real app's, and
+// the obvious candidate is that they are BORDERLESS and at .floating level,
+// which the compositor may handle differently from an ordinary window.
+//
+// If an ordinary titled window at normal level is clean, this reproducer is an
+// artefact of its own window configuration and must not be used to justify
+// spending boots. If it scrambles too, the reproducer is representative and the
+// contradiction with Terminal has to be explained some other way.
+let NORMAL_WINDOW = (MODE == "normalwin")
+// normalwin changes three things at once - style, level, and the backing
+// store's height, since a titled window's frame is taller than its content.
+// normallevel keeps the borderless style and only drops the window out of
+// .floating, which separates the level from the rest.
+let NORMAL_LEVEL = (MODE == "normallevel")
 
 // 2my. Across the first sweep the CPU window was intermittently shredded and
 // the GPU window never was - in direct-1 and msaa-2 but not in direct-2 or
@@ -418,9 +442,10 @@ func reportMetalDriverPatch() {
 
 // --- windows ----------------------------------------------------------------
 func makeWindow(_ x: Int, _ y: Int) -> NSWindow {
+    let style: NSWindow.StyleMask = NORMAL_WINDOW ? [.titled, .closable] : [.borderless]
     let w = NSWindow(contentRect: NSRect(x: x, y: y, width: WIDE, height: TALL),
-                     styleMask: [.borderless], backing: .buffered, defer: false)
-    w.level = .floating
+                     styleMask: style, backing: .buffered, defer: false)
+    w.level = (NORMAL_WINDOW || NORMAL_LEVEL) ? .normal : .floating
     w.isOpaque = true
     w.backgroundColor = .black
     return w
@@ -490,7 +515,7 @@ print("decode with: build/out/decodescreen <png> \(leftX) \(topY) \(rightX) \(to
 // Only now is the pattern actually on screen, so only now may it be captured.
 if !READY.isEmpty { try? "ready\n".write(toFile: READY, atomically: true, encoding: .utf8) }
 
-print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE)")
+print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE), normal window: \(NORMAL_WINDOW)")
 
 Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
     if CPU_REDRAW { cpuView.needsDisplay = true }
