@@ -26,9 +26,23 @@ not re-run it. 2mn found a real defect with a law that predicted 16/16
 geometries, `tools/iosurftex.m` fixes it, and 2mw proved it cannot be the cause:
 Claude issues **zero** `replaceRegion` calls and all 101 of its texture
 descriptors are `MTLStorageModePrivate`, which cannot take a CPU upload.
-What is still unmeasured, and where to look next: **MSAA resolve** (20 of those
-101 are `type=4`), texture-to-texture blit, mipmapped sampling, sRGB.
-See `docs/PROBLEM-TEXT.md`.
+Blit into tiled private textures, texture-to-texture blit, cross-consumer
+reads and Metal-to-Metal aliasing are all **measured clean** (2mx/2my).
+**Every probe before 2mx shared one blind spot**: it wrote a texture and read
+*that same texture object* back, so a consistently wrong layout reads clean.
+`tools/screenprobe.swift` is the first instrument without it - the same pattern
+in two real windows, CPU-drawn beside GPU-drawn, composited by the WindowServer
+and diffed against each other (which cancels colour management exactly).
+It found the **first controlled reproduction**: at 900x880 a *CPU-drawn* window
+was shredded while the GPU one beside it was clean, and the same window was
+clean in the run before - the only difference being that the other window had
+allocated a 900x880 4x multisample texture. Not yet believed: the old script
+killed each probe before the next, and a recycled window surface would look the
+same (rule 16), and it was one frame (rule 18).
+**Next action: run `tools/screenprobe.sh` from the user's Terminal** (it needs
+Screen Recording permission, which Claude's shell lacks) and read
+`logs/<stamp>-screenprobe/report.txt`. The `bigcpu` mode is the discriminator.
+See `docs/JOURNAL.md` 2mx/2my and `docs/PROBLEM-TEXT.md`.
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
 
