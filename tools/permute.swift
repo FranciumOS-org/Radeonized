@@ -52,7 +52,7 @@ for y in 20..<TALL where y % 64 != 0 && y % 256 != 0 {
     for x in 0..<WIDE where x % 64 != 0 && x % 256 != 0 {
         let (r, g, b) = px(gpuX + x, gpuY + y)
         rS[x & 0xff].append(r); gS[y & 0xff].append(g)
-        bS[((x >> 8) & 0xf) | (((y >> 8) & 0xf) << 4)].append(b)
+        bS[((x >> 8) & 3) | (((y >> 8) & 3) << 2)].append(b)
     }
 }
 func med(_ s: [[Int]]) -> [Int] { s.map { $0.isEmpty ? -1 : $0.sorted()[$0.count / 2] } }
@@ -77,8 +77,8 @@ for y in 20..<TALL where y % 64 != 0 && y % 256 != 0 {
         let (r, g, b) = px(cpuX + x, cpuY + y)
         let lo_x = rInv[r], lo_y = gInv[g], hi = bInv[b]
         if lo_x < 0 || lo_y < 0 || hi < 0 { continue }
-        let sx = lo_x | ((hi & 0xf) << 8)
-        let sy = lo_y | (((hi >> 4) & 0xf) << 8)
+        let sx = lo_x | ((hi & 3) << 8)
+        let sy = lo_y | (((hi >> 2) & 3) << 8)
         if sx >= WIDE || sy >= TALL { continue }
         srcX[y * WIDE + x] = sx; srcY[y * WIDE + x] = sy; decoded += 1
     }
@@ -307,3 +307,64 @@ for (num, den) in [(2,1),(1,2),(3,2),(2,3),(4,3),(3,4)] {
     }
     print(String(format: "   x%d/%d : %5.1f%%", num, den, 100.0 * Double(hits) / Double(max(1,n))))
 }
+
+print("")
+// --- is the permutation separable? ------------------------------------------
+// If sx depends only on x and sy only on y, the whole thing is two independent
+// 1-D remappings and can be tabulated outright. That is worth knowing before
+// any more address algebra.
+var xMap = [Int: Set<Int>](), yMap = [Int: Set<Int>]()
+for y in 21..<TALL { for x in 0..<WIDE {
+    let sx = srcX[y * WIDE + x]; if sx < 0 { continue }
+    xMap[x, default: []].insert(sx)
+    yMap[y, default: []].insert(srcY[y * WIDE + x])
+}}
+let xPure = xMap.values.filter { $0.count == 1 }.count
+let yPure = yMap.values.filter { $0.count == 1 }.count
+print("separability: \(xPure)/\(xMap.count) destination columns map to a single source column")
+print("              \(yPure)/\(yMap.count) destination rows map to a single source row")
+let xSizes = xMap.values.map { $0.count }.sorted()
+let ySizes = yMap.values.map { $0.count }.sorted()
+if !xSizes.isEmpty {
+    print("              source columns per dest column: min \(xSizes.first!), median \(xSizes[xSizes.count/2]), max \(xSizes.last!)")
+    print("              source rows per dest row:        min \(ySizes.first!), median \(ySizes[ySizes.count/2]), max \(ySizes.last!)")
+}
+print("")
+
+// --- the mod-8 structure seen in the samples, measured over every row -------
+print("for each destination row, the source rows' residue mod 8:")
+var rowsWithOneResidue = 0, rowsCounted = 0
+for y in stride(from: 21, to: TALL, by: 1) {
+    guard let set = yMap[y], !set.isEmpty else { continue }
+    rowsCounted += 1
+    if Set(set.map { $0 & 7 }).count == 1 { rowsWithOneResidue += 1 }
+}
+print("   \(rowsWithOneResidue)/\(rowsCounted) rows draw from a SINGLE residue class mod 8")
+for y in [21, 25, 33, 57, 121, 200, 301, 405] where yMap[y] != nil {
+    let set = yMap[y]!
+    let res = Set(set.map { $0 & 7 }).sorted()
+    print("   dest row \(y): residues \(res), source range \(set.min()!)..\(set.max()!), count \(set.count)")
+}
+print("")
+
+// --- does a single XOR explain it? ------------------------------------------
+// A pure XOR on the coordinates is the simplest remaining family and costs
+// nothing to test exhaustively.
+var bestXor = (-1, -1, 0)
+for kx in 0..<512 {
+    for ky in 0..<512 {
+        var hits = 0
+        var y = 25
+        while y < TALL {
+            var x = 1
+            while x < WIDE {
+                let sx = srcX[y * WIDE + x]
+                if sx >= 0 && sx == (x ^ kx) && srcY[y * WIDE + x] == (y ^ ky) { hits += 1 }
+                x += 23
+            }
+            y += 29
+        }
+        if hits > bestXor.2 { bestXor = (kx, ky, hits) }
+    }
+}
+print("best pure-XOR fit: x^\(bestXor.0), y^\(bestXor.1) matching \(bestXor.2) sampled pixels")

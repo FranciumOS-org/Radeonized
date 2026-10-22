@@ -47,7 +47,18 @@ let SECONDS = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3])
 // it is a stale surface left behind by a process that has exited - this
 // harness's fault, like the four instrument defects before it - and if it
 // carries the current run's tag the corruption is live.
-let TAG = CommandLine.arguments.count > 4 ? (Int(CommandLine.arguments[4]) ?? 64) & 0xff : 64
+// The stamp did its job - every scrambled capture carried the CURRENT run's
+// tag, so the corruption is live and not a stale surface - and blue is now
+// needed back for the high coordinate bits, which is what names the swizzle.
+//
+// Those high bits used to be encoded as blue values 0, 1, 16, 17: a ONE level
+// difference, which no display pipeline preserves reliably. The bit matrix
+// came out ragged in exactly the columns that depend on them. They are now
+// spaced 15 levels apart, which is survivable.
+@inline(__always) func blueFor(_ x: Int, _ y: Int) -> UInt32 {
+    let combo = ((x >> 8) & 3) | (((y >> 8) & 3) << 2)
+    return UInt32(8 + combo * 15)
+}
 
 let BIG = (MODE == "big" || MODE == "bigmsaa" || MODE == "bigcpu")
 let WIDE = BIG ? 900 : 512
@@ -90,7 +101,7 @@ let GPU_ONCE = (MODE == "static" || MODE == "swap")
     if (x % 256 == 0) || (y % 256 == 0) { return 0xffff_ffff }
     if (x % 64 == 0) || (y % 64 == 0) { return 0xff80_8080 }
     let r = UInt32(x & 0xff), g = UInt32(y & 0xff)
-    return 0xff00_0000 | (r << 16) | (g << 8) | UInt32(TAG)
+    return 0xff00_0000 | (r << 16) | (g << 8) | blueFor(x, y)
 }
 
 // --- the CPU window ---------------------------------------------------------
@@ -146,15 +157,15 @@ vertex float4 vs(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2);
     return float4(p * 2.0 - 1.0, 0.0, 1.0);
 }
-fragment float4 fs(float4 pos [[position]], constant uint &wide [[buffer(0)]],
-                   constant uint &tag [[buffer(1)]]) {
+fragment float4 fs(float4 pos [[position]], constant uint &wide [[buffer(0)]]) {
     uint x = uint(pos.x), y = uint(pos.y);
     if (y < 16u) { float v = float(min(255u, x * 256u / wide)) / 255.0; return float4(v, v, v, 1); }
     if ((x % 256u == 0u) || (y % 256u == 0u)) return float4(1, 1, 1, 1);
     if ((x % 64u  == 0u) || (y % 64u  == 0u)) return float4(0.5020, 0.5020, 0.5020, 1);
     float r = float(x & 0xffu) / 255.0;
     float g = float(y & 0xffu) / 255.0;
-    return float4(r, g, float(tag) / 255.0, 1);
+    uint combo = ((x >> 8) & 3u) | (((y >> 8) & 3u) << 2);
+    return float4(r, g, float(8u + combo * 15u) / 255.0, 1);
 }
 """
 
@@ -206,8 +217,6 @@ func renderPattern(into target: MTLTexture, present: MTLDrawable?) {
     e.setRenderPipelineState(pso)
     var w = UInt32(WIDE)
     e.setFragmentBytes(&w, length: 4, index: 0)
-    var tg = UInt32(TAG)
-    e.setFragmentBytes(&tg, length: 4, index: 1)
     e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     e.endEncoding()
     if target.storageMode == .managed {
@@ -334,7 +343,7 @@ print("decode with: build/out/decodescreen <png> \(leftX) \(topY) \(rightX) \(to
 // Only now is the pattern actually on screen, so only now may it be captured.
 if !READY.isEmpty { try? "ready\n".write(toFile: READY, atomically: true, encoding: .utf8) }
 
-print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE), tag \(TAG)")
+print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE)")
 
 Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
     if CPU_REDRAW { cpuView.needsDisplay = true }
