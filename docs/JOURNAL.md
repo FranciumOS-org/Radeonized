@@ -20713,3 +20713,70 @@ userspace swizzle chooser.
 What remains: the layout of a CoreAnimation layer backing store, decided
 somewhere this plugin has not yet reached, and worsening with each additional
 backing store a process allocates.
+
+## 2nj (2026-10-22, boot 118) — window backing stores never reach the kernel, and our own lever is a suspect
+
+### Where a layer backing store is NOT
+
+Watched from inside the process with `tools/surfwatch.c`, which interposes
+IOSurfaceCreate and IOSurfaceLookupFromMachPort:
+
+    1, 2 and 4 windows   ->  exactly ONE IOSurfaceCreate, always 512x512 id=108
+                             ZERO surfaces arriving by mach port
+
+The single create does not scale with the window count, so it is incidental.
+Layer backing stores are neither created as IOSurfaces in this process nor
+passed into it from the WindowServer by port.
+
+### And not in the kernel either
+
+`rbgpu-si` and `rbgpu-surf` are read straight from NVRAM, which needs no sudo.
+Before creating four 512x512 windows and after:
+
+    rbgpu-surf  calls=59      (before)
+    rbgpu-surf  calls=59      (after)
+
+Unchanged. **Window backing stores do not pass through the kernel's align
+manager.** That closes the last place this plugin can currently see.
+
+### What the kernel DOES see, and why it matters
+
+All 59 calls, with their per-surface rows:
+
+    1920x1080 b32 f26 t1 fl20 s0->1b
+    1920x1080 b32 f26 t1 fl20 s0->1b
+    8192x4320 b32 f26 t1 fl0  s9->1b
+    1920x1080 b32 f26 t1 fl0  s9->1b
+    64x64     b32 f26 t1 fl0  s9->16
+    forced=59
+
+The 1920x1080 surfaces are screen-sized: the WindowServer's own compositing
+buffers. Apple's chooser returns **0x1b = ADDR_SW_64KB_R_X** for them, and
+`forced=59` says `-rbgpulinear` rewrites every one of them to LINEAR.
+
+### The suspicion that follows
+
+Every window's pixels reach the screen through those compositing surfaces. We
+force them to a layout Apple did not choose, for all 59 of them. If anything
+downstream still addresses them as 64KB_R_X, the result is a permutation of
+whole micro tiles with their contents intact - which is exactly what 2na
+measured.
+
+`CLAUDE.md` already records `-rbgpulinear` as "a SUSPECT in the text defect
+(2mm), not neutral", and 2mm's pending test - remove it and see - was never
+run. This session has built the instrument that can read the answer precisely
+instead of by eye.
+
+**The experiment: remove `-rbgpulinear`, reboot armed, and re-run
+`tools/screenprobe.sh`.**
+
+    windows go clean    we have been causing this ourselves, and the lever
+                        that fixes widgets and chrome breaks window content.
+                        The two classes need separating rather than one global
+                        force.
+    unchanged           the force is not the cause and the kernel-side
+                        compositing surfaces are exonerated, which is worth
+                        knowing for the same single boot.
+
+Either way it costs one boot and settles a suspicion that has been carried,
+unmeasured, since 2mm.
