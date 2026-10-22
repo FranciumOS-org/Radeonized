@@ -31,28 +31,58 @@ ORIG_SIG="55 48 89 e5 41"
 say() { echo "$@"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Recovery does NOT mount Preboot under /Volumes. Measured on this machine
+# (2026-10-22, in Recovery): it is already mounted at /System/Volumes/Preboot,
+# READ-ONLY, on a device whose number differs from the booted system's
+# (disk3s2 there, disk2s2 when booted). Mounting it again at /Volumes/Preboot
+# fails with "Resource busy" because it is already mounted. So look in both
+# places, never assume a device number, and remount read-write in place.
+SEARCH_DIRS="/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld
+/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
 find_dyld_dir() {
+    for d in $SEARCH_DIRS; do
+        [ -d "$d" ] && { echo "$d"; return 0; }
+    done
     for d in /Volumes/*/Cryptexes/OS/System/Library/dyld; do
         [ -d "$d" ] && { echo "$d"; return 0; }
     done
     return 1
 }
 find_backup_dir() {
-    for d in /Volumes/*/Users/*/rbgpu-cache-backup; do
+    for d in /Volumes/*/Users/*/rbgpu-cache-backup \
+             /System/Volumes/Data/Users/*/rbgpu-cache-backup \
+             /Users/*/rbgpu-cache-backup; do
         [ -d "$d" ] && { echo "$d"; return 0; }
     done
     return 1
 }
+# mount point that actually holds a path, without assuming a device number
+mount_point_of() { df "$1" 2>/dev/null | tail -1 | awk '{for(i=9;i<=NF;i++)printf "%s%s",$i,(i<NF?" ":"")}'; }
 # first five bytes of the function, without python
 sig_at() { dd if="$1" bs=4096 skip=$BLK count=1 2>/dev/null | od -An -tx1 -j $IN -N 5 | tr -s ' ' | sed 's/^ //;s/ $//'; }
 
-DIR=$(find_dyld_dir) || die "no Cryptexes dyld directory under /Volumes - run: diskutil mount Preboot"
-BK=$(find_backup_dir) || die "no rbgpu-cache-backup under /Volumes - mount your Data volume"
+DIR=$(find_dyld_dir) || {
+    say "searched:"; for d in $SEARCH_DIRS /Volumes/*/Cryptexes/OS/System/Library/dyld; do say "  $d"; done
+    say ""; say "mounted apfs volumes:"; mount | grep apfs | sed 's/^/  /'
+    die "no Cryptexes dyld directory found. If Preboot is not listed above, run: diskutil mount Preboot"
+}
+BK=$(find_backup_dir) || die "no rbgpu-cache-backup found - mount your Data volume (diskutil mount \"MACOS - Data\")"
 SUB="$DIR/$SUBNAME"
 say "dyld directory : $DIR"
 say "backup folder  : $BK"
 [ -f "$SUB" ] || die "no $SUBNAME in $DIR"
 say "current bytes  : $(sig_at "$SUB")"
+
+# Recovery mounts Preboot read-only. Remount in place; mounting it a second
+# time elsewhere just returns "Resource busy".
+MP=$(mount_point_of "$DIR")
+say "mount point    : ${MP:-unknown}"
+if mount | grep -F " on ${MP} " | grep -q read-only; then
+    say "it is mounted READ-ONLY - remounting read-write ..."
+    mount -uw "$MP" || die "could not remount $MP read-write"
+    mount | grep -F " on ${MP} " | grep -q read-only && die "$MP is STILL read-only"
+    say "remounted read-write."
+fi
 
 case "${1:-}" in
 install) SRC="$BK/patched.03";                 WANT="$PATCHED_SIG"; WORD="patched" ;;
