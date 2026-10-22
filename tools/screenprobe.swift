@@ -40,11 +40,15 @@ let MODE = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "direct"
 let READY = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
 let SECONDS = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 12.0 : 12.0
 
-let BIG = (MODE == "big" || MODE == "bigmsaa")
+let BIG = (MODE == "big" || MODE == "bigmsaa" || MODE == "bigcpu")
 let WIDE = BIG ? 900 : 512
 let TALL = BIG ? 880 : 512
 let MSAA = (MODE == "msaa" || MODE == "bigmsaa")
 let VIA_IOSURFACE = (MODE == "iosurface")
+// bigcpu draws BOTH windows with CoreGraphics and never touches Metal, which
+// separates "a large window backing store corrupts" from "allocating a large
+// GPU texture corrupts something else".
+let CPUONLY = (MODE == "bigcpu")
 
 // The one definition of the pattern, shared by the CPU and GPU paths, so a
 // difference on screen is a difference in how the pixels travelled rather than
@@ -237,7 +241,9 @@ cpuWin.contentView = CPUView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL
 
 let metalView = MetalView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
 let surfaceView = SurfaceView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
-if VIA_IOSURFACE {
+if CPUONLY {
+    gpuWin.contentView = CPUView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
+} else if VIA_IOSURFACE {
     surfaceView.wantsLayer = true
     gpuWin.contentView = surfaceView
 } else {
@@ -250,17 +256,22 @@ if VIA_IOSURFACE {
 cpuWin.orderFrontRegardless()
 gpuWin.orderFrontRegardless()
 
-guard dev != nil, buildPipeline() else {
-    print("NO METAL DEVICE or pipeline failed - this boot has no accelerator (rule 14).")
-    print("  mode=\(MODE)")
-    exit(2)
-}
-if VIA_IOSURFACE && !surfaceView.prepare() {
-    print("IOSurface path unavailable (rule 14: saying so rather than drawing nothing)")
-    exit(2)
+if !CPUONLY {
+    guard dev != nil, buildPipeline() else {
+        print("NO METAL DEVICE or pipeline failed - this boot has no accelerator (rule 14).")
+        print("  mode=\(MODE)")
+        exit(2)
+    }
+    if VIA_IOSURFACE && !surfaceView.prepare() {
+        print("IOSurface path unavailable (rule 14: saying so rather than drawing nothing)")
+        exit(2)
+    }
 }
 
-func draw() { if VIA_IOSURFACE { surfaceView.render() } else { metalView.render() } }
+func draw() {
+    if CPUONLY { return }
+    if VIA_IOSURFACE { surfaceView.render() } else { metalView.render() }
+}
 draw()
 
 let topY = sh - originY - TALL

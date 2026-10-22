@@ -1,21 +1,30 @@
 #!/bin/sh
-# screenprobe.sh (2mx) — show a known pattern on the real screen through each
-# production path in turn, capture it, and decode what the compositor did.
+# screenprobe.sh (2my) — a known pattern in real windows, captured and decoded.
 #
-# Must be run from the user's Terminal, not from Claude's shell: screencapture
-# needs Screen Recording permission, and Claude's shell does not have it
-# ("could not create image from display"). Terminal does.
+# Run from the user's Terminal, not Claude's shell: screencapture needs Screen
+# Recording permission and Claude's shell does not have it. No sudo, loads
+# nothing, changes nothing. Leaves PNGs and a report in logs/.
 #
-# No sudo, loads nothing, changes nothing. Leaves PNGs and a report in logs/.
+# Modes, each a two-window capture:
+#   direct     CPU control | plain CAMetalLayer render       512x512
+#   msaa       CPU control | 4x multisample, resolved        512x512
+#   iosurface  CPU control | render to IOSurface -> CALayer  512x512
+#   big        CPU control | plain render                    900x880
+#   bigmsaa    CPU control | 4x multisample                  900x880
+#   bigcpu     CPU control | CPU - no Metal in the process   900x880
 #
-# Modes, each a two-window capture - the CPU-drawn control beside one GPU path:
-#   direct     a plain CAMetalLayer render           512x512
-#   msaa       4x multisample, resolved              512x512
-#   iosurface  render to IOSurface -> CALayer        512x512
-#   big        a plain render, large                 900x880
-#   bigmsaa    4x multisample, large                 900x880
+# Each mode runs REPEATS times and is captured twice per run, because the one
+# corruption seen so far appeared in a single frame and a single frame is not a
+# result (rule 18: do not build a table from n=1 rows).
+#
+# The probe is allowed to exit on its own rather than being killed. An abruptly
+# killed process's window surface being recycled while still on screen would
+# look exactly like the corruption being hunted, and that has to be excluded
+# before the chip is blamed (rule 16: the instrument is a suspect).
 set -e
 cd "$(dirname "$0")/.."
+MODES="${MODES:-bigcpu big bigmsaa direct msaa iosurface}"
+REPEATS="${REPEATS:-2}"
 OUT="logs/$(date +%Y%m%d-%H%M%S)-screenprobe"
 mkdir -p "$OUT"
 REPORT="$OUT/report.txt"
@@ -23,48 +32,61 @@ REPORT="$OUT/report.txt"
 [ -x build/out/screenprobe ] || make screenprobe
 [ -x build/out/decodescreen ] || make decodescreen
 
-for MODE in direct msaa iosurface big bigmsaa; do
-    rm -f "$OUT/ready-$MODE"
-    ./build/out/screenprobe "$MODE" "$OUT/ready-$MODE" 20 > "$OUT/geom-$MODE.txt" 2>&1 &
+for MODE in $MODES; do
+  R=1
+  while [ $R -le $REPEATS ]; do
+    TAG="$MODE-$R"
+    rm -f "$OUT/ready-$TAG"
+    # 5 seconds up, then it terminates itself in an orderly way
+    ./build/out/screenprobe "$MODE" "$OUT/ready-$TAG" 5 > "$OUT/geom-$TAG.txt" 2>&1 &
     PROBE=$!
 
     i=0
-    while [ ! -f "$OUT/ready-$MODE" ]; do
+    while [ ! -f "$OUT/ready-$TAG" ]; do
         i=$((i + 1))
         if [ $i -gt 400 ]; then
-            echo "mode $MODE never reported the pattern on screen; its output was:" | tee -a "$REPORT"
-            cat "$OUT/geom-$MODE.txt" | tee -a "$REPORT"
+            echo "$TAG never reported the pattern on screen; output was:" | tee -a "$REPORT"
+            cat "$OUT/geom-$TAG.txt" | tee -a "$REPORT"
             kill $PROBE 2>/dev/null || true
+            R=$((R + 1))
             continue 2
         fi
         sleep 0.1
     done
     sleep 0.6
 
-    screencapture -x "$OUT/$MODE.png" || {
-        echo "screencapture failed - this shell lacks Screen Recording permission."
-        echo "Grant it in System Settings > Privacy & Security >"
-        echo "Screen & System Audio Recording, then run this again."
-        kill $PROBE 2>/dev/null || true
-        exit 1
-    }
-    kill $PROBE 2>/dev/null || true
-    wait $PROBE 2>/dev/null || true
+    for n in a b; do
+        screencapture -x "$OUT/$TAG$n.png" || {
+            echo "screencapture failed - this shell lacks Screen Recording permission."
+            echo "Grant it in System Settings > Privacy & Security >"
+            echo "Screen & System Audio Recording, then run this again."
+            exit 1
+        }
+        sleep 0.8
+    done
 
-    # the probe prints the exact rectangles it used, so nothing is guessed here
-    ARGS=$(sed -n 's/^decode with: build\/out\/decodescreen <png> //p' "$OUT/geom-$MODE.txt")
+    wait $PROBE 2>/dev/null || true   # orderly exit, not a kill
+    sleep 1                            # let the WindowServer settle
+
+    ARGS=$(sed -n 's/^decode with: build\/out\/decodescreen <png> //p' "$OUT/geom-$TAG.txt")
     {
-        echo "================ mode: $MODE ================"
-        cat "$OUT/geom-$MODE.txt"
-        echo "----"
+        echo "================ $TAG ================"
         if [ -n "$ARGS" ]; then
-            ./build/out/decodescreen "$OUT/$MODE.png" $ARGS
+            for n in a b; do
+                printf '  capture %s: ' "$n"
+                ./build/out/decodescreen "$OUT/$TAG$n.png" $ARGS \
+                  | sed -n 's/^pixels differing by more than 2\/255 between the two windows: /differ=/p;s/^  largest single-channel difference anywhere: /  maxdiff=/p;s/^  rows touched: /  rows=/p' \
+                  | tr '\n' ' '
+                echo ""
+            done
         else
-            echo "no geometry line - the probe did not get far enough to print one"
+            echo "  no geometry line; the probe did not get that far"
+            cat "$OUT/geom-$TAG.txt"
         fi
-        echo ""
     } 2>&1 | tee -a "$REPORT"
+    R=$((R + 1))
+  done
 done
 
-echo ""
+echo "" | tee -a "$REPORT"
 echo "report: $REPORT"
