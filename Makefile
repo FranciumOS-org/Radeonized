@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump mtllinear vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -143,6 +143,12 @@ $(OUT)/mtllinear.dylib: tools/mtllinear.c | $(OUT)
 surfdump: $(OUT)/surfdump
 $(OUT)/surfdump: tools/surfdump.c | $(OUT)
 	clang -O2 -Wall -o $@ $< -framework IOSurface -framework CoreFoundation
+
+# surfwatch (2nj): watch IOSurfaceCreate in-process to see what CoreAnimation
+# asks for when it makes a layer backing store.
+surfwatch: $(OUT)/surfwatch.dylib
+$(OUT)/surfwatch.dylib: tools/surfwatch.c | $(OUT)
+	clang -dynamiclib -O2 -Wall -o $@ $< -framework IOSurface -framework CoreFoundation
 
 # texprobe: the userspace texture-upload probe the text work is measured with.
 texprobe: $(OUT)/texprobe
