@@ -30,19 +30,25 @@ Blit into tiled private textures, texture-to-texture blit, cross-consumer
 reads and Metal-to-Metal aliasing are all **measured clean** (2mx/2my).
 **Every probe before 2mx shared one blind spot**: it wrote a texture and read
 *that same texture object* back, so a consistently wrong layout reads clean.
-`tools/screenprobe.swift` is the first instrument without it - the same pattern
-in two real windows, CPU-drawn beside GPU-drawn, composited by the WindowServer
-and diffed against each other (which cancels colour management exactly).
-It found the **first controlled reproduction**: at 900x880 a *CPU-drawn* window
-was shredded while the GPU one beside it was clean, and the same window was
-clean in the run before - the only difference being that the other window had
-allocated a 900x880 4x multisample texture. Not yet believed: the old script
-killed each probe before the next, and a recycled window surface would look the
-same (rule 16), and it was one frame (rule 18).
-**Next action: run `tools/screenprobe.sh` from the user's Terminal** (it needs
-Screen Recording permission, which the assistant's shell lacks) and read
-`logs/<stamp>-screenprobe/report.txt`. The `bigcpu` mode is the discriminator.
-See `docs/JOURNAL.md` 2mx/2my and `docs/PROBLEM-TEXT.md`.
+`tools/screenprobe.sh` is the first instrument without it - the same
+self-locating pattern in two real windows, CPU-drawn beside GPU-drawn,
+composited by the WindowServer and diffed against each other, which cancels
+colour management exactly. **Run it from the user's Terminal** (it needs Screen
+Recording permission, which the assistant's shell lacks).
+**It reproduces a real defect on demand** (2na): a freshly drawn CoreGraphics
+window backing store comes out rearranged in about half of all runs,
+mode-independent, with a byte-identical signature every time, while the
+GPU-rendered window beside it is never touched. A per-run stamp in the blue
+channel proved it is live and not a stale surface.
+`tools/bitfit.swift` extracts the permutation's XOR-linear bit matrix
+(validated: identity and 100% on a known-clean window). **x and y bits swap
+into each other**, so it is tiling-shaped - but 64KB_S, 64KB_S_X and 4KB_D all
+fit 0.00%, and the matrix explains 94.04%, not ~100%. The mode is NOT named
+yet and no fix is derived from it. It reproduces with `-rbgpulinear` already
+in boot-args, which is evidence that lever does not reach window backing
+stores - the likeliest reason it fixed Terminal and never fixed the assistant.
+Next: locate the residual 6%, get a 100% model, then match it against the
+GFX10 equations. See `docs/JOURNAL.md` 2mx/2my/2mz/2na.
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
 

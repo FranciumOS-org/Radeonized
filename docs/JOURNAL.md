@@ -20371,3 +20371,80 @@ Next, in order, all userspace and needing no boot:
    AddrLib notes in `docs/APPLE-STACK.md`. Naming the mode names the fix.
 2. Find what decides tiled versus linear for a window backing store, since the
    same window is clean in 11 of 16 runs.
+
+## 2na (2026-10-22) — the corruption is live, and the map is tiling-shaped
+
+### The harness is cleared, at last
+
+Every run stamped the blue channel with a distinct value. Blue was constant
+across a window, so it survives any rearrangement of the pixels and names the
+run that PRODUCED the surface. In all seven scrambled captures the CPU window
+carried the **current** run's stamp:
+
+    static-2 -> 56   swap-1 -> 128   swap-3 -> 176   refresh-2 -> 8
+    refresh-3 -> 32  refresh-4 -> 56  direct-1 -> 80
+
+Not a stale surface from an exited process. After five instrument defects in
+one session this one is real: a freshly drawn CoreGraphics window backing
+store, rearranged, mode-independent, in roughly half of all runs, with a
+byte-identical signature (84 row jumps, 92 column jumps) every time.
+
+### What the rearrangement is
+
+`tools/bitfit.swift` extracts the XOR-linear bit matrix of the permutation,
+measuring each column by toggling one bit over thousands of reference points
+and taking the mode (rule 18, after an earlier one-sample-per-bit attempt
+produced a ragged table). Validated against a window known to be clean, where
+it returns the identity matrix and predicts 100.00%.
+
+With `p = y*512 + x`, so bits 0-8 are x and 9-17 are y:
+
+    x0 -> x0        y0 -> y0
+    x1 -> x1        y1 -> y1
+    x2 -> x2        y2 -> y2
+    x3 -> y5        y3 -> x5
+    x4 -> x4        y4 -> y4
+    x5 -> y6, x3    y5 -> y6
+    x6 -> y3,y4,x4  y6 -> y6,y4,x6,x4
+    x7 -> y5,y6,x6,x7
+    x8 -> y4,x8,x4  y7 -> y7,y6,y3,x6,x5
+                    y8 -> y8,y4,x4,x3
+
+**x and y bits swap into each other.** That is what a tiled layout does, and it
+is why linear, pitch and scale models all fitted at 0.00%, and why nothing
+stayed inside its own 128x128 tile under the assumption of an untiled surface.
+The named modes still do not fit: 64KB_S, 64KB_S_X and 4KB_D all scored 0.00%
+in both directions.
+
+### Why the matrix is believed but the mode is not yet named
+
+The model predicts **94.04%** of decoded pixels, not ~100%. Two things were
+done before accepting that as structure rather than noise:
+
+- The high coordinate bits had been encoded in blue as the values 0, 1, 16 and
+  17 - a ONE level difference, which no display pipeline preserves. They were
+  respaced 15 levels apart (8, 23, 68, 83) and the capture verified to carry
+  the new values.
+- The matrix was re-extracted from the new capture and came out **identical to
+  the same hex digits, with the same agreement percentages**, 94-97% per column.
+
+Two different encodings through two different captures agreeing exactly means
+the residual 6% is not decode error. It is either a second term the XOR-linear
+form cannot express, or two populations in the same surface. Until that is
+resolved the mode is NOT named, and no fix is derived from this matrix.
+
+### Standing
+
+Real, reproducible on demand, deterministic, tiling-shaped, 94% explained by a
+bit matrix, mode unnamed. It reproduces with `-rbgpulinear` already in
+boot-args, which is direct evidence that lever does not reach this surface
+class - and that is the likeliest reason it fixed Terminal and never fixed
+the assistant.
+
+Next, in order:
+1. Find where the residual 6% lives - whether it is concentrated in regions or
+   spread - which decides between "a missing term" and "two populations".
+2. With a 100% model, match it against the GFX10 equations rather than the
+   three hand-coded candidates.
+3. Only then: whether the lever that forces LINEAR can be made to reach window
+   backing stores.
