@@ -32,6 +32,7 @@
 import Cocoa
 import Metal
 import QuartzCore
+import MachO
 
 setvbuf(stdout, nil, _IONBF, 0)   // rule 14: the first run lost its output to buffering
 
@@ -273,6 +274,75 @@ final class SurfaceView: NSView {
     }
 }
 
+// --- is this process's Metal driver actually patched? -----------------------
+//
+// Rule 20: a hook that reports ARMED is not evidence that a patch applied. The
+// 2lm/2nb user patch rewrites `amdMtl_HWL_DetermineSwizzleMode` inside
+// AMDRadeonX6000MTLDriver to return ADDR_SW_LINEAR, and Lilu's user patcher
+// has no way to report back into the kext. The plugin's own log is a ring
+// buffer that had already rotated past the registration line by the time it
+// was read, so NVRAM cannot answer this either.
+//
+// The process can answer it about itself: look at the bytes. Either the
+// original prologue is there or the stub is.
+func reportMetalDriverPatch() {
+    let find: [UInt8] = [0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                         0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC,
+                         0x88, 0x00, 0x00, 0x00, 0x45, 0x89, 0xCD, 0x44,
+                         0x89, 0xC3, 0x48, 0x89, 0x4D, 0xD0, 0x49, 0x89]
+    let repl: [UInt8] = [0x48, 0x8B, 0x44, 0x24, 0x08, 0xC7, 0x00, 0x00,
+                         0x00, 0x00, 0x00, 0x31, 0xC0, 0xC3]
+
+    for i in 0..<_dyld_image_count() {
+        guard let nameC = _dyld_get_image_name(i) else { continue }
+        let name = String(cString: nameC)
+        guard name.contains("AMDRadeonX6000MTLDriver") else { continue }
+        guard let hdr = _dyld_get_image_header(i) else { continue }
+        let slide = _dyld_get_image_vmaddr_slide(i)
+
+        // walk the load commands for __TEXT
+        var base: UnsafeRawPointer? = nil
+        var size = 0
+        var cmd = UnsafeRawPointer(hdr).advanced(by: MemoryLayout<mach_header_64>.size)
+        for _ in 0..<Int(hdr.pointee.ncmds) {
+            let lc = cmd.assumingMemoryBound(to: load_command.self)
+            if lc.pointee.cmd == UInt32(LC_SEGMENT_64) {
+                let seg = cmd.assumingMemoryBound(to: segment_command_64.self)
+                let segName = withUnsafeBytes(of: seg.pointee.segname) { raw -> String in
+                    String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                }
+                if segName == "__TEXT" {
+                    base = UnsafeRawPointer(bitPattern: UInt(seg.pointee.vmaddr) + UInt(bitPattern: slide))
+                    size = Int(seg.pointee.vmsize)
+                }
+            }
+            cmd = cmd.advanced(by: Int(lc.pointee.cmdsize))
+        }
+        guard let b = base, size > 64 else {
+            print("mtl-patch: found the driver but could not read its __TEXT"); return
+        }
+        let bytes = b.assumingMemoryBound(to: UInt8.self)
+        var foundFind = 0, foundRepl = 0
+        for o in 0..<(size - 32) {
+            if bytes[o] == find[0] {
+                var m = true
+                for k in 0..<32 where bytes[o + k] != find[k] { m = false; break }
+                if m { foundFind += 1 }
+            }
+            if bytes[o] == repl[0] {
+                var m = true
+                for k in 0..<14 where bytes[o + k] != repl[k] { m = false; break }
+                if m { foundRepl += 1 }
+            }
+        }
+        print("mtl-patch: \(name)")
+        print("mtl-patch: original prologue present \(foundFind)x, LINEAR stub present \(foundRepl)x")
+        print("mtl-patch: -> \(foundRepl > 0 && foundFind == 0 ? "PATCHED" : foundFind > 0 ? "NOT PATCHED" : "INCONCLUSIVE")")
+        return
+    }
+    print("mtl-patch: AMDRadeonX6000MTLDriver is not loaded in this process")
+}
+
 // --- windows ----------------------------------------------------------------
 func makeWindow(_ x: Int, _ y: Int) -> NSWindow {
     let w = NSWindow(contentRect: NSRect(x: x, y: y, width: WIDE, height: TALL),
@@ -332,6 +402,10 @@ func draw() {
     if VIA_IOSURFACE { surfaceView.render() } else { metalView.render() }
 }
 draw()
+
+// Only meaningful once Metal has loaded the driver, which creating the device
+// and the pipeline has now done.
+reportMetalDriverPatch()
 
 let topY = sh - originY - TALL
 print("mode        \(MODE)")

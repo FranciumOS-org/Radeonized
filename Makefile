@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit mtllinear vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -131,6 +131,12 @@ $(OUT)/permute: tools/permute.swift | $(OUT)
 bitfit: $(OUT)/bitfit
 $(OUT)/bitfit: tools/bitfit.swift | $(OUT)
 	swiftc -O $< -o $@
+
+# mtllinear (2nc): force DetermineSwizzleMode to LINEAR in ONE process, with
+# no kext and no reboot. Injected per process (rule 21), never via launchd.
+mtllinear: $(OUT)/mtllinear.dylib
+$(OUT)/mtllinear.dylib: tools/mtllinear.c | $(OUT)
+	clang -dynamiclib -O2 -Wall -o $@ $<
 
 # texprobe: the userspace texture-upload probe the text work is measured with.
 texprobe: $(OUT)/texprobe
