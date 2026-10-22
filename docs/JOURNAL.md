@@ -20780,3 +20780,43 @@ instead of by eye.
 
 Either way it costs one boot and settles a suspicion that has been carried,
 unmeasured, since 2mm.
+
+## 2nk (2026-10-22, boot 119) — `-rbgpulinear` is PROTECTIVE, not the cause
+
+Boot 119, armed (`rbgpu-boot` 118 -> 119, `rbgpu-arm` consumed), with
+`-rbgpulinear` removed. The kernel hook confirms the change at the chip rather
+than from boot-args alone: `lin=2 forced=0`, so the WindowServer's compositing
+surfaces now keep Apple's own choice of `0x1b` (ADDR_SW_64KB_R_X) instead of
+being rewritten to LINEAR.
+
+    with    -rbgpulinear   gpu window NEVER scrambled, cpu window ~50%
+    without -rbgpulinear   BOTH scrambled, 8 of 8
+
+And the CPU window's signature **changed**: 84 row jumps / 92 column jumps
+becomes 77 / 58. It is a different permutation, not the same defect carrying
+on unaffected.
+
+So the force is exonerated. Removing it does not reveal a cleaner machine - it
+breaks the GPU-rendered window too, which had been clean in every run and every
+mode for two days. 2mm's suspicion, carried in `docs/RULES.md` since then as
+"`-rbgpulinear` is now a SUSPECT in the text defect, not neutral", is settled
+negative.
+
+What it positively establishes: **Apple's chosen 64KB_R_X addressing does not
+match what this chip actually does.** Forcing those compositing surfaces LINEAR
+removes the disagreement for GPU-rendered content entirely, and for about half
+of CPU-drawn window content. The residual - a CoreAnimation layer backing store
+that bypasses every allocation path this plugin can see (2nj) - is what LINEAR
+does not reach.
+
+### Instrument note
+
+`bitfit` was run on this capture and reported 0.38%. That number is void, not a
+finding: it builds its colour LUT from the window it is told is clean, and on
+this boot neither window is. It needs a known-good reference in the same frame
+and there was none.
+
+### Standing
+
+`-rbgpulinear` belongs IN, now for a measured reason rather than an observed
+~80%. Restored at the end of this boot.
