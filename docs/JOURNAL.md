@@ -21408,3 +21408,77 @@ proven unique in this driver's `__text` (2lm counted it), the byte arithmetic
 is checked against the live process's own memory, and the whole thing can be
 written and validated against a COPY of `.03` before anything on the volume is
 touched.
+
+## 2nx (2026-10-22, boot 123) — the cryptex is immutable from a running system
+
+2nw built and verified the shared-cache patch. Installing it does not work
+from a booted macOS, and the reason is not any of the things that were
+checked first.
+
+### The install failed silently, and the script was at fault
+
+First attempt reported "installed. REBOOT" and the live cache still held the
+original prologue afterwards. The script printed that without reading
+anything back - **rule 20, broken by the tool whose whole job is to apply a
+patch.** What it had actually done was back up the original and write its
+checksum, then stop. It could not say which step failed because it checked
+none of them. Fixed: every step checked, a failed staging copy prints `df`,
+the live file is re-verified after the rename, and a live file that does not
+carry the patch is rolled back automatically.
+
+With that in place the real error appeared:
+
+    cp .../dyld_shared_cache_x86_64h.03.new : Read-only file system
+
+### What it is not
+
+Measured, in this order, and all of them exonerated:
+
+    /System/Library/dyld/                    EMPTY - the cryptex copy is the
+                                             only one, so not the wrong file
+    Cryptexes/OS                             not a mount; same dev as Preboot
+    /System/Cryptexes/OS                     a symlink to the Preboot copy
+    manifests, .im4m, .dmg near the cryptex  none
+    log for cryptex activity this boot       none
+    statvfs(.../dyld)                        ST_RDONLY = False
+    diskutil info Preboot                    Volume Read-Only: No
+    df on the directory                      /dev/disk2s2, 35 GB free
+    csrutil status                           Filesystem Protections: DISABLED
+    csrutil authenticated-root status        disabled
+    csr-active-config                        0xA43, ALLOW_UNRESTRICTED_FS SET
+
+**And CLAUDE.md was wrong about the last one.** It has said `csr-active-config
+0xA03` since the file was written; NVRAM reads `43 0a 00 00` = **0xA43**
+(UNTRUSTED_KEXTS | UNRESTRICTED_FS | UNRESTRICTED_NVRAM | UNAPPROVED_KEXTS |
+UNAUTHENTICATED_ROOT). Corrected.
+
+### What it is
+
+The dyld directory and the subcache carry the `restricted` flag. Clearing it
+fails the same way:
+
+    chflags norestricted .../dyld : Read-only file system
+
+An explicit `mount -uw /System/Volumes/Preboot` changes nothing. **`chflags`
+failing identically to `cp` is the finding** - it is not the file and not the
+disk, it is the subtree, and the policy holding it is governed by none of the
+switches above. Apple protects cryptex content by a mechanism that SIP's
+filesystem protections, authenticated-root and the CSR bits do not reach.
+
+### The route that remains
+
+Recovery, where that policy is not in force. `tools/cachepatch-recovery.sh`
+does it with no python and no perl, because Recovery has shipped neither
+since 12.3: it finds the Preboot and Data volumes under `/Volumes` itself,
+refuses unless the source matches the target in size, checks the source
+carries the right 5-byte signature at block 36149 offset 2577 via `dd | od`,
+copies, renames, restores the flags and then **reads the bytes back out of the
+installed file** rather than announcing success. `install` and `restore` are
+the same code path with different sources and different expected signatures.
+Self-tested here against both files: `e9 ea ff 3b 00` for the patched one,
+`55 48 89 e5 41` for the original.
+
+Doing the install from Recovery has a property worth naming: it exercises the
+exact path the rollback needs. Rule 21 was learned from a recovery procedure
+that had never been run in the situation it existed for; this one will have
+been run once before it is ever needed.
