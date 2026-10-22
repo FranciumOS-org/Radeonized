@@ -44,6 +44,21 @@ REPORT="$OUT/report.txt"
 [ -x build/out/screenprobe ] || make screenprobe
 [ -x build/out/decodescreen ] || make decodescreen
 
+# Say what this sweep actually is, at the top of its own report. A run was
+# read as the cpusurface discriminator when it was in fact the default mode
+# list, and only the run NAMES gave it away. An instrument that does not state
+# its own configuration invites that.
+#
+# It also matters because the defect rate DRIFTS between sweeps: two identical
+# MTLLINEAR=1 sweeps gave 14/32 and 30/32 scrambled captures. Comparing one
+# sweep against another is therefore weak evidence either way, and modes that
+# are to be compared must be interleaved inside a single sweep, which the mode
+# loop below does by alternating them.
+{
+    echo "modes:   $MODES"
+    echo "repeats: $REPEATS"
+} | tee -a "$REPORT"
+
 # MTLLINEAR=1 injects tools/mtllinear.c, which forces
 # amdMtl_HWL_DetermineSwizzleMode to return ADDR_SW_LINEAR in THIS process
 # only. Per process, never a launchd environment (rule 21): the blast radius
