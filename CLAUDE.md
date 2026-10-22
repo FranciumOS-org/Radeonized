@@ -268,7 +268,24 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     forwarded into Electron's single-instance lock and died. The lock was the
     symptom; the blind check was the cause. Use
     `ps -axo pid=,command=` with a prefix match. [2nu]
-24. **A search is an instrument too.** A grep that returns nothing is not
+24. **The dyld shared cache is inside a GRAFTED, Apple-signed cryptex.**
+    `<Preboot>/<UUID>/cryptex1/current/os.dmg` is grafted into
+    `Cryptexes/OS` at boot, which is why the tree reports Preboot's own
+    `st_dev`, has no `mount` entry, is read-only to root (EROFS on `cp` AND
+    `chflags`, which no CSR bit lifts) and is **absent when the volume is
+    mounted raw in Recovery**. The image is raw UDRW, but the volume inside
+    is sealed, its root hash is an IM4P and that hash is covered by an
+    Apple-signed IM4M ticket - so it cannot be modified. This is also why
+    rule 22 is true. Do not spend Recovery trips looking for the cache as a
+    file. [2ny]
+25. **Read the machine, not the manual.** Four Recovery trips were each ended
+    by something asserted from general macOS knowledge instead of measured
+    here: `Cmd-R` (this is OpenCore, `PollAppleHotKeys` False - it is SPACE at
+    the picker), the Data volume's name (`MACOS - Data`), Recovery booting
+    from its own APFS container, and a booted-system path existing on a raw
+    volume. The OpenCore config that answered the first was already in
+    `logs/efi-backups/`. [2ny]
+26. **A search is an instrument too.** A grep that returns nothing is not
     evidence of absence until it has been checked against a case known to
     be present. `objdump` separates mnemonic and operands with a **tab**, so
     a space-based pattern silently matched nothing and produced a confident

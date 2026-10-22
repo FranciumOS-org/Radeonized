@@ -21482,3 +21482,88 @@ Doing the install from Recovery has a property worth naming: it exercises the
 exact path the rollback needs. Rule 21 was learned from a recovery procedure
 that had never been run in the situation it existed for; this one will have
 been run once before it is ever needed.
+
+## 2ny (2026-10-22) — where the shared cache actually lives, and why the route ends
+
+Four Recovery trips, each killed by an assumption of mine, and the last one
+returned the answer. The dyld shared cache is **not a file on the Preboot
+volume at all**.
+
+### What the Preboot volume really holds
+
+Mounted raw in Recovery (the user's own container, found via the backup
+folder - `disk4` there, `disk2` when booted):
+
+    Cryptexes/OS:                               empty
+    Cryptexes/OS/System/Library/dyld:           empty
+    Cryptexes/Incoming/OS/System/Library/dyld:  empty
+    <UUID>/cryptex1/current/os.dmg              2,172,649,472 bytes
+    <UUID>/cryptex1/current/os.clone.dmg        identical to it
+    <UUID>/cryptex1/current/os.dmg.root_hash    229 bytes
+    <UUID>/cryptex1/current/os.dmg.trustcache
+    <UUID>/cryptex1/current/apticket.*.im4m     18 of them
+
+The cache lives **inside `os.dmg`**, which macOS **grafts** into
+`Cryptexes/OS` at boot. That single fact explains every symptom at once, and
+all of them had looked like separate puzzles:
+
+* the grafted tree reports the **same `st_dev` as Preboot**, which is why
+  `stat` said it was a plain directory on that volume and why checking for a
+  nested mount found nothing;
+* it has **no `mount` entry**, so `mount | grep -i cryptex` was empty;
+* it is **read-only to root**, which is the EROFS on both `cp` and `chflags`
+  that no CSR bit, `Filesystem Protections: disabled` or
+  `Authenticated Root: disabled` could lift, because none of them govern a
+  graft;
+* and it is **absent when the volume is mounted raw**, which is what sent
+  three Recovery trips looking for a path that only exists after boot.
+
+It is also, belatedly, why rule 22 is true: `AMDRadeonX6000MTLDriver` has no
+file on disk because the whole dyld cache is sealed inside a cryptex image.
+
+### Why the patch cannot be delivered
+
+    hdiutil imageinfo os.dmg   Format: UDRW, raw read/write, no checksum,
+                               not compressed, not encrypted
+    os.dmg.root_hash           IM4P containing `cssy` - the APFS
+                               sealed-volume root hash
+    apticket.x86legacyap.im4m  IM4M - an Apple-SIGNED IMG4 manifest
+
+The image is raw and editable. The volume inside it is **sealed**, its root
+hash is wrapped in an IM4P, and that hash is covered by an Apple-signed
+ticket. Editing a byte inside breaks the APFS seal; recomputing the root hash
+then requires re-signing the ticket with Apple's private key, which is not
+something that can be done.
+
+**This also corrects 2nw.** "The cache's signature is ad-hoc (flags 0x2) with
+an empty CMS blob, so nothing is cryptographically pinned" was true of the
+cache's *own* embedded signature and is still true - but that signature is
+nested inside an outer, Apple-signed cryptex seal that was never looked for.
+The conclusion drawn from it, that the edit was verifiable rather than
+hopeful, was wrong. The patched file and its 182524 recomputed page hashes
+are all perfectly valid; there is simply no way to put them where they would
+be read.
+
+### The honest end state
+
+Seven levers were closed in 2ns/2nt because the decision is made in a
+per-process copy of a driver. The eighth, the cache as a file, is closed
+because the file is inside an Apple-signed sealed image. **Injection per
+process is the only delivery mechanism that exists for this fix**, which
+leaves Apple's own platform binaries and sandboxed App Store apps permanently
+out of reach by any route this project can take.
+
+`tools/cachepatch*.{py,sh}` and `~/rbgpu-cache-backup/` are kept: the
+analysis is sound and the tooling verifies correctly, so if a future macOS
+ships the cache unsealed, or the graft is ever shown not to verify, it is one
+command away. Nothing on this machine was modified at any point - every
+attempt failed before writing, which is the one thing that went right.
+
+### What it cost, and the pattern
+
+Four Recovery trips and three reboots, and every one ended on something I
+asserted about this machine from general macOS knowledge instead of reading
+it: `Cmd-R` on a hackintosh (OpenCore, `PollAppleHotKeys` False), the volume
+name (`MACOS - Data`), Recovery's own container, and the booted-system path
+on a raw volume. The config that answered the first was in
+`logs/efi-backups/` the whole time. Rule 25 states it.
