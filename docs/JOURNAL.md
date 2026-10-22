@@ -20203,3 +20203,104 @@ only one with an obvious connection to glyph edges.
 problem", which remains true and is now independently confirmed. It should also
 say that the CPU-upload line of work is finished and did not reach the symptom,
 so a future session does not re-run it.
+
+## 2mx/2my (2026-10-21) — the first controlled reproduction, and the blind spot every probe shared
+
+### The blind spot, stated plainly
+
+`texprobe`, `lawtest`, `rtprobe`, and today's `blitprobe` and `xprobe` all write
+a texture and read **that same texture object** back. A layout that is wrong
+*consistently* reads back clean through such a loop. Every "the GPU path is
+clean" line in this journal is of that shape, including today's. That is why
+measurement after measurement comes back clean while the screen is visibly not.
+
+### What was closed today, by measurement
+
+- **Blit into a 64 KB-tiled PRIVATE texture is correct.** `tools/blitprobe.swift`,
+  at the assistant's own geometries including the 2048x2048 R8 glyph atlas, with
+  glyph-sized sub-rect uploads and texture-to-texture copies. 30 cases, all
+  clean. The control - a CPU `replace`, which the 2mn law says must fail -
+  failed at all 8 FLAGGED geometries and passed at both untiled ones, 10/10
+  with the law, so the detector was known good before its negatives were
+  believed (rule 22).
+  This kills the hypothesis that motivated it: Skia's atlas is `2048x2048
+  fmt=10 usage=0x1`, shader-read-only and private, so a blit is the *only* way
+  to fill it - and the blit is right.
+- **Cross-consumer reads are correct.** `tools/xprobe.swift`: gpu-write ->
+  gpu-read through a FRESH texture over the same IOSurface, gpu-write ->
+  cpu-read of the raw surface bytes, and the reverse. 30 cases, all clean.
+- **No Metal-to-Metal aliasing.** `tools/vramprobe.swift`: 624 surfaces at
+  the assistant's own mixed sizes plus 624 multisample textures, each filled with a
+  pattern carrying its own id and all kept alive; every one holds its own data.
+
+### The measurement that finally has the right shape
+
+`tools/screenprobe.swift` puts the same self-locating pattern in two real
+windows - one drawn by CoreGraphics, one by Metal - and lets the WindowServer
+composite them on the same frame. Diffing the two cancels colour management
+exactly, so no LUT has to be guessed at.
+
+    direct 512x512      0/262144 differ, max channel difference 0/255
+    msaa 512x512        0/262144
+    iosurface 512x512   0/262144
+    big 900x880         1518/792000, max 5/255, only in the grey calibration
+                        ramp - integer-vs-float rounding, not corruption
+    bigmsaa 900x880     790054/792000, max 255/255
+
+**In `bigmsaa` the window that was destroyed is the CPU-drawn one.** Blocky,
+repeating, and made of the pattern's own colours rearranged. The identical
+window at the identical size was clean in `big`, the run immediately before.
+The only difference is that the *other* window in the same process had
+allocated a 900x880 4x multisample texture.
+
+This is the first time in this investigation that the symptom has been
+reproduced in an artifact we control, and it is consistent with two things seen
+in the wild: the desktop carries repeated miniature copies of **other windows'**
+content, and there are **zero VM faults** - an aliased mapping is a valid
+mapping, so nothing faults; the data is just somebody else's.
+
+### Not yet believed, and why
+
+The harness is a suspect before the chip is (rule 16). The script that produced
+it killed each probe and immediately started the next at the same screen
+coordinates, and a killed process's window surface being recycled while still
+displayed would look exactly like this. It was also a single frame, and one
+frame is not a result (rule 18).
+
+So `screenprobe.sh` now lets the probe terminate itself and waits for it,
+captures twice per run, repeats each mode, and adds a **`bigcpu`** mode that
+draws both windows with CoreGraphics and never creates a Metal device. That
+mode is the discriminator:
+
+- `bigcpu` corrupts too -> Metal is not involved; a large window backing store
+  is enough, and the hunt moves to the WindowServer's surfaces.
+- only `bigmsaa` corrupts -> allocating a large multisample texture damages an
+  unrelated surface, and the hunt moves to the allocator and to MSAA/FMASK
+  sizing for GC 10.3.3 against Navi 21's.
+- nothing corrupts -> the one observation was the killed-process artifact, and
+  2mx's screen results stand as clean across the board.
+
+**The next action is to run `tools/screenprobe.sh` from the user's Terminal
+and read `logs/<stamp>-screenprobe/report.txt`.** It needs no reboot, no kext
+load and no sudo; it needs Terminal's Screen Recording permission, which
+the assistant's own shell does not have.
+
+### Instrument defects found and fixed, four in one session
+
+- The first capture had no windows in it: the Metal shader is compiled at
+  runtime and that outlasted a guessed `sleep`. The probe now touches a file
+  once the pattern is genuinely on screen and the wrapper waits for it.
+- `geometry.txt` came back empty - stdout buffered, process killed before the
+  flush. `setvbuf` now.
+- The row matcher reported a spurious `shift -256` for half the rows because
+  red and green repeat every 256 and it only looked at green. It folds in blue,
+  which carries the high bits, and now maps 491/496 rows to identity.
+- The CPU control was drawn vertically flipped: CoreGraphics draws images
+  bottom-up. Fixed at the source, and the decoder now confirms orientation from
+  the calibration strip rather than assuming it.
+- `xprobe`'s "meta ~" column is nonsense - `size/px` is already the ratio - and
+  its labels truncate at 40 characters. Neither affects its verdicts.
+
+Four instrument defects against one hardware finding is the ratio rule 16 is
+about. A negative from an instrument that has not been checked against a case
+known to be present is not a negative.
