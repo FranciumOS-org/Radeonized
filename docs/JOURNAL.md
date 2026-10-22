@@ -20820,3 +20820,61 @@ and there was none.
 
 `-rbgpulinear` belongs IN, now for a measured reason rather than an observed
 ~80%. Restored at the end of this boot.
+
+## 2nn (2026-10-22, boot 121) — the Lilu user patch CANNOT work: the driver is in the dyld shared cache
+
+Boot 121 carried the WindowServer entry (2nm), `-rbgpumtllinear` and
+`-rbgpulinear`, kext UUID `5B28C4CF` matching the build. The user reported
+the assistant unchanged. Before reading anything into that, `screenprobe` - which is
+itself in the proc list and reads its own memory - was asked:
+
+    mtl-patch: original prologue present 1x, LINEAR stub present 0x
+    mtl-patch: -> NOT PATCHED
+
+Same as boot 117. So the experiment did not run, again, and "the assistant is
+unchanged" says nothing about the WindowServer hypothesis.
+
+### Why, and it is structural
+
+    ls /System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/
+       MacOS/AMDRadeonX6000MTLDriver
+    -> No such file or directory
+
+**The file does not exist.** A process that has loaded the driver reports that
+path through `dladdr`, but the image comes from the **dyld shared cache**.
+Lilu's `BinaryModInfo` names a file and patches its pages as they are mapped;
+those pages are never mapped from that file because there is no file. So
+`onProcLoad` returns `NoError`, the hook logs ARMED, and nothing is patched -
+ever.
+
+**2lm, 2nb and 2nm are inert by construction.** The Terminal patch that 2lq
+wanted to test, the screenprobe entry of 2nb, and the WindowServer entry of
+2nm could none of them ever have applied. This retires the whole line, and it
+is rule 20 in its most expensive form: a registration reporting success is not
+evidence that a patch applied, and here nothing short of reading the target
+process's memory could have revealed it.
+
+The check that would have caught it before a boot was spent costs nothing:
+**`ls` the file named in the `BinaryModInfo`.**
+
+### What still works
+
+`tools/mtllinear.c` patches the same bytes successfully, every time, because it
+edits the in-memory image with `vm_protect(..., VM_PROT_COPY)` rather than
+relying on a file mapping. It is injected per process with
+DYLD_INSERT_LIBRARIES (rule 21), and both it and the probe's independent
+self-check confirm PATCHED.
+
+That mechanism cannot reach the WindowServer, which launchd starts - and
+putting DYLD_INSERT_LIBRARIES in a launchd environment is precisely what rule
+21 forbids and what already cost this machine a desktop once. So the
+WindowServer stays out of reach by any means currently available.
+
+### Where that leaves a fix
+
+The one process whose text the user actually cares about CAN be reached: the assistant
+itself, and Safari, by per-process injection, which has already been done
+safely on this machine (2mv/2mw ran the assistant under an injected dylib for a full
+trace). Forcing `DetermineSwizzleMode` to LINEAR inside the app is a direct
+test of whether the app's own texture layout is part of its symptom, costs no
+boot, and has a blast radius of one restartable application.
