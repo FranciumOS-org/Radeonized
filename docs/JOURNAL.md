@@ -20520,3 +20520,73 @@ That leaves the kernel side. `-rbgpulinear` hooks
 CoreAnimation's backing stores are not going through it. Finding the
 allocation path that decides their layout is the next step, and it needs
 boots.
+
+## 2ng (2026-10-22) — a per-surface coin flip at allocation, decided once and permanent
+
+### Three candidate explanations killed, cheaply, with no boots
+
+**Window style and level.** A first run of an ordinary titled window at normal
+level came back clean 6 of 6 and looked like the reproducer being an artefact
+of its own borderless, floating windows. With more samples it is not:
+
+    normalwin   (titled, normal level)    3 of 6 scrambled
+    normallevel (borderless, normal)      2 of 6
+    direct      (borderless, floating)    4 of 6
+
+6 of 6 clean on a defect that fires near half the time has probability about
+1.6% - unlikely, and it happened. Rule 18 earned again.
+
+**Geometry.** Every size tested scrambles, including Terminal's own:
+
+    512x512  3/6     580x380  3/6     256x256  6/6    1024x768 4/6
+    900x880  6/6     128x128  6/6     640x480  3/6     800x600  2/6
+
+**Time.** The same window captured at 0.5s and again at 15s:
+
+    run 1  clean / clean          run 4  clean / clean
+    run 2  clean / clean          run 5  SCRAMBLED / SCRAMBLED
+    run 3  SCRAMBLED / SCRAMBLED  run 6  clean / clean
+
+Identical in all six. Not a transient, and nothing settles.
+
+### What that leaves, and it fits everything
+
+**A surface is either right or wrong from the moment it is created, and stays
+that way for its whole life.** Roughly a coin flip, decided at allocation. Not
+drawing, not timing, not geometry, not window kind, and not CPU versus GPU -
+all measured and excluded.
+
+That resolves every contradiction this investigation has been carrying:
+
+  Terminal crisp              one surface; it won the flip, and a winner stays
+  the assistant's text broken        Chromium uses MANY surfaces; ~half lose, so
+                              something is always visibly wrong
+  Safari chrome fine,
+  its in-page images broken   chrome is one surface, images are many
+  desktop wallpaper broken    its one surface lost
+  this probe ~50%             one surface, a fresh flip every run
+
+It also explains why the permutation is byte-identical whenever it occurs: the
+loser gets one specific wrong layout, not random damage.
+
+### Where a fix has to go
+
+Not the drawing path and not the app: `DetermineSwizzleMode` forced to LINEAR
+in-process changes nothing (2nc/2nd, with every run carrying
+`patch state: PATCHED`). The layout of a layer backing store is agreed between
+whoever allocates it and the WindowServer that reads it, and the app is not
+part of that conversation.
+
+The WindowServer cannot be injected into - it is launchd-started, so that is
+exactly the launchd DYLD_INSERT_LIBRARIES that rule 21 forbids and that
+already cost this project a desktop once.
+
+So the kernel side. `-rbgpulinear` hooks `getPreferredSwizzleMode2`, which
+sees ~61 calls, all display-class, while these backing stores are allocated in
+their thousands. If half of all surfaces draw a wrong layout and forcing
+LINEAR removes the disagreement, widening that hook's coverage to every
+surface is the fix - and the per-surface coin flip predicts it would fix
+the assistant, Safari's images, the desktop and the icons all at once.
+
+Next: find which allocation path decides a layer backing store's layout, and
+whether the existing hook can be made to cover it. That needs boots.
