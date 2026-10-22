@@ -21567,3 +21567,84 @@ it: `Cmd-R` on a hackintosh (OpenCore, `PollAppleHotKeys` False), the volume
 name (`MACOS - Data`), Recovery's own container, and the booted-system path
 on a raw volume. The config that answered the first was in
 `logs/efi-backups/` the whole time. Rule 25 states it.
+
+## 2nz (2026-10-22) — rule 22 is WRONG: Lilu is built to patch the shared cache
+
+The user pushed back on 2ny's conclusion - "we own the entire kernel with
+OpenCore and kexts and we can't apply a single screen patch?" - and was
+right. 2ny closed the *file* route correctly: the cache is inside a grafted,
+Apple-signed cryptex image and cannot be edited on disk. But it then treated
+that as the end, which was only true because of rule 22, and **rule 22 is
+wrong**.
+
+### What Lilu actually has
+
+Read from `third_party/Lilu/Lilu/Headers/kern_user.hpp`, which was in the
+tree the whole time:
+
+    codeSignValidatePageWrapper / codeSignValidateRangeWrapper
+        -> it hooks cs_validate_page / cs_validate_range
+    performPagePatch(const void *data_ptr, size_t data_size)
+        "Applies page patches to the memory range - pages in kernel memory"
+    patchDyldSharedCache
+        "Set on init to decide on whether to use __RESTRICT or patch dyld
+         shared cache"
+    MapEntry { filename, length, startTEXT, endTEXT, startDATA, endDATA }
+    mapAddresses(...)  "Obtains __TEXT addresses from .map files"
+    venturaSharedCacheMapHaswell
+        "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h.map"
+
+Lilu is **explicitly designed to patch dylibs inside the dyld shared cache**.
+It resolves them through the cache's `.map` file and rewrites pages in kernel
+memory as they pass code-signing validation. It even hard-codes this
+machine's cryptex map path.
+
+### And the map is there, with our driver in it
+
+    $ ls -l .../dyld_shared_cache_x86_64h.map        965305 bytes, 3258 images
+    $ grep -A1 AMDRadeonX6000MTLDriver .../*.map
+    /System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/MacOS/AMDRadeonX6000MTLDriver
+              __TEXT 0x7FFB08BF3000 -> 0x7FFB090F59AE
+
+Byte-identical to what `tools/re/dyldcache.py` derived independently. And the
+plugin's existing `kRb2lmMod` already names exactly that path, with
+`section = 1` and `SegmentTextText`.
+
+**So 2nn's diagnosis was also wrong.** "A `BinaryModInfo` can only patch a
+file that EXISTS" is false for a shared-cache dylib: Lilu does not open that
+path, it looks the name up in the map. The *observation* stands - boot 117
+really was not patched, measured from the process's own memory - but the
+reason is still unknown, and "the file does not exist" was a plausible story
+that fitted the evidence and was never tested against Lilu's own source.
+
+That is the recurring error in its purest form yet: a conclusion about a
+mechanism, drawn without reading the mechanism, written into the rules, and
+then used to close a route for three milestones.
+
+### What remains unknown, and what is now feasible
+
+Unknown: whether Lilu 1.7.3's user patcher functions on macOS 15.8.1. That is
+the real question 2lm/2nb/2nm failed to answer.
+
+Feasible: the whole `fix` policy fits inside the range Lilu patches. The
+driver's own `__TEXT` contains **28 padding runs of >= 200 bytes**, the
+largest 1164 bytes of zeros at `0x7ffb08bf4024`, which is inside
+`0x7FFB08BF3000 -> 0x7FFB090F59AE` and within rel32 of the function at
+`0x7ffb08d35a11`. So two `BinaryModPatch` entries - the 163-byte cave into
+that padding, and the 5-byte detour at the entry - deliver exactly what
+`tools/mtlswizzle.c` does per process, but to **every process**, with no
+injection, no wrapper, and no write to the cryptex. The seal is irrelevant
+because the file is never touched; only the mapped pages are.
+
+### The experiment that costs nothing
+
+Boot A, zero risk: register **only** the cave patch, writing 163 bytes into
+padding that nothing calls. Functionally inert by construction. A userspace
+prober then reads those bytes out of its own mapped copy. If they are there,
+Lilu's user patcher works on this macOS and the universal fix is one boot
+away. If they are not, the mechanism is dead and we finally know it, instead
+of inferring it a fourth time.
+
+Boot B, only if A succeeds: add the detour.
+
+One variable per boot, and the first one cannot break anything.

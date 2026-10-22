@@ -249,16 +249,18 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     is `sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES`.
     Inject per process, where the blast radius is one process started on
     purpose. [2mq]
-22. **A Lilu `BinaryModInfo` can only patch a file that EXISTS.**
-    `AMDRadeonX6000MTLDriver` is in the dyld shared cache and has no file on
-    disk, so its pages are never mapped from the path the patch names:
-    `onProcLoad` returns `NoError`, the hook logs ARMED, and nothing is ever
-    patched. Three milestones of user patches (2lm, 2nb, 2nm) were inert by
-    construction and one boot was spent on it. **`ls` the file named in the
-    `BinaryModInfo` before building anything on it**, and verify from the
-    target process's own memory, which is the only thing that revealed it.
-    `tools/mtllinear.c` works where Lilu cannot, because it edits the
-    in-memory image with `vm_protect(VM_PROT_COPY)`. [2nn]
+22. **WITHDRAWN (2nz). It said a Lilu `BinaryModInfo` can only patch a file
+    that EXISTS, and that Lilu's user patcher could therefore never touch
+    `AMDRadeonX6000MTLDriver`. That is FALSE.** Lilu is explicitly built to
+    patch dylibs inside the dyld shared cache: it hooks `cs_validate_page`,
+    resolves images through the cache's `.map` file (`mapAddresses`,
+    `MapEntry`, `performPagePatch`, `patchDyldSharedCache`) and hard-codes
+    this machine's cryptex map path as `venturaSharedCacheMapHaswell`. The
+    map is present, lists our driver, and gives `__TEXT 0x7FFB08BF3000 ->
+    0x7FFB090F59AE`, matching `dyldcache.py` exactly. The *observation* that
+    boot 117 was not patched stands; the *reason* is still unknown. What is
+    true and worth keeping: **verify a patch from the target process's own
+    memory**, because that is the only thing that revealed it. [2nn, 2nz]
 23. **`pgrep` cannot see the process a script is running inside.** BSD
     `pgrep` never matches the invoking process or **its ancestors**, so a
     script run from the assistant Code cannot see the the assistant app: `pgrep -x the assistant`
