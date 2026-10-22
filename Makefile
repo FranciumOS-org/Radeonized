@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -92,6 +92,25 @@ $(OUT)/ownership-test: tools/ownership-test.m | $(OUT)
 noop: $(OUT)/noop-insert.dylib
 $(OUT)/noop-insert.dylib: tools/noop-insert.c | $(OUT)
 	clang -dynamiclib -O2 -o $@ $<
+
+# blitprobe (2mx): is a GPU blit into a 64 KB-TILED PRIVATE texture correct?
+# texprobe's private-blit paths only ever ran at sizes that land untiled.
+blitprobe: $(OUT)/blitprobe
+$(OUT)/blitprobe: tools/blitprobe.swift | $(OUT)
+	swiftc -O $< -o $@ -framework Metal
+
+# xprobe (2mx): cross-consumer reads - does a surface the GPU wrote read the
+# same through a SECOND view of it? Every earlier probe used one view only.
+xprobe: $(OUT)/xprobe
+$(OUT)/xprobe: tools/xprobe.swift | $(OUT)
+	swiftc -O $< -o $@ -framework Metal -framework IOSurface
+
+# screenprobe (2mx): the same pattern on the real screen, CPU-drawn beside
+# GPU-drawn. Run it with tools/screenprobe.sh from a Terminal that has Screen
+# Recording permission.
+screenprobe: $(OUT)/screenprobe
+$(OUT)/screenprobe: tools/screenprobe.swift | $(OUT)
+	swiftc -O $< -o $@ -framework Cocoa -framework Metal -framework QuartzCore
 
 # texprobe: the userspace texture-upload probe the text work is measured with.
 texprobe: $(OUT)/texprobe
