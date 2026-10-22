@@ -6998,6 +6998,37 @@ static const char kRb2lmProcPath[] =
 // downstream of it.
 static const char kRb2lmProcProbe[] = "/screenprobe";
 
+// 2nm: and the WindowServer. THIS IS THE RISKY ONE, and it is deliberate.
+//
+// 2nj measured where a CoreAnimation layer backing store is laid out, and it
+// is nowhere this plugin can currently see: no IOSurfaceCreate in the app
+// process (one incidental surface for 1, 2 or 4 windows), nothing arriving by
+// mach port, and the kernel align manager unchanged at calls=59 before and
+// after four windows were made. The WindowServer is what is left.
+//
+// 2nk established that the force is worth applying: with -rbgpulinear removed
+// the GPU-rendered window scrambles too, 8 of 8, where it had been clean in
+// every run for two days. Apple's chooser returns 0x1b (ADDR_SW_64KB_R_X) for
+// the screen-sized compositing surfaces and this chip does not address them
+// that way, so forcing LINEAR removes a real disagreement rather than papering
+// over one.
+//
+// The blast radius is the desktop. If the stub is wrong the login session
+// renders wrong or the WindowServer dies, and the recovery is to remove
+// -rbgpumtllinear from boot-args over SSH, or boot with -rbgpuoff. The stub
+// itself is not speculative: it has been applied to this same driver in a live
+// process many times through tools/mtllinear.c, which verifies the bytes after
+// writing them and reports PATCHED, and the probe independently re-reads its
+// own memory and agrees.
+//
+// What it decides:
+//   windows go clean   the layout of a layer backing store is chosen here, and
+//                      widening the LINEAR force is the fix
+//   unchanged          it is not chosen here either, and the search moves on
+//                      with one boot spent rather than several
+static const char kRb2lmProcWindowServer[] =
+    "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer";
+
 static UserPatcher::ProcInfo kRb2lmProcs[] {
     { kRb2lmProcPath,  sizeof(kRb2lmProcPath) - 1,  1,
       UserPatcher::ProcInfo::MatchExact },
@@ -7005,6 +7036,8 @@ static UserPatcher::ProcInfo kRb2lmProcs[] {
     // processes whose section matches the patch's, and kRb2lmPatch.section is 1.
     { kRb2lmProcProbe, sizeof(kRb2lmProcProbe) - 1, 1,
       UserPatcher::ProcInfo::MatchSuffix },
+    { kRb2lmProcWindowServer, sizeof(kRb2lmProcWindowServer) - 1, 1,
+      UserPatcher::ProcInfo::MatchExact },
 };
 
 static void rbgpu_register_mtllinear_2lm(void) {
@@ -7028,8 +7061,8 @@ static void rbgpu_register_mtllinear_2lm(void) {
     rbgpu_diag_set_num("mtllinear_procs", static_cast<uint32_t>(nprocs));
     auto err = lilu.onProcLoad(kRb2lmProcs, nprocs, nullptr, nullptr, &kRb2lmMod, 1);
     if (err == LiluAPI::Error::NoError) {
-        rbgpu_log("2nb: ARMED - DetermineSwizzleMode returns LINEAR in %zu "
-                  "processes (Terminal, and any binary named screenprobe). "
+        rbgpu_log("2nm: ARMED - DetermineSwizzleMode returns LINEAR in %zu "
+                  "processes (Terminal, screenprobe, and the WindowServer). "
                   "Read it with tools/screenprobe.sh: if its CPU window stops "
                   "scrambling, the cause IS client surface layout chosen in "
                   "userspace and -rbgpulinear never reached these surfaces. "
