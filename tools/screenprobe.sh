@@ -44,13 +44,33 @@ REPORT="$OUT/report.txt"
 [ -x build/out/screenprobe ] || make screenprobe
 [ -x build/out/decodescreen ] || make decodescreen
 
+# MTLLINEAR=1 injects tools/mtllinear.c, which forces
+# amdMtl_HWL_DetermineSwizzleMode to return ADDR_SW_LINEAR in THIS process
+# only. Per process, never a launchd environment (rule 21): the blast radius
+# is one binary started on purpose.
+#
+# Boot 117 showed why this is injected rather than left to the kext: the
+# -rbgpumtllinear user patch was armed, the kext UUID matched the build and
+# rbgpu-arm had been consumed, yet the process's own memory read NOT PATCHED,
+# so that boot tested nothing. Each run below records its own patch state, so
+# a clean sweep can never again be read as a fix that was not applied.
+INJECT=""
+if [ "${MTLLINEAR:-0}" = "1" ]; then
+    [ -x build/out/mtllinear.dylib ] || make mtllinear
+    INJECT="DYLD_INSERT_LIBRARIES=$(pwd)/build/out/mtllinear.dylib"
+    echo "mtllinear: INJECTED per process" | tee -a "$REPORT"
+else
+    echo "mtllinear: not injected (set MTLLINEAR=1 to force LINEAR)" | tee -a "$REPORT"
+fi
+
 for MODE in $MODES; do
   R=1
   while [ $R -le $REPEATS ]; do
     TAG="$MODE-$R"
     rm -f "$OUT/ready-$TAG"
     # 5 seconds up, then it terminates itself in an orderly way
-    ./build/out/screenprobe "$MODE" "$OUT/ready-$TAG" 5 > "$OUT/geom-$TAG.txt" 2>&1 &
+    env $INJECT ./build/out/screenprobe "$MODE" "$OUT/ready-$TAG" 5 \
+        > "$OUT/geom-$TAG.txt" 2>&1 &
     PROBE=$!
 
     i=0
@@ -83,6 +103,8 @@ for MODE in $MODES; do
     ARGS=$(sed -n 's/^decode with: build\/out\/decodescreen <png> //p' "$OUT/geom-$TAG.txt")
     {
         echo "================ $TAG ================"
+        # rule 20: say whether the patch actually applied, every run
+        sed -n 's/^mtl-patch: -> /  patch state: /p' "$OUT/geom-$TAG.txt"
         if [ -n "$ARGS" ]; then
             for n in a b; do
                 printf '  capture %s: ' "$n"
