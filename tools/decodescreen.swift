@@ -91,6 +91,55 @@ if greyRows(unflipped) > greyRows(cpu) {
 }
 print("")
 
+// 0. which window is broken, judged on its own.
+//
+// Diffing the two windows says they differ but not which one is wrong, and the
+// 2my swap experiment needs to know exactly that. In the pattern green is
+// y & 255 and red is x & 255, so in a correct window adjacent rows differ by
+// about 1 and so do adjacent columns. A window scrambled into blocks does not.
+// This needs no reference image and no colour management, because it only
+// looks at differences within one window.
+// A first attempt measured the step between ADJACENT rows and called the
+// known-shredded window clean: the scrambled blocks are themselves smooth
+// gradient fragments, so inside a block adjacent rows still step by 1. It
+// failed the rule 22 check against a case known to be present, so it was
+// replaced. What a displaced block does change is where a row sits as a whole,
+// so this measures the row's own level and counts how often that jumps.
+func jumps(_ im: [(Int, Int, Int)]) -> (Int, Int) {
+    func med(_ v: [Double]) -> Double { v.sorted()[v.count / 2] }
+    var rowLevel: [Int: Double] = [:], colLevel: [Int: Double] = [:]
+    for y in 20..<TALL where y % 64 != 0 {
+        var d: [Double] = []
+        for x in stride(from: 3, to: WIDE, by: 11) where x % 64 != 0 {
+            d.append(Double(im[y * WIDE + x].1))
+        }
+        rowLevel[y] = med(d)
+    }
+    for x in 0..<WIDE where x % 64 != 0 {
+        var d: [Double] = []
+        for y in stride(from: 20, to: TALL, by: 11) where y % 64 != 0 {
+            d.append(Double(im[y * WIDE + x].0))
+        }
+        colLevel[x] = med(d)
+    }
+    // a jump is a step bigger than 8 that is not the pattern's own wrap at 256
+    func count(_ lv: [Int: Double], _ n: Int) -> Int {
+        var c = 0
+        for i in 0..<(n - 1) {
+            guard let a = lv[i], let b = lv[i + 1] else { continue }
+            if a > 235 && b < 20 { continue }
+            if abs(b - a) > 8 { c += 1 }
+        }
+        return c
+    }
+    return (count(rowLevel, TALL), count(colLevel, WIDE))
+}
+let (cr, cc) = jumps(cpu), (gr, gc) = jumps(gpu)
+func verdict(_ r: Int, _ c: Int) -> String { (r <= 2 && c <= 2) ? "CLEAN" : "SCRAMBLED" }
+print(String(format: "window state: cpu %@ (row jumps %d, col jumps %d),  gpu %@ (row jumps %d, col jumps %d)",
+             verdict(cr, cc), cr, cc, verdict(gr, gc), gr, gc))
+print("")
+
 // 1. raw difference
 var diff = 0, firstDiff: (Int, Int)? = nil
 var chanMax = 0

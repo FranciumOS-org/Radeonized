@@ -40,6 +40,27 @@ let SIDE = CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2])! : 10
 let MSAA = CommandLine.arguments.contains("--msaa")
 let MIXED = CommandLine.arguments.contains("--mixed")
 
+// 2my: the screen probe's CPU window is drawn ONCE and is intermittently
+// shredded; its GPU window redraws every 0.5s and never is. The same split
+// holds on screen in the wild - the wallpaper, desktop icons and Safari's
+// in-page images are drawn once and are broken, while Terminal, the widgets
+// and the menu bar redraw constantly and are crisp. So the question is not
+// whether a surface is written correctly, which is now measured many times
+// over, but whether it STAYS written. These two knobs let the surfaces sit.
+//
+//   --churn N   keep allocating and releasing other textures for N seconds
+//   --wait N    simply wait N seconds, allocating nothing
+//
+// Both, then re-read every original surface.
+func argValue(_ name: String, _ dflt: Double) -> Double {
+    guard let i = CommandLine.arguments.firstIndex(of: name),
+          i + 1 < CommandLine.arguments.count,
+          let v = Double(CommandLine.arguments[i + 1]) else { return dflt }
+    return v
+}
+let CHURN = CommandLine.arguments.contains("--churn") ? argValue("--churn", 10) : 0
+let WAIT = CommandLine.arguments.contains("--wait") ? argValue("--wait", 10) : 0
+
 // Claude's own descriptor sizes, from logs/iosurftex-claude.log. A uniform
 // grid of identical tiles is the easiest possible case for an allocator; a
 // real application's spread of sizes is what fragments a free list.
@@ -148,6 +169,39 @@ for (id, g) in geoms.enumerated() {
 print("filled \(texes.count) surfaces, all still alive; \(allocFailed) allocations refused")
 if MSAA { print("multisample textures: asked \(msaaAsked), got \(msaaKeepAlive.count)") }
 print("")
+
+// Let the surfaces sit. Nothing here touches them: they are only kept alive.
+if WAIT > 0 {
+    print(String(format: "waiting %.0fs, allocating nothing...", WAIT))
+    Thread.sleep(forTimeInterval: WAIT)
+}
+if CHURN > 0 {
+    print(String(format: "churning other allocations for %.0fs...", CHURN))
+    let deadline = Date().addingTimeInterval(CHURN)
+    var rounds = 0, made = 0
+    while Date() < deadline {
+        var tmp: [MTLTexture] = []
+        for g in claudeGeoms {
+            if let t = dev.makeTexture(descriptor: desc(g.0, g.1)) { tmp.append(t); made += 1 }
+        }
+        // render into a few of them so the memory is genuinely touched, not
+        // just reserved
+        if let t = tmp.first {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = t
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0.25, 0.5, 0.75, 1)
+            let cb = q.makeCommandBuffer()!
+            cb.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
+            cb.commit(); cb.waitUntilCompleted()
+        }
+        tmp.removeAll()          // released: this is the memory that gets reused
+        rounds += 1
+    }
+    print("  \(rounds) rounds, \(made) temporary textures allocated and released")
+}
+if WAIT > 0 || CHURN > 0 { print("") }
 
 // read every surface back and see whose data is in it
 let out = dev.makeBuffer(length: maxBpr * maxH, options: .storageModeShared)!
