@@ -79,11 +79,32 @@ esac
 [ -n "$PBMP" ] || die "$PB has no mount point even after mounting"
 say "mounted at     : $PBMP"
 
+# On the BOOTED system the cache sits at
+# <Preboot>/Cryptexes/OS/System/Library/dyld. On the RAW volume in Recovery it
+# does not: Cryptexes/OS is only populated at boot (cryptexd), and the payload
+# lives elsewhere on the volume. So do not assume the path - search for the
+# file itself and work back to its directory.
 DIR="$PBMP/Cryptexes/OS/System/Library/dyld"
-[ -d "$DIR" ] || {
-    say "contents of $PBMP:"; ls "$PBMP" 2>/dev/null | sed 's/^/  /'
-    die "no Cryptexes/OS/System/Library/dyld under $PBMP"
-}
+if [ ! -f "$DIR/$SUBNAME" ]; then
+    say "not at the booted-system path; searching $PBMP for $SUBNAME ..."
+    FOUND=$(find "$PBMP" -type f -name "$SUBNAME" 2>/dev/null | head -1)
+    if [ -n "$FOUND" ]; then
+        DIR=$(dirname "$FOUND")
+        say "found it elsewhere on the volume."
+    else
+        say ""
+        say "$SUBNAME is not anywhere on $PBMP. What IS there:"
+        say "  $PBMP:"            ; ls -1 "$PBMP" 2>/dev/null | sed 's/^/    /'
+        say "  $PBMP/Cryptexes:"  ; ls -1 "$PBMP/Cryptexes" 2>/dev/null | sed 's/^/    /'
+        say "  $PBMP/com.apple.security.cryptexd:"
+        ls -1 "$PBMP/com.apple.security.cryptexd" 2>/dev/null | sed 's/^/    /'
+        say "  any dyld caches at all:"
+        find "$PBMP" -name 'dyld_shared_cache_x86_64h*' 2>/dev/null | head -10 | sed 's/^/    /'
+        say "  any disk images (a cryptex payload may be one):"
+        find "$PBMP" \( -name '*.dmg' -o -name '*.aar' -o -name '*.img4' \) 2>/dev/null | head -10 | sed 's/^/    /'
+        die "cannot locate $SUBNAME on $PBMP - send the listing above"
+    fi
+fi
 say "dyld directory : $DIR"
 
 SUB="$DIR/$SUBNAME"
