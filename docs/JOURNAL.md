@@ -21059,3 +21059,112 @@ the hw info). If a device-settings field steers the chooser away from the `_X`
 family, changing it kernel-side would reach **every process with no injection
 at all** - including the platform binaries. That is the next experiment, and
 the first one in a while that is worth a boot.
+
+## 2ns (2026-10-22) — can it be global? Three measurements, all negative
+
+2nr ended by naming `const AMD_DeviceSettings*`, argument four of the chooser,
+as "the next experiment, and the first one in a while that is worth a boot".
+It is not. None of the three routes to a fix that needs no injection survives
+contact, and one of them takes a claim from 2nr with it.
+
+### 1. The AddrLib configuration is CORRECT, so the kext cannot fix the math
+
+`amdMtl_HWL_InitAddrLibHwRegFields(_ADDR_CREATE_INPUT*, const AMDCommonHwInfoRec*)`
+is four instructions:
+
+    movl $0xd, 0x4(%rdi)        ; ADDR_CREATE_INPUT.chipFamily = 0xd (GFX10)
+    movl 0xa4(%rsi), %eax
+    movl %eax, 0x30(%rdi)       ; regValue.gbAddrConfig
+
+So AddrLib's **entire** hardware configuration is one field,
+`AMDCommonHwInfoRec + 0xa4`, and that record is filled by `gfx10_HwInfoInitData`
+from the kernel's `_sAMD_GET_HW_INFO_VALUES`. Read live, from inside a process,
+through the 2nq hook which already holds that pointer as argument one:
+
+    swz: AddrLib gbAddrConfig (hwInfo+0xa4) = 0x242
+         pipes=4 pkrs=4 se=1 interleave=256
+    swz:   hardware GB_ADDR_CONFIG is 0x242 -> AGREES
+
+**It agrees with the chip exactly.**
+
+**This withdraws 2nr's explanation.** "The `_X` pipe-bank XOR is computed from
+Navi 21's pipe count against a 4-pipe chip" is false: the userspace AddrLib is
+configured from this chip's own GB_ADDR_CONFIG. The `fix` policy still works -
+IntelliJ is clean, that was seen - but the reason it works is **not**
+established, and the entry that said it was has been corrected. What survives
+is 2na's measurement that the permutation is an exact XOR-linear bit matrix,
+which still points at the `_X` XOR term; it just no longer points at the pipe
+count. Thirty-one instances now of reading a value without establishing what
+makes it meaningful - this one caught within the hour, by measuring the field
+instead of continuing to reason about it.
+
+It also closes the route: there is nothing in the AddrLib configuration for
+the kext to correct, because it is already right.
+
+### 2. AMD_DeviceSettings is built in userspace, not handed over by the kext
+
+    __Z29amdMtl_HWL_InitDeviceSettingsP18AMD_DeviceSettingsP18AMDCommonHwInfoRec
+    amdMtl_HWL_InitDeviceSettings(AMD_DeviceSettings*, AMDCommonHwInfoRec*)
+
+Argument four is derived in the process from argument one. It is not an
+independent channel from the kernel, so 2nr's lead was a lead to the same
+place. The kernel's only channel into any of this is
+
+    AMDRadeonX6000_AMDAccelDevice::getHardwareInfo(_sAMD_GET_HW_INFO_VALUES*)
+
+and the field of it that configures AddrLib is the one already shown correct.
+Whether some *other* hwInfo bit steers the choice (the chooser gates on
+`0xcd(%r12) & 0x10` and on settings bits derived from it) is unproven and
+would cost boots to explore.
+
+### 3. LSEnvironment in the real app's Info.plist - LaunchServices refuses it
+
+The one route that would have removed the wrapper icon without a launchd
+environment: put `DYLD_INSERT_LIBRARIES` in the app's own `LSEnvironment`, so
+the real app launched normally from the Dock comes up patched. Measured on
+IntelliJ, with the original saved to `logs/plist-backups/`:
+
+    _LSOpenURLsWithCompletionHandler() failed for the application
+    /Applications/IntelliJ IDEA.app with error -54.
+
+Editing the bundle invalidates its signature and LaunchServices refuses the
+app outright - independently of `amfi_get_out_of_my_way`, which only governs
+whether dyld will honour the insert once the process exists. Restored, and the
+app launches again. It would also have been undone by every app update, where
+a wrapper survives one.
+
+### A self-inflicted confound, recorded because it looked like a result
+
+After restoring the plist, IntelliJ still would not start, and left a crash
+log identical to 2nr's. The cause was not the restore:
+
+    DYLD_INSERT_LIBRARIES=.../build/out/mtllinear.dylib
+
+**This the assistant process is itself running under 2np's blanket stub**, so every
+shell it spawns inherits that variable, and `open -a` propagates it to the app
+it launches. The IDE was being started under the one patch known to crash it,
+by the act of measuring. `env -u DYLD_INSERT_LIBRARIES` and it came up clean.
+Rule 16 in a new costume: the instrument is a suspect, and here the instrument
+was the environment the measurement ran in.
+
+### What global actually means now
+
+    third-party apps, signed or ad-hoc or unsigned   wrapper works
+    Apple platform binaries (Safari, Finder,
+      Terminal, Mail, WindowServer)                  unreachable, full stop
+    App Store apps (sandboxed)                       cannot read the dylib
+                                                     out of a home directory
+    a launchd environment                            forbidden by rule 21,
+                                                     and it cost a machine
+
+`tools/rbgpu-app.sh install-all` wraps every injectable app in /Applications
+in one pass and names what it skipped and why, so the setup is one command
+rather than one per app. The first version of it skipped unsigned and ad-hoc
+apps as "unsigned or App Store", which was backwards - those are the easiest
+things to inject into - and it also tried to wrap `/Applications/Spotify.app`,
+which on this machine has no `Contents` at all.
+
+**The honest answer to "can we fix this globally": not for Apple's own apps,
+and not without injecting per process.** The decision is made in the userspace
+Metal driver, one copy per process, and the kernel's only input to it is
+already correct.

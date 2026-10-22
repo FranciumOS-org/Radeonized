@@ -32,11 +32,13 @@ a linear surface is not a legal render target (Electron survives it only
 because Skia's render targets are IOSurface-backed and never reach this
 chooser). Policy `RBGPU_SWIZZLE=fix` is the one to use: LINEAR for
 non-render-targets, and render targets mapped **off the `_X` family**
-(22->6, 26->10, 27->10; Z modes untouched). `_X` means a pipe-bank XOR built
-from the pipe/bank config, and this chip reads GB_ADDR_CONFIG 0x242 against a
-driver built for Navi 21 - which is exactly 2na's "8x8 micro tiles intact,
-only their placement wrong". So `fix` keeps the surfaces **tiled** and is a
-better answer than 2np's LINEAR, not merely a wider one.
+(22->6, 26->10, 27->10; Z modes untouched). `fix` keeps the surfaces **tiled**,
+so it is a better answer than 2np's LINEAR, not merely a wider one.
+**WHY it works is NOT established** - 2nr said the `_X` pipe-bank XOR is built
+from Navi 21's pipe count, and 2ns measured that false: AddrLib's whole
+configuration is `AMDCommonHwInfoRec+0xa4` = gbAddrConfig, and it reads 0x242,
+agreeing with the chip exactly. 2na's exact XOR-linear bit matrix still points
+at the `_X` XOR term, just not at the pipe count.
 
 `usage` is at descriptor **+0x68 as requested and +0xb0 as resolved** - always
 OR them. JBR leaves usage unset, so +0x68 reads 0 on a render target.
@@ -56,10 +58,21 @@ reproduces it on demand; 2na has the exact permutation). Forcing the chooser
 does NOT fix it (2nd), because those surfaces reach neither this path nor the
 kernel's align manager (2nj). Do not conflate the two.
 
-**The lead for a GLOBAL fix** is argument four of the chooser,
-`const AMD_DeviceSettings*`, which comes from the kext. If a field in it
-steers the chooser off the `_X` family, changing it kernel-side reaches every
-process with no injection - platform binaries included. Worth a boot.
+**There is NO global fix, and 2ns closed all three routes.** gbAddrConfig is
+already correct, so the kext cannot fix the math; `AMD_DeviceSettings` is
+built in userspace by `amdMtl_HWL_InitDeviceSettings` from hwInfo, so it is
+not a second kernel channel; and `LSEnvironment` in the real app's Info.plist
+invalidates the bundle signature, after which LaunchServices refuses the app
+outright (**error -54**, measured on IntelliJ, backups in
+`logs/plist-backups/`). The decision is made in the userspace driver, one copy
+per process. `tools/rbgpu-app.sh install-all` wraps every injectable app in
+one pass. **Apple platform binaries and sandboxed App Store apps stay broken.**
+
+**Note for any session run inside the the assistant app:** it is itself launched with
+`DYLD_INSERT_LIBRARIES` set, so every shell inherits it and `open -a` passes
+it on. Launch anything with `env -u DYLD_INSERT_LIBRARIES` or it starts under
+whatever patch this the assistant is running - which once looked exactly like a
+regression (2ns).
 
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.

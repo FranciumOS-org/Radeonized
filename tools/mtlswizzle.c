@@ -117,6 +117,7 @@ static int gDumpBudget = 8;
 
 static swz_fn gTramp;
 static int gDone;
+static int gSaidHw;
 
 // ---- dedup table so a per-draw function does not flood the log ----------
 struct key { uint64_t type, fmt, w, h, mip, smp, arr; unsigned int mode; };
@@ -155,6 +156,28 @@ static unsigned int hook(void *hw, void *al, const void *desc, const void *st,
     int dump = fresh && gDumpBudget > 0 ? gDumpBudget-- : 0;
     pthread_mutex_unlock(&gLock);
 
+    if (fresh && !gSaidHw) {
+        // amdMtl_HWL_InitAddrLibHwRegFields is four instructions:
+        //     movl $0xd, 0x4(%rdi)        chipFamily = GFX10
+        //     movl 0xa4(%rsi), %eax
+        //     movl %eax, 0x30(%rdi)       regValue.gbAddrConfig
+        // so AddrLib's ENTIRE hardware configuration is AMDCommonHwInfoRec+0xa4,
+        // and that record is filled by gfx10_HwInfoInitData from the kernel's
+        // _sAMD_GET_HW_INFO_VALUES. This chip's GB_ADDR_CONFIG reads 0x242
+        // (4 pipes, 4 packers, 1 SE). If the two disagree, every `_X` swizzle
+        // in every process is computed from the wrong pipe config, and the
+        // place to fix it is the kext - once, for everyone.
+        gSaidHw = 1;
+        unsigned int cfg = *(const unsigned int *)((const char *)hw + 0xa4);
+        fprintf(stderr, "swz: AddrLib gbAddrConfig (hwInfo+0xa4) = 0x%x"
+                        "  pipes=%u pkrs=%u se=%u interleave=%u\n",
+                cfg, 1u << (cfg & 7), 1u << ((cfg >> 8) & 7),
+                1u << ((cfg >> 19) & 3), 256u << ((cfg >> 3) & 7));
+        fprintf(stderr, "swz:   hardware GB_ADDR_CONFIG is 0x242 -> pipes=4 "
+                        "pkrs=4 se=1 interleave=256  (%s)\n",
+                cfg == 0x242 ? "AGREES - the _X theory is wrong"
+                             : "DISAGREES - this is the global defect");
+    }
     if (fresh) {
         fprintf(stderr, "swz: type=%llu fmt=%-3llu %llux%llu depth=%llu mip=%llu "
                         "smp=%llu arr=%llu | samples=%u frags=%u b8=%d b9=%d "
