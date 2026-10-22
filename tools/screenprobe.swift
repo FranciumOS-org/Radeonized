@@ -129,6 +129,25 @@ let NORMAL_WINDOW = (MODE == "normalwin")
 // .floating, which separates the level from the rest.
 let NORMAL_LEVEL = (MODE == "normallevel")
 
+// 2nh: how are the losers distributed?
+//
+// 2ng established that a surface is right or wrong from creation and stays
+// that way, about half and half. That is a property of the ALLOCATION, and
+// the shape of its randomness says what kind:
+//
+//   independent ~50%   a per-surface coin flip - an alignment bit, or which
+//                      of two pools the allocation landed in
+//   strict alternation two pools used round-robin
+//   runs/clusters      a pool that flips state, or an address range
+//
+// One window per run cannot tell these apart: it is one sample of one
+// allocation. grid opens EIGHT windows at once in a single process and
+// reports each, so the pattern across simultaneous allocations is visible in
+// one capture.
+let GRID = (MODE == "grid")
+let GRID_N = 8
+let GRID_SIDE = 256
+
 // 2my. Across the first sweep the CPU window was intermittently shredded and
 // the GPU window never was - in direct-1 and msaa-2 but not in direct-2 or
 // msaa-1, so it is not the mode. The one asymmetry built into this probe
@@ -460,6 +479,37 @@ let originY = BIG ? 100 : 200
 let gap = BIG ? 40 : 40
 let leftX = BIG ? 40 : 100
 let rightX = leftX + WIDE + gap
+
+if GRID {
+    // eight 256x256 CPU-drawn windows, 4 across and 2 down
+    var wins: [NSWindow] = []
+    for i in 0..<GRID_N {
+        let gx = 60 + (i % 4) * (GRID_SIDE + 20)
+        let gy = 120 + (i / 4) * (GRID_SIDE + 20)
+        let w = NSWindow(contentRect: NSRect(x: gx, y: gy, width: GRID_SIDE, height: GRID_SIDE),
+                         styleMask: [.borderless], backing: .buffered, defer: false)
+        w.level = .floating
+        w.isOpaque = true
+        w.backgroundColor = .black
+        w.contentView = CPUView(frame: NSRect(x: 0, y: 0, width: GRID_SIDE, height: GRID_SIDE))
+        w.orderFrontRegardless()
+        wins.append(w)
+    }
+    // the decoder compares two rectangles per call, so emit them in pairs
+    let sh2 = Int(NSScreen.main!.frame.height)
+    for i in stride(from: 0, to: GRID_N, by: 2) {
+        let ax = 60 + (i % 4) * (GRID_SIDE + 20)
+        let ay = sh2 - (120 + (i / 4) * (GRID_SIDE + 20)) - GRID_SIDE
+        let j = i + 1
+        let bx = 60 + (j % 4) * (GRID_SIDE + 20)
+        let by = sh2 - (120 + (j / 4) * (GRID_SIDE + 20)) - GRID_SIDE
+        print("grid pair \(i),\(j): \(ax) \(ay) \(bx) \(by) \(GRID_SIDE) \(GRID_SIDE)")
+    }
+    if !READY.isEmpty { try? "ready\n".write(toFile: READY, atomically: true, encoding: .utf8) }
+    Timer.scheduledTimer(withTimeInterval: SECONDS, repeats: false) { _ in app.terminate(nil) }
+    app.run()
+    exit(0)
+}
 
 let cpuWin = makeWindow(leftX, originY)
 let gpuWin = makeWindow(rightX, originY)
