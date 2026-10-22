@@ -23,8 +23,20 @@
 # before the chip is blamed (rule 16: the instrument is a suspect).
 set -e
 cd "$(dirname "$0")/.."
-MODES="${MODES:-bigcpu big bigmsaa direct msaa iosurface}"
-REPEATS="${REPEATS:-2}"
+# The 2my swap experiment. The corruption so far has always landed on the CPU
+# window, which is also the only one drawn once and left alone; the GPU window
+# redraws every 0.5s and has never been hit. These modes move that asymmetry
+# around to find out which of the two properties matters:
+#
+#   static   neither window redraws     -> if it is "drawn once", BOTH corrupt
+#   swap     CPU redraws, GPU drawn once-> if it is "drawn once", the GPU one
+#                                          corrupts and the CPU one stops
+#   refresh  both redraw                -> neither should corrupt
+#   direct   the original asymmetry, as a control
+#
+# It is intermittent, so each mode runs REPEATS times (rule 18).
+MODES="${MODES:-static swap refresh direct}"
+REPEATS="${REPEATS:-4}"
 OUT="logs/$(date +%Y%m%d-%H%M%S)-screenprobe"
 mkdir -p "$OUT"
 REPORT="$OUT/report.txt"
@@ -75,7 +87,7 @@ for MODE in $MODES; do
             for n in a b; do
                 printf '  capture %s: ' "$n"
                 ./build/out/decodescreen "$OUT/$TAG$n.png" $ARGS \
-                  | sed -n 's/^pixels differing by more than 2\/255 between the two windows: /differ=/p;s/^  largest single-channel difference anywhere: /  maxdiff=/p;s/^  rows touched: /  rows=/p' \
+                  | sed -n 's/^window state: //p' \
                   | tr '\n' ' '
                 echo ""
             done

@@ -50,6 +50,24 @@ let VIA_IOSURFACE = (MODE == "iosurface")
 // GPU texture corrupts something else".
 let CPUONLY = (MODE == "bigcpu")
 
+// 2my. Across the first sweep the CPU window was intermittently shredded and
+// the GPU window never was - in direct-1 and msaa-2 but not in direct-2 or
+// msaa-1, so it is not the mode. The one asymmetry built into this probe
+// without thinking about it is that the GPU window redraws every 0.5s on a
+// timer while the CPU window is drawn once and left alone. On screen in the
+// wild the same split holds: the wallpaper, desktop icons and Safari's in-page
+// images are drawn once and are broken; Terminal, the widgets and the menu bar
+// redraw constantly and are crisp.
+//
+// So swap it. If the corruption follows "drawn once" rather than "drawn by the
+// CPU", then CPU-versus-GPU was never the variable.
+//
+//   refresh   both windows redraw continuously   -> expect both clean
+//   static    neither redraws                    -> expect BOTH to corrupt
+//   swap      CPU redraws, GPU drawn once        -> expect the GPU one to corrupt
+let CPU_REDRAW = (MODE == "refresh" || MODE == "swap")
+let GPU_ONCE = (MODE == "static" || MODE == "swap")
+
 // The one definition of the pattern, shared by the CPU and GPU paths, so a
 // difference on screen is a difference in how the pixels travelled rather than
 // in what was asked for. The blue channel carries the high bits of x and y,
@@ -237,7 +255,8 @@ let rightX = leftX + WIDE + gap
 
 let cpuWin = makeWindow(leftX, originY)
 let gpuWin = makeWindow(rightX, originY)
-cpuWin.contentView = CPUView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
+let cpuView = CPUView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
+cpuWin.contentView = cpuView
 
 let metalView = MetalView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
 let surfaceView = SurfaceView(frame: NSRect(x: 0, y: 0, width: WIDE, height: TALL))
@@ -284,6 +303,11 @@ print("decode with: build/out/decodescreen <png> \(leftX) \(topY) \(rightX) \(to
 // Only now is the pattern actually on screen, so only now may it be captured.
 if !READY.isEmpty { try? "ready\n".write(toFile: READY, atomically: true, encoding: .utf8) }
 
-Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in draw() }
+print("cpu redraws: \(CPU_REDRAW), gpu drawn once: \(GPU_ONCE)")
+
+Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+    if CPU_REDRAW { cpuView.needsDisplay = true }
+    if !GPU_ONCE { draw() }
+}
 Timer.scheduledTimer(withTimeInterval: SECONDS, repeats: false) { _ in app.terminate(nil) }
 app.run()
