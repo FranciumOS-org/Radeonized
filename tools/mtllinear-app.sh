@@ -22,10 +22,24 @@
 # pass DYLD_INSERT_LIBRARIES on.
 #
 # Env: RBGPU_MTLLINEAR=0 disables the patch while still injecting, as a control.
+#      RBGPU_INJECT=<path to .dylib> injects something else instead - in
+#      particular build/out/mtlswizzle.dylib (2nq), the trampoline hook whose
+#      policy is chosen with RBGPU_SWIZZLE. Any RBGPU_* variable set on this
+#      script's command line is inherited by the app, so
+#        RBGPU_INJECT=build/out/mtlswizzle.dylib RBGPU_SWIZZLE=auto \
+#          tools/mtllinear-app.sh "IntelliJ IDEA"
+#      is the whole interface.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
-dylib="$root/build/out/mtllinear.dylib"
-[ -f "$dylib" ] || { echo "build it first:  make mtllinear" >&2; exit 1; }
+dylib="${RBGPU_INJECT:-$root/build/out/mtllinear.dylib}"
+case "$dylib" in /*) ;; *) dylib="$root/$dylib" ;; esac
+[ -f "$dylib" ] || { echo "no such dylib: $dylib  (make mtllinear / make mtlswizzle)" >&2; exit 1; }
+# The dylib names its own log lines; mtllinear says "mtllinear:", mtlswizzle
+# says "swz:". Rule 20 needs the right tag or the verdict below is vacuous.
+case "$(basename "$dylib")" in
+    mtlswizzle.dylib) tag="swz:"; okpat="swz: HOOKED" ;;
+    *)                tag="mtllinear:"; okpat="mtllinear: PATCHED" ;;
+esac
 [ $# -ge 1 ] || { echo "usage: tools/mtllinear-app.sh <AppName>   (e.g. the assistant)" >&2; exit 2; }
 
 name=$1; shift
@@ -76,13 +90,13 @@ if running >/dev/null 2>&1; then
     # Rule 20: a launcher reporting success is not evidence the patch applied.
     # The dylib re-reads the bytes after writing them and says so; print that
     # verdict here rather than leaving it to be assumed.
-    if grep -q "mtllinear: PATCHED" "$log"; then
+    if grep -q "$okpat" "$log"; then
         echo "up, and the patch APPLIED:"
-        grep "mtllinear:" "$log" | head -3 | sed 's/^/  /'
+        grep "$tag" "$log" | head -3 | sed 's/^/  /'
     else
         echo "up, but the patch did NOT apply - the dylib said:"
-        grep "mtllinear:" "$log" | head -5 | sed 's/^/  /'
-        echo "  (no mtllinear line at all means the dylib never loaded -"
+        grep "$tag" "$log" | head -5 | sed 's/^/  /'
+        echo "  (no $tag line at all means the dylib never loaded -"
         echo "   a hardened-runtime platform binary such as Safari strips"
         echo "   DYLD_INSERT_LIBRARIES. Anything measured now is void.)"
     fi
