@@ -20590,3 +20590,62 @@ Claude, Safari's images, the desktop and the icons all at once.
 
 Next: find which allocation path decides a layer backing store's layout, and
 whether the existing hook can be made to cover it. That needs boots.
+
+## 2nh (2026-10-22, boot 118) — it scales with the NUMBER of backing stores
+
+### The boot was checked first, and the baseline re-measured on it
+
+Boot 117 came back up unarmed after the shutdown - `rbgpu-boot` unchanged and
+`rbgpu-arm` consumed - and `lawtest` confirmed it at the hardware with no Metal
+device at all. Boot 118 is armed (`rbgpu-boot` 118). The two-window probe at
+512x512 gives 3 of 6 on this boot, the same as boot 117, so the boot is not a
+variable and yesterday's numbers carry over.
+
+### "A per-surface coin flip" was too loose
+
+2ng called it a coin flip at allocation. The rate is not a constant: it depends
+strongly on geometry, and far more strongly on **how many CoreAnimation backing
+stores the process has**.
+
+Same boot, same 800x600 geometry, same screen position:
+
+    one CPU-drawn window      2 of 6 scrambled
+    two CPU-drawn windows    12 of 12 scrambled
+
+And at 512x512, with two windows, the per-window split is the clue:
+
+    window 0 (allocated first)   clean in 4 of 6, then 2 of 6 in a repeat
+    window 1 (allocated second)  scrambled in 6 of 6, both times
+
+The first backing store a process allocates is often right. Every one after it
+is wrong, and their presence drags the first one wrong too. Grids of four and
+six at 512 were scrambled in every window of every round.
+
+Metal is not the variable: creating a device and nothing else (RB_GRIDMETAL=1)
+left window 1 at 6 of 6 either way. Position is not the variable: the grid was
+moved to the probe's exact coordinates and the split persisted.
+
+### Why this explains the machine
+
+    Terminal                  one window surface, usually right - and crisp
+    Claude / Chromium         dozens of layer surfaces, so some are always
+                              wrong and the window is never clean
+    Safari chrome vs images   chrome is few surfaces, in-page images are many
+    this probe                one surface ~33-50%, two surfaces always
+
+It also explains why every single-surface experiment this session looked like a
+coin flip: with one allocation there is only one draw.
+
+### Instrument notes
+
+- A grid of N windows at 512 puts anything past the third in a second row that
+  falls off a 1080-tall screen, so an N=4 run decoded only two of its windows.
+  That row is discarded, not reported.
+- With N=1 the decoder is still handed a pair, so its second verdict is empty
+  screen and meaningless. Only the first is real.
+
+### Next
+
+The question is now what differs between the first allocation and the later
+ones. An address or alignment threshold would fit: the first lands somewhere
+acceptable, later ones do not, and adding allocations moves the first as well.

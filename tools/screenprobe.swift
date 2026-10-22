@@ -145,8 +145,14 @@ let NORMAL_LEVEL = (MODE == "normallevel")
 // reports each, so the pattern across simultaneous allocations is visible in
 // one capture.
 let GRID = (MODE == "grid")
-let GRID_N = 8
-let GRID_SIDE = 256
+// The first grid ran at 256x256 and came back 48 of 48 scrambled - which says
+// nothing about the distribution, because the size sweep had already measured
+// 256x256 at 6 of 6. The rate is strongly geometry-dependent (100% at 256 and
+// 128, about a third at 800x600), so the grid has to run at a geometry that
+// actually sits near half if the pattern across simultaneous allocations is to
+// be visible at all. Configurable, and it defaults to 512.
+let GRID_SIDE = ProcessInfo.processInfo.environment["RB_GRID"].flatMap { Int($0) } ?? 512
+let GRID_N = ProcessInfo.processInfo.environment["RB_GRIDN"].flatMap { Int($0) } ?? 6
 
 // 2my. Across the first sweep the CPU window was intermittently shredded and
 // the GPU window never was - in direct-1 and msaa-2 but not in direct-2 or
@@ -484,8 +490,13 @@ if GRID {
     // eight 256x256 CPU-drawn windows, 4 across and 2 down
     var wins: [NSWindow] = []
     for i in 0..<GRID_N {
-        let gx = 60 + (i % 4) * (GRID_SIDE + 20)
-        let gy = 120 + (i / 4) * (GRID_SIDE + 20)
+        // origin overridable, so the grid can be put exactly where the
+        // two-window probe puts its window and position ruled in or out
+        let ox = ProcessInfo.processInfo.environment["RB_GRIDX"].flatMap { Int($0) } ?? 20
+        let oy = ProcessInfo.processInfo.environment["RB_GRIDY"].flatMap { Int($0) } ?? 20
+        let perRow = max(1, (1900 - 40) / (GRID_SIDE + 20))
+        let gx = ox + (i % perRow) * (GRID_SIDE + 20)
+        let gy = oy + (i / perRow) * (GRID_SIDE + 20)
         let w = NSWindow(contentRect: NSRect(x: gx, y: gy, width: GRID_SIDE, height: GRID_SIDE),
                          styleMask: [.borderless], backing: .buffered, defer: false)
         w.level = .floating
@@ -498,12 +509,26 @@ if GRID {
     // the decoder compares two rectangles per call, so emit them in pairs
     let sh2 = Int(NSScreen.main!.frame.height)
     for i in stride(from: 0, to: GRID_N, by: 2) {
-        let ax = 60 + (i % 4) * (GRID_SIDE + 20)
-        let ay = sh2 - (120 + (i / 4) * (GRID_SIDE + 20)) - GRID_SIDE
-        let j = i + 1
-        let bx = 60 + (j % 4) * (GRID_SIDE + 20)
-        let by = sh2 - (120 + (j / 4) * (GRID_SIDE + 20)) - GRID_SIDE
+        let ox = ProcessInfo.processInfo.environment["RB_GRIDX"].flatMap { Int($0) } ?? 20
+        let oy = ProcessInfo.processInfo.environment["RB_GRIDY"].flatMap { Int($0) } ?? 20
+        let perRow = max(1, (1900 - 40) / (GRID_SIDE + 20))
+        let ax = ox + (i % perRow) * (GRID_SIDE + 20)
+        let ay = sh2 - (oy + (i / perRow) * (GRID_SIDE + 20)) - GRID_SIDE
+        let j = min(i + 1, GRID_N - 1)
+        let bx = ox + (j % perRow) * (GRID_SIDE + 20)
+        let by = sh2 - (oy + (j / perRow) * (GRID_SIDE + 20)) - GRID_SIDE
         print("grid pair \(i),\(j): \(ax) \(ay) \(bx) \(by) \(GRID_SIDE) \(GRID_SIDE)")
+    }
+    // RB_GRIDMETAL=1 creates a Metal device and nothing else. The two-window
+    // probe always does this and scrambles about half the time; grid mode
+    // never did and scrambles always. If merely having a device changes the
+    // rate, that is the variable.
+    if ProcessInfo.processInfo.environment["RB_GRIDMETAL"] == "1" {
+        if let d = MTLCreateSystemDefaultDevice() {
+            print("grid: Metal device created (\(d.name))")
+        } else {
+            print("grid: NO METAL DEVICE - unarmed boot (rule 14)")
+        }
     }
     if !READY.isEmpty { try? "ready\n".write(toFile: READY, atomically: true, encoding: .utf8) }
     Timer.scheduledTimer(withTimeInterval: SECONDS, repeats: false) { _ in app.terminate(nil) }
