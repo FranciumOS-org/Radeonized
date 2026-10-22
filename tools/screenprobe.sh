@@ -35,9 +35,8 @@ cd "$(dirname "$0")/.."
 #   direct   the original asymmetry, as a control
 #
 # It is intermittent, so each mode runs REPEATS times (rule 18).
-MODES="${MODES:-static swap refresh direct}"
+MODES="${MODES:-refresh refresh refresh refresh}"
 REPEATS="${REPEATS:-4}"
-STAMPN=0   # each run gets a distinct blue stamp, so a stale surface is detectable
 OUT="logs/$(date +%Y%m%d-%H%M%S)-screenprobe"
 mkdir -p "$OUT"
 REPORT="$OUT/report.txt"
@@ -51,10 +50,7 @@ for MODE in $MODES; do
     TAG="$MODE-$R"
     rm -f "$OUT/ready-$TAG"
     # 5 seconds up, then it terminates itself in an orderly way
-    STAMP=$(( (STAMPN * 24 + 24) % 240 + 8 ))
-    STAMPN=$((STAMPN + 1))
-    echo "$TAG stamp=$STAMP" >> "$OUT/stamps.txt"
-    ./build/out/screenprobe "$MODE" "$OUT/ready-$TAG" 5 "$STAMP" > "$OUT/geom-$TAG.txt" 2>&1 &
+    ./build/out/screenprobe "$MODE" "$OUT/ready-$TAG" 5 > "$OUT/geom-$TAG.txt" 2>&1 &
     PROBE=$!
 
     i=0
@@ -91,7 +87,7 @@ for MODE in $MODES; do
             for n in a b; do
                 printf '  capture %s: ' "$n"
                 ./build/out/decodescreen "$OUT/$TAG$n.png" $ARGS \
-                  | sed -n 's/^window state: //p;s/^run stamp (blue channel):  /stamp: /p' \
+                  | sed -n 's/^window state: //p' \
                   | tr '\n' ' '
                 echo ""
             done

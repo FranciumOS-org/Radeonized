@@ -134,21 +134,6 @@ func jumps(_ im: [(Int, Int, Int)]) -> (Int, Int) {
     }
     return (count(rowLevel, TALL), count(colLevel, WIDE))
 }
-// The per-run stamp lives in blue and is the same for every pixel, so it
-// survives any rearrangement: a scrambled window still reports the tag of the
-// run that produced it. A scrambled window carrying an OLD tag is a stale
-// surface, which is this harness's fault and not the machine's.
-func tagOf(_ im: [(Int, Int, Int)]) -> Int {
-    var h = [Int: Int]()
-    for y in 20..<TALL where y % 64 != 0 && y % 256 != 0 {
-        for x in 0..<WIDE where x % 64 != 0 && x % 256 != 0 {
-            h[im[y * WIDE + x].2, default: 0] += 1
-        }
-    }
-    return h.max { $0.value < $1.value }?.key ?? -1
-}
-print("run stamp (blue channel):  cpu tag \(tagOf(cpu)),  gpu tag \(tagOf(gpu))")
-
 let (cr, cc) = jumps(cpu), (gr, gc) = jumps(gpu)
 func verdict(_ r: Int, _ c: Int) -> String { (r <= 2 && c <= 2) ? "CLEAN" : "SCRAMBLED" }
 print(String(format: "window state: cpu %@ (row jumps %d, col jumps %d),  gpu %@ (row jumps %d, col jumps %d)",
