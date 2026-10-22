@@ -17,38 +17,28 @@ Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev
 
 **An armed boot is a usable, accelerated Mac** — the CP halt is fixed
 (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute bit-exact.
-**The frontier is readable text, and it is NOT a layout problem** (2ln, and
-confirmed from the register state in 2mw: boot 115 reports every client
-resource LINEAR, `m0=5553`, with the text still scrambled). Every layout lever
-moves the widget/chrome class and leaves text untouched.
-**The CPU-upload line of work is FINISHED and did not reach the symptom** - do
-not re-run it. 2mn found a real defect with a law that predicted 16/16
-geometries, `tools/iosurftex.m` fixes it, and 2mw proved it cannot be the cause:
-the assistant issues **zero** `replaceRegion` calls and all 101 of its texture
-descriptors are `MTLStorageModePrivate`, which cannot take a CPU upload.
-Blit into tiled private textures, texture-to-texture blit, cross-consumer
-reads and Metal-to-Metal aliasing are all **measured clean** (2mx/2my).
-**Every probe before 2mx shared one blind spot**: it wrote a texture and read
-*that same texture object* back, so a consistently wrong layout reads clean.
-`tools/screenprobe.sh` is the first instrument without it - the same
-self-locating pattern in two real windows, CPU-drawn beside GPU-drawn,
-composited by the WindowServer and diffed against each other, which cancels
-colour management exactly. **Run it from the user's Terminal** (it needs Screen
-Recording permission, which the assistant's shell lacks).
-**It reproduces a real defect on demand** (2na): a freshly drawn CoreGraphics
-window backing store comes out rearranged in about half of all runs,
-mode-independent, with a byte-identical signature every time, while the
-GPU-rendered window beside it is never touched. A per-run stamp in the blue
-channel proved it is live and not a stale surface.
-`tools/bitfit.swift` extracts the permutation's XOR-linear bit matrix
-(validated: identity and 100% on a known-clean window). **x and y bits swap
-into each other**, so it is tiling-shaped - but 64KB_S, 64KB_S_X and 4KB_D all
-fit 0.00%, and the matrix explains 94.04%, not ~100%. The mode is NOT named
-yet and no fix is derived from it. It reproduces with `-rbgpulinear` already
-in boot-args, which is evidence that lever does not reach window backing
-stores - the likeliest reason it fixed Terminal and never fixed the assistant.
-Next: locate the residual 6%, get a 100% model, then match it against the
-GFX10 equations. See `docs/JOURNAL.md` 2mx/2my/2mz/2na.
+**APP TEXT IS FIXED (2np, 2026-10-22).** Forcing
+`amdMtl_HWL_DetermineSwizzleMode` to return `ADDR_SW_LINEAR` **inside the
+application process** makes the assistant's text readable and accelerated. Run it with
+`tools/mtllinear-app.sh the assistant`; the launcher prints whether the patch actually
+applied and a run without `mtllinear: PATCHED` measured nothing.
+The defect is the swizzle mode the **userspace** Metal driver picks for client
+textures - 2lg found that place on 2026-10-20 and filed it "out of this
+plugin's reach", which was right about the place and wrong about the reach.
+**Lilu's user patcher can never do it** (rule 22): the driver is in the dyld
+shared cache with no file on disk, so 2lm/2nb/2nm were inert while reporting
+success. `tools/mtllinear.c` works because it edits the in-memory image with
+`vm_protect(VM_PROT_COPY)` and re-reads the bytes.
+**Still open, and a SEPARATE defect:** a CoreAnimation layer backing store
+comes out rearranged in about half of allocations (`tools/screenprobe.sh`
+reproduces it on demand; 2na has the exact permutation, 8x8 micro tiles intact
+and only their placement wrong). Forcing the function above does NOT fix it
+(2nd, every run recording `patch state: PATCHED`), because those surfaces reach
+neither this path nor the kernel's align manager (2nj). Do not conflate the
+two.
+**Not yet done:** the fix is per process and does not survive a relaunch, and
+LINEAR is a correction rather than the right answer - making the chosen mode
+match what this chip does would keep tiling's performance.
 **The display half has never started** — Apple's controller matches Navi 21
 PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
 
