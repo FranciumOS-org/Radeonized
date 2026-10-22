@@ -31,23 +31,19 @@ ORIG_SIG="55 48 89 e5 41"
 say() { echo "$@"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# Recovery does NOT mount Preboot under /Volumes. Measured on this machine
-# (2026-10-22, in Recovery): it is already mounted at /System/Volumes/Preboot,
-# READ-ONLY, on a device whose number differs from the booted system's
-# (disk3s2 there, disk2s2 when booted). Mounting it again at /Volumes/Preboot
-# fails with "Resource busy" because it is already mounted. So look in both
-# places, never assume a device number, and remount read-write in place.
-SEARCH_DIRS="/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld
-/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
-find_dyld_dir() {
-    for d in $SEARCH_DIRS; do
-        [ -d "$d" ] && { echo "$d"; return 0; }
-    done
-    for d in /Volumes/*/Cryptexes/OS/System/Library/dyld; do
-        [ -d "$d" ] && { echo "$d"; return 0; }
-    done
-    return 1
-}
+# Recovery runs from its OWN APFS container. Measured here on 2026-10-22:
+#
+#   /dev/disk3s1 on /                        <- Recovery's own system volume
+#   /dev/disk3s2 on /System/Volumes/Preboot  <- Recovery's own Preboot
+#   /dev/disk4s1 on /Volumes/MACOS - Data    <- the real install
+#   /dev/disk4s4 on /Volumes/MACOS           <- the real install
+#
+# So /System/Volumes/Preboot in Recovery is the WRONG Preboot and has no
+# Cryptexes at all, and the right one (disk4s2) is not mounted. Device numbers
+# also differ from the booted system (disk2 there), so nothing may be
+# hardcoded. The only reliable anchor is the backup folder: whatever container
+# holds it is the user's install, and that container's Preboot is the target.
+
 find_backup_dir() {
     for d in /Volumes/*/Users/*/rbgpu-cache-backup \
              /System/Volumes/Data/Users/*/rbgpu-cache-backup \
@@ -56,31 +52,49 @@ find_backup_dir() {
     done
     return 1
 }
-# mount point that actually holds a path, without assuming a device number
 mount_point_of() { df "$1" 2>/dev/null | tail -1 | awk '{for(i=9;i<=NF;i++)printf "%s%s",$i,(i<NF?" ":"")}'; }
-# first five bytes of the function, without python
-sig_at() { dd if="$1" bs=4096 skip=$BLK count=1 2>/dev/null | od -An -tx1 -j $IN -N 5 | tr -s ' ' | sed 's/^ //;s/ $//'; }
-
-DIR=$(find_dyld_dir) || {
-    say "searched:"; for d in $SEARCH_DIRS /Volumes/*/Cryptexes/OS/System/Library/dyld; do say "  $d"; done
-    say ""; say "mounted apfs volumes:"; mount | grep apfs | sed 's/^/  /'
-    die "no Cryptexes dyld directory found. If Preboot is not listed above, run: diskutil mount Preboot"
+container_of()   { df "$1" 2>/dev/null | tail -1 | awk '{print $1}' | sed 's|/dev/||; s|s[0-9][0-9]*$||'; }
+mount_point_of_dev() {
+    diskutil info "$1" 2>/dev/null | awk -F: '/Mount Point/ {sub(/^ +/,"",$2); print $2; exit}'
 }
-BK=$(find_backup_dir) || die "no rbgpu-cache-backup found - mount your Data volume (diskutil mount \"MACOS - Data\")"
-SUB="$DIR/$SUBNAME"
-say "dyld directory : $DIR"
+
+BK=$(find_backup_dir) || die "no rbgpu-cache-backup found - run: diskutil mount \"MACOS - Data\""
 say "backup folder  : $BK"
+CONT=$(container_of "$BK")
+[ -n "$CONT" ] || die "could not work out which APFS container holds $BK"
+say "that container : $CONT  (this is your install, not Recovery's)"
+
+PB=$(diskutil list "$CONT" 2>/dev/null | awk '/APFS Volume Preboot/ {print $NF; exit}')
+[ -n "$PB" ] || { diskutil list "$CONT"; die "no Preboot volume in $CONT"; }
+say "its Preboot    : $PB"
+
+PBMP=$(mount_point_of_dev "$PB")
+case "$PBMP" in
+    ""|"Not applicable"*|"Not mounted"*)
+        say "not mounted - mounting it ..."
+        diskutil mount "$PB" >/dev/null 2>&1 || die "could not mount $PB"
+        PBMP=$(mount_point_of_dev "$PB")
+        ;;
+esac
+[ -n "$PBMP" ] || die "$PB has no mount point even after mounting"
+say "mounted at     : $PBMP"
+
+DIR="$PBMP/Cryptexes/OS/System/Library/dyld"
+[ -d "$DIR" ] || {
+    say "contents of $PBMP:"; ls "$PBMP" 2>/dev/null | sed 's/^/  /'
+    die "no Cryptexes/OS/System/Library/dyld under $PBMP"
+}
+say "dyld directory : $DIR"
+
+SUB="$DIR/$SUBNAME"
 [ -f "$SUB" ] || die "no $SUBNAME in $DIR"
 say "current bytes  : $(sig_at "$SUB")"
 
-# Recovery mounts Preboot read-only. Remount in place; mounting it a second
-# time elsewhere just returns "Resource busy".
-MP=$(mount_point_of "$DIR")
-say "mount point    : ${MP:-unknown}"
-if mount | grep -F " on ${MP} " | grep -q read-only; then
+# Recovery mounts volumes read-only. Remount in place.
+if mount | grep -F " on ${PBMP} " | grep -q read-only; then
     say "it is mounted READ-ONLY - remounting read-write ..."
-    mount -uw "$MP" || die "could not remount $MP read-write"
-    mount | grep -F " on ${MP} " | grep -q read-only && die "$MP is STILL read-only"
+    mount -uw "$PBMP" || die "could not remount $PBMP read-write"
+    mount | grep -F " on ${PBMP} " | grep -q read-only && die "$PBMP is STILL read-only"
     say "remounted read-write."
 fi
 
