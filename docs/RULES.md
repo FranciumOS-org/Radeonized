@@ -11,7 +11,11 @@
 Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev
 0a, GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on macOS. Plan:
 `docs/PLAN.md`. Machine: ASUS TUF A15 FA507NU (Ryzen 7 7735HS), macOS 15.8.1
-(24H32), OpenCore. Boot-args include `-wegnoegpu`; csr-active-config 0xA03.
+(24H32), OpenCore. Boot-args include `-wegnoegpu`; csr-active-config **0xA43** (not
+0xA03 as this line said until 2026-10-22; measured from NVRAM. SIP reports
+Filesystem Protections *disabled*, yet the dyld cryptex path still refuses
+writes with EROFS because its files carry the `restricted` flag, which the
+sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
