@@ -11,8 +11,10 @@
 #
 #   tools/rbgpu-app.sh install "IntelliJ IDEA"
 #   tools/rbgpu-app.sh install Claude
+#   tools/rbgpu-app.sh install-all          every injectable app in /Applications
 #   tools/rbgpu-app.sh list
 #   tools/rbgpu-app.sh remove "IntelliJ IDEA"
+#   tools/rbgpu-app.sh remove-all
 #
 # Env at install time is baked into the wrapper:
 #   RBGPU_SWIZZLE=fix   (default) LINEAR for non-render-targets, and render
@@ -20,9 +22,21 @@
 #   RBGPU_SWIZZLE=linear   the blanket 2np behaviour; fixes Electron, crashes
 #                          JetBrains - kept only as a fallback
 #
-# What this CANNOT do: Apple platform binaries (Safari, Finder, Mail,
-# WindowServer) strip DYLD_INSERT_LIBRARIES whatever amfi says, so they need
-# the kernel-side route instead. See docs/HANDOFF.md.
+# What this CANNOT do, and why there is no global form (2ns):
+#
+#  * Apple platform binaries (Safari, Finder, Mail, Terminal, WindowServer)
+#    strip DYLD_INSERT_LIBRARIES whatever amfi says. Nothing here reaches them.
+#  * Editing the real app's Info.plist to carry LSEnvironment does work in
+#    principle but invalidates the bundle signature, and LaunchServices then
+#    refuses the app outright with error -54 - measured on IntelliJ, restored
+#    from logs/plist-backups/. It would also be undone by every app update,
+#    where a wrapper survives one.
+#  * A launchd environment is the only true system-wide form and rule 21
+#    forbids it: it is not per app, dyld KILLS any process that cannot load
+#    the inserted dylib, and the one attempt took the machine down.
+#
+# A wrapper per app is therefore the persistent form. Install once, then keep
+# only the wrapper in the Dock - it carries the real app's icon.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 dylib="$root/build/out/mtlswizzle.dylib"
@@ -99,6 +113,44 @@ LAUNCH
     echo "  wraps:   $exe"
     echo "  policy:  RBGPU_SWIZZLE=$policy"
     echo "  Quit $name, then open the wrapper (drag it to the Dock to keep it)."
+    ;;
+install-all)
+    # Only apps that can actually take an insert: a Developer ID or ad-hoc
+    # signed third-party bundle. Apple platform binaries are skipped by name
+    # rather than attempted, because a wrapper for them would silently do
+    # nothing and look like a fix.
+    [ -f "$dylib" ] || { echo "build it first:  make mtlswizzle" >&2; exit 1; }
+    for a in /Applications/*.app; do
+        [ -d "$a" ] || continue
+        n=$(basename "$a" .app)
+        [ -f "$a/Contents/Info.plist" ] || {
+            printf 'skipped  %-32s (not a real bundle)\n' "$n"; continue; }
+        # An UNSIGNED or ad-hoc app is the easiest thing to inject into, not the
+        # hardest - the first version of this skipped them and was wrong. Only
+        # two classes are genuinely out of reach: Apple's own platform
+        # binaries, which strip DYLD_INSERT_LIBRARIES outright, and App Store
+        # apps, which are sandboxed and cannot read a dylib out of a home
+        # directory (the failure mode rule 21 was learned from).
+        auth=$(codesign -dv --verbose=2 "$a" 2>&1 | grep -m1 '^Authority=' || true)
+        case "$auth" in
+            *"Software Signing"*)                   skip="Apple platform binary" ;;
+            *"Apple Mac OS Application Signing"*)   skip="App Store, sandboxed" ;;
+            *)                                      skip="" ;;
+        esac
+        if [ -n "$skip" ]; then printf 'skipped  %-32s (%s)\n' "$n" "$skip"; continue; fi
+        "$0" install "$n" >/dev/null 2>&1 && printf 'wrapped  %s\n' "$n" \
+            || printf 'FAILED   %s\n' "$n"
+    done
+    echo
+    echo "Keep only the (GPU) wrappers in your Dock."
+    ;;
+remove-all)
+    n=0
+    for w in "$dest"/*\ \(GPU\).app; do
+        [ -d "$w" ] || continue
+        rm -rf "$w"; n=$((n+1))
+    done
+    echo "removed $n wrapper(s)"
     ;;
 list)
     found=0
