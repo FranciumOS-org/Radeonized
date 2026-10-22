@@ -21338,3 +21338,73 @@ such exclusion. Claude immediately reported `PATCHED pid 1227`.
 live process, which is the only form of that answer worth having (rule 20),
 and warns when no IOAccelerator is in the registry, because on an unarmed boot
 every reading is void.
+
+## 2nv (2026-10-22) — the seventh lever: the shared cache itself
+
+Six levers were closed in 2ns/2nt, all on the premise that the decision is
+made in a per-process copy of a driver that lives in the dyld shared cache.
+That premise has one hole: **the cache is a file.**
+
+### The dyld-root route is closed by mechanics, not policy
+
+Metal dlopens
+`/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/MacOS/AMDRadeonX6000MTLDriver`,
+which does not exist on disk (rule 22, confirmed again). Creating a patched
+file there would make dyld prefer it - a "root" - and would reach every
+process. It needs a loadable standalone copy of the driver, and there is none
+to be had:
+
+    dlopen(extracted copy)  ->  exit 139 (SIGSEGV)
+
+    __TEXT        vm 0x7ffb08bf3000   file 0x08bf3000
+    __DATA_CONST  vm 0x7ffb412e7b00   file 0x205bfb00   ~870 MB away
+    __DATA        vm 0x7ffb434b1ca0   file 0x22789ca0
+    __LINKEDIT    vm 0x7ffb80000000   file 0x239d4000   the cache's SHARED linkedit
+
+The image's segments are scattered across the cache and its `__LINKEDIT` is
+the cache's global one, shared with every other dylib. A loadable copy means
+rebuilding segments contiguously, rewriting every chained fixup, and splitting
+one image's symbol, export and binding tables out of a 143 MB shared
+linkedit - a full dsc_extractor, whose output is for analysis and generally
+does not load either. Closed.
+
+### Patching the cache in place is mechanically open
+
+No extraction needed. `tools/re/dyldcache.py`'s own mapper locates the
+function exactly, and the first attempt at the arithmetic was wrong in an
+instructive way - the offset was right and the FILE was wrong, because the
+cache is split into subcaches and the main file was read instead of `.03`:
+
+    amdMtl_HWL_DetermineSwizzleMode  vm 0x7ffb08d35a11
+      subcache  dyld_shared_cache_x86_64h.03
+      mapping   vm 0x7ffb00000000+0x1f2d8000 -> file offset 0
+      OFFSET    0x8d35a11          30-byte prologue verified byte-for-byte
+
+Conditions, all measured:
+
+    Authenticated Root status      disabled
+    /System/Volumes/Preboot        apfs, local, journaled - READ-WRITE
+                                   (no remount of / and no new snapshot needed)
+    .03                            718.6 MB, root:0755, 36 GB free for a backup
+    main cache header              codeSignatureOffset 0, codeSignatureSize 0
+
+### Why it is not done, and what it would take
+
+The blanket LINEAR stub of 2np fits in the 30 bytes but **crashes JetBrains in
+3.6 s** and would be applied to every process on the system, WindowServer
+included. The policy that actually works, `fix`, needs the usage check at
+descriptor +0x68|+0xb0 and the `_X` remap - roughly 60 bytes, so it needs a
+code cave in the cache's `__TEXT` plus a redirect.
+
+And the failure mode is not a bad boot, it is **no boot**: if dyld refuses the
+modified cache, nothing launches, and the rollback is a Recovery boot to
+restore the backup. Rule 21 was learned from a recovery procedure that had
+never been tested in the situation it existed for, and this one cannot be
+tested from inside a running system. So this is the user's call, not a step
+to be taken on judgement.
+
+The patch itself is small and verifiable offline: the find pattern is already
+proven unique in this driver's `__text` (2lm counted it), the byte arithmetic
+is checked against the live process's own memory, and the whole thing can be
+written and validated against a COPY of `.03` before anything on the volume is
+touched.
