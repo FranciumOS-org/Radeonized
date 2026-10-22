@@ -53,8 +53,17 @@
 // tools/usageprobe.m creating one texture per usage value (2nq):
 //   +0x00 textureType   +0x08 pixelFormat  +0x10 width   +0x18 height
 //   +0x20 depth         +0x28 mipLevels    +0x30 samples +0x38 arrayLength
-//   +0x68 usage         <- 5/5 cases tracked the value set, and the function
-//                          itself tests `0x68(%r14) & 6` = ShaderWrite|RT
+//   +0x68 usage as REQUESTED   <- 5/5 cases tracked the value set, and the
+//                                function itself tests `0x68(%r14) & 6`
+//   +0xb0 usage as RESOLVED    <- identical to +0x68 whenever usage is set
+//                                explicitly, which is why usageprobe alone
+//                                could not tell them apart. IntelliJ did:
+//                                JBR leaves usage unset, so +0x68 reads 0
+//                                while +0xb0 reads 0x17 (Metal expands an
+//                                unspecified usage to all of them). Keying on
+//                                +0x68 therefore calls a render target "not a
+//                                render target" - it did not crash, but only
+//                                by luck. The hook uses the OR of the two.
 //
 // Why non-X is a candidate for the RIGHT answer rather than a correction.
 // The modes the driver picks here are 4KB_D_X, 64KB_R_X, 64KB_Z_X - the `_X`
@@ -101,7 +110,8 @@ typedef unsigned int (*swz_fn)(void *hw, void *addrlib, const void *desc,
 enum { M_LOG, M_LINEAR, M_AUTO, M_FIX, M_NOX, M_OFF };
 static int gMode = M_LOG;
 static int gNonRT = -1, gRT = -1;      // explicit overrides, -1 = per-mode default
-static unsigned long gUsageOff = 0x68; // measured by tools/usageprobe.m
+static unsigned long gUsageOff  = 0x68; // usage as requested
+static unsigned long gUsageOff2 = 0xb0; // usage as resolved by Metal
 static unsigned long gUsageRT = 4;      // MTLTextureUsageRenderTarget
 static int gDumpBudget = 8;
 
@@ -163,7 +173,8 @@ static unsigned int hook(void *hw, void *al, const void *desc, const void *st,
     if (gMode == M_LOG || gMode == M_OFF) return orig;
     if (gMode == M_LINEAR) return 0;
 
-    uint64_t usage = *(const uint64_t *)((const char *)desc + gUsageOff);
+    uint64_t usage = *(const uint64_t *)((const char *)desc + gUsageOff) |
+                     *(const uint64_t *)((const char *)desc + gUsageOff2);
     int isRT = (usage & gUsageRT) != 0;
     unsigned int want = orig;
     if (gMode == M_NOX) want = nox(orig);
@@ -192,6 +203,7 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     else if (m && !strcmp(m, "nox")) gMode = M_NOX;
     else if (m && !strcmp(m, "off")) gMode = M_OFF;
     if (getenv("RBGPU_USAGE_OFF")) gUsageOff = strtoul(getenv("RBGPU_USAGE_OFF"), 0, 0);
+    if (getenv("RBGPU_USAGE_OFF2")) gUsageOff2 = strtoul(getenv("RBGPU_USAGE_OFF2"), 0, 0);
     if (getenv("RBGPU_USAGE_RT"))  gUsageRT  = strtoul(getenv("RBGPU_USAGE_RT"), 0, 0);
     if (getenv("RBGPU_SWIZZLE_DUMP")) gDumpBudget = atoi(getenv("RBGPU_SWIZZLE_DUMP"));
     if (getenv("RBGPU_SWIZZLE_NONRT")) gNonRT = atoi(getenv("RBGPU_SWIZZLE_NONRT"));
@@ -276,7 +288,7 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     fprintf(stderr, "swz: HOOKED DetermineSwizzleMode at %p (verify %s) mode=%s",
             (void *)fn, ok ? "ok" : "FAILED", names[gMode]);
     if (gMode != M_LOG && gMode != M_LINEAR)
-        fprintf(stderr, " usage@0x%lx & 0x%lx", gUsageOff, gUsageRT);
+        fprintf(stderr, " usage@(0x%lx|0x%lx) & 0x%lx", gUsageOff, gUsageOff2, gUsageRT);
     if (gNonRT >= 0) fprintf(stderr, " nonRT=%d", gNonRT);
     if (gRT >= 0)    fprintf(stderr, " RT=%d", gRT);
     fprintf(stderr, "\n");

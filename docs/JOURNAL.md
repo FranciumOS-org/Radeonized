@@ -20933,3 +20933,129 @@ started through the launcher. Making it permanent cannot use Lilu for the
 reason above. And LINEAR is a correction, not the right answer - the proper
 fix is to make the chosen mode match what this chip actually does, which would
 also keep tiling's performance.
+
+## 2nr (2026-10-22) — INTELLIJ FIXED TOO, and with tiling kept
+
+2np fixed the assistant by forcing the userspace chooser to ADDR_SW_LINEAR. The same
+stub applied to IntelliJ IDEA killed it in 3.6 s:
+
+    SIGSEGV (si_addr 0x68) in libawt_lwawt.dylib
+    -[EncoderManager getEncoder:renderOptions:]+0x1b2
+    <- MTLRenderer_FillSpans <- sun.java2d.metal.MTLRenderQueue.flushBuffer
+
+Relaunching with the dylib injected and `RBGPU_MTLLINEAR=0` came up stable, so
+the patch is the cause and not the injection (rule 16).
+
+### Why the same fix broke the second app
+
+The apps differ in what they draw INTO. Electron/Skia renders into
+IOSurface-backed textures, which take `NewTextureWithDescriptor2` and never
+reach this chooser (2nl), and uses a plain MTLTexture only for its glyph
+atlas - so blanket LINEAR fixed the atlas and touched no render target. JBR
+renders every Swing surface into a plain MTLTexture. A linear surface is not a
+legal render target, `newRenderPipelineState` returned nil, and JBR
+dereferenced it at +0x68.
+
+A constant-return stub can never be selective, so `tools/mtlswizzle.c`
+replaces it with a detour: 30 bytes of prologue (a whole number of
+instructions - the 32-byte uniqueness pattern of 2lm cuts `movq %rdx, %r14` in
+half) copied to an RX page with an absolute jump back, and
+`movabs %r11, hook; jmp *%r11` over the entry. The hook has the real
+signature, so calling the original is an ordinary C call.
+
+### What the hook could measure that the stub could not
+
+The signature, from the mangled name:
+
+    amdMtl_HWL_DetermineSwizzleMode(AMDCommonHwInfoRec*, void* addrLib,
+        const MTLTextureDescriptorPrivate*, const AMD_DeviceSettings*,
+        uint samples, uint frags, uint& out, bool, bool)
+
+It builds a 0x44-byte ADDR2_GET_PREFERRED_SURF_SETTING_INPUT on the stack
+(`movl $0x44, -0x7c(%rbp)`) and asks AddrLib. The flags it fills are
+color/depth/stencil/texture/display, derived from format and sample count -
+**not** from Metal's usage - so the flags cannot discriminate a render target.
+
+`usage` is at descriptor+0x68, and that was measured, not inferred: the
+function tests `0x68(%r14) & 6` = ShaderWrite|RenderTarget, and
+`tools/usageprobe.m` then created one texture per usage value and the field
+tracked all five. **But +0x68 is the usage as REQUESTED.** IntelliJ exposed
+the difference: JBR leaves usage unset, so +0x68 reads 0 while +0xb0 reads
+0x17, Metal having expanded an unspecified usage to all of them. Keying on
++0x68 alone called a render target "not a render target" and did not crash
+only by luck. The hook ORs the two. usageprobe could never have caught this,
+because it always set usage explicitly and the two fields agreed 5/5.
+
+### The finding: every mode the chooser picks is an `_X` mode
+
+Logged from live processes:
+
+    37x48 BGRA8  -> 2  (256B_D)      256x16  -> 22 (4KB_D_X)
+    256x48 BGRA8 -> 27 (64KB_R_X)    640x480 -> 27 (64KB_R_X)
+    IntelliJ: 512x512 A8 -> 26 (64KB_D_X)   <- the glyph atlas
+              1400x941   -> 27 (64KB_R_X)   <- the window surface
+              16x16 fmt 253 -> 24 (64KB_Z_X)
+
+`_X` means the swizzle carries a pipe-bank XOR derived from the pipe/bank
+configuration. This chip reads GB_ADDR_CONFIG 0x242 (4 pipes, 4 packers, 1 SE)
+where Apple's driver is built for Navi 21, and 2na measured the corruption as
+**8x8 micro tiles intact with only their placement wrong** - which is what a
+pipe-bank XOR computed from the wrong pipe count looks like. A non-X mode
+applies no pipe-bank XOR at all, so it is tiled, configuration independent,
+and still a legal render target.
+
+Every one of IntelliJ's textures has the render-target bit set in its resolved
+usage (0x05, 0x07, 0x17), so usage-gating alone can do nothing for it: its
+scrambled text IS the 512x512 A8 atlas at 64KB_D_X. Mode `fix` therefore sends
+non-render-targets to LINEAR and maps render targets off the `_X` family:
+
+    22 -> 6   (4KB_D_X  -> 4KB_D)    x8
+    26 -> 10  (64KB_D_X -> 64KB_D)   x1
+    27 -> 10  (64KB_R_X -> 64KB_D)   x5
+    24        (64KB_Z_X) left alone - depth needs _X for HTILE, and is
+                                      neither displayed nor CPU-read
+
+**IntelliJ came up completely clean**: menus, project tree, syntax-highlighted
+Java, breadcrumbs and status bar all sharp, with no crash. The driver and the
+hardware both accepted non-X render targets. This is a better result than
+2np's: the surfaces stay TILED and only the pipe-bank XOR is removed, so the
+performance tiling buys is kept.
+
+The screenshot also shows the desktop and Finder icons behind the window still
+scrambled, which is the control that matters - the chip is in its usual state
+and defect B is untouched, exactly as 2nj predicted.
+
+### texprobe is not an oracle for this, and never was
+
+Baseline, unpatched, on this boot: 0/12 failures in every geometry, every
+footprint `1.00x (linear)`, "law held in 16/16". Its round trip is
+self-consistent because both ends use the driver's own assumption. That is why
+it stayed clean for twenty milestones while the assistant's text was unreadable. The
+only honest oracles for defect A are real applications.
+
+### Made persistent
+
+`tools/rbgpu-app.sh install "IntelliJ IDEA"` builds
+`~/Applications/<Name> (GPU).app`, a wrapper bundle whose executable execs the
+real binary with the dylib inserted and the policy baked in. Verified through
+LaunchServices, which is what the Dock uses: `vmmap` on the resulting process
+shows `mtlswizzle.dylib` mapped. It activates an already-running copy instead
+of starting a second one, because an app holding a single-instance lock
+forwards and exits in a way that looks exactly like a crash (2no).
+
+Rule 21 still forbids the only system-wide form of this. A wrapper per app is
+the persistent form that keeps the blast radius at one app.
+
+### What this still cannot reach
+
+Apple platform binaries (Safari, Finder, Mail, WindowServer) strip
+DYLD_INSERT_LIBRARIES whatever amfi is set to, so no injection reaches them.
+Defect B is a different path again and is unaffected.
+
+**The lead for a genuinely global fix is now visible and is argument four of
+this very function.** `const AMD_DeviceSettings*` comes from the kext, and the
+chooser consults it (`testb $0x8, 0x7(%rsi)` with `testb $0x10, 0xcd(%r12)` on
+the hw info). If a device-settings field steers the chooser away from the `_X`
+family, changing it kernel-side would reach **every process with no injection
+at all** - including the platform binaries. That is the next experiment, and
+the first one in a while that is worth a boot.
