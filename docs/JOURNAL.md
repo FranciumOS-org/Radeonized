@@ -20138,3 +20138,68 @@ session has spent itself on.
 
 `-rbgpulinear` goes back in. Removing it was my doing, for 2mn's test, and that
 test could not have worked.
+
+## 2mw — the CPU-upload defect CANNOT be Claude's problem, and the proof is mechanical
+
+Boot 115, armed, `-rbgpulinear` in. Claude run under `iosurftex` with
+`RBGPU_IOSURFTEX_TRACE=1`, used for a minute, then quit.
+
+```
+pid 2137 summary: swapped=0 declined=0/0/0 law-clean=0 fellthrough=0 cpu-uploads=0
+101 distinct descriptors across the GPU helper, all of them:
+    storage=2 (MTLStorageModePrivate)   x101
+    type=2 (2D) x81,  type=4 (2DMultisample) x20
+    mips=1 x100,      mips=6 x1
+25 textures swapped
+CPU UPLOAD lines in the whole log:  0
+```
+
+**Claude calls `replaceRegion` zero times.** Every texture it creates is
+`MTLStorageModePrivate`, which cannot take a CPU upload at all - the API
+forbids it, and `texprobe` learned that the hard way in 2mf when a `.private`
+`replace()` segfaulted.
+
+The law of 2mn describes corruption of a CPU `replace()` into a driver-allocated
+texture. Claude performs no such operation. So the defect this session found,
+characterised, predicted 16/16 and fixed **cannot be what scrambles Claude's
+text.** That is not an inference from a failed fix; it is mechanical.
+
+A second screenshot under the interposer, with 25 textures swapped, is
+pixel-for-pixel the same kind of scramble as the first. Expected, now.
+
+### What that closes
+
+- The CPU-upload defect is real, obeys a law, and `iosurftex` fixes it. It is
+  **not** this machine's presenting symptom. Both halves of that sentence are
+  measured.
+- Layout is excluded for Claude from the hardware side as well: this boot
+  reports `rbgpu-mode seen=5553 m0=5553` - every client resource LINEAR, which
+  has no swizzle to get wrong - and the text is scrambled anyway. 2ln said this
+  from photographs in boots 103/104; it is now said from the register state.
+- Scanout and compositing are excluded: the screenshot carries the corruption,
+  so the pixels are already wrong in the surfaces.
+
+### What is left, and it is a short list
+
+Claude's content is produced by the **GPU** into **private** textures. The GPU
+paths measured so far are clean: a render pass writing position-derived values
+(2mu, 0/6 at every geometry and storage class) and a buffer-to-texture blit
+(2lo). Never measured:
+
+1. **MSAA resolve.** 20 of Claude's 101 descriptors are `type=4`, and a
+   multisample resolve is a distinct hardware path. Antialiased glyph edges
+   come out of exactly this.
+2. **Texture-to-texture blit**, which a compositor uses constantly.
+3. **Mipmapped sampling** - one descriptor has `mips=6`.
+4. **sRGB formats**, which the inventory also shows.
+
+Each is a `texprobe`-shaped userspace measurement needing no boot, and 1 is the
+one to do first: it is the largest share of the unexplained population and the
+only one with an obvious connection to glyph edges.
+
+### Status correction
+
+`CLAUDE.md`'s three-line status still says the frontier "is NOT a layout
+problem", which remains true and is now independently confirmed. It should also
+say that the CPU-upload line of work is finished and did not reach the symptom,
+so a future session does not re-run it.
