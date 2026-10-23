@@ -129,8 +129,25 @@ it on. Launch anything with `env -u DYLD_INSERT_LIBRARIES` or it starts under
 whatever patch this Claude is running - which once looked exactly like a
 regression (2ns).
 
-**The display half has never started** — Apple's controller matches Navi 21
-PCI IDs, ours is `0x16811002`, and spoofing `device-id` kills the accelerator.
+**The display half has never started**, and 2oq surveyed why, statically.
+Apple's controller personality matches Navi 21 PCI IDs and ours is
+`0x16811002`; spoofing `device-id` kills the accelerator. But the personality
+route is **pointless**: **macOS contains no DCN 3.1.2 code at all** - Apple's
+DAL compiles `dcn10/20/21/30/302`, and `dcn31`/`dcn312`/`vba_31`/`yellow_carp`
+are 0 hits in every AMD kext against a control of 58 for `dcn30`. This chip is
+DCN 3.1.2 / DMU 3.1.3.
+
+**The desktop runs on `IONDRVFramebuffer` with `IOFB0Hz = Yes` and one fixed
+mode.** No vblank is why animations are timer-paced; one mode is why nothing
+switches; the 7 MB is the same fact. **But the firmware already brought DCN
+3.1.2 up** - `OTG0_CONTROL = 0x00011201` (master enable), OTG1-3 off, DMCUB
+firmware 4.0.15.47 running - so the route is to **adopt the running pipe**,
+not to bring DCN up: read OTG0's timing, publish our own `IOFramebuffer`
+(IOGraphicsFamily is a public KPI), then take OTG0's vblank and flip
+`HUBP0_PRIMARY_SURFACE_ADDRESS`. The last two **write DCN registers, which is
+the user's decision** - the probe allows no writes but `MM_INDEX`, and a wrong
+OTG/HUBP write blanks the panel (rule 12). Only the vblank step fixes
+animations. `docs/HANDOFF.md` §4 and §10 have the detail.
 
 Details, evidence and next steps: `docs/HANDOFF.md`.
 
