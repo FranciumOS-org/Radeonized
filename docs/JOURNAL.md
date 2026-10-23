@@ -25714,3 +25714,100 @@ well be downstream of the display being an `IONDRVFramebuffer` rather than an
 accelerated framebuffer - in which case this chain ends up pointing back at the
 same large body of work, but it will do so **with the exact predicate named**
 instead of inferred, which is worth having either way.
+
+---
+
+## 2px (2026-10-23) — MEASURED: our display's accelerator id is 0, and the field it comes from is named
+
+Zero boots. The first *measurement* in this chain rather than a deduction, plus
+CoreDisplay's two display-device ops families.
+
+### Measured, from a scratch process, no root
+
+`SLSAcceleratorForDisplayNumber` is exported from SkyLight and is client-safe.
+Called with `CGMainDisplayID()`:
+
+```
+real        id=1535231424   rc=0      out1=0    out2=0
+real+1      id=1535231425   rc=1000   out1=0    out2=0
+1           id=1            rc=1000   out1=0    out2=0
+0           id=0            rc=0      out1=0    out2=0      (0 = main display)
+0xffffffff  id=4294967295   rc=1000   out1=0    out2=0
+```
+
+**The discrimination control is what makes this evidence** (rule 26): three
+invalid ids return error 1000 while the real display and `0` return success. So
+the call genuinely resolved *our* display and reported **accelerator id 0**. It
+is not an empty-client-side-list artifact.
+
+A caveat that must travel with the reading: **`out1 = 0` on its own proves
+nothing**, because both CoreDisplay implementations zero the out-params at entry
+before doing anything (`movl $0x0, (%rbx)` / `(%r15)`), so every error path also
+leaves 0. The information is in `rc = 0` *paired with* `out1 = 0`.
+
+A failed attempt worth recording: calling `CGXDisplayDeviceForDisplayNumber`,
+`CGXActiveDisplayDevices` and `CGXAllDisplayDevices` from a client process
+**segfaulted** (exit 139). Those are server-side and expect WindowServer state;
+splitting the probe is what preserved the useful half.
+
+### CoreDisplay has exactly TWO display-device ops families
+
+CoreDisplay's `__DATA_CONST` is at unslid `0x7FF8404F7BB0` and is only 64 KB, so
+it was decoded exhaustively with the new v2 support. Exactly two tables of 68
+function pointers (`0x220` bytes) exist:
+
+| table | slot `0x000` | slot `0x148` |
+|---|---|---|
+| `0x7ff8404fa7b0` | `VFBInitScreen` | `VFBAcceleratorForDisplayDevice` |
+| `0x7ff8404fc700` | `MPInitScreen`  | `MPAcceleratorForDisplayDevice` |
+
+`VFB` is a virtual framebuffer family; `MP` is the other. `+0x148` is entry 41
+of 68, and it is exactly the slot `CGXAcceleratorForDisplayDevice` tail-jumps
+through (2pw).
+
+### Where the id actually lives
+
+`MPAcceleratorForDisplayDevice(CGXDisplayDevice const*, int which, uint *out1, uint *out2)`,
+unslid `0x7ff8040e6825`:
+
+```
+if (out2) *out2 = 0;
+*out1 = 0;
+priv = MPDisplayDevicePriv(dev->0x160, which);      ; 0x7ff8040ebef2
+if (priv == NULL)  -> failure path 0x7ff8040e6878   ; out1 stays 0
+eax = 0;                                            ; success
+*out1 = priv->0x5c;                                 ; <<< THE ACCELERATOR ID
+if (out2) *out2 = priv->0x98;
+```
+
+**The accelerator id is `MPDisplayDevicePriv->0x5c`.** SkyLight passes
+`which = -1`, which the VFB twin treats specially (`js`), i.e. "the current one".
+
+### Which of the two zeros it is - NOT settled
+
+`out1 = 0` can mean the `priv` lookup failed, or that `priv->0x5c` is genuinely
+0. The measured `rc = 0` is suggestive of the second, because in
+`MPAcceleratorForDisplayDevice` the `eax = 0` return is only reached **after**
+the null check - but that rc came from SkyLight's
+`SLSAcceleratorForDisplayNumber` (`0x7ff807e0c67c`), which is its own function
+and was **not** verified to propagate CoreDisplay's return code. So: suggestive,
+not established. Do not write it down as settled.
+
+Also unknown: **whether our display even uses the MP table or the VFB one.**
+That is runtime state. If it turned out to be VFB, that would itself be the
+finding.
+
+### The gap, stated precisely
+
+**What writes `MPDisplayDevicePriv->0x5c`.** It is not in `MPInitScreen`
+(unslid `0x7ff8040e0729`): no `+0x5c` store appears anywhere in its first
+0x1800 bytes. The ten `movl %reg, 0x5c(%reg)` sites in all of CoreDisplay
+symbolize to unrelated structures - `IOPSBlitFill`, `IOFBBlitVRAMCopy`,
+`IOFBBlitSurfaceCopy`, `TimingToHost`, `CGXExtendedDisplayStart`,
+`MPHWMoveRegion`, `CGXConnDisplayCapture`, `execute_handlers`,
+`DisplaySurfacePool::GetNextSurface` - so `+0x5c` is simply a common offset and
+none of them is the writer. Either the store goes through a computed pointer, or
+it is in a region the linear sweep desynced through, or the field is filled by a
+`memcpy`-style bulk copy from an IOKit query.
+
+Finding that writer is the next step, and it is still static.
