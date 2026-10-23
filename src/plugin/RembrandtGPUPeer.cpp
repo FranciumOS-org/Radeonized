@@ -733,6 +733,13 @@ static const char *const kRbgpuNvramHotKeys[] = {
     "ptb_written", "ptb_back", "vmf_st_wait", "stamp_ret",
     "setres_ret", "gfxmqd_ret", "mapq_calls", "mapq_fails",
     "gate_stage",
+    // 2pl: the DAL promotion's numbers. Boot 143 panicked and boot 144 may
+    // come up with no usable screen, so these have to survive in NVRAM or the
+    // boot teaches nothing (rule 14). Numeric only - the full trace lives in
+    // dal_tr0..15 in RBGPUDiag and needs a readable boot; the 512-byte NVRAM
+    // budget cannot hold it.
+    "dal_writes", "dal_r_hw", "dal_tr_n", "dalfb_start_ret",
+    "dalfb_grouted", "dalfb_attr_blocked",
 };
 
 

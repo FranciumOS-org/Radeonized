@@ -24510,3 +24510,67 @@ to remove `-rbgpudalfbreal`.
 
 Keys: `dalfb_start`, `dalfb_start_ret`, `dalfb_declined`, `dalfb_srouted`,
 `dal_tr_n`, `dal_tr0..15`.
+
+## 2pl (2026-10-23, boot 143) — THE DECLINE PANICKED THE MACHINE. Returning false from start() does not undo what start() did.
+
+Boot 143 panicked ~5.5 s in. The user rescued with `-rbgpuoff`. **This was my
+error, and 2pk had already named it without mitigating it.**
+
+```
+panic(cpu 7): Kernel trap, type 14 = page fault
+CR2: 0x0000000000000000      RDI: 0x0000000000000000      <- NULL `this`
+RIP: AMDRadeonX6000_AmdGpuWrangler::vendor_doDeviceAttribute + 0xd4
+  <- AppleGraphicsDeviceControl::vendor_doDeviceAttribute + 0x27
+  <- AppleGraphicsDeviceControl::filtered_doDeviceAttribute + 0x1027
+  <- AppleGraphicsDeviceControl::setDeviceAttribute + 0x1d
+  <- AppleGPUWrangler -> IOInterruptEventSource::checkForWork
+  <- IOWorkLoop::runEventSources / threadMain
+System uptime: 5500804735 ns
+```
+
+### The mechanism
+
+Apple's `AmdGpuWrangler::start()` **registers the Wrangler with
+AppleGraphicsDeviceControl** - a different kext. 2pk let that start() run and
+then returned **false**, reasoning correctly from xnu's "start the best (until
+success) of each category" that IOKit would fall through to
+IONDRVFramebuffer and keep the panel. The fall-through is real and did happen.
+
+What is not real is the assumption underneath it: IOKit unwinds the
+**attachment**, not the **side effects**. Our instance was detached and freed;
+AGDC's registration survived; 5.5 seconds later AGDC's workloop called
+`vendor_doDeviceAttribute` on the dead pointer and faulted on a NULL `this`.
+
+**The reusable rule: returning false from `start()` does not undo what
+`start()` did.** A cross-kext registration is a side effect, and there is no
+hook that reverses it. This belongs with rule 13 and rule 20 - a success/failure
+return describes the caller's bookkeeping, not the world.
+
+And the process failure matters more than the bug. 2pk's own comment said
+*"calling orig then returning false leaves Apple's objects half-initialised.
+Could panic or leak. But it's bounded."* **Naming a risk is not mitigating it.**
+The honest options at that point were to find the registration and block it, to
+guard the entry points, or to not promote at all - and I took none of them
+because the decline looked elegant.
+
+### The fix
+
+1. **The forced decline is gone.** The Wrangler's `start()` result is passed
+   through untouched, the object stays alive, AGDC's registration stays valid,
+   and the panic cause is removed. The cost is honest: when promoted, the
+   Wrangler really does own `IOFramebuffer`. Every DAL write is still dropped,
+   so the hardware is untouched and the firmware's scanout keeps running - the
+   panel may well survive. If it does not, remove `-rbgpudalfbreal`.
+2. **A guard on the same shape of bug by a different route.** Apple's own
+   `start()` can fail on this chip and produce exactly boot 143's sequence - a
+   freed Wrangler with a live AGDC registration.
+   `vendor_doDeviceAttribute` is the **single** AGDC-facing entry point on the
+   class (nm) and is rule-2 clean, so it is routed and refuses with
+   `kIOReturnNoDevice` when `this` is not a kernel VA. Rule 19 exactly: a NULL
+   check is not a pointer check, and `RDI 0x0` is what it would have caught.
+3. **The DAL keys now persist to NVRAM** (`dal_writes`, `dal_r_hw`,
+   `dal_tr_n`, `dalfb_start_ret`, `dalfb_grouted`, `dalfb_attr_blocked`).
+   Boot 144 may come up with no usable screen, and without these in the
+   512-byte NVRAM summary the boot would teach nothing (rule 14). The full
+   trace stays in `dal_tr0..15` in `RBGPUDiag` and needs a readable boot - the
+   NVRAM budget cannot hold 16 chunks.

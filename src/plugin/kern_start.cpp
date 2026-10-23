@@ -8325,6 +8325,9 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
 //
 // In the private category it does NOT decline, so boot 142's behaviour is
 // preserved exactly and the safety is added only where it is needed.
+using t_rbVendorAttr = IOReturn (*)(void *, uint32_t, unsigned long *,
+                                    unsigned long, unsigned long *,
+                                    unsigned long *, void *);
 static bool g_dalfb_real = false;          // -rbgpudalfbreal
 static t_rbCtlStart orig_wr_start_2pk = nullptr;
 
@@ -8342,15 +8345,66 @@ static bool hooked_wr_start_2pk(void *self, void *provider) {
     rbgpu_diag_set_num("dal_r_hw",   g_dal_r_hw);
     rbgpu_diag_set_num("dal_w_atom", g_dal_w_atom);
     rbgpu_diag_set_num("dal_w_bios", g_dal_w_bios);
-    if (g_dalfb_real) {
-        rbgpu_log("2pk: DECLINING the framebuffer on purpose - every DAL write "
-                  "was dropped, so this framebuffer cannot drive a panel. "
-                  "Returning false sends xnu to the next candidate, which is "
-                  "IONDRVFramebuffer, and the display keeps working.");
-        rbgpu_diag_set_num("dalfb_declined", 1);
-        return false;
-    }
+    // 2pl: THE DECLINE IS GONE, AND IT IS WHY BOOT 143 PANICKED.
+    //
+    // 2pk returned false here after letting Apple's start() run, reasoning
+    // from xnu's "start the best (until success) of each category" that IOKit
+    // would fall through to IONDRVFramebuffer and keep the panel. The fall
+    // through is real. The problem is what start() had already done:
+    //
+    //   panic: page fault, CR2 0x0, RDI 0x0            <- NULL `this`
+    //   AmdGpuWrangler::vendor_doDeviceAttribute + 0xd4
+    //     <- AppleGraphicsDeviceControl::vendor_doDeviceAttribute
+    //     <- AGDC::filtered_doDeviceAttribute / setDeviceAttribute
+    //     <- AppleGPUWrangler -> IOInterruptEventSource::checkForWork
+    //   uptime 5.5 s
+    //
+    // Apple's `start()` REGISTERS THE WRANGLER WITH AppleGraphicsDeviceControl,
+    // a different kext. Returning false made IOKit detach and free our
+    // instance, but AGDC kept the registration, and 5.5 seconds later its
+    // workloop called a method on the dead object.
+    //
+    // The general lesson, which is the part worth keeping: **returning false
+    // from start() does not undo what start() did.** IOKit unwinds the
+    // attachment, not the side effects, and a cross-kext registration is a
+    // side effect. 2pk named this risk in its own notes - "calling orig then
+    // returning false leaves Apple's objects half-initialised, could panic" -
+    // and shipped it anyway. Naming a risk is not mitigating it.
+    //
+    // So the Wrangler's start() result is now passed through untouched. The
+    // object stays alive, AGDC's registration stays valid, and the panic cause
+    // is removed. The cost is that when promoted the Wrangler really does own
+    // `IOFramebuffer`. With every DAL write still dropped the hardware is
+    // untouched, so the firmware's scanout keeps running and the panel may well
+    // survive; if it does not, the rescue is to remove `-rbgpudalfbreal`.
+    (void)g_dalfb_real;
     return ret;
+}
+
+// 2pl: and a guard for the same shape of bug arriving by a different route.
+//
+// Even with our forced decline gone, Apple's own `start()` can fail on this
+// chip and produce exactly the boot-143 sequence: a freed Wrangler with a live
+// AGDC registration. `vendor_doDeviceAttribute` is the single AGDC-facing
+// entry point on the class (checked with nm) and is rule-2 clean, so it can be
+// guarded directly. Rule 19: a NULL check is not a pointer check - validate it
+// as a kernel VA, which is what the panic's RDI 0x0 would have failed.
+static t_rbVendorAttr orig_wr_attr_2pl = nullptr;
+static uint64_t g_dalfb_attr_blocked = 0;
+
+static IOReturn hooked_wr_attr_2pl(void *self, uint32_t sel, unsigned long *a,
+                                   unsigned long b, unsigned long *c,
+                                   unsigned long *d, void *args) {
+    if (reinterpret_cast<uintptr_t>(self) < 0xffffff8000000000ull) {
+        g_dalfb_attr_blocked++;
+        if (g_dalfb_attr_blocked == 1)
+            rbgpu_log("2pl: BLOCKED vendor_doDeviceAttribute on a non-kernel "
+                      "`this` (%p) - this is the boot-143 panic, refused "
+                      "instead of faulted", self);
+        rbgpu_diag_set_num("dalfb_attr_blocked", g_dalfb_attr_blocked);
+        return kIOReturnNoDevice;
+    }
+    return orig_wr_attr_2pl(self, sel, a, b, c, d, args);
 }
 
 __attribute__((noinline))
@@ -8396,6 +8450,18 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                   "register write will be recorded and DROPPED");
     }
     rbgpu_diag_set_num("dal_wroutes", g_dal_safe ? 1 : 0);
+
+    KernelPatcher::RouteRequest ga(
+        "__ZN29AMDRadeonX6000_AmdGpuWrangler24vendor_doDeviceAttributeEjPmmS0_S0_P25IOExternalMethodArguments",
+        hooked_wr_attr_2pl, orig_wr_attr_2pl);
+    if (patcher.routeMultiple(id, &ga, 1, address, size)) {
+        rbgpu_diag_set_num("dalfb_grouted", 1);
+    } else {
+        patcher.clearError();
+        rbgpu_log("2pl: FAILED to route vendor_doDeviceAttribute - the boot-143 "
+                  "panic guard is NOT in place");
+        rbgpu_diag_set_num("dalfb_grouted", 0);
+    }
 
     KernelPatcher::RouteRequest wr(
         "__ZN29AMDRadeonX6000_AmdGpuWrangler5startEP9IOService",
