@@ -4403,8 +4403,26 @@ static bool rbgpu_bounded_stamp_wait_2en(void *ch, uint32_t stamp, uint32_t cap_
         fn_refresh(ch);
         if (static_cast<int32_t>(stamp - completed()) <= 0) {
             rbgpu_diag_set_num("bwait_iters", i + 1);
-            rbgpu_log("2en: BOUNDED wait satisfied after %u polls (~%u us, cap %u ms): "
-                      "+0x84 reached %u", i + 1, (i + 1) * 100, cap_ms, completed());
+            // 2pi: THROTTLED, and this mattered more than it looks. This is a
+            // SUCCESS message on a wait that has worked since 2en, and it
+            // fires on essentially every submission - boot 140's RBGPULog ring
+            // held 506 of 512 entries from this one line, evicting every other
+            // milestone in the plugin. The ring is the only log channel that
+            // survives to a capture (the kernel buffer wraps long before
+            // plugin_check runs: boot 140's log.txt had ZERO 2o/2p lines), so
+            // this single site made the whole logging channel useless and left
+            // nothing but numeric diag keys to work from. Log the first, and
+            // the slow ones that are actually interesting, and count the rest.
+            static uint64_t satisfied = 0;
+            satisfied++;
+            if (satisfied == 1 || i > 0) {
+                rbgpu_log("2en: BOUNDED wait satisfied after %u polls (~%u us, "
+                          "cap %u ms): +0x84 reached %u [#%llu]",
+                          i + 1, (i + 1) * 100, cap_ms, completed(),
+                          (unsigned long long)satisfied);
+            }
+            if ((satisfied & 0x3ff) == 0)
+                rbgpu_diag_set_num("bwait_ok", satisfied);
             (void)t0;
             return true;
         }
@@ -8083,10 +8101,21 @@ bool rbgpu_vblp_start(OSObject *owner) {
 static bool     g_dal_on      = false;     // -rbgpudal
 static bool     g_dal_safe    = false;     // both write routes landed
 static uint64_t g_dal_writes  = 0;
+// 2pi: THE CONTROL for `dal_writes`. Boot 140 reported dal_writes 0 with the
+// controller started and start() returning true, and 0 has two readings:
+// "DAL genuinely wrote nothing" or "the writes bypassed our hooks" - which is
+// live, because rule 2 refused `writeRegList`. Reads settle it. readReg32 is
+// rule-2 clean, it is PASSED THROUGH unchanged (orig is called and its value
+// returned), and a nonzero `dal_reads` beside a zero `dal_writes` proves the
+// accessor is in use and the zero is real. Absence is not a result (rule 14),
+// and this is the cheapest thing that turns one into one.
+static uint64_t g_dal_reads   = 0;
 static uint64_t g_dal_dropped = 0;
 static uint32_t g_dal_logged  = 0;
 #define RB_DAL_LOG_MAX 192                 // enough to see DAL's opening moves
 
+using t_rbDalR3  = uint32_t (*)(void *, uint32_t, uint32_t, uint8_t);
+static t_rbDalR3 orig_dal_r3_2pi = nullptr;
 using t_rbDalW2  = void (*)(void *, uint32_t, uint32_t);
 using t_rbDalW4  = void (*)(void *, uint32_t, uint32_t, uint8_t, uint32_t);
 using t_rbCtlStart = bool (*)(void *, void *);
@@ -8119,6 +8148,14 @@ static void hooked_dal_w4_2ph(void *self, uint32_t reg, uint32_t val,
     // Deliberately NOT calling orig_dal_w4_2ph.
 }
 
+static uint32_t hooked_dal_r3_2pi(void *self, uint32_t reg, uint32_t a, uint8_t b) {
+    uint32_t v = orig_dal_r3_2pi(self, reg, a, b);   // passed through untouched
+    g_dal_reads++;
+    if (g_dal_reads == 1 || (g_dal_reads & 0xff) == 0)
+        rbgpu_diag_set_num("dal_reads", g_dal_reads);
+    return v;
+}
+
 static bool hooked_ctl_start_2ph(void *self, void *provider) {
     if (!g_dal_safe) {
         // Rule 14: refuse loudly. This is the interlock, and it firing is a
@@ -8140,6 +8177,7 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
               ret, (unsigned long long)g_dal_writes);
     rbgpu_diag_set_num("dal_start_ret", ret ? 1 : 0);
     rbgpu_diag_set_num("dal_writes", g_dal_writes);
+    rbgpu_diag_set_num("dal_reads", g_dal_reads);
     return ret;
 }
 
@@ -8161,6 +8199,9 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
          hooked_dal_w2_2ph, orig_dal_w2_2ph},
         {"__ZN32AMDRadeonX6000_AmdRegisterAccess10writeReg32Ejjhj",
          hooked_dal_w4_2ph, orig_dal_w4_2ph},
+        // 2pi: the control. Passed through, counted, never altered.
+        {"__ZN32AMDRadeonX6000_AmdRegisterAccess9readReg32Ejjh",
+         hooked_dal_r3_2pi, orig_dal_r3_2pi},
     };
     g_dal_safe = patcher.routeMultiple(id, w, arrsize(w), address, size);
     if (!g_dal_safe) {
