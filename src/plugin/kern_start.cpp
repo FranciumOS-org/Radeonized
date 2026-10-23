@@ -7652,6 +7652,118 @@ static void rbgpu_vblp_tick(OSObject *, IOTimerEventSource *ts) {
         ts->setTimeoutUS(g_vblp_us);
 }
 
+// 2pa: THE "7 MB". Not a memory limit - a missing label (2or).
+//
+// System Profiler right now, live on boot 137:
+//
+//     VRAM (Total): 7 MB
+//     Vendor: AMD (0x1002)   Device ID: 0x1681
+//     (and NO "Chipset Model" line at all)
+//
+// 8294400 bytes is exactly 1920x1080x4 - ONE scanout buffer - which is
+// `IOFBMemorySize` on `.Display_boot`. SPDisplaysReporter reads
+// `VRAM,totalMB` / `VRAM,totalsize` and falls back to `IOFBMemorySize` only
+// because NEITHER EXISTS on this machine (checked live: `ioreg -c
+// IONDRVFramebuffer | grep -c 'VRAM,total'` is 0). The 4096 MB is really
+// there - `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
+// `MMMC_VM_FB_LOCATION_TOP` all agree, and `tools/vramtest` reads back 1 GB
+// plus an 8K texture. So this publishes a label; it allocates nothing and
+// moves nothing.
+//
+// Why a hook and not `RembrandtGPUPeer::start()`: ordering. The peer starts
+// when the PCI device matches, which is BEFORE IONDRVSupport loads from the
+// system KC - that race is exactly what cost boot 137 (2oy). A routed
+// `enableController` cannot have that problem, because it only runs once the
+// framebuffer exists.
+//
+// THE CAST IS VERIFIED, NOT ASSUMED. `fb` is an `IONDRVFramebuffer *` and we
+// cannot link that class, but IOKit's chain is single inheritance
+// (OSMetaClassBase -> OSObject -> IORegistryEntry -> IOService ->
+// IOFramebuffer -> IONDRVFramebuffer), so the pointer value is the same at
+// every level and `IOService` IS linkable - it lives in the kernel, not in
+// IOGraphicsFamily. Before touching it we ask the object its own class name
+// and REFUSE if it is not `IONDRVFramebuffer` (rule 19's spirit: a NULL check
+// is not a pointer check, and neither is a comment).
+static bool     g_vram_on   = false;        // -rbgpufbvram
+static uint32_t g_vram_mb   = 4096;         // rbgpufbvrammb=<N>
+static bool     g_vram_done = false;
+
+static void rbgpu_vram_publish(void *fb) {
+    if (!g_vram_on || g_vram_done)
+        return;
+    if (reinterpret_cast<uintptr_t>(fb) < 0xffffff8000000000ull) {
+        rbgpu_diag_set_num("fbvram", 1);     // not a kernel VA
+        return;
+    }
+    auto *svc = reinterpret_cast<IOService *>(fb);
+    const OSMetaClass *mc = svc->getMetaClass();
+    const char *cls = mc ? mc->getClassName() : nullptr;
+    if (!cls || strcmp(cls, "IONDRVFramebuffer") != 0) {
+        rbgpu_log("2pa: refusing to publish VRAM - the object says it is '%s', "
+                  "not IONDRVFramebuffer, so the cast is not safe",
+                  cls ? cls : "(null)");
+        rbgpu_diag_set_str("fbvram_class", cls ? cls : "null");
+        rbgpu_diag_set_num("fbvram", 2);
+        return;
+    }
+    g_vram_done = true;
+
+    const uint64_t bytes = static_cast<uint64_t>(g_vram_mb) << 20;
+    unsigned placed = 0;
+
+    // Both keys, on BOTH the framebuffer and its provider. Which node
+    // SPDisplaysReporter reads is not established here, and setting a label on
+    // the PCI node is harmless - nothing matches on `VRAM,totalMB`, unlike
+    // `device-id`, which must never be spoofed because it is what makes Apple
+    // accept this chip at all. Covering both costs nothing and saves a boot.
+    IOService *targets[2] = { svc, svc->getProvider() };
+    for (auto *t : targets) {
+        if (!t)
+            continue;
+        if (auto *n = OSNumber::withNumber(static_cast<uint64_t>(g_vram_mb), 32)) {
+            if (t->setProperty("VRAM,totalMB", n)) placed++;
+            n->release();
+        }
+        if (auto *d = OSData::withBytes(&bytes, sizeof(bytes))) {
+            if (t->setProperty("VRAM,totalsize", d)) placed++;
+            d->release();
+        }
+    }
+
+    // The missing "Chipset Model" line. Cosmetic, and deliberately on the
+    // provider only, where System Profiler looks for it.
+    if (IOService *prov = svc->getProvider()) {
+        static const char kModel[] = "AMD Radeon 680M";
+        if (auto *d = OSData::withBytes(kModel, sizeof(kModel))) {
+            if (prov->setProperty("model", d)) placed++;
+            d->release();
+        }
+    }
+
+    rbgpu_log("2pa: published VRAM,totalMB %u (%llu bytes) and the model "
+              "string on the framebuffer and its provider - %u properties set. "
+              "System Information should read %u MB instead of 7 MB.",
+              g_vram_mb, (unsigned long long)bytes, placed, g_vram_mb);
+    rbgpu_diag_set_num("fbvram", 3);
+    rbgpu_diag_set_num("fbvram_mb", g_vram_mb);
+    rbgpu_diag_set_num("fbvram_props", placed);
+}
+
+using t_rbNdrvEnableCtl = IOReturn (*)(void *);
+static t_rbNdrvEnableCtl orig_ndrv_enablectl_2pa = nullptr;
+
+static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
+    IOReturn ret = orig_ndrv_enablectl_2pa(fb);
+    // Only after the original has run: if the controller failed to come up,
+    // labelling it would be a lie. Rule 13 - a return code is not a result
+    // until the code that sets it has been read - so this does not interpret
+    // `ret`, it only records it and publishes regardless, because the VRAM is
+    // present either way and the label is about the chip, not the controller.
+    rbgpu_diag_set_num("fbvram_enable_ret", static_cast<uint32_t>(ret));
+    rbgpu_vram_publish(fb);
+    return ret;
+}
+
 // 2oz: the three interrupt methods. All three are defined in IONDRVSupport
 // (rule 1, nm) and all three pass rule 2 - the first rel8/rel32 branch is 26,
 // 17 and 17 bytes in respectively, so none begins within the first five.
@@ -7892,6 +8004,27 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         }
     }
 
+    // 2pa: the VRAM label, gated on its own arg and routed on its own.
+    rbgpu_diag_set_num("fbvram_on", g_vram_on ? 1 : 0);
+    if (g_vram_on) {
+        KernelPatcher::RouteRequest vr(
+            "__ZN17IONDRVFramebuffer16enableControllerEv",
+            hooked_ndrv_enablectl_2pa, orig_ndrv_enablectl_2pa);
+        if (patcher.routeMultiple(id, &vr, 1, address, size)) {
+            rbgpu_log("2pa: ARMED - routed IONDRVFramebuffer::enableController; "
+                      "VRAM,totalMB %u will be published on the framebuffer and "
+                      "its provider. Read it with "
+                      "`system_profiler SPDisplaysDataType`: \"7 MB\" means it "
+                      "did not take.", g_vram_mb);
+            rbgpu_diag_set_num("fbvram_routed", 1);
+        } else {
+            patcher.clearError();
+            rbgpu_log("2pa: FAILED to route enableController - System "
+                      "Information keeps saying 7 MB");
+            rbgpu_diag_set_num("fbvram_routed", 0);
+        }
+    }
+
     if (!g_vbl_on) {
         rbgpu_log("2ou: NOT armed - -rbgpuvbl absent, so the mode keeps "
                   "reporting refreshRate 0 to CoreGraphics");
@@ -7976,6 +8109,28 @@ void RGPU::init() {
     }
     rbgpu_log("2oz: vblank-via-registerForInterruptType %s",
               g_vbli_on ? "ARMED by -rbgpufbvbl" : "off (add -rbgpufbvbl)");
+
+    // 2pa: the VRAM label. Independent of the vblank - one boot can fix the
+    // "7 MB" and the pacing separately, and say which of them took.
+    g_vram_on = checkKernelArgument("-rbgpufbvram");
+    char vrambuf[16] = {};
+    if (PE_parse_boot_argn("rbgpufbvrammb", vrambuf, sizeof(vrambuf)) &&
+        vrambuf[0]) {
+        uint32_t mb = 0;
+        for (const char *c = vrambuf; *c >= '0' && *c <= '9'; c++)
+            mb = mb * 10 + static_cast<uint32_t>(*c - '0');
+        // Refuse anything that is not plausibly this carve-out. 4096 MB is
+        // what three independent measurements say; a wrong label here is a
+        // cosmetic lie, but it would also be a lie in a bug report.
+        if (mb >= 256 && mb <= 16384)
+            g_vram_mb = mb;
+        else
+            rbgpu_log("2pa: rbgpufbvrammb=%s is outside 256-16384 - ignored, "
+                      "keeping %u", vrambuf, g_vram_mb);
+    }
+    rbgpu_log("2pa: VRAM label %s (%u MB)",
+              g_vram_on ? "ARMED by -rbgpufbvram" : "off (add -rbgpufbvram)",
+              g_vram_mb);
 
     rbgpu_log("2ou: refresh-rate fix %s (%u.%03u Hz)",
               g_vbl_on ? "ARMED by -rbgpuvbl" : "off (add -rbgpuvbl)",
