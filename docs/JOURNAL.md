@@ -23783,3 +23783,48 @@ CoreVideo reads `StdFBShmem_t.vblDelta`, and only this path writes it. It is
 `OTG0_FRAME_COUNT`, which is read-only and is the next step. It writes **no
 DCN register**. Brightness, the hardware cursor, page flipping and the
 mode/Hz menu all need writes or the missing DCN 3.1.2 code and are not here.
+
+### 2pa (2026-10-23) — the "7 MB", answered
+
+The user, on reading 2oz: *"So at the end is this our own actual framebuffer
+without the 7MB bs?"* No on both counts, and saying so was the honest answer:
+2oz shipped the **vblank only**. At that point we owned **4** of ~27
+framebuffer methods (`getInformationForDisplayMode` from 2ou plus 2oz's
+interrupt trio), the class in `ioreg` was still `IONDRVFramebuffer`, and the
+7 MB was untouched — the subclass had carried the `VRAM,totalMB` fix and I
+deleted it along with the subclass without replacing it.
+
+Live on boot 137, before any of this:
+
+```
+VRAM (Total): 7 MB
+Vendor: AMD (0x1002)   Device ID: 0x1681
+Metal: Supported
+UI Looks like: 1920 x 1080 @ 144.00Hz        <- 2ou, working
+```
+
+No **"Chipset Model"** line at all, which is why System Information shows the
+section as a bare "Display". And `ioreg -c IONDRVFramebuffer | grep -c
+'VRAM,total'` → **0**, checked live: SPDisplaysReporter falls back to
+`IOFBMemorySize` because neither VRAM key exists. 8294400 = 1920×1080×4, one
+scanout buffer. The 4096 MB is real and already usable (2or, `tools/vramtest`).
+
+So `-rbgpufbvram` publishes `VRAM,totalMB` + `VRAM,totalsize` on **both** the
+framebuffer and its provider — which node SP reads is not established, and a
+label on the PCI node is harmless because nothing matches on it, unlike
+`device-id` — and `model` on the provider.
+
+Two things worth keeping from how it was built. **It is routed on
+`enableController`, not done from `RembrandtGPUPeer::start()`**: the peer runs
+before IONDRVSupport loads from the system KC, which is exactly the race that
+cost boot 137, and a hook on the framebuffer cannot have an ordering problem.
+And **the cast is verified**: `fb` is an `IONDRVFramebuffer *`, a class we
+cannot link, but IOKit's chain is single inheritance and `IOService` *is*
+linkable (it is in the kernel, not IOGraphicsFamily), so before touching the
+object we ask it `getMetaClass()->getClassName()` and refuse unless it answers
+`IONDRVFramebuffer`, recording what it actually said.
+
+Still open after this, and not pretended otherwise: `Metal: Supported` rather
+than Metal 3 (the families are already there — `spdisplays_metal3` /
+`spdisplays_mtlgpufamilysupport` are simply unpopulated), the Hz menu, real
+mode setting, brightness, the hardware cursor, page flipping and phase lock.
