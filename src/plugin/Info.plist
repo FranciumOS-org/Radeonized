@@ -96,6 +96,32 @@
             <key>IOProviderClass</key>
             <string>IOPCIDevice</string>
         </dict>
+        <!-- 2pi: Apple's framebuffer (the Wrangler). Apple ships it in
+             IOFramebuffer at score 60000, which would DISPLACE
+             IONDRVFramebuffer (20000) and leave no working display if DAL
+             cannot drive this chip. A PRIVATE category means it starts and
+             drives DAL's init without ever contesting the panel. Gated on
+             LoadDisplayWrangler, published only with -rbgpudalfb. -->
+        <key>RembrandtGPU DisplayWrangler (0x1681)</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.apple.kext.AMDRadeonX6000Framebuffer</string>
+            <key>IOClass</key>
+            <string>AMDRadeonX6000_AmdGpuWrangler</string>
+            <key>IOMatchCategory</key>
+            <string>RBDisplayWrangler</string>
+            <key>IOPCIMatch</key>
+            <string>0x16811002</string>
+            <key>IOPropertyMatch</key>
+            <dict>
+                <key>LoadDisplayWrangler</key>
+                <true/>
+                <key>RBGPULoad</key>
+                <true/>
+            </dict>
+            <key>IOProviderClass</key>
+            <string>IOPCIDevice</string>
+        </dict>
         <key>RembrandtGPU Accelerator (0x1681)</key>
         <dict>
             <key>CFBundleIdentifier</key>

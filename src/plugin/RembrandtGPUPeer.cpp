@@ -494,6 +494,19 @@ bool RembrandtGPUPeer::start(IOService *provider) {
         rbgpu_log("2ph: published LoadDisplayController - Apple's DAL will be "
                   "loaded, with every register write recorded and dropped");
     }
+    // 2pi: the Wrangler, separately. Boot 140 showed the CONTROLLER attaches
+    // and start()s clean on this chip with ZERO register writes, so start() is
+    // construction only and something else has to ask DAL to touch hardware.
+    // The Wrangler is Apple's IOFramebuffer for this GPU and is the obvious
+    // asker. Its own arg so it stays independently attributable from the
+    // controller (rule 16), and its own match category in the plist so it
+    // cannot contest IOFramebuffer and cannot take the display.
+    if (checkKernelArgument("-rbgpudalfb")) {
+        pciDevice->setProperty("LoadDisplayWrangler", kOSBooleanTrue);
+        rbgpu_log("2pi: published LoadDisplayWrangler - Apple's framebuffer "
+                  "will start in a PRIVATE match category, so IONDRVFramebuffer "
+                  "keeps the panel and every DAL write is still dropped");
+    }
 
     // 2cs: LoadAccelerator only on an armed boot. Without it Apple's
     // accelerator personality does not match at all, so nothing can claim the
