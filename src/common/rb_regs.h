@@ -127,6 +127,21 @@ static const struct rb_reg_def rb_reg_defs[] = {
     { "OTG0_V_SYNC_A_CNTL",     RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b38 },
     { "HUBP0_SURFACE_PITCH",    RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x0607 },
     { "HUBP0_SURFACE_CONTROL",  RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x061a },
+
+    /* 2or: the backlight PWM, read-only. The panel's brightness is a tiny,
+     * self-contained block - nothing like mode setting - and the firmware has
+     * already configured it, because the backlight is on. Reading what it
+     * left says whether changing brightness is a matter of one duty-cycle
+     * write (GRP1_REG_LOCK exists to make that update atomic) or whether the
+     * panel is driven some other way, e.g. over ACPI.
+     *
+     * PWRSEQ0 is the first of two instances; the second (PWRSEQ1, 0x2f85..)
+     * is for a second eDP and is not read until something needs it. Linux
+     * drives these through dce_panel_cntl / dcn31_panel_cntl. */
+    { "BL_PWM_CNTL",            RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x2f19 },
+    { "BL_PWM_CNTL2",           RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x2f1a },
+    { "BL_PWM_PERIOD_CNTL",     RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x2f1b },
+    { "BL_PWM_GRP1_REG_LOCK",   RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x2f1c },
 };
 
 #define RB_NREG_DEFS (sizeof(rb_reg_defs) / sizeof(rb_reg_defs[0]))
