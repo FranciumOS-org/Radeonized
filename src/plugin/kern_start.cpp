@@ -7295,17 +7295,48 @@ static UserPatcher::BinaryModInfo kRbMods[2] {
 static UserPatcher::BinaryModInfo &kRbMapMod  = kRbMods[0];
 static UserPatcher::BinaryModInfo &kRbCaveMod = kRbMods[1];
 
+// mapAddresses fills only the FIRST registered mod whose path matches a given
+// .map line - it breaks out of the loop - and 2lm and 2lp declare the SAME
+// dylib path and register before this one does. So depending on which
+// boot-args are set, the real startTEXT lands on kRb2lmMod, kRb2lpMod or
+// kRbMapMod, and reading only our own would silently see 0. Take it from
+// whichever actually received it, and take startTEXT and endTEXT together so
+// they can never come from different mods.
+static UserPatcher::BinaryModInfo *rbgpu_mtlcave_mapped_mod(void) {
+    UserPatcher::BinaryModInfo *cands[] { &kRb2lmMod, &kRb2lpMod, &kRbMapMod };
+    for (size_t i = 0; i < arrsize(cands); i++)
+        if (cands[i]->startTEXT != 0 && cands[i]->endTEXT != 0)
+            return cands[i];
+    return nullptr;
+}
+
 // Runs on every matching exec, AFTER patchSharedCache has already run for
 // that process - so the first exec goes unpatched and every later one is
-// covered. Guarded so it writes once.
+// covered. Guarded so it acts once.
+static bool g_rbCaveMapWarned = false;
 static void rbgpu_mtlcave_binary_loaded(void *, UserPatcher &, vm_map_t,
                                         const char *, size_t) {
-    if (kRbCaveMod.startTEXT != 0 || kRbMapMod.startTEXT == 0)
+    if (kRbCaveMod.startTEXT != 0)
         return;
-    kRbCaveMod.startTEXT = kRbMapMod.startTEXT;
-    kRbCaveMod.endTEXT   = kRbMapMod.endTEXT;
+    auto *src = rbgpu_mtlcave_mapped_mod();
+    if (!src) {
+        // Rule 14: say so rather than going quiet.
+        if (!g_rbCaveMapWarned) {
+            g_rbCaveMapWarned = true;
+            rbgpu_diag_set_num("mtlcave_startTEXT", 0);
+            rbgpu_log("2od: INERT - no registered mod received a startTEXT "
+                      "from the cache .map, so patchSharedCache has no base "
+                      "address and nothing can be placed");
+        }
+        return;
+    }
+    kRbCaveMod.startTEXT = src->startTEXT;
+    kRbCaveMod.endTEXT   = src->endTEXT;
     rbgpu_diag_set_num("mtlcave_startTEXT", kRbCaveMod.startTEXT);
     rbgpu_diag_set_num("mtlcave_endTEXT", kRbCaveMod.endTEXT);
+    rbgpu_diag_set_str("mtlcave_mapsrc",
+                       src == &kRb2lmMod ? "2lm" :
+                       src == &kRb2lpMod ? "2lp" : "own");
     rbgpu_log("2od: startTEXT 0x%llx endTEXT 0x%llx adopted from the "
               "map-matched mod - patchSharedCache can place patches from the "
               "next exec onward",
