@@ -24384,3 +24384,70 @@ with `dal_wroutes 0` is the case where DAL wrote real registers.
 Keys: `dal_on`, `dal_wroutes`, `dal_srouted`, `dal_interlock`, `dal_start`,
 `dal_start_ret`, `dal_writes`. The first 192 writes are logged with register
 and value to `amd-log.txt`.
+
+## 2pj (2026-10-23, boot 141) — both Apple personalities attach, and the read control earns its keep
+
+`rbgpu-boot = 141`, loaded UUID matches the build (rules 8 and 15).
+
+### What attached
+
+```
+RembrandtGPUPeer · AMDSupport · .Display_boot (IONDRVFramebuffer)
+AMDRadeonX6000_AMDRadeonHWServicesNavi
+AMDRadeonX6000_AmdRadeonControllerNavi21      <- Apple's display controller
+AMDRadeonX6000_AmdGpuWrangler                 <- Apple's framebuffer
+AMDRadeonX6000_AMDNavi21GraphicsAccelerator
+```
+
+**Both Apple display personalities attach and start cleanly on a Rembrandt
+APU**, and `.Display_boot` survived - the private match category did exactly
+what it was for, so the panel was never contested. `dal_start_ret 1` for the
+controller.
+
+### And the control is what made the result readable
+
+`dal_reads 0` beside `dal_writes 0`. **A zero read count cannot mean "DAL chose
+not to write."** It means that accessor was never touched at all - so the
+instrument could not have protected anything, and `dal_writes 0` on its own
+would have read as proof of safety. 2pi added that control precisely because
+2ph flagged the ambiguity in advance; this is the one measurement in the
+sequence that stopped a false conclusion.
+
+### The register surface is wider than one class
+
+`nm` shows four more paths in the same kext, all rule-2 clean:
+
+| path | |
+|---|---|
+| `AmdRegisterAccess::hwReadReg32(uint)` | the low-level read |
+| `AmdDalHelper::dalAtomReadRegister32(void*, uint)` | AtomBIOS read |
+| `AmdDalHelper::dalAtomWriteRegister32(void*, uint, uint)` | AtomBIOS write |
+| `AmdBiosParserHelper::readReg32(void*, uint)` | VBIOS parser read |
+| `AmdBiosParserHelper::writeReg32(void*, uint, uint)` | VBIOS parser write |
+
+There is deliberately **no** `hwWriteReg32`, so
+`AmdRegisterAccess::writeReg32` really is the bottom of that path - checked,
+not assumed. And the strings name **`dm_read_reg_func`**, so DAL's generic
+register layer reaches hardware through a **function pointer**, which is why
+routing the class methods alone caught nothing.
+
+All five are now routed: writes recorded and **dropped**, reads **passed
+through** and counted, with a separate counter per path (`dal_r_hw`,
+`dal_r_atom`, `dal_r_bios`, `dal_w_atom`, `dal_w_bios`) because "which path
+does Apple's DAL use on this chip" is the open question and one aggregate
+number would hide it.
+
+### The honest state of the experiment
+
+The Wrangler is in a private category, which protected the panel **and**
+probably prevented anything from driving it as a framebuffer - no
+`enableController`, no `setDisplayMode`, so no reason for DAL to touch
+hardware. That trade-off is why the dry run has not yet traced anything.
+
+So the order matters and is deliberate: **prove the hooks fire before promoting
+the Wrangler into `IOFramebuffer`.** If `dal_r_*` all stay zero with the full
+surface routed, that is strong evidence nothing asks DAL to do hardware work in
+a private category, and promotion becomes the only way forward - at which point
+the dry-run protection will have been demonstrated rather than hoped for.
+Promoting first would be writing real DCN registers with unproven
+interception.
