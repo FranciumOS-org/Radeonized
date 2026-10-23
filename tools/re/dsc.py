@@ -81,6 +81,78 @@ REGS = ["rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
         "r8","r9","r10","r11","r12","r13","r14","r15"]
 
 
+def slide_regions(path):
+    """The cache's mappings that carry slide info, with their v2 parameters.
+
+    Data pointers in those mappings are NOT stored as plain addresses: a
+    64-bit slot holds the target in the low bits and a chain delta in
+    `delta_mask`, so a raw byte search for a pointer finds nothing there.
+    `__TEXT` (map0) and the map at 0x7ff880000000 have no slide info, and
+    their contents ARE literal - which is why a raw search turns up symbol
+    tables and misses vtables entirely.
+
+    Only version 2 is handled; anything else is reported rather than guessed
+    at, because decoding the wrong format silently yields plausible garbage.
+    """
+    f = open(path, "rb")
+    h = f.read(0x400)
+    mwso, mwsc = struct.unpack_from("<II", h, 0x138)
+    out = []
+    for i in range(mwsc):
+        f.seek(mwso + i * 56)
+        d = f.read(56)
+        addr, size, fo, sio, sis, _flags = struct.unpack_from("<QQQQQQ", d, 0)
+        if not sio:
+            continue
+        f.seek(sio)
+        ver = struct.unpack("<I", f.read(4))[0]
+        if ver != 2:
+            out.append((addr, size, fo, None, None, ver))
+            continue
+        f.seek(sio)
+        si = f.read(40)
+        dmask, vadd = struct.unpack_from("<QQ", si, 24)
+        out.append((addr, size, fo, dmask, vadd, ver))
+    return out
+
+
+def ptr_decode(value, dmask, vadd):
+    """A v2 slot's target. Zero means "no pointer here", not address vadd."""
+    if value == 0:
+        return 0
+    return (value & ~dmask) + vadd
+
+
+def dataxref(path, target):
+    """Every slide-info slot whose DECODED value is `target`."""
+    import array
+    c = Cache(path)
+    f = open(path, "rb")
+    hits = []
+    for addr, size, fo, dmask, vadd, ver in slide_regions(path):
+        if dmask is None:
+            print("  (skipping va 0x%x: slide info version %s, not 2)" % (addr, ver))
+            continue
+        low = target - vadd
+        keep = ~dmask & 0xFFFFFFFFFFFFFFFF
+        if low < 0 or low & dmask:
+            continue
+        f.seek(fo)
+        done = 0
+        while done < size:
+            n = min(1 << 24, size - done)
+            n -= n % 8
+            if n <= 0:
+                break
+            a = array.array("Q")
+            a.frombytes(f.read(n))
+            for k, v in enumerate(a):
+                if v and (v & keep) == low:
+                    hits.append(addr + done + k * 8)
+            done += n
+    return hits
+
+
 def callxref(c, text_va, text_len, target):
     """Direct `call rel32` (E8) and `jmp rel32` (E9) sites whose target is
     `target`. Both are 5 bytes, so the destination is site + 5 + disp32."""
@@ -179,6 +251,25 @@ def main():
         tva, tlen, field = (int(x, 0) for x in sys.argv[3:6])
         for site, imm, reg in setimm(c, tva, tlen, field):
             print("  0x%x   movl $%d, 0x%x(%%%s)" % (site, imm, field, reg))
+    elif cmd == "slide":
+        for addr, size, fo, dmask, vadd, ver in slide_regions(path):
+            print("va 0x%012x size 0x%09x v%s delta_mask 0x%016x value_add 0x%x"
+                  % (addr, size, ver, dmask or 0, vadd or 0))
+    elif cmd == "dataxref":
+        tgt = int(sys.argv[3], 0)
+        hits = dataxref(path, tgt)
+        print("%d slide-info slot(s) decoding to 0x%x:" % (len(hits), tgt))
+        for v in hits:
+            print("  0x%x" % v)
+    elif cmd == "rdptr":
+        va = int(sys.argv[3], 0)
+        for addr, size, fo, dmask, vadd, ver in slide_regions(path):
+            if dmask is not None and addr <= va < addr + size:
+                raw = struct.unpack("<Q", c.read(va, 8))[0]
+                print("raw 0x%016x -> 0x%x" % (raw, ptr_decode(raw, dmask, vadd)))
+                return 0
+        raw = struct.unpack("<Q", c.read(va, 8))[0]
+        print("raw 0x%016x (no slide info for this mapping: literal)" % raw)
     elif cmd == "func":
         va = int(sys.argv[3], 0)
         f = func_start(c, va)
