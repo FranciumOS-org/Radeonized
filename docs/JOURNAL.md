@@ -22632,3 +22632,113 @@ status is unknown**, and the "goes wrong after idle" symptom above is
 suspiciously close to a backing-store reallocation, so it may well be Defect B
 rather than a third thing. That is the next measurement, and it should be run
 on a boot with this build, where the config is stable.
+
+## 2op - BOOT 132: flawless desktop from the defaults, and DEFECT B IS GONE
+
+Boot 132, build `A0DD3CA4-4ECD-3EAA-8C1E-1DF8F7BEB768`, the 2oo default-on
+build. The user's words: *"everything is flawless... not a single artifact or
+even an off pixel... it's perfect"*, and `tools/screenprobe.sh` came back
+**CLEAN on every test**.
+
+### What this boot actually tested - the defaults, not the args
+
+Boot-args at install (`logs/efi-backups/20261023-000431-install/config.plist`)
+still carry `-rbgpumtlcave -rbgpumtlkfix rbgpumtlkscope=*`, so the honest
+question is whether anything ran from a boot-arg rather than from 2oo's new
+default. Checked against the built binary rather than assumed:
+
+```
+$ grep -n 'checkKernelArgument("-rbgpumtlkfix")' src/plugin/kern_start.cpp
+  none - the arg is not read
+$ strings build/out/.../RembrandtGPU | grep -E 'rbgpumtlk|rbgpu.*linear'
+  -rbgpumtlkoff  -rbgpumtlkpatch  -rbgpunolinear  rbgpumtlkexclude  rbgpumtlkscope
+```
+
+`-rbgpumtlkfix` and `-rbgpulinear` survive **only inside log-message text**;
+neither is read anywhere. So:
+
+* **The linear force ran from its default.** `-rbgpulinear` was already out of
+  boot-args at boot 131 and is now unread; `-rbgpunolinear` is absent. PROVEN.
+* **The patcher ran from its default enable and its default stage.** The arg
+  that used to enable it is dead text, and `-rbgpumtlkpatch` is absent, so
+  stage B came from the default. PROVEN.
+* **The scope string came from `rbgpumtlkscope=*`**, not from the default. The
+  default is also `*`, so the resulting state is identical, but the default
+  scope string itself is still untested on hardware. A boot with that arg
+  removed would close it; nothing depends on it.
+
+### Defect B no longer reproduces - with the control this time
+
+`screenprobe.sh` ran `refresh` x4, repeats 4: **32 of 32 captures CLEAN**, row
+jumps 0 and column jumps 0 in every one, CPU window and GPU window alike
+(`logs/20261023-000923-screenprobe/report.txt`).
+
+Rule 26 says a clean instrument is not evidence of absence until it has been
+checked against a case known to be present, and texprobe has already burned
+us by being clean at baseline (0/12). So the same four `refresh` blocks were
+pulled out of the two earlier runs that used them, broken down per block:
+
+| run | instrument | scrambled captures |
+|---|---|---|
+| `20261022-013727` | refresh x4 | **20 / 32** |
+| `20261022-015825` | refresh x4 | **18 / 32** |
+| `20261023-000923` | refresh x4 | **0 / 32** |
+
+And across all 28 earlier screenprobe runs, every single one that produced a
+report had `cpu SCRAMBLED` captures - the three immediately before the fix
+(`direct`, 10:01-10:05 on 10-22) were **100 % scrambled, GPU window included**.
+The probe was never clean here before tonight. The negative result is real.
+
+### An independent, in-process proof the detour is live
+
+screenprobe's own `reportMetalDriverPatch` walks its `_dyld_image` list and
+searches the **loaded** `AMDRadeonX6000MTLDriver` `__TEXT` for the 32-byte
+original prologue of `amdMtl_HWL_DetermineSwizzleMode`:
+
+```
+10-22 10:01 / 10:05  (14 launches)  original prologue present 1x  -> NOT PATCHED
+10-23 00:09          ( 4 launches)  original prologue present 0x  -> patched
+```
+
+The prologue is **gone from screenprobe's own address space**. screenprobe is
+a plain Swift binary launched from a shell script that nothing special-cased,
+so this is the universal fix verified a third independent way - from inside an
+ordinary process, by code that predates the kext patcher and knows nothing
+about it.
+
+It also confirms 2om's "a leftover `(GPU)` wrapper is a safe no-op" from the
+other direction: the same 32-byte search that `mtlswizzle` uses to decide
+whether to patch now finds **0** matches, which is exactly why it refuses.
+
+**One instrument bug fixed, not reasoned around.** That reading printed
+`INCONCLUSIVE`, because the verdict was written when there were only two
+possible readings - prologue intact, or mtllinear's 14-byte constant stub in
+its place. The kext's 5-byte detour leaves *neither* pattern findable (the
+cave's trampoline holds only the 30 displaced bytes, two short of 32), so the
+success case fell into the "don't know" branch and read like a failure.
+`tools/screenprobe.swift` now distinguishes all three and names the kext
+detour explicitly.
+
+### What this closes
+
+* **Defect B** - the CoreAnimation layer backing store that came out
+  rearranged in about half of allocations, open since 2nj/2na and the last
+  named rendering defect. It does not reproduce. 2on's warning not to assume
+  the universal fix touched it was the right caution and the measurement has
+  now answered it the other way.
+* **The "wrong after idle or a tab switch" symptom** of boot 131 was Defect B,
+  or at least shares its cause: it is gone on the same boot that cleans up
+  screenprobe, and the kernel linear force is what covers it. No third defect
+  needs to be hypothesised.
+
+### What is still open, and must not be quietly dropped
+
+* **WHY the `_X` swizzle family is wrong on this chip.** Unchanged since 2ns.
+  gbAddrConfig reads 0x242 and agrees with the hardware; 2na's XOR-linear bit
+  matrix still points at the `_X` XOR term and nothing has explained it. The
+  fix is a policy that works, not an understanding.
+* **Why the render targets the policy keeps TILED do not disagree** with the
+  kernel's linear computation, when that disagreement is precisely 2oo's
+  explanation for why the force is needed at all. Both halves being on cannot
+  be the whole story, and this is the loose thread.
+* **The display half has never started** (§4) - still the boot framebuffer.

@@ -413,8 +413,21 @@ final class SurfaceView: NSView {
 // buffer that had already rotated past the registration line by the time it
 // was read, so NVRAM cannot answer this either.
 //
-// The process can answer it about itself: look at the bytes. Either the
-// original prologue is there or the stub is.
+// The process can answer it about itself: look at the bytes.
+//
+// 2op: there are now THREE readings, not two, because the kext (2og-2oo)
+// places a 5-byte detour over the same prologue instead of mtllinear's
+// 14-byte constant stub:
+//   find > 0              - the prologue is intact, nothing patched this
+//                           process.
+//   repl > 0, find == 0   - mtllinear's constant stub (the old injected path).
+//   find == 0, repl == 0  - the kext detour. Its first five bytes are a jmp
+//                           into the __const cave, so the 32-byte pattern no
+//                           longer matches, and the cave's trampoline holds
+//                           only the 30 displaced bytes - two short of 32 - so
+//                           it cannot match there either (2om). This used to
+//                           print INCONCLUSIVE, which read as a failure when
+//                           it is in fact the success case.
 func reportMetalDriverPatch() {
     let find: [UInt8] = [0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
                          0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC,
@@ -467,7 +480,10 @@ func reportMetalDriverPatch() {
         }
         print("mtl-patch: \(name)")
         print("mtl-patch: original prologue present \(foundFind)x, LINEAR stub present \(foundRepl)x")
-        print("mtl-patch: -> \(foundRepl > 0 && foundFind == 0 ? "PATCHED" : foundFind > 0 ? "NOT PATCHED" : "INCONCLUSIVE")")
+        let verdict = foundFind > 0 ? "NOT PATCHED (original prologue intact)"
+                : foundRepl > 0 ? "PATCHED (mtllinear constant stub)"
+                : "PATCHED (kext detour - prologue gone, no stub)"
+    print("mtl-patch: -> \(verdict)")
         return
     }
     print("mtl-patch: AMDRadeonX6000MTLDriver is not loaded in this process")
