@@ -7530,60 +7530,111 @@ static uint8_t              g_vblp_shmem  = 2;         // 2 = not looked at yet
 using t_rbHandleVBL = void (*)(void *, void *);
 static t_rbHandleVBL g_vblp_handleVBL = nullptr;
 
+static uint64_t g_vblp_idle_nofb = 0;      // ticks with no framebuffer yet
+static uint64_t g_vblp_idle_noshmem = 0;   // ticks with a framebuffer but no shmem
+
 static void rbgpu_vblp_tick(OSObject *, IOTimerEventSource *ts) {
-    if (g_vblp_handleVBL && g_vblp_fb) {
-        g_vblp_handleVBL(g_vblp_fb, nullptr);
-        g_vblp_ticks++;
-        if ((g_vblp_ticks & 0x3ff) == 1)
-            rbgpu_diag_set_num("vblp_ticks", g_vblp_ticks);
+    if (!g_vblp_handleVBL || !g_vblp_fb) {
+        // Rule 14: an idle tick still says why it was idle.
+        if (++g_vblp_idle_nofb == 1 || (g_vblp_idle_nofb & 0xfff) == 0)
+            rbgpu_diag_set_num("vblp_idle_nofb", g_vblp_idle_nofb);
+    } else {
+        // 2ow: re-read the shmem EVERY tick. handleVBL no-ops while fb+0x90
+        // is NULL, and it only becomes non-NULL when a client opens the
+        // framebuffer - which had not happened yet when 2ov sampled it once.
+        void *shmem = *reinterpret_cast<void **>(
+            reinterpret_cast<uint8_t *>(g_vblp_fb) + 0x90);
+        if (!shmem) {
+            if (++g_vblp_idle_noshmem == 1 || (g_vblp_idle_noshmem & 0xfff) == 0)
+                rbgpu_diag_set_num("vblp_idle_noshmem", g_vblp_idle_noshmem);
+        } else {
+            if (g_vblp_shmem != 1) {
+                g_vblp_shmem = 1;
+                rbgpu_diag_set_num("vblp_shmem", 1);
+                rbgpu_log("2ow: shmem appeared at fb+0x90 after %llu idle "
+                          "ticks - handleVBL is live from here",
+                          g_vblp_idle_noshmem);
+            }
+            g_vblp_handleVBL(g_vblp_fb, nullptr);
+            g_vblp_ticks++;
+            if (g_vblp_ticks == 1 || (g_vblp_ticks & 0x3ff) == 1)
+                rbgpu_diag_set_num("vblp_ticks", g_vblp_ticks);
+        }
     }
     if (ts)
         ts->setTimeoutUS(g_vblp_us);
 }
 
-// Called from 2ou's hook the first time it sees the framebuffer, so the pump
-// starts only once there is something to pump.
+// 2ow: this is ALL the hook does now - record the pointer.
+//
+// 2ov created the workloop and timer right here, inside the routed
+// `getInformationForDisplayMode`, and boot 135 said what that was worth:
+// `vblp_solved 1` but `vblp_armed 0`. The hook runs during the framebuffer's
+// own early mode enumeration, which is no place to spawn a workloop thread,
+// and `IOWorkLoop::workLoop()` or `addEventSource` failed there.
+//
+// `vblp_shmem 0` from the same boot was ALSO my mistake, though a harmless
+// one: the shmem is created when a client opens the framebuffer, so reading
+// it once during mode enumeration can only ever see NULL. It has to be
+// re-checked at pump time, not snapshotted at arm time.
+//
+// So the pump now lives in RembrandtGPUPeer::start(), which runs in ordinary
+// IOService matching context where workloops are routine, and it idles until
+// this pointer appears.
 static void rbgpu_vblp_arm(void *fb) {
-    if (!g_vblp_on || g_vblp_armed || !fb || !g_vblp_handleVBL)
+    if (!g_vblp_on || g_vblp_fb || !fb)
         return;
-
-    // Rule 19: validate as a kernel VA before keeping, let alone dereferencing.
+    // Rule 19: validate as a kernel VA before keeping it, let alone
+    // dereferencing it later.
     if (reinterpret_cast<uintptr_t>(fb) < 0xffffff8000000000ull) {
-        rbgpu_log("2ov: refusing framebuffer %p - not a kernel address", fb);
+        rbgpu_log("2ow: refusing framebuffer %p - not a kernel address", fb);
         return;
     }
     g_vblp_fb = fb;
+    rbgpu_diag_set_num("vblp_fb_seen", 1);
+    rbgpu_log("2ow: framebuffer %p recorded from 2ou's hook; the pump will "
+              "pick it up", fb);
+}
 
-    // Read-only, for the record: handleVBL is a no-op while fb+0x90 (the
-    // StdFBShmem_t) is NULL, which it is until a client opens the
-    // framebuffer. Reporting it separates "the pump never ran" from "the pump
-    // ran but had nowhere to write".
-    void *shmem = *reinterpret_cast<void **>(reinterpret_cast<uint8_t *>(fb) + 0x90);
-    g_vblp_shmem = shmem ? 1 : 0;
-    rbgpu_diag_set_num("vblp_shmem", g_vblp_shmem);
-
+// 2ow: started from the peer, where a workloop is an ordinary thing to make.
+bool rbgpu_vblp_start(void) {
+    if (!g_vblp_on) {
+        rbgpu_log("2ow: vblank pump off - -rbgpuvblpump absent");
+        rbgpu_diag_set_num("vblp_armed", 0);
+        return false;
+    }
+    if (!g_vblp_handleVBL) {
+        rbgpu_log("2ow: IOFramebuffer::handleVBL was never solved - the pump "
+                  "cannot run this boot");
+        rbgpu_diag_set_num("vblp_armed", 0);
+        return false;
+    }
     g_vblp_wl = IOWorkLoop::workLoop();
     if (!g_vblp_wl) {
-        rbgpu_log("2ov: IOWorkLoop::workLoop() failed - no vblank pump");
+        rbgpu_log("2ow: IOWorkLoop::workLoop() failed - no vblank pump");
         rbgpu_diag_set_num("vblp_armed", 0);
-        return;
+        return false;
     }
     g_vblp_timer = IOTimerEventSource::timerEventSource(nullptr, rbgpu_vblp_tick);
-    if (!g_vblp_timer || g_vblp_wl->addEventSource(g_vblp_timer) != kIOReturnSuccess) {
-        rbgpu_log("2ov: could not create or add the timer - no vblank pump");
+    if (!g_vblp_timer) {
+        rbgpu_log("2ow: timerEventSource() failed - no vblank pump");
         rbgpu_diag_set_num("vblp_armed", 0);
-        return;
+        return false;
+    }
+    if (g_vblp_wl->addEventSource(g_vblp_timer) != kIOReturnSuccess) {
+        rbgpu_log("2ow: addEventSource() failed - no vblank pump");
+        rbgpu_diag_set_num("vblp_armed", 0);
+        return false;
     }
     g_vblp_armed = true;
-    g_vblp_timer->setTimeoutUS(g_vblp_us);
-    rbgpu_log("2ov: ARMED - pumping IOFramebuffer::handleVBL(%p) every %u us "
-              "(%u.%03u Hz); shmem at fb+0x90 is %s. Read it with "
-              "tools/dispclk: nominal 30.00 means this did not take.",
-              fb, g_vblp_us, 1000000u / g_vblp_us,
-              (1000000000u / g_vblp_us) % 1000,
-              shmem ? "present" : "NULL (handleVBL will no-op until a client opens the FB)");
     rbgpu_diag_set_num("vblp_armed", 1);
     rbgpu_diag_set_num("vblp_us", g_vblp_us);
+    g_vblp_timer->setTimeoutUS(g_vblp_us);
+    rbgpu_log("2ow: ARMED - the pump is running every %u us and will call "
+              "handleVBL once the framebuffer and its shmem both exist. "
+              "Read it with tools/dispclk: nominal 30.00 means it did not take.",
+              g_vblp_us);
+    return true;
 }
 
 void RGPU::processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_t address,

@@ -37,6 +37,14 @@ extern volatile uint32_t g_rb_peer_stage;
 extern volatile uint32_t g_rb_peer_ret06;
 extern volatile uint32_t g_rb_peer_ret1B;
 
+// 2ow: the vblank pump. Defined in kern_start.cpp, started from
+// RembrandtGPUPeer::start() - ordinary IOService matching context, where a
+// workloop is routine. 2ov created it inside the routed
+// getInformationForDisplayMode instead, during the framebuffer's own early
+// mode enumeration, and boot 135 reported vblp_solved 1 with vblp_armed 0.
+// Declared here because this header is the one both files already include.
+bool rbgpu_vblp_start(void);
+
 class RembrandtGPUPeer : public IOService {
     OSDeclareDefaultStructors(RembrandtGPUPeer)
 

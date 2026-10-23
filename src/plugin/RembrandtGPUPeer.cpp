@@ -572,6 +572,17 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     pciDevice->registerService();
 
     rbgpu_log("Peer: attached to 0x16811002; properties set and service registered");
+
+    // 2ow: start the vblank pump HERE, not inside the routed framebuffer call.
+    // 2ov created its workloop inside `getInformationForDisplayMode`, during
+    // the framebuffer's own early mode enumeration, and boot 135 reported
+    // `vblp_solved 1` with `vblp_armed 0` - the creation failed there. This is
+    // ordinary IOService matching context, where a workloop is routine. The
+    // pump idles until 2ou's hook hands over the framebuffer pointer and the
+    // shmem at fb+0x90 exists, and it re-checks the shmem every tick rather
+    // than trusting one early sample.
+    rbgpu_vblp_start();
+
     scheduleRefreshDiag();
     return true;
 }

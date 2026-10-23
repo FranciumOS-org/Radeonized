@@ -23512,3 +23512,82 @@ Built: UUID `D8B3C0E2` -> `59AD6CF5`, `hosttest: all passed`. Rule 1 and rule 5
 checked against `nm -m build/re/IOGraphicsFamily`:
 `__ZN13IOFramebuffer9handleVBLEPS_Pv`, external, defined in `(__TEXT,__text)`.
 **Unverified on hardware.**
+
+## 2ow - the pump never ran. My bug, and the counters named it exactly.
+
+Boot 135, `-rbgpuvbl -rbgpuvblpump`. `dispclk` was unchanged - nominal
+30.000, `actual latency 0.000 ms`, link at 29.50 Hz. The diag said why, from
+the IORegistry with no sudo and no log scraping:
+
+```
+vbl_on 1   vbl_routed 1   vbl_filled 3   vbl_rr 9426239     <- the 2ou half works
+vblp_on 1  vblp_solved 1                                    <- handleVBL resolved
+vblp_shmem 0   vblp_armed 0                                 <- THE PUMP NEVER STARTED
+```
+
+**So the vblank hypothesis is untested, not refuted.** Two mistakes, both mine,
+both in the plumbing rather than the idea:
+
+1. **The workloop was created in the wrong place.** `rbgpu_vblp_arm` ran
+   inside the routed `getInformationForDisplayMode` - i.e. during the
+   framebuffer's own early mode enumeration - and `IOWorkLoop::workLoop()` or
+   `addEventSource` failed there. That is no place to spawn a workloop thread.
+   It now runs from `RembrandtGPUPeer::start()`, ordinary IOService matching
+   context, where a workloop is routine. The hook does nothing but record the
+   pointer.
+2. **`vblp_shmem 0` was a meaningless sample, not a finding.** The
+   `StdFBShmem_t` at `fb + 0x90` is created when a *client* opens the
+   framebuffer, so reading it once during mode enumeration can only ever see
+   NULL. It is now re-read **every tick**, and the first transition to
+   non-NULL is logged with the idle-tick count that preceded it.
+
+This is rule 16 in its plainest form - the instrument was the suspect - and
+rule 14 earning its place twice over: `vblp_armed 0` is why this took one
+reading instead of another round of guessing, and the two new counters
+`vblp_idle_nofb` / `vblp_idle_noshmem` mean an idle pump now says *which*
+precondition is missing rather than just sitting there.
+
+### What boot 136 can now distinguish
+
+| reading | meaning |
+|---|---|
+| `vblp_armed 0` | the workloop still failed, even from the peer |
+| `vblp_fb_seen 0` | 2ou's hook never ran, so no pointer was ever recorded |
+| `vblp_idle_nofb` climbing | the pump is alive but has no framebuffer |
+| `vblp_idle_noshmem` climbing, `vblp_ticks 0` | framebuffer present, no client ever opened it |
+| `vblp_ticks` climbing, nominal still 30.00 | **handleVBL is being called and CoreVideo still ignores it** - that would be the first real evidence against the vblank route |
+| `vblp_ticks` climbing, nominal ~144 | done |
+
+Only the second-to-last row would refute the idea. Nothing so far does.
+
+### On the user's position, fairly
+
+The user, twice now: *"the culprit is the same as i told you, the whole
+framebuffer has to change to one that directly takes over the entire display
+to GPU"*.
+
+**On the end state they are very likely right**, and it is worth writing down
+rather than defending incrementalism: a real framebuffer driver is what
+delivers the refresh-rate menu, brightness, the correct VRAM string, page
+flipping, a hardware cursor and a phase-locked vblank. Everything done in
+2ou-2ow is surgery on `IONDRVFramebuffer` to borrow one of those six.
+
+**But the cheap experiment has not actually been run yet.** `vblp_armed 0`
+means the one-line-scale fix above has never been on hardware. Writing a
+framebuffer driver for a chip whose DCN generation macOS does not contain
+(2oq) is the largest single piece of work left in this project; spending one
+more boot to find out whether a timer and an exported function fix the pacing
+is worth it either way. If it works, the framebuffer rewrite is still needed -
+but only for the *other* five items, which reprices it honestly. If
+`vblp_ticks` climbs and nominal stays 30, the rewrite is the answer and we
+will know it on evidence rather than by assumption.
+
+Also worth separating, because they were asked as one thing: the **cursor**
+is not downstream of pacing alone. `StdFBShmem_t` carries
+`hardwareCursorCapable` / `hardwareCursorActive`, and the boot NDRV has no
+hardware cursor, so WindowServer composites it in software - at 30 Hz. Pacing
+should help it; only a real framebuffer gives it a hardware cursor. And
+**desktop load time** has not been measured at all and should not be assumed
+to be graphics - nothing in this milestone addresses it.
+
+Built: UUID `59AD6CF5` -> `E4518225`, `hosttest: all passed`.
