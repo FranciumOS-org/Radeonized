@@ -24574,3 +24574,87 @@ because the decline looked elegant.
    512-byte NVRAM summary the boot would teach nothing (rule 14). The full
    trace stays in `dal_tr0..15` in `RBGPUDiag` and needs a readable boot - the
    NVRAM budget cannot hold 16 chunks.
+
+## 2pm (2026-10-23, boot 144) — THE PROMOTED DRY RUN IS SELF-CONTRADICTORY. A hang, traded for a panic, from one impossible requirement.
+
+Boot 144 never finished booting: Apple logo, progress bar filling slower and
+slower, no panic. The user power-cycled and rescued with `-rbgpuoff`.
+
+### What the evidence says, and what it does not
+
+NVRAM was **useless and had to be read as such** (rules 8, 11, 12):
+
+| | |
+|---|---|
+| `rbgpu-boot` | **142** - never incremented, so nothing in NVRAM is this boot's |
+| `rbgpu-arm` | still `1` |
+| `rbgpu-prog` / `rbgpu-gate` | `b=142` - stale |
+| panic report | none newer than 09:56 - it **hung**, it did not trap |
+
+The still-set arm *looked* like proof the peer never ran, and that reading was
+wrong - rule 12 warns against exactly this. The unified log settled it,
+because `/var/db/diagnostics` retains the previous boot:
+
+```
+10:02:29  kernelmanagerd: Could not find: Extension 'com.apple.kext.AMDRadeonX6000Framebuffer'
+10:02:29  kernelmanagerd: Received kext load notification: ...AMDRadeonX6000Framebuffer
+10:02:29  WindowServer [GPUWrangler] (reg) gpu 0xfbc7 vid.did=1002.1681
+            agdc       0x000000000
+            gpuc       0x1000004b0  /AMDRadeonX6000_AmdGpuWrangler
+            agdpclient 0x000000000
+            accel      0x1000004b6  /AMDRadeonX6000_AMDNavi21GraphicsAccelerator
+```
+
+So the boot got **as far as WindowServer**. The peer ran, published its
+properties, and the Wrangler loaded and became `gpuc`. The arm's survival is
+best explained by the forced NVRAM sync not reaching flash before a hard power
+cut - which is precisely what 2dg records happening before.
+
+**And the keystone, with a control (rule 26):** that registration has **no
+`fb0:0` line at all**, where working boot 142's identical lines read
+`fb0:0 0x1000004b2 /IONDRVFramebuffer`. There was **no framebuffer in the
+system.**
+
+### The mechanism, and it is a design error not a bug
+
+Our promoted Wrangler won `IOFramebuffer` at score 30000 against
+IONDRVFramebuffer's 20000. Its `start()` **succeeded**, because 2pl removed
+the decline. So IONDRV never attached - and the Wrangler cannot drive a panel
+with every register write swallowed. No framebuffer, WindowServer retrying
+forever, progress bar crawling.
+
+**One impossible requirement, two failures:**
+
+* For DAL to do hardware work, the Wrangler must own `IOFramebuffer`.
+* For safety, its writes must be dropped.
+* A framebuffer that owns the display but cannot write registers has no
+  picture.
+
+2pk resolved it by declining -> **panic** (AGDC held a registration across the
+free). 2pl resolved it by not declining -> **hang** (no framebuffer). Those are
+not two bugs. They are the same contradiction, and I shipped it twice.
+
+### The way out: drop only what is WRONG
+
+`src/common/rb_dcn_deny.h`, **generated** by `tools/re/dcn_denylist.py` from
+the two vendored headers - 299 dword offsets that moved between dcn302 and
+dcn312. DAL then programs everything it can get right (the whole scanout path
+is identical) and is blocked precisely where it would hit the wrong register.
+A hosttest guards it and was checked to FAIL when broken: inserting
+OTG0_OTG_H_TOTAL into the list trips both the sortedness and the
+search-finds-its-own-entry checks.
+
+### Why it refuses to arm, and this is the important part
+
+The deny list is keyed on **dword offsets from the Linux headers**. What
+`writeReg32`'s register argument actually carries on Apple's side - a dword
+offset, a byte address, or an encoded id like the accelerator's
+`(dword << 32) | hwid` - is **NOT established**. Applying the list anyway
+would be the recurring error of this project in its purest form.
+
+So `-rbgpudalpass` **refuses to arm** unless `rbgpudalenc=dword|byte` is also
+given, logs the refusal, sets `dal_pass_refused`, and keeps dropping every
+write. The units cost nothing to learn: boot 142's exact configuration -
+controller only, no promotion, **display intact** - produced four reads, and
+`dal_tr0` now captures them with their addresses. Four numbers settle it, on a
+boot that cannot hurt anything.
