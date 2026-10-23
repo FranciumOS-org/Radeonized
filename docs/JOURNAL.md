@@ -24957,3 +24957,93 @@ got past.** What is dead is making Apple's dcn302 DAL do a modeset (2po). The
 display pipe is already built on our framebuffer, by Apple's own code, with
 transactions advertised and a WindowServer client attached — four facts that
 every milestone from 2oq onward assumed to be false.
+
+---
+
+## 2pq (2026-10-23) — the flip window, built to answer several questions in one boot
+
+Built, not yet booted. `-rbgpufbvramrange`, default off.
+
+### What it does
+
+Routes `IONDRVFramebuffer::getVRAMRange()` (rule 1: defined in IONDRVSupport;
+rule 2: `55 / 48 89 e5 / 53`, no branch in the first five bytes; rule 3:
+grepped, not routed anywhere else; rule 5: both new mangled names taken from
+`nm` output, not hand-written).
+
+It does **not** answer blanket. `getVRAMRange` has **14 virtual call sites** —
+IOGraphicsFamily 4, IOAcceleratorFamily2 6, IONDRVSupport 4 — and a blanket
+change would also resize IOGraphics' aperture and `IOFBMemorySize`. It enlarges
+for exactly **one return address**: the call inside
+`IOGraphicsAccelerator2::find_vram_descriptor`, at that function `+0x4a`
+(`ff 91 b0 09 00 00`, six bytes), so the return address is `+0x50`. Those six
+bytes are **read back from the running kernel and compared** before anything is
+enlarged; a mismatch logs the bytes it found and enlarges nothing. That is the
+`mtlk` fail-safe pattern: an OS update that moves the call site means nothing
+is patched rather than something wrong being patched.
+
+The enlarged `IODeviceMemory` is built at the **same physical base as the
+original**, read from the original object with `getPhysicalSegment(0, …)`
+rather than hardcoded, and is only longer. Offset 0 therefore stays the live
+scanout DCHUBBUB is already fetching, so even total failure leaves a picture.
+Default 64 MB (8 buffers against the current 1), `rbgpufbvramrangemb=<N>`
+clamped **8–256** because BAR0 is 256 MB — measured from `assigned-addresses`
+on `IGPU@0`: `0x8_8000_0000`, length `0x1000_0000`. `find_vram_descriptor`
+**maps the whole range**, so claiming more than the aperture would hand it a
+range whose far end is not VRAM.
+
+Reference convention checked rather than assumed: `getVRAMRange` returns a
+**retained** reference (the original calls `retain()` before returning), so the
+hook retains ours and **releases the original's**, which is not the one going
+out.
+
+Ordering: IONDRVSupport loads **before** IOAcceleratorFamily2, so the route is
+armed before the call site is known. Until `processAccelFamily` resolves and
+verifies it, the hook records callers and passes every call through untouched.
+
+### Why one boot can answer more than one question
+
+Rule 14, applied deliberately — and `-rbgpuflipprobe` is already routed and
+observe-only (2pe/2pf), so the flip signal costs nothing extra.
+
+| reading | where | what it settles |
+|---|---|---|
+| `fbvr_routed` | NVRAM | did the route land |
+| `fbvr_verify` | NVRAM | did the six call-site bytes match |
+| `fbvr_orig_len`, `fbvr_orig_base` | NVRAM / diag | **is it really 8294400, and at what base** — 2pp inferred this from `IOFBMemorySize`, a different call on a different node |
+| `fbvr_hit` | NVRAM | did `find_vram_descriptor` actually ask |
+| `fbvr_big` | NVRAM | did the enlarged range go out, how many times |
+| `fbvr_fail` | NVRAM | 1 no original, 2 no base, 3 base unaligned, 4 already big, 5 `withRange` refused |
+| `fbvr_calls`, `fbvr_ret1..8` | NVRAM / diag | **the whole caller set**, decoded against `kextstat` slides afterwards |
+| `IOFBMemorySize` | `ioreg` | **control**: must stay 8294400, proving only the accelerator was affected |
+| `bufferFlipCount`, `bufferSwapCount` | `ioreg` accel `PerformanceStatistics` | did flipping start |
+| `fliprq` | `-rbgpuflipprobe` | did `getDisplayPipeTransactionFlip` fire — 2pf's zero is the control |
+| `CompositorSW::CompositeLayersToDestination` | `sample WindowServer` | did software compositing drop from 48 % |
+| nominal Hz | `tools/dispclk` | did 2oz/2ov regress |
+
+The seven load-bearing keys are **first** in `kRbgpuNvramHotKeys`, so they
+survive a boot with no usable screen (rule 10's reason, and the 512-byte budget
+is spent frontier-first).
+
+`fbvr_orig_len` is the gate on everything else: if it is not 8294400 the
+machine was not in the state 2pp measured, and no other reading here means
+anything.
+
+### What a negative looks like, stated before the boot
+
+`fbvr_hit ≥ 1` and `fbvr_big ≥ 1` with `bufferFlipCount` still 0 and `fliprq`
+still never firing is a **clean negative**: the accelerator asked, got room for
+eight buffers, and still did not flip — which kills the "no second buffer"
+hypothesis outright and moves the question to `initFramebufferResource` or to
+SkyLight's destination choice. Saying this now is what stops the boot being
+spent twice.
+
+`fbvr_hit = 0` says something different and equally useful: `find_vram_descriptor`
+never ran again after our route armed, i.e. the accelerator cached its
+descriptor before IONDRVSupport's hook existed — in which case the hook has to
+move to `findVRAM` (also routable, also in IONDRVSupport) or earlier.
+
+Build: imports **354/354** resolve via `IOPCIFamily` + `kpi.*` only — no
+IOGraphicsFamily dependency (the 2oz trap), `IODeviceMemory::withRange`
+resolves through `com.apple.kpi.iokit`. `hosttest: all passed`.
+UUID `28BF4AC7-22A2-3EA5-B32A-3BB073908CCD`.

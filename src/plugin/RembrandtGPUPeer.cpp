@@ -713,6 +713,13 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
+    // 2pq: the frontier, so it comes first. These seven decide whether the
+    // boot answered its question, and they have to survive a boot with no
+    // usable screen (rule 14, rule 10). `fbvr_orig_len` is the number the
+    // whole hypothesis rests on - if it is not 8294400 the machine was not in
+    // the state 2pp measured and nothing else here means anything.
+    "fbvr_routed", "fbvr_verify", "fbvr_hit", "fbvr_big",
+    "fbvr_orig_len", "fbvr_fail", "fbvr_calls",
     // 2fq (2026-10-14): the frontier moved and this list did not follow it.
     //
     // Everything that was here - gate_stage, the ptb_*, stamp_*, gfxmqd_* and
