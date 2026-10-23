@@ -21928,3 +21928,126 @@ UUID EAC5023E -> 0AE2AA9A.
 The next boot tests both things at once: if it boots, the probe was the cause
 and the cave measurement comes with it; if it panics again, the remaining new
 thing is the two-mod registration and that gets bisected on its own.
+
+## 2of - Lilu disables its own user patcher on Big Sur and newer. Route closed.
+
+Boot 125, fully qualified before interpreting (rule 8, 15):
+
+```
+loaded kext   0AE2AA9A == built            not stale
+boot-args     -rbgpumtlcave present, -rbgpuoff GONE
+rbgpu-boot    125, up from 124             armed
+machine       booted normally
+```
+
+**2oe is confirmed by that last line.** Removing the `FileIO` call from the
+init path fixed the panic; the early-boot vnode read was the cause, as
+suspected. Rule 27 stands.
+
+`tools/cavecheck` still reports `VERDICT: NEITHER` (slide 0x14723000, cave
+absent, detour absent).
+
+### Qualifying the diag before reading it
+
+`mtlcave_stencil` and `mtlcave_mapsrc` are absent from `RBGPUDiag`. Three
+instruments were checked before that absence was allowed to mean anything:
+
+* the log ring is 512 entries and is full of repeating `2en: BOUNDED wait`
+  lines, so **no** registration-time line survives - grepping it for `2od`
+  returned nothing, and so did a grep for `2lm`/`2lp`, which certainly ran.
+  Broken instrument, caught by the control (rule 26).
+* the diag table holds 395 of `RBGPU_MAX_DIAGS` 448 keys and the
+  "DIAG TABLE FULL" warning never fired, so keys were not being dropped.
+* `rbgpu_diag_set_num` calls `scheduleRefreshDiag`, and the 2en traffic keeps
+  refreshes flowing, so the published table is current.
+
+So the absence is real: **the binary-loaded callback never ran.** Our
+`ProcInfo` is `MatchAny` on `"/"`, which `onPath` matches with `strstr` - it
+matches every exec on the system. It fired zero times.
+
+### The one line that explains every inert user patch since 2lm
+
+`Configuration::getBootArguments`:
+
+```c
+isUserDisabled = checkKernelArgument(bootargUserOff) ||
+    getKernelVersion() <= KernelVersion::SnowLeopard ||
+    getKernelVersion() >= KernelVersion::BigSur;
+```
+
+`BigSur = 20`; this machine is `Sequoia = 24`. The third term is
+unconditionally true, and it is a `||`, so **no boot-arg can switch it off**.
+
+What that does, all of it silent:
+
+```c
+bool UserPatcher::init(...) {
+    if (ADDPR(config).isUserDisabled) {
+        SYSLOG_COND(ADDPR(debugEnabled), ...);   // only with -liludbgall
+        return true;                             // NO kauth listener
+    }
+    ...
+}
+bool UserPatcher::registerPatches(...) {
+    if (ADDPR(config).isUserDisabled) return true;   // silently
+    ...
+}
+```
+
+`init` returns **true**, so `performCommonInit` continues and calls
+`activate()`; `registerPatches` returns **true** without reading a file,
+parsing the map, or hooking anything. Every layer reports success and the
+listener does not exist.
+
+So 2lm, 2lp, 2nb, 2nm, 2oa and 2od were inert for this reason and no other.
+
+### What I got wrong, and how
+
+2oc read `loadFilesForPatching`, `performPagePatch`, `patchSharedCache`,
+`mapAddresses`, `findSectionBounds` and `hookMemoryAccess` - six functions
+deep - and concluded "the patcher is alive and its hooks are installed,
+it simply had nothing to look for". **Every one of those functions is
+unreachable on this OS.** The analysis of them was accurate and irrelevant.
+
+This is the recurring error in its canonical form: reading values without
+first establishing what makes them meaningful. The specific omission has a
+name worth keeping - *check that a subsystem is ENABLED on this OS before
+reading how it behaves*. One `grep -n isUserDisabled` would have cost
+nothing and saved 2oc, 2od, 2oe, the stencil, and a panicked boot.
+
+Rule 22 is therefore right in its original conclusion for a **third** reason,
+simpler than either previous one. The 2oc mechanism (addresses from the map,
+bytes from a file) is a true description of code that never executes here.
+
+### Caveat on the source
+
+This is master's `kern_start.cpp`. Tag 1.7.3 does not exist - the newest tag
+is 1.7.2 and the loaded kext reports 1.7.3, so it is an unreleased build. The
+source has not been diffed against the loaded binary; the EFI was not mounted
+and that needs a password. The behavioural evidence is independent of the
+source and is what carries the conclusion: a `MatchAny "/"` callback that
+fires zero times in hundreds of execs means no listener exists.
+
+### What is still possible
+
+`patchSharedCache`'s *mechanism* is untouched by this - it is just Lilu's
+code that cannot run. Every kernel symbol it uses is present in this kernel,
+checked directly against `/System/Library/Kernels/kernel`:
+
+```
+_cs_validate_range _cs_validate_page _current_map _get_map_min _get_task_map
+_vm_map_check_protection _vm_map_read_user _vm_map_write_user
+_task_set_main_thread_qos _vm_shared_region_map_file _vm_shared_region_slide
+```
+
+and `KernelPatcher` works fine here - it is what routes the AMD functions the
+accelerator fix depends on. So the write can be done by this plugin directly:
+hook `_vm_shared_region_slide` for the slide, hook `_task_set_main_thread_qos`
+for a per-process point with a task, then `_vm_map_read_user` to verify and
+`_vm_map_write_user` to place the two patches at
+`startTEXT + segOff + slide`. We already know those addresses exactly, so
+none of Lilu's file-based pattern discovery is needed and **the stencil
+becomes unnecessary**.
+
+That is real kernel code on the exec path of every process, with real panic
+risk, and it is a decision rather than a next step.

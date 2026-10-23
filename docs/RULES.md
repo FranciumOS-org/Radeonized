@@ -25,13 +25,15 @@ sealed-OS policy enforces independently of the CSR bits).
 The defect is the swizzle mode the **userspace** Metal driver picks for client
 textures - 2lg found that place on 2026-10-20 and filed it "out of this
 plugin's reach", which was right about the place and wrong about the reach.
-**Lilu's user patcher CAN do it, and a boot-A experiment showed why it had
-not** (rule 22, 2oc): the driver is in the dyld shared cache with no file on
-disk, and Lilu takes patch addresses from the cache `.map` but patch *bytes*
-from a file - so 2lm/2nb/2nm/2oa were inert while reporting success. Feeding
-it a byte source is the open frontier; `patchSharedCache` then edits live
-process memory with `vm_map_write_user`, which would also reach the Apple
-platform binaries that strip `DYLD_INSERT_LIBRARIES`.
+**Lilu's user patcher is DISABLED on Big Sur and newer and cannot be
+re-enabled** (rule 22, 2of): `isUserDisabled |= getKernelVersion() >=
+BigSur`, so 2lm/2lp/2nb/2nm/2oa/2od all registered with `NoError` and never
+existed. Do not write another `BinaryModInfo` here. The *mechanism* is still
+open - every kernel symbol it needs is present and `KernelPatcher` works -
+so this plugin could hook `_task_set_main_thread_qos` and
+`_vm_shared_region_slide` and do the `vm_map_write_user` itself, reaching
+even the Apple platform binaries that strip `DYLD_INSERT_LIBRARIES`. That is
+kernel code on every process's exec path: a decision, not a next step.
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -253,25 +255,28 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     is `sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES`.
     Inject per process, where the blast radius is one process started on
     purpose. [2mq]
-22. **Lilu's user patcher takes its ADDRESSES from the cache `.map` but its
-    BYTES from a file on disk - and our driver has no file.** This rule has
-    now been wrong twice: first as "a `BinaryModInfo` can only patch a file
-    that exists" (right conclusion, overstated reason), then as 2nz's
-    withdrawal (the map is parsed, so the route is open - half the
-    mechanism). `registerPatches` runs `loadFilesForPatching()` **before**
-    the map is read, and that function's only byte source is
-    `FileIO::readFileToBuffer(binaryMod[i]->path)` with **no `else` branch
-    and no SYSLOG**. A missing file leaves `lookupStorage` empty, every
-    consumer is guarded on its size, and nothing is patched in total
-    silence while `onProcLoad` reports `NoError`. The patcher itself is
-    alive: `loadLookups()` returns true unconditionally, so
-    `hookMemoryAccess()` still runs. **The route is open, but it must be fed
-    a byte source** - `patchSharedCache` needs only `ref->segOffs`, which is
-    `vmsection - vmsegment + sectOff` from the file's own load commands, and
-    `MachInfo::findSectionBounds` validates nothing but bounds. What is true
-    and worth keeping from all three readings: **verify a patch from the
-    target process's own memory**, because that is the only thing that ever
-    revealed it. [2nn, 2nz, 2oc]
+22. **Lilu's user patcher DOES NOT RUN on this OS at all.** Lilu's
+    `Configuration::getBootArguments` sets
+    `isUserDisabled = ... || getKernelVersion() >= KernelVersion::BigSur`,
+    and that term is unconditionally true on Sequoia (24 >= 20). It is a
+    `||`, so **no boot-arg re-enables it**. `UserPatcher::init` then returns
+    `true` without registering its kauth listener and `registerPatches`
+    returns `true` without reading a file, parsing the map or hooking
+    anything - every layer reports success and nothing exists. That, and
+    nothing else, is why 2lm, 2lp, 2nb, 2nm, 2oa and 2od were all inert
+    while `onProcLoad` returned `NoError`. **Do not write another Lilu
+    `BinaryModInfo` for this machine.** This rule has now been wrong twice
+    and under-specified once: the earlier readings (a mod can only patch an
+    existing file; addresses come from the `.map` but bytes from a file) are
+    accurate descriptions of code that never executes here. The reusable
+    lesson: **check that a subsystem is ENABLED on this OS before reading
+    how it behaves** - one `grep isUserDisabled` would have saved three
+    milestones and a panicked boot. What survives: **verify a patch from the
+    target process's own memory** (`tools/cavecheck`), and note that a
+    `MatchAny "/"` proc callback firing ZERO times is the cheapest proof the
+    listener does not exist. The *mechanism* Lilu would have used is still
+    open to us directly - see 2of. [2nn, 2nz, 2oc, 2of]
+
 23. **`pgrep` cannot see the process a script is running inside.** BSD
     `pgrep` never matches the invoking process or **its ancestors**, so a
     script run from the assistant Code cannot see the the assistant app: `pgrep -x the assistant`
