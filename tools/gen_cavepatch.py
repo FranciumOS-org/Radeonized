@@ -15,8 +15,13 @@ which runs per process at exec and writes straight into the live image:
 
 The file is never touched, so the seal is irrelevant, and the patch lands in
 every process - including the Apple platform binaries that strip
-DYLD_INSERT_LIBRARIES. It does require a byte SOURCE on disk for Lilu to find
-the patterns in: see tools/gen_stencil.py.
+DYLD_INSERT_LIBRARIES.
+
+2op: the Lilu route this was first written for never ran at all (rule 22), and
+the kext places these bytes itself with _vm_map_write_user from known unslid
+addresses (2og). It needs no byte source on disk, so the 2oc/2od stencil and
+tools/gen_stencil.py are gone. What this generator emits is unchanged and
+still exactly what the kext compares and writes.
 
 Two constraints shape what is emitted:
 
