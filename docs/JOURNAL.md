@@ -24731,3 +24731,77 @@ unestablished. Audio is not needed for first light.
 
 The hosttest was re-anchored on measured data and verified to FAIL when the
 data is wrong - removing the `0x089` entry trips it.
+
+## 2po (2026-10-23, boot 145) — NEGATIVE RESULT: Apple's dcn302 DAL cannot bring up DCN 3.1.2 by filtering writes. DCHUBBUB is why.
+
+Boot 145 hung exactly as boot 144 did - logo, bar crawling, no panic - with
+the selective pass-through **armed** (`-rbgpudalpass rbgpudalenc=dword` both
+confirmed present in boot-args).
+
+Evidence, and the limits of it:
+
+* `rbgpu-boot` still **143** (rule 8), so every NVRAM value is stale - the
+  `dal_writes=0 dal_r_hw=4 dal_tr_n=4` read out of it is boot 143's.
+* No panic report. Unified log reached WindowServer at 10:38:47 and kept
+  logging for ~35 s before going quiet.
+* And the same keystone as 144, with the same control: AppleGPUWrangler's
+  registration has `gpuc /AMDRadeonX6000_AmdGpuWrangler`, `accel
+  /...GraphicsAccelerator`, and **no `fb0:0` line** - no framebuffer.
+* Our own `2pm:`/`2pj:` log lines reach neither the unified log nor a readable
+  ring, so **there is no direct trace of what DAL wrote.** That is a real gap,
+  not a conclusion.
+
+### Why it cannot work, measured
+
+What the 160-entry deny list actually blocks:
+
+| | |
+|---|---|
+| **DCHUBBUB** | **46** |
+| SURFACE / VTG / MMHUBBUB / WBIF | 22 |
+| power-gating domains | 11 |
+| everything else | 81 |
+
+**DCHUBBUB dominates, and 2pg measured 74 of its 77 registers as having
+moved** - almost the entire block relocated between dcn302 and dcn312.
+DCHUBBUB is the display memory hub: it arbitrates DRAM requests for scanout.
+Without it programmed, the pipe has timing but cannot fetch pixels.
+
+So both branches fail, and not by accident:
+
+* **Deny** the 46 -> DAL cannot program the data path, waits on a hub that
+  never becomes ready, burns `generic_reg_wait` timeouts. That is exactly the
+  "slower and slower" symptom, twice.
+* **Pass** the 46 -> dcn302 offsets land on different dcn312 registers.
+
+**The one block that relocated almost entirely is the one block you cannot
+skip.** 2pg's headline - 94.7 % of registers identical, scanout path
+bit-identical - was true and *misleading*: the 5.3 % that differs is
+concentrated precisely in the bring-up path, and a percentage is not a
+difficulty measure when the remainder is load-bearing.
+
+### What this closes, and what it does not
+
+**Closed: write filtering.** No deny/allow policy over a shared address space
+can reconcile dcn302 code with dcn312 hardware, because the mismatch is
+topological (which register is where, how many power domains, how the hub is
+organised), not a set of typos. Three boots said so three ways - 2pk's panic,
+2pm's hang, 2po's hang - and the static measurement explains all three.
+
+**Still open, and honestly a long shot:** *remapping* instead of blocking -
+rewriting a dcn302 offset to wherever that same register NAME lives in
+dcn312. Feasible to generate from the two headers. But DCN 3.1 changed
+DCHUBBUB's *semantics* as well as its addresses (detile-buffer segmentation,
+different watermark encodings), so correctly-addressed writes would still
+carry dcn302-shaped VALUES - the DML problem 2pg already flagged as "not just
+offsets". Addresses are the easy half.
+
+### Process note
+
+I told the user `dal_passed` and `dal_denied` would persist to NVRAM so a
+failed boot would still say how far DAL got. **They were never in the key
+list** - 2pl added `dal_writes`, `dal_r_hw`, `dal_tr_n`,
+`dalfb_start_ret`, `dalfb_grouted`, `dalfb_attr_blocked` and no more. So boot
+145 could not answer the one question it was spent on. Added now, but the
+lesson is the recurring one: **state what makes a reading possible before
+spending the boot that depends on it.**
