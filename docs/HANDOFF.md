@@ -1,4 +1,4 @@
-# RembrandtGPU — handoff state (2026-10-20, after 2lj)
+# RembrandtGPU — handoff state (2026-10-23, after 2op)
 
 Apple's Navi 21 macOS GPU stack drives a **Radeon 680M** (Rembrandt APU,
 `1002:1681` rev 0a, GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on
@@ -23,11 +23,33 @@ call sites. Zero VM faults, no halt, no freeze, VMIDs 1–8 all translate.
 WindowServer composites through Metal on `AMDRadeonX6000MTLDriver`; a
 4096-element compute kernel returns **bit-exact** results.
 
-**The one remaining defect is rendering: body text is unreadable.**
-`-rbgpulinear` forces linear surfaces and fixed ~80 % of the corruption
-(widgets, Dock, menu bar, desktop). What it did not fix is **app-owned
-textures**, whose layout is computed entirely in **userspace** by
-`AMDRadeonX6000MTLDriver` — the kernel is never asked. That is the frontier.
+**THE RENDERING DEFECTS ARE FIXED (2on/2oo/2op, boots 130–132).** The user on
+boot 132: *"everything is flawless, not a single artifact or even an off
+pixel"*. It took **two** halves, both now on by default with no boot-arg and
+no setup:
+
+* **Userspace** — the kext places a 224-byte cave in the loaded
+  `AMDRadeonX6000MTLDriver`'s `__TEXT,__const` and a 5-byte detour over
+  `amdMtl_HWL_DetermineSwizzleMode`, in **every process on the system**,
+  Safari and other platform binaries included. It hooks
+  `_vm_shared_region_slide` for the cache slide and
+  `_task_set_main_thread_qos` for a per-process point at exec, and writes with
+  `_vm_map_write_user`. No wrapper, no injected dylib, no change to any app
+  bundle — so it survives app updates. ~2000 execs per boot, ~99.5 % patched.
+  **Lilu's user patcher is irrelevant: it is disabled on Big Sur and newer and
+  cannot be re-enabled (rule 22).**
+* **Kernel-side** — the linear force, on unless `-rbgpunolinear`. Boot 131
+  removed it and the desktop regressed: apps correct at launch, wrong again
+  after idle or a tab switch, Terminal broken regardless. Native AppKit apps
+  never reach the userspace chooser, and reallocated surfaces are only covered
+  here.
+
+**Defect B is closed too (2op)**: screenprobe is 32/32 CLEAN against 20/32 and
+18/32 scrambled on the identical instrument before the fix.
+
+§2 below is the *history* of how this was found, kept because its evidence
+table is still true and its refuted hypotheses must not be re-run. **What is
+still unexplained is WHY** — see §2's closing note and §6.
 
 The **display half has never started**: no framebuffer kext loads, because
 Apple's controller personality matches on Navi 21 PCI IDs and ours is
@@ -36,7 +58,15 @@ accelerator attached, which is why *About This Mac* still reads 7 MB.
 
 ---
 
-## 2. THE FRONTIER — userspace texture tiling
+## 2. SOLVED — userspace texture tiling (history + the evidence that holds)
+
+**This section is no longer the frontier.** The fix landed in 2on–2op; §1 has
+it. What follows is the evidence trail, kept for two reasons: the table below
+is still measured truth, and the three refuted hypotheses must not be re-run.
+The policy that works is `fix` — LINEAR for non-render-targets, render targets
+mapped **off the `_X` family** (21→5, 22→6, 23→6, 25→9, 26→10, 27→10; Z modes
+20/24 untouched), keyed on `usage` OR'd from descriptor **+0x68 and +0xb0**.
+**WHY the `_X` family is wrong is still NOT established.**
 
 ### What is established
 
@@ -140,7 +170,7 @@ evidence already in hand before designing the next experiment.**
 - **2la** AddrLib geometry (kernel side) — correct.
 - **2lc** rotation — no effect.
 
-### The next step
+### How it was found (history — the step that led to 2on)
 
 Both AddrLibs agree, so a client texture is written by the CPU and read by
 the GPU through the **same** equation. A self-consistent surface cannot
@@ -195,10 +225,32 @@ not proof of independence when an unexcluded cache sits between.
 **The fix shape improves:** the proper fix touches ~4% of resources and keeps
 tiling everywhere else, instead of forcing all 4788.
 
-`-rbgpulinear` is currently **OUT**. Whether it is still earning its place
-needs the screen, not a note — it bought ~80 % in boot 98, before the halt
-fix was complete at three sites and before faults reached zero, and has never
-been retested on a healthy chip.
+**That question — whether the force still earns its place — was answered by
+removing it.** Boot 131 took it out and the desktop regressed (apps correct at
+launch, wrong after idle or a tab switch, Terminal broken regardless), so it
+earns its place and is **ON BY DEFAULT since 2oo**; `-rbgpulinear` is no
+longer read anywhere and `-rbgpunolinear` turns it off.
+
+### What 2on–2op did NOT explain
+
+Two things are owed, and neither is cosmetic:
+
+1. **WHY the `_X` swizzle family is wrong on this chip.** 2nr blamed Navi 21's
+   pipe count and 2ns measured that false: AddrLib's whole configuration is
+   `AMDCommonHwInfoRec+0xa4` = gbAddrConfig, which reads **0x242** and agrees
+   with the hardware exactly. 2na's XOR-linear bit matrix still points at the
+   `_X` XOR term, just not at the pipe count. The fix is a policy that works,
+   not an understanding.
+2. **Why the render targets the policy deliberately keeps TILED do not
+   disagree** with the kernel's linear force. 2oo's explanation for why both
+   halves are needed is that the force made the kernel compute linear while
+   userspace still tiled, and the universal fix removed that disagreement for
+   non-render-targets — but it did *not* remove it for render targets, and
+   those render correctly anyway. Something in that account is incomplete.
+   Related: 2nj held that AppKit CALayer backing stores reach neither the
+   userspace chooser nor the kernel align manager, yet the kernel force is
+   exactly what fixes Terminal (boots 131/132). The second half of 2nj is in
+   doubt.
 
 ---
 
@@ -568,10 +620,13 @@ rbgpu-diag    the diag summary — FULL at d=73, carries no nonce
                                              no SSH window (2hh)
 -rbgpuvramadj                                2ks/2ku/2kw: THE FIX
 -rbgpudisplaypipe                            2kt: adopt the display pipe
-(-rbgpulinear was REMOVED before boot 104 to settle 2ll; it is a
- blanket force on all ~4788 client resources to correct the ~190
- that are tiled. Re-add with:
-   sudo tools/efi.sh bootarg add -rbgpulinear && sudo nvram rbgpu-arm=1)
+(-rbgpulinear and -rbgpumtlkfix are GONE as flags since 2oo - both
+ behaviours are now DEFAULT-ON and neither string is read anywhere in
+ the plugin. Leaving them in boot-args is harmless and enables
+ nothing. The off-switches are -rbgpunolinear and -rbgpumtlkoff, and
+ rbgpumtlkscope= / rbgpumtlkexclude= still override the universal
+ scope. Boot 132 ran both halves from their defaults and the desktop
+ was flawless, Defect B included - 2op.)
 ```
 
 **OUT**, each proven:
@@ -594,14 +649,29 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
 
 ## 10. Where to go next
 
-1. **Readable text (the user's stated priority).** §2: the AddrLib
-   configuration is now proven identical on both sides, so the next step is a
-   userspace *observation* of what client textures actually get — not another
-   global parameter.
-2. **The display chain.** §4: answer the linkability question **statically**
+**Rendering is done** (§1, 2on–2op): flawless desktop, Defect B closed, both
+halves on by default, no boot-arg and no setup. Nothing on this list is
+blocking a usable machine any more.
+
+1. **The display chain.** §4, and now the largest thing left: no framebuffer
+   kext loads, because Apple's controller personality matches Navi 21 PCI IDs
+   and ours is `0x16811002`. Answer the linkability question **statically**
    before spending a boot. If `AMDRadeonX6000Framebuffer` cannot be linked
    from an EFI-loaded kext, this becomes an OpenCore personality patch and
-   leaves this repo.
-3. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
-4. **`-rbgpulinear` is already dropped** (boot 104). Re-add it only if the
-   screen says it still earns its bandwidth.
+   leaves this repo. Note `-rbgpufbmatch` must stay OUT — spoofing
+   `device-id` kills the accelerator (§9).
+2. **The two unexplained things in §2's closing note** — why the `_X` family
+   is wrong, and why the render targets kept tiled do not disagree with the
+   kernel force. Static work, no boot needed, and the second one is a real
+   loose thread rather than tidying: it says the current account of why both
+   halves are needed is incomplete.
+3. **Hardening the universal fix.** It fails safe by construction (every site
+   read back and compared before any write), so an OS update means *nothing*
+   is patched rather than something wrong — but that also means an update
+   silently returns the machine to the broken rendering. The failure is loud
+   in `mtlk_failed`; it is not loud on screen. Worth a visible signal.
+4. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
+5. **Housekeeping.** The 2lm/2lp/2oa/2od Lilu `BinaryModInfo` paths are still
+   in the tree and can never apply (rule 22); `tools/rbgpu-app.sh` is
+   superseded. Both are inert, neither is load-bearing, and removing them is
+   cleanup rather than a fix.

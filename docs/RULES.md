@@ -59,6 +59,13 @@ correct at launch, wrong again after idle or a tab switch, Terminal broken
 regardless - because native AppKit apps never reach the userspace chooser
 (2oj). **No boot-arg or manual setup is required for a working desktop.**
 
+**BOOT 132 CONFIRMED IT, FROM THE DEFAULTS (2op).** The user: *"everything is
+flawless, not a single artifact or even an off pixel"*. Both halves ran from
+their defaults, checked rather than assumed: `-rbgpumtlkfix` and
+`-rbgpulinear` survive only inside log-message text and are **not read**
+anywhere, so the args still sitting in boot-args enabled nothing. Only the
+scope string came from an arg (`rbgpumtlkscope=*`, same value as the default).
+
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
 JetBrains, because JBR renders every Swing surface into a plain MTLTexture and
@@ -86,19 +93,34 @@ be reached by injection at all** - which is why the kext path matters, and
 **Nor is TextEdit, or any native AppKit app** - 2oj/2ok: this defect is the
 mode chosen for client `MTLTexture`s, which Electron and JBR hit by rendering
 text into plain textures, while AppKit text goes through CALayer backing
-stores that reach neither this chooser nor the kernel align manager (2nj,
-Defect B). TextEdit renders correctly at baseline, so it can only ever show
-"did not crash".
+stores that do not reach this chooser (2nj, Defect B). TextEdit renders
+correctly at baseline, so it can only ever show "did not crash".
+**2nj's second half - that they do not reach the kernel align manager
+either - is now in doubt**: boot 131 broke Terminal with the force removed
+and boot 132 fixed it with the force defaulted on, so something on that path
+*is* reachable kernel-side. Unresolved, and recorded as the loose thread in
+2op rather than smoothed over.
 
 **texprobe is NOT an oracle for this defect** - it is clean at baseline (0/12,
 every footprint 1.00x) because its round trip is self-consistent. Only a real
 application tells you anything.
 
-**Defect B is the one still open** - a CoreAnimation layer backing store
-comes out rearranged in about half of allocations (`tools/screenprobe.sh`
-reproduces it; 2na has the exact permutation). It is a different path (2nj)
-and 2on's universal fix should NOT be assumed to have touched it; it needs
-its own `screenprobe.sh` run. Do not conflate the two.
+**Defect B IS CLOSED (2op)** - the CoreAnimation layer backing store that came
+out rearranged in about half of allocations no longer reproduces.
+`tools/screenprobe.sh` on boot 132: **32 of 32 captures CLEAN**, row and
+column jumps 0, against **20/32 and 18/32 scrambled** on the identical
+`refresh` x4 instrument before the fix - and every one of the 28 earlier runs
+had scrambled captures, the three just before the fix being 100 % scrambled.
+2on was right to warn against assuming the universal fix reached it; the
+measurement answered the other way. The "wrong after idle or a tab switch"
+symptom of boot 131 was this, so **no third defect need be hypothesised**.
+Boot 132 also proved the detour a third independent way: screenprobe's own
+in-process search finds the 32-byte prologue of
+`amdMtl_HWL_DetermineSwizzleMode` **0x** in its own `__TEXT`, where 14
+launches before the fix all read 1x. That verdict used to print
+`INCONCLUSIVE` - it had only two branches and the kext's 5-byte detour leaves
+*neither* pattern findable, so the success case read like a failure; fixed in
+`tools/screenprobe.swift`.
 
 **Note for any session run inside the the assistant app:** it is itself launched with
 `DYLD_INSERT_LIBRARIES` set, so every shell inherits it and `open -a` passes
