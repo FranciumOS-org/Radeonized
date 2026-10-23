@@ -22,6 +22,7 @@
 #include "rb_discovery.h"
 #include "rb_probe.h"
 #include "rb_regs.h"
+#include "rb_dcn_deny.h"
 #include "rb_smu.h"
 
 int smu13_tests(const struct rb_disc *real_table);   /* smu13_test.c */
@@ -359,6 +360,53 @@ static void test_levels(void)
  * rb_regs.h documents still hold (a wrong stride is how a future pipe-1
  * extension would read the wrong register), and that no two entries share a
  * name (find_sample returns the first match, so a duplicate would shadow). */
+static void test_dcn_denylist(void)
+{
+    /* 2pm: the generated dcn302 -> dcn312 deny list. Apple's DAL is dcn302
+     * code; these 299 dword offsets land on a DIFFERENT register on this
+     * chip, so our write hook must refuse exactly these and pass the rest.
+     *
+     * Three properties, because a wrong deny list is silent either way: too
+     * small and DAL writes a wrong register, too large and DAL is crippled
+     * for no reason. */
+
+    /* 1. Strictly ascending - rb_dcn_is_denied binary-searches it. */
+    for (uint32_t i = 1; i < RB_DCN_DENY_COUNT; i++) {
+        if (rb_dcn_deny[i - 1] >= rb_dcn_deny[i]) {
+            printf("  FAIL deny list not ascending at %u: %#x >= %#x\n",
+                   i, rb_dcn_deny[i - 1], rb_dcn_deny[i]);
+            failures++;
+            break;
+        }
+    }
+
+    /* 2. Every entry is found by the search. Guards the search, not the data. */
+    for (uint32_t i = 0; i < RB_DCN_DENY_COUNT; i++) {
+        if (!rb_dcn_is_denied(rb_dcn_deny[i])) {
+            printf("  FAIL rb_dcn_is_denied missed its own entry %#x at %u\n",
+                   rb_dcn_deny[i], i);
+            failures++;
+            break;
+        }
+    }
+
+    /* 3. The cases that matter, by name, from docs/linux-ref.
+     *
+     * DENIED: DCHUBBUB_SDPIF_CFG0 moved (74 of 77 DCHUBBUB registers did).
+     * ALLOWED: the scanout path is identical in 3.0.2 and 3.1.2, and blocking
+     * it would stop DAL doing the one thing it CAN get right on this chip. */
+    CHECK(rb_dcn_is_denied(0x0048fu));    /* DCHUBBUB_SDPIF_CFG0 - moved */
+    CHECK(!rb_dcn_is_denied(0x01b2au));   /* OTG0_OTG_H_TOTAL - identical */
+    CHECK(!rb_dcn_is_denied(0x01b41u));   /* OTG0_OTG_CONTROL - identical */
+    CHECK(!rb_dcn_is_denied(0x005e5u));   /* HUBP0_DCSURF_SURFACE_CONFIG */
+
+    /* 4. Past the end of the table, so the search cannot run off it. */
+    CHECK(!rb_dcn_is_denied(0xffffffffu));
+
+    printf("dcn deny: %u offsets, sorted, searchable; OTG/HUBP allowed, "
+           "DCHUBBUB denied\n", RB_DCN_DENY_COUNT);
+}
+
 static void test_dcn_timing_regs(void)
 {
     printf("level 2 reads OTG0's full timing and HUBP0's pitch\n");
@@ -768,6 +816,7 @@ int main(int argc, char **argv)
     test_default_path();
     test_levels();
     test_dcn_timing_regs();
+    test_dcn_denylist();
     test_bar0_window();
     test_high_offset();
     test_scratch_path();

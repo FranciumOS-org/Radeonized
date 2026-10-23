@@ -14,6 +14,8 @@
 
 #include "kern_start.hpp"
 #include "rb_smu13.h"
+// 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
+#include "rb_dcn_deny.h"
 
 #ifndef RB_HWID_MP1
 #define RB_HWID_MP1 1
@@ -8164,6 +8166,66 @@ static void rbgpu_dal_trace(char kind, uint32_t reg, uint32_t val) {
     rbgpu_diag_set_num("dal_tr_n", g_dal_tr_n);
 }
 
+// 2pm: SELECTIVE PASS-THROUGH, AND WHY IT CANNOT ARM BY ITSELF.
+//
+// Boot 143 panicked and boot 144 hung, and both came from one impossible
+// requirement: for DAL to do hardware work the Wrangler must own
+// `IOFramebuffer`, but a framebuffer that owns the display while every one of
+// its register writes is swallowed cannot produce a picture. The hung boot
+// proves it with a control - `fb0:0` is ABSENT from AppleGPUWrangler's
+// registration, where working boot 142 shows `fb0:0 /IONDRVFramebuffer`. So
+// the dry run is self-contradictory ONCE PROMOTED, and no cleverness at
+// `start()` fixes it: 2pk tried declining, AGDC kept a registration, and the
+// machine faulted on a freed object.
+//
+// The way out is to stop dropping everything and drop only what is WRONG.
+// 2pg measured exactly that: of 5631 registers Apple's dcn302 code and this
+// chip's dcn312 share, 5332 sit at the SAME dword offset and base, and the
+// entire scanout path - OTG 0/434, HUBP 0/80, CM 0/1000, DSCL 0/136,
+// DPP+OPP+DCCG 0/82 - is identical. `src/common/rb_dcn_deny.h` is the
+// generated list of the 299 that MOVED, guarded by a hosttest that fails if
+// the list stops being sorted, stops being searchable, or stops allowing
+// OTG/HUBP.
+//
+// BUT THE UNITS ARE NOT ESTABLISHED. The deny list is keyed on **dword
+// offsets** from the Linux headers. What `writeReg32`'s first argument
+// actually carries on Apple's side - a dword offset, a byte address, or an
+// encoded id like the accelerator's `(dword << 32) | hwid` - is NOT known.
+// Applying the list without checking would be the recurring error of this
+// project in its purest form: reading a value without first establishing what
+// makes it meaningful.
+//
+// So pass-through REFUSES TO ARM unless the units are declared with
+// `rbgpudalenc=dword` or `rbgpudalenc=byte`. Learning them costs nothing and
+// risks nothing: boot 142's exact configuration (controller only, no
+// promotion, display intact) produced four reads, and `dal_tr0` now captures
+// them with their addresses. Four numbers settle it.
+static bool     g_dal_pass    = false;     // -rbgpudalpass
+static uint8_t  g_dal_enc     = 0;         // 0 unknown, 1 dword, 2 byte
+static uint64_t g_dal_passed  = 0;
+static uint64_t g_dal_denied  = 0;
+
+// Returns true if this write should reach the chip. Records either way.
+static bool rbgpu_dal_allow(uint32_t reg) {
+    if (!g_dal_pass || g_dal_enc == 0) {
+        g_dal_denied++;
+        return false;                      // the default is still: drop it
+    }
+    const uint32_t dw = (g_dal_enc == 2) ? (reg >> 2) : reg;
+    if (rb_dcn_is_denied(dw)) {
+        g_dal_denied++;
+        if (g_dal_denied <= 16)
+            rbgpu_log("2pm: DENIED write to %#x (dword %#x) - this register "
+                      "moved between dcn302 and dcn312", reg, dw);
+        rbgpu_diag_set_num("dal_denied", g_dal_denied);
+        return false;
+    }
+    g_dal_passed++;
+    if (g_dal_passed == 1 || (g_dal_passed & 0xff) == 0)
+        rbgpu_diag_set_num("dal_passed", g_dal_passed);
+    return true;
+}
+
 static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
     g_dal_writes++;
     g_dal_dropped++;
@@ -8178,16 +8240,16 @@ static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
 }
 
 static void hooked_dal_w2_2ph(void *self, uint32_t reg, uint32_t val) {
-    (void)self;
     rbgpu_dal_record(reg, val, "2");
-    // Deliberately NOT calling orig_dal_w2_2ph. Nothing reaches the chip.
+    if (rbgpu_dal_allow(reg))
+        orig_dal_w2_2ph(self, reg, val);
 }
 
 static void hooked_dal_w4_2ph(void *self, uint32_t reg, uint32_t val,
                               uint8_t a, uint32_t b) {
-    (void)self; (void)a; (void)b;
     rbgpu_dal_record(reg, val, "4");
-    // Deliberately NOT calling orig_dal_w4_2ph.
+    if (rbgpu_dal_allow(reg))
+        orig_dal_w4_2ph(self, reg, val, a, b);
 }
 
 // 2pj: THE REGISTER SURFACE IS WIDER THAN ONE CLASS, and boot 141 proved the
@@ -8250,9 +8312,10 @@ static uint32_t hooked_dal_atomr_2pj(void *self, void *ctx, uint32_t reg) {
     return v;
 }
 static void hooked_dal_atomw_2pj(void *self, void *ctx, uint32_t reg, uint32_t val) {
-    (void)self; (void)ctx;
     rbgpu_dal_count("dal_w_atom", &g_dal_w_atom);
-    rbgpu_dal_record(reg, val, "A");          // DROPPED: orig not called
+    rbgpu_dal_record(reg, val, "A");
+    if (rbgpu_dal_allow(reg))
+        orig_dal_atomw_2pj(self, ctx, reg, val);
 }
 static uint32_t hooked_dal_biosr_2pj(void *self, void *ctx, uint32_t reg) {
     uint32_t v = orig_dal_biosr_2pj(self, ctx, reg);
@@ -8260,9 +8323,10 @@ static uint32_t hooked_dal_biosr_2pj(void *self, void *ctx, uint32_t reg) {
     return v;
 }
 static void hooked_dal_biosw_2pj(void *self, void *ctx, uint32_t reg, uint32_t val) {
-    (void)self; (void)ctx;
     rbgpu_dal_count("dal_w_bios", &g_dal_w_bios);
-    rbgpu_dal_record(reg, val, "B");          // DROPPED: orig not called
+    rbgpu_dal_record(reg, val, "B");
+    if (rbgpu_dal_allow(reg))
+        orig_dal_biosw_2pj(self, ctx, reg, val);
 }
 
 static uint32_t hooked_dal_r3_2pi(void *self, uint32_t reg, uint32_t a, uint8_t b) {
@@ -8690,6 +8754,26 @@ void RGPU::init() {
     g_dal_on = checkKernelArgument("-rbgpudal");
     rbgpu_log("2ph: DAL dry run %s (records and DROPS every register write)",
               g_dal_on ? "ARMED by -rbgpudal" : "off (add -rbgpudal)");
+    g_dal_pass = checkKernelArgument("-rbgpudalpass");
+    char encbuf[12] = {};
+    if (PE_parse_boot_argn("rbgpudalenc", encbuf, sizeof(encbuf)) && encbuf[0]) {
+        if (!strncmp(encbuf, "dword", 5)) g_dal_enc = 1;
+        else if (!strncmp(encbuf, "byte", 4)) g_dal_enc = 2;
+    }
+    if (g_dal_pass && g_dal_enc == 0) {
+        rbgpu_log("2pm: -rbgpudalpass REFUSED - rbgpudalenc= is not set, so the "
+                  "units of writeReg32's register argument are unknown and the "
+                  "deny list cannot be applied. Every write stays DROPPED. "
+                  "Read dal_tr0 from a controller-only boot first.");
+        rbgpu_diag_set_num("dal_pass_refused", 1);
+    }
+    rbgpu_diag_set_num("dal_pass", (g_dal_pass && g_dal_enc) ? g_dal_enc : 0);
+    rbgpu_log("2pm: selective pass-through %s (deny list %u offsets)",
+              (g_dal_pass && g_dal_enc)
+                  ? (g_dal_enc == 1 ? "ARMED units=dword" : "ARMED units=byte")
+                  : "off - every write dropped",
+              RB_DCN_DENY_COUNT);
+
     g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
     rbgpu_log("2pk: Wrangler promotion %s - it will take IOFramebuffer, let "
               "DAL run with writes dropped, then DECLINE so IONDRVFramebuffer "
