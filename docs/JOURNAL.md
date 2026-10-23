@@ -25173,3 +25173,130 @@ Three, all mine, all fixed in `tools/fbvr_check.sh`:
    NVRAM, where they never were). The real keys are `fliprq_on` /
    `fliprq_routed` / `fliprq_calls` in the registry — rule 26 again, fourth time
    this project.
+
+---
+
+## 2ps (2026-10-23) — the SkyLight predicate, read. Zero boots.
+
+2pr found SkyLight rejecting the display destination by name ~47 000 times a
+boot. This reads the code that does it.
+
+### New capability: `tools/re/dsc.py`
+
+The dyld shared cache cannot be turned into a standalone Mach-O with anything
+on this machine - there is no `otool` that will open a cache-resident path
+(`otool-classic: can't open file`), `llvm-objdump` has **no `-b binary`**,
+there is no `llvm-mc`, and `capstone` is not installed. So the tool does three
+things directly:
+
+- parses the cache header's mappings for **VA <-> file offset** (map0: VA
+  `0x7ff800000000`, fileoff 0, size `0x25198000`, r-x)
+- finds **RIP-relative LEA cross-references** to an address, using
+  `bytes.find` per 3-byte opcode prefix (REX.W `48`/`4C` + `8D` + modrm
+  mod=00 rm=101) so all 622 MB of the r-x mapping scans in seconds
+- wraps raw bytes in a **minimal x86-64 MH_OBJECT** with one `__TEXT,__text`
+  section at the right vmaddr, so `objdump -d` disassembles cache-resident
+  code at correct addresses
+
+`dyld_info -segments` supplies an image's unslid base: SkyLight `__TEXT` =
+**`0x7FF807B42000`**, 4923 KB.
+
+### Rule 26, paid again, and the control is what saved it
+
+The first xref returned **0 sites** - and that was my arithmetic, not absence.
+I wrote the string's VA as `0x7FDF8F0` when file offset 134092464 is
+`0x7FE1670`: **off by 8128 bytes**. Dumping the bytes at the wrong VA showed
+unrelated strings ("connection for the requested process is null"), which is
+what exposed it, after a **known-present control** - "Metal compositor
+activated", which has exactly one LEA xref at `0x7ff807c9a87b` - proved the
+pipeline itself was sound. Without that control I would have reported "the
+string is never referenced", confidently and wrongly, which is exactly the
+failure rule 26 exists for.
+
+Corrected: the string is at **`0x7ff807fe16b0`** (verified by dumping it:
+`Unsupported sw composite destination.` + NUL) with **exactly one** LEA xref at
+`0x7ff807c3eb9a`, into `rcx`, feeding the standard
+`_os_log_impl(dso=0x7ff807b42000, log, type=0x10 = ERROR, fmt, buf, size)`.
+
+### The predicate, exactly
+
+The function begins at **`0x7ff807c3e820`** and takes the source in `rsi` and
+the **destination in `rdx`**. Exactly **one** branch reaches the error block at
+`0x7ff807c3eb68`:
+
+```
+7ff807c3e83f:  testq %rsi, %rsi
+7ff807c3e842:  je    ...                  ; no source -> out
+7ff807c3e848:  movq  %rdx, %rbx           ; rbx = destination
+7ff807c3e84b:  movl  0x2c(%rdx), %eax
+7ff807c3e84e:  cmpl  0x34(%rdx), %eax
+7ff807c3e851:  jg    ...                  ; bounds: 0x2c must be <= 0x34
+7ff807c3e857:  movl  0x30(%rbx), %eax
+7ff807c3e85a:  cmpl  0x38(%rbx), %eax
+7ff807c3e85d:  jg    ...                  ; bounds: 0x30 must be <= 0x38
+7ff807c3e866:  movl  0x10(%rbx), %r13d    ; <<< destination TYPE, int32 at +0x10
+7ff807c3e86a:  cmpl  $0x2, %r13d
+7ff807c3e86e:  je    0x7ff807c3e896       ; type 2 -> OK, uses dest->0x98
+7ff807c3e870:  cmpl  $0x1, %r13d
+7ff807c3e874:  jne   0x7ff807c3eb68       ; <<< NOT 1 AND NOT 2 -> REJECT
+7ff807c3e87a:  movq  0x18(%rbx), %rax     ; type 1 -> OK, uses dest->0x18
+```
+
+**The gate is a single int32 at destination+0x10, and it must be 1 or 2.**
+Type 1 is served out of `dest->0x18`, type 2 out of `dest->0x98`. This is the
+mechanical form of what 2pd inferred from the two constructors it named.
+
+The sibling errors - `Unexpected composite destination type (%d)`
+(`0x7ff807fe40f0`) and `Unreasonable composite destination bounds requested`
+(`0x7ff807fe4090`) - are both emitted from one other function, around
+`0x7ff807cbf900`, and **neither has ever fired**, so our destination does not
+reach that path. The one that would have printed the type number is the one
+that stays silent.
+
+No `WSCompositeDestination*` symbol is **exported** from SkyLight, so the
+constructors are internal and cannot be found by name.
+
+### Where the type is assigned - and what is NOT yet known
+
+Scanning SkyLight's `__text` for `movl $imm, 0x10(reg)` with imm < 16 found a
+coherent small group writing the type field:
+
+| value | sites |
+|---|---|
+| 2 | `0x7ff807c6e5c0`, `0x7ff807ccff97` |
+| 3 | `0x7ff807c97f1f`, `0x7ff807f275ba` |
+
+(The ad-hoc scan labelled these `%rsi`; the type-3 site is actually
+`41 c7 46 10 03…` = `movl $0x3, 0x10(%r14)`, because a REX.B prefix precedes
+it and the throwaway scanner did not decode REX. The offset and the immediate
+are right; the register name in that one listing is not.)
+
+`0x7ff807c6e5c0` writes **2** into a structure it has just zeroed with a run of
+`movaps`, then sets `0x80` = 4 and two floats - a freshly constructed
+destination. The type-**3** site sets `0x18`, `0x20`, a byte at `0x28`, zeroes
+`0x30` and `0x48`, writes `3` to `0x10`, and then branches on whether `0x18` is
+null - so **type 3 also populates the `0x18` field that the accepted type 1
+uses.**
+
+**What is NOT established, and must not be assumed: that our destination is
+type 3.** Three values are now known to exist (1, 2, 3) and the predicate
+accepts two of them, but nothing measured here says which one the display gets.
+The structural similarity between 1 and 3 is suggestive and is *not* evidence.
+
+### The two ways to get the actual value, and their cost
+
+1. **Static**: keep going - find which constructor the display path calls. Free,
+   and the next thing to try.
+2. **Runtime**: read `dest->0x10` in WindowServer. WindowServer is a platform
+   binary and strips `DYLD_INSERT_LIBRARIES`, so injection cannot reach it -
+   but **the kernel-side patcher already does** (2og/2oi/2on,
+   `-rbgpumtlkfix`), which patches the dyld cache per-process for ~2045 execs
+   per boot including Safari and WindowServer, verifying every site from the
+   target's own memory first. The mechanism for a SkyLight detour therefore
+   already exists and is proven. Costs a boot, and should not be spent until
+   the static route is exhausted.
+
+**Do not patch the predicate to accept 3 as a "fix".** It would make the SW
+compositor read `dest->0x18` on a structure whose `0x18` has not been shown to
+mean the same thing, inside WindowServer, which is the one process whose crash
+takes the desktop with it.
