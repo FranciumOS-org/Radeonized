@@ -52,10 +52,12 @@ sandboxed App Store apps. Leftover wrappers are a safe no-op (2om), so remove
 them at leisure. 2ns's "there is NO global fix" was right about the place and
 wrong about the reach, exactly as 2lg was.
 
-**Not yet re-evaluated against the working fix:** `-rbgpulinear` (a *kernel*
-forcing of the same decision, credited with ~80 % of widget artifacts in boot
-104, so possibly now redundant or harmful) and `-rbgpumtllinear` (provably
-inert, rule 22). Test one at a time.
+**BOTH HALVES ARE NOW DEFAULT-ON AND BOTH ARE NEEDED (2oo).** The kernel-side
+linear force is on unless `-rbgpunolinear`; the userspace patcher is on unless
+`-rbgpumtlkoff`. Boot 131 removed the force and the desktop regressed - apps
+correct at launch, wrong again after idle or a tab switch, Terminal broken
+regardless - because native AppKit apps never reach the userspace chooser
+(2oj). **No boot-arg or manual setup is required for a working desktop.**
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -390,36 +392,33 @@ The two that bite hardest:
   `-rbgpupdefix` (composes with the upstream fix, halt returns),
   `-rbgpunodisppanic`, `-rbgpusdmahook`, `-rbgpustampraw`, `-rbgpuregdump`,
   `debug=0x100`.
-- **`-rbgpulinear` is now a SUSPECT in the text defect (2mm), not neutral.**
-  It forces client surfaces to LINEAR while the userspace driver lays them out
-  in 64 KB tiles; every geometry whose tiled footprint exceeds its pixel bytes
-  renders wrong and every geometry where the two agree renders correctly. Test
-  pending: remove it and the height sweep must go clean. The note below is the
-  pre-2mm reading and its ~80 % widget win still stands.
-- **`-rbgpulinear` belongs IN and is currently OUT.** Boot 104 removed it and
-  the widget/Dock/chrome artifacts came straight back on a healthy chip, so
-  its ~80 % is real and not an artefact of boot 98's broken state. Restore:
-  `sudo tools/efi.sh bootarg add -rbgpulinear && sudo nvram rbgpu-arm=1`
-  It does **not** affect the text in either direction (2ln).
-- **`-rbgpumtllinear`** (2lm) is **IN** - this line said "built but OUT"
-  until 2026-10-22, when `efi.sh status` showed it in boot-args alongside
-  `-rbgpuhwblt` (rule 15: read the config, not this file). A Lilu user patch
-  forcing `DetermineSwizzleMode` to LINEAR in **Terminal only**. It is inert
-  for the usual 2oc reason - no file to read patterns from - but it is NOT
-  harmless to the 2od work: `kRb2lmMod` and `kRb2lpMod` declare the same
-  dylib path and register FIRST, and `mapAddresses` fills only the first
-  matching mod per `.map` line, so the real `startTEXT` lands on one of them
-  rather than on ours. `rbgpu_mtlcave_mapped_mod()` exists for exactly this.
+- **The linear force is ON BY DEFAULT (2oo) - `-rbgpulinear` is gone.** The
+  arg is no longer read anywhere in the plugin; the behaviour it used to gate
+  is now the default, and **`-rbgpunolinear`** turns it off. **You need it as
+  well as the userspace fix**: boot 131 removed it and apps came up correct,
+  then went wrong again after idle or a tab switch, with Terminal and other
+  native apps broken regardless. The two cover different paths - native AppKit
+  apps never reach the userspace chooser at all (2oj). This also retires 2mm's
+  suspicion of the arg and explains it: the force made the KERNEL compute
+  linear while USERSPACE still tiled, and the universal fix removes that
+  disagreement for non-render-targets. Why it does not also disagree for the
+  render targets userspace keeps tiled is **not** established.
+- **`-rbgpumtllinear`** (2lm) is **provably inert** (rule 22) and was removed
+  from boot-args in boot 131. The 2lm/2lp code is still in the tree and still
+  registers Lilu `BinaryModInfo`s that can never apply.
 
 - **`-rbgpumtlkpatch` / `-rbgpumtlkfix`** (2og/2oi) are the kernel-side
   patcher, which **WORKS**: it hooks `_vm_shared_region_slide` and
   `_task_set_main_thread_qos` and places bytes with `_vm_map_write_user`,
   because Lilu's user patcher cannot run here at all (rule 22). 2oi placed
-  and verified the cave in a live process. `-rbgpumtlkpatch` is stage A
-  (inert cave only); `-rbgpumtlkfix` adds the detour and makes it live.
-  `rbgpumtlkscope=a,b,c` retargets by process name without a rebuild, and
-  **`*` means every process** - the universal fix (2om). Default is
-  `cavecheck`, so going universal is always explicit.
+  and verified the cave in a live process. **It is ON BY DEFAULT since 2oo**:
+  stage B, scope `*`, no boot-arg needed. **`-rbgpumtlkoff`** disables it,
+  `-rbgpumtlkpatch` selects the inert cave-only stage, and
+  `rbgpumtlkscope=a,b,c` still overrides the scope. Defaulting it on is safe
+  because it **fails safe**: every site is read back and compared before
+  anything is written, so an OS update that moves the driver means nothing is
+  patched rather than something wrong being patched. Boot 131 showed
+  **WindowServer is safe to patch** - no exclusion is needed.
   `rbgpumtlkexclude=a,b` is checked FIRST and always wins: the escape hatch
   for an app that misbehaves, settable over SSH without a rebuild. Read
   `mtlk_patched` / `mtlk_failed`; detailed keys are throttled to the first 8
