@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -279,3 +279,17 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 -include $(KEXT_OBJS:.o=.d) $(PLUGIN_OBJS:.o=.d)
+
+# 2pb: where the display time actually goes. fbperf compares a GPU-side blit
+# (the control) against the scanout read path; fbpresent measures the real
+# full-screen present path, serialised and pipelined, with CPU-vs-wall so a
+# copy can be told apart from a wait. Neither touches hardware.
+fbperf:
+	@clang -fobjc-arc -O2 -Wall -framework Foundation -framework Metal \
+	    -framework CoreGraphics tools/fbperf.m -o $(OUT)/fbperf
+	@echo "  OBJC $(OUT)/fbperf"
+
+fbpresent:
+	@clang -fobjc-arc -O2 -Wall -framework Cocoa -framework Metal \
+	    -framework QuartzCore tools/fbpresent.m -o $(OUT)/fbpresent
+	@echo "  OBJC $(OUT)/fbpresent"

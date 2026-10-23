@@ -23828,3 +23828,106 @@ Still open after this, and not pretended otherwise: `Metal: Supported` rather
 than Metal 3 (the families are already there — `spdisplays_metal3` /
 `spdisplays_mtlgpufamilysupport` are simply unpopulated), the Hz menu, real
 mode setting, brightness, the hardware cursor, page flipping and phase lock.
+
+---
+
+## 2pb (2026-10-23) — THE DISPLAY DEFECT IS NOT 30 Hz. WindowServer is CPU-copying every frame.
+
+The user rejected the 30 Hz explanation, with specifics: *"the animations dont
+run at all... I press minimize the screen turns blur... but screen freezes for
+5 seconds as animations is running then skipped... completely... also the
+wallpaper loading slow when unlocking, takes 30s instead of the usual 5s...
+changing wallpapers also take 30s... it isnt cosmetic and it is not even 30...
+it doesnt even work at all its like actual 7MB type thing"*.
+
+**They were right and I was wrong.** 30 Hz is choppy but *responsive*.
+Multi-second freezes on blur and 30-second wallpaper changes are **throughput**
+symptoms, and every operation named moves or reads back a whole screen. Calling
+the 7 MB "cosmetic" was true of the *number* and false of what it is a symptom
+of. Measured with `tools/fbperf` and `tools/fbpresent`, live, no reboot.
+
+### The measurements
+
+```
+A. GPU blit  (VRAM->VRAM)  :   2.99 ms/screen   2649 MB/s   [control - fine]
+C. screen cap (scanout)    :  18.17 ms/screen    435 MB/s   (worst 174.62 ms)
+
+full-screen present, 1920x1080, trivial clear, nothing to composite:
+  sync OFF   mean  78 ms (12.7 fps) | p50 110 | p99 132 | max 225 ms
+  sync ON    mean 117 ms ( 8.6 fps) | p50 117 | p99 229 | max 230 ms
+  pipe OFF    59.3 ms/frame (16.9 fps) | our CPU  6% of wall   [pipelined]
+  pipe ON    114.8 ms/frame ( 8.7 fps) | our CPU  1% of wall   [pipelined]
+
+WindowServer during the test: 165-173 % CPU, 88.2 CPU-seconds
+```
+
+Four things fall out, each from a deliberate control:
+
+1. **The GPU is fine.** 2649 MB/s VRAM→VRAM — enough for 330 fps of a
+   screenful. Not a GPU or VRAM problem, and that was the point of having a
+   control.
+2. **It is bandwidth, not latency.** Pipelining 120 frames deep moved 110 ms →
+   59 ms and no further. Latency hides under pipelining; a throughput wall does
+   not.
+3. **It is not the refresh clock.** `displaySyncEnabled = NO` gave 110 ms and
+   `YES` gave 117 ms — near-identical. If the 30 Hz fallback were the gate,
+   turning sync off would have changed it dramatically. **So 2oz does not fix
+   this**, and saying so matters more than the fix I had just shipped.
+4. **WindowServer is doing it on the CPU.** Our process waits at 1-6 % of wall
+   while WindowServer pegs ~1.7 cores. 88.2 CPU-seconds over ~560 frames is
+   ~157 ms of CPU per frame for 7.9 MB = **~50 MB/s**, which is uncached-memcpy
+   throughput, not cached (≈10 GB/s) and not even write-combined. And the test
+   scene is a *trivial clear* — there is nothing to composite — so the CPU is
+   not going on blending. It is going on moving the frame.
+
+### The diagnosis
+
+**Every presented frame is being copied into the single fixed 8 MB scanout
+buffer by WindowServer's CPU, through a slow mapping, because nothing flips
+`HUBP0_PRIMARY_SURFACE_ADDRESS`.** `IONDRVFramebuffer` offers one aperture at
+one fixed address and no flip capability, so SkyLight falls back to a CPU blit.
+
+That is one mechanism and it explains every symptom:
+
+| symptom | mechanism |
+|---|---|
+| minimise blur freezes ~5 s | multi-frame animation at ~9 fps, and blur adds readbacks |
+| lock → home transition slow | same path |
+| wallpaper change 30 s | full recomposite of everything, many frames |
+| typing drops words | ~117 ms between screen updates |
+
+And it vindicates the user's instinct exactly: it behaves "like an actual 7 MB
+thing" because there **is** only one 8 MB buffer, and everything funnels
+through a CPU copy into it. The defect was never that 8 MB is too little
+memory — 2or and `tools/vramtest` were right about that — it is that there is
+exactly **one** of it, at a **fixed address**, so every frame must be copied
+instead of flipped to.
+
+### Instruments, and what was wrong with the first ones (rule 16)
+
+`fbperf`'s readback row reported 13 GB/s, which is nonsense for a GPU→CPU
+transfer: `getBytes` on an untouched Shared texture is a cached memcpy, not a
+bus transfer. And `CGDisplayCreateImage` carries WindowServer IPC, so row C is
+not a clean scanout read either. Both are recorded here rather than quietly
+dropped, because the conclusion rests on `fbpresent` and the WindowServer CPU
+sample, not on them. `CGDisplayCreateImage` is also marked obsoleted in the
+15.0 SDK and had to be taken with `dlsym` — the header's availability
+attribute beats a local prototype.
+
+### What this means for the plan
+
+The vblank (2oz) and the label (2pa) both stand, and neither addresses this.
+Ranked by what the evidence supports:
+
+1. **Find out why SkyLight CPU-blits instead of flipping**, and whether the
+   aperture is mapped uncached. If it is UC and can be write-combined, that is
+   a 5-10x improvement **with no DCN register write at all** -
+   `getApertureRange` is routable. Cheapest possible win; investigate first.
+2. **Page flipping** - write `HUBP0_PRIMARY_SURFACE_ADDRESS` to the GPU's
+   rendered surface so the copy disappears entirely. This is the real fix and
+   it **writes DCN registers, which is the user's decision**; a wrong OTG or
+   HUBP write blanks the panel (rule 12).
+3. The accelerator already has a display pipe (`IOAccelDisplayPipeTransaction2`
+   exists, and the plugin already hooks
+   `IOAccelDisplayMachine::found_framebuffer`), so the macOS-side machinery for
+   flipping is present and may only need the framebuffer to advertise it.
