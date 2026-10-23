@@ -21,6 +21,10 @@
 #define RBGPU_MTL_TEXT_VM  0x7ffb08bf3000ULL
 #define RBGPU_MTL_FN_VM    0x7ffb08d35a11ULL
 #define RBGPU_MTL_CAVE_USED 163
+// The patch site is ANCHOR bytes BEFORE the cave: the cave sits in an
+// all-zero run, so the pattern needs preceding context to be unique.
+#define RBGPU_MTL_CAVE_ANCHOR 48
+#define RBGPU_MTL_CAVE_RESERVED 176
 
 static const uint8_t kRbMtlCaveFind[224] = {
     0xFC, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

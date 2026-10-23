@@ -4,6 +4,8 @@
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_user.hpp>
 #include <Headers/kern_file.hpp>
+#include <mach/vm_map.h>
+#include <sys/proc.h>
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -7470,6 +7472,247 @@ static void rbgpu_register_hwblt_2lp(void) {
 
 static void rbgpu_pkrs_init_2ly(void);
 
+
+// ---------------------------------------------------------------------------
+// 2og (2026-10-22): place the shared-cache patch OURSELVES, from the kernel.
+//
+// 2of established that Lilu's user patcher cannot run on this machine at all:
+// Configuration::getBootArguments forces
+//   isUserDisabled |= getKernelVersion() >= KernelVersion::BigSur
+// so UserPatcher::init returns true without registering its kauth listener
+// and registerPatches returns true without hooking anything. No
+// BinaryModInfo will ever apply here, however it is written - which is why
+// 2lm, 2lp, 2nb, 2nm, 2oa and 2od were all inert while reporting success.
+//
+// The MECHANISM is untouched by that. Every kernel symbol Lilu's
+// patchSharedCache uses is present in this kernel (checked directly against
+// /System/Library/Kernels/kernel), and KernelPatcher works fine - it is what
+// routes the AMD functions the accelerator fix depends on. A further
+// consequence of 2of is in our favour: because isUserDisabled short-circuits
+// BEFORE hookMemoryAccess, Lilu never routes these functions, so they are
+// free for us to take (rule 3 - a second route of the same function panics).
+//
+// We also need none of Lilu's file-based pattern discovery, because we know
+// the exact unslid addresses. The 2od stencil is therefore unnecessary.
+//
+// STAGE A (-rbgpumtlkpatch) is deliberately almost inert:
+//   * scoped to processes named "cavecheck", which exist only to be measured;
+//   * writes ONLY the cave - 224 bytes into a zero run inside __const that
+//     nothing branches to. The detour that would make it live is stage B.
+//   * every step records a number, because the point of this stage is to find
+//     out which step fails. Above all: can a shared-cache page be made
+//     writable, and is RW enough or is RWX needed? Lilu needs RWX and pays
+//     for it by clearing CS_ENFORCEMENT/CS_KILL out of struct proc with a
+//     hand-rolled field scan. This does NOT do that. If RW is refused, that
+//     refusal is the result, not a problem to route around.
+// ---------------------------------------------------------------------------
+
+using t_rbMtlkGetTaskMap     = vm_map_t (*)(task_t);
+using t_rbMtlkVmMapReadUser  = kern_return_t (*)(vm_map_t, mach_vm_address_t, void *, vm_size_t);
+using t_rbMtlkVmMapWriteUser = kern_return_t (*)(vm_map_t, const void *, mach_vm_address_t, vm_size_t);
+
+static t_rbMtlkGetTaskMap     g_mtlkGetTaskMap     = nullptr;
+static t_rbMtlkVmMapReadUser  g_mtlkVmMapReadUser  = nullptr;
+static t_rbMtlkVmMapWriteUser g_mtlkVmMapWriteUser = nullptr;
+
+static mach_vm_address_t g_mtlkOrgSlide = 0;
+static mach_vm_address_t g_mtlkOrgQos   = 0;
+
+static uint32_t g_mtlkSlide     = 0;
+static bool     g_mtlkSlideSeen = false;
+static bool     g_mtlkInstalled = false;
+
+// Deliberately NOT calling rbgpu_diag_set_num from here. This fires during
+// early boot, before the peer exists, and the diag setter schedules a
+// thread_call. Store the value; the exec path reports it (rule 16: do not put
+// new machinery on a path that has to survive before the machinery is up).
+static int wrap_rbMtlkSharedRegionSlide(uint32_t slide, uint64_t a, uint64_t b,
+                                        uint64_t c, uint64_t d, uint64_t e, void *f) {
+    if (!g_mtlkSlideSeen) {
+        g_mtlkSlide = slide;
+        g_mtlkSlideSeen = true;
+    }
+    return FunctionCast(wrap_rbMtlkSharedRegionSlide, g_mtlkOrgSlide)(slide, a, b, c, d, e, f);
+}
+
+// Local, so stage A adds no new load-time import. Lilu does EXPORT a bounded
+// strstr, but every symbol this kext resolves at load is a way for the boot to
+// fail, and this one is six lines.
+static bool rbgpu_mtlk_name_matches(const char *name, const char *needle) {
+    for (size_t i = 0; name[i] != '\0'; i++) {
+        size_t j = 0;
+        while (needle[j] != '\0' && name[i + j] == needle[j]) {
+            j++;
+        }
+        if (needle[j] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void rbgpu_mtlk_on_exec(task_t task) {
+    // Scope. proc_selfname is the exec'ing process here; a mis-scope in this
+    // stage costs nothing, because the cave is identical in every process and
+    // is never executed.
+    char pname[MAXCOMLEN + 1] = {};
+    proc_selfname(pname, sizeof(pname));
+    if (!rbgpu_mtlk_name_matches(pname, "cavecheck")) {
+        return;
+    }
+
+    rbgpu_diag_set_num("mtlk_slide", g_mtlkSlide);
+
+    if (!g_mtlkSlideSeen || !g_mtlkGetTaskMap || !g_mtlkVmMapReadUser || !g_mtlkVmMapWriteUser) {
+        rbgpu_diag_set_num("mtlk_ready", 0);
+        rbgpu_log("2og: NOT READY - slide_seen=%d getTaskMap=%d read=%d write=%d. "
+                  "Nothing was touched.",
+                  g_mtlkSlideSeen, g_mtlkGetTaskMap != nullptr,
+                  g_mtlkVmMapReadUser != nullptr, g_mtlkVmMapWriteUser != nullptr);
+        return;
+    }
+    rbgpu_diag_set_num("mtlk_ready", 1);
+
+    vm_map_t map = g_mtlkGetTaskMap(task);
+    if (map == nullptr) {
+        rbgpu_diag_set_num("mtlk_map", 0);
+        return;
+    }
+    rbgpu_diag_set_num("mtlk_map", 1);
+
+    // The patch site is ANCHOR bytes before the cave (the cave sits in a zero
+    // run and needs preceding context to be identifiable).
+    mach_vm_address_t place =
+        (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
+    rbgpu_diag_set_num("mtlk_place", place);
+
+    // One buffer, reused for the read-back: two 224-byte frames plus locals
+    // would crowd a kernel stack frame.
+    static uint8_t probe[sizeof(kRbMtlCaveFind)];
+
+    kern_return_t r = g_mtlkVmMapReadUser(map, place, probe, sizeof(probe));
+    rbgpu_diag_set_num("mtlk_read", static_cast<uint64_t>(r));
+    if (r != KERN_SUCCESS) {
+        rbgpu_log("2og: vm_map_read_user at 0x%llx failed with %d - the slide "
+                  "or the address is wrong, and nothing was written",
+                  (unsigned long long)place, r);
+        return;
+    }
+
+    // THE measurement of this stage: do the expected bytes actually live at
+    // startTEXT + segOff + slide? If they do, the whole address chain is
+    // right and only the write remains.
+    bool isFind = memcmp(probe, kRbMtlCaveFind, sizeof(probe)) == 0;
+    bool isRepl = memcmp(probe, kRbMtlCaveRepl, sizeof(probe)) == 0;
+    rbgpu_diag_set_num("mtlk_match", isFind ? 1 : (isRepl ? 2 : 0));
+    if (!isFind) {
+        rbgpu_log("2og: bytes at 0x%llx are %s - refusing to write. "
+                  "first 4: %02X %02X %02X %02X",
+                  (unsigned long long)place,
+                  isRepl ? "ALREADY PATCHED" : "not the expected pattern",
+                  probe[0], probe[1], probe[2], probe[3]);
+        return;
+    }
+
+    mach_vm_address_t pmask = static_cast<mach_vm_address_t>(PAGE_MASK);
+    mach_vm_address_t pstart = place & ~pmask;
+    mach_vm_address_t pend   = (place + sizeof(probe) - 1) & ~pmask;
+    vm_size_t psize = static_cast<vm_size_t>(pend - pstart) + PAGE_SIZE;
+
+    kern_return_t pr = vm_protect(map, pstart, psize, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE);
+    rbgpu_diag_set_num("mtlk_prot_rw", static_cast<uint64_t>(pr));
+    bool writable = pr == KERN_SUCCESS;
+    if (!writable) {
+        kern_return_t pr2 = vm_protect(map, pstart, psize, FALSE,
+                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        rbgpu_diag_set_num("mtlk_prot_rwx", static_cast<uint64_t>(pr2));
+        writable = pr2 == KERN_SUCCESS;
+    }
+    if (!writable) {
+        rbgpu_log("2og: the page at 0x%llx cannot be made writable (RW=%d). "
+                  "Lilu gets RWX only by clearing CS_ENFORCEMENT out of "
+                  "struct proc, which this does not do.",
+                  (unsigned long long)pstart, pr);
+        return;
+    }
+
+    kern_return_t wr = g_mtlkVmMapWriteUser(map, kRbMtlCaveRepl, place, sizeof(probe));
+    rbgpu_diag_set_num("mtlk_write", static_cast<uint64_t>(wr));
+
+    vm_protect(map, pstart, psize, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+    // Rule 20/2nn: the only evidence that counts is the target's own memory.
+    if (g_mtlkVmMapReadUser(map, place, probe, sizeof(probe)) == KERN_SUCCESS) {
+        bool ok = memcmp(probe, kRbMtlCaveRepl, sizeof(probe)) == 0;
+        rbgpu_diag_set_num("mtlk_verify", ok ? 1 : 0);
+        rbgpu_log("2og: cave %s at 0x%llx in %s (write=%d)",
+                  ok ? "PLACED and verified" : "write reported OK but readback DIFFERS",
+                  (unsigned long long)place, pname, wr);
+    } else {
+        rbgpu_diag_set_num("mtlk_verify", 2);
+    }
+}
+
+static void wrap_rbMtlkTaskSetMainThreadQos(task_t task, thread_t main_thread) {
+    if (g_mtlkOrgQos) {
+        FunctionCast(wrap_rbMtlkTaskSetMainThreadQos, g_mtlkOrgQos)(task, main_thread);
+    }
+    rbgpu_mtlk_on_exec(task);
+}
+
+static void rbgpu_mtlk_install(KernelPatcher &patcher) {
+    if (g_mtlkInstalled) {
+        return;
+    }
+    g_mtlkInstalled = true;
+
+    if (!checkKernelArgument("-rbgpumtlkpatch")) {
+        rbgpu_log("2og: NOT armed - -rbgpumtlkpatch absent, no kernel hooks "
+                  "installed and no userspace image touched");
+        return;
+    }
+
+    struct { const char *sym; void **slot; } syms[] = {
+        { "_get_task_map",     reinterpret_cast<void **>(&g_mtlkGetTaskMap) },
+        { "_vm_map_read_user", reinterpret_cast<void **>(&g_mtlkVmMapReadUser) },
+        { "_vm_map_write_user", reinterpret_cast<void **>(&g_mtlkVmMapWriteUser) },
+    };
+    uint64_t have = 0;
+    for (size_t i = 0; i < arrsize(syms); i++) {
+        auto addr = patcher.solveSymbol(KernelPatcher::KernelID, syms[i].sym);
+        if (patcher.getError() != KernelPatcher::Error::NoError || addr == 0) {
+            patcher.clearError();
+            *syms[i].slot = nullptr;
+            rbgpu_log("2og: could not resolve %s - stage A cannot run", syms[i].sym);
+        } else {
+            *syms[i].slot = reinterpret_cast<void *>(addr);
+            have |= (1ull << i);
+        }
+    }
+    rbgpu_diag_set_num("mtlk_syms", have);
+
+    // Rule 3: both of these were checked unrouted in this plugin, and 2of
+    // means Lilu never routes them either, because hookMemoryAccess is never
+    // reached on Big Sur and newer.
+    KernelPatcher::RouteRequest slideReq("_vm_shared_region_slide",
+                                         wrap_rbMtlkSharedRegionSlide, g_mtlkOrgSlide);
+    bool okSlide = patcher.routeMultipleLong(KernelPatcher::KernelID, &slideReq, 1);
+    patcher.clearError();
+    rbgpu_diag_set_num("mtlk_hook_slide", okSlide && g_mtlkOrgSlide ? 1 : 0);
+
+    KernelPatcher::RouteRequest qosReq("_task_set_main_thread_qos",
+                                       wrap_rbMtlkTaskSetMainThreadQos, g_mtlkOrgQos);
+    bool okQos = patcher.routeMultipleLong(KernelPatcher::KernelID, &qosReq, 1);
+    patcher.clearError();
+    rbgpu_diag_set_num("mtlk_hook_qos", okQos && g_mtlkOrgQos ? 1 : 0);
+
+    rbgpu_log("2og: stage A armed. syms=0x%llx slide_hook=%d qos_hook=%d. "
+              "ARMED IS NOT EVIDENCE - scoped to cavecheck, cave only, no "
+              "detour; read mtlk_* from the IORegistry (rule 20).",
+              have, okSlide && g_mtlkOrgSlide ? 1 : 0, okQos && g_mtlkOrgQos ? 1 : 0);
+}
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
@@ -7497,6 +7740,16 @@ void RGPU::init() {
     rbgpu_register_hwblt_2lp();
     rbgpu_register_mtlcave_2oa();
 
+    // 2og: install the kernel-side patcher at the EARLIEST point Lilu offers.
+    // processPatcherLoadCallbacks runs inside performCommonInit before
+    // userPatcher.init(), i.e. before userspace starts - which matters,
+    // because the shared region (and therefore the slide we need) is created
+    // by the first process that needs it. processKext also calls this, as a
+    // guarded fallback; whichever runs first wins.
+    lilu.onPatcherLoad([](void *, KernelPatcher &patcher) {
+        rbgpu_mtlk_install(patcher);
+    });
+
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
         static_cast<RGPU *>(user)->processKext(patcher, id, address, size);
     }, this);
@@ -7507,6 +7760,7 @@ void RGPU::deinit() {
 
 void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     installKernelLogHooks(patcher);
+    rbgpu_mtlk_install(patcher);   // 2og, no-op unless -rbgpumtlkpatch
 
     if (kextList[KextHWLibs].loadIndex == id) {
         g_kext_addr_hwlibs = address;

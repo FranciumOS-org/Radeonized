@@ -22051,3 +22051,94 @@ becomes unnecessary**.
 
 That is real kernel code on the exec path of every process, with real panic
 risk, and it is a decision rather than a next step.
+
+## 2og - place the shared-cache patch ourselves, from the kernel. Stage A.
+
+2of closed Lilu's user patcher permanently on this OS. The *mechanism* it
+would have used is still available to us, so the plugin now does it directly.
+
+### Why this can work where a BinaryModInfo cannot
+
+* Every kernel symbol `patchSharedCache` relies on is present here, checked
+  against `/System/Library/Kernels/kernel`: `_get_task_map`,
+  `_vm_map_read_user`, `_vm_map_write_user`, `_task_set_main_thread_qos`,
+  `_vm_shared_region_slide`, and the rest.
+* `KernelPatcher` works - it is what routes the AMD functions the accelerator
+  fix depends on.
+* A consequence of 2of is in our favour: `isUserDisabled` short-circuits
+  **before** `hookMemoryAccess`, so Lilu never routes those functions and
+  they are free to take. Rule 3 checked: zero existing routes in this plugin.
+* We know the exact unslid addresses, so **none of Lilu's file-based pattern
+  discovery is needed and the 2od stencil is unnecessary**.
+
+### Shape
+
+`-rbgpumtlkpatch` installs, from `lilu.onPatcherLoad` (the earliest point
+Lilu offers - `processPatcherLoadCallbacks` runs inside `performCommonInit`
+before `userPatcher.init()`, and therefore before userspace starts, which
+matters because the shared region is created by the first process that needs
+it; `processKext` keeps a guarded fallback):
+
+* a hook on `_vm_shared_region_slide` that records arg0 as the slide and
+  nothing else - deliberately no `rbgpu_diag_set_num` there, because that
+  schedules a thread_call and this fires before the peer exists (2oe's lesson:
+  do not put new machinery on a path that has to survive before the machinery
+  is up);
+* a hook on `_task_set_main_thread_qos` as the per-process point, giving a
+  task at exec;
+* `vm_protect` + `_vm_map_write_user` to place the bytes.
+
+Stage A is deliberately almost inert: **scoped to processes named
+"cavecheck"**, and it writes only the **cave** - 224 bytes into a zero run in
+`__const` that nothing branches to. The detour that would make it live is
+stage B. `cavecheck` is both the trigger and the verifier, which is the point.
+
+### Checks done before booting it
+
+* **Rule 2**, which cost a boot in 2gb: both prologues disassembled from the
+  kernel. `_task_set_main_thread_qos` and `_vm_shared_region_slide` both
+  begin `55 / 48 89 e5 / 41 57 / 41 56 / 41 55 / 41 54` - no rel8/rel32
+  branch anywhere near the first five bytes. Safe to displace.
+* **Imports.** `make plugin` does *not* run `kmutil libraries`, so the new
+  undefined symbols were checked by hand: `_vm_protect`, `_proc_selfname`,
+  `_memcmp`, all exported by this kernel. A fourth, Lilu's bounded `strstr`,
+  was found to be a NEW import - the only other `strstr(` matches in the file
+  are comments - and was removed in favour of a six-line local matcher.
+  Lilu does `EXPORT` it, but every symbol resolved at load is a way for a
+  boot to fail.
+* **Header regeneration.** The patch site is ANCHOR bytes before the cave, so
+  `gen_cavepatch.py` now emits `RBGPU_MTL_CAVE_ANCHOR` and
+  `RBGPU_MTL_CAVE_RESERVED` rather than having the number hand-written
+  anywhere. All four byte arrays verified **identical** to the ones already
+  being compiled, so the regeneration changed nothing but the defines.
+* **Slide trust.** If arg0 of `_vm_shared_region_slide` is not the slide, the
+  computed address is wrong, the read-back fails to match `kRbMtlCaveFind`,
+  and nothing is written. A wrong slide is therefore reported, not acted on.
+  `cavecheck` prints the slide from userspace too, so the two can be compared
+  in the same boot.
+
+### What each outcome will mean
+
+```
+mtlk_hook_slide / mtlk_hook_qos   0 -> the route failed; nothing else matters
+mtlk_slide                        compare against cavecheck's own slide print
+mtlk_ready        0 -> a symbol or the slide was missing; nothing was touched
+mtlk_match        1 -> THE result: the expected bytes really are at
+                       unslid + slide, so the whole address chain is right
+                  2 -> already patched;  0 -> wrong address or wrong slide
+mtlk_prot_rw      0 (KERN_SUCCESS) -> a cache page can be made writable with
+                       plain RW, and Lilu's CS_ENFORCEMENT surgery is not
+                       needed. Non-zero -> mtlk_prot_rwx says whether RWX is
+                       accepted instead.
+mtlk_write        0 -> vm_map_write_user accepted it
+mtlk_verify       1 -> read back from the target's own memory and correct.
+                       This is the only line that proves anything (rule 20).
+```
+
+### Risk, stated plainly
+
+The qos hook runs on **every** exec on the system. The scope check is the
+first thing it does and costs a `proc_selfname` plus a substring compare, with
+no VM work for any other process - but a fault inside that wrapper would
+panic every exec and make the machine unbootable. The rescue is `-rbgpuoff`,
+which 2of confirmed disables the plugin outright before `init()` runs.

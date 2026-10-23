@@ -391,6 +391,15 @@ The two that bite hardest:
   matching mod per `.map` line, so the real `startTEXT` lands on one of them
   rather than on ours. `rbgpu_mtlcave_mapped_mod()` exists for exactly this.
 
+- **`-rbgpumtlkpatch`** (2og) is the kernel-side patcher: it hooks
+  `_vm_shared_region_slide` and `_task_set_main_thread_qos` and places the
+  cave with `_vm_map_write_user`, because Lilu's user patcher cannot run here
+  at all (rule 22). Stage A is scoped to processes named `cavecheck` and
+  writes only the inert cave, no detour. The qos hook runs on **every** exec,
+  so a fault in it makes the machine unbootable - rescue with `-rbgpuoff`.
+  Read `mtlk_*` from the IORegistry; `mtlk_verify=1` is the only line that
+  proves anything.
+
 ## Rescue
 
 `-rbgpuoff` in boot-args: the kext still loads, no peer instance exists.
