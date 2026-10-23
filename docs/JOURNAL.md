@@ -23005,3 +23005,112 @@ polarity, and the HUBP pitch.
 Nothing here writes a register, so it is all inside the probe's existing
 hardware rules. **Unverified on hardware**: it needs one level-2 probe boot,
 which is a kext load and therefore the user's to run.
+
+## 2or - what is reachable WITHOUT DCN 3.1.2, measured rather than guessed
+
+The user asked which of HDMI, HDMI audio, brightness, real 144 Hz, the "7 MB"
+in About This Mac and "Metal: Supported" need the DCN 3.1.2 code that 2oq
+proved absent. Three of the six turn out not to be display-pipe questions at
+all. All read-only, no boot.
+
+### "Metal: Supported" is cosmetic - the GPU ALREADY supports Metal 3
+
+`SPDisplaysReporter` carries the strings `spdisplays_metal`,
+`spdisplays_metal2`, `spdisplays_metal3`, `spdisplays_metalfamily`,
+`spdisplays_mtlgpufamilysupport`, and the message *"MTLCopyAllDevices failed,
+unable to gather MTLGPUFamily and Slot info"* - so the Metal line comes from
+querying Metal and correlating the device with an IOKit GPU node, not from the
+framebuffer.
+
+`tools/metal_probe` now asks directly:
+
+```
+device: AMD Radeon HD GFX10 Family Unknown Prototype
+  recommendedMax  = 4096 MB
+  GPU families    = Metal3 Mac2 Common3 Common2 Common1
+  argumentBuffers = tier 1
+```
+
+**`supportsFamily:MTLGPUFamilyMetal3` is TRUE today.** Metal 3 is not missing;
+System Profiler's string is. (Also recorded, unasked: argument buffers are
+**tier 1**, where a Mac GPU of this class would normally be tier 2. That is a
+real if minor capability gap and nobody has looked at why.)
+
+### The "7 MB" has a named cause and no DCN involvement
+
+SPDisplaysReporter reads **`VRAM,totalMB`** / **`VRAM,totalsize`** (and has
+`spdisplays_vram_shared` for integrated parts). Neither property exists
+anywhere in this machine's IORegistry - checked - so it falls back to the boot
+framebuffer's `IOFBMemorySize` = 8294400 = 1920x1080x4 = the 7 MB. Metal
+itself already reports 4096 MB. Publishing `VRAM,totalMB` on the GPU node
+would fix the line with no display work whatsoever.
+
+The *name* is a second, separate thing: Metal reports **"AMD Radeon HD GFX10
+Family Unknown Prototype"**, i.e. Apple's device-name table has no entry for
+`0x1681`. "AMD Radeon 680M" is therefore the same class of patch as
+`deviceTypeTable` and `DeviceCapabilityTbl`, which this plugin already does -
+not a DCN question either. `MetalPluginName` (AMDRadeonX6000MTLDriver),
+`MetalPluginClassName` (AMDMTLGFX10Device) and `MetalStatisticsName` are all
+present and correct, so the Metal wiring itself is fine.
+
+### 144 Hz splits in two
+
+The panel is **already scanning out** at whatever the firmware set (2oq: OTG0
+live). So *running* at 144 Hz needs only the adopt-the-pipe plan - publish the
+timing so macOS knows it, take the vblank so WindowServer paces to it. No DCN
+3.1.2 code. But **choosing** a refresh rate, or any resolution change, is mode
+setting, and that does need the code that is not here. "144 Hz" yes;
+"a refresh-rate menu" no.
+
+### Brightness looks genuinely reachable, and is now measured for
+
+The backlight is a tiny block, nothing like mode setting:
+
+```
+regPWRSEQ0_BL_PWM_CNTL          0x2f19   BASE_IDX 2
+regPWRSEQ0_BL_PWM_CNTL2         0x2f1a
+regPWRSEQ0_BL_PWM_PERIOD_CNTL   0x2f1b
+regPWRSEQ0_BL_PWM_GRP1_REG_LOCK 0x2f1c
+```
+
+Same DMU segment the probe already reads. The firmware must have configured
+it, because the backlight is on, so changing brightness would be a duty-cycle
+write with `GRP1_REG_LOCK` making the update atomic - Linux's
+`dce_panel_cntl` / `dcn31_panel_cntl`. All four are now **read-only** probe
+entries, so the level-2 boot says whether the PWM is enabled and what duty and
+period firmware left. `BL_PWM_PERIOD == 0` would mean the panel is driven some
+other way (ACPI, or PWRSEQ1) and this route is wrong.
+
+Also measured, and relevant: the attached display reports
+`_spdisplays_display-vendor-id = 756e6b6e` - ASCII **"unkn"** - and
+`_name = "Unknown Display"`. There is no EDID, because `IONDRVFramebuffer`
+never read one. `AppleBacklightDisplay` has **0 instances**; the display is a
+plain `AppleDisplay`. So even with the PWM reachable, the brightness *UI* may
+need a display identity macOS will accept.
+
+### HDMI needs the missing code. This is the honest no.
+
+Lighting an output that firmware did not light means HPD detection, EDID over
+DDC/AUX, TMDS or DP link training, a second OTG + HUBP + DIO stream encoder +
+link encoder, and DML watermarks. None of it is running and none of it exists
+for 3.1.2 here. **HDMI audio is downstream of that** (`dcn30_afmt` is in
+Apple's build, but it has nothing to attach to), so it is also no.
+
+**One exception worth testing, cheaply:** if the UEFI GOP lights an external
+display that is already plugged in at boot, a second OTG would come up live
+and could be adopted exactly like OTG0. That would give a fixed-mode external
+display with no hotplug - limited, but not nothing. The test is free: boot with
+HDMI connected and read `OTG1_CONTROL`. The probe already reads all four.
+
+### Summary
+
+| ask | needs DCN 3.1.2? |
+|---|---|
+| "Metal 3" instead of "Supported" | **no** - already true, reporting only |
+| "4 GB" instead of "7 MB" | **no** - publish `VRAM,totalMB` |
+| "AMD Radeon 680M" name | **no** - a device-name table patch |
+| running at the panel's 144 Hz | **no** - the adopt-the-pipe plan (b)+(c) |
+| choosing a resolution or refresh rate | **yes** |
+| display brightness | **probably not** - PWM looks reachable, unmeasured |
+| HDMI output | **yes** - unless firmware already lit it |
+| HDMI audio | **yes**, and downstream of HDMI |

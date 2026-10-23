@@ -105,6 +105,32 @@ int main(int argc, const char **argv) {
             printf("  unifiedMemory   = %d\n", (int)d.hasUnifiedMemory);
             printf("  maxThreadsPerTG = %lu\n", (unsigned long)d.maxThreadsPerThreadgroup.width);
             printf("  recommendedMax  = %llu MB\n", d.recommendedMaxWorkingSetSize >> 20);
+
+            /* 2or: which GPU family does Metal think this is? System Profiler
+             * prints "Metal 3" from MTLCopyAllDevices + MTLGPUFamily (the
+             * strings spdisplays_metal3 / spdisplays_metalfamily /
+             * spdisplays_mtlgpufamilysupport are in SPDisplaysReporter), so
+             * "Metal: Supported" rather than "Metal 3" is a question about
+             * this list, not about the display pipe. */
+            struct { const char *name; MTLGPUFamily fam; } fams[] = {
+                { "Metal3",    MTLGPUFamilyMetal3 },
+                { "Apple7",    MTLGPUFamilyApple7 },
+                { "Mac2",      MTLGPUFamilyMac2 },
+                { "Common3",   MTLGPUFamilyCommon3 },
+                { "Common2",   MTLGPUFamilyCommon2 },
+                { "Common1",   MTLGPUFamilyCommon1 },
+            };
+            printf("  GPU families    =");
+            for (size_t i = 0; i < sizeof(fams) / sizeof(fams[0]); i++) {
+                if ([d respondsToSelector:@selector(supportsFamily:)] &&
+                    [d supportsFamily:fams[i].fam]) {
+                    printf(" %s", fams[i].name);
+                }
+            }
+            printf("\n");
+            if (@available(macOS 13.0, *)) {
+                printf("  argumentBuffers = tier %ld\n", (long)d.argumentBuffersSupport);
+            }
             if (wantDispatch) { rc |= dispatch_on(d); }
         }
         if (!wantDispatch) {

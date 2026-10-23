@@ -215,6 +215,19 @@ def main():
                     # DCSURF_SURFACE_PITCH: PITCH in [15:0], in pixels - 1
                     print(f"  pitch  {(pitch & 0xFFFF) + 1} px")
 
+        # 2or: the backlight PWM, to say whether brightness is reachable.
+        # dcn_3_1_2_sh_mask.h: BL_PWM_CNTL.BL_ACTIVE_INT_FRAC_CNT is [31:16],
+        # BL_PWM_PERIOD_CNTL.BL_PWM_PERIOD is [31:16] and _BITCNT is [8:6].
+        blc, blp = reg(regs, "BL_PWM_CNTL"), reg(regs, "BL_PWM_PERIOD_CNTL")
+        if blc is not None and blp is not None:
+            duty, period = (blc >> 16) & 0xFFFF, (blp >> 16) & 0xFFFF
+            en = "enabled" if blc & (1 << 1) else "DISABLED"
+            pct = f"{100.0 * duty / period:.1f}%" if period else "n/a"
+            print(f"\nbacklight PWM: {en}, duty {duty}/{period} = {pct}")
+            if not period:
+                print("  period 0 - firmware did not set up this PWM; the panel "
+                      "is driven some other way (ACPI, or PWRSEQ1)")
+
     # 2oq: the refresh rate, timed in the kext from OTG0's frame counter.
     # This is what the boot framebuffer cannot tell macOS (IOFB0Hz = Yes).
     state = p.get("VSyncState")

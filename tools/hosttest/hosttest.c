@@ -380,6 +380,10 @@ static void test_dcn_timing_regs(void)
         { "OTG0_V_SYNC_A_CNTL",     0x1b38 },
         { "HUBP0_SURFACE_PITCH",    0x0607 },
         { "HUBP0_SURFACE_CONTROL",  0x061a },
+        { "BL_PWM_CNTL",            0x2f19 },
+        { "BL_PWM_CNTL2",           0x2f1a },
+        { "BL_PWM_PERIOD_CNTL",     0x2f1b },
+        { "BL_PWM_GRP1_REG_LOCK",   0x2f1c },
     };
     for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
         const struct rb_reg_sample *s = find_sample(r, want[i].name);
