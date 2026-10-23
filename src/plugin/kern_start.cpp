@@ -7596,44 +7596,60 @@ static void rbgpu_vblp_arm(void *fb) {
               "pick it up", fb);
 }
 
-// 2ow: started from the peer, where a workloop is an ordinary thing to make.
-bool rbgpu_vblp_start(void) {
-    if (!g_vblp_on) {
-        rbgpu_log("2ow: vblank pump off - -rbgpuvblpump absent");
-        rbgpu_diag_set_num("vblp_armed", 0);
-        return false;
-    }
-    if (!g_vblp_handleVBL) {
-        rbgpu_log("2ow: IOFramebuffer::handleVBL was never solved - the pump "
-                  "cannot run this boot");
-        rbgpu_diag_set_num("vblp_armed", 0);
-        return false;
-    }
+// 2ox: started from the peer, which also supplies the OWNER.
+//
+// Boot 136 still reported `vblp_armed 0`, now with `vblp_fb_seen 1` and no
+// `vblp_idle_*` at all - so the tick never ran once and the failure was still
+// inside this function. The cause was `timerEventSource(nullptr, ...)`:
+// `IOEventSource::init` refuses a NULL owner, so the timer was never created.
+// Passing a real owner is correct regardless of that detail, so it is passed
+// rather than researched.
+//
+// 2ow ALSO made every failure publish the same `vblp_armed 0`, which is rule
+// 14 broken by the person who keeps citing it: four different causes looked
+// identical and cost a boot to tell apart. `vblp_fail` now carries a distinct
+// code, so this can never be ambiguous again:
+//
+//   1 off by boot-arg   2 handleVBL unsolved   3 no owner
+//   4 workLoop() failed  5 timerEventSource() failed  6 addEventSource() failed
+#define RB_VBLP_FAIL(code, msg, ...) do {                      \
+        rbgpu_log("2ox: " msg, ##__VA_ARGS__);                 \
+        rbgpu_diag_set_num("vblp_armed", 0);                   \
+        rbgpu_diag_set_num("vblp_fail", (code));               \
+        return false;                                          \
+    } while (0)
+
+bool rbgpu_vblp_start(OSObject *owner) {
+    if (!g_vblp_on)
+        RB_VBLP_FAIL(1, "vblank pump off - -rbgpuvblpump absent");
+    if (!g_vblp_handleVBL)
+        RB_VBLP_FAIL(2, "IOFramebuffer::handleVBL was never solved - the pump "
+                        "cannot run this boot");
+    if (!owner)
+        RB_VBLP_FAIL(3, "no owner passed - IOEventSource::init refuses a NULL "
+                        "owner, so the timer could not be created");
+
     g_vblp_wl = IOWorkLoop::workLoop();
-    if (!g_vblp_wl) {
-        rbgpu_log("2ow: IOWorkLoop::workLoop() failed - no vblank pump");
-        rbgpu_diag_set_num("vblp_armed", 0);
-        return false;
-    }
-    g_vblp_timer = IOTimerEventSource::timerEventSource(nullptr, rbgpu_vblp_tick);
-    if (!g_vblp_timer) {
-        rbgpu_log("2ow: timerEventSource() failed - no vblank pump");
-        rbgpu_diag_set_num("vblp_armed", 0);
-        return false;
-    }
-    if (g_vblp_wl->addEventSource(g_vblp_timer) != kIOReturnSuccess) {
-        rbgpu_log("2ow: addEventSource() failed - no vblank pump");
-        rbgpu_diag_set_num("vblp_armed", 0);
-        return false;
-    }
+    if (!g_vblp_wl)
+        RB_VBLP_FAIL(4, "IOWorkLoop::workLoop() failed - no vblank pump");
+
+    g_vblp_timer = IOTimerEventSource::timerEventSource(owner, rbgpu_vblp_tick);
+    if (!g_vblp_timer)
+        RB_VBLP_FAIL(5, "timerEventSource(owner=%p) failed - no vblank pump",
+                     owner);
+
+    if (g_vblp_wl->addEventSource(g_vblp_timer) != kIOReturnSuccess)
+        RB_VBLP_FAIL(6, "addEventSource() failed - no vblank pump");
+
     g_vblp_armed = true;
     rbgpu_diag_set_num("vblp_armed", 1);
+    rbgpu_diag_set_num("vblp_fail", 0);
     rbgpu_diag_set_num("vblp_us", g_vblp_us);
     g_vblp_timer->setTimeoutUS(g_vblp_us);
-    rbgpu_log("2ow: ARMED - the pump is running every %u us and will call "
-              "handleVBL once the framebuffer and its shmem both exist. "
-              "Read it with tools/dispclk: nominal 30.00 means it did not take.",
-              g_vblp_us);
+    rbgpu_log("2ox: ARMED - the pump is running every %u us (owner %p) and "
+              "will call handleVBL once the framebuffer and its shmem both "
+              "exist. Read it with tools/dispclk: nominal 30.00 means it did "
+              "not take.", g_vblp_us, owner);
     return true;
 }
 

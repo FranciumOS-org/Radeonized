@@ -581,7 +581,7 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // pump idles until 2ou's hook hands over the framebuffer pointer and the
     // shmem at fb+0x90 exists, and it re-checks the shmem every tick rather
     // than trusting one early sample.
-    rbgpu_vblp_start();
+    rbgpu_vblp_start(this);   // 2ox: the owner - IOEventSource::init refuses NULL
 
     scheduleRefreshDiag();
     return true;
