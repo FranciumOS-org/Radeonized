@@ -129,6 +129,33 @@ it on. Launch anything with `env -u DYLD_INSERT_LIBRARIES` or it starts under
 whatever patch this Claude is running - which once looked exactly like a
 regression (2ns).
 
+**THE DISPLAY HALF IS HALF-FIXED, AND THE REAL DEFECT IS NAMED (2pd/2pf,
+boot 138).** The pacing is **fixed**: CoreVideo nominal went **30.000 ->
+129.267 Hz** and the measured callback rate 29.99 -> **134.10 Hz**, a 4.3x
+improvement the user felt before reading a number. The string is **fixed**:
+System Profiler reads `AMD Radeon 680M` / `VRAM (Total): 4 GB` - *published by
+us, not detected*. **But the stalls are NOT fixed and the cause is now
+measured**: `sample WindowServer` shows `CompositorSW::CompositeLayersToDestination`
+at **48 % of the main thread**, rasterising the whole layer tree on the CPU via
+`CA::OGL::SW::` in **RGBA half-float**. Chain: no DCN 3.1.2 -> the display is
+`IONDRVFramebuffer`, whose destination is a raw CPU-mapped range, **not an
+IOSurface and not a Metal texture** -> SkyLight's only two destination
+constructors take exactly those, so `CompositorMetal` (which IS activated, per
+the log) has nothing to render the display into -> software compositing ->
+~9 fps, multi-second blurs, 30 s wallpaper changes.
+**PAGE FLIPPING IS NOT THE FIX, and this was MEASURED, not argued (2pf):**
+with `-rbgpuflipprobe` armed and routed, `AMDRadeonX6000_AMDHWDisplay::getDisplayPipeTransactionFlip`
+was **never called once** in a whole boot. The flip is downstream of a decision
+already lost; a `HUBP0_PRIMARY_SURFACE_ADDRESS` write would have fixed nothing
+and risked a black panel. **Do not propose it again without new evidence.** The
+real lever is making the display's destination a GPU surface, i.e. an
+accelerated framebuffer owning the display - which needs the DCN 3.1.2 code
+macOS lacks, written from Linux's `dcn31` reference. Name it as a large body of
+work, not one more hook. Still cheap and unspent: phase-lock the vblank by
+polling `OTG0_FRAME_COUNT` (read-only; the timer's 7.736 ms vs the panel's
+6.952 ms is ~0.78 ms of workloop overhead, which is why nominal reads 129 and
+not 143.833).
+
 **The display half has never started**, and 2oq surveyed why, statically.
 Apple's controller personality matches Navi 21 PCI IDs and ours is
 `0x16811002`; spoofing `device-id` kills the accelerator. But the personality
@@ -543,6 +570,19 @@ The two that bite hardest:
   `tools/dispclk`; rule 14 keys: `fb_vbl_calls` + `fb_vbl_t1..t8` (was the
   door knocked on, with what types), `fb_vbl_bound`/`fb_vbl_origret` (we took
   it), `fb_vbl_sent` (proc deliveries) vs `vblp_ticks` (fallback deliveries).
+  **BOOT 138 RESULT: it works, but via the FALLBACK.** `fb_vbl_bound = 1` so
+  the proc was captured, then macOS called `setInterruptState(ourRef, 0)` -
+  `fb_vbl_state = 0` - and `fb_vbl_sent` is absent: **zero** deliveries through
+  the proc. All 23553 frames came from `vblp_ticks`, 2ov's direct `handleVBL`
+  call. So **2oy's ordering fix is what fixed the pacing** (`vblp_idle_nohandler
+  = 682` measures the race it was built for), and keeping the fallback instead
+  of deleting it is the only reason the boot delivered anything. Rule 6 does
+  NOT apply yet - do not remove the pump. Also: `fb_vbl_origret` is
+  **`0xE00002BE` = kIOReturnNoResources**, not the `0xE00002C7` 2oz predicted -
+  that constant sits on the `"Ignore VBL"` path, which is not the path taken.
+  And `registerForInterruptType` is called **54** times with types like
+  `0xff0000e9` / `0x60000400` that are not fourccs, so `'vbl '` arrives after
+  the 8-call `fb_vbl_t1..t8` window.
 - **`-rbgpufbvram`** (2pa) publishes the label the "7 MB" is missing:
   `VRAM,totalMB` (default 4096, override `rbgpufbvrammb=<N>`, refused outside
   256-16384) and `VRAM,totalsize` on **both** the framebuffer and its provider,
@@ -554,7 +594,15 @@ The two that bite hardest:
   `IONDRVFramebuffer`. Allocates nothing - the 4096 MB is already there. Read
   it with `system_profiler SPDisplaysDataType`; "7 MB" means it did not take.
   Keys: `fbvram` (3 = published, 1 = bad pointer, 2 = wrong class, with
-  `fbvram_class`), `fbvram_props`, `fbvram_routed`.
+  `fbvram_class`), `fbvram_props`, `fbvram_routed`. **BOOT 138: CONFIRMED** -
+  `fbvram 3`, `fbvram_props 5`, `fbvram_mb 4096`, and System Profiler reads
+  `Chipset Model: AMD Radeon 680M` with `VRAM (Total): 4 GB`. Note for honesty
+  when reporting it: the name is a **string literal we write**, and the 4096 MB
+  is measured but also published by us - macOS detects neither.
+- **`-rbgpuflipprobe`** (2pe) is observe-only and **has already returned its
+  answer** (2pf): routed successfully, `getDisplayPipeTransactionFlip` never
+  called once. Keep it only if re-testing that after a change; it writes
+  nothing.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
@@ -562,7 +610,11 @@ The two that bite hardest:
   1920x1080x4 buffer - `IONDRVFramebuffer`'s own scanout surface, which System
   Profiler falls back to because no `VRAM,totalMB` property exists (2or). The
   stock framebuffer IS the culprit for the Hz menu, brightness, the string and
-  the pacing - but by timing, not by memory (2ov).
+  the pacing - but by timing, not by memory (2ov). **2pd refines this and the
+  user was right to keep pushing:** the number is cosmetic, but what it
+  indicates is not. One fixed CPU-mapped buffer is not a GPU surface, and that
+  - not its size - is why WindowServer composites in software. "The 7 MB is
+  cosmetic" was true of the label and wrong about the defect.
 
 ## Rescue
 
