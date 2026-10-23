@@ -428,8 +428,17 @@ The two that bite hardest:
   because Lilu's user patcher cannot run here at all (rule 22). 2oi placed
   and verified the cave in a live process. `-rbgpumtlkpatch` is stage A
   (inert cave only); `-rbgpumtlkfix` adds the detour and makes it live.
-  `rbgpumtlkscope=<substring>` retargets by process name without a rebuild
-  (default `cavecheck`). Three things learned there:
+  `rbgpumtlkscope=a,b,c` retargets by process name without a rebuild, and
+  **`*` means every process** - the universal fix (2om). Default is
+  `cavecheck`, so going universal is always explicit.
+  `rbgpumtlkexclude=a,b` is checked FIRST and always wins: the escape hatch
+  for an app that misbehaves, settable over SSH without a rebuild. Read
+  `mtlk_patched` / `mtlk_failed`; detailed keys are throttled to the first 8
+  patches because this runs on ~2000 execs per boot. **A leftover
+  `(GPU)` wrapper is a safe no-op** - `mtlswizzle` needs exactly one match of
+  a 32-byte pattern, the detour changes the first five bytes and the cave's
+  trampoline holds only 30, so it finds 0 and refuses; do not shorten
+  `kFind` below 31 bytes. Three things learned earlier:
   **`proc_selfname` is the parent at this hook point** - the exec'ing process
   is only reachable as `proc_name(proc_pid(get_bsdtask_info(task)))`;
   **plain `VM_PROT_READ|VM_PROT_WRITE` succeeds** on a cache page, so Lilu's
