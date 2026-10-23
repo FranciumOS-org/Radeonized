@@ -25510,3 +25510,101 @@ Both values are readable at runtime, and both are plain integers:
 
 Read the two globals from a scratch process first. That is free and it halves
 the question.
+
+---
+
+## 2pv (2026-10-23) — deduced: the display gets the software compositor because its ACCELERATOR ID IS 0
+
+Zero boots. 2pu left two candidate causes; this eliminates one of them by
+exhaustive static analysis plus one measured log line.
+
+### The elimination
+
+`activate_compositor_default()` is at unslid `0x7ff807c9abe1`:
+
+```
+7ff807c9abf9:  cmpb $0x0, *0x7ff843c9ed28     ; the "force software" byte
+7ff807c9ac00:  je   -> activate_compositor_metal
+7ff807c9ac05:  jmp     activate_compositor_sw(false)
+```
+
+So **Metal is activated if and only if `*0x7ff843c9ed28 == 0`.**
+
+That byte has, across the whole of SkyLight's `__text`, **exactly one writer and
+exactly one reader**:
+
+```
+7ff807c9abf9:  cmpb $0x0, 0x7ff843c9ed28      ; the read, above
+7ff807c9ac4f:  movb $0x1, 0x7ff843c9ed28      ; the ONLY write
+```
+
+and that single write sits behind:
+
+```
+7ff807c9ac46:  cmpb $0x0, *0x7ff843ca08b0     ; the Metal-capability flag
+7ff807c9ac4d:  jne  -> return                 ; capable -> leave the byte 0
+7ff807c9ac4f:  movb $0x1, *0x7ff843c9ed28     ; NOT capable -> force software
+```
+
+A `static` byte starts at 0, so `*0x7ff843c9ed28 != 0` is reachable **only**
+through the capability flag reading zero.
+
+**Measured**: the unified log on this machine says
+`[com.apple.SkyLight:default] Metal compositor activated.`, and that string has
+**exactly one** LEA cross-reference in the entire cache — inside
+`activate_compositor_metal` (2ps). So that function ran.
+
+Therefore `*0x7ff843c9ed28 == 0`, therefore the capability flag
+`*0x7ff843ca08b0` is **non-zero**. It is handled everywhere as a boolean
+(`andb $0x1`, `cmpb $0x1`), so non-zero means bit 0 is set.
+
+### The conclusion
+
+In `WSGetCompositorForAccelerator` (2pu), with mode `== 0`:
+
+```
+if (accelId == 0)               return SW singleton;   <-- the only one left
+if ((*0x7ff843ca08b0 & 1) == 0) return SW singleton;   <-- CANNOT fire, just proved
+return getMetalCompositorFor(accelId);
+```
+
+**The display is handed `CompositorSW` because the accelerator id it reports is
+0.** Not because of a destination type, not because of a missing capability, and
+not because macOS lacks DCN 3.1.2 code. One integer, read from the display's own
+virtual method at vtable slot **+0x60**, is zero.
+
+### What that integer is NOT
+
+**It is not simply `IOAccelIndex`.** 2pp measured `IOAccelIndex = 0` on our
+`.Display_boot`, which is the obvious match and is almost certainly wrong: an
+ordinary single-GPU Mac also publishes `IOAccelIndex = 0` and composites its
+primary display with Metal. If `accelId == 0` meant software there too, Metal
+display compositing would never happen on any Mac. So **0 is the "no accelerator
+resolved" value**, and the real numbering is something else — an id or handle
+that is 1-based or table-allocated. Writing `IOAccelIndex = 1` and hoping is
+exactly the kind of move that costs a boot and teaches nothing.
+
+### Next, and still free
+
+Name the method at CDDisplay's vtable slot `+0x60`. The vtable's address point
+is `0x7ff88166da20` (located by finding `CDDisplay::render_update`'s raw pointer
+at `0x7ff88166df18` and subtracting the `+0x4f8` call offset), and slot `+0x60`
+reads `0x10e017c79de`, which is a **chained-fixup encoding**, not an address.
+Decoding the cache's chained fixups is the missing piece of `tools/re/dsc.py`;
+once slot `+0x60` has a name, what feeds it can be read directly, and only then
+is it worth spending a boot.
+
+`SLSAcceleratorForDisplayNumber` (unslid `0x7FF807E0C67C`; export offsets are
+image-relative, verified with `atos`) is a nearby public entry with signature
+`(uint displayNumber, uint *out, uint *out2)` that zeroes both outputs before
+looking anything up — a plausible sibling of the same lookup, and readable.
+
+### Correcting 2pu
+
+2pu ended by saying the mode and capability globals could be read from a scratch
+process for free and that this would halve the question. **That was wrong**:
+both are initialised at runtime (the capability behind a `dispatch_once`), so a
+process that merely dlopens SkyLight shows static defaults, not WindowServer's
+values. The deduction above replaced that plan and is stronger, because it rests
+on a log line the machine actually emitted plus a single-writer proof rather than
+on a value read out of the wrong process.
