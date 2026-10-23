@@ -305,6 +305,19 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     a space-based pattern silently matched nothing and produced a confident
     wrong negative. [2lw]
 
+27. **No vnode work at plugin init - the root filesystem is not mounted
+    yet.** `RGPU::init()` runs at kext load during early kernel bootstrap.
+    `FileIO::readFileToBuffer` goes through `vnode_open`, so a file probe
+    there panics the boot **before the Apple progress bar appears**, with no
+    `.panic` report written because the log machinery is not up either. Lilu
+    makes the same call and deliberately defers it to `registerPatches`, at
+    user-patcher init. Read a file from a callback that runs at exec time
+    instead. The probe that did this existed only to report a precondition
+    (rule 14) and so was rule 16 exactly: the instrument is a suspect. Note
+    also that `-rbgpuoff` disables the plugin through
+    `PluginConfiguration::bootargOff`, so `init()` never runs - a boot with
+    it set is **not** a control for anything on the init path. [2oe]
+
 **The recurring error, stated once**
 
 Thirty recorded instances of reading a value without first establishing

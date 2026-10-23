@@ -7314,10 +7314,27 @@ static UserPatcher::BinaryModInfo *rbgpu_mtlcave_mapped_mod(void) {
 // that process - so the first exec goes unpatched and every later one is
 // covered. Guarded so it acts once.
 static bool g_rbCaveMapWarned = false;
+static bool g_rbCaveStencilProbed = false;
 static void rbgpu_mtlcave_binary_loaded(void *, UserPatcher &, vm_map_t,
                                         const char *, size_t) {
     if (kRbCaveMod.startTEXT != 0)
         return;
+    // Safe here: this runs at exec time, long after the root filesystem is up.
+    // Reported once, so an unreadable or truncated stencil is a measurement
+    // rather than a silence - without touching a vnode during early boot.
+    if (!g_rbCaveStencilProbed) {
+        g_rbCaveStencilProbed = true;
+        size_t stencilSize = 0;
+        auto *stencil = FileIO::readFileToBuffer(RBGPU_MTL_STENCIL, stencilSize);
+        rbgpu_diag_set_num("mtlcave_stencil", stencil ? stencilSize : 0);
+        if (stencil)
+            Buffer::deleter(stencil);
+        else
+            rbgpu_log("2oe: %s is unreadable now, so loadFilesForPatching "
+                      "found no patterns either and nothing can be patched",
+                      RBGPU_MTL_STENCIL);
+    }
+
     auto *src = rbgpu_mtlcave_mapped_mod();
     if (!src) {
         // Rule 14: say so rather than going quiet.
@@ -7378,21 +7395,14 @@ static void rbgpu_register_mtlcave_2oa(void) {
     rbgpu_diag_set_num("mtlcave_npatches", n);
     rbgpu_diag_set_str("mtlcave_stage", fix ? "cave+detour" : "cave only");
 
-    // Rule 14: the precondition must say something. Read the stencil here,
-    // in the same early-boot moment and by the same mechanism Lilu will use,
-    // so an unreadable or truncated file is a measurement and not a silence.
-    size_t stencilSize = 0;
-    auto *stencil = FileIO::readFileToBuffer(RBGPU_MTL_STENCIL, stencilSize);
-    rbgpu_diag_set_num("mtlcave_stencil", stencil ? stencilSize : 0);
-    if (stencil) {
-        Buffer::deleter(stencil);
-    } else {
-        rbgpu_log("2od: INERT - cannot read %s at registration time, so "
-                  "loadFilesForPatching will find no patterns either and "
-                  "nothing will be patched (2oc)", RBGPU_MTL_STENCIL);
-        return;
-    }
-
+    // NO FileIO HERE. This function runs from RGPU::init(), i.e. at kext load
+    // during early kernel bootstrap, before the root filesystem is mounted -
+    // readFileToBuffer goes through vnode_open and panics with no rootvnode.
+    // A probe placed here "so the precondition says something" killed the
+    // boot before the Apple progress bar appeared (2oe, rule 16: the
+    // instrument is a suspect). Lilu reads the file from registerPatches,
+    // which runs much later; the stencil is probed from the binary-loaded
+    // callback instead, where a filesystem definitely exists.
     auto err = lilu.onProcLoad(&kRbCaveProc, 1, rbgpu_mtlcave_binary_loaded,
                                nullptr, kRbMods, arrsize(kRbMods));
     rbgpu_diag_set_num("mtlcave_onprocload", static_cast<uint64_t>(err));
