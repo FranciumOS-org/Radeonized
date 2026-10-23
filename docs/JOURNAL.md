@@ -22800,3 +22800,140 @@ flawless boot 132. `29E0049F` should behave identically - the deleted code
 could not execute - but "could not execute" is a reading of Lilu's source, not
 a measurement of this build, so it owes one boot before that is stated as
 fact.
+
+## 2oq - the display half, surveyed statically: macOS HAS NO DCN 3.1.2, and it does not matter
+
+All of this is read-only - no boot, no load, no write. Four findings, in the
+order they change the plan.
+
+### 1. There is no DCN 3.1.2 code anywhere in macOS
+
+Apple's DAL is real AMD display-core source compiled into
+`AMDRadeonX6000Framebuffer`, from `ampc/SunburstE/dal/...`. Its compiled
+directories top out at **DCN 3.0 / 3.0.2**:
+
+```
+dal/dc/dcn10  dcn20  dcn21  dcn30  dcn302
+dal/dc/dml/dcn20  dcn21  dcn30
+dal/dc/clk_mgr/dce100  dce110  dcn10(rv1)  dcn21(rn)
+```
+
+Rule 26 - a search is an instrument - so the pattern was checked against a
+case known to be present before the absence was believed:
+
+| pattern | hits |
+|---|---|
+| `dcn30` (control) | **58** |
+| `dcn31`, `dcn312`, `dcn_3_1`, `vba_31` | 0 |
+| `yellow_carp`, `yellowcarp`, `rembrandt`, `3_1_2` | 0 |
+
+Zero in `AMDRadeonX6000Framebuffer`, and zero in `AMDSupport`,
+`AMDRadeonX6000`, `AMDFramebuffer` and `AMDRadeonX6800HWLibs` too - none of
+which carries a DAL at all. **This chip is DCN 3.1.2 (DMU 3.1.3). Apple's
+newest is 3.0.2.** There is no code here to coax, which is the opposite of the
+accelerator half, where GC 10.3.0 paths drove GC 10.3.3 once `vram_base_offset`
+was right.
+
+Note `clk_mgr/dcn21/rn_clk_mgr` - Renoir, an APU. Apple does have one APU
+display path, two DCN generations too old.
+
+### 2. §4's blocking prerequisite is dead - the linkability worry was unfounded
+
+`AMDRadeonX6000Framebuffer.kext`'s `OSBundleLibraries` are **all public KPIs**:
+AppleGraphicsDeviceControl, IOACPIFamily, IOGraphicsFamily, IOPCIFamily and
+the `kpi.*` set. Nothing private, nothing unlinkable. `OSBundleRequired` is
+`Safe Boot`. And Apple's own kext *imports* `IOFramebuffer` symbols from
+IOGraphicsFamily - `getVBLTime`, `moveCursor`, `showCursor`, 66 in all - so
+`IOFramebuffer` is an exported class we can subclass from our own kext.
+
+The exact personality that would have to accept `0x16811002`:
+
+```
+AMDRadeonNavi21Controller  IOClass AMDRadeonX6000_AmdRadeonControllerNavi21
+                           IOProviderClass IOPCIDevice   (not AtiFbStub)
+                           IOMatchCategory ATIFramebuffer  IOProbeScore 1000
+AMDGPUWrangler             IOClass AMDRadeonX6000_AmdGpuWrangler
+                           IOProviderClass IOPCIDevice
+                           IOMatchCategory IOFramebuffer   IOProbeScore 60000
+```
+
+Both match `IOPCIDevice` directly, in **different** match categories, and
+neither lists `0x1681`. **But finding 1 makes this route pointless**: even a
+matching personality would instantiate a Navi 21 controller whose DAL has no
+DCN 3.1.2 resource pool, hwseq, DML or clk_mgr. It would match and then fail,
+or worse, program a 3.0 register layout into a 3.1.2 chip.
+
+Also measured: `AMDRadeonX6000Framebuffer` is **not loaded** (`kextstat` lists
+AMDSupport, X6000HWServices, X6000 and X6800HWLibs; not it), so its
+OSMetaClasses are not registered and a personality naming that IOClass would
+have nothing to instantiate until the kext itself is loaded.
+
+### 3. What the desktop is actually running on, and why animations are poor
+
+```
+.Display_boot  <class IONDRVFramebuffer>
+  IOFBConfig = { "IOFB0Hz" = Yes, "IOFBModes" = ( ONE mode: 0x780 x 0x438 ) }
+  IOFBMemorySize = 8294400          (1920*1080*4)
+  no vblank, flip, or refresh property of any kind
+```
+
+`system_profiler SPDisplaysDataType` prints a resolution and **no refresh
+rate**. `IOFB0Hz = Yes` is IOKit's marker for a framebuffer with no refresh
+clock, and there is exactly one mode, taken from firmware.
+
+So the two things the user asked for have **one** cause: there is no display
+driver at all, only the generic NDRV boot framebuffer. No vblank means
+WindowServer cannot pace to the panel and animates off a timer; one fixed mode
+means no resolution or refresh change; every present is a copy into the
+firmware's buffer rather than a flip. The 7 MB in About This Mac is the same
+fact (2lj recorded it as cosmetic, and it is, but it is cosmetic *because* this
+is the boot framebuffer).
+
+### 4. The hardware is ALREADY programmed and scanning out
+
+From `logs/20261020-175624-plugin/pci.txt`, a level-2 probe this project
+already took:
+
+```
+OTG0_CONTROL    0x00011201     bit0 OTG_MASTER_EN = 1   -> LIVE
+OTG1..3_CONTROL 0x00000300     bit0 = 0                 -> off
+OTG4/5_CONTROL  0x00000000                              -> absent (4 pipes)
+DCHUBP_CNTL0    0x300f1002     distinct from 1/2/3      -> HUBP0 is the feeder
+DCHUBP_CNTL1..3 0x000f101b/2b/3b
+DMCUB firmware  4.0.15.47 running (4.0.21.71 on ROM)    -> DMUB is UP
+```
+
+The firmware brought DCN 3.1.2 up, OTG0 is running, HUBP0 is feeding it, the
+DMCUB is loaded, and 1920x1080 is on the panel right now. **Nothing needs to
+bring DCN up.** `src/common/rb_regs.h` already carries OTG0-3
+CONTROL/H_TOTAL/V_TOTAL and HUBP0-3 SURFACE_CONFIG/PRIMARY_ADDR - precisely
+the registers this needs.
+
+### The plan this produces
+
+Not "implement DCN 3.1.2" (tens of thousands of lines, and Linux's dcn31 is
+the only reference), and not "make Apple's DCN 3.0 DAL drive a 3.1.2 chip"
+(finding 1: the offsets, DML, clk_mgr and DMUB ABI all differ). Instead,
+**adopt the pipe the firmware is already running**:
+
+| step | what | writes DCN? |
+|---|---|---|
+| a | read `OTG0_H_TOTAL`/`V_TOTAL` + pixel clock -> the real timing | no |
+| b | our own `IOFramebuffer` subclass reporting that timing and the firmware buffer, so macOS stops saying 0 Hz | no |
+| c | enable and handle OTG0's vertical interrupt -> a real vsync for WindowServer | **yes** |
+| d | write `HUBP0_PRIMARY_SURFACE_ADDRESS` at vblank -> tear-free page flip | **yes** |
+
+Steps (a) and (b) are inside the probe's existing hardware rules. **Steps (c)
+and (d) are not**: `rb_probe.c` permits no writes except `MM_INDEX`/
+`MM_INDEX_HI`, and these are writes to a live display pipe. That is the user's
+decision, like an SMU message group, and it carries a specific hazard worth
+saying out loud - a wrong OTG or HUBP write **blanks the panel**, and rule 12
+records that a user rebooting a black screen is indistinguishable from a hang.
+Steps (a)/(b) also will **not** fix animations on their own; only (c) will.
+
+Honest scope: the rendering half is finished, and the accelerator was the hard
+part. The display half is a new subsystem rather than a remaining 10 %, but
+finding 4 makes its first useful milestone - a real framebuffer with a real
+vblank - much smaller than finding 1 alone would suggest. Mode setting,
+external displays, brightness, DSC and PSR are all beyond it and all need the
+DCN 3.1.2 code that does not exist here.

@@ -317,17 +317,45 @@ never instantiated**. This plugin works by making Apple **ACCEPT** `0x1681`
 gate); reporting another id bypasses every one of those patches. It also
 produced no `AtiFbStub`, so it bought nothing. **Must stay OUT.**
 
-The route that remains is making Apple's *personality* accept `0x16811002`.
-**Unexamined prerequisite:** whether a personality with
-`IOClass = AMDRadeonX6000_AmdRadeonControllerNavi21` is reachable from an
-EFI-loaded kext at all — `AMDRadeonX6000Framebuffer.kext` lives in
-`SystemKernelExtensions.kc` and may need `OSBundleLibraries` that cannot link.
-**Establish that before spending a boot.** If it cannot link, this is an
-OpenCore-level personality patch, not this plugin's job.
+**2oq answered the prerequisite, and then made the whole personality route
+pointless.** Statically, read-only, no boot:
 
-The 7 MB is cosmetic: Metal reports `recommendedMax = 4096 MB`; System
-Profiler reads `IOFBMemorySize = 8294400` (1920×1080×4) from the boot
-framebuffer.
+* The linkability worry was unfounded — `AMDRadeonX6000Framebuffer.kext`'s
+  `OSBundleLibraries` are all public KPIs (AppleGraphicsDeviceControl,
+  IOACPIFamily, IOGraphicsFamily, IOPCIFamily, `kpi.*`), and Apple's own kext
+  imports 66 `IOFramebuffer` symbols from IOGraphicsFamily, so `IOFramebuffer`
+  is a class we can subclass ourselves.
+* **But macOS contains no DCN 3.1.2 code at all.** Apple's DAL compiles
+  `dcn10/20/21/30/302` and DML `dcn20/21/30` and stops. `dcn31`, `dcn312`,
+  `vba_31`, `yellow_carp` and `rembrandt` are **0 hits** in every AMD kext,
+  against a control of 58 for `dcn30`. This chip is DCN 3.1.2 / DMU 3.1.3.
+  A matching personality would instantiate a Navi 21 controller with no
+  resource pool, hwseq, DML or clk_mgr for this chip — it would fail, or
+  program a 3.0 register layout into a 3.1.2 pipe.
+* `AMDRadeonX6000Framebuffer` is **not loaded** at all (`kextstat`), so its
+  OSMetaClasses are not registered either.
+
+**What the desktop runs on now:** `.Display_boot`, class `IONDRVFramebuffer`,
+`IOFBConfig = { IOFB0Hz = Yes, one mode 1920×1080 }`, `IOFBMemorySize =
+8294400`, and no vblank/flip/refresh property anywhere. `system_profiler`
+prints no refresh rate. **No vblank is why animations are timer-paced**, one
+fixed mode is why nothing can be switched, and the 7 MB is the same fact
+(Metal itself reports `recommendedMax = 4096 MB`).
+
+**The hardware is already up**, from a level-2 probe this project already
+took: `OTG0_CONTROL = 0x00011201` (master enable set) with OTG1–3 off and
+OTG4/5 absent; `DCHUBP_CNTL0` distinct from HUBP1–3; DMCUB firmware
+**4.0.15.47 running**. The firmware brought DCN 3.1.2 up and is scanning out
+right now, and `rb_regs.h` already carries the OTG and HUBP registers needed.
+
+**So the route is to adopt the running pipe, not to bring DCN up:** (a) read
+`OTG0_H_TOTAL`/`V_TOTAL` for the real timing, (b) publish our own
+`IOFramebuffer` with it, (c) enable and handle OTG0's vertical interrupt for a
+real vsync, (d) flip `HUBP0_PRIMARY_SURFACE_ADDRESS` at vblank. (a) and (b)
+need no DCN writes; **(c) and (d) do, which is the user's decision** — the
+probe permits no writes but `MM_INDEX`/`MM_INDEX_HI`, and a wrong OTG or HUBP
+write blanks the panel, which rule 12 says is indistinguishable from a hang.
+Only (c) fixes animations.
 
 ---
 
@@ -654,25 +682,39 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
 halves on by default, no boot-arg and no setup. Nothing on this list is
 blocking a usable machine any more.
 
-1. **The display chain.** §4, and now the largest thing left: no framebuffer
-   kext loads, because Apple's controller personality matches Navi 21 PCI IDs
-   and ours is `0x16811002`. Answer the linkability question **statically**
-   before spending a boot. If `AMDRadeonX6000Framebuffer` cannot be linked
-   from an EFI-loaded kext, this becomes an OpenCore personality patch and
-   leaves this repo. Note `-rbgpufbmatch` must stay OUT — spoofing
-   `device-id` kills the accelerator (§9).
-2. **The two unexplained things in §2's closing note** — why the `_X` family
+1. **The display chain**, and now the largest thing left. §4 is surveyed
+   (2oq): the personality route is dead because **macOS has no DCN 3.1.2
+   code**, and the hardware is already scanning out under firmware. The route
+   is to adopt the running pipe, in this order:
+   **(a)** read `OTG0_H_TOTAL`/`V_TOTAL` and the pixel clock on a level-2
+   probe boot — the one measurement still missing, and read-only;
+   **(b)** publish our own `IOFramebuffer` subclass with that timing
+   (IOGraphicsFamily is a public KPI, confirmed), which is what stops macOS
+   reporting 0 Hz;
+   **(c)** enable and handle OTG0's vertical interrupt — **the only step that
+   fixes animations**, and the first that writes a DCN register;
+   **(d)** flip `HUBP0_PRIMARY_SURFACE_ADDRESS` at vblank for tear-free
+   presents.
+   (c) and (d) are **the user's decision**: the probe permits no writes but
+   `MM_INDEX`/`MM_INDEX_HI`, and a wrong OTG or HUBP write blanks the panel —
+   rule 12. `-rbgpufbmatch` must stay OUT either way; spoofing `device-id`
+   kills the accelerator (§9).
+2. **Mode setting, external displays, brightness, DSC and PSR** are all
+   beyond step (d) and all need the DCN 3.1.2 code that does not exist here.
+   That is where a real port would begin, and it is large: Linux's `dcn31` is
+   the only reference.
+3. **The two unexplained things in §2's closing note** — why the `_X` family
    is wrong, and why the render targets kept tiled do not disagree with the
    kernel force. Static work, no boot needed, and the second one is a real
    loose thread rather than tidying: it says the current account of why both
    halves are needed is incomplete.
-3. **Hardening the universal fix.** It fails safe by construction (every site
+4. **Hardening the universal fix.** It fails safe by construction (every site
    read back and compared before any write), so an OS update means *nothing*
    is patched rather than something wrong — but that also means an update
    silently returns the machine to the broken rendering. The failure is loud
    in `mtlk_failed`; it is not loud on screen. Worth a visible signal.
-4. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
-5. ~~**Housekeeping.**~~ Done in 2op: the 2lm/2lp/2oa/2oc/2od Lilu
+5. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
+6. ~~**Housekeeping.**~~ Done in 2op: the 2lm/2lp/2oa/2oc/2od Lilu
    `BinaryModInfo` paths are deleted (~590 lines, rule 6), along with
    `tools/rbgpu-app.sh`, `tools/mtllinear-app.sh` and `tools/gen_stencil.py`.
    The four boot-args they read - `-rbgpumtllinear`, `-rbgpuhwblt`,
