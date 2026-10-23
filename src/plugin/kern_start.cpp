@@ -9,6 +9,7 @@
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
 
@@ -7882,6 +7883,220 @@ static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
     return ret;
 }
 
+// ---------------------------------------------------------------------------
+// 2pq (`-rbgpufbvramrange`): the accelerator's flip window.
+//
+// 2pp measured the chain and found it already connected. Apple's
+// `IOAccelDisplayMachine::found_framebuffer` filters NOTHING - no class, no
+// provider, no vendor, no PCI-ID check - so it adopted our
+// `IONDRVFramebuffer`, published `IOAccelIndex` / `IOAccelRevision` /
+// `IOAccelTypes` on it, advertised `DisplayPipeSupported=Yes` and
+// `TransactionsSupported=Yes`, and WindowServer (pid 162) holds an
+// `IOAccelDisplayPipeUserClient2`. What the accelerator does NOT have is room:
+// `IOGraphicsAccelerator2::find_vram_descriptor` takes its entire notion of
+// scanout VRAM from ONE virtual call, slot 0x9b0 =
+// `IOFramebuffer::getVRAMRange`, and here that returns 8294400 bytes - one
+// 1920x1080x4 buffer, room for zero others. A flip needs a second buffer, and
+// `bufferFlipCount` and `bufferSwapCount` are both 0.
+//
+// WHAT WOULD HAVE TO BE TRUE for enlarging it to help: that the missing second
+// buffer is WHY no flip happens. **That is not established.** Competing
+// explanations survive - the pipe's `initFramebufferResource` may fail for an
+// unrelated reason, or SkyLight may build its destination without consulting
+// the display pipe at all. This is an experiment built to say which, not a fix.
+//
+// Why it is cheap, unlike 2pk / 2pm / 2po: it writes NO DCN register. A flip,
+// unlike a modeset, touches only OTG (2pg: 0 of 434 registers moved between
+// dcn302 and dcn312) and HUBP (0 of 80) - both bit-identical. DCHUBBUB, which
+// moved 74 of 77, is a MODESET requirement, and the firmware already
+// programmed it. That is the new evidence docs/RULES.md requires before page
+// flipping may be raised again.
+//
+// The enlarged range starts at the SAME physical base as the original and is
+// only longer, so offset 0 remains the live scanout DCHUBBUB is already
+// fetching. Total failure therefore still leaves a picture on the screen.
+//
+// `getVRAMRange` has 14 virtual call sites - IOGraphicsFamily 4,
+// IOAcceleratorFamily2 6, IONDRVSupport 4 - so this does NOT answer blanket,
+// which would also resize IOGraphics' aperture and `IOFBMemorySize`. It
+// enlarges for exactly ONE return address: the call inside
+// `find_vram_descriptor`, at that function + 0x4a, a six-byte
+// `ff 91 b0 09 00 00`, so the return address is + 0x50. Those six bytes are
+// read back and compared before anything is enlarged - if an OS update moved
+// them nothing is enlarged, rather than something wrong being enlarged.
+static bool     g_fbvr_on   = false;        // -rbgpufbvramrange
+static bool     g_fbvr_all  = false;        // -rbgpufbvramrangeall (follow-up only)
+static uint32_t g_fbvr_mb   = 64;           // rbgpufbvramrangemb=<N>, clamped 8-256
+
+// The exact return address we enlarge for, resolved in processAccelFamily
+// because IONDRVSupport loads FIRST - so the route is armed before this is
+// known, and every call before it is recorded and passed through untouched.
+static mach_vm_address_t g_fbvr_callsite = 0;
+static const uint8_t     kFbvrCallBytes[6] = { 0xff, 0x91, 0xb0, 0x09, 0x00, 0x00 };
+static const size_t      kFbvrCallOff     = 0x4a;
+
+static uint64_t g_fbvr_calls  = 0;          // every call, whoever asked
+static uint64_t g_fbvr_big    = 0;          // times the enlarged range went out
+static uint64_t g_fbvr_hit    = 0;          // times find_vram_descriptor asked
+static uint8_t  g_fbvr_verify = 0;          // 1 = the six bytes matched
+static uint32_t g_fbvr_fail   = 0;          // why we could not build it
+static uint64_t g_fbvr_rets[8] = {};        // first 8 DISTINCT callers
+static unsigned g_fbvr_nrets  = 0;
+static IODeviceMemory *g_fbvr_mem = nullptr;
+static uint64_t g_fbvr_base   = 0;          // the original's physical base
+static uint64_t g_fbvr_olen   = 0;          // the original's length
+
+// Rule 14: record who asked, so one boot learns the whole caller set even if
+// the experiment answers no. The addresses go out raw and are decoded against
+// `kextstat` slides afterwards - no runtime classification to get wrong.
+static void rbgpu_fbvr_note_caller(uint64_t ret) {
+    for (unsigned i = 0; i < g_fbvr_nrets; i++)
+        if (g_fbvr_rets[i] == ret)
+            return;
+    if (g_fbvr_nrets >= arrsize(g_fbvr_rets))
+        return;
+    g_fbvr_rets[g_fbvr_nrets++] = ret;
+    char key[16];
+    snprintf(key, sizeof(key), "fbvr_ret%u", g_fbvr_nrets);
+    rbgpu_diag_set_num(key, ret);
+}
+
+using t_rbNdrvVramRange = IODeviceMemory *(*)(void *);
+static t_rbNdrvVramRange orig_ndrv_vramrange_2pq = nullptr;
+
+static IODeviceMemory *hooked_ndrv_vramrange_2pq(void *fb) {
+    IODeviceMemory *orig = orig_ndrv_vramrange_2pq(fb);
+    const uint64_t ret = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+
+    g_fbvr_calls++;
+    if ((g_fbvr_calls & 0x3f) == 1 || g_fbvr_calls < 8)
+        rbgpu_diag_set_num("fbvr_calls", g_fbvr_calls);
+    rbgpu_fbvr_note_caller(ret);
+
+    // The original's base and length, recorded once. These are the numbers the
+    // whole hypothesis rests on, so they are read from the object rather than
+    // assumed: 2pp inferred 8294400 from `IOFBMemorySize`, which is a DIFFERENT
+    // call's result on a different node.
+    if (orig && g_fbvr_olen == 0) {
+        IOByteCount seg = 0;
+        g_fbvr_olen = orig->getLength();
+        g_fbvr_base = static_cast<uint64_t>(orig->getPhysicalSegment(0, &seg, 0));
+        rbgpu_diag_set_num("fbvr_orig_len", g_fbvr_olen);
+        rbgpu_diag_set_num("fbvr_orig_base", g_fbvr_base);
+        rbgpu_diag_set_num("fbvr_orig_seg", seg);
+        rbgpu_log("2pq: IONDRVFramebuffer::getVRAMRange returns base 0x%llx "
+                  "length %llu (first segment %llu). 8294400 is one "
+                  "1920x1080x4 buffer.",
+                  (unsigned long long)g_fbvr_base,
+                  (unsigned long long)g_fbvr_olen,
+                  (unsigned long long)seg);
+    }
+
+    const bool mine = g_fbvr_all ||
+                      (g_fbvr_callsite != 0 && ret == g_fbvr_callsite);
+    if (!mine)
+        return orig;
+    g_fbvr_hit++;
+    rbgpu_diag_set_num("fbvr_hit", g_fbvr_hit);
+
+    const uint64_t want = static_cast<uint64_t>(g_fbvr_mb) << 20;
+
+    if (!g_fbvr_mem) {
+        // Every refusal says why (rule 14). None of these is a guess about the
+        // hardware - they are the conditions under which the enlarged range
+        // would not be known to contain the live scanout at offset 0.
+        if (!orig) {
+            g_fbvr_fail = 1;                 // nothing to copy the base from
+        } else if (g_fbvr_base == 0) {
+            g_fbvr_fail = 2;                 // no physical base
+        } else if ((g_fbvr_base & PAGE_MASK) != 0) {
+            g_fbvr_fail = 3;                 // base not page aligned
+        } else if (g_fbvr_olen == 0 || g_fbvr_olen >= want) {
+            g_fbvr_fail = 4;                 // already as big, or empty
+        } else {
+            g_fbvr_mem = IODeviceMemory::withRange(
+                static_cast<IOPhysicalAddress>(g_fbvr_base),
+                static_cast<IOPhysicalLength>(want));
+            if (!g_fbvr_mem)
+                g_fbvr_fail = 5;             // withRange refused
+        }
+        if (!g_fbvr_mem) {
+            rbgpu_log("2pq: NOT enlarging - reason %u (base 0x%llx length "
+                      "%llu, wanted %llu). The accelerator keeps the original "
+                      "range and the display is untouched.",
+                      g_fbvr_fail, (unsigned long long)g_fbvr_base,
+                      (unsigned long long)g_fbvr_olen,
+                      (unsigned long long)want);
+            rbgpu_diag_set_num("fbvr_fail", g_fbvr_fail);
+            return orig;
+        }
+        rbgpu_log("2pq: built an enlarged IODeviceMemory at base 0x%llx for "
+                  "%u MB (%llu bytes) - %llu buffers of %llu, against the "
+                  "original's 1. Offset 0 is unchanged, so the live scanout is "
+                  "still there.",
+                  (unsigned long long)g_fbvr_base, g_fbvr_mb,
+                  (unsigned long long)want,
+                  (unsigned long long)(want / (g_fbvr_olen ? g_fbvr_olen : 1)),
+                  (unsigned long long)g_fbvr_olen);
+        rbgpu_diag_set_num("fbvr_biglen", want);
+    }
+
+    // getVRAMRange hands back a RETAINED reference - the original does
+    // `retain()` before returning - so ours must too, and the original's
+    // reference must be dropped because it is not the one going out.
+    if (orig)
+        orig->release();
+    g_fbvr_mem->retain();
+    g_fbvr_big++;
+    if (g_fbvr_big < 8 || (g_fbvr_big & 0x3f) == 0)
+        rbgpu_diag_set_num("fbvr_big", g_fbvr_big);
+    return g_fbvr_mem;
+}
+
+// Resolved late, from processAccelFamily, because IOAcceleratorFamily2 loads
+// after IONDRVSupport. Nothing is enlarged until this has verified the bytes.
+static void rbgpu_fbvr_resolve_callsite(KernelPatcher &patcher, size_t id,
+                                        mach_vm_address_t address, size_t size) {
+    if (!g_fbvr_on)
+        return;
+    mach_vm_address_t fvd = patcher.solveSymbol(
+        id, "__ZN22IOGraphicsAccelerator220find_vram_descriptorEv",
+        address, size);
+    patcher.clearError();
+    rbgpu_diag_set_num("fbvr_fvd", fvd);
+    if (fvd == 0) {
+        rbgpu_log("2pq: could NOT solve find_vram_descriptor - nothing will be "
+                  "enlarged, and the hook only records callers");
+        rbgpu_diag_set_num("fbvr_verify", 0);
+        return;
+    }
+    // Read the six bytes back from the running kernel and compare. This is the
+    // fail-safe the mtlk path established: verify from the target's own memory,
+    // so an OS update that moved the call site means nothing is enlarged.
+    const uint8_t *site = reinterpret_cast<const uint8_t *>(fvd + kFbvrCallOff);
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(kFbvrCallBytes); i++)
+        if (site[i] != kFbvrCallBytes[i]) { ok = false; break; }
+    if (!ok) {
+        rbgpu_log("2pq: the call site at find_vram_descriptor+0x%zx reads "
+                  "%02x %02x %02x %02x %02x %02x, not the expected "
+                  "ff 91 b0 09 00 00 - REFUSING to enlarge anything",
+                  kFbvrCallOff, site[0], site[1], site[2], site[3], site[4],
+                  site[5]);
+        rbgpu_diag_set_num("fbvr_verify", 0);
+        return;
+    }
+    g_fbvr_verify  = 1;
+    g_fbvr_callsite = fvd + kFbvrCallOff + sizeof(kFbvrCallBytes);
+    rbgpu_diag_set_num("fbvr_verify", 1);
+    rbgpu_diag_set_num("fbvr_callsite", g_fbvr_callsite);
+    rbgpu_log("2pq: ARMED - find_vram_descriptor at %p, its getVRAMRange call "
+              "verified at +0x%zx, so the one return address we enlarge for is "
+              "%p. Every other caller keeps the original range.",
+              reinterpret_cast<void *>(fvd), kFbvrCallOff,
+              reinterpret_cast<void *>(g_fbvr_callsite));
+}
+
 // 2oz: the three interrupt methods. All three are defined in IONDRVSupport
 // (rule 1, nm) and all three pass rule 2 - the first rel8/rel32 branch is 26,
 // 17 and 17 bytes in respectively, so none begins within the first five.
@@ -8644,6 +8859,30 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         }
     }
 
+    // 2pq: the accelerator's flip window, gated and routed on its own so one
+    // boot can tell it apart from 2oz and 2pa. The route is armed here but
+    // nothing is enlarged until processAccelFamily has verified the call site -
+    // IONDRVSupport loads first, so until then the hook only records callers.
+    rbgpu_diag_set_num("fbvr_on", g_fbvr_on ? 1 : 0);
+    if (g_fbvr_on) {
+        KernelPatcher::RouteRequest vr(
+            "__ZN17IONDRVFramebuffer12getVRAMRangeEv",
+            hooked_ndrv_vramrange_2pq, orig_ndrv_vramrange_2pq);
+        if (patcher.routeMultiple(id, &vr, 1, address, size)) {
+            rbgpu_log("2pq: ARMED - routed IONDRVFramebuffer::getVRAMRange. "
+                      "%u MB will be reported to find_vram_descriptor ONLY; "
+                      "every other caller keeps the original range, so "
+                      "IOFBMemorySize should stay 8294400 as a control.",
+                      g_fbvr_mb);
+            rbgpu_diag_set_num("fbvr_routed", 1);
+        } else {
+            patcher.clearError();
+            rbgpu_log("2pq: FAILED to route getVRAMRange - the accelerator "
+                      "keeps its one-buffer flip window");
+            rbgpu_diag_set_num("fbvr_routed", 0);
+        }
+    }
+
     if (!g_vbl_on) {
         rbgpu_log("2ou: NOT armed - -rbgpuvbl absent, so the mode keeps "
                   "reporting refreshRate 0 to CoreGraphics");
@@ -8747,6 +8986,35 @@ void RGPU::init() {
             rbgpu_log("2pa: rbgpufbvrammb=%s is outside 256-16384 - ignored, "
                       "keeping %u", vrambuf, g_vram_mb);
     }
+
+    // 2pq: the accelerator's flip window. Separate arg from 2pa on purpose -
+    // 2pa changes a LABEL on a registry node, this changes what Apple's
+    // accelerator believes about scanout memory, and conflating them would
+    // make a bad boot unattributable.
+    g_fbvr_on  = checkKernelArgument("-rbgpufbvramrange");
+    g_fbvr_all = checkKernelArgument("-rbgpufbvramrangeall");
+    char fbvrbuf[16] = {};
+    if (PE_parse_boot_argn("rbgpufbvramrangemb", fbvrbuf, sizeof(fbvrbuf)) &&
+        fbvrbuf[0]) {
+        uint32_t mb = 0;
+        for (const char *c = fbvrbuf; *c >= '0' && *c <= '9'; c++)
+            mb = mb * 10 + static_cast<uint32_t>(*c - '0');
+        // Clamped to BAR0, which is 256 MB on this chip (measured from
+        // assigned-addresses: 0x8_8000_0000, length 0x1000_0000). Claiming
+        // more than the aperture would hand the accelerator a range whose far
+        // end is not VRAM, and find_vram_descriptor MAPS the whole thing.
+        if (mb >= 8 && mb <= 256)
+            g_fbvr_mb = mb;
+        else
+            rbgpu_log("2pq: rbgpufbvramrangemb=%s is outside 8-256 (BAR0 is "
+                      "256 MB) - ignored, keeping %u", fbvrbuf, g_fbvr_mb);
+    }
+    rbgpu_log("2pq: the accelerator's flip window %s%s. It writes NO DCN "
+              "register; offset 0 stays the live scanout.",
+              g_fbvr_on ? "ARMED by -rbgpufbvramrange"
+                        : "off (add -rbgpufbvramrange)",
+              g_fbvr_all ? ", BLANKET (-rbgpufbvramrangeall: every caller, "
+                           "not just find_vram_descriptor)" : "");
     // 2ph: the DAL dry run. One arg gates BOTH the personality injection and
     // the write hooks, deliberately - the hooks must exist before DAL runs,
     // and an interlock on the controller's start() refuses to run it if they
@@ -13459,6 +13727,11 @@ void (*g_rb_enableAccelerator_2hg)(void *) = nullptr;
 
 void RGPU::processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                               size_t size) {
+    // 2pq first: this is where the one return address we enlarge for becomes
+    // known. The getVRAMRange route was already armed when IONDRVSupport
+    // loaded, and has been passing every call through untouched until now.
+    rbgpu_fbvr_resolve_callsite(patcher, id, address, size);
+
     // Solved, not routed: we want to call it, not intercept it.
     auto ea = patcher.solveSymbol(id, "__ZN22IOGraphicsAccelerator217enableAcceleratorEv",
                                   address, size);

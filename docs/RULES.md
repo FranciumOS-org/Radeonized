@@ -603,6 +603,33 @@ The two that bite hardest:
   answer** (2pf): routed successfully, `getDisplayPipeTransactionFlip` never
   called once. Keep it only if re-testing that after a change; it writes
   nothing.
+- **`-rbgpufbvramrange`** (2pq) is the flip window, **off by default**. 2pp
+  measured that Apple's accelerator is **already bound to our
+  IONDRVFramebuffer** (`IOAccelIndex`/`IOAccelRevision`/`IOAccelTypes` are
+  published on `.Display_boot`), advertises `DisplayPipeSupported=Yes` and
+  `TransactionsSupported=Yes`, and that **WindowServer holds an
+  `IOAccelDisplayPipeUserClient2`** - because
+  `IOAccelDisplayMachine::found_framebuffer` filters NOTHING. What it lacks is
+  room: `IOGraphicsAccelerator2::find_vram_descriptor` takes its whole notion
+  of scanout VRAM from slot 0x9b0 = `IOFramebuffer::getVRAMRange`, which
+  returns **8294400 bytes - one buffer, room for zero others**, and a flip
+  needs a second. This routes `IONDRVFramebuffer::getVRAMRange` and reports a
+  bigger range **to one return address only** - the call inside
+  `find_vram_descriptor` at `+0x4a`, verified by reading its six bytes
+  (`ff 91 b0 09 00 00`) back from the running kernel first. All 14 other call
+  sites keep the original, so **`IOFBMemorySize` staying 8294400 is the
+  control**. The range is built at the original's own physical base and only
+  longer, so offset 0 stays the live scanout and failure still shows a picture.
+  `rbgpufbvramrangemb=<N>` clamped 8-256 (BAR0 is 256 MB, measured); default
+  64. Writes **NO DCN register**: a flip touches only OTG (0/434 moved) and
+  HUBP (0/80), both bit-identical dcn302 vs dcn312 - DCHUBBUB's 74/77 is a
+  **modeset** requirement and the firmware already did it. **That is the "new
+  evidence" the page-flipping prohibition above asks for.** Keys:
+  `fbvr_routed`, `fbvr_verify`, `fbvr_orig_len` (**the gate - if it is not
+  8294400 nothing else means anything**), `fbvr_hit`, `fbvr_big`, `fbvr_fail`,
+  `fbvr_calls`, `fbvr_ret1..8`. **Not yet booted; the hypothesis that the one
+  buffer is WHY no flip happens is NOT established** - see 2pq for what a
+  clean negative looks like.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
