@@ -21719,3 +21719,152 @@ amount of work on the cache side matters.
 
 Cheaper first, and it needs no boot: Lilu's own SYSLOG lines are in the
 kernel buffer, which `sudo dmesg` can read.
+
+## 2oc - why Boot A patched nothing: the byte source is a FILE, and ours has none
+
+`sudo dmesg | grep -i lilu` came back empty, which decides nothing on its own
+(rule 26 - and `dmesg` needs a password I do not have, so its own emptiness
+was never qualified here). The answer came instead from reading Lilu's
+implementation, which settled Boot A with **no boot at all**.
+
+`third_party/Lilu` carries only `Headers/` and `Library/`, so the user
+patcher's code was never in the tree. Fetched it: `Lilu/Sources/kern_user.cpp`
+(my first three guesses at the path 404'd - `Kernel/`, and tag `1.7.3`, which
+**does not exist**: the newest Lilu tag is 1.7.2 while the loaded kext reports
+`as.vit9696.Lilu (1.7.3)`, so this machine runs an unreleased master build.
+The reading below is master's; it has not been diffed against the loaded
+binary).
+
+### The mechanism, from the source
+
+`LiluAPI::onProcLoad` only queues a registration - the header says so
+outright ("@return Error::NoError on success", where success means
+*registered*). The work happens later in `UserPatcher::registerPatches`,
+whose last line is the whole story:
+
+```c
+return loadFilesForPatching() && (!patchDyldSharedCache || loadDyldSharedCacheMapping())
+       && loadLookups() && hookMemoryAccess();
+```
+
+`loadFilesForPatching()` runs **first**, before the cache map is ever parsed,
+and it gets the bytes it searches from exactly one place:
+
+```c
+auto buf = FileIO::readFileToBuffer(binaryMod[i]->path, fileSize);
+if (buf) {
+    ...  // findSectionBounds, scan for patch.find, build lookupStorage
+}
+// no else. no SYSLOG. loadFilesForPatching returns true regardless.
+```
+
+Measured here:
+
+```
+/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle          exists (directory)
+.../Contents/MacOS/AMDRadeonX6000MTLDriver                         No such file or directory
+```
+
+So `buf` is null, the body is skipped in silence, `lookupStorage` stays
+empty - and every consumer is guarded on its size: `performPagePatch` needs
+`sz > 0`, `patchSharedCache` iterates `0, sz = lookupStorage.size()`. Nothing
+to match, nothing patched, no message anywhere. That is `VERDICT: NEITHER`,
+exactly.
+
+Of the five `readFileToBuffer` calls in `kern_user.cpp`, four read the `.map`
+and the fifth is the one above. `getSharedCachePath` and
+`matchSharedCachePath` only ever *match* path strings. **Lilu never reads the
+shared cache's bytes.**
+
+### Both earlier readings were wrong, in different directions
+
+* Rule 22 said Lilu's user patcher could never patch our driver. Its
+  **conclusion was right as the code stands** - but for a reason it did not
+  give, and it generalised that into "a `BinaryModInfo` can only patch a file
+  that exists", which overstates it.
+* 2nz withdrew rule 22 and declared the route open because Lilu parses the
+  cache map. The parsing is real - `loadDyldSharedCacheMapping` reads
+  `venturaSharedCacheMapHaswell`, which exists here, lists our driver, and
+  gives `__TEXT 0x7FFB08BF3000 -> 0x7FFB090F59AE`, matching `dyldcache.py`.
+  But the map supplies **addresses only**. 2nz never asked where the *bytes*
+  come from, and concluded the route was open on half the mechanism.
+
+Both preconditions I checked after that were fine and neither was the problem:
+`isHaswell` is `cpuHasAvx2` (true on the 7735HS, so the Haswell map is the
+right one); Lilu's `KernelVersion` enum knows `Sequoia = 24` and `Tahoe = 25`;
+`BinaryModPatch`'s nine fields match our nine positional initialisers in
+order; and `RBGPU_MTL_PATH` matches the map's line byte for byte.
+
+### What this says about the patcher - the fork is closed, and neither arm won
+
+2ob's two candidates were both wrong. `loadLookups()` returns `true`
+unconditionally (with empty storage its loops simply do nothing), so
+`hookMemoryAccess()` **is** reached. **The patcher is alive and its hooks are
+installed.** It had zero patterns to look for. The planned on-disk control
+binary is unnecessary - it would have measured something already known.
+
+### The route is open after all, and better than the one we were building
+
+For an image in the shared cache, patching does **not** go through
+`performPagePatch`'s full-page `memcmp`. It goes through `patchSharedCache`,
+which edits live process memory:
+
+```c
+auto place = modStart + ref->segOffs[k] + slide;        // modStart = mod->startTEXT, from the .map
+orgVmMapReadUser(taskPort, place, tmp, patch.size);
+if (!memcmp(tmp, patch.find, patch.size)) {             // patch.size bytes, NOT a page
+    vmProtect(taskPort, place & -PAGE_SIZE, PAGE_SIZE, FALSE, RWX);
+    orgVmMapWriteUser(taskPort, patch.replace, place, patch.size);
+    vmProtect(... RX);
+}
+```
+
+That is per-process, slide-aware, `vm_map_write_user` into the live image -
+which is what 2np's trampoline does from inside the process, only done from
+the kernel instead. It would therefore also reach the **Apple platform
+binaries** that strip `DYLD_INSERT_LIBRARIES` and that `rbgpu-app.sh` can
+never wrap.
+
+The only thing `patchSharedCache` needs from the file is `ref->segOffs`, and
+that is pure arithmetic on the file's own declared load commands:
+
+```c
+off_t segOff = vmsection - vmsegment + sectOff;         // loadFilesForPatching
+```
+
+`MachInfo::findSectionBounds` is a plain load-command walk: it takes
+`vmsegment = scmd->vmaddr`, `vmsection = sect->addr`,
+`sectionptr = ptr + sect->offset`, `sectionSize = sect->size`, and validates
+nothing but bounds - no code signature, no LINKEDIT, no dyld info. **Lilu
+never checks that the file is the real dylib.** So a small hand-built Mach-O
+that merely *declares* the right geometry is a sufficient byte source, and the
+addresses close exactly:
+
+```
+fn    segOff = 0x7FFB08D35A11 - 0x7FFB08BF3000 = 0x142A11
+cave  segOff = 0x7FFB08FB75A0 - 0x7FFB08BF3000 = 0x3C45A0
+place = startTEXT + segOff + slide  ->  FN_VM + slide,  CAVE_VM + slide
+```
+
+Two hazards found in the same read, before building anything:
+
+* `end = start + size - patch.size` with `start < end`, so a section whose
+  size **equals** `patch.size` never scans. The section must be strictly
+  larger.
+* `pageOff = ((vmsection + sectOff) & -PAGE_SIZE) - vmsection` is computed in
+  `vm_address_t`. If `sectOff < vmsection % PAGE_SIZE` it **underflows**, and
+  `lilu_os_memcpy(entry->page->p, sectionptr + pageOff, PAGE_SIZE)` then reads
+  a wild kernel address. The real dylib is safe by accident (cave sectOff
+  0x2F00 against `__const` at ...46A0). A stencil must keep
+  `sectOff >= vmsection % PAGE_SIZE` - simplest is a page-aligned `vmsection`
+  with `sectOff` shifted up by the same amount, which preserves `segOff`.
+
+### Still unverified
+
+`patchBinary` only reaches `patchSharedCache` when `sharedCacheSlideStored` is
+true, set when the `vm_shared_region_slide` hooks fire. Those hooks are
+installed by `hookMemoryAccess()`, which does run - but whether they are in
+place before the first process maps the cache is not established here, and
+there is no log channel on this machine to tell us (2ob). It is the same path
+every Lilu shared-cache patch depends on, so it is likely fine; it is an
+assumption, not a measurement, and the next boot tests it implicitly.

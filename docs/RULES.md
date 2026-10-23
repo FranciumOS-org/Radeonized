@@ -25,9 +25,13 @@ sealed-OS policy enforces independently of the CSR bits).
 The defect is the swizzle mode the **userspace** Metal driver picks for client
 textures - 2lg found that place on 2026-10-20 and filed it "out of this
 plugin's reach", which was right about the place and wrong about the reach.
-**Lilu's user patcher can never do it** (rule 22): the driver is in the dyld
-shared cache with no file on disk, so 2lm/2nb/2nm were inert while reporting
-success. The patch has to edit the in-memory image from inside the process.
+**Lilu's user patcher CAN do it, and a boot-A experiment showed why it had
+not** (rule 22, 2oc): the driver is in the dyld shared cache with no file on
+disk, and Lilu takes patch addresses from the cache `.map` but patch *bytes*
+from a file - so 2lm/2nb/2nm/2oa were inert while reporting success. Feeding
+it a byte source is the open frontier; `patchSharedCache` then edits live
+process memory with `vm_map_write_user`, which would also reach the Apple
+platform binaries that strip `DYLD_INSERT_LIBRARIES`.
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -249,18 +253,25 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     is `sudo launchctl asuser $(id -u) launchctl unsetenv DYLD_INSERT_LIBRARIES`.
     Inject per process, where the blast radius is one process started on
     purpose. [2mq]
-22. **WITHDRAWN (2nz). It said a Lilu `BinaryModInfo` can only patch a file
-    that EXISTS, and that Lilu's user patcher could therefore never touch
-    `AMDRadeonX6000MTLDriver`. That is FALSE.** Lilu is explicitly built to
-    patch dylibs inside the dyld shared cache: it hooks `cs_validate_page`,
-    resolves images through the cache's `.map` file (`mapAddresses`,
-    `MapEntry`, `performPagePatch`, `patchDyldSharedCache`) and hard-codes
-    this machine's cryptex map path as `venturaSharedCacheMapHaswell`. The
-    map is present, lists our driver, and gives `__TEXT 0x7FFB08BF3000 ->
-    0x7FFB090F59AE`, matching `dyldcache.py` exactly. The *observation* that
-    boot 117 was not patched stands; the *reason* is still unknown. What is
-    true and worth keeping: **verify a patch from the target process's own
-    memory**, because that is the only thing that revealed it. [2nn, 2nz]
+22. **Lilu's user patcher takes its ADDRESSES from the cache `.map` but its
+    BYTES from a file on disk - and our driver has no file.** This rule has
+    now been wrong twice: first as "a `BinaryModInfo` can only patch a file
+    that exists" (right conclusion, overstated reason), then as 2nz's
+    withdrawal (the map is parsed, so the route is open - half the
+    mechanism). `registerPatches` runs `loadFilesForPatching()` **before**
+    the map is read, and that function's only byte source is
+    `FileIO::readFileToBuffer(binaryMod[i]->path)` with **no `else` branch
+    and no SYSLOG**. A missing file leaves `lookupStorage` empty, every
+    consumer is guarded on its size, and nothing is patched in total
+    silence while `onProcLoad` reports `NoError`. The patcher itself is
+    alive: `loadLookups()` returns true unconditionally, so
+    `hookMemoryAccess()` still runs. **The route is open, but it must be fed
+    a byte source** - `patchSharedCache` needs only `ref->segOffs`, which is
+    `vmsection - vmsegment + sectOff` from the file's own load commands, and
+    `MachInfo::findSectionBounds` validates nothing but bounds. What is true
+    and worth keeping from all three readings: **verify a patch from the
+    target process's own memory**, because that is the only thing that ever
+    revealed it. [2nn, 2nz, 2oc]
 23. **`pgrep` cannot see the process a script is running inside.** BSD
     `pgrep` never matches the invoking process or **its ancestors**, so a
     script run from the assistant Code cannot see the the assistant app: `pgrep -x the assistant`
@@ -277,9 +288,10 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     `chflags`, which no CSR bit lifts) and is **absent when the volume is
     mounted raw in Recovery**. The image is raw UDRW, but the volume inside
     is sealed, its root hash is an IM4P and that hash is covered by an
-    Apple-signed IM4M ticket - so it cannot be modified. This is also why
-    rule 22 is true. Do not spend Recovery trips looking for the cache as a
-    file. [2ny]
+    Apple-signed IM4M ticket - so it cannot be modified. Do not spend
+    Recovery trips looking for the cache as a file. This rule is about the
+    cache ON DISK and is unrelated to rule 22, which is about how Lilu finds
+    patch bytes - editing the cryptex was never needed (2oc). [2ny]
 25. **Read the machine, not the manual.** Four Recovery trips were each ended
     by something asserted from general macOS knowledge instead of measured
     here: `Cmd-R` (this is OpenCore, `PollAppleHotKeys` False - it is SPACE at
