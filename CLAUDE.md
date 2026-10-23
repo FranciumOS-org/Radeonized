@@ -46,10 +46,11 @@ targets mapped off the `_X` family (21->5, 22->6, 23->6, 25->9, 26->10,
 the chip. 2na's XOR-linear bit matrix still points at the `_X` XOR term, just
 not at the pipe count.
 
-**`tools/rbgpu-app.sh` and the `(GPU)` wrappers are OBSOLETE** - superseded by
-the kext path, which reaches what they never could: platform binaries and
-sandboxed App Store apps. Leftover wrappers are a safe no-op (2om), so remove
-them at leisure. 2ns's "there is NO global fix" was right about the place and
+**`tools/rbgpu-app.sh`, `tools/mtllinear-app.sh` and the `(GPU)` wrappers are
+GONE (2op)** - superseded by the kext path, which reaches what they never
+could: platform binaries and sandboxed App Store apps. All 11 wrappers were
+removed in 2on and both scripts are deleted. A leftover wrapper elsewhere is a
+safe no-op (2om). 2ns's "there is NO global fix" was right about the place and
 wrong about the reach, exactly as 2lg was.
 
 **BOTH HALVES ARE NOW DEFAULT-ON AND BOTH ARE NEEDED (2oo).** The kernel-side
@@ -309,7 +310,9 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     anything - every layer reports success and nothing exists. That, and
     nothing else, is why 2lm, 2lp, 2nb, 2nm, 2oa and 2od were all inert
     while `onProcLoad` returned `NoError`. **Do not write another Lilu
-    `BinaryModInfo` for this machine.** This rule has now been wrong twice
+    `BinaryModInfo` for this machine.** All of that code was DELETED in 2op
+    (~590 lines), so there is no longer a working example in the tree to copy
+    by accident. This rule has now been wrong twice
     and under-specified once: the earlier readings (a mod can only patch an
     existing file; addresses come from the `.map` but bytes from a file) are
     accurate descriptions of code that never executes here. The reusable
@@ -425,9 +428,14 @@ The two that bite hardest:
   linear while USERSPACE still tiled, and the universal fix removes that
   disagreement for non-render-targets. Why it does not also disagree for the
   render targets userspace keeps tiled is **not** established.
-- **`-rbgpumtllinear`** (2lm) is **provably inert** (rule 22) and was removed
-  from boot-args in boot 131. The 2lm/2lp code is still in the tree and still
-  registers Lilu `BinaryModInfo`s that can never apply.
+- **`-rbgpumtllinear`, `-rbgpuhwblt`, `-rbgpumtlcave` and `-rbgpumtlfix` NO
+  LONGER EXIST (2op).** All four were Lilu `BinaryModInfo` paths that could
+  never apply (rule 22), and 2op deleted the code - ~590 lines - under rule 6:
+  when a fix moves upstream, remove the downstream patch it replaces. None of
+  the four strings is read anywhere in the plugin now, so leaving them in
+  boot-args is harmless and does nothing. Take them out when convenient:
+  `sudo tools/efi.sh bootarg remove -rbgpuhwblt` and the same for
+  `-rbgpumtlcave`. Their history is in `docs/JOURNAL.md` under 2lm/2lp/2oa/2oc/2od.
 
 - **`-rbgpumtlkpatch` / `-rbgpumtlkfix`** (2og/2oi) are the kernel-side
   patcher, which **WORKS**: it hooks `_vm_shared_region_slide` and

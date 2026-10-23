@@ -620,9 +620,10 @@ rbgpu-diag    the diag summary — FULL at d=73, carries no nonce
                                              no SSH window (2hh)
 -rbgpuvramadj                                2ks/2ku/2kw: THE FIX
 -rbgpudisplaypipe                            2kt: adopt the display pipe
-(-rbgpulinear and -rbgpumtlkfix are GONE as flags since 2oo - both
- behaviours are now DEFAULT-ON and neither string is read anywhere in
- the plugin. Leaving them in boot-args is harmless and enables
+(-rbgpulinear and -rbgpumtlkfix are GONE as flags since 2oo, and
+ -rbgpumtllinear, -rbgpuhwblt, -rbgpumtlcave and -rbgpumtlfix since
+ 2op, which deleted the Lilu code that read them. None of the six is
+ read anywhere in the plugin; the first two are now DEFAULT-ON. Leaving them in boot-args is harmless and enables
  nothing. The off-switches are -rbgpunolinear and -rbgpumtlkoff, and
  rbgpumtlkscope= / rbgpumtlkexclude= still override the universal
  scope. Boot 132 ran both halves from their defaults and the desktop
@@ -671,7 +672,15 @@ blocking a usable machine any more.
    silently returns the machine to the broken rendering. The failure is loud
    in `mtlk_failed`; it is not loud on screen. Worth a visible signal.
 4. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
-5. **Housekeeping.** The 2lm/2lp/2oa/2od Lilu `BinaryModInfo` paths are still
-   in the tree and can never apply (rule 22); `tools/rbgpu-app.sh` is
-   superseded. Both are inert, neither is load-bearing, and removing them is
-   cleanup rather than a fix.
+5. ~~**Housekeeping.**~~ Done in 2op: the 2lm/2lp/2oa/2oc/2od Lilu
+   `BinaryModInfo` paths are deleted (~590 lines, rule 6), along with
+   `tools/rbgpu-app.sh`, `tools/mtllinear-app.sh` and `tools/gen_stencil.py`.
+   The four boot-args they read - `-rbgpumtllinear`, `-rbgpuhwblt`,
+   `-rbgpumtlcave`, `-rbgpumtlfix` - are read nowhere now. **Kept
+   deliberately**: `tools/cachepatch.py` (a live dependency of
+   `tools/gen_cavepatch.py`), `cachepatch.sh` / `cachepatch-recovery.sh` /
+   `docs/CACHE-RECOVERY.md` (they are the *undo* for a cache install, and an
+   undo is worth keeping even for something rule 24 says cannot succeed),
+   `tools/iosurftex-launchd.sh` (already neutered to recovery-only, and it is
+   the undo for the 2mq disaster) and `tools/mtllinear.c` (still a live option
+   of `screenprobe.sh`, `MTLLINEAR=1`).

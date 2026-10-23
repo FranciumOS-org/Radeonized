@@ -22742,3 +22742,61 @@ detour explicitly.
   explanation for why the force is needed at all. Both halves being on cannot
   be the whole story, and this is the loose thread.
 * **The display half has never started** (§4) - still the boot framebuffer.
+
+### The cleanup, same milestone
+
+Rule 6 - when a fix moves upstream, remove the downstream patch it replaces -
+applied to everything the universal fix made dead.
+
+**Deleted from `src/plugin/kern_start.cpp` (~590 lines):** the 2lm userspace
+force (`-rbgpumtllinear`), the 2lp hardware-blit force (`-rbgpuhwblt`), and
+the whole 2oa/2oc/2od shared-cache attempt (`-rbgpumtlcave`, `-rbgpumtlfix`),
+including `kRb2lmMod`, `kRb2lpMod`, the contiguous `kRbMods[2]` array, the
+stencil probe `rbgpu_mtlcave_binary_loaded`, `rbgpu_mtlcave_mapped_mod` and
+the three registrars called from `RGPU::init()`. Every one of them was a Lilu
+`BinaryModInfo`, and Lilu's user patcher cannot run on this OS (rule 22), so
+all of it reported success and did nothing.
+
+**Kept, deliberately:** `#include "rbgpu_mtlcave.h"` and all four byte arrays
+- `kRbMtlCaveFind/Repl` and `kRbMtlFnFind/Repl` are what the kernel-side
+patcher compares and writes. Only the Lilu `BinaryModPatch` wrappers around
+them went.
+
+**Deleted tools:** `tools/gen_stencil.py` (2og: the kext knows the unslid
+addresses, so no byte source on disk is needed), `tools/rbgpu-app.sh` and
+`tools/mtllinear-app.sh` (the `(GPU)` wrapper machinery; all 11 wrappers were
+removed in 2on). The `stencil` Makefile target went with them.
+
+**Kept, with the reason, so this is not re-litigated:**
+
+| kept | why |
+|---|---|
+| `tools/cachepatch.py` | a live dependency - `gen_cavepatch.py` imports it |
+| `cachepatch.sh`, `cachepatch-recovery.sh`, `docs/CACHE-RECOVERY.md` | the *undo* for a cache install. An undo is worth keeping even for something rule 24 says cannot succeed |
+| `tools/iosurftex-launchd.sh` | already neutered to recovery-only; it is the undo for the 2mq disaster that needed a reboot |
+| `tools/mtllinear.c` | still a live option of `screenprobe.sh` (`MTLLINEAR=1`) |
+
+**Verified, not assumed:**
+
+* `make plugin` from a clean object dir: **0 errors, 41 warnings** - the same
+  count as before the deletion, so no new diagnostic and nothing left unused.
+* UUID moved `A0DD3CA4` -> `29E0049F`.
+* The four dead arg strings are **absent** from the binary; the live ones
+  (`-rbgpumtlkoff`, `-rbgpumtlkpatch`, `-rbgpunolinear`, `rbgpumtlkscope`,
+  `rbgpumtlkexclude`) are all present.
+* `gen_cavepatch.py` re-run after losing its `gen_stencil.py` pointer
+  reproduces `src/plugin/rbgpu_mtlcave.h` **byte-identical**.
+* `make kext`: `hosttest: all passed`. `make tools`: every target still builds,
+  no dangling rule.
+
+A side effect worth having: the removed `rbgpu_diag_set_num` keys
+(`mtllinear_section`, `mtllinear_procs`, `hwblt_section`, `hwblt_scope`,
+`hwblt_onprocload`, `mtlcave_section`, `mtlcave_startTEXT`, `mtlcave_endTEXT`)
+free slots in the diag table, which §6 records as full at `d=73`.
+
+**This is behaviour-neutral by construction and unverified on hardware.** The
+installed build is still `A0DD3CA4`, which is the one that produced the
+flawless boot 132. `29E0049F` should behave identically - the deleted code
+could not execute - but "could not execute" is a reading of Lilu's source, not
+a measurement of this build, so it owes one boot before that is stated as
+fact.
