@@ -637,22 +637,36 @@ The two that bite hardest:
   `bufferSwapCount` are still 0 with `fliprq_calls` absent.** Room was never
   what was missing. Keep the arg OUT; it costs a 64 MB kernel mapping and buys
   nothing.
-- **THE DISPLAY DEFECT NOW HAS A NAME, FROM SKYLIGHT (2pr, boot 144).** The
-  unified log carries `[com.apple.SkyLight:default] Unsupported sw composite
-  destination.` **31 299 times in boot 144 and 46 994 times in boot 143** - so
-  it **predates** every display hook and is the real blocker. SkyLight is not
-  quietly preferring software compositing; it is **rejecting the destination
-  object by name**. Two siblings sit next to it in SkyLight:
-  `Unexpected composite destination type (%d)` - which would print the type
-  number and has **never** fired - and `Unreasonable composite destination
-  bounds requested`. **The frontier is now SkyLight, in userspace, not another
-  kernel hook**: find the function that emits that string and the predicate it
-  tests. `dyld_info -exports
-  /System/Library/PrivateFrameworks/SkyLight.framework/SkyLight` works, and the
-  cache is readable at
-  `/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h` (rule 24
-  is about WRITING it). This is static and costs no boot. **Read
-  `docs/JOURNAL.md` 2pr before proposing anything else for the display.**
+- **SKYLIGHT IS NOW READABLE, AND `CompositorSW` IS PINNED DOWN (2ps/2pt).**
+  `tools/re/dsc.py` reads the dyld shared cache directly - VA <-> file offset
+  from the header mappings, fast RIP-relative LEA xrefs, and a minimal Mach-O
+  wrapper so `objdump` disassembles cache-resident code - because nothing else
+  here can (`otool` will not open the path, `llvm-objdump` has no `-b binary`,
+  no `llvm-mc`, no capstone). Symbolize **without root**: the cache slide is
+  per-boot and system-wide, so dlopen SkyLight in a scratch process,
+  `vmmap <pid> | grep SkyLight` for the `__TEXT` base, then `atos -p <pid>` on
+  `unslid + (base - 0x7FF807B42000)`. **Measure the slide every boot** - reusing
+  an old one makes `atos` answer `libBLAS` for everything.
+  **Established:** `CompositorSW::CompositeLayersToDestination` is at unslid
+  `0x7ff807c3e820` - the function 2pd measured at 48 % of WindowServer's main
+  thread - and it gates on `dest->type`, an **int32 at destination+0x10, which
+  must be 1 or 2** (type 1 served from `dest->0x18`, type 2 from `dest->0x98`),
+  after two bounds checks (`0x2c <= 0x34`, `0x30 <= 0x38`).
+  `SLDisplayStreamCreateCommon` writes type **3**.
+  **CORRECTION, and it matters: the `Unsupported sw composite destination.` log
+  line is NOT the display defect (2pt).** 2pr called it the real blocker on the
+  strength of 46 994 hits in boot 143 and 31 299 in boot 144 - **both armed,
+  with no unarmed control**. On a later boot with the hooks live (`dispclk`
+  nominal 131.671 Hz; note `rbgpu-arm` gates only the NVRAM capture, **not** the
+  hooks) the count over 20 minutes is **1**. It tracks machine activity, and
+  type 3 is a **display stream** (screen capture). Also, CompositorSW plainly
+  **accepts** the display's destination - 2pd measured it doing real work, and a
+  rejected destination returns immediately - so the display destination's type
+  is already 1 or 2. **The open question is why the display composite goes to
+  `CompositorSW` instead of `CompositorMetal`**, not whether the destination is
+  valid. `MetalContext::StartComposite(WSCompositeDestination*, MTLLoadAction,
+  MTLStoreAction)` is the Metal entry point. Read 2ps and 2pt together; 2pr's
+  headline is retracted there.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
