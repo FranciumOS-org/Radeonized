@@ -8148,6 +8148,82 @@ static void hooked_dal_w4_2ph(void *self, uint32_t reg, uint32_t val,
     // Deliberately NOT calling orig_dal_w4_2ph.
 }
 
+// 2pj: THE REGISTER SURFACE IS WIDER THAN ONE CLASS, and boot 141 proved the
+// first instrument was pointed at the wrong part of it.
+//
+// Boot 141: both Apple personalities attached - the controller AND the
+// Wrangler - `.Display_boot` survived (the private category worked exactly as
+// designed), start() returned true for both, and `dal_reads 0` with
+// `dal_writes 0`. The read control is what made that readable: a zero READ
+// count cannot mean "DAL chose not to write", it means **this accessor was
+// never touched**, so the instrument could not have protected anything.
+// Without the control, `dal_writes 0` would have looked like proof of safety.
+//
+// `nm` then shows four more register paths in the same kext, all rule-2 clean:
+//
+//   AmdRegisterAccess::hwReadReg32(uint)                  - the low-level read
+//   AmdDalHelper::dalAtomReadRegister32(void*, uint)      - AtomBIOS read
+//   AmdDalHelper::dalAtomWriteRegister32(void*, uint, uint)  - AtomBIOS write
+//   AmdBiosParserHelper::readReg32(void*, uint)           - VBIOS parser read
+//   AmdBiosParserHelper::writeReg32(void*, uint, uint)    - VBIOS parser write
+//
+// There is deliberately NO `hwWriteReg32` in the kext, so
+// `AmdRegisterAccess::writeReg32` really is the bottom of that path - checked,
+// not assumed. The strings also name `dm_read_reg_func`, so DAL's generic
+// layer reaches registers through a FUNCTION POINTER, which is why routing the
+// class methods alone caught nothing.
+//
+// Writes are recorded and DROPPED. Reads are PASSED THROUGH and counted. Every
+// counter is separate, because "which path does Apple's DAL actually use on
+// this chip" is the open question and one aggregate number would hide it.
+static uint64_t g_dal_r_hw = 0, g_dal_r_atom = 0, g_dal_r_bios = 0;
+static uint64_t g_dal_w_atom = 0, g_dal_w_bios = 0;
+
+using t_rbDalHwR  = uint32_t (*)(void *, uint32_t);
+using t_rbDalAtomR = uint32_t (*)(void *, void *, uint32_t);
+using t_rbDalAtomW = void     (*)(void *, void *, uint32_t, uint32_t);
+using t_rbDalBiosR = uint32_t (*)(void *, void *, uint32_t);
+using t_rbDalBiosW = void     (*)(void *, void *, uint32_t, uint32_t);
+static t_rbDalHwR   orig_dal_hwr_2pj  = nullptr;
+static t_rbDalAtomR orig_dal_atomr_2pj = nullptr;
+static t_rbDalAtomW orig_dal_atomw_2pj = nullptr;
+static t_rbDalBiosR orig_dal_biosr_2pj = nullptr;
+static t_rbDalBiosW orig_dal_biosw_2pj = nullptr;
+
+static void rbgpu_dal_count(const char *key, uint64_t *n) {
+    (*n)++;
+    if (*n == 1 || (*n & 0xff) == 0)
+        rbgpu_diag_set_num(key, *n);
+}
+
+static uint32_t hooked_dal_hwr_2pj(void *self, uint32_t reg) {
+    uint32_t v = orig_dal_hwr_2pj(self, reg);
+    rbgpu_dal_count("dal_r_hw", &g_dal_r_hw);
+    if (g_dal_r_hw <= 24)
+        rbgpu_log("2pj: DAL hwRead  reg %#010x -> %#010x", reg, v);
+    return v;
+}
+static uint32_t hooked_dal_atomr_2pj(void *self, void *ctx, uint32_t reg) {
+    uint32_t v = orig_dal_atomr_2pj(self, ctx, reg);
+    rbgpu_dal_count("dal_r_atom", &g_dal_r_atom);
+    return v;
+}
+static void hooked_dal_atomw_2pj(void *self, void *ctx, uint32_t reg, uint32_t val) {
+    (void)self; (void)ctx;
+    rbgpu_dal_count("dal_w_atom", &g_dal_w_atom);
+    rbgpu_dal_record(reg, val, "A");          // DROPPED: orig not called
+}
+static uint32_t hooked_dal_biosr_2pj(void *self, void *ctx, uint32_t reg) {
+    uint32_t v = orig_dal_biosr_2pj(self, ctx, reg);
+    rbgpu_dal_count("dal_r_bios", &g_dal_r_bios);
+    return v;
+}
+static void hooked_dal_biosw_2pj(void *self, void *ctx, uint32_t reg, uint32_t val) {
+    (void)self; (void)ctx;
+    rbgpu_dal_count("dal_w_bios", &g_dal_w_bios);
+    rbgpu_dal_record(reg, val, "B");          // DROPPED: orig not called
+}
+
 static uint32_t hooked_dal_r3_2pi(void *self, uint32_t reg, uint32_t a, uint8_t b) {
     uint32_t v = orig_dal_r3_2pi(self, reg, a, b);   // passed through untouched
     g_dal_reads++;
@@ -8178,6 +8254,11 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
     rbgpu_diag_set_num("dal_start_ret", ret ? 1 : 0);
     rbgpu_diag_set_num("dal_writes", g_dal_writes);
     rbgpu_diag_set_num("dal_reads", g_dal_reads);
+    rbgpu_diag_set_num("dal_r_hw",   g_dal_r_hw);
+    rbgpu_diag_set_num("dal_r_atom", g_dal_r_atom);
+    rbgpu_diag_set_num("dal_r_bios", g_dal_r_bios);
+    rbgpu_diag_set_num("dal_w_atom", g_dal_w_atom);
+    rbgpu_diag_set_num("dal_w_bios", g_dal_w_bios);
     return ret;
 }
 
@@ -8202,6 +8283,17 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
         // 2pi: the control. Passed through, counted, never altered.
         {"__ZN32AMDRadeonX6000_AmdRegisterAccess9readReg32Ejjh",
          hooked_dal_r3_2pi, orig_dal_r3_2pi},
+        // 2pj: the rest of the surface boot 141 showed we were missing.
+        {"__ZN32AMDRadeonX6000_AmdRegisterAccess11hwReadReg32Ej",
+         hooked_dal_hwr_2pj, orig_dal_hwr_2pj},
+        {"__ZN27AMDRadeonX6000_AmdDalHelper21dalAtomReadRegister32EPvj",
+         hooked_dal_atomr_2pj, orig_dal_atomr_2pj},
+        {"__ZN27AMDRadeonX6000_AmdDalHelper22dalAtomWriteRegister32EPvjj",
+         hooked_dal_atomw_2pj, orig_dal_atomw_2pj},
+        {"__ZN34AMDRadeonX6000_AmdBiosParserHelper9readReg32EPvj",
+         hooked_dal_biosr_2pj, orig_dal_biosr_2pj},
+        {"__ZN34AMDRadeonX6000_AmdBiosParserHelper10writeReg32EPvjj",
+         hooked_dal_biosw_2pj, orig_dal_biosw_2pj},
     };
     g_dal_safe = patcher.routeMultiple(id, w, arrsize(w), address, size);
     if (!g_dal_safe) {
