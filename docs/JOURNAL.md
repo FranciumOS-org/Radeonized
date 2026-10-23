@@ -22228,3 +22228,74 @@ used to check whether `___strlcpy_chk` was a pre-existing import left the
 object files newer than the sources, so `make plugin` reported success and
 produced the *previous* UUID. `efi.sh install` deletes those two objects for
 exactly this reason; a bare `make plugin` does not.
+
+## 2oj - TextEdit is not an oracle, and the cave verified before executing it
+
+The user asked, before arming stage B, whether TextEdit rendering text
+correctly *right now* was expected. It is, and it kills TextEdit as the
+target.
+
+This defect is the swizzle mode the userspace driver picks for **client
+MTLTextures**. Electron and JBR hit it because they render text into plain
+textures themselves. Native AppKit apps draw text through CoreGraphics into
+CALayer backing stores, and 2nj measured that those surfaces reach **neither**
+this chooser nor the kernel's align manager - that is Defect B. TextEdit was
+never affected by this one.
+
+The sharper point: if TextEdit never calls `DetermineSwizzleMode`, stage B
+there executes the cave **zero times** and tests neither correctness nor
+crash-safety. It would have been a wasted boot, and the "it still renders
+fine" result would have looked like success. 2og's choice of TextEdit was
+made on "Apple platform binary, cannot be reached any other way" without
+asking whether it is affected at all - the recurring error again, one step
+removed.
+
+### An honest correction to the value of this work
+
+"Reaches the Apple platform binaries that strip `DYLD_INSERT_LIBRARIES`" has
+been repeated since 2oc as the prize. It is not established that **any**
+platform binary is broken by *this* defect rather than by Defect B, and the
+first data point - TextEdit - says it is not. What the kernel patcher
+definitely buys: no per-app wrappers, no `~/Applications/<App> (GPU).app`, it
+survives app updates, it needs no user action, and it reaches sandboxed App
+Store apps, which cannot load an inserted dylib from a home directory at all
+(rule 21). That is what the user asked for originally - "a fix for everything,
+out of the box from the kext" - so the goal stands. The platform-binary claim
+should stop being stated as a benefit until one is shown affected.
+
+### The cave verified statically, before its first execution
+
+Disassembled `kRbMtlCaveRepl[ANCHOR..ANCHOR+163]` by assembling the bytes
+into an object file (no raw-binary disassembler is available here - no
+capstone, no llvm-mc, and `objdump -b binary` produces nothing):
+
+```
+push rbp; mov rsp,rbp; push rbx; sub 0x18,rsp
+mov  rdx,rbx                  ; rbx = the descriptor
+copy 0x10/0x18/0x20(rbp) to the new stack   ; out*, bool, bool
+call <trampoline>             ; the relocated original
+mov  0x68(rbx),rcx ; or 0xb0(rbx),rcx       ; usage, BOTH offsets
+test 0x4,cl ; jne                           ; render-target bit
+xor  eax,eax                                ; non-RT -> LINEAR
+cmp  0x1b,eax ; ja                          ; in-range guard
+lea  0xe(rip),rcx ; movzbl (rcx,rax),eax    ; table lookup
+pop rbx; pop rbp; ret
+```
+
+and the 28-byte table is exactly `nox()`: `21->5 22->6 23->6 25->9 26->10
+27->10`, identity elsewhere, **Z modes 20 and 24 untouched**. No mismatches.
+
+One thing that needed checking rather than assuming: the cave modifies
+**`%eax`** and never dereferences the `out` pointer after the call, which
+looks wrong against a signature whose 7th parameter is `uint &out`. It is
+right: `tools/mtlswizzle.c`, the hook that demonstrably works, also ignores
+`out` and ends in `return want`. The function returns the mode; `out` is
+something the caller may or may not consume. The cave matches the proven
+contract.
+
+### The target that does answer something
+
+**IntelliJ IDEA**, process name `idea`: broken unwrapped, fixed by this exact
+policy through the DYLD trampoline, so it is a true oracle - and it answers
+the question that actually matters, which is whether the wrappers can be
+retired. Explicitly **not** Claude, which is this session's host.
