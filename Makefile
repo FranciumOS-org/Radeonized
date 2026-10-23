@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck stencil vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -154,6 +154,15 @@ $(OUT)/usageprobe: tools/usageprobe.m | $(OUT)
 cavecheck: $(OUT)/cavecheck
 $(OUT)/cavecheck: tools/cavecheck.m src/plugin/rbgpu_mtlcave.h | $(OUT)
 	clang -O2 -Wall -o $@ $< -framework Metal -framework Foundation
+
+# stencil (2oc): the byte source Lilu reads to find the patch patterns. The
+# driver has no file on disk, and loadFilesForPatching takes its bytes from a
+# file, so without this nothing is ever patched - silently. Install it where
+# the kext expects it (see RBGPU_MTL_STENCIL); the kext refuses to register
+# when it cannot read it.
+stencil: $(OUT)/rbgpu-mtl.stencil
+$(OUT)/rbgpu-mtl.stencil: tools/gen_stencil.py src/plugin/rbgpu_mtlcave.h | $(OUT)
+	python3 tools/gen_stencil.py $@
 
 # surfdump (2ni): what does a CoreAnimation backing store carry that a
 # hand-allocated IOSurface does not?

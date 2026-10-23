@@ -3,6 +3,7 @@
 #include <Headers/kern_util.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_user.hpp>
+#include <Headers/kern_file.hpp>
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -7255,11 +7256,62 @@ static UserPatcher::BinaryModPatch kRbFnPatch {
     1
 };
 
+// 2oc: BinaryModInfo::path has to do two incompatible jobs. mapAddresses
+// matches it by requiring the .map LINE to start with it, so it must be the
+// real dylib path; loadFilesForPatching reads it as a FILE to find the patch
+// patterns, so it must exist. This driver lives only in the shared cache, so
+// one string cannot be both - which is exactly why boot A patched nothing in
+// total silence (no else branch, no SYSLOG). Two mods, one job each:
+//
+//   kRbMapMod   the real dylib path with count 0. loadFilesForPatching's
+//               hasPatches check `continue`s BEFORE readFileToBuffer, so the
+//               missing file is never opened, while mapAddresses still
+//               matches the line and fills startTEXT/endTEXT with the real
+//               values. It also keeps nEntries > 0, which matters for every
+//               Lilu plugin: on zero matches loadDyldSharedCacheMapping
+//               returns false and registerPatches' && chain never reaches
+//               hookMemoryAccess at all.
+//
+//   kRbCaveMod  the stencil from tools/gen_stencil.py - a small hand-built
+//               Mach-O that exists and merely DECLARES the geometry that
+//               makes segOff come out right. findSectionBounds validates
+//               nothing but bounds, so it needs to be nothing more. Not in
+//               the .map, so Lilu zeroes ITS startTEXT.
+//
+// patchSharedCache computes mod->startTEXT + segOff + slide, so the address
+// is copied from the mod that legitimately received it into the mod that owns
+// the patches, after registerPatches has run. Never hardcoded here (rule 17).
+#define RBGPU_MTL_STENCIL "/Library/RembrandtGPU/mtl.stencil"
+
 // Both patches, or just the cave, depending on the stage.
 static UserPatcher::BinaryModPatch kRbBothPatches[2] {};
-static UserPatcher::BinaryModInfo kRbCaveMod {
-    RBGPU_MTL_PATH, kRbBothPatches, 1, 0, 0, 0, 0
+
+// ONE CONTIGUOUS ARRAY, deliberately: LiluAPI::onProcLoad stores &mods[i],
+// so two separate statics would make mods[1] read past the first object.
+static UserPatcher::BinaryModInfo kRbMods[2] {
+    { RBGPU_MTL_PATH,    nullptr,        0, 0, 0, 0, 0 },   // map match only
+    { RBGPU_MTL_STENCIL, kRbBothPatches, 1, 0, 0, 0, 0 },   // owns the patches
 };
+static UserPatcher::BinaryModInfo &kRbMapMod  = kRbMods[0];
+static UserPatcher::BinaryModInfo &kRbCaveMod = kRbMods[1];
+
+// Runs on every matching exec, AFTER patchSharedCache has already run for
+// that process - so the first exec goes unpatched and every later one is
+// covered. Guarded so it writes once.
+static void rbgpu_mtlcave_binary_loaded(void *, UserPatcher &, vm_map_t,
+                                        const char *, size_t) {
+    if (kRbCaveMod.startTEXT != 0 || kRbMapMod.startTEXT == 0)
+        return;
+    kRbCaveMod.startTEXT = kRbMapMod.startTEXT;
+    kRbCaveMod.endTEXT   = kRbMapMod.endTEXT;
+    rbgpu_diag_set_num("mtlcave_startTEXT", kRbCaveMod.startTEXT);
+    rbgpu_diag_set_num("mtlcave_endTEXT", kRbCaveMod.endTEXT);
+    rbgpu_log("2od: startTEXT 0x%llx endTEXT 0x%llx adopted from the "
+              "map-matched mod - patchSharedCache can place patches from the "
+              "next exec onward",
+              (unsigned long long)kRbCaveMod.startTEXT,
+              (unsigned long long)kRbCaveMod.endTEXT);
+}
 
 // MatchAny is strstr(path, p->path) in Lilu 1.7.3, so "/" matches every
 // process. That is deliberate: the point is to reach the platform binaries
@@ -7295,9 +7347,23 @@ static void rbgpu_register_mtlcave_2oa(void) {
     rbgpu_diag_set_num("mtlcave_npatches", n);
     rbgpu_diag_set_str("mtlcave_stage", fix ? "cave+detour" : "cave only");
 
-    UserPatcher::ProcInfo *procs[] { &kRbCaveProc };
-    UserPatcher::BinaryModInfo *mods[] { &kRbCaveMod };
-    auto err = lilu.onProcLoad(procs[0], 1, nullptr, nullptr, mods[0], 1);
+    // Rule 14: the precondition must say something. Read the stencil here,
+    // in the same early-boot moment and by the same mechanism Lilu will use,
+    // so an unreadable or truncated file is a measurement and not a silence.
+    size_t stencilSize = 0;
+    auto *stencil = FileIO::readFileToBuffer(RBGPU_MTL_STENCIL, stencilSize);
+    rbgpu_diag_set_num("mtlcave_stencil", stencil ? stencilSize : 0);
+    if (stencil) {
+        Buffer::deleter(stencil);
+    } else {
+        rbgpu_log("2od: INERT - cannot read %s at registration time, so "
+                  "loadFilesForPatching will find no patterns either and "
+                  "nothing will be patched (2oc)", RBGPU_MTL_STENCIL);
+        return;
+    }
+
+    auto err = lilu.onProcLoad(&kRbCaveProc, 1, rbgpu_mtlcave_binary_loaded,
+                               nullptr, kRbMods, arrsize(kRbMods));
     rbgpu_diag_set_num("mtlcave_onprocload", static_cast<uint64_t>(err));
     if (err != LiluAPI::Error::NoError) {
         rbgpu_log("2oa: onProcLoad FAILED with %d - nothing is patched",
