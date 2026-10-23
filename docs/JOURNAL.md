@@ -23298,3 +23298,106 @@ arithmetic is right. It also answers a second question for free - whether
 If the keys are dead, the PWM is simply parked where firmware left it, which is
 equally informative. Until then `34.8 %` stays a reading with a wide error bar,
 not a confirmed value.
+
+## 2ou - the 30 Hz fix, built: nominal IS the pacing
+
+2ot measured the animation clock at **exactly 30.00 Hz**. That exactness is the
+whole clue. CoreVideo's nominal period for this display is 30 Hz (its
+documented fallback for an indefinite refresh), and the display link fired at
+*precisely* that - not near it. With no real vsync there is nothing to lock to,
+so **CoreVideo is simply running a timer at nominal**. Nominal is the pacing.
+
+So the smallest intervention that can move 30 Hz is to stop the framebuffer
+reporting zero. Not a new framebuffer, not a vblank interrupt, not a DCN
+write: one field.
+
+### What was read before anything was written
+
+`IONDRVFramebuffer` is the class actually driving this panel, and it lives in
+`IONDRVSupport`, which is loaded (kextstat 138). Extracted both it and
+`IOGraphicsFamily` from `SystemKernelExtensions.kc`.
+
+`IONDRVFramebuffer::getInformationForDisplayMode(int, IODisplayModeInformation*)`
+fills the struct whose `refreshRate` macOS reports. The layout was taken from
+the SDK's own `IOGraphicsTypes.h`, **not** assumed:
+
+```
+nominalWidth 0, nominalHeight 4, refreshRate 8 (IOFixed1616), maxDepthIndex 12
+```
+
+Gates checked before routing, in order:
+
+* **Rule 1** - `nm -m build/re/IONDRVSupport` shows it `external` and defined
+  in `(__TEXT,__text)` at 0x15003aa8. Not an import.
+* **Rule 2** - prologue is `push rbp; mov rsp,rbp; mov (rdi),rax`
+  (`55 48 89 e5 48 8b 07`). No rel8/rel32 branch starts inside the first five
+  bytes. The `callq *0xc00(%rax)` at +7 is an **indirect** vtable call, so it
+  is position-independent and safe to displace into Lilu's trampoline.
+* **Rule 3** - the mangled name appears nowhere else in the plugin (grep: 0
+  before this change).
+* **Rule 5** - the hand-written mangled name was diffed against `nm`:
+  `__ZN17IONDRVFramebuffer28getInformationForDisplayModeEiP24IODisplayModeInformation`,
+  exact match. The first attempt at this name used length **19** instead of
+  **17** and found nothing - caught by `nm`, which is the entire point of the
+  rule.
+
+### The hook is deliberately the smallest thing that could work
+
+The original runs first and its return value passes through untouched. One
+4-byte field is filled, and **only when it is still 0** - so this adds
+information and never contradicts a driver that knows its own timing. It
+writes no hardware register of any kind. The worst case is a wrong number
+*reported*; it cannot blank the panel. `info` is caller-provided, so it is
+validated as a kernel VA before being written through (rule 19).
+
+Off unless **`-rbgpuvbl`**. **`rbgpuvblhz=<millihertz>`** overrides the rate
+(refused outside 20000-400000), so a wrong value costs an NVRAM edit rather
+than a rebuild.
+
+### Shipped ALONE, on purpose
+
+2ot also found the complete vblank-delivery mechanism while reading
+`IONDRVSupport`, and it is worth recording even though nothing uses it yet:
+
+* `IONDRVFramebuffer::registerForInterruptType` compares the type against
+  `0x76626c20` = ASCII **`'vbl '`**.
+* On that path it checks the provider for an **`"Ignore VBL"`** property and
+  returns `kIOReturnUnsupported` (0xE00002C7) if present. **That property does
+  not exist on this machine** (ioreg: 0 occurrences), so it is not the cause.
+* It then walks a linked list of `_VSLService` at **`fb + 0x268`** looking for
+  one whose type at **+0x08** matches. Found: handler goes to **+0x10**,
+  target to **+0x18**, refCon to **+0x20**, `next` is **+0x28**, and it
+  returns success. Not found: it tail-calls the superclass.
+* **No `'vbl '` service exists**, because only an NDRV calls
+  `VSLNewInterruptService` and the boot NDRV never does. So registration falls
+  through, IOFramebuffer never receives a vblank, and CoreVideo falls back to
+  30 Hz. **That is the complete causal chain, read rather than guessed.**
+* The injection points are plain C exports in IONDRVSupport, callable without
+  patching anything: `_VSLNewInterruptService`, `_VSLDoInterruptService`,
+  `_VSLDisposeInterruptService`. `IOFramebuffer::handleVBL(IOFramebuffer*,
+  void*)` is also exported and self-guards on `fb + 0x90` being non-NULL.
+* **It needs no DCN writes either**: OTG0's frame counter and
+  `OTG_STATUS_POSITION` vertical count are read-only, so a timer can be
+  phase-locked to the real scanout without touching the pipe.
+
+Adding both mechanisms in one boot would make a partial result
+uninterpretable - rule 16. If `dispclk` goes 30 -> ~144 after this, the vblank
+work is a refinement for phase-lock and tear-free presents, not the fix for
+the complaint.
+
+### What the counters will say, either way
+
+`vbl_calls`, `vbl_filled`, `vbl_had` and `vbl_rr` are published, which makes
+every outcome distinguishable instead of just "it did not work":
+
+| reading | meaning |
+|---|---|
+| `vbl_routed 0` | the route failed; nothing else matters |
+| `vbl_filled 0`, `vbl_calls 0` | the hook never ran - the route landed too late, or this path is not used |
+| `vbl_filled 0`, `vbl_had > 0` | the field already had a value, so zero was never the problem |
+| `vbl_filled > 0`, dispclk still 30.00 | the write happened but macOS cached the mode list - needs a re-enumeration trigger, not a different value |
+| `vbl_filled > 0`, dispclk ~144 | **done** |
+
+Built: UUID `29E0049F` -> `D8B3C0E2`, `hosttest: all passed`, and all of
+`-rbgpuvbl`, `rbgpuvblhz`, `vbl_routed`, `vbl_filled` and `IONDRVSupport`
+present in the binary. **Unverified on hardware.**
