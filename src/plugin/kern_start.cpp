@@ -7530,11 +7530,27 @@ static uint8_t              g_vblp_shmem  = 2;         // 2 = not looked at yet
 using t_rbHandleVBL = void (*)(void *, void *);
 static t_rbHandleVBL g_vblp_handleVBL = nullptr;
 
+static uint64_t g_vblp_idle_nohandler = 0; // ticks before handleVBL was solved
 static uint64_t g_vblp_idle_nofb = 0;      // ticks with no framebuffer yet
 static uint64_t g_vblp_idle_noshmem = 0;   // ticks with a framebuffer but no shmem
 
+// 2oy: THE TIMER IS THE RETRY MECHANISM. Nothing else may gate on ordering.
+//
+// Boot 137 reported `vblp_fail 2` ("handleVBL unsolved") together with
+// `vblp_solved 1`, which reads as a contradiction and is actually a race:
+// `RembrandtGPUPeer::start()` runs when the PCI device matches, and
+// IOGraphicsFamily - where handleVBL lives - loads from the system KC AFTER
+// that. So the pump checked a pointer that was still NULL, refused to arm, and
+// never looked again, while the symbol was solved moments later.
+//
+// The fix is structural rather than a reordering: `rbgpu_vblp_start` now needs
+// only an owner, and every other precondition is re-checked HERE, once per
+// tick. An idle tick costs nothing and says which precondition is missing.
 static void rbgpu_vblp_tick(OSObject *, IOTimerEventSource *ts) {
-    if (!g_vblp_handleVBL || !g_vblp_fb) {
+    if (!g_vblp_handleVBL) {
+        if (++g_vblp_idle_nohandler == 1 || (g_vblp_idle_nohandler & 0xfff) == 0)
+            rbgpu_diag_set_num("vblp_idle_nohandler", g_vblp_idle_nohandler);
+    } else if (!g_vblp_fb) {
         // Rule 14: an idle tick still says why it was idle.
         if (++g_vblp_idle_nofb == 1 || (g_vblp_idle_nofb & 0xfff) == 0)
             rbgpu_diag_set_num("vblp_idle_nofb", g_vblp_idle_nofb);
@@ -7551,6 +7567,8 @@ static void rbgpu_vblp_tick(OSObject *, IOTimerEventSource *ts) {
             if (g_vblp_shmem != 1) {
                 g_vblp_shmem = 1;
                 rbgpu_diag_set_num("vblp_shmem", 1);
+                rbgpu_diag_set_num("vblp_idle_nohandler", g_vblp_idle_nohandler);
+                rbgpu_diag_set_num("vblp_idle_nofb", g_vblp_idle_nofb);
                 rbgpu_log("2ow: shmem appeared at fb+0x90 after %llu idle "
                           "ticks - handleVBL is live from here",
                           g_vblp_idle_noshmem);
@@ -7610,7 +7628,7 @@ static void rbgpu_vblp_arm(void *fb) {
 // identical and cost a boot to tell apart. `vblp_fail` now carries a distinct
 // code, so this can never be ambiguous again:
 //
-//   1 off by boot-arg   2 handleVBL unsolved   3 no owner
+//   1 off by boot-arg   2 RETIRED (was: handleVBL unsolved)   3 no owner
 //   4 workLoop() failed  5 timerEventSource() failed  6 addEventSource() failed
 #define RB_VBLP_FAIL(code, msg, ...) do {                      \
         rbgpu_log("2ox: " msg, ##__VA_ARGS__);                 \
@@ -7622,9 +7640,10 @@ static void rbgpu_vblp_arm(void *fb) {
 bool rbgpu_vblp_start(OSObject *owner) {
     if (!g_vblp_on)
         RB_VBLP_FAIL(1, "vblank pump off - -rbgpuvblpump absent");
-    if (!g_vblp_handleVBL)
-        RB_VBLP_FAIL(2, "IOFramebuffer::handleVBL was never solved - the pump "
-                        "cannot run this boot");
+    // 2oy: deliberately NOT gated on g_vblp_handleVBL. IOGraphicsFamily loads
+    // after this runs (boot 137: vblp_fail 2 alongside vblp_solved 1), so the
+    // handler is checked per tick instead. Code 2 is retired and kept listed
+    // only so an old capture still decodes.
     if (!owner)
         RB_VBLP_FAIL(3, "no owner passed - IOEventSource::init refuses a NULL "
                         "owner, so the timer could not be created");
