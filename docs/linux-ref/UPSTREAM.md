@@ -205,3 +205,20 @@ rather than assumed - `regOTG0_OTG_H_TOTAL` 0x1b2a, `regOTG0_OTG_V_TOTAL`
 For the vblank step, when it comes: `regOTG0_OTG_VERTICAL_INTERRUPT0_CONTROL`
 is 0x1b63 and `..._POSITION` 0x1b62, both `BASE_IDX 2`. `OTG_INTERRUPT_DEST`
 does not exist under that name in 3.1.2 and still has to be found.
+
+## DCN display headers (2pg, 2026-10-23)
+
+Fetched from kernel.org (GitHub raw was rate-limiting), tag **v6.11**,
+`drivers/gpu/drm/amd/include/asic_reg/dcn/`:
+
+- `dcn_3_1_2_offset.h` — **this chip** (DMU 3.1.3 groups to `DCN_VERSION_3_1`,
+  and `dcn31_resource.c` uses this header). Independently confirms
+  `src/common/rb_regs.h`: `regOTG0_OTG_H_TOTAL 0x1b2a` BASE_IDX 2,
+  `regOTG0_OTG_CONTROL 0x1b41`, `regHUBP0_DCSURF_SURFACE_CONFIG 0x5e5`.
+- `dcn_3_0_2_offset.h` — the **newest DCN Apple actually compiles**
+  (`dc/dcn302` appears in `AMDRadeonX6000Framebuffer`'s source paths), kept as
+  the comparison baseline for 2pg.
+
+Note the prefix change: the 3.0.x headers use `mm<REG>`, the 3.1.x headers use
+`reg<REG>`. A parser that handles only one silently reports near-total
+disagreement - that cost one wrong table in 2pg before it was caught (rule 26).
