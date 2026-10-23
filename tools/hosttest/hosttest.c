@@ -392,10 +392,18 @@ static void test_dcn_denylist(void)
 
     /* 3. The cases that matter, by name, from docs/linux-ref.
      *
-     * DENIED: DCHUBBUB_SDPIF_CFG0 moved (74 of 77 DCHUBBUB registers did).
-     * ALLOWED: the scanout path is identical in 3.0.2 and 3.1.2, and blocking
-     * it would stop DAL doing the one thing it CAN get right on this chip. */
-    CHECK(rb_dcn_is_denied(0x0048fu));    /* DCHUBBUB_SDPIF_CFG0 - moved */
+     * DENIED: a dcn302 write to base-2 dword 0x89 is DOMAIN4_PG_STATUS, but
+     * 0x89 in dcn312 is DOMAIN16_PG_CONFIG - a power-gating CONFIG register.
+     * That write would gate the wrong block, which is exactly the class of
+     * damage this list exists to stop.
+     *
+     * ALLOWED: the four registers DAL was actually observed reading on boot
+     * 143 (all CM0, all base 2, identical in both headers), plus the scanout
+     * path. Blocking any of these would stop DAL doing the one thing it CAN
+     * get right on this chip. */
+    CHECK(rb_dcn_is_denied(0x00089u));    /* DOMAIN4_PG_STATUS -> DOMAIN16_PG_CONFIG */
+    CHECK(!rb_dcn_is_denied(0x00d31u));   /* CM0_CM_GAMUT_REMAP_C21_C22 - traced */
+    CHECK(!rb_dcn_is_denied(0x00de3u));   /* CM0_CM_SHAPER_RAMA_END_CNTL_B - traced */
     CHECK(!rb_dcn_is_denied(0x01b2au));   /* OTG0_OTG_H_TOTAL - identical */
     CHECK(!rb_dcn_is_denied(0x01b41u));   /* OTG0_OTG_CONTROL - identical */
     CHECK(!rb_dcn_is_denied(0x005e5u));   /* HUBP0_DCSURF_SURFACE_CONFIG */
@@ -403,8 +411,15 @@ static void test_dcn_denylist(void)
     /* 4. Past the end of the table, so the search cannot run off it. */
     CHECK(!rb_dcn_is_denied(0xffffffffu));
 
-    printf("dcn deny: %u offsets, sorted, searchable; OTG/HUBP allowed, "
-           "DCHUBBUB denied\n", RB_DCN_DENY_COUNT);
+    /* 5. The counts are consistent with the generator's own accounting. */
+    CHECK(RB_DCN_DENY_COUNT == RB_DCN_DENY_DANGER ||
+          RB_DCN_DENY_COUNT == RB_DCN_DENY_DANGER + RB_DCN_DENY_VOID);
+    CHECK(RB_DCN_DENY_BASE_IDX == 2u);
+
+    printf("dcn deny: %u base-%u offsets (%u dangerous, %u void), sorted and "
+           "searchable; OTG/HUBP/CM0 allowed, DOMAIN_PG denied\n",
+           RB_DCN_DENY_COUNT, RB_DCN_DENY_BASE_IDX,
+           RB_DCN_DENY_DANGER, RB_DCN_DENY_VOID);
 }
 
 static void test_dcn_timing_regs(void)

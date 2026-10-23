@@ -24658,3 +24658,76 @@ write. The units cost nothing to learn: boot 142's exact configuration -
 controller only, no promotion, **display intact** - produced four reads, and
 `dal_tr0` now captures them with their addresses. Four numbers settle it, on a
 boot that cannot hurt anything.
+
+## 2pn (2026-10-23, boot 143 recaptured) — THE UNITS ARE SETTLED, and 2pm's deny list was wrong in kind
+
+`rbgpu-boot = 143`, loaded UUID `3BDD5711` matches the build. Controller only,
+no promotion, **display intact** - the safe boot, as intended.
+
+```
+dal_on 1  dal_wroutes 1  dal_srouted 1  dalfb_grouted 1  dalfb_srouted 1
+dal_start 1  dal_start_ret 1   dalfb_start 1  dalfb_start_ret 1
+dal_r_hw 4   dal_tr_n 4   dal_pass 0   (all other paths 0)
+dal_tr0 = 'rd31=ff70ff00 rde3=1000 rde7=100 rde8=80000 '
+```
+
+The evictionless trace channel worked. Both personalities started. And note
+`dalfb_grouted 1` - the boot-143 panic guard is in place.
+
+(The `dalfb_*` keys were nearly missed: a grep for `"dal_[a-z_]*"` does not
+match `dalfb_grouted`, because there is no underscore after `dal`. Rule 26 for
+the third time this session - the search is an instrument.)
+
+### The units: raw dword offsets, BASE_IDX applied inside
+
+Four reads, tested against **both** interpretations and this chip's real DMU
+bases from `rbdump` (`0x12 0xc0 0x34c0 0x9000 0x2403c00`):
+
+| | raw dword offset | absolute index |
+|---|---|---|
+| `0xd31` | `CM0_CM_GAMUT_REMAP_C21_C22` (base2) | nothing |
+| `0xde3` | `CM0_CM_SHAPER_RAMA_END_CNTL_B` (base2) | nothing |
+| `0xde7` | `CM0_CM_SHAPER_RAMA_REGION_2_3` (base2) | nothing |
+| `0xde8` | `CM0_CM_SHAPER_RAMA_REGION_4_5` (base2) | nothing |
+
+Four for four coherent one way, zero the other, and the values fit: `0xff70ff00`
+is a packed pair of small negative 2.13 coefficients, exactly what a gamut
+remap matrix holds. So **`reg` is the raw header dword offset** and the base is
+applied inside the accessor. `rbgpudalenc=dword`.
+
+### And that exposed 2pm's deny list as wrong in KIND, not just in count
+
+2pm asked "which registers moved?" and keyed the list on offsets. **A dword
+offset is not a unique register identity** - two registers with different
+BASE_IDX share one. Measured: **98 of 2pm's 299 denied offsets were also the
+offset of an UNMOVED register**, so that list would have blocked correct
+writes, e.g. `DCHUBBUB_ARB_DF_REQ_OUTSTAND` (moved) sharing `0x505` with
+`MPC_CRC_RESULT_GB` (unmoved).
+
+The right question is per-base: **for BASE_IDX 2, does a dcn302 write to
+offset O land on the same register in dcn312?** Three outcomes:
+
+| | |
+|---|---|
+| same register - ALLOW | 3957 offsets (the whole scanout path) |
+| nothing in dcn312 - write is a no-op | 1151 offsets |
+| **a DIFFERENT real register - DENY** | **160 offsets** |
+
+160, not 299, and a different 160. The entries show why it matters:
+`0x089` is `DOMAIN4_PG_STATUS` to dcn302 and `DOMAIN16_PG_CONFIG` here - DAL
+reading a power-gate status would **write a power-gate config for the wrong
+domain**. That is the class of damage this list exists to stop.
+
+The generator now takes `danger` (the 160, default) or `all` (plus the 1151,
+which costs DAL ~23 % of its base-2 writes and will very likely make it fail -
+a diagnostic setting, not a working one).
+
+**KNOWN LIMITATION, recorded now rather than discovered later:** BASE_IDX 2
+only - 5268 of 6402 registers, and where 4 of 4 observed accesses went.
+BASE_IDX 3 (977 registers, overwhelmingly HDMI/DP audio: AFMT, VPG, DIG) has
+**71** dangerous offsets of its own and is **not covered**, because which
+argument of `writeReg32(reg, val, uint8, uint)` carries the base is still
+unestablished. Audio is not needed for first light.
+
+The hosttest was re-anchored on measured data and verified to FAIL when the
+data is wrong - removing the `0x089` entry trips it.
