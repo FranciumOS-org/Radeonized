@@ -8123,6 +8123,47 @@ static t_rbDalW2    orig_dal_w2_2ph    = nullptr;
 static t_rbDalW4    orig_dal_w4_2ph    = nullptr;
 static t_rbCtlStart orig_ctl_start_2ph = nullptr;
 
+// 2pk: A TRACE CHANNEL THAT CANNOT BE EVICTED.
+//
+// Boot 142 proved the hooks fire (`dal_r_hw 4`) but the trace was still
+// unreadable: `RBGPULog` is a 512-entry ring holding the MOST RECENT lines,
+// and the DAL hooks run at the very start of boot, so the accelerator's own
+// bring-up logging pushed them out. 2pi fixed the 2en flood - the ring now
+// shows 90+ distinct milestones instead of one - and that fix is what made
+// this diagnosable, but a ring is still the wrong shape for a trace that
+// happens first and must survive to a capture.
+//
+// So the trace gets its own storage: fixed chunks published as string diag
+// keys `dal_tr0..dal_tr15`, which live in RBGPUDiag and are never evicted by
+// anything. 16 x 12 = 192 entries, which is plenty - boot 142's whole trace
+// was four reads.
+#define RB_DAL_TR_CHUNKS 16
+#define RB_DAL_TR_PER    12
+static char     g_dal_tr[RB_DAL_TR_CHUNKS][224];
+static uint32_t g_dal_tr_len[RB_DAL_TR_CHUNKS];
+static uint32_t g_dal_tr_n = 0;
+
+// kind: 'w'/'W' = writeReg32 2-arg/4-arg, 'A' = AtomBIOS, 'B' = VBIOS parser,
+// 'r' = hwRead. Writes are DROPPED; reads are passed through.
+static void rbgpu_dal_trace(char kind, uint32_t reg, uint32_t val) {
+    const uint32_t idx = g_dal_tr_n / RB_DAL_TR_PER;
+    if (idx >= RB_DAL_TR_CHUNKS)
+        return;                       // full; the counters still total
+    char *buf = g_dal_tr[idx];
+    uint32_t *len = &g_dal_tr_len[idx];
+    if (*len >= sizeof(g_dal_tr[0]) - 1)
+        return;
+    int n = snprintf(buf + *len, sizeof(g_dal_tr[0]) - *len, "%c%x=%x ",
+                     kind, reg, val);
+    if (n > 0)
+        *len += static_cast<uint32_t>(n);
+    g_dal_tr_n++;
+    char key[16];
+    snprintf(key, sizeof(key), "dal_tr%u", idx);
+    rbgpu_diag_set_str(key, buf);
+    rbgpu_diag_set_num("dal_tr_n", g_dal_tr_n);
+}
+
 static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
     g_dal_writes++;
     g_dal_dropped++;
@@ -8133,6 +8174,7 @@ static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
     }
     if (g_dal_writes == 1 || (g_dal_writes & 0xff) == 0)
         rbgpu_diag_set_num("dal_writes", g_dal_writes);
+    rbgpu_dal_trace(how[0], reg, val);
 }
 
 static void hooked_dal_w2_2ph(void *self, uint32_t reg, uint32_t val) {
@@ -8199,8 +8241,7 @@ static void rbgpu_dal_count(const char *key, uint64_t *n) {
 static uint32_t hooked_dal_hwr_2pj(void *self, uint32_t reg) {
     uint32_t v = orig_dal_hwr_2pj(self, reg);
     rbgpu_dal_count("dal_r_hw", &g_dal_r_hw);
-    if (g_dal_r_hw <= 24)
-        rbgpu_log("2pj: DAL hwRead  reg %#010x -> %#010x", reg, v);
+    rbgpu_dal_trace('r', reg, v);
     return v;
 }
 static uint32_t hooked_dal_atomr_2pj(void *self, void *ctx, uint32_t reg) {
@@ -8262,6 +8303,56 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
     return ret;
 }
 
+// 2pk: PROMOTING THE WRANGLER, AND WHY IT MUST DECLINE.
+//
+// Boot 142 settled the question the private category left open: with both
+// Apple personalities attached but neither owning `IOFramebuffer`, DAL did
+// exactly **four** register reads and zero writes. Nothing drives it. So the
+// Wrangler has to actually BE the framebuffer for DAL to attempt a mode set.
+//
+// But promoting it is a one-way door if it succeeds: Apple ships it in
+// `IOFramebuffer` at score 60000 against IONDRVFramebuffer's 20000, and with
+// every write DROPPED it cannot possibly bring up a display - so a successful
+// start() would hand the panel to a framebuffer that physically cannot drive
+// it. A black screen, and rule 12 says that is indistinguishable from a hang.
+//
+// So when promoted this hook calls orig - DAL does its work, every write
+// recorded and swallowed, the trace captured - and then returns **false**
+// regardless. xnu's `probeCandidates` was read in 2oz: the start loop is
+// "start the best (until success) of each category", so a false sends it to
+// the next candidate, which is IONDRVFramebuffer. We get the full trace AND
+// keep the working display.
+//
+// In the private category it does NOT decline, so boot 142's behaviour is
+// preserved exactly and the safety is added only where it is needed.
+static bool g_dalfb_real = false;          // -rbgpudalfbreal
+static t_rbCtlStart orig_wr_start_2pk = nullptr;
+
+static bool hooked_wr_start_2pk(void *self, void *provider) {
+    rbgpu_diag_set_num("dalfb_start", 1);
+    bool ret = orig_wr_start_2pk(self, provider);
+    rbgpu_log("2pk: AmdGpuWrangler::start returned %d after %llu dropped "
+              "writes and %llu reads (hw %llu atom %llu bios %llu)",
+              ret, (unsigned long long)g_dal_writes,
+              (unsigned long long)(g_dal_r_hw + g_dal_r_atom + g_dal_r_bios),
+              (unsigned long long)g_dal_r_hw, (unsigned long long)g_dal_r_atom,
+              (unsigned long long)g_dal_r_bios);
+    rbgpu_diag_set_num("dalfb_start_ret", ret ? 1 : 0);
+    rbgpu_diag_set_num("dal_writes", g_dal_writes);
+    rbgpu_diag_set_num("dal_r_hw",   g_dal_r_hw);
+    rbgpu_diag_set_num("dal_w_atom", g_dal_w_atom);
+    rbgpu_diag_set_num("dal_w_bios", g_dal_w_bios);
+    if (g_dalfb_real) {
+        rbgpu_log("2pk: DECLINING the framebuffer on purpose - every DAL write "
+                  "was dropped, so this framebuffer cannot drive a panel. "
+                  "Returning false sends xnu to the next candidate, which is "
+                  "IONDRVFramebuffer, and the display keeps working.");
+        rbgpu_diag_set_num("dalfb_declined", 1);
+        return false;
+    }
+    return ret;
+}
+
 __attribute__((noinline))
 void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                           mach_vm_address_t address, size_t size) {
@@ -8305,6 +8396,19 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                   "register write will be recorded and DROPPED");
     }
     rbgpu_diag_set_num("dal_wroutes", g_dal_safe ? 1 : 0);
+
+    KernelPatcher::RouteRequest wr(
+        "__ZN29AMDRadeonX6000_AmdGpuWrangler5startEP9IOService",
+        hooked_wr_start_2pk, orig_wr_start_2pk);
+    if (patcher.routeMultiple(id, &wr, 1, address, size)) {
+        rbgpu_diag_set_num("dalfb_srouted", 1);
+    } else {
+        patcher.clearError();
+        rbgpu_log("2pk: FAILED to route AmdGpuWrangler::start - if the "
+                  "promoted personality is active it could KEEP the "
+                  "framebuffer it cannot drive. Remove -rbgpudalfbreal.");
+        rbgpu_diag_set_num("dalfb_srouted", 0);
+    }
 
     KernelPatcher::RouteRequest st(
         "__ZN39AMDRadeonX6000_AmdRadeonControllerNavi25startEP9IOService",
@@ -8520,6 +8624,11 @@ void RGPU::init() {
     g_dal_on = checkKernelArgument("-rbgpudal");
     rbgpu_log("2ph: DAL dry run %s (records and DROPS every register write)",
               g_dal_on ? "ARMED by -rbgpudal" : "off (add -rbgpudal)");
+    g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
+    rbgpu_log("2pk: Wrangler promotion %s - it will take IOFramebuffer, let "
+              "DAL run with writes dropped, then DECLINE so IONDRVFramebuffer "
+              "keeps the panel",
+              g_dalfb_real ? "ARMED by -rbgpudalfbreal" : "off");
 
     // 2pe: observe-only, so it is safe to leave armed. Separate arg because a
     // diagnostic must be removable without disturbing the two fixes.
