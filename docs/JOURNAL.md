@@ -23114,3 +23114,101 @@ HDMI connected and read `OTG1_CONTROL`. The probe already reads all four.
 | display brightness | **probably not** - PWM looks reachable, unmeasured |
 | HDMI output | **yes** - unless firmware already lit it |
 | HDMI audio | **yes**, and downstream of HDMI |
+
+## 2os - BOOT 133, level 2: the pipe measured, and my backlight decode was wrong
+
+First level-2 probe. `refused writes 0` against `index writes 2565` - the
+no-write policy held while reading the DMU window. Capture in
+`logs/20261023-012428`.
+
+### The timing, complete
+
+```
+OTG0_CONTROL            0x00011201   OTG_MASTER_EN set
+OTG0_H_TOTAL            0x0000083a   2106 -> 2107 total
+OTG0_V_TOTAL            0x00000469   1129 -> 1130 total
+OTG0_H_BLANK_START_END  0x007f07ff   start 2047  end  127
+OTG0_V_BLANK_START_END  0x0014044c   start 1100  end   20
+OTG0_H_SYNC_A           0x003c0000   0 -> 60     POL 0  positive
+OTG0_V_SYNC_A           0x00050000   0 ->  5     POL 1  negative
+HUBP0_SURFACE_PITCH     0x0000077f   1920 px
+HUBP0_SURFACE_CONFIG    0x00000008   ARGB8888
+HUBP0_PRIMARY_ADDR(_HI) 0x000000f4:0x00000000
+```
+
+**The refresh rate measured 143.833 Hz** - 10 frames in 69 524 857 ns. The
+panel has been running at 144 Hz all along; macOS simply never knew, which is
+the whole of `IOFB0Hz = Yes`.
+
+**The active size is not a register** - it is `blank_start - blank_end`, and it
+comes out **2047 - 127 = 1920** by **1100 - 20 = 1080**. That is the
+cross-check: an independent quantity, derived from registers this session
+mapped for the first time, landing exactly on the resolution macOS reports. The
+mapping is right.
+
+With the measured refresh the pixel clock follows: 2107 x 1130 x 143.833 Hz =
+**342.453 MHz**. Nothing reads it directly (it is behind the DCCG dividers), so
+this is the only way we get it, and an `IOFramebuffer` detailed timing now has
+every field it needs.
+
+**The scanout buffer is at the carve-out base.** `HUBP0_PRIMARY_SURFACE_ADDRESS`
+= `0xf400000000`, and the carve-out is `0xf400000000 - 0xf4ffffffff`. So by
+2ks's own equation, `mc2pa(0xf400000000)` = `0xf400000000 - vram_start +
+vram_base_offset` = **0x780000000** system-physical, exactly `FB_OFFSET`
+(0x780 << 20). Step (d) therefore already knows both the register to write and
+how to turn an address into what it expects.
+
+**The carve-out reads 4096 MB.** That settles 2or's `VRAM,totalMB` value.
+
+**DMCUB boot status is 0x2** - `mailbox ready` only, with bit 0
+(driver/DAL firmware) **clear**, so the running DMCUB image is the
+**firmware's (GOP/VBIOS)**, not a driver's. Consistent with 2oq: Apple's DAL
+never initialised this chip. DMCUB_CNTL 0x001900c6 = enabled, idle-waiting.
+
+**OTG1, OTG2 and OTG3 are all off** (0x300) with HUBP1-3 surfaces at 0. Whether
+an external display was connected for this boot is not recorded, so 2or's "does
+the GOP light an already-connected HDMI display" question is **still open** -
+it needs a boot where HDMI is known to be plugged in.
+
+### My backlight decode was wrong, and the hardware said so immediately
+
+It printed:
+
+```
+backlight PWM: enabled, duty 49152/12 = 409600.0%
+```
+
+409600 % is not a reading, it is a bug, and it was mine: I had placed
+`BL_ACTIVE_INT_FRAC_CNT` and `BL_PWM_PERIOD` in `[31:16]` and the enable at
+bit 1, from memory. `dcn_3_1_2_sh_mask.h` says otherwise - all three of
+`BL_ACTIVE_INT_FRAC_CNT`, `BL_PWM_PERIOD` and `BL_PWM_GRP1_REG_LOCK` are at
+**shift 0**, `BL_PWM_PERIOD_BITCNT` at 0x10, `BL_PWM_FRACTIONAL_EN` at bit
+**30** and `BL_PWM_EN` at bit **31**. The "enabled" was luck: `0xc00056ea & 2`
+is non-zero by coincidence.
+
+The level is fixed-point, so rather than re-derive it the arithmetic is now
+taken verbatim from Linux's `dce_get_16_bit_backlight_from_pwm`
+(`display/dc/dce/dce_panel_cntl.c`): mask the period by its bit count, take
+the full 16 bits of the count when fractional is on, then
+`(count << (1 + bitcnt)) / period`, rounded. On this machine:
+
+```
+BL_PWM_CNTL        0xc00056ea   EN=1 FRACTIONAL=1  count 22250
+BL_PWM_PERIOD_CNTL 0x000c0fa0   period 4000, 12-bit
+BL_PWM_GRP1_REG_LOCK 0x80000000 lock free, no update pending
+  -> level 22784 / 65535 = 34.8 %
+```
+
+**This is a falsifiable prediction, not a decode exercise**: if the panel is
+not sitting at roughly a third brightness, the arithmetic is still wrong.
+
+**Brightness is confirmed reachable.** The PWM is enabled and configured by
+firmware, the group lock is free with no update pending, and Linux's setter is
+one field write - `REG_UPDATE(BL_PWM_CNTL, BL_ACTIVE_INT_FRAC_CNT, level)`.
+That is a far smaller thing than mode setting, and it is now measured rather
+than hoped.
+
+This is the rule that keeps earning its place: **the instrument is a suspect.**
+Two decodes went out in 2oq/2or; the hardware falsified one of them on first
+contact, and only because the output was a physical quantity with a plausible
+range rather than a hex dump.

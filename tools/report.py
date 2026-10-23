@@ -197,33 +197,68 @@ def main():
                 extra += f" ({fmt})"
             print(f"OTG{i} {on}{extra}")
             if i == 0 and ctl & 1:
-                # 2oq: the detailed timing a published IOFramebuffer needs.
-                # Blank/sync registers pack start in [15:0] and end in [31:16]
-                # (dcn_3_1_2_sh_mask.h: OTG_H_BLANK_START, OTG_H_BLANK_END,
-                # OTG_H_SYNC_A_START, OTG_H_SYNC_A_END).
+                # 2os: the detailed timing an IOFramebuffer needs, decoded with
+                # the real field shifts from dcn_3_1_2_sh_mask.h - every one of
+                # OTG_H_BLANK_START, OTG_H_SYNC_A_START, OTG_V_BLANK_START and
+                # PITCH is at shift 0 with its _END / _META counterpart at 0x10.
+                #
+                # The ACTIVE size is not a register: it is blank_start minus
+                # blank_end. Printing it is the cross-check that the whole
+                # mapping is right, because it has to come out as the
+                # resolution macOS independently reports.
                 hb, vb = reg(regs, "OTG0_H_BLANK_START_END"), reg(regs, "OTG0_V_BLANK_START_END")
                 hs, vs_ = reg(regs, "OTG0_H_SYNC_A"), reg(regs, "OTG0_V_SYNC_A")
                 hsc, vsc = reg(regs, "OTG0_H_SYNC_A_CNTL"), reg(regs, "OTG0_V_SYNC_A_CNTL")
                 pitch = reg(regs, "HUBP0_SURFACE_PITCH")
-                lohi = lambda v: (v & 0xFFFF, (v >> 16) & 0xFFFF)
+                lo = lambda v: v & 0xFFFF
+                hi = lambda v: (v >> 16) & 0xFFFF
                 if hb is not None and vb is not None:
-                    print(f"  blank  H {lohi(hb)}  V {lohi(vb)}   (start, end)")
+                    hact, vact = lo(hb) - hi(hb), lo(vb) - hi(vb)
+                    print(f"  active {hact}x{vact}   (blank start - blank end)")
+                    print(f"  blank  H start {lo(hb)} end {hi(hb)}   "
+                          f"V start {lo(vb)} end {hi(vb)}")
                 if hs is not None and vs_ is not None:
+                    # OTG_H_SYNC_A_POL / OTG_V_SYNC_A_POL are both at shift 0.
                     pol = lambda c: "negative" if c is not None and c & 1 else "positive"
-                    print(f"  sync   H {lohi(hs)} {pol(hsc)}  V {lohi(vs_)} {pol(vsc)}")
+                    print(f"  sync   H {hi(hs) - lo(hs)} px {pol(hsc)}   "
+                          f"V {hi(vs_) - lo(vs_)} lines {pol(vsc)}")
                 if pitch is not None:
-                    # DCSURF_SURFACE_PITCH: PITCH in [15:0], in pixels - 1
-                    print(f"  pitch  {(pitch & 0xFFFF) + 1} px")
+                    print(f"  pitch  {lo(pitch) + 1} px")
+                # The pixel clock is not readable here (it is behind the DCCG
+                # dividers), but total x total x the measured refresh gives it.
+                mhz = p.get("VSyncMilliHertz") or 0
+                if mhz and h is not None and v is not None:
+                    total = ((h & 0x7FFF) + 1) * ((v & 0x7FFF) + 1)
+                    print(f"  pixclk {total * mhz / 1e9:.3f} MHz "
+                          f"(derived: {total} total px x the measured refresh)")
 
-        # 2or: the backlight PWM, to say whether brightness is reachable.
-        # dcn_3_1_2_sh_mask.h: BL_PWM_CNTL.BL_ACTIVE_INT_FRAC_CNT is [31:16],
-        # BL_PWM_PERIOD_CNTL.BL_PWM_PERIOD is [31:16] and _BITCNT is [8:6].
+        # 2os: the backlight PWM. My first decode of this was WRONG and the
+        # hardware said so - it printed "duty 49152/12 = 409600.0%". The
+        # fields are not where I guessed: per dcn_3_1_2_sh_mask.h,
+        # BL_ACTIVE_INT_FRAC_CNT, BL_PWM_PERIOD and BL_PWM_GRP1_REG_LOCK are
+        # all at shift 0, BL_PWM_PERIOD_BITCNT at 0x10, BL_PWM_FRACTIONAL_EN
+        # at bit 30 and BL_PWM_EN at bit 31 (not bit 1).
+        #
+        # The level is fixed-point, so the arithmetic is taken verbatim from
+        # Linux's dce_get_16_bit_backlight_from_pwm (dce/dce_panel_cntl.c)
+        # rather than re-derived. It returns a 16-bit level.
         blc, blp = reg(regs, "BL_PWM_CNTL"), reg(regs, "BL_PWM_PERIOD_CNTL")
+        bll = reg(regs, "BL_PWM_GRP1_REG_LOCK")
         if blc is not None and blp is not None:
-            duty, period = (blc >> 16) & 0xFFFF, (blp >> 16) & 0xFFFF
-            en = "enabled" if blc & (1 << 1) else "DISABLED"
-            pct = f"{100.0 * duty / period:.1f}%" if period else "n/a"
-            print(f"\nbacklight PWM: {en}, duty {duty}/{period} = {pct}")
+            bitcnt = (blp >> 16) & 0xFFFF or 16
+            period = blp & ((1 << bitcnt) - 1)
+            frac_en = bool(blc & (1 << 30))
+            pwm = blc & 0xFFFF if frac_en else blc & (((1 << bitcnt) - 1) << (16 - bitcnt))
+            lvl = ((pwm << (1 + bitcnt)) // (period or 0xFFFF) + 1) >> 1
+            print(f"\nbacklight PWM: {'ENABLED' if blc & (1 << 31) else 'disabled'}"
+                  f", period {period} ({bitcnt}-bit)"
+                  f", fractional {'on' if frac_en else 'off'}")
+            print(f"  level {lvl}/65535 = {100.0 * lvl / 65535:.1f}% "
+                  f"(BL_ACTIVE_INT_FRAC_CNT {pwm})")
+            if bll is not None:
+                print(f"  group lock {'HELD' if bll & 1 else 'free'}"
+                      f", update {'PENDING' if bll & (1 << 8) else 'idle'}"
+                      f", ignore-master-lock {'on' if bll & (1 << 31) else 'off'}")
             if not period:
                 print("  period 0 - firmware did not set up this PWM; the panel "
                       "is driven some other way (ACPI, or PWRSEQ1)")
