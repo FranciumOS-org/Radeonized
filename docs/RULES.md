@@ -667,6 +667,42 @@ The two that bite hardest:
   valid. `MetalContext::StartComposite(WSCompositeDestination*, MTLLoadAction,
   MTLStoreAction)` is the Metal entry point. Read 2ps and 2pt together; 2pr's
   headline is retracted there.
+- **THE SOFTWARE-COMPOSITING CHAIN IS NOW CLOSED END TO END, AND ITS LAST LINK
+  IS ONE USERSPACE CALL (2px/2py).** SkyLight routes a display to
+  `CompositorSW` when its accelerator id is 0 (2pv), and the id comes from
+  CoreDisplay, not from any framebuffer property:
+  `MPAcceleratorForDisplayDevice` returns `mpPriv->accelerator`. **The field
+  names are Apple's own**, decoded from
+  `CoreDisplay::CreateMPPrivDict(MPPriv const*)`, which pairs each field with a
+  CFString key - `+0x58 service`, **`+0x5c accelerator`**, `+0x60 unit`,
+  `+0x64 aliasID`, `+0x74 deviceFlags`, `+0x98 fbIndex` - so nothing here rests
+  on offset arithmetic. Its **single writer** is
+  `CoreDisplay::Framebuffer::InitializeMPPrivAccelerator()`
+  (`mpPriv->accelerator = fb->0x18`), and `fb->0x18` is written only by the
+  `dispatch_once` block of `CoreDisplay::GPU::UpdateAcceleratorForMetal()` from
+  **`CoreDisplay::FindAcceleratorWithMTLDevice()`**, which is just:
+  `MTLCopyAllDevices()`, then the first device with
+  `isLowPower && !isRemovable`, else the first `!isRemovable`, and
+  `[d acceleratorPort]`; **0 if none**, in which case the fill loop never runs
+  and every `mpPriv->accelerator` stays 0. **`make accelport` reproduces that
+  exactly in userspace** - no kext, no boot-arg, one second. **It has NOT
+  answered the question yet**: run on the session's boot it prints 0 and
+  declares itself INCONCLUSIVE (`rc=3`), because that boot has **zero
+  `IOAccelerator` services** (`AMDRadeonX6800_AMDRadeonHWLibsX6800` is
+  `!registered, !matched`), so Metal has no device for an unrelated reason.
+  **Run it in an armed boot.** Non-zero there means the id is fine and the gate
+  is the loop's other precondition - `gpu->0x58 == gpu->0x60`, i.e. the
+  GPUWrangler gave this `CoreDisplay::GPU` no `Framebuffer` at all - which
+  points at `GPUController::ProcessGPUAdded` and `GPUWranglerDevices()`. Still
+  unanswered from 2px: whether our display uses the **MP** or the **VFB** ops
+  table. New cache tooling, all under `tools/re/`: `dscsym.sh` /
+  `dscsym_many.sh` (symbolize unslid addresses, slide measured **every run**;
+  the `_many` form symbolized a 0x40 grid over CoreDisplay's `__TEXT` into its
+  complete **2304-function inventory** in three seconds, which is what found
+  the names - cheaper than any byte scan), `dscdis.sh`, `ripxref.py` (all
+  RIP-relative encodings, not just `lea`) and `fldstore.py` (every store whose
+  written bytes **overlap** a field - 216 sites where 2px's single-encoding
+  search found ten).
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and

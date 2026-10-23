@@ -25811,3 +25811,189 @@ it is in a region the linear sweep desynced through, or the field is filled by a
 `memcpy`-style bulk copy from an IOKit query.
 
 Finding that writer is the next step, and it is still static.
+
+## 2py - the writer is found: `mpPriv->accelerator` comes from `-[MTLDevice acceleratorPort]`
+
+2px left one gap: what writes the accelerator id. It is closed, statically, in
+one pass. The field also has Apple's own name now, so nothing here rests on
+offset arithmetic.
+
+### The field is named by Apple, not inferred
+
+`CoreDisplay::CreateMPPrivDict(MPPriv const*)` (unslid `0x7ff8040ad280`) builds
+a debug dictionary by pairing each field with a CFString key, 0x20 bytes apart
+in `__DATA_CONST`. Decoding the keys next to each `movl 0xNN(%r15)` gives the
+struct outright:
+
+| offset | Apple's key | cross-check |
+|---|---|---|
+| +0x00 | `next` | the list walk in `MPDisplayDevicePriv` reads `(%rax)` |
+| +0x10 | `deviceName` | passed by address to `SetStringValue` |
+| +0x50 | `deviceLocation` | |
+| +0x58 | **`service`** | `MPRebuildDevice` passes it to `DisplayPipeForService` |
+| +0x5c | **`accelerator`** | `MPAcceleratorForDisplayDevice` returns it as `out1` |
+| +0x60 | **`unit`** | `RebuildMappedDisplayList` writes it from `WSGLGetAssignedFramebufferUnitNumber` |
+| +0x64 | `aliasID` | the `AAPL,display-alias` property |
+| +0x68 | `aliasPolicy` | `AAPL,alias-policy` |
+| +0x6c / +0x70 | `devicePort` / `deviceNotifyPort` | |
+| +0x74 | **`deviceFlags`** | receives `get_acceleration_flags(...)` |
+| +0x78 / +0x80 / +0x88 | `vramOptions` / `vramAddress` / `vramSize` | |
+| +0x98 | **`fbIndex`** | `MPAcceleratorForDisplayDevice` returns it as `out2` |
+| +0xa0 / +0xa8 | `fbOffset` / `fbModeNum` | |
+| +0x180 / +0x184 | `gpuVendor` / `modeCount` | |
+
+So 2px's `priv->0x5c` **is** the accelerator id, by Apple's own label, and
+`priv->0x98` is `fbIndex`. Four of the names are independently confirmed by
+what the code does with them.
+
+### Why 2px's search missed the writer
+
+2px looked for `movl %reg, 0x5c(%reg)` and found ten unrelated sites. That form
+is not the only way to write a 4-byte field: a 64-bit store to +0x58 covers
+0x5c, and an SSE store to +0x50 covers 0x50..0x5f. `tools/re/fldstore.py` scans
+for every store *whose written bytes overlap a range*, with the width, and found
+**216 sites** where 2px found ten - among them `UpdateCGXDisplayDevice`,
+`MPRebuildDevice`, `CGXRegisterScreen` and
+`CoreDisplay::Framebuffer::Framebuffer`. The lesson is the old one in a new
+costume: **a search is an instrument (rule 26), and an instrument that only
+knows one encoding will report absence.**
+
+What actually found it was not a wider search but a **name**. `atos` on a
+0x40-byte grid over CoreDisplay's whole `__TEXT`, in one call, yields its
+complete 2304-function inventory in three seconds. In that list:
+
+```
+7ff804136a76  CoreDisplay::Framebuffer::InitializeMPPrivAccelerator()
+7ff8040f590b  UpdateDisplayAccelerators(CGXDisplayDevice const*, MPPriv const*)
+7ff80412f8ea  CoreDisplay::FindAcceleratorWithMTLDevice()
+7ff8040c29a8  CoreDisplay::GPU::UpdateAcceleratorForMetal()::$_0
+```
+
+Getting the inventory first would have been cheaper than any of the scans.
+
+### The chain, end to end
+
+`CoreDisplay::Framebuffer` is 0x488 bytes (the loop stride below) and embeds the
+`MPPriv` at **+0x70**. That bias is carried by four semantic matches, not by
+position alone: `fb+0xc8` -> `service` is handed to
+`IORegistryEntryCreateCFProperty`; `fb+0xe4` -> `deviceFlags` receives
+`get_acceleration_flags`; `fb+0x108` -> `fbIndex`; `fb+0xcc` -> `accelerator`.
+
+`InitializeMPPrivAccelerator()` (`0x7ff804136a76`) is three instructions of
+substance:
+
+```
+movl 0x18(%rdi), %eax        ; the Framebuffer's accelerator port
+movl %eax,  0xcc(%rdi)       ; mpPriv->accelerator = it
+testl %eax, %eax
+je   <no-accelerator path>   ; mpPriv->deviceFlags = 0, fbIndex = vramAddress
+```
+
+and on the accelerated path it reads **`IOAccelRevision`** off the service with
+`IORegistryEntryCreateCFProperty` and sets `deviceFlags |= 0x40` when it is
+`>= 2`. Our `.Display_boot` publishes `IOAccelRevision = 2` (2pp), so that bit
+would be set for us.
+
+`fb+0x18` has exactly one writer: the `dispatch_once` block of
+**`CoreDisplay::GPU::UpdateAcceleratorForMetal()`** (`0x7ff8040c29a8`):
+
+```
+accel = CoreDisplay::FindAcceleratorWithMTLDevice()
+gpu->0x70 = accel
+if (accel == 0) return                       ; <<< nothing else happens
+IOObjectRetain(accel)
+for (fb = gpu->0x58; fb != gpu->0x60; fb += 0x488) {
+    if (fb->0x18) IOObjectRelease(fb->0x18)
+    fb->0x18 = accel
+    IOObjectRetain(accel)
+    fb->0x20 = AcceleratorFBCounts()[accel].0x14
+    InitializeMPPrivAccelerator(fb)
+    ++AcceleratorFBCounts()[accel].0x14
+}
+```
+
+**If `FindAcceleratorWithMTLDevice()` returns 0, the loop never runs and every
+`mpPriv->accelerator` stays 0** - which is precisely what 2px measured through
+`SLSAcceleratorForDisplayNumber`.
+
+### `FindAcceleratorWithMTLDevice()` in full
+
+`0x7ff80412f8ea` is Objective-C through `objc_msgSend`. The three selectors
+decode out of `__DATA_CONST` as `count`, `objectAtIndex:`, `isLowPower`,
+`isRemovable` and `acceleratorPort`:
+
+```
+devices = MTLCopyAllDevices()
+if ([devices count] == 0) return 0
+pass 1: first d with  [d isLowPower] && ![d isRemovable]  ->  [d acceleratorPort]
+pass 2: first d with !([d isRemovable])                   ->  [d acceleratorPort]
+neither                                                   ->  0
+```
+
+That is the whole source of the number. An integrated, non-removable GPU - ours
+- is what pass 1 is written for.
+
+### The oracle, and why its first run proves nothing
+
+This is reproducible from userspace with no kext and no boot, so
+`tools/accelport.m` (`make accelport`) reproduces it instruction for
+instruction, reading `acceleratorPort` through `respondsToSelector` rather than
+assuming it exists.
+
+**Run on this boot it reports 0 - and the run is INCONCLUSIVE, by its own
+verdict.** It prints its precondition first:
+
+```
+precondition: IOAccelerator services in this boot = 0
+MTLCopyAllDevices()            count = 0
+MTLCreateSystemDefaultDevice() -> NULL
+FindAcceleratorWithMTLDevice() = 0 (0x0)  [neither pass matched - returns 0]
+INCONCLUSIVE: this boot has no accelerator service, so 0 here says nothing
+about compositing. Re-run in an armed boot.
+```
+
+`ioreg` agrees: `AMDRadeonX6800_AMDRadeonHWLibsX6800` is `!registered,
+!matched`, and there are **zero** `IOAccelerator` services. **The boot the
+session is running in is not an accelerated boot**, so Metal has no device for a
+reason that has nothing to do with compositing. Rule 14 and rule 26 both apply,
+and the tool refuses the conclusion rather than offering it; `rc=3` is that
+refusal. Do not record "`MTLCopyAllDevices` returns nothing, that is the bug" -
+it is not evidence yet.
+
+### What this does and does not settle
+
+Settled: the accelerator id's name, its single writer, and the exact expression
+that produces it. The question "what writes `mpPriv->accelerator`" is closed.
+
+Not settled, and both need an armed boot:
+
+1. **Does `FindAcceleratorWithMTLDevice()` return 0 when the accelerator IS
+   up?** `make accelport && build/out/accelport` answers it in one second. If it
+   returns non-zero there, the id is fine and the loop's *other* precondition is
+   the gate: `gpu->0x58 == gpu->0x60`, i.e. **the GPUWrangler never gave this
+   `CoreDisplay::GPU` any `Framebuffer`** - our `IONDRVFramebuffer` is not in its
+   vector. That would move the hunt to `GPUController::ProcessGPUAdded` and
+   `GPUWranglerDevices()`.
+2. **MP table or VFB table** (2px's second open item) is still runtime state and
+   still unanswered.
+
+Also note for honesty about 2pt: its "1 rejection in 20 minutes" count came from
+this same unaccelerated boot. That does not disturb 2pt's conclusion, which
+rests on 2pd's measurement of `CompositorSW` doing real work, but the count
+itself is from an unaccelerated machine and should not be quoted as an armed
+figure.
+
+### Tooling added
+
+- `tools/accelport.m` - the oracle above.
+- `tools/re/dscsym.sh`, `tools/re/dscsym_many.sh` - symbolize cache addresses,
+  measuring the slide **every run** (2ps). The `_many` form takes a file of
+  unslid addresses and does them in one `atos` call, which is what made the
+  2304-function inventory cheap.
+- `tools/re/dscdis.sh` - disassemble cache-resident code at its real address.
+- `tools/re/ripxref.py` - every RIP-relative reference to an address, read or
+  write, across all the common encodings. `dsc.py xref` only knows `lea`, which
+  is why the writers of the mapped-display list head (`0x7ff843bb14e0`) were
+  invisible to it.
+- `tools/re/fldstore.py` - every store whose written bytes overlap a struct
+  field range, with its width.
