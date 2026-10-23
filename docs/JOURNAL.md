@@ -23591,3 +23591,47 @@ should help it; only a real framebuffer gives it a hardware cursor. And
 to be graphics - nothing in this milestone addresses it.
 
 Built: UUID `59AD6CF5` -> `E4518225`, `hosttest: all passed`.
+
+## 2ox - a NULL owner. Two boots spent on my plumbing, and one rule I broke myself.
+
+Boot 136: `vblp_fb_seen 1`, `vblp_solved 1`, `vblp_on 1` - and still
+`vblp_armed 0`, with **no `vblp_idle_*` keys at all**. The absent idle counters
+are the informative part: the tick never ran even once, so the failure was
+still inside `rbgpu_vblp_start`, not downstream of it.
+
+The cause: `IOTimerEventSource::timerEventSource(nullptr, rbgpu_vblp_tick)`.
+`IOEventSource::init` refuses a NULL owner, so the timer was never created.
+The peer now passes `this`. That is correct whether or not the NULL-owner
+detail is exactly as remembered, so it was **passed rather than researched** -
+the same move as not re-deriving the backlight arithmetic in 2os.
+
+### The rule I broke was my own
+
+2ow made all four failure paths publish the identical `vblp_armed 0`. That is
+**rule 14** - "absence is not a result; every path out of a probe must say
+something" - violated by the person citing it two paragraphs earlier in the
+same milestone. Four distinct causes were made indistinguishable, and telling
+them apart cost a boot that a reason code would have saved.
+
+`vblp_fail` now carries one: 1 off by boot-arg, 2 handleVBL unsolved, 3 no
+owner, 4 `workLoop()`, 5 `timerEventSource()`, 6 `addEventSource()`, 0 on
+success. The lesson is not "add a counter" - it is that **a failure path which
+cannot say which failure it was is not instrumented**, however many counters
+sit next to it.
+
+### Accounting, honestly
+
+Three boots have now gone to this: 134 proved `refreshRate` lands but does not
+pace, 135 and 136 were **both** my plumbing - wrong context for the workloop,
+then a NULL owner. The vblank hypothesis itself has **still never executed**.
+The user has twice said the real answer is replacing the framebuffer, and has
+been patient while two of those three boots measured nothing but my own bugs.
+
+That has to be weighed against the thing that has not changed: the experiment
+is a timer plus one exported call, and the alternative is a framebuffer driver
+for a DCN generation macOS does not contain (2oq). One more boot settles
+whether the cheap path works. If `vblp_ticks` climbs and nominal stays 30.00,
+the vblank route is dead on evidence and the rewrite is the answer - which is
+the user's position, confirmed rather than assumed.
+
+Built: UUID `E4518225` -> `F4A12A24`, `hosttest: all passed`.
