@@ -100,6 +100,33 @@ static const struct rb_reg_def rb_reg_defs[] = {
     { "HUBP3_SURFACE_CONFIG",  RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x0879 },
     { "HUBP3_PRIMARY_ADDR",    RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x089e },
     { "HUBP3_PRIMARY_ADDR_HI", RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x089f },
+
+    /* 2oq: the full timing of the pipe that is actually scanning out, so a
+     * framebuffer can be published with the real numbers instead of the boot
+     * framebuffer's single 0 Hz mode.
+     *
+     * OTG0 ONLY, deliberately. The probe reads all four OTGn_CONTROLs and
+     * boot 2oq measured OTG0_CONTROL = 0x00011201 (OTG_MASTER_EN set) with
+     * OTG1-3 at 0x300 (off), so OTG0 is the live pipe on this machine. If a
+     * later boot shows another pipe live, extending is mechanical: the OTG
+     * instance stride is 0x80 dwords (OTG1_H_TOTAL 0x1baa - OTG0 0x1b2a) and
+     * the HUBP stride is 0xdc (HUBP1_SURFACE_CONFIG 0x06c1 - HUBP0 0x05e5).
+     *
+     * FRAME_COUNT is the one that answers the question H_TOTAL and V_TOTAL
+     * cannot: read it twice a known interval apart and the difference IS the
+     * refresh rate, with no need to know the pixel clock or trust a panel
+     * descriptor. Read-only, so it stays inside the probe's write rules. */
+    { "OTG0_STATUS",            RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b49 },
+    { "OTG0_STATUS_POSITION",   RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b4a },
+    { "OTG0_FRAME_COUNT",       RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b4c },
+    { "OTG0_H_BLANK_START_END", RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b2b },
+    { "OTG0_H_SYNC_A",          RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b2c },
+    { "OTG0_H_SYNC_A_CNTL",     RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b2d },
+    { "OTG0_V_BLANK_START_END", RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b36 },
+    { "OTG0_V_SYNC_A",          RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b37 },
+    { "OTG0_V_SYNC_A_CNTL",     RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b38 },
+    { "HUBP0_SURFACE_PITCH",    RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x0607 },
+    { "HUBP0_SURFACE_CONTROL",  RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x061a },
 };
 
 #define RB_NREG_DEFS (sizeof(rb_reg_defs) / sizeof(rb_reg_defs[0]))

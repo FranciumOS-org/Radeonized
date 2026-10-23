@@ -22937,3 +22937,71 @@ finding 4 makes its first useful milestone - a real framebuffer with a real
 vblank - much smaller than finding 1 alone would suggest. Mode setting,
 external displays, brightness, DSC and PSR are all beyond it and all need the
 DCN 3.1.2 code that does not exist here.
+
+### Step (a)'s instrument, built the same day
+
+The display plan's step (a) - get the real timing - needed registers the probe
+did not have. Fetched `dcn_3_1_2_offset.h` and `_sh_mask.h` from
+torvalds/linux master (`734bef54`), and the first thing they did was **confirm
+the three DCN offsets already in `rb_regs.h`**: `regOTG0_OTG_H_TOTAL` 0x1b2a,
+`regOTG0_OTG_V_TOTAL` 0x1b2f, `regOTG0_OTG_CONTROL` 0x1b41, all `BASE_IDX 2`,
+exact matches. The headers are not copied into the tree (1.5 MB and 6.5 MB,
+per UPSTREAM.md's existing policy); all eleven new offsets are tabulated there
+with their Linux names.
+
+**The refresh rate needed a different measurement than I first reached for.**
+H_TOTAL and V_TOTAL cannot give it - that needs the pixel clock, which sits
+behind the DCCG dividers and DISPCLK. `OTG0_OTG_STATUS_FRAME_COUNT` can, and
+is read-only.
+
+My first design was to count frames in a fixed window inside `rb_probe.c`.
+Two things were wrong with it, and both are worth recording because the fix
+was a better design rather than a patch:
+
+1. **Counting in a window quantizes to +-1 frame.** At a 100 ms window that
+   is +-10 Hz - enough to report 144 Hz as 134 or 154. Timing **N frame
+   boundaries** instead leaves only the polling granularity, so 10 frames
+   gives better than 0.1 Hz. Measure the time for a known number of frames,
+   not the frames in a known time.
+2. **`rb_probe.c` has no clock, and its own contract says it never waits** -
+   `rb_hw.delay_us` is documented as "used by rb_smu.c's polls; the probe
+   itself never waits". Putting a 100 ms busy-wait there would have broken a
+   stated invariant to get a worse number. The measurement lives in
+   `src/kext/RembrandtProbe.cpp` instead, where `mach_absolute_time` exists.
+   `src/common` is unchanged except for the table.
+
+It is bounded twice, because it runs in `start()`: a 0.4 s hard deadline and a
+requirement that the counter move at all. **A counter that does not move is
+itself a result** - OTG_MASTER_EN set but not scanning - and is reported as
+`VSyncState = "counter never advanced"` rather than being allowed to hang the
+boot. Partial progress is reported too, instead of being discarded.
+
+`tools/report.py` now prints the refresh rate, and the detailed timing a
+published `IOFramebuffer` needs: blank start/end, sync start/end with
+polarity, and the HUBP pitch.
+
+**Verified:**
+
+* `make kext`: `hosttest: all passed`; the kext builds with every import
+  resolved.
+* The new hosttest case `test_dcn_timing_regs` checks all eleven offsets
+  resolve at level 2 to the right absolute dword, that the instance strides
+  rb_regs.h documents still hold (OTG 0x80, HUBP 0xdc), and that no two table
+  entries share a name (`find_sample` returns the first match, so a duplicate
+  would silently shadow).
+* **The test was checked to FAIL when what it guards is broken**, per the
+  standing rule: perturbing `OTG0_FRAME_COUNT` 0x1b4c -> 0x1b4d gives
+  `1 FAILED`; perturbing `OTG2_H_TOTAL` to break the stride gives `2 FAILED`;
+  restoring gives `all passed`.
+* `report.py`'s new paths were exercised against synthetic probe data for a
+  2080x1111 @ 144 Hz panel - it printed `OTG0 ON total 2080x1111`, the blank,
+  sync and pitch lines, and `refresh: 144.001 Hz (10 frames in 69444000 ns)` -
+  and against a stuck counter, printing `NOT measured - counter never
+  advanced`.
+* One latent trap removed while there: `report.py` masks negative ints to 32
+  bits to undo ioreg's signed printing, which would have corrupted
+  `VSyncNanoseconds`, the first 64-bit key published. It is now excluded.
+
+Nothing here writes a register, so it is all inside the probe's existing
+hardware rules. **Unverified on hardware**: it needs one level-2 probe boot,
+which is a kext load and therefore the user's to run.

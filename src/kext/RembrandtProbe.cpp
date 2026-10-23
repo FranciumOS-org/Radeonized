@@ -10,6 +10,7 @@
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
+#include <kern/clock.h>
 #include <pexpert/pexpert.h>
 
 extern "C" {
@@ -92,6 +93,75 @@ void set_str(OSDictionary *d, const char *key, const char *s)
         d->setObject(key, o);
         o->release();
     }
+}
+
+/* 2oq: the refresh rate of the pipe that is already scanning out.
+ *
+ * H_TOTAL and V_TOTAL cannot give it - that needs the pixel clock, which is
+ * downstream of the DCCG dividers and DISPCLK. OTG0_OTG_STATUS_FRAME_COUNT
+ * can, and only has to be read.
+ *
+ * It is timed as "how long do N frames take", NOT "how many frames in a fixed
+ * window". Counting in a window quantizes to +-1 frame, which at 100 ms is
+ * +-10 Hz - enough to confuse 144 Hz with 134 or 154. Timing N frame
+ * boundaries leaves only the polling granularity, so 10 frames gives better
+ * than 0.1 Hz.
+ *
+ * This runs in start(), so it is bounded twice: a total deadline, and a
+ * requirement that the counter move at all. A counter that never advances is
+ * itself a result (OTG enabled but not scanning) and must not hang the boot.
+ *
+ * Read-only: one register, polled. rb_probe.c's no-write policy is untouched,
+ * and this deliberately lives here rather than in src/common because
+ * rb_probe.c has no clock and its contract says it never waits. */
+#define RB_VSYNC_FRAMES   10u        /* ~69 ms at 144 Hz, ~167 ms at 60 Hz */
+#define RB_VSYNC_BUDGET_NS 400000000ull  /* hard deadline: 0.4 s */
+#define RB_VSYNC_POLL_US  20u
+
+void measure_vsync(volatile uint32_t *mmio, uint32_t frame_count_dword,
+                   RBVSync *m)
+{
+    bzero(m, sizeof(*m));
+    m->ran = 1;
+
+    const uint64_t start = mach_absolute_time();
+    uint64_t elapsed_ns = 0;
+    auto ns_since = [&](uint64_t from) {
+        uint64_t out = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time() - from, &out);
+        return out;
+    };
+
+    /* Align to a frame boundary first, so the first interval is a whole
+     * frame rather than whatever fraction of one we arrived in. */
+    const uint32_t c0 = mmio[frame_count_dword];
+    uint32_t cur = c0;
+    while (cur == c0) {
+        if ((elapsed_ns = ns_since(start)) > RB_VSYNC_BUDGET_NS) {
+            m->first = c0;
+            m->last = cur;
+            return;                      /* never advanced: not scanning */
+        }
+        IODelay(RB_VSYNC_POLL_US);
+        cur = mmio[frame_count_dword];
+    }
+    m->advanced = 1;
+    m->first = cur;
+
+    const uint64_t t0 = mach_absolute_time();
+    const uint32_t want = cur + RB_VSYNC_FRAMES;
+    while (cur != want) {
+        if (ns_since(start) > RB_VSYNC_BUDGET_NS)
+            break;                       /* partial result is still usable */
+        IODelay(RB_VSYNC_POLL_US);
+        cur = mmio[frame_count_dword];
+    }
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &m->ns);
+    m->last = cur;
+    m->frames = cur - m->first;
+
+    if (m->frames && m->ns)
+        m->millihertz = static_cast<uint32_t>((m->frames * 1000000000000ull) / m->ns);
 }
 
 const char *source_name(uint8_t s)
@@ -206,6 +276,40 @@ bool RembrandtProbe::start(IOService *provider)
     }
     LOG("index writes %u, refused writes %u", r->index_writes, r->refused_writes);
 
+    /* 2oq: if a pipe is already scanning out, time its frame counter. This is
+     * the measurement a published framebuffer needs and the boot framebuffer
+     * does not have - macOS reports this panel as 0 Hz (IOFB0Hz = Yes).
+     * Gated on OTG0_CONTROL's OTG_MASTER_EN so it is never attempted on a
+     * dark pipe, and on the counter resolving at this level. */
+    RBVSync vs = {};
+    if (rc == 0 && level >= RB_LEVEL_DC) {
+        const rb_reg_sample *ctl = nullptr, *fc = nullptr;
+        for (uint32_t i = 0; i < r->nregs; i++) {
+            if (!strcmp(r->regs[i].name, "OTG0_CONTROL"))     ctl = &r->regs[i];
+            if (!strcmp(r->regs[i].name, "OTG0_FRAME_COUNT")) fc  = &r->regs[i];
+        }
+        if (ctl && fc && ctl->status == RB_REG_OK && fc->status == RB_REG_OK &&
+            (ctl->value & 1)) {
+            measure_vsync(ctx.mmio, fc->dw, &vs);
+            if (vs.millihertz)
+                LOG("OTG0 scanning: %u frames in %llu ns = %u.%03u Hz "
+                    "(frame count %#x -> %#x)", vs.frames,
+                    (unsigned long long)vs.ns, vs.millihertz / 1000,
+                    vs.millihertz % 1000, vs.first, vs.last);
+            else if (!vs.advanced)
+                LOG("OTG0 has OTG_MASTER_EN set but its frame counter never "
+                    "advanced (stuck at %#x) - enabled but not scanning",
+                    vs.first);
+            else
+                LOG("OTG0 frame counter advanced but the measurement did not "
+                    "complete: %u frames, %llu ns", vs.frames,
+                    (unsigned long long)vs.ns);
+        } else if (ctl && ctl->status == RB_REG_OK) {
+            LOG("OTG0_CONTROL = %#x: OTG_MASTER_EN %s, no vsync measured",
+                ctl->value, (ctl->value & 1) ? "set" : "clear");
+        }
+    }
+
     rb_smu_result *sr = nullptr;
     if (rc == 0 && smu) {
         sr = static_cast<rb_smu_result *>(IOMalloc(sizeof(rb_smu_result)));
@@ -229,7 +333,7 @@ bool RembrandtProbe::start(IOService *provider)
     }
     mmio->release();
 
-    publish(r, pci, sr);
+    publish(r, pci, sr, &vs);
     IOFree(r, sizeof(*r));
     if (sr)
         IOFree(sr, sizeof(*sr));
@@ -237,7 +341,8 @@ bool RembrandtProbe::start(IOService *provider)
     return true;
 }
 
-void RembrandtProbe::publish(const rb_probe_result *r, IOPCIDevice *pci, const rb_smu_result *sr)
+void RembrandtProbe::publish(const rb_probe_result *r, IOPCIDevice *pci, const rb_smu_result *sr,
+                             const RBVSync *vs)
 {
     OSDictionary *d = OSDictionary::withCapacity(32);
     if (!d)
@@ -286,6 +391,17 @@ void RembrandtProbe::publish(const rb_probe_result *r, IOPCIDevice *pci, const r
         }
         d->setObject("IPs", ips);
         ips->release();
+    }
+
+    if (vs->ran) {
+        set_num(d, "VSyncFrames", vs->frames, 32);
+        set_num(d, "VSyncNanoseconds", vs->ns, 64);
+        set_num(d, "VSyncMilliHertz", vs->millihertz, 32);
+        set_num(d, "VSyncCounterFirst", vs->first, 32);
+        set_num(d, "VSyncCounterLast", vs->last, 32);
+        set_str(d, "VSyncState", vs->millihertz ? "measured"
+                                : vs->advanced  ? "incomplete"
+                                               : "counter never advanced");
     }
 
     if (OSDictionary *regs = OSDictionary::withCapacity(r->nregs ? r->nregs : 1)) {

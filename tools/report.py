@@ -100,9 +100,12 @@ def main():
     nodes = plistlib.loads(out.stdout)
     p = nodes[0].get("RBProbe") if nodes else None
     if p:
-        # ioreg prints 32-bit OSNumbers as signed integers.
+        # ioreg prints 32-bit OSNumbers as signed integers. 2oq: skip the
+        # keys published as 64-bit, where masking to 32 bits would corrupt a
+        # large value rather than repair a sign.
+        wide = {"VSyncNanoseconds"}
         for k, v in p.items():
-            if isinstance(v, int) and v < 0:
+            if isinstance(v, int) and v < 0 and k not in wide:
                 p[k] = v & 0xFFFFFFFF
     if not p:
         print("RembrandtProbe is attached but published no RBProbe results.")
@@ -193,6 +196,36 @@ def main():
                 fmt = {8: "ARGB8888", 9: "ABGR8888", 10: "ARGB2101010"}.get(cfg & 0x7F, f"format {cfg & 0x7F}")
                 extra += f" ({fmt})"
             print(f"OTG{i} {on}{extra}")
+            if i == 0 and ctl & 1:
+                # 2oq: the detailed timing a published IOFramebuffer needs.
+                # Blank/sync registers pack start in [15:0] and end in [31:16]
+                # (dcn_3_1_2_sh_mask.h: OTG_H_BLANK_START, OTG_H_BLANK_END,
+                # OTG_H_SYNC_A_START, OTG_H_SYNC_A_END).
+                hb, vb = reg(regs, "OTG0_H_BLANK_START_END"), reg(regs, "OTG0_V_BLANK_START_END")
+                hs, vs_ = reg(regs, "OTG0_H_SYNC_A"), reg(regs, "OTG0_V_SYNC_A")
+                hsc, vsc = reg(regs, "OTG0_H_SYNC_A_CNTL"), reg(regs, "OTG0_V_SYNC_A_CNTL")
+                pitch = reg(regs, "HUBP0_SURFACE_PITCH")
+                lohi = lambda v: (v & 0xFFFF, (v >> 16) & 0xFFFF)
+                if hb is not None and vb is not None:
+                    print(f"  blank  H {lohi(hb)}  V {lohi(vb)}   (start, end)")
+                if hs is not None and vs_ is not None:
+                    pol = lambda c: "negative" if c is not None and c & 1 else "positive"
+                    print(f"  sync   H {lohi(hs)} {pol(hsc)}  V {lohi(vs_)} {pol(vsc)}")
+                if pitch is not None:
+                    # DCSURF_SURFACE_PITCH: PITCH in [15:0], in pixels - 1
+                    print(f"  pitch  {(pitch & 0xFFFF) + 1} px")
+
+    # 2oq: the refresh rate, timed in the kext from OTG0's frame counter.
+    # This is what the boot framebuffer cannot tell macOS (IOFB0Hz = Yes).
+    state = p.get("VSyncState")
+    if state:
+        mhz = p.get("VSyncMilliHertz") or 0
+        if mhz:
+            print(f"\nrefresh: {mhz / 1000:.3f} Hz "
+                  f"({p.get('VSyncFrames')} frames in {p.get('VSyncNanoseconds')} ns)")
+        else:
+            print(f"\nrefresh: NOT measured - {state} "
+                  f"(frame counter {p.get('VSyncCounterFirst')} -> {p.get('VSyncCounterLast')})")
 
     smu = p.get("SMU")
     if smu:
