@@ -740,6 +740,9 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // budget cannot hold it.
     "dal_writes", "dal_r_hw", "dal_tr_n", "dalfb_start_ret",
     "dalfb_grouted", "dalfb_attr_blocked",
+    // 2po: these two were PROMISED to the user as persisting and were not in
+    // this list, so boot 145 could not say how many writes got through. Added.
+    "dal_passed", "dal_denied", "dal_pass",
 };
 
 
