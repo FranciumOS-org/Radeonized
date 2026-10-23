@@ -24229,3 +24229,100 @@ The timer currently delivers a 7.736 ms period against the panel's 6.952 ms -
 about 0.78 ms of workloop overhead per tick - which is why nominal reads
 129 Hz instead of 143.833. Phase locking would take the clock exact and remove
 tearing.
+
+---
+
+## 2pg (2026-10-23) — how big is the DCN 3.1.2 hole? Measured: 5.3 % of the register map, and the scanout path is identical
+
+The user, after 2pf: *"make it SHINE, make it DCN 3.1.2 so we get all the
+things we need"*. Before writing any of it, measure the hole. All static, no
+boot.
+
+### What Apple actually ships
+
+`AMDRadeonX6000Framebuffer`'s compiled source paths (strings):
+`dc/dcn10` (9 files), `dc/dcn20` (12), `dc/dcn21` (2), `dc/dcn30` (9),
+`dc/dcn302` (1), `dc/dml` (10), `dc/clk_mgr` (7), plus `falcon_dm` (30,
+Apple's own display-manager layer). So `dcn302` is the newest generation
+present - one minor version below ours.
+
+Two personalities matter, from the kext's own Info.plist:
+
+| personality | IOClass | category | score |
+|---|---|---|---|
+| `AMDGPUWrangler` | `AMDRadeonX6000_AmdGpuWrangler` | **IOFramebuffer** | **60000** |
+| `AMDRadeonNavi21Controller` | `..._AmdRadeonControllerNavi21` | **ATIFramebuffer** | 1000 |
+
+The Wrangler at 60000 would displace `.Display_boot` (IONDRVFramebuffer,
+20000) outright. **And `RembrandtGPUPeer` currently sits in ATIFramebuffer at
+65000, which would block the Controller** - a structural conflict of our own
+making, and a one-line fix.
+
+### The pivotal measurement: dcn_3_0_2 vs dcn_3_1_2 register maps
+
+| | |
+|---|---|
+| shared register names | 5631 |
+| **same offset AND base_idx** | **5332 (94.7 %)** |
+| different | **299 (5.3 %)** |
+| only in 3_1_2 | 771 |
+
+And the differences are **not** in the scanout path:
+
+| block | differ / shared | |
+|---|---|---|
+| **OTG** (timing generator) | **0 / 434** | identical |
+| **HUBP** (surface fetch, the flip register) | **0 / 80** | identical |
+| **CM** (color management) | **0 / 1000** | identical |
+| **DSCL** (scaler) | **0 / 136** | identical |
+| **DPP / OPP / DCCG** | **0 / 82** | identical |
+| DCHUBBUB (memory hub / watermarks) | 74 / 77 | nearly all moved |
+| MPC (multi-plane compositor) | 53 / 214 | |
+| DC* (generic) | 91 / 295 | |
+| AFMT / VPG (HDMI-DP **audio**) | 29 / 174 | |
+
+Every register this project already uses is at the **same** offset and base in
+3.0.0, 3.0.2 and 3.1.2: all ten OTG timing/status/frame-count registers and
+`HUBP0_DCSURF_SURFACE_CONFIG`. `BL_PWM_*` exists in 3.0.0 but was renamed by
+3.1.2 (rb_regs.h already carries the 3.1.2 location, 0x2f19).
+
+**So Apple's dcn302 code would drive our timing generator and surface fetch at
+exactly the right addresses**, and would get DCHUBBUB watermarks and MPC
+blending wrong. That is a far better starting point than "write a generation",
+and it is why this is worth attempting rather than declaring impossible.
+
+### What is NOT just offsets
+
+Honesty about the remaining work, because 5.3 % understates it:
+
+* **DML** (`display_mode_vba_31`) is generation-specific *logic*, not offsets -
+  different pipe/DRAM parameters. Wrong DML means wrong watermarks, which
+  shows up as underflow and flicker rather than a black screen.
+* **clk_mgr** - dcn31 talks to **SMU 13.0.x**; Apple's clk_mgr set is
+  dce100/dce110/dcn10(rv1)/dcn21(rn). This is a real gap and touches the SMU,
+  which is the user's decision territory.
+* **ASIC identification** - Apple's tables must accept `0x1681` as a part they
+  will build a controller for.
+
+### A safer first experiment than expected
+
+The Controller (`ATIFramebuffer`) and the Wrangler (`IOFramebuffer`) are
+**separate personalities**, so they can be injected independently:
+
+1. **Controller only.** DAL initialises and we learn how far it gets, while
+   `.Display_boot` keeps the display - nothing displaces the working
+   framebuffer. The risk is that DAL's `init_hw` touches registers during
+   bring-up and blanks the panel; a reboot without the arg restores it,
+   because the firmware re-initialises DCN every boot.
+2. **Then the Wrangler**, which is the step that actually takes the display and
+   the step that can make WindowServer hardware-composite.
+
+xnu's fallback was already read in 2oz and applies here: if the Wrangler's
+`start()` returns false, IOKit starts the next candidate in the category,
+which is IONDRVFramebuffer. A clean failure is recoverable; a partial success
+that programs the display wrong is the case to fear.
+
+Headers vendored to `docs/linux-ref/` with provenance in `UPSTREAM.md`. Note
+the prefix change - 3.0.x uses `mm<REG>`, 3.1.x uses `reg<REG>` - which made
+the first comparison report near-total disagreement until it was caught
+(rule 26, again).
