@@ -486,6 +486,15 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     pciDevice->setProperty("RBGPULoad", kOSBooleanTrue);
     pciDevice->setProperty("LoadHWServices", kOSBooleanTrue);
 
+    // 2ph: the DAL dry run's personality is gated on this property, which is
+    // published only with -rbgpudal. Without it Apple's framebuffer kext is
+    // never even loaded, so the boot is identical to one without this code.
+    if (checkKernelArgument("-rbgpudal")) {
+        pciDevice->setProperty("LoadDisplayController", kOSBooleanTrue);
+        rbgpu_log("2ph: published LoadDisplayController - Apple's DAL will be "
+                  "loaded, with every register write recorded and dropped");
+    }
+
     // 2cs: LoadAccelerator only on an armed boot. Without it Apple's
     // accelerator personality does not match at all, so nothing can claim the
     // display and the machine always reaches a desktop.

@@ -24326,3 +24326,61 @@ Headers vendored to `docs/linux-ref/` with provenance in `UPSTREAM.md`. Note
 the prefix change - 3.0.x uses `mm<REG>`, 3.1.x uses `reg<REG>` - which made
 the first comparison report near-total disagreement until it was caught
 (rule 26, again).
+
+## 2ph (2026-10-23) — a dry run of Apple's DAL on a DCN 3.1.2 chip, writing nothing
+
+2pg said the hole is 5.3 % of the register map with the scanout path
+identical, so Apple's DAL is worth pointing at this chip. Not blind, though: a
+wrong DCHUBBUB write is an underflow or a blank panel, and 74 of 77 DCHUBBUB
+registers moved. So this boot **writes nothing at all**.
+
+**The choke point.** Every DAL register write in
+`AMDRadeonX6000Framebuffer` goes through
+`AMDRadeonX6000_AmdRegisterAccess::writeReg32`. Both overloads are defined per
+`nm` and both are rule-2 clean (six pushes and a mov; no branch in the five
+bytes Lilu overwrites). The hooks **record and drop** - `orig` is deliberately
+never called. Reads are **not** hooked, so DAL sees the real chip and its
+decisions come from true state.
+
+One boot therefore yields the ordered list of registers Apple's DAL wants to
+write to bring up a display on this chip, comparable offline against
+`docs/linux-ref/dcn_3_1_2_offset.h`. That is the whole DCN 3.1.2 question
+answered on the bench instead of on the panel.
+
+**The interlock.** The danger is not the hooks, it is the hooks *failing* while
+the controller still runs - then Apple's dcn302 code writes a DCN 3.1.2 chip
+for real. So `AmdRadeonControllerNavi2::start` is routed too, and returns
+false unless both write routes landed. No trace and no writes, rather than
+writes without a trace. `dal_interlock 1` firing is a **good** outcome.
+
+Rule 5 earned its keep twice here. There is no `AmdRadeonControllerNavi21::start`
+- the personality's class inherits it, and only
+`AmdRadeonController`, `...ControllerNavi` and `...ControllerNavi2` define it -
+so the hand-written name was wrong until `nm` corrected it. And the
+`AMDRadeonX6000Framebuffer` kext is in **SystemKernelExtensions.kc**, the same
+collection as `AMDRadeonX6000`, which this plugin already injects successfully -
+so the loading mechanism is proven, not assumed.
+
+**Rule 2 refused one route.** `writeRegList` opens
+`testq %rsi,%rsi; je ...` - a conditional branch at byte **+3**, inside the
+patch window. That is exactly the 2gb pattern that panicked this machine twice,
+so it is not routed. It reaches a vtable slot at +0x138 which was not resolved,
+so if that slot is not `writeReg32` the trace will be short. **A suspiciously
+small `dal_writes` is the first thing to check**, recorded here rather than
+discovered as a surprise.
+
+**Gating.** `-rbgpudal` gates both halves. The personality is injected in its
+own match category `RBDisplayController`, deliberately - Apple puts the
+controller in `ATIFramebuffer` where `RembrandtGPUPeer` sits at 65000 and would
+block it, and a private category avoids touching the peer at all. It is
+property-matched on `LoadDisplayController`, which the peer publishes only with
+the arg, so without it Apple's framebuffer kext is never loaded and the boot is
+identical to one without this code.
+
+The one genuinely dangerous failure is both the write routes AND the interlock
+route failing. `dal_wroutes` and `dal_srouted` say which landed; `dal_srouted 0`
+with `dal_wroutes 0` is the case where DAL wrote real registers.
+
+Keys: `dal_on`, `dal_wroutes`, `dal_srouted`, `dal_interlock`, `dal_start`,
+`dal_start_ret`, `dal_writes`. The first 192 writes are logged with register
+and value to `amd-log.txt`.

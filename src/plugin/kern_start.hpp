@@ -27,6 +27,8 @@ private:
     void installKernelLogHooks(KernelPatcher &patcher);
     void processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
     void processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    // 2ph: Apple's DAL, routed only to record-and-drop its register writes.
+    void processX6000FB(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
     void processHWServices(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
     // 2ct: IOAcceleratorFamily2, for the headless-accelerator hook.
     void processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
