@@ -7652,6 +7652,92 @@ static void rbgpu_vblp_tick(OSObject *, IOTimerEventSource *ts) {
         ts->setTimeoutUS(g_vblp_us);
 }
 
+// 2pe: IS APPLE'S FLIP PATH EVEN INVOKED? Observe only. No register is
+// written and nothing is changed.
+//
+// 2pd found the defect: `CompositorSW::CompositeLayersToDestination` is 48 %
+// of WindowServer's main thread, rasterising the whole layer tree on the CPU
+// through `CA::OGL::SW::` in RGBA half-float. The reason is that
+// `IONDRVFramebuffer`'s destination is a raw CPU-mapped physical range, and
+// SkyLight can only build a composite destination from an IOSurface or a
+// Metal texture - so `CompositorMetal`, which the log confirms IS activated,
+// has nothing to render the display into.
+//
+// The fix is for the GPU to own scanout, which means Apple's display pipe has
+// to flip. The pipe is adopted (`AMDRadeonX6000_AMDAccelDisplayPipe = 1`) but
+// does nothing (`IOAccelDisplayPipeTransaction2 = 0`), and the suspected
+// reason is that the flip ends in DAL code that does not exist for DCN 3.1.2.
+//
+// SUSPECTED. That word is why this hook writes nothing. The HUBP write that
+// would complete the flip is the user's decision and a wrong one blanks the
+// panel (rule 12), so it must not be made on an assumption. There are two
+// possibilities and they want opposite work:
+//
+//   `fliprq` climbs  -> Apple's code IS asking to flip and only the register
+//                       write is missing. The HUBP write is then well founded
+//                       and narrowly scoped, exactly like `vram_base_offset`
+//                       completing Apple's working accelerator code.
+//   `fliprq` absent  -> nothing ever asks to flip, the missing piece is
+//                       further up, and a HUBP write would have been a shot
+//                       in the dark that cost a boot and a black screen.
+//
+// Rule 14: both outcomes are legible, and the second one is the valuable one.
+// Rule 16: this instrument touches nothing, so it cannot be the suspect.
+static bool     g_flip_on    = false;      // -rbgpuflipprobe
+static uint64_t g_flip_calls = 0;
+static uint32_t g_flip_first_arg = 0;
+
+using t_rbPipeFlip = int (*)(void *, uint32_t, void *, void *, int, void *, bool,
+                             int, void *);
+static t_rbPipeFlip orig_pipe_flip_2pe = nullptr;
+
+__attribute__((noinline))
+static void rbgpu_arm_flip_probe_2pe(KernelPatcher &patcher, size_t id,
+                                     mach_vm_address_t address, size_t size);
+
+static int hooked_pipe_flip_2pe(void *self, uint32_t a, void *res0, void *res1,
+                                int interval, void *flip, bool b, int rot,
+                                void *flip2) {
+    int ret = orig_pipe_flip_2pe(self, a, res0, res1, interval, flip, b, rot, flip2);
+    g_flip_calls++;
+    if (g_flip_calls == 1) {
+        g_flip_first_arg = a;
+        rbgpu_log("2pe: FLIP REQUESTED - Apple's display pipe wants to scan out "
+                  "a surface (arg %u, resources %p / %p, interval %d, rot %d, "
+                  "returned %d). The pipe path IS live; only the DCN write is "
+                  "missing.", a, res0, res1, interval, rot, ret);
+        rbgpu_diag_set_num("fliprq", 1);
+        rbgpu_diag_set_num("fliprq_arg", a);
+        rbgpu_diag_set_num("fliprq_ret", static_cast<uint32_t>(ret));
+    }
+    if ((g_flip_calls & 0xff) == 0)
+        rbgpu_diag_set_num("fliprq_calls", g_flip_calls);
+    return ret;
+}
+
+__attribute__((noinline))
+static void rbgpu_arm_flip_probe_2pe(KernelPatcher &patcher, size_t id,
+                                     mach_vm_address_t address, size_t size) {
+    rbgpu_diag_set_num("fliprq_on", g_flip_on ? 1 : 0);
+    if (!g_flip_on)
+        return;
+    KernelPatcher::RouteRequest fr(
+        "__ZN27AMDRadeonX6000_AMDHWDisplay29getDisplayPipeTransactionFlipEjP16IOAccelResource2S1_17_eAMDSwapIntervalP14_AMD_PIPE_FLIPb42AMDAccelDisplayPipeTransactionPipeRotationS4_",
+        hooked_pipe_flip_2pe, orig_pipe_flip_2pe);
+    if (patcher.routeMultiple(id, &fr, 1, address, size)) {
+        rbgpu_log("2pe: ARMED - observing AMDHWDisplay::getDisplayPipeTransactionFlip. "
+                  "`fliprq 1` means Apple's pipe asks to scan out a surface and only "
+                  "the DCN write is missing; no `fliprq` at all means nothing ever "
+                  "asks, and a HUBP write would have been a shot in the dark.");
+        rbgpu_diag_set_num("fliprq_routed", 1);
+    } else {
+        patcher.clearError();
+        rbgpu_log("2pe: FAILED to route getDisplayPipeTransactionFlip - the flip "
+                  "question goes unanswered this boot");
+        rbgpu_diag_set_num("fliprq_routed", 0);
+    }
+}
+
 // 2pa: THE "7 MB". Not a memory limit - a missing label (2or).
 //
 // System Profiler right now, live on boot 137:
@@ -8128,6 +8214,12 @@ void RGPU::init() {
             rbgpu_log("2pa: rbgpufbvrammb=%s is outside 256-16384 - ignored, "
                       "keeping %u", vrambuf, g_vram_mb);
     }
+    // 2pe: observe-only, so it is safe to leave armed. Separate arg because a
+    // diagnostic must be removable without disturbing the two fixes.
+    g_flip_on = checkKernelArgument("-rbgpuflipprobe");
+    rbgpu_log("2pe: flip probe %s (observe only, writes nothing)",
+              g_flip_on ? "ARMED by -rbgpuflipprobe" : "off (add -rbgpuflipprobe)");
+
     rbgpu_log("2pa: VRAM label %s (%u MB)",
               g_vram_on ? "ARMED by -rbgpufbvram" : "off (add -rbgpufbvram)",
               g_vram_mb);
@@ -12079,6 +12171,12 @@ static void rbgpu_route_getHWChannel_2gv(KernelPatcher &patcher, size_t id,
 
 void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6000 (Trap 3 Failure Guard)");
+
+    // 2pe: the flip probe goes FIRST and is gated on its own arg, so it runs
+    // even on a boot where the Trap 3 guard below returns early. Its own
+    // function because processX6000's frame is already near the 1024-byte
+    // limit and a RouteRequest is large.
+    rbgpu_arm_flip_probe_2pe(patcher, id, address, size);
 
     if (noTrap3Guard) {
         return;
