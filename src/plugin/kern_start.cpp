@@ -7538,16 +7538,69 @@ static uint64_t g_mtlkCaveHits = 0;   // execs whose name matched the scope
 static bool     g_mtlkProbed   = false;
 static bool     g_mtlkStageB   = false;            // -rbgpumtlkfix: write the detour too
 
-// Retargetable without a rebuild: rbgpumtlkscope=<substring of the process
-// name>. Default "cavecheck", which only exists to be measured.
-static char     g_mtlkScope[64] = "cavecheck";
+// Retargetable without a rebuild:
+//   rbgpumtlkscope=a,b,c   comma-separated substrings of the process name,
+//                          or "*" for EVERY process (2om, the universal fix)
+//   rbgpumtlkexclude=a,b   checked first, so it always wins
+// The default stays "cavecheck" deliberately: going universal must be an
+// explicit act, never something a stale boot-arg does by accident.
+static char     g_mtlkScope[160]   = "cavecheck";
+static char     g_mtlkExclude[160] = "";
+
+// Detailed per-site keys are written only for the first few patches. In
+// universal mode this runs on every exec on the system - a couple of thousand
+// per boot - and rbgpu_diag_set_num takes a lock and scans ~400 keys, so
+// unthrottled reporting would be the slowest thing in the plugin (rule 16).
+static int      g_mtlkReportBudget = 8;
+static uint64_t g_mtlkPatched = 0;   // cave AND detour verified
+static uint64_t g_mtlkFailed  = 0;   // matched the scope but did not complete
+
+// Comma-separated substring match. "*" anywhere in the list matches
+// everything. An empty list matches nothing.
+static bool rbgpu_mtlk_list_matches(const char *name, const char *list) {
+    if (name[0] == '\0' || list[0] == '\0') {
+        return false;
+    }
+    size_t i = 0;
+    while (list[i] != '\0') {
+        while (list[i] == ',' || list[i] == ' ') {
+            i++;
+        }
+        size_t start = i;
+        while (list[i] != '\0' && list[i] != ',') {
+            i++;
+        }
+        size_t len = i - start;
+        while (len > 0 && list[start + len - 1] == ' ') {
+            len--;
+        }
+        if (len == 1 && list[start] == '*') {
+            return true;
+        }
+        if (len > 0) {
+            // substring search of list[start..start+len) inside name
+            for (size_t a = 0; name[a] != '\0'; a++) {
+                size_t b = 0;
+                while (b < len && name[a + b] == list[start + b]) {
+                    b++;
+                }
+                if (b == len) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
 
 // 2oi: one place to put one patch, so the cave and the detour cannot drift
 // apart in how they are applied or reported.
 static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
                              const uint8_t *find, const uint8_t *repl, size_t len,
                              const char *kMatch, const char *kProt,
-                             const char *kWrite, const char *kVerify) {
+                             const char *kWrite, const char *kVerify,
+                             bool report) {
+#define RB_MTLK_SET(k, v) do { if (report) rbgpu_diag_set_num((k), (v)); } while (0)
     static uint8_t buf[sizeof(kRbMtlCaveFind)];
     if (len > sizeof(buf)) {
         return false;
@@ -7555,13 +7608,13 @@ static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
 
     kern_return_t r = g_mtlkVmMapReadUser(map, place, buf, len);
     if (r != KERN_SUCCESS) {
-        rbgpu_diag_set_num(kMatch, 0xFFFF);
+        RB_MTLK_SET(kMatch, 0xFFFF);
         return false;
     }
 
     bool isFind = memcmp(buf, find, len) == 0;
     bool isRepl = memcmp(buf, repl, len) == 0;
-    rbgpu_diag_set_num(kMatch, isFind ? 1 : (isRepl ? 2 : 0));
+    RB_MTLK_SET(kMatch, isFind ? 1 : (isRepl ? 2 : 0));
     if (isRepl) {
         return true;                  // already placed in this process
     }
@@ -7578,13 +7631,13 @@ static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
     // Lilu's CS_ENFORCEMENT/CS_KILL surgery on struct proc is NOT needed.
     kern_return_t pr = vm_protect(map, pstart, psize, FALSE,
                                   VM_PROT_READ | VM_PROT_WRITE);
-    rbgpu_diag_set_num(kProt, static_cast<uint64_t>(pr));
+    RB_MTLK_SET(kProt, static_cast<uint64_t>(pr));
     if (pr != KERN_SUCCESS) {
         return false;
     }
 
     kern_return_t wr = g_mtlkVmMapWriteUser(map, repl, place, len);
-    rbgpu_diag_set_num(kWrite, static_cast<uint64_t>(wr));
+    RB_MTLK_SET(kWrite, static_cast<uint64_t>(wr));
     vm_protect(map, pstart, psize, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     if (wr != KERN_SUCCESS) {
         return false;
@@ -7592,12 +7645,13 @@ static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
 
     // Rule 20: the target's own memory is the only evidence.
     if (g_mtlkVmMapReadUser(map, place, buf, len) != KERN_SUCCESS) {
-        rbgpu_diag_set_num(kVerify, 2);
+        RB_MTLK_SET(kVerify, 2);
         return false;
     }
     bool ok = memcmp(buf, repl, len) == 0;
-    rbgpu_diag_set_num(kVerify, ok ? 1 : 0);
+    RB_MTLK_SET(kVerify, ok ? 1 : 0);
     return ok;
+#undef RB_MTLK_SET
 }
 
 // Deliberately NOT calling rbgpu_diag_set_num from here. This fires during
@@ -7611,22 +7665,6 @@ static int wrap_rbMtlkSharedRegionSlide(uint32_t slide, uint64_t a, uint64_t b,
         g_mtlkSlideSeen = true;
     }
     return FunctionCast(wrap_rbMtlkSharedRegionSlide, g_mtlkOrgSlide)(slide, a, b, c, d, e, f);
-}
-
-// Local, so stage A adds no new load-time import. Lilu does EXPORT a bounded
-// strstr, but every symbol this kext resolves at load is a way for the boot to
-// fail, and this one is six lines.
-static bool rbgpu_mtlk_name_matches(const char *name, const char *needle) {
-    for (size_t i = 0; name[i] != '\0'; i++) {
-        size_t j = 0;
-        while (needle[j] != '\0' && name[i + j] == needle[j]) {
-            j++;
-        }
-        if (needle[j] == '\0') {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Read-only. A failed vm_map_read_user returns an error, it does not fault,
@@ -7692,21 +7730,35 @@ static void rbgpu_mtlk_on_exec(task_t task) {
         rbgpu_mtlk_probe(task);
     }
 
-    bool scoped = rbgpu_mtlk_name_matches(selfname, g_mtlkScope) ||
-                  rbgpu_mtlk_name_matches(taskname, g_mtlkScope);
+    // The exclude list is checked FIRST so it always wins - that is the escape
+    // hatch for an app that misbehaves under the fix policy, settable over SSH
+    // without a rebuild.
+    if (rbgpu_mtlk_list_matches(taskname, g_mtlkExclude) ||
+        rbgpu_mtlk_list_matches(selfname, g_mtlkExclude)) {
+        return;
+    }
+    // Prefer the task name: proc_selfname is the PARENT at this hook point
+    // (2oi/2ok measured launchd, zsh and xpcproxy in three boots), so matching
+    // on it alone both misses the real process and drags in its children.
+    bool scoped = rbgpu_mtlk_list_matches(taskname, g_mtlkScope) ||
+                  (taskname[0] == '\0' &&
+                   rbgpu_mtlk_list_matches(selfname, g_mtlkScope));
     if (!scoped) {
         return;
     }
     g_mtlkCaveHits++;
-    rbgpu_diag_set_num("mtlk_cavehits", g_mtlkCaveHits);
-    rbgpu_diag_set_str("mtlk_self", selfname);
-    rbgpu_diag_set_str("mtlk_task", taskname);
 
     const char *pname = taskname[0] != '\0' ? taskname : selfname;
-
-    rbgpu_diag_set_num("mtlk_slide", g_mtlkSlide);
+    bool report = g_mtlkReportBudget > 0;
+    if (report) {
+        g_mtlkReportBudget--;
+        rbgpu_diag_set_str("mtlk_self", selfname);
+        rbgpu_diag_set_str("mtlk_task", taskname);
+        rbgpu_diag_set_num("mtlk_slide", g_mtlkSlide);
+    }
 
     if (!g_mtlkSlideSeen || !g_mtlkGetTaskMap || !g_mtlkVmMapReadUser || !g_mtlkVmMapWriteUser) {
+        g_mtlkFailed++;
         rbgpu_diag_set_num("mtlk_ready", 0);
         rbgpu_log("2og: NOT READY - slide_seen=%d getTaskMap=%d read=%d write=%d. "
                   "Nothing was touched.",
@@ -7714,36 +7766,50 @@ static void rbgpu_mtlk_on_exec(task_t task) {
                   g_mtlkVmMapReadUser != nullptr, g_mtlkVmMapWriteUser != nullptr);
         return;
     }
-    rbgpu_diag_set_num("mtlk_ready", 1);
+    if (report) {
+        rbgpu_diag_set_num("mtlk_ready", 1);
+    }
 
     vm_map_t map = g_mtlkGetTaskMap(task);
     if (map == nullptr) {
+        g_mtlkFailed++;
         rbgpu_diag_set_num("mtlk_map", 0);
         return;
     }
-    rbgpu_diag_set_num("mtlk_map", 1);
+    if (report) {
+        rbgpu_diag_set_num("mtlk_map", 1);
+    }
 
     // The patch site is ANCHOR bytes before the cave (the cave sits in a zero
     // run and needs preceding context to be identifiable).
     mach_vm_address_t cavePlace =
         (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
     mach_vm_address_t fnPlace = RBGPU_MTL_FN_VM + g_mtlkSlide;
-    rbgpu_diag_set_num("mtlk_place", cavePlace);
+    if (report) {
+        rbgpu_diag_set_num("mtlk_place", cavePlace);
+    }
 
     bool caveOk = rbgpu_mtlk_place(map, cavePlace,
                                    kRbMtlCaveFind, kRbMtlCaveRepl, sizeof(kRbMtlCaveFind),
-                                   "mtlk_match", "mtlk_prot_rw", "mtlk_write", "mtlk_verify");
+                                   "mtlk_match", "mtlk_prot_rw", "mtlk_write", "mtlk_verify",
+                                   report);
     if (!caveOk) {
-        rbgpu_log("2oi: cave NOT placed in %s at 0x%llx - the detour is not "
-                  "written, so nothing can jump into unpatched padding",
-                  pname, (unsigned long long)cavePlace);
+        g_mtlkFailed++;
+        if (report) {
+            rbgpu_log("2om: cave NOT placed in %s at 0x%llx - the detour is "
+                      "not written, so nothing can jump into unpatched padding",
+                      pname, (unsigned long long)cavePlace);
+        }
         return;
     }
 
     if (!g_mtlkStageB) {
-        rbgpu_log("2oi: cave placed and verified in %s at 0x%llx (stage A, "
-                  "no detour - the bytes are never executed)",
-                  pname, (unsigned long long)cavePlace);
+        g_mtlkPatched++;
+        if (report) {
+            rbgpu_log("2om: cave placed and verified in %s at 0x%llx (stage A, "
+                      "no detour - the bytes are never executed)",
+                      pname, (unsigned long long)cavePlace);
+        }
         return;
     }
 
@@ -7752,10 +7818,25 @@ static void rbgpu_mtlk_on_exec(task_t task) {
     // its own copy-on-write copy, so "patched elsewhere" is worth nothing.
     bool detOk = rbgpu_mtlk_place(map, fnPlace,
                                   kRbMtlFnFind, kRbMtlFnRepl, sizeof(kRbMtlFnFind),
-                                  "mtlkd_match", "mtlkd_prot", "mtlkd_write", "mtlkd_verify");
-    rbgpu_log("2oi: stage B in %s - cave verified, detour %s at 0x%llx",
-              pname, detOk ? "PLACED and verified" : "NOT placed",
-              (unsigned long long)fnPlace);
+                                  "mtlkd_match", "mtlkd_prot", "mtlkd_write", "mtlkd_verify",
+                                  report);
+    if (detOk) {
+        g_mtlkPatched++;
+    } else {
+        g_mtlkFailed++;
+    }
+    if (report) {
+        rbgpu_log("2om: %s - cave verified, detour %s at 0x%llx",
+                  pname, detOk ? "PLACED and verified" : "NOT placed",
+                  (unsigned long long)fnPlace);
+    }
+    // Counters always, details only for the first few. These are the two
+    // numbers that describe a universal boot.
+    rbgpu_diag_set_num("mtlk_patched", g_mtlkPatched);
+    if (g_mtlkFailed) {
+        rbgpu_diag_set_num("mtlk_failed", g_mtlkFailed);
+    }
+    rbgpu_diag_set_num("mtlk_cavehits", g_mtlkCaveHits);
 }
 
 static void wrap_rbMtlkTaskSetMainThreadQos(task_t task, thread_t main_thread) {
@@ -7783,7 +7864,12 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
     if (lilu_get_boot_args("rbgpumtlkscope", scope, sizeof(scope) - 1) && scope[0] != '\0') {
         lilu_strlcpy(g_mtlkScope, scope, sizeof(g_mtlkScope));
     }
+    char excl[sizeof(g_mtlkExclude)] = {};
+    if (lilu_get_boot_args("rbgpumtlkexclude", excl, sizeof(excl) - 1) && excl[0] != '\0') {
+        lilu_strlcpy(g_mtlkExclude, excl, sizeof(g_mtlkExclude));
+    }
     rbgpu_diag_set_str("mtlk_scope", g_mtlkScope);
+    rbgpu_diag_set_str("mtlk_exclude", g_mtlkExclude[0] ? g_mtlkExclude : "(none)");
     rbgpu_diag_set_num("mtlk_stage", g_mtlkStageB ? 2 : 1);
 
     struct { const char *sym; void **slot; } syms[] = {

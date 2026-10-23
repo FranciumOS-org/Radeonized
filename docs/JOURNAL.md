@@ -22415,3 +22415,74 @@ cover are each confirmed under the kernel path.
 
 Defect B - the CoreAnimation backing store - is untouched by any of this and
 remains open.
+
+## 2om - the universal fix: every process, with an escape hatch
+
+2ol proved one app. This makes it general.
+
+### What changed
+
+* `rbgpumtlkscope` is now a **comma-separated list**, and `*` matches every
+  process. The default stays `cavecheck`: going universal has to be an
+  explicit act, never something a stale boot-arg does by accident.
+* `rbgpumtlkexclude=a,b` is checked **first**, so it always wins. That is the
+  escape hatch for an app that misbehaves under the `fix` policy - settable
+  over SSH with `efi.sh bootarg` and a reboot, no rebuild.
+* **Reporting is throttled.** The detailed per-site keys are written for the
+  first 8 patches only. `rbgpu_diag_set_num` takes a lock and scans ~400 keys,
+  and in universal mode this runs on every exec on the system - about 2000 per
+  boot (`mtlk_execs` = 2049, 2081 in previous boots). Unthrottled it would
+  have been the slowest thing in the plugin, which is how 2fa/2ez turned a
+  publisher into something indistinguishable from a wedge. Two counters are
+  always maintained: `mtlk_patched` and `mtlk_failed`.
+* **Scope now prefers the task name.** 2oi/2ok measured `proc_selfname` as
+  `launchd`, `zsh` and `xpcproxy` in three different boots, so matching on it
+  drags in children of a matched process - boot 129 patched `jspawnhelper`
+  for exactly that reason. `selfname` is now only a fallback for when
+  `get_bsdtask_info` yields nothing.
+* Removed `rbgpu_mtlk_name_matches`, now dead, in the same change (rule 6).
+
+### Leftover (GPU) wrappers are safe, and the reason is worth keeping
+
+A wrapper and the kernel patch in the same process looked dangerous: our
+detour is placed at exec, *before* dyld runs, so `mtlswizzle` would copy an
+already-patched prologue into its trampoline, and the `jmp rel32` inside it
+would be relocated and point somewhere wrong - rule 2's hazard exactly.
+
+It cannot happen. `mtlswizzle` searches for a **32-byte** pattern and refuses
+unless it finds exactly one match (2lm needed 32 bytes for uniqueness: 14
+bytes gave 2099 hits). After our patch:
+
+```
+occurrences of the 32-byte kFind in kRbMtlCaveRepl : 0
+detour changes the first 5 bytes: 55 48 89 e5 41 -> e9 8a 1b 28 00
+```
+
+The function site no longer matches because the first five bytes changed, and
+the cave's trampoline holds only **30** original bytes - two short of the
+pattern. So `hits == 0`, `mtlswizzle` prints REFUSING and does nothing. The
+kernel patch stands and the wrapper is inert. This is luck rather than design,
+and it only holds while the pattern is longer than the trampoline's copy - so
+do not shorten `kFind` below 31 bytes.
+
+A first check of this was wrong and caught itself: a hand-typed 16-byte
+prefix of `kFind` reported 1 occurrence inside the cave, which would have
+meant the wrapper patches our trampoline. Parsing the real 32-byte array out
+of `mtlswizzle.c` instead of retyping it gave 0. Rule 26 again - the
+instrument was a hand-typed constant.
+
+### Recommended first universal boot
+
+`rbgpumtlkscope=*` with `rbgpumtlkexclude=WindowServer,loginwindow`.
+WindowServer is the one process whose failure costs the GUI, and 2nj already
+measured that its CoreAnimation surfaces reach neither this chooser nor the
+kernel align manager - so excluding it gives up almost nothing and removes
+the worst outcome. Drop the exclusion in a later boot if it is worth testing.
+
+### Cost, stated honestly
+
+Patching every process writes two copy-on-write pages per process (one for
+`__text`, one for `__const`), so a universal boot costs roughly 8 KB of
+private memory per process that execs. Across ~2000 execs that is a few tens
+of MB transiently, most of it freed as short-lived processes exit. The
+per-exec work is two reads, two protects, two writes and two read-backs.
