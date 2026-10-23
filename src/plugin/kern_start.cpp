@@ -59,13 +59,22 @@ static const char *kextPathNDRV =
 static const char *kextPathIOGraphics =
     "/System/Library/Extensions/IOGraphicsFamily.kext/Contents/MacOS/IOGraphicsFamily";
 
+// 2ph: AMDRadeonX6000Framebuffer - Apple's DAL. Added ONLY to intercept
+// AmdRegisterAccess::writeReg32 before any of it reaches the chip. Lives in
+// SystemKernelExtensions.kc, same as AMDRadeonX6000, which this plugin
+// already injects successfully - so IOKit will load it on demand from an
+// injected personality.
+static const char *kextPathX6000FB =
+    "/System/Library/Extensions/AMDRadeonX6000Framebuffer.kext/Contents/MacOS/AMDRadeonX6000Framebuffer";
+
 enum KextListIndex {
     KextHWLibs = 0,
     KextX6000,
     KextHWSvc,
     KextAccelFamily,
     KextNDRV,
-    KextIOGraphics
+    KextIOGraphics,
+    KextX6000FB
 };
 
 static KernelPatcher::KextInfo kextList[] = {
@@ -83,6 +92,9 @@ static KernelPatcher::KextInfo kextList[] = {
       KernelPatcher::KextInfo::Unloaded },
     // 2ov: IOGraphicsFamily, for IOFramebuffer::handleVBL.
     { "com.apple.iokit.IOGraphicsFamily", &kextPathIOGraphics, 1, {true}, {},
+      KernelPatcher::KextInfo::Unloaded },
+    // 2ph: Apple's DAL, for the dry-run register trace.
+    { "com.apple.kext.AMDRadeonX6000Framebuffer", &kextPathX6000FB, 1, {true}, {},
       KernelPatcher::KextInfo::Unloaded }
 };
 
@@ -8023,6 +8035,160 @@ bool rbgpu_vblp_start(OSObject *owner) {
     return true;
 }
 
+// ===========================================================================
+// 2ph: A DRY RUN OF APPLE'S DAL ON A DCN 3.1.2 CHIP. NO REGISTER IS WRITTEN.
+//
+// 2pg measured the hole and it is smaller than it looked: dcn_3_0_2 (the
+// newest DCN Apple compiles) and dcn_3_1_2 (ours) share 5631 register names
+// and 5332 of them - 94.7 % - sit at the SAME offset and base_idx. The
+// scanout path is IDENTICAL: OTG 0/434 differ, HUBP 0/80, CM 0/1000,
+// DSCL 0/136, DPP+OPP+DCCG 0/82. The 299 that differ cluster in DCHUBBUB
+// (74 of 77), MPC (53 of 214) and HDMI/DP audio.
+//
+// So Apple's DAL would drive our timing generator and surface fetch at
+// exactly the right addresses, and get memory-hub watermarks and plane
+// blending wrong. That is worth trying - but NOT blind. A wrong DCHUBBUB
+// write is an underflow or a blank panel (rule 12), and the user's decision
+// on DCN writes is not something to spend on a guess.
+//
+// So this boot writes NOTHING. `AmdRegisterAccess::writeReg32` is the single
+// choke point every DAL register write goes through (both overloads are
+// defined in the kext per nm, and both are rule-2 clean - six pushes and a
+// mov, no branch in the patch window). The hooks RECORD and DROP. Reads are
+// deliberately NOT hooked, so DAL sees the real chip and we learn what it
+// decides from true state.
+//
+// What one boot then yields: the ordered list of registers Apple's DAL wants
+// to write to bring up a display on this chip, which can be compared offline
+// against `docs/linux-ref/dcn_3_1_2_offset.h` to say exactly which writes
+// would have been wrong. That is the whole DCN 3.1.2 question, answered on
+// the bench instead of on the panel.
+//
+// THE INTERLOCK. The danger is not the hooks, it is the hooks FAILING while
+// the controller still runs - then Apple's dcn302 code writes a DCN 3.1.2
+// chip for real. So `AmdRadeonControllerNavi2::start` is routed too (rule 2
+// clean; note rule 5 earned its keep here - there is no `Navi21::start`, the
+// personality's class inherits it, and the hand-written name was wrong until
+// nm corrected it). If either writeReg32 route failed, start() returns false
+// and DAL never runs. No trace and no writes, rather than writes without a
+// trace.
+//
+// KNOWN GAP, stated rather than discovered later: `writeRegList` is NOT
+// routed, because it opens `testq %rsi,%rsi; je ...` - a conditional branch
+// at byte +3, inside the five bytes Lilu overwrites. That is exactly the 2gb
+// pattern that panicked this machine twice, so rule 2 refuses it. It reaches
+// a vtable slot at +0x138 which was not resolved, so if the slot is not
+// writeReg32 the trace will be short. A suspiciously small `dal_writes` is
+// the first thing to check.
+static bool     g_dal_on      = false;     // -rbgpudal
+static bool     g_dal_safe    = false;     // both write routes landed
+static uint64_t g_dal_writes  = 0;
+static uint64_t g_dal_dropped = 0;
+static uint32_t g_dal_logged  = 0;
+#define RB_DAL_LOG_MAX 192                 // enough to see DAL's opening moves
+
+using t_rbDalW2  = void (*)(void *, uint32_t, uint32_t);
+using t_rbDalW4  = void (*)(void *, uint32_t, uint32_t, uint8_t, uint32_t);
+using t_rbCtlStart = bool (*)(void *, void *);
+static t_rbDalW2    orig_dal_w2_2ph    = nullptr;
+static t_rbDalW4    orig_dal_w4_2ph    = nullptr;
+static t_rbCtlStart orig_ctl_start_2ph = nullptr;
+
+static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
+    g_dal_writes++;
+    g_dal_dropped++;
+    if (g_dal_logged < RB_DAL_LOG_MAX) {
+        g_dal_logged++;
+        rbgpu_log("2ph: DAL w%-2s #%-4llu reg %#010x = %#010x [DROPPED]",
+                  how, (unsigned long long)g_dal_writes, reg, val);
+    }
+    if (g_dal_writes == 1 || (g_dal_writes & 0xff) == 0)
+        rbgpu_diag_set_num("dal_writes", g_dal_writes);
+}
+
+static void hooked_dal_w2_2ph(void *self, uint32_t reg, uint32_t val) {
+    (void)self;
+    rbgpu_dal_record(reg, val, "2");
+    // Deliberately NOT calling orig_dal_w2_2ph. Nothing reaches the chip.
+}
+
+static void hooked_dal_w4_2ph(void *self, uint32_t reg, uint32_t val,
+                              uint8_t a, uint32_t b) {
+    (void)self; (void)a; (void)b;
+    rbgpu_dal_record(reg, val, "4");
+    // Deliberately NOT calling orig_dal_w4_2ph.
+}
+
+static bool hooked_ctl_start_2ph(void *self, void *provider) {
+    if (!g_dal_safe) {
+        // Rule 14: refuse loudly. This is the interlock, and it firing is a
+        // GOOD outcome - it means the boot is intact and we learned the
+        // routes did not land.
+        rbgpu_log("2ph: INTERLOCK - the writeReg32 routes did not land, so "
+                  "refusing AmdRadeonControllerNavi2::start. DAL does not run "
+                  "and no register is written. The panel is untouched.");
+        rbgpu_diag_set_num("dal_interlock", 1);
+        return false;
+    }
+    rbgpu_log("2ph: controller start() - DAL is about to initialise with every "
+              "register write swallowed. Writes so far: %llu",
+              (unsigned long long)g_dal_writes);
+    rbgpu_diag_set_num("dal_start", 1);
+    bool ret = orig_ctl_start_2ph(self, provider);
+    rbgpu_log("2ph: controller start() returned %d after %llu dropped writes "
+              "- DAL got as far as it could with no hardware behind it",
+              ret, (unsigned long long)g_dal_writes);
+    rbgpu_diag_set_num("dal_start_ret", ret ? 1 : 0);
+    rbgpu_diag_set_num("dal_writes", g_dal_writes);
+    return ret;
+}
+
+__attribute__((noinline))
+void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
+                          mach_vm_address_t address, size_t size) {
+    rbgpu_diag_set_num("dal_on", g_dal_on ? 1 : 0);
+    if (!g_dal_on) {
+        // Rule 14. Reaching here without the arg would mean the personality
+        // matched when it should not have, which is worth knowing.
+        rbgpu_log("2ph: AMDRadeonX6000Framebuffer loaded but -rbgpudal is "
+                  "absent - NOT routing, and the controller personality should "
+                  "not have matched either");
+        return;
+    }
+
+    KernelPatcher::RouteRequest w[] = {
+        {"__ZN32AMDRadeonX6000_AmdRegisterAccess10writeReg32Ejj",
+         hooked_dal_w2_2ph, orig_dal_w2_2ph},
+        {"__ZN32AMDRadeonX6000_AmdRegisterAccess10writeReg32Ejjhj",
+         hooked_dal_w4_2ph, orig_dal_w4_2ph},
+    };
+    g_dal_safe = patcher.routeMultiple(id, w, arrsize(w), address, size);
+    if (!g_dal_safe) {
+        patcher.clearError();
+        rbgpu_log("2ph: FAILED to route writeReg32 - the interlock will refuse "
+                  "the controller, so nothing is written");
+    } else {
+        rbgpu_log("2ph: ARMED - both writeReg32 overloads routed; every DAL "
+                  "register write will be recorded and DROPPED");
+    }
+    rbgpu_diag_set_num("dal_wroutes", g_dal_safe ? 1 : 0);
+
+    KernelPatcher::RouteRequest st(
+        "__ZN39AMDRadeonX6000_AmdRadeonControllerNavi25startEP9IOService",
+        hooked_ctl_start_2ph, orig_ctl_start_2ph);
+    if (patcher.routeMultiple(id, &st, 1, address, size)) {
+        rbgpu_diag_set_num("dal_srouted", 1);
+    } else {
+        patcher.clearError();
+        // Rule 14, and this is the one failure that is actually dangerous:
+        // no interlock AND possibly no write hooks.
+        rbgpu_log("2ph: FAILED to route the controller start - the interlock is "
+                  "NOT in place. If the write routes also failed, DAL will "
+                  "write real registers this boot.");
+        rbgpu_diag_set_num("dal_srouted", 0);
+    }
+}
+
 void RGPU::processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                              size_t size) {
     if (!g_vblp_on) {
@@ -8214,6 +8380,14 @@ void RGPU::init() {
             rbgpu_log("2pa: rbgpufbvrammb=%s is outside 256-16384 - ignored, "
                       "keeping %u", vrambuf, g_vram_mb);
     }
+    // 2ph: the DAL dry run. One arg gates BOTH the personality injection and
+    // the write hooks, deliberately - the hooks must exist before DAL runs,
+    // and an interlock on the controller's start() refuses to run it if they
+    // did not land.
+    g_dal_on = checkKernelArgument("-rbgpudal");
+    rbgpu_log("2ph: DAL dry run %s (records and DROPS every register write)",
+              g_dal_on ? "ARMED by -rbgpudal" : "off (add -rbgpudal)");
+
     // 2pe: observe-only, so it is safe to leave armed. Separate arg because a
     // diagnostic must be removable without disturbing the two fixes.
     g_flip_on = checkKernelArgument("-rbgpuflipprobe");
@@ -8273,6 +8447,10 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         rbgpu_log("2ou: IONDRVSupport loaded at %p (size 0x%zx)",
                   reinterpret_cast<void *>(address), size);
         processNDRV(patcher, id, address, size);
+    } else if (kextList[KextX6000FB].loadIndex == id) {
+        rbgpu_log("2ph: AMDRadeonX6000Framebuffer loaded at %p (size 0x%zx)",
+                  reinterpret_cast<void *>(address), size);
+        processX6000FB(patcher, id, address, size);
     } else if (kextList[KextHWSvc].loadIndex == id) {
         g_kext_addr_hwsvc = address;
         g_kext_size_hwsvc = size;

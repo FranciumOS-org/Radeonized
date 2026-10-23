@@ -70,6 +70,32 @@
             <key>IOProviderClass</key>
             <string>IOPCIDevice</string>
         </dict>
+        <!-- 2ph: Apple's display controller, for the DAL dry run. Its OWN
+             match category, deliberately: Apple puts it in ATIFramebuffer,
+             where RembrandtGPUPeer sits at 65000 and would block it. A private
+             category avoids touching the peer at all. Gated on
+             LoadDisplayController, which the peer publishes only with
+             -rbgpudal, so without that arg this kext is never loaded. -->
+        <key>RembrandtGPU DisplayController (0x1681)</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.apple.kext.AMDRadeonX6000Framebuffer</string>
+            <key>IOClass</key>
+            <string>AMDRadeonX6000_AmdRadeonControllerNavi21</string>
+            <key>IOMatchCategory</key>
+            <string>RBDisplayController</string>
+            <key>IOPCIMatch</key>
+            <string>0x16811002</string>
+            <key>IOPropertyMatch</key>
+            <dict>
+                <key>LoadDisplayController</key>
+                <true/>
+                <key>RBGPULoad</key>
+                <true/>
+            </dict>
+            <key>IOProviderClass</key>
+            <string>IOPCIDevice</string>
+        </dict>
         <key>RembrandtGPU Accelerator (0x1681)</key>
         <dict>
             <key>CFBundleIdentifier</key>
