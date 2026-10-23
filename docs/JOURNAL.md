@@ -24116,3 +24116,116 @@ next correct write, and rule 12 says a black panel is indistinguishable from a
 hang. It is also the one write that can be validated cheaply, because the
 current correct value is known and measured (`0xf4_0000_0000`), so a readback
 can confirm the write landed and a restore path exists.
+
+---
+
+## 2pf (2026-10-23, boot 138) — the pacing is fixed, the label is fixed, and the flip route is DEAD
+
+`rbgpu-boot = 138` (rule 8: new, so the capture is this boot's).
+
+### What worked
+
+**The 30 Hz is gone.** `tools/dispclk`, boot 138 against boot 137:
+
+| | boot 137 | boot 138 |
+|---|---|---|
+| `CGDisplayModeGetRefreshRate` | 144.000 Hz | 144.000 Hz |
+| CoreVideo **nominal** | **30.000 Hz** | **129.267 Hz** |
+| measured callback rate | 29.99 Hz | **134.10 Hz** |
+
+A **4.3x** improvement in the animation clock, and the user felt it before
+reading any number: *"the cursor sometimes when cpu isnt too busy runs at
+actual 144hz... i can tell from the smoothness"*.
+
+**The label is fixed.** `fbvram = 3`, `fbvram_props = 5`, `fbvram_mb = 4096`,
+`fbvram_enable_ret = 0`. System Profiler now reads `Chipset Model: AMD Radeon
+680M` and `VRAM (Total): 4 GB`. **Said plainly because the user asked whether
+it was detected: it is NOT.** `"AMD Radeon 680M"` is a string literal this
+project writes into the `model` property. The 4096 MB is a measured number
+(three independent ways) but it too is published by us, not discovered by
+macOS.
+
+### Two things that did not go the way 2oz said
+
+**1. The vblank is delivered by the FALLBACK, not by the front door.**
+`fb_vbl_bound = 1`, so the hook did capture the proc IOFramebuffer offered -
+but `fb_vbl_state = 0`, meaning macOS then called
+`setInterruptState(ourRef, 0)` and disabled it, and `fb_vbl_sent` is
+**absent**: zero deliveries through the proc. The 23553 frames came from
+`vblp_ticks` - 2ov's direct `handleVBL` call, the path 2oz demoted to
+"fallback". So the honest accounting is: **2oy's ordering fix is what fixed the
+pacing**, and 2oz's contribution was the framebuffer pointer plus proving the
+API path binds. Keeping the fallback instead of deleting it is the only reason
+this boot delivered anything.
+
+`vblp_idle_nohandler = 682` then `vblp_idle_nofb = 150` then
+`vblp_shmem = 1`, `vblp_fail = 0`: the timer-as-retry design worked exactly as
+designed, and 682 idle ticks is the ordering race 2oy was built for, measured.
+
+**2. `fb_vbl_origret = 0xE00002BE = kIOReturnNoResources`, not
+`kIOReturnUnsupported`.** 2oz's log text and journal entry both predicted
+`0xE00002C7` from reading the disassembly's preloaded `movl $0xe00002c7, %eax`.
+That constant is on the `"Ignore VBL"` path, which is not the path taken - the
+empty-list walk tail-calls super, and super returns NoResources. Rule 13
+again: a return code is not a result until the code that sets it has been read,
+and I read the wrong one of two.
+
+Also recorded: `registerForInterruptType` was called **54** times, and the
+first seven types were `0xff0000e9`, `0xff0000ea`, `0x60000400`, `0xff000152`
+... - not fourccs at all, so `'vbl '` (0x76626c20) arrives later than the
+8-call diag window. Worth knowing before trusting `fb_vbl_t1..t8` to
+characterise anything.
+
+### THE RESULT THAT MATTERS: nothing ever asks to flip
+
+`fliprq_on = 1`, `fliprq_routed = 1`, and **no `fliprq`, no `fliprq_calls`**.
+The hook armed and routed successfully, and
+`AMDRadeonX6000_AMDHWDisplay::getDisplayPipeTransactionFlip` was **never
+called once**, across an entire boot of ordinary desktop use.
+
+That is exactly the second branch 2pe wrote down in advance:
+
+> `fliprq` absent -> nothing ever asks to flip, the missing piece is further
+> up, and a HUBP write would have been a shot in the dark that cost a boot and
+> a black screen.
+
+**So the `HUBP0_PRIMARY_SURFACE_ADDRESS` write would have fixed nothing.** The
+observe-only probe cost one ride-along on a boot that was happening anyway and
+saved a boot, a likely black screen, and a permission the user should never
+have been asked for. This is the clearest return any instrument in this
+project has produced, and it is worth stating as the general lesson: when a
+fix requires an irreversible or dangerous action, spend the cheap boot proving
+the precondition first.
+
+### Where the display half actually stands
+
+`fbpresent` is **unchanged** - p50 108.96 ms, 8.5 fps with sync on, against
+110.16 ms before. Exactly as predicted, because nothing shipped addresses
+software compositing.
+
+The chain is now fully closed and the flip route is excluded from it:
+
+1. No DCN 3.1.2 code in macOS -> no Apple AMD framebuffer for this display.
+2. The display is `IONDRVFramebuffer`, whose destination is a raw CPU-mapped
+   range - not an IOSurface, not a Metal texture.
+3. SkyLight's only two destination constructors take exactly those, so
+   `CompositorMetal` (which IS activated) has nothing to render the display
+   into.
+4. -> `CompositorSW` rasterises the whole layer tree on the CPU in RGBA
+   half-float. 48 % of WindowServer's main thread.
+5. -> **and because step 4 never produces a GPU surface, the display pipe is
+   never asked to flip at all.** 2pf measured this. The flip is downstream of
+   a decision already lost at step 3.
+
+So page flipping was never the lever. The lever is step 3: the display's
+destination has to be a GPU surface, which means an accelerated framebuffer
+owning the display - which means the DCN 3.1.2 code macOS does not have,
+written from Linux's `dcn31` reference. That is a large body of work and
+should be named as such rather than approached as one more hook.
+
+**Cheap and still available, with no DCN write:** phase-lock the vblank by
+polling `OTG0_FRAME_COUNT` (read-only, and `measure_vsync` already does it).
+The timer currently delivers a 7.736 ms period against the panel's 6.952 ms -
+about 0.78 ms of workloop overhead per tick - which is why nominal reads
+129 Hz instead of 143.833. Phase locking would take the clock exact and remove
+tearing.
