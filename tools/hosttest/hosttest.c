@@ -353,6 +353,65 @@ static void test_levels(void)
     free(r); free(f);
 }
 
+/* 2oq: the OTG0 timing registers a published framebuffer will be built from.
+ * Guards three things an ordinary edit could silently break: that they are
+ * read at level 2 at the right absolute dword, that the instance strides
+ * rb_regs.h documents still hold (a wrong stride is how a future pipe-1
+ * extension would read the wrong register), and that no two entries share a
+ * name (find_sample returns the first match, so a duplicate would shadow). */
+static void test_dcn_timing_regs(void)
+{
+    printf("level 2 reads OTG0's full timing and HUBP0's pitch\n");
+    struct fake *f = fake_new(512, (512ull << 20) - RB_DISC_TMR_OFFSET,
+                              256u << 20, rembrandt_ips, NIPS);
+    struct rb_hw hw = hw_of(f);
+    struct rb_probe_result *r = calloc(1, sizeof(*r));
+    CHECK(rb_probe_run(&hw, RB_LEVEL_DC, r) == 0);
+
+    static const struct { const char *name; uint32_t dw; } want[] = {
+        { "OTG0_STATUS",            0x1b49 },
+        { "OTG0_STATUS_POSITION",   0x1b4a },
+        { "OTG0_FRAME_COUNT",       0x1b4c },
+        { "OTG0_H_BLANK_START_END", 0x1b2b },
+        { "OTG0_H_SYNC_A",          0x1b2c },
+        { "OTG0_H_SYNC_A_CNTL",     0x1b2d },
+        { "OTG0_V_BLANK_START_END", 0x1b36 },
+        { "OTG0_V_SYNC_A",          0x1b37 },
+        { "OTG0_V_SYNC_A_CNTL",     0x1b38 },
+        { "HUBP0_SURFACE_PITCH",    0x0607 },
+        { "HUBP0_SURFACE_CONTROL",  0x061a },
+    };
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        const struct rb_reg_sample *s = find_sample(r, want[i].name);
+        CHECK(s && s->status == RB_REG_OK && s->dw == 0x34C0 + want[i].dw);
+    }
+    check_policy(f, r);
+    free(r); free(f);
+
+    printf("the instance strides rb_regs.h documents still hold\n");
+    uint32_t otg[4] = { 0, 0, 0, 0 }, hubp[4] = { 0, 0, 0, 0 };
+    for (size_t i = 0; i < RB_NREG_DEFS; i++) {
+        const char *n = rb_reg_defs[i].name;
+        for (int k = 0; k < 4; k++) {
+            char a[32], b[32];
+            snprintf(a, sizeof(a), "OTG%d_H_TOTAL", k);
+            snprintf(b, sizeof(b), "HUBP%d_SURFACE_CONFIG", k);
+            if (!strcmp(n, a)) otg[k]  = rb_reg_defs[i].reg;
+            if (!strcmp(n, b)) hubp[k] = rb_reg_defs[i].reg;
+        }
+    }
+    for (int k = 0; k < 4; k++) { CHECK(otg[k] != 0); CHECK(hubp[k] != 0); }
+    for (int k = 1; k < 4; k++) {
+        CHECK(otg[k]  - otg[k - 1]  == 0x80);
+        CHECK(hubp[k] - hubp[k - 1] == 0xdc);
+    }
+
+    printf("no two register definitions share a name\n");
+    for (size_t i = 0; i < RB_NREG_DEFS; i++)
+        for (size_t j = i + 1; j < RB_NREG_DEFS; j++)
+            CHECK(strcmp(rb_reg_defs[i].name, rb_reg_defs[j].name) != 0);
+}
+
 static void test_bar0_window(void)
 {
     printf("small carve-out inside BAR0: BAR0 cross-check\n");
@@ -704,6 +763,7 @@ int main(int argc, char **argv)
 
     test_default_path();
     test_levels();
+    test_dcn_timing_regs();
     test_bar0_window();
     test_high_offset();
     test_scratch_path();

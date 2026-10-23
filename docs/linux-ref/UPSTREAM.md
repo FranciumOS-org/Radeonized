@@ -170,3 +170,38 @@ Used by 2hw for the PM4 format:
   **dw3 lower_32_bits(addr), dw4 upper_32_bits(addr)**, dw5/dw6 seq,
   dw7 ctx_id. dw3/dw4 is the end-of-pipe timestamp writeback address 2hw
   exists to read.
+
+Checked 2026-10-23 (2oq), not copied, from master at
+`734bef548a96e8774d6eef5dfa2026c6edc4e80b`:
+
+| File | Upstream path |
+|---|---|
+| dcn_3_1_2_offset.h | drivers/gpu/drm/amd/include/asic_reg/dcn/dcn_3_1_2_offset.h |
+| dcn_3_1_2_sh_mask.h | drivers/gpu/drm/amd/include/asic_reg/dcn/dcn_3_1_2_sh_mask.h |
+
+Still not copied, per the note above: 1.5 MB and 6.5 MB. The offset header has
+not changed upstream since commit `5dfcaecc7e1f7cd54134b093993aa3449e79afae`
+(2023-05-18), so the dword offsets in `src/common/rb_regs.h` are stable.
+
+The three DCN offsets this project already had were **verified** against it
+rather than assumed - `regOTG0_OTG_H_TOTAL` 0x1b2a, `regOTG0_OTG_V_TOTAL`
+0x1b2f and `regOTG0_OTG_CONTROL` 0x1b41, all `BASE_IDX 2`, matching
+`rb_regs.h` exactly. 2oq then added, from the same header:
+
+| rb_regs.h name | Linux name | dword |
+|---|---|---|
+| OTG0_STATUS | regOTG0_OTG_STATUS | 0x1b49 |
+| OTG0_STATUS_POSITION | regOTG0_OTG_STATUS_POSITION | 0x1b4a |
+| OTG0_FRAME_COUNT | regOTG0_OTG_STATUS_FRAME_COUNT | 0x1b4c |
+| OTG0_H_BLANK_START_END | regOTG0_OTG_H_BLANK_START_END | 0x1b2b |
+| OTG0_H_SYNC_A | regOTG0_OTG_H_SYNC_A | 0x1b2c |
+| OTG0_H_SYNC_A_CNTL | regOTG0_OTG_H_SYNC_A_CNTL | 0x1b2d |
+| OTG0_V_BLANK_START_END | regOTG0_OTG_V_BLANK_START_END | 0x1b36 |
+| OTG0_V_SYNC_A | regOTG0_OTG_V_SYNC_A | 0x1b37 |
+| OTG0_V_SYNC_A_CNTL | regOTG0_OTG_V_SYNC_A_CNTL | 0x1b38 |
+| HUBP0_SURFACE_PITCH | regHUBPREQ0_DCSURF_SURFACE_PITCH | 0x0607 |
+| HUBP0_SURFACE_CONTROL | regHUBPREQ0_DCSURF_SURFACE_CONTROL | 0x061a |
+
+For the vblank step, when it comes: `regOTG0_OTG_VERTICAL_INTERRUPT0_CONTROL`
+is 0x1b63 and `..._POSITION` 0x1b62, both `BASE_IDX 2`. `OTG_INTERRUPT_DEST`
+does not exist under that name in 3.1.2 and still has to be found.
