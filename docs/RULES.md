@@ -627,9 +627,32 @@ The two that bite hardest:
   evidence" the page-flipping prohibition above asks for.** Keys:
   `fbvr_routed`, `fbvr_verify`, `fbvr_orig_len` (**the gate - if it is not
   8294400 nothing else means anything**), `fbvr_hit`, `fbvr_big`, `fbvr_fail`,
-  `fbvr_calls`, `fbvr_ret1..8`. **Not yet booted; the hypothesis that the one
-  buffer is WHY no flip happens is NOT established** - see 2pq for what a
-  clean negative looks like.
+  `fbvr_calls`, `fbvr_ret1..8`. **BOOT 144: the hook worked and the hypothesis
+  is DEAD (2pr).** `fbvr_verify 1`, `fbvr_orig_len 8294400`, `fbvr_orig_base
+  0x8_8000_0000` (**BAR0's base - the GOP framebuffer IS BAR0 offset 0**,
+  measured for the first time), `fbvr_biglen 64 MB`, `fbvr_hit 2`,
+  `fbvr_big 1`, and `fbvr_ret1 == fbvr_fvd + 0x50` so it fired at exactly the
+  intended call site. The control held - `IOFBMemorySize` still 8294400, no
+  regression, vblank 133.801/137.04 Hz. **And `bufferFlipCount` and
+  `bufferSwapCount` are still 0 with `fliprq_calls` absent.** Room was never
+  what was missing. Keep the arg OUT; it costs a 64 MB kernel mapping and buys
+  nothing.
+- **THE DISPLAY DEFECT NOW HAS A NAME, FROM SKYLIGHT (2pr, boot 144).** The
+  unified log carries `[com.apple.SkyLight:default] Unsupported sw composite
+  destination.` **31 299 times in boot 144 and 46 994 times in boot 143** - so
+  it **predates** every display hook and is the real blocker. SkyLight is not
+  quietly preferring software compositing; it is **rejecting the destination
+  object by name**. Two siblings sit next to it in SkyLight:
+  `Unexpected composite destination type (%d)` - which would print the type
+  number and has **never** fired - and `Unreasonable composite destination
+  bounds requested`. **The frontier is now SkyLight, in userspace, not another
+  kernel hook**: find the function that emits that string and the predicate it
+  tests. `dyld_info -exports
+  /System/Library/PrivateFrameworks/SkyLight.framework/SkyLight` works, and the
+  cache is readable at
+  `/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h` (rule 24
+  is about WRITING it). This is static and costs no boot. **Read
+  `docs/JOURNAL.md` 2pr before proposing anything else for the display.**
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and

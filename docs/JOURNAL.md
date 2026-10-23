@@ -25047,3 +25047,129 @@ Build: imports **354/354** resolve via `IOPCIFamily` + `kpi.*` only — no
 IOGraphicsFamily dependency (the 2oz trap), `IODeviceMemory::withRange`
 resolves through `com.apple.kpi.iokit`. `hosttest: all passed`.
 UUID `28BF4AC7-22A2-3EA5-B32A-3BB073908CCD`.
+
+---
+
+## 2pr (2026-10-23, boot 144) — the flip window was NOT the blocker, and SkyLight names the real one
+
+`rbgpu-boot = 144` (rule 8: new, so the capture is this boot's). Boot-args
+confirmed to hold `-rbgpufbvramrange` and **no** `-rbgpudal*` and no
+`-rbgpuoff`, so 2pq armed alone — one new thing, not two.
+
+### The hook did exactly what it was built to do
+
+From the full `RBGPUDiag` table (decimal) and NVRAM (hex):
+
+```
+fbvr_routed    1            fbvr_verify    1
+fbvr_orig_len  8294400      fbvr_orig_seg  8294400     (one contiguous segment)
+fbvr_orig_base 36507222016  = 0x8_8000_0000            <-- BAR0's base, exactly
+fbvr_biglen    67108864     = 64 MB                    built and handed over
+fbvr_hit       2            fbvr_big       1
+fbvr_fail      1            fbvr_calls     7
+fbvr_ret1      = fbvr_callsite = fbvr_fvd + 0x50       <-- the intended site
+```
+
+So: the six call-site bytes verified, the gate passed (`8294400`), and
+`fbvr_ret1` equals `fbvr_fvd + 0x50` by arithmetic — the hook fired at exactly
+the one call inside `find_vram_descriptor` and nowhere else.
+
+**`fbvr_orig_base = 0x880000000` is BAR0's base**, measured for the first time.
+The GOP framebuffer *is* BAR0 offset 0, so the 64 MB range sat entirely inside
+BAR0's 256 MB. The design assumption held, and that number is now known rather
+than inferred.
+
+**The control held.** `IOFBMemorySize` still reads **8294400** — the other 13
+call sites got the original, so the change was surgical exactly as intended, and
+nothing about IOGraphics' aperture moved. No regression anywhere: the vblank
+reads nominal **133.801 Hz** / measured **137.04 Hz** (boot 138 was
+129.267/134.10, so slightly better), and the desktop stayed up.
+
+### And it changed nothing — the pre-stated clean negative
+
+`bufferFlipCount = 0`. `bufferSwapCount = 0`. `fliprq_routed = 1` with **no
+`fliprq_calls`**, so `getDisplayPipeTransactionFlip` was never called, exactly
+as in 2pf.
+
+2pq wrote down in advance what this would mean, so it cannot be relitigated:
+*"`fbvr_hit ≥ 1` and `fbvr_big ≥ 1` with `bufferFlipCount` still 0 … is a clean
+negative"*. That is what happened. **Room was not what was missing.** The
+accelerator was handed eight buffers' worth of scanout VRAM, accepted it, and
+still never asked for a flip.
+
+`fbvr_fail = 1` is worth naming rather than hiding: `find_vram_descriptor`'s
+**first** call got NULL from `getVRAMRange` (IONDRVFramebuffer returns 0 until
+`0x218` is set and `0x238` is cached — pre-existing behaviour we did not cause),
+and its second call got our 64 MB. So the enlarged descriptor *is* what
+`accel->0x180` ends up holding. Whether a consumer read `0x180` between the two
+calls is not observable from this hook, and is the one thread this boot leaves
+loose.
+
+### The sample proves nothing, and saying so is the point
+
+`CompositorSW` lines: **0**. `CA::OGL::SW` lines: **0**. `CompositorMetal`:
+2. That looks like the fix. **It is not evidence.** The sample was 3 seconds on
+an idle desktop: **2370 of 2371 main-thread samples were in `mach_msg`**, and
+the single composite frame was `CaptureSurfaceMetal::Populate` — a *capture*
+surface, not the display destination. 2pd's 48 % was measured under load. n=1
+(rule 18). Nothing about the display composite path changed measurably here.
+
+### SkyLight names the defect itself — and it predates 2pq
+
+The unified log, which no previous milestone had read with this predicate:
+
+```
+WindowServer[161] [com.apple.SkyLight:default] Unsupported sw composite destination.
+```
+
+**31 299 times in boot 144's 45 minutes.** And in boot 143's window
+(10:00–10:45, before `-rbgpufbvramrange` existed at all): **46 994 times.** So
+it is **pre-existing**, not caused by the hook — attribution clean (rule 16).
+
+This is a far better handle than anything the display half has had. SkyLight is
+not silently choosing software compositing; it is **rejecting the destination
+outright, by name, tens of thousands of times a boot**. Two sibling strings sit
+beside it in SkyLight:
+
+```
+Unexpected composite destination type (%d)
+Unreasonable composite destination bounds requested: (%.1f, %.1f) [%.1f x ...
+```
+
+The first would print the destination **type as a number** — the single most
+useful value available — and it has **never fired**, so our destination does not
+reach that path. `Metal compositor activated.` is still logged (11:23:46), which
+is consistent with 2pd: the Metal compositor is activated and the *display
+destination* is what it cannot take.
+
+### What this closes and what it opens
+
+**CLOSED: the flip window.** The accelerator's scanout VRAM size is not the
+blocker. 2pp's finding that the bind, the pipe and the WindowServer client all
+already exist stands and is now strengthened — every structural precondition is
+present and the thing that fails is the **destination object itself**, in
+userspace, in SkyLight.
+
+**OPEN, and the new frontier:** what makes a destination "supported". The
+answer is in SkyLight, which `dyld_info` can read out of the cache
+(`/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h`), and the
+work is to find the function emitting that string and the predicate it tests.
+That is static, costs no boot, and is where the next effort belongs — not in
+another kernel hook.
+
+### Instrument bugs this boot exposed (rule 16: the instrument is a suspect)
+
+Three, all mine, all fixed in `tools/fbvr_check.sh`:
+
+1. **The script read only NVRAM**, which holds the hot keys alone, so **11 of 18
+   `fbvr_*` keys were invisible** — including `fbvr_orig_base`, `fbvr_biglen`,
+   `fbvr_fvd` and `fbvr_ret1..8`. The full table is `RBGPUDiag` in the
+   IORegistry and was readable the whole time.
+2. **It compared a HEX diag value against a DECIMAL constant.** NVRAM printed
+   `fbvr_orig_len=7e9000`; the guidance line said "8294400 = the state 2pp
+   measured". `0x7e9000 == 8294400`. The gate had **passed** and the report made
+   it look like it failed.
+3. **The flip-probe grep used the wrong key names** (`^flip|^fliprq` against
+   NVRAM, where they never were). The real keys are `fliprq_on` /
+   `fliprq_routed` / `fliprq_calls` in the registry — rule 26 again, fourth time
+   this project.

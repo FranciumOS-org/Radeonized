@@ -43,11 +43,23 @@ echo "=== 2. the 2pq keys ============================================"
 # fbvr_orig_len is the GATE: if it is not 8294400 the machine was not in the
 # state 2pp measured, and nothing else here means anything.
 nvram -p 2>/dev/null | grep -E 'rbgpu-diag|rbgpu-arm' > "$out/nvram-diag.txt"
-tr ' ' '\n' < "$out/nvram-diag.txt" | grep -E '^fbvr_' | tee "$out/fbvr.txt"
+# NVRAM holds only the HOT keys - the 512-byte budget. The FULL diag table is
+# RBGPUDiag in the IORegistry, and boot 144 was read wrong because this script
+# looked only at NVRAM: 11 of 18 fbvr_* keys were invisible, including
+# fbvr_orig_base, fbvr_biglen, fbvr_fvd and fbvr_ret1..8. Read both.
+rb_ioreg 30 "$out/diag-raw.txt" -w0 -l
+{
+    tr ' ' '\n' < "$out/nvram-diag.txt" | grep -E '^fbvr_|^fliprq'
+    tr ',' '\n' < "$out/diag-raw.txt" | grep -oE '"(fbvr|fliprq)_?[a-z0-9_]*"=[^,}]*'
+} | sort -u | tee "$out/fbvr.txt"
 [ -s "$out/fbvr.txt" ] || echo "   NO fbvr_* keys - the route never armed, or the diag is stale"
 echo
+echo "   NOTE: NVRAM prints these in HEX, the IORegistry in DECIMAL."
+echo "   0x7e9000 == 8294400 - the same number. Boot 144 was nearly misread"
+echo "   because this line used to compare a hex value against a decimal one."
+echo
 echo "   how to read it:"
-echo "     fbvr_orig_len  8294400 = the state 2pp measured; anything else voids the rest"
+echo "     fbvr_orig_len  8294400 == 0x7e9000 = the state 2pp measured; anything else voids the rest"
 echo "     fbvr_verify    1 = the six call-site bytes matched; 0 = nothing was enlarged"
 echo "     fbvr_hit       >=1 = find_vram_descriptor asked us; 0 = it cached before we armed"
 echo "     fbvr_big       >=1 = the enlarged range went out"
@@ -84,8 +96,16 @@ echo "   2pf's control: both counts were 0 with the pipe bound and a client open
 echo
 
 echo "=== 5. did the flip probe fire? (-rbgpuflipprobe, 2pe) ========="
-tr ' ' '\n' < "$out/nvram-diag.txt" | grep -E '^flip|^fliprq' | tee "$out/flip.txt"
-[ -s "$out/flip.txt" ] || echo "   no flip keys - probe not armed, or it never fired (2pf: never, once)"
+# The real key names are fliprq_on / fliprq_routed / fliprq_calls / fliprq_ret
+# (rule 26: a search is an instrument - the old pattern looked in NVRAM, where
+# these keys never were). fliprq_routed=1 with NO fliprq_calls means the hook
+# was in place and getDisplayPipeTransactionFlip was never called.
+grep -E '"fliprq' "$out/fbvr.txt" | tee "$out/flip.txt"
+if grep -q 'fliprq_calls' "$out/flip.txt"; then
+    echo "   getDisplayPipeTransactionFlip WAS called - new, 2pf and 2pq both had zero"
+else
+    echo "   no fliprq_calls: the flip was never requested (2pf, 2pq: the same)"
+fi
 echo
 
 echo "=== 6. is software compositing still 48% of WindowServer? ======"
@@ -104,6 +124,18 @@ if [ "$(id -u)" = "0" ]; then
 else
     echo "   skipped - needs sudo. Re-run as: sudo tools/fbvr_check.sh"
 fi
+echo
+
+echo "=== 6b. does SkyLight reject the destination? (2pr) ============"
+# "Unsupported sw composite destination." - SkyLight's own name for the defect.
+# ~47000 per boot on 143 and ~31000 on 144, so it PREDATES 2pq. A drop to zero
+# is what a real fix looks like; the sibling string "Unexpected composite
+# destination type (%d)" would print the type number but has never fired.
+/usr/bin/log show --last 45m --predicate 'eventMessage CONTAINS "Unsupported sw composite"' 2>/dev/null \
+    | grep -c "Unsupported" | sed 's/^/Unsupported sw composite destination: /' | tee "$out/skylight-reject.txt"
+/usr/bin/log show --last 45m --predicate 'eventMessage CONTAINS "composite destination type" OR eventMessage CONTAINS "compositor activated"' --style compact 2>/dev/null \
+    | grep -vE "^Timestamp|log run noninteractively" | head -5 | tee -a "$out/skylight-reject.txt"
+echo "   zero rejections = the destination was finally accepted. Anything else is the defect."
 echo
 
 echo "=== 7. did the vblank regress? (2oz/2ov) ======================="
