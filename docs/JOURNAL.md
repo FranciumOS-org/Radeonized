@@ -22486,3 +22486,81 @@ Patching every process writes two copy-on-write pages per process (one for
 private memory per process that execs. Across ~2000 execs that is a few tens
 of MB transiently, most of it freed as short-lived processes exit. The
 per-exec work is two reads, two protects, two writes and two read-backs.
+
+## 2on - UNIVERSAL. Every app, Safari included, no wrappers, from the kext.
+
+Boot 130, `-rbgpumtlkfix`, `rbgpumtlkscope=*`,
+`rbgpumtlkexclude=WindowServer,loginwindow`.
+
+```
+mtlk_execs    2049
+mtlk_patched  2045
+mtlk_failed      8
+mtlk_cavehits 2050
+mtlk_stage       2
+Safari        pid 457, no DYLD_* in its environment
+```
+
+The user reports **every single app correct, Safari included, and all images
+loading**. Nothing is wrapped, nothing is injected, no app bundle is
+modified.
+
+### This settles the question 2oj withdrew
+
+2oj struck out "reaches the Apple platform binaries that strip
+`DYLD_INSERT_LIBRARIES`" because TextEdit was evidence *against* it and
+nothing was evidence *for* it. **Safari answers it:** it is a platform
+binary, it was affected by this defect, and the kernel path fixes it.
+The withdrawal was right at the time - there was no evidence - and the claim
+is now re-established on a measurement instead of an assumption. TextEdit
+remains correctly explained: it was never affected, because AppKit text does
+not reach this chooser (2oj).
+
+### The defect was never only about text
+
+"All pictures load" is new. Images were affected too, which means the mis-set
+swizzle mode damaged ordinary sampled textures and not just the surfaces
+applications render glyphs into. Every milestone from 2lg to 2ol called this
+"the text defect" because text is where it was first *noticed*; the name was
+always narrower than the fault.
+
+### Two honest caveats on the numbers
+
+* **The counters are racy by construction.** `g_mtlkPatched` and
+  `g_mtlkFailed` are plain `uint64_t` increments on a path that runs
+  concurrently on every exec, with no atomics, so `2045 + 8 = 2053` against
+  `cavehits = 2050` does not balance and is not meant to. They are
+  magnitude indicators, not an audit. Making them atomic would be easy and
+  is not worth putting more work on that path.
+* `mtlk_exclude` printed as `"WindowServer` with the rest missing. That is my
+  own reader - `tr ',' '\n'` splits the IORegistry dump on commas, and the
+  value legitimately contains one. The stored value is correct. Rule 26: the
+  instrument again, this time only cosmetically.
+
+The 8 failures are almost certainly execs that happened before
+`_vm_shared_region_slide` fired, which take the `mtlk_ready = 0` path and
+touch nothing. That is a guess, not a measurement, and it is cheap to confirm
+later by reporting the reason per failure.
+
+### What this retires
+
+`tools/rbgpu-app.sh` and the whole `~/Applications/<App> (GPU).app` scheme are
+now obsolete: the kext covers every process, survives app updates, needs no
+user action, and reaches sandboxed App Store apps and platform binaries that
+the wrapper scheme could never touch (rule 21, 2ns). Leftover wrappers are
+harmless (2om), so they can be removed at leisure rather than urgently.
+
+Also worth re-testing now, separately and one at a time: `-rbgpulinear` and
+`-rbgpumtllinear` are both still in boot-args. The first predates all of this
+and was credited with ~80 % of the widget/Dock artifacts (boot 104); the
+second is provably inert (rule 22). Neither has been evaluated against a
+working universal fix, and `-rbgpulinear` in particular is a *kernel* forcing
+of the same decision this patch now makes correctly in userspace, so it may
+now be redundant or actively harmful.
+
+### Still open
+
+Defect B - the CoreAnimation layer backing store, rearranged in about half of
+allocations (2na, `tools/screenprobe.sh`) - is a different path (2nj) and
+nothing here should be assumed to have touched it. It needs its own run of
+`screenprobe.sh` to say anything.
