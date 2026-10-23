@@ -137,6 +137,26 @@ DAL compiles `dcn10/20/21/30/302`, and `dcn31`/`dcn312`/`vba_31`/`yellow_carp`
 are 0 hits in every AMD kext against a control of 58 for `dcn30`. This chip is
 DCN 3.1.2 / DMU 3.1.3.
 
+**A SUBCLASSED `IOFramebuffer` IS NOT POSSIBLE FROM THIS KEXT (2oz).** It was
+built and it compiled: `IOFramebuffer.h` ships in Kernel.framework (no Xcode,
+no KDK), only four pure virtuals, and a subclass resolved **356 of 356**
+imports through `com.apple.iokit.IOGraphicsFamily` - Apple does the same in
+`AMDFramebuffer`. Displacing `.Display_boot` would also have worked: same
+provider (IOPCIDevice), same category (`IOFramebuffer`), its post-probe score
+is **20000**, and xnu's `probeCandidates` was *read* - `probe()` returning NULL
+does `continue`, and the start loop is `// start the best (until success) of
+each category` - so **both** failure modes fall back. What kills it is the
+**kernel collection**: IOGraphicsFamily is in SystemKernelExtensions.kc,
+IOPCIFamily in BootKernelExtensions.kc, and OpenCore injects us into the
+**boot** KC. `kextstat` proves it on this machine - **WhateverGreen depends on
+Lilu and IOPCIFamily, NOT on IOGraphicsFamily.** Shipping that dependency
+would have failed the plugin's load and taken the accelerator with it.
+`/Library/Extensions` is no escape (Auxiliary KC, loads too late, and
+forbidden). **Own the methods instead**: every framebuffer method is defined in
+IONDRVSupport and therefore routable - mode list, timings, aperture, cursor,
+gamma, attributes, the interrupt trio - which is the same technique that fixed
+the accelerator, and functionally the same thing.
+
 **The desktop runs on `IONDRVFramebuffer` with `IOFB0Hz = Yes` and one fixed
 mode.** No vblank is why animations are timer-paced; one mode is why nothing
 switches; the 7 MB is the same fact. **But the firmware already brought DCN
@@ -504,6 +524,25 @@ The two that bite hardest:
   means it did not take. The pump calls into IOFramebuffer 144x/s from a
   workloop - if that path needs a lock WindowServer holds the desktop can
   wedge, so rescue with `-rbgpuoff`.
+- **`-rbgpufbvbl`** (2oz) is the vblank taken through the **documented API**
+  and supersedes `-rbgpuvblpump` as the primary path; it implies the pump's
+  timer, which is its delivery mechanism. `IOFramebuffer.h` says the class
+  "will call its subclasses to set callbacks to be called on interrupt
+  events", so IOFramebuffer **hands the driver the proc**; we route
+  `IONDRVFramebuffer::registerForInterruptType`, keep the proc on `'vbl '`,
+  return success and call it ourselves. Its disassembly closes the 30 Hz
+  chain and confirms the `_VSLService` layout a third way (head `fb+0x268`,
+  type `+0x08`, next `+0x28`): `"Ignore VBL"` is absent, so the path taken is
+  the **empty list** - no NDRV ever called `VSLNewInterruptService` - and it
+  tail-calls super, installing nothing. `unregisterInterrupt` and
+  `setInterruptState` are routed too, so a sleep that disables the vblank is
+  obeyed; handing back our own ref is safe by measurement - both only
+  **compare** it against node addresses and never dereference it. Fixes
+  **pacing**, not tearing: phase lock needs `OTG0_FRAME_COUNT` polling, which
+  is read-only and is the next step. Writes **no DCN register**. Read it with
+  `tools/dispclk`; rule 14 keys: `fb_vbl_calls` + `fb_vbl_t1..t8` (was the
+  door knocked on, with what types), `fb_vbl_bound`/`fb_vbl_origret` (we took
+  it), `fb_vbl_sent` (proc deliveries) vs `vblp_ticks` (fallback deliveries).
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
