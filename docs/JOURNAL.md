@@ -22564,3 +22564,71 @@ Defect B - the CoreAnimation layer backing store, rearranged in about half of
 allocations (2na, `tools/screenprobe.sh`) - is a different path (2nj) and
 nothing here should be assumed to have touched it. It needs its own run of
 `screenprobe.sh` to say anything.
+
+## 2oo - both halves on by default. The desktop needs the kernel force too.
+
+Boot 131: `-rbgpulinear` and `-rbgpumtllinear` both removed,
+`rbgpumtlkexclude` empty - so **WindowServer and loginwindow were patched for
+the first time**. `mtlk_patched = 2195`, `mtlk_failed = 10`, capture in
+`logs/20261022-222826-plugin`.
+
+Two results, one good and one a regression.
+
+**WindowServer is safe to patch.** The machine booted, the GUI came up, and
+the exclusion I had recommended turns out not to be needed. That removes the
+last special case from universal mode.
+
+**The userspace fix alone is NOT a stable desktop.** With `-rbgpulinear` gone,
+apps came up correct and then went wrong again after idle or a tab switch, and
+Terminal and other native apps were broken regardless. That is consistent with
+everything measured before: the kernel-side force and the userspace chooser
+are two **different** paths, and surfaces reallocated later - or belonging to
+native AppKit apps, which never reach the chooser at all (2oj) - are only
+covered by the kernel one.
+
+### So both are now ON BY DEFAULT, no boot-arg, no setup
+
+* The linear force: on unless `-rbgpunolinear`. `-rbgpulinear` is no longer
+  read anywhere in the plugin - it is the default behaviour now, and the arg
+  is simply ignored if left in boot-args.
+* The kernel-side patcher: on unless `-rbgpumtlkoff`, stage B, scope `*`.
+  `-rbgpumtlkpatch` still selects the inert cave-only stage, and
+  `rbgpumtlkscope` / `rbgpumtlkexclude` still override.
+
+This is safe to default because the patcher **fails safe by construction**:
+every site is read back and compared against the expected bytes before
+anything is written, so if an OS update moves the driver the comparison fails
+and nothing is patched at all. `-rbgpuoff` remains the blunt rescue (rule 27).
+
+### 2mm's suspicion of -rbgpulinear is retired, and explained
+
+2mm filed `-rbgpulinear` as a *suspect* in the defect, reasoning that it makes
+the kernel compute a linear layout while the userspace driver still lays the
+surface out in 64 KB tiles - so the two disagree and every geometry whose
+tiled footprint exceeds its pixel bytes renders wrong. That was right, and the
+universal fix removes the disagreement: userspace now returns LINEAR for
+non-render-targets too, so both sides agree.
+
+Stated as a hypothesis, not a result: the render targets userspace deliberately
+keeps **tiled** (mapped off the `_X` family) are still computed linear by this
+force, and nothing yet explains why *that* pair does not also disagree. It
+works; why it works is not established, which is the same honest gap 2nr/2ns
+left around the `_X` family itself.
+
+### A latent bug found while making the change
+
+`g_rb_2ld_on` was initialised lazily inside `hooked_swizmode_2la` but **read**
+by `hooked_surfinfo_2lf`. If the latter ran first, it saw 0 - neither 1 nor 2 -
+and the force silently did not apply. It is now resolved once through
+`rbgpu_2ld_state()`, callable from either hook, and reported as
+`linear_force`. Whether this ever actually happened is unknown; the ordering
+was never guaranteed.
+
+### Still not measured
+
+`tools/screenprobe.sh` has not been run since the universal fix - the newest
+screenprobe logs are from 10:05 this morning, long before 2on. **Defect B's
+status is unknown**, and the "goes wrong after idle" symptom above is
+suspiciously close to a backing-store reallocation, so it may well be Defect B
+rather than a third thing. That is the next measurement, and it should be run
+on a boot with this build, where the config is stable.

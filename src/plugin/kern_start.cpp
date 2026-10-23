@@ -7544,7 +7544,7 @@ static bool     g_mtlkStageB   = false;            // -rbgpumtlkfix: write the d
 //   rbgpumtlkexclude=a,b   checked first, so it always wins
 // The default stays "cavecheck" deliberately: going universal must be an
 // explicit act, never something a stale boot-arg does by accident.
-static char     g_mtlkScope[160]   = "cavecheck";
+static char     g_mtlkScope[160]   = "*";
 static char     g_mtlkExclude[160] = "";
 
 // Detailed per-site keys are written only for the first few patches. In
@@ -7852,13 +7852,19 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
     }
     g_mtlkInstalled = true;
 
-    bool stageA = checkKernelArgument("-rbgpumtlkpatch");
-    g_mtlkStageB = checkKernelArgument("-rbgpumtlkfix");
-    if (!stageA && !g_mtlkStageB) {
-        rbgpu_log("2og: NOT armed - neither -rbgpumtlkpatch nor -rbgpumtlkfix, "
-                  "no kernel hooks installed and no userspace image touched");
+    // 2oo: ON BY DEFAULT, stage B, every process. 2on proved it on the whole
+    // system (2045 of 2049 execs, Safari included) and the design fails safe:
+    // every site is read back before it is written, so if an OS update moves
+    // the driver the bytes will not match and nothing is patched at all.
+    // -rbgpumtlkoff disables it; -rbgpumtlkpatch still selects the inert
+    // cave-only stage; -rbgpuoff disables the whole plugin (rule 27).
+    if (checkKernelArgument("-rbgpumtlkoff")) {
+        rbgpu_log("2oo: kernel-side patcher OFF by -rbgpumtlkoff - no hooks "
+                  "installed and no userspace image touched");
+        rbgpu_diag_set_num("mtlk_stage", 0);
         return;
     }
+    g_mtlkStageB = !checkKernelArgument("-rbgpumtlkpatch");
 
     char scope[sizeof(g_mtlkScope)] = {};
     if (lilu_get_boot_args("rbgpumtlkscope", scope, sizeof(scope) - 1) && scope[0] != '\0') {
@@ -9460,6 +9466,37 @@ static uint32_t g_rb_2lb_hit = 0;
 static uint32_t g_rb_2ld_on  = 0;
 static uint32_t g_rb_2ld_hit = 0;
 
+// 2oo: the kernel-side linear force is now ON BY DEFAULT, no boot-arg needed.
+//
+// 2on's universal userspace fix covers the client-texture chooser, and that
+// alone is not a stable desktop: with -rbgpulinear removed (boot 131) apps
+// came up correct and then went wrong again after idle or a tab switch, and
+// Terminal and other native apps were never fixed by it at all. The two
+// address DIFFERENT paths and the desktop needs both.
+//
+// This also retires 2mm's suspicion of -rbgpulinear, and explains it: the
+// force made the KERNEL compute a linear layout while USERSPACE still laid
+// the surface out in 64 KB tiles, so the two disagreed. Now that the
+// userspace chooser returns LINEAR for non-render-targets as well, they
+// agree. That is a plausible mechanism, not an established one - the render
+// targets userspace keeps tiled (off the _X family) are still computed linear
+// here, and nothing yet explains why that does not also disagree.
+//
+// Resolved once, from either hook, because g_rb_2ld_on used to be initialised
+// lazily inside hooked_swizmode_2la while being READ by hooked_surfinfo_2lf -
+// so if the latter ran first the force silently did not apply.
+static uint32_t rbgpu_2ld_state(void) {
+    if (g_rb_2ld_on == 0) {
+        g_rb_2ld_on = checkKernelArgument("-rbgpunolinear") ? 2u : 1u;
+        rbgpu_log("2oo: linear force %s (default ON since 2oo; "
+                  "-rbgpunolinear turns it off)",
+                  g_rb_2ld_on == 1 ? "ARMED - every surface ADDR_SW_LINEAR"
+                                   : "OFF by -rbgpunolinear");
+        rbgpu_diag_set_num("linear_force", g_rb_2ld_on);
+    }
+    return g_rb_2ld_on;
+}
+
 static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
     uint32_t r = orig_swizmode_2la ? orig_swizmode_2la(mgr, in) : 0;
     g_rb_2la_swz_calls++;
@@ -9469,12 +9506,7 @@ static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
                   g_rb_2lb_on == 1 ? "ARMED 64KB_R_X -> 64KB_S_X"
                                    : "OFF (observe only)");
     }
-    if (g_rb_2ld_on == 0) {
-        g_rb_2ld_on = checkKernelArgument("-rbgpulinear") ? 1u : 2u;
-        rbgpu_log("2ld: linear force %s",
-                  g_rb_2ld_on == 1 ? "ARMED - every surface ADDR_SW_LINEAR"
-                                   : "OFF");
-    }
+    rbgpu_2ld_state();
     if (in && g_rb_2la_n < RB_2LA_N) {
         auto p32 = reinterpret_cast<volatile uint32_t *>(in);
         struct rb_2la_s *e = &g_rb_2la[g_rb_2la_n++];
@@ -9793,7 +9825,7 @@ static uint32_t hooked_surfinfo_2lf(void *mgr, void *in, void *out) {
         g_rb_2lf_calls++;
         if (m == 0) {
             g_rb_2lf_already++;
-        } else if (g_rb_2ld_on == 1) {
+        } else if (rbgpu_2ld_state() == 1) {
             p32[0x08 / 4] = 0;          // ADDR_SW_LINEAR
             g_rb_2lf_forced++;
         }
