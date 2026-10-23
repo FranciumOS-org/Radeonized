@@ -24805,3 +24805,155 @@ list** - 2pl added `dal_writes`, `dal_r_hw`, `dal_tr_n`,
 145 could not answer the one question it was spent on. Added now, but the
 lesson is the recurring one: **state what makes a reading possible before
 spending the boot that depends on it.**
+
+---
+
+## 2pp (2026-10-23) — the accelerator is ALREADY bound to the framebuffer, and the flip window is 8 MB. Zero boots.
+
+The user asked whether the accelerated framebuffer is dead and whether
+DCHUBBUB can be got past or reprogrammed. The answer to the second is **it
+never needed reprogramming**, and the answer to the first is **no** — because
+the premise of 2ph–2po was wrong in a way that is measurable from static data
+and a capture already on disk.
+
+### DCHUBBUB never needed to be touched
+
+2ph–2po tried to make Apple's **dcn302** DAL perform a **full modeset** on
+dcn312 hardware. A modeset reprograms every block from scratch, which is why
+DCHUBBUB — 46 of the 160 denied offsets, 74 of 77 registers relocated — became
+load-bearing. But the firmware **already programmed DCHUBBUB** and it is
+working: `OTG0_CONTROL = 0x00011201`, DMCUB 4.0.15.47, 1920x1080 scanning out
+of MC `0xf400000000` at 143.833 Hz, right now, on the machine the user is
+reading this on. The requirement to reprogram it was **self-inflicted** by
+choosing a route that does a modeset. 2po's conclusion ("write filtering is
+closed") stands; its framing — that the display half therefore needs DCN 3.1.2
+code — does not follow.
+
+### The accelerator↔framebuffer bind ALREADY EXISTS — measured, not argued
+
+`logs/20261022-222826-plugin/pci.txt`, an armed boot, on `.Display_boot`
+(`class IONDRVFramebuffer`):
+
+```
+"IOFramebufferOpenGLIndex" = 0
+"IOAccelRevision"          = 2
+"IOAccelIndex"             = 0
+"IOAccelTypes" = "IOService:/.../IGPU@0/AMDRadeonX6000_AMDNavi21GraphicsAccelerator"
+```
+
+and on the accelerator:
+
+```
+"IOAccelDisplayPipeCapabilities" = {"DisplayPipeSupported"=Yes,"TransactionsSupported"=Yes}
++-o IOAccelDisplayPipeUserClient2  ... "IOUserClientCreator" = "pid 162, WindowServer"
+```
+
+So: Apple's accelerator **found our IONDRVFramebuffer**, bound to it, published
+the index triple on it, advertises display pipes AND transactions as supported,
+and **WindowServer opened a display-pipe user client on it**. None of that was
+known; all of it was sitting in a capture from the previous day.
+
+Why it works is in the code, and there is no filtering anywhere:
+
+- `IOAccelDisplayMachine::start(IOPCIDevice*)` runs two passes. Pass 1 walks
+  the IOPCIDevice's children (`vtable[0x320]`, plane global at `0x14e7d0c0`),
+  and for each asks `getClientWithCategory(OSSymbol("IOFramebuffer"))`
+  (`vtable[0x420]`), casts the result to `IOFramebuffer` and calls
+  `found_framebuffer` (`this->vtable[0x8d8]`). Pass 2 then **recursively walks
+  the whole subtree** (`vtable[0x6a8]` child iterator) for anything that casts
+  to `IOFramebuffer`, same call. `.Display_boot` is a direct child of the GPU's
+  IOPCIDevice in category `IOFramebuffer`, so it is found by pass 1.
+- `IOAccelDisplayMachine::found_framebuffer(IOFramebuffer*)` was disassembled
+  in full. It checks for a duplicate, checks `count < accel->0xcb0` (a max),
+  creates the pipe via `accel->vtable[0x908](fb)`, calls `find_vram_descriptor`
+  and increments. **There is no class check, no provider check, no vendor
+  check, no PCI-ID check.** Any `IOFramebuffer` is accepted.
+
+This retires the theory this investigation started from — that
+`SLSAcceleratorForDisplayNumber` finds no accelerator for our display. It
+finds one. The keys it needs are present.
+
+### The one call that defines the flippable window — and it is 8 MB
+
+`IOGraphicsAccelerator2::find_vram_descriptor()` (0x14e53922), disassembled:
+
+```
+if (this->0x180) return true;                       // cached
+for (i = 0; i < displayMachine->getFramebufferCount(); i++) {
+    fb = displayMachine->getIOFramebuffer(i);
+    if (!fb) continue;
+    this->0x180 = fb->vtable[0x9b0]();              // <-- the whole input
+    if (this->0x180) break;
+}
+if (!this->0x180) return false;
+this->0x188 = desc->vtable[0x200](1);               // map
+if (!this->0x188) { desc->release(); this->0x180 = 0; return false; }
+this->0x190 = map->vtable[0x118]();                 // kernel VA
+return true;
+```
+
+Slot `0x9b0` resolved against `__ZTV13IOFramebuffer` in IOGraphicsFamily:
+**`IOFramebuffer::getVRAMRange()`**. Adjacent slot `0x9b8` is
+`enableController` — the method 2pa already routes successfully, so this is a
+proven-reachable region of this exact vtable.
+
+**So the accelerator's entire notion of scanout VRAM is one virtual call, and
+on this machine it returns 8294400 bytes — exactly one 1920x1080x4 buffer,
+with room for zero others.**
+
+That is the fourth and most consequential sense in which the "7 MB" is not
+cosmetic. 2or said it was the label. 2pd said it indicates a CPU-mapped buffer
+rather than a GPU surface. This says it is **the size of the window the
+accelerator is permitted to flip inside** — and a flip needs a second buffer.
+`bufferFlipCount = 0` and `bufferSwapCount = 0` in the same capture.
+
+### It is routable
+
+```
+00000000150019a0 (__TEXT,__text) external __ZN17IONDRVFramebuffer12getVRAMRangeEv
+```
+
+Defined in IONDRVSupport, so rule 1 is satisfied. Rule 2: first bytes are
+`55 / 48 89 e5 / 53` — push rbp, mov, push rbx — **no branch within the first
+five bytes**; the first `je` is at +0x17. Routable.
+
+Its body caches at `+0x238` and otherwise delegates to `vtable[0xc40]` =
+**`IONDRVFramebuffer::findVRAM()`**, also defined in IONDRVSupport and
+therefore also routable. `findVRAM` is where the value is born and it is
+cached, so hooking it is a one-shot; `getVRAMRange` is what the accelerator
+actually calls.
+
+### What is measured and what is not — stated plainly
+
+**Measured:** the bind exists; the index triple is published on
+IONDRVFramebuffer; pipes and transactions are advertised; WindowServer holds a
+pipe user client; `found_framebuffer` filters nothing; the accelerator's VRAM
+descriptor comes from exactly one routable virtual; that virtual returns
+8294400 bytes; flips and swaps are both 0; `ioSurfaceReadOutBytes = 40812544`
+and `iosurfaceTextureCreationCount = 74`, i.e. WindowServer **is** making
+GPU-backed IOSurfaces and reading ~40 MB back off the GPU.
+
+**NOT measured — this is a hypothesis, not a result:** that the *reason* no
+flip happens is the 8 MB. Competing explanations survive: the pipe's
+`initFramebufferResource` may fail for an unrelated reason; SkyLight may build
+its destination without consulting the display pipe at all; or a capability
+distinct from the two advertised may be missing. 2pf's measurement
+(`getDisplayPipeTransactionFlip` never called once) is consistent with all of
+them.
+
+What makes it worth one boot anyway is the risk profile, which is nothing like
+2pk/2pm/2po: **no DCN register is written**, the hook is one return value on a
+method Apple calls for information, it is gated behind a boot-arg, and the
+failure mode is a wrong `IOFBMemorySize` rather than a dead pipe. The range
+must start at the **same** physical base (BAR0 offset 0 / system-physical
+`0x780000000`) and only be longer, so offset 0 remains the live scanout that
+DCHUBBUB is already fetching — then even a total failure leaves the picture on
+screen.
+
+### Verdict on the user's question
+
+**The accelerated framebuffer is not dead, and DCHUBBUB does not need to be
+got past.** What is dead is making Apple's dcn302 DAL do a modeset (2po). The
+display pipe is already built on our framebuffer, by Apple's own code, with
+transactions advertised and a WindowServer client attached — four facts that
+every milestone from 2oq onward assumed to be false.
