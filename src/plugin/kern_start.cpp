@@ -7522,6 +7522,21 @@ static uint32_t g_mtlkSlide     = 0;
 static bool     g_mtlkSlideSeen = false;
 static bool     g_mtlkInstalled = false;
 
+// 2oh: boot 126 installed both hooks (mtlk_syms=7, both hooks 1) and booted,
+// but every key set inside the exec path was absent - and the first of those
+// is set AFTER the name check. So either the hook never fires or the name
+// never matches. `task_set_main_thread_qos` takes the task as an argument and
+// itself calls get_bsdtask_info on it, so current_proc() need not be the
+// exec'ing process at all: proc_selfname may be naming the parent. Measure
+// both, and separate "does the hook fire" from "does the name match" from
+// "is the address right" so one boot answers all three.
+using t_rbMtlkGetBsdTaskInfo = void *(*)(task_t);
+static t_rbMtlkGetBsdTaskInfo g_mtlkGetBsdTaskInfo = nullptr;
+
+static uint64_t g_mtlkExecs    = 0;   // every qos call, before any filtering
+static uint64_t g_mtlkCaveHits = 0;   // execs whose name matched the scope
+static bool     g_mtlkProbed   = false;
+
 // Deliberately NOT calling rbgpu_diag_set_num from here. This fires during
 // early boot, before the peer exists, and the diag setter schedules a
 // thread_call. Store the value; the exec path reports it (rule 16: do not put
@@ -7551,15 +7566,80 @@ static bool rbgpu_mtlk_name_matches(const char *name, const char *needle) {
     return false;
 }
 
-static void rbgpu_mtlk_on_exec(task_t task) {
-    // Scope. proc_selfname is the exec'ing process here; a mis-scope in this
-    // stage costs nothing, because the cave is identical in every process and
-    // is never executed.
-    char pname[MAXCOMLEN + 1] = {};
-    proc_selfname(pname, sizeof(pname));
-    if (!rbgpu_mtlk_name_matches(pname, "cavecheck")) {
+// Read-only. A failed vm_map_read_user returns an error, it does not fault,
+// so this cannot damage anything - and it answers the only question that
+// matters about the addresses: are the expected bytes at unslid + slide?
+static void rbgpu_mtlk_probe(task_t task) {
+    g_mtlkProbed = true;
+    rbgpu_diag_set_num("mtlk_slide", g_mtlkSlide);
+
+    if (!g_mtlkGetTaskMap || !g_mtlkVmMapReadUser) {
+        rbgpu_diag_set_num("mtlk_probe_read", 0xFFFF);
         return;
     }
+    vm_map_t map = g_mtlkGetTaskMap(task);
+    if (map == nullptr) {
+        rbgpu_diag_set_num("mtlk_probe_read", 0xFFFE);
+        return;
+    }
+    mach_vm_address_t place =
+        (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
+    rbgpu_diag_set_num("mtlk_place", place);
+
+    static uint8_t pbuf[sizeof(kRbMtlCaveFind)];
+    kern_return_t r = g_mtlkVmMapReadUser(map, place, pbuf, sizeof(pbuf));
+    rbgpu_diag_set_num("mtlk_probe_read", static_cast<uint64_t>(r));
+    if (r != KERN_SUCCESS) {
+        return;
+    }
+    bool isFind = memcmp(pbuf, kRbMtlCaveFind, sizeof(pbuf)) == 0;
+    bool isRepl = memcmp(pbuf, kRbMtlCaveRepl, sizeof(pbuf)) == 0;
+    rbgpu_diag_set_num("mtlk_probe_match", isFind ? 1 : (isRepl ? 2 : 0));
+    rbgpu_diag_set_num("mtlk_probe_b0", pbuf[0]);
+}
+
+static void rbgpu_mtlk_on_exec(task_t task) {
+    g_mtlkExecs++;
+    // Throttled: the diag setter takes a lock and scans ~400 keys, and this
+    // runs on every exec on the system. The counter only has to show that the
+    // hook fires at all, so publishing every 32nd is enough (rule 16 - do not
+    // put avoidable work on a path this hot).
+    if ((g_mtlkExecs & 31) == 1) {
+        rbgpu_diag_set_num("mtlk_execs", g_mtlkExecs);
+    }
+
+    // Two independent names, because it is not established which one is the
+    // exec'ing process at this point. proc_selfname is current_proc();
+    // get_bsdtask_info(task) is the task actually being set up.
+    char selfname[MAXCOMLEN + 1] = {};
+    proc_selfname(selfname, sizeof(selfname));
+
+    char taskname[MAXCOMLEN + 1] = {};
+    if (g_mtlkGetBsdTaskInfo) {
+        auto *bsd = g_mtlkGetBsdTaskInfo(task);
+        if (bsd != nullptr) {
+            proc_name(proc_pid(static_cast<proc_t>(bsd)), taskname, sizeof(taskname));
+        }
+    }
+
+    // Probe once, as soon as a slide exists, whatever the process is called.
+    if (!g_mtlkProbed && g_mtlkSlideSeen) {
+        rbgpu_diag_set_str("mtlk_probe_self", selfname);
+        rbgpu_diag_set_str("mtlk_probe_task", taskname);
+        rbgpu_mtlk_probe(task);
+    }
+
+    bool scoped = rbgpu_mtlk_name_matches(selfname, "cavecheck") ||
+                  rbgpu_mtlk_name_matches(taskname, "cavecheck");
+    if (!scoped) {
+        return;
+    }
+    g_mtlkCaveHits++;
+    rbgpu_diag_set_num("mtlk_cavehits", g_mtlkCaveHits);
+    rbgpu_diag_set_str("mtlk_self", selfname);
+    rbgpu_diag_set_str("mtlk_task", taskname);
+
+    const char *pname = taskname[0] != '\0' ? taskname : selfname;
 
     rbgpu_diag_set_num("mtlk_slide", g_mtlkSlide);
 
@@ -7677,6 +7757,7 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
         { "_get_task_map",     reinterpret_cast<void **>(&g_mtlkGetTaskMap) },
         { "_vm_map_read_user", reinterpret_cast<void **>(&g_mtlkVmMapReadUser) },
         { "_vm_map_write_user", reinterpret_cast<void **>(&g_mtlkVmMapWriteUser) },
+        { "_get_bsdtask_info", reinterpret_cast<void **>(&g_mtlkGetBsdTaskInfo) },
     };
     uint64_t have = 0;
     for (size_t i = 0; i < arrsize(syms); i++) {
