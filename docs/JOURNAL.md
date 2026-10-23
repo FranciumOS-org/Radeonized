@@ -24012,3 +24012,107 @@ A wrong OTG or HUBP write blanks the panel (rule 12). Before asking, one cheap
 step remains that needs only a single privileged command and no reboot:
 `sample WindowServer` during a reproduction, which will name the hot function
 and confirm the read hypothesis instead of leaving it as the best inference.
+
+---
+
+## 2pd (2026-10-23) — ANSWERED: WindowServer rasterises the desktop in software, in half-float
+
+The user ran `sample WindowServer` and left the file behind, so this was read
+directly rather than inferred. **It overturns 2pb and 2pc's mechanism** while
+confirming their shape (throughput, not 30 Hz).
+
+### The stack
+
+```
+CGXUpdateDisplay
+  WS::Updater::UpdateDisplays
+    WS::Displays::CDDisplay::render_update
+      CompositorSW::CompositeLayersToDestination   1681 / 3471 samples (~48%)
+        layer_blit_entry -> CGLayerKitFetch -> CARenderOGLRender
+          CA::OGL::render_layers
+            CA::OGL::ImagingNode::render  x10 deep        <- the blur
+              CA::OGL::SW::scanline
+              CA::OGL::SW::image_sampler
+              CA::OGL::SWContext::draw_elements
+              CA::OGL::SW::Format::RGBAh::load_           <- HALF-FLOAT, in software
+```
+
+`CA::OGL::SW::` is CoreAnimation's **software rasteriser**, and `RGBAh` is
+**RGBA half-float** - 8 bytes per pixel, converted per sample in C. The whole
+desktop, blurs included, is being drawn by the CPU in an HDR float format.
+
+### Two corrections to the record, both mine
+
+**1. "Metal compositor activated" - it IS active.** My first read of the
+sample said "the GPU is not in the composite path", which was too quick. The
+log says otherwise:
+
+```
+2026-10-23 02:18:47.340  WindowServer[161]  [com.apple.SkyLight:default] Metal compositor activated.
+```
+
+Both are true: SkyLight *activates* `CompositorMetal` and uses it for
+off-screen work (shadows, captures, surfaces), but the **display destination**
+goes through `CompositorSW`. SkyLight has three - Metal, Software and Noop.
+
+**2. `log show` returning 0 lines was an instrument artifact, not an empty
+log.** zsh shadows `log`, so every `log show` in 2pc "returned nothing"
+(`too many arguments`). `/usr/bin/log` works. That is rule 26 exactly - a
+search is an instrument, and a grep returning nothing is not evidence of
+absence until checked against a case known to be present. It nearly cost the
+whole diagnosis.
+
+**3. Argument buffers are Tier 2, not Tier 1.** `MTLArgumentBuffersTier1 = 0`
+and `Tier2 = 1`, so the raw `1` recorded earlier as "tier 1" is Tier **2**,
+which is normal for RDNA2. docs/RULES.md listed this as an unexplained anomaly;
+it was a misread enum. One open question retired, and one hypothesis
+(a Metal path gated on argument buffers) killed with it.
+
+### The chain, now fully evidenced
+
+1. macOS has **no DCN 3.1.2 code** (2oq, measured with a control), so Apple's
+   AMD framebuffer driver cannot drive this display.
+2. The display is therefore `IONDRVFramebuffer`, whose destination is a raw
+   CPU-mapped physical range (`fFrameBuffer`, from `fbRange->map()`) - **not an
+   IOSurface and not a Metal texture**. SkyLight's two destination
+   constructors are `WSCompositeDestinationCreateWithIOSurface` and
+   `...WithMetalTexture`; a bare framebuffer pointer is neither.
+3. So `CompositorMetal` has nothing it can render the display into, and the
+   display composite falls back to `CompositorSW`.
+4. `CompositorSW` rasterises the entire layer tree on the CPU through
+   `CA::OGL::SW::` in RGBAh, then writes the result into write-combined
+   memory.
+5. Result: ~9-14 fps, WindowServer at 165-173 % CPU, 88 CPU-seconds per
+   45-second test, and multi-second stalls on exactly the read-and-blur-heavy
+   operations the user named.
+
+**The user has been right about this since boot 133**, in their own words:
+*"there is no framebuffer to use it"*, *"its the framebuffer we are on, apples
+stock"*, *"the whole framebuffer has to change to one that directly takes over
+the entire display to GPU"*. That is precisely what step 2 says. My "the 7 MB
+is cosmetic" was true of the number and wrong about what it indicates: one
+fixed CPU-mapped buffer is not a GPU destination, and that is the defect.
+
+### What the fix has to be
+
+The display's scanout must be a surface the GPU owns, so that
+`CompositorMetal` can target it and the pipe can flip. The adopted pipe is
+already there (`AMDRadeonX6000_AMDAccelDisplayPipe = 1`) but does nothing
+(`IOAccelDisplayPipeTransaction2 = 0`), because the flip it would perform ends
+in DAL code that does not exist for DCN 3.1.2.
+
+Hook target found: **`AMDRadeonX6000_AMDHWDisplay::getDisplayPipeTransactionFlip(
+unsigned int, IOAccelResource2*, IOAccelResource2*, _eAMDSwapInterval,
+_AMD_PIPE_FLIP*, bool, AMDAccelDisplayPipeTransactionPipeRotation,
+_AMD_PIPE_FLIP*)`** - Apple's code decides *which* surface to scan out and
+hands over `IOAccelResource2` surfaces; the part it cannot do is the register
+write. Supplying exactly the missing piece under Apple's own decision is the
+same shape as the CP halt fix (`vram_base_offset` at three call sites).
+
+**That write is `HUBP0_PRIMARY_SURFACE_ADDRESS` + `_HI`, and it is the user's
+decision.** On the chip it changes which address DCN's display pipe fetches
+scanout pixels from; a wrong value shows garbage or a black panel until the
+next correct write, and rule 12 says a black panel is indistinguishable from a
+hang. It is also the one write that can be validated cheaply, because the
+current correct value is known and measured (`0xf4_0000_0000`), so a readback
+can confirm the write landed and a restore path exists.
