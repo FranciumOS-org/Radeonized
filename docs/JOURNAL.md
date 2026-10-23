@@ -22299,3 +22299,57 @@ contract.
 policy through the DYLD trampoline, so it is a true oracle - and it answers
 the question that actually matters, which is whether the wrappers can be
 retired. Explicitly **not** the assistant, which is this session's host.
+
+## 2ok - stage B lands: cave AND detour live in a real app, nothing crashed
+
+Boot 128. Qualified first, and the qualification is the whole story:
+
+```
+built/loaded   EE7D0B93 (stage B code ran, so not stale)
+boot-args      -rbgpumtlkfix  rbgpumtlkscope=TextEdit
+rbgpu-boot     128, up from 127   armed
+mtlk_stage     2
+mtlk_scope     "TextEdit"
+```
+
+The scope was still `TextEdit` from the 2og plan - the switch to `idea` was
+never applied - so **IntelliJ was never targeted** and its text being broken
+is the correct result, not a failure. Rule 15 again: read which boot-args are
+actually there before interpreting anything.
+
+What did happen, in TextEdit:
+
+```
+mtlk_self   "xpcproxy"      mtlk_task  "TextEdit"
+mtlk_match     1   mtlk_prot_rw  0   mtlk_write  0   mtlk_verify   1
+mtlkd_match    1   mtlkd_prot    0   mtlkd_write 0   mtlkd_verify  1
+```
+
+**Both sites placed and read back correct in a live application.** And
+TextEdit is pid 441, launched this boot, still running, with no crash report
+of any kind. So the detour is live in a real process and the machine and the
+app are both fine.
+
+A third confirmation of the naming finding, from a different angle:
+`mtlk_self` is `xpcproxy` this time, not `zsh` or `launchd` - whatever
+`current_proc()` is at that hook point, it is never the process being
+exec'd. Only `proc_name(proc_pid(get_bsdtask_info(task)))` is.
+
+### What this does and does not prove
+
+Proved: the kernel-side patcher can place a 224-byte cave and a 5-byte detour
+into the dyld shared cache of an arbitrary process, per-process and
+copy-on-write, with plain RW protection, and the process keeps running.
+
+**Not** proved: that the cave's machine code ever executed. 2oj established
+that TextEdit draws text through CoreGraphics into CALayer backing stores and
+so may never call `DetermineSwizzleMode` at all. "TextEdit did not crash" is
+therefore consistent with both "the cave is correct" and "the cave was never
+called". That distinction is exactly what the next boot settles, because
+IntelliJ definitely calls it.
+
+### Also corrected
+
+docs/RULES.md's status paragraph still read "first target TextEdit, an Apple
+platform binary that no other route can reach", which 2oj already withdrew.
+Fixed there too, not just in the journal.
