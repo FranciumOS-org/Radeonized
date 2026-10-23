@@ -363,9 +363,15 @@ The two that bite hardest:
   its ~80 % is real and not an artefact of boot 98's broken state. Restore:
   `sudo tools/efi.sh bootarg add -rbgpulinear && sudo nvram rbgpu-arm=1`
   It does **not** affect the text in either direction (2ln).
-- **`-rbgpumtllinear`** (2lm) is built but OUT: a Lilu user patch forcing
-  `DetermineSwizzleMode` to LINEAR in **Terminal only**. Not armed; 2ll's
-  result must be read first.
+- **`-rbgpumtllinear`** (2lm) is **IN** - this line said "built but OUT"
+  until 2026-10-22, when `efi.sh status` showed it in boot-args alongside
+  `-rbgpuhwblt` (rule 15: read the config, not this file). A Lilu user patch
+  forcing `DetermineSwizzleMode` to LINEAR in **Terminal only**. It is inert
+  for the usual 2oc reason - no file to read patterns from - but it is NOT
+  harmless to the 2od work: `kRb2lmMod` and `kRb2lpMod` declare the same
+  dylib path and register FIRST, and `mapAddresses` fills only the first
+  matching mod per `.map` line, so the real `startTEXT` lands on one of them
+  rather than on ours. `rbgpu_mtlcave_mapped_mod()` exists for exactly this.
 
 ## Rescue
 
