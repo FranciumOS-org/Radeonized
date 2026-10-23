@@ -42,8 +42,9 @@ through CALayer backing stores and may never call `DetermineSwizzleMode`, so
 "TextEdit did not crash" fits both "the cave is correct" and "it was never
 called". The oracle is **IntelliJ IDEA** (`rbgpumtlkscope=idea`), which is
 broken unwrapped and fixed by this exact policy through the DYLD trampoline -
-it answers whether the per-app wrappers can be retired. Do not scope this at
-Claude, which hosts the session.
+**2ol confirmed it**: unwrapped IntelliJ, correct text, no injection. The
+cave's hand-written code executes correctly. Do not scope this at Claude,
+which hosts the session.
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -85,15 +86,28 @@ reproduces it on demand; 2na has the exact permutation). Forcing the chooser
 does NOT fix it (2nd), because those surfaces reach neither this path nor the
 kernel's align manager (2nj). Do not conflate the two.
 
-**There is NO global fix, and 2ns closed all three routes.** gbAddrConfig is
-already correct, so the kext cannot fix the math; `AMD_DeviceSettings` is
-built in userspace by `amdMtl_HWL_InitDeviceSettings` from hwInfo, so it is
-not a second kernel channel; and `LSEnvironment` in the real app's Info.plist
-invalidates the bundle signature, after which LaunchServices refuses the app
-outright (**error -54**, measured on IntelliJ, backups in
-`logs/plist-backups/`). The decision is made in the userspace driver, one copy
-per process. `tools/rbgpu-app.sh install-all` wraps every injectable app in
-one pass. **Apple platform binaries and sandboxed App Store apps stay broken.**
+**THERE IS A GLOBAL FIX AND IT WORKS (2ol, boot 129).** `-rbgpumtlkfix` with
+`rbgpumtlkscope=idea` made **unwrapped** IntelliJ render correct text - plain
+`/Applications/IntelliJ IDEA.app`, no `DYLD_*` in its environment at all, no
+`(GPU)` wrapper running, and `-rbgpulinear`/`-rbgpumtllinear` were set in the
+boots where it was broken, so only `-rbgpumtlkfix` explains it. The fix is
+delivered by the kext into any process matching the scope, with no wrapper, no
+injected dylib and no change to the app bundle, so it survives app updates.
+
+2ns's "no global fix" was right about the place and wrong about the reach (as
+2lg was): gbAddrConfig is already correct so the kext cannot fix the *math*;
+`AMD_DeviceSettings` is built in userspace by
+`amdMtl_HWL_InitDeviceSettings`, so it is not a second kernel channel; and
+`LSEnvironment` in a real bundle's Info.plist invalidates its signature, after
+which LaunchServices refuses the app (**error -54**, measured on IntelliJ,
+backups in `logs/plist-backups/`). All true - and none of them block writing
+the decision into the process from the kernel.
+
+**Remaining work is widening the scope, which is NOT free:** blanket LINEAR
+crashes JBR (2np), and the `fix` policy is proven on exactly one app so far.
+Widen app by app and keep a way to exclude one that misbehaves.
+`tools/rbgpu-app.sh` wrappers can be retired per app, but only after that app
+is confirmed under the kernel path.
 
 **Note for any session run inside the Claude app:** it is itself launched with
 `DYLD_INSERT_LIBRARIES` set, so every shell inherits it and `open -a` passes

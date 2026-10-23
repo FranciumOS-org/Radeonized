@@ -22353,3 +22353,65 @@ IntelliJ definitely calls it.
 CLAUDE.md's status paragraph still read "first target TextEdit, an Apple
 platform binary that no other route can reach", which 2oj already withdrew.
 Fixed there too, not just in the journal.
+
+## 2ol - THE UNIVERSAL FIX WORKS. Unwrapped IntelliJ, text correct, from the kext.
+
+Boot 129, `rbgpumtlkscope=idea`, `-rbgpumtlkfix`. The user launched
+IntelliJ IDEA normally - no `env -u`, no `(GPU)` wrapper - and **the text is
+correct**.
+
+Qualified before being believed, because this is the claim the whole project
+has been reaching for:
+
+```
+pid 413    /Applications/IntelliJ IDEA.app/Contents/MacOS/idea   the plain bundle
+ps eww     no DYLD_* in its environment AT ALL                   no injection
+wrapper    no ~/Applications/IntelliJ IDEA (GPU).app instance running
+scope      "idea"     mtlk_cavehits 4     mtlkd_verify 1
+boot       129, up from 128, armed
+```
+
+and the obvious confounds ruled out: `-rbgpulinear` and `-rbgpumtllinear` were
+both set in boots 124-128, during which unwrapped IntelliJ was broken every
+time, so neither explains the change. The only new variable is
+`-rbgpumtlkfix`.
+
+**This is the first time the hand-written cave has executed**, and it produced
+the right answer. 2oj's static verification of it - usage OR'd from +0x68 and
++0xb0, render-target bit test, non-RT to LINEAR, 28-byte `nox()` table with Z
+modes untouched - is now confirmed dynamically.
+
+### An instrument mistake worth recording, caught in the same breath
+
+My own verification printed "wrapper matches: 3", which looked like three
+wrapped IntelliJ processes running and would have invalidated the result.
+They were **my own `grep` command lines**, visible in `ps` output because the
+pattern `(GPU)` appears in the shell command that searches for it. Rule 23's
+cousin: `ps` shows the searcher alongside the searched. Also in the same
+check, `awk '$2=="idea"'` against `ps -axo comm=` silently matched nothing,
+because `comm=` prints the **full path**, not the basename - so the
+DYLD-environment test did not run at all and reported nothing, which looked
+like a pass. Both were caught only by printing the raw rows instead of a
+count.
+
+### What is now true
+
+The fix is delivered **by the kext**, into any process named by
+`rbgpumtlkscope`, with no wrapper, no injected dylib, no user action, and no
+change to the app bundle. It survives app updates, because nothing about the
+app is touched. The route 2ns declared closed - "there is NO global fix, the
+decision is made in the userspace driver, one copy per process" - was right
+about the *place* and wrong about the reach, in exactly the way 2lg was.
+
+### What is next, and the risk in it
+
+The scope is still a single substring. Widening it is the remaining work, and
+it is not free: blanket LINEAR **crashes** JBR (2np), and while the `fix`
+policy is strictly gentler, it has now been proven on exactly one application.
+Widening should go app by app, or by a list, and the mechanism should keep a
+way to exclude a process that misbehaves. The per-app wrappers in
+`tools/rbgpu-app.sh` can start being retired, but not before the apps they
+cover are each confirmed under the kernel path.
+
+Defect B - the CoreAnimation backing store - is untouched by any of this and
+remains open.
