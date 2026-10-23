@@ -21,30 +21,41 @@ sealed-OS policy enforces independently of the CSR bits).
 
 **An armed boot is a usable, accelerated Mac** — the CP halt is fixed
 (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute bit-exact.
-**APP TEXT IS FIXED (2np/2nr, 2026-10-22), in the assistant AND IntelliJ IDEA.**
-The defect is the swizzle mode the **userspace** Metal driver picks for client
-textures - 2lg found that place on 2026-10-20 and filed it "out of this
-plugin's reach", which was right about the place and wrong about the reach.
-**Lilu's user patcher is DISABLED on Big Sur and newer and cannot be
-re-enabled** (rule 22, 2of): `isUserDisabled |= getKernelVersion() >=
-BigSur`, so 2lm/2lp/2nb/2nm/2oa/2od all registered with `NoError` and never
-existed. Do not write another `BinaryModInfo` here. The *mechanism* is still
-open - every kernel symbol it needs is present and `KernelPatcher` works -
-so this plugin does it itself, and **it works**: 2oi hooked
-`_task_set_main_thread_qos` and `_vm_shared_region_slide` and placed the cave
-into the shared cache of a process that was never given
-`DYLD_INSERT_LIBRARIES`, verified from that process's own memory
-(`-rbgpumtlkpatch`). Stage B (`-rbgpumtlkfix`) adds the detour, and 2ok placed
-**both** cave and detour into a live TextEdit, verified from its memory, with
-the app still running and no crash. What is NOT yet shown is that the cave's
-code ever *executed*: 2oj established that native AppKit apps draw text
-through CALayer backing stores and may never call `DetermineSwizzleMode`, so
-"TextEdit did not crash" fits both "the cave is correct" and "it was never
-called". The oracle is **IntelliJ IDEA** (`rbgpumtlkscope=idea`), which is
-broken unwrapped and fixed by this exact policy through the DYLD trampoline -
-**2ol confirmed it**: unwrapped IntelliJ, correct text, no injection. The
-cave's hand-written code executes correctly. Do not scope this at the assistant,
-which hosts the session.
+
+**THE UNIVERSAL FIX IS DONE (2on, boot 130).** `-rbgpumtlkfix` with
+`rbgpumtlkscope=*` fixes **every process on the system**, Safari included,
+with no wrapper, no injected dylib and no change to any app bundle - so it
+survives app updates. 2045 of ~2049 execs patched. The kext hooks
+`_vm_shared_region_slide` for the cache slide and
+`_task_set_main_thread_qos` for a per-process point at exec, then places a
+224-byte cave in `__TEXT,__const` and a 5-byte detour over
+`amdMtl_HWL_DetermineSwizzleMode` with `_vm_map_write_user`, verifying both
+from the target's own memory. **Lilu's user patcher is irrelevant here - it
+is disabled on Big Sur and newer and cannot be re-enabled (rule 22).**
+
+**The defect was never only about text.** It is the swizzle mode the
+*userspace* Metal driver picks for client textures; images were affected too
+(2on). Everything from 2lg to 2ol called it "the text defect" because text is
+where it was noticed. Policy `fix`: LINEAR for non-render-targets, render
+targets mapped off the `_X` family (21->5, 22->6, 23->6, 25->9, 26->10,
+27->10; Z modes 20/24 untouched), keyed on `usage` OR'd from descriptor
+**+0x68 and +0xb0** (JBR leaves +0x68 unset on a render target).
+**WHY the `_X` family is wrong is still NOT established** - 2nr blamed Navi
+21's pipe count and 2ns measured that false: AddrLib's whole configuration is
+`AMDCommonHwInfoRec+0xa4` = gbAddrConfig, which reads 0x242, agreeing with
+the chip. 2na's XOR-linear bit matrix still points at the `_X` XOR term, just
+not at the pipe count.
+
+**`tools/rbgpu-app.sh` and the `(GPU)` wrappers are OBSOLETE** - superseded by
+the kext path, which reaches what they never could: platform binaries and
+sandboxed App Store apps. Leftover wrappers are a safe no-op (2om), so remove
+them at leisure. 2ns's "there is NO global fix" was right about the place and
+wrong about the reach, exactly as 2lg was.
+
+**Not yet re-evaluated against the working fix:** `-rbgpulinear` (a *kernel*
+forcing of the same decision, credited with ~80 % of widget artifacts in boot
+104, so possibly now redundant or harmful) and `-rbgpumtllinear` (provably
+inert, rule 22). Test one at a time.
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -64,10 +75,11 @@ at the `_X` XOR term, just not at the pipe count.
 `usage` is at descriptor **+0x68 as requested and +0xb0 as resolved** - always
 OR them. JBR leaves usage unset, so +0x68 reads 0 on a render target.
 
-Persist it per app with `tools/rbgpu-app.sh install "<App>"`, which builds a
-Dock-able `~/Applications/<App> (GPU).app`. Never a launchd environment
-(rule 21). **Apple platform binaries (Safari, Finder, WindowServer) strip
-DYLD_INSERT_LIBRARIES and cannot be reached this way at all.**
+For a one-off test in a single process you can still inject
+`tools/mtlswizzle.c` with `RBGPU_SWIZZLE=fix`; never a launchd environment
+(rule 21). **Apple platform binaries strip `DYLD_INSERT_LIBRARIES` and cannot
+be reached by injection at all** - which is why the kext path matters, and
+2on proved Safari is both affected and fixed by it.
 
 **Nor is TextEdit, or any native AppKit app** - 2oj/2ok: this defect is the
 mode chosen for client `MTLTexture`s, which Electron and JBR hit by rendering
@@ -80,34 +92,11 @@ Defect B). TextEdit renders correctly at baseline, so it can only ever show
 every footprint 1.00x) because its round trip is self-consistent. Only a real
 application tells you anything.
 
-**Still open, and a SEPARATE defect:** a CoreAnimation layer backing store
+**Defect B is the one still open** - a CoreAnimation layer backing store
 comes out rearranged in about half of allocations (`tools/screenprobe.sh`
-reproduces it on demand; 2na has the exact permutation). Forcing the chooser
-does NOT fix it (2nd), because those surfaces reach neither this path nor the
-kernel's align manager (2nj). Do not conflate the two.
-
-**THERE IS A GLOBAL FIX AND IT WORKS (2ol, boot 129).** `-rbgpumtlkfix` with
-`rbgpumtlkscope=idea` made **unwrapped** IntelliJ render correct text - plain
-`/Applications/IntelliJ IDEA.app`, no `DYLD_*` in its environment at all, no
-`(GPU)` wrapper running, and `-rbgpulinear`/`-rbgpumtllinear` were set in the
-boots where it was broken, so only `-rbgpumtlkfix` explains it. The fix is
-delivered by the kext into any process matching the scope, with no wrapper, no
-injected dylib and no change to the app bundle, so it survives app updates.
-
-2ns's "no global fix" was right about the place and wrong about the reach (as
-2lg was): gbAddrConfig is already correct so the kext cannot fix the *math*;
-`AMD_DeviceSettings` is built in userspace by
-`amdMtl_HWL_InitDeviceSettings`, so it is not a second kernel channel; and
-`LSEnvironment` in a real bundle's Info.plist invalidates its signature, after
-which LaunchServices refuses the app (**error -54**, measured on IntelliJ,
-backups in `logs/plist-backups/`). All true - and none of them block writing
-the decision into the process from the kernel.
-
-**Remaining work is widening the scope, which is NOT free:** blanket LINEAR
-crashes JBR (2np), and the `fix` policy is proven on exactly one app so far.
-Widen app by app and keep a way to exclude one that misbehaves.
-`tools/rbgpu-app.sh` wrappers can be retired per app, but only after that app
-is confirmed under the kernel path.
+reproduces it; 2na has the exact permutation). It is a different path (2nj)
+and 2on's universal fix should NOT be assumed to have touched it; it needs
+its own `screenprobe.sh` run. Do not conflate the two.
 
 **Note for any session run inside the the assistant app:** it is itself launched with
 `DYLD_INSERT_LIBRARIES` set, so every shell inherits it and `open -a` passes
