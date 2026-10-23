@@ -48,12 +48,17 @@ static const char *kextPathX6000  = "/System/Library/Extensions/AMDRadeonX6000.k
 static const char *kextPathHWSvc  = "/System/Library/Extensions/AMDRadeonX6000HWServices.kext/Contents/MacOS/AMDRadeonX6000HWServices";
 static const char *kextPathAccelFamily =
     "/System/Library/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2";
+// 2ou: IONDRVSupport owns IONDRVFramebuffer, the class actually driving this
+// panel (.Display_boot). It is where the refresh rate comes from.
+static const char *kextPathNDRV =
+    "/System/Library/Extensions/IONDRVSupport.kext/Contents/MacOS/IONDRVSupport";
 
 enum KextListIndex {
     KextHWLibs = 0,
     KextX6000,
     KextHWSvc,
-    KextAccelFamily
+    KextAccelFamily,
+    KextNDRV
 };
 
 static KernelPatcher::KextInfo kextList[] = {
@@ -64,6 +69,10 @@ static KernelPatcher::KextInfo kextList[] = {
     // dependency of AMDRadeonX6000, so it loads after this plugin and
     // onKextLoad fires for it.
     { "com.apple.iokit.IOAcceleratorFamily2", &kextPathAccelFamily, 1, {true}, {},
+      KernelPatcher::KextInfo::Unloaded },
+    // 2ou: IONDRVSupport. Loads from SystemKernelExtensions.kc after this
+    // plugin, so onKextLoad fires for it.
+    { "com.apple.iokit.IONDRVSupport", &kextPathNDRV, 1, {true}, {},
       KernelPatcher::KextInfo::Unloaded }
 };
 
@@ -7355,6 +7364,126 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
               have, okSlide && g_mtlkOrgSlide ? 1 : 0, okQos && g_mtlkOrgQos ? 1 : 0);
 }
 
+
+// ---------------------------------------------------------------------------
+// 2ou (2026-10-23): the 30 Hz fix - make the display report its real refresh.
+//
+// 2ot measured the animation clock with tools/dispclk: the CoreVideo display
+// link fires at **exactly 30.00 Hz** while the panel scans out at 143.833 Hz
+// (2os, from OTG0's frame counter). 30 Hz is CoreVideo's documented fallback
+// for a display whose refresh period is indefinite, and the callbacks arrived
+// at *precisely* the nominal rate - which is the tell: with no real vsync,
+// CoreVideo is simply running a timer at nominal. **So nominal IS the
+// pacing**, and the smallest thing that can move it is to stop the framebuffer
+// reporting zero.
+//
+// `IONDRVFramebuffer::getInformationForDisplayMode` fills an
+// `IODisplayModeInformation`, whose `refreshRate` is an `IOFixed1616` at
+// **offset 8** - verified against the SDK's own IOGraphicsTypes.h
+// (nominalWidth 0, nominalHeight 4, refreshRate 8, maxDepthIndex 12), not
+// assumed. The boot framebuffer leaves it 0, and that is the whole of
+// `IOFBConfig`'s `IOFB0Hz = Yes`.
+//
+// Deliberately the SMALLEST possible intervention:
+//
+//   * the ORIGINAL runs first and its return value is passed through
+//     untouched;
+//   * one 4-byte field is filled, and ONLY when it is still 0, so this adds
+//     information and never contradicts a driver that knows its own timing;
+//   * it writes no hardware register of any kind. The worst case is a wrong
+//     number *reported*. It cannot blank the panel.
+//
+// Rule 2 checked before routing: the prologue is
+// `55 48 89 e5 48 8b 07` - push rbp, mov rsp,rbp, mov (rdi),rax - with no
+// rel8/rel32 branch starting inside the first five bytes. The
+// `callq *0xc00(%rax)` at +7 is an *indirect* vtable call, so it is
+// position-independent and safe to displace into Lilu's trampoline.
+// Rule 3 checked: the mangled name appears nowhere else in this plugin.
+//
+// SHIPPED ALONE, deliberately. 2ot also found the full vblank-delivery
+// mechanism (no `_VSLService` of type 'vbl ' exists, so
+// `registerForInterruptType` falls through and IOFramebuffer never gets a
+// vblank), but adding both in one boot would make attribution impossible if
+// the result were partial. Rule 16. If `dispclk` goes 30 -> ~144 after this,
+// the vblank work is a refinement for phase-lock and tear-free presents
+// rather than the fix for the user's complaint.
+//
+// Off unless `-rbgpuvbl`. `rbgpuvblhz=<millihertz>` overrides the rate, so a
+// wrong guess costs an NVRAM edit rather than a rebuild.
+static bool     g_vbl_on     = false;
+static uint32_t g_vbl_mhz    = 143833;   // measured, 2os/2ot
+static uint64_t g_vbl_calls  = 0;        // times the original was called
+static uint64_t g_vbl_filled = 0;        // times the field was still 0 and got filled
+static uint64_t g_vbl_had    = 0;        // times it already had a value (not ours to touch)
+static uint32_t g_vbl_wrote  = 0;        // the 16.16 value last written
+
+using t_rbNdrvGetInfoForMode = int (*)(void *, int, void *);
+static t_rbNdrvGetInfoForMode orig_ndrv_getinfo_2ou = nullptr;
+
+static int hooked_ndrv_getinfo_2ou(void *fb, int mode, void *info) {
+    int ret = orig_ndrv_getinfo_2ou(fb, mode, info);
+    g_vbl_calls++;
+
+    // Rule 19: a NULL check is not a pointer check. `info` is caller-provided,
+    // so require a kernel VA before writing through it.
+    auto addr = reinterpret_cast<uintptr_t>(info);
+    if (ret != 0 || addr < 0xffffff8000000000ull)
+        return ret;
+
+    auto *rr = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(info) + 8);
+    if (*rr != 0) {
+        g_vbl_had++;
+        return ret;
+    }
+    if (g_vbl_mhz == 0)
+        return ret;
+
+    // IOFixed1616 from millihertz: (mhz << 16) / 1000.
+    *rr = static_cast<uint32_t>((static_cast<uint64_t>(g_vbl_mhz) << 16) / 1000);
+    g_vbl_filled++;
+    g_vbl_wrote = *rr;
+    if (g_vbl_filled <= 4) {
+        rbgpu_log("2ou: mode %d had refreshRate 0 -> wrote %u (16.16) = %u.%03u Hz",
+                  mode, *rr, g_vbl_mhz / 1000, g_vbl_mhz % 1000);
+    }
+    rbgpu_diag_set_num("vbl_filled", g_vbl_filled);
+    rbgpu_diag_set_num("vbl_rr", g_vbl_wrote);
+    return ret;
+}
+
+void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
+                       size_t size) {
+    // Rule 14: every path out of here says something.
+    if (!g_vbl_on) {
+        rbgpu_log("2ou: NOT armed - -rbgpuvbl absent, IONDRVSupport untouched and "
+                  "the display keeps reporting 0 Hz (animations stay at CoreVideo's "
+                  "30 Hz fallback)");
+        rbgpu_diag_set_num("vbl_on", 0);
+        return;
+    }
+    rbgpu_diag_set_num("vbl_on", 1);
+    rbgpu_diag_set_num("vbl_mhz", g_vbl_mhz);
+
+    KernelPatcher::RouteRequest req(
+        "__ZN17IONDRVFramebuffer28getInformationForDisplayModeEiP24IODisplayModeInformation",
+        hooked_ndrv_getinfo_2ou,
+        orig_ndrv_getinfo_2ou
+    );
+    if (patcher.routeMultiple(id, &req, 1, address, size)) {
+        rbgpu_log("2ou: ARMED - routed IONDRVFramebuffer::getInformationForDisplayMode; "
+                  "a mode reporting refreshRate 0 will be told %u.%03u Hz. "
+                  "Read it with tools/dispclk: 30.00 Hz means this did not take, "
+                  "~%u Hz means it did.",
+                  g_vbl_mhz / 1000, g_vbl_mhz % 1000, g_vbl_mhz / 1000);
+        rbgpu_diag_set_num("vbl_routed", 1);
+    } else {
+        patcher.clearError();
+        rbgpu_log("2ou: FAILED to route getInformationForDisplayMode - nothing is "
+                  "patched and the display still reports 0 Hz");
+        rbgpu_diag_set_num("vbl_routed", 0);
+    }
+}
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
@@ -7378,6 +7507,23 @@ void RGPU::init() {
               pspHwMode ? "ENABLED" : "DISABLED");
 
     rbgpu_pkrs_init_2ly();
+
+    // 2ou: the 30 Hz fix. OFF by default - its first boot has not happened.
+    g_vbl_on = checkKernelArgument("-rbgpuvbl");
+    char vblbuf[32] {};
+    if (lilu_get_boot_args("rbgpuvblhz", vblbuf, sizeof(vblbuf) - 1) && vblbuf[0]) {
+        uint32_t v = 0;
+        for (const char *c = vblbuf; *c >= '0' && *c <= '9'; c++)
+            v = v * 10 + static_cast<uint32_t>(*c - '0');
+        if (v >= 20000 && v <= 400000)      // 20-400 Hz, refuse nonsense
+            g_vbl_mhz = v;
+        else
+            rbgpu_log("2ou: rbgpuvblhz=%s is outside 20000-400000 mHz - ignored, "
+                      "keeping %u", vblbuf, g_vbl_mhz);
+    }
+    rbgpu_log("2ou: refresh-rate fix %s (%u.%03u Hz)",
+              g_vbl_on ? "ARMED by -rbgpuvbl" : "off (add -rbgpuvbl)",
+              g_vbl_mhz / 1000, g_vbl_mhz % 1000);
 
     // 2og: install the kernel-side patcher at the EARLIEST point Lilu offers.
     // processPatcherLoadCallbacks runs inside performCommonInit before
@@ -7416,6 +7562,10 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         g_kext_size_accelfam = size;
         rbgpu_log("AccelFamily loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
         processAccelFamily(patcher, id, address, size);
+    } else if (kextList[KextNDRV].loadIndex == id) {
+        rbgpu_log("2ou: IONDRVSupport loaded at %p (size 0x%zx)",
+                  reinterpret_cast<void *>(address), size);
+        processNDRV(patcher, id, address, size);
     } else if (kextList[KextHWSvc].loadIndex == id) {
         g_kext_addr_hwsvc = address;
         g_kext_size_hwsvc = size;
