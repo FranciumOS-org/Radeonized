@@ -25391,3 +25391,122 @@ two compositors is the thing to read next, not the destination's validity.
 
 The honest summary of 2pr -> 2pt: a loud log line is not a diagnosis, and
 "predates X" needs a boot where X is off before it can be said at all.
+
+---
+
+## 2pu (2026-10-23) — THE COMPOSITOR SELECTION, NAMED END TO END. Zero boots.
+
+2pt left the right question: why does the display composite go to
+`CompositorSW` when the log says `Metal compositor activated.`? This answers it,
+and the answer is two concrete values, not a missing driver.
+
+### The chain, every link symbolized
+
+The caller stack came from a **spindump already on disk**
+(`logs/20261019-003554-metal/ws-spindump.txt`) - measured, not inferred:
+
+```
+WS::Updater::UpdateDisplays(CGXConnection*, bool, vector<shared_ptr<WS::Displays::Display>>)
+  -> WS::Displays::CDDisplay::render_update(WS::Displays::Update&, Compositor*,
+                                            unsigned int, WSCompositeSourceLayer*)
+    -> CompositorSW::CompositeLayersToDestination(...)        <- 2pd's 48 %
+```
+
+`render_update` **takes the `Compositor*` as an argument**, so the display does
+not choose it - its caller does. At the call site
+(`UpdateDisplays + 20990`, unslid `0x7ff807e337e3`):
+
+```
+movq -0xa00(%rbp), %rdx     ; the Compositor*
+leaq -0x510(%rbp), %rsi     ; &Update
+movl %ebx, %ecx
+callq *0x4f8(%rax)          ; virtual render_update, display vtable slot +0x4f8
+```
+
+and the display's own accessor, `WS::Displays::CDDisplay::compositor() const`
+(unslid `0x7ff807d6c13c`), is four instructions:
+
+```
+movq (%rdi), %rax
+callq *0x60(%rax)           ; virtual: the display's ACCELERATOR ID -> edi
+movl %eax, %edi
+jmp  0x7ff807c9b78c         ; tail call WSGetCompositorForAccelerator
+```
+
+### The decision, exactly
+
+`WSGetCompositorForAccelerator(unsigned int accelId)`, unslid `0x7ff807c9b78c`:
+
+```
+mode = *0x7ff843c9ecdc                       ; 0 = Metal, 1 = SW, 2 = debug
+if (mode == 2)                 return *0x7ff843c9eca0;   ; debug singleton
+if (mode != 0)                 return *0x7ff843c9eca8;   ; SW singleton
+;  ---- mode == 0, i.e. "Metal compositor activated." ----
+if (accelId == 0)              return *0x7ff843c9eca8;   ; <<< SOFTWARE
+if ((*0x7ff843ca08b0 & 1) == 0) return *0x7ff843c9eca8;  ; <<< SOFTWARE
+return getMetalCompositorFor(accelId);                   ; 0x7ff807c99cd6
+```
+
+The mode global was pinned down from the activators, which the log strings
+locate: `activate_compositor_metal(bool)` (`0x7ff807c9a826`) writes **0**,
+`activate_compositor_sw(bool)` (`0x7ff807c9a8ae`) writes **1**, and
+`WSCompositorSetDebugOptions` writes **2**. `activate_compositor_default()` and
+`WSGetCompositorForAccelerator` are the readers that matter; the rest are
+`set_debug_options` and `DumpWSCDIOPWSAA`.
+
+**So: Metal IS activated globally, and the display is still handed the software
+compositor, by one of exactly two tests** - `accelId == 0`, or bit 0 of the flag
+at `0x7ff843ca08b0` being clear. Nothing else in that function can produce the
+SW singleton once mode is 0.
+
+The other eight callers confirm the shape - `displaystream_update`,
+`device_composite_windows`, `WindowFreeze::Update`, `WSCALayerBacking::Flatten`,
+`WSCALayerBacking::BeginUpdate`, `CaptureSurface::PrepareForPopulation`,
+`WSCompositeWindowToDestination` - every consumer gets its compositor from this
+one selector, per accelerator.
+
+### What this changes
+
+The display half has been framed since 2oq as "macOS has no DCN 3.1.2 code, so
+the destination can never be a GPU surface". 2pt already removed the
+destination from the story (CompositorSW **accepts** it). This removes the
+driver from the story too: **the software path is chosen by an `if` on two
+integers, before any destination or driver capability is consulted.**
+
+### The one thing NOT established
+
+**Which of the two tests fails, and what `accelId` actually is.** It comes from
+a virtual method at the display's vtable slot **+0x60**, and naming that needs
+the vtable, whose slots in `__DATA_CONST` are **chained-fixup encoded** - slot
+`+0x60` of CDDisplay's vtable (address point `0x7ff88166da20`, found by locating
+`render_update`'s raw pointer at `0x7ff88166df18` and subtracting `0x4f8`) reads
+`0x10e017c79de`, which is an encoding, not an address. Decoding chained fixups
+is the next piece of tooling.
+
+A correction while here: 2pt's remark that the compositor vtable region
+"interleaves non-pointer values, so it isn't a plain vtable" was wrong about the
+cause. Those values are **chained-fixup encodings** of the slots that need
+rebasing; the ones that symbolized cleanly happen to be stored raw. It is a
+vtable.
+
+**And a trap to avoid naming it too fast:** 2pp measured `IOAccelIndex = 0` on
+our `IONDRVFramebuffer`, which is tempting to equate with `accelId == 0`. But a
+normal single-GPU Mac also has `IOAccelIndex = 0` and composites with Metal, so
+either 0 is a legal id there and our problem is the capability flag, or `accelId`
+is a different number entirely. **Do not report IOAccelIndex as the cause
+without reading slot +0x60.**
+
+### Why the next step is cheap either way
+
+Both values are readable at runtime, and both are plain integers:
+
+- the flag at `0x7ff843ca08b0` and the mode at `0x7ff843c9ecdc` are **globals in
+  SkyLight's `__DATA`**, so any process that loads SkyLight has them at
+  `unslid + slide` - no root, no WindowServer, no boot. The flag's writer is
+  inside a `dispatch_once` block, so its value is only knowable by reading it.
+- `accelId` needs the display, i.e. WindowServer - but the kernel-side patcher
+  (2og/2oi/2on) already reaches WindowServer and verifies every site from the
+  target's own memory first.
+
+Read the two globals from a scratch process first. That is free and it halves
+the question.
