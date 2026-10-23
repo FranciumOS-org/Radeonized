@@ -543,6 +543,18 @@ The two that bite hardest:
   `tools/dispclk`; rule 14 keys: `fb_vbl_calls` + `fb_vbl_t1..t8` (was the
   door knocked on, with what types), `fb_vbl_bound`/`fb_vbl_origret` (we took
   it), `fb_vbl_sent` (proc deliveries) vs `vblp_ticks` (fallback deliveries).
+- **`-rbgpufbvram`** (2pa) publishes the label the "7 MB" is missing:
+  `VRAM,totalMB` (default 4096, override `rbgpufbvrammb=<N>`, refused outside
+  256-16384) and `VRAM,totalsize` on **both** the framebuffer and its provider,
+  plus `model` = "AMD Radeon 680M" on the provider for the absent "Chipset
+  Model" line. Routed on `IONDRVFramebuffer::enableController`, NOT done from
+  `RembrandtGPUPeer::start()`, which runs before IONDRVSupport loads and is the
+  boot-137 race (2oy). The cast to `IOService` is checked by asking the object
+  `getMetaClass()->getClassName()` and refusing unless it is
+  `IONDRVFramebuffer`. Allocates nothing - the 4096 MB is already there. Read
+  it with `system_profiler SPDisplaysDataType`; "7 MB" means it did not take.
+  Keys: `fbvram` (3 = published, 1 = bad pointer, 2 = wrong class, with
+  `fbvram_class`), `fbvram_props`, `fbvram_routed`.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
