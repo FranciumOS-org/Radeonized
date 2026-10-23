@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -168,6 +168,16 @@ $(OUT)/dispclk: tools/dispclk.m | $(OUT)
 vramtest: $(OUT)/vramtest
 $(OUT)/vramtest: tools/vramtest.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal
+
+# accelport (2py): the ORACLE for "why software compositing?" - reproduces
+# CoreDisplay::FindAcceleratorWithMTLDevice(), whose return IS
+# mpPriv->accelerator, which SkyLight routes to CompositorSW when it is 0.
+# Prints its own precondition: an unarmed boot has no accelerator and every
+# number is 0 for an unrelated reason.
+accelport: $(OUT)/accelport
+$(OUT)/accelport: tools/accelport.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
+	      -framework IOKit
 
 # surfdump (2ni): what does a CoreAnimation backing store carry that a
 # hand-allocated IOSurface does not?
