@@ -1,4 +1,20 @@
 #!/bin/sh
+# SUPERSEDED (2on, 2026-10-22). DO NOT USE TO FIX APPS.
+#
+# The kext now fixes EVERY process on the system by itself: boot with
+# -rbgpumtlkfix and rbgpumtlkscope=* (see docs/RULES.md "Boot-args"). That reaches
+# what this script never could - Apple platform binaries like Safari, which
+# strip DYLD_INSERT_LIBRARIES, and sandboxed App Store apps, which cannot load
+# an inserted dylib from a home directory at all (rule 21). It also survives
+# app updates, because no app bundle is touched.
+#
+# All 11 wrappers were removed on 2026-10-22. A leftover wrapper is harmless
+# if one reappears: mtlswizzle refuses unless it finds exactly one match of a
+# 32-byte prologue pattern, and the kernel detour leaves zero (2om).
+#
+# Kept only for `verify`, which reads a live process with vmmap, and as the
+# reference for how per-process injection worked.
+#
 # Build a Dock-able wrapper .app that starts a real app with the swizzle fix
 # applied (2nr). The fix is a per-process patch of a dyld-shared-cache driver,
 # so it cannot live anywhere but in the process - rule 21 forbids the only
