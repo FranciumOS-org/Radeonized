@@ -23931,3 +23931,84 @@ Ranked by what the evidence supports:
    exists, and the plugin already hooks
    `IOAccelDisplayMachine::found_framebuffer`), so the macOS-side machinery for
    flipping is present and may only need the framebuffer to advertise it.
+
+## 2pc (2026-10-23) — chasing the cheap fix: three dead ends closed for zero boots
+
+2pb localised the defect to the present path. 2pc went looking for a fix that
+needs no DCN register write. **There isn't one**, and establishing that cost
+nothing, which is the point.
+
+**Dead end 1 — "the display pipe was never adopted."** 2ct (2026-10-12) made
+the accelerator deliberately headless by returning false from
+`IOAccelDisplayMachine::found_framebuffer`, because back then `powerUpHW`
+failed and `set_display_mode_and_vram` returned false in the loop over adopted
+pipes. 2kt (2026-10-20) already recorded that the premise was obsolete. I was
+about to announce this as the root cause — and checked first:
+`-rbgpudisplaypipe` **is** in the current boot-args, and
+`AMDRadeonX6000_AMDAccelDisplayPipe = 1` with `IOAccelDisplayPipe = 1` and
+`IOAccelDisplayPipeUserClient2 = 1`. The pipe is adopted. Not the problem.
+
+**Dead end 2 — "the aperture is mapped uncached."** It is not. IOGraphics'
+own source (apple-oss-distributions/IOGraphics, IOGraphics-598) line 106:
+
+```c
+#if defined(__i386__) || defined(__x86_64__)
+enum { kIOFBMapCacheMode = kIOMapWriteCombineCache };
+#else
+enum { kIOFBMapCacheMode = kIOMapInhibitCache };
+#endif
+```
+
+and all five `fbRange->map(...)` sites use it. So the framebuffer is already
+**write-combined**, which kills the "make it WC" idea before it was written.
+
+**Dead end 3 — the pixel-info cache flags.** `IOGraphicsTypes.h` defines
+`kFramebufferSupportsCopybackCache` (0x10000) and
+`kFramebufferSupportsWritethruCache` (0x20000) in `IOPixelInformation.flags`,
+and `getPixelInformation` is routable, so declaring cacheability looked like a
+one-bit fix. **IOGraphics never reads either flag** — `grep -c
+kFramebufferSupports IOFramebuffer.cpp` is **0**. They are vestigial. A boot
+would have "proved" the fix inert and taught nothing.
+
+### What the evidence now says
+
+Dead end 2 is the important one, because it inverts the reading of 2pb's
+number. **Write-combining is write-optimised and read-catastrophic** - WC
+reads bypass the cache with no prefetch, and ~50 MB/s is textbook WC read
+throughput. 2pb measured ~50 MB/s. So the wall is almost certainly **reads of
+the front buffer**, not writes to it.
+
+Which is forced by the architecture: with **one** buffer at a **fixed**
+address and no flip, compositing is read-modify-write. And every symptom the
+user named is read-heavy - minimise blur, lock-screen blur, wallpaper
+crossfade - which is why those stall for seconds while plain scrolling merely
+drags.
+
+**Second, independent defect found: there is no hardware cursor.**
+`IONDRVFramebuffer::getAttribute` answers `'crsr'` (0x63727372) by calling
+`_doStatus(this, 0x16, ...)` - an NDRV status request the boot NDRV will not
+support - so `haveHWCursor` is false, and IOGraphics line 2509,
+`if ((!haveHWCursor) && fVramMap) switch (info->bitsPerPixel)`, lifts and
+drops the cursor **by CPU, into that same write-combined memory, on every
+mouse move**, reading back what was underneath each time. `IOFBWaitCursorFrames
+= 29` and `IOFBWaitCursorPeriod = 33333333` on `.Display_boot` confirm the
+software path is the live one. That is a complete explanation of cursor lag on
+its own, separate from the frame-rate wall.
+
+### Conclusion
+
+Every no-write avenue is now closed by evidence rather than by a boot. The
+remaining fixes all write DCN registers, **which is the user's decision**:
+
+1. **Page flipping** - `HUBP0_PRIMARY_SURFACE_ADDRESS` (+ `_HI`) pointed at a
+   GPU-rendered surface. Removes the copy AND the read-modify-write, because
+   nothing ever touches the front buffer from the CPU. This is the fix for the
+   stalls. The firmware has already configured everything else (2oq), so the
+   write is one address per frame, ideally during the vblank 2oz provides.
+2. **Hardware cursor** - DCN `CURSOR0` registers, which removes the per-move
+   read-modify-write.
+
+A wrong OTG or HUBP write blanks the panel (rule 12). Before asking, one cheap
+step remains that needs only a single privileged command and no reboot:
+`sample WindowServer` during a reproduction, which will name the hot function
+and confirm the read hypothesis instead of leaving it as the best inference.
