@@ -32,6 +32,8 @@ private:
     void processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
     // 2ou: IONDRVSupport, for the refresh rate the boot framebuffer reports as 0.
     void processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
+    // 2ov: IOGraphicsFamily, to solve IOFramebuffer::handleVBL for the vblank pump.
+    void processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
 
     void routeTTL(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);
     void routePSPBasics(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size);

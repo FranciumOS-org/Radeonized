@@ -23401,3 +23401,114 @@ every outcome distinguishable instead of just "it did not work":
 Built: UUID `29E0049F` -> `D8B3C0E2`, `hosttest: all passed`, and all of
 `-rbgpuvbl`, `rbgpuvblhz`, `vbl_routed`, `vbl_filled` and `IONDRVSupport`
 present in the binary. **Unverified on hardware.**
+
+## 2ov - 2ou was half wrong, and the right answer is the vblank
+
+Boot 134, `-rbgpuvbl`:
+
+```
+CGDisplay 1535231424: 1920x1080, CGDisplayModeGetRefreshRate = 144.000 Hz
+nominal refresh period: 33333333/1000000000 = 30.000 Hz
+actual latency: 0.000 ms
+display link fired 55 times, 1929.3 ms span = 27.99 Hz
+```
+
+**The patch worked and the hypothesis still failed.** `refreshRate` went
+0 -> 144.000, so the route landed, the hook ran and the value took. But
+CVDisplayLink's **nominal stayed at 30.000** and the callbacks kept arriving at
+~28-30 Hz. (27.99 is 54 intervals in 1.929 s - jitter on a loaded machine, not
+a regression.)
+
+So `IODisplayModeInformation.refreshRate` is read by **CoreGraphics' mode
+listing** and *not* by **CoreVideo's pacing**. 2ou's first half - "nominal is
+the pacing" - survives; its second half - "refreshRate sets nominal" - is
+dead. One boot, one unambiguous answer, because the two halves were shipped
+separately.
+
+### Where CoreVideo actually reads, read rather than guessed again
+
+`actual latency: 0.000 ms` was the clue worth following: CoreVideo has no
+measured vblank at all.
+
+* `StdFBShmem_t` carries `vblTime`, `vblDelta` and `vblCount`. Their offsets
+  were **confirmed by compiling `offsetof()` against the SDK's own
+  `IOFramebufferShared.h`**: 0x40, 0x48, 0x50.
+* `IOFramebuffer::handleVBL` loads the shmem from **`fb + 0x90`** and returns
+  immediately if it is NULL, then reads **`0x40(%r13)`** and computes a delta.
+  `0x40` *is* `vblTime` - the disassembly and the header agree, which is what
+  identifies `fb + 0x90` as the shmem pointer.
+* **`handleVBL` is the only thing that writes those fields.**
+
+And `handleVBL` only runs when a driver fires a `_VSLService` of type
+**`'vbl '`** (0x76626c20):
+
+* `IONDRVFramebuffer::registerForInterruptType` walks a list at `fb + 0x268`
+  for a matching type at `+0x08`, then installs handler/target/refCon at
+  **`+0x10` / `+0x18` / `+0x20`**.
+* `VSLDoInterruptService` reads the same three offsets and does
+  `handler(target, refCon)`. **Those offsets are therefore read twice
+  independently** - the registrar writes them, the dispatcher reads them.
+* **No `'vbl '` service exists here**, because only an NDRV calls
+  `VSLNewInterruptService` and the boot NDRV never does. The other way
+  registration can fail - an `"Ignore VBL"` property - is **absent from the
+  IORegistry** (checked: 0 occurrences). So registration falls through to the
+  superclass, `handleVBL` never runs, `vblDelta` is never written, and nominal
+  falls back to 30 Hz.
+
+**That is the complete causal chain for the 30 Hz, end to end.**
+
+### The fix, and why it needs no service and no DCN write
+
+Because `VSLDoInterruptService` reduces to `handler(target, refCon)`, calling
+`handleVBL(fb, nullptr)` from a timer is **exactly equivalent** to a real VBL
+service firing - with no service to create and no inferred struct to write.
+`handleVBL` is an exported symbol, solved from IOGraphicsFamily the same way
+2hg solves `enableAccelerator`: solved to be *called*, not routed.
+
+The framebuffer pointer costs nothing: **2ou's hook already receives it as its
+first argument**, so it is captured from a call we know happens rather than by
+walking the IORegistry.
+
+It writes **no hardware register**. It is **not** phase-locked to real
+scanout, so it does not address tearing - it addresses the **pacing**, which
+is what 30 Hz is. Phase-locking from OTG0's read-only frame counter is a later
+refinement.
+
+**The risk, stated plainly:** this calls into IOFramebuffer 144 times a second
+from a workloop thread. If that path needs a lock WindowServer holds, the
+desktop can wedge. Recovery is a reboot; `-rbgpuoff` keeps it off.
+
+`-rbgpuvblpump`, separate from `-rbgpuvbl` so the halves stay independently
+attributable (rule 16). The prefix relationship between the two was
+**checked, not assumed**: `tools/efi_config.py` splits boot-args on whitespace
+and compares exactly, so `bootarg remove -rbgpuvbl` cannot corrupt
+`-rbgpuvblpump`, and on x86_64 Lilu's `checkKernelArgument` is
+`PE_parse_boot_argn`, which tokenizes.
+
+### The user's VRAM theory: right culprit, wrong mechanism
+
+The user: *"no animations cuz they are too much for the VRAM... it only uses
+7MB of either those 4GB or straight from ram, no room for animations"*, and
+*"its the framebuffer we are on, apples stock"*.
+
+**The culprit is exactly right** and worth saying so: `IONDRVFramebuffer` is
+the root of the whole cluster - no Hz menu, no brightness, the "7 MB" string,
+and the pacing. All four are the same stock-framebuffer problem.
+
+**The mechanism is not memory.** 2ot allocated and read back 1024 MB in eight
+buffers plus a 8192x8192 BGRA8 texture, with `recommendedMaxWorkingSetSize` at
+4096 MB; the probe measured the carve-out at 4096 MB; `MMMC_VM_FB_LOCATION_TOP`
+agrees. Nothing is running out of anything. `IOFBMemorySize = 8294400` is
+*one* 1920x1080x4 buffer - `IONDRVFramebuffer`'s own scanout surface, which is
+also why there is no flip chain - and it is a **label** that System Profiler
+falls back to, not a pool.
+
+The distinction matters because it changes the work: a memory problem would
+need a real framebuffer driver before anything improved, whereas a *timing*
+problem can be fixed by delivering vblanks into the framebuffer that is
+already there. That is this milestone.
+
+Built: UUID `D8B3C0E2` -> `59AD6CF5`, `hosttest: all passed`. Rule 1 and rule 5
+checked against `nm -m build/re/IOGraphicsFamily`:
+`__ZN13IOFramebuffer9handleVBLEPS_Pv`, external, defined in `(__TEXT,__text)`.
+**Unverified on hardware.**

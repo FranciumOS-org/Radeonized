@@ -485,6 +485,34 @@ The two that bite hardest:
   makes the machine unbootable - rescue with `-rbgpuoff`. Read `mtlk_*` from
   the IORegistry; `mtlk_verify=1` is the only line that proves anything.
 
+- **`-rbgpuvbl` / `-rbgpuvblpump`** (2ou/2ov) are the 30 Hz fix, both OFF by
+  default. `tools/dispclk` measured the animation clock at **exactly 30.00 Hz**
+  while the panel scans at 143.833 Hz - CoreVideo's fallback for a display with
+  no refresh clock, which the boot framebuffer is. **`-rbgpuvbl`** fills
+  `IODisplayModeInformation.refreshRate`, and boot 134 proved it takes
+  (`CGDisplayModeGetRefreshRate` 0 -> 144.000) **but does not change the
+  pacing** - nominal stayed 30, so that field is CoreGraphics' mode listing and
+  not CoreVideo's clock. **`-rbgpuvblpump`** is the actual fix: CoreVideo paces
+  off `StdFBShmem_t.vblDelta`, only `IOFramebuffer::handleVBL` writes it, and
+  it only runs when a `'vbl '` `_VSLService` fires - which never exists here,
+  because only an NDRV creates one. The pump calls `handleVBL(fb, nullptr)` on
+  a timer, which `VSLDoInterruptService`'s own code shows is equivalent. The
+  framebuffer pointer comes free from the `-rbgpuvbl` hook, so **both are
+  needed**. `rbgpuvblhz=<millihertz>` sets the rate (refused outside
+  20000-400000). **No DCN register is written** and it is not phase-locked, so
+  it fixes pacing, not tearing. Read it with `tools/dispclk`: nominal 30.00
+  means it did not take. The pump calls into IOFramebuffer 144x/s from a
+  workloop - if that path needs a lock WindowServer holds the desktop can
+  wedge, so rescue with `-rbgpuoff`.
+- **The "7 MB" is NOT a memory limit** and not why anything is choppy.
+  `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
+  `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
+  `MMMC_VM_FB_LOCATION_TOP` all say 4096 MB. 8294400 bytes is exactly ONE
+  1920x1080x4 buffer - `IONDRVFramebuffer`'s own scanout surface, which System
+  Profiler falls back to because no `VRAM,totalMB` property exists (2or). The
+  stock framebuffer IS the culprit for the Hz menu, brightness, the string and
+  the pacing - but by timing, not by memory (2ov).
+
 ## Rescue
 
 `-rbgpuoff` in boot-args: the kext still loads, no peer instance exists.

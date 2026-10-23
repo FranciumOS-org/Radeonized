@@ -9,6 +9,8 @@
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOTimerEventSource.h>
 
 #include "kern_start.hpp"
 #include "rb_smu13.h"
@@ -52,13 +54,18 @@ static const char *kextPathAccelFamily =
 // panel (.Display_boot). It is where the refresh rate comes from.
 static const char *kextPathNDRV =
     "/System/Library/Extensions/IONDRVSupport.kext/Contents/MacOS/IONDRVSupport";
+// 2ov: IOGraphicsFamily, only to SOLVE IOFramebuffer::handleVBL. We want to
+// call it, not intercept it - the same shape as 2hg's enableAccelerator.
+static const char *kextPathIOGraphics =
+    "/System/Library/Extensions/IOGraphicsFamily.kext/Contents/MacOS/IOGraphicsFamily";
 
 enum KextListIndex {
     KextHWLibs = 0,
     KextX6000,
     KextHWSvc,
     KextAccelFamily,
-    KextNDRV
+    KextNDRV,
+    KextIOGraphics
 };
 
 static KernelPatcher::KextInfo kextList[] = {
@@ -73,6 +80,9 @@ static KernelPatcher::KextInfo kextList[] = {
     // 2ou: IONDRVSupport. Loads from SystemKernelExtensions.kc after this
     // plugin, so onKextLoad fires for it.
     { "com.apple.iokit.IONDRVSupport", &kextPathNDRV, 1, {true}, {},
+      KernelPatcher::KextInfo::Unloaded },
+    // 2ov: IOGraphicsFamily, for IOFramebuffer::handleVBL.
+    { "com.apple.iokit.IOGraphicsFamily", &kextPathIOGraphics, 1, {true}, {},
       KernelPatcher::KextInfo::Unloaded }
 };
 
@@ -7420,6 +7430,9 @@ static uint32_t g_vbl_wrote  = 0;        // the 16.16 value last written
 using t_rbNdrvGetInfoForMode = int (*)(void *, int, void *);
 static t_rbNdrvGetInfoForMode orig_ndrv_getinfo_2ou = nullptr;
 
+// 2ov, defined below: the hook is where the live framebuffer pointer appears.
+static void rbgpu_vblp_arm(void *fb);
+
 static int hooked_ndrv_getinfo_2ou(void *fb, int mode, void *info) {
     int ret = orig_ndrv_getinfo_2ou(fb, mode, info);
     g_vbl_calls++;
@@ -7429,6 +7442,9 @@ static int hooked_ndrv_getinfo_2ou(void *fb, int mode, void *info) {
     auto addr = reinterpret_cast<uintptr_t>(info);
     if (ret != 0 || addr < 0xffffff8000000000ull)
         return ret;
+
+    // 2ov: this call is also where the live framebuffer pointer comes from.
+    rbgpu_vblp_arm(fb);
 
     auto *rr = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(info) + 8);
     if (*rr != 0) {
@@ -7449,6 +7465,155 @@ static int hooked_ndrv_getinfo_2ou(void *fb, int mode, void *info) {
     rbgpu_diag_set_num("vbl_filled", g_vbl_filled);
     rbgpu_diag_set_num("vbl_rr", g_vbl_wrote);
     return ret;
+}
+
+
+// ---------------------------------------------------------------------------
+// 2ov (2026-10-23): deliver the vblank. THE actual fix for the 30 Hz.
+//
+// 2ou was half wrong and the hardware said so in one boot. Filling
+// IODisplayModeInformation.refreshRate DID take -
+// CGDisplayModeGetRefreshRate went 0 -> 144.000 Hz - but CVDisplayLink's
+// nominal stayed at 30.000 and the callbacks kept arriving at ~28-30 Hz. So
+// that field is read by CoreGraphics' mode listing and NOT by CoreVideo's
+// pacing. Where CoreVideo actually reads, established by reading Apple's code
+// rather than guessing again:
+//
+//   StdFBShmem_t carries vblTime (+0x40), vblDelta (+0x48) and vblCount
+//   (+0x50) - offsets confirmed by compiling offsetof() against the SDK's
+//   IOFramebufferShared.h. IOFramebuffer::handleVBL loads the shmem from
+//   `fb + 0x90`, returns immediately if it is NULL, then reads 0x40(shmem)
+//   (= vblTime, which matches) and computes the delta. **handleVBL is the
+//   only thing that writes those fields.**
+//
+//   handleVBL only runs when a driver fires a `_VSLService` of type 'vbl '
+//   (0x76626c20). IONDRVFramebuffer::registerForInterruptType walks a list at
+//   `fb + 0x268` looking for one; `VSLDoInterruptService` then does
+//   handler(target, refCon) from +0x10 / +0x18 / +0x20. Those three offsets
+//   were read TWICE independently - the registrar writes them, the dispatcher
+//   reads them.
+//
+//   **No 'vbl ' service exists on this machine**, because only an NDRV calls
+//   VSLNewInterruptService and the boot NDRV never does. ("Ignore VBL", the
+//   other way registration can fail, is absent from the IORegistry - checked.)
+//   So handleVBL never runs, vblDelta is never written, CVDisplayLink reports
+//   `actual latency: 0.000 ms`, and nominal falls back to 30 Hz.
+//
+// Since VSLDoInterruptService reduces to handler(target, refCon), calling
+// `handleVBL(fb, nullptr)` ourselves is EXACTLY equivalent to a real VBL
+// service firing - with no service to create and no inferred struct to write.
+//
+// The framebuffer pointer costs nothing: 2ou's hook already receives it as
+// its first argument, so it is captured from a call we know happens rather
+// than by walking the IORegistry.
+//
+// **This writes no hardware register.** It is a timer calling an exported
+// Apple function. It is NOT phase-locked to real scanout, so it does not fix
+// tearing - it fixes the PACING, which is what 30 Hz is. Phase-locking from
+// OTG0's read-only frame counter is a later refinement.
+//
+// Off unless `-rbgpuvblpump`, deliberately separate from `-rbgpuvbl` so the
+// two halves stay independently attributable (rule 16).
+//
+// The risk, stated plainly: this calls into IOFramebuffer 144 times a second
+// from a workloop thread. If that path needs a lock WindowServer holds, the
+// desktop could wedge. Recovery is a reboot, and `-rbgpuoff` keeps it off.
+static bool                 g_vblp_on     = false;
+static void                *g_vblp_fb     = nullptr;   // the live IONDRVFramebuffer
+static IOWorkLoop          *g_vblp_wl     = nullptr;
+static IOTimerEventSource  *g_vblp_timer  = nullptr;
+static uint64_t             g_vblp_ticks  = 0;
+static uint32_t             g_vblp_us     = 6953;      // 143.833 Hz, from 2os
+static bool                 g_vblp_armed  = false;
+static uint8_t              g_vblp_shmem  = 2;         // 2 = not looked at yet
+
+using t_rbHandleVBL = void (*)(void *, void *);
+static t_rbHandleVBL g_vblp_handleVBL = nullptr;
+
+static void rbgpu_vblp_tick(OSObject *, IOTimerEventSource *ts) {
+    if (g_vblp_handleVBL && g_vblp_fb) {
+        g_vblp_handleVBL(g_vblp_fb, nullptr);
+        g_vblp_ticks++;
+        if ((g_vblp_ticks & 0x3ff) == 1)
+            rbgpu_diag_set_num("vblp_ticks", g_vblp_ticks);
+    }
+    if (ts)
+        ts->setTimeoutUS(g_vblp_us);
+}
+
+// Called from 2ou's hook the first time it sees the framebuffer, so the pump
+// starts only once there is something to pump.
+static void rbgpu_vblp_arm(void *fb) {
+    if (!g_vblp_on || g_vblp_armed || !fb || !g_vblp_handleVBL)
+        return;
+
+    // Rule 19: validate as a kernel VA before keeping, let alone dereferencing.
+    if (reinterpret_cast<uintptr_t>(fb) < 0xffffff8000000000ull) {
+        rbgpu_log("2ov: refusing framebuffer %p - not a kernel address", fb);
+        return;
+    }
+    g_vblp_fb = fb;
+
+    // Read-only, for the record: handleVBL is a no-op while fb+0x90 (the
+    // StdFBShmem_t) is NULL, which it is until a client opens the
+    // framebuffer. Reporting it separates "the pump never ran" from "the pump
+    // ran but had nowhere to write".
+    void *shmem = *reinterpret_cast<void **>(reinterpret_cast<uint8_t *>(fb) + 0x90);
+    g_vblp_shmem = shmem ? 1 : 0;
+    rbgpu_diag_set_num("vblp_shmem", g_vblp_shmem);
+
+    g_vblp_wl = IOWorkLoop::workLoop();
+    if (!g_vblp_wl) {
+        rbgpu_log("2ov: IOWorkLoop::workLoop() failed - no vblank pump");
+        rbgpu_diag_set_num("vblp_armed", 0);
+        return;
+    }
+    g_vblp_timer = IOTimerEventSource::timerEventSource(nullptr, rbgpu_vblp_tick);
+    if (!g_vblp_timer || g_vblp_wl->addEventSource(g_vblp_timer) != kIOReturnSuccess) {
+        rbgpu_log("2ov: could not create or add the timer - no vblank pump");
+        rbgpu_diag_set_num("vblp_armed", 0);
+        return;
+    }
+    g_vblp_armed = true;
+    g_vblp_timer->setTimeoutUS(g_vblp_us);
+    rbgpu_log("2ov: ARMED - pumping IOFramebuffer::handleVBL(%p) every %u us "
+              "(%u.%03u Hz); shmem at fb+0x90 is %s. Read it with "
+              "tools/dispclk: nominal 30.00 means this did not take.",
+              fb, g_vblp_us, 1000000u / g_vblp_us,
+              (1000000000u / g_vblp_us) % 1000,
+              shmem ? "present" : "NULL (handleVBL will no-op until a client opens the FB)");
+    rbgpu_diag_set_num("vblp_armed", 1);
+    rbgpu_diag_set_num("vblp_us", g_vblp_us);
+}
+
+void RGPU::processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
+                             size_t size) {
+    if (!g_vblp_on) {
+        rbgpu_log("2ov: NOT armed - -rbgpuvblpump absent, no vblank is delivered "
+                  "and CoreVideo keeps pacing at its 30 Hz fallback");
+        rbgpu_diag_set_num("vblp_on", 0);
+        return;
+    }
+    rbgpu_diag_set_num("vblp_on", 1);
+
+    // Solved, not routed: we want to call it, not intercept it (2hg's shape).
+    // Rule 1: nm -m build/re/IOGraphicsFamily shows this external and defined
+    // in (__TEXT,__text). Rule 5: the name is copied from nm, not hand-built.
+    auto h = patcher.solveSymbol(id, "__ZN13IOFramebuffer9handleVBLEPS_Pv",
+                                 address, size);
+    if (h) {
+        g_vblp_handleVBL = reinterpret_cast<t_rbHandleVBL>(h);
+        rbgpu_log("2ov: IOFramebuffer::handleVBL solved at %p - the pump arms as "
+                  "soon as 2ou's hook hands over the framebuffer",
+                  reinterpret_cast<void *>(h));
+        rbgpu_diag_set_num("vblp_solved", 1);
+    } else {
+        // Rule 14: absence is not a result unless it is stated.
+        patcher.clearError();
+        rbgpu_log("2ov: FAILED to solve IOFramebuffer::handleVBL - the pump "
+                  "CANNOT run this boot, whatever the boot-args say");
+        rbgpu_diag_set_num("vblp_solved", 0);
+    }
 }
 
 void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
@@ -7521,6 +7686,14 @@ void RGPU::init() {
             rbgpu_log("2ou: rbgpuvblhz=%s is outside 20000-400000 mHz - ignored, "
                       "keeping %u", vblbuf, g_vbl_mhz);
     }
+    // 2ov: the vblank pump, separate from -rbgpuvbl so the two halves stay
+    // independently attributable. The period follows the same rate.
+    g_vblp_on = checkKernelArgument("-rbgpuvblpump");
+    g_vblp_us = g_vbl_mhz ? static_cast<uint32_t>(1000000000ull / g_vbl_mhz) : 6953;
+    rbgpu_log("2ov: vblank pump %s (period %u us)",
+              g_vblp_on ? "ARMED by -rbgpuvblpump" : "off (add -rbgpuvblpump)",
+              g_vblp_us);
+
     rbgpu_log("2ou: refresh-rate fix %s (%u.%03u Hz)",
               g_vbl_on ? "ARMED by -rbgpuvbl" : "off (add -rbgpuvbl)",
               g_vbl_mhz / 1000, g_vbl_mhz % 1000);
@@ -7562,6 +7735,10 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         g_kext_size_accelfam = size;
         rbgpu_log("AccelFamily loaded at %p (size 0x%zx)", reinterpret_cast<void *>(address), size);
         processAccelFamily(patcher, id, address, size);
+    } else if (kextList[KextIOGraphics].loadIndex == id) {
+        rbgpu_log("2ov: IOGraphicsFamily loaded at %p (size 0x%zx)",
+                  reinterpret_cast<void *>(address), size);
+        processIOGraphics(patcher, id, address, size);
     } else if (kextList[KextNDRV].loadIndex == id) {
         rbgpu_log("2ou: IONDRVSupport loaded at %p (size 0x%zx)",
                   reinterpret_cast<void *>(address), size);
