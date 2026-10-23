@@ -21868,3 +21868,63 @@ place before the first process maps the cache is not established here, and
 there is no log channel on this machine to tell us (2ob). It is the same path
 every Lilu shared-cache patch depends on, so it is likely fine; it is an
 assumption, not a measurement, and the next boot tests it implicitly.
+
+## 2oe - the precondition probe panicked the boot before the Apple bar
+
+Boot with `-rbgpumtlcave` and build C05C7933/EAC5023E panicked immediately -
+"not even the apple bar started to fill in". Qualified before interpreting:
+
+```
+loaded kext        EAC5023E  (so the re-install did happen)
+rbgpu-boot         124, unchanged from boot A  -> this boot never armed
+.panic report      none; newest is 2026-10-20  -> too early for the log
+recovery           -rbgpuoff added to boot-args by hand
+```
+
+### The suspect is the instrument I added to satisfy rule 14
+
+2od put this in `rbgpu_register_mtlcave_2oa()`, reached from `RGPU::init()`:
+
+```c
+auto *stencil = FileIO::readFileToBuffer(RBGPU_MTL_STENCIL, stencilSize);
+```
+
+`RGPU::init()` runs at **kext load, during early kernel bootstrap, before the
+root filesystem is mounted**. `readFileToBuffer` goes through `vnode_open`,
+which needs a root vnode that does not exist yet. The Apple progress bar
+appears *after* root mount, so "before the bar" is exactly as far as a boot
+gets when it dies there.
+
+The detail that should have stopped this at writing time: **Lilu makes the
+identical call, and deliberately not from here.** `loadFilesForPatching` runs
+inside `registerPatches`, at user-patcher init, long after BSD is up. 2oc read
+that function closely enough to quote it and still copied the call without
+copying its timing.
+
+Rule 16 in its purest form - and worse than usual, because the probe existed
+only to report a precondition. It reported nothing and cost the boot.
+
+### This boot is NOT a control, and nearly got read as one
+
+`-rbgpuoff` is listed in `PluginConfiguration::bootargOff`, so Lilu disables
+the plugin and `pluginStart() -> rgpu.init()` never runs. The machine is
+therefore up with EAC5023E loaded and `-rbgpumtlcave` still in boot-args,
+which looks exactly like "the suspect code ran and did not panic". It did not
+run at all. The theory is untested, not refuted.
+
+Supporting it, short of a boot: the FileIO call is the only new action on the
+init path; registration itself is list-appending that 2lm and 2lp already do
+safely on every boot today; and the two-mod change adds only a second
+`BinaryModInfo` with `count = 0` plus a non-null callback pointer, neither of
+which touches a vnode.
+
+### Fix
+
+The probe moves to the binary-loaded callback, which runs at exec time with a
+filesystem up, and reports `mtlcave_stencil` once. The init path now has no
+FileIO call at all and the "refuse to register" early return is gone with it.
+UUID EAC5023E -> 0AE2AA9A.
+
+The next boot tests both things at once: if it boots, the probe was the cause
+and the cave measurement comes with it; if it panics again, the remaining new
+thing is the two-mod registration and that gets bisected on its own.
