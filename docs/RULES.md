@@ -211,7 +211,9 @@ Details, evidence and next steps: `docs/HANDOFF.md`.
 
 - **Always ask the user before loading or unloading a kext.** A bad load can
   hang or panic the machine and ends the session.
-- The user runs `sudo tools/load.sh`, `sudo tools/unload.sh`,
+- The user runs `sudo tools/load.sh` (2oq: takes an optional probe level,
+  `sudo tools/load.sh 2` for the display engine - applied to the staged copy
+  only, so the committed default stays 1), `sudo tools/unload.sh`,
   `sudo tools/efi.sh …` and `tools/plugin_check.sh`.
   **the assistant never runs these and never asks for the password.**
 - **Never install into the EFI or `/Library/Extensions`.**
