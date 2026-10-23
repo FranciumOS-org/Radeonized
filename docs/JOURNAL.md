@@ -25300,3 +25300,94 @@ The structural similarity between 1 and 3 is suggestive and is *not* evidence.
 compositor read `dest->0x18` on a structure whose `0x18` has not been shown to
 mean the same thing, inside WindowServer, which is the one process whose crash
 takes the desktop with it.
+
+---
+
+## 2pt (2026-10-23) — the function is confirmed, and 2pr's headline was WRONG
+
+Zero boots. Symbolized, which 2ps could not do, and the symbols overturn 2pr's
+central claim.
+
+### How to symbolize SkyLight without root (reusable)
+
+`atos` cannot take a cache-resident path, and WindowServer needs root. But the
+dyld cache slide is **per-boot and system-wide**, so any process that loads
+SkyLight has it at the same address:
+
+```
+python3 -c "import ctypes,os,time; ctypes.CDLL('/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight'); ..."
+vmmap <pid> | grep SkyLight        # __TEXT base
+atos -p <pid> <unslid + (base - 0x7FF807B42000)>
+```
+
+`vmmap` reports `__TEXT 4924K`, matching `dyld_info`'s 4923 KB on the unslid
+base `0x7FF807B42000` — an independent check that the base is right.
+
+**The slide must be MEASURED, not carried over.** The first attempt reused the
+slide computed from boot 144's `sample` file (`0x2CE7000`) and `atos` answered
+`libBLAS.dylib` for every address. The machine had **rebooted** —
+`uptime: up 23 mins` — and `rbgpu-boot` still read **144** because `rbgpu-arm`
+is one-shot (rule 9), so the stale counter hid a whole new boot. Rule 8 caught
+it. In this boot the slide is `0x8052000`.
+
+### Confirmed: the function with the type gate is CompositorSW
+
+```
+0x7ff807c3e820 -> CompositorSW::CompositeLayersToDestination(
+                      WSCompositeSourceLayer*, WSCompositeDestination*,
+                      unsigned long long) + 0
+0x7ff807ef5c94 -> CompositorMetal::CompositeLayersToDestination(...) + 0
+0x7ff807cbf900 -> MetalContext::StartComposite(WSCompositeDestination*,
+                      MTLLoadAction, MTLStoreAction) + 1096
+```
+
+So 2ps's predicate is exactly `CompositorSW::CompositeLayersToDestination`'s —
+**the same function 2pd measured at 48 % of WindowServer's main thread** — and
+its gate is `dest->type` (int32 at +0x10) ∈ {1, 2}. That part stands.
+
+### And here is the correction
+
+**`0x7ff807c97e47` = `SLDisplayStreamCreateCommon`.** The type-**3** write at
+`0x7ff807c97f1f` is inside *display-stream* creation — `CGDisplayStream`, i.e.
+**screen capture**, not the display scanout. The other sites the `setimm` scan
+turned up resolve to `_CGXSetMenuBar`, `SLSSetMenuBar` and
+`FanPolygon::FanPolygon(CGPath const*)`, which are **unrelated structures that
+merely have an int at +0x10**. So 2ps's "three type values are now known to
+exist — 1, 2 and 3" was over-claimed: the scan was not type-aware, and the only
+value tied to a real `WSCompositeDestination` is **3 = a display stream**.
+
+**2pr's headline is wrong.** It said the rejection *"predates every display
+hook and is the real blocker"*. Two things kill that:
+
+1. **I had no unarmed control.** 2pr compared boot 143 (46 994 rejections) with
+   boot 144 (31 299) — **both armed, both with every display hook active** —
+   and generalized to "predates every display hook". On the boot this was
+   written in, with the display hooks running (`dispclk` nominal **131.671 Hz**,
+   measured **134.07 Hz**, so the vblank path is live), the count over 20
+   minutes is **1**. Note `rbgpu-arm` being absent does **not** disable the
+   hooks — it only gates the NVRAM/diag capture — so this is a genuine
+   hooks-on comparison. 47 000 versus 1 tracks **machine activity**, not our
+   code.
+2. **CompositorSW accepts the display's destination.** 2pd measured
+   `CompositorSW::CompositeLayersToDestination` burning 48 % of the main thread
+   doing real work through `CA::OGL::SW::`. A destination it *rejects* costs
+   nothing — the `jne` goes straight to the epilogue. So the display
+   destination's type **is** 1 or 2 and is perfectly acceptable to CompositorSW.
+   That is precisely *why* the desktop composites in software.
+
+Putting both together: the rejection is about **display streams** (type 3,
+`SLDisplayStreamCreateCommon`), which is some screen-capture client, and it is
+**not the display defect**. It was log noise that looked like a smoking gun
+because it was loud, named and sat next to the right layer.
+
+### Where this leaves the display question
+
+Back where 2pd put it, with one thing now firmly established rather than
+inferred: **the display destination is one CompositorSW can take, and the
+question is why the composite goes to CompositorSW rather than
+CompositorMetal.** `MetalContext::StartComposite(WSCompositeDestination*, ...)`
+is the Metal side's entry and is named; the per-composite choice between the
+two compositors is the thing to read next, not the destination's validity.
+
+The honest summary of 2pr -> 2pt: a loud log line is not a diagnosis, and
+"predates X" needs a boot where X is off before it can be said at all.
