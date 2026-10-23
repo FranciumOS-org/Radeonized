@@ -501,6 +501,15 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // asker. Its own arg so it stays independently attributable from the
     // controller (rule 16), and its own match category in the plist so it
     // cannot contest IOFramebuffer and cannot take the display.
+    // 2pk: the PROMOTED Wrangler, which takes IOFramebuffer for real. Its
+    // start() hook declines after letting DAL run, so IONDRVFramebuffer keeps
+    // the panel - see the comment on hooked_wr_start_2pk.
+    if (checkKernelArgument("-rbgpudalfbreal")) {
+        pciDevice->setProperty("LoadDisplayWranglerFB", kOSBooleanTrue);
+        rbgpu_log("2pk: published LoadDisplayWranglerFB - Apple's framebuffer "
+                  "will contest IOFramebuffer, run DAL with every write "
+                  "dropped, then decline so the panel stays on IONDRV");
+    }
     if (checkKernelArgument("-rbgpudalfb")) {
         pciDevice->setProperty("LoadDisplayWrangler", kOSBooleanTrue);
         rbgpu_log("2pi: published LoadDisplayWrangler - Apple's framebuffer "

@@ -24451,3 +24451,62 @@ a private category, and promotion becomes the only way forward - at which point
 the dry-run protection will have been demonstrated rather than hoped for.
 Promoting first would be writing real DCN registers with unproven
 interception.
+
+## 2pk (2026-10-23, boot 142) — the hooks fire, and the private category is the thing blocking DAL
+
+`rbgpu-boot = 142`, loaded UUID matches the build.
+
+```
+dal_on 1   dal_wroutes 1   dal_srouted 1   dal_start 1   dal_start_ret 1
+dal_r_hw 4        <- THE HOOKS FIRE
+dal_reads 0  dal_r_atom 0  dal_r_bios 0  dal_w_atom 0  dal_w_bios 0  dal_writes 0
+```
+
+**Interception is now demonstrated rather than hoped for.** `dal_r_hw 4` is
+four real reads through `AmdRegisterAccess::hwReadReg32`, so the routes land
+and fire. And it names the path: of the six register entry points in that
+kext, DAL used **only** `hwReadReg32` - not `readReg32`, not AtomBIOS, not the
+VBIOS parser.
+
+**Four reads and zero writes** with both personalities attached settles what
+2pj left open: in a private match category, nothing drives DAL. No
+`enableController`, no `setDisplayMode`, so no reason to touch hardware. The
+safety that protected the panel is the same thing preventing the experiment.
+
+### Two instrument fixes, one of which was load-bearing
+
+**2pi's 2en throttle worked and was the prerequisite for everything here.** The
+ring went from 506 of 512 entries from one log site to **90+ distinct milestone
+tags**. Without it nothing below would have been diagnosable.
+
+**But a ring is still the wrong shape for this trace.** `RBGPULog` keeps the
+most RECENT 512 lines, and the DAL hooks run at the very start of boot, so the
+accelerator's own bring-up logging evicted them - the trace was unreadable even
+with the flood fixed. So the trace now has its own storage: chunked string diag
+keys `dal_tr0..dal_tr15` (16 x 12 = 192 entries) in `RBGPUDiag`, which nothing
+evicts. Each entry is `<kind><reg>=<val>`, kind being `w`/`W` for the two
+writeReg32 overloads, `A` AtomBIOS, `B` VBIOS parser, `r` hwRead.
+
+### Promoting the Wrangler, and why it must decline
+
+DAL needs the Wrangler to actually BE the framebuffer. But promoting it is a
+one-way door **if it succeeds**: Apple ships it in `IOFramebuffer` at 60000
+against IONDRVFramebuffer's 20000, and with every write dropped it cannot
+possibly bring up a display - so a successful `start()` would hand the panel to
+a framebuffer that physically cannot drive it. Black screen, and rule 12 says
+that is indistinguishable from a hang.
+
+So the promoted path calls Apple's `start()` - DAL runs, writes recorded and
+swallowed, trace captured - and then returns **false** regardless. xnu's start
+loop is "start the best (until success) of each category" (read in 2oz), so the
+false falls through to IONDRVFramebuffer. **Full trace and a working display.**
+The promoted personality scores 30000, enough to win the category and be
+asked, and it declines only when promoted - the private-category path keeps
+boot 142's behaviour exactly.
+
+If `AmdGpuWrangler::start` fails to route, the promoted personality could KEEP
+the framebuffer it cannot drive. `dalfb_srouted 0` says so, and the remedy is
+to remove `-rbgpudalfbreal`.
+
+Keys: `dalfb_start`, `dalfb_start_ret`, `dalfb_declined`, `dalfb_srouted`,
+`dal_tr_n`, `dal_tr0..15`.
