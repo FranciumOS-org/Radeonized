@@ -4,10 +4,19 @@ process, by patching the dyld shared cache's pages in the kernel (2nz/2oa).
 
 Why this works where tools/cachepatch*.{py,sh} could not. 2ny established that
 the cache is inside a grafted, Apple-signed cryptex and cannot be edited on
-disk. Lilu does not edit it on disk: it hooks cs_validate_page, resolves
-shared-cache images through the cache's own .map file, and rewrites the page
-contents in kernel memory as they are validated. The file is never touched, so
-the seal is irrelevant, and the patch lands in every process.
+disk. Lilu does not edit it on disk. For an image in the shared cache it does
+NOT use the cs_validate_page page rewrite either - that is the on-disk path,
+and 2oc corrects this docstring's original claim. It uses patchSharedCache,
+which runs per process at exec and writes straight into the live image:
+
+    place = mod->startTEXT + ref->segOffs[k] + slide      (startTEXT from the .map)
+    orgVmMapReadUser(...);  if bytes == patch.find
+    vmProtect(RWX); orgVmMapWriteUser(..., patch.replace, place, patch.size)
+
+The file is never touched, so the seal is irrelevant, and the patch lands in
+every process - including the Apple platform binaries that strip
+DYLD_INSERT_LIBRARIES. It does require a byte SOURCE on disk for Lilu to find
+the patterns in: see tools/gen_stencil.py.
 
 Two constraints shape what is emitted:
 
