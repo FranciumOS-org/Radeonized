@@ -25608,3 +25608,109 @@ process that merely dlopens SkyLight shows static defaults, not WindowServer's
 values. The deduction above replaced that plan and is stronger, because it rests
 on a log line the machine actually emitted plus a single-writer proof rather than
 on a value read out of the wrong process.
+
+---
+
+## 2pw (2026-10-23) — the chain is complete: CoreDisplay does not give our display an accelerator
+
+Zero boots. Slot `+0x60` is named, and the path runs out of SkyLight entirely.
+
+### Two corrections first, both mine
+
+**1. `tools/re/dsc.py` could not see vtables at all, and 2pu/2pv said the wrong
+thing about why.** Parsing the cache's `mappingWithSlideOffset` (header `0x138`)
+shows which mappings carry slide info:
+
+```
+map0 va 0x7ff800000000 (__TEXT)      slideInfo 0        -> contents LITERAL
+map1 va 0x7ff840000000 (__DATA_CONST) slideInfo v2      -> contents ENCODED
+map2 va 0x7ff843670000               slideInfo v2       -> contents ENCODED
+map3 va 0x7ff880000000               slideInfo 0        -> contents LITERAL
+```
+
+v2 parameters for both encoded mappings: `delta_mask 0x00ffff0000000000`
+(shift 40), `value_add 0x7ff800000000`, so a slot's target is
+`(value & ~delta_mask) + value_add`.
+
+**Vtables live in `__DATA_CONST` (map1), which is encoded** — which is why a raw
+byte search for `CDDisplay::render_update`'s pointer never found a vtable. What
+it *did* find, at `0x7ff88166df18` in map3, was a **symbol table**: dumping that
+region shows it strictly alternating a real text pointer with a monotonically
+increasing value (`+0x26`, `+0x2d`, `+0x2e`…), i.e. (function address, name
+string offset). So 2pu/2pv's "slot +0x60 reads `0x10e017c79de`, a chained-fixup
+encoding" was wrong twice over: that region is not a vtable, and the value is a
+string offset, not an encoded pointer. The `- 0x4f8` arithmetic on it was
+meaningless.
+
+With v2 decoding added (`dsc.py slide` / `dataxref` / `rdptr`), the real vtable
+slot for `render_update` is **`0x7ff840a57eb8`**, giving address point
+`0x7ff840a579c0` — and the header checks out, `offset-to-top` and the typeinfo
+slot both zero at `-0x10`/`-0x8`.
+
+### Slot +0x60, and the whole path
+
+```
+0x7ff807d699ee  WS::Displays::CDDisplay::vendor() const
+0x7ff807d69a06  WS::Displays::CDDisplay::model() const
+0x7ff807d69b10  WS::Displays::CDDisplay::accelerator() const     <- slot +0x60
+```
+
+```
+CDDisplay::accelerator():
+    rdi = this->0x158
+    if (rdi == NULL) return 0
+    tail jmp CGXGLDisplayDeviceAccelerator
+
+CGXGLDisplayDeviceAccelerator(device):                   [SkyLight 0x7ff807dd86bf]
+    if (*0x7ff843c9ecd8 == 1) { ...legacy path... }
+    if (!WSMetalCompositorEnabled())            -> 0     ; 0x7ff807c9ac71
+    CGXAcceleratorForDisplayDevice(device, -1, &id)      ; CoreDisplay
+    if (id == 0)                                -> 0     ; <<< the failure
+    ...
+    return id
+
+CGXAcceleratorForDisplayDevice(device, ...):   [CoreDisplay 0x7ff8041291df unslid]
+    if (device == NULL) return 0x3e9            ; 1001
+    jmp *(device->0x8)->0x148                   ; per-device ops entry
+```
+
+`WSMetalCompositorEnabled` is the predicate 2pv proved true on this machine
+(`mode == 0 && (capability & 1)`), so that gate passes. The remaining way to get
+0 is `CGXAcceleratorForDisplayDevice` returning 0.
+
+### So the whole thing, end to end
+
+```
+UpdateDisplays
+ -> CDDisplay::compositor()
+     -> CDDisplay::accelerator()              [vtable +0x60]
+         -> CGXGLDisplayDeviceAccelerator
+             -> WSMetalCompositorEnabled()            PASSES (2pv)
+             -> CGXAcceleratorForDisplayDevice        returns 0  <<<<
+ -> WSGetCompositorForAccelerator(0)
+     -> CompositorSW                                  the 48 % (2pd)
+```
+
+**The display composites in software because CoreDisplay does not associate an
+accelerator with our display device.** Not a destination type (2pt), not a
+missing SkyLight capability (2pv), not the flip window (2pr), and not - at this
+layer - the absence of DCN 3.1.2 code.
+
+### `IOAccelIndex` is definitively NOT the input
+
+2pv flagged the temptation; this settles it. The id does not come from a
+framebuffer property at all - it comes from a **function pointer at
+`(device->0x8)->0x148`**, a per-device-type ops entry inside CoreDisplay. So
+nothing we publish on `IONDRVFramebuffer` can change it directly, and the 2pp
+reading of `IOAccelIndex = 0` is unrelated to this zero.
+
+### Next, and it is a real question rather than a guess
+
+Which ops table our display device gets, and what that `+0x148` entry does.
+That is CoreDisplay, same technique, no boots: the cache is readable, the slide
+is measurable, `atos` names things through a scratch process. The honest
+expectation to set: CoreDisplay deciding "this display has no accelerator" may
+well be downstream of the display being an `IONDRVFramebuffer` rather than an
+accelerated framebuffer - in which case this chain ends up pointing back at the
+same large body of work, but it will do so **with the exact predicate named**
+instead of inferred, which is worth having either way.
