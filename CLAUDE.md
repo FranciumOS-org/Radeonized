@@ -34,9 +34,16 @@ so this plugin does it itself, and **it works**: 2oi hooked
 `_task_set_main_thread_qos` and `_vm_shared_region_slide` and placed the cave
 into the shared cache of a process that was never given
 `DYLD_INSERT_LIBRARIES`, verified from that process's own memory
-(`-rbgpumtlkpatch`). Stage B (`-rbgpumtlkfix`) adds the detour that makes it
-live and is the first execution of the hand-written cave - first target
-TextEdit, an Apple platform binary that no other route can reach.
+(`-rbgpumtlkpatch`). Stage B (`-rbgpumtlkfix`) adds the detour, and 2ok placed
+**both** cave and detour into a live TextEdit, verified from its memory, with
+the app still running and no crash. What is NOT yet shown is that the cave's
+code ever *executed*: 2oj established that native AppKit apps draw text
+through CALayer backing stores and may never call `DetermineSwizzleMode`, so
+"TextEdit did not crash" fits both "the cave is correct" and "it was never
+called". The oracle is **IntelliJ IDEA** (`rbgpumtlkscope=idea`), which is
+broken unwrapped and fixed by this exact policy through the DYLD trampoline -
+it answers whether the per-app wrappers can be retired. Do not scope this at
+Claude, which hosts the session.
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -60,6 +67,13 @@ Persist it per app with `tools/rbgpu-app.sh install "<App>"`, which builds a
 Dock-able `~/Applications/<App> (GPU).app`. Never a launchd environment
 (rule 21). **Apple platform binaries (Safari, Finder, WindowServer) strip
 DYLD_INSERT_LIBRARIES and cannot be reached this way at all.**
+
+**Nor is TextEdit, or any native AppKit app** - 2oj/2ok: this defect is the
+mode chosen for client `MTLTexture`s, which Electron and JBR hit by rendering
+text into plain textures, while AppKit text goes through CALayer backing
+stores that reach neither this chooser nor the kernel align manager (2nj,
+Defect B). TextEdit renders correctly at baseline, so it can only ever show
+"did not crash".
 
 **texprobe is NOT an oracle for this defect** - it is clean at baseline (0/12,
 every footprint 1.00x) because its round trip is self-consistent. Only a real
