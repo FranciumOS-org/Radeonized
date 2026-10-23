@@ -30,10 +30,13 @@ re-enabled** (rule 22, 2of): `isUserDisabled |= getKernelVersion() >=
 BigSur`, so 2lm/2lp/2nb/2nm/2oa/2od all registered with `NoError` and never
 existed. Do not write another `BinaryModInfo` here. The *mechanism* is still
 open - every kernel symbol it needs is present and `KernelPatcher` works -
-so this plugin could hook `_task_set_main_thread_qos` and
-`_vm_shared_region_slide` and do the `vm_map_write_user` itself, reaching
-even the Apple platform binaries that strip `DYLD_INSERT_LIBRARIES`. That is
-kernel code on every process's exec path: a decision, not a next step.
+so this plugin does it itself, and **it works**: 2oi hooked
+`_task_set_main_thread_qos` and `_vm_shared_region_slide` and placed the cave
+into the shared cache of a process that was never given
+`DYLD_INSERT_LIBRARIES`, verified from that process's own memory
+(`-rbgpumtlkpatch`). Stage B (`-rbgpumtlkfix`) adds the detour that makes it
+live and is the first execution of the hand-written cave - first target
+TextEdit, an Apple platform binary that no other route can reach.
 
 Use `tools/mtlswizzle.c`, a **trampoline** hook, not `tools/mtllinear.c`'s
 constant stub: the stub can only be blanket, and blanket LINEAR **crashes**
@@ -391,14 +394,22 @@ The two that bite hardest:
   matching mod per `.map` line, so the real `startTEXT` lands on one of them
   rather than on ours. `rbgpu_mtlcave_mapped_mod()` exists for exactly this.
 
-- **`-rbgpumtlkpatch`** (2og) is the kernel-side patcher: it hooks
-  `_vm_shared_region_slide` and `_task_set_main_thread_qos` and places the
-  cave with `_vm_map_write_user`, because Lilu's user patcher cannot run here
-  at all (rule 22). Stage A is scoped to processes named `cavecheck` and
-  writes only the inert cave, no detour. The qos hook runs on **every** exec,
-  so a fault in it makes the machine unbootable - rescue with `-rbgpuoff`.
-  Read `mtlk_*` from the IORegistry; `mtlk_verify=1` is the only line that
-  proves anything.
+- **`-rbgpumtlkpatch` / `-rbgpumtlkfix`** (2og/2oi) are the kernel-side
+  patcher, which **WORKS**: it hooks `_vm_shared_region_slide` and
+  `_task_set_main_thread_qos` and places bytes with `_vm_map_write_user`,
+  because Lilu's user patcher cannot run here at all (rule 22). 2oi placed
+  and verified the cave in a live process. `-rbgpumtlkpatch` is stage A
+  (inert cave only); `-rbgpumtlkfix` adds the detour and makes it live.
+  `rbgpumtlkscope=<substring>` retargets by process name without a rebuild
+  (default `cavecheck`). Three things learned there:
+  **`proc_selfname` is the parent at this hook point** - the exec'ing process
+  is only reachable as `proc_name(proc_pid(get_bsdtask_info(task)))`;
+  **plain `VM_PROT_READ|VM_PROT_WRITE` succeeds** on a cache page, so Lilu's
+  `CS_ENFORCEMENT` surgery is never needed; and **the write is per-process
+  copy-on-write**, so the cave must be verified in *this* process before the
+  detour is written. The qos hook runs on **every** exec, so a fault in it
+  makes the machine unbootable - rescue with `-rbgpuoff`. Read `mtlk_*` from
+  the IORegistry; `mtlk_verify=1` is the only line that proves anything.
 
 ## Rescue
 

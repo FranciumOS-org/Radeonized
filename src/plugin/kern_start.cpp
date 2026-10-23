@@ -7536,6 +7536,69 @@ static t_rbMtlkGetBsdTaskInfo g_mtlkGetBsdTaskInfo = nullptr;
 static uint64_t g_mtlkExecs    = 0;   // every qos call, before any filtering
 static uint64_t g_mtlkCaveHits = 0;   // execs whose name matched the scope
 static bool     g_mtlkProbed   = false;
+static bool     g_mtlkStageB   = false;            // -rbgpumtlkfix: write the detour too
+
+// Retargetable without a rebuild: rbgpumtlkscope=<substring of the process
+// name>. Default "cavecheck", which only exists to be measured.
+static char     g_mtlkScope[64] = "cavecheck";
+
+// 2oi: one place to put one patch, so the cave and the detour cannot drift
+// apart in how they are applied or reported.
+static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
+                             const uint8_t *find, const uint8_t *repl, size_t len,
+                             const char *kMatch, const char *kProt,
+                             const char *kWrite, const char *kVerify) {
+    static uint8_t buf[sizeof(kRbMtlCaveFind)];
+    if (len > sizeof(buf)) {
+        return false;
+    }
+
+    kern_return_t r = g_mtlkVmMapReadUser(map, place, buf, len);
+    if (r != KERN_SUCCESS) {
+        rbgpu_diag_set_num(kMatch, 0xFFFF);
+        return false;
+    }
+
+    bool isFind = memcmp(buf, find, len) == 0;
+    bool isRepl = memcmp(buf, repl, len) == 0;
+    rbgpu_diag_set_num(kMatch, isFind ? 1 : (isRepl ? 2 : 0));
+    if (isRepl) {
+        return true;                  // already placed in this process
+    }
+    if (!isFind) {
+        return false;                 // wrong address, wrong slide, or moved
+    }
+
+    mach_vm_address_t pmask = static_cast<mach_vm_address_t>(PAGE_MASK);
+    mach_vm_address_t pstart = place & ~pmask;
+    mach_vm_address_t pend   = (place + len - 1) & ~pmask;
+    vm_size_t psize = static_cast<vm_size_t>(pend - pstart) + PAGE_SIZE;
+
+    // 2oi measured mtlk_prot_rw = KERN_SUCCESS, so plain RW is enough and
+    // Lilu's CS_ENFORCEMENT/CS_KILL surgery on struct proc is NOT needed.
+    kern_return_t pr = vm_protect(map, pstart, psize, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE);
+    rbgpu_diag_set_num(kProt, static_cast<uint64_t>(pr));
+    if (pr != KERN_SUCCESS) {
+        return false;
+    }
+
+    kern_return_t wr = g_mtlkVmMapWriteUser(map, repl, place, len);
+    rbgpu_diag_set_num(kWrite, static_cast<uint64_t>(wr));
+    vm_protect(map, pstart, psize, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (wr != KERN_SUCCESS) {
+        return false;
+    }
+
+    // Rule 20: the target's own memory is the only evidence.
+    if (g_mtlkVmMapReadUser(map, place, buf, len) != KERN_SUCCESS) {
+        rbgpu_diag_set_num(kVerify, 2);
+        return false;
+    }
+    bool ok = memcmp(buf, repl, len) == 0;
+    rbgpu_diag_set_num(kVerify, ok ? 1 : 0);
+    return ok;
+}
 
 // Deliberately NOT calling rbgpu_diag_set_num from here. This fires during
 // early boot, before the peer exists, and the diag setter schedules a
@@ -7629,8 +7692,8 @@ static void rbgpu_mtlk_on_exec(task_t task) {
         rbgpu_mtlk_probe(task);
     }
 
-    bool scoped = rbgpu_mtlk_name_matches(selfname, "cavecheck") ||
-                  rbgpu_mtlk_name_matches(taskname, "cavecheck");
+    bool scoped = rbgpu_mtlk_name_matches(selfname, g_mtlkScope) ||
+                  rbgpu_mtlk_name_matches(taskname, g_mtlkScope);
     if (!scoped) {
         return;
     }
@@ -7662,76 +7725,37 @@ static void rbgpu_mtlk_on_exec(task_t task) {
 
     // The patch site is ANCHOR bytes before the cave (the cave sits in a zero
     // run and needs preceding context to be identifiable).
-    mach_vm_address_t place =
+    mach_vm_address_t cavePlace =
         (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
-    rbgpu_diag_set_num("mtlk_place", place);
+    mach_vm_address_t fnPlace = RBGPU_MTL_FN_VM + g_mtlkSlide;
+    rbgpu_diag_set_num("mtlk_place", cavePlace);
 
-    // One buffer, reused for the read-back: two 224-byte frames plus locals
-    // would crowd a kernel stack frame.
-    static uint8_t probe[sizeof(kRbMtlCaveFind)];
-
-    kern_return_t r = g_mtlkVmMapReadUser(map, place, probe, sizeof(probe));
-    rbgpu_diag_set_num("mtlk_read", static_cast<uint64_t>(r));
-    if (r != KERN_SUCCESS) {
-        rbgpu_log("2og: vm_map_read_user at 0x%llx failed with %d - the slide "
-                  "or the address is wrong, and nothing was written",
-                  (unsigned long long)place, r);
+    bool caveOk = rbgpu_mtlk_place(map, cavePlace,
+                                   kRbMtlCaveFind, kRbMtlCaveRepl, sizeof(kRbMtlCaveFind),
+                                   "mtlk_match", "mtlk_prot_rw", "mtlk_write", "mtlk_verify");
+    if (!caveOk) {
+        rbgpu_log("2oi: cave NOT placed in %s at 0x%llx - the detour is not "
+                  "written, so nothing can jump into unpatched padding",
+                  pname, (unsigned long long)cavePlace);
         return;
     }
 
-    // THE measurement of this stage: do the expected bytes actually live at
-    // startTEXT + segOff + slide? If they do, the whole address chain is
-    // right and only the write remains.
-    bool isFind = memcmp(probe, kRbMtlCaveFind, sizeof(probe)) == 0;
-    bool isRepl = memcmp(probe, kRbMtlCaveRepl, sizeof(probe)) == 0;
-    rbgpu_diag_set_num("mtlk_match", isFind ? 1 : (isRepl ? 2 : 0));
-    if (!isFind) {
-        rbgpu_log("2og: bytes at 0x%llx are %s - refusing to write. "
-                  "first 4: %02X %02X %02X %02X",
-                  (unsigned long long)place,
-                  isRepl ? "ALREADY PATCHED" : "not the expected pattern",
-                  probe[0], probe[1], probe[2], probe[3]);
+    if (!g_mtlkStageB) {
+        rbgpu_log("2oi: cave placed and verified in %s at 0x%llx (stage A, "
+                  "no detour - the bytes are never executed)",
+                  pname, (unsigned long long)cavePlace);
         return;
     }
 
-    mach_vm_address_t pmask = static_cast<mach_vm_address_t>(PAGE_MASK);
-    mach_vm_address_t pstart = place & ~pmask;
-    mach_vm_address_t pend   = (place + sizeof(probe) - 1) & ~pmask;
-    vm_size_t psize = static_cast<vm_size_t>(pend - pstart) + PAGE_SIZE;
-
-    kern_return_t pr = vm_protect(map, pstart, psize, FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE);
-    rbgpu_diag_set_num("mtlk_prot_rw", static_cast<uint64_t>(pr));
-    bool writable = pr == KERN_SUCCESS;
-    if (!writable) {
-        kern_return_t pr2 = vm_protect(map, pstart, psize, FALSE,
-                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-        rbgpu_diag_set_num("mtlk_prot_rwx", static_cast<uint64_t>(pr2));
-        writable = pr2 == KERN_SUCCESS;
-    }
-    if (!writable) {
-        rbgpu_log("2og: the page at 0x%llx cannot be made writable (RW=%d). "
-                  "Lilu gets RWX only by clearing CS_ENFORCEMENT out of "
-                  "struct proc, which this does not do.",
-                  (unsigned long long)pstart, pr);
-        return;
-    }
-
-    kern_return_t wr = g_mtlkVmMapWriteUser(map, kRbMtlCaveRepl, place, sizeof(probe));
-    rbgpu_diag_set_num("mtlk_write", static_cast<uint64_t>(wr));
-
-    vm_protect(map, pstart, psize, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-
-    // Rule 20/2nn: the only evidence that counts is the target's own memory.
-    if (g_mtlkVmMapReadUser(map, place, probe, sizeof(probe)) == KERN_SUCCESS) {
-        bool ok = memcmp(probe, kRbMtlCaveRepl, sizeof(probe)) == 0;
-        rbgpu_diag_set_num("mtlk_verify", ok ? 1 : 0);
-        rbgpu_log("2og: cave %s at 0x%llx in %s (write=%d)",
-                  ok ? "PLACED and verified" : "write reported OK but readback DIFFERS",
-                  (unsigned long long)place, pname, wr);
-    } else {
-        rbgpu_diag_set_num("mtlk_verify", 2);
-    }
+    // ORDER IS THE SAFETY PROPERTY: the detour is a jmp into the cave, so the
+    // cave must be verified present in THIS process first. Each process gets
+    // its own copy-on-write copy, so "patched elsewhere" is worth nothing.
+    bool detOk = rbgpu_mtlk_place(map, fnPlace,
+                                  kRbMtlFnFind, kRbMtlFnRepl, sizeof(kRbMtlFnFind),
+                                  "mtlkd_match", "mtlkd_prot", "mtlkd_write", "mtlkd_verify");
+    rbgpu_log("2oi: stage B in %s - cave verified, detour %s at 0x%llx",
+              pname, detOk ? "PLACED and verified" : "NOT placed",
+              (unsigned long long)fnPlace);
 }
 
 static void wrap_rbMtlkTaskSetMainThreadQos(task_t task, thread_t main_thread) {
@@ -7747,11 +7771,20 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
     }
     g_mtlkInstalled = true;
 
-    if (!checkKernelArgument("-rbgpumtlkpatch")) {
-        rbgpu_log("2og: NOT armed - -rbgpumtlkpatch absent, no kernel hooks "
-                  "installed and no userspace image touched");
+    bool stageA = checkKernelArgument("-rbgpumtlkpatch");
+    g_mtlkStageB = checkKernelArgument("-rbgpumtlkfix");
+    if (!stageA && !g_mtlkStageB) {
+        rbgpu_log("2og: NOT armed - neither -rbgpumtlkpatch nor -rbgpumtlkfix, "
+                  "no kernel hooks installed and no userspace image touched");
         return;
     }
+
+    char scope[sizeof(g_mtlkScope)] = {};
+    if (lilu_get_boot_args("rbgpumtlkscope", scope, sizeof(scope) - 1) && scope[0] != '\0') {
+        lilu_strlcpy(g_mtlkScope, scope, sizeof(g_mtlkScope));
+    }
+    rbgpu_diag_set_str("mtlk_scope", g_mtlkScope);
+    rbgpu_diag_set_num("mtlk_stage", g_mtlkStageB ? 2 : 1);
 
     struct { const char *sym; void **slot; } syms[] = {
         { "_get_task_map",     reinterpret_cast<void **>(&g_mtlkGetTaskMap) },

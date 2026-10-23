@@ -22142,3 +22142,89 @@ first thing it does and costs a `proc_selfname` plus a substring compare, with
 no VM work for any other process - but a fault inside that wrapper would
 panic every exec and make the machine unbootable. The rescue is `-rbgpuoff`,
 which 2of confirmed disables the plugin outright before `init()` runs.
+
+## 2oi - THE CAVE IS IN. A kernel-placed patch, verified in a live process.
+
+Boot 127, qualified first: built UUID 3424F78C loaded, `-rbgpumtlkpatch`
+present, `rbgpu-boot` 127 (up from 126), armed.
+
+```
+mtlk_syms        = 15     all four symbols resolved
+mtlk_hook_slide  = 1      routed, original non-zero
+mtlk_hook_qos    = 1      routed, original non-zero
+mtlk_execs       = 2049   the hook fires constantly
+mtlk_slide       = 0x8209000
+mtlk_map         = 1
+mtlk_place       = 0x7FFB111C0570
+mtlk_match       = 1
+mtlk_prot_rw     = 0      KERN_SUCCESS
+mtlk_write       = 0
+mtlk_verify      = 1
+```
+
+and from the target's own memory, which is the only evidence that counts:
+
+```
+tools/cavecheck: slide 0x8209000, cave at 0x7ffb111c05a0
+  CAVE (stage A)   PRESENT
+    in memory : 55 48 89 e5 53 48 83 ec 18 48 89 d3 48 8b 45 10 ...
+    expected  : 55 48 89 e5 53 48 83 ec 18 48 89 d3 48 8b 45 10 ...
+```
+
+**A patch placed from the kernel into the dyld shared cache, in a process
+that was never given `DYLD_INSERT_LIBRARIES`.** Lilu's user patcher took no
+part in it and cannot (rule 22).
+
+### Four things measured here, each worth keeping
+
+* **`proc_selfname` is the WRONG name at this hook point.** `mtlk_probe_self`
+  = `launchd` while `mtlk_probe_task` = `fsck`, and on the scoped hit
+  `mtlk_self` = `zsh` while `mtlk_task` = `cavecheck`. `current_proc()` is
+  the *parent*; the exec'ing process is only reachable through the task
+  argument, `proc_name(proc_pid(get_bsdtask_info(task)))`. The 2og scope
+  matched on `proc_selfname` alone and would never have fired - and would
+  have looked exactly like "the address is wrong".
+* **The slide is confirmed two independent ways.** `mtlk_slide` = 0x8209000
+  from arg0 of `_vm_shared_region_slide`, and `cavecheck` printed the same
+  0x8209000 from `_dyld_get_image_vmaddr_slide` in userspace. Arg0 is the
+  slide on Sequoia.
+* **`mtlk_prot_rw = KERN_SUCCESS`: plain RW is enough.** A shared-cache page
+  can be made writable with `VM_PROT_READ|VM_PROT_WRITE`. Lilu only ever
+  asks for RWX and pays for it by clearing `CS_KILL|CS_HARD|CS_ENFORCEMENT`
+  out of `struct proc` through a hand-rolled field scan. **We never need
+  that**, so this does strictly less damage to the process than Lilu would.
+* **The write is copy-on-write, per process.** Every process needs its own,
+  which is why "verified somewhere" is worth nothing and the cave must be
+  confirmed in *this* process before the detour goes in.
+
+### Stage B, and the one ordering rule that makes it safe
+
+`-rbgpumtlkfix` adds the detour. `rbgpu_mtlk_place()` now applies both sites
+through one path so they cannot drift apart, and the order is the safety
+property: the detour is a `jmp` into the cave, so the cave is written **and
+read back** in the same process first, and a failed cave means the detour is
+never written. The alternative - a detour jumping into untouched `__const`
+padding - is a crash.
+
+`rbgpumtlkscope=<substring>` retargets without a rebuild; default
+`cavecheck`. `mtlk_stage` reports 1 or 2.
+
+**Stage B will be the first time this hand-written x86 has ever executed.**
+The cave was assembled by `cachepatch.py: build_cave()` and the detour by
+`detour()`, and until now both have only ever been compared as bytes. So the
+first target is deliberately **TextEdit**: an Apple platform binary, which
+strips `DYLD_INSERT_LIBRARIES` and therefore *cannot* be fixed any other way,
+has visible text to judge, and can be killed without ending the session.
+A bug in the cave crashes TextEdit, not the machine.
+
+### Also fixed here
+
+`tools/cavecheck.m` was printing "CAVE PRESENT - Lilu's user patcher WORKS on
+this macOS", which is now exactly wrong and would mislead a future session.
+Both verdict strings now name the kernel-side patcher and point at `mtlk_*`.
+
+A stale-build near miss, caught by the UUID rule: a `git stash` round-trip
+used to check whether `___strlcpy_chk` was a pre-existing import left the
+object files newer than the sources, so `make plugin` reported success and
+produced the *previous* UUID. `efi.sh install` deletes those two objects for
+exactly this reason; a bare `make plugin` does not.

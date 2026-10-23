@@ -65,12 +65,14 @@ int main(void)
         int detOk  = memcmp(fn, kRbMtlFnRepl, 5) == 0;
         printf("\nVERDICT: ");
         if (caveOk && detOk) printf("cave AND detour present - the fix is live for every process.\n");
-        else if (caveOk)     printf("CAVE PRESENT - Lilu's user patcher WORKS on this macOS. "
-                                    "Stage B (-rbgpumtlfix) is now worth arming.\n");
+        else if (caveOk)     printf("CAVE PRESENT - the KERNEL-side patcher (2og/2oi) placed it. "
+                                    "Lilu's own user patcher is disabled on this OS and was never "
+                                    "involved (rule 22). Stage B is -rbgpumtlkfix.\n");
         else if (detOk)      printf("detour present but cave is NOT - do not reboot into this, "
                                     "the detour would jump into unpatched padding.\n");
-        else                 printf("NEITHER - Lilu's user patcher did not reach the shared "
-                                    "cache. The kext saying ARMED means nothing (rule 20).\n");
+        else                 printf("NEITHER - nothing was placed in THIS process. Read mtlk_* "
+                                    "from the IORegistry to see how far it got; the kext saying "
+                                    "ARMED means nothing (rule 20).\n");
         return caveOk ? 0 : 1;
     }
 }
