@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -154,6 +154,20 @@ $(OUT)/usageprobe: tools/usageprobe.m | $(OUT)
 cavecheck: $(OUT)/cavecheck
 $(OUT)/cavecheck: tools/cavecheck.m src/plugin/rbgpu_mtlcave.h | $(OUT)
 	clang -O2 -Wall -o $@ $< -framework Metal -framework Foundation
+
+# dispclk (2ot): the ORACLE for the vblank step - what frame clock does macOS
+# actually have? Boot 133: 30.00 Hz against a 144 Hz panel. Run it before and
+# after publishing a framebuffer with a real vblank.
+dispclk: $(OUT)/dispclk
+$(OUT)/dispclk: tools/dispclk.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework CoreGraphics \
+	      -framework CoreVideo
+
+# vramtest (2ot): the falsifier for "it is running out of the 7 MB VRAM".
+# Allocates and reads back 1 GB plus an 8K texture. Run it when idle.
+vramtest: $(OUT)/vramtest
+$(OUT)/vramtest: tools/vramtest.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal
 
 # surfdump (2ni): what does a CoreAnimation backing store carry that a
 # hand-allocated IOSurface does not?

@@ -23212,3 +23212,89 @@ This is the rule that keeps earning its place: **the instrument is a suspect.**
 Two decodes went out in 2oq/2or; the hardware falsified one of them on first
 contact, and only because the output was a physical quantity with a plausible
 range rather than a hex dump.
+
+## 2ot - the choppiness MEASURED: 30 Hz against a 144 Hz panel. Not VRAM.
+
+The user, after boot 133: *"my screen isn't running on actual 144Hz, it says it
+is but everything is choppy, maybe cause its running out of the 7MB VRAM... and
+hence why no animations"*. Both halves of that are testable and both were
+tested. The first is right and now has a number; the second is wrong, and
+saying so matters because it points the work somewhere else.
+
+### The animation clock is 30.00 Hz. Measured.
+
+`tools/dispclk.m`, new, read-only, no window and no GPU work:
+
+```
+CGDisplay 1535231424: 1920x1080, CGDisplayModeGetRefreshRate = 0.000 Hz
+nominal refresh period: 33333333/1000000000 = 30.000 Hz
+actual latency: 0.000 ms
+display link fired 60 times, 1966.8 ms span = 30.00 Hz
+```
+
+**CoreVideo's fallback for a display with no refresh clock is 30 Hz**, and the
+display link really does fire 30 times a second. The panel scans out at
+143.833 Hz (2os). So the compositor is pacing every animation at **roughly one
+frame in five** of what the panel can show.
+
+That is the choppiness, precisely, and it is a *better* account than 2oq's
+"timer-paced": not a vague fallback but a measured 30 Hz. It also prices the
+vblank step - step (c) of the display plan - at **30 -> 144 Hz, 4.8x**, which
+is the single largest user-visible change left in this project.
+
+`dispclk` is committed as the **oracle for that step**: run it before and
+after, and the number says whether the vblank is real. Having the instrument
+before the change is the discipline this project keeps relearning.
+
+### "Running out of the 7 MB" is false, and here is the falsifier
+
+`tools/vramtest.m`, new:
+
+```
+recommendedMaxWorkingSetSize = 4096 MB
+allocated and verified: 1024 MB in 8 buffers
+8192x8192 BGRA8 texture (256 MB): allocated
+```
+
+A gigabyte in eight buffers, each written and read back at its first and last
+page, plus a 256 MB 8K texture. If the GPU had 7 MB none of it would allocate.
+
+**The 7 MB is 8294400 bytes = 1920 x 1080 x 4 = exactly ONE framebuffer.** It is
+`IONDRVFramebuffer`'s own buffer size, surfaced through `IOFBMemorySize`, which
+System Profiler falls back to because no `VRAM,totalMB` property exists
+anywhere (2or). It is a *label*, not a pool. Three independent numbers agree
+that the real figure is 4096 MB: Metal's `recommendedMaxWorkingSetSize`, the
+probe's `RCC_CONFIG_MEMSIZE` (2os) and `MMMC_VM_FB_LOCATION_TOP` 0xf4ff.
+
+So the "4 GB" fix and the animation fix are **unrelated**. Fixing the string
+will not make anything smoother, and fixing the vblank will not change the
+string. Worth stating plainly because the opposite assumption would have put
+the effort on the cosmetic one.
+
+### HDMI: the GOP does NOT light an external display
+
+The user confirms **HDMI was connected for boot 133**, and OTG1, OTG2 and OTG3
+all read `0x00000300` with HUBP1-3 surfaces at 0. The control is present and
+the pipes stayed dark.
+
+**That closes 2or's one exception.** There is no firmware-lit external pipe to
+adopt, so HDMI needs the DCN 3.1.2 code that macOS does not have - HPD, EDID
+over DDC/AUX, link training, a second OTG/HUBP/DIO, DML. HDMI audio is
+downstream of it. Both are **no**, now with a measurement rather than an
+inference.
+
+### Brightness: consistent, NOT confirmed
+
+2os predicted 34.8 % and asked for a check. The user: *"im sitting at a full
+dark room and the brightness isnt making me uncomfortable or too bright"*.
+That is consistent with a third, and it is **not** confirmation - a dark room
+is comfortable across a wide range, and the prediction would survive anything
+from roughly 20 % to 50 %.
+
+The test that would actually settle it is **differential**: change the
+brightness and re-probe. If the computed level tracks the change, the
+arithmetic is right. It also answers a second question for free - whether
+*anything* currently drives the panel (ACPI, or the keys doing nothing at all).
+If the keys are dead, the PWM is simply parked where firmware left it, which is
+equally informative. Until then `34.8 %` stays a reading with a wide error bar,
+not a confirmed value.
