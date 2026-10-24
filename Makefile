@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -178,6 +178,13 @@ accelport: $(OUT)/accelport
 $(OUT)/accelport: tools/accelport.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
 	      -framework IOKit
+
+# slquery (2pz): what SkyLight itself says about THIS display - whether its
+# accelerator id resolves and whether it hands back a Metal device. Arity of
+# each export was read from its disassembly before it was called.
+slquery: $(OUT)/slquery
+$(OUT)/slquery: tools/slquery.m | $(OUT)
+	clang -O2 -o $@ $< -framework Metal -framework ApplicationServices
 
 # surfdump (2ni): what does a CoreAnimation backing store carry that a
 # hand-allocated IOSurface does not?
