@@ -27083,3 +27083,127 @@ would have to be called at `unslid + measured slide`. That is calling internal
 unexported C++ with a hand-built ABI: worst case it crashes the probe process,
 which costs nothing, but a success in our process would not prove WindowServer
 behaves the same. State that limit before running it, not after.
+
+## 2qb — the oracle says it is NOT the shaders, and 2q2's negative was the wrong slot
+
+`make skyshaders` + `tools/skyshaders_pairs.sh`, boot 149, no root. Built to
+answer 2qa's survivor: does this GPU fail to build what
+`CompositorMetal::new_compositor` needs?
+
+The selectors and CFStrings came from that function's own RIP-relative slots,
+decoded through the cache's slide-info v2 pointers:
+`mainBundle` / `pathForResource:ofType:` / `newLibraryWithURL:error:` with
+**`@"SkyLightShaders.air64"` `@"metallib"`**, `newSamplerStateWithDescriptor:`,
+`newDepthStencilStateWithDescriptor:`, `newSharedEvent`,
+`setSubmissionQueue:`/`setCompletionQueue:`/`setGPUPriority:`,
+`supportPriorityBand`, `maxTextureWidth2D`/`Height2D`, `acceleratorPort`,
+`peerGroupID`, and `rangeOfString:` against **`@"Intel"`** and
+**`@"NVIDIA"`** - so SkyLight special-cases those two vendors and ours is
+neither. So the tool rebuilds each with **public Metal APIs only**; none of
+the SkyLight compositor symbols are exported (dlsym finds
+`CGXAcceleratorForDisplayDevice` and `CGXNextDisplayDevice` and nothing else),
+and calling them at `unslid + slide` would have proved less.
+
+### The answer: everything builds
+
+```
+newLibraryWithURL:error:              built, 37 functions
+  8 vertex, 24 fragment, 5 kernel
+newSamplerStateWithDescriptor:        built
+newDepthStencilStateWithDescriptor:   built
+newSharedEvent                        built
+newCommandQueue                       built
+compute pipelines                     5 of 5
+supportPriorityBand                   YES
+maxTextureWidth2D / Height2D          16384 / 16384      (not 0)
+acceleratorPort                       10755
+```
+
+**So the silent NULL is not "Apple's compositor shaders will not compile on
+gfx1035"** - which was 2qa's most attractive hypothesis and is now dead. Stated
+with its limit, as 2qa promised: a success here does **not** clear
+WindowServer, which is a different process with different entitlements and
+ordering. It only rules out this class of failure.
+
+### My own instrument was wrong twice, and the second one aborts
+
+First version built **compute** pipelines only, so the backend compiler never
+ran on the *rendering* path at all - the thing a compositor actually does.
+Second version paired every vertex with every fragment, which mostly tests
+pairs that are not meant to link (`"fragment input tex was not found in vertex
+shader outputs"` is a correct refusal) and needed a vertex descriptor it did
+not set. Both rule 16.
+
+With a descriptor synthesized from each function's own `vertexAttributes`, and
+one process per pair (`skyshaders --pair V F fmt`, because Metal **aborts**):
+
+```
+BGRA8Unorm   8 built, 0 refused with an error, 6 aborted the validator
+RGBA16Float  8 built, 0 refused with an error, 6 aborted the validator
+```
+
+The six are `UberComposite*` (3), `BlurComposite`, and two `Shadow*`. They
+abort inside `validateWithDevice(id<MTLDevice>, MTLRenderPipelineDescriptorPrivate const&)`
+-> `MTLReportFailure` -> `__assert_rtn` -> `abort`, and the reason is logged as
+**`validateWithDevice, line 4704: error '<private>'`**. **Identical in both
+pixel formats**, so it is format-independent and structural: a statement about
+the descriptor *this tool* builds, not about the GPU. Recorded as a tool
+limit, not as evidence. Nothing returned an NSError, which is what a real
+shader-compilation failure for this device would look like.
+
+### Two instruments that did not exist, and one correction they produce
+
+**`tools/re/vcall.py`** - every `call *slot(%reg)`. A virtual call is invisible
+to `callxref` (no direct branch) and to `ripxref` (displacement off a register,
+not RIP), which is why 2pz found **zero** callers of `CDDisplay::compositor()`
+and could only call it a limit of the instrument. It was; this closes it.
+Against the vtable base `0x7ff840a579c0` established in 2qa:
+
+| method | vtable slot |
+|---|---|
+| `CDDisplay::accelerator()` | 0x60 |
+| `CDDisplay::compositor()` | **0x4b0** |
+| `CDDisplay::render_update()` | **0x4f8** |
+
+**`tools/re/rbpslot.py`** - every access to one rbp-relative stack slot, loads
+separated from stores. `fldstore.py` **cannot** find these: rbp-relative is
+modrm `rm=101`, and that scanner skips `rm==5` along with SIB and rip-relative.
+
+With those: `render_update`'s only real caller is **`UpdateDisplays + 20984`**
+(`0x7ff807e33801`), and the `Compositor*` is `%rdx`, loaded at
+`0x7ff807e337e3` from **`-0xa00(%rbp)`**.
+
+> **2q2 searched `-0x350(%rbp)`.** Its bounded negative - proved three ways,
+> with controls - was entirely sound about a slot that is not the one the call
+> site reads. The conclusion drawn from it, that nothing in `UpdateDisplays`
+> writes the compositor slot, does not follow.
+
+### And `UpdateDisplays` does call `compositor()`
+
+Three sites (`0x7ff807e30f11`, `0x7ff807e3433d`, `0x7ff807e347f6`), so the
+2qa chain is live, not dead code. Two of them read:
+
+```
+callq *0x4b0(%rax)      ; compositor()
+testq %rax, %rax
+je    ...               ; NULL is EXPECTED and handled
+movq  0x10(%rax), %rbx  ; compositor->0x10
+```
+
+`->0x10` is exactly where 2qa found `new_compositor` storing the MetalContext
+in its 0x20-byte object - independent corroboration of that layout, from a
+different function. And **a NULL compositor is a handled case**, which is what
+2qa predicted and what a silent fallback to software looks like from the
+inside.
+
+### Where this stops, deliberately
+
+`-0xa00(%rbp)` has 11 stores and 62 loads in that 34 KB function, and its
+address is taken repeatedly (`lea`), so it is a struct base and not a scalar -
+hand-tracing it is the same mistake 2q2 named. The next instrument is not more
+disassembly: it is getting `CDDisplay::compositor()`'s **return value** from
+the running WindowServer, which needs either root (`sample` was already refused
+once this session) or a probe in-process. Nothing short of that separates "the
+compositor is NULL" from "the compositor is the SW object", and 2pz's sample -
+`CompositorSW` frames doing real work - is weak evidence for the second, since
+software is also where a NULL lands.
