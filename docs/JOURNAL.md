@@ -26833,3 +26833,130 @@ exactly what 2q5 pre-stated as the expected outcome. Three gates were named in
 (`dev->0x48`)**. Their writers are the next target, and `numDisplayBuffers`
 is the one 2pd predicted mattered - a destination needs a buffer to be a
 destination.
+
+## 2q9 — both gates traced to their source, and `numDisplayBuffers` is CLOSED
+
+Static, no boot, no root. The two fields 2q3 named and 2q7 left standing.
+
+### `numDisplayBuffers` (`dev->0x48`) - closed end to end
+
+The single writer is **`setup_hardware(CGXDisplayDevice*)`** at unslid
+`0x7ff8040edb37` (CoreDisplay), at `0x7ff8040edd70`:
+
+```
+*out = 0;                                             // 0x7ff8040edd35
+r = IOAccelSurfaceControl(mpPriv->0x1d0, 17,           // 0x7ff8040edd50
+                          mpPriv->0x98 /*fbIndex*/, out);
+dev->numDisplayBuffers = (r != 0) ? 2 : *out;          // 0x7ff8040edd70
+```
+
+Note the inversion: **a FAILED call means two buffers are assumed.** We read
+0, so the call succeeded and reported 0.
+
+Userspace `IOAccelSurfaceControl` (unslid `0x7ff8058d8209`, resolved by dlsym
+in a scratch process and de-slid) packs `{selector, arg}` as two scalars and
+calls external method **16**; CoreDisplay's `17` is the **sub**-selector. The
+kernel side is `IOAccelSurface::surface_control(uint,uint,uint*)`
+(`IOAcceleratorFamily2+0x14e47950`), which only takes locks and dispatches
+through **the surface's own vtable slot 0xa30** - so the subclass decides.
+All three implementations exist, and they disagree:
+
+| class | selector 17 | result |
+|---|---|---|
+| `IOAccelSurface` | not in {1,4,5} | `0xE00002C2` kIOReturnBadArgument -> CoreDisplay writes **2** |
+| `IOAccelLegacySurface` | table 16..19, case at `0x14e2a11d` | success, writes **1, 2 or 3** - never 0 |
+| `IOAccelSurfaceMTL` | table 1..0x14, case at `0x14e23de8` | success, writes **popcount(flags & 3)** |
+
+`IOAccelSurfaceMTL`'s case 17, in full:
+
+```
+movl $0x0, (%rbx)                 ; *result = 0
+movl 0x13c(%r14), %eax            ; flags
+andl $0x1, %eax                   ; bit 0
+btl  $0x1, 0x13c(%r14)            ; CF = bit 1
+adcl $0x0, %eax                   ; bit0 + bit1
+movl %eax, (%rbx)
+jmp  ...0x14e23e7a: xorl %eax,%eax ; kIOReturnSuccess
+```
+
+**So `numDisplayBuffers` is literally the popcount of the low two bits of
+`IOAccelSurfaceMTL->0x13c`** - the field name is exact, it counts attached
+buffers. The `fbIndex` argument is **ignored** by this case.
+
+**The measurement identifies the class, which did not have to be assumed.**
+Zero is reachable from exactly one of the three: the base class answers
+BadArgument (-> 2) and Legacy never writes 0. So our display surface *is* an
+`IOAccelSurfaceMTL`, and **both of its low req-bits are clear**.
+
+`0x13c` is a **req-bits mask** (cf. `IOAccelResource2::get_surface_buffer_reqbit`).
+It starts at **0** - `surfaceStart` does `xorl %r14d,%r14d` then
+`movl %r14d, 0x13c(%rbx)` at `0x14e22de5` - and the only thing that sets
+buffer bits is **`add_drawable_to_list(IOAccelGLDrawableUserClient*)`** at
+`0x14e23171`:
+
+```
+surface->0x13c |= drawable->vt[0x9a0]();
+```
+
+(`reset_req_bits` and `prune_buffers` also touch it; neither introduces a
+buffer.) So the root is one of two things, and I cannot yet separate them:
+**either no drawable has ever been added to the display surface, or the one
+that was asks for no buffers.**
+
+### `displayPipeIsAvailable` (`dev->0x14c`) - mechanism found, root still open
+
+Whole-image scan of CoreDisplay's code range, with the group-1 `/reg` field
+decoded so `cmpb` is not mistaken for a store - **64 of the 80 hits at this
+offset are `cmp`**, and a scanner that cannot tell them apart would have
+buried the three real writers. (The three hits inside `MPRebuildDevice` are
+all `cmpb $0x1`, reads.)
+
+Two writers matter:
+
+- **`CGXAcquireDisplayDeviceSurface`** `0x7ff80411d5b0`: `movb $0x0, 0x14c(%r14)`
+  - pre-clears it, then calls `*(dev->0x8)->0x158`. `dev->0x8` is the device's
+    **ops table**, the same one 2px saw VFB tail-jump through at `0x148`.
+- **`UpdateCGXDisplayDevice`** `0x7ff804123447`, the only one that can set it:
+
+```
+ops->0x140(dev, -1, &out);              ; 0x7ff804123433 - signature of
+                                        ; CGXAcceleratorForDisplayDevice
+if (out == 0) goto skip;                ; store SKIPPED entirely
+dev->0x14c = FindDisplayPipeForService(out) & 1;
+```
+
+**`CoreDisplay::FindDisplayPipeForService(unsigned int)`** (`0x7ff804056d04`):
+a function-local static `unordered_map<unsigned long long,
+CoreDisplay::DisplayPipe>`, keyed by **`IORegistryEntryGetRegistryEntryID`**
+of the passed port, returning `find(key) != nullptr` at `0x7ff804057299`.
+
+Two things I nearly got wrong here and did not:
+
+- `0x7ff843bad2d8` looked like a feature flag gating the whole function. It is
+  the **`__cxa_guard_acquire` token** for that static map.
+- the "miss" path does not fail - it calls `operator new(0x20)` and
+  **constructs and inserts** a DisplayPipe.
+
+Which leaves a contradiction I am recording rather than resolving: as read,
+the function inserts on a miss and then returns whether the key is present,
+which should be **true**. Yet `displayPipeIsAvailable` is 0 with
+`priv.accelerator = 0x14b23` non-zero. So either construction can bail out
+along a path I have not traced, or `ops->0x140` returned **0 at the moment
+`UpdateCGXDisplayDevice` ran** - which the dumped `priv.accelerator` does not
+contradict, because the dump is a later snapshot and 2oy was exactly such an
+ordering race. **Unresolved. Do not act on either branch yet.**
+
+### The caveat that decides whether any of this is worth a boot
+
+**It is NOT established that SkyLight's compositor choice reads either
+field.** 2q3 named them because they are 0 in the dump, and the only reader
+found so far is `CreateDisplayDeviceDict`, which exists to *print* them. Until
+a consumer is found, setting them is the 2pq mistake again - enlarging
+`getVRAMRange` was a correct fix to a thing that was not the gate, and it cost
+a boot. Find the reader first.
+
+What has genuinely changed: `numDisplayBuffers` is no longer a mystery number,
+it is a buffer count on an Apple `IOAccelSurfaceMTL` that has no buffers
+attached - which is **2pd's reading, arrived at from the other end and made
+specific.** The destination is not a GPU surface because the surface has
+nothing to draw into.
