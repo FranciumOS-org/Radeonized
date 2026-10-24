@@ -21,10 +21,14 @@ say() { printf '\n== %s\n' "$1"; }
 
 {
 say "preconditions (rule 26)"
+# -r prints each match's whole SUBTREE, so grep -c '+-o' counts children as
+# well and read 69 where the real answer was 1. -d1 limits the depth.
 printf 'IOAccelerator services : %s\n' \
-    "$(ioreg -rw0 -c IOAccelerator 2>/dev/null | grep -c '+-o')"
-printf 'accelerator started    : %s\n' \
-    "$(ioreg -w0 2>/dev/null | grep -c 'AMDRadeonX6800_AMDRadeonHWLibsX6800.*registered, matched')"
+    "$(ioreg -rw0 -d1 -c IOAccelerator 2>/dev/null | grep -c '^+-o')"
+# The class name differs between boots, so match the line and print it rather
+# than grepping for a state that read 0 while the accelerator was up.
+printf 'AMD HWLibs node        : %s\n' \
+    "$(ioreg -w0 2>/dev/null | grep -oE 'AMDRadeonX6[0-9]*_AMDRadeonHWLibsX6[0-9]*.*(registered|!registered), *(matched|!matched)' | head -1)"
 printf 'plugin loaded          : %s\n' \
     "$(kmutil showloaded --list-only 2>/dev/null | grep -c com.rembrandtgpu.plugin)"
 printf 'rbgpu-boot             : %s\n' \
@@ -49,6 +53,22 @@ ioreg -l -w0 2>/dev/null \
 printf 'IOAccelDisplayPipeUserClient2 nodes: %s\n' \
     "$(ioreg -rw0 -c IOAccelDisplayPipeUserClient2 2>/dev/null | grep -c '+-o')"
 
+say "the CoreDisplay/SkyLight log for this boot"
+# NOTE: `log` is a zsh BUILTIN that shadows /usr/bin/log and answers
+# "too many arguments", which looks exactly like an empty log (rule 26).
+# Always the absolute path.
+wslog=$(/usr/bin/log show --last boot --predicate \
+    'process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight")' \
+    --style compact 2>/dev/null)
+printf '%s\n' "$wslog" > "$out/ws-log.txt"
+printf 'lines: %s\n' "$(printf '%s\n' "$wslog" | wc -l)"
+echo '--- "Creating FB N of M": GPU::GPU logs its own framebuffer count ---'
+printf '%s\n' "$wslog" | grep "Creating FB" | sed 's/^.*\] //' | sort -u \
+    || echo "(none - the GPU got no framebuffers)"
+echo '--- distinct message shapes ---'
+printf '%s\n' "$wslog" | sed 's/^.*\] //' | sed 's/[0-9]\{2,\}/N/g' \
+    | sort | uniq -c | sort -rn | head -12
+
 say "WindowServer CPU burn - software compositing pegs a core"
 ws=$(ps -axo pid=,comm= | awk '/WindowServer$/{print $1; exit}')
 if [ -z "$ws" ]; then
@@ -70,9 +90,12 @@ else
             "$(grep -c CompositorSW "$out/ws-sample.txt" 2>/dev/null)"
         printf 'CompositorMetal mentions            : %s\n' \
             "$(grep -c CompositorMetal "$out/ws-sample.txt" 2>/dev/null)"
-        echo "--- heaviest main-thread frames ---"
-        sed -n '/Thread_.*DispatchQueue_1/,/^$/p' "$out/ws-sample.txt" \
-            | grep -E '^ +[0-9]+ ' | head -40
+        # The compositor each CALLER gets is the whole point: Metal and SW
+        # can both be live in one process, and that discriminates the gate.
+        echo "--- who got which compositor ---"
+        grep -B1 -E "Compositor(SW|Metal)::CompositeLayersToDestination" \
+            "$out/ws-sample.txt" | sed 's/^ *[+!:|-]*  *//' \
+            | grep -vE '^--$' | cut -c1-120 | head -30
         echo "(full sample in $out/ws-sample.txt)"
     fi
 fi
