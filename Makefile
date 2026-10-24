@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -187,6 +187,14 @@ skyshaders: $(OUT)/skyshaders
 $(OUT)/skyshaders: tools/skyshaders.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
 	      -framework IOKit
+
+# cdchain (2qc): CALL the ops-table thunks the compositor decision calls,
+# rather than reading a field out of a state dump. Arity of each was read
+# from its disassembly first. An empty device list in a client process is the
+# expected outcome and is reported as INCONCLUSIVE.
+cdchain: $(OUT)/cdchain
+$(OUT)/cdchain: tools/cdchain.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation
 
 # slquery (2pz): what SkyLight itself says about THIS display - whether its
 # accelerator id resolves and whether it hands back a Metal device. Arity of

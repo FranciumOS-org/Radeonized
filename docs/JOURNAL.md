@@ -27207,3 +27207,111 @@ once this session) or a probe in-process. Nothing short of that separates "the
 compositor is NULL" from "the compositor is the SW object", and 2pz's sample -
 `CompositorSW` frames doing real work - is weak evidence for the second, since
 software is also where a NULL lands.
+
+## 2qc — the ops table, a correction to 2qa, and why a client process cannot ask
+
+`make cdchain`, boot 149, no root. The aim was to stop reading branch 5 of the
+compositor decision out of a state dump and instead **call** the function the
+decision calls. Both outcomes below are worth more than that would have been.
+
+### CORRECTION to 2qa: slot 0x140 is the SERVICE, not the accelerator
+
+`CGXAcceleratorForDisplayDevice` is three instructions:
+
+```
+if (dev == 0) return 0x3e9
+rax = dev->0x8          ; the ops table - confirms 2qa's reading of dev->0x8
+jmp *(rax->0x148)
+```
+
+So the accelerator op is slot **0x148**. But `UpdateCGXDisplayDevice` calls
+**0x140**. 2qa asserted that call "has the signature of
+`CGXAcceleratorForDisplayDevice`" - inferred from the argument shape
+`(dev, -1, &out)` instead of from the slot, and wrong.
+
+Searching CoreDisplay for the thunk shape `movq 0x8(%rdi),%rax; movq
+SLOT(%rax),%rax` (19 hits) gives the ops table by name:
+
+| slot | thunk |
+|---|---|
+| 0xb8 | `CGXMPSetCursor` |
+| 0xf0 | `CGXMaxCursorSize` |
+| 0x100/0x108/0x110 | `CGXSetOpenGLAcceleration` |
+| 0x118 | `CGXHWPurgeSurface` |
+| 0x130 | `CGXHWCopyPixels` |
+| 0x138 | `CGXDisplayDeviceSetHDRScalingFactor` |
+| **0x140** | **`CGXServiceForDisplayDevice`** |
+| **0x148** | **`CGXAcceleratorForDisplayDevice`** |
+| 0x150/0x158 | `CGXFramebufferForDisplayDevice` |
+| 0x160 | `CGXFinishSurfaceForDisplayDevice` |
+| 0x180 | `CGXAccessCaptureSurfaceForDisplayDevice` |
+| 0x188 | `CGXDisplayCreateCopyForwardShape` |
+| 0x1a8 | `CGXDisplayGetVBLTiming` |
+| 0x208 | `CGXMPSetCursorPosition` |
+
+(The inventory labels `0x7ff8041291e8` as `WSUpdateHDRState`; it is inside
+`CGXAcceleratorForDisplayDevice`, which starts 9 bytes earlier - the grid
+caveat again.)
+
+So the real mechanism is
+
+```
+displayPipeIsAvailable = FindDisplayPipeForService( SERVICE(dev) ) & 1
+```
+
+which is what the function's **name** said all along, and what the map being
+keyed by `IORegistryEntryGetRegistryEntryID` of a port implied. `priv.service`
+is `0x10c03` in boot 149 and `0x14903` in 148. It does not change 2qa's
+conclusion - neither field is read by `WSGetCompositorForAccelerator` - but the
+`if (out == 0) skip` test is on the **service**, not the accelerator.
+
+Also note slot 0x158 belongs to `CGXFramebufferForDisplayDevice`, and
+`CGXAcquireDisplayDeviceSurface` calls `ops->0x158` right after clearing
+`displayPipeIsAvailable` (2q9) - so that call is *get the framebuffer*, not
+*acquire a surface*. Another inference from a name that the slot table
+corrects.
+
+### `CGXNextDisplayDevice` is UNREACHABLE from a client process - measured
+
+```
+cache slide (measured)        : 0xd1f3000
+CoreDisplay server hook @...  : 0x0
+```
+
+`CGXNextDisplayDevice(0)` does `callq *[0x7ff843bb2280]` on an indirect
+global, and that global is **NULL** outside WindowServer - only its CoreDisplay
+initialisation fills it. The first run of the tool proved this the expensive
+way: **SIGSEGV at address 0, `CGXNextDisplayDevice + 15`, and zero bytes of
+output.**
+
+So the list is not *empty* here, it is *unreachable*, and **branch 5 cannot be
+re-measured by calling the function from a client process.** The os_state dump
+stays the evidence for it, and it is sound for the reason 2qa gave:
+`CreateDisplayDeviceDict` reads the MPPriv from `dev->0x160`, the same field
+`MPDisplayDevicePriv(dev, -1)` returns.
+
+The tool now reads that pointer and reports INCONCLUSIVE (rc=3) instead of
+crashing - rule 14, every path out of a probe must say something.
+
+### An instrumentation lesson worth its own line
+
+**stdout redirected to a file is FULLY buffered, so a segfault discards
+everything printed before it.** The first run looked like a tool that produced
+no output at all, which is indistinguishable from one that never ran - rule 14
+in a new disguise. `setvbuf(stdout, NULL, _IONBF, 0)` at the top of any probe
+that might fault.
+
+### Where this leaves the frontier
+
+Unchanged, and now with one fewer way to attack it. Getting
+`CDDisplay::compositor()`'s return value out of WindowServer needs root
+(`sample`, refused this session) or code inside that process. WindowServer is
+an Apple platform binary, so `DYLD_INSERT_LIBRARIES` is stripped (docs/RULES.md,
+2on) - the kext path exists for exactly this reason, and it is the only
+remaining instrument. That is a real option, not a dead end: the plugin already
+hooks `_task_set_main_thread_qos` per exec and writes bytes into a target with
+`_vm_map_write_user`, verified from the target's own memory. Pointing that at
+WindowServer to read one return value is a much smaller change than the Metal
+patcher was - but it is a kext change on the process that owns the display, so
+it is the user's call, and a mistake there is a black screen rather than a
+crashed probe.
