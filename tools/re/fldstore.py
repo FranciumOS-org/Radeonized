@@ -17,7 +17,23 @@ STORES = {
     0x89: ("mov m,r",    4, 0),   # 8 with REX.W, 2 with 0x66
     0xc6: ("mov m8,imm", 1, 1),
     0xc7: ("mov m,imm",  4, 4),   # imm is still 4 bytes with REX.W
+    # 2q3: read-modify-write forms. A BIT FLAG is never set with a `mov`, so a
+    # scanner that knows only the mov family cannot find the writer of a flags
+    # word - which is exactly what `isAcceleratorBacked` (bit 22 of +0x64) is.
+    0x80: ("grp1 m8,imm8", 1, 1),  # or/and/xor m8, imm8
+    0x81: ("grp1 m,imm32", 4, 4),  # or/and/xor m, imm32
+    0x83: ("grp1 m,imm8",  4, 1),  # or/and/xor m, sign-extended imm8
 }
+# DELIBERATELY ABSENT: the single-byte reg-to-mem forms (0x01 add, 0x09 or,
+# 0x21 and, 0x31 xor, 0xff inc/dec). They are real instructions, but as bare
+# byte values they match constantly inside __cstring and the GCC exception
+# tables, and adding them took one scan from a handful of hits to 909, nearly
+# all of them data. If you need them, restrict the scan to the code range -
+# CoreDisplay's __text ends around 0x7ff804141000, before the stubs and
+# strings - rather than passing the whole __TEXT segment.
+# 0f ba /5 = bts, /6 = btr, /7 = btc - the other way a single bit is written.
+TWOBYTE = {0xba: ("bt-group m,imm8", 4, 1), 0xab: ("bts m,r", 4, 0),
+           0xb3: ("btr m,r", 4, 0), 0xbb: ("btc m,r", 4, 0)}
 SSE = {  # (prefix, 0f, op) -> (mnemonic, width)
     (0x00, 0x11): ("movups m,x", 16),
     (0x66, 0x11): ("movupd m,x", 16),
@@ -47,6 +63,10 @@ def scan(blob, va, lo, hi):
             key = (0x66 if p66 else 0xf3 if pf3 else 0x00, blob[j+1])
             if key in SSE:
                 mn, width = SSE[key]; imm = 0; j += 1
+            elif blob[j+1] in TWOBYTE:
+                mn, width, imm = TWOBYTE[blob[j+1]]
+                if rex & 0x08: width = 8
+                j += 1
         elif op in STORES:
             mn, width, imm = STORES[op]
             if rex & 0x08: width = 8 if width == 4 else width

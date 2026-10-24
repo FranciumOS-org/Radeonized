@@ -26455,3 +26455,105 @@ later session does not discover them and mistake them for something.
    from the first run contained no CoreDisplay state at all - only a window
    list and a spindump. **An optimisation that removes the measurement is not
    an optimisation.**
+
+## 2q4 - `isAcceleratorBacked` is a DISPLAY MODE FLAG, and we already own the hook that sets it
+
+2q3 named three gates. This traces the first one to its source, and the source
+turns out to be a field this project has been writing to since 2ou.
+
+### The chain, every hop
+
+```
+IONDRVFramebuffer::getInformationForDisplayMode -> IODisplayModeInformation.flags
+   bit 22 = kDisplayModeAcceleratorBackedFlag               [Apple's own header]
+      |
+      v  IOConnectCallStructMethod(fbConnect, selector 0x11, ..., out, 0xcc)
+IOFBDriverPreflight:  desc->0x10 |= (out->0x10 & 0x400000)
+      |
+      v
+mpPriv->0xb0  bit 22
+      |
+      v  MPRebuildDevice @ 0x7ff8040eca2d
+CGXDisplayDevice->0x64  bit 22
+      |
+      v  CreateDisplayDeviceDict @ 0x7ff8040aee0b:  btl $0x16, 0x64(%r14)
+"isAcceleratorBacked" = 0
+```
+
+**`MPRebuildDevice` is a verbatim copy of one bit:**
+
+```
+movl 0xb0(%r14), %ecx        ; r14 = dev->0x160, the MPPriv
+andl $0x400000, %ecx         ; isolate bit 22
+movl $0xffbfffff, %edx
+andl 0x64(%rbx), %edx        ; clear bit 22 of the device flags
+orl  %ecx, %edx
+movl %edx, 0x64(%rbx)        ; dev->0x64 bit 22 = mpPriv->0xb0 bit 22
+```
+
+`r14` was checked rather than assumed: between `movq 0x160(%rbx), %r14` at
+`0x7ff8040ec456` and this store 1.5 KB later, every appearance of `r14` is a
+**read** (`movq %r14, %rdi`, four times). No reassignment. So r14 is the MPPriv.
+
+### Apple names the bit twice, at the same position
+
+- `/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/.../IOGraphicsTypes.h:177`
+  **`kDisplayModeAcceleratorBackedFlag = 0x00400000`** - bit 22, in a **public
+  header**, as a flag on `IODisplayModeInformation`.
+- `CreateDisplayDeviceDict` reads bit 22 of `dev->0x64` and labels it
+  **`isAcceleratorBacked`**.
+
+Two independent namings at the same bit, plus two code paths carrying it. The
+one hop NOT traced instruction-by-instruction is
+`IOFBDisplayModeDescription.info.flags` -> `mpPriv->0xb0`; it is inferred from
+the naming and from `IOFBDriverPreflight` being the only place in CoreDisplay
+that ORs `0x400000` out of a driver-returned struct. **Strong, not proven - do
+not write it down as traced.**
+
+### Measured: our mode does not set it
+
+From boot 148's state dump, the display's own mode line:
+
+```
+144 Hz [...] IOMode 0x64, IOFlags 0xf, flags 0xf  Safe Default AlwaysShow IOGraphicsDefault
+```
+
+`flags = 0xf` = Valid|Safe|Default|AlwaysShow. **Bit 22 is absent.** Our
+`IONDRVFramebuffer` never claims `kDisplayModeAcceleratorBackedFlag`, so
+CoreDisplay concludes the display is not accelerator-backed - and that is
+consistent with `numDisplayBuffers = 0`, `isBackBuffered = 0`,
+`isPageFlipped = 0` while the accelerator id is a perfectly good `0x10723`.
+
+### We already own the hook
+
+`-rbgpuvbl` (2ou) routes
+**`IONDRVFramebuffer::getInformationForDisplayMode(int, IODisplayModeInformation*)`**
+and writes `refreshRate` into that very struct. Boot 134 proved the write takes
+(`CGDisplayModeGetRefreshRate` 0 -> 144.000). The field needed is in the same
+struct, four bytes further on:
+
+```
+nominalWidth 0   nominalHeight 4   refreshRate 8   maxDepthIndex 12   flags 16
+```
+
+`flags = 16` is from the **compiler** (`offsetof`), not from counting header
+lines; `sizeof` is 36.
+
+So the experiment is `info->flags |= kDisplayModeAcceleratorBackedFlag` inside a
+hook that exists, is proven, and writes no DCN register.
+
+### What is NOT established, and the risk
+
+1. **Sufficiency is unknown.** `displayPipeIsAvailable` (`dev->0x14c`) and
+   `numDisplayBuffers` (`dev->0x48`) are separate fields with separate writers,
+   untraced. Setting bit 22 may change nothing.
+2. **It is a claim, not a capability.** This advertises that the mode is
+   accelerator-backed. If macOS then takes a path that assumes real
+   accelerator-backed scanout - page flipping into buffers that do not exist -
+   the failure mode is a black panel, not a no-op. 2pf's prohibition on page
+   flipping was measured, and this flag could be the thing that finally calls
+   `getDisplayPipeTransactionFlip`, which never fired in a whole boot. **That
+   makes it a real experiment with a real downside, not a free one**, and the
+   load is the user's call.
+3. The honest framing: this is the first lever found that is cheap, already
+   wired, and sits upstream of the actual verdict - not a proof that it works.
