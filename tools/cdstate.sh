@@ -1,0 +1,76 @@
+#!/bin/sh
+# cdstate.sh (2q1) - read mpPriv->accelerator as WINDOWSERVER sees it.
+#
+# This is the one number every remaining question about software compositing
+# turns on, and a client process CANNOT compute it: SkyLight's client-side
+# SLSAcceleratorForDisplayNumber is a different code path and answers 5127
+# while WindowServer's CDDisplay::accelerator() answers 0. That mismatch is
+# what made 2px wrong.
+#
+# CoreDisplay registers an os_state handler in CGXMappedDisplayStart,
+# UNCONDITIONALLY (verified: the call to os_state_add_handler at
+# CGXMappedDisplayStart+3698 has no guard), whose block runs
+# DumpStateForSysDiagnose() -> CreateCoreDisplayStateDictWithOptions(0x3e53b)
+# -> CreateMPPrivDict, the dict whose CFString keys named `accelerator` in the
+# first place (2py). os_state handlers are invoked by sysdiagnose and the
+# payload is written to the unified log as a state event, so the ARCHIVE IS
+# NOT NEEDED - this script reads the log.
+#
+#   1. in the boot you care about:   sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
+#      (-R -G -D skip the heavy log collection; the state dump is not in it)
+#   2. then:                         tools/cdstate.sh
+#
+# RULE 28: every line is attributed to a boot by timestamp AND pid, because
+# `log show --last boot` silently changes meaning across a reboot.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+out="logs/$(date +%Y%m%d-%H%M%S)-cdstate"
+mkdir -p "$out" || exit 1
+
+echo "== this boot"
+printf 'booted            : %s\n' "$(sysctl -n kern.boottime | sed 's/.*} //')"
+printf 'rbgpu-boot        : %s\n' "$(nvram rbgpu-boot 2>/dev/null | awk '{print $2}')"
+printf 'IOAccelerator svcs: %s   <- 0 means UNACCELERATED; any 0 below is then meaningless\n' \
+    "$(ioreg -rw0 -d1 -c IOAccelerator 2>/dev/null | grep -c '^+-o')"
+printf 'WindowServer pid  : %s\n' \
+    "$(ps -axo pid=,comm= | awk '/WindowServer$/{print $1; exit}')"
+
+echo
+echo "== CoreDisplay state events from WindowServer this boot"
+/usr/bin/log show --last boot \
+    --predicate 'eventType == "stateEvent" AND process == "WindowServer"' \
+    --style compact > "$out/stateevents.txt" 2>/dev/null
+n=$(grep -c . "$out/stateevents.txt" 2>/dev/null)
+printf 'lines: %s\n' "${n:-0}"
+
+echo
+echo "== the fields (MPPriv keys, named by Apple in CreateMPPrivDict)"
+found=0
+for f in "$out/stateevents.txt" /var/tmp/CoreDisplay_State.plist; do
+    [ -f "$f" ] || continue
+    if grep -qE '"?(accelerator|mpPriv)"?' "$f" 2>/dev/null; then
+        echo "--- $f"
+        grep -oE '"(accelerator|service|unit|aliasID|fbIndex|deviceFlags|gpuVendor)" *[:=] *[-0-9a-zA-Zx"]*' \
+            "$f" | sort | uniq -c | head -40
+        found=1
+    fi
+done
+[ -f /var/tmp/CoreDisplay_State.plist ] && \
+    cp /var/tmp/CoreDisplay_State.plist "$out/" 2>/dev/null
+
+if [ "$found" -eq 0 ]; then
+    cat <<'MSG'
+nothing yet - the handler has not been invoked in this boot.
+
+RULE 14: that is not a result. os_state handlers only run when something asks,
+and nothing has. Trigger it, in the boot you care about:
+
+    sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
+
+then re-run this script. If the narrow flags turn out to skip the state dump,
+fall back to a plain `sudo sysdiagnose` - the flags are an optimisation, not a
+requirement, and which collectors `-p/-R/-G/-D` cover was NOT verified here.
+MSG
+fi
+echo
+echo "saved: $out"
