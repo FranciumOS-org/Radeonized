@@ -724,12 +724,33 @@ The two that bite hardest:
   capability globals must be set": `CaptureSurfaceMetal::Populate` calls
   `WSGetCompositorMetal` **directly** and is not one of
   `WSGetCompositorForAccelerator`'s nine callers, so that inference is unsound
-  (2q0 retracts it). Two candidates survive: **`CDDisplay->0x158 == NULL`**,
-  which makes `CDDisplay::accelerator()` return 0 in six instructions without
-  consulting CoreDisplay at all, and **2pd's original reading** - the
-  destination is a raw CPU-mapped range, not a GPU surface, and
-  `CaptureSurfaceMetal::WorksWithCompositor(Compositor*)` shows surfaces do
-  validate compositors. Note `callxref` finds **zero** callers of
+  (2q0 retracts it). **BOTH of 2pz's surviving candidates are now DEAD and the
+  frontier is one function (2qa).** `WSGetCompositorForAccelerator` has
+  **six** paths to the software compositor and **five are closed by
+  measurement**: the mode global is 0 (the string `"Metal compositor
+  activated."` is LEA'd *inside* `activate_compositor_metal`, 48 bytes after
+  its `mode = 0` store, so boot 149's log line measures it); the capability
+  flag is 1; the debug "acceleration disabled" byte is `00` in the cache image
+  and `WSInitialize` calls `debug_set_acceleration(mode == 0)`, which inverts
+  (**so "nothing calls debug_set_acceleration normally" was wrong - it has
+  four callers**); `CGXAcceleratorForDisplayDevice` reads the MPPriv from
+  `dev->0x160`, the **same field `CreateDisplayDeviceDict` prints**, so
+  `priv.accelerator = 0x14b23` is the decision's own value; and
+  **`CDDisplay->0x158` CANNOT be NULL** - `all_displays()` has
+  `testq %rax,%rax; je` at `0x7ff807d6fc8f`, so a NULL device skips
+  construction. (Both inherited assumptions were re-checked: `dataxref` puts
+  `&CDDisplay::accelerator()` at `0x7ff840a57a20` against a vtable pointer of
+  `0x7ff840a579c0`, difference **exactly 0x60**; and `0x158` is the
+  constructor's device argument, `movq %r12, 0x170(%rbx)` with the object at
+  +0x18.) **The survivor is `CompositorMetal::new_compositor(uint)`
+  (`0x7ff807f0045e`), which returns NULL unless all of
+  `ctx->0x90/0xa8->vt[0x10]()/0x110/0x118/0x120/0x128` are non-NULL** - Metal
+  pipeline states, queues and a `SurfacePool`. `WSGetCompositorMetal` then
+  returns **NULL**, not the SW compositor, so `CDDisplay::compositor()` is
+  NULL and the software path is a **fallback**, not a choice. **It fails
+  silently** - no log string on the fail path, and 922 SkyLight lines in boot
+  149 contain no Metal/pipeline/shader failure. That is why six milestones of
+  reading flags found nothing. Note `callxref` finds **zero** callers of
   `CDDisplay::compositor()` and `WorksWithCompositor` because both are
   virtual - a limit of the instrument, not dead code. Still unanswered from
   2px: whether our display uses the **MP** or the **VFB** ops table, though
@@ -798,8 +819,14 @@ The two that bite hardest:
   `bufferSwapCount` still 0, and `fliprq_calls` still absent: advertising the
   capability did not make macOS flip. That is **exactly the partial result 2q5
   pre-stated as expected** - those fields have separate, untraced writers and
-  sufficiency was never claimed. Next target: the writers of `dev->0x14c` and
-  `dev->0x48`, untraced since 2q3. Read the compositor verdict with
+  sufficiency was never claimed. **2q9 traced both writers and 2qa then showed they do
+  not matter**: `numDisplayBuffers` is the popcount of the low two bits of
+  `IOAccelSurfaceMTL->0x13c`, a req-bits mask that starts at 0 and is only
+  ORed by `add_drawable_to_list` - so the display surface has **no buffers
+  attached** - and `displayPipeIsAvailable` is
+  `FindDisplayPipeForService(acceleratorID) & 1`. But **neither field appears
+  anywhere in `WSGetCompositorForAccelerator`**, so hooking either would have
+  repeated 2pq. Find a consumer before writing to a field. Read the compositor verdict with
   `sudo tools/compositor_check.sh`; re-read the bit after a sysdiagnose with
   `tools/cdstate.sh`.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
