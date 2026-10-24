@@ -26557,3 +26557,58 @@ hook that exists, is proven, and writes no DCN register.
    load is the user's call.
 3. The honest framing: this is the first lever found that is cheap, already
    wired, and sits upstream of the actual verdict - not a proof that it works.
+
+## 2q5 - `-rbgpufbaccel` built: claim `kDisplayModeAcceleratorBackedFlag`
+
+2q4 found the lever; this is the change. User: *"fuck it lets do it all"*.
+
+One transform, inside 2ou's existing hook on
+`IONDRVFramebuffer::getInformationForDisplayMode`:
+
+```c
+if (g_fbaccel_on) {
+    auto *fl = (uint32_t *)((uint8_t *)info + 16);   // flags, from offsetof
+    ...
+    if (*fl & kDisplayModeAcceleratorBackedFlag) g_fbaccel_had++;   // premise wrong
+    else { *fl |= kDisplayModeAcceleratorBackedFlag; g_fbaccel_set++; }
+}
+```
+
+**Rule 3 was the governing constraint.** `getInformationForDisplayMode` is
+already routed by 2ou, and a second `RouteRequest` for a routed function
+*panics the machine outright*. So this shares 2ou's route and the gate became
+`if (!g_vbl_on && !g_fbaccel_on) return;`. Verified after building: exactly
+**one** occurrence of the mangled name in the whole plugin.
+
+**The 2oz trap stayed shut deliberately.** `kDisplayModeAcceleratorBackedFlag`
+is a local `constexpr` quoting `IOGraphicsTypes.h:177`, not an `#include` of
+it. A compile-time constant cannot add an import; an include might, and an
+`IOGraphicsFamily` dependency would fail the plugin's load and take the
+accelerator with it. `grep -c IOGraphicsFamily src/plugin/Info.plist` = **0**,
+and 313 imports resolve via `IOPCIFamily` + `kpi.*` only.
+
+Build checks, all run rather than assumed: hosttest all passed; UUID moved
+(`1E3AC90E` -> `B2DE69AE` after the peer change); `flags` offset **16** from
+`offsetof` against the SDK, not from counting header lines.
+
+The four keys are **NVRAM-hot**, placed first in `kRbgpuNvramHotKeys`. That is
+not boilerplate here: this is the first display change in the project that can
+plausibly leave no usable screen, so the capture has to survive one (rule 10,
+rule 14). `fbaccel_flags0` carries the first mode's ORIGINAL flags, so
+2q4's premise - "our mode reports 0xf" - is checkable from the boot itself
+rather than trusted from a comment. `fbaccel_had` non-zero falsifies 2q4
+outright.
+
+### What the boot can say, stated before it runs
+
+- `fbaccel_set >= 1`, `fbaccel_flags0 = 0xf`, and `isAcceleratorBacked = 1` in
+  a later state dump -> the chain of 2q4 is confirmed end to end.
+- the bit takes but `numDisplayBuffers` / `displayPipeIsAvailable` stay 0 ->
+  **the expected partial result.** Those are separate untraced fields; this was
+  never claimed to be sufficient.
+- `fbaccel_had >= 1` -> 2q4's premise is wrong; the flag was already set and
+  something else zeroes the device bit.
+- `fbaccel_flags0 != 0xf` -> rule 15/28, the machine was not in the state boot
+  148 measured; nothing else in the capture means anything.
+- a blank panel -> the risk named in 2q4 materialised. `-rbgpuoff` rescues; no
+  DCN register was written, so a reboot is the whole recovery.

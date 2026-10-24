@@ -713,6 +713,16 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
+    // 2q4: THE frontier. This boot claims kDisplayModeAcceleratorBackedFlag,
+    // and it is the first display change in this project that can plausibly
+    // blank the panel rather than merely report a wrong number - so these have
+    // to survive a boot with no usable screen (rule 14, rule 10).
+    // `fbaccel_flags0` is the one the premise rests on: 2q4 measured the
+    // mode's original flags as 0xf, and if the capture says otherwise the
+    // machine was not in the state that was measured. `fbaccel_had` non-zero
+    // means the flag was ALREADY set and 2q4's premise is simply wrong.
+    "fbaccel_on", "fbaccel_set", "fbaccel_had", "fbaccel_flags0",
+    // 2pq: answered (2pr) - kept only because the keys cost nothing.
     // 2pq: the frontier, so it comes first. These seven decide whether the
     // boot answered its question, and they have to survive a boot with no
     // usable screen (rule 14, rule 10). `fbvr_orig_len` is the number the
