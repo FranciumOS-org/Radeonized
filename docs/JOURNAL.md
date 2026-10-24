@@ -26960,3 +26960,126 @@ it is a buffer count on an Apple `IOAccelSurfaceMTL` that has no buffers
 attached - which is **2pd's reading, arrived at from the other end and made
 specific.** The destination is not a GPU surface because the surface has
 nothing to draw into.
+
+## 2qa — the compositor decision is CLOSED except one function, and it fails silently
+
+Static, no boot, no root. This is the chain 2pz left with "two candidates
+survive"; both of those are now dead and the real frontier is a function
+neither of them named.
+
+### `WSGetCompositorForAccelerator`, read in full
+
+```
+mode = *0x7ff843c9ecdc
+if (mode != 0)             return (mode == 2) ? *0x7ff843c9eca0 : *0x7ff843c9eca8
+if (accelId == 0)          return *0x7ff843c9eca8          ; SW
+if (!(*0x7ff843ca08b0 & 1)) return *0x7ff843c9eca8          ; SW
+return WSGetCompositorMetal(accelId)                        ; TAIL CALL
+```
+
+**Neither `numDisplayBuffers` nor `displayPipeIsAvailable` appears anywhere in
+it** - which settles 2q9's closing caveat the unwelcome way. The two fields
+2q3 called "the real gates" are not read by the compositor decision at all.
+Had I hooked them, it would have been 2pq over again.
+
+### Six ways to reach the software compositor; five are closed BY MEASUREMENT
+
+1. **mode global != 0.** CLOSED. Writers are exactly three:
+   `WSCompositorSetDebugOptions` (2), `activate_compositor_metal` (**0**),
+   `activate_compositor_sw` (**1**). The string
+   `"Metal compositor activated."` is LEA'd at `0x7ff807c9a87b`, which is
+   **inside `activate_compositor_metal`, 48 bytes after the `mode = 0`
+   store** - so boot 149's log line *measures* mode = 0 rather than hinting at
+   it. Independently: the only writer of the byte that picks sw-vs-metal in
+   `WSCompositorActivateDefault` (`0x7ff843c9ed28`) sets it to 1 **only when
+   the Metal capability flag is 0**, and that flag is 1.
+2. **capability flag bit clear.** CLOSED (2pz: `isHeadless = 0`), and
+   corroborated by #1 - a clear flag would have produced
+   `activate_compositor_sw` and no "Metal compositor activated" line.
+3. **debug "acceleration disabled" byte `0x7ff843c9ecd8` == 1**, checked at
+   the top of `CGXGLDisplayDeviceAccelerator`. CLOSED two ways: its value in
+   the cache image is **`00`**, and `WSInitialize` calls
+   `debug_set_acceleration(mode == 0)`, which inverts, so mode 0 -> byte 0.
+   **This also corrects the record**: the claim that "nothing calls
+   `debug_set_acceleration` normally" is wrong - it has four callers,
+   including `activate_compositor_metal` and `WSInitialize`.
+4. **`!WSMetalCompositorEnabled()`** inside `CGXGLDisplayDeviceAccelerator`.
+   CLOSED - it is exactly `mode == 0 && (flag & 1)`, both established.
+5. **`CGXAcceleratorForDisplayDevice(dev,-1,&out)` returns 0.** CLOSED, and
+   this one needed a check I had not done: `CreateDisplayDeviceDict` reads the
+   MPPriv from **`movq 0x160(%r14), %r12`** at `0x7ff8040addbd` - the *same*
+   `dev->0x160` that `MPDisplayDevicePriv(dev, -1)` short-circuits to. So the
+   dump's `priv.accelerator = 0x14b23` is the very field the decision reads,
+   not a parallel copy.
+6. **`CDDisplay->0x158 == NULL`** -> `accelerator()` returns 0 in six
+   instructions. **CLOSED, and this retracts a live candidate docs/RULES.md has
+   been carrying since 2pz.** `all_displays()` builds each CDDisplay from
+   `CGXNextDisplayDevice`, and at `0x7ff807d6fc8f` there is
+   `testq %rax,%rax; je` - **a NULL device skips construction entirely.** A
+   CDDisplay that exists cannot have a NULL `0x158`.
+
+Two inherited assumptions checked rather than reused, since the whole
+elimination rests on them:
+
+- **vtable slot 0x60 really is `accelerator()`.** `allocate_shared<CDDisplay>`
+  stores the vtable pointer `0x7ff840a579c0` at `0x7ff807d78231`, and
+  `dataxref` finds `&CDDisplay::accelerator()` in exactly one slide-info slot,
+  `0x7ff840a57a20`. The difference is **0x60** exactly.
+- **`0x158` is the constructor's `CGXDisplayDevice*`.** `movq %r12, 0x170(%rbx)`
+  at `0x7ff807d78243`; allocation 0x1d0 with the object at +0x18, so
+  0x170 - 0x18 = **0x158**. (The control-block trap from the earlier attempt,
+  avoided.)
+- the inventory has **no `::accelerator()` entry at all** - its documented
+  caveat biting - so both names came from `atos` on the exact addresses.
+
+### What is left: `CompositorMetal::new_compositor(unsigned int)`
+
+`WSGetCompositorMetal(accelId)` keys a map of one Compositor per accelerator
+(`metal_compositor_map()`); on a miss it calls
+**`CompositorMetal::new_compositor(accelId)`** (`0x7ff807f0045e`) and, if that
+returns NULL, **returns NULL** - not the SW compositor. Its last gate:
+
+```
+if (!ctx->0x110 || !ctx->0x118 || !ctx->0x120 || !ctx->0x128)  goto fail
+if (!ctx->0xa8->vt[0x10]())                                    goto fail
+if (!ctx->0x90)                                                goto fail
+r14 = operator new(0x20)          ; CompositorMetal is a 0x20-byte wrapper
+r14->0x00 = vtable 0x7ff840a64218
+r14->0x10 = ctx
+r14->0x18 = accelId
+fail: destroy ctx; return NULL    ; 0x7ff807f01073 -> xorl %r14d,%r14d
+```
+
+The function builds a `MetalContext` and a `SurfacePool` (its strings:
+`SurfacePool.mm`, `_context != nullptr && _context->Device() != nil`) and two
+dispatch queues, `com.apple.SkyLight.mtl_submit` and
+`com.apple.SkyLight.mtl_completion`. **Any one of those six fields NULL and
+the desktop composites in software.** They are Metal objects - pipeline
+states, queues, the surface pool - exactly the class of thing that fails on a
+GPU Apple's driver only half-supports.
+
+**And it fails silently.** There is no log string on the fail path, and the
+boot log agrees: 922 SkyLight lines this boot (the control that the predicate
+works) and not one Metal, pipeline, shader or library failure in WindowServer.
+That is why six milestones of looking at *flags* found nothing - the thing
+that fails does not report.
+
+### So the compositor is NULL, not CompositorSW
+
+Worth stating plainly, because it reframes 2pd: on this reading
+`CDDisplay::compositor()` returns **NULL**, and whatever `render_update`'s
+caller does with a NULL compositor is what produces the software path. That
+is consistent with 2q2's bounded negative - nothing in `UpdateDisplays`
+writes the `Compositor*` slot - and it means the fallback, not the choice, is
+what 2pz sampled.
+
+### Next, and the risk
+
+The one instrument that would settle which field is NULL is an **oracle in
+userspace**, the way `accelport` was for 2py. `CompositorMetal::new_compositor`
+is **not exported** (dlsym finds `CGXAcceleratorForDisplayDevice` and
+`CGXNextDisplayDevice` but none of the SkyLight compositor symbols), so it
+would have to be called at `unslid + measured slide`. That is calling internal
+unexported C++ with a hand-built ABI: worst case it crashes the probe process,
+which costs nothing, but a success in our process would not prove WindowServer
+behaves the same. State that limit before running it, not after.
