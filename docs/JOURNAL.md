@@ -27433,3 +27433,106 @@ different purpose. The candidates are a caller of `UpdateDisplays`, or a
 callee writing through a stashed pointer, and separating them wants the
 **caller** side: `WS::Updater::UpdateDisplays` is itself called from
 somewhere, and that is a smaller function to read than this 34 KB one.
+
+## 2qe — ANSWERED: the Update constructor. And the contradiction is now explicit.
+
+Static, no boot, no sudo. 2qd asked who hands `UpdateDisplays` its
+`Compositor*`.
+
+### The answer, and 2q2 was right twice over
+
+`WS::Displays::Update::Update(CGSRegionObject*, ..., shared_ptr<WS::Displays::Display>, unsigned long long, float)`
+at `0x7ff807ee5902`:
+
+```
+7ff807ee5aba:  callq *0x4b0(%rax)        ; display->compositor()
+7ff807ee5ac0:  movq  %rax, 0x1c0(%rbx)   ; Update->0x1c0 = the compositor
+```
+
+The `Update` lives at **`-0x510(%rbp)`** in `UpdateDisplays` (its address is
+taken ~50 times and passed to callees as rdi/rsi/rdx/r8/r9/r12/rbx/r15), and
+
+> **-0x510 + 0x1c0 = -0x350.**
+
+So the slot 2q2 found with zero stores is `Update+0x1c0`, and the store that
+fills it is **inside the constructor, off `%rbx`** - which is exactly why no
+rbp-relative store exists anywhere in `UpdateDisplays`. 2q2's measurement was
+right, and so was the conclusion it drew: nothing in that function produces
+the compositor. 2qb's "correction" was wrong, and 2qd retracted it; this
+explains *why* 2q2's negative was true.
+
+The object is a `CDDisplay`, established two ways rather than assumed:
+`WS::Displays::CDDisplay::compositor() const` is the **only** `compositor()`
+in SkyLight's 13 069-function inventory, and `dataxref` finds its address in
+**exactly one** slide-info slot in the entire cache - CDDisplay's own vtable,
+at offset 0x4b0.
+
+### Which puts us back on 2qa's chain, and forces `accelId == 0`
+
+`CDDisplay::compositor()` does not cache: `movq (%rdi),%rax; callq *0x60(%rax);
+movl %eax,%edi; jmp WSGetCompositorForAccelerator`. It is recomputed for every
+Update, so the *current* accelerator id governs. With 2qd's two measurements
+inside WindowServer - **mode = 0** (only `'Metal compositor activated.'` in the
+boot log, never `'Software compositor activated.'`) and **capability flag = 1**
+(a live `CompositorMetal` through `CaptureSurfaceMetal::Populate`, which
+`WSGetCompositorMetal` refuses unless the flag is 1) - and a **real SW
+compositor object** in the sample, the only path left is `accelId == 0`.
+
+### Five closures, re-verified by reading rather than inheriting
+
+1. **`WSMetalCompositorEnabled`** - read it myself this time:
+   `cmpl $0, [mode]; jne -> return 0`, else `dispatch_once(0x7ff843ca08b8)`,
+   `al = [flag]`, `andb $1`. Exactly `mode == 0 && (flag & 1)`. Holds.
+2. **`CDDisplay->0x158` cannot be NULL.** *Both* construction sites null-check
+   the device before `allocate_shared<CDDisplay>`: `all_displays()` at
+   `0x7ff807d6fc8f` and `head_mounted_displays()` at `0x7ff807d70ff5`, each
+   `testl %eax,%eax; je` past the construction. 2qa checked only the first.
+3. **The MP ops table is confirmed, base `0x7ff8404fc700`**, three entries by
+   `dataxref`: `MPServiceForDisplayDevice` at +**0x140**,
+   `MPAcceleratorForDisplayDevice` at +**0x148**,
+   `MPFramebufferForDisplayDevice` at +**0x150** - matching 2qc's thunk table
+   exactly. So for an MP device `ops->0x148` really is the accelerator op, and
+   `*out = dev->0x160->0x5c`.
+4. **There is only ONE device.** The boot-149 state block contains exactly one
+   device dict, with `accelerator = 0x14b23`. No second device with id 0.
+5. **The debug byte is 0** - `00` in the cache image, and `WSInitialize` calls
+   `debug_set_acceleration(mode == 0)`, which inverts.
+
+### So this is a flat contradiction, and static analysis is out of moves
+
+Every link in the chain reads non-zero, and the sampled outcome requires a
+zero. One of these measurements therefore describes a **different moment or a
+different object** than the decision does, and nothing I can read off the cache
+separates those two possibilities. The remaining degree of freedom is time: the
+`os_state` dump is one instant (15:32:09) while an `Update` is constructed
+every frame, and `mpPriv->accelerator` is written from `fb->0x18` inside a
+**`dispatch_once`** (2py) - once, and late. But `compositor()` recomputes per
+Update, so a stale early value cannot persist on its own; something would have
+to cache the choice, and nothing in the three functions read does.
+
+Recording it as a contradiction rather than resolving it by picking a favourite
+is the honest state. It is also the strongest position this line has been in:
+the chain is fully identified, five of six branches are closed by code or by
+measurement, and the one remaining value is a single `unsigned int` in one
+process.
+
+### What it would take, with the SIP facts measured first
+
+`csr-active-config` is **0xA43**, which decodes as UNTRUSTED_KEXTS(0x1) +
+UNRESTRICTED_FS(0x2) + UNRESTRICTED_NVRAM(0x40) + UNAPPROVED_KEXTS(0x200) +
+UNAUTHENTICATED_ROOT(0x800). **`CSR_ALLOW_UNRESTRICTED_DTRACE` (0x20) is
+clear**, so DTrace's pid provider on an Apple binary is unavailable - which
+would otherwise have been the ideal instrument, tracing
+`CGXGLDisplayDeviceAccelerator`'s return in WindowServer without stopping it.
+Do not spend a round trip proposing it. `CSR_ALLOW_TASK_FOR_PID` (0x4) is also
+clear, but root task access evidently works, since `sample` succeeded in 2qd.
+
+That leaves two, both the user's call:
+
+- **a one-shot `lldb -p 162 -b` batch read** of `[0x7ff843c9ecdc]`,
+  `[0x7ff843ca08b0]`, `[0x7ff843c9ecd8]` and the device's `0x160->0x5c`, then
+  `detach`. Cheap and read-only, **but it stops WindowServer while attached**,
+  so the desktop freezes for the duration and a wedged debugger means a hard
+  reboot.
+- **the kext**, reading the value from inside the process that owns the
+  display. Larger, and a mistake there is a black screen.
