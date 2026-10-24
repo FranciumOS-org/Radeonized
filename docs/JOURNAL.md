@@ -26288,3 +26288,60 @@ boot is the alternative that changes no configuration.
 
 Note the boot: 146 is **unaccelerated**, so this only establishes that the
 notification alone is not enough. It says nothing about an armed boot.
+
+## 2q2 - a bounded negative: nothing in `UpdateDisplays` writes the compositor slot
+
+While waiting on a state dump, candidate 2 was approached from the other end:
+`CDDisplay::render_update(Update&, Compositor*, uint, WSCompositeSourceLayer*)`
+takes the compositor **as an argument** (2pw), so whatever `UpdateDisplays`
+passes is the decision. 2pw found the call site - `movq -0xa00(%rbp), %rdx` at
+`0x7ff807e337e3` - and 2pw's linear sweep desynced before reaching the store
+that fills it. That store is now traced, and the result is a clean negative.
+
+`-0xa00(%rbp)` is loaded from `-0x350(%rbp)` at `0x7ff807e32dcd`. So
+`-0x350(%rbp)` holds the `Compositor*`. **Nothing in the function writes it**,
+established three independent ways, each with its instrument controlled:
+
+1. **Exact displacement.** The 4-byte pattern for `-0x350` occurs **once** in
+   the whole function, in `48 8b 8d b0 fc ff ff` - the load. A displacement
+   that is never encoded cannot be stored to.
+2. **Coverage.** Every rbp-relative disp32 in `[-0x390, -0x350]` was decoded
+   with its width: the widest store near the slot is
+   `movaps %xmm0, -0x370(%rbp)`, which ends at `-0x361`. Nothing reaches
+   `-0x350`. (Two of the raw matches were false positives -
+   `0f 85 a1 fc ff ff` is a `jne`, not a memory operand - which is why the
+   modrm has to be decoded rather than pattern-matched.)
+3. **The other base register.** This is the encoding the first two scans would
+   have missed. The prologue is five pushes plus `subq $0xd28`, so
+   `rsp = rbp - 0xd50` and the same slot is **`0xa00(%rsp)`**. Scanning for
+   `mod=10, rm=100, SIB=0x24, disp32=0xa00` finds **zero** accesses - and the
+   scanner is not broken, because run across the whole frame it finds three
+   rsp-relative stores (`0xe8`, `0x100`, `0x130`, the outgoing-argument area).
+   **A large-frame function addresses the same slot two ways; a scan for one
+   of them proves nothing about the other.**
+
+So the pointer is written by a callee through a pointer, or the slot is shared
+with another live range. The one `leaq -0x3??(%rbp)` whose struct could put a
+field at `-0x350` is `leaq -0x3e0(%rbp), %rdi` at `0x7ff807e3550d` - and it is
+immediately followed by `leaq <global>, %rsi; movl $0x100, %edx; call`, with a
+second identical pair at `-0x2e0`. Those are **256-byte stack string buffers**
+being filled from 256-byte globals (`0x7ff843ca0d58`, `0x7ff843ca0e58`, exactly
+0x100 apart) - the watchdog-triage string path. `-0x3e0 + 0x90 = -0x350` is
+**stack-slot reuse across disjoint live ranges**, not the writer.
+
+**That is where this line stops, and the stopping is the finding.** Tracing a
+value by hand through a 33 KB function whose frame slots are reused is the
+wrong instrument; three scans and a false lead is the cost of learning it on
+this function rather than on the next one. What the three scans do establish is
+real and reusable: the compositor is **not** handed to `render_update` by a
+store anywhere in `UpdateDisplays`, so the simple picture - "`CDDisplay::compositor()`
+returns it and `UpdateDisplays` passes it straight through" - is not what the
+code does.
+
+Also recorded, since it cost a run: **`sysdiagnose -f` refuses a directory that
+does not exist** ("Specified invalid base directory"), and **`/tmp` is cleared
+on reboot**, which lost one run outright. `tools/cdstate.sh` now creates
+`~/rbgpu-sd` itself. Its first section earned its keep immediately: it printed
+`IOAccelerator svcs: 0` and caught that the machine had rebooted into an
+unaccelerated boot between the command being issued and the result being read -
+rule 28, by instrument rather than by luck.
