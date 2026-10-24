@@ -26155,3 +26155,136 @@ blind to them. That is a limit of the instrument, not evidence of dead code.
   so only the low byte is defined - it printed 257), `SLDisplayUsesOpenGLAcceleration`
   and `SLSDisplayCopyCurrentMetalDevice`, each one's arity read from its
   disassembly before it was called.
+
+## 2q1 - one candidate killed, the inverted flag, and the plist that holds the answer
+
+### `CDDisplay->0x158` cannot be NULL - candidate 1 is dead
+
+`CDDisplay::accelerator()` returns 0 in six instructions when `this->0x158` is
+NULL, without consulting CoreDisplay at all, so that pointer was one of the two
+surviving candidates (2q0). It is settled, statically.
+
+`fldstore` on SkyLight for `[0x158,0x160)` points at
+`allocate_shared<WS::Displays::CDDisplay>` (`0x7ff807d78127`), and there the
+store at `0x158(%rbx)` is `$0x3f800000` - the float **1.0**, not a pointer.
+That is the libc++ control-block trap: `leaq 0x18(%rbx), %r15` shows the object
+begins at control-block **+0x18**, the allocation is `0x1d0` bytes so
+`sizeof(CDDisplay)` is `0x1b8`, and the store that really lands on the object's
+`+0x158` is one line further on:
+
+```
+movq %r12, 0x170(%rbx)        ; object+0x158 = r12 = arg2
+```
+
+`r12 = rsi`, the constructor's second argument. And the only two callers are
+`CoreDisplayManager::all_displays()` and `head_mounted_displays()`, where:
+
+```
+xorl  %edi, %edi
+callq 0x7ff807f6a69e        ; fetch the display device
+testq %rax, %rax
+je    <skip>                ; NULL -> no CDDisplay is constructed at all
+movq  %rax, %r14
+...
+movq  %r14, %rsi            ; -> object+0x158
+callq allocate_shared<CDDisplay>
+```
+
+The pointer is **null-checked before construction**, so a `CDDisplay` that
+exists necessarily has a non-NULL `+0x158`. We have a display, therefore
+`accelerator()` does not take the early return.
+
+**Offset arithmetic against a `shared_ptr` must account for the control block.**
+Had I stopped at the first `0x158` store I would have reported a float as the
+device pointer.
+
+### `debug_set_acceleration(bool)` INVERTS its argument
+
+A moment of alarm worth recording, because it resolved the right way only
+because the function got read instead of assumed.
+`activate_compositor_metal(bool force)` begins:
+
+```
+testl %edi, %edi
+je    skip
+movl  $0x1, %edi
+callq debug_set_acceleration          ; <- with TRUE
+skip:
+movl  $0x0, [0x7ff843c9ecdc]          ; compositor mode = Metal
+... logs "Metal compositor activated."
+```
+
+and `*0x7ff843c9ecd8 == 1` is exactly what makes
+`CGXGLDisplayDeviceAccelerator` return 0 unconditionally. So *activating the
+Metal compositor appeared to set the byte that disables acceleration.* It does
+not:
+
+```
+debug_set_acceleration(bool x):
+    movl %ebx, %eax
+    xorb $0x1, %al                    ; <<< INVERTED
+    movb %al, [0x7ff843c9ecd8]
+```
+
+The byte means "acceleration **disabled**". `debug_set_acceleration(true)`
+clears it; `activate_compositor_sw` sets it, which is coherent - a software
+compositor forces every display's accelerator to 0. The global's sense is the
+opposite of its address's neighbour, and nothing but the two instructions says
+so.
+
+Also confirmed by reading rather than quoting: `WSMetalCompositorEnabled` is
+`mode == 0 && (capabilityFlag & 1)`, exactly as 2pu described, with the
+capability read behind a `dispatch_once` guard at `0x7ff843ca08b8`.
+
+### The VFB path delegates, so the MP work holds either way
+
+2px asked whether our display uses the MP or the VFB ops table and treated the
+answer as load-bearing. It is less load-bearing than it looked.
+`VFBAcceleratorForDisplayDevice` (`0x7ff804080a4e`) has the same shape as the MP
+one - `dev->0x160` is a **`VFBPriv`** with `+0x00 next`, `+0x50 unit`,
+`+0x54 aliasID`, `+0x58 fbIndex`, `+0x60 accelerator` - but when the local
+accelerator is 0 and `which < 0` it does not return 0. It **delegates**:
+
+```
+r15 = dev->0x10->0x118                 ; the backing display number
+rax = <look up that display device>
+if (!rax) return 0
+r8 = (rax->0x8)->0x148                 ; the REAL device's AcceleratorForDisplayDevice
+jmp *r8                                ; tail-call it
+```
+
+So a virtual framebuffer forwards the query to the hardware device's own ops
+table, and the MP analysis of 2px/2py/2pz applies whichever table the display
+sits on. Supporting, not conclusive: `SLSCopyDisplayInfoDictionary` reports
+`kCGDisplayIsVirtualDevice = 0`.
+
+### The designed way to read the field - and its gate
+
+CoreDisplay has an introspection path that prints exactly what is wanted.
+`CoreDisplay::CreateCoreDisplayStateDictWithOptions(unsigned int)` embeds
+`CreateMPPrivDict` (2py: the dict whose keys named `accelerator` in the first
+place) at +25162 and +25640, so the state dict carries **`accelerator` as
+WindowServer itself sees it** - the one number every remaining question turns
+on, and the one a client process cannot compute (the trap that made 2px wrong).
+
+Two triggers exist:
+
+- notification **`com.apple.CoreDisplay.DumpState`**, whose handler
+  (`RegisterForDumpState()`'s block at `0x7ff804058877`) builds the dict, logs
+  `DataDump - DumpState`, and writes **`/var/tmp/CoreDisplay_State.plist`**.
+  Verified read-only before posting it: it reads state, calls the logger, and
+  writes that path - nothing else.
+- `CoreDisplay::DumpStateForSysDiagnose()` (`0x7ff804059152`), which builds the
+  same dict with options **`0x3e53b`**.
+
+**Posting the notification on boot 146 produced no file and no log line**, at
+`--debug --info`. So the registration is gated. The gate is a preference
+domain: `com.apple.CoreDisplay` with keys `enableDataDump`, `dataDumpOptions`
+and `dataDumpFrameCount` (strings at `0x7ff8041526e9`...), and
+`defaults read com.apple.CoreDisplay` reports **the domain does not exist** on
+this machine. Enabling it is a persistent configuration change plus a
+WindowServer restart, so it is the user's call; `sudo sysdiagnose` in an armed
+boot is the alternative that changes no configuration.
+
+Note the boot: 146 is **unaccelerated**, so this only establishes that the
+notification alone is not enough. It says nothing about an armed boot.
