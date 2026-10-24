@@ -17,11 +17,17 @@
 # NOT NEEDED - this script reads the log.
 #
 #   1. in the boot you care about:
-#        sudo sysdiagnose -u -b -Q -R -G -D -n -f ~/rbgpu-sd
-#      (-R -G -D skip the heavy log collection; the state dump is not in it.
-#       `-f` refuses a directory that does not exist - "Specified invalid base
-#       directory" - so this script creates it for you. NOT /tmp: that is
-#       cleared on reboot, and one run was already lost that way.)
+#        sudo sysdiagnose -u -b -n -f ~/rbgpu-sd
+#
+#      DO NOT add -R -G -D. One run was spent learning why: sysdiagnose invokes
+#      os_state handlers as part of collecting the LOG ARCHIVE, and `-R` means
+#      "do not collect log archive", so the handler was never called and the
+#      27 MB archive contained no CoreDisplay state at all. The flags were an
+#      optimisation that removed the one thing being measured.
+#
+#      `-f` also refuses a directory that does not exist ("Specified invalid
+#      base directory"), so this script creates it. NOT /tmp: cleared on
+#      reboot, and a run was lost that way too.
 #   2. then:                         tools/cdstate.sh
 #
 # RULE 28: every line is attributed to a boot by timestamp AND pid, because
@@ -51,6 +57,18 @@ n=$(grep -c . "$out/stateevents.txt" 2>/dev/null)
 printf 'lines: %s\n' "${n:-0}"
 
 echo
+echo "== sysdiagnose log archives found (the dump lands HERE, not in the live log)"
+for a in "$HOME"/rbgpu-sd/sysdiagnose_*/system_logs.logarchive; do
+    [ -d "$a" ] || continue
+    printf -- '--- %s\n' "$a"
+    /usr/bin/log show --archive "$a" \
+        --predicate 'eventType == "stateEvent" AND process == "WindowServer"' \
+        --style compact >> "$out/stateevents.txt" 2>/dev/null
+    printf '    cumulative state-event lines: %s\n' \
+        "$(grep -c . "$out/stateevents.txt" 2>/dev/null)"
+done
+
+echo
 echo "== the fields (MPPriv keys, named by Apple in CreateMPPrivDict)"
 found=0
 for f in "$out/stateevents.txt" /var/tmp/CoreDisplay_State.plist \
@@ -73,12 +91,11 @@ nothing yet - the handler has not been invoked in this boot.
 RULE 14: that is not a result. os_state handlers only run when something asks,
 and nothing has. Trigger it, in the boot you care about:
 
-    sudo sysdiagnose -u -b -Q -R -G -D -n -f ~/rbgpu-sd
+    sudo sysdiagnose -u -b -n -f ~/rbgpu-sd
 
-then re-run this script. (The directory already exists - this script made it.
-Not /tmp: it is cleared on reboot and a run was lost that way.) If the narrow flags turn out to skip the state dump,
-fall back to a plain `sudo sysdiagnose` - the flags are an optimisation, not a
-requirement, and which collectors `-p/-R/-G/-D` cover was NOT verified here.
+then re-run this script. The directory already exists - this script made it.
+DO NOT add -R: it skips the log-archive collection, which is the step that
+invokes os_state handlers, so the dump never happens. That cost one run.
 MSG
 fi
 echo
