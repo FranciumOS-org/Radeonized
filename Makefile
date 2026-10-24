@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -176,6 +176,15 @@ $(OUT)/vramtest: tools/vramtest.m | $(OUT)
 # number is 0 for an unrelated reason.
 accelport: $(OUT)/accelport
 $(OUT)/accelport: tools/accelport.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
+	      -framework IOKit
+
+# skyshaders (2qb): the ORACLE for 2qa's survivor - can this GPU build the
+# things CompositorMetal::new_compositor needs?  Public Metal APIs only, on
+# the selectors and CFStrings decoded from that function's own slide-info
+# slots.  A failure is the answer; a success does NOT clear WindowServer.
+skyshaders: $(OUT)/skyshaders
+$(OUT)/skyshaders: tools/skyshaders.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
 	      -framework IOKit
 
