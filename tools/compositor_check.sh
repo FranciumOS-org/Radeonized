@@ -1,0 +1,81 @@
+#!/bin/sh
+# compositor_check.sh (2pz) - WHY is the desktop compositing in software?
+#
+#   sudo tools/compositor_check.sh      # sudo only for `sample WindowServer`
+#
+# 2px/2py mapped the whole decision and 2pz measured that the test it named
+# does NOT fire: our display's accelerator id is 5127, not 0, and
+# SLSDisplayCopyCurrentMetalDevice hands back our 680M. So the gate is
+# somewhere else and the live stack is the only thing that can say where.
+#
+# RULE 14: every section says something, including "not present".
+# RULE 26: the preconditions are printed FIRST, because every number below is
+# meaningless on a boot with no accelerator (2py measured exactly that).
+set -u
+cd "$(dirname "$0")/.." || exit 1
+out="logs/$(date +%Y%m%d-%H%M%S)-compositor"
+mkdir -p "$out" || exit 1
+echo "writing to $out"
+
+say() { printf '\n== %s\n' "$1"; }
+
+{
+say "preconditions (rule 26)"
+printf 'IOAccelerator services : %s\n' \
+    "$(ioreg -rw0 -c IOAccelerator 2>/dev/null | grep -c '+-o')"
+printf 'accelerator started    : %s\n' \
+    "$(ioreg -w0 2>/dev/null | grep -c 'AMDRadeonX6800_AMDRadeonHWLibsX6800.*registered, matched')"
+printf 'plugin loaded          : %s\n' \
+    "$(kmutil showloaded --list-only 2>/dev/null | grep -c com.rembrandtgpu.plugin)"
+printf 'rbgpu-boot             : %s\n' \
+    "$(nvram rbgpu-boot 2>/dev/null | awk '{print $2}')"
+
+say "the accelerator id (2py oracle)"
+if [ -x build/out/accelport ]; then build/out/accelport; else
+    echo "build/out/accelport missing - run: make accelport"; fi
+
+say "what SkyLight says about THIS display"
+if [ -x build/out/slquery ]; then build/out/slquery; else
+    echo "build/out/slquery missing - run: make slquery"; fi
+
+say "the frame clock"
+if [ -x build/out/dispclk ]; then build/out/dispclk 2>&1 | tail -6; else
+    echo "build/out/dispclk missing - run: make dispclk"; fi
+
+say "flip counters (0/0 = no page flip is happening; 2pf/2pr)"
+ioreg -l -w0 2>/dev/null \
+  | grep -oE '(bufferFlipCount|bufferSwapCount)"=[0-9]*' | sort -u \
+  || echo "(no flip counters present)"
+printf 'IOAccelDisplayPipeUserClient2 nodes: %s\n' \
+    "$(ioreg -rw0 -c IOAccelDisplayPipeUserClient2 2>/dev/null | grep -c '+-o')"
+
+say "WindowServer CPU burn - software compositing pegs a core"
+ws=$(ps -axo pid=,comm= | awk '/WindowServer$/{print $1; exit}')
+if [ -z "$ws" ]; then
+    echo "WindowServer not found"
+else
+    printf 'pid %s  elapsed/cpu/%%cpu: %s\n' "$ws" "$(ps -o etime=,time=,%cpu= -p "$ws")"
+    a=$(ps -o time= -p "$ws"); /usr/bin/python3 -c 'import time;time.sleep(4)'
+    b=$(ps -o time= -p "$ws")
+    printf 'cpu time %s -> %s over 4 s of wall clock\n' "$a" "$b"
+
+    say "the live stack - which compositor, and who called it"
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "NOT ROOT: skipped. Re-run as: sudo tools/compositor_check.sh"
+    else
+        sample "$ws" 5 -file "$out/ws-sample.txt" >/dev/null 2>&1
+        n=$(grep -cE 'CompositeLayersToDestination' "$out/ws-sample.txt" 2>/dev/null)
+        printf 'CompositeLayersToDestination frames : %s\n' "${n:-0}"
+        printf 'CompositorSW  mentions              : %s\n' \
+            "$(grep -c CompositorSW "$out/ws-sample.txt" 2>/dev/null)"
+        printf 'CompositorMetal mentions            : %s\n' \
+            "$(grep -c CompositorMetal "$out/ws-sample.txt" 2>/dev/null)"
+        echo "--- heaviest main-thread frames ---"
+        sed -n '/Thread_.*DispatchQueue_1/,/^$/p' "$out/ws-sample.txt" \
+            | grep -E '^ +[0-9]+ ' | head -40
+        echo "(full sample in $out/ws-sample.txt)"
+    fi
+fi
+} 2>&1 | tee "$out/compositor.txt"
+echo
+echo "saved: $out/compositor.txt"
