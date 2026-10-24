@@ -26612,3 +26612,60 @@ outright.
   148 measured; nothing else in the capture means anything.
 - a blank panel -> the risk named in 2q4 materialised. `-rbgpuoff` rescues; no
   DCN register was written, so a reboot is the whole recovery.
+
+## 2q6 - boot 149: the hook ran, no black panel, and `fbaccel_flags0` corrects 2q4
+
+Boot 149, armed (`rbgpu-boot` 149), loaded UUID `B2DE69AE` matching
+`build/out` exactly, accelerator up (1 `IOAccelerator` service),
+`-rbgpufbaccel` present in the live boot-args. User: *"im in no black pan"*.
+
+```
+fbaccel_on      = 1
+fbaccel_set     = 3          ; the bit was added to 3 modes
+fbaccel_had     = absent     ; it was NEVER already set at this layer
+fbaccel_flags0  = 0          ; <<< NOT 0xf
+```
+
+### The risk did not materialise
+
+No blank panel. Pacing unchanged - `dispclk` 134.20 Hz against boot 148's
+134.51 - so claiming the flag cost nothing in the one place a regression would
+have shown first. `bufferFlipCount` and `bufferSwapCount` are **still 0**, so
+2pf's measurement stands: nothing started page-flipping. `isAcc=YES` in the
+CoreDisplay log, the same as boot 148 - that field was never the one.
+
+### CORRECTION to 2q4: the mode's flags are 0, not 0xf
+
+2q4 wrote "**MEASURED: our mode reports `flags = 0xf`**" on the strength of the
+state dump's rendered mode line:
+
+```
+144 Hz [...] IOMode 0x64, IOFlags 0xf, flags 0xf  Safe Default AlwaysShow IOGraphicsDefault
+```
+
+`fbaccel_flags0` says the value `IONDRVFramebuffer::getInformationForDisplayMode`
+actually hands out is **0**. Both readings are real; they are **different
+layers**. 0xf is CoreDisplay's view after its own processing has added
+Valid|Safe|Default|AlwaysShow; the driver itself reports nothing. 2q4 quoted a
+post-processed number and called it the driver's.
+
+That key existed for exactly this - "if it is not `0xf` the machine was not in
+the state 2q4 measured" - and the answer is the third option neither branch
+anticipated: **the premise was describing the wrong layer, not the wrong
+machine.** Bit 22 is absent in both readings, so the change itself is still the
+right one; the sentence justifying it was wrong.
+
+### And it opens a real doubt about the mechanism
+
+If flags are 0 at our layer and 0xf by the time CoreDisplay prints them,
+something downstream **writes** that field rather than only reading it - and
+`fbaccel_set = 3` proves only that we wrote the bit, never that it survived.
+Worse, 2q4's own trace says `IOFBDriverPreflight` ORs bit 22 out of the reply
+to user-client **selector 0x11**, which is not obviously the same path as
+`getInformationForDisplayMode`. There are now known to be at least two layers
+carrying this field with different values, so **do not assume our write reaches
+`mpPriv->0xb0`.**
+
+The verdict is `isAcceleratorBacked` in a fresh `os_state` dump, and nothing
+short of it decides this. Everything else measured here is consistent with both
+outcomes.
