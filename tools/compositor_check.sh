@@ -118,6 +118,57 @@ else
             "$out/ws-sample.txt" | sed 's/^ *[+!:|-]*  *//' \
             | grep -vE '^--$' | cut -c1-120 | head -30
         echo "(full sample in $out/ws-sample.txt)"
+
+        # 2qd: THE question 2qa and 2qb left, pre-stated before reading.
+        #
+        # `CDDisplay::compositor()` -> `WSGetCompositorForAccelerator` can
+        # return (a) the SW compositor object or (b) NULL, because
+        # WSGetCompositorMetal returns NULL - not the SW object - when
+        # CompositorMetal::new_compositor fails. 2qa closed five of the six
+        # SW branches by measurement, which predicts (b). 2qb found that
+        # UpdateDisplays `testq/je`s on NULL, so (b) is a handled case.
+        #
+        #   render_update present AND a Compositor method beneath it
+        #     -> the compositor is the SW OBJECT, non-NULL. 2qa's NULL
+        #        reading is WRONG and one of its five closures must re-open.
+        #   render_update present with NO Compositor method beneath it
+        #     -> NULL, and 2qa is confirmed.
+        #   render_update absent from the sample
+        #     -> says nothing either way (the display may simply be idle);
+        #        re-run while the screen is changing.
+        echo "--- 2qd: the subtree under CDDisplay::render_update ---"
+        awk '
+          /render_update/ { ind = match($0, /[0-9]/); shown = 1; depth = 0;
+                            print "  " substr($0, 1, 150); next }
+          shown {
+            i = match($0, /[0-9]/)
+            if (i > ind) { print "  " substr($0, 1, 150); depth++;
+                           if (depth > 14) shown = 0 }
+            else shown = 0
+          }
+        ' "$out/ws-sample.txt" | head -40
+        ru=$(grep -c 'render_update' "$out/ws-sample.txt" 2>/dev/null)
+        cm=$(grep -cE 'Compositor(SW|Metal)::CompositeLayersToDestination' \
+             "$out/ws-sample.txt" 2>/dev/null)
+        echo "--- 2qd verdict ---"
+        printf 'render_update frames                : %s\n' "${ru:-0}"
+        printf 'Compositor*::CompositeLayers frames : %s\n' "${cm:-0}"
+        if [ "${ru:-0}" -eq 0 ]; then
+            echo "INCONCLUSIVE: render_update never sampled - the display may"
+            echo "have been idle. Re-run with the screen actually changing."
+        elif [ "${cm:-0}" -gt 0 ]; then
+            echo "The compositor is a REAL OBJECT, not NULL: render_update is"
+            echo "calling a Compositor method. 2qa predicted NULL, so one of"
+            echo "its five closed branches has to be re-opened."
+        else
+            echo "render_update runs but calls NO Compositor method, which is"
+            echo "what a NULL compositor looks like - 2qa's prediction."
+        fi
+        # new_compositor runs once per accelerator, so absence here is not
+        # evidence; presence would be a direct sighting of the frontier.
+        printf 'new_compositor / WSGetCompositorMetal sightings: %s\n' \
+            "$(grep -cE 'new_compositor|WSGetCompositorMetal' \
+               "$out/ws-sample.txt" 2>/dev/null)"
     fi
 fi
 } 2>&1 | tee "$out/compositor.txt"
