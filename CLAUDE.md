@@ -765,14 +765,16 @@ The two that bite hardest:
   builds; 8 build and nothing returns an NSError. `new_compositor` also
   special-cases `@"Intel"` and `@"NVIDIA"` by `rangeOfString:` on the device
   name; ours is neither.
-  **CORRECTION to 2q2 (2qb): it searched the wrong stack slot.** The
-  `Compositor*` `render_update` receives is loaded at `0x7ff807e337e3` from
-  **`-0xa00(%rbp)`**, not `-0x350(%rbp)`, so 2q2's negative was sound about a
-  slot the call site never reads and "nothing in `UpdateDisplays` writes the
-  compositor slot" does not follow. `UpdateDisplays` **does** call
-  `compositor()`, at three sites, two of which `testq/je` on NULL and then read
-  `compositor->0x10` - the MetalContext field 2qa found - so **a NULL
-  compositor is an expected, handled case.**
+  **2qb "corrected" 2q2 here and was WRONG; 2qd retracts it.** `-0xa00(%rbp)`
+  is a **copy** of `-0x350(%rbp)` (`movq -0x350(%rbp),%rcx` /
+  `movq %rcx,-0xa00(%rbp)` at `0x7ff807e32dbf`), the very slot 2q2 searched -
+  and a re-run with the newer instrument confirms **0 stores, 1 load, address
+  never taken**. 2q2 was right on the measurement and right to stop. What its
+  negative means is now clear: **nothing in `UpdateDisplays` produces that
+  `Compositor*`** - it arrives from outside, or through a pointer the frame
+  stashes elsewhere. `UpdateDisplays` does call `compositor()` at three sites,
+  but their results go to `%r14`/`%rbx` for `->0x10`, the MetalContext - a
+  different purpose.
   **`callxref` finding zero callers of `CDDisplay::compositor()` was a missing
   instrument, and 2qb built it:** `tools/re/vcall.py` lists every
   `call *slot(%reg)`, which neither `callxref` (no direct branch) nor
@@ -813,6 +815,34 @@ The two that bite hardest:
   out of WindowServer is a smaller change than the Metal patcher was - but it
   is a kext change on the process that owns the display, so it is the user's
   call and a mistake is a black screen.
+- **BOOT 149, `sudo tools/compositor_check.sh`: THE COMPOSITOR IS A REAL SW
+  OBJECT, AND THE CHAIN 2qa CLOSED IS NOT THE ONE IN USE (2qd).** The sample
+  shows `render_update` (2998) -> `CompositorSW::CompositeLayersToDestination`
+  (2986) -> `layer_blit_entry` -> `CGLayerKitFetch` -> `CARenderOGLRender` ->
+  `CA::OGL::` - 2pd's 48 % seen from the top. So it is **not NULL**, and 2qa's
+  prediction was wrong. Two branches are now closed *inside WindowServer*:
+  **the capability flag is 1** (the same sample has
+  `WSCALayerBacking::Flatten` -> `CaptureSurfaceMetal::Populate` ->
+  `CompositorMetal::CompositeLayersToDestination`, and `WSGetCompositorMetal`
+  returns NULL unless `cmpb $0x1, [0x7ff843ca08b0]` passes - which also means
+  **`new_compositor` SUCCEEDS there**, so 2qa's frontier is not failing); and
+  **the mode global is 0** - all three paths log
+  (`'Metal compositor activated.'` in `activate_compositor_metal`,
+  **`'Software compositor activated.'`** at `0x7ff807c9a900` in
+  `activate_compositor_sw`, `'Noop compositor activated.'` in the mode-2 path)
+  and boot 149 has the Metal line **twice and neither other**, with the Metal
+  line as the control. Also read rather than trusted: `MPAcceleratorForDisplayDevice`
+  takes **four** args and calls `MPDisplayDevicePriv(**dev->0x160**, which)`,
+  and `MPDisplayDevicePriv` returns its argument unchanged when `which < 0`
+  (or `unit == which`, or `unit > 0x20`); `unit = 0` here, so
+  `*out = dev->0x160->0x5c` = the dumped `0x14b23`. And `UpdateDisplays` is
+  **not** among the 8 readers of the SW global, so it does not substitute it on
+  a NULL. **With mode 0, flag 1, a non-zero id and a working `new_compositor`,
+  `CDDisplay::compositor()` CANNOT return the SW compositor - so that is not
+  where `render_update`'s compositor comes from.** The open question is now
+  exactly one: **who hands `UpdateDisplays` its `Compositor*`?** Read the
+  **callers** of `WS::Updater::UpdateDisplays` - a smaller function than the
+  34 KB one.
   `WorksWithCompositor` still has no direct callers because it is
   virtual - a limit of the instrument, not dead code. Still unanswered from
   2px: whether our display uses the **MP** or the **VFB** ops table, though
