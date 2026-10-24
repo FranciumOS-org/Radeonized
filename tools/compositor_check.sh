@@ -42,6 +42,27 @@ say "what SkyLight says about THIS display"
 if [ -x build/out/slquery ]; then build/out/slquery; else
     echo "build/out/slquery missing - run: make slquery"; fi
 
+say "CoreDisplay state dict (2q1) - the accelerator field from WindowServer"
+# CreateCoreDisplayStateDictWithOptions embeds CreateMPPrivDict, so this plist
+# carries mpPriv->accelerator as WINDOWSERVER sees it - the one number a client
+# process cannot compute. The handler is read-only: it reads state, logs
+# "DataDump - DumpState" and writes this path.
+# It is gated on the `com.apple.CoreDisplay` preference `enableDataDump`, which
+# does not exist by default, so absence here is the gate and not a finding.
+rm -f /var/tmp/CoreDisplay_State.plist
+notifyutil -p com.apple.CoreDisplay.DumpState >/dev/null 2>&1
+sleep 2
+if [ -f /var/tmp/CoreDisplay_State.plist ]; then
+    cp /var/tmp/CoreDisplay_State.plist "$out/CoreDisplay_State.plist"
+    echo "got it; accelerator / service / unit / fbIndex per MPPriv:"
+    plutil -p /var/tmp/CoreDisplay_State.plist 2>/dev/null \
+      | grep -E '"(accelerator|service|unit|aliasID|fbIndex|deviceFlags)"' | head -40
+else
+    echo "no /var/tmp/CoreDisplay_State.plist - dump not enabled (expected by"
+    echo "default). Enabling it is a persistent preference change + a"
+    echo "WindowServer restart; sudo sysdiagnose needs no config change."
+fi
+
 say "the frame clock"
 if [ -x build/out/dispclk ]; then build/out/dispclk 2>&1 | tail -6; else
     echo "build/out/dispclk missing - run: make dispclk"; fi
