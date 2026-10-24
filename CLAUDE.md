@@ -784,6 +784,35 @@ The two that bite hardest:
   runtime read of what `CDDisplay::compositor()` returns in WindowServer**
   (root, or an in-process probe); more disassembly of a 34 KB frame with reused
   slots is the instrument 2q2 correctly rejected.
+  **CORRECTION to 2qa (2qc): ops slot 0x140 is `CGXServiceForDisplayDevice`,
+  not the accelerator.** The thunk shape `movq 0x8(%rdi),%rax; movq
+  SLOT(%rax),%rax` names the whole ops table (19 thunks): **0x140 =
+  CGXServiceForDisplayDevice, 0x148 = CGXAcceleratorForDisplayDevice**,
+  0x150/0x158 = CGXFramebufferForDisplayDevice, 0x160 =
+  CGXFinishSurfaceForDisplayDevice, 0x1a8 = CGXDisplayGetVBLTiming, 0x208 =
+  CGXMPSetCursorPosition. So
+  `displayPipeIsAvailable = FindDisplayPipeForService(SERVICE(dev)) & 1` -
+  which the function's *name* said all along - and `CGXAcquireDisplayDeviceSurface`'s
+  `ops->0x158` is *get the framebuffer*, not *acquire a surface*. 2qa inferred
+  both from argument shape and names instead of reading the slot. Neither
+  changes 2qa's conclusion, since neither field is read by
+  `WSGetCompositorForAccelerator`.
+  **`make cdchain` is INCONCLUSIVE by measurement, not by argument (2qc):**
+  `CGXNextDisplayDevice(0)` does `callq *[0x7ff843bb2280]`, and that global is
+  **NULL outside WindowServer**, so the device list is *unreachable* from a
+  client process, not empty - the first run segfaulted at address 0. Branch 5
+  therefore cannot be re-measured by calling the function; the os_state dump
+  stays the evidence. **Lesson: stdout redirected to a file is FULLY buffered,
+  so a segfault discards every line printed before it** - the run looked like
+  a tool that produced no output at all. Put
+  `setvbuf(stdout, NULL, _IONBF, 0)` at the top of any probe that can fault.
+  **The only remaining instrument for the frontier is the kext**: WindowServer
+  is an Apple platform binary, so injection is stripped (2on), and `sample`
+  needs root. The plugin already hooks `_task_set_main_thread_qos` per exec and
+  writes verified bytes with `_vm_map_write_user`, so reading one return value
+  out of WindowServer is a smaller change than the Metal patcher was - but it
+  is a kext change on the process that owns the display, so it is the user's
+  call and a mistake is a black screen.
   `WorksWithCompositor` still has no direct callers because it is
   virtual - a limit of the instrument, not dead code. Still unanswered from
   2px: whether our display uses the **MP** or the **VFB** ops table, though
