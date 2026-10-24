@@ -750,8 +750,41 @@ The two that bite hardest:
   NULL and the software path is a **fallback**, not a choice. **It fails
   silently** - no log string on the fail path, and 922 SkyLight lines in boot
   149 contain no Metal/pipeline/shader failure. That is why six milestones of
-  reading flags found nothing. Note `callxref` finds **zero** callers of
-  `CDDisplay::compositor()` and `WorksWithCompositor` because both are
+  reading flags found nothing.
+  **2qb's oracle says it is NOT the shaders.** `make skyshaders` rebuilds, with
+  public Metal APIs only, everything that function is observed to build:
+  `SkyLightShaders.air64.metallib` (37 functions: 8 vertex, 24 fragment, 5
+  kernel), the sampler state, the depth-stencil state, the shared event, the
+  command queue, 5 of 5 compute pipelines - **all build** - plus
+  `supportPriorityBand` YES, `maxTextureWidth2D/Height2D` 16384 (not 0),
+  `acceleratorPort` 10755. A success does **not** clear WindowServer (different
+  process, entitlements, ordering), but it kills that class of failure. The
+  tool's render-pipeline section is a **tool limit, not evidence**: 6 of 14
+  named shader pairs abort `validateWithDevice` with `'<private>'`,
+  **identically in BGRA8 and RGBA16Float**, so it is the descriptor the tool
+  builds; 8 build and nothing returns an NSError. `new_compositor` also
+  special-cases `@"Intel"` and `@"NVIDIA"` by `rangeOfString:` on the device
+  name; ours is neither.
+  **CORRECTION to 2q2 (2qb): it searched the wrong stack slot.** The
+  `Compositor*` `render_update` receives is loaded at `0x7ff807e337e3` from
+  **`-0xa00(%rbp)`**, not `-0x350(%rbp)`, so 2q2's negative was sound about a
+  slot the call site never reads and "nothing in `UpdateDisplays` writes the
+  compositor slot" does not follow. `UpdateDisplays` **does** call
+  `compositor()`, at three sites, two of which `testq/je` on NULL and then read
+  `compositor->0x10` - the MetalContext field 2qa found - so **a NULL
+  compositor is an expected, handled case.**
+  **`callxref` finding zero callers of `CDDisplay::compositor()` was a missing
+  instrument, and 2qb built it:** `tools/re/vcall.py` lists every
+  `call *slot(%reg)`, which neither `callxref` (no direct branch) nor
+  `ripxref` (displacement off a register) can see. Slots, against the vtable
+  base `0x7ff840a579c0`: `accelerator()` **0x60**, `compositor()` **0x4b0**,
+  `render_update()` **0x4f8**. Also `tools/re/rbpslot.py` - one rbp-relative
+  stack slot, loads vs stores; `fldstore.py` skips `rm==5`, i.e. every
+  rbp-relative form, which is why 2q2 could not have found it. **Next needs a
+  runtime read of what `CDDisplay::compositor()` returns in WindowServer**
+  (root, or an in-process probe); more disassembly of a 34 KB frame with reused
+  slots is the instrument 2q2 correctly rejected.
+  `WorksWithCompositor` still has no direct callers because it is
   virtual - a limit of the instrument, not dead code. Still unanswered from
   2px: whether our display uses the **MP** or the **VFB** ops table, though
   `kCGDisplayIsVirtualDevice = 0` and a VFB **delegates** the accelerator query
