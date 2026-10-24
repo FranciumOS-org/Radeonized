@@ -26345,3 +26345,113 @@ on reboot**, which lost one run outright. `tools/cdstate.sh` now creates
 `IOAccelerator svcs: 0` and caught that the machine had rebooted into an
 unaccelerated boot between the command being issued and the result being read -
 rule 28, by instrument rather than by luck.
+
+## 2q3 - MEASURED in WindowServer's own memory: the accelerator is 0x10723, and the real gates are named
+
+Boot 148, accelerated, `sudo sysdiagnose -u -b -n -f ~/rbgpu-sd` then
+`tools/cdstate.sh`. CoreDisplay's `os_state` handler produced a **`CoreDisplay
+State`** payload of 979 lines - WindowServer's own display-device state, built
+by `CreateDisplayDeviceDict` + `CreateMPPrivDict`, i.e. the dict whose CFString
+keys named these fields in the first place (2py). Saved as
+`logs/20261024-144350-cdstate/coredisplay-state.txt`.
+
+### The accelerator id is NOT zero. Final.
+
+```
+priv.accelerator  = 0x10723
+priv.service      = 0x14903
+priv.unit         = 0
+priv.aliasID      = 0xffffffff
+priv.fbIndex      = 0
+priv.deviceFlags  = 0x000005f3
+priv.gpuVendor    = 1
+priv.displayPipe  = 0x00007fd4b8013000      (non-NULL)
+```
+
+and in the human-readable summary:
+
+```
+Display 0x5b81c5c0: GL mask 0x00000001; bounds (0,0)[1920 x 1080], 2 modes available
+    Main, Active, On-line, Enabled, Boot, OpenGL-accel, Rotation 0, dVBL 0.0075513
+    Unit 0, Vendor 0x756e6b6e ('unkn'), Model 0x717
+    Service Port 0x14903, Accelerator Port 0x10723 (index 0x0)
+    144 Hz [...] IOMode 0x64, IOFlags 0xf
+CrashLogMessage: "MetalDevice for accelerator(0x10723): 0x7fd4b5f0af48 (MTLDevice: 0x7fd480048000)"
+```
+
+**This is the measurement 2px, 2pv and 2pz were all arguing about, taken from
+the only place it was ever meaningful.** `mpPriv->accelerator` is `0x10723`;
+a Metal device exists for it; the display is `OpenGL-accel` with
+`usesOpenGLAccel = 1`. Every form of "the accelerator id is 0" is dead:
+2px measured it in a client process in an unaccelerated boot, 2pv deduced the
+consequence, and 2pz re-derived the same conclusion from an unsound inference
+(2q0). Three attempts, one right answer, and it took WindowServer's own dict to
+get it.
+
+### The real gates, and they are Apple's own field names
+
+```
+isAcceleratorBacked           = 0        <<<
+displayPipeIsAvailable        = 0        <<<
+numDisplayBuffers             = 0        <<<
+isBackBuffered                = 0
+isPageFlipped                 = 0
+exclusiveSurfaceAcceleratorID = 0
+acceleratorBackedSWCursor     = 0
+usesOpenGLAccel               = 1
+isVirtualDevice               = 0
+```
+
+Decoded from `CreateDisplayDeviceDict`, each key paired with the load that
+precedes its `leaq`:
+
+| field | how it is computed |
+|---|---|
+| `isAcceleratorBacked` | `btl $0x16, 0x64(%r14)` - **bit 22** of the device's flags word at `+0x64` |
+| `isPageFlipped` | `btl $0x17, 0x64(%r14)` - bit 23 of the same word |
+| `displayPipeIsAvailable` | `cmpb $0x0, 0x14c(%r14)` - a **byte** at `+0x14c` |
+| `numDisplayBuffers` | `movl 0x48(%r14), %edx` - a u32 at `+0x48` |
+
+`+0x14c` is already known to be load-bearing: `MPRebuildDevice` does
+`movq 0x68(%r15), %rax; cmpb $0x1, 0x14c(%rax); jne <skip>` (2py), so a
+`displayPipeIsAvailable` of 0 skips that path outright. And a `displayPipe`
+object **exists** (`0x7fd4b8013000`) while being reported unavailable, so the
+field is a capability verdict on the pipe, not a null check for it.
+
+### This vindicates 2pd, which was right from the start
+
+`numDisplayBuffers = 0`, `isBackBuffered = 0`, `isPageFlipped = 0` with a
+non-zero accelerator says exactly what 2pd said and docs/RULES.md has carried
+since: **the display has no GPU-side buffers to composite into.** The
+accelerator was never the missing piece; the destination was. Note what this
+does to 2pr as well - it concluded "room was never what was missing" because
+enlarging `getVRAMRange` changed nothing, and that is consistent: the buffer
+*count* is zero, so no amount of room matters until something allocates them.
+
+So the next question is what sets bit 22 of `dev->0x64` and the byte at
+`dev->0x14c`, and those are static.
+
+### Also in the payload, worth noting and not chasing yet
+
+The display-device list carries entries whose `IODisplayLocation` is
+`.../GPP0@1,1/IOPP/GFX0@0/NVRM/NVRMDisplay/NVRMFramebuffer` - **NVIDIA**
+framebuffer records, five of them, alongside our two `.Display_boot` entries.
+Those are stale saved-configuration records, not live devices. Recorded so a
+later session does not discover them and mistake them for something.
+
+### Two corrections to this session's own procedure
+
+1. **`-R` was the whole problem, and my second "fix" was based on a wrong
+   diagnosis.** After the narrow run produced nothing I concluded the payload
+   lands in the sysdiagnose log archive rather than the live log, and taught
+   `cdstate.sh` to read the archive. The successful run shows the live log had
+   **1144** state-event lines on its own - reading it was always correct.
+   Dropping `-R` was the only change that mattered; the archive reader is
+   harmless but was not the fix. Stated here because the commit message for it
+   implied otherwise.
+2. The flags cost a run, exactly as the caveat written when they were added
+   said they might. `-R` means "do not collect log archive", and sysdiagnose
+   invokes `os_state` handlers as part of that collection, so the 27 MB archive
+   from the first run contained no CoreDisplay state at all - only a window
+   list and a spindump. **An optimisation that removes the measurement is not
+   an optimisation.**
