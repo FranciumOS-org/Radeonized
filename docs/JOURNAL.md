@@ -27315,3 +27315,121 @@ WindowServer to read one return value is a much smaller change than the Metal
 patcher was - but it is a kext change on the process that owns the display, so
 it is the user's call, and a mistake there is a black screen rather than a
 crashed probe.
+
+## 2qd — the compositor is a real SW object, the chain cannot produce it, and 2qb owes 2q2 an apology
+
+`sudo tools/compositor_check.sh` in boot 149 with the screen moving, branches
+pre-stated in the script before the run (`logs/20261024-194154-compositor/`).
+
+### The sample
+
+```
+render_update                                     2998
+  CompositorSW::CompositeLayersToDestination      2986
+    layer_blit_entry -> CGLayerKitFetch
+      CARenderOGLRender -> CA::OGL::render
+        CA::OGL::Renderer::render -> render_prepared_layers -> render_layers
+          CA::OGL::ImagingNode::render -> LayerNode::apply ...
+```
+
+**The compositor is a REAL OBJECT, not NULL** - `render_update` is calling a
+method on it - so 2qa's prediction was wrong, and `WSGetCompositorForAccelerator`
+must have returned `*0x7ff843c9eca8`. This is also 2pd's 48 % measurement seen
+from the top: the whole CoreAnimation tree rasterised by `CA::OGL::` on the CPU.
+
+### Two branches closed properly, in WindowServer's own process
+
+**The capability flag is 1, measured inside WindowServer.** The same sample has
+
+```
+WSCALayerBacking::Flatten
+  CaptureSurfaceMetal::Populate
+    CompositorMetal::CompositeLayersToDestination
+      CompositorMetal::composite
+```
+
+`CaptureSurfaceMetal::Populate` calls `WSGetCompositorMetal` directly, and that
+function's second instruction is `cmpb $0x1, [0x7ff843ca08b0]; jne -> return
+NULL`. A non-NULL CompositorMetal therefore **measures the flag as 1 in that
+process**. 2q0 retracted an inference from this very frame; that one was about
+the *mode* global, which `WSGetCompositorMetal` never reads. This is about the
+flag it does read, and it is sound. It also means **`CompositorMetal::new_compositor`
+SUCCEEDS in WindowServer** - 2qa's frontier is not failing, which agrees with
+2qb's oracle finding that everything it needs builds.
+
+**The mode global is 0, measured.** All three activation paths announce
+themselves: `'Metal compositor activated.'` (LEA at `0x7ff807c9a87b`, inside
+`activate_compositor_metal`, which sets mode 0), **`'Software compositor
+activated.'`** (`0x7ff807c9a900`, inside `activate_compositor_sw`, mode 1) and
+`'Noop compositor activated.'` (`0x7ff807c9a679`, the mode 2 path). Boot 149's
+log contains the Metal line **twice and neither of the others** - with the
+Metal line itself as the control that the predicate and grep work (rule 26).
+
+### Which makes the chain impossible, so the premise is wrong
+
+With mode 0, flag 1, `priv.accelerator = 0x14b23`, and `new_compositor`
+working, `CDDisplay::compositor()` **cannot** return the SW compositor. I also
+stopped trusting my own summary and read the last two links:
+
+- `MPAcceleratorForDisplayDevice(dev, which, out, out2)` takes **four** args and
+  calls `MPDisplayDevicePriv(**dev->0x160**, which)` - not `dev`, which is what
+  the note said.
+- `MPDisplayDevicePriv`: `rax = rdi`; `ecx = priv->0x60` (unit); if
+  `unit > 0x20`, or `which < 0`, or `unit == which`, **return the argument
+  unchanged**. Boot 149 reports `unit = 0`, `which` is -1, so it returns
+  `dev->0x160` and `*out = dev->0x160->0x5c` - exactly the field the dump
+  prints. The outcome the note claimed was right; its reasoning was not.
+
+And `UpdateDisplays` is **not** among the 8 readers of the SW compositor global
+(they are `UtilityDisplayController::clear_to_black`, both
+`CaptureSurfaceSW::Populate` overloads, `CompositorSW::CreateShadowFromLayers`,
+`initialize_compositors`' block, and `WSGetCompositorForAccelerator` itself),
+so it does not substitute the SW compositor on a NULL either.
+
+**Therefore the `Compositor*` that `render_update` receives does not come from
+`CDDisplay::compositor()`.** Everything 2qa closed is still closed; it was
+closing a chain that is not the one in use.
+
+### RETRACTION: 2qb's correction of 2q2 was wrong
+
+2qb wrote that 2q2 "searched the wrong stack slot". It did not. The store that
+feeds the call is
+
+```
+7ff807e32dbf:  movq -0x350(%rbp), %rcx
+7ff807e32dcd:  movq %rcx, -0xa00(%rbp)
+```
+
+**`-0xa00` is a copy of `-0x350`** - the slot 2q2 searched. 2q2 found the
+source; 2qb found the copy and called 2q2 mistaken. Re-run with the newer
+instrument, which handles encodings 2q2's did not:
+
+```
+2 access(es) to -848(%rbp): 0 store(s), 2 load(s)
+  0x7ff807e32dbf  mov  rcx <- SLOT
+```
+
+**Zero stores, one real load, and its address is never taken.** 2q2's bounded
+negative - proved three ways with controls - was correct, and its conclusion
+was correct too: **nothing in `UpdateDisplays` produces this Compositor\*.**
+It arrives from outside the function, or is written through a pointer the frame
+stores elsewhere (the frame does keep pointers to its own slots, e.g.
+`leaq -0xa70(%rbp), %rax; movq %rax, -0x988(%rbp)` at `0x7ff807e32daa`), and
+2q2 explicitly checked that no SSE or rsp-relative store in the neighbourhood
+reaches it.
+
+So 2q2 was right on the measurement and right to stop. I was wrong to overturn
+it, and wrong in the same way twice over: 2qa inferred an ops slot from an
+argument shape, and 2qb inferred a mistake from a slot number without checking
+whether the two slots were the same value.
+
+### What is actually left
+
+One question, sharply: **who hands `UpdateDisplays` its `Compositor*`?** Not
+`CDDisplay::compositor()`, not the SW global, not any store in the function.
+The three `call *0x4b0` sites 2qb found do call `compositor()`, but their
+results go to `%r14`/`%rbx` and are used for `->0x10`, the MetalContext - a
+different purpose. The candidates are a caller of `UpdateDisplays`, or a
+callee writing through a stashed pointer, and separating them wants the
+**caller** side: `WS::Updater::UpdateDisplays` is itself called from
+somewhere, and that is a smaller function to read than this 34 KB one.
