@@ -27536,3 +27536,79 @@ That leaves two, both the user's call:
   reboot.
 - **the kext**, reading the value from inside the process that owns the
   display. Larger, and a mistake there is a black screen.
+
+## 2qf — the contradiction was MINE: the two readings are 4 hours and a display sleep apart
+
+No new measurement. 2qe's "flat contradiction" dissolves on a timestamp, and
+the mechanism it points at is a real candidate root cause.
+
+### The error
+
+| reading | when | value |
+|---|---|---|
+| `os_state` dump, `priv.accelerator` | **15:32:09** | **0x14b23** |
+| `sample`, `render_update` -> compositor | **19:41:54** | **CompositorSW** |
+
+**Four hours and nine minutes apart.** I treated the first as describing the
+state of the second and called the result impossible. Rule 28 says to
+attribute every log line to a boot by timestamp *and* pid; this is the same
+error one level up - attributing a *field* reading to a moment it does not
+describe. The boot is the same (149, booted 15:25:31), which is exactly what
+made it feel safe.
+
+And the gap is not quiet:
+
+```
+15:25:31  boot
+15:32:09  os_state dump                       <- PRE-sleep
+15:44:42  kernel: PMRD: Removed IODisplayWrangler from idle sleep preventers
+15:44:42  UniversalControl: === Display Sleep ===
+15:58:32  kernel: PMRD: power clamped IODisplayWrangler, ps 4->0
+17:21:45  kernel: PMRD: power clamp removed, ps 4
+19:41:54  sample                              <- POST sleep/wake
+```
+
+### The mechanism this points at, and it is a known shape
+
+`mpPriv->accelerator` has exactly one writer,
+`CoreDisplay::Framebuffer::InitializeMPPrivAccelerator()`, which copies
+`fb->0x18`; and `fb->0x18` is written **only inside the `dispatch_once` block
+of `CoreDisplay::GPU::UpdateAcceleratorForMetal()`** (2py, measured). A
+`dispatch_once` fires **once per process, ever**.
+
+`MPRebuildDevice` exists and runs on display reconfiguration (2q3 read it
+copying bit 22 out of `mpPriv->0xb0`). So:
+
+> If the display device / MPPriv is rebuilt on wake, the fresh one's
+> `accelerator` field is **never refilled**, because the only code that fills
+> it is behind a `dispatch_once` that already fired at login. From that moment
+> `CDDisplay::accelerator()` returns 0 for the rest of the WindowServer
+> session, and every `Update` gets `CompositorSW`.
+
+That fits everything: 2qe's five closures all hold, `WSMetalCompositorEnabled`
+is true, `new_compositor` works, the capability flag is 1 - and `out` is still
+0, because the field it reads was zeroed by a rebuild after the only filler
+had retired.
+
+### Predictions, stated before the measurement
+
+- **fresh dump now shows `priv.accelerator = 0`** -> confirmed. The
+  contradiction dissolves, and the root cause is a once-only fill versus a
+  rebuild on wake.
+- **fresh dump still shows `0x14b23`** -> dead. The two readings agree after
+  all and something else makes `out` zero; the lldb or kext read becomes
+  necessary.
+- **fresh dump shows a different non-zero value** -> the priv was rebuilt
+  *and* refilled, so the sleep is not the cause, and what differs is elsewhere.
+
+Two further predictions that follow only if the first branch holds, and which
+are worth stating now because they are cheap and falsifiable:
+
+- the desktop should have been **noticeably faster in the first ~12 minutes of
+  this boot**, before 15:44:42, than it is now;
+- **restarting WindowServer (log out and back in) after a wake should restore
+  it**, because that re-runs the `dispatch_once` in a fresh process - and
+  setting the display to never sleep should keep it.
+
+If those hold, there is a usable mitigation today and a real fix to design,
+and neither needs a kext change aimed at the display server.
