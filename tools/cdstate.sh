@@ -16,11 +16,12 @@
 # payload is written to the unified log as a state event, so the ARCHIVE IS
 # NOT NEEDED - this script reads the log.
 #
-#   1. in the boot you care about:   mkdir -p /tmp/sd
-#                                    sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
+#   1. in the boot you care about:
+#        sudo sysdiagnose -u -b -Q -R -G -D -n -f ~/rbgpu-sd
 #      (-R -G -D skip the heavy log collection; the state dump is not in it.
-#       `-f` refuses a directory that does not exist: "Specified invalid base
-#       directory". mkdir first.)
+#       `-f` refuses a directory that does not exist - "Specified invalid base
+#       directory" - so this script creates it for you. NOT /tmp: that is
+#       cleared on reboot, and one run was already lost that way.)
 #   2. then:                         tools/cdstate.sh
 #
 # RULE 28: every line is attributed to a boot by timestamp AND pid, because
@@ -29,6 +30,9 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 out="logs/$(date +%Y%m%d-%H%M%S)-cdstate"
 mkdir -p "$out" || exit 1
+# sysdiagnose -f refuses a directory that does not exist, and /tmp does not
+# survive a reboot, so make a durable one up front.
+mkdir -p "$HOME/rbgpu-sd" 2>/dev/null
 
 echo "== this boot"
 printf 'booted            : %s\n' "$(sysctl -n kern.boottime | sed 's/.*} //')"
@@ -49,7 +53,8 @@ printf 'lines: %s\n' "${n:-0}"
 echo
 echo "== the fields (MPPriv keys, named by Apple in CreateMPPrivDict)"
 found=0
-for f in "$out/stateevents.txt" /var/tmp/CoreDisplay_State.plist; do
+for f in "$out/stateevents.txt" /var/tmp/CoreDisplay_State.plist \
+         "$HOME"/rbgpu-sd/*/WindowServer*state* ; do
     [ -f "$f" ] || continue
     if grep -qE '"?(accelerator|mpPriv)"?' "$f" 2>/dev/null; then
         echo "--- $f"
@@ -68,10 +73,10 @@ nothing yet - the handler has not been invoked in this boot.
 RULE 14: that is not a result. os_state handlers only run when something asks,
 and nothing has. Trigger it, in the boot you care about:
 
-    mkdir -p /tmp/sd
-    sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
+    sudo sysdiagnose -u -b -Q -R -G -D -n -f ~/rbgpu-sd
 
-then re-run this script. (`-f` refuses a directory that does not exist.) If the narrow flags turn out to skip the state dump,
+then re-run this script. (The directory already exists - this script made it.
+Not /tmp: it is cleared on reboot and a run was lost that way.) If the narrow flags turn out to skip the state dump,
 fall back to a plain `sudo sysdiagnose` - the flags are an optimisation, not a
 requirement, and which collectors `-p/-R/-G/-D` cover was NOT verified here.
 MSG
