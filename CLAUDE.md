@@ -764,8 +764,12 @@ The two that bite hardest:
   (the header constant, and `isAcceleratorBacked` in CoreDisplay's own debug
   dict). `MPRebuildDevice` copies that one bit verbatim from
   `mpPriv->0xb0`; `IOFBDriverPreflight` ORs it out of the reply to framebuffer
-  user-client **selector 0x11**. **MEASURED: our mode reports `flags = 0xf`** -
-  bit 22 absent. The fix sets it inside **2ou's existing hook** on
+  user-client **selector 0x11**. **The field is ACCUMULATED, not overwritten**
+  (2q7): the driver hands out `flags = 0` at our layer, something downstream
+  ORs in `0xf`, and our `0x400000` rides through untouched - so both of those
+  are contributors to one value, not competitors. 2q4 wrote "MEASURED: our mode
+  reports `flags = 0xf`" from the state dump's *rendered* mode line and called
+  it the driver's; `fbaccel_flags0 = 0` corrected it (2q6). The fix sets it inside **2ou's existing hook** on
   `IONDRVFramebuffer::getInformationForDisplayMode` - **rule 3, never a second
   `RouteRequest`** - at `flags` **offset 16** (from `offsetof`, not from
   counting header lines; refreshRate is 8). The constant is a local
@@ -782,11 +786,22 @@ The two that bite hardest:
   means the flag was ALREADY set and 2q4's premise is wrong),
   **`fbaccel_flags0`** (the first mode's ORIGINAL flags - if it is not `0xf`
   the machine was not in the state 2q4 measured and nothing else means
-  anything). **Sufficiency is NOT established**: `displayPipeIsAvailable` and
-  `numDisplayBuffers` have separate, untraced writers, so "the bit took and
-  nothing else changed" is a real and expected outcome. Read the result with
-  `sudo tools/compositor_check.sh` and, after a sysdiagnose, `tools/cdstate.sh`
-  - `isAcceleratorBacked` in the dump is the verdict.
+  anything). **BOOT 149: IT WORKS, AND IT CHANGES NOTHING DOWNSTREAM (2q7).**
+  `isAcceleratorBacked` went **0 -> 1** against boot 148 as the control (both
+  accelerated, both with a live Metal device, the arg the only difference), and
+  the mode's rendered flags went `IOFlags 0xf` -> **`IOFlags 0x40000f`** with
+  **Apple's own renderer now printing the word `AcceleratorBacked`**. Live keys
+  from the IORegistry, not NVRAM: `fbaccel_on 1`, `fbaccel_set 3`,
+  `fbaccel_flags0 0`, `fbaccel_had` absent. **No black panel** - the risk did
+  not materialise. **But `displayPipeIsAvailable`, `numDisplayBuffers`,
+  `isBackBuffered` and `isPageFlipped` are all still 0**, `bufferFlipCount` and
+  `bufferSwapCount` still 0, and `fliprq_calls` still absent: advertising the
+  capability did not make macOS flip. That is **exactly the partial result 2q5
+  pre-stated as expected** - those fields have separate, untraced writers and
+  sufficiency was never claimed. Next target: the writers of `dev->0x14c` and
+  `dev->0x48`, untraced since 2q3. Read the compositor verdict with
+  `sudo tools/compositor_check.sh`; re-read the bit after a sysdiagnose with
+  `tools/cdstate.sh`.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
