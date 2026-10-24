@@ -436,6 +436,21 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     `PluginConfiguration::bootargOff`, so `init()` never runs - a boot with
     it set is **not** a control for anything on the init path. [2oe]
 
+28. **Attribute every log line to a boot by its timestamp AND its pid before
+    using it.** `/usr/bin/log show --last boot` means "the boot I am in now",
+    so it silently changes meaning the moment the machine reboots mid-session -
+    rule 8 for the unified log, in a tool rule 8 does not mention. It made an
+    `isAcc=NO` from an unaccelerated boot look like the answer, when the
+    accelerated boot logs the same line twice and the second says **`isAcc=YES`**;
+    and it made `GPU: FB: 0 of 1 opened` look like a failure in the boot under
+    investigation when those lines were `WindowServer[161]` and
+    `WindowServer[358]` from other boots. `--start/--end` is **not** a reliable
+    filter either: a 22:30-22:50 window returned entries timestamped 21:28 and
+    01:28. The per-line timestamp and pid are trustworthy; the range predicate
+    is not. And **`log` is a zsh builtin** that shadows `/usr/bin/log` and
+    answers `too many arguments`, which is indistinguishable from an empty log -
+    always the absolute path, always with a known-present control. [2q0]
+
 **The recurring error, stated once**
 
 Thirty recorded instances of reading a value without first establishing
@@ -693,9 +708,41 @@ The two that bite hardest:
   **Run it in an armed boot.** Non-zero there means the id is fine and the gate
   is the loop's other precondition - `gpu->0x58 == gpu->0x60`, i.e. the
   GPUWrangler gave this `CoreDisplay::GPU` no `Framebuffer` at all - which
-  points at `GPUController::ProcessGPUAdded` and `GPUWranglerDevices()`. Still
-  unanswered from 2px: whether our display uses the **MP** or the **VFB** ops
-  table. New cache tooling, all under `tools/re/`: `dscsym.sh` /
+  points at `GPUController::ProcessGPUAdded` and `GPUWranglerDevices()`.
+  **BOOT 145 ANSWERED IT, AND THE ANSWER RETRACTS 2px AND 2pv (2pz/2q0):
+  `accelport` returns NON-ZERO** (10243/10755 across two boots), and
+  `SLSDisplayCopyCurrentMetalDevice` hands back our 680M, so the `accelId == 0`
+  test never fires and 2px's "the id is 0" was measured in an unaccelerated
+  boot **and** through a client process whose code path is not
+  `CDDisplay::accelerator`. Everything upstream of the compositor choice is
+  healthy in an accelerated boot - accelerator service up, Metal device
+  present, `GPU: FB: 1 of 1 opened`, **`isAcc=YES`**, capability flag 1
+  (`__WSSystemCanCompositeWithMetal` sets it iff some Metal device is not
+  `isHeadless`, and ours is `isHeadless=0`), "Metal compositor activated"
+  logged twice - **and `CDDisplay::render_update` still gets `CompositorSW`,
+  10 of 11 samples.** Do NOT reason "Metal ran somewhere, so the mode and
+  capability globals must be set": `CaptureSurfaceMetal::Populate` calls
+  `WSGetCompositorMetal` **directly** and is not one of
+  `WSGetCompositorForAccelerator`'s nine callers, so that inference is unsound
+  (2q0 retracts it). Two candidates survive: **`CDDisplay->0x158 == NULL`**,
+  which makes `CDDisplay::accelerator()` return 0 in six instructions without
+  consulting CoreDisplay at all, and **2pd's original reading** - the
+  destination is a raw CPU-mapped range, not a GPU surface, and
+  `CaptureSurfaceMetal::WorksWithCompositor(Compositor*)` shows surfaces do
+  validate compositors. Note `callxref` finds **zero** callers of
+  `CDDisplay::compositor()` and `WorksWithCompositor` because both are
+  virtual - a limit of the instrument, not dead code. Still unanswered from
+  2px: whether our display uses the **MP** or the **VFB** ops table, though
+  `kCGDisplayIsVirtualDevice = 0` and a VFB **delegates** the accelerator query
+  to the backing device's own ops table anyway.
+  **Run `sudo tools/compositor_check.sh` in an armed boot** - it prints its
+  preconditions, both oracles, the boot's CoreDisplay log and which caller got
+  which compositor.
+  **Build `tools/re/dscinv.sh <image>` FIRST** before any byte scan: a cached
+  `atos` grid over the whole `__TEXT` names every function in seconds (2304 in
+  CoreDisplay, 13069 in SkyLight) and a NAME has now found the answer three
+  times where byte scans missed it. Its caveat: a function no grid point lands
+  inside is absent, so an absent name is not an absent function. New cache tooling, all under `tools/re/`: `dscsym.sh` /
   `dscsym_many.sh` (symbolize unslid addresses, slide measured **every run**;
   the `_many` form symbolized a 0x40 grid over CoreDisplay's `__TEXT` into its
   complete **2304-function inventory** in three seconds, which is what found
