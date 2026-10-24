@@ -7453,6 +7453,79 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
 //
 // Off unless `-rbgpuvbl`. `rbgpuvblhz=<millihertz>` overrides the rate, so a
 // wrong guess costs an NVRAM edit rather than a rebuild.
+// ---------------------------------------------------------------------------
+// 2q4 (2026-10-24): claim `kDisplayModeAcceleratorBackedFlag`.
+//
+// Boot 148's os_state dump gave WindowServer's OWN view of the display, and it
+// killed the theory three milestones had been built on: `priv.accelerator` is
+// **0x10723**, not 0, with a live Metal device for it. What is 0 instead:
+//
+//     isAcceleratorBacked    = 0        <- bit 22 of CGXDisplayDevice->0x64
+//     displayPipeIsAvailable = 0        <- byte at   CGXDisplayDevice->0x14c
+//     numDisplayBuffers      = 0        <- u32  at   CGXDisplayDevice->0x48
+//     isBackBuffered = 0, isPageFlipped = 0
+//
+// Bit 22 traces all the way back to this struct, and Apple names it twice at
+// the same position: `kDisplayModeAcceleratorBackedFlag = 0x00400000` in the
+// PUBLIC IOGraphicsTypes.h, and `isAcceleratorBacked` in CoreDisplay's own
+// debug dictionary. `MPRebuildDevice` copies that one bit verbatim:
+//
+//     movl 0xb0(%r14), %ecx        ; r14 = dev->0x160, the MPPriv (verified:
+//     andl $0x400000, %ecx         ;  every r14 use between the assignment
+//     movl $0xffbfffff, %edx       ;  and here, 1.5 KB later, is a READ)
+//     andl 0x64(%rbx), %edx
+//     orl  %ecx, %edx
+//     movl %edx, 0x64(%rbx)
+//
+// and `IOFBDriverPreflight` ORs it out of the reply to framebuffer user-client
+// selector 0x11. MEASURED: our mode reports `flags = 0xf`
+// (Valid|Safe|Default|AlwaysShow). Bit 22 absent.
+//
+// `flags` is at offset **16**, from `offsetof` against the SDK, not from
+// counting header lines (sizeof 36; nominalWidth 0, nominalHeight 4,
+// refreshRate 8, maxDepthIndex 12, flags 16).
+//
+// RULE 3: `getInformationForDisplayMode` is ALREADY routed by 2ou. A second
+// RouteRequest for a routed function panics the machine outright, so this is a
+// transform INSIDE the existing hook and shares its route.
+//
+// THIS ONE IS NOT SAFE THE WAY 2ou WAS, and the difference is the point. 2ou
+// could only ever cause a wrong number to be *reported*. This advertises a
+// CAPABILITY: if macOS believes the mode is accelerator-backed it may take an
+// accelerator-backed scanout path - page-flipping into buffers that do not
+// exist. 2pf measured `getDisplayPipeTransactionFlip` never firing once in a
+// whole boot; this flag is a candidate for what finally makes it fire, and the
+// failure mode is a BLANK PANEL, not a no-op. Hence:
+//
+//   * off unless `-rbgpufbaccel`, and it is never implied by anything;
+//   * rescue is `-rbgpuoff` as always;
+//   * it writes no hardware register, so recovery is a reboot, never a reflash.
+//
+// Rule 14 keys: `fbaccel_on`, `fbaccel_calls`, `fbaccel_set` (modes we added
+// the bit to), `fbaccel_had` (modes that already claimed it - if this is
+// non-zero the premise is wrong and the flag was never missing),
+// `fbaccel_flags0` (the first mode's ORIGINAL flags, so "was it really 0xf?"
+// is answerable from the capture instead of from this comment).
+//
+// NOT established, and the journal says so in 2q4: whether this is SUFFICIENT.
+// `displayPipeIsAvailable` and `numDisplayBuffers` are separate fields with
+// separate, untraced writers. A boot where the bit takes and nothing else
+// changes is a real and expected outcome.
+// Defined locally rather than by including <IOKit/graphics/IOGraphicsTypes.h>.
+// The value is quoted from that header - MacOSX.sdk/.../IOGraphicsTypes.h:177,
+// `kDisplayModeAcceleratorBackedFlag = 0x00400000` - and a compile-time
+// constant cannot add an import, which is the whole point: 2oz established
+// that a `com.apple.iokit.IOGraphicsFamily` dependency would fail this
+// plugin's load outright and take the accelerator with it. `grep -c
+// IOGraphicsFamily src/plugin/Info.plist` must stay 0.
+static constexpr uint32_t kDisplayModeAcceleratorBackedFlag = 0x00400000;
+
+static bool     g_fbaccel_on     = false;
+static uint64_t g_fbaccel_calls  = 0;
+static uint64_t g_fbaccel_set    = 0;
+static uint64_t g_fbaccel_had    = 0;
+static uint32_t g_fbaccel_flags0 = 0xffffffff;
+
 static bool     g_vbl_on     = false;
 static uint32_t g_vbl_mhz    = 143833;   // measured, 2os/2ot
 static uint64_t g_vbl_calls  = 0;        // times the original was called
@@ -7478,6 +7551,33 @@ static int hooked_ndrv_getinfo_2ou(void *fb, int mode, void *info) {
 
     // 2ov: this call is also where the live framebuffer pointer comes from.
     rbgpu_vblp_arm(fb);
+
+    // 2q4: claim kDisplayModeAcceleratorBackedFlag. Rule 3 - this shares
+    // 2ou's route rather than adding a second one. `flags` is at offset 16.
+    if (g_fbaccel_on) {
+        auto *fl = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(info) + 16);
+        g_fbaccel_calls++;
+        if (g_fbaccel_flags0 == 0xffffffff) {
+            g_fbaccel_flags0 = *fl;
+            rbgpu_diag_set_num("fbaccel_flags0", g_fbaccel_flags0);
+        }
+        if (*fl & kDisplayModeAcceleratorBackedFlag) {
+            // Rule 14: if this ever fires the premise of 2q4 is wrong - the
+            // flag was already there and something else makes the device
+            // report isAcceleratorBacked = 0.
+            g_fbaccel_had++;
+            rbgpu_diag_set_num("fbaccel_had", g_fbaccel_had);
+        } else {
+            *fl |= kDisplayModeAcceleratorBackedFlag;
+            g_fbaccel_set++;
+            if (g_fbaccel_set <= 4) {
+                rbgpu_log("2q4: mode %d flags 0x%08x -> 0x%08x "
+                          "(+kDisplayModeAcceleratorBackedFlag)",
+                          mode, g_fbaccel_flags0, *fl);
+            }
+            rbgpu_diag_set_num("fbaccel_set", g_fbaccel_set);
+        }
+    }
 
     auto *rr = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(info) + 8);
     if (*rr != 0) {
@@ -8883,9 +8983,12 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         }
     }
 
-    if (!g_vbl_on) {
-        rbgpu_log("2ou: NOT armed - -rbgpuvbl absent, so the mode keeps "
-                  "reporting refreshRate 0 to CoreGraphics");
+    // 2q4 shares this route (rule 3: never a second RouteRequest for a routed
+    // function), so either arg arms it.
+    if (!g_vbl_on && !g_fbaccel_on) {
+        rbgpu_log("2ou: NOT armed - neither -rbgpuvbl nor -rbgpufbaccel, so the "
+                  "mode keeps reporting refreshRate 0 to CoreGraphics and never "
+                  "claims kDisplayModeAcceleratorBackedFlag");
         return;
     }
     rbgpu_diag_set_num("vbl_mhz", g_vbl_mhz);
@@ -8935,6 +9038,9 @@ void RGPU::init() {
     rbgpu_pkrs_init_2ly();
 
     // 2ou: the 30 Hz fix. OFF by default - its first boot has not happened.
+    g_fbaccel_on = checkKernelArgument("-rbgpufbaccel");
+    rbgpu_diag_set_num("fbaccel_on", g_fbaccel_on ? 1 : 0);
+
     g_vbl_on = checkKernelArgument("-rbgpuvbl");
     char vblbuf[32] {};
     if (lilu_get_boot_args("rbgpuvblhz", vblbuf, sizeof(vblbuf) - 1) && vblbuf[0]) {

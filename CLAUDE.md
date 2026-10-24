@@ -750,6 +750,43 @@ The two that bite hardest:
   RIP-relative encodings, not just `lea`) and `fldstore.py` (every store whose
   written bytes **overlap** a field - 216 sites where 2px's single-encoding
   search found ten).
+- **`-rbgpufbaccel`** (2q4/2q5) claims **`kDisplayModeAcceleratorBackedFlag`**,
+  and it is the FIRST display change here that can plausibly blank the panel
+  rather than merely report a wrong number. **OFF by default, implied by
+  nothing.** Boot 148's `os_state` dump gave WindowServer's own view and killed
+  the theory three milestones rested on: `priv.accelerator` is **0x10723**, not
+  0, with a live Metal device. What is 0 instead - **`isAcceleratorBacked`**
+  (bit 22 of `CGXDisplayDevice->0x64`), **`displayPipeIsAvailable`**
+  (`dev->0x14c`), **`numDisplayBuffers`** (`dev->0x48`), `isBackBuffered`,
+  `isPageFlipped`. Bit 22 is **`kDisplayModeAcceleratorBackedFlag = 0x00400000`
+  in the PUBLIC `IOGraphicsTypes.h:177`**, a flag on
+  `IODisplayModeInformation`, and Apple names it twice at the same position
+  (the header constant, and `isAcceleratorBacked` in CoreDisplay's own debug
+  dict). `MPRebuildDevice` copies that one bit verbatim from
+  `mpPriv->0xb0`; `IOFBDriverPreflight` ORs it out of the reply to framebuffer
+  user-client **selector 0x11**. **MEASURED: our mode reports `flags = 0xf`** -
+  bit 22 absent. The fix sets it inside **2ou's existing hook** on
+  `IONDRVFramebuffer::getInformationForDisplayMode` - **rule 3, never a second
+  `RouteRequest`** - at `flags` **offset 16** (from `offsetof`, not from
+  counting header lines; refreshRate is 8). The constant is a local
+  `constexpr` quoting the header, NOT an `#include`, because a compile-time
+  constant cannot add an import and the 2oz trap must stay shut
+  (`grep -c IOGraphicsFamily src/plugin/Info.plist` = 0). Writes **no DCN
+  register**, so recovery is a reboot. **Why it is risky:** 2ou could only
+  cause a wrong number to be *reported*; this advertises a **capability**. If
+  macOS believes the mode is accelerator-backed it may page-flip into buffers
+  that do not exist - 2pf measured `getDisplayPipeTransactionFlip` never firing
+  once, and this is a candidate for what makes it fire. Rescue with
+  `-rbgpuoff`. Rule 14 keys, all NVRAM-hot so a screenless boot still reports:
+  `fbaccel_on`, `fbaccel_calls`, `fbaccel_set`, **`fbaccel_had`** (non-zero
+  means the flag was ALREADY set and 2q4's premise is wrong),
+  **`fbaccel_flags0`** (the first mode's ORIGINAL flags - if it is not `0xf`
+  the machine was not in the state 2q4 measured and nothing else means
+  anything). **Sufficiency is NOT established**: `displayPipeIsAvailable` and
+  `numDisplayBuffers` have separate, untraced writers, so "the bit took and
+  nothing else changed" is a real and expected outcome. Read the result with
+  `sudo tools/compositor_check.sh` and, after a sysdiagnose, `tools/cdstate.sh`
+  - `isAcceleratorBacked` in the dump is the verdict.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
