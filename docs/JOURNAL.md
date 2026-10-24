@@ -26669,3 +26669,86 @@ carrying this field with different values, so **do not assume our write reaches
 The verdict is `isAcceleratorBacked` in a fresh `os_state` dump, and nothing
 short of it decides this. Everything else measured here is consistent with both
 outcomes.
+
+## 2q7 — the bit SURVIVED: `isAcceleratorBacked = 1`, and Apple prints the name
+
+The verdict 2q6 asked for, read from WindowServer's own `os_state` dump in
+boot 149 (`logs/20261024-153427-cdstate/stateevents.txt`).
+
+Preconditions first (rules 8, 15, 28). `nvram rbgpu-boot` = **149**;
+`rbgpu-arm` consumed; loaded UUID `B2DE69AE-892C-3124-B772-2BB212342E30`
+matching `build/out/RembrandtGPU.kext` exactly; `-rbgpufbaccel` present in the
+live `boot-args`; **1** `IOAccelerator` service; `kern.boottime` =
+**15:25:31**, so the `15:32:09` dump is this boot's and the `14:43:05` blocks
+in the same file come from the sysdiagnose **archives** of boot 148. The
+capture holds four `CoreDisplay State` blocks: two at 15:32:09 (boot 149, once
+from the live log and once from the new archive) and two at 14:43:05 (boot
+148). Attributing them by timestamp was not optional - the two boots disagree
+on the field in question, and `WindowServer` is **pid 162 in both**, so pid
+alone would have been useless here. Rule 28 earned again.
+
+### The reading
+
+| field | boot 148 (no arg) | boot 149 (`-rbgpufbaccel`) |
+|---|---|---|
+| `isAcceleratorBacked` | **0** | **1** |
+| rendered mode flags | `IOFlags 0xf, flags 0xf` | **`IOFlags 0x40000f, flags 0x40000f`** |
+| rendered mode words | `Safe Default AlwaysShow IOGraphicsDefault` | `Safe Default AlwaysShow **AcceleratorBacked** IOGraphicsDefault` |
+| `priv.accelerator` | `0x10723` | `0x14b23` |
+| `displayPipeIsAvailable` | 0 | **0** |
+| `numDisplayBuffers` | 0 | **0** |
+| `isBackBuffered` / `isPageFlipped` | 0 / 0 | **0 / 0** |
+
+Both boots are accelerated, both have a live Metal device, both report
+`usesOpenGLAccel = 1` and `isVirtualDevice = 0`; the arg is the only
+difference. `0x40000f` is `0xf | 0x400000` exactly, and **Apple's own renderer
+now prints the word `AcceleratorBacked`** where it printed nothing before -
+which is the same constant, named by the OS rather than by us.
+
+This boot's live keys, read from the **IORegistry** rather than NVRAM so they
+are certainly this boot's: `fbaccel_on 1`, `fbaccel_set 3`,
+`fbaccel_flags0 0`, `fbaccel_had` **absent**.
+
+### What that settles, and how 2q6's doubt resolves
+
+2q6 was right to refuse the claim and wrong about the mechanism. The field is
+**accumulated, not overwritten**: the driver hands out 0, something downstream
+ORs in `0xf` (Valid|Safe|Default|AlwaysShow), and our `0x400000` rides through
+untouched to `mpPriv->0xb0` and on into `CGXDisplayDevice->0x64` bit 22. So
+`getInformationForDisplayMode` **is** on the path that feeds it, and
+`IOFBDriverPreflight`'s selector-0x11 OR is a *second* contributor to the same
+accumulated value, not a competing one. The "two layers with different values"
+observation was correct; the inference that one of them might discard our
+write was not.
+
+That also retires the lead 2q6 named for the failure case - selector 0x11's
+own path needs no hook.
+
+### What it does NOT settle, which is most of it
+
+`fliprq_on 1` and `fliprq_routed 1` with **`fliprq_calls` absent**:
+`getDisplayPipeTransactionFlip` is still never called. `bufferFlipCount` and
+`bufferSwapCount` are still **0**. `IOFBMemorySize` is still 8294400, so
+2pq's control still holds. `displayPipeIsAvailable` and `numDisplayBuffers`
+did not move, which is **exactly the outcome 2q5 pre-stated as expected** -
+they have separate, untraced writers and sufficiency was never claimed.
+
+The risk 2q5 flagged did not materialise: no black panel, and advertising the
+capability did not make macOS flip into buffers that do not exist. It simply
+did not make it flip at all.
+
+WindowServer burned 9.6 s of CPU in a 10 s window during this capture, 52.8 %
+over its 13-minute lifetime. That is **not** evidence of anything on its own -
+2q0 over-claimed from exactly this number and the terminal traffic I was
+generating is a confound - but it is not the signature of a desktop that
+started compositing on the GPU either.
+
+**The compositor verdict needs `sudo tools/compositor_check.sh`**, whose
+`sample WindowServer` section is the only instrument here that shows which
+caller got which compositor. `Metal compositor activated` appears twice in
+this boot's log, as it did in 145 and 148, and 2pz already established that
+line says nothing about the display composite.
+
+So: the capability bit is now claimed end to end, verified by the OS's own
+name for it, and the three fields downstream of it are unchanged. The next
+target is the writers of `dev->0x14c` and `dev->0x48`, untraced since 2q3.
