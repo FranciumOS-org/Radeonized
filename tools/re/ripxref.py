@@ -12,7 +12,14 @@ OPS = {0x8b:"mov r<-m", 0x89:"mov m<-r", 0x8d:"lea", 0x63:"movslq",
        0x85:"test", 0x01:"add m,r", 0x29:"sub m,r", 0x31:"xor m,r",
        0xc7:"mov m,imm", 0x83:"grp1 m,imm8", 0x81:"grp1 m,imm32",
        0xff:"grp5 m", 0x8a:"mov r8<-m", 0x88:"mov m<-r8", 0xc6:"mov m8,imm",
-       0x0f:"0f-two-byte"}
+       0x0f:"0f-two-byte",
+       # 2pz: leaving these out hid the `cmpb $0x1, mem(%rip)` read inside
+       # CGXGLDisplayDeviceAccelerator, so the scan reported one reader where
+       # there were two. Rule 26 applies to one's own scanner.
+       0x80:"grp1 m8,imm8", 0x38:"cmp m8,r8", 0x3a:"cmp r8,m8",
+       0x84:"test m8,r8", 0x86:"xchg m8,r8", 0xf6:"grp3 m8",
+       0xf7:"grp3 m", 0xfe:"inc/dec m8", 0x00:"add m8,r8",
+       0x08:"or m8,r8", 0x20:"and m8,r8", 0x30:"xor m8,r8"}
 
 def scan(blob, va, target):
     hits = []
@@ -33,9 +40,8 @@ def scan(blob, va, target):
         disp = struct.unpack_from("<i", blob, j+2)[0]
         ilen = (j + 6) - i
         # immediates extend the instruction, which shifts the RIP base
-        if op == 0xc7: ilen += 4
-        elif op == 0x81: ilen += 4
-        elif op in (0x83, 0xc6): ilen += 1
+        if op in (0xc7, 0x81): ilen += 4
+        elif op in (0x83, 0xc6, 0x80): ilen += 1
         tgt = va + i + ilen + disp
         if tgt == target:
             hits.append((va + i, blob[i:i+ilen].hex(), OPS[op]))

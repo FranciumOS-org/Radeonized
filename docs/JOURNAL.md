@@ -25997,3 +25997,161 @@ figure.
   invisible to it.
 - `tools/re/fldstore.py` - every store whose written bytes overlap a struct
   field range, with its width.
+
+## 2q0 - three of my own claims retracted in one session, and what survives
+
+This entry exists mostly to take things back. The underlying work was sound;
+three inferences built on top of it were not, and two of them I had already
+reported to the user.
+
+### Retraction 1: "Metal running proves the mode global is 0 and the capability flag is set"
+
+2pz reasoned: `WSGetCompositorForAccelerator`'s mode test and capability test
+are accelerator-**independent**, so if either failed *nothing* would get
+`CompositorMetal`; the sample shows `WSCALayerBacking::Flatten` ->
+`CaptureSurfaceMetal::Populate` -> `CompositorMetal`, therefore both pass. That
+upgraded 2pu's deduction to a "measurement".
+
+**It is unsound.** `CaptureSurfaceMetal::Populate(WSCompositeSourceLayer*)`
+(unslid `0x7ff807edd01e`) opens with
+
+```
+movl 0x7c(%rdi), %edi          ; the accelerator id cached on the surface
+callq 0x7ff807c99cd6           ; WSGetCompositorMetal  <- DIRECTLY
+testq %rax, %rax
+je    <return>
+```
+
+It calls **`WSGetCompositorMetal`**, the function that is only the *last line*
+of `WSGetCompositorForAccelerator`, and so consults neither global. A
+`callxref` on `WSGetCompositorForAccelerator` returns exactly nine callers -
+2pu's list - and `CaptureSurfaceMetal::Populate` is not among them.
+`Flatten` *is* a caller (at +1071), but the sampled frame was `Flatten + 2416`,
+inside `Populate`, so the sample says nothing about what `Flatten`'s own call
+returned.
+
+**The lesson, which is rule 26 wearing yet another costume:** "if X were false,
+Y could not have happened" requires proving that Y actually goes through X. I
+had 2pu's caller list in hand and did not check it against the one frame my
+argument rested on.
+
+### The capability flag, established properly this time
+
+Not by inference from the sample, but from its single writer.
+`__WSSystemCanCompositeWithMetal_block_invoke` (`0x7ff807f0033f`) is the only
+site that writes `*0x7ff843ca08b0`, and it is three lines:
+
+```
+for d in MTLCopyAllDevices():
+    if (![d isHeadless]) { *0x7ff843ca08b0 = 1; break; }
+```
+
+The selector decodes out of `__DATA_CONST` as **`isHeadless`**. Our 680M
+reports `isHeadless = 0` (`build/out/accelport`, measured), so the flag is 1.
+This is solid because the computation depends only on `MTLCopyAllDevices()`,
+which is system-wide, not on any per-process state - the trap that made 2px
+wrong.
+
+Also closed: `*0x7ff843c9ecd8`, the byte whose being 1 makes
+`CGXGLDisplayDeviceAccelerator` return 0 unconditionally, has exactly one
+writer - **`debug_set_acceleration(bool)`**, a debug entry point. Nothing calls
+it in normal operation.
+
+### Retraction 2: "isAcc=NO is CoreDisplay's verdict on our display"
+
+I found `get_display_device_info: Display 0x5b81c5c0 ... isAcc=NO ...` in the
+log and reported it as the lead. **It is from an unaccelerated boot.** The
+machine had rebooted into boot 146 (0 `IOAccelerator` services) while I was
+working, and `log show --last boot` silently changed meaning under me.
+
+Re-reading boot 145 by timestamp, that line appears **twice**:
+
+```
+22:31:02  pid 162   force8BPC=YES  isAcc=NO
+22:35:15  pid 162   force8BPC=NO   isAcc=YES      <<<
+```
+
+So in the accelerated boot the display **does** become accelerated.
+`isAcc` is not the gate. Boot 146 logs the line once, `isAcc=NO`, exactly as a
+boot with no accelerator should.
+
+### Retraction 3: "GPU: FB: 0 of 1 opened - the framebuffer failed to open"
+
+Also wrong, and caught within a minute by checking pids. Those lines are
+`WindowServer[161]` at 21:28 and `WindowServer[358]` at 01:28 - **other boots**.
+In boot 145 both GPU constructions logged `Creating FB 1 of 1` -> `Created FB
+1 of 1` -> `GPU: FB: 1 of 1 opened`.
+
+### A new rule, paid for twice in one session
+
+**Rule 28: attribute every log line to a boot by its timestamp AND its pid
+before using it.** `log show --last boot` means "the boot I am in now", which
+is not the boot being investigated once the machine has rebooted - the same
+trap as rule 8, in a tool rule 8 does not mention. Worse, `--start/--end` does
+**not** filter reliably: a window of 22:30-22:50 on 2026-10-23 returned entries
+timestamped 21:28 the same day and 01:28 the next. The per-line timestamp and
+pid are trustworthy; the range predicate is not.
+
+And the instrument that nearly hid all of this: **`log` is a zsh builtin** that
+shadows `/usr/bin/log` and answers `too many arguments`, which is
+indistinguishable from an empty log. A known-present control caught it.
+
+### What is now established for boot 145, the accelerated boot
+
+All measured, all properly attributed:
+
+| fact | how |
+|---|---|
+| accelerator service present | `ioreg`, 1 service |
+| Metal device present, `isHeadless = 0`, `acceleratorPort` non-zero | `build/out/accelport` |
+| `FindAcceleratorWithMTLDevice()` != 0 | same |
+| capability flag `*0x7ff843ca08b0` = 1 | single writer + `isHeadless = 0` |
+| "Metal compositor activated." logged twice | boot-145 log, pid 162 |
+| GPU got 1 framebuffer and opened it | `Creating/Created FB 1 of 1`, `1 of 1 opened` |
+| CoreDisplay considers the display accelerated | `isAcc=YES` at 22:35:15 |
+| `CDDisplay::render_update` -> **`CompositorSW`**, 10 of 11 samples | `sample WindowServer` |
+
+So everything upstream of the choice is healthy, and the display still
+composites in software. That is a sharper statement of the problem than any
+previous milestone managed, and it is the opposite of 2px's and 2pv's reading.
+
+### The two candidates left
+
+1. **`CDDisplay->0x158 == NULL`.** `CDDisplay::accelerator() const`
+   (`0x7ff807d69b10`, confirmed by `atos`) is six instructions: load
+   `0x158(%rdi)`, and if it is NULL return 0 **without consulting CoreDisplay at
+   all**; otherwise tail-jump to `CGXGLDisplayDeviceAccelerator`. Every fact in
+   the table above lives on the far side of that pointer. If SkyLight never put
+   the `CGXDisplayDevice*` there, none of it is ever read.
+2. **2pd's original explanation, which still stands.** Even with a valid
+   accelerator, `CompositorMetal` needs a destination it can render into, and
+   the `IONDRVFramebuffer` destination is a raw CPU-mapped range.
+   `CaptureSurfaceMetal::WorksWithCompositor(Compositor*)` exists, so surfaces
+   do validate compositors, and a fallback to SW on that check would reconcile
+   every measurement above.
+
+Note `CDDisplay::compositor()` and `WorksWithCompositor` both return **zero**
+direct callers - they are virtual, reached through vtables, so `callxref` is
+blind to them. That is a limit of the instrument, not evidence of dead code.
+
+### Tooling
+
+- `tools/re/dscinv.sh` - an image's complete function inventory, cached in
+  `build/re/`. **Build this first.** It named the accelerator writer in 2py
+  after two byte-level scans had missed it, and it is what found
+  `__WSSystemCanCompositeWithMetal` and `debug_set_acceleration` here.
+  Caveat: a function no 0x40 grid point lands inside is absent -
+  `CDDisplay::accelerator()` is missing from the SkyLight inventory for exactly
+  that reason, so an absent name is not an absent function.
+- `tools/re/dsclook.py` - address -> function against a cached inventory, no
+  `atos` round trip.
+- `tools/re/dscsym_many.sh` now chunks through `xargs`; a whole-image grid is
+  78 720 addresses and overflowed argv, which silently produced nothing.
+- `tools/re/ripxref.py` gained the `cmpb $imm, mem` family. Without it the scan
+  reported **one** reader of `*0x7ff843c9ecd8` where there are seven, and
+  missed the read inside `CGXGLDisplayDeviceAccelerator` itself - the very
+  instruction that sent me looking. Rule 26 applies to one's own scanner.
+- `tools/slquery.m` - `SLSServerMightHaveAcceleration` (returns a bool in `al`,
+  so only the low byte is defined - it printed 257), `SLDisplayUsesOpenGLAcceleration`
+  and `SLSDisplayCopyCurrentMetalDevice`, each one's arity read from its
+  disassembly before it was called.
