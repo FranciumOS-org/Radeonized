@@ -16,8 +16,11 @@
 # payload is written to the unified log as a state event, so the ARCHIVE IS
 # NOT NEEDED - this script reads the log.
 #
-#   1. in the boot you care about:   sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
-#      (-R -G -D skip the heavy log collection; the state dump is not in it)
+#   1. in the boot you care about:   mkdir -p /tmp/sd
+#                                    sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
+#      (-R -G -D skip the heavy log collection; the state dump is not in it.
+#       `-f` refuses a directory that does not exist: "Specified invalid base
+#       directory". mkdir first.)
 #   2. then:                         tools/cdstate.sh
 #
 # RULE 28: every line is attributed to a boot by timestamp AND pid, because
@@ -65,9 +68,10 @@ nothing yet - the handler has not been invoked in this boot.
 RULE 14: that is not a result. os_state handlers only run when something asks,
 and nothing has. Trigger it, in the boot you care about:
 
+    mkdir -p /tmp/sd
     sudo sysdiagnose -u -b -Q -R -G -D -n -f /tmp/sd
 
-then re-run this script. If the narrow flags turn out to skip the state dump,
+then re-run this script. (`-f` refuses a directory that does not exist.) If the narrow flags turn out to skip the state dump,
 fall back to a plain `sudo sysdiagnose` - the flags are an optimisation, not a
 requirement, and which collectors `-p/-R/-G/-D` cover was NOT verified here.
 MSG
