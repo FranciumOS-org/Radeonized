@@ -26752,3 +26752,84 @@ line says nothing about the display composite.
 So: the capability bit is now claimed end to end, verified by the OS's own
 name for it, and the three fields downstream of it are unchanged. The next
 target is the writers of `dev->0x14c` and `dev->0x48`, untraced since 2q3.
+
+## 2q8 — the composite is STILL on the CPU, measured without root
+
+`sample WindowServer` needs privileges I am not going to supply, so this is
+the same question answered from a counter the kernel publishes to every
+process. Boot 149, `-rbgpufbaccel` live, `isAcceleratorBacked = 1`.
+
+### The instrument, and the control that nearly caught me out
+
+`AGCInfo` on the accelerator carries `fSubmissionsSinceLastCheck` and
+`fLastSubmissionPID`. If SkyLight composited the display with
+`CompositorMetal` it would submit at display rate - `vbl_mhz` says 143 Hz on
+this panel.
+
+**`HWChannel GFX | Commands Submitted` reads 0 even while a command buffer
+runs to completion.** I was one step from reporting "the GFX ring has never
+had a single command submitted this boot" as a finding. The control:
+`metal_probe --dispatch` ran a compute kernel, `cb.status = 4`, all 4096
+elements verified correct - and that counter stayed **0**. It is **dead on
+this driver**, like `Core Clock(MHz)`, `Temperature(C)` and `Total Power(W)`
+beside it, all of which read 0 because the SMU telemetry is unwired. Rule 26
+in a place rule 26 does not mention: **a performance counter is an instrument
+too, and zero from a dead counter is indistinguishable from zero from an idle
+engine.**
+
+`fSubmissionsSinceLastCheck` passed the same control: one dispatch moved it
+**670 -> 671** and `fLastSubmissionPID` became metal_probe's own pid. So it is
+live, and it attributes.
+
+### The reading
+
+The informative window, ten seconds spanning real desktop activity:
+
+```
+t     wsCPU(s)   dCPU/s    fSubmissions   lastPID
+1s    2658.35    5.52      661            162   <- WindowServer
+2s    2663.74    5.39      661            162
+3s    2664.21    0.47      668            439
+4s    2664.26    0.05      670            162
+5s..10s          0.00      670            162
+```
+
+**~11.5 CPU-seconds burned in about two seconds of screen activity - 5.7
+cores - against 9 GPU submissions in the whole ten.** One composite per frame
+would have been ~270 submissions for those two seconds alone. A 30x shortfall
+at minimum, and a GPU composite does not cost whole CPU-seconds.
+
+Granularity caveat, stated rather than buried: one submission could batch
+several composites, so the count alone would not settle it. The CPU column is
+what makes it unambiguous.
+
+### A correction to my own reading an hour earlier
+
+I reported WindowServer at "551 % CPU, 9.6 s in a 10 s window" as if it were a
+standing cost. It is not: **CPU drops to exactly 0.00 for seven consecutive
+seconds** when the screen stops changing. CompositorSW costs CPU **per frame**,
+not per second. The number was right and what I implied by it was wrong - the
+same over-claim as 2q0, from the same instrument.
+
+That also means a quiet window proves nothing, so `tools/gpusubs.sh` refuses
+to call one: under 0.5 s of CPU and zero submissions exits **3 INCONCLUSIVE**
+and asks for a screen that is actually changing. Rule 14.
+
+### Retired: accelport's conclusion line
+
+`tools/accelport.m` printed `=> mpPriv->accelerator = N, so SkyLight
+composites with CompositorMetal` on a non-zero id. That is 2pv's inference and
+it is now **measured false** - boot 148 has `priv.accelerator = 0x10723`, a
+live Metal device, and a software composite. It now says the non-zero id
+clears the `accelId == 0` gate **only**. 2pz retracted the reasoning; the tool
+was still printing it.
+
+### Where this leaves 2q7
+
+`isAcceleratorBacked = 1` was **necessary and not sufficient**, which is
+exactly what 2q5 pre-stated as the expected outcome. Three gates were named in
+2q3; one is now closed. The other two are unchanged and still untraced:
+**`displayPipeIsAvailable` (`dev->0x14c`)** and **`numDisplayBuffers`
+(`dev->0x48`)**. Their writers are the next target, and `numDisplayBuffers`
+is the one 2pd predicted mattered - a destination needs a buffer to be a
+destination.

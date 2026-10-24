@@ -94,7 +94,14 @@ done:
                "says nothing about compositing. Re-run in an armed boot.\n");
         return 3;
     }
-    printf("=> mpPriv->accelerator = %u, so SkyLight composites with %s\n",
-           chosen, chosen ? "CompositorMetal" : "CompositorSW");
+    /* 2q8: this used to print "so SkyLight composites with CompositorMetal"
+     * on a non-zero id.  That was 2pv's inference and it is MEASURED FALSE:
+     * boot 148 reads priv.accelerator = 0x10723 with a live Metal device and
+     * the display composite is still CompositorSW (2pz, and the submission
+     * counter in tools/gpusubs.sh).  A non-zero id only clears ONE gate. */
+    printf("=> mpPriv->accelerator = %u. Non-zero clears the accelId==0 gate "
+           "ONLY;\n   it does NOT establish which compositor serves the "
+           "display (2pz/2q8).\n   For that: tools/gpusubs.sh, or "
+           "sudo tools/compositor_check.sh.\n", chosen);
     return chosen ? 0 : 1;
 }
