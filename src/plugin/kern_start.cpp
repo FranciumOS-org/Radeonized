@@ -7043,6 +7043,93 @@ static int      g_mtlkReportBudget = 8;
 static uint64_t g_mtlkPatched = 0;   // cave AND detour verified
 static uint64_t g_mtlkFailed  = 0;   // matched the scope but did not complete
 
+// ---------------------------------------------------------------------------
+// 2qo (2026-10-25): the IOPresentment gate, placed at ONE CALL SITE.
+//
+// 2ql/2qm traced the display's software compositing to a single userspace
+// test: CoreDisplay classifies every IOFramebuffer by `IOObjectCopyClass` and
+// scores `IONDRVFramebuffer` as bit 0x01 ("unknown vendor"), which the
+// `supported` mask - assembled only from 0x02/0x04/0x08/0x10 - can never
+// contain, so `UseIOPresentment()` is false for every value of every
+// preference. Both of `Display::GetNextSurface`'s paths are then closed and
+// the DisplaySurface comes back with no IOSurface.
+//
+// Intervention A, as 2qm recorded it, patched the classifier
+// `GetGPUVendorForFramebufferService` (0x7ff80412cc38) itself and claimed
+// "its only caller is __GetSystemGPUVendors_block_invoke, so the entire
+// effect is gSystemGPUVendors = 0x4". THAT IS WRONG, and this is the
+// correction: `dsc.py callxref` reports **two** direct callers, and the
+// second is `CoreDisplay::Framebuffer::Framebuffer` +0x8ec, which stores the
+// result at `fb+0x1f0`. The Framebuffer embeds its MPPriv at +0x70 (measured
+// from `InitializeMPPrivAccelerator`: `movl 0x18(%rdi),%eax; movl %eax,
+// 0xcc(%rdi)` against 2px's `+0x5c accelerator`, so 0xcc - 0x5c = 0x70), so
+// fb+0x1f0 is MPPriv+0x180 - the field `CreateMPPrivDict` publishes under
+// Apple's own key **`gpuVendor`**, which boot 148's state dump prints as 1.
+//
+// Patching the function would therefore have flipped four more decisions,
+// none of them wanted and none of them measured here:
+//   * `MPGetGPUVendor` is MP ops slot 0x200, and `access_display_pipe_info`
+//     does `testb $0x1c,%al; je <allocate>` - it returns the pipe-info
+//     structure only when the vendor is NOT one of AMD/NVDA/APV. Vendor 4
+//     makes it return NULL where it currently returns a real 0x3018-byte
+//     structure.
+//   * `UseIOPGamma` switches onto the per-vendor IOP gamma path.
+//   * `__WSMachineIsAMD_block_invoke` compares the vendor against 4 and sets
+//     a global read by `CGXIsHDRSupported` and by
+//     `__WSMachineUsesNewStyleMirroring_block_invoke`.
+// So the function-level patch changes the pipe-info allocator, the gamma path,
+// HDR support and the mirroring style as well as the gate. Rule 14's sibling:
+// say what a patch's blast radius is before arming it, not after.
+//
+// The narrow lever costs the same five bytes. The call inside the vendors
+// block at 0x7ff80412ce97 is `e8 9c fd ff ff` - exactly five bytes - and
+// `movl $0x4, %eax` is `b8 04 00 00 00`, also five. Overwriting the call with
+// the constant leaves `orl %eax, gSystemGPUVendors` reading 4 and touches
+// NOTHING else: the Framebuffer constructor keeps calling the real
+// classifier, so `gpuVendor` stays 1 and all four decisions above keep their
+// present behaviour. The replaced range is one whole instruction and no
+// branch in the block targets a byte inside it (the block's targets are
+// ce92, ceae, ceb7, cedb, cef2). The classifier's own CFString is released
+// internally, and the block never releases the service, so skipping the call
+// leaks nothing it did not already leak.
+//
+// Uniqueness, with the preceding `testl %eax,%eax; je` and the following
+// `orl` as anchors: the 27-byte window occurs **once** in the cache's whole
+// 0x25198000-byte executable mapping, not merely once in CoreDisplay.
+//
+// SAFETY. If the IOPresentment path then fails past the gate - which no
+// instrument short of WindowServer itself can rule out, because the
+// GPUWrangler user client is entitlement-gated and root does not clear it
+// (2qn) - WindowServer may not bring the display up, i.e. a black screen at
+// login. So this is gated TWICE: `-rbgpuiop` must be in boot-args AND the
+// one-shot NVRAM variable `rbgpu-iop` must be set. The variable is consumed
+// and flushed to flash immediately before the write, so a black screen is
+// recovered by a plain power cycle - no boot-arg edit, no single-user mode and
+// no second OS. Writes no DCN register.
+//
+// This is independent of the mtlk scope/exclude lists: it is a different
+// patch, in a different image, for a different purpose.
+// ---------------------------------------------------------------------------
+#define RBGPU_IOP_SITE_VM 0x7ff80412ce87ULL   // = the call at ...ce97 minus 16
+
+static const uint8_t kRbIopFind[27] = {
+    0x85, 0xC0, 0x74, 0x23, 0x48, 0x8D, 0x1D, 0xAE, 0x3A, 0x04, 0x00, 0x48,
+    0x89, 0xDF, 0x89, 0xC6,
+    0xE8, 0x9C, 0xFD, 0xFF, 0xFF,              // callq GetGPUVendorForFramebufferService
+    0x09, 0x05, 0xC2, 0x4E, 0xA8, 0x3F,        // orl %eax, gSystemGPUVendors(%rip)
+};
+
+static const uint8_t kRbIopRepl[27] = {
+    0x85, 0xC0, 0x74, 0x23, 0x48, 0x8D, 0x1D, 0xAE, 0x3A, 0x04, 0x00, 0x48,
+    0x89, 0xDF, 0x89, 0xC6,
+    0xB8, 0x04, 0x00, 0x00, 0x00,              // movl $0x4, %eax  (AMD)
+    0x09, 0x05, 0xC2, 0x4E, 0xA8, 0x3F,
+};
+
+static bool g_rbIopOn      = false;   // -rbgpuiop present
+static bool g_rbIopChecked = false;
+static bool g_rbIopDone    = false;   // one attempt per boot, whatever it said
+
 // Comma-separated substring match. "*" anywhere in the list matches
 // everything. An empty list matches nothing.
 static bool rbgpu_mtlk_list_matches(const char *name, const char *list) {
@@ -7187,6 +7274,71 @@ static void rbgpu_mtlk_probe(task_t task) {
     rbgpu_diag_set_num("mtlk_probe_b0", pbuf[0]);
 }
 
+// 2qo: one attempt, in WindowServer only, behind two independent gates.
+// Every path out of here writes a number (rule 14) - the whole point of the
+// experiment is that a boot which never shows a desktop still says why.
+static void rbgpu_iop_try(task_t task, const char *pname) {
+    if (!g_rbIopChecked) {
+        g_rbIopChecked = true;
+        g_rbIopOn = checkKernelArgument("-rbgpuiop");
+        rbgpu_diag_set_num("iop_on", g_rbIopOn ? 1 : 0);
+    }
+    if (!g_rbIopOn || g_rbIopDone) {
+        return;
+    }
+    // Exact name, not a substring: this patch belongs to the one process that
+    // owns the display, and `WindowServer` is 12 of MAXCOMLEN's 16 chars.
+    if (strcmp(pname, "WindowServer") != 0) {
+        return;
+    }
+    g_rbIopDone = true;
+    rbgpu_diag_set_num("iop_saw_ws", 1);
+
+    if (!g_mtlkSlideSeen || !g_mtlkGetTaskMap || !g_mtlkVmMapReadUser || !g_mtlkVmMapWriteUser) {
+        rbgpu_diag_set_num("iop_ready", 0);
+        rbgpu_log("2qo: WindowServer execed but the cache-patch machinery is "
+                  "not ready (slide_seen=%d map=%d read=%d write=%d). NVRAM is "
+                  "untouched, so `rbgpu-iop` survives and a plain reboot retries.",
+                  g_mtlkSlideSeen, g_mtlkGetTaskMap != nullptr,
+                  g_mtlkVmMapReadUser != nullptr, g_mtlkVmMapWriteUser != nullptr);
+        return;
+    }
+    rbgpu_diag_set_num("iop_ready", 1);
+
+    // The one-shot comes LAST among the checks and immediately before the
+    // write, so a boot that fails a precondition does not burn the arming.
+    uint32_t why = 0;
+    bool armed = rbgpu_nvram_consume_oneshot("rbgpu-iop", &why);
+    rbgpu_diag_set_num("iop_oneshot", why);
+    if (!armed) {
+        rbgpu_log("2qo: -rbgpuiop is set but the one-shot `rbgpu-iop` is not "
+                  "armed (why=%u: 1 /options missing, 2 absent, 3 literal 0). "
+                  "Nothing was written. Arm it with: sudo nvram rbgpu-iop=1",
+                  why);
+        return;
+    }
+
+    vm_map_t map = g_mtlkGetTaskMap(task);
+    if (map == nullptr) {
+        rbgpu_diag_set_num("iop_map", 0);
+        return;
+    }
+    rbgpu_diag_set_num("iop_map", 1);
+
+    mach_vm_address_t place = RBGPU_IOP_SITE_VM + g_mtlkSlide;
+    rbgpu_diag_set_num("iop_place", place);
+    bool ok = rbgpu_mtlk_place(map, place, kRbIopFind, kRbIopRepl, sizeof(kRbIopFind),
+                               "iop_match", "iop_prot", "iop_write", "iop_verify",
+                               true);
+    rbgpu_diag_set_num("iop_patched", ok ? 1 : 0);
+    rbgpu_log("2qo: WindowServer - IOPresentment vendor constant %s at 0x%llx. "
+              "The one-shot is consumed either way, so the next boot is normal.",
+              ok ? "PLACED and verified from the target's own memory"
+                 : "NOT placed (bytes did not match - an OS update moves this "
+                   "site, and failing safe is the designed behaviour)",
+              (unsigned long long)place);
+}
+
 static void rbgpu_mtlk_on_exec(task_t task) {
     g_mtlkExecs++;
     // Throttled: the diag setter takes a lock and scans ~400 keys, and this
@@ -7217,6 +7369,11 @@ static void rbgpu_mtlk_on_exec(task_t task) {
         rbgpu_diag_set_str("mtlk_probe_task", taskname);
         rbgpu_mtlk_probe(task);
     }
+
+    // 2qo: the IOPresentment gate, before the mtlk scope/exclude logic because
+    // it is a different patch in a different image and must not be silently
+    // turned off by a scope string meant for the Metal driver.
+    rbgpu_iop_try(task, taskname[0] != '\0' ? taskname : selfname);
 
     // The exclude list is checked FIRST so it always wins - that is the escape
     // hatch for an app that misbehaves under the fix policy, settable over SSH

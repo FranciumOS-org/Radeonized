@@ -12,11 +12,17 @@
 > already listing **our** framebuffer (`0x100000548`) with **our** accelerator
 > (`0x10000054a`). The client-side probe is permanently blocked: the GPUWrangler
 > user client is entitlement-gated and `sudo` does not clear it
-> (`kIOReturnNotPermitted` both ways). **Pending user decision:** intervention
-> A, a 6-byte patch of CoreDisplay's vendor classifier `0x7ff80412cc38` inside
-> WindowServer (`b8 04 00 00 00 c3`, one caller, no DCN register, rescue
-> `-rbgpuoff`). The user chose to stop before implementing it (2026-10-24).
-> Tools: `make useiop`, `make ioptest`. Detail: JOURNAL 2ql, 2qm, 2qn.
+> (`kIOReturnNotPermitted` both ways). **Intervention A is now BUILT, and 2qo
+> corrected it first:** the classifier `0x7ff80412cc38` has **two** callers,
+> not one - the second is `CoreDisplay::Framebuffer::Framebuffer`, which stores
+> the result as `MPPriv.gpuVendor`, read by the pipe-info allocator, the IOP
+> gamma path and `WSMachineIsAMD`. So the patch is **five bytes at the call
+> site `0x7ff80412ce97`** (`e8 9c fd ff ff` -> `b8 04 00 00 00`), which changes
+> `gSystemGPUVendors` to 4 and nothing else. `-rbgpuiop` plus the **one-shot
+> NVRAM `rbgpu-iop`**, so a black screen at login is recovered by a plain power
+> cycle instead of a boot-arg edit from another OS. **Pending user decision -
+> it is still a kext change on the process that owns the display.** Tools:
+> `make useiop`, `make ioptest`. Detail: JOURNAL 2ql, 2qm, 2qn, **2qo**.
 
 # RembrandtGPU — handoff state (2026-10-25, after 2qn)
 
@@ -426,20 +432,64 @@ client-side probe (`make ioptest`) is permanently blocked: the GPUWrangler user
 client is entitlement-gated and `sudo` does **not** clear it
 (`kIOReturnNotPermitted` both ways, measured).
 
-**PENDING USER DECISION - nothing proceeds without it.** Intervention A: inside
-WindowServer only, patch CoreDisplay's per-framebuffer vendor classifier
-`0x7ff80412cc38` to return `0x4` instead of `0x1`. Six bytes,
-`b8 04 00 00 00 c3`, at an entry with no branch in it; its only caller is
-`__GetSystemGPUVendors_block_invoke`, so the entire effect is
-`gSystemGPUVendors = 0x4` - a belief that is **true of the hardware**. The
-`-rbgpumtlkfix` machinery already does this class of patch, verifies every site
-from the target's own memory first, fails safe, and runs before the process
-executes any code (`GetSystemGPUVendors` is a `dispatch_once`). Writes **no DCN
-register**; rescue is `-rbgpuoff` + reboot. **Risk:** if the IOPresentment path
-fails past the gate, WindowServer may not bring the display up - a black screen
-at login - and no instrument short of WindowServer itself can rule that out.
-The user chose to stop before implementing it (2026-10-25). Full detail:
-JOURNAL **2ql**, **2qm**, **2qn**.
+**PENDING USER DECISION - nothing proceeds without it. Intervention A is built
+(2qo), and building it refuted how 2qm described it.**
+
+2qm said the classifier `0x7ff80412cc38` had one caller, so patching the
+function would only set `gSystemGPUVendors = 0x4`. `dsc.py callxref` finds
+**two**: the vendors block, and `CoreDisplay::Framebuffer::Framebuffer` +0x8ec,
+which stores the result at `fb+0x1f0` = `MPPriv+0x180` = Apple's own
+**`gpuVendor`** key, which the state dump prints as 1. That field is MP ops
+**slot 0x200** (`MPGetGPUVendor`) and four sites read it, so the function-level
+patch would also have changed the pipe-info allocator
+(`access_display_pipe_info` does `testb $0x1c,%al; je <allocate>`, so an AMD
+vendor makes it return **NULL** where it returns a real 0x3018-byte structure
+today), the IOP gamma path, HDR support and the mirroring style. **A blast
+radius is a measurement, not a description.**
+
+**What is built instead - five bytes at the call site, not the function:**
+
+```
+0x7ff80412ce97:  e8 9c fd ff ff   callq GetGPUVendorForFramebufferService
+           ->    b8 04 00 00 00   movl  $0x4, %eax
+0x7ff80412ce9c:  09 05 ...        orl   %eax, gSystemGPUVendors(%rip)
+```
+
+`gSystemGPUVendors` reads 4; `gpuVendor` stays 1; all four decisions above keep
+their present behaviour. One whole instruction, no branch targets a byte inside
+it, nothing extra leaks (the classifier releases its own string, and the block
+never released the service), and the 27-byte anchored window occurs **once in
+the cache's entire 0x25198000-byte executable mapping**. Both byte arrays were
+verified *in the built kext* against the live cache, not by eye.
+
+**Two gates, and the second is the safety property.** `-rbgpuiop` in boot-args
+**and** the one-shot NVRAM variable **`rbgpu-iop`**, consumed and flushed to
+flash immediately before the write, checked last so a failed precondition does
+not burn the arming. 2qn's rescue was `-rbgpuoff` + reboot, which needs a
+boot-arg edit from another OS if the login screen never appears; **a one-shot
+makes a black screen recoverable by a plain power cycle.** Scoped to
+`WindowServer` by exact name, placed through the existing verified
+`rbgpu_mtlk_place` at `_task_set_main_thread_qos`, before the process executes
+any instruction (`GetSystemGPUVendors` is a `dispatch_once` inside
+`CGXMappedDisplayStart`). Writes **no DCN register**.
+
+**NVRAM-hot rule-14 keys, in reading order:** `iop_oneshot` (0 armed and
+consumed, 1 /options unreachable, 2 not armed, 3 literal "0", **4 armed but the
+clear did not take - the next boot is armed too**), `iop_saw_ws` (absent means
+WindowServer never execed while the hook was live, so nothing was attempted and
+nothing is proven), `iop_ready`, `iop_match` (1 the five bytes were the call,
+2 already patched, 0 neither - an OS update moved the site), and
+**`iop_verify 1`, the only line that proves the write landed.**
+
+**The risk, unchanged and unhidden:** if IOPresentment fails *past* the gate -
+`IONDRVFramebuffer` implements none of
+`IOPresentmentBindIOAccelSurfaceToResource` / `IOPresentmentSetPlaneState` -
+WindowServer may not bring the display up. 2qn proved no client-side probe can
+rule that out, because the GPUWrangler user client is entitlement-gated and
+root does not clear it. **This is the experiment that answers it.** 2ql's "do
+NOT force `UseIOPresentment`" stands untouched: this patches none of its 72
+call sites, only one input it reads, to a value true of the hardware. Full
+detail: JOURNAL **2ql**, **2qm**, **2qn**, **2qo**.
 
 (Intervention B - renaming `IONDRVFramebuffer`'s class via `gMetaClass + 0x18` -
 is recorded in 2qm and is **strictly worse** than A for the same effect: it
@@ -747,6 +797,12 @@ rbgpu-diag    the diag summary — FULL at d=73, carries no nonce
  was flawless, Defect B included - 2op.)
 ```
 
+**ARMED ONLY FOR ONE EXPERIMENT, and it needs an NVRAM one-shot as well:**
+
+| flag | what it does |
+|---|---|
+| `-rbgpuiop` | 2qo. Five bytes in WindowServer make `gSystemGPUVendors` read 4, which is what `UseIOPresentment()` tests. Inert on its own: it also needs `sudo nvram rbgpu-iop=1`, consumed and flushed before the write, so **a black screen at login is recovered by a plain power cycle**. Read `iop_verify` - 1 is the only line that proves the write landed. §4 has the risk. |
+
 **OUT**, each proven:
 
 | flag | why |
@@ -777,9 +833,11 @@ blocking a usable machine any more.
    `Display::GetNextSurface`'s paths are closed; the only one that can open is
    gated on a userspace class-name test that scores `IONDRVFramebuffer` as an
    unknown vendor. Every kernel precondition IOPresentment needs is already
-   live and paired. The next step is **intervention A** (§4), a 6-byte patch of
-   CoreDisplay's vendor classifier inside WindowServer - **the user's decision,
-   because a mistake is a black screen at login**. The old plan in this slot
+   live and paired. **Intervention A is BUILT** (2qo, §4): five bytes at the
+   call site `0x7ff80412ce97` - not at the classifier, which 2qo measured to
+   have a second caller that writes `MPPriv.gpuVendor`. Arm it with
+   `-rbgpuiop` **and** `sudo nvram rbgpu-iop=1`; a black screen at login costs
+   one power cycle. **Still the user's decision.** The old plan in this slot
    (publish an IOFramebuffer, take OTG0's vblank, flip
    `HUBP0_PRIMARY_SURFACE_ADDRESS`) is **superseded and refuted** - 2pf
    measured the flip never firing once, 2pr measured room never being the

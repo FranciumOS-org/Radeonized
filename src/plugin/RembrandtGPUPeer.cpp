@@ -713,6 +713,21 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
+    // 2qo: THE frontier, and the first change here that is EXPECTED to be able
+    // to end in a login screen that never appears - so these must survive a
+    // boot with no usable screen, which is the whole reason this list exists.
+    // Read them in this order:
+    //   iop_oneshot  0 armed+consumed, 1 /options unreachable, 2 not armed,
+    //                3 literal "0", 4 armed but the clear did not take (the
+    //                NEXT boot is armed too - clear it by hand).
+    //   iop_saw_ws   absent means WindowServer never execed while the hook was
+    //                live, so nothing was attempted and nothing is proven.
+    //   iop_match    1 the five bytes were the call, 2 already patched,
+    //                0 neither (an OS update moved the site - failing safe).
+    //   iop_verify   1 is the only line that proves the write landed, read
+    //                back from WindowServer's own memory (rule 20).
+    "iop_on", "iop_saw_ws", "iop_ready", "iop_oneshot",
+    "iop_match", "iop_verify", "iop_patched",
     // 2q4: THE frontier. This boot claims kDisplayModeAcceleratorBackedFlag,
     // and it is the first display change in this project that can plausibly
     // blank the panel rather than merely report a wrong number - so these have
@@ -1529,6 +1544,64 @@ void rbgpu_nvram_note(const char *var, const char *text) {
         sync->release();
     }
     g_rbgpuNvramBusy = 0;
+}
+
+// 2qo: a one-shot NVRAM gate for an experiment that can cost the desktop.
+//
+// Same contract as `rbgpu-arm` (2cs/2dg), for the same reason and with the
+// same hard-won detail: `removeProperty` alone only edits IODTNVRAM's
+// in-memory copy, so the removal is flushed with IONVRAM-FORCESYNCNOW BEFORE
+// the caller does anything that can break the boot. The 2026-10-12 boot loop
+// was paid for by getting that order wrong.
+//
+// `why` is set on every path, because "it did not arm" and "it armed and the
+// patch did nothing" must be distinguishable from NVRAM alone (rule 14):
+//   0 armed and consumed    1 /options unreachable
+//   2 variable absent       3 variable present but a literal "0"
+//   4 armed, but the clear did not take - the next boot is armed too
+bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why) {
+    auto out = [why](uint32_t v) { if (why) *why = v; };
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            out(1);
+            return false;
+        }
+        g_rbgpuOptions = options;   // retained by fromPath; kept for the boot
+    }
+
+    OSObject *val = options->getProperty(var);
+    if (!val) {
+        out(2);
+        return false;
+    }
+    // `nvram var=1` stores an OSData, so check the first byte rather than
+    // expecting a string - the 2cs lesson, unchanged.
+    if (auto data = OSDynamicCast(OSData, val)) {
+        if (data->getLength() >= 1 &&
+            *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
+            out(3);
+            return false;
+        }
+    } else if (auto str = OSDynamicCast(OSString, val)) {
+        if (str->isEqualTo("0")) {
+            out(3);
+            return false;
+        }
+    }
+
+    options->removeProperty(var);
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    bool cleared = options->getProperty(var) == nullptr;
+    rbgpu_log("Peer: one-shot `%s` consumed; clear %s", var,
+              cleared ? "OK (next boot comes up normally)"
+                      : "FAILED - still set, so the next boot is armed too");
+    out(cleared ? 0 : 4);
+    return true;
 }
 
 void rbgpu_gate_nvram(uint32_t stage, const char *what) {

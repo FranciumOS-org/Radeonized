@@ -228,16 +228,45 @@ candidate fix. `Unable to create IOAccelDisplayPipe` -> the capability is
 missing and 2ql's verdict stands. NotPermitted again -> still inconclusive and
 only WindowServer itself can answer.
 
-**The two candidate interventions, both producing `UseIOPresentment() == true`
-(one lever, two placements):** **A, userspace, narrow** - patch the vendor
-classifier `0x7ff80412cc38` to return `0x4` instead of `0x1` inside
-WindowServer only: six bytes `b8 04 00 00 00 c3` at an entry with no branch in
-it (rule 2 trivially satisfied, nothing displaced), whose **only** caller is
-`__GetSystemGPUVendors_block_invoke`, so the entire effect is
-`gSystemGPUVendors = 0x4` - a belief that is **true of the hardware**. The
-`-rbgpumtlkfix` machinery already does this class of patch and runs before the
-process executes any code, which matters because `GetSystemGPUVendors` is a
-`dispatch_once`. **B, kernel, global** - rename `IONDRVFramebuffer`'s class by
+**INTERVENTION A IS BUILT, AND 2qo CORRECTED IT FIRST: the classifier has TWO
+callers, so patch the CALL SITE, not the function.** `dsc.py callxref` finds
+`0x7ff80412cc38` called from `__GetSystemGPUVendors_block_invoke` **and** from
+`CoreDisplay::Framebuffer::Framebuffer` +0x8ec, which stores the result at
+`fb+0x1f0` = `MPPriv+0x180` = Apple's own **`gpuVendor`** key (offset measured:
+`InitializeMPPrivAccelerator` puts the embedded MPPriv at fb+0x70, and
+`CreateMPPrivDict` pairs +0x180 with that CFString; the state dump prints
+`gpuVendor = 1`). `MPGetGPUVendor` is **MP ops slot 0x200** and four sites read
+it, so the function-level patch 2qm proposed would ALSO have flipped: the
+pipe-info allocator (`access_display_pipe_info` does `testb $0x1c,%al; je
+<allocate>` - vendor 4 makes it return **NULL** where it returns a real
+0x3018-byte structure today), `UseIOPGamma`, and `__WSMachineIsAMD` -> HDR
+support + new-style mirroring. **2qm's "the entire effect is
+`gSystemGPUVendors = 0x4`" was an inference from an unchecked caller count. A
+blast radius is a measurement, not a description.**
+The narrow lever costs the same five bytes: the call at **`0x7ff80412ce97`** is
+`e8 9c fd ff ff` and `movl $0x4, %eax` is `b8 04 00 00 00`, so overwriting it
+leaves `orl %eax, gSystemGPUVendors` reading 4 and changes nothing else -
+`gpuVendor` stays 1. One whole instruction, no branch targets a byte inside it,
+nothing extra leaks, and the 27-byte anchored window occurs **once in the
+cache's entire 0x25198000-byte executable mapping**. **`-rbgpuiop` + the
+one-shot `rbgpu-iop`** (off by default, WindowServer by exact name, placed via
+the verified `rbgpu_mtlk_place` at `_task_set_main_thread_qos` before the
+process runs any instruction, because `GetSystemGPUVendors` is a
+`dispatch_once`). The one-shot is the point: 2qn's rescue needed a boot-arg
+edit from another OS, and **a one-shot means a black screen is recovered by a
+plain power cycle.** NVRAM-hot keys, in reading order: `iop_oneshot` (0 armed,
+1 /options unreachable, 2 not armed, 3 literal "0", **4 armed but not cleared -
+the next boot is armed too**), `iop_saw_ws` (absent = WindowServer never execed,
+nothing proven), `iop_match` (1 call, 2 already patched, 0 moved), and
+**`iop_verify 1`, the only line that proves the write landed.** Writes no DCN
+register. What it cannot pre-settle: whether IOPresentment fails *past* the
+gate - `IONDRVFramebuffer` implements none of
+`IOPresentmentBindIOAccelSurfaceToResource`/`SetPlaneState` - which 2qn proved
+no client probe can answer. **It is still the user's call: a mistake is a black
+screen at login.** 2ql's "do NOT force `UseIOPresentment`" stands untouched -
+this patches none of its 72 call sites, only one input it reads, to a value
+true of the hardware. Detail: JOURNAL **2qo**.
+**B, kernel, global** - rename `IONDRVFramebuffer`'s class by
 writing an `OSSymbol *` to `gMetaClass + 0x18` (offset measured from
 `is_io_object_get_class`, which does `metaclass->0x18` then `vt[0x148]`
 `getCStringNoCopy`, and from `OSMetaClass`'s ctor, which has exactly one store
