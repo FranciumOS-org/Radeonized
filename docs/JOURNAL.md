@@ -29328,3 +29328,102 @@ failure to solve either symbol closes route C for free, which is the outcome
 worth hoping for if one is being honest about the remaining work: 2qs's §6
 lists AGDC vendor info, the IOPresentment kernel API and the OTG/HUBP
 programming still owed after registration succeeds.
+
+## 2qu — boot 151: the probe's own guard refused the answer; rule 19 corrected
+
+**Result: no verdict. The instrument failed, not the hypothesis.** Rule 16,
+in a probe written to be read-only and therefore assumed safe from it.
+
+Boot 151, `logs/20261025-021521-plugin/`. Every gate passed: `rbgpu-boot`
+**151** (150 was the previous capture, rule 8), loaded UUID
+`80B63A57-C76F-39AE-A194-59B41F6D9536` matching the build exactly (rule 15),
+`mcp_on 1` so `-rbgpumcprobe` was read.
+
+Then:
+
+```
+mcp_on=1  mcp_mc=2  mcp_vt=2
+mcp_acc, mcp_size, mcp_verdict  -- absent
+mcp_mc_addr=0  mcp_vt_addr=0    (live IORegistry)
+```
+
+Key 2 is this probe's own rule-19 rejection: *"solved to something that is
+not a kernel VA."* **Both symbols solved.** `solveSymbol` returned non-zero
+for `__ZN13IOFramebuffer10gMetaClassE` and `__ZTV13IOFramebuffer`, and the
+guard threw the result away.
+
+**Why the guard was wrong.** It applied rule 19's
+`>= 0xffffff8000000000`. That constant is the **kernel's** base, not a kext's.
+Measured live:
+
+```
+com.apple.iokit.IOGraphicsFamily    0xffffff7f95c94000  0x2efea   system KC
+com.apple.iokit.IONDRVSupport       0xffffff7f95ce8000  0x8ffc    system KC
+com.apple.iokit.IOAcceleratorFamily2 0xffffff7f95afc000 0x69ffc   system KC
+com.rembrandtgpu.plugin (ours)      0xffffff8004043000  0x236000  boot KC
+```
+
+`kextstat` lists **180** kext addresses on this machine: **50 below** the
+kernel base and **130 above**, lowest `0xffffff7f8cb22000`, highest
+`0xffffff80056c8000`. Controls for the extraction, rule 26: the grep found
+both `0xffffff7f95c94000` and `0xffffff8004043000`. **Kexts live on both sides
+of the kernel base**, so no constant at the kernel base can validate one.
+
+The sting is that `docs/SCOPE-FRAMEBUFFER.md` §3 — written three milestones
+earlier, in this same session — tabulates `0xffffff7f95c94000` for
+IOGraphicsFamily as the whole point of its KC-split argument. The guard was
+written afterwards and rejects the address the table is about.
+
+**Second fault, same probe:** the rejection path `continue`d without recording
+the address, so `mcp_mc_addr` published `want[0].addr`, still 0. The one value
+needed to understand the refusal was reported as zero. Rule 14 — *every path
+out of a probe must say something* — applies to the failure paths of an
+instrument, not only to its returns.
+
+**And the obvious repair is also wrong, caught statically rather than with a
+second boot.** Demanding the symbol land in `[address, address+size)` — the
+kext's own load range, which Lilu hands the callback — looks strictly stronger
+and self-calibrating. It is not. In a kernel collection a kext's `__DATA` is
+grouped with every other kext's `__DATA`, not placed after its own `__TEXT`:
+
+| segment | vmaddr | vmsize |
+|---|---|---|
+| `__TEXT` | `0x14fab000` | `0x2f000` |
+| `__DATA` | `0x14fda000` | `0x11000` |
+| `__DATA_CONST` | `0x14feb000` | `0x02000` |
+
+`kextstat`'s size (`0x2efea`) covers `__TEXT` alone, and `nm -m` puts
+`gMetaClass` at `0x14fea040` in `__DATA,__common` and the vtable at
+`0x14fe0248` in `__DATA,__const` — offsets **`0x3f040`** and **`0x35248`** from
+the `__TEXT` base, both **past** `address+size`. A range check would have
+rejected both for a brand-new wrong reason and cost a third boot.
+
+Also measured, and worth carrying: **`solveSymbol`'s own lookup is not bounded
+by `size`.** It was given `0x2efea` and still resolved a symbol at `0x3f040`.
+
+**The fix.** A floor, `0xffffff7f80000000`, below all 180 measured kext
+addresses; the raw address published on every path including the refusal; and
+the offset from the kext base published rather than checked, which upgrades
+the experiment from "do three strings agree" to a numeric prediction:
+
+> **Pre-stated (rule 14): `mcp_mc_off` MUST read `0x3f040` and `mcp_vt_off`
+> MUST read `0x35248`.** Those come from `nm -m build/re/IOGraphicsFamily`
+> minus the extracted `__TEXT` vmaddr, computed before the boot. If either
+> disagrees, the symbol is not the one the static read describes and
+> `mcp_verdict` means nothing whatever it says.
+
+`mcp_verdict 15` remains the only meaningful verdict (name 1 | size 2 |
+super 4 | vtable 8), and what it would establish is unchanged from 2qt: that
+the **inputs** a runtime-built subclass needs are reachable across the KC
+boundary. It still says nothing about whether a class can be **registered**,
+which is stage 2 and the part that can panic the next kext load.
+
+**Rule 19 is hereby corrected, not retired.** Its intent — a NULL check is not
+a pointer check; validate a derived pointer before dereferencing it — cost a
+boot in 2gh and stands. Its stated yardstick does not. `0xffffff8000000000`
+is correct for a **kalloc'd kernel object** (which is why the `fb` guards in
+2pa/2oz and the `info`/`res` guards in 2ou/2ll are right and have worked for
+months) and wrong for a **symbol in a kext**, which may be in either
+collection. Build: UUID `9E28A3A0-6A9C-3E7C-8480-28606C5477FB`, hosttest all
+passed, five names re-checked against `nm` (rule 5), both target symbols
+confirmed **defined** in IOGraphicsFamily (rule 1).

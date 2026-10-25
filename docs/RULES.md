@@ -579,8 +579,26 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
 17. **Never substitute a value and then narrate it as a hardware result.**
     [2cy, which cost fifteen milestones]
 18. **Do not build a table from n=1 rows.** [2ev, 2fs]
-19. **A NULL check is not a pointer check.** Validate derived pointers as
-    kernel VAs (`>= 0xffffff8000000000`) before dereferencing. [2gh]
+19. **A NULL check is not a pointer check.** Validate derived pointers before
+    dereferencing — but **with the right yardstick, and `0xffffff8000000000`
+    is only sometimes it (2qu).** That constant is the **kernel's** base and is
+    correct for a **kalloc'd kernel object** (the `fb`, `info` and `res` guards
+    in 2pa/2ou/2ll, working for months). It is **wrong for a symbol in a
+    kext**: `kextstat` here lists 180 kext addresses, **50 below** the kernel
+    base and 130 above — IOGraphicsFamily is at `0xffffff7f95c94000` in the
+    **system** KC, our plugin at `0xffffff8004043000` in the **boot** KC.
+    Boot 151 was spent on a read-only probe that solved both of its symbols
+    and then threw them away as "not a kernel VA". For a kext symbol the floor
+    is **`0xffffff7f80000000`** (below all 180, measured). And **do not
+    "improve" it to the kext's own `[address, address+size)`** — a collection
+    groups every kext's `__DATA` separately, `kextstat`'s size covers `__TEXT`
+    alone, and IOGraphicsFamily's `gMetaClass` is at offset `0x3f040` against a
+    size of `0x2efea`; that check rejects valid symbols too. Two corollaries
+    from the same boot: **`solveSymbol`'s lookup is not bounded by `size`** (it
+    resolved `0x3f040` when given `0x2efea`), and **a refusal path must publish
+    the value it refused** — this one `continue`d and reported the address as 0,
+    so the capture could not say what had been rejected (rule 14 applies to an
+    instrument's failure paths, not just its returns). [2gh, 2qu]
 20. **A registration that reports success is not evidence that a patch
     applied.** A Lilu `BinaryModPatch` with `section == 0`
     (`SectionDisabled`) is skipped and its file never read, while

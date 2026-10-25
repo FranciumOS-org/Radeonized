@@ -9090,34 +9090,80 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
     // the object, not a pointer to it) and the vtable to copy.
     // Rule 1: both are `nm -m build/re/IOGraphicsFamily` external and defined.
     // Rule 5: both names are copied from nm output, not hand-built.
-    struct { const char *sym; const char *key; mach_vm_address_t addr; } want[] = {
-        { "__ZN13IOFramebuffer10gMetaClassE", "mcp_mc", 0 },
-        { "__ZTV13IOFramebuffer",             "mcp_vt", 0 },
+    struct {
+        const char *sym; const char *key; const char *akey; const char *okey;
+        mach_vm_address_t addr;
+    } want[] = {
+        { "__ZN13IOFramebuffer10gMetaClassE", "mcp_mc", "mcp_mc_addr",
+          "mcp_mc_off", 0 },
+        { "__ZTV13IOFramebuffer",             "mcp_vt", "mcp_vt_addr",
+          "mcp_vt_off", 0 },
     };
+    // 2qu: WHY the guard below is a floor and not the kext's own range.
+    //
+    // Boot 151 refused both symbols because the first version of this probe
+    // applied rule 19's `>= 0xffffff8000000000` to them. That constant is the
+    // KERNEL's base, not a kext's: IOGraphicsFamily is in the SYSTEM
+    // collection, which loads BELOW the kernel (`0xffffff7f95c94000` on boot
+    // 151 - SCOPE-FRAMEBUFFER.md §3 tabulates that very address). So the
+    // guard refused a good address and called it "not a kernel VA".
+    //
+    // The obvious repair - demand the symbol land in [address, address+size),
+    // the kext's own load range, which Lilu hands this callback - is ALSO
+    // wrong, and it was caught statically rather than with a second boot. In
+    // a kernel collection a kext's __DATA is grouped with every other kext's
+    // __DATA, not placed after its own __TEXT:
+    //     __TEXT       0x14fab000 + 0x2f000
+    //     __DATA       0x14fda000 + 0x11000   <- gMetaClass 0x14fea040
+    //     __DATA_CONST 0x14feb000 + 0x02000
+    // and `size` (0x2efea on boot 151) covers __TEXT alone. gMetaClass is at
+    // offset 0x3f040 and the vtable at 0x35248, both PAST address+size, so a
+    // range check would have rejected them for a brand-new wrong reason.
+    //
+    // What is left that is sound: a floor, measured here rather than recalled.
+    // `kextstat` on boot 151 lists 180 kext addresses, 50 below the kernel
+    // base and 130 above (our own plugin is at 0xffffff8004043000), the lowest
+    // being 0xffffff7f8cb22000. Kexts live on BOTH sides of the kernel base,
+    // so the only constant that is below all of them is the base of the kext
+    // VA window itself. Rule 19's intent is kept - a non-zero solve is not a
+    // pointer - and only its yardstick changes.
+    //
+    // The offset from the kext base is published instead of being checked, so
+    // the capture carries a number that can be compared against the static
+    // read above. That turns this probe from "do three strings agree" into a
+    // prediction: mcp_mc_off MUST be 0x3f040 and mcp_vt_off MUST be 0x35248.
+    constexpr uint64_t kRbKextVaFloor = 0xffffff7f80000000ull;
+    rbgpu_diag_set_num("mcp_kext_base", address);
+    rbgpu_diag_set_num("mcp_kext_size", size);
     for (size_t i = 0; i < arrsize(want); i++) {
         auto a = patcher.solveSymbol(id, want[i].sym, address, size);
         if (patcher.getError() != KernelPatcher::Error::NoError || a == 0) {
             patcher.clearError();
             rbgpu_diag_set_num(want[i].key, 0);
+            rbgpu_diag_set_num(want[i].akey, 0);
+            rbgpu_diag_set_num(want[i].okey, 0);
             rbgpu_log("2qt: could not solve %s - route C's inputs are NOT "
                       "reachable from the boot KC and nothing else here means "
                       "anything", want[i].sym);
             continue;
         }
-        // Rule 19: a non-zero solve is not a pointer. Validate the kernel VA
-        // before anything dereferences it.
-        if (a < 0xffffff8000000000ull) {
+        // Rule 14, learned the hard way on boot 151: publish the address on
+        // EVERY path, including the refusal. The first version recorded it
+        // only on success, so the one value needed to understand the refusal
+        // was reported as 0 and the boot had to be spent again.
+        rbgpu_diag_set_num(want[i].akey, a);
+        rbgpu_diag_set_num(want[i].okey, a - address);
+        if (a < kRbKextVaFloor) {
             rbgpu_diag_set_num(want[i].key, 2);
-            rbgpu_log("2qt: %s solved to 0x%llx, which is NOT a kernel VA - "
-                      "refusing to dereference it", want[i].sym,
-                      static_cast<unsigned long long>(a));
+            rbgpu_log("2qt: %s solved to 0x%llx, below the kext VA floor "
+                      "0x%llx - refusing to dereference it", want[i].sym,
+                      static_cast<unsigned long long>(a),
+                      static_cast<unsigned long long>(kRbKextVaFloor));
             continue;
         }
         want[i].addr = a;
         rbgpu_diag_set_num(want[i].key, 1);
     }
-    rbgpu_diag_set_num("mcp_mc_addr", want[0].addr);
-    rbgpu_diag_set_num("mcp_vt_addr", want[1].addr);
 
     if (want[0].addr == 0) {
         return;
@@ -9163,10 +9209,13 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
         rbgpu_diag_set_str("mcp_name", cname);
     }
 
+    // 2qu: IOGraphicsDevice::gMetaClass is in the same collection, so it is
+    // held to the same floor - not to the kernel base, for the reason above.
     const void *sup = mcSuper(mc);
     const char *sname = nullptr;
+    rbgpu_diag_set_num("mcp_super_addr", reinterpret_cast<uint64_t>(sup));
     if (sup != nullptr &&
-        reinterpret_cast<uintptr_t>(sup) >= 0xffffff8000000000ull) {
+        reinterpret_cast<uintptr_t>(sup) >= kRbKextVaFloor) {
         sname = mcName(sup);
         if (sname) {
             rbgpu_diag_set_str("mcp_super", sname);
