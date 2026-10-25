@@ -290,7 +290,62 @@
 > `0x7ff812e8ad03`, then who implements selector 1 in
 > `AppleGraphicsDeviceControl`. Detail: JOURNAL **2r4**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r4)
+> **2r5 — BOTH OF 2r4's READS, ANSWERED. THE AGDC ASSOCIATION MAP IS EMPTY, AND
+> `0x10000003` IS A MACH SEND TO PORT 0.** The enclosing symbol at 2r4's
+> addresses is **`ioPresentmentCreateAssociationMap`** (`0x7ff812e8a730`), not
+> `ioPresentmentFindAGDCMatch` — that name survives only as the **os_log
+> function string** (`0x7ff812ea14f7`) of a helper inlined into it. `%r13d` is
+> `IOIteratorNext` over
+> `IOServiceGetMatchingServices(IOServiceMatching("AppleGraphicsDeviceControl"))`,
+> **minus the entry named `AppleGPUWrangler`** — an exact 17-byte compare done
+> as three xors against `"AppleGPU"`, `"Wrangler"` and the NUL at `[16]`
+> (`0x7ff812e8ad6c`–`0x7ff812e8ada1`). **`make agdcinfo` measures it live,
+> non-root, in a second: exactly ONE service matches, and it is the wrangler,
+> so zero candidates survive and the map is EMPTY.** (So `AppleGPUWrangler`
+> **is** an `AppleGraphicsDeviceControl` subclass and
+> `AppleGraphicsDeviceControlPlugin` is **not** — it is live and does not
+> match. Instrument control, rule 26: `ioreg -c IOUserClient -r -d1` matches
+> **431** services, so `-c` does follow the chain; `-d1` *without* `-r` prints
+> only the root and proves nothing.) **`0x10000003` is
+> `MACH_SEND_INVALID_DEST`** (SDK `mach/message.h:807`), not a user-client
+> status as 2r4 supposed: the second inlined query,
+> `ioPresentmentPopulateIOFramebufferEntries`, looks our framebuffer's GPU up
+> in that map (stride 0x30), finds nothing, keeps service id **0**
+> (`0x7ff812e8b3be`) and opens *that* — and the tool's control measures
+> `IOServiceOpen(MACH_PORT_NULL, …, 2, …)` returning exactly `0x10000003`.
+> **The two selectors name themselves** in the os_log formats three bytes from
+> the failing branch: **selector 1 = `kAGDCVendorInfo`** (`0x7ff812ea1512`,
+> 0x2c-byte reply, `+0x28` ∈ {1,2}), **selector 0x980 = `kAGDCGPUCapability`**
+> (`0x7ff812ea1625`, 0xdc bytes, non-zero count at `+0x30`) — so 2qr's
+> motivation is restored while 2r1's measurement (0 hits in either kext)
+> stands. **KERNEL SIDE: there is no type-2 user client to implement.**
+> `AppleGraphicsDeviceControl::newUserClient` (`0x13dfd45e`) has **no switch on
+> the type at all**; it is IOService's canonical body —
+> `allocClassWithName(this's IOUserClientClass property)`, cast to
+> `AppleGraphicsDeviceControlClient`, `initWithTask` / `authorizeTask` /
+> `attach` / `start` — with the type passed only to the first two
+> (`authorizeTask`'s failure is `0xE00002E2`, exactly what `agdcinfo` measures
+> unprivileged). `AppleGraphicsDeviceControlClient::externalMethod` forwards
+> **every** selector to `UserKernelTransfer` →
+> `filtered_doDeviceAttribute(api=3, attribute=selector, …)`, so **the
+> selectors are AGDC device attributes**. `0x980` is explicit (require
+> `*outLen == 0xdc`, call **virtual slot `0x858`**); **attribute 1 is NOT** —
+> the `attr<=0x7f` group handles only 3, 0x10 and 0x20, so it falls to the
+> plugin path: 16-slot table at `0x13e00940` indexed `(attr>>2)&0x3c0`, slot
+> `+0x18` ≥ attr, `agdc->0xa0` **and** `->0xa8` non-NULL, then
+> `AGDCPlugin::doPluginAttribute`. **COST, before anyone builds:**
+> `__ZTV26AppleGraphicsDeviceControl` spans **0x8b8 = 279 pointers**, so ~277
+> instance methods **plus** the metaclass vtable 2qy showed is also required,
+> in a class whose superclass is in another kernel collection, with Apple's
+> code calling our methods and **no fail-safe** — and the post-gate question
+> (`IONDRVFramebuffer` implements neither
+> `IOPresentmentBindIOAccelSurfaceToResource` nor `SetPlaneState`) is still
+> unanswered behind it. **So the display half is now a DECISION, not a read.**
+> One cheap thing is left and it is the user's: `sudo ./build/out/agdcinfo`,
+> which says whether an AGDC user client here answers attribute 1 at all.
+> Detail: JOURNAL **2r5**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2r5)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
