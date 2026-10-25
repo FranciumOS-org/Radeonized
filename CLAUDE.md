@@ -292,6 +292,26 @@ its absence had a control that also read 0 - rule 26). **FRONTIER, static:**
 `0x7ff843bad2d8` then popcounts a table at `0x7ff843bad2b8`;
 `DisplayPipeForService` (`0x7ff804056c52`) logs *"Unable to find display
 pipe"*. Read **who populates that map**. Detail: JOURNAL **2qp**.
+**2qq/2qr CLOSED THE WHOLE CHAIN, AND IT ENDS AT THE MISSING AMD
+FRAMEBUFFER.** The pipe is `IOPresentmentCreateForRegistryID(0, registryID)`,
+which returned NULL, and Apple named why in boot 150's log - found only after
+dropping a `subsystem == "com.apple.CoreDisplay"` filter, because
+IOPresentment logs under its own name: `(IOPresentment) Error: **Unable to get
+AGDC information.  Return code: 0x10000003**`, 3 ms before the DisplayPipe
+backtrace, same process and thread. It wants **`AGDCVendorInfo`** and
+**`AGDCGPUCapability`**; live `debug-gpus` has **`gpuc` = 0** and **`agdp` =
+0** with our fb and accelerator correctly paired - which **corrects 2qn** (the
+association exists, its contents do not; a field being present is not a field
+being populated). Those are filled by the **vendor AGDC plugin**, i.e.
+`AMDSupport`/`AMDFramebuffer`, which never instantiates here (2oq). **So this
+route terminates at the same root cause and 2ql's structural verdict is
+confirmed twice from two directions - the next thing to supply is the AMD
+framebuffer stack, not another gate.** Killed suspects: `FB_Triage`
+(diagnostic dumps only) and the third-party NV kexts in `/Library/Extensions`
+(`kextstat`, control 67 - **none loaded**). The `IOPresentment` boot-arg token
+is logging-only and real but **no longer worth a boot**. Keep `-rbgpuiop`:
+correct, verified, inert without its one-shot. Detail: JOURNAL **2qq**,
+**2qr**.
 **B, kernel, global** - rename `IONDRVFramebuffer`'s class by
 writing an `OSSymbol *` to `gMetaClass + 0x18` (offset measured from
 `is_io_object_get_class`, which does `metaclass->0x18` then `vt[0x148]`
