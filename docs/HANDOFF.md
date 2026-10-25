@@ -48,6 +48,25 @@
 > `0x7ff843bad2d8` then popcounts a table at `0x7ff843bad2b8`;
 > `DisplayPipeForService` (`0x7ff804056c52`) logs *"Unable to find display
 > pipe"*. Read **who populates that map**. Detail: JOURNAL **2qp**.
+>
+> **2qq READ IT, AND THE CAPABILITY REALLY IS ABSENT.** The pipe is built
+> inline in the map's emplace: `IOPresentmentCreateForRegistryID(0,
+> registryID)` -> **NULL** -> `CoreDisplay::Backtrace` thrown (which is boot
+> 150's empty-message-plus-backtrace error exactly). Its worker has two NULL
+> paths, each logged: `bad arg` when arg0==arg1, and **`no match %#llx %#llx`**
+> - `ioPresentmentFindAGDCMatch` missing - which is the one that fired.
+> **This answers 2qn:** the call that refused `ioptest` with
+> `kIOReturnNotPermitted` ran inside WindowServer, which HAS the entitlement,
+> and still returned NULL. The entitlement was never the obstacle; **2ql's
+> verdict is confirmed by measurement**, and **2qm is contradicted** - AGDC's
+> `debug-gpus` pairing exists and the match still fails. 2ql's prediction that
+> forcing the gate would black-screen was **wrong**: boot 150 came up normally.
+> **Free next measurement, written by Apple:** IOPresentment reads
+> `IODeviceTree:/options` `boot-args` for the token **`IOPresentment`** to
+> un-gate those two messages, so
+> `sudo tools/efi.sh bootarg add IOPresentment` prints both ids. Logging only,
+> no risk; needs `-rbgpuiop` armed in the same boot or the pipe is never
+> attempted. Detail: JOURNAL **2qq**.
 
 # RembrandtGPU — handoff state (2026-10-25, after 2qn)
 
