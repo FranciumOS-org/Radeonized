@@ -28913,3 +28913,130 @@ and whatever `GPUWranglerRegisterEventBlock` hands it - and what about our
 process, and is inert without the one-shot. It is also the only way to reach
 this layer at all: without it the chain stops one step earlier, at the vendor
 mask, and `FindDisplayPipeForService` is never consulted.
+
+## 2qq - the DisplayPipe constructor, decoded: WindowServer answered 2qn's question and the capability really is absent
+
+2qp left the frontier at "who populates the DisplayPipe map and why does our
+framebuffer's emplace fail". Both are now read, statically, and the answer
+closes the question 2qn said only WindowServer could settle.
+
+### The constructor, three calls
+
+The `DisplayPipe` is built inline inside the map's
+`__emplace_unique_impl` (which is why `atos` reports a 4 KB "hash emplace" -
+the pipe's whole construction is inlined into it). Stubs resolved by hand
+through their GOT slots (`ff 25 disp32` -> GOT -> chained-pointer decode) and
+then symbolized, rather than guessed:
+
+```
+registryID = IORegistryEntryGetRegistryEntryID(service)      ; 0x7ff8058b5d43
+pipe       = IOPresentmentCreateForRegistryID(0, registryID)  ; 0x7ff812e88a67
+if (pipe == NULL)                 throw CoreDisplay::Backtrace  ; 0x7ff804059957
+if (IOPresentmentInitialize(pipe) != 0) throw CoreDisplay::Backtrace ; 0x7ff804059967
+```
+
+The throw is built from `CoreDisplay::Backtrace::Backtrace()` +
+`CoreDisplay::Backtrace::GetString()` - which is exactly the shape of boot
+150's log entry: an `[ERROR] -` with an **empty message** followed by a
+symbolized backtrace. The message was empty because the payload *is* the
+backtrace.
+
+### `IOPresentmentCreateForRegistryID` and its two NULL paths
+
+The exported function is a three-line wrapper:
+
+```
+7ff812e88a67:  callq 0x7ff812e8c0b8     ; the worker; rdi/rsi pass straight through
+               testq %rax,%rax
+               je    .return_NULL
+               mov   %rax,%rdi ; jmp <wrap/retain>
+.return_NULL:  xorl  %eax,%eax ; retq
+```
+
+The worker (`0x7ff812e8c0b8`) has **exactly two** branches to its NULL tail at
+`0x7ff812e8c8f7`, and each logs its own reason first:
+
+| site | condition | Apple's message | line |
+|---|---|---|---|
+| `0x7ff812e8c183` | `cmpq %r12,%r15; jne` falls through, i.e. **arg0 == arg1** | **`bad arg: %#llx %#llx`** | 0xdd0 |
+| `0x7ff812e8c334` | the lookup miss | **`no match %#llx %#llx`** | 0xdc9 |
+
+`no match` is `ioPresentmentFindAGDCMatch` failing - the function 2qm named
+from IOPresentment's own strings. The call site passes `edi = 0` and
+`rsi = registryID`, and a valid registry ID is non-zero, so `arg0 == arg1` is
+false and **the `no match` path is the one that must have fired**. That last
+step is an inference from the call site, not a measurement - see below for how
+to measure it.
+
+### What this settles, and it is the point of the whole experiment
+
+2qn ended with three possible outcomes for `ioptest` and said of the third:
+
+> `kIOReturnNotPermitted` again -> still INCONCLUSIVE; the only remaining
+> instrument is WindowServer itself.
+
+**Boot 150 is WindowServer itself, and it answered.** The same
+`IOPresentmentCreateForRegistryID` that refused `ioptest` with
+`kIOReturnNotPermitted` ran inside the one process that *has* the entitlement,
+against our framebuffer's own registry ID, and **returned NULL**. So:
+
+* the entitlement was never the real obstacle, only the reason a client probe
+  could not see past it;
+* **the capability genuinely is absent for an `IONDRVFramebuffer`**, and
+  **2ql's verdict is now confirmed by measurement rather than argument**;
+* **2qm's conclusion is contradicted.** 2qm read AGDC's `debug-gpus` pairing
+  of our framebuffer (`0x100000548`) with our accelerator (`0x10000054a`) and
+  concluded "what the class-name test refuses appears to be already wired up".
+  The pairing exists and the match still fails, so `ioPresentmentFindAGDCMatch`
+  wants something that pairing does not supply, or keys on a different id.
+
+And one prediction of 2ql's was simply **wrong**, which is worth recording as
+plainly as the parts that were right: it said forcing the gate "would
+black-screen". It did not. Boot 150 came up normally, the user confirmed it,
+and the only visible effect of opening the gate was two extra error lines in
+the log. The risk was real and correctly flagged; it did not materialise.
+
+### The next measurement is free, and Apple wrote it
+
+Both messages above are behind a log-level check (`esi = 0x10`), which is why
+neither appeared in boot 150. IOPresentment's string table shows how it is
+enabled - it reads `IODeviceTree:/options` -> **`boot-args`** and looks for the
+token **`IOPresentment`**:
+
+```
+IODeviceTree:/options
+boot-args
+...
+IOPresentment:
+boot-args:
+IOPresentment
+```
+
+So `sudo tools/efi.sh bootarg add IOPresentment` makes Apple print `no match
+%#llx %#llx` (or `bad arg`) **with both ids**, which distinguishes the two
+paths and names exactly what it compared. **Logging only - it writes nothing,
+patches nothing and carries no black-screen risk.** It needs `-rbgpuiop` armed
+in the same boot, because without the vendor gate open the pipe is never
+attempted and there is nothing to log.
+
+### Honest assessment of where this leaves the display half
+
+The chain is now closed from the compositor all the way down to a single
+Apple API returning NULL for our framebuffer:
+
+```
+IONDRVFramebuffer -> IOPresentmentCreateForRegistryID -> NULL
+  -> DisplayPipe ctor throws -> zero pipes in the map
+  -> "System set to use IOP but no display pipes are present" -> gUseIOP = 0
+  -> GetNextSurface takes the legacy path -> set_id_mode rejects id 1 (2qk)
+  -> DisplaySurface with no IOSurface (2qh) -> CompositorSW rasterises (2pd)
+```
+
+Every link is measured. The remaining lever is whatever
+`ioPresentmentFindAGDCMatch` needs, and 2ql's larger point stands: this is the
+IOPresentment *world*, and `IONDRVFramebuffer` implements none of
+`IOPresentmentBindIOAccelSurfaceToResource` / `IOPresentmentSetPlaneState`.
+Opening one more gate may well surface the next one. The structural fix
+remains the one 2pd named - an accelerated framebuffer owning the display,
+which needs DCN 3.1.2 code macOS does not contain - and nothing here changes
+that estimate.
