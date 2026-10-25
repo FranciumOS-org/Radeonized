@@ -31410,3 +31410,112 @@ another reboot. Require agdc_solved=0x3ff, agdc_error=0, agdc_mc_post=0,
 agdc_mc_ok=1, agdc_started=1 and iop_verify=1 before interpreting the next
 presentation failure. No EFI, NVRAM, kext load/unload or reboot was performed
 by the agent in this turn.
+
+
+---
+
+## 2rc — boot 156 published the AGDC bridge; the Apple-logo stall reaches missing link configuration
+
+2026-10-25. User reported the Apple logo froze while SSD activity continued,
+and ran plugin_check over SSH. Saved capture **logs/20261025-174221-plugin**.
+Read its nonce first: **156**, after 155. Loaded UUID
+**667372BC-502F-31A6-BFF2-60E61AAAF29F** matches the 2rb build. This is a
+real armed boot of the corrected resolver, not a stale build or stale note.
+
+### What the hardware test proves
+
+**agdc_solved=1023/0x3ff**, error0, layout_ok1, filter_routed1, stage70,
+mc_post0, mc_ok1, started1. RembrandtGPUAGDC appears under the real IGPU
+beside IONDRVFramebuffer and the AMD accelerator. PCI registry id
+**0x100000288**, framebuffer **0x100000538**. User vendor queries **4**,
+user GPU-capability queries **1** (separate from vendor callbacks7 and
+cap callbacks3). **iop_verify=1**. rbgpu-arm, rbgpu-iop and rbgpu-agdc all
+absent: the one-shots cleared. The registry walks completed; this is not
+2er's zero-byte-pci.txt hard wedge. Diagnostic table **550/768**, so the
+absent result keys were not lost to capacity.
+
+This establishes runtime class registration, AGDC service publication and
+actual user-client queries. It does NOT establish a working display pipe,
+IOSurface desktop surface or Metal presentation. The user's frozen logo is
+the actual display result. Kernel fault note c/f/r/o/fw all0 and sampled CP
+never halted, but the saved log still has a **checkGPUProgress hardware
+error on channel12**. Do not conclude that no GPU scheduling problem exists.
+
+### The retained display log narrows the next protocol step
+
+The plugin capture originally filtered only plugin/AMD messages and omitted
+WindowServer's display errors. Recovered a broader historical log into
+**display-log.txt** inside the capture. The log utility warned about a wall
+clock adjustment, and its requested --end did NOT exclude the following
+boot. A separate **display-boot156.txt** selects the known boot-156
+WindowServer PID161/displaypolicyd142 and pre-17:43 kernel progress records;
+next-boot WindowServer PID162 lines must not be attributed to boot156.
+In particular, the broad file's **17:43:44 “Unable to acquire map” is the
+next boot, not this test**.
+
+The focused file has two “Attempting to get capabilities from capabilities
+with no devices” and 138 “Attempting to get capabilities when none exist”
+messages, plus 29 GPU progress errors on channels12/25/52/53. Several
+mode-information/offline warnings also occur in boot155's compositor log,
+so those warnings alone do not identify this regression. No live sample of
+the frozen WindowServer was saved before reboot; no claim about its blocking
+stack is made.
+
+**agdc_last_api=3, agdc_last_attr=2337/0x921**. Direct static trace:
+
+* IOPresentment `__gatherCapabilities` at 0x7ff812e95370 first calls
+  `__GatherAGDCLogicalDeviceCapabilities` at **0x7ff812e9781a**. That submits
+  **0x921**, with **0xb0-byte input AND output**, first word framebuffer
+  index. A nonzero IOReturn exits before gathering pipeline capabilities.
+* Apple's AMD AGDC dispatch table at **0xbfec050**, entry1 (0x921-0x920),
+  selects **0xbfebd9f**, then tailcalls **getLinkConfig at 0xc009184**.
+  Its structure is **AGDCLinkConfig_t**, not a new GPU-capability reply.
+  It verifies length0xb0 and framebuffer index; fills link/active flags,
+  detailed timing, stream address+0xa4 and stream state+0xac.
+* After logical capabilities, IOPresentment gathers display pipeline
+  capabilities at **0x7ff812e979dc** via **0x711**, length **0x196c**.
+  AMD dispatch selects `getFbExtendedCapability`. Real plane capability and
+  bind/transaction/scanout implementation is still required.
+
+Our bridge's first vendor-callback line was `if (inSize || !outSize) return
+BadArgument`. That rejects 0x921 before updating `agdc_vendor_unsupported`.
+Thus saved **unsupported=3** is an earlier operation, not evidence that 3
+is the final missing one. The binary/control flow predicts BadArgument for
+0x921; **the boot did not record its return code**, so that return is a
+static inference, not a measured runtime result. This missing operation is
+a concrete presentation blocker; it does not yet explain every GPU progress
+error or prove it is the sole cause of the frozen panel.
+
+### Repairs, validation and frontier
+
+The common **rb_agdc_reply** dispatcher now validates input lengths only for
+implemented attributes1/0x980 and returns Unsupported for other operations,
+without touching the output. Their bounded reply builders are unchanged.
+The vendor callback records attribute and input/output sizes before dispatch.
+The existing filtered hook also records results after calling Apple,
+including a dedicated 0x921 counter/sizes/result and last failure attribute
+and result. The main failure/result keys are NVRAM-hot. No new hook target,
+capability claim or hardware write is added.
+
+plugin_check now saves boot args/session UUID, WindowServer/CoreDisplay/
+SkyLight/IOPresentment/GPUWrangler/progress logs and a three-second
+WindowServer sample when run as root. This keeps SSH diagnosis of a frozen
+panel in one capture. Agent did not run plugin_check or any EFI/load/reboot
+command; historical log recovery was read-only.
+
+`make plugin` passes including ASan/UBSan and 300,000 parser mutations.
+New dispatcher regressions exercise 0x921/0x711 requests with nonzero input,
+unsupported attribute3, supported malformed requests and unchanged-buffer
+checks. Restoring the old blanket input guard makes **three new assertions
+fail**. Imports **362/362** resolve through the existing dependencies; no
+AGDC/IOGraphics import added. Shell syntax and git diff whitespace checks
+pass. UUID moved **667372BC… → 758BFD86-567C-3E90-BB5B-0A1C3727D10C**.
+Build log saved under **logs/20261025-2rc-agdc/build.txt**.
+
+**This rebuild fixes diagnosis, not the frozen display. No repeat AGDC+IOP
+boot is requested just for it.** The next framebuffer implementation is an
+accurate boot-link 0x921 reply from real timing/stream state, followed by
+truthful plane capabilities and the presentation backend. Do not advertise
+nonexistent planes or use an offline zero-filled response to get past a
+check. The already verified publication/query stage needs no further
+metaclass experiment.

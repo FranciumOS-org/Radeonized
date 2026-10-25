@@ -62,21 +62,20 @@ OSObject *allocate(const void *) {
 
 IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
                 unsigned long *out,unsigned long *outSize,void *) {
-    if (inSize || !outSize) return kIOReturnBadArgument;
-    if (attr==1) {
-        rbgpu_diag_inc("agdc_vendor_calls");
-        return rb_agdc_vendor(out,*outSize)==0 ? kIOReturnSuccess : kIOReturnBadArgument;
+    rbgpu_diag_set_num("agdc_vendor_attr",attr);
+    rbgpu_diag_set_num("agdc_vendor_in",inSize);
+    rbgpu_diag_set_num("agdc_vendor_out",outSize ? *outSize : 0);
+    if (attr==1) rbgpu_diag_inc("agdc_vendor_calls");
+    if (attr==0x980) rbgpu_diag_inc("agdc_cap_calls");
+    // KERNEL pointers, not registry IDs. Apple's filtered 0x980 handler
+    // still converts these before copying anything to userspace.
+    const int result=rb_agdc_reply(attr,inSize,out,outSize,
+        reinterpret_cast<uint64_t>(pci),reinterpret_cast<uint64_t>(framebuffer));
+    if (result==RB_AGDC_UNSUPPORTED) {
+        rbgpu_diag_set_num("agdc_vendor_unsupported",attr);
+        return kIOReturnUnsupported;
     }
-    if (attr==0x980) {
-        rbgpu_diag_inc("agdc_cap_calls");
-        // KERNEL pointers, not registry IDs. Keep Apple's filtered 0x980
-        // handler: it converts these before copying anything to userspace.
-        return rb_agdc_capability(out,*outSize,reinterpret_cast<uint64_t>(pci),
-                   reinterpret_cast<uint64_t>(framebuffer))==0
-                   ? kIOReturnSuccess : kIOReturnBadArgument;
-    }
-    rbgpu_diag_set_num("agdc_vendor_unsupported",attr);
-    return kIOReturnUnsupported;
+    return result==0 ? kIOReturnSuccess : kIOReturnBadArgument;
 }
 
 IOReturn filter(void *self,unsigned api,unsigned attr,void *in,
@@ -90,10 +89,29 @@ IOReturn filter(void *self,unsigned api,unsigned attr,void *in,
         if (api==3 && attr==1) rbgpu_diag_inc("agdc_user_vendor");
         if (api==3 && attr==0x980) rbgpu_diag_inc("agdc_user_cap");
     }
-    if (self==service && service && attr==1 && (api==0 || api==2 || api==3))
-        return vendor(self,attr,static_cast<unsigned long *>(in),inSize,
-                      static_cast<unsigned long *>(out),outSize,nullptr);
-    return originalFilter(self,api,attr,in,inSize,out,outSize,state);
+    const bool mine=self==service && service;
+    const auto capacity=mine && outSize ? *outSize : 0;
+    const IOReturn result=mine && attr==1 && (api==0 || api==2 || api==3)
+        ? vendor(self,attr,static_cast<unsigned long *>(in),inSize,
+                      static_cast<unsigned long *>(out),outSize,nullptr)
+        : originalFilter(self,api,attr,in,inSize,out,outSize,state);
+    if (mine) {
+        // Record AFTER Apple's filter as well: a request can fail there
+        // without ever reaching our vendor callback. No buffers/pointers logged.
+        rbgpu_diag_set_num("agdc_last_ret",static_cast<uint32_t>(result));
+        if (attr==0x921) {
+            rbgpu_diag_inc("agdc_logical_calls");
+            rbgpu_diag_set_num("agdc_logical_in",inSize);
+            rbgpu_diag_set_num("agdc_logical_out",capacity);
+            rbgpu_diag_set_num("agdc_logical_ret",static_cast<uint32_t>(result));
+        }
+        if (result!=kIOReturnSuccess) {
+            rbgpu_diag_inc("agdc_failed_calls");
+            rbgpu_diag_set_num("agdc_failed_attr",attr);
+            rbgpu_diag_set_num("agdc_failed_ret",static_cast<uint32_t>(result));
+        }
+    }
+    return result;
 }
 
 uintptr_t solve(KernelPatcher &p,size_t id,const char *name,

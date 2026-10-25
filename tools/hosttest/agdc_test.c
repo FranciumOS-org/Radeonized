@@ -26,6 +26,18 @@ int agdc_tests(void) {
     A(rb_agdc_capability(b+1,RB_AGDC_CAP_SIZE,0,2)<0);
     A(rb_agdc_capability(b+1,RB_AGDC_CAP_SIZE,1,0)<0);
     A(!memcmp(b,original,sizeof b));
+    size_t out_size=RB_AGDC_VENDOR_SIZE;
+    /* Boot 156's next request has input data; it is an unimplemented
+     * operation, not a malformed vendor-info request. Refusals don't write. */
+    A(rb_agdc_reply(0x921,0xb0,b+1,&out_size,1,2)==RB_AGDC_UNSUPPORTED);
+    A(rb_agdc_reply(0x711,0x196c,b+1,&out_size,1,2)==RB_AGDC_UNSUPPORTED);
+    A(rb_agdc_reply(3,4,b+1,NULL,1,2)==RB_AGDC_UNSUPPORTED);
+    A(rb_agdc_reply(1,4,b+1,&out_size,1,2)==RB_AGDC_BAD_ARGUMENT);
+    A(rb_agdc_reply(0x980,1,b+1,&out_size,1,2)==RB_AGDC_BAD_ARGUMENT);
+    A(rb_agdc_reply(1,0,b+1,NULL,1,2)==RB_AGDC_BAD_ARGUMENT);
+    A(!memcmp(b,original,sizeof b) && out_size==RB_AGDC_VENDOR_SIZE);
+    A(rb_agdc_reply(1,0,b+1,&out_size,1,2)==0);
+    memset(b,0xa5,sizeof b);
     A(rb_agdc_vendor(b+1,RB_AGDC_VENDOR_SIZE)==0);
     A(b[0]==0xa5 && b[1+RB_AGDC_VENDOR_SIZE]==0xa5);
     const uint8_t *p=b+1;
@@ -34,7 +46,8 @@ int agdc_tests(void) {
     for (unsigned i=8; i<0x24; i++) A(p[i]==0);
     memset(b,0xa5,sizeof b);
     const uint64_t pci=0xffffff8001234567ULL, fb=0xffffff800abcdef0ULL;
-    A(rb_agdc_capability(b+1,RB_AGDC_CAP_SIZE,pci,fb)==0);
+    out_size=RB_AGDC_CAP_SIZE;
+    A(rb_agdc_reply(0x980,0,b+1,&out_size,pci,fb)==0);
     A(b[0]==0xa5 && b[sizeof b-1]==0xa5);
     A(le(p+0x20,4)==1 && le(p+0x30,4)==1);
     A(le(p+0x34,8)==pci && le(p+0x3c,8)==fb);

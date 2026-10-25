@@ -19,23 +19,23 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
-**BOOT 155 / 2rb: the AGDC bridge refused before registration, and its lookup
-bug is fixed.** Correct loaded build 902BE8B3, `iop_verify=1`, `agdc_error=1`;
-four valid kernel symbols were rejected because our helper selected Lilu's
-range-checking overload with range [0,0). The new resolver uses the
-two-argument API, explicit bounds for kext symbols, and records raw addresses
-+ `agdc_solved` (expect 0x3ff). Host regression passes and fails with the old
-overload. **New build 667372BC… needs the same user-run AGDC+IOP boot test.**
-No class/service was created in boot 155; rbgpu-agdc remained armed. The
-compositor sample was idle and INCONCLUSIVE. JOURNAL **2rb**.
+**BOOT 156 / 2rc: AGDC REGISTERED AND STARTED; PANEL FROZE.** Loaded
+667372BC matches, nonce 156, solved 0x3ff, started1, iop_verify1. Actual
+WindowServer vendor/capability queries4/1, all one-shots consumed, SSH and
+registry live. Next request **0x921 = getLinkConfig (0xb0-byte structure)**
+is unimplemented. Our blanket input-length guard hid its failure; 2rc fixes
+that and retains filter return codes. plugin_check now captures display logs
+and a root WindowServer sample. GPU progress errors are also present, not
+yet explained. **Next is boot-link timing/state and plane support; no repeat
+boot needed just for this diagnostic build.** JOURNAL **2rc**.
 
 **FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
 AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
-host-tested, **not yet boot-tested**. It clones the inherited AGDC tables,
+host-tested, **published and queried in boot 156**. It clones the inherited AGDC tables,
 supplies attributes 1/0x980 for our actual PCI/boot framebuffer, and retains
 Apple's entitlement and pointer-sanitization paths. **-rbgpuagdc + one-shot
-rbgpu-agdc**, off by default. Next: user-run installation and boot with the
-existing IOP gate experiment; full commands and verdicts in
+rbgpu-agdc**, off by default. Next: boot-link and plane protocol/backend
+implementation; activation commands and measured verdicts in
 `docs/SPEC-AGDC-BRIDGE.md`. No EFI/NVRAM was changed while implementing it.
 Do not divert this request into rendering loose threads again.
 

@@ -43,6 +43,8 @@ rb_ioreg() {   # rb_ioreg <seconds> <outfile> <ioreg args...>
 }
 
 args="$(nvram boot-args 2>/dev/null | cut -f2-)"
+printf '%s\n' "$args" > "$out/boot-args.txt"
+sysctl -n kern.bootsessionuuid > "$out/boot-session-uuid.txt" 2>/dev/null
 echo "boot-args: $args"
 case " $args " in *" -rbgpuoff "*) off=1; echo "  -rbgpuoff is set: the plugin should report itself disabled" ;; *) off=0 ;; esac
 
@@ -64,6 +66,27 @@ if [ -n "$built" ] && grep -q com.rembrandtgpu.plugin "$out/kexts.txt"; then
     grep com.rembrandtgpu.plugin "$out/kexts.txt" | grep -q "$built" \
         && echo "  loaded plugin = build/out (UUID $built)" \
         || echo "  NOTE: loaded plugin is NOT the current build/out (UUID $built): reinstall with sudo tools/efi.sh install"
+fi
+
+echo
+echo "--- display startup and GPU progress this boot"
+# 2rc: a frozen Apple logo can leave SSH and the entire registry responsive.
+# Keep the display's own errors with the same capture, before reboot loses
+# the live stack. Filtering only for RembrandtGPU missed this in boot 156.
+/usr/bin/log show --last boot --style compact --predicate \
+    '(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR eventMessage CONTAINS "checkGPUProgress"' \
+    > "$out/display-log.txt" 2> "$out/display-log-errors.txt"
+echo "  $(wc -l < "$out/display-log.txt" | tr -d ' ') display log lines saved"
+if [ "$(id -u)" = 0 ]; then
+    ws="$(pgrep -x WindowServer | head -1)"
+    if [ -n "$ws" ]; then
+        /usr/bin/sample "$ws" 3 -file "$out/ws-sample.txt" > "$out/ws-sample-status.txt" 2>&1
+        echo "  WindowServer sample: $out/ws-sample.txt (status in ws-sample-status.txt)"
+    else
+        echo "  WindowServer not running" > "$out/ws-sample-status.txt"
+    fi
+else
+    echo "  WindowServer sample skipped: requires root" > "$out/ws-sample-status.txt"
 fi
 
 echo

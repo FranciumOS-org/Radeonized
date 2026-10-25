@@ -40,4 +40,17 @@ static inline int rb_agdc_capability(void *out, size_t size,
     rb_agdc_put64(p+0x3c, framebuffer);
     return 0;
 }
+
+/* Validate only the operations we implement. Later AGDC operations legitimately
+ * have input data (e.g. 0x921 uses a 0xb0-byte input/output structure).
+ * Classifying those as malformed hides the missing operation. */
+#define RB_AGDC_BAD_ARGUMENT (-1)
+#define RB_AGDC_UNSUPPORTED  (-2)
+static inline int rb_agdc_reply(unsigned attr, size_t in_size, void *out,
+                                size_t *out_size, uint64_t pci, uint64_t fb) {
+    if (attr != 1 && attr != 0x980) return RB_AGDC_UNSUPPORTED;
+    if (in_size || !out_size) return RB_AGDC_BAD_ARGUMENT;
+    return attr == 1 ? rb_agdc_vendor(out,*out_size)
+                     : rb_agdc_capability(out,*out_size,pci,fb);
+}
 #endif
