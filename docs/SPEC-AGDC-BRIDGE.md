@@ -5,14 +5,50 @@ The four-argument Lilu symbol solver treated kernel lookups as range [0,0),
 so the four kernel functions all resolved to zero. The new lookup uses the
 two-argument resolver, records each raw result, and applies explicit bounds
 only to kext symbols. Its regression test fails with the old overload.
-The corrected build still needs a user-run boot test. This supplies the missing service
-at the measured IOPresentment blocker; it does not implement DCN mode setting.
+Boot 156 verified the corrected build's publication and user-client queries,
+but the panel froze at the next protocol step. The bridge supplies the missing
+service; it does not implement DCN mode setting.
 
-`AppleGPUWrangler` is the only existing `AppleGraphicsDeviceControl` service,
+Before the bridge, `AppleGPUWrangler` was the only matching AGDC service,
 and IOPresentment explicitly skips it. The new **RembrandtGPUAGDC** service
 attaches to the real 1002:1681 PCI device and reports the existing
 `IONDRVFramebuffer` as its one framebuffer. It leaves that framebuffer in
 control of the panel.
+
+## Boot 156: publication proven, presentation incomplete
+
+The 2rb build (667372BC) registered and started the service, and WindowServer
+queried attributes 1/0x980. The panel retained the Apple logo; SSH and registry
+walks remained responsive. All experiment one-shots cleared. This is not a
+successful display backend. Do not repeat this experiment just for 2rc's
+diagnostic rebuild.
+
+The last recorded user request was **0x921**. IOPresentment's
+`__GatherAGDCLogicalDeviceCapabilities` (0x7ff812e9781a) submits a **0xb0-byte
+input/output** structure whose first word selects the framebuffer. Apple's
+AMD vendor dispatch, table at 0xbfec050 entry 1, leads via 0xbfebd9f to
+**getLinkConfig (0xc009184)**. It checks the selected framebuffer against
+the capability framebuffer count and returns **AGDCLinkConfig_t**: flags at
++0x08, timing fields at +0x10..+0x9b, stream address at +0xa4 and translated
+stream state at +0xac. These need the real boot pipe's state. An offline
+all-zero reply cannot describe the running panel.
+
+After that query succeeds, IOPresentment calls
+`__GatherAGDCDisplayPipelineCapabilities` (0x7ff812e979dc), using **0x711**
+and a **0x196c-byte input/output** structure. Apple's dispatch maps it to
+`getFbExtendedCapability`. Capability dictionaries must describe implemented
+plane operations; the actual bind/transaction/scanout backend is still needed.
+Neither this stage nor a page flip was established in boot 156.
+
+2rc removes the vendor callback's blanket input-length rejection. Supported
+attributes still require their exact valid sizes; unknown operations return
+Unsupported without modifying output. Vendor attribute/input/output sizes
+are recorded before dispatch. `agdc_last_ret`, `agdc_failed_attr/ret` and
+`agdc_logical_calls/in/out/ret` record Apple's filtered result, including
+refusals that never reach the vendor callback. The old `unsupported=3` was
+not the next missing operation: nonzero-input requests returned before that
+key was updated. plugin_check now preserves boot arguments, boot-session UUID,
+display logs and (when root) a three-second WindowServer sample.
 
 ## Implementation
 
@@ -72,7 +108,7 @@ one-shot are required. The one-shot must clear through the existing
 fail-closed helper before even the filtered hook is placed. No EFI or NVRAM
 setting was changed while implementing this. The bridge contains no DCN
 register writes, but newly reachable Apple presentation paths can still hang
-or blank the panel; they have not been tested.
+or blank the panel; boot 156 retained the Apple logo.
 
 The user runs installation/reboot, per CLAUDE.md. This test also needs the
 already verified IOP vendor-gate patch armed in the same boot:

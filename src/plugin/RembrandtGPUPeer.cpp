@@ -758,6 +758,8 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // failed login boot still distinguishes refusal, registration and start.
     "agdc_on", "agdc_error", "agdc_solved", "agdc_stage", "agdc_oneshot", "agdc_started",
     "agdc_user_vendor", "agdc_user_cap",
+    "agdc_last_attr", "agdc_last_ret", "agdc_failed_attr", "agdc_failed_ret",
+    "agdc_logical_calls", "agdc_logical_ret",
     // 2qo: THE frontier, and the first change here that is EXPECTED to be able
     // to end in a login screen that never appears - so these must survive a
     // boot with no usable screen, which is the whole reason this list exists.

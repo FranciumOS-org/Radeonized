@@ -1,3 +1,20 @@
+> **BOOT 156 / 2rc: AGDC PUBLISHED; DISPLAY FROZE AT THE NEXT PROTOCOL STEP.**
+> Capture `logs/20261025-174221-plugin`, UUID **667372BC…**, nonce 155→156:
+> `agdc_solved=0x3ff`, `agdc_mc_ok=1`, `agdc_started=1`, `iop_verify=1`.
+> WindowServer queried vendor info four times and GPU capability once. All
+> three one-shots cleared. SSH and registry remained live; the panel retained
+> the Apple logo. The last user request was **0x921**, which Apple's AMD
+> dispatch identifies as **getLinkConfig (0xb0-byte AGDCLinkConfig_t)**.
+> The bridge's blanket input-length rejection hid this missing operation;
+> 2rc fixes classification and records vendor inputs plus filter returns.
+> Recovered WindowServer logs show absent capabilities; GPU progress errors
+> also occurred, so do not claim the whole stall is explained. **Next: real
+> boot-link timing/state for 0x921, then 0x711 plane capabilities and the
+> actual presentation backend.** The current build only repairs diagnostics;
+> another AGDC+IOP boot is not needed yet. plugin_check now saves display
+> logs and a root WindowServer sample automatically. JOURNAL **2rc**.
+>
+
 > **BOOT 155 / 2rb: RIGHT BUILD, BRIDGE REFUSED; THE LOOKUP BUG IS FIXED.**
 > Capture `logs/20261025-173030-plugin`: loaded 902BE8B3 matches the built
 > kext, boot 154→155, `iop_verify=1`, `agdc_error=1`, and rbgpu-agdc still 1.
