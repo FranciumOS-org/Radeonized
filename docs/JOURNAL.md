@@ -28137,3 +28137,224 @@ attempting a create. That is the thing to read next.
 with its own diagnostic text. Only the sentence about the pool was wrong, and
 it was wrong in the same way three earlier sentences in this session were -
 an offset comparison treated as control flow.
+
+## 2ql - BOTH of CoreDisplay's surface paths are closed, and the second one is closed by a CLASS NAME
+
+2qk's correction left one question: which of `Display::GetNextSurface`'s two
+sret writes executes, i.e. does the desktop's surface come from the legacy
+`CGXAcquireDisplayDeviceSurface` or from `DisplaySurfacePool`.  The answer is
+in the function's first twenty instructions, and it is not a subtle one.
+
+`CoreDisplay::Display::GetNextSurface` (unslid **0x7ff80408bf86**) opens with
+two gates and nothing else:
+
+```
+0x7ff80408bfd2   callq CoreDisplay::UseIOPresentment()
+0x7ff80408bfd7   testb %al,%al ; je 0x7ff80408c04e      -> LEGACY
+0x7ff80408bfdb   cmpb  $0x1, [0x7ff843bac773]           -> ("displaySurfaceUsesIOSurface")
+0x7ff80408bfe2   jne   0x7ff80408c04e                   -> LEGACY
+                 fall through to 0x7ff80408bfe4          -> DisplaySurfacePool
+```
+
+`0x7ff80408c04e` loads `dev->0x68` and calls **`CGXAcquireDisplayDeviceSurface`**
+(0x7ff80411cc8d, symbolized, not inferred), then `operator new(0x1a0)` and the
+sret write at `0x7ff80408c262` - 2qk's first write, the dead path.  The
+fall-through walks the hw-mirror-loop list at `dev->0xb0`, reaches
+`0x7ff80408c291`, builds a `DisplaySurfacePool` (0x7ff80413403c) and ends at
+the other sret write, `0x7ff80408c489`.  **So the two writes are the two
+gates, and the gate decides.**
+
+Gate 2 is already satisfied and was already measured: byte `0x7ff843bac773` is
+the preference **`displaySurfaceUsesIOSurface`**, which boot 149's os_state
+dump printed as **1**.  Gate 1 is the one that fails.
+
+### `UseIOPresentment()`, read instruction by instruction
+
+`0x7ff804057b40`:
+
+```
+al = gUseIOP                                  ; byte 0x7ff843bac76d  ("useIOP")
+if (al != 1) return al & 1;
+supported = (useIOP_onIG      ? 0x02 : 0)     ; byte 0x7ff843bac76e
+          | (useIOP_onAMD     ? 0x04 : 0)     ; byte 0x7ff843bad282
+          | (useIOP_onNVIDIA  ? 0x08 : 0)     ; byte 0x7ff843bad281
+          | (useIOP_onAPV     ? 0x10 : 0);    ; byte 0x7ff843bad283
+present = gSystemGPUVendors;                  ; int  0x7ff843bb1d64
+if (present == 0 || (supported & present) != present) { gUseIOP = 0; return 0; }
+return gUseIOP;
+```
+
+All five bytes are CFPreferences booleans in the domain
+**`com.apple.CoreDisplay`**, read by `CGXMappedDisplayStart+950..1050` through
+one helper (`0x7ff80405597a` = `CFPreferencesCopyValue` +
+`CFGetTypeID == CFBooleanGetTypeID` + `CFBooleanGetValue`).  The whole key
+table was read out of the cache: `enableWSAA{,_onNVIDIA,_onAMD,_onAPV,_onIG}`,
+`useIOP{,_onNVIDIA,_onAMD,_onAPV,_onIG}`, `useIOP_gamma_on*`, `useIOSurfaceLog`,
+**`displaySurfaceUsesIOSurface`**, `muxSwitchPresentUsesVSync`, `useMetal`,
+`enableGTrace`, `enableStateDump`, `enableDataDump`, `convert10BitSurface`.
+`displaySurfaceUsesIOSurface` being in that table *and* in the os_state dump is
+the control that the table is the live one.
+
+**The default is 1, not 0** - worth stating because the cache image's static
+initializers are misleading.  All five `useIOP*` reads pass the same default,
+`[0x7ff843bad260]`, a function-local static (guard byte `bad268`) filled from
+`[0x7ff843bad738]`, and the only writer of `bad738` is the block in
+`CoreDisplay::VorpalBlade()` at **0x7ff8040598b7**, which stores `$1`
+**unconditionally** - every path through the block, including both early
+`je`s, falls into the store.  So on a stock machine with no keys set,
+`supported = 0x1e`.
+
+### `present` is built from the framebuffer's CLASS NAME
+
+`__GetSystemGPUVendors_block_invoke` (0x7ff80412ce2c):
+`IOServiceGetMatchingServices(IOServiceMatching("IOFramebuffer"))`, and for
+each service `0x7ff80412cc38` does **`IOObjectCopyClass`** (stub symbolized)
+and four `CFStringFind`s:
+
+| needle in the class name | bit |
+|---|---|
+| `Intel` | 0x02 |
+| `AMD` | 0x04 |
+| `NVDA` | 0x08 |
+| `AppleParavirt` | 0x10 |
+| **no match** | **0x01** |
+
+If the iterator is empty at all, the block does `andb $0xfe` and clears bit 0.
+
+**The asymmetry is the whole finding: `supported` is assembled only from bits
+0x02/0x04/0x08/0x10, so bit 0x01 can never be in it.**  One unclassifiable
+IOFramebuffer makes `(supported & present) != present` hold for every possible
+value of every preference.
+
+### Measured, non-root, in one second: `make useiop`
+
+```
+IONDRVFramebuffer   name=.Display_boot   -> bit 0x01   <-- UNKNOWN VENDOR
+present mask = 0x01  (1 framebuffer)
+supported mask = 0x1e
+reproduced UseIOPresentment() = 0   (a present vendor is not in the supported set)
+```
+
+**Our only IOFramebuffer is `IONDRVFramebuffer`, and "IONDRVFramebuffer"
+contains none of Intel / AMD / NVDA / AppleParavirt.**  On a real Mac with this
+GPU family the framebuffer is Apple's **`AMDFramebuffer`** (the class exists -
+it is in `build/re/`), whose name contains `AMD`, so `present = 0x04` (plus
+`0x02` for an Intel iGPU), `supported = 0x1e` covers it, and IOPresentment is
+on.  That is the single discriminator between this machine and a supported one.
+
+**RULE 14, stated against my own tool:** `CoreDisplay::UseIOPresentment` *is*
+exported and `useiop` calls it, and it returns 0 - but that is **not** a
+cross-check and the tool now says so in its own output.  In a client process
+`CGXMappedDisplayStart` never ran, so `gSystemGPUVendors` is still 0 and
+Apple's function returns 0 from its `present == 0` branch: the right answer for
+the wrong reason.  The first version of the tool printed `agree.` and that line
+was hollow; it was removed.  What *is* process-independent and is the real
+measurement is section 1 - `IOObjectCopyClass` on the live services.
+
+### Forcing the gate is NOT the fix
+
+`UseIOPresentment` has **72 direct call sites** in CoreDisplay:
+`MPRebuildDevice` (x5), `setup_hardware`, `displayConnectChange` (x3),
+`displayDidWake` (x2), `displayAliasActivate` (x4), `DisplayPipe::Commit` (x2),
+`CGXMappedDisplayStart` (x4), `CGXAcquireDisplayDeviceSurface` (x2),
+`CGXReleaseDisplayDeviceSurface`, `CGXShutdownDisplays`, `set_gamma_transfer`,
+`generate_update`, `resetPageFlipState`, `UpdateDisplayAccelerators`,
+`__WSMachineUsesNewStyleMirroring_block_invoke`, `MPHWCopyPixels`,
+`UseIOPGamma`, `update_gl_acceleration`, `mp_display_will_sleep_common`.
+It does not select a surface allocator - it selects **the entire presentment
+world**, the one that talks to the `IOPresentment*` kernel API
+(`IOPresentmentBindIOAccelSurfaceToResource`, `IOPresentmentSetPlaneState`,
+`IOPresentmentDestroyResource`, all three present as DYLD stubs in CoreDisplay).
+`IONDRVFramebuffer` implements none of it.  Patching this one function true in
+WindowServer - which the `-rbgpumtlkfix` machinery could do, and could do more
+cheaply than the Metal detour because `UseIOPresentment`'s first instruction is
+a 6-byte `mov r8<-m` with no branch inside it - would switch 72 call sites into
+a stack that is not there.  **Do not propose it.**
+
+### Why the legacy path is dead too, mechanically this time
+
+2qk established *that* `IOAccelSurface::set_id_mode` rejects ids below 256.
+The missing half is *why the base-class implementation runs at all*, since
+there are three:
+
+```
+IOAccelSurface::set_id_mode        0x14e48cac   cmpl $0xff, %r14d  -> 0xe00002c2
+IOAccelSurfaceMTL::set_id_mode     0x14e22560
+IOAccelLegacySurface::set_id_mode  0x14e27202
+```
+
+**Neither override calls the base** - checked by disassembling both and
+searching for a call to `0x14e48cac`; there is none.  So the base ran because
+the object's class does not override it.  `IOGraphicsAccelerator2::newUserClient`
+(`0x14e512aa`) switches on the IOServiceOpen `type`, and the jump table at
+`0x14e51ab8` was decoded rather than guessed:
+
+```
+type 0   -> 0x14e51560:  this->vt[0xa30]()            then IOAccelSurface::init
+type 0x20 -> 0x14e51806: operator new(0x340)
+                         IOAccelSurfaceMTL()          then IOAccelSurfaceMTL::init
+type 0x21 -> IOAccelMemoryInfoUserClient
+```
+
+There is **no `IOGraphicsAccelerator2::newSurface`** - only `newSurfaceMTL` -
+so slot `0xa30` is the vendor's.  Apple's AMD driver supplies it:
+
+```
+AMDRadeonX6000_AMDGraphicsAccelerator::newSurface()   0xbe3ed98
+    if (!(this->0x1f10 & 0x20)) return NULL;
+    return new AMDRadeonX6000_AMDAccelSurface();       // 0x1358 bytes
+```
+
+and `AMDRadeonX6000_AMDAccelSurface` **does not override `set_id_mode`** (its
+full symbol list has `surfaceStart`, `surfaceStop`, `shapeSurface`,
+`copyToBuffer`, `submitSwapCopy`, `getSurfaceModeDepthFormat` and no
+`set_id_mode`).  So:
+
+- **legacy** `IOAccelCreateSurface` -> type 0 -> `AMDRadeonX6000_AMDAccelSurface`
+  -> inherited `IOAccelSurface::set_id_mode` -> **id must be >= 256**, and
+  `MPAcquireSurfaceID` can only ever return 0..255 -> unsatisfiable.
+- **Metal** -> type 0x20 -> `IOAccelSurfaceMTL` -> its own `set_id_mode`, which
+  has no id check at all (its tests are `cmpl %r15d,%ecx`, `cmpl $0xc,%edx`,
+  `cmpl $-0x20,%r9d`).
+
+Incidentally this confirms the surface *was* created: `newSurface` returning
+NULL makes `newUserClient` return `kIOReturnNoResources (0xe00002be)`, and we
+measured `kIOReturnBadArgument (0xe00002c2)` from `set_id_mode` - so
+`accel->0x1f10 & 0x20` is set and that gate is fine.
+
+### Where this leaves the display half
+
+Both branches of the one function that produces the desktop's surface are
+closed, by two independent Apple decisions:
+
+1. the legacy MP path by an id check no caller of it can satisfy, and
+2. the IOPresentment path by a class-name vendor test that `IONDRVFramebuffer`
+   cannot pass.
+
+No preference, no boot-arg and no hook on either of them changes that. The
+single thing that opens path 2 is **an `IOFramebuffer` whose class name
+contains "AMD"** - which is exactly the subclassed framebuffer 2oz built,
+compiled, and then ruled out, not on capability but on kernel-collection
+placement: IOGraphicsFamily lives in SystemKernelExtensions.kc and OpenCore
+injects us into BootKernelExtensions.kc.  **2oz's conclusion ("own the methods
+instead of subclassing") is therefore not equivalent after all** - routing
+`IONDRVFramebuffer`'s methods can change what it *reports*, but nothing routed
+on an instance changes what `IOObjectCopyClass` returns for it, because that is
+`getMetaClass()->getClassName()` on the shared `IONDRVFramebuffer` OSMetaClass.
+That is the thing to re-open, and it is a real decision rather than another
+read: either find a load path that can depend on IOGraphicsFamily, or decide
+the display half stays software.
+
+Also retired by this milestone: the 2qk-correction's open question about
+`DisplaySurfacePool::GetNextSurface`'s reuse path.  The pool is never reached,
+so why it might hand back a NULL-backed surface is moot; the `cmpq $0x0,
+0x20(%rbp)` reuse branch at `0x7ff804134316` was never the question.
+
+### Added
+
+`tools/useiop.m` + `make useiop` - non-root, one second, no boot.  Prints every
+IOFramebuffer with the bit its class name earns, the five preferences with
+whether each was found or defaulted, the reproduced verdict with the branch
+named, and a verdict that distinguishes "a preference is wrong" (fixable) from
+"a framebuffer is unclassifiable" (not).  Exit codes: 0 IOPresentment is on,
+1 unknown-vendor framebuffer, 2 a preference, 3 inconclusive.

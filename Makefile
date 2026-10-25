@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -187,6 +187,16 @@ skyshaders: $(OUT)/skyshaders
 $(OUT)/skyshaders: tools/skyshaders.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
 	      -framework IOKit
+
+# useiop (2ql): the ORACLE for the gate that picks between CoreDisplay's two
+# surface worlds.  Display::GetNextSurface calls UseIOPresentment() and falls
+# back to the legacy CGXAcquireDisplayDeviceSurface path - the one 2qk proved
+# dead - whenever it is false.  Reproduces that function exactly, including
+# the IOObjectCopyClass vendor classifier, and calls Apple's own if it is
+# exported so the two can be compared (rule 14).
+useiop: $(OUT)/useiop
+$(OUT)/useiop: tools/useiop.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework IOKit
 
 # cdchain (2qc): CALL the ops-table thunks the compositor decision calls,
 # rather than reading a field out of a state dump. Arity of each was read
