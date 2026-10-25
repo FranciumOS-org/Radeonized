@@ -30574,3 +30574,254 @@ Two bounded, boot-free reads, in this order:
 
 Only after both is it known what supplying this would mean. Nothing here is a
 pixel, and no boot was spent.
+
+---
+
+## 2r5 — both of 2r4's reads, answered: the map is EMPTY, and "selector 1" is an AGDC device attribute
+
+No boot. One new oracle (`make agdcinfo`), run non-root in a second.
+
+### 1. What `%r13d` holds — and the enclosing function is not the one 2r4 named
+
+Symbolized with `atos` (slide measured this run, 0x6137000) after teaching
+`dscsym.sh`/`dscsym_many.sh` to dlopen IOPresentment and IOKit and giving
+`dscinv.sh` an `IOPresentment` case — **449 functions**:
+
+```
+0x7ff812e8ad03 -> ioPresentmentCreateAssociationMap(sioPresentmentDeviceMap**) + 1491
+```
+
+So the function running at 2r4's addresses is
+**`ioPresentmentCreateAssociationMap`** (`0x7ff812e8a730`, 0x18dc bytes), not
+`ioPresentmentFindAGDCMatch`. That name survives only as the **os_log function
+string** at `0x7ff812ea14f7`, which every log site in the inlined helper
+passes as its `%s` — the helper was inlined into its caller. 2r4 read the
+string correctly and attributed the code to it; the enclosing symbol is the
+association-map builder, which is a more useful fact, because that map is
+exactly what `IOPresentmentCreateForRegistryID` searches.
+
+The query, read instruction by instruction, every stub resolved by
+chained-pointer decode + `atos` (14 of them: `IOServiceMatching`,
+`IOServiceGetMatchingServices`, `IOIteratorIsValid`, `IOIteratorNext`,
+`IOServiceOpen`, `IOConnectCallMethod`, `IOServiceClose`, `IOObjectRelease`,
+`IOObjectRetain`, `IORegistryEntryGetName`,
+`IORegistryEntryGetRegistryEntryID`, `IOMasterPort`, `os_log_type_enabled`,
+`_os_log_impl`):
+
+```
+7ff812e8ac33   lea   "AppleGraphicsDeviceControl" ; -> IOServiceMatching
+7ff812e8ac4e   call  IOServiceGetMatchingServices ; else log "gms %#x"
+7ff812e8acb8   call  IOIteratorIsValid            ; must == 1
+7ff812e8acc9   call  IOIteratorNext               ; -> %r13d   <-- THE ANSWER
+7ff812e8ad67   call  IORegistryEntryGetName
+7ff812e8ad73   movabsq $0x72656c676e617257       ; "Wrangler"
+7ff812e8ad87   movabsq $0x555047656c707041       ; "AppleGPU"
+7ff812e8ad94   movzbl -0x2500(%rbp)              ; the NUL at [16]
+7ff812e8ada1   je    7ff812e8af98                ; name == "AppleGPUWrangler" -> SKIP
+7ff812e8adb1   call  IORegistryEntryGetRegistryEntryID
+7ff812e8ad12   call  IOServiceOpen(svc, mach_task_self_, 2, &conn)
+7ff812e8ae54   call  IOConnectCallMethod(conn, 1, …, out, &outLen)
+7ff812e8ae6a   movl  -0xf8(%rbp), %eax ; out+0x28
+7ff812e8ae72   cmpl  $0x1, %eax
+7ff812e8ae75   ja    <skip>                      ; out+0x28 must be 1 or 2
+7ff812e8afc9   …record (service, registryID) in the map, stride 0x30, max 16
+```
+
+**`%r13d` is a service matching the CLASS `AppleGraphicsDeviceControl`** —
+`IOServiceMatching` sets `IOProviderClass`, which matches by `metaCast`, so
+subclasses qualify — **minus the one named `AppleGPUWrangler`**, rejected by an
+exact 17-byte compare done as three xors.
+
+### 2. Measured live, non-root: there is exactly ONE, and it is the wrangler
+
+`make agdcinfo` reproduces that query byte for byte, including the name test
+written the way the code writes it rather than as `strcmp`:
+
+```
+[1] name="AppleGPUWrangler" class=AppleGPUWrangler registryID=0x100000537
+    -> SKIPPED by the name test
+matched 1, skipped 1, candidates 0
+```
+
+So **`AppleGPUWrangler` IS an `AppleGraphicsDeviceControl` subclass** — which
+also explains why the wrangler imports `AppleGraphicsDeviceControl::gMetaClass`
+and both AGDC constructors (2r0 read the imports and guessed subclasses; this
+measures it) — and **`AppleGraphicsDeviceControlPlugin` is NOT**: it is live
+(`id 0x100000545, registered, matched, active`) and does **not** appear in the
+match. Control for the instrument (rule 26): `ioreg -c IOUserClient -r -d1`
+matches **431** services, none of which is exactly an `IOUserClient`, so `-c`
+does follow the superclass chain. (My first control was `-c IOUserClient -d1`
+without `-r`, which prints only the root and proved nothing — the depth is
+measured from wherever the tree is rooted.)
+
+**Zero candidates survive. The association map is EMPTY.**
+
+### 3. `0x10000003` is MACH_SEND_INVALID_DEST — a send to port 0
+
+Not an `IOReturn` and **not** a user-client status, as 2r4 supposed:
+
+```
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/mach/message.h:807
+#define MACH_SEND_INVALID_DEST          0x10000003
+```
+
+And the chain that produces it is complete. There are **three** LEA sites to
+the error string `0x7ff812ea2880` (cache-wide `ripall`, 7 mappings), each in a
+distinct outlined cold block, each with exactly one caller
+(`dsc.py callxref`):
+
+| cold block | caller | enclosing function |
+|---|---|---|
+| `0x7ff812e9f34b` (`.cold.1`) | `0x7ff812e8aee1` | `ioPresentmentCreateAssociationMap` — the selector-1 failure |
+| `0x7ff812e9f3af` (`.cold.3`) | `0x7ff812e8b6d5` | `ioPresentmentCreateAssociationMap` — the **IOServiceOpen** failure |
+| `0x7ff812e9f617` (`.cold.2`) | `0x7ff812e8c50b` | `IOPresentment::IOPresentmentCreateForRegistryID` |
+
+The second inlined query is **`ioPresentmentPopulateIOFramebufferEntries`**
+(its own os_log name string, `0x7ff812ea15e8`). It looks a framebuffer's GPU up
+in the map built by the first — stride 0x30, matched on registry ID at
+`0x18(%rdi,%rsi)` — and when there is no entry it leaves the service id **0**
+(`movl $0x0, -0x2578(%rbp)` at `0x7ff812e8b3be`) and opens *that*:
+
+```
+7ff812e8b6a3   call  IOServiceOpen(-0x2578(%rbp), mach_task_self_, 2, &conn)
+7ff812e8b6d5   call  7ff812e9f3af    ; -> "Unable to get AGDC information. %#x"
+```
+
+The tool's control closes it:
+`IOServiceOpen(MACH_PORT_NULL, mach_task_self(), 2, &c)` returns **exactly
+`0x10000003`**. So boot 150's
+`(IOPresentment) Error: Unable to get AGDC information.  Return code: 0x10000003`
+is **a mach send to port 0 because the association map is empty** — not a
+misbehaving user client, and not a missing property. Those would need different
+repairs; this one needs a *second AGDC service*.
+
+### 4. The two selectors name themselves — and 2r1 is half-corrected
+
+The os_log format strings on these calls' own paths:
+
+| VA | string |
+|---|---|
+| `0x7ff812ea1512` | `kAGDCVendorInfo %#x %#x %#zx` |
+| `0x7ff812ea15ca` | `kAGDCVendorInfo %#llx %#x %#x` |
+| `0x7ff812ea1667` | `kAGDCVendorInfo failed %#llx %#x %#zx` |
+| `0x7ff812ea1625` | `kAGDCGPUCapability %#llx %zu %u` |
+| `0x7ff812ea1645` | `kAGDCGPUCapability %#llx %#x %#zx` |
+
+So **selector 1 is `kAGDCVendorInfo`** (0x2c-byte reply, `+0x28` ∈ {1,2},
+a u16 at `+0x24`) and **selector 0x980 is `kAGDCGPUCapability`** (0xdc-byte
+reply, non-zero count at `+0x30`, then 8-byte entries from `+0x3c`).
+2r1 was right that those names appear **0 times** in `AppleGPUWrangler` and
+`AppleGraphicsDeviceControl`; it was wrong to conclude the names were only
+2qm's reading of a string table. They are IOPresentment's own labels for these
+two calls, printed three bytes from the failing branch. 2qr's *motivation* is
+restored; 2r1's *measurement* stands unchanged.
+
+### 5. The kernel side: there is no "type-2 user client" to implement
+
+`AppleGraphicsDeviceControl::newUserClient(task, secID, type, props, &out)`
+(`0x13dfd45e`, symbols intact in this kext) has **no switch on `type` at all**
+— unlike `IOGraphicsAccelerator2::newUserClient`, which 2ql decoded as a jump
+table. It is IOService's canonical implementation with two changes:
+
+```
+prop = this->copyProperty(gIOUserClientClassKey)      ; vt[0x2a8]
+  cast to OSSymbol, else cast to OSString -> OSSymbol::withString
+                                          -> this->setProperty (vt[0x258])
+  neither                                 -> kIOReturnUnsupported 0xE00002C7
+obj = OSMetaClass::allocClassWithName(sym)             ; NULL -> 0xE00002BD
+safeMetaCast(obj, AppleGraphicsDeviceControlClient::metaClass) ; NULL -> 0xE00002C7
+obj->vt[0x8e8](task, secID, TYPE)   ; initWithTask     ; false -> 0xE00002BC
+obj->vt[0x960](this, task, TYPE)    ; authorizeTask    ; false -> 0xE00002E2
+obj->vt[0x670](this)                ; attach           ; false -> 0xE00002BC
+obj->vt[0x5c0](this)                ; start            ; false -> 0xE00002BC
+*out = obj; return 0
+```
+
+`gIOUserClientClassKey` identified by measurement, not by resemblance: the
+wrangler's own `IOUserClientClass` property reads **`AppleGPUWranglerClient`**
+in ioreg. And `0xE00002E2` from `authorizeTask` is exactly what `agdcinfo`
+measured unprivileged, so that constant is now placed.
+
+**And "selector N" is not a dispatch index.**
+`AppleGraphicsDeviceControlClient::externalMethod` (`0x13dfae20`) builds an
+`AGDCClientState_t` from `client+0xf0..0x120` with the
+`IOExternalMethodArguments*` at `state+0x38`, then forwards **every** selector
+to `AppleGraphicsDeviceControl::UserKernelTransfer(selector, state)`
+(`0x13dfd600`), which unwraps the arguments —
+`structureOutputDescriptor` at `args+0x68` else `structureOutputSize` at
+`+0x60`; `structureInputDescriptor` at `+0x40` else `structureInputSize` at
+`+0x38`; both ≤ 0x4000000 or `0xE00002EA`; `prepare`/`map`/`getVirtualAddress`
+for the descriptor cases — and calls
+
+```
+filtered_doDeviceAttribute(api = 3, attribute = selector, in, inLen, out, &outLen, state)
+```
+
+`agdc_filtered_api_t` complete, from the four callers:
+**0 = getDeviceAttribute, 1 = setDeviceAttribute, 2 = doDeviceAttribute,
+3 = UserKernelTransfer.**
+
+So **IOPresentment's "selector 1" and "selector 0x980" are AGDC device
+attributes 1 and 0x980**, and the thing to implement is the attribute
+protocol, not a user client.
+
+In `filtered_doDeviceAttribute` (`0x13dfbf02`), the two differ:
+
+- **0x980 (`kAGDCGPUCapability`)** is handled explicitly (`0x13dfc29e`):
+  `bzero(local, 0xdc)`, require a state and `*outLen == 0xdc`, then call
+  **virtual slot `0x858`** with `(0x980, in, inLen, &local, &outLen)`. A
+  vendor subclass must implement that slot. (`vendor_doDeviceAttribute`,
+  `0x13dfd3d4`, is the sibling that calls **slot `0x850`**.)
+- **1 (`kAGDCVendorInfo`)** is **not** in the explicit list. The `attr <= 0x7f`
+  group (`0x13dfc40a`) handles only **3, 0x10 and 0x20**, so attribute 1 falls
+  to the default at `0x13dfd1f1`, which takes an `IORecursiveLock`, indexes a
+  16-slot plugin table at `0x13e00940` by `(attr >> 2) & 0x3c0` — slot **0**
+  for attribute 1 — retains the plugin there, requires the slot's `+0x18`
+  (max attribute) ≥ attr, requires `agdc->0xa0` **and** `agdc->0xa8` non-NULL
+  (else `0xE00002D8`), and then calls
+  **`AGDCPlugin::doPluginAttribute(agdc, attr, in, inLen, out, outLen, state)`**.
+
+Two side confirmations fell out. Attribute **0x301** at `0x13dfc474` is
+`movzwl (%r10),%eax; movw %ax,0xb0(%rdi)` — **2r1's reading of the wrangler's
+`0x301` call as a SET that pushes the GPU id INTO AGDC, confirmed from AGDC's
+own side.** And live, `ioreg -c AGDCPlugin -r -d1` matches exactly one service,
+**`AGDCPluginDisplayMetrics`** (`!registered, !matched`), while
+`AppleGraphicsDeviceControlPlugin` is not an `AGDCPlugin` at all.
+
+### What this costs, stated before anyone starts building
+
+`__ZTV26AppleGraphicsDeviceControl` spans `0x13dff478`..`0x13dffd30` = **0x8b8
+bytes = 279 pointers**, so a subclass needs a ~277-method instance vtable plus
+the metaclass vtable 2qy showed is also required (its `alloc()` is pure virtual
+on the base). That is on top of implementing the attribute protocol — at
+minimum slot `0x858` for `kAGDCGPUCapability` and a plugin path for
+`kAGDCVendorInfo` — in a class whose superclass lives in a different kernel
+collection, i.e. through 2qy's runtime-metaclass route, with Apple's code
+calling our methods and **no fail-safe**. `SCOPE-FRAMEBUFFER.md` §6 counted one
+vtable for a smaller class; this is strictly larger.
+
+And it still does not answer what 2qn proved no client probe can:
+whether IOPresentment works *past* the gate, since `IONDRVFramebuffer`
+implements neither `IOPresentmentBindIOAccelSurfaceToResource` nor
+`SetPlaneState`.
+
+### Tooling
+
+- `dscsym.sh` / `dscsym_many.sh` dlopen IOPresentment and IOKit; a failed
+  dlopen prints and is skipped rather than silently renaming every address.
+- `dscinv.sh IOPresentment` (base `0x7FF812E88000`, len `0x1C000` from
+  `dyld_info -segments`): 449 functions.
+- `make agdcinfo` — the oracle above. Its two load-bearing answers need no
+  root; the third (would the wrangler itself answer attribute 1?) returned
+  `kIOReturnNotPermitted` unprivileged, as the tool pre-stated, and needs
+  `sudo ./build/out/agdcinfo` to be decided.
+
+### Next
+
+The display half is now closed as a **decision**, not a read. Either accept
+2ql's verdict and leave the desktop on software compositing, or take on a
+~277-slot runtime `AppleGraphicsDeviceControl` subclass that also implements
+the attribute protocol — with the post-gate question still open behind it.
+One cheap thing is left and it is the user's to run:
+`sudo ./build/out/agdcinfo`, which says whether an AGDC user client on this
+machine answers attribute 1 at all.
