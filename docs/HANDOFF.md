@@ -891,17 +891,28 @@ Extracted kexts in `build/re/`: `AMDRadeonX6000`, `AMDRadeonX6800HWLibs`,
 
 ## 6. Open, unexplained, owed
 
-- **`rbgpu-vmid` reads `av=N fail=N` equal** — every `assignVMID` reports
-  failure by the hook's own criterion while VMIDs are plainly handed out.
-  `fail` has never been read against the code that sets it. The 2ha rule
-  applies: a return code is not a result until the code that sets it has been
-  read.
+- ~~**`rbgpu-vmid` reads `av=N fail=N` equal.**~~ **PAID AND RETRACTED (2r7).**
+  `AMDRadeonX6000_AMDHWVMM::assignVMID` (`0xbe91376`) has exactly **one**
+  `retq` (`0xbe914f3`), and the instruction before it is `movb $0x1, %al`
+  (`0xbe914e3`), reached from every path. **It returns `bool` and always
+  returns true**, so there is no failure return to count: `av == fail` meant
+  *every call succeeded*. The hook declared the return `uint32_t`, which the
+  mangled name does not carry, and the SysV ABI defines only `%al` for a bool
+  — so the upper bits were the previous computation's (the assigned VMID),
+  which is why `fail` could read a value that was not even 1. Exactly 2ha.
+  The counter is kept under its old key, now counting `r == false`, which the
+  disassembly says cannot happen: a nonzero `fail` is now real news that the
+  driver changed.
 - **`gfx_min = gfx_max = 0`** since 2di: the SMU reports no GFX clock range,
   GFX DPM never started. 2hl measured the CP clocked and executing, so this is
   **not** the mechanism of anything currently broken. Why it reads zero is
   still open.
-- **The diag table is full at `d=73`** — new `rbgpu_diag_set_num` entries
-  silently do not appear. Values that matter must ride an NVRAM note.
+- ~~**The diag table is full at `d=73`.**~~ **Stale — fixed in 2qw.** The cap
+  is **768** and the table now seeds `diag_max` and `diag_used` into slots 0
+  and 1 before any real key, so the two numbers that say whether the data is
+  trustworthy cannot be evicted by the table filling up. **Rule 14 still
+  applies: check `diag_used` against `diag_max` before concluding anything
+  from an absent key** — equal means absence carries no information.
 - **MMHUB's fault status register reads all-ones** on this chip, and Apple's
   `getVMFaultInfo` fills its struct whenever `(addr != 0 || status != 0)`, so
   Apple reports a **phantom hub-1 fault** on every poll. Never treat an Apple
@@ -1187,12 +1198,18 @@ blocking a usable machine any more.
    kernel force. Static work, no boot needed, and the second one is a real
    loose thread rather than tidying: it says the current account of why both
    halves are needed is incomplete.
-4. **Hardening the universal fix.** It fails safe by construction (every site
-   read back and compared before any write), so an OS update means *nothing*
-   is patched rather than something wrong — but that also means an update
-   silently returns the machine to the broken rendering. The failure is loud
-   in `mtlk_failed`; it is not loud on screen. Worth a visible signal.
-5. **The `av=N fail=N` debt.** §6: one disassembly, no boot.
+4. ~~**Hardening the universal fix.**~~ **Done in 2r6, not yet seen on
+   hardware.** The silent case was worse than "loud in `mtlk_failed`": the
+   counters were published only after the stage-B detour, so when the cave
+   probe missed, `mtlk_patched`, `mtlk_failed` and `mtlk_cavehits` were **all
+   absent**. Now `mtlk_moved` counts the OS-update signature specifically (the
+   read succeeded and neither pattern is present), the counters go out on
+   every path, and **`mtlk_moved_verdict 1`** is the one-per-boot signal, with
+   a log line carrying both unslid addresses and the slide. A normal boot must
+   show `mtlk_moved` and `mtlk_moved_verdict` **absent** with `mtlk_patched`
+   tracking `mtlk_cavehits`.
+5. ~~**The `av=N fail=N` debt.**~~ **Paid in 2r7** — see §6: the reading was
+   wrong, not the driver.
 6. ~~**Housekeeping.**~~ Done in 2op: the 2lm/2lp/2oa/2oc/2od Lilu
    `BinaryModInfo` paths are deleted (~590 lines, rule 6), along with
    `tools/rbgpu-app.sh`, `tools/mtllinear-app.sh` and `tools/gen_stencil.py`.

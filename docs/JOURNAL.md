@@ -30885,3 +30885,68 @@ of a normal boot after this: `mtlk_moved` and `mtlk_moved_verdict` should both
 be **absent**, `mtlk_cavehits` should be in the low thousands and
 `mtlk_patched` should track it. If `mtlk_moved_verdict` is 1, the desktop will
 have artifacts and the log line says what to do.
+
+---
+
+## 2r7 — the `av=N fail=N` debt, paid: the reading was wrong, not the driver
+
+No boot. One disassembly, as §6 said it would take.
+
+`rbgpu-vmid` has printed `av=N fail=N` with the two **equal** in every boot
+that ever read it, and the standing note said "every `assignVMID` reports
+failure by the hook's own criterion while VMIDs are plainly handed out".
+
+`AMDRadeonX6000_AMDHWVMM::assignVMID` is at **`0xbe91376`** in
+`build/re/AMDRadeonX6000`, and it has **exactly one `retq`** (`0xbe914f3`).
+The instruction two before it is:
+
+```
+be914d2   testl %r14d, %r14d        ; the vmid the context already had
+be914d5   je    be914f4             ; 0 -> do the invalidate work
+be914d7   movq  -0x40(%rbp), %rax   ; the `bool *` out-parameter
+be914db   testq %rax, %rax
+be914de   je    be914e3
+be914e0   movb  %r12b, (%rax)       ; *flag = (freshly assigned)
+be914e3   movb  $0x1, %al           ; <-- THE RETURN VALUE
+be914e5   addq  $0x48, %rsp
+...
+be914f3   retq
+```
+
+and `0xbe914d7` is reached from **every** path: the already-assigned early
+exit (`je` at `0xbe914d5` not taken), the invalidate-submitted exit (`je` at
+`0xbe91538`), the no-channel exit (`je` at `0xbe9154e`) and the full path
+(`jmp` at `0xbe915b6`).
+
+**So `assignVMID` returns `bool`, and it always returns `true`. There is no
+failure return in the function.** `av == fail` never meant "every call
+failed"; it meant **every call succeeded**, counted by a hook whose criterion
+was `r != 0`. This is 2ha in its purest form — *a return code is not a result
+until the code that sets it has been read* — and the thing that made it
+plausible for fifteen milestones is that `0 == success` is the right
+convention for `IOReturn`, which this function does not use.
+
+The declaration was wrong twice over. A C++ mangled name **does not encode the
+return type**, so `uint32_t (*)(void *, void *, uint32_t *, void *, void *,
+void *)` was an assumption with nothing behind it; and the SysV ABI defines
+only **`%al`** for a `bool` return, so the upper 24 bits of what the hook read
+as a `uint32_t` were whatever the previous computation left in `%eax` — here
+the assigned VMID, via `movl %eax, -0x64(%rbp)` at `0xbe914bc`. That is why a
+boot could report a `fail` value that was not even 1.
+
+Fixed: the hook and the original's type are both `bool`, and the counter is
+kept **under its old key** so existing captures stay comparable, now counting
+`r == false`. The disassembly says that cannot happen, so from here a nonzero
+`fail` means the driver changed and everything else in that note should be
+re-derived before it is trusted — which is now written into the note's own
+legend.
+
+Built: hosttest all passed, UUID moved `C3FEAF28` -> `442DF066`. The four
+`-Wshadow` warnings are pre-existing and unchanged (4 before, 4 after,
+measured by stashing).
+
+Also corrected in `docs/HANDOFF.md` §6, where it had been standing wrong since
+2qw: **"the diag table is full at `d=73`"**. The cap is **768**, and the table
+seeds `diag_max`/`diag_used` into slots 0 and 1 before any real key. Rule 14's
+actual requirement — check `diag_used` against `diag_max` before concluding
+from an absent key — is what replaces it.
