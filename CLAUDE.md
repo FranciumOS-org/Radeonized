@@ -393,7 +393,70 @@ gated. Detail: JOURNAL **2qz**.
   setting `agdp` unblocks IOPresentment. **Next read, and it is a different
   file: IOPresentment's own path to `0x10000003`** (the measured log line from
   boot 150), via `tools/re/dsc.py` / `dscinv.sh`, anchoring on that constant.
-  Detail: JOURNAL **2r1**. Killed suspects: `FB_Triage`
+  Detail: JOURNAL **2r1**.
+  **2r5 CLOSES THE DISPLAY CHAIN AND TURNS IT INTO A DECISION.** The function
+  at 2r4's addresses is **`ioPresentmentCreateAssociationMap`**
+  (`0x7ff812e8a730`); `ioPresentmentFindAGDCMatch` survives only as the
+  **os_log function string** (`0x7ff812ea14f7`) of a helper inlined into it.
+  `%r13d` is `IOIteratorNext` over
+  `IOServiceGetMatchingServices(IOServiceMatching("AppleGraphicsDeviceControl"))`
+  **minus the entry named `AppleGPUWrangler`** - an exact 17-byte compare done
+  as three xors against `"AppleGPU"`, `"Wrangler"` and the NUL at `[16]`
+  (`0x7ff812e8ad6c`-`0x7ff812e8ada1`). **`make agdcinfo` measures it live,
+  non-root, in a second: exactly ONE service matches and it IS the wrangler, so
+  zero candidates survive and the association map is EMPTY.** So
+  `AppleGPUWrangler` **is** an `AppleGraphicsDeviceControl` subclass and
+  `AppleGraphicsDeviceControlPlugin` is **not** (live, and it does not match).
+  Instrument control, rule 26: `ioreg -c IOUserClient -r -d1` matches **431**
+  services so `-c` does follow the superclass chain, while `-d1` *without*
+  `-r` prints only the root and proves nothing.
+  **`0x10000003` is `MACH_SEND_INVALID_DEST`** (SDK `mach/message.h:807`), not
+  a user-client status as 2r4 supposed: the second inlined query,
+  `ioPresentmentPopulateIOFramebufferEntries`, looks our framebuffer's GPU up
+  in that map (stride 0x30), finds nothing, keeps service id **0**
+  (`0x7ff812e8b3be`) and opens *that* - and `agdcinfo`'s control measures
+  `IOServiceOpen(MACH_PORT_NULL, ..., 2, ...)` returning exactly `0x10000003`.
+  **The selectors name themselves**, in os_log formats three bytes from the
+  failing branch: **selector 1 = `kAGDCVendorInfo`** (`0x7ff812ea1512`; 0x2c
+  bytes, `+0x28` must be 1 or 2) and **selector 0x980 =
+  `kAGDCGPUCapability`** (`0x7ff812ea1625`; 0xdc bytes, non-zero count at
+  `+0x30`). 2qr's motivation is restored; 2r1's measurement (0 hits in either
+  kext) stands - these are IOPresentment's labels, not the kexts'.
+  **KERNEL SIDE: there is NO type-2 user client to implement.**
+  `AppleGraphicsDeviceControl::newUserClient` (`0x13dfd45e`) has **no switch on
+  the type at all**, unlike `IOGraphicsAccelerator2`'s (2ql): it is IOService's
+  canonical body - `allocClassWithName(this's `IOUserClientClass` property,
+  measured as `AppleGPUWranglerClient` on the wrangler), cast to
+  `AppleGraphicsDeviceControlClient`, then `initWithTask` / `authorizeTask` /
+  `attach` / `start` - with the type passed only to the first two.
+  `authorizeTask`'s failure is `0xE00002E2`, exactly what `agdcinfo` measures
+  unprivileged. `AppleGraphicsDeviceControlClient::externalMethod`
+  (`0x13dfae20`) forwards **every** selector to `UserKernelTransfer` ->
+  `filtered_doDeviceAttribute(api=3, attribute=selector, ...)`, so **the
+  selectors are AGDC device attributes** (`agdc_filtered_api_t`: 0 get, 1 set,
+  2 do, 3 UserKernelTransfer). `0x980` is handled explicitly (require
+  `*outLen == 0xdc`, call **virtual slot `0x858`**); **attribute 1 is NOT** -
+  the `attr<=0x7f` group handles only 3, 0x10 and 0x20, so it falls to the
+  plugin path: a 16-slot table at `0x13e00940` indexed `(attr>>2)&0x3c0`, the
+  slot's `+0x18` >= attr, `agdc->0xa0` **and** `->0xa8` non-NULL, then
+  `AGDCPlugin::doPluginAttribute`. Side confirmation: attribute **0x301** is
+  `movzwl (%r10),%eax; movw %ax,0xb0(%rdi)`, i.e. **2r1's reading of the
+  wrangler's `0x301` call as a SET, confirmed from AGDC's own side**.
+  **THE COST, stated before anyone builds:**
+  `__ZTV26AppleGraphicsDeviceControl` spans `0x13dff478`..`0x13dffd30` =
+  **0x8b8 = 279 pointers**, so ~277 instance methods **plus** the metaclass
+  vtable 2qy showed is also needed (the base's `alloc()` is pure virtual), in a
+  class whose superclass lives in another kernel collection - i.e. through
+  2qy's runtime-metaclass route - with Apple's code calling our methods and
+  **no fail-safe**; and the post-gate question is still unanswered behind it,
+  because `IONDRVFramebuffer` implements neither
+  `IOPresentmentBindIOAccelSurfaceToResource` nor `SetPlaneState`, which 2qn
+  proved no client probe can decide. **So the display half is now a DECISION,
+  not another read.** The one cheap thing left is the user's to run:
+  **`sudo ./build/out/agdcinfo`**, which says whether an AGDC user client here
+  answers attribute 1 at all (unprivileged it returns
+  `kIOReturnNotPermitted`, which the tool pre-states as INCONCLUSIVE).
+  Detail: JOURNAL **2r5**. Killed suspects: `FB_Triage`
 (diagnostic dumps only) and the third-party NV kexts in `/Library/Extensions`
 (`kextstat`, control 67 - **none loaded**). The `IOPresentment` boot-arg token
 is logging-only and real but **no longer worth a boot**. Keep `-rbgpuiop`:
@@ -1031,15 +1094,20 @@ The two that bite hardest:
   *different* string cannot catch. Re-run on the real start: **3 sites, all in
   the main file.** Find the preceding NUL before xrefing any string. The VA space is global across subcaches, so code in `.01`
   can reference a string in the main file and the tool will never see it. **A
-  hit is still a hit; a "0 hits" means only "not in this file".** Measured on
-  the string `"Unable to get AGDC information.  Return code: %#x"`
-  (`0x7ff812ea2887`, VA verified by reading it back): **0** LEA sites across the
-  whole main-file exec mapping and **0** references of any RIP-relative form in
-  198k instructions around IOPresentment, against a control of **7** hits for
-  the neighbouring `ioPresentmentFindAGDCMatch` every time. **Fix it before
-  trusting another cache negative:** glob `dyld_shared_cache_x86_64h*`, build
-  one combined VA->(file, offset) map, and resolve
-  `xref`/`callxref`/`dump`/`macho` against it. Detail: JOURNAL **2r2**.
+  hit is still a hit; a "0 hits" means only "not in this file".**
+  **2r2's headline numbers are RETRACTED and must not be quoted again:** the
+  "**0** LEA sites and **0** RIP-relative references to the AGDC error string"
+  was the substring-offset bug above, not a property of the cache - the real
+  start `0x7ff812ea2880` has **3** sites, each in its own outlined cold block
+  with exactly one caller (2r5 lists them). The combining fix 2r2 asked for is
+  **done** (`Cache` globs `dyld_shared_cache_x86_64h*` and `xrefall`/`ripall`
+  resolve against one combined VA->(file, offset) map), and `dscsym.sh` /
+  `dscsym_many.sh` now dlopen IOPresentment and IOKit as well, with a failed
+  dlopen printed rather than silently renaming every address. `dscinv.sh`
+  knows `IOPresentment` (base `0x7FF812E88000`, len `0x1C000` from
+  `dyld_info -segments`): **449 functions**, and it is what showed that 2r4's
+  `ioPresentmentFindAGDCMatch` is only an os_log string inside
+  `ioPresentmentCreateAssociationMap`. Detail: JOURNAL **2r2**, **2r4**, **2r5**.
 - **SKYLIGHT IS NOW READABLE, AND `CompositorSW` IS PINNED DOWN (2ps/2pt).**
   `tools/re/dsc.py` reads the dyld shared cache directly - VA <-> file offset
   from the header mappings, fast RIP-relative LEA xrefs, and a minimal Mach-O
