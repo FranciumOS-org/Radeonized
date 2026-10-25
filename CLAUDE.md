@@ -129,36 +129,90 @@ it on. Launch anything with `env -u DYLD_INSERT_LIBRARIES` or it starts under
 whatever patch this Claude is running - which once looked exactly like a
 regression (2ns).
 
-**ROOT CAUSE, FINAL, IN APPLE'S OWN WORDS (2qk): `IOAccelSurface::set_id_mode`
-REJECTS SURFACE IDS BELOW 256 AND SAYS THE FEATURE IS UNSUPPORTED.** The kernel
-log of boot 149, found by grepping for that method's own os_log function name:
-`IOAccelSurface::set_id_mode: New id (0x00000001) less than 256, Assembly
-surfaces for display updates not supported` (and, 4x at 15:25:36,
-`Surface mode contains bad bits`; once at 20:26:03, `mode 0x4 must has
-kIOAccelSurfaceModeWindowedBit bit`). The method (`IOAcceleratorFamily2
-+0x14e48cac`) returns `kIOReturnBadArgument` when `mode & 0xFF8073C0`, when
-**`id <= 0xff`** (`cmpl $0xff, %r14d` at `0x14e48e85`), or when the windowed bit
-is missing - and **`MPAcquireSurfaceID()` can only ever return 0..255** (a
-256-bit bitmap: `rax<8`, `ecx<32`, id = `rax*32+ecx`; it returned **1**). So
-**CoreDisplay's MP display-device surface path cannot succeed against this
-accelerator by construction** - not our bug, Apple declining a legacy path.
-Chain, every link disassembled or logged: `MPAccessSurfaceForDisplayDevice`
-(MP ops **0x158**) -> `IOAccelCreateSurface` (= `IOServiceOpen` + external
-method **7** = `set_id_mode`) -> **BadArgument** -> `CGXAcquireDisplayDeviceSurface`
-returns NULL -> `Display::GetNextSurface` **+229..+243** wraps NULL in a
-`operator new(0x1a0)` DisplaySurface and **returns early, never reaching the
-pool at +1270** -> `GetIOSurface(s) == NULL` -> `cdsurf->0x40 = 1` ->
-`begin_update` overwrites `Update->0x1c0` with the SW compositor. Also:
-`isAcceleratorBacked` (`-rbgpufbaccel`) DOES have a consumer -
-`all_devices_in_hw_mirror_loop_are_accelerator_backed` gates on
-`priv->0xb2 & 0x40` = dword `0xb0` bit 22 - but it only picks mode flag
-`0x8800` over `0x8400`, and **both are rejected for the same id reason**, so the
-arg is harmless and currently pointless; keep it OUT. **Next target, static:
-what makes `Display::GetNextSurface` take the +1270 pool path
-(`DisplaySurfacePool::GetNextSurface` -> `CD_IOSurfaceCreate`, a real IOSurface)
-instead of returning at +243?** The MP path is a dead end by Apple's decision,
-so no hook can fix it; the pool path is the only one that puts a real IOSurface
-under the desktop.
+**ROOT CAUSE, FINAL, AND BOTH EXITS ARE CLOSED BY APPLE (2qk + 2ql).**
+`CoreDisplay::Display::GetNextSurface` (unslid `0x7ff80408bf86`) is the one
+function that produces the desktop's surface, and it has exactly **two** paths,
+picked by two gates in its first twenty instructions:
+`callq UseIOPresentment(); testb %al,%al; je LEGACY` then
+`cmpb $0x1, [0x7ff843bac773]; jne LEGACY`, else fall through to
+`DisplaySurfacePool`. **Both paths are dead here, for two unrelated Apple
+decisions.**
+
+**Path 1, legacy (`CGXAcquireDisplayDeviceSurface`): an id check no caller can
+satisfy.** Boot 149's kernel log, found by grepping for the method's own os_log
+function name: `IOAccelSurface::set_id_mode: New id (0x00000001) less than 256,
+Assembly surfaces for display updates not supported` (plus `Surface mode
+contains bad bits` x4 and `mode 0x4 must has kIOAccelSurfaceModeWindowedBit
+bit`). The base method (`IOAcceleratorFamily2 +0x14e48cac`) returns
+`kIOReturnBadArgument` when `mode & 0xFF8073C0`, when **`id <= 0xff`**
+(`cmpl $0xff, %r14d` at `0x14e48e85`), or when the windowed bit is missing - and
+**`MPAcquireSurfaceID()` can only ever return 0..255** (a 256-bit bitmap;
+it returned **1**). 2ql closes *why the base implementation runs*: there are
+three `set_id_mode`s and **neither override calls the base**, so the object's
+class simply does not override it.
+`IOGraphicsAccelerator2::newUserClient` switches on the `IOServiceOpen` type
+(jump table at `0x14e51ab8`, decoded): **type 0** -> `this->vt[0xa30]()` +
+`IOAccelSurface::init`, **type 0x20** -> `IOAccelSurfaceMTL`. There is no
+`IOGraphicsAccelerator2::newSurface`, so slot `0xa30` is the vendor's, and
+Apple's is `AMDRadeonX6000_AMDGraphicsAccelerator::newSurface()` (`0xbe3ed98`)
+-> `new AMDRadeonX6000_AMDAccelSurface()`, which **does not override
+`set_id_mode`**. So legacy -> AMD surface -> inherited base -> id >= 256
+required -> unsatisfiable; Metal -> `IOAccelSurfaceMTL`, whose `set_id_mode`
+has **no id check at all**. (It also proves the surface was created:
+`newSurface` returning NULL gives `kIOReturnNoResources`, and we measured
+`BadArgument`.)
+
+**Path 2, IOPresentment (`DisplaySurfacePool` -> `CD_IOSurfaceCreate`, a real
+IOSurface): closed by the framebuffer's CLASS NAME.**
+`UseIOPresentment()` (`0x7ff804057b40`) is
+`if (gUseIOP != 1) return 0; if (present == 0 || (supported & present) != present)
+{ gUseIOP = 0; return 0; } return 1`, where `supported` is OR'd from five
+`com.apple.CoreDisplay` CFPreferences booleans - `useIOP`, `useIOP_onIG` (0x02),
+`useIOP_onAMD` (0x04), `useIOP_onNVIDIA` (0x08), `useIOP_onAPV` (0x10) - and
+`present` comes from `__GetSystemGPUVendors_block_invoke`, which iterates
+`IOServiceMatching("IOFramebuffer")` and classifies each service by
+**`IOObjectCopyClass`** + four `CFStringFind`s: `Intel` 0x02, `AMD` 0x04,
+`NVDA` 0x08, `AppleParavirt` 0x10, **no match 0x01**. **`supported` is built
+only from bits 0x02/0x04/0x08/0x10, so bit 0x01 can NEVER be in it** - one
+unclassifiable framebuffer fails the test for every value of every preference.
+`make useiop` measures it non-root in a second: our only framebuffer is
+**`IONDRVFramebuffer` / `.Display_boot` -> bit 0x01**, `present = 0x01`,
+`supported = 0x1e`. All five prefs **default to 1** (the shared default byte
+`0x7ff843bad260` comes from `0x7ff843bad738`, whose only writer, the block in
+`CoreDisplay::VorpalBlade()` at `0x7ff8040598b7`, stores `$1`
+**unconditionally**), so no `defaults write` is missing - the class name is.
+Gate 2, `displaySurfaceUsesIOSurface`, is already 1 (it is one of the same
+preference keys, and boot 149's os_state dump printed it).
+
+**Do NOT force `UseIOPresentment` true.** It has **72 direct call sites**
+(`MPRebuildDevice` x5, `setup_hardware`, `displayConnectChange` x3,
+`displayDidWake` x2, `displayAliasActivate` x4, `DisplayPipe::Commit` x2,
+`CGXMappedDisplayStart` x4, gamma, mirroring, shutdown...). It does not pick a
+surface allocator, it selects the whole **IOPresentment** world - the
+`IOPresentmentBindIOAccelSurfaceToResource` / `IOPresentmentSetPlaneState`
+kernel API, which `IONDRVFramebuffer` does not implement. The
+`-rbgpumtlkfix` machinery *could* patch it (its first instruction is a 6-byte
+`mov` with no branch inside, so it is easier than the Metal detour) and it
+would switch 72 call sites onto a stack that is not there.
+
+**So the display half now rests on ONE decision, not another read: an
+`IOFramebuffer` whose class name contains "AMD".** That is exactly the
+subclass 2oz built and compiled, then ruled out on **kernel-collection
+placement** (IOGraphicsFamily is in SystemKernelExtensions.kc, OpenCore
+injects us into BootKernelExtensions.kc) - not on capability. **2oz's
+"own the methods instead" is NOT equivalent after all:** routing
+`IONDRVFramebuffer`'s methods changes what it reports, but nothing routed on an
+instance changes `IOObjectCopyClass`, which is
+`getMetaClass()->getClassName()` on the shared OSMetaClass. Either find a load
+path that may depend on IOGraphicsFamily, or decide the display stays software.
+Also: `isAcceleratorBacked` (`-rbgpufbaccel`) does have consumers - the
+mirror-loop walk at `GetNextSurface+0x6e` reads bit 22 of `dev->0x64` to pick
+the pool's buffer count (2 vs 3), and
+`all_devices_in_hw_mirror_loop_are_accelerator_backed` uses it to pick mode
+flag `0x8800` over `0x8400` - but every one of those is downstream of a gate
+that fails, so **keep the arg OUT**. 2ql also retires the 2qk-correction's open
+question about `DisplaySurfacePool::GetNextSurface`'s reuse path: the pool is
+never reached, so it was never the question.
 
 **(2qh, superseded in part by 2qk) the display's
 `CoreDisplay::DisplaySurface` has NO IOSurface, and SkyLight swaps the
