@@ -155,7 +155,24 @@
 > now publishes `diag_max` / `diag_used` in slots 0 and 1 so this is visible in
 > the data; see rule 14. Detail: JOURNAL **2qw**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qw)
+> **2qx — ROUTE C STAGE 2 IS BUILT, UNRUN, AND SPLIT IN TWO.** `-rbgpumcnew`
+> constructs an `OSMetaClass` at runtime and is **safe** (the kernel's ctor
+> handles `sStalled == NULL` with one log line and a return; every field is
+> stored before that check). `-rbgpumcreg` registers it and is **the user's
+> decision**, needing `nvram rbgpu-mcreg=1` as well. Two things were found by
+> reading `build/re/kernel` first, and both would have cost a machine:
+> **`getClassName()` dereferences `+0x18` as an `OSSymbol` while the ctor
+> stores a raw `const char *` there**, so the obvious read-back would have
+> jumped through a string literal in the kernel; and **`preModLoad` takes
+> `_sStalledClassesLock` and never unlocks on any path**, so the real failure
+> mode is the **next kext load hanging forever**, not a panic — and
+> `postModLoad` must be called even when `preModLoad` returns NULL. Pre-stated:
+> `mcn_verdict 15` for 2a; `mcr_post 0` then `mcr_name_ok 1` for 2b. A
+> registered class is still not a published framebuffer (2qr closed the chain
+> at AGDC vendor info), so this answers only "can it be done at all". Detail:
+> JOURNAL **2qx**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2qx)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
