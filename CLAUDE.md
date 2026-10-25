@@ -205,6 +205,48 @@ injects us into BootKernelExtensions.kc) - not on capability. **2oz's
 instance changes `IOObjectCopyClass`, which is
 `getMetaClass()->getClassName()` on the shared OSMetaClass. Either find a load
 path that may depend on IOGraphicsFamily, or decide the display stays software.
+**AND THE LEVER IS NOT WORTHLESS (2qm) - IOPresentment NEEDS NOTHING WE LACK
+IN THE KERNEL.** Before accepting 2ql's "decide whether the display stays
+software", the obvious check: would the IOPresentment path work if the gate
+opened? `IOPresentment.framework` **is on this machine**, dlopens, and its own
+strings name `IOFramebuffer`, `IOAccelIndex`, `IOAccelDisplayPipeTriage`,
+`IOAccelDisplayPipeTransactionWait`, `DisplayPipeSupported` and
+`ioPresentmentFindAGDCMatch` - **no IOMobileFramebuffer, nothing AMD-specific
+in the kernel** - and `make ioptest` measured every one of them live on this
+boot: `IOAccelIndex 0`, `IOAccelRevision 2`,
+`IOAccelDisplayPipeCapabilities = {DisplayPipeSupported=1,
+TransactionsSupported=1}` (on the **accelerator**, not the framebuffer), two
+live `IOAccelDisplayPipeUserClient2`s and AGDC present. So what the class-name
+test refuses appears to be already wired up. **The client test is
+INCONCLUSIVE and the framework said why**: unprivileged, the call ABORTS after
+logging `ioPresentmentFindAGDCMatch() failed - retCode: 0xe00002e2` and
+`GPUWranglerOpenWithTimeout: failed to connect; status=0xe00002e2`, and
+`0xe00002e2` is **`kIOReturnNotPermitted`** - an entitlement, not an answer
+about the pipe. **Next step, one command, the user's:
+`sudo ./build/out/ioptest`.** Pipe created -> intervention A below is a real
+candidate fix. `Unable to create IOAccelDisplayPipe` -> the capability is
+missing and 2ql's verdict stands. NotPermitted again -> still inconclusive and
+only WindowServer itself can answer.
+
+**The two candidate interventions, both producing `UseIOPresentment() == true`
+(one lever, two placements):** **A, userspace, narrow** - patch the vendor
+classifier `0x7ff80412cc38` to return `0x4` instead of `0x1` inside
+WindowServer only: six bytes `b8 04 00 00 00 c3` at an entry with no branch in
+it (rule 2 trivially satisfied, nothing displaced), whose **only** caller is
+`__GetSystemGPUVendors_block_invoke`, so the entire effect is
+`gSystemGPUVendors = 0x4` - a belief that is **true of the hardware**. The
+`-rbgpumtlkfix` machinery already does this class of patch and runs before the
+process executes any code, which matters because `GetSystemGPUVendors` is a
+`dispatch_once`. **B, kernel, global** - rename `IONDRVFramebuffer`'s class by
+writing an `OSSymbol *` to `gMetaClass + 0x18` (offset measured from
+`is_io_object_get_class`, which does `metaclass->0x18` then `vt[0x148]`
+`getCStringNoCopy`, and from `OSMetaClass`'s ctor, which has exactly one store
+there). **B is strictly worse than A for the same effect** - it changes every
+`IOObjectCopyClass`, ioreg and panic-log consumer system-wide to fix one string
+comparison in one userspace function. Either way it is a kext change on the
+process that owns the display, so it is the user's decision and a mistake is a
+black screen; rescue `-rbgpuoff`. Writes no DCN register.
+
 Also: `isAcceleratorBacked` (`-rbgpufbaccel`) does have consumers - the
 mirror-loop walk at `GetNextSurface+0x6e` reads bit 22 of `dev->0x64` to pick
 the pool's buffer count (2 vs 3), and
