@@ -28589,3 +28589,173 @@ which matters because `GetSystemGPUVendors` is a `dispatch_once` inside
 
 **It is a kext change on the process that owns the display, so it is the
 user's decision.**
+
+## 2qo - intervention A, CORRECTED and NARROWED: the classifier has TWO callers, so patch the CALL SITE
+
+2qm staked intervention A on a claim that is false, and this milestone is the
+measurement that refutes it plus the five-byte patch that replaces it. Nothing
+has been booted; everything below is static, read-only and reproducible on this
+machine.
+
+### The claim that was wrong
+
+2ql and 2qm both say of `GetGPUVendorForFramebufferService` (`0x7ff80412cc38`):
+
+> Its **only** caller is `__GetSystemGPUVendors_block_invoke`, so the entire
+> effect is `gSystemGPUVendors = 0x4`.
+
+`python3 tools/re/dsc.py callxref <cache> 0x7FF80404C000 0x12A800 0x7ff80412cc38`
+reports **two**:
+
+```
+2 direct branch(es) to 0x7ff80412cc38:
+  0x7ff80412ce97   call      <- __GetSystemGPUVendors_block_invoke +0x6b
+  0x7ff804137526   call      <- CoreDisplay::Framebuffer::Framebuffer +0x8ec
+```
+
+The second one stores the result **per framebuffer**:
+
+```
+7ff804137526:  callq  0x7ff80412cc38
+7ff80413752b:  movl   %eax, 0x1f0(%r14)
+```
+
+`fb+0x1f0` is `MPPriv+0x180`, and the offset is measured rather than counted:
+`CoreDisplay::Framebuffer::InitializeMPPrivAccelerator` does
+`movl 0x18(%rdi),%eax; movl %eax,0xcc(%rdi)`, which against 2px's decoded
+`MPPriv +0x5c accelerator` puts the embedded MPPriv at **fb+0x70**
+(0xcc - 0x5c), so 0x1f0 - 0x70 = **0x180**. And +0x180 is named by Apple:
+`CoreDisplay::CreateMPPrivDict` pairs `movl 0x180(%r15), %edx` with the
+CFString key **`gpuVendor`** - the field boot 148's state dump prints as
+`gpuVendor = 1`, i.e. exactly the "unknown" bit 0x01 that 2ql's whole finding
+is about. Same value, two consumers, one classifier.
+
+### What the function-level patch would ALSO have changed
+
+`MPGetGPUVendor(CGXDisplayDevice const*)` (`0x7ff8040e7e85`) is
+`dev->0x160->0x180`, and `dsc.py dataxref` puts it at exactly one slot,
+`0x7ff8404fc900`. Decoding the whole MP ops table from its base
+`0x7ff8404fc700` (which independently reproduces 2qc's slot 0x140 =
+`MPServiceForDisplayDevice` and 0x148 = `MPAcceleratorForDisplayDevice`) makes
+it **slot 0x200**, and four call sites read it:
+
+| caller | what the vendor decides |
+|---|---|
+| `access_display_pipe_info(MPPriv*)` | `testb $0x1c,%al; je <allocate>` - the 0x3018-byte pipe-info structure is allocated **only when the vendor is NOT** AMD/NVDA/APV. Vendor 4 makes this return **NULL** where it returns a real structure today. |
+| `UseIOPGamma(dev)` | jump table on `(vendor-2) ror 1` into the per-vendor IOP gamma prefs (`useIOPresentmentGammaOnAMD` = 1 live) |
+| `get_display_device_info` x2 | the state-dump/debug view |
+| `__WSMachineIsAMD_block_invoke` | `cmpl $0x4,%eax` -> sets `0x7ff843bb1d40`, read by `CGXIsHDRSupported` and `__WSMachineUsesNewStyleMirroring_block_invoke` |
+
+So patching the classifier would have changed the pipe-info allocator, the
+gamma path, HDR support and the mirroring style **in addition to** the gate -
+and the first of those moves in the direction we do not want. 2qm's "the entire
+effect is `gSystemGPUVendors = 0x4`" was an inference from a caller count that
+was never checked. Rule 26 again, and a new way to state it: **a blast radius
+is a measurement, not a description.**
+
+### The narrow lever costs the same five bytes
+
+The call inside the vendors block is five bytes and so is the constant:
+
+```
+7ff80412ce97:  e8 9c fd ff ff    callq GetGPUVendorForFramebufferService
+         ->    b8 04 00 00 00    movl  $0x4, %eax
+7ff80412ce9c:  09 05 c2 4e a8 3f  orl  %eax, gSystemGPUVendors(%rip)
+```
+
+That leaves `gSystemGPUVendors` reading 4 and touches nothing else: the
+`Framebuffer` constructor keeps calling the real classifier, so `gpuVendor`
+stays 1 and all four decisions in the table above keep their present
+behaviour. Checked rather than assumed:
+
+* the replaced range is **one whole instruction**, and no branch in the block
+  targets a byte inside it (its targets are ce92, ceae, ceb7, cedb, cef2);
+* the classifier releases its own `IOObjectCopyClass` string internally and
+  the block never releases the service, so skipping the call **leaks nothing
+  it did not already leak**;
+* `UseIOPresentment()` reads `gSystemGPUVendors` (int at `0x7ff843bb1d64`),
+  and a `ripxref` of that global finds **9 sites in CoreDisplay and 0 in
+  SkyLight**: `UseIOPresentment`, `EnableWSAA`, `AllowMatrixNightShift`,
+  `GetCurrentSystemGPUVendorName`, `UpdateCrashLogMessage`,
+  `CreateCoreDisplayStateDictWithOptions` and the block itself. So the global's
+  blast radius is bounded and named - and `enableWSAA` reads **0** in the live
+  state dump while all five `useIOP*` defaults read 1, which is why this flips
+  IOPresentment and not WSAA.
+
+Uniqueness, with `testl %eax,%eax; je` before and the `orl` after as anchors:
+the 27-byte window occurs **once in the cache's entire 0x25198000-byte
+executable mapping**, not merely once in CoreDisplay.
+
+### Built, and gated twice
+
+`-rbgpuiop` (boot-arg, **off by default**) plus the one-shot NVRAM variable
+**`rbgpu-iop`**, consumed and flushed to flash immediately before the write.
+That is the point of the design: 2qn's rescue was `-rbgpuoff` and a reboot,
+which needs a boot-arg edit from another OS or single-user mode if the login
+screen never appears. With a one-shot, **a black screen is recovered by a plain
+power cycle.** The one-shot is checked LAST, after the readiness checks, so a
+boot that fails a precondition does not burn the arming.
+
+Scoped to `WindowServer` by **exact** name (`strcmp`, not the mtlk substring
+match), placed through the existing `rbgpu_mtlk_place` - which reads the site
+back from the target's own memory and compares before writing, and verifies
+after (rule 20) - at `_task_set_main_thread_qos`, before the process executes
+any instruction. That matters because `GetSystemGPUVendors` is a
+`dispatch_once` inside `CGXMappedDisplayStart`. It is deliberately placed
+BEFORE the mtlk scope/exclude logic: different patch, different image,
+different purpose, and a scope string meant for the Metal driver must not
+silently disable it.
+
+Transcription checked against the machine rather than by eye (rule 5's
+spirit): both byte arrays were searched for **in the built kext** and compared
+to the live cache - `find` occurs once and is byte-identical to
+`0x7ff80412ce87`, `replace` occurs once and is the intended patch.
+
+Writes **no DCN register**. New UUID `3B40FB20-540E-3C9A-BE39-A0481860DB05`.
+
+### Rule 14 keys, all NVRAM-hot
+
+A boot that ends in a login screen that never appears can only be read from
+NVRAM, so these go in `kRbgpuNvramHotKeys`, at the front:
+
+`iop_on`, `iop_saw_ws`, `iop_ready`, `iop_oneshot`, `iop_match`, `iop_verify`,
+`iop_patched`. Read them in that order:
+
+* `iop_oneshot` - 0 armed and consumed, 1 /options unreachable, 2 not armed,
+  3 literal "0", **4 armed but the clear did not take, so the NEXT boot is
+  armed too and must be disarmed by hand.**
+* `iop_saw_ws` absent -> WindowServer never execed while the hook was live;
+  nothing was attempted and nothing is proven.
+* `iop_match` - 1 the five bytes were the call, 2 already patched, 0 neither
+  (an OS update moved the site; failing safe is the designed behaviour).
+* **`iop_verify 1` is the only line that proves the write landed.**
+
+### What the experiment can and cannot settle
+
+`UseIOPresentment()` true makes `Display::GetNextSurface` take the
+`DisplaySurfacePool` -> `CD_IOSurfaceCreate` path, which is the only one of its
+two paths that is not closed (2qk closed the legacy one at
+`IOAccelSurface::set_id_mode`). Every kernel precondition that path is known to
+need is live and paired on this machine (2qm/2qn): `IOAccelIndex 0`,
+`IOAccelRevision 2`, `DisplayPipeSupported=1`, `TransactionsSupported=1`, two
+live `IOAccelDisplayPipeUserClient2`s, and AGDC's `debug-gpus` already listing
+our framebuffer with our accelerator.
+
+What it cannot settle in advance is whether something **else** inside
+IOPresentment fails after the gate opens - `IOPresentmentBindIOAccelSurfaceToResource`
+and `IOPresentmentSetPlaneState` are kernel APIs `IONDRVFramebuffer` does not
+implement, and 2qn measured that no client-side probe can answer it because the
+GPUWrangler user client is entitlement-gated and root does not clear it. So the
+honest statement is: **this is the experiment that answers it, and its failure
+mode is a black screen at login with a one-power-cycle recovery.**
+
+Note on `UseIOPresentment` itself: 2ql's "do NOT force it" stands and is
+untouched. This does not patch that function or any of its 72 call sites; it
+corrects one input it reads, to a value that is **true of the hardware**.
+
+### Debt this leaves
+
+`rbgpu_mtlk_place` keeps its scratch buffer in a `static`, so two concurrent
+execs can interleave a compare with a verify. Pre-existing - it has shipped
+~2000 patches a boot since 2on - and this adds a third site rather than fixing
+it. Recorded, not smoothed over.

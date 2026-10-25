@@ -16,6 +16,12 @@ void rbgpu_nvram_quiesce(void);
 // trail: the gate trail's twenty-four flash commits inside IOService::start
 // were the 2fo wedge, and this is a single write that carries a whole answer.
 void rbgpu_nvram_note(const char *var, const char *text);
+// 2qo: a one-shot NVRAM gate for an experiment that can cost the desktop.
+// True iff `var` was set and not a literal "0"; the variable is removed and
+// FLUSHED TO FLASH before returning, so a boot that ends in a black screen is
+// recovered by a plain power cycle - no boot-arg edit and no second OS.
+// `why` is written on every path; see the definition for the codes.
+bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the
 // gate trail can be told apart from a machine that died under it.
 void rbgpu_heartbeat_start(void);
