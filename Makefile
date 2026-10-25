@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -196,6 +196,14 @@ $(OUT)/skyshaders: tools/skyshaders.m | $(OUT)
 # exported so the two can be compared (rule 14).
 useiop: $(OUT)/useiop
 $(OUT)/useiop: tools/useiop.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework IOKit
+
+# ioptest (2qm): the de-risking experiment for 2ql's lever - can an
+# IOPresentment display pipe be created for OUR IONDRVFramebuffer and OUR AMD
+# accelerator?  Arity of CreateForRegistryService was read from its
+# disassembly.  A NULL is INCONCLUSIVE (entitlements), pre-stated in the tool.
+ioptest: $(OUT)/ioptest
+$(OUT)/ioptest: tools/ioptest.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework IOKit
 
 # cdchain (2qc): CALL the ops-table thunks the compositor decision calls,
