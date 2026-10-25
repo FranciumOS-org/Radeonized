@@ -1,5 +1,12 @@
 # Scoping the AMD framebuffer stack — what it would actually take
 
+> Historical scope report, superseded by 2qy and 2r5/2r8. Runtime class
+> registration has succeeded; the immediate blocker is the missing per-GPU
+> AGDC service, not static linkage. **2ra builds that bridge**, off by default
+> and not yet boot-tested. Current implementation, test and recovery:
+> [SPEC-AGDC-BRIDGE.md](SPEC-AGDC-BRIDGE.md). The old gpuc/agdp inference in
+> §2 was corrected in the journal; use the current handoff for state.
+
 Written 2026-10-25, after 2qr, entirely from static measurement on this
 machine. No boot was spent on it. Every number below is reproducible with the
 commands in the footnotes; nothing here is estimated from general knowledge.

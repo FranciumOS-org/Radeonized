@@ -1,3 +1,16 @@
+> **FRAMEBUFFER FRONTIER, 2ra (2026-10-25): THE PER-GPU AGDC BRIDGE IS BUILT.**
+> `src/plugin/rbgpu_agdc.cpp` creates a runtime AGDC subclass attached to the
+> real PCI device, reporting AMD vendor info and the existing boot framebuffer
+> through the two required attributes. Apple's user client, entitlement check
+> and capability-pointer sanitization are retained. **Off by default, unrun on
+> hardware**, gated by **-rbgpuagdc + rbgpu-agdc one-shot**, alongside the
+> existing IOP gate experiment. It copies the inherited vtable and overrides
+> four instance slots; it does not implement 277 methods. No EFI/NVRAM changed.
+> Host tests and build pass. User-run boot test, expected keys and recovery:
+> **docs/SPEC-AGDC-BRIDGE.md**. This is the next framebuffer action; do not
+> substitute unrelated rendering archaeology for it. Publication alone will
+> not prove Metal display compositing; plane-state/bind support may fail next.
+>
 > **LATEST, 2026-10-25 (2r8/2r9).** 2r8 already ran the root `agdcinfo`
 > suggested below: the same entitlement refusal, so that command is no longer
 > pending. The display blocker remains the missing per-GPU AGDC service.
@@ -361,7 +374,7 @@
 > which says whether an AGDC user client here answers attribute 1 at all.
 > Detail: JOURNAL **2r5**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r9)
+# RembrandtGPU — handoff state (2026-10-25, after 2ra)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
@@ -1200,10 +1213,11 @@ blocking a usable machine any more.
    only matching service, `AppleGPUWrangler`; its next query opens port 0.
    Root `agdcinfo` has also already run and was refused for missing private
    entitlements. Neither command is pending. The substantial candidate work
-   is a runtime `AppleGraphicsDeviceControl` subclass plus its vendor-info
-   and GPU-capability attribute protocol; post-gate presentation remains
-   unproved. That kernel experiment still needs the user's decision.
-   Keep the verified IOP instrument for that work. The old direct-flip plan
+   is now **built in 2ra**: a runtime `AppleGraphicsDeviceControl` subclass
+   plus vendor-info and GPU-capability replies. The user explicitly asked to
+   continue framebuffer work. **Next is its user-run boot test**, documented
+   in `SPEC-AGDC-BRIDGE.md`; post-gate presentation remains unproved.
+   Keep the verified IOP instrument for that test. The old direct-flip plan
    remains superseded: 2pf measured no flip request, and 2pr showed extra
    VRAM room bought nothing. `-rbgpufbmatch` must stay OUT (§9).
 2. **Mode setting, external displays, brightness, DSC and PSR** are all

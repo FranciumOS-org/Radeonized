@@ -14,6 +14,7 @@
 #include <IOKit/IOTimerEventSource.h>
 
 #include "kern_start.hpp"
+#include "rbgpu_agdc.hpp"
 #include "rb_smu13.h"
 // 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
 #include "rb_dcn_deny.h"
@@ -69,6 +70,8 @@ static const char *kextPathIOGraphics =
 // injected personality.
 static const char *kextPathX6000FB =
     "/System/Library/Extensions/AMDRadeonX6000Framebuffer.kext/Contents/MacOS/AMDRadeonX6000Framebuffer";
+static const char *kextPathAGDC =
+    "/System/Library/Extensions/AppleGraphicsControl.kext/Contents/PlugIns/AppleGraphicsDeviceControl.kext/Contents/MacOS/AppleGraphicsDeviceControl";
 
 enum KextListIndex {
     KextHWLibs = 0,
@@ -77,7 +80,8 @@ enum KextListIndex {
     KextAccelFamily,
     KextNDRV,
     KextIOGraphics,
-    KextX6000FB
+    KextX6000FB,
+    KextAGDC
 };
 
 static KernelPatcher::KextInfo kextList[] = {
@@ -98,6 +102,8 @@ static KernelPatcher::KextInfo kextList[] = {
       KernelPatcher::KextInfo::Unloaded },
     // 2ph: Apple's DAL, for the dry-run register trace.
     { "com.apple.kext.AMDRadeonX6000Framebuffer", &kextPathX6000FB, 1, {true}, {},
+      KernelPatcher::KextInfo::Unloaded },
+    { "com.apple.AppleGraphicsDeviceControl", &kextPathAGDC, 1, {true}, {},
       KernelPatcher::KextInfo::Unloaded }
 };
 
@@ -8221,6 +8227,7 @@ static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
     // It touches nothing of `fb`; it only needs to run this late.
     rbgpu_mcprobe_read_2qv();
     rbgpu_mcnew_2qx();
+    rbgpu_agdc_framebuffer(reinterpret_cast<IOService *>(fb));
     return ret;
 }
 
@@ -9756,7 +9763,7 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     // never a second one for the same function.
     rbgpu_diag_set_num("fbvram_on", g_vram_on ? 1 : 0);
     if (g_vram_on || g_mcp_on || checkKernelArgument("-rbgpumcnew") ||
-        checkKernelArgument("-rbgpumcreg")) {
+        checkKernelArgument("-rbgpumcreg") || checkKernelArgument("-rbgpuagdc")) {
         KernelPatcher::RouteRequest vr(
             "__ZN17IONDRVFramebuffer16enableControllerEv",
             hooked_ndrv_enablectl_2pa, orig_ndrv_enablectl_2pa);
@@ -10033,6 +10040,8 @@ void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         rbgpu_log("2ph: AMDRadeonX6000Framebuffer loaded at %p (size 0x%zx)",
                   reinterpret_cast<void *>(address), size);
         processX6000FB(patcher, id, address, size);
+    } else if (kextList[KextAGDC].loadIndex == id) {
+        rbgpu_agdc_load(patcher,id,address,size);
     } else if (kextList[KextHWSvc].loadIndex == id) {
         g_kext_addr_hwsvc = address;
         g_kext_size_hwsvc = size;

@@ -19,6 +19,16 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
+AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
+host-tested, **not yet boot-tested**. It clones the inherited AGDC tables,
+supplies attributes 1/0x980 for our actual PCI/boot framebuffer, and retains
+Apple's entitlement and pointer-sanitization paths. **-rbgpuagdc + one-shot
+rbgpu-agdc**, off by default. Next: user-run installation and boot with the
+existing IOP gate experiment; full commands and verdicts in
+`docs/SPEC-AGDC-BRIDGE.md`. No EFI/NVRAM was changed while implementing it.
+Do not divert this request into rendering loose threads again.
+
 **2r9 closes the tiled-render-target loose thread.** With the existing
 kernel linear force on, plain Metal render targets have GPU descriptor
 **SW_MODE 6/10**, but reach the kernel as **type-0x40 raw allocations,
