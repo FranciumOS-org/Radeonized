@@ -172,7 +172,22 @@
 > at AGDC vendor info), so this answers only "can it be done at all". Detail:
 > JOURNAL **2qx**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qx)
+> **2qy — BOOT 154: A CLASS CAN BE REGISTERED AT RUNTIME FROM THE BOOT KC.**
+> `mcr_post 0`, `mcr_name` = `RembrandtGPUProbeClass`, `mcr_name_ok 1`, with
+> `mcn_f00` = vtable + 0x10, `mcn_f10` = `IOGraphicsDevice::gMetaClass` and
+> `mcn_super_off` `0x3f138` for a third boot. `mcn_verdict 14` is correct here
+> (bit 1 clears because `postModLoad` swapped `+0x18` for an `OSSymbol`; 15 was
+> pre-stated for stage 2a, which did not run). **2oz's blocker was static
+> linking, nothing else** — route C's two cheap questions are both answered yes
+> now, and everything expensive is still ahead. It buys **no pixel**: 2qr
+> closed the chain at AGDC vendor info. **AND THE ONE-SHOT'S CLEAR FAILED** —
+> `mcr_oneshot 4`, `nvram rbgpu-mcreg` still 1 — so this ran with no rescue in
+> force. Cause unestablished (not the code, not timing, not a stale
+> `/options`); the defect that *was* ours is fixed — it reported the failure
+> and returned "proceed", and now retries and **fails closed**.
+> **Run `sudo nvram -d rbgpu-mcreg`.** Detail: JOURNAL **2qy**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2qy)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
