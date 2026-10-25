@@ -31298,3 +31298,115 @@ verdict is a created display pipe, IOSurface-backed display surfaces and
 Metal display compositing. If it stops on another attribute or on plane/bind
 support, that is the next framebuffer implementation task. It has not been
 tested on hardware, and nothing in these host checks proves that final chain.
+
+
+---
+
+## 2rb — boot 155 refused the bridge before registration: the kernel symbol helper selected a zero-length range
+
+2026-10-25. User supplied `logs/20261025-173030-plugin` and
+`logs/20261025-173052-compositor/compositor.txt`. Read the saved boot nonce
+first: **155**, after 154. Loaded UUID **902BE8B3-FA45-3CA3-AABD-94E526538A31**
+agrees with the 2ra build. This was a real armed test of the intended build.
+
+### What ran, and what did not
+
+The IOP input patch landed: **iop_verify=1**, iop_match=1, iop_patched=1,
+iop_oneshot=0. The AGDC bridge did **not** get as far as its one-shot:
+**agdc_error=1**, agdc_say="required symbols/ranges", agdc_fb_seen=1,
+agdc_wait_load=1; rbgpu-agdc is still **1**, while rbgpu-iop and rbgpu-arm
+are absent. No runtime AGDC class registration or service start was attempted.
+This is a defect in our preparation code, not a negative hardware answer.
+
+The diagnostic table has room: **522 used / 768 max**. The NVRAM summary's
+`d=105` is its separate truncation count, and its numeric values are hex:
+`diag_max=300`, `diag_used=20a`. It is not a full IORegistry diag table.
+
+### The existing log contains the exact cause
+
+`logs/20261025-173030-plugin/log.txt`, all four at **17:28:29.580–.581**:
+
+```
+patcher: address 0xFFFFFF8011449940 is out of range 0x0000000000000000 with size 0
+patcher: address 0xFFFFFF801144A190 is out of range 0x0000000000000000 with size 0
+patcher: address 0xFFFFFF801144A290 is out of range 0x0000000000000000 with size 0
+patcher: address 0xFFFFFF8011475800 is out of range 0x0000000000000000 with size 0
+```
+
+These are OSMetaClass's ctor, preModLoad, postModLoad and __cxa_pure_virtual,
+all valid kernel symbols. `third_party/Lilu/Lilu/Headers/kern_patcher.hpp`
+**209–224** defines the overload the new helper called:
+
+```
+solveSymbol(id, name, start, size):
+    addr = solveSymbol(id, name)
+    if addr >= start && addr < start + size: return addr
+    code = InvalidSymbolFound
+    return 0
+```
+
+2ra's helper supplied its default **base=0, size=0** for kernel symbols but
+still called this FOUR-argument overload. The underlying symbol lookup
+succeeded, then the empty range necessarily rejected it. The prior static
+ABI tests checked names/slots/prologue but never exercised this helper's
+choice of overload. That gap cost boot 155.
+
+### Fix and regression
+
+`src/plugin/rbgpu_agdc_lookup.hpp` now resolves with Lilu's **two-argument**
+API, records the raw result, and applies **explicit bounds only to kext
+symbols**. Bounds use `address >= base && address-base < size`, avoiding
+base+size overflow. Null results and the existing kernel/kext pointer-floor
+checks still refuse. No class, reply layout, hook target or arming policy
+changed.
+
+`tools/hosttest/agdc_lookup_test.cpp` exercises the exact failing case: a
+valid kernel address with no supplied range, plus valid/outside/empty kext
+ranges, preserved rejected addresses and a missing symbol. It runs under
+ASan/UBSan as part of `make hosttest` / `make plugin`. Mutating the resolver
+back to `solveSymbol(id,name,base,size)` makes the regression fail, including
+the kernel lookup and raw-address assertions. The real Lilu implementation
+above is the basis for that mock's overload behavior.
+
+Also repaired the instrument's refusal path: **every one of the ten input
+addresses** is recorded in RBGPUDiag, alongside callback base/size. The helper's
+own logs were absent from the saved log ring because early lines were evicted;
+only Lilu's unified-log warnings survived. **agdc_solved** now records the
+accepted inputs, expected **0x3ff / 1023**; bits 5–8 are the four kernel
+inputs. It is NVRAM-hot. `agdc_bad_slot` identifies a failed instance-slot
+check. Future early refusals no longer require recovering overwritten logs
+just to tell which input was missing.
+
+### The compositor capture does not answer a new display question
+
+It measured a live accelerator/Metal device, nonzero acceleratorPort 0x2203,
+135.63 Hz callback pacing and **0 flips / 0 swaps**. But **render_update=0**
+and no compositor frames were sampled: its own verdict is **INCONCLUSIVE:
+the display may have been idle**. No inference that Metal display compositing
+works or fails is made from that sample. The bridge's preparation refusal is
+already the decisive finding for this test; another compositor sample before
+fixing it would not exercise the missing service.
+
+Incidental existing-fix validation, not the framebuffer task: `rbgpu-vmid`
+now reads **av=2611 fail=0**, the first hardware confirmation of 2r7's bool
+return correction. 2r6's normal path publishes mtlk_patched=1788,
+mtlk_cavehits=1792 and mtlk_failed=7, with both moved keys absent and capacity
+available. That verifies ordinary counter publication, not the unexercised
+OS-update/moved-pattern failure path.
+
+### Build and next boot
+
+`make plugin`: host tests and the new lookup regression pass. The new module
+builds with -Werror. `tools/check_imports.py` resolves **362/362** symbols;
+`git diff --check` passes. UUID moved **902BE8B3… →
+667372BC-502F-31A6-BFF2-60E61AAAF29F**. Log:
+`logs/20261025-2rb-agdc/build.txt`.
+
+**Next is the SAME AGDC+IOP boot test with the rebuilt kext**, not another
+experimental branch. The flags are already present from boot 155. The user
+installs the rebuild, checks EFI status, rearms IOP and rbgpu-arm (both were
+consumed), and leaves/reasserts rbgpu-agdc=1. Then capture plugin_check before
+another reboot. Require agdc_solved=0x3ff, agdc_error=0, agdc_mc_post=0,
+agdc_mc_ok=1, agdc_started=1 and iop_verify=1 before interpreting the next
+presentation failure. No EFI, NVRAM, kext load/unload or reboot was performed
+by the agent in this turn.

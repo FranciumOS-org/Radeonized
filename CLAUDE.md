@@ -19,6 +19,16 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**BOOT 155 / 2rb: the AGDC bridge refused before registration, and its lookup
+bug is fixed.** Correct loaded build 902BE8B3, `iop_verify=1`, `agdc_error=1`;
+four valid kernel symbols were rejected because our helper selected Lilu's
+range-checking overload with range [0,0). The new resolver uses the
+two-argument API, explicit bounds for kext symbols, and records raw addresses
++ `agdc_solved` (expect 0x3ff). Host regression passes and fails with the old
+overload. **New build 667372BC… needs the same user-run AGDC+IOP boot test.**
+No class/service was created in boot 155; rbgpu-agdc remained armed. The
+compositor sample was idle and INCONCLUSIVE. JOURNAL **2rb**.
+
 **FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
 AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
 host-tested, **not yet boot-tested**. It clones the inherited AGDC tables,

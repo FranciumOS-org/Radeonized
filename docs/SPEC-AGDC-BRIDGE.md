@@ -1,6 +1,11 @@
 # Per-GPU AGDC bridge — 2ra
 
-Built 2026-10-25. **Not yet boot-tested.** This supplies the missing service
+Built 2026-10-25. **Boot 155 refused before registration; fixed in 2rb.**
+The four-argument Lilu symbol solver treated kernel lookups as range [0,0),
+so the four kernel functions all resolved to zero. The new lookup uses the
+two-argument resolver, records each raw result, and applies explicit bounds
+only to kext symbols. Its regression test fails with the old overload.
+The corrected build still needs a user-run boot test. This supplies the missing service
 at the measured IOPresentment blocker; it does not implement DCN mode setting.
 
 `AppleGPUWrangler` is the only existing `AppleGraphicsDeviceControl` service,
@@ -101,6 +106,7 @@ plugin_check's variable list. Full details remain in RBGPUDiag/RBGPULog.
 |---|---|
 | agdc_oneshot | 0 consumed; 1 options missing; 2 absent; 3 literal 0; 4 clear failed, refused |
 | agdc_error | 0 no refusal; codes below |
+| agdc_solved | **0x3ff / 1023**; all ten inputs found. Bits 5..8 are the four kernel symbols rejected in boot 155 |
 | agdc_stage | 10 layout verified; 20 one-shot consumed; 30 filter routed; 40 before class registration; 41 returned; 60 before start; 70 returned |
 | agdc_mc_post / agdc_mc_ok | 0 / 1 |
 | agdc_started | 1; also inspect a live RembrandtGPUAGDC service under the PCI device |
@@ -112,6 +118,11 @@ Refusal codes: 1 symbols/ranges; 2 vtable/prologue; 3 unarmed; 4 route;
 5 framebuffer class; 6 PCI identity; 7 worker allocation; 8 readiness timeout;
 9 superclass layout; 10 metaclass registration; 11 registered name;
 12 allocation; 13 init; 14 properties/attach; 15 start failure (instance pinned).
+
+`agdc_base` / `agdc_size` and the raw `agdc_vt`, `agdc_mvt`, `agdc_mc`,
+`agdc_ctor`, `agdc_dtor`, `agdc_mcc`, `agdc_pre`, `agdc_post`, `agdc_pure`,
+`agdc_filter` addresses remain in RBGPUDiag even after early log lines have
+been evicted. `agdc_bad_slot` identifies a failed instance-vtable check.
 
 **A published service is a partial result.** The full success criterion is
 WindowServer creating a display pipe, obtaining an IOSurface-backed display

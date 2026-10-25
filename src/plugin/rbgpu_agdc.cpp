@@ -2,6 +2,7 @@
 // rbgpu-agdc one-shot. No IOFramebuffer takeover and no DCN register writes.
 // Runtime superclass/vtables avoid a system-KC static dependency (2qy).
 #include "rbgpu_agdc.hpp"
+#include "rbgpu_agdc_lookup.hpp"
 #include "RembrandtGPUPeer.hpp"
 #include "rb_agdc.h"
 #include <Headers/kern_util.hpp>
@@ -96,10 +97,13 @@ IOReturn filter(void *self,unsigned api,unsigned attr,void *in,
 }
 
 uintptr_t solve(KernelPatcher &p,size_t id,const char *name,
-                mach_vm_address_t base=0,size_t size=0) {
-    auto a=p.solveSymbol(id,name,base,size);
+                mach_vm_address_t base=0,size_t size=0,const char *key=nullptr) {
+    uintptr_t raw=0;
+    auto a=rb_agdc_lookup(p,id,name,static_cast<uintptr_t>(base),size,&raw);
+    if (key) rbgpu_diag_set_num(key,raw);
     if (p.getError()!=KernelPatcher::Error::NoError || a<kextFloor) {
-        p.clearError(); rbgpu_log("2ra: unresolved %s (%p)",name,reinterpret_cast<void *>(a));
+        p.clearError(); rbgpu_log("2rb: unresolved/refused %s (raw %p, base %p, size %#lx)",
+            name,reinterpret_cast<void *>(raw),reinterpret_cast<void *>(base),size);
         return 0;
     }
     return a;
@@ -184,16 +188,21 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     rbgpu_diag_set_num("agdc_on",checkKernelArgument("-rbgpuagdc") ? 1 : 0);
     if (!checkKernelArgument("-rbgpuagdc")) return;
     rbgpu_diag_set_num("agdc_error",0);
-    auto vt=solve(p,id,"__ZTV26AppleGraphicsDeviceControl",base,size);
-    auto mvt=solve(p,id,"__ZTVN26AppleGraphicsDeviceControl9MetaClassE",base,size);
-    superMeta=reinterpret_cast<const OSMetaClass *>(solve(p,id,"__ZN26AppleGraphicsDeviceControl10gMetaClassE",base,size));
-    ctor=reinterpret_cast<Ctor>(solve(p,id,"__ZN26AppleGraphicsDeviceControlC2EPK11OSMetaClass",base,size));
-    dtor=reinterpret_cast<Dtor>(solve(p,id,"__ZN26AppleGraphicsDeviceControlD2Ev",base,size));
-    mcCtor=reinterpret_cast<McCtor>(solve(p,KernelPatcher::KernelID,"__ZN11OSMetaClassC2EPKcPKS_j"));
-    pre=reinterpret_cast<Pre>(solve(p,KernelPatcher::KernelID,"__ZN11OSMetaClass10preModLoadEPKc"));
-    post=reinterpret_cast<Post>(solve(p,KernelPatcher::KernelID,"__ZN11OSMetaClass11postModLoadEPv"));
-    auto pure=solve(p,KernelPatcher::KernelID,"___cxa_pure_virtual");
-    auto fn=solve(p,id,"__ZN26AppleGraphicsDeviceControl26filtered_doDeviceAttributeENS_19agdc_filtered_api_tEjPmmS1_S1_P17AGDCClientState_t",base,size);
+    rbgpu_diag_set_num("agdc_base",base);
+    rbgpu_diag_set_num("agdc_size",size);
+    auto vt=solve(p,id,"__ZTV26AppleGraphicsDeviceControl",base,size,"agdc_vt");
+    auto mvt=solve(p,id,"__ZTVN26AppleGraphicsDeviceControl9MetaClassE",base,size,"agdc_mvt");
+    superMeta=reinterpret_cast<const OSMetaClass *>(solve(p,id,"__ZN26AppleGraphicsDeviceControl10gMetaClassE",base,size,"agdc_mc"));
+    ctor=reinterpret_cast<Ctor>(solve(p,id,"__ZN26AppleGraphicsDeviceControlC2EPK11OSMetaClass",base,size,"agdc_ctor"));
+    dtor=reinterpret_cast<Dtor>(solve(p,id,"__ZN26AppleGraphicsDeviceControlD2Ev",base,size,"agdc_dtor"));
+    mcCtor=reinterpret_cast<McCtor>(solve(p,KernelPatcher::KernelID,"__ZN11OSMetaClassC2EPKcPKS_j",0,0,"agdc_mcc"));
+    pre=reinterpret_cast<Pre>(solve(p,KernelPatcher::KernelID,"__ZN11OSMetaClass10preModLoadEPKc",0,0,"agdc_pre"));
+    post=reinterpret_cast<Post>(solve(p,KernelPatcher::KernelID,"__ZN11OSMetaClass11postModLoadEPv",0,0,"agdc_post"));
+    auto pure=solve(p,KernelPatcher::KernelID,"___cxa_pure_virtual",0,0,"agdc_pure");
+    auto fn=solve(p,id,"__ZN26AppleGraphicsDeviceControl26filtered_doDeviceAttributeENS_19agdc_filtered_api_tEjPmmS1_S1_P17AGDCClientState_t",base,size,"agdc_filter");
+    const unsigned solved=(vt?1u:0u)|(mvt?2u:0u)|(superMeta?4u:0u)|(ctor?8u:0u)|
+        (dtor?16u:0u)|(mcCtor?32u:0u)|(pre?64u:0u)|(post?128u:0u)|(pure?256u:0u)|(fn?512u:0u);
+    rbgpu_diag_set_num("agdc_solved",solved); // 0x3ff required; kernel inputs are bits 5..8
     if (!vt || !mvt || !superMeta || !ctor || !dtor || !mcCtor || !pre || !post || !pure || !fn ||
         vt<base || size<tableBytes || vt-base>size-tableBytes ||
         mvt<base || size<metaTableBytes || mvt-base>size-metaTableBytes) {
@@ -213,6 +222,8 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
                 metaTable[metaTableBytes/8-1]==0 && table[2+0x850/8]==pure;
     for (auto &s:sites) {
         auto expected=solve(p,id,s.name,base,size);
+        if (!expected || table[2+s.slot/8]!=expected)
+            rbgpu_diag_set_num("agdc_bad_slot",s.slot);
         layout=layout && expected && table[2+s.slot/8]==expected;
     }
     auto alloc=solve(p,id,"__ZNK26AppleGraphicsDeviceControl9MetaClass5allocEv",base,size);
