@@ -1650,17 +1650,36 @@ bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why) {
         }
     }
 
-    options->removeProperty(var);
-    if (auto sync = OSString::withCString("now")) {
-        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
-        sync->release();
+    // 2qy: boot 154 measured this FAILING for `rbgpu-mcreg` while the
+    // byte-identical `rbgpu-arm` path cleared in the same boot, and the
+    // variable survived to live NVRAM (`nvram rbgpu-mcreg` still read 1
+    // afterwards). The cause is NOT established. What is established is that
+    // the old code then `return true`d anyway, so the caller ran its risky
+    // operation with `why = 4` recorded and **no rescue in force** - had that
+    // boot hung, the next one would have hung too, which is the exact failure
+    // the one-shot exists to prevent.
+    //
+    // So: retry, and then FAIL CLOSED. A gate that cannot arm its own rescue
+    // must refuse, not proceed and report. The retry is three rounds because
+    // one forced sync may be coalesced with an earlier one in the same boot -
+    // a hypothesis, not a measurement, and it is written here as such.
+    bool cleared = false;
+    for (int attempt = 0; attempt < 3 && !cleared; attempt++) {
+        options->removeProperty(var);
+        if (auto sync = OSString::withCString("now")) {
+            options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+            sync->release();
+        }
+        cleared = options->getProperty(var) == nullptr;
     }
-    bool cleared = options->getProperty(var) == nullptr;
-    rbgpu_log("Peer: one-shot `%s` consumed; clear %s", var,
-              cleared ? "OK (next boot comes up normally)"
-                      : "FAILED - still set, so the next boot is armed too");
+    rbgpu_log("Peer: one-shot `%s` %s", var,
+              cleared ? "consumed; clear OK (next boot comes up normally)"
+                      : "clear FAILED after 3 attempts - REFUSING to run, "
+                        "because the next boot would be armed too. Clear it "
+                        "by hand: sudo nvram -d <var>");
     out(cleared ? 0 : 4);
-    return true;
+    // Fail closed: `why = 4` now means "armed, but we did NOT run".
+    return cleared;
 }
 
 void rbgpu_gate_nvram(uint32_t stage, const char *what) {
