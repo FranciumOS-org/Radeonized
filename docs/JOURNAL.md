@@ -30454,3 +30454,123 @@ Every future `dsc.py` negative is cache-wide instead of one-seventh wide, and
 `maps` names the owning file. That is a permanent improvement to the main
 instrument of the display investigation, and it is the actual deliverable of
 this milestone.
+
+## 2r4 — FOUND IT. The AGDC query is `IOServiceOpen(type 2)` + `IOConnectCallMethod(selector 1)`, and `0x10000003` is NOT an IOReturn. 2r2's diagnosis was wrong: the negative was my own substring-offset bug.
+
+Static, no boot. Everything below is symbolized by measurement, not inferred
+from argument shape (the 2qa/2qc mistake).
+
+### The correction first, because it invalidates 2r2's explanation
+
+2r2 and 2r3 reported that the AGDC error string had **no reference anywhere**,
+and 2r2 diagnosed the cause as `dsc.py` reading one cache file of seven.
+
+**That diagnosis was wrong.** The cause was mine: I searched the cache for the
+*substring* `"Unable to get AGDC information"` and then xrefed **its** address,
+`0x7ff812ea2887`. The actual C string starts seven bytes earlier, at
+**`0x7ff812ea2880`**:
+
+```
+'Error: Unable to get AGDC information.  Return code: %#x\n'
+ ^ 0x7ff812ea2880                ^ 0x7ff812ea2887 (what I searched for)
+```
+
+Code LEAs the **start** of a string. Nothing ever references the middle. So
+every one of those scans was looking for an address no instruction could hold,
+and the controls all passed because the control string happened to be searched
+by its own full text.
+
+Re-run on `0x7ff812ea2880`: **3 sites**, `0x7ff812e9f368`, `0x7ff812e9f3cc`,
+`0x7ff812e9f64a` — all `leaq …(%rip), %rcx`, **all in the main cache file**,
+0x3500 bytes before the string. They were there the whole time.
+
+> **The lesson, and it is a new one for the instrument rules: when xrefing a
+> string, xref the string's START.** A substring search returns an interior
+> address, and an interior address has zero references by construction — a
+> guaranteed false negative that no control over a *different* string can
+> catch. Find the preceding NUL first.
+
+**What 2r2 got right and what stands:** the cache really is seven files, each
+with its own executable mapping, and `dsc.py` really did read one — that is a
+genuine defect and the fix is genuinely worth having. It simply was not the
+reason this search failed. 2qo's uniqueness correction also stands on its own.
+
+### Also built (2r3's named gap, now closed)
+
+`dsc.py ripall <target>` — **every** RIP-relative encoding, not just `lea`,
+across every executable mapping of every cache file, driven by one
+`re.finditer` pass per mapping over `ripxref.py`'s opcode table (the per-byte
+Python loop in `ripxref.py` cannot be pointed at 1.4 GB). Validated before use:
+it returns the known 7 LEA sites for `ioPresentmentFindAGDCMatch`, with the
+instruction bytes printed (`48 8d 15 …` = `leaq disp32(%rip), %rdx`).
+
+### The chain, end to end
+
+The three references are **outlined `os_log` trace thunks**. The relevant one,
+`0x7ff812e9f34b`, takes the return code in `%esi`, stores `0x4000100` into the
+caller's buffer and logs the format string. It has **exactly one caller**:
+`0x7ff812e8aee1`, inside **`ioPresentmentFindAGDCMatch`**.
+
+Walking that function, with all four stubs decoded (chained pointer ->
+`ptr_decode` -> `atos`, slide measured this run at `0x6137000`):
+
+```
+7ff812e8acfa   movq  [0x7ff8400566c8], %rax
+7ff812e8ad01   movl  (%rax), %esi          ; owningTask  (mach_task_self_)
+7ff812e8ad03   movl  %r13d, %edi           ; the AGDC service found earlier
+7ff812e8ad06   movl  $0x2, %edx            ; *** IOServiceOpen TYPE = 2 ***
+7ff812e8ad0b   leaq  -0x90(%rbp), %rcx     ; &connect
+7ff812e8ad12   callq IOServiceOpen         (in IOKit)
+7ff812e8ad1c   je    7ff812e8ae20          ; only on success ->
+
+7ff812e8ae20   (the query)
+7ff812e8ae45   movl  $0x1, %esi            ; *** selector 1 ***
+               rdx=rcx=r8=r9=0            ; no input
+               rsp+0x00 = output   = 0
+               rsp+0x08 = outputCnt= 0
+               rsp+0x10 = outputStruct    = &-0x120(%rbp)
+               rsp+0x18 = outputStructCnt = &-0x2568(%rbp)
+7ff812e8ae54   callq IOConnectCallMethod   (in IOKit)
+7ff812e8ae59   movl  %eax, %r15d           ; <- the logged code
+7ff812e8ae5e   jne   7ff812e8aebb          ; non-zero -> error
+7ff812e8ae60   cmpq  $0x0, -0x2568(%rbp)
+7ff812e8ae68   je    7ff812e8aebb          ; OR zero bytes returned -> error
+7ff812e8aee1   callq 7ff812e9f34b          ; "Unable to get AGDC information…"
+```
+
+Other stubs in the same function, resolved the same way:
+`IORegistryEntryGetName`, `IORegistryEntryGetRegistryEntryID`.
+
+### What this actually says
+
+**IOPresentment asks AGDC for a struct through a user client**: open it with
+`IOServiceOpen(service, task, type=2, &conn)`, then
+`IOConnectCallMethod(conn, selector 1)` with no input and a struct output. The
+error fires on a non-zero return **or** on a zero-length reply.
+
+**`0x10000003` is not an `IOReturn`.** Every `kIOReturn*` is `0xe00002xx`
+(`0xe00002e2` = NotPermitted, measured in 2qm; `0xe00002be` = NoResources,
+measured in 2oz). `0x10000003` matches none of that space, so it is a status
+the **user client's own method** produced, passed straight through by
+`IOConnectCallMethod` — or what comes back when a type-2 user client is not
+there to answer. That is a materially different thing from "a property is
+missing", which is how 2qr framed it.
+
+Note the shape is the same mechanism 2ql decoded on the kernel side, where
+`IOGraphicsAccelerator2::newUserClient` switched on the `IOServiceOpen` type
+(0 -> the vendor surface, 0x20 -> `IOAccelSurfaceMTL`). **So what has to exist
+is a type-2 user client on the AGDC service, with a method at selector 1
+returning a struct.**
+
+### Next
+
+Two bounded, boot-free reads, in this order:
+1. **Which service `%r13d` holds** at `0x7ff812e8ad03` — trace it back through
+   this function to the matching call that produced it. That names what
+   IOPresentment opens, and whether our GPU could ever be it.
+2. **Who implements selector 1 on a type-2 AGDC user client** — now a kernel
+   question, against `AppleGraphicsDeviceControl` (12 KB, already extracted as
+   `build/re/AGDControl`) and its `newUserClient`.
+
+Only after both is it known what supplying this would mean. Nothing here is a
+pixel, and no boot was spent.

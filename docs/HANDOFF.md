@@ -270,7 +270,27 @@
 > `lea [rip+disp32]` — the same gap `ripxref.py` fixes on the `.dis` path.
 > Next: extend that opcode set and re-run. Detail: JOURNAL **2r3**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r3)
+> **2r4 — FOUND IT, AND 2r2's DIAGNOSIS WAS WRONG.** The AGDC error string was
+> never unreferenced: I had xrefed `0x7ff812ea2887`, the address of my search
+> *substring*, while the C string starts at **`0x7ff812ea2880`**. Code LEAs a
+> string's start, so that was a false negative by construction. Re-run: **3
+> sites, all in the main cache file.** (`dsc.py`'s one-file defect was real and
+> the fix stands — it just wasn't the cause.) Also added **`ripall`**: every
+> RIP-relative form, all files, validated against the known 7-hit control.
+> **The chain, every stub symbolized by measurement:**
+> `ioPresentmentFindAGDCMatch` does `IOServiceOpen(service, task, **type=2**,
+> &conn)` then `IOConnectCallMethod(conn, **selector 1**, no input,
+> outputStruct=&-0x120, outputStructCnt=&-0x2568)`, and errors on a non-zero
+> return **or** a zero-length reply. **`0x10000003` is NOT an `IOReturn`** —
+> those are all `0xe00002xx` — so it is the user client's own status, not a
+> missing property, which is how 2qr framed it. **What must exist is a type-2
+> user client on the AGDC service with a selector-1 method returning a
+> struct** — the same `newUserClient` type switch 2ql decoded for
+> `IOGraphicsAccelerator2`. Next: trace which service `%r13d` holds at
+> `0x7ff812e8ad03`, then who implements selector 1 in
+> `AppleGraphicsDeviceControl`. Detail: JOURNAL **2r4**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2r4)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4

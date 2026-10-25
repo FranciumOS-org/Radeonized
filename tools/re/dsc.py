@@ -311,6 +311,52 @@ def main():
         print("# %d file(s), %d mapping(s), %d executable"
               % (len(c.files), len(c.regions), len(c.exec_ranges())),
               file=sys.stderr)
+    elif cmd == "ripall":
+        # 2r4: EVERY RIP-relative encoding, not just `lea`, across every
+        # executable mapping of every cache file.
+        #
+        # `xref`/`xrefall` match only `lea <reg>,[rip+disp32]`, so their "0
+        # hits" means "nothing LEAs it" - which is exactly how the referencer
+        # of the AGDC error string survived four searches in 2r2/2r3.
+        # `ripxref.py` has carried the full opcode table since 2pz but scans
+        # with a per-byte Python loop, which cannot be pointed at 1.4 GB.
+        #
+        # This is the same table driven by ONE `re.finditer` pass per mapping:
+        # the regex matches an optional REX, an opcode from the table, and a
+        # modrm with mod=00 / rm=101 (any reg field), all at C speed. The
+        # per-match work is then just the length fix-up and one comparison.
+        import re as _re
+        tgt = int(sys.argv[3], 0)
+        ops1 = [0x8b, 0x89, 0x8d, 0x63, 0x03, 0x2b, 0x39, 0x3b, 0x85, 0x01,
+                0x29, 0x31, 0xc7, 0x83, 0x81, 0xff, 0x8a, 0x88, 0xc6, 0x80,
+                0x38, 0x3a, 0x84, 0x86, 0xf6, 0xf7, 0xfe, 0x00, 0x08, 0x20,
+                0x30]
+        names = {0x8b: "mov r<-m", 0x89: "mov m<-r", 0x8d: "lea",
+                 0x63: "movslq", 0xc7: "mov m,imm", 0x83: "grp1 m,imm8",
+                 0x81: "grp1 m,imm32", 0xff: "grp5 m", 0x80: "grp1 m8,imm8",
+                 0x8a: "mov r8<-m", 0x88: "mov m<-r8", 0xc6: "mov m8,imm"}
+        opcls = b"[" + bytes(ops1) + b"]"
+        modrm = b"[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]"
+        pat = _re.compile(b"[\x40-\x4f]?" + opcls + modrm, _re.DOTALL)
+        extra = {0xc7: 4, 0x81: 4, 0x83: 1, 0xc6: 1, 0x80: 1}
+        total = 0
+        for va, size, name in c.exec_ranges():
+            blob = c.read(va, size)
+            for m in pat.finditer(blob):
+                i = m.start()
+                j = i + 1 if 0x40 <= blob[i] <= 0x4f else i
+                op = blob[j]
+                if j + 6 > len(blob):
+                    continue
+                disp = struct.unpack_from("<i", blob, j + 2)[0]
+                ilen = (j + 6) - i + extra.get(op, 0)
+                if va + i + ilen + disp == tgt:
+                    total += 1
+                    print("  0x%x   %-14s %s   %s"
+                          % (va + i, names.get(op, "op %#x" % op),
+                             blob[i:i + ilen].hex(), name))
+        print("%d RIP-relative site(s) targeting 0x%x across %d mapping(s)"
+              % (total, tgt, len(c.exec_ranges())))
     elif cmd == "xrefall":
         # 2r3: every executable mapping in EVERY cache file. This is the
         # command to use for "does anything reference X"; the single-range
