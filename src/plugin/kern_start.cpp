@@ -7042,6 +7042,21 @@ static char     g_mtlkExclude[160] = "";
 static int      g_mtlkReportBudget = 8;
 static uint64_t g_mtlkPatched = 0;   // cave AND detour verified
 static uint64_t g_mtlkFailed  = 0;   // matched the scope but did not complete
+// 2r6: the ONE failure this design makes silent. 2on's fail-safe reads every
+// site back before writing, so an OS update that moves
+// amdMtl_HWL_DetermineSwizzleMode leaves the desktop UNPATCHED rather than
+// wrongly patched - correct, and invisible: the artifacts come back with
+// nothing to point at. g_mtlkMoved counts the signature of exactly that -
+// the read succeeded and NEITHER the original nor the replacement bytes are
+// there - which is a different thing from a failed read, a missing map or an
+// unsolved symbol, and is the only one of them an OS update produces.
+static uint64_t g_mtlkMoved     = 0;
+static bool     g_mtlkMovedSaid = false;
+// place()'s verdict, set on EVERY call: 1 = original found, 2 = already
+// placed, 0 = neither, 0xFFFF = the read itself failed. The diag key of the
+// same meaning is written only for the first 8 execs, so after the report
+// budget runs out this global is the only carrier.
+static int      g_mtlkLastMatch = -1;
 
 // ---------------------------------------------------------------------------
 // 2qo (2026-10-25): the IOPresentment gate, placed at ONE CALL SITE.
@@ -7183,13 +7198,15 @@ static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
 
     kern_return_t r = g_mtlkVmMapReadUser(map, place, buf, len);
     if (r != KERN_SUCCESS) {
+        g_mtlkLastMatch = 0xFFFF;
         RB_MTLK_SET(kMatch, 0xFFFF);
         return false;
     }
 
     bool isFind = memcmp(buf, find, len) == 0;
     bool isRepl = memcmp(buf, repl, len) == 0;
-    RB_MTLK_SET(kMatch, isFind ? 1 : (isRepl ? 2 : 0));
+    g_mtlkLastMatch = isFind ? 1 : (isRepl ? 2 : 0);
+    RB_MTLK_SET(kMatch, g_mtlkLastMatch);
     if (isRepl) {
         return true;                  // already placed in this process
     }
@@ -7339,6 +7356,33 @@ static void rbgpu_iop_try(task_t task, const char *pname) {
               (unsigned long long)place);
 }
 
+// 2r6, rule 14: the counters must exist on EVERY path out of the per-exec
+// hook, not only the ones that reach the detour. Until now they were written
+// after the stage-B detour, so the single failure the fail-safe exists for -
+// the driver moved, every cave probe misses, nothing is ever patched -
+// published NOTHING at all: mtlk_cavehits, mtlk_patched and mtlk_failed were
+// absent, which is indistinguishable from "the hook never ran". Absence is
+// not a result.
+//
+// Throttled, because rbgpu_diag_set_num takes a lock and scans the whole key
+// table and this runs on every exec on the system (rule 16, and the comment
+// on g_mtlkReportBudget). The first 64 scoped execs are enough to make the
+// "nothing was ever patched" verdict certain; after that every 256th, which
+// keeps the final counts honest at a cost of ~8 writes per boot.
+static void rbgpu_mtlk_counters(void) {
+    if (g_mtlkCaveHits > 64 && (g_mtlkCaveHits & 255) != 0) {
+        return;
+    }
+    rbgpu_diag_set_num("mtlk_cavehits", g_mtlkCaveHits);
+    rbgpu_diag_set_num("mtlk_patched", g_mtlkPatched);
+    if (g_mtlkFailed) {
+        rbgpu_diag_set_num("mtlk_failed", g_mtlkFailed);
+    }
+    if (g_mtlkMoved) {
+        rbgpu_diag_set_num("mtlk_moved", g_mtlkMoved);
+    }
+}
+
 static void rbgpu_mtlk_on_exec(task_t task) {
     g_mtlkExecs++;
     // Throttled: the diag setter takes a lock and scans ~400 keys, and this
@@ -7409,6 +7453,7 @@ static void rbgpu_mtlk_on_exec(task_t task) {
                   "Nothing was touched.",
                   g_mtlkSlideSeen, g_mtlkGetTaskMap != nullptr,
                   g_mtlkVmMapReadUser != nullptr, g_mtlkVmMapWriteUser != nullptr);
+        rbgpu_mtlk_counters();
         return;
     }
     if (report) {
@@ -7419,6 +7464,7 @@ static void rbgpu_mtlk_on_exec(task_t task) {
     if (map == nullptr) {
         g_mtlkFailed++;
         rbgpu_diag_set_num("mtlk_map", 0);
+        rbgpu_mtlk_counters();
         return;
     }
     if (report) {
@@ -7440,11 +7486,40 @@ static void rbgpu_mtlk_on_exec(task_t task) {
                                    report);
     if (!caveOk) {
         g_mtlkFailed++;
+        // 2r6: distinguish "the driver moved" from a failed read or a bad
+        // map. g_mtlkLastMatch is set on every place() call, not only the
+        // reported ones, so this survives the report budget running out.
+        if (g_mtlkLastMatch == 0) {
+            g_mtlkMoved++;
+        }
         if (report) {
             rbgpu_log("2om: cave NOT placed in %s at 0x%llx - the detour is "
                       "not written, so nothing can jump into unpatched padding",
                       pname, (unsigned long long)cavePlace);
         }
+        // The visible signal, once per boot. Eight scoped execs all missing
+        // the pattern with nothing yet patched is not a one-off process: it
+        // is the whole cave address being wrong, which is what an OS update
+        // does. Say so with both unslid addresses and this boot's slide, so
+        // the next session can re-derive them without a boot.
+        if (!g_mtlkMovedSaid && g_mtlkMoved >= 8 && g_mtlkPatched == 0) {
+            g_mtlkMovedSaid = true;
+            rbgpu_diag_set_num("mtlk_moved_verdict", 1);
+            rbgpu_log("2r6: THE DRIVER MOVED. %llu scoped execs, the cave "
+                      "pattern absent in every one, 0 patched - so NOTHING "
+                      "was written and the desktop is simply unpatched "
+                      "(fail-safe, by design). Re-derive the cave (unslid "
+                      "0x%llx, anchor 0x%x) and the detour (unslid 0x%llx) "
+                      "against the new AMDRadeonX6000MTLDriver, update "
+                      "src/plugin/rbgpu_mtlcave.h and rebuild. Slide this "
+                      "boot 0x%llx.",
+                      (unsigned long long)g_mtlkMoved,
+                      (unsigned long long)RBGPU_MTL_CAVE_VM,
+                      (unsigned)RBGPU_MTL_CAVE_ANCHOR,
+                      (unsigned long long)RBGPU_MTL_FN_VM,
+                      (unsigned long long)g_mtlkSlide);
+        }
+        rbgpu_mtlk_counters();
         return;
     }
 
@@ -7455,6 +7530,7 @@ static void rbgpu_mtlk_on_exec(task_t task) {
                       "no detour - the bytes are never executed)",
                       pname, (unsigned long long)cavePlace);
         }
+        rbgpu_mtlk_counters();
         return;
     }
 
@@ -7475,13 +7551,9 @@ static void rbgpu_mtlk_on_exec(task_t task) {
                   pname, detOk ? "PLACED and verified" : "NOT placed",
                   (unsigned long long)fnPlace);
     }
-    // Counters always, details only for the first few. These are the two
-    // numbers that describe a universal boot.
-    rbgpu_diag_set_num("mtlk_patched", g_mtlkPatched);
-    if (g_mtlkFailed) {
-        rbgpu_diag_set_num("mtlk_failed", g_mtlkFailed);
-    }
-    rbgpu_diag_set_num("mtlk_cavehits", g_mtlkCaveHits);
+    // Counters on every path out, details only for the first few. These are
+    // the numbers that describe a universal boot.
+    rbgpu_mtlk_counters();
 }
 
 static void wrap_rbMtlkTaskSetMainThreadQos(task_t task, thread_t main_thread) {

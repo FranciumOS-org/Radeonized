@@ -30825,3 +30825,63 @@ the attribute protocol — with the post-gate question still open behind it.
 One cheap thing is left and it is the user's to run:
 `sudo ./build/out/agdcinfo`, which says whether an AGDC user client on this
 machine answers attribute 1 at all.
+
+---
+
+## 2r6 — the universal fix's one silent failure, closed
+
+No boot. The debt named in 2op's loose threads: *"hardening the universal fix
+with a visible signal when an OS update moves the driver."*
+
+**The defect was rule 14 on the plugin's most-travelled path.** 2on's design
+is fail-safe — every site is read back and compared before anything is
+written, so an OS update that moves `amdMtl_HWL_DetermineSwizzleMode` leaves
+the desktop *unpatched* rather than wrongly patched. Correct, and silent: the
+counters were published at the **end** of `rbgpu_mtlk_on_exec`, after the
+stage-B detour, so in exactly that case the function returned at `if
+(!caveOk)` and `mtlk_patched`, `mtlk_failed` and `mtlk_cavehits` were **all
+absent**. Absent is indistinguishable from "the hook never ran" — which is the
+rule 14 mistake, committed on the one path that runs ~2000 times a boot. The
+only trace was a `rbgpu_log` line for the first 8 execs, and 2qw already
+established that a log that lands only in a capture is not enough.
+
+Three changes, all in `src/plugin/kern_start.cpp`:
+
+1. **`g_mtlkLastMatch`**, set inside `rbgpu_mtlk_place` on **every** call
+   (1 = original found, 2 = already placed, 0 = neither, 0xFFFF = the read
+   itself failed). The diag key of the same meaning is written only while the
+   report budget lasts, so after 8 execs this global is the only carrier.
+2. **`mtlk_moved`** counts `g_mtlkLastMatch == 0` — the read succeeded and
+   **neither** pattern is there. That is the signature an OS update produces,
+   and it is a different thing from a failed read, a NULL task map or an
+   unsolved symbol, each of which already had its own key.
+3. **`rbgpu_mtlk_counters()`** publishes
+   `mtlk_cavehits`/`mtlk_patched`/`mtlk_failed`/`mtlk_moved` on **every** path
+   out. Throttled to the first 64 scoped execs, then every 256th: the comment
+   on `g_mtlkReportBudget` warns that `rbgpu_diag_set_num` takes a lock and
+   scans the whole key table, and rule 16 says the instrument is a suspect, so
+   this must not become the slowest thing in the plugin. 64 execs is already
+   enough to make a "nothing was ever patched" verdict certain, and the tail
+   sampling keeps the final counts honest for ~8 extra writes per boot.
+
+**The visible signal is `mtlk_moved_verdict 1`**, set once per boot when 8
+scoped execs have all missed the pattern with `mtlk_patched == 0`, with a log
+line naming the cave (`RBGPU_MTL_CAVE_VM`, its anchor) and the detour
+(`RBGPU_MTL_FN_VM`) unslid, plus this boot's slide — so the next session can
+re-derive both against the new `AMDRadeonX6000MTLDriver` and edit
+`src/plugin/rbgpu_mtlcave.h` without spending a boot to find out where things
+went. `plugin_check.sh` dumps the whole `RBGPUDiag`, so the new keys appear in
+every capture with no script change.
+
+Built: hosttest all passed, UUID moved `5C3D0EA9` -> `C3FEAF28`, no new
+compiler warnings in the edited region (the `-Wsign-conversion` lines are all
+pre-existing, around line 1040 and below).
+
+**Not verified on hardware.** Nothing here changes what is written — the
+write path, the ordering and the read-back are untouched — but the throttle
+arithmetic and the new counters are only *claimed* correct until a boot shows
+`mtlk_patched` still counting up and `mtlk_moved` absent. The honest reading
+of a normal boot after this: `mtlk_moved` and `mtlk_moved_verdict` should both
+be **absent**, `mtlk_cavehits` should be in the low thousands and
+`mtlk_patched` should track it. If `mtlk_moved_verdict` is 1, the desktop will
+have artifacts and the log line says what to do.
