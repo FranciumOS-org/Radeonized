@@ -27759,3 +27759,60 @@ long long)` (`0x7ff80408c490`, which 2q9's scan already showed reading
 
 That is static work, and it is the first time the display half has had a
 named, falsifiable target that is not "write DCN 3.1.2".
+
+### 2qh, continued: the surface exists, the IOSurface was never created
+
+`CoreDisplay_DisplaySurface_GetIOSurface` (`0x7ff8040b887c`) is four
+instructions: `if (s == NULL) return NULL; return *(s)`. So the IOSurface is
+the **first field** of a `DisplaySurface`, which agrees with the constructor
+taking `__IOSurface*` as argument 1.
+
+And in `prepare_for_update` the two cases are **separate branches**:
+
+```
+7ff807d6f3f9  s = CoreDisplay_Display_GetNextSurface(...)
+7ff807d6f3fe  cdsurf->0x18 = s
+7ff807d6f402  cmpq $0, 0x10(%r14) ; je -> 0x7ff807d6f553   (different path)
+7ff807d6f410  testq %rax,%rax     ; je -> 0x7ff807d6f572   (s NULL: different path)
+7ff807d6f421  io = GetIOSurface(s)
+7ff807d6f42d  testq; je -> cdsurf->0x40 = 1                (OUR path)
+```
+
+So on the path we are on, **`s` is NOT NULL** - a `DisplaySurface` exists - and
+`s->0x00` is NULL. The display has a surface object with no IOSurface behind
+it.
+
+`CD_IOSurfaceCreate` (the function `internal_allocate_surface`) logs
+**`'%s: IOSurfaceCreate failed for dictionary => [%s]'`** when the allocation
+fails. This boot: **0 occurrences**, against a control of 113 CoreDisplay log
+lines from WindowServer. So **nothing tried and failed to create it** - the
+creation was never attempted for this display. `CD_IOSurfaceCreate` has exactly
+two callers, `DisplaySurfacePool::GetNextSurface` and
+`DisplayPipe::RunFullDisplayPipe`, and `Display::GetNextSurface` reaches the
+pool only at **+1270 of a 0x65c-byte function**, so an earlier return is the
+likely path. That is the next read.
+
+### Why this is the end of the compositor hunt and the start of framebuffer work
+
+The whole 2px->2qg excursion asked "which flag makes SkyLight choose
+software". There is no such flag: SkyLight **chooses Metal correctly** and then
+`begin_update` replaces it because the destination has no IOSurface. Every
+accelerator-side reading was healthy because nothing on the accelerator side
+was ever wrong.
+
+This also joins the two halves of the project's own evidence:
+
+- **2pd (boot 138)**: *"the display is `IONDRVFramebuffer`, whose destination
+  is a raw CPU-mapped range, not an IOSurface and not a Metal texture"* - now a
+  literal branch, `if (GetIOSurface() == NULL) force software`.
+- **2q9**: `numDisplayBuffers` is the popcount of the low two req-bits of
+  `IOAccelSurfaceMTL->0x13c` and reads 0 because `add_drawable_to_list` never
+  ran - no buffer attached to the display's accelerator surface. A display with
+  no attached buffer has no IOSurface to hand out. **The same fact at two
+  layers**, which is why both read 0, and why 2pr's bigger `getVRAMRange`
+  changed nothing: room was never the problem, a *surface* was.
+
+So the target is no longer a flag to flip but the thing 2pd named: the
+framebuffer must present an accelerator-backed scanout **surface**, not a bare
+range. That is real work, and it is now specified by what consumes it rather
+than guessed at.
