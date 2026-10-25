@@ -958,6 +958,28 @@ The two that bite hardest:
   detour is written. The qos hook runs on **every** exec, so a fault in it
   makes the machine unbootable - rescue with `-rbgpuoff`. Read `mtlk_*` from
   the IORegistry; `mtlk_verify=1` is the only line that proves anything.
+  **2r6 CLOSES ITS ONE SILENT FAILURE.** Failing safe meant an OS update that
+  moves `amdMtl_HWL_DetermineSwizzleMode` left the desktop **unpatched** -
+  correct, and **invisible**: the counters were published only after the
+  stage-B detour, so in exactly that case `mtlk_patched`, `mtlk_failed` and
+  `mtlk_cavehits` were **all absent**, indistinguishable from "the hook never
+  ran" (rule 14, on this plugin's most-travelled path). Now `place()` records
+  its verdict in `g_mtlkLastMatch` on **every** call, not only the first 8
+  reported ones, so **`mtlk_moved`** counts the signature an OS update
+  actually produces - the read succeeded and **neither** the original nor the
+  replacement bytes are there, as distinct from a failed read (`0xFFFF`), a
+  missing task map or an unsolved symbol - and `rbgpu_mtlk_counters()`
+  publishes `mtlk_cavehits`/`mtlk_patched`/`mtlk_failed`/`mtlk_moved` on
+  **every** path out, throttled to the first 64 scoped execs then every 256th
+  so rule 16's warning about the diag lock still holds (~8 extra writes per
+  boot). **The visible signal is `mtlk_moved_verdict 1`**, set once per boot
+  when 8 scoped execs have all missed the pattern with nothing patched,
+  alongside a log line carrying both unslid addresses and this boot's slide so
+  the cave can be re-derived without spending another one. Read it with
+  `ioreg` or any `plugin_check.sh` capture - that script dumps the whole
+  `RBGPUDiag`, so the new keys need no script change. **NOT yet verified on
+  hardware**: a normal boot must show `mtlk_moved` and `mtlk_moved_verdict`
+  both ABSENT with `mtlk_patched` tracking `mtlk_cavehits`.
 
 - **`-rbgpuvbl` / `-rbgpuvblpump`** (2ou/2ov) are the 30 Hz fix, both OFF by
   default. `tools/dispclk` measured the animation clock at **exactly 30.00 Hz**
