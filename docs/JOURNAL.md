@@ -29796,3 +29796,132 @@ image it is solved from (`IOGraphicsDevice::gMetaClass` in IOGraphicsFamily,
 the five `OSMetaClass` symbols in the kernel, none in both). Rule 3: one
 `RouteRequest` for `enableController`. 2oz's trap still shut —
 `grep -c IOGraphicsFamily src/plugin/Info.plist` = 0.
+
+## 2qy — BOOT 154: A CLASS **CAN** BE REGISTERED AT RUNTIME FROM THE BOOT KC. And the one-shot's clear failed, so the experiment ran without its rescue.
+
+Two results, and the second is the uncomfortable one.
+
+Gates, all passed: `rbgpu-boot` **154** (153 the previous), loaded UUID
+**`16A3402E-96BD-3DDB-BA76-4F6D4FF094BB`** matching the build exactly,
+`armed=1`, and — the new 2qw gate — **`diag_used 524` of `diag_max 768`**, so
+the table did not fill and an absent key means something this time.
+
+### Result 1: route C stage 2 succeeded
+
+```
+mcr_on 1   mcr_ran 1   mcr_pre 1   mcr_check 1   mcr_post 0
+mcr_name "RembrandtGPUProbeClass"   mcr_name_ok 1
+mcr_say  REGISTERED(2b: postModLoad succeeded and the class names itself)
+```
+
+Both criteria 2qx pre-stated for stage 2b are met: **`mcr_post` is 0**
+(`kOSReturnSuccess`) and **`mcr_name_ok` is 1** — the class naming itself back
+through Apple's own `getClassName()`, which is only safe once `postModLoad`
+has replaced `+0x18` with a real `OSSymbol`. `preModLoad` returned a handle,
+`checkModLoad` agreed the stalled data was intact, `postModLoad` committed it
+into `sAllClassesDict`, and `OSKext::lookupKextWithIdentifier` accepted
+`com.rembrandtgpu.plugin`.
+
+The construction readings corroborate it field by field:
+
+| key | value | meaning |
+|---|---|---|
+| `mcn_f00` | `0xffffff80106550b8` | `mcn_osmc_vt` + **0x10** exactly — `__ZTV11OSMetaClass + 0x10` |
+| `mcn_f10` | `0xffffff7fa60d3138` | **equals `mcn_super_mc`** |
+| `mcn_super_off` | `0x3f138` | exactly `nm`'s `__ZN16IOGraphicsDevice10gMetaClassE` offset |
+| `mcn_f20` | `464` = `0x1d0` | the size we passed |
+| `mcn_f18` | `0xffffff86c53a4830` | a kalloc'd heap address, **not** our BSS literal |
+| `mcn_name_is_literal` | 0 | → `mcn_verdict` **14** |
+
+**`mcn_verdict 14` is the correct value on the 2b path, not a failure.** Bit 1
+is "`+0x18` still points at our string literal", and `postModLoad` swapping it
+for an `OSSymbol` is precisely what registration *does* — 2qx's code comment
+said so ("changed is the SUCCESS signal there"), though the pre-stated criteria
+section only spelled out `mcn_verdict 15` for stage **2a**, which this boot did
+not run (`mcn_on 0`). Stating that plainly rather than claiming 14 was
+predicted: the 2b criteria were `mcr_post 0` and `mcr_name_ok 1`, and those
+are what hit.
+
+`mcn_super_off` holding at `0x3f138` across a third boot with a third KASLR
+base makes the static symbol read a settled regression check. Control held:
+`fbvram 3`.
+
+**So the answer to 2qs's gating question is yes.** An `OSMetaClass` can be
+constructed and registered at runtime from a kext in the boot KC, with
+`IOGraphicsDevice` — a class in the *system* KC — as its superclass, with no
+declared `OSBundleLibraries` dependency on IOGraphicsFamily. The mechanism
+2oz ruled out was **static linking**, and nothing else.
+
+### Result 2: the one-shot did not consume, and the code proceeded anyway
+
+```
+mcr_oneshot 4        # armed, but the clear FAILED
+$ nvram rbgpu-mcreg
+rbgpu-mcreg	1       # still set, live, after the boot
+```
+
+Code 4 means the removal did not stick. It is not a racy read-back — the
+variable survived to live NVRAM. **The rescue property that justified running
+this at all was therefore not in force.** Had boot 154 hung in
+`preModLoad`'s `lck_mtx_lock`, boot 155 would have hung identically, and
+recovery would have needed a boot-arg edit from another OS — exactly the
+situation 2qo built the one-shot to eliminate.
+
+**The cause is NOT established, and three explanations are already excluded:**
+
+* Not the code. `rbgpu_nvram_consume_oneshot` and `rbgpu_gate_nvram`'s arm
+  consumption are byte-identical in this respect — same `removeProperty`, same
+  `IONVRAM-FORCESYNCNOW-PROPERTY` key, same read-back — and **`rbgpu-arm`
+  cleared in this same boot** (`<unset>` in the capture).
+* Not "too early". `rbgpu-arm` is consumed in `RembrandtGPUPeer::start()`,
+  which 2oy established runs *before* IONDRVSupport loads, i.e. earlier than
+  `enableController`, and it worked.
+* Not "too late" either. `rbgpu-iop` was consumed successfully in boot 150 at
+  `_task_set_main_thread_qos`, seconds later than this.
+* Not a stale cached `/options`. Lines 426/465/490 and 937/993/1090 each take
+  and release their own `fromPath` reference; `g_rbgpuOptions` holds a separate
+  one kept for the boot. No use-after-release.
+
+The one pattern left, written down as a **hypothesis, not a measurement**: the
+arm consumption forces a sync a short time before this one, and IODTNVRAM may
+coalesce or drop a second forced sync inside the same window — which would fit
+arm (first, works), mcreg (second, same window, fails) and iop (seconds later,
+works). Untested.
+
+### The real defect was mine, and it is one line
+
+```c
+out(cleared ? 0 : 4);
+return true;          // <- ran anyway, with no rescue
+```
+
+The function reported the failure correctly and then told the caller to
+proceed. **Fixed to fail closed**: retry the removal three times, and
+`return cleared`, so `why = 4` now means *"armed, and we did NOT run"*. A gate
+whose purpose is recoverability must refuse when it cannot arm its own rescue,
+not proceed and annotate. That is rule 20 one level up — *a mechanism that
+reports success is not the same as a mechanism that worked* — applied to the
+mechanism's own failure report.
+
+**Also a rule-26 gap, caught by luck:** `rbgpu-mcreg` was not in
+`plugin_check.sh`'s capture list, so its absence from `nvram.txt` proved
+nothing. Only the `mcr_oneshot` key revealed this, which is rule 14 earning
+its keep. `rbgpu-mcreg` is now captured.
+
+### What this does and does not buy
+
+It answers "can it be done at all", which 2qs named as the thing gating
+everything else on route C. It buys **nothing on screen**: 2qq/2qr closed the
+display chain at **AGDC vendor info**, not at the class name, so a registered
+metaclass with no personality, no provider and no `registerService` changes no
+pixel. The honest position is that route C's two cheap questions are now both
+answered yes — the inputs are reachable (2qw) and a class can be registered
+(2qy) — and everything expensive is still ahead: a real subclass with a copied
+vtable, AGDC vendor info and GPU capability, the IOPresentment plane API
+`IONDRVFramebuffer` does not implement, and only then the DCN 3.1.2 register
+work that 2qs measured as the *small* half.
+
+**Before any further `-rbgpumcreg` boot: `sudo nvram -d rbgpu-mcreg`.** The
+variable is still set from boot 154.
+
+Build: UUID `5C3D0EA9-87F1-337B-B7EF-14E07158C729`, hosttest all passed.
