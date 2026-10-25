@@ -184,11 +184,24 @@ Honest assessment of Route C:
 * **Not obviously impossible.** Every symbol needed (`IOFramebuffer`'s vtable,
   its metaclass, `IOService::registerService`) is resolvable the same way the
   AMD symbols already are.
-* **Genuinely hairy.** A hand-built vtable that is one slot wrong is a kernel
-  panic on a path that owns the display, and vtable layout is not stable across
-  OS updates — the fail-safe property that makes `-rbgpumtlkfix` acceptable
-  (read back and compare before writing) does not transfer to a vtable we
-  synthesise.
+* **Less fragile than first written here (corrected 2qt).** This section
+  originally said a hand-built vtable would have to synthesise every slot, and
+  that overstated it: `IOFramebuffer`'s vtable is at least `0x9b0` bytes
+  (~311 slots — 2pq resolved `getVRAMRange` at slot `0x9b0`), but a subclass
+  does not *invent* those. It **copies** `__ZTV13IOFramebuffer` and overwrites
+  only the handful of slots it overrides, which is what the compiler does. The
+  risk is a wrong slot *index*, not 311 wrong addresses.
+* **Still genuinely hairy.** A copied vtable with one index wrong is a kernel
+  panic on the path that owns the display, and slot indices are not stable
+  across OS updates — the fail-safe property that makes `-rbgpumtlkfix`
+  acceptable (read back and compare before writing) does not transfer to a
+  vtable we assemble.
+* **`sizeof(IOFramebuffer)` = `0x1d0` and its superclass is
+  `IOGraphicsDevice`**, not `IOService` — read statically from
+  `IOFramebuffer::MetaClass::MetaClass()` at IOGraphicsFamily `0x14fb7b6a`,
+  which passes `("IOFramebuffer", &IOGraphicsDevice::gMetaClass, 0x1d0)` to
+  `OSMetaClass`'s constructor. A subclass must chain through
+  `IOGraphicsDevice`.
 * **And it only gets us to the start line.** With the framebuffer published we
   would still owe: AGDC vendor info and GPU capability (§2), which means
   impersonating a vendor AGDC plugin; then
