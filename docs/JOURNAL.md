@@ -30050,3 +30050,119 @@ Read that before building anything.
 
 What has NOT changed: none of this is a pixel yet, and every earlier verdict
 upstream of AGDC still stands.
+
+## 2r0 — the AGDC pairing is a MATCHING NOTIFICATION, and its class test is `safeMetaCast`, so a SUBCLASS QUALIFIES. 2qz's flagged unknown is settled.
+
+Static, no boot. 2qz left one question marked explicitly unread: *"whether
+`0x18(%r15)` is a metaclass pointer — the compare is a plain `cmpq`, so if it
+is a metaclass it is an **exact-class** test and not a `safeMetaCast`, which
+would matter a great deal."* It mattered, and the answer is the good one.
+
+### The mechanism
+
+`AppleGPUWrangler` installs **two** matching notifications, and both are on the
+widest possible match:
+
+```
+13df36d9  leaq  0x13df5c67                 ; "IOService"
+13df36e5  callq IOService::serviceMatching("IOService", NULL)
+13df36ed  movq  [0x13df60a0] -> %rdi       ; notification type symbol
+13df36f7  movq  [0x13df60a8] -> %r8        ; refCon = A METACLASS
+13df3701  leaq  0x13df3194   -> %rdx       ; handler
+13df3711  callq IOService::addMatchingNotification(type, dict, handler, this, ref, 0)
+...
+13df3726  movq  [0x13df60b8] -> %r8        ; refCon = the OTHER metaclass
+13df3730  leaq  0x13df3194   -> %rdx       ; THE SAME handler
+13df3746  callq IOService::addMatchingNotification(...)
+```
+
+So the wrangler watches **every service that publishes** and discriminates in
+the handler, with the metaclass carried as the refcon. That is why
+`grep -c 'callq 0x13df4c'` found zero callers in 2qz: nothing calls it, the
+kernel does.
+
+### The class test, and it is subclass-tolerant
+
+Handler `0x13df3194`, with `%rbx` = the new service and `%r14` = the refcon:
+
+```
+13df31b1  callq safeMetaCast(newService, *[0x13df6008])  ; jne accept
+13df31c8  callq safeMetaCast(newService, *[0x13df6020])  ; jne accept
+13df31df  callq safeMetaCast(newService, *[0x13df6018])  ; jne accept
+13df31f6  callq safeMetaCast(newService, *[0x13df6038])  ; jne accept
+13df320a  callq OSMetaClassBase::metaCast("IOThunderboltSwitch")  ; by NAME
+13df3212  je    <reject>
+```
+
+**Five tests, four by metaclass and one by class-name string, and every one of
+them is `safeMetaCast`/`metaCast`** — both of which walk the superclass chain.
+**A subclass qualifies.** 2qz's worry about an exact-class `cmpq` was about a
+*later* comparison in the store path, which only distinguishes *which of the
+two notifications* fired; the admission test is here, and it is permissive.
+
+The by-name case is `IOThunderboltSwitch` — eGPU plumbing, not us.
+
+### What the wrangler is watching for
+
+Its complete metaclass import list is three symbols:
+
+```
+__ZN26AppleGraphicsDeviceControl10gMetaClassE
+__ZN32AppleGraphicsDeviceControlClient10gMetaClassE
+__ZN8OSObject10gMetaClassE
+```
+
+and it also imports **both AGDC constructors**
+(`AppleGraphicsDeviceControl::AppleGraphicsDeviceControl(const OSMetaClass*)`
+and the Client's), so **AppleGPUWrangler defines its own AGDC subclasses** —
+which is exactly what the live `AppleGraphicsDeviceControlPlugin` on
+`IOResources` is (2qz).
+
+**There is no `IOFramebuffer` and no `IOAccelerator` metaclass import at all.**
+The wrangler's class filter is AGDC-family plus Thunderbolt, full stop. So
+`agdp` is not reachable through, and has nothing to do with, an
+`IOFramebuffer` subclass.
+
+### AGDC's own side
+
+`com.apple.AppleGraphicsDeviceControl` extracted from the system KC:
+`__text` at `0x13dfac54`, size **`0x30cb` — 12 KB, 3397 instructions**.
+It contains **zero calls into the wrangler's range** (`0x13df0000`–
+`0x13df6000`). The coupling is one-way: AGDC merely publishes, and the
+wrangler's notification does the pairing. The traffic in the other direction
+is real though — right after storing `+0x68` the wrangler calls
+`0x13dfd37c`, which is **inside AGDC's `__text`** (AGDC+0x2728), with our
+object and `0x301`.
+
+### What this means for the plan
+
+Putting 2qy, 2qz and this together, the route to `agdp` is:
+
+> **Publish an `IOService` that `safeMetaCast`s to `AppleGraphicsDeviceControl`
+> (or its Client), and the wrangler's own notification will pair it to our
+> GPU's struct and set `agdp`.** No `IOFramebuffer`, no 311-slot vtable, no
+> displacing `.Display_boot`.
+
+and 2qy already measured that a class can be registered at runtime from the
+boot KC with a **system-KC superclass**, which is precisely what this needs.
+AGDC is a 12 KB class rather than IOFramebuffer's ~311 slots, so the vtable
+surface is far smaller.
+
+**Not established, and not to be glossed:**
+
+* **Which of the four globals is which class.** Only three `gMetaClass`
+  symbols are imported for four slots, so at least one is a wrangler-local
+  class, resolved neither by `nm` nor here.
+* **`gpuc` (`gpuStruct+0x10`) has no identified writer.** There are 14 stores
+  to `+0x10` in the kext and **none** of them is adjacent to any of the six
+  call sites of the per-GPU struct finder `0x13df2e74`
+  (`0x13df4b14`, `0x13df4baf`, `0x13df4cda`, `0x13df4ea6`, `0x13df4f23`,
+  `0x13df51e4`). So `gpuc` is written from somewhere else, and IOPresentment
+  wants **both** `AGDCVendorInfo` and `AGDCGPUCapability`. Half the field pair
+  is still unexplained.
+* **A runtime AGDC subclass would have its methods CALLED by Apple's code** —
+  the wrangler retains it (`vt[0x20]`) and immediately calls into AGDC at
+  `0x13dfd37c` with it. So this is not a passive registration: the object has
+  to behave like an AGDC. That is the real cost, and it is not measured yet.
+
+Nothing here is a pixel, and every verdict upstream of AGDC still stands.

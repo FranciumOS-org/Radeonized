@@ -332,9 +332,37 @@ is a **per-GPU `AppleGraphicsDeviceControl` registered against our GPU**.
 `0x18(%r15)` is a metaclass pointer - the compare is a plain `cmpq`, so if it
 is, it is an **exact-class** test, which would matter. Noted, unchased: this
 machine presents as **`MacBookPro16,2`** and AGDP/AGDC is often board-id
-gated. **Next, still static and free: what calls `0x13df4c96`, and what
-creates the per-GPU AGDC that calls it.** Read that before building anything.
-Detail: JOURNAL **2qz**. Killed suspects: `FB_Triage`
+gated. Detail: JOURNAL **2qz**.
+  **2r0 SETTLES THE QUESTION 2qz FLAGGED, AND THE ANSWER IS THE GOOD ONE.**
+  Nothing calls `0x13df4c96` because the pairing is a **matching
+  notification**: the wrangler installs **two**, both on
+  `serviceMatching("IOService")` - the widest possible match - with the **same
+  handler `0x13df3194`** and the discriminating **metaclass carried as the
+  refCon** (`*[0x13df60a8]`, `*[0x13df60b8]`). The handler admits a service via
+  **five `safeMetaCast`/`metaCast` tests** (four metaclass globals plus a
+  by-name `metaCast("IOThunderboltSwitch")`), and **`safeMetaCast` walks the
+  superclass chain - so A SUBCLASS QUALIFIES.** 2qz's fear of an exact-class
+  `cmpq` was misplaced: that compare is in the *store* path and only says which
+  of the two notifications fired. The wrangler's whole metaclass import list is
+  `AppleGraphicsDeviceControl`, `AppleGraphicsDeviceControlClient`, `OSObject`,
+  and it imports **both AGDC constructors**, so it defines its own AGDC
+  subclasses - the live `AppleGraphicsDeviceControlPlugin` is one. **There is
+  NO `IOFramebuffer` or `IOAccelerator` metaclass import at all**, so `agdp` is
+  unrelated to an IOFramebuffer subclass. AGDC itself is **12 KB**
+  (`__text 0x13dfac54 + 0x30cb`) and makes **zero calls into the wrangler** -
+  the coupling is one-way, AGDC publishes and the wrangler pairs; but right
+  after the store the wrangler calls **into** AGDC at `0x13dfd37c` with our
+  object. **So the route to `agdp` is: publish an IOService that
+  `safeMetaCast`s to `AppleGraphicsDeviceControl`, and the wrangler pairs it
+  itself** - and 2qy already measured that a class can be registered at
+  runtime from the boot KC with a system-KC superclass. **Still unestablished,
+  do not gloss:** which of the four globals is which class (only three
+  `gMetaClass` symbols for four slots); **`gpuc` (+0x10) has NO identified
+  writer** - 14 stores to `+0x10` and none adjacent to any of the six call
+  sites of the struct finder `0x13df2e74`, while IOPresentment wants **both**
+  `AGDCVendorInfo` and `AGDCGPUCapability`; and a runtime AGDC subclass would
+  have **its methods called by Apple's code**, so it must behave like an AGDC,
+  which is the real unmeasured cost. Detail: JOURNAL **2r0**. Killed suspects: `FB_Triage`
 (diagnostic dumps only) and the third-party NV kexts in `/Library/Extensions`
 (`kextstat`, control 67 - **none loaded**). The `IOPresentment` boot-arg token
 is logging-only and real but **no longer worth a boot**. Keep `-rbgpuiop`:
