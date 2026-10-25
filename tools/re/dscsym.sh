@@ -16,8 +16,11 @@ SL_UNSLID=$((0x7FF807B42000))
 import ctypes, time
 for p in ("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
           "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
-          "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"):
-    ctypes.CDLL(p)
+          "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+          "/System/Library/PrivateFrameworks/IOPresentment.framework/IOPresentment",
+          "/System/Library/Frameworks/IOKit.framework/IOKit"):
+    try: ctypes.CDLL(p)
+    except Exception as e: print("dlopen FAILED", p, e)
 time.sleep(600)' &
 PID=$!
 trap 'kill $PID 2>/dev/null' EXIT

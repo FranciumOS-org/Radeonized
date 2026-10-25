@@ -8,8 +8,15 @@ SL_UNSLID=$((0x7FF807B42000))
 import ctypes, time
 for p in ("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
           "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
-          "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"):
-    ctypes.CDLL(p)
+          "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+          # 2r5: IOPresentment and IOKit, so the same grid names the frameworks
+          # the display chain actually ends in. dlopen failures are printed and
+          # skipped rather than fatal - a missing image must not silently
+          # rename every address (rule 26 on the symbolizer itself).
+          "/System/Library/PrivateFrameworks/IOPresentment.framework/IOPresentment",
+          "/System/Library/Frameworks/IOKit.framework/IOKit"):
+    try: ctypes.CDLL(p)
+    except Exception as e: print("dlopen FAILED", p, e)
 time.sleep(1800)' &
 PID=$!
 trap 'kill $PID 2>/dev/null' EXIT

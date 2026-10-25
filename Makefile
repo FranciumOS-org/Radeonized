@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -204,6 +204,17 @@ $(OUT)/useiop: tools/useiop.m | $(OUT)
 # disassembly.  A NULL is INCONCLUSIVE (entitlements), pre-stated in the tool.
 ioptest: $(OUT)/ioptest
 $(OUT)/ioptest: tools/ioptest.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework IOKit
+
+# agdcinfo (2r5): the ORACLE for the last link in the display chain - it
+# reproduces ioPresentmentFindAGDCMatch's own query byte for byte, including
+# the exact 17-byte "AppleGPUWrangler" name test that decides whether the
+# association map gets any entries at all, and it checks the measured
+# 0x10000003 against IOServiceOpen on a null port.  Needs no root for the two
+# questions that matter; selector 1 on the wrangler may answer NotPermitted
+# unprivileged (2qm), which is pre-stated in the tool as INCONCLUSIVE.
+agdcinfo: $(OUT)/agdcinfo
+$(OUT)/agdcinfo: tools/agdcinfo.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework IOKit
 
 # cdchain (2qc): CALL the ops-table thunks the compositor decision calls,
