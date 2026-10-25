@@ -29534,3 +29534,112 @@ a class can be **registered**, which is stage 2, drives `OSMetaClass`'s global
 stalled-class list, and panics the *next* kext load if it is wrong.
 
 Build: UUID `89A5E227-C830-3250-8603-6AC7EE96FB8E`, hosttest all passed.
+
+## 2qw — boot 153: ROUTE C's INPUTS ARE REACHABLE. All four agree. And the diag table filled again.
+
+**Result: the probe returned the answer it was built to return.** Read live
+from boot 153, because `plugin_check.sh` was not run in it — the capture on
+disk (`logs/20261025-022931-plugin/`) is still boot **152**'s and nothing in it
+is this boot's (rule 8, rule 12). Live gates instead: `nvram rbgpu-boot`
+**153**, `kextstat` loaded UUID **`89A5E227-C830-3250-8603-6AC7EE96FB8E`**
+matching the split-probe build exactly, `armed=1`, `rbgpu-arm` consumed.
+
+```
+mcp_deferred    = 1
+mcp_kext_base   = ffffff7fad894000   mcp_kext_size = 270336 (0x42000)
+mcp_mc_addr     = ffffff7fad8d3040   mcp_mc_off = 3f040   mcp_mc = 1
+mcp_vt_addr     = ffffff7fad8c9248   mcp_vt_off = 35248   mcp_vt = 1
+mcp_acc         = 7
+mcp_name        = "IOFramebuffer"
+mcp_size        = 464 = 0x1d0
+mcp_super       = "IOGraphicsDevice"
+mcp_super_addr  = ffffff7fad8d3138
+fbvram          = 3                  <- the control
+```
+
+**All four pre-stated conditions are met**: `mcp_name` = `IOFramebuffer`,
+`mcp_size` = `0x1d0`, `mcp_super` = `IOGraphicsDevice`, vtable solved. Those
+are exactly what `IOFramebuffer::MetaClass::MetaClass()` passes to
+`OSMetaClass`'s constructor, read statically at IOGraphicsFamily `0x14fb7b6a`
+three milestones before this boot. **Verdict 15 in all but the byte** — see
+the table-full section below for why the `mcp_verdict` key itself is missing,
+and note that it is a convenience field computed from the four components,
+every one of which is present.
+
+**The control held.** `fbvram 3` means 2pa's hook asked
+`getMetaClass()->getClassName()` at `enableController` and got
+`IONDRVFramebuffer`, so a populated metaclass really is readable at the new
+site. 2qv's diagnosis — right address, unconstructed object, wrong moment —
+is confirmed by moving only the moment: same symbols, same addresses, zeros
+before, real values after.
+
+**The offsets are now a three-boot regression check.** `0x3f040` and
+`0x35248` across boots 152 and 153 with different KASLR bases
+(`…ad294000` vs `…ad894000`), matching `nm` both times.
+
+**And the superclass link is independently confirmed.**
+`mcp_super_addr - mcp_mc_addr` = **`0xf8`**, so the predicted static address
+of `IOGraphicsDevice::gMetaClass` is `0x14fea040 + 0xf8` = `0x14fea138`.
+`nm -m build/re/IOGraphicsFamily`:
+
+```
+0000000014fea138 (__DATA,__common) external __ZN16IOGraphicsDevice10gMetaClassE
+```
+
+Exact. The kernel's own `getSuperClass()` and the static symbol table agree to
+the byte, which is a second, independent reading of the chain a subclass would
+have to walk. All three addresses fall inside
+`[0xffffff7fad894000, 0xffffff7fad8d6000)`, the kext's own range.
+
+### What this does and does not establish
+
+**Does:** the two data symbols a runtime-constructed `IOFramebuffer` subclass
+needs — the superclass metaclass object and the vtable to copy — are
+reachable from a kext in the **boot** KC, at the addresses static analysis
+names, with their contents valid and self-consistent, read through Apple's own
+accessors. 2qs listed route C as "the only route no measurement has closed",
+and its **inputs** are now measured present rather than assumed.
+
+**Does not:** say anything about whether a class can be **registered**. That
+is stage 2, it drives `OSMetaClass`'s global stalled-class list
+(`preModLoad` `0xffffff8000a4a190`, the ctor `0xffffff8000a49940`,
+`postModLoad` `0xffffff8000a4a290`), and a mistake there panics the *next*
+kext load rather than this one. It needs its own arg and its own decision
+taken on these numbers. Nothing in 2qw licenses it.
+
+### The diag table filled again — 448 of 448 — and that is 2db repeating
+
+`mcp_super_size`, `mcp_verdict` and `mcp_say` are **absent as keys**, and the
+reason is not the probe: the live IORegistry diag holds exactly **448**
+entries against `RBGPU_MAX_DIAGS` **448**. The three dropped keys are the last
+three the probe sets, in order. Every value they were computed from survived,
+so the conclusion is intact — but it was intact by luck, not by design.
+
+This is the third occurrence of one defect. 2db hit it at 96 and raised the
+cap to 192 with the note *"absent has to mean absent"*; 2ds filled 192 exactly
+and lost `stamp_wb_e0`; 2dt raised it again and wrote the warning. **The
+warning exists and fires into `rbgpu_log`** — which lands in the plugin's ring
+and is captured only by `plugin_check.sh`, which was not run this boot. So the
+one instrument that would have announced the problem was in the file that
+wasn't written.
+
+Two fixes, because raising a number has now failed twice:
+
+1. `RBGPU_MAX_DIAGS` 448 → **768**.
+2. **The table reports its own occupancy.** `diag_max` and `diag_used` are
+   seeded into slots **0 and 1** on the first insert, before any real key, so
+   the two numbers that say whether the table can be trusted are the two that
+   can never be evicted by it filling up. Both are NVRAM-hot, listed first.
+   Every insert path updates `diag_used`, and the two paths that previously
+   dropped a key in total silence (`set_str`, `inc`) now set
+   `g_diagFullPending` like `set_num` already did.
+
+> **The reading rule this adds: check `diag_used` against `diag_max` BEFORE
+> concluding anything from an absent key.** Equal means absence carries no
+> information. This belongs with rule 14 — it is the same error one layer
+> down: the instrument's own capacity is part of the instrument.
+
+Build: UUID `B5539E29-24AF-3E19-8F65-9F5DB95F0EA1`, hosttest all passed.
+No boot is needed to trust 2qw's result; the table fix is hygiene for the next
+one, and the immediate value of re-running is to see `mcp_verdict 15` written
+as a single number and `diag_used` below `diag_max`.

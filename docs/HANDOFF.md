@@ -132,7 +132,30 @@
 > retracted** — Lilu passes `0x42000`, not `kextstat`'s `0x2efea`. Detail:
 > JOURNAL **2qv**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qv)
+> **2qw — ROUTE C's INPUTS ARE MEASURED PRESENT. ALL FOUR AGREE.** Boot 153,
+> read live (no `plugin_check` was run, so the newest capture on disk is still
+> boot 152's - rule 8): loaded UUID `89A5E227…`, `armed=1`, `mcp_deferred 1`,
+> and then **`mcp_name` = `IOFramebuffer`, `mcp_size` = `0x1d0`,
+> `mcp_super` = `IOGraphicsDevice`, vtable solved** - exactly what
+> `IOFramebuffer::MetaClass::MetaClass()` passes to `OSMetaClass`'s
+> constructor, read statically three milestones earlier. The control held
+> (`fbvram 3`), so 2qv's "right address, wrong moment" is confirmed by moving
+> only the moment. The offsets `0x3f040` / `0x35248` held across two boots with
+> different KASLR bases. **And the superclass link is independently confirmed:**
+> `mcp_super_addr - mcp_mc_addr` = `0xf8`, predicting
+> `IOGraphicsDevice::gMetaClass` at `0x14fea138`, which is exactly what `nm`
+> says. **So route C's INPUTS exist** - the superclass metaclass and the vtable
+> to copy are reachable from the boot KC with valid contents. It still says
+> **nothing** about whether a class can be **registered**: that is stage 2, it
+> drives `OSMetaClass`'s stalled-class list, it panics the *next* kext load if
+> wrong, and it needs its own arg and its own decision. **Caveat worth
+> carrying: the diag table filled at 448 of 448** and silently dropped
+> `mcp_verdict`, `mcp_say` and `mcp_super_size` - the keys holding the
+> conclusion - while every component survived. Cap raised to 768 and the table
+> now publishes `diag_max` / `diag_used` in slots 0 and 1 so this is visible in
+> the data; see rule 14. Detail: JOURNAL **2qw**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2qw)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4

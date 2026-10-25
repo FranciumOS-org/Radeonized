@@ -24,7 +24,16 @@ OSDefineMetaClassAndStructors(RembrandtGPUPeer, IOService)
 // table was full, so every new key (fw_calls, stamp_calls, setres_ret, ...)
 // was silently dropped and read as "absent". Absent must mean absent, not
 // "the table filled up", or the next conclusion drawn from it will be wrong.
-#define RBGPU_MAX_DIAGS 448
+// 2qw: and it happened AGAIN, at 448. Boot 153 read exactly 448 of 448 and
+// lost `mcp_super_size`, `mcp_verdict` and `mcp_say` - the three keys that
+// carried a probe's whole conclusion, while every component it was computed
+// from survived. Raised to 768, and this time the table REPORTS ITS OWN
+// OCCUPANCY: `diag_max` and `diag_used` are seeded into slots 0 and 1 on the
+// first insert, so they can never themselves be the keys that get dropped.
+// A capture whose `diag_used` equals `diag_max` is a capture in which absence
+// means nothing - readable from the data, not only from a log line nobody
+// captured.
+#define RBGPU_MAX_DIAGS 768
 #define RBGPU_BUF_SIZE  4096
 
 struct LogEntry {
@@ -93,7 +102,27 @@ static void initDiagLock() {
     }
 }
 
+// 2qw: slots 0 and 1, reserved. Seeded before any real key so that the two
+// numbers which say whether the table is trustworthy are the two that can
+// never be evicted by it filling up.
+#define RBGPU_DIAG_SLOT_MAX  0
+#define RBGPU_DIAG_SLOT_USED 1
+
+static void rbgpu_diag_reserve_locked(void) {
+    if (g_diagCount != 0) {
+        return;
+    }
+    strncpy(g_diags[0].key, "diag_max", sizeof(g_diags[0].key) - 1);
+    g_diags[0].type = DIAG_TYPE_NUM;
+    g_diags[0].numVal = RBGPU_MAX_DIAGS;
+    strncpy(g_diags[1].key, "diag_used", sizeof(g_diags[1].key) - 1);
+    g_diags[1].type = DIAG_TYPE_NUM;
+    g_diags[1].numVal = 2;
+    g_diagCount = 2;
+}
+
 static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
+    rbgpu_diag_reserve_locked();
     for (size_t i = 0; i < g_diagCount; i++) {
         if (strncmp(g_diags[i].key, key, sizeof(g_diags[i].key)) == 0) {
             g_diags[i].type   = DIAG_TYPE_NUM;
@@ -107,6 +136,7 @@ static void rbgpu_diag_set_num_locked(const char *key, uint64_t val) {
         g_diags[g_diagCount].type   = DIAG_TYPE_NUM;
         g_diags[g_diagCount].numVal = val;
         g_diagCount++;
+        g_diags[RBGPU_DIAG_SLOT_USED].numVal = g_diagCount;
         return;
     }
     // 2dt: a full table used to drop new keys in silence, so "absent" became a
@@ -257,6 +287,7 @@ void rbgpu_diag_set_str(const char *key, const char *val) {
                 return;
             }
         }
+        rbgpu_diag_reserve_locked();                               // 2qw
         if (g_diagCount < RBGPU_MAX_DIAGS) {
             strncpy(g_diags[g_diagCount].key, key, sizeof(g_diags[g_diagCount].key) - 1);
             g_diags[g_diagCount].key[sizeof(g_diags[g_diagCount].key) - 1] = '\0';
@@ -264,6 +295,9 @@ void rbgpu_diag_set_str(const char *key, const char *val) {
             strncpy(g_diags[g_diagCount].strVal, val, sizeof(g_diags[g_diagCount].strVal) - 1);
             g_diags[g_diagCount].strVal[sizeof(g_diags[g_diagCount].strVal) - 1] = '\0';
             g_diagCount++;
+            g_diags[RBGPU_DIAG_SLOT_USED].numVal = g_diagCount;   // 2qw
+        } else {
+            g_diagFullPending = true;                              // 2qw
         }
         IOLockUnlock(g_diagLock);
     }
@@ -289,12 +323,16 @@ void rbgpu_diag_inc(const char *key) {
                 return;
             }
         }
+        rbgpu_diag_reserve_locked();                               // 2qw
         if (g_diagCount < RBGPU_MAX_DIAGS) {
             strncpy(g_diags[g_diagCount].key, key, sizeof(g_diags[g_diagCount].key) - 1);
             g_diags[g_diagCount].key[sizeof(g_diags[g_diagCount].key) - 1] = '\0';
             g_diags[g_diagCount].type   = DIAG_TYPE_NUM;
             g_diags[g_diagCount].numVal = 1;
             g_diagCount++;
+            g_diags[RBGPU_DIAG_SLOT_USED].numVal = g_diagCount;   // 2qw
+        } else {
+            g_diagFullPending = true;                              // 2qw
         }
         IOLockUnlock(g_diagLock);
     }
@@ -713,6 +751,9 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
+    // 2qw: first, because they say whether every OTHER absence in the capture
+    // means anything. diag_used == diag_max means keys were dropped.
+    "diag_max", "diag_used",
     // 2qo: THE frontier, and the first change here that is EXPECTED to be able
     // to end in a login screen that never appears - so these must survive a
     // boot with no usable screen, which is the whole reason this list exists.
