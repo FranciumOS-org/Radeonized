@@ -756,7 +756,7 @@ static const char *const kRbgpuNvramHotKeys[] = {
     "diag_max", "diag_used",
     // 2ra: current framebuffer frontier. These precede the old probes so a
     // failed login boot still distinguishes refusal, registration and start.
-    "agdc_on", "agdc_error", "agdc_stage", "agdc_oneshot", "agdc_started",
+    "agdc_on", "agdc_error", "agdc_solved", "agdc_stage", "agdc_oneshot", "agdc_started",
     "agdc_user_vendor", "agdc_user_cap",
     // 2qo: THE frontier, and the first change here that is EXPECTED to be able
     // to end in a login screen that never appears - so these must survive a

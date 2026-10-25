@@ -56,10 +56,12 @@ all: kext tools
 # freestanding; nothing links it yet.
 HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c
 
-hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o
+hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp
 	@mkdir -p $(OUT)
 	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
+	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -Isrc/plugin tools/hosttest/agdc_lookup_test.cpp -o $(OUT)/agdc_lookup_test
+	@$(OUT)/agdc_lookup_test
 
 tools: $(OUT)/rbdump
 

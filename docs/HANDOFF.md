@@ -1,3 +1,15 @@
+> **BOOT 155 / 2rb: RIGHT BUILD, BRIDGE REFUSED; THE LOOKUP BUG IS FIXED.**
+> Capture `logs/20261025-173030-plugin`: loaded 902BE8B3 matches the built
+> kext, boot 154→155, `iop_verify=1`, `agdc_error=1`, and rbgpu-agdc still 1.
+> **No AGDC registration was attempted.** Lilu logged four valid kernel
+> addresses rejected as out of range [0,0): the helper accidentally selected
+> its four-argument range-checking overload for kernel symbols. 2rb uses the
+> two-argument resolver and explicit kext-only bounds, with raw addresses and
+> `agdc_solved` (expect **0x3ff**) retained in RBGPUDiag. Host regression passes
+> and fails with the old overload; corrected UUID **667372BC…**. Next is the
+> same AGDC+IOP user-run boot test with this rebuild. The compositor capture
+> was idle and explicitly INCONCLUSIVE, not evidence of a new compositor.
+>
 > **FRAMEBUFFER FRONTIER, 2ra (2026-10-25): THE PER-GPU AGDC BRIDGE IS BUILT.**
 > `src/plugin/rbgpu_agdc.cpp` creates a runtime AGDC subclass attached to the
 > real PCI device, reporting AMD vendor info and the existing boot framebuffer
@@ -374,7 +386,7 @@
 > which says whether an AGDC user client here answers attribute 1 at all.
 > Detail: JOURNAL **2r5**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2ra)
+# RembrandtGPU — handoff state (2026-10-25, after 2rb)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
