@@ -27664,3 +27664,98 @@ Read-only by construction - no expression evaluated, no function called in the
 target, because calling into a stopped WindowServer can deadlock on a lock its
 own stopped thread holds. Watchdog SIGKILLs lldb past 25 s, since the kernel
 resumes a task whose debugger dies.
+
+## 2qh — ROOT CAUSE: the display's DisplaySurface has no IOSurface
+
+Static, free, and it reconciles every observation in 2qd-2qg. The compositor
+is swapped **after** `CDDisplay::compositor()` has correctly returned a Metal
+one.
+
+### The chain, end to end
+
+```
+UpdateDisplays
+  Update::Update(..., shared_ptr<Display>, ...)            0x7ff807ee5902
+    callq *0x4b0(%rax)            ; display->compositor()   -> a CompositorMetal
+    movq  %rax, 0x1c0(%rbx)       ; Update->0x1c0 = it              (2qe)
+
+  CDDisplay::begin_update(Update&)                          0x7ff807d6c488
+    surface = make_shared<CDSurface>(this)                  0x7ff807d6f294
+    CDSurface::prepare_for_update(update, false)            0x7ff807d6f382
+        s = CoreDisplay_Display_GetNextSurface(...)          -> DisplaySurface
+        cdsurf->0x18 = s
+        io = CoreDisplay_DisplaySurface_GetIOSurface(s)      0x7ff807d6f421
+        cdsurf->0x20 = io
+        if (io == NULL) cdsurf->0x40 = 1        <<< THE DEFECT, 0x7ff807d6f42d
+        else cdsurf->0x44 = IOSurfaceGetID(io)
+
+    if (capability flag != 1)   goto force_sw
+    if (cdsurf->0x40 == 1)      goto force_sw   <<< 0x7ff807d6f5af
+    ...
+  force_sw:
+    update->0x1f8 |= 8
+    update->0x1c0 = *[0x7ff843c9eca8]           ; THE SW COMPOSITOR
+    update->0x1f8 &= ~1                         ; 0x7ff807d6c5c8..d6
+
+  movq -0x350(%rbp), %rcx    ; = Update+0x1c0   (2qe)
+  movq %rcx, -0xa00(%rbp)
+  callq *0x4f8(%rax)         ; render_update(update, THAT, ...)
+```
+
+`CDSurface->0x40` is **0** from the constructor (`movw $0x0, 0x58(%rbx)` in the
+shared_ptr allocation, object+0x18) and has exactly **one** other writer, the
+`movb $0x1, 0x40(%r14)` above, reached by exactly **one** branch - the
+`je` at `0x7ff807d6f42d` when `CoreDisplay_DisplaySurface_GetIOSurface`
+returns NULL.
+
+### Why every earlier measurement was right and the conclusion still eluded me
+
+- the compositor is a **real object**, not NULL - because it is *replaced*,
+  not left unset, which is why `'Unable to composite display due to null
+  compositor.'` never appears in the log (2qg's test, 0 hits with a working
+  control);
+- `CDDisplay::compositor()` really does return a **CompositorMetal** - so mode
+  0, capability flag 1, `accelId = 0x14b23` and a working `new_compositor` are
+  all correct **and all irrelevant to the outcome**;
+- `CompositorMetal` really is alive in the process (2qd, via
+  `CaptureSurfaceMetal::Populate`) - it simply never gets the *display*;
+- `-0x350(%rbp)` really has **no store in `UpdateDisplays`** (2q2, vindicated
+  twice) - because both writers are elsewhere, the constructor and
+  `begin_update`, through the struct pointer.
+
+Six milestones went into `WSGetCompositorForAccelerator` because the SW
+compositor can only come from there. It can also come from `begin_update`,
+which reads the same global directly - and that reader was in the list I
+printed in 2qd and truncated at ten lines. **The answer was in output I had
+already generated and cut off.** `WS::Displays::CDDisplay::begin_update(WS::Displays::Update&) + 320`
+is line 7 of 8.
+
+### This IS 2pd, confirmed at the decision point
+
+2pd read it from the symptom side: *"the display is `IONDRVFramebuffer`, whose
+destination is a raw CPU-mapped range, **not an IOSurface and not a Metal
+texture**"*. Here is that sentence as a literal branch in SkyLight:
+`if (GetIOSurface() == NULL) force software`. 2pd has been right since boot
+138 and the whole 2px->2qg excursion was spent re-deriving it from the
+accelerator side, where nothing was ever wrong.
+
+It also re-attaches 2q9, which looked like a dead end: `numDisplayBuffers` is
+the popcount of the low two req-bits of `IOAccelSurfaceMTL->0x13c` and reads
+**0** because no drawable is attached. A display with no attached buffer has
+no IOSurface to hand out, so `GetIOSurface` returns NULL. The two findings are
+the same fact at two layers, which is why both were 0.
+
+### The frontier, and it is a different kind of problem now
+
+Not "which flag is wrong" - there is no flag left. The question is **where
+CoreDisplay gets the IOSurface for a display**, and why ours has none.
+`CoreDisplay::DisplaySurface::DisplaySurface(__IOSurface*, gsl::not_null<AbstractDisplay const*>, bool, bool, unsigned long long)`
+takes one as its first argument, so the surface is *constructed* around an
+IOSurface that something upstream must produce. The candidates, in the order
+worth reading: `CoreDisplay::Display::GetNextSurface(CGSRegionObject*,
+CGSRegionObject*, CGSRegionObject*, double, double, unsigned int, unsigned
+long long)` (`0x7ff80408c490`, which 2q9's scan already showed reading
+`+0x14c`), and `CoreDisplay::Display::GetCurrentSurface()`.
+
+That is static work, and it is the first time the display half has had a
+named, falsifiable target that is not "write DCN 3.1.2".
