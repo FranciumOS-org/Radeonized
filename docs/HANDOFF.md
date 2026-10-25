@@ -18,7 +18,13 @@
 > `-rbgpuoff`). The user chose to stop before implementing it (2026-10-24).
 > Tools: `make useiop`, `make ioptest`. Detail: JOURNAL 2ql, 2qm, 2qn.
 
-# RembrandtGPU — handoff state (2026-10-23, after 2op)
+# RembrandtGPU — handoff state (2026-10-25, after 2qn)
+
+> §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
+> about the rendering half, which is **done**). §1's compositing sentence, §4
+> and §10 were corrected on 2026-10-25 for 2pa–2qn; anything else here that
+> predates those milestones is history, not current state. The chronological
+> record is `docs/JOURNAL.md`, grepped by milestone tag.
 
 Apple's Navi 21 macOS GPU stack drives a **Radeon 680M** (Rembrandt APU,
 `1002:1681` rev 0a, GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on
