@@ -30266,3 +30266,96 @@ supplied.
 
 Cheap and unspent either way: nothing here needed a boot, and nothing here
 changes the desktop.
+
+## 2r2 — the AGDC error string has NO reference anywhere `dsc.py` can look, and the reason is an instrument defect: the cache is NINE files and `dsc.py` reads one. 2qo's uniqueness claim is corrected.
+
+Static, no boot. The task was to read IOPresentment's path to `0x10000003`.
+It is not answered, and the reason is worth more than the answer would have
+been.
+
+### What was found
+
+The format string behind boot 150's log line is at VA **`0x7ff812ea2887`**:
+
+```
+"Unable to get AGDC information.  Return code: %#x"
+```
+
+The VA is verified, not computed and trusted — `dsc.py dump` reads the string
+back at it. The neighbouring literal is `"Error: Invalid response for AGDC
+vendor"`, so the region is the right one. IOPresentment's **code** is located
+too: the string `ioPresentmentFindAGDCMatch` (`0x7ff812ea14f7`) has **7 LEA
+sites** starting at `0x7ff812e8ab13`.
+
+### What was NOT found, with the controls that make it mean something
+
+| search | target | result | control |
+|---|---|---|---|
+| `dsc.py xref`, 9 MB window | error string | **0** | 7 hits for `ioPresentmentFindAGDCMatch` |
+| `dsc.py xref`, **whole** `0x25198000` exec mapping | error string | **0** | as above |
+| objdump, `0x7ff812e80000 +0x30000` (56k insns) | error string | **0** | 7 hits for the control string |
+| objdump, `0x7ff812e00000 +0xa0000` (198k insns) | error string | **0** | 7 hits for the control string |
+
+`objdump --print-imm-hex` resolves the target of **every** RIP-relative form,
+not just `lea`, so the last two rows exclude the "it is not a LEA" explanation
+that the first two cannot.
+
+### The instrument defect, measured
+
+The shared cache is **nine files**, and each subcache carries its **own
+executable mapping at a distinct VA base**:
+
+```
+file      exec mapping VA        size
+(main)    0x7ff800000000         0x25198000
+.01       0x7ff900000000         0x1febc000
+.02       0x7ffa00000000         0x1fd0c000
+.03       0x7ffb00000000         0x1f2d8000
+…         (.04 … .08 unread)
+```
+
+`tools/re/dsc.py` does `open(path, "rb")` on the single path it is given and
+enumerates only that file's mappings. **So every `dsc.py xref` and `callxref`
+this project has run searched one file's mappings — about a ninth of the
+cache's code.** The VA space is global across the subcaches, so code in `.01`
+can perfectly well reference a string stored in the main file, and nothing in
+the tool would ever see it.
+
+**A hit found this way is still a hit. Every NEGATIVE is only as wide as one
+file.** That is rule 26 at the scale of the whole cache campaign: the search
+was the instrument, and its reach was never checked against a case known to be
+outside it.
+
+### 2qo is corrected
+
+2qo justified the `-rbgpuiop` patch partly on uniqueness: *"the 27-byte
+anchored window occurs **once** in the cache's entire 0x25198000-byte
+executable mapping."* That number is **the main file's** exec size. The
+uniqueness was therefore established over one file of nine and stated as
+cache-wide.
+
+**The consequence stands and the patch is not in doubt**: what the patch
+actually required was a unique match within the text mapped into WindowServer,
+the write was verified by reading the bytes back from that process's own
+memory (`iop_verify 1`, boot 150), and `rbgpu_mtlk_place` refuses on anything
+but exactly one match. So this corrects the *stated basis*, not the result.
+Worth fixing in the record precisely because it reads like a stronger
+measurement than it was.
+
+### What this does not change
+
+Nothing about the display chain upstream of AGDC, and nothing on screen. 2r1's
+conclusion also stands untouched and is reinforced: `gpuc`/`agdp` are
+AppleGPUWrangler's debug-dictionary keys, and the code that emits the actual
+AGDC failure is **not** in either kext and — now measured — not in the part of
+the cache this tooling can read either. Whatever queries AGDC lives somewhere
+the instrument has never reached.
+
+### Next step, and it is tooling, not archaeology
+
+Extend `dsc.py` to enumerate **all nine** files: read the main header's
+subcache list (or just glob `dyld_shared_cache_x86_64h*`), build one combined
+VA→(file, offset) map, and make `xref`/`callxref`/`dump`/`macho` resolve
+against it. Bounded work, no boot, and it retroactively strengthens every
+negative the cache work has produced. Then re-run this xref; the referencing
+image should fall out immediately.

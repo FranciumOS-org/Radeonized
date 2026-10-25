@@ -248,7 +248,12 @@ The narrow lever costs the same five bytes: the call at **`0x7ff80412ce97`** is
 leaves `orl %eax, gSystemGPUVendors` reading 4 and changes nothing else -
 `gpuVendor` stays 1. One whole instruction, no branch targets a byte inside it,
 nothing extra leaks, and the 27-byte anchored window occurs **once in the
-cache's entire 0x25198000-byte executable mapping**. **`-rbgpuiop` + the
+main cache file's 0x25198000-byte executable mapping** (**corrected by 2r2**:
+that is ONE of the cache's NINE files, not the whole cache - the claim used to
+read "the cache's entire". The patch is not in doubt, because what it needed
+was a unique match in the text mapped into WindowServer, `rbgpu_mtlk_place`
+refuses on anything but exactly one match, and boot 150 verified the write
+from that process's own memory). **`-rbgpuiop` + the
 one-shot `rbgpu-iop`** (off by default, WindowServer by exact name, placed via
 the verified `rbgpu_mtlk_place` at `_task_set_main_thread_qos` before the
 process runs any instruction, because `GetSystemGPUVendors` is a
@@ -996,6 +1001,23 @@ The two that bite hardest:
   `bufferSwapCount` are still 0 with `fliprq_calls` absent.** Room was never
   what was missing. Keep the arg OUT; it costs a 64 MB kernel mapping and buys
   nothing.
+- **`dsc.py` READS ONE OF THE CACHE'S NINE FILES - EVERY NEGATIVE IT HAS
+  PRODUCED IS ONLY THAT WIDE (2r2).** The shared cache is nine files and each
+  subcache has its **own executable mapping at a distinct VA base** (main
+  `0x7ff800000000`+`0x25198000`, `.01` `0x7ff900000000`+`0x1febc000`, `.02`
+  `0x7ffa00000000`, `.03` `0x7ffb00000000`, `.04`-`.08` unread), while
+  `dsc.py` does `open(path)` on the single path given and enumerates only that
+  file's mappings. The VA space is global across subcaches, so code in `.01`
+  can reference a string in the main file and the tool will never see it. **A
+  hit is still a hit; a "0 hits" means only "not in this file".** Measured on
+  the string `"Unable to get AGDC information.  Return code: %#x"`
+  (`0x7ff812ea2887`, VA verified by reading it back): **0** LEA sites across the
+  whole main-file exec mapping and **0** references of any RIP-relative form in
+  198k instructions around IOPresentment, against a control of **7** hits for
+  the neighbouring `ioPresentmentFindAGDCMatch` every time. **Fix it before
+  trusting another cache negative:** glob `dyld_shared_cache_x86_64h*`, build
+  one combined VA->(file, offset) map, and resolve
+  `xref`/`callxref`/`dump`/`macho` against it. Detail: JOURNAL **2r2**.
 - **SKYLIGHT IS NOW READABLE, AND `CompositorSW` IS PINNED DOWN (2ps/2pt).**
   `tools/re/dsc.py` reads the dyld shared cache directly - VA <-> file offset
   from the header mappings, fast RIP-relative LEA xrefs, and a minimal Mach-O
