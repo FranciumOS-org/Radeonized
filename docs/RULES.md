@@ -1183,6 +1183,46 @@ The two that bite hardest:
   repeated 2pq. Find a consumer before writing to a field. Read the compositor verdict with
   `sudo tools/compositor_check.sh`; re-read the bit after a sysdiagnose with
   `tools/cdstate.sh`.
+- **`-rbgpumcnew` / `-rbgpumcreg`** (2qx) are route C stage 2, **both OFF by
+  default**, and they are different in kind, so do not conflate them.
+  **`-rbgpumcnew` is safe**: it constructs an `OSMetaClass` at runtime with
+  `sStalled == NULL`, which the kernel's own ctor handles by emitting one
+  `OSKextLog` (*"preModLoad() wasn't called for class %s"*) and returning - no
+  lock, no global, no panic - because every field store happens BEFORE that
+  check. Expect that log line; it is confirmation, not a fault. Verdict
+  `mcn_verdict 15` only: `mcn_f00` = `__ZTV11OSMetaClass + 0x10`, `mcn_f10` =
+  `IOGraphicsDevice::gMetaClass`, `mcn_f20` = `0x1d0`,
+  `mcn_name_is_literal 1`; `mcn_ready 0` means a symbol did not solve and
+  nothing else means anything.
+  **`-rbgpumcreg` is the user's decision and needs `nvram rbgpu-mcreg=1` as
+  well** - and the failure mode is **a HANG, not a panic**, which is why the
+  one-shot exists. `OSMetaClass::preModLoad` takes `_sStalledClassesLock` as
+  its first instruction and **never unlocks on any path**, including the
+  `kalloc` failure that returns 0; the only unlock lives in `postModLoad`
+  (`0xffffff8000a4a3a5`), which every one of its paths reaches. So **if
+  `postModLoad` is not reached the NEXT KEXT LOAD BLOCKS FOREVER** with no
+  panic and no log, and **`postModLoad` must be called even when `preModLoad`
+  returns NULL** - `if (!h) return;` would brick the next boot. Nothing may
+  return, allocate, solve or write a diag key between the two calls.
+  **THE PANIC TRAP, and it is not obvious:** `getClassName()`
+  (`0xffffff8000a4a150`) does `sym = this->0x18; return sym->vt[0x148]()`, but
+  the ctor stores a RAW `const char *` at +0x18 - so calling it on a fresh,
+  unregistered metaclass jumps through the first eight bytes of a string
+  literal. 2qw was safe only because IOFramebuffer's metaclass was already
+  registered. Stage 2a therefore checks the name by **pointer identity** and
+  reads `+0x00/+0x10/+0x20` as fields; only 2b calls `getClassName()`, after
+  `postModLoad`. Read `mcr_ran` first (0 = one-shot unarmed, nothing
+  registered), then **`mcr_post`, which must be 0**, then **`mcr_name_ok 1`**.
+  `0xdc004001` = handle mismatch, `0xdc004004` = the stalled array could not
+  grow. Registers nothing matchable: no personality, no provider, no
+  `registerService`, class name `RembrandtGPUProbeClass`, superclass
+  `IOGraphicsDevice`, size `0x1d0`, storage in our own BSS. Its vtable is the
+  BASE `OSMetaClass` one, whose `alloc()` is pure virtual, so anything that
+  allocated by that name would panic - nothing knows the name. Writes **no DCN
+  register**. **And a registered class is NOT a published framebuffer**: 2qr
+  closed the display chain at AGDC vendor info, not at the class name, so even
+  `mcr_name_ok 1` buys a metaclass and nothing on screen. Detail: JOURNAL
+  **2qx**.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
