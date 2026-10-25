@@ -739,7 +739,7 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // judged against now travel together.
     "mcp_on", "mcp_mc", "mcp_vt", "mcp_acc", "mcp_size", "mcp_verdict",
     "mcp_mc_addr", "mcp_vt_addr", "mcp_kext_base",
-    "mcp_mc_off", "mcp_vt_off",
+    "mcp_mc_off", "mcp_vt_off", "mcp_deferred",
     // 2q4: THE frontier. This boot claims kDisplayModeAcceleratorBackedFlag,
     // and it is the first display change in this project that can plausibly
     // blank the panel rather than merely report a wrong number - so these have

@@ -8128,6 +8128,11 @@ static void rbgpu_vram_publish(void *fb) {
 using t_rbNdrvEnableCtl = IOReturn (*)(void *);
 static t_rbNdrvEnableCtl orig_ndrv_enablectl_2pa = nullptr;
 
+// 2qv: defined with the rest of the metaclass probe, further down; called from
+// here because this is the latest point the plugin reaches with a measured,
+// populated metaclass.
+static void rbgpu_mcprobe_read_2qv(void);
+
 static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
     IOReturn ret = orig_ndrv_enablectl_2pa(fb);
     // Only after the original has run: if the controller failed to come up,
@@ -8137,6 +8142,11 @@ static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
     // present either way and the label is about the chip, not the controller.
     rbgpu_diag_set_num("fbvram_enable_ret", static_cast<uint32_t>(ret));
     rbgpu_vram_publish(fb);
+    // 2qv: read-only, and this is the one site in the plugin where a POPULATED
+    // metaclass is measured rather than assumed - `fbvram 3` above means
+    // getMetaClass()->getClassName() just returned "IONDRVFramebuffer" here.
+    // It touches nothing of `fb`; it only needs to run this late.
+    rbgpu_mcprobe_read_2qv();
     return ret;
 }
 
@@ -9071,6 +9081,17 @@ using t_rbMcName  = const char *(*)(const void *);
 using t_rbMcSize  = unsigned int (*)(const void *);
 using t_rbMcSuper = const void *(*)(const void *);
 
+// 2qv: carried from the solve (at IOGraphicsFamily's load) to the read (at
+// enableController). Boot 152 measured that those must be two different
+// moments: the symbols resolve exactly at the first, and the object they name
+// is still zero-filled BSS until the kext's own constructors have run.
+static bool              g_mcp_on   = false;
+static mach_vm_address_t g_mcp_mc   = 0;
+static mach_vm_address_t g_mcp_vt   = 0;
+static t_rbMcName        g_mcp_name = nullptr;
+static t_rbMcSize        g_mcp_size = nullptr;
+static t_rbMcSuper       g_mcp_super = nullptr;
+
 static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
                               mach_vm_address_t address, size_t size) {
     static bool done = false;
@@ -9084,6 +9105,7 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
         return;
     }
     rbgpu_diag_set_num("mcp_on", 1);
+    g_mcp_on = true;
 
     // The two data symbols a runtime-built subclass would need: the
     // superclass metaclass OBJECT (it is in __DATA,__common, so the symbol IS
@@ -9174,13 +9196,10 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
     // +0x20) and that reading still stands, but calling getClassName() /
     // getClassSize() / getSuperClass() cannot drift if Apple moves a field,
     // and all three are const.
-    t_rbMcName  mcName  = nullptr;
-    t_rbMcSize  mcSize  = nullptr;
-    t_rbMcSuper mcSuper = nullptr;
     struct { const char *sym; void **slot; } acc[] = {
-        { "__ZNK11OSMetaClass12getClassNameEv",  reinterpret_cast<void **>(&mcName)  },
-        { "__ZNK11OSMetaClass12getClassSizeEv",  reinterpret_cast<void **>(&mcSize)  },
-        { "__ZNK11OSMetaClass13getSuperClassEv", reinterpret_cast<void **>(&mcSuper) },
+        { "__ZNK11OSMetaClass12getClassNameEv",  reinterpret_cast<void **>(&g_mcp_name)  },
+        { "__ZNK11OSMetaClass12getClassSizeEv",  reinterpret_cast<void **>(&g_mcp_size)  },
+        { "__ZNK11OSMetaClass13getSuperClassEv", reinterpret_cast<void **>(&g_mcp_super) },
     };
     uint64_t have = 0;
     for (size_t i = 0; i < arrsize(acc); i++) {
@@ -9194,14 +9213,66 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
         }
     }
     rbgpu_diag_set_num("mcp_acc", have);
-    if (!mcName || !mcSize || !mcSuper) {
+    if (!g_mcp_name || !g_mcp_size || !g_mcp_super) {
         rbgpu_log("2qt: OSMetaClass accessors did not all resolve (mask 0x%llx) - "
                   "the metaclass was found but cannot be read through Apple's "
                   "own code", static_cast<unsigned long long>(have));
         return;
     }
 
-    auto *mc = reinterpret_cast<const void *>(want[0].addr);
+    // 2qv: STOP HERE. Everything above is a symbol lookup and boot 152 proved
+    // it exact - mcp_mc_off read 0x3f040 and mcp_vt_off 0x35248, the two
+    // offsets computed from `nm` before the boot, to the byte. What boot 152
+    // also measured is that READING the metaclass here is too early: this
+    // callback runs while IOGraphicsFamily is being prepared, BEFORE the
+    // kext's own OSMetaClass constructors run, and
+    // `__ZN13IOFramebuffer10gMetaClassE` lives in `__DATA,__common` - BSS,
+    // zero-filled at load. So the object was all zeros: getClassSize() 0,
+    // getClassName() NULL, getSuperClass() NULL, verdict 8. Not a wrong
+    // address - an unpopulated one.
+    //
+    // The read therefore moves to a site where a populated metaclass is
+    // MEASURED, not assumed: 2pa's `enableController` hook, where
+    // `getMetaClass()->getClassName()` already returns "IONDRVFramebuffer"
+    // and `fbvram 3` in this same boot 152 is the control that says so.
+    g_mcp_mc = want[0].addr;
+    g_mcp_vt = want[1].addr;
+    rbgpu_diag_set_num("mcp_deferred", 1);
+    rbgpu_log("2qv: solved both symbols (mc 0x%llx off 0x%llx, vt 0x%llx off "
+              "0x%llx) and deferring the READ to enableController - the "
+              "metaclass is BSS and is not constructed yet at this callback",
+              static_cast<unsigned long long>(want[0].addr),
+              static_cast<unsigned long long>(want[0].addr - address),
+              static_cast<unsigned long long>(want[1].addr),
+              static_cast<unsigned long long>(want[1].addr - address));
+}
+
+// 2qv: the read half, called from 2pa's enableController hook. By then
+// IOGraphicsFamily has started, so IOFramebuffer::gMetaClass is constructed.
+// Still read-only: this constructs nothing, registers nothing, allocates
+// nothing and attaches to no provider.
+static void rbgpu_mcprobe_read_2qv(void) {
+    static bool done = false;
+    if (done || !g_mcp_on) {
+        return;
+    }
+    done = true;
+
+    if (g_mcp_mc == 0) {
+        rbgpu_diag_set_num("mcp_verdict", 0);
+        rbgpu_diag_set_str("mcp_say", "NOSYMBOL(the metaclass never solved)");
+        return;
+    }
+    auto mcName  = g_mcp_name;
+    auto mcSize  = g_mcp_size;
+    auto mcSuper = g_mcp_super;
+    if (!mcName || !mcSize || !mcSuper) {
+        rbgpu_diag_set_num("mcp_verdict", 0);
+        rbgpu_diag_set_str("mcp_say", "NOACCESSOR(see mcp_acc)");
+        return;
+    }
+
+    auto *mc = reinterpret_cast<const void *>(g_mcp_mc);
     unsigned int csize = mcSize(mc);
     const char *cname  = mcName(mc);
     rbgpu_diag_set_num("mcp_size", csize);
@@ -9215,7 +9286,7 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
     const char *sname = nullptr;
     rbgpu_diag_set_num("mcp_super_addr", reinterpret_cast<uint64_t>(sup));
     if (sup != nullptr &&
-        reinterpret_cast<uintptr_t>(sup) >= kRbKextVaFloor) {
+        reinterpret_cast<uintptr_t>(sup) >= 0xffffff7f80000000ull) {
         sname = mcName(sup);
         if (sname) {
             rbgpu_diag_set_str("mcp_super", sname);
@@ -9231,16 +9302,16 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
     bool sizeOk  = csize == 0x1d0;
     bool superOk = sname != nullptr && strcmp(sname, "IOGraphicsDevice") == 0;
     uint64_t verdict = (nameOk ? 1 : 0) | (sizeOk ? 2 : 0) | (superOk ? 4 : 0) |
-                       (want[1].addr ? 8 : 0);
+                       (g_mcp_vt ? 8 : 0);
     rbgpu_diag_set_num("mcp_verdict", verdict);
     rbgpu_diag_set_str("mcp_say",
                        verdict == 15
                            ? "REACHABLE(all four agree; route C's inputs exist)"
                            : "MISMATCH(see mcp_name/size/super; read nothing further)");
-    rbgpu_log("2qt: IOFramebuffer metaclass %p vtable %p - name=%s size=0x%x "
+    rbgpu_log("2qv: IOFramebuffer metaclass %p vtable %p - name=%s size=0x%x "
               "super=%s(0x%x) verdict=0x%llx %s",
-              reinterpret_cast<void *>(want[0].addr),
-              reinterpret_cast<void *>(want[1].addr),
+              reinterpret_cast<void *>(g_mcp_mc),
+              reinterpret_cast<void *>(g_mcp_vt),
               cname ? cname : "(null)", csize, sname ? sname : "(null)",
               sup ? mcSize(sup) : 0,
               static_cast<unsigned long long>(verdict),
@@ -9324,8 +9395,11 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     }
 
     // 2pa: the VRAM label, gated on its own arg and routed on its own.
+    // 2qv also rides this hook for its READ, so the route is taken when either
+    // arg is set. Rule 3 - this is the SAME RouteRequest under a wider gate,
+    // never a second one for the same function.
     rbgpu_diag_set_num("fbvram_on", g_vram_on ? 1 : 0);
-    if (g_vram_on) {
+    if (g_vram_on || g_mcp_on) {
         KernelPatcher::RouteRequest vr(
             "__ZN17IONDRVFramebuffer16enableControllerEv",
             hooked_ndrv_enablectl_2pa, orig_ndrv_enablectl_2pa);
