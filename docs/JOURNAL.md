@@ -29925,3 +29925,128 @@ work that 2qs measured as the *small* half.
 variable is still set from boot 154.
 
 Build: UUID `5C3D0EA9-87F1-337B-B7EF-14E07158C729`, hosttest all passed.
+
+## 2qz — who fills AGDC's `gpuc` and `agdp`: ONE writer, and it is a service registering ITSELF. 2qr corrected: the AGDC kext IS loaded and a plugin IS live.
+
+Static, no boot. The question 2qy left: route C's two cheap questions are
+answered yes, but neither touches the blocker 2qr named, so before building a
+subclass — find what fills the two AGDC fields.
+
+### The instrument first (rule 26)
+
+`AppleGPUWrangler`'s `__text` is **`0x58aa` = 22698 bytes, 6376
+instructions** — the whole kext is readable, which is why this cost no boot.
+Control: the known `agdp` site `0x13df0a10` from 2qr is present in the
+disassembly exactly once. Calls named with
+`tools/re/kc_stubs.py` (**1678 of 1678 stubs resolved**, boot base
+`0xffffff8000100000`).
+
+### The reader, confirming 2qr's decode exactly
+
+In the `debug-gpus` dictionary builder, `%r15` is the per-GPU struct:
+
+```
+13df09a9   movq 0x10(%r15), %rdi ; OSNumber::withNumber(…,64) ; key -> "gpuc"
+13df09df   movq 0x68(%r15), %rdi ; IORegistryEntry::getRegistryEntryID()
+13df09e8                         ; OSNumber::withNumber(…,64) ; key -> "agdp"
+```
+
+So **`gpuc` is a 64-bit value at `+0x10` and `agdp` is the registry ID of an
+`IORegistryEntry *` held at `+0x68`.** 2qr read this right.
+
+### The writer: exactly one, set-once, and it is a registration
+
+`+0x68` has **exactly one store in the entire kext**:
+
+```
+13df4c96   <fn start>
+13df4cb4   callq OSMetaClassBase::safeMetaCast(obj, *[0x13df6038])
+13df4cbc   je    <return>                     ; wrong class -> nothing happens
+13df4cda   callq 0x13df2e74(mgr, obj, 0)      ; -> %r14 = the per-GPU struct
+13df4cf2   movq  0x18(%r15), %rax
+13df4cf6   cmpq  %rax, (%rcx)                 ; %rcx from [0x13df60a8]
+13df4cf9   je    0x13df4d26                   ; -> the +0x68 path
+13df4d02   cmpq  %rax, (%rcx)                 ; %rcx from [0x13df60b8]
+13df4d05   jne   <done>                       ; neither -> nothing happens
+13df4d26   cmpq  $0x0, 0x68(%r14)             ; SET ONCE
+13df4d2b   jne   <done>
+13df4d2d   incl  0x98(%r14)
+13df4d34   movq  %rbx, 0x68(%r14)             ; <-- the only writer
+13df4d3e   callq *0x20(%rax)                  ; retain
+```
+
+**The class test can only be AGDC.** The wrangler imports exactly **three**
+`gMetaClass` symbols, and that is the whole list:
+
+```
+__ZN26AppleGraphicsDeviceControl10gMetaClassE
+__ZN32AppleGraphicsDeviceControlClient10gMetaClassE
+__ZN8OSObject10gMetaClassE
+```
+
+So the two globals compared at `0x13df60a8` / `0x13df60b8` are
+`AppleGraphicsDeviceControl` and `AppleGraphicsDeviceControlClient`. **Not
+established:** which global is which, and whether `0x18(%r15)` is a metaclass
+pointer or something else — the comparison is a plain `cmpq`, so if it is a
+metaclass it is an **exact-class** test and not a `safeMetaCast`, which would
+matter a great deal. Flagged, unread.
+
+**And the function has ZERO direct callers inside the wrangler**
+(`grep -c 'callq 0x13df4c'` = 0). It is an entry point reached from outside:
+**AGDC calls into the wrangler to register itself**, per GPU. Nothing on that
+path involves `IOFramebuffer`, a vtable, or a subclass.
+
+### 2qr IS CORRECTED, and this is the part that matters
+
+2qr wrote that `gpuc`/`agdp` are "filled by the vendor AGDC plugin, i.e.
+`AMDSupport`/`AMDFramebuffer`, **which never instantiates here**". Measured
+live, that is too strong:
+
+```
+148   4  com.apple.AppleGraphicsDeviceControl (8.1.10)   <-- LOADED, 4 dependents
+178   0  com.apple.AGDCPluginDisplayMetrics   (8.1.10)   <-- LOADED
+```
+
+and in the registry:
+
+```
+Root
+  MacBookPro16,2
+    IOResources
+      AppleGPUWrangler
+        AppleGraphicsDeviceControlPlugin   <registered, matched, active, retain 6>
+          AGDCPluginDisplayMetrics         <!registered, !matched>
+```
+
+**The AGDC kext is loaded and an AGDC plugin IS instantiated.** But look at
+where: it attaches to **`AppleGPUWrangler` on `IOResources`** — machine-level,
+not per-GPU, and its class is `AppleGraphicsDeviceControlPlugin`, which is
+neither of the two names the writer tests for. So what is missing is not "AGDC"
+but a **per-GPU `AppleGraphicsDeviceControl` instance registered against our
+GPU**, which is the thing `+0x68` is reserved for and which the vendor stack
+creates.
+
+Also noted in passing, not chased: this machine presents as **`MacBookPro16,2`**
+(the SMBIOS spoof), and AGDP/AGDC behaviour is commonly board-id gated.
+
+### What this changes about the plan
+
+**Route C's expensive half is not the next step, and may never be.** The field
+that blocks the display chain is filled by a **service registration into
+AppleGPUWrangler**, by Apple's own `AppleGraphicsDeviceControl` — a class in a
+kext that is **already loaded on this machine**. That path requires no
+`IOFramebuffer` subclass, no copied 311-slot vtable, and none of the
+two-vtable problem 2qy exposed (the registered metaclass cannot be
+instantiated, because its own vtable is the base `__ZTV11OSMetaClass` whose
+`alloc()` is pure virtual — so a real subclass needs a synthesized *metaclass*
+vtable as well as a synthesized instance vtable, which
+`docs/SCOPE-FRAMEBUFFER.md` §6 did not count).
+
+**The next question, still static and still free:** what calls
+`0x13df4c96`, and what creates the per-GPU `AppleGraphicsDeviceControl` that
+calls it? `AppleGraphicsDeviceControl` is 4-referenced and loaded, so its own
+matching and its registration entry points are readable the same way this was.
+Read that before building anything.
+
+What has NOT changed: none of this is a pixel yet, and every earlier verdict
+upstream of AGDC still stands.
