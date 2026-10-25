@@ -187,7 +187,25 @@
 > and returned "proceed", and now retries and **fails closed**.
 > **Run `sudo nvram -d rbgpu-mcreg`.** Detail: JOURNAL **2qy**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qy)
+> **2qz — THE AGDC FIELD HAS ONE WRITER, AND IT IS A SERVICE REGISTERING
+> ITSELF. ROUTE C'S EXPENSIVE HALF IS NOT THE NEXT STEP.** `AppleGPUWrangler`
+> is only `0x58aa` of code, so it was read whole with no boot. `agdp` =
+> registry ID of an `IORegistryEntry *` at `gpuStruct+0x68`, and that field has
+> **exactly one store** (`0x13df4d34`, in the function at `0x13df4c96`):
+> `safeMetaCast`, find the object's per-GPU struct, test its class against one
+> of two globals, store once and retain. The wrangler imports exactly three
+> `gMetaClass` symbols — `AppleGraphicsDeviceControl`,
+> `AppleGraphicsDeviceControlClient`, `OSObject` — so the test is for AGDC, and
+> the function has **zero callers inside the kext**, so **AGDC registers itself
+> per GPU**. No `IOFramebuffer`, no vtable, no subclass on that path.
+> **2qr corrected:** the AGDC kext IS loaded (4 dependents) and
+> `AppleGraphicsDeviceControlPlugin` IS registered and matched — but on
+> `AppleGPUWrangler`/`IOResources`, machine-level, not per-GPU. What is missing
+> is a per-GPU AGDC instance. Unread: which global is which, and whether the
+> `cmpq` is an exact-class test. **Next, static and free: what calls
+> `0x13df4c96`.** Detail: JOURNAL **2qz**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2qz)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4

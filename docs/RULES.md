@@ -306,7 +306,35 @@ being populated). Those are filled by the **vendor AGDC plugin**, i.e.
 `AMDSupport`/`AMDFramebuffer`, which never instantiates here (2oq). **So this
 route terminates at the same root cause and 2ql's structural verdict is
 confirmed twice from two directions - the next thing to supply is the AMD
-framebuffer stack, not another gate.** Killed suspects: `FB_Triage`
+framebuffer stack, not another gate.**
+**2qz CORRECTS THAT LAST SENTENCE, AND IT IS THE BIGGEST OPENING IN A WHILE.**
+`AppleGPUWrangler`'s `__text` is only **`0x58aa` (6376 instructions)**, so it
+was read whole, statically, no boot (`kc_stubs.py`: 1678 of 1678 stubs
+resolved). `gpuc` is `gpuStruct+0x10`; `agdp` is the registry ID of an
+`IORegistryEntry *` at `gpuStruct+0x68` - 2qr's decode confirmed. **`+0x68`
+has EXACTLY ONE writer in the whole kext**, at `0x13df4d34` inside the
+function starting `0x13df4c96`: it `safeMetaCast`s an incoming object, looks
+up that object's per-GPU struct, tests its class against **one of two
+globals**, and only then stores + retains it, guarded by `cmpq $0x0` so it is
+**set once**. The wrangler imports exactly **three** `gMetaClass` symbols -
+`AppleGraphicsDeviceControl`, `AppleGraphicsDeviceControlClient`, `OSObject` -
+so that test can only be for AGDC. **And the function has ZERO direct callers
+inside the wrangler**, so it is an entry point: **AGDC registers ITSELF with
+the wrangler, per GPU.** Nothing on that path touches `IOFramebuffer`, a
+vtable or a subclass. **Measured live, "the vendor AGDC plugin never
+instantiates here" is too strong**: `com.apple.AppleGraphicsDeviceControl`
+(8.1.10) is **LOADED with 4 dependents**, `AGDCPluginDisplayMetrics` is loaded,
+and `AppleGraphicsDeviceControlPlugin` is **registered, matched and active** -
+but it attaches to `AppleGPUWrangler` on `IOResources`, i.e. **machine-level,
+not per-GPU**, and its class is neither name the writer tests. What is missing
+is a **per-GPU `AppleGraphicsDeviceControl` registered against our GPU**.
+**NOT established:** which of the two globals is which, and whether
+`0x18(%r15)` is a metaclass pointer - the compare is a plain `cmpq`, so if it
+is, it is an **exact-class** test, which would matter. Noted, unchased: this
+machine presents as **`MacBookPro16,2`** and AGDP/AGDC is often board-id
+gated. **Next, still static and free: what calls `0x13df4c96`, and what
+creates the per-GPU AGDC that calls it.** Read that before building anything.
+Detail: JOURNAL **2qz**. Killed suspects: `FB_Triage`
 (diagnostic dumps only) and the third-party NV kexts in `/Library/Extensions`
 (`kextstat`, control 67 - **none loaded**). The `IOPresentment` boot-arg token
 is logging-only and real but **no longer worth a boot**. Keep `-rbgpuiop`:
