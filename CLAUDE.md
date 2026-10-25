@@ -565,7 +565,18 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
 14. **Absence is not a result.** A silent `return` inside an instrument, a
     full diag table and a missing NVRAM write all look identical to "the code
     never got there". Every path out of a probe must say something.
-    [2eh, 2ek, 2fb]
+    **And check `diag_used` against `diag_max` BEFORE concluding anything from
+    an absent key (2qw)** - equal means the table filled and absence carries no
+    information at all. That has now happened three times (2db at 96, 2ds at
+    192, 2qw at 448, which dropped `mcp_verdict` and `mcp_say` - the keys
+    holding a probe's whole conclusion - while every component survived).
+    Raising the cap failed twice, so the table now seeds `diag_max` and
+    `diag_used` into slots 0 and 1 before any real key: the two numbers that
+    say whether the data is trustworthy are the only two that cannot be
+    evicted by it filling up. The `rbgpu_log` warning was not enough, because
+    it lands only in `plugin_check.sh`'s capture and that boot had none - **an
+    instrument's own capacity is part of the instrument.**
+    [2eh, 2ek, 2fb, 2db, 2ds, 2qw]
 15. Before interpreting anything, check the loaded UUID against `build/out`,
     whether `rbgpu-arm` was left set, and which boot-args are actually in
     `config.plist`. [2cu, 2cv]
