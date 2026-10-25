@@ -40,8 +40,10 @@ desktop, and texts from it. The CP halt that blocked this project for its
 entire 2e–2k history is **fixed** (2ks/2ku/2kw, boot 89 onward): one missing
 addition, `vram_base_offset`, applied to Apple's `adjustVRAMAddress` at three
 call sites. Zero VM faults, no halt, no freeze, VMIDs 1–8 all translate.
-WindowServer composites through Metal on `AMDRadeonX6000MTLDriver`; a
-4096-element compute kernel returns **bit-exact** results.
+A 4096-element compute kernel returns **bit-exact** results. **But
+WindowServer does NOT composite through Metal** - that line stood here until
+2026-10-25 and was wrong from 2pd onward. The desktop is rasterised on the CPU
+by `CompositorSW` (~48 % of WindowServer's main thread, ~9 fps); see §4.
 
 **THE RENDERING DEFECTS ARE FIXED (2on/2oo/2op, boots 130–132).** The user on
 boot 132: *"everything is flawless, not a single artifact or even an off
@@ -368,14 +370,75 @@ OTG4/5 absent; `DCHUBP_CNTL0` distinct from HUBP1–3; DMCUB firmware
 **4.0.15.47 running**. The firmware brought DCN 3.1.2 up and is scanning out
 right now, and `rb_regs.h` already carries the OTG and HUBP registers needed.
 
-**So the route is to adopt the running pipe, not to bring DCN up:** (a) read
-`OTG0_H_TOTAL`/`V_TOTAL` for the real timing, (b) publish our own
-`IOFramebuffer` with it, (c) enable and handle OTG0's vertical interrupt for a
-real vsync, (d) flip `HUBP0_PRIMARY_SURFACE_ADDRESS` at vblank. (a) and (b)
-need no DCN writes; **(c) and (d) do, which is the user's decision** — the
-probe permits no writes but `MM_INDEX`/`MM_INDEX_HI`, and a wrong OTG or HUBP
-write blanks the panel, which rule 12 says is indistinguishable from a hang.
-Only (c) fixes animations.
+**That route - adopt the running pipe, publish an IOFramebuffer, take OTG0's
+vblank, flip `HUBP0_PRIMARY_SURFACE_ADDRESS` - is SUPERSEDED. Do not start
+it.** Two measurements killed it and a third explained why:
+
+* **2pf**: with `-rbgpuflipprobe` armed and routed,
+  `AMDRadeonX6000_AMDHWDisplay::getDisplayPipeTransactionFlip` was **never
+  called once** in a whole boot. The flip is downstream of a decision already
+  lost.
+* **2pr**: `-rbgpufbvramrange` gave `find_vram_descriptor` a 64 MB range
+  instead of 8294400 bytes, at exactly the intended call site. `bufferFlipCount`
+  and `bufferSwapCount` stayed 0. Room was never what was missing.
+* **2oz**: the vblank *was* taken, through the documented API, and boot 138
+  delivered all 23553 frames through the fallback timer. Pacing is fixed
+  (30.000 -> 129.267 Hz nominal). It did not touch the compositing.
+
+**What is actually wrong, traced end to end (2pd -> 2qn):** the desktop
+composites in software because its `CoreDisplay::DisplaySurface` has **no
+IOSurface**. `CDSurface::prepare_for_update` sets `cdsurf->0x40 = 1` when
+`CoreDisplay_DisplaySurface_GetIOSurface` returns NULL, and `begin_update`
+then overwrites `Update->0x1c0` - a perfectly good `CompositorMetal` - with the
+software compositor. The surface comes from
+`CoreDisplay::Display::GetNextSurface`, which has exactly **two** paths and
+both are closed:
+
+1. **legacy** (`CGXAcquireDisplayDeviceSurface`): ends in
+   `IOAccelSurface::set_id_mode`, which rejects every surface id below 256,
+   and `MPAcquireSurfaceID()` can only ever return 0..255. Apple's own kernel
+   log says so. Mechanically (2ql): `newUserClient` type 0 goes to the vendor's
+   `newSurface()` -> `AMDRadeonX6000_AMDAccelSurface`, which does not override
+   `set_id_mode`; type 0x20 -> `IOAccelSurfaceMTL`, which has no id check.
+2. **IOPresentment** (`DisplaySurfacePool` -> `CD_IOSurfaceCreate`, a real
+   IOSurface): gated on `UseIOPresentment()`, false **only** because
+   CoreDisplay classifies GPUs by `IOObjectCopyClass` on the IOFramebuffer -
+   `Intel` 0x2, `AMD` 0x4, `NVDA` 0x8, `AppleParavirt` 0x10, **no match 0x1** -
+   and `IONDRVFramebuffer` matches none of them. The supported mask is built
+   only from bits 0x2/0x4/0x8/0x10, so bit 0x1 can never be in it, for any
+   value of any preference. `make useiop` measures it in a second, non-root.
+
+**Everything IOPresentment needs is already live and paired (2qm/2qn)**, so
+path 2 is not a fantasy: `IOAccelIndex 0` and `IOAccelRevision 2` on
+`.Display_boot`, `IOAccelDisplayPipeCapabilities = {DisplayPipeSupported=1,
+TransactionsSupported=1}` on the accelerator, two live
+`IOAccelDisplayPipeUserClient2` instances, `IOPresentment.framework` on disk
+and loadable, and `AppleGPUWrangler`'s `debug-gpus` already listing **our**
+framebuffer (`0x100000548`) together with **our** accelerator (`0x10000054a`) -
+which is the pairing `ioPresentmentFindAGDCMatch()` searches for. The
+client-side probe (`make ioptest`) is permanently blocked: the GPUWrangler user
+client is entitlement-gated and `sudo` does **not** clear it
+(`kIOReturnNotPermitted` both ways, measured).
+
+**PENDING USER DECISION - nothing proceeds without it.** Intervention A: inside
+WindowServer only, patch CoreDisplay's per-framebuffer vendor classifier
+`0x7ff80412cc38` to return `0x4` instead of `0x1`. Six bytes,
+`b8 04 00 00 00 c3`, at an entry with no branch in it; its only caller is
+`__GetSystemGPUVendors_block_invoke`, so the entire effect is
+`gSystemGPUVendors = 0x4` - a belief that is **true of the hardware**. The
+`-rbgpumtlkfix` machinery already does this class of patch, verifies every site
+from the target's own memory first, fails safe, and runs before the process
+executes any code (`GetSystemGPUVendors` is a `dispatch_once`). Writes **no DCN
+register**; rescue is `-rbgpuoff` + reboot. **Risk:** if the IOPresentment path
+fails past the gate, WindowServer may not bring the display up - a black screen
+at login - and no instrument short of WindowServer itself can rule that out.
+The user chose to stop before implementing it (2026-10-25). Full detail:
+JOURNAL **2ql**, **2qm**, **2qn**.
+
+(Intervention B - renaming `IONDRVFramebuffer`'s class via `gMetaClass + 0x18` -
+is recorded in 2qm and is **strictly worse** than A for the same effect: it
+changes every `IOObjectCopyClass`, ioreg and panic-log consumer system-wide to
+fix one string comparison in one userspace function.)
 
 ---
 
@@ -702,23 +765,19 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
 halves on by default, no boot-arg and no setup. Nothing on this list is
 blocking a usable machine any more.
 
-1. **The display chain**, and now the largest thing left. §4 is surveyed
-   (2oq): the personality route is dead because **macOS has no DCN 3.1.2
-   code**, and the hardware is already scanning out under firmware. The route
-   is to adopt the running pipe, in this order:
-   **(a)** read `OTG0_H_TOTAL`/`V_TOTAL` and the pixel clock on a level-2
-   probe boot — the one measurement still missing, and read-only;
-   **(b)** publish our own `IOFramebuffer` subclass with that timing
-   (IOGraphicsFamily is a public KPI, confirmed), which is what stops macOS
-   reporting 0 Hz;
-   **(c)** enable and handle OTG0's vertical interrupt — **the only step that
-   fixes animations**, and the first that writes a DCN register;
-   **(d)** flip `HUBP0_PRIMARY_SURFACE_ADDRESS` at vblank for tear-free
-   presents.
-   (c) and (d) are **the user's decision**: the probe permits no writes but
-   `MM_INDEX`/`MM_INDEX_HI`, and a wrong OTG or HUBP write blanks the panel —
-   rule 12. `-rbgpufbmatch` must stay OUT either way; spoofing `device-id`
-   kills the accelerator (§9).
+1. **The display chain** - and it is now **one pending decision, not a
+   survey**. §4 has the whole traced chain. The desktop composites in software
+   because its DisplaySurface has no IOSurface; both of
+   `Display::GetNextSurface`'s paths are closed; the only one that can open is
+   gated on a userspace class-name test that scores `IONDRVFramebuffer` as an
+   unknown vendor. Every kernel precondition IOPresentment needs is already
+   live and paired. The next step is **intervention A** (§4), a 6-byte patch of
+   CoreDisplay's vendor classifier inside WindowServer - **the user's decision,
+   because a mistake is a black screen at login**. The old plan in this slot
+   (publish an IOFramebuffer, take OTG0's vblank, flip
+   `HUBP0_PRIMARY_SURFACE_ADDRESS`) is **superseded and refuted** - 2pf
+   measured the flip never firing once, 2pr measured room never being the
+   problem. Do not restart it. `-rbgpufbmatch` must stay OUT either way (§9).
 2. **Mode setting, external displays, brightness, DSC and PSR** are all
    beyond step (d) and all need the DCN 3.1.2 code that does not exist here.
    That is where a real port would begin, and it is large: Linux's `dcn31` is
