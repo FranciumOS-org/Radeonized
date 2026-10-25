@@ -1,3 +1,19 @@
+> **LATEST, 2026-10-25 (2r8/2r9).** 2r8 already ran the root `agdcinfo`
+> suggested below: the same entitlement refusal, so that command is no longer
+> pending. The display blocker remains the missing per-GPU AGDC service.
+> **2r9 closes §2's second loose thread with a measurement:** plain Metal
+> render targets reach `IOAccelResourceCreate` as **type 0x40, format 0**, a
+> raw backing allocation, while their own GPU image descriptors carry
+> **SW_MODE 6 or 10**. The kernel's resource histogram can read `m0` without
+> making that client texture linear. Three sizes, traced and untraced,
+> coordinate-coded rendering and full readback: **0 mismatches / 2,195,456
+> pixels**, with `linear_force=1`. The IOSurface controls use **type 0x82**
+> and descriptor mode 0. Tools: `make texturepath resourcewatch`; detail and
+> limits: JOURNAL **2r9**. No kext behavior or boot configuration changed.
+>
+> The dated frontier entries below retain their chronology; later entries
+> supersede earlier next-step suggestions.
+
 > **FRONTIER, 2026-10-24 (2ql/2qm/2qn) - read this before anything on the
 > display half.** The software-compositing chain is closed end to end and the
 > remaining step is a DECISION, not a read. `Display::GetNextSurface` has two
@@ -345,7 +361,7 @@
 > which says whether an AGDC user client here answers attribute 1 at all.
 > Detail: JOURNAL **2r5**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r5)
+# RembrandtGPU — handoff state (2026-10-25, after 2r9)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
@@ -586,9 +602,9 @@ launch, wrong after idle or a tab switch, Terminal broken regardless), so it
 earns its place and is **ON BY DEFAULT since 2oo**; `-rbgpulinear` is no
 longer read anywhere and `-rbgpunolinear` turns it off.
 
-### What 2on–2op did NOT explain
+### What 2on–2op did NOT explain (updated through 2r9)
 
-Two things are owed, and neither is cosmetic:
+One thing remains unexplained; the second was answered in 2r9:
 
 1. **WHY the `_X` swizzle family is wrong on this chip.** 2nr blamed Navi 21's
    pipe count and 2ns measured that false: AddrLib's whole configuration is
@@ -596,16 +612,20 @@ Two things are owed, and neither is cosmetic:
    with the hardware exactly. 2na's XOR-linear bit matrix still points at the
    `_X` XOR term, just not at the pipe count. The fix is a policy that works,
    not an understanding.
-2. **Why the render targets the policy deliberately keeps TILED do not
-   disagree** with the kernel's linear force. 2oo's explanation for why both
-   halves are needed is that the force made the kernel compute linear while
-   userspace still tiled, and the universal fix removed that disagreement for
-   non-render-targets — but it did *not* remove it for render targets, and
-   those render correctly anyway. Something in that account is incomplete.
-   Related: 2nj held that AppKit CALayer backing stores reach neither the
-   userspace chooser nor the kernel align manager, yet the kernel force is
-   exactly what fixes Terminal (boots 131/132). The second half of 2nj is in
-   doubt.
+2. **CLOSED for the measured plain-texture path (2r9): why tiled render
+   targets coexist with the kernel's linear force.** The kernel allocates
+   raw memory (`IOAccelResourceCreate` type 0x40, `args+0x68` format 0);
+   `AMDAccelResourceAddr2::initialize` branches past its swizzle lookup when
+   that format is zero (`0xbe569a6`–`0xbe569b2`). The client's own GPU image
+   descriptor still carries mode 6/10. At 64×64, 640×480 and 1024×768, with
+   `linear_force=1`, the descriptor was read directly and coordinate-coded
+   render/readback passed with and without interposition. **`rbgpu-mode m0`
+   is not a census of GPU texture descriptors.** 2oo's blanket explanation
+   that the kernel recomputes every client texture linear is withdrawn;
+   both fixes are still required by the boot-131/132 experiment. The related
+   question — which backing surface makes the kernel force fix Terminal —
+   remains open; these scratch allocations do not trace AppKit's backing
+   store lifecycle.
 
 ---
 
@@ -1174,30 +1194,27 @@ and zeroes `+0x89/+0xa8/+0xac`. It changes nothing on the chip.
 halves on by default, no boot-arg and no setup. Nothing on this list is
 blocking a usable machine any more.
 
-1. **The display chain** - and it is now **one pending decision, not a
-   survey**. §4 has the whole traced chain. The desktop composites in software
-   because its DisplaySurface has no IOSurface; both of
-   `Display::GetNextSurface`'s paths are closed; the only one that can open is
-   gated on a userspace class-name test that scores `IONDRVFramebuffer` as an
-   unknown vendor. Every kernel precondition IOPresentment needs is already
-   live and paired. **Intervention A is BUILT** (2qo, §4): five bytes at the
-   call site `0x7ff80412ce97` - not at the classifier, which 2qo measured to
-   have a second caller that writes `MPPriv.gpuVendor`. Arm it with
-   `-rbgpuiop` **and** `sudo nvram rbgpu-iop=1`; a black screen at login costs
-   one power cycle. **Still the user's decision.** The old plan in this slot
-   (publish an IOFramebuffer, take OTG0's vblank, flip
-   `HUBP0_PRIMARY_SURFACE_ADDRESS`) is **superseded and refuted** - 2pf
-   measured the flip never firing once, 2pr measured room never being the
-   problem. Do not restart it. `-rbgpufbmatch` must stay OUT either way (§9).
+1. **The display chain now stops at the missing per-GPU AGDC service
+   (2r5/2r8).** Boot 150 already ran Intervention A and passed the vendor
+   gate. IOPresentment's association map remains empty because it skips the
+   only matching service, `AppleGPUWrangler`; its next query opens port 0.
+   Root `agdcinfo` has also already run and was refused for missing private
+   entitlements. Neither command is pending. The substantial candidate work
+   is a runtime `AppleGraphicsDeviceControl` subclass plus its vendor-info
+   and GPU-capability attribute protocol; post-gate presentation remains
+   unproved. That kernel experiment still needs the user's decision.
+   Keep the verified IOP instrument for that work. The old direct-flip plan
+   remains superseded: 2pf measured no flip request, and 2pr showed extra
+   VRAM room bought nothing. `-rbgpufbmatch` must stay OUT (§9).
 2. **Mode setting, external displays, brightness, DSC and PSR** are all
    beyond step (d) and all need the DCN 3.1.2 code that does not exist here.
    That is where a real port would begin, and it is large: Linux's `dcn31` is
    the only reference.
-3. **The two unexplained things in §2's closing note** — why the `_X` family
-   is wrong, and why the render targets kept tiled do not disagree with the
-   kernel force. Static work, no boot needed, and the second one is a real
-   loose thread rather than tidying: it says the current account of why both
-   halves are needed is incomplete.
+3. **Why the `_X` family is wrong** remains unexplained. **The tiled-render-
+   target disagreement is closed for the measured path (2r9, §2):** raw
+   kernel backing allocations and client GPU texture descriptors are separate
+   layouts. Still open: tracing which backing surface makes the kernel force
+   fix Terminal; the scratch-process probe does not establish that lifecycle.
 4. ~~**Hardening the universal fix.**~~ **Done in 2r6, not yet seen on
    hardware.** The silent case was worse than "loud in `mtlk_failed`": the
    counters were published only after the stage-B detour, so when the cave

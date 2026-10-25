@@ -11524,13 +11524,14 @@ static uint32_t g_rb_2ld_hit = 0;
 // Terminal and other native apps were never fixed by it at all. The two
 // address DIFFERENT paths and the desktop needs both.
 //
-// This also retires 2mm's suspicion of -rbgpulinear, and explains it: the
-// force made the KERNEL compute a linear layout while USERSPACE still laid
-// the surface out in 64 KB tiles, so the two disagreed. Now that the
-// userspace chooser returns LINEAR for non-render-targets as well, they
-// agree. That is a plausible mechanism, not an established one - the render
-// targets userspace keeps tiled (off the _X family) are still computed linear
-// here, and nothing yet explains why that does not also disagree.
+// 2r9 corrects the old "kernel linear vs userspace tiled" explanation.
+// Plain Metal textures arrive as type-0x40 raw allocations with format 0;
+// AMDAccelResourceAddr2::initialize skips its swizzle lookup when format is
+// zero (0xbe569a6..0xbe569b2). The client's own image descriptor can still
+// carry mode 6/10 while the backing resource's histogram reads m0. This
+// force covers the kernel-managed surface path; it does not recompute every
+// client render target. texturepath + resourcewatch measured the distinction
+// at three sizes with coordinate-coded render/readback; JOURNAL 2r9.
 //
 // Resolved once, from either hook, because g_rb_2ld_on used to be initialised
 // lazily inside hooked_swizmode_2la while being READ by hooked_surfinfo_2lf -

@@ -19,6 +19,17 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**2r9 closes the tiled-render-target loose thread.** With the existing
+kernel linear force on, plain Metal render targets have GPU descriptor
+**SW_MODE 6/10**, but reach the kernel as **type-0x40 raw allocations,
+format 0**. `AMDAccelResourceAddr2::initialize` skips its swizzle lookup on
+format 0, so its `m0` histogram does not say the client's texture is linear.
+Three sizes, each traced and untraced: coordinate-coded rendering and full
+readback passed **2,195,456 pixels, zero mismatches**. IOSurface controls use
+type 0x82 and mode 0. `make texturepath resourcewatch`; JOURNAL **2r9**.
+Both fixes remain necessary; why `_X` is wrong and the exact AppKit backing
+store lifecycle remain unexplained. No kext behavior or boot config changed.
+
 **An armed boot is a usable, accelerated Mac** — the CP halt is fixed
 (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute bit-exact.
 
@@ -917,10 +928,11 @@ The two that bite hardest:
   then went wrong again after idle or a tab switch, with Terminal and other
   native apps broken regardless. The two cover different paths - native AppKit
   apps never reach the userspace chooser at all (2oj). This also retires 2mm's
-  suspicion of the arg and explains it: the force made the KERNEL compute
-  linear while USERSPACE still tiled, and the universal fix removes that
-  disagreement for non-render-targets. Why it does not also disagree for the
-  render targets userspace keeps tiled is **not** established.
+  suspicion of the arg. **2r9 corrects the old explanation:** plain Metal
+  render targets use raw type-0x40 backing allocations with format 0 in the
+  kernel, and their own client GPU descriptors carry mode 6/10. The kernel
+  force does not recompute those client texture layouts. Its exact connection
+  to AppKit's backing-store lifecycle remains untraced.
 - **`-rbgpumtllinear`, `-rbgpuhwblt`, `-rbgpumtlcave` and `-rbgpumtlfix` NO
   LONGER EXIST (2op).** All four were Lilu `BinaryModInfo` paths that could
   never apply (rule 22), and 2op deleted the code - ~590 lines - under rule 6:

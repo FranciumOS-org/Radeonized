@@ -150,6 +150,16 @@ usageprobe: $(OUT)/usageprobe
 $(OUT)/usageprobe: tools/usageprobe.m | $(OUT)
 	clang -O2 -Wall -o $@ $< -framework Metal -framework Foundation
 
+# 2r9: observe the backing resource independently of the Metal texture layout.
+.PHONY: resourcewatch texturepath
+resourcewatch: $(OUT)/resourcewatch.dylib
+$(OUT)/resourcewatch.dylib: tools/resourcewatch.c | $(OUT)
+	clang -dynamiclib -O2 -Wall -Wextra -Werror -undefined dynamic_lookup -o $@ $<
+
+texturepath: $(OUT)/texturepath
+$(OUT)/texturepath: tools/texturepath.m | $(OUT)
+	clang -O2 -Wall -Wextra -Werror -o $@ $< -framework Metal -framework Foundation -framework IOSurface
+
 # cavecheck (2oa): did Lilu's page patch actually land in the shared cache?
 cavecheck: $(OUT)/cavecheck
 $(OUT)/cavecheck: tools/cavecheck.m src/plugin/rbgpu_mtlcave.h | $(OUT)

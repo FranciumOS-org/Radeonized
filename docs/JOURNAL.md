@@ -31018,3 +31018,146 @@ turn. It would at most let a user-run tool reach `authorizeTask`; it would
 **not** create the missing AGDC service, so it answers the measurement
 question and nothing about the diagnosis. Noted so it is in the record, not
 proposed.
+
+---
+
+## 2r9 — tiled client render targets and linear kernel surfaces are different paths
+
+2026-10-25. **No reboot, no kext load, no boot-arg or NVRAM write.**
+Continued the second loose thread in HANDOFF §2 rather than building the
+unapproved runtime AGDC subclass. The display blocker from 2r5/2r8 stands.
+
+### Preconditions, recorded before treating anything as a new boot
+
+`rbgpu-boot` is **154**, the SAME boot as the latest disk capture. This is
+additional userspace measurement on that existing accelerated boot, not boot
+155 and not a new test of the pending plugin. `kextstat` reports loaded UUID
+**16A3402E-96BD-3DDB-BA76-4F6D4FF094BB**, while `build/out` is
+**442DF066-9584-3FD2-BB1E-2B5CABB2DD0C**. Therefore **2r6's diagnostic
+hardening and 2r7's bool fix remain unverified on hardware**. Live
+`RBGPUDiag`: `armed=1`, `diag_used=524 < diag_max=768`, `linear_force=1`,
+`mtlk_patched=14903`, `mtlk_cavehits=14965`, `mtlk_failed=74` at the recorded
+snapshot. Those counters move as processes exec; they are not a new boot nonce.
+`rbgpu-mcreg` is now absent (read-only check), so 2qy's deletion is no longer
+pending on this boot.
+
+Evidence directory: **`logs/20261025-2r9-texturepath/`**. `preconditions.txt`
+holds the loaded/built UUIDs, live boot-args and diagnostics. The final runs
+are the six **`<width>x<height>-{control,watched}.txt`** files.
+
+### The question 2oo left behind
+
+2oo explained the need for both fixes as kernel LINEAR disagreeing with
+userspace tiling until the userspace fix also selected LINEAR. But `fix`
+deliberately keeps render targets tiled, and they work. The missing premise
+was whether a plain Metal texture's backing allocation is a kernel texture
+layout at all. A count of resources whose `+0x1dc` reads 0 cannot answer that
+without identifying their resource type and format.
+
+### First read the initializer's actual branch
+
+In `AMDAccelResourceAddr2::initialize` (`0xbe56894`):
+
+- The base `AMDAccelResource::initialize` copies **`args+0x68`**, one byte,
+  into the resource's format byte (`res+0x1b4`) at **`0xbe4de84`**.
+- Back in the Addr2 override, **`0xbe56958`** zero-extends that low byte into
+  `%edx`. At **`0xbe569a6`**, `testl %edx,%edx; sete %cl`, combined with
+  `negb %al; setno %al; orb %cl,%al; jne 0xbe56a14`, bypasses the swizzle
+  lookup when **format is zero**. The other condition restricts the lookup
+  to resource type **0x80** (`negb` overflows only for byte 0x80).
+- Only the non-bypassed path at `0xbe569b4` clears `res+0x1dc`, calls
+  `res->0x250->vt[0x1b8](0)` at `0xbe569cb`, and stores its low five bits.
+  **The histogram reads that resource field, not a client image descriptor.**
+- `IOAccelResource2::init` independently stores the supplied type byte at
+  `res+0x14`, **`0x14e3447e`**. Types are not guessed from allocation sizes.
+
+These instructions give a testable distinction; they do not identify what
+Metal actually passes. That was measured next.
+
+### The two new tools and their controls
+
+**`tools/resourcewatch.c`**, `make resourcewatch`: per-process interposition
+on **`IOAccelResourceCreate`**, observe-only. Its three-argument signature
+and pointer return were read from unslid **`0x7ff80d33ce77`**: it forwards
+the second and third arguments unchanged to `IOConnectCallMethod`, selector
+0. The interposer reads at most `min(size,0x108)` through
+`mach_vm_read_overwrite` on its own task, logs a failed/short read explicitly,
+calls the original with unchanged arguments and returns its unchanged handle.
+It prints both an initial loaded line and final intercepted-call/failure
+counts, so zero intercepted calls means **INCONCLUSIVE**, not no allocations.
+No patch to the driver's instructions and no launchd environment.
+
+**`tools/texturepath.m`**, `make texturepath`: a shared-buffer control, plain
+shader-read texture, plain render-target texture and IOSurface-backed render
+target, bracketed with BEGIN/END markers. Read the *texture's own GPU image
+descriptor* too: Objective-C runtime metadata gives the `GFX10_MtlTexture`
+ivar **`_gfx10` at +0x2c8**, and its full type encoding names
+`texImgRsrcDesc.SQ_IMG_RSRC_WORD3.SW_MODE`. Four 3-bit channel selectors and
+two 4-bit mip levels precede its five bits, hence **`(WORD3 >> 20) & 31`**.
+The tool resolves the ivar offset at runtime, checks the class/type encoding
+and instance bounds, and reports **INCONCLUSIVE** on an unknown layout. The
+metadata dump is saved in `ivars.txt`; the mode was not inferred from the
+footprint or from a variable named `swizzle`.
+
+An initial uniform-clear check passed, but **cannot expose a permutation of
+tiles**. It was replaced before drawing the conclusion. The final tool draws
+a fullscreen triangle whose fragment shader encodes x/y into all RGB
+channels, blits the private render target to a shared buffer, waits for
+completion, and compares **every pixel** with the CPU formula (one UNORM
+quantization level allowed). The initial `control.txt`/`watched.txt` are
+preliminary uniform-clear runs, superseded by the six dimension-named logs.
+This remains a test of the allocation/layout distinction, **not an oracle
+for the original application text defect** (texprobe's limitation stands).
+
+### What arrived at the kernel, at all three sizes
+
+64×64, 640×480 and 1024×768, each in a fresh process with and without the
+observer; all with the existing system policy and `linear_force=1`:
+
+| API object | IOAccelResourceCreate type | format byte +0x68 | Own GPU descriptor SW_MODE |
+|---|---|---|---|
+| Plain shader-read texture | 0x40 | 0 | 0 at all three sizes |
+| Plain render target | 0x40 | 0 | **6**, **10**, **10**, respectively |
+| IOSurface-backed render target | 0x82 | 0x0f | 0 at all three sizes |
+
+The plain-RT phase contains **one** create, so the corresponding allocation
+is unambiguous; its requested byte count agrees with `allocatedSize` (e.g.
+**1,310,720** for 640×480). Its `vendor104` is 0x1000; no per-texture format
+is handed to the kernel in that request. The shader-read phase includes
+first-use allocations, so the table classifies the backing type/format,
+not every incidental allocation's ownership.
+
+Every watched run intercepted **13** calls, all successful. Both controls
+and watched runs have the same descriptor modes. Every patterned render
+completed; **0 mismatches out of 4,096 / 307,200 / 786,432 pixels**, twice
+each, for **2,195,456 checked pixels** total. The two tiled descriptor values
+are directly observed, not deduced from the successful rendering.
+
+Reproduce on an accelerated boot without root:
+
+```
+make texturepath resourcewatch
+env -u DYLD_INSERT_LIBRARIES ./build/out/texturepath 640 480
+env DYLD_INSERT_LIBRARIES="$PWD/build/out/resourcewatch.dylib" ./build/out/texturepath 640 480
+```
+
+### What is closed, and what is still owed
+
+**Closed for the measured plain-texture path:** the kernel's linear force
+does not recompute this render target's texture layout. It allocates raw
+backing memory; the userspace driver keeps the tiled layout in its own GPU
+descriptor. A zero in the backing resource's `+0x1dc` is therefore compatible
+with a tiled client texture. **2oo's blanket kernel/userspace disagreement
+explanation is withdrawn**, including the matching source comment, now
+corrected. The boot-131/132 experiment still proves both fixes are needed;
+no hook or policy was removed.
+
+**Still owed:** why the `_X` family is wrong, and exactly which AppKit backing
+surface/lifecycle makes the kernel force fix Terminal. The IOSurface control
+shows a separate allocation path, but these scratch allocations do not trace
+CoreAnimation's backing-store lifecycle. Nothing here advances the missing
+AGDC protocol or turns on Metal display compositing.
+
+Both new tools built with **`-Wall -Wextra -Werror`**; the six final runs
+exited 0 and `git diff --check` passed. Only a comment changed in the plugin;
+no plugin build or hardware configuration was changed by this milestone.
