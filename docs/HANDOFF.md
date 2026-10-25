@@ -93,7 +93,24 @@
 > `-rbgpuiop` in the tree: correct, verified, inert without its one-shot, and
 > the only instrument that reaches this layer. Detail: JOURNAL **2qr**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qr)
+> **2qt/2qu — ROUTE C STAGE 1 IS BUILT AND HAS NOT YET ANSWERED.** 2qs scoped
+> the framebuffer stack and found route C (a runtime-constructed `OSMetaClass`,
+> no declared dependency) the only route no measurement closes; `-rbgpumcprobe`
+> is its stage 1, read-only, constructing and registering nothing. **Boot 151
+> produced no verdict because the probe's own guard refused its answer**:
+> both symbols solved and rule 19's `>= 0xffffff8000000000` threw them away,
+> since IOGraphicsFamily is in the **system** KC, below the kernel base. The
+> rejection path also failed to record the address. Both faults are fixed, the
+> "obvious" repair (the kext's own `[address, address+size)`) was caught
+> statically as equally wrong, and the probe now carries a **numeric
+> prediction**: `mcp_mc_off` must read `0x3f040` and `mcp_vt_off` `0x35248`,
+> computed from `nm` before the boot. `mcp_verdict 15` stays the only
+> meaningful verdict, and it would establish only that route C's **inputs** are
+> reachable — never that a class can be **registered**, which is stage 2 and
+> the part that can panic the next kext load. Rule 19 is corrected above, not
+> retired. Detail: JOURNAL **2qt**, **2qu**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2qu)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
@@ -717,8 +734,17 @@ above is the most recent, and is the variant worth naming:
 9. **A stale note is no evidence about where a boot got to** — not weak
    evidence of an early stop. A user rebooting a black screen looks exactly
    like a hang. [2gw]
-10. **A NULL check is not a pointer check.** Validate derived pointers as
-    kernel VAs (`>= 0xffffff8000000000`) before dereferencing. [2gh]
+10. **A NULL check is not a pointer check** — and the yardstick depends on
+    what the pointer IS (corrected 2qu). `>= 0xffffff8000000000` is the
+    **kernel's** base: right for a kalloc'd kernel object, **wrong for a symbol
+    in a kext**, because kexts sit on both sides of it (180 here, 50 below /
+    130 above; IOGraphicsFamily `0xffffff7f95c94000` system KC, ours
+    `0xffffff8004043000` boot KC). For a kext symbol use
+    **`0xffffff7f80000000`**, and NOT the kext's own `[address, address+size)`:
+    a collection groups every kext's `__DATA` apart from its `__TEXT`, so
+    `gMetaClass` is at offset `0x3f040` against a reported size of `0x2efea`.
+    Boot 151 was spent on this. Also: `solveSymbol` is not bounded by `size`,
+    and **a refusal path must publish the value it refused**. [2gh, 2qu]
 11. **When a fix moves upstream, REMOVE the downstream patch it replaces, in
     the same change.** "Redundant" and "inert" are different things. [2kv]
 

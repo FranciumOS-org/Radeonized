@@ -733,7 +733,13 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // `mcp_verdict` 15 is the only value that means anything: name, size,
     // super and vtable all agreeing with the static read of
     // IOFramebuffer::MetaClass::MetaClass().
+    // 2qu: the two ADDRESSES are hot too. Boot 151 refused both symbols on a
+    // bad range check and recorded the rejected address as 0, so the capture
+    // could not say what had been refused. The address and the range it is
+    // judged against now travel together.
     "mcp_on", "mcp_mc", "mcp_vt", "mcp_acc", "mcp_size", "mcp_verdict",
+    "mcp_mc_addr", "mcp_vt_addr", "mcp_kext_base",
+    "mcp_mc_off", "mcp_vt_off",
     // 2q4: THE frontier. This boot claims kDisplayModeAcceleratorBackedFlag,
     // and it is the first display change in this project that can plausibly
     // blank the panel rather than merely report a wrong number - so these have
