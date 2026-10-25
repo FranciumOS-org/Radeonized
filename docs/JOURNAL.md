@@ -29643,3 +29643,156 @@ Build: UUID `B5539E29-24AF-3E19-8F65-9F5DB95F0EA1`, hosttest all passed.
 No boot is needed to trust 2qw's result; the table fix is hygiene for the next
 one, and the immediate value of re-running is to see `mcp_verdict 15` written
 as a single number and `diag_used` below `diag_max`.
+
+## 2qx — route C stage 2, built: construct (safe) and register (the user's call). The deadlock and the panic trap both found by reading first.
+
+Built, not run. Both halves are OFF by default and the registering half needs
+a one-shot on top of its boot-arg. Everything below was read out of
+`build/re/kernel` before a line was written, which is what turned two
+guesses into two measurements.
+
+### The object layout, confirming 2qm a third way
+
+`OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int)` at
+`0xffffff8000a49940` writes, in this order:
+
+| offset | value |
+|---|---|
+| `+0x00` | `&__ZTV11OSMetaClass + 0x10` |
+| `+0x24` | 0 |
+| `+0x20` | `inClassSize` |
+| `+0x10` | `inSuperClass` |
+| `+0x08` | `kalloc_type_impl_external(...)` |
+| `+0x18` | `inClassName`, **as the raw `const char *`** |
+
+`reserved +0x08`, `superClassLink +0x10`, name `+0x18`, `classSize +0x20` —
+2qm measured those from `is_io_object_get_class`, 2qw confirmed them by
+reading IOFramebuffer's live metaclass, and the constructor now agrees.
+
+### Finding 1 — the ctor is SAFE without the mod-load protocol
+
+Every field store above happens **before** the constructor looks at the
+stalled-class list. If `sStalled` (`0xffffff80013b4ea8`) is NULL it takes the
+branch at `0xffffff8000a49a71`, which is one call:
+
+```
+OSKextLog(..., "OSMetaClass: preModLoad() wasn't called for class %s "
+               "(runtime internal error).", inClassName)
+```
+
+and returns. **No panic, no abort, no lock, no global touched** — and the
+object is already fully built. That is stage 2a, and it is why stage 2 splits
+in two rather than being one risky step.
+
+### Finding 2 — THE PANIC TRAP, which a naive read-back would have hit
+
+`OSMetaClass::getClassName()` (`0xffffff8000a4a150`) is:
+
+```
+sym = this->0x18;  if (!sym) return NULL;
+return sym->vtable[0x148]();      // OSSymbol::getCStringNoCopy
+```
+
+It **dereferences +0x18 as an object and calls through its vtable**, but the
+constructor put a raw `const char *` there. So calling `getClassName()` on a
+freshly constructed, unregistered metaclass reads the first eight bytes of a
+**string literal** and jumps through them — an arbitrary call, in the kernel.
+2qw could call it safely only because IOFramebuffer's metaclass had long since
+been registered, which is what replaces that `char*` with a real `OSSymbol`.
+
+**Stage 2a therefore never calls `getClassName()`.** It verifies the name by
+**pointer identity** against the literal it passed and reads `+0x00/+0x10/
++0x20` as plain fields. Stage 2b may call it, once, and only after
+`postModLoad` has run — at which point `+0x18` changing away from our literal
+is itself the success signal.
+
+Writing the obvious read-back would have panicked the machine. Rule 16 again:
+the instrument is a suspect — including the part of it that only *reads*.
+
+### Finding 3 — THE DEADLOCK, and it is a hang, not a panic
+
+`preModLoad` (`0xffffff8000a4a190`) takes `_sStalledClassesLock`
+(`0xffffff8001334880`) with `lck_mtx_lock` as its **first instruction** and
+**never unlocks on any path** — not on success, and not on the `kalloc`
+failure path that returns 0. The only `lck_mtx_unlock(_sStalledClassesLock)`
+in the pair is inside `postModLoad`, at `0xffffff8000a4a3a5`, and **every**
+path of `postModLoad` reaches it: the handle-mismatch path
+(`0xffffff8000a4a2f3`, result `0xdc004001`) logs and falls through to the same
+epilogue, and `sStalled == NULL` jumps straight to the unlock at
+`0xffffff8000a4a342`.
+
+Two consequences, both counter-intuitive, both coded for:
+
+1. **If `preModLoad` succeeds and `postModLoad` is not reached, the next kext
+   load blocks forever** inside `preModLoad`'s own `lck_mtx_lock`. No panic,
+   no log line, no `.panic` report — a silent hang, the same shape as 2fz's
+   recursive-IOLock bug. So nothing returns, allocates, solves, or writes a
+   diag key between the two calls; all of that is done first. (`rbgpu_diag_set_num`
+   takes `g_diagLock` and schedules a thread call, so it is not safe in that
+   window either.)
+2. **If `preModLoad` returns NULL, `postModLoad` must STILL be called.** The
+   natural `if (!h) return;` holds the lock forever. That one line is the
+   difference between an experiment and a brick.
+
+So the risk the handoff recorded as "panics the next kext load" is wrong in
+kind: it **hangs** it. A hang is worse to diagnose, which is exactly why the
+one-shot matters.
+
+### What stage 2b does
+
+From `postModLoad`'s success path: builds an `OSDictionary`, calls
+`OSSymbol::withCStringNoCopy(kmodName)` and
+**`OSKext::lookupKextWithIdentifier()`** — so the kmod name must name a
+**loaded** kext, and we pass `com.rembrandtgpu.plugin`, which is loaded by
+definition — then takes `_sAllClassesLock` (`0xffffff8001334870`) and inserts
+into `sAllClassesDict`.
+
+Deliberately not done: no personality, no provider, no `registerService`, and
+a class name (`RembrandtGPUProbeClass`) that nothing in macOS looks up, so it
+cannot collide in `sAllClassesDict` and cannot be matched. Noted honestly: the
+object carries the **base** `__ZTV11OSMetaClass`, whose `alloc()` is pure
+virtual, so anything that ever allocated by this class name would panic —
+nothing does, because nothing knows the name. Superclass is
+`IOGraphicsDevice::gMetaClass` and size `0x1d0`, as a real `IOFramebuffer`
+subclass would be.
+
+Storage is our own BSS (`g_rbMcObj`): no allocation to fail and no lifetime
+question, since the kext outlives everything.
+
+Both halves run from 2pa's existing `enableController` hook — rule 3, the
+same `RouteRequest` under a wider gate — because 2qv/2qw established that as
+the earliest point where a populated metaclass is **measured**, and because
+`IOGraphicsFamily` has certainly started by then.
+
+### Pre-stated criteria (rule 14)
+
+> **Stage 2a, `-rbgpumcnew`:** `mcn_verdict 15` is the only meaningful value —
+> `mcn_f00` = `__ZTV11OSMetaClass + 0x10` (bit 8), `mcn_f10` =
+> `IOGraphicsDevice::gMetaClass` (bit 4), `mcn_f20` = `0x1d0` (bit 2),
+> `mcn_name_is_literal 1` (bit 1). `mcn_ready 0` means a symbol did not solve
+> and nothing else means anything. Expect the kernel log line quoted above —
+> its presence is confirmation, not a fault.
+>
+> **Stage 2b, `-rbgpumcreg` + `nvram rbgpu-mcreg=1`:** read `mcr_ran` first
+> (0 = the one-shot was not armed and NOTHING was registered), then
+> **`mcr_post`, which must be 0** (`kOSReturnSuccess`), then
+> **`mcr_name_ok 1`** — the class naming itself through Apple's own
+> `getClassName()`, which is only safe once `postModLoad` has swapped `+0x18`
+> for an `OSSymbol`. `mcr_pre 0` with `mcr_post` non-zero means `preModLoad`
+> failed and the lock was released anyway, which is the designed-for case.
+> `0xdc004001` means the handle did not match; `0xdc004004` means the ctor
+> could not grow the stalled array.
+
+Still unchanged, and worth repeating because it is the whole point of keeping
+these claims narrow: a registered class is **not** a published framebuffer.
+2qq/2qr closed the display chain at AGDC vendor info, not at the class name,
+so even `mcr_name_ok 1` buys a registered metaclass and nothing on screen. It
+answers "can this be done at all", which is what 2qs said gates everything
+else on route C.
+
+Build: UUID `16A3402E-96BD-3DDB-BA76-4F6D4FF094BB`, hosttest all passed.
+Rule 5, each of the six new names once in the kext and defined in exactly the
+image it is solved from (`IOGraphicsDevice::gMetaClass` in IOGraphicsFamily,
+the five `OSMetaClass` symbols in the kernel, none in both). Rule 3: one
+`RouteRequest` for `enableController`. 2oz's trap still shut —
+`grep -c IOGraphicsFamily src/plugin/Info.plist` = 0.

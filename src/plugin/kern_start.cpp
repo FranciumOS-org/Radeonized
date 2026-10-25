@@ -8132,6 +8132,7 @@ static t_rbNdrvEnableCtl orig_ndrv_enablectl_2pa = nullptr;
 // here because this is the latest point the plugin reaches with a measured,
 // populated metaclass.
 static void rbgpu_mcprobe_read_2qv(void);
+static void rbgpu_mcnew_2qx(void);
 
 static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
     IOReturn ret = orig_ndrv_enablectl_2pa(fb);
@@ -8147,6 +8148,7 @@ static IOReturn hooked_ndrv_enablectl_2pa(void *fb) {
     // getMetaClass()->getClassName() just returned "IONDRVFramebuffer" here.
     // It touches nothing of `fb`; it only needs to run this late.
     rbgpu_mcprobe_read_2qv();
+    rbgpu_mcnew_2qx();
     return ret;
 }
 
@@ -9077,6 +9079,10 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
 // the real metaclass and that we are reading it correctly. Disagreement means
 // the symbol resolved to something else and nothing further is meaningful.
 // ---------------------------------------------------------------------------
+using t_rbMcCtor       = void  (*)(void *, const char *, const void *, unsigned int);
+using t_rbPreModLoad   = void *(*)(const char *);
+using t_rbPostModLoad  = int   (*)(void *);
+using t_rbCheckModLoad = bool  (*)(void *);
 using t_rbMcName  = const char *(*)(const void *);
 using t_rbMcSize  = unsigned int (*)(const void *);
 using t_rbMcSuper = const void *(*)(const void *);
@@ -9091,6 +9097,17 @@ static mach_vm_address_t g_mcp_vt   = 0;
 static t_rbMcName        g_mcp_name = nullptr;
 static t_rbMcSize        g_mcp_size = nullptr;
 static t_rbMcSuper       g_mcp_super = nullptr;
+// 2qx: stage 2's inputs, solved in the same place and carried the same way.
+static mach_vm_address_t g_mcp_super_mc = 0;   // IOGraphicsDevice::gMetaClass
+static mach_vm_address_t g_mcp_osmc_vt  = 0;   // __ZTV11OSMetaClass
+static void             *g_mcp_ctor_raw = nullptr;
+static void             *g_mcp_pre_raw  = nullptr;
+static void             *g_mcp_post_raw = nullptr;
+static void             *g_mcp_chk_raw  = nullptr;
+#define g_mcp_ctor  (reinterpret_cast<t_rbMcCtor>(g_mcp_ctor_raw))
+#define g_mcp_pre   (reinterpret_cast<t_rbPreModLoad>(g_mcp_pre_raw))
+#define g_mcp_post  (reinterpret_cast<t_rbPostModLoad>(g_mcp_post_raw))
+#define g_mcp_check (reinterpret_cast<t_rbCheckModLoad>(g_mcp_chk_raw))
 
 static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
                               mach_vm_address_t address, size_t size) {
@@ -9238,6 +9255,45 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
     g_mcp_mc = want[0].addr;
     g_mcp_vt = want[1].addr;
     rbgpu_diag_set_num("mcp_deferred", 1);
+
+    // 2qx: stage 2's extra inputs. The superclass metaclass comes from this
+    // kext (rule 1: nm -m shows it defined, __DATA,__common, 0x14fea138 -
+    // which 2qw predicted from a runtime delta and then confirmed); the four
+    // OSMetaClass entry points come from the kernel.
+    {
+        auto a = patcher.solveSymbol(id, "__ZN16IOGraphicsDevice10gMetaClassE",
+                                     address, size);
+        if (patcher.getError() != KernelPatcher::Error::NoError ||
+            a < 0xffffff7f80000000ull) {
+            patcher.clearError();
+            a = 0;
+        }
+        g_mcp_super_mc = a;
+        rbgpu_diag_set_num("mcn_super_mc", a);
+        rbgpu_diag_set_num("mcn_super_off", a ? a - address : 0);
+    }
+    struct { const char *sym; void **slot; const char *key; } s2[] = {
+        { "__ZTV11OSMetaClass",                 &g_mcp_ctor_raw, nullptr },
+        { "__ZN11OSMetaClassC2EPKcPKS_j",       &g_mcp_ctor_raw, "mcn_ctor" },
+        { "__ZN11OSMetaClass10preModLoadEPKc",  &g_mcp_pre_raw,  "mcn_pre"  },
+        { "__ZN11OSMetaClass11postModLoadEPv",  &g_mcp_post_raw, "mcn_post" },
+        { "__ZN11OSMetaClass12checkModLoadEPv", &g_mcp_chk_raw,  "mcn_chk"  },
+    };
+    for (size_t i = 0; i < arrsize(s2); i++) {
+        auto a = patcher.solveSymbol(KernelPatcher::KernelID, s2[i].sym);
+        if (patcher.getError() != KernelPatcher::Error::NoError ||
+            a < 0xffffff7f80000000ull) {
+            patcher.clearError();
+            a = 0;
+        }
+        if (i == 0) {
+            g_mcp_osmc_vt = a;              // data, not a function pointer
+            rbgpu_diag_set_num("mcn_osmc_vt", a);
+            continue;
+        }
+        *s2[i].slot = reinterpret_cast<void *>(a);
+        rbgpu_diag_set_num(s2[i].key, a ? 1 : 0);
+    }
     rbgpu_log("2qv: solved both symbols (mc 0x%llx off 0x%llx, vt 0x%llx off "
               "0x%llx) and deferring the READ to enableController - the "
               "metaclass is BSS and is not constructed yet at this callback",
@@ -9324,6 +9380,234 @@ static void rbgpu_mcprobe_read_2qv(void) {
                               "else in this capture is meaningful");
 }
 
+// ---------------------------------------------------------------------------
+// 2qx (`-rbgpumcnew` / `-rbgpumcreg`): route C stage 2 - can an OSMetaClass be
+// CONSTRUCTED, and then REGISTERED, at runtime from the boot KC?
+//
+// 2qw answered stage 1: the inputs exist. IOFramebuffer's metaclass and vtable
+// are reachable at the addresses nm names, and its name/size/superclass read
+// back exactly as IOFramebuffer::MetaClass::MetaClass() passes them. This is
+// the next question, and it is split in two because the kernel's own code says
+// the two halves carry completely different risk.
+//
+// Everything below was read out of build/re/kernel before a line was written.
+//
+// `OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int)`
+// at 0xffffff8000a49940, in order:
+//     (this)   = &__ZTV11OSMetaClass + 0x10
+//     +0x24    = 0
+//     +0x20    = inClassSize          (confirms 2qm)
+//     +0x10    = inSuperClass         (confirms 2qm)
+//     +0x08    = kalloc_type_impl_external(...)    the reserved/expansion ptr
+//     +0x18    = inClassName, STORED AS THE RAW `const char *`
+// and only THEN does it look at the stalled-class list.
+//
+// **The sStalled == NULL path is SAFE.** At 0xffffff8000a49a71 the ctor does
+// one `OSKextLog(... "OSMetaClass: preModLoad() wasn't called for class %s
+// (runtime internal error).", name)` and returns. No panic, no abort, nothing
+// locked, nothing global touched - and the object is ALREADY fully built,
+// because every field store happens before that check. That is stage 2a.
+//
+// **THE PANIC TRAP, and it is the reason stage 2a does not call
+// getClassName().** `OSMetaClass::getClassName()` (0xffffff8000a4a150) is:
+//     sym = this->0x18; if (!sym) return NULL;
+//     return sym->vtable[0x148]();     // OSSymbol::getCStringNoCopy
+// It DEREFERENCES +0x18 as an object and jumps through its vtable. The ctor
+// put a raw `const char *` there. So on a freshly constructed, unregistered
+// metaclass, getClassName() reads the first eight bytes of a STRING LITERAL
+// and calls through them - an arbitrary jump, in the kernel. 2qw could call it
+// only because IOFramebuffer's metaclass was long since registered, which is
+// what replaces that char* with a real OSSymbol. Stage 2a therefore verifies
+// the name by POINTER IDENTITY against the literal it passed, and never
+// dereferences it.
+//
+// **THE DEADLOCK, measured, which is what makes stage 2b the user's call.**
+// `preModLoad` (0xffffff8000a4a190) takes `_sStalledClassesLock`
+// (0xffffff8001334880) with `lck_mtx_lock` as its FIRST act and **never
+// unlocks on any path** - not on success, and not on the kalloc failure path
+// that returns 0. `postModLoad` (0xffffff8000a4a290) holds the only
+// `lck_mtx_unlock(_sStalledClassesLock)` in the pair, at 0xffffff8000a4a3a5,
+// and every one of its paths reaches it: the handle-mismatch path
+// (0xffffff8000a4a2f3, result 0xdc004001) logs and falls through to the same
+// epilogue, and so does `sStalled == NULL` (0xffffff8000a4a342 jumps straight
+// to the unlock).
+//
+// Two consequences, both counter-intuitive, both coded for below:
+//   1. If `preModLoad` succeeds and `postModLoad` is NOT reached, the lock
+//      stays held and **the next kext load blocks forever** inside
+//      `preModLoad`'s own `lck_mtx_lock`. No panic, no log line, no .panic
+//      report - a silent hang, exactly the shape of 2fz's recursive-IOLock
+//      bug. So NOTHING may return, allocate, solve or log between the two
+//      calls; all of that is done first.
+//   2. **If `preModLoad` returns NULL, `postModLoad` must STILL be called.**
+//      The natural `if (!h) return;` would hold the lock forever. That one
+//      line is the whole difference between an experiment and a brick.
+//
+// What stage 2b actually does, from postModLoad's success path: builds an
+// OSDictionary, calls `OSSymbol::withCStringNoCopy(kmodName)` and
+// `OSKext::lookupKextWithIdentifier()` - so the kmod name must name a LOADED
+// kext, and we pass our own bundle id, which is loaded by definition - then
+// takes `_sAllClassesLock` and inserts into `sAllClassesDict`.
+//
+// Deliberately NOT done: no personality, no provider, no `registerService`,
+// and a class name nothing in the system asks for. The class is registered and
+// then left alone. Note that its own vtable is the BASE `__ZTV11OSMetaClass`,
+// whose `alloc()` is pure virtual, so anything that ever allocated by this
+// class name would panic - nothing does, because nothing knows the name.
+using t_rbMcCtor       = void  (*)(void *, const char *, const void *, unsigned int);
+using t_rbPreModLoad   = void *(*)(const char *);
+using t_rbPostModLoad  = int   (*)(void *);
+using t_rbCheckModLoad = bool  (*)(void *);
+
+// The class we build. A name nothing in macOS looks up, so registering it
+// cannot collide in sAllClassesDict and cannot be matched.
+static const char  kRbMcName[]  = "RembrandtGPUProbeClass";
+static const char  kRbMcKmod[]  = "com.rembrandtgpu.plugin";
+static const unsigned int kRbMcSize = 0x1d0;   // sizeof(IOFramebuffer), 2qt
+
+// Storage in our own BSS: no allocation to fail, and no lifetime question -
+// the object outlives everything because the kext does.
+static uint64_t g_rbMcObj[16] __attribute__((aligned(16)));
+
+static bool g_mcn_on = false;   // -rbgpumcnew : construct only (safe)
+static bool g_mcr_on = false;   // -rbgpumcreg : construct AND register
+
+static void rbgpu_mcnew_2qx(void) {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    g_mcn_on = checkKernelArgument("-rbgpumcnew");
+    g_mcr_on = checkKernelArgument("-rbgpumcreg");
+    rbgpu_diag_set_num("mcn_on", g_mcn_on ? 1 : 0);
+    rbgpu_diag_set_num("mcr_on", g_mcr_on ? 1 : 0);
+    if (!g_mcn_on && !g_mcr_on) {
+        return;
+    }
+
+    // Stage 1's superclass pointer, re-solved by name rather than inherited
+    // from getSuperClass(), so this does not depend on 2qv having run. Rule 1:
+    // `nm -m build/re/IOGraphicsFamily` shows it DEFINED, in __DATA,__common,
+    // at 0x14fea138 - which 2qw predicted from a runtime delta and confirmed.
+    if (g_mcp_super_mc == 0 || g_mcp_ctor == nullptr) {
+        rbgpu_diag_set_num("mcn_ready", 0);
+        rbgpu_log("2qx: refusing - IOGraphicsDevice::gMetaClass %s, "
+                  "OSMetaClass ctor %s",
+                  g_mcp_super_mc ? "ok" : "UNSOLVED",
+                  g_mcp_ctor ? "ok" : "UNSOLVED");
+        return;
+    }
+    rbgpu_diag_set_num("mcn_ready", 1);
+
+    auto *self = reinterpret_cast<void *>(g_rbMcObj);
+    void *h    = nullptr;
+    bool  chk  = false;
+    int   rc   = -1;
+
+    if (!g_mcr_on) {
+        // ---- stage 2a: construct with sStalled == NULL. No lock is taken by
+        // anything on this path, so there is no deadlock to recover from.
+        g_mcp_ctor(self, kRbMcName, reinterpret_cast<const void *>(g_mcp_super_mc),
+                   kRbMcSize);
+        rbgpu_diag_set_num("mcn_built", 1);
+    } else {
+        // ---- stage 2b: the registering sequence. Gated on its own arg AND a
+        // one-shot, because the failure mode is a machine whose next kext load
+        // hangs - and a one-shot means the recovery is a power cycle rather
+        // than a boot-arg edit from another OS (the 2qo pattern).
+        uint32_t why = 0;
+        bool armed = rbgpu_nvram_consume_oneshot("rbgpu-mcreg", &why);
+        rbgpu_diag_set_num("mcr_oneshot", why);
+        if (!armed) {
+            rbgpu_log("2qx: -rbgpumcreg is set but the one-shot rbgpu-mcreg "
+                      "was not armed (why=%u) - registering NOTHING. Set "
+                      "`sudo nvram rbgpu-mcreg=1` and reboot.", why);
+            rbgpu_diag_set_num("mcr_ran", 0);
+            return;
+        }
+        rbgpu_diag_set_num("mcr_ran", 1);
+
+        // Everything that could fail, log or block is done BEFORE preModLoad,
+        // because from the call below until postModLoad returns we hold
+        // _sStalledClassesLock and every kext load in the system is waiting on
+        // it. No diag writes in that window either: rbgpu_diag_set_num takes
+        // g_diagLock and schedules a thread call.
+        h = g_mcp_pre(kRbMcKmod);
+        g_mcp_ctor(self, kRbMcName, reinterpret_cast<const void *>(g_mcp_super_mc),
+                   kRbMcSize);
+        chk = (g_mcp_check != nullptr) ? g_mcp_check(h) : false;
+        // Called unconditionally, INCLUDING when h is NULL (see note 2 above).
+        rc = g_mcp_post(h);
+
+        rbgpu_diag_set_num("mcn_built", 1);
+        rbgpu_diag_set_num("mcr_pre", h != nullptr ? 1 : 0);
+        rbgpu_diag_set_num("mcr_check", chk ? 1 : 0);
+        rbgpu_diag_set_num("mcr_post", static_cast<uint32_t>(rc));
+    }
+
+    // ---- read the object back as FIELDS, never through getClassName().
+    uint64_t f00 = g_rbMcObj[0];                       // vtable
+    uint64_t f10 = g_rbMcObj[2];                       // superClassLink
+    uint64_t f18 = g_rbMcObj[3];                       // className
+    uint32_t f20 = static_cast<uint32_t>(g_rbMcObj[4] & 0xffffffffu);  // classSize
+    rbgpu_diag_set_num("mcn_f00", f00);
+    rbgpu_diag_set_num("mcn_f10", f10);
+    rbgpu_diag_set_num("mcn_f18", f18);
+    rbgpu_diag_set_num("mcn_f20", f20);
+    rbgpu_diag_set_num("mcn_f08", g_rbMcObj[1]);       // the ctor's own kalloc
+
+    bool vtOk  = g_mcp_osmc_vt != 0 && f00 == g_mcp_osmc_vt + 0x10;
+    bool supOk = f10 == g_mcp_super_mc;
+    bool szOk  = f20 == kRbMcSize;
+    // Pointer identity, not a string compare: on stage 2a this is still the
+    // literal, and on stage 2b postModLoad has swapped it for an OSSymbol, so
+    // "changed" is the SUCCESS signal there.
+    bool nameIs = f18 == reinterpret_cast<uint64_t>(kRbMcName);
+    rbgpu_diag_set_num("mcn_name_is_literal", nameIs ? 1 : 0);
+
+    uint64_t verdict = (nameIs ? 1 : 0) | (szOk ? 2 : 0) | (supOk ? 4 : 0) |
+                       (vtOk ? 8 : 0);
+    rbgpu_diag_set_num("mcn_verdict", verdict);
+
+    if (!g_mcr_on) {
+        rbgpu_diag_set_str("mcn_say", verdict == 15
+            ? "BUILT(2a: a runtime OSMetaClass exists; nothing registered)"
+            : "BAD(2a: see mcn_f00/f10/f18/f20)");
+        rbgpu_log("2qx stage 2a: built %p vt=0x%llx super=0x%llx size=0x%x "
+                  "verdict=0x%llx - nothing was locked and nothing registered",
+                  self, static_cast<unsigned long long>(f00),
+                  static_cast<unsigned long long>(f10), f20,
+                  static_cast<unsigned long long>(verdict));
+        return;
+    }
+
+    // Stage 2b only: now that postModLoad has run, +0x18 should be an OSSymbol
+    // and getClassName() is safe. This is the ONLY place it may be called on
+    // our object, and only when postModLoad reported success.
+    const char *cn = nullptr;
+    uint64_t post = 0;
+    rbgpu_diag_set_num("mcr_name_ok", 0);
+    if (!nameIs && g_mcp_name != nullptr) {
+        cn = g_mcp_name(self);
+        if (cn != nullptr) {
+            rbgpu_diag_set_str("mcr_name", cn);
+            if (strcmp(cn, kRbMcName) == 0) {
+                rbgpu_diag_set_num("mcr_name_ok", 1);
+                post = 1;
+            }
+        }
+    }
+    rbgpu_diag_set_str("mcr_say", post == 1
+        ? "REGISTERED(2b: postModLoad succeeded and the class names itself)"
+        : "NOTREGISTERED(2b: read mcr_post, then mcr_pre/mcr_check)");
+    rbgpu_log("2qx stage 2b: pre=%p check=%d post=%d name=%s - %s",
+              h, chk ? 1 : 0, rc, cn ? cn : "(not read)",
+              post == 1 ? "REGISTERED" : "NOT registered");
+}
+
+
 void RGPU::processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                              size_t size) {
     // 2qt: independent of the vblank pump's gate below, which returns early.
@@ -9399,7 +9683,8 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     // arg is set. Rule 3 - this is the SAME RouteRequest under a wider gate,
     // never a second one for the same function.
     rbgpu_diag_set_num("fbvram_on", g_vram_on ? 1 : 0);
-    if (g_vram_on || g_mcp_on) {
+    if (g_vram_on || g_mcp_on || checkKernelArgument("-rbgpumcnew") ||
+        checkKernelArgument("-rbgpumcreg")) {
         KernelPatcher::RouteRequest vr(
             "__ZN17IONDRVFramebuffer16enableControllerEv",
             hooked_ndrv_enablectl_2pa, orig_ndrv_enablectl_2pa);
