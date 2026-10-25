@@ -29040,3 +29040,113 @@ Opening one more gate may well surface the next one. The structural fix
 remains the one 2pd named - an accelerated framebuffer owning the display,
 which needs DCN 3.1.2 code macOS does not contain - and nothing here changes
 that estimate.
+
+## 2qr - Apple names the cause, 2qq's inference is CORRECTED, and the IOPresentment route ends at the missing AMD framebuffer
+
+2qq inferred that `IOPresentmentCreateForRegistryID` failed on its `no match`
+path. **That inference was wrong, and boot 150's log already contained the
+answer** - I had filtered it out by querying `subsystem ==
+"com.apple.CoreDisplay"`, and IOPresentment logs under its own name. Querying
+for `GPUWrangler OR AGDC OR Presentment` instead, with the query's own line as
+the control (rule 26) and every line attributed by timestamp and pid (rule 28):
+
+```
+01:33:39.865  E  WindowServer[161:3d0] (IOPresentment) Error: Unable to get AGDC information.  Return code: 0x10000003
+01:33:39.868  E  WindowServer[161:3d0] [com.apple.CoreDisplay:default] [ERROR] - <the DisplayPipe backtrace>
+```
+
+Three milliseconds apart, same process, same thread. **Apple names the cause
+itself**, and it is one step EARLIER than 2qq guessed: not the AGDC map match,
+but the **AGDC information query** that precedes it. The format string
+`"Unable to get AGDC information.  Return code: %#x"` is in IOPresentment's
+`__oslogstring` at `0x7ff812ea2887`, alongside `AGDCVendorInfo %#x %#x %#zx`,
+`AGDCVendorInfo failed %#llx %#x %#zx`, `AGDCGPUCapability %#llx %zu %u` and
+`AGDC map invalid` - so what IOPresentment wants from AGDC is **VendorInfo and
+GPUCapability**.
+
+### And the IORegistry says those are empty
+
+`AppleGPUWrangler`'s `debug-gpus`, re-read **live** on this boot rather than
+copied from 2qn:
+
+```
+{"id"=64455, "acc"=4294968640, "fbs"=(4294968638), "gpuc"=0, "pci"=4294967993,
+ "agdp"=0, "cc"=3, "flags"=2986344480, "tds"=0, ...}
+```
+
+| field | value | meaning |
+|---|---|---|
+| `acc` | 0x1000003C0 | our accelerator |
+| `fbs[0]` | 0x1000003BE | our `.Display_boot` `IONDRVFramebuffer` |
+| **`gpuc`** | **0** | **GPU capability - empty** |
+| **`agdp`** | **0** | **no AppleGraphicsDevicePolicy / vendor AGDC plugin** |
+
+`AGDCPluginDisplayMetrics` is loaded but its instance is
+`!registered, !matched`.
+
+**This corrects 2qn as well.** 2qn read the same `debug-gpus` entry and
+concluded: *"AGDC already knows our IONDRVFramebuffer and our AMD accelerator
+as one GPU. That is the association `ioPresentmentFindAGDCMatch()` looks for,
+and it exists."* The **association** exists. The **information** does not -
+`gpuc` and `agdp` are both 0. 2qn checked that the row was there and did not
+check what the row contained, and the row's emptiness is exactly what
+IOPresentment reports. Rule 13 in a new place: a field being present is not the
+same as a field being populated.
+
+### Where `gpuc` and `agdp` come from, and why that ends this route
+
+They are filled by the **vendor's** AGDC plugin - for AMD, the stack rooted at
+`AMDSupport`/`AMDFramebuffer`. That stack **never instantiates on this
+machine**, and 2oq established why, statically: no controller personality
+matches `0x16811002`, so no `AtiFbStub` is published, so no `AMDFramebuffer`,
+**and macOS contains no DCN 3.1.2 code at all** (`dcn31`/`dcn312`/`vba_31`/
+`yellow_carp` are 0 hits in every AMD kext against a control of 58 for
+`dcn30`).
+
+So the full chain, every link now measured on hardware:
+
+```
+no DCN 3.1.2 in macOS -> no AMD controller personality matches 0x1681
+  -> no AMDFramebuffer -> AGDC has no vendor plugin for this GPU
+  -> debug-gpus row has gpuc = 0, agdp = 0
+  -> IOPresentment: "Unable to get AGDC information. Return code: 0x10000003"
+  -> IOPresentmentCreateForRegistryID returns NULL
+  -> DisplayPipe ctor throws -> zero pipes in the map
+  -> "System set to use IOP but no display pipes are present" -> gUseIOP = 0
+  -> GetNextSurface takes the legacy path -> set_id_mode rejects id 1 (2qk)
+  -> DisplaySurface with no IOSurface (2qh) -> CompositorSW rasterises (2pd)
+```
+
+**The IOPresentment route terminates at the same root cause the project
+already knew.** Intervention A was correct, verified and safe, and it bought a
+real measurement - but the gate behind it needs the very framebuffer whose
+absence started all of this. **2ql's structural verdict is now confirmed twice
+over, from two directions.** There is no third gate worth opening: the next
+thing to supply is not a flag, a property or a five-byte patch, it is the AMD
+framebuffer stack.
+
+### Two suspects checked and killed, so nobody re-opens them
+
+* **`FB_Triage`** (2qp): a red herring, read only by
+  `DumpIORegistryFrameBufferInfo`/`AcceleratorInfo`.
+* **The third-party NVIDIA kexts.** `/Library/Extensions` holds `NVAccel`,
+  `NVRM`, `NVRMAGDC` and `NVRMFB`, and boot 150's log shows kernelmanagerd
+  processing `com.nullmoth.NVRMAGDC` and then erroring on it (*"tried to insert
+  an invalid codeful kernel extension in the restricted lookup table"*). A
+  third-party **AGDC** kext in the path of a failing **AGDC** query is an
+  obvious suspect, so it was checked rather than flagged: `kextstat` (control:
+  67 `IOPCIDevice` matches from the same `ioreg` instrument) shows **only**
+  `com.apple.AppleGPUWrangler` and `com.apple.AGDCPluginDisplayMetrics` loaded.
+  **None of the NV kexts is loaded.** Not a confound.
+
+### What remains cheap and unspent
+
+The `IOPresentment` boot-arg token still un-gates `no match %#llx %#llx` /
+`bad arg %#llx %#llx` and the `AGDCVendorInfo`/`AGDCGPUCapability` traces, and
+it is logging-only with no risk. But it would now only add detail to a cause
+Apple has already stated in one line, so **it is no longer worth a boot**.
+Recorded so the option is known, not recommended.
+
+`-rbgpuiop` stays in the tree: correct, verified, five bytes in one process,
+inert without its one-shot, and the only instrument that can reach this layer
+if the framebuffer question is ever reopened.
