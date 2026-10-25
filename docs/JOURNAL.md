@@ -27878,3 +27878,123 @@ method itself.
 `getVRAMRange`, verified to fire at exactly the intended call site, that
 changed nothing because the gate was elsewhere. Establish what consumes the
 surface and what refuses to create it first.
+
+## 2qj — the surface path, named end to end, and `IOAccelCreateSurface` FAILS
+
+Static plus one log line. Continues 2qh/2qi.
+
+### The MP ops table, dumped by name
+
+Read straight out of the cache by decoding the slide-info pointers at the base
+2qe established (`0x7ff8404fc700`), so these are facts, not inferences:
+
+| slot | function |
+|---|---|
+| 0x100/0x108/0x110 | `MPHWCopyRegion` / `MPHWFillRegion` / `MPHWMoveRegion` |
+| 0x118/0x120/0x128 | `MPHWPurgeSurface` / `MPHWCopyPixels` / `MPHWCopyForwardRegion` |
+| 0x130/0x138 | `MPHWWait` / `MPHWWaitTokenRelease` |
+| 0x140 | `MPServiceForDisplayDevice` |
+| 0x148 | `MPAcceleratorForDisplayDevice` |
+| 0x150 | `MPFramebufferForDisplayDevice` |
+| **0x158** | **`MPAccessSurfaceForDisplayDevice(CGXDisplayDevice*, void**, unsigned int*, bool, bool*)`** |
+| 0x160/0x168 | `MPFinishSurfaceForDisplayDevice` / `MPResetSurfaceForDisplayDevice` |
+| 0x170/0x178 | `MPDisplayDeviceDidFlush` / `MPDisplayDeviceSurfaceIsReady` |
+| 0x180/0x188 | `MPAccessCaptureSurfaceForDisplayDevice` / `MPGenerateUpdate` |
+| 0x190/0x198 | `MPResetGammaTablesOnDisplayDevice` / `MPUpdateGammaTablesOnDisplayDevice` |
+| 0x1a0/0x1a8 | `MPGetNextWakeupTime` / `MPGetVBLTiming` |
+
+So 2q9's `ops->0x158` is **not** "get the framebuffer" as 2qc guessed from the
+CGX thunk名 - it is `MPAccessSurfaceForDisplayDevice`, and its two out-params
+are exactly the dict's `surface` and `surfaceID`.
+
+### The complete path
+
+```
+CDSurface::prepare_for_update                       (SkyLight)
+ -> CoreDisplay_Display_GetNextSurface
+   -> CoreDisplay::Display::GetNextSurface
+      +229  -> CGXAcquireDisplayDeviceSurface        (its ONLY caller)
+                 -> ops->0x158 = MPAccessSurfaceForDisplayDevice
+      +1270 -> DisplaySurfacePool::GetNextSurface -> CD_IOSurfaceCreate
+```
+
+`MPAccessSurfaceForDisplayDevice` returns `kCGErrorFailure (0x3e8)` at four
+early gates before it ever tries to make a surface:
+
+```
+A  if (!(dev->0x10->0x10c & 0x4))      return 0x3e8
+B  if (dev->0x10->0x137 != 0)          return 0x3e8
+C  if (UseIOPresentment())             return 0x3e8      <<< note the polarity
+D  if (priv->0x198 == -1)              return 0x3e8
+```
+
+then, if it gets through:
+
+```
+flags = <switch on priv->0xbc>
+if (dev->0x10->0x10c & 0x80) && [0x7ff843bac931]==1 && dev->0x140==0:
+      if   UseIOPresentment()                            flags |= 0x800
+      elif all_devices_in_hw_mirror_loop_are_accelerator_backed(dev)
+                                                         flags |= 0x8800
+      else                                               flags |= 0x8400
+id = MPAcquireSurfaceID()
+priv->0x198 = id
+IOAccelCreateSurface(priv->0x5c /*accelerator port*/, id, flags, &priv->0x1a0)
+```
+
+**`priv->0x198` and `priv->0x1a0` are the dict's `surfaceID` and `surface`** -
+consecutive fields, and the dump reads **`surfaceID = "-1"`, `surface = 0x0`**
+(2qi). So gate D is satisfied by the measurement; whether D or C fires **first**
+is undetermined, because `UseIOPresentment()`'s runtime value is unknown and C
+precedes D. Recorded as undetermined rather than guessed.
+
+### 2q9's open question is answered: the consumer of `isAcceleratorBacked`
+
+`all_devices_in_hw_mirror_loop_are_accelerator_backed(dev)` opens with
+
+```
+rax = dev->0x160                  ; the MPPriv
+if (!(rax->0xb2 & 0x40)) return 0
+```
+
+Byte `0xb2` bit 6 **is bit 22 of the dword at `0xb0`** (16+6=22) - exactly
+`kDisplayModeAcceleratorBackedFlag`, the bit `-rbgpufbaccel` sets, which 2q7
+measured as 1 in boot 149. So **2q4's hook feeds a real consumer after all**,
+and 2q9's caveat ("find a consumer before writing to a field") is discharged.
+Its effect is to pick flag **0x8800** instead of **0x8400** for
+`IOAccelCreateSurface`. That is smaller than hoped - it is a flag bit, not a
+gate - but it is no longer speculative.
+
+### The hard measured fact: the accelerator refuses to create a surface
+
+One log line in boot 149, with a working control (the same grep found the
+message's siblings 0 times, and CoreDisplay logs 113 lines):
+
+```
+15:44:42.467  WindowServer[162] (CoreDisplay) [ERROR] -
+  MPHWCopyPixels: display 0x5b81c5c0: device 0x7f99b020bde0:
+  port 0x00010d03: IOAccelCreateSurface = 0xe00002c2
+```
+
+**`0xe00002c2` is `kIOReturnBadArgument`.** `IOAccelCreateSurface` *fails* on
+this machine. Neither `'Set up page flip mode on display ...'` nor
+`'Failed to set up surface for page flip mode'` appears at all, so
+`MPAccessSurfaceForDisplayDevice` never reaches its page-flip section - it
+either returns at a gate or fails at the create.
+
+`MPAcquireSurfaceID()` is a 256-bit allocation bitmap at `0x7ff843bb1a30`
+(all-zero in the cache image) that returns **-1 only when all 256 ids are
+taken**. `reset_hardware(MPPriv*, bool)` calls `IOAccelDestroySurface` and
+resets `priv->0x198` to **0**, not -1, and it touches the bitmap at three
+sites, so ids do appear to be released - a plain never-released leak is the
+less likely story, and the -1 wants explaining by something else.
+
+### Next, and it is static
+
+`IOAccelCreateSurface` returning `kIOReturnBadArgument` is the deepest fact
+reached so far, and the kernel side is **already extracted**:
+`build/re/IOAcceleratorFamily2`. 2qb read `IOAccelSurface::surface_control_with_lock`
+there and found `0xE00002C2` as its unsupported-selector return, so the same
+code is answering "bad argument" to surface creation. Find the external method
+`IOAccelCreateSurface` maps to, read what it validates, and see which check our
+accelerator fails. No boot, no root, no sudo.
