@@ -27998,3 +27998,102 @@ there and found `0xE00002C2` as its unsupported-selector return, so the same
 code is answering "bad argument" to surface creation. Find the external method
 `IOAccelCreateSurface` maps to, read what it validates, and see which check our
 accelerator fails. No boot, no root, no sudo.
+
+## 2qk — THE ROOT CAUSE, in Apple's own words: "Assembly surfaces for display updates not supported"
+
+The kernel log of boot 149, found by taking the os_log format string out of
+`IOAccelSurfaceMTL::set_id_mode` and grepping for its function name:
+
+```
+15:25:36.383  kernel (IOAcceleratorFamily2) IOAccelSurface::set_id_mode:
+              Surface mode contains bad bits                                    x4
+15:25:36.795  kernel (IOAcceleratorFamily2) IOAccelSurface::set_id_mode:
+              New id (0x00000001) less than 256,
+              Assembly surfaces for display updates not supported               x2
+15:44:42.467  (the same, and this is the line whose caller logged
+               IOAccelCreateSurface = 0xe00002c2 one millisecond later)
+20:26:03.816  kernel (IOAcceleratorFamily2) IOAccelSurface::set_id_mode:
+              mode 0x4 must has kIOAccelSurfaceModeWindowedBit bit
+```
+
+`IOAccelSurface::set_id_mode(uint32_t id, uint32_t mode)` (`0x14e48cac`) rejects
+with `kIOReturnBadArgument` when:
+
+- `mode & 0xFF8073C0` is non-zero - *"Surface mode contains bad bits"*;
+- **`id <= 0xff`** (`cmpl $0xff, %r14d` at `0x14e48e85`) - *"less than 256,
+  Assembly surfaces for display updates not supported"*;
+- the mode lacks `kIOAccelSurfaceModeWindowedBit`.
+
+And **`MPAcquireSurfaceID()` can only ever return 0..255** - it is a 256-bit
+bitmap (`rax < 8`, `ecx < 32`, id = `rax*32 + ecx`). The log shows it returned
+**1**.
+
+> **So CoreDisplay's MP display-device surface path cannot succeed against this
+> accelerator, by construction. Every id the allocator can produce is below the
+> threshold the accelerator demands, and the accelerator says the feature -
+> "assembly surfaces for display updates" - is not supported.**
+
+This is not a bug in our driver. It is Apple's accelerator declining a legacy
+path that `IONDRVFramebuffer`-backed displays are the only remaining users of.
+
+### The complete chain, measured end to end
+
+```
+MPAccessSurfaceForDisplayDevice                    (CoreDisplay, MP ops 0x158)
+  id = MPAcquireSurfaceID()                        -> 1   (can only be 0..255)
+  IOAccelCreateSurface(priv->0x5c, id, mode, &priv->0x1a0)
+    = IOServiceOpen(accelPort, type) + external method 7
+    -> IOAccelSurface::set_id_mode(1, mode)
+       -> id <= 0xff  ==> kIOReturnBadArgument (0xe00002c2)   [LOGGED]
+  -> logs "IOAccelCreateSurface = 0xe00002c2"                 [LOGGED]
+CGXAcquireDisplayDeviceSurface                      returns NULL
+CoreDisplay::Display::GetNextSurface +229..+243
+  movq %rax, %rbx            ; NULL
+  operator new(0x1a0)        ; wraps it anyway  <-- 0x7ff80408c073
+  -> a DisplaySurface whose IOSurface field is NULL, and it RETURNS,
+     never reaching DisplaySurfacePool::GetNextSurface at +1270
+CDSurface::prepare_for_update
+  s != NULL, but GetIOSurface(s) == NULL  ==> cdsurf->0x40 = 1
+CDDisplay::begin_update
+  cdsurf->0x40 == 1  ==> Update->0x1c0 = *[0x7ff843c9eca8]   (CompositorSW)
+UpdateDisplays -> render_update(update, CompositorSW, ...)
+  -> CompositorSW::CompositeLayersToDestination -> CA::OGL:: on the CPU
+```
+
+Every link is either disassembled or logged. The three independent
+confirmations of 2qi (static branch, sampled behaviour, live state dict) now
+have a fourth: **the accelerator's own diagnostic text.**
+
+### What this settles, and what it kills
+
+- **2pd was right at boot 138** and has been right ever since: the destination
+  is a raw CPU-mapped range, not an IOSurface. Everything from 2px to 2qg was
+  spent on the accelerator side, where nothing was ever wrong.
+- `numDisplayBuffers = 0` (2q9) is the same fact one layer down: no surface,
+  therefore no attached buffer.
+- `isAcceleratorBacked` (2q4/2q7, `-rbgpufbaccel`) does feed a real consumer -
+  `all_devices_in_hw_mirror_loop_are_accelerator_backed` gates on
+  `priv->0xb2 & 0x40`, which is dword `0xb0` bit 22 - but its only effect is to
+  choose mode flag `0x8800` over `0x8400`, and **both are rejected for the same
+  reason the id is**. So the arg is harmless and currently pointless. Keep it
+  OUT of boot-args until there is a reason.
+- **"Surface mode contains bad bits" also fires 4x at 15:25:36**, so the mode
+  word is *additionally* wrong, independently of the id. CoreDisplay's switch on
+  `priv->0xbc` can select a pixel-format fourcc (`'B32f'` = 0x42333266 when
+  `priv->0xc8 == 0x20`, i.e. 32bpp - ours) as the mode, and
+  `0x42333266 & 0xFF8073C0 = 0x42007240` - rejected in all three flag variants.
+  Computed, not guessed.
+
+### Where this leaves the framebuffer work
+
+The MP surface path is a dead end **by Apple's decision**, so there is no hook
+that makes it work. The surviving path is the modern one, which
+`Display::GetNextSurface` reaches only at **+1270**:
+`DisplaySurfacePool::GetNextSurface` -> `CD_IOSurfaceCreate` -> a real
+IOSurface. Our display never gets there because the acquire at +229 returns
+NULL and the function returns early with the NULL-wrapping DisplaySurface.
+
+So the next question is precise and static: **what makes
+`Display::GetNextSurface` take the +1270 pool path instead of returning at
++243?** That is a branch in a function we now know well, and it is the first
+target in this project that would put a real IOSurface under the desktop.
