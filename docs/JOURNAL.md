@@ -28097,3 +28097,43 @@ So the next question is precise and static: **what makes
 `Display::GetNextSurface` take the +1270 pool path instead of returning at
 +243?** That is a branch in a function we now know well, and it is the first
 target in this project that would put a real IOSurface under the desktop.
+
+### CORRECTION to 2qk: "never reaching the pool" was not measured
+
+2qk wrote that `Display::GetNextSurface` "wraps NULL in a `operator new(0x1a0)`
+DisplaySurface and **returns early, never reaching the pool at +1270**". The
+first half is right; the second was inferred from the offsets and is wrong as
+stated. The function has **two** writes through its sret pointer
+(`-0x70(%rbp)`, loaded from `%rdi` at entry):
+
+```
+0x7ff80408c262   movq %rbx, (%rax)     ; *sret = the CGXAcquireDisplayDeviceSurface result
+0x7ff80408c489   movq %rax, (%rcx)     ; *sret = the DisplaySurfacePool::GetNextSurface result
+```
+
+So there are two returns, and the 0x1a0 object built at +243 is an
+**intermediate** (vtable `0x7ff8404fcc88`, the acquired surface stored at its
+`+0x20` and the display at `+0x98`) - not the thing returned.
+
+Which write executes is **not** established. What is established:
+
+- the acquire **fails** - logged twice over, `set_id_mode` refusing id 1 and
+  `IOAccelCreateSurface = 0xe00002c2`;
+- `prepare_for_update` is on its `GetIOSurface(s) == NULL` branch, and it tests
+  `s == NULL` **separately** at `0x7ff807d6f410`, so `s` is **non-NULL**.
+
+A NULL from the acquire path would therefore have gone down the other branch.
+So the surface `prepare_for_update` holds is most likely **the pool's**, and
+the open question sharpens to: **why does `DisplaySurfacePool::GetNextSurface`
+hand back a DisplaySurface whose IOSurface is NULL, when `CD_IOSurfaceCreate`
+logged no failure all boot?** The pool has a reuse path - when the colorspace
+argument is NULL (`cmpq $0x0, 0x20(%rbp)` at `0x7ff804134316`) or matches, it
+returns a cached slot (`rbx->0x58 + index`) and skips creation entirely
+(`0x7ff804134362` jumps past the `CD_IOSurfaceCreate` call) - so a slot
+populated with a NULL-backed surface would be handed out forever without ever
+attempting a create. That is the thing to read next.
+
+2qk's root cause stands unchanged: the accelerator refuses the MP surface path,
+with its own diagnostic text. Only the sentence about the pool was wrong, and
+it was wrong in the same way three earlier sentences in this session were -
+an offset comparison treated as control flow.
