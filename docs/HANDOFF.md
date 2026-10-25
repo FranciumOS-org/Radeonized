@@ -239,7 +239,23 @@
 > IOPresentment. **Next: read IOPresentment's own path to `0x10000003`**, not
 > more wrangler archaeology. Detail: JOURNAL **2r1**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r1)
+> **2r2 — THE AGDC ERROR STRING HAS NO REFERENCE ANYWHERE `dsc.py` CAN LOOK,
+> AND THAT IS AN INSTRUMENT DEFECT.** The format string behind boot 150's log
+> line is at `0x7ff812ea2887` (VA verified by reading it back), with
+> IOPresentment's code located nearby (7 LEA sites on
+> `ioPresentmentFindAGDCMatch`). Yet it has **0** references: 0 LEA sites over
+> the whole `0x25198000` exec mapping, and 0 of **any** RIP-relative form in
+> 198k instructions of objdump — controls held at 7 every time. The reason:
+> **the cache is NINE files, each subcache with its own executable mapping at a
+> distinct VA base**, and `dsc.py` reads only the file it is given. **Every
+> `dsc.py` negative in this project is only one-ninth wide.** This also
+> **corrects 2qo**, whose "occurs once in the cache's entire 0x25198000-byte
+> executable mapping" was the main file's size — the patch is not in doubt
+> (unique match within WindowServer's text, verified from its own memory), only
+> the stated basis. **Next is tooling, not archaeology: teach `dsc.py` all nine
+> files, then re-run the xref.** Detail: JOURNAL **2r2**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2r2)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
