@@ -29150,3 +29150,84 @@ Recorded so the option is known, not recommended.
 `-rbgpuiop` stays in the tree: correct, verified, five bytes in one process,
 inert without its one-shot, and the only instrument that can reach this layer
 if the framebuffer question is ever reopened.
+
+## 2qs - scoping the framebuffer stack: the DCN port is the SMALL half, the load path is the blocker
+
+Static, no boot. Full write-up in `docs/SCOPE-FRAMEBUFFER.md`; this entry
+records the four new measurements and the conclusion.
+
+**1. What AGDC is missing, decoded.** `AppleGPUWrangler`'s `debug-gpus` builder
+puts **`gpuc` = `gpuStruct + 0x10`** (via `OSNumber::withNumber(..., 64)`) and
+**`agdp` = a registry ID of the object at `gpuStruct + 0x68`**
+(`strxref` -> `0x13df09c2` and `0x13df0a10`). Both read 0 live, with our
+framebuffer and accelerator correctly paired in the row. They are what
+IOPresentment asks for and what the vendor AGDC plugin fills.
+
+**2. The kernel-collection split, measured live rather than inherited.**
+IOPCIFamily `0xffffff8002886000`, our plugin `0xffffff8004043000`,
+WhateverGreen `0xffffff80056c7000` — all `0xffffff80…`, the boot KC. But
+**IOGraphicsFamily `0xffffff7f95c94000`** and IONDRVSupport
+`0xffffff7f95ce8000` — `0xffffff7f9…`, the system KC. 2oz's blocker confirmed.
+
+**3. And the blocker is NARROWER than 2oz left it, which is the finding worth
+keeping.** Our `OSBundleLibraries` are only Lilu, IOPCIFamily and the five
+`com.apple.kpi.*` — nothing for IOGraphicsFamily. Yet the plugin **already
+routes 35 `IONDRVFramebuffer` call sites** and solves symbols in
+`IOGraphicsFamily`, `IONDRVSupport`, `IOAcceleratorFamily2` and four AMD kexts,
+across that boundary, every armed boot. So the KC split blocks **static
+linking** — a subclass whose vtable and imports bind at load time — and does
+**not** block calling or routing system-KC code. Two different mechanisms; this
+project has used the second one from the start. 2oz concluded "not possible
+from this kext" and that is right about the *linked* subclass and wrong as a
+general statement.
+
+**4. The DCN 3.1.2 delta, recomputed from the headers rather than recalled.**
+`dcn_3_0_2_offset.h` (newest DCN Apple compiles) against `dcn_3_1_2_offset.h`
+(this chip), normalising the `mm`/`reg` prefixes and comparing **both** offset
+and `BASE_IDX`:
+
+```
+dcn302 6996 regs, dcn312 6401, 5630 common names
+only on our chip 771, absent on ours 1366
+common 5630, moved 298  ->  94.7 % IDENTICAL
+```
+
+`CM` 1000/0, `DP` 559/0, `HUBP`(+`HUBPREQ`) 444/0, `OTG` 434/0, `MPCC` 408/0,
+`CURSOR` 68/0, and `DSCL`/`DSCC`/`DMCUB`/`ABM`/`OPP`/`DPP`/`HPD` all 0 moved.
+Moved: **`DCHUBBUB` 74 of 77**, `DC` 91, `MPC` 53, `AFMT` 19, `VPG` 10,
+`DCN` 9, `DIG` 5. **The whole scanout path is bit-identical**; the one block
+that really moved is the memory-hub/bandwidth config, which is a *modeset*
+concern, and the firmware already did the modeset (`OTG0_CONTROL 0x00011201`,
+DMCUB 4.0.15.47). Second independent confirmation of 2pq, from the headers.
+
+Also located for the first time: **Apple's DAL/DC lives in
+`AMDRadeonX6000Framebuffer`** (10 MB, 2339 defined symbols, 176 vtables;
+`dcn30` 58, `dcn302` 15, `dcn21` 25, `dml` 128, **`dcn31`/`dcn312` 0**), **not**
+in `AMDSupport` (0 hits) or `AMDFramebuffer` (0 hits). `AMDFramebuffer` itself
+defines 220 of its own methods.
+
+### Conclusion
+
+Route A (our own linked `IOFramebuffer`) is closed by the KC split. Route B
+(make Apple's stack match) is closed twice — 2lj measured the id spoof killing
+the accelerator, and there is no dcn312 code to run. **Route C — construct an
+`OSMetaClass`-registered class at runtime, with no declared dependency, the way
+the plugin already reaches system-KC code — is the only route no measurement
+has closed**, and it was never tried.
+
+Route C is not obviously impossible (every symbol needed is resolvable the same
+way the AMD ones are, and 2qm already measured `OSMetaClass`'s layout) but it is
+genuinely fragile: a hand-built vtable one slot wrong is a panic on the path
+that owns the display, vtable layout is not stable across OS updates, and the
+read-back-and-compare fail-safe that makes `-rbgpumtlkfix` acceptable does not
+transfer to a vtable we synthesise. And it only reaches the start line — AGDC
+vendor info, then the IOPresentment kernel API, then the OTG/HUBP programming
+that §5 says is the easy part.
+
+**So: the DCN port is the small half and the load path is the blocker.** If
+Route C is judged too fragile, the display half is **closed, not paused**, and
+should be recorded as closed so no future session re-derives the KC split a
+fifth time. The cheapest decisive experiment if it is ever attempted:
+**register a throwaway `OSMetaClass` at runtime from the boot KC**, attached to
+no provider, to learn whether that is possible at all. Contained, clear
+negative, and it gates everything else.
