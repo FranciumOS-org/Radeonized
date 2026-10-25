@@ -28753,6 +28753,15 @@ Note on `UseIOPresentment` itself: 2ql's "do NOT force it" stands and is
 untouched. This does not patch that function or any of its 72 call sites; it
 corrects one input it reads, to a value that is **true of the hardware**.
 
+### One precondition worth stating
+
+`-rbgpumtlkoff` disables the kernel-side patcher's *install*, so the
+`_task_set_main_thread_qos` route never happens, `rbgpu_mtlk_on_exec` never
+fires and `rbgpu_iop_try` is never reached - `iop_on` would not even be
+written. The two are on the same hook by design. Nobody is likely to set it,
+but an absent `iop_on` with `mtlk_stage 0` means exactly that and not a
+failure of this patch.
+
 ### Debt this leaves
 
 `rbgpu_mtlk_place` keeps its scratch buffer in a `static`, so two concurrent
