@@ -26,6 +26,7 @@
 #include "rb_smu.h"
 
 int smu13_tests(const struct rb_disc *real_table);   /* smu13_test.c */
+int agdc_tests(void);
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -839,6 +840,7 @@ int main(int argc, char **argv)
     test_version_gate();
     test_smu();
     failures += smu13_tests(have_real ? &real_disc : NULL);
+    failures += agdc_tests();
     test_fuzz();
 
     if (failures) {

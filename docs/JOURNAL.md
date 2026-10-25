@@ -31161,3 +31161,140 @@ AGDC protocol or turns on Metal display compositing.
 Both new tools built with **`-Wall -Wextra -Werror`**; the six final runs
 exited 0 and `git diff --check` passed. Only a comment changed in the plugin;
 no plugin build or hardware configuration was changed by this milestone.
+
+---
+
+## 2ra — framebuffer work: the missing per-GPU AGDC bridge is implemented and built
+
+2026-10-25. The user clarified **"continue the GPU framebuffer work"**.
+Returned to 2r5's measured blocker and implemented its missing service. This
+is a kernel change prepared for a user-run boot test, **not a claim that the
+framebuffer or Metal display compositing now works**. No kext was loaded,
+no EFI installed, and no boot-arg or NVRAM variable changed in this turn.
+
+### The vendor protocol has an exact reference implementation here
+
+`AMDRadeonX6000Framebuffer` names both methods; no need to invent the replies:
+
+- **`AmdAgdcServices::getVendorInfo`, 0xbffb59a**: require output size 0x2c,
+  zero the reply, +0x00 = 0x30000, +0x04 = "AMD", +0x24 = 0x1002,
+  **+0x28 = 2**. The separate `AmdGpuWrangler::getVendorInfo` at
+  **0xc010918** instead writes **7**, which is deliberately excluded by
+  IOPresentment's {1,2} role test. This is why renaming the existing wrangler
+  would not supply the per-GPU reply even if its name gate were removed.
+- **`AmdAgdcServices::getGpuCapability`, 0xbffb712**: output size 0xdc,
+  count +0x30, PCI entry +0x34, framebuffer array +0x3c. The cached struct is
+  at service+0x140; stores at **0xbffb9b8/0xbffb9cf** populate those entries
+  from the controller's actual objects. Controller vtable slots were checked
+  by name: +0x8b8 = getPciDevice, +0x8c8 = getNumFramebuffer, +0x8d0 =
+  getFramebuffer. So these are **kernel object pointers**, not registry IDs.
+- **`AGDC::filtered_doDeviceAttribute`, 0x13dfd167** converts the PCI pointer
+  through `IORegistryEntry::getRegistryEntryID`, then the framebuffer array
+  (bounded to eight), before copying 0xdc bytes to the client's output at
+  **0x13dfd1bf**. That conversion must remain in the call chain. Returning
+  registry IDs from the vendor callback would make Apple dereference IDs as
+  pointers; bypassing the filter with the kernel form would leak addresses.
+
+`src/common/rb_agdc.h` now builds the exact vendor reply and a conservative
+one-framebuffer capability reply, using the real objects. Optional feature
+masks are zero: no invented link, VRR, DSC, brightness or modeset support.
+
+### The runtime class is smaller than the "277 methods" description implied
+
+**`src/plugin/rbgpu_agdc.cpp`** watches the real AGDC kext (bundle id and path
+verified against its installed Info.plist). It clones the live **0x8b8-byte
+instance vtable** and **0xe8-byte metaclass table**, preserving their address
+points at +0x10. Static analysis checked every overridden/relevant slot:
+
+| Instance slot | Treatment |
+|---|---|
+| 0x00 / 0x08 | Replace abstract D1/D0 traps with base-D2/IOFree wrappers |
+| 0x38 | Return our registered runtime metaclass |
+| 0x5c0 / 0x770 | Preserve Apple's start / newUserClient, verify by symbol |
+| 0x850 | Replace the sole `__cxa_pure_virtual` with our vendor callback |
+| 0x858 | Preserve Apple's state-to-arguments vendor wrapper |
+
+The metaclass allocator is overridden at **0x88**. Everything else is copied,
+not reimplemented. The live constructor receives our metaclass; the allocator
+calls `instanceConstructed`, just as the SDK's generated constructors do.
+`OSObject::free` at **0xffffff8000a4b880** was read before choosing destruction:
+it obtains the virtual metaclass, calls `instanceDestructed`, and then dispatches
+the deleting destructor. Our wrapper must not decrement the count twice.
+
+Runtime guards separately solve and compare the six relevant instance slots
+and metaclass allocator, table bounds/terminators and all callable entries;
+the only pure virtual must be slot 0x850. The routed filter's first eight
+bytes must be **55 48 89 e5 41 57 41 56**, with no branch in the displaced
+prefix. Every mangled name was checked defined in the extracted AGDC binary,
+and the whole-plugin search found no pre-existing route.
+
+### Keep Apple's user client and its entitlement check
+
+`newUserClient`, `AppleGraphicsDeviceControlClient` and `authorizeTask` are
+unchanged. 2r8's root-entitlement result stands. Attribute **1** ordinarily
+falls into the global plugin table, so the new filtered-method hook supplies
+it **only when this == our service**. All other services and all other
+attributes, particularly 0x980 with its pointer conversion, call the original.
+Unsupported vendor operations return Unsupported; they are not faked successful.
+
+The service is **RembrandtGPUAGDC**, attached to our actual 1002:1681 PCI
+device, and its capability reply names the existing IONDRVFramebuffer.
+There is no framebuffer takeover or new static AGDC/IOGraphicsFamily import.
+The bridge itself writes no DCN registers. Apple's newly reachable presentation
+code remains untested and may still fail or blank the panel.
+
+### Startup, arming and lifetime
+
+The existing `enableController` route hands off the framebuffer after calling
+the original. Registration runs on a thread-call worker, outside that hook.
+It waits boundedly for the superclass to be **registered**, not merely nonzero
+BSS (2qv), and for AppleGPUWrangler to exist before entering AGDC::start's
+otherwise unbounded wait. Either kext/framebuffer arrival order can wake it.
+It verifies class size **0x110** and IOService superclass before constructing.
+
+`preModLoad` / metaclass ctor / `postModLoad` reuse 2qy's successful protocol.
+No diagnostics or returns occur while the stalled-class lock is held;
+postModLoad is unconditional, including a NULL pre handle. The instance is
+initialized and attached, then Apple's AGDC::start publishes it. Its initial
+reference stays pinned for the boot **even if start returns false**, because
+2pl already proved cross-kext registrations outlive an IOKit start failure.
+
+**OFF unless -rbgpuagdc AND one-shot rbgpu-agdc.** The fail-closed one-shot
+must be consumed before the filtered hook is installed or any runtime class is
+registered. The already verified IOP gate patch still needs **its own**
+one-shot in that boot. Full user-run commands and recovery are in
+**`docs/SPEC-AGDC-BRIDGE.md`**; no install/activation was done here.
+
+`agdc_stage`, `agdc_error`, `agdc_oneshot`, `agdc_started` and the separate
+**`agdc_user_vendor` / `agdc_user_cap`** counts go at the front of the existing
+NVRAM hot-key list. Base AGDC::start calls the vendor callback too, so a vendor
+count alone must not be mistaken for a WindowServer query. The last requested
+attribute and last unsupported vendor attribute are also recorded. Every
+refusal has a numeric error plus a readable reason. plugin_check now captures
+`rbgpu-agdc`, avoiding 2qy's missing-one-shot-key instrumentation defect.
+
+### Validation and the actual next step
+
+**`make plugin` passes**, including the existing ASan/UBSan hosttest and its
+300,000 parser mutations. New protocol tests exercise NULL/zero identities,
+every invalid size through 0xdd with unchanged-buffer checks, guard bytes,
+AMD identity/role, pointer offsets and zero optional features. A mutation
+changing GPU role **2 to 7** makes the new tests fail, as required. The new
+plugin translation unit compiles under `-Werror`; no new warning there.
+
+**`tools/check_imports.py` resolves 362/362 imports** through the existing
+IOPCIFamily and kpi libraries. `nm -u` has IOMallocZero/IOFree as positive
+controls and **no AGDC or IOFramebuffer imports**. Info.plist gained no
+dependency. Shell syntax and `git diff --check` pass. UUID moved from
+**442DF066… to 902BE8B3-FA45-3CA3-AABD-94E526538A31**. Build log saved to
+`logs/20261025-2ra-agdc/build.txt`.
+
+**Next: the user-run boot test of this build, with AGDC and IOP both armed.**
+First require a new boot nonce and matching loaded UUID, then
+`agdc_mc_post=0`, `agdc_mc_ok=1`, `agdc_started=1`, `iop_verify=1` and a live
+RembrandtGPUAGDC service. User-attribute counters show whether IOPresentment
+actually queried it. A service publishing is only partial success: the real
+verdict is a created display pipe, IOSurface-backed display surfaces and
+Metal display compositing. If it stops on another attribute or on plane/bind
+support, that is the next framebuffer implementation task. It has not been
+tested on hardware, and nothing in these host checks proves that final chain.

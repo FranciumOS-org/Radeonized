@@ -754,6 +754,10 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // 2qw: first, because they say whether every OTHER absence in the capture
     // means anything. diag_used == diag_max means keys were dropped.
     "diag_max", "diag_used",
+    // 2ra: current framebuffer frontier. These precede the old probes so a
+    // failed login boot still distinguishes refusal, registration and start.
+    "agdc_on", "agdc_error", "agdc_stage", "agdc_oneshot", "agdc_started",
+    "agdc_user_vendor", "agdc_user_cap",
     // 2qo: THE frontier, and the first change here that is EXPECTED to be able
     // to end in a login screen that never appears - so these must survive a
     // boot with no usable screen, which is the whole reason this list exists.
