@@ -67,8 +67,33 @@
 > `sudo tools/efi.sh bootarg add IOPresentment` prints both ids. Logging only,
 > no risk; needs `-rbgpuiop` armed in the same boot or the pipe is never
 > attempted. Detail: JOURNAL **2qq**.
+>
+> **2qr CLOSED IT, AND IT ENDS WHERE EVERYTHING ELSE DOES.** 2qq's guess that
+> the `no match` path fired was **wrong**, and boot 150's log already held the
+> answer - it was filtered out by querying `subsystem ==
+> "com.apple.CoreDisplay"` when IOPresentment logs under its own name:
+> `01:33:39.865 WindowServer[161] (IOPresentment) Error: **Unable to get AGDC
+> information.  Return code: 0x10000003**`, three milliseconds before the
+> DisplayPipe backtrace, same process and thread. So the failure is the AGDC
+> **information** query, one step before the map match, and IOPresentment's
+> strings name what it wants: **`AGDCVendorInfo`** and **`AGDCGPUCapability`**.
+> Live `debug-gpus` says both are empty - **`gpuc` = 0, `agdp` = 0** - with our
+> framebuffer and accelerator correctly paired, which **corrects 2qn**: the
+> association exists, its contents do not. Those fields are filled by the
+> **vendor AGDC plugin**, i.e. `AMDSupport`/`AMDFramebuffer`, which never
+> instantiates here (2oq: nothing matches `0x16811002`, and macOS has no DCN
+> 3.1.2 code at all). **So the IOPresentment route terminates at the same root
+> cause, and 2ql's structural verdict is confirmed twice from two directions.
+> The next thing to supply is not a flag, a property or a five-byte patch - it
+> is the AMD framebuffer stack.** Also checked and killed so nobody reopens
+> them: `FB_Triage` (diagnostic dumps only) and the third-party NV kexts in
+> `/Library/Extensions` (`kextstat`, control 67 - **none loaded**). The
+> `IOPresentment` boot-arg token would only add detail to a cause Apple has
+> already stated in one line, so it is **no longer worth a boot**. Keep
+> `-rbgpuiop` in the tree: correct, verified, inert without its one-shot, and
+> the only instrument that reaches this layer. Detail: JOURNAL **2qr**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qn)
+# RembrandtGPU — handoff state (2026-10-25, after 2qr)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
