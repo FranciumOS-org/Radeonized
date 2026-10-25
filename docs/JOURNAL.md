@@ -28499,3 +28499,93 @@ accelerator (`IOAccelDisplayPipeCapabilities` lives on the accelerator, not the
 framebuffer - the first version reported it ABSENT); the call made in a forked
 child; and a verdict that names which failure mode was observed.  Exit codes:
 0 pipe created, 3 inconclusive.
+
+## 2qn - root does NOT clear the entitlement, but the AGDC map answers the capability question anyway
+
+**`sudo ./build/out/ioptest` (boot 149, 21:09:37): still SIGABRT.** The
+privileged run's own log:
+
+```
+ioptest: (IOPresentment) Error: Invalid argument
+ioptest: (GPUWrangler) GPUWranglerOpenWithTimeout: failed to connect; service=0xc0b status=0xe00002e2
+```
+
+`0xe00002e2` = `kIOReturnNotPermitted`, unchanged from the unprivileged run.
+**So the GPUWrangler user client is entitlement-gated, not privilege-gated, and
+the client-side test can never answer the question.** That branch of 2qm is now
+closed by measurement rather than left open - do not spend another run on it.
+(`AppleGPUWrangler` itself is fine: it is `registered, matched, active` with
+**three** live `AppleGPUWranglerClient`s - `displaypolicyd` pid 142,
+`WindowServer` pid 162, and one more. It is our process that is refused, not
+the service that is broken.)
+
+### But the thing the test was trying to prove is readable from ioreg
+
+`ioPresentmentFindAGDCMatch()` searches AGDC's GPU map, and
+`AppleGPUWrangler` publishes it as the `debug-gpus` property. On this boot it
+holds exactly one entry:
+
+```
+{"id"=64455, "acc"=4294968650, "fbs"=(4294968648), "gpuc"=0, "pci"=4294967939,
+ "agdp"=0, "cc"=3, "flags"=2986344480, "tds"=0}
+```
+
+Decoded against the live registry IDs:
+
+| field | value | is |
+|---|---|---|
+| `acc` | 0x1000005**4a** | **our `AMDRadeonX6000_AMDNavi21GraphicsAccelerator`** |
+| `fbs[0]` | 0x1000005**48** | **our `.Display_boot`, the `IONDRVFramebuffer`** |
+| `pci` | 0x100000283 | the PCI device |
+| `id` | 0xfbc7 | the wrangler's GPU id |
+
+**AGDC already knows our IONDRVFramebuffer and our AMD accelerator as one
+GPU.** That is the association `ioPresentmentFindAGDCMatch()` looks for, and it
+exists. Nothing had to be created for it; the wrangler built it at boot.
+
+### Where the display half stands now
+
+Every precondition IOPresentment is known to need is live and paired on this
+machine, measured, none of it inferred:
+
+- `IOFramebuffer` present (`.Display_boot`)
+- `IOAccelIndex 0`, `IOAccelRevision 2` on it
+- `IOAccelDisplayPipeCapabilities = {DisplayPipeSupported=1, TransactionsSupported=1}`
+  on the accelerator
+- two live `IOAccelDisplayPipeUserClient2` instances
+- AGDC/`AppleGPUWrangler` up, with **our** fb and **our** accelerator in one
+  `debug-gpus` entry
+- `IOPresentment.framework` on disk and loadable
+
+and the **only** thing refusing the path is CoreDisplay's userspace vendor
+test, which classifies GPUs by `IOObjectCopyClass` on the framebuffer and
+scores `IONDRVFramebuffer` as "unknown" (2ql).
+
+That is no longer "a decision about whether the display stays software". It is
+one 6-byte userspace patch whose correctness is now supported from four
+independent directions, and whose remaining risk is that something *else*
+inside the IOPresentment path fails after the gate opens - which no instrument
+short of WindowServer itself can rule out, because the entitlement blocks every
+client-side probe.
+
+**Intervention A, restated with the evidence behind it:** inside WindowServer
+only, patch CoreDisplay's per-framebuffer vendor classifier `0x7ff80412cc38` to
+return `0x4` (AMD) instead of `0x1` (unknown). Six bytes, `b8 04 00 00 00 c3`,
+at an entry with no branch in it. Its only caller is
+`__GetSystemGPUVendors_block_invoke`, so the whole effect is
+`gSystemGPUVendors = 0x4` - and that belief is **true of the hardware**. Then
+`UseIOPresentment()` returns true and `Display::GetNextSurface` takes the pool
+path that calls `CD_IOSurfaceCreate`.
+
+**The risk, stated plainly:** if the IOPresentment path then fails somewhere we
+cannot see, WindowServer may not bring the display up - a black screen at
+login. Rescue is `-rbgpuoff` and a reboot, over SSH if needed. It writes **no
+DCN register**. The `-rbgpumtlkfix` machinery already does exactly this class of
+patch, verifies every site from the target's own memory before writing, and
+fails safe (an OS update that moves the function means nothing is patched).
+It runs at `_task_set_main_thread_qos`, before the process executes any code,
+which matters because `GetSystemGPUVendors` is a `dispatch_once` inside
+`CGXMappedDisplayStart`.
+
+**It is a kext change on the process that owns the display, so it is the
+user's decision.**
