@@ -479,7 +479,11 @@ clear did not take - the next boot is armed too**), `iop_saw_ws` (absent means
 WindowServer never execed while the hook was live, so nothing was attempted and
 nothing is proven), `iop_ready`, `iop_match` (1 the five bytes were the call,
 2 already patched, 0 neither - an OS update moved the site), and
-**`iop_verify 1`, the only line that proves the write landed.**
+**`iop_verify 1`, the only line that proves the write landed.** One
+precondition: `-rbgpumtlkoff` disables the install that routes
+`_task_set_main_thread_qos`, so this patch shares that hook and an absent
+`iop_on` alongside `mtlk_stage 0` means the hook was never installed, not that
+the patch failed.
 
 **The risk, unchanged and unhidden:** if IOPresentment fails *past* the gate -
 `IONDRVFramebuffer` implements none of
