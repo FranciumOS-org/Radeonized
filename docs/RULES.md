@@ -129,7 +129,38 @@ it on. Launch anything with `env -u DYLD_INSERT_LIBRARIES` or it starts under
 whatever patch this the assistant is running - which once looked exactly like a
 regression (2ns).
 
-**ROOT CAUSE OF THE SOFTWARE COMPOSITING, FOUND (2qh): the display's
+**ROOT CAUSE, FINAL, IN APPLE'S OWN WORDS (2qk): `IOAccelSurface::set_id_mode`
+REJECTS SURFACE IDS BELOW 256 AND SAYS THE FEATURE IS UNSUPPORTED.** The kernel
+log of boot 149, found by grepping for that method's own os_log function name:
+`IOAccelSurface::set_id_mode: New id (0x00000001) less than 256, Assembly
+surfaces for display updates not supported` (and, 4x at 15:25:36,
+`Surface mode contains bad bits`; once at 20:26:03, `mode 0x4 must has
+kIOAccelSurfaceModeWindowedBit bit`). The method (`IOAcceleratorFamily2
++0x14e48cac`) returns `kIOReturnBadArgument` when `mode & 0xFF8073C0`, when
+**`id <= 0xff`** (`cmpl $0xff, %r14d` at `0x14e48e85`), or when the windowed bit
+is missing - and **`MPAcquireSurfaceID()` can only ever return 0..255** (a
+256-bit bitmap: `rax<8`, `ecx<32`, id = `rax*32+ecx`; it returned **1**). So
+**CoreDisplay's MP display-device surface path cannot succeed against this
+accelerator by construction** - not our bug, Apple declining a legacy path.
+Chain, every link disassembled or logged: `MPAccessSurfaceForDisplayDevice`
+(MP ops **0x158**) -> `IOAccelCreateSurface` (= `IOServiceOpen` + external
+method **7** = `set_id_mode`) -> **BadArgument** -> `CGXAcquireDisplayDeviceSurface`
+returns NULL -> `Display::GetNextSurface` **+229..+243** wraps NULL in a
+`operator new(0x1a0)` DisplaySurface and **returns early, never reaching the
+pool at +1270** -> `GetIOSurface(s) == NULL` -> `cdsurf->0x40 = 1` ->
+`begin_update` overwrites `Update->0x1c0` with the SW compositor. Also:
+`isAcceleratorBacked` (`-rbgpufbaccel`) DOES have a consumer -
+`all_devices_in_hw_mirror_loop_are_accelerator_backed` gates on
+`priv->0xb2 & 0x40` = dword `0xb0` bit 22 - but it only picks mode flag
+`0x8800` over `0x8400`, and **both are rejected for the same id reason**, so the
+arg is harmless and currently pointless; keep it OUT. **Next target, static:
+what makes `Display::GetNextSurface` take the +1270 pool path
+(`DisplaySurfacePool::GetNextSurface` -> `CD_IOSurfaceCreate`, a real IOSurface)
+instead of returning at +243?** The MP path is a dead end by Apple's decision,
+so no hook can fix it; the pool path is the only one that puts a real IOSurface
+under the desktop.
+
+**(2qh, superseded in part by 2qk) the display's
 `CoreDisplay::DisplaySurface` has NO IOSurface, and SkyLight swaps the
 compositor because of it.** `WS::Displays::Update::Update` correctly sets
 `Update->0x1c0 = display->compositor()` - a **CompositorMetal** - and then
