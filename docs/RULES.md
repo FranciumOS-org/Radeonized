@@ -1221,8 +1221,35 @@ The two that bite hardest:
   allocated by that name would panic - nothing knows the name. Writes **no DCN
   register**. **And a registered class is NOT a published framebuffer**: 2qr
   closed the display chain at AGDC vendor info, not at the class name, so even
-  `mcr_name_ok 1` buys a metaclass and nothing on screen. Detail: JOURNAL
-  **2qx**.
+  `mcr_name_ok 1` buys a metaclass and nothing on screen.
+  **BOOT 154: IT WORKED, AND THE ONE-SHOT DID NOT (2qy).** `mcr_post 0`
+  (`kOSReturnSuccess`), `mcr_pre 1`, `mcr_check 1`, and **`mcr_name` =
+  `RembrandtGPUProbeClass` with `mcr_name_ok 1`** - the class naming itself
+  through Apple's own `getClassName()`. `mcn_f00` = `mcn_osmc_vt + 0x10`
+  exactly, `mcn_f10` = `mcn_super_mc`, `mcn_super_off` `0x3f138` for a third
+  boot running, `mcn_f20` `0x1d0`, and `mcn_f18` now a **heap** address - so
+  `mcn_verdict` reads **14, which is CORRECT on the 2b path**: bit 1 is
+  "+0x18 is still our literal", and `postModLoad` replacing it with an
+  `OSSymbol` is what registration does. (Verdict 15 was pre-stated for stage
+  **2a** only, which did not run - `mcn_on 0`.) **So an `OSMetaClass` CAN be
+  constructed and registered at runtime from the boot KC, with a system-KC
+  superclass and no declared IOGraphicsFamily dependency** - 2oz's blocker was
+  **static linking** and nothing else. Control held: `fbvram 3`, and
+  `diag_used 524` of `diag_max 768` so absence meant something.
+  **BUT `mcr_oneshot 4`: the clear FAILED and `nvram rbgpu-mcreg` still reads
+  1**, so the experiment ran with **no rescue in force** - had it hung, the
+  next boot would have hung too. Cause NOT established; excluded by
+  measurement: not the code (byte-identical to the `rbgpu-arm` path, which
+  cleared in the same boot), not too early (arm runs earlier and works), not
+  too late (`rbgpu-iop` worked seconds later in boot 150), not a stale cached
+  `/options`. Hypothesis only: a second forced IODTNVRAM sync in the same
+  window may be coalesced away. **The defect that WAS ours is fixed** - the
+  function did `out(4); return true`, reporting the failure and telling the
+  caller to proceed. It now retries three times and **fails closed**, so
+  `why = 4` means *armed and we did NOT run*. Rule-26 gap also closed:
+  `rbgpu-mcreg` was not in `plugin_check.sh`'s capture list, so only the
+  `mcr_oneshot` key revealed this. **`sudo nvram -d rbgpu-mcreg` before any
+  further boot.** Detail: JOURNAL **2qx**, **2qy**.
 - **The "7 MB" is NOT a memory limit** and not why anything is choppy.
   `tools/vramtest` allocates and reads back 1 GB plus an 8K texture;
   `recommendedMaxWorkingSetSize`, `RCC_CONFIG_MEMSIZE` and
