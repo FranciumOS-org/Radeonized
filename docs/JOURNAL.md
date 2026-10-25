@@ -28358,3 +28358,144 @@ whether each was found or defaulted, the reproduced verdict with the branch
 named, and a verdict that distinguishes "a preference is wrong" (fixable) from
 "a framebuffer is unclassifiable" (not).  Exit codes: 0 IOPresentment is on,
 1 unknown-vendor framebuffer, 2 a preference, 3 inconclusive.
+
+## 2qm - IOPresentment needs nothing we lack in the kernel, and the client test is blocked by an entitlement
+
+2ql ended with "the lever is an `IOFramebuffer` whose class name contains AMD",
+and treated that as a decision about 2oz's subclass.  Before accepting that,
+the obvious question: **would the IOPresentment path even work if the gate
+opened?**  If it needs IOMobileFramebuffer or an AMD-specific kernel
+framebuffer, the gate is irrelevant and 2ql's lever is worthless.
+
+It does not.  `IOPresentment.framework` **is present on this machine**
+(`/System/Library/PrivateFrameworks/IOPresentment.framework`, dlopens fine,
+exports `IOPresentmentCreateForRegistryService/ID`, `CreateResource`,
+`CreateResourceWithIOSurface`, `SetPlaneState`,
+`BindIOAccelSurfaceToResource`, `CopyCapabilities`).  Its `__TEXT` strings name
+what it talks to, and there is no IOMobileFramebuffer and nothing AMD-specific
+among them:
+
+```
+IOFramebuffer            IOAccelIndex              IOAccelerator
+IOAccelDisplayPipeTriage IOAccelDisplayPipeTransactionWait
+DisplayPipeSupported     IsDisplayable             IODisplayEDID
+Error: Unable to create IOAccelDisplayPipe
+Error: Unable to connect to IOPresentment client
+Error: ioPresentmentFindAGDCMatch() failed - retCode: %#x
+```
+
+**Every one of those is live on this machine right now**, measured with
+`make ioptest` on the session's boot:
+
+```
+framebuffer  IONDRVFramebuffer   name=.Display_boot   id=0x100000548
+accelerator  AMDRadeonX6000_AMDNavi21GraphicsAccelerator  id=0x10000054a
+IOAccelIndex                    [fb]    0
+IOAccelRevision                 [fb]    2
+IOAccelDisplayPipeCapabilities  [accel] {DisplayPipeSupported=1, TransactionsSupported=1}
+```
+
+plus **2 live `IOAccelDisplayPipeUserClient2` instances** in the IORegistry and
+AGDC present (15 nodes).  That is 2pp re-confirmed on this boot, and it is
+exactly the kernel surface IOPresentment uses.  So 2ql's lever is **not**
+worthless: the thing the class-name test is refusing appears to be already
+wired up.
+
+### The signature, read rather than guessed
+
+`IOPresentment::IOPresentmentCreateForRegistryService(unsigned int, unsigned int)`
+(image+0x400C) takes **two** `io_service_t`, refuses when they are equal
+(`cmpl %esi,%edi; jne`, else it logs and returns 0), converts each to a registry
+ID and forwards to `CreateForRegistryID(uint64, uint64)`.  So the pair is
+**(framebuffer, accelerator)** - which is why the test can be run at all.  The
+C wrappers pass their arguments through with no shuffling.
+
+### The client test is INCONCLUSIVE, and the framework says why
+
+The unprivileged call does not return NULL - it **aborts** (SIGABRT) inside the
+framework, after logging to this process's own os_log:
+
+```
+Error: ioPresentmentFindAGDCMatch() failed - retCode: 0xe00002e2
+Error: Unable to acquire map
+GPUWranglerOpenWithTimeout: failed to connect; service=0x1a03 status=0xe00002e2
+```
+
+**`0xe00002e2` is `kIOReturnNotPermitted`** - an entitlement on opening the
+GPUWrangler, not an answer about the display pipe.  Neither
+`Unable to create IOAccelDisplayPipe` nor
+`Unable to connect to IOPresentment client` appeared.  This is the branch
+`ioptest` pre-stated as INCONCLUSIVE before the first run, and it is reported
+as such: WindowServer holds two of these user clients already and has
+entitlements this process does not.
+
+`ioptest` now makes the call in a **forked child** and interprets the exit
+status, so the abort cannot take the verdict with it - and because the parent
+survives, the tool is usable under privilege.  (Rule 14 again: the first
+version would have died at step 3 with no verdict printed at all.)
+
+### Where the two candidate interventions now stand
+
+Both produce the *same* effect - `UseIOPresentment()` true - so they are one
+lever with two placements, and 2ql's warning against forcing the gate applies
+to both only if the pipe cannot be created.  That is now the open question, not
+a settled one.
+
+**A - userspace, narrow, inside WindowServer only.** Patch the per-framebuffer
+vendor classifier `0x7ff80412cc38` to return `0x4` (AMD) instead of `0x1`
+(unknown): six bytes, `b8 04 00 00 00 c3`, at an entry whose first instructions
+are `pushq %rbp; movq %rsp,%rbp; pushq %r15; pushq %r14` - no branch inside, so
+rule 2 is satisfied and nothing needs displacing.  Its **only** caller is
+`__GetSystemGPUVendors_block_invoke`, so the whole effect is
+`gSystemGPUVendors = 0x4`.  Readers of that global then believe "AMD", which is
+**true of the hardware** - `GetCurrentSystemGPUVendorName()` would return
+`"AMD"` instead of `"Unknown"`.  The `-rbgpumtlkfix` machinery already does
+exactly this class of patch (hooks `_task_set_main_thread_qos` per exec, writes
+verified bytes with `_vm_map_write_user`, compares before writing so an OS
+update means nothing is patched), and it runs **before the process executes any
+code**, which matters because `GetSystemGPUVendors` is a `dispatch_once` during
+`CGXMappedDisplayStart`.
+
+**B - kernel, global.** Rename `IONDRVFramebuffer`'s class.  Measured rather
+than assumed: `is_io_object_get_class` (`0xffffff8000b371a0`) does
+`metaclass = obj->vt[0x38]()`, then `sym = metaclass->0x18`, then
+`sym->vt[0x148]()` (`getCStringNoCopy`) - so `className` is at **+0x18** of the
+OSMetaClass and is read as an **object**, not a `char *`.  `OSMetaClass`'s
+constructor (`0xffffff8000a49940`) stores `reserved` at +0x08, `superClassLink`
+at +0x10, the name at **+0x18** and `classSize` at +0x20, and the name it stores
+there is the raw `const char *` argument - xnu's known placeholder, interned
+into an OSSymbol later - with exactly **one** store to +0x18 in the whole
+function.  So a rename means writing an `OSSymbol *` into
+`IONDRVFramebuffer::gMetaClass + 0x18`.  **B is strictly worse than A for the
+same effect**: it changes what `IOObjectCopyClass`, `ioreg`, panic logs and any
+name-based `metaCast` see, system-wide, to fix one string comparison in one
+userspace function.  Recorded, not recommended.
+
+### The next step is one command, and it is the user's
+
+`sudo ./build/out/ioptest`.  Root may or may not clear
+`kIOReturnNotPermitted` - many Apple user clients check an entitlement with no
+root fallback - but it is instant, writes nothing, and it is the only thing that
+turns INCONCLUSIVE into an answer about capability.  It creates a third
+GPUWrangler/display-pipe client beside the two WindowServer already holds and
+presents nothing; if it aborts again the process dies and the kernel reclaims
+the connection, which is what the unprivileged run already did twice with no
+effect on the desktop.
+
+- **pipe created** -> intervention A is a real candidate fix, and the display
+  half has a cheap route for the first time since 2pd.
+- **`Unable to create IOAccelDisplayPipe`** -> the capability is missing and
+  2ql's verdict stands: the gate is not the problem and A would black-screen.
+- **`kIOReturnNotPermitted` again** -> still INCONCLUSIVE; the only remaining
+  instrument is WindowServer itself, i.e. intervention A run as an experiment,
+  which is a kext change on the process that owns the display and therefore a
+  decision rather than a measurement.
+
+### Added
+
+`tools/ioptest.m` + `make ioptest`.  Prints both services with class, name and
+registry ID; the three preconditions, searched on the framebuffer **and** the
+accelerator (`IOAccelDisplayPipeCapabilities` lives on the accelerator, not the
+framebuffer - the first version reported it ABSENT); the call made in a forked
+child; and a verdict that names which failure mode was observed.  Exit codes:
+0 pipe created, 3 inconclusive.
