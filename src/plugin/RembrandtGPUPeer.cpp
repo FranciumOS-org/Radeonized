@@ -781,6 +781,12 @@ static const char *const kRbgpuNvramHotKeys[] = {
     "mcp_on", "mcp_mc", "mcp_vt", "mcp_acc", "mcp_size", "mcp_verdict",
     "mcp_mc_addr", "mcp_vt_addr", "mcp_kext_base",
     "mcp_mc_off", "mcp_vt_off", "mcp_deferred",
+    // 2qx: stage 2. `-rbgpumcreg` can leave the machine with a next kext
+    // load that hangs forever on _sStalledClassesLock, so every one of
+    // these has to survive a boot that never finishes coming up.
+    "mcn_on", "mcr_on", "mcn_ready", "mcn_built", "mcn_verdict",
+    "mcr_oneshot", "mcr_ran", "mcr_pre", "mcr_check", "mcr_post",
+    "mcr_name_ok",
     // 2q4: THE frontier. This boot claims kDisplayModeAcceleratorBackedFlag,
     // and it is the first display change in this project that can plausibly
     // blank the panel rather than merely report a wrong number - so these have
