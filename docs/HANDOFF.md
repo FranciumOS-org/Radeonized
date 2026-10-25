@@ -205,7 +205,26 @@
 > `cmpq` is an exact-class test. **Next, static and free: what calls
 > `0x13df4c96`.** Detail: JOURNAL **2qz**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qz)
+> **2r0 — THE AGDC PAIRING IS A MATCHING NOTIFICATION AND ITS CLASS TEST IS
+> `safeMetaCast`, SO A SUBCLASS QUALIFIES.** Nothing calls `0x13df4c96`
+> because the kernel does: the wrangler installs **two** notifications, both
+> `serviceMatching("IOService")`, same handler `0x13df3194`, with the
+> discriminating metaclass as the refCon. The handler admits via five
+> `safeMetaCast`/`metaCast` tests — all superclass-chain walks — so 2qz's
+> exact-class worry is settled in our favour. The wrangler imports only
+> `AppleGraphicsDeviceControl`, its `Client` and `OSObject` (plus **both AGDC
+> constructors**, so it subclasses AGDC itself), and **no `IOFramebuffer` or
+> `IOAccelerator` metaclass at all**. AGDC is 12 KB and never calls the
+> wrangler. **Route to `agdp`: publish an IOService that `safeMetaCast`s to
+> `AppleGraphicsDeviceControl` — no framebuffer subclass, no 311-slot vtable —
+> and 2qy already proved runtime class registration with a system-KC
+> superclass.** Unestablished: which of the four globals is which; **`gpuc`
+> (+0x10) still has no identified writer** (14 stores, none near the struct
+> finder) and IOPresentment wants both fields; and the wrangler calls **into**
+> AGDC with our object right after the store, so a runtime subclass must
+> actually behave like an AGDC. Detail: JOURNAL **2r0**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2r0)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
