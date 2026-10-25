@@ -28768,3 +28768,148 @@ failure of this patch.
 execs can interleave a compare with a verify. Pre-existing - it has shipped
 ~2000 patches a boot since 2on - and this adds a third site rather than fixing
 it. Recorded, not smoothed over.
+
+## 2qp - BOOT 150: THE GATE OPENED. Apple's own words: "System set to use IOP but no display pipes are present"
+
+The patch worked, it did exactly what it was designed to do, and the display
+half is **not** fixed - the blocker moved one layer down and is now named, with
+a backtrace. No black screen; the user: *"desktop is on im on inot black"*.
+
+### Every gate passes
+
+`logs/20261025-013512-plugin/`, read from disk before live NVRAM (rule 10):
+
+```
+rbgpu-boot   150        (new - rule 8 satisfied)
+rbgpu-arm    <unset>    consumed
+rbgpu-iop    <unset>    consumed
+loaded UUID  3B40FB20-540E-3C9A-BE39-A0481860DB05  == build/out
+iop_on 1  iop_saw_ws 1  iop_ready 1  iop_oneshot 0
+iop_match 1  iop_verify 1  iop_patched 1
+```
+
+`iop_match 1` - the five bytes at `0x7ff80412ce97 + slide` really were the
+`callq`. **`iop_verify 1`** - the replacement was read back out of
+WindowServer's own address space and compared (rule 20). `iop_oneshot 0` -
+armed and the clear took, so the next boot is normal with no intervention.
+
+### The gate opened, and Apple says so
+
+`/usr/bin/log show --last boot`, with my own query at 01:36:30 as the
+known-present control and every line attributed by timestamp **and** pid
+(rule 28). `WindowServer[161]`, boot 150:
+
+```
+01:33:39.868  [CoreDisplay] [ERROR] -            <backtrace, below>
+01:33:39.872  [CoreDisplay] [ERROR] - Error: No property 'FB_Triage', or property isn't a string.
+01:33:39.872  [CoreDisplay] [ERROR] - Error: Can't get value for key 'Triage'.
+01:33:39.919  [CoreDisplay] [ERROR] - System set to use IOP but no display pipes are present
+```
+
+**"System set to use IOP"** is the measurement this experiment existed to
+produce. That string is LEA'd immediately before a `movb $0x0, gUseIOP` in the
+`CoreDisplay::GPUController::GPUController()` block, so reaching it proves
+`gSystemGPUVendors` passed the supported-mask test - the exact thing 2ql said
+could never happen for any value of any preference. **The class-name test is
+beaten.** 2ql's finding was right about the mechanism and this is its
+confirmation from the other side.
+
+And the backtrace at 39.868 names where it then failed:
+
+```
+0  ...__hash_table<...CoreDisplay::DisplayPipe...>::__emplace_unique_impl + 4340
+1  CoreDisplay::Framebuffer::Framebuffer(unsigned, unsigned long long, unsigned, unsigned long long) + 3601
+2  CoreDisplay::GPU::GPU(__GPUWranglerGPU*, dispatch_queue_s*) + 744
+3  invocation function for block in CoreDisplay::GPUController::GPUController() + 2634
+4  GPUWranglerRegisterEventBlock + 1077
+5  CGXMappedDisplayStart + 4409
+6  CGXDisplayDriverInitialize + 972
+7  WS::Displays::CoreDisplayManager::initialize() + 43
+8  WSInitialize + 3959
+```
+
+So: the GPUWrangler event block builds a `CoreDisplay::GPU`, which builds a
+`CoreDisplay::Framebuffer`, which tries to put a `DisplayPipe` into an
+`unordered_map<unsigned long long, CoreDisplay::DisplayPipe>` and fails. Zero
+pipes exist, so `GPUController` turns IOP back off.
+
+### Three things measured that kill three easier explanations
+
+**It is not a preference.** `defaults read com.apple.CoreDisplay` and
+`defaults -currentHost read com.apple.CoreDisplay` both answer *"Domain
+com.apple.CoreDisplay does not exist"* - the code reads `kCFPreferencesAnyUser`
++ `kCFPreferencesCurrentHost`, so that is the domain, and nothing is set in it.
+2ql's "all five prefs default to 1, no `defaults write` is missing" holds.
+
+**`FB_Triage` is a RED HERRING, and I nearly acted on it.** The two 39.872
+errors look like the cause - a missing string property named almost exactly
+like `IOAccelDisplayPipeTriage`, which 2qm found in IOPresentment's own
+strings - and the obvious move was to publish it from the plugin the way 2pa
+publishes `VRAM,totalMB`. `ripxref` on the string says otherwise: its only
+readers are **`DumpIORegistryFrameBufferInfo`** and
+**`DumpIORegistryAcceleratorInfo`**. They are diagnostic dumps that run
+*because* the pipe failed. Publishing `FB_Triage` would have changed a debug
+dump and nothing else. **Read what consumes a value before acting on it** -
+the recurring error, caught this time before it cost a boot.
+(`AMDRadeonX6000` does carry `FB Triage - Pipe %u:` and `Triage parameters are
+incorrect for Display - %d string=%p, length=%p`, so the property is real and
+AMD's framebuffer publishes it. It is still not what refused the pipe.)
+
+**And the ioreg grep that "confirmed" its absence was a broken instrument.**
+`grep -c -i triage` over the capture returned 0 - but so did the control,
+`grep -c VRAM,totalMB`, for a property we publish ourselves. Rule 26: the
+search was not checked against a known-present case, so its 0 meant nothing.
+
+### `gUseIOP` is a LATCH, which constrains every future attempt
+
+Read instruction by instruction at `0x7ff804057b40`, not from 2ql's
+pseudocode:
+
+```
+movzbl gUseIOP(%rip), %eax        ; 0x7ff843bac76d
+cmpb   $0x1, %al
+jne    .ret                       ; <- once it is not 1, the function is a no-op forever
+cmpq   $-1, [0x7ff843bb1d68]      ; dispatch_once guard
+jne    .run_GetSystemGPUVendors   ; it TRIGGERS the vendors block itself
+...
+testl  %eax, %eax                 ; present == 0 ?
+je     .fail
+andl   %eax, %ecx
+cmpl   %eax, %ecx                 ; (supported & present) != present ?
+jne    .fail
+movb   gUseIOP(%rip), %al
+.fail:
+movb   $0x0, gUseIOP(%rip)        ; LATCH OFF
+```
+
+Two consequences. First, **ordering was never the risk**: the function runs
+`GetSystemGPUVendors`' `dispatch_once` itself, so our patched classifier is
+guaranteed to have been used on the first call. Second, `CGXMappedDisplayStart`
+writes `$0` to `gUseIOP` directly at **three further sites**
+(`+0x1232`, `+0x2881`, `+0x2894`), each beside an os_log explaining itself. So
+IOP, once refused for any reason, is refused for the life of the process - and
+re-opening the vendor gate alone can never be enough if a later check fails.
+
+### Where this leaves it
+
+Unchanged on screen, and that is expected rather than disappointing: the legacy
+path still runs (`IOAccelSurface::set_id_mode: New id (0x00000001) less than
+256` still appears twice this boot), so the DisplaySurface still has no
+IOSurface and `CompositorSW` still rasterises the desktop. `Metal compositor
+activated.` still appears exactly twice, as in boot 149.
+
+**The frontier is now one function, and it is static work.**
+`CoreDisplay::FindDisplayPipeForService(unsigned)` (`0x7ff804056d04`) opens
+with `movb [0x7ff843bad2d8], %al; testb %al, %al; je <bail>` - a gate byte -
+then loads `[0x7ff843bad2b8]` and popcounts it (the
+`0x5555.../0x3333.../0x0f0f...` sequence) to size a hash table, bailing on
+`testq %rsi,%rsi; je`. `CoreDisplay::DisplayPipeForService(unsigned)`
+(`0x7ff804056c52`) wraps it and logs **"Unable to find display pipe"** on the
+miss. So the next read is **who populates that map** - `InitializeDisplayPipes`
+and whatever `GPUWranglerRegisterEventBlock` hands it - and what about our
+`IONDRVFramebuffer` makes the emplace fail.
+
+**Keep `-rbgpuiop` as it is.** It is correct, verified, costs five bytes in one
+process, and is inert without the one-shot. It is also the only way to reach
+this layer at all: without it the chain stops one step earlier, at the vendor
+mask, and `FindDisplayPipeForService` is never consulted.
