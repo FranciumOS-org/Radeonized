@@ -13030,6 +13030,9 @@ static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
 //                    a VMID the driver never bound - a different bug
 //   av=0          -> no VMID was ever assigned this boot; the hook is the
 //                    silence, not the driver
+//   fail>0        -> 2r7: assignVMID returned FALSE, which its disassembly
+//                    says it cannot. The driver changed; re-read 0xbe91376
+//                    before trusting anything else in this note.
 //
 // Observe only. getPDEValue is called per page-table level per bind, so it
 // records a per-level digest rather than every call, and never logs from
@@ -13042,7 +13045,25 @@ static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
 static void *g_rb_2ig_ctx[16];              // 2ig: VMID -> the bound context
 static uint32_t g_rb_2if_av = 0;            // assignVMID calls
 static uint16_t g_rb_2if_vmids = 0;         // bit n = VMID n was handed out
-static uint32_t g_rb_2if_av_fail = 0;       // calls that returned nonzero
+// 2r7: RETRACTED MEANING. This used to count `r != 0` and the note called it
+// `fail`, which made every boot read "av=N fail=N - every assignVMID failed".
+// The disassembly says otherwise. `AMDRadeonX6000_AMDHWVMM::assignVMID`
+// (0xbe91376) has exactly ONE `retq` (0xbe914f3) and the instruction before
+// it is `movb $0x1, %al` (0xbe914e3), reached from every path - the
+// already-assigned early exit (`testl %r14d,%r14d; je` at 0xbe914d5), the
+// invalidate-submitted exit (`je` at 0xbe91538), the no-channel exit (`je` at
+// 0xbe9154e) and the full path (`jmp` at 0xbe915b6). **It returns `bool` and
+// it always returns true; there is no failure return to count.** So `av ==
+// fail` meant "every call SUCCEEDED", and the old reading was exactly 2ha:
+// a return code is not a result until the code that sets it has been read.
+// Reading it as `uint32_t` was wrong twice over - the SysV ABI defines only
+// `%al` for a bool return, so the upper 24 bits were whatever the previous
+// computation left there (here the assigned VMID, via `movl %eax,-0x64(%rbp)`),
+// which is why a boot could show a `fail` that was not even 1.
+// The counter is kept, under its old key, counting an ACTUAL failure
+// (`r == false`). The disassembly says that cannot happen, so a nonzero
+// `fail` now means the driver changed and is real news.
+static uint32_t g_rb_2if_av_fail = 0;       // calls that returned FALSE
 static uint32_t g_rb_2if_pde[RB_2IF_LVLS];  // getPDEValue calls, per level
 static uint64_t g_rb_2if_pde_first[RB_2IF_LVLS];
 static uint64_t g_rb_2if_pde_last[RB_2IF_LVLS];
@@ -13050,7 +13071,7 @@ static uint32_t g_rb_2if_pde_other = 0;     // levels past the table
 static uint32_t g_rb_2if_pde_novalid = 0;   // returns with bit 0 CLEAR
 static int      g_rb_2if_hooked = 0;
 
-static uint32_t (*orig_assignVMID_2if)(void *, void *, uint32_t *, void *,
+static bool (*orig_assignVMID_2if)(void *, void *, uint32_t *, void *,
                                        void *, void *) = nullptr;
 static uint64_t (*orig_getPDEValue_2if)(void *, uint32_t, uint64_t) = nullptr;
 
@@ -13352,13 +13373,16 @@ void rbgpu_ptfix_flush_2ih(void) {
               "refused the value, which 2ig's single write did not see.");
 }
 
-static uint32_t hooked_assignVMID_2if(void *vmm, void *ctx, uint32_t *vmid,
-                                      void *chan, void *ev, void *flag) {
-    uint32_t r = orig_assignVMID_2if
-                     ? orig_assignVMID_2if(vmm, ctx, vmid, chan, ev, flag)
-                     : 0;
+static bool hooked_assignVMID_2if(void *vmm, void *ctx, uint32_t *vmid,
+                                  void *chan, void *ev, void *flag) {
+    // 2r7: `bool`, not `uint32_t`. The mangled name carries no return type,
+    // so the original declaration was an assumption; the one `retq` sets only
+    // %al, and the upper bits were being read as significant.
+    bool r = orig_assignVMID_2if
+                 ? orig_assignVMID_2if(vmm, ctx, vmid, chan, ev, flag)
+                 : false;
     g_rb_2if_av++;
-    if (r != 0) g_rb_2if_av_fail++;
+    if (!r) g_rb_2if_av_fail++;
     // Read AFTER the original: this is the only moment it holds the answer.
     if (vmid && *vmid < 16) {
         g_rb_2if_vmids = static_cast<uint16_t>(g_rb_2if_vmids | (1u << *vmid));
