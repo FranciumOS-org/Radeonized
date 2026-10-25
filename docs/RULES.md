@@ -1001,13 +1001,24 @@ The two that bite hardest:
   `bufferSwapCount` are still 0 with `fliprq_calls` absent.** Room was never
   what was missing. Keep the arg OUT; it costs a 64 MB kernel mapping and buys
   nothing.
-- **`dsc.py` READS ONE OF THE CACHE'S NINE FILES - EVERY NEGATIVE IT HAS
-  PRODUCED IS ONLY THAT WIDE (2r2).** The shared cache is nine files and each
-  subcache has its **own executable mapping at a distinct VA base** (main
-  `0x7ff800000000`+`0x25198000`, `.01` `0x7ff900000000`+`0x1febc000`, `.02`
-  `0x7ffa00000000`, `.03` `0x7ffb00000000`, `.04`-`.08` unread), while
-  `dsc.py` does `open(path)` on the single path given and enumerates only that
-  file's mappings. The VA space is global across subcaches, so code in `.01`
+- **`dsc.py` NOW READS THE WHOLE CACHE - and it used to read one file of
+  seven, so every negative before 2r3 was only that wide (2r2/2r3).** The
+  cache is **seven** files (2r2 said nine; that was `ls | wc -l` counting
+  `.atlas` and `.map`, which are not caches), each with its **own executable
+  mapping at a distinct VA base**: main `0x7ff800000000`+`0x25198000`, `.01`
+  `0x7ff900000000`, `.02` `0x7ffa00000000`, `.03` `0x7ffb00000000`, `.04`
+  `0x7ffc00000000`, `.05` `0x7ffd00000000`, `.06` `0x7ffe00000000`. `Cache`
+  now globs the siblings, combines their mappings, and **`xrefall <target>`
+  scans every executable mapping in one call** - use it, not the
+  single-range `xref`, for "does anything reference X". `maps` names the
+  owning file. Validated before use: `xrefall` returns the same 7 LEA sites
+  for `ioPresentmentFindAGDCMatch` that the old search found. Watch the
+  protection bits - `VM_PROT_EXECUTE` is **4**, not 1 (`prot 5` =
+  READ|EXECUTE); the first cut of `exec_ranges()` tested `& 1` and claimed
+  "28 of 28 executable", which would have made a data scan look exhaustive.
+  **Still a gap: `xref` matches ONLY `lea <reg>,[rip+disp32]`**, so "0 LEA
+  sites" is not "0 references" - `ripxref.py` exists for exactly that reason
+  on the `.dis` path and the cache reader has never had the equivalent. The VA space is global across subcaches, so code in `.01`
   can reference a string in the main file and the tool will never see it. **A
   hit is still a hit; a "0 hits" means only "not in this file".** Measured on
   the string `"Unable to get AGDC information.  Return code: %#x"`

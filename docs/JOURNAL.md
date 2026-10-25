@@ -30359,3 +30359,98 @@ VA→(file, offset) map, and make `xref`/`callxref`/`dump`/`macho` resolve
 against it. Bounded work, no boot, and it retroactively strengthens every
 negative the cache work has produced. Then re-run this xref; the referencing
 image should fall out immediately.
+
+## 2r3 — `dsc.py` now reads the WHOLE cache, and the AGDC string is still unreferenced. Two corrections to 2r2, and the remaining gap is named.
+
+Tooling, no boot. 2r2 diagnosed that `dsc.py` searched one cache file. Fixed,
+validated, and the original question re-run. It is still unanswered, but now
+for a different and much narrower reason.
+
+### What was built
+
+`Cache.__init__` globs its siblings (`dyld_shared_cache_x86_64h.NN`, digits
+only), reads **each** file's own header mappings, and builds one combined
+VA -> (file, offset) map. `read()` resolves across every file; `maps` prints
+the owning file per mapping; `exec_ranges()` returns every executable mapping;
+and a new **`xrefall <target>`** scans all of them in one call.
+
+Measured, all seven cache files and their executable mappings:
+
+```
+dyld_shared_cache_x86_64h       exec va 0x7ff800000000  size 0x25198000
+dyld_shared_cache_x86_64h.01    exec va 0x7ff900000000  size 0x1febc000
+dyld_shared_cache_x86_64h.02    exec va 0x7ffa00000000  size 0x1fd0c000
+dyld_shared_cache_x86_64h.03    exec va 0x7ffb00000000  size 0x1f2d8000
+dyld_shared_cache_x86_64h.04    exec va 0x7ffc00000000  size 0x20044000
+dyld_shared_cache_x86_64h.05    exec va 0x7ffd00000000  size 0x200a8000
+dyld_shared_cache_x86_64h.06    exec va 0x7ffe00000000  size 0x01260000
+```
+
+**Correction 1 to 2r2: it is SEVEN cache files, not nine.** The nine came from
+`ls | wc -l`, which counted `.atlas` and `.map` — neither is a cache. The
+digit-only glob skips them, and that is why the loader reports 7. The
+substance of 2r2 is unchanged: the code space is **seven** separate VA regions
+and the old reader saw one.
+
+**Correction 2, a bug in this very change, caught by its own output:** the
+first version of `exec_ranges()` tested `initp & 1` and reported "28 of 28
+mappings executable", which is obviously wrong for a cache that has
+read-only and read-write regions. `VM_PROT_EXECUTE` is **4**, not 1 (`prot 5`
+= READ|EXECUTE). Fixed to `initp & 4`, and the count then falls to 7. Recorded
+because a self-reported "28 executable" would have made a later scan look
+exhaustive when it was scanning data.
+
+### The instrument was then validated before being trusted (rule 26)
+
+`xrefall` on the neighbouring string `ioPresentmentFindAGDCMatch`
+(`0x7ff812ea14f7`) returns the **same 7 LEA sites** as the old single-range
+search, now reported across 7 executable mappings. So the widened scan loses
+no known hit and covers every file.
+
+### The answer: still zero, and now the negative is cache-wide
+
+```
+xrefall 0x7ff812ea2887  ->  0 LEA site(s) across 7 executable mapping(s)
+```
+
+Three further checks, each with its own control:
+
+* **Exactly one copy of the string exists** in the entire cache
+  (`"Unable to get AGDC information"`, all 7 files searched for every
+  occurrence, not just the first). So "the code references a duplicate" is
+  dead — that was a real possibility, since 2r2 took `m.find`'s first hit.
+* **Not in either kernel collection** — and the control
+  (`ioPresentmentFindAGDCMatch`) is *also* absent from both, which is the
+  consistent result: both strings are userspace-only, so the emitting code is
+  in the cache.
+* **No absolute-address reference**: searching all 7 files for the 8-byte
+  little-endian VA finds 0 — **but so does the same search for the control**,
+  which has 7 known references. So that search is not a valid instrument here
+  (cache references are RIP-relative) and proves nothing either way. Noted
+  because it would have read as corroboration.
+
+### The one gap left, named precisely
+
+`dsc.py xref` matches **only** `lea <reg>, [rip+disp32]` — its own docstring
+says so, and it deliberately excludes even the non-REX form. So "0 LEA sites"
+is not "0 references". The project already knows this shape of error:
+`tools/re/ripxref.py` exists because *"all RIP-relative encodings, not just
+`lea`"* was the same gap on the `.dis` path (2py). **The cache-level scan has
+never had that fix.**
+
+The objdump sweep in 2r2 *did* cover every RIP-relative form — `--print-imm-hex`
+resolves them all — but only over `0xa0000` bytes around IOPresentment. So the
+live hypothesis is: **the string is referenced by a non-LEA RIP-relative form,
+somewhere outside that window.**
+
+**Next: extend the opcode set in `xref` (or port `ripxref.py`'s table to the
+cache reader) and re-run `xrefall`.** Bounded, no boot, and it closes the last
+way this negative can be wrong. Only if that is also zero is "the string is
+present but dead in this cache build" worth entertaining.
+
+### What is now better regardless of the answer
+
+Every future `dsc.py` negative is cache-wide instead of one-seventh wide, and
+`maps` names the owning file. That is a permanent improvement to the main
+instrument of the display investigation, and it is the actual deliverable of
+this milestone.

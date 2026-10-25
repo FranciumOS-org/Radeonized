@@ -17,34 +17,115 @@ import sys
 
 
 class Cache:
+    """The whole cache, ALL of its files.
+
+    2r2: this used to be `open(path)` on the single path given, enumerating
+    only that file's mappings - and the cache on this machine is **nine**
+    files, each subcache carrying its own executable mapping at a distinct VA
+    base (main 0x7ff800000000+0x25198000, .01 0x7ff900000000, .02
+    0x7ffa00000000, .03 0x7ffb00000000, ...). The VA space is global across
+    them, so code in .01 can reference a string stored in the main file. Every
+    `xref`/`callxref` negative this project produced was therefore only one
+    file wide, and that is how the referencer of "Unable to get AGDC
+    information" stayed invisible through four searches whose controls all
+    passed.
+
+    Subcaches are found by globbing siblings rather than by parsing the
+    header's subCacheArray, because the glob is checkable by eye and the
+    header layout has moved between OS versions. `.symbols` is skipped: it
+    carries no mappings of interest and its VAs overlap nothing.
+    """
+
     def __init__(self, path):
-        self.f = open(path, "rb")
-        h = self.f.read(0x200)
-        mo, mc = struct.unpack_from("<II", h, 16)
-        self.maps = []
-        self.f.seek(mo)
-        for _ in range(mc):
-            addr, size, fo, maxp, initp = struct.unpack("<QQQII", self.f.read(32))
-            self.maps.append((addr, size, fo, initp))
+        import glob as _glob
+        import os as _os
+
+        base = path
+        for suffix in (".01", ".02", ".03", ".04", ".05", ".06", ".07", ".08"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        paths = [base] + sorted(
+            q for q in _glob.glob(base + ".*")
+            if _os.path.basename(q).split(".")[-1].isdigit()
+        )
+
+        self.files = []        # open file objects, main first
+        self.regions = []      # (addr, size, fileoff, initp, fileobj, name)
+        self.maps = []         # (addr, size, fileoff, initp) - legacy shape
+        for q in paths:
+            try:
+                f = open(q, "rb")
+            except OSError:
+                continue
+            h = f.read(0x200)
+            if h[:16].rstrip(b"\x00") == b"" or len(h) < 0x200:
+                f.close()
+                continue
+            mo, mc = struct.unpack_from("<II", h, 16)
+            if mc == 0 or mc > 64:
+                f.close()
+                continue
+            f.seek(mo)
+            got = []
+            for _ in range(mc):
+                rec = f.read(32)
+                if len(rec) < 32:
+                    break
+                addr, size, fo, maxp, initp = struct.unpack("<QQQII", rec)
+                got.append((addr, size, fo, initp))
+            if not got:
+                f.close()
+                continue
+            self.files.append(f)
+            name = _os.path.basename(q)
+            for addr, size, fo, initp in got:
+                self.regions.append((addr, size, fo, initp, f, name))
+                self.maps.append((addr, size, fo, initp))
+        if not self.regions:
+            raise ValueError("no mappings found for %s" % path)
+        self.f = self.files[0]   # kept: some callers still touch it
+
+    def _loc(self, va):
+        """(fileobj, offset) for a VA, searched across every file."""
+        for addr, size, fo, _, f, _n in self.regions:
+            if addr <= va < addr + size:
+                return f, fo + (va - addr)
+        return None, None
 
     def va2off(self, va):
-        for addr, size, fo, _ in self.maps:
+        """Offset WITHIN THAT VA's OWN FILE. Ambiguous across files on its
+        own, so `read` uses `_loc` instead; kept for callers that pair it
+        with `file_of`."""
+        _f, o = self._loc(va)
+        return o
+
+    def file_of(self, va):
+        for addr, size, _fo, _ip, _f, name in self.regions:
             if addr <= va < addr + size:
-                return fo + (va - addr)
+                return name
         return None
 
-    def off2va(self, off):
-        for addr, size, fo, _ in self.maps:
-            if fo <= off < fo + size:
+    def off2va(self, off, name=None):
+        """File offsets are per-file, so this needs the file to be meaningful
+        once there is more than one. `name` defaults to the main cache."""
+        want = name or self.regions[0][5]
+        for addr, size, fo, _ip, _f, n in self.regions:
+            if n == want and fo <= off < fo + size:
                 return addr + (off - fo)
         return None
 
     def read(self, va, n):
-        o = self.va2off(va)
+        f, o = self._loc(va)
         if o is None:
             raise ValueError("va 0x%x is not mapped" % va)
-        self.f.seek(o)
-        return self.f.read(n)
+        f.seek(o)
+        return f.read(n)
+
+    def exec_ranges(self):
+        """Every executable mapping, across all files: (va, size, name).
+        This is what a cache-wide code scan has to iterate."""
+        return [(a, s, n) for a, s, _fo, ip, _f, n in self.regions if ip & 4]
 
 
 def xref(c, text_va, text_len, target):
@@ -224,9 +305,28 @@ def main():
     cmd, path = sys.argv[1], sys.argv[2]
     c = Cache(path)
     if cmd == "maps":
-        for addr, size, fo, initp in c.maps:
-            print("va 0x%012x size 0x%09x fileoff 0x%09x prot %d"
-                  % (addr, size, fo, initp))
+        for addr, size, fo, initp, _f, name in c.regions:
+            print("va 0x%012x size 0x%09x fileoff 0x%09x prot %d  %s"
+                  % (addr, size, fo, initp, name))
+        print("# %d file(s), %d mapping(s), %d executable"
+              % (len(c.files), len(c.regions), len(c.exec_ranges())),
+              file=sys.stderr)
+    elif cmd == "xrefall":
+        # 2r3: every executable mapping in EVERY cache file. This is the
+        # command to use for "does anything reference X"; the single-range
+        # `xref` below answers only "does anything in THIS range".
+        tgt = int(sys.argv[3], 0)
+        regs = ["rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                "r8","r9","r10","r11","r12","r13","r14","r15"]
+        total = 0
+        for va, size, name in c.exec_ranges():
+            hits = xref(c, va, size, tgt)
+            total += len(hits)
+            for site, reg in hits:
+                print("  0x%x   lea %s, [rip+...]   %s"
+                      % (site, regs[reg], name))
+        print("%d LEA site(s) targeting 0x%x across %d executable mapping(s)"
+              % (total, tgt, len(c.exec_ranges())))
     elif cmd == "xref":
         tva, tlen, tgt = (int(x, 0) for x in sys.argv[3:6])
         hits = xref(c, tva, tlen, tgt)

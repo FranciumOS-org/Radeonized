@@ -255,7 +255,22 @@
 > the stated basis. **Next is tooling, not archaeology: teach `dsc.py` all nine
 > files, then re-run the xref.** Detail: JOURNAL **2r2**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r2)
+> **2r3 — `dsc.py` NOW READS THE WHOLE CACHE; THE AGDC STRING IS STILL
+> UNREFERENCED.** `Cache` globs all **seven** cache files (2r2's "nine" was
+> `ls` counting `.atlas`/`.map`), combines their mappings, and the new
+> **`xrefall`** scans every executable mapping in one call — validated by
+> returning the same 7 LEA sites for `ioPresentmentFindAGDCMatch`. A bug in
+> this change was caught by its own output: `VM_PROT_EXECUTE` is 4, not 1, so
+> the first `exec_ranges()` claimed "28 of 28 executable". Re-run:
+> **0 LEA sites cache-wide** for the AGDC error string, with exactly **one**
+> copy of it in the cache (all files, every occurrence) and neither it nor the
+> control present in the kernel collections. The absolute-address search is
+> invalid here — it returns 0 for the control too. **The one live hypothesis
+> left: a non-LEA RIP-relative reference**, since `xref` matches only
+> `lea [rip+disp32]` — the same gap `ripxref.py` fixes on the `.dis` path.
+> Next: extend that opcode set and re-run. Detail: JOURNAL **2r3**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2r3)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
