@@ -27816,3 +27816,65 @@ So the target is no longer a flag to flip but the thing 2pd named: the
 framebuffer must present an accelerator-backed scanout **surface**, not a bare
 range. That is real work, and it is now specified by what consumes it rather
 than guessed at.
+
+## 2qi — CONFIRMED a third way, from Apple's own live state: `surface = 0x0`
+
+The boot-149 `os_state` block at **20:00:04**, MPPriv dict
+(`logs/20261024-200010-cdstate`):
+
+```
+surface          = 0x0000000000000000      surfaceID        = "-1"
+scanoutSurface   = 0x0000000000000000      scanoutSurfaceID = 1
+scanoutWidth     = 0                       scanoutHeight    = 0
+scanoutTransform = {a=0 b=0 c=0 d=0 tx=0 ty=0}
+scanoutUseGLPath = 0
+shmemPtr         = 0x0000000118054000      shmemSize        = 8130560
+vramAddress      = 0x0000000118815000      vramSize         = 0x7e9000
+displayPipe      = 0x00007f99af813e00      (non-NULL)
+displaySurfaceUsesIOSurface = 1            (the feature is ENABLED)
+forcePipeFallback = 0
+```
+
+**The display has a CPU-mapped range and no surface**, said by CoreDisplay's own
+debug dictionary: `surface` NULL, `surfaceID` -1, `scanoutSurface` NULL,
+`scanoutWidth`/`scanoutHeight` 0, while `shmemPtr` and `vramAddress` are both
+non-NULL. `displaySurfaceUsesIOSurface = 1` is the global setting, so
+CoreDisplay **wants** an IOSurface-backed display surface; it has none to use.
+
+So the root cause now stands on three independent legs:
+
+1. **static** - `CDSurface::prepare_for_update` sets `cdsurf->0x40 = 1` when
+   `CoreDisplay_DisplaySurface_GetIOSurface` returns NULL, and
+   `CDDisplay::begin_update` then overwrites `Update->0x1c0` with the software
+   compositor (2qh);
+2. **runtime behaviour** - `render_update` runs `CompositorSW` with no
+   `'Unable to composite display due to null compositor.'` in the log, i.e. the
+   compositor was *replaced*, not missing (2qg/2qh);
+3. **runtime state** - this dict: the display has no surface at all.
+
+And it is 2pd's sentence from boot 138, now quoted back by the OS rather than
+inferred: the destination is a raw CPU-mapped range, not an IOSurface.
+
+### Which finally specifies the framebuffer work
+
+The question is no longer "which flag" but **what makes CoreDisplay acquire a
+scanout surface for a display, and what it asks the framebuffer for.** The
+named entry point is `CGXAcquireDisplayDeviceSurface` (2q9): it clears
+`displayPipeIsAvailable`, then calls `ops->0x158`, which 2qc's thunk table
+identifies as **`CGXFramebufferForDisplayDevice`** - so the acquire path goes
+*through the framebuffer*. Our framebuffer is `IONDRVFramebuffer`, and by 2oz
+every framebuffer method is defined in IONDRVSupport and therefore **routable**
+from this plugin - the same technique that fixed the accelerator.
+
+That is the first time the display half has a target that is neither "write
+DCN 3.1.2 from scratch" nor a flag to flip: a specific acquire path, with a
+specific caller, on a class we can already hook. It is also still static work -
+read what `CGXAcquireDisplayDeviceSurface` requires before writing anything,
+and note that `numDisplayBuffers = 0` (2q9) says the accelerator surface has no
+attached buffer, so the requirement may well be upstream of the framebuffer
+method itself.
+
+**Do not hook anything yet.** 2pq/2pr is the cautionary case: a correct hook on
+`getVRAMRange`, verified to fire at exactly the intended call site, that
+changed nothing because the gate was elsewhere. Establish what consumes the
+surface and what refuses to create it first.
