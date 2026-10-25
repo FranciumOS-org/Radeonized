@@ -17,7 +17,8 @@ case "$1" in
   SkyLight)     BASE=0x7FF807B42000; LEN=0x4CE000 ;;
   CoreDisplay)  BASE=0x7FF80404C000; LEN=0x12A800 ;;
   CoreGraphics) BASE=0x7FF807D00000; LEN=0x400000 ;;   # approximate
-  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics>" >&2; exit 2 ;;
+  IOPresentment) BASE=0x7FF812E88000; LEN=0x1C000 ;;   # dyld_info -segments
+  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment>" >&2; exit 2 ;;
 esac
 mkdir -p build/re
 OUT="build/re/$1-funcs.txt"
