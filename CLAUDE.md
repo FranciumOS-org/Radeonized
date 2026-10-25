@@ -266,6 +266,32 @@ no client probe can answer. **It is still the user's call: a mistake is a black
 screen at login.** 2ql's "do NOT force `UseIOPresentment`" stands untouched -
 this patches none of its 72 call sites, only one input it reads, to a value
 true of the hardware. Detail: JOURNAL **2qo**.
+**BOOT 150: THE GATE OPENED, AND THE BLOCKER MOVED DOWN ONE LAYER (2qp).**
+`iop_verify 1` (bytes read back from WindowServer's own memory), no black
+screen, and WindowServer logs Apple's own **"System set to use IOP but no
+display pipes are present"** - LEA'd immediately before a `movb $0x0,
+gUseIOP`, so reaching it proves the supported-mask test passed. **2ql's
+class-name test is beaten.** It then fails at
+`Framebuffer::Framebuffer+3601`, emplacing into
+`unordered_map<unsigned long long, CoreDisplay::DisplayPipe>`
+(backtrace: `CGXMappedDisplayStart` -> `GPUWranglerRegisterEventBlock` ->
+`GPUController::GPUController` block -> `GPU::GPU`), so zero pipes exist and
+IOP is switched back off. Screen unchanged - legacy path, `CompositorSW` -
+the expected partial result. **Keep `-rbgpuiop`**: without it this layer is
+unreachable. Measured and worth carrying: **`gUseIOP` is a LATCH** (read
+first, any failing path writes 0, plus three more direct zero-writes in
+`CGXMappedDisplayStart`), so re-opening the vendor gate can never suffice
+alone; `UseIOPresentment` triggers `GetSystemGPUVendors`' `dispatch_once`
+itself, so ordering was never the risk; **no `com.apple.CoreDisplay`
+preference domain exists**, so nothing was set to 0; and **`FB_Triage` is a
+RED HERRING** - only `DumpIORegistryFrameBufferInfo`/`AcceleratorInfo` read
+it, diagnostic dumps that run *because* the pipe failed, so publishing it
+would change a debug dump and nothing else (the ioreg grep that "confirmed"
+its absence had a control that also read 0 - rule 26). **FRONTIER, static:**
+`CoreDisplay::FindDisplayPipeForService` (`0x7ff804056d04`) gates on byte
+`0x7ff843bad2d8` then popcounts a table at `0x7ff843bad2b8`;
+`DisplayPipeForService` (`0x7ff804056c52`) logs *"Unable to find display
+pipe"*. Read **who populates that map**. Detail: JOURNAL **2qp**.
 **B, kernel, global** - rename `IONDRVFramebuffer`'s class by
 writing an `OSSymbol *` to `gMetaClass + 0x18` (offset measured from
 `is_io_object_get_class`, which does `metaclass->0x18` then `vt[0x148]`

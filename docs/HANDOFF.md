@@ -23,6 +23,31 @@
 > cycle instead of a boot-arg edit from another OS. **Pending user decision -
 > it is still a kext change on the process that owns the display.** Tools:
 > `make useiop`, `make ioptest`. Detail: JOURNAL 2ql, 2qm, 2qn, **2qo**.
+>
+> **BOOT 150 RAN IT AND THE GATE OPENED (2qp).** `iop_verify 1` - the five
+> bytes read back out of WindowServer's own memory - no black screen, and
+> WindowServer logs Apple's own **"System set to use IOP but no display pipes
+> are present"**, a string LEA'd immediately before a `movb $0x0, gUseIOP`, so
+> reaching it proves the supported-mask test passed. **The class-name test is
+> beaten.** The blocker is now one layer down and named, with a backtrace:
+> `CGXMappedDisplayStart` -> `GPUWranglerRegisterEventBlock` ->
+> `GPUController::GPUController` block -> `GPU::GPU` ->
+> `Framebuffer::Framebuffer+3601` -> emplace into
+> `unordered_map<unsigned long long, CoreDisplay::DisplayPipe>` **fails**, so
+> zero pipes exist and IOP is switched back off. Nothing changed on screen -
+> the legacy path still runs and `CompositorSW` still rasterises the desktop -
+> which is the expected partial result, not a disappointment. **Keep
+> `-rbgpuiop`:** without it the chain stops one step earlier and this layer is
+> unreachable. Also measured: `gUseIOP` is a **latch** (read first, any failing
+> path writes 0, and `CGXMappedDisplayStart` zeroes it at three more sites), so
+> re-opening the vendor gate alone can never suffice if a later check fails;
+> and `FB_Triage` is a **red herring** - its only readers are
+> `DumpIORegistryFrameBufferInfo`/`AcceleratorInfo`, diagnostic dumps that run
+> *because* the pipe failed. **FRONTIER, static, no boot:**
+> `CoreDisplay::FindDisplayPipeForService` (`0x7ff804056d04`) gates on byte
+> `0x7ff843bad2d8` then popcounts a table at `0x7ff843bad2b8`;
+> `DisplayPipeForService` (`0x7ff804056c52`) logs *"Unable to find display
+> pipe"*. Read **who populates that map**. Detail: JOURNAL **2qp**.
 
 # RembrandtGPU — handoff state (2026-10-25, after 2qn)
 
