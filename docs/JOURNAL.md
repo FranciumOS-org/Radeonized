@@ -27612,3 +27612,55 @@ are worth stating now because they are cheap and falsifiable:
 
 If those hold, there is a usable mitigation today and a real fix to design,
 and neither needs a kext change aimed at the display server.
+
+### 2qf RESULT: dead, on both of its own predictions
+
+Fresh dump at **20:00:04**, post sleep/wake, same boot
+(`logs/20261024-200010-cdstate`):
+
+```
+accelerator            = 0x14b23     <- UNCHANGED, still non-zero
+isAcceleratorBacked    = 1
+displayPipeIsAvailable = 0
+numDisplayBuffers      = 0
+service                = 0x10c03
+```
+
+That is branch 2 of the three stated above: **the hypothesis is wrong.** The
+user also refuted it independently and more cheaply - the desktop was *not*
+faster before the first display sleep: "same speed... same desktop time", with
+a grey screen for a minute or two at boot while things load. So the slowness
+was present from login, before any sleep, which the dispatch-once story cannot
+explain.
+
+Worth keeping: the 15:32 and 20:00 dumps **agree**, 4½ hours and a sleep/wake
+apart, so `priv.accelerator` is stable at `0x14b23` and the field is not the
+variable. 2qe's contradiction is therefore real and not an artefact of timing,
+which is what 2qf set out to test. A hypothesis that dies on a measurement it
+predicted is worth more than one that is quietly dropped.
+
+Also re-verified, since it is the one place offset arithmetic could have lied
+(the shared_ptr control-block trap this project hit once already):
+`allocate_shared<CDDisplay>` stores the **vtable pointer at `0x18(%rbx)`**
+(`movq %rcx, 0x18(%rbx)` at `0x7ff807d78238`), so the object really does begin
+at allocation+0x18 and the device at `0x170(%rbx)` really is object+**0x158**.
+The arithmetic holds.
+
+What is left unverified is narrow and specific: **whether the device
+`CDDisplay->0x158` holds is the device the dump prints.** `CGXNextDisplayDevice`
+chooses between **two** lists - the global head at `0x7ff843bb1c08`, or, when
+an indirect predicate at `0x7ff843bb2280` is true, the virtual-framebuffer
+accessor at `0x7ff843bb20d0` plus 0x30. That idiom appears at ~110 sites in
+CoreDisplay, so it is the standard "virtual display mode?" test, and if it is
+true in WindowServer then `all_displays()` builds its CDDisplay on a **VFB**
+device whose `ops->0x148` is `VFBAcceleratorForDisplayDevice`, not the MP one -
+and 2px read that function delegating, with a path that yields 0. The dump
+says `isVirtualDevice = 0`, but that describes the device the **dump** walked.
+
+`tools/wsread.sh` (2qg) reads exactly that, live: the three globals, the list
+predicate, both heads, and for each device its **ops table pointer compared
+against the MP table base** `0x7ff8404fc700`, its priv, and `priv->0x5c`.
+Read-only by construction - no expression evaluated, no function called in the
+target, because calling into a stopped WindowServer can deadlock on a lock its
+own stopped thread holds. Watchdog SIGKILLs lldb past 25 s, since the kernel
+resumes a task whose debugger dies.
