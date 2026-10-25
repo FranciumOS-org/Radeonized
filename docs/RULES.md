@@ -1016,9 +1016,20 @@ The two that bite hardest:
   protection bits - `VM_PROT_EXECUTE` is **4**, not 1 (`prot 5` =
   READ|EXECUTE); the first cut of `exec_ranges()` tested `& 1` and claimed
   "28 of 28 executable", which would have made a data scan look exhaustive.
-  **Still a gap: `xref` matches ONLY `lea <reg>,[rip+disp32]`**, so "0 LEA
-  sites" is not "0 references" - `ripxref.py` exists for exactly that reason
-  on the `.dis` path and the cache reader has never had the equivalent. The VA space is global across subcaches, so code in `.01`
+  **`xref` matches ONLY `lea <reg>,[rip+disp32]`**, so its "0 LEA sites" is
+  not "0 references"; **`ripall <target>` (2r4) closes that** - every
+  RIP-relative encoding, all files, one `re.finditer` pass per mapping over
+  `ripxref.py`'s opcode table. Use `ripall` for "does anything reference X".
+  **AND THE RULE THAT COST THREE MILESTONES (2r4): WHEN XREFING A STRING,
+  XREF THE STRING'S START.** 2r2/2r3 reported the AGDC error string as
+  unreferenced cache-wide; it was not. I had searched for the *substring*
+  `"Unable to get AGDC information"` and xrefed **its** address
+  `0x7ff812ea2887`, while the C string starts seven bytes earlier at
+  `0x7ff812ea2880` (`'Error: Unable to get AGDC information…'`). Code LEAs the
+  START of a string and never the middle, so that search could only ever
+  return zero - a false negative by construction, which a control over a
+  *different* string cannot catch. Re-run on the real start: **3 sites, all in
+  the main file.** Find the preceding NUL before xrefing any string. The VA space is global across subcaches, so code in `.01`
   can reference a string in the main file and the tool will never see it. **A
   hit is still a hit; a "0 hits" means only "not in this file".** Measured on
   the string `"Unable to get AGDC information.  Return code: %#x"`
