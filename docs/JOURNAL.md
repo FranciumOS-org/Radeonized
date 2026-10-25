@@ -30166,3 +30166,103 @@ surface is far smaller.
   to behave like an AGDC. That is the real cost, and it is not measured yet.
 
 Nothing here is a pixel, and every verdict upstream of AGDC still stands.
+
+## 2r1 — `gpuc` has NO writer in the wrangler, and the bigger finding: `gpuc`/`agdp` are NOT the fields IOPresentment asks for. 2qr's inference was a name resemblance.
+
+Static, no boot. The question was "what writes `gpuStruct+0x10`". The answer is
+nothing in this kext — and chasing it exposed a wrong premise under 2qz, 2r0
+and the question itself.
+
+### The reader, pinned down completely
+
+The debug-dict builder is `fn(rdi = gpuStruct, rsi = …)` at `0x13df0912`, so
+`%r15` really is the per-GPU struct (verified, not assumed — rule 20):
+
+| read | width | key |
+|---|---|---|
+| `0xc(%r15)` | `movzwl`, 16-bit | `id` |
+| `0x24(%r15)` | `movl`, 32-bit | `flags` |
+| `0x10(%r15)` | `movq`, 64-bit | **`gpuc`** |
+| `0x68(%r15)` | → `getRegistryEntryID()` | **`agdp`** |
+
+### Four candidate classes for the writer, all eliminated
+
+1. **The 14 plain `0x10(%rX)` stores.** The two plausible ones provably belong
+   to other structs: `0x13df450e` allocates an event-record node with
+   `IOMallocTypeImpl` and sets `+0x10 = mach_absolute_time()`, `+0x18`, then
+   `memmove`s `0x99` bytes to `+0x1c` and links it under the lock at
+   `0x158(%rbx)`; and `0x13df581e` is a trivial `OSObject::init` wrapper that
+   stores its own argument. Neither is the GPU struct.
+2. **Wide/SSE stores overlapping the field.** There are **none** in the kext —
+   zero hits for `movups|movaps|movdqa|movdqu|xorps`, against a control of 47
+   `movzwl` (rule 26).
+3. **All eight `filtered_doDeviceAttribute` calls.** Every one writes a
+   **stack** buffer (`-0x2c(%rbp)`, `-0x86(%rbp)`, `-0x94(%rbp)`) or a caller's
+   buffer, never the struct. The triple at `0x13df57c8` fetches `0x4119` /
+   `0x411a` / `0x411b` into `buf+0`/`+8`/`+0x10` — a *caller's* buffer, which
+   is what made it look promising.
+4. **The `0x301` call beside the `agdp` store, which I wrongly proposed as the
+   answer.** It is a **SET, not a get**: `cmpq $0x2, %r8` requires exactly 2,
+   then `movzwl (%r10), %eax ; movw %ax, 0xb0(%rdi)` — AGDC reads two bytes
+   *from* `&gpuStruct[0xc]` and stores them in **its own** object at `+0xb0`.
+   Since `+0xc` is `id`, that call **pushes the GPU's id into AGDC**. I had
+   reasoned "output pointer + count 2 spans +0x10"; the count is 2 *bytes* and
+   the direction is inward. Stated as a lead and killed by the next read, which
+   is the right order, but it was still an inference dressed as a finding.
+
+**So `gpuStruct+0x10` is read by the debug dictionary and written nowhere in
+`AppleGPUWrangler`.** Either it is written from outside through a pointer to
+the struct, or it is vestigial in this OS and always reads 0. Not resolved.
+
+### The correction that matters more
+
+The premise under the whole question was that `gpuc`/`agdp` are what
+IOPresentment wants. **Measured, with controls, they are not:**
+
+```
+                     in AppleGPUWrangler   in AppleGraphicsDeviceControl
+AGDCVendorInfo              0                        0
+AGDCGPUCapability           0                        0
+AGDCPortCapability          0                        0
+control "agdp"              1                        -
+control "AppleGraphics…"    -                        7
+```
+
+`AGDCVendorInfo` and `AGDCGPUCapability` are strings 2qm read out of
+**IOPresentment.framework's** own string table. **Neither the wrangler nor
+AGDC contains them.** `gpuc` and `agdp` are AppleGPUWrangler's **debug
+dictionary** keys — the thing `ioreg -c AppleGPUWrangler | grep debug-gpus`
+prints.
+
+2qr wrote that IOPresentment "wants `AGDCVendorInfo` and `AGDCGPUCapability`;
+live `debug-gpus` has `gpuc` = 0 and `agdp` = 0". Those are two separate
+observations joined by **the resemblance of the names**, and the join was never
+measured. `gpuc` is not demonstrably `AGDCGPUCapability`, and a debug
+dictionary reading 0 is a symptom at best.
+
+**What this does and does not retract:**
+
+* **2r0's mechanism stands on its own.** The wrangler really does install two
+  `serviceMatching("IOService")` notifications with a shared handler and
+  metaclass refcons, the admission test really is `safeMetaCast`, so a subclass
+  really would qualify, and there really is no `IOFramebuffer` metaclass import.
+  All of that is measured.
+* **2r0's *motivation* is now unsupported.** "Publish an AGDC subclass and
+  `agdp` gets set" is still true, but *that `agdp` being set would unblock
+  IOPresentment* is exactly the unverified join above. Do not build an AGDC
+  subclass on this basis.
+* 2qz's reading of the writer and the loaded-AGDC correction stand; its framing
+  of `agdp` as "the blocker" inherits 2qr's error.
+
+### The next read, and it is a different file
+
+Stop doing wrangler archaeology. The measured failure is IOPresentment's own
+log line, `(IOPresentment) Error: Unable to get AGDC information. Return code:
+0x10000003` (2qr, boot 150). **Read IOPresentment's path to that return code**
+and find what it actually queries — it is a userspace framework in the dyld
+cache, so `tools/re/dsc.py` and `dscinv.sh` apply, and `0x10000003` is a
+distinctive constant to anchor on. Only then is it known what has to be
+supplied.
+
+Cheap and unspent either way: nothing here needed a boot, and nothing here
+changes the desktop.

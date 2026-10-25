@@ -224,7 +224,22 @@
 > AGDC with our object right after the store, so a runtime subclass must
 > actually behave like an AGDC. Detail: JOURNAL **2r0**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2r0)
+> **2r1 — `gpuc` HAS NO WRITER, AND `gpuc`/`agdp` ARE NOT WHAT IOPRESENTMENT
+> ASKS FOR. 2qr's inference was a name resemblance.** `gpuStruct+0x10` is read
+> by the debug dictionary and written **nowhere** in AppleGPUWrangler: all 14
+> plain `0x10(%rX)` stores belong to other structs, there are **zero** SSE
+> stores in the kext (control 47 `movzwl`), and all **eight**
+> `filtered_doDeviceAttribute` calls write stack or caller buffers. The `0x301`
+> call I proposed as the answer is a **set**, pushing the GPU `id` from `+0xc`
+> into AGDC's own `+0xb0`. **And `AGDCVendorInfo`/`AGDCGPUCapability` appear 0
+> times in BOTH the wrangler and AGDC** (controls held) — they are
+> IOPresentment's strings, while `gpuc`/`agdp` are the wrangler's debug-dict
+> keys. 2qr joined the two on the names alone. **2r0's mechanism stands; its
+> motivation does not** — do not build an AGDC subclass expecting it to unblock
+> IOPresentment. **Next: read IOPresentment's own path to `0x10000003`**, not
+> more wrangler archaeology. Detail: JOURNAL **2r1**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2r1)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4

@@ -362,7 +362,33 @@ gated. Detail: JOURNAL **2qz**.
   sites of the struct finder `0x13df2e74`, while IOPresentment wants **both**
   `AGDCVendorInfo` and `AGDCGPUCapability`; and a runtime AGDC subclass would
   have **its methods called by Apple's code**, so it must behave like an AGDC,
-  which is the real unmeasured cost. Detail: JOURNAL **2r0**. Killed suspects: `FB_Triage`
+  which is the real unmeasured cost. Detail: JOURNAL **2r0**.
+  **2r1 CORRECTS THE PREMISE UNDER ALL OF THIS, INCLUDING 2qr.** `gpuc`
+  (`gpuStruct+0x10`) has **NO writer in AppleGPUWrangler** - four candidate
+  classes eliminated: all 14 plain `0x10(%rX)` stores (the two plausible ones
+  are provably other structs - `0x13df450e` builds an event-record node whose
+  `+0x10` is `mach_absolute_time()`, `0x13df581e` is a trivial
+  `OSObject::init` wrapper); **zero** wide/SSE stores exist in the kext
+  (control: 47 `movzwl`); and **all eight** `filtered_doDeviceAttribute` calls
+  write **stack** buffers or a caller's buffer, never the struct. The `0x301`
+  call beside the `agdp` store, which looked like the answer, is a **SET, not a
+  get** - `movzwl (%r10),%eax ; movw %ax,0xb0(%rdi)`, i.e. AGDC reads 2 bytes
+  *from* `&gpuStruct[0xc]` (which is `id`) into **its own** object, so the
+  wrangler is pushing the GPU id INTO AGDC. **And the bigger finding: `gpuc`
+  and `agdp` are the wrangler's DEBUG-DICTIONARY keys, not what IOPresentment
+  asks for.** `AGDCVendorInfo` / `AGDCGPUCapability` / `AGDCPortCapability`
+  appear **0 times in both AppleGPUWrangler and AppleGraphicsDeviceControl**
+  (controls: `agdp` 1x in the wrangler, `AppleGraphicsDeviceControl` 7x in
+  AGDC); 2qm read those names from **IOPresentment.framework's** string table.
+  2qr joined "IOPresentment wants AGDCVendorInfo/AGDCGPUCapability" to
+  "`debug-gpus` has `gpuc=0, agdp=0`" **on the resemblance of the names**, and
+  that join was never measured. **2r0's mechanism still stands** (the two
+  notifications, the `safeMetaCast` admission, no `IOFramebuffer` import) -
+  **its motivation does not.** Do NOT build an AGDC subclass on the belief that
+  setting `agdp` unblocks IOPresentment. **Next read, and it is a different
+  file: IOPresentment's own path to `0x10000003`** (the measured log line from
+  boot 150), via `tools/re/dsc.py` / `dscinv.sh`, anchoring on that constant.
+  Detail: JOURNAL **2r1**. Killed suspects: `FB_Triage`
 (diagnostic dumps only) and the third-party NV kexts in `/Library/Extensions`
 (`kextstat`, control 67 - **none loaded**). The `IOPresentment` boot-arg token
 is logging-only and real but **no longer worth a boot**. Keep `-rbgpuiop`:
