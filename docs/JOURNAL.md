@@ -30950,3 +30950,71 @@ Also corrected in `docs/HANDOFF.md` §6, where it had been standing wrong since
 seeds `diag_max`/`diag_used` into slots 0 and 1 before any real key. Rule 14's
 actual requirement — check `diag_used` against `diag_max` before concluding
 from an absent key — is what replaces it.
+
+---
+
+## 2r8 — root is refused for an ENTITLEMENT, not a capability; only WindowServer holds it
+
+`sudo ./build/out/agdcinfo` (boot of 2026-10-25). Output is in the session;
+the load-bearing lines:
+
+```
+[1] name="AppleGPUWrangler" ... -> SKIPPED by the name test
+    IOServiceOpen(type 2)        = 0xe00002e2 (kIOReturnNotPermitted)
+matched 1, skipped 1, candidates 0
+== 2. control: IOServiceOpen(MACH_PORT_NULL, ..., 2) = 0x10000003
+```
+
+So **as root, the wrangler's own AGDC user client still returns
+`kIOReturnNotPermitted`** — the same `0xe00002e2` the unprivileged run gave.
+2r5 pre-stated the unprivileged refusal as inconclusive; the root refusal is
+the new fact, and it means `sudo` is not the missing privilege.
+
+`AppleGraphicsDeviceControlClient::authorizeTask` (`0x13dfaf46`) says why,
+read whole:
+
+```
+copyClientEntitlement(task, "com.apple.private.applegraphicsdevicecontrol")  ; 0x13dfafb8
+  present -> authorized
+else copyClientEntitlement(task, "com.apple.private.gpuwrangler")            ; 0x13dfaff3
+  present -> authorized
+else IOLog("AGDCC: Unauthorized client '%s' blocked (%s)") ; return FAIL     ; 0x13dfb0cd
+```
+
+(entitlement strings `0x13dfdd9c` / `0x13dfddc9`, the block message
+`0x13dfdde7`, all confirmed by reading `(__TEXT,__cstring)`). **The gate is a
+code-signing entitlement, which `sudo` does not grant** — uid 0 and an
+unprivileged process both lack those two private entitlements, so both are
+refused identically. The one holder of
+`com.apple.private.applegraphicsdevicecontrol` on this system is
+**WindowServer** (its name is a literal `0x13dfde16` in the very same
+function, used only to format the block message), which is exactly the process
+boot 150 saw take the failure. So **no tool a user can run from a shell can
+probe attribute 1**, root or not; only WindowServer opens this client.
+
+This does not touch 2r5's verdict. The association map is empty because our
+only AGDC service is `AppleGPUWrangler`, which IOPresentment skips by name —
+a **missing per-GPU `AppleGraphicsDeviceControl`**, not an access problem. The
+entitlement gate only closes the measurement, not the diagnosis.
+
+### The one Apple lever, flagged and NOT pursued
+
+`authorizeTask`'s first branch (`0x13dfaf72`) is
+`cmpb $-0x1, 0x13e00884; jne <skip the parse>`, and when that cached byte is
+`0xFF` it runs `PE_parse_boot_argn("agdc_entitle", &b, 1)` (string
+`0x13dfdd8f`) and stores `b != 0` back. When the resulting flag at
+`0x13e00884` is non-zero, the check at `0x13dfb016`
+(`cmpb $0x0, 0x13e00884; jne <authorized>`) **bypasses the entitlement test
+entirely.** All **three** references to that byte are inside `authorizeTask`
+(`0x13dfaf72`, `0x13dfafa8`, `0x13dfb016`) — `ripxref` over the whole AGDC
+`__text` finds no others — so the blast radius is this one function.
+
+**Not pursued, and it is the user's call if ever:** `agdc_entitle` is an
+Apple-internal development boot-arg that disables a code-signing authorization
+check across AGDC; it is untested here, and before arming it one would need to
+read **what sets `0x13e00884` to `0xFF`** (the initial-sentinel guard) and
+whether that path even runs on a release kernel — it was not spent on this
+turn. It would at most let a user-run tool reach `authorizeTask`; it would
+**not** create the missing AGDC service, so it answers the measurement
+question and nothing about the diagnosis. Noted so it is in the record, not
+proposed.
