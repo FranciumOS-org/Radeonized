@@ -589,16 +589,18 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     **system** KC, our plugin at `0xffffff8004043000` in the **boot** KC.
     Boot 151 was spent on a read-only probe that solved both of its symbols
     and then threw them away as "not a kernel VA". For a kext symbol the floor
-    is **`0xffffff7f80000000`** (below all 180, measured). And **do not
-    "improve" it to the kext's own `[address, address+size)`** — a collection
-    groups every kext's `__DATA` separately, `kextstat`'s size covers `__TEXT`
-    alone, and IOGraphicsFamily's `gMetaClass` is at offset `0x3f040` against a
-    size of `0x2efea`; that check rejects valid symbols too. Two corollaries
-    from the same boot: **`solveSymbol`'s lookup is not bounded by `size`** (it
-    resolved `0x3f040` when given `0x2efea`), and **a refusal path must publish
-    the value it refused** — this one `continue`d and reported the address as 0,
-    so the capture could not say what had been rejected (rule 14 applies to an
-    instrument's failure paths, not just its returns). [2gh, 2qu]
+    is **`0xffffff7f80000000`** (below all 180, measured). The second lesson
+    is the one that generalises: **a refusal path must publish the value it
+    refused.** This one `continue`d and reported the address as 0, so the
+    capture could not say what had been rejected — rule 14 applies to an
+    instrument's failure paths, not only its returns. **2qu also claimed the
+    kext's own `[address, address+size)` would reject valid symbols, and boot
+    152 measured that false**: it used `kextstat`'s size column (`0x2efea`,
+    `__TEXT` only) in place of the `size` Lilu actually passes, which is
+    `0x42000` and spans `__TEXT + __DATA + __DATA_CONST`, so the range check
+    would have worked. Both guards are fine; the floor is just simpler. The
+    reusable form of *that* mistake: **one number was read and another
+    asserted — publish the parameter instead of assuming it.** [2gh, 2qu, 2qv]
 20. **A registration that reports success is not evidence that a patch
     applied.** A Lilu `BinaryModPatch` with `section == 0`
     (`SectionDisabled`) is skipped and its file never read, while

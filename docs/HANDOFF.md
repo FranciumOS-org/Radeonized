@@ -110,7 +110,29 @@
 > the part that can panic the next kext load. Rule 19 is corrected above, not
 > retired. Detail: JOURNAL **2qt**, **2qu**.
 
-# RembrandtGPU — handoff state (2026-10-25, after 2qu)
+> **2qv — ROUTE C's SYMBOLS ARE REACHABLE; THE OBJECT HAS TO BE READ LATER.**
+> Boot 152 hit 2qu's pre-stated prediction **to the byte**: `mcp_mc_off`
+> `0x3f040`, `mcp_vt_off` `0x35248`, each address exactly kext base + offset,
+> both accepted. `__ZN13IOFramebuffer10gMetaClassE` and `__ZTV13IOFramebuffer`
+> **are reachable from the boot KC at the addresses static analysis names** —
+> that half of 2qs's question is answered. But the metaclass read back all
+> zeros (`mcp_size 0`, name NULL, super NULL, `mcp_verdict 8`) because the
+> symbol is in **`__DATA,__common`** — BSS — and Lilu's kext callback runs
+> **before** IOGraphicsFamily's own `OSMetaClass` constructors. Control in the
+> same boot: `fbvram 3`, i.e. `getMetaClass()->getClassName()` returning
+> `IONDRVFramebuffer` at `enableController`, so the accessors and a populated
+> metaclass work fine — later. The probe is now split: **solve at kext load,
+> read from 2pa's existing `enableController` hook** (rule 3, same
+> `RouteRequest`, wider gate), the one site where a populated metaclass is
+> measured rather than assumed — so **keep `-rbgpufbvram`** for that control.
+> `mcp_verdict 15` is still the only meaningful verdict and still establishes
+> only that route C's **inputs** exist, never that a class can be
+> **registered** (stage 2, the part that can panic the next kext load).
+> **2qu's claim that a `[address, address+size)` check would have failed is
+> retracted** — Lilu passes `0x42000`, not `kextstat`'s `0x2efea`. Detail:
+> JOURNAL **2qv**.
+
+# RembrandtGPU — handoff state (2026-10-25, after 2qv)
 
 > §1–§3 and §5–§9 were written 2026-10-23 after 2op and still hold (they are
 > about the rendering half, which is **done**). §1's compositing sentence, §4
@@ -740,11 +762,13 @@ above is the most recent, and is the variant worth naming:
     in a kext**, because kexts sit on both sides of it (180 here, 50 below /
     130 above; IOGraphicsFamily `0xffffff7f95c94000` system KC, ours
     `0xffffff8004043000` boot KC). For a kext symbol use
-    **`0xffffff7f80000000`**, and NOT the kext's own `[address, address+size)`:
-    a collection groups every kext's `__DATA` apart from its `__TEXT`, so
-    `gMetaClass` is at offset `0x3f040` against a reported size of `0x2efea`.
-    Boot 151 was spent on this. Also: `solveSymbol` is not bounded by `size`,
-    and **a refusal path must publish the value it refused**. [2gh, 2qu]
+    **`0xffffff7f80000000`**. Boot 151 was spent on this. The lesson that
+    generalises: **a refusal path must publish the value it refused** — this
+    one reported the rejected address as 0. (2qu also said the kext's own
+    `[address, address+size)` would reject valid symbols; boot 152 measured
+    that false — Lilu passes `0x42000`, spanning `__TEXT + __DATA +
+    __DATA_CONST`, not `kextstat`'s `__TEXT`-only `0x2efea`. Publish the
+    parameter instead of asserting it.) [2gh, 2qu, 2qv]
 11. **When a fix moves upstream, REMOVE the downstream patch it replaces, in
     the same change.** "Redundant" and "inert" are different things. [2kv]
 

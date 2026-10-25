@@ -29427,3 +29427,110 @@ months) and wrong for a **symbol in a kext**, which may be in either
 collection. Build: UUID `9E28A3A0-6A9C-3E7C-8480-28606C5477FB`, hosttest all
 passed, five names re-checked against `nm` (rule 5), both target symbols
 confirmed **defined** in IOGraphicsFamily (rule 1).
+
+## 2qv — boot 152: the prediction held to the byte; the metaclass is BSS and was read too early. 2qu corrected.
+
+Boot 152, `logs/20261025-022931-plugin/`. Gates: `rbgpu-boot` **152** (151 the
+previous capture, rule 8), loaded UUID
+`9E28A3A0-6A9C-3E7C-8480-28606C5477FB` matching the build (rule 15),
+`mcp_on 1`.
+
+**The pre-stated prediction held exactly.** 2qu wrote, before the boot, that
+`mcp_mc_off` must read `0x3f040` and `mcp_vt_off` `0x35248`, computed from
+`nm -m build/re/IOGraphicsFamily` minus the extracted `__TEXT` vmaddr:
+
+```
+mcp_kext_base = ffffff7fad294000
+mcp_mc_addr   = ffffff7fad2d3040   mcp_mc_off = 3f040   mcp_mc = 1
+mcp_vt_addr   = ffffff7fad2c9248   mcp_vt_off = 35248   mcp_vt = 1
+mcp_acc       = 7
+```
+
+Both offsets to the byte, both addresses exactly base + offset, and the floor
+accepted them. A clean before/after control came free: the capture holds
+`rbgpu-diag` (this boot) **and** `rbgpu-diag-prev` (boot 151's), and the same
+keys read `mcp_mc=2 mcp_vt=2` there against `mcp_mc=1 mcp_vt=1` here — the
+2qu fix, measured against its own previous value.
+
+So **`__ZN13IOFramebuffer10gMetaClassE` and `__ZTV13IOFramebuffer` are
+reachable from the boot KC, at the addresses static analysis names.** That was
+2qs's open question about route C's inputs, and for the symbols it is answered.
+
+### But the object is not populated yet
+
+```
+mcp_size       = 0        (static read says 0x1d0)
+mcp_name       -- absent  (getClassName() returned NULL)
+mcp_super_addr = 0        (getSuperClass() returned NULL)
+mcp_verdict    = 8        (only the vtable-solved bit)
+mcp_say        = MISMATCH(see mcp_name/size/super; read nothing further)
+```
+
+All three accessors resolved (`mcp_acc 7`) and all three answered zero. That
+is not a wrong address — the offsets prove the address — it is **zero-filled
+memory**. `nm -m` puts the symbol in **`__DATA,__common`**, i.e. BSS, and the
+`OSMetaClass` is constructed by IOGraphicsFamily's own module load
+(`preModLoad` → the `MetaClass` constructors → `postModLoad`). Lilu's kext
+callback runs while the kext is being *prepared*, **before** those
+constructors. The probe read the storage before anyone filled it.
+
+**The control is in the same boot, and it is decisive:** `fbvram 3` means
+2pa's `enableController` hook called `getMetaClass()->getClassName()` and got
+`IONDRVFramebuffer` back. So populated metaclasses and these very accessors
+work fine here — just later. Noted in passing: `getClassName()` on a zeroed
+metaclass returned NULL rather than faulting, so it carries its own NULL
+guard.
+
+### 2qu's claim about the range check was WRONG, and this boot measured it
+
+2qu said a `[address, address+size)` check "would have rejected them for a
+brand-new wrong reason", on the grounds that `kextstat` reports `0x2efea`
+while `gMetaClass` sits at offset `0x3f040`. The probe published the number
+instead of assuming it:
+
+```
+mcp_kext_size = 270336 = 0x42000
+__TEXT 0x2f000 + __DATA 0x11000 + __DATA_CONST 0x2000 = 0x42000
+```
+
+**Lilu's `size` spans all three segments**, so `0x3f040` and `0x35248` are
+both inside it and the range check would have worked. The error was
+substituting `kextstat`'s size column for the parameter Lilu actually passes —
+one number read, another asserted. The floor that shipped is still correct and
+still the simpler test; what is retracted is the reason given for preferring
+it. **2qu was right about the bug and wrong about the alternative.**
+
+Also measured and worth keeping: **`solveSymbol`'s lookup is not bounded by
+the `size` argument in the way 2qu guessed** — there was never a conflict to
+observe, because `size` already covered `__DATA`.
+
+### The fix: solve early, read late
+
+Split in two, because boot 152 showed they belong at different moments.
+`rbgpu_mcprobe_2qt` keeps the symbol lookup at IOGraphicsFamily's load, where
+it is exact, stashes the two addresses and the three accessors, publishes
+`mcp_deferred 1` and stops. `rbgpu_mcprobe_read_2qv` does the reading and the
+verdict, called from **2pa's existing `enableController` hook** — rule 3, the
+same `RouteRequest` under a wider gate (`g_vram_on || g_mcp_on`), never a
+second route for one function. That site is chosen because it is the only
+place in the plugin where a populated metaclass is **measured** rather than
+assumed. Keep `-rbgpufbvram` in boot-args so `fbvram 3` stays available as
+that control.
+
+Still read-only: constructs nothing, registers nothing, allocates nothing,
+attaches to no provider, touches nothing of the framebuffer it is handed.
+
+> **Pre-stated (rule 14): `mcp_verdict 15` is the only meaningful value** —
+> `mcp_name` = `IOFramebuffer`, `mcp_size` = `0x1d0`, `mcp_super` =
+> `IOGraphicsDevice`, from `IOFramebuffer::MetaClass::MetaClass()` read
+> statically at IOGraphicsFamily `0x14fb7b6a`. `mcp_deferred 1` with
+> `mcp_verdict` still 8 would mean `enableController` never ran. And the
+> offsets must stay `0x3f040` / `0x35248`; they are now a regression check on
+> the symbol lookup, not a question.
+
+What a verdict of 15 would establish is unchanged and still narrow: route C's
+**inputs** are reachable across the KC boundary. It says nothing about whether
+a class can be **registered**, which is stage 2, drives `OSMetaClass`'s global
+stalled-class list, and panics the *next* kext load if it is wrong.
+
+Build: UUID `89A5E227-C830-3250-8603-6AC7EE96FB8E`, hosttest all passed.
