@@ -1,3 +1,23 @@
+> **FRONTIER, 2026-10-24 (2ql/2qm/2qn) - read this before anything on the
+> display half.** The software-compositing chain is closed end to end and the
+> remaining step is a DECISION, not a read. `Display::GetNextSurface` has two
+> paths; the legacy one is dead (Apple rejects surface ids < 256, 2qk) and the
+> IOSurface one is gated on `UseIOPresentment()`, which is false **only**
+> because CoreDisplay classifies GPUs by `IOObjectCopyClass` on the
+> IOFramebuffer and `IONDRVFramebuffer` matches none of
+> Intel/AMD/NVDA/AppleParavirt, scoring the "unknown" bit 0x1 that the
+> supported mask can never contain. Everything IOPresentment needs is live and
+> paired - `DisplayPipeSupported=1`/`TransactionsSupported=1`, two live
+> `IOAccelDisplayPipeUserClient2`s, and `AppleGPUWrangler`'s `debug-gpus`
+> already listing **our** framebuffer (`0x100000548`) with **our** accelerator
+> (`0x10000054a`). The client-side probe is permanently blocked: the GPUWrangler
+> user client is entitlement-gated and `sudo` does not clear it
+> (`kIOReturnNotPermitted` both ways). **Pending user decision:** intervention
+> A, a 6-byte patch of CoreDisplay's vendor classifier `0x7ff80412cc38` inside
+> WindowServer (`b8 04 00 00 00 c3`, one caller, no DCN register, rescue
+> `-rbgpuoff`). The user chose to stop before implementing it (2026-10-24).
+> Tools: `make useiop`, `make ioptest`. Detail: JOURNAL 2ql, 2qm, 2qn.
+
 # RembrandtGPU — handoff state (2026-10-23, after 2op)
 
 Apple's Navi 21 macOS GPU stack drives a **Radeon 680M** (Rembrandt APU,
