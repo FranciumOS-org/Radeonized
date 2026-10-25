@@ -29231,3 +29231,100 @@ fifth time. The cheapest decisive experiment if it is ever attempted:
 **register a throwaway `OSMetaClass` at runtime from the boot KC**, attached to
 no provider, to learn whether that is possible at all. Contained, clear
 negative, and it gates everything else.
+
+## 2qt - route C stage 1: is IOFramebuffer's metaclass reachable from the boot KC? (read-only, built)
+
+2qs left route C - construct the class at runtime instead of linking it - as
+the only route no measurement had closed. This is its first stage, and it is
+deliberately the cheap, safe half: **it reads and reports, and constructs
+nothing.**
+
+### Why a read-only stage is the right first boot
+
+Registering a class outside kext-load time means driving `OSMetaClass`'s
+global stalled-class list (`preModLoad` / the constructor / `postModLoad`, all
+three present in the kernel at `0xffffff8000a4a190`, `0xffffff8000a49940`,
+`0xffffff8000a4a290`). Getting that wrong does not fault *our* code - it leaves
+the global list inconsistent and panics **the next kext load**, which on this
+machine means a boot that may not come back. So that attempt gets its own arg
+and its own decision, taken on this stage's numbers rather than ahead of them.
+
+This stage solves two data symbols and calls three of the kernel's own `const`
+accessors on the object it finds. No construction, no registration, no
+allocation, no provider. There is no path by which it changes what the machine
+does.
+
+### What it reads, and what would make it meaningful
+
+`-rbgpumcprobe`, off by default, inside the existing `processIOGraphics`
+(before the vblank pump's early return, so the pump's arg does not gate it):
+
+* `__ZN13IOFramebuffer10gMetaClassE` - the superclass metaclass. It is in
+  `__DATA,__common`, so the **symbol is the object**, not a pointer to it.
+* `__ZTV13IOFramebuffer` - the vtable a subclass would copy.
+* then `OSMetaClass::getClassName()`, `getClassSize()` and `getSuperClass()`
+  from the kernel, called on that object - Apple's own accessors rather than
+  offset arithmetic, so the reading cannot drift if a field moves. 2qm's
+  measured layout (name `OSSymbol*` at +0x18, `classSize` at +0x20) still
+  stands; this just does not depend on it.
+
+**Stated in the code, before the boot (rule 14): the reading means something
+only if `mcp_name` = `IOFramebuffer`, `mcp_size` = `0x1d0` and `mcp_super` =
+`IOGraphicsDevice`.** Those three are exactly what
+`IOFramebuffer::MetaClass::MetaClass()` passes to `OSMetaClass::OSMetaClass`,
+read statically from its disassembly at IOGraphicsFamily `0x14fb7b6a`:
+
+```
+leaq "IOFramebuffer"(%rip), %rsi
+leaq __ZN16IOGraphicsDevice10gMetaClassE(%rip), %rdx
+movl $0x1d0, %ecx
+callq OSMetaClass::OSMetaClass
+```
+
+Agreement proves both that the object is the real metaclass and that we are
+reading it correctly; disagreement means the symbol resolved to something else
+and nothing further in the capture is meaningful. `mcp_verdict` packs the four
+checks (name 1, size 2, super 4, vtable 8) and **15 is the only value that
+means anything**; `mcp_say` words it.
+
+### Two facts this already produced statically, with no boot
+
+* **`sizeof(IOFramebuffer)` = `0x1d0` (464 bytes), and its superclass is
+  `IOGraphicsDevice`**, not `IOService`. A subclass must chain through
+  `IOGraphicsDevice`.
+* **2qs's fragility claim was overstated, and `docs/SCOPE-FRAMEBUFFER.md` is
+  corrected.** It said a hand-built vtable must synthesise every slot.
+  `IOFramebuffer`'s vtable is at least `0x9b0` bytes (~311 slots - 2pq resolved
+  `getVRAMRange` at slot `0x9b0`), but a subclass **copies** it and overwrites
+  only the slots it overrides, exactly as the compiler does. The risk is a
+  wrong slot *index*, not 311 wrong addresses. Still fragile - a wrong index is
+  a panic on the display path, indices move across OS updates, and the
+  read-back-and-compare fail-safe that makes `-rbgpumtlkfix` acceptable does
+  not transfer - but it is a different and smaller claim than the one I wrote.
+
+### Rules applied rather than recited
+
+* Rule 1: both data symbols are `nm -m build/re/IOGraphicsFamily` external and
+  defined; all three accessors are defined in `build/re/kernel`.
+* Rule 5: all five names were cross-checked against `nm` **after** the build -
+  each appears exactly once in the built kext and exactly once in `nm`.
+* Rule 19: a non-zero `solveSymbol` is not a pointer. Each address is checked
+  `>= 0xffffff8000000000` before anything dereferences it, and a failure
+  reports `2` rather than being silently skipped.
+* Rule 14: every path writes a key - `mcp_on` 0 when the arg is absent,
+  `mcp_mc`/`mcp_vt` 0 on a failed solve and 2 on a bad VA, `mcp_acc` as a mask.
+* Rule 16: the instrument is a suspect, which is the whole reason stage 1
+  touches nothing.
+
+Keys are NVRAM-hot: this runs during IOGraphicsFamily's load, long before a
+desktop exists. UUID `80B63A57-C76F-39AE-A194-59B41F6D9536`; hosttest passed.
+
+### What a result would and would not settle
+
+`mcp_verdict 15` means the **inputs** a runtime-built subclass needs are
+reachable across the KC boundary - it does **not** mean a class can be
+registered, which is stage 2's question and the one that carries risk. A
+failure to solve either symbol closes route C for free, which is the outcome
+worth hoping for if one is being honest about the remaining work: 2qs's §6
+lists AGDC vendor info, the IOPresentment kernel API and the OTG/HUBP
+programming still owed after registration succeeds.

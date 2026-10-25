@@ -728,6 +728,12 @@ static const char *const kRbgpuNvramHotKeys[] = {
     //                back from WindowServer's own memory (rule 20).
     "iop_on", "iop_saw_ws", "iop_ready", "iop_oneshot",
     "iop_match", "iop_verify", "iop_patched",
+    // 2qt: read-only, but it runs during IOGraphicsFamily's load, long before
+    // a desktop exists, so a boot that never shows one still reports it.
+    // `mcp_verdict` 15 is the only value that means anything: name, size,
+    // super and vtable all agreeing with the static read of
+    // IOFramebuffer::MetaClass::MetaClass().
+    "mcp_on", "mcp_mc", "mcp_vt", "mcp_acc", "mcp_size", "mcp_verdict",
     // 2q4: THE frontier. This boot claims kDisplayModeAcceleratorBackedFlag,
     // and it is the first display change in this project that can plausibly
     // blank the panel rather than merely report a wrong number - so these have

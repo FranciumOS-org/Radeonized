@@ -9028,8 +9028,187 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
     }
 }
 
+// ---------------------------------------------------------------------------
+// 2qt (2026-10-25): is IOFramebuffer's OSMetaClass REACHABLE from the boot KC?
+//
+// 2qs scoped the framebuffer stack and found the blocker is not the DCN 3.1.2
+// port (94.7 % of display registers are at identical offsets, and the whole
+// scanout path is bit-identical) but the kernel-collection split: our plugin
+// is in BootKernelExtensions.kc, IOGraphicsFamily is in
+// SystemKernelExtensions.kc, so a kext DECLARING
+// `OSBundleLibraries -> com.apple.iokit.IOGraphicsFamily` cannot load here -
+// and a failed load takes the working accelerator with it (2oz built that
+// subclass and it compiled; it can never be loaded).
+//
+// 2qs also narrowed that blocker, which is why this probe exists: the split
+// blocks STATIC LINKING, not calling. This plugin already routes 35
+// IONDRVFramebuffer call sites and solves symbols in IOGraphicsFamily,
+// IONDRVSupport, IOAcceleratorFamily2 and four AMD kexts across that same
+// boundary, every armed boot, while declaring none of them. So the question
+// for "route C" - construct the class at runtime instead of linking it - is
+// whether the pieces a subclass needs are reachable the same way.
+//
+// THIS STAGE READS AND REPORTS. It solves three data symbols and calls three
+// of the kernel's own const accessors on the object it finds. It constructs
+// nothing, registers nothing, allocates nothing and attaches to no provider,
+// so there is no path by which it can change what the machine does. That
+// matters because the next stage is NOT like this: registering a class
+// outside kext-load time manipulates `OSMetaClass`'s global stalled-class
+// list, and getting that wrong panics the NEXT kext load rather than this
+// code - so it is a separate decision, with its own arg, taken on this
+// stage's numbers.
+//
+// What it would have to show for route C to be worth anything (rule 14, said
+// in the code rather than after the fact): `mcp_name` = "IOFramebuffer",
+// `mcp_size` = 0x1d0 and `mcp_super` = "IOGraphicsDevice". Those three are
+// what `IOFramebuffer::MetaClass::MetaClass()` passes to
+// `OSMetaClass::OSMetaClass` - read statically from its disassembly at
+// IOGraphicsFamily `0x14fb7b6a` - so agreement proves both that the object is
+// the real metaclass and that we are reading it correctly. Disagreement means
+// the symbol resolved to something else and nothing further is meaningful.
+// ---------------------------------------------------------------------------
+using t_rbMcName  = const char *(*)(const void *);
+using t_rbMcSize  = unsigned int (*)(const void *);
+using t_rbMcSuper = const void *(*)(const void *);
+
+static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
+                              mach_vm_address_t address, size_t size) {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    if (!checkKernelArgument("-rbgpumcprobe")) {
+        rbgpu_diag_set_num("mcp_on", 0);
+        return;
+    }
+    rbgpu_diag_set_num("mcp_on", 1);
+
+    // The two data symbols a runtime-built subclass would need: the
+    // superclass metaclass OBJECT (it is in __DATA,__common, so the symbol IS
+    // the object, not a pointer to it) and the vtable to copy.
+    // Rule 1: both are `nm -m build/re/IOGraphicsFamily` external and defined.
+    // Rule 5: both names are copied from nm output, not hand-built.
+    struct { const char *sym; const char *key; mach_vm_address_t addr; } want[] = {
+        { "__ZN13IOFramebuffer10gMetaClassE", "mcp_mc", 0 },
+        { "__ZTV13IOFramebuffer",             "mcp_vt", 0 },
+    };
+    for (size_t i = 0; i < arrsize(want); i++) {
+        auto a = patcher.solveSymbol(id, want[i].sym, address, size);
+        if (patcher.getError() != KernelPatcher::Error::NoError || a == 0) {
+            patcher.clearError();
+            rbgpu_diag_set_num(want[i].key, 0);
+            rbgpu_log("2qt: could not solve %s - route C's inputs are NOT "
+                      "reachable from the boot KC and nothing else here means "
+                      "anything", want[i].sym);
+            continue;
+        }
+        // Rule 19: a non-zero solve is not a pointer. Validate the kernel VA
+        // before anything dereferences it.
+        if (a < 0xffffff8000000000ull) {
+            rbgpu_diag_set_num(want[i].key, 2);
+            rbgpu_log("2qt: %s solved to 0x%llx, which is NOT a kernel VA - "
+                      "refusing to dereference it", want[i].sym,
+                      static_cast<unsigned long long>(a));
+            continue;
+        }
+        want[i].addr = a;
+        rbgpu_diag_set_num(want[i].key, 1);
+    }
+    rbgpu_diag_set_num("mcp_mc_addr", want[0].addr);
+    rbgpu_diag_set_num("mcp_vt_addr", want[1].addr);
+
+    if (want[0].addr == 0) {
+        return;
+    }
+
+    // Read the metaclass through the KERNEL's own accessors rather than by
+    // offset arithmetic. 2qm measured the layout (name at +0x18, classSize at
+    // +0x20) and that reading still stands, but calling getClassName() /
+    // getClassSize() / getSuperClass() cannot drift if Apple moves a field,
+    // and all three are const.
+    t_rbMcName  mcName  = nullptr;
+    t_rbMcSize  mcSize  = nullptr;
+    t_rbMcSuper mcSuper = nullptr;
+    struct { const char *sym; void **slot; } acc[] = {
+        { "__ZNK11OSMetaClass12getClassNameEv",  reinterpret_cast<void **>(&mcName)  },
+        { "__ZNK11OSMetaClass12getClassSizeEv",  reinterpret_cast<void **>(&mcSize)  },
+        { "__ZNK11OSMetaClass13getSuperClassEv", reinterpret_cast<void **>(&mcSuper) },
+    };
+    uint64_t have = 0;
+    for (size_t i = 0; i < arrsize(acc); i++) {
+        auto a = patcher.solveSymbol(KernelPatcher::KernelID, acc[i].sym);
+        if (patcher.getError() != KernelPatcher::Error::NoError || a == 0) {
+            patcher.clearError();
+            *acc[i].slot = nullptr;
+        } else {
+            *acc[i].slot = reinterpret_cast<void *>(a);
+            have |= (1ull << i);
+        }
+    }
+    rbgpu_diag_set_num("mcp_acc", have);
+    if (!mcName || !mcSize || !mcSuper) {
+        rbgpu_log("2qt: OSMetaClass accessors did not all resolve (mask 0x%llx) - "
+                  "the metaclass was found but cannot be read through Apple's "
+                  "own code", static_cast<unsigned long long>(have));
+        return;
+    }
+
+    auto *mc = reinterpret_cast<const void *>(want[0].addr);
+    unsigned int csize = mcSize(mc);
+    const char *cname  = mcName(mc);
+    rbgpu_diag_set_num("mcp_size", csize);
+    if (cname) {
+        rbgpu_diag_set_str("mcp_name", cname);
+    }
+
+    const void *sup = mcSuper(mc);
+    const char *sname = nullptr;
+    if (sup != nullptr &&
+        reinterpret_cast<uintptr_t>(sup) >= 0xffffff8000000000ull) {
+        sname = mcName(sup);
+        if (sname) {
+            rbgpu_diag_set_str("mcp_super", sname);
+        }
+        rbgpu_diag_set_num("mcp_super_size", mcSize(sup));
+    } else {
+        rbgpu_diag_set_num("mcp_super_size", 0);
+    }
+
+    // The verdict, worded, so the capture says what it means without anyone
+    // re-deriving it (the 2lk pattern).
+    bool nameOk  = cname != nullptr && strcmp(cname, "IOFramebuffer") == 0;
+    bool sizeOk  = csize == 0x1d0;
+    bool superOk = sname != nullptr && strcmp(sname, "IOGraphicsDevice") == 0;
+    uint64_t verdict = (nameOk ? 1 : 0) | (sizeOk ? 2 : 0) | (superOk ? 4 : 0) |
+                       (want[1].addr ? 8 : 0);
+    rbgpu_diag_set_num("mcp_verdict", verdict);
+    rbgpu_diag_set_str("mcp_say",
+                       verdict == 15
+                           ? "REACHABLE(all four agree; route C's inputs exist)"
+                           : "MISMATCH(see mcp_name/size/super; read nothing further)");
+    rbgpu_log("2qt: IOFramebuffer metaclass %p vtable %p - name=%s size=0x%x "
+              "super=%s(0x%x) verdict=0x%llx %s",
+              reinterpret_cast<void *>(want[0].addr),
+              reinterpret_cast<void *>(want[1].addr),
+              cname ? cname : "(null)", csize, sname ? sname : "(null)",
+              sup ? mcSize(sup) : 0,
+              static_cast<unsigned long long>(verdict),
+              verdict == 15 ? "- all four agree with the static read of "
+                              "IOFramebuffer::MetaClass::MetaClass(), so the "
+                              "pieces a runtime-built subclass needs are "
+                              "reachable across the KC boundary"
+                            : "- at least one disagrees with the static read, "
+                              "so the symbol is not what we think and nothing "
+                              "else in this capture is meaningful");
+}
+
 void RGPU::processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                              size_t size) {
+    // 2qt: independent of the vblank pump's gate below, which returns early.
+    rbgpu_mcprobe_2qt(patcher, id, address, size);
+
     if (!g_vblp_on) {
         rbgpu_log("2ov: NOT armed - -rbgpuvblpump absent, no vblank is delivered "
                   "and CoreVideo keeps pacing at its 30 Hz fallback");
