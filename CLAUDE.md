@@ -129,6 +129,35 @@ it on. Launch anything with `env -u DYLD_INSERT_LIBRARIES` or it starts under
 whatever patch this Claude is running - which once looked exactly like a
 regression (2ns).
 
+**ROOT CAUSE OF THE SOFTWARE COMPOSITING, FOUND (2qh): the display's
+`CoreDisplay::DisplaySurface` has NO IOSurface, and SkyLight swaps the
+compositor because of it.** `WS::Displays::Update::Update` correctly sets
+`Update->0x1c0 = display->compositor()` - a **CompositorMetal** - and then
+`CDDisplay::begin_update` (`0x7ff807d6c488`) creates a `CDSurface`, calls
+`CDSurface::prepare_for_update`, and that does
+`io = CoreDisplay_DisplaySurface_GetIOSurface(s); if (io == NULL)
+cdsurf->0x40 = 1` (`0x7ff807d6f42d`). `begin_update` then tests
+`cdsurf->0x40 == 1` and **overwrites `Update->0x1c0` with the software
+compositor** read straight from `*[0x7ff843c9eca8]` (`0x7ff807d6c5c8`).
+`UpdateDisplays` loads that from `Update+0x1c0` (= `-0x350(%rbp)`) and hands it
+to `render_update`. **So there is no flag that chooses software** - SkyLight
+chooses Metal and is then overridden, which is why every accelerator-side
+reading (mode 0, capability flag 1, `priv.accelerator = 0x14b23`, working
+`new_compositor`) was healthy and irrelevant. The getter is
+`if (s==NULL) return NULL; return *(s)`, and `prepare_for_update` tests
+`s == NULL` on a *separate* branch, so **a DisplaySurface exists with a NULL
+IOSurface**; `CD_IOSurfaceCreate` logs
+`'IOSurfaceCreate failed for dictionary'` and that appears **0 times** this
+boot (control: 113 CoreDisplay lines), so creation was never attempted.
+**This is 2pd, confirmed at the decision point, and it joins 2q9**:
+`numDisplayBuffers = 0` is the popcount of `IOAccelSurfaceMTL->0x13c`'s low
+req-bits, 0 because no drawable is attached - a display with no attached buffer
+has no IOSurface to hand out. Same fact, two layers; and it is why 2pr's bigger
+`getVRAMRange` changed nothing (room was never the problem, a **surface** was).
+Next static read: `CoreDisplay::Display::GetNextSurface` reaches
+`DisplaySurfacePool::GetNextSurface` only at +1270 of 0x65c bytes, so find the
+earlier return.
+
 **THE DISPLAY HALF IS HALF-FIXED, AND THE REAL DEFECT IS NAMED (2pd/2pf,
 boot 138).** The pacing is **fixed**: CoreVideo nominal went **30.000 ->
 129.267 Hz** and the measured callback rate 29.99 -> **134.10 Hz**, a 4.3x
