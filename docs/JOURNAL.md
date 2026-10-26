@@ -32617,3 +32617,111 @@ programmed (`OTG0_CONTROL = 0x00011201`). That is read-only, it is what
 exactly it - no writes but `MM_INDEX`/`MM_INDEX_HI`, probe level 2. Synthesising
 blanking from CVT/GTF instead would be rule 17 verbatim: substituting a value
 and narrating it as a hardware result.
+
+## 2rm - OTG0's live timing becomes the 0x921 source, read-only
+
+2rl left 0x921 refusing because `IONDRVFramebuffer` **answers**
+`getTimingInfoForDisplayMode` and what it answers is `flags = 0` -
+`kIODetailedTimingValid` clear. This builds the fallback the firmware already
+made available.
+
+**THE PANEL'S REAL TIMING WAS ALREADY ON DISK, MEASURED IN 2oq/2os:**
+
+```
+OTG0_H_TOTAL            0x0000083a   2106
+OTG0_H_BLANK_START_END  0x007f07ff   127 / 2047
+OTG0_H_SYNC_A           0x003c0000     0 / 60
+OTG0_V_TOTAL            0x00000469   1129
+OTG0_V_BLANK_START_END  0x0014044c    20 / 1100
+OTG0_V_SYNC_A           0x00050000     0 / 5
+```
+
+**The field order is established by arithmetic, not by a header this tree does
+not have** (`docs/linux-ref` carries `dcn_3_1_2_offset.h` but no `sh_mask`):
+
+```
+h: active 2047-127 = 1920   front 2106-2047 = 59, sync 60, back 127-60 = 67 -> 186 = 2106-1920
+v: active 1100-20  = 1080   front 1129-1100 = 29, sync  5, back  20-5  = 15 ->  49 = 1129-1080
+```
+
+Three independently derived porches summing to the blanking the totals imply,
+**on both axes**, is a stronger check than a header would be - and it is what
+makes this a decode rather than a guess.
+
+**IT ALSO CORRECTS 2os.** The registers hold the **true** totals, 2106 and
+1129; 2os computed the pixel clock from **2107 x 1130**, one too many on each
+axis, and with those values the porches above do not sum. Pixel clock is
+therefore **341 987 984 Hz (341.988 MHz)**, not 2os's 342 453 428 - a 465 444 Hz
+(0.14 %) difference that matters to nothing yet, but the journal's number was
+wrong and this is where it is fixed.
+
+**`src/common/rb_otg.h`** is the converter: raw registers in, a 0xa0-byte
+`IODetailedTimingInformationV2` body out, freestanding and host-tested. The V2
+offsets are derived from the **public** Kernel.framework header's member list
+by walking the types (UInt64 is 8-aligned, so `pixelClock` is 0x28 and the
+struct closes at 0xa0) - not by counting header lines, which 2q4 already
+learned to avoid. All four offsets `rb_agdc.h` independently pinned from the
+consumer side agree, and the closing size equals `RB_AGDC_TIMING_SIZE`; the
+host test asserts both, so two derivations have to keep agreeing.
+`kIOSyncPositivePolarity` (`IOGraphicsTypes.h:1002`) is a local constant
+quoting the header, never an `#include` - a compile-time constant cannot add a
+kext dependency and 2oz's IOGraphicsFamily trap stays shut
+(`grep -c` on Info.plist is still **0**).
+The halves of each field pair are read **order-agnostically** (span and lower
+edge), so the hardware's naming of "start" versus "end" cannot matter, and
+every refusal carries its own code: `RB_OTG_E_HACTIVE` for equal halves,
+`_HTOTAL`/`_VTOTAL` for no room to blank, `_HSYNC`/`_VSYNC` for a sync that
+does not start at 0, is zero-width, or will not fit, `_REFRESH` for an
+unmeasured refresh. An unprogrammed OTG reads zeros and therefore refuses, so
+it can never publish a zero timing into Apple's capability cache (2rd/2rg).
+**A guard that could not fail was removed before it shipped:** the first cut
+also checked `front + sync + back == blanking`, which is an *identity* once
+active is `hb_hi - hb_lo` - it can never trip, and a guard that cannot fail is
+not a guard. What replaced it are the three checks that do carry information.
+
+**`tools/hosttest/otg_test.c`** runs the converter on this machine's own
+register values and asserts 1920/1080, 186/49, 59/60, 29/5, the clock as
+`2106*1129*143833/1000` written as arithmetic rather than a constant, both
+polarity mappings, that every untouched byte of the 0xa0 body is zero, and
+that each refusal both names itself and leaves the output untouched. It also
+asserts that the two guards **compose**: a zero V2 body is refused by
+`rb_agdc_link_config`, and a converted one is accepted. Three deliberate
+breaks of the decode trip **21 / 27 / 1** assertions.
+
+**`rbgpuOtgSample()` in the plugin reads the registers; nothing writes one.**
+That is what makes this different in kind from the OTG/HUBP writes docs/RULES.md
+reserves to the user: a wrong read reports a wrong number, it cannot blank the
+panel. Addressing needed the DMU segment, and the plugin's `g_disc` is a
+two-IP stub (MP1 + SMUIO) with no DMU entry - so **segment 2 = `0x34c0`**,
+parsed by this project's own `rb_disc_parse` from this machine's real
+discovery table (`tests/data/rembrandt-680m-tufa15.bin` -> DMU **3.1.3**,
+nbase 5, `base[2] = 0x34c0`), putting `OTG0_CONTROL` at dword `0x5001`.
+**Because a constant is an assumption, it is checked:** 2oq's measured
+four-register signature - OTG0 with `OTG_MASTER_EN` set and OTG1-3 reading
+exactly `0x300` - must hold, and all four values are published either way
+(`otg_ctl0..3`, `otg_off_ok`). If it does not hold we are not addressing what
+we think we are, and the sampler refuses rather than converting whatever it
+read. The refresh is **measured**, not assumed: `OTG0_FRAME_COUNT` across a
+100 ms `IOSleep` on the bridge's own `thread_call`, with
+`absolutetime_to_nanoseconds` for the real elapsed time, published as
+`otg_frames`/`otg_ns` and clamped to 20-400 Hz. That is the method
+`RembrandtProbe.cpp` already uses (2os: 10 frames in 69 524 857 ns).
+Rule 3 untouched - **nothing is routed** - and rule 17 is the reason the clock
+is `hTotal * vTotal * measured refresh` instead of CVT/GTF.
+
+**Keys, in reading order after `agdc_tim_err 3`:** `agdc_otg_bound 1`,
+`agdc_otg_src` (0 no sampler, 1 refused, 2 sampled), `otg_err` **0**,
+`otg_ctl0`/`otg_off_ok 3`, the six raw registers as
+`agdc_otg_htot`/`_hbse`/`_hsa`/`_vtot`/`_vbse`/`_vsa`, `agdc_otg_mhz`,
+`agdc_otg_ret` **0**, and then **`agdc_tim_cached 2`** - 2 means the timing
+came from OTG0, 1 means it came from the NDRV, so the source is never
+ambiguous. `agdc_tim_err` is set to 3 **before** the fallback runs and only
+cleared if it succeeds, so a boot where the fallback does nothing reads
+exactly as 159 did.
+
+UUID **9028175A**; imports **362 of 362**, 0 unresolved; Info.plist graphics
+deps **0**; `make hosttest` and `make plugin` pass. **NOT VERIFIED ON
+HARDWARE** - and what a boot can show is bounded: 0x921 and 0x711 answering
+does not mean a display pipe exists, because `iop_oneshot 2` in 159 means
+IOPresentment never ran at all. Arm **`rbgpu-iop=1` alongside `rbgpu-agdc=1`**
+to reach that layer.

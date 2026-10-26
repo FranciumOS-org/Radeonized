@@ -54,7 +54,7 @@ all: kext tools
 # rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
 # docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
 # freestanding; nothing links it yet.
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp
 	@mkdir -p $(OUT)

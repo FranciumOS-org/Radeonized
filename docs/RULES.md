@@ -155,6 +155,67 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rm: OTG0's LIVE TIMING IS NOW THE 0x921 SOURCE, AND EVERY ACCESS IS A
+READ.** 2rl left 0x921 refusing because the NDRV answers
+`getTimingInfoForDisplayMode` with `flags = 0`. The panel's real timing was
+already on disk from 2oq/2os: `H_TOTAL 0x83a`, `H_BLANK_START_END 0x007f07ff`,
+`H_SYNC_A 0x003c0000`, `V_TOTAL 0x469`, `V_BLANK_START_END 0x0014044c`,
+`V_SYNC_A 0x00050000`. **The field order is established by arithmetic, not by
+a header this tree does not have** (`dcn_3_1_2_offset.h` is here, no
+`sh_mask`): h active 2047-127 = **1920**, front 59 + sync 60 + back 67 =
+**186** = 2106-1920; v active 1100-20 = **1080**, front 29 + sync 5 + back 15 =
+**49** = 1129-1080. Three independently derived porches summing to the
+blanking the totals imply, **on both axes**.
+**IT CORRECTS 2os:** the registers hold the TRUE totals **2106 / 1129**; 2os
+used 2107 x 1130, one too many per axis, with which the porches do not sum. So
+the pixel clock is **341 987 984 Hz (341.988 MHz)**, not 342 453 428 - 0.14 %
+out, harmless so far, but the journal's number was wrong.
+**`src/common/rb_otg.h`** converts raw registers -> a 0xa0-byte
+`IODetailedTimingInformationV2`, freestanding and host-tested. V2 offsets come
+from walking the **public** Kernel.framework header's member types (UInt64 is
+8-aligned, so `pixelClock` = 0x28 and the struct closes at 0xa0), **not** from
+counting header lines (2q4's lesson); all four offsets `rb_agdc.h` pinned from
+the consumer side agree and the size equals `RB_AGDC_TIMING_SIZE`, both
+asserted. `kIOSyncPositivePolarity` is a local constant quoting
+`IOGraphicsTypes.h:1002`, never an `#include` - Info.plist graphics deps stay
+**0**. Field pairs are read **order-agnostically** (span + lower edge), so the
+hardware's start/end naming cannot matter, and every refusal names itself
+(`_HACTIVE`, `_HTOTAL`, `_HSYNC`, `_REFRESH`, ...). An unprogrammed OTG reads
+zeros and so **refuses**, never publishing a zero timing into Apple's
+capability cache. **A guard that could not fail was removed before shipping:**
+`front + sync + back == blanking` is an identity once active is
+`hb_hi - hb_lo`, so it could never trip.
+**`rbgpuOtgSample()` reads; nothing writes a DCN register** - that is what
+keeps it out of the user-decision category, since a wrong read reports a wrong
+number and cannot blank the panel. The plugin's `g_disc` is a two-IP stub with
+no DMU entry, so **DMU segment 2 = `0x34c0`**, parsed by this project's own
+`rb_disc_parse` from this machine's real table (DMU **3.1.3**, nbase 5,
+`base[2] = 0x34c0`; `OTG0_CONTROL` at dword `0x5001`). **A constant is an
+assumption, so it is checked** against 2oq's four-register signature - OTG0
+with `OTG_MASTER_EN` and OTG1-3 at exactly `0x300` - with all four values
+published either way; failing it refuses instead of converting garbage. The
+refresh is **measured** (`OTG0_FRAME_COUNT` across a 100 ms `IOSleep` on the
+bridge's own `thread_call`, `absolutetime_to_nanoseconds` for the elapsed,
+clamped 20-400 Hz), the method `RembrandtProbe.cpp` already uses. Rule 3
+untouched - **nothing routed**; rule 17 is why the clock is
+`hTotal * vTotal * measured refresh` and not CVT/GTF.
+Host test runs the converter on this machine's own values, asserts
+1920/1080/186/49/59/60/29/5, the clock as arithmetic, both polarity mappings,
+that every untouched byte is zero, that each refusal leaves the output alone,
+and that the guards **compose** with `rb_agdc_link_config`. Three deliberate
+breaks trip **21 / 27 / 1** assertions.
+**Reading order after `agdc_tim_err 3`:** `agdc_otg_bound 1`, `agdc_otg_src`
+(0 none / 1 refused / 2 sampled), `otg_err` **0**, `otg_ctl0` + `otg_off_ok 3`,
+the six raw registers `agdc_otg_htot/_hbse/_hsa/_vtot/_vbse/_vsa`,
+`agdc_otg_mhz`, `agdc_otg_ret` **0**, then **`agdc_tim_cached 2`** (2 = OTG0,
+1 = NDRV, so the source is never ambiguous). `agdc_tim_err` is set to 3 before
+the fallback and cleared only on success, so a boot where it does nothing reads
+exactly as 159 did. UUID **9028175A**; imports **362 of 362**; graphics deps
+**0**. **NOT VERIFIED ON HARDWARE**, and what one boot can show is bounded:
+0x921/0x711 answering is not a display pipe, because `iop_oneshot 2` means
+IOPresentment never ran in 159 - arm **`rbgpu-iop=1` alongside
+`rbgpu-agdc=1`** to reach that layer. Detail: JOURNAL **2rm**.
+
 **BOOT 159 / 2rl: THE PANEL LIVED, AND THE WRANGLER PAIRED OUR BRIDGE.** The
 user ran `plugin_check.sh` from inside the armed boot, on a live desktop - the
 first armed boot since 156 where publishing the AGDC did not freeze the screen.
