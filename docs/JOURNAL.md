@@ -33968,3 +33968,124 @@ untouched: opening the gate needs
 `IOPresentmentBindIOAccelSurfaceToResource` and `IOPresentmentSetPlaneState`,
 i.e. DCN 3.1.2 from Linux's `dcn31`, and until that exists `-rbgpuagdcearly`
 stays out.
+
+## 2s1 — The two afternoon hangs were NOT boot 164's failure, and 2rz over-grouped them
+
+This corrects 2rz and 2s0 on one point, found by reading evidence already on
+disk rather than by booting: **the hung boot of 2026-10-26 14:26 failed
+EARLIER than boot 164, in a different place, and 2rz treated both as the same
+class.** 2rz's fix and verdict stand; its account of the evidence does not.
+
+### Rule 28, and I fell into it once before getting it right
+
+My first pass windowed the afternoon log by `$2 > "14:26:25" && $2 < "14:30:48"`
+and read `WindowServer[161]` lines at 14:30:47 as that boot's tail. **They are
+the NEXT boot's WindowServer, which was assigned pid 161 again.** Pids are
+reused across boots, so a timestamp window alone does not separate boots. The
+reliable separator is the **`Darwin Kernel Version` banner**, which prints once
+per boot. Boundaries, afternoon: **14:26:29**, **14:30:47**, **14:50:32**.
+
+### The three afternoon boots, separated
+
+| | boot A | boot B | boot C (= boot 165) |
+|---|---|---|---|
+| kernel banner | **14:26:29** | 14:30:47 | 14:50:32 |
+| build | 2ry `0E6F0DCD` | 2ry + `-rbgpuoff` | 2rz `5951FC1F` |
+| WS start | `[161:40d]` 14:26:32.113 | `[162:38f]` 14:30:50.104 | `[162:3a2]` 14:50:35.105 |
+| compositor line | **NONE of the three** | **`Software` x2** | `Metal` x2 |
+| IOPresentment errors | **none** | 1 (`Unable to acquire map`) | all 3 |
+| outcome | **HUNG** | usable (plugin off) | **clean** |
+
+**Boot B is `-rbgpuoff`** — the boot I did the diagnosis from — so it is not a
+third hang. There were **two** 2ry hangs: boot A, and the one before it that
+boot A's `previous shutdown cause 5` reports.
+
+### Where boot A blocked, pinned against boot C as the control
+
+`WindowServer[161:40d]`, boot A's main thread, last logged at
+**14:26:38.311** — `(CoreFoundation) Updating Key-Value Observers Of
+Preferences`, after MobileGestalt, CoreVideo's pixel-format registry, TCC and
+Accessibility. A HID thread (`161:9a8`) kept logging Multitouch momentum rates
+until 14:26:44.203, so **the process was alive with its main thread blocked** —
+the frozen-panel signature. The whole system then stopped logging at
+**14:26:56.054**.
+
+Milestone counts, boot A against boot C:
+
+| string | boot A | boot C |
+|---|---|---|
+| `Session 257` | 4 | 4 |
+| **`CGXConstructVirtualFramebuffer`** | **1** | **7** |
+| **`Setting main display`** | **1** | **7** |
+| `CGXMainDisplayDevice` | 1 | 1 |
+| `debug-gpus` | **0** | present |
+| `RembrandtGPUAGDC` | **0** | present |
+
+**So boot A entered WindowServer's display bring-up and blocked inside the
+FIRST `CGXConstructVirtualFramebuffer` pass**, where a healthy boot completes
+seven. It never reached the compositor decision (all three of
+`Metal`/`Software`/`Noop compositor activated` absent, and 2qa/2qd established
+all three paths log), never issued an IOPresentment query, and never ran the
+wrangler's `debug-gpus` dump. The nonce stayed **164**, so the peer's first
+NVRAM note never flushed either.
+
+**Boot 164, by contrast, got through all of that**: `Metal compositor
+activated` x2 at +4 s, zero IOPresentment errors, 26 `IOAccelDisplayPipe`
+events, and `WindowServer[161]` still servicing XPC and bluetooth at
+**13:30:22**, 54 s in, before the user power-cycled a frozen panel. Boot 164
+is a late freeze past the gate; boot A is an early block before it.
+
+### The mechanism, as a hypothesis, and the code change that separates it
+
+**NOT ESTABLISHED.** No diag note exists for boot A, so nothing here is
+measured from the plugin's own side. But the composition is specific: 2ry put a
+`mapDeviceMemoryWithRegister(BAR5, …)` and an **up-to-400 ms `IODelay` poll of
+OTG0** on the bridge's early worker, which runs during exactly the window boot
+A blocked in. Boot 164 could not reach that code at all — the sampler was then
+bound only from `processNDRV`, which is why 164 shows no OTG keys and 2ry was
+written to "fix" that. **This is 2rq's own unexcluded suspect, verbatim:**
+*"`rbgpuOtgSample`'s up-to-400 ms `IODelay` spin during early matching, and
+MMIO through `g_hw.ctx` before the chip is ready."* 2ry moved that spin onto the
+early path and the next two boots blocked earlier than anything before.
+
+**The change: `sampleTimingOtg()` now declines on the early path** —
+`if (early && !framebuffer)` publishes **`agdc_otg_src 3`** and returns. The
+early trigger therefore publishes with **no timing** (`agdc_tim_err 7`, exactly
+what boot 164 did and still got past the gate), and the OTG sample belongs to
+the late, framebuffer-triggered path that boot 165 measured clean. A future
+`-rbgpuagdcearly` experiment then tests **one** variable instead of two.
+
+**This is inert in the default configuration** — `early` is false, so the guard
+cannot fire, and boot 165's verified behaviour is unchanged byte-for-byte in
+effect. No boot is needed to trust the current default.
+
+### A control this project has never had
+
+**`Software compositor activated` was observed for the first time**, twice, in
+boot B (`-rbgpuoff`, no accelerator). 2qd read the three-way logging from the
+disassembly and noted boot 149 had *"the Metal line twice and neither other"*;
+this is the negative control for that reading, and it confirms it. It also
+means **`Metal compositor activated` x2 is the normal signature of an
+accelerated boot here and says nothing about which compositor a given display
+gets** — boots 163, 164 and 165 all log it, and all three composite in
+software (2pd/2qd).
+
+### What this does and does not change
+
+- **2rz's fix is unaffected**: boot 165 verified it, and the early trigger is
+  off by default either way.
+- **2rz's verdict is unaffected but its evidence is narrower than written**:
+  "past the gate there is no backend" rests on **boot 164 alone** — the boot
+  that answered IOPresentment, logged no error, and froze. Boot A says nothing
+  about past-the-gate, because it never got there. 2rz's status block and
+  commit message both imply the two afternoon hangs corroborated 164; they do
+  not.
+- **One inference in 2rz is now weaker, and it should be**: a hang is not what
+  a missing method produces. `IOPresentmentBindIOAccelSurfaceToResource` and
+  `IOPresentmentSetPlaneState` being unimplemented would return
+  `kIOReturnUnsupported`, not block. Boot 164 **blocked**, silently, so what it
+  wedged on is a **wait**, not an absent selector — `IOPresentment`'s own
+  string table names `IOAccelDisplayPipeTransactionWait` (2qm). Whether DCN
+  3.1.2 is the requirement, or a transaction that nothing completes is, is
+  **NOT established**, and the next read on this frontier is that function
+  rather than more Linux `dcn31` scoping.
