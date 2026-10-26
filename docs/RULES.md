@@ -19,6 +19,101 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2s5: TIER 1 IS ANSWERED BY A READ - THERE ARE **TWO**
+`'vbl '` REGISTRANTS, THIS HOOK ALIASED THEM, AND THE DISPLAY PIPE *DOES* RUN
+HERE.** No boot. `docs/SCOPE-DISPLAY-PIPE.md` asked whether the proc our
+`-rbgpufbvbl` hook captures is `IOAccelDisplayPipe::signalVBLInterrupt`, i.e.
+whether we have starved retirement since 2oz. **Yes to the identity, no to the
+blame** - and the read found a defect of ours and a bigger finding behind it.
+**THE SLOTS ARE NOW NAMED, where 2s4 failed three ways and correctly excluded
+them.** The instrument that works is this project's own `dumptable.py` (it goes
+through `machoread.Macho`, which decodes chained pointers):
+`__ZTV13IOFramebuffer` dump **`+0xae0 = registerForInterruptType`**, dump
+**`+0xaf0 = setInterruptState`**, so by rule 7 call **`0xad0`** and **`0xae0`** -
+exactly the pair `displayModeDidChange` calls.
+**TWO REGISTRANTS, each kext's ONLY `'vbl '` literal (control: the known
+`displayModeDidChange` site):** IOAcceleratorFamily2 `0x14e5db4c` =
+`displayModeDidChange+0x38` -> **`signalVBLInterrupt`**; IOGraphicsFamily
+`0x14fc5eee` = **`IOFramebuffer::open+0x7f2` -> `IOFramebuffer::handleVBL`**
+(`sete 0x19d(%r14)` on the return); IONDRVSupport's is the branch inside
+`registerForInterruptType`; AMDSupport's is an `ATIController` property dump;
+**`AMDRadeonX6000` has ZERO** - the vendor registers no `'vbl '` itself.
+**OUR DEFECT: `*iref = &g_vbli_proc` FOR EVERY REGISTRANT, and `g_vbli_proc`
+was last-wins** - so the pipe's registration clobbered `handleVBL` and the
+pipe's own `setInterruptState(ref, 0)` one instruction later disabled delivery
+for **both**. **The captures split exactly along that line and had never been
+read together:** boot **159** logged `fb_vbl_calls` **4** - `'vbl ' 'dci '
+'dpir' 'hdci'`, IOGraphicsFamily's four sites fourcc for fourcc - **no
+`fb_vbl_state` key** and **`fb_vbl_sent 12289`**; boots 138/140/141/142/154/155/
+156/160/**165** logged **54** calls, **`fb_vbl_state 0`** and **zero** sends.
+**So the scope doc's premise "`fb_vbl_sent` absent, zero deliveries" is a
+property of the 54-call boots, NOT universal** - 2s4's sentence holds for boot
+138 and must not be generalised.
+**AND `fb_vbl_state 0` IS POSITIVE EVIDENCE THE PIPE RAN:** IOGraphicsFamily
+calls `setInterruptState` at **no site at all**, and IOAcceleratorFamily2's only
+two callers on an IOFramebuffer slot are `displayModeDidChange+90` and
+`framebuffer_terminated+113`, **both passing 0**. A pipe can only hold our
+`&g_vbli_proc` in its `0xd8` if its register call came through this hook - so
+**`IOAccelDisplayPipe::displayModeDidChange` runs against our
+`IONDRVFramebuffer` in nine recorded boots, boot 165 included**, which 2s4
+listed as unmeasured and 2pp predicted. (The third `*0xae0` site is
+`IOGraphicsAccelerator2::newUserClient+1110`, a different object's slot - a slot
+number means nothing without its vtable.)
+**THE ARM IS SELF-SERVICE - nothing on our side has to supply it.** A first pass
+concluded "nothing ever calls `setInterruptState(ref, 1)`"; **retracted, it was
+a wrong negative from the instrument** (rule 26, third time this week) -
+`grep 'callq \*0xae0('` cannot see a **tail jump through a loaded register**,
+which is what the enable is: `enableVBLInterrupt` (`0x14e60946`) =
+`if (this->0x2a8++ != 0) return; ref = this->0xd8; ...
+movq 0xae0(%rax),%rax; movl $0x1,%edx; jmpq *%rax` - a **refcounted**
+`setInterruptState(ref, 1)`. Above it, every link read:
+**`transaction_queue_gated+38`** and `event_interrupt_gated+374` ->
+`enableTransactionInterrupt` = `this->vt[0x878](); this->0x281 = 1`, where pipe
+vtable dump `+0x888` = `enableVBLInterrupt` and `+0x890` =
+`disableVBLInterrupt`; and `0x281` is the flag `signalVBLInterrupt` tests before
+`signalTransactionInterrupt` -> `event_interrupt_gated`, the ring's only
+consumer (2s4). **So queueing a transaction arms retirement BY ITSELF** - the
+producer does it, there is nothing to implement or advertise, and
+`AMDRadeonX6000` calls slot `0x888` nowhere either.
+**WHAT IT SETTLES:** we do hold `signalVBLInterrupt` and deliver it zero times,
+but the disable is **Apple's own unconditional instruction** right after its own
+register call. Retirement was never going to run, because **`state == 1` has
+never arrived in any boot** - so `transaction_queue_gated` never ran, so no
+transaction was ever queued. Consistent with boot 165 (gate shut); and it is
+**boot 164's unanswered half** - 164 got past the gate and wedged in
+`wait_for_queue_slot_gated`, so a transaction *was* submitted, and `state == 1`
+is what separates *"the ring filled and nothing retired it"* from *"it never got
+that far"*. **Boot 164 cannot answer it and the reason is OURS:** its capture is
+NVRAM-only (the machine wedged, `plugin_check.sh` never ran, rule 10) and
+**`fb_vbl_state` was not NVRAM-hot** - the one key that would have separated the
+two readings was invisible in the only boot where it mattered.
+**THE CHANGE, two files, no new route (`git diff` touches `RouteRequest`
+ZERO times), no DCN register, no behaviour added.** The slot is **split**:
+`g_vbli_other` has its **own** `iref`, so the pipe can no longer tear down
+`handleVBL`'s delivery. Classification uses **two independent tests, both
+published in `fb_vbl_cls`** (bit 0 `target == fb`, which needs no symbol solved
+because Apple's two sites differ in the target they pass; bit 1
+`proc == g_vblp_handleVBL`, a pointer 2ov already solves, so no new import).
+**The second registrant is OBSERVED, not delivered** - what
+`signalVBLInterrupt` would do on arrival is untested and boot 165's desktop
+depends on the other entry (rule 16). **`fb_vbl_ot_armed` is the line that
+would move the display half**, and the frontier keys are **NVRAM-hot** now:
+`fb_vbl_ot_armed`, `fb_vbl_ot_state`, `fb_vbl_ot`, `fb_vbl_cls`,
+`fb_vbl_state`, `fb_vbl_hv_state`, `fb_vbl_ot_lo`/`_hi`. `fb_vbl_state` keeps
+its old meaning so the nine boots on disk stay comparable.
+**NEXT BOOT, PRE-STATED:** `fb_vbl_ot 1`, `fb_vbl_cls` **1** or **3**,
+`fb_vbl_ot_state 0`, and `fb_vbl_ot_lo`/`_hi` minus IOAcceleratorFamily2's slide
+= **`0x14e5dcb8`** - the runtime confirmation 2s4 could only infer. `fb_vbl_cls
+0` with a second registrant present means the **classifier** is the suspect.
+**ONE EXPECTED BEHAVIOUR CHANGE, stated because it is one:** with the aliasing
+gone the pacing moves from `vblp_ticks` to **`fb_vbl_sent`** - the same function
+on the same framebuffer, one delivery per tick either way, and **boot 159 ran
+exactly that way with a live panel**, so measured-good rather than argued-safe.
+`src/common` did not change so **no host-test case was added** (a coverage gap,
+not a justification); the existing suite passes. Imports **365 of 365**, 0
+unresolved, **0** from `SystemKernelExtensions.kc`, graphics deps **0**. UUID
+**ABB85BCD -> 50518DAC**. **NOT VERIFIED ON HARDWARE.** JOURNAL **2s5**.
+
 **LATEST 2026-10-26 / 2s3: THE `TransactionsSupported` LEVER IS BACKWARDS -
 IOPRESENTMENT HAS NO TRANSACTIONS-OFF MODE.** Static read, no boot, answering
 2s2's open question. A negative, and the kind that saves a boot: 2q9/2qa's
