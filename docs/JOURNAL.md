@@ -34310,3 +34310,97 @@ configuration deliberately does not open the gate, which boot 165 verified
 keeps a working accelerated desktop.
 
 No code changed.
+
+## 2s4 — Scoping the flip: the vendor side ALREADY EXISTS, and the completion source is the framebuffer's vblank
+
+Static reads only, no boot. Full write-up: **`docs/SCOPE-DISPLAY-PIPE.md`**.
+The short version is that "write DCN 3.1.2 from Linux's `dcn31`" was the wrong
+frame, and three measurements say so.
+
+### 1. The ring is drained by an interrupt, and the interrupt is `'vbl '`
+
+Ring indices (2s2): `0x238` consumed, `0x23c` produced. Writers, found by
+scanning only the `IOAccelDisplayPipe` address range:
+
+- **producer**, ONE site: `transaction_queue_gated(IOAccelDisplayPipeTransaction2 *)`
+  increments `0x23c` at `0x14e604ee`;
+- **consumer**, TWO sites: **`event_interrupt_gated()`** increments `0x238` at
+  `0x14e5ff06` / `0x14e5ff60`.
+
+Chain, each link read: `signalVBLInterrupt(void *)` (`0x14e5dcb8`, gated on
+`this->0x281`, the flag `enableTransactionInterrupt` sets) ->
+`signalTransactionInterrupt(void *)` (`0x14e5e0ec`, returns early unless
+`this->0x2a4`) -> `transaction_interrupt_gated` (`0x14e60184`, a `jmp`) ->
+`event_interrupt_gated`. **So retirement is driven by an interrupt and by
+nothing else.**
+
+And `displayModeDidChange()` (`0x14e5db14`) registers for it on the
+**framebuffer**: `fb->vt[0xad0](0x76626c20 /* 'vbl ' */, signalVBLInterrupt,
+this, 0, &this->0xd8)`, followed by `fb->vt[0xae0](this->0xd8, 0)`.
+
+**Slot identity NOT asserted from a table.** Naming `0xad0`/`0xae0` out of the
+extracted `IOGraphicsFamily` landed past its symbol coverage and produced
+ASCII garbage (`__ZZN16GMetricsRecorder...+0xdf906`), so it is **excluded as
+evidence**. The identification rests on the `'vbl '` fourcc, the
+five-argument shape, the two-argument follow-up on the out-ref, and **boot
+138's own measurement** of our hook capturing a `'vbl '` proc (`fb_vbl_bound
+1`) and macOS then calling `setInterruptState(ourRef, 0)` (`fb_vbl_state 0`) —
+the exact pairing this code performs. Slot `0x9b0` of the same vtable is
+already pinned to `getVRAMRange` (2pq / boot 144), so slot numbers here do mean
+something.
+
+### 2. Apple's AMD driver already implements the vendor side
+
+`AMDRadeonX6000` has **73** `IOAccelDisplayPipe` references and a complete
+subclass: `AMDRadeonX6000_AMDAccelDisplayPipe::init(IOGraphicsAccelerator2 *,
+IOAccelDisplayMachine *, **IOFramebuffer ***, unsigned int)`, plus
+`submitTransaction`, `executeTransaction`, `performTransaction`,
+`validateTransaction`, **`isTransactionComplete`**, `initializeTransaction`,
+`uninitializeTransaction`, `initFramebufferResource`, `initAffineTransform` —
+and `AMDRadeonX6000_AMDHWDisplay::getDisplayPipeTransactionFlip(...)` with
+`_AMD_PIPE_FLIP *` and a rotation enum in its signature.
+
+**None of that has to be written.** It is in the kext this project already
+makes run. `getDisplayPipeTransactionFlip` has **no caller inside
+AMDRadeonX6000** — it is reached from IOAcceleratorFamily2 through a virtual
+slot, which is why 2pf had to route it to observe it.
+
+Joined with **2pq's register measurement** — a flip touches only OTG (**0 of
+434** moved) and HUBP (**0 of 80** moved) between dcn302 and dcn312,
+bit-identical, with DCHUBBUB's differences being a *modeset* the firmware
+already performed — **if Apple's existing flip code runs, the registers it
+writes are right for this chip.**
+
+### 3. The minimum path, and it starts with a read
+
+**Tier 1, no DCN write: deliver the vblank we already capture.** Boot 138
+measured `fb_vbl_bound 1` with **`fb_vbl_sent` ABSENT** — our `-rbgpufbvbl`
+hook captured a `'vbl '` proc and delivered it **zero** times, serving all
+23 553 frames from `vblp_ticks` instead. **If that proc is
+`IOAccelDisplayPipe::signalVBLInterrupt`, transaction retirement has been
+starved by our own hook since 2oz.** HYPOTHESIS, not established: the captured
+proc's address was never recorded, and `setInterruptState(ourRef, 0)` says
+macOS disabled it at once. **The first step is a read, not a boot** — log the
+captured proc's address and compare it with `signalVBLInterrupt`'s slid
+address. That is rule 16's shape: the instrument we added is a suspect in the
+thing we are trying to measure.
+
+**Tier 2: get `AMDRadeonX6000_AMDAccelDisplayPipe` instantiated** for our
+framebuffer. `found_framebuffer` filters nothing (2pp) and `.Display_boot`
+already carries `IOAccelIndex`/`IOAccelRevision`/`IOAccelTypes`. What creates
+the pipe, and whether it is created for us, is unmeasured — the next read.
+
+**Tier 3: DCN 3.1.2**, needed only if Tier 2 shows Apple's pipe cannot bind to
+a non-AMD framebuffer at all.
+
+### Instrument discarded, with its control
+
+A live instance count was attempted and **thrown away**:
+`ioreg -c <class> -r -d1 | grep -c '+-o'` returned **0** for
+`AMDRadeonX6000_AMDNavi21GraphicsAccelerator`, which is demonstrably present in
+this boot, and **1** for `AppleGraphicsDeviceControl` where another form counts
+**2**. Nothing was concluded from its four zeros. Rule 26 caught this before it
+became a claim, which is the only reason it is a footnote instead of a
+milestone.
+
+No code changed.
