@@ -4,6 +4,17 @@
 #include <IOKit/IOService.h>
 void rbgpu_agdc_load(KernelPatcher &, size_t, mach_vm_address_t, size_t);
 void rbgpu_agdc_framebuffer(IOService *);
+// 2ro: the publish trigger. Until now the bridge could not start before
+// IONDRVFramebuffer::enableController, because that hook was the only caller
+// of rbgpu_agdc_framebuffer() and that function allocated the thread_call -
+// and boot 160 measured the bridge arriving AFTER WindowServer had already
+// asked IOPresentment for the AGDC. Nothing about the bridge needs the
+// framebuffer any more: since 2rm the timing comes from OTG0, and the one
+// load-bearing use was fb->getProvider() for the IOPCIDevice, which
+// RembrandtGPUPeer already holds in start(). So the peer hands the device over
+// directly and the framebuffer becomes a later, optional refinement.
+void rbgpu_agdc_pci(IOService *pciDevice);
+
 
 // 2rd: the real boot-link timing for attribute 0x921. AGDCLinkConfig_t embeds
 // the PUBLIC IODetailedTimingInformationV2, which is exactly what

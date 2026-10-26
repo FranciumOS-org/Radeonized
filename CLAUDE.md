@@ -155,6 +155,43 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rp: THE OTG FALLBACK IS NOW REACHABLE FROM EVERY NDRV FAILURE, AND THE
+PUBLISH NO LONGER WAITS FOR THE FRAMEBUFFER.**
+**(1)** `sampleTiming()` had four early returns - `agdc_tim_err` **6**
+(getters unresolved), **7** (no framebuffer), **1**, **2** - that each bypassed
+OTG0, leaving the fallback on the fifth path alone. Split into
+`sampleTimingNdrv()` (returns the code) + `sampleTimingOtg()`, so OTG0 gets a
+turn after **any** NDRV failure. New key **`agdc_tim_ndrv_err`** keeps the
+NDRV's verdict visible when OTG0 then succeeds and `agdc_tim_err` reads 0 -
+without it the fix would hide which source was used. `agdc_tim_cached` still
+1 = NDRV, 2 = OTG0.
+**(2)** New entry **`rbgpu_agdc_pci(IOService *)`**, called from
+**`RembrandtGPUPeer::start()`** with its own provider - the device the peer
+matched on (`IOProviderClass = IOPCIDevice` + `IOPCIMatch`), validated by
+`0x1002`/`0x1681` as before (refusal **6** unchanged). That now allocates and
+enters the worker, and `run()`'s gate is **`!pci`** instead of `!framebuffer`.
+`rbgpu_agdc_framebuffer()` is **demoted**: it supplies the framebuffer for the
+NDRV path and `agdc_fb_id` and only triggers if the peer did not, so the old
+ordering still works. New key **`agdc_pci_seen`**.
+**Why this is safe and not merely earlier:** the "too early" handshake was
+already written and dead - `run()` returns on `!armed` publishing
+`agdc_wait_load`, `rbgpu_agdc_load` re-enters the worker once AGDC is routed,
+and a missing metaclass/wrangler retries **100 ms x 100 = 10 s** publishing
+`agdc_wait`. Both were ABSENT in boot 160 because nothing waited; they are
+load-bearing now. **Boot 161 should show `agdc_wait` NON-ZERO - if it is still
+absent, the peer starts later than assumed and that is the finding.**
+**2oy does NOT apply:** it moved the *VRAM property publish* out of the peer
+because that needs the framebuffer; this publishes a service on the **PCI
+device** and takes its timing from **OTG0**.
+**NOT established:** that this fixes the race. 2ro showed the publish cannot
+precede `enableController`, not that `enableController` runs at ~34 s - the
+log's only upper bound is `SafeEjectGPUService` at 10:12:07, i.e. "paired by
+67 s", not "at 67 s". 2rn's `agdc_t_presample_ms`/`_sampled_ms`/`_started_ms`
+plus the now-live `agdc_wait` are what settle it. Refusal codes still unique
+1-16; `RouteRequest` count still **1** (rule 3 untouched). UUID **FB501234**;
+imports **362 of 362**; graphics deps **0**. **NOT VERIFIED ON HARDWARE.**
+Detail: JOURNAL **2rp**.
+
 **BOOT 160 / 2rn: OTG0 WORKED, THE IOP PATCH LANDED, AND THE BRIDGE IS SIMPLY
 TOO LATE.** No black panel, desktop live, `plugin_check.sh` run from inside the
 boot. Rule 8/15 clear: `rbgpu-boot` **160**, UUID **9028175A** = `build/out`,
