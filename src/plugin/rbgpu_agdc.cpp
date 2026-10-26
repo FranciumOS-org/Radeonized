@@ -96,16 +96,30 @@ const void *currentTiming(uint8_t *scratch) {
         rbgpu_diag_set_num("agdc_tim_err",3); return nullptr;
     }
     const uint8_t *v2=scratch+kRbTimingDetailOff;
-    uint32_t hactive=0, vactive=0;
-    // horizontalActive/verticalActive are at V2+0x40 and V2+0x50 (offsetof,
-    // not counted); published so a boot says what timing was handed over.
-    for (unsigned i=0;i<4;i++) hactive|=static_cast<uint32_t>(v2[0x40+i])<<(8*i);
-    for (unsigned i=0;i<4;i++) vactive|=static_cast<uint32_t>(v2[0x50+i])<<(8*i);
+    // Field offsets are Apple's own, named in rb_agdc.h from the CFNumber keys
+    // IOPresentment publishes them under; all five are reported so a boot says
+    // what timing was handed over and, on a refusal, exactly what was refused.
+    const uint32_t hactive=rb_agdc_get32(v2+RB_AGDC_V2_HACTIVE);
+    const uint32_t vactive=rb_agdc_get32(v2+RB_AGDC_V2_VACTIVE);
+    const uint32_t hblank =rb_agdc_get32(v2+RB_AGDC_V2_HBLANKING);
+    const uint32_t vblank =rb_agdc_get32(v2+RB_AGDC_V2_VBLANKING);
+    const uint64_t clock  =rb_agdc_get64(v2+RB_AGDC_V2_PIXELCLOCK);
     rbgpu_diag_set_num("agdc_tim_h",hactive);
     rbgpu_diag_set_num("agdc_tim_v",vactive);
+    rbgpu_diag_set_num("agdc_tim_hblank",hblank);
+    rbgpu_diag_set_num("agdc_tim_vblank",vblank);
+    rbgpu_diag_set_num("agdc_tim_clk",clock);
     if (!hactive || !vactive) {
         rbgpu_diag_set_num("agdc_tim_err",4); return nullptr;
     }
+    // 2rg: __gatherCapabilities computes refresh = pixelClock / (hTotal*vTotal)
+    // and publishes it as RefreshTime/Min/MaxRefreshTime. A zero clock passes
+    // its > 0.0f guard and yields 0.0 Hz, so rb_agdc_link_config refuses it;
+    // report the millihertz this boot's timing would produce either way, so the
+    // capture says whether the number Apple will advertise is the panel's.
+    const uint64_t total=static_cast<uint64_t>(hactive+hblank)*(vactive+vblank);
+    rbgpu_diag_set_num("agdc_tim_mhz",total?(clock*1000ull)/total:0ull);
+    if (!clock) { rbgpu_diag_set_num("agdc_tim_err",5); return nullptr; }
     rbgpu_diag_set_num("agdc_tim_err",0);
     return v2;
 }

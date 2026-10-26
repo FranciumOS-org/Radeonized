@@ -117,6 +117,49 @@ int agdc_tests(void) {
     A(p[0x10]==0x0c && p[0xa3]==0x9f);
     A(le(p+0xa4,4)==RB_AGDC_STREAM_NONE && le(p+0xa8,4)==0);
     A(le(p+0xac,4)==RB_AGDC_STREAM_BAD);
+
+    /* 2rg: the fields IOPresentment actually consumes must land at the reply
+     * offsets it reads them from - 0x19afc + these, measured in
+     * __gatherCapabilities and IOPresentmentCreateEndPointDictionary. Pinning
+     * the literals ties our V2 constants to that measurement, so editing
+     * either one trips here instead of silently shifting the timing. */
+    A(RB_AGDC_TIMING_OFF+RB_AGDC_V2_PIXELCLOCK==0x2c);
+    A(RB_AGDC_TIMING_OFF+RB_AGDC_V2_HACTIVE  ==0x44);
+    A(RB_AGDC_TIMING_OFF+RB_AGDC_V2_HBLANKING==0x48);
+    A(RB_AGDC_TIMING_OFF+RB_AGDC_V2_VACTIVE  ==0x54);
+    A(RB_AGDC_TIMING_OFF+RB_AGDC_V2_VBLANKING==0x58);
+    /* and the ramp proves the copy put each one there. */
+    A(p[0x2c]==RB_AGDC_V2_PIXELCLOCK && p[0x44]==RB_AGDC_V2_HACTIVE);
+    A(p[0x48]==RB_AGDC_V2_HBLANKING && p[0x54]==RB_AGDC_V2_VACTIVE);
+    A(p[0x58]==RB_AGDC_V2_VBLANKING);
+
+    /* A zero pixelClock is a REFUSAL: it PASSES Apple's `total > 0.0f` guard
+     * and publishes a 0.0 Hz RefreshTime, which is the one poisoning left
+     * after 2rd. The index must be zero here or the index check refuses first
+     * and this passes for the wrong reason - the same trap the bit-0 guard
+     * fell into above. The actives stay non-zero so err 4 cannot fire either. */
+    uint8_t noclock[RB_AGDC_TIMING_SIZE];
+    memcpy(noclock,timing,sizeof noclock);
+    memset(noclock+RB_AGDC_V2_PIXELCLOCK,0,8);
+    A(le(noclock+RB_AGDC_V2_HACTIVE,4)!=0);
+    A(le(noclock+RB_AGDC_V2_VACTIVE,4)!=0);
+    memset(b,0xa5,sizeof b); memset(b+1,0,RB_AGDC_LINK_SIZE);
+    memcpy(original,b,sizeof b);
+    A(rb_agdc_link_config(b+1,RB_AGDC_LINK_SIZE,noclock,0,
+                          RB_AGDC_LINK_BIT3,0,0)<0);
+    A(!memcmp(b,original,sizeof b));
+    out_size=RB_AGDC_LINK_SIZE;
+    A(rb_agdc_reply(0x921,0,b+1,&out_size,pci,fb,noclock)==RB_AGDC_BAD_ARGUMENT);
+    A(!memcmp(b,original,sizeof b));
+    /* The refusal is scoped to 0x921: 0x711 never reads the clock, so a timing
+     * without one must still answer the scaler query. */
+    static uint8_t nc[RB_AGDC_EXTCAP_SIZE+2];
+    memset(nc,0xa5,sizeof nc); memset(nc+1,0,RB_AGDC_EXTCAP_SIZE);
+    rb_agdc_put32(nc+1+4,RB_AGDC_CAP_SCALER);
+    out_size=RB_AGDC_EXTCAP_SIZE;
+    A(rb_agdc_reply(0x711,0,nc+1,&out_size,pci,fb,noclock)==0);
+    A(le(nc+1+RB_AGDC_EXTCAP_COUNT_OFF,4)==1);
+    A(nc[0]==0xa5 && nc[1+RB_AGDC_EXTCAP_SIZE]==0xa5);
     /* 2rf: AGDCFBGetExtendedCapability_t, 0x196c = 0xc header + 8 * 0x32c. */
     static uint8_t x[RB_AGDC_EXTCAP_SIZE+2], xorig[sizeof x];
     const uint8_t *q=x+1;
