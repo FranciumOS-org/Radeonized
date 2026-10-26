@@ -155,6 +155,74 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**BOOT 159 / 2rl: THE PANEL LIVED, AND THE WRANGLER PAIRED OUR BRIDGE.** The
+user ran `plugin_check.sh` from inside the armed boot, on a live desktop - the
+first armed boot since 156 where publishing the AGDC did not freeze the screen.
+Rule 8/15 clear: `rbgpu-boot` **159** in capture and live, uptime 4 min,
+`kextstat` UUID **8CB914E5** byte-equal to `build/out`, `diag_used` **542** of
+**768**, and **`agdc_oneshot 0`** - the one-shot cleared, so 2rh's failure did
+not recur.
+**THE HEADLINE IS APPLE'S OWN `debug-gpus` DUMP:
+`gpu 0xfbc7 agdc 0x100000536 /RembrandtGPUAGDC`.** Every boot before this read
+**0**, and 2qq/2qr built a chain on that zero. **2r0's mechanism is confirmed
+live** - publish an IOService that `safeMetaCast`s to
+`AppleGraphicsDeviceControl` and the wrangler's own matching notification pairs
+it: no `IOFramebuffer` subclass, no vtable, no personality.
+`AppleGraphicsDeviceControl` went **1 -> 2**, `AppleGraphicsDeviceControlClient`
+is live, and `agdc_user_vendor 4` / `agdc_user_cap 1` - WindowServer queried
+through it. **`gpuc` is still 0**, exactly as 2r1 predicted (no writer in the
+wrangler).
+**THE OPT-OUT WORKED BUT IS NOT ESTABLISHED AS THE FIX:**
+`agdc_policy_optout 1`, `AppleGraphicsDevicePolicy` **0** instances - AGDP did
+not attach - **but boot 159 differs from 156 by SIX milestones** (2rd-2rh,
+2rk), and 2rh alone moved the timing read off WindowServer's thread. Calling
+the living panel `NeedsPolicyDriver`'s doing would repeat 2qm's error. **The
+clean A/B is one boot: `-rbgpuagdcpolicy`**, which leaves the property absent
+with everything else byte-identical.
+**0x921 REFUSED, AND THE REASON IS THE NDRV, NOT THE BRIDGE.**
+`agdc_tim_src 3`, `agdc_tim_mode 100`, `getTimingInfoForDisplayMode`
+**succeeded**, then **`agdc_tim_flags 0`** - `kIODetailedTimingValid` clear - so
+`agdc_tim_err 3`, `agdc_link_result -2`, `agdc_logical_ret 0xE00002C7`, and
+**every `agdc_extcap_*` key ABSENT** (0x711 unreached: IOPresentment aborts the
+pipeline gather after the logical-device gather fails). **Exactly the condition
+2rg's reading order pre-stated, and the refusal is CORRECT** - a zero fill would
+have passed Apple's checks and poisoned its capability cache, and
+`agdc_tim_flags 0` publishes what was refused (rule 19). Also:
+`agdc_last_attr 0x82` returned **0**; `agdc_vendor_unsupported 0x2001`.
+**AND THE NDRV HAS NO DETAILED TIMING TO GIVE - MEASURED.** `IOFBConfig`'s one
+mode `ID=100` decodes to width **1920**, height **1080**, refreshRate
+**0x8fd53f/65536 = 143.83 Hz**, flags **0x40000b** (containing 2q7's
+`kDisplayModeAcceleratorBackedFlag` 0x400000, an independent re-confirmation) -
+and **every remaining word is zero**: no blanking, no sync offsets, no pixel
+clock. **`IODisplayEDID` is absent from the entire registry** (controls in the
+same dump: `IOFBMemorySize`, `IOFBConfig`, `IOFBProbeOptions`, `AppleDisplay`
+x2, `IODisplayConnect` x2), as are `IOFBDetailedTimings`,
+`IOFBCurrentPixelClock`, `IOFBTimingRange`. Those two reads come from a
+**later UNARMED boot** (`logs/boot159/ioreg-UNARMED-later-boot.txt`) but are
+arm-independent framebuffer properties - stated because that dump was briefly
+mis-filed as 159's.
+**IOPRESENTMENT NEVER RAN, SO NOTHING HERE TESTS THE DISPLAY PIPE:**
+`iop_oneshot 2` = **not armed**, so 2qo's patch was never placed and
+`UseIOPresentment` returned 0 at the class-name gate.
+`"Unable to get AGDC information"` appears **0** times and **that is NOT
+evidence the 2qq/2qr blocker is gone** (rule 14). The control is broken two
+ways: `plugin_check.sh`'s predicate does match
+`senderImagePath CONTAINS "IOPresentment"`, but **`--style compact` never
+prints the sender path**, so grepping the capture for that word returns 0
+regardless. An unfiltered query returned 33 AGDC lines (the `debug-gpus` dump
+among them) - that is the control. **To test the pipe, arm `rbgpu-iop=1`
+alongside `rbgpu-agdc=1`.**
+Re-checked, still dead: **`com.nullmoth.NVRMAGDC`** logged four
+kernelmanagerd lines and `error: tried to insert an invalid codeful kernel
+extension`, and `kextstat` (control **186**) shows it **NOT loaded**.
+Compositor unchanged: `"Metal compositor activated."` twice, neither other
+line - same as 149.
+**NEXT IS A READ, NOT A GUESS: OTG0's live timing registers**, which the
+firmware already programmed (`OTG0_CONTROL = 0x00011201`); read-only, named in
+`docs/HANDOFF.md` §4, and permitted by `rb_probe.c`'s rules at probe level 2.
+Synthesising blanking from CVT/GTF would be rule 17 verbatim. Detail: JOURNAL
+**2rl**.
+
 **2rk: `NeedsPolicyDriver` IS AN OPT-OUT, AND ITS ABSENCE RECRUITS
 `AppleGraphicsDevicePolicy` ONTO OUR BRIDGE - 2rj HAD THE SENSE BACKWARDS.**
 Instrument first (rule 26, again): **`strings -a` SILENTLY UNDER-REPORTS** on

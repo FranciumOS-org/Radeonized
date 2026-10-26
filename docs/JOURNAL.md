@@ -32504,3 +32504,116 @@ UUID **8CB914E5**; plugin imports **362 of 362**, 0 unresolved;
 **NOT VERIFIED ON HARDWARE.** Reading order gains one line before the timing
 block: **`agdc_policy_optout 1`**, and verdict **16** means the bridge refused
 rather than published.
+
+## 2rl - BOOT 159: THE PANEL LIVED, AND THE WRANGLER PAIRED OUR BRIDGE
+
+First armed boot since 156 in which publishing the AGDC did **not** freeze the
+desktop. The user ran `plugin_check.sh` from inside the armed boot, on the
+live desktop, chatting - which is itself the result.
+
+**Rule 8 and rule 15 first.** `rbgpu-boot` **159** in both
+`logs/20261026-034305-plugin/nvram.txt` and live NVRAM two minutes after the
+capture, uptime 4 min; `kextstat` shows
+`com.rembrandtgpu.plugin ... 8CB914E5-D9D0-3587-B3C7-F6B9220C9419`, byte-equal
+to `build/out`. `diag_used` **542** of `diag_max` **768**, so an absent key
+carries information. `agdc_oneshot 0` - **the one-shot cleared this time**, so
+2rh's failure did not recur, and all four one-shots read ABSENT afterwards with
+`-rbgpuagdc` still in boot-args and the bridge correctly inert.
+
+**MEASURED, from Apple's own `debug-gpus` dump in this boot's log:**
+
+```
+(reg) gpu 0xfbc7 flags 0x20 (DG) vid.did=1002.1681 b:d:f=54:0:0
+gpu 0xfbc7        pci 0x100000280  .../GP17@8,1/IOPP/IGPU@0
+gpu 0xfbc7       agdc 0x100000536  /RembrandtGPUAGDC
+gpu 0xfbc7       gpuc 0x000000000
+gpu 0xfbc7 agdpclient 0x000000000
+gpu 0xfbc7      accel 0x1000004bd  /AMDRadeonX6000_AMDNavi21GraphicsAccelerator
+gpu 0xfbc7      fb0:0 0x1000004bb  /.Display_boot
+```
+
+**`agdc` is no longer 0.** It carries our service's registry ID. Every boot
+before this read `agdp 0`, and 2qq/2qr built a whole chain on that zero. So
+**2r0's mechanism is confirmed live**: publish an IOService that
+`safeMetaCast`s to `AppleGraphicsDeviceControl` and the wrangler's own matching
+notification pairs it, with no `IOFramebuffer` subclass, no vtable work and no
+personality. `AppleGraphicsDeviceControl` instance count went **1 -> 2**
+(the wrangler plus ours) and `AppleGraphicsDeviceControlClient` is live in the
+registry, with `agdc_user_vendor 4` / `agdc_user_cap 1` - WindowServer queried
+through it, exactly as in 156. **`gpuc` is still 0**, which is what 2r1
+predicted: it has no writer in the wrangler at all.
+
+**THE OPT-OUT WORKED, BUT IT IS NOT ESTABLISHED AS THE FIX.**
+`agdc_policy_optout 1` and `AppleGraphicsDevicePolicy` at **0** instances, so
+AGDP did not attach. But boot 159 differs from boot 156 by **six milestones**
+(2rd, 2re, 2rf, 2rg, 2rh, 2rk), not one - 2rh alone moved the timing read off
+WindowServer's thread, which was a real structural defect. Attributing the
+living panel to `NeedsPolicyDriver` would be 2qm's error again: a blast radius
+is a measurement, not a description. **The clean A/B exists and is one boot:
+`-rbgpuagdcpolicy` leaves the property absent with everything else
+byte-identical.** Until that runs, the honest statement is *the panel lived*,
+not *the opt-out fixed it*.
+
+**0x921 REFUSED, FOR A MEASURED REASON, AND THE REASON IS THE NDRV.**
+`agdc_tim_src 3` (both getters resolved), `agdc_tim_mode 100`,
+`getTimingInfoForDisplayMode` **succeeded** (err would be 2), and then
+**`agdc_tim_flags 0`** - `kIODetailedTimingValid` clear - so
+`agdc_tim_err 3`. `agdc_link_result -2`, `agdc_logical_ret 0xE00002C7`
+(`kIOReturnUnsupported`), `agdc_failed_attr 0x921`, `agdc_failed_calls 3`, and
+**every `agdc_extcap_*` key is ABSENT** - 0x711 was never reached, because
+IOPresentment aborts the pipeline gather once the logical-device gather fails.
+That is exactly the condition 2rg's reading order pre-stated. **The refusal is
+correct behaviour**: a zero-filled reply would have passed Apple's checks and
+poisoned its capability cache, and `agdc_tim_flags 0` publishes precisely what
+was refused (rule 19). The guard earned its keep on its first real boot.
+Also new: `agdc_last_attr 0x82` returned **0**, and
+`agdc_vendor_unsupported 0x2001` names an attribute we refuse.
+
+**THE NDRV HAS NO DETAILED TIMING TO GIVE, AND THAT IS NOW MEASURED, NOT
+INFERRED.** `IOFBConfig`'s single mode is
+`{"ID"=100, "DM"=<8007000038040000 3fd58f00 00000000 0b004000 ...>}`:
+width **0x780 = 1920**, height **0x438 = 1080**, refreshRate
+**0x8fd53f / 65536 = 143.83 Hz** (2ou/2ov's fill, visible here), flags
+**0x40000b** - which contains 2q7's `kDisplayModeAcceleratorBackedFlag`
+**0x400000**, independently confirming that boot's result. Every remaining
+word is **zero**: no blanking, no sync offsets, no pixel clock. And
+**`IODisplayEDID` is absent from the whole registry** (controls present in the
+same dump: `IOFBMemorySize`, `IOFBConfig`, `IOFBProbeOptions`, `AppleDisplay`
+x2, `IODisplayConnect` x2), as are `IOFBDetailedTimings`,
+`IOFBCurrentPixelClock` and `IOFBTimingRange`. So nominal geometry and refresh
+exist; a detailed timing does not, anywhere a framebuffer client can reach.
+(These two reads come from a **later, UNARMED boot** - saved as
+`logs/boot159/ioreg-UNARMED-later-boot.txt` - but they are properties of the
+`IONDRVFramebuffer` and do not depend on arming. Said plainly because that
+dump was briefly filed as boot 159's and is not.)
+
+**IOPRESENTMENT NEVER RAN, SO NOTHING HERE TESTS THE DISPLAY PIPE.**
+`iop_oneshot 2` = **not armed**, so 2qo's vendor-mask patch was never placed
+and `UseIOPresentment` returned 0 at the class-name gate. The string
+`"Unable to get AGDC information"` appears **0** times this boot - and that is
+**NOT** evidence the 2qq/2qr blocker is gone (rule 14). Worse, the obvious
+control is broken twice over: `plugin_check.sh`'s predicate does include
+`senderImagePath CONTAINS "IOPresentment"`, but `--style compact` never prints
+the sender path, so grepping the capture for `IOPresentment` returns 0 whether
+or not such lines matched. A direct unfiltered query found 33 AGDC-related
+lines (the `debug-gpus` dump among them), which is the control that makes the
+absence readable at all. **To test the pipe, boot with `rbgpu-iop=1` armed
+alongside `rbgpu-agdc=1`.**
+
+**Suspect re-checked and still dead:** `com.nullmoth.NVRMAGDC` in
+`/Library/Extensions` produced four kernelmanagerd lines this boot and
+`error: tried to insert an invalid codeful kernel extension in the restricted
+lookup table`, and `kextstat` (control: **186** kexts) shows it **not loaded**.
+CLAUDE.md's killed-suspect line stands; the log noise is not a load.
+
+**Compositor unchanged:** `"Metal compositor activated."` twice, neither other
+line - the same reading as boot 149, so the mode global is still 0 and nothing
+about the software-compositing chain moved.
+
+**NEXT, AND IT IS A READ, NOT A GUESS.** The timing must come from the one
+place that has it: **OTG0's live registers**, which the firmware already
+programmed (`OTG0_CONTROL = 0x00011201`). That is read-only, it is what
+`docs/HANDOFF.md` §4 already names, and `rb_probe.c`'s hardware rules permit
+exactly it - no writes but `MM_INDEX`/`MM_INDEX_HI`, probe level 2. Synthesising
+blanking from CVT/GTF instead would be rule 17 verbatim: substituting a value
+and narrating it as a hardware result.
