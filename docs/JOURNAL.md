@@ -34925,3 +34925,134 @@ passes. UUID **15E25510 → 6E916669**. **NOT VERIFIED ON HARDWARE** - and the
 thing to check first on the next capture is the cheapest possible one:
 **`grep -c fb_vbl nvram.txt` must be non-zero.** If it is 0 again, the note is
 still the problem and no reading past it means anything.
+
+## 2s9 — boot 168: the early path wedges because OUR bridge can never answer getLinkConfig
+
+Boot 168 is the deliberate `-rbgpuagdcearly` experiment planned in 2s8, on
+build `6E916669`. The machine wedged as predicted, and the user ran
+`sudo tools/plugin_check.sh` **from inside the wedged boot over SSH** — so
+unlike boot 164 this capture is not NVRAM-only: `peer.plist` is on disk with
+the full 571-entry diag table. `logs/20261026-181921-plugin`.
+
+**Rule 8 first:** `rbgpu-boot = 168`, up from 167. This boot's own capture.
+**Rule 14:** `diag_used = 571`, `diag_max = 768`. The table did **not** fill,
+so an absent key carries information.
+**2s8's fix took:** `fb_vbl` appears in `nvram.txt` this time (it appeared
+zero times in boot 167's). The reordering was worth the commit.
+
+### The answer: no transaction was ever queued
+
+`fb_vbl_ot_armed` is **absent** — from the full table, not merely from the
+note — and `fb_vbl_ot_state = 0`. With the table not full, that is a result:
+`enableTransactionInterrupt` never ran, so **nothing was ever queued**, even
+with the AGDC gate won (`agdc_early 1`, `agdc_started 1`, `agdc_stage 0x46`,
+`agdc_note_fired 1`).
+
+So the wedge is **not** "the ring filled and nothing retired it". That
+reading is now excluded. Whatever WindowServer's stack showed in 2s2, a
+queue-slot wait cannot be the first cause of a ring that never received a
+transaction.
+
+### Why: the timing is sampled 1085 ms before the framebuffer exists
+
+The cause is on **our** side, and the capture dates it to the millisecond:
+
+| key | value | meaning |
+| --- | --- | --- |
+| `agdc_t_presample_ms` / `agdc_t_sampled_ms` | 6320 | `sampleTiming()` ran here |
+| `agdc_t_fb_ms` | 7405 | the framebuffer arrived 1085 ms LATER |
+| `agdc_tim_ndrv_err` | 7 | `sampleTimingNdrv`: "no framebuffer yet" |
+| `agdc_otg_src` | 3 | `sampleTimingOtg`: declined, `early && !framebuffer` |
+| `agdc_tim_cached` | **absent** | no timing was ever cached |
+| `otg_*` | **absent entirely** | the BAR5 sampler never ran at all |
+| `agdc_vendor_calls` | 6 | WindowServer asked |
+| `agdc_failed_calls` | 4 | we refused |
+| `agdc_vendor_unsupported` / `agdc_failed_attr` | `0x921` | getLinkConfig |
+| `agdc_failed_ret` | `0xe00002c7` | `kIOReturnUnsupported` |
+| `agdc_link_result` | −2 | |
+
+`sampleTiming()` is called from **exactly one place**, the start path
+(`rbgpu_agdc.cpp:487`). On the early path it runs before any framebuffer
+exists, so the NDRV source returns 7 and the OTG fallback declines by 2s1's
+deliberate guard. `timingValid` stays false, and `rbgpu_agdc.cpp:290` then
+refuses every `0x921` for the rest of the boot rather than zero-filling
+(2rd's correct choice — a zero reply would pass IOPresentment's validation
+and poison its capability cache).
+
+Nothing re-samples when the framebuffer finally arrives. The arrival path
+ends in `if (work && !finished) thread_call_enter(work)` and `finished` was
+set at 6320 ms, so the worker is never re-entered — and `run()` returns
+immediately on `finished` anyway.
+
+Contrast boot 167, the clean late path: `agdc_tim_ndrv_err 3` (the NDRV says
+it has no detailed timing) → OTG fallback **ran** (`agdc_otg_src 2`,
+`otg_err 0`, 931 polls, 111 ms) → `agdc_tim_cached 2`, and only 1 of 2
+vendor calls failed.
+
+### Two controls, both passed
+
+**Identity (rules 19/29).** `fb_vbl_ot_lo − fb_vbl_hv_lo` is the same
+constant in both boots on different slides: boot 168 `0xab946cb8 −
+0xabaa9484 = −0x15cdcc`; boot 167 `0xab546cb8 − 0xab6a9484 = −0x15cdcc`.
+Same function pair, and 167 already named it `signalVBLInterrupt`. The
+control pointer matched its solved value again (`fb_vbl_hv_lo ==
+fb_vbl_sym_lo`), so 2s6's instrument is doing its job.
+
+**Delivery.** `fb_vbl_sent 0xc01` (3073) with `vblp_ticks` absent — the vbl
+is reaching the first registrant and the fallback branch never ran.
+
+### An observation, not yet a result
+
+`fb_vbl_calls` is **0x36 (54)** past the gate, against 5 on the late path,
+and the last-8 type ring no longer holds FourCCs: boot 167 read
+`'vbl ' 'dci ' 'dpir' 'hdci' 'vbl '`, boot 168 reads `0xff0000e9 0xff0000ea
+0x60000400 0xff000152 0xff000153 0xff000154 0xff000155 0xff000152`. Winning
+the gate makes something register interrupt types in a different numbering.
+Recorded; not the frontier, and no boot should be spent on it yet.
+
+### The change
+
+A **second** `thread_call` dedicated to the re-sample, entered when the
+framebuffer binds. It cannot reuse `work` (whose body returns on `finished`)
+and must not — `run()` is the registration path boots 164–168 measured, and
+rule 16 forbids putting a new suspect on it.
+
+- `resampleRun()`: publishes `agdc_t_resample_ms`, then `agdc_resample`
+  2 = already valid, 3 = no framebuffer, 1 = sampled; and
+  `agdc_resample_valid` = `timingValid` afterwards. That last key is the
+  **enabling field itself** (rule 20): a boot cannot report "the re-sample
+  ran" while `0x921` is still refused without saying so.
+- entered from the framebuffer path under `early && finished && !timingValid`
+  (`agdc_resample` 4 = entered, 5 = no thread_call). Scoped to `early`, so
+  the default configuration is byte-for-byte what boots 165–167 booted clean.
+- it runs on **our own thread_call**, which is 2rh's requirement (never from
+  the vendor callback, never under a lock of ours) and keeps 2ry's hazard —
+  a BAR5 mapping and an up-to-400 ms `IODelay` poll — off the NDRV matching
+  path. By then `framebuffer` is set, so `sampleTimingOtg()` no longer
+  declines and takes the late path 167 measured clean.
+
+`agdc_resample`, `agdc_resample_valid` and `agdc_tim_cached` go into the hot
+key list immediately behind `fb_vbl_ot_armed`, per 2s8 — the note is 512
+bytes and the frontier moved again.
+
+Build **`8B261646`**: imports 365/365, **0** from `SystemKernelExtensions.kc`,
+0 `IOGraphicsFamily` in `Info.plist`, hosttest passed. **Not booted.**
+
+### What the next boot would show
+
+Same procedure as 2s8 (it wedges; `plugin_check` over SSH from inside the
+wedge works, which boot 168 just demonstrated, and a plain power cycle comes
+up clean because the one-shots are consumed).
+
+| read | meaning |
+| --- | --- |
+| `agdc_resample 1` + `agdc_resample_valid 1` + `agdc_tim_cached 2` | the fix took: a real OTG0 timing is cached and `0x921` can be answered |
+| `agdc_resample 1` + `agdc_resample_valid 0` | it ran and the sample still failed — read `agdc_otg_src` / `agdc_otg_ret` / `otg_err` for which stage |
+| `agdc_resample 3` or 5 | the trigger fired with no framebuffer / no thread_call |
+| `agdc_resample` absent | the framebuffer path was never reached on this boot |
+| then **`fb_vbl_ot_armed 1`** | a transaction was finally queued and Apple armed retirement — the refused `0x921` was the blocker |
+| `fb_vbl_ot_armed` still absent, with `agdc_resample_valid 1` | the link config was NOT the blocker, and the next suspect is the queue slot count itself |
+
+That last row is the point: the boot separates "we were refusing WindowServer
+the one thing it needed" from "there is a second gate behind it", and either
+answer is worth the boot.
