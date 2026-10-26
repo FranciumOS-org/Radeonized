@@ -33294,3 +33294,92 @@ boot, which is why the uptime and nonce were checked first. A capture without
 the registry dump cannot answer rule 15 on its own.
 
 No code changed. Tree still byte-identical to `1caa488` over `src/` and `tools/`.
+
+## 2rv — BOOT 162: `rbgpu-arm` + `rbgpu-iop` BOOTS CLEAN TOO, AND THE ORDERING WINDOW IS 6.2 s, NOT 34
+
+The user: *"im in just fine this time"*. Second step of the A/B, one variable
+added. **The hang does not reproduce**, and the boot handed over a timeline the
+project did not have.
+
+**Rule 8 / 15 first.** `rbgpu-boot` **162**, up from 161. `rbgpu-arm`,
+`rbgpu-agdc`, `rbgpu-iop`, `rbgpu-mcreg` **all absent** — armed and consumed.
+Loaded UUID **A83C0170-8504-3110-B288-C4D90F6E8BDD**, byte-equal to
+`dwarfdump --uuid build/out/...`. `diag_used` **518** of `diag_max` **768**, so
+absence carries information. Uptime 4 min, live reads taken inside the boot —
+**no `plugin_check.sh` capture exists for this boot**, so every reading below is
+a live `ioreg` / `nvram` / `log show` read with the nonce checked first.
+
+**THE IOP PATCH LANDED, AND `iop_verify` IS THE LINE THAT SAYS SO.**
+`iop_verify 1` — the five bytes read back from WindowServer's own memory.
+`iop_oneshot 0` (armed and cleared), `iop_on 1`, `iop_ready 1`, `iop_saw_ws 1`,
+`iop_match 1`, `iop_patched 1`, `iop_map 1`, `iop_prot 0`, `iop_write 0`.
+The desktop is accelerated: `AMDRadeonX6000_AMDNavi21GraphicsAccelerator`
+registered/matched/active, peer live, `dispclk` nominal **130.727 Hz**.
+
+**SO THE A/B IS OUT OF VARIABLES AND THE HANG NEVER REPRODUCED.** Three
+consecutive clean boots on the tree restored in 2rs: 161 (`arm`), 162
+(`arm` + `iop`), and boot 160 before the hangs ran `arm` + `agdc` + `iop` and was
+also fine. 2rt's reconstructed hung configuration was *accelerator armed + IOP
+armed + AGDC off*, which is within a boot-arg of this one — and this one works.
+**Stated as it stands: four hangs, no mechanism, and no configuration of the
+current tree now reproduces them.** The three hangs before the fourth ran
+2rp/2rq/2rr trees that no longer exist; the fourth ran a tree 2rs could only
+reconstruct, never measure. That is where it rests, and no fifth theory is named
+here (2rs's instruction to itself).
+
+**THE REAL FINDING: THE WINDOW IS 6.2 SECONDS.** `kern.boottime` for this boot
+is **12:57:02.736**, and the whole sequence is one process, one thread,
+`WindowServer[161:39e]`, with `displaypolicyd[142:35e]` ahead of it (rule 28
+satisfied — every line attributed by timestamp *and* pid):
+
+| offset | source | line |
+|---|---|---|
+| +5.241 s | `displaypolicyd[142:35e]` | `(reg) gpu 0xfbc7 flags 0x2000020 (DG,pubArmed) vid.did=ffff.ffff b:d:f=???` |
+| +5.683 s | `displaypolicyd[142:35e]` | `gpu 0xfbc7 flags 0xb2000020 (DG,published,quiet,pubSched,pubArmed) vid.did=1002.1681 b:d:f=54:0:0` |
+| +6.211 s | `WindowServer[161:39e]` | `(reg) gpu 0xfbc7 flags 0x20 (DG) vid.did=1002.1681` — and the dump reads **`agdc 0x000000000`** |
+| +6.230 s | `WindowServer[161:39e]` | `(IOPresentment) Error: Unable to get AGDC information.  Return code: 0x10000003` |
+| +6.231 s | `WindowServer[161:39e]` | `(IOPresentment) Error: **Unable to locate service dependencies**` |
+| +6.231 s | `WindowServer[161:39e]` | `(IOPresentment) Error: **Unable to acquire map**` |
+| +6.270 s | `WindowServer[161:39e]` | `[CoreDisplay] System set to use IOP but no display pipes are present` |
+
+**2rn read the same question being asked at 33.920 s.** Both are measurements;
+this boot differs by `rbgpu-agdc` being unarmed and by whatever moved
+WindowServer's start, so the honest statement is that **the deadline is not a
+fixed 34 s and can be as early as ~6.2 s after boot** — which is a far harder
+target than 2rn's finding implied, and it is the number any publish-earlier work
+has to beat. 2rn's number is not retracted; it is no longer the only one.
+
+**TWO OF THOSE LINES ARE NEW TO THIS RECORD, AND THEY NAME 2r5's FUNCTION.**
+`Unable to locate service dependencies` and `Unable to acquire map` sit between
+the `0x10000003` and the no-pipes verdict, 1 ms apart. **The map is
+`ioPresentmentCreateAssociationMap`** (2r5, `0x7ff812e8a730`), and 2r5 measured
+with `make agdcinfo` exactly why it comes back empty: the only service matching
+`AppleGraphicsDeviceControl` here *is* `AppleGPUWrangler`, which that function
+excludes by an exact 17-byte name compare, so zero candidates survive.
+**So this boot is the clean control the project never had: IOP gate OPEN
+(`iop_verify 1`), bridge ABSENT, map empty, no pipes** — with
+`gpu 0xfbc7 agdc 0x000000000` from Apple's own dump as the reading.
+
+**AND AN UNRECORDED CHANGE TO THE MACHINE, FOUND WHILE CHECKING THE LOG.**
+`com.nullmoth.NVRMAGDC` (0.1) and `com.nullmoth.NVRMFB` (0.1) are **LOADED** in
+this boot, at kextstat slots 152 and 173 against a 198-kext control, with
+`syspolicyd` logging `Kernel Extension ALLOWED` at +4.4 s and kernelmanagerd
+`Validate approval for /Library/Extensions/NVRMAGDC.kext in auxKC: approved`.
+**2rl recorded both as NOT loaded** (`error: tried to insert an invalid codeful
+kernel extension`, `kextstat` control 186), so the auxKC state changed at some
+point nobody wrote down. `/Library/Extensions` also holds `NVAccel.kext` and
+`NVRM.kext`.
+**They instantiate NOTHING, measured:** `NVRMFBClaim`, `NVRMNVDAFramebuffer`,
+`NVDAGDCLoader` and `NVRMDisplay` all have **0** instances, the single
+`IOFramebuffer` is still `.Display_boot` / `IONDRVFramebuffer` (control: 1
+instance), and 13 log lines this boot mention NVRM with an error. So they are
+loaded and inert — **not** a confound for anything measured here.
+**But NVRMFB is built to compete for the display:** its `NVRMFBClaim`
+personality is `IOProviderClass = IOPCIDevice`, `IONameMatch = display`,
+**`IOMatchCategory = IOFramebuffer`** — the same provider and the same category
+2oz established are what it takes to displace `.Display_boot`. And `NVRMAGDC`'s
+`NVDAGDCLoader` matches on `IOResources`. Two third-party kexts aimed at exactly
+the two layers this work is building, live in the kernel, currently matching
+nothing. **Recorded as a known confound to watch, not as a cause of anything.**
+
+No code changed.
