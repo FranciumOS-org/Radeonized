@@ -188,6 +188,24 @@ int sampleTimingNdrv() {
 // 2rx: the OTG0 fallback, reachable from EVERY NDRV failure. Read-only; it
 // refuses rather than publishing a zero timing into Apple's capability cache.
 void sampleTimingOtg() {
+    // 2s1: do NOT spin on DCN MMIO during WindowServer's display bring-up.
+    // The early path's own hazard is measured (2rz); 2ry then put a BAR5
+    // mapping and an up-to-400 ms IODelay poll of OTG0 on it, and the boot
+    // that ran that combination blocked inside the FIRST
+    // CGXConstructVirtualFramebuffer pass - earlier than any previous failure
+    // here, and earlier than boot 164's frozen panel. That is 2rq's
+    // unexcluded suspect ("the up-to-400 ms IODelay spin during early
+    // matching") arriving on a path where boot 164 could not reach it,
+    // because the sampler was then bound only from processNDRV.
+    // So the two variables stay separate: the early trigger publishes with NO
+    // timing (agdc_tim_err 7, exactly what boot 164 did and still got past the
+    // gate), and the OTG sample belongs to the late, framebuffer-triggered
+    // path that boot 165 measured clean. A future -rbgpuagdcearly experiment
+    // then tests ONE thing.
+    if (early && !framebuffer) {
+        rbgpu_diag_set_num("agdc_otg_src",3);   // 3 = declined, early path
+        return;
+    }
     struct rb_otg_timing otg;
     for (size_t i=0;i<sizeof otg;i++) reinterpret_cast<uint8_t *>(&otg)[i]=0;
     if (!rbgpu_agdc_sample_otg(pci,&otg)) { rbgpu_diag_set_num("agdc_otg_src",1); return; }

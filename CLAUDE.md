@@ -19,6 +19,63 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2s1: THE TWO AFTERNOON HANGS WERE NOT BOOT 164's FAILURE -
+2rz AND 2s0 OVER-GROUPED THEM.** Found by reading evidence already on disk, no
+boot. 2rz's fix and verdict stand; its account of the evidence does not.
+**RULE 28, AND I TRIPPED ON IT FIRST:** a timestamp window does NOT separate
+boots, because **pids are reused** - `WindowServer[161]` lines at 14:30:47 are
+the NEXT boot's. The reliable separator is the **`Darwin Kernel Version`
+banner**, once per boot: afternoon boundaries **14:26:29 / 14:30:47 / 14:50:32**.
+**THE THREE BOOTS:** A = 2ry `0E6F0DCD`, **HUNG**, WS `[161:40d]` 14:26:32,
+**no compositor line at all**, **no IOPresentment errors**; B = 2ry +
+**`-rbgpuoff`** (the boot I diagnosed from, NOT a third hang), **`Software
+compositor activated` x2**; C = boot 165, 2rz `5951FC1F`, `Metal` x2, all 3
+IOPresentment errors, **clean**. So there were **two** 2ry hangs, A and the one
+its own `shutdown cause 5` reports.
+**WHERE BOOT A BLOCKED, pinned against C as control:** main thread
+`[161:40d]` last logged **14:26:38.311** (`Updating Key-Value Observers Of
+Preferences`), while HID thread `[161:9a8]` kept going to 14:26:44.203 - **alive
+process, blocked main thread** - and the whole system stopped at 14:26:56.054.
+Milestones A vs C: `Session 257` **4 / 4**, **`CGXConstructVirtualFramebuffer`
+1 / 7**, **`Setting main display` 1 / 7**, `debug-gpus` **0 / present**,
+`RembrandtGPUAGDC` **0 / present**. **So boot A blocked inside WindowServer's
+FIRST display-construction pass** - before the compositor decision (all three
+of `Metal`/`Software`/`Noop compositor activated` absent, and 2qa/2qd showed all
+three paths log), before any IOPresentment query, before the wrangler's dump.
+**Boot 164 got through ALL of that**: `Metal` x2 at +4 s, zero IOPresentment
+errors, 26 `IOAccelDisplayPipe` events, WindowServer still servicing XPC at
+13:30:22 (+54 s). **164 is a late freeze PAST the gate; A is an early block
+BEFORE it.**
+**MECHANISM - HYPOTHESIS, NOT MEASURED** (boot A left no diag note): 2ry put a
+BAR5 `mapDeviceMemoryWithRegister` and an **up-to-400 ms `IODelay` poll of
+OTG0** on the bridge's early worker, in exactly A's window. Boot 164 could not
+reach that code (the sampler was bound only from `processNDRV`, which is what
+2ry "fixed"). **This is 2rq's own unexcluded suspect verbatim** - *"the
+up-to-400 ms IODelay spin during early matching, and MMIO before the chip is
+ready"*. **CHANGE: `sampleTimingOtg()` declines on the early path** -
+`if (early && !framebuffer)` -> **`agdc_otg_src 3`** - so the early trigger
+publishes with NO timing (`agdc_tim_err 7`, what 164 did and still passed the
+gate) and the OTG sample stays on the late path boot 165 measured clean. A
+future `-rbgpuagdcearly` boot then tests ONE variable. **INERT BY DEFAULT**
+(`early` false => the guard cannot fire), so boot 165's verified behaviour is
+unchanged and no boot is needed to trust the default.
+**A CONTROL THIS PROJECT HAS NEVER HAD: `Software compositor activated`,
+observed for the first time**, x2, in boot B. It confirms 2qd's three-way
+reading from the other side, and it means **`Metal compositor activated` x2 is
+just the normal accelerated-boot signature and says NOTHING about which
+compositor a display gets** - 163, 164 and 165 all log it and all three
+composite in software.
+**WHAT CHANGES: one inference in 2rz is now WEAKER and should be.** A hang is
+not what a missing method produces - an unimplemented
+`IOPresentmentBindIOAccelSurfaceToResource`/`SetPlaneState` returns
+`kIOReturnUnsupported`, it does not block. **Boot 164 BLOCKED, silently, so what
+it wedged on is a WAIT, not an absent selector** - IOPresentment's own strings
+name **`IOAccelDisplayPipeTransactionWait`** (2qm). Whether DCN 3.1.2 is the
+requirement, or a transaction nothing completes is, is **NOT established**, and
+the next read on this frontier is that function, not more `dcn31` scoping.
+UUID **5951FC1F -> ABB85BCD**; 365/365 imports, **0** from
+`SystemKernelExtensions.kc`. JOURNAL **2s1**.
+
 **LATEST 2026-10-26 / 2s0: BOOT 165 VERIFIES 2rz - THE GATE IS SHUT, THE DESKTOP
 LIVES, AND 2ry's BAR5 SAMPLER WORKS ON HARDWARE.** Capture
 `logs/20261026-145230-plugin`, run from a live accelerated desktop. Rule
