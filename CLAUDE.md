@@ -155,6 +155,47 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rj: `AGDC::start` QUERIES OUR VENDOR TWICE AND BRANCHES ON THE ANSWERS, AND
+IT HOLDS THE KEXT'S ONLY INFINITE WAIT.** `0x13dfd37c` is
+**`setDeviceAttribute`**, a 36-byte thunk to
+`filtered_doDeviceAttribute(api=1 SET)` - **2r1 confirmed from AGDC's own
+side**. Swept whole-kext: **one** `waitForMatchingService`, one `IOSleep`, 12/14
+recursive lock/unlock. The wait is in `start` and it is
+`waitForMatchingService(serviceMatching("AppleGPUWrangler"), **$-1 = UINT64_MAX**)`
+- **infinite**, bracketed by `mach_absolute_time` so Apple measures the delay.
+Benign here (2r5: the wrangler is present), but this bridge calls
+`service->start(pci)` from its own `thread_call`, so were it ever absent that
+thread blocks **forever** with no timeout and no diagnostic of ours;
+`agdc_stage` would sit at 60.
+**`start` RE-ENTERS OUR CODE THREE TIMES** - `*0x858` at `0x13dfbb60` and
+`0x13dfbba1`, plus `filtered_doDeviceAttribute` at `0x13dfbef6` - and the first
+two decode fully: query attr **1**, then `if ((vendorInfo->0x28 - 1) > 1u)`
+skip, else query **0x980**; then `if ((eax - 7) > 1u)` skip, else
+`setProperty("NeedsPolicyDriver")`. So **`vendorInfo+0x28` must be 1 or 2** -
+which **2r5 derived independently from IOPresentment's os_log**, two files
+agreeing - and the bridge writes **2**, taking the query-capability branch,
+correctly. **New decode:** `+0x28 == 7` (what Apple's AMD path reports)
+**skips 0x980 entirely** and sets **`NeedsPolicyDriver`**, so `+0x28` is not a
+version - it selects *"policy-driver GPU, do not ask me"* vs *"ask me and
+decide from the reply"*.
+**A TIDY LOCK STORY WAS DROPPED BEFORE IT BECAME A CLAIM:** three `*0x858`
+sites sit inside `filtered_doDeviceAttribute` and `0x13dfc6ff`'s lock is not
+unlocked until `0x13dfd0f3`, which looked like "our callback runs under AGDC's
+lock" and would have explained a convoy. But 2rd's traced 0x921 path
+(`0x13dfc32b → 0x13dfc5b8 → 0x13dfd1f1 → 0x13dfd204 → 0x13dfcf0d`) **skips that
+whole region**, so **no lock is held at our callback**. Recorded as a
+non-finding, because this was the second tidy lock story this week and the
+first (2rh) reached a commit before being measured false.
+**THE FREEZE IS STILL UNEXPLAINED** - boot 156 froze with `agdc_started=1`
+before any timing code existed, and 2rh/2ri/2rj have not touched it. What is
+new: `start` **branches on our replies**, so the bridge's answers configure
+Apple's object rather than merely being reported. Live lead: find
+**`NeedsPolicyDriver`**'s readers, and pin down which field the `TAIL`
+comparison reads after the 0x980 call - it is `-0x4(%r15)`, four bytes *below*
+the capability buffer, so it is **not** obviously a field of our reply and must
+be established before anything is concluded from it. No code changed.
+Detail: JOURNAL **2rj**.
+
 **2ri RETRACTS 2rh's HYPOTHESIS: NEITHER TIMING GETTER TAKES A LOCK, AND THE
 FROZEN PANEL PREDATES ALL OF 2rd-2rg.** `getCurrentDisplayMode` is **34 bytes**
 - two loads from `this->0x1e8`/`0x1ec`, two stores, `return 0`, **no call at
