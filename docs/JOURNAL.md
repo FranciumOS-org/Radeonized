@@ -32969,3 +32969,62 @@ plugin ordering and threading, which the host harness cannot reach; that is a
 coverage gap, not a justification. UUID **FB501234**; imports **362 of 362**,
 0 unresolved; Info.plist graphics deps **0**; hosttest and plugin pass.
 **NOT VERIFIED ON HARDWARE.**
+
+## 2rq - 2rp's TRIGGER MOVE HUNG THREE BOOTS AND IS REVERTED
+
+The user: *"i rebooted 3 times it kept the bar filling up over and over but
+nothing happend so i added gpuoff"*. Progress bar filling, nothing after it,
+three times, recovered only by `-rbgpuoff`.
+
+**WHAT IS ESTABLISHED, WHICH IS LESS THAN I WOULD LIKE.** No `.panic` file was
+written - the newest is **2026-10-23**, three days old - so these were hangs,
+not panics, same signature as 2rh's boot 157. And **`rbgpu-boot` still reads
+160**: the nonce is bumped lazily by the first NVRAM note of the boot
+(`rbgpu_boot_seq`, called from the note writer, not from `start()`), so no note
+was written in any of the three. **All three one-shots are STILL SET**
+(`rbgpu-arm 1`, `rbgpu-agdc 1`, `rbgpu-iop 1`) - never consumed. So the three
+boots left **no evidence whatsoever**: no nonce, no panic, no capture. The
+cause is **NOT measured** and no guess is recorded as a finding.
+
+**THE LEADING HYPOTHESIS, LABELLED AS ONE.** 2rp called
+`rbgpu_agdc_pci(pciDevice)` from `RembrandtGPUPeer::start()`, which IOKit calls
+*on the matching thread with the provider busy*, and that path enters a
+`thread_call` that does `service->attach(pci)` and `service->start(pci)` **on
+that same provider**. Attaching to a provider that is in the middle of its own
+`start()` contends for the arbitration the matching thread holds, which is a
+textbook re-entrancy deadlock and matches the symptom exactly - IOKit matching
+never completes, so the boot never progresses past the bar. Alternatives not
+excluded: `rbgpuOtgSample`'s up-to-400 ms of `IODelay` spinning during early
+matching, and MMIO reads through `g_hw.ctx` at a point where the AMD TTL
+context may be set but the chip not ready. **Nothing here is measured.**
+
+**AND THE LESSON IS THAT docs/RULES.md ALREADY CARRIED THE WARNING.** 2oy moved the
+VRAM publish *out* of `RembrandtGPUPeer::start()` for the boot-137 race, and
+2rp read that warning, decided it did not apply, and wrote so in the commit -
+on the grounds that 2oy was about *needing the framebuffer* while this needed
+only the PCI device. **That reasoning was correct about the dependency and
+silent about the hazard.** Two different things live at that call site: what
+the code needs, and when it is safe to publish an IOService. 2ro answered the
+first and I treated it as having answered the second. The reusable form:
+**a dependency analysis is not a safety analysis** - "it no longer needs X"
+does not establish "it is safe here".
+
+**REVERTED.** `rbgpu_agdc_pci` is gone (0 references in all three files), the
+framebuffer hook is the trigger again and sets `pci` and `framebuffer`
+together, so `run()`'s `!pci` gate is equivalent to the pre-2rp `!framebuffer`
+one. **2rp's part (1) is KEPT**: the `sampleTimingNdrv()`/`sampleTimingOtg()`
+split and `agdc_tim_ndrv_err` are pure control flow with no new calls and no
+new timing, they fix a real reachability defect, and they are not a suspect for
+a boot hang.
+
+**2ro's finding still stands and so does the goal:** the framebuffer is needed
+only for its provider, and the publish is still too late for IOPresentment
+(boot 160). What 2rp got wrong is *where* earlier is. A point after matching
+completes - a matching notification on the PCI device, or a delayed
+`thread_call` - is the shape to measure next, and it must be measured rather
+than argued, because this is the second time in this sequence that a tidy
+static argument reached a commit before hardware saw it.
+
+UUID **45F0E563**; imports **362 of 362**, 0 unresolved; graphics deps **0**;
+hosttest and plugin pass. **The one-shots must be cleared before `-rbgpuoff`
+comes out**, or the next boot re-arms the bridge immediately.

@@ -155,6 +155,41 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rq: 2rp's TRIGGER MOVE HUNG THREE BOOTS - REVERTED. DO NOT PUBLISH AN
+IOSERVICE FROM INSIDE ITS PROVIDER'S OWN `start()`.** The user: *"i rebooted 3
+times it kept the bar filling up over and over but nothing happend so i added
+gpuoff"*. **Established:** no `.panic` file (newest is 2026-10-23, three days
+old) so these were HANGS; **`rbgpu-boot` still reads 160** because the nonce is
+bumped lazily by the first NVRAM note, so no note was written; and **all three
+one-shots are STILL SET** (`rbgpu-arm`/`rbgpu-agdc`/`rbgpu-iop` = 1), never
+consumed. The three boots left **no evidence at all**, so the cause is **NOT
+measured.**
+**LEADING HYPOTHESIS, labelled as one:** `RembrandtGPUPeer::start()` is called
+by IOKit *on the matching thread with the provider busy*, and 2rp's path
+entered a `thread_call` that did `attach(pci)` + `start(pci)` on **that same
+provider** - a re-entrancy deadlock against the arbitration the matching thread
+holds, which matches "matching never completes, bar never finishes". Not
+excluded: `rbgpuOtgSample`'s up-to-400 ms `IODelay` spin during early matching,
+and MMIO through `g_hw.ctx` before the chip is ready.
+**THE LESSON, AND docs/RULES.md ALREADY CARRIED THE WARNING:** 2oy moved the VRAM
+publish OUT of `RembrandtGPUPeer::start()`, 2rp read that, decided it did not
+apply because 2oy was about *needing the framebuffer* while this needed only
+the PCI device - **correct about the dependency, silent about the hazard**.
+**A dependency analysis is not a safety analysis:** "it no longer needs X" does
+not establish "it is safe here".
+**REVERTED:** `rbgpu_agdc_pci` is gone (0 references), the framebuffer hook is
+the trigger again and sets `pci`/`framebuffer` together so `run()`'s `!pci`
+gate equals the old `!framebuffer` one. **2rp part (1) is KEPT** - the
+`sampleTimingNdrv`/`sampleTimingOtg` split and `agdc_tim_ndrv_err` are pure
+control flow, fix a real reachability defect, and are no suspect for a hang.
+2ro's finding and the goal stand; what 2rp got wrong is **where** earlier is. A
+point after matching completes (a matching notification on the PCI device, or a
+delayed `thread_call`) is the shape to measure next - **measured, not argued**,
+because this is the second time here that a tidy static argument reached a
+commit before hardware saw it. UUID **45F0E563**; imports **362 of 362**;
+graphics deps **0**. **Clear the one-shots before `-rbgpuoff` comes out.**
+Detail: JOURNAL **2rq**.
+
 **2rp: THE OTG FALLBACK IS NOW REACHABLE FROM EVERY NDRV FAILURE, AND THE
 PUBLISH NO LONGER WAITS FOR THE FRAMEBUFFER.**
 **(1)** `sampleTiming()` had four early returns - `agdc_tim_err` **6**

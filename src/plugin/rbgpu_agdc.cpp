@@ -500,29 +500,19 @@ void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
     rbgpu_diag_set_num("agdc_tim_src",(cur?1u:0u)|(info?2u:0u)); // 3 required
 }
 
-// 2ro: the ONE thing the bridge needed the framebuffer for was its provider,
-// and the peer already has it. Allocating the thread_call here - and entering
-// it - is what used to chain the whole publish behind enableController.
-void rbgpu_agdc_pci(IOService *pciDevice) {
-    if (!checkKernelArgument("-rbgpuagdc") || pci) return;
-    auto dev=OSDynamicCast(IOPCIDevice,pciDevice);
-    if (!dev || dev->configRead16(kIOPCIConfigVendorID)!=0x1002 ||
-        dev->configRead16(kIOPCIConfigDeviceID)!=0x1681) {
-        refuse(6,"PCI identity"); return;
-    }
-    pci=dev; pci->retain();
-    rbgpu_diag_set_num("agdc_pci_seen",1);
-    if (!work) {
-        work=thread_call_allocate(run,nullptr);
-        if (!work) { refuse(7,"worker allocation"); return; }
-    }
-    thread_call_enter(work);
-}
-
-// Still called from the enableController hook, but no longer the trigger: it
-// only supplies the framebuffer, which is now optional. If the publish has
-// already happened the timing came from OTG0 and this changes nothing; if it
-// has not, run() gets another chance with the NDRV source available too.
+// 2rq: THE PEER-START TRIGGER IS REVERTED. 2rp moved the publish into
+// RembrandtGPUPeer::start() and the next three boots HUNG - progress bar
+// filling, nothing after it, no panic - until -rbgpuoff rescued the machine.
+// The peer's start() is called BY IOKit matching with the provider busy, and
+// this path calls attach(pci) and start(pci) on that same provider from a
+// thread_call, so it contends for the arbitration the matching thread is
+// holding. The framebuffer hook does not have that problem: it runs after
+// IONDRVFramebuffer has already started on the device.
+// 2ro's finding still stands - the framebuffer is only needed for its
+// provider - but "the dependency is vestigial" was never a licence to publish
+// from inside a provider's own start(). Earlier is correct; THIS earlier is
+// not. Keep the trigger here until a point after matching completes is
+// measured, not assumed.
 void rbgpu_agdc_framebuffer(IOService *fb) {
     if (!checkKernelArgument("-rbgpuagdc") || framebuffer) return;
     if (reinterpret_cast<uintptr_t>(fb)<0xffffff8000000000ULL ||
@@ -530,10 +520,18 @@ void rbgpu_agdc_framebuffer(IOService *fb) {
         strcmp(fb->getMetaClass()->getClassName(),"IONDRVFramebuffer")) {
         refuse(5,"unexpected framebuffer"); return;
     }
-    framebuffer=fb; framebuffer->retain();
+    pci=OSDynamicCast(IOPCIDevice,fb->getProvider());
+    if (!pci || pci->configRead16(kIOPCIConfigVendorID)!=0x1002 ||
+        pci->configRead16(kIOPCIConfigDeviceID)!=0x1681) {
+        pci=nullptr; refuse(6,"framebuffer PCI identity"); return;
+    }
+    // Called after enableController. The worker waits for AGDC construction
+    // outside the framebuffer's gate; no wait/registration inside its hook.
+    framebuffer=fb; framebuffer->retain(); pci->retain();
+    if (!work) {
+        work=thread_call_allocate(run,nullptr);
+        if (!work) { refuse(7,"worker allocation"); return; }
+    }
+    thread_call_enter(work);
     rbgpu_diag_set_num("agdc_fb_seen",1);
-    // The peer normally gets here first; this covers the case where it did not
-    // (and keeps the old ordering working) without being the only path.
-    if (!pci) rbgpu_agdc_pci(fb->getProvider());
-    else if (work && !finished) thread_call_enter(work);
 }
