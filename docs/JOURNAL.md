@@ -33028,3 +33028,70 @@ static argument reached a commit before hardware saw it.
 UUID **45F0E563**; imports **362 of 362**, 0 unresolved; graphics deps **0**;
 hosttest and plugin pass. **The one-shots must be cleared before `-rbgpuoff`
 comes out**, or the next boot re-arms the bridge immediately.
+
+## 2rr - THE PUBLISH TRIGGER IS A MATCHED NOTIFICATION, WHICH IS APPLE'S OWN IDIOM
+
+The user chose to skip the measure-only boot and go straight at the fix. The
+timestamps 2rn added are in anyway, so this boot measures and acts at once.
+
+**THE MECHANISM IS THE ONE THE WRANGLER ITSELF USES.** 2r0 measured
+`AppleGPUWrangler` pairing services through **two matching notifications** on
+`serviceMatching("IOService")`. `gIOMatchedNotification` fires only after a
+service has **matched and started**, on IOKit's notification thread - which is
+precisely not the window `RembrandtGPUPeer::start()` sits inside and that 2rq
+hung three boots in.
+
+**The service waited for is `AppleGPUWrangler`, because its arrival IS the
+readiness condition** `run()` otherwise polls for: the wrangler is itself an
+`AppleGraphicsDeviceControl` subclass (2r5), so AGDC's metaclass is registered
+by the time it starts, and `AGDC::start`'s infinite
+`waitForMatchingService("AppleGPUWrangler")` (2rj) is already satisfied. One
+notification replaces a 10-second poll and arrives earlier than
+`enableController`.
+
+**THE HANDLER DOES TWO DIAG WRITES AND `thread_call_enter`. NOTHING ELSE.**
+That is the whole of 2rq's lesson, encoded. It matters more than it looks:
+`addMatchingNotification` fires the handler **immediately and synchronously**
+for a service that has *already* matched, so the handler can run on the
+kext-load thread that installed it. Because it touches no IOService state, that
+is harmless - `attach()` and `start()` happen only in `run()`, on a
+`thread_call`, on a plain kernel thread, with our provider long since started.
+The worker is allocated at **kext-load time** now so the handler never has to.
+
+**THE PCI DEVICE IS RESOLVED, NOT HANDED OVER.** `resolvePci()` does
+`copyMatchingService(serviceMatching("RembrandtGPUPeer"))` and takes the
+provider, validating `0x1002`/`0x1681` exactly as before. Our peer's
+personality is `IOProviderClass = IOPCIDevice` + `IOPCIMatch 0x16811002`, so
+**a peer in the registry is proof its own `start()` already returned** - the
+precise fact 2rp assumed instead of establishing. No call crosses from the peer
+into the bridge any more (`grep -c rbgpu_agdc` in `RembrandtGPUPeer.cpp` = 0),
+so the hazardous call site no longer exists at all rather than being merely
+unused.
+
+**The framebuffer hook survives as the fallback** and will not clobber a device
+`resolvePci()` already retained - the first cut would have dropped a retain and
+could have replaced a good pointer. `agdc_pci_seen` says which path won:
+**1 = framebuffer, 2 = peer lookup**.
+
+**IMPORTS WENT 362 -> 364, AND BOTH ARE SAFE:**
+`IOService::addMatchingNotification` and `gIOMatchedNotification`, both from
+**`com.apple.kpi.iokit` in the BOOT KC** - the same collection the plugin is
+injected into, no new kext dependency, and `grep -c` for IOGraphicsFamily in
+Info.plist is still **0**, so 2oz's trap stays shut.
+
+**Timeline keys, which is what makes the next boot readable:**
+`agdc_t_armed_ms` (AGDC kext routed), **`agdc_t_note_ms`** (the wrangler
+arrived - compare against the log's AGDC query at ~33.94 s),
+`agdc_t_fb_ms` (enableController, the old trigger),
+`agdc_t_presample_ms`/`_sampled_ms`/`_started_ms` (2rn). Plus
+`agdc_note_armed 1`, `agdc_note_fired 1`, `agdc_pci_seen`, `agdc_pci_err`
+(1 no dictionary, 2 no peer, 3 wrong identity) and `agdc_wait_pci`.
+**If `agdc_t_note_ms` lands before `agdc_t_fb_ms`, the trigger moved earlier
+and the whole point of this change is measured rather than argued.**
+
+Audited against 2rq, five ways: the handler body is diag + enter only; zero
+calls from the peer; `attach`/`start` appear in `run()` only;
+`RouteRequest` count still **1** (rule 3); imports 364/364 with 0 unresolved.
+UUID **A6A4FDD8**; graphics deps **0**; hosttest and plugin pass.
+**NOT VERIFIED ON HARDWARE**, and the rescue is unchanged and must be in reach:
+`-rbgpuoff`, with `-rbgpuagdc` out of boot-args between experiments (2rh).

@@ -20,6 +20,7 @@ alignas(16) uint64_t metaStorage[16];
 alignas(16) uintptr_t table[tableBytes/8], metaTable[metaTableBytes/8];
 const OSMetaClass *superMeta;
 IOService *service, *framebuffer;
+IONotifier *wranglerNote;
 IOPCIDevice *pci;
 thread_call_t work;
 bool armed, finished;
@@ -306,8 +307,52 @@ uintptr_t solve(KernelPatcher &p,size_t id,const char *name,
     return a;
 }
 
+// 2rr: find the PCI device WITHOUT touching anything mid-start. Our own peer
+// matches IOPCIMatch 0x16811002 on IOPCIDevice, so a peer in the registry is
+// proof its start() already completed - which is exactly the condition 2rp
+// violated by publishing from inside that start(). Taking the provider from a
+// started peer cannot contend with the matching thread, because there is no
+// matching thread here: this runs on a thread_call.
+bool resolvePci() {
+    if (pci) return true;
+    auto matching=IOService::serviceMatching("RembrandtGPUPeer");
+    if (!matching) { rbgpu_diag_set_num("agdc_pci_err",1); return false; }
+    IOService *peer=IOService::copyMatchingService(matching);
+    matching->release();
+    if (!peer) { rbgpu_diag_set_num("agdc_pci_err",2); return false; }
+    auto dev=OSDynamicCast(IOPCIDevice,peer->getProvider());
+    const bool ok=dev && dev->configRead16(kIOPCIConfigVendorID)==0x1002 &&
+                  dev->configRead16(kIOPCIConfigDeviceID)==0x1681;
+    if (ok) { pci=dev; pci->retain(); rbgpu_diag_set_num("agdc_pci_seen",2); }
+    else      rbgpu_diag_set_num("agdc_pci_err",3);
+    peer->release();
+    return ok;
+}
+
+// 2rr: the trigger. `gIOMatchedNotification` fires only once a service has
+// matched AND started, on IOKit's notification thread - not inside anybody's
+// start(). AppleGPUWrangler is the right service to wait for because its
+// arrival IS the readiness condition run() otherwise polls for: the wrangler
+// is itself an AppleGraphicsDeviceControl subclass (2r5), so its metaclass is
+// registered by then, and AGDC::start's infinite
+// waitForMatchingService("AppleGPUWrangler") (2rj) is already satisfied.
+//
+// THE HANDLER DOES ONE THING AND TOUCHES NO IOService STATE. That is the whole
+// lesson of 2rq: the attach() and start() happen on the thread_call, on a
+// plain kernel thread, with our provider long since started - never on the
+// thread that delivered the notification and never on a matching thread.
+bool wranglerArrived(void *,void *,IOService *,IONotifier *) {
+    rbgpu_diag_set_num("agdc_note_fired",1);
+    rbgpu_diag_set_num("agdc_t_note_ms",rbgpuAgdcUptimeMs());
+    if (work) thread_call_enter(work);
+    return true;
+}
+
 void run(thread_call_param_t,thread_call_param_t) {
-    if (finished || !pci) return;   // 2ro: pci is the requirement, not the fb
+    if (finished) return;
+    // 2rr: the framebuffer hook may have supplied it already; otherwise take it
+    // from our own started peer. Either way this is a thread_call, not a hook.
+    if (!pci && !resolvePci()) { rbgpu_diag_set_num("agdc_wait_pci",1); return; }
     if (!armed) { rbgpu_diag_set_num("agdc_wait_load",1); return; }
     // Lookup certifies registration; a BSS metaclass at kext-load time does
     // not yet contain an OSSymbol at +0x18 (2qv/2qx).
@@ -484,8 +529,30 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     armed=true;
     rbgpu_diag_set_num("agdc_stage",30);
     rbgpu_diag_set_num("agdc_filter_routed",1);
-    rbgpu_diag_set_str("agdc_say","ARMED: waiting for boot framebuffer");
-    if (work) thread_call_enter(work); // framebuffer may have arrived first
+    rbgpu_diag_set_str("agdc_say","ARMED: waiting for AppleGPUWrangler");
+    rbgpu_diag_set_num("agdc_t_armed_ms",rbgpuAgdcUptimeMs());
+    // 2rr: allocate the worker HERE, at kext-load time, so the notification
+    // handler only ever has to enter it. 2rq's hang came from doing IOService
+    // work on a thread the matching path owned; nothing on this path does any.
+    if (!work) work=thread_call_allocate(run,nullptr);
+    if (!work) { refuse(7,"worker allocation"); return; }
+    // The wrangler's arrival is the readiness condition, so wait for it by
+    // notification instead of polling for it from a framebuffer hook that
+    // boot 160 measured as too late. gIOMatchedNotification fires after the
+    // service has started, on IOKit's own notification thread.
+    if (!wranglerNote) {
+        auto matching=IOService::serviceMatching("AppleGPUWrangler");
+        if (matching) {
+            wranglerNote=IOService::addMatchingNotification(
+                gIOMatchedNotification,matching,wranglerArrived,nullptr,nullptr,0);
+            matching->release();
+        }
+        rbgpu_diag_set_num("agdc_note_armed",wranglerNote?1u:0u);
+    }
+    // The wrangler may already be up, in which case the notification fires
+    // immediately for the existing service; entering the worker here covers
+    // the framebuffer-first ordering as well.
+    thread_call_enter(work);
 }
 
 void rbgpu_agdc_otg_source(RbOtgSample fn) {
@@ -520,18 +587,24 @@ void rbgpu_agdc_framebuffer(IOService *fb) {
         strcmp(fb->getMetaClass()->getClassName(),"IONDRVFramebuffer")) {
         refuse(5,"unexpected framebuffer"); return;
     }
-    pci=OSDynamicCast(IOPCIDevice,fb->getProvider());
-    if (!pci || pci->configRead16(kIOPCIConfigVendorID)!=0x1002 ||
-        pci->configRead16(kIOPCIConfigDeviceID)!=0x1681) {
-        pci=nullptr; refuse(6,"framebuffer PCI identity"); return;
+    // 2rr: do NOT overwrite a device resolvePci() already took and retained -
+    // that would drop a retain and could replace a good pointer with a worse
+    // one. The notification path normally wins the race; this is the fallback.
+    if (!pci) {
+        auto dev=OSDynamicCast(IOPCIDevice,fb->getProvider());
+        if (!dev || dev->configRead16(kIOPCIConfigVendorID)!=0x1002 ||
+            dev->configRead16(kIOPCIConfigDeviceID)!=0x1681) {
+            refuse(6,"framebuffer PCI identity"); return;
+        }
+        pci=dev; pci->retain();
+        rbgpu_diag_set_num("agdc_pci_seen",1);   // 1 = from the framebuffer
     }
     // Called after enableController. The worker waits for AGDC construction
     // outside the framebuffer's gate; no wait/registration inside its hook.
-    framebuffer=fb; framebuffer->retain(); pci->retain();
-    if (!work) {
-        work=thread_call_allocate(run,nullptr);
-        if (!work) { refuse(7,"worker allocation"); return; }
-    }
-    thread_call_enter(work);
+    framebuffer=fb; framebuffer->retain();
     rbgpu_diag_set_num("agdc_fb_seen",1);
+    rbgpu_diag_set_num("agdc_t_fb_ms",rbgpuAgdcUptimeMs());
+    // The worker is allocated at kext-load time now; if AGDC never loaded
+    // there is nothing to enter and agdc_wait_load already says so.
+    if (work && !finished) thread_call_enter(work);
 }

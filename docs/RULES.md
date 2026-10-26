@@ -155,6 +155,45 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rr: THE PUBLISH TRIGGER IS NOW A MATCHED NOTIFICATION - APPLE'S OWN IDIOM.**
+2r0 measured the wrangler pairing services through **matching notifications**;
+`gIOMatchedNotification` fires only after a service has **matched and started**,
+on IOKit's notification thread - exactly not the window 2rq hung in. The
+service waited for is **`AppleGPUWrangler`**, because its arrival IS the
+readiness condition `run()` polls for: the wrangler is itself an
+`AppleGraphicsDeviceControl` subclass (2r5) so AGDC's metaclass is registered
+by then, and `AGDC::start`'s infinite `waitForMatchingService` (2rj) is already
+satisfied. One notification replaces a 10 s poll and arrives before
+`enableController`.
+**THE HANDLER DOES TWO DIAG WRITES AND `thread_call_enter`, NOTHING ELSE** -
+2rq's lesson encoded, and it matters because `addMatchingNotification` fires
+the handler **synchronously** for an already-matched service, so it can run on
+the kext-load thread that installed it. Touching no IOService state makes that
+harmless: `attach()`/`start()` happen only in `run()`, on a `thread_call`, with
+our provider long since started. The worker is allocated at **kext-load time**.
+**THE PCI DEVICE IS RESOLVED, NOT HANDED OVER:** `resolvePci()` does
+`copyMatchingService(serviceMatching("RembrandtGPUPeer"))` and takes the
+provider (validated `0x1002`/`0x1681`). The peer's personality is
+`IOPCIDevice` + `IOPCIMatch 0x16811002`, so **a peer in the registry proves its
+own `start()` returned** - the fact 2rp assumed. **No call crosses from the
+peer into the bridge any more** (`grep -c rbgpu_agdc` in the peer = **0**), so
+the hazardous call site is gone, not merely unused. The framebuffer hook
+survives as fallback and will not clobber an already-retained device;
+`agdc_pci_seen` says which won (**1 = framebuffer, 2 = peer lookup**).
+**IMPORTS 362 -> 364 AND BOTH ARE SAFE:** `addMatchingNotification` and
+`gIOMatchedNotification`, both `com.apple.kpi.iokit` in the **BOOT KC** - no
+new kext dependency, Info.plist graphics deps still **0**, 2oz's trap shut.
+**Timeline keys:** `agdc_t_armed_ms`, **`agdc_t_note_ms`** (compare against the
+log's AGDC query at ~33.94 s), `agdc_t_fb_ms`, plus 2rn's
+`agdc_t_presample_ms`/`_sampled_ms`/`_started_ms`; also `agdc_note_armed 1`,
+`agdc_note_fired 1`, `agdc_pci_err` (1 no dict / 2 no peer / 3 wrong identity),
+`agdc_wait_pci`. **If `agdc_t_note_ms` < `agdc_t_fb_ms` the trigger moved
+earlier, measured rather than argued.** Audited against 2rq five ways: handler
+body, zero peer calls, `attach`/`start` in `run()` only, `RouteRequest` still
+**1**, imports 364/364 0 unresolved. UUID **A6A4FDD8**. **NOT VERIFIED ON
+HARDWARE**; rescue unchanged - `-rbgpuoff`, and keep `-rbgpuagdc` out between
+experiments. Detail: JOURNAL **2rr**.
+
 **2rq: 2rp's TRIGGER MOVE HUNG THREE BOOTS - REVERTED. DO NOT PUBLISH AN
 IOSERVICE FROM INSIDE ITS PROVIDER'S OWN `start()`.** The user: *"i rebooted 3
 times it kept the bar filling up over and over but nothing happend so i added
