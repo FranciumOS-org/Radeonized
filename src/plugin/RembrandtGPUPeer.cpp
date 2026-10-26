@@ -5,7 +5,6 @@
 #include <Headers/kern_util.hpp>
 #include <mach/mach_time.h>
 #include <kern/clock.h>
-#include "rbgpu_agdc.hpp"
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSString.h>
@@ -510,15 +509,6 @@ bool RembrandtGPUPeer::start(IOService *provider) {
 
     g_peer = this;
 
-    // 2ro: hand the AGDC bridge its PCI device HERE, the earliest point at
-    // which it exists. Boot 160 measured the bridge publishing after
-    // WindowServer had already asked IOPresentment for the AGDC, because the
-    // only trigger was the IONDRVFramebuffer::enableController hook. Nothing
-    // in the bridge needs the framebuffer now - 2rm takes the timing from
-    // OTG0 - so this is the dependency, and it is satisfied far earlier.
-    // Inert without -rbgpuagdc, and the bridge's own bounded 100 ms x 100
-    // retry handles the AGDC metaclass and the wrangler not being up yet.
-    rbgpu_agdc_pci(pciDevice);
 
     auto name = OSString::withCString("ATY,Belknap");
     if (name) {
