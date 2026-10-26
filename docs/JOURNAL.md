@@ -34210,3 +34210,103 @@ and CoreDisplay, with `ripall` on the string's START (2r4) and a known-present
 control.
 
 No code changed in this milestone.
+
+## 2s3 — The `TransactionsSupported` lever is BACKWARDS: IOPresentment has no transactions-off mode
+
+Static read, no boot, answering the one question 2s2 left open. The answer is a
+negative, and it is the kind that saves a boot: **2q9/2qa's rule "find the
+consumer before writing to a field" has now paid for itself twice.**
+
+### Finding the consumer took two complementary instruments
+
+`TransactionsSupported` and `DisplayPipeSupported` live in **IOPresentment**'s
+cstring section, starts **`0x7ff812ea16c6`** and **`0x7ff812ea16b1`** (preceding
+NUL located first — 2r4's rule, applied rather than re-learned).
+
+**`ripall` found ZERO code references to either**, with a validated control: the
+AGDC error string start `0x7ff812ea2880` returned exactly **3** sites, matching
+2r4's recorded count, and `IOAccelDisplayPipeTriage` returned 1. So the
+instrument works and the negative is real — **but it is not the answer**, and
+stopping there would have been 2r2/2r3's mistake in a new shape.
+
+**`dataxref` found them both**: one slide-info slot each, at
+**`0x7ff84166f4b0`** and **`0x7ff84166f4d0`** — 0x20 apart, the `__cfstring`
+stride, with the data pointer at struct +0x10, so the CFString objects are at
+**`0x7ff84166f4a0`** and **`0x7ff84166f4c0`**. The control is the mirror image:
+the error string has **0** data references and 3 code references. **Two
+instruments, each with its own working positive case, and a key can be invisible
+to either one alone.**
+
+Xrefing the CFStrings gives **exactly one site each**, 0x39 apart:
+`0x7ff812e8c6ad` and `0x7ff812e8c6e6`, both inside
+**`IOPresentment::IOPresentmentCreateForRegistryID(unsigned long long,
+unsigned long long)`** (starts `0x7ff812e8c0b8`, so +1525 and +1582) — **the
+exact function 2qq/2qr measured returning NULL.**
+
+### The decode, with every stub named by `dscsym.sh`
+
+```
+r12 = <create>(accelIndex = *(u32*)(rbx+0x14), *(u32*)(rbx+0x50))   ; 0x7ff812e9c676
+if (!r12) -> r15d = 0x2002, fail
+r15 = IOPresentmentDisplayPipe::IOPresentmentDisplayPipeCopyCapabilities(r12)
+      IOPresentmentDisplayPipe::IOPresentmentDisplayPipeRelease(r12)   ; released AT ONCE
+if (!r15) -> r15d = 0x2002, fail
+
+r13d = 0x2001
+if (!CFDictionaryGetValueIfPresent(r15, @"DisplayPipeSupported", &v))  -> fail 0x2001
+CFNumberGetValue(v, kCFNumberCharType /* esi = 1 */, &b)
+if ((int8_t)b <= 0)                                                    -> fail 0x2005
+if (!CFDictionaryGetValueIfPresent(r15, @"TransactionsSupported", &v)) -> fail 0x2001
+CFNumberGetValue(v, kCFNumberCharType, &b)
+r13d = 0x2005
+if ((int8_t)b <= 0)                                                    -> fail 0x2005
+*(u32 *)(rbx + 0x60) = 0x400
+r13d = 0                                                               ; THE ONLY SUCCESS
+CFRelease(r15)
+```
+
+Stubs, read rather than guessed: `0x7ff812e9ffb8` =
+`CFDictionaryGetValueIfPresent`, `0x7ff812e9ffdc` = `CFNumberGetValue`,
+`0x7ff812e9ffe2` = `CFRelease`, `0x7ff812e9c6be` =
+`IOPresentmentDisplayPipeCopyCapabilities`, `0x7ff812e9c6ac` =
+`IOPresentmentDisplayPipeRelease`.
+
+Note the shape: it **creates a pipe, copies its capability dictionary, and
+releases the pipe immediately**. This is a capability *probe*, and the
+dictionary is the pipe object's own — the same
+`IOAccelDisplayPipeCapabilities` 2pp measured on the accelerator.
+
+### So the lever is backwards, and it would have cost a boot
+
+**Both keys must be non-zero or `IOPresentmentCreateForRegistryID` FAILS.**
+Advertising `TransactionsSupported = 0` does not yield "a display pipe that does
+not use transactions" — it yields **failure 0x2005 and no pipe**, which is
+exactly the state boot 165 is already in. The intervention 2s2 named as
+plausible is measured dead before it was built.
+
+### What this settles, and it tightens 2s2 rather than loosening it
+
+**IOPresentment has no transactions-off mode.** There is no configuration of
+those two keys that gives a working pipe without transactions: the success path
+requires both, and the only thing it then does is set `0x400` at `pipe+0x60`.
+
+So the requirement 2s2 stated as *"transactions must complete"* is now the
+**only** route, measured: the ring in `IOAccelDisplayPipe` (2s2) blocks
+uninterruptibly when nothing drains it, the only way to drain it is a
+completion, a completion needs a flip, and the flip needs DCN 3.1.2 — because
+declining the capability is not a legal option on Apple's side.
+
+**2s2 said "DCN 3.1.2 is one way to satisfy it, not the only thing in view."
+That is now narrowed back: it is the thing in view.** CLAUDE.md's long-standing
+"a large body of work, written from Linux's `dcn31`" stands, and for the first
+time it rests on a measurement of the alternative rather than on the absence of
+one.
+
+**And the display half's position is honest and stable:** the AGDC gate is
+solved (2rx/2rz, boot 164 proved it), the post-gate blocker is named and is
+Apple's own uninterruptible wait (2s2), the one cheap way around it is measured
+impossible (this milestone), and the expensive way is unchanged. The default
+configuration deliberately does not open the gate, which boot 165 verified
+keeps a working accelerated desktop.
+
+No code changed.
