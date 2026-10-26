@@ -15,6 +15,7 @@
 
 #include "kern_start.hpp"
 #include "rbgpu_agdc.hpp"
+#include "rbgpu_agdc_lookup.hpp"
 #include "rb_smu13.h"
 // 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
 #include "rb_dcn_deny.h"
@@ -9727,6 +9728,34 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     // boot can tell which of them took.
     rbgpu_diag_set_num("vbl_on", g_vbl_on ? 1 : 0);
     rbgpu_diag_set_num("fb_vbl_on", g_vbli_on ? 1 : 0);
+
+    // 2rd: hand the AGDC bridge the boot framebuffer's own timing getters, for
+    // attribute 0x921. BEFORE the -rbgpuvbl/-rbgpufbaccel gate below, because
+    // the bridge is armed independently of both. Both names are DEFINED in
+    // IONDRVSupport (rule 1, nm) and NEITHER is routed anywhere, here or
+    // elsewhere - these are resolved and CALLED, so rule 3 is untouched and
+    // nothing is patched. A failed solve leaves the bridge refusing 0x921
+    // rather than inventing a reply, and clearError keeps the later routes
+    // in this function unaffected.
+    {
+        uintptr_t rawCur = 0, rawInfo = 0;
+        auto cur = rb_agdc_lookup(
+            patcher, id,
+            "__ZN17IONDRVFramebuffer21getCurrentDisplayModeEPiS0_",
+            address, size, &rawCur);
+        auto info = rb_agdc_lookup(
+            patcher, id,
+            "__ZN17IONDRVFramebuffer27getTimingInfoForDisplayModeEiP19IOTimingInformation",
+            address, size, &rawInfo);
+        if (!cur || !info) {
+            patcher.clearError();
+            rbgpu_diag_set_num("agdc_tim_raw_cur", rawCur);
+            rbgpu_diag_set_num("agdc_tim_raw_info", rawInfo);
+        }
+        rbgpu_agdc_timing_source(
+            reinterpret_cast<RbNdrvCurrentMode>(cur),
+            reinterpret_cast<RbNdrvTimingInfo>(info));
+    }
 
     // 2oz FIRST: the vblank is the one that fixes the pacing. Three routes in
     // one call - rule 3 was checked, none of these names is routed elsewhere.
