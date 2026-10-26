@@ -155,6 +155,36 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rs: A FOURTH HANG, AND THE BACKUPS SAY IT HAPPENED WITH `-rbgpuagdc` OUT -
+SO THE AGDC PATH MAY BE EXONERATED AND I HAVE BEEN GUESSING.**
+The tree is **restored to the last one that booted**: `git diff 1caa488` over
+`src/`+`tools/` is **0 lines** and the rebuild reproduces **A83C0170**, the UUID
+2rn recorded for it - same sources, same binary. 2rp's `sampleTiming` split and
+2rr's matched notification are **both gone**.
+**THE EFI BACKUPS (a reconstruction from snapshot gaps, NOT a measurement):**
+`efi.sh` saves `config.plist` *before* each edit, and the snapshot taken before
+the 11:30 install reads **agdc=0 off=0** - so between 11:22:36 and 11:30 the
+config stood with **`-rbgpuagdc` OUT and `-rbgpuoff` OUT**, the control
+configuration, and that is the boot that hung.
+**IF SO, NOTHING OF 2rp/2rq/2rr COULD HAVE RUN:** with `-rbgpuagdc` absent
+`rbgpu_agdc_load` returns at its second line and `rbgpu_agdc_otg_source` /
+`rbgpu_agdc_framebuffer` return immediately - no notification, no worker, no
+`attach`/`start`, `rbgpuOtgSample` never bound. The only other delta from boot
+160 was a stray **blank line** in the peer. **A provider-busy deadlock cannot
+explain a hang in code that does not run, so 2rq's hypothesis is dead.**
+**ALL FOUR HANGS LEFT THE SAME NOTHING:** `rbgpu-boot` still **160**,
+`rbgpu-arm`/`rbgpu-agdc`/`rbgpu-iop` all still **1** and unconsumed, no panic
+file, no capture. **The cause has never been measured.** Three theories
+against four boots - 2rp's reasoning wrong, 2rq's hypothesis now argued
+against, 2rr's fix addressing 2rq's mechanism with the hang persisting - so no
+fifth mechanism is named here. **Unexplained and open:** why a boot with
+`-rbgpuagdc` out on a tree functionally identical to 160's would hang, and
+whether `efi.sh install` (run twice in that window) is in the frame. The one
+fact only the user has is which boot-args were in force on the hung boot.
+UUID **A83C0170**; imports **362 of 362**. Machine is on `-rbgpuoff` with the
+one-shots still armed - **clear them before it comes out**.
+Detail: JOURNAL **2rs**.
+
 **2rr: THE PUBLISH TRIGGER IS NOW A MATCHED NOTIFICATION - APPLE'S OWN IDIOM.**
 2r0 measured the wrangler pairing services through **matching notifications**;
 `gIOMatchedNotification` fires only after a service has **matched and started**,

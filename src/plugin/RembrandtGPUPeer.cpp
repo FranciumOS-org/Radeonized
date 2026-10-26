@@ -509,7 +509,6 @@ bool RembrandtGPUPeer::start(IOService *provider) {
 
     g_peer = this;
 
-
     auto name = OSString::withCString("ATY,Belknap");
     if (name) {
         pciDevice->setProperty("@0,name", name);

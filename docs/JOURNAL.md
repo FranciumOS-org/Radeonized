@@ -33095,3 +33095,63 @@ calls from the peer; `attach`/`start` appear in `run()` only;
 UUID **A6A4FDD8**; graphics deps **0**; hosttest and plugin pass.
 **NOT VERIFIED ON HARDWARE**, and the rescue is unchanged and must be in reach:
 `-rbgpuoff`, with `-rbgpuagdc` out of boot-args between experiments (2rh).
+
+## 2rs - A FOURTH HANG, AND THE EFI BACKUPS SAY IT HAPPENED WITH THE AGDC PATH SWITCHED OFF
+
+The user: *"same issue presisted so i added gpu off again"*. Fourth hang in
+this sequence, recovered again by `-rbgpuoff`.
+
+**THE TREE IS NOW BYTE-IDENTICAL TO THE LAST ONE THAT BOOTED.**
+`git diff 1caa488 -- src/ tools/` is **0 lines**, and the rebuild reproduces
+**A83C0170**, exactly the UUID 2rn recorded for that tree - same sources, same
+binary, which is the check that makes the revert verifiable rather than
+asserted. 2rp's `sampleTiming` split and 2rr's matched notification are both
+**gone**; nothing of mine since 2rn survives in the plugin.
+
+**WHAT THE BACKUPS SAY, AND IT IS A RECONSTRUCTION, NOT A MEASUREMENT.**
+`efi.sh` snapshots `config.plist` **before** each edit, so the sequence has to
+be read from the gaps between snapshots:
+
+| snapshot | state BEFORE the edit |
+|---|---|
+| `112223-install` | agdc=1 off=1 |
+| `112230-bootarg` | agdc=1 off=1 |
+| `112236-bootarg` | agdc=0 off=1 |
+| `113033-install` | **agdc=0 off=0** |
+
+So between 11:22:36 and 11:30:33 the config stood at **`-rbgpuagdc` OUT and
+`-rbgpuoff` OUT** - which is exactly the control boot - and the next thing that
+happened was another `install` plus three boot-arg edits ending at the live
+state (agdc=1, off=1). **That indicates the boot that hung was the control.**
+
+**IF THAT IS RIGHT, THE AGDC PATH IS EXONERATED AND MY 2rq HYPOTHESIS IS
+DEAD.** With `-rbgpuagdc` absent, `rbgpu_agdc_load` returns at its second line,
+`rbgpu_agdc_otg_source` and `rbgpu_agdc_framebuffer` both return immediately,
+so **no notification is installed, no worker is allocated, no `attach`/`start`
+happens and `rbgpuOtgSample` is never bound** - none of 2rp, 2rq or 2rr can
+execute. The only difference from boot 160 in that configuration was a stray
+**blank line** in `RembrandtGPUPeer.cpp` (now also reverted). A provider-busy
+deadlock cannot explain a hang in code that does not run.
+
+**AND THE EVIDENCE IS THE SAME SHAPE FOR ALL FOUR HANGS:** `rbgpu-boot` still
+reads **160**, and `rbgpu-arm`/`rbgpu-agdc`/`rbgpu-iop` are **all still 1**,
+unconsumed. No nonce, no note, no panic file, no capture - four boots that left
+nothing. Rule 14 at its harshest: four data points that are all the same
+absence.
+
+**WHAT I AM NOT GOING TO DO IS NAME A FIFTH MECHANISM.** 2rq's hypothesis was
+offered as a hypothesis and the backups now argue against it; 2rp's reasoning
+was wrong; 2rr's fix addressed 2rq's mechanism and the hang persisted. That is
+three theories against four boots, and the only honest conclusion is that **the
+cause has never been measured and I have been guessing**. The reconstruction
+above is from file timestamps, not from the machine, so even the exoneration is
+provisional - the one fact only the user has is which boot-args were in force
+on the boot that hung.
+
+Open and unexplained, stated as such: why a boot with `-rbgpuagdc` out, on a
+tree functionally identical to boot 160's, would hang at all - and whether
+`efi.sh install` itself, run twice in that window, is in the frame.
+
+UUID **A83C0170**; imports **362 of 362**, 0 unresolved. The machine is on
+`-rbgpuoff` and the one-shots are still armed, so they must be cleared before
+it comes out.
