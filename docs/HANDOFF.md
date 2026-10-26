@@ -1,3 +1,33 @@
+> **LATEST 2026-10-26 / 2ry: BOOT 164 WINS THE AGDC RACE, BUT HAS NO TIMING.**
+> Capture `logs/20261026-133012-plugin`, nonce164, UUID932B9FC8, all one-shots
+> consumed, `iop_verify 1`, 559/768 diag slots. Apple's dump names our AGDC
+> before WindowServer queries it; the old AGDC-map errors are gone. Three
+> 0x921 requests return Unsupported, which this implemented handler returns
+> when the timing cache is invalid. No plane indices; GPU-progress errors
+> remain. Full sampler diagnostics were lost because `plugin_check` itself
+> exited on an unset `$RBGPU_WS_SAMPLE` under `set -u` — fixed.
+>
+> **The early worker still depended on a late source:** OTG was bound only
+> from `processNDRV`, then read through AMD's not-necessarily-ready `g_hw`.
+> The sampler now lives in `rbgpu_agdc_otg.cpp`, called directly with the
+> retained PCI device and a temporary **read-only BAR5** mapping. Identity,
+> decoding, bounds, pipe signature and timing stability are checked; no
+> register write or new route. The exact old sampler refusal on 164 was not
+> captured, so do not claim it was measured. NDRV binding API removed.
+> Host tests execute the production sampler with no NDRV/AMD initialization;
+> existing sanitizer tests and 300000 parser mutations pass. Imports365/365,
+> no SystemKernelExtensions.kc dependency. UUID **0E6F0DCD-FB38-3D8B-BD95-370AF39DDF9B**.
+> **UNTESTED ON HARDWARE.**
+>
+> `plugin_check` now saves/syncs depth-one `peer.plist` before display logs;
+> NVRAM prioritizes timing verdicts, `agdc_link_result`, successful plane
+> answers and `iop_verify`. Next user boot: same three one-shots as164;
+> expect `otg_err 0`, `otg_map_ro 1`, `agdc_tim_err 0`, `agdc_tim_cached 2`,
+> 1920x1080 near143.833Hz, `agdc_link_result 0`,
+> **`agdc_extcap_answered > 0`**. Last optional extcap query may be Unsupported.
+> Actual flip/backend remains unverified. JOURNAL **2ry**.
+>
+
 > **2rd–2rg (static, no boot): BOTH PENDING AGDC ATTRIBUTES ARE IMPLEMENTED
 > AND NEITHER NEEDED DCN CODE. The block below is superseded on its "Next".**
 > **0x921 / getLinkConfig**: `AGDCLinkConfig_t` is 0xb0 bytes embedding the

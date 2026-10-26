@@ -45,6 +45,7 @@ rb_ioreg() {   # rb_ioreg <seconds> <outfile> <ioreg args...>
 args="$(nvram boot-args 2>/dev/null | cut -f2-)"
 printf '%s\n' "$args" > "$out/boot-args.txt"
 sysctl -n kern.bootsessionuuid > "$out/boot-session-uuid.txt" 2>/dev/null
+sysctl kern.boottime > "$out/boot-time.txt" 2>/dev/null
 echo "boot-args: $args"
 case " $args " in *" -rbgpuoff "*) off=1; echo "  -rbgpuoff is set: the plugin should report itself disabled" ;; *) off=0 ;; esac
 
@@ -62,6 +63,12 @@ cat "$out/nvram.txt"
 # before anything slower, or riskier, runs.
 sync; sync
 echo "  breadcrumbs synced to disk"
+
+# Save the full timing verdict before log collection. The NVRAM summary is
+# only 512 bytes and boot 164 lost these keys to truncation. A depth-one walk
+# reads our peer's properties without traversing the accelerator's children.
+rb_ioreg 10 "$out/peer.plist" -w0 -p IOService -c RembrandtGPUPeer -r -d1 -l -a
+sync
 
 echo
 echo "--- loaded kexts"
@@ -96,7 +103,7 @@ echo "  $(wc -l < "$out/display-log.txt" | tr -d ' ') display log lines saved"
 # task_suspend already stuck in the kernel, exactly as rb_ioreg says of a
 # blocked ioreg. So the default is OFF. The guard below is a second line only,
 # and it reports honestly that it cannot recover the thread.
-if [ -z "$RBGPU_WS_SAMPLE" ]; then
+if [ -z "${RBGPU_WS_SAMPLE:-}" ]; then
     {
       echo "WindowServer sample SKIPPED (default since 2rh)."
       echo "It hung this machine twice on 2026-10-26 by suspending a wedged"
@@ -195,7 +202,8 @@ echo "  $(wc -l < "$out/amd-log.txt" | tr -d ' ') log lines from the peer and Ap
 head -40 "$out/amd-log.txt" | sed 's/^/    /'
 echo
 echo "--- plugin diagnostics (RBGPULog / RBGPUDiag on the peer)"
-rb_ioreg 30 "$out/peer.plist" -w0 -p IOService -c RembrandtGPUPeer -r -l -a
+# Already captured before the slower display log. Do not issue a second walk
+# if the first blocked: a timeout cannot cancel an in-kernel registry wait.
 python3 - "$out/peer.plist" <<'PY'
 import plistlib, sys
 try:

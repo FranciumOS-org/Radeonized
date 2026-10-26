@@ -754,9 +754,14 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // 2qw: first, because they say whether every OTHER absence in the capture
     // means anything. diag_used == diag_max means keys were dropped.
     "diag_max", "diag_used",
+    "iop_verify",
     // 2ra: current framebuffer frontier. These precede the old probes so a
     // failed login boot still distinguishes refusal, registration and start.
     "agdc_on", "agdc_error", "agdc_solved", "agdc_stage", "agdc_oneshot", "agdc_started",
+    // 2ry: boot 164 reached 0x921 with no timing; the summary omitted WHY.
+    // Keep the sampler's verdict ahead of query counters and solved probes.
+    "agdc_tim_err", "agdc_tim_cached", "agdc_tim_ndrv_err", "otg_err",
+    "agdc_link_result", "agdc_extcap_answered",
     "agdc_user_vendor", "agdc_user_cap",
     "agdc_last_attr", "agdc_last_ret", "agdc_failed_attr", "agdc_failed_ret",
     "agdc_logical_calls", "agdc_logical_ret",
@@ -774,7 +779,7 @@ static const char *const kRbgpuNvramHotKeys[] = {
     //   iop_verify   1 is the only line that proves the write landed, read
     //                back from WindowServer's own memory (rule 20).
     "iop_on", "iop_saw_ws", "iop_ready", "iop_oneshot",
-    "iop_match", "iop_verify", "iop_patched",
+    "iop_match", "iop_patched",
     // 2qt: read-only, but it runs during IOGraphicsFamily's load, long before
     // a desktop exists, so a boot that never shows one still reports it.
     // `mcp_verdict` 15 is the only value that means anything: name, size,

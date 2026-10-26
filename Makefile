@@ -56,12 +56,14 @@ all: kext tools
 # freestanding; nothing links it yet.
 HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c
 
-hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp
+hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 	@mkdir -p $(OUT)
 	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -Isrc/plugin tools/hosttest/agdc_lookup_test.cpp -o $(OUT)/agdc_lookup_test
 	@$(OUT)/agdc_lookup_test
+	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -DRBGPU_OTG_HOSTTEST -Itools/hosttest tools/hosttest/otg_kernel_test.cpp src/plugin/rbgpu_agdc_otg.cpp -o $(OUT)/otg_kernel_test
+	@$(OUT)/otg_kernel_test
 
 tools: $(OUT)/rbdump
 
@@ -303,7 +305,7 @@ PLUGIN_SRC  := $(PROJ_ROOT)/src/plugin
 PLUGIN_VER  := 1.0.0
 PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"'
 PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/RembrandtGPUPeer.o \
-               $(BUILD_DIR)/plugin/rbgpu_agdc.o \
+               $(BUILD_DIR)/plugin/rbgpu_agdc.o $(BUILD_DIR)/plugin/rbgpu_agdc_otg.o \
                $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o \
                $(BUILD_DIR)/plugin/rb_smu13.o $(BUILD_DIR)/plugin/rb_discovery.o $(BUILD_DIR)/plugin/fw_yellow_carp.o $(BUILD_DIR)/plugin/fw_yellow_carp_rlc.o
 VBIOS_ROM   := firmware/680m-vbios.rom

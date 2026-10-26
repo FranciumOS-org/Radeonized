@@ -25,6 +25,8 @@ void rbgpu_agdc_timing_source(RbNdrvCurrentMode, RbNdrvTimingInfo);
 // READS only, no DCN register is written, and a failed read refuses 0x921
 // exactly as a failed NDRV read does.
 struct rb_otg_timing;
-using RbOtgSample = bool (*)(struct rb_otg_timing *);
-void rbgpu_agdc_otg_source(RbOtgSample);
+class IOPCIDevice;
+// 2ry: always available, maps BAR5 read-only for this sample. No dependency
+// on processNDRV binding a callback or on AMD initializing g_hw first.
+bool rbgpu_agdc_sample_otg(IOPCIDevice *, struct rb_otg_timing *);
 #endif

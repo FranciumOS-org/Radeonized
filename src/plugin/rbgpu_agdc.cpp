@@ -120,8 +120,6 @@ static uint64_t rbgpuAgdcUptimeMs() {
     return ns / 1000000ull;
 }
 
-RbOtgSample otgSample=nullptr;
-
 // 2rx (restores 2rp part 1, which 2rq kept and 2rs reverted wholesale):
 // returns an agdc_tim_err code, 0 = the NDRV supplied a valid timing. Every
 // failure code RETURNS instead of giving up, so the OTG0 fallback gets a turn
@@ -176,10 +174,9 @@ int sampleTimingNdrv() {
 // 2rx: the OTG0 fallback, reachable from EVERY NDRV failure. Read-only; it
 // refuses rather than publishing a zero timing into Apple's capability cache.
 void sampleTimingOtg() {
-    if (!otgSample) { rbgpu_diag_set_num("agdc_otg_src",0); return; }
     struct rb_otg_timing otg;
     for (size_t i=0;i<sizeof otg;i++) reinterpret_cast<uint8_t *>(&otg)[i]=0;
-    if (!otgSample(&otg)) { rbgpu_diag_set_num("agdc_otg_src",1); return; }
+    if (!rbgpu_agdc_sample_otg(pci,&otg)) { rbgpu_diag_set_num("agdc_otg_src",1); return; }
     rbgpu_diag_set_num("agdc_otg_src",2);
     // Publish the raw registers before converting: a refusal below must
     // say what it refused (rule 19), and these eight words are the whole
@@ -242,9 +239,9 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
         else
             rbgpu_diag_set_num("agdc_extcap_type_short",outSize ? *outSize : 0);
     }
-    // 2rh: the CACHE, never a call. This runs on WindowServer's thread inside
-    // a user-client external method; calling into IOFramebuffer from here is
-    // what is believed to have wedged boot 157 three times.
+    // 2rh: the cache, never a hardware sample or framebuffer call on
+    // WindowServer's external-method thread. 2ri exonerated the NDRV getters
+    // as the proposed deadlock, but they still report an ungated call here.
     const void *v2=((attr==0x921 || attr==0x711) && timingValid)
                    ? static_cast<const void *>(timingCache) : nullptr;
     // KERNEL pointers, not registry IDs. Apple's filtered 0x980 handler
@@ -574,12 +571,6 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     // where it is not, and the framebuffer-first ordering as well. run()'s
     // single-entry claim makes the duplicate harmless.
     thread_call_enter(work);
-}
-
-void rbgpu_agdc_otg_source(RbOtgSample fn) {
-    if (!checkKernelArgument("-rbgpuagdc")) return;
-    otgSample=fn;
-    rbgpu_diag_set_num("agdc_otg_bound",fn?1u:0u);
 }
 
 void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
