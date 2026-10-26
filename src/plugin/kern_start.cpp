@@ -7962,6 +7962,57 @@ static uint64_t  g_vbli_sent    = 0;       // deliveries through the proc
 static uint32_t  g_vbli_origret = 0;       // what the original said for 'vbl '
 static bool      g_vbli_bound   = false;
 
+// 2s5: THERE ARE TWO 'vbl ' REGISTRANTS AND THIS HOOK ALIASED THEM ONTO ONE
+// SLOT. Each kext's ONLY 'vbl ' literal, found by byte search with the known
+// site as the control (rule 26):
+//   IOFramebuffer::open+0x7f2                      -> IOFramebuffer::handleVBL
+//   IOAccelDisplayPipe::displayModeDidChange+0x38  -> signalVBLInterrupt
+// The slots are READ from __ZTV13IOFramebuffer, not asserted (rule 7: call
+// offset = dump offset - 0x10): dump +0xae0 = registerForInterruptType
+// (call 0xad0), dump +0xaf0 = setInterruptState (call 0xae0).
+//
+// Every registrant used to be handed `*iref = &g_vbli_proc`, and g_vbli_proc
+// was last-wins, so the pipe's registration CLOBBERED handleVBL and the
+// pipe's own `setInterruptState(ref, 0)` one instruction later disabled
+// delivery for BOTH. Measured, not argued: boot 159 logged 4 calls - 'vbl '
+// 'dci ' 'dpir' 'hdci', exactly IOGraphicsFamily's four
+// registerForInterruptType sites - with NO `fb_vbl_state` key and
+// `fb_vbl_sent 12289`; the nine boots that logged 54 calls all carry
+// `fb_vbl_state 0` and ZERO sends.
+//
+// `fb_vbl_state 0` is POSITIVE evidence the pipe ran: IOGraphicsFamily calls
+// setInterruptState at no site at all, and IOAcceleratorFamily2's only two
+// callers on an IOFramebuffer slot are displayModeDidChange+90 and
+// framebuffer_terminated+113, both passing 0. The pipe can only have had our
+// `&g_vbli_proc` in its own 0xd8 if its register call came through here - so
+// `IOAccelDisplayPipe::displayModeDidChange` DOES run against this
+// IONDRVFramebuffer, which 2s4 listed as unmeasured.
+//
+// AND THE ARM IS SELF-SERVICE, so nothing here has to supply it:
+//   transaction_queue_gated+38 -> enableTransactionInterrupt
+//     -> vt[0x878] = enableVBLInterrupt: `if (++pipe->0x2a8 == 1)
+//        fb->setInterruptState(pipe->0xd8, 1)` - a tail `jmpq` through a
+//        loaded register, which is why a `callq *0xae0(` search found no
+//        state-1 site and reported a wrong negative
+//     -> pipe->0x281 = 1, the flag signalVBLInterrupt tests before calling
+//        signalTransactionInterrupt -> event_interrupt_gated, the ring's only
+//        consumer (2s4).
+// So a queued transaction arms the retirement interrupt BY ITSELF, and a
+// `state == 1` arriving here is the first direct evidence that WindowServer
+// queued a transaction at all. It has never been 1 in any recorded boot.
+//
+// This change SPLITS the slot and OBSERVES the second registrant; it does
+// NOT deliver it. The handleVBL entry keeps driving the pacing, because that
+// is the arrangement boot 159 measured good (rule 16).
+struct RbVblReg {
+    t_rbFBIntProc proc;
+    OSObject     *target;
+    void         *ref;
+    bool          enabled;
+    bool          seen;
+};
+static RbVblReg g_vbli_other = { nullptr, nullptr, nullptr, false, false };
+
 // 2oy: THE TIMER IS THE RETRY MECHANISM. Nothing else may gate on ordering.
 //
 // Boot 137 reported `vblp_fail 2` ("handleVBL unsolved") together with
@@ -8491,12 +8542,63 @@ static IOReturn hooked_ndrv_regirq_2oz(void *fb, uint32_t type, t_rbFBIntProc pr
         return ret;
     }
 
+    g_vblp_fb = fb;               // the framebuffer, for free and earlier than 2ou
+
+    // 2s5: classify the registrant, two independent ways, publishing both so
+    // a disagreement is visible instead of silently resolved (rule 14).
+    // Apple's two sites differ in the TARGET they pass - IOFramebuffer::open
+    // passes the framebuffer itself (`movq %r14,%rcx` with %r14 = this),
+    // displayModeDidChange passes the pipe (`movq %rbx,%rcx`) - so
+    // `target == fb` names the handleVBL registration without needing any
+    // symbol solved. The proc comparison is the cross-check and uses a
+    // pointer 2ov already solves, so it adds no import and no dependency.
+    const bool byTarget = (static_cast<void *>(target) == fb);
+    const bool byProc   = (g_vblp_handleVBL != nullptr &&
+                           reinterpret_cast<void *>(proc) ==
+                           reinterpret_cast<void *>(g_vblp_handleVBL));
+    rbgpu_diag_set_num("fb_vbl_cls",
+                       (byTarget ? 1u : 0u) | (byProc ? 2u : 0u));
+
+    if (!byTarget && !byProc) {
+        // The OTHER registrant, which the static read names as
+        // IOAccelDisplayPipe::signalVBLInterrupt. It gets its OWN ref, so its
+        // setInterruptState no longer disables handleVBL's delivery, and it
+        // is OBSERVED rather than delivered - what it would do on arrival is
+        // untested, and the desktop boot 165 verified depends on the other
+        // entry. Success is still reported: the original's kIOReturnNoResources
+        // makes displayModeDidChange `jne` past its own setInterruptState, and
+        // that call is the signal being measured.
+        g_vbli_other.proc    = proc;
+        g_vbli_other.target  = target;
+        g_vbli_other.ref     = ref;
+        g_vbli_other.enabled = true;
+        if (iref)
+            *iref = &g_vbli_other;
+        if (!g_vbli_other.seen) {
+            g_vbli_other.seen = true;
+            const uintptr_t pv = reinterpret_cast<uintptr_t>(proc);
+            rbgpu_diag_set_num("fb_vbl_ot", 1);
+            rbgpu_diag_set_num("fb_vbl_ot_lo",
+                               static_cast<uint32_t>(pv & 0xffffffffu));
+            rbgpu_diag_set_num("fb_vbl_ot_hi",
+                               static_cast<uint32_t>(pv >> 32));
+            rbgpu_diag_set_num("fb_vbl_ot_origret",
+                               static_cast<uint32_t>(ret));
+            rbgpu_log("2s5: a SECOND 'vbl ' registrant - proc %p target %p "
+                      "ref %p, original returned %#x. Expected to be "
+                      "IOAccelDisplayPipe::signalVBLInterrupt (unslid "
+                      "0x14e5dcb8); name it by subtracting "
+                      "IOAcceleratorFamily2's slide. Observed, not delivered.",
+                      reinterpret_cast<void *>(proc), target, ref, ret);
+        }
+        return kIOReturnSuccess;
+    }
+
     g_vbli_proc    = proc;
     g_vbli_target  = target;
     g_vbli_ref     = ref;
     g_vbli_enabled = true;
     g_vbli_origret = static_cast<uint32_t>(ret);
-    g_vblp_fb      = fb;          // the framebuffer, for free and earlier than 2ou
     if (iref)
         *iref = &g_vbli_proc;
 
@@ -8519,13 +8621,40 @@ static IOReturn hooked_ndrv_unreg_2oz(void *fb, void *iref) {
         rbgpu_diag_set_num("fb_vbl_bound", 0);
         return kIOReturnSuccess;
     }
+    // 2s5: before the split this arrived with the SAME ref as handleVBL's and
+    // tore both down together.
+    if (iref == &g_vbli_other) {
+        g_vbli_other.enabled = false;
+        rbgpu_diag_set_num("fb_vbl_ot", 0);
+        return kIOReturnSuccess;
+    }
     return orig_ndrv_unreg_2oz(fb, iref);
 }
 
 static IOReturn hooked_ndrv_irqst_2oz(void *fb, void *iref, uint32_t state) {
     if (iref == &g_vbli_proc) {
         g_vbli_enabled = (state != 0);
+        // `fb_vbl_state` keeps its old meaning - the last state for ANY
+        // registrant - so the nine boots already captured stay comparable.
         rbgpu_diag_set_num("fb_vbl_state", state);
+        rbgpu_diag_set_num("fb_vbl_hv_state", state);
+        return kIOReturnSuccess;
+    }
+    if (iref == &g_vbli_other) {
+        g_vbli_other.enabled = (state != 0);
+        rbgpu_diag_set_num("fb_vbl_state", state);
+        rbgpu_diag_set_num("fb_vbl_ot_state", state);
+        // 2s5: THE ONE LINE THAT WOULD CHANGE THE DISPLAY HALF'S POSITION.
+        // state 1 reaches here only through enableVBLInterrupt, whose only
+        // caller chain starts at transaction_queue_gated - so it means
+        // WindowServer queued a transaction and asked for the retirement
+        // interrupt. A latch, because the refcounted disable follows.
+        if (state) {
+            rbgpu_diag_set_num("fb_vbl_ot_armed", 1);
+            rbgpu_log("2s5: the transaction interrupt was ARMED - a "
+                      "transaction was queued. This has never happened in a "
+                      "recorded boot.");
+        }
         return kIOReturnSuccess;
     }
     return orig_ndrv_irqst_2oz(fb, iref, state);

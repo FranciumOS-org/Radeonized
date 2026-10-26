@@ -34404,3 +34404,224 @@ became a claim, which is the only reason it is a footnote instead of a
 milestone.
 
 No code changed.
+
+## 2s5 — Tier 1, and it is answered by a read: there are TWO `'vbl '` registrants, this hook aliased them, and the pipe's one was never armed
+
+`docs/SCOPE-DISPLAY-PIPE.md`'s Tier 1 asked one question and said the first
+step was a read rather than a boot: *is the `'vbl '` proc our `-rbgpufbvbl`
+hook captures `IOAccelDisplayPipe::signalVBLInterrupt`, i.e. has transaction
+retirement been starved by our own hook since 2oz?* The read is done. The
+answer is **yes to the identity and no to the blame**, and on the way it found
+a real defect of ours and a second finding that is larger than the question.
+
+### The slots, read rather than asserted
+
+2s4 decoded `displayModeDidChange` as
+`fb->vt[0xad0]('vbl ', signalVBLInterrupt, this, 0, &this->0xd8)` then
+`fb->vt[0xae0](this->0xd8, 0)`, but could not name the two slots - three
+attempts failed (ad-hoc section mapping on a kernel collection returns garbage
+because of chained pointers; the system-KC read decoded addresses but
+`entry_symbols` did not cover them; an `nm` bisect landed on
+`__ZZN16GMetricsRecorder13initWithCountEjE20kalloc_type_view_157+0xdf906`) and
+2s4 correctly **excluded** the identification as evidence.
+
+The instrument that works is the project's own `dumptable.py`, which goes
+through `machoread.Macho` and therefore decodes chained pointers:
+
+```
+__ZTV13IOFramebuffer at 0x14fe0248, 2824 bytes
+  +0xae0  __ZN13IOFramebuffer24registerForInterruptTypeEjPFvP8OSObjectPvES1_S2_PS2_
+  +0xaf0  __ZN13IOFramebuffer17setInterruptStateEPvj
+```
+
+Rule 7 - call offset = dump offset − 0x10 - so **call `0xad0` is
+`registerForInterruptType` and call `0xae0` is `setInterruptState`**, exactly
+the pair `displayModeDidChange` calls, named from Apple's own vtable.
+
+### There are TWO registrants of `'vbl '`, not one
+
+Byte search for the little-endian fourcc, with the known
+`displayModeDidChange` site as the control (rule 26), gives **exactly one hit
+per kext**, each mapped to its VA and nearest symbol:
+
+| kext | VA | enclosing symbol |
+|---|---|---|
+| IOAcceleratorFamily2 | `0x14e5db4c` | `IOAccelDisplayPipe::displayModeDidChange+0x38` |
+| IOGraphicsFamily | `0x14fc5eee` | **`IOFramebuffer::open+0x7f2`** |
+| IONDRVSupport | `0x15001a6e` | `IONDRVFramebuffer::registerForInterruptType+0x16` (the branch, not a registrant) |
+| AMDSupport | `0x13bf066b` | `ATIController::getPropertiesForUserClient` (irrelevant; never instantiates here) |
+| AMDRadeonX6000 | — | **zero** - the vendor accelerator registers no `'vbl '` itself |
+
+`IOFramebuffer::open` is a second registrant and it registers **Apple's own
+`handleVBL`**:
+
+```
+movq  0x1c8(%r14), %r9 ; addq $0x78, %r9      ; iref = &fb->0x1c8[0x78]
+leaq  __ZN13IOFramebuffer9handleVBLEPS_Pv(%rip), %rdx
+movq  %r14, %rdi ; movl $0x76626c20, %esi ; movq %r14, %rcx
+callq *0xad0(%rax)                             ; registerForInterruptType
+testl %eax, %eax ; sete 0x19d(%r14)            ; fb->0x19d = (ret == 0)
+```
+
+IOGraphicsFamily has **four** `registerForInterruptType` call sites and that is
+the only one carrying `'vbl '`.
+
+### THIS HOOK ALIASED THEM ONTO ONE SLOT - our defect, and it is measured
+
+`hooked_ndrv_regirq_2oz` assigned `g_vbli_proc` **unconditionally** (last-wins)
+while publishing `fb_vbl_bound` only once, and handed **every** `'vbl '`
+registrant the *same* `*iref = &g_vbli_proc`. So the pipe's registration
+clobbered `handleVBL`, and the pipe's own `setInterruptState(ref, 0)` one
+instruction later set `g_vbli_enabled = false` - **disabling the delivery
+`IOFramebuffer::open` had asked for as well**. `unregisterInterrupt` collapsed
+the same way.
+
+The captures on disk split cleanly along exactly that line, and nobody had read
+them together before:
+
+| boot | `fb_vbl_calls` | first types | `fb_vbl_state` | `fb_vbl_sent` | `vblp_ticks` |
+|---|---|---|---|---|---|
+| 159 | **4** | `'vbl ' 'dci ' 'dpir' 'hdci'` | **absent** | **12289** | absent |
+| 138, 140, 141, 142, 154, 155, 156, 160, **165** | **54** | `0xff0000e9 0xff0000ea 0x60000400 0xff000152…` | **0** | absent | 23553 … 16385 |
+
+Boot 159's four calls are IOGraphicsFamily's four sites, fourcc for fourcc -
+so that boot saw `IOFramebuffer::open` **alone**, nothing disabled the slot, and
+**the hook delivered 12 289 times through the proc**. So the scope document's
+premise, *"`fb_vbl_sent` absent: our hook captured a proc and delivered it zero
+times"*, is a property of the 54-call boots and **not** universal; 2s4's
+sentence stands for boot 138 and must not be generalised.
+
+### `fb_vbl_state 0` is POSITIVE evidence the display pipe ran here
+
+IOGraphicsFamily calls `setInterruptState` at **no site at all**. In
+IOAcceleratorFamily2 the only two callers on an `IOFramebuffer` slot are
+`displayModeDidChange+90` and `framebuffer_terminated+113`, **both passing 0**
+(`xorl %edx,%edx`). The third `*0xae0` site is
+`IOGraphicsAccelerator2::newUserClient+1110`, a different object's slot and not
+this method - recorded because a slot number means nothing without its vtable.
+
+A pipe can only have had our `&g_vbli_proc` in its own `0xd8` if its
+`registerForInterruptType` call came through this hook. So the `fb_vbl_state 0`
+present in **nine** recorded boots, boot 165 included, is direct evidence that
+**`IOAccelDisplayPipe::displayModeDidChange` runs against our
+`IONDRVFramebuffer`** - which 2s4 listed as unmeasured, and which 2pp's
+"`found_framebuffer` filters nothing" predicted. The pipe exists, binds our
+framebuffer, and registers Apple's retirement interrupt on it.
+
+### AND THE ARM IS SELF-SERVICE - nothing on our side has to supply it
+
+A first pass concluded "nothing ever calls `setInterruptState(ref, 1)`, so the
+interrupt is registered and never enabled." **That was a wrong negative from the
+instrument** (rule 26, and the third time this week): `grep 'callq \*0xae0('`
+cannot see a **tail jump through a loaded register**, which is what the enable
+is. Retracted before it became a claim:
+
+```
+IOAccelDisplayPipe::enableVBLInterrupt (0x14e60946):
+  n = this->0x2a8; this->0x2a8 = n + 1;
+  if (n != 0) return;                       // refcounted: only the first acts
+  ref = this->0xd8; if (!ref) return;
+  movq 0xae0(%rax),%rax ; movl $0x1,%edx ; jmpq *%rax
+                                            ; fb->setInterruptState(ref, 1)
+```
+
+and the chain above it, every link read:
+
+```
+IOAccelDisplayPipe::transaction_queue_gated+38  -> enableTransactionInterrupt
+IOAccelDisplayPipe::event_interrupt_gated+374   -> enableTransactionInterrupt
+IOAccelDisplayPipe::enable_transaction_interrupt+29 (a jmpq, the runAction target)
+
+enableTransactionInterrupt = { this->vt[0x878](); this->0x281 = 1; }
+   vt dump +0x888 = enableVBLInterrupt   (call 0x878)   [rule 7]
+   vt dump +0x890 = disableVBLInterrupt  (call 0x880)
+```
+
+and `0x281` is the flag `signalVBLInterrupt` tests (`cmpb $0x0, 0x281(%rbx)`)
+before calling `signalTransactionInterrupt` → `transaction_interrupt_gated` →
+`event_interrupt_gated`, the ring's only consumer (2s4).
+
+**So queueing a transaction arms the retirement interrupt by itself.** The
+producer does it. There is nothing to implement, enable or advertise for the arm
+to happen - and `AMDRadeonX6000` calls slot `0x888` nowhere, so it is not a
+vendor responsibility either.
+
+### What this settles, and what it costs
+
+The Tier 1 hypothesis is **confirmed in identity and refuted in mechanism**. We
+do hold `signalVBLInterrupt` and deliver it zero times in every 54-call boot -
+but the disable is Apple's own unconditional instruction immediately after its
+own register call, not a consequence of anything we chose. Retirement was never
+going to run off that registration, because **`state == 1` has never arrived in
+any recorded boot**, which means `transaction_queue_gated` never ran, which
+means no transaction was ever queued. That is consistent with boot 165 (gate
+shut, WindowServer never asked) and it is the unanswered half of **boot 164**,
+which got past the gate and wedged in `wait_for_queue_slot_gated` - so a
+transaction *was* submitted there, and whether it reached
+`transaction_queue_gated` is exactly what would separate *"the ring filled and
+nothing retired it"* from *"it never got that far"*.
+
+**Boot 164 cannot answer it, and the reason is ours:** its capture is
+NVRAM-only, because the machine wedged and `plugin_check.sh` never ran (rule
+10) - and `fb_vbl_state` was **not** an NVRAM-hot key. The one key that would
+have separated those two readings was invisible in the only boot where it
+mattered. Rule 14 on an instrument's reach rather than its returns.
+
+### The change
+
+Two files, no new route (rule 3 untouched by construction - `git diff` touches
+`RouteRequest` **zero** times), no DCN register, no behaviour added.
+
+**The slot is split.** `g_vbli_other` is a separate registrant record with its
+**own** `iref`, so the pipe's `setInterruptState`/`unregisterInterrupt` resolve
+to it and can no longer tear down `handleVBL`'s delivery. Classification is by
+**two independent tests, both published** in `fb_vbl_cls` (bit 0 / bit 1), so a
+disagreement is visible rather than silently resolved:
+- `target == fb` - Apple's two sites differ in the target they pass
+  (`movq %r14,%rcx` with `%r14 = this` in `open`; `movq %rbx,%rcx` = the pipe in
+  `displayModeDidChange`), so this needs no symbol solved;
+- `proc == g_vblp_handleVBL`, the pointer 2ov already solves, so it adds no
+  import and no dependency (2oz's trap stays shut: `kmutil libraries` reads
+  **365 of 365**, **0** unresolved, **0** from `SystemKernelExtensions.kc`,
+  Info.plist graphics deps **0**).
+
+**The second registrant is OBSERVED, not delivered.** What `signalVBLInterrupt`
+would do on arrival is untested, and the accelerated desktop boot 165 verified
+depends on the other entry, so rule 16 applies: the delivery decision keeps the
+exact shape boot 159 measured good. New keys `fb_vbl_ot`, `fb_vbl_ot_lo`/`_hi`
+(the proc address, named offline by subtracting IOAcceleratorFamily2's slide
+from the unslid `0x14e5dcb8`), `fb_vbl_ot_origret`, `fb_vbl_ot_state`,
+`fb_vbl_hv_state`. Success is still reported for it, deliberately: the
+original's `kIOReturnNoResources` would make `displayModeDidChange` `jne` past
+its own `setInterruptState`, and that call is the signal being measured.
+
+**`fb_vbl_ot_armed` is the line that would move the display half**, and the
+frontier keys are now NVRAM-hot so a wedged boot reports them:
+`fb_vbl_ot_armed`, `fb_vbl_ot_state`, `fb_vbl_ot`, `fb_vbl_cls`,
+`fb_vbl_state`, `fb_vbl_hv_state`, `fb_vbl_ot_lo`, `fb_vbl_ot_hi`.
+`fb_vbl_state` keeps its old meaning - the last state for **any** registrant -
+so the nine boots already on disk stay comparable.
+
+### What the next boot must show, pre-stated
+
+`fb_vbl_ot 1` with `fb_vbl_cls 1` (by target) or `3` (both agreeing) and
+`fb_vbl_ot_state 0`; `fb_vbl_ot_lo`/`_hi` minus IOAcceleratorFamily2's slide
+equal to **`0x14e5dcb8`**, which is the runtime confirmation that the second
+proc is `signalVBLInterrupt` - the thing 2s4 could only infer. A
+`fb_vbl_cls 0` with a second registrant present means the **classifier** is the
+suspect, not the stack.
+
+**One expected behaviour change, stated because it is a change:** with the
+aliasing gone, `handleVBL`'s entry stays enabled, so the pacing moves from
+`vblp_ticks` (the direct call) to `fb_vbl_sent` (through the proc). These are
+the same function on the same framebuffer, one delivery per tick either way, and
+boot 159 ran exactly that way with a live panel - so this is measured-good
+rather than argued-safe. If `vblp_ticks` is absent and `fb_vbl_sent` tracks the
+refresh, that is the fix working, not a regression.
+
+`src/common` did not change, so **no host-test case was added** - the change is
+in the plugin's hook classification, which the host harness cannot reach. That
+is a coverage gap, not a justification; the existing suite passes (parser,
+300 000 mutations, the AGDC symbol/bounds tests and the OTG sampler tests).
+UUID **ABB85BCD → 50518DAC**. **NOT VERIFIED ON HARDWARE.** Rescue unchanged:
+`-rbgpuoff`, and clear the one-shots before it comes back out.

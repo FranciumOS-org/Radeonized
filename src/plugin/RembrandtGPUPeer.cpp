@@ -810,6 +810,21 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // mode's original flags as 0xf, and if the capture says otherwise the
     // machine was not in the state that was measured. `fbaccel_had` non-zero
     // means the flag was ALREADY set and 2q4's premise is simply wrong.
+    // 2s5: THE FRONTIER, so it comes first. These keys answer a question only
+    // a boot that WEDGES can answer, and such a boot leaves nothing but NVRAM
+    // (rule 10) - boot 164's capture is NVRAM-only for exactly that reason,
+    // and `fb_vbl_state` was not hot, so the one key that would have
+    // separated "a transaction was queued and we starved the VBL" from "no
+    // transaction was ever queued" was invisible in the only boot where it
+    // mattered. `fb_vbl_ot_armed` is the line that would move the display
+    // half: it is set only from enableVBLInterrupt, whose caller chain starts
+    // at IOAccelDisplayPipe::transaction_queue_gated. `fb_vbl_ot` says a
+    // second 'vbl ' registrant exists at all; `fb_vbl_cls` says how it was
+    // told apart (bit 0 = by target, bit 1 = by proc - a 0 or a 3 with both
+    // registrants present means the classifier, not the stack, is the
+    // suspect).
+    "fb_vbl_ot_armed", "fb_vbl_ot_state", "fb_vbl_ot", "fb_vbl_cls",
+    "fb_vbl_state", "fb_vbl_hv_state", "fb_vbl_ot_lo", "fb_vbl_ot_hi",
     "fbaccel_on", "fbaccel_set", "fbaccel_had", "fbaccel_flags0",
     // 2pq: answered (2pr) - kept only because the keys cost nothing.
     // 2pq: the frontier, so it comes first. These seven decide whether the
