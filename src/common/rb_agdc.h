@@ -106,6 +106,99 @@ static inline int rb_agdc_link_config(void *out, size_t size,
     return 0;
 }
 
+/* 2rf: attribute 0x711 / getFbExtendedCapability. The structure is a QUERY,
+ * not a dump: the caller fills in a framebuffer index, a capability type and
+ * a capacity, and the handler writes back how many entries it filled.
+ * Measured in Apple's getFbExtendedCapability (0xbfecb62) and its per-type
+ * fillers, whose symbols are intact:
+ *
+ *   +0x00  u8   framebuffer index   (Apple reads it with movzbl)
+ *   +0x04  u32  capability type
+ *   +0x08  u32  count - IN the caller's capacity, OUT the number filled
+ *   +0x0c  AGDCFBExtendedCapabilitesEntry_t entries[8], 0x32c each
+ *
+ * The sizes close the layout exactly: 8 * 0x32c = 0x1960, + 0xc = 0x196c,
+ * which is both the length Apple's filter demands and the capacity 8 that
+ * IOPresentment pre-loads into +0x08. getFbCapabilityForScaler bzeroes
+ * entry+0x08 for 0x324 bytes, which is the same 0x32c.
+ *
+ * Apple implements only types 1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler and
+ * 0x8000 Cursor; every other type returns kIOReturnUnsupported even on a real
+ * AMD Mac. IOPresentment asks for ALL SIXTEEN type bits in turn, so most of
+ * those queries fail by design and it tolerates them:
+ * __GatherAGDCDisplayPipelineCapabilities (0x7ff812e979dc) returns 0x2006 from
+ * exactly two places, both tied to the FIRST query - type 0x10, the scaler -
+ * its non-zero IOReturn, and a returned count of zero. Every later query's
+ * failure merely resets outLen and moves on, and the last one is preceded by
+ * `xorl %r14d,%r14d` so even its failure returns success.
+ *
+ * So the whole stage needs: answer type 0x10 with count >= 1, refuse the rest.
+ * The count must also stay below 9 or IOPresentment clamps it to 8. */
+#define RB_AGDC_EXTCAP_SIZE      0x196cu
+#define RB_AGDC_EXTCAP_COUNT_OFF 0x08u
+#define RB_AGDC_EXTCAP_ENTRY_OFF 0x0cu
+#define RB_AGDC_EXTCAP_ENTRY_SZ  0x32cu
+#define RB_AGDC_EXTCAP_ENTRIES   8u
+#define RB_AGDC_CAP_CSC          0x0001u
+#define RB_AGDC_CAP_GAMMA        0x0002u
+#define RB_AGDC_CAP_DEGAMMA      0x0004u
+#define RB_AGDC_CAP_SCALER       0x0010u
+#define RB_AGDC_CAP_CURSOR       0x8000u
+
+/* One scaler entry describing NO SCALING, in Apple's own shape: its
+ * no-scaling path (0xbfed05a) writes the identity word, a 1 at entry+0x1c and
+ * +0x1a4, the two extents twice over in each of two blocks, and the constants
+ * 0x00050005 / 4 - and because the source and destination extents are equal,
+ * the entry says "this framebuffer scales 1:1", which is true of ours.
+ *
+ * NOT ESTABLISHED, and deliberately not guessed: which of the two slots in
+ * each pair is width and which is height. Apple takes them from fb->0x720 and
+ * fb->0x71c, and updateStreamComposition (0xbfe9270) shows 0x71c pairing with
+ * 0xc0 and 0x720 with 0xc4 in a letterbox fit, which fixes the pairing but not
+ * the axis names. It cannot change this entry's MEANING: with source and
+ * destination equal, transposing both pairs still says 1:1. Both values are
+ * published as diag keys so one boot that reaches a consumer can settle it. */
+static inline int rb_agdc_scaler_entry(uint8_t *e, uint32_t slotA, uint32_t slotB) {
+    rb_agdc_put32(e+0x000, 0x00080004);   /* identity; CSC's is 0x00080005 */
+    rb_agdc_put32(e+0x01c, 1);
+    rb_agdc_put32(e+0x024, slotA);
+    rb_agdc_put32(e+0x028, slotB);
+    rb_agdc_put32(e+0x02c, slotA);
+    rb_agdc_put32(e+0x030, slotB);
+    rb_agdc_put32(e+0x034, 0x00050005);
+    rb_agdc_put32(e+0x038, 4);
+    rb_agdc_put32(e+0x1a4, 1);
+    rb_agdc_put32(e+0x1ac, slotA);
+    rb_agdc_put32(e+0x1b0, slotB);
+    rb_agdc_put32(e+0x1b4, slotA);
+    rb_agdc_put32(e+0x1b8, slotB);
+    rb_agdc_put32(e+0x1bc, 0x00050005);
+    rb_agdc_put32(e+0x1c0, 4);
+    return 0;
+}
+
+#define RB_AGDC_EXTCAP_UNSUPPORTED (-2)
+/* Returns 0 when it answered, RB_AGDC_EXTCAP_UNSUPPORTED for a type this
+ * bridge does not implement (the caller maps that to kIOReturnUnsupported and
+ * the output is left exactly as it was), -1 for a malformed request.
+ * The index and type are read where Apple reads them, out of the structure
+ * itself; +0x00 and +0x04 are preserved and everything from +0x08 is
+ * rewritten. hactive/vactive must both be non-zero: with no real timing there
+ * is nothing truthful to say about a scaler, so it refuses. */
+static inline int rb_agdc_extcap(void *out, size_t size,
+                                 uint32_t hactive, uint32_t vactive) {
+    if (!out || size != RB_AGDC_EXTCAP_SIZE) return -1;
+    uint8_t *p=(uint8_t *)out;
+    if (p[0] != 0) return -1;             /* one framebuffer, index 0 */
+    uint32_t type=0;
+    for (unsigned i=0;i<4;i++) type|=(uint32_t)p[4+i]<<(8*i);
+    if (type != RB_AGDC_CAP_SCALER) return RB_AGDC_EXTCAP_UNSUPPORTED;
+    if (!hactive || !vactive) return -1;
+    for (size_t i=RB_AGDC_EXTCAP_COUNT_OFF;i<size;i++) p[i]=0;
+    rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, 1);
+    return rb_agdc_scaler_entry(p+RB_AGDC_EXTCAP_ENTRY_OFF, vactive, hactive);
+}
+
 /* Validate only the operations we implement. Later AGDC operations legitimately
  * have input data (e.g. 0x921 uses a 0xb0-byte input/output structure).
  * Classifying those as malformed hides the missing operation. */
@@ -114,8 +207,21 @@ static inline int rb_agdc_link_config(void *out, size_t size,
 static inline int rb_agdc_reply(unsigned attr, size_t in_size, void *out,
                                 size_t *out_size, uint64_t pci, uint64_t fb,
                                 const void *timing_v2) {
-    if (attr != 1 && attr != 0x980 && attr != 0x921) return RB_AGDC_UNSUPPORTED;
+    if (attr != 1 && attr != 0x980 && attr != 0x921 && attr != 0x711)
+        return RB_AGDC_UNSUPPORTED;
     if (!out_size) return RB_AGDC_BAD_ARGUMENT;
+    if (attr == 0x711) {
+        /* The scaler entry's extents come from the same real timing as 0x921;
+         * without it there is nothing truthful to report. */
+        if (!timing_v2) return RB_AGDC_UNSUPPORTED;
+        uint32_t h=0, v=0;
+        const uint8_t *t=(const uint8_t *)timing_v2;
+        for (unsigned i=0;i<4;i++) h|=(uint32_t)t[0x40+i]<<(8*i); /* hActive */
+        for (unsigned i=0;i<4;i++) v|=(uint32_t)t[0x50+i]<<(8*i); /* vActive */
+        const int r=rb_agdc_extcap(out,*out_size,h,v);
+        if (r == RB_AGDC_EXTCAP_UNSUPPORTED) return RB_AGDC_UNSUPPORTED;
+        return r == 0 ? 0 : RB_AGDC_BAD_ARGUMENT;
+    }
     if (attr == 0x921) {
         /* Without real timing we do not answer at all. Unsupported leaves
          * IOPresentment exactly where it was in boot 156 and tells no lie. */

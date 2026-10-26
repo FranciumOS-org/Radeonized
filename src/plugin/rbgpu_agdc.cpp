@@ -118,14 +118,29 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
     if (attr==1) rbgpu_diag_inc("agdc_vendor_calls");
     if (attr==0x980) rbgpu_diag_inc("agdc_cap_calls");
     if (attr==0x921) rbgpu_diag_inc("agdc_link_calls");
+    if (attr==0x711) {
+        rbgpu_diag_inc("agdc_extcap_calls");
+        // 2rf: IOPresentment passes ONE buffer as both input and output, so
+        // the type it asked for should be readable here, exactly as Apple's
+        // own handler reads it. Publish it: if this is always 0 the kernel
+        // handed us a separate zeroed output copy and every type would be
+        // refused for that reason and not because it is unimplemented.
+        if (out) rbgpu_diag_set_num("agdc_extcap_type",
+                                    *(reinterpret_cast<const uint32_t *>(
+                                        reinterpret_cast<const uint8_t *>(out)+4)));
+    }
     uint8_t timing[kRbTimingInfoSize];
-    const void *v2=attr==0x921 ? currentTiming(timing) : nullptr;
+    const void *v2=(attr==0x921 || attr==0x711) ? currentTiming(timing) : nullptr;
     // KERNEL pointers, not registry IDs. Apple's filtered 0x980 handler
     // still converts these before copying anything to userspace.
     const int result=rb_agdc_reply(attr,inSize,out,outSize,
         reinterpret_cast<uint64_t>(pci),reinterpret_cast<uint64_t>(framebuffer),v2);
     if (attr==0x921) rbgpu_diag_set_num("agdc_link_result",
                                         static_cast<uint64_t>(result));
+    if (attr==0x711) {
+        rbgpu_diag_set_num("agdc_extcap_result",static_cast<uint64_t>(result));
+        if (result==0) rbgpu_diag_inc("agdc_extcap_answered");
+    }
     if (result==RB_AGDC_UNSUPPORTED) {
         rbgpu_diag_set_num("agdc_vendor_unsupported",attr);
         return kIOReturnUnsupported;
