@@ -32824,3 +32824,83 @@ UUID **A83C0170**; imports **362 of 362**, 0 unresolved; graphics deps **0**;
 hosttest and plugin pass. Evidence kept at `logs/boot160/`.
 **The display pipe is still not created, and the reason is now a schedule
 rather than a capability.**
+
+## 2ro - WHAT DELAYS THE PUBLISH: NOTHING OF OURS WAITS, AND THE FRAMEBUFFER DEPENDENCY IS NOW VESTIGIAL
+
+Static, no boot. Three findings, and the third is a defect that blocks the fix.
+
+**1. OUR OWN WAITS DID NOT FIRE.** `run()` (`rbgpu_agdc.cpp:303`) polls every
+**100 ms** for up to **100 retries = 10 s**, waiting for the
+`AppleGraphicsDeviceControl` metaclass to be registered AND `AppleGPUWrangler`
+to exist, and publishes `agdc_wait` on every retry; the un-armed path publishes
+`agdc_wait_load`. **Both keys are ABSENT in boot 160's capture** at
+`diag_used` **564** of **768**, so absence carries information (rule 14):
+`run()` was entered **once**, found the metaclass registered and the wrangler
+present on the first try, and went straight through. The 10-second retry
+machinery contributed **zero**. So the delay is not in the publish, it is in
+**when `run()` is first called at all**.
+
+**2. THE TRIGGER IS `IONDRVFramebuffer::enableController`, AND IT IS THE ONLY
+ONE.** `rbgpu_agdc_framebuffer()` has exactly one caller - `kern_start.cpp:8232`,
+the tail of `hooked_ndrv_enablectl_2pa`, after the original returns - and it is
+what allocates the `thread_call` and enters it (`rbgpu_agdc.cpp:511-513`). The
+only other entry is `rbgpu_agdc_load`'s `if (work) thread_call_enter(work)`
+(line 481), which can only re-enter a `work` the framebuffer path already
+created. **So the publish cannot happen before `enableController` returns, by
+construction**, and within our own code that is the whole of the delay by
+elimination.
+**NOT established, and the log cannot establish it:** that `enableController`
+itself runs at ~34 s. The second `debug-gpus` dump reading
+`/RembrandtGPUAGDC` is **`SafeEjectGPUService` at 10:12:07**, which bounds the
+publish from **above only** - it says the bridge was paired by 67 s of uptime,
+not that it was paired at 67 s. The real publish instant is anywhere in
+`(33.92, 67.3]`. 2rn's new `agdc_t_presample_ms`/`_sampled_ms`/`_started_ms`
+are what close that, and they are the reason not to guess here.
+
+**3. THE FRAMEBUFFER IS NO LONGER NEEDED, AND 2rm IS WHY.** Every use of
+`framebuffer` in the bridge:
+
+| line | use | load-bearing? |
+|---|---|---|
+| 121-131 | `sampleTiming()`'s NDRV getters | **no** - boot 160 measured `flags 0`, and OTG0 supplied the timing instead |
+| 240 | a pointer in a diag/log line | no |
+| 304 | the `run()` gate | only because of the above |
+| 377 | `agdc_fb_id`, a registry id | no |
+| 503 | **`pci = fb->getProvider()`** | **yes - this is the one** |
+
+So the single thing the bridge actually needs the framebuffer for is the
+`IOPCIDevice`. **And the plugin already holds that device far earlier:**
+`src/plugin/Info.plist` matches `RembrandtGPUPeer` on
+`IOProviderClass = IOPCIDevice` with an `IOPCIMatch`, and
+`RembrandtGPUPeer.cpp:504` does `pciDevice = OSDynamicCast(IOPCIDevice,
+provider)` in `start()` - the GPU's own PCI device, attached long before the
+boot framebuffer's controller is enabled. **So yes, the bridge can start
+earlier, and the handshake for doing so already exists**: `run()`'s bounded
+retry loop (currently dead) is exactly the mechanism for "the AGDC metaclass or
+the wrangler is not up yet", and `rbgpu_agdc_load`'s re-entry already covers
+the other ordering. Starting earlier makes that dead code load-bearing, which
+is a point in its favour, not against it - it was written for this case.
+**2oy's warning does NOT apply here**, and the distinction matters:
+CLAUDE.md says the VRAM publish was deliberately moved out of
+`RembrandtGPUPeer::start()` into `enableController` because of the boot-137
+race - but that was publishing *properties on the framebuffer*, which genuinely
+needs the framebuffer. The AGDC bridge publishes a service on the **PCI
+device** and, since 2rm, takes its timing from **OTG0**. Different dependency,
+different answer.
+
+**AND ONE DEFECT BLOCKS IT, WORTH FIXING EITHER WAY.** `sampleTiming()` has
+**four** early returns that bypass the OTG fallback entirely - `agdc_tim_err`
+**6** (getters unresolved), **7** (no framebuffer), **1**
+(`getCurrentDisplayMode` failed), **2** (`getTimingInfoForDisplayMode` failed).
+The fallback sits on the **fifth** path only, the one where the NDRV answers
+and its `flags` lack `kIODetailedTimingValid`. So OTG0 - a complete,
+independent timing source that boot 160 proved works - is reachable only when
+the NDRV partially succeeds. Publishing before the framebuffer exists would
+take path **7** and lose the timing altogether. The fallback belongs behind
+**every** NDRV failure, not one of five.
+
+**Order of work, for the same reason 2rl gave:** fix the fallback's
+reachability first, because it is correct independently of any re-ordering;
+then measure the publish instant with 2rn's timestamps; only then move the
+trigger, so the move is made against a measured baseline instead of an
+inferred one.
