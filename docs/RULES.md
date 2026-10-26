@@ -155,6 +155,37 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**BOOT 161 / 2ru: `rbgpu-arm` ALONE BOOTS CLEAN - THE ACCELERATOR ARM IS NOT THE
+HANG, AND THE DESKTOP IS ACCELERATED AGAIN.** First boot of 2rt's one-variable
+A/B. Rule 8/15 clear: `rbgpu-boot` **161** (all four hangs left 160), UUID
+**A83C0170** = `build/out`, `diag_used` **517** of **768** so absence means
+something. Config: `-rbgpuoff` **OUT**, `-rbgpuagdc`/`-rbgpuiop` **IN**,
+**`rbgpu-arm` armed and CONSUMED**, every other one-shot absent.
+**It is a working accelerated Mac:** `AMDRadeonX6000_AMDNavi21GraphicsAccelerator`
+registered/matched/active (control: `IOUserClient` 437), peer live, profiler
+reads `AMD Radeon 680M` / `VRAM (Total): 4 GB`, `dispclk` nominal **129.006 Hz**
+with **134.41 Hz** measured, `starthw_count 4`, `ptb_written 1`, `fbaccel_set 3`.
+**2r6's pre-stated check PASSES on hardware for the first time:**
+`mtlk_patched` **2296** of `mtlk_execs` **2401** with **`mtlk_moved` and
+`mtlk_moved_verdict` both ABSENT** - exactly the healthy signature it specified.
+**AND THE BRIDGE'S GATE IS NOW MEASURED FROM BOTH SIDES:** with the arg in and
+the one-shot out, `agdc_on 1`, `agdc_solved 0x3ff`, `agdc_otg_bound 1` and
+**`agdc_fb_seen 1`** - the framebuffer hook fires, validates `0x1002`/`0x1681`,
+retains and enters the worker - which then exits at **`agdc_wait_load 1`** with
+`agdc_oneshot 2`. `agdc_tim_err` stays at its load-time seed **9**, so no DCN
+register was read, `RembrandtGPUAGDC` is **0** in the registry and
+`AppleGraphicsDeviceControl` is back to **1** (the wrangler alone). So 2rh's
+rule has a companion: **without the one-shot the arg is inert but NOT silent.**
+`iop_saw_ws 1`, `iop_oneshot 2` - the IOP hook likewise declined.
+**NARROWING, NARROWLY: `rbgpu-arm` is exonerated; `rbgpu-iop` and the
+combination remain.** NOT established that `rbgpu-iop` is the culprit - boot 160
+ran with all three armed and was fine, so "the IOP patch hangs" does not fit
+either. **Next boot adds `rbgpu-iop=1` and nothing else.** Instrument note: this
+capture has **no `ioreg.txt`**, so every registry reading above is a live read
+from inside the same boot (uptime 6 min, nonce checked first) - a capture
+without the registry dump cannot answer rule 15 alone. No code changed; tree
+still byte-identical to `1caa488`. Detail: JOURNAL **2ru**.
+
 **2rs: A FOURTH HANG, AND THE BACKUPS SAY IT HAPPENED WITH `-rbgpuagdc` OUT -
 SO THE AGDC PATH MAY BE EXONERATED AND I HAVE BEEN GUESSING.**
 The tree is **restored to the last one that booted**: `git diff 1caa488` over
