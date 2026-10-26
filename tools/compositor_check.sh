@@ -104,7 +104,26 @@ else
     if [ "$(id -u)" -ne 0 ]; then
         echo "NOT ROOT: skipped. Re-run as: sudo tools/compositor_check.sh"
     else
-        sample "$ws" 5 -file "$out/ws-sample.txt" >/dev/null 2>&1
+        # 2rh: guarded. `sample` suspends the target and walks its stacks; a
+        # WindowServer wedged in a kernel call cannot be suspended, so this
+        # blocks in the kernel and hangs the machine - it did exactly that
+        # twice on 2026-10-26 via plugin_check.sh. This script only makes
+        # sense on a RESPONSIVE desktop, so sampling stays on here, but it is
+        # bounded and says so when it cannot be recovered.
+        rm -f "$out/ws-sample.done"
+        ( sample "$ws" 5 -file "$out/ws-sample.txt" >/dev/null 2>&1
+          : > "$out/ws-sample.done" ) &
+        _i=0
+        while [ ! -f "$out/ws-sample.done" ] && [ "$_i" -lt 20 ]; do
+            sleep 1; _i=$((_i + 1))
+        done
+        if [ -f "$out/ws-sample.done" ]; then
+            rm -f "$out/ws-sample.done"
+        else
+            echo "*** sample did not finish in 20s: WindowServer is wedged in the"
+            echo "    kernel and cannot be suspended or killed. The machine may"
+            echo "    hang. Do not re-run this with the display frozen."
+        fi
         n=$(grep -cE 'CompositeLayersToDestination' "$out/ws-sample.txt" 2>/dev/null)
         printf 'CompositeLayersToDestination frames : %s\n' "${n:-0}"
         printf 'CompositorSW  mentions              : %s\n' \
