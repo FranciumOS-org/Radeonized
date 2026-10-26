@@ -33383,3 +33383,112 @@ the two layers this work is building, live in the kernel, currently matching
 nothing. **Recorded as a known confound to watch, not as a cause of anything.**
 
 No code changed.
+
+## 2rw — BOOT 163: THE EDGE-LATCH FIX IS VERIFIED (73x BETTER), THE BRIDGE PUBLISHED AND PAIRED, AND THE RACE IS NOW A NUMBER: LATE BY 1732 ms, OF WHICH THE SAMPLE IS 112
+
+The user: *"im in no hang i didnt run plugin check yet"*. All three one-shots
+armed — boot 160's configuration — on 2rs's restored tree. Fourth consecutive
+clean boot. Every reading below is a live read taken inside the boot, nonce
+checked first.
+
+**Rule 8 / 15 / 14.** `rbgpu-boot` **163**; `rbgpu-arm`/`rbgpu-agdc`/`rbgpu-iop`
+**all absent** (armed and consumed — `agdc_oneshot 0`, `iop_oneshot 0`, so 2rh's
+stuck-one-shot failure did not recur); UUID **A83C0170** = `build/out`;
+`diag_used` **565** of **768**.
+
+**(1) 2rn's EDGE-LATCH FIX IS VERIFIED ON HARDWARE, AND THE ARITHMETIC AUDITS.**
+`otg_frames` **16** exactly — not 15 — in `otg_ns` **111 189 556** over
+`otg_polls` **924** (bound 4000). That is **143.8984 Hz** against the panel's
+143.833, and `agdc_otg_mhz` reads **143898**.
+
+| | boot 160 (fixed window) | boot 163 (edge-latched) | truth |
+|---|---|---|---|
+| measured refresh | 148 549 | **143 898** | 143 833 |
+| `agdc_tim_clk` | 353 198 717 | **342 142 533** | 341 987 984 |
+| error | **+3.278 %** | **+0.045 %** | — |
+
+**73x better for the same elapsed time**, and the published components close the
+arithmetic independently: `2106 * 1129 * 143898 / 1000` = **342 142 533**,
+exactly `agdc_tim_clk`. 2rn predicted ~0.1 %; measured 0.045 %. The six raw
+registers match 2oq to the bit (`htot` 2106, `vtot` 1129, `hbse` 0x7F07FF,
+`hsa` 0x3C0000, `vbse` 0x14044C, `vsa` 0x50000), `otg_err 0`, `otg_off_ok 3`
+so the DMU-segment guard held, `agdc_otg_ret 0`, `agdc_otg_src 2`.
+
+**(2) THE TIMING BLOCK IS GREEN AND THE SOURCE IS UNAMBIGUOUS.**
+`agdc_tim_err` **0**, `agdc_tim_cached` **2** (OTG0, not the NDRV),
+`agdc_tim_h` **1920**, `agdc_tim_v` **1080**, `agdc_tim_mhz` **143898**.
+`agdc_tim_flags` **0** confirms 2rl again — the NDRV still has no detailed
+timing to give — which is exactly why the OTG0 fallback is load-bearing.
+
+**(3) THE BRIDGE PUBLISHED, AND APPLE'S OWN DUMP PAIRED IT.**
+`agdc_started 1`, `agdc_start_enter 1`, `agdc_stage 70`, `agdc_error 0`,
+`agdc_solved 0x3ff`, `agdc_layout_ok 1`, `agdc_mc_ok 1`, `agdc_mc_post 0`,
+`agdc_say` = *"PUBLISHED: verify IOPresentment in WindowServer"*.
+`AppleGraphicsDeviceControl` is **2** instances and `RembrandtGPUAGDC` appears
+in the registry, with the wrangler's own dump reading
+**`gpu 0xfbc7 agdc 0x10000052d /RembrandtGPUAGDC`**. `agdc_policy_optout 1`
+with `AppleGraphicsDevicePolicy` at **0** instances — 2rk's opt-out held.
+Apple's `AGDC::start` queried us as 2rj decoded: `agdc_vendor_calls` **2**,
+`agdc_cap_calls` **1**, `agdc_vendor_out` 4. `agdc_failed_attr 3` /
+`agdc_failed_ret` **0xE00002C7** (`kIOReturnUnsupported`) is the same harmless
+refusal as boot 160.
+
+**(4) THE RACE, MEASURED END TO END. `kern.boottime` 13:09:24.106.**
+
+| offset | source | event |
+|---|---|---|
+| +4461 ms | `displaypolicyd[142:365]` | gpu 0xfbc7 `pubArmed`, vid.did not yet known |
+| +4746 ms | `displaypolicyd` | `event type=GpuAdded (0x1) gpuId=0xfbc7` |
+| +4747 ms | `displaypolicyd` | gpu `published`, vid.did=`1002.1681` |
+| **+5128 ms** | `kernelmanagerd[122:44a]` | `kext load notification: com.apple.AppleGPUWrangler` |
+| +5432 ms | `WindowServer[162:39b]` | registers gpu 0xfbc7 — dump reads **`agdc 0x000000000`** |
+| **+5452 ms** | `WindowServer[162:39b]` | `Unable to get AGDC information. 0x10000003` / `Unable to locate service dependencies` / `Unable to acquire map` |
+| +5498 ms | `WindowServer[162:39b]` | `System set to use IOP but no display pipes are present` |
+| **+7072 ms** | `agdc_t_presample_ms` | our worker reaches the sample |
+| **+7184 ms** | `agdc_t_sampled_ms` = `agdc_t_started_ms` | sample done, `service->start()` publishes |
+| +30632 ms | `SafeEjectGPUService[607]` | dump reads `agdc 0x10000052d /RembrandtGPUAGDC` |
+
+**SO THE BRIDGE IS LATE BY 1732 ms, AND THE SAMPLE IS 112 ms OF IT — 6.5 %.**
+The 112 ms is the OTG sample itself and it audits against `otg_ns`
+(111 189 556 ns = 111 ms). **2rn named two suspects and said boot 161 would say
+which; the answer is NEITHER.** Delete the sample entirely and the publish
+lands at +7072 ms, still **1620 ms** after the question. 2rn's leading
+suspect — its own 100 ms `IOSleep` — is a sixteenth of the gap.
+
+**AND `agdc_wait` IS ABSENT, WHICH LOCATES THE DELAY EXACTLY.** The worker
+publishes `agdc_wait` when it has to poll for the AGDC metaclass or the
+wrangler, and `agdc_wait`/`agdc_wait_load` are both absent — so **nothing
+waited**: both were already present when the worker ran. The 1732 ms is not
+spent waiting inside the worker. It is spent before the worker starts, in the
+**trigger** — the framebuffer hook. `fbvram 3` with `fbvram_enable_ret 0`
+confirms `enableController` ran, and 2ro already established the publish
+**cannot precede `enableController` by construction**.
+
+**THE STRUCTURAL CONCLUSION, AND IT IS THE FIRST ONE HERE THAT RESTS ON A
+MEASURED DEADLINE:** `enableController` has not run at +5452 ms, so a
+framebuffer-triggered publish can **never** meet the IOPresentment deadline —
+not by shaving the sample, not by shaving anything else inside the worker. The
+trigger has to come from something that exists earlier. **The window is
+measured and it is 324 ms wide:** the wrangler's kext load notification at
++5128 ms to the question at +5452 ms. That is precisely the window 2rr's
+`gIOMatchedNotification` on `AppleGPUWrangler` was built to hit, and 2rr was
+abandoned on hangs that four clean boots now make unlikely to have been its
+(2rs reconstructed the hung boot as having `-rbgpuagdc` **out**, under which
+none of 2rr's code runs). **Not re-landing it on that reasoning alone** — that
+is the mistake 2rp and 2rq each made once. But the target is no longer argued,
+it is 324 ms wide and timestamped.
+
+**AND IT RECONCILES BOOT 159, WHICH LOOKED LIKE A COUNTEREXAMPLE.** 159 had
+`agdc_user_vendor 4` / `agdc_user_cap 1` — WindowServer *did* query the bridge —
+while 160 and 163 have both keys **absent**. The difference is `rbgpu-iop`:
+unarmed in 159, so `UseIOPresentment` returned 0 at the class-name gate and
+**IOPresentment never ran**, so there was no +5.45 s question to lose. 159's
+queries came later, through the user-client path. **Arming the IOP patch is what
+creates this deadline**; without it there is nothing to be late for. So 159 is
+not evidence that an earlier publish was ever achieved.
+
+**STILL NOT DONE, stated plainly:** the display pipe is not created, 0x711 was
+never reached (not refused), and `agdc_user_vendor`/`agdc_user_cap` are absent
+with `diag_used` 565 of 768, so that absence carries information. What this boot
+bought is a verified timing source, a published and paired bridge, and the
+deadline expressed as 1732 ms with its components separated.
