@@ -32381,3 +32381,126 @@ bytes *below* the capability buffer, so it is not obviously a field of our
 reply and must be pinned down before anything is concluded from it).
 
 No code changed in this milestone.
+
+## 2rk - NeedsPolicyDriver is an OPT-OUT, and its absence recruits AppleGraphicsDevicePolicy onto our bridge
+
+2rj's lead, chased and closed, and it reverses 2rj's own reading of the flag.
+
+**The instrument was broken first (rule 26, again).** `strings -a` on the
+373 MB `SystemKernelExtensions.kc` **silently under-reports**: it found
+`AppleGPUWrangler` **11** times where a byte search finds **32**, and
+`NeedsPolicyDriver` **0** times where a byte search finds **4**. A
+`grep -rl --binary-files=binary` over the same trees found **neither** string -
+control included - so both scans would have produced a confident
+"only AGDC has it". The answer came from `mmap` + `bytes.find`.
+
+**Four occurrences, three kexts, and only ONE is a read:**
+
+| file offset | kext | what it does |
+|---|---|---|
+| `0x13dfdf9f` | `AppleGraphicsDeviceControl` | the string; LEA'd at `0x13dfbbb6` in `AGDC::start` |
+| `0x13e0f0c3` | `AppleGraphicsDevicePolicy` | **read** at `0x13e098ce`, **write** at `0x13e0e800` |
+| `0x13e392b6` | `AppleMuxControl` | write at `0x13e3299d` |
+| `0x13e50a72` | `AppleMuxControl2` | write at `0x13e4c997` |
+
+Boundaries from `kc_extract.py --list`: AGDC `0x13dfa000`, AGDP `0x13e03000`,
+AppleMuxControl `0x13e29000`, AppleMuxControl2 `0x13e3e000`,
+ApplePolicyControl `0x13e55000`. The scanner was validated before use: it
+returns the AGDC site inside `AGDC::start`'s measured range, which 2rj had
+already decoded independently.
+
+**THE READER IS `AppleGraphicsDevicePolicy::probe` (`0x13e0989a`), AND THE
+SENSE IS INVERTED FROM WHAT 2rj ASSUMED.** Slots named from the boot KC
+(`vtslots.py`): `0x278` = `IORegistryEntry::setProperty(const char *, bool)`,
+`0x2b8` = `getProperty(const char *)`, `0x670` = `IOService::attach`,
+`0x5c0` = `IOService::start`; the GOT entries resolve to
+`__ZTV9IOService` and `OSBoolean::metaClass`, and slot `0x128` on OSBoolean's
+own vtable is `OSBoolean::getValue` (rule 7: a call through a vtable
+**symbol** uses dump offsets, so `*0x5c8(__ZTV9IOService)` is the
+**non-virtual super call** `IOService::probe` at address-point `0x5b8`).
+
+```c
+IOService *AGDP::probe(IOService *provider, SInt32 *score) {
+    *score = 0;
+    IOService *r = IOService::probe(provider, score);   /* super, non-virtual */
+    *score = 1000;
+    if (!r) { *score = 0; return NULL; }
+    OSBoolean *b = OSDynamicCast(OSBoolean,
+                                 provider->getProperty("NeedsPolicyDriver"));
+    *score = 1000;
+    if (!b)            return r;      /* ABSENT  -> MATCH, score 1000 */
+    if (b->getValue()) return r;      /* TRUE    -> MATCH, score 1000 */
+    *score = 0; return NULL;          /* FALSE   -> REFUSE            */
+}
+```
+
+So an **absent** property is not neutral: it is consent. And
+`vt[0x278]` with `edx = 0` is `setProperty(name, **false**)`, so
+`AGDC::start` does not "set NeedsPolicyDriver" as 2rj wrote - it **clears**
+it, for `vendorInfo+0x28` in {7,8}. Apple's own AMD value opts **out** of the
+policy driver; our `2` leaves the property absent and opts **in**.
+
+**AND AGDP MATCHES ON EVERY AGDC.** Its personality is
+`IOProviderClass = AppleGraphicsDeviceControl`, `IOMatchCategory =
+AppleGraphicsDevicePolicy`, `IOResourceMatch = IOKit` - no PCI match, no
+board-id gate at the matching stage. `IOService` provider matching is a
+`metaCast`, so a subclass qualifies (2r0's finding, applied here). The two
+`AppleMuxControl` personalities are **not** ours - both are
+`IOProviderClass = IOACPIPlatformDevice` with `IONameMatch` `GMUX` / `GPUC`,
+i.e. a real gmux device this laptop does not have; their `NeedsPolicyDriver`
+sites are *writes*, part of the same opt-out pattern (`attach` -> clear the
+flag -> `start`), and `AppleMuxControl` is **absent from the live class list**
+while `AppleGraphicsDevicePolicy` is present at **0** instances - so AGDP's
+kext IS loaded here and simply has nothing to attach to yet.
+
+**WHY THIS IS A FREEZE CANDIDATE, STATED HONESTLY.** Boot 156 published an
+AGDC with no `NeedsPolicyDriver`, so `AppleGraphicsDevicePolicy` became
+eligible to probe and start on it - a mux/dual-GPU policy driver, on a
+single-GPU APU, holding Apple's own display-policy state. That is a NEW
+mechanism, reachable only once the bridge publishes, and it fits the one fact
+every reading has had to accommodate: the panel froze the first time the
+bridge was registered and has frozen every time since. **It is NOT
+established that AGDP is what freezes the panel** - it has not been observed
+attaching, boot 156's capture never reached disk, and the baseline shows AGDP
+at 0 instances against the wrangler (which is itself an AGDC), so something
+already stops it there. Do not record this as the cause.
+
+**THE FIX IS ONE PROPERTY, AND IT IS APPLE'S OWN.** The bridge now publishes
+`NeedsPolicyDriver = false` between `init()` and `attach()`, exactly where
+AGDP's own nested AGDC does it (`0x13e0e800`, between `vt[0x670]` attach and
+`vt[0x5c0]` start). `-rbgpuagdcpolicy` leaves the property absent for an A/B
+test, and `agdc_policy_optout` publishes which way it went (1 = opted out,
+0 = policy driver allowed). New verdict **16** = the property could not be
+published, which refuses the whole bridge rather than publishing a service
+that invites a driver we did not mean to invite. `src/common` did not change,
+so no host-test case was added - this is a property on an IOService the host
+harness cannot construct, and that is a coverage gap, not a justification.
+
+**THE TAIL COMPARISON IS `vendorInfo+0x28`, THE SAME SLOT - 2rj's "four bytes
+below the capability buffer" is now pinned.** `AGDC::start`'s stack:
+buffer 1 is `rbp-0x138` (bzero `0x108`, `*(r15-8) = this` at `rbp-0x140`,
+outLen at `rbp-0x148`), so `0x28(%r15)` is **`rbp-0x110`**. For the `0x980`
+query `%r15` is **reassigned** to `rbp-0x10c`, so `-0x4(%r15)` is
+**`rbp-0x110` again** - the identical slot. The compiler reused the register;
+there is no second field. Buffer 2 spans `rbp-0x10c` upward and cannot reach
+`rbp-0x110`, so the capability reply **cannot clobber it**. Therefore
+`AGDC::start` tests **one** value twice:
+
+```c
+vendor(attr=1, out=&buf1, outLen=0x2c);
+if ((uint32_t)(buf1.u32[0x28/4] - 1) <= 1u)        /* 1 or 2 */
+    vendor(attr=0x980, out=&buf2, outLen=0xdc);    /* reply unread here */
+if ((uint32_t)(buf1.u32[0x28/4] - 7) <= 1u)        /* 7 or 8 */
+    this->setProperty("NeedsPolicyDriver", false);
+```
+
+The `0x980` reply is **never read by `start`** - it is fetched and dropped, so
+whatever our capability answer says, `start` branches only on `+0x28`. That
+retires the open question 2rj left and removes a field we did not need to
+model.
+
+UUID **8CB914E5**; plugin imports **362 of 362**, 0 unresolved;
+`grep -c 'IOGraphicsFamily\|IONDRVSupport' src/plugin/Info.plist` = **0**.
+**NOT VERIFIED ON HARDWARE.** Reading order gains one line before the timing
+block: **`agdc_policy_optout 1`**, and verdict **16** means the bridge refused
+rather than published.
