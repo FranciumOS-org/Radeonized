@@ -5,6 +5,27 @@ answers the question "what exactly would DCN 3.1.2 mean, how big is it, and
 what is the minimum path to a completed flip?" **The headline is that the
 question was wrong**, and the measured answer is much smaller.
 
+## 0. TIER 1 IS ANSWERED — read 2s5 before acting on §4 below
+
+2s5 did Tier 1's read. Three things in this document are now corrected:
+
+1. **The proc we capture *is* `signalVBLInterrupt`**, but the starvation is not
+   ours. `displayModeDidChange` calls `setInterruptState(ref, 0)` one
+   instruction after registering it, unconditionally. Apple registers it off.
+2. **"`fb_vbl_sent` absent — delivered zero times" is not universal.** It is a
+   property of the 54-call boots. Boot 159 saw only
+   `IOFramebuffer::open`'s registration and delivered **12 289** times.
+   There are **two** `'vbl '` registrants, and this hook aliased them onto one
+   slot — our defect, now split.
+3. **The arm is self-service.** `transaction_queue_gated` →
+   `enableTransactionInterrupt` → `enableVBLInterrupt` → a refcounted
+   `setInterruptState(ref, 1)`. Nothing here has to supply it, so Tier 1 is not
+   "deliver the vblank" — it is "find out whether a transaction was ever
+   queued", which `fb_vbl_ot_armed` now reports from NVRAM.
+
+Also measured: `IOAccelDisplayPipe::displayModeDidChange` **does** run against
+our `IONDRVFramebuffer` (nine boots), which §4 listed as unmeasured.
+
 ## 1. What has to happen, restated precisely
 
 From 2s2 and 2s3, the requirement is **not** "implement
