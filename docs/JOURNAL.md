@@ -34767,3 +34767,92 @@ and `fb_vbl_ot_cls` **0** (0 is correct there and is not a fault),
 `fb_vbl_ot_lo`/`_hi` still reads `0xffffff7fa6946cb8`, then the capture is
 sound and that address is a real finding needing its own explanation - at which
 point the question is what is mapped there, not what our hook did.
+
+## 2s7 — BOOT 167: THE CONTROL PASSES, THE SECOND PROC *IS* `signalVBLInterrupt`, AND BOOT 166's FAILURE WAS `kextstat`
+
+Capture `logs/20261026-180144-plugin`, same boot session as the live reads
+below (`kern.bootsessionuuid` matches). Rule 8/15/14: **`rbgpu-boot` 167**,
+loaded UUID **15E25510** byte-equal to `build/out`, `diag_used` **585** of
+**768**. Boot-args untouched again, so the build is the only variable.
+
+### The gate passes, so every reading below is on a sound capture path
+
+```
+fb_vbl_hv_lo 2875888772   fb_vbl_hv_hi 4294967167    (the proc we captured)
+fb_vbl_sym_lo 2875888772  fb_vbl_sym_hi 4294967167   (our own solved handleVBL)
+```
+
+**Equal, exactly.** 2s6 added these precisely because boot 166 published an
+address with no known-good pointer beside it, and the two readings could not be
+separated. They can now: `proc` is read correctly by this hook, so the second
+registrant's address is a real pointer and the failure was in the expectation.
+
+`fb_vbl_hv_cls` **3** — both independent tests agree on the handleVBL
+registration (target == fb, and proc == the solved symbol). `fb_vbl_ot_cls`
+**0**, which 2s6 pre-stated as correct there rather than a fault.
+`fb_vbl_ot_n` **1**, so exactly one distinct proc took the other branch.
+
+### The identity is confirmed, from the control rather than from kextstat
+
+The slide derived from the control pointer — our own solved
+`IOFramebuffer::handleVBL`, whose unslid address is `0x14fc0484`:
+
+```
+handleVBL captured == solved   0xffffff7fab6a9484
+  => slide                     0xffffff7f966e9000
+signalVBLInterrupt (0x14e5dcb8) + slide  = 0xffffff7fab546cb8
+fb_vbl_ot_lo/_hi captured                = 0xffffff7fab546cb8   MATCH
+```
+
+**So the second `'vbl '` registrant is `IOAccelDisplayPipe::signalVBLInterrupt`,
+measured at runtime** — the thing 2s4 could only infer and 2s5 pre-stated.
+Tier 1's question is now answered on hardware, not by a static read.
+
+**And boot 166 failed for exactly one reason: `kextstat`.** The same boot
+measures the slide two ways and they disagree:
+
+| source | slide |
+|---|---|
+| our own solved `handleVBL` | **`0xffffff7f966e9000`** |
+| `kextstat`'s IOGraphicsFamily base `0xffffff7f95c94000` − `0x14fab000` | `0xffffff7f80ce9000` |
+
+off by **`0x15a00000`**. Boot 166's captured address was right all along; the
+expectation built on `kextstat` was wrong, which is why it landed `0x10e00000`
+past where `signalVBLInterrupt` "should" be and in no loaded kext's range. The
+21-bit low-order match 2s6 recorded as "not a coincidence" was the real
+signature of the real function, read through a wrong slide.
+
+**Recorded as rule 29: derive a kernel slide from a pointer you solved
+yourself, never from `kextstat`.** It is rule 26 in a new place — `kextstat`'s
+columns were used as an instrument without a control, and the control existed
+the whole time in a symbol this plugin already solves.
+
+### The rest of the block, all as pre-stated
+
+`fb_vbl_ot 1`, `fb_vbl_ot_state 0`, `fb_vbl_hv_state` **absent**,
+`fb_vbl_sent` **20481** climbing, `vblp_ticks` **absent** — the de-aliasing
+holds for a second boot, the pipe's disable lands on its own entry, and the
+pacing runs through the proc. `fb_vbl_ot_armed` **absent**, as this
+configuration cannot produce it.
+
+**A bonus this boot gave that 165/166 did not:** `fb_vbl_calls` is **5**, not
+54, and the types are `'vbl '`, `'dci '`, `'dpir'`, `'hdci'`, **`'vbl '`** —
+IOGraphicsFamily's four sites followed by the pipe's, both `'vbl '`
+registrations inside the 8-key window for the first time. That is 2s5's
+two-registrant finding visible directly in the type list instead of inferred
+from the state keys.
+
+### What is still open
+
+`fb_vbl_ot_armed` is the one key that would move the display half, and it needs
+a boot that gets past the AGDC gate — which wedges (2rz). So the position is
+unchanged: the retirement path is present, correct and self-arming, and nothing
+has ever queued a transaction for it to retire.
+
+No code changed. `CLAUDE.md` was cut from 2813 lines to ~400 in the same
+commit: it had accumulated every milestone's full narrative, all of which is
+here in the journal under its tag, and the old version is in git history.
+Checked mechanically rather than by eye — all 29 numbered rules survive, every
+hard rule survives, and the five boot-arg tunables the first pass dropped
+(`rbgpuvblhz=`, `rbgpufbvrammb=`, `rbgpufbvramrangemb=`, `-rbgpumtlkpatch`,
+`-rbgpuagdcpolicy`) were restored after a diff of the arg lists found them.
