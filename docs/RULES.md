@@ -19,6 +19,58 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2s3: THE `TransactionsSupported` LEVER IS BACKWARDS -
+IOPRESENTMENT HAS NO TRANSACTIONS-OFF MODE.** Static read, no boot, answering
+2s2's open question. A negative, and the kind that saves a boot: 2q9/2qa's
+**"find the consumer before writing to a field"** has now paid for itself twice.
+**FINDING THE CONSUMER NEEDED TWO COMPLEMENTARY INSTRUMENTS.** Both keys live in
+**IOPresentment**'s cstrings - starts **`0x7ff812ea16c6`** / **`0x7ff812ea16b1`**
+(preceding NUL found first, 2r4 applied rather than re-learned). **`ripall`
+found ZERO code refs to either**, with a validated control (the AGDC error
+string start `0x7ff812ea2880` -> exactly **3** sites, matching 2r4;
+`IOAccelDisplayPipeTriage` -> 1). **But that is not the answer** - stopping
+there would have been 2r2/2r3's mistake in a new shape. **`dataxref` found them
+both**: one slot each at **`0x7ff84166f4b0`** / **`0x7ff84166f4d0`**, 0x20 apart
+= the `__cfstring` stride with the data pointer at +0x10, so the CFStrings are
+at **`0x7ff84166f4a0`** / **`0x7ff84166f4c0`**. The control is the mirror image
+(error string: 0 data refs, 3 code refs). **Two instruments, each with its own
+working positive, and a key can be invisible to either alone.**
+Xrefing the CFStrings gives **exactly one site each**, 0x39 apart, both inside
+**`IOPresentment::IOPresentmentCreateForRegistryID`** (start `0x7ff812e8c0b8`,
+so +1525 / +1582) - **the exact function 2qq/2qr measured returning NULL.**
+**THE DECODE, every stub named:** it creates a pipe, **copies its capability
+dictionary, releases the pipe at once** (a capability *probe*; the dict is the
+pipe's own `IOAccelDisplayPipeCapabilities`, the one 2pp measured), then:
+`if (!CFDictionaryGetValueIfPresent(caps,@"DisplayPipeSupported",&v)) fail
+0x2001; CFNumberGetValue(v,kCFNumberCharType,&b); if ((int8)b<=0) fail 0x2005;`
+the same two steps for **`@"TransactionsSupported"`**; and only then
+`*(u32*)(pipe+0x60)=0x400; return 0`. Stubs read, not guessed: `0x7ff812e9ffb8`
+`CFDictionaryGetValueIfPresent`, `0x7ff812e9ffdc` `CFNumberGetValue`,
+`0x7ff812e9ffe2` `CFRelease`, `0x7ff812e9c6be`
+`IOPresentmentDisplayPipeCopyCapabilities`, `0x7ff812e9c6ac`
+`IOPresentmentDisplayPipeRelease`.
+**SO THE LEVER IS BACKWARDS:** **both keys must be non-zero or
+`IOPresentmentCreateForRegistryID` FAILS.** Advertising
+`TransactionsSupported = 0` does NOT give "a pipe that skips transactions" - it
+gives **failure 0x2005 and no pipe**, i.e. exactly the state boot 165 is in. The
+intervention 2s2 named as plausible is **measured dead before it was built**.
+**WHAT IT SETTLES - this TIGHTENS 2s2, not loosens it.** There is no
+configuration of those keys giving a working pipe without transactions. So
+2s2's *"transactions must complete"* is now the **only** route: the
+`IOAccelDisplayPipe` ring blocks uninterruptibly when nothing drains it, only a
+completion drains it, a completion needs a flip, and the flip needs DCN 3.1.2 -
+**because declining the capability is not a legal option on Apple's side.**
+2s2 said "DCN 3.1.2 is one way, not the only thing in view"; **it is now the
+thing in view**, and docs/RULES.md's long-standing "a large body of work from
+Linux's `dcn31`" rests for the first time on a measurement of the alternative
+rather than the absence of one.
+**THE DISPLAY HALF'S POSITION IS NOW HONEST AND STABLE:** the AGDC gate is
+**solved** (2rx/2rz, boot 164 proved it); the post-gate blocker is **named** and
+is Apple's own uninterruptible wait (2s2); the one cheap way around it is
+**measured impossible** (here); the expensive way is unchanged. The default
+configuration deliberately does not open the gate, which boot 165 verified keeps
+a working accelerated desktop. No code changed. JOURNAL **2s3**.
+
 **LATEST 2026-10-26 / 2s2: THE POST-GATE BLOCKER IS NAMED, IT IS APPLE'S OWN
 CODE, AND IT IS NOT A MISSING SELECTOR.** Static read, no boot, following 2s1's
 finding that boot 164 **blocked silently**.
