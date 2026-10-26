@@ -43,7 +43,10 @@ not memory, not a flag and not the AGDC gate:
   `IOAccelDisplayPipe::wait_for_queue_slot_gated` — `commandSleep` with **no
   deadline, THREAD_UNINT, zero os_log refs** (2s2). So the default
   configuration deliberately does **not** open the gate, which boots 165–167
-  verified keeps a working accelerated desktop. **`-rbgpuagdcearly` stays OUT.**
+  verified keeps a working accelerated desktop. **`-rbgpuagdcearly` stays OUT**
+  unless the boot is a deliberate, instrumented experiment: boot 164 shows the
+  wedge still **writes its NVRAM note** and still **consumes its one-shots**,
+  so it does not re-arm itself and a plain power cycle comes up clean (2s8).
 - **The cheap way round is measured dead** (2s3): both `DisplayPipeSupported`
   and `TransactionsSupported` must be non-zero or
   `IOPresentmentCreateForRegistryID` fails. There is no transactions-off mode.
