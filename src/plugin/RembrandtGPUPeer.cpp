@@ -754,6 +754,35 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // 2qw: first, because they say whether every OTHER absence in the capture
     // means anything. diag_used == diag_max means keys were dropped.
     "diag_max", "diag_used",
+    // 2s8: THE NOTE IS 512 BYTES AND THESE WERE PAST THE CUT. 2s5 and 2s6
+    // both declared these keys "NVRAM-hot so a wedged boot reports them", and
+    // boot 167 measured that FALSE: `fb_vbl` appears ZERO times in its
+    // nvram.txt, because the note truncates mid-`mcp_mc_off` and this block
+    // sat ~74 entries down the list. Being in the hot LIST is not being in the
+    // NOTE - rule 20 (a registration that reports success is not evidence it
+    // applied) on the project's own instrument, and it would have wasted the
+    // one boot these keys exist for.
+    //
+    // So the list's own 2fq convention applies: the frontier moved and the
+    // ordering did not follow. These come first now, ahead of the agdc, iop
+    // and mcp blocks, whose questions are answered (2qy, 2s0) and which were
+    // consuming the whole note.
+    //
+    // `fb_vbl_ot_armed` is the line that would move the display half: it is
+    // set only from enableVBLInterrupt, whose caller chain starts at
+    // IOAccelDisplayPipe::transaction_queue_gated, so it means a transaction
+    // was queued. `fb_vbl_hv_lo`/`_hi` must equal `fb_vbl_sym_lo`/`_hi` or
+    // nothing else in the block means anything (2s7's gate).
+    // Only the cheap verdicts come first. The four pointer keys
+    // (`fb_vbl_hv_lo`/`_hi`, `fb_vbl_sym_lo`/`_hi`) cost ~100 of the 512
+    // bytes between them and their gate is ALREADY settled on this build by
+    // boot 167, so they stay further down: a wedged boot needs the verdicts
+    // and the proof the early trigger ran, not a re-measurement of the gate.
+    "fb_vbl_ot_armed", "fb_vbl_ot_state", "fb_vbl_ot_n", "fb_vbl_ot",
+    "fb_vbl_hv_state", "fb_vbl_state", "fb_vbl_ot_cls", "fb_vbl_hv_cls",
+    // and the keys that say the early trigger actually ran, so an absent
+    // `fb_vbl_ot_armed` can be told from "the bridge never published".
+    "agdc_early", "agdc_started", "agdc_stage", "agdc_note_fired",
     "iop_verify",
     // 2ra: current framebuffer frontier. These precede the old probes so a
     // failed login boot still distinguishes refusal, registration and start.
@@ -823,14 +852,12 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // told apart (bit 0 = by target, bit 1 = by proc - a 0 or a 3 with both
     // registrants present means the classifier, not the stack, is the
     // suspect).
-    "fb_vbl_ot_armed", "fb_vbl_ot_state", "fb_vbl_ot", "fb_vbl_cls",
-    "fb_vbl_state", "fb_vbl_hv_state", "fb_vbl_ot_lo", "fb_vbl_ot_hi",
     // 2s6: the per-entry classification and the control pointer. Boot 166's
     // `fb_vbl_cls 0` was the pipe's own (correct) value read as a fault, and
     // its `fb_vbl_ot_lo`/`_hi` had no known-good pointer beside it to check
     // the capture path against. `fb_vbl_sym_*` is that pointer.
-    "fb_vbl_ot_cls", "fb_vbl_hv_cls", "fb_vbl_ot_n",
     "fb_vbl_hv_lo", "fb_vbl_hv_hi", "fb_vbl_sym_lo", "fb_vbl_sym_hi",
+    "fb_vbl_ot_lo", "fb_vbl_ot_hi", "fb_vbl_cls",
     "fbaccel_on", "fbaccel_set", "fbaccel_had", "fbaccel_flags0",
     // 2pq: answered (2pr) - kept only because the keys cost nothing.
     // 2pq: the frontier, so it comes first. These seven decide whether the

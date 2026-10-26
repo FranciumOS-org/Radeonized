@@ -34856,3 +34856,72 @@ Checked mechanically rather than by eye — all 29 numbered rules survive, every
 hard rule survives, and the five boot-arg tunables the first pass dropped
 (`rbgpuvblhz=`, `rbgpufbvrammb=`, `rbgpufbvramrangemb=`, `-rbgpumtlkpatch`,
 `-rbgpuagdcpolicy`) were restored after a diff of the arg lists found them.
+
+## 2s8 — THE "NVRAM-HOT" FRONTIER KEYS NEVER REACHED NVRAM, AND BOOT 167 SAYS SO
+
+Found while planning the `-rbgpuagdcearly` boot, before spending it. **2s5 and
+2s6 both claimed their frontier keys were "NVRAM-hot so a wedged boot reports
+them". Boot 167 measures that false:** `grep -c fb_vbl` on its `nvram.txt` is
+**0**.
+
+The note is `static char buf[512]`, written in two passes (hot list, then the
+full list) and truncated at the end. Boot 167's note is 512 bytes and stops
+mid-`mcp_mc_off`; the `fb_vbl` block sat about **74 entries down** the hot
+list, behind the whole `agdc_*`, `iop_*`, `mcp_*`, `mcn_*` and `mcr_*` runs.
+**Being in the hot LIST is not being in the NOTE.** That is rule 20 - *a
+registration that reports success is not evidence that a patch applied* - on
+this project's own instrument, and rule 14 on the one key that exists purely
+for a boot that leaves nothing else.
+
+It would have wasted exactly the boot it was built for: an
+`-rbgpuagdcearly` boot wedges, so NVRAM is all it leaves, and
+`fb_vbl_ot_armed` would have been absent for the same reason it is absent in
+boot 167 - never written - which is indistinguishable from "no transaction was
+queued", the very distinction 2s5 added it to make.
+
+### A correction to 2rz, carried into CLAUDE.md and now out again
+
+2rz wrote that boot 164 left *"`rbgpu-boot` still 164 with all three one-shots
+unconsumed, so NVRAM carries nothing"*, and the shortened CLAUDE.md repeated
+it. **Boot 164's own capture says otherwise:** `rbgpu-boot = 164`, all three
+one-shots `<unset>` (so **consumed**), and `rbgpu-diag` carrying 164's own
+keys - `agdc_user_vendor=4`, `agdc_user_cap=1`, `iop_verify=1`,
+`diag_used=22f`. 2rz's sentence is true of the **two later 2ry hangs** (2s1
+separated those), not of boot 164.
+
+**This matters twice over, and both ways are good news for the experiment:**
+the hot-key mechanism **does** survive this wedge - boot 164 wedged at ~24 s
+and still wrote its note - and the one-shots **are** consumed before the wedge,
+so a wedging early boot does **not** re-arm itself. The next boot has the
+boot-arg but no key, so the bridge is inert and the machine comes up clean on a
+plain power cycle. That is rule 9's structure working in our favour, and it is
+the opposite of 2rh's three-hang sequence, where the key did not clear.
+
+### The change
+
+Ordering only, in `kRbgpuNvramHotKeys`; no code path touched. The list's own
+2fq convention applies - *the frontier moved and the ordering did not follow* -
+so the verdicts now come first, immediately after `diag_max`/`diag_used`:
+
+```
+fb_vbl_ot_armed, fb_vbl_ot_state, fb_vbl_ot_n, fb_vbl_ot,
+fb_vbl_hv_state, fb_vbl_state, fb_vbl_ot_cls, fb_vbl_hv_cls,
+agdc_early, agdc_started, agdc_stage, agdc_note_fired,
+```
+
+Two deliberate choices rather than "put it all at the front":
+
+- **The four pointer keys stay further down.** `fb_vbl_hv_lo`/`_hi` and
+  `fb_vbl_sym_lo`/`_hi` cost ~100 of the 512 bytes between them, and 2s7
+  already settled their gate **on this build**. A wedged boot needs the
+  verdicts, not a re-measurement of a gate that passed.
+- **`agdc_early`, `agdc_started`, `agdc_stage` and `agdc_note_fired` join
+  them**, because without those an absent `fb_vbl_ot_armed` cannot be told
+  from *"the bridge never published in the first place"* - the same ambiguity
+  this milestone is about, one level up.
+
+Imports **365 of 365**, **0** from `SystemKernelExtensions.kc`; hosttest
+passes. UUID **15E25510 → 6E916669**. **NOT VERIFIED ON HARDWARE** - and the
+thing to check first on the next capture is the cheapest possible one:
+**`grep -c fb_vbl nvram.txt` must be non-zero.** If it is 0 again, the note is
+still the problem and no reading past it means anything.
