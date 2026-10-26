@@ -825,6 +825,12 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // suspect).
     "fb_vbl_ot_armed", "fb_vbl_ot_state", "fb_vbl_ot", "fb_vbl_cls",
     "fb_vbl_state", "fb_vbl_hv_state", "fb_vbl_ot_lo", "fb_vbl_ot_hi",
+    // 2s6: the per-entry classification and the control pointer. Boot 166's
+    // `fb_vbl_cls 0` was the pipe's own (correct) value read as a fault, and
+    // its `fb_vbl_ot_lo`/`_hi` had no known-good pointer beside it to check
+    // the capture path against. `fb_vbl_sym_*` is that pointer.
+    "fb_vbl_ot_cls", "fb_vbl_hv_cls", "fb_vbl_ot_n",
+    "fb_vbl_hv_lo", "fb_vbl_hv_hi", "fb_vbl_sym_lo", "fb_vbl_sym_hi",
     "fbaccel_on", "fbaccel_set", "fbaccel_had", "fbaccel_flags0",
     // 2pq: answered (2pr) - kept only because the keys cost nothing.
     // 2pq: the frontier, so it comes first. These seven decide whether the
