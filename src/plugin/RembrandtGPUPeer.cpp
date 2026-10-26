@@ -758,6 +758,10 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // 2ra: current framebuffer frontier. These precede the old probes so a
     // failed login boot still distinguishes refusal, registration and start.
     "agdc_on", "agdc_error", "agdc_solved", "agdc_stage", "agdc_oneshot", "agdc_started",
+    // 2rz: which trigger ran. 0 = late (framebuffer), the boot-163 shape that
+    // keeps a desktop; 1 = the early matched notification, which boot 164
+    // measured as winning the gate and wedging the machine.
+    "agdc_early",
     // 2ry: boot 164 reached 0x921 with no timing; the summary omitted WHY.
     // Keep the sampler's verdict ahead of query counters and solved probes.
     "agdc_tim_err", "agdc_tim_cached", "agdc_tim_ndrv_err", "otg_err",

@@ -33704,3 +33704,158 @@ accessor `IOPCIDevice::extendedConfigRead8` resolves through the already
 declared IOPCIFamily in BootKernelExtensions.kc. Info.plist graphics
 dependencies remain zero. `git diff --check` passes. Existing kern_start
 warnings remain; the new sampler compiles without warnings.
+
+## 2rz — Two more hangs, and boot 163 vs boot 164 is finally a clean A/B: winning the AGDC gate is what wedges the machine
+
+**The user, after a session driven by another assistant:** *"ChatGPT did something and
+now the bar filling up and not showing desktop happend again so i added gpuoff...
+fix what chatgpt did"*.
+
+### What the machine says about the hung boots
+
+Two resets, both **`previous shutdown cause 5`** (`DumpPanic` at 14:26:31.995 and
+14:30:50.021) and **no `.panic` file** newer than 2026-10-23 — so hangs, not
+panics, same as every hang before. `rbgpu-boot` reads **164** live, unchanged,
+with `rbgpu-arm`/`rbgpu-agdc`/`rbgpu-iop` **all still 1 and unconsumed**: no
+note was written, so NVRAM carries nothing from these boots. The loaded kext is
+**0E6F0DCD** = 2ry's `build/out`, currently inert under `-rbgpuoff`.
+
+**But the unified log survives a power cycle, and it is the evidence four
+earlier hangs never produced.** Attributed by timestamp AND pid (rule 28), the
+hung boot that began **14:26:31** reached:
+
+- +3.7 s `kernelmanagerd[122]` probe-bundle check, +3.9 s `Received kext load
+  notification: com.rembrandtgpu.plugin`;
+- +3.9 s `WindowServer[161:40d]` `(reg) gpu 0xfbc7 flags 0x20 (DG)
+  vid.did=1002.1681 b:d:f=54:0:0` — the wrangler registered our GPU;
+- +3.9 s to +5 s dozens of `IOAccelDisplayPipe::display_change_handler` events;
+- +10 s `PMRD: wrangler->setIgnoreIdleTimer(1)`, +13 s `WindowServer[161:9a8]`
+  Multitouch momentum rates around 130–143 Hz, +21 s to +22 s the familiar
+  `AMDRadeonX6000 channel ... event timeout` / `is not hung, keep running`
+  `checkGPUProgress` noise, +24 s `airportd` scan results, `launchd` reaping
+  `mdmclient`;
+- **and then the log ends.** Last line **14:26:56.054**. Nothing until
+  14:30:51, the next boot.
+
+So the accelerator was **alive**, WindowServer was **running**, and the whole
+machine wedged at **~24 s uptime** — the login-window / desktop-composition
+stage, which is exactly "the bar filling up and nothing happened". Rule 12
+holds: a user power-cycling a frozen boot looks like a hang, and this one is a
+hang with the kernel's own log stopping mid-second.
+
+### Boot 163 vs boot 164: identical boot-args, one variable, opposite outcomes
+
+Boot 164's capture (`logs/20261026-133012-plugin`) was still unread. It is the
+A/B this project has been missing for five hangs, because
+`diff` of 163's and 164's `boot-args.txt` is **empty — byte-identical**. The
+only difference between them is 2rx's trigger.
+
+| | boot 163 (2rw, A83C0170) | boot 164 (2rx, 932B9FC8) |
+|---|---|---|
+| trigger | framebuffer hook, 1732 ms late | matched notification, early |
+| `agdc_started` | 1 | **1** (`agdc_stage` `0x46` = 70) |
+| wrangler dump | `agdc 0x10000052d /RembrandtGPUAGDC` | `agdc 0x1000004ad /RembrandtGPUAGDC` |
+| `agdc_user_vendor` / `_cap` | **absent** | **4 / 1** |
+| `Unable to get AGDC information` | present | **0 occurrences** |
+| `Unable to acquire map` | present | **0** |
+| `Unable to locate service dependencies` | present | **0** |
+| `System set to use IOP but no display pipes are present` | present | **0** |
+| outcome | **working accelerated desktop** | **HUNG** |
+
+`diag_used` `0x22f` = 559 of `diag_max` `0x300` = 768, so absence in 164 means
+something (rule 14). `iop_verify 1`, `iop_patched 1`, `iop_oneshot 0` — the
+IOPresentment vendor gate was open and verified from WindowServer's own memory.
+
+**So 2rx worked.** It won the race it was built to win: the bridge published
+before WindowServer asked, WindowServer asked (`agdc_user_vendor 4`,
+`agdc_user_cap 1`), and **every single AGDC error that boots 160/162/163 logged
+disappeared**. IOPresentment got its vendor info and its capability and went
+past the gate 2ql, 2qp, 2qq/2qr and 2r5 spent six milestones closing.
+
+**And going past the gate is what hangs the machine.**
+
+### This was pre-stated, and it is now measured
+
+CLAUDE.md has carried the warning since 2qo, unanswered through 2r5:
+
+> *"the post-gate question is still unanswered behind it, because
+> `IONDRVFramebuffer` implements neither `IOPresentmentBindIOAccelSurfaceToResource`
+> nor `SetPlaneState`, which 2qn proved no client probe can decide."*
+
+Boot 164 decided it. Nothing else distinguishes 163 from 164 — same tree except
+the trigger, same args, same one-shots, same hardware, both with
+`iop_verify 1`. Open the gate on a framebuffer that cannot serve the
+presentment protocol and WindowServer blocks with no panic and no log; leave it
+closed and the desktop works, software-composited, exactly as it has since 2pd.
+It also retro-fits **boot 156**, which froze the panel with `agdc_started=1`
+before any timing code existed, and reconciles **boot 159**, which published and
+was queried and lived — because `rbgpu-iop` was unarmed there, so IOPresentment
+never ran and there was no post-gate path to enter (2rw established that
+arming the IOP patch is what creates the deadline at all).
+
+**The three `0x921` refusals are not the cause.** `agdc_last_attr 921`,
+`agdc_last_ret 0xe00002c7` (`kIOReturnUnsupported`), `agdc_logical_calls 3` —
+our own refusal, correct per 2rd/2rg, because the early path had no timing. The
+hang is downstream of it: IOPresentment tolerates a failed logical-device
+gather (2rl measured it aborting the pipeline gather and carrying on), and 164
+hung anyway.
+
+### What 2ry did, and what was wrong with it
+
+2ry read boot 164 as *"wins the AGDC race, but has no timing"* and set out to
+fix the timing: it deleted `rbgpu_agdc_otg_source`/`agdc_otg_bound`, moved the
+sampler into `src/plugin/rbgpu_agdc_otg.cpp`, and gave it its own read-only
+BAR5 mapping (`mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress5,
+kIOMapInhibitCache | kIOMapReadOnly)`) so it no longer depends on `processNDRV`
+binding a callback or on AMD's `g_hw` being ready.
+
+**That diagnosis is not wrong about the timing, and it is the wrong thing to
+have fixed.** The capture's headline was not the missing timing; it was that
+every AGDC error had vanished and the machine had hung. 2ry kept the trigger
+that caused the hang, added live MMIO and an up-to-400 ms `IODelay` spin to the
+earliest path in the plugin, and shipped it to hardware — which hung twice
+more, this time without even reaching the peer's first NVRAM note.
+
+**What is kept:** the sampler itself. It is read-only, bounds-checked
+(`otg_err 9` on a short BAR), identity-checked against 2oq's four-register
+signature (`otg_err 3`), re-reads every register after the measurement
+(`otg_err 10`), publishes a key on every exit, and refuses rather than
+converting garbage. Not depending on a late callback is a genuine improvement,
+and `make hosttest` executes the production sampler with no NDRV or AMD
+initialization. It is also no longer on a path that runs by default.
+
+### The fix
+
+**`-rbgpuagdcearly`, OFF by default.** Without it `rbgpu_agdc_load` publishes
+`agdc_say = "ARMED (late): waiting for the framebuffer"` and returns before
+both triggers 2rx added — `addMatchingNotification` is never installed and the
+load-time `thread_call_enter` is never reached — leaving the framebuffer hook
+as the sole trigger. That is the pre-2rx shape, byte-for-byte the behaviour
+boot 163 booted clean on. `wranglerArrived` also tests `early` before entering
+the worker, so a notification that somehow survived cannot publish.
+
+This is **not** a fix for the race. It is a deliberate decision not to win a
+race we cannot yet survive winning, recorded as such so the next session does
+not re-land the trigger for the third time. **`agdc_early`** is published and
+NVRAM-hot: **0 = late (keeps a desktop), 1 = early (boot 164's wedge)**.
+
+**What would make the early path safe is NOT another trigger change.** It is
+the thing CLAUDE.md has named as a large body of work since 2pd: an
+`IOFramebuffer` that implements `IOPresentmentBindIOAccelSurfaceToResource` and
+`IOPresentmentSetPlaneState`, i.e. DCN 3.1.2 written from Linux's `dcn31`.
+Until that exists, opening the gate is measured to be worse than leaving it
+shut, and that is a result, not a setback: **the display half's blocker has
+moved from "we cannot get past the AGDC gate" to "past the gate there is no
+backend", and the first of those is now solved.**
+
+### Verification
+
+`make hosttest` passes (SMU, AGDC bounded replies, link-config overlay, scaler
+capability, 300 000 parser mutations, the OTG kernel sampler's early-timing,
+edge-latch, refusal and unmap cases). UUID **0E6F0DCD -> 5951FC1F**.
+`kmutil libraries` resolves **365 of 365**, **0 unresolved**, **0 from
+`SystemKernelExtensions.kc`** — the gate adds no import, so 2oz's trap stays
+shut. Info.plist graphics dependencies **0**. `RouteRequest` in
+`rbgpu_agdc.cpp` still **1** (rule 3). **NOT YET BOOTED.**
+
+Rescue unchanged: `-rbgpuoff`, and clear the one-shots before it comes out.

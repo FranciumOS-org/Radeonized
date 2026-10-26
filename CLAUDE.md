@@ -19,6 +19,68 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2rz: TWO MORE HANGS, AND BOOT 163 vs BOOT 164 IS THE A/B
+THIS PROJECT NEVER HAD: WINNING THE AGDC GATE IS WHAT WEDGES THE MACHINE.**
+`diff` of 163's and 164's `boot-args.txt` is **EMPTY - byte-identical** - so the
+only variable is 2rx's trigger. 164: `agdc_started 1`, `agdc_stage 0x46` (=70),
+wrangler dump `agdc 0x1000004ad /RembrandtGPUAGDC`, **`agdc_user_vendor 4` /
+`agdc_user_cap 1`** where 163 had both absent, `iop_verify 1`, `diag_used 0x22f`
+of `0x300` so absence means something - **and ZERO occurrences of `Unable to get
+AGDC information`, `Unable to acquire map`, `Unable to locate service
+dependencies` and `System set to use IOP but no display pipes are present`**,
+every one of which 163 logged. **So 2rx WORKED: it won the race, WindowServer
+asked, and the whole six-milestone AGDC blocker (2ql/2qp/2qq/2qr/2r5) is
+GONE. And going past the gate is what hangs the machine.** 163, late and
+refused, keeps a working accelerated desktop; 164, early and answered, hung.
+**THE HUNG BOOTS' OWN LOG SURVIVES A POWER CYCLE - the evidence four earlier
+hangs never produced.** Both resets are `previous shutdown cause 5` with no
+`.panic` newer than 2026-10-23; `rbgpu-boot` still **164** with all three
+one-shots **unconsumed**, so NVRAM carries nothing. The 14:26:31 boot reached
++3.9 s `WindowServer[161:40d]` `(reg) gpu 0xfbc7 ... vid.did=1002.1681`, dozens
+of `IOAccelDisplayPipe::display_change_handler` events, +10 s
+`PMRD: wrangler->setIgnoreIdleTimer(1)`, +13 s Multitouch at 130-143 Hz, +21 s
+the usual `checkGPUProgress` channel-timeout noise, +24 s `airportd` -
+**and the log ENDS at 14:26:56.054.** Accelerator alive, WindowServer running,
+machine wedged at **~24 s** = the desktop-composition stage.
+**THIS WAS PRE-STATED SINCE 2qo AND IS NOW MEASURED:** past the gate
+IOPresentment needs `IOPresentmentBindIOAccelSurfaceToResource` and
+`IOPresentmentSetPlaneState`, and **`IONDRVFramebuffer` implements NEITHER** -
+which 2qn proved no client probe could decide. Boot 164 decided it. It also
+retro-fits **boot 156** (froze with `agdc_started=1` before any timing code) and
+reconciles **boot 159** (published, queried, lived - because `rbgpu-iop` was
+unarmed, so there was no post-gate path). **The three 0x921 refusals are NOT the
+cause**: `agdc_last_ret 0xe00002c7` is our own correct refusal, and 2rl measured
+IOPresentment tolerating a failed logical-device gather.
+**WHAT 2ry GOT WRONG:** it read 164 as "wins the race but has no timing" and
+fixed the timing - deleting `rbgpu_agdc_otg_source`/`agdc_otg_bound` and giving
+the sampler its own read-only BAR5 mapping in `src/plugin/rbgpu_agdc_otg.cpp`.
+The capture's headline was not the missing timing; it was that every AGDC error
+had vanished and the machine had hung. 2ry **kept the trigger that caused the
+hang** and added live MMIO plus an up-to-400 ms `IODelay` spin to the plugin's
+earliest path. **The sampler is KEPT** - read-only, bounds-checked
+(`otg_err 9`), identity-checked against 2oq's signature (`otg_err 3`),
+re-verified after the measurement (`otg_err 10`), a key on every exit,
+host-tested with no NDRV/AMD init - it is simply no longer on a default path.
+**THE FIX: `-rbgpuagdcearly`, OFF BY DEFAULT.** Without it `rbgpu_agdc_load`
+publishes `agdc_say` = *"ARMED (late): waiting for the framebuffer"* and returns
+**before both** triggers 2rx added (no `addMatchingNotification`, and the
+load-time `thread_call_enter` unreached), leaving the framebuffer hook as the
+sole trigger - the pre-2rx shape boot 163 booted clean. `wranglerArrived` also
+tests `early` first. **This is NOT a fix for the race**; it is a deliberate
+decision not to win a race we cannot survive winning, recorded so the trigger is
+not re-landed a third time. **`agdc_early` is NVRAM-hot: 0 = late (keeps a
+desktop), 1 = boot 164's wedge.** What would make the early path safe is not
+another trigger change but DCN 3.1.2 from Linux's `dcn31`. **So the display
+half's blocker has MOVED: from "we cannot get past the AGDC gate" to "past the
+gate there is no backend" - and the first of those is solved.**
+UUID **0E6F0DCD -> 5951FC1F**; `kmutil libraries` **365 of 365**, 0 unresolved,
+**0 from `SystemKernelExtensions.kc`**; graphics deps **0**; `RouteRequest`
+still **1**. hosttest passes. **NOT YET BOOTED.** Next boot: same three
+one-shots, expect **`agdc_early 0`**, `agdc_started 1` LATE, `agdc_tim_err 0`,
+`otg_err 0`, `otg_map_ro 1`, and 163's AGDC errors BACK in the log - their
+return is the control that says the gate is shut again. Rescue: `-rbgpuoff`,
+clear the one-shots first. JOURNAL **2rz**.
+
 **LATEST 2026-10-26 / 2ry: BOOT 164 WINS THE AGDC RACE, BUT HAS NO TIMING.**
 Capture `logs/20261026-133012-plugin`, nonce164, UUID932B9FC8, all one-shots
 consumed, `iop_verify 1`, 559/768 diag slots. Apple's dump names our AGDC

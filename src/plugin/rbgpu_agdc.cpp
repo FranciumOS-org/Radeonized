@@ -24,6 +24,20 @@ IONotifier *wranglerNote;
 IOPCIDevice *pci;
 thread_call_t work;
 bool armed, finished;
+// 2rz: the matched-notification trigger 2rx landed is OFF by default, because
+// boot 164 measured what winning the AGDC gate costs. Boot 163 and boot 164
+// ran BYTE-IDENTICAL boot-args; the only difference was this trigger, and 164
+// published early (`agdc 0x1000004ad /RembrandtGPUAGDC` in the wrangler's own
+// dump) with every one of 163's AGDC errors GONE - no "Unable to get AGDC
+// information", no "Unable to acquire map", no "no display pipes are present"
+// - and then wedged the desktop with no panic and no log. 163, late and
+// refused, had a working accelerated desktop. CLAUDE.md pre-stated this exact
+// hazard: past the gate IOPresentment needs
+// IOPresentmentBindIOAccelSurfaceToResource and SetPlaneState, and
+// IONDRVFramebuffer implements NEITHER. So the gate is not the finish line -
+// opening it is what hangs the machine, and that is now MEASURED rather than
+// feared. `-rbgpuagdcearly` re-arms it for a deliberate experiment.
+bool early;
 // 2rx: run() may now be entered from THREE places (the wrangler notification,
 // rbgpu_agdc_load and the framebuffer hook) where the restored tree had one
 // live site, because `work` used to be NULL at load time. thread_call_enter on
@@ -349,7 +363,9 @@ bool resolvePci() {
 bool wranglerArrived(void *,void *,IOService *,IONotifier *) {
     rbgpu_diag_set_num("agdc_note_fired",1);
     rbgpu_diag_set_num("agdc_t_note_ms",rbgpuAgdcUptimeMs());
-    if (work) thread_call_enter(work);
+    // 2rz: belt and braces - without -rbgpuagdcearly the notification is never
+    // installed, so this cannot fire; if it somehow does, it must not publish.
+    if (early && work) thread_call_enter(work);
     return true;
 }
 
@@ -557,6 +573,18 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     // than leaving it argued.
     if (!work) work=thread_call_allocate(run,nullptr);
     if (!work) { refuse(7,"worker allocation"); return; }
+    early=checkKernelArgument("-rbgpuagdcearly");
+    rbgpu_diag_set_num("agdc_early",early ? 1u : 0u);
+    if (!early) {
+        // 2rz: the pre-2rx shape, which is the one boot 163 booted clean. The
+        // framebuffer hook is then the ONLY trigger, so the publish lands
+        // after enableController and misses WindowServer's question - which
+        // 2rw measured as 1732 ms late and which boot 164 proved is the only
+        // reason that boot kept its desktop. Not a fix for the race; a
+        // deliberate choice not to win a race we cannot yet survive winning.
+        rbgpu_diag_set_str("agdc_say","ARMED (late): waiting for the framebuffer");
+        return;
+    }
     if (!wranglerNote) {
         auto matching=IOService::serviceMatching("AppleGPUWrangler");
         if (matching) {
