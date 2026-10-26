@@ -100,6 +100,16 @@ constexpr size_t   kRbTimingInfoSize=kRbTimingDetailOff+RB_AGDC_TIMING_SIZE;
 // A failure here leaves timingValid false, and 0x921/0x711 then REFUSE rather
 // than zero-fill (2rd: IOPresentment validates no timing field, so a zero
 // reply would pass and poison its capability cache).
+// 2rn: boot 160 showed the bridge publishing AFTER WindowServer had already
+// asked IOPresentment for the AGDC, so "when" is now part of the evidence.
+// mach_absolute_time() is ticks since boot, so this is uptime in ms and can be
+// compared directly against the log's own timestamps.
+static uint64_t rbgpuAgdcUptimeMs() {
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+    return ns / 1000000ull;
+}
+
 RbOtgSample otgSample=nullptr;
 
 void sampleTiming() {
@@ -369,10 +379,13 @@ void run(thread_call_param_t,thread_call_param_t) {
     // registered yet and no Apple lock held by us - so the vendor callback
     // never has to call into IOFramebuffer. Must precede start(), because
     // AGDC::start registers the service and WindowServer can query at once.
+    rbgpu_diag_set_num("agdc_t_presample_ms",rbgpuAgdcUptimeMs());
     sampleTiming();
+    rbgpu_diag_set_num("agdc_t_sampled_ms",rbgpuAgdcUptimeMs());
     rbgpu_diag_set_num("agdc_start_enter",1);
     rbgpu_diag_set_num("agdc_stage",60);
     bool started=service->start(pci); // AGDC::start registers the service itself
+    rbgpu_diag_set_num("agdc_t_started_ms",rbgpuAgdcUptimeMs());
     rbgpu_diag_set_num("agdc_stage",70);
     rbgpu_diag_set_num("agdc_started",started ? 1 : 0);
     // Retain the initial allocation for the boot, EVEN on start failure.
