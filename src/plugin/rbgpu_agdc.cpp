@@ -32,6 +32,11 @@ using Filter=IOReturn (*)(void *,unsigned,unsigned,void *,unsigned long,
                          void *,unsigned long *,void *);
 Ctor ctor;
 Dtor dtor;
+// 2rd: the boot framebuffer's own timing, for attribute 0x921. Set from
+// processNDRV once IONDRVSupport is up; NULL until then, and the bridge
+// refuses 0x921 rather than inventing a reply while it is NULL.
+RbNdrvCurrentMode ndrvCurrentMode;
+RbNdrvTimingInfo  ndrvTimingInfo;
 McCtor mcCtor;
 Pre pre;
 Post post;
@@ -60,6 +65,51 @@ OSObject *allocate(const void *) {
     return reinterpret_cast<OSObject *>(p);
 }
 
+// IOTimingInformation: appleTimingID, flags, then the detailed union. The
+// V2 body therefore begins at +0x08 and is RB_AGDC_TIMING_SIZE bytes.
+// kIODetailedTimingValid is quoted as a local constant rather than included,
+// so this adds no import and the 2oz trap stays shut (2q4's rule).
+constexpr uint32_t kRbDetailedTimingValid=0x80000000u;
+constexpr size_t   kRbTimingDetailOff=0x08;
+constexpr size_t   kRbTimingInfoSize=kRbTimingDetailOff+RB_AGDC_TIMING_SIZE;
+
+// Read-only. Returns the V2 body of the CURRENT mode, or NULL - and NULL is a
+// refusal upstream, never a zero fill (2rd: IOPresentment validates no timing
+// field, so a zero reply would pass this stage and poison its cache).
+const void *currentTiming(uint8_t *scratch) {
+    if (!ndrvCurrentMode || !ndrvTimingInfo || !framebuffer) return nullptr;
+    int32_t mode=0, depth=0;
+    if (ndrvCurrentMode(framebuffer,&mode,&depth)!=kIOReturnSuccess) {
+        rbgpu_diag_set_num("agdc_tim_err",1); return nullptr;
+    }
+    rbgpu_diag_set_num("agdc_tim_mode",static_cast<uint64_t>(mode));
+    for (size_t i=0;i<kRbTimingInfoSize;i++) scratch[i]=0;
+    if (ndrvTimingInfo(framebuffer,mode,scratch)!=kIOReturnSuccess) {
+        rbgpu_diag_set_num("agdc_tim_err",2); return nullptr;
+    }
+    uint32_t flags=0;
+    for (unsigned i=0;i<4;i++) flags|=static_cast<uint32_t>(scratch[4+i])<<(8*i);
+    rbgpu_diag_set_num("agdc_tim_flags",flags);
+    // Rule 13/14: the struct is only meaningful when the driver says the
+    // detailed timing is filled in. Refuse rather than ship whatever was there.
+    if (!(flags & kRbDetailedTimingValid)) {
+        rbgpu_diag_set_num("agdc_tim_err",3); return nullptr;
+    }
+    const uint8_t *v2=scratch+kRbTimingDetailOff;
+    uint32_t hactive=0, vactive=0;
+    // horizontalActive/verticalActive are at V2+0x40 and V2+0x50 (offsetof,
+    // not counted); published so a boot says what timing was handed over.
+    for (unsigned i=0;i<4;i++) hactive|=static_cast<uint32_t>(v2[0x40+i])<<(8*i);
+    for (unsigned i=0;i<4;i++) vactive|=static_cast<uint32_t>(v2[0x50+i])<<(8*i);
+    rbgpu_diag_set_num("agdc_tim_h",hactive);
+    rbgpu_diag_set_num("agdc_tim_v",vactive);
+    if (!hactive || !vactive) {
+        rbgpu_diag_set_num("agdc_tim_err",4); return nullptr;
+    }
+    rbgpu_diag_set_num("agdc_tim_err",0);
+    return v2;
+}
+
 IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
                 unsigned long *out,unsigned long *outSize,void *) {
     rbgpu_diag_set_num("agdc_vendor_attr",attr);
@@ -67,10 +117,15 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
     rbgpu_diag_set_num("agdc_vendor_out",outSize ? *outSize : 0);
     if (attr==1) rbgpu_diag_inc("agdc_vendor_calls");
     if (attr==0x980) rbgpu_diag_inc("agdc_cap_calls");
+    if (attr==0x921) rbgpu_diag_inc("agdc_link_calls");
+    uint8_t timing[kRbTimingInfoSize];
+    const void *v2=attr==0x921 ? currentTiming(timing) : nullptr;
     // KERNEL pointers, not registry IDs. Apple's filtered 0x980 handler
     // still converts these before copying anything to userspace.
     const int result=rb_agdc_reply(attr,inSize,out,outSize,
-        reinterpret_cast<uint64_t>(pci),reinterpret_cast<uint64_t>(framebuffer));
+        reinterpret_cast<uint64_t>(pci),reinterpret_cast<uint64_t>(framebuffer),v2);
+    if (attr==0x921) rbgpu_diag_set_num("agdc_link_result",
+                                        static_cast<uint64_t>(result));
     if (result==RB_AGDC_UNSUPPORTED) {
         rbgpu_diag_set_num("agdc_vendor_unsupported",attr);
         return kIOReturnUnsupported;
@@ -279,6 +334,12 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     rbgpu_diag_set_num("agdc_filter_routed",1);
     rbgpu_diag_set_str("agdc_say","ARMED: waiting for boot framebuffer");
     if (work) thread_call_enter(work); // framebuffer may have arrived first
+}
+
+void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
+    if (!checkKernelArgument("-rbgpuagdc")) return;
+    ndrvCurrentMode=cur; ndrvTimingInfo=info;
+    rbgpu_diag_set_num("agdc_tim_src",(cur?1u:0u)|(info?2u:0u)); // 3 required
 }
 
 void rbgpu_agdc_framebuffer(IOService *fb) {

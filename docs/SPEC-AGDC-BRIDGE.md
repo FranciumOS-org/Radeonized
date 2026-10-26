@@ -50,6 +50,62 @@ not the next missing operation: nonzero-input requests returned before that
 key was updated. plugin_check now preserves boot arguments, boot-session UUID,
 display logs and (when root) a three-second WindowServer sample.
 
+## 2rd: attribute 0x921 is implemented from the real boot timing
+
+`AGDCLinkConfig_t` is **not** a new AMD structure. It is 0xb0 bytes and embeds
+the **public** `IODetailedTimingInformationV2` at **+0x04**, with the three
+`__reservedA` words the header documents as "Init to 0" reused by AGDC:
+
+| offset | field |
+|---|---|
+| +0x00 | framebuffer index — **IOPresentment writes it**, Apple reads it back out of the *output* buffer |
+| +0x04 | link id (`0xFFFFFFFF` = none) — overlays `__reservedA[0]` |
+| +0x08 | flags, u64, low byte only — overlays `__reservedA[1..2]` |
+| +0x10..+0xa3 | the V2 body from `horizontalScaledInset` on |
+| +0xa4 | stream index — Apple's own value is `fb->0xec + 1`, 0 when `0xff` |
+| +0xa8 | `fb->0xf0` |
+| +0xac | stream state — `translateAmdStreamState`, whose out-of-range result is `0x80000000` |
+
+Measured in `getLinkConfig` (`0xc009184`) and verified by `offsetof`, not by
+counting header lines: `sizeof(V2)` is 0xa0, so `0x04 + 0xa0 = 0xa4` is exactly
+the next written field and the whole structure sums to the 0xb0 Apple's own
+length check demands. Detail and the three independent confirmations:
+JOURNAL **2rd**.
+
+**The timing comes from the boot framebuffer, not from DCN and not from
+invention.** `IONDRVFramebuffer::getCurrentDisplayMode` and
+`getTimingInfoForDisplayMode` are both **defined** in IONDRVSupport (rule 1,
+`nm`) and **neither is routed** anywhere, so `processNDRV` resolves and *calls*
+them — rule 3 untouched, nothing patched, no register read or write. The reply
+is refused unless the driver sets `kIODetailedTimingValid` and both
+`horizontalActive` and `verticalActive` are non-zero.
+
+**A missing or invalid timing is a refusal, never a zero fill.** 2rd measured
+that IOPresentment validates **no** timing field: it copies `reply+0x10..0x9b`
+into its own cache and returns success either way. A zero-filled reply would
+therefore *pass* this stage and silently poison that cache — the failure that
+would be hardest to find later. Without real timing the bridge returns
+Unsupported and leaves IOPresentment exactly where boot 156 left it.
+
+**Flags bit 0 stays clear, bit 3 is set.** Apple sets bit 3 unconditionally.
+Bit 0 is the only field IOPresentment acts on: `0x7ff812e98af6` reads it and,
+when set, issues selector **0x925** (`getPortStatus`, 0xc bytes) and then a
+0x24-byte follow-up. Setting it would claim a port sub-protocol the bridge does
+not implement. Apple's dispatch table at `0xbfec050` holds **int32 offsets from
+its own base**, not pointers.
+
+**What the bridge reports is "one framebuffer, no AGDC link or stream":** link
+id `0xFFFFFFFF`, stream index 0, stream state `0x80000000`, which are Apple's
+own values for "none" and "unknown". That is what this bridge actually knows.
+**Not established:** whether anything past this stage requires a real link —
+this stage does not check, and the two link constants are single named values
+in `rb_agdc.h` so a later boot's evidence can change them in one line.
+
+Reachability is no longer an inference: `0x921` is traced through Apple's
+`filtered_doDeviceAttribute` — not 0x712/0x713, outside the 0x4000 range, so
+`0x13dfd1f1 → 0x13dfd204 → 0x13dfcf0d`, which calls **`*0x858(%rax)`**, the
+vendor slot this bridge overrides.
+
 ## Implementation
 
 `src/plugin/rbgpu_agdc.cpp` solves AGDC's superclass, constructor, destructor
@@ -148,6 +204,12 @@ plugin_check's variable list. Full details remain in RBGPUDiag/RBGPULog.
 | agdc_started | 1; also inspect a live RembrandtGPUAGDC service under the PCI device |
 | agdc_user_vendor / agdc_user_cap | User-kernel attribute calls, distinct from AGDC::start's own vendor calls |
 | agdc_last_attr / agdc_vendor_unsupported | Next protocol request to implement if presentation stops farther down |
+| agdc_tim_src | **3** required: both IONDRVSupport timing symbols resolved. 0/1/2 means 0x921 is refused |
+| agdc_tim_raw_cur / agdc_tim_raw_info | Raw solve results, published only when one failed (2rb's lesson) |
+| agdc_link_calls / agdc_link_result | 0x921 requests reaching the vendor callback, and the builder's verdict (0 = replied) |
+| agdc_tim_err | **0** required. 1 getCurrentDisplayMode failed; 2 getTimingInfoForDisplayMode failed; 3 kIODetailedTimingValid clear; 4 zero active pixels |
+| agdc_tim_mode / agdc_tim_h / agdc_tim_v | The mode and the active pixels actually handed to IOPresentment — if these are not the panel's, nothing downstream means anything |
+| agdc_tim_flags | The driver's own timing flags; bit 31 is kIODetailedTimingValid |
 | iop_verify | 1; otherwise WindowServer never passed the earlier gate |
 
 Refusal codes: 1 symbols/ranges; 2 vtable/prologue; 3 unarmed; 4 route;

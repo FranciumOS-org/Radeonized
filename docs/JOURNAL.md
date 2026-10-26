@@ -31664,3 +31664,111 @@ structure and truthful plane capabilities, and the bind/transaction/scanout
 backend after it. Nothing here touches boot 156's frozen panel, the
 `checkGPUProgress` channel errors, or the 138 "Attempting to get capabilities
 when none exist" messages. No hardware was touched and no boot was spent.
+
+---
+
+## 2re — 0x921 answered from the boot framebuffer's own timing
+
+2026-10-26. No boot. Builds and host tests only; **not verified on hardware.**
+
+2rd established the layout and that IOPresentment validates none of it. This
+implements the reply.
+
+### Reachability is now traced, not inferred
+
+2rc recorded `agdc_last_attr = 0x921` from the *filter* hook and said the
+return code was never recorded, so "0x921 reaches the vendor callback" was a
+static inference. It is now a traced path through Apple's
+`filtered_doDeviceAttribute`: 0x921 is `> 0x703`, `<= 0x922`, `> 0x711`, so
+`0x13dfc32b`, where `0x921 - 0x800 = 0x121 > 3` takes `ja` to `0x13dfc5b8`;
+it is neither 0x712 nor 0x713, so `jne` to the default at `0x13dfd1f1`; it is
+outside the 0x4000 range so `ja` to `0x13dfd204`; `r14b` is still 0 (only the
+0x411c path sets it) so `je` to **`0x13dfcf0d`**, which is
+
+```
+13dfcf23   callq *0x858(%rax)      ; esi = attribute
+```
+
+— the vendor slot the bridge overrides. The argument order at that call is
+`(this, attr, in, inLen, out, outLenPtr, state)`, matching the bridge's
+callback exactly.
+
+### One correction to my own first cut
+
+I had required `in_size == 0xb0` for 0x921. **Apple does not check inLen at
+all** — `getLinkConfig` validates only the output length (`cmpq $0xb0,%rdx` at
+`0xc0091a0`) — and input and output are the same userspace structure, so my
+check would have invented a refusal the protocol does not have. Removed; the
+0xb0 is enforced where Apple enforces it, on the output. A host test now
+passes `in_size` of 0 and 0x196c and requires both to succeed, and a wrong
+*output* length to refuse without writing.
+
+### What is supplied, and what is refused
+
+`rb_agdc_link_config` in `src/common/rb_agdc.h` — freestanding, bounded,
+host-tested. It reads the framebuffer index where Apple reads it (out of the
+**output** buffer, because IOPresentment wrote it there), refuses anything but
+index 0 since the bridge advertises one framebuffer, copies the V2 body to
++0x04 **first** and only then overwrites the two AGDC overlay words, so the
+reused `__reservedA` slots cannot survive.
+
+Refusals, every one of them preferring silence to a fabrication:
+
+* **no timing → Unsupported.** Not a zero fill. 2rd measured that a zero reply
+  would *pass* the gather and poison IOPresentment's cache.
+* `kIODetailedTimingValid` clear, or zero `horizontalActive`/`verticalActive`
+  → refuse (rule 13: the struct is only meaningful when the driver says it is
+  filled in).
+* flags bit 0 set → refuse, because that claims selector 0x925
+  (`getPortStatus`). The builder enforces it so the policy cannot be lost at a
+  call site.
+
+The timing source is `IONDRVFramebuffer::getCurrentDisplayMode` +
+`getTimingInfoForDisplayMode`, both **defined** in IONDRVSupport (rule 1,
+`nm`) and **neither routed** anywhere — `processNDRV` resolves and *calls*
+them, so rule 3 is untouched and nothing is patched. The solve sits **before**
+the `-rbgpuvbl`/`-rbgpufbaccel` gate, because the bridge is armed
+independently of both; a failed solve clears the patcher error so the later
+routes in that function are unaffected, publishes both raw results (2rb's
+lesson), and leaves 0x921 refused.
+
+`kIODetailedTimingValid = 0x80000000` and `IOAppleTimingID` being `UInt32`
+(so the detailed union starts at +0x08) were both read out of the SDK header,
+not recalled. They are local `constexpr`s, not an `#include`, so no import is
+added and the 2oz trap stays shut.
+
+The bridge reports **one framebuffer with no AGDC link and no stream**: link id
+`0xFFFFFFFF`, stream index 0, stream state `0x80000000` — Apple's own values
+for "none" and "unknown", and an honest description of what the bridge knows.
+Whether anything past this stage requires a real link is **not established**;
+this stage does not check, and both are single named constants so one boot's
+evidence can change them in one line.
+
+### A test that passed for the wrong reason
+
+The first bit-0 assertion did not trip when the guard was deliberately
+removed: the buffer was 0xa5-filled, so the *index* check refused first and
+masked it. That is rule 26 applied to a test rather than a search. Fixed by
+zeroing the index before each single-guard assertion. Re-verified by breaking
+each guard in turn: wrong timing offset **5** failures, bit 0 permitted **3**,
+NULL timing not refused **1**, index check removed **1**.
+
+### Build
+
+`make hosttest` and `make plugin` pass, ASan/UBSan and the parser mutations
+included. Imports **362 of 362**, the same count as 2rc, through the same
+dependencies — `grep -c 'IOGraphicsFamily\|IONDRVSupport' src/plugin/Info.plist`
+is **0**. No new compiler warning in any edited file (the 42 that remain are
+pre-existing). UUID moved `758BFD86…` → **B8E38412-6CD7-374A-8762-BA53B460AE77**.
+Ten new diag keys; boot 156 used 550 of 768, so capacity is not at risk and
+`diag_used`/`diag_max` still self-report.
+
+**Nothing here is measured on hardware.** It makes one request answerable from
+real values. It does not create a display pipe, and the next stage — 0x711 /
+`getFbExtendedCapability`, 0x196c bytes, truthful plane capabilities — plus the
+bind/transaction/scanout backend are still absent, as are explanations for boot
+156's frozen panel, the `checkGPUProgress` channel errors and the 138
+"Attempting to get capabilities when none exist" messages. Activation is
+unchanged (`-rbgpuagdc` + `-rbgpuiop` + the one-shots); read `agdc_tim_src 3`,
+`agdc_tim_err 0` and `agdc_link_result 0` first, and `agdc_tim_h`/`agdc_tim_v`
+must be the panel's own numbers or nothing downstream means anything.
