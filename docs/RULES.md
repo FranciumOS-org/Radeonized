@@ -29,6 +29,44 @@ and a root WindowServer sample. GPU progress errors are also present, not
 yet explained. **Next is boot-link timing/state and plane support; no repeat
 boot needed just for this diagnostic build.** JOURNAL **2rc**.
 
+**2rd/2re: 0x921 IS NOW IMPLEMENTED FROM REAL TIMING, AND IT NEEDED NO DCN
+CODE.** `AGDCLinkConfig_t` is not an AMD structure: it is 0xb0 bytes and
+embeds the **public** `IODetailedTimingInformationV2` at **+0x04**, with the
+three `__reservedA` words the header calls "Init to 0" reused by AGDC as the
+link id (+0x04) and flags (+0x08). Measured in `getLinkConfig` (`0xc009184`),
+whose block copy is shifted by exactly `-0xc` = `sizeof(__reservedA[3])`, and
+verified by **`offsetof`** - `sizeof(V2)` is 0xa0, so `0x04 + 0xa0 = 0xa4` is
+exactly the next written field and the whole thing sums to the 0xb0 Apple's
+length check demands. So the honest source for every timing field is
+`IONDRVFramebuffer::getCurrentDisplayMode` + `getTimingInfoForDisplayMode`,
+both **defined** in IONDRVSupport and **neither routed** - resolved and
+**called**, so rule 3 is untouched, nothing is patched and no register is
+read or written. **AND IOPRESENTMENT VALIDATES NO TIMING FIELD**:
+`__GatherAGDCLogicalDeviceCapabilities` (`0x7ff812e9781a`) fails only on a
+non-zero IOReturn or a zero `outLen`, copies `reply+0x10..0x9b` into its own
+cache at `this->0x19b0c` and returns success either way - so a zero-filled
+reply would **pass** and silently poison that cache, which is why a missing or
+invalid timing is a **refusal** here, never a zero fill. The ONE field it acts
+on is **flags bit 0**, which makes it issue selector **0x925**
+(`getPortStatus`) and then a 0x24-byte follow-up, so **bit 0 stays clear** and
+bit 3 (which Apple sets unconditionally) stays set. The bridge reports one
+framebuffer with **no link and no stream** - link id `0xFFFFFFFF`, stream
+index 0, state `0x80000000`, Apple's own "none"/"unknown" - which is what it
+actually knows; whether anything past this stage needs a real link is **NOT
+established**, and both are single named constants in `rb_agdc.h`.
+Reachability is traced, not inferred: 0x921 runs
+`0x13dfc32b → 0x13dfc5b8 → 0x13dfd1f1 → 0x13dfd204 → 0x13dfcf0d`, which does
+`callq *0x858(%rax)` - the vendor slot the bridge overrides. Corrected my own
+first cut: **Apple never checks `inLen`**, only the output length, and input
+and output are the same userspace structure. **NOT VERIFIED ON HARDWARE.**
+Read `agdc_tim_src 3`, `agdc_tim_err 0`, `agdc_link_result 0` first, and
+`agdc_tim_h`/`agdc_tim_v` must be the panel's own numbers or nothing
+downstream means anything. Still absent: **0x711 /
+`getFbExtendedCapability` (0x196c bytes)**, truthful plane capabilities, the
+bind/transaction/scanout backend, and any explanation for the frozen panel or
+the `checkGPUProgress` errors. UUID **B8E38412**; imports 362/362 unchanged.
+Detail: JOURNAL **2rd**, **2re**; `docs/SPEC-AGDC-BRIDGE.md`.
+
 **FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
 AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
 host-tested, **published and queried in boot 156**. It clones the inherited AGDC tables,
