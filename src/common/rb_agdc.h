@@ -17,6 +17,29 @@ static inline void rb_agdc_put32(uint8_t *p, uint32_t v) {
 static inline void rb_agdc_put64(uint8_t *p, uint64_t v) {
     for (unsigned i=0; i<8; i++) p[i]=(uint8_t)(v >> (8*i));
 }
+static inline uint32_t rb_agdc_get32(const uint8_t *p) {
+    uint32_t v=0; for (unsigned i=0;i<4;i++) v|=(uint32_t)p[i]<<(8*i); return v;
+}
+static inline uint64_t rb_agdc_get64(const uint8_t *p) {
+    uint64_t v=0; for (unsigned i=0;i<8;i++) v|=(uint64_t)p[i]<<(8*i); return v;
+}
+
+/* IODetailedTimingInformationV2 field offsets. These are not ours to guess:
+ * 2rg read IOPresentmentCreateEndPointDictionary (0x7ff812e9550c), which turns
+ * the cached 0x921 timing into CFNumbers under Apple's OWN key names, and the
+ * fourteen leaq sites line up field-for-field and in order with the public
+ * header - PixelClock 0x28, MinPixelClock 0x30, MaxPixelClock 0x38,
+ * HorizontalActive 0x40, HorizontalBlanking 0x44, HorizontalSyncOffset 0x48,
+ * HorizontalSyncPulseWidth 0x4c, VerticalActive 0x50, VerticalBlanking 0x54,
+ * VerticalSyncOffset 0x58, VerticalSyncPulseWidth 0x5c, HorizontalSyncConfig
+ * 0x70, VerticalSyncConfig 0x78, VerticalBlankingExtension 0x84. That is
+ * Apple naming the fields rather than us matching offsets, and it is the
+ * strongest confirmation yet that the V2 struct sits at reply+0x04. */
+#define RB_AGDC_V2_PIXELCLOCK 0x28u
+#define RB_AGDC_V2_HACTIVE    0x40u
+#define RB_AGDC_V2_HBLANKING  0x44u
+#define RB_AGDC_V2_VACTIVE    0x50u
+#define RB_AGDC_V2_VBLANKING  0x54u
 static inline int rb_agdc_vendor(void *out, size_t size) {
     if (!out || size != RB_AGDC_VENDOR_SIZE) return -1;
     uint8_t *p=(uint8_t *)out;
@@ -57,10 +80,16 @@ static inline int rb_agdc_capability(void *out, size_t size,
  * The flags byte Apple assembles is
  *   0x08 | (linkId != -1 ? 0x10 : 0x02) | ((link->vt[0x150](0xd) & 1) << 2)
  *        | fb->0x719
- * i.e. bit 3 unconditionally. Bit 0 must stay CLEAR: IOPresentment's
- * 0x7ff812e98af6 reads it and, when set, issues selector 0x925
- * (getPortStatus, 0xc bytes) and then a 0x24-byte follow-up - a port
- * sub-protocol this bridge does not implement. */
+ * i.e. bit 3 unconditionally. Bit 0 stays CLEAR, and 2rg measured what it
+ * actually costs rather than assuming: __GatherAGDCLogicalDeviceCapabilities
+ * tests reply+0x08 bit 0 at 0x7ff812e979b7 and, when set, calls
+ * __GatherAGDCLinkCapabilities(reply+0xa4) - which issues selector 0x925
+ * (getPortStatus, 0xc bytes) and then 0x988 (0x24 bytes), and whose ONLY
+ * effect is this->0x19c78, a field with four writers and ZERO readers in the
+ * whole image. It returns void, r14 (the success code, already zeroed at
+ * 0x7ff812e979b4) is callee-saved across it, and every failure path leaves
+ * 0x19c78 = 2. So setting bit 0 would be SAFE, not fatal - it is left clear
+ * because this bridge knows of no link to describe, not to dodge a hazard. */
 #define RB_AGDC_LINK_SIZE    0xb0u
 #define RB_AGDC_TIMING_OFF   0x04u
 #define RB_AGDC_TIMING_SIZE  0xa0u
@@ -83,23 +112,50 @@ static inline int rb_agdc_capability(void *out, size_t size,
  * IOPresentment validates no timing field - it copies reply+0x10..0x9b into
  * its own cache and returns success either way - so a zero-filled reply would
  * PASS this stage and silently poison that cache, which is the failure that
- * would be hardest to find later. */
+ * would be hardest to find later.
+ *
+ * 2rg CORRECTS 2rd's "a cache it never reads": the cache has 24 reads, and it
+ * is the SOURCE of the display's advertised capabilities.
+ * IOPresentmentCreateEndPointDictionary republishes the whole V2 body as
+ * CFNumbers, IOPresentmentGetCurrentEndPointDimensions serves LooksLikeWidth
+ * and LooksLikeHeight out of it, and __gatherCapabilities (0x7ff812e95370)
+ * COMPUTES the refresh rate from it:
+ *
+ *     total = (float)(hActive+hBlanking) * (float)(vActive+vBlanking);
+ *     refresh = 60.0f;                       // 0x42700000, stored first
+ *     if (total > 0.0f) refresh = pixelClock / total;
+ *
+ * (the ucomiss constant at 0x7ff812ea3468 reads 0.0f, so that branch is only a
+ * divide-by-zero guard) and the result is published under RefreshTime,
+ * MinRefreshTime and MaxRefreshTime. Which makes a ZERO pixelClock the one
+ * remaining poison: it PASSES the > 0.0f guard and yields a published refresh
+ * of 0.0 Hz, where a zero total would at least leave Apple's stated 60.0f
+ * default. So a zero pixelClock is a refusal too, by the same rule and for a
+ * measured reason. A zero hActive/vActive is refused in the caller, and 2rg
+ * justifies that independently: GetCurrentEndPointDimensions returns having
+ * written NEITHER output when either is zero, leaving its caller's values
+ * untouched. */
 static inline int rb_agdc_link_config(void *out, size_t size,
                                       const void *timing_v2, uint32_t link_id,
                                       uint64_t flags, uint32_t stream_index,
                                       uint32_t stream_state) {
     if (!out || size != RB_AGDC_LINK_SIZE || !timing_v2) return -1;
     if (flags & RB_AGDC_LINK_PORT) return -1;
+    const uint8_t *t = (const uint8_t *)timing_v2;
+    /* Refuse before touching the output, so a refusal leaves it as it was. */
+    if (!rb_agdc_get64(t+RB_AGDC_V2_PIXELCLOCK)) return -1;
     uint8_t *p = (uint8_t *)out;
-    uint32_t index = 0;
-    for (unsigned i = 0; i < 4; i++) index |= (uint32_t)p[i] << (8*i);
+    uint32_t index = rb_agdc_get32(p);
     if (index != 0) return -1;            /* one framebuffer, index 0 */
     for (size_t i = 0; i < size; i++) p[i] = 0;
-    const uint8_t *t = (const uint8_t *)timing_v2;
     for (size_t i = 0; i < RB_AGDC_TIMING_SIZE; i++) p[RB_AGDC_TIMING_OFF+i] = t[i];
     rb_agdc_put32(p, index);
     rb_agdc_put32(p+0x04, link_id);       /* overlays __reservedA[0] */
     rb_agdc_put64(p+0x08, flags);         /* overlays __reservedA[1..2] */
+    /* +0xa4 and +0xa8 are ONE field to the consumer: 2rg's
+     * __GatherAGDCLogicalDeviceCapabilities reads reply+0xa4 with a single
+     * movq and passes it as AGDCStreamAddress_t, so the zero at +0xa8 is this
+     * address's high half, not padding. */
     rb_agdc_put32(p+0xa4, stream_index);
     rb_agdc_put32(p+0xa8, 0);
     rb_agdc_put32(p+0xac, stream_state);
@@ -214,10 +270,9 @@ static inline int rb_agdc_reply(unsigned attr, size_t in_size, void *out,
         /* The scaler entry's extents come from the same real timing as 0x921;
          * without it there is nothing truthful to report. */
         if (!timing_v2) return RB_AGDC_UNSUPPORTED;
-        uint32_t h=0, v=0;
         const uint8_t *t=(const uint8_t *)timing_v2;
-        for (unsigned i=0;i<4;i++) h|=(uint32_t)t[0x40+i]<<(8*i); /* hActive */
-        for (unsigned i=0;i<4;i++) v|=(uint32_t)t[0x50+i]<<(8*i); /* vActive */
+        const uint32_t h=rb_agdc_get32(t+RB_AGDC_V2_HACTIVE);
+        const uint32_t v=rb_agdc_get32(t+RB_AGDC_V2_VACTIVE);
         const int r=rb_agdc_extcap(out,*out_size,h,v);
         if (r == RB_AGDC_EXTCAP_UNSUPPORTED) return RB_AGDC_UNSUPPORTED;
         return r == 0 ? 0 : RB_AGDC_BAD_ARGUMENT;
