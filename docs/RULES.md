@@ -155,6 +155,47 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**BOOT 162 / 2rv: `rbgpu-arm` + `rbgpu-iop` ALSO BOOTS CLEAN, THE HANG NEVER
+REPRODUCED, AND THE ORDERING WINDOW IS 6.2 s - NOT 34.** Rule 8/15 clear:
+`rbgpu-boot` **162**, all four one-shots armed-and-consumed, UUID **A83C0170** =
+`build/out`, `diag_used` **518** of **768**. **`iop_verify 1`** - the five bytes
+read back from WindowServer's own memory - with `iop_oneshot 0`, `iop_match 1`,
+`iop_patched 1`, `iop_saw_ws 1`; accelerator active, `dispclk` **130.727 Hz**.
+**THE A/B IS OUT OF VARIABLES:** three clean boots on 2rs's restored tree (161
+`arm`, 162 `arm`+`iop`) plus boot 160's `arm`+`agdc`+`iop`, and 2rt's
+reconstructed hung config is within one boot-arg of this one. **Four hangs, no
+mechanism, and no configuration of the current tree reproduces them** - the
+three earlier ones ran trees that no longer exist and the fourth ran one 2rs
+could only reconstruct. No fifth theory.
+**THE FINDING IS THE TIMELINE.** `kern.boottime` **12:57:02.736**, one thread
+throughout (`WindowServer[161:39e]`, after `displaypolicyd[142:35e]`), every
+line attributed by timestamp AND pid: **+5.24 s** gpu 0xfbc7 `pubArmed`
+vid.did=`ffff.ffff`; **+5.68 s** `published` vid.did=`1002.1681` b:d:f=54:0:0;
+**+6.21 s** WindowServer's own dump reads **`agdc 0x000000000`**; **+6.23 s**
+`Unable to get AGDC information. Return code: 0x10000003`; **+6.231 s**
+**`Unable to locate service dependencies`** and **`Unable to acquire map`** (two
+lines NEW to this record); **+6.27 s** `System set to use IOP but no display
+pipes are present`. **2rn read the same question at 33.920 s and is NOT
+retracted** - but the deadline is not a fixed 34 s and **can be ~6.2 s after
+boot**, which is the number any publish-earlier work must beat.
+**`Unable to acquire map` NAMES 2r5's FUNCTION** -
+`ioPresentmentCreateAssociationMap` - and 2r5 already measured why it is empty
+(the only `AppleGraphicsDeviceControl` match is the wrangler, which that
+function excludes by an exact 17-byte name compare). **So this boot is the
+control the project never had: IOP gate OPEN, bridge ABSENT, map empty, no
+pipes.**
+**UNRECORDED MACHINE CHANGE, and it is a confound to watch:**
+`com.nullmoth.NVRMAGDC` and `com.nullmoth.NVRMFB` are **LOADED** (kextstat 152
+and 173, control 198), `syspolicyd` logging `ALLOWED` and auxKC `approved` -
+where **2rl recorded both as NOT loaded**. They instantiate **nothing**
+(`NVRMFBClaim`/`NVRMNVDAFramebuffer`/`NVDAGDCLoader`/`NVRMDisplay` all 0
+instances; `.Display_boot` still the only `IOFramebuffer`), so they confound
+nothing measured - **but `NVRMFBClaim` is `IOPCIDevice` + `IONameMatch display`
++ `IOMatchCategory IOFramebuffer`**, exactly the provider and category 2oz
+established are needed to displace `.Display_boot`, and `NVDAGDCLoader` matches
+`IOResources`. Two third-party kexts aimed at these two layers, live and
+matching nothing. No code changed. Detail: JOURNAL **2rv**.
+
 **BOOT 161 / 2ru: `rbgpu-arm` ALONE BOOTS CLEAN - THE ACCELERATOR ARM IS NOT THE
 HANG, AND THE DESKTOP IS ACCELERATED AGAIN.** First boot of 2rt's one-variable
 A/B. Rule 8/15 clear: `rbgpu-boot` **161** (all four hangs left 160), UUID
