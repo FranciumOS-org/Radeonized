@@ -117,8 +117,85 @@ int agdc_tests(void) {
     A(p[0x10]==0x0c && p[0xa3]==0x9f);
     A(le(p+0xa4,4)==RB_AGDC_STREAM_NONE && le(p+0xa8,4)==0);
     A(le(p+0xac,4)==RB_AGDC_STREAM_BAD);
+    /* 2rf: AGDCFBGetExtendedCapability_t, 0x196c = 0xc header + 8 * 0x32c. */
+    static uint8_t x[RB_AGDC_EXTCAP_SIZE+2], xorig[sizeof x];
+    const uint8_t *q=x+1;
+    const uint32_t HA=1920, VA=1080;
+    memset(x,0xa5,sizeof x); memcpy(xorig,x,sizeof x);
+    A(rb_agdc_extcap(NULL,RB_AGDC_EXTCAP_SIZE,HA,VA)<0);
+    /* Wrong length refuses without writing. Sampled rather than exhaustive:
+     * 0x196c memcmps of 6.5 KB each is not worth the host-test seconds. */
+    size_t probe[]={0,1,0xb0,0xdc,RB_AGDC_EXTCAP_SIZE-1,RB_AGDC_EXTCAP_SIZE+1};
+    for (unsigned i=0;i<sizeof probe/sizeof probe[0];i++) {
+        A(rb_agdc_extcap(x+1,probe[i],HA,VA)<0);
+        A(!memcmp(x,xorig,sizeof x));
+    }
+    /* Index must be 0; the type field is only reached once it is. */
+    memset(x,0,sizeof x); x[1]=1;
+    rb_agdc_put32(x+1+4,RB_AGDC_CAP_SCALER);
+    A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,HA,VA)<0);
+    /* Every type but the scaler is Unsupported and must not write a byte. */
+    uint32_t types[]={RB_AGDC_CAP_CSC,RB_AGDC_CAP_GAMMA,RB_AGDC_CAP_DEGAMMA,
+                      RB_AGDC_CAP_CURSOR,0x8,0x20,0x40,0x80,0x100,0x200,
+                      0x400,0x800,0x1000,0x2000,0x4000,0,0x12345};
+    for (unsigned i=0;i<sizeof types/sizeof types[0];i++) {
+        memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
+        rb_agdc_put32(x+1+4,types[i]);
+        memcpy(xorig,x,sizeof x);
+        A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,HA,VA)
+          ==RB_AGDC_EXTCAP_UNSUPPORTED);
+        A(!memcmp(x,xorig,sizeof x));
+    }
+    /* No real timing: nothing truthful to say about a scaler, so refuse. */
+    memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
+    rb_agdc_put32(x+1+4,RB_AGDC_CAP_SCALER); memcpy(xorig,x,sizeof x);
+    A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,0,VA)<0);
+    A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,HA,0)<0);
+    A(!memcmp(x,xorig,sizeof x));
+    /* The scaler answer. Pre-fill from +0x08 with garbage: everything from
+     * the count onward must be REWRITTEN, not merely added to. Without this
+     * the success case starts from a zeroed buffer and a missing clear is
+     * invisible - which is exactly what a deliberate break showed. */
+    memset(x+1+RB_AGDC_EXTCAP_COUNT_OFF,0x5c,
+           RB_AGDC_EXTCAP_SIZE-RB_AGDC_EXTCAP_COUNT_OFF);
+    A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,HA,VA)==0);
+    A(x[0]==0xa5 && x[1+RB_AGDC_EXTCAP_SIZE]==0xa5);
+    A(le(q,4)==0 && le(q+4,4)==RB_AGDC_CAP_SCALER);   /* preserved */
+    A(le(q+RB_AGDC_EXTCAP_COUNT_OFF,4)==1);
+    const uint8_t *e=q+RB_AGDC_EXTCAP_ENTRY_OFF;
+    A(le(e+0x000,4)==0x00080004);
+    A(le(e+0x01c,4)==1 && le(e+0x1a4,4)==1);
+    /* Source and destination extents are EQUAL in both blocks: that is what
+     * makes this entry mean "1:1, no scaling" whichever slot is the width. */
+    A(le(e+0x024,4)==le(e+0x02c,4) && le(e+0x028,4)==le(e+0x030,4));
+    A(le(e+0x1ac,4)==le(e+0x1b4,4) && le(e+0x1b0,4)==le(e+0x1b8,4));
+    A(le(e+0x024,4)==VA && le(e+0x028,4)==HA);
+    A(le(e+0x1ac,4)==VA && le(e+0x1b0,4)==HA);
+    A(le(e+0x034,4)==0x00050005 && le(e+0x038,4)==4);
+    A(le(e+0x1bc,4)==0x00050005 && le(e+0x1c0,4)==4);
+    /* Only ONE entry is claimed, so entries 1..7 must be entirely zero -
+     * IOPresentment offered room for 8 and a stale byte there would be a
+     * capability nobody implements. */
+    for (size_t i=RB_AGDC_EXTCAP_ENTRY_SZ;
+         i<RB_AGDC_EXTCAP_ENTRIES*RB_AGDC_EXTCAP_ENTRY_SZ; i++)
+        A(e[i]==0);
+    /* Through the dispatcher, with the timing carrying the active pixels at
+     * V2+0x40 and V2+0x50 (offsetof, same pair 0x921 uses). */
+    memset(timing,0,sizeof timing);
+    rb_agdc_put32(timing+0x40,HA); rb_agdc_put32(timing+0x50,VA);
+    memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
+    rb_agdc_put32(x+1+4,RB_AGDC_CAP_SCALER);
+    memcpy(xorig,x,sizeof x);
+    out_size=RB_AGDC_EXTCAP_SIZE;
+    A(rb_agdc_reply(0x711,RB_AGDC_EXTCAP_SIZE,x+1,&out_size,pci,fb,NULL)
+      ==RB_AGDC_UNSUPPORTED);
+    A(!memcmp(x,xorig,sizeof x));
+    A(rb_agdc_reply(0x711,RB_AGDC_EXTCAP_SIZE,x+1,&out_size,pci,fb,timing)==0);
+    A(le(q+RB_AGDC_EXTCAP_COUNT_OFF,4)==1);
+    A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x024,4)==VA);
+    A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x028,4)==HA);
     printf("agdc: bounded replies, AMD identity, kernel pointer layout, "
-           "link config overlay: %s\n",bad?"FAILED":"passed");
+           "link config overlay, scaler capability: %s\n",bad?"FAILED":"passed");
     return bad;
 #undef A
 }

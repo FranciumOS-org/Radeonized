@@ -31772,3 +31772,121 @@ bind/transaction/scanout backend are still absent, as are explanations for boot
 unchanged (`-rbgpuagdc` + `-rbgpuiop` + the one-shots); read `agdc_tim_src 3`,
 `agdc_tim_err 0` and `agdc_link_result 0` first, and `agdc_tim_h`/`agdc_tim_v`
 must be the panel's own numbers or nothing downstream means anything.
+
+---
+
+## 2rf — 0x711 answered, and the whole stage needs ONE capability
+
+2026-10-26. No boot. Static reads, host tests and a build; **not verified on
+hardware.**
+
+### The structure, closed by its own arithmetic
+
+`getFbExtendedCapability` (`0xbfecb62`, symbol intact) shows
+`AGDCFBGetExtendedCapability_t` is a **query**, not a dump:
+
+```
++0x00  u8   framebuffer index   (Apple reads it with movzbl)
++0x04  u32  capability type     (the switch value)
++0x08  u32  count - IN the caller's capacity, OUT the number filled
++0x0c  AGDCFBExtendedCapabilitesEntry_t entries[8], 0x32c each
+```
+
+The sizes close it: `getFbCapabilityForScaler` bzeroes `entry+0x08` for
+**0x324** bytes, so an entry is 0x32c; `8 * 0x32c = 0x1960`, `+ 0xc = 0x196c`
+— both the length Apple's filter demands and the capacity **8** IOPresentment
+pre-loads into `+0x08`. Three numbers that were measured separately agreeing is
+what makes this a layout rather than a guess.
+
+Apple's switch implements **five** types — 1 CSC (inline), 2 Gamma, 4 Degamma,
+0x10 Scaler, 0x8000 Cursor — and returns `kIOReturnUnsupported` for anything
+else, with a NULL display path giving `kIOReturnNoDevice` and a zero
+`fb->0x719` giving Unsupported. `getFbCapabilityForRotation` exists
+(`0xbfed23e`) and is **not** in this switch, so it is reached from some other
+attribute; unchased.
+
+### IOPresentment asks for all sixteen bits and needs exactly one
+
+`__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`) issues **sixteen**
+0x711 queries, one per type bit — 0x10, 0x8, 0x4, 0x2, 0x1, 0x40, 0x20, 0x200,
+0x80, 0x100, 0x400, 0x800, 0x1000, 0x2000, 0x4000, 0x8000 — each into its own
+0x196c buffer at a different offset in its object, each with capacity 8. Eleven
+of those sixteen are types **Apple itself does not implement**, so most of these
+queries fail on a real AMD Mac too, and the gather is built to tolerate it:
+
+* `0x808` when there is no device or a zero device count.
+* `0x2006` from exactly **two** sites, and both belong to the **first** query,
+  type **0x10, the scaler**: a non-zero IOReturn (`0x7ff812e97b1c`, and even
+  that is only fatal while `this->0x434` bit 0 is clear), and a returned
+  **count of zero** (`movl 0x69f8(%rbx),%eax; testl; je 0x7ff812e98ad3`).
+* Every later query's failure just rewrites `outLen` and falls into the next
+  one, and the last is preceded by `xorl %r14d,%r14d`, so **even its failure
+  returns success**.
+* A count of 9 or more is clamped to 8 rather than rejected.
+
+**So the entire stage reduces to: answer type 0x10 with count >= 1.** As with
+0x921, IOPresentment reads nothing out of the entries here — only the count,
+which it stores at `this->0x42c` before setting `this->0x434` bit 0.
+
+### What the bridge answers
+
+`rb_agdc_extcap` / `rb_agdc_scaler_entry` in `src/common/rb_agdc.h`,
+freestanding and host-tested. It reads the index and type **where Apple reads
+them**, out of the structure itself, preserves `+0x00`/`+0x04`, rewrites
+everything from `+0x08`, and reproduces Apple's own **no-scaling** entry
+(`0xbfed05a`): the identity word `0x00080004`, a 1 at `entry+0x1c` and
+`+0x1a4`, the two extents twice over in each of two blocks, and the constants
+`0x00050005` and 4. The extents come from the same real timing 0x921 uses —
+`horizontalActive` at V2+0x40 and `verticalActive` at V2+0x50.
+
+Refusals, again preferring silence to a fabrication: any type but 0x10 →
+Unsupported **without writing a byte**; index not 0 → refuse; no timing, or a
+zero active dimension → refuse, because there is nothing truthful to say about
+a scaler without the panel's size. Only entry 0 is claimed, and entries 1..7
+are required to be entirely zero — IOPresentment offered room for eight and a
+stale byte there would be a capability nobody implements.
+
+**NOT ESTABLISHED, and deliberately not guessed:** which slot in each pair is
+width and which is height. Apple takes them from `fb->0x720` and `fb->0x71c`,
+and `updateStreamComposition` (`0xbfe9270`) shows `0x71c` pairing with `0xc0`
+and `0x720` with `0xc4` in a letterbox fit — which fixes the *pairing* but not
+the axis names, and `populateScalingCapabilities` (`0xbff5d84`) writes the
+scaling table from `fb->0xc0`/`0xc4` in the same order without naming them
+either. It cannot change this entry's meaning: **source and destination
+extents are equal, so transposing both pairs still says 1:1**, and a host test
+asserts that equality rather than the axis assignment. Both numbers are
+published as diag keys.
+
+### Two guards that the tests did not actually catch
+
+Deliberately breaking each guard (the project's rule for a new test) found two
+that passed for the wrong reason:
+
+* Removing the type check didn't fail a test — it failed the **build**,
+  `-Werror=unused-but-set-variable`. A real guard, but not the one claimed.
+  Re-broken as `type == 0xdeadbeef`, which compiles: **34** failures.
+* Removing the `+0x08`-onward zero fill changed nothing, because the test
+  started from an already-zeroed buffer. The test now pre-fills that region
+  with `0x5c` and requires it rewritten: **5684** failures.
+
+Final verification, each break in turn: hactive/vactive **3**, count **2**,
+an entry field **2**, type guard **34**, zero fill **5684**.
+
+### Build
+
+`make hosttest` and `make plugin` pass. Imports **362 of 362**, unchanged
+again, and `grep -c 'IOGraphicsFamily\|IONDRVSupport' src/plugin/Info.plist`
+is **0**. No new warning in any edited file. UUID moved `B8E38412…` →
+**5719404C-3236-3851-870C-36A767392FFC**. New diag keys
+`agdc_extcap_calls`/`_type`/`_result`/`_answered`; `agdc_extcap_type` exists
+specifically so that if the kernel hands the vendor callback a separate zeroed
+*output* copy rather than the shared in/out buffer, a boot says so — every type
+would then read 0 and be refused for that reason rather than because it is
+unimplemented.
+
+**One boot now covers both stages.** Read in order: `agdc_tim_src 3`,
+`agdc_tim_err 0`, `agdc_tim_h`/`agdc_tim_v` matching the panel,
+`agdc_link_result 0`, `agdc_extcap_type 0x10` and `agdc_extcap_result 0`.
+Still absent and not claimed: the bind/transaction/scanout backend, any plane
+state, and any explanation for boot 156's frozen panel or the
+`checkGPUProgress` channel errors. A published capability is not a picture.
