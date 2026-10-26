@@ -155,6 +155,63 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**BOOT 160 / 2rn: OTG0 WORKED, THE IOP PATCH LANDED, AND THE BRIDGE IS SIMPLY
+TOO LATE.** No black panel, desktop live, `plugin_check.sh` run from inside the
+boot. Rule 8/15 clear: `rbgpu-boot` **160**, UUID **9028175A** = `build/out`,
+`diag_used` **564** of **768**, both one-shots cleared.
+**THE OTG0 SOURCE WORKS AND THE SEGMENT CONSTANT WAS RIGHT:** `otg_err 0`, and
+2oq's four-register signature held live - `otg_ctl0 0x11201` with
+`OTG_MASTER_EN`, `otg_ctl1/2/3` all `0x300`, `otg_off_ok 3` - so DMU segment 2
+= `0x34c0` is confirmed on hardware. Every register matched 2oq
+(`htot 2106`, `vtot 1129`, `hbse 0x7f07ff`, `hsa 0x3c0000`, `vbse 0x14044c`,
+`vsa 0x50000`), the converter accepted them (`agdc_otg_ret 0`,
+`agdc_otg_src 2`) and produced **`agdc_tim_h 1920`**, **`agdc_tim_v 1080`**,
+`agdc_tim_err 0`, **`agdc_tim_cached 2`**. Boot 159's 0x921 refusal is **gone**.
+**BUT THE PIXEL CLOCK CAME OUT 3.3 % HIGH AND THE METHOD WAS WRONG, NOT THE
+WINDOW:** `otg_frames 15` in `otg_ns 100 977 001` = **148.549 Hz** where the
+panel scans at 143.833 - it really delivered **14.52** frames, and an integer
+counter over a FIXED window can only resolve +/- one frame, so
+`agdc_tim_clk` read 353 198 717 against a true 341 987 984. Lengthening the
+window only shrinks that linearly and costs delay on a path that is already too
+late. **FIXED by latching both endpoints on a counter EDGE**: the frame count
+is then exact by construction and the residual is the difference between two
+100 us polls, ~**0.1 %** over 16 frames (~111 ms) - ~30x better for the same
+elapsed time. `otg_frames`/`otg_ns`/`otg_polls` are published so the arithmetic
+is auditable from any capture.
+**THE IOP PATCH LANDED:** `iop_verify 1`, `iop_patched 1`, `iop_match 1`,
+`iop_saw_ws 1` - 2qo's five bytes went into WindowServer's own memory and the
+vendor gate opened, as in boot 150.
+**THE REAL FINDING IS AN ORDERING RACE**, and only the timestamped log shows
+it - same process, same thread: at **33.920** the wrangler's own `debug-gpus`
+reads **`agdc 0x000000000`**; **21 ms later** IOPresentment logs
+*"Unable to get AGDC information. Return code: 0x10000003"*, then *"System set
+to use IOP but no display pipes are present"*; and at **34 seconds** the same
+dump reads **`agdc 0x100000525 /RembrandtGPUAGDC`**. **The bridge is published,
+paired and correct - it just arrives after the only question that mattered was
+already answered.** `agdc_user_vendor`/`agdc_user_cap` are **absent** where 159
+had 4 and 1, so WindowServer never queried us, and 0x711 was **never reached**
+(not refused). **`0x10000003` is the same constant as boot 150 with a different
+cause** - in 150 the association map was empty because no per-GPU AGDC existed,
+in 160 because none existed *yet*; the error string alone could never have
+separated those, the timestamps did.
+**SUSPECT, NOT ESTABLISHED, AND IT IS MINE:** 2rm put a **100 ms `IOSleep`** in
+`sampleTiming()`, which runs immediately before `service->start()` - delay added
+to the publish path in the same change that made the publish matter. 159
+published early enough to be queried; 160 did not. But 160 also differs by
+`rbgpu-iop` being armed, which changes when WindowServer runs, so blaming the
+sleep would repeat 2qm's error. Both are live suspects, and boot 161 will say
+which: new keys **`agdc_t_presample_ms`**, **`agdc_t_sampled_ms`**,
+**`agdc_t_started_ms`** (uptime ms from `mach_absolute_time`, directly
+comparable with the log's timestamps) turn "too late" into "late by N, of which
+the sample cost M".
+Re-checked: `fb0:0` reads `/IONDRVFramebuffer` where 159 read `/.Display_boot`
+(instance name, not a different driver, nothing downstream reads it); `gpuc`
+still **0** as 2r1 predicted; `agdc_failed_attr 3` is attribute 3 from a new
+caller in Apple's own `attr <= 0x7f` group, refused and harmless. UUID
+**A83C0170**; imports **362 of 362**; graphics deps **0**. Evidence at
+`logs/boot160/`. **The display pipe is still not created, and the reason is now
+a SCHEDULE rather than a capability.** Detail: JOURNAL **2rn**.
+
 **2rm: OTG0's LIVE TIMING IS NOW THE 0x921 SOURCE, AND EVERY ACCESS IS A
 READ.** 2rl left 0x921 refusing because the NDRV answers
 `getTimingInfoForDisplayMode` with `flags = 0`. The panel's real timing was

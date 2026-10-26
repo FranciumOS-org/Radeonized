@@ -32725,3 +32725,102 @@ HARDWARE** - and what a boot can show is bounded: 0x921 and 0x711 answering
 does not mean a display pipe exists, because `iop_oneshot 2` in 159 means
 IOPresentment never ran at all. Arm **`rbgpu-iop=1` alongside `rbgpu-agdc=1`**
 to reach that layer.
+
+## 2rn - BOOT 160: OTG0 WORKED, THE IOP PATCH LANDED, AND THE BRIDGE IS SIMPLY TOO LATE
+
+No black panel, desktop live, `plugin_check.sh` run from inside the boot.
+Rule 8/15 clear: `rbgpu-boot` **160** in capture and live, uptime 4 min,
+`kextstat` UUID **9028175A** byte-equal to `build/out`, `diag_used` **564** of
+**768** so absence still carries information, `agdc_oneshot 0` and
+`iop_oneshot 0` - both one-shots cleared.
+
+**THE OTG0 SOURCE WORKS, AND THE SEGMENT CONSTANT WAS RIGHT.**
+`otg_err 0`; the four-register signature held exactly as 2oq measured it -
+`otg_ctl0 0x11201` with `OTG_MASTER_EN` set, `otg_ctl1/2/3` all `0x300`,
+`otg_off_ok 3` - so DMU segment 2 = `0x34c0` is correct on live hardware and
+the addressing was not a guess. Every register came back as 2oq recorded it:
+`agdc_otg_htot 2106`, `_vtot 1129`, `_hbse 0x7f07ff`, `_hsa 0x3c0000`,
+`_vbse 0x14044c`, `_vsa 0x50000`. The converter accepted them
+(`agdc_otg_ret 0`, `agdc_otg_src 2`) and produced **`agdc_tim_h 1920`**,
+**`agdc_tim_v 1080`**, `agdc_tim_err 0` and **`agdc_tim_cached 2`** - 2 meaning
+the timing came from OTG0, exactly as the key was designed to distinguish. The
+0x921 refusal of boot 159 is **gone**: `agdc_link_result` is now absent
+because nothing refused.
+
+**BUT THE PIXEL CLOCK IS 3.3 % HIGH, AND THE METHOD WAS WRONG, NOT THE
+WINDOW.** `otg_frames 15` in `otg_ns 100 977 001` = **148.549 Hz**, against
+this panel's 143.833. The panel really delivered **14.52** frames in that
+window and an integer counter sampled over a fixed interval can only resolve
++/- one frame, so 15 is a quantisation over-read - and it went straight into
+`agdc_tim_clk 353 198 717` where the truth is 341 987 984. **Lengthening the
+window only shrinks that linearly and costs delay on a path boot 160 proves is
+already too late.** FIXED by changing the method: both endpoints are now
+latched on a counter **edge**, so the frame count is exact by construction and
+the only residual is the difference between two 100 us polling delays - about
+**0.1 %** over 16 frames (~111 ms), a ~30x improvement for the same elapsed
+time. `otg_frames`, `otg_ns` and the new `otg_polls` are published so the
+arithmetic can be re-checked from any capture instead of trusted.
+
+**THE IOP PATCH LANDED: `iop_verify 1`, `iop_patched 1`, `iop_match 1`,
+`iop_saw_ws 1`.** So 2qo's five-byte write went into WindowServer's own memory
+and the vendor-mask gate opened, exactly as in boot 150.
+
+**AND THE REAL FINDING IS AN ORDERING RACE, WHICH NO AMOUNT OF CAPABILITY WORK
+WOULD HAVE FOUND.** The log, by timestamp, same process and thread:
+
+```
+10:11:33.920 WindowServer[161:3a0] (reg) gpu 0xfbc7 ... agdc 0x000000000
+                                                        fb0:0 /IONDRVFramebuffer
+10:11:33.941 WindowServer[161:3a0] (IOPresentment) Error: Unable to get AGDC
+                                   information.  Return code: 0x10000003
+10:11:33.982 WindowServer[161:3a0] System set to use IOP but no display pipes
+                                   are present
+10:11:34.396 WindowServer[161:3a0] Unable to find display pipe for IOFB
+                                   service / regID: 0xc703 / 0x1000004af
+...
+10:12:07.323 SafeEjectGPUService[570] (reg) gpu 0xfbc7 ... agdc 0x100000525
+                                                           /RembrandtGPUAGDC
+```
+
+**At 33.920 the wrangler's own dump reads `agdc 0`. Twenty-one milliseconds
+later IOPresentment asks for the AGDC and fails. Thirty-four seconds later the
+same dump reads `/RembrandtGPUAGDC`.** So the bridge is published, paired and
+correct - and it arrives after the only question that mattered had already been
+answered. `agdc_user_vendor` and `agdc_user_cap` are **absent** this boot,
+where boot 159 had 4 and 1: WindowServer gave up before our service existed,
+so it never queried it. That also means **0x711 was never exercised**
+(`agdc_extcap_*` absent) - not refused, never reached.
+
+**`0x10000003` IS THE SAME CONSTANT AS BOOT 150, AND IT NOW MEANS SOMETHING
+DIFFERENT.** 2r5 established it as `MACH_SEND_INVALID_DEST` from
+`ioPresentmentPopulateIOFramebufferEntries` opening service id 0 after finding
+nothing in an empty association map. In 150 the map was empty because no
+per-GPU AGDC existed at all. In 160 it is empty because none existed **yet**.
+Same error, different cause - which is why the error string alone was never
+going to settle this and the timestamped `debug-gpus` dump is what did.
+
+**SUSPECT, NOT ESTABLISHED, AND IT IS MINE.** 2rm put a **100 ms `IOSleep`**
+in `sampleTiming()`, which runs immediately before `service->start()` - i.e. I
+added 100 ms of delay to the publish path in the same change that made the
+publish matter. Boot 159 published early enough to be queried four times;
+boot 160 did not. But 160 also differs by `rbgpu-iop` being armed, which
+changes when WindowServer runs and what it asks, so **attributing the miss to
+my sleep would be exactly 2qm's error**. Both are live suspects. The edge-
+latched measurement above shortens that window and, more to the point, boot 161
+will say where the time actually goes: new keys **`agdc_t_presample_ms`**,
+**`agdc_t_sampled_ms`** and **`agdc_t_started_ms`**, uptime in milliseconds
+from `mach_absolute_time`, directly comparable against the log's own
+timestamps. That turns "too late" into "late by N ms, of which the sample cost
+M".
+
+**Re-checked:** `fb0:0` reads `/IONDRVFramebuffer` here where 159 read
+`/.Display_boot` - an instance-name difference, not a change of driver, and
+nothing downstream reads it. `gpuc` is still **0**, as 2r1 predicted.
+`agdc_failed_attr 3` / `agdc_failed_ret 0xE00002C7` is attribute **3**, one of
+the three Apple handles in its own `attr <= 0x7f` group, refused by us - a new
+caller, not WindowServer's 0x921 path, and harmless.
+
+UUID **A83C0170**; imports **362 of 362**, 0 unresolved; graphics deps **0**;
+hosttest and plugin pass. Evidence kept at `logs/boot160/`.
+**The display pipe is still not created, and the reason is now a schedule
+rather than a capability.**

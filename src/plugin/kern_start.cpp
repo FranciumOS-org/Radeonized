@@ -9803,15 +9803,56 @@ static bool rbgpuOtgSample(struct rb_otg_timing *out) {
     // MEASURED from OTG0's read-only frame counter and multiplied by the
     // totals - the method RembrandtProbe.cpp already uses (2os: 10 frames in
     // 69 524 857 ns). Synthesising a clock from CVT/GTF would be rule 17.
-    const uint32_t f0 = rbgpuOtgRead(kRbOtg0FrameCount);
+    // BOOT 160 MEASURED THIS WRONG AND THE FIX IS THE METHOD, NOT THE WINDOW.
+    // The first cut read the counter, slept a fixed 100 ms and divided: it got
+    // 15 frames in 100 977 001 ns = 148.549 Hz where this panel scans at
+    // 143.833, because an integer counter sampled over a fixed window can only
+    // ever resolve +/- one frame - the panel really delivered 14.52 frames and
+    // 15 is a 3.3 % over-read, which went straight into pixelClock (353.2 MHz
+    // published against a true 341.99). Lengthening the window only shrinks
+    // that error linearly and costs delay on a publish path that boot 160
+    // showed is ALREADY too late.
+    // So both endpoints are now latched on a counter EDGE. The frame count is
+    // then exact by construction and the only error left is the difference
+    // between the two polling delays, not a whole frame: at 100 us polling
+    // over 16 frames (~111 ms) that is ~0.1 %, a ~30x improvement for the same
+    // elapsed time. otg_frames and otg_ns are published so the arithmetic can
+    // be re-checked from any capture rather than trusted.
+    const uint32_t kOtgFrames  = 16;
+    const uint32_t kOtgPollUs  = 100;
+    const uint32_t kOtgMaxPoll = 4000;        // 400 ms, hard bound
+    uint32_t polls = 0;
+    uint32_t prev = rbgpuOtgRead(kRbOtg0FrameCount);
+    while (rbgpuOtgRead(kRbOtg0FrameCount) == prev) {   // edge: start of a frame
+        if (++polls >= kOtgMaxPoll) {
+            rbgpu_diag_set_num("otg_err", 4);  // enabled but never advancing
+            return false;
+        }
+        IODelay(kOtgPollUs);
+    }
     const uint64_t t0 = mach_absolute_time();
-    IOSleep(100);                      // our own thread_call, nothing held
-    const uint32_t f1 = rbgpuOtgRead(kRbOtg0FrameCount);
+    uint32_t frames = 0;
+    prev = rbgpuOtgRead(kRbOtg0FrameCount);
+    uint64_t t1 = t0;
+    while (frames < kOtgFrames) {
+        if (++polls >= kOtgMaxPoll) {
+            rbgpu_diag_set_num("otg_frames", frames);
+            rbgpu_diag_set_num("otg_err", 4);
+            return false;
+        }
+        IODelay(kOtgPollUs);
+        const uint32_t now = rbgpuOtgRead(kRbOtg0FrameCount);
+        if (now != prev) {
+            frames += now - prev;        // the counter may step by more than 1
+            prev = now;
+            t1 = mach_absolute_time();   // latched ON the edge, not after a sleep
+        }
+    }
     uint64_t ns = 0;
-    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-    const uint32_t frames = f1 - f0;   // 24-bit counter; 100 ms cannot wrap it
+    absolutetime_to_nanoseconds(t1 - t0, &ns);
     rbgpu_diag_set_num("otg_frames", frames);
     rbgpu_diag_set_num("otg_ns", ns);
+    rbgpu_diag_set_num("otg_polls", polls);
     if (!frames || !ns) {
         rbgpu_diag_set_num("otg_err", 4);   // scanning out but not advancing
         return false;
