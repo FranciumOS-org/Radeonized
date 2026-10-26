@@ -155,6 +155,39 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2ri RETRACTS 2rh's HYPOTHESIS: NEITHER TIMING GETTER TAKES A LOCK, AND THE
+FROZEN PANEL PREDATES ALL OF 2rd-2rg.** `getCurrentDisplayMode` is **34 bytes**
+- two loads from `this->0x1e8`/`0x1ec`, two stores, `return 0`, **no call at
+all**. `getTimingInfoForDisplayMode` goes through `_doStatus` (`0x15001610`),
+which takes **no lock and never blocks**: `_ml_at_interrupt_context` (named via
+`kc_stubs.py`, 1678/1678), then an `inGate` predicate, and on failure **only**
+`OSReportWithBacktrace` with **Apple's own string
+`"%s::_doStatus(%d) not gated\n"`** - then **every path falls through to the
+call anyway**. So the inversion 2rh proposed cannot happen, and the cheap static
+read that proves it was available the whole time (the rules' own closing
+variant: *read the evidence already in hand*).
+**AND THE FREEZE WAS NEVER 2re's:** docs/RULES.md's own line above says
+*"BOOT 156 / 2rc: AGDC REGISTERED AND STARTED; PANEL FROZE"* - boot 156 froze
+with `agdc_started=1` **before 2rd/2re/2rf/2rg existed**. Publishing the bridge
+freezes the panel and always has. **Itemised, the bad night was: (1) the freeze,
+known since 156, cause STILL UNKNOWN and untouched; (2) `plugin_check.sh`'s
+unguarded `sample`, mine, fixed; (3) the one-shot not clearing, known from 2qy,
+mitigated; (4) the capture never reaching disk, fixed.** Two fixed, one
+mitigated, **and the thing that freezes the screen is none of them.**
+**2rh's fix still stands, for a measured reason instead of a guessed one:** the
+vendor callback runs on WindowServer's thread, which is **not** the IOGraphics
+gate, so calling from there earned **three** `OSReportWithBacktrace`es per
+0x921/0x711 query; once on our own `thread_call` costs one set.
+**Also fixed, a real rule-19 defect found while reading:** `vendor()`'s
+`agdc_extcap_type` probe read `out+0x04` behind **`if (out)` alone** - a NULL
+check, not a bounds check - an out-of-bounds kernel read for any caller passing
+fewer than 8 bytes. Now `out && outSize && *outSize >= 8`, with
+`agdc_extcap_type_short` publishing the refused length.
+**THE OPEN QUESTION IS: why does publishing the bridge freeze the panel?** Not
+the timing path. Next read: `AppleGraphicsDeviceControl::start` and the
+wrangler's `0x13dfd37c` call on our service. UUID **61BE982B**; imports
+362/362. Detail: JOURNAL **2ri**.
+
 **2rh: BOOT 157 HUNG THREE TIMES. THE CALLBACK WAS CALLING INTO
 IOFRAMEBUFFER, AND `plugin_check.sh` WAS FINISHING THE JOB.** Not panics -
 all three resets recorded **`previous shutdown cause 5`**, not `-128`, and

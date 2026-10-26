@@ -32170,3 +32170,108 @@ is a real gap in coverage, not an argument that none was needed.
 one-shot.** Take **`-rbgpuagdc` out of boot-args** between experiments: the
 bridge needs the arg *and* the key, so without the arg a stuck one-shot is
 inert. That, not the one-shot, is the rescue that actually holds.
+
+---
+
+## 2ri — 2rh's lock-order inversion is MEASURED FALSE, and the frozen panel predates every line of it
+
+Static, no boot, and it retracts the hypothesis 2rh was built on.
+
+### Neither getter takes a lock
+
+`getCurrentDisplayMode` (`0x15003f50`) is **0x22 = 34 bytes**, whole:
+
+```
+testq %rsi,%rsi ; je +0x11 ; movl 0x1e8(%rdi),%eax ; movl %eax,(%rsi)
+testq %rdx,%rdx ; je +0x1e ; movl 0x1ec(%rdi),%eax ; movl %eax,(%rdx)
+xorl %eax,%eax ; retq
+```
+
+Two loads from cached fields, two guarded stores, `return kIOReturnSuccess`.
+**No call of any kind.** It cannot block, lock or fail.
+
+`getTimingInfoForDisplayMode` (`0x15003ddc`, 0x174 bytes) calls
+`this->vt[0xc10]` once and then `IONDRVFramebuffer::_doStatus` three times,
+with codes 0xd, 0x1f and 0x24. `_doStatus` (`0x15001610`) is where any lock
+would be, and it has none:
+
+```
+if (this->0x218 == 0)            return 0xe00002cd;   /* NDRV not open */
+<fill a 0x60-byte request with 0xAA>
+if (_ml_at_interrupt_context())  goto CALL;
+wl = <0x14fc6858>(this);  if (!wl) goto CALL;
+if (wl->vt[0x138]())             goto CALL;           /* gated: fine */
+OSReportWithBacktrace("%s::_doStatus(%d) not gated\n", this->0x118, code);
+CALL: return this->vt[0xaf0](this, 1, req, 0x85, 4);
+```
+
+The stub at `0x10330` resolves through `kc_stubs.py` (1678 of 1678) to
+**`_ml_at_interrupt_context`**, and the format string is **Apple's own**, lifted
+from the image: **`"%s::_doStatus(%d) not gated\n"`**, next to
+`"%s::_doControl(%d) not gated\n"` and `IONDRVFramebuffer.cpp`. So `vt[0x138]`
+is an `inGate`/`onThread` **predicate**, and failing it costs **one log line
+with a backtrace and nothing else** - every path, including the complaint path,
+falls through to the NDRV call. There is no lock, no gate acquisition and no
+wait anywhere in it.
+
+**So 2rh's lock-order inversion could not have happened**, and I should not
+have let it stand as "the leading hypothesis" while the cheap static read that
+refutes it was available the whole time - the exact variant named at the end of
+docs/RULES.md's rules: *read the evidence already in hand before designing the next
+experiment.*
+
+### And the freeze was never 2re's
+
+The decisive fact was already in docs/RULES.md's own status block:
+**"BOOT 156 / 2rc: AGDC REGISTERED AND STARTED; PANEL FROZE."** Boot 156 froze
+the panel with `agdc_started=1` and `iop_verify=1` **before 2rd, 2re, 2rf or
+2rg existed**. Publishing the bridge is what freezes the panel, and it has done
+so from the first boot that published it. 2rh pinned it on 2re's timing call;
+that was wrong, and the correction matters because it moves the frontier back
+to where it actually is.
+
+### What the night actually was, itemised
+
+1. **The frozen panel** - known since boot 156, **cause still unknown**, and
+   untouched by anything in 2rh or 2ri.
+2. **`plugin_check.sh`'s unguarded `sample`** - real, mine (2rc), killed the
+   machine on two of three attempts and destroyed the capture each time. Fixed
+   in 2rh.
+3. **The one-shot failing to clear** - real, measured in 2qy, which is why the
+   same hang repeated three times. Mitigated in 2rh by keeping `-rbgpuagdc`
+   out of boot-args between experiments.
+4. **The capture directory never reaching disk** - real; fixed in 2rh by
+   syncing the breadcrumbs immediately.
+
+Two of the four are fixed, one mitigated, and **the thing that actually freezes
+the screen is none of them.**
+
+### 2rh's fix is still right, now for a measured reason
+
+Sampling once off the callback is not justified by deadlock avoidance, because
+there is no deadlock. It is justified because the vendor callback runs on
+**WindowServer's thread, which is not the IOGraphics gate**, so calling
+`getTimingInfoForDisplayMode` from there earned an `OSReportWithBacktrace` -
+three of them, one per `_doStatus` - on **every** 0x921 and 0x711 query. Once,
+on our own `thread_call`, costs one set. The structure was still wrong; the
+reason was not the one 2rh gave.
+
+### A real second defect, found while reading this
+
+`vendor()`'s `agdc_extcap_type` probe read `out+0x04` behind **`if (out)`
+alone** - a NULL check, not a bounds check, which is **rule 19** verbatim. The
+type is at +0x04, so the read needs eight bytes of output buffer, and any
+caller passing fewer got an out-of-bounds kernel read. Now guarded by
+`out && outSize && *outSize >= 8`, with `agdc_extcap_type_short` publishing the
+length that was refused instead (rule 14 on the refusal path, 2qu's form).
+
+### Build
+
+`make hosttest` and `make plugin` pass; imports **362 of 362**; Info.plist
+graphics deps **0**; no new warnings. UUID → **61BE982B-C074-3B04-A751-0CE18935E5B4**.
+
+**The open question is the one 2rc left and 2rh mislabelled: why does
+publishing the AGDC bridge freeze the panel?** It is not the timing path. The
+next read is `AppleGraphicsDeviceControl::start` and what the wrangler does
+with our service on the `0x13dfd37c` call, since that is the only thing that
+runs between a working desktop and a frozen one.

@@ -81,19 +81,20 @@ constexpr size_t   kRbTimingInfoSize=kRbTimingDetailOff+RB_AGDC_TIMING_SIZE;
 // thread_call, once, BEFORE service->start() publishes the bridge - never from
 // the vendor callback.
 //
-// Boot 157 hung with a frozen panel and live SSH, three times, and the capture
-// that would have proved why was lost with it. The leading hypothesis is this
-// call path: 2rd/2re called getCurrentDisplayMode/getTimingInfoForDisplayMode
-// SYNCHRONOUSLY from inside filtered_doDeviceAttribute, i.e. on WindowServer's
-// thread inside a user-client external method, while those are IOFramebuffer
-// methods that expect the IOGraphics workloop - a lock-order inversion whose
-// symptom is exactly a wedged desktop with the kernel alive. docs/RULES.md already
-// warned about this shape for -rbgpuvblpump ("if that path needs a lock
-// WindowServer holds the desktop can wedge") and 2re did it anyway.
+// 2rh proposed a lock-order inversion here and 2ri MEASURED IT FALSE. Neither
+// getter takes a lock: getCurrentDisplayMode is 34 bytes, two loads from
+// this->0x1e8/0x1ec and two stores, with no call at all; and
+// getTimingInfoForDisplayMode goes through _doStatus (0x15001610), which takes
+// no lock, never blocks, and on the un-gated path merely logs Apple's own
+// "%s::_doStatus(%d) not gated\n" via OSReportWithBacktrace and then performs
+// the call anyway - EVERY path falls through to it. So this code could not
+// have deadlocked, and the frozen panel was NOT caused by it: boot 156 froze
+// the same way with agdc_started=1, before any of this existed.
 //
-// NOT ESTABLISHED: that the lock is what hung it. This is the right structure
-// regardless - the callback must not call into another subsystem - so the fix
-// does not depend on the hypothesis being right.
+// Sampling once off the callback is still right, and for a measured reason:
+// the vendor callback runs on WindowServer's thread, which is not the
+// IOGraphics gate, so calling from there earned an OSReportWithBacktrace on
+// EVERY 0x921/0x711 query. Once, on our own thread, costs one.
 //
 // A failure here leaves timingValid false, and 0x921/0x711 then REFUSE rather
 // than zero-fill (2rd: IOPresentment validates no timing field, so a zero
@@ -171,9 +172,16 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
         // own handler reads it. Publish it: if this is always 0 the kernel
         // handed us a separate zeroed output copy and every type would be
         // refused for that reason and not because it is unimplemented.
-        if (out) rbgpu_diag_set_num("agdc_extcap_type",
-                                    *(reinterpret_cast<const uint32_t *>(
-                                        reinterpret_cast<const uint8_t *>(out)+4)));
+        // 2ri, rule 19: a NULL check is not a pointer check. The type lives at
+        // +0x04, so reading it needs EIGHT bytes of output buffer, and until
+        // now this read only tested `out` - an out-of-bounds kernel read for
+        // any caller passing a shorter one.
+        if (out && outSize && *outSize >= 8)
+            rbgpu_diag_set_num("agdc_extcap_type",
+                               rb_agdc_get32(
+                                   reinterpret_cast<const uint8_t *>(out)+4));
+        else
+            rbgpu_diag_set_num("agdc_extcap_type_short",outSize ? *outSize : 0);
     }
     // 2rh: the CACHE, never a call. This runs on WindowServer's thread inside
     // a user-client external method; calling into IOFramebuffer from here is
