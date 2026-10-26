@@ -19,6 +19,84 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2s6: BOOT 166 - THE DE-ALIASING IS VERIFIED; THE IDENTITY
+CHECK FAILED AND **BOTH** OF 2s5's PRE-STATED READINGS WERE WRONG.** Capture
+`logs/20261026-174616-plugin`, read in the same boot session (live
+`kern.bootsessionuuid` == the capture's, so the live slide below is this
+boot's). Rule 8/15/14: `rbgpu-boot` **166**, UUID **50518DAC** = `build/out`,
+`diag_used` **581** of **768**, every one-shot consumed. Boot-args untouched, so
+against boot 165 the only variable is the build.
+**WHAT IS VERIFIED - the split works, line for line as pre-stated:**
+`fb_vbl_ot` **1**, `fb_vbl_ot_state` **0**, **`fb_vbl_hv_state` ABSENT**,
+`fb_vbl_sent` **20481 -> 23553** climbing, **`vblp_ticks` ABSENT** (165 had
+`fb_vbl_sent` absent and `vblp_ticks` 16385). `fb_vbl_hv_state` absent is the
+proof: the pipe's disable now lands on its own entry and the `handleVBL` entry
+is never touched - which is exactly right, because `IOFramebuffer::open`
+registers and never disables while `displayModeDidChange` always does. The
+pacing moved to the proc path, one delivery per tick either way, the shape boot
+159 measured good. `fb_vbl_ot_armed` **absent** - also pre-stated, and this
+boot could not have produced it (arming needs the early path).
+**WRONG READING 1, and it would have misled: `fb_vbl_cls 0` does NOT mean the
+classifier is the suspect.** `fb_vbl_cls` is ONE key written on **every**
+`'vbl '` registration, so it holds the **last** one - the pipe's - for which
+**0 is the CORRECT value** (target is the pipe, proc is not `handleVBL`; the
+branch is *defined* by both tests failing). The classification in fact worked,
+proved by the table and not by the key: `fb_vbl_bound 1` + `fb_vbl_sent`
+counting says one registration took the handleVBL branch and stayed enabled,
+and `fb_vbl_hv_state` absent against `fb_vbl_ot_state 0` says the two branches
+got the two behaviours that distinguish Apple's two call sites. **A last-wins
+key cannot express a per-entry fact - rule 14 on my own instrument, in a shape
+the pre-statement actively obscured.**
+**WRONG READING 2: THE IDENTITY CONFIRMATION FAILED.** 2s5 pre-stated
+`fb_vbl_ot_lo`/`_hi` minus the slide would equal **`0x14e5dcb8`**. It does not.
+Captured **`0xffffff7fa6946cb8`**. This boot's slide from live `kextstat` -
+IOAcceleratorFamily2 `0xffffff7f95afc000`, IOGraphicsFamily `0xffffff7f95c94000`,
+IONDRVSupport `0xffffff7f95ce8000` against the extracts' `__TEXT` vmaddrs
+`0x14e13000`/`0x14fab000`/`0x14fff000` - gives all three the **same** slide
+**`0xffffff7f80ce9000`**, which one KC must do and is the first check it is
+right. **CONTROL, and it passes:** the collection's segment map puts
+`0x14e5dcb8` inside `__REGION383` = `0x14e13000..0x14e7d000`, byte-equal to
+IOAcceleratorFamily2's `__TEXT` base. Expected `signalVBLInterrupt` this boot =
+**`0xffffff7f95b46cb8`**; the captured value is **exactly `0x10e00000`
+(270 MiB) above it** with the **low 21 bits identical** (`…5dcb8`, matching at
+12/16/20/21 and diverging at 22). And it is in **no loaded kext** - the 188
+loaded kexts occupy `0xffffff7f8cb22000`..`0xffffff7f98043e22` and
+`0xffffff8004043000`..`0xffffff80057xxxxx`, and it falls in the gap; unslid it
+is `0x25c5dcb8`, **past the end of the whole system KC** (`__LINKEDIT` ends
+`0x163d4000`), with no fileset entry containing it. A 21-bit match is ~1 in 2
+million so this is **not** a coincidental address - **but a clean
+`0x10e00000` displacement into unmapped space is not an explanation and is NOT
+claimed as one.** What the boot establishes is only: *the second `'vbl '`
+registrant's proc, as this instrument captured it, resolves to nothing loaded.*
+**THE INSTRUMENT'S OWN GAP, and it is why this is not settled:** 2s5 published
+that address with **no known-good pointer beside it**, so there is no way to
+separate *a wrong capture* from *a wrong expectation* - whether `proc` is read
+correctly at all is untested, and every check above tests only the expectation.
+Rule 19 one level up: **a captured pointer needs a captured control pointer in
+the same boot.**
+**THE CHANGE - instrument only**, no new route (`git diff` touches
+`RouteRequest` **zero** times), no DCN register, no behaviour change.
+**`fb_vbl_sym_lo`/`_hi`** publish our own solved `IOFramebuffer::handleVBL`
+(`g_vblp_handleVBL`, already resolved by 2ov, so no new import) and
+**`fb_vbl_hv_lo`/`_hi`** the proc actually captured on that branch - **these two
+must be equal**, and that is the control. **`fb_vbl_ot_cls`/`fb_vbl_hv_cls`**
+replace the last-wins reading with a per-entry one. **`fb_vbl_ot_n`** counts
+DISTINCT procs on the other branch and the address is republished when the proc
+changes (boot 166 published once and never again, so a second one was
+invisible). All seven NVRAM-hot, same reason as 2s5: the boots that matter wedge.
+Imports **365 of 365**, 0 unresolved, **0** from `SystemKernelExtensions.kc`,
+graphics deps **0**; hosttest passes. UUID **50518DAC -> 15E25510**.
+**NOT VERIFIED ON HARDWARE.**
+**NEXT BOOT, pre-stated carefully this time:** **`fb_vbl_hv_lo`/`_hi` ==
+`fb_vbl_sym_lo`/`_hi` is the GATE** - nothing else here means anything until it
+holds. Then `fb_vbl_hv_cls` **1** or **3**, `fb_vbl_ot_cls` **0** (correct
+there, not a fault), `fb_vbl_ot_n` **1**, `fb_vbl_ot_state 0`,
+`fb_vbl_hv_state` absent, `fb_vbl_sent` climbing with `vblp_ticks` absent. If
+the control holds and `fb_vbl_ot_lo`/`_hi` still reads `0xffffff7fa6946cb8`,
+the capture is sound and that address becomes a finding needing its own
+explanation - the question then being what is mapped there, not what our hook
+did. JOURNAL **2s6**.
+
 **LATEST 2026-10-26 / 2s5: TIER 1 IS ANSWERED BY A READ - THERE ARE **TWO**
 `'vbl '` REGISTRANTS, THIS HOOK ALIASED THEM, AND THE DISPLAY PIPE *DOES* RUN
 HERE.** No boot. `docs/SCOPE-DISPLAY-PIPE.md` asked whether the proc our

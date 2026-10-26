@@ -8010,8 +8010,9 @@ struct RbVblReg {
     void         *ref;
     bool          enabled;
     bool          seen;
+    uint32_t      n;          // 2s6: how many DISTINCT procs took this branch
 };
-static RbVblReg g_vbli_other = { nullptr, nullptr, nullptr, false, false };
+static RbVblReg g_vbli_other = { nullptr, nullptr, nullptr, false, false, 0 };
 
 // 2oy: THE TIMER IS THE RETRY MECHANISM. Nothing else may gate on ordering.
 //
@@ -8556,8 +8557,16 @@ static IOReturn hooked_ndrv_regirq_2oz(void *fb, uint32_t type, t_rbFBIntProc pr
     const bool byProc   = (g_vblp_handleVBL != nullptr &&
                            reinterpret_cast<void *>(proc) ==
                            reinterpret_cast<void *>(g_vblp_handleVBL));
-    rbgpu_diag_set_num("fb_vbl_cls",
-                       (byTarget ? 1u : 0u) | (byProc ? 2u : 0u));
+    // 2s6: `fb_vbl_cls` is LAST-WINS over all 'vbl ' registrations, and boot
+    // 166 showed why that is not enough: it read 0, which 2s5 pre-stated as
+    // "the classifier is the suspect" - WRONG, because 0 is the CORRECT value
+    // for the pipe's branch (its target is the pipe, its proc is not
+    // handleVBL), and the pipe registers last. The pre-statement was unusable;
+    // a per-entry key is not.
+    const uint32_t cls = (byTarget ? 1u : 0u) | (byProc ? 2u : 0u);
+    rbgpu_diag_set_num("fb_vbl_cls", cls);
+    rbgpu_diag_set_num((!byTarget && !byProc) ? "fb_vbl_ot_cls"
+                                              : "fb_vbl_hv_cls", cls);
 
     if (!byTarget && !byProc) {
         // The OTHER registrant, which the static read names as
@@ -8574,8 +8583,17 @@ static IOReturn hooked_ndrv_regirq_2oz(void *fb, uint32_t type, t_rbFBIntProc pr
         g_vbli_other.enabled = true;
         if (iref)
             *iref = &g_vbli_other;
-        if (!g_vbli_other.seen) {
+        // 2s6: boot 166 published this once and the address resolved to
+        // NOTHING - 0xffffff7fa6946cb8, which is in no loaded kext and
+        // unslides past the end of the system KC, yet sits exactly
+        // 0x10e00000 above where this boot's slide puts signalVBLInterrupt
+        // with the low 21 bits identical. A second 'vbl ' registrant arriving
+        // after the first would have been invisible, so count them and
+        // republish on a change.
+        if (!g_vbli_other.seen || g_vbli_other.proc != proc) {
             g_vbli_other.seen = true;
+            g_vbli_other.n++;
+            rbgpu_diag_set_num("fb_vbl_ot_n", g_vbli_other.n);
             const uintptr_t pv = reinterpret_cast<uintptr_t>(proc);
             rbgpu_diag_set_num("fb_vbl_ot", 1);
             rbgpu_diag_set_num("fb_vbl_ot_lo",
@@ -8611,6 +8629,18 @@ static IOReturn hooked_ndrv_regirq_2oz(void *fb, uint32_t type, t_rbFBIntProc pr
                   reinterpret_cast<void *>(proc), target, ret);
         rbgpu_diag_set_num("fb_vbl_bound", 1);
         rbgpu_diag_set_num("fb_vbl_origret", g_vbli_origret);
+        // 2s6: THE CONTROL BOOT 166 DID NOT HAVE. 2s5 published the second
+        // registrant's address and no known-good pointer beside it, so when
+        // the address resolved to nothing there was no way to tell a wrong
+        // capture from a wrong expectation. These two are a pointer whose
+        // identity is known from the other side: the proc here must equal
+        // `fb_vbl_sym_lo`/`_hi`, our own solved IOFramebuffer::handleVBL.
+        const uintptr_t hv = reinterpret_cast<uintptr_t>(proc);
+        rbgpu_diag_set_num("fb_vbl_hv_lo", static_cast<uint32_t>(hv & 0xffffffffu));
+        rbgpu_diag_set_num("fb_vbl_hv_hi", static_cast<uint32_t>(hv >> 32));
+        const uintptr_t sym = reinterpret_cast<uintptr_t>(g_vblp_handleVBL);
+        rbgpu_diag_set_num("fb_vbl_sym_lo", static_cast<uint32_t>(sym & 0xffffffffu));
+        rbgpu_diag_set_num("fb_vbl_sym_hi", static_cast<uint32_t>(sym >> 32));
     }
     return kIOReturnSuccess;
 }
