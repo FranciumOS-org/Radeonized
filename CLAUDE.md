@@ -67,6 +67,39 @@ bind/transaction/scanout backend, and any explanation for the frozen panel or
 the `checkGPUProgress` errors. UUID **B8E38412**; imports 362/362 unchanged.
 Detail: JOURNAL **2rd**, **2re**; `docs/SPEC-AGDC-BRIDGE.md`.
 
+**2rf: 0x711 IS ALSO IMPLEMENTED, AND THE WHOLE STAGE NEEDED ONE
+CAPABILITY.** `AGDCFBGetExtendedCapability_t` is a **query**: `u8` index +0x00,
+`u32` type +0x04, `u32` count +0x08 (**in** capacity, **out** filled), then
+**8 entries of 0x32c** from +0x0c - closed three ways
+(`getFbCapabilityForScaler` bzeroes `entry+0x08` for 0x324; `8*0x32c+0xc` is
+exactly 0x196c; 8 is the capacity IOPresentment pre-loads).
+`__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`) issues **sixteen**
+0x711 queries, one per type bit, and **eleven are for types Apple itself does
+not implement** - so failure is tolerated by design. **`0x2006` comes from
+exactly two sites, both belonging to the FIRST query, type 0x10 (the
+scaler)**: a non-zero IOReturn and a returned **count of zero**. Later
+failures fall into the next query and the last is preceded by
+`xorl %r14d,%r14d`, so even its failure returns success; a count >= 9 is
+clamped to 8. **So the stage reduces to: answer type 0x10 with count >= 1.**
+The bridge reproduces Apple's own **no-scaling** entry (`0xbfed05a`) with the
+extents from the same real timing 0x921 uses; every other type returns
+Unsupported **without writing a byte**, and entries 1..7 stay zero.
+**NOT established, not guessed:** which slot of each pair is width vs height -
+`updateStreamComposition` (`0xbfe9270`) fixes the pairing but not the axis
+names, and it cannot change the meaning, because source and destination
+extents are equal so transposing both still says 1:1. Two guards passed for
+the wrong reason and were fixed: the type check failed the **build**
+(`-Werror=unused-but-set-variable`) rather than a test, and the zero fill was
+invisible against an already-zeroed buffer. **ONE BOOT NOW COVERS BOTH
+STAGES.** Read in order: `agdc_tim_src 3`, `agdc_tim_err 0`,
+`agdc_tim_h`/`agdc_tim_v` matching the panel, `agdc_link_result 0`,
+`agdc_extcap_type 0x10`, `agdc_extcap_result 0`. UUID **5719404C**; imports
+362/362 unchanged; Info.plist graphics-dependency count still 0.
+**NOT VERIFIED ON HARDWARE**, and a published capability is not a picture: the
+bind/transaction/scanout backend and all plane state are still absent, as is
+any explanation for boot 156's frozen panel or the `checkGPUProgress` channel
+errors. Detail: JOURNAL **2rf**.
+
 **FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
 AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
 host-tested, **published and queried in boot 156**. It clones the inherited AGDC tables,
