@@ -318,3 +318,23 @@ been evicted. `agdc_bad_slot` identifies a failed instance-vtable check.
 WindowServer creating a display pipe, obtaining an IOSurface-backed display
 surface and compositing through Metal. Missing plane-state/bind support may
 be the next blocker; neither host tests nor successful registration prove it.
+
+## 2rk - the policy-driver opt-out
+
+`AppleGraphicsDevicePolicy` matches on `IOProviderClass =
+AppleGraphicsDeviceControl` with no PCI or board-id gate, and its `probe`
+(`0x13e0989a`) returns a match with score 1000 unless the provider carries
+`NeedsPolicyDriver` as an `OSBoolean` whose `getValue()` is false. An absent
+property therefore recruits it. The bridge publishes it **false** between
+`init()` and `attach()` - where AGDP's own nested AGDC does the same
+(`0x13e0e800`).
+
+| key | meaning |
+|---|---|
+| `agdc_policy_optout` | 1 = `NeedsPolicyDriver=false` published; 0 = `-rbgpuagdcpolicy`, property left absent |
+| verdict 16 | the property could not be published; the bridge refused |
+
+Boot-arg `-rbgpuagdcpolicy` leaves the property absent, for an A/B test of
+whether the policy driver is what freezes the panel. `AGDC::start` never reads
+the `0x980` capability reply - it branches only on `vendorInfo+0x28`, which it
+tests twice (see JOURNAL 2rk for the stack-slot proof).
