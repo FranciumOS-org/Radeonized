@@ -100,6 +100,61 @@ bind/transaction/scanout backend and all plane state are still absent, as is
 any explanation for boot 156's frozen panel or the `checkGPUProgress` channel
 errors. Detail: JOURNAL **2rf**.
 
+**2rg CORRECTS 2rd ON THE SENTENCE THAT MATTERED, AND IT COSTS ONE NEW
+REFUSAL.** 2rd said the 0x921 reply goes into "a cache it never reads in this
+image." **It reads it twenty-four times, and that cache IS the display's
+advertised capability.** `__gatherCapabilities` (`0x7ff812e95370`, 0x104 bytes,
+read whole) is the function above both gathers: it aborts only on
+`__GatherAGDCLogicalDeviceCapabilities` returning non-zero, then **computes**
+`refresh = pixelClock / ((hActive+hBlanking) * (vActive+vBlanking))` after
+storing **60.0f** (`0x42700000`) as the default - the `ucomiss` constant at
+`0x7ff812ea3468` reads **`0.0f`** (measured; its neighbour is 160.0f), so that
+branch is only a divide-by-zero guard, not a plausibility test.
+**And the field names are APPLE'S OWN**:
+`IOPresentmentCreateEndPointDictionary` (`0x7ff812e9550c`) `leaq`s fourteen
+cached fields in turn into CFNumbers keyed `PixelClock`, `MinPixelClock`,
+`MaxPixelClock`, `HorizontalActive`, `HorizontalBlanking`,
+`HorizontalSyncOffset`, `HorizontalSyncPulseWidth`, `VerticalActive`,
+`VerticalBlanking`, `VerticalSyncOffset`, `VerticalSyncPulseWidth`,
+`HorizontalSyncConfig`, `VerticalSyncConfig`, `VerticalBlankingExtension` -
+**field for field, in order, matching the public header**, which is a stronger
+confirmation of the `reply+0x04` embedding than 2rd's shifted block copy or the
+`offsetof` sum, because it is Apple naming the fields instead of us matching
+offsets. The derived values publish as **`LooksLikeWidth`** / **`LooksLikeHeight`**
+(`0x19c58`/`0x19c60`) and the computed refresh under **`RefreshTime`**,
+**`MinRefreshTime`** and **`MaxRefreshTime`** - three keys, one address. So
+2rd stands exactly as measured: IOPresentment **validates** no timing field, and
+**consumes** nearly all of them.
+**THE NEW REFUSAL: a zero `pixelClock`.** It **passes** the `> 0.0f` guard
+(which tests the *totals*, not the clock) and publishes **0.0 Hz**, where a
+zero total would at least leave Apple's stated 60.0f - so it is the one
+poisoning left after 2rd, and `rb_agdc_link_config` refuses it before touching
+the output. The zero-active refusal is now independently justified too:
+`IOPresentmentGetCurrentEndPointDimensions` (`0x7ff812e96ed6`) writes **neither**
+output when `hActive` or `vActive` is 0, leaving the caller's values untouched;
+it also shows `horizontalScaled`/`verticalScaled` (V2+0x18/+0x1c) **override**
+the actives when set, which the bridge inherits from the NDRV by copying the V2
+body wholesale.
+**AND flags bit 0 IS SAFE - 2rd overstated it.** Bit 0 calls
+`__GatherAGDCLinkCapabilities(reply+0xa4)` (`0x7ff812e98af6`), which issues
+0x925 then 0x988 and tolerates every failure, returns **void** with `r14`
+(the success code, zeroed at `0x7ff812e979b4`) callee-saved across it, and
+whose only effect is `0x19c78` - **four writers, ZERO readers in the whole
+image**. Bit 0 stays clear because the bridge knows of no link to describe, a
+reason of honesty and not of hazard; recorded because a wrong reason for a
+right decision breaks the next time it is revisited. Also: `reply+0xa4`/`+0xa8`
+are **one** field - a single `movq` passed as `AGDCStreamAddress_t` - so the
+zero at `+0xa8` is that address's high half, not padding.
+New keys `agdc_tim_hblank`/`_vblank`/`_clk` and **`agdc_tim_mhz`**, the refresh
+*Apple's own formula* will produce from this boot's timing, published even when
+the reply is refused; `agdc_tim_err` gains **5 = zero pixelClock**. Three
+deliberate breaks trip 4 / 2 / 6 assertions. UUID **E56F3227**; imports 362/362
+unchanged; Info.plist graphics-dependency count still 0. **NOT VERIFIED ON
+HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
+**`agdc_tim_mhz`** against the panel's 143 833 - 0 or 60 000 means the NDRV's
+detailed timing is incomplete and that, not the bridge, is next. Detail:
+JOURNAL **2rg**.
+
 **FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
 AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
 host-tested, **published and queried in boot 156**. It clones the inherited AGDC tables,

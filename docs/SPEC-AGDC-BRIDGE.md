@@ -144,6 +144,55 @@ extents are equal, so transposing both pairs still says 1:1 — and the host
 test asserts that equality rather than the axis assignment. Detail: JOURNAL
 **2rf**.
 
+## 2rg: the 0x921 cache is the advertised capability, and it feeds one formula
+
+`IOPresentmentCapabilities::__gatherCapabilities()` (`0x7ff812e95370`, 0x104
+bytes) sits above both gathers. It aborts only when
+`__GatherAGDCLogicalDeviceCapabilities` returns non-zero; then it stores
+**60.0f** (`0x42700000`) and overwrites it with
+
+> **refresh = pixelClock / ((hActive + hBlanking) × (vActive + vBlanking))**
+
+whenever the product exceeds the `ucomiss` constant at `0x7ff812ea3468`, which
+reads **`0.0f`** — a divide-by-zero guard, not a plausibility test.
+
+**This corrects 2rd's "a cache it never reads in this image."** The cache has
+24 reads, and `IOPresentmentCreateEndPointDictionary` (`0x7ff812e9550c`)
+republishes fourteen of its fields as CFNumbers under Apple's own keys —
+`PixelClock`, `MinPixelClock`, `MaxPixelClock`, `HorizontalActive`,
+`HorizontalBlanking`, `HorizontalSyncOffset`, `HorizontalSyncPulseWidth`,
+`VerticalActive`, `VerticalBlanking`, `VerticalSyncOffset`,
+`VerticalSyncPulseWidth`, `HorizontalSyncConfig`, `VerticalSyncConfig`,
+`VerticalBlankingExtension` — field for field, in order, matching the public
+header. That is the strongest confirmation yet that the V2 struct sits at
+`reply+0x04`: Apple names the fields, so no offset matching of ours is
+involved. The derived values go out as **`LooksLikeWidth`** /
+**`LooksLikeHeight`** and, from one address, **`RefreshTime`** /
+**`MinRefreshTime`** / **`MaxRefreshTime`**.
+
+So 2rd holds exactly as far as it was measured: IOPresentment **validates** no
+timing field, and **consumes** nearly all of them.
+
+**One new refusal.** A zero `pixelClock` passes the `> 0.0f` guard — the guard
+tests the totals, not the clock — and publishes a 0.0 Hz refresh, where a zero
+total would leave Apple's stated 60.0f. `rb_agdc_link_config` refuses it before
+touching the output. `IOPresentmentGetCurrentEndPointDimensions`
+(`0x7ff812e96ed6`) independently justifies the existing zero-active refusal: it
+returns having written **neither** output in that case, leaving the caller's
+values untouched. It also shows `horizontalScaled`/`verticalScaled`
+(V2+0x18/+0x1c) **override** the actives when non-zero, which the bridge
+inherits from the NDRV by copying the V2 body wholesale.
+
+**flags bit 0 is safe, and 2rd overstated it.** Bit 0 (`0x7ff812e979b7`) calls
+`__GatherAGDCLinkCapabilities(reply+0xa4)` (`0x7ff812e98af6`): selector 0x925
+(0xc bytes) then 0x988 (0x24 bytes), **every** failure tolerated, returning
+void with the success code already zeroed at `0x7ff812e979b4` in a callee-saved
+register, and writing only `0x19c78` — **four writers, zero readers in the
+whole image**. Bit 0 stays clear because the bridge knows of no link to
+describe, which is honesty rather than hazard avoidance. `reply+0xa4`/`+0xa8`
+are **one** field: a single `movq` passed as `AGDCStreamAddress_t`, so the zero
+at `+0xa8` is the address's high half, not padding. Detail: JOURNAL **2rg**.
+
 ## Implementation
 
 `src/plugin/rbgpu_agdc.cpp` solves AGDC's superclass, constructor, destructor
@@ -245,8 +294,10 @@ plugin_check's variable list. Full details remain in RBGPUDiag/RBGPULog.
 | agdc_tim_src | **3** required: both IONDRVSupport timing symbols resolved. 0/1/2 means 0x921 is refused |
 | agdc_tim_raw_cur / agdc_tim_raw_info | Raw solve results, published only when one failed (2rb's lesson) |
 | agdc_link_calls / agdc_link_result | 0x921 requests reaching the vendor callback, and the builder's verdict (0 = replied) |
-| agdc_tim_err | **0** required. 1 getCurrentDisplayMode failed; 2 getTimingInfoForDisplayMode failed; 3 kIODetailedTimingValid clear; 4 zero active pixels |
+| agdc_tim_err | **0** required. 1 getCurrentDisplayMode failed; 2 getTimingInfoForDisplayMode failed; 3 kIODetailedTimingValid clear; 4 zero active pixels; **5 zero pixelClock** (2rg) |
 | agdc_tim_mode / agdc_tim_h / agdc_tim_v | The mode and the active pixels actually handed to IOPresentment — if these are not the panel's, nothing downstream means anything |
+| agdc_tim_hblank / agdc_tim_vblank / agdc_tim_clk | The other three fields Apple's refresh formula consumes (2rg). A zero clock is refused: it passes Apple's `> 0.0f` guard and would publish 0.0 Hz |
+| agdc_tim_mhz | **The refresh in millihertz that Apple's OWN formula will produce** from this timing — `pixelClock / ((hActive+hBlank) * (vActive+vBlank))`, published even on a refusal. Compare against the panel's **143 833**. **0** or **60 000** means the NDRV's detailed timing is incomplete, and that is the next thing to fix rather than the bridge |
 | agdc_tim_flags | The driver's own timing flags; bit 31 is kIODetailedTimingValid |
 | agdc_extcap_calls / agdc_extcap_answered | 0x711 requests seen, and how many were answered (expect 1 of ~16: only type 0x10) |
 | agdc_extcap_type | The type of the LAST 0x711 seen. If this is always 0 the vendor callback is being handed a separate zeroed output copy, and every type is refused for that reason rather than for being unimplemented |
