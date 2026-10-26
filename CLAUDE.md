@@ -19,6 +19,63 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2s2: THE POST-GATE BLOCKER IS NAMED, IT IS APPLE'S OWN
+CODE, AND IT IS NOT A MISSING SELECTOR.** Static read, no boot, following 2s1's
+finding that boot 164 **blocked silently**.
+**THE TRANSACTION BACKEND EXISTS AND IS APPLE'S.** `IOAcceleratorFamily2` has
+**429** named `IOAccelDisplayPipe*` symbols - `transaction_wait_gated`/`_nolock`,
+`wait_for_queue_slot_gated`/`_nolock`, `submitFlipBufferTransaction`,
+`IOAccelDisplayPipeTransaction2::{prepare,complete,finish,make_flip_transaction}`,
+`IOAccelDisplayPipeUserClient2::{transactionWait,transactionEnd}`. No vendor
+code. **So "past the gate there is no backend" is WRONG as stated.**
+**`waitForStampTimeout` NEVER SLEEPS** - 0x69 bytes:
+`r14 = this->vt[0x930](); if (r14==arg) os_log(); return r14==arg;` - a
+predicate, not a wait (rule 13 on a misleading name).
+**AND THE BOUNDED WAIT IS THE SAFE ONE:** `transaction_wait_gated` builds a
+deadline from `args+0x8` via `clock_interval_to_deadline(ms,1000000,&out)` (over
+0xAAAA.. poison, so an unwritten deadline would show), calls gate slot **0x1f0**
+with `(this,deadline,1)`, returns **`0xE00002D6` = `kIOReturnTimeout`**, and
+carries **10 os_log refs** including elapsed-ms.
+**THE ONE THAT BLOCKS:**
+`wait_for_queue_slot_gated` (0x14e60526, 0x47 bytes) =
+`if (this->0x23c - this->0x238 != 4) return; do gate(0xb0)->vt[0x1e0](this,0);
+while (this->0x23c - this->0x238 == 4);`
+**Both slots READ from Apple's vtable, not asserted** (rule 7; first try used
+`__ZTV14IOCommandGate` - rule 5, `IOCommandGate` is 13 chars):
+**`0x1e0` = `IOCommandGate::commandSleep(void *, unsigned int)` - the
+TWO-ARGUMENT, NO-DEADLINE overload, called with `interruptible = 0` =
+`THREAD_UNINT`, in a `while` loop**; `0x1f0` = the deadline overload. The
+queue-slot path has **no deadline, no timeout return and ZERO os_log refs**
+against 10. Ring is **4 deep** (`0x238` consumed, `0x23c` produced; the other
+function walks it with `andl $-0x4` and a 72-byte stride).
+**THE CHAIN, END TO END:** `wait_for_queue_slot_nolock` runs `_gated` **by
+address** (`leaq`, a `runAction` - which is why a `callq` search for `_gated`
+finds nothing), and has exactly **two** callers:
+**`IOAccelDisplayPipe::submitFlipBufferTransaction`** and
+**`IOAccelDisplayPipeUserClient2::transactionEnd`** - the **userspace entry
+point**. So WindowServer, past the AGDC gate, submits via `transactionEnd` ->
+`wait_for_queue_slot_nolock` -> `runAction(_gated)` -> ring full ->
+**`commandSleep(event, THREAD_UNINT)` forever: uninterruptible, no deadline, no
+log, no panic.** The ring drains only on completion, completion needs a flip,
+and **2pf measured `getDisplayPipeTransactionFlip` never called once.**
+**That is boot 164 exactly**, and the silence is now explained, not just noted.
+**WHAT CHANGES: 2rz's inference is RETRACTED on one point.** An unimplemented
+`IOPresentmentBindIOAccelSurfaceToResource`/`SetPlaneState` returns
+`kIOReturnUnsupported`; it does not block. What blocks is Apple's own code
+waiting for a completion this machine never produces. **The requirement is
+"transactions must complete"; DCN 3.1.2 is one way to satisfy it, not the only
+thing in view.**
+**THE LEVER, AND THE READ THAT MUST PRECEDE IT:** `TransactionsSupported` and
+`DisplayPipeSupported` are **not** in IOAcceleratorFamily2 (control:
+`IOAccelDisplayPipeCapabilities` IS, so the search works) - they are in
+**`AMDRadeonX6000`**, a kext this project already routes, and 2pp measured both
+published as **1** on our accelerator. Advertising `TransactionsSupported = 0`
+is a property rather than a display engine. **NOT PROPOSED YET**, for the reason
+2q9/2qa recorded after 2pq: **find the consumer before writing to a field.**
+**Next read: the consumers of `TransactionsSupported`/`DisplayPipeSupported`** in
+IOPresentment/SkyLight/CoreDisplay, via `ripall` on the string's **START**
+(2r4) with a known-present control. No code changed. JOURNAL **2s2**.
+
 **LATEST 2026-10-26 / 2s1: THE TWO AFTERNOON HANGS WERE NOT BOOT 164's FAILURE -
 2rz AND 2s0 OVER-GROUPED THEM.** Found by reading evidence already on disk, no
 boot. 2rz's fix and verdict stand; its account of the evidence does not.
