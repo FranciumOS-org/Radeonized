@@ -16,4 +16,15 @@ void rbgpu_agdc_framebuffer(IOService *);
 using RbNdrvCurrentMode = IOReturn (*)(IOService *, int32_t *, int32_t *);
 using RbNdrvTimingInfo  = IOReturn (*)(IOService *, int32_t, void *);
 void rbgpu_agdc_timing_source(RbNdrvCurrentMode, RbNdrvTimingInfo);
+
+// 2rm: boot 159 measured that the NDRV has NO detailed timing to give - its
+// one mode carries nominal geometry and a refresh rate, kIODetailedTimingValid
+// is clear (agdc_tim_err 3) and there is no IODisplayEDID anywhere in the
+// registry. The firmware did program DCN 3.1.2 and OTG0 is scanning, so the
+// panel's real timing is in OTG0's registers. This is the fallback source:
+// READS only, no DCN register is written, and a failed read refuses 0x921
+// exactly as a failed NDRV read does.
+struct rb_otg_timing;
+using RbOtgSample = bool (*)(struct rb_otg_timing *);
+void rbgpu_agdc_otg_source(RbOtgSample);
 #endif

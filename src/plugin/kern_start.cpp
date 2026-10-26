@@ -15,6 +15,7 @@
 
 #include "kern_start.hpp"
 #include "rbgpu_agdc.hpp"
+#include "rb_otg.h"
 #include "rbgpu_agdc_lookup.hpp"
 #include "rb_smu13.h"
 // 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
@@ -9721,6 +9722,112 @@ void RGPU::processIOGraphics(KernelPatcher &patcher, size_t id, mach_vm_address_
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// 2rm: OTG0's live timing, read-only, as the 0x921 fallback.
+//
+// Boot 159 measured the problem this solves: IONDRVFramebuffer ANSWERS
+// getTimingInfoForDisplayMode and what it answers is flags = 0, i.e.
+// kIODetailedTimingValid clear - no blanking, no sync, no pixel clock - and
+// there is no IODisplayEDID anywhere in the registry. The firmware did bring
+// DCN 3.1.2 up, so the panel's actual timing is in OTG0's registers.
+//
+// Everything here is a READ. No DCN register is written, which is what makes
+// this different in kind from the OTG/HUBP writes CLAUDE.md reserves to the
+// user: a wrong read reports a wrong number, it cannot blank the panel.
+//
+// Addressing: DMU segment 2 is 0x34c0 on this chip, parsed by this project's
+// own rb_disc_parse from this machine's real discovery table
+// (tests/data/rembrandt-680m-tufa15.bin -> DMU 3.1.3, nbase 5,
+// base[2] = 0x34c0), so OTG0_CONTROL lands at dword 0x5001. The plugin's
+// g_disc is a two-IP stub (MP1 + SMUIO) with no DMU entry, so the segment is
+// a constant here - and because a constant is an assumption, it is CHECKED
+// against 2oq's measured four-register signature before any value is
+// believed: OTG0 with OTG_MASTER_EN set and OTG1-3 reading 0x300. If that
+// does not hold we are not addressing what we think we are, and the sampler
+// refuses rather than converting whatever it read.
+// ---------------------------------------------------------------------------
+static const uint32_t kRbDmuSeg2 = 0x34c0;   // measured; checked below
+
+/* dcn_3_1_2_offset.h, the same dwords rb_regs.h already lists. */
+static const uint32_t kRbOtgStride      = 0x80;   // OTG1_H_TOTAL - OTG0_H_TOTAL
+static const uint32_t kRbOtg0Control    = 0x1b41;
+static const uint32_t kRbOtg0FrameCount = 0x1b4c;
+static const uint32_t kRbOtg0HTotal     = 0x1b2a;
+static const uint32_t kRbOtg0HBlank     = 0x1b2b;
+static const uint32_t kRbOtg0HSyncA     = 0x1b2c;
+static const uint32_t kRbOtg0HSyncCntl  = 0x1b2d;
+static const uint32_t kRbOtg0VTotal     = 0x1b2f;
+static const uint32_t kRbOtg0VBlank     = 0x1b36;
+static const uint32_t kRbOtg0VSyncA     = 0x1b37;
+static const uint32_t kRbOtg0VSyncCntl  = 0x1b38;
+
+#define RB_OTG_MASTER_EN  0x1u
+#define RB_OTG_OFF_VALUE  0x300u   // 2oq measured OTG1-3 at exactly this
+
+static uint32_t rbgpuOtgRead(uint32_t dw) {
+    return g_hw.rreg(g_hw.ctx, (kRbDmuSeg2 + dw) * 4);
+}
+
+// Fills `out` from OTG0 and returns true only if every precondition held.
+// Rule 14: every exit publishes a key, so a boot always says which step
+// stopped it instead of leaving the keys absent.
+static bool rbgpuOtgSample(struct rb_otg_timing *out) {
+    if (!out) { rbgpu_diag_set_num("otg_err", 1); return false; }
+    if (!g_hw.rreg || !g_hw.ctx) { rbgpu_diag_set_num("otg_err", 2); return false; }
+
+    const uint32_t ctl0 = rbgpuOtgRead(kRbOtg0Control);
+    rbgpu_diag_set_num("otg_ctl0", ctl0);
+    uint32_t off_ok = 0;
+    for (unsigned i = 1; i < 4; i++) {
+        uint32_t c = rbgpuOtgRead(kRbOtg0Control + i * kRbOtgStride);
+        rbgpu_diag_set_num(i == 1 ? "otg_ctl1" : i == 2 ? "otg_ctl2" : "otg_ctl3", c);
+        if (c == RB_OTG_OFF_VALUE) off_ok++;
+    }
+    rbgpu_diag_set_num("otg_off_ok", off_ok);
+    if (!(ctl0 & RB_OTG_MASTER_EN) || off_ok != 3) {
+        rbgpu_diag_set_num("otg_err", 3);   // not the segment we think it is
+        return false;
+    }
+
+    out->h_total           = rbgpuOtgRead(kRbOtg0HTotal);
+    out->h_blank_start_end = rbgpuOtgRead(kRbOtg0HBlank);
+    out->h_sync_a          = rbgpuOtgRead(kRbOtg0HSyncA);
+    out->h_sync_a_cntl     = rbgpuOtgRead(kRbOtg0HSyncCntl);
+    out->v_total           = rbgpuOtgRead(kRbOtg0VTotal);
+    out->v_blank_start_end = rbgpuOtgRead(kRbOtg0VBlank);
+    out->v_sync_a          = rbgpuOtgRead(kRbOtg0VSyncA);
+    out->v_sync_a_cntl     = rbgpuOtgRead(kRbOtg0VSyncCntl);
+
+    // The pixel clock is in no register this project reads, so the refresh is
+    // MEASURED from OTG0's read-only frame counter and multiplied by the
+    // totals - the method RembrandtProbe.cpp already uses (2os: 10 frames in
+    // 69 524 857 ns). Synthesising a clock from CVT/GTF would be rule 17.
+    const uint32_t f0 = rbgpuOtgRead(kRbOtg0FrameCount);
+    const uint64_t t0 = mach_absolute_time();
+    IOSleep(100);                      // our own thread_call, nothing held
+    const uint32_t f1 = rbgpuOtgRead(kRbOtg0FrameCount);
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    const uint32_t frames = f1 - f0;   // 24-bit counter; 100 ms cannot wrap it
+    rbgpu_diag_set_num("otg_frames", frames);
+    rbgpu_diag_set_num("otg_ns", ns);
+    if (!frames || !ns) {
+        rbgpu_diag_set_num("otg_err", 4);   // scanning out but not advancing
+        return false;
+    }
+    // millihertz, so 143.833 Hz is 143833 and nothing rounds to an integer Hz.
+    const uint64_t mhz = (uint64_t)frames * 1000000000000ull / ns;
+    if (mhz < 20000 || mhz > 400000) {
+        rbgpu_diag_set_num("otg_mhz_bad", mhz);
+        rbgpu_diag_set_num("otg_err", 5);   // outside any panel we can believe
+        return false;
+    }
+    out->refresh_mhz = (uint32_t)mhz;
+    rbgpu_diag_set_num("otg_err", 0);
+    return true;
+}
+
 void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                        size_t size) {
     // Rule 14: every path out of here says something. 2ou (the refresh rate)
@@ -9755,6 +9862,9 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
         rbgpu_agdc_timing_source(
             reinterpret_cast<RbNdrvCurrentMode>(cur),
             reinterpret_cast<RbNdrvTimingInfo>(info));
+        // 2rm: and the fallback for when the NDRV answers "no detailed
+        // timing", which boot 159 measured it doing. Read-only.
+        rbgpu_agdc_otg_source(rbgpuOtgSample);
     }
 
     // 2oz FIRST: the vblank is the one that fixes the pacing. Three routes in

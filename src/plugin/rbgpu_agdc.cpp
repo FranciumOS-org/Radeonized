@@ -5,6 +5,7 @@
 #include "rbgpu_agdc_lookup.hpp"
 #include "RembrandtGPUPeer.hpp"
 #include "rb_agdc.h"
+#include "rb_otg.h"
 #include <Headers/kern_util.hpp>
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSSymbol.h>
@@ -99,6 +100,8 @@ constexpr size_t   kRbTimingInfoSize=kRbTimingDetailOff+RB_AGDC_TIMING_SIZE;
 // A failure here leaves timingValid false, and 0x921/0x711 then REFUSE rather
 // than zero-fill (2rd: IOPresentment validates no timing field, so a zero
 // reply would pass and poison its capability cache).
+RbOtgSample otgSample=nullptr;
+
 void sampleTiming() {
     // Rule 14: every exit publishes. agdc_tim_err was set to 9 before any of
     // this, so the key exists even if we are never called at all.
@@ -124,7 +127,40 @@ void sampleTiming() {
     // Rule 13/14: the struct is only meaningful when the driver says the
     // detailed timing is filled in. Refuse rather than ship whatever was there.
     if (!(flags & kRbDetailedTimingValid)) {
-        rbgpu_diag_set_num("agdc_tim_err",3); return;
+        // 2rm: boot 159's measured case. The NDRV answered, and what it
+        // answered is "I have no detailed timing" - so fall back to OTG0,
+        // which the firmware already programmed and which is read-only.
+        // agdc_tim_err stays 3 unless the fallback actually produces a
+        // timing, so a boot without the fallback reads exactly as 159 did.
+        rbgpu_diag_set_num("agdc_tim_err",3);
+        if (!otgSample) { rbgpu_diag_set_num("agdc_otg_src",0); return; }
+        struct rb_otg_timing otg;
+        for (size_t i=0;i<sizeof otg;i++) reinterpret_cast<uint8_t *>(&otg)[i]=0;
+        if (!otgSample(&otg)) { rbgpu_diag_set_num("agdc_otg_src",1); return; }
+        rbgpu_diag_set_num("agdc_otg_src",2);
+        // Publish the raw registers before converting: a refusal below must
+        // say what it refused (rule 19), and these eight words are the whole
+        // input, so a capture of them is a capture of the hardware.
+        rbgpu_diag_set_num("agdc_otg_htot",otg.h_total);
+        rbgpu_diag_set_num("agdc_otg_hbse",otg.h_blank_start_end);
+        rbgpu_diag_set_num("agdc_otg_hsa", otg.h_sync_a);
+        rbgpu_diag_set_num("agdc_otg_vtot",otg.v_total);
+        rbgpu_diag_set_num("agdc_otg_vbse",otg.v_blank_start_end);
+        rbgpu_diag_set_num("agdc_otg_vsa", otg.v_sync_a);
+        rbgpu_diag_set_num("agdc_otg_mhz", otg.refresh_mhz);
+        uint8_t otg_v2[RB_V2_SIZE];
+        int orc=rb_otg_to_v2(&otg,otg_v2,sizeof otg_v2);
+        rbgpu_diag_set_num("agdc_otg_ret",static_cast<uint64_t>(-orc));
+        if (orc!=RB_OTG_OK) return;        // refuses, never zero-fills
+        for (size_t i=0;i<RB_AGDC_TIMING_SIZE;i++) timingCache[i]=otg_v2[i];
+        timingValid=true;
+        rbgpu_diag_set_num("agdc_tim_h",rb_agdc_get32(otg_v2+RB_AGDC_V2_HACTIVE));
+        rbgpu_diag_set_num("agdc_tim_v",rb_agdc_get32(otg_v2+RB_AGDC_V2_VACTIVE));
+        rbgpu_diag_set_num("agdc_tim_clk",rb_agdc_get64(otg_v2+RB_AGDC_V2_PIXELCLOCK));
+        rbgpu_diag_set_num("agdc_tim_mhz",otg.refresh_mhz);
+        rbgpu_diag_set_num("agdc_tim_err",0);
+        rbgpu_diag_set_num("agdc_tim_cached",2);   // 2 = from OTG0, 1 = NDRV
+        return;
     }
     const uint8_t *v2=scratch+kRbTimingDetailOff;
     // Field offsets are Apple's own, named in rb_agdc.h from the CFNumber keys
@@ -430,6 +466,12 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     rbgpu_diag_set_num("agdc_filter_routed",1);
     rbgpu_diag_set_str("agdc_say","ARMED: waiting for boot framebuffer");
     if (work) thread_call_enter(work); // framebuffer may have arrived first
+}
+
+void rbgpu_agdc_otg_source(RbOtgSample fn) {
+    if (!checkKernelArgument("-rbgpuagdc")) return;
+    otgSample=fn;
+    rbgpu_diag_set_num("agdc_otg_bound",fn?1u:0u);
 }
 
 void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
