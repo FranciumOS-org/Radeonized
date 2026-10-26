@@ -55,6 +55,13 @@ for v in rbgpu-boot rbgpu-prog rbgpu-sdma rbgpu-1b rbgpu-prog2 rbgpu-gate rbgpu-
     echo "  $v = ${val:-<unset>}"
 done > "$out/nvram.txt" 2>&1
 cat "$out/nvram.txt"
+# 2rh: FLUSH NOW. The three hangs of 2026-10-26 were ended by a hard reset and
+# the capture directory itself never reached the disk - no logs/<ts>-plugin at
+# all, so the breadcrumbs this script exists to save were lost with the boot.
+# These are the only record a wedged boot leaves (rule 10), so they are synced
+# before anything slower, or riskier, runs.
+sync; sync
+echo "  breadcrumbs synced to disk"
 
 echo
 echo "--- loaded kexts"
@@ -77,16 +84,51 @@ echo "--- display startup and GPU progress this boot"
     '(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR eventMessage CONTAINS "checkGPUProgress"' \
     > "$out/display-log.txt" 2> "$out/display-log-errors.txt"
 echo "  $(wc -l < "$out/display-log.txt" | tr -d ' ') display log lines saved"
-if [ "$(id -u)" = 0 ]; then
-    ws="$(pgrep -x WindowServer | head -1)"
-    if [ -n "$ws" ]; then
-        /usr/bin/sample "$ws" 3 -file "$out/ws-sample.txt" > "$out/ws-sample-status.txt" 2>&1
-        echo "  WindowServer sample: $out/ws-sample.txt (status in ws-sample-status.txt)"
-    else
-        echo "  WindowServer not running" > "$out/ws-sample-status.txt"
-    fi
-else
+# 2rh: THE SAMPLE IS NOW OPT-IN, AND IT IS THE REASON THIS SCRIPT KILLED THE
+# MACHINE TWICE. `sample` suspends the target's threads and walks their stacks.
+# A WindowServer wedged inside a kernel call - which is the exact state you run
+# this script in - cannot be suspended, so `sample` blocks in the kernel and
+# takes the box with it. On 2026-10-26 that happened on two of three attempts,
+# each time destroying the capture it was part of. 2rc added this step; rule 16
+# said the instrument is a suspect, and here it was the culprit.
+#
+# A shell timeout does NOT make it safe: killing the wrapper cannot unblock a
+# task_suspend already stuck in the kernel, exactly as rb_ioreg says of a
+# blocked ioreg. So the default is OFF. The guard below is a second line only,
+# and it reports honestly that it cannot recover the thread.
+if [ -z "$RBGPU_WS_SAMPLE" ]; then
+    {
+      echo "WindowServer sample SKIPPED (default since 2rh)."
+      echo "It hung this machine twice on 2026-10-26 by suspending a wedged"
+      echo "WindowServer, losing the capture both times. Run it only when the"
+      echo "desktop is RESPONSIVE: RBGPU_WS_SAMPLE=1 sudo tools/plugin_check.sh"
+    } > "$out/ws-sample-status.txt"
+    echo "  WindowServer sample skipped by default (RBGPU_WS_SAMPLE=1 to force)"
+elif [ "$(id -u)" != 0 ]; then
     echo "  WindowServer sample skipped: requires root" > "$out/ws-sample-status.txt"
+else
+    ws="$(ps -axo pid=,comm= | awk '/WindowServer$/{print $1; exit}')"
+    if [ -z "$ws" ]; then
+        echo "  WindowServer not running" > "$out/ws-sample-status.txt"
+    else
+        rm -f "$out/ws-sample.done"
+        ( /usr/bin/sample "$ws" 3 -file "$out/ws-sample.txt" \
+              > "$out/ws-sample-status.txt" 2>&1; : > "$out/ws-sample.done" ) &
+        _i=0
+        while [ ! -f "$out/ws-sample.done" ] && [ "$_i" -lt 15 ]; do
+            sleep 1; _i=$((_i + 1))
+        done
+        if [ -f "$out/ws-sample.done" ]; then
+            rm -f "$out/ws-sample.done"
+            echo "  WindowServer sample: $out/ws-sample.txt"
+        else
+            echo "  *** sample did not finish in 15s - WindowServer is wedged in"
+            echo "      the kernel and CANNOT be suspended, interrupted or killed."
+            echo "      The machine may now hang. Everything above is already on"
+            echo "      disk and synced. Do not run this again with the display"
+            echo "      frozen; the breadcrumbs are the evidence, not the sample."
+        fi
+    fi
 fi
 
 echo

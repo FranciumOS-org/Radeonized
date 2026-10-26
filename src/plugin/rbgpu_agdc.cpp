@@ -37,6 +37,10 @@ Dtor dtor;
 // refuses 0x921 rather than inventing a reply while it is NULL.
 RbNdrvCurrentMode ndrvCurrentMode;
 RbNdrvTimingInfo  ndrvTimingInfo;
+// 2rh: the timing is sampled ONCE, on our own thread_call, before the service
+// is started - never from the vendor callback. See sampleTiming().
+uint8_t timingCache[RB_AGDC_TIMING_SIZE];
+bool    timingValid;
 McCtor mcCtor;
 Pre pre;
 Post post;
@@ -73,19 +77,45 @@ constexpr uint32_t kRbDetailedTimingValid=0x80000000u;
 constexpr size_t   kRbTimingDetailOff=0x08;
 constexpr size_t   kRbTimingInfoSize=kRbTimingDetailOff+RB_AGDC_TIMING_SIZE;
 
-// Read-only. Returns the V2 body of the CURRENT mode, or NULL - and NULL is a
-// refusal upstream, never a zero fill (2rd: IOPresentment validates no timing
-// field, so a zero reply would pass this stage and poison its cache).
-const void *currentTiming(uint8_t *scratch) {
-    if (!ndrvCurrentMode || !ndrvTimingInfo || !framebuffer) return nullptr;
+// 2rh: SAMPLE the current mode's V2 timing into timingCache. Runs on our own
+// thread_call, once, BEFORE service->start() publishes the bridge - never from
+// the vendor callback.
+//
+// Boot 157 hung with a frozen panel and live SSH, three times, and the capture
+// that would have proved why was lost with it. The leading hypothesis is this
+// call path: 2rd/2re called getCurrentDisplayMode/getTimingInfoForDisplayMode
+// SYNCHRONOUSLY from inside filtered_doDeviceAttribute, i.e. on WindowServer's
+// thread inside a user-client external method, while those are IOFramebuffer
+// methods that expect the IOGraphics workloop - a lock-order inversion whose
+// symptom is exactly a wedged desktop with the kernel alive. CLAUDE.md already
+// warned about this shape for -rbgpuvblpump ("if that path needs a lock
+// WindowServer holds the desktop can wedge") and 2re did it anyway.
+//
+// NOT ESTABLISHED: that the lock is what hung it. This is the right structure
+// regardless - the callback must not call into another subsystem - so the fix
+// does not depend on the hypothesis being right.
+//
+// A failure here leaves timingValid false, and 0x921/0x711 then REFUSE rather
+// than zero-fill (2rd: IOPresentment validates no timing field, so a zero
+// reply would pass and poison its capability cache).
+void sampleTiming() {
+    // Rule 14: every exit publishes. agdc_tim_err was set to 9 before any of
+    // this, so the key exists even if we are never called at all.
+    if (!ndrvCurrentMode || !ndrvTimingInfo) {
+        rbgpu_diag_set_num("agdc_tim_err",6); return;   // getters unresolved
+    }
+    if (!framebuffer) {
+        rbgpu_diag_set_num("agdc_tim_err",7); return;   // no framebuffer
+    }
+    uint8_t scratch[kRbTimingInfoSize];
     int32_t mode=0, depth=0;
     if (ndrvCurrentMode(framebuffer,&mode,&depth)!=kIOReturnSuccess) {
-        rbgpu_diag_set_num("agdc_tim_err",1); return nullptr;
+        rbgpu_diag_set_num("agdc_tim_err",1); return;
     }
     rbgpu_diag_set_num("agdc_tim_mode",static_cast<uint64_t>(mode));
     for (size_t i=0;i<kRbTimingInfoSize;i++) scratch[i]=0;
     if (ndrvTimingInfo(framebuffer,mode,scratch)!=kIOReturnSuccess) {
-        rbgpu_diag_set_num("agdc_tim_err",2); return nullptr;
+        rbgpu_diag_set_num("agdc_tim_err",2); return;
     }
     uint32_t flags=0;
     for (unsigned i=0;i<4;i++) flags|=static_cast<uint32_t>(scratch[4+i])<<(8*i);
@@ -93,7 +123,7 @@ const void *currentTiming(uint8_t *scratch) {
     // Rule 13/14: the struct is only meaningful when the driver says the
     // detailed timing is filled in. Refuse rather than ship whatever was there.
     if (!(flags & kRbDetailedTimingValid)) {
-        rbgpu_diag_set_num("agdc_tim_err",3); return nullptr;
+        rbgpu_diag_set_num("agdc_tim_err",3); return;
     }
     const uint8_t *v2=scratch+kRbTimingDetailOff;
     // Field offsets are Apple's own, named in rb_agdc.h from the CFNumber keys
@@ -110,7 +140,7 @@ const void *currentTiming(uint8_t *scratch) {
     rbgpu_diag_set_num("agdc_tim_vblank",vblank);
     rbgpu_diag_set_num("agdc_tim_clk",clock);
     if (!hactive || !vactive) {
-        rbgpu_diag_set_num("agdc_tim_err",4); return nullptr;
+        rbgpu_diag_set_num("agdc_tim_err",4); return;
     }
     // 2rg: __gatherCapabilities computes refresh = pixelClock / (hTotal*vTotal)
     // and publishes it as RefreshTime/Min/MaxRefreshTime. A zero clock passes
@@ -119,9 +149,11 @@ const void *currentTiming(uint8_t *scratch) {
     // capture says whether the number Apple will advertise is the panel's.
     const uint64_t total=static_cast<uint64_t>(hactive+hblank)*(vactive+vblank);
     rbgpu_diag_set_num("agdc_tim_mhz",total?(clock*1000ull)/total:0ull);
-    if (!clock) { rbgpu_diag_set_num("agdc_tim_err",5); return nullptr; }
+    if (!clock) { rbgpu_diag_set_num("agdc_tim_err",5); return; }
+    for (size_t i=0;i<RB_AGDC_TIMING_SIZE;i++) timingCache[i]=v2[i];
+    timingValid=true;
     rbgpu_diag_set_num("agdc_tim_err",0);
-    return v2;
+    rbgpu_diag_set_num("agdc_tim_cached",1);
 }
 
 IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
@@ -143,8 +175,11 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
                                     *(reinterpret_cast<const uint32_t *>(
                                         reinterpret_cast<const uint8_t *>(out)+4)));
     }
-    uint8_t timing[kRbTimingInfoSize];
-    const void *v2=(attr==0x921 || attr==0x711) ? currentTiming(timing) : nullptr;
+    // 2rh: the CACHE, never a call. This runs on WindowServer's thread inside
+    // a user-client external method; calling into IOFramebuffer from here is
+    // what is believed to have wedged boot 157 three times.
+    const void *v2=((attr==0x921 || attr==0x711) && timingValid)
+                   ? static_cast<const void *>(timingCache) : nullptr;
     // KERNEL pointers, not registry IDs. Apple's filtered 0x980 handler
     // still converts these before copying anything to userspace.
     const int result=rb_agdc_reply(attr,inSize,out,outSize,
@@ -271,6 +306,11 @@ void run(thread_call_param_t,thread_call_param_t) {
     }
     rbgpu_diag_set_num("agdc_pci_id",pci->getRegistryEntryID());
     rbgpu_diag_set_num("agdc_fb_id",framebuffer->getRegistryEntryID());
+    // 2rh: sample the timing HERE - on this thread_call, with nothing of ours
+    // registered yet and no Apple lock held by us - so the vendor callback
+    // never has to call into IOFramebuffer. Must precede start(), because
+    // AGDC::start registers the service and WindowServer can query at once.
+    sampleTiming();
     rbgpu_diag_set_num("agdc_start_enter",1);
     rbgpu_diag_set_num("agdc_stage",60);
     bool started=service->start(pci); // AGDC::start registers the service itself
@@ -288,6 +328,10 @@ void run(thread_call_param_t,thread_call_param_t) {
 
 void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t size) {
     rbgpu_diag_set_num("agdc_on",checkKernelArgument("-rbgpuagdc") ? 1 : 0);
+    // 2rh, rule 14: seed the verdict so an ABSENT agdc_tim_err is impossible.
+    // 9 means sampleTiming() was never reached at all, which is exactly what
+    // boot 157 could not distinguish from a full diag table.
+    if (checkKernelArgument("-rbgpuagdc")) rbgpu_diag_set_num("agdc_tim_err",9);
     if (!checkKernelArgument("-rbgpuagdc")) return;
     rbgpu_diag_set_num("agdc_error",0);
     rbgpu_diag_set_num("agdc_base",base);
