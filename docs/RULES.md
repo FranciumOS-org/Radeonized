@@ -155,6 +155,56 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**BOOT 163 / 2rw: THE EDGE-LATCH FIX IS VERIFIED (73x BETTER), THE BRIDGE
+PUBLISHED AND PAIRED, AND THE RACE IS A NUMBER - LATE BY 1732 ms, OF WHICH THE
+SAMPLE IS 112.** All three one-shots armed (boot 160's config), fourth clean
+boot running. Rule 8/15/14: `rbgpu-boot` **163**, all one-shots consumed
+(`agdc_oneshot 0`, `iop_oneshot 0` - 2rh's stuck one-shot did not recur), UUID
+**A83C0170**, `diag_used` **565** of **768**.
+**2rn's EDGE LATCH WORKS AND THE ARITHMETIC AUDITS:** `otg_frames` **16**
+exactly in `otg_ns` **111 189 556** (`otg_polls` 924 of 4000) =
+**143.8984 Hz**; `agdc_tim_clk` **342 142 533** against a true 341 987 984 =
+**+0.045 %**, where boot 160's fixed window gave 353 198 717 = **+3.278 %**.
+**73x better for the same elapsed time**, and `2106 * 1129 * 143898 / 1000`
+reproduces `agdc_tim_clk` exactly. Six raw registers match 2oq to the bit;
+`otg_err 0`, `otg_off_ok 3`, `agdc_otg_ret 0`, `agdc_otg_src 2`.
+**TIMING BLOCK GREEN:** `agdc_tim_err 0`, `agdc_tim_cached` **2** (OTG0),
+`agdc_tim_h 1920`, `agdc_tim_v 1080`, `agdc_tim_mhz 143898`; `agdc_tim_flags 0`
+re-confirms the NDRV has no detailed timing, which is why the fallback carries
+this.
+**THE BRIDGE PUBLISHED AND THE WRANGLER PAIRED IT:** `agdc_started 1`,
+`agdc_stage 70`, `agdc_error 0`, `agdc_say` = *"PUBLISHED: verify IOPresentment
+in WindowServer"*, `AppleGraphicsDeviceControl` **2** instances, and Apple's own
+dump reads **`gpu 0xfbc7 agdc 0x10000052d /RembrandtGPUAGDC`**.
+`agdc_policy_optout 1` with AGDP at **0** instances (2rk held). `AGDC::start`
+queried us as 2rj decoded (`agdc_vendor_calls 2`, `agdc_cap_calls 1`).
+**THE RACE, boot 13:09:24.106:** +4747 ms gpu published vid.did=1002.1681;
+**+5128 ms** `kext load notification: com.apple.AppleGPUWrangler`; +5432 ms
+WindowServer reads `agdc 0x000000000`; **+5452 ms** `Unable to get AGDC
+information 0x10000003`; +5498 ms no display pipes; **+7072 ms**
+`agdc_t_presample_ms`; **+7184 ms** `agdc_t_sampled_ms` = `agdc_t_started_ms`.
+**LATE BY 1732 ms; THE SAMPLE IS 112 ms OF IT (6.5 %), and it audits against
+`otg_ns`.** 2rn named two suspects and said a boot would say which - **the
+answer is NEITHER**: delete the sample and the publish still lands 1620 ms late.
+**AND `agdc_wait`/`agdc_wait_load` ARE BOTH ABSENT, so nothing waited** - the
+metaclass and wrangler were already there. The 1732 ms is in the **trigger**,
+the framebuffer hook, and `fbvram 3` + `fbvram_enable_ret 0` confirm
+`enableController` ran. With 2ro's "the publish cannot precede
+`enableController` by construction": **a framebuffer-triggered publish can NEVER
+meet this deadline.** The trigger must come from something that exists earlier,
+and **the window is measured at 324 ms** - the wrangler's load (+5128) to the
+question (+5452). That is exactly 2rr's `gIOMatchedNotification` target;
+**do not re-land it on that alone** (2rp and 2rq each made that mistake), but
+the target is now timestamped rather than argued.
+**AND IT RECONCILES BOOT 159:** 159 had `agdc_user_vendor 4`/`agdc_user_cap 1`
+where 160 and 163 have both **absent**, and the difference is `rbgpu-iop` -
+unarmed in 159, so `UseIOPresentment` returned 0 and **IOPresentment never ran**,
+so there was no +5.45 s question to lose. **Arming the IOP patch is what creates
+this deadline**; 159 is not evidence that an earlier publish was achieved.
+**Still not done:** no display pipe, 0x711 never reached (not refused),
+`agdc_user_vendor`/`agdc_user_cap` absent against a 565-of-768 table.
+Detail: JOURNAL **2rw**.
+
 **BOOT 162 / 2rv: `rbgpu-arm` + `rbgpu-iop` ALSO BOOTS CLEAN, THE HANG NEVER
 REPRODUCED, AND THE ORDERING WINDOW IS 6.2 s - NOT 34.** Rule 8/15 clear:
 `rbgpu-boot` **162**, all four one-shots armed-and-consumed, UUID **A83C0170** =
