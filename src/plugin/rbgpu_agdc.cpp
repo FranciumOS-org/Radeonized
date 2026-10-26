@@ -23,6 +23,11 @@ IOService *service, *framebuffer;
 IONotifier *wranglerNote;
 IOPCIDevice *pci;
 thread_call_t work;
+// 2s9: a SECOND thread_call, for the timing re-sample alone. It cannot reuse
+// `work`, whose body returns immediately once `finished` is set - and must
+// not, because `run()` is the registration path that boots 164-168 measured
+// and rule 16 forbids putting a new suspect on it.
+thread_call_t resample;
 bool armed, finished;
 // 2rz: the matched-notification trigger 2rx landed is OFF by default, because
 // boot 164 measured what winning the AGDC gate costs. Boot 163 and boot 164
@@ -387,6 +392,39 @@ bool wranglerArrived(void *,void *,IOService *,IONotifier *) {
     return true;
 }
 
+// 2s9: boot 168 measured why the early path wedges, and it is OURS.
+// sampleTiming() is called from exactly one place - the start path - and on
+// the early path it runs BEFORE the framebuffer exists: sampleTimingNdrv()
+// returns 7 ("no framebuffer yet") and sampleTimingOtg() declines outright
+// (`early && !framebuffer`, 2s1's deliberate guard against spinning on DCN
+// MMIO during WindowServer's bring-up). So `timingValid` stays false, and
+// every getLinkConfig is REFUSED for the rest of the boot.
+//
+// Boot 168's own numbers: sampled at 6320 ms, framebuffer arrived at 7405 ms
+// - 1085 ms later - agdc_tim_ndrv_err 7, agdc_otg_src 3 (declined), no
+// agdc_tim_cached, no otg_* keys at all, and attribute 0x921 refused 4 times
+// out of 6 vendor calls with kIOReturnUnsupported. Nothing re-sampled,
+// because the framebuffer path ends in `thread_call_enter(work)` guarded by
+// `!finished` and `finished` was set at 6320 ms.
+//
+// So: when the framebuffer finally arrives, sample again - on OUR OWN
+// thread_call, which is 2rh's requirement (never from the vendor callback,
+// never with an Apple lock of ours held) and which keeps 2ry's hazard off the
+// NDRV matching path. By then `framebuffer` is set, so sampleTimingOtg() no
+// longer declines and takes the late path boot 167 measured clean (otg_err 0,
+// 931 polls, 111 ms).
+//
+// Every exit says something (rule 14), and agdc_resample_valid reports the
+// enabling field itself rather than the fact that we ran (rule 20).
+void resampleRun(thread_call_param_t,thread_call_param_t) {
+    rbgpu_diag_set_num("agdc_t_resample_ms",rbgpuAgdcUptimeMs());
+    if (timingValid) { rbgpu_diag_set_num("agdc_resample",2); return; }
+    if (!framebuffer) { rbgpu_diag_set_num("agdc_resample",3); return; }
+    sampleTiming();
+    rbgpu_diag_set_num("agdc_resample",1);
+    rbgpu_diag_set_num("agdc_resample_valid",timingValid ? 1u : 0u);
+}
+
 void run(thread_call_param_t,thread_call_param_t) {
     if (finished) return;
     // 2rx: exactly one thread may be inside this body. Released only where we
@@ -591,6 +629,11 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     // than leaving it argued.
     if (!work) work=thread_call_allocate(run,nullptr);
     if (!work) { refuse(7,"worker allocation"); return; }
+    // 2s9: allocated unconditionally, entered only on the early path. A
+    // failure here is reported and is not fatal - it costs the re-sample, not
+    // the publish.
+    if (!resample) resample=thread_call_allocate(resampleRun,nullptr);
+    rbgpu_diag_set_num("agdc_resample_alloc",resample ? 1u : 0u);
     early=checkKernelArgument("-rbgpuagdcearly");
     rbgpu_diag_set_num("agdc_early",early ? 1u : 0u);
     if (!early) {
@@ -652,6 +695,14 @@ void rbgpu_agdc_framebuffer(IOService *fb) {
     framebuffer=fb; framebuffer->retain();
     rbgpu_diag_set_num("agdc_fb_seen",1);
     rbgpu_diag_set_num("agdc_t_fb_ms",rbgpuAgdcUptimeMs());
+    // 2s9: the early path published without a timing and will never sample
+    // again on its own. Scoped to `early` so the default configuration is
+    // byte-for-byte what boots 165-167 booted clean, and to `finished` so it
+    // cannot race the registration's own sample.
+    if (early && finished && !timingValid) {
+        if (resample) { rbgpu_diag_set_num("agdc_resample",4); thread_call_enter(resample); }
+        else rbgpu_diag_set_num("agdc_resample",5);
+    }
     // The worker is allocated at kext-load time now; if AGDC never loaded there
     // is nothing to enter and agdc_wait_load already says so.
     if (work && !finished) thread_call_enter(work);

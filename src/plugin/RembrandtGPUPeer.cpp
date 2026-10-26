@@ -779,6 +779,13 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // boot 167, so they stay further down: a wedged boot needs the verdicts
     // and the proof the early trigger ran, not a re-measurement of the gate.
     "fb_vbl_ot_armed", "fb_vbl_ot_state", "fb_vbl_ot_n", "fb_vbl_ot",
+    // 2s9: boot 168's verdict keys. agdc_resample says which exit the
+    // re-sample took (1 ran, 2 already valid, 3 no framebuffer, 4 entered,
+    // 5 no thread_call) and agdc_resample_valid is the enabling field itself
+    // - whether a timing is now cached - so a boot cannot report "ran" and
+    // leave 0x921 still refused without saying so. agdc_tim_cached names the
+    // source (1 NDRV, 2 OTG0) and its ABSENCE is what boot 168 read.
+    "agdc_resample", "agdc_resample_valid", "agdc_tim_cached",
     "fb_vbl_hv_state", "fb_vbl_state", "fb_vbl_ot_cls", "fb_vbl_hv_cls",
     // and the keys that say the early trigger actually ran, so an absent
     // `fb_vbl_ot_armed` can be told from "the bridge never published".
