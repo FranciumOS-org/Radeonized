@@ -155,6 +155,58 @@ HARDWARE.** Reading order gains one line: after `agdc_tim_h`/`agdc_tim_v`, read
 detailed timing is incomplete and that, not the bridge, is next. Detail:
 JOURNAL **2rg**.
 
+**2rh: BOOT 157 HUNG THREE TIMES. THE CALLBACK WAS CALLING INTO
+IOFRAMEBUFFER, AND `plugin_check.sh` WAS FINISHING THE JOB.** Not panics -
+all three resets recorded **`previous shutdown cause 5`**, not `-128`, and
+**no `.panic` file was written**: frozen panel, live SSH, power-cycled. **It
+repeated because the one-shot did not clear** - `rbgpu-agdc` survived the boot
+that consumed it, so the next two re-armed and re-hung. 2qy had already
+measured that failure (`mcr_oneshot 4`) and the activation commands rested on
+it anyway. **So between experiments take `-rbgpuagdc` OUT of boot-args**: the
+bridge needs the arg *and* the key, so without the arg a stuck one-shot is
+inert. That is the rescue that holds, not the one-shot.
+**THE DEFECT IS 2re's.** `currentTiming()` called
+`IONDRVFramebuffer::getCurrentDisplayMode`/`getTimingInfoForDisplayMode`
+**synchronously inside `filtered_doDeviceAttribute`** - WindowServer's thread,
+inside a user-client external method - while both expect the IOGraphics
+workloop. That inversion's symptom is exactly a wedged desktop with a live
+kernel. docs/RULES.md already carried this warning for `-rbgpuvblpump`; 2re asked
+the *routing* question (rule 3) and never the *locking* one. **NOT ESTABLISHED
+that the lock is the cause** - the capture died with the boot - but the
+structure was wrong regardless. **FIXED:** `sampleTiming()` runs on the
+bridge's own `thread_call`, **once**, immediately before `service->start()`,
+and caches the 0xa0-byte V2 body; `vendor()` serves the cache and **calls
+nothing** (verified mechanically). A failed sample still **refuses** 0x921 and
+0x711.
+**EVIDENCE LOST, AND ONE INFERENCE RETRACTED.** No `logs/<ts>-plugin` from
+2026-10-26 exists at all - the directory never reached the disk before the
+reset - so the breadcrumbs are now **`sync`ed immediately** after being
+written. And `rbgpu-diag-prev` is **NOT boot 157**: rule 8, it carries no
+nonce, its numbers are identical to boot 156's and **every 2re/2rf/2rg key is
+absent from it** at `diag_used` 548 of 768. **The diag notes are HEX** -
+`diag_max=300` IS 768 - so the "check diag_max reads 768" instruction given
+with the activation commands was wrong and would have made a good install look
+broken.
+**RULE 16, TWICE IN ONE NIGHT: `plugin_check.sh:83`'s unguarded
+`/usr/bin/sample WindowServer`** (added by me in 2rc) suspends the target and
+walks its stacks, and a WindowServer wedged in a kernel call **cannot be
+suspended** - so it blocked in the kernel and took the machine down on two of
+three attempts, destroying the capture each time. A timeout does **not** fix
+it (killing the wrapper cannot unblock a `task_suspend` already in the kernel,
+as the script's own `rb_ioreg` comment says of `ioreg`), so the sample is now
+**OFF by default**, opt-in with **`RBGPU_WS_SAMPLE=1`**, bounded by the
+`rb_ioreg` idiom as a second line only. `compositor_check.sh`'s is bounded too
+but stays on, since that script only makes sense on a responsive desktop.
+**RULE 14 ON MY OWN REFUSAL PATH:** the old first guard returned NULL with **no
+key**, making "unresolved", "no framebuffer" and "never called" identical. Now
+**6** = getters unresolved, **7** = no framebuffer, and `agdc_tim_err` is
+**seeded to 9** at load so an *absent* key is impossible; **9 means
+`sampleTiming()` was never reached**. `agdc_tim_cached 1` confirms the positive
+case. UUID **B5419C66**; imports 362/362; Info.plist graphics deps 0.
+**`src/common` did not change, so NO host-test case was added** - the fix is in
+the plugin's threading, which the host harness cannot reach; that is a coverage
+gap, not a justification. **NOT VERIFIED ON HARDWARE.** Detail: JOURNAL **2rh**.
+
 **FRAMEBUFFER WORK IS THE USER'S ACTIVE REQUEST (2ra).** The missing per-GPU
 AGDC bridge is now implemented in `src/plugin/rbgpu_agdc.cpp`, built and
 host-tested, **published and queried in boot 156**. It clones the inherited AGDC tables,

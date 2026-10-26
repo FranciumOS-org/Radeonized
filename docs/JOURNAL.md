@@ -32054,3 +32054,119 @@ is unchanged except for one addition: after `agdc_tim_h`/`agdc_tim_v`, read
 the next thing to fix. Still absent: the bind/transaction/scanout backend, all
 plane state, and any explanation for boot 156's frozen panel or the
 `checkGPUProgress` channel errors.
+
+---
+
+## 2rh — boot 157 hung three times; the callback was calling into IOFramebuffer, and the capture script finished the job
+
+**BOOT 157 WAS A HANG, NOT A PANIC, AND THE EVIDENCE IS GONE.** All three
+resets recorded `previous shutdown cause 5`, not `-128`, and **no `.panic` file
+was written** (newest is 2026-10-23). The panel froze, SSH stayed up, the user
+power-cycled. That is a deadlock.
+
+**It happened three times because the one-shot did not clear.** `rbgpu-agdc`
+survived the boot that consumed it, so the next two boots re-armed and re-hung;
+it is absent only now. **2qy had already measured this exact failure**
+(`mcr_oneshot 4`, the NVRAM clear silently failing, cause never established)
+and I handed over the activation commands anyway, resting the whole rescue on
+a mechanism this journal says is unreliable. The one-shot's entire purpose is
+that a bad boot is recovered by a power cycle, and that is the job it failed.
+
+### What was lost, and one inference retracted
+
+No `logs/<ts>-plugin` directory from 2026-10-26 exists **at all** - not a
+partial one. `plugin_check.sh` creates it at line 12 and writes the NVRAM
+breadcrumbs by line 57, so the directory existed in the page cache and **never
+reached the disk** before the hard reset.
+
+`rbgpu-diag` is overwritten every boot, so boot 157's block is gone too. I was
+one step from reporting `rbgpu-diag-prev` as boot 157's capture. **It is not,
+and rule 8 says why: `rbgpu-diag` carries no nonce.** Its contents -
+`agdc_user_vendor=4`, `agdc_user_cap=1`, `agdc_last_attr=921`,
+`agdc_logical_ret=e00002c7` - are *identical* to boot 156's documented numbers,
+and **every key added in 2re/2rf/2rg is absent from it** while `diag_used`
+reads 0x224 of 0x300, i.e. 548 of 768 with room to spare. So that block is
+boot 156 and says nothing about the boot that hung. Retracted before it became
+a finding.
+
+Also corrected, because I told the user the wrong thing to read: **the diag
+notes are HEX.** `diag_max=300` is 0x300 = **768**, matching
+`RBGPU_MAX_DIAGS`; `diag_used=224` is 548. I had told them to check that
+`diag_max` reads 768 as proof the new build was live, which would have made a
+correct install look like a failed one.
+
+### The defect, and it is 2re's
+
+`currentTiming()` called `IONDRVFramebuffer::getCurrentDisplayMode` and
+`getTimingInfoForDisplayMode` **synchronously from inside
+`filtered_doDeviceAttribute`** - that is, on WindowServer's thread, inside a
+user-client external method - while both are IOFramebuffer methods that expect
+the IOGraphics workloop. A lock-order inversion there produces exactly the
+observed symptom: wedged desktop, live kernel, no panic. **docs/RULES.md already
+carried the warning in this shape** for `-rbgpuvblpump` ("if that path needs a
+lock WindowServer holds the desktop can wedge") and 2re did it anyway, because
+"resolved and called, so rule 3 is untouched" answered the *routing* question
+and I never asked the *locking* one.
+
+**NOT ESTABLISHED: that the lock is what hung it.** The capture that would have
+proved it died with the boot. What is certain is that the structure was wrong.
+
+### The fix: sample once, off the callback
+
+`sampleTiming()` now runs on the bridge's own `thread_call`, **once**,
+immediately before `service->start(pci)` - with nothing of ours registered,
+no Apple lock held by us, and before WindowServer can query - and copies the
+0xa0-byte V2 body into `timingCache`. `vendor()` serves that cache and **calls
+nothing**: verified mechanically, `vendor()` no longer mentions
+`ndrvCurrentMode`, `ndrvTimingInfo` or any sampler. A failed sample leaves
+`timingValid` false and 0x921/0x711 **refuse**, which is 2rd's rule unchanged.
+This is the right structure whether or not the lock hypothesis holds, so the
+fix does not depend on it.
+
+### Rule 14, on my own refusal path
+
+`currentTiming()`'s first guard - `!ndrvCurrentMode || !ndrvTimingInfo ||
+!framebuffer` - returned `nullptr` **with no diag key at all**, so "the symbols
+never resolved", "no framebuffer" and "never called" were indistinguishable,
+which is the precise failure rule 14 exists for and 2qu restated as *a refusal
+path must publish the value it refused*. Now: **6** getters unresolved, **7**
+no framebuffer, and `agdc_tim_err` is **seeded to 9** in `rbgpu_agdc_load`
+before anything else, so an **absent** `agdc_tim_err` is impossible and 9 means
+`sampleTiming()` was never reached. `agdc_tim_cached 1` is the positive
+confirmation.
+
+### The instrument was the other culprit — rule 16, twice in one night
+
+`plugin_check.sh:83` ran `/usr/bin/sample WindowServer 3` **unguarded**, added
+by me in 2rc. `sample` suspends the target's threads and walks their stacks; a
+WindowServer wedged in a kernel call **cannot be suspended**, so `sample`
+blocks in the kernel and takes the machine with it - which is what ended two of
+the three attempts, each time destroying the capture it belonged to. The script
+run to diagnose a hang was causing one.
+
+**A timeout does not make it safe**, and the script already said so about
+`ioreg`: killing the wrapper cannot unblock a `task_suspend` already in the
+kernel. So the sample is now **OFF by default**, opt-in via
+`RBGPU_WS_SAMPLE=1`, with the bounded background-and-poll guard copied from
+`rb_ioreg` as a second line only, and a message that states plainly it cannot
+recover the thread. `compositor_check.sh`'s `sample` is bounded the same way
+but stays on, because that script is only meaningful on a responsive desktop.
+Its `pgrep -x WindowServer` also became the `ps -axo` form (rule 23).
+
+And the breadcrumbs are now **`sync`ed immediately** after they are written,
+before anything slower or riskier runs - the single change that would have
+saved tonight's evidence.
+
+### Build
+
+`make hosttest` and `make plugin` pass; imports **362 of 362** unchanged;
+`grep -c 'IOGraphicsFamily\|IONDRVSupport' src/plugin/Info.plist` = **0**; no
+new warnings. UUID moved `E56F3227…` → **B5419C66-347A-3123-880D-245FA816F9E4**.
+**`src/common` did not change, so no host-test case was added** - the fix is
+entirely in the plugin's threading, which the host harness cannot reach. That
+is a real gap in coverage, not an argument that none was needed.
+
+**NOTHING HERE IS VERIFIED ON HARDWARE, and the next boot must not rest on the
+one-shot.** Take **`-rbgpuagdc` out of boot-args** between experiments: the
+bridge needs the arg *and* the key, so without the arg a stuck one-shot is
+inert. That, not the one-shot, is the rescue that actually holds.
