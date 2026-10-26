@@ -106,6 +106,44 @@ Reachability is no longer an inference: `0x921` is traced through Apple's
 `0x13dfd1f1 → 0x13dfd204 → 0x13dfcf0d`, which calls **`*0x858(%rax)`**, the
 vendor slot this bridge overrides.
 
+## 2rf: attribute 0x711 needs exactly one capability
+
+`AGDCFBGetExtendedCapability_t` is a **query**: `u8` framebuffer index at
++0x00, `u32` type at +0x04, `u32` count at +0x08 (**in** the caller's capacity,
+**out** the number filled), then **8 entries of 0x32c** from +0x0c. The
+arithmetic closes three separate measurements: an entry is 0x32c because
+`getFbCapabilityForScaler` bzeroes `entry+0x08` for 0x324; `8 * 0x32c + 0xc`
+is exactly the 0x196c Apple's filter demands; and 8 is the capacity
+IOPresentment pre-loads.
+
+IOPresentment's `__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`)
+issues **sixteen** 0x711 queries, one per type bit — and eleven of them are for
+types **Apple itself does not implement**, so it tolerates failure by design.
+`0x2006` comes from exactly two sites, both belonging to the **first** query,
+type **0x10, the scaler**: a non-zero IOReturn and a returned count of zero.
+Later failures fall into the next query, and the last is preceded by
+`xorl %r14d,%r14d` so even its failure returns success. A count of 9 or more is
+clamped to 8.
+
+**So the stage reduces to: answer type 0x10 with count ≥ 1, refuse the rest.**
+IOPresentment reads nothing from the entries here either — only the count,
+stored at `this->0x42c` before it sets `this->0x434` bit 0.
+
+The bridge reproduces Apple's own **no-scaling** entry (`0xbfed05a`) with the
+extents taken from the same real timing 0x921 uses. Any other type returns
+Unsupported **without writing a byte**; index ≠ 0, a missing timing or a zero
+active dimension refuse; entries 1..7 stay entirely zero, because
+IOPresentment offered room for eight and a stale byte there would be a
+capability nobody implements.
+
+**NOT established, and not guessed:** which slot in each pair is width and
+which is height. `updateStreamComposition` (`0xbfe9270`) fixes the *pairing*
+(`fb->0x71c` with `0xc0`, `0x720` with `0xc4`, a letterbox fit) but not the
+axis names. It cannot change the entry's meaning — source and destination
+extents are equal, so transposing both pairs still says 1:1 — and the host
+test asserts that equality rather than the axis assignment. Detail: JOURNAL
+**2rf**.
+
 ## Implementation
 
 `src/plugin/rbgpu_agdc.cpp` solves AGDC's superclass, constructor, destructor
@@ -210,6 +248,9 @@ plugin_check's variable list. Full details remain in RBGPUDiag/RBGPULog.
 | agdc_tim_err | **0** required. 1 getCurrentDisplayMode failed; 2 getTimingInfoForDisplayMode failed; 3 kIODetailedTimingValid clear; 4 zero active pixels |
 | agdc_tim_mode / agdc_tim_h / agdc_tim_v | The mode and the active pixels actually handed to IOPresentment — if these are not the panel's, nothing downstream means anything |
 | agdc_tim_flags | The driver's own timing flags; bit 31 is kIODetailedTimingValid |
+| agdc_extcap_calls / agdc_extcap_answered | 0x711 requests seen, and how many were answered (expect 1 of ~16: only type 0x10) |
+| agdc_extcap_type | The type of the LAST 0x711 seen. If this is always 0 the vendor callback is being handed a separate zeroed output copy, and every type is refused for that reason rather than for being unimplemented |
+| agdc_extcap_result | 0 when the scaler reply was built; -2 for a type we refuse, which is expected for 15 of the 16 |
 | iop_verify | 1; otherwise WindowServer never passed the earlier gate |
 
 Refusal codes: 1 symbols/ranges; 2 vtable/prologue; 3 unarmed; 4 route;
