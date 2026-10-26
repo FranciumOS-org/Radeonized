@@ -33605,3 +33605,102 @@ case was added** — the change is the plugin's control flow and threading, whic
 the host harness cannot reach. That is a coverage gap, not a justification
 (2rh's own words for the same situation). Rescue unchanged: `-rbgpuoff`, and
 clear the one-shots before it comes back out.
+
+## 2ry — BOOT 164 WINS THE AGDC RACE, THEN REFUSES 0x921; MAKE THE TIMING SOURCE EARLY TOO
+
+User requested the new commits/handoff and the hang's plugin_check results,
+then continued framebuffer work. Evidence is `logs/20261026-133012-plugin`,
+not the live recovery boot: capture nonce **164**, loaded UUID
+**932B9FC8-49CB-3472-9099-A92D34380236** (2rx), all three one-shots absent,
+`iop_verify 1`, `diag_used 0x22f` = **559 of 768**. Live `kern.boottime`
+was already **13:30:44**, after this capture, while `rbgpu-boot` still read
+164; live RBGPUDiag reads `armed 0` / `agdc_oneshot 2`. Those live values
+are recovery controls and are NOT assigned to the hung boot.
+
+**2rx did win the publication race.** In the saved log, displaypolicyd PID142
+already sees AGDC registry ID **0x1000004ad** at **13:29:30.463**; its
+13:29:30.974 publication dump and WindowServer PID161's **13:29:31.515**
+registration both name `/RembrandtGPUAGDC`. There are **zero** occurrences
+of `Unable to get AGDC information` or `Unable to acquire map`, against the
+known-present registration dump. NVRAM records `agdc_started 1`,
+`agdc_user_vendor 4`, `agdc_user_cap 1`, `agdc_logical_calls 3` and
+**`agdc_last_attr 0x921` / `agdc_logical_ret 0xe00002c7`**. The bridge was
+queried and refused the logical-device timing. In this tree `rb_agdc_reply`
+returns Unsupported for implemented 0x921 when its timing pointer is NULL,
+and vendor supplies that pointer only when `timingValid` is true. Thus the
+cache was invalid. The log has **69** `No plane indices` and **20**
+`checkGPUProgress` occurrences. This is progress past the AGDC map failure,
+not a working framebuffer, and the GPU-progress errors remain unexplained.
+
+**The capture lost WHY, and it was a shell error, not evidence of a registry
+wedge.** Its last file is `display-log.txt`; no sample-status or peer file.
+`plugin_check.sh` uses `set -u` but its default-off branch expands
+`$RBGPU_WS_SAMPLE` without a default. When unset, the shell exits immediately
+at that line, before the registry collection. Fixed to
+`${RBGPU_WS_SAMPLE:-}`. The exact production conditional was executed in an
+isolated shell with the variable removed: exit 0, skip-status file written,
+no sample invoked. `sh -n` passes. The full script was NOT run by the agent.
+The depth-one peer plist now saves and syncs immediately after the NVRAM
+breadcrumbs, before slower log collection, and the later formatter reuses
+it rather than issuing a second potentially blocked walk. `boot-time.txt`
+is saved alongside the boot session UUID. Timing verdicts and the completed
+plane-answer counter move ahead of old probes in the existing 512-byte
+NVRAM summary; `iop_verify` also stays ahead of possible truncation.
+
+**The code's remaining dependency on the late NDRV path is real.** 2rx made
+all NDRV failures fall through to OTG, but the OTG function pointer was still
+assigned only by `processNDRV`. The early worker can therefore find no
+sampler, publish with an invalid cache, and never repair it (sampling is
+once, and `finished` prevents another registration). Merely moving the
+binding earlier would retain another startup dependency: the sampler used
+`g_hw`, populated only by AMD SMU sw_init. The saved NVRAM omitted all the
+sampler keys, so it cannot distinguish those early failures from a later
+OTG refusal; **the exact failed precondition on boot 164 is NOT measured**.
+
+**Fix:** move the existing edge-latched sampler into
+`src/plugin/rbgpu_agdc_otg.cpp`, call it directly with the bridge's retained
+PCI device, and delete the source-binding API and its NDRV registration.
+It maps **BAR5 only, `kIOMapInhibitCache | kIOMapReadOnly`**, using its own
+local map, and releases it on every exit. No AMD context or NDRV callback is
+needed. Before reading any register it checks **1002:1681 rev0a**, existing
+memory decoding, the virtual address and the aperture length through the
+highest of all four OTG control registers. It does not enable decoding or
+bus mastering. The DMU segment and four-pipe signature, raw timing decode,
+16-frame edge latch and conversion are the same ones boot 163 verified.
+After the sample it rejects changed timing/control registers. No register
+write, new route, new notification or publication trigger was added.
+The sampler error codes retain 1/3/4/5 and gain **6 identity, 7 decoding off,
+8 mapping failure, 9 short/invalid mapping, 10 timing changed**; old code 2
+(global AMD context absent) is obsolete. `agdc_otg_bound` is obsolete too;
+`otg_map_ro 1` and `otg_bar_len` describe the actual mapping instead.
+
+**Validation exercises the production sampler**, compiled with a minimal
+IOKit/clock shim under ASan/UBSan. With no NDRV or AMD startup in that
+executable it measures the fixture scanout and produces a successful 0x921
+with 1920x1080. Cases also cover 32-bit counter rollover, stopped counter,
+unreasonable refresh, timing changes, wrong vendor/device/revision, disabled
+decoding, mapping failure, short aperture (inaccessible pointer, so an early
+read fails hard), NULL address/output/device, unexpected second active OTG,
+read-only BAR5 flags and release on every mapped exit. Existing parser,
+AGDC, OTG and lookup tests pass, including 300000 parser mutations.
+
+**Next hardware verdict, pre-stated:** all three one-shots armed as on 164;
+`otg_err 0`, `otg_map_ro 1`, `agdc_tim_err 0`, `agdc_tim_cached 2`, real panel
+geometry/refresh, then **`agdc_link_result 0`** and
+**`agdc_extcap_answered > 0`**. The last `agdc_extcap_result` can legitimately
+be Unsupported: Apple asks optional types after the mandatory scaler, so
+use the successful-answer counter rather than requiring the last query to
+succeed. A successful reply still does not prove a display-pipe transaction
+or scanout. The actual flip/backend and GPU-progress errors remain open.
+
+Build/import UUID and commit are recorded in the next state block. No EFI,
+boot arguments, one-shots, installed kext, live hardware register or reboot
+was changed by the agent. **NOT VERIFIED ON HARDWARE.**
+
+**Final build:** `make plugin` passed; UUID moved from installed 932B9FC8
+to **0E6F0DCD-FB38-3D8B-BD95-370AF39DDF9B**. Imports **365/365**, no
+unresolved and none in SystemKernelExtensions.kc; the new revision-byte
+accessor `IOPCIDevice::extendedConfigRead8` resolves through the already
+declared IOPCIFamily in BootKernelExtensions.kc. Info.plist graphics
+dependencies remain zero. `git diff --check` passes. Existing kern_start
+warnings remain; the new sampler compiles without warnings.
