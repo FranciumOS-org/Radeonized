@@ -31519,3 +31519,148 @@ truthful plane capabilities and the presentation backend. Do not advertise
 nonexistent planes or use an offline zero-filled response to get past a
 check. The already verified publication/query stage needs no further
 metaclass experiment.
+
+---
+
+## 2rd — `AGDCLinkConfig_t` identified: it is a PUBLIC struct, and IOPresentment validates none of its timing
+
+2026-10-26. No boot, no build. Static only, against `build/re/AMDRadeonX6000Framebuffer`
+(`__text 0xbfcc6a0 + 0x1ed164`, which is the image 2rc's addresses live in) and
+the dyld cache.
+
+### 1. The reply layout, from `getLinkConfig` itself
+
+`__ZNK30AMDRadeonX6000_AmdAgdcServices13getLinkConfigEP16AGDCLinkConfig_tm`
+at **`0xc009184`** — the symbol is intact, so the name is Apple's. Guards
+first: `out != NULL`, `len == 0xb0` exactly (`cmpq $0xb0,%rdx; jne` at
+`0xc0091a0`), and `out[0] <= this->0x170 - 1` (the framebuffer count, an
+**unsigned** compare, so count 0 would wrap and reject everything). Then
+`fb = this->0x118->vt[0x900](out[0])` and `link = this->0x118->vt[0x8e8](fb->0xec)`
+must both be non-NULL, and `fb->0xd0 != 0`.
+
+The fill is a near-verbatim block copy from `fb->0x1c` to `out+0x10`, i.e.
+shifted by exactly **-0xc**, in four groups: **7 dwords**, **3 unaligned
+`movq`s**, **18 dwords**, **8 `movzwl`/`movw` halves**. That shape is
+`IODetailedTimingInformationV2` from the **public**
+`IOKit/graphics/IOGraphicsTypes.h`, whose own groups are 10 dwords (3 of them
+`__reservedA`), 3 `UInt64`s, 18 dwords, 9 `UInt16`s — and `-0xc` is exactly
+`sizeof(__reservedA[3])`.
+
+Verified by `offsetof`, not by counting header lines (2q4's rule), with the
+timing base hypothesised at `out+0x04`:
+
+```
+sizeof(V2) = 0xa0 ; 0x04 + 0xa0 = 0xa4   <- exactly the next written field
+horizontalScaledInset              reply+0x10   (first copied dword)
+signalLevels                       reply+0x28   (seventh, last before the u64s)
+pixelClock / minPixelClock / maxPixelClock
+                                   reply+0x2c / 0x34 / 0x3c  (the three movqs)
+horizontalActive                   reply+0x44
+verticalBlankingExtension          reply+0x88   (eighteenth, last dword)
+pixelEncoding                      reply+0x8c   (first half)
+verticalBlankingMaxStretchPerFrame reply+0x9a   (last half copied)
+verticalBlankingMaxShrinkPerFrame  reply+0x9c   (NOT copied - left zero)
+```
+
+Every one matches the disassembly. So:
+
+```c
+struct AGDCLinkConfig_t {                        // 0xb0 bytes
+    uint32_t                      framebufferIndex;  // +0x00  (input; see §2)
+    IODetailedTimingInformationV2 timing;            // +0x04, sizeof 0xa0
+        // __reservedA[0]    @ +0x04 = AGDC link id, 0xFFFFFFFF = none
+        // __reservedA[1..2] @ +0x08 = AGDC flags (u64; only the low byte is built)
+    uint32_t                      streamIndex;       // +0xa4
+    uint32_t                      field_a8;          // +0xa8  <- fb->0xf0
+    uint32_t                      streamState;       // +0xac  translateAmdStreamState()
+};                                                   // sums to exactly 0xb0
+```
+
+**AGDC reuses `__reservedA[3]`, which the header documents as "Init to 0",
+for its own link id and flags.** That is why the copy is shifted by 0xc.
+
+Two details worth having, both corrections to 2rc's wording:
+`+0xa4` is **not** a "stream address" — it is `fb->0xec + 1`, zero when
+`fb->0xec == 0xff` (`cmpl $0xff; cmovel`), i.e. a 1-based **stream index**;
+and the flags byte at `+0x08` is assembled as
+`0x08 | (linkId != -1 ? 0x10 : 0x02) | ((link->vt[0x150](0xd) & 1) << 2) | fb->0x719`,
+so **bit 3 is unconditionally set** and bit 4 vs bit 1 are mutually exclusive.
+
+### 2. IOPresentment checks the IOReturn and ONE bit. Nothing else.
+
+`__GatherAGDCLogicalDeviceCapabilities` at **`0x7ff812e9781a`**, read whole
+(0x1c2 bytes):
+
+* `this->0x20` must be non-NULL and `->0x10` non-zero, else **0x808**.
+* The buffer is `this+0x2c`, bzero'd to 0x3fc, and **IOPresentment writes the
+  framebuffer index itself**: `this->0x2c = deviceRecord->0x50`. We do not
+  choose it.
+* `IOConnectCallMethod(conn, 0x921, NULL, 0, inStruct = this+0x2c, 0xb0,
+  NULL, NULL, outStruct = this+0x2c, &outLen = 0xb0)` — **input and output are
+  the same buffer**, which is why 2rc's blanket "inSize must be 0" guard
+  rejected it.
+* `jne → 0x80e` on any non-zero IOReturn; `je → 0x80e` if `outLen` came back
+  zero. Those are the only two failure tests.
+* It then copies `reply+0x10 .. reply+0x9b` — the entire timing body — into
+  its own cache at `this->0x19b0c..`, with `movups`/`movq`/`movl`/`movw`.
+  **It inspects no field of it.**
+* `r14d = 0` (success), then `testb $0x1, reply+0x08` — and on either branch
+  the function returns **0**.
+
+So **the timing values cannot make this stage fail.** The stage's only
+behavioural output is flags bit 0.
+
+And the cache it fills is, within this image, **write-only**: `0x19b00`,
+`0x19b0c` and `0x19b10` appear at exactly three sites, all three inside this
+one function, all three stores, and `0x19b00`'s address is never taken
+(grep over the whole 32 292-line `__text` disassembly). The neighbouring
+`0x19c78` *is* read — `addq $0x19c78,%r15` at `0x7ff812e959dd` feeds
+`CFNumberCreate(alloc, 3, &value)` → `CFDictionarySetValue` → `CFRelease`
+(all three stubs resolved by chained-pointer decode + `atos`), so that one is
+published into a capabilities dictionary. **Not established, do not gloss:**
+"write-only in this image" is not "nothing ever reads it" — the object could
+be handed to a consumer elsewhere. But no consumer exists in IOPresentment and
+no pointer to the block is formed there.
+
+### 3. Flags bit 0 opts INTO more unimplemented protocol
+
+The bit-0 branch calls `0x7ff812e98af6`, which sets `this->0x19c78 = 2` and
+issues selector **0x925** with a **0xc-byte** in/out struct; if *that* reply's
+bit 0 is set it issues a further **0x24-byte** request. AMD's dispatch table
+at `0xbfec050` is a table of **int32 offsets from its own base**, not
+pointers (`machoread.ptr()` masks them to 30 bits and makes them look like
+`0x3ffff...`; reading them as `int32` reproduces 2rc's `0x921 → 0xbfebd9f`
+exactly). Decoded:
+
+| attr | stub | tailcalls |
+|---|---|---|
+| 0x921 | 0xbfebd9f | `getLinkConfig(AGDCLinkConfig_t*, 0xb0)` |
+| 0x925 | 0xbfebdc6 | `getPortStatus(AGDCPortStatus_t*, 0xc)` |
+
+So **leave flags bit 0 clear.** With it clear the gather returns success
+immediately after the copy and claims nothing; with it set we promise a port
+sub-protocol the bridge does not implement. Bit 3 should still be set, because
+AMD sets it unconditionally.
+
+### 4. What this changes about the next step
+
+The 0x921 reply does **not** need DCN registers, and it does not need
+invention either. `IODetailedTimingInformationV2` is exactly what
+`IOFramebuffer::getTimingInfoForDisplayMode` produces (inside
+`IOTimingInformation`), and this plugin **already routes**
+`IONDRVFramebuffer::getInformationForDisplayMode` (2ou/2q4) and already holds
+the framebuffer pointer. So the truthful source for every timing field is the
+boot framebuffer's own current mode — read-only, no register access, no
+fabricated value, and nothing in the stage branches on it anyway.
+
+2rc's "an offline all-zero reply cannot describe the running panel" remains
+the right instinct and is now sharper: a zero reply would **pass** this stage
+and poison IOPresentment's cache, which is precisely the failure that would be
+hard to find later. Fill it from the framebuffer.
+
+**What this does NOT do**, stated plainly: it makes one request succeed. The
+next stage is still 0x711 / `getFbExtendedCapability` with a 0x196c-byte
+structure and truthful plane capabilities, and the bind/transaction/scanout
+backend after it. Nothing here touches boot 156's frozen panel, the
+`checkGPUProgress` channel errors, or the 138 "Attempting to get capabilities
+when none exist" messages. No hardware was touched and no boot was spent.
