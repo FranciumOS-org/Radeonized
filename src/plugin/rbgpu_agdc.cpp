@@ -307,6 +307,21 @@ void run(thread_call_param_t,thread_call_param_t) {
         refuse(13,"init failed"); return;
     }
     service->setName(className);
+    // 2rk: AppleGraphicsDevicePolicy's personality is
+    // IOProviderClass = AppleGraphicsDeviceControl, so it probes EVERY AGDC -
+    // ours included - and its probe (0x13e0989a) matches with score 1000
+    // unless the provider carries NeedsPolicyDriver as an OSBoolean whose
+    // getValue() is FALSE. An ABSENT property therefore RECRUITS the policy
+    // driver. Apple's own nested AGDC sets it false for exactly this reason
+    // (0x13e0e800: setProperty(name,false) between attach() and start()).
+    // We are a single-GPU APU with no gmux, so we opt out by default;
+    // -rbgpuagdcpolicy leaves the property absent for an A/B test.
+    const bool allowPolicy=checkKernelArgument("-rbgpuagdcpolicy");
+    if (!allowPolicy && !service->setProperty("NeedsPolicyDriver",false)) {
+        auto failed=service; service=nullptr; failed->release();
+        refuse(16,"NeedsPolicyDriver publish failed"); return;
+    }
+    rbgpu_diag_set_num("agdc_policy_optout",allowPolicy ? 0u : 1u);
     if (!service->setProperty("IOUserClientClass","AppleGraphicsDeviceControlClient") ||
         !service->setProperty("RBGPUAGDCBridge",true) || !service->attach(pci)) {
         auto failed=service; service=nullptr; failed->release();
