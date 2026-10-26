@@ -34089,3 +34089,124 @@ software (2pd/2qd).
   3.1.2 is the requirement, or a transaction that nothing completes is, is
   **NOT established**, and the next read on this frontier is that function
   rather than more Linux `dcn31` scoping.
+
+## 2s2 — The post-gate blocker is NAMED, it is Apple's own code, and it is not a missing selector
+
+Static read, no boot, following 2s1's correction that boot 164 **blocked
+silently** rather than returning an error. The question was whether DCN 3.1.2
+is really the requirement. **It is not the thing that blocked.**
+
+### The whole transaction backend is Apple's, and it is present
+
+`IOAcceleratorFamily2` (extracted, 429 named `IOAccelDisplayPipe*` symbols)
+contains the entire display-pipe transaction machinery:
+`IOAccelDisplayPipe::transaction_wait_gated` / `_nolock`,
+`wait_for_queue_slot_gated` / `_nolock`, `submitFlipBufferTransaction`,
+`waitForStampTimeout`, `IOAccelDisplayPipeTransaction2::{prepare, complete,
+finish, make_flip_transaction, set_transaction_args, …}`,
+`IOAccelDisplayPipeUserClient2::{transactionWait, transactionEnd,
+s_transaction_wait}`. None of it is vendor code. 2pp already measured
+WindowServer holding a live `IOAccelDisplayPipeUserClient2` here. **So "past the
+gate there is no backend" is wrong as stated: the backend exists and is
+Apple's.**
+
+### `waitForStampTimeout` does not wait, and the bounded wait is the safe one
+
+**`waitForStampTimeout(int)` never sleeps.** It is 0x69 bytes:
+`r14 = this->vt[0x930](); if (r14 == arg) os_log(...); return r14 == arg;` — a
+*predicate* that reports whether the stamp equals the argument. The name is
+misleading and reading it as a wait would have been an error of exactly the
+kind rule 13 names.
+
+**`transaction_wait_gated` IS bounded and cannot be the hang.** It computes a
+deadline from `args+0x8` via `clock_interval_to_deadline(ms, 1000000, &out)`
+(the 0xAAAA.. poison in `-0x40(%rbp)` first, so an unwritten deadline would be
+obvious), then calls gate slot **0x1f0** with `(this, deadline, 1)`. It returns
+**`0xE00002D6` = `kIOReturnTimeout`** on expiry and carries **10 os_log
+references**, including one that divides elapsed ns by 1e6 (`mulq
+$0x431bde82d7b634db ; shrq $0x12`) to print the milliseconds waited alongside
+`0x238`/`0x23c`.
+
+### The unbounded wait, which is the one that blocks
+
+```
+IOAccelDisplayPipe::wait_for_queue_slot_gated():        // 0x14e60526, 0x47 bytes
+    if (this->0x23c - this->0x238 != 4) return;         // ring has room
+    do   gate(this->0xb0)->vt[0x1e0](this, 0);          // edx = 0
+    while (this->0x23c - this->0x238 == 4);
+```
+
+**Both slots resolved from Apple's own vtable, not asserted** (rule 7; and the
+first attempt used `__ZTV14IOCommandGate`, which is rule 5's wrong length
+prefix — `IOCommandGate` is 13 characters):
+
+- **`0x1e0` = `IOCommandGate::commandSleep(void *, unsigned int)`** — the
+  **two-argument, NO-DEADLINE** overload, called with `interruptible = 0`
+  = **`THREAD_UNINT`**, inside a `while` loop.
+- `0x1f0` = `IOCommandGate::commandSleep(void *, unsigned long long,
+  unsigned int)` — the deadline overload `transaction_wait_gated` uses.
+
+So the same object sleeps two different ways, and the queue-slot path has **no
+deadline, no timeout return, and — measured — ZERO os_log references**, against
+10 in `transaction_wait_gated`.
+
+The ring is **4 deep**: `0x238` consumed, `0x23c` produced, a difference of 4 is
+full, and `transaction_wait_gated` walks the same ring with `andl $-0x4`
+(modulo 4) and a 72-byte stride (`leaq (%rsi,%rsi,8)` then
+`0x40(%r13,%rsi,8)`).
+
+### Who reaches it — the chain, end to end
+
+`wait_for_queue_slot_nolock` (0x14e5e530) takes the gate and runs
+`wait_for_queue_slot_gated` by address (`leaq … , %rsi` at 0x14e5e55e), i.e. a
+`runAction`, which is why a `callq` search for the `_gated` body finds nothing.
+It has exactly **two** callers:
+
+1. **`IOAccelDisplayPipe::submitFlipBufferTransaction(IOAccelEvent *, uint,
+   IOAccelResource2 *, IOAccelResource2 *)`** (+0x96)
+2. **`IOAccelDisplayPipeUserClient2::transactionEnd(IOAccelDisplayPipeTransactionArgs *)`**
+   — the **userspace entry point**
+
+**So: WindowServer, once past the AGDC gate, submits through `transactionEnd`
+-> `wait_for_queue_slot_nolock` -> `runAction(wait_for_queue_slot_gated)` ->
+with the 4-deep ring full, `commandSleep(event, THREAD_UNINT)` forever.
+Uninterruptible, no deadline, no log, no panic.** The ring drains only when
+transactions complete; completion needs a flip; and **2pf measured
+`getDisplayPipeTransactionFlip` never called once in a whole boot.**
+
+**That is boot 164's signature exactly**: silent, no error, no panic file,
+frozen panel, main thread gone, other threads alive. And the silence is now
+explained rather than noted — that path has no os_log at all.
+
+### What this changes
+
+**The post-gate blocker is NOT a missing selector.** An unimplemented
+`IOPresentmentBindIOAccelSurfaceToResource` or `IOPresentmentSetPlaneState`
+returns `kIOReturnUnsupported`; it does not block. 2rz's inference is
+retracted on that point. What blocks is Apple's own code waiting for a
+completion this machine never produces.
+
+**So the requirement is "transactions must complete", and DCN 3.1.2 is one way
+to satisfy it, not the only conceivable one.** docs/RULES.md's "a large body of
+work" stands as the honest route to a real flip, but it is no longer the only
+thing in view.
+
+### The lever, and the read that must come before it
+
+`TransactionsSupported` and `DisplayPipeSupported` are **not** in
+IOAcceleratorFamily2 (control: `IOAccelDisplayPipeCapabilities` IS, so the
+search works). They are in **`AMDRadeonX6000`** — the vendor kext this project
+already routes. 2pp measured the published dictionary as
+`{DisplayPipeSupported = 1, TransactionsSupported = 1}` on our accelerator.
+
+Advertising `TransactionsSupported = 0` would be a plausible way to stop
+WindowServer submitting a transaction nothing will complete, and it is a
+property rather than a display engine. **But that is NOT proposed here**, for
+the reason 2q9/2qa recorded the hard way after 2pq: **find the consumer before
+writing to a field.** Nothing yet shows that IOPresentment or SkyLight reads
+either key and branches on it. **Next read: the consumers of
+`TransactionsSupported` / `DisplayPipeSupported`** in IOPresentment, SkyLight
+and CoreDisplay, with `ripall` on the string's START (2r4) and a known-present
+control.
+
+No code changed in this milestone.
