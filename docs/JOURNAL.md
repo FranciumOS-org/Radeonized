@@ -33214,3 +33214,83 @@ reboot instead of another theory.
 Tree unchanged from 2rs (restored to 1caa488); nothing rebuilt. The machine is
 usable but **unaccelerated** - `rbgpu-arm=1` is what makes an armed,
 accelerated boot, and that is exactly the first variable to test.
+
+## 2ru — BOOT 161: `rbgpu-arm` ALONE BOOTS CLEAN, SO THE ACCELERATOR ARM IS NOT THE HANG
+
+The user: *"im in with acceleration plugin check ran too all good"*. First boot of
+the one-variable A/B 2rt proposed, and the first armed boot since the four hangs.
+
+**Rule 8 / 15 first, and both clear.** `rbgpu-boot` reads **161** in the capture
+and live, up from the 160 that all four hung boots left behind — so the nonce
+bumped, a note was written, and everything below is this boot's. Loaded UUID is
+**A83C0170-8504-3110-B288-C4D90F6E8BDD**, byte-equal to `build/out` and to the
+UUID 2rn recorded for commit `1caa488`'s sources. Capture
+`logs/20261026-124936-plugin/`; live reads taken at 12:52 against a capture at
+12:49:36 on a 6-minute uptime, same boot.
+
+**THE CONFIGURATION, which is the whole point of the boot:**
+
+| | |
+|---|---|
+| `-rbgpuoff` | **OUT** |
+| `-rbgpuagdc` / `-rbgpuiop` | **IN** (both inert without their one-shots) |
+| `rbgpu-arm` | **armed, and CONSUMED** — absent after the boot |
+| `rbgpu-agdc` / `rbgpu-iop` / `rbgpu-mcreg` | **all absent** |
+
+`diag_used` **517** of `diag_max` **768**, so the table did not fill and an
+absent key carries information (rule 14).
+
+**IT IS AN ACCELERATED MAC.** `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` is
+**registered, matched, active** (id `0x1000004b7`, retain 88) — one
+`IOAccelerator` service against a 437-service `IOUserClient` control, and
+`ioreg -c ... -r -d1` with the **`-r`** 2r5 pinned. `RembrandtGPUPeer` is live
+(1 match). `system_profiler` reads `AMD Radeon 680M` / `VRAM (Total): 4 GB` /
+`Metal: Supported`. `dispclk` reads nominal **129.006 Hz** with a measured
+callback rate of **134.41 Hz** over 269 frames — the vblank path took, so this
+is not a 30 Hz fallback boot. Accelerator-path keys all present and sane:
+`starthw_c2 1`, `starthw_count 4`, `ptb_written 1`, `ptb_back 0x78fdfa001`,
+`stamp_ret 1`, `setres_ret 1`, `fbaccel_on 1`, `fbaccel_set 3`,
+`fbaccel_flags0 0`.
+
+**2r6's PRE-STATED CHECK PASSES ON ITS FIRST NORMAL BOOT.** `mtlk_patched`
+**2296** of `mtlk_execs` **2401**, `mtlk_failed` 11, `mtlk_ready 1`,
+`mtlk_syms 15` — and **`mtlk_moved` and `mtlk_moved_verdict` are both ABSENT**,
+which is exactly the signature 2r6 said a healthy boot must show. That was
+recorded as "NOT yet verified on hardware"; it is verified now.
+
+**AND THE BRIDGE PROVES ITS OWN GATE, WHICH IS WORTH MORE THAN THE NEGATIVE.**
+`-rbgpuagdc` was in boot-args with `rbgpu-agdc` absent, and the keys show
+exactly how far that carries: `agdc_on 1`, `agdc_solved 1023` (0x3ff, every
+symbol), `agdc_layout_ok 1`, `agdc_otg_bound 1`, **`agdc_fb_seen 1`** — so
+`rbgpu_agdc_framebuffer` DID fire, validated `0x1002`/`0x1681`, retained the
+framebuffer and the PCI device, allocated the worker and entered it — and then
+**`agdc_wait_load 1`** with `agdc_oneshot 2` (not armed), which is `run()`
+taking its unarmed exit. `agdc_tim_err` reads **9**, the load-time seed, so
+`sampleTiming()` was never reached and no DCN register was read; `RembrandtGPUAGDC`
+appears **0** times in the registry and `AppleGraphicsDeviceControl` is back to
+**1** instance (the wrangler alone). So the arg alone runs the hook and the
+worker's first few lines, and publishes nothing — 2rh's "without the arg a stuck
+one-shot is inert" has a companion: *without the one-shot the arg is inert too,
+but not silent.* `iop_on 1`, `iop_saw_ws 1`, `iop_ready 1`, `iop_oneshot 2` —
+the IOP hook likewise saw WindowServer and declined to patch.
+
+**WHAT THIS NARROWS, STATED NARROWLY.** The hung configuration 2rt reconstructed
+was *accelerator armed + IOP patch armed + AGDC off*. This boot is *accelerator
+armed + AGDC arg on, one-shot off*. It boots. So **`rbgpu-arm` alone is
+exonerated**, and the remaining variables are `rbgpu-iop` and the combination.
+**NOT established:** that `rbgpu-iop` is the culprit — boot 160 ran with
+`rbgpu-arm` + `rbgpu-agdc` + `rbgpu-iop` all armed and was fine, so a plain
+"the IOP patch hangs" does not fit the evidence either. The next boot adds
+**`rbgpu-iop=1`** and nothing else; if that hangs, the pair *arm + iop without
+`rbgpu-agdc`* is the suspect and the one after it adds `rbgpu-agdc=1` to
+reproduce boot 160. If it boots, the suspect is the full triple and the question
+becomes what 160 had that the hung boot did not.
+
+**One instrument note, since the capture is the evidence:** this
+`plugin_check.sh` run produced `boot-args.txt`, `boot-session-uuid.txt`,
+`display-log.txt`, `display-log-errors.txt`, `kexts.txt` and `nvram.txt` — **no
+`ioreg.txt`**. Every registry reading above is a live read taken inside the same
+boot, which is why the uptime and nonce were checked first. A capture without
+the registry dump cannot answer rule 15 on its own.
+
+No code changed. Tree still byte-identical to `1caa488` over `src/` and `tools/`.
