@@ -33155,3 +33155,62 @@ tree functionally identical to boot 160's, would hang at all - and whether
 UUID **A83C0170**; imports **362 of 362**, 0 unresolved. The machine is on
 `-rbgpuoff` and the one-shots are still armed, so they must be cleared before
 it comes out.
+
+## 2rt - THE MACHINE BOOTS AGAIN, AND THE VARIABLE IS THE ONE-SHOTS, NOT THE AGDC CODE
+
+The user: *"i rebooted im in no hang"*. Measured on that boot, not inferred:
+
+| | |
+|---|---|
+| uptime | 1 min, no hang |
+| `-rbgpuoff` | **OUT** - the plugin's peer is enabled |
+| `-rbgpuagdc` | **IN** |
+| `-rbgpuiop` | **IN** |
+| `rbgpu-arm` / `rbgpu-agdc` / `rbgpu-iop` | **all ABSENT** |
+| loaded UUID | **A83C0170**, byte-equal to `build/out` (rule 15) |
+| `RembrandtGPUPeer` | **live** |
+| `IOAccelerator` | **none** - unarmed, so unaccelerated, as expected |
+| framebuffer | `.Display_boot` |
+| `rbgpu-boot` | still **160** - unarmed, so no note was written |
+
+**MY FIRST READ OF THE PEER WAS WRONG, BY THE TRAP THIS PROJECT ALREADY
+DOCUMENTS.** `ioreg -c RembrandtGPUPeer -d1` returned **0** and I nearly
+reported the peer as absent. 2r5 recorded the reason in docs/RULES.md: **`-d1`
+without `-r` prints only the root**. Re-run as `-c ... -r -d1` it returns
+**2**, with `IOUserClient` as a 351-node control. Rule 26, caught before it
+became a finding instead of after.
+
+**SO THE PLUGIN AND `-rbgpuagdc`'s MERE PRESENCE ARE BOTH EXONERATED.**
+A83C0170 loads, the peer starts, the desktop comes up - with `-rbgpuagdc`
+sitting in boot-args the whole time. The hang is not the kext loading, not the
+boot-arg being present, and not the restored code.
+
+**AND THE REMAINING VARIABLE IS NAMED, WHICH IS THE FIRST REAL NARROWING IN
+FOUR BOOTS.** Against the hung boot, the difference is the **one-shots**:
+
+* the good boot has **none** set - nothing armed;
+* the hung boot had **`rbgpu-arm` = 1** and **`rbgpu-iop` = 1** (both measured
+  still set afterwards, unconsumed), with `-rbgpuagdc` out so `rbgpu-agdc` was
+  inert.
+
+**`rbgpu-arm` is not gated by `-rbgpuagdc` at all** - it arms the
+**accelerator** - and `rbgpu-iop` is gated by `-rbgpuiop`, which was present.
+So the hung configuration was *accelerator armed + IOP patch armed + AGDC off*,
+and the AGDC path could not have run in it. That is consistent with 2rs's
+backup reconstruction and arrives from a different direction.
+
+**One more thing the still-set keys say:** `rbgpu-arm` is consumed in the
+peer's own start path (`options->removeProperty("rbgpu-arm")`), so a key that
+survived means the hang happened **before that point** - early, in or before
+peer start. Which region that is, and why boot 160 survived the same armed
+path, is **NOT established**, and no mechanism is recorded here.
+
+**THE CHEAP A/B THAT WOULD SETTLE IT**, one variable per boot, each recoverable
+by `-rbgpuoff`: arm **`rbgpu-arm` only** (accelerator, no IOP, no AGDC). If
+that boots, add **`rbgpu-iop`**. If that boots, add `-rbgpuagdc` +
+`rbgpu-agdc`. The first one that hangs names the culprit, and each costs one
+reboot instead of another theory.
+
+Tree unchanged from 2rs (restored to 1caa488); nothing rebuilt. The machine is
+usable but **unaccelerated** - `rbgpu-arm=1` is what makes an armed,
+accelerated boot, and that is exactly the first variable to test.
