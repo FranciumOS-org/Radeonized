@@ -32904,3 +32904,68 @@ reachability first, because it is correct independently of any re-ordering;
 then measure the publish instant with 2rn's timestamps; only then move the
 trigger, so the move is made against a measured baseline instead of an
 inferred one.
+
+## 2rp - THE OTG FALLBACK IS REACHABLE FROM EVERY NDRV FAILURE, AND THE PUBLISH NO LONGER WAITS FOR THE FRAMEBUFFER
+
+Both changes 2ro named, with the dependency 2rm removed actually taken out.
+
+**1. `sampleTiming()` IS SPLIT, AND THE FALLBACK NOW SITS BEHIND ALL FIVE
+FAILURES INSTEAD OF ONE.** It was one function with four early returns -
+`agdc_tim_err` **6** (getters unresolved), **7** (no framebuffer), **1**
+(`getCurrentDisplayMode`), **2** (`getTimingInfoForDisplayMode`) - that each
+bypassed OTG0 entirely, leaving the fallback on the fifth path alone, the one
+boot 159 happened to hit. Now `sampleTimingNdrv()` **returns** the code and
+`sampleTimingOtg()` gets a turn after any non-zero, so a complete, independent,
+already-proven timing source is no longer gated on the NDRV partly succeeding.
+New key **`agdc_tim_ndrv_err`** keeps the NDRV's own verdict visible even when
+OTG0 then succeeds and `agdc_tim_err` reads 0 - otherwise the fix would have
+hidden which source was used and why, which is the error this project keeps
+making about its own instruments. `agdc_tim_cached` still says 1 = NDRV,
+2 = OTG0.
+
+**2. THE TRIGGER MOVED TO `RembrandtGPUPeer::start()`.** 2ro established that
+`rbgpu_agdc_framebuffer()` had one caller - the tail of the
+`IONDRVFramebuffer::enableController` hook - and that it was also what
+allocated the `thread_call`, so the publish could not precede
+`enableController` **by construction**. New entry point
+**`rbgpu_agdc_pci(IOService *)`**: the peer hands over its own provider, which
+is the device it matched on (`IOProviderClass = IOPCIDevice` + `IOPCIMatch` in
+`Info.plist`), validated the same way as before by vendor/device
+(`0x1002`/`0x1681`, refusal **6** unchanged), and that is what allocates and
+enters the worker now. `run()`'s gate changed from `!framebuffer` to **`!pci`**.
+`rbgpu_agdc_framebuffer()` survives but is **demoted**: it supplies the
+framebuffer for the NDRV path and `agdc_fb_id`, and only triggers the publish
+if the peer somehow did not - so the old ordering still works and is no longer
+the only path. New key **`agdc_pci_seen`**.
+
+**What makes this safe rather than merely earlier:** the handshake for "too
+early" was already written and, until now, dead. `run()` returns on `!armed`
+publishing `agdc_wait_load`, and `rbgpu_agdc_load`'s
+`if (work) thread_call_enter(work)` re-enters once AGDC's kext is routed - so
+either order works. If the metaclass or the wrangler is not up yet, `run()`
+retries every **100 ms** up to **100 times (10 s)** publishing `agdc_wait`.
+Both keys were ABSENT in boot 160 because nothing ever waited; they become
+load-bearing now, which is what they were written for. **Boot 161 should show
+`agdc_wait` NON-ZERO** - if it is still absent, the peer is starting later than
+assumed and that is itself the finding.
+**2oy's warning does not apply**, and the distinction is the whole reason this
+is allowed: it moved the *VRAM property publish* out of the peer because that
+needs the framebuffer. This publishes a service on the **PCI device** and takes
+its timing from **OTG0**, so it needs neither.
+
+**NOT established, and deliberately not assumed:** that moving the trigger
+fixes the race. 2ro showed the publish cannot precede `enableController`; it
+did **not** show that `enableController` is what runs at ~34 s, because the
+only upper bound in the log is `SafeEjectGPUService` at 10:12:07, which says
+"paired by 67 s", not "paired at 67 s". 2rn's `agdc_t_presample_ms` /
+`_sampled_ms` / `_started_ms` and the now-live `agdc_wait` are what will say
+whether this moved the publish before WindowServer's query at ~33.94 s, and by
+how much.
+
+Refusal codes unchanged and still unique (1-16, no collisions);
+`RouteRequest` count in the file still **1**, so rule 3 is untouched.
+`src/common` did not change, so no host-test case was added - both changes are
+plugin ordering and threading, which the host harness cannot reach; that is a
+coverage gap, not a justification. UUID **FB501234**; imports **362 of 362**,
+0 unresolved; Info.plist graphics deps **0**; hosttest and plugin pass.
+**NOT VERIFIED ON HARDWARE.**

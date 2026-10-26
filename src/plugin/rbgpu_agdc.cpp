@@ -112,66 +112,29 @@ static uint64_t rbgpuAgdcUptimeMs() {
 
 RbOtgSample otgSample=nullptr;
 
-void sampleTiming() {
-    // Rule 14: every exit publishes. agdc_tim_err was set to 9 before any of
-    // this, so the key exists even if we are never called at all.
-    if (!ndrvCurrentMode || !ndrvTimingInfo) {
-        rbgpu_diag_set_num("agdc_tim_err",6); return;   // getters unresolved
-    }
-    if (!framebuffer) {
-        rbgpu_diag_set_num("agdc_tim_err",7); return;   // no framebuffer
-    }
+// 2ro: OTG0 is a COMPLETE, independent timing source, so it must be reachable
+// from EVERY way the NDRV can fail - not only from the one case boot 159 hit.
+// The first cut had four early returns (agdc_tim_err 6, 7, 1, 2) that bypassed
+// it entirely and put the fallback on the fifth path alone, the one where the
+// NDRV answers and its flags lack kIODetailedTimingValid. That also blocked
+// publishing before the framebuffer exists, which takes path 7.
+//
+// Returns the agdc_tim_err code; 0 means the cache is filled.
+uint32_t sampleTimingNdrv() {
+    if (!ndrvCurrentMode || !ndrvTimingInfo) return 6;  // getters unresolved
+    if (!framebuffer)                        return 7;  // no framebuffer (yet)
     uint8_t scratch[kRbTimingInfoSize];
     int32_t mode=0, depth=0;
-    if (ndrvCurrentMode(framebuffer,&mode,&depth)!=kIOReturnSuccess) {
-        rbgpu_diag_set_num("agdc_tim_err",1); return;
-    }
+    if (ndrvCurrentMode(framebuffer,&mode,&depth)!=kIOReturnSuccess) return 1;
     rbgpu_diag_set_num("agdc_tim_mode",static_cast<uint64_t>(mode));
     for (size_t i=0;i<kRbTimingInfoSize;i++) scratch[i]=0;
-    if (ndrvTimingInfo(framebuffer,mode,scratch)!=kIOReturnSuccess) {
-        rbgpu_diag_set_num("agdc_tim_err",2); return;
-    }
+    if (ndrvTimingInfo(framebuffer,mode,scratch)!=kIOReturnSuccess) return 2;
     uint32_t flags=0;
     for (unsigned i=0;i<4;i++) flags|=static_cast<uint32_t>(scratch[4+i])<<(8*i);
     rbgpu_diag_set_num("agdc_tim_flags",flags);
     // Rule 13/14: the struct is only meaningful when the driver says the
     // detailed timing is filled in. Refuse rather than ship whatever was there.
-    if (!(flags & kRbDetailedTimingValid)) {
-        // 2rm: boot 159's measured case. The NDRV answered, and what it
-        // answered is "I have no detailed timing" - so fall back to OTG0,
-        // which the firmware already programmed and which is read-only.
-        // agdc_tim_err stays 3 unless the fallback actually produces a
-        // timing, so a boot without the fallback reads exactly as 159 did.
-        rbgpu_diag_set_num("agdc_tim_err",3);
-        if (!otgSample) { rbgpu_diag_set_num("agdc_otg_src",0); return; }
-        struct rb_otg_timing otg;
-        for (size_t i=0;i<sizeof otg;i++) reinterpret_cast<uint8_t *>(&otg)[i]=0;
-        if (!otgSample(&otg)) { rbgpu_diag_set_num("agdc_otg_src",1); return; }
-        rbgpu_diag_set_num("agdc_otg_src",2);
-        // Publish the raw registers before converting: a refusal below must
-        // say what it refused (rule 19), and these eight words are the whole
-        // input, so a capture of them is a capture of the hardware.
-        rbgpu_diag_set_num("agdc_otg_htot",otg.h_total);
-        rbgpu_diag_set_num("agdc_otg_hbse",otg.h_blank_start_end);
-        rbgpu_diag_set_num("agdc_otg_hsa", otg.h_sync_a);
-        rbgpu_diag_set_num("agdc_otg_vtot",otg.v_total);
-        rbgpu_diag_set_num("agdc_otg_vbse",otg.v_blank_start_end);
-        rbgpu_diag_set_num("agdc_otg_vsa", otg.v_sync_a);
-        rbgpu_diag_set_num("agdc_otg_mhz", otg.refresh_mhz);
-        uint8_t otg_v2[RB_V2_SIZE];
-        int orc=rb_otg_to_v2(&otg,otg_v2,sizeof otg_v2);
-        rbgpu_diag_set_num("agdc_otg_ret",static_cast<uint64_t>(-orc));
-        if (orc!=RB_OTG_OK) return;        // refuses, never zero-fills
-        for (size_t i=0;i<RB_AGDC_TIMING_SIZE;i++) timingCache[i]=otg_v2[i];
-        timingValid=true;
-        rbgpu_diag_set_num("agdc_tim_h",rb_agdc_get32(otg_v2+RB_AGDC_V2_HACTIVE));
-        rbgpu_diag_set_num("agdc_tim_v",rb_agdc_get32(otg_v2+RB_AGDC_V2_VACTIVE));
-        rbgpu_diag_set_num("agdc_tim_clk",rb_agdc_get64(otg_v2+RB_AGDC_V2_PIXELCLOCK));
-        rbgpu_diag_set_num("agdc_tim_mhz",otg.refresh_mhz);
-        rbgpu_diag_set_num("agdc_tim_err",0);
-        rbgpu_diag_set_num("agdc_tim_cached",2);   // 2 = from OTG0, 1 = NDRV
-        return;
-    }
+    if (!(flags & kRbDetailedTimingValid)) return 3;    // boot 159/160's case
     const uint8_t *v2=scratch+kRbTimingDetailOff;
     // Field offsets are Apple's own, named in rb_agdc.h from the CFNumber keys
     // IOPresentment publishes them under; all five are reported so a boot says
@@ -186,9 +149,7 @@ void sampleTiming() {
     rbgpu_diag_set_num("agdc_tim_hblank",hblank);
     rbgpu_diag_set_num("agdc_tim_vblank",vblank);
     rbgpu_diag_set_num("agdc_tim_clk",clock);
-    if (!hactive || !vactive) {
-        rbgpu_diag_set_num("agdc_tim_err",4); return;
-    }
+    if (!hactive || !vactive) return 4;
     // 2rg: __gatherCapabilities computes refresh = pixelClock / (hTotal*vTotal)
     // and publishes it as RefreshTime/Min/MaxRefreshTime. A zero clock passes
     // its > 0.0f guard and yields 0.0 Hz, so rb_agdc_link_config refuses it;
@@ -196,11 +157,56 @@ void sampleTiming() {
     // capture says whether the number Apple will advertise is the panel's.
     const uint64_t total=static_cast<uint64_t>(hactive+hblank)*(vactive+vblank);
     rbgpu_diag_set_num("agdc_tim_mhz",total?(clock*1000ull)/total:0ull);
-    if (!clock) { rbgpu_diag_set_num("agdc_tim_err",5); return; }
+    if (!clock) return 5;
     for (size_t i=0;i<RB_AGDC_TIMING_SIZE;i++) timingCache[i]=v2[i];
     timingValid=true;
-    rbgpu_diag_set_num("agdc_tim_err",0);
-    rbgpu_diag_set_num("agdc_tim_cached",1);
+    rbgpu_diag_set_num("agdc_tim_cached",1);   // 1 = NDRV, 2 = OTG0
+    return 0;
+}
+
+// OTG0's live registers, read-only. True only if the cache is filled.
+bool sampleTimingOtg() {
+    if (!otgSample) { rbgpu_diag_set_num("agdc_otg_src",0); return false; }
+    struct rb_otg_timing otg;
+    for (size_t i=0;i<sizeof otg;i++) reinterpret_cast<uint8_t *>(&otg)[i]=0;
+    if (!otgSample(&otg)) { rbgpu_diag_set_num("agdc_otg_src",1); return false; }
+    rbgpu_diag_set_num("agdc_otg_src",2);
+    // Publish the raw registers before converting: a refusal below must say
+    // what it refused (rule 19), and these words are the whole input, so a
+    // capture of them is a capture of the hardware.
+    rbgpu_diag_set_num("agdc_otg_htot",otg.h_total);
+    rbgpu_diag_set_num("agdc_otg_hbse",otg.h_blank_start_end);
+    rbgpu_diag_set_num("agdc_otg_hsa", otg.h_sync_a);
+    rbgpu_diag_set_num("agdc_otg_vtot",otg.v_total);
+    rbgpu_diag_set_num("agdc_otg_vbse",otg.v_blank_start_end);
+    rbgpu_diag_set_num("agdc_otg_vsa", otg.v_sync_a);
+    rbgpu_diag_set_num("agdc_otg_mhz", otg.refresh_mhz);
+    uint8_t otg_v2[RB_V2_SIZE];
+    int orc=rb_otg_to_v2(&otg,otg_v2,sizeof otg_v2);
+    rbgpu_diag_set_num("agdc_otg_ret",static_cast<uint64_t>(-orc));
+    if (orc!=RB_OTG_OK) return false;      // refuses, never zero-fills
+    for (size_t i=0;i<RB_AGDC_TIMING_SIZE;i++) timingCache[i]=otg_v2[i];
+    timingValid=true;
+    rbgpu_diag_set_num("agdc_tim_h",rb_agdc_get32(otg_v2+RB_AGDC_V2_HACTIVE));
+    rbgpu_diag_set_num("agdc_tim_v",rb_agdc_get32(otg_v2+RB_AGDC_V2_VACTIVE));
+    rbgpu_diag_set_num("agdc_tim_clk",rb_agdc_get64(otg_v2+RB_AGDC_V2_PIXELCLOCK));
+    rbgpu_diag_set_num("agdc_tim_mhz",otg.refresh_mhz);
+    rbgpu_diag_set_num("agdc_tim_cached",2);   // 2 = from OTG0, 1 = NDRV
+    return true;
+}
+
+void sampleTiming() {
+    // Rule 14: every exit publishes. agdc_tim_err was seeded to 9 before any of
+    // this, so the key exists even if we are never called at all.
+    // The NDRV is tried first because it is the display's own advertised
+    // timing; OTG0 then gets a turn after ANY of its failures, and
+    // agdc_tim_ndrv_err keeps the NDRV's own verdict visible either way so a
+    // boot still says why the first source was not used.
+    const uint32_t ndrv=sampleTimingNdrv();
+    rbgpu_diag_set_num("agdc_tim_ndrv_err",ndrv);
+    if (ndrv==0) { rbgpu_diag_set_num("agdc_tim_err",0); return; }
+    rbgpu_diag_set_num("agdc_tim_err",ndrv);
+    if (sampleTimingOtg()) rbgpu_diag_set_num("agdc_tim_err",0);
 }
 
 IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
@@ -301,7 +307,7 @@ uintptr_t solve(KernelPatcher &p,size_t id,const char *name,
 }
 
 void run(thread_call_param_t,thread_call_param_t) {
-    if (finished || !framebuffer) return;
+    if (finished || !pci) return;   // 2ro: pci is the requirement, not the fb
     if (!armed) { rbgpu_diag_set_num("agdc_wait_load",1); return; }
     // Lookup certifies registration; a BSS metaclass at kext-load time does
     // not yet contain an OSSymbol at +0x18 (2qv/2qx).
@@ -374,7 +380,8 @@ void run(thread_call_param_t,thread_call_param_t) {
         refuse(14,"properties/attach failed"); return;
     }
     rbgpu_diag_set_num("agdc_pci_id",pci->getRegistryEntryID());
-    rbgpu_diag_set_num("agdc_fb_id",framebuffer->getRegistryEntryID());
+    if (framebuffer)
+        rbgpu_diag_set_num("agdc_fb_id",framebuffer->getRegistryEntryID());
     // 2rh: sample the timing HERE - on this thread_call, with nothing of ours
     // registered yet and no Apple lock held by us - so the vendor callback
     // never has to call into IOFramebuffer. Must precede start(), because
@@ -493,6 +500,29 @@ void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
     rbgpu_diag_set_num("agdc_tim_src",(cur?1u:0u)|(info?2u:0u)); // 3 required
 }
 
+// 2ro: the ONE thing the bridge needed the framebuffer for was its provider,
+// and the peer already has it. Allocating the thread_call here - and entering
+// it - is what used to chain the whole publish behind enableController.
+void rbgpu_agdc_pci(IOService *pciDevice) {
+    if (!checkKernelArgument("-rbgpuagdc") || pci) return;
+    auto dev=OSDynamicCast(IOPCIDevice,pciDevice);
+    if (!dev || dev->configRead16(kIOPCIConfigVendorID)!=0x1002 ||
+        dev->configRead16(kIOPCIConfigDeviceID)!=0x1681) {
+        refuse(6,"PCI identity"); return;
+    }
+    pci=dev; pci->retain();
+    rbgpu_diag_set_num("agdc_pci_seen",1);
+    if (!work) {
+        work=thread_call_allocate(run,nullptr);
+        if (!work) { refuse(7,"worker allocation"); return; }
+    }
+    thread_call_enter(work);
+}
+
+// Still called from the enableController hook, but no longer the trigger: it
+// only supplies the framebuffer, which is now optional. If the publish has
+// already happened the timing came from OTG0 and this changes nothing; if it
+// has not, run() gets another chance with the NDRV source available too.
 void rbgpu_agdc_framebuffer(IOService *fb) {
     if (!checkKernelArgument("-rbgpuagdc") || framebuffer) return;
     if (reinterpret_cast<uintptr_t>(fb)<0xffffff8000000000ULL ||
@@ -500,16 +530,10 @@ void rbgpu_agdc_framebuffer(IOService *fb) {
         strcmp(fb->getMetaClass()->getClassName(),"IONDRVFramebuffer")) {
         refuse(5,"unexpected framebuffer"); return;
     }
-    pci=OSDynamicCast(IOPCIDevice,fb->getProvider());
-    if (!pci || pci->configRead16(kIOPCIConfigVendorID)!=0x1002 ||
-        pci->configRead16(kIOPCIConfigDeviceID)!=0x1681) {
-        refuse(6,"framebuffer PCI identity"); return;
-    }
-    // Called after enableController. The worker waits for AGDC construction
-    // outside the framebuffer's gate; no wait/registration inside its hook.
-    framebuffer=fb; framebuffer->retain(); pci->retain();
-    work=thread_call_allocate(run,nullptr);
-    if (!work) { refuse(7,"worker allocation"); return; }
-    thread_call_enter(work);
+    framebuffer=fb; framebuffer->retain();
     rbgpu_diag_set_num("agdc_fb_seen",1);
+    // The peer normally gets here first; this covers the case where it did not
+    // (and keeps the old ordering working) without being the only path.
+    if (!pci) rbgpu_agdc_pci(fb->getProvider());
+    else if (work && !finished) thread_call_enter(work);
 }
