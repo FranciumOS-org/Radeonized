@@ -33492,3 +33492,116 @@ never reached (not refused), and `agdc_user_vendor`/`agdc_user_cap` are absent
 with `diag_used` 565 of 768, so that absence carries information. What this boot
 bought is a verified timing source, a published and paired bridge, and the
 deadline expressed as 1732 ms with its components separated.
+
+## 2rx — THE MATCHED NOTIFICATION IS RE-LANDED, AND THE AUDIT FOUND THREE DEFECTS 2rr DID NOT HAVE WHEN IT WAS WRITTEN
+
+The user asked for 2rr's trigger back now that 2rw measured the window, and for
+an audit against 2rq's lesson first. The audit is the substance of this
+milestone: **2rr as written would not have been safe on this tree**, and one of
+the three defects is a plausible mechanism for the fourth hang.
+
+**DEFECT 1, AND IT IS THE INTERESTING ONE: `run()` HAD NO MUTUAL EXCLUSION, AND
+2rr TAKES ITS LIVE ENTRY POINTS FROM ONE TO THREE.** The restored tree has three
+`thread_call_enter` sites but only **one live**, by accident of ordering: `work`
+is allocated in the framebuffer hook, so `rbgpu_agdc_load`'s own
+`if (work) thread_call_enter(work)` is a no-op (`work` is still NULL) and the
+hook's is the only enter. 2rr moves the allocation to kext-load time, which
+**activates that dormant enter** and adds the notification handler's — and
+`addMatchingNotification` fires the handler **synchronously** for an
+already-matched service, so the handler's enter and the one two lines below it
+happen back to back. `thread_call_enter` on a call that is already executing
+requeues it, and a thread call has no built-in exclusion, so two `run()` bodies
+can overlap.
+**Why that is not a stylistic objection:** `run()` calls
+`preModLoad` / `mcCtor` / `postModLoad`, and 2qx measured that
+`OSMetaClass::preModLoad` takes `_sStalledClassesLock` as its first instruction
+and **only `postModLoad` releases it**. Two overlapping bodies means two
+`preModLoad`s against one lock, a second metaclass constructed into the same
+`metaStorage`, and a double `attach`/`start`. 2qx already spelled out the
+consequence: **if that lock is not released the next kext load blocks forever,
+with no panic and no log** — which is exactly "the bar filling up over and over
+but nothing happened", and exactly why all four hangs left `rbgpu-boot` at 160
+with no note and no panic file.
+**HYPOTHESIS, LABELLED AS ONE, AND IT IS NOT PROVEN:** this is a mechanism that
+fits the fourth hang's whole signature, where 2rq's provider-busy story did not.
+It does **not** explain the first three (they ran 2rp's tree, which had the old
+single-enter shape), and 2rs reconstructed the fourth boot as having
+`-rbgpuagdc` **out**, under which none of this code runs — but 2rs labelled that
+reconstruction "NOT a measurement". So: a candidate, recorded as one, and
+**`agdc_run_reentry` now measures it** rather than leaving it argued.
+**THE FIX** is one claim at the top of `run()`:
+`if (!OSCompareAndSwap(0,1,&inRun)) { rbgpu_diag_inc("agdc_run_reentry"); return; }`
+released **only** on the paths that deliberately ask to be re-entered (no PCI
+yet, not armed, and the 100 ms retry), and held forever on every terminal path.
+The idiom is the one `RembrandtGPUPeer.cpp` already uses for
+`g_rbgpuNvramBusy`. All seven exits were walked individually.
+
+**DEFECT 2: A NULL DEREFERENCE ON THE FAST PATH.** `run()` does
+`rbgpu_diag_set_num("agdc_fb_id",framebuffer->getRegistryEntryID())`, and the
+entire point of this change is to publish **before the framebuffer exists** —
+so `framebuffer` is NULL exactly when the fix works. 2rr's diff never touched
+that line because 2rr was written against 2rq's tree, where `run()` still
+required the framebuffer two statements earlier. Guarded.
+
+**DEFECT 3: THE OTG0 FALLBACK WAS UNREACHABLE ON THE FAST PATH, SO THE BRIDGE
+WOULD HAVE PUBLISHED WITH NO TIMING.** `sampleTiming()` returns
+`agdc_tim_err 7` ("no framebuffer") **before** the OTG0 fallback — and with the
+notification trigger, 7 becomes the **normal** case. The published 0x921 would
+then refuse, which is correct behaviour and a useless result: we would have
+traded a late-but-complete bridge for an early-but-empty one. This is precisely
+the reachability defect **2rp part (1)** fixed and **2rq explicitly kept**
+("pure control flow... no suspect for a hang") before 2rs reverted the whole
+tree wholesale. Restored: `sampleTimingNdrv()` returns the code (6/7/1/2/3/4/5,
+0 on success) and `sampleTimingOtg()` gets a turn after **every** non-zero one,
+with **`agdc_tim_ndrv_err`** preserving the NDRV's own verdict when OTG0 then
+succeeds and `agdc_tim_err` reads 0. Without that key the fix would hide which
+source the published timing came from.
+
+**A FOURTH, LATENT, FOUND WHILE EDITING:** the framebuffer hook did
+`pci = OSDynamicCast(...)` and *then* validated the identity, so a non-matching
+device was left in the global `pci` **unretained**. Harmless while `run()` gated
+on `framebuffer`; not harmless once it gates on `pci`. Now validated into a
+local and assigned only on success, and it will not clobber a device
+`resolvePci()` already retained (`agdc_pci_seen`: 1 = framebuffer, 2 = peer).
+
+**WHAT IS KEPT FROM 2rr, UNCHANGED:** `resolvePci()` takes the PCI device from
+our own peer in the registry — a peer that matched `IOPCIMatch 0x16811002` is
+proof its `start()` returned, the fact 2rp assumed while publishing from inside
+that same `start()` — and it runs on a `thread_call`, so there is no matching
+thread to contend with. The handler is **two diag writes and
+`thread_call_enter`**, nothing else.
+
+**THE 2rq AUDIT, ITEM BY ITEM:** handler body minimal (verified by reading it);
+`attach(pci)` and `service->start(pci)` occur at exactly **one site each**, both
+inside `run()`, on the thread_call; no call crosses from the peer into the
+bridge (`grep -c rbgpu_agdc` in the peer = 0, unchanged); `RouteRequest` count
+still **1** (rule 3); refusal codes still unique **1–16**.
+
+**IMPORTS 362 -> 364, AND 2oz's TRAP IS SHUT — CHECKED, NOT ASSUMED.**
+`kmutil libraries` resolves **364 of 364** with **0 unresolved** and
+**0 from `SystemKernelExtensions.kc`**. Both new symbols —
+`IOService::addMatchingNotification` and `gIOMatchedNotification` — resolve to
+`com.apple.kpi.iokit` in **`BootKernelExtensions.kc`**, so no new kext
+dependency and `grep -c IOGraphicsFamily src/plugin/Info.plist` is still **0**.
+UUID moved **A83C0170 -> 932B9FC8**. Hosttest passed, including the agdc cases.
+
+**WHAT THE NEXT BOOT HAS TO SHOW, PRE-STATED.** 2rw's deadline is
+**+5452 ms** and the framebuffer hook fired at **+7072 ms**. So, in order:
+`agdc_note_armed 1`, `agdc_note_fired 1`, then **`agdc_t_armed_ms` and
+`agdc_t_note_ms` against 5452** — if `agdc_t_note_ms` is above it, the wrangler
+arrives later than the window implies and that is the finding, not a failure of
+this code. Then **`agdc_t_started_ms` below 5452** is the actual goal, with
+`agdc_pci_seen` **2** (resolved from the peer, not the framebuffer) and
+`agdc_run_reentry` **absent** (or non-zero, which would confirm defect 1 was
+real and is now contained). The timing block must still read `agdc_tim_err 0`
+with `agdc_tim_cached 2` and `agdc_tim_ndrv_err 7` — NDRV had nothing because
+the framebuffer did not exist yet, OTG0 supplied it anyway. And the verdict that
+matters: whether `Unable to get AGDC information` and
+`Unable to acquire map` are **gone** from the log, with
+`agdc_user_vendor`/`agdc_user_cap` present instead of absent.
+
+**NOT VERIFIED ON HARDWARE.** `src/common` did not change, so **no host-test
+case was added** — the change is the plugin's control flow and threading, which
+the host harness cannot reach. That is a coverage gap, not a justification
+(2rh's own words for the same situation). Rescue unchanged: `-rbgpuoff`, and
+clear the one-shots before it comes back out.
