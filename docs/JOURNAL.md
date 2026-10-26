@@ -33859,3 +33859,112 @@ shut. Info.plist graphics dependencies **0**. `RouteRequest` in
 `rbgpu_agdc.cpp` still **1** (rule 3). **NOT YET BOOTED.**
 
 Rescue unchanged: `-rbgpuoff`, and clear the one-shots before it comes out.
+
+## 2s0 — Boot 165 verifies 2rz: the gate is shut, the desktop lives, and the BAR5 sampler works on hardware
+
+Capture `logs/20261026-145230-plugin`, run from inside a live accelerated
+desktop. Rule 8/15/14 all clear: **`rbgpu-boot` 165**, every one-shot
+**consumed** (`rbgpu-arm`/`rbgpu-agdc`/`rbgpu-iop` all `<unset>`, `agdc_oneshot
+0`, `iop_oneshot 0`), UUID **5951FC1F** = `build/out`, `diag_used` **0x23f =
+575** of **0x300 = 768**, so an absent key carries information. Boot-args: no
+`-rbgpuoff`, no `-rbgpuagdcearly`, `-rbgpuagdc` and `-rbgpuiop` in.
+
+### The gate held, and the absences are the proof
+
+**`agdc_early 0`.** `agdc_note_armed`, `agdc_note_fired`, `agdc_run_reentry`,
+`agdc_wait` and `agdc_wait_load` are **all absent** — the matched notification
+was never installed, the load-time `thread_call_enter` was never reached,
+nothing re-entered and nothing waited. `agdc_pci_seen` **1** (framebuffer, not
+the peer lookup) confirms the framebuffer hook was the sole trigger, which is
+the pre-2rx shape by construction.
+
+### Published late, never queried, desktop alive — boot 163's signature exactly
+
+`agdc_started 1`, `agdc_stage 0x46` (= 70), `agdc_error 0`, `agdc_say` =
+*"PUBLISHED: verify IOPresentment in WindowServer"*, `agdc_policy_optout 1`.
+`AGDC::start` queried us as 2rj decoded (`agdc_vendor_calls 2`,
+`agdc_cap_calls 1`). **`agdc_user_vendor` and `agdc_user_cap` are ABSENT**, and
+so are `agdc_link_result` and every `agdc_extcap_*` key — WindowServer never
+reached us, so 0x921 and 0x711 were never asked.
+
+**THE CONTROL, and it is the point of the whole change: all four errors are
+BACK**, one occurrence each in `display-log.txt` — `Unable to get AGDC
+information`, `Unable to acquire map`, `Unable to locate service dependencies`,
+`System set to use IOP but no display pipes are present`. Boot 164 had **zero**
+of all four and hung. Their return is what says the gate is shut again.
+
+Apple's own dump reads **both** states, which is the clearest single picture of
+the race this project has: `gpu 0xfbc7 agdc 0x000000000` three times, then
+`gpu 0xfbc7 agdc 0x100000524 /RembrandtGPUAGDC` later in the same log.
+Published and paired — after the question.
+
+**The race, measured again and TIGHTER than 163's:** `kern.boottime`
+**14:50:32.279**; the question is `WindowServer[162:3a2]` at **14:50:38.608** =
+**+6329 ms** (rule 28: timestamp and pid). `agdc_t_armed_ms` **5946**,
+`agdc_t_fb_ms` **7134** = `agdc_t_presample_ms`, `agdc_t_sampled_ms` **7249** =
+`agdc_t_started_ms`. **Late by 920 ms, of which the sample is 115 ms.** Boot
+163 was late by 1732 ms. The trigger is the same; what moved is when the
+framebuffer arrived, which is further evidence that a framebuffer-triggered
+publish cannot meet this deadline reliably (2ro) rather than evidence of any
+improvement.
+
+### 2ry's BAR5 sampler is verified on hardware, first time
+
+This is the part of 2ry that was worth keeping, and it works:
+
+- **`otg_map_ro 1`** — the read-only `mapDeviceMemoryWithRegister(BAR5,
+  kIOMapInhibitCache | kIOMapReadOnly)` succeeded.
+- **`otg_bar_len 0x80000` = 512 KB** — BAR5's size, measured here for the first
+  time, against the `lastByte` the sampler needs (0x14608 = 83 976), so the
+  bounds check had 6x headroom rather than passing by luck.
+- **The identity check held through the NEW path**: `otg_ctl0 0x11201` with
+  `OTG_MASTER_EN`, `otg_ctl1`/`2`/`3` all `0x300`, `otg_off_ok 3` — 2oq's
+  four-register signature, so a direct BAR5 read reaches the same registers
+  AMD's `g_hw.rreg` did. That equivalence was assumed by 2ry and is now
+  measured.
+- **Six raw registers bit-identical to 2oq and boot 163**: `agdc_otg_htot`
+  2106, `_hbse` 0x7f07ff, `_hsa` 0x3c0000, `_vtot` 1129, `_vbse` 0x14044c,
+  `_vsa` 0x50000. `agdc_otg_ret 0`, `agdc_otg_src 2`.
+- **The edge latch and the arithmetic audit**: `otg_frames` **16** in `otg_ns`
+  **111 205 632** (`otg_polls` 954 of 4000) = **143.8776 Hz**, and
+  `2106 * 1129 * 143877 / 1000` = **342 092 602**, reproducing `agdc_tim_clk`
+  to the digit. Against the true 341 987 984 that is **+0.0306 %** (boot 163:
+  +0.045 %; boot 160's fixed window: +3.278 %).
+- Timing block green: `agdc_tim_err 0`, `agdc_tim_cached` **2** (OTG0),
+  `agdc_tim_h 1920`, `agdc_tim_v 1080`, `agdc_tim_mhz 143877`.
+- **`agdc_tim_ndrv_err 3`** — the NDRV answered with `kIODetailedTimingValid`
+  clear (`agdc_tim_flags 0`), exactly as 2rl measured, and 2rx's split is what
+  let the OTG fallback carry it. So the key does the job it was added for:
+  `agdc_tim_err 0` alone would have hidden which source won.
+
+`iop_verify 1` with `iop_match 1`, `iop_patched 1`, `iop_saw_ws 1` — 2qo's five
+bytes landed in WindowServer's own memory again, so the IOP gate was open and
+this boot is a true comparison with 164 rather than a repeat of 159.
+
+### Live state, same boot
+
+Read live at 4 min uptime with the nonce checked first:
+`AppleGraphicsDeviceControl` **2** instances, `RembrandtGPUAGDC` present,
+`AMDRadeonX6000_AMDNavi21GraphicsAccelerator` present. A working accelerated
+Mac with the bridge published and paired.
+
+### Instrument note, rule 26
+
+**`ioreg.txt` in a `plugin_check.sh` capture is TWO LINES** — our own
+`RembrandtGPU` node and its bundle id, not a registry dump. A grep for
+`AMDRadeonX6000_AMDNavi21GraphicsAccelerator` against it returns 0 and that is
+a property of the file, not of the boot; the accelerator is in
+`igpu-children.txt`, `igpu-raw.txt` and `pci.txt`. This produced a confident
+wrong negative here before the control was run. Do not read class presence out
+of `ioreg.txt`.
+
+### What this boot does NOT show
+
+It is the deliberate *non*-winning configuration, so it tests nothing past the
+gate. No display pipe, 0x921 and 0x711 never asked, `agdc_user_vendor` /
+`agdc_user_cap` absent, software compositing unchanged, and the
+`checkGPUProgress` channel errors still unexplained. 2rz's verdict stands
+untouched: opening the gate needs
+`IOPresentmentBindIOAccelSurfaceToResource` and `IOPresentmentSetPlaneState`,
+i.e. DCN 3.1.2 from Linux's `dcn31`, and until that exists `-rbgpuagdcearly`
+stays out.

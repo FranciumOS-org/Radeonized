@@ -19,6 +19,60 @@ sealed-OS policy enforces independently of the CSR bits).
 
 ## Status in three lines
 
+**LATEST 2026-10-26 / 2s0: BOOT 165 VERIFIES 2rz - THE GATE IS SHUT, THE DESKTOP
+LIVES, AND 2ry's BAR5 SAMPLER WORKS ON HARDWARE.** Capture
+`logs/20261026-145230-plugin`, run from a live accelerated desktop. Rule
+8/15/14: **`rbgpu-boot` 165**, every one-shot **consumed**, UUID **5951FC1F** =
+`build/out`, `diag_used` **0x23f = 575** of **0x300 = 768**. No `-rbgpuoff`, no
+`-rbgpuagdcearly`.
+**THE GATE HELD, AND THE ABSENCES PROVE IT:** `agdc_early 0`, with
+`agdc_note_armed`, `agdc_note_fired`, `agdc_run_reentry`, `agdc_wait` and
+`agdc_wait_load` **all absent** - the notification was never installed, the
+load-time enter never reached, nothing re-entered, nothing waited.
+`agdc_pci_seen` **1** (framebuffer, not the peer lookup) confirms the hook was
+the sole trigger.
+**PUBLISHED LATE, NEVER QUERIED, DESKTOP ALIVE - boot 163's signature exactly:**
+`agdc_started 1`, `agdc_stage 0x46`, `agdc_error 0`, `agdc_policy_optout 1`,
+`agdc_vendor_calls 2` / `agdc_cap_calls 1` (AGDC::start, 2rj), and
+**`agdc_user_vendor`/`agdc_user_cap`/`agdc_link_result`/every `agdc_extcap_*`
+ABSENT** - WindowServer never reached us. **THE CONTROL: all four errors are
+BACK**, one each - `Unable to get AGDC information`, `Unable to acquire map`,
+`Unable to locate service dependencies`, `no display pipes are present` - where
+boot 164 had ZERO of all four and hung. Apple's dump shows **both** states in
+one log: `agdc 0x000000000` three times, then
+`agdc 0x100000524 /RembrandtGPUAGDC`. **Race: boottime 14:50:32.279, the
+question `WindowServer[162:3a2]` at 14:50:38.608 = +6329 ms;
+`agdc_t_armed_ms 5946`, `agdc_t_fb_ms 7134`, `agdc_t_started_ms 7249` - LATE BY
+920 ms, sample 115 ms** (163 was 1732 ms; the trigger is the same, only the
+framebuffer arrived differently, which is more evidence for 2ro, not progress).
+**THE BAR5 SAMPLER IS VERIFIED:** `otg_map_ro 1`; **`otg_bar_len 0x80000` =
+512 KB**, measured for the first time against the 0x14608 the sampler needs (6x
+headroom, not luck); 2oq's signature held **through the new path** -
+`otg_ctl0 0x11201` with `OTG_MASTER_EN`, `otg_ctl1/2/3 0x300`, `otg_off_ok 3` -
+so a direct BAR5 read reaches the same registers `g_hw.rreg` did, which 2ry
+assumed and this measures; six raw registers bit-identical to 2oq and 163;
+`otg_frames` **16** in `otg_ns` **111 205 632** (954 polls) = **143.8776 Hz**,
+and `2106 * 1129 * 143877 / 1000` = **342 092 602** reproducing `agdc_tim_clk`
+to the digit = **+0.0306 %** of the true 341 987 984 (163: +0.045 %; 160:
++3.278 %). `agdc_tim_err 0`, `agdc_tim_cached 2`, 1920x1080, `agdc_tim_mhz
+143877`, and **`agdc_tim_ndrv_err 3`** (NDRV flags 0) is 2rx's split doing its
+job - `agdc_tim_err 0` alone would have hidden which source won. `iop_verify 1`
+so the IOP gate was open and this IS a true comparison with 164.
+Live, same boot: `AppleGraphicsDeviceControl` **2** instances,
+`RembrandtGPUAGDC` and `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` present.
+**INSTRUMENT NOTE, rule 26: `ioreg.txt` in a capture is TWO LINES** - our own
+node and its bundle id, NOT a registry dump - so a class grep against it
+returns 0 as a property of the file; the accelerator is in `igpu-children.txt`,
+`igpu-raw.txt` and `pci.txt`. It produced a wrong negative here before the
+control was run.
+**WHAT IT DOES NOT SHOW:** this is the deliberate non-winning configuration, so
+nothing past the gate is tested - no display pipe, 0x921/0x711 never asked,
+software compositing unchanged, `checkGPUProgress` errors still unexplained.
+2rz stands: opening the gate needs
+`IOPresentmentBindIOAccelSurfaceToResource` + `IOPresentmentSetPlaneState`, i.e.
+DCN 3.1.2 from Linux's `dcn31`, and `-rbgpuagdcearly` stays OUT until then.
+JOURNAL **2s0**.
+
 **LATEST 2026-10-26 / 2rz: TWO MORE HANGS, AND BOOT 163 vs BOOT 164 IS THE A/B
 THIS PROJECT NEVER HAD: WINNING THE AGDC GATE IS WHAT WEDGES THE MACHINE.**
 `diff` of 163's and 164's `boot-args.txt` is **EMPTY - byte-identical** - so the
