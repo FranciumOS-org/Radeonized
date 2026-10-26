@@ -1,3 +1,36 @@
+> **2rd–2rg (static, no boot): BOTH PENDING AGDC ATTRIBUTES ARE IMPLEMENTED
+> AND NEITHER NEEDED DCN CODE. The block below is superseded on its "Next".**
+> **0x921 / getLinkConfig**: `AGDCLinkConfig_t` is 0xb0 bytes embedding the
+> **public** `IODetailedTimingInformationV2` at **+0x04**, with `__reservedA[3]`
+> reused as link id (+0x04) and a flags u64 (+0x08); the honest source is
+> `IONDRVFramebuffer::getCurrentDisplayMode` + `getTimingInfoForDisplayMode`,
+> both **defined** in IONDRVSupport, resolved and **called** — nothing routed,
+> nothing patched, no register touched.
+> **0x711 / getFbExtendedCapability** is a **query** (index/type/capacity in,
+> count out, 8 entries of 0x32c = 0x196c). IOPresentment issues **sixteen**,
+> eleven for types Apple itself does not implement, and only the **first**
+> (type 0x10, the scaler) can fail the stage — so the bridge answers that one
+> with Apple's own no-scaling entry and refuses the rest without writing a byte.
+> **2rg then corrected 2rd's one load-bearing error**: the 0x921 reply does not
+> go into a write-only cache. It has 24 reads, it **is** the display's
+> advertised capability (fourteen fields republished as CFNumbers under Apple's
+> own key names — `PixelClock`, `HorizontalActive`, `HorizontalBlanking`,
+> `VerticalActive`, `VerticalBlanking`, …, matching the public header field for
+> field and in order), and `__gatherCapabilities` **computes**
+> `refresh = pixelClock / ((hActive+hBlank) * (vActive+vBlank))` from it,
+> publishing it as `RefreshTime`/`Min`/`Max`. A zero `pixelClock` passes
+> Apple's `> 0.0f` guard and would advertise **0.0 Hz**, so it is now a
+> refusal. flags bit 0 turns out to be **safe**, not dangerous (its whole
+> effect is a field with four writers and zero readers); it stays clear for
+> honesty. **Read `agdc_tim_mhz`** — the refresh Apple's own formula will
+> produce from this boot's timing — against the panel's **143 833**.
+> UUID **E56F3227**; imports 362/362; Info.plist graphics deps 0.
+> **NONE OF 2rd–2rg IS VERIFIED ON HARDWARE**, and a published capability is
+> not a picture: the bind/transaction/scanout backend, all plane state, the
+> frozen panel and the `checkGPUProgress` errors are all still open.
+> JOURNAL **2rd**, **2re**, **2rf**, **2rg**; `docs/SPEC-AGDC-BRIDGE.md`.
+>
+
 > **BOOT 156 / 2rc: AGDC PUBLISHED; DISPLAY FROZE AT THE NEXT PROTOCOL STEP.**
 > Capture `logs/20261025-174221-plugin`, UUID **667372BC…**, nonce 155→156:
 > `agdc_solved=0x3ff`, `agdc_mc_ok=1`, `agdc_started=1`, `iop_verify=1`.

@@ -31890,3 +31890,167 @@ unimplemented.
 Still absent and not claimed: the bind/transaction/scanout backend, any plane
 state, and any explanation for boot 156's frozen panel or the
 `checkGPUProgress` channel errors. A published capability is not a picture.
+
+---
+
+## 2rg — the 0x921 cache is NOT write-only: it IS the display's advertised capability, and Apple computes the refresh rate out of it
+
+Static, no boot. Follows 2rd/2re/2rf, and **corrects 2rd on one sentence that
+mattered**: *"copies `reply+0x10..0x9b` into a cache it never reads in this
+image."* It reads it twenty-four times.
+
+### The orchestrator
+
+`IOPresentmentCapabilities::__gatherCapabilities()` (`0x7ff812e95370`, 0x104
+bytes) is the function above both gathers, and it is small enough to read
+whole:
+
+```
+if (this == NULL)                       return 0x808;
+if (!cmpxchg(this->0x8, 0 -> 1))        return 0x81f;   /* re-entrant */
+retry:
+  this->0x10 = 0;                                        /* dirty flag */
+  ret = __GatherAGDCLogicalDeviceCapabilities();         /* 0x7ff812e9781a */
+  if (ret != 0) goto out;                                /* <- the only abort */
+  ret = __GatherAGDCDisplayPipelineCapabilities();       /* 0x7ff812e979dc */
+  this->0x19c54 = 60.0f;                                 /* 0x42700000 */
+  hTotal = (float)(this->0x19b40 + this->0x19b44);
+  vTotal = (float)(this->0x19b50 + this->0x19b54);
+  if (hTotal * vTotal > 0.0f)
+      this->0x19c54 = (float)this->0x19b28 / (hTotal * vTotal);
+  this->0x19c58 = this->0x19b40;
+  this->0x19c60 = this->0x19b50;
+out:
+  if (this->0x10) goto retry;
+  release lock; return ret (or 0x821 if the release raced)
+```
+
+The `ucomiss` operand at `0x7ff812ea3468` reads **`0.0f`** (measured, not
+assumed — the neighbouring word is `160.0f`), so that branch is **only a
+divide-by-zero guard**, not a plausibility test.
+
+### Which fields those offsets are, by Apple's own names
+
+The cache base is `reply + 0x19afc` (`reply+0x10` → `0x19b0c`, from the copy
+in `__GatherAGDCLogicalDeviceCapabilities`), and the V2 struct sits at
+`reply+0x04`, so `V2 = cache - 0x19b00`. That makes the formula above:
+
+> **refresh = pixelClock / ((horizontalActive + horizontalBlanking) ×
+> (verticalActive + verticalBlanking))**
+
+the textbook refresh-rate identity — which is itself evidence for the
+embedding. But it is no longer the only evidence.
+`IOPresentmentCreateEndPointDictionary` (`0x7ff812e9550c`) takes the **address**
+of fourteen cached fields in turn and makes a CFNumber of each under a CFString
+key, and the keys decode to:
+
+| cache | V2 | Apple's key |
+|---|---|---|
+| `0x19b28` | `0x28` | `PixelClock` |
+| `0x19b30` | `0x30` | `MinPixelClock` |
+| `0x19b38` | `0x38` | `MaxPixelClock` |
+| `0x19b40` | `0x40` | `HorizontalActive` |
+| `0x19b44` | `0x44` | `HorizontalBlanking` |
+| `0x19b48` | `0x48` | `HorizontalSyncOffset` |
+| `0x19b4c` | `0x4c` | `HorizontalSyncPulseWidth` |
+| `0x19b50` | `0x50` | `VerticalActive` |
+| `0x19b54` | `0x54` | `VerticalBlanking` |
+| `0x19b58` | `0x58` | `VerticalSyncOffset` |
+| `0x19b5c` | `0x5c` | `VerticalSyncPulseWidth` |
+| `0x19b70` | `0x70` | `HorizontalSyncConfig` |
+| `0x19b78` | `0x78` | `VerticalSyncConfig` |
+| `0x19b84` | `0x84` | `VerticalBlankingExtension` |
+
+Field for field, in order, matching the public `IOGraphicsTypes.h`. **This is
+Apple naming the fields rather than us matching offsets**, and it is the
+strongest confirmation of the `reply+0x04` embedding so far — stronger than
+2rd's shifted block copy and stronger than the `offsetof` sum. The derived
+values are published too: `0x19c58`/`0x19c60` as **`LooksLikeWidth`** /
+**`LooksLikeHeight`**, and `0x19c54` under **`RefreshTime`**,
+**`MinRefreshTime`** and **`MaxRefreshTime`** — three keys, one address, all
+the computed value.
+
+So 2rd's claim stands exactly as far as it was measured and no further:
+IOPresentment **validates** no timing field. It **consumes** nearly all of
+them.
+
+### What that changes in the bridge: one new refusal
+
+The zero-fill hazard 2rd reasoned about is now specific rather than general. A
+zero `pixelClock` **passes** the `> 0.0f` guard (because the guard tests the
+*totals*, not the clock) and publishes a `RefreshTime` of **0.0 Hz** — where a
+zero total would at least have left Apple's own stated 60.0f. So a zero clock
+is the one remaining poisoning, and `rb_agdc_link_config` now refuses it,
+before touching the output, by the same rule and for a measured reason.
+
+`IOPresentmentGetCurrentEndPointDimensions` (`0x7ff812e96ed6`) independently
+justifies the refusal already in place: when `0x19b40` or `0x19b50` is zero it
+returns having written **neither** output, leaving its caller's values whatever
+they were. It also reveals an override — `*w = 0x19b18 ? 0x19b18 : hActive`,
+`*h = 0x19b1c ? 0x19b1c : vActive`, i.e. **`horizontalScaled`** /
+**`verticalScaled`** (V2+0x18/+0x1c) win when set. The bridge copies the V2
+body wholesale, so whatever the NDRV publishes there is what Apple will use;
+that is honest, and it is recorded here rather than silently inherited.
+
+### flags bit 0 is SAFE, and 2rd overstated it
+
+2rd said bit 0 must stay clear because it pulls in "a port sub-protocol this
+bridge does not implement." The reachability is right; the danger is not.
+`__GatherAGDCLogicalDeviceCapabilities` tests `reply+0x08` bit 0 at
+`0x7ff812e979b7` and calls `__GatherAGDCLinkCapabilities(reply+0xa4)`
+(`0x7ff812e98af6`), which:
+
+* presets `this->0x19c78 = 2`;
+* issues selector **0x925** with a 0xc-byte `{streamAddr, 0}` — on failure, on
+  `outLen == 0`, or if `reply+0x08` bit 0 is clear, **returns**;
+* issues selector **0x988** with a 0x24-byte buffer — same three exits;
+* otherwise sets `0x19c78` from `reply+0x20`: bit 3 → 8, else bit 1 → 4, else
+  bit 2 → 1, else 2.
+
+It returns **void**; `r14` (the success code) is zeroed at `0x7ff812e979b4`
+*before* the call and is callee-saved across it. And `0x19c78` has **four
+writers and ZERO readers in the entire image** (`grep` of the full 0x1c000-byte
+disassembly) — the same shape as the cache 2rd mis-called write-only, inverted.
+So setting bit 0 would cost two answerable queries and change nothing. It stays
+clear because **this bridge knows of no link to describe**, which is a reason
+of honesty, not of hazard. Recorded because a wrong reason for a right
+decision breaks the next time the decision is revisited.
+
+Also confirmed: `reply+0xa4` and `+0xa8` are **one** field to the consumer —
+read with a single `movq` and passed as `AGDCStreamAddress_t` — so the zero the
+bridge writes at `+0xa8` is that address's high half, not padding.
+
+### Tests, and each one broken on purpose
+
+Five new offset literals are pinned to the measurement (`RB_AGDC_TIMING_OFF +
+RB_AGDC_V2_*` must equal `0x2c`/`0x44`/`0x48`/`0x54`/`0x58`, the reply offsets
+`0x19b28`−`0x19afc` etc.), the ramp proves the copy puts each one there, the
+zero-clock refusal is asserted to write nothing, and 0x711 is asserted to
+**still answer** with a clockless timing so the refusal is provably scoped to
+0x921. The index is zeroed first so the clock guard is what fires and not the
+index check — the trap the bit-0 guard fell into in 2re.
+
+Broken in turn: removing the clock guard (as `== 0xdeadbeef`, so it still
+compiles) **4** failures; shifting `RB_AGDC_V2_PIXELCLOCK` by 4 → **2**;
+shifting `RB_AGDC_V2_HACTIVE` by 4 → **6**.
+
+### Build
+
+`make hosttest` and `make plugin` pass; imports **362 of 362** unchanged;
+`grep -c 'IOGraphicsFamily\|IONDRVSupport' src/plugin/Info.plist` = **0**; no
+new warnings. UUID moved `5719404C…` →
+**E56F3227-243C-3F7E-9B29-5B8DD5B5405F**.
+
+New diag keys: `agdc_tim_hblank`, `agdc_tim_vblank`, `agdc_tim_clk`, and
+**`agdc_tim_mhz`** — the refresh in millihertz that *Apple's own formula* will
+produce from this boot's timing, published whether or not the reply is refused,
+so the capture says directly whether the number macOS is about to advertise is
+the panel's. `agdc_tim_err` gains **5 = zero pixelClock**.
+
+**Nothing here is verified on hardware.** The reading order for the next boot
+is unchanged except for one addition: after `agdc_tim_h`/`agdc_tim_v`, read
+**`agdc_tim_mhz`** and compare it with the panel's 143 833 — if it reads 0 or
+60 000, the NDRV's detailed timing is incomplete and that, not the bridge, is
+the next thing to fix. Still absent: the bind/transaction/scanout backend, all
+plane state, and any explanation for boot 156's frozen panel or the
+`checkGPUProgress` channel errors.
