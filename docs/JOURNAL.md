@@ -32275,3 +32275,109 @@ publishing the AGDC bridge freeze the panel?** It is not the timing path. The
 next read is `AppleGraphicsDeviceControl::start` and what the wrangler does
 with our service on the `0x13dfd37c` call, since that is the only thing that
 runs between a working desktop and a frozen one.
+
+---
+
+## 2rj — AGDC::start queries OUR vendor twice and branches on the answers; and it holds the kext's only infinite wait
+
+Static, no boot. Asked for: `AppleGraphicsDeviceControl::start` and the
+wrangler's `0x13dfd37c` call. Both read; the freeze is **still not explained**,
+but two concrete things came out and one forming hypothesis was dropped.
+
+### `0x13dfd37c` is `setDeviceAttribute`, and it is a 36-byte thunk
+
+```
+AppleGraphicsDeviceControl::setDeviceAttribute(unsigned, unsigned long *, unsigned long):
+    filtered_doDeviceAttribute(api = 1 /* SET */, attr, buf, len, 0, 0, NULL)
+```
+
+So **2r1's reading is confirmed from AGDC's own side**: the wrangler is pushing
+a value *into* AGDC, not reading one out, and it lands in the very function
+this bridge routes.
+
+### `start` has the only blocking wait in the kext, and it is INFINITE
+
+Swept the whole of AGDC through `kc_stubs.py`: **one**
+`IOService::waitForMatchingService`, **one** `IOSleep`, 12 `IORecursiveLockLock`
+and 14 unlocks. The wait is in `start`:
+
+```
+13dfbc8d  leaq "AppleGPUWrangler", %rdi
+13dfbc94  xorl %esi, %esi            ; serviceMatching("AppleGPUWrangler", NULL)
+13dfbca6  movq $-0x1, %rsi           ; *** timeout = UINT64_MAX ***
+13dfbcad  callq IOService::waitForMatchingService
+13dfbcb5  callq mach_absolute_time   ; it MEASURES how long it waited
+13dfbcc7  callq absolutetime_to_nanoseconds
+```
+
+`$-0x1` is an infinite timeout, and Apple instruments the duration, so a long
+wait is expected behaviour. **Benign here** - 2r5 measured that
+`AppleGPUWrangler` is present and is the only `AppleGraphicsDeviceControl`
+match - but worth recording plainly: this bridge calls `service->start(pci)`
+from its own `thread_call`, so if that service were ever absent the call blocks
+**forever**, on a shared kernel thread, with no timeout and no diagnostic of
+ours. `agdc_stage` would sit at 60 and never reach 70.
+
+### `start` calls OUR vendor slot twice, and branches on what we answer
+
+Three re-entries into our code during `start`: `*0x858` at `0x13dfbb60` and
+`0x13dfbba1`, and `filtered_doDeviceAttribute` directly at `0x13dfbef6`. The
+first two decode completely:
+
+```
+*(u64 *)outLen = 0x2c;
+vendor(attr = 1, ..., buf);              /* kAGDCVendorInfo */
+eax = buf->0x28;
+if ((uint32_t)(eax - 1) > 1) goto TAIL;  /* i.e. unless buf->0x28 is 1 or 2 */
+    *(u64 *)outLen = 0xdc;
+    vendor(attr = 0x980, ..., buf2);     /* kAGDCGPUCapability */
+    eax = <field>;
+TAIL:
+if ((uint32_t)(eax - 7) > 1) goto SKIP;  /* i.e. only for 7 or 8 */
+    setProperty("NeedsPolicyDriver", ...);
+SKIP:
+```
+
+Two things follow, and the first is a genuine cross-confirmation:
+
+* **`vendorInfo+0x28` must be 1 or 2**, measured here in AGDC's own `start`.
+  2r5 derived exactly that constraint from the opposite end, out of
+  IOPresentment's os_log format ("0x2c bytes, `+0x28` must be 1 or 2"). Two
+  independent files, same requirement. **The bridge writes 2**
+  (`rb_agdc_vendor`), so it takes the branch that queries 0x980 - correct.
+* **The decode of the other value is new**: `+0x28 == 7` - the value this
+  bridge's own comment records as what Apple's AMD wrangler reports - **skips
+  the 0x980 query entirely** and lands on `TAIL` with `eax = 7`, which is in
+  `{7,8}` and therefore **sets `NeedsPolicyDriver`**. So `+0x28` is not a
+  version field: it selects between *"I am a policy-driver GPU, do not ask me
+  for capabilities"* and *"ask me for capabilities and decide from the reply"*.
+  The bridge is deliberately on the second path.
+
+### A hypothesis dropped before it became a claim
+
+Three `*0x858` dispatch sites sit in `filtered_doDeviceAttribute`
+(`0x13dfcf23`, `0x13dfd026`, `0x13dfd0a2`), and there is an
+`IORecursiveLockLock` at `0x13dfc6ff` whose unlock is not until `0x13dfd0f3`.
+That looked like "our callback runs under AGDC's lock", which would have made
+every slow thing in `vendor()` a convoy - a tidy story for a frozen panel.
+
+**It is not supported.** 2rd already traced 0x921 as
+`0x13dfc32b → 0x13dfc5b8 → 0x13dfd1f1 → 0x13dfd204 → 0x13dfcf0d`, which
+**skips `0x13dfc6ff..0x13dfca43` entirely**, and `0x13dfd222`'s lock is past
+the `0x13dfd204` hop. So on 0x921's actual path **no recursive lock is held at
+our callback**. Recorded as a non-finding rather than quietly dropped, because
+this is the second tidy lock story this week and the first one (2rh) reached a
+commit before being measured false.
+
+### Where this leaves the freeze
+
+**Still unexplained**, and nothing in 2rh, 2ri or 2rj has touched it - the
+panel froze in boot 156 with `agdc_started=1`, before any of the timing code
+existed. What is new is that `start` **branches on our replies**, so the
+bridge's answers are not merely reported, they configure Apple's object. The
+live lead is **`NeedsPolicyDriver`**: find its readers, and find which field
+the `TAIL` comparison reads after the 0x980 call (it is `-0x4(%r15)`, four
+bytes *below* the capability buffer, so it is not obviously a field of our
+reply and must be pinned down before anything is concluded from it).
+
+No code changed in this milestone.
