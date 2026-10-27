@@ -120,7 +120,17 @@ echo "--- display startup and GPU progress this boot"
 # empty, and the script waits and retries rather than reporting a blank. If the
 # control is non-zero and our predicate is still zero, THAT is a result.
 rb_display_log() {
-    /usr/bin/log show --last boot --style compact --predicate "$1" 2>"$2"
+    # 2w2: --info is REQUIRED. Without it `log show` drops every
+    # OS_LOG_TYPE_INFO message, and CoreDisplay's three logging wrappers are
+    # level 0x10 `[ERROR]` (0x7ff80405f052), 0x2 `[WARN]` (0x7ff80405ec06)
+    # and 0x1 `[INFO]` (0x7ff80405ed79). `IOPTransaction::Submit`'s ONLY
+    # informative failure - "Failed to submit transaction: %s", where the %s
+    # names the actual error - goes to the INFO one, so boots 177-184 all
+    # captured the consequence ("Fallback GPU Display Pipe transaction
+    # submission failed", ERROR, from Commit) and never the cause.
+    # INFO messages also do NOT persist across a reboot, so they cannot be
+    # recovered afterwards: they must be captured in the armed boot.
+    /usr/bin/log show --last boot --info --style compact --predicate "$1" 2>"$2"
 }
 dl_pred='(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR eventMessage CONTAINS "checkGPUProgress"'
 dl_ctl_pred='process == "WindowServer"'
@@ -136,7 +146,12 @@ while : ; do
     echo "  WindowServer has logged NOTHING yet (control 0) - waiting 15s (try $dl_tries/6)"
     sleep 15
 done
-echo "  $dl_n display log lines saved (WindowServer control: $dl_c lines)"
+dl_i="$(grep -c '\[INFO\]' "$out/display-log.txt" 2>/dev/null || echo 0)"
+echo "  $dl_n display log lines saved (WindowServer control: $dl_c lines, [INFO] lines: $dl_i)"
+if [ "$dl_n" -gt 0 ] && [ "$dl_i" -eq 0 ]; then
+    echo "  WARNING: ZERO [INFO] lines. --info is supposed to include them (2w2);"
+    echo "           without them Submit's 'Failed to submit transaction: %s' is invisible."
+fi
 if [ "$dl_c" -eq 0 ]; then
     echo "  WARNING: the control is ZERO, so display-log.txt carries NO information."
     echo "           Re-run this script later in the boot; do NOT reboot on this capture."

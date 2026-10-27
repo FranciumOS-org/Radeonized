@@ -362,6 +362,33 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**`Submit()` IS READ IN FULL, AND OUR CAPTURE HAS BEEN DROPPING THE CAUSE FOR
+EIGHT BOOTS (2w2).** No boot. `IOPTransaction::Submit` (`0x7ff8040c8a56`) has
+one epilogue returning `%ebx` and three exits: success
+(`Submitted IOP Transaction`), **`Failed to create IOPresentment
+transaction`** at `0x7ff8040c8dde` when `IOPresentmentBegin` returns NULL, and
+**`Failed to submit transaction: %s`** at `0x7ff8040c97e9` when the final
+call, **`IOPresentmentEnd`** (`0x7ff812e89211`), returns non-zero.
+CoreDisplay's three logging wrappers differ only in a level and a tag:
+`0x7ff80405f052` = 0x10 **`[ERROR]`**, `0x7ff80405ec06` = 0x2 `[WARN]`,
+`0x7ff80405ed79` = **0x1 `[INFO]`**.
+**So `IOPresentmentBegin` SUCCEEDED in boot 184** — its failure is
+`[ERROR]`-level, the same wrapper as the `Fallback …` line that appears 56
+times, and it is absent from a capture carrying 197 `[ERROR]` and 134
+`[WARN]` CoreDisplay lines. **2v9 is refuted a second, independent way**, and
+the plane count is fine.
+**The failure is `IOPresentmentEnd`, and its error string has never been
+captured**: `plugin_check.sh` ran `log show` **without `--info`**, so every
+`OS_LOG_TYPE_INFO` line was dropped — and that is exactly where the one
+message naming the error lives. Boots 177-184 captured the *consequence*
+(`Fallback … submission failed`, ERROR, from `Commit` after Submit returns
+false) and never the *cause*. **It cannot be recovered afterwards** — INFO
+messages do not persist across a reboot; re-querying boot 184 with
+`--info --debug` gives 2290 lines, the 56-line control, **3** `[INFO]` total
+and none of Submit's. Fixed in `tools/plugin_check.sh` (`--info`, plus an
+`[INFO]`-count control). **No new build needed — the next armed boot answers
+it.**
+
 **BOOT 184: THE WHOLE AGDC REPLY SURFACE IS ELIMINATED BY MEASUREMENT, AND
 2v9 IS REFUTED (2w1).** Armed, wedged, captured. All four one-shots consumed
 (`agdc_oneshot 0`, `iop_oneshot 0`), `rbgpu-boot` 184, `diag_used` **565 of
@@ -747,6 +774,12 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the `Darwin Kernel Version` banner, once per boot. And `log` is a zsh
     builtin that shadows `/usr/bin/log`: always the absolute path, always with
     a known-present control. [2q0, 2s1]
+36. **A log capture has a LEVEL as well as a predicate and a window, and all
+    three can silently drop the answer.** `log show` omits
+    `OS_LOG_TYPE_INFO` unless `--info` is passed, and INFO messages do not
+    survive a reboot, so they must be captured in the armed boot. 2u5 lost a
+    boot to the window; 2w2 lost **eight** to the level. Count the levels you
+    need against a known-present control in the same capture. [2w2]
 35. **When a static chain ends at our own code, instrument our end FIRST and
     prove it correct before building on the chain.** 2v9 disassembled five
     layers correctly and attached them to the one link that turned out to be
