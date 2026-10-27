@@ -36946,3 +36946,106 @@ AuxKC carries `com.rembrandtgpu.fb` **only** at its stale
 its `AppleDisplay` child. So the desktop is back to its normal configuration and
 the installed copy has never loaded. The boot-time AuxKC rebuild did **not**
 pick it up, which also leaves 2sp's option 1 answered: **no**.
+
+## 2sr — the one-shot clear is NOT durable, the kernel says why, and rule 9 already had the answer
+
+The user confirms they did not re-set `rbgpu-fb`. So 2sq's alternative is
+excluded: **the clear genuinely failed**, and the key survived a reboot after
+`removeProperty` + the FORCESYNCNOW write + a read-back that returned absent.
+
+### What the kernel does, read rather than assumed
+
+`/options` is an **`IODTNVRAMVariables`** on macOS 15, not `IODTNVRAM`, and:
+
+```
+IODTNVRAMVariables::removeProperty(const OSSymbol*)      0xffffff8000b219e0
+    ... jmp IODTNVRAM::removePropertyWithGUIDAndName     0xffffff8000b228f0
+
+IODTNVRAMVariables::setProperty(const OSSymbol*, OSObject*)
+    ... callq IODTNVRAM::setPropertyWithGUIDAndName
+```
+
+and the two destinations differ in exactly the way that matters:
+
+| | calls `IODTNVRAM::syncInternal` |
+|---|---|
+| `setPropertyWithGUIDAndName` | **yes** |
+| `removePropertyWithGUIDAndName` | **no** |
+
+`removePropertyWithGUIDAndName`'s entire call/jump set is
+`clientHasPrivilege`, `handleSpecialVariables`, `memcmp`, `strcmp`, `strncmp`,
+`record_system_event`, `__stack_chk_fail` and internal branches. **There is no
+commit in it.** A removal is in memory until something else flushes.
+
+And `IONVRAM-FORCESYNCNOW-PROPERTY` is referenced by **exactly one function in
+the whole kernel** — `IODTNVRAM::setPropertyWithGUIDAndName` — found by mapping
+the string's file offset `0x9c31d1` through `__cstring`
+(vmaddr `0xffffff8000c1f080`, offset `0x937080`) to **`0xffffff8000cab1d1`** and
+xrefing that address across the image.
+
+So the pieces exist and are wired, which is why this is recorded as "the
+read-back proves nothing" rather than "the sync is a no-op": our FORCESYNCNOW
+write does reach the only function that honours it. What is **not** read is
+`handleSpecialVariables`' return path — whether it can make
+`setPropertyWithGUIDAndName` return before `syncInternal`, and whether the GUID
+`IODTNVRAMVariables::setProperty` passes is the one the special-variable check
+wants. That is the remaining unknown, and it is deliberately left unread,
+because the fix below does not depend on the answer.
+
+**An instrument note, and it is rule 26 almost verbatim:** my first pass
+grepped each function for `callq` and reported that
+`IODTNVRAMVariables::removeProperty` makes **no calls at all** — because it
+ends in a `jmp`, a tail call. Rule 26 already records "a `callq *0xNNN(` grep
+cannot see a tail jump through a loaded register"; this is the same trap with a
+direct target. The grep now matches `(callq|jmp)`.
+
+### The fix, which rule 9 had already written down
+
+docs/RULES.md rule 9, as it has stood for many milestones:
+
+> And a one-shot can fail to clear (2qy, `mcr_oneshot 4`), so between
+> experiments take the *boot-arg* out: the feature needs the arg *and* the key,
+> so without the arg a stuck key is inert.
+
+Every other gated feature in this project follows that. **The framebuffer kext
+did not** — I gave it an NVRAM key alone and then built a safety argument on
+top of the key's durability, which rule 9 explicitly says not to trust. The
+guarantee I repeated at every stage ("a bad boot costs one power cycle") rested
+on the one mechanism the project had already measured to be unreliable.
+
+`probe()` now requires **both**:
+
+```c
+char flag[16];
+if (!PE_parse_boot_argn("-rbgpufb", flag, sizeof(flag))) {
+    LOG("-rbgpufb is not in boot-args; NOT arming whatever NVRAM says ...");
+    return false;
+}
+```
+
+so the durable disarm is `sudo tools/efi.sh bootarg remove -rbgpufb` — an edit
+to a file, with a backup, which is durable in a way the NVRAM one-shot
+demonstrably is not. The one-shot stays for what it is actually good at: making
+a single armed boot single, so a repeat takes a deliberate `nvram` command. It
+is no longer load bearing.
+
+The in-memory read-back is kept but now logs what it is: *"one-shot removal
+accepted IN MEMORY - this does NOT prove it reached flash (2sq); the durable
+disarm is `efi.sh bootarg remove -rbgpufb`"*. A refusal path that publishes the
+value it refused, and a success path that publishes the limit of what it
+proved.
+
+`fbload.sh` refuses the beside stage without the boot-arg, so a missing arg
+cannot read as a broken kext. docs/RULES.md records both this and the
+`kmutil unload` panic in the hard rules.
+
+### What this costs and what it buys
+
+Stage 3b now needs an EFI edit as well as an `nvram` command, which is a bigger
+setup — and that is the correct price. The thing it buys is that the dangerous
+combination 2sq left on the machine (**an installed kext plus a key that would
+not clear**) can no longer exist: without `-rbgpufb` in `config.plist` the kext
+cannot arm, whatever NVRAM holds.
+
+Built, `-Wall -Werror` clean, UUID moved to AE8133E2. Not loaded anywhere; the
+kext is out of `/Library/Extensions` and the key deleted.
