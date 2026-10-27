@@ -41324,3 +41324,80 @@ correctly and attached them to the one link that turned out to be fine; the
 key that settled it (`agdc_ec_scaler`) cost one boot and could have been
 written in the same change as the chain. Reading further is cheaper than
 reading further *and* being wrong about where to start.
+
+## 2w2 — `Submit()` read in full; the cause has been dropped by the capture every boot
+
+Static read of `CoreDisplay::IOPTransaction::Submit()` (`0x7ff8040c8a56`,
+0x1840 bytes, one epilogue at `0x7ff8040c9812` returning `%ebx`). **No boot.**
+
+### Three exits, and only one of them is success
+
+| `%ebx` | site | logged | level |
+|---|---|---|---|
+| 1 | `0x7ff8040c977b` | `Submitted IOP Transaction` | `[WARN]`, debug-gated |
+| 0 | `0x7ff8040c8dde` | **`Failed to create IOPresentment transaction`** | **`[ERROR]`** |
+| 0 | `0x7ff8040c97e9` | **`Failed to submit transaction: %s`** | **`[INFO]`** |
+
+The first failure is `IOPresentmentBegin` returning NULL — 2v9's plane-count
+path. The second is the final call, **`IOPresentmentEnd`**
+(`0x7ff812e89211`, reached through stub `0x7ff804140c88` with `ecx = 1`)
+returning non-zero. A third `%ebx = 0` landing at `0x7ff8040ca281` is a C++
+exception landing pad (`__cxa_begin_catch`/`end_catch`) that logs at line
+0x10c through the `[ERROR]` wrapper.
+
+### The three logging wrappers, and the level that has been invisible
+
+CoreDisplay has three instantiations of one logging template, identical except
+for a level constant and a format-tag string:
+
+| wrapper | level | tag |
+|---|---|---|
+| `0x7ff80405f052` | `0x10` | `[ERROR] - %s[%d]: %s` (`0x7ff80415918a`) |
+| `0x7ff80405ec06` | `0x2` | `[WARN]` |
+| `0x7ff80405ed79` | **`0x1`** | **`[INFO]`** (`0x7ff804154d95`) |
+
+### What that settles, and what it cost
+
+**`IOPresentmentBegin` SUCCEEDED in boot 184.** Its failure message is
+`[ERROR]`-level — the *same wrapper* as the `Fallback GPU Display Pipe
+transaction submission failed` line that appears 56 times — and it is
+**absent** from the capture, which carries 197 `[ERROR]` and 134 `[WARN]`
+CoreDisplay lines. So the plane count is non-zero and **2v9's hypothesis is
+refuted a second, independent way**, from the opposite direction to 2w1.
+
+**The failure is `IOPresentmentEnd`, and its error string has never been
+captured.** `tools/plugin_check.sh` ran `log show` **without `--info`**, so
+every `OS_LOG_TYPE_INFO` message was dropped — and the one line that *names*
+the error, `Failed to submit transaction: %s`, is exactly that level.
+Checked: the capture's CoreDisplay bracket tags are only `[ERROR]` and
+`[WARN]`, with **zero** `[INFO]`.
+
+So for eight boots (177-184) we have been capturing the **consequence**
+(`Fallback … submission failed`, `[ERROR]`, logged by `Commit` *after* Submit
+returns false) and never the **cause** (`Failed to submit transaction: <err>`,
+`[INFO]`, logged by Submit itself). They are one event, 56 of each, and the
+informative half was filtered out by our own instrument.
+
+**And it cannot be recovered after the fact.** `OS_LOG_TYPE_INFO` messages
+live in the in-memory ring and are not persisted across a reboot: re-querying
+boot 184's window (18:35:14-18:36:59) with `--info --debug` returns 2290
+lines, 56 `Fallback` control hits, **3** `[INFO]` lines in total and **zero**
+of Submit's five messages. The line must be captured in the armed boot.
+
+### Fix
+
+`tools/plugin_check.sh`: `rb_display_log` now passes **`--info`**, and the
+summary prints the `[INFO]` line count with a warning when it is zero against
+a non-zero total — the same control shape rule 26 demands, applied to a log
+*level* rather than a log window. No code change to the kext; the next armed
+boot answers it with no new build.
+
+### Rule
+
+**A log capture has a LEVEL as well as a predicate and a window, and all
+three are instruments that can silently drop the answer.** 2u5 lost a boot to
+the window (capture at +28 s, 0 bytes); 2w2 lost eight boots to the level.
+`log show` omits `OS_LOG_TYPE_INFO` unless `--info` is passed, and those
+messages do not survive a reboot. Before reading absence from a log, check
+that the levels you need are present — count them against a known-present
+control in the same capture.
