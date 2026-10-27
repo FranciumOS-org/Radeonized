@@ -39619,3 +39619,63 @@ Boot 177 wedged, as boots 156/164/169/170 did. 2s8 holds: the wedge writes its
 NVRAM note, consumes its one-shots, and a plain power cycle comes up clean.
 `-rbgpuoff` remains the rescue. The capture surviving on disk is what makes
 these boots affordable.
+
+## 2u5: boot 178 — the gamma arm LANDS on the AGDC side, and the display-side verdict was lost to a +28 s capture
+
+Boot 178 (`rbgpu-boot = 178`, new nonce, `armed = 1`, kern.boottime
+04:26:42) ran 2u4's single-variable experiment: `-rbgpuagdccaps` present in
+`boot-args.txt`, everything else as boot 177.
+
+**The arm took, and the capability negotiation changed exactly as predicted:**
+
+| key | boot 177 | **boot 178** |
+|---|---|---|
+| `agdc_extcap_all` | 0 | **1** |
+| `agdc_extcap_answered` | 3 | **15** |
+| `agdc_extcap_calls` | 48 | 48 |
+| `agdc_extcap_gated` / `_gated_n` | 0x8000 / 45 | **absent** |
+| `agdc_failed_calls` | 46 | **34** |
+| `agdc_last_ret` | 0xE00002C7 | **0** |
+
+48 calls is 16 types × 3 rounds. 3 answered was one type per round (Scaler);
+**15 is five types per round** — 1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler,
+0x8000 Cursor. `agdc_failed_calls` falls by **exactly 12** = 4 new types × 3
+rounds, and `agdc_extcap_gated_n` disappears because nothing is gated off any
+more. So **type 2 (Gamma) was answered this boot**, which is the one thing 2u4
+asked for. Everything else held identical: `agdc_say = "PUBLISHED"`,
+`agdc_error 0`, `agdc_stage 0x46`, `agdc_user_vendor 4`, `agdc_user_cap 1`,
+`agdc_tim_ndrv_err 8` with OTG timing (1920×1080, 342287571 Hz, 143959
+mHz), `agdc_link_result 0`, `fb_vbl_on 1`, `otg_err 0`.
+
+**But the experiment's actual readout is MISSING, and the capture is why.**
+`display-log.txt` is **0 bytes**, and so is `display-log-errors.txt` — the
+`log show` succeeded and matched nothing. The capture ran at
+04:27:10, **28 s into the boot**; boot 177's ran at **46 s** and got 2225
+lines. Live `kern.boottime` now reads 04:27:45, i.e. the machine was power
+cycled 63 s into boot 178, so **that boot is gone and its display log cannot
+be recovered**. Rule 10 saved the diag and nothing else.
+
+**Stated per rule 14: the zero is not a result.** Two readings fit it and this
+capture cannot separate them — (a) the log store had nothing flushed at +28 s
+and WindowServer's pipe activity came later, or (b) boot 178 never got as far
+as WindowServer's display-pipe work at all. `framebuffer.plist` is 4261 bytes,
+so `RBAMDFramebuffer` existed; that bounds nothing about WindowServer.
+So **`Attempting to get capabilities from plane with no gamma` is neither
+confirmed changed nor confirmed unchanged**, and 2u4's prediction is still
+open.
+
+**The repeat costs no new code and no new arg** — the arm is already in
+boot-args and already measured to take. What it needs is the capture **later
+in the boot**, which is a procedure change, not a build:
+
+> **New rule, paid for here:** `plugin_check.sh` reads NVRAM, which is ready
+> immediately, and the unified log, which is not. A capture taken before
+> WindowServer has run is a capture with the display half silently blank.
+> **Check `wc -l display-log.txt` against a known-present control in the same
+> capture before concluding anything from it** — exactly rule 26's shape,
+> applied to a log window instead of a grep.
+
+Also recorded: the display-side question has never been answered with the
+gamma arm on. 2sd's A/B (boot 170) answered five types too, but that was
+**before** gate 1 was won and before a `DisplayPipe` existed, so its
+byte-identical display log says nothing about boot 178's configuration.
