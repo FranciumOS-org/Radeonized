@@ -38954,3 +38954,27 @@ a 1.3 s margin and may well make it. **`-rbgpuagdcearly` stays OUT** — it is
 the arg that wedges (2rz) and it is not needed to test this. If the plain path
 loses the race, the fix is to make the bridge earlier, not to open the gate
 earlier.
+
+### 2t7 addendum — our selector-1 reply is verified compatible, so the experiment needs no code
+
+Read the validation byte by byte rather than trusting 2r5's prose, because
+`cmpl $0x1,%eax; ja` alone would accept **0 or 1** and `rb_agdc_vendor` writes
+**2** at `+0x28` — which would have made the whole experiment fail silently:
+
+```
+7ff812e8ae6a   movl  -0xf8(%rbp), %eax     ; out is -0x120(%rbp), so this is out+0x28
+7ff812e8ae70   decl  %eax                  ; <-- THE instruction that decides
+7ff812e8ae72   cmpl  $0x1, %eax
+7ff812e8ae75   ja    <skip>
+```
+
+The `decl` makes the accepted set `{1, 2}`. **2r5's "must be 1 or 2" is
+correct and our `+0x28 = 2` passes.** Also confirmed from the same block: the
+`IOConnectCallMethod` at `0x7ff812e8ae54` passes `esi = 1`, output buffer
+`-0x120(%rbp)`, output length `-0x2568(%rbp)`, and a zero length or non-zero
+return goes to the error tail at `0x7ff812e8aebb`.
+
+`rb_agdc_reply` handles attributes 1, 0x980, 0x921 and 0x711, so both map
+queries (`kAGDCVendorInfo` = 1, `kAGDCGPUCapability` = 0x980) are answered.
+Two of the map's four conditions are now verified statically; the untested two
+are the class match and `IOServiceOpen(type 2)`, and both need the boot.
