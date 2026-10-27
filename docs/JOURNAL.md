@@ -39931,3 +39931,83 @@ that function either. The array belongs to `CoreDisplay::IOPCapabilities`
 (`this->0x8 -> +0xb0 -> 0x90 -> 0x88` is its count), and its constructor is the
 thing to read — `CapabilitiesForClients` (`0x7ff80405d582`) and the destructor
 (`0x7ff80405d4f8`) bracket it in the function list.
+
+## 2u9: Apple's own gamma producer re-read field by field — `+0x28` is an ELEMENT COUNT, and Apple's second entry hardcodes 0x200
+
+Static, kernel side, no boot. `nm -m build/re/AMDRadeonX6000Framebuffer`
+resolves `0xbfecda8` to
+`AMDRadeonX6000_AmdAgdcServices::getFbCapabilityForGamma(AmdFbDisplayPath*,
+unsigned int&, AGDCFBExtendedCapabilitesEntry_t*)` — **the Framebuffer kext,
+not `AMDRadeonX6000`**, which is why the address is absent from the latter's
+text (noted so the next reader does not repeat the lookup).
+
+2sc read this function and took its smallest branch. Read field by field now,
+with the write **widths** attended to:
+
+**Entry 1** (`%rbx` = the entry):
+
+| write | offset / width | value |
+|---|---|---|
+| `movl $0x88005, (%rbx)` | +0x00 dword | `0x00088005` |
+| `movq $0x1, 0x4(%rbx)` | +0x04 **qword** | 1 (so +0x08 = 0) |
+| `movq $0x1000000000, 0xc(%rbx)` | +0x0c **qword** | +0x0c = 0, **+0x10 = 0x10** |
+| `movl $0x0, 0x14(%rbx)` | +0x14 dword | 0 |
+| `movq $0x3f80000000000000, 0x20(%rbx)` | +0x20 **qword** | +0x20 = 0, **+0x24 = 1.0f** |
+| `vt[0x1b8](0xf)`, `cltq`, `movq %rax, 0x28(%rbx)` | +0x28 **qword** | the substituted field |
+
+`rb_agdc_gamma_entry` reproduces every one of those correctly, including the
+two values that are only visible once the qword writes are split
+(+0x10 = 0x10 and +0x24 = 1.0f). The segment count comes from
+`vt[0x118](0x17) + 1` on a *different* object (`this->0x118` → `vt[0x920]()`),
+and the +0x28 value from `vt[0x1b8](0xf)` on another (`this->0x118` →
+`vt[0x938]()`) — both `AmdFbDisplayPath`-side objects we do not have.
+
+**Entry 2 — written only when the segment count is >= 2** — is the find:
+
+| write | offset within entry 2 | value |
+|---|---|---|
+| `movl $0x88005, 0x32c(%rbx)` | +0x00 | `0x00088005` |
+| `movq $1, 0x330(%rbx)` | +0x04 qword | 1 |
+| `movl $0, 0x338(%rbx)` | +0x0c | 0 |
+| `movq $1, 0x33c(%rbx)` | +0x10 qword | **1** |
+| `movq this->0x2e798 \| 0x40, 0x344(%rbx)` | +0x18 qword | device flags OR 0x40 |
+| `power(2.0, -25)` → `movss 0x34c` | +0x20 float | `powf(2, -25)` |
+| `power(2.0, 7)` → `movss 0x350` | +0x24 float | `powf(2, 7)` |
+| `movq $0x200, 0x354(%rbx)` | +0x28 qword | **0x200** |
+
+So **`+0x28` is the entry's ELEMENT COUNT**, and Apple's own second entry
+states it as a literal **0x200 = 512** — a 512-entry segmented gamma table —
+while `+0x10` carries a format word (0x10 for entry 1, 1 for entry 2). That
+reading is consistent with 2u7's consumer: CoreDisplay accepts our format word
+(bit 4 of `+0x10`) and then finds the count behind it empty.
+
+**Which makes the next experiment materially better than the one 2u6 proposed,
+and cheaper to justify.** 2u6 wanted to invent a channel count. Instead,
+raising `RB_AGDC_GAMMA_SEGMENTS` from 1 to **2** makes `rb_agdc.h` write
+Apple's second entry, whose element count is **Apple's own literal 0x200** and
+whose two floats are **Apple's own `powf` constants** — nothing invented. The
+single remaining substitute in entry 2 is the device-flags qword
+(`this->0x2e798`), for which 2sc's convention already uses 0, leaving
+`0 | 0x40 = 0x40` — Apple's own OR, with the unavailable term zero.
+
+**Still not established, and it matters (rule 13/17):** that CoreDisplay's
+`entry+0x30` *is* this `+0x28` after translation. The chain
+`this->0x8 → +0xb0 → +0x90 → {+0x88 count, +0x90 array}` walks a **0x38-stride
+CoreDisplay array**, not our 0x32c AGDC entry, and the translation step is
+still unread — `IOPresentmentCapabilitiesStructureFromDictionary`
+(`0x7ff812e8df1c`, 911 lines, 36/30/10 calls through three imported stubs)
+references the gamma keys through CFSTR constants rather than direct string
+leas, so neither `ripall` on `GammaArray` (`0x7ff812ea0ed3`) nor a chained-
+pointer-blind qword search for its `__cfstring` finds the site. That is a
+tooling gap, not a dead end, and it is the honest reason this entry proposes an
+experiment rather than claiming a cause.
+
+**What the experiment is, stated so it stays a single variable:** one constant,
+`RB_AGDC_GAMMA_SEGMENTS 1u` → `2u` in `src/common/rb_agdc.h`, plus the second
+entry's builder; `-rbgpuagdccaps` already armed and already measured to take
+(2u6); the prediction is that
+`Attempting to get 3-channel gamma table capabilities from plane with no
+3-channel gamma table support` changes again. If it does, the count is the
+field and `System Gamma` has a chance of leaving `Unknown`. If it does not,
+the translation step above is where the next read has to go, and no further
+boot should be spent before it.
