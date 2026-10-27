@@ -35968,3 +35968,94 @@ side of that line any future framebuffer kext sits on is the user's decision,
 not Claude's, and should be made before code is written rather than after.
 
 Nothing was built. No boot was spent.
+
+## 2sk — the accelerator id's producer, and the lookup is NOT what fails
+
+No boot. 2sj redirected away from IOPresentment; nullarc's compositing runs
+through **Metal**, and 2pu had already named the Metal-vs-software decision end
+to end. This picks up 2pu's one open question.
+
+### 2pu's decision, restated
+
+```
+WSGetCompositorForAccelerator(accelId)          0x7ff807c9b78c
+    mode = *0x7ff843c9ecdc                      ; 0 Metal, 1 SW, 2 debug
+    if (mode == 2)                  return debug;
+    if (mode != 0)                  return SW;
+    if (accelId == 0)               return SW;          ; (a)
+    if ((*0x7ff843ca08b0 & 1) == 0) return SW;          ; (b)
+    return getMetalCompositorFor(accelId);
+```
+
+Mode is 0 — `Metal compositor activated.` is logged every boot — so the
+software path is taken by **(a)** or **(b)** and nothing else. 2pu could not
+say which, because the id arrives through `CDDisplay`'s vtable slot +0x60 and
+that slot is chained-fixup encoded.
+
+### The producer, read without needing that vtable
+
+`CGXAcceleratorForDisplayDevice` is a stub in SkyLight, imported from
+CoreDisplay, where the implementation is **`MPAcceleratorForDisplayDevice`**
+(`0x7ff8040e6825`). Its own log string gives the real signature:
+
+```
+CGError MPAcceleratorForDisplayDevice(const CGXDisplayDevice *const, int32_t,
+                                      CGXDisplayAccelerator *,
+                                      CGXDisplayAcceleratorID *)
+```
+
+```
+    if (outID) *outID = 0;
+    *outAccel = 0;                                  ; BOTH pre-zeroed
+    rec = lookup(dev->0x160, idx);                  ; 0x7ff8040ebef2
+    if (!rec) { log("%s: Invalid device alias (%d)"); return 0x3e9; }
+    *outAccel = rec->0x5c;
+    if (outID) *outID = rec->0x98;
+    return 0;
+```
+
+The lookup walks a linked list off `dev->0x160`, matching a record on its
+`+0x60` and `+0x64` fields (bounds-checked `<= 0x20`, rejecting negative
+indices).
+
+**So `accelId == 0` — test (a), the one that routes to the software compositor
+— is exactly what a failed lookup leaves behind**, because both out-params are
+zeroed before it and the failure path returns without writing them. It is also
+what a found record holding zero in that field produces. Two routes to the
+same zero.
+
+### And the measurement: the lookup is not failing
+
+The failure path logs `MPAcceleratorForDisplayDevice: Invalid device alias
+(%d)`. **That string appears in ZERO captures in `logs/`**, against a control
+of **704** CoreDisplay lines in the same file.
+
+So CoreDisplay **finds** the record. The accelerator id is whatever
+`rec->0x5c` / `rec->0x98` holds, and 2pu's open question narrows: it is not a
+failed lookup. Either the record carries zero in that field, or test (b) — bit
+0 of `*0x7ff843ca08b0` — is the one failing.
+
+**Caveat on that negative**: the failure logs through `0x7ff80405f052`, and
+whether that is an always-on error channel or a gated category has **not**
+been checked. 704 CoreDisplay lines show the subsystem is logging, which is
+why the negative is worth recording, but it is not the same control as
+catching this specific logger with a known-present line.
+
+### What is now worth doing, in order
+
+1. Find what writes the record's `+0x5c` / `+0x98`. That names the condition
+   under which a display gets a non-zero accelerator id, and it is the whole
+   display half if the answer is a property or an IOKit association we can
+   publish.
+2. Find the writers of the flag at `0x7ff843ca08b0`, to settle test (b). A
+   `ripall` for that address is the instrument, and it must be chunked.
+3. Only then consider nullarc's route (our own `IOFramebuffer`), which is a
+   much larger build. 2sj's reading stands — their framebuffer needs none of
+   IOPresentment — but if a non-zero accelerator id is all that stands between
+   `CompositorSW` and `CompositorMetal` on the framebuffer we already have,
+   that is a far smaller change for the same result.
+
+The user has cleared PolyForm-NC for this project, so copying from
+`src/phxaccel` is permitted if it comes to that.
+
+Nothing was built. No boot was spent.
