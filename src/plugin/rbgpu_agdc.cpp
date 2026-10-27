@@ -155,6 +155,25 @@ static uint64_t rbgpuAgdcUptimeMs() {
 int sampleTimingNdrv() {
     if (!ndrvCurrentMode || !ndrvTimingInfo) return 6;   // getters unresolved
     if (!framebuffer) return 7;                          // no framebuffer yet
+    // 2t9: THESE TWO POINTERS ARE IONDRVFramebuffer METHODS, and they are
+    // called with `framebuffer` as `this`. Until 2t8 that was safe by
+    // construction - the only caller was 2pa's route on
+    // IONDRVFramebuffer::enableController, so `framebuffer` could not be
+    // anything else. 2t8 added an RBAMDFramebuffer notification and made it
+    // reachable with OUR object as `this`, which PANICKED two boots:
+    // getTimingInfoForDisplayMode dispatches virtually through `this`, our
+    // vtable has nothing at that slot, and RIP came out 0 inside the inlined
+    // sampleTimingNdrv (`sampleTiming + 0xcf`, boots 176/177).
+    //
+    // Returning non-zero is exactly right rather than merely safe:
+    // sampleTiming() already falls through to sampleTimingOtg() when the NDRV
+    // path fails, and OTG reads the panel's timing out of BAR5 with no object
+    // at all (2rn) - so this is the correct source for our framebuffer, not a
+    // degraded one.
+    if (!framebuffer->getMetaClass() ||
+        !framebuffer->getMetaClass()->getClassName() ||
+        strcmp(framebuffer->getMetaClass()->getClassName(),"IONDRVFramebuffer"))
+        return 8;                                        // not an NDRV object
     uint8_t scratch[kRbTimingInfoSize];
     int32_t mode=0, depth=0;
     if (ndrvCurrentMode(framebuffer,&mode,&depth)!=kIOReturnSuccess) return 1;
