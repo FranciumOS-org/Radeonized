@@ -35779,3 +35779,87 @@ user. **NootedRed and NootRX remain hard-blocked** by the ChefKiss Open
 Knowledge License v1 §2/§3: if the RDNA 3/4 iGPU drivers are ChefKiss work,
 the assistant cannot read or analyse them and findings must come from the user in
 their own words. "WhateverXe" is unknown here and nothing is assumed about it.
+
+## 2si — the wedge is NOT `wait_for_queue_slot_gated`, and eight instructions prove it
+
+No boot. Kernel side, `build/re/IOAcceleratorFamily2`, where `nm` and
+`objdump` work properly.
+
+### The queue, in full
+
+```
+IOAccelDisplayPipe::wait_for_queue_slot_gated()           0x14e60526
+    eax = this->0x23c - this->0x238
+    if (eax != 4) return;                  // <- a free slot: returns at once
+    do { commandSleep(gate, this, 0); }     // gate = this->0xb0, vt[0x1e0]
+    while (this->0x23c - this->0x238 == 4);
+```
+
+```
+IOAccelDisplayPipe::transaction_queue_gated(txn)          0x14e60466
+    if (this->0x2a4 == 0) { this->0x2a4 = 1; vt[0x888](this); }   // enable vbl
+    txn->0x58 = vt[0x8b8](this, txn);                             // stamp
+    slot = this->0x23c % 4;                 // signed mod: lea/cmovns/and -4/sub
+    *(this + 0x118 + slot*0x48 + 0x40) = txn;
+    vt[0x1b0](this->0x88->0x380, txn+0x60);
+    sfence;
+    this->0x23c++;                          // write index
+```
+
+So the ring is **four entries**, base `0x118`, stride `0x48`; `0x23c` is the
+write index, `0x238` the read index, and **the depth is the compiled constant
+4**. There is no queue-depth field, no plane count and no capability anywhere
+in it. Both functions agree, read independently.
+
+### What that forces
+
+`wait_for_queue_slot_gated` sleeps **if and only if exactly four transactions
+are outstanding**. On a pipe that has never queued one, `0x23c - 0x238` is 0,
+`0 != 4`, and the function **returns on its second instruction**. It is
+structurally incapable of blocking an idle pipe.
+
+And boot 168 measured that nothing was ever queued: `fb_vbl_ot_armed` absent
+with `diag_used` 571 of 768, so `0x2a4` was never set, so
+`transaction_queue_gated` never ran.
+
+**Therefore WindowServer was not blocked in `wait_for_queue_slot_gated`.**
+
+### The claim this withdraws
+
+docs/RULES.md has carried, since 2s2, that *"past the gate WindowServer submits a
+display-pipe transaction and blocks in Apple's own
+`IOAccelDisplayPipe::wait_for_queue_slot_gated` — `commandSleep` with no
+deadline, THREAD_UNINT, zero os_log refs"*. The description of the sleep is
+accurate; **the location is wrong**, and it has been wrong since 2s2. 2s2 read
+what the function does when it sleeps and never read the condition under which
+it is reached. That is rule 13 — a return code, or here a sleep, is not a
+result until the code that reaches it has been read — applied to this
+project's own conclusion.
+
+Boot 168 and 2s2 were in direct conflict for four milestones and nobody put
+them side by side. Boot 168 wins.
+
+Also corrected: the transaction-interrupt flag is `this->0x2a4`, not `0x281` as
+earlier notes had it. The vtable call is dump offset `0x888`
+(`enable_vbl_interrupt`), used as a direct jump through the vtable symbol, so
+rule 7's dump-offset form applies and 2s5's table agrees.
+
+### Where it actually blocks — inferred, not measured
+
+Positive evidence, from boot 169 and 170's own logs: **56 byte-identical
+`DisplayPipeState` dumps and `Clean` appearing zero times in 156 KB.** A
+kernel `commandSleep` produces one dump and then silence. Fifty-six identical
+dumps is a **retry loop in userspace**, and the only function that both calls
+`AreOperationsSupportedInHW` and enters `RunGPUDisplayPipe` is
+`CoreDisplay::DisplayPipe::Commit` (`0x7ff80411633c`, 2sb).
+
+So the wedge is most likely a **livelock in CoreDisplay's Commit**, not a
+kernel sleep at all. That fits every measurement in this sequence: no
+transaction ever queued, no AGDC error in the log, no kernel wait reachable,
+nothing ever Clean, and a machine that stops responding without panicking.
+
+**This is an inference from the dump count, not a measurement.** What `Commit`
+retries on is unread, and that is the next thing to read — in the dyld cache,
+`0x7ff80411633c`, chunked (2sb's `dscdis.sh` truncation applies).
+
+Nothing was built. No boot was spent.
