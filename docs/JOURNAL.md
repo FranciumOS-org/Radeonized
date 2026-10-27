@@ -37121,3 +37121,45 @@ Rebuilt clean. docs/RULES.md gains rule 30 for the boot-arg semantics and three
 more entries in rule 26's list of instruments that lied: `ioreg -c X -k Y` not
 filtering (2sn), a tool's exit code being its verdict (2so), and a direct tail
 `jmp` hiding a call (2sr).
+
+### 2ss addendum — the accelerator arm has the same exposure, and the code already suspected it
+
+`rbgpuConsumeArming()` in `RembrandtGPUPeer.cpp` opens with a comment written
+long before tonight:
+
+> Caveat: if this setup uses OpenCore's emulated NVRAM, a variable cleared here
+> may not survive a forced restart, in which case the next boot is armed again.
+> Recover from single-user mode (Cmd+S) with `nvram -d rbgpu-arm`.
+
+**That caveat was speculation when it was written. 2sq/2sr measured it true**,
+and 2sr found the kernel-side reason
+(`removePropertyWithGUIDAndName` calls no sync at all). So the comment should
+now be read as a fact, and the recovery it names is the right one.
+
+But the accelerator's arming is an **OR**, not an AND:
+
+```c
+if (checkKernelArgument("-rbgpuarm")) {
+    rbgpu_log("Peer: -rbgpuarm set; accelerator ARMED by boot-arg (NVRAM untouched)");
+    return true;
+}
+... else fall through to the rbgpu-arm NVRAM one-shot ...
+```
+
+so the NVRAM key alone still arms it, and a key that fails to clear arms the
+next boot too. **2s8's claim — "the wedge still consumes its one-shots, so it
+does not re-arm itself and a plain power cycle comes up clean" — rests on the
+same mechanism now measured unreliable.** Boots 165–167 did come up clean, so
+it evidently works often; it is not a guarantee.
+
+Deliberately **not** changed here. Making the accelerator require both would
+alter a workflow the user has relied on for many milestones, and `-rbgpuarm`
+arming on its own looks like a deliberate convenience rather than an oversight.
+It is the user's call, and the honest statement meanwhile is: **an armed
+accelerator boot may repeat, and the disarm that always works is removing the
+boot-arg or `nvram -d rbgpu-arm` from single-user mode.**
+
+What the framebuffer kext does differently, and why: it requires **both**,
+because it is the one component that can take the console and leave no SSH
+window. The cost of a repeat there is categorically worse than for the
+accelerator, where a wedge still leaves NVRAM and a power cycle.
