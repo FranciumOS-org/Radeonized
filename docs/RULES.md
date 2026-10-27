@@ -90,11 +90,23 @@ not memory, not a flag and not the AGDC gate:
   1, 4 and 0x8000 are eliminated; **type 2 is not**, because 2sc had to
   substitute its channel count (`vt[0x1b8](0xf)`, on an object we lack) and an
   empty gamma capability is plausibly indistinguishable from a refused one.
-- **The frontier is the pre-statement nothing has touched**: IOPresentment
-  needs `IOPresentmentBindIOAccelSurfaceToResource` and `SetPlaneState`, and
-  `IONDRVFramebuffer` implements **neither**. `Fetch - Pipe` resolving while
-  nothing ever goes `Clean` fits a pipe that is selected and then cannot be
-  given a surface. Static work, no boot needed to start.
+- **The gate is a PLANE COUNT, and the capability interface we have been
+  answering is the wrong one** (2se). `SetPlaneState` and
+  `BindIOAccelSurfaceToResource` are **userspace** (IOPresentment in the dyld
+  cache), so no vtable slot of ours is missing — the pre-statement had the
+  wrong shape. `IOPresentmentSetPlaneState` refuses on its second instruction:
+  the plane count is a **byte at pipe+0x10**, set by
+  `_IOPresentmentSetPlaneCount`, and IOPresentment's own error table names the
+  result **"Plane out of range"**. A count of 0 means nothing can ever be
+  staged — which is `fb_vbl_ot_armed` absent and `Clean` never appearing.
+  The set IOPresentment runs on comes from a **CFDictionary**
+  (`IOPresentmentCapabilitiesStructureFromDictionary` `0x7ff812e8df1c`) keyed
+  `PlaneArray`, `GammaArray`, `CSCArray`, `LinearizationArray`, the scaling
+  and cursor groups — which line up name-for-name with CoreDisplay's
+  `IOPCapabilities` accessors, **not** with the AGDC type bits. That
+  retro-explains 2sd. **Where the dictionary comes from is NOT established**:
+  `IOPresentmentCopyCapabilities` (`0x7ff812e88ab8`) is unread, so there is no
+  basis yet for claiming we can supply it. That read is the next step.
 - **A boot of `8B261646` + `-rbgpuagdcearly` hung at the progress bar with no
   SSH** and needed a force restart (2sa). That boot was UNARMED
   (`agdc_error 3`, `agdc_oneshot 2`), so the bridge was inert in it and the
