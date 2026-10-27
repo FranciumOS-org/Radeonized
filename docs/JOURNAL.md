@@ -37163,3 +37163,67 @@ What the framebuffer kext does differently, and why: it requires **both**,
 because it is the one component that can take the console and leave no SSH
 window. The cost of a repeat there is categorically worse than for the
 accelerator, where a wedge still leaves NVRAM and a power cycle.
+
+## 2st — the wrangler pairs Apple's accelerator to our framebuffer, and the Metal compositor activates
+
+Boot of 2026-10-26 23:42, `uptime` 3 mins at capture, both one-shots set
+(`rbgpu-arm=1 rbgpu-fb=1`) with `-rbgpuownfb` in boot-args. Measured, user's
+own capture:
+
+```
+armed=1
+dal_pass=0
+debug-gpus" = ({"id"=64455,"acc"=4294968520,"fbs"=(4294968517),"gpuc"=0,
+                "pci"=4294967932,"agdp"=0,"tsa"=6897972014,"tgp"=7023160,
+                "cc"=3,"tgd"=6377853,"flags"=2986344480,"tds"=0})
+2026-10-26 23:42:36.504 Df WindowServer[162:3a2] [com.apple.SkyLight:default] Metal compositor activated.
++-o RBAMDFramebuffer  <class RBAMDFramebuffer, id 0x1000004c5, registered, matched, active, busy 0 (211 ms), retain 19>
+```
+
+Three facts, each new on this machine:
+
+1. **`acc` is non-zero for the first time**: `4294968520` = **0x1000004C8**.
+   Every previous `debug-gpus` row on this machine read `"acc"=0`.
+2. **The pairing is ours.** `fbs` = `4294968517` = **0x1000004C5**, which is
+   byte-for-byte the registry id on the `RBAMDFramebuffer` line of the same
+   capture. `pci` = `4294967932` = 0x27C. So the wrangler did not pair some
+   other framebuffer; it paired Apple's `AMDRadeonX6000` accelerator to a
+   **non-Apple `IOFramebuffer` subclass of ours**.
+3. **`Metal compositor activated.`** The previous boot (2ss addendum, framebuffer
+   armed, `armed=0`) logged `Software compositor activated.` This boot, with the
+   accelerator armed, logs Metal. The compositor-selection global flipped.
+
+**This answers 2sj's one stated unknown.** 2sj recorded: "*NOT established*:
+whether Apple's `AMDRadeonX6000` will composite for a non-Apple
+`IOFramebuffer` — nullarc's compositor is their own." It will: the wrangler
+pairs it and SkyLight selects Metal.
+
+**And it retires the previous boot's two readings as non-evidence**, as that
+capture's own control said it would. `acc=0` and `Software compositor` were
+both the unarmed accelerator, not our framebuffer. The user called this before
+the measurement did.
+
+### What is NOT established, and the user's own report against it
+
+The user, in this live boot: *"my screen is still renders on cpu its the laggy
+one."* So the perceived frame delivery did **not** improve, and that is not in
+conflict with anything above — compositor selection and pixel delivery are
+different steps:
+
+- `dal_pass=0`, unchanged. No DAL path.
+- `agdp=0` and `gpuc=0` in the same row.
+- Nothing here measures **what writes the scanned-out bytes**. Our
+  `getApertureRange` hands back BAR0 offset 0, the firmware-lit GOP surface
+  (2pr), and by design `RBAMDFramebuffer` **writes nothing to the display
+  engine**. DCN is still scanning out whatever firmware pointed OTG0 at. For a
+  GPU-composited surface to reach the panel, either DCN's primary surface
+  address is reprogrammed (we do not) or the result is copied into BAR0 offset
+  0. The second is what must be happening, and **whether that copy is a GPU
+  blit or a CPU memcpy is unmeasured.** At 1920x1080x4 and ~144 Hz a CPU copy
+  is ~1.2 GB/s, which would feel exactly as the user describes.
+
+So "Metal compositor activated" is a real flip of a real global and nothing
+more: it does **not** license the claim that the display is GPU-driven. Rule
+13 — the name tells you what the name means. The next read is a live
+`sample WindowServer`, which names the function burning the time, and
+WindowServer's CPU share against 2pd's measured ~48 % baseline.
