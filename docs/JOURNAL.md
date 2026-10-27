@@ -40760,3 +40760,177 @@ per-operation target field in `DisplayPipeState`, the default that prints
 `Unknown`, and then the writer of the System-Gamma slot. That is a static read
 and needs no boot. `AddGamma`'s analogue of `AddLinearization` is the likely
 writer.
+
+## 2v8
+
+**`System Gamma - Unknown` is SOLVED, and it was never a capability failure.**
+Static read only, no boot spent. Three of 2v7's closing statements are
+withdrawn on the way; the correction is what made the answer visible.
+
+### 2v7's reading of the printer is WRONG on three counts
+
+`CoreDisplay::DisplayPipeState::operator std::string() const`
+(`0x7ff80410d1b6`) disassembled in full. The dump loop runs `r13` from
+`state+0x00` to `state+0x08`, stride **`0xc`**, and each entry is:
+
+| off | type | printed as |
+|---|---|---|
+| `+0x00` | dword | operation name, bounds `ja 8` → `char*[9]` at `0x7ff8404fc2b0` |
+| `+0x04` | dword | target name, bounds `ja 3` → `char*[4]` at **`0x7ff8404fc2f8`** |
+| `+0x08` | byte | `"Bypass "` when non-zero, 7 spaces when zero |
+| `+0x09` | byte | `"Dirty "` when non-zero, 6 spaces when zero |
+
+Each pointer table has a **parallel length table** passed as the `%rdx`
+argument of the append — ops at `0x7ff804144f58` (`6 6 7 10 4 13 8 5 5`),
+targets at `0x7ff804144fa0` (`7 3 4 4`). Those lengths are what pin the
+table bounds; the strings themselves are concatenated with no separators, so
+reading them without the lengths is what produced 2v7's error.
+
+1. **The target table is at `0x7ff8404fc2f8`, not `0x7ff8404fc300`.** 2v7 read
+   it off by one slot. It is contiguous with the operation table: slot 9 of a
+   10-slot dump of `0x7ff8404fc2b0` *is* target slot 0.
+2. **It has four entries, not three, and `Unknown` is entry 0** — before
+   `GPU`(1), `Pipe`(2), `None`(3). So `Unknown` is an ordinary in-range enum
+   member, not a default.
+3. **There is no default branch.** `ja 3` skips the append entirely, printing
+   no target at all. An out-of-range value would print `System Gamma  - `
+   with nothing after it.
+
+So `System Gamma - Unknown` means the target dword is **literally 0** — the
+value a freshly constructed entry already holds. The slot was never assigned.
+2v7's inference "a target value outside 0..2" is withdrawn, and with it the
+whole framing of System Gamma as something our AGDC reply failed to satisfy.
+
+### `Clean` never appeared because CoreDisplay cannot print it
+
+The printer's vocabulary for `+0x09` is `"Dirty "` or six spaces. **The string
+`Clean` does not exist in this printer.** Checked against the capture with a
+known-present control, per rule 26:
+
+| grep | count in `logs/20261027-160914-plugin/display-log.txt` |
+|---|---|
+| `DisplayPipeState` | 66 |
+| `Dirty` | **528** = 66 × 8 |
+| `Bypass` | 0 |
+| `Clean` | **0** |
+
+528/528 is every operation of every dump. So "`Clean` has never appeared in
+any boot", carried since 2sa across six milestones and five boots, is
+**vacuous** — a grep for a string the producing code does not contain, never
+checked against a control. The real content of that byte is the opposite and
+much stronger: **all eight operations are Dirty in all 66 dumps, and none is
+Bypass.** Remove `Clean` from every open-question list.
+
+(The same capture shows `LUT: R/G/B - [0..0.500489..1] with 1024 entries` —
+boot 182's `RB_AGDC_GAMMA_CHANNELS = 0x400` arriving intact — and
+`LiT: R/G/B` with 3 entries.)
+
+### The operation array, and the one function that assigns targets
+
+`AreOperationsSupportedInHW` (`0x7ff8041087fe`) reads the live array through
+`pipe->0x728` with `cmpl $0x2, N(%rax)` at `N` = `0x04 0x10 0x1c 0x28 0x34
+0x40 0x4c 0x58` — eight entries, stride `0xc`, target at `+0x04`, matching the
+printer exactly. Index → offset:
+
+| k | operation | target off | dirty off | boot 182 reads |
+|---|---|---|---|---|
+| 0 | Fetch | 0x04 | 0x09 | Pipe (2) |
+| 1 | Scale | 0x10 | 0x15 | None (3) |
+| 2 | Rotate | 0x1c | 0x21 | None (3) |
+| 3 | Linearize | 0x28 | 0x2d | None (3) |
+| 4 | CSC | 0x34 | 0x39 | None (3) |
+| 5 | **System Gamma** | **0x40** | **0x45** | **Unknown (0)** |
+| 6 | Regamma | 0x4c | 0x51 | None (3) |
+| 7 | EOTF | 0x58 | 0x5d | Pipe (2) |
+
+`CoreDisplay::DisplayPipe::UpdateTargetStateColorProcessing()`
+(`0x7ff8041079be`) is the colour-processing target assigner. Its writer block
+(`0x7ff804107bec`–`0x7ff804107c3c`) writes **exactly four** slots:
+
+```
+0x28 <- r14d   + dirty 0x2d     Linearize
+0x34 <- r14d   + dirty 0x39     CSC
+0x4c <- r14d   + dirty 0x51     Regamma
+0x58 <- $2     + dirty 0x5d     EOTF      (hardcoded Pipe)
+```
+
+**`0x40` is absent.** The function whose entire job is colour-processing
+targets does not touch System Gamma.
+
+**This also explains 2v6's unexplained `EOTF` move from `GPU` to `Pipe`.**
+EOTF is written `$2` unconditionally *if the writer block is reached*, and
+`UpdateTargetStateColorProcessing` has four early returns to `0x7ff804107c43`
+before it — `pipe->0x870 == 0`, a null result from `0x7ff8040bd87a`,
+`pipe->0x850 == 0`, and the two colour-match paths. Boots 179/181 bailed early;
+boot 182 reached the block. Recorded in 2v6 as "not predicted"; it is now
+accounted for, and it is **not** a consequence of the gamma MaximumSize fix
+reaching the display engine.
+
+### The sole writer of the System Gamma target, and its gate
+
+Scanning the whole DisplayPipe cluster (`0x7ff804106000`+`0x16000`) for writes
+to `0x40`/`0x45` through the `0x728` array gives **one** site, inside
+`CoreDisplay::DisplayPipe::Commit(Transaction const&, bool)`
+(`0x7ff80411633c`; `rdi` = pipe → `rbx`, **`rsi` = transaction → `r13`**):
+
+```
+7ff804116f18:  cmpb  $0x1, 0x1a0(%r13)     ; txn's system-gamma has-value flag
+7ff804116f20:  jne   7ff804116f45          ; not set -> slot never touched
+7ff804116f22:  movsd 0x198(%r13), %xmm0    ; the double
+7ff804116f2b:  movsd %xmm0, 0x2b0(%rbx)
+7ff804116f33:  movq  0x728(%rbx), %rax
+7ff804116f3a:  movb  $0x1, 0x45(%rax)      ; System Gamma dirty = 1
+7ff804116f3e:  movl  $0x2, 0x40(%rax)      ; System Gamma target = 2 (Pipe)
+```
+
+`Commit`'s whole body is a run of `cmpb $0x1, <flag>(%r13)` optional-applies,
+and `DisplayPipe::CreateTransaction()` (`0x7ff804106986`) zeroes every one of
+those flags, `0x1a0` among them (`0x7ff804106a48`). The only setter is
+`CoreDisplay::Display::SetSystemGamma(double)` (`0x7ff8040a19f0`):
+
+```
+GetMasterDisplayPipe()        0x7ff80408ab24
+DisplayPipe::CreateTransaction()  0x7ff804106986
+movsd %xmm0, 0x198(%rbx) ; movb $0x1, 0x1a0(%rbx)
+DisplayPipe::Commit(txn, ...)     0x7ff80411633c
+```
+
+The consumer side is `DisplayPipe::CommitState()` (`0x7ff80410cc9a`), which at
+`0x7ff80410cdf1` tests `0x45(%rax) == 1`, clears it, and copies entry 5's
+bytes `0x3c..0x44` into `pipe->0x600`.
+
+### What this means
+
+**`System Gamma - Unknown` is not a capability failure, not an AGDC reply
+defect, and not something our kext can answer.** It is the printed shape of
+one fact: **no `DisplayPipe::Transaction` has ever reached `Commit` with its
+system-gamma optional set**, because nothing has called
+`CoreDisplay::Display::SetSystemGamma(double)` on this machine. The slot is
+untouched, so it reads the constructor's 0, so the printer names enum 0,
+which is spelled `Unknown`.
+
+That makes it a **symptom of the same silence** as `fb_vbl_ot_armed` being
+absent and no transaction ever having been queued (2s9, 2sv) — not an
+independent blocker. 2u4's named blocker, *"Attempting to get capabilities
+from plane with no gamma"*, was real and boot 182 cleared it; the `Unknown`
+beside it was never the same question.
+
+**Do not spend another boot, another AGDC reply field or another capability
+type on `System Gamma`.** It cannot change until a transaction carrying a
+system gamma is committed.
+
+### Rules this cost
+
+- **Rule 26 again, and the most expensive instance yet.** `Clean` was grepped
+  across five boots and six milestones with no known-present control, and the
+  producing code never contained the word. The control that settles it is one
+  command and was available from the first capture.
+- **New: when reading a `char*[]` table out of a cache, read its length table
+  too, and check the slot count against the bound in the code.** 2v7 took three
+  names off a table whose strings are concatenated without separators, landed
+  one slot high, and built an inference ("`Unknown` is the default") on it that
+  pointed six milestones of work at the wrong question. The bound was in the
+  instruction immediately above the LEA the whole time: `cmpq $0x3, %rax`.
+- **An enum value of 0 is a value, not an absence — but an unwritten field is
+  an absence that LOOKS like that value.** Distinguishing them needs the
+  writer, not the reader.
