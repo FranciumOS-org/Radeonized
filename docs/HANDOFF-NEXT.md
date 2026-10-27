@@ -1,4 +1,4 @@
-# Handoff — 2026-10-27, after 2v7
+# Handoff — 2026-10-27, after 2v8
 
 Read this, then `CLAUDE.md`, then grep `docs/JOURNAL.md` for the tags below.
 All hard rules in `CLAUDE.md` remain in force, unchanged.
@@ -80,37 +80,58 @@ Tooling fixed on the way (each had destroyed a capture):
 
 ## What to do next
 
-**1. Read `CoreDisplay::DisplayPipeState::operator std::string() const`
-(`0x7ff80410d1b6`).** No boot needed. The two string tables are already
-located:
-- operation names, `char*[9]` at **`0x7ff8404fc2b0`**: Fetch, Scale, Rotate,
-  Linearize, CSC, **System Gamma** (index 5), Regamma, EOTF, None. The single
-  LEA of this table is at `0x7ff80410db6f`, inside the printer.
-- target names, `char*[3]` at **`0x7ff8404fc300`**: `GPU`, `Pipe`, `None`.
-  **`Unknown` is not in the table**, so it is the printer's default for a
-  target value outside 0..2 — which is exactly why `System Gamma` alone reads
-  `Unknown`.
+**2v8 answered step 1 of the previous handoff, and the answer closed the
+line.** Read `docs/JOURNAL.md` under `2v8` first — it withdraws three of
+2v7's closing statements. In short:
 
-Find the per-operation target field in `DisplayPipeState`, the default branch
-that prints `Unknown`, and then the **writer** of the System-Gamma slot.
-`DisplayPipe::AddGamma` (the analogue of `AddLinearization`, which 2v7 read in
-full) is the likely writer. Useful command form:
+- The target table is at **`0x7ff8404fc2f8`** with **four** entries,
+  `Unknown`(0), `GPU`(1), `Pipe`(2), `None`(3). `Unknown` is **enum 0**, not
+  a printer default. 2v7 read the table one slot high.
+- `System Gamma`'s target (`pipe->0x728 + 0x40`) has exactly **one** writer,
+  in `DisplayPipe::Commit` at `0x7ff804116f3e`, gated on the transaction's
+  system-gamma optional `txn->0x1a0`, whose only setter is
+  `CoreDisplay::Display::SetSystemGamma(double)` (`0x7ff8040a19f0`).
+  `UpdateTargetStateColorProcessing` (`0x7ff8041079be`) assigns Linearize,
+  CSC, Regamma and EOTF and **never** System Gamma.
+- So **`System Gamma - Unknown` is a symptom of "no transaction has ever been
+  committed", not an independent blocker**, and nothing our kext replies can
+  change it. It also explains 2v6's unexplained `EOTF` `GPU`->`Pipe` move.
+- **`Clean` was never printable.** The byte prints `Dirty` or spaces;
+  controlled counts in boot 182's capture are `Dirty` 528 = 66 x 8, `Bypass`
+  0, `Clean` 0. Drop it from the open list; the real content is that **all
+  eight operations are Dirty and none is Bypass in all 66 dumps**.
+
+**So the frontier is back where 2s9/2sv left it, now with the gamma side
+provably clear: nothing has ever queued a transaction.** `fb_vbl_ot_armed` is
+absent with `diag_used` 549-552 of 768, so rule 14's check passes and the
+absence carries information.
+
+The next step is to find **what should queue the first transaction and does
+not**. Two static reads, neither needing a boot:
+
+1. `CoreDisplay::DisplayPipe::BuildTransactions(UseCountProxy<DisplaySurface*>)`
+   (`0x7ff80410be58`) and `DisplayPipe::RunFullDisplayPipe`
+   (`0x7ff80410e2c2`) — find the predicate that decides between the full pipe
+   and `RunGPUDisplayPipe` (`0x7ff804112c9c`), which is the path that produces
+   *"Fallback GPU Display Pipe transaction submission failed"* (1.00/dump,
+   still unexplained).
+2. `AreOperationsSupportedInHW` (`0x7ff8041087fe`) reads every target with
+   `cmpl $0x2` (== Pipe). Boot 182 has **two** Pipe (Fetch, EOTF) and five
+   None. Establish what that function returns for that mix and who consumes
+   it — it is the most likely gate between "capabilities are fine" and "no
+   transaction is built".
+
+Useful command form:
 
 ```bash
-env -u DYLD_INSERT_LIBRARIES sh tools/re/dscdis.sh 0x7ff80410d1b6 0xc49
+env -u DYLD_INSERT_LIBRARIES sh tools/re/dscdis.sh 0x7ff80410be58 0xe42
 ```
-
-**2. `CLAUDE.md` is STALE from 2u6 onward.** It still carries only the
-2u4/2u5 blocks and knows nothing of the gamma chain, the `MaximumSize`
-finding, boot 182's result, or 2v7's withdrawal. Bring it up to date in the
-same pass — it is the file a new session reads first. Put the narrative in
-`docs/JOURNAL.md` and keep `CLAUDE.md` short.
 
 **3. Still open, carried forward:**
 - The **wedge** is unexplained; boots 177–182 all wedged. 2s8 holds — a plain
   power cycle comes up clean, the one-shots are consumed, nothing re-arms.
 - `Fallback GPU Display Pipe transaction submission failed`, 1.00/dump, cause
-  unknown. `Clean` has never appeared in any boot.
+  unknown. (`Clean` is struck from this list by 2v8 — it was never printable.)
 - `fb_vbl_ot_armed` is still **absent**, with `diag_used` 549–552 of 768, so
   rule 14's check passes and the absence carries information.
 - Audit the three remaining transforms on the dead
@@ -136,6 +157,7 @@ RB_AGDC_GAMMA_MIN_F      0x33000000   /* powf(2,-25) */
 RB_AGDC_GAMMA_MAX_F      0x43000000   /* powf(2,7)   */
 ```
 
+Nothing has changed in the kext in 2v8 either — it was a pure static read.
 Boot 182 ran build `7C1FED31` (`7C1FED31-711A-3A1F-B035-6FDEAAC9DF9C`) with
 `-rbgpuagdccaps` armed. Nothing has changed in the kext since, so no new build
 or boot is pending — the next step is a static read.

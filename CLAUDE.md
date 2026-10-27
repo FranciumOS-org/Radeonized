@@ -1,11 +1,15 @@
 # RembrandtGPU — notes for Claude
 
-> **New session: read `docs/HANDOFF.md` FIRST** — current state, frontier,
-> verified facts, procedure. `docs/JOURNAL.md` is the chronological evidence
-> journal (~34 000 lines): authoritative for what was measured, in order,
-> including every withdrawn reading, and **never to be trimmed**. Grep it by
-> milestone tag (`2ks`, `2s4`) for the history of one step; never read it
-> whole. `docs/HANDOFF-FULL.md` is a stale dump from 2026-10-05 — ignore it.
+> **New session: read `docs/HANDOFF-NEXT.md` FIRST** — current state,
+> frontier, what to do next. It is the live handoff.
+> **`docs/HANDOFF.md` is STALE (2026-10-26 / 2ry) — it predates the
+> framebuffer takeover and the whole gamma chain. Read it only for its §7
+> rules and §6 procedure, never for the frontier.**
+> `docs/JOURNAL.md` is the chronological evidence journal (~41 000 lines):
+> authoritative for what was measured, in order, including every withdrawn
+> reading, and **never to be trimmed**. Grep it by milestone tag (`2ks`,
+> `2s4`, `2v8`) for the history of one step; never read it whole.
+> `docs/HANDOFF-FULL.md` is a stale dump from 2026-10-05 — ignore it.
 >
 > This file was ~2800 lines of milestone narrative until 2026-10-26 and is now
 > a reference card. **Nothing was deleted, only moved**: every milestone block
@@ -264,6 +268,61 @@ no code and no new arg — only the capture taken later in the boot.
 capture before reading anything into it** (rule 26's shape, applied to a log
 window). And `-rbgpuagdccaps`'s gamma answer carries a **substituted** channel
 count (2sc): rule 17 — no reading from it is a hardware fact.
+
+**THE GAMMA CHAIN IS TRACED, FIXED AND MEASURED (2u6-2v7, boot 182).** Our
+AGDC attribute-`0x711` type-2 (Gamma) reply entry's `+0x28` is the dictionary
+key **`MaximumSize`** — the gamma table entry count CoreDisplay reads:
+`rb_agdc_gamma_entry()` -> `IOPresentmentCreateGammaDictionary`
+(`0x7ff812e9b8e0`) -> `__gammaFromDictionary` (`0x7ff812e8fb40`) ->
+`__fieldsFromDictionary` (`0x7ff812e8f866`) -> CoreDisplay's 0x38-stride entry
+`+0x30` -> `IOPCapabilities::GammaChannelTableEntryCountAndType`
+(`0x7ff80405ddd8`). With `RB_AGDC_GAMMA_CHANNELS = 0x400` (build `7C1FED31`,
+hot-key `agdc_gamma_elems1 = 400`) boot 182's *"plane with no 3-channel gamma
+table support"* went **7.12/dump -> 0**, and the capture shows
+`LUT: R/G/B - [0..0.500489..1] with 1024 entries`. The 0x32c reply entry's map
+is `+0x04` gate, `+0x0c` `NonAtomicApplicationPeriod`, `+0x10` `Type`, `+0x14`
+`FixedFormat`, `+0x18` `ConfigurationID`, `+0x20` `MinimumValue`, `+0x24`
+`MaximumValue`, `+0x28` `MaximumSize`. `RB_AGDC_GAMMA_SEGMENTS` is back to
+**1** — Apple skips entry 2 at a `Type` of 1.
+**2v7 withdrew 2v6's "linearization is the new blocker"**: Apple's own
+`getFbCapabilityForDegamma` (`0xbfed0dc`) writes `Type = 1` for both degamma
+entries and CoreDisplay's predicate accepts only mask `0x3fcc`, never bit 0,
+so a **real** AMD Mac logs that WARN too, and `AddLinearization`
+(`0x7ff8041092b4`) propagates nothing. **Do not raise the degamma `Type` off
+1** (rule 17). `CoreDisplay::UseIOPGamma` (`0x7ff8040ea95c`) is eliminated —
+all four `useIOP_gamma_on{IG,AMD,NVIDIA,APV}` prefs read `1 (absent)`;
+`build/out/useiop` prints them.
+
+**`System Gamma - Unknown` IS SOLVED, AND IT WAS NEVER OURS TO ANSWER
+(2v8).** Static read, no boot. `DisplayPipeState`'s printer
+(`0x7ff80410d1b6`) walks `0xc`-stride entries: `+0x00` op (`char*[9]` at
+`0x7ff8404fc2b0`, bound `ja 8`), `+0x04` target (`char*[4]` at
+**`0x7ff8404fc2f8`**, bound `ja 3`), `+0x08` Bypass byte, `+0x09` Dirty byte;
+each table has a parallel **length** table (`0x7ff804144f58`,
+`0x7ff804144fa0`). 2v7 read the target table **one slot high**: it is
+`Unknown`(0), `GPU`(1), `Pipe`(2), `None`(3), so **`Unknown` is enum 0, not a
+default** — the `ja` branch prints nothing at all. The live array is
+`pipe->0x728`, target of op k at `0x4 + 0xc*k`, System Gamma being k=5 ->
+**`0x40`**. `UpdateTargetStateColorProcessing` (`0x7ff8041079be`) writes
+`0x28` Linearize, `0x34` CSC, `0x4c` Regamma and `0x58` EOTF (hardcoded `$2`)
+— and **never `0x40`**. Its four early returns are also why **2v6's
+unexplained `EOTF` `GPU`->`Pipe` move** happened: boots 179/181 bailed before
+the writer block, boot 182 reached it. The **sole** writer of `0x40` is inside
+`DisplayPipe::Commit` (`0x7ff804116f3e`), gated on `txn->0x1a0`, whose only
+setter is `CoreDisplay::Display::SetSystemGamma(double)` (`0x7ff8040a19f0`).
+So `Unknown` means **no transaction has ever been committed carrying a system
+gamma** — the same silence as `fb_vbl_ot_armed` being absent, not an
+independent blocker. **Do not spend another boot, AGDC field or capability
+type on System Gamma.**
+
+**`Clean` NEVER APPEARED BECAUSE THE PRINTER CANNOT PRINT IT (2v8).** That
+byte prints `"Dirty "` or six spaces; the string `Clean` is not in
+CoreDisplay. Controlled against the capture: `DisplayPipeState` 66, **`Dirty`
+528** (= 66 x 8), `Bypass` 0, `Clean` 0. The claim "`Clean` has never
+appeared", carried since 2sa, is **vacuous** — rule 26, and the most expensive
+instance yet. The real content is the opposite: **all eight operations are
+Dirty in all 66 dumps and none is Bypass.** Remove `Clean` from every
+open-question list.
 
 The paragraph below is kept for its disassembly, which stands; its conclusion
 does not. (2sw/2sx superseded by 2sy, 2sy superseded by 2u0.)
@@ -548,9 +607,13 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     capture is two lines, not a registry dump; **`ioreg -c X -k Y` does not
     filter** and printed only `+-o Root` (2sn — use `ioreg -rl -c X`); a
     tool's **exit code can be its verdict**, so `make useiop && …` reported
-    "failed" under a perfectly good report (2so); and **when xrefing a string,
-    xref the string's START** (find the preceding NUL first) — a substring's
-    address can never be referenced. [2lw, 2rk, 2r4, 2s0, 2s5, 2sn, 2so, 2sr]
+    "failed" under a perfectly good report (2so); **a grep for a word the
+    producing code never contains returns 0 forever** — `Clean` was counted
+    across five boots and six milestones while CoreDisplay's printer only ever
+    writes `Dirty` or spaces (2v8, the most expensive instance); and **when
+    xrefing a string, xref the string's START** (find the preceding NUL first)
+    — a substring's address can never be referenced.
+    [2lw, 2rk, 2r4, 2s0, 2s5, 2sn, 2so, 2sr, 2v8]
 30. **Boot-arg names: the KERNEL is exact, our greps are not.**
     `PE_parse_boot_argn` does `strncmp(token, name, token_len)` and then
     **requires `token_len == strlen(name)`** (`0xffffff8000b92a7c`), so it
@@ -575,6 +638,16 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the `Darwin Kernel Version` banner, once per boot. And `log` is a zsh
     builtin that shadows `/usr/bin/log`: always the absolute path, always with
     a known-present control. [2q0, 2s1]
+32. **Read a `char*[]` table's LENGTH table too, and check the slot count
+    against the bound in the code.** Cache string tables are concatenated with
+    no separators, so names read without lengths run together and an
+    off-by-one slot looks plausible. 2v7 took three names off the target table
+    one slot high, concluded `Unknown` was the printer's default for an
+    out-of-range value, and pointed the next step at the wrong question; the
+    bound sat in the instruction above the LEA all along (`cmpq $0x3, %rax`),
+    and the real table has four entries with `Unknown` at index 0. Corollary:
+    **an enum value of 0 is a value, but an unwritten field is an absence that
+    looks exactly like it** — only the writer tells them apart. [2v8]
 29. **Derive a kernel slide from a pointer you solved yourself, never from
     `kextstat`.** Boot 167 measured the slide two ways in one boot: our own
     solved `handleVBL` gave `0xffffff7f966e9000` and resolved
