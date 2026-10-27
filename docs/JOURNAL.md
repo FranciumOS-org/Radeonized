@@ -39051,3 +39051,75 @@ set; accelerator NOT armed"* — because the commands handed over named only
 `rbgpu-agdc` and `rbgpu-fb`. The accelerator did not load at all that boot, so
 nothing about the desktop in boot 175 is evidence of anything. **Rule 9 names
 all four one-shots; the hand-over listed two.**
+
+## 2t9 — 2t8 PANICKED TWICE: the NDRV timing getters are called with `framebuffer` as `this`, and 2t8 made that our object
+
+Two boots lost (176, 177), both to a bug I introduced in 2t8. Build
+`4E119EEE`, byte-identical panics:
+
+```
+panic(cpu 14): Kernel trap at 0x0000000000000000, type = 14=page fault
+RIP: 0x0000000000000000   RAX: 0xffffff7fb6e80068   RSI/RDX/R12/R13: 0
+  com.rembrandtgpu.plugin : sampleTiming() + 0xcf
+  com.rembrandtgpu.plugin : run(void*, void*) + 0x5ad
+  mach_kernel : _thread_call_delayed_timer
+```
+
+`RIP = 0` is a call through a NULL pointer; `RAX` is a kext address ending
+`0x68`, i.e. a vtable slot that was read and found empty. `sampleTiming()` is
+three lines, so `+0xcf` is inside the **inlined `sampleTimingNdrv()`**.
+
+### The bug
+
+`ndrvCurrentMode` and `ndrvTimingInfo` are raw pointers to
+**`IONDRVFramebuffer::getCurrentDisplayMode`** and
+**`getTimingInfoForDisplayMode`** (`rbgpu_agdc.hpp:16-17`), and
+`sampleTimingNdrv()` calls them with the global `framebuffer` as `this`. Until
+2t8 that was **safe by construction**: the only caller of
+`rbgpu_agdc_framebuffer()` was 2pa's route on
+`IONDRVFramebuffer::enableController`, so `framebuffer` could not be anything
+else. 2t8 added the `RBAMDFramebuffer` notification and made the same code
+reachable with **our** object as `this`. `getTimingInfoForDisplayMode`
+dispatches virtually through `this`; our vtable has nothing at that slot; the
+machine died at +6.4 s, twice, and the second power cycle hung at the progress
+bar in between.
+
+2ri's note — *"neither getter takes a lock … getCurrentDisplayMode is 34
+bytes, two loads from `this->0x1e8/0x1ec`"* — is why the first getter survived
+and the second did not. The guard at the top tested that the **pointers** were
+non-NULL and never that the **object** was the right type. Rule 19, almost
+verbatim: *a NULL check is not a pointer check*. Here it was not even a NULL
+check of the thing that mattered.
+
+### The fix, build `43447D39`
+
+`sampleTimingNdrv()` now returns **8** when `framebuffer`'s class name is not
+`IONDRVFramebuffer`. That is correct rather than merely safe: `sampleTiming()`
+already falls through to `sampleTimingOtg()` whenever the NDRV path fails, and
+OTG reads the panel's timing straight out of BAR5 with no object at all (2rn,
+±0.03 %) — so **OTG is the right timing source for our framebuffer**, not a
+degraded fallback. New code 8 is distinct from 6 (getters unresolved) and 7 (no
+framebuffer) so `agdc_tim_ndrv_err` says which it was.
+
+Audited the rest of the bridge for the same shape: the only other uses of
+`framebuffer` are `getRegistryEntryID()` (a genuine virtual on any
+`IORegistryEntry`, so both classes are fine), a pointer-to-`uint64_t` cast for
+the AGDC reply, and two NULL tests. Nothing else is NDRV-typed.
+
+### The rule this earns
+
+**When a hook's trigger changes, re-check the TYPE of everything the old
+trigger guaranteed.** 2t8 reasoned carefully about *timing* — it argued that
+`gIOMatchedNotification` fires at the same "controller is up" point as the old
+route, which was true and was the right question to ask — and never asked what
+else the old route had been silently guaranteeing. It guaranteed the class of
+`framebuffer`, which three functions depended on without saying so. The
+generalisable form: a route on `Class::method` is an implicit type assertion
+for every global it feeds, and moving the trigger voids it.
+
+This also sharpens 2t8's own closing note. It listed 2pa's VRAM publish, 2qv's
+metaclass read and 2qx as "still on the dead route, unaudited". That was
+recorded as a loose end; it is in fact the same defect class, and 2qv's read in
+particular asserts `getClassName() == "IONDRVFramebuffer"` by comment. Those
+three must be audited for type, not just for reachability, before anything
+re-triggers them.
