@@ -791,11 +791,35 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // (agdc_extcap_gated_n) and how many types were ANSWERED. On boot 169 the
     // answered count was 1 of 16; with the arg it should be 5.
     "agdc_extcap_all", "agdc_extcap_answered", "agdc_extcap_gated_n",
+    // 2v9: THE ONE KEY THE WHOLE DISPLAY-PIPE CHAIN HANGS ON, so it goes
+    // ahead of everything else in this block. 2v9 read the chain to its end:
+    // IOPTransaction::Submit fails at its first step and logs NOTHING iff
+    // IOPresentment's plane count is 0; that count is
+    // CFArrayGetCount(caps["DeviceArray"]); DeviceArray is NULL iff
+    // CreatePlaneDictionary is, which happens iff caps->0x434 != 1; and
+    // 0x434 is set by one instruction, only when the type-0x10 (Scaler)
+    // 0x711 query returns IOReturn 0, a non-zero out-length and a non-zero
+    // count. agdc_extcap_answered cannot settle that - it is a last-wins
+    // total and cannot say WHICH types were answered (rule 14).
+    //   bits  7..0  our return      (0 = success)
+    //   bits 15..8  the count we published at +0x08  (must be >= 1)
+    //   bits 23..16 the framebuffer index we were handed at +0x00, which
+    //               rb_agdc_extcap refuses unless it is 0
+    //   bits 47..32 the out-length, which Apple fails the gather on if 0
+    // So 0x196c_00_01_00 is the shape that makes the chain work; anything
+    // with a non-zero low byte, a zero count byte, or a non-zero index byte
+    // names the defect outright. ABSENT means the scaler was never asked,
+    // which agdc_extcap_calls distinguishes.
+    "agdc_ec_scaler",
+    // The other four cost nothing to answer and nothing downstream depends
+    // on them, so they sit after the gamma provenance.
+
     // 2v0: the gamma reply's own shape, read back out of the buffer we wrote,
     // so a wedged boot's NVRAM identifies the build without kmutil. 2 entries
     // and elems2 = 0x200 is the two-entry build; absent means the one-entry
     // build (or a gamma query that never arrived).
     "agdc_gamma_entries", "agdc_gamma_elems1", "agdc_gamma_elems2",
+    "agdc_ec_csc", "agdc_ec_gamma", "agdc_ec_degamma", "agdc_ec_cursor",
     "fb_vbl_hv_state", "fb_vbl_state", "fb_vbl_ot_cls", "fb_vbl_hv_cls",
     // and the keys that say the early trigger actually ran, so an absent
     // `fb_vbl_ot_armed` can be told from "the bridge never published".

@@ -1,4 +1,4 @@
-# Handoff — 2026-10-27, after 2v9
+# Handoff — 2026-10-27, after 2v9 (build 8887186E pending a boot)
 
 Read this, then `docs/RULES.md`, then grep `docs/JOURNAL.md` for the tags below.
 All hard rules in `docs/RULES.md` remain in force, unchanged.
@@ -121,9 +121,48 @@ does not match. Candidates, in order of cheapness:
    the `IOPresentmentCapabilitiesDisplayPipe` subclass (only that subclass has
    `CreatePlaneArray` at `vt[0x50]`).
 
-The cheapest next build is pure instrumentation in our own bridge, one NVRAM
-key per 0x711 type recording the framebuffer index we saw, the type, the count
-we wrote and our return — which distinguishes all three at once.
+**That build exists: `8887186E`, committed, hosttest green, not yet booted.**
+It adds one NVRAM key per 0x711 capability type — `agdc_ec_scaler` (hot, high
+in the note), plus `agdc_ec_csc` / `_gamma` / `_degamma` / `_cursor` — each
+packing everything Apple's gate reads:
+
+```
+bits  7..0   our return        0 = success
+bits 15..8   the count we published at +0x08        must be >= 1
+bits 23..16  the framebuffer index we were handed at +0x00
+bits 47..32  the out-length, which Apple fails the gather on if 0
+```
+
+`agdc_ec_scaler = 196c0001 00` is the shape that makes the chain work. Read it
+first; it names the defect outright:
+
+| `agdc_ec_scaler` | meaning |
+|---|---|
+| absent, `agdc_extcap_calls` > 0 | the scaler type was never asked — the gather is not running, or not on the `IOPresentmentCapabilitiesDisplayPipe` subclass |
+| low byte non-zero | **we refused it** — read the index byte next |
+| index byte (23..16) non-zero | `rb_agdc_extcap`'s `p[0] != 0` refusal; IOPresentment seeds it from `(caps->0x20)->0x50` |
+| count byte (15..8) zero | we answered but published no entries |
+| out-length (47..32) zero | `0x7ff812e97a72` fails the whole gather regardless of our return |
+| `0x196c0001 00` | our side is correct and the defect is past us — go to `CreatePlaneDictionary`'s other inputs |
+
+Install and arm:
+
+```bash
+sudo tools/efi.sh install && sudo tools/efi.sh status
+```
+
+```bash
+sudo tools/efi.sh on && sudo nvram rbgpu-arm=1 && sudo nvram rbgpu-fb=1 && sudo reboot
+```
+
+Then, **in the armed boot, over SSH, before any reboot** (rule 10):
+
+```bash
+sudo tools/plugin_check.sh
+```
+
+`-rbgpuownfb` and `-rbgpuagdccaps` are already in boot-args; the framebuffer
+kext needs `sudo tools/fbload.sh` as usual, and that is the user's step.
 
 **Also unresolved (2v9)**: the `je` at `0x7ff804117ff7` into the fallback can
 never fire, because `0x7ff80410ddff` cannot return an empty vector. The
@@ -160,7 +199,8 @@ RB_AGDC_GAMMA_MIN_F      0x33000000   /* powf(2,-25) */
 RB_AGDC_GAMMA_MAX_F      0x43000000   /* powf(2,7)   */
 ```
 
-Nothing has changed in the kext in 2v8 or 2v9 either — it was a pure static read.
 Boot 182 ran build `7C1FED31` (`7C1FED31-711A-3A1F-B035-6FDEAAC9DF9C`) with
-`-rbgpuagdccaps` armed. Nothing has changed in the kext since, so no new build
-or boot is pending — the next step is a static read.
+`-rbgpuagdccaps` armed. **The current build is `8887186E`**
+(`8887186E-DBF4-32D3-8654-EB1FCA172935`), 2v9's per-type 0x711 instrumentation;
+`rb_agdc.h` is unchanged, so the chip sees exactly what boot 182's did and the
+only difference is what NVRAM reports. A boot of it is pending.
