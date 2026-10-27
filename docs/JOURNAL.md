@@ -41113,3 +41113,91 @@ nothing, and the reason is worth more than the reading:
   capture is the newest one on disk.
 - **An index is not a count.** When a reading is used to retire a line of
   inquiry, name the object the number belongs to.
+
+## 2w0 — boot 183
+
+**Build `8887186E` booted, no wedge, and the measurement it was built for did
+NOT happen — my arm instructions were incomplete.** 2v9's handoff gave
+`rbgpu-arm=1` and `rbgpu-fb=1` and omitted **`rbgpu-agdc=1`** and
+**`rbgpu-iop=1`**, so the two features the experiment depends on were inert.
+Rule 9 in its plainest form, and the mistake was in the instructions, not the
+machine.
+
+Identity checks all pass (rules 8, 15, 33): `kern.boottime` 18:24:40 is this
+session's, `rbgpu-boot` **183** (was 182), loaded plugin
+`8887186E-DBF4-32D3-8654-EB1FCA172935` matches `build/out`,
+`com.rembrandtgpu.fb` loaded at index 176. Boot-args checked as whole tokens
+(rule 30): `-rbgpuagdc`, `-rbgpuiop`, `-rbgpuownfb`, `-rbgpuagdccaps` all
+PRESENT, `-rbgpuagdcearly` correctly absent.
+
+`agdc_oneshot=2` and `iop_oneshot=2` — 2t7's "not armed" — and
+`agdc_ec_scaler`, every other `agdc_ec_*`, and the whole `agdc_extcap_*` block
+are **absent** from the note because they were never set. `diag_used` is
+**0x1df = 479** of **0x300 = 768**, so the table did not fill and rule 14's
+check passes: that absence is informative, and it says the bridge never ran.
+
+### What boot 183 IS worth
+
+**A clean no-wedge differential on one variable.** Boots 177-182 all had the
+AGDC bridge armed and all wedged. Boot 183 is the same build family, the same
+boot-args, the framebuffer armed and the accelerator up — with the bridge
+**unarmed** — and the desktop is usable enough that the user drove a terminal
+session on it for minutes. n=1 and not a proof, but it is the first boot that
+isolates the bridge from everything else, and it points at the bridge rather
+than at the framebuffer takeover or `-rbgpuagdccaps`.
+
+**The VBL half is confirmed correct and complete**, from the registry (rule
+31 — our `IOLog` is invisible):
+
+```
+RBFBVBLRunning   Yes      RBFBVBLFires      54000     RBFBVBLRegistered 2
+RBFBVBL0Self Yes  0Enabled Yes  0Used Yes  0Fires 54000
+RBFBVBL1Self No   1Enabled No   1Used Yes  1Fires 0
+```
+
+Handler 0 is our own self-registered pump, enabled and ticking: 54 000 fires
+in ~375 s is **144 Hz**, the panel's measured 143.88 (2rn). Handler 1 is
+**Apple's**, registered and left **disabled with zero fires** — exactly what
+2s5 measured and predicted, and it is enabled only by
+`enableTransactionInterrupt` off a queued transaction. So the clock is right,
+the registration is right, and `fb_vbl_ot_armed` is **absent**: still **no
+transaction has ever been queued**, now with the VBL side positively
+eliminated as the reason.
+
+**Other live confirmations** (control: `ioreg -rl -c IOPCIDevice` works;
+`log show` window carried 4323 WindowServer lines):
+- `IOAccelDisplayPipeCapabilities = {DisplayPipeSupported=Yes,
+  TransactionsSupported=Yes}` live on our accelerator — **2u2 reconfirmed**,
+  and 2sv's controlled zero is now the outlier twice over.
+- `RBAMDFramebuffer` owns the panel, `VRAM,totalMB` 4096, accelerator present.
+- SkyLight logs **`Metal compositor`**, not Software.
+- WindowServer is at **200.2 %**, *not* the 0.0 % idle of 2su. Unexplained,
+  and **not** attributed: the user was actively driving the machine, and the
+  unarmed boot measured in 2v9 showed 207.9 % too, so nothing here separates
+  "CPU compositing" from "a busy desktop". It needs its own controlled read.
+
+### The repeat
+
+No code change. `rb_agdc.h` is untouched since boot 182, so the chip sees
+exactly what it saw then; the only difference is what NVRAM reports. Arm
+**all four** keys:
+
+```
+sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
+```
+
+Then `sudo tools/fbload.sh` as usual, and `sudo tools/plugin_check.sh` in the
+armed boot over SSH **before** rebooting (rule 10) — the bridge being armed is
+also what correlates with the wedge, and 2s8 holds: the note still gets
+written, the one-shots are still consumed, and a plain power cycle comes up
+clean.
+
+### Rule
+
+**An arm instruction must list EVERY one-shot the experiment needs, and the
+reader must check each one's `*_oneshot` key before interpreting anything.**
+2v9's handoff named two of four. The cost was one boot that looked completely
+healthy and carried no data; the keys that would have caught it
+(`agdc_oneshot`, `iop_oneshot`) were already in the note and already meant
+"not armed". Rule 9 says the one-shots are one-shot; this adds: **say which
+ones, and verify them before reading the result.**
