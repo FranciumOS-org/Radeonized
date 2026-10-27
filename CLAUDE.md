@@ -143,6 +143,30 @@ not memory, not a flag and not the AGDC gate:
   cause is **unexplained**. It is a worse failure mode than the wedge, because
   it leaves no SSH window.
 
+**THE IOPRESENTMENT PATH IS OPTIONAL — a working driver skips it** (2sj).
+`luuumi-dev/nullarc` (Phoenix, RDNA 3, **DCN 3.1.4**, the same
+`DCN_VERSION_3_1` grouping as our 3.1.2; MIT/GPL-2.0 own code, PolyForm-NC for
+`src/phxaccel`, **no AI restriction**) gets WindowServer compositing at 120 Hz
+with a framebuffer that uses **none** of IOPresentment, AGDC transactions,
+`SetPlaneState`, `BindIOAccelSurfaceToResource` or plane state — they do not
+appear in `phxfb.cpp` at all. `PhxAMDFB` subclasses **`IOFramebuffer`**, takes
+over the firmware-lit GOP mode, **writes nothing to the display engine** (it
+only *reads* OTG0), returns the boot console surface from `getApertureRange`,
+reports one mode at a measured refresh, drives up to four VBL handlers from a
+`thread_call`, and exposes `callPlatformFunction` VRAM/GPU-VA hooks; its
+**accelerator** composites. Every one of those inputs this project already
+measures (2pr, 2rn, 2s5, 2s9). So 2s2–2si's eliminations stand as facts but
+their relevance does not, and **the frontier is a framebuffer kext, not more
+IOPresentment**. We are better placed than nullarc: gfx1033 is inside Apple's
+supported generation and our accelerator already works, so only the
+framebuffer half is missing. **NOT established**: whether Apple's
+`AMDRadeonX6000` will composite for a non-Apple `IOFramebuffer` — nullarc's
+compositor is their own. **Unverified, do not act on it**: their comment that
+CoreDisplay gates IOPresentment on "AMD" in the class name; the bare "AMD" in
+that region of the cache is a hang-watchdog vendor tag, not a comparison.
+Also measured (2sj): CoreDisplay's hang watchdog never fired in either wedged
+boot, so there was no transaction to hang.
+
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
 once in a whole boot. **Do not force `UseIOPresentment` true** (2ql): 72 call
