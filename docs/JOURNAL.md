@@ -38158,3 +38158,112 @@ that CA has no accelerated renderer for a display owned by
 `IONDRVFramebuffer` — is **untested**, and the experiment that tests it is the
 one configuration never yet booted: accelerator **and** `RBAMDFramebuffer`
 together, with the VBL clock now running (2sz) and a crumb to read if it dies.
+
+## 2t2 — boot 173: the COMBINATION boots, the accelerator registers a VBL handler on OUR framebuffer, and `CA::OGL::SW` disappears
+
+Boot 173. **The configuration that had never completed a boot** — accelerator
+armed **and** `RBAMDFramebuffer` owning the panel — came up with no panic.
+Sample saved as `logs/ws-sample-boot173.txt`.
+
+```
+armed=1   diag_max=300  diag_used=1df (479 of 768, not full)
++-o RBAMDFramebuffer <class RBAMDFramebuffer, id 0x1000004b2, registered, matched, active>
+debug-gpus: {"acc"=4294968501,"fbs"=(4294968498),...}   -> acc 0x1000004B5, fbs 0x1000004B2
+RBFBVBLRegistered = 2      RBFBVBLRunning = Yes     RBFBVBLFires = 25200
+RBFBVBL0Self = Yes         RBFBVBL1Self = No
+RBFBVBL2Self = No          RBFBVBL3Self = No
+```
+
+**`fbs` = 0x1000004B2 is exactly this boot's `RBAMDFramebuffer` id**, so the
+pairing is ours again (2st, now with the accelerator actually armed).
+
+### The new fact: TWO VBL registrants
+
+`RBFBVBLRegistered = 2` with `RBFBVBL0Self = Yes` and **`RBFBVBL1Self = No`**.
+Slot 0 is `IOFramebuffer`'s own `handleVBL` (target == this); **slot 1 has a
+target that is not us**, which is the accelerator's `signalVBLInterrupt` —
+`IOAccelDisplayPipe::displayModeDidChange` registering for `'vbl '`, the call
+2s5 measured on the old `IONDRVFramebuffer` path. **It has never registered on
+our framebuffer before**, and it can only do so because 2sz's change leaves the
+clock running instead of waiting for an enable that never comes.
+
+### `CA::OGL::SW` is GONE
+
+`sudo sample WindowServer 3`, same command as 2t1, sort-by-top-of-stack:
+
+```
+__workq_kernreturn          42695
+mach_msg2_trap              11811
+semaphore_timedwait_trap     6329
+start_wqthread                  8
+(nothing else >= 5)
+```
+
+Boot 172's identical command gave `CA::OGL::SW::image_sampler` 43,
+`_platform_memmove` 36, `bzero_sse_np` 36, `scan_convert` 20,
+`RGBAh::load_1` 15, `clip_vertices` 15, `draw_polygon` 9, `layer_blit_byte_ANY`
+9, `circle_sampler` 8. **All of it is absent.** WindowServer is no longer
+running QuartzCore's software rasteriser.
+
+### Why this is NOT yet the win, stated plainly
+
+**The sample is 3 seconds of an IDLE desktop.** A sample with nothing animating
+cannot show rasterisation that is not happening, so the absence of
+`CA::OGL::SW` is consistent with both "the work moved to the GPU" and "there
+was no work". 2t1's sample caught SW frames because something was compositing
+at that moment; this one may simply have caught nothing. **The control is a
+sample taken WHILE the desktop animates** (Mission Control, a window resize),
+and it has not been taken.
+
+And the user's own report contradicts the optimistic reading: *"im in all
+animations are still on cpu"*. That is a subjective report against an idle
+sample, so the two are not yet in conflict — but the animating-sample control
+is what decides it. If `CA::OGL::SW` stays absent under load, then
+WindowServer's compositing is on the GPU and the user's perception is about
+something else — per-app animation renders in the app's own process, not in
+WindowServer, which this sample cannot see at all.
+
+### The nonce is systematically ONE BEHIND — correction to 2t0
+
+```
+nvram rbgpu-boot        -> 173
+nvram rbgpu-fbcrumb     -> b=172 s=12 f=10000 e=2 r=1
+ioreg RBFBCrumbBoot     -> "172"      (LIVE, this boot's instance)
+```
+
+`RBFBCrumbBoot` is a live property of the **current** instance and reads 172
+while the counter reads 173. So `RBAMDFramebuffer` reads `rbgpu-boot` **before
+the plugin increments it**, and `b=` is one less than the counter for the same
+boot. The crumb above is **this boot's**, not boot 172's.
+
+**2t0's stated procedure was therefore wrong and would have discarded good
+evidence**: "compare b= against nvram rbgpu-boot and believe nothing unless
+they match" rejects every valid crumb. The correct comparison is against the
+live `RBFBCrumbBoot` property, or `b == rbgpu-boot - 1` when read after the
+fact. Better still, the nonce should not depend on another kext's write
+ordering at all — that is the real defect, and it is the fourth time in this
+project that a nonce or counter has been read without establishing what makes
+it meaningful.
+
+Note what the crumb does say once decoded: `s=12 f=10000` — stage 12 is the
+10 000-fire milestone, so start() completed and the clock passed 10 000 in this
+boot, consistent with the live `RBFBVBLFires = 25200`.
+
+### Unrelated, measured because the user asked: the trackpad did not attach
+
+```
+VoodooI2CMultitouchInterface        0 instance(s)
+VoodooI2CMultitouchHIDEventDriver   0 instance(s)
+VoodooI2CMultitouchEngine           0 instance(s)
++-o TPD2 <class VoodooI2CDeviceNub, id 0x1000002a3, ... busy 0 (1000 ms)>
+```
+
+Exactly one `VoodooI2CHIDDevice` exists in the registry (`Transport = "I2C"`),
+and the trackpad's three multitouch classes have **no instances at all**, so
+the HID device under `TPD2` never attached. `TPD2`'s busy time is exactly
+1000 ms, which reads like an I2C init timeout. The user reports it as
+intermittent across boots, which fits an attach race. **No GPU involvement is
+established**; this is VoodooI2C's own stack and outside this project. A
+sleep/wake cycle re-probes the device and is the cheap recovery. No VoodooI2C
+log lines were found, and per rule 26 nothing is concluded from that absence
+without a known-present control.
