@@ -38499,3 +38499,121 @@ barred (2sy), so a path requiring Apple's controller remains closed.
 
 *"trackapd is back"* with no action taken, consistent with 2t2's attach-race
 reading and against anything this project did.
+
+## 2t5 — the live chain CONFIRMS 2qh on hardware, and both reference projects get GPU compositing a way we have not tried
+
+Boot 174, from `logs/ws-sample-boot174-animating.txt`. No new boot.
+
+### The chain, measured, top to bottom
+
+```
+ 3100 ws_main_thread -> SLXServer -> server_loop
+ 2112 CGXRunOneServicesPass -> post_port_data
+ 2093 non_coalesced_timer_handler -> run_timer_pass -> update_display_callback -> CGXUpdateDisplay
+ 2044 WS::Updater::UpdateDisplays(CGXConnection*, bool, vector<shared_ptr<WS::Displays::Display>>)
+ 2044 WS::Displays::CDDisplay::render_update(Update&, Compositor*, unsigned, WSCompositeSourceLayer*)
+ 2034 CompositorSW::CompositeLayersToDestination(...)            <<< SkyLight's SOFTWARE compositor
+ 1942 layer_blit_entry -> 1937 CGLayerKitFetch -> 1861 CARenderOGLRender
+ 1763 CA::OGL::Renderer::render(...)
+ 1414 CA::OGL::render_prepared_layers -> render_layers -> ImagingNode::render -> LayerNode::apply  (recursing)
+  525 CA::OGL::render_contents_background -> ContentsGeometry::fill_and_unbind
+  480 CA::OGL::SWContext::draw_elements(...)                      <<< the SW context
+  475 CA::OGL::SW::draw_polygon(...)
+```
+
+**`CompositorSW::CompositeLayersToDestination` is the decision point**, and it is
+the class 2pd named at ~48 % of the main thread. **This is 2qh measured on
+hardware for the first time.** 2qh read the mechanism statically:
+
+```
+CDSurface::prepare_for_update:
+    io = CoreDisplay_DisplaySurface_GetIOSurface(s)
+    if (io == NULL) cdsurf->0x40 = 1          <<< THE DEFECT
+    if (cdsurf->0x40 == 1) goto force_sw
+force_sw: update->0x1c0 = THE SW COMPOSITOR
+```
+
+`CDDisplay::compositor()` returns a **Metal** compositor — that is what logs
+`Metal compositor activated` — and `begin_update` then **swaps it for
+`CompositorSW`** because the display's `DisplaySurface` has no backing
+IOSurface. **That is why the compositor log line has been worthless**, for the
+third time in this session (2st, 2sz, 2t1 each leaned on it).
+
+### Apple's Metal driver IS loaded in WindowServer, and is not compositing
+
+Counted in the same sample:
+
+| image | frame-lines |
+|---|---|
+| `CA::OGL::SW` | **1746** |
+| `QuartzCore` | 5239 |
+| `AMDRadeonX6000MTLDriver` | **10** |
+| `IOAccelerator2D.plugin` | 1 |
+| `vImage` | 140 |
+
+`AMDRadeonX6000MTLDriver` **is** mapped into WindowServer and does real work —
+`-[GFXAAMD_MtlDevice newTextureWithDescriptor:iosurface:plane:]`,
+`-[GFXAAMD_MtlTexture initIOSurfaceWithDevice:...]`,
+`-[GFXAAMD_MtlCmdQueue submitCommandBuffers:count:]` — so Metal is alive on our
+GPU inside WindowServer. But at 10 frame-lines against 1746 it is **marginal,
+not co-equal**, and an intermediate claim that "both paths are running" was
+corrected by this count before it was written down. `AMDRadeonX6000GLDriver` is
+**never mapped**, although the accelerator publishes
+`IOGLBundleName = "AMDRadeonX6000GLDriver"` (with `IOOCDBundleName`,
+`MetalPluginName = AMDRadeonX6000MTLDriver`,
+`MetalPluginClassName = AMDMTLGFX10Device`, `IOVARendererID = 16908292`, and it
+is the only device on the machine publishing any of them). So the renderer
+plumbing is advertised and correct; the missing thing is the display surface.
+
+### What the reference projects actually do — the user's question, answered
+
+Licence position first. **NootedRed and NootRX were not read** (ChefKiss OKL v1
+§2/§3). `luuumi-dev/nullarc` (MIT/GPL-2.0 own code, PolyForm-NC for
+`src/phxaccel`/`src/nmplugin`, no AI restriction) and `Almosst-DEV/Cobalt64`
+(MIT) were, from their READMEs over `raw.githubusercontent.com`.
+
+Both get a GPU-composited desktop, and **both do it by shipping their own
+userspace Metal device bundle** — not by making Apple's Metal driver composite:
+
+| | nullarc (Phoenix, gfx1103, DCN 3.1.4) | Cobalt64 (Navi 48, RDNA 4, DCN 4.1) |
+|---|---|---|
+| kernel | `PhxAccel.kext` — `NMXAccel` IOAccelerator + `PhxAMDFB` + `PhxAGDC` | `src/navi48-bringup`, **"hooks into Apple's AMDRadeonX6000 accelerator"** |
+| **userspace Metal** | **`NVMTLDriver.bundle`** in `/Library/GPUBundles` — "Metal on Vulkan, zero-copy IOSurfaces" (Mesa RADV) | **`navi48metal`** — "a Metal device bundle that runs Metal on top of the Vulkan driver" (metal2vulkan, AIR→SPIR-V) |
+| result | "WindowServer composites on the 780M at the panel's 120 Hz" | "GPU-composited desktop on three displays at once … WindowServer's Metal compositor running on this driver stack" |
+| maturity | working | preview |
+
+Two of nullarc's own notes land directly on 2qh's defect and are independent
+confirmation that the IOSurface path is the crux:
+
+> **Zero-copy IOSurfaces** — textures are linear images over the surface's own
+> pages; WindowServer CPU 77 % → 36 %
+> **Surface keep cache** — CoreAnimation re-wraps the same IOSurfaces every
+> frame; keeping their imports took a dragged window from 64–69 to 116 fps
+
+So in their stacks CoreAnimation **does** get IOSurfaces for compositing, from
+their Metal plugin. Ours does not, from Apple's.
+
+### The conclusion, and it is not a fix we can lift
+
+**Neither project solved our problem; they avoided it.** Both replaced Apple's
+userspace Metal driver wholesale with a Metal-on-Vulkan implementation, and
+neither found a way to make `AMDRadeonX6000MTLDriver` supply an IOSurface-backed
+display surface. Cobalt64 is the sharper datum, because it **hooks Apple's
+`AMDRadeonX6000` in the kernel exactly as this project does** and still needs
+its own userspace Metal bundle for the composited desktop.
+
+That reframes 2t4's "next read" honestly: the question is not only *what selects
+CoreAnimation's renderer* but **whether Apple's Metal driver can be made to
+produce the display surface at all** — and the only two working precedents on
+unsupported AMD hardware answered "no, we wrote our own". 2sj's
+"its accelerator composites" was the whole point and this is its full form.
+
+**Nothing from either project is liftable into the current architecture**, which
+is what the user asked. The known-working route is a userspace Metal device
+bundle, and that is a Metal-on-Vulkan implementation for gfx1033 — an
+undertaking on the scale of the rest of this project, and the user's decision,
+not a next step.
+
+Still **not established**: that Apple's path is closed. 2qh names the exact
+branch, `CoreDisplay_DisplaySurface_GetIOSurface(s) == NULL`, and what feeds
+`GetNextSurface` on this machine has never been read.
