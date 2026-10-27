@@ -62,9 +62,17 @@ not memory, not a flag and not the AGDC gate:
   registers `signalVBLInterrupt` for `'vbl '` on our `IONDRVFramebuffer`, then
   disables it; `transaction_queue_gated` → `enableTransactionInterrupt` →
   `enableVBLInterrupt` re-arms it by itself when a transaction is queued.
-  **`fb_vbl_ot_armed` has never appeared, so no transaction has ever been
-  queued** — which is the one measurement that would separate "the ring filled
-  and nothing retired it" from "it never got that far".
+  **Boot 168 measured that no transaction has EVER been queued** — past the
+  gate, with the table not full (`diag_used` 571 of 768), `fb_vbl_ot_armed` is
+  absent. So "the ring filled and nothing retired it" is excluded (2s9).
+- **The early path wedges because OUR bridge refuses getLinkConfig** (2s9).
+  `sampleTiming()` is called from one place, the start path, and on the early
+  path it runs 1085 ms *before* the framebuffer exists (boot 168: sampled
+  6320 ms, framebuffer 7405 ms), so the NDRV source returns 7, the OTG
+  fallback declines by 2s1's guard, and `timingValid` stays false for the
+  whole boot — attribute **`0x921`** refused 4 of 6 times with
+  `kIOReturnUnsupported`. Build `8B261646` re-samples on framebuffer arrival,
+  on its own thread_call, scoped to `early`. **Not booted.**
 
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
