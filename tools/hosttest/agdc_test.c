@@ -256,7 +256,14 @@ int agdc_tests(void) {
         /* Entry 1 must still be entry 1 either way: format word 0x10 and its
          * own substituted count, unaffected by whether entry 2 is written. */
         A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x10,4)==0x10);
-        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==RB_AGDC_GAMMA_CHANNELS);
+        /* 2v5: entry 1's +0x28 is the field IOPresentment publishes as the
+         * dictionary key `MaximumSize`, and a zero there is the whole defect.
+         * Asserted as a LITERAL, not against RB_AGDC_GAMMA_CHANNELS, for the
+         * reason 2v1's addendum records: a field compared against the macro
+         * that wrote it is not a test. 1024 is the LUT size CoreDisplay's own
+         * DisplayPipeState dumps report for this display. */
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==0x400u);
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)!=0);
         /* Whatever the count, it must be a count of entries that FIT: a reply
          * that publishes 2 into a buffer holding one is worse than a refusal.
          * rb_agdc_extcap's size check is exact, so a short size is refused

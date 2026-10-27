@@ -795,7 +795,7 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // so a wedged boot's NVRAM identifies the build without kmutil. 2 entries
     // and elems2 = 0x200 is the two-entry build; absent means the one-entry
     // build (or a gamma query that never arrived).
-    "agdc_gamma_entries", "agdc_gamma_elems2",
+    "agdc_gamma_entries", "agdc_gamma_elems1", "agdc_gamma_elems2",
     "fb_vbl_hv_state", "fb_vbl_state", "fb_vbl_ot_cls", "fb_vbl_hv_cls",
     // and the keys that say the early trigger actually ran, so an absent
     // `fb_vbl_ot_armed` can be told from "the bridge never published".

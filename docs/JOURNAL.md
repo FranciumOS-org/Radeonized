@@ -40523,3 +40523,46 @@ non-zero, yet `no 3-channel linearization table support` still appears once per
 dump. That check is `IsLinearizationTableBased` / `SupportsLinearization`
 (`0x7ff80405e00c` / `0x7ff80405e870`), a different predicate, and it is a
 separate read.
+
+### 2v5 addendum: built, in `7C1FED31`
+
+One constant: `RB_AGDC_GAMMA_CHANNELS` **0 → 0x400** (1024) at
+`src/common/rb_agdc.h`, entry 1's `+0x28`, which 2v5 pinned as the dictionary
+key `MaximumSize`. Nothing else in the reply changed —
+`RB_AGDC_GAMMA_SEGMENTS` stays **1**, so entry 2 is still not written and this
+is a single variable.
+
+**Rule 17, in the header and here:** 1024 is still a **substitute**. Apple
+reads it from `vt[0x1b8](0xf)` on an `AmdFbDisplayPath` this machine does not
+instantiate. It is chosen because CoreDisplay's own `DisplayPipeState` dumps
+already print `LUT: R - [0..0.500489..1] with 1024 entries` for this panel, so
+it is the size of a table CoreDisplay built, not a number invented here — but
+no reading downstream of it is a hardware fact.
+
+The hosttest assertion on that field was itself a tautology
+(`== RB_AGDC_GAMMA_CHANNELS`) and is now a **literal** `== 0x400u`, plus an
+explicit `!= 0`, for the reason 2v1's addendum records. Checked both ways: with
+the constant temporarily 0 the suite reports
+`FAIL AGDC:265: ... ==0x400u` and `FAIL AGDC:266: ... !=0`; restored, all
+passed.
+
+**And the provenance key was watching the wrong entry.** 2v0 published
+`agdc_gamma_elems2` — entry **2**'s `+0x28` — which is precisely the entry
+Apple skips, so a boot could read "armed" while the field Apple actually reads
+stayed 0. `agdc_gamma_elems1` is added beside it and both are in the peer's
+hot-key list, so a wedged boot's `rbgpu-diag` now says what entry 1 published.
+Expect `agdc_gamma_entries 1`, **`agdc_gamma_elems1 400`**, `agdc_gamma_elems2 0`.
+
+Build **`7C1FED31`**. `kmutil libraries -p` resolves 0 from
+`SystemKernelExtensions.kc`; `grep -c IOGraphicsFamily src/plugin/Info.plist`
+is 0. `-rbgpuagdccaps` is already in boot-args and already measured to take, so
+the boot needs the install, the one-shots, and the capture.
+
+**The prediction, sharp enough to be wrong:**
+`Attempting to get 3-channel gamma table capabilities from plane with no
+3-channel gamma table support` must leave **7 per `DisplayPipeState` dump**. If
+it does, `System Gamma` has a chance of resolving off `Unknown` and the next
+reading is whether `Clean` ever appears. If it does not — with
+`agdc_gamma_elems1` confirming 1024 went out — then `MaximumSize` is not
+sufficient either, and the remaining difference is `Type`: entry 1 claims bit 4,
+and the six accepted bits are 9, 8, 7, 6, 4, 3 (2u7).
