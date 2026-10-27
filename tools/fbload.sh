@@ -28,9 +28,11 @@
 # the auxiliary collection at boot, which is an install and therefore the user's
 # own step.
 #
-# Both stages need the one-shot: the kext's probe() refuses unless
+# Stage 2 and stage 3 need the one-shot: the kext's probe() refuses unless
 # `rbgpu-fb` is set in NVRAM, and consumes it durably before it touches
-# anything. So a boot or load that goes wrong costs exactly one power cycle.
+# anything, so a load or boot that goes wrong costs exactly one power cycle.
+# Stage 1 does NOT need it, and does not consume it, because no personality is
+# sent and probe() is therefore never called.
 set -eu
 
 mode="${1:-start-only}"
@@ -52,9 +54,12 @@ if kmutil showloaded 2>/dev/null | grep -q com.rembrandtgpu.fb; then
     exit 1
 fi
 
-# Refuse before the load if the one-shot is absent, so a forgotten `nvram`
-# does not read as "the kext is broken". Absence is not a result.
-if ! nvram rbgpu-fb >/dev/null 2>&1; then
+# Stage 1 never calls probe(): --load-style start-only sends no personality, so
+# no instance is ever created and the one-shot is neither read nor consumed.
+# Requiring it there would be theatre. Stage 2 does match, so it does need it -
+# and refusing BEFORE the load keeps a forgotten `nvram` from reading as "the
+# kext is broken", because absence is not a result.
+if [ "$mode" = beside ] && ! nvram rbgpu-fb >/dev/null 2>&1; then
     echo "rbgpu-fb is not set, so probe() would decline and this load would"
     echo "prove nothing. Set it first:"
     echo "  sudo nvram rbgpu-fb=1"
