@@ -37227,3 +37227,64 @@ more: it does **not** license the claim that the display is GPU-driven. Rule
 13 — the name tells you what the name means. The next read is a live
 `sample WindowServer`, which names the function burning the time, and
 WindowServer's CPU share against 2pd's measured ~48 % baseline.
+
+### 2st addendum — WindowServer is IDLE, so the CPU-copy reading is dead
+
+Same boot, user's capture after `plugin_check.sh`:
+
+```
+armed=1  iop_on=1  iop_saw_ws=1  iop_ready=1  iop_oneshot=2  dal_pass=0
+--- WindowServer cpu
+  0.0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+```
+
+`sudo sample WindowServer 3`: every thread idle at the full sample count, and
+the one stack that expanded is `_dispatch_semaphore_wait_slow` →
+`semaphore_timedwait_trap`. Only one `compositor` line exists in the whole
+boot, so **Metal stayed selected and did not fall back**.
+
+**WindowServer at 0.0 % kills 2st's own CPU-blit hypothesis.** Nothing is
+rasterising and nothing is copying 8 MB a frame on the CPU; 2pd's ~48 %
+`CompositorSW` load is simply gone. The lag is therefore **not** WindowServer
+working slowly — it is WindowServer *idle while frames fail to arrive*. That is
+the opposite failure from every previous display boot on this machine.
+
+Also new: **`iop_saw_ws=1` and `iop_ready=1`**, neither of which has ever read
+true before.
+
+### 2su — the VBL enable is the suspect, and our own instrument could not see it
+
+`RBAMDFramebuffer::armVBL` starts the thread_call only while a handler is
+enabled:
+
+```
+485:    if (!vblCall || !anyVBLEnabled()) {
+486:        vblRunning = false;
+```
+
+and `registerForInterruptType` deliberately stores `enabled = false`, leaving
+the enable to `IOFramebuffer`. 2s5 measured the matching Apple-side behaviour
+on the old path: `IOAccelDisplayPipe::displayModeDidChange` registers
+`signalVBLInterrupt` for `'vbl '` **and then disables it**, re-arming only
+through `transaction_queue_gated` → `enableTransactionInterrupt` →
+`enableVBLInterrupt` when a transaction is queued. Registered-but-disabled
+means no VBL is delivered, nothing paces presentation, and WindowServer waits
+on a semaphore at 0 % CPU — which is exactly the captured state.
+
+**But `setInterruptState` logged nothing**, so "enabled and never fired",
+"disabled", and "never registered" were indistinguishable. Rule 14: absence is
+not a result. Fixed in build `5B669C0F`:
+
+- `setInterruptState` logs every actual transition with the slot, the
+  direction, `vblRunning`, and the running enable/fire counts, and publishes
+  `RBFBVBLEnables` / `RBFBVBLEnabled`.
+- `deliverVBL` logs the **first** delivery with the handler count, then
+  publishes `RBFBVBLFires` / `RBFBVBLHandlers` every 1200 fires (~8 s). It
+  publishes rather than logs because a per-fire `IOLog` at the measured refresh
+  is ~144 lines a second and would become the suspect itself (rule 16).
+
+**Not yet established**: whether the accelerator registered a `'vbl '` handler
+on our framebuffer at all this boot. `registerForInterruptType` already logs,
+so the live boot can answer that without spending a reboot, and the
+`diag_used`/`diag_max` pair is the rule-14 control for reading anything into
+`fb_vbl_ot_armed`'s absence.

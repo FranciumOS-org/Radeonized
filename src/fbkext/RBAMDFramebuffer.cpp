@@ -494,11 +494,24 @@ void RBAMDFramebuffer::armVBL(void)
 
 void RBAMDFramebuffer::deliverVBL(void)
 {
+    unsigned delivered = 0;
     for (unsigned i = 0; i < kMaxInterrupts; i++) {
         if (interrupts[i].used && interrupts[i].enabled &&
             interrupts[i].type == kIOFBVBLInterruptType && interrupts[i].proc) {
             interrupts[i].proc(interrupts[i].target, interrupts[i].ref);
+            delivered++;
         }
+    }
+    vblFires++;
+    if (vblFires == 1) {
+        LOG("first vblank delivered to %u handler(s)", delivered);
+    }
+    /* Publish rather than log: at the measured refresh a per-fire IOLog
+     * would be ~144 lines a second and would itself become the suspect
+     * (rule 16). ioreg reads this live. */
+    if ((vblFires % 1200) == 0) {
+        setProperty("RBFBVBLFires", vblFires, 64);
+        setProperty("RBFBVBLHandlers", (UInt64)delivered, 32);
     }
     armVBL();
 }
@@ -558,12 +571,22 @@ IOReturn RBAMDFramebuffer::setInterruptState(void *interruptRef, UInt32 state)
 {
     for (unsigned i = 0; i < kMaxInterrupts; i++) {
         if (interruptRef == &interrupts[i] && interrupts[i].used) {
+            bool was = interrupts[i].enabled;
             interrupts[i].enabled = (state != 0);
             if (interrupts[i].enabled && !vblRunning) {
+                vblEnables++;
                 armVBL();
             } else if (!anyVBLEnabled() && vblCall) {
                 thread_call_cancel(vblCall);
                 vblRunning = false;
+            }
+            if (was != interrupts[i].enabled) {
+                LOG("setInterruptState slot %u: %s -> %s (running %d, "
+                    "enables %u, fires %llu)", i, was ? "on" : "off",
+                    interrupts[i].enabled ? "on" : "off", vblRunning,
+                    vblEnables, vblFires);
+                setProperty("RBFBVBLEnables", (UInt64)vblEnables, 32);
+                setProperty("RBFBVBLEnabled", interrupts[i].enabled);
             }
             return kIOReturnSuccess;
         }
