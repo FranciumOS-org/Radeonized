@@ -16,6 +16,28 @@ import struct
 import sys
 
 
+def cache_paths(path):
+    """Every file of the cache `path` belongs to, main first.
+
+    Factored out of Cache in 2v2 because `slide_regions` and `dataxref` were
+    still single-file - the exact defect 2r2 fixed for the code searches and
+    recorded as costing four false negatives. A data pointer stored in .03
+    was invisible to every `dataxref` this project ran.
+    """
+    import glob as _glob
+    import os as _os
+
+    base = path
+    for suffix in (".01", ".02", ".03", ".04", ".05", ".06", ".07", ".08"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return [base] + sorted(
+        q for q in _glob.glob(base + ".*")
+        if _os.path.basename(q).split(".")[-1].isdigit()
+    )
+
+
 class Cache:
     """The whole cache, ALL of its files.
 
@@ -37,18 +59,8 @@ class Cache:
     """
 
     def __init__(self, path):
-        import glob as _glob
         import os as _os
-
-        base = path
-        for suffix in (".01", ".02", ".03", ".04", ".05", ".06", ".07", ".08"):
-            if base.endswith(suffix):
-                base = base[: -len(suffix)]
-                break
-        paths = [base] + sorted(
-            q for q in _glob.glob(base + ".*")
-            if _os.path.basename(q).split(".")[-1].isdigit()
-        )
+        paths = cache_paths(path)
 
         self.files = []        # open file objects, main first
         self.regions = []      # (addr, size, fileoff, initp, fileobj, name)
@@ -175,25 +187,42 @@ def slide_regions(path):
     Only version 2 is handled; anything else is reported rather than guessed
     at, because decoding the wrong format silently yields plausible garbage.
     """
-    f = open(path, "rb")
-    h = f.read(0x400)
-    mwso, mwsc = struct.unpack_from("<II", h, 0x138)
+    import os as _os
     out = []
-    for i in range(mwsc):
-        f.seek(mwso + i * 56)
-        d = f.read(56)
-        addr, size, fo, sio, sis, _flags = struct.unpack_from("<QQQQQQ", d, 0)
-        if not sio:
+    for q in cache_paths(path):
+        try:
+            f = open(q, "rb")
+        except OSError:
             continue
-        f.seek(sio)
-        ver = struct.unpack("<I", f.read(4))[0]
-        if ver != 2:
-            out.append((addr, size, fo, None, None, ver))
+        h = f.read(0x400)
+        if len(h) < 0x400:
+            f.close()
             continue
-        f.seek(sio)
-        si = f.read(40)
-        dmask, vadd = struct.unpack_from("<QQ", si, 24)
-        out.append((addr, size, fo, dmask, vadd, ver))
+        mwso, mwsc = struct.unpack_from("<II", h, 0x138)
+        if mwsc == 0 or mwsc > 64:
+            f.close()
+            continue
+        for i in range(mwsc):
+            f.seek(mwso + i * 56)
+            d = f.read(56)
+            if len(d) < 56:
+                break
+            addr, size, fo, sio, sis, _flags = struct.unpack_from("<QQQQQQ", d, 0)
+            if not sio:
+                continue
+            f.seek(sio)
+            ver4 = f.read(4)
+            if len(ver4) < 4:
+                continue
+            ver = struct.unpack("<I", ver4)[0]
+            if ver != 2:
+                out.append((addr, size, fo, None, None, ver, q))
+                continue
+            f.seek(sio)
+            si = f.read(40)
+            dmask, vadd = struct.unpack_from("<QQ", si, 24)
+            out.append((addr, size, fo, dmask, vadd, ver, q))
+        f.close()
     return out
 
 
@@ -207,10 +236,9 @@ def ptr_decode(value, dmask, vadd):
 def dataxref(path, target):
     """Every slide-info slot whose DECODED value is `target`."""
     import array
-    c = Cache(path)
-    f = open(path, "rb")
     hits = []
-    for addr, size, fo, dmask, vadd, ver in slide_regions(path):
+    _open = {}
+    for addr, size, fo, dmask, vadd, ver, q in slide_regions(path):
         if dmask is None:
             print("  (skipping va 0x%x: slide info version %s, not 2)" % (addr, ver))
             continue
@@ -218,6 +246,7 @@ def dataxref(path, target):
         keep = ~dmask & 0xFFFFFFFFFFFFFFFF
         if low < 0 or low & dmask:
             continue
+        f = _open.get(q) or _open.setdefault(q, open(q, "rb"))
         f.seek(fo)
         done = 0
         while done < size:
@@ -398,9 +427,10 @@ def main():
         for site, imm, reg in setimm(c, tva, tlen, field):
             print("  0x%x   movl $%d, 0x%x(%%%s)" % (site, imm, field, reg))
     elif cmd == "slide":
-        for addr, size, fo, dmask, vadd, ver in slide_regions(path):
-            print("va 0x%012x size 0x%09x v%s delta_mask 0x%016x value_add 0x%x"
-                  % (addr, size, ver, dmask or 0, vadd or 0))
+        import os as _os
+        for addr, size, fo, dmask, vadd, ver, q in slide_regions(path):
+            print("va 0x%012x size 0x%09x v%s delta_mask 0x%016x value_add 0x%x  %s"
+                  % (addr, size, ver, dmask or 0, vadd or 0, _os.path.basename(q)))
     elif cmd == "dataxref":
         tgt = int(sys.argv[3], 0)
         hits = dataxref(path, tgt)
@@ -409,7 +439,7 @@ def main():
             print("  0x%x" % v)
     elif cmd == "rdptr":
         va = int(sys.argv[3], 0)
-        for addr, size, fo, dmask, vadd, ver in slide_regions(path):
+        for addr, size, fo, dmask, vadd, ver, _q in slide_regions(path):
             if dmask is not None and addr <= va < addr + size:
                 raw = struct.unpack("<Q", c.read(va, 8))[0]
                 print("raw 0x%016x -> 0x%x" % (raw, ptr_decode(raw, dmask, vadd)))
