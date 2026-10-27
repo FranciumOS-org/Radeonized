@@ -40566,3 +40566,65 @@ reading is whether `Clean` ever appears. If it does not — with
 `agdc_gamma_elems1` confirming 1024 went out — then `MaximumSize` is not
 sufficient either, and the remaining difference is `Type`: entry 1 claims bit 4,
 and the six accepted bits are 9, 8, 7, 6, 4, 3 (2u7).
+
+## 2v6: boot 182 — THE GAMMA ERROR IS GONE, and `EOTF` moved from the GPU to the PIPE
+
+Boot 182, every precondition verified in the capture:
+
+| check | reading |
+|---|---|
+| `rbgpu-boot` | **182**, new nonce |
+| loaded plugin UUID | **`7C1FED31`** = `build/out` |
+| `agdc_gamma_entries` / `agdc_gamma_elems1` / `agdc_gamma_elems2` | **1 / 0x400 / 0** |
+| display log / WindowServer control | 2205 / 2660 lines |
+
+`agdc_gamma_elems1 = 400` is the provenance 2v5 added, and it says the 1024
+reached Apple's reader. Normalised per `DisplayPipeState` dump (66 of them):
+
+| | boot 179 | boot 181 | **boot 182** |
+|---|---|---|---|
+| `no 3-channel gamma table support` | 7.12 | 7.01 | **0** |
+| `no 3-channel linearization table support` | 1.01 | 1.01 | **2.03** |
+| `Fallback GPU Display Pipe transaction submission failed` | 1.00 | 1.00 | 1.00 |
+| `Clean` | 0 | 0 | 0 |
+| `System Gamma` | `Unknown` | `Unknown` | `Unknown` |
+| **`EOTF`** | `GPU` | `GPU` | **`Pipe`** |
+
+**2v5's prediction holds exactly.** The gamma complaint goes from seven per
+dump to **zero**, with one constant changed and its arrival confirmed in NVRAM.
+So the chain 2u6 → 2u7 → 2v2 → 2v4 → 2v5 is measured end to end: the AGDC
+0x711 type-2 reply's `+0x28` becomes the dictionary key `MaximumSize`, lands at
+CoreDisplay's entry `+0x30`, and a non-zero value there satisfies
+`GammaChannelTableEntryCountAndType`. **Rule 17 stands: 1024 is still a
+substitute**, and what is measured is that the *shape* was wrong, not that the
+hardware has a 1024-entry table.
+
+**And something moved that nobody asked for.** `EOTF` has read
+`Dirty EOTF - GPU` in every dump of every boot since 2sa — 56 dumps in boot
+169, 57 in 179, 63 in 181. In boot 182 all 66 read **`Dirty EOTF - Pipe`**.
+That is an operation migrating off the GPU fallback and onto the display pipe,
+and it is the first time any of the eight operations has changed target. It is
+*downstream* of the gamma fix and was not predicted, so it is recorded as the
+measurement it is rather than explained.
+
+**The blocker moved, and it doubled.** `no 3-channel linearization table
+support` goes from 1.01 to **2.03 per dump** — with gamma satisfied,
+CoreDisplay now asks about linearization for both of our two degamma entries
+instead of giving up after one. `System Gamma - Unknown` and the fallback
+failure are unchanged, and `Clean` has still never appeared.
+
+**Why linearization is not simply the same one-line fix.** Our degamma entries
+already write `+0x28 = 1` — Apple's own literal from `getFbCapabilityForDegamma`
+— so by 2v5's map their `MaximumSize` is **non-zero already**. What they also
+write is `+0x10 = 1`, i.e. `Type` **1**, and 2u7 measured the six `Type` bits
+`GammaChannelTableEntryCountAndType` accepts: **9, 8, 7, 6, 4, 3**. Bit 0 is
+not among them. If the linearization predicate tests `Type` the same way, a
+`Type` of 1 is rejected regardless of size — which would also explain why
+2u9's two-entry gamma experiment did nothing, since entry 2's `Type` is 1 too.
+
+So the next read is the linearization predicate itself:
+`CoreDisplay::IOPCapabilities::IsLinearizationTableBased(unsigned int)`
+(`0x7ff80405e00c`) and `SupportsLinearization(unsigned int, bool)`
+(`0x7ff80405e870`), both already named in `build/re/CoreDisplay-funcs.txt`.
+No boot is needed for it, and it decides whether the next change is a size, a
+`Type`, or both.
