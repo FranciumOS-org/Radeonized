@@ -47,7 +47,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext fbkext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -296,6 +296,50 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@codesign --force --sign - $(KEXT_BUNDLE) 2>/dev/null || true
 	@echo "  KEXT $(KEXT_BUNDLE)"
 	@python3 tools/check_imports.py $(KEXT_BUNDLE)
+
+# The framebuffer kext (src/fbkext): an IOFramebuffer subclass whose CLASS NAME
+# carries "AMD", which is the one thing that opens CoreDisplay's IOPresentment
+# gate (2ql). It is a SEPARATE kext from the Lilu plugin on purpose: the plugin
+# is injected by OpenCore into BootKernelExtensions.kc, where a dependency on
+# IOGraphicsFamily cannot bind (the 2oz trap), while this one is loaded at
+# runtime or from the auxiliary collection, where it can (2sl, measured with
+# kmutil libraries). So `make kext` must NOT build it into the plugin and
+# check_imports.py's 0-from-SystemKernelExtensions rule does NOT apply here -
+# this kext is REQUIRED to resolve against the system collection.
+FBKEXT_SRC    := $(PROJ_ROOT)/src/fbkext
+FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/kmod_info.o
+FBKEXT_BUNDLE := $(OUT)/RBAMDFramebuffer.kext
+FBKEXT_BIN    := $(FBKEXT_BUNDLE)/Contents/MacOS/RBAMDFramebuffer
+
+$(BUILD_DIR)/fbkext/%.o: $(FBKEXT_SRC)/%.cpp $(FBKEXT_SRC)/RBAMDFramebuffer.hpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  fbkext/$*.cpp"
+	@$(CXX) $(KEXT_CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/fbkext/%.o: $(FBKEXT_SRC)/%.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   fbkext/$*.c"
+	@$(CC) $(KEXT_CFLAGS) -c $< -o $@
+
+fbkext: $(FBKEXT_OBJS) $(FBKEXT_SRC)/Info.plist
+	@rm -rf $(FBKEXT_BUNDLE)
+	@mkdir -p $(dir $(FBKEXT_BIN))
+	@cp $(FBKEXT_SRC)/Info.plist $(FBKEXT_BUNDLE)/Contents/Info.plist
+	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
+	    -L$(MKSDK)/Library/x86_64 $(FBKEXT_OBJS) -lkmod -o $(FBKEXT_BIN)
+	@codesign --force --sign - $(FBKEXT_BUNDLE) 2>/dev/null || true
+	@echo "  KEXT $(FBKEXT_BUNDLE)"
+	@# Every import must resolve, and the IOGraphicsFamily ones must come from
+	@# the SYSTEM collection - the opposite of the plugin's requirement. Fail
+	@# the build if IOFramebuffer does not resolve, so a broken dependency is
+	@# never discovered on hardware.
+	@kmutil libraries -p $(FBKEXT_BUNDLE) > $(BUILD_DIR)/fbkext/libraries.txt 2>&1 || \
+	    { echo "  FAIL kmutil libraries refused the bundle:"; cat $(BUILD_DIR)/fbkext/libraries.txt; exit 1; }
+	@grep -q 'IOFramebuffer.*SystemKernelExtensions.kc.*IOGraphicsFamily' \
+	    $(BUILD_DIR)/fbkext/libraries.txt || \
+	    { echo "  FAIL no IOFramebuffer symbol resolved from SystemKernelExtensions.kc"; \
+	      cat $(BUILD_DIR)/fbkext/libraries.txt; exit 1; }
+	@echo "  LINK $$(grep -c SystemKernelExtensions.kc $(BUILD_DIR)/fbkext/libraries.txt) symbols from the system collection, $$(grep -c BootKernelExtensions.kc $(BUILD_DIR)/fbkext/libraries.txt) from boot"
 
 # The Lilu plugin. Built against Lilu's source (third_party/Lilu, the version
 # loaded on this machine) the way Lilu's own plugins are: plugin_start.cpp

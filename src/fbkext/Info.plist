@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>RBAMDFramebuffer</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.rembrandtgpu.fb</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>RBAMDFramebuffer</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>RBAMDFramebuffer</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.rembrandtgpu.fb</string>
+			<key>IOClass</key>
+			<string>RBAMDFramebuffer</string>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+			<!-- Same provider, name and category as IONDRVSupport's personality,
+			     with a higher score than its 20000, so this DISPLACES
+			     IONDRVFramebuffer rather than joining it. Required, not an
+			     optimisation: CoreDisplay ORs the vendor bit over ALL
+			     IOFramebuffer services, so an unclassifiable one left in place
+			     keeps the IOPresentment gate shut (2ql/2sl). -->
+			<key>IONameMatch</key>
+			<string>display</string>
+			<key>IOMatchCategory</key>
+			<string>IOFramebuffer</string>
+			<key>IOProbeScore</key>
+			<integer>30000</integer>
+			<!-- Narrowed to this chip so the personality cannot claim the
+			     display on any other machine that loads this kext. -->
+			<key>IOPCIMatch</key>
+			<string>0x16811002</string>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IOGraphicsFamily</key>
+		<string>599</string>
+		<key>com.apple.iokit.IOPCIFamily</key>
+		<string>2.9</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>16.7</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>16.7</string>
+		<key>com.apple.kpi.mach</key>
+		<string>16.7</string>
+	</dict>
+</dict>
+</plist>
