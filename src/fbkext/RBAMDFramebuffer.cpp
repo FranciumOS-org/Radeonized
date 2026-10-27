@@ -33,14 +33,8 @@ namespace {
 const IODisplayModeID kModeID       = 100;
 const UInt32 kWidth                 = 1920;
 const UInt32 kHeight                = 1080;
-const UInt32 kRefreshRate1616       = 0x008fd53f;   /* 143.83 Hz */
 const UInt32 kBytesPerRow           = 7680;
 const UInt32 kApertureBytes         = 8294400;      /* IOFBMemorySize, live */
-
-/* The vblank period that follows from the measured refresh: 1 / 143.908 Hz.
- * Stated in nanoseconds because that is what the delay takes, and derived
- * rather than typed so the two cannot drift. */
-const uint64_t kVBLPeriodNs         = 1000000000ULL * 65536ULL / kRefreshRate1616;
 
 /* 2sr: THE BOOT-ARG IS THE REAL DISARM. The NVRAM one-shot is not.
  *
@@ -176,8 +170,8 @@ IOService *RBAMDFramebuffer::probe(IOService *provider, SInt32 *score)
         LOG("provider is not an IOPCIDevice; declining");
         return nullptr;
     }
-    /* Refuse unless armed, and consume the one-shot before returning. A boot
-     * that goes wrong therefore costs exactly one power cycle. */
+    /* Refuse unless both gates are armed. The one-shot removal is checked
+     * in memory; only the boot-arg is a durable disarm (2sq/2sr). */
     if (!armedOnce()) {
         return nullptr;
     }
@@ -193,6 +187,9 @@ bool RBAMDFramebuffer::start(IOService *provider)
         return false;
     }
     bzero(interrupts, sizeof(interrupts));
+    vblRunning = false;
+    vblFires = 0;
+    vblEnables = 0;
 
     /* The firmware already lit the panel and the GOP framebuffer is BAR0
      * offset 0 (2pr), so the aperture is a sub-range of BAR0 rather than
@@ -216,6 +213,8 @@ bool RBAMDFramebuffer::start(IOService *provider)
     if (!vblCall) {
         LOG("thread_call_allocate failed; the vblank will not be delivered");
     }
+    setProperty("RBFBVBLTimerAllocated", vblCall != nullptr);
+    publishVBLState();  // zero is a reading; missing properties are not
 
     if (!IOFramebuffer::start(provider)) {
         LOG("IOFramebuffer::start refused");
@@ -457,139 +456,4 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
 IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
     return IOFramebuffer::setAttribute(attribute, value);
-}
-
-/* -- the vblank ---------------------------------------------------------- */
-
-/* Why a thread_call rather than a real interrupt: the display engine's own
- * vblank IRQ is wired to the AMD driver's interrupt controller, which we do not
- * own, and 2s4 measured that what the display pipe actually needs is a 'vbl '
- * callback at the panel's rate - not a particular source for it. The comparable
- * working driver drives its VBL handlers from a thread_call for the same reason
- * (2sj). The rate is the measured refresh, so the pacing is right even though
- * the phase is not locked to scanout. */
-
-bool RBAMDFramebuffer::anyVBLEnabled(void)
-{
-    for (unsigned i = 0; i < kMaxInterrupts; i++) {
-        if (interrupts[i].used && interrupts[i].enabled &&
-            interrupts[i].type == kIOFBVBLInterruptType) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void RBAMDFramebuffer::armVBL(void)
-{
-    if (!vblCall || !anyVBLEnabled()) {
-        vblRunning = false;
-        return;
-    }
-    vblRunning = true;
-    uint64_t deadline = 0;
-    clock_interval_to_deadline((uint32_t)kVBLPeriodNs, 1, &deadline);
-    thread_call_enter_delayed(vblCall, deadline);
-}
-
-void RBAMDFramebuffer::deliverVBL(void)
-{
-    unsigned delivered = 0;
-    for (unsigned i = 0; i < kMaxInterrupts; i++) {
-        if (interrupts[i].used && interrupts[i].enabled &&
-            interrupts[i].type == kIOFBVBLInterruptType && interrupts[i].proc) {
-            interrupts[i].proc(interrupts[i].target, interrupts[i].ref);
-            delivered++;
-        }
-    }
-    vblFires++;
-    if (vblFires == 1) {
-        LOG("first vblank delivered to %u handler(s)", delivered);
-    }
-    /* Publish rather than log: at the measured refresh a per-fire IOLog
-     * would be ~144 lines a second and would itself become the suspect
-     * (rule 16). ioreg reads this live. */
-    if ((vblFires % 1200) == 0) {
-        setProperty("RBFBVBLFires", vblFires, 64);
-        setProperty("RBFBVBLHandlers", (UInt64)delivered, 32);
-    }
-    armVBL();
-}
-
-void RBAMDFramebuffer::vblFired(thread_call_param_t self, thread_call_param_t)
-{
-    static_cast<RBAMDFramebuffer *>(self)->deliverVBL();
-}
-
-IOReturn RBAMDFramebuffer::registerForInterruptType(IOSelect interruptType,
-                                                    IOFBInterruptProc proc,
-                                                    OSObject *target, void *ref,
-                                                    void **interruptRef)
-{
-    if (interruptType != kIOFBVBLInterruptType) {
-        /* Decline every other type explicitly. A silent success here would be
-         * a registration that reports success without a patch applying, which
-         * rule 20 exists to forbid. */
-        return kIOReturnUnsupported;
-    }
-    for (unsigned i = 0; i < kMaxInterrupts; i++) {
-        if (interrupts[i].used) {
-            continue;
-        }
-        interrupts[i].type    = interruptType;
-        interrupts[i].proc    = proc;
-        interrupts[i].target  = target;
-        interrupts[i].ref     = ref;
-        interrupts[i].enabled = false;   /* IOFramebuffer enables it explicitly */
-        interrupts[i].used    = true;
-        if (interruptRef) {
-            *interruptRef = &interrupts[i];
-        }
-        LOG("registered 'vbl ' handler %u (period %llu ns)", i, kVBLPeriodNs);
-        return kIOReturnSuccess;
-    }
-    LOG("no free interrupt slot for 'vbl ' (%u in use)", kMaxInterrupts);
-    return kIOReturnNoResources;
-}
-
-IOReturn RBAMDFramebuffer::unregisterInterrupt(void *interruptRef)
-{
-    for (unsigned i = 0; i < kMaxInterrupts; i++) {
-        if (interruptRef == &interrupts[i] && interrupts[i].used) {
-            bzero(&interrupts[i], sizeof(interrupts[i]));
-            if (!anyVBLEnabled() && vblCall) {
-                thread_call_cancel(vblCall);
-                vblRunning = false;
-            }
-            return kIOReturnSuccess;
-        }
-    }
-    return kIOReturnBadArgument;
-}
-
-IOReturn RBAMDFramebuffer::setInterruptState(void *interruptRef, UInt32 state)
-{
-    for (unsigned i = 0; i < kMaxInterrupts; i++) {
-        if (interruptRef == &interrupts[i] && interrupts[i].used) {
-            bool was = interrupts[i].enabled;
-            interrupts[i].enabled = (state != 0);
-            if (interrupts[i].enabled && !vblRunning) {
-                vblEnables++;
-                armVBL();
-            } else if (!anyVBLEnabled() && vblCall) {
-                thread_call_cancel(vblCall);
-                vblRunning = false;
-            }
-            if (was != interrupts[i].enabled) {
-                LOG("setInterruptState slot %u: %s -> %s (running %d, "
-                    "enables %u, fires %llu)", i, was ? "on" : "off",
-                    interrupts[i].enabled ? "on" : "off", vblRunning,
-                    vblEnables, vblFires);
-                setProperty("RBFBVBLEnables", (UInt64)vblEnables, 32);
-                setProperty("RBFBVBLEnabled", interrupts[i].enabled);
-            }
-            return kIOReturnSuccess;
-        }
-    }
-    return kIOReturnBadArgument;
 }

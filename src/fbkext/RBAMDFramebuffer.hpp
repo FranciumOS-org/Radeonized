@@ -25,10 +25,9 @@
  * shape of the one working comparable driver (2sj): subclass IOFramebuffer,
  * take over the lit mode, only ever READ the OTG registers.
  *
- * Arming: `probe()` refuses unless the NVRAM one-shot `rbgpu-fb` is set, and
- * consumes it. A boot that goes wrong therefore costs ONE power cycle, which is
- * the same guarantee the accelerator arm has relied on since 2s8. Without the
- * one-shot this kext is inert and `IONDRVFramebuffer` matches as usual.
+ * Arming requires BOTH -rbgpuownfb and the NVRAM key rbgpu-fb. Removal of a
+ * one-shot is not proven durable (2sq/2sr); removing the boot-arg from the
+ * OpenCore config is the durable disarm. Never unload a live framebuffer.
  */
 #ifndef RBAMDFRAMEBUFFER_HPP
 #define RBAMDFRAMEBUFFER_HPP
@@ -96,8 +95,12 @@ private:
         void *ref;
         bool enabled;
         bool used;
+        uint64_t fires;
     };
     static const unsigned kMaxInterrupts = 4;
+    static constexpr UInt32 kRefreshRate1616 = 0x008fd53f; /* measured 143.83 Hz */
+    static constexpr uint64_t kVBLPeriodNs =
+        1000000000ULL * 65536ULL / kRefreshRate1616;
 
     IOPCIDevice *pci;
     IODeviceMemory *aperture;
@@ -119,6 +122,7 @@ private:
     void deliverVBL(void);
     void armVBL(void);
     bool anyVBLEnabled(void);
+    void publishVBLState(void);
 };
 
 #endif /* RBAMDFRAMEBUFFER_HPP */
