@@ -118,9 +118,19 @@ kmutil showloaded --no-kernel-components 2>/dev/null | grep -i 'rembrandtgpu.fb'
     echo "com.rembrandtgpu.fb does NOT appear in showloaded"
 
 echo
-echo "--- the kext's own log lines (the only account of what probe() decided) ---"
-/usr/bin/log show --last 2m --predicate 'eventMessage CONTAINS "RBAMDFramebuffer"' \
-    --style compact 2>/dev/null | tail -20 || true
+echo "--- the kext's own log lines ---"
+# BEGINSWITH, not CONTAINS: CONTAINS "RBAMDFramebuffer" also matches every
+# kernelmanagerd line carrying the bundle PATH, which buries our output in
+# noise that looks like output. 15m rather than --last boot because the log
+# archive's boot bookkeeping is not trustworthy here - `--last boot` returned
+# TWO `Darwin Kernel Version` banners in one run, and `--start/--end` printed
+# "Wall Clock adjustment detected". Rule 28.
+/usr/bin/log show --last 15m --info --debug \
+    --predicate 'eventMessage BEGINSWITH "RBAMDFramebuffer:"' \
+    --style compact 2>/dev/null | grep 'RBAMDFramebuffer:' || \
+    echo "(none captured - NOT a result: this log pipeline has already been seen
+ to drop them while the kext was demonstrably loaded and matched. The registry
+ dump below and the one-shot state are the evidence; read those instead.)"
 
 echo
 echo "--- IOFramebuffer services now in the registry ---"
@@ -136,8 +146,13 @@ if [ "$mode" = beside ]; then
     echo "--- CoreDisplay's vendor mask, as the tool reproduces it ---"
     echo "(0x04 beside the 0x01 is the result worth having; the VERDICT staying"
     echo " 0 is expected while .Display_boot is still present)"
-    (cd "$root" && make useiop >/dev/null 2>&1 && ./build/out/useiop) || \
-        echo "make useiop failed; run it by hand"
+    # useiop EXITS 1 when a framebuffer classifies as unknown vendor - that is
+    # its verdict, not a failure, and chaining it with && reported "failed"
+    # under output that had printed perfectly. Build and run as separate steps.
+    (cd "$root" && make useiop >/dev/null 2>&1) || echo "make useiop: build failed"
+    [ -x "$root/build/out/useiop" ] && "$root/build/out/useiop"
+    echo "(useiop exit $? - 1 means 'an unknown-vendor framebuffer is present',"
+    echo " which in THIS configuration is the expected answer, not a failure)"
 fi
 
 echo
