@@ -37471,3 +37471,79 @@ elimination, not a measurement.
 exists in this boot is one `ioreg` away and needs no reboot. Absent means
 `populateAccelConfig` never published it; present means the two gates passed
 and the frontier is the blob in §5.
+
+### 2sv addendum — `IOAccelDisplayPipeCapabilities` is never published, with the instrument controlled
+
+Armed boot of 2026-10-26 23:42:
+
+```
+ioreg -l | grep -c IOAccelDisplayPipeCapabilities   ->  0
+ioreg -rl -c RBAMDFramebuffer | grep -i AccelDisplayPipe  ->  (empty)
+```
+
+**The instrument is controlled** (rule 26), measured in the following
+unaccelerated boot, where the question is boot-independent: `ioreg -l` emits
+**7973** property lines and does find `IOFBMemorySize`, and it resolves
+`"IOAccelerationUserClient"` and `"IOAccelerator"` as known-present
+`IOAccel*`-shaped property names. So `ioreg -l` does print properties and does
+match on this key shape, and the zero is a **real absence**, not a failed grep.
+
+So `AMDRadeonX6000_AMDGraphicsAccelerator::populateAccelConfig` never published
+the property, `IOAccelDisplayPipe::copyCapabilities()` returns NULL,
+`DisplayPipeSupported` and `TransactionsSupported` are therefore unset, and the
+plane count is 0. Every observation of the armed boot fits that one chain:
+nothing stageable, no transaction ever queued, `enableVBLInterrupt` never
+reached, WindowServer idle at 0.0 % CPU.
+
+**NOT established**: *why* it was not published. The publish block at
+`0xbe3c6b1` sits behind a `test rax, rax; je` on the collection allocation, and
+only a ~50-line window of `populateAccelConfig` has been read, so an earlier
+branch may skip it entirely. **That is the next read**, and it is static.
+
+Control for the following boot: `ioreg -rl -c IOFramebuffer` reads
+`.Display_boot <class IONDRVFramebuffer, id 0x1000004b5>` — the expected
+unarmed baseline, one-shots consumed as designed.
+
+### 2sv addendum 2 — PROVENANCE: commit 98412c2 contains work that is not mine
+
+Correction to the record, not a measurement. `98412c2` was written as a
+`docs/JOURNAL.md` append, and it was committed with `git add -A` while
+uncommitted third-party work (the user's other assistant) was in the tree. That
+commit therefore also carries, under my message and my Co-Authored-By line:
+
+```
+Makefile                           |  12 ++-
+src/fbkext/RBAMDFramebuffer.cpp    | 150 ++---------------------------
+src/fbkext/RBAMDFramebufferVBL.cpp | 192 ++++++++++++++++++++  (new)
+tools/fbvbl.c                      |  96 ++++++++++++++  (new)
+tools/hosttest/fb_vbl_shim.hpp     |  56 ++++++++  (new)
+tools/hosttest/fb_vbl_test.cpp     |  80 ++++++++++  (new)
+tools/fbload.sh, tools/plugin_check.sh
+```
+
+**That attribution is wrong and this entry is the correction.** The history is
+unpushed; the commit is left intact rather than rewritten so that this note and
+the commit stay in one order.
+
+**The work itself was then reviewed and it is good.** `make fbkext` builds
+clean, the hosttest passes with a new case of its own
+(*"framebuffer VBL: registration starts clock; per-handler disable, re-arm,
+cancellation and telemetry passed"*), 2su's counters survived the move into
+`RBAMDFramebufferVBL.cpp` (plus a new `RBFBVBLEnabledCount`), and all three
+rules that cost hardware are intact and verified individually:
+
+- the kext still refuses to arm without **both** `-rbgpuownfb` and `rbgpu-fb`
+  (`RBAMDFramebuffer.cpp:66`, 2sr);
+- `fbload.sh:77` still uses the **whole-token** form
+  `tr ' \t' '\n\n' | grep -qx` (2ss);
+- `kmutil unload` appears in `fbload.sh` only as a prohibition
+  (lines 63, 170, 172), never as advice (2sq).
+
+The `beside`-only gating of those two checks looked inverted and is not: stage 1
+(`start-only`) sends no personality, so `probe()` is never called and the
+one-shot is never consumed — requiring the arg there would be theatre, as that
+file's own comment says.
+
+New build UUID **770AE129-E550-3C37-BB4D-AE6900390389**, moved from
+`5B669C0F`. The lesson for me: `git add -A` is not safe in a tree someone else
+is also editing; stage the paths I actually changed.
