@@ -204,20 +204,21 @@ not compositing slowly, which is the opposite failure from every earlier boot.
 **no transaction has ever been queued** even now. Suspect: our VBL thread_call
 only runs while a handler is enabled, and 2s5 measured Apple registering the
 `'vbl '` handler and then disabling it until a transaction is queued.
-**2sw WAS WITHDRAWN BY 2sx — do not act on it.** `populateAccelConfig`
-pre-sets `config->0x47 = 1` at `0xbe3c584`, so an **absent `CFG_USE_DPT` means
-enabled**: `getProperty` NULL -> `safeMetaCast` NULL -> the `je` at `0xbe3c5cd`
--> `al = 1` -> gate A passes. Only a **present and zero** flag blocks it, so
-publishing `CFG_USE_DPT = 1` is a **no-op** and was not written. (`rule 2`
-refuses routing `populateAccelConfig` anyway: a rel32 `je` begins at offset 3.)
-`1681` matching no `AmdRadeonController*` personality remains true but explains
-nothing. **The live suspect is gate B**: the publish also needs a non-NULL
-collection from `hw->vt[0x6a8]()` and a member whose `IOMatchCategory` is
-exactly `"IOAccelerator"` — ours is `"IOFramebuffer"` by design. Next armed
-boot, the value test 2sv's name-grep could not make:
-`ioreg -l | grep -E '"IOMatchCategory" = "IOAccelerator"'` and
-`ioreg -l | grep '"CFG_USE_DPT"'`. Still unread: what collection `vt[0x6a8]`
-returns, and the capabilities blob at slot 0x8d0 on userclient+0xe8.
+**APPLE'S DISPLAY-PIPE PATH IS CLOSED HERE (2sw/2sx both superseded by 2sy).**
+`populateAccelConfig` derefs `accel+0x368` with **no NULL check** after casting
+to `ATIController`, and the journal already recorded that `ATIController`
+**never instantiates here** (line 34452) because `0x1681` matches no controller
+personality (`RembrandtGPUPeer.cpp:577`). No boot panicked there, so
+**`populateAccelConfig` never runs** - 2sw's gate A and 2sx's gate B were both
+branches inside a function that does not execute. The only route to a
+controller is `-rbgpufbmatch`, which **kills the accelerator**, so the path is
+closed, not gated. **That confirms 2sj from this machine: skip IOPresentment.**
+So the fix is local to our kext and is in build **770AE129**:
+`RBAMDFramebufferVBL.cpp` now registers `'vbl '` **enabled**, because Apple's
+enable comes from `enableTransactionInterrupt` off a queue that can never fill
+here (2s5/2s9) - which is why WindowServer sat idle at 0.0 %. Next armed boot
+reads `RBFBVBLFires` / `RBFBVBLRegistered` / `RBFBVBLRunning` from `ioreg`
+(rule 31 - our `IOLog` is invisible).
 
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
