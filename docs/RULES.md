@@ -102,11 +102,22 @@ not memory, not a flag and not the AGDC gate:
   The set IOPresentment runs on comes from a **CFDictionary**
   (`IOPresentmentCapabilitiesStructureFromDictionary` `0x7ff812e8df1c`) keyed
   `PlaneArray`, `GammaArray`, `CSCArray`, `LinearizationArray`, the scaling
-  and cursor groups — which line up name-for-name with CoreDisplay's
-  `IOPCapabilities` accessors, **not** with the AGDC type bits. That
-  retro-explains 2sd. **Where the dictionary comes from is NOT established**:
-  `IOPresentmentCopyCapabilities` (`0x7ff812e88ab8`) is unread, so there is no
-  basis yet for claiming we can supply it. That read is the next step.
+  and cursor groups. **2sf corrected 2se here**: that dictionary IS built from
+  the AGDC replies — `IOPresentmentCreateCapabilities` → `0x7ff812e95370` →
+  `__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`), the address
+  `rb_agdc.h:182` has cited since 2rf — so it is the same interface, not a
+  separate one.
+- **`PlaneArray` is the one group the capability types do not feed** (2sf), and
+  it carries the count that gates everything: `CSCArray`←1, `GammaArray`←2,
+  `LinearizationArray`←4, the two scaling arrays←0x10, `CursorArray`←0x8000,
+  and `PlaneArray`←**nothing**. That reconciles 2sd — 2sc filled the five
+  groups that gate nothing. `_IOPresentmentSetPlaneCount` has no caller inside
+  IOPresentment, so CoreDisplay sets it from its own `IOPCapabilities`.
+  **Next read: `__GatherAGDCDisplayPipelineCapabilities` itself**, to find
+  where the plane group is filled and from what. `kAGDCGPUCapability` and
+  `kAGDCVendorInfo` are named in IOPresentment's table and we publish neither,
+  but that is key-name co-location and **not** a measurement — do not publish
+  them on the strength of it.
 - **A boot of `8B261646` + `-rbgpuagdcearly` hung at the progress bar with no
   SSH** and needed a force restart (2sa). That boot was UNARMED
   (`agdc_error 3`, `agdc_oneshot 2`), so the bridge was inert in it and the
