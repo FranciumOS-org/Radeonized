@@ -189,6 +189,29 @@ Also withdrawn in 2sl: 2sj's caveat that nullarc's class-name claim was
 unverified. **2ql had already measured that gate**, and `make useiop` prints it
 live.
 
+**THE FRAMEBUFFER WORKS AND THE ACCELERATOR PAIRS WITH IT** (2st/2su/2sv).
+`RBAMDFramebuffer` displaced `IONDRVFramebuffer`, owns the panel, and
+`displaypolicyd`, `WindowServer` and `SafeEjectGPUService` each print
+`accel 0x1000004c8 /AMDRadeonX6000_AMDNavi21GraphicsAccelerator` against
+`fb0:0 0x1000004c5 /RBAMDFramebuffer`. So **2sj's one stated unknown is
+answered**: Apple's accelerator does pair with a non-Apple `IOFramebuffer`.
+`UseIOPresentment()` is 1, `iop_saw_ws`/`iop_ready` are 1, and SkyLight logs
+**`Metal compositor activated`** where the unarmed-accelerator boot logged
+`Software`. **But the desktop is still laggy**, and WindowServer measures
+**0.0 % CPU with every sample thread idle** — so it is idle waiting for frames,
+not compositing slowly, which is the opposite failure from every earlier boot.
+`fb_vbl_ot_armed` is still absent with the table only 480 of 768 full, so
+**no transaction has ever been queued** even now. Suspect: our VBL thread_call
+only runs while a handler is enabled, and 2s5 measured Apple registering the
+`'vbl '` handler and then disabling it until a transaction is queued.
+**Frontier**: the plane count. `IOAccelDisplayPipe::copyCapabilities` is
+`this->0x88->copyProperty("IOAccelDisplayPipeCapabilities")`, and
+`AMDRadeonX6000_AMDGraphicsAccelerator::populateAccelConfig` publishes that
+property as `DisplayPipeSupported` + `TransactionsSupported` (2s3's two gates,
+producer finally named). The plane count is not in it; the only remaining
+non-AGDC channel is `getCapabilitiesData`'s binary blob from slot 0x8d0 on
+userclient+0xe8, **not yet read**.
+
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
 once in a whole boot. **Do not force `UseIOPresentment` true** (2ql): 72 call
@@ -413,6 +436,12 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     by something asserted from general macOS knowledge instead of measured
     here (this is OpenCore, so it is SPACE at the picker, not `Cmd-R`; the
     Data volume is `MACOS - Data`). [2ny]
+31. **`IOLog` is NOT an instrument in `src/fbkext` — publish to the registry.**
+    32 554 kernel-sender lines reached the unified log in one boot and **not one
+    was ours**, while `VRAM,totalMB` and `model` in `ioreg` proved `start()`
+    had run. Why is unmeasured. So an fbkext diagnostic that only logs is
+    invisible, and the absence of its line says nothing: `setProperty` it and
+    read it with `ioreg -rl -c RBAMDFramebuffer`. [2sv]
 26. **A search is an instrument too.** A grep returning nothing is not
     evidence of absence until checked against a known-present case. Burned
     repeatedly: `objdump` separates mnemonic and operands with a **tab**;
