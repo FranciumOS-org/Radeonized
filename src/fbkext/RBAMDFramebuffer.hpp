@@ -117,6 +117,7 @@ private:
     IORegistryEntry *nvram;
     bool crumbOn;
     uint32_t crumbStage;
+    char crumbBoot[12];   /* rbgpu-boot, the nonce (rule 11) */
 
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection
