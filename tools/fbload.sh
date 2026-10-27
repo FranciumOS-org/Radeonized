@@ -156,4 +156,13 @@ if [ "$mode" = beside ]; then
 fi
 
 echo
-echo "To unload: sudo kmutil unload -b com.rembrandtgpu.fb"
+echo "TO REMOVE THIS KEXT: REBOOT. Do NOT run kmutil unload."
+echo
+echo "  2sq: \`sudo kmutil unload -b com.rembrandtgpu.fb\` PANICKED the machine."
+echo "  OSKext::removeKext -> IOCatalogue::terminateDriversForModule ->"
+echo "  IOFramebuffer::terminate -> actionStop -> IOFramebuffer::stop+0x48,"
+echo "  page fault, CR2 0x120. Apple's stop() does"
+echo "    rax = this->0x1c8 ; rax = *rax ; r12 = rax->0x120"
+echo "  and *(this->0x1c8) is NULL on a framebuffer that never completed"
+echo "  configuration - which a beside instance never does, by design."
+echo "  A reboot tears it down without running that path."

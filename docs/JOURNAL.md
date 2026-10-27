@@ -36831,3 +36831,118 @@ done.
    option and ranked last: the error names the biometric policy specifically, so
    there is no reason to expect a different answer on a second run. Do not spend
    a round trip on it before 1.
+
+## 2sq — PANIC: `kmutil unload` of a live framebuffer. My command caused it, and my one-shot guarantee did not hold.
+
+The user ran the 3a cleanup line and the machine panicked. Both faults are mine
+and neither is in stage 3 — **the `/Library/Extensions` copy never loaded and
+stage 3a never ran.**
+
+### The panic, named to the byte
+
+`logs/Kernel-2026-10-26-231753.panic`, kept in the repo:
+
+```
+panic(cpu 2 ...): Kernel trap at 0xffffff7fab2a56aa, type = 14=page fault
+CR2: 0x0000000000000120
+R12: 0x0000000100000700          <- the registry id of our stage-2 instance
+Panicked task ... pid 122: kernelmanagerd
+
+kext_request -> OSKext::handleRequest -> OSKext::removeKext
+  -> IOCatalogue::terminateDriversForModule
+  -> IOGraphicsFamily: IOFramebuffer::terminate(uint)
+  -> IOService::terminatePhase1 -> scheduleTerminatePhase2 -> terminateWorker
+  -> IOWorkLoop::runAction -> IOService::actionStop
+  -> IOGraphicsFamily: IOFramebuffer::stop(IOService*) + 0x48    <-- PANIC
+```
+
+`R12 = 0x100000700` is **exactly** the `id` of the `RBAMDFramebuffer` service
+2so recorded, so there is no ambiguity about which object was being torn down.
+
+Disassembling `IOFramebuffer::stop` (`0x14fbc662`) gives the fault instruction
+at `+0x48` to the byte — `0x14fbc6aa - 0x14fbc662 = 0x48`:
+
+```
+0x14fbc699   movq 0x118(%r15), %rsi      ; this->0x118
+0x14fbc6a0   movq 0x1c8(%r15), %rax      ; this->0x1c8  - valid, did not fault
+0x14fbc6a7   movq (%rax), %rax           ; *(this->0x1c8) == NULL
+0x14fbc6aa   movq 0x120(%rax), %r12      ; <-- CR2 = 0x120
+0x14fbc6b1   movq %r12, %rdi
+0x14fbc6b4   movq %r13, %rdx             ; r13 = "stop"
+```
+
+`r12` becomes the first argument of a call whose third argument is the literal
+`"stop"`, i.e. another `IOGraphicsWorkLoop::timedCloseGate`. So `this->0x1c8`
+points at a framebuffer-group table and `[0]` is the group's first framebuffer,
+whose `+0x120` is its workloop. **Our instance never joined a group**, so `[0]`
+is NULL.
+
+That is consistent with everything 2so measured about the beside instance:
+`getConnectionCount()` 0, no `AppleDisplay` child, no `IOFBConfig`, no
+`IOFBMemorySize` — it never completed configuration. **`IOFramebuffer::stop()`
+assumes a configuration that a never-configured framebuffer does not have.**
+It is Apple's code, reached through a lifecycle Apple's own framebuffers never
+enter.
+
+Ruled out by the disassembly rather than by argument: my `stop()` releases the
+aperture before calling super, which was the obvious suspect. The fault is on
+`*(this->0x1c8)`, a field we never touch, so the release ordering is not the
+cause. Noted because it would have been the natural thing to "fix".
+
+**The fix is in the instructions, not the code.** `fbload.sh` ended every run
+with `To unload: sudo kmutil unload -b com.rembrandtgpu.fb`, and I put that same
+command at the head of the 3a cleanup line. It now says, with the reason and the
+disassembly: **to remove this kext, REBOOT; do not run `kmutil unload`.** A
+reboot tears the instance down without running that path.
+
+A code-level guard — refusing termination so an unload is declined instead of
+fatal — is **not** written yet, deliberately. `terminateDriversForModule` calls
+`terminate()` directly, so whether `requestTerminate` is even consulted on this
+path is unread, and adding a guard whose mechanism has not been verified is
+rule 20's error. It needs a read first.
+
+### The worse defect: the one-shot was STILL SET after a reboot
+
+```
+nvram rbgpu-fb   ->   rbgpu-fb    1
+```
+
+2so recorded the one-shot as consumed, on the strength of `nvram rbgpu-fb`
+returning "not found" **in the same boot**. That reads IODTNVRAM's *in-memory*
+copy. It does not establish that the removal reached flash, and the value came
+back after the reboot.
+
+So the claim I have repeated at every stage — *"a bad boot costs exactly one
+power cycle, because `probe()` consumes the key durably before touching
+anything"* — **is not established, and the evidence now points the other way.**
+2qy already recorded that a one-shot can fail to clear (`mcr_oneshot 4`); this
+is that failure mode again, in the one place where the consequence is the
+framebuffer arming on a boot nobody armed.
+
+An alternative explanation exists and has not been excluded: the user may have
+set the key again. That is why this is written as "not established" rather than
+"the clear failed" — but the safe reading is the dangerous one, and everything
+downstream now assumes the one-shot is **not** a reliable disarm.
+
+What that means concretely, and it is the whole safety story of this work:
+
+- `/Library/Extensions/RBAMDFramebuffer.kext` + `rbgpu-fb=1` in flash = the
+  framebuffer arms on the next boot where the AuxKC carries it. **That
+  combination must not be left on the machine**, so the kext comes out and the
+  key is deleted explicitly with `nvram -d`.
+- The durability has to be **measured across a reboot** before stage 3b is
+  proposed again: set it, consume it, reboot, read it. Until that measurement
+  exists, there is no one-power-cycle guarantee and 3b has no safety net
+  except `trigger-panic-medic`.
+- Rule 9's existing wording ("the one-shots are one-shot") is too confident for
+  this case and should be read with 2qy's caveat in front of it.
+
+### State of the machine as of this entry
+
+Measured, not assumed: `kextstat` lists only `com.rembrandtgpu.plugin`; the
+AuxKC carries `com.rembrandtgpu.fb` **only** at its stale
+`/private/var/tmp/RBAMDFramebuffer.stage` path, not the
+`/Library/Extensions` one; and the sole `IOFramebuffer` is `.Display_boot` with
+its `AppleDisplay` child. So the desktop is back to its normal configuration and
+the installed copy has never loaded. The boot-time AuxKC rebuild did **not**
+pick it up, which also leaves 2sp's option 1 answered: **no**.
