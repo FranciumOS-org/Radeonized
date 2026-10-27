@@ -104,6 +104,11 @@ private:
     Interrupt interrupts[kMaxInterrupts];
     thread_call_t vblCall;
     bool vblRunning;
+    /* 2su: setInterruptState was silent, so enabled-and-never-fired,
+     * disabled, and never-registered all looked identical. These make the
+     * enable transition and the delivery observable (rule 14). */
+    uint64_t vblFires;
+    uint32_t vblEnables;
 
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection
