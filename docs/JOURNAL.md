@@ -36365,3 +36365,64 @@ The script refuses to load at all when `rbgpu-fb` is unset, so a forgotten
   ends in the wedge. Opening the gate with a real framebuffer is a different
   input to the same machinery, not a different machinery. Nothing measured so
   far says the wedge will not come back, and nothing says it will.
+
+### 2sm addendum — the loadability question, taken as far as static analysis goes
+
+`kmutil print-diagnostics` is "perform all possible tests on a specified kext,
+and indicate whether the kext is loadable" — the dry run 2sl asked for. On the
+framebuffer kext:
+
+```
+Diagnosing build/out/RBAMDFramebuffer.kext...
+Error:
+	Filesystem error: Invalid ownership (501:20) should be (0:0) ...   [x7]
+	Authenticating extension failed: Bad code signature
+Resolving dependencies for build/out/RBAMDFramebuffer.kext...
+Dependencies: OK
+```
+
+**With the control that makes it mean something** — `RembrandtProbe`, which
+loads on this machine every time `tools/load.sh` is run:
+
+```
+Diagnosing build/out/RembrandtProbe.kext...
+Error:
+	Authenticating extension failed: Bad code signature
+Resolving dependencies for build/out/RembrandtProbe.kext...
+Dependencies: OK
+```
+
+**The same two errors and the same `Dependencies: OK`.** So the ownership and
+signature complaints are artifacts of reading the bundle out of `build/out`
+(user-owned, ad-hoc signed) rather than the root:wheel staged copy `fbload.sh`
+makes, and they are not a property of the framebuffer kext. The one
+substantive line — full dependency resolution, which is exactly the system-KC
+link in question — **passes**. A negative here would have been worth a lot;
+this is the positive, and it is as far as static work reaches. Whether
+`kmutil load` *authorizes* it still needs stage 1.
+
+### The stage-3 rescue, named before stage 3 is proposed
+
+A framebuffer kext in the auxiliary collection that fails at boot can take the
+console with it, which is worse than the AGDC wedge because it leaves no SSH
+window. Two layers:
+
+1. **The one-shot.** `probe()` consumes `rbgpu-fb` durably before touching
+   anything, so the *next* boot is unarmed. A plain power cycle is the first
+   and usually only move. This is the same guarantee 2s8 measured for the
+   accelerator arm, where the wedge still wrote its NVRAM note and still
+   consumed its one-shots.
+2. **`kmutil trigger-panic-medic`** — "delete and disable loading of third
+   party kexts in order to safely boot into a target volume", Recovery only.
+   The command for this machine, with both facts rule 25 was written for:
+   Recovery is reached with **SPACE at the OpenCore picker** (not Cmd-R), and
+   the system volume is **`MACOS`** (`diskutil info /` → Volume Name MACOS;
+   the Data volume is `MACOS - Data`):
+
+   ```
+   kmutil trigger-panic-medic --volume-root /Volumes/MACOS
+   ```
+
+   Recorded now, while the machine is up and the names can be read off it,
+   rather than looked up from a black screen. Four Recovery trips were each
+   ended by a detail asserted instead of measured (2ny).
