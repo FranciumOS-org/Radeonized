@@ -786,6 +786,11 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // leave 0x921 still refused without saying so. agdc_tim_cached names the
     // source (1 NDRV, 2 OTG0) and its ABSENCE is what boot 168 read.
     "agdc_resample", "agdc_resample_valid", "agdc_tim_cached",
+    // 2sc: whether the boot asked for the four new capability types
+    // (agdc_extcap_all), how many queries were refused by our own gate
+    // (agdc_extcap_gated_n) and how many types were ANSWERED. On boot 169 the
+    // answered count was 1 of 16; with the arg it should be 5.
+    "agdc_extcap_all", "agdc_extcap_answered", "agdc_extcap_gated_n",
     "fb_vbl_hv_state", "fb_vbl_state", "fb_vbl_ot_cls", "fb_vbl_hv_cls",
     // and the keys that say the early trigger actually ran, so an absent
     // `fb_vbl_ot_armed` can be told from "the bridge never published".

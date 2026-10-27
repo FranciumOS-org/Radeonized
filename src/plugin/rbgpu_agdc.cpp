@@ -43,6 +43,11 @@ bool armed, finished;
 // opening it is what hangs the machine, and that is now MEASURED rather than
 // feared. `-rbgpuagdcearly` re-arms it for a deliberate experiment.
 bool early;
+// 2sc: off by default. Answering the other four extended-capability types is
+// a CLAIM about hardware we do not program, and three of the four carry a
+// substituted field (rb_agdc.h names each one), so the default configuration
+// keeps answering the scaler alone - byte-for-byte what boots 165-169 did.
+bool extcapAll;
 // 2rx: run() may now be entered from THREE places (the wrangler notification,
 // rbgpu_agdc_load and the framebuffer hook) where the restored tree had one
 // live site, because `work` used to be NULL at load time. thread_call_enter on
@@ -269,12 +274,22 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
         // +0x04, so reading it needs EIGHT bytes of output buffer, and until
         // now this read only tested `out` - an out-of-bounds kernel read for
         // any caller passing a shorter one.
-        if (out && outSize && *outSize >= 8)
-            rbgpu_diag_set_num("agdc_extcap_type",
-                               rb_agdc_get32(
-                                   reinterpret_cast<const uint8_t *>(out)+4));
-        else
+        if (out && outSize && *outSize >= 8) {
+            const uint32_t ty=rb_agdc_get32(
+                                  reinterpret_cast<const uint8_t *>(out)+4);
+            rbgpu_diag_set_num("agdc_extcap_type",ty);
+            // 2sc: the gate. Refuse the four new types exactly as before unless
+            // the boot asked for them, and publish WHICH type was gated so an
+            // unchanged capture cannot be mistaken for the arg not being read.
+            if (!extcapAll && ty!=0x10) {
+                rbgpu_diag_set_num("agdc_extcap_gated",ty);
+                rbgpu_diag_inc("agdc_extcap_gated_n");
+                rbgpu_diag_set_num("agdc_vendor_unsupported",attr);
+                return kIOReturnUnsupported;
+            }
+        } else {
             rbgpu_diag_set_num("agdc_extcap_type_short",outSize ? *outSize : 0);
+        }
     }
     // 2rh: the cache, never a hardware sample or framebuffer call on
     // WindowServer's external-method thread. 2ri exonerated the NDRV getters
@@ -636,6 +651,8 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     rbgpu_diag_set_num("agdc_resample_alloc",resample ? 1u : 0u);
     early=checkKernelArgument("-rbgpuagdcearly");
     rbgpu_diag_set_num("agdc_early",early ? 1u : 0u);
+    extcapAll=checkKernelArgument("-rbgpuagdccaps");
+    rbgpu_diag_set_num("agdc_extcap_all",extcapAll ? 1u : 0u);
     if (!early) {
         // 2rz: the pre-2rx shape, which is the one boot 163 booted clean. The
         // framebuffer hook is then the ONLY trigger, so the publish lands

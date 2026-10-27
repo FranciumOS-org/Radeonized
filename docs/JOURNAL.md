@@ -35258,3 +35258,104 @@ no degamma, no CSC and no cursor.
 
 That is source-side work with a measured consumer for each field, and it costs
 no boot to write. It is not yet written.
+
+## 2sc — the other four AGDC extended-capability types, from Apple's own code
+
+No boot. 2sb found the consumer chain; this implements the four types we were
+refusing. Build **C92D436F**.
+
+### Apple's dispatcher, read rather than assumed
+
+`AMDRadeonX6000_AmdAgdcServices::getFbExtendedCapability` (`0xbfecb62`, in
+`AMDRadeonX6000Framebuffer`) is a switch over the type at +0x04 with **exactly
+five arms** and `kIOReturnUnsupported` for everything else:
+
+| type | provider |
+| --- | --- |
+| 1 | **inline in the dispatcher** at `0xbfecca2` (CSC) |
+| 2 | `getFbCapabilityForGamma` `0xbfecda8` |
+| 4 | `getFbCapabilityForDegamma` `0xbfed0dc` |
+| 0x10 | `getFbCapabilityForScaler` `0xbfecf0e` |
+| 0x8000 | `getFbCapabilityForCursor` `0xbfed1a6` |
+
+So this header's five-type list was **right**, and 2sb's worry that it was
+wrong about which five was unfounded. Two refinements, from
+`stringifyFbCapabilityType` (`0xbff0e70`), whose sixteen strings are in bit
+order and cross-check on four arms Apple compares explicitly (0x20 Rotation,
+0x200 Mirroring, 0x800 HDR Scaler, 0x2000 3D LUT): type **4 is
+"Linearization"** (Apple's provider is named Degamma) and **0x10 is "Plane
+Scaler"** (0x8 is "Pipeline Scaler"). Also `getFbCapabilityForRotation` is
+present in the binary and **unreachable from the dispatcher**, so a real Navi
+21 Mac refuses 0x20 too — it stays in the test's unsupported list on purpose.
+
+Before the switch there is a gate worth recording: the dispatcher resolves a
+display path by the index at +0x00 (`vt[0x900]`), returns `0xe00002f0` if
+there is none, and returns `kIOReturnUnsupported` when the path's byte at
+**+0x719** is zero.
+
+The structure confirms this header's existing offsets: count at +0x08, entries
+at +0x0c, stride **0x32c**.
+
+### The layouts, and the limit
+
+Field-for-field from Apple's code; the structural constants are Apple's.
+Apple's own constants read out of the binary: the gamma base double at
+`0xc1f3840` is **2.0** (its second entry carries `powf(2.0,-25)` and
+`powf(2.0,7)`), and the degamma segment ids at `0xc1f3860` are **{0x10,
+0x20}**.
+
+**Three of the four need inputs we do not have** — an `AmdFbDisplayPath` and
+the `AmdAgdcServices` device object:
+
+| substituted input | Apple's source | value used |
+| --- | --- | --- |
+| CSC precision word | `path->0x7c4 < 2` branch | `0x00050005` (>=2 gives `0x00070007`, >=3 ORs `0x01000000`) |
+| degamma device flags | `this->0x2e798`, OR'd into the segment id | 0 |
+| gamma segment count | `vt[0x118](0x17) + 1` | 1 (so Apple's second entry is not written) |
+| gamma channel count | `vt[0x1b8](0xf)` | 0 |
+| cursor dimension | `vt[0x1b8](6)`, written to +0x14 **and** +0x18 | 0 |
+
+Each is the value Apple's own code produces on its **smallest** branch, so
+nothing claims a capability larger than Apple's minimum, and each is named at
+its definition. **These are substitutes and are labelled as such** (rule 17).
+What the entries therefore describe is a stage that exists and does nothing —
+which is what an `IONDRVFramebuffer` with no DCN programming can honestly
+report. Copying AMD's real numbers would claim hardware gamma, CSC and a
+cursor plane we cannot program, and if `Commit` then chose the hardware pipe
+on the strength of it the result would be worse than the wedge.
+
+**So the honest expectation is modest**: this turns "Unknown" into an explicit
+answer and takes the answered-type count from 1 of 16 to 5 of 16. It does
+**not** follow that the pipe will go Clean — 2sb was explicit that an
+unsupported operation causing the Dirty loop is a correlation, not a
+measurement. What the boot buys is the elimination of the capability set as
+the suspect, which is worth one boot either way.
+
+### Gating and instrumentation
+
+Off by default behind **`-rbgpuagdccaps`**. The default configuration still
+answers the scaler alone, byte-for-byte what boots 165–169 did, because
+answering the rest is a claim about hardware we do not drive. The gate lives
+in `vendor()` and publishes `agdc_extcap_gated` (which type was refused) and
+`agdc_extcap_gated_n`, so a capture that looks unchanged cannot be confused
+with the arg not being read — rule 20 on this change's own switch.
+`agdc_extcap_all`, `agdc_extcap_answered` and `agdc_extcap_gated_n` go into
+the NVRAM hot list, because one boot of 2sa's pair hung with no SSH and NVRAM
+was all it would have left.
+
+### Tests
+
+Four positive cases, each pre-filled with `0x5c` from the count onward so a
+field the code fails to write shows as garbage rather than as a zero that
+happened to be right, plus the degamma second entry and its capacity refusal.
+Per the project rule, each was checked to FAIL on a deliberate break:
+
+| break | caught by |
+| --- | --- |
+| gamma capability word `0x88005` → `0x88004` | `AGDC:218 le(ce+0x00,4)==f00` |
+| degamma second entry not written | `AGDC:229 …ENTRY_SZ+0x18)==0x20` |
+| the zero-from-count removed | `AGDC:222 q[b]!=0x5c` |
+
+Restored, all pass. Build C92D436F: hosttest passed, imports 365/365, **0**
+from `SystemKernelExtensions.kc`, 0 `IOGraphicsFamily` in `Info.plist`.
+**Not booted.**
