@@ -40011,3 +40011,34 @@ entry's builder; `-rbgpuagdccaps` already armed and already measured to take
 field and `System Gamma` has a chance of leaving `Unknown`. If it does not,
 the translation step above is where the next read has to go, and no further
 boot should be spent before it.
+
+### 2u9 addendum: built, in `AA4E5167`
+
+`src/common/rb_agdc.h`: `RB_AGDC_GAMMA_SEGMENTS` **1 → 2**, a new
+`rb_agdc_gamma_entry2()` carrying Apple's eight fields, and three named
+constants — `RB_AGDC_GAMMA_ELEMENTS 0x200`, `RB_AGDC_GAMMA_MIN_F 0x33000000`
+(`powf(2,-25)`, exponent 127−25 = 0x66) and `RB_AGDC_GAMMA_MAX_F 0x43000000`
+(`powf(2,7)`). The gamma arm of `rb_agdc_extcap` gained the same capacity
+guard the degamma arm has always had, so a count of 2 can never be published
+into a buffer that fits one. `RB_AGDC_GAMMA_CHANNELS` is **untouched** at 0:
+entry 1 keeps its substitute, so the only new values in the reply are Apple's
+own literals plus `0 | 0x40`.
+
+Hosttest extended per the standing rule, and **checked to fail when what it
+guards is broken**: with `RB_AGDC_GAMMA_ELEMENTS` temporarily 0 it reports
+`FAIL AGDC:248: le(g2+0x28,4)==0x200`; restored, `hosttest: all passed`. The
+case checks all eight fields of entry 2, re-checks that entry 1 is still entry
+1 (format word 0x10, count still the substitute), and checks the refusal at a
+one-entry capacity.
+
+Build **`AA4E5167`** (was `43447D39`, so the UUID moved). `kmutil libraries -p`
+resolves **0** from `SystemKernelExtensions.kc` and
+`grep -c IOGraphicsFamily src/plugin/Info.plist` is **0** — both standing
+post-plugin-change checks pass.
+
+The boot needs **no boot-arg change**: `-rbgpuagdccaps` is already in and
+already measured to take (2u6). It needs the plugin reinstalled to the EFI,
+the one-shots, and the capture taken once WindowServer is up — which
+`plugin_check.sh` now says out loud (2u5). The single reading that decides it
+is whether `Attempting to get 3-channel gamma table capabilities from plane
+with no 3-channel gamma table support` changes from **7**.

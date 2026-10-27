@@ -228,6 +228,34 @@ int agdc_tests(void) {
         A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,0,0)==0);
         A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+RB_AGDC_EXTCAP_ENTRY_SZ+0x18,4)==0x20);
         A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x18,4)==0x10);
+        /* 2u9: GAMMA now writes Apple's second entry too, and it is the only
+         * entry in the whole reply whose element count is one of Apple's own
+         * literals. Check every field of it, because the element count at
+         * +0x28 is the FIELD UNDER TEST - 2u7 read CoreDisplay refusing on a
+         * zero there - and a silent 0 is exactly the failure this guards. */
+        memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
+        rb_agdc_put32(x+1+4,RB_AGDC_CAP_GAMMA);
+        A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,0,0)==0);
+        A(le(q+RB_AGDC_EXTCAP_COUNT_OFF,4)==2);
+        {
+            const uint8_t *g2=q+RB_AGDC_EXTCAP_ENTRY_OFF+RB_AGDC_EXTCAP_ENTRY_SZ;
+            A(le(g2+0x00,4)==0x00088005);
+            A(le(g2+0x04,4)==1);
+            A(le(g2+0x10,4)==1);          /* entry 2's format word, NOT 0x10 */
+            A(le(g2+0x18,4)==0x40);
+            A(le(g2+0x20,4)==RB_AGDC_GAMMA_MIN_F);
+            A(le(g2+0x24,4)==RB_AGDC_GAMMA_MAX_F);
+            A(le(g2+0x28,4)==0x200);      /* the element count, non-zero */
+            /* And entry 1 must still be entry 1: its format word is 0x10 and
+             * its own count is the substitute, unchanged by this addition. */
+            A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x10,4)==0x10);
+            A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==RB_AGDC_GAMMA_CHANNELS);
+        }
+        /* Two entries means the capacity must really hold two: a reply that
+         * publishes a count of 2 into a buffer that fits one is worse than a
+         * refusal. The size check is exact, so only the real size is accepted. */
+        A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_ENTRY_OFF
+                              +RB_AGDC_EXTCAP_ENTRY_SZ,0,0)<0);
     }
     /* No real timing: nothing truthful to say about a scaler, so refuse. */
     memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
