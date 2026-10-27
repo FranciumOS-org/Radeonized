@@ -35359,3 +35359,83 @@ Per the project rule, each was checked to FAIL on a deliberate break:
 Restored, all pass. Build C92D436F: hosttest passed, imports 365/365, **0**
 from `SystemKernelExtensions.kc`, 0 `IOGraphicsFamily` in `Info.plist`.
 **Not booted.**
+
+## 2sd — boot 170: the capability set is answered in full and NOTHING moved
+
+Build C92D436F, `-rbgpuagdcearly -rbgpuagdccaps`. `logs/20261026-213533-plugin`,
+captured live over SSH from inside the wedge. `rbgpu-boot = 170`, UUID matches
+`build/out`, both args present in `boot-args.txt`, `diag_used 603` of 768 so
+the table did not fill and absence is a result.
+
+### 2sc works, mechanically, exactly as designed
+
+| key | boot 169 | boot 170 |
+| --- | --- | --- |
+| `agdc_extcap_all` | absent | **1** (the arg was read) |
+| `agdc_extcap_calls` | 16 | 16 |
+| `agdc_extcap_answered` | **1** | **5** |
+| `agdc_extcap_gated_n` | — | **absent** (our gate refused nothing) |
+| `agdc_extcap_result` (last-wins) | **−2** | **0** |
+| `agdc_extcap_type` (last-wins) | 0x8000 | 0x8000 |
+| `agdc_failed_calls` | 0x12 = 18 | **0xe = 14** |
+
+The last query of the sixteen — Cursor, 0x8000 — now **succeeds** where it
+returned −2, and the failed-call count drops by **exactly four**, which is an
+independent confirmation that the four types answered are the four that were
+failing. `agdc_link_result 0`, `agdc_resample_valid 1`, `agdc_tim_cached 2`:
+2s9's fix still holds on this build.
+
+### And it changed nothing at all
+
+`fb_vbl_ot_armed` **still absent**, `fb_vbl_ot_state 0`. Still no transaction
+ever queued.
+
+The display log is **byte-identical to boot 169's**: 56 `DisplayPipeState`
+dumps, `Clean` appearing **zero** times in the whole file, and the same eight
+operation lines — including **`System Gamma - Unknown`**, unchanged, even
+though capability type 2 Gamma was answered successfully sixteen queries deep.
+
+So answering the capability set is **not sufficient**, and 2sb's correlation
+("the pipe stays Dirty because the capability set is incomplete") is not
+supported: the set is now as complete as Apple's own five types and every
+operation reads exactly as before.
+
+### The confound, stated plainly
+
+This boot does **not** fully eliminate capability type 2, and the reason is
+2sc's own substitute. `CoreDisplay::IOPCapabilities::GammaChannelTableEntryCountAndType`
+(`0x7ff80405ddd8`) walks `this->0x8 -> 0xb0 -> 0x90` and discriminates on an
+entry **flags** word, testing bits 8 and 9 and comparing a size against 0x10
+and 0xc. 2sc had to publish `RB_AGDC_GAMMA_CHANNELS 0` because the real value
+is `vt[0x1b8](0xf)` on an object we do not have. **"Answered with an empty
+gamma capability" is plausibly indistinguishable from "refused"** — so the
+one line in the log we care about is exactly the one our substitute controls.
+
+Types 1, 4 and 0x8000 are eliminated: their replies are structurally complete
+and the pipe state did not move. Type 2 is **not**, and no boot can settle it
+until the channel count is obtained rather than substituted.
+
+A caution against going further down that road right now: the disassembly of
+that function broke into `<unknown>` at `0x7ff80405de63`, so the tail is
+**not** reliable and nothing above should be extended past bits 8/9 and the
+0x10/0xc comparisons without a working disassembly (rule 26; rule 13 — a
+field is not understood until the code that reads it has actually been read).
+The display log's own gamma dumps mention 1024-entry and 3-entry tables, which
+is suggestive and is **not** a measurement of this field.
+
+### Where that leaves the frontier
+
+Two of 2sa's candidates are now dead or weakened and the third is untouched:
+
+- our AGDC bridge — eliminated (2s9/2sa).
+- the capability set — answered in full, nothing moved; only type 2's channel
+  count survives as a loose end, and it is behind a substitute.
+- **`IOPresentmentBindIOAccelSurfaceToResource` and `SetPlaneState`, which
+  `IONDRVFramebuffer` implements NEITHER of** — CLAUDE.md pre-stated this
+  before any of these boots and nothing since has touched it. `Fetch - Pipe`
+  resolving while nothing ever goes Clean is consistent with a pipe that is
+  selected and then cannot be given a surface.
+
+That is where the next static pass belongs, and it needs no boot to start.
+
+Nothing was built this milestone. `-rbgpuagdccaps` stays off by default.
