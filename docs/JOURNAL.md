@@ -39716,3 +39716,79 @@ The repeat is unchanged otherwise: `-rbgpuagdccaps` is **already in
 boot-args** and already measured to take (`agdc_extcap_answered 15`), so the
 next boot needs no `efi.sh` step — only the one-shots, and the capture run
 **once WindowServer is up**, which the script will now tell the user.
+
+## 2u6: boot 179 — the gamma arm MOVED the error, and the new wording names the field 2sc substituted
+
+Boot 179 (`rbgpu-boot = 179`, new nonce, `armed = 1`, boot 14:43:53, capture
+14:44:35 = **+42 s**) is 2u4's experiment with a capture that works. The new
+control proves the window this time: `display-log-control.txt` **2693 lines**,
+`display-log.txt` **2245**. 2u5's blank was the window, nothing else.
+
+Arm identical to 178: `agdc_extcap_all 1`, `agdc_extcap_answered 15`,
+`agdc_failed_calls 34`, `agdc_last_ret 0`, `agdc_say = "PUBLISHED"`,
+`agdc_error 0`, `agdc_stage 0x46`, `agdc_user_vendor 4`. Chain still open:
+`Unable to get AGDC information` **0**, `no display pipes are present` **0**,
+`Unable to find display pipe` **0**, `Metal compositor activated` **2**,
+`CompositorSW` **0**.
+
+**2u4's prediction is CONFIRMED, and sharply.** The message did not merely
+change count — it changed **text**, with the same ×7 multiplicity:
+
+| | boot 177 (gamma gated OFF) | **boot 179 (gamma answered)** |
+|---|---|---|
+| `Attempting to get capabilities from plane with no gamma` | **7** | **0** |
+| `Attempting to get 3-channel gamma table capabilities from plane with no 3-channel gamma table support` | 0 | **7** |
+| `...3-channel linearization table capabilities from plane with no 3-channel linearization table support` (WARN) | 0 | **1** |
+| `Fallback GPU Display Pipe transaction submission failed` | present | 57 |
+| `Transaction Target State` | present | 57 |
+| `DisplayPipeState` dumps | 58 | 57 |
+| `Clean` | 0 | **0** |
+
+So the gamma capability **does** reach CoreDisplay, and what it now rejects is
+the capability's **channel count** — which is exactly the field 2sc had to
+substitute and labelled as substituted (`vt[0x1b8](0xf)`, value **0**, on an
+`AmdFbDisplayPath` we do not have). Apple asks for a 3-channel table; we said
+zero channels; it says so in words.
+
+**That REFUTES 2sf's reading of where CoreDisplay gets gamma from.** 2sf/2sd
+concluded, from 2sd's byte-identical display log, that "type 2's substituted
+channel count was never going to matter, because that is not where CoreDisplay
+reads gamma from" (journal line 35513). Boot 179 measures the opposite: the
+AGDC type-2 reply is read, and its channel count is the field under test. 2sf's
+*disassembly* of the dictionary and its key groups stands; the inference that
+the AGDC type bits do not feed it does not. The reason 2sd saw no change is
+that 2sd ran **before gate 1 was won and before a `DisplayPipe` existed**
+(2t7/2u4) — there was no consumer in that boot to read the reply. 2sd is
+therefore not a null result about capabilities either; it is a null result
+about a boot with no pipe.
+
+**The dumps also got richer, which is independent corroboration.** Boot 177's
+`DisplayPipeState` carried `LUT: R` alone. Boot 179's carries `Rotation Angle`,
+a 3×3 `Matrix`, `LUT: R/G/B` (1024 entries each) **and `LiT: R/G/B`** (3
+entries each). Those are the CSC, gamma and linearization groups appearing
+because we now answer their types. The operation list is complete and, of
+eight operations, **seven resolve** — `Fetch - Pipe`, `EOTF - GPU`, and
+`Scale / Rotate / Linearize / CSC / Regamma - None` — with exactly one left:
+
+```
+    Dirty        System Gamma  - Unknown
+```
+
+**So the frontier is now one field, named by Apple, in code we already own.**
+`rb_agdc.h`'s gamma reply writes a channel count of 0; CoreDisplay wants 3.
+
+**Stated before anyone acts on it (rule 17):** changing 0 to 3 is **still a
+substitution**, not a measurement — we would be asserting a three-channel
+gamma table we cannot program, exactly the risk 2sc named when it chose
+Apple's smallest branch ("copying AMD's real numbers would claim hardware
+gamma … and if `Commit` then chose the hardware pipe on the strength of it the
+result would be worse than the wedge"). The honest framing is that boot 179
+turns that caution from a general worry into a **specific, testable** one: the
+error names the field, so a single-field change is a single-variable
+experiment, and it must be journalled as a substituted value whatever it
+produces. The `LiT: R/G/B - 3 entries` line and the linearization WARN say the
+same thing about `LinearizationArray`.
+
+Unchanged and still unexplained: `fb_vbl_ot_armed` absent (`diag_used` 549 of
+768, so rule 14's check passes and the absence carries information — nothing
+has ever been queued), and the wedge itself.
