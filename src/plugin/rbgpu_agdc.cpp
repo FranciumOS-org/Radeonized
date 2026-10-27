@@ -21,6 +21,9 @@ alignas(16) uintptr_t table[tableBytes/8], metaTable[metaTableBytes/8];
 const OSMetaClass *superMeta;
 IOService *service, *framebuffer;
 IONotifier *wranglerNote;
+// 2t8: the late path's own trigger. See fbArrived.
+IONotifier *fbNote;
+
 IOPCIDevice *pci;
 thread_call_t work;
 // 2s9: a SECOND thread_call, for the timing re-sample alone. It cannot reuse
@@ -398,6 +401,28 @@ bool resolvePci() {
 // handler SYNCHRONOUSLY for an already-matched service, so this can run on the
 // kext-load thread that installed it. attach()/start() happen only in run(),
 // on a thread_call, with our provider long since started.
+// 2t8: the late path's trigger, and the fix for boot 175. 2pa's route on
+// IONDRVFramebuffer::enableController was the ONLY way rbgpu_agdc_framebuffer
+// was ever reached, so once our framebuffer won the panel the bridge sat at
+// agdc_say "ARMED (late): waiting for the framebuffer" for the whole boot:
+// zero RembrandtGPUAGDC instances, and `agdcinfo` reporting candidates 0 -
+// which is NOT a verdict on the bridge (rule 14), only on its trigger.
+//
+// gIOMatchedNotification fires after the service has matched AND start()
+// returned true, which is the same "the controller is up" point the old route
+// sat at, so this is a trigger change and not a timing change.
+//
+// THE HANDLER CALLS rbgpu_agdc_framebuffer AND NOTHING ELSE - retains plus a
+// thread_call_enter. That is 2rr's rule, and it matters here too, because
+// addMatchingNotification fires the handler SYNCHRONOUSLY for a service that
+// has already matched, so this can run on the thread that installed it.
+bool fbArrived(void *,void *,IOService *svc,IONotifier *) {
+    rbgpu_diag_set_num("agdc_fbnote_fired",1);
+    rbgpu_diag_set_num("agdc_t_fbnote_ms",rbgpuAgdcUptimeMs());
+    if (svc) rbgpu_agdc_framebuffer(svc);
+    return true;
+}
+
 bool wranglerArrived(void *,void *,IOService *,IONotifier *) {
     rbgpu_diag_set_num("agdc_note_fired",1);
     rbgpu_diag_set_num("agdc_t_note_ms",rbgpuAgdcUptimeMs());
@@ -660,7 +685,20 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
         // 2rw measured as 1732 ms late and which boot 164 proved is the only
         // reason that boot kept its desktop. Not a fix for the race; a
         // deliberate choice not to win a race we cannot yet survive winning.
-        rbgpu_diag_set_str("agdc_say","ARMED (late): waiting for the framebuffer");
+        // 2t8: and WAIT FOR IT PROPERLY. The old shape relied on 2pa's
+        // IONDRVFramebuffer route, which our own framebuffer displaced.
+        if (!fbNote) {
+            auto m=IOService::serviceMatching("RBAMDFramebuffer");
+            if (m) {
+                fbNote=IOService::addMatchingNotification(
+                    gIOMatchedNotification,m,fbArrived,nullptr,nullptr,0);
+                m->release();
+            }
+            rbgpu_diag_set_num("agdc_fbnote_armed",fbNote?1u:0u);
+        }
+        rbgpu_diag_set_str("agdc_say",fbNote
+            ? "ARMED (late): watching for RBAMDFramebuffer"
+            : "ARMED (late): NO framebuffer notification - trigger is 2pa only");
         return;
     }
     if (!wranglerNote) {
@@ -685,11 +723,23 @@ void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
     rbgpu_diag_set_num("agdc_tim_src",(cur?1u:0u)|(info?2u:0u)); // 3 required
 }
 
+// 2t8: which classes count as "the framebuffer driving this panel". Until our
+// own kext existed this was IONDRVFramebuffer alone, and the check was a bare
+// strcmp against it. Boot 175 measured what that costs now: RBAMDFramebuffer
+// DISPLACES IONDRVFramebuffer (same provider, name and IOMatchCategory, higher
+// score - 2sm), so the old name never appears and the old trigger never fires.
+// Both are listed rather than the check being dropped, because rule 19's point
+// stands: a refusal path has to be able to say what it refused, and a bridge
+// that accepts any IOService would publish against the wrong provider.
+static bool rbgpuAgdcIsFramebufferClass(const char *name) {
+    return !strcmp(name,"RBAMDFramebuffer") || !strcmp(name,"IONDRVFramebuffer");
+}
+
 void rbgpu_agdc_framebuffer(IOService *fb) {
     if (!checkKernelArgument("-rbgpuagdc") || framebuffer) return;
     if (reinterpret_cast<uintptr_t>(fb)<0xffffff8000000000ULL ||
         !fb->getMetaClass() || !fb->getMetaClass()->getClassName() ||
-        strcmp(fb->getMetaClass()->getClassName(),"IONDRVFramebuffer")) {
+        !rbgpuAgdcIsFramebufferClass(fb->getMetaClass()->getClassName())) {
         refuse(5,"unexpected framebuffer"); return;
     }
     // 2rr: do NOT clobber a device resolvePci() already took and retained -
