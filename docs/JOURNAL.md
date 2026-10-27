@@ -39387,3 +39387,99 @@ statically (class match by metaCast, the name test, selector 1's `out+0x28`
 So the next experiment is unchanged from 2t7's, but its value is higher than it
 was: everything downstream of the AGDC map is now known to be in place rather
 than hoped to be.
+
+## 2u3 — 2sv §5 ANSWERED and CORRECTED: slot `0x8d0` is `copyCapabilities`, not a vendor blob. There is no second capabilities channel
+
+Static, no boot. 2sv §5 named "the blob produced by **slot 0x8d0** on the
+object at `userclient+0xe8`, a **vendor method**" as *the next read*, and
+pointed at `AMDRadeonX6000`. Read it, and the premise is wrong.
+
+### The read
+
+The vendor display-pipe class is `AMDRadeonX6000_AMDAccelDisplayPipe` (2s4).
+Dumping its vtable (`dumptable.py`, `__ZTV34AMDRadeonX6000_AMDAccelDisplayPipe`,
+0xbf94220, 2336 bytes) at **dump offset 0x8e0** — rule 7, call offset
+`0x8d0` = dump `0x8e0`:
+
+```
+  +0x8c8  __ZN34AMDRadeonX6000_AMDAccelDisplayPipe17submitTransactionEP30IOAccelDisplayPipeTransaction2
+  +0x8d0  -> 0x14e5d79e      (inherited, IOAcceleratorFamily2)
+  +0x8d8  -> 0x14e5d4be      (inherited)
+  +0x8e0  -> 0x14e5d7aa      (inherited)   <-- CALL OFFSET 0x8d0
+  +0x8e8  __ZN34AMDRadeonX6000_AMDAccelDisplayPipe16beginTransactionEP12IOAccelEvent
+```
+
+`nm` on the extracted `IOAcceleratorFamily2` names all three:
+
+| address | symbol |
+|---|---|
+| `0x14e5d79e` | `IOAccelDisplayPipe::getDisplayModePipeScalerSetup` |
+| `0x14e5d4be` | `IOAccelDisplayPipe::createWorkLoop` |
+| **`0x14e5d7aa`** | **`IOAccelDisplayPipe::copyCapabilities()`** |
+
+and its body is the same function 2sv §2 had already read, four bytes further
+in at the first instruction after the frame setup:
+
+```
+14e5d7aa  pushq %rbp
+14e5d7ab  movq  %rsp, %rbp
+14e5d7ae  movq  0x88(%rdi), %rdi
+14e5d7b5  movq  (%rdi), %rax
+14e5d7b8  movq  0x2e8(%rax), %rax
+14e5d7bf  leaq  0x16b41(%rip), %rsi     ; "IOAccelDisplayPipeCapabilities"
+14e5d7c7  jmpq  *%rax
+```
+
+### What that corrects, and what it means
+
+1. **It is not a vendor method.** The entry at call offset `0x8d0` is
+   *inherited*; `AMDRadeonX6000_AMDAccelDisplayPipe` overrides the slots on
+   either side of it (`submitTransaction`, `beginTransaction`) and leaves this
+   one alone. 2sv §5's "a vendor method" and its instruction to read
+   `AMDRadeonX6000` were both wrong, and the error is instructive: 2sv
+   inferred "vendor" from the *call shape* (`call [rax+0x8d0]` on an object
+   reached through a field) without checking whether that slot was overridden.
+   **A high vtable offset is not evidence of a vendor override** — rule 7's
+   neighbourhood needs the actual dump.
+2. **It is the SAME channel, read twice.** 2sv §2 and 2sv §5 were describing
+   one function. So `getCapabilitiesData`'s "binary blob" is just
+   `copyCapabilities()`'s return value serialised through the two accessors at
+   slots `0x158`/`0x118`; the length/bytes reading of those two is 2sv's
+   inference and is **still unverified**, but it no longer matters for the
+   question being asked.
+3. **There is therefore NO second, non-AGDC capabilities channel in the
+   kernel.** 2sv §5 was the last candidate found by elimination for where the
+   plane count could enter, and it has collapsed into the registry property
+   this project has now measured twice (2u1, 2u2) as containing exactly two
+   keys: `DisplayPipeSupported` and `TransactionsSupported`. No `PlaneArray`,
+   no count.
+
+### So where the plane count comes from is OPEN again, and honestly so
+
+The state of that question, with nothing papered over:
+
+* 2sf measured the userspace dictionary that carries the count
+  (`IOPresentmentCapabilitiesStructureFromDictionary`, keyed `PlaneArray`,
+  `GammaArray`, …) is built by `__GatherAGDCDisplayPipelineCapabilities` from
+  the **AGDC replies**.
+* 2sg measured that **no AGDC query carries a plane count** — 0x711 sixteen
+  times, 0x921 once, and `__GatherAGDCLinkCapabilities` which 2rg measured
+  inert — and that `PlaneArray` is the one group no capability type feeds.
+* 2u3 now removes the kernel-side blob that was the remaining candidate.
+
+Three measurements that each exclude a source, and the count is non-zero on
+real hardware. **Something in that set is being read wrongly, and the cheapest
+way to find out which is to watch the code run rather than to read a fourth
+candidate.** None of this is observable until
+`IOPresentmentCreateCapabilities` is actually reached, and it is not reached
+while the AGDC association map is empty.
+
+### Which makes the AGDC boot the next step on its own merits
+
+Not as a prerequisite to be got out of the way, but because it is the only
+instrument that makes the plane-count question answerable at all. Everything
+downstream of the map is now known present rather than hoped for (2u2: gate 1
+and both capability flags), three of the map's four conditions are verified
+statically (2t7, 2t8 addendum), the bridge's trigger is fixed (2t8) and its
+panic is fixed (2t9). The static road has run out; this is no longer a choice
+between reading more and booting.
