@@ -37820,3 +37820,43 @@ desktop's feel is then the direct read on whether a paced `'vbl '` is what
 WindowServer was waiting for. `RBFBVBLFires` absent or zero with
 `RBFBVBLRegistered` non-zero would mean registration happened and the
 thread_call still is not firing — a different defect, in `armVBL`.
+
+### 2sy addendum — the AuxKC rebuild command, and two failures that are not ours
+
+`sudo kmutil install --volume-root / --update-all` **cannot work on this
+machine**:
+
+```
+warning: unable to create release/debug/kasan/development/research extension manager
+Error Domain=KMErrorDomain Code=71 "Missing Developer Kit: ... you will need to
+install a KDK matching your build 24H32 to rebuild kernel collections."   (x5)
+```
+
+`--update-all` rebuilds **every** collection variant, and `ls
+/Library/Developer/KDKs` is empty - **no KDK is installed**. The AuxKC alone
+needs none. The correct form, which this repo's own notes already carried:
+
+```
+sudo kmutil create -n aux -z --volume-root /
+```
+
+`-n aux` limits it to the auxiliary collection; `-z/--no-authorization` skips
+the approval check that produced 2sq-era
+`LocalAuthentication Code=-6 "Biometry is not available on this device"`, which
+was never a consent problem (`spctl kext-consent status` reads DISABLED).
+`--allow-missing-kdk` exists if a KDK is still demanded.
+
+**Two consequences of the failure that matter more than the error:**
+
+1. **The `&&` chain broke before `nvram`, so the one-shots were NOT set.** A
+   reboot there would have been an unarmed boot, and rule 8 would have read it
+   as a result. Chaining an arming step behind a build step hides this; the
+   arming belongs in its own command.
+2. **`/Library/Extensions` holds `770AE129` while the AuxKC still holds the
+   previous build.** `rm -rf` + `cp -R` succeeded (installed UUID verified
+   `770AE129-E550-3C37-BB4D-AE6900390389`), so the *file* is new and the
+   *collection* is stale. Booting in that state loads the OLD kext while every
+   on-disk check says the new one is installed - precisely the stale-build trap
+   that has already cost this project two boots. **Verify the UUID of the
+   installed bundle AND rebuild the AuxKC before concluding anything from an
+   armed boot.**
