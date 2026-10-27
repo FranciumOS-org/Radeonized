@@ -35439,3 +35439,98 @@ Two of 2sa's candidates are now dead or weakened and the third is untouched:
 That is where the next static pass belongs, and it needs no boot to start.
 
 Nothing was built this milestone. `-rbgpuagdccaps` stays off by default.
+
+## 2se — static: the plane count, and why 2sd was answering the wrong interface
+
+No boot. Picking up where 2sd left the frontier: the pre-stated
+`IOPresentmentBindIOAccelSurfaceToResource` / `SetPlaneState` gap.
+
+**First correction: both are USERSPACE.** They are in `IOPresentment` in the
+dyld cache, not kernel methods — `IOPresentmentDisplayPipe::IOPresentmentSetPlaneState`
+`0x7ff812e9da3e`, `IOPresentmentDisplayPipe::IOPresentmentBindIOAccelSurfaceToResource`
+`0x7ff812e9cf3a`. So "IONDRVFramebuffer implements neither" was the wrong
+shape for the problem: there is no vtable slot of ours missing. The question
+is what IOPresentment is told, not what it calls.
+
+### The gate is a plane count, and ours is zero
+
+`IOPresentmentSetPlaneState(transaction, planeIndex, state)` does almost
+nothing before it refuses:
+
+```
+if (!transaction) return 0x10;
+count = <getter>(this);              /* 0x7ff812e8eef6 */
+if (planeIndex >= count) return 0x10;
+if (state != 1 && state != 2 && state != 4) return 0x10;
+```
+
+and the getter is a one-line accessor — `movzbl 0x10(%rdi), %eax`, a **byte at
+pipe+0x10**, written by `IOPresentment::_IOPresentmentSetPlaneCount(unsigned
+char)` (`0x7ff812e8ed00`). IOPresentment's own error table names the result
+exactly: **"Plane out of range"**, beside "Plane in use", "Plane invalid" and
+"General plane error".
+
+So with a plane count of 0, every `SetPlaneState` fails on the second
+instruction, for every plane, for the whole boot. Nothing can be staged, so
+nothing completes, so nothing is queued — which is `fb_vbl_ot_armed` absent and
+56 `DisplayPipeState` dumps with `Clean` never appearing, from the other end.
+
+### Where the capability actually comes from — a different interface entirely
+
+`IOPresentment::IOPresentmentCapabilitiesStructureFromDictionary(void const *,
+sPipelineDictionary *)` (`0x7ff812e8df1c`) builds the structure from a
+**CFDictionary**, with `__performSecondaryCapabilitiesValidation`
+(`0x7ff812e8ed14`) doing nested key lookups over it. The key table is in
+IOPresentment's own strings, and it is large:
+
+| group | keys |
+| --- | --- |
+| planes | **`PlaneArray`**, `BlendType`, `PlaneScalerDictionary`, `ClosedCaptionRegions`, `PlaneState`, `PlaneOptions`, `SetPlaneFlushOptions` |
+| gamma | `GammaArray`, `FixedFormat`, `GammaValue`, `NumberOfElements`, `Elements`, `Entered*` variants |
+| linearization | `LinearizationArray`, `SegmentDictionary`, `Type`, `ConfigurationID`, `MinimumValue`, `MaximumValue`, `MaximumSize` |
+| CSC | `CSCArray` |
+| scaling | `SourceUpScalingArray`, `SourceDownScalingArray`, `BestDictionary`, `WorstDictionary`, `Width`, `Height`, `FilterType`, `CoefficientDictionary`, `HTaps`, `HPhases`, `HTableSize`, `VTaps`, `VPhases`, `VTableSize` |
+| cursor | `CursorArray`, `CursorMaximumFrames`, `CursorInputSize`, `CursorScalingLimits`, `CursorDownWidth/Height`, `CursorUpWidth/Height` |
+| misc | `DiscardTransactionsPastDue`, `GetVendorID`, `SetFlushOptions`, `SetCaptureControl`, `Timestamp`, `TransactionID`, `VendorID`, `IOAccelIndex`, `SurfaceID`, `IsDisplayable`, `Bypass`, `PixelFormat`, `ScalerColor/Width/Height`, `Sync`, `DPBState`, `RotationType` |
+
+**This is not the AGDC vendor-attribute interface.** Our 0x980 reply sets two
+dwords and two pointers (`rb_agdc_capability`); the 0x711 extended-capability
+replies 2sc implemented are a third thing again. The capability set
+IOPresentment and CoreDisplay actually run on is this dictionary.
+
+### Which retro-explains 2sd
+
+2sd measured that answering all five extended-capability types changed
+**nothing** — same 56 dumps, `System Gamma` still `Unknown`. That was not a
+null result about capabilities; it was 2sc answering the wrong interface.
+`CoreDisplay::IOPCapabilities`'s accessors (`PlaneCount`, `GetPlaneIndices`,
+`GammaChannelTableEntryCountAndType`, `CanCSC`, …) line up name-for-name with
+this dictionary's groups — `PlaneArray`, `GammaArray`, `CSCArray` — not with
+the AGDC type bits. So `System Gamma - Unknown` persisting while our 0x711
+gamma reply succeeded is exactly what this predicts.
+
+It also means 2sd's one loose end is closed differently than expected: type
+2's substituted channel count was never going to matter, because that is not
+where CoreDisplay reads gamma from.
+
+### What is NOT established
+
+**Where the dictionary comes from.** `IOPresentmentCopyCapabilities`
+(`0x7ff812e88ab8`) is the entry point and has not been read. Until it is,
+there is no basis for claiming we can supply the dictionary — it may be an
+IORegistry property on a service we publish, or built by CoreDisplay from
+sources of its own. That is the next thing to read, and it decides whether
+this whole line is actionable or just diagnostic.
+
+Also not established: that a non-zero plane count is sufficient. The plane
+count explains the refusal mechanism; it does not prove nothing else blocks
+behind it.
+
+An instrument note: the CFString keys that `__performSecondaryCapabilitiesValidation`
+looks up could not be resolved — the structs are there (flags 0x7c8, lengths
+18, 12, 14, 18, 5) but their character pointers are **chained/rebased** in the
+cache and `dsc.py` does not unchain data pointers (`machoread.py` does, for
+kexts). The key names above come from IOPresentment's string table, which is
+solid; matching a specific key to a specific lookup by string LENGTH was
+available and deliberately not done (rule 17). `dsc.py` wanting a `dataptr`
+that unchains is the real fix.
