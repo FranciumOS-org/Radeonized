@@ -35534,3 +35534,85 @@ kexts). The key names above come from IOPresentment's string table, which is
 solid; matching a specific key to a specific lookup by string LENGTH was
 available and deliberately not done (rule 17). `dsc.py` wanting a `dataptr`
 that unchains is the real fix.
+
+## 2sf — correcting 2se: it IS the AGDC interface, and the plane group is the one input the types do not feed
+
+No boot. 2se ended with "where the dictionary comes from is NOT established"
+and a claim that needs withdrawing.
+
+### 2se's framing was wrong, and here is the chain
+
+`IOPresentmentCopyCapabilities` (`0x7ff812e88ab8`) is a thunk that dispatches
+through `this->0xa0`'s vtable. `IOPresentmentCapabilities::IOPresentmentCreateCapabilities(unsigned int)`
+(`0x7ff812e950f4`) stores the port at `this->0x28`, calls `0x7ff812e95370`,
+and on success turns the result into the CFDictionary by `CFDictionarySetValue`
+over the key table 2se listed.
+
+And `0x7ff812e95370` calls two things:
+
+1. `0x7ff812e9781a` — its result must be **0** or the next step is skipped.
+2. **`__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`)** — the exact
+   address `rb_agdc.h:182` has cited since 2rf.
+
+It then computes, in the caller's own instructions,
+`refresh = this->0x19b28 / ((this->0x19b40 + 0x19b44) * (this->0x19b50 + 0x19b54))`
+— pixel clock over hTotal × vTotal — storing it at `0x19c54`, whose default is
+`0x42700000` = **60.0f**. That is 2rg's reading of `__gatherCapabilities`,
+arrived at again from the other side, and it confirms the block at `0x19b28…`
+is the gathered timing.
+
+**So the dictionary is built FROM the AGDC replies.** 2se said "this is not the
+AGDC vendor-attribute interface" — **withdrawn**. It is the same interface; the
+dictionary is IOPresentment's own rendering of what the gather collected.
+
+### What survives from 2se, and what it now means
+
+The plane gate stands exactly as measured: `IOPresentmentSetPlaneState`
+refuses when `planeIndex >= (byte)pipe->0x10`, IOPresentment's error table
+calls it "Plane out of range", and `_IOPresentmentSetPlaneCount` is the setter.
+New: that setter has **no caller inside IOPresentment** — the control (one
+call to the gather, found) passed, so the grep is trustworthy. It is exported,
+so **CoreDisplay** sets it, consistent with `CoreDisplay::IOPCapabilities::PlaneCount`
+from 2sb.
+
+The sharper point is how the dictionary's array groups line up:
+
+| dictionary group | extended-capability type |
+| --- | --- |
+| `CSCArray` | 1 CSC |
+| `GammaArray` | 2 Gamma |
+| `LinearizationArray` | 4 Linearization/Degamma |
+| `SourceUpScalingArray` / `SourceDownScalingArray` | 0x10 Plane Scaler |
+| `CursorArray` | 0x8000 Cursor |
+| **`PlaneArray`** | **none** |
+
+Five of the six groups are fed by exactly the five types 2sc implemented. The
+sixth — the one that carries the plane count that gates `SetPlaneState` — has
+no corresponding type and is fed by something else.
+
+**That reconciles 2sd.** Answering all five types filled the five groups that
+do not gate anything, and left untouched the one group that does. It is no
+longer surprising that boot 170's log was byte-identical: the thing being
+refused was never one of the five.
+
+### The candidate, named but NOT established
+
+IOPresentment's string table carries two IORegistry property names, both
+referenced from `ioPresentmentPopulateIOFramebufferEntries`:
+**`kAGDCGPUCapability`** and **`kAGDCVendorInfo`**. Our AGDC service publishes
+**neither** — `rbgpu_agdc.cpp` sets only `NeedsPolicyDriver`,
+`IOUserClientClass` and `RBGPUAGDCBridge`.
+
+That is a co-location of key names, **not** a read of where `PlaneArray` is
+filled, and it is recorded as a hypothesis only. The project's own rule is to
+find the consumer before writing a field (2q9/2qa), and that read has not been
+done. Do not publish `kAGDCGPUCapability` on the strength of this paragraph.
+
+### Next
+
+Read `__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`) itself and
+find where the plane group is filled and from what. It is the one function
+that sits between the AGDC replies and every capability CoreDisplay later
+reads, and both remaining unknowns — the plane count and why
+`System Gamma - Unknown` survived a successful type 2 reply — are inside it.
+Static, no boot.
