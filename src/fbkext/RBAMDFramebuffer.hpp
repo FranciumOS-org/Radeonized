@@ -105,6 +105,11 @@ private:
     thread_call_t vblCall;
     bool vblRunning;
 
+    /* True iff this instance won the `IOFramebuffer` match category, i.e.
+     * displaced IONDRVFramebuffer. Gates the console claim and the connection
+     * count; see the comment on the definition. */
+    bool ownsPanel(void);
+
     static void vblFired(thread_call_param_t self, thread_call_param_t);
     void deliverVBL(void);
     void armVBL(void);
