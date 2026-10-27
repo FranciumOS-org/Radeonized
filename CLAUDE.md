@@ -81,11 +81,20 @@ not memory, not a flag and not the AGDC gate:
   routing through the pipe; `System Gamma - Unknown` is the one operation that
   does not resolve. We answer **one** of the five capability types a real AMD
   Mac implements (1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler, 0x8000 Cursor).
-  Whether the pipe stays Dirty *because* of that is a correlation, not a
-  measurement — it is the next thing to separate, against the still-standing
-  pre-statement that IOPresentment needs
-  `IOPresentmentBindIOAccelSurfaceToResource` and `SetPlaneState`, which
-  `IONDRVFramebuffer` implements neither of.
+- **Answering all five capability types changes NOTHING** (2sc/2sd). Boot 170
+  answered 5 of 16 instead of 1 (`agdc_extcap_answered 5`, the Cursor query
+  returning 0 instead of −2, `agdc_failed_calls` down by exactly four), and
+  the display log is **byte-identical** to boot 169's — same 56 dumps, `Clean`
+  still absent, **`System Gamma - Unknown` unchanged** — with
+  `fb_vbl_ot_armed` still absent. So 2sb's correlation is unsupported. Types
+  1, 4 and 0x8000 are eliminated; **type 2 is not**, because 2sc had to
+  substitute its channel count (`vt[0x1b8](0xf)`, on an object we lack) and an
+  empty gamma capability is plausibly indistinguishable from a refused one.
+- **The frontier is the pre-statement nothing has touched**: IOPresentment
+  needs `IOPresentmentBindIOAccelSurfaceToResource` and `SetPlaneState`, and
+  `IONDRVFramebuffer` implements **neither**. `Fetch - Pipe` resolving while
+  nothing ever goes `Clean` fits a pipe that is selected and then cannot be
+  given a surface. Static work, no boot needed to start.
 - **A boot of `8B261646` + `-rbgpuagdcearly` hung at the progress bar with no
   SSH** and needed a force restart (2sa). That boot was UNARMED
   (`agdc_error 3`, `agdc_oneshot 2`), so the bridge was inert in it and the
