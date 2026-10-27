@@ -130,10 +130,13 @@ not memory, not a flag and not the AGDC gate:
   the image. Boot 170 answered all five types with no change, and we answer
   0x921 correctly and copy it wholesale. So there is no AGDC query carrying a
   plane count, and `PlaneArray` having no type is not a naming accident.
-  **Next read: the `IOAccelDisplayPipe` plane interface in
-  `IOAcceleratorFamily2`** — kernel side, where `nm` and `dumptable.py` work —
-  not more dyld cache. IOPresentment links `IOAccelDisplayPipe*` stubs, and
-  `AMDRadeonX6000` already implements that vendor half (2s4).
+  **That read is DONE and the line of inquiry is RETIRED** (2u3/2u4): slot
+  `0x8d0` is `IOAccelDisplayPipe::copyCapabilities`, *inherited*, a
+  three-instruction read of `IOAccelDisplayPipeCapabilities` — there is no
+  second capabilities channel — and boot 177 measured **`Plane Index: 0` in
+  all 58 `DisplayPipeState` dumps**, so the count was never zero and never
+  the gate. 2se/2sf/2sg's measurements stand; the inference stacked on them
+  does not.
 - **Grep `docs/JOURNAL.md` before reading any Apple function.** 2sg re-read a
   function 2rg had already read by address, and 2rg had already settled the
   question being asked. Third recorded instance of this error.
@@ -231,9 +234,36 @@ are missing" must be re-checked against 2u2. Also unexplained:
 `IOAccelDisplayPipeUserClient2` counts 2 with `IONDRVFramebuffer` and 1 with
 ours.
 
-**So the frontier is the EMPTY AGDC ASSOCIATION MAP (2r5), and everything
-downstream of it is now known present rather than hoped for.** Behind it, still
-unread, is 2se's plane count via the slot-`0x8d0` blob (2sv §5).
+**BOOT 177 OPENED THE WHOLE CHAIN, AND APPLE NAMES GAMMA (2u4).** Armed, with
+the framebuffer and the bridge both up: `agdc_say = "PUBLISHED"`,
+`agdc_error 0`, and in the display log *"Unable to get AGDC information"*,
+*"System set to use IOP but no display pipes are present"* and *"Unable to
+find display pipe"* each count **0**. So **2r5's empty association map is
+FILLED** — `agdc_user_vendor 4` means IOPresentment opened the type-2 user
+client and called selector 1 (`kAGDCVendorInfo`) four times, which was the
+map's one statically unverifiable condition — `IOPresentmentCreateForRegistryID`
+succeeded, a `DisplayPipe` exists, and `gUseIOP` was never latched. 2t8/2t9
+both verified (`agdc_tim_ndrv_err 8`, OTG timing, no panic). The remaining
+blocker is named in words: **`Attempting to get capabilities from plane with
+no gamma`** (x7) -> *"Fallback GPU Display Pipe transaction submission
+failed"*, with `System Gamma - Unknown` the one unresolved operation and
+`Clean` absent from 58 dumps. That is **capability type 2**, the one suspect
+2sd could not eliminate — and `-rbgpuagdccaps` was ABSENT in 177, so type 2
+was gated off and never answered.
+
+**THE GAMMA ARM LANDS, BUT ITS READOUT WAS LOST (2u5, boot 178).** With
+`-rbgpuagdccaps` on: `agdc_extcap_all 1`, `agdc_extcap_answered` **3 -> 15**
+(five types x three rounds), `agdc_failed_calls` **46 -> 34** (exactly the four
+new types x three rounds), `agdc_extcap_gated` gone, `agdc_last_ret 0`. So
+**Gamma was answered**. But `display-log.txt` is **0 bytes** because the
+capture ran at **+28 s** (boot 177's ran at +46 s and got 2225 lines), and the
+box was power cycled at +63 s, so that boot is unrecoverable. Per rule 14 the
+zero is **not** a result: 2u4's prediction is **still open**. The repeat needs
+no code and no new arg — only the capture taken later in the boot.
+**Check `wc -l display-log.txt` against a known-present control in the same
+capture before reading anything into it** (rule 26's shape, applied to a log
+window). And `-rbgpuagdccaps`'s gamma answer carries a **substituted** channel
+count (2sc): rule 17 — no reading from it is a hardware fact.
 
 The paragraph below is kept for its disassembly, which stands; its conclusion
 does not. (2sw/2sx superseded by 2sy, 2sy superseded by 2u0.)
