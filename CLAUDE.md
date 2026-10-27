@@ -213,15 +213,27 @@ and the ONLY setter of that name in `AMDRadeonX6000` is inside
 panic** - which kills 2sy's inference from "no boot panicked" to "it never
 executes", and makes **2sw/2sx open again** rather than moot (2sx's
 `CFG_USE_DPT` default of 1 now *explains* 2pp instead of being irrelevant).
-2sv then measured the property **absent** (`ioreg -l | grep -c` = 0, instrument
-controlled). So the display-pipe road **worked here and has since regressed**,
-and 2s3's two gates were once satisfied. **Prime suspect: our framebuffer
-takeover suppressed the publish** - the same defect class as 2t8/2t9, which
-would be the third in one session - but that is a SUSPICION, not a
-measurement. **The A/B that settles it needs no new code and no risky boot**:
-`rbgpu-arm=1 rbgpu-fb=1` vs `rbgpu-arm=1` alone, and in each
-`ioreg -l | grep -c IOAccelDisplayPipeCapabilities`. 2u0 tabulates all four
-outcomes. **Run this before any more AGDC/IOPresentment work.**
+**THE A/B IS RUN, AND ARM A HAS EVERYTHING (2u1/2u2).** Both arms publish the
+property with both keys `Yes`:
+
+| | gate 1 (vendor mask) | the two capability flags |
+|---|---|---|
+| `IONDRVFramebuffer` | FAILS - mask `0x01` (2ql) | PASSES (2u1) |
+| **`RBAMDFramebuffer`** | **PASSES** - mask `0x04` (2t7) | **PASSES** (2u2) |
+
+So **2u0's prime suspect is WITHDRAWN** - the framebuffer takeover does NOT
+suppress the publish - and the framebuffer kext is a clear net gain: it buys
+gate 1 and costs nothing. 2s3's two checks are satisfied in the armed
+configuration. **Unreconciled, not dismissed**: 2sv's controlled zero for the
+same property on 2026-10-26 23:42, with an unarmed accelerator excluded (boot
+171 reads `armed=1` seven minutes later). Anything built on "the capabilities
+are missing" must be re-checked against 2u2. Also unexplained:
+`IOAccelDisplayPipeUserClient2` counts 2 with `IONDRVFramebuffer` and 1 with
+ours.
+
+**So the frontier is the EMPTY AGDC ASSOCIATION MAP (2r5), and everything
+downstream of it is now known present rather than hoped for.** Behind it, still
+unread, is 2se's plane count via the slot-`0x8d0` blob (2sv §5).
 
 The paragraph below is kept for its disassembly, which stands; its conclusion
 does not. (2sw/2sx superseded by 2sy, 2sy superseded by 2u0.)
