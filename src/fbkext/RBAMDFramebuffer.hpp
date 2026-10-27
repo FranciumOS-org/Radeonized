@@ -112,6 +112,11 @@ private:
      * enable transition and the delivery observable (rule 14). */
     uint64_t vblFires;
     uint32_t vblEnables;
+    /* 2t0: crash breadcrumbs. Rule 10 - a boot that dies leaves NVRAM only,
+     * and rule 31's registry properties vanish with the machine. */
+    IORegistryEntry *nvram;
+    bool crumbOn;
+    uint32_t crumbStage;
 
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection
@@ -119,6 +124,7 @@ private:
     bool ownsPanel(void);
 
     static void vblFired(thread_call_param_t self, thread_call_param_t);
+    void crumb(uint32_t stage);
     void deliverVBL(void);
     void armVBL(void);
     bool anyVBLEnabled(void);
