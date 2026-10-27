@@ -37739,3 +37739,84 @@ the work and not the initialisation that decides what the branch sees. The
 practice in CLAUDE.md is "say what would have to be true for the reading to
 mean anything" — for a conditional skip, that includes **the value the fallback
 path uses**, which here was three instructions above the code I quoted.
+
+## 2sy — Apple's display-pipe path is architecturally closed here, which confirms 2sj's route
+
+The question "why were the capabilities never published" has a simpler answer
+than either 2sw or 2sx proposed, and **this project had already written it
+down**.
+
+`populateAccelConfig` reads `[r14 + 0x368]`, `safeMetaCast`s it, and then does
+`mov rcx, [rax]` at `0xbe3c5a1` **with no NULL check**. The cast target is
+`ATIController` (`AMDSupport`, the only `*Controller*` `gMetaClass` in it). And
+the journal already records, at line 34452: *"`ATIController::getPropertiesForUserClient`
+(irrelevant; **never instantiates here**)"*.
+
+`RembrandtGPUPeer.cpp:577` states the mechanism in the project's own words:
+
+> This GPU is `0x16811002` and matches none of them, so the controller never
+> matches, no `AtiFbStub` is published, `AMDFramebuffer` … has no provider, and
+> DCN is never programmed.
+
+So there is **no `ATIController` instance**, `accel->0x368` is never populated,
+and a call to `populateAccelConfig` would **panic** at `0xbe3c5a1`. No boot
+panicked there. Therefore:
+
+**`populateAccelConfig` is never called at all.** The capabilities are not
+"withheld by a gate" — the function that would publish them does not run. Both
+2sw (gate A) and 2sx (gate B) were reasoning about branches inside a function
+that never executes.
+
+### Why this cannot be fixed by making the gate pass
+
+The only route to an `ATIController` is `-rbgpufbmatch`, which spoofs
+`device-id` to `0x73A0` so Apple's controller matches (`RembrandtGPUPeer.cpp`,
+2li). That arg is **must-stay-out**: it *kills the accelerator*, because this
+whole plugin works by making Apple **accept** `0x1681`. So Apple's display-pipe
+path requires Apple's controller and DAL, and acquiring them costs the
+rendering half. It is closed, not merely gated.
+
+**This is 2sj's conclusion arriving from the opposite direction**, and it is now
+an argument from this machine rather than from nullarc: *the IOPresentment path
+is optional and a working driver skips it.* 2s2–2sx's eliminations stay true
+and stay irrelevant. The framebuffer + accelerator pairing measured in 2st/2su
+is the right track, and the lag has to be solved **without** Apple's transaction
+machinery.
+
+### Which makes the fix small, local, and already written
+
+Our VBL only ran while a handler was *enabled* (2su), and the enable is driven
+by `enableTransactionInterrupt` → `enableVBLInterrupt` off a transaction queue
+that can never fill here (2s5, 2s9). So the handler is registered and never
+enabled, no `'vbl '` is delivered, nothing paces presentation, and WindowServer
+waits at 0.0 % CPU — the exact state 2sv measured.
+
+`RBAMDFramebufferVBL.cpp:134` now registers **enabled**:
+
+```c
+interrupts[i].enabled = true;
+```
+
+with a pipe registrant still free to disable its own slot (as
+`displayModeDidChange` does) without stopping the framebuffer's clock. Per-slot
+telemetry (`RBFBVBL0Fires`…`RBFBVBL3Fires`, `RBFBVBLRegistered`,
+`RBFBVBLRunning`, `RBFBVBLEnabledCount`) is published, not logged, per rule 31,
+and the hosttest covers it (*"registration starts clock; per-handler disable,
+re-arm, cancellation and telemetry"*). Build **770AE129**.
+
+**Provenance and one unverified claim**: that change is the third-party work
+described in 2sv addendum 2, not mine; I reached the same conclusion
+independently from 2sv's 0.0 % measurement before reading it. Its comment cites
+*"`IOFramebuffer::open` registers `handleVBL` at `0x14fc5ef5` and never performs
+an initial enable … measured in boot 171"*. **I have not verified either the
+address or that boot**, and no capture in this repo is labelled boot 171. The
+change is sound on the reasoning above regardless, but that specific
+measurement should not be cited as this project's until it is re-taken.
+
+### What the next armed boot decides
+
+`RBFBVBLFires` non-zero and growing would mean the clock finally runs, and the
+desktop's feel is then the direct read on whether a paced `'vbl '` is what
+WindowServer was waiting for. `RBFBVBLFires` absent or zero with
+`RBFBVBLRegistered` non-zero would mean registration happened and the
+thread_call still is not firing — a different defect, in `armVBL`.
