@@ -40277,3 +40277,77 @@ above print a nonsense "-> 0x7ff8000007c8" and "-> 0x7ff80000000a". The **raw**
 column is the value for those. `ptr_decode` cannot know which slots are
 pointers — that is what the chain walk is for — so read raw unless the slot is
 one you already believe is a pointer.
+
+## 2v3: the field is named — `MaximumSize`, and the whole gamma entry is mapped key by key
+
+With `dataxref` fixed (2v2), the chain 2u7 could not follow opens in three
+steps and no boot.
+
+**Step 1 — who reads the key.** `ripall` on the `GammaArray` `__cfstring`
+(`0x7ff84166ef80`) finds **exactly one** site: `0x7ff812e8fb62`, a `lea` inside
+`IOPresentment::__gammaFromDictionary(__CFDictionary const*,
+sGammaSegmentDictionary**, unsigned long long*)` at **`0x7ff812e8fb40`**
+(`build/re/IOPresentment-funcs.txt`). Its neighbours are
+`__linearizationFromDictionary`, `__cscFromDictionary` and
+`__planesFromDictionary` — the same group names 2sf read from the key strings.
+
+**Step 2 — the array is the one CoreDisplay walks.** `__gammaFromDictionary`:
+
+```
+CFDictionaryGetValueIfPresent(dict, CFSTR("GammaArray"), &arr)   ; must be 1
+n = CFArrayGetCount(arr);  if (n <= 0) return 0                  ; SUCCESS, no array
+r14 = n * 0x38                                                   ; THE 0x38 STRIDE
+*out = malloc_type_malloc(r14, 0x100004028543706)                ; NULL -> return 0x20
+bzero(*out, r14);  *outCount = n
+for (i = n-1; i >= 0; i--) { e = CFArrayGetValueAtIndex(arr, i); ... }
+```
+
+`imulq $0x38` settles it: this is the array `GammaChannelTableEntryCountAndType`
+walks at `this->0x8 -> +0xb0 -> +0x90`. Worth recording for its own sake: **an
+absent or empty `GammaArray` returns SUCCESS with a zero count**, not an error —
+so nothing upstream complains, and the only symptom is the message 63 dumps
+later.
+
+**Step 3 — the per-entry field map.** Each element goes to
+`IOPresentment::__fieldsFromDictionary` (`0x7ff812e8f866`) with **ten**
+pointers into the entry, six in registers and four pushed. Resolving all eight
+of its `__cfstring` keys with the new tooling, and pairing each with the
+destination the call sets up:
+
+| CF key | type arg | entry offset |
+|---|---|---|
+| `Flags` | 4 | +0x00 |
+| `NonAtomicApplicationPeriod` | 0xc | +0x08 |
+| **`Type`** | 4 | **+0x10** — the format bitmask 2u7 measured |
+| `FixedFormat` | 4 | +0x18 |
+| `ConfigurationID` | 4 | +0x20 |
+| `MinimumValue` | 0xc | +0x28 |
+| `MaximumValue` | 0xc | +0x2c |
+| **`MaximumSize`** | 4 | **+0x30** — THE FIELD |
+
+(Stack args resolve as `[rbp+0x10] = +0x20`, `+0x18 = +0x28`, `+0x20 = +0x2c`,
+`+0x28 = +0x30`, from the push order `r13, r11, r10, rdi`.)
+
+**So the value whose zero produces `Attempting to get 3-channel gamma table
+capabilities from plane with no 3-channel gamma table support` is the
+dictionary key `MaximumSize`**, and `GammaChannelTableEntryCountAndType`
+picks the entry with the widest `Type` and returns its `MaximumSize`. That
+also explains the linearization warning: 2sf's key list for
+`LinearizationArray` is `Type`, `ConfigurationID`, `MinimumValue`,
+`MaximumValue`, `MaximumSize` — the same eight-key helper serves both groups,
+which is why both messages have the same shape and the same per-dump rate.
+
+**And it explains 2v1 without inventing anything.** Our AGDC entry's `+0x28`
+is not `MaximumSize`; by this map `+0x28` is `MinimumValue`. Writing Apple's
+`0x200` there could not have moved `MaximumSize`, so boot 181's null result is
+exactly what this predicts retrospectively — the first time in this sequence
+that a failed experiment is explained rather than merely recorded.
+
+**What is still unread, and it is the last hop:** which field of the AGDC
+0x711 reply becomes `MaximumSize` in the dictionary. The builder is
+`IOPresentmentCreateCapabilities` → `0x7ff812e95370` (2sf), and the way to
+find the exact site is now available: `ripall` on the `MaximumSize`
+`__cfstring` (`0x7ff84166ef60`), which is running. Until that lands there is
+no basis for another gamma experiment — and when it does, the change is
+whichever offset of `AGDCFBGammaSegmentEntry_t` that site reads, which is a
+measurement rather than a substitute.
