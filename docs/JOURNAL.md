@@ -36523,3 +36523,33 @@ our own script, caught only because a control existed elsewhere in the same run.
 
 That `IOFramebuffer::start()` completes on this subclass. Nothing constructed an
 instance — that is exactly what stage 1 avoids, and exactly what stage 2 is for.
+
+### 2sn addendum — two claims in the kext were false in the beside configuration, fixed before stage 2 was offered
+
+Reviewing stage 2 before proposing it found that `isConsoleDevice()` returned
+**true unconditionally** and `getConnectionCount()` returned **1
+unconditionally**. Both are correct for the instance that displaced
+`IONDRVFramebuffer`. Beside it, both are **false statements about hardware we
+are not driving**:
+
+- a second framebuffer claiming the console invites `IOFramebuffer` to hand the
+  kernel console to an instance that is not driving the panel — on the driver
+  that *is* the screen, that is a black screen with no SSH window;
+- claiming a live connection beside the real framebuffer conjures a second
+  1920x1080 display for WindowServer.
+
+Neither is a configuration flag, and neither needed one. Which configuration an
+instance is in **is readable from the instance**: only one driver wins a given
+(provider, `IOMatchCategory`) pair, so an instance whose own `IOMatchCategory`
+is `IOFramebuffer` took that category from IONDRVSupport's personality and
+therefore owns the panel and the console. `ownsPanel()` reads exactly that, and
+both answers now follow from it; an instance with no category property at all
+answers "no", because the safe direction for an unknown is the one that touches
+nothing. `start()` logs which configuration it came up in, so a capture says so
+rather than leaving it to be inferred.
+
+This is rule 17's shape — do not state something about the hardware that is not
+so — caught by asking what stage 2 would actually assert rather than by running
+it. Re-verified after the change: the vtable is still **2824 bytes**,
+`ownsPanel` is **not** in it (0 hits, it is non-virtual), and the UUID moved
+97E170CD → A62398A7.

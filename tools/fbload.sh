@@ -19,10 +19,20 @@
 # any other way: whether IOFramebuffer::start() completes on a non-Apple
 # subclass here, whether the service appears in the registry, and - via
 # `make useiop` - whether the class name really earns CoreDisplay's AMD vendor
-# bit (0x04). Note that the gate will still read SHUT in stage 2 and that is
-# EXPECTED, not a failure: `present` is the OR over all framebuffers, so with
-# .Display_boot still there the mask is 0x05 and (0x1e & 0x05) != 0x05. Stage 2
-# proves the bit, not the verdict.
+# bit (0x04).
+#
+# The kext knows which configuration it is in - it reads its own
+# IOMatchCategory - and in the beside one it reports isConsoleDevice() FALSE and
+# getConnectionCount() ZERO. Both answers are the truthful ones there, and both
+# matter: claiming the console beside the real framebuffer invites IOFramebuffer
+# to hand it the kernel console, and claiming a connection conjures a phantom
+# 1920x1080 display for WindowServer. So stage 2 exercises start() without
+# offering to drive anything, and `kmutil unload` detaches it again.
+#
+# Note that the gate will still read SHUT in stage 2 and that is EXPECTED, not a
+# failure: `present` is the OR over all framebuffers, so with .Display_boot
+# still there the mask is 0x05 and (0x1e & 0x05) != 0x05. Stage 2 proves the
+# bit, not the verdict.
 #
 # Neither stage is the real test. Displacing IONDRVFramebuffer needs the kext in
 # the auxiliary collection at boot, which is an install and therefore the user's

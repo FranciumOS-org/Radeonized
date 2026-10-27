@@ -106,6 +106,37 @@ bool armedOnce(void)
 
 } /* namespace */
 
+/* Did we DISPLACE the boot framebuffer, or are we attached beside it?
+ *
+ * This is not a configuration flag, it is a fact about this instance, and it is
+ * readable: only one driver wins a given (provider, IOMatchCategory) pair, so an
+ * instance whose own IOMatchCategory is `IOFramebuffer` took that category from
+ * IONDRVSupport's personality and therefore owns the panel and the console. Any
+ * other category means IONDRVFramebuffer is still there and still the console.
+ *
+ * Two answers depend on it, and both were wrong before this existed:
+ *
+ *   isConsoleDevice()   - claiming the console while IONDRVFramebuffer holds it
+ *                         invites IOFramebuffer to hand the kernel console to an
+ *                         instance that is not driving it. On a framebuffer that
+ *                         is the screen, that is a black screen with no SSH.
+ *   getConnectionCount()- claiming a live connection beside the real framebuffer
+ *                         conjures a second 1920x1080 display for WindowServer.
+ *
+ * In the beside configuration the truthful answers are "no" and "none", and the
+ * whole point of that configuration is to exercise IOFramebuffer::start() while
+ * the real framebuffer keeps the display. Answering otherwise would be claiming
+ * hardware we are not driving - the shape of error rule 17 is about. */
+bool RBAMDFramebuffer::ownsPanel(void)
+{
+    if (auto cat = OSDynamicCast(OSString, getProperty(gIOMatchCategoryKey))) {
+        return cat->isEqualTo("IOFramebuffer");
+    }
+    /* No category property at all: assume we do NOT own the panel. The safe
+     * direction for an unknown is the one that touches nothing. */
+    return false;
+}
+
 IOService *RBAMDFramebuffer::probe(IOService *provider, SInt32 *score)
 {
     if (!IOFramebuffer::probe(provider, score)) {
@@ -165,7 +196,10 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * 4096 MB is what the plugin publishes from the real carve-out size. */
     setProperty("VRAM,totalMB", 4096ULL, 32);
     setProperty("model", "AMD Radeon 680M");
-    LOG("started");
+    LOG("started; %s", ownsPanel()
+        ? "OWNS THE PANEL (displaced IONDRVFramebuffer): console yes, 1 connection"
+        : "attached BESIDE the boot framebuffer: console no, 0 connections - "
+          "this configuration measures start(), it does not drive the display");
     return true;
 }
 
@@ -314,13 +348,19 @@ IOReturn RBAMDFramebuffer::enableController(void)
 
 bool RBAMDFramebuffer::isConsoleDevice(void)
 {
-    /* We own the GOP framebuffer the kernel console is already drawing into. */
-    return true;
+    /* True only when we displaced the boot framebuffer; then we own the GOP
+     * framebuffer the kernel console is already drawing into. Attached beside
+     * it, IONDRVFramebuffer is the console and saying otherwise could take the
+     * screen. */
+    return ownsPanel();
 }
 
 IOItemCount RBAMDFramebuffer::getConnectionCount(void)
 {
-    return 1;
+    /* One connection - the internal panel - but only when we are the driver
+     * for it. Beside the real framebuffer we report none, so no second display
+     * is created for a panel we are not driving. */
+    return ownsPanel() ? 1 : 0;
 }
 
 IOReturn RBAMDFramebuffer::getAttributeForConnection(IOIndex connectIndex,
