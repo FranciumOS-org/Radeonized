@@ -57,6 +57,7 @@ all: kext tools
 HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
+hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
 	@mkdir -p $(OUT)
 	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
@@ -64,8 +65,15 @@ hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_sm
 	@$(OUT)/agdc_lookup_test
 	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -DRBGPU_OTG_HOSTTEST -Itools/hosttest tools/hosttest/otg_kernel_test.cpp src/plugin/rbgpu_agdc_otg.cpp -o $(OUT)/otg_kernel_test
 	@$(OUT)/otg_kernel_test
+	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -DRBGPU_FB_VBL_HOSTTEST -Itools/hosttest tools/hosttest/fb_vbl_test.cpp src/fbkext/RBAMDFramebufferVBL.cpp -o $(OUT)/fb_vbl_test
+	@$(OUT)/fb_vbl_test
 
 tools: $(OUT)/rbdump
+
+.PHONY: fbvbl
+fbvbl: $(OUT)/fbvbl
+$(OUT)/fbvbl: tools/fbvbl.c | $(OUT)
+	$(CC) -O2 -Wall -Wextra -Werror $< -o $@ -framework IOKit -framework CoreFoundation
 
 # iosurftex (2mo/2mp): backs the textures Apple's driver lays out wrongly with
 # IOSurfaces, in the client process. Not part of `all` - it is a userspace
@@ -307,7 +315,7 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 # check_imports.py's 0-from-SystemKernelExtensions rule does NOT apply here -
 # this kext is REQUIRED to resolve against the system collection.
 FBKEXT_SRC    := $(PROJ_ROOT)/src/fbkext
-FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/kmod_info.o
+FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/kmod_info.o
 FBKEXT_BUNDLE := $(OUT)/RBAMDFramebuffer.kext
 FBKEXT_BIN    := $(FBKEXT_BUNDLE)/Contents/MacOS/RBAMDFramebuffer
 
@@ -321,7 +329,7 @@ $(BUILD_DIR)/fbkext/%.o: $(FBKEXT_SRC)/%.c
 	@echo "  CC   fbkext/$*.c"
 	@$(CC) $(KEXT_CFLAGS) -c $< -o $@
 
-fbkext: $(FBKEXT_OBJS) $(FBKEXT_SRC)/Info.plist
+fbkext: hosttest $(FBKEXT_OBJS) $(FBKEXT_SRC)/Info.plist
 	@rm -rf $(FBKEXT_BUNDLE)
 	@mkdir -p $(dir $(FBKEXT_BIN))
 	@cp $(FBKEXT_SRC)/Info.plist $(FBKEXT_BUNDLE)/Contents/Info.plist

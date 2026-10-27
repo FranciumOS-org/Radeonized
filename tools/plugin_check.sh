@@ -51,7 +51,7 @@ case " $args " in *" -rbgpuoff "*) off=1; echo "  -rbgpuoff is set: the plugin s
 
 echo
 echo "--- nvram breadcrumbs (the only record a wedged boot leaves)"
-for v in rbgpu-boot rbgpu-prog rbgpu-sdma rbgpu-1b rbgpu-prog2 rbgpu-gate rbgpu-ea rbgpu-ctxw rbgpu-gvmw rbgpu-vmid rbgpu-ptw rbgpu-ptfix rbgpu-aper rbgpu-pdc rbgpu-walk rbgpu-rst rbgpu-me rbgpu-rd2 rbgpu-cpfw rbgpu-pwr rbgpu-rlcx rbgpu-wtest rbgpu-bl rbgpu-ume rbgpu-ald rbgpu-rstop rbgpu-mehold rbgpu-hyp rbgpu-blbuf rbgpu-grbm rbgpu-mew rbgpu-mew2 rbgpu-cgcg rbgpu-ib rbgpu-cph rbgpu-pde rbgpu-pdw rbgpu-pdv rbgpu-adj rbgpu-disp rbgpu-addr rbgpu-surf rbgpu-res rbgpu-si rbgpu-hwi rbgpu-mode rbgpu-ring rbgpu-vm rbgpu-fault rbgpu-pm4 rbgpu-fence rbgpu-diag rbgpu-diag-prev rbgpu-arm rbgpu-iop rbgpu-mcreg rbgpu-agdc; do
+for v in rbgpu-boot rbgpu-prog rbgpu-sdma rbgpu-1b rbgpu-prog2 rbgpu-gate rbgpu-ea rbgpu-ctxw rbgpu-gvmw rbgpu-vmid rbgpu-ptw rbgpu-ptfix rbgpu-aper rbgpu-pdc rbgpu-walk rbgpu-rst rbgpu-me rbgpu-rd2 rbgpu-cpfw rbgpu-pwr rbgpu-rlcx rbgpu-wtest rbgpu-bl rbgpu-ume rbgpu-ald rbgpu-rstop rbgpu-mehold rbgpu-hyp rbgpu-blbuf rbgpu-grbm rbgpu-mew rbgpu-mew2 rbgpu-cgcg rbgpu-ib rbgpu-cph rbgpu-pde rbgpu-pdw rbgpu-pdv rbgpu-adj rbgpu-disp rbgpu-addr rbgpu-surf rbgpu-res rbgpu-si rbgpu-hwi rbgpu-mode rbgpu-ring rbgpu-vm rbgpu-fault rbgpu-pm4 rbgpu-fence rbgpu-diag rbgpu-diag-prev rbgpu-arm rbgpu-iop rbgpu-mcreg rbgpu-agdc rbgpu-fb; do
     val="$(nvram "$v" 2>/dev/null | cut -f2-)"
     echo "  $v = ${val:-<unset>}"
 done > "$out/nvram.txt" 2>&1
@@ -68,6 +68,9 @@ echo "  breadcrumbs synced to disk"
 # only 512 bytes and boot 164 lost these keys to truncation. A depth-one walk
 # reads our peer's properties without traversing the accelerator's children.
 rb_ioreg 10 "$out/peer.plist" -w0 -p IOService -c RembrandtGPUPeer -r -d1 -l -a
+# 2sv: the separate framebuffer publishes per-handler VBL counters. Its
+# IOLog path is not reliable (2su); capture its own properties explicitly.
+rb_ioreg 10 "$out/framebuffer.plist" -w0 -p IOService -c IOFramebuffer -r -d1 -l -a
 sync
 
 echo
@@ -80,6 +83,13 @@ if [ -n "$built" ] && grep -q com.rembrandtgpu.plugin "$out/kexts.txt"; then
     grep com.rembrandtgpu.plugin "$out/kexts.txt" | grep -q "$built" \
         && echo "  loaded plugin = build/out (UUID $built)" \
         || echo "  NOTE: loaded plugin is NOT the current build/out (UUID $built): reinstall with sudo tools/efi.sh install"
+fi
+
+fbuilt="$(dwarfdump --uuid "$root/build/out/RBAMDFramebuffer.kext/Contents/MacOS/RBAMDFramebuffer" 2>/dev/null | awk '{print $2}')"
+if [ -n "$fbuilt" ] && grep -q com.rembrandtgpu.fb "$out/kexts.txt"; then
+    grep com.rembrandtgpu.fb "$out/kexts.txt" | grep -q "$fbuilt" \
+        && echo "  loaded framebuffer = build/out (UUID $fbuilt)" \
+        || echo "  NOTE: loaded framebuffer differs from build/out (UUID $fbuilt); the framebuffer requires its own AuxKC update"
 fi
 
 echo

@@ -37344,3 +37344,130 @@ the same instrument.
 
 This is the reason 2su's new counters are published as **registry properties**
 and not only logged: `ioreg` does not depend on the path that just failed.
+
+## 2sv — our IOLog is dropped wholesale, and the two IOPresentment gates are a registry property
+
+### 1. The IOLog control, and what it forces
+
+```
+=== our kext, kernel sender, whole boot ===     (empty)
+=== control: do ANY kernel lines reach the log this boot? ===
+   32554
+=== our properties (sidesteps IOLog entirely) ===
+  |   "VRAM,totalMB" = 4096
+  |   "IOFBMemorySize" = 8294400
+  |   "model" = "AMD Radeon 680M"
+```
+
+**32 554 kernel-sender lines reach the unified log in this boot, and not one of
+them is ours.** `VRAM,totalMB` and `model` are both set by
+`RBAMDFramebuffer::start()`, so `start()` demonstrably ran — and every `IOLog`
+it issued is gone. So our kext's `IOLog` is dropped wholesale on this path,
+while the rest of the kernel's logging is not. **Why is NOT established**
+(auxKC codeless/codeful handling, log filtering, and the
+`error: tried to insert an invalid codeful kernel extension in the restricted
+lookup table` line are all candidates and none is measured).
+
+Consequence, and it is a rule-16 consequence: **`IOLog` is not an instrument on
+this kext.** Everything 2su added must be read through `ioreg`, which is how it
+was written. Any future fbkext diagnostic must publish, not log.
+
+### 2. `IOAccelDisplayPipe::copyCapabilities` is a registry property read
+
+Three instructions, a tail call:
+
+```
+14e5d7ae: mov  rdi, [rdi + 0x88]
+14e5d7b5: mov  rax, [rdi]
+14e5d7b8: mov  rax, [rax + 0x2e8]
+14e5d7bf: lea  rsi, [rip + 0x16b41]   ; 0x14e74307
+14e5d7c7: jmp  rax
+```
+
+and 0x14e74307 in `__cstring` is **`"IOAccelDisplayPipeCapabilities"`**. So the
+pipe's capabilities are fetched by name from the registry object at
+`this->0x88`, through vtable slot 0x2e8 — a two-argument (this, name) accessor,
+the `copyProperty`/`getProperty` shape. **Not** computed, and **not** AGDC,
+which is what 2sg concluded had to be true.
+
+### 3. The publisher, and what it publishes
+
+The name has exactly one reference in `AMDRadeonX6000` (and one in
+`IOAcceleratorFamily2`; none in `AMDRadeonX6000Framebuffer`, `…HWServices`,
+`…MTLDriver`, `AMDRadeonX6800HWLibs`). It is inside
+**`AMDRadeonX6000_AMDGraphicsAccelerator::populateAccelConfig(IOAccelConfig *)`**
+at `0xbe3c6f1`, and it is a **setter**:
+
+```
+be3c6b1: mov edi, 2 ; call <alloc>          ; a 2-entry collection -> r12
+be3c6c1: lea rsi, 0xbf3cbfb ; call [rax+0x1d0]   ; r12->setObject(key, val)
+be3c6d9: lea rsi, 0xbf3cc10 ; call [rax+0x1d0]   ; r12->setObject(key, val)
+be3c6f1: lea rsi, 0xbf3cc26 ; mov rdx, r12 ; call [rax+0x268]  ; r13->setProperty(name, r12)
+```
+
+The two keys resolve to:
+
+| va | key |
+|---|---|
+| 0xbf3cbfb | **`DisplayPipeSupported`** |
+| 0xbf3cc10 | **`TransactionsSupported`** |
+| 0xbf3cc26 | `IOAccelDisplayPipeCapabilities` |
+| 0xbf3cc45 | `headless` (used just below, slot 0x2b8) |
+
+**These are exactly 2s3's two gates** — the pair 2s3 measured must both be
+non-zero or `IOPresentmentCreateForRegistryID` fails. 2s3 established the
+requirement; this establishes *where they come from*: a two-entry dictionary
+published by the accelerator's own `populateAccelConfig` as the
+`IOAccelDisplayPipeCapabilities` property. That is consistent with this boot's
+`iop_ready=1`, and it is the first time the producer of those flags has been
+named.
+
+### 4. WITHDRAWN: "the `PlaneCount` key string is in `IOAcceleratorFamily2`"
+
+A raw search for `PlaneCount` returned one hit at 0x532ba2, and I began to read
+the plane count as a serialised key off it. Resolving the string's **start**
+(rule 26 — find the preceding NUL) gives `__ZNK9IOSurface13getPlaneCountEv`:
+the hit is a **substring of a mangled symbol name**, an `IOSurface` accessor
+with nothing to do with capabilities. `PlaneArray`, `GammaArray`, `CSCArray`,
+`NumberOfPlanes`, `MaxPlanes`, `PlaneState`, `DisplayPipeSupported` and
+`TransactionsSupported` are all **absent as literals** from
+`IOAcceleratorFamily2` (the last two live in `AMDRadeonX6000`, above).
+
+Fifth recorded instance of rule 26, and the rule's own remedy is what caught
+it. Note the asymmetry worth keeping: the two keys in §3 were found by
+resolving a *reference*, not by trusting a substring.
+
+### 5. Where the plane count actually has to be, not yet read
+
+`IOAccelDisplayPipeUserClient2::getCapabilitiesData(unsigned char *,
+unsigned long long *)` takes a **buffer and a length**, so this channel is a
+binary blob, which is why no key literals exist for it. Its body:
+
+```
+14e63fac: mov  rdi, [rbx + 0xe8]       ; NULL -> error exit
+14e63fbf: call [rax + 0x8d0]           ; vendor method -> capabilities object
+14e63fc5: test rax, rax ; je error
+...
+14e6400a: call [rax + 0x158]           ; length
+14e64018: cmp  [r14], rcx ; jb error   ; caller buffer too small
+14e64026: call [rax + 0x118]           ; bytes
+```
+
+with raw error constants `0xe00002c7` and `0xe00002db` (**not** named here —
+rule 13: a return code is not a result until the code that sets it is read).
+
+So the blob is produced by **slot 0x8d0 on the object at userclient+0xe8**, a
+vendor method, serialised through length/bytes accessors. **That is the next
+read**, and `AMDRadeonX6000` is where to read it, since 2s4 already measured
+that it implements the whole vendor display-pipe half.
+
+**Still not established**: that the plane count is in that blob at all. It is
+the only remaining non-AGDC channel found so far, which is an argument from
+elimination, not a measurement.
+
+### 6. The cheap live test this suggests
+
+`IOAccelDisplayPipeCapabilities` is a **registry property**, so whether it
+exists in this boot is one `ioreg` away and needs no reboot. Absent means
+`populateAccelConfig` never published it; present means the two gates passed
+and the frontier is the blob in §5.

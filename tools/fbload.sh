@@ -27,7 +27,7 @@
 # matter: claiming the console beside the real framebuffer invites IOFramebuffer
 # to hand it the kernel console, and claiming a connection conjures a phantom
 # 1920x1080 display for WindowServer. So stage 2 exercises start() without
-# offering to drive anything, and `kmutil unload` detaches it again.
+# offering to drive anything. Reboot to remove it; unloading panics (2sq).
 #
 # Note that the gate will still read SHUT in stage 2 and that is EXPECTED, not a
 # failure: `present` is the OR over all framebuffers, so with .Display_boot
@@ -39,8 +39,8 @@
 # own step.
 #
 # Stage 2 and stage 3 need the one-shot: the kext's probe() refuses unless
-# `rbgpu-fb` is set in NVRAM, and consumes it durably before it touches
-# anything, so a load or boot that goes wrong costs exactly one power cycle.
+# -rbgpuownfb AND `rbgpu-fb` are present. The NVRAM removal is not proven
+# durable (2sq/2sr); remove the boot-arg from the config between experiments.
 # Stage 1 does NOT need it, and does not consume it, because no personality is
 # sent and probe() is therefore never called.
 set -eu
@@ -59,8 +59,8 @@ stage=/private/var/tmp/RBAMDFramebuffer.stage
 [ -d "$src" ] || { echo "no kext at $src; run: make fbkext" >&2; exit 1; }
 
 if kmutil showloaded 2>/dev/null | grep -q com.rembrandtgpu.fb; then
-    echo "com.rembrandtgpu.fb is already loaded; unload it first:" >&2
-    echo "  sudo kmutil unload -b com.rembrandtgpu.fb" >&2
+    echo "com.rembrandtgpu.fb is already loaded. Reboot before another load." >&2
+    echo "Do NOT use kmutil unload: unloading this framebuffer panics (2sq)." >&2
     exit 1
 fi
 
@@ -69,9 +69,6 @@ fi
 # Requiring it there would be theatre. Stage 2 does match, so it does need it -
 # and refusing BEFORE the load keeps a forgotten `nvram` from reading as "the
 # kext is broken", because absence is not a result.
-if [ "$mode" = beside ] && ! nvram rbgpu-fb >/dev/null 2>&1; then
-    :
-fi
 # A WHOLE-TOKEN test. 2ss: `grep -q -- '-rbgpufb'` reported the arg present
 # because -rbgpufbvbl, -rbgpufbvram and -rbgpufbaccel all contain it, and that
 # was a SAFETY check reading as armed. The kernel is stricter than the grep was
