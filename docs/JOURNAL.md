@@ -36195,3 +36195,173 @@ The display half is **not closed**. The thing 2ql named as the single lever —
 load path the repo already uses, and a working driver on comparable silicon
 ships exactly that shape. 2s2–2sk's eliminations keep their value as
 eliminations; the route around them is now open rather than hypothetical.
+
+## 2sm — THE FRAMEBUFFER KEXT IS BUILT, AND ITS VTABLE IS VERIFIED SLOT BY SLOT AGAINST APPLE'S
+
+Static, no boot. `src/fbkext/` + `make fbkext` + `tools/fbload.sh`.
+
+### The vtable risk, retired before a line was written
+
+2qs's objection to building our own framebuffer was "a hand-built vtable one
+slot wrong is a panic on the path that owns the display, vtable layout is not
+stable across OS updates". That objection is about *synthesising* a vtable
+(route C). A **compiled subclass** does not synthesise one — the compiler emits
+it from the header — so the risk reduces to a single checkable question: does
+`third_party/MacKernelSDK/Headers/IOKit/graphics/IOFramebuffer.h` describe the
+same layout as the IOGraphicsFamily this machine runs?
+
+Measured both ways, with the project's own instrument.
+
+**Apple's table**, `dumptable.py build/re/IOGraphicsFamily __ZTV13IOFramebuffer`
+— 2824 bytes, and the declared order in the header matches the named entries
+exactly, from `open` at dump +0x988 through:
+
+```
++0x988 open          +0x990 close          +0x998 isConsoleDevice
++0x9a0 setupForCurrentConfig  +0x9a8 serializeInfo  +0x9b0 setNumber
++0x9b8 getApertureRange (pure)  +0x9c0 getVRAMRange  +0x9c8 enableController
+... +0xa08 setDisplayMode ... +0xa60 getConnectionCount ...
++0xae0 registerForInterruptType  +0xae8 unregisterInterrupt
++0xaf0 setInterruptState  +0xaf8 getNotificationSemaphore   <- last slot
+```
+
+The header's last virtual is `getNotificationSemaphore`, and the table ends
+there. Also a free confirmation of rule 7 and of docs/RULES.md's recorded call
+offsets: `getVRAMRange` dumps at 0x9c0 and is documented as call offset 0x9b0;
+`registerForInterruptType` dumps at 0xae0, documented 0xad0. Both hold.
+
+**Our table**, dumped out of the built kext: `__ZTV16RBAMDFramebuffer` is
+**2824 bytes — byte-for-byte the same size**. No slot added, none removed, so
+every override replaced an existing entry rather than extending the class. Then
+each override checked individually against `nm`:
+
+```
++0x998 isConsoleDevice   +0x9b8 getApertureRange   +0x9c0 getVRAMRange
++0x9c8 enableController  +0x9d0 getPixelFormats    +0x9d8 getDisplayModeCount
++0x9e0 getDisplayModes   +0x9e8 getInformationForDisplayMode
++0x9f0 getPixelFormatsForDisplayMode  +0x9f8 getPixelInformation
++0xa00 getCurrentDisplayMode  +0xa08 setDisplayMode
++0xa18 setStartupDisplayMode  +0xa20 getStartupDisplayMode
++0xa38 setAttribute      +0xa40 getAttribute      +0xa60 getConnectionCount
++0xa68 setAttributeForConnection  +0xa70 getAttributeForConnection
++0xae0 registerForInterruptType   +0xae8 unregisterInterrupt
++0xaf0 setInterruptState
+
+22 of 22 slots carry the expected override
+```
+
+With controls: the three slots we deliberately did **not** override —
+`setApertureEnable` (0xa10), `setCLUTWithEntries` (0xa28),
+`getTimingInfoForDisplayMode` (0xa48) — read 0 in the unlinked image and appear
+in `nm -u` as undefined `__ZN13IOFramebuffer…` imports, which is what an
+inherited slot looks like before the kext is linked into a collection. A pass
+with no control would have been the same hollow result the first `useiop`
+printed (rule 14 against our own tool).
+
+### The build
+
+`make fbkext` → `build/out/RBAMDFramebuffer.kext`, `-Wall -Werror`, clean, and
+the target **fails the build** unless `kmutil libraries` both accepts the bundle
+and shows an `IOFramebuffer` symbol resolving out of `SystemKernelExtensions.kc`
+— so a broken dependency can never be discovered on hardware. It reports:
+
+```
+LINK 83 symbols from the system collection, 283 from boot
+```
+
+`make plugin` re-checked afterwards: still **0** from the system collection and
+**0** `IOGraphicsFamily` in its Info.plist, so the 2oz trap guard is intact.
+The two kexts have **opposite** requirements and the Makefile now enforces each
+one separately, which is the thing that was conflated for five milestones.
+
+### What it does, and what it deliberately does not
+
+Every number is read off this machine, not chosen. `.Display_boot`'s live
+`IOFBConfig` carries one mode, ID 100, `DM = 80070000 38040000 3fd58f00
+00000000`: width 0x780 = 1920, height 0x438 = 1080, refresh `0x008fd53f` in
+16.16 = **143.83 Hz**, maxDepthIndex 0. `IOFBMemorySize` reads **8294400** =
+1920·1080·4 exactly, so rows are unpadded and `bytesPerRow` is **7680**. The
+aperture is a sub-range of BAR0 at offset 0 (2pr), BAR0 read from
+`assigned-addresses` as `0x8_8000_0000`, 256 MB. The 16.16 refresh has an
+independent control: the BAR5 OTG sampler measured 143.908 Hz by latching both
+endpoints on an `OTG0_FRAME_COUNT` edge (2rm/2rn).
+
+It **writes nothing to the display engine** — `enableController` returns success
+because OTG0 is already running (`OTG0_CONTROL 0x00011201`, DMCUB 4.0.15.47),
+and `setDisplayMode` *refuses* anything but the firmware's mode rather than
+silently accepting it. That is 2sj's shape, and it is also the only honest one:
+we have no modeset.
+
+The `'vbl '` interrupt is delivered from a `thread_call` at the measured period,
+because 2s4 measured that the pipe needs a `'vbl '` callback at the panel's
+rate, not a particular source for it, and the comparable driver does the same
+(2sj). Phase is not locked to scanout; the rate is right. Stated, not hidden.
+
+`registerForInterruptType` **declines every type except `'vbl '`** instead of
+returning success, because a registration that reports success without
+installing anything is exactly what rule 20 forbids.
+
+### The class name is the point
+
+`RBAMDFramebuffer`. It contains `AMD` and none of `Intel` / `NVDA` /
+`AppleParavirt`, so `__GetSystemGPUVendors_block_invoke` scores it **0x04**
+instead of the 0x01 that `.Display_boot` earns and that no `supported` mask can
+contain (2ql).
+
+The personality therefore **displaces** `IONDRVFramebuffer` rather than joining
+it — same `IOProviderClass` (`IOPCIDevice`), same `IONameMatch` (`display`),
+same `IOMatchCategory` (`IOFramebuffer`), `IOProbeScore` 30000 against its
+20000, plus `IOPCIMatch 0x16811002` so it can never claim a display on another
+machine. Displacing is **required, not tidier**: `present` is the OR over all
+`IOFramebuffer` services, so an AMD-named framebuffer added *beside*
+`.Display_boot` gives `present = 0x05` and `(0x1e & 0x05) != 0x05` keeps the
+gate shut.
+
+### Arming, and why a bad boot costs one power cycle
+
+`probe()` refuses unless NVRAM `rbgpu-fb` is set, and consumes it with
+`IONVRAM-FORCESYNCNOW-PROPERTY` **before** returning — the same two details the
+accelerator arm paid for: the bounded retry for the `/options` race (2in) and
+the durable flush, because a removal that never reached flash cost the boot loop
+of 2026-10-12 (2dg). Unarmed, the kext is inert and `IONDRVFramebuffer` matches
+as usual. This matters more here than for the accelerator, because this one owns
+the panel: a failure has no SSH window if it also takes the console.
+
+### `tools/fbload.sh`, staged by risk
+
+- **stage 1, `sudo tools/fbload.sh`** — `kmutil load --load-style start-only`.
+  No personality reaches the catalog, so the class registers and nothing
+  matches; the display is untouched. It answers the one thing 2sl left open:
+  the symbols **resolve**, but is the **load accepted**? `kmutil libraries`
+  does not check authorization, so that is a separate claim and gets its own
+  measurement.
+- **stage 2, `sudo tools/fbload.sh beside`** — stages the `IOMatchCategory` to a
+  private one so the service attaches *alongside* the boot framebuffer. Three
+  readings available nowhere else: does `IOFramebuffer::start()` complete on a
+  non-Apple subclass here, does the service appear in the registry, and does
+  `make useiop` report **0x04** for our class name. **The verdict staying 0 in
+  stage 2 is expected and is not a failure** — that is the 0x05 arithmetic
+  above. Stage 2 proves the bit, not the gate. Writing that down before the run
+  is the point; it is the prediction, and a stage-2 "failure" that was predicted
+  cannot later be read as one.
+- **stage 3** — the auxiliary collection at boot, with the displacing
+  personality. That is an install, so it is the user's step, and it is the only
+  stage that can actually open the gate.
+
+The script refuses to load at all when `rbgpu-fb` is unset, so a forgotten
+`nvram` cannot be mistaken for a broken kext.
+
+### Still not established, and it is the honest list
+
+- **That the load is accepted** — stage 1 exists to measure exactly this.
+- **Whether `IOFramebuffer::start()` completes** on our subclass on this
+  machine. Stage 2.
+- **Whether Apple's `AMDRadeonX6000` will composite for a non-Apple
+  `IOFramebuffer`.** Unchanged since 2sj; nullarc's compositor is their own, and
+  this is the one question no static read here can settle.
+- **What happens past the gate.** 2qp already opened `UseIOPresentment` by
+  patching the classifier's call site and met *"System set to use IOP but no
+  display pipes are present"*, and the display-pipe arc from there (2qq→2sk)
+  ends in the wedge. Opening the gate with a real framebuffer is a different
+  input to the same machinery, not a different machinery. Nothing measured so
+  far says the wedge will not come back, and nothing says it will.
