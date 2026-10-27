@@ -11,7 +11,15 @@
 # Level 2 is what reads OTG0's timing and measures the refresh rate.
 #
 # Only a person runs this (see CLAUDE.md). Nothing is installed: the staged
-# copy lives under /private/var/tmp and the kext is gone after a reboot.
+# copy lives under /private/var/tmp and the LOAD does not survive a reboot.
+#
+# 2sp: the FILE does survive, and the distinction matters. /private/var/tmp is
+# not cleared at boot, and `kmutil load` also enters the kext into the
+# auxiliary collection - measured: after a reboot the probe was still listed in
+# the AuxKC with its staged file present, and was NOT loaded. So a staged kext
+# is inert after a reboot but not absent, and a stale staged copy of a kext
+# that also exists in /Library/Extensions is worth removing before a boot where
+# the installed one is meant to win.
 set -eu
 
 # Validate the level BEFORE the root check, so a typo does not cost a
