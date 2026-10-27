@@ -35616,3 +35616,82 @@ that sits between the AGDC replies and every capability CoreDisplay later
 reads, and both remaining unknowns — the plane count and why
 `System Gamma - Unknown` survived a successful type 2 reply — are inside it.
 Static, no boot.
+
+## 2sg — the plane count cannot come from AGDC at all, and 2rg had already read the function I went to read
+
+No boot. Two results, one of them about method.
+
+### The method failure first
+
+I read `__GatherAGDCDisplayPipelineCapabilities` and `__GatherAGDCLogicalDeviceCapabilities`
+from scratch and reported the bit-0 gate at `0x7ff812e979b7` as a finding.
+**2rg had already read all of it**, by address, and `rb_agdc.h`'s own comment
+on `+0xa4` cites that function by name. Worse, 2rg had already settled the
+question I was about to pursue. One `grep GatherAGDCLinkCapabilities
+docs/JOURNAL.md` at the start would have cost nothing and saved the whole
+detour. That is the project's own recurring error — **read the evidence
+already in hand before designing the next experiment** — and it is now
+recorded for the third time (2kx/2la/2lc, 2s5, here).
+
+### What is actually established, combining old and new
+
+`__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`, 0x111a bytes)
+issues **attribute 0x711 exactly sixteen times and nothing else**. Its
+immediates are the sixteen qwords `0x800000001 … 0x800008000` — stored at
+struct+0x04, so type at +0x04 and **count 8 pre-loaded at +0x08**, which is
+`rb_agdc.h:178`'s claim confirmed from the caller's side — plus `0x196c`, the
+struct size, and `0x2006`, its failure code. Four distinct callees, 16/16/32/32
+calls. Sixteen queries is exactly what boots 169 and 170 measured
+(`agdc_extcap_calls = 16`).
+
+`__GatherAGDCLogicalDeviceCapabilities` (`0x7ff812e9781a`) issues **0x921
+once** and copies the whole 0xb0 reply into the capability block — `reply+0x2c`
+lands at `0x19b28`, the field its caller divides by hTotal × vTotal, which
+independently re-confirms 2rd/2rg's `IODetailedTimingInformationV2`-at-+0x04
+embedding from a third direction. It returns 0x808 with no device, 0x80E on a
+failed or empty 0x921.
+
+`__GatherAGDCLinkCapabilities` (`0x7ff812e98af6`) is reached only when
+link-config `+0x08` bit 0 is set, which we deliberately clear. **2rg already
+measured that this is a dead end**: it issues 0x925 and 0x988 and all it
+ultimately writes is `this->0x19c78`, which has *four writers and ZERO readers
+in the entire image*. Setting bit 0 "would cost two answerable queries and
+change nothing".
+
+### The deduction
+
+Those three functions are the **entire** AGDC input to
+`IOPresentmentCreateCapabilities`. The plane count is in none of them:
+
+- not the sixteen 0x711 queries — boot 170 answered all five answerable types
+  and the plane group and the pipe state did not move (2sd);
+- not the 0x921 logical-device reply — we answer it correctly as of boot 169
+  (`agdc_link_result 0`) and the copy is wholesale, so there is no field of it
+  we are withholding;
+- not the link gather — unreachable by our own choice, and measured inert.
+
+So **the plane count does not come from AGDC**, and `PlaneArray` having no
+corresponding capability type (2sf) is not an accident of naming — there is no
+AGDC query that carries it. `_IOPresentmentSetPlaneCount` has no caller inside
+IOPresentment, so CoreDisplay sets it, and CoreDisplay's
+`IOPCapabilities::PlaneCount` must be fed from something that is not the AGDC
+gather.
+
+### Where that points
+
+IOPresentment links against `IOAccelDisplayPipe*` symbols — a DYLD stub for
+`IOAccelDisplayPipeTransactionSetPlaneEmpty` sits in its stub table. That is
+the IOAccelerator user library over `IOAccelDisplayPipe` in
+IOAcceleratorFamily2, the same class whose `signalVBLInterrupt` we have been
+feeding since 2s5, and whose vendor half `AMDRadeonX6000` already implements
+in full (2s4, `AMDRadeonX6000_AMDAccelDisplayPipe`). A plane count sourced
+there rather than from AGDC is consistent with every measurement in this
+sequence, and it would explain why four milestones of AGDC work moved nothing.
+
+It is a direction, not a result. The next read is the `IOAccelDisplayPipe`
+plane interface — kernel side, `IOAcceleratorFamily2`, where `nm` works and
+`dumptable.py` decodes the vtables — **not** more of the dyld cache. And 2rg's
+closing line in its own entry already said where this was going: "Still
+absent: the bind/transaction/scanout backend, **all plane state**".
+
+Nothing was built. No boot was spent.
