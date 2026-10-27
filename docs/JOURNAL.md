@@ -40106,3 +40106,117 @@ Build **`A90BD0F8`** (was `AA4E5167`). `kmutil libraries -p` resolves 0 from
 `SystemKernelExtensions.kc`. The experiment is unchanged and still single
 variable; it needs the install, the one-shots, and a capture that now cannot
 be stopped by the step before the one that matters.
+
+## 2v1: boot 181 — 2u9's prediction FAILS. The element count is not the field.
+
+Boot 181 is the first boot in four that measures everything it was supposed to.
+Every precondition verified, in the capture:
+
+| check | reading |
+|---|---|
+| `rbgpu-boot` | **181**, new nonce |
+| loaded plugin UUID | **`A90BD0F8`** = `build/out` (rule 15 satisfied) |
+| `agdc_gamma_entries` | **2** |
+| `agdc_gamma_elems2` | **0x200** |
+| display log / WindowServer control | **2478 / 2943** lines |
+| capture completeness | all 21 files; `kexts-all.txt` present, nothing timed out |
+
+So 2v0's three fixes all worked: the bounded `kmutil`, the display log moved
+first, and the NVRAM provenance keys. The two-entry gamma reply **went out**,
+with Apple's own `0x200`, and was **accepted** (`agdc_extcap_answered 15`,
+`agdc_failed_calls 34`, `agdc_last_ret 0`, unchanged from 179/180).
+
+**And it changed nothing.** Normalised per `DisplayPipeState` dump, because
+the dump count differs between boots and a raw grep count would have looked
+like a 10 % rise:
+
+| | boot 179 (1 entry, count 0) | **boot 181 (2 entries, count 0x200)** |
+|---|---|---|
+| dumps | 57 | 63 |
+| `no 3-channel gamma table support` | 406 = **7.12/dump** | 442 = **7.01/dump** |
+| `no 3-channel linearization table support` | 58 = **1.01/dump** | 64 = **1.01/dump** |
+| `Fallback GPU Display Pipe transaction submission failed` | 1/dump | 1/dump |
+| `Clean` | 0 | **0** |
+| `System Gamma` | `Unknown` | **`Unknown`** |
+
+Seven gamma complaints and one linearization complaint per dump, in both.
+The other seven operations resolve in both. `Metal compositor activated` twice
+in both, `CompositorSW` zero in both.
+
+**2u9's prediction is therefore refuted, and with it the reading it rested on.**
+`+0x28` of the AGDC gamma entry — Apple's `0x200` literal, the entry's element
+count — is **not** what CoreDisplay's `entry+0x30` is fed from, or the
+translation drops it. 2u9 flagged exactly this as unestablished ("that
+CoreDisplay's `entry+0x30` *is* this `+0x28` after translation... is still
+unread"), and that caveat is what the boot spent itself on. The honest
+accounting: the experiment was worth running because it needed no invented
+value, and it has eliminated a candidate rather than merely failed.
+
+**What survives as fact:**
+
+- The AGDC type-2 reply **is** consumed — 2u6's error-text change stands, and
+  it is the only reason gamma is on this table at all.
+- Our format word (`+0x10 = 0x10`, bit 4) **is** accepted by
+  `GammaChannelTableEntryCountAndType` — 2u7's read of the six accepted bits.
+- The refusal is `entry+0x30 == 0` on a **0x38-stride CoreDisplay array**, and
+  neither of the two values we have put behind our own `+0x28` (0, then 0x200)
+  reaches it.
+- `UseIOPGamma` is not involved (2u8).
+
+**So the translation step is now the only lead, and it is the thing to read
+before any further boot.** It is `IOPresentmentCapabilitiesStructureFromDictionary`
+(`0x7ff812e8df1c`) plus whatever builds the CFDictionary from the AGDC blob
+(`IOPresentmentCreateCapabilities` → `0x7ff812e95370`). 2u9 recorded why the
+easy paths fail: the gamma keys (`GammaArray` `0x7ff812ea0ed3`, `FixedFormat`,
+`NumberOfElements`, …) are reached through CFSTR constants, so `ripall` on the
+string finds nothing and a qword search for the `__cfstring` is blind to the
+cache's chained pointers. **That is a tooling gap and it is the next piece of
+work**: `tools/re/dsc.py` needs to decode chained pointers in the cache's DATA
+regions, the way `machoread.py` already does for kexts, so a `__cfstring` can
+be located and xrefed. Until then there is no basis for another gamma
+experiment.
+
+### And the default goes back to Apple's smallest branch
+
+`RB_AGDC_GAMMA_SEGMENTS` returns to **1**. The reason is 2sc's own rule, which
+2u9 bent: every substituted input in this header uses "the value Apple's own
+code produces on its SMALLEST branch". The segment count is itself a
+substitute (`vt[0x118](0x17) + 1`), and setting it to 2 claims a two-segment
+gamma stage *and* introduces one more substituted field — entry 2's
+`0x40` device-flags term. Measured to buy nothing, it is now just an extra
+claim about hardware we cannot program, which is exactly what rule 17 exists
+to prevent. `rb_agdc_gamma_entry2()` and the three constants **stay**, fully
+documented and hosttested, so retrying this is one character.
+
+### 2v1 addendum: the hosttest I added in 2u9 could not have failed
+
+Reverting the segment count meant rewriting the gamma case so it checks the
+builder directly rather than through the dispatcher's default. Doing that
+exposed a defect in the 2u9 test itself.
+
+The direct-builder checks were written as
+`A(le(g2+0x28,4)==RB_AGDC_GAMMA_ELEMENTS)` — **the field compared against the
+macro that wrote it**. Setting `RB_AGDC_GAMMA_ELEMENTS` to 0 and re-running
+left the suite **passing**. The 2u9 negative check only appeared to work
+because it ran against the dispatcher-level assertion, which at that moment
+still said the literal `0x200`; once the default moved, nothing was testing
+the value at all.
+
+Now the direct-builder checks assert **Apple's literals** — `0x33000000`,
+`0x43000000`, `0x200` — so the constants are tested against what was read out
+of `getFbCapabilityForGamma`, not against themselves. Verified both ways:
+with `RB_AGDC_GAMMA_ELEMENTS` temporarily 0 the suite reports
+`FAIL AGDC:286: le(g2+0x28,4)==0x200u` / `hosttest: 1 FAILED`; restored, all
+passed.
+
+That is rule 26 — a search is an instrument, and so is an assertion — in a
+form the project had not recorded: **a test that compares output against the
+constant that produced it is not a test.** Worth stating because the whole of
+`rb_agdc.h` is Apple's measured constants, and the same shape would be easy to
+write for any of them.
+
+Build **`FF4B8693`** (segments back to 1, entry 2's builder kept, tests
+corrected). `kmutil libraries -p` resolves 0 from `SystemKernelExtensions.kc`.
+**No boot is pending**: the next piece of work is chained-pointer decoding in
+`tools/re/dsc.py` so a `__cfstring` can be xrefed, which is what 2v1's
+translation-step read needs.

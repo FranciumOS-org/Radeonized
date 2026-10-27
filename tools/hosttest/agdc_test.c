@@ -236,8 +236,14 @@ int agdc_tests(void) {
         memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
         rb_agdc_put32(x+1+4,RB_AGDC_CAP_GAMMA);
         A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,0,0)==0);
-        A(le(q+RB_AGDC_EXTCAP_COUNT_OFF,4)==2);
-        {
+        A(le(q+RB_AGDC_EXTCAP_COUNT_OFF,4)==RB_AGDC_GAMMA_SEGMENTS);
+        /* 2v1: the segment count went back to Apple's smallest branch, so
+         * entry 2 is no longer written by default. The checks below are the
+         * ones that matter the moment it is turned back on, and they must not
+         * silently pass on a stale buffer - so they are gated on the constant
+         * rather than deleted, and entry 1's own fields are checked either
+         * way. The builder is still compiled and still correct. */
+        if (RB_AGDC_GAMMA_SEGMENTS >= 2u) {
             const uint8_t *g2=q+RB_AGDC_EXTCAP_ENTRY_OFF+RB_AGDC_EXTCAP_ENTRY_SZ;
             A(le(g2+0x00,4)==0x00088005);
             A(le(g2+0x04,4)==1);
@@ -245,17 +251,40 @@ int agdc_tests(void) {
             A(le(g2+0x18,4)==0x40);
             A(le(g2+0x20,4)==RB_AGDC_GAMMA_MIN_F);
             A(le(g2+0x24,4)==RB_AGDC_GAMMA_MAX_F);
-            A(le(g2+0x28,4)==0x200);      /* the element count, non-zero */
-            /* And entry 1 must still be entry 1: its format word is 0x10 and
-             * its own count is the substitute, unchanged by this addition. */
-            A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x10,4)==0x10);
-            A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==RB_AGDC_GAMMA_CHANNELS);
+            A(le(g2+0x28,4)==0x200u);     /* the element count, non-zero */
         }
-        /* Two entries means the capacity must really hold two: a reply that
-         * publishes a count of 2 into a buffer that fits one is worse than a
-         * refusal. The size check is exact, so only the real size is accepted. */
+        /* Entry 1 must still be entry 1 either way: format word 0x10 and its
+         * own substituted count, unaffected by whether entry 2 is written. */
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x10,4)==0x10);
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==RB_AGDC_GAMMA_CHANNELS);
+        /* Whatever the count, it must be a count of entries that FIT: a reply
+         * that publishes 2 into a buffer holding one is worse than a refusal.
+         * rb_agdc_extcap's size check is exact, so a short size is refused
+         * regardless, and this stays a live check on the guard either way. */
         A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_ENTRY_OFF
                               +RB_AGDC_EXTCAP_ENTRY_SZ,0,0)<0);
+        /* 2v1: and the builder itself, called directly, so turning the segment
+         * count back up cannot find it rotted. This is the only check of
+         * entry 2 that survives the default being 1. */
+        {
+            uint8_t g2[RB_AGDC_EXTCAP_ENTRY_SZ];
+            memset(g2,0,sizeof g2);
+            A(rb_agdc_gamma_entry2(g2)==0);
+            A(le(g2+0x00,4)==0x00088005);
+            A(le(g2+0x04,4)==1);
+            A(le(g2+0x10,4)==1);
+            A(le(g2+0x18,4)==0x40);
+            /* LITERALS, not the constants. Comparing a field against the
+             * macro that produced it is a tautology: zeroing
+             * RB_AGDC_GAMMA_ELEMENTS left this test PASSING, which is rule
+             * 26's lesson about instruments applied to an assertion. These
+             * are Apple's own values from 0xbfece6f onward - powf(2,-25),
+             * powf(2,7) and 0x200 - so the test now fails if the constants
+             * drift from what was read out of the binary. [2v1] */
+            A(le(g2+0x20,4)==0x33000000u);   /* powf(2, -25) */
+            A(le(g2+0x24,4)==0x43000000u);   /* powf(2, 7) */
+            A(le(g2+0x28,4)==0x200u);        /* the element count */
+        }
     }
     /* No real timing: nothing truthful to say about a scaler, so refuse. */
     memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
