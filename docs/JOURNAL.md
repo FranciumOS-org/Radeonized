@@ -40351,3 +40351,73 @@ find the exact site is now available: `ripall` on the `MaximumSize`
 no basis for another gamma experiment — and when it does, the change is
 whichever offset of `AGDCFBGammaSegmentEntry_t` that site reads, which is a
 measurement rather than a substitute.
+
+## 2v4: the keys ARE in IOPresentment — the "they exist nowhere" reading was the search, again
+
+Chasing 2v3's last hop produced a false negative worth recording in full,
+because it took four separate searches to see it and every one of them had a
+passing control.
+
+**What the searches said.** `ripall` on the `MaximumSize` `__cfstring`
+(`0x7ff84166ef60`) returns **exactly one** site — `0x7ff812e8f9e8`, the
+*reader* inside `__fieldsFromDictionary`. Nothing writes it. Then, with a
+byte search (`mmap` + `find`, not `strings -a`, per rule 26) and
+`IOAccelDisplayPipeCapabilities` as a known-present control:
+
+| searched | `GammaArray` / `MaximumSize` / `PlaneArray` / `CSCArray` / `LinearizationArray` | control |
+|---|---|---|
+| `AMDRadeonX6000` | 0 | **1** |
+| `AMDRadeonX6000Framebuffer`, `AMDSupport`, `AGDC`, `IOGraphicsFamily` | 0 | 0 |
+| `IOAcceleratorFamily2` | 0 | **1** |
+| `BootKernelExtensions.kc` | 0 | 0 |
+| `SystemKernelExtensions.kc` | 0 | **7** |
+| `/System/Library/Extensions`, CoreDisplay.framework, IOPresentment.framework (grep -rl) | nothing | — |
+| the live `ioreg -l` | 0 | — |
+
+So the keys are in **no** kext, **no** kernel collection, **no** file and **no**
+registry property, and only one `GammaArray` string exists in the whole dyld
+cache. The tempting conclusion — which I was one commit from writing — is that
+`IOPresentmentCapabilitiesStructureFromDictionary` is dead code and the real
+array is built elsewhere. Two further facts seemed to support it: that function
+has **no caller inside IOPresentment** (its address appears once in a 28 111-line
+dump of the whole library, as its own label), and all four `imulq $0x38` sites
+in IOPresentment are in the `*FromDictionary` family with **none** in the
+gather region.
+
+**It is wrong, and the function names say where to look.** Immediately after
+`IOPresentmentCapabilities::__gatherCapabilities()` (`0x7ff812e95370`) sit
+`IOPresentmentCreatePipelineDictionary()` (`0x7ff812e95474`),
+`IOPresentmentCreateEndPointDictionary(__CFDictionary*)`,
+`IOPresentmentSetFlagsForDictionary`, `IOPresentmentCreateInlineBufferDictionary`
+and `AGDCPixelFormatTypeToIOPresentment`. IOPresentment builds the dictionary
+itself, from the gathered AGDC capabilities, exactly as 2sf said.
+
+`IOPresentmentCreatePipelineDictionary` shows why every search missed it:
+
+```
+7ff812e954cb:  leaq 0x2e7d8026(%rip), %rax   ## 0x7ff84166d4f8
+7ff812e954d2:  movq (%rax), %rsi             ; <- the key, loaded INDIRECTLY
+7ff812e954d8:  callq ...                     ; CFDictionarySetValue(dict, key, num)
+```
+
+The key is **not** `lea`'d; a data slot holds a pointer to the `__cfstring` and
+the code loads it. `ripall` matches RIP-relative *code* references to the
+target, so it can never see this — it finds the slot's *user*, not the
+cfstring's. **That is a third shape of rule 26, and the sharpest one yet: a
+cfstring reached through a pointer slot is invisible to `ripall`, so "one
+reference" meant "one direct reference".** The byte searches were answering a
+different question entirely (where is the string stored), and their controls
+passed because that question was well-posed.
+
+**The right instrument is the one 2v2 just fixed.** `dataxref` on
+`0x7ff84166ef60` finds the data slots that *hold* the cfstring; `ripall` on
+each slot then finds the code that loads it. That is running, and 2v3's field
+map (`MaximumSize` → entry+0x30) stands unchanged — what 2v4 corrects is only
+the premature conclusion that nothing writes it.
+
+**Lesson, stated for the rules list:** `ripall` answers "what code mentions
+this address", not "what code uses this value". For a CFSTR, a vtable entry or
+any constant that can be reached through a pointer slot, `dataxref` has to run
+first and `ripall` second, on what it finds. 2v2 fixed `dataxref`'s file scope
+on the same day this needed it, which is the only reason the hop is one
+command away instead of another dead end.
