@@ -36677,3 +36677,63 @@ predicate, and the pool path it then takes reaches `CD_IOSurfaceCreate`, which
 touches no `IOPresentment*` API; the `DisplayPipe` is a separate object with a
 separate constructor. 2qh's chain says a non-NULL IOSurface alone is what keeps
 `CompositorMetal`. Not established, and stated as the hypothesis stage 3 tests.
+
+### 2so addendum — stage 3 splits in two, and the reason is rule 21
+
+Stage 3 was going to be one step: install to `/Library/Extensions`, arm, reboot.
+That bundles two different risks into one boot, and one of them has never been
+tested.
+
+**The untested one is the fallback.** Unarmed, `probe()` returns `nullptr`, and
+IOKit is then supposed to match `IONDRVFramebuffer` instead — same provider,
+same `IOMatchCategory`, lower score. That is standard IOKit behaviour and it is
+what makes a permanent install safe by design, because every future boot
+attempts the match. But it has **not** been exercised: in stage 2 our `probe()`
+returned `this`, and the category was private, so nothing ever competed. Rule 21
+is exactly this lesson — *test a recovery procedure in the situation it exists
+for* — and the recovery procedure here is "the installed kext declines and the
+boot framebuffer takes over".
+
+So:
+
+- **stage 3a — install and reboot UNARMED.** The kext is in
+  `/Library/Extensions`, the AuxKC carries it, the displacing personality is
+  live, and `rbgpu-fb` is **not** set. Expected: `probe()` declines,
+  `IONDRVFramebuffer` matches, the desktop is exactly as it is today, and
+  `ioreg` shows our kext loaded with **no** `RBAMDFramebuffer` service. That
+  proves the install is inert by default and that the fallback works — which is
+  the property every later boot depends on.
+- **stage 3b — `sudo nvram rbgpu-fb=1` and reboot.** The real test, and the
+  first time our code owns the screen.
+
+If 3a does **not** come up normally, stage 3b is off the table until it does,
+and the install comes straight back out. Splitting costs one extra boot and buys
+the only safety property that matters for a permanent install.
+
+**The failure modes of 3b, ranked, with what covers each:**
+
+1. *Black screen, kernel alive.* The most likely bad outcome, and the mildest:
+   **SSH still works**, so the capture and the uninstall are both available.
+   This is strictly better than the AGDC wedge, which takes WindowServer with
+   it.
+2. *Panic during our `start()`.* The one-shot is consumed and flushed with
+   `IONVRAM-FORCESYNCNOW-PROPERTY` **before** anything touches hardware — now
+   not just implemented but *demonstrated*, since stage 2 consumed it — so the
+   next boot is unarmed and 3a's behaviour is what comes up. One power cycle.
+3. *Panic so early the flush does not land.* `armedOnce()` returns before any
+   mapping, any PCI access and any `IOFramebuffer::start()`, so there is no
+   code path between the flush and the risk. Not impossible, covered by 4.
+4. *Unbootable.* `kmutil trigger-panic-medic --volume-root /Volumes/MACOS`
+   from Recovery — SPACE at the OpenCore picker, system volume `MACOS`, both
+   read off the live machine in 2sm rather than recalled.
+
+**A known gap in the kext, stated before the boot rather than after it:** we
+publish no gamma. `.Display_boot` carries `IOFBGammaCount 256`,
+`IOFBGammaWidth 8`, `IOFBGammaHeaderSize 12`; we inherit
+`IOFramebuffer::setGammaTable` and publish none of those keys. CoreDisplay's
+wedge logs showed `System Gamma - Unknown` as the one operation that never
+resolved (2sa), so gamma is plausibly load-bearing somewhere downstream.
+Deliberately **not** implemented yet: adding unmeasured machinery before the
+first owning boot is how 2cy happened. If 3b comes up with wrong colours or a
+gamma complaint, that is the first thing to add, and it will then be a response
+to a measurement.
