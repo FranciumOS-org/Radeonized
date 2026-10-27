@@ -39301,3 +39301,89 @@ and may have cost the capabilities, and a working desktop needs both at once.
 Arm A needs `-rbgpuownfb` back in boot-args (it is currently out, so
 `rbgpu-fb=1` alone cannot arm the framebuffer - rule 9's "the feature needs the
 arg *and* the key" read in the other direction).
+
+## 2u2 — A/B arm A: the capabilities SURVIVE our framebuffer. 2u0's suspicion is WRONG, and the frontier moves
+
+Measured, no risk, in the arm-A boot. Configuration established first:
+
+```
+ioreg -rl -c IOFramebuffer:
+  +-o RBAMDFramebuffer  <class RBAMDFramebuffer, id 0x1000004c4, registered, matched, active>
+```
+
+So the framebuffer armed and owns the panel - the arm actually took, which is
+what makes a zero meaningful (and it was not zero):
+
+```
+ioreg -l | grep -c IOAccelDisplayPipeCapabilities   ->  1
+ioreg -l | grep -c IOAccelDisplayPipeUserClient2    ->  1
+"IOAccelDisplayPipeCapabilities" = {"DisplayPipeSupported"=Yes,"TransactionsSupported"=Yes}
+```
+
+**Both keys `Yes`, with `RBAMDFramebuffer` on the panel.** That is 2u0's second
+row: present in both arms.
+
+### 2u0's prime suspect is WITHDRAWN
+
+2u0 wrote: *"Prime suspect: the framebuffer takeover suppressed the
+capabilities publish … the same defect class as 2t8/2t9, which would be the
+third in one session."* **That is measured false.** The publish survives our
+framebuffer. The pattern-match to 2t8/2t9 was seductive precisely because two
+real instances of it had just been found, and it was wrong - which is worth
+recording as its own small lesson: **two confirmed instances of a defect class
+make the third feel measured when it is still only guessed.** 2u0 did label it
+a suspicion rather than a finding, and that label is the only reason this cost
+nothing.
+
+The complementary-failure table 2u1 proposed is therefore also wrong in its
+second row, and the corrected version is:
+
+| | gate 1 (`UseIOPresentment` vendor mask) | the two capability flags |
+|---|---|---|
+| **B** - `IONDRVFramebuffer` | FAILS - mask `0x01`, no "AMD" in the name (2ql) | **PASSES** (2u1) |
+| **A** - `RBAMDFramebuffer` | **PASSES** - mask `0x04` (2t7) | **PASSES** (here) |
+
+**Arm A has BOTH.** Nothing in this pair is missing any more, and the
+framebuffer kext is a clear net gain: it buys gate 1 and costs nothing here.
+
+### What is still unexplained, and is not being papered over
+
+2sv's addendum measured this same property **absent** on 2026-10-26 23:42,
+`ioreg -l | grep -c` = 0, with the instrument controlled (rule 26). The obvious
+candidate - an unarmed accelerator in that boot - is **excluded**:
+`logs/20261026-234946-plugin/nvram.txt` is boot 171, captured seven minutes
+later, and its live `rbgpu-diag` reads `armed=1`.
+
+So 2sv's zero and 2u2's one disagree with no mechanism named. Candidates, none
+measured: a different build (2sv predates `770AE129`, `4E119EEE` and
+`43447D39`); a timing race where `ioreg` ran before `populateAccelConfig`; or
+the `-rbgpuownfb`/one-shot combination differing in a way the capture does not
+record. **Rule 14 cuts both ways here** - 2sv's absence was a controlled
+measurement and is not dismissed, it is unreconciled, and anything built on
+"the capabilities are missing" must now be re-checked against 2u2 instead.
+
+One real difference between the arms, measured and unexplained:
+`IOAccelDisplayPipeUserClient2` counts **2** in arm B and **1** in arm A.
+
+### Where the frontier actually is now
+
+With both capability flags published and gate 1 passing, 2s3's two checks are
+satisfied in arm A. The chain's remaining break is the one 2t7 named and 2r5
+measured, and it is unchanged by any of tonight's work:
+
+```
+AGDC association map EMPTY -> IOServiceOpen(port 0) -> 0x10000003
+  -> IOPresentmentCreateForRegistryID NULL -> DisplayPipe ctor throws
+  -> zero pipes in the map -> gUseIOP LATCHED 0 -> legacy path -> CompositorSW
+```
+
+and behind it, still unread, 2se's plane count via the slot-`0x8d0` blob
+(2sv §5). The AGDC bridge is the thing that fills the association map, its
+trigger was broken (2t8) and its panic is fixed (2t9), and **it has still never
+been tested against the map's four conditions** - three of which are verified
+statically (class match by metaCast, the name test, selector 1's `out+0x28`
+= 2 in `{1,2}`), leaving only the type-2 `IOServiceOpen`.
+
+So the next experiment is unchanged from 2t7's, but its value is higher than it
+was: everything downstream of the AGDC map is now known to be in place rather
+than hoped to be.
