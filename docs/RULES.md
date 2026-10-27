@@ -286,7 +286,7 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
   reboot after being removed and read back absent (2sq), because
   `IODTNVRAM::removePropertyWithGUIDAndName` calls no sync at all. So between
   experiments take the boot-arg out with
-  `sudo tools/efi.sh bootarg remove -rbgpufb`, exactly as rule 9 says.
+  `sudo tools/efi.sh bootarg remove -rbgpuownfb`, exactly as rule 9 says.
 - **Never run `kmutil unload` on the framebuffer kext — it PANICS** (2sq).
   `IOFramebuffer::stop+0x48` reads `*(this->0x1c8)`, which is NULL on an
   instance that never completed configuration. To remove the kext, **reboot**.

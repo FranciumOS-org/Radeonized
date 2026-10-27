@@ -37049,3 +37049,75 @@ cannot arm, whatever NVRAM holds.
 
 Built, `-Wall -Werror` clean, UUID moved to AE8133E2. Not loaded anywhere; the
 kext is out of `/Library/Extensions` and the key deleted.
+
+## 2ss — the boot-arg check was a substring grep, and the kernel is stricter than our tooling
+
+Immediately after 2sr added the boot-arg requirement, a state check printed:
+
+```
+rbgpu-fb in NVRAM : not found          (good - the user disarmed it)
+kext in /L/E      : absent             (good)
+-rbgpuownfb arg   : PRESENT            (<-- WRONG. Nobody added it.)
+fb kext loaded    : 0
+```
+
+The check was `nvram boot-args | grep -q -- '-rbgpufb'`, and this machine's
+boot-args contain **`-rbgpufbvbl`, `-rbgpufbvram` and `-rbgpufbaccel`**, each of
+which contains `-rbgpufb` as a substring. `-rbgpufb` is in fact a prefix of six
+names in this project: `-rbgpufbaccel`, `-rbgpufbmatch`, `-rbgpufbvbl`,
+`-rbgpufbvram`, `-rbgpufbvramrange`, `-rbgpufbvramrangeall`.
+
+A false positive in a **safety** check, reading as armed. That is the worst
+place for one, and it was mine, written in the same milestone that moved the
+safety story onto that very check.
+
+### The kernel, read rather than feared
+
+`PE_parse_boot_argn` (`0xffffff8000b92970`) scans a token up to a separator and
+then:
+
+```
+0xb92a38   rbx = r8 - r13          ; rbx = LENGTH of the token in boot-args
+0xb92a4b   strncmp(token, name, rbx)
+0xb92a52   je   -> +0x100          ; first rbx bytes equal
+0xb92a77   strlen(name)
+0xb92a7c   cmpq %rax, %rbx         ; token length == strlen(name)?
+0xb92a7f   jne  -> reject          ; <-- EXACT LENGTH REQUIRED
+```
+
+**So `PE_parse_boot_argn` never prefix-matches.** A token `-rbgpufbvram` has
+length 12 against `strlen("-rbgpufb") == 8`, so it is rejected. Consequences,
+and the second is worth more than the first:
+
+1. The kext was **never** actually at risk of arming off `-rbgpufbvram`. The
+   hazard existed only in our shell tooling.
+2. **The project's existing prefix pairs are safe too** — `-rbgpufbvram`
+   against `-rbgpufbvramrange`, and the `-rbgpumtlk*` family. That was an open
+   worry the moment the collision was noticed, and it is now closed by
+   measurement rather than left as an assumption. Lilu's
+   `checkKernelArgument` wraps `lilu_get_boot_args` → `PE_parse_boot_argn`, so
+   the plugin inherits the same exact semantics.
+
+### Fixed two ways, because one was not enough
+
+- **The check is now whole-token**:
+  `nvram boot-args | tr ' \t' '\n\n' | grep -qx -- '-rbgpuownfb'`. Verified on
+  the live machine **with a control in the same run**, which is the only form
+  of this that means anything:
+
+  ```
+  new form: absent (correct)
+  old form: PRESENT   <- the false positive, reproduced
+  ```
+
+- **The arg is renamed `-rbgpufb` → `-rbgpuownfb`.** The kernel did not need
+  this; humans and greps do. A name that is a prefix of six others in the same
+  family is a trap for every future `grep` anyone writes, including the user's.
+  `-rbgpuownfb` shares no prefix relationship with any existing arg (`-rbgpuoff`
+  is the nearest, and neither is a prefix of the other), and it says what it
+  does: this is the arg that lets our framebuffer **own** the panel.
+
+Rebuilt clean. docs/RULES.md gains rule 30 for the boot-arg semantics and three
+more entries in rule 26's list of instruments that lied: `ioreg -c X -k Y` not
+filtering (2sn), a tool's exit code being its verdict (2so), and a direct tail
+`jmp` hiding a call (2sr).
