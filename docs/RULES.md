@@ -204,13 +204,21 @@ not compositing slowly, which is the opposite failure from every earlier boot.
 **no transaction has ever been queued** even now. Suspect: our VBL thread_call
 only runs while a handler is enabled, and 2s5 measured Apple registering the
 `'vbl '` handler and then disabling it until a transaction is queued.
-**Frontier**: the plane count. `IOAccelDisplayPipe::copyCapabilities` is
-`this->0x88->copyProperty("IOAccelDisplayPipeCapabilities")`, and
-`AMDRadeonX6000_AMDGraphicsAccelerator::populateAccelConfig` publishes that
-property as `DisplayPipeSupported` + `TransactionsSupported` (2s3's two gates,
-producer finally named). The plane count is not in it; the only remaining
-non-AGDC channel is `getCapabilitiesData`'s binary blob from slot 0x8d0 on
-userclient+0xe8, **not yet read**.
+**THE CHAIN IS CLOSED (2sw)**: `populateAccelConfig` publishes
+`IOAccelDisplayPipeCapabilities` (= `DisplayPipeSupported` +
+`TransactionsSupported`, 2s3's two gates) only if
+`getProperty("CFG_USE_DPT")` off **`accelerator + 0x368`** is true, and only
+onto a service whose `IOMatchCategory` is `"IOAccelerator"`.
+`CFG_USE_DPT = 1` ships **only** on `AmdRadeonController*` personalities in
+`AMDRadeonX6000Framebuffer.kext`, every one keyed to a discrete Navi id, and
+**`1681` appears zero times in that plist**. So nothing here carries the flag →
+no capabilities (`ioreg` count 0, controlled) → plane count 0
+("Plane out of range") → nothing stageable → no transaction → no
+`enableVBLInterrupt` → no `'vbl '` pacing → WindowServer idle at 0.0 %.
+Every link is measured. **The frontier is now that one property.** Unverified:
+gate B (the `IOAccelerator` match category), and the capabilities blob from
+slot 0x8d0 on userclient+0xe8. **Do not spoof the device id to reach it** —
+`-rbgpufbmatch` is a must-stay-out arg for exactly this reason.
 
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
