@@ -42,6 +42,16 @@ public:
     bool vblRunning=false;
     uint64_t vblFires=0;
     uint32_t vblEnables=0;
+    // 2t0: the host substitute counts NVRAM writes instead of performing
+    // them, which is what makes "bounded by construction" an assertion
+    // rather than a claim in a comment.
+    uint32_t crumbStage=0;
+    unsigned crumbWrites=0;
+    uint32_t lastCrumb=0;
+    void crumb(uint32_t stage){
+        if(stage>crumbStage) crumbStage=stage;
+        lastCrumb=crumbStage; crumbWrites++;
+    }
     std::map<std::string,uint64_t> properties;
     bool setProperty(const char *key,bool v) { properties[key]=v;return true; }
     bool setProperty(const char *key,uint64_t v,unsigned) { properties[key]=v;return true; }

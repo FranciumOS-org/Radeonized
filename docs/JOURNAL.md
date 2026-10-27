@@ -37940,3 +37940,89 @@ a hang look identical from here. What is known:
 **Not established**: that the VBL is what panicked. The arming state of that
 boot is unknown, no report exists, and "panicked after login" is also what a
 wedge plus a power button looks like.
+
+## 2t0 — crash breadcrumbs in the framebuffer kext, bounded by construction and asserted
+
+Boot 171 panicked after the lock screen and **wrote no panic report** (2sz), so
+the furthest point reached was unrecoverable. Rule 10 states the general case:
+a boot that dies leaves NVRAM only. Rule 31's registry properties are the right
+instrument for a *live* boot and vanish with the machine — exactly the boot
+worth reading. Build **4C11938D** closes that gap.
+
+### What it writes
+
+One NVRAM key, `rbgpu-fbcrumb`, holding `s=<stage> f=<fires> e=<enables> r=<running>`.
+Last-wins is correct *here* because what is wanted is the **furthest** stage and
+`crumbStage` is monotonic — a later call with a lower stage cannot walk it back
+(asserted). Rule 14's "a last-wins key cannot express a per-entry fact" still
+holds, which is why the per-slot VBL facts stay in the registry.
+
+| stage | meaning |
+|---|---|
+| 1 | `start()` entered, provider is an `IOPCIDevice` |
+| 2 | BAR0 aperture sub-range made |
+| 3 | `thread_call` allocated (or refused — see `RBFBVBLTimerAllocated`) |
+| 4 | about to enter `IOFramebuffer::start` |
+| 5 | …and the superclass refused |
+| 6 | `IOFramebuffer::start` accepted |
+| 7 | `start()` returning true |
+| 8 | `stop()` entered — a clean teardown, **not** a crash |
+| 10–13 | VBL reached 100 / 1 000 / 10 000 / 100 000 fires |
+
+Read it after a crash with `nvram rbgpu-fbcrumb`.
+
+### Bounded by construction, because every write is a flash commit
+
+- **Stage transitions only**, plus **four** VBL milestones at **exact
+  equality** so each lands once. Never per-fire: at the measured refresh that
+  would be ~144 flash commits a second, and rule 16 says the instrument is the
+  suspect.
+- **The first milestone is 100, not 1**, deliberately — ~0.7 s in, so no
+  synchronous commit lands inside display bring-up, where 2ft already found
+  such commits suspect.
+- `/options` is opened **once and retained**, because `crumb()` is also called
+  from the VBL `thread_call` and `fromPath` there would be a registry walk per
+  milestone. Failure to open is reported (`RBFBCrumbOn`) and is **not** fatal —
+  rule 14, and the kext must work with no instrument.
+- `stop()` sets `crumbOn = false` and releases `/options` **before**
+  `IOFramebuffer::stop`, the call that panicked in 2sq.
+- **`-rbgpufbnocrumb` disables the mechanism outright.**
+- `setProperty` is used, not `removeProperty`: 2sr measured that
+  `setPropertyWithGUIDAndName` is the only path reaching
+  `IODTNVRAM::syncInternal`, so this **does** sync — which is precisely why
+  `rbgpu-fb` keeps surviving its own removal.
+
+### The budget is ASSERTED, not claimed in a comment
+
+`fb_vbl_shim.hpp` gives the host a `crumb()` that **counts** writes instead of
+performing them, and `fb_vbl_test.cpp` drives 120 000 fires and asserts
+`crumbWrites == 4` and `lastCrumb == 13`, then calls `crumb(2)` and asserts the
+stage stays 13.
+
+**And the test was verified to fail when the code it guards is broken**, as
+`tools/hosttest`'s rule requires. Changing `vblFires == 100` to
+`(vblFires % 100) == 0`:
+
+```
+make exit = 2
+Assertion failed: (cr.crumbWrites==4), function main, file fb_vbl_test.cpp, line 88.
+```
+
+restored → `make exit = 0`, test passes. (First attempt at this check was
+itself wrong: a `grep` filter swallowed the verdict and printed `exit=0` from
+the grep rather than from `make` — rule 26, "a tool's exit code can be its
+verdict", for the second time in one session.)
+
+### User's own reading of boot 171, recorded as such
+
+The user prefers the half-armed configuration — framebuffer armed, accelerator
+not — to the previous `IONDRVFramebuffer` desktop, despite WindowServer at
+253.7 % CPU: *"ill rather stay in this exact combo my desktop is better"*. That
+is a **subjective report, not a measurement**, and it is recorded because it is
+the only comparison anyone has made between the two configurations from the
+user's seat. A plausible mechanism is our framebuffer reporting the panel's real
+143.83 Hz where `IONDRVFramebuffer` does not, but **nothing here measures
+that**, and the 253.7 % is a software compositor doing real work either way.
+
+Build **4C11938D** changes nothing about which configuration arms; it only
+makes the next crash legible.

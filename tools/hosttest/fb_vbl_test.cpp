@@ -76,5 +76,19 @@ int main() {
     RBAMDFramebuffer noTimer;
     assert(noTimer.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&extra)==0);
     assert(!noTimer.vblRunning && noTimer.properties.at("RBFBVBLRunning")==0);
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation and telemetry passed");
+    // 2t0: the breadcrumb budget. An NVRAM write is a flash commit, so the
+    // count must NOT scale with the fire count. Drive past every milestone
+    // and assert the writes stay at exactly the four defined ones.
+    {
+        RBAMDFramebuffer cr; FakeCall crTimer; cr.vblCall=&crTimer;
+        void *ref=nullptr;
+        assert(cr.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&ref)==0);
+        for(unsigned i=0;i<120000;i++) cr.deliverVBL();
+        assert(cr.vblFires==120000);
+        assert(cr.crumbWrites==4);          // 100, 1000, 10000, 100000 - no more
+        assert(cr.lastCrumb==13);           // and monotonic to the last one
+        // A lower stage must never walk the furthest point back.
+        cr.crumb(2); assert(cr.crumbStage==13);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry and a bounded 4-write crumb budget passed");
 }

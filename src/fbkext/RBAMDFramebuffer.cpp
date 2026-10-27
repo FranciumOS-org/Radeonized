@@ -191,6 +191,21 @@ bool RBAMDFramebuffer::start(IOService *provider)
     vblFires = 0;
     vblEnables = 0;
 
+    /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
+     * is also called from the VBL thread_call and fromPath there would be a
+     * registry walk per milestone. A failure is reported, not fatal - rule 14,
+     * and the kext must still work with no instrument. */
+    crumbStage = 0;
+    char nocrumb[16];
+    crumbOn = !PE_parse_boot_argn("-rbgpufbnocrumb", nocrumb, sizeof(nocrumb));
+    nvram = crumbOn ? IORegistryEntry::fromPath("/options", gIODTPlane) : nullptr;
+    setProperty("RBFBCrumbOn", crumbOn && nvram != nullptr);
+    if (crumbOn && !nvram) {
+        LOG("/options not found; crash breadcrumbs are OFF for this boot "
+            "(nvram rbgpu-fbcrumb will be stale - do not read it as this boot's)");
+    }
+    crumb(1);   /* start() entered, provider is an IOPCIDevice */
+
     /* The firmware already lit the panel and the GOP framebuffer is BAR0
      * offset 0 (2pr), so the aperture is a sub-range of BAR0 rather than
      * anything we program. getDeviceMemoryWithRegister returns a reference
@@ -208,6 +223,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     LOG("aperture: BAR0 phys %#llx + 0, %u bytes, %ux%u stride %u",
         bar0->getPhysicalSegment(0, nullptr, 0), kApertureBytes,
         kWidth, kHeight, kBytesPerRow);
+    crumb(2);   /* aperture sub-range made */
 
     vblCall = thread_call_allocate(vblFired, this);
     if (!vblCall) {
@@ -215,11 +231,15 @@ bool RBAMDFramebuffer::start(IOService *provider)
     }
     setProperty("RBFBVBLTimerAllocated", vblCall != nullptr);
     publishVBLState();  // zero is a reading; missing properties are not
+    crumb(3);   /* thread_call allocated (or refused, see the property) */
 
+    crumb(4);   /* about to enter IOFramebuffer::start - the superclass */
     if (!IOFramebuffer::start(provider)) {
         LOG("IOFramebuffer::start refused");
+        crumb(5);   /* ...and it refused */
         return false;
     }
+    crumb(6);   /* IOFramebuffer::start accepted */
 
     /* The labels System Profiler reads. Values measured, not invented: the
      * 4096 MB is what the plugin publishes from the real carve-out size. */
@@ -229,7 +249,52 @@ bool RBAMDFramebuffer::start(IOService *provider)
         ? "OWNS THE PANEL (displaced IONDRVFramebuffer): console yes, 1 connection"
         : "attached BESIDE the boot framebuffer: console no, 0 connections - "
           "this configuration measures start(), it does not drive the display");
+    crumb(7);   /* start() returning true */
     return true;
+}
+
+/* -- crash breadcrumbs --------------------------------------------------- */
+
+/* 2t0: boot 171 panicked after the lock screen and wrote NO panic report, so
+ * the furthest point reached was unrecoverable. Rule 10 states the general
+ * case: a boot that dies leaves NVRAM only, and rule 31's registry properties
+ * - the right instrument for a LIVE boot - are gone with the machine, which is
+ * exactly the boot worth reading.
+ *
+ * One key, last-wins, which is correct HERE: what is wanted is the FURTHEST
+ * stage reached, and crumbStage is monotonic so a later call cannot walk it
+ * back. (Rule 14's "a last-wins key cannot express a per-entry fact" still
+ * holds - that is why the per-slot VBL facts stay in the registry.)
+ *
+ * Bounded BY CONSTRUCTION, because every NVRAM write is a flash commit: stage
+ * transitions only, plus four fixed VBL milestones at exact equality so each
+ * fires once. NEVER per-fire - at the measured refresh that would be ~144
+ * commits a second, and rule 16 says the instrument is the suspect. The first
+ * milestone is 100, not 1, deliberately: ~0.7 s in, so no synchronous commit
+ * lands inside display bring-up, where 2ft already found such commits suspect.
+ * `-rbgpufbnocrumb` disables the mechanism outright.
+ *
+ * Read it after a crash with:  nvram rbgpu-fbcrumb */
+void RBAMDFramebuffer::crumb(uint32_t stage)
+{
+    if (!crumbOn || !nvram) {
+        return;
+    }
+    if (stage > crumbStage) {
+        crumbStage = stage;
+    }
+    char buf[72];
+    snprintf(buf, sizeof(buf), "s=%u f=%llu e=%u r=%u",
+             crumbStage, (unsigned long long)vblFires, vblEnables,
+             vblRunning ? 1u : 0u);
+    if (auto str = OSString::withCString(buf)) {
+        /* 2sr measured that setPropertyWithGUIDAndName is the ONLY path that
+         * reaches IODTNVRAM::syncInternal, so a plain setProperty here DOES
+         * sync - unlike removeProperty, which is exactly why rbgpu-fb keeps
+         * surviving its own removal. */
+        nvram->setProperty("rbgpu-fbcrumb", str);
+        str->release();
+    }
 }
 
 void RBAMDFramebuffer::stop(IOService *provider)
@@ -240,6 +305,9 @@ void RBAMDFramebuffer::stop(IOService *provider)
         vblCall = nullptr;
     }
     vblRunning = false;
+    crumb(8);   /* stop() entered - a clean teardown, not a crash */
+    crumbOn = false;            /* no writes once the object is going away */
+    OSSafeReleaseNULL(nvram);
     OSSafeReleaseNULL(aperture);
     IOFramebuffer::stop(provider);
 }

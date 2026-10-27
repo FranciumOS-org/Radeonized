@@ -93,6 +93,19 @@ void RBAMDFramebuffer::deliverVBL(void)
         publishVBLState();
         setProperty("RBFBVBLHandlers", (UInt64)delivered, 32);
     }
+    /* 2t0: four NVRAM breadcrumbs for the whole boot, at exact equality so
+     * each lands once. The registry above is for a live boot; these are the
+     * only record a boot that dies leaves behind (rule 10). The first is 100,
+     * not 1, so no flash commit lands inside display bring-up. */
+    if (vblFires == 100) {
+        crumb(10);
+    } else if (vblFires == 1000) {
+        crumb(11);
+    } else if (vblFires == 10000) {
+        crumb(12);
+    } else if (vblFires == 100000) {
+        crumb(13);
+    }
     armVBL();
 }
 
