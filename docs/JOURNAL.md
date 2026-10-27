@@ -38709,3 +38709,88 @@ whether to recreate nullarc's/Cobalt64's approach. Recorded for the decision:
 **Not established**: that gate 2 is satisfiable, or that the pool path produces
 a working surface once entered. Both are the next reads, and neither needs a
 boot.
+
+### 2t6 addendum — gate 2 is a CFPreference, its default appears to be 1, and that forces the contradiction onto gate 1
+
+**Gate 2 identified.** The only writer of `0x7ff843bac773` is inside
+**`CGXMappedDisplayStart`** (`0x7ff8040f9180`), in a block that reads a run of
+booleans by name:
+
+```
+movzbl <global>, %esi          ; the current value, passed as the DEFAULT
+leaq   <CFString>, %rdi        ; the key
+callq  0x7ff80405597a          ; CoreDisplay::GetBoolCFPreference(CFStringRef, bool)
+movb   %al, <global>           ; store the answer back
+```
+
+`CoreDisplay::GetBoolCFPreference` is `CFPreferencesCopyValue(key, appID, user,
+host)` with the domain CFString at `0x7ff8404fd578` =
+**`com.apple.CoreDisplay`**, then `CFGetTypeID == CFBooleanGetTypeID` and
+`CFBooleanGetValue`, else the default.
+
+The keys, decoded (the CFString `cstr` fields are chained pointers; real address
+is cache base `0x7ff800000000` + low 36 bits):
+
+| global | key |
+|---|---|
+| 0x7ff843bac76e | `useIOP_gamma_onNVIDIA` |
+| 0x7ff843bac76f | `useIOP_gamma_onAMD` |
+| 0x7ff843bac770 | `useIOP_gamma_onAPV` |
+| 0x7ff843bac771 | `useIOP_gamma_onIG` |
+| 0x7ff843bac772 | `useIOSurfaceLog` |
+| **0x7ff843bac773** | **`displaySurfaceUsesIOSurface`** ← GATE 2 |
+| 0x7ff843bac774 | `muxSwitchPresentUsesVSync` |
+| 0x7ff843bac775 | `useMetal` |
+
+So gate 2 is overridable with
+`defaults write com.apple.CoreDisplay displaySurfaceUsesIOSurface -bool …`,
+which looked like a one-command fix.
+
+**It is not, because the compiled default reads 1.** A read of
+`0x7ff843bac76e..775` out of the cache returned `1` for every byte.
+
+**That read is SUSPECT and is not being treated as settled** (rule 26). Every
+byte in the block came back 1, `useIOSurfaceLog` included, and a shipping OS
+almost certainly does not default IOSurface logging on. A uniform block of 1s is
+exactly what reading the wrong region looks like, and **no control distinguishes
+"all genuinely 1" from "wrong bytes"**. The control to take: read a byte in that
+region whose value is independently known, or read the same addresses a second
+way.
+
+### The contradiction, stated because it is the useful part
+
+The loop past the gates has **no exit except the pool**:
+
+```
+7ff80408c010: testq %rsi,%rsi ; je POOL
+7ff80408c019: cmpq  %rdx,%rsi ; je POOL
+7ff80408c045: movq 0xb0(%rsi),%rsi ; 7ff80408c04c: jmp 7ff80408c010
+```
+
+So if both gates pass, `GetNextSurface` **always** reaches
+`DisplaySurfacePool::GetNextSurface`. We measure the legacy path instead (NULL
+surface, `CompositorSW`, 2qh/2t5). Therefore **a gate fails at runtime**, and
+there are exactly three candidates:
+
+1. **the default read above is wrong** and gate 2 is really 0 — then the
+   `defaults write` fix is live after all;
+2. **gate 1 fails live**: `UseIOPresentment()` returns false inside
+   WindowServer. 2st measured `present mask = 0x04` and
+   `reproduced UseIOPresentment() = 1`, but that is `make useiop`
+   **reproducing** the computation from the registry, **not** reading
+   WindowServer's live value. `UseIOPresentment()` reads `gSystemGPUVendors`
+   (int at `0x7ff843bb1d64`, 2t-era note at journal line 28676) — a **cached
+   global**. If it is computed once, before our framebuffer is classified, it
+   caches "unsupported" and no later arrival fixes it. **That is the same shape
+   as 2s9's `sampleTiming()` bug**, which sampled 1085 ms before the framebuffer
+   existed;
+3. a CFPreference somewhere already sets `displaySurfaceUsesIOSurface` false.
+
+Candidate 2 is the most interesting and the cheapest to test: it predicts that
+`gSystemGPUVendors` in a live WindowServer disagrees with what `make useiop`
+computes from the registry.
+
+**Bearing on the Vulkan decision**: the Apple path is still **not shown
+closed**. One boolean and one cached vendor mask stand in it, both identified by
+address, neither yet read live. That remains far cheaper than a Metal-on-Vulkan
+stack, and 2t6's recommendation is unchanged.
