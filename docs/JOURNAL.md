@@ -35863,3 +35863,108 @@ retries on is unread, and that is the next thing to read — in the dyld cache,
 `0x7ff80411633c`, chunked (2sb's `dscdis.sh` truncation applies).
 
 Nothing was built. No boot was spent.
+
+## 2sj — nullarc's framebuffer uses NONE of the path 2s2–2si chased, and that is the redirection
+
+No boot. The user supplied `luuumi-dev/nullarc` and `Almosst-DEV/Cobalt64`.
+2mk already cleared nullarc's licence (MIT or GPL-2.0-only own code,
+PolyForm-NC for `src/phxaccel`/`src/nmplugin`/`tools/nvmtl-patches`, **no AI
+restriction**) and surveyed its four echelons — but 2mk was about the glyph
+defect, and never asked the question that is now the whole frontier.
+
+`Cobalt64` is MIT, RDNA 4 / Navi 48, a preview tested on one PC, not yet
+installable. Architecturally the furthest of the three from gfx1033 and the
+least mature; nothing to take now.
+
+### `PhxAMDFB` (src/phxaccel/accel/phxfb.cpp), read for the display path
+
+| question | answer |
+| --- | --- |
+| superclass | **`IOFramebuffer`** — not `IONDRVFramebuffer`. Takes over the mode the firmware GOP already lit, replacing the firmware framebuffer at boot |
+| IOPresentment | named in **one comment**; the code never uses it |
+| `IOAccelDisplayPipe` | comments only |
+| display-pipe transactions | comments only; no transaction code |
+| `SetPlaneState`, `BindIOAccelSurfaceToResource`, plane state | **absent entirely**, code and comments |
+| DCN register writes | **none** — "writes nothing to the display engine". `measureRefresh` maps BAR5 and only **reads** OTG0 timing and frame counter |
+| mode | one mode, measured refresh, 32-bit direct, built-in |
+| scanout | `getApertureRange` returns the **boot console's physical surface** |
+| vblank | `registerForInterruptType` accepts up to **four** VBL handlers, driven by a `thread_call` at panel refresh |
+| accelerator hooks | `callPlatformFunction` for VRAM alloc/free and GPU-VA, emulating an NVIDIA RM interface so the accelerator can allocate surfaces |
+| who composites | **not this class.** `PhxAccel` / `NMXAccel` composites for WindowServer; this supplies the framebuffer side |
+
+### The redirection
+
+**A working RDNA 3 driver, on DCN 3.1.4 — the same `DCN_VERSION_3_1` grouping
+as our 3.1.2 — gets WindowServer compositing at 120 Hz while using none of
+IOPresentment, AGDC transactions, plane state or display-pipe queues.**
+
+So the path 2s2 through 2si chased is **optional**. 2s3's "there is no
+transactions-off mode" was true of `IOPresentmentCreateForRegistryID`
+specifically, and the correct inference was not "we must satisfy
+IOPresentment" but "we need not go through IOPresentment at all".
+
+Everything that path cost — the AGDC bridge's capability work (2s9–2sd), the
+plane-count hunt (2se–2sg), the queue read (2si) — was elimination inside a
+subsystem a working driver skips. The eliminations stand as facts; their
+relevance does not.
+
+And note how closely their framebuffer matches instruments we **already have
+measured and working**: OTG0 read-only sampling (`otg_err 0`, 143.898 Hz,
+2rn/2s9), the GOP surface at BAR0 offset 0 (2pr), a timer-driven vblank to
+multiple registrants (`-rbgpuvbl`/`-rbgpuvblpump`/`-rbgpufbvbl`, de-aliased
+for multiple handlers in 2s5), and the single firmware mode the NDRV already
+reports. We have been building the parts of their framebuffer for weeks
+without the framebuffer.
+
+### Why this project is better placed than nullarc was
+
+nullarc had to write **all four** echelons because Apple's driver stops at
+RDNA 2 (Navi 21/23) and gfx1103 has nothing to reuse. **Our chip is gfx1033 —
+inside the generation Apple still supports**, and our accelerator already
+works: `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` is attached and Metal
+compute is bit-exact. We would need only the framebuffer half.
+
+**The open question that decides it, and it is NOT established:** will Apple's
+`AMDRadeonX6000` composite for a framebuffer that is not Apple's? nullarc's
+compositor is their own `NMXAccel`, so their result does not answer it.
+
+### A claim I went to verify and could NOT
+
+`phxfb.cpp` carries a comment that **CoreDisplay disables IOPresentment for
+framebuffers whose class name lacks "AMD"**. If true it would explain this
+entire sequence at a stroke, since ours is `IONDRVFramebuffer`. So it was
+checked rather than believed.
+
+**It is unverified, and the obvious evidence for it is something else.** The
+only bare `"AMD"` string in that region of the cache (`0x415ad4a`) sits in a
+watchdog message table beside `"Intel"`, `"Transaction hang (IG IOFB)"`,
+`"IOAF waiting for GPU work completion stamp (IG 3D Driver)"`, `"AMD
+transaction hang or work overload (AMD IOFB)"` and `"CD surface count issue
+(CoreDisplay)"` — **vendor tags for hang diagnosis, not a class-name gate**.
+Both `IONDRVFramebuffer` hits in the cache are the property name
+`IONDRVFramebufferGeneration`, not a comparison. The claim may still be true
+elsewhere in CoreDisplay; it is **not** to be acted on as fact.
+
+### One real measurement that fell out of looking
+
+Those watchdog strings are exactly the diagnoses CoreDisplay emits for a hung
+transaction, so the wedged boots were checked for them. **Zero hits** for
+transaction hang, work overload, surface-count issue or IOAF waiting, in
+**both** boot 169 and boot 170 — against a control of 112 hits for a
+known-present pattern and **757** CoreDisplay/WindowServer lines in the same
+file.
+
+So CoreDisplay's own watchdog never fired. There was no transaction to hang,
+which is independent support for 2si: the loop never reaches submission, and
+the wedge is not a wait on submitted work.
+
+### Licence note for whatever gets built
+
+Reading `src/phxaccel` is permitted and 2mk established that. **Copying from
+it carries PolyForm-NC** (noncommercial only) and would attach that to the
+derived files here. Learning the architecture — that an `IOFramebuffer`
+subclass over the firmware-lit mode is sufficient — is not copying. Which
+side of that line any future framebuffer kext sits on is the user's decision,
+not Claude's, and should be made before code is written rather than after.
+
+Nothing was built. No boot was spent.
