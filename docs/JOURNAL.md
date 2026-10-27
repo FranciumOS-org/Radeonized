@@ -40421,3 +40421,105 @@ any constant that can be reached through a pointer slot, `dataxref` has to run
 first and `ripall` second, on what it finds. 2v2 fixed `dataxref`'s file scope
 on the same day this needed it, which is the only reason the hop is one
 command away instead of another dead end.
+
+## 2v5: the writer is found, the alignment is pinned, and `MaximumSize` IS our `+0x28` — 2v3's field map was off by one slot
+
+`dataxref` on the `MaximumSize` `__cfstring` (`0x7ff84166ef60`) finds **one**
+data slot, `0x7ff84166d738`, inside IOPresentment's key-pointer table; `grep`
+for that slot in the library dump finds **two** code sites, and both are named:
+
+- `0x7ff812e9b37a` in `IOPresentmentCapabilitiesDisplayPipe::IOPresentmentCreateLinearizationDictionary(unsigned int, unsigned int, __CFArray*)` (`0x7ff812e9b2d4`)
+- `0x7ff812e9b986` in **`IOPresentmentCapabilitiesDisplayPipe::IOPresentmentCreateGammaDictionary(unsigned int, unsigned int, __CFArray*)`** (`0x7ff812e9b8e0`)
+
+That is the writer 2v3 was looking for, and the whole hop took two commands
+once `dataxref` worked cache-wide (2v2) and once the pointer-slot indirection
+was understood (2v4).
+
+**The builder reads OUR REPLY BUFFER, verbatim.** Its loop:
+
+```
+cmpl  $0x0, 0x1db4(%rdi)          ; count; zero -> return immediately
+...
+testq -0x88(%rbp), 0x1dbc(%r12,%rbx)   ; (1 << type_index) & entry-word; 0 -> skip
+...
+addq  $0x32c, %rbx                ; THE STRIDE
+cmpq  %rcx, %r13 ; jb loop        ; rcx = 0x1db4(%r12), the count
+```
+
+**`0x32c` is `RB_AGDC_EXTCAP_ENTRY_SZ`** and `0x1db4` is the reply's count
+field, so the object holds the 0x711 structure as-is. That pins the alignment
+with no guessing: the reply has its count at `+0x08` and its entries at
+`+0x0c`, so the blob sits at `this->0x1dac`, the count at `0x1dac+0x08 =
+0x1db4` ✓ and entry *i* at `0x1dac+0x0c + i*0x32c = 0x1db8 + i*0x32c` ✓.
+
+**The field map, keys paired with the stack slot each `CFDictionarySetValue`
+uses, now in terms of OUR entry offsets:**
+
+| source | CF type | key | our entry offset |
+|---|---|---|---|
+| `0x1dbc` | — | the `testq` gate, not a key | **+0x04** |
+| `0x1dc4` | 0xc | `NonAtomicApplicationPeriod` | **+0x0c** |
+| `0x1dc8` | 4 (via `0x7ff812e98e5a`) | `Type` | **+0x10** |
+| `0x1dcc` | 4 (via `0x7ff812e98fca`) | `FixedFormat` | **+0x14** |
+| `0x1dd0` | 4 | `ConfigurationID` | **+0x18** |
+| `0x1dd8` | 0xc | `MinimumValue` | **+0x20** |
+| `0x1ddc` | 0xc | `MaximumValue` | **+0x24** |
+| `0x1de0` | 4 | **`MaximumSize`** | **+0x28** |
+
+**Two independent checks say this alignment is the right one**, and they are
+Apple's own constants from `getFbCapabilityForGamma` (2u9):
+
+- entry 1 writes `+0x20 = 0`, `+0x24 = 1.0f`, `+0x28 = vt[0x1b8](0xf)` →
+  `MinimumValue` **0.0**, `MaximumValue` **1.0**, `MaximumSize` **a queried
+  integer count**. Coherent.
+- entry 2 writes `+0x20 = powf(2,-25)`, `+0x24 = powf(2,7)`, `+0x28 = 0x200` →
+  `MinimumValue` **2⁻²⁵**, `MaximumValue` **2⁷**, `MaximumSize` **512**.
+  Coherent, and it is a floating-point gamma segment with 512 entries.
+
+The one-slot-earlier alignment would make `MaximumSize` read `1.0f`'s bit
+pattern as an integer, which is not a size. So the map above is the one that
+holds.
+
+### Which corrects 2v3 and vindicates 2u6
+
+**2v3 said `+0x28` is `MinimumValue`. It is not — `+0x28` is `MaximumSize`,
+the field.** 2v3 derived its map from `__fieldsFromDictionary`'s *destination*
+offsets inside CoreDisplay's 0x38-stride struct, which are correct for that
+struct, and then mis-stated them as offsets in our AGDC entry. Those are two
+different layouts and the entry offsets differ by one slot. The key→struct half
+of 2v3 stands; the key→**reply** half is replaced by the table above.
+
+So **2u6's original reading was right after all**: the field CoreDisplay refuses
+on is `RB_AGDC_GAMMA_CHANNELS` (`rb_agdc.h:278`), our substituted **0** at
+entry 1's `+0x28`, and 2sc named the consumer correctly in its own comment.
+
+**And it explains boot 181 exactly.** 2u9 set *entry 2*'s `+0x28` to 0x200 and
+left entry 1's at 0. Entry 2's `Type` is **1**, and 2u7 measured the six `Type`
+bits `GammaChannelTableEntryCountAndType` accepts — 9, 8, 7, 6, 4, 3. Bit 0 is
+not among them, so **entry 2 is skipped entirely** and entry 1 wins with
+`MaximumSize = 0`. The null result was not evidence against the field; it was
+Apple's own selection rule picking the entry we did not change.
+
+### The next experiment, and what is substituted in it
+
+One constant: `RB_AGDC_GAMMA_CHANNELS` from **0** to a non-zero table size at
+entry 1's `+0x28`. Stated as rule 17 requires: **this remains a substitute** —
+Apple reads it from `vt[0x1b8](0xf)` on an `AmdFbDisplayPath` we do not have,
+so no value we write is a hardware fact. What has changed is that the field is
+now *identified* rather than guessed, and two anchors bound a sensible value:
+entry 1's `Type` is `0x10`, whose accepted bit is 4, and CoreDisplay's own
+`DisplayPipeState` dumps already print `LUT: R - [0..0.500489..1] with 1024
+entries`. So **0x400 (1024)** matches the LUT CoreDisplay has built for this
+display, and Apple's own segmented entry uses 0x200 for its own stage.
+
+No code is changed in this entry. The build on disk is `FF4B8693` with
+segments back to 1, so the change is one constant and the hosttest already
+checks entry 1's `+0x28` against `RB_AGDC_GAMMA_CHANNELS` — that assertion must
+become a literal too, for the reason 2v1's addendum gives.
+
+**Not explained, and not to be folded into this:** our degamma entries already
+write `+0x28 = 1` (Apple's own literal), so linearization's `MaximumSize` is
+non-zero, yet `no 3-channel linearization table support` still appears once per
+dump. That check is `IsLinearizationTableBased` / `SupportsLinearization`
+(`0x7ff80405e00c` / `0x7ff80405e870`), a different predicate, and it is a
+separate read.
