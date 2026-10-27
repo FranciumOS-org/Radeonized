@@ -327,6 +327,50 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
     if (attr==0x711) {
         rbgpu_diag_set_num("agdc_extcap_result",static_cast<uint64_t>(result));
         if (result==0) rbgpu_diag_inc("agdc_extcap_answered");
+        // 2v9: ONE KEY PER TYPE, because a last-wins key cannot express a
+        // per-entry fact (rule 14) - `agdc_extcap_answered 0xf` says fifteen
+        // calls were answered and NOT which fifteen, and the whole
+        // display-pipe chain hangs on exactly one of them.
+        //
+        // 2v9 read that chain to its end: IOPTransaction::Submit fails at its
+        // first step, silently, iff IOPresentment's plane count is 0; that
+        // count is CFArrayGetCount(caps["DeviceArray"]); DeviceArray is NULL
+        // iff CreatePlaneDictionary (0x7ff812e9aca4) is, which happens iff
+        // caps->0x434 != 1; and 0x434 is set by one instruction
+        // (0x7ff812e97b13) only when THIS query, with type 0x10, returns
+        // IOReturn 0, a non-zero out-length and a non-zero count.
+        //
+        // So publish, per type, everything that gate reads:
+        //   bits  7..0   our return, as a signed byte
+        //   bits 15..8   the count we wrote at +0x08
+        //   bits 23..16  the framebuffer index byte we were handed at +0x00,
+        //                which rb_agdc_extcap refuses unless it is 0 and
+        //                which IOPresentment seeds from (caps->0x20)->0x50
+        //   bits 47..32  the out-length, which 0x7ff812e97a72 fails on if 0
+        // A type that is never asked for leaves its key absent, and absence
+        // here is informative because agdc_extcap_calls counts the asks.
+        if (out && outSize && *outSize >= RB_AGDC_EXTCAP_ENTRY_OFF) {
+            const uint8_t *q=reinterpret_cast<const uint8_t *>(out);
+            const uint32_t ty=rb_agdc_get32(q+4);
+            const char *key=nullptr;
+            switch (ty) {
+            case RB_AGDC_CAP_CSC:     key="agdc_ec_csc";     break;
+            case RB_AGDC_CAP_GAMMA:   key="agdc_ec_gamma";   break;
+            case RB_AGDC_CAP_DEGAMMA: key="agdc_ec_degamma"; break;
+            case RB_AGDC_CAP_SCALER:  key="agdc_ec_scaler";  break;
+            case RB_AGDC_CAP_CURSOR:  key="agdc_ec_cursor";  break;
+            default: break;
+            }
+            if (key) {
+                const uint64_t v=
+                    (static_cast<uint64_t>(*outSize & 0xffffu) << 32) |
+                    (static_cast<uint64_t>(q[0]) << 16) |
+                    (static_cast<uint64_t>(
+                        rb_agdc_get32(q+RB_AGDC_EXTCAP_COUNT_OFF) & 0xffu) << 8) |
+                    static_cast<uint64_t>(static_cast<uint8_t>(result));
+                rbgpu_diag_set_num(key,v);
+            }
+        }
         // 2v0: PROVENANCE THAT SURVIVES A WEDGE. Boot 180 ran the two-entry
         // gamma build and its capture died at `kmutil showloaded`, so nothing
         // on disk said which plugin was loaded - rule 15's check had no input,
