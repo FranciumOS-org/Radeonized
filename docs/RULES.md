@@ -281,7 +281,7 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
   kext's third stage needs the auxiliary collection, which is an install and so
   is the user's own step; the assistant builds it and hands over the commands.
 - The user runs `sudo tools/fbload.sh [beside]`. Arming needs **both**
-  `-rbgpufb` in boot-args **and** `sudo nvram rbgpu-fb=1` (2sr). The boot-arg
+  `-rbgpuownfb` in boot-args **and** `sudo nvram rbgpu-fb=1` (2sr). The boot-arg
   is the durable disarm; **the NVRAM one-shot is NOT** — `rbgpu-fb` survived a
   reboot after being removed and read back absent (2sq), because
   `IODTNVRAM::removePropertyWithGUIDAndName` calls no sync at all. So between
@@ -419,10 +419,26 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     `strings -a` silently under-reports on a 373 MB KC (use `mmap` +
     `bytes.find`); `otool -tV` resolves symbol names in call operands, so a
     numeric search for a target address finds nothing; a `callq *0xNNN(` grep
-    cannot see a **tail jump through a loaded register**; `ioreg.txt` in a
-    capture is two lines, not a registry dump; and **when xrefing a string,
+    cannot see a **tail jump through a loaded register** — nor a *direct*
+    tail `jmp`, which made `IODTNVRAMVariables::removeProperty` look as though
+    it called nothing (2sr); `ioreg.txt` in a
+    capture is two lines, not a registry dump; **`ioreg -c X -k Y` does not
+    filter** and printed only `+-o Root` (2sn — use `ioreg -rl -c X`); a
+    tool's **exit code can be its verdict**, so `make useiop && …` reported
+    "failed" under a perfectly good report (2so); and **when xrefing a string,
     xref the string's START** (find the preceding NUL first) — a substring's
-    address can never be referenced. [2lw, 2rk, 2r4, 2s0, 2s5]
+    address can never be referenced. [2lw, 2rk, 2r4, 2s0, 2s5, 2sn, 2so, 2sr]
+30. **Boot-arg names: the KERNEL is exact, our greps are not.**
+    `PE_parse_boot_argn` does `strncmp(token, name, token_len)` and then
+    **requires `token_len == strlen(name)`** (`0xffffff8000b92a7c`), so it
+    never prefix-matches — `-rbgpufbvram` cannot satisfy a check for
+    `-rbgpufb`, and the project's existing prefix pairs are safe. Lilu's
+    `checkKernelArgument` wraps the same function. But a shell
+    `grep -q -- '-rbgpufb'` **does** match `-rbgpufbvbl`, `-rbgpufbvram` and
+    `-rbgpufbaccel`, and that false positive landed in a **safety** check that
+    then read as armed. Test a whole token
+    (`tr ' \t' '\n\n' | grep -qx`), and do not name an arg so that it
+    prefixes an existing one. [2ss]
 27. **No vnode work at plugin init — the root filesystem is not mounted yet.**
     `RGPU::init()` runs during early kernel bootstrap, so a file read there
     panics before the progress bar, with no report written. Read files from a
