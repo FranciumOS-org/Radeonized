@@ -282,8 +282,18 @@ static inline int rb_agdc_scaler_entry(uint8_t *e, uint32_t slotA, uint32_t slot
  * LITERAL in its code - 0x200 - rather than a query on an object we lack, so
  * taking the two-entry branch is the one way to answer with a non-empty gamma
  * table WITHOUT inventing a number (rule 17). Entry 1 is unchanged and its
- * substituted count below is untouched. */
-#define RB_AGDC_GAMMA_SEGMENTS    2u
+ * substituted count below is untouched.
+ *
+ * 2v1: AND PUT BACK TO 1, because boot 181 measured it buy NOTHING - 7.01
+ * gamma complaints per DisplayPipeState dump against 179's 7.12, `System
+ * Gamma` still `Unknown`, `Clean` still absent, with the reply verified sent
+ * (`agdc_gamma_entries 2`, `agdc_gamma_elems2 0x200`) and the build verified
+ * loaded. So CoreDisplay's `entry+0x30` is not fed from our `+0x28`. The
+ * segment count is itself a substitute, and 2 claims a two-segment stage plus
+ * one more substituted field (entry 2's 0x40 device flags) for no measured
+ * gain - rule 17. `rb_agdc_gamma_entry2()` below is kept and hosttested, so
+ * retrying this is one character. */
+#define RB_AGDC_GAMMA_SEGMENTS    1u
 /* vt[0x1b8](0xf), written as a QWORD to entry 1's +0x28. 2u9 read the widths
  * and this is the entry's ELEMENT COUNT, not a channel count - the name is
  * kept because 2sc coined it and the journal cites it. Still substituted,
