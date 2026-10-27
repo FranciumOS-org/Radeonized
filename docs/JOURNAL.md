@@ -38267,3 +38267,120 @@ established**; this is VoodooI2C's own stack and outside this project. A
 sleep/wake cycle re-probes the device and is the cheap recovery. No VoodooI2C
 log lines were found, and per rule 26 nothing is concluded from that absence
 without a known-present control.
+
+## 2t3 — the animating sample: `CA::OGL::SW` is BACK, on a MORE expensive format, and the gamma keys are driver INPUTS we never supplied
+
+2t2's control, taken while the desktop animated (saved as
+`logs/ws-sample-boot173-animating.txt`). It settles 2t2's open question
+against the optimistic reading.
+
+```
+__workq_kernreturn                              50846   (idle)
+mach_msg2_trap                                  11891   (idle)
+semaphore_timedwait_trap                         6140   (idle)
+start_wqthread                                   2349
+CA::OGL::SW::Format::RGBAh::load_1                635   (in QuartzCore)
+vAlpha_Blend_Premultiplied_BGRA_8888_CV_avx2      459   (in vImage)
+CA::HalfFloat::to_float                           339   (in QuartzCore)
+CA::OGL::SW::image_sampler<RGBAh,...>             256
+_platform_memmove$VARIANT$Base                    200
+```
+
+**So owning the framebuffer does NOT stop CoreAnimation's software renderer.**
+2t2's idle sample showed no `CA::OGL::SW` because nothing was compositing, and
+the caveat written there was the correct one. The user's report — *"im in all
+animations are still on cpu"* — is confirmed by measurement.
+
+### And we made the format WORSE
+
+Boot 172 (`IONDRVFramebuffer`) rasterised **`ARGB8_Host`**. Boot 173
+(`RBAMDFramebuffer`) rasterises **`RGBAh`** — half-float RGBA — with
+`CA::HalfFloat::to_float` at 339 samples and `vImage`'s AVX2 premultiplied
+alpha blend at 459. Half-float software compositing is strictly more expensive
+per pixel than 8-bit. **Our framebuffer pushed the compositor onto a costlier
+surface format**, which is a new defect, not merely a failure to fix the old
+one.
+
+### The accelerator association is NOT the problem
+
+```
+"IOAccelTypes" = ".../AMDRadeonX6000_AMDNavi21GraphicsAccelerator"
+"IOAccelIndex" = 0      "IOAccelRevision" = 2
+"IOFramebufferOpenGLIndex" = 0
+"IOCFPlugInTypes" = {"ACCF0000-..."="IOAccelerator2D.plugin"}
+```
+
+Our framebuffer is correctly bound to the AMD accelerator and advertises the
+2D plugin, so "CA cannot find an accelerated renderer for this display" is
+**excluded**. It can; it chose software anyway.
+
+### What IS missing, and it is an INPUT, not an output
+
+Every gamma key is absent from our framebuffer (`IOFBGammaCount`,
+`IOFBGammaWidth`, `IOFBGammaHeaderSize`), along with `IOFBProbeOptions`,
+`graphic-options`, `IOFBCurrentPixelClock`, `IOFBCurrentPixelCount`,
+`IOFBScalerInfo`.
+
+**The direction of the gamma keys was the thing I had wrong.** They are not
+published *by* IOFramebuffer as a description of itself —
+`IOFramebuffer::open()` **reads them off the driver**
+(`IOGraphicsFamily`, 0x14fc6304-0x14fc63b4):
+
+```
+lea  rsi, "IOFBGammaWidth"      ; then Count, then HeaderSize
+call [rax + 0x2b8]              ; this->getProperty(...)
+call <safeMetaCast>             ; -> OSNumber
+test rax, rax ; je <skip>       ; ABSENT -> field left at ZERO
+call [rcx + 0x148]              ; getValue()
+mov  [rcx + 0x1a0], eax         ; private+0x1a0 (Width); +0x1a4 Count; +0x198 HeaderSize
+```
+
+So an absent key is not "use the default" — it is **"this framebuffer has no
+gamma"**, which is what we have been telling IOGraphics since 2sm. That is
+independently consistent with 2sa's `System Gamma - Unknown`, the single
+`DisplayPipeState` operation that never resolved across 56 dumps, and it is a
+plausible route to a half-float compositing path: with no hardware gamma, the
+colour transform has to happen somewhere, and float is where CoreAnimation does
+it.
+
+**That route is a hypothesis, not a measurement.** What IS measured is that the
+keys are inputs, that ours are absent, and that the fields therefore read zero.
+
+### The fix, in build 45588775
+
+- Publish the three keys **before** `IOFramebuffer::start`, since `open()`
+  reads them later. Values are **measured, not chosen** — they are what
+  `IONDRVFramebuffer` published on this machine, recovered from `logs/`:
+  `IOFBGammaCount = 256`, `IOFBGammaWidth = 8`, `IOFBGammaHeaderSize = 12`
+  (rule 17).
+- Override **both** exported arities,
+  `__ZN13IOFramebuffer13setGammaTableEjjjPv` and `...EjjjPvb`, because which
+  one macOS calls here is **not established**; the five-argument form
+  delegates.
+- The override **accepts the table and programs nothing.** This is the shape
+  rule 20 exists to forbid, so it is stated outright rather than buried: the
+  panel is firmware-lit and this driver writes nothing to the display engine
+  (2sj/2sm), so DCN keeps the firmware LUT — the state the desktop already runs
+  in. Returning an error instead would leave IOGraphics believing gamma is
+  broken rather than absent, and Apple's own software framebuffer
+  (`IOBootFramebuffer`) overrides this same 4-argument method.
+- **What makes the no-op auditable instead of a lie**: every call is counted
+  and published with its parameters — `RBFBGammaCalls`, `RBFBGammaChannels`,
+  `RBFBGammaDataCount`, `RBFBGammaDataWidth`, `RBFBGammaDataNull`. If
+  `RBFBGammaCalls` stays **0**, publishing the keys changed nothing downstream
+  and this override is inert, which is a result rather than a silence
+  (rule 14).
+
+Controls checked: our vtable is still **2824 bytes**, identical to Apple's
+(2sm's invariant, so the two overrides landed in existing slots and added
+none), both symbols are defined in the binary, and the system-collection import
+count fell 83 → 81 exactly because we now define what we used to import.
+
+### What the next boot decides
+
+- `RBFBGammaCalls` > 0 → macOS is setting gamma through us, and the keys took.
+- `CA::OGL::SW::Format::**ARGB8**` instead of `RGBAh` under an animating
+  sample → the half-float path was the gamma metadata, and the regression
+  against boot 172 is undone.
+- `CA::OGL::SW` **absent** under an animating sample → the software renderer
+  itself is gone. That is the real target and nothing yet says gamma reaches it.
