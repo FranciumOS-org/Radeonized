@@ -35695,3 +35695,87 @@ closing line in its own entry already said where this was going: "Still
 absent: the bind/transaction/scanout backend, **all plane state**".
 
 Nothing was built. No boot was spent.
+
+## 2sh — NullMoth's two personalities are a blueprint, and they reframe why the AGDC work could not have worked
+
+No boot, no code. The user asked whether the other third-party drivers help.
+`/Library/Extensions` still holds `NVAccel`, `NVRM`, `NVRMAGDC` and `NVRMFB`,
+so the architecture is on this disk and its Info.plists are readable without
+touching anyone's source. 2rv already noted the `NVRMFBClaim` line; the full
+personality set is new here and it says more than the one line did.
+
+```
+NVRMFB.kext
+  NVRMFBClaim   IOProviderClass=IOPCIDevice  IONameMatch=display
+                IOMatchCategory=IOFramebuffer   IOProbeScore=30000
+  NVRMFB        IOClass=NVRMNVDAFramebuffer  IOProviderClass=NVRMDisplay
+                IOProbeScore=1000
+NVRMAGDC.kext
+  NVDAGDCLoader IOClass=NVDAGDCLoader  IOProviderClass=IOResources
+                IOResourceMatch=IOKit  IOMatchCategory=NVDAGDCLoader
+```
+
+### Three things that transfer
+
+**1. How to displace `.Display_boot`.** `IOMatchCategory = IOFramebuffer` +
+`IONameMatch = display` on `IOPCIDevice` at **`IOProbeScore` 30000**. 2oz
+established the provider and category; the probe score is the part that
+outbids `IONDRVFramebuffer`, and here it is as a worked example rather than a
+guess.
+
+**2. The framebuffer attaches to the driver's OWN service, not to PCI.**
+`NVRMFB`'s real class takes `IOProviderClass = NVRMDisplay` — a service the
+claim stage publishes. So the shape is two-stage: a cheap high-score claim
+wins the display category, then the real framebuffer matches on the driver's
+own node. Nothing about that requires Apple's framebuffer kext.
+
+**3. `IOResources` matching sidesteps the wrangler race entirely.**
+`NVDAGDCLoader` matches `IOProviderClass = IOResources`,
+`IOResourceMatch = IOKit` — it loads as soon as IOKit is up, with no race to
+win. Our bridge publishes on the PCI device and races `AppleGPUWrangler`,
+which is the whole of 2rx/2rz/2r0 and the reason `-rbgpuagdcearly` exists and
+wedges. This is a different mechanism for being early. It would **not** fix
+the wedge — boots 164/169/170 won the race and wedged anyway — but it is a
+cleaner way to be early than the notification race, and worth holding.
+
+### What this reframes
+
+Every AGDC milestone from 2s9 to 2sd fed capabilities to a framebuffer that
+**structurally cannot participate**. `IONDRVFramebuffer` is the generic NDRV
+driver; it implements none of the IOFramebuffer hooks IOPresentment needs, and
+2s3's pre-statement said as much before any of those boots. So the capability
+work was answering questions on behalf of a driver that was never going to be
+asked the next one. That is a better explanation of 2sd's null result than
+anything in 2sd or 2se.
+
+And it suggests the path that does not dead-end on missing DCN code: **our own
+`IOFramebuffer` subclass**, winning the category the way `NVRMFBClaim` does,
+implementing the plane/transaction hooks — while leaving scanout exactly where
+it already is. We do not need DCN 3.1.2 to scan out: OTG0 is already running
+(`OTG0_CONTROL 0x00011201`, DMCUB 4.0.15.47, 143.898 Hz measured) and the GOP
+framebuffer is BAR0 offset 0 (2pr). Firmware did the mode-set permanently at
+boot. What `IONDRVFramebuffer` withholds is not pixels, it is the hooks.
+
+**This is a design hypothesis, not a measurement.** It is also a large build
+and its failure mode is a black screen, rescuable with `-rbgpuoff`. Nothing
+should be written until the plane-count read in `IOAcceleratorFamily2` says
+whether the transaction path can be satisfied at all.
+
+### What does NOT transfer, and the licence line
+
+NVIDIA display hardware shares nothing with DCN 3.1.2, so no register, timing
+or sequence knowledge crosses over — only the IOKit-side shape above, which is
+match-dictionary configuration read from this machine's own
+`/Library/Extensions`. Measured and still true (2rv): `NVRMFBClaim`,
+`NVRMNVDAFramebuffer`, `NVDAGDCLoader` and `NVRMDisplay` instantiate **zero**
+instances here, and boot 170 loaded only Lilu and our plugin. It is a
+blueprint, not a working example on this machine.
+
+**An RDNA 3 iGPU driver is the one that could carry display code**, because
+Phoenix is DCN **3.1.4** and this chip is DCN **3.1.2** — the same
+`DCN_VERSION_3_1` grouping this project's own register rule keys off. Which
+project that is, and its licence, is **not** known here and must come from the
+user. **NootedRed and NootRX remain hard-blocked** by the ChefKiss Open
+Knowledge License v1 §2/§3: if the RDNA 3/4 iGPU drivers are ChefKiss work,
+the assistant cannot read or analyse them and findings must come from the user in
+their own words. "WhateverXe" is unknown here and nothing is assumed about it.
