@@ -35180,3 +35180,81 @@ not distinguish that from the capability-set reading.
 `early && finished && !timingValid`, so with `-rbgpuagdcearly` out of
 boot-args — which the user removed from inside the wedge — it is inert, and
 the configuration is byte-for-byte what boots 165–167 booted clean.
+
+## 2sb — static: the AGDC capability set is wired to the hardware-vs-GPU fork
+
+No boot. 2sa left two hypotheses for the second gate and named the cheaper
+one: the capability set. This is the consumer search the project's own rule
+demands before writing to a field (2q9/2qa), done in the dyld cache.
+
+**Instrument failure first, because it nearly cost the result.**
+`tools/re/dscdis.sh` ends in `sed -n '8,100000p'`, so it **silently truncates
+at 100 000 lines**. A 1 MB disassembly of CoreDisplay came back as 99 993
+lines and a search of it reported **zero** calls to a function I had already
+watched being called. The control caught it (rule 26, the project's own
+script this time). Redone in 0x20000 chunks: 253 985 lines, control back to
+the expected 2. Any future whole-image disassembly must chunk.
+
+### The chain
+
+| step | address |
+| --- | --- |
+| `IOPCapabilities::GammaChannelTableEntryCountAndType` | `0x7ff80405ddd8` |
+| ← `DisplayPipe::IsEOTFSupportedInHW` (2 call sites) | `0x7ff804107df8` |
+| ← `DisplayPipe::AreOperationsSupportedInHW` (**7** call sites) | `0x7ff8041087fe` |
+| ← `DisplayPipe::Commit(Transaction const&, bool)` (2 call sites) | `0x7ff80411633c` |
+| and `Commit` is the **only** caller of `RunGPUDisplayPipe` | `0x7ff804112c9c` at `0x7ff80411899a` |
+
+`CoreDisplay::DisplayPipe::Commit` is therefore the fork. It calls
+`AreOperationsSupportedInHW`, which returns a **vector** — Commit reads the
+begin/end pair and tests `begin == end` (empty) and `begin + 0x14 == end`
+(exactly one element, stride 0x14) — and `Commit` is also the one place that
+enters `RunGPUDisplayPipe`, which in turn calls `RunFullDisplayPipe`
+(`0x7ff804114b91`). So the list of operations that cannot be done in hardware
+is computed, and the GPU path is entered from the same function.
+
+`AreOperationsSupportedInHW` walks a capability block at `DisplayPipe+0x728`,
+testing per-operation dwords at +0x04, +0x10, +0x1c (stride 0xc) against the
+value **2** and calling `IsOperationTypeSupportedInHW` (`0x7ff80410840c`) when
+a slot reads 2. `BuildTransactions` (`0x7ff80410be58`) gates on byte flags in
+the same block (+0x09, +0x2c, +0x2d).
+
+`CoreDisplay::IOPCapabilities` has one accessor per capability type:
+`GammaChannelTableEntryCountAndType`, `CanCSC`, `SupportsCSC`,
+`SupportsLinearization`, `IsLinearizationTableBased`, `PlaneCount`,
+`SupportsUpscalingToEndpoint`, `SupportsDownscalingToEndpoint`,
+`CursorBlendIsPostSpatialScaler` — mapping onto Apple's five implemented types
+(1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler, 0x8000 Cursor). **We answer one of
+the five.**
+
+### What this does and does not establish
+
+It establishes that the AGDC extended-capability set we refuse is **wired by
+code structure**, not by correlation, into the decision that selects the GPU
+path over the hardware pipe. Boot 169's log is consistent at every point:
+`EOTF - GPU` (the operation `IsEOTFSupportedInHW` governs, resolved to GPU),
+`System Gamma - Unknown` (the one operation that resolves to nothing, and the
+one whose capability accessor has nothing to read), and `Clean` appearing zero
+times in 156 KB.
+
+It does **not** establish that this is why the early path wedges. `Commit`
+choosing `RunGPUDisplayPipe` is software compositing, which is the state the
+machine has been in all along without wedging. What 2sb adds is that the same
+refused capability set now has a named mechanism for the *default* behaviour
+too, which makes it the first thing to fix rather than a detail — and 2sa's
+other candidate (`IOPresentmentBindIOAccelSurfaceToResource` / `SetPlaneState`
+unimplemented on `IONDRVFramebuffer`) is untouched by this and remains open.
+
+### Next
+
+Implement AGDC extended-capability types **1 CSC, 2 Gamma, 4 Degamma and
+0x8000 Cursor** — the four of Apple's five that we refuse — truthfully, from
+Apple's own structure layout, the way `rb_agdc_extcap` already does type 0x10.
+`rb_agdc.h:182`'s "answer 0x10, refuse the rest" was derived from what makes
+`__GatherAGDCDisplayPipelineCapabilities` *return success*; 2sb shows that is
+a different question from what the pipeline needs in order to *run*. The
+gather tolerates the refusals and then carries a capability set with no gamma,
+no degamma, no CSC and no cursor.
+
+That is source-side work with a measured consumer for each field, and it costs
+no boot to write. It is not yet written.
