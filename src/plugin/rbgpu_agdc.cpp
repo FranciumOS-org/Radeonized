@@ -327,6 +327,27 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
     if (attr==0x711) {
         rbgpu_diag_set_num("agdc_extcap_result",static_cast<uint64_t>(result));
         if (result==0) rbgpu_diag_inc("agdc_extcap_answered");
+        // 2v0: PROVENANCE THAT SURVIVES A WEDGE. Boot 180 ran the two-entry
+        // gamma build and its capture died at `kmutil showloaded`, so nothing
+        // on disk said which plugin was loaded - rule 15's check had no input,
+        // and the boot's AGDC numbers could not be attributed to the build
+        // they were meant to test. These two keys are read straight back out
+        // of the reply we just wrote, so NVRAM alone identifies the gamma
+        // shape: the published entry count and the second entry's element
+        // count, which is the field 2u7 measured CoreDisplay refusing on.
+        if (out && outSize
+            && *outSize >= RB_AGDC_EXTCAP_ENTRY_OFF
+                           + 2u*RB_AGDC_EXTCAP_ENTRY_SZ
+            && result==0
+            && rb_agdc_get32(reinterpret_cast<const uint8_t *>(out)+4)
+               == RB_AGDC_CAP_GAMMA) {
+            const uint8_t *q=reinterpret_cast<const uint8_t *>(out);
+            rbgpu_diag_set_num("agdc_gamma_entries",
+                rb_agdc_get32(q+RB_AGDC_EXTCAP_COUNT_OFF));
+            rbgpu_diag_set_num("agdc_gamma_elems2",
+                rb_agdc_get32(q+RB_AGDC_EXTCAP_ENTRY_OFF
+                                +RB_AGDC_EXTCAP_ENTRY_SZ+0x28));
+        }
     }
     if (result==RB_AGDC_UNSUPPORTED) {
         rbgpu_diag_set_num("agdc_vendor_unsupported",attr);

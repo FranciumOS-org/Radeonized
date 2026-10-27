@@ -42,6 +42,29 @@ rb_ioreg() {   # rb_ioreg <seconds> <outfile> <ioreg args...>
     return 1
 }
 
+# 2v0: kmutil showloaded NEEDS THE SAME TREATMENT, and boot 180 is why. That
+# boot ran the build the whole experiment existed to test, and the capture
+# stops dead at this step: boot-args, nvram, peer.plist and framebuffer.plist
+# are on disk and kexts.txt does not exist, so `kmutil showloaded` never
+# returned. It talks to kernelmanagerd, which a wedged graphics stack can hold,
+# and unlike ioreg nothing here bounded it. Rule 16 again - the instrument is a
+# suspect - and the cost was the decisive display log, for the second time in
+# three boots.
+rb_bounded() {   # rb_bounded <seconds> <outfile> <command...>
+    _secs="$1"; _dest="$2"; shift 2
+    rm -f "$_dest.done"
+    ( "$@" > "$_dest" 2>/dev/null; : > "$_dest.done" ) &
+    _i=0
+    while [ ! -f "$_dest.done" ] && [ "$_i" -lt "$_secs" ]; do
+        sleep 1; _i=$((_i + 1))
+    done
+    if [ -f "$_dest.done" ]; then rm -f "$_dest.done"; return 0; fi
+    echo "  *** $1 did not finish in ${_secs}s - skipped, and the file it would"
+    echo "      have written is absent rather than wrong."
+    : > "$_dest"
+    return 1
+}
+
 args="$(nvram boot-args 2>/dev/null | cut -f2-)"
 printf '%s\n' "$args" > "$out/boot-args.txt"
 sysctl -n kern.bootsessionuuid > "$out/boot-session-uuid.txt" 2>/dev/null
@@ -73,25 +96,10 @@ rb_ioreg 10 "$out/peer.plist" -w0 -p IOService -c RembrandtGPUPeer -r -d1 -l -a
 rb_ioreg 10 "$out/framebuffer.plist" -w0 -p IOService -c IOFramebuffer -r -d1 -l -a
 sync
 
-echo
-echo "--- loaded kexts"
-kmutil showloaded --list-only 2>/dev/null | grep -E 'as.vit9696.Lilu|com.rembrandtgpu' | tee "$out/kexts.txt"
-grep -q com.rembrandtgpu.plugin "$out/kexts.txt" || echo "  com.rembrandtgpu.plugin is not loaded"
-# Is the loaded plugin the one in build/out? (kmutil prints the binary's UUID)
-built="$(dwarfdump --uuid "$root/build/out/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU" 2>/dev/null | awk '{print $2}')"
-if [ -n "$built" ] && grep -q com.rembrandtgpu.plugin "$out/kexts.txt"; then
-    grep com.rembrandtgpu.plugin "$out/kexts.txt" | grep -q "$built" \
-        && echo "  loaded plugin = build/out (UUID $built)" \
-        || echo "  NOTE: loaded plugin is NOT the current build/out (UUID $built): reinstall with sudo tools/efi.sh install"
-fi
-
-fbuilt="$(dwarfdump --uuid "$root/build/out/RBAMDFramebuffer.kext/Contents/MacOS/RBAMDFramebuffer" 2>/dev/null | awk '{print $2}')"
-if [ -n "$fbuilt" ] && grep -q com.rembrandtgpu.fb "$out/kexts.txt"; then
-    grep com.rembrandtgpu.fb "$out/kexts.txt" | grep -q "$fbuilt" \
-        && echo "  loaded framebuffer = build/out (UUID $fbuilt)" \
-        || echo "  NOTE: loaded framebuffer differs from build/out (UUID $fbuilt); the framebuffer requires its own AuxKC update"
-fi
-
+# 2v0: THE DISPLAY LOG NOW GOES FIRST. It is the measurement these boots
+# exist to take, and twice it has been the thing that was missing - once
+# to a +28 s window (2u5) and once to a hung kmutil ahead of it (boot 180).
+# The kext listing is a provenance check and can be the casualty instead.
 echo
 echo "--- display startup and GPU progress this boot"
 # 2rc: a frozen Apple logo can leave SSH and the entire registry responsive.
@@ -135,6 +143,27 @@ if [ "$dl_c" -eq 0 ]; then
 elif [ "$dl_n" -eq 0 ]; then
     echo "  display predicate matched 0 of $dl_c WindowServer lines - that IS a result."
 fi
+echo
+echo "--- loaded kexts"
+rb_bounded 20 "$out/kexts-all.txt" kmutil showloaded --list-only
+grep -E 'as.vit9696.Lilu|com.rembrandtgpu' "$out/kexts-all.txt" > "$out/kexts.txt" || :
+cat "$out/kexts.txt"
+grep -q com.rembrandtgpu.plugin "$out/kexts.txt" || echo "  com.rembrandtgpu.plugin is not loaded"
+# Is the loaded plugin the one in build/out? (kmutil prints the binary's UUID)
+built="$(dwarfdump --uuid "$root/build/out/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU" 2>/dev/null | awk '{print $2}')"
+if [ -n "$built" ] && grep -q com.rembrandtgpu.plugin "$out/kexts.txt"; then
+    grep com.rembrandtgpu.plugin "$out/kexts.txt" | grep -q "$built" \
+        && echo "  loaded plugin = build/out (UUID $built)" \
+        || echo "  NOTE: loaded plugin is NOT the current build/out (UUID $built): reinstall with sudo tools/efi.sh install"
+fi
+
+fbuilt="$(dwarfdump --uuid "$root/build/out/RBAMDFramebuffer.kext/Contents/MacOS/RBAMDFramebuffer" 2>/dev/null | awk '{print $2}')"
+if [ -n "$fbuilt" ] && grep -q com.rembrandtgpu.fb "$out/kexts.txt"; then
+    grep com.rembrandtgpu.fb "$out/kexts.txt" | grep -q "$fbuilt" \
+        && echo "  loaded framebuffer = build/out (UUID $fbuilt)" \
+        || echo "  NOTE: loaded framebuffer differs from build/out (UUID $fbuilt); the framebuffer requires its own AuxKC update"
+fi
+
 # 2rh: THE SAMPLE IS NOW OPT-IN, AND IT IS THE REASON THIS SCRIPT KILLED THE
 # MACHINE TWICE. `sample` suspends the target's threads and walks their stacks.
 # A WindowServer wedged inside a kernel call - which is the exact state you run

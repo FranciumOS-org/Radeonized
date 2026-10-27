@@ -791,6 +791,11 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // (agdc_extcap_gated_n) and how many types were ANSWERED. On boot 169 the
     // answered count was 1 of 16; with the arg it should be 5.
     "agdc_extcap_all", "agdc_extcap_answered", "agdc_extcap_gated_n",
+    // 2v0: the gamma reply's own shape, read back out of the buffer we wrote,
+    // so a wedged boot's NVRAM identifies the build without kmutil. 2 entries
+    // and elems2 = 0x200 is the two-entry build; absent means the one-entry
+    // build (or a gamma query that never arrived).
+    "agdc_gamma_entries", "agdc_gamma_elems2",
     "fb_vbl_hv_state", "fb_vbl_state", "fb_vbl_ot_cls", "fb_vbl_hv_cls",
     // and the keys that say the early trigger actually ran, so an absent
     // `fb_vbl_ot_armed` can be told from "the bridge never published".

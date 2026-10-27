@@ -40042,3 +40042,67 @@ the one-shots, and the capture taken once WindowServer is up — which
 `plugin_check.sh` now says out loud (2u5). The single reading that decides it
 is whether `Attempting to get 3-channel gamma table capabilities from plane
 with no 3-channel gamma table support` changes from **7**.
+
+## 2v0: boot 180 — the two-entry reply is ACCEPTED, and the capture died at `kmutil showloaded`
+
+Boot 180 (`rbgpu-boot = 180`, new nonce, boot 15:04:40, capture 15:07:21 =
+**+161 s**, `armed = 1`) is 2u9's experiment. Half of it landed.
+
+**The reply is not refused.** Byte-for-byte the same AGDC numbers as boot 179's
+one-entry reply: `agdc_extcap_all 1`, `agdc_extcap_answered` **15**,
+`agdc_extcap_calls 48`, `agdc_failed_calls 34`, `agdc_last_ret 0`,
+`agdc_extcap_result 0`, `agdc_say = "PUBLISHED"`, `agdc_error 0`,
+`agdc_stage 0x46`, `agdc_user_vendor 4`. That was the thing most likely to go
+wrong — a two-entry gamma reply with a count of 2 could have been rejected
+outright — and it was not.
+
+**And the reading the boot existed for is missing again.** The capture holds
+`boot-args.txt`, `boot-session-uuid.txt`, `boot-time.txt`, `nvram.txt`,
+`peer.plist` and `framebuffer.plist`, and **stops**: no `kexts.txt`, no
+`display-log.txt`. The script's next step after the two `ioreg` dumps is
+`kmutil showloaded`, which was **unbounded** — `rb_ioreg` has had a 10 s guard
+since 2rc and `kmutil` never did. It talks to `kernelmanagerd`, which a wedged
+graphics stack can hold, and the machine was power cycled at 15:07:57, 36 s
+into a capture that was already stuck.
+
+Two consequences, and the second is worse than the first:
+
+1. **No display log**, so whether
+   `Attempting to get 3-channel gamma table capabilities from plane with no
+   3-channel gamma table support` moved off 7 is **unmeasured**. Third boot in
+   a row where the AGDC half reports cleanly and the display half is blank —
+   +28 s (2u5), a clean read (2u6), and now a hang in the step before it.
+2. **No provenance.** `kexts.txt` is where rule 15's "check the loaded UUID
+   against `build/out`" gets its input. Without it, boot 180's numbers cannot
+   be attributed to build `AA4E5167` rather than to `43447D39` still sitting in
+   the EFI — the identical-to-179 numbers are consistent with *either*. So even
+   "the two-entry reply is accepted" is, strictly, conditional on the install
+   having taken.
+
+### Three fixes, all in this change
+
+**`tools/plugin_check.sh` gained `rb_bounded`**, the same shape as `rb_ioreg`
+generalised to any command, and `kmutil showloaded` now runs under it with a
+20 s limit, writing `kexts-all.txt` and filtering from that. Tested in
+isolation: `rb_bounded 5 … echo hello` returns 0 with the output, and
+`rb_bounded 2 … sleep 10` prints its skip notice, returns 1 and leaves an empty
+file rather than a partial one.
+
+**The display log now runs BEFORE the kext listing.** It is the measurement
+these boots exist to take; the kext listing is a provenance check. If one of
+them has to be the casualty of a hang, it should not be the one that cost three
+boots.
+
+**The plugin publishes the gamma reply's own shape**, read back out of the
+buffer it just wrote: `agdc_gamma_entries` (the published count) and
+`agdc_gamma_elems2` (the second entry's element count at +0x28, the field 2u7
+measured CoreDisplay refusing on). Both are in the peer's **hot-key list**, so
+they reach `rbgpu-diag` and survive a wedge — which is the whole point: NVRAM
+alone now identifies which gamma build ran, with no `kmutil` in the path.
+`2` and `0x200` is the two-entry build; absent is the one-entry build, or no
+gamma query at all.
+
+Build **`A90BD0F8`** (was `AA4E5167`). `kmutil libraries -p` resolves 0 from
+`SystemKernelExtensions.kc`. The experiment is unchanged and still single
+variable; it needs the install, the one-shots, and a capture that now cannot
+be stopped by the step before the one that matters.
