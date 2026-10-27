@@ -65,14 +65,32 @@ not memory, not a flag and not the AGDC gate:
   **Boot 168 measured that no transaction has EVER been queued** — past the
   gate, with the table not full (`diag_used` 571 of 768), `fb_vbl_ot_armed` is
   absent. So "the ring filled and nothing retired it" is excluded (2s9).
-- **The early path wedges because OUR bridge refuses getLinkConfig** (2s9).
-  `sampleTiming()` is called from one place, the start path, and on the early
-  path it runs 1085 ms *before* the framebuffer exists (boot 168: sampled
-  6320 ms, framebuffer 7405 ms), so the NDRV source returns 7, the OTG
-  fallback declines by 2s1's guard, and `timingValid` stays false for the
-  whole boot — attribute **`0x921`** refused 4 of 6 times with
-  `kIOReturnUnsupported`. Build `8B261646` re-samples on framebuffer arrival,
-  on its own thread_call, scoped to `early`. **Not booted.**
+- **Our AGDC bridge is ELIMINATED as the cause** (2s9/2sa). Boot 168 found it
+  refusing `0x921` all boot, because `sampleTiming()` ran 1085 ms before the
+  framebuffer existed and nothing re-sampled. Build `8B261646` re-samples on
+  framebuffer arrival (own thread_call, scoped to `early`), and boot 169
+  measured it work: `agdc_resample_valid 1`, `agdc_tim_cached 2`, the panel's
+  own timing from OTG0, **`agdc_link_result 0`**. The negotiation is now
+  complete and correct — the remaining `0x711` refusals are the fifteen type
+  bits Apple's own driver also refuses (`rb_agdc.h:182`, measured:
+  `agdc_extcap_calls` 16, scaler answered, Cursor last). **And
+  `fb_vbl_ot_armed` is still absent**, so the second gate is elsewhere.
+- **What the wedge looks like from WindowServer's side** (2sa): no AGDC error
+  in the log at all, and 56 byte-identical `DisplayPipeState` dumps in which
+  `Clean` never appears once. `Fetch - Pipe` and `EOTF - GPU`, so it IS
+  routing through the pipe; `System Gamma - Unknown` is the one operation that
+  does not resolve. We answer **one** of the five capability types a real AMD
+  Mac implements (1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler, 0x8000 Cursor).
+  Whether the pipe stays Dirty *because* of that is a correlation, not a
+  measurement — it is the next thing to separate, against the still-standing
+  pre-statement that IOPresentment needs
+  `IOPresentmentBindIOAccelSurfaceToResource` and `SetPlaneState`, which
+  `IONDRVFramebuffer` implements neither of.
+- **A boot of `8B261646` + `-rbgpuagdcearly` hung at the progress bar with no
+  SSH** and needed a force restart (2sa). That boot was UNARMED
+  (`agdc_error 3`, `agdc_oneshot 2`), so the bridge was inert in it and the
+  cause is **unexplained**. It is a worse failure mode than the wedge, because
+  it leaves no SSH window.
 
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
