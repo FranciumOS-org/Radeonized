@@ -271,11 +271,33 @@ static inline int rb_agdc_scaler_entry(uint8_t *e, uint32_t slotA, uint32_t slot
 /* this->0x2e798, a device flags qword Apple ORs into the segment id. */
 #define RB_AGDC_DEV_FLAGS_NONE    0u
 /* vt[0x118](0x17) + 1. Apple writes a second gamma entry only when this is
- * >= 2, so 1 is both the minimum and the single-entry case. */
-#define RB_AGDC_GAMMA_SEGMENTS    1u
-/* vt[0x1b8](0xf), the gamma channel table entry count that
- * CoreDisplay::IOPCapabilities::GammaChannelTableEntryCountAndType reads. */
+ * >= 2, so 1 is both the minimum and the single-entry case.
+ *
+ * 2u9: RAISED FROM 1 TO 2, and this is the one place to put it back. Boot 179
+ * measured that answering type 2 at all moves CoreDisplay's complaint from
+ * "plane with no gamma" to "plane with no 3-channel gamma table support"
+ * (2u6), and 2u7 read the sole emitter: the predicate is a NON-ZERO value
+ * behind an accepted format word, and our format word is already accepted.
+ * Apple's second entry is the only one of the two whose element count is a
+ * LITERAL in its code - 0x200 - rather than a query on an object we lack, so
+ * taking the two-entry branch is the one way to answer with a non-empty gamma
+ * table WITHOUT inventing a number (rule 17). Entry 1 is unchanged and its
+ * substituted count below is untouched. */
+#define RB_AGDC_GAMMA_SEGMENTS    2u
+/* vt[0x1b8](0xf), written as a QWORD to entry 1's +0x28. 2u9 read the widths
+ * and this is the entry's ELEMENT COUNT, not a channel count - the name is
+ * kept because 2sc coined it and the journal cites it. Still substituted,
+ * still 0: Apple's smallest branch. Entry 2 carries Apple's own 0x200. */
 #define RB_AGDC_GAMMA_CHANNELS    0u
+/* movq $0x200, 0x354(%rbx) in getFbCapabilityForGamma - Apple's LITERAL for
+ * the second gamma entry's element count, not a substitute. [2u9] */
+#define RB_AGDC_GAMMA_ELEMENTS    0x200u
+/* powf(2.0, -25) and powf(2.0, 7) as IEEE-754 single bit patterns: Apple calls
+ * AmdMathUtilities::power(2.0, -25) and (2.0, 7) and stores the cvtsd2ss
+ * results at entry 2's +0x20 and +0x24. Exact powers of two, so the encodings
+ * are exact: exponent 127-25 = 102 = 0x66 and 127+7 = 134 = 0x86. [2u9] */
+#define RB_AGDC_GAMMA_MIN_F       0x33000000u
+#define RB_AGDC_GAMMA_MAX_F       0x43000000u
 /* vt[0x1b8](6), written to BOTH entry+0x14 and entry+0x18. */
 #define RB_AGDC_CURSOR_DIM_NONE   0u
 
@@ -300,6 +322,29 @@ static inline int rb_agdc_gamma_entry(uint8_t *e) {
     rb_agdc_put32(e+0x10, 0x10);
     rb_agdc_put32(e+0x24, 0x3f800000);    /* +1.0f */
     rb_agdc_put32(e+0x28, RB_AGDC_GAMMA_CHANNELS);
+    return 0;
+}
+
+/* Apple's SECOND gamma entry, written only when the segment count is >= 2.
+ * Field for field from 0xbfece6f onward, with the qword writes split:
+ *   +0x00 0x00088005          movl  $0x88005, 0x32c(%rbx)
+ *   +0x04 1                   movq  $1,       0x330(%rbx)
+ *   +0x0c 0                   movl  $0,       0x338(%rbx)
+ *   +0x10 1                   movq  $1,       0x33c(%rbx)   (format word)
+ *   +0x18 devflags | 0x40     movq  ...,      0x344(%rbx)
+ *   +0x20 powf(2.0, -25)      movss %xmm0,    0x34c(%rbx)
+ *   +0x24 powf(2.0, 7)        movss %xmm0,    0x350(%rbx)
+ *   +0x28 0x200               movq  $0x200,   0x354(%rbx)
+ * Only the device-flags term is unavailable (this->0x2e798); 2sc's convention
+ * gives it 0, so Apple's own OR leaves 0x40. Everything else is Apple's. */
+static inline int rb_agdc_gamma_entry2(uint8_t *e) {
+    rb_agdc_put32(e+0x00, 0x00088005);
+    rb_agdc_put32(e+0x04, 1);
+    rb_agdc_put32(e+0x10, 1);
+    rb_agdc_put32(e+0x18, 0x40u | RB_AGDC_DEV_FLAGS_NONE);
+    rb_agdc_put32(e+0x20, RB_AGDC_GAMMA_MIN_F);
+    rb_agdc_put32(e+0x24, RB_AGDC_GAMMA_MAX_F);
+    rb_agdc_put32(e+0x28, RB_AGDC_GAMMA_ELEMENTS);
     return 0;
 }
 
@@ -355,8 +400,15 @@ static inline int rb_agdc_extcap(void *out, size_t size,
         return rb_agdc_csc_entry(e);
     }
     if (type == RB_AGDC_CAP_GAMMA) {
+        /* Same capacity guard the degamma arm has always had: the count we
+         * publish must be a count of entries that actually fit. */
+        if ((size_t)RB_AGDC_EXTCAP_ENTRY_OFF
+            + (size_t)RB_AGDC_GAMMA_SEGMENTS*RB_AGDC_EXTCAP_ENTRY_SZ > size)
+            return -1;
         rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, RB_AGDC_GAMMA_SEGMENTS);
-        return rb_agdc_gamma_entry(e);
+        if (rb_agdc_gamma_entry(e)) return -1;
+        if (RB_AGDC_GAMMA_SEGMENTS < 2u) return 0;
+        return rb_agdc_gamma_entry2(e+RB_AGDC_EXTCAP_ENTRY_SZ);
     }
     if (type == RB_AGDC_CAP_DEGAMMA) {
         /* Two entries, so the capacity must really hold them. */
