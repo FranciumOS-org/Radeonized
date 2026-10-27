@@ -70,6 +70,15 @@ fi
 # and refusing BEFORE the load keeps a forgotten `nvram` from reading as "the
 # kext is broken", because absence is not a result.
 if [ "$mode" = beside ] && ! nvram rbgpu-fb >/dev/null 2>&1; then
+    :
+fi
+if [ "$mode" = beside ] && ! nvram boot-args 2>/dev/null | grep -q -- '-rbgpufb'; then
+    echo "-rbgpufb is not in boot-args, so probe() will decline (2sr: the"
+    echo "boot-arg is the durable disarm, not the NVRAM key). Add it with:"
+    echo "  sudo tools/efi.sh bootarg add -rbgpufb"
+    exit 1
+fi
+if [ "$mode" = beside ] && ! nvram rbgpu-fb >/dev/null 2>&1; then
     echo "rbgpu-fb is not set, so probe() would decline and this load would"
     echo "prove nothing. Set it first:"
     echo "  sudo nvram rbgpu-fb=1"

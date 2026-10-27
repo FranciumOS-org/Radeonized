@@ -280,11 +280,16 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
 - **Never install into the EFI or `/Library/Extensions`.** The framebuffer
   kext's third stage needs the auxiliary collection, which is an install and so
   is the user's own step; Claude builds it and hands over the commands.
-- The user runs `sudo tools/fbload.sh [beside]`. Both stages need
-  `sudo nvram rbgpu-fb=1` first — the kext's `probe()` refuses unarmed and
-  consumes the key durably before it touches anything, so a bad load or boot
-  costs **one power cycle**. The script refuses to load when the key is unset,
-  so a forgotten `nvram` cannot read as a broken kext.
+- The user runs `sudo tools/fbload.sh [beside]`. Arming needs **both**
+  `-rbgpufb` in boot-args **and** `sudo nvram rbgpu-fb=1` (2sr). The boot-arg
+  is the durable disarm; **the NVRAM one-shot is NOT** — `rbgpu-fb` survived a
+  reboot after being removed and read back absent (2sq), because
+  `IODTNVRAM::removePropertyWithGUIDAndName` calls no sync at all. So between
+  experiments take the boot-arg out with
+  `sudo tools/efi.sh bootarg remove -rbgpufb`, exactly as rule 9 says.
+- **Never run `kmutil unload` on the framebuffer kext — it PANICS** (2sq).
+  `IOFramebuffer::stop+0x48` reads `*(this->0x1c8)`, which is NULL on an
+  instance that never completed configuration. To remove the kext, **reboot**.
 - Before any load, **commit** so a hang loses nothing. The user allows Claude
   to commit at any time without asking (2026-10-04); **pushing still needs
   asking**.

@@ -10,6 +10,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
+#include <pexpert/pexpert.h>
 
 #define LOG(fmt, ...) IOLog("RBAMDFramebuffer: " fmt "\n", ##__VA_ARGS__)
 
@@ -41,15 +42,39 @@ const UInt32 kApertureBytes         = 8294400;      /* IOFBMemorySize, live */
  * rather than typed so the two cannot drift. */
 const uint64_t kVBLPeriodNs         = 1000000000ULL * 65536ULL / kRefreshRate1616;
 
-/* Read and consume the NVRAM one-shot. Returns true only when this boot was
- * explicitly armed. Mirrors RembrandtGPUPeer::armed() deliberately, including
- * its two hard-won details: the bounded retry for the /options race (2in), and
- * the FORCESYNCNOW flush so the disarm reaches flash before anything can go
- * wrong on this boot (2dg - a removal that never reached flash cost a boot
- * loop). The retry is shorter here because probe() runs after IODT matching
- * has begun, not during early bootstrap. */
+/* 2sr: THE BOOT-ARG IS THE REAL DISARM. The NVRAM one-shot is not.
+ *
+ * `rbgpu-fb` survived a reboot after being removed and read back as absent
+ * (2sq), and the kernel says why that is possible:
+ * `IODTNVRAMVariables::removeProperty` tail-jumps to
+ * `IODTNVRAM::removePropertyWithGUIDAndName`, which calls **no** sync - the
+ * removal is in memory until something else commits it. Only
+ * `setPropertyWithGUIDAndName` calls `IODTNVRAM::syncInternal`, and it is the
+ * single referrer of `IONVRAM-FORCESYNCNOW-PROPERTY` in the whole kernel. So
+ * the read-back we perform proves the in-memory state and nothing about flash.
+ *
+ * CLAUDE.md rule 9 already states the answer, learned on other features and
+ * not applied to this one: *the feature needs the arg AND the key, so without
+ * the arg a stuck key is inert.* So arming requires BOTH, and the boot-arg -
+ * removed with `tools/efi.sh bootarg remove -rbgpufb`, which edits a file and
+ * is durable in a way an NVRAM one-shot demonstrably is not - is what makes a
+ * stuck key harmless.
+ *
+ * The one-shot is kept for what it is good at: making a single armed boot
+ * single, so a repeat needs a deliberate `nvram` command. It is no longer load
+ * bearing for safety.
+ *
+ * Also mirrors RembrandtGPUPeer::armed()'s bounded retry for the /options race
+ * (2in); shorter here because probe() runs after IODT matching has begun. */
 bool armedOnce(void)
 {
+    char flag[16];
+    if (!PE_parse_boot_argn("-rbgpufb", flag, sizeof(flag))) {
+        LOG("-rbgpufb is not in boot-args; NOT arming whatever NVRAM says "
+            "(rule 9: the feature needs the arg AND the key, so a key that "
+            "failed to clear is inert). IONDRVFramebuffer keeps the panel.");
+        return false;
+    }
     IORegistryEntry *options = nullptr;
     unsigned tries = 0;
     for (; tries < 5; tries++) {
@@ -84,8 +109,9 @@ bool armedOnce(void)
     }
 
     if (!armed) {
-        LOG("rbgpu-fb not set; staying out of the way (the desktop keeps "
-            "IONDRVFramebuffer). Arm it with: sudo nvram rbgpu-fb=1");
+        LOG("-rbgpufb present but rbgpu-fb not set; staying out of the way "
+            "(the desktop keeps IONDRVFramebuffer). Arm with: "
+            "sudo nvram rbgpu-fb=1");
         options->release();
         return false;
     }
@@ -95,11 +121,15 @@ bool armedOnce(void)
         options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
         sync->release();
     }
+    /* This read-back proves the IN-MEMORY state only. 2sq measured the key
+     * coming back after a reboot having read as absent here, and the kernel
+     * path above explains how. So it is logged as what it is, and the boot-arg
+     * is what the disarm actually rests on. */
     bool cleared = options->getProperty("rbgpu-fb") == nullptr;
-    LOG("rbgpu-fb set; taking the panel for THIS BOOT ONLY; one-shot clear %s",
-        cleared ? "OK (next boot comes up on IONDRVFramebuffer)"
-                : "FAILED - still set, the next boot will arm too; "
-                  "disarm with `nvram -d rbgpu-fb`");
+    LOG("armed (-rbgpufb + rbgpu-fb); taking the panel for THIS BOOT. "
+        "one-shot removal %s IN MEMORY - this does NOT prove it reached flash "
+        "(2sq); the durable disarm is `sudo tools/efi.sh bootarg remove -rbgpufb`",
+        cleared ? "accepted" : "FAILED, so the key is definitely still set");
     options->release();
     return true;
 }
