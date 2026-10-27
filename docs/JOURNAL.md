@@ -36426,3 +36426,100 @@ window. Two layers:
    Recorded now, while the machine is up and the names can be read off it,
    rather than looked up from a black screen. Four Recovery trips were each
    ended by a detail asserted instead of measured (2ny).
+
+## 2sn — STAGE 1 PASSED ON HARDWARE: the kernel bound IOGraphicsFamily to our kext, and the vendor arithmetic is clear
+
+The user ran `sudo tools/fbload.sh`. No reboot, no display disturbance, nothing
+matched. Two results, one of them stronger than the measurement it confirms.
+
+### 1. The load was accepted, and the kernel itself names the dependency
+
+```
+201    0 0xffffff7f98089000 0x1ff9  0x1ff9  com.rembrandtgpu.fb (0.1.0)
+                                    97E170CD-72E5-3858-B32D-F85F4D6CBB39 <139 18 7 6 3>
+```
+
+and, from `kextstat` in the same boot:
+
+```
+139   18 0xffffff7f95c94000 0x2efea  com.apple.iokit.IOGraphicsFamily (599)
+ 18   37 0xffffff8002886000 0x35000  com.apple.iokit.IOPCIFamily (2.9)
+141    4 0xffffff7f95ce8000 0x8ffc   com.apple.iokit.IONDRVSupport (599)
+```
+
+**Index 139 in our dependency list IS `IOGraphicsFamily`.** The link is not a
+static claim from `kmutil libraries` any more — the running kernel resolved it
+and recorded it.
+
+And the load address settles it from the other side. 2qs measured the split
+with these exact numbers: *"IOGraphicsFamily `0xffffff7f95c94000`, our plugin
+`0xffffff8004043000` — all `0xffffff80…`, the boot KC. 2oz's blocker
+confirmed."* Our framebuffer kext loaded at **`0xffffff7f98089000`** — the
+`0xffffff7f9…` range, beside IOGraphicsFamily and IONDRVSupport, **not** the
+boot-KC range the plugin lives in. The same instrument that was read as proof
+the route was closed now shows us inside the region it was measuring. The
+measurement was always right; only the conclusion drawn from it was wrong.
+
+`kernelmanagerd`'s own account of the decision, which is the part
+`kmutil libraries` could not speak to:
+
+```
+directLoadAuxiliaryExtensions: [com.rembrandtgpu.fb v0.1.0 ... signed @none ...]
+extensionsNeedingApproval:     []
+approvalsRequiredFromSyspolicyd: false
+unsupportedExtensions:         []
+safebootBlockedExtensions:     []
+```
+
+So: an **auxiliary** load, ad-hoc signed (`signed @none`), **no** syspolicyd
+approval required, not unsupported, and not safeboot-blocked. The UUID matched
+`build/out` (97E170CD…), per the standing rule.
+
+No `RBAMDFramebuffer:` log lines appeared, which is **correct and was predicted**:
+`--load-style start-only` sends no personality, so `probe()` never runs and the
+one-shot was neither read nor consumed. An absence that was stated in advance is
+a result; this one is.
+
+### 2. The vendor arithmetic for stage 3, measured rather than assumed
+
+`make useiop`, live, and `ioreg -rl -c IOFramebuffer`:
+
+```
+IONDRVFramebuffer   name=.Display_boot   -> bit 0x01   <-- UNKNOWN VENDOR
+present mask = 0x01  (1 framebuffer)
+supported mask = 0x1e
+reproduced UseIOPresentment() = 0
+```
+
+**Exactly one IOFramebuffer service exists on this machine.** That had to be
+checked rather than assumed, because this machine also carries
+`/Library/Extensions/NVRMFB.kext` (`com.nullmoth.NVRMFB`, alongside `NVAccel`,
+`NVRM` and `NVRMAGDC`) — an NVIDIA framebuffer kext from the nullmoth driver,
+which the stage-1 output listed in the auxiliary contents. **It publishes no
+`IOFramebuffer` service**, so it contributes no vendor bit.
+
+That matters concretely. `present` is the OR over all framebuffers, so a second
+unclassifiable one would have kept the gate shut no matter what we did, and
+stage 3 would have failed for a reason nothing in the kext could fix. With
+`.Display_boot` displaced and ours in its place the mask becomes `present =
+0x04`, `supported = 0x1e`, and `(0x1e & 0x04) == 0x04` — the gate opens. Free
+to measure now, expensive to discover from a black screen.
+
+Also noted without being chased: `.Display_boot`'s registry id read
+`0x1000004c9` earlier this session and `0x1000004c3` now. The node has been
+recreated in between. Not pursued, and not used for anything.
+
+### An instrument defect, found by its own output
+
+`fbload.sh`'s registry line was `ioreg -c IOFramebuffer -k IOClass | grep '^+-o'`,
+and it printed **`+-o Root`** — saying nothing at all about framebuffers, while
+looking like an answer. That flag pair does not filter the way it reads. Fixed
+to `ioreg -rl -c IOFramebuffer | grep -E '^\+-o|"IOClass"'`, which is what
+produced the one-framebuffer result above, and the failure case now prints
+"no IOFramebuffer service found" rather than a bare `Root`. Rule 26 again, on
+our own script, caught only because a control existed elsewhere in the same run.
+
+### What stage 1 did NOT establish
+
+That `IOFramebuffer::start()` completes on this subclass. Nothing constructed an
+instance — that is exactly what stage 1 avoids, and exactly what stage 2 is for.
