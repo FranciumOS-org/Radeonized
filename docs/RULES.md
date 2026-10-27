@@ -220,6 +220,30 @@ here (2s5/2s9) - which is why WindowServer sat idle at 0.0 %. Next armed boot
 reads `RBFBVBLFires` / `RBFBVBLRegistered` / `RBFBVBLRunning` from `ioreg`
 (rule 31 - our `IOLog` is invisible).
 
+**GATE 1 IS WON, AND THE LATCH IS WHY IT DOES NOT SHOW** (2t7, boot 174, no
+boot spent). `ioreg` finds **exactly one** IOFramebuffer and it is ours, so no
+unclassifiable framebuffer contributes bit `0x01` any more: the vendor mask
+reads **0x04** and `UseIOPresentment()` returns **true, unpatched** - proven by
+boot 174 logging *"System set to use IOP but no display pipes are present"*,
+which sits past that call's own `testb/je`. 2qp needed a classifier patch for
+that line; we get it from the class name. **`gUseIOP` is a one-way LATCH**, so
+`CGXMappedDisplayStart` finds the `DisplayPipe` map empty, writes 0, and all 72
+later call sites - `GetNextSurface` among them - see false. That dissolves
+2t6's addendum, which is **withdrawn** along with both candidates it named: the
+preference read was corroborated (`useiop` via CFPreferences, and boot 149's
+os_state dump), and ordering was never the risk because `UseIOPresentment()`
+runs `GetSystemGPUVendors`' `dispatch_once` itself. `0x7ff8438eac90` is the
+entry count of CoreDisplay's `unordered_map<unsigned long long,
+CoreDisplay::DisplayPipe>`. The remaining link is **2r5's empty AGDC
+association map**, unchanged, and **our bridge was UNARMED in boot 174**
+(`agdc_say = "UNARMED: no class or service created"`, `agdc_oneshot 2`, zero
+`RembrandtGPUAGDC` instances), so `agdcinfo`'s `candidates 0` is **not** a
+verdict on it. Next experiment needs **no new code**: an armed boot with
+`-rbgpuagdc` *and* its one-shot, then `build/out/agdcinfo` over SSH. Timing is
+tight - boot 174 latched at **+6.5 s**, 2rw measured the bridge at **<= +5128
+ms** - and **`-rbgpuagdcearly` still stays OUT**; if the race is lost, make the
+bridge earlier, not the gate.
+
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
 once in a whole boot. **Do not force `UseIOPresentment` true** (2ql): 72 call
