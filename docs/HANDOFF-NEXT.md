@@ -1,4 +1,4 @@
-# Handoff — 2026-10-27, after 2v8
+# Handoff — 2026-10-27, after 2v9
 
 Read this, then `docs/RULES.md`, then grep `docs/JOURNAL.md` for the tags below.
 All hard rules in `docs/RULES.md` remain in force, unchanged.
@@ -80,52 +80,55 @@ Tooling fixed on the way (each had destroyed a capture):
 
 ## What to do next
 
-**2v8 answered step 1 of the previous handoff, and the answer closed the
-line.** Read `docs/JOURNAL.md` under `2v8` first — it withdraws three of
-2v7's closing statements. In short:
+Read `docs/JOURNAL.md` under **`2v8`** and **`2v9`** first. Between them they
+withdraw five earlier conclusions and reinstate two. The short version:
 
-- The target table is at **`0x7ff8404fc2f8`** with **four** entries,
-  `Unknown`(0), `GPU`(1), `Pipe`(2), `None`(3). `Unknown` is **enum 0**, not
-  a printer default. 2v7 read the table one slot high.
-- `System Gamma`'s target (`pipe->0x728 + 0x40`) has exactly **one** writer,
-  in `DisplayPipe::Commit` at `0x7ff804116f3e`, gated on the transaction's
-  system-gamma optional `txn->0x1a0`, whose only setter is
-  `CoreDisplay::Display::SetSystemGamma(double)` (`0x7ff8040a19f0`).
-  `UpdateTargetStateColorProcessing` (`0x7ff8041079be`) assigns Linearize,
-  CSC, Regamma and EOTF and **never** System Gamma.
-- So **`System Gamma - Unknown` is a symptom of "no transaction has ever been
-  committed", not an independent blocker**, and nothing our kext replies can
-  change it. It also explains 2v6's unexplained `EOTF` `GPU`->`Pipe` move.
-- **`Clean` was never printable.** The byte prints `Dirty` or spaces;
-  controlled counts in boot 182's capture are `Dirty` 528 = 66 x 8, `Bypass`
-  0, `Clean` 0. Drop it from the open list; the real content is that **all
-  eight operations are Dirty and none is Bypass in all 66 dumps**.
+- **`System Gamma - Unknown` is closed (2v8)** — enum 0, never written; its
+  only writer is `DisplayPipe::Commit` `0x7ff804116f3e`, gated on a
+  transaction carrying a system gamma. Not ours to answer.
+- **`Clean` was never printable (2v8)** — the byte prints `Dirty` or spaces.
+  All 8 ops are Dirty, none Bypass, in all 66 dumps.
+- **The 66 dumps ARE the 66 submit failures (2v9)** — one straight-line block
+  in `Commit`. Four equal counts of 66. Stop treating dump counts as evidence
+  of retries or livelock.
+- **`Submit()` fails at its first step, silently, iff the plane count is 0
+  (2v9)**, and that count collapses from one thing: the **0x711 capability
+  type `0x10` (Scaler)** reply must return IOReturn 0, non-zero out-length and
+  non-zero count, or `caps->0x434` is never set, `CreatePlaneDictionary`
+  returns NULL, `PlaneArray`/`DeviceArray` collapse, and the plane count byte
+  stays 0.
+- **2se/2sf are reinstated; 2u3/2u4's retirement is withdrawn.**
 
-**So the frontier is back where 2s9/2sv left it, now with the gamma side
-provably clear: nothing has ever queued a transaction.** `fb_vbl_ot_armed` is
-absent with `diag_used` 549-552 of 768, so rule 14's check passes and the
-absence carries information.
+**The tension to resolve first, and it needs no boot.** Boot 182's own NVRAM
+says the scaler WAS answered: `agdc_extcap_answered 0xf` (five types x three
+rounds), `agdc_last_attr 711`, `agdc_last_ret 0`, `agdc_extcap_all 1`. If that
+is true, `0x434` should be 1 and the chain should not collapse — yet
+`Submit()` fails 66 times in a way that only a zero plane count explains.
+Something between our reply and `__GatherAGDCDisplayPipelineCapabilities`
+does not match. Candidates, in order of cheapness:
 
-The next step is to find **what should queue the first transaction and does
-not**. Two static reads, neither needing a boot:
+1. **Our handler refuses on the framebuffer index.** `rb_agdc_extcap` does
+   `if (p[0] != 0) return -1`, and IOPresentment seeds `buf[0x00]` from
+   `(caps->0x20)->0x50` — a **32-bit** copy of a field Apple reads back with
+   `movzbl`. If that field is not 0 on this machine, every scaler query is
+   refused. `agdc_extcap_answered` counting 15 argues against it, but the
+   counter does not record *which* types were answered — **a last-wins key
+   cannot express a per-entry fact** (rule 14). Publish one key per type.
+2. **The out-length.** `rb_agdc_reply` never writes `*out_size` on the 0x711
+   path; it inherits the caller's 0x196c. Confirm that survives Apple's user
+   client, because `0x7ff812e97a72` fails the whole gather on a zero length.
+3. **Whether `__GatherAGDCDisplayPipelineCapabilities` runs at all**, and on
+   the `IOPresentmentCapabilitiesDisplayPipe` subclass (only that subclass has
+   `CreatePlaneArray` at `vt[0x50]`).
 
-1. `CoreDisplay::DisplayPipe::BuildTransactions(UseCountProxy<DisplaySurface*>)`
-   (`0x7ff80410be58`) and `DisplayPipe::RunFullDisplayPipe`
-   (`0x7ff80410e2c2`) — find the predicate that decides between the full pipe
-   and `RunGPUDisplayPipe` (`0x7ff804112c9c`), which is the path that produces
-   *"Fallback GPU Display Pipe transaction submission failed"* (1.00/dump,
-   still unexplained).
-2. `AreOperationsSupportedInHW` (`0x7ff8041087fe`) reads every target with
-   `cmpl $0x2` (== Pipe). Boot 182 has **two** Pipe (Fetch, EOTF) and five
-   None. Establish what that function returns for that mix and who consumes
-   it — it is the most likely gate between "capabilities are fine" and "no
-   transaction is built".
+The cheapest next build is pure instrumentation in our own bridge, one NVRAM
+key per 0x711 type recording the framebuffer index we saw, the type, the count
+we wrote and our return — which distinguishes all three at once.
 
-Useful command form:
-
-```bash
-env -u DYLD_INSERT_LIBRARIES sh tools/re/dscdis.sh 0x7ff80410be58 0xe42
-```
+**Also unresolved (2v9)**: the `je` at `0x7ff804117ff7` into the fallback can
+never fire, because `0x7ff80410ddff` cannot return an empty vector. The
+fallback is entered by the `jmp` at `0x11812b` instead, from the `pipe->0x290`
+branch. Which of `0x290`'s conditions produces it is not established.
 
 **3. Still open, carried forward:**
 - The **wedge** is unexplained; boots 177–182 all wedged. 2s8 holds — a plain
@@ -157,7 +160,7 @@ RB_AGDC_GAMMA_MIN_F      0x33000000   /* powf(2,-25) */
 RB_AGDC_GAMMA_MAX_F      0x43000000   /* powf(2,7)   */
 ```
 
-Nothing has changed in the kext in 2v8 either — it was a pure static read.
+Nothing has changed in the kext in 2v8 or 2v9 either — it was a pure static read.
 Boot 182 ran build `7C1FED31` (`7C1FED31-711A-3A1F-B035-6FDEAAC9DF9C`) with
 `-rbgpuagdccaps` armed. Nothing has changed in the kext since, so no new build
 or boot is pending — the next step is a static read.

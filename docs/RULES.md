@@ -315,6 +315,53 @@ gamma** — the same silence as `fb_vbl_ot_armed` being absent, not an
 independent blocker. **Do not spend another boot, AGDC field or capability
 type on System Gamma.**
 
+**THE SUBMIT PATH IS READ END TO END, AND THE PLANE-COUNT LINE IS BACK
+(2v9).** No boot. The **66 dumps and the 66 failures are ONE event**: a single
+straight-line block in `DisplayPipe::Commit` logs *"Fallback GPU Display Pipe
+transaction submission failed"* (`0x7ff804118a4a`), prints the
+`DisplayPipeState` (`0x7ff804118a72`), then *"Transaction Target State"* and
+*"DisplaySurface Size"* — four counts of **66** in boot 182's capture. So the
+dumps were never a separate phenomenon; they are the failure's own
+diagnostic, and every reading since 2sa that built on "56/58/66 identical
+dumps" was describing one failing submit retried.
+That block runs only on the **GPU FALLBACK** path (`RunGPUDisplayPipe`
+`0x7ff804112c9c` then `BuildTransactions`), entered via `jmp 0x118983` from
+the `pipe->0x290` branch — CoreDisplay has already abandoned the hardware
+pipe. (**Unresolved**: the other entry, `je` at `0x7ff804117ff7`, fires only
+on an empty vector from `0x7ff80410ddff`, which cannot return empty — all
+nine cases write at least `'ARGB'`.)
+`IOPTransaction::Submit` (`0x7ff8040c8a56`) fails at its **first** step and
+**logs nothing**, which matches 66 failures with zero IOPresentment errors in
+2205 lines: `IOPresentmentBegin` -> `vt[0x78]`
+(`0x7ff812e9cf8a`) -> `cmpb %r12b, %al; jbe` where `al` is the **plane count**
+byte `backend+0x11` and `r12b` is 0 — so **a plane count of 0 is exactly and
+only what makes it return NULL**. That byte = `CFArrayGetCount(caps
+["DeviceArray"])`, and `DeviceArray` collapses to NULL if
+`CreatePlaneDictionary` (`0x7ff812e9aca4`) does, which happens **iff
+`caps->0x434 != 1`** — its one fatal branch. `0x434` is set by a single
+instruction (`0x7ff812e97b13`) in `__GatherAGDCDisplayPipelineCapabilities`,
+only when the **first** 0x711 query — capability type **`0x10` (Scaler)**,
+capacity 8 — returns IOReturn 0, a non-zero out-length and a non-zero count.
+Which is exactly what 2rf wrote at `rb_agdc.h:189`, now confirmed from the
+consuming side three layers down.
+**2se and 2sf are REINSTATED and 2u3/2u4's retirement of them is WITHDRAWN.**
+2u4 retired the line because boot 177 read `Plane Index: 0` in all 58 dumps —
+but that is CoreDisplay's **index** of the plane being described (0 = the
+first one, the normal value), not IOPresentment's plane **count**. An index is
+not a count; name the object a number belongs to before retiring a line with
+it.
+
+**The live machine is NOT the armed boot, and two instruments lied (2v9).**
+`kern.boottime` 16:09:59 vs the capture's 16:07:01, `rbgpu-boot` still 182 and
+both one-shots absent: the running box was **never armed**, so the absence of
+`RBAMDFramebuffer`, the accelerator, `RembrandtGPUAGDC` and
+`com.rembrandtgpu.fb` from it means nothing, and WindowServer at 207.9 % there
+is not the boot-182 wedge. **`timeout` does not exist on macOS** — three
+`ioreg` reads came back empty as `timeout: command not found` and looked
+exactly like "service absent"; only a control in the same command
+(`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
+anything from the live machine, establish which boot it is.**
+
 **`Clean` NEVER APPEARED BECAUSE THE PRINTER CANNOT PRINT IT (2v8).** That
 byte prints `"Dirty "` or six spaces; the string `Clean` is not in
 CoreDisplay. Controlled against the capture: `DisplayPipeState` 66, **`Dirty`
@@ -607,8 +654,10 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     capture is two lines, not a registry dump; **`ioreg -c X -k Y` does not
     filter** and printed only `+-o Root` (2sn — use `ioreg -rl -c X`); a
     tool's **exit code can be its verdict**, so `make useiop && …` reported
-    "failed" under a perfectly good report (2so); **a grep for a word the
-    producing code never contains returns 0 forever** — `Clean` was counted
+    "failed" under a perfectly good report (2so); **`timeout` does not exist
+    on macOS**, so three `ioreg` reads came back as `timeout: command not
+    found` and looked exactly like "the service is absent" (2v9); **a grep for
+    a word the producing code never contains returns 0 forever** — `Clean` was counted
     across five boots and six milestones while CoreDisplay's printer only ever
     writes `Dirty` or spaces (2v8, the most expensive instance); and **when
     xrefing a string, xref the string's START** (find the preceding NUL first)
@@ -638,6 +687,15 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the `Darwin Kernel Version` banner, once per boot. And `log` is a zsh
     builtin that shadows `/usr/bin/log`: always the absolute path, always with
     a known-present control. [2q0, 2s1]
+33. **Before reading anything from the LIVE machine, establish which boot it
+    is**: `kern.boottime` against the capture's, and `rbgpu-boot` against the
+    last nonce. The running box is not the armed boot merely because the armed
+    boot's capture is the newest on disk — 2v9 read a whole graphics stack as
+    "torn down during the wedge" when it was simply an unarmed boot two
+    minutes later. **And an index is not a count**: 2u4 retired the
+    plane-count line using `Plane Index: 0`, which is CoreDisplay's index of
+    the first plane, not IOPresentment's count. Name the object a number
+    belongs to before retiring a line with it. [2v9]
 32. **Read a `char*[]` table's LENGTH table too, and check the slot count
     against the bound in the code.** Cache string tables are concatenated with
     no separators, so names read without lengths run together and an

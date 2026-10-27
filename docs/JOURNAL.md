@@ -40934,3 +40934,182 @@ system gamma is committed.
 - **An enum value of 0 is a value, not an absence — but an unwritten field is
   an absence that LOOKS like that value.** Distinguishing them needs the
   writer, not the reader.
+
+## 2v9
+
+**The whole path from our AGDC reply to the 66 failing dumps is now read end to
+end, and 2u3/2u4's retirement of the plane-count line is WITHDRAWN.** Static
+read plus live reads of the running machine; **no boot spent**.
+
+### The 66 dumps and the 66 failures are ONE event
+
+`DisplayPipeState::operator std::string()` has five call sites. The one that
+produces our dumps is inside `DisplayPipe::Commit`, in a single straight-line
+block that runs when a transaction's submission fails:
+
+```
+7ff804118a2e:  callq IOPTransaction::Submit        (0x7ff8040c8a56)
+7ff804118a33:  testb %al,%al ; jne next-transaction
+7ff804118a45:  callq IOPAttachment::RemoveTransactionFromList
+7ff804118a4a:  log  #0xdbb "Fallback GPU Display Pipe transaction submission failed"
+7ff804118a72:  callq DisplayPipeState::operator std::string()
+7ff804118a9a:  log  #0xdbc "Transaction Target State\n%s"
+7ff804118b02:  log  #0xdc0 "DisplaySurface Size: (%.0fx%.0f) Format:%c%c%c%c"
+```
+
+Controlled against `logs/20261027-160914-plugin/display-log.txt`: `Fallback …
+submission failed` **66**, `Transaction Target State` **66**,
+`DisplayPipeState` **66**, `DisplaySurface Size` **66**. Four equal counts, one
+block. So the dumps were never an independent phenomenon to be explained —
+**they are the failure's own diagnostic**, emitted once per failed `Submit()`.
+Every reading since 2sa that treated "56 / 58 / 66 byte-identical dumps" as a
+separate fact about retries or livelock was describing the retry of one
+failing submit.
+
+### CoreDisplay is on the GPU FALLBACK path, not the hardware pipe
+
+That block is reached only through `0x7ff80411897b`, whose only two entries are
+`je` from `0x7ff804117ff7` and `jmp` from `0x7ff80411812b`, and which begins:
+
+```
+7ff804118989:  movl  %r14d, 0x740(%rbx)     ; 0
+7ff80411899a:  callq DisplayPipe::RunGPUDisplayPipe    (0x7ff804112c9c)
+7ff8041189d1:  callq DisplayPipe::BuildTransactions    (0x7ff80410be58)
+```
+
+So CoreDisplay has already given up on the hardware pipe, composited on the
+GPU, and is trying to submit *that* — and even that submission fails. The
+branch at `0x7ff804117faa` tests `pipe->0x290` (written once, at
+`0x7ff804116eba`); the hardware path needs it set.
+
+**Unresolved and recorded as such**: the `je` at `0x7ff804117ff7` is taken when
+the vector built by `0x7ff80410ddff` is empty, and that function cannot return
+empty — every one of its nine cases, default included, allocates and writes at
+least `'ARGB'`. So the fallback is entered by the `jmp` at `0x11812b`, not that
+`je`. Which of `0x290`'s conditions produces it is **not** established here.
+
+### Submit() fails at its FIRST step, and the gate is the plane count
+
+`IOPTransaction::Submit()` (`0x7ff8040c8a56`) opens with:
+
+```
+7ff8040c8a8c:  callq IOPresentmentBegin(attachment->0x00, 0, 0)
+7ff8040c8a95:  testq %rax,%rax ; je 0x7ff8040c8dd0     -> FAIL, nothing logged
+```
+
+A NULL there fails the whole submit **silently**, which matches the capture
+exactly: 66 failures and *not one* IOPresentment error line in 2205 lines.
+
+`IOPresentmentBegin` (`0x7ff812e891b0`) validates and tail-calls
+`pres->0xa0`'s `vt[0x78]` = `IOPresentmentDisplayPipe::IOPresentmentBegin`
+(`0x7ff812e9cf8a`), which opens:
+
+```
+7ff812e9cfa1:  callq 0x7ff812e8ef00        ; return movzbl 0x11(%rdi)  -- PLANE COUNT
+7ff812e9cfa6:  cmpb  %r12b, %al            ; r12b = 0 (CoreDisplay's arg)
+7ff812e9cfa9:  jbe   fail -> return NULL
+```
+
+`0 <= 0`, so **a plane count of 0 is exactly and only what makes `Begin`
+return NULL**. That byte is written in one place
+(`0x7ff812e8edf8: movb %r12b, 0x11(%rbx)`), from
+
+```
+7ff812e8edcb:  CFDictionaryGetValueIfPresent(caps, "DeviceArray", &v)
+7ff812e8edd8:  absent -> error 0x1fff, byte never written (stays 0)
+7ff812e8edeb:  callq CFArrayGetCount(v)
+7ff812e8edf3:  jle   -> byte never written (stays 0)
+```
+
+### `DeviceArray` collapses on one flag, and that flag is the SCALER reply
+
+- `IOPresentmentCreateDeviceArray` (`0x7ff812e95db6`) hardcodes `this->0x428 =
+  1` and builds exactly one entry from `vt[0x38]` =
+  `IOPresentmentCreateDeviceDictionary`; NULL there → the whole array is NULL.
+- `IOPresentmentCreateDeviceDictionary` (`0x7ff812e95f94`) has exactly **one**
+  fatal child: `vt[0x50]` =
+  `IOPresentmentCapabilitiesDisplayPipe::IOPresentmentCreatePlaneArray`
+  (`0x7ff812e9a540`), stored under the key **`PlaneArray`**
+  (`0x7ff84166d6e8`, len 10). Queue, rotation, cursor and scaler-pipeline
+  children are all optional.
+- `CreatePlaneArray` returns NULL only if a plane dictionary does. With
+  `this->0x42c == 0` it returns an **empty but non-NULL** array.
+- `IOPresentmentCreatePlaneDictionary` (`0x7ff812e9aca4`) returns NULL **iff**
+  `0x7ff812e9acea: cmpb $0x1, 0x434(%r13); jne -> release, return NULL`.
+  Every other path in its 0x472 bytes returns the dictionary.
+
+`caps->0x434` is set in exactly one instruction, `0x7ff812e97b13`, inside
+`__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`) — the function
+`rb_agdc.h:182` has cited since 2rf — and only when its **first** 0x711 query
+succeeds:
+
+```
+7ff812e97a18:  buf = this + 0x69f0, bzero 0x196c
+7ff812e97a31:  buf[0x00] = (this->0x20)->0x50        ; framebuffer index
+7ff812e97a41:  buf[0x04] = 0x10 ; buf[0x08] = 8      ; type SCALER, capacity 8
+7ff812e97a60:  AGDC request 0x711, len 0x196c, in/out the same buffer
+7ff812e97a65:  IOReturn != 0      -> 0x2006, 0x434 never set
+7ff812e97a72:  outLen == 0        -> 0x2006, 0x434 never set
+7ff812e97b09:  count > 8          -> clamped to 8
+7ff812e97b13:  movb $0x1, 0x434
+7ff812e97b37:  count == 0         -> whole capabilities build FAILS
+7ff812e97b3d:  movl %eax, 0x42c                      ; plane count
+```
+
+**So the entire display-pipe chain hangs on one reply**: 0x711 with capability
+type `0x10` must return IOReturn 0, a non-zero out-length, and a non-zero
+count. That is word for word what 2rf wrote at `rb_agdc.h:189` — *"the whole
+stage needs: answer type 0x10 with count >= 1, refuse the rest"* — now
+confirmed from the consuming side, three layers deeper than 2rf could see.
+
+### What this overturns
+
+**2se and 2sf are REINSTATED; 2u3/2u4's retirement of them is WITHDRAWN.**
+2sf's statement — *"`PlaneArray` is the one group the capability types do not
+feed, and it carries the count that gates everything"* — is correct, and the
+chain above is the mechanism. 2u4 retired it on the grounds that boot 177
+measured **`Plane Index: 0` in all 58 dumps**, so "the count was never zero".
+That conflated two different objects:
+
+| | what it is | 0 means |
+|---|---|---|
+| `Plane Index` in a `DisplayPipeState` dump | CoreDisplay's index of the plane being described | the **first** plane — the normal value |
+| IOPresentment's plane count, `backend+0x11` | `CFArrayGetCount(caps["DeviceArray"])` | the capabilities build **failed** |
+
+An index of 0 is not a count of 0. Fourth recorded instance of reading a value
+without establishing what makes it meaningful, and the first where the
+misreading **closed** a line that was right.
+
+### The live machine is NOT boot 182 — and two instruments lied
+
+The box was up while this was written, so the live registry was read. It says
+nothing, and the reason is worth more than the reading:
+
+- `kern.boottime` = **16:09:59**; the capture's = **16:07:01**. Different
+  boots. The `Darwin Kernel Version` control (rule 28) found **3+ banners** in
+  the two-hour window, which is what exposed it.
+- `nvram rbgpu-boot` is still **182** and both one-shots are absent, so the
+  live boot was **never armed** (rule 8). `RBAMDFramebuffer`,
+  `AMDRadeonX6000_AMDNavi21GraphicsAccelerator`, `RembrandtGPUAGDC` and
+  `com.rembrandtgpu.fb` are all absent from it — which means only that an
+  unarmed boot has none of them. Before the control, this had been written
+  down as "the graphics stack was torn down during the wedge". It was not.
+- **`timeout` does not exist on macOS.** Three `ioreg` readings came back
+  empty as `timeout: command not found`, and all three looked exactly like
+  "the service is absent". Caught only because a control
+  (`ioreg -rl -c IOPCIDevice` → 4577 lines) was run in the same breath.
+- WindowServer at **207.9 %** in that unarmed boot is therefore not the boot-182
+  wedge and is not evidence about it.
+
+### Rules
+
+- **Rule 26 gains two instances**: a word the producing code never contains
+  (2v8's `Clean`), and a shell helper that does not exist on this machine
+  (`timeout`). Both return empty, both read as absence, both need a
+  known-present control in the same command.
+- **New: before reading anything from the live machine, establish which boot
+  it is.** `kern.boottime` against the capture's, and `rbgpu-boot` against the
+  last nonce. The live box is not the armed boot just because the armed boot's
+  capture is the newest one on disk.
+- **An index is not a count.** When a reading is used to retire a line of
+  inquiry, name the object the number belongs to.
