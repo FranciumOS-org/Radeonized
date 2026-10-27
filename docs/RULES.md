@@ -204,7 +204,27 @@ not compositing slowly, which is the opposite failure from every earlier boot.
 **no transaction has ever been queued** even now. Suspect: our VBL thread_call
 only runs while a handler is enabled, and 2s5 measured Apple registering the
 `'vbl '` handler and then disabling it until a transaction is queued.
-**APPLE'S DISPLAY-PIPE PATH IS CLOSED HERE (2sw/2sx both superseded by 2sy).**
+**2sy IS WITHDRAWN - APPLE'S DISPLAY-PIPE PATH IS NOT CLOSED HERE (2u0).**
+**2pp measured `IOAccelDisplayPipeCapabilities = {DisplayPipeSupported=Yes,
+TransactionsSupported=Yes}` on our own accelerator** on 2026-10-23, with
+WindowServer's `IOAccelDisplayPipeUserClient2` beside it (journal line 24847),
+and the ONLY setter of that name in `AMDRadeonX6000` is inside
+`populateAccelConfig` (2sv §3). So that function **ran, published and did not
+panic** - which kills 2sy's inference from "no boot panicked" to "it never
+executes", and makes **2sw/2sx open again** rather than moot (2sx's
+`CFG_USE_DPT` default of 1 now *explains* 2pp instead of being irrelevant).
+2sv then measured the property **absent** (`ioreg -l | grep -c` = 0, instrument
+controlled). So the display-pipe road **worked here and has since regressed**,
+and 2s3's two gates were once satisfied. **Prime suspect: our framebuffer
+takeover suppressed the publish** - the same defect class as 2t8/2t9, which
+would be the third in one session - but that is a SUSPICION, not a
+measurement. **The A/B that settles it needs no new code and no risky boot**:
+`rbgpu-arm=1 rbgpu-fb=1` vs `rbgpu-arm=1` alone, and in each
+`ioreg -l | grep -c IOAccelDisplayPipeCapabilities`. 2u0 tabulates all four
+outcomes. **Run this before any more AGDC/IOPresentment work.**
+
+The paragraph below is kept for its disassembly, which stands; its conclusion
+does not. (2sw/2sx superseded by 2sy, 2sy superseded by 2u0.)
 `populateAccelConfig` derefs `accel+0x368` with **no NULL check** after casting
 to `ATIController`, and the journal already recorded that `ATIController`
 **never instantiates here** (line 34452) because `0x1681` matches no controller
