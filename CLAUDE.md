@@ -401,7 +401,10 @@ and a measured 4096 MB we publish; macOS detects neither), `-rbgpufbaccel`
 (claims `kDisplayModeAcceleratorBackedFlag`; verified to take and to change
 nothing downstream, 2q7), `-rbgpuiop` (opens the IOPresentment vendor gate;
 correct, verified, inert without its one-shot — **keep it**), `-rbgpuagdc`
-(the AGDC bridge), `-rbgpuflipprobe` (already answered, writes nothing).
+(the AGDC bridge), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
+(answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
+Cursor as well as 0x10 Scaler — off by default because three of the four carry
+a substituted field, 2sc).
 `-rbgpumcnew` / `-rbgpumcreg` are the runtime-metaclass experiment: `mcreg` is
 the user's decision because its failure mode is a **hang**, not a panic.
 

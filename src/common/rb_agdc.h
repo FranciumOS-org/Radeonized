@@ -241,6 +241,91 @@ static inline int rb_agdc_scaler_entry(uint8_t *e, uint32_t slotA, uint32_t slot
  * itself; +0x00 and +0x04 are preserved and everything from +0x08 is
  * rewritten. hactive/vactive must both be non-zero: with no real timing there
  * is nothing truthful to say about a scaler, so it refuses. */
+/* 2sc: the other four types Apple's own dispatcher answers.
+ *
+ * AMDRadeonX6000_AmdAgdcServices::getFbExtendedCapability (0xbfecb62) is a
+ * switch over the type at +0x04 with EXACTLY five arms - 1, 2, 4, 0x10, 0x8000
+ * - and kIOReturnUnsupported (0xe00002c7) for everything else. That confirms
+ * the five-type list this header already carried. The names come from
+ * stringifyFbCapabilityType (0xbff0e70), whose sixteen strings are in bit
+ * order, cross-checked on four arms Apple compares explicitly (0x20
+ * "Rotation", 0x200 "Mirroring", 0x800 "HDR Scaler", 0x2000 "3D LUT"): so type
+ * 4 is "Linearization" (Apple's provider is named Degamma) and 0x10 is
+ * "Plane Scaler". getFbCapabilityForRotation EXISTS in the binary and is
+ * unreachable from the dispatcher, so a real Navi 21 Mac does not answer 0x20.
+ *
+ * THE LIMIT OF THIS, STATED ONCE. Apple fills three of the four from queries
+ * on objects we do not have - an AmdFbDisplayPath and the AmdAgdcServices
+ * device object. Every such input below uses the value Apple's own code
+ * produces on its SMALLEST branch, so nothing here claims a capability larger
+ * than Apple's minimum, and each one is named. This is a substitute and is
+ * labelled as one (rule 17): what the entries describe is a stage that exists
+ * and does nothing, which is what an IONDRVFramebuffer with no DCN
+ * programming can honestly report. The structural constants - the capability
+ * words, the 1.0f, the segment ids - are read out of Apple's code and are not
+ * substitutes.
+ */
+/* path->0x7c4 < 2, the branch Apple takes for the fewest CSC precision bits.
+ * >= 2 gives 0x00070007 and >= 3 ORs in 0x01000000. */
+#define RB_AGDC_CSC_PRECISION_MIN 0x00050005u
+/* this->0x2e798, a device flags qword Apple ORs into the segment id. */
+#define RB_AGDC_DEV_FLAGS_NONE    0u
+/* vt[0x118](0x17) + 1. Apple writes a second gamma entry only when this is
+ * >= 2, so 1 is both the minimum and the single-entry case. */
+#define RB_AGDC_GAMMA_SEGMENTS    1u
+/* vt[0x1b8](0xf), the gamma channel table entry count that
+ * CoreDisplay::IOPCapabilities::GammaChannelTableEntryCountAndType reads. */
+#define RB_AGDC_GAMMA_CHANNELS    0u
+/* vt[0x1b8](6), written to BOTH entry+0x14 and entry+0x18. */
+#define RB_AGDC_CURSOR_DIM_NONE   0u
+
+/* Type 1 CSC. Apple handles this one INLINE in the dispatcher, at 0xbfecca2. */
+static inline int rb_agdc_csc_entry(uint8_t *e) {
+    rb_agdc_put32(e+0x00, 0x00080005);
+    rb_agdc_put32(e+0x04, 1);
+    rb_agdc_put32(e+0x10, 8);
+    rb_agdc_put32(e+0x20, RB_AGDC_CSC_PRECISION_MIN);
+    rb_agdc_put32(e+0x24, 0xbf800000);    /* -1.0f, Apple's coefficient range */
+    rb_agdc_put32(e+0x28, 0x3f800000);    /* +1.0f */
+    return 0;
+}
+
+/* Type 2 Gamma, AGDCFBGammaSegmentEntry_t. getFbCapabilityForGamma 0xbfecda8.
+ * Apple's second entry (only when segments >= 2) carries powf(2.0, -25) and
+ * powf(2.0, 7) - the 2.0 is the double at 0xc1f3840 - and a 0x200 at +0x28.
+ * With RB_AGDC_GAMMA_SEGMENTS 1 that entry is not written at all. */
+static inline int rb_agdc_gamma_entry(uint8_t *e) {
+    rb_agdc_put32(e+0x00, 0x00088005);
+    rb_agdc_put32(e+0x04, 1);
+    rb_agdc_put32(e+0x10, 0x10);
+    rb_agdc_put32(e+0x24, 0x3f800000);    /* +1.0f */
+    rb_agdc_put32(e+0x28, RB_AGDC_GAMMA_CHANNELS);
+    return 0;
+}
+
+/* Type 4 Degamma/Linearization, AGDCFBLinearizationSegmentEntry_t.
+ * getFbCapabilityForDegamma 0xbfed0dc writes TWO entries unconditionally and
+ * sets count 2; the segment ids are the two qwords at 0xc1f3860. */
+static inline int rb_agdc_degamma_entry(uint8_t *e, unsigned index) {
+    const uint32_t seg = (index & 1u) ? 0x20u : 0x10u;
+    rb_agdc_put32(e+0x00, 0x00080005);
+    rb_agdc_put32(e+0x04, 1);
+    rb_agdc_put32(e+0x10, 1);
+    rb_agdc_put32(e+0x18, seg | RB_AGDC_DEV_FLAGS_NONE);
+    rb_agdc_put32(e+0x24, 0x3f800000);    /* +1.0f */
+    rb_agdc_put32(e+0x28, 1);
+    return 0;
+}
+
+/* Type 0x8000 Cursor. getFbCapabilityForCursor 0xbfed1a6 zeroes +0x04..+0x2b,
+ * writes 0xe5 at +0x00 and the same queried dimension at +0x14 and +0x18. */
+static inline int rb_agdc_cursor_entry(uint8_t *e) {
+    rb_agdc_put32(e+0x00, 0xe5);
+    rb_agdc_put32(e+0x14, RB_AGDC_CURSOR_DIM_NONE);
+    rb_agdc_put32(e+0x18, RB_AGDC_CURSOR_DIM_NONE);
+    return 0;
+}
+
 static inline int rb_agdc_extcap(void *out, size_t size,
                                  uint32_t hactive, uint32_t vactive) {
     if (!out || size != RB_AGDC_EXTCAP_SIZE) return -1;
@@ -248,11 +333,41 @@ static inline int rb_agdc_extcap(void *out, size_t size,
     if (p[0] != 0) return -1;             /* one framebuffer, index 0 */
     uint32_t type=0;
     for (unsigned i=0;i<4;i++) type|=(uint32_t)p[4+i]<<(8*i);
-    if (type != RB_AGDC_CAP_SCALER) return RB_AGDC_EXTCAP_UNSUPPORTED;
-    if (!hactive || !vactive) return -1;
+    /* The scaler is the only type whose reply needs the real mode, so it keeps
+     * its own refusal: with no timing there is nothing truthful to say about
+     * extents. The other four are extent-free. */
+    if (type == RB_AGDC_CAP_SCALER && (!hactive || !vactive)) return -1;
+    if (type != RB_AGDC_CAP_SCALER && type != RB_AGDC_CAP_CSC &&
+        type != RB_AGDC_CAP_GAMMA && type != RB_AGDC_CAP_DEGAMMA &&
+        type != RB_AGDC_CAP_CURSOR)
+        return RB_AGDC_EXTCAP_UNSUPPORTED;
+    /* Zero from the count on, as the scaler path has always done: Apple's CSC
+     * and cursor arms write individual fields over whatever the caller passed,
+     * and zeroing first is strictly more defined than trusting it. */
     for (size_t i=RB_AGDC_EXTCAP_COUNT_OFF;i<size;i++) p[i]=0;
+    uint8_t *e=p+RB_AGDC_EXTCAP_ENTRY_OFF;
+    if (type == RB_AGDC_CAP_SCALER) {
+        rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, 1);
+        return rb_agdc_scaler_entry(e, vactive, hactive);
+    }
+    if (type == RB_AGDC_CAP_CSC) {
+        rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, 1);
+        return rb_agdc_csc_entry(e);
+    }
+    if (type == RB_AGDC_CAP_GAMMA) {
+        rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, RB_AGDC_GAMMA_SEGMENTS);
+        return rb_agdc_gamma_entry(e);
+    }
+    if (type == RB_AGDC_CAP_DEGAMMA) {
+        /* Two entries, so the capacity must really hold them. */
+        if (size < RB_AGDC_EXTCAP_ENTRY_OFF + 2u*RB_AGDC_EXTCAP_ENTRY_SZ)
+            return -1;
+        rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, 2);
+        if (rb_agdc_degamma_entry(e, 0)) return -1;
+        return rb_agdc_degamma_entry(e+RB_AGDC_EXTCAP_ENTRY_SZ, 1);
+    }
     rb_agdc_put32(p+RB_AGDC_EXTCAP_COUNT_OFF, 1);
-    return rb_agdc_scaler_entry(p+RB_AGDC_EXTCAP_ENTRY_OFF, vactive, hactive);
+    return rb_agdc_cursor_entry(e);
 }
 
 /* Validate only the operations we implement. Later AGDC operations legitimately

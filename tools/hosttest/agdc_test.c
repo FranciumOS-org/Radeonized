@@ -177,9 +177,12 @@ int agdc_tests(void) {
     memset(x,0,sizeof x); x[1]=1;
     rb_agdc_put32(x+1+4,RB_AGDC_CAP_SCALER);
     A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,HA,VA)<0);
-    /* Every type but the scaler is Unsupported and must not write a byte. */
-    uint32_t types[]={RB_AGDC_CAP_CSC,RB_AGDC_CAP_GAMMA,RB_AGDC_CAP_DEGAMMA,
-                      RB_AGDC_CAP_CURSOR,0x8,0x20,0x40,0x80,0x100,0x200,
+    /* 2sc: the twelve types Apple's own dispatcher does NOT answer are still
+     * Unsupported and must not write a byte. 0x20 is in this list on purpose:
+     * getFbCapabilityForRotation exists in AMDRadeonX6000Framebuffer and is
+     * unreachable from getFbExtendedCapability, so a real Navi 21 Mac refuses
+     * it too. The five Apple answers are asserted below. */
+    uint32_t types[]={0x8,0x20,0x40,0x80,0x100,0x200,
                       0x400,0x800,0x1000,0x2000,0x4000,0,0x12345};
     for (unsigned i=0;i<sizeof types/sizeof types[0];i++) {
         memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
@@ -188,6 +191,43 @@ int agdc_tests(void) {
         A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,HA,VA)
           ==RB_AGDC_EXTCAP_UNSUPPORTED);
         A(!memcmp(x,xorig,sizeof x));
+    }
+    /* 2sc: the four types 2sc added. Each is pre-filled with garbage from the
+     * count onward, so a field this code fails to write shows up as 0x5c
+     * rather than as a zero that happened to be right. The index and type
+     * words at +0x00/+0x04 must survive, and the bytes either side of the
+     * structure must not be touched. */
+    {
+        struct { uint32_t ty, count, f00, off_a, val_a; } cases[]={
+            { RB_AGDC_CAP_CSC,     1, 0x00080005, 0x20, RB_AGDC_CSC_PRECISION_MIN },
+            { RB_AGDC_CAP_GAMMA,   RB_AGDC_GAMMA_SEGMENTS, 0x00088005, 0x10, 0x10 },
+            { RB_AGDC_CAP_DEGAMMA, 2, 0x00080005, 0x18, 0x10 },
+            { RB_AGDC_CAP_CURSOR,  1, 0xe5,       0x14, RB_AGDC_CURSOR_DIM_NONE },
+        };
+        for (unsigned i=0;i<sizeof cases/sizeof cases[0];i++) {
+            memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
+            rb_agdc_put32(x+1+4,cases[i].ty);
+            memset(x+1+RB_AGDC_EXTCAP_COUNT_OFF,0x5c,
+                   RB_AGDC_EXTCAP_SIZE-RB_AGDC_EXTCAP_COUNT_OFF);
+            /* These four need no mode, so they must answer even with none. */
+            A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,0,0)==0);
+            A(x[0]==0xa5 && x[1+RB_AGDC_EXTCAP_SIZE]==0xa5);
+            A(le(q,4)==0 && le(q+4,4)==cases[i].ty);
+            A(le(q+RB_AGDC_EXTCAP_COUNT_OFF,4)==cases[i].count);
+            const uint8_t *ce=q+RB_AGDC_EXTCAP_ENTRY_OFF;
+            A(le(ce+0x00,4)==cases[i].f00);
+            A(le(ce+cases[i].off_a,4)==cases[i].val_a);
+            /* Nothing from the count onward may still be garbage. */
+            for (size_t b=RB_AGDC_EXTCAP_COUNT_OFF;b<RB_AGDC_EXTCAP_SIZE;b++)
+                A(q[b]!=0x5c);
+        }
+        /* Degamma writes a SECOND entry, with the other segment id, and
+         * refuses outright if the capacity cannot hold both. */
+        memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
+        rb_agdc_put32(x+1+4,RB_AGDC_CAP_DEGAMMA);
+        A(rb_agdc_extcap(x+1,RB_AGDC_EXTCAP_SIZE,0,0)==0);
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+RB_AGDC_EXTCAP_ENTRY_SZ+0x18,4)==0x20);
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x18,4)==0x10);
     }
     /* No real timing: nothing truthful to say about a scaler, so refuse. */
     memset(x,0xa5,sizeof x); memset(x+1,0,RB_AGDC_EXTCAP_SIZE);
@@ -238,7 +278,7 @@ int agdc_tests(void) {
     A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x024,4)==VA);
     A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x028,4)==HA);
     printf("agdc: bounded replies, AMD identity, kernel pointer layout, "
-           "link config overlay, scaler capability: %s\n",bad?"FAILED":"passed");
+           "link config overlay, all five capability types: %s\n",bad?"FAILED":"passed");
     return bad;
 #undef A
 }
