@@ -37860,3 +37860,83 @@ was never a consent problem (`spctl kext-consent status` reads DISABLED).
    that has already cost this project two boots. **Verify the UUID of the
    installed bundle AND rebuild the AuxKC before concluding anything from an
    armed boot.**
+
+## 2sz — the VBL clock RUNS (15600 fires), but the boot was half-armed and the panic left no report
+
+Boot 171 (`rbgpu-boot 171`), 2026-10-27 ~02:13, after a panic the user
+power-cycled. Loaded build verified: `com.rembrandtgpu.fb (0.1.0)
+770AE129-E550-3C37-BB4D-AE6900390389` at `0xffffff7f980ce000`, dep index 144.
+
+### The result
+
+```
+RBFBVBLFires        = 15600     RBFBVBLRunning       = Yes
+RBFBVBL0Fires       = 15600     RBFBVBLRegistered    = 1
+RBFBVBLEnables      = 1         RBFBVBLEnabledCount  = 1
+RBFBVBLHandlers     = 1         RBFBVBLTimerAllocated = Yes
+RBFBVBL0Used = Yes   RBFBVBL0Enabled = Yes   RBFBVBL0Self = Yes
+RBFBVBL1..3: Used No, Enabled No, Fires 0
+```
+
+**The `'vbl '` clock runs for the first time.** Every earlier boot had the
+handler registered-and-disabled forever (2su/2sv), because Apple's enable comes
+off a transaction queue that can never fill here (2s5/2s9/2sy). Registering
+**enabled** fixes that, measured: 15 600 deliveries, `RBFBVBLRunning` true,
+one slot used, `vblEnables` 1. Read through `ioreg`, per rule 31.
+
+`RBFBVBL0Self = Yes` is the per-slot fact that matters: the single registrant's
+`target == this`, i.e. `IOFramebuffer`'s own `handleVBL`. **The accelerator
+never registered a slot** — slots 1-3 unused. So the clock ticks and nothing
+downstream of the accelerator consumes it.
+
+### Why this boot cannot answer the lag question
+
+```
+armed=0            diag_max=300  diag_used=72   dal_pass=0
+debug-gpus: {"acc"=0,"fbs"=(4294968511),"gpuc"=0,"pci"=4294967942,"cc"=2,...}
+WindowServer: 253.7 % CPU
+2026-10-27 02:13:38 WindowServer[161] Software compositor activated.
+```
+
+**The boot was HALF-ARMED**: the framebuffer armed, the accelerator did not.
+`acc=0`, `armed=0`, software compositor, WindowServer at 253.7 % — the
+CPU-rasterising state of 2pd, not 2st's idle-at-0.0 %. So this boot measures
+the VBL mechanism and **nothing about whether paced vblanks cure the lag**,
+because there is no accelerator to pair or to composite.
+
+**Why it was half-armed is our own known defect, and it bit exactly as rule 9
+predicted.** `rbgpu-fb` **failed to clear again** (2sq: `IODTNVRAM::
+removePropertyWithGUIDAndName` calls no sync), so with `-rbgpuownfb` still in
+`config.plist` the framebuffer re-armed itself on the power-cycle.
+`rbgpu-arm` is the *plugin's* one-shot and consumes correctly, so the
+accelerator stayed off. **The two arming mechanisms have different
+durability**, and a power-cycle after a panic therefore lands in a
+framebuffer-only configuration that nothing intended. 2sr required the boot-arg
+*and* the key precisely so a stuck key would be inert — but that only holds
+while the boot-arg is absent, and it was not.
+
+`fbs` = `4294968511` = **0x1000004BF**, which matches this boot's
+`RBAMDFramebuffer` id, so the wrangler still sees our framebuffer; `acc=0` here
+carries no information, for the same reason 2ss's did.
+
+### The panic left NO report
+
+The user reports: reboot, lock screen, password entered, then a panic. The
+newest file in `/Library/Logs/DiagnosticReports` is
+**`Kernel-2026-10-26-231753.panic`** — 2sq's `kmutil unload` panic from hours
+earlier, already committed to `logs/`. **Nothing was written for tonight's
+panic.**
+
+So the cause is **unmeasured**, and rule 12 applies: a power-cycled machine and
+a hang look identical from here. What is known:
+
+- it reached the **lock screen and accepted a password**, so the framebuffer
+  carried the display through login;
+- the combination **accelerator armed + our framebuffer + a firing VBL** has
+  **never completed a boot**, and this is the first build in which the VBL
+  actually fires;
+- the half-armed boot that followed is stable.
+
+**Not established**: that the VBL is what panicked. The arming state of that
+boot is unknown, no report exists, and "panicked after login" is also what a
+wedge plus a power button looks like.
