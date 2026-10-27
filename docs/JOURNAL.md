@@ -38617,3 +38617,95 @@ not a next step.
 Still **not established**: that Apple's path is closed. 2qh names the exact
 branch, `CoreDisplay_DisplaySurface_GetIOSurface(s) == NULL`, and what feeds
 `GetNextSurface` on this machine has never been read.
+
+## 2t6 — THE GATE: `Display::GetNextSurface` takes the IOSurface pool path only past `UseIOPresentment()` AND one global byte
+
+Static, no boot. This answers the question 2qk/2ql wrote down and left:
+*"what makes `Display::GetNextSurface` take the +1270 pool path instead of
+returning at +243?"*
+
+`CoreDisplay::Display::GetNextSurface` is at **`0x7ff80408bf86`**
+(`build/re/CoreDisplay-funcs.txt`). Its first eight instructions after the
+prologue are the whole decision:
+
+```
+7ff80408bfcb:  movq  $0x0, (%rdi)           ; *sret = NULL up front
+7ff80408bfd2:  callq 0x7ff804057b40         ; CoreDisplay::UseIOPresentment()
+7ff80408bfd7:  testb %al, %al
+7ff80408bfd9:  je    0x7ff80408c04e         ; FALSE  -> LEGACY acquire path
+7ff80408bfdb:  cmpb  $0x1, 0x3fb20791(%rip) ; == 0x7ff843bac773, a global BYTE
+7ff80408bfe2:  jne   0x7ff80408c04e         ; != 1   -> LEGACY acquire path
+```
+
+`0x7ff804057b40` is **`CoreDisplay::UseIOPresentment()`**, named in the
+inventory, the same function 2ql measured and `make useiop` reproduces.
+
+Past both gates it walks a chain through `+0xb0` (`rsi = rsi->0xb0`, looping
+back to `0x7ff80408c010`) and branches to the **pool block at
+`0x7ff80408c291`** when the chain ends (`rsi == NULL`) or closes on itself
+(`rsi == rdx`):
+
+```
+7ff80408c010:  testq %rsi, %rsi
+7ff80408c013:  je    0x7ff80408c291         ; -> POOL PATH
+7ff80408c019:  cmpq  %rdx, %rsi
+7ff80408c01c:  je    0x7ff80408c291         ; -> POOL PATH
+```
+
+The legacy block at `0x7ff80408c04e` is the one 2qi/2qk already read end to
+end: it calls the acquire at `0x7ff80408c06b`, **does not NULL-check the
+result**, wraps it unconditionally in `operator new(0x1a0)` (vtable
+`0x7ff8404fcc88`, acquired surface at `+0x20`, display at `+0x98`), then at
+`0x7ff80408c214-0x7ff80408c28c` releases that intermediate, writes
+`*sret = rbx` (the acquire result, **NULL** here) at `0x7ff80408c262`, and
+jumps to the common exit at `0x7ff80408c48c`. The pool path's own write is the
+second sret store at `0x7ff80408c489`, after
+`DisplaySurfacePool::GetNextSurface` at `0x7ff80408c47c` (the pool itself is
+constructed at `0x7ff80408c2ea`).
+
+**So 2qk's correction stands and is now resolved**: there are two sret writes,
+and which executes is decided *before* the acquire, by these two gates — not by
+anything downstream.
+
+### Why this matters more than anything else measured tonight
+
+**Gate 1 already passes on this machine.** 2st measured
+`present mask = 0x04` and `reproduced UseIOPresentment() = 1` in the
+configuration where `RBAMDFramebuffer` owns the panel — the first time ever on
+this hardware. That is the gate this project spent 2qp-2ql and most of
+2s2-2sg on.
+
+**Gate 2 is a single byte**, `0x7ff843bac773`, and has never been read. Its
+writers are being traced with `dsc.py ripall` (2r4's full-opcode scan, because
+a `lea`-only xref would miss a `movb`/`cmpb` form — rule 26).
+
+So **Apple's own path is not closed**, which is the opposite of what 2sy's
+conclusion implied for the display half as a whole. 2sy closed the *display
+pipe* (it needs `ATIController`, which needs the device-id spoof that kills the
+accelerator). This is a **different route to the same goal**:
+`DisplaySurfacePool::GetNextSurface` -> `CD_IOSurfaceCreate` is one of only two
+callers of `CD_IOSurfaceCreate`, and the *other* is
+`DisplayPipe::RunFullDisplayPipe` — the closed one. The pool is the open one,
+and nothing yet says it depends on the pipe.
+
+### Bearing on the Vulkan question the user raised
+
+The user asked whether Vulkan is "more efficient and better even for APUs" and
+whether to recreate nullarc's/Cobalt64's approach. Recorded for the decision:
+
+- **Vulkan is not more efficient here.** Both projects run Metal -> AIR ->
+  SPIR-V -> RADV, which is strictly more overhead than a native Metal driver.
+  They do it because they have **no** Metal driver for their silicon. This
+  project has Apple's, working: Metal compute is bit-exact (2ks-era), apps
+  render correctly since the swizzle fix, and `AMDRadeonX6000MTLDriver` is
+  mapped into WindowServer doing real IOSurface texture work (2t5).
+- The Vulkan route is a Metal API surface + AIR->SPIR-V translation + a macOS
+  Mesa RADV port, under PolyForm-NC (nullarc's `src/nmplugin`) or LGPL-3.0
+  (`metal2vulkan`). Person-years.
+- Against that, the Apple route is now **two conditions, one already
+  satisfied.** That is the cheap bet and it should be tested before any
+  rewrite.
+
+**Not established**: that gate 2 is satisfiable, or that the pool path produces
+a working surface once entered. Both are the next reads, and neither needs a
+boot.
