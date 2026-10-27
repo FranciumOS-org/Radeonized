@@ -38059,3 +38059,102 @@ Note what this does **not** fix: a boot that dies before `start()` runs still
 leaves the previous crumb, with the previous `b=`. That is now *detectable*,
 which is the whole difference — an undetectable stale reading is a trap, a
 detectable one is a result.
+
+## 2t1 — boot 172: the CPU work is `CA::OGL::SW`, and "Metal compositor activated" is NOT the operative fact
+
+Boot 172 (`rbgpu-boot 172`), accelerator armed, **framebuffer not**. Sample
+saved as `logs/ws-sample-boot172.txt`.
+
+### What this boot actually was
+
+```
+armed=1   diag_max=300  diag_used=20f (527 of 768, not full)
+debug-gpus: {"acc"=4294968492,"fbs"=(4294968490),"gpuc"=0,"pci"=4294967966,"cc"=3,...}
+ioreg -rl -c IOFramebuffer: +-o .Display_boot <class IONDRVFramebuffer, id 0x1000004aa>
+ioreg -rl -c RBAMDFramebuffer: (nothing)
+nvram rbgpu-fbcrumb: data was not found
+nvram rbgpu-fb / rbgpu-arm: both ABSENT
+loaded: com.rembrandtgpu.fb (0.1.0) E114DC9F-20D7-3071-A2D7-0CFF701D744A
+WindowServer: 237.4 %
+2026-10-27 02:27:11 WindowServer[162] Metal compositor activated.
+```
+
+So the kext **loaded but never started**: `IONDRVFramebuffer` owns the panel,
+no `RBAMDFramebuffer` instance exists, and `rbgpu-fb` had been consumed in boot
+171. **The combination (accelerator + our framebuffer) STILL has never
+completed a boot.**
+
+**2t0's crumb earned itself here.** `rbgpu-fbcrumb` is *absent*, not stale, and
+because the nonce design makes staleness detectable, absence is a trustworthy
+reading: `start()` never ran. Without it, "no crumb" and "a crumb from boot
+171" would have been the same observation.
+
+Also worth recording against 2sq: `rbgpu-fb` **did** clear this time. So the
+one-shot's failure to clear is **intermittent**, not systematic — 2sq saw it
+survive, 2sz saw it survive, boot 172 saw it go. The durable disarm remains the
+boot-arg either way.
+
+### The measurement that matters
+
+`sudo sample WindowServer 3`, sort-by-top-of-stack:
+
+```
+__workq_kernreturn              41610   (parked workers - idle)
+mach_msg2_trap                  11292   (idle)
+semaphore_timedwait_trap         4673   (idle)
+...
+CA::OGL::SW::image_sampler<ARGB8_Host,...>   43   (in QuartzCore)
+_platform_memmove$VARIANT$Base               36
+bzero_sse_np                                 36
+CA::OGL::SW::scan_convert                    20
+CA::OGL::SW::Format::RGBAh::load_1           15
+CA::OGL::clip_vertices                       15
+CA::OGL::SW::draw_polygon                     9
+layer_blit_byte_ANY                           9   (in SkyLight)
+CA::OGL::SW::circle_sampler                   8
+CA::Render::Updater::prepare_layer           11
+```
+
+**`CA::OGL::SW::` is QuartzCore's SOFTWARE renderer.** `image_sampler`,
+`scan_convert`, `draw_polygon`, `circle_sampler` and `clip_vertices` are its
+rasterisation path, and they are where the non-idle time goes, alongside bulk
+`memmove`/`bzero`.
+
+**Therefore `Metal compositor activated` is not the operative fact.** SkyLight
+selected the Metal compositor *and CoreAnimation is still rasterising every
+layer on the CPU beneath it.* Two boots were read through that log line — 2st
+treated it as the win, 2sz treated `Software compositor` as the regression —
+and **neither reading was load-bearing**. The direct instrument for "is the
+desktop on the CPU" is the presence of `CA::OGL::SW::*` frames in a
+WindowServer sample, not the compositor-selection message. The user's report
+(*"no animations, same desktop loading lag of 15 sec, its still on cpu all the
+way"*) matches the sample exactly.
+
+This also reframes 2sv's 0.0 % reading: that boot had our framebuffer and no
+accelerator and WindowServer was genuinely idle; this boot has an accelerator
+and no framebuffer of ours and WindowServer is doing SW rasterisation. Neither
+has had both.
+
+### WITHDRAWN within the same investigation: `-rbgpuagdcearly` as the cause
+
+`-rbgpuagdcearly` **is** in boot-args (it should not be — 2rz wedges, 2sa hung
+at the progress bar with no SSH), and I suspected it immediately. Measured
+instead of asserted, and it is **inert this boot**:
+
+- `agdc_oneshot=2`, `agdc_error=3` — 2sa recorded exactly this pair as the
+  unarmed state, so the bridge did nothing;
+- the 2sa wedge signature does not match: **1** `DisplayPipeState` dump this
+  boot, not 56. One dump is not a livelock.
+- `-rbgpuiop` likewise: `iop_oneshot=2`, unarmed.
+
+So the arg is a loaded gun for a future boot where the AGDC one-shot *is* set,
+and should come out — but it is not this boot's cause. `wdt=-1` **is** present,
+so `-rbgpuforceenable`'s 2hh interlock is satisfied.
+
+### Not established
+
+Why CoreAnimation selects its software renderer here. The obvious hypothesis —
+that CA has no accelerated renderer for a display owned by
+`IONDRVFramebuffer` — is **untested**, and the experiment that tests it is the
+one configuration never yet booted: accelerator **and** `RBAMDFramebuffer`
+together, with the VBL clock now running (2sz) and a crumb to read if it dies.
