@@ -38978,3 +38978,76 @@ return goes to the error tail at `0x7ff812e8aebb`.
 queries (`kAGDCVendorInfo` = 1, `kAGDCGPUCapability` = 0x980) are answered.
 Two of the map's four conditions are now verified statically; the untested two
 are the class match and `IOServiceOpen(type 2)`, and both need the boot.
+
+## 2t8 — BOOT 175: the AGDC bridge armed and then waited forever, because winning the framebuffer destroyed its only trigger
+
+Boot 175 set `rbgpu-agdc=1` and the bridge **armed cleanly** — `agdc_error 0`,
+`agdc_oneshot 0`, `agdc_stage 0x1e`, `agdc_t_armed_ms 0x1948` (6472 ms), and
+the peer's own line: *"one-shot `rbgpu-agdc` consumed; clear OK"*. Boot 174's
+`agdc_error 3` / `"UNARMED: no class or service created"` is gone.
+
+And then nothing happened. `agdc_say` read
+**`ARMED (late): waiting for the framebuffer`** for the whole boot, `ioreg`
+found **zero** `RembrandtGPUAGDC` instances, and `agdcinfo` again reported
+`matched 1, skipped 1, candidates 0`.
+
+### The cause, and it is ours
+
+`rbgpu_agdc_framebuffer()` has exactly **one** caller in the whole plugin:
+`hooked_ndrv_enablectl_2pa` (`kern_start.cpp:8284`), which is 2pa's route on
+**`__ZN17IONDRVFramebuffer16enableControllerEv`**. `RBAMDFramebuffer`
+**displaces** `IONDRVFramebuffer` (2sm: same provider, name and
+`IOMatchCategory`, score 30000 vs 20000), so that function **never runs**, and
+the bridge waited for a framebuffer that could not arrive.
+
+The same function would have refused ours even if it had been reached: its
+identity check was a bare `strcmp(…, "IONDRVFramebuffer")` with
+`refuse(5,"unexpected framebuffer")` on anything else. Two independent
+blockers, both introduced by the framebuffer kext succeeding.
+
+**So `candidates 0` in boot 175 is still NOT a verdict on the bridge** (rule
+14) — it is a verdict on its trigger. The four association-map conditions
+remain untested.
+
+This is rule 6's shape again — *when a fix moves upstream, remove the
+downstream patch it replaces* — inverted: the framebuffer moved upstream of
+`IONDRVFramebuffer` and **nothing downstream was updated to follow it**. 2sm
+through 2sy changed which class owns the panel and never audited what else was
+routed on the old one. 2pa's VRAM publish, 2qv's metaclass read, 2qx and the
+AGDC trigger all hang off that one hook; only the AGDC trigger is fixed here,
+and **the other three are still on the dead route** — unaudited, and named so
+the next session does not have to rediscover them.
+
+### The fix, in build `4E119EEE`
+
+Two changes in `rbgpu_agdc.cpp`, both behind the existing `-rbgpuagdc`, no new
+boot-arg:
+
+1. `rbgpuAgdcIsFramebufferClass()` accepts **`RBAMDFramebuffer`** as well as
+   `IONDRVFramebuffer`. Listed rather than dropped, because rule 19's point
+   holds: a refusal path must be able to say what it refused.
+2. The late path now installs its own `gIOMatchedNotification` on
+   `RBAMDFramebuffer` (`fbArrived`), mirroring 2rr's wrangler notification.
+   `gIOMatchedNotification` fires after the service matched **and** `start()`
+   returned true, which is the same "the controller is up" point 2pa's route
+   sat at — **a trigger change, not a timing change**, so the 2rz wedge risk
+   is unchanged and `-rbgpuagdcearly` stays out.
+
+Per 2rr, `fbArrived` does two diag writes and calls `rbgpu_agdc_framebuffer`
+and nothing else, because `addMatchingNotification` fires **synchronously** for
+an already-matched service and can therefore run on the installing thread.
+New keys: `agdc_fbnote_armed`, `agdc_fbnote_fired`, `agdc_t_fbnote_ms`, and
+`agdc_say` now distinguishes *"watching for RBAMDFramebuffer"* from *"NO
+framebuffer notification"*.
+
+Build `4E119EEE` (was `C92D436F`): hosttest green, `kmutil libraries` resolves
+**0** from `SystemKernelExtensions.kc`, `grep -c IOGraphicsFamily
+src/plugin/Info.plist` is **0**.
+
+### Also measured, and it was my error
+
+Boot 175 ran with `armed = 0` and `rbgpu-arm` unset — *"Peer: rbgpu-arm not
+set; accelerator NOT armed"* — because the commands handed over named only
+`rbgpu-agdc` and `rbgpu-fb`. The accelerator did not load at all that boot, so
+nothing about the desktop in boot 175 is evidence of anything. **Rule 9 names
+all four one-shots; the hand-over listed two.**
