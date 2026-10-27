@@ -296,9 +296,26 @@ static inline int rb_agdc_scaler_entry(uint8_t *e, uint32_t slotA, uint32_t slot
 #define RB_AGDC_GAMMA_SEGMENTS    1u
 /* vt[0x1b8](0xf), written as a QWORD to entry 1's +0x28. 2u9 read the widths
  * and this is the entry's ELEMENT COUNT, not a channel count - the name is
- * kept because 2sc coined it and the journal cites it. Still substituted,
- * still 0: Apple's smallest branch. Entry 2 carries Apple's own 0x200. */
-#define RB_AGDC_GAMMA_CHANNELS    0u
+ * kept because 2sc coined it and the journal cites it.
+ *
+ * 2v5: THIS IS THE FIELD, and it is now identified rather than guessed.
+ * IOPresentmentCapabilitiesDisplayPipe::IOPresentmentCreateGammaDictionary
+ * (0x7ff812e9b8e0) walks THIS BUFFER at stride 0x32c and publishes +0x28 as
+ * the dictionary key `MaximumSize`; __fieldsFromDictionary lands that at the
+ * CoreDisplay entry's +0x30; and GammaChannelTableEntryCountAndType
+ * (0x7ff80405ddd8) logs "plane with no 3-channel gamma table support" when
+ * that is ZERO. Boots 179 and 181 both measured the message at ~7 per
+ * DisplayPipeState dump with this field at 0.
+ *
+ * 0x400 = 1024, AND IT IS STILL A SUBSTITUTE (rule 17). Apple reads it from
+ * vt[0x1b8](0xf) on an AmdFbDisplayPath we do not have, so no value written
+ * here is a hardware fact and no reading downstream of it may be narrated as
+ * one. Two things bound the choice: entry 1's Type is 0x10, whose accepted
+ * bit is 4 (2u7), and CoreDisplay's own DisplayPipeState dumps already print
+ * `LUT: R - [0..0.500489..1] with 1024 entries` for this display - so 1024 is
+ * the size of the table CoreDisplay has itself built, not a number of ours.
+ * Apple's own segmented second entry uses 0x200 for its different stage. */
+#define RB_AGDC_GAMMA_CHANNELS    0x400u
 /* movq $0x200, 0x354(%rbx) in getFbCapabilityForGamma - Apple's LITERAL for
  * the second gamma entry's element count, not a substitute. [2u9] */
 #define RB_AGDC_GAMMA_ELEMENTS    0x200u

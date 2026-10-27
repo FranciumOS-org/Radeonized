@@ -344,6 +344,14 @@ IOReturn vendor(void *,unsigned attr,unsigned long *,unsigned long inSize,
             const uint8_t *q=reinterpret_cast<const uint8_t *>(out);
             rbgpu_diag_set_num("agdc_gamma_entries",
                 rb_agdc_get32(q+RB_AGDC_EXTCAP_COUNT_OFF));
+            // 2v5: entry ONE's +0x28 is the field under test - IOPresentment
+            // publishes it as `MaximumSize` and CoreDisplay refuses a zero.
+            // 2v0 published entry 2's and that was the wrong entry (entry 2's
+            // Type is 1, a bit GammaChannelTableEntryCountAndType does not
+            // accept, so it is skipped), which is exactly how boot 181 looked
+            // armed while the value Apple reads stayed 0. Publish both.
+            rbgpu_diag_set_num("agdc_gamma_elems1",
+                rb_agdc_get32(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28));
             rbgpu_diag_set_num("agdc_gamma_elems2",
                 rb_agdc_get32(q+RB_AGDC_EXTCAP_ENTRY_OFF
                                 +RB_AGDC_EXTCAP_ENTRY_SZ+0x28));
