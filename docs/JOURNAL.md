@@ -39866,3 +39866,68 @@ line 35489): `GammaArray`, `FixedFormat`, `GammaValue`, `NumberOfElements`,
 `Elements`. `NumberOfElements` is the obvious candidate for `+0x30` and
 `FixedFormat` for `+0x10` — **candidate, not conclusion**; the read decides it.
 No boot is needed for any of this, and no boot should be spent until it is done.
+
+## 2u8: `UseIOPGamma` read and ELIMINATED, and `useiop` gained the gamma quartet
+
+Static, plus one live oracle run. No boot.
+
+`CoreDisplay-funcs.txt` lists **`UseIOPGamma(CGXDisplayDevice const*)`** at
+`0x7ff8040ea95c`, which is the obvious candidate for `System Gamma - Unknown`
+and had never been read. It is short:
+
+```
+7ff8040ea962:  movq  0x8(%rdi), %rax
+7ff8040ea966:  callq *0x200(%rax)          ; device vtable slot 0x200 -> %ebx
+7ff8040ea96e:  callq 0x7ff804057b40        ; UseIOPresentment()
+7ff8040ea973:  testb %al, %al
+7ff8040ea975:  je    <return 0>
+7ff8040ea977:  leal  -0x2(%rbx), %ecx
+7ff8040ea97a:  rorl  %ecx
+7ff8040ea97e:  cmpl  $0x7, %ecx
+7ff8040ea981:  ja    <return 0>            ; jump table at 0x7ff8040ea9e4
+```
+
+So it **calls `UseIOPresentment()` itself** — which 2t7 proved true here,
+unpatched — and then switches on `%ebx`, the value from device vtable slot
+`0x200`, which the branch bodies compare against **4, 8 and 0x10**: the same
+AMD / NVDA / AppleParavirt bits as `gSystemGPUVendors`. Each vendor branch does
+`movb $0x1, %al; cmpb $0x0, <byte>; jne <return 1>` against one of four bytes
+at **`0x7ff843bac76f`–`0x772`**, immediately after `useIOP_onIG`'s
+`0x7ff843bac76e` (`tools/useiop.m:24`).
+
+**The names were one string block away.** Dumping the strings around
+`displaySurfaceUsesIOSurface` prints `CoreDisplay::InitializeUserDefaults()`'s
+whole key list, and beside `useIOP`, `useIOP_onIG/onAMD/onNVIDIA/onAPV` sit
+**`useIOP_gamma_onIG`, `useIOP_gamma_onAMD`, `useIOP_gamma_onNVIDIA`,
+`useIOP_gamma_onAPV`**. Same quartet, same shape, same domain.
+
+`tools/useiop.m` now reads all four the way it already reads the others, so
+this is an oracle rather than a reading of the binary. Live, this machine:
+
+```
+   useIOP_gamma_onIG     = 1  (absent -> default)
+   useIOP_gamma_onAMD    = 1  (absent -> default)  <- ours
+   useIOP_gamma_onNVIDIA = 1  (absent -> default)
+   useIOP_gamma_onAPV    = 1  (absent -> default)
+```
+
+**A non-zero byte takes the `jne <return 1>` branch**, so with the default of 1
+`UseIOPGamma` returns **1** for an AMD device whenever `UseIOPresentment()` does
+— which it does (2t7). **`UseIOPGamma` is therefore ELIMINATED as the cause of
+`System Gamma - Unknown`**, and nobody should spend a `defaults write` or a
+boot on it. Worth saying because the temptation was real: a per-vendor
+preference named `useIOP_gamma_onAMD` reads exactly like the switch one wants
+to find, and it is already on.
+
+**So 2u7's conclusion stands unchanged and is now the only live lead**: the
+sole emitter is `GammaChannelTableEntryCountAndType`, and its predicate is
+`entry+0x30 != 0` over a 0x38-stride array whose format bitmask at `entry+0x10`
+our `0x10` already satisfies. The next read is what **fills** that array.
+Where it is NOT: `__GatherAGDCDisplayPipelineCapabilities`'s own body, which
+2rg/2sg already read in full — its sixteen 0x711 calls go through four imported
+stubs (`0x7ff812ea00f6`, `0x7ff812ea02b8`, `0x7ff812ea0306`, `0x7ff812ea039c`,
+16/16/32/32 calls, all `jmpq *GOT`), so the per-type field copying is not in
+that function either. The array belongs to `CoreDisplay::IOPCapabilities`
+(`this->0x8 -> +0xb0 -> 0x90 -> 0x88` is its count), and its constructor is the
+thing to read — `CapabilitiesForClients` (`0x7ff80405d582`) and the destructor
+(`0x7ff80405d4f8`) bracket it in the function list.

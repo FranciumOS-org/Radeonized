@@ -141,6 +141,24 @@ int main(void)
     printf("   useIOP_onAPV    = %d  %s  bit 0x10\n", on_apv, f_apv ? "(set)" : "(absent -> default)");
     unsigned supported = (on_ig ? 0x2 : 0) | (on_nv ? 0x8 : 0) | (on_amd ? 0x4 : 0) | (on_apv ? 0x10 : 0);
     printf("   supported mask = 0x%02x\n\n", supported);
+    // 2u8: the GAMMA quartet, found beside these four in the same string block
+    // and read by `UseIOPGamma(CGXDisplayDevice const*)` (0x7ff8040ea95c).
+    // That function calls UseIOPresentment() itself, then switches on the
+    // device's vendor mask (4 AMD / 8 NVDA / 0x10 APV, the same bits as above)
+    // and tests one byte per vendor at 0x7ff843bac76f-772, adjacent to
+    // useIOP_onIG's 0x7ff843bac76e. A NON-ZERO byte returns 1, so the default
+    // of 1 means IOP gamma is ENABLED unless someone turned it off - printed
+    // here so that is measured rather than assumed. [2u8]
+    int f_gig = 0, f_gnv = 0, f_gamd = 0, f_gapv = 0;
+    int g_ig  = prefbool(CFSTR("useIOP_gamma_onIG"),     1, &f_gig);
+    int g_nv  = prefbool(CFSTR("useIOP_gamma_onNVIDIA"), 1, &f_gnv);
+    int g_amd = prefbool(CFSTR("useIOP_gamma_onAMD"),    1, &f_gamd);
+    int g_apv = prefbool(CFSTR("useIOP_gamma_onAPV"),    1, &f_gapv);
+    printf("   useIOP_gamma_onIG     = %d  %s\n", g_ig,  f_gig  ? "(set)" : "(absent -> default)");
+    printf("   useIOP_gamma_onAMD    = %d  %s  <- ours\n", g_amd, f_gamd ? "(set)" : "(absent -> default)");
+    printf("   useIOP_gamma_onNVIDIA = %d  %s\n", g_nv,  f_gnv  ? "(set)" : "(absent -> default)");
+    printf("   useIOP_gamma_onAPV    = %d  %s\n\n", g_apv, f_gapv ? "(set)" : "(absent -> default)");
+
     printf("   NOTE: these are read as WindowServer reads them, but this process is\n");
     printf("   not WindowServer; a per-user-domain value could differ.  The masks\n");
     printf("   above are the reproduction's inputs, not WindowServer's own bytes.\n\n");
