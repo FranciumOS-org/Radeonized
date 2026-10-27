@@ -37647,3 +37647,95 @@ need to publish — on the object at `accelerator + 0x368`, not on our
 framebuffer. **Do not spoof the device id to get there**: `-rbgpufbmatch` is
 already a must-stay-out arg precisely because making Apple match a different id
 kills the accelerator, and this plugin works by making Apple accept `0x1681`.
+
+## 2sx — 2sw IS WITHDRAWN: `CFG_USE_DPT` defaults to ENABLED, so its absence is not the gate
+
+Caught while writing the patch 2sw called for, by reading the instructions
+*before* the branch I had already read. 2sw is wrong and this entry retracts
+its central claim.
+
+The full gate A sequence, with the line 2sw omitted:
+
+```
+be3c581: mov  [rbx], rax                 ; rbx = the IOAccelConfig argument
+be3c584: mov  byte ptr [rbx + 0x47], 0x1 ; <<< DEFAULT = 1
+be3c588: mov  rdi, [r14 + 0x368]
+be3c59c: call <safeMetaCast>
+be3c5a4: lea  rsi, "CFG_USE_DPT"
+be3c5ae: call [rcx + 0x2b8]              ; getProperty -> rax (NULL if absent)
+be3c5c5: call <safeMetaCast>             ; cast the property
+be3c5ca: test rax, rax
+be3c5cd: je   0xbe3c5e0                  ; NULL -> al = [rbx+0x47] = 1
+be3c5cf: mov  rcx, [rax]
+be3c5d5: call [rcx + 0x128]              ; getValue -> al
+be3c5db: mov  [rbx + 0x47], al
+be3c5e3: test al, al
+be3c5e5: je   0xbe3c73d                  ; ONLY A ZERO skips the publish
+```
+
+So the property is an **override, defaulting to enabled**. An absent
+`CFG_USE_DPT` yields `getProperty` NULL → `safeMetaCast` NULL → the `je` at
+`be3c5cd` → `al = 1` → gate A **passes**. The only way gate A blocks is a
+`CFG_USE_DPT` that is **present and zero**.
+
+**Therefore:**
+
+- 2sw's chain is broken at its first arrow. `1681` matching no
+  `AmdRadeonController*` personality is still true, and
+  `CFG_USE_DPT = 1` appearing only there is still true, but **neither
+  explains the missing capabilities**, because the flag's absence is
+  permissive.
+- **The patch 2sw proposed is a no-op** and was not written. Publishing
+  `CFG_USE_DPT = 1` sets a value the default already supplies. (It was also
+  not routable the way intended: **rule 2 refuses `populateAccelConfig`** — a
+  rel32 `je` (`0f 84`) begins at **offset 3**, inside the first five bytes, so
+  Lilu's copied displacement would land in its own buffer.)
+- The type note stands and is worth keeping: `plutil` prints `CFG_USE_DPT => 1`,
+  not `=> true`, so Apple ships it as an **integer**, and `*(0xbf90140)` is
+  `OSNumber`-shaped, not `OSBoolean`. A wrong type here is *safe* because of
+  the NULL check at `be3c5ca` — it falls back to the default.
+
+### Where the gate actually is
+
+Two candidates remain between the default-pass and the publish:
+
+```
+be3c5eb: mov  rdi, [r14 + 0x368]
+be3c5f5: call <safeMetaCast>
+be3c600: call [rcx + 0x6a8]       ; -> a collection
+be3c606: test rax, rax
+be3c609: je   0xbe3c73d           ; (1) NULL collection -> no publish
+...
+be3c620: call [rax + 0x128]       ; iterate
+be3c629: je   0xbe3c72c           ; (2) exhausted without a match -> no publish
+be3c643: lea  rsi, "IOMatchCategory"
+be3c64a: call [rax + 0x2b8]
+be3c666: lea  rsi, "IOAccelerator"
+be3c66d: call [rcx + 0x158]       ; isEqualTo
+be3c675: jne  0xbe3c690           ; match -> PUBLISH
+```
+
+So the publish needs a non-NULL collection from `vt[0x6a8]` **and** a member
+whose `IOMatchCategory` is exactly `"IOAccelerator"`. Our framebuffer carries
+`IOMatchCategory = "IOFramebuffer"` by design (that is how it displaced
+`IONDRVFramebuffer`), which makes gate B the live suspect and raises a question
+2sw never asked: **what collection is `vt[0x6a8]` and does our framebuffer
+belong to it?**
+
+**Unverified, and cheap in the next armed boot** — note the first command is
+the *value* test 2sv's property-name grep could not make:
+
+```
+ioreg -l | grep -E '"IOMatchCategory" = "IOAccelerator"'
+ioreg -l | grep -E '"CFG_USE_DPT"'
+```
+
+A present-and-zero `CFG_USE_DPT` would revive 2sw; absent leaves gate B.
+
+### The error, named
+
+This is the recurring error in its usual shape: I read the branch that skips
+the work and not the initialisation that decides what the branch sees. The
+practice in CLAUDE.md is "say what would have to be true for the reading to
+mean anything" — for a conditional skip, that includes **the value the fallback
+path uses**, which here was three instructions above the code I quoted.
