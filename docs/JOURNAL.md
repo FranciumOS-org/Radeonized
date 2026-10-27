@@ -39123,3 +39123,122 @@ recorded as a loose end; it is in fact the same defect class, and 2qv's read in
 particular asserts `getClassName() == "IONDRVFramebuffer"` by comment. Those
 three must be audited for type, not just for reachability, before anything
 re-triggers them.
+
+## 2u0 — 2sy IS REFUTED BY 2pp: `populateAccelConfig` DID run here, published the capabilities, and something we did since stopped it
+
+Static, no boot. This is the most consequential thing found in a while, and it
+was found by reading evidence already in hand — the failure mode this journal
+names most often.
+
+### The contradiction, stated plainly
+
+**2pp (2026-10-23, boot ~145, journal line 24847)** recorded, from `ioreg` on
+**this machine**, on **our** accelerator:
+
+```
+"IOAccelDisplayPipeCapabilities" = {"DisplayPipeSupported"=Yes,"TransactionsSupported"=Yes}
++-o IOAccelDisplayPipeUserClient2  ... "IOUserClientCreator" = "pid 162, WindowServer"
+```
+
+with `IOAccelTypes` naming `IGPU@0/AMDRadeonX6000_AMDNavi21GraphicsAccelerator`,
+and 2pp's own words: *"Apple's accelerator **found our IONDRVFramebuffer**,
+bound to it, published the index triple on it, advertises display pipes AND
+transactions as supported"*.
+
+**2sv addendum (2026-10-26 23:42)** measured, with the instrument controlled
+(rule 26 — `ioreg -l` emits 7973 property lines and does resolve other
+`IOAccel*`-shaped names in the same boot):
+
+```
+ioreg -l | grep -c IOAccelDisplayPipeCapabilities   ->  0
+```
+
+**And 2sv §3 established there is exactly ONE setter of that name** in
+`AMDRadeonX6000` — `0xbe3c6f1`, `r13->setProperty(name, r12)` inside
+`AMDRadeonX6000_AMDGraphicsAccelerator::populateAccelConfig` — the single other
+reference in the image being `IOAcceleratorFamily2`'s **getter**
+(`copyCapabilities`, a three-instruction `getProperty` tail call through slot
+`0x2e8`).
+
+So the property was published on 2026-10-23 and is absent on 2026-10-26, and
+the only thing that publishes it is `populateAccelConfig`.
+
+### What that refutes
+
+2sy concluded: `populateAccelConfig` derefs `accel->0x368` with no NULL check,
+`ATIController` never instantiates here, so a call *would panic*; no boot
+panicked; **therefore the function never runs**, and "Apple's display-pipe path
+is architecturally closed here".
+
+**That inference is dead.** 2pp is a direct observation of the function's own
+output. The function ran, published, and did not panic. Therefore at least one
+link of 2sy's argument is false — either `accel->0x368` is populated by
+something that is not an `ATIController`, or there is a NULL check in the ~50
+unread lines of that function, or the cast target is not `ATIController`. Which
+one is **not established here**; 2sy's *conclusion* is what is withdrawn, and
+the bad step was reasoning from "no panic was observed" to "the code did not
+run" without checking whether the code's *effects* had been observed. They had
+been, three days earlier, in this same file.
+
+With 2sy withdrawn, **2sw and 2sx are un-superseded** and go back to being
+open rather than moot. 2sx's finding stands on its own merits
+(`mov byte ptr [rbx+0x47], 0x1` — `CFG_USE_DPT` defaults to ENABLED, so its
+absence from the plist is not a gate), and it is now *consistent* with 2pp
+rather than irrelevant to it: gate A passed because the default is 1.
+
+### What it means for the goal, which is the point
+
+The display-pipe path is **not architecturally closed on this machine**. It
+**worked**, to the extent of both gate flags being published and WindowServer
+opening an `IOAccelDisplayPipeUserClient2` against it. So:
+
+* 2s3's two gates (`DisplayPipeSupported`, `TransactionsSupported`) were
+  **satisfied** in 2pp.
+* The plane count, 2se's blocker, was never reached in 2pp's analysis because
+  nobody looked — the property being present means the frontier in that boot
+  was the **blob at slot 0x8d0** (2sv §5), not the dictionary.
+* And the capabilities are **gone now**. Between 2pp and 2sv this project
+  replaced the framebuffer: `RBAMDFramebuffer` displaced `IONDRVFramebuffer`
+  (2sl/2sm/2st). 2pp's line says the publish happened while the accelerator was
+  bound to `IONDRVFramebuffer`.
+
+**Prime suspect: the framebuffer takeover suppressed the capabilities
+publish.** That is the same defect class as 2t8 and 2t9 — winning the panel
+voided assumptions downstream that nothing audited — and it would be the third
+instance in one session. It is a **suspicion, not a measurement**: no boot has
+yet compared the two configurations for this property.
+
+### The A/B that settles it, and both halves are KNOWN-GOOD configurations
+
+No new code, no wedge risk, no `-rbgpuagdcearly`, no AGDC one-shot. One
+property, one grep, in two boots this project has already booted cleanly many
+times:
+
+```
+A:  sudo nvram rbgpu-arm=1 rbgpu-fb=1     (our framebuffer owns the panel)
+B:  sudo nvram rbgpu-arm=1                (IONDRVFramebuffer keeps the panel, 2pp's shape)
+
+in each:  ioreg -l | grep -c IOAccelDisplayPipeCapabilities
+          ioreg -l | grep -c IOAccelDisplayPipeUserClient2
+```
+
+Four outcomes, each decisive:
+
+| A | B | reading |
+|---|---|---|
+| 0 | 1 | **the framebuffer takeover suppressed it.** Fix is ours and local, and the display-pipe road reopens. |
+| 1 | 1 | it is published now too, 2sv's boot differed for another reason, and the frontier is the 0x8d0 blob. |
+| 0 | 0 | it regressed between 2pp and now for a reason unrelated to the framebuffer — bisect the plugin changes since 2026-10-23. |
+| 1 | 0 | would contradict 2pp; re-check the instrument before believing it. |
+
+Run A first, since it is the configuration the machine is being restored to
+anyway, so the first half costs no extra boot at all.
+
+### The rule this earns, stated against myself
+
+**Before concluding that Apple's code does not run, grep this journal for its
+observable effects.** 2sy had the disassembly and reasoned forward from it;
+2pp had the output and had written it down. The existing rule says *read the
+evidence already in hand before designing the next experiment* — this adds the
+specific trigger: a claim of the form "that function never executes" is only as
+good as a search for what it would have left behind.
