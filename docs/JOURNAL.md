@@ -37547,3 +37547,103 @@ file's own comment says.
 New build UUID **770AE129-E550-3C37-BB4D-AE6900390389**, moved from
 `5B669C0F`. The lesson for me: `git add -A` is not safe in a tree someone else
 is also editing; stage the paths I actually changed.
+
+## 2sw — THE DISPLAY CHAIN IS CLOSED: `CFG_USE_DPT` is never published for `0x1681`
+
+Static, no boot. `AMDRadeonX6000_AMDGraphicsAccelerator::populateAccelConfig`
+(`0xbe3c53e`) guards the `IOAccelDisplayPipeCapabilities` publish with two
+gates, read from the disassembly:
+
+**Gate A — a config flag.**
+
+```
+be3c588: mov  rdi, [r14 + 0x368]          ; r14 = the accelerator
+be3c599: mov  rsi, r13                    ; r13 = *(0xbf90008), a metaclass
+be3c59c: call <safeMetaCast>
+be3c5a4: lea  rsi, 0xbf3cbd1              ; "CFG_USE_DPT"
+be3c5ae: call [rcx + 0x2b8]               ; getProperty
+be3c5c5: call <safeMetaCast>              ; -> *(0xbf90140), OSBoolean-shaped
+be3c5d5: call [rcx + 0x128]               ; getValue()
+be3c5db: mov  [rbx + 0x47], al            ; into the IOAccelConfig
+be3c5e3: test al, al
+be3c5e5: je   0xbe3c73d                   ; ZERO -> JUMP PAST THE PUBLISH
+```
+
+**Gate B — a match-category search.** `hw->vt[0x6a8]()` returns a collection;
+each entry is iterated with `vt[0x128]`, its `getProperty("IOMatchCategory")`
+(`0xbf3cbdd`) is cast to `OSString` (`*(0xbf90128)`, confirmed by the
+`vt[0x158]` call shape) and tested `isEqualTo("IOAccelerator")`
+(`0xbf3cbed`). Only a match breaks out to `0xbe3c690` and publishes. Note the
+publish target: `rdi = r13`, **the matched entry itself** — so the capabilities
+land on the service in the `IOAccelerator` match category, and
+`copyCapabilities` reads them back off `pipe->0x88`, the same service.
+
+### The measurement that closes it
+
+`CFG_USE_DPT` is an Info.plist property, and Apple ships it:
+
+```
+/System/Library/Extensions/AMDRadeonX6000Framebuffer.kext  ->  "CFG_USE_DPT" => 1   (x5)
+/System/Library/Extensions/AMDSupport.kext                 ->  absent
+/System/Library/Extensions/AMDRadeonX6000.kext             ->  absent
+```
+
+All five live on `AmdRadeonController*` personalities, and **every one is keyed
+to a discrete Navi PCI id**:
+
+| personality | IOPCIMatch |
+|---|---|
+| `AmdGpuWrangler` | 0x7310…0x73FF (25 ids) |
+| `AmdRadeonControllerNavi10` | 0x7310 0x7312 0x7318 0x7319 0x731A 0x731B 0x731F 0x73BF |
+| `…Navi12` | 0x7360 0x7362 |
+| `…Navi14` | 0x7340 0x7341 0x7343 0x7347 0x734F |
+| `…Navi21` | 0x73A0 0x73A2 0x73A3 0x73AB 0x73AE 0x73AF 0x73BF |
+| `…Navi23` | 0x73E0 0x73E3 0x73FF |
+
+**`1681` appears zero times in that entire plist** (`grep -c -i 1681` = 0). Our
+APU matches no controller personality, so nothing on this machine ever carries
+`CFG_USE_DPT`.
+
+### The chain, every link measured
+
+```
+AmdRadeonController* cannot match 0x1681          (plist, this entry)
+  -> nothing publishes CFG_USE_DPT = 1
+  -> gate A fails, populateAccelConfig jumps past the publish
+  -> IOAccelDisplayPipeCapabilities never published (ioreg count 0, 2sv, controlled)
+  -> DisplayPipeSupported / TransactionsSupported unset (2s3: both required)
+  -> plane count stays 0                            (2se: "Plane out of range")
+  -> nothing stageable, no transaction ever queued   (fb_vbl_ot_armed absent, 2s9/2sv)
+  -> enableTransactionInterrupt/enableVBLInterrupt never reached (2s5)
+  -> no 'vbl ' pacing; WindowServer idle at 0.0 % CPU with a laggy desktop (2sv)
+```
+
+Every arrow is a prior measurement, and the top one is new here. This also
+retires the search 2sf/2sg left open: `PlaneArray` has no AGDC type **because
+the whole capability structure is gated off before AGDC is consulted at all**.
+
+### What it does NOT say
+
+- It does **not** say gate A is the only failing gate. Gate B needs a service
+  with `IOMatchCategory == "IOAccelerator"`; `ioreg` does show an
+  `"IOAccelerator"` string live, but that was a *property-name* match, not a
+  match-category read, so gate B is **unverified**.
+- It does not say the plane count is reachable once gate A passes. 2sv's
+  §5 blob (slot 0x8d0 on userclient+0xe8) is still unread.
+- `CFG_DPT_MODE`, `CFG_IOP_DEBUG` and `CFG_USE_IOPSCALER` exist in the same
+  namespace (50 `CFG_` keys in `AMDSupport`, 37 in
+  `AMDRadeonX6000Framebuffer`) and none has been read.
+
+### The one cheap confirmation, next armed boot
+
+```
+ioreg -l | grep -E 'CFG_USE_DPT|CFG_DPT_MODE'
+ioreg -l | grep -A2 -E '"IOMatchCategory" = "IOAccelerator"'
+```
+
+Absent `CFG_USE_DPT` plus a present `IOAccelerator` category would pin the
+failure to gate A alone, which is the single property this project would then
+need to publish — on the object at `accelerator + 0x368`, not on our
+framebuffer. **Do not spoof the device id to get there**: `-rbgpufbmatch` is
+already a must-stay-out arg precisely because making Apple match a different id
+kills the accelerator, and this plugin works by making Apple accept `0x1681`.
