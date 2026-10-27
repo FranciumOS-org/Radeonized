@@ -38384,3 +38384,118 @@ count fell 83 → 81 exactly because we now define what we used to import.
   against boot 172 is undone.
 - `CA::OGL::SW` **absent** under an animating sample → the software renderer
   itself is gone. That is the real target and nothing yet says gamma reaches it.
+
+## 2t4 — gamma is ELIMINATED, EDID is a dead end, and `CA::OGL::SW` was software in BOTH configurations
+
+Boot 174 (build `45588775`, gamma keys published), animating sample saved as
+`logs/ws-sample-boot174-animating.txt`.
+
+### The gamma keys took, and changed nothing structural
+
+```
+IOFBGammaCount = 256   IOFBGammaWidth = 8   IOFBGammaHeaderSize = 12
+RBFBGammaCalls = 8     RBFBGammaChannels = 3
+RBFBGammaDataCount = 256  RBFBGammaDataWidth = 8  RBFBGammaDataNull = No
+```
+
+`IOFramebuffer::open()` read the keys and macOS called `setGammaTable` **eight
+times** with three channels, 256 entries, 8 bits and real data. So 2t3's
+override is **not** inert — that outcome is excluded, and the keys are correct
+and should stay.
+
+But the animating sample is structurally identical:
+
+```
+CA::OGL::SW::Format::RGBAh::load_1              438   (was 635)
+vAlpha_Blend_Premultiplied_BGRA_8888_CV_avx2    292   (was 459)
+CA::HalfFloat::to_float                         217   (was 339)
+```
+
+**Still `RGBAh`.** The counts are lower, and that is **NOT claimed as an
+improvement**: two samples of hand-driven animation at different intensities
+cannot support a ratio (rule 18). The structure is what matters and it did not
+change. **Gamma metadata does not select the half-float path.**
+
+### EDID is a dead end, and the capture settles it
+
+`IODisplayPrefsKey` contains `756e6b6e` = ASCII **"unkn"**, and
+`IODisplayEDID`, `IODisplayEDIDOriginal`, `AppleDisplayType`,
+`IODisplayHasBacklight`, `IODisplayIsHDR` are all absent from our framebuffer.
+That looked like the lead. It is not: the `IODisplayEDID` block captured on
+2026-10-24 **under `IONDRVFramebuffer`** is
+
+```
+IODisplayEDID = { 0x5b81c5c0 = { }; };          <- EMPTY
+IODisplayMode = { ... imageWidth = 0; imageHeight = 0; ... }
+```
+
+**empty, with zero physical dimensions.** So this panel has never presented
+EDID to macOS through *either* driver, and a missing EDID cannot explain a
+difference between boot 172 and boot 173 because both lacked it. Dropped
+without a boot spent on it.
+
+### Our pixel reporting is plain 8-bit, so `RGBAh` is chosen ABOVE us
+
+```c
+info->bitsPerPixel     = 32;        info->pixelType = kIORGBDirectPixels;
+info->componentCount   = 3;         info->bitsPerComponent = 8;
+info->componentMasks   = { 0x00ff0000, 0x0000ff00, 0x000000ff };
+getPixelFormats() -> IO32BitDirectPixels
+```
+
+Nothing here requests a float or wide format. So the half-float surface is
+CoreAnimation's own intermediate choice, made above the framebuffer interface,
+and chasing it through more framebuffer properties is guessing at a large
+surface.
+
+### THE CONCLUSION THAT REFRAMES THE DISPLAY HALF
+
+Put the two animating samples side by side:
+
+| boot | framebuffer | accelerator | compositor renderer |
+|---|---|---|---|
+| 172 | `IONDRVFramebuffer` | armed | **`CA::OGL::SW`**, `ARGB8_Host` |
+| 173/174 | **`RBAMDFramebuffer`** | armed | **`CA::OGL::SW`**, `RGBAh` |
+
+**CoreAnimation used its software renderer in BOTH.** Owning the framebuffer
+changed the surface *format* and nothing else. So the premise this work has
+run on since 2sj — that a working `IOFramebuffer` of ours is what stands
+between this machine and GPU compositing — is **measured false for Apple's
+accelerator**. Everything downstream of it succeeded and none of it helped:
+
+- the framebuffer owns the panel (2st) ✓
+- Apple's `AMDNavi21GraphicsAccelerator` pairs with it as `fb0:0`, named by
+  three processes (2su) ✓
+- the accelerator **registers its own `'vbl '` handler** on us
+  (`RBFBVBLRegistered = 2`, slot 1 not self) (2t2) ✓
+- the VBL clock delivers at the panel's rate (2sz, 25 200 fires) ✓
+- `IOAccelTypes` / `IOAccelIndex` / `IOCFPlugInTypes` bind us to the
+  accelerator and advertise `IOAccelerator2D.plugin` (2t3) ✓
+- gamma is live and consumed (this entry) ✓
+
+…and CoreAnimation still rasterises the desktop on the CPU.
+
+**This is what 2sj actually said, read correctly.** nullarc gets GPU
+compositing because **their accelerator composites** — "its *accelerator*
+composites" is in that entry verbatim. Apple's accelerator pairing with our
+framebuffer was never the same claim, and 2st/2su's "2sj's one stated unknown
+is answered" was answered too generously: Apple's accelerator will *pair* with
+a non-Apple `IOFramebuffer`, which is not the same as *compositing* for one.
+
+### The next read, and it is NOT another framebuffer property
+
+What selects CoreAnimation's renderer — why `CA::OGL::SW` rather than the
+Metal/GPU path — in **CoreAnimation/SkyLight**, userspace, dyld cache. That is
+a different question from everything 2s2-2t3 investigated, and it is the only
+one that distinguishes "the desktop can be GPU-composited here" from "it
+cannot, with Apple's compositor". `CA::OGL::SW::` is the direct instrument
+(2t1) and it has never once been absent from an animating sample on this
+machine.
+
+**Not established**: that it is reachable at all. `-rbgpufbmatch` is still
+barred (2sy), so a path requiring Apple's controller remains closed.
+
+### Unrelated, user-reported: the trackpad returned on its own
+
+*"trackapd is back"* with no action taken, consistent with 2t2's attach-race
+reading and against anything this project did.
