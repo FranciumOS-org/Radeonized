@@ -39483,3 +39483,139 @@ and both capability flags), three of the map's four conditions are verified
 statically (2t7, 2t8 addendum), the bridge's trigger is fixed (2t8) and its
 panic is fixed (2t9). The static road has run out; this is no longer a choice
 between reading more and booting.
+
+## 2u4 — BOOT 177: THE WHOLE CHAIN OPENS. The AGDC map fills, a DisplayPipe exists, the plane count is NOT zero, and Apple names the real blocker: GAMMA
+
+Boot 177, `rbgpu-boot = 177` against the previous capture's 174, so the nonce
+is new (rule 8). Capture on disk: `logs/20261027-042201-plugin`. It **wedged**,
+which is 2rz's known cost of winning the gate, and the user ran
+`plugin_check.sh` before rebooting exactly as rule 10 requires - so for once
+the wedge cost nothing.
+
+### Every link that was closed is now open
+
+| measurement | boot 174 | **boot 177** |
+|---|---|---|
+| `agdc_say` | `UNARMED: no class or service created` | **`PUBLISHED: verify IOPresentment in WindowServer`** |
+| `agdc_error` / `agdc_started` / `agdc_stage` | 3 / - / 0xa | **0 / 1 / 0x46** |
+| `Unable to get AGDC information. 0x10000003` | present | **0 occurrences** |
+| `System set to use IOP but no display pipes are present` | present | **0 occurrences** |
+| `Unable to find display pipe for IOFB service` | present | **0 occurrences** |
+
+So: the **association map FILLED**, `IOPresentmentCreateForRegistryID`
+succeeded, a **`DisplayPipe` exists for our framebuffer**, and `gUseIOP` was
+**never latched off**. 2t7's latch, 2r5's empty map and 2qq's whole chain are
+all cleared in one boot.
+
+### The map's fourth condition - the only one never verified - PASSED
+
+2t7/2t8 verified three of `ioPresentmentCreateAssociationMap`'s four
+conditions statically and left the type-2 `IOServiceOpen` untested. Boot 177
+answers it from our own side:
+
+```
+agdc_user_vendor = 4      <- IOPresentment opened the type-2 user client and
+agdc_user_cap    = 1         called selector 1 (kAGDCVendorInfo) FOUR times,
+                             and selector 0x980 (kAGDCGPUCapability) once
+agdc_vendor_calls = 6     agdc_cap_calls = 2
+agdc_link_result  = 0     agdc_logical_calls = 3
+```
+
+`out+0x28 = 2` was therefore accepted, confirming the 2t7-addendum read of the
+`decl %eax; cmpl $1; ja` test from the other end.
+
+### 2t8 and 2t9 are both verified working
+
+```
+agdc_tim_ndrv_err = 8        <- 2t9's new refusal code: the NDRV getters were
+                                correctly NOT called with our framebuffer
+agdc_tim_err      = 0        <- and OTG supplied a real timing instead
+agdc_tim_h = 1920   agdc_tim_v = 1080   agdc_tim_clk = 341797770
+otg_frames = 16   otg_polls = 994   otg_err = 0
+```
+
+No panic, and the timing came from the source 2t9 argued was the correct one
+rather than a degraded fallback. The 2t8 notification fired: without it
+`agdc_say` would still read "waiting for the framebuffer".
+
+### THE PLANE COUNT IS NOT ZERO - 2se/2sf/2sg's whole line of inquiry is RETIRED
+
+Every one of the 58 `DisplayPipeState` dumps opens:
+
+```
+-------------------DisplayPipeState-------------------
+Plane Index: 0
+Source Color Space: <CGColorSpace ...> (sRGB IEC61966-2.1)
+Rotation Angle: 0 degrees
+Matrix / LUT R,G,B [0..0.500489..1] with 1024 entries / LiT R,G,B with 3 entries
+```
+
+**A plane exists and is being enumerated.** So 2se's "the plane count is a
+byte at pipe+0x10, a count of 0 means nothing can ever be staged" was never
+the gate here, 2sf's hunt for what feeds `PlaneArray` was answering a question
+that had no teeth, and 2sg's "the plane count does not come from AGDC" is
+consistent with it coming from nowhere we needed to supply. **2u3's three
+mutually-exclusive measurements are reconciled the cheapest possible way: the
+count was never the problem.** 2u3 said the way to find which measurement was
+wrong was to watch the code run; the answer is that none of them was wrong and
+the inference built on top of them was.
+
+### What Apple says the blocker IS, in its own words
+
+New in this boot, and never seen before in this project:
+
+```
+04:21:23.303  [ERROR] - DisplaySurface Size: (1920x1080) Format:BGRA
+04:21:23.303  [WARN]  - Display: 0x5b81c5c0 woke on GPU: AMD
+04:21:23.303  [ERROR] - Attempting to get capabilities from plane with no gamma   (x7)
+04:21:23.305  [ERROR] - Fallback GPU Display Pipe transaction submission failed
+04:21:23.305  [ERROR] - Transaction Target State
+```
+
+and in every dump, the single unresolved operation, unchanged since 2sa:
+
+```
+    Dirty        Fetch  - Pipe          <- routing through the pipe
+    Dirty        System Gamma  - Unknown   <- THE ONE THAT DOES NOT RESOLVE
+    Dirty        EOTF  - GPU
+```
+
+`Clean` still never appears in 58 dumps, and the transaction submission now
+fails **with a named cause**: the plane has **no gamma capability**.
+
+### This is precisely the suspect 2sc/2sd could not eliminate
+
+2sd eliminated capability types 1 (CSC), 4 (Degamma) and 0x8000 (Cursor) by
+answering all five and measuring a byte-identical log. It explicitly could not
+eliminate **type 2 (Gamma)**, because 2sc had to substitute its channel count
+(`vt[0x1b8](0xf)`, on an object we lack) and "an empty gamma capability is
+plausibly indistinguishable from a refused one". **Apple has now printed the
+distinction.**
+
+### And we did not even answer it this boot
+
+```
+boot-args: -rbgpuagdccaps   ABSENT
+agdc_extcap_all = 0   agdc_extcap_answered = 3   agdc_extcap_gated_n = 0x2d
+```
+
+So type 2 was **gated off**. The next experiment is therefore a single
+variable, needs no new code, and carries a sharp prediction: arm
+`-rbgpuagdccaps` and `Attempting to get capabilities from plane with no gamma`
+must change. If it does, gamma is the blocker and the question becomes what a
+*correct* gamma capability contains. If it does not, the message is about
+something other than our AGDC reply and the capability interface is the wrong
+lever after all.
+
+**Stated plainly because rule 17 demands it**: `-rbgpuagdccaps`'s gamma answer
+contains a SUBSTITUTED channel count (2sc). It is legitimate as a diagnostic -
+that is what 2sc built it for - and **no reading from it may be narrated as a
+hardware fact**. It tells us whether the message responds to that input, and
+nothing more.
+
+### Standing risk, unchanged
+
+Boot 177 wedged, as boots 156/164/169/170 did. 2s8 holds: the wedge writes its
+NVRAM note, consumes its one-shots, and a plain power cycle comes up clean.
+`-rbgpuoff` remains the rescue. The capture surviving on disk is what makes
+these boots affordable.
