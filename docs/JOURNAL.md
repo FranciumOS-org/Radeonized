@@ -35056,3 +35056,127 @@ up clean because the one-shots are consumed).
 That last row is the point: the boot separates "we were refusing WindowServer
 the one thing it needed" from "there is a second gate behind it", and either
 answer is worth the boot.
+
+## 2sa — boot 169: the 2s9 fix took, the AGDC side is now COMPLETE, and the pipe still never queues
+
+Build `8B261646`, `-rbgpuagdcearly`. Two boots happened, and they must be
+separated before anything is read.
+
+**The first boot hung at the progress bar with no SSH** and needed a force
+restart. It is the `rbgpu-diag-prev` note: `d=5 armed=0 diag_used=97
+agdc_stage=a agdc_error=3 agdc_oneshot=2 iop_oneshot=2 agdc_tim_err=9`.
+`agdc_error 3` is `refuse(3,"UNARMED: no class or service created")`,
+`agdc_oneshot 2` and `iop_oneshot 2` say the one-shot keys were **absent**,
+and `agdc_tim_err 9` is the seeded value meaning `sampleTiming()` was never
+reached. So the bridge was inert in that boot and the 2s9 change never ran in
+it. `rbgpu-boot` did not advance for it either. **What hung it is
+unexplained** — a new failure mode, and worse than the wedge because it
+leaves no SSH window. Rule 12 applies: a progress bar that never finishes and
+a hang are indistinguishable from outside. Not chased here; recorded.
+
+**The second boot is the armed one and the one captured**, live over SSH from
+inside the wedge: `logs/20261026-205851-plugin`, `rbgpu-boot = 169`. Its
+`peer.plist` reports `diag_used 602` and the live note reads `diag_used=25a`
+— the same number, so the captured table and the note are the same boot's.
+Table not full (602 of 768), so an absent key is a result.
+
+### The 2s9 fix worked, to the millisecond
+
+| key | value |
+| --- | --- |
+| `agdc_resample_alloc` / `agdc_resample` / `agdc_resample_valid` | 1 / 1 / **1** |
+| `agdc_t_resample_ms` | 0x1b07 = 6919 ms |
+| `agdc_t_fb_ms` | 0x1b07 = **the same ms** |
+| `agdc_t_sampled_ms` | 0x16bb = 5819 ms (the early, timing-less sample) |
+| `agdc_tim_ndrv_err` → `agdc_otg_src` / `agdc_otg_ret` / `otg_err` | 3 → 2 / 0 / **0** |
+| `agdc_tim_err` / `agdc_tim_cached` | **0** / **2** (OTG0) |
+| `agdc_tim_h` / `_v` / `_clk` / `_mhz` | 1920 / 1080 / 341 987 621 Hz / 143.908 Hz |
+
+The re-sample fired at the instant the framebuffer arrived, the NDRV said "no
+detailed timing" (err 3) exactly as on the clean late path, OTG0 answered, and
+the cached timing is the panel's own — the pixel clock agrees with 2rn's
+edge-latched 341 987 984 Hz to 1 part in 10⁶.
+
+**`agdc_link_result 0` and `agdc_logical_ret 0`: getLinkConfig (0x921) now
+SUCCEEDS.** In boot 168 it was −2 and refused 4 times. That blocker is gone.
+
+### The remaining refusals are CORRECT, and 2rf already said so
+
+The refusal moved to `0x711` — `agdc_failed_attr 0x711`, 18 failed calls,
+`kIOReturnUnsupported` — and the first reading of that would be "a new
+blocker". It is not, and the evidence was already in `rb_agdc.h:182`:
+
+> Apple implements only types 1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler and
+> 0x8000 Cursor … IOPresentment asks for ALL SIXTEEN type bits in turn, so
+> most of those queries fail by design and it tolerates them.
+
+Boot 169 measured that prediction on hardware: `agdc_extcap_calls` = **0x10 =
+16**, one per type bit; `agdc_extcap_answered` = **1**, the scaler; and
+`agdc_extcap_result −2` with `agdc_extcap_type 0x8000` — last-wins, and
+Cursor is the last of the sixteen, the one Apple's own gather precedes with
+`xorl %r14d,%r14d` so that even its failure returns success.
+
+**So the AGDC negotiation is now complete and correct**: 0x980 answered, 0x921
+answered with a real measured timing, extended-capability type 0x10 answered
+with count 1, the rest refused exactly where Apple's driver refuses them. Our
+bridge is eliminated as the cause of the wedge. That was the live hypothesis
+as of 2s9 and it is now dead.
+
+### And the pipe still never queues
+
+**`fb_vbl_ot_armed` remains ABSENT**, with the table not full. `fb_vbl_ot_state
+0`, `fb_vbl_ot_n 1`. So 2s9's pre-stated row 6 is the one that came true: the
+link config was **not** the blocker, and there is a second gate behind it that
+is not in our AGDC bridge.
+
+`fb_vbl_calls` is back to **5** this boot, against 0x36 in boot 168, and the
+type ring holds FourCCs again. So 2s9's "54 calls in a different numbering"
+observation does **not** reproduce — rule 18, it was an n=1 row and is
+withdrawn as a finding.
+
+### What the wedged boot's own log says, and the next question
+
+`display-log.txt` carries **no** AGDC error of any kind — no "Unable to get
+AGDC information", no "no display pipes are present". What it carries is 56
+identical `DisplayPipeState` dumps, and the word `Clean` appears **zero**
+times in the whole 156 KB log. Every block is byte-identical:
+
+```
+    Dirty        Fetch  - Pipe
+    Dirty        Scale  - None
+    Dirty        Rotate  - None
+    Dirty        Linearize  - None
+    Dirty        CSC  - None
+    Dirty        System Gamma  - Unknown
+    Dirty        Regamma  - None
+    Dirty        EOTF  - GPU
+```
+
+`Fetch - Pipe` and `EOTF - GPU` mean WindowServer **is** routing this through
+the display pipe. Nothing ever resolves, 56 times over, and no transaction is
+ever queued — which is `fb_vbl_ot_armed` absent, from the other side.
+
+One line stands out: **`System Gamma - Unknown`**, where every other operation
+resolves to `Pipe`, `None` or `GPU`. And the capability set we hand over is
+scaler-only, while `rb_agdc.h:182`'s own list says a real AMD Mac implements
+**five** types — 1 CSC, 2 Gamma, 4 Degamma, 0x10 Scaler, 0x8000 Cursor. We
+answer one of the five. 2rf's "answer 0x10, refuse the rest" was derived from
+what makes `__GatherAGDCDisplayPipelineCapabilities` *return success*, which
+is a different question from what the pipeline needs in order to *run*: the
+gather tolerates the refusals, and the capability set it ends up with is then
+missing gamma, degamma, CSC and cursor.
+
+So the next question is **whether the pipe stays Dirty because the capability
+set is incomplete**, with Gamma (type 2) named directly by the log. That is a
+reading of a correlation, not a measurement, and it is the first thing a
+further boot should separate. Nothing is built for it yet.
+
+Still standing and untouched by this boot: docs/RULES.md's own pre-statement that
+past the gate IOPresentment needs `IOPresentmentBindIOAccelSurfaceToResource`
+and `SetPlaneState`, and `IONDRVFramebuffer` implements neither. Boot 169 does
+not distinguish that from the capability-set reading.
+
+**The installed build is safe to leave in place.** The 2s9 change is scoped to
+`early && finished && !timingValid`, so with `-rbgpuagdcearly` out of
+boot-args — which the user removed from inside the wedge — it is inert, and
+the configuration is byte-for-byte what boots 165–167 booted clean.
