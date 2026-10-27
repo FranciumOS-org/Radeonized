@@ -78,6 +78,16 @@ public:
     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) APPLE_KEXT_OVERRIDE;
     IOReturn setAttribute(IOSelect attribute, uintptr_t value) APPLE_KEXT_OVERRIDE;
 
+    /* 2t3: gamma. IOFramebuffer::open() READS IOFBGammaCount/Width/HeaderSize
+     * off the driver and leaves its own fields at zero when they are absent,
+     * so publishing them is what tells IOGraphics gamma exists at all. These
+     * two then receive the tables. */
+    virtual IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount,
+                                   UInt32 dataWidth, void *data) APPLE_KEXT_OVERRIDE;
+    virtual IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount,
+                                   UInt32 dataWidth, void *data,
+                                   bool syncToVBL) APPLE_KEXT_OVERRIDE;
+
     /* IOFramebuffer: the vblank, which is what drains the display pipe (2s4) */
     IOReturn registerForInterruptType(IOSelect interruptType, IOFBInterruptProc proc,
                                       OSObject *target, void *ref,
@@ -117,6 +127,7 @@ private:
     IORegistryEntry *nvram;
     bool crumbOn;
     uint32_t crumbStage;
+    uint64_t gammaCalls;
     char crumbBoot[12];   /* rbgpu-boot, the nonce (rule 11) */
 
     /* True iff this instance won the `IOFramebuffer` match category, i.e.

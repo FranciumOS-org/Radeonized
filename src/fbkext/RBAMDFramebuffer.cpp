@@ -272,6 +272,25 @@ bool RBAMDFramebuffer::start(IOService *provider)
     publishVBLState();  // zero is a reading; missing properties are not
     crumb(3);   /* thread_call allocated (or refused, see the property) */
 
+    /* 2t3: these three are INPUTS. IOFramebuffer::open() calls
+     * getProperty("IOFBGammaWidth"/"IOFBGammaCount"/"IOFBGammaHeaderSize") on
+     * the driver, casts each to an OSNumber and stores it at private+0x1a0 /
+     * +0x1a4 / +0x198; when the property is absent the safeMetaCast returns
+     * NULL, the je is taken and the field stays ZERO (measured in
+     * IOGraphicsFamily at 0x14fc6304-0x14fc63b4). So an absent key does not
+     * mean "default gamma", it means "this framebuffer has no gamma", which is
+     * what we have been telling IOGraphics - and matches 2sa's
+     * `System Gamma - Unknown`, the one DisplayPipeState operation that never
+     * resolved.
+     *
+     * The values are MEASURED, not chosen: they are what IONDRVFramebuffer
+     * published on THIS machine (captured in logs/). Rule 17. */
+    setProperty("IOFBGammaCount", 256ULL, 32);
+    setProperty("IOFBGammaWidth", 8ULL, 32);
+    setProperty("IOFBGammaHeaderSize", 12ULL, 32);
+    gammaCalls = 0;
+    setProperty("RBFBGammaCalls", 0ULL, 64);
+
     crumb(4);   /* about to enter IOFramebuffer::start - the superclass */
     if (!IOFramebuffer::start(provider)) {
         LOG("IOFramebuffer::start refused");
@@ -290,6 +309,54 @@ bool RBAMDFramebuffer::start(IOService *provider)
           "this configuration measures start(), it does not drive the display");
     crumb(7);   /* start() returning true */
     return true;
+}
+
+/* -- gamma --------------------------------------------------------------- */
+
+/* 2t3: we accept the table and program NOTHING, which is the honest behaviour
+ * for this driver and needs saying plainly, because rule 20 exists to forbid
+ * exactly the shape this has: a call that reports success without anything
+ * being applied.
+ *
+ * Why accepting is still right: the panel is lit by firmware and this driver
+ * deliberately writes nothing to the display engine (2sj/2sm), so the LUT in
+ * DCN keeps whatever the firmware programmed - which is the state the desktop
+ * already runs in today. Returning an error instead would leave IOGraphics
+ * believing gamma is broken rather than simply fixed, and `IOBootFramebuffer`
+ * - Apple's own software framebuffer - overrides this same 4-argument method.
+ *
+ * What makes the no-op auditable rather than a lie: every call is counted and
+ * published, with its parameters, so `ioreg` says whether macOS ever actually
+ * set a table and with what shape. If RBFBGammaCalls stays 0 then publishing
+ * the three keys changed nothing downstream and this override is inert - which
+ * is a result, not a silence (rule 14). */
+IOReturn RBAMDFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount,
+                                         UInt32 dataWidth, void *data)
+{
+    gammaCalls++;
+    setProperty("RBFBGammaCalls", gammaCalls, 64);
+    setProperty("RBFBGammaChannels", (UInt64)channelCount, 32);
+    setProperty("RBFBGammaDataCount", (UInt64)dataCount, 32);
+    setProperty("RBFBGammaDataWidth", (UInt64)dataWidth, 32);
+    setProperty("RBFBGammaDataNull", data == nullptr);
+    if (gammaCalls == 1) {
+        LOG("setGammaTable #1: channels %u, entries %u, width %u, data %s - "
+            "ACCEPTED AND NOT PROGRAMMED (firmware LUT retained; this driver "
+            "writes nothing to the display engine)",
+            channelCount, dataCount, dataWidth, data ? "present" : "NULL");
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn RBAMDFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount,
+                                         UInt32 dataWidth, void *data,
+                                         bool /*syncToVBL*/)
+{
+    /* Both arities are exported by IOGraphicsFamily
+     * (__ZN13IOFramebuffer13setGammaTableEjjjPv and ...EjjjPvb) and which one
+     * macOS calls here is NOT established, so both are overridden and the
+     * five-argument form delegates. There is no hardware write to sync to. */
+    return setGammaTable(channelCount, dataCount, dataWidth, data);
 }
 
 /* -- crash breadcrumbs --------------------------------------------------- */
