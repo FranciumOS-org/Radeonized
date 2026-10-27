@@ -40220,3 +40220,60 @@ corrected). `kmutil libraries -p` resolves 0 from `SystemKernelExtensions.kc`.
 **No boot is pending**: the next piece of work is chained-pointer decoding in
 `tools/re/dsc.py` so a `__cfstring` can be xrefed, which is what 2v1's
 translation-step read needs.
+
+## 2v2: `dataxref` was single-file — the same defect 2r2 fixed for code searches
+
+2v1 said the gamma dictionary keys could not be xrefed because they are CFSTR
+constants and "a qword search for the `__cfstring` is blind to the cache's
+chained pointers". **Half of that was wrong, and the wrong half was mine**:
+`dsc.py` has had `dataxref` — a chained-pointer-aware search for a slot whose
+*decoded* value is a target — since 2r4, with `slide_regions` and
+`ptr_decode` behind it. What it did **not** have was more than one file.
+
+`slide_regions(path)` opened **only the path given** and `dataxref` seeded its
+reads from that one handle. So every `dataxref` this project has ever run saw
+**2** slide regions. Run cache-wide now, there are **14**, across seven files:
+
+```
+va 0x7ff840000000 size 0x003670000 v2 ...  dyld_shared_cache_x86_64h
+va 0x7ff843670000 size 0x000e44000 v2 ...  dyld_shared_cache_x86_64h
+va 0x7ff940000000 size 0x00305c000 v2 ...  .01
+...
+va 0x7ffe40190000 size 0x0000d4000 v2 ...  .06
+```
+
+This is **2r2's defect, in the data searches instead of the code searches**.
+2r2 found `xref` enumerating one file's mappings and recorded that it was how
+the referencer of "Unable to get AGDC information" survived four searches whose
+controls all passed. The same sentence applies here verbatim, and the fix is
+the same: `cache_paths()` is now factored out of `Cache` and used by
+`slide_regions`, which returns the owning file with each region, and `dataxref`
+opens each file lazily. `rdptr` and the `slide` command follow the new tuple;
+`slide` now prints the file.
+
+Recorded as a lesson rather than a patch note: **when one search is found to be
+single-file, check the others in the same tool.** 2r2 fixed one and left two.
+
+### It works, and the key is found
+
+`dataxref 0x7ff812ea0ed3` (the `GammaArray` C string) → **exactly one** slot,
+`0x7ff84166ef90`. A `__cfstring` is `{isa, flags, cstr, length}`, so the object
+is at **`0x7ff84166ef80`**, and reading its four slots validates it with no
+assumption left standing:
+
+| slot | raw | reading |
+|---|---|---|
+| +0x00 | `0x00000400438e1768` → `0x7ff8438e1768` | `__CFConstantStringClassReference` |
+| +0x08 | `0x00000000000007c8` | flags `0x7c8` |
+| +0x10 | `0x0000040012ea0ed3` → `0x7ff812ea0ed3` | the C string |
+| +0x18 | `0x000000000000000a` | length **10** = `strlen("GammaArray")` |
+
+The length matching the string's own length is the control: a wrong hit could
+not produce it.
+
+**Caveat on the instrument, since it will mislead someone:** `rdptr` applies
+`ptr_decode` to every slot in a slide-info mapping, so the non-pointer slots
+above print a nonsense "-> 0x7ff8000007c8" and "-> 0x7ff80000000a". The **raw**
+column is the value for those. `ptr_decode` cannot know which slots are
+pointers — that is what the chain walk is for — so read raw unless the slot is
+one you already believe is a pointer.
