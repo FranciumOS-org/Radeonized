@@ -362,6 +362,31 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 183: NO WEDGE, AND THE VBL HALF IS ELIMINATED (2w0).** Build
+`8887186E` booted clean and carried **no measurement** — 2v9's handoff named
+only two of the four one-shots, so `agdc_oneshot=2` and `iop_oneshot=2` ("not
+armed") and every `agdc_ec_*` key is absent with `diag_used` 479 of 768, so
+that absence means the bridge never ran. What boot 183 **is** worth:
+**a clean no-wedge differential** — 177-182 all had the AGDC bridge armed and
+all wedged; 183 is the same build family and boot-args with the bridge
+**unarmed**, framebuffer and accelerator up, and the desktop stayed usable for
+minutes. n=1, but it points at the bridge, not the framebuffer takeover.
+**And the VBL side is now positively correct**, from the registry (rule 31):
+`RBFBVBLRunning Yes`, `RBFBVBLFires 54000` in ~375 s = **144 Hz** (the panel's
+measured 143.88), handler 0 ours and enabled, **handler 1 Apple's, registered
+and left disabled with 0 fires** — exactly 2s5's prediction. So the clock and
+the registration are right and `fb_vbl_ot_armed` is still absent: **no
+transaction has ever been queued, and the VBL half is no longer a candidate
+for why.** Also live: `IOAccelDisplayPipeCapabilities` with both keys `Yes`
+(**2u2 reconfirmed**, 2sv's zero is the outlier twice over), `VRAM,totalMB`
+4096, SkyLight logging `Metal compositor`.
+**Unexplained and NOT attributed**: WindowServer at **200.2 %**, against
+2su's 0.0 % idle — but the user was driving the machine and 2v9's *unarmed*
+boot read 207.9 %, so nothing separates CPU compositing from a busy desktop.
+Needs its own controlled read.
+**Arm ALL FOUR**: `sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1
+rbgpu-fb=1`.
+
 **`Clean` NEVER APPEARED BECAUSE THE PRINTER CANNOT PRINT IT (2v8).** That
 byte prints `"Dirty "` or six spaces; the string `Clean` is not in
 CoreDisplay. Controlled against the capture: `DisplayPipeState` 66, **`Dirty`
@@ -687,6 +712,13 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the `Darwin Kernel Version` banner, once per boot. And `log` is a zsh
     builtin that shadows `/usr/bin/log`: always the absolute path, always with
     a known-present control. [2q0, 2s1]
+34. **An arm instruction must list EVERY one-shot the experiment needs, and
+    the reader must check each `*_oneshot` key before interpreting anything.**
+    2v9's handoff named `rbgpu-arm` and `rbgpu-fb` and omitted `rbgpu-agdc`
+    and `rbgpu-iop`; boot 183 came up looking completely healthy and carried
+    no data at all. The keys that would have caught it were already in the
+    note and already read 2 = not armed. Rule 9 says the one-shots are
+    one-shot; this adds **say which ones, and verify them first**. [2w0]
 33. **Before reading anything from the LIVE machine, establish which boot it
     is**: `kern.boottime` against the capture's, and `rbgpu-boot` against the
     last nonce. The running box is not the armed boot merely because the armed
