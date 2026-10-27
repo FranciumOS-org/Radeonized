@@ -167,6 +167,28 @@ that region of the cache is a hang-watchdog vendor tag, not a comparison.
 Also measured (2sj): CoreDisplay's hang watchdog never fired in either wedged
 boot, so there was no transaction to hang.
 
+**THE DISPLAY HALF IS OPEN AGAIN, AND THE FRAMEBUFFER IS BUILT** (2sl/2sm).
+`kmutil libraries` resolves `__ZTV13IOFramebuffer`, `gMetaClass`, `start` and
+the `OSMetaClass` constructor out of **`SystemKernelExtensions.kc`** for a kext
+that declares `IOGraphicsFamily` — so Route A was never closed, only untested.
+nullarc confirms the split from a working driver: `PhxBringup.kext` to
+`EFI/OC/Kexts`, `PhxAccel.kext` (which holds `PhxAMDFB`) to the **auxiliary
+collection**. `src/fbkext/RBAMDFramebuffer` is built against that, and its
+vtable is verified slot by slot: Apple's `__ZTV13IOFramebuffer` is 2824 bytes,
+ours is **the same 2824**, and all 22 overrides land on the measured offsets
+with three inherited slots as controls. What is **not** established: that the
+load is *accepted* (stage 1 measures it — `kmutil libraries` does not check
+authorization), that `IOFramebuffer::start()` completes on a non-Apple subclass
+here (stage 2), and whether `AMDRadeonX6000` will composite for a non-Apple
+`IOFramebuffer` at all. **And opening the gate is a different input to the same
+machinery that wedges** — 2qp already opened `UseIOPresentment` by patching the
+classifier and met *"System set to use IOP but no display pipes are present"*.
+Nothing measured says the wedge will or will not come back.
+
+Also withdrawn in 2sl: 2sj's caveat that nullarc's class-name claim was
+unverified. **2ql had already measured that gate**, and `make useiop` prints it
+live.
+
 **Do not propose page flipping again without new evidence** (2pf): with
 `-rbgpuflipprobe` routed, `getDisplayPipeTransactionFlip` was never called
 once in a whole boot. **Do not force `UseIOPresentment` true** (2ql): 72 call
@@ -182,6 +204,14 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
 - `src/kext/` — `RembrandtProbe`, an IOService in its own IOMatchCategory
   beside the boot framebuffer driver. Probes once in `start()`, publishes
   `RBProbe` properties, unmaps everything.
+- `src/fbkext/` — `RBAMDFramebuffer`, an `IOFramebuffer` subclass for the
+  firmware-lit panel. Its **class name carries "AMD"**, which is the one thing
+  that opens CoreDisplay's IOPresentment gate (2ql). It writes nothing to the
+  display engine, delivers `'vbl '` from a `thread_call` at the measured
+  refresh, and its personality **displaces** `IONDRVFramebuffer` (same provider,
+  name and `IOMatchCategory`, score 30000 vs 20000) because `present` is the OR
+  over all framebuffers. `make fbkext`; loaded by the user with
+  `sudo tools/fbload.sh` — **never installed by the assistant**. 2sm.
 - `src/plugin/` — the Lilu plugin: `kern_start.cpp` (hooks and probes),
   `RembrandtGPUPeer.cpp` (the IOService peer, the diag table and the NVRAM
   hot-key list), `rbgpu_agdc.cpp` (the AGDC bridge), `rbgpu_agdc_otg.cpp` (the
@@ -215,6 +245,13 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
 - After any plugin change, check: `kmutil libraries -p build/out/RembrandtGPU.kext`
   resolves everything with **0 from `SystemKernelExtensions.kc`** (the 2oz
   trap), and `grep -c IOGraphicsFamily src/plugin/Info.plist` is **0**.
+  **This rule is about the PLUGIN only.** It is injected by OpenCore into
+  `BootKernelExtensions.kc`, where a system-KC dependency cannot bind. A kext
+  loaded at runtime or from the auxiliary collection links against every loaded
+  collection, so `src/fbkext` **requires** `IOGraphicsFamily` out of
+  `SystemKernelExtensions.kc` and `make fbkext` fails the build if it is absent
+  (2sl, measured; 2oz/2qs/2ql each reasoned about the load path instead of
+  testing it). Two kexts, opposite requirements, each enforced separately.
 - Probe hardware rules: no writes except `MM_INDEX`/`MM_INDEX_HI` (enforced in
   `rb_probe.c`, asserted by the hosttest), never enable PCI decoding or bus
   mastering, never map BAR0's first 16 MB (the boot framebuffer's), read only
@@ -240,7 +277,14 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
   applied to the staged copy only), `sudo tools/unload.sh`,
   `sudo tools/efi.sh …` and `tools/plugin_check.sh`.
   **the assistant never runs these and never asks for the password.**
-- **Never install into the EFI or `/Library/Extensions`.**
+- **Never install into the EFI or `/Library/Extensions`.** The framebuffer
+  kext's third stage needs the auxiliary collection, which is an install and so
+  is the user's own step; the assistant builds it and hands over the commands.
+- The user runs `sudo tools/fbload.sh [beside]`. Both stages need
+  `sudo nvram rbgpu-fb=1` first — the kext's `probe()` refuses unarmed and
+  consumes the key durably before it touches anything, so a bad load or boot
+  costs **one power cycle**. The script refuses to load when the key is unset,
+  so a forgotten `nvram` cannot read as a broken kext.
 - Before any load, **commit** so a hang loses nothing. The user allows the assistant
   to commit at any time without asking (2026-10-04); **pushing still needs
   asking**.
