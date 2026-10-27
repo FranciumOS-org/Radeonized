@@ -199,6 +199,45 @@ bool RBAMDFramebuffer::start(IOService *provider)
     char nocrumb[16];
     crumbOn = !PE_parse_boot_argn("-rbgpufbnocrumb", nocrumb, sizeof(nocrumb));
     nvram = crumbOn ? IORegistryEntry::fromPath("/options", gIODTPlane) : nullptr;
+    /* Snapshot the boot counter the plugin publishes. "?" is a reading too
+     * (rule 14): it means the plugin did not run, so a crumb from this boot
+     * cannot be told from an older one and must not be trusted. */
+    crumbBoot[0] = '?';
+    crumbBoot[1] = '\0';
+    if (nvram) {
+        if (OSObject *bv = nvram->getProperty("rbgpu-boot")) {
+            const char *p = nullptr;
+            unsigned n = 0;
+            if (auto d = OSDynamicCast(OSData, bv)) {
+                p = static_cast<const char *>(d->getBytesNoCopy());
+                n = d->getLength();
+            } else if (auto st = OSDynamicCast(OSString, bv)) {
+                p = st->getCStringNoCopy();
+                n = st->getLength();
+            }
+            if (p && n) {
+                if (n > sizeof(crumbBoot) - 1) {
+                    n = sizeof(crumbBoot) - 1;
+                }
+                unsigned w = 0;
+                for (unsigned i = 0; i < n; i++) {
+                    /* `nvram` stores this with a trailing NUL inside the data
+                     * ("171%00" as printed), so stop at the first non-digit
+                     * rather than copying embedded junk into the key. */
+                    if (p[i] < '0' || p[i] > '9') {
+                        break;
+                    }
+                    crumbBoot[w++] = p[i];
+                }
+                crumbBoot[w] = '\0';
+                if (w == 0) {
+                    crumbBoot[0] = '?';
+                    crumbBoot[1] = '\0';
+                }
+            }
+        }
+    }
+    setProperty("RBFBCrumbBoot", crumbBoot);
     setProperty("RBFBCrumbOn", crumbOn && nvram != nullptr);
     if (crumbOn && !nvram) {
         LOG("/options not found; crash breadcrumbs are OFF for this boot "
@@ -283,9 +322,14 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
     if (stage > crumbStage) {
         crumbStage = stage;
     }
-    char buf[72];
-    snprintf(buf, sizeof(buf), "s=%u f=%llu e=%u r=%u",
-             crumbStage, (unsigned long long)vblFires, vblEnables,
+    char buf[96];
+    /* 2t0 addendum: the nonce comes FIRST because it decides whether anything
+     * after it is this boot's. rbgpu-fbcrumb persists in NVRAM, so without it
+     * a boot that died before stage 1 leaves the PREVIOUS boot's crumb reading
+     * exactly like this one's - rule 11, and rule 8's whole point. Compare b=
+     * against `nvram rbgpu-boot` before believing a single other field. */
+    snprintf(buf, sizeof(buf), "b=%s s=%u f=%llu e=%u r=%u",
+             crumbBoot, crumbStage, (unsigned long long)vblFires, vblEnables,
              vblRunning ? 1u : 0u);
     if (auto str = OSString::withCString(buf)) {
         /* 2sr measured that setPropertyWithGUIDAndName is the ONLY path that

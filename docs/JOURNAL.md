@@ -38026,3 +38026,36 @@ that**, and the 253.7 % is a software compositor doing real work either way.
 
 Build **4C11938D** changes nothing about which configuration arms; it only
 makes the next crash legible.
+
+### 2t0 addendum — the crumb had no nonce, which would have made it a trap
+
+Caught before the build shipped, and it is my own rule-11 violation.
+`rbgpu-fbcrumb` **persists in NVRAM**. So once any boot writes it, a later boot
+that dies **before stage 1** leaves the previous boot's crumb in place, reading
+exactly like the current boot's. Rule 11: *a note is evidence only when its
+nonce is new.* Rule 8 says the same thing from the other end — `rbgpu-diag`
+carries no nonce, which is why "armed=1 reads live" can certify a stale
+capture. I had just rebuilt that exact failure in a new instrument.
+
+Fixed in **E114DC9F**: the crumb now leads with the boot counter the plugin
+already publishes.
+
+```
+b=<rbgpu-boot> s=<stage> f=<fires> e=<enables> r=<running>
+```
+
+The nonce comes **first** because it decides whether any field after it is this
+boot's. Procedure: read `nvram rbgpu-boot`, compare to `b=`, and believe nothing
+else in the key unless they match.
+
+`rbgpu-boot` is stored by `nvram` with a trailing NUL inside the data (it prints
+as `171%00`), so the copy stops at the first non-digit rather than carrying
+embedded bytes into the key, and is bounded to 11 digits. **`b=?` is a reading,
+not a failure** (rule 14): it means the plugin did not publish a counter, so a
+crumb from this boot cannot be distinguished from an older one and must not be
+trusted. Also published live as `RBFBCrumbBoot`.
+
+Note what this does **not** fix: a boot that dies before `start()` runs still
+leaves the previous crumb, with the previous `b=`. That is now *detectable*,
+which is the whole difference — an undetectable stale reading is a trap, a
+detectable one is a result.
