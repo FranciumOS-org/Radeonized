@@ -36553,3 +36553,127 @@ so — caught by asking what stage 2 would actually assert rather than by runnin
 it. Re-verified after the change: the vtable is still **2824 bytes**,
 `ownsPanel` is **not** in it (0 hits, it is non-virtual), and the UUID moved
 97E170CD → A62398A7.
+
+## 2so — STAGE 2 PASSED: `IOFramebuffer::start()` completes on a non-Apple subclass, and Apple's display stack attaches to it
+
+The user ran `sudo tools/fbload.sh beside`. Every prediction 2sn stated in
+advance held, and the one thing static analysis could not reach is now measured.
+
+### 1. The service exists, started, and Apple's own drivers joined it
+
+```
++-o RBAMDFramebuffer  <class RBAMDFramebuffer, id 0x100000700,
+                       registered, matched, active, busy 0 (1 ms), retain 10>
+  |   "IOClass"         = "RBAMDFramebuffer"
+  |   "IOMatchCategory" = "RBAMDFramebufferBeside"
+  |   "IOProbeScore"    = 30000
+  |   "IONameMatched"   = "display"
+  |   "VRAM,totalMB"    = 4096
+  |   "model"           = "AMD Radeon 680M"
+  +-o AppleMCCSControlModule       ("IOProviderClass" = "IOFramebuffer")
+  |   +-o AppleMCCSParameterHandler
+  +-o AppleUpstreamUserClientDriver
+```
+
+`registered, matched, active` requires `start()` to have returned true, so
+**`IOFramebuffer::start()` completes on our subclass on this machine.** And the
+stronger result is the children: `AppleMCCSControlModule` matches on
+`IOProviderClass = IOFramebuffer`, so **Apple's own display stack metacast our
+class to `IOFramebuffer` and attached to it.** The vtable verification of 2sm
+predicted that; this is it happening on hardware.
+
+`<140 18 7 6 3>` — and index **140** is `IOGraphicsFamily (599)` in this boot.
+Note it was **139** last boot: `kextstat` indices are not stable across boots,
+so the dependency must be confirmed by resolving the index in the same boot,
+never by the number. Recorded because the number was nearly treated as the fact.
+
+### 2. The class name earns the AMD vendor bit, measured in the classifier
+
+```
+IONDRVFramebuffer   name=.Display_boot      -> bit 0x01   <-- UNKNOWN VENDOR
+RBAMDFramebuffer    name=RBAMDFramebuffer   -> bit 0x04
+present mask = 0x05  (2 framebuffers)
+supported mask = 0x1e
+reproduced UseIOPresentment() = 0
+```
+
+**`-> bit 0x04`.** That is the whole thesis of 2ql/2sl confirmed against a real
+service: our class name scores as AMD in `IOObjectCopyClass` + `CFStringFind`.
+The verdict staying **0** is the result 2sn predicted in writing — `0x1e & 0x05
+!= 0x05` while `.Display_boot` is still present — so it is not a failure, and
+because it was predicted it cannot be read as one later. Stage 3's arithmetic
+follows directly: displace `.Display_boot`, the `0x01` goes away, `present`
+becomes `0x04`, and the gate opens.
+
+### 3. The hardening of 2sn's addendum worked, and the registry proves it
+
+The beside configuration was supposed to claim no console and no connection.
+Measured by comparison, which is the only way this means anything:
+
+| | `.Display_boot` | `RBAMDFramebuffer` |
+|---|---|---|
+| `AppleDisplay` child | **yes** | **no** |
+| `IOFBConfig` | 1 | **0** |
+| `IOFBMemorySize` | 1 | **0** |
+
+`getConnectionCount()` returning 0 from `ownsPanel()` means **no display was
+created for a panel we are not driving** — no phantom second display, exactly
+as designed, and confirmed from the registry rather than from the absence of a
+complaint. The one-shot `rbgpu-fb` is **absent** afterwards, so `probe()` ran
+its armed path and consumed it durably.
+
+### The error in this milestone, which was mine and nearly went into the journal
+
+The kext's own `IOLog` lines did not appear in the capture. I went looking for
+why, found `RembrandtProbe` with **106 lines** in `log show --last boot`, and
+was about to record "a sibling kext's IOLog reaches the unified log and ours
+does not" as a finding about our kext.
+
+It was the same boot error rule 28 was written for, one level up. `uptime` reads
+**up 4 minutes**; `log show --last boot` returned **two** `Darwin Kernel
+Version` banners; `--start/--end` printed *"Wall Clock adjustment detected -
+results might be strange"*. The machine had rebooted at ~23:04, those 106 lines
+were from a **previous** boot, and `RembrandtProbe` is **not loaded at all**
+now — its control count in this boot is **0**, identically to ours. So the
+control did not discriminate anything, and **the absence of our log lines
+carries no information whatsoever.**
+
+What makes the conclusion safe without it: the registry dump, the consumed
+one-shot and `kextstat` were all read live, in the current boot, and each one
+independently requires `probe()` and `start()` to have run and succeeded. The
+log was never the evidence; it only looked like the evidence because it was
+missing.
+
+### Two instrument defects, both found by their own output
+
+- `CONTAINS "RBAMDFramebuffer"` matched every `kernelmanagerd` line carrying
+  the bundle **path**, so the capture filled with noise shaped like output.
+  Now `BEGINSWITH "RBAMDFramebuffer:"`, over a 15-minute window rather than
+  `--last boot`, and the empty case prints that absence here is **not** a
+  result and points at the registry instead.
+- `make useiop && ./build/out/useiop` printed the whole correct report and then
+  **"make useiop failed; run it by hand"** — because `useiop` exits **1** when
+  an unknown-vendor framebuffer is present, which is its *verdict*. Build and
+  run are separate steps now, and the exit code is printed with what it means.
+
+Rule 26, twice, on our own script, in one run.
+
+### Where this leaves stage 3
+
+Both of the things stage 1 and 2 existed to measure are answered: the load is
+accepted and binds `IOGraphicsFamily` in-kernel (2sn), and the subclass starts
+and is accepted as an `IOFramebuffer` by Apple's drivers (2so). Nothing about
+the framebuffer itself is unmeasured now.
+
+What remains is entirely about the configuration change: displacing
+`IONDRVFramebuffer` makes us the console and the only framebuffer, which is the
+first time our code owns the screen, and it needs the auxiliary collection at
+boot. The known wall behind it is unchanged — 2qp opened this gate by patching
+the classifier and met *"System set to use IOP but no display pipes are
+present"* — and the open question is whether that is fatal to the **surface**
+path or merely noisy beside it. The reason it may come apart:
+`Display::GetNextSurface` calls `UseIOPresentment()` only as a branch
+predicate, and the pool path it then takes reaches `CD_IOSurfaceCreate`, which
+touches no `IOPresentment*` API; the `DisplayPipe` is a separate object with a
+separate constructor. 2qh's chain says a non-NULL IOSurface alone is what keeps
+`CompositorMetal`. Not established, and stated as the hypothesis stage 3 tests.
