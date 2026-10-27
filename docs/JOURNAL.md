@@ -39242,3 +39242,62 @@ observable effects.** 2sy had the disassembly and reasoned forward from it;
 evidence already in hand before designing the next experiment* — this adds the
 specific trigger: a claim of the form "that function never executes" is only as
 good as a search for what it would have left behind.
+
+## 2u1 — A/B arm B: with `IONDRVFramebuffer` on the panel the capabilities ARE published, today, on the current build
+
+Measured, no risk, in the recovery boot. Configuration established first
+(rule 15), because the property alone would not have said which arm this was:
+
+```
+boot-args: -rbgpuoff   ABSENT        (rescue removed)
+boot-args: -rbgpuownfb ABSENT        <-- so our framebuffer CANNOT arm (needs the arg AND the key)
+ioreg -rl -c IOFramebuffer:
+  +-o .Display_boot  <class IONDRVFramebuffer, id 0x1000004c9, registered, matched, active>
+kextstat: com.rembrandtgpu.plugin 43447D39  (the 2t9 build, loaded)
+          com.rembrandtgpu.fb     45588775  (loaded but unarmed)
+```
+
+So this is **arm B** of 2u0's A/B — `IONDRVFramebuffer` owns the panel, which is
+2pp's shape — and the answer is unambiguous:
+
+```
+ioreg -l | grep -c IOAccelDisplayPipeCapabilities   ->  1
+ioreg -l | grep -c IOAccelDisplayPipeUserClient2    ->  2
+"IOAccelDisplayPipeCapabilities" = {"DisplayPipeSupported"=Yes,"TransactionsSupported"=Yes}
+```
+
+**Byte-for-byte what 2pp recorded on 2026-10-23**, reproduced four days later on
+a plugin build four days newer. That settles three things:
+
+1. **2u0's refutation of 2sy is confirmed by a live measurement**, not just by
+   an old journal line. `populateAccelConfig` runs on this machine, publishes
+   both of 2s3's gate flags, and does not panic. 2sy's "architecturally closed"
+   is dead for good, and 2sw/2sx stay open.
+2. The regression is **not** in the plugin changes between 2026-10-23 and now —
+   this build publishes it fine.
+3. 2pp was not a fluke or a misread; the configuration is reproducible.
+
+### What this does NOT settle, and it is the whole point
+
+**Arm A has not been run.** The property being present with
+`IONDRVFramebuffer` on the panel says nothing about whether it survives
+`RBAMDFramebuffer` taking the panel — which is precisely what 2sv measured
+absent. Arm A is the measurement; this is its control.
+
+### The shape this is starting to take, stated as a hypothesis
+
+If arm A comes back 0, the two configurations fail at **different, complementary
+links**, and neither has ever had both:
+
+| | gate 1 (`UseIOPresentment`, vendor mask) | the two capability flags |
+|---|---|---|
+| **B** — `IONDRVFramebuffer` | **FAILS** — class name has no "AMD", mask `0x01` (2ql) | **PASSES** — measured here |
+| **A** — `RBAMDFramebuffer` | **PASSES** — mask `0x04`, measured in 2t7 | ? — 2sv says absent |
+
+That table is the useful way to hold this: the framebuffer kext bought gate 1
+and may have cost the capabilities, and a working desktop needs both at once.
+**It is a hypothesis with one cell unmeasured**, and the A arm fills it.
+
+Arm A needs `-rbgpuownfb` back in boot-args (it is currently out, so
+`rbgpu-fb=1` alone cannot arm the framebuffer - rule 9's "the feature needs the
+arg *and* the key" read in the other direction).
