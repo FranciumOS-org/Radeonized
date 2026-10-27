@@ -38,10 +38,18 @@ not memory, not a flag and not the AGDC gate:
 - **The AGDC gate is SOLVED** (2rx/2rz). Publishing an IOService that
   `safeMetaCast`s to `AppleGraphicsDeviceControl` makes the wrangler pair it
   (2r0, boot 159), and boot 164 won the race with every AGDC error gone.
-- **Winning the gate wedges the machine** (2rz, boots 156/164). Past the gate
-  WindowServer submits a display-pipe transaction and blocks in Apple's own
-  `IOAccelDisplayPipe::wait_for_queue_slot_gated` — `commandSleep` with **no
-  deadline, THREAD_UNINT, zero os_log refs** (2s2). So the default
+- **Winning the gate wedges the machine** (2rz, boots 156/164/169/170), but
+  **WHERE it wedges is no longer claimed** (2si). 2s2's
+  `wait_for_queue_slot_gated` location is **withdrawn**: that function sleeps
+  iff `this->0x23c - this->0x238 == 4` (a four-entry ring, base 0x118 stride
+  0x48, depth a compiled constant), and boot 168 measured that nothing was
+  ever queued — so the difference is 0 and it returns on its second
+  instruction. It cannot block an idle pipe. The best current reading, from 56
+  byte-identical `DisplayPipeState` dumps with `Clean` absent from 156 KB, is a
+  **userspace livelock in `CoreDisplay::DisplayPipe::Commit`**
+  (`0x7ff80411633c`) — a kernel sleep would log one dump, not 56. That is an
+  inference from the dump count, **not** a measurement; what Commit retries on
+  is the next read. So the default
   configuration deliberately does **not** open the gate, which boots 165–167
   verified keeps a working accelerated desktop. **`-rbgpuagdcearly` stays OUT**
   unless the boot is a deliberate, instrumented experiment: boot 164 shows the
