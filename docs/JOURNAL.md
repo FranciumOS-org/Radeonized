@@ -39679,3 +39679,40 @@ Also recorded: the display-side question has never been answered with the
 gamma arm on. 2sd's A/B (boot 170) answered five types too, but that was
 **before** gate 1 was won and before a `DisplayPipe` existed, so its
 byte-identical display log says nothing about boot 178's configuration.
+
+### 2u5 addendum: boot 178 wedged, and the capture is now self-checking
+
+The user reports boot 178 **wedged like 156/164/169/170/177**. That bounds the
+0-byte display log usefully: boot 177 wedged too and still logged **2225
+lines** at +46 s, so the wedge does **not** suppress WindowServer's logging —
+the +28 s capture window does. Reading (b) from 2u5 ("the boot never got as
+far as WindowServer's display-pipe work") is therefore **not supported**; the
+log was simply not flushed yet. The zero still carries no information about
+gamma.
+
+Two things follow, and the second is a fix rather than a note.
+
+**1. The wedge survives answering Gamma.** That is weak and stated as weak: a
+wedge is the observable in every armed, gate-open boot since 2rz, so its
+recurrence distinguishes nothing on its own. What would distinguish is the
+`plane with no gamma` line, which is exactly what was lost.
+
+**2. `tools/plugin_check.sh` now measures its own log window.** The display
+capture gained an unfiltered `process == "WindowServer"` **control** written to
+`display-log-control.txt`, and the script waits 15 s and retries up to six
+times while that control reads 0. Three outcomes are now distinguishable where
+boot 178 had one:
+
+- control 0 → the script prints `WARNING: the control is ZERO, so
+  display-log.txt carries NO information` and says not to reboot on it;
+- control > 0 and predicate 0 → it prints `that IS a result`;
+- both > 0 → the capture is what it has always been.
+
+Verified live: the control predicate returns 13 876 lines in the current boot,
+and `bash -n` passes. This is rule 26 applied to a log window instead of a
+grep, and it is the first time the script checks an instrument of its own.
+
+The repeat is unchanged otherwise: `-rbgpuagdccaps` is **already in
+boot-args** and already measured to take (`agdc_extcap_answered 15`), so the
+next boot needs no `efi.sh` step — only the one-shots, and the capture run
+**once WindowServer is up**, which the script will now tell the user.

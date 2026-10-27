@@ -97,10 +97,44 @@ echo "--- display startup and GPU progress this boot"
 # 2rc: a frozen Apple logo can leave SSH and the entire registry responsive.
 # Keep the display's own errors with the same capture, before reboot loses
 # the live stack. Filtering only for RembrandtGPU missed this in boot 156.
-/usr/bin/log show --last boot --style compact --predicate \
-    '(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR eventMessage CONTAINS "checkGPUProgress"' \
-    > "$out/display-log.txt" 2> "$out/display-log-errors.txt"
-echo "  $(wc -l < "$out/display-log.txt" | tr -d ' ') display log lines saved"
+# 2u5: AND CHECK THE CAPTURE AGAINST A CONTROL BEFORE TRUSTING IT. NVRAM is
+# ready the moment the peer runs; the unified log is not. Boot 178 ran this
+# script at +28 s and got a display-log.txt of ZERO BYTES with an empty stderr
+# - the `log show` succeeded and simply had nothing yet - while boot 177, same
+# configuration, got 2225 lines at +46 s. That silently blanked the display
+# half of the one experiment the boot existed to run, and the boot was power
+# cycled before anyone noticed. Rule 26's shape: a search is an instrument, and
+# an empty result is not evidence of absence until it is checked against a
+# known-present case.
+#
+# So the control is the WindowServer process itself, unfiltered. If WindowServer
+# has logged nothing at all, the log window - not the display - is what is
+# empty, and the script waits and retries rather than reporting a blank. If the
+# control is non-zero and our predicate is still zero, THAT is a result.
+rb_display_log() {
+    /usr/bin/log show --last boot --style compact --predicate "$1" 2>"$2"
+}
+dl_pred='(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR eventMessage CONTAINS "checkGPUProgress"'
+dl_ctl_pred='process == "WindowServer"'
+dl_tries=0
+while : ; do
+    rb_display_log "$dl_pred" "$out/display-log-errors.txt" > "$out/display-log.txt"
+    rb_display_log "$dl_ctl_pred" /dev/null > "$out/display-log-control.txt"
+    dl_n="$(wc -l < "$out/display-log.txt" | tr -d ' ')"
+    dl_c="$(wc -l < "$out/display-log-control.txt" | tr -d ' ')"
+    [ "$dl_c" -gt 0 ] && break
+    dl_tries=$((dl_tries + 1))
+    if [ "$dl_tries" -ge 6 ]; then break; fi
+    echo "  WindowServer has logged NOTHING yet (control 0) - waiting 15s (try $dl_tries/6)"
+    sleep 15
+done
+echo "  $dl_n display log lines saved (WindowServer control: $dl_c lines)"
+if [ "$dl_c" -eq 0 ]; then
+    echo "  WARNING: the control is ZERO, so display-log.txt carries NO information."
+    echo "           Re-run this script later in the boot; do NOT reboot on this capture."
+elif [ "$dl_n" -eq 0 ]; then
+    echo "  display predicate matched 0 of $dl_c WindowServer lines - that IS a result."
+fi
 # 2rh: THE SAMPLE IS NOW OPT-IN, AND IT IS THE REASON THIS SCRIPT KILLED THE
 # MACHINE TWICE. `sample` suspends the target's threads and walks their stacks.
 # A WindowServer wedged inside a kernel call - which is the exact state you run
