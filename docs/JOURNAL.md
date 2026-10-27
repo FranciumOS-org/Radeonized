@@ -41201,3 +41201,126 @@ healthy and carried no data; the keys that would have caught it
 (`agdc_oneshot`, `iop_oneshot`) were already in the note and already meant
 "not armed". Rule 9 says the one-shots are one-shot; this adds: **say which
 ones, and verify them before reading the result.**
+
+## 2w1 — boot 184
+
+**THE ENTIRE AGDC REPLY SURFACE IS ELIMINATED BY MEASUREMENT, AND 2v9'S
+PLANE-COUNT HYPOTHESIS IS REFUTED.** Armed, wedged, captured to disk
+(`logs/20261027-183551-plugin`, rule 10).
+
+Identity and arming (rules 8, 15, 34): `rbgpu-boot` **184**, plugin
+`8887186E` matching `build/out`, `com.rembrandtgpu.fb` loaded, **all four
+one-shots consumed** — `agdc_oneshot 0`, `iop_oneshot 0`, `armed 1`,
+`agdc_say = "PUBLISHED: verify IOPresentment in WindowServer"`. `diag_used`
+**565** of **768**, so the table did not fill and every absence below is
+informative. The WindowServer sample was correctly skipped (2rh).
+
+### Our side is provably correct, and it changes nothing
+
+`agdc_ec_scaler = 0x196C_00_01_00`, decoding to exactly the shape 2v9 said
+the chain requires:
+
+| field | value | required |
+|---|---|---|
+| out-length | `0x196c` | non-zero |
+| framebuffer index we were handed | `0x00` | 0, or we refuse |
+| count we published | `0x01` | >= 1 |
+| our IOReturn | `0x00` | 0 |
+
+and the other four types match: `csc`, `gamma`, `cursor` all
+`0x196C00000100`, `degamma` `0x196C00000200` (two entries, correct).
+`agdc_extcap_calls` **48** = 16 types x **three** full gathers, with
+`agdc_extcap_answered` **15** = 5 x 3. So
+`__GatherAGDCDisplayPipelineCapabilities` ran three times and got a perfect
+scaler reply every time. `agdc_error 0`, `agdc_link_result 0`,
+`agdc_logical_ret 0`, `agdc_user_vendor 4`, `agdc_user_cap 1`.
+
+**And the display log is shape-identical to boot 182's.** Normalising both to
+message shapes and diffing gives exactly one difference in each direction:
+
+```
+184 only:  can't get framebuffer {red,green,blue} gamma scaling factor on port 51715
+182 only:  can't get framebuffer {red,green,blue} gamma scaling factor on port 50947
+```
+
+a mach port number, which changes every boot. Everything else is identical:
+**`Fallback GPU Display Pipe transaction submission failed` 56**,
+`DisplayPipeState` 56, `Transaction Target State` 56, `no gamma` **0**
+(boot 182's fix holds), `no 3-channel linearization` 114 (= 56x2+2, Apple's
+own behaviour per 2v7), and `no display pipes are present` / `Unable to find
+display pipe` / `Unable to get AGDC information` all **0**.
+
+### What that refutes
+
+2v9 read the chain to `IOPresentmentBegin` and concluded that **a plane count
+of 0 is exactly and only what makes it return NULL**, with the count
+collapsing from the type-0x10 scaler reply via `caps->0x434` and
+`caps->0x42c`. Boot 184 satisfies every one of those conditions, three times
+over, and `Submit()` still fails 56 times with `fb_vbl_ot_armed` **absent
+from the full table**.
+
+So **the defect is strictly past our AGDC replies.** Either
+
+- `IOPresentmentBegin` succeeds and `IOPTransaction::Submit` fails at a later
+  step — `IOPresentmentCreateResource` (`vt[0x80]`),
+  `IOPresentmentBindIOSurfaceToResourcePlane`, or `IOPresentmentSetPlaneState`
+  (`vt[0xa8]`, whose "Plane out of range" 2se measured); or
+- the capabilities object IOPresentment actually uses is not the one
+  `__GatherAGDCDisplayPipelineCapabilities` fills.
+
+2v9's *reading* of the chain stands — every link was disassembled — but the
+**inference that our reply was the broken link does not**. This is the fourth
+time a correct static chain has been attached to the wrong end.
+
+**Every AGDC capability type is now eliminated by measurement**, not by
+argument: 2sd eliminated 1, 4 and 0x8000 behaviourally; 2v6 fixed and
+measured 2; 2w1 proves 0x10 correct and shows the log unchanged. There is
+nothing left to answer on that interface, and no further boot should be spent
+on one.
+
+### Two structural facts found on the way
+
+**`pipe->0x290` — the flag that chooses the hardware pipe over the GPU
+fallback — is a transaction-carried `std::optional`**, exactly the shape 2v8
+found for System Gamma:
+
+```
+7ff804116ea9:  cmpb $0x1, 0x181(%r13)      ; txn's has-value flag
+7ff804116eb1:  jne  skip
+7ff804116eb3:  movb 0x180(%r13), %al       ; the value
+7ff804116eba:  movb %al, 0x290(%rbx)       ; pipe->0x290
+```
+
+`r13` is the Transaction. So the hardware/fallback choice is **CoreDisplay's
+own, carried on the transaction**, not something our replies set — the same
+answer 2v8 reached for System Gamma, now for the fallback itself.
+
+**The VBL half stayed eliminated**: `fb_vbl_on 1`, `fb_vbl_routed 1`, and
+`fb_vbl_ot_armed` absent from the *full* table, not just the truncated note.
+2w0 measured the pump correct at 144 Hz; 2w1 confirms nothing ever asked it
+to arm.
+
+### Where this leaves the instrument
+
+The remaining failure is **entirely in userspace**, inside WindowServer's
+IOPresentment, and we currently have no instrument that reaches it:
+
+- a `sample` of the wedged WindowServer is **forbidden** — it hung the machine
+  twice on 2026-10-26 and lost both captures (2rh), and `plugin_check.sh`
+  skips it by default;
+- `tools/ioptest.m` **aborts** without WindowServer's entitlement
+  (`kIOReturnNotPermitted`, 2qm);
+- our kext sees only the AGDC surface, which is now provably correct.
+
+So the next step is **not** another AGDC boot. It is either a static read of
+`Submit()`'s three post-`Begin` steps against the inputs we now know we
+supply, or a way to observe IOPresentment from a process that is allowed to.
+
+### Rule
+
+**When a static chain ends at our own code, instrument our end FIRST and
+prove it correct before building on the chain.** 2v9 read five layers
+correctly and attached them to the one link that turned out to be fine; the
+key that settled it (`agdc_ec_scaler`) cost one boot and could have been
+written in the same change as the chain. Reading further is cheaper than
+reading further *and* being wrong about where to start.

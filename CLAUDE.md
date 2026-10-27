@@ -362,6 +362,41 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 184: THE WHOLE AGDC REPLY SURFACE IS ELIMINATED BY MEASUREMENT, AND
+2v9 IS REFUTED (2w1).** Armed, wedged, captured. All four one-shots consumed
+(`agdc_oneshot 0`, `iop_oneshot 0`), `rbgpu-boot` 184, `diag_used` **565 of
+768** so absences are informative. **`agdc_ec_scaler = 0x196C_00_01_00`** —
+out-length `0x196c`, framebuffer index `0`, count `1`, return `0`: *exactly*
+the shape 2v9 said the chain requires. The other four match
+(`degamma` `...0200`, two entries). `agdc_extcap_calls` **48** = 16 types x
+**three** gathers, `agdc_extcap_answered` 15, `agdc_error 0`,
+`agdc_link_result 0`, `agdc_user_vendor 4`.
+**And the display log is shape-identical to boot 182's** — normalised and
+diffed, the only difference in either direction is a mach **port number**
+(51715 vs 50947). `Fallback ... submission failed` **56**, `no gamma` **0**,
+`no display pipes are present` 0, and **`fb_vbl_ot_armed` absent from the
+FULL table**, not just the truncated note.
+So **2v9's "a plane count of 0 is exactly and only what makes
+`IOPresentmentBegin` return NULL" is REFUTED**: every condition it named is
+satisfied three times over and `Submit()` still fails. Its *reading* of the
+chain stands — every link was disassembled — but the inference that **our
+reply** was the broken link does not. Fourth time a correct static chain has
+been attached to the wrong end. **Every AGDC capability type is now
+eliminated by measurement** (1/4/0x8000 by 2sd, 2 by 2v6, 0x10 by 2w1):
+spend no further boot on that interface.
+The defect is **strictly past our replies** — either `Submit()` failing at
+`IOPresentmentCreateResource` / `BindIOSurfaceToResourcePlane` /
+`SetPlaneState` (2se's "Plane out of range"), or a capabilities object that
+is not the one `__GatherAGDCDisplayPipelineCapabilities` fills.
+Also found: **`pipe->0x290`, the flag choosing the hardware pipe over the GPU
+fallback, is a transaction-carried `std::optional`** (`txn+0x180` value,
+`txn+0x181` flag, `0x7ff804116eba`) — the same shape 2v8 found for System
+Gamma, so that choice is CoreDisplay's own and not ours to set.
+**No instrument currently reaches the remaining failure**: it is userspace
+inside WindowServer, the `sample` is forbidden (2rh), `ioptest` aborts
+without the entitlement (2qm), and our kext sees only the AGDC surface, which
+is provably correct.
+
 **BOOT 183: NO WEDGE, AND THE VBL HALF IS ELIMINATED (2w0).** Build
 `8887186E` booted clean and carried **no measurement** — 2v9's handoff named
 only two of the four one-shots, so `agdc_oneshot=2` and `iop_oneshot=2` ("not
@@ -712,6 +747,11 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the `Darwin Kernel Version` banner, once per boot. And `log` is a zsh
     builtin that shadows `/usr/bin/log`: always the absolute path, always with
     a known-present control. [2q0, 2s1]
+35. **When a static chain ends at our own code, instrument our end FIRST and
+    prove it correct before building on the chain.** 2v9 disassembled five
+    layers correctly and attached them to the one link that turned out to be
+    fine; `agdc_ec_scaler` settled it in one boot and could have been written
+    in the same change as the chain. [2w1]
 34. **An arm instruction must list EVERY one-shot the experiment needs, and
     the reader must check each `*_oneshot` key before interpreting anything.**
     2v9's handoff named `rbgpu-arm` and `rbgpu-fb` and omitted `rbgpu-agdc`
