@@ -114,7 +114,12 @@ echo "--- the kext's own log lines (the only account of what probe() decided) --
 
 echo
 echo "--- IOFramebuffer services now in the registry ---"
-ioreg -c IOFramebuffer -k IOClass 2>/dev/null | grep -E '^\+-o' || true
+# `ioreg -c X -k Y` does NOT filter the way it reads: the stage-1 run printed
+# only `+-o Root` and said nothing about framebuffers. Rule 26 - the search was
+# the instrument. `-rl -c` roots the tree at the class and prints properties.
+ioreg -rl -c IOFramebuffer 2>/dev/null | grep -E '^\+-o|"IOClass"' || \
+    echo "no IOFramebuffer service found - which would itself be a result"
+
 
 if [ "$mode" = beside ]; then
     echo
