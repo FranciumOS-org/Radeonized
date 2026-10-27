@@ -36059,3 +36059,139 @@ The user has cleared PolyForm-NC for this project, so copying from
 `src/phxaccel` is permitted if it comes to that.
 
 Nothing was built. No boot was spent.
+
+## 2sl — ROUTE A IS OPEN: the KC split blocks EFI injection, NOT a runtime-loaded kext. 2oz/2qs/2ql corrected.
+
+Static, no boot, one minute of measurement. This reverses the conclusion that
+has closed the display half since 2oz, and it is the first time the load path
+itself was tested rather than inherited.
+
+### The measurement
+
+A throwaway kext bundle whose only content is four undefined references to
+`IOFramebuffer` — its vtable, its metaclass, its `start` and its
+`OSMetaClass` constructor, i.e. exactly what a *linked subclass* needs:
+
+```c
+extern char _ZTV13IOFramebuffer[];
+extern char _ZN13IOFramebuffer10gMetaClassE[];
+extern char _ZN13IOFramebuffer5startEP9IOService[];
+extern char _ZN13IOFramebufferC2EPK11OSMetaClass[];
+void *rb_linktest_refs[4] = { ... };
+```
+
+`OSBundleLibraries` extended with `com.apple.iokit.IOGraphicsFamily`,
+`IONDRVSupport` and `IOAcceleratorFamily2`, then:
+
+```
+$ kmutil libraries -p .../LinkTest.kext
+For extension com.rembrandtgpu.probe:
+  __ZN13IOFramebuffer10gMetaClassE   in SystemKernelExtensions.kc: com.apple.iokit.IOGraphicsFamily (599)
+  __ZTV13IOFramebuffer               in SystemKernelExtensions.kc: com.apple.iokit.IOGraphicsFamily (599)
+  __ZN13IOFramebuffer5startEP9IOService      in SystemKernelExtensions.kc: com.apple.iokit.IOGraphicsFamily (599)
+  __ZN13IOFramebufferC2EPK11OSMetaClass      in SystemKernelExtensions.kc: com.apple.iokit.IOGraphicsFamily (599)
+```
+
+**All four resolve, out of `SystemKernelExtensions.kc`.** `kmutil libraries` is
+the same instrument the `make kext` step has used since the beginning to prove
+every import resolves; here it is pointed at the one dependency the project
+decided was impossible.
+
+### The error, and it is a specific one
+
+The "2oz trap" is real and the CLAUDE.md check that guards it is correct — but
+it guards **the Lilu plugin**, which OpenCore injects into
+`BootKernelExtensions.kc`, where a system-KC dependency genuinely cannot bind.
+That constraint was then carried over to *any* kext of ours:
+
+- **2oz** built the `IOFramebuffer` subclass and ruled it out "on
+  kernel-collection placement".
+- **2qs** measured the split live and correctly — IOGraphicsFamily at
+  `0xffffff7f95c94000`, our plugin at `0xffffff8004043000` — then wrote
+  "Route A (our own linked `IOFramebuffer`) is closed by the KC split" and
+  recorded the display half as closable.
+- **2ql** ended "either find a load path that can depend on IOGraphicsFamily,
+  or decide the display half stays software."
+
+The load path was in the repository the whole time. `tools/load.sh` loads
+`RembrandtProbe` with `kmutil`, at runtime, after the desktop is up; a kext
+loaded that way links against **every** loaded collection, system KC included.
+`src/kext/Info.plist` simply never declared a system-KC library, so the
+capability was never exercised. Nobody tested it; three milestones reasoned
+about it.
+
+### Independent confirmation, from a driver that works
+
+`luuumi-dev/nullarc`'s own install description splits its kexts exactly along
+this line (fetched from its README):
+
+- **`PhxBringup.kext` → `EFI/OC/Kexts`** — the OpenCore-injected half, which
+  brings the GPU up before WindowServer and needs no system-KC dependency;
+- **`PhxAccel.kext` → installed as an auxiliary kernel collection** — and
+  `PhxAccel` is the kext that contains `PhxAMDFB`, their `IOFramebuffer`
+  subclass.
+
+So the one working RDNA 3 driver on a Hackintosh uses the EFI slot for the
+Lilu-like half and the **AuxKC** for the framebuffer half. That is the same
+split this project already has, with the second half unused.
+
+### Correction to 2sj, on nullarc's class-name claim
+
+2sj recorded their comment that CoreDisplay gates IOPresentment on "AMD" in
+the framebuffer's class name as **"unverified, do not act on it"**, because the
+bare `"AMD"` string found near that region of the cache is a hang-watchdog
+vendor tag. That caveat was about the wrong string. **2ql had already measured
+the gate itself**, instruction by instruction:
+`__GetSystemGPUVendors_block_invoke` runs `IOObjectCopyClass` over every
+`IOFramebuffer` service and `CFStringFind`s `Intel`/`AMD`/`NVDA`/
+`AppleParavirt`, a no-match earning bit `0x01` which `supported` can never
+contain — and `make useiop` prints it live: `IONDRVFramebuffer name=.Display_boot
+-> bit 0x01`, `present 0x01`, `supported 0x1e`, verdict 0. nullarc's comment is
+**confirmed, by our own prior measurement**, and `PhxAMDFB` contains `AMD` for
+precisely this reason. The 2sj caveat is withdrawn.
+
+### The personality numbers, read rather than guessed
+
+| kext | IOClass | IOProviderClass | IONameMatch | IOMatchCategory | IOProbeScore |
+|---|---|---|---|---|---|
+| IONDRVSupport | `IONDRVFramebuffer` | `IOPCIDevice` | `display` | **`IOFramebuffer`** | **20000** |
+| AMDFramebuffer | `AMDFramebuffer` | `AtiFbStub` | `display` | **`IOFramebuffer`** | 65050 |
+
+One driver wins per (provider, `IOMatchCategory`), so a personality with
+`IOProviderClass = IOPCIDevice`, `IONameMatch = display`,
+`IOMatchCategory = IOFramebuffer` and a score above 20000 **displaces
+`IONDRVFramebuffer`** rather than joining it. That matters beyond winning the
+match: `present` is the OR over *all* `IOFramebuffer` services, so an
+AMD-named framebuffer **added beside** `.Display_boot` would give
+`present = 0x05`, and `(0x1e & 0x05) != 0x05` keeps the gate shut. Displacing
+is not an optimisation here, it is the requirement.
+
+### A staging lever found in the same read
+
+`kmutil load --load-style start-only|match-only|start-and-match`. **`start-only`
+loads the kext without sending its personalities to the catalog** — the class
+registers, nothing matches, nothing touches the display. So the first hardware
+test of a framebuffer kext can be "does it load and register without a panic",
+with the match a separate, later step (`kmutil load -P <personality>`). That is
+the kind of two-stage experiment rule 16 asks for, and it is free.
+
+### What is NOT established
+
+- **That the load is accepted**, as opposed to resolvable. `kmutil libraries`
+  checks symbols; `kmutil load` additionally wants authorization. SIP is 0xA43
+  (UNTRUSTED_KEXTS + UNAPPROVED_KEXTS set) and `RembrandtProbe` loads ad-hoc
+  signed today, so the precedent is good — but the precedent is for a kext
+  with no system-KC dependency, and AuxKC rebuilds are a separate mechanism.
+  Measure it with `start-only` before anything else.
+- **Whether `Apple`'s `AMDRadeonX6000` will composite for a non-Apple
+  `IOFramebuffer`.** Unchanged from 2sj; nullarc's compositor is their own.
+- **Where in `/Library/Extensions` vs AuxKC this lands.** CLAUDE.md forbids
+  Claude installing there; it is the user's action, like the EFI.
+
+### What this does to the frontier
+
+The display half is **not closed**. The thing 2ql named as the single lever —
+"an `IOFramebuffer` whose class name contains AMD" — is buildable, by the
+load path the repo already uses, and a working driver on comparable silicon
+ships exactly that shape. 2s2–2sk's eliminations keep their value as
+eliminations; the route around them is now open rather than hypothetical.
