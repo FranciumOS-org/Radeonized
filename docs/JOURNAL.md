@@ -38794,3 +38794,163 @@ computes from the registry.
 closed**. One boolean and one cached vendor mask stand in it, both identified by
 address, neither yet read live. That remains far cheaper than a Metal-on-Vulkan
 stack, and 2t6's recommendation is unchanged.
+
+## 2t7 — GATE 1 IS WON, AND THE LATCH IS WHY IT DOES NOT SHOW: boot 174 logs Apple's whole chain, unpatched
+
+No boot spent. Everything here is boot 174's own unified log plus two static
+reads, and it **withdraws 2t6's addendum**: the "contradiction" it described
+does not exist, and neither candidate it named is the cause.
+
+### First, the error: this re-derived what 2qq/2qr had already measured
+
+2t6's addendum set out to read `UseIOPresentment()` and the preference block.
+Both were already in this journal — the full causal chain is at line 29028,
+written in 2qq, and `0x10000003` was decoded in 2r5. **Rule "grep
+`docs/JOURNAL.md` before reading any Apple function", fifth instance this
+session.** The static reads below are kept only because two of them are new
+(the latch's log strings, and the identity of `0x7ff8438eac90`); the chain
+itself is 2qq's and is credited as such.
+
+### What `0x7ff8438eac90` is, and the three log strings beside the latch
+
+`CGXMappedDisplayStart` latches `gUseIOP = 0` at three sites, each guarded by
+`cmpq $0x0, 0x7ff8438eac90`. `dsc.py ripall` gives that global **9**
+RIP-relative sites, and `atos` (slide measured this run) names every one:
+
+| site | insn | function |
+|---|---|---|
+| `0x7ff80405a815` | `incq` | `__emplace_unique_impl` of `unordered_map<unsigned long long, CoreDisplay::DisplayPipe>` |
+| `0x7ff80413855b` | `decq` | `CoreDisplay::Framebuffer::~Framebuffer()` |
+| `0x7ff8041274a9` | `movq $0` | `CGXShutdownDisplays` |
+| `0x7ff804127463` | `cmpq $0` | `CGXShutdownDisplays` |
+| `0x7ff8040fa37c`, `0x7ff8040fb9d5`, `0x7ff8040fba0a` | `cmpq $0` | `CGXMappedDisplayStart` |
+| `0x7ff80405a4c1`, `0x7ff80405a67e` | `movq` | the same emplace |
+
+So **it is the entry count of CoreDisplay's `DisplayPipe` map**, incremented
+only by that map's emplace and zeroed only at shutdown. Its three log strings,
+read out of the cache:
+
+```
+0x7ff8041641af  'System has no accelerator\n'
+0x7ff8041641ca  'System set to use IOP but no display pipes are present\n'
+0x7ff804164202  'CoreDisplay::GPUController::GPUController()'
+0x7ff804152bd5  'void CoreDisplay::InitializeDisplayPipes()'
+```
+
+Both `__PRETTY_FUNCTION__` strings have **all** their references inside
+`CGXMappedDisplayStart`, so `GPUController::GPUController()` and
+`InitializeDisplayPipes()` are **inlined into it** — which is why the pipe
+loop and these asserts share one symbol.
+
+### Boot 174, armed, measured: the chain fires in order, and gate 1 PASSED
+
+`/usr/bin/log show` over this boot's window, one `Darwin Kernel Version`
+banner in the result as rule 28's separator:
+
+```
+02:47:25.792  E  WindowServer[161:3a8] (IOPresentment) Error: Unable to get AGDC information.  Return code: 0x10000003
+02:47:25.831  E  WindowServer[161:3a8] [CoreDisplay] [ERROR] - System set to use IOP but no display pipes are present
+02:47:26.263  E  WindowServer[161:3a8] [CoreDisplay] [ERROR] - Unable to find display pipe for IOFB service / regID: 0xd703 / 0x1000004cb
+```
+
+`0x1000004cb` is **`RBAMDFramebuffer`'s own registry ID** (`ioreg` agrees
+exactly). And the middle line is the finding:
+
+**that message cannot print unless `UseIOPresentment()` returned TRUE.** It
+sits past `callq 0x7ff804057b40; testb %al,%al; je` at `0x7ff8040fa37a`. In
+2qp the same line was obtained only by *patching* the classifier. Boot 174
+prints it with **nothing patched**, because the vendor mask now reads `0x04`
+instead of `0x01` — our framebuffer's class name carries "AMD".
+
+Confirmed independently, live and non-root, by `build/out/useiop`:
+
+```
+RBAMDFramebuffer   name=RBAMDFramebuffer -> bit 0x04
+present mask = 0x04  (1 framebuffer)
+supported mask = 0x1e
+reproduced UseIOPresentment() = 1
+```
+
+`ioreg -rl -c IOFramebuffer` shows **exactly one** IOFramebuffer and it is
+ours: `IONDRVFramebuffer` is gone, so no unclassifiable framebuffer
+contributes bit `0x01` any more. **Gate 1's vendor mask is won, and that is a
+measured result of the framebuffer kext.**
+
+### So 2t6's addendum is withdrawn, both candidates with it
+
+2t6 asked how the legacy path can run when both gates pass, and named a
+suspect preference read and a cached `gSystemGPUVendors`. Neither is the
+answer:
+
+* **Candidate 1 (the preference default) is dead twice over.** `useiop` reads
+  the five `useIOP*` keys through `CFPreferences` — an independent path from
+  2t6's raw-byte read — and agrees that all are 1. And gate 2's own byte was
+  measured **live from Apple's own os_state dump** in boot 149:
+  `displaySurfaceUsesIOSurface = 1` (2qi, journal line 27834). 2t6's read was
+  right; it was simply not the question.
+* **Candidate 2 (ordering) was already excluded in this journal.**
+  `UseIOPresentment()` runs `GetSystemGPUVendors`' `dispatch_once` **itself**
+  (`cmpq $-1, 0x7ff843bb1d68; jne .run`), so the classifier is guaranteed to
+  have been used on the first call. Ordering was never the risk.
+
+**The real mechanism is the latch, which this journal recorded and 2t6 failed
+to apply.** `gUseIOP` is a one-way latch: once any path writes 0 to it,
+`UseIOPresentment()` returns 0 for the life of the process. Gate 1 passes,
+`CGXMappedDisplayStart` finds the `DisplayPipe` map empty, latches the gate
+**off**, and every one of the 72 later call sites — `GetNextSurface` among
+them — then sees false. There is no contradiction: gate 1 is true at the
+first call and false at every later one.
+
+### The one remaining link, and it is unchanged since 2r5
+
+```
+AGDC association map EMPTY -> IOServiceOpen(port 0) -> 0x10000003
+  -> IOPresentmentCreateForRegistryID NULL -> DisplayPipe ctor throws
+  -> zero pipes in the map -> gUseIOP latched 0 -> legacy path -> CompositorSW
+```
+
+`ioPresentmentCreateAssociationMap` (`0x7ff812e8a730`) builds that map from
+`IOServiceMatching("AppleGraphicsDeviceControl")`, skipping the one service
+named exactly `AppleGPUWrangler`, then requiring of each survivor an
+`IOServiceOpen(type 2)` and an `IOConnectCallMethod(selector 1)`
+(`kAGDCVendorInfo`) whose reply has `out+0x28` ∈ {1,2}.
+
+`build/out/agdcinfo` run in boot 174 reproduces that query and finds
+`matched 1, skipped 1, candidates 0` — only the wrangler.
+
+### What that does NOT say (rule 14)
+
+**Our AGDC bridge was UNARMED in boot 174**, so `candidates 0` is not a
+verdict on it. `RBGPUDiag` says so in its own words:
+
+```
+agdc_say = "UNARMED: no class or service created"
+agdc_error = 3      agdc_oneshot = 2      agdc_stage = 10
+armed = 1   iop_on = 1   iop_saw_ws = 1   iop_ready = 1   dal_pass = 0
+```
+
+`-rbgpuagdc` is in boot-args but the NVRAM one-shot was never set this boot —
+rule 9, exactly as written. `ioreg` finds **0** `RembrandtGPUAGDC` instances.
+So the four map conditions have **never been tested against our bridge**, and
+`rbgpu_agdc.cpp` already satisfies two of them on paper: it registers a
+runtime metaclass whose superclass is `AppleGraphicsDeviceControl` (so
+`IOServiceMatching` should match it by `metaCast`) and it is named
+`RembrandtGPUAGDC`, not `AppleGPUWrangler`. Untested: the type-2
+`IOServiceOpen` (it sets `IOUserClientClass =
+AppleGraphicsDeviceControlClient`) and selector 1's `out+0x28`.
+
+### The next experiment, and its one real risk
+
+It needs **no new code**: an armed boot with `-rbgpuagdc` *and* its one-shot
+set, then `build/out/agdcinfo` over SSH. Either our bridge appears as a
+candidate — in which case the map gets an entry, a `DisplayPipe` is built, the
+latch never fires and the whole chain above unwinds — or it is skipped, and
+`agdcinfo` names which of the four conditions it failed.
+
+The risk is **timing, and it is tight**. Boot 174 latched at **+6.5 s** after
+`kern.boottime`, with the AGDC query 39 ms earlier at +6.47 s. 2rw measured
+the bridge's load at **≤ +5128 ms**. So the plain `-rbgpuagdc` path has about
+a 1.3 s margin and may well make it. **`-rbgpuagdcearly` stays OUT** — it is
+the arg that wedges (2rz) and it is not needed to test this. If the plain path
+loses the race, the fix is to make the bridge earlier, not to open the gate
+earlier.
