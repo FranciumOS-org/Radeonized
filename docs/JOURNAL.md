@@ -39792,3 +39792,77 @@ same thing about `LinearizationArray`.
 Unchanged and still unexplained: `fb_vbl_ot_armed` absent (`diag_used` 549 of
 768, so rule 14's check passes and the absence carries information — nothing
 has ever been queued), and the wedge itself.
+
+## 2u7: the error's one and only emitter, read — and it is NOT the channel count, it is a NULL table
+
+Static read, no boot. 2u6 ended by saying the next change is one field; this
+corrects *which* field before anyone spends a boot on it.
+
+The new string `Attempting to get 3-channel gamma table capabilities from plane
+with no 3-channel gamma table support` lives at **`0x7ff80415456f`** (found by
+`Cache.read` + `bytes.find`, start-of-string per rule 26). `dsc.py ripall`
+across all seven cache files finds **exactly one** RIP-relative site:
+`0x7ff80405df8e`, a `lea` feeding the log call — inside
+**`CoreDisplay::IOPCapabilities::GammaChannelTableEntryCountAndType()`**
+(`0x7ff80405ddd8`, named in `build/re/CoreDisplay-funcs.txt`). So 2sc's comment
+at `rb_agdc.h:277` named the right consumer all along, and 2sf talked itself
+out of it (2u6).
+
+**What the function actually decides.** After a NULL check on `this->0x8` and
+on `[this->0x8 + 0xb0] -> 0x90 -> 0x88` (the array count, `rax`; zero takes a
+*different* error at `0x7ff80405dfb1`), it walks an array with **stride 0x38**
+from `0x90(%rcx) + 0x30`, and per entry reads two slots:
+
+- `%rdi = [entry + 0x10]` — a **format bitmask**
+- `%rsi = [entry + 0x30]` — the value it will return
+
+It then picks the entry with the widest accepted format, in this order, each
+guarded by the best-so-far count in `%rdx`:
+
+| bit of `entry+0x10` | entry count it claims |
+|---|---|
+| 9 | 0x10 (16) |
+| 8 | 0xc (12) |
+| 7 | 0xa (10) |
+| 6 | 8 |
+| 4 | 8 |
+| 3 | 8 |
+
+and the winner's `%rsi` is kept in `%r14`. The **last three instructions before
+the error** are the whole predicate:
+
+```
+7ff80405df7f:  testq %r14, %r14
+7ff80405df82:  jne   0x7ff80405dfd1          ; success
+7ff80405df84:  xorl  %r14d, %r14d
+7ff80405df87:  leaq  0xf6541(%rip), %rdi     ; function/file name
+7ff80405df8e:  leaq  0xf65da(%rip), %rdx     ; the error string
+7ff80405df95:  movl  $0x2d8, %esi            ; Apple's source line 728
+```
+
+**So the complaint is `entry+0x30 == 0`, not a channel count.** And our format
+bitmask is already accepted: `rb_agdc_gamma_entry` writes `0x10` at `+0x10`,
+which is **bit 4**, one of the six the table above lists. That is why the error
+*moved* rather than staying put — the entry is now found and its format
+honoured, and the one thing missing is the value at `+0x30`.
+
+**Stated plainly, because 2u6 came one step from getting this wrong:** 2u6
+inferred from the new wording that the field under test was
+`RB_AGDC_GAMMA_CHANNELS` (`rb_agdc.h:278`, our substituted 0, written to our
+entry's `+0x28`). **That inference is NOT supported.** The slot Apple reads is
+`+0x30` of a **0x38-stride CoreDisplay array**, which is not our 0x32c-stride
+AGDC entry; nothing read so far maps our `+0x28` onto it. 2u6's measurement
+stands in full — the error text changed, so the AGDC type-2 reply *is* consumed
+— but its closing sentence named a field it had not traced. This is the
+recurring error again (reading a value without establishing what makes it
+meaningful), caught this time before it cost a boot rather than after.
+
+**The one read that closes it** is the field mapping:
+`__GatherAGDCDisplayPipelineCapabilities` (`0x7ff812e979dc`, the address
+`rb_agdc.h:182` has cited since 2rf) → the gamma branch → which slot of our
+reply it copies into the dictionary's `GammaArray` entry, and which key then
+lands at `+0x30`. The dictionary's gamma keys are already known (2sf, journal
+line 35489): `GammaArray`, `FixedFormat`, `GammaValue`, `NumberOfElements`,
+`Elements`. `NumberOfElements` is the obvious candidate for `+0x30` and
+`FixedFormat` for `+0x10` — **candidate, not conclusion**; the read decides it.
+No boot is needed for any of this, and no boot should be spent until it is done.
