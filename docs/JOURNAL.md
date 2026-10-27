@@ -40628,3 +40628,135 @@ So the next read is the linearization predicate itself:
 (`0x7ff80405e870`), both already named in `build/re/CoreDisplay-funcs.txt`.
 No boot is needed for it, and it decides whether the next change is a size, a
 `Type`, or both.
+
+## 2v7 — the linearization WARN is APPLE'S OWN BEHAVIOUR, and it is benign
+
+No boot. Static read of the predicate 2v6 named, plus its emitter.
+
+### The emitter
+
+`Attempting to get 3-channel linearization table capabilities from plane with
+no 3-channel linearization table support` is at `0x7ff80415464d`. One
+RIP-relative reference in the whole cache (`ripall`, 7 mappings):
+`0x7ff804109a77`, inside **`CoreDisplay::DisplayPipe::AddLinearization`**
+(`0x7ff8041092b4`), source line **0x361**. Its function-name string is
+`std::tuple<uint32_t, uint64_t> CoreDisplay::IOPCapabilities::LinearizationChannelTableEntryCountAndType(uint32_t) const`
+— i.e. the gamma emitter's sibling, **inlined** into `AddLinearization`, which
+is why it is absent from `build/re/CoreDisplay-funcs.txt`.
+
+### The predicate, read
+
+`AddLinearization` first calls `SupportsLinearization(plane, false)`
+(`0x7ff80405e870`) at `0x7ff80410989d` with `edx = 0`; false → plain return,
+nothing logged. That function:
+
+- `this->0x8 → +0xb0`, bounds-check plane against `+0x88`, plane array at
+  `+0x90`, **stride 0xa8**, linearization count at `plane+0x78`, entry array at
+  `plane+0x80`, entry stride **0x38** (CoreDisplay's struct, 2v3's map).
+- With the bool **false** it returns simply `count != 0`.
+- With the bool **true** it ORs **bit 2 of `Flags` (entry+0x00)** over all
+  entries. Our degamma `+0x00 = 0x00080005` has bit 2 set, so that arm passes
+  too.
+
+Then the inlined `LinearizationChannelTableEntryCountAndType` loop
+(`0x7ff80410991c`): `rcx = entryArray + 0x30`; per entry it reads
+`[rcx-0x20]` = **`Type` (entry+0x10)** and `[rcx]` = **`MaximumSize`
+(entry+0x30)**, and selects the widest accepted `Type` bit:
+
+| `Type` bit | depth | tier |
+| --- | --- | --- |
+| 9 | 0x10 | primary |
+| 8 | 0xc | primary |
+| 7 | 0xa | primary |
+| 6 | 8 | primary |
+| 3 | 8 | primary |
+| 13 | 0x10 | secondary (`0x3c04`) |
+| 12 | 0xc | secondary |
+| 11 | 0xa | secondary |
+| 10 | 8 | secondary |
+| 2 | 8 | secondary |
+
+The union is exactly **`0x3fcc`** — which is literally the mask
+`IsLinearizationTableBased` (`0x7ff80405e00c`) tests, so that function means
+"any linearization entry with a recognized `Type`". The accumulator is the
+selected entry's **`MaximumSize`**, and the WARN fires when it stays zero —
+i.e. **no accepted `Type` bit**, or count zero.
+
+Note the asymmetry with gamma (2u7): gamma accepts bit **4**, linearization
+accepts bit **2**. Neither accepts **bit 0**.
+
+### Why this is not ours to fix
+
+`AMDRadeonX6000_AmdAgdcServices::getFbCapabilityForDegamma` (`0xbfed0dc`,
+`AMDRadeonX6000Framebuffer`) was re-read in full. It writes **two** entries
+(stride 0x32c), each:
+
+```
++0x00 = 0x00080005
++0x04 = 1                        (qword)
++0x0c/+0x10 = movabsq $0x100000000   -> +0x0c = 0, Type (+0x10) = 1
++0x14 = 0
++0x18 = segtab[i] | dev->0x2e798
++0x20 = movabsq $0x3f80000000000000  -> +0x24 = 1.0f
++0x28 = 1                        (qword)
+```
+
+and `*outCount = 2`. So **Apple's own Navi 21 driver sends
+`AGDCLinearizationType = 1`**, and `IOPresentmentCapabilities::AGDCLinearizationTypeToIOPresentment`
+(`0x7ff812e98f0c`) is a priority-ordered **identity** map (lowest set bit
+wins, bits 0,1,2 first, then 13..10, then 3..9), so 1 arrives at CoreDisplay
+as 1 — **bit 0, which `0x3fcc` does not contain**.
+
+`IOPresentmentCapabilitiesDisplayPipe::IOPresentmentCreateLinearizationDictionary`
+(`0x7ff812e9b2d4`) was read to confirm the field map is the same as gamma's:
+count at `this->0x3720`, entries at `this->0x3724`, stride 0x32c, and per
+entry `+0x04` gate (testq `1<<arg`), `+0x0c` `NonAtomicApplicationPeriod`
+(key slot `0x7ff84166d628`), **`+0x10` `Type`** (`d718`), `+0x14`
+`FixedFormat` (`d748`), `+0x18` `ConfigurationID` (`d720`), `+0x20`
+`MinimumValue` (`d728`), `+0x24` `MaximumValue` (`d730`), **`+0x28`
+`MaximumSize`** (`d738`). Identical to 2v5's gamma map — a second,
+independent confirmation of it.
+
+### And the WARN propagates nothing
+
+After the WARN, `AddLinearization` sets `r12 = 0`, writes `txn+0x20 = 0`, and
+`cmpl $0x2, %ebx` (the selected `MaximumSize`) **jb** → `0x7ff804109d65`,
+skipping the whole LUT interpolation. With `r15 = 0` that falls straight to
+`movb $0x1, 0x12c(%r14)` (the identity/bypass flag), `0x130 = plane`,
+`0xa8 = 1`, and **returns void**. There is no error return and no failure
+path. So:
+
+- `no 3-channel linearization table support` is what a **real** AMD Mac logs
+  too, every dump, and it means "this plane has fixed-function degamma, not a
+  3-channel table" — the transaction then marks linearization as identity and
+  continues.
+- Boot 182's doubling from 1.01 to 2.03/dump is exactly the two degamma
+  entries now both being walked, not a regression.
+- **Do not raise the degamma `Type` off 1.** It would be a substituted value
+  contradicting Apple's own literal (rule 17), and it would make CoreDisplay
+  try to build a 3-channel LUT the chip has not been told it has.
+
+**2v6's "linearization is the new blocker" is WITHDRAWN.** The real remaining
+items are unchanged: `System Gamma - Unknown`, `Fallback GPU Display Pipe
+transaction submission failed` (1.00/dump), `Clean` never appearing, and the
+wedge itself.
+
+### Where the next read was heading
+
+`System Gamma - Unknown` is printed by
+**`CoreDisplay::DisplayPipeState::operator std::string() const`**
+(`0x7ff80410d1b6`). Its tables are now located:
+
+- operation names, `char*[9]` at **`0x7ff8404fc2b0`**: Fetch, Scale, Rotate,
+  Linearize, CSC, **System Gamma**, Regamma, EOTF, None. Index 5 is ours. The
+  one LEA of that table is `0x7ff80410db6f`, inside the printer.
+- target names, `char*[3]` at **`0x7ff8404fc300`**: `GPU`, `Pipe`, `None`.
+  `Unknown` is **not** in that table, so it is the printer's own default for a
+  target value outside 0..2 — which is why `System Gamma` reads `Unknown`
+  while every other operation reads `GPU` or `Pipe`.
+
+So the next step is to read `0x7ff80410d1b6` around `0x7ff80410db6f`: find the
+per-operation target field in `DisplayPipeState`, the default that prints
+`Unknown`, and then the writer of the System-Gamma slot. That is a static read
+and needs no boot. `AddGamma`'s analogue of `AddLinearization` is the likely
+writer.
