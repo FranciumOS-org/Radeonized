@@ -113,11 +113,22 @@ not memory, not a flag and not the AGDC gate:
   and `PlaneArray`←**nothing**. That reconciles 2sd — 2sc filled the five
   groups that gate nothing. `_IOPresentmentSetPlaneCount` has no caller inside
   IOPresentment, so CoreDisplay sets it from its own `IOPCapabilities`.
-  **Next read: `__GatherAGDCDisplayPipelineCapabilities` itself**, to find
-  where the plane group is filled and from what. `kAGDCGPUCapability` and
-  `kAGDCVendorInfo` are named in IOPresentment's table and we publish neither,
-  but that is key-name co-location and **not** a measurement — do not publish
-  them on the strength of it.
+- **The plane count does NOT come from AGDC** (2sg). The entire AGDC input to
+  `IOPresentmentCreateCapabilities` is three functions: 0x711 sixteen times
+  (`__GatherAGDCDisplayPipelineCapabilities`), 0x921 once
+  (`__GatherAGDCLogicalDeviceCapabilities`), and `__GatherAGDCLinkCapabilities`,
+  which bit 0 of link-config +0x08 gates and which **2rg already measured
+  inert** — all it writes is `0x19c78`, with four writers and zero readers in
+  the image. Boot 170 answered all five types with no change, and we answer
+  0x921 correctly and copy it wholesale. So there is no AGDC query carrying a
+  plane count, and `PlaneArray` having no type is not a naming accident.
+  **Next read: the `IOAccelDisplayPipe` plane interface in
+  `IOAcceleratorFamily2`** — kernel side, where `nm` and `dumptable.py` work —
+  not more dyld cache. IOPresentment links `IOAccelDisplayPipe*` stubs, and
+  `AMDRadeonX6000` already implements that vendor half (2s4).
+- **Grep `docs/JOURNAL.md` before reading any Apple function.** 2sg re-read a
+  function 2rg had already read by address, and 2rg had already settled the
+  question being asked. Third recorded instance of this error.
 - **A boot of `8B261646` + `-rbgpuagdcearly` hung at the progress bar with no
   SSH** and needed a force restart (2sa). That boot was UNARMED
   (`agdc_error 3`, `agdc_oneshot 2`), so the bridge was inert in it and the
