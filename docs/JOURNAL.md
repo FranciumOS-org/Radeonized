@@ -37288,3 +37288,59 @@ on our framebuffer at all this boot. `registerForInterruptType` already logs,
 so the live boot can answer that without spending a reboot, and the
 `diag_used`/`diag_max` pair is the rule-14 control for reading anything into
 `fb_vbl_ot_armed`'s absence.
+
+### 2su addendum — the pairing is confirmed by name; the absence of our IOLog is an INSTRUMENT failure
+
+Same boot. Two results.
+
+**1. The rule-14 control passes, so the transaction absence is real.**
+
+```
+diag_max=300        (hex: 768)
+diag_used=1e0       (hex: 480)
+```
+
+Both hex, consistent with 2s9's "571 of 768". 480 < 768, so the table did not
+fill and **`fb_vbl_ot_armed`'s absence carries information**: no transaction
+has ever been queued in this boot either, with the accelerator armed AND paired.
+2s9's finding survives the pairing.
+
+**2. The pairing is named, by three processes independently.**
+`displaypolicyd`, `WindowServer` and `SafeEjectGPUService` each print:
+
+```
+gpu 0xfbc7 flags 0xb2000020 (DG,published,quiet,pubSched,pubArmed) vid.did=1002.1681 b:d:f=54:0:0
+gpu 0xfbc7        pci 0x10000027c IOService:/AppleACPIPlatformExpert/PCI0@0/AppleACPIPCI/GP17@8,1/IOPP/IGPU@0
+gpu 0xfbc7       agdc 0x000000000
+gpu 0xfbc7       gpuc 0x000000000
+gpu 0xfbc7 agdpclient 0x000000000
+gpu 0xfbc7      accel 0x1000004c8     /AMDRadeonX6000_AMDNavi21GraphicsAccelerator
+gpu 0xfbc7      fb0:0 0x1000004c5     /RBAMDFramebuffer
+```
+
+So it is **`AMDRadeonX6000_AMDNavi21GraphicsAccelerator`** bound to
+`RBAMDFramebuffer` as **`fb0:0`** — framebuffer slot zero, the primary. 2st
+inferred this from two matching ids; this states it by class name and path.
+`agdc`, `gpuc` and `agdpclient` are all still 0.
+
+Also present, and not yet explained:
+`kernelmanagerd error: tried to insert an invalid codeful kernel extension in
+the restricted lookup table: Kext com.rembrandtgpu.fb v0.1.0`. The kext loaded
+and matched regardless.
+
+**3. WITHDRAWN before it was written: "the accelerator never registered a
+'vbl ' handler."** The log contains **zero** lines from our kext's own `IOLog`
+— and that includes `start()`'s lines, which *must* have run, because the
+framebuffer is matched, active, and owns the display. Every line in the capture
+came from `kernelmanagerd` or the wrangler merely *containing* the string
+`RBAMDFramebuffer`. The known-present case is absent too, so what is broken is
+the `IOLog` → unified-log path, **not** the registration. Nothing can be
+concluded about `registerForInterruptType` from this capture.
+
+Rule 26, now for the fourth recorded time, and the second time on this exact
+shape (2so was the third): a grep returning nothing is not evidence of absence
+until it is checked against a case known to be present. 2so's near-miss was
+the same instrument.
+
+This is the reason 2su's new counters are published as **registry properties**
+and not only logged: `ioreg` does not depend on the path that just failed.
