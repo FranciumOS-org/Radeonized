@@ -36737,3 +36737,97 @@ Deliberately **not** implemented yet: adding unmeasured machinery before the
 first owning boot is how 2cy happened. If 3b comes up with wrong colours or a
 gamma complaint, that is the first thing to add, and it will then be a response
 to a measurement.
+
+## 2sp — the AuxKC rebuild is blocked by a broken password prompt, not by consent; and a staged kext is inert after a reboot but not absent
+
+The user ran the 3a install. `cp`, `chown` and `chmod` succeeded —
+`/Library/Extensions/RBAMDFramebuffer.kext` is there, `root:wheel` — and
+`kmutil rebuild` got as far as accepting the kext and then failed:
+
+```
+Attempting to add the following extensions (1):
+[+] com.rembrandtgpu.fb  0.1.0  /Library/Extensions/RBAMDFramebuffer.kext
+Attempting to remove the following extensions (1):
+[-] com.rembrandtgpu.fb  0.1.0  /private/var/tmp/RBAMDFramebuffer.stage/RBAMDFramebuffer.kext
+Requesting user approval (times out in 60 seconds)...
+Error Domain=com.apple.LocalAuthentication Code=-6
+  "Biometry is not available on this device."
+```
+
+So the collection builder **accepts** the kext; the step that fails is the
+interactive approval, and `kmutil rebuild` takes no flags at all (`--help`
+lists only `-h`).
+
+### What the blocker is NOT
+
+`spctl kext-consent status` reads **`Kernel Extension User Consent: DISABLED`**.
+That is SIP's `CSR_ALLOW_UNAPPROVED_KEXTS` (0x200, set in this machine's 0xA43)
+doing its job, so there is **nothing to approve in System Settings** and no
+syspolicyd gate in the way. Worth stating because "kext blocked" normally means
+exactly that, and chasing the Privacy & Security pane here would have been a
+dead end.
+
+What fails is `kmutil rebuild`'s own `LocalAuthentication` call — an
+admin-password prompt — and it asked for **biometry** on a machine that has
+none, erroring instead of falling back to a password.
+
+### The second finding, which changes the procedure
+
+`tools/load.sh` has said since it was written that a staged kext "is gone after
+a reboot". Measured now:
+
+```
+/private/var/tmp/RBAMDFramebuffer.stage          PRESENT
+/private/var/tmp/RembrandtProbe.stage            PRESENT
+/private/var/tmp/MHelper.stage                   PRESENT
+```
+
+and the AuxKC's own contents list **both** of our kexts at their staged paths:
+
+```
+com.rembrandtgpu.fb     0.1.0  /private/var/tmp/RBAMDFramebuffer.stage/...
+com.rembrandtgpu.probe  0.1.0  /private/var/tmp/RembrandtProbe.stage/...
+```
+
+So the **load** does not survive a reboot — `kextstat` after the 23:04 reboot
+showed the probe absent, with its file present and its AuxKC entry intact — but
+the **file** and the **collection entry** both do. `/private/var/tmp` is not
+cleared at boot.
+
+The distinction is not pedantry. The staged copy of the framebuffer carries the
+**beside** personality (`IOMatchCategory = RBAMDFramebufferBeside`), and it is
+sitting in the AuxKC next to the `/Library/Extensions` copy that carries the
+**displacing** one. Nothing observed suggests it would auto-load — the probe is
+the control, and it did not — but entering a boot where the installed copy is
+meant to win the `IOFramebuffer` category with a second copy of the same bundle
+id present in the collection is exactly the kind of thing that produces a
+result nobody can attribute. It gets removed first.
+
+`load.sh`'s comment is corrected rather than deleted, with what was measured.
+
+Also noted: the mechanism by which `/Library/Extensions` kexts reach the AuxKC
+clearly works on this machine — `NVAccel`, `NVRM`, `NVRMAGDC`, `NVRMFB`,
+`HighPointRR` and `HighPointIOP` are all in it at their `/Library/Extensions`
+paths. So this is a question of which command does it, not whether it can be
+done.
+
+### The three ways forward, in risk order
+
+1. **Let the boot-time rebuild do it.** `kernelmanagerd` rebuilds a stale AuxKC
+   during boot, and with consent DISABLED there is nothing interactive to
+   satisfy there. The collection is stale right now (our installed copy is not
+   in it), the kext is correctly owned, and **stage 3a is a reboot anyway** — so
+   this costs nothing extra and is tried first. Either the next boot lists the
+   `/Library/Extensions` path in the AuxKC or it does not, and that is a clean
+   fact either way.
+2. **`sudo kmutil create -z -n aux …`** — `create` *does* carry
+   `-z/--no-authorization`, unlike `rebuild`. This is the documented bypass, and
+   it is the fallback rather than the first move for one reason: it rewrites the
+   collection that the user's **working** nullmoth RTX driver depends on. That
+   risk is fully covered by copying the single 18.6 MB
+   `/Library/KernelCollections/AuxiliaryKernelExtensions.kc` aside first, which
+   makes it reversible, but it is still a bigger step than a reboot.
+3. Re-running `kmutil rebuild` and hoping for a password dialog. Recorded as an
+   option and ranked last: the error names the biometric policy specifically, so
+   there is no reason to expect a different answer on a second run. Do not spend
+   a round trip on it before 1.
