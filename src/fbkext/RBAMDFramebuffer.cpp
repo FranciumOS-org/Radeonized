@@ -56,7 +56,7 @@ const uint64_t kVBLPeriodNs         = 1000000000ULL * 65536ULL / kRefreshRate161
  * CLAUDE.md rule 9 already states the answer, learned on other features and
  * not applied to this one: *the feature needs the arg AND the key, so without
  * the arg a stuck key is inert.* So arming requires BOTH, and the boot-arg -
- * removed with `tools/efi.sh bootarg remove -rbgpufb`, which edits a file and
+ * removed with `tools/efi.sh bootarg remove -rbgpuownfb`, which edits a file and
  * is durable in a way an NVRAM one-shot demonstrably is not - is what makes a
  * stuck key harmless.
  *
@@ -69,8 +69,8 @@ const uint64_t kVBLPeriodNs         = 1000000000ULL * 65536ULL / kRefreshRate161
 bool armedOnce(void)
 {
     char flag[16];
-    if (!PE_parse_boot_argn("-rbgpufb", flag, sizeof(flag))) {
-        LOG("-rbgpufb is not in boot-args; NOT arming whatever NVRAM says "
+    if (!PE_parse_boot_argn("-rbgpuownfb", flag, sizeof(flag))) {
+        LOG("-rbgpuownfb is not in boot-args; NOT arming whatever NVRAM says "
             "(rule 9: the feature needs the arg AND the key, so a key that "
             "failed to clear is inert). IONDRVFramebuffer keeps the panel.");
         return false;
@@ -109,7 +109,7 @@ bool armedOnce(void)
     }
 
     if (!armed) {
-        LOG("-rbgpufb present but rbgpu-fb not set; staying out of the way "
+        LOG("-rbgpuownfb present but rbgpu-fb not set; staying out of the way "
             "(the desktop keeps IONDRVFramebuffer). Arm with: "
             "sudo nvram rbgpu-fb=1");
         options->release();
@@ -126,9 +126,9 @@ bool armedOnce(void)
      * path above explains how. So it is logged as what it is, and the boot-arg
      * is what the disarm actually rests on. */
     bool cleared = options->getProperty("rbgpu-fb") == nullptr;
-    LOG("armed (-rbgpufb + rbgpu-fb); taking the panel for THIS BOOT. "
+    LOG("armed (-rbgpuownfb + rbgpu-fb); taking the panel for THIS BOOT. "
         "one-shot removal %s IN MEMORY - this does NOT prove it reached flash "
-        "(2sq); the durable disarm is `sudo tools/efi.sh bootarg remove -rbgpufb`",
+        "(2sq); the durable disarm is `sudo tools/efi.sh bootarg remove -rbgpuownfb`",
         cleared ? "accepted" : "FAILED, so the key is definitely still set");
     options->release();
     return true;

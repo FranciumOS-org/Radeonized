@@ -72,10 +72,15 @@ fi
 if [ "$mode" = beside ] && ! nvram rbgpu-fb >/dev/null 2>&1; then
     :
 fi
-if [ "$mode" = beside ] && ! nvram boot-args 2>/dev/null | grep -q -- '-rbgpufb'; then
-    echo "-rbgpufb is not in boot-args, so probe() will decline (2sr: the"
+# A WHOLE-TOKEN test. 2ss: `grep -q -- '-rbgpufb'` reported the arg present
+# because -rbgpufbvbl, -rbgpufbvram and -rbgpufbaccel all contain it, and that
+# was a SAFETY check reading as armed. The kernel is stricter than the grep was
+# (PE_parse_boot_argn requires token length == strlen(name)), so the kext was
+# never actually at risk - our tooling was.
+if [ "$mode" = beside ] && ! nvram boot-args 2>/dev/null | tr ' \t' '\n\n' | grep -qx -- '-rbgpuownfb'; then
+    echo "-rbgpuownfb is not in boot-args, so probe() will decline (2sr: the"
     echo "boot-arg is the durable disarm, not the NVRAM key). Add it with:"
-    echo "  sudo tools/efi.sh bootarg add -rbgpufb"
+    echo "  sudo tools/efi.sh bootarg add -rbgpuownfb"
     exit 1
 fi
 if [ "$mode" = beside ] && ! nvram rbgpu-fb >/dev/null 2>&1; then
