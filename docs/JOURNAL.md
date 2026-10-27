@@ -41401,3 +41401,139 @@ the window (capture at +28 s, 0 bytes); 2w2 lost eight boots to the level.
 messages do not survive a reboot. Before reading absence from a log, check
 that the levels you need are present — count them against a known-present
 control in the same capture.
+
+================================================================================
+2w3 - BOOT 185: THE ERROR IS NAMED, AND IT IS THREE BITS IN APPLE'S KERNEL
+================================================================================
+2026-10-27, logs/20261027-185657-plugin, boot 185, armed, wedged, captured.
+
+Arm verified first (rule 34): `rbgpu-boot 185`, `agdc_oneshot 0`,
+`iop_oneshot 0`, `agdc_error 0`, `agdc_ec_scaler` 27951647162624 =
+**0x196C_00_01_00** (identical to boot 184), `diag_used` **564** of 768 so
+absences are informative, and all four NVRAM one-shots read `<unset>` =
+consumed. Boot-args unchanged from 184.
+
+2w2's `--info` fix WORKED. 388 `[INFO]` lines where boots 177-184 had zero,
+against the 203 `[ERROR]` / 139 `[WARN]` control, and the line that had been
+invisible for eight boots is there 118 times:
+
+    [INFO] - Failed to submit transaction:
+            IOPRESENTMENT_METHOD_FAILURE: IOReturn: 0x2d8
+
+**0x2d8 is `kIOReturnNotReady`** (`iokit_common_err(0x2d8)`, IOReturn.h:126,
+read on this machine's SDK). The string is CoreDisplay's
+(`0x7ff804163529`, one RIP-relative referencer at `0x7ff8040cd385`), and its
+encoder packs `(ioreturn_low10 << 22) | 0x8f`: `andl $0x3fffff` then
+`cmpl $0x8f` selects the METHOD_FAILURE text, `shrl $0x16` prints the
+IOReturn. So the whole of the error is one kernel return code.
+
+COUNTS. `Fallback ... submission failed` **58**, `DisplayPipeState` 58,
+`Submit` failures **118** - so Submit is called about twice per Commit and
+`Commit` logs once. `no gamma` 0, `no display pipes are present` 0,
+`Failed to create IOPresentment transaction` **0** (2w2's reading of
+`IOPresentmentBegin` is confirmed from the opposite direction, in a capture
+that now carries the INFO level it would have been logged at anyway).
+
+AND IOPRESENTMENT ITSELF IS TALKING. The `--info` level also uncovered
+IOPresentment's own logging, which no earlier capture had:
+
+    (IOPresentment) Info: Valid ADGC node found for this device.       x1
+    (IOPresentment) Info: AGDC CSC / Gamma / Linearization /
+                          Plane Scaler / Cursor successful             x3 each
+    (IOPresentment) Info: Capabilities conversion successful           x2
+    (IOPresentment) Info: Successfully created presentment object
+                          type: 1024                                   x1
+
+Every one of our five AGDC capability replies is accepted by name, three
+gathers over. 2w1's elimination of the AGDC reply surface is now confirmed
+by the consumer saying so in words. Before each of the 118 failures it also
+prints the descriptor it is applying - `type: 0x1  format: 0  cid: 0x20
+min: 0.000000  max: 1.000000  num: 1  tableSize: 16`, identical every time,
+which is our degamma entry 1 (`rb_agdc.h:381`: `+0x10` Type 1, `+0x18`
+ConfigurationID 0x20, `+0x24` 1.0f, `+0x28` 1) echoed back correctly.
+
+THE FAILING CALL, READ TO THE BIT. `IOPresentmentEnd` (`0x7ff812e89211`) is
+a trampoline: validate, then tail-jump `obj->0xa0`'s vtable slot `0x80`.
+The IOReturn it forwards comes from the kernel, and the only
+`kIOReturnNotReady` in the display-pipe path is
+**`IOAccelDisplayPipeUserClient2::transactionEnd`** (IOAcceleratorFamily2,
+`0x14e64620`), at `+0xac`. Its gate, in order:
+
+    pipe = this->0xe8                       NULL        -> 0xe00002bc
+    pipe->0x299 != 0                                    -> (other)
+    pipe->0x280 != 0                                    -> (other)
+    accel = this->0xd8
+    (accel->0xc78 & 0x2) == 0               -> NotReady
+    pipe->0x282 != 0                        -> NotReady
+    !pipe->isActive()                       -> NotReady
+
+`IOAccelDisplayPipe::isActive()` (`0x14e5d51c`) is exactly
+`pipe->0x298 != 0`. So **three bits** decide it.
+
+BIT 0x298 IS ALMOST CERTAINLY SET. Its only writer is
+`IOAccelDisplayPipe::init_framebuffer_resource` (`0x14e5d7ca`), whose only
+caller is `IOAccelDisplayPipe::displayModeDidChange` (`0x14e5db14`), which
+calls it **unconditionally**. And `displayModeDidChange` is the **only site
+in the whole kext** that registers `'vbl '` (`movl $0x76626c20, %esi` at
+`0x14e5db4b`, one hit) - which boot 183 measured happening on our
+framebuffer (handler 1, Apple's, registered and left disabled). So that
+function ran. `init_framebuffer_resource` has three failure exits and every
+one of them logs at os_log type **0x11 = FAULT**; the capture carries
+IOAcceleratorFamily2 FAULTs (`checkGPUProgress` at 18:56:11) and **none of
+init_framebuffer_resource's**. Rule 26: the control is present and the
+message is absent, so the absence is informative.
+
+BIT 0x282 is the WSAA defer flag (`wsaaWillEnterDefer` / `wsaaWillExitDefer`
+/ `wsaaDidExitDefer`), 0 outside a defer transition.
+
+**BIT 0x2 OF `accel->0xc78` IS THE PRIME SUSPECT, AND IT HAS A GATE WE CAN
+FAIL.** `IOGraphicsAccelerator2::start` clears it (`andl $0xfffffbe8`);
+the ONLY setter is `IOGraphicsAccelerator2::enableAccelerator()`
+(`orb $0x2, 0xc78`); the only clearer is `disableAccelerator()`. Those two
+have exactly two callers each, and they bracket a mode change:
+`IOAccelDisplayMachine::display_mode_will_change` disables,
+`display_mode_did_change` (`0x14e2148e`) enables. In `did_change`:
+
+    decl this->0x10c ; je ...          nesting counter, must reach 0
+    this->vt[0x870]()  == false  -> skip enable AND skip the pipe loop
+    accel->0x180 == 0            -> SKIP enableAccelerator, but STILL run
+                                    the per-pipe displayModeDidChange loop
+    -> enableAccelerator()
+
+That second branch is the one that fits every measurement we have: the pipe
+loop runs (so `'vbl '` gets registered and `init_framebuffer_resource`
+succeeds, both observed), and the accelerator is never enabled (so
+`transactionEnd` answers NotReady, observed 118 times).
+
+`accel->0x180` IS THE VRAM DESCRIPTOR, AND IT COMES FROM OUR FRAMEBUFFER.
+`IOGraphicsAccelerator2::find_vram_descriptor()` (`0x14e53922`), called from
+`IOAccelDisplayMachine::found_framebuffer` and
+`IOAccelDisplayPipe::display_change_handler`, loops the display machine's
+framebuffers and does `fb->vt[0x9b0]()` - **`IOFramebuffer::getVRAMRange()`**,
+the slot 2pq measured - storing the result at `accel->0x180`. It then maps
+it (`desc->vt[0x200](1)` -> `accel->0x188`, `map->vt[0x118]()` ->
+`accel->0x190`) and **if the map fails it releases the descriptor and writes
+`0x180 = 0`**. `start` only zero-initialises it.
+
+`RBAMDFramebuffer::getVRAMRange()` (`src/fbkext/RBAMDFramebuffer.cpp:437`)
+returns the retained aperture, non-NULL whenever `aperture` exists - so the
+first half is fine and the suspect is the **map**, or `found_framebuffer`
+never running for our framebuffer at all.
+
+Offsets confirmed from the accessors rather than assumed:
+`machine+0x108` = framebuffer count (`getFramebufferCount`),
+`machine+0x88 + 8*i` = `IOAccelDisplayPipe*` (`getDisplayPipe`),
+`accel+0x378` = the display machine (`find_vram_descriptor`),
+`accel+0x128` is the machine's back-pointer to the accelerator.
+
+WHAT THIS RETIRES. The failure is **not** in anything we send: not the AGDC
+replies (IOPresentment says each is "successful"), not the plane count
+(`Begin` never failed), not the gamma tables (echoed back intact), not the
+capability types. It is a single enable bit in Apple's accelerator, and the
+most likely reason it is clear is a VRAM descriptor that never took.
+
+NEXT, AND IT IS A READ. All three bits are readable from a live kernel
+object at known offsets, so one armed boot with a read-only probe -
+accelerator by class, then `+0xc78`, `+0x180`, `+0x188`, `+0x378` ->
+`+0x108`, `+0x88[0]` -> `+0x298`, `+0x282`, `+0x280`, `+0x299` - says which
+gate is shut, with no hooks and no writes.
