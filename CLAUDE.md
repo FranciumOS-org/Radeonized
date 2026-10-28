@@ -465,7 +465,7 @@ Offsets are from the accessors, not guessed: `machine+0x108` count
 `pipe+0x298` (`isActive`), `accel+0x378` machine (`find_vram_descriptor`).
 **So the defect is in NONE of our replies** - not AGDC, not the plane count,
 not gamma, not a capability type. It is one enable bit.
-**NEXT IS A READ, build `27C88A57`**: `-rbgpuaccelprobe` schedules three
+**NEXT IS A READ, build `D8B1115C`**: `-rbgpuaccelprobe` schedules three
 read-only samples (25/45/75 s) that find the accelerator by class, check
 `getClassSize()` before touching an offset (rule 19, and refuse loudly),
 and publish `ax<i>_gate` (0 all open, 1 accel not enabled, 2 defer,

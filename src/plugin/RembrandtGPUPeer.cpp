@@ -2345,22 +2345,36 @@ static void rbgpu_ax_action(thread_call_param_t p0, thread_call_param_t) {
     char k[48];
     #define RB_AXKEY(suffix) (snprintf(k, sizeof(k), "ax%u_" suffix, idx), k)
 
-    OSDictionary *m = IOService::serviceMatching("IOGraphicsAccelerator2");
-    if (!m) {
-        rbgpu_diag_set_str(RB_AXKEY("say"), "no matching dictionary");
-        return;
+    // The base class first, because it is what the offsets were read from;
+    // the concrete name as a fallback, in case the base is not matchable by
+    // name on this OS. A match that only ever worked one way would make a
+    // zero read exactly like "the service is absent" (rule 26).
+    static const char *const kClasses[2] = {
+        "IOGraphicsAccelerator2",
+        "AMDRadeonX6000_AMDNavi21GraphicsAccelerator",
+    };
+    IOService *accel = nullptr;
+    uint32_t n = 0, via = 0;
+    for (unsigned c = 0; c < 2 && !accel; c++) {
+        OSDictionary *m = IOService::serviceMatching(kClasses[c]);
+        if (!m) {
+            continue;
+        }
+        OSIterator *it = IOService::getMatchingServices(m);
+        m->release();
+        if (!it) {
+            continue;
+        }
+        accel = OSDynamicCast(IOService, it->getNextObject());
+        if (accel) {
+            n = 1;
+            while (it->getNextObject()) n++;
+            via = c + 1;
+        }
+        it->release();
     }
-    OSIterator *it = IOService::getMatchingServices(m);
-    m->release();
-    if (!it) {
-        rbgpu_diag_set_str(RB_AXKEY("say"), "getMatchingServices NULL");
-        return;
-    }
-    IOService *accel = OSDynamicCast(IOService, it->getNextObject());
-    uint32_t n = accel ? 1 : 0;
-    while (it->getNextObject()) n++;
-    it->release();
     rbgpu_diag_set_num(RB_AXKEY("n"), n);
+    rbgpu_diag_set_num(RB_AXKEY("via"), via);
     if (!accel) {
         // Rule 14: a silent return and an absent key look identical.
         rbgpu_diag_set_str(RB_AXKEY("say"), "no IOGraphicsAccelerator2 yet");
