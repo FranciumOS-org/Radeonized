@@ -171,6 +171,35 @@ private:
     uint64_t amtrFlipRefused;
     uint8_t  amtrFlipSnap[kAmtrFlipBytes];
 
+    /* 2wh: the first write to the display engine. The decision logic is
+     * src/common/rb_hubp.h, proven by the hosttest; these are the mechanism's
+     * state and its telemetry. hubpProgram() runs on the accelerator's thread
+     * from setAttribute('amtr'), so it only does volatile stores - the map is
+     * made once in start() and the VBL thread_call publishes (rule 31). */
+    bool               hubpArmed;
+    bool               hubpReady;
+    uint64_t           hubpMax;        /* 0 = unlimited; rbgpufbhubpmax= */
+    IOMemoryMap       *hubpMap;
+    volatile uint32_t *hubpRegs;
+    unsigned           hubpIndex;
+    uint32_t           hubpRefuse;     /* 0 = set up; else why we will not write */
+    uint32_t           hubpPitch;      /* the pipe state we proved ourselves on */
+    uint32_t           hubpConfig;
+    uint32_t           hubpOtgCtl;
+    uint32_t           hubpAddrCfg;   /* DCSURF_ADDR_CONFIG, read-only */
+    uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
+    uint64_t           hubpOrig;       /* the firmware's address: restore path */
+    uint64_t           hubpWrites;
+    uint64_t           hubpLast;
+    uint64_t           hubpReadback;   /* the pair read back after write #1 */
+    uint64_t           hubpRejects;
+    uint64_t           hubpRejectAddr; /* the FIRST refused address, and why */
+    uint32_t           hubpRejectWhy;
+
+    bool hubpSetup(void);
+    void hubpTeardown(void);
+    void hubpProgram(uint64_t mc);
+
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection
      * count; see the comment on the definition. */

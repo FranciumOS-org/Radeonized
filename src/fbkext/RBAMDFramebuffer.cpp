@@ -217,6 +217,29 @@ bool RBAMDFramebuffer::start(IOService *provider)
         amtrArmed = PE_parse_boot_argn("-rbgpufbamtr", amtrflag, sizeof(amtrflag));
     }
 
+    /* 2wh: the HUBP write. Armed with -rbgpufbhubp, and it needs
+     * -rbgpufbamtr too, because the address it writes arrives only through
+     * setAttribute('amtr'). Rule 30: both names are whole tokens and neither
+     * prefixes the other, so PE_parse_boot_argn cannot confuse them.
+     * rbgpufbhubpmax=<N> bounds the writes for a deliberately conservative
+     * first boot; 0 or absent means unlimited, which is what a live display
+     * needs. */
+    hubpArmed = false;
+    hubpMax = 0;
+    hubpRejectAddr = 0;
+    hubpRejectWhy = 0;
+    {
+        char hubpflag[16];
+        hubpArmed = PE_parse_boot_argn("-rbgpufbhubp", hubpflag, sizeof(hubpflag))
+                    && amtrArmed;
+        int maxn = 0;
+        if (PE_parse_boot_argn("rbgpufbhubpmax", &maxn, sizeof(maxn)) &&
+            maxn > 0 && maxn <= 1000000) {
+            hubpMax = (uint64_t)maxn;
+        }
+    }
+    hubpSetup();
+
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
      * is also called from the VBL thread_call and fromPath there would be a
      * registry walk per milestone. A failure is reported, not fatal - rule 14,
@@ -541,6 +564,7 @@ void RBAMDFramebuffer::stop(IOService *provider)
     crumbOn = false;            /* no writes once the object is going away */
     OSSafeReleaseNULL(nvram);
     OSSafeReleaseNULL(aperture);
+    hubpTeardown();
     IOFramebuffer::stop(provider);
 }
 
@@ -877,6 +901,25 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
                 amtrFlipSnapped = true;
             } else {
                 amtrFlipRefused = ps;
+            }
+        }
+        /* 2wh: and the write. The address is _AMD_PIPE_FLIP +0x08/+0x0c, a
+         * low/high pair in exactly the layout HUBP's register pair wants
+         * (2wg). Taken fresh from EVERY transaction, not from the snapshot:
+         * the snapshot is the first one only, and a swap chain moves the
+         * surface each flip. hubpProgram() is a no-op unless armed and set
+         * up, and it refuses anything outside the measured carve-out. */
+        if (hubpReady && value >= 0xffffff8000000000ULL) {
+            /* Bit 0x1 of the flag word is what makes txn->0x10 a plane state
+             * this transaction actually updated - 2wf read the consumer doing
+             * exactly this test before it touches the pointer, and boot 193
+             * measured the bit SET (flags 0x75). Without it we would write a
+             * stale address on a transaction that only changed, say, the
+             * colour matrix. */
+            const uint64_t flags = ((const uint64_t *)value)[0];
+            const uint64_t ps    = ((const uint64_t *)value)[2];  /* txn->0x10 */
+            if ((flags & 0x1) && ps >= 0xffffff8000000000ULL) {
+                hubpProgram(((const uint64_t *)ps)[1]);           /* flip +0x08 */
             }
         }
         return kIOReturnSuccess;

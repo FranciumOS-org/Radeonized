@@ -57,6 +57,21 @@ public:
     uint64_t amtrFlipPtr=0;
     uint64_t amtrFlipRefused=0;
     uint8_t amtrFlipSnap[kAmtrFlipBytes]{};
+    bool hubpArmed=false;
+    bool hubpReady=false;
+    uint32_t hubpRefuse=0;
+    uint32_t hubpOtgCtl=0;
+    uint32_t hubpAddrCfg=0;
+    uint32_t hubpTiling=0;
+    uint32_t hubpPitch=0;
+    uint32_t hubpConfig=0;
+    uint64_t hubpOrig=0;
+    uint64_t hubpWrites=0;
+    uint64_t hubpLast=0;
+    uint64_t hubpReadback=0;
+    uint64_t hubpRejects=0;
+    uint64_t hubpRejectAddr=0;
+    uint32_t hubpRejectWhy=0;
     // 2t0: the host substitute counts NVRAM writes instead of performing
     // them, which is what makes "bounded by construction" an assertion
     // rather than a claim in a comment.
