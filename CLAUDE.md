@@ -362,6 +362,73 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**THE TRANSACTION IS READ END TO END, AND THE ADDRESS IS ALREADY IN IT
+(2wf).** Static, no boot. `handleDisplayPipeTransaction` (`AMDFramebuffer`
+`0x2b4df0`) is compiled **unoptimized**, so it reads almost like source.
+`SUPPORTED_TRANSACTIONS` (`0x2bec98`, 8 bytes) = **`0x7d`**, and boot 193's
+flag word `0x75` satisfies `0x75 & ~0x7d == 0`: **every bit we carry is
+supported** (bit `0x2`, plane gamma, is the one bit absent from `0x7d`, and is
+clear in `0x75` anyway). The body is `flags = txn->0x00 & 0x7d`, then one block
+per bit, each `if (this->0x1198 & bit) dequeue(bit); else if (flags & bit)
+handle()`. **Every handler dereferences exactly the pointer 2we's snapshot
+recorded** - 0x40->`txn->0x40`, 0x20->`txn->0x38` (`setGammaTable`),
+0x10->`txn->0x30` (`memcpy` of **0x30** bytes, the matrix size exactly),
+0x4->`txn->0x20`, 0x1->`txn->0x10` - so the field map is confirmed from the
+consumer side. `txn->0x08` is the u32 transaction ID
+(`processDisplayPipeTransaction(txn->0x8, false)` in the tail). Its own gates
+are AMDFramebuffer state: `0x908`/`0x820` bit 1 -> **`kIOReturnOffline`**
+(`0x2d7`), `0xdd8` call/`0xe00` -> **`kIOReturnNotPermitted`** (`0x2e2`).
+**THE PLANE STATE IS AN `_AMD_PIPE_FLIP`, 0x220 BYTES, AND IT IS `txn->0x10`.**
+Produced by `executeTransaction` at `0xbe49cf6`: `r9 = pipe + 0x36b0` as the
+out-parameter of `pipe->0x330->vt[0x198]` =
+**`AMDHWDisplay::getDisplayPipeTransactionFlip`** (`0xbe88392`, dump `0x1a8`,
+one slot past 2wc's `'amtr'` gate `vt[0x190]`), whose demangled signature
+carries two `_AMD_PIPE_FLIP *` out-parameters - and the call site fills **one
+or the other, never both** (`r9` on submit, the last stack arg on validate).
+`flip->0x00` u32 format (`0/6/7/8/9`), `+0x04` rotation byte, `+0x06` the u16
+the caller fills after. **Three independent agreements on 0x220**:
+AMDFramebuffer's `memcpy(this + 0xf10, ps, 0x220)`; `pipe+0x36b0 + 0x220 ==
+0x38d0`, the next pointer the snapshot already carries; and
+`bzero(flip + 5, 0x21b)` in the writer itself.
+**THE ADDRESS IS A GPU VA, from a leaf helper at `0xbe88846`**:
+`mem = res->0x88; base = mem->vt[0x158](0,0); k = (uint8_t)res->0x14;
+off = (k==0||k==0x80) ? res->0xf8 : (k==0x82) ? (u32)res->0xfc : 0;
+return base + off`. Called on each `IOAccelResource2` (primary, secondary),
+then both are passed as `%rcx`/`%r8` to a `vt[0x230]` on a third object which
+does the storing. **THE CHAIN IS DELIBERATELY NOT FOLLOWED to the store
+offset** - three more vtable layers in three more classes, and rules 33/35
+(seven chains attached one link off; 2v9's five correct layers on the one fine
+link). `flip->0x58` at `0xbe885a4` is the one address store seen directly and
+is a **candidate, not a result**. It does not need deriving: **Apple fills the
+struct before `setAttribute('amtr')` is called**, so the real addresses are in
+memory we already hold a pointer to. Measure, do not derive (rule 17).
+**2pf's "never called once" is neither refuted nor relied on** - it was
+measured when no transaction had ever executed, so it is not evidence either
+way now.
+**AND THE AMDFRAMEBUFFER PATH COULD NEVER HAVE WORKED HERE** - independent
+confirmation of 2sj. `processDisplayPipeTransaction` ends with
+`this->0xdd8->vt[0x8c0](this->0xd40)`; rule 7 -> dump `0x8d0` of
+`__ZTV13ATIController` = `0x975800`, a filler shared by **122** slots, i.e. the
+pure-virtual stub. `ATIController` does not implement the plane-state program;
+a subclass does, and none instantiates here (journal 34452). **Even Apple's own
+`AMDFramebuffer` could not have completed this flip on this machine** - the
+register write was always ours, not a consequence of the takeover.
+**Build `A454F066`, NO new boot-arg**: `-rbgpufbamtr` now also follows
+`txn->0x10` and takes all `0x220` bytes. `amtrFlipSnapped` is a separate flag
+from `amtrSnapped` so "header read, plane state not" differs from "never
+called". Published: `RBFBAmtrFlipSnapped/Ptr/Refused/Snap` plus
+`RBFBAmtrFlipFmt` (+0x00), `RBFBAmtrFlipRot` (+0x04), `RBFBAmtrFlipA58`
+(+0x58) - **the three fields the static read predicts, so the boot tests it**.
+**Said before the boot**: bit `0x1` is SET in `0x75`, so `RBFBAmtrFlipSnapped`
+must be **true**; false or a non-zero `Refused` means the flag word and the
+pointer disagree and 2we's decode is wrong. `Fmt` in `0/6/7/8/9`, `Rot` small.
+`A58` a plausible GPU VA = the static read landed; zero = the blob says where
+the address really is and nothing is lost. **The picture stays wrong either
+way** - nothing is written to the display engine in this build.
+**NEXT**: one armed boot, plugin **`0D1F953A` unchanged in the EFI** (no
+rebuild, no `efi.sh install`), fbkext **`A454F066` installed to the auxiliary
+collection** - the only artifact that changed, and rule 15's install for it.
+
 **BOOT 193: THE DISPLAY PIPE ACCEPTS TRANSACTIONS. EVERY FAILURE IN THE CHAIN
 IS GONE (2we).** `rbgpu-boot` 193, armed, both one-shots 0, `agdc_error 0`,
 `diag_used` 664/768, 20 files. Rule 15 on both: plugin **`0D1F953A`**, fb
@@ -1464,9 +1531,11 @@ small for the offsets), `-rbgpufbaty` (2w9 - publishes
 `ATY,fb_offset` and `ATY,fb_size`, the two properties `AMDHWDisplay` reads off
 the framebuffer; **the offset it publishes is deliberately not the truthful 0**,
 so the composited image lands where the scanout is not reading - expect a wrong
-picture with an active pipe), `-rbgpufbamtr` (2wc - answers the
+picture with an active pipe), `-rbgpufbamtr` (2wc/2wf - answers the
 `'amtr'` framebuffer attribute, which is the gate on every display-pipe
-transaction, and snapshots the first transaction struct AMD hands us;
+transaction, and snapshots the first transaction struct AMD hands us **plus
+the whole 0x220-byte `_AMD_PIPE_FLIP` it points at**, which already carries
+the GPU address of the surface the compositor rendered into;
 answered, NOT executed, so the picture stays wrong), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
 (answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
 Cursor as well as 0x10 Scaler — off by default because three of the four carry

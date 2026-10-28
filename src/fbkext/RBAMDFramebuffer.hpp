@@ -144,6 +144,33 @@ private:
     uint64_t amtrRefused;
     uint8_t  amtrSnap[kAmtrSnapBytes];
 
+    /* 2wf: the plane state the transaction points at. txn->0x10 is a
+     * _AMD_PIPE_FLIP, 0x220 bytes, and Apple's own code has ALREADY filled it
+     * with the GPU addresses by the time setAttribute('amtr') is called:
+     * executeTransaction calls AMDHWDisplay::getDisplayPipeTransactionFlip
+     * (vt[0x198], dump 0x1a8) with &pipe->0x36b0 as the out-parameter, and
+     * that function's own bzero(flip + 5, 0x21b) fixes the size at 0x220.
+     * Three independent agreements on that number: the bzero, AMDFramebuffer's
+     * memcpy(this + 0xf10, ps, 0x220) in handleDisplayPipeTransaction, and the
+     * pipe's own field adjacency (0x36b0 + 0x220 == 0x38d0, the next pointer
+     * the snapshot already carries).
+     *
+     * The addresses inside it are computed by a leaf helper at 0xbe88846:
+     *     mem = res->0x88; base = mem->vt[0x158](0, 0);
+     *     k = (uint8_t)res->0x14;
+     *     off = (k == 0 || k == 0x80) ? res->0xf8 : (k == 0x82) ? res->0xfc : 0;
+     *     return base + off;
+     * so what lands here is a GPU virtual address, not a VRAM byte offset.
+     * Which field holds it is NOT derived: three more vtable layers separate
+     * the helper from the store, and rules 33 and 35 both say measure our end
+     * rather than attach a correct chain one link off for the eighth time.
+     * So dump the struct and read the offset out of it. */
+    static const unsigned kAmtrFlipBytes = 0x220;
+    bool     amtrFlipSnapped;
+    uint64_t amtrFlipPtr;
+    uint64_t amtrFlipRefused;
+    uint8_t  amtrFlipSnap[kAmtrFlipBytes];
+
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection
      * count; see the comment on the definition. */

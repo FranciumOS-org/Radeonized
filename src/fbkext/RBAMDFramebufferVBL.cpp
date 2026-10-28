@@ -68,6 +68,28 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAmtrSnapped", amtrSnapped);
     setProperty("RBFBAmtrPtr", amtrPtr, 64);
     setProperty("RBFBAmtrRefused", amtrRefused, 64);
+    setProperty("RBFBAmtrFlipSnapped", amtrFlipSnapped);
+    setProperty("RBFBAmtrFlipPtr", amtrFlipPtr, 64);
+    setProperty("RBFBAmtrFlipRefused", amtrFlipRefused, 64);
+    if (amtrFlipSnapped) {
+        setProperty("RBFBAmtrFlipSnap", amtrFlipSnap,
+                    (unsigned int)sizeof(amtrFlipSnap));
+        /* 2wf: the three fields the static read PREDICTS, published on their
+         * own so the boot tests that read instead of assuming it. +0x00 is the
+         * u32 AMDFramebuffer hands to saveFlipTransactionPixelFormat and
+         * getDisplayPipeTransactionFlip sets to 0/6/7/8/9; +0x04 is the
+         * rotation byte it writes from its own argument; +0x58 is the one
+         * address store seen directly (base + offset off a vt[0x158] call).
+         * If +0x58 is zero while the blob holds a plausible GPU VA elsewhere,
+         * the prediction is wrong and the blob says where it actually is -
+         * which is the whole reason the blob is published too. */
+        setProperty("RBFBAmtrFlipFmt",
+                    *(const uint32_t *)(amtrFlipSnap + 0x00), 32);
+        setProperty("RBFBAmtrFlipRot",
+                    (uint64_t)amtrFlipSnap[0x04], 32);
+        setProperty("RBFBAmtrFlipA58",
+                    *(const uint64_t *)(amtrFlipSnap + 0x58), 64);
+    }
     if (amtrSnapped) {
         setProperty("RBFBAmtrSnap", amtrSnap, (unsigned int)sizeof(amtrSnap));
     }
