@@ -362,6 +362,30 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 186: THE PROBE NEVER RAN, AND THE TWO ELIMINATIONS RECONFIRMED
+(2w5).** Armed, `rbgpu-boot` 186, both one-shots 0, `diag_used` 564/768,
+`-rbgpuaccelprobe` in boot-args, build `D8B1115C` loaded - **and not one
+`ax*` key**, not even the unconditional `ax_say`. The fault is the **call
+site**: 2w3 put `rbgpu_accelprobe_start()` beside `rbgpu_heartbeat_start()`
+in `kern_start.cpp` because a grep found that name, and never read what gates
+it - `if (stage >= 40)` **and** `if (checkKernelArgument("-rbgpubeat"))`, and
+`-rbgpubeat` has not been in boot-args since 2fg. Rule 16 on a probe's own
+call site. Moved into `RembrandtGPUPeer.cpp` right after
+`rbgpu_diag_set_num("armed", ...)`, which runs in the peer's `start()` every
+boot; build **`D69D9B33`**.
+**But the boot was NOT wasted.** 2w4's sender predicate works and turns 186
+into an independent confirmation: **801 kernel lines**, **26
+`display_change_handler`** (the kernel-half control), 494 `[INFO]`, 152
+`Failed to submit transaction` **all `IOReturn: 0x2d8`**, 75 `Fallback`,
+46/46 `event timeout`/`not hung`, 4 `bad bits`, and
+**`init_framebuffer_resource` 0** - so `pipe->0x298` is set, captured
+directly this time instead of re-queried. The 13-notification sequence is
+**identical to 185's**, and the last `event 93` (WSAADidExitDefer, which
+zeroes `pipe->0x282` unconditionally) is at 22:58:51.552 while the last
+submit failure is at **23:02:06.182 - 194 seconds later** (2w4 had 51).
+**So `accel->0xc78 & 0x2` is the gate in two boots.** New shape seen:
+`hardwareErrorEvent(): GPURestartDeferred`.
+
 **THE KERNEL HALF OF OUR OWN CAPTURE WAS ONE FUNCTION NAME (2w4).** No boot.
 `dl_pred`'s only kernel clause was `eventMessage CONTAINS "checkGPUProgress"`
 - a literal - so **every other** IOAcceleratorFamily2 / AMDRadeonX6000 message
@@ -465,7 +489,7 @@ Offsets are from the accessors, not guessed: `machine+0x108` count
 `pipe+0x298` (`isActive`), `accel+0x378` machine (`find_vram_descriptor`).
 **So the defect is in NONE of our replies** - not AGDC, not the plane count,
 not gamma, not a capability type. It is one enable bit.
-**NEXT IS A READ, build `D8B1115C`**: `-rbgpuaccelprobe` schedules three
+**NEXT IS A READ, build `D69D9B33`** (2w5 moved its call site): `-rbgpuaccelprobe` schedules three
 read-only samples (25/45/75 s) that find the accelerator by class, check
 `getClassSize()` before touching an offset (rule 19, and refuse loudly),
 and publish `ax<i>_gate` (0 all open, 1 accel not enabled, 2 defer,
