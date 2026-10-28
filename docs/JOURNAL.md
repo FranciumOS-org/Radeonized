@@ -44158,3 +44158,43 @@ if the handler fires promptly and only the wait is late, the defect is in the
 **wait primitive**; if both are late by 172 ms, it is the **notification** and
 the interrupt path is where to look. The machine is usable and the
 framebuffer is out of the picture, so this costs one command and no risk.
+
+## 2wr — it is the NOTIFICATION, not the wait, and it is not our instrument
+
+Same boot 198, same usable desktop, no framebuffer. `--bench` now times the
+completion **handler** against the **wait** from one commit, because they are
+two different ways to learn the same fact and only timing both separates them.
+
+    SERIAL median: wall 173.805 ms   gpu 0.014 ms
+    HANDLER median:    173.796 ms    (wait - handler = 0.009 ms)
+    VERDICT: handler and wait are late TOGETHER -> notification
+    PIPELINED: 25 buffers in 0.176 s -> 141.9 buffers/s
+
+**Nine microseconds apart.** `addCompletedHandler` fires at the same instant
+`waitUntilCompleted` returns, 173 ms after a commit whose GPU work took 14
+microseconds. So **`waitUntilCompleted` is not the problem** - the wait
+primitive returns the moment it is told. The driver is not told for 173 ms.
+
+**Reproducible**: 172.557 ms (n=40) and 173.805 ms (n=25), two runs.
+
+**RULE 16 CHECKED AND CLEARED, explicitly, because the suspect was ours.**
+`-rbgpustampwait` is in boot-args and it routes `AMDHWChannel::waitForHwStamp`
+to `rbgpu_bounded_stamp_wait_2en` - our own polling loop. Two reasons it is
+not this number: its poll is **100 us per iteration**, so it would return
+within 100 us of the stamp landing and could not manufacture 173 ms; and the
+live diag table carries **no `bwait_*` key at all** this boot
+(`bwait_iters`, `bwait_raw`, `bwait_disabled`, `bwait_vt_bad` all absent),
+so the bounded wait was **never reached**. The hook is not in the Metal
+completion path. Said out loud because when a measurement and one of our own
+features are both in frame, the feature is the first suspect, not the last.
+
+**WHAT THIS LEAVES.** Something must tell the driver a command buffer
+finished. It is told 173 ms late, uniformly, independent of how much work the
+buffer did, while the chip finishes in microseconds and 25 buffers' worth of
+notifications arrive together in one 176 ms window. **The completion signal
+is the defect** - interrupt, event, or whatever stands in for it here - and
+nothing else in the chain is slow.
+
+**AND 144 Hz IS NOT BLOCKED BY SPEED.** A 144 Hz frame is 6.9 ms. The
+pipelined path already retires a buffer every 4.5 ms. Nothing has to get
+faster; the per-completion wait has to stop happening.

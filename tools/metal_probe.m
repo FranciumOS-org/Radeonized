@@ -135,6 +135,13 @@ static int bench_on(id<MTLDevice> dev, int iters) {
     /* The dispatch is deliberately TINY - 4096 threads of three arithmetic
      * ops. Anything the chip takes longer than microseconds on is overhead,
      * which is the whole point: this measures latency, not throughput. */
+    /* 2wr: the discriminator. The completion HANDLER and the WAIT are two
+     * different ways to learn the same fact, so timing both from the same
+     * commit separates "the notification is late" from "the wait primitive is
+     * late". If the handler fires in microseconds and only waitUntilCompleted
+     * returns at 172 ms, the defect is the wait; if both are late together,
+     * it is the notification and the interrupt path is where to look. */
+    double *hand = calloc(iters, sizeof(double));
     double *wall = calloc(iters, sizeof(double));
     double *gpu  = calloc(iters, sizeof(double));
     double *drv  = calloc(iters, sizeof(double));
@@ -150,18 +157,25 @@ static int bench_on(id<MTLDevice> dev, int iters) {
         [enc dispatchThreads:MTLSizeMake(N, 1, 1)
        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];
+        __block double tHandler = 0;
         double t0 = now_s();
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+            (void)b;
+            tHandler = now_s();
+        }];
         [cb commit];
         [cb waitUntilCompleted];
         wall[i] = now_s() - t0;
+        hand[i] = tHandler > 0 ? tHandler - t0 : -1.0;
         gpu[i]  = cb.GPUEndTime    - cb.GPUStartTime;
         drv[i]  = cb.kernelEndTime - cb.kernelStartTime;
         if (cb.error) {
             printf("  iter %d ERROR: %s\n", i, cb.error.description.UTF8String);
         }
         /* Flushed every iteration so a hang keeps what already ran. */
-        printf("    %3d  wall %9.3f ms   gpu %9.3f ms   driver %9.3f ms\n",
-               i, wall[i] * 1e3, gpu[i] * 1e3, drv[i] * 1e3);
+        printf("    %3d  wall %9.3f ms   handler %9.3f ms   gpu %9.3f ms   "
+               "driver %9.3f ms\n",
+               i, wall[i] * 1e3, hand[i] * 1e3, gpu[i] * 1e3, drv[i] * 1e3);
         fflush(stdout);
     }
 
@@ -176,6 +190,22 @@ static int bench_on(id<MTLDevice> dev, int iters) {
     printf("  SERIAL median: wall %.3f ms  gpu %.3f ms  -> %.1f buffers/s\n",
            medw * 1e3, medg * 1e3, medw > 0 ? 1.0 / medw : 0.0);
     printf("  SERIAL range : wall %.3f .. %.3f ms\n", sw[0] * 1e3, sw[iters - 1] * 1e3);
+    {
+        double *sh = malloc(iters * sizeof(double));
+        if (sh) {
+            memcpy(sh, hand, iters * sizeof(double));
+            qsort(sh, iters, sizeof(double), cmp_d);
+            double medh = sh[iters / 2];
+            printf("  HANDLER median: %.3f ms   (wait - handler = %.3f ms)\n",
+                   medh * 1e3, (medw - medh) * 1e3);
+            printf("  VERDICT: %s\n",
+                   medh < 0 ? "no handler fired - inconclusive" :
+                   (medh < medw / 10.0)
+                       ? "handler is PROMPT, the WAIT is late -> wait primitive"
+                       : "handler and wait are late TOGETHER -> notification");
+            free(sh);
+        }
+    }
     if (medg > 0) {
         printf("  OVERHEAD RATIO: wall / gpu = %.1fx\n", medw / medg);
     }
@@ -214,7 +244,7 @@ static int bench_on(id<MTLDevice> dev, int iters) {
         if (p[i] != i * 3u + 7u) { bad++; }
     }
     printf("  verify: %s (%d of %d wrong)\n", bad ? "FAIL" : "PASS", bad, N);
-    free(wall); free(gpu); free(drv); free(sw); free(sg);
+    free(hand); free(wall); free(gpu); free(drv); free(sw); free(sg);
     return bad ? 1 : 0;
 }
 
