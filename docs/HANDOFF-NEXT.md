@@ -1,6 +1,6 @@
 # HANDOFF-NEXT — the live handoff
 
-Last updated **2026-10-27**, after milestone **2w4** (boot 185, re-read).
+Last updated **2026-10-27**, after milestone **2w5** (boot 186).
 Read this first, then `docs/RULES.md`'s rules, then grep `docs/JOURNAL.md` by tag.
 
 ---
@@ -87,9 +87,15 @@ returns the retained aperture, so the suspect is the **map**, or
 - **The transactions-off route** — there isn't one (2s3).
 - **Page flipping** — never called in a whole boot (2pf).
 
-## 4. The next experiment: ONE armed boot, build `D8B1115C`
+## 4. The next experiment: ONE armed boot, build `D69D9B33`
 
-A read, not a change. `-rbgpuaccelprobe` schedules three read-only samples at
+A read, not a change. **Boot 186 already tried it and the probe never ran** —
+2w3 had put its call next to `rbgpu_heartbeat_start()`, which sits behind
+`-rbgpubeat` (absent since 2fg), so build `D8B1115C` produced not one `ax*`
+key. The call now lives in the peer's `start()` and is gated only by its own
+arg (2w5, build `D69D9B33`). The boot-arg is already in `config.plist`.
+
+`-rbgpuaccelprobe` schedules three read-only samples at
 25 / 45 / 75 s that find the accelerator by class, verify
 `getMetaClass()->getClassSize()` covers the offset before touching it
 (rule 19 — and refuse, publishing what was refused), and publish:
@@ -107,13 +113,8 @@ The numeric keys are first in `kRbgpuNvramHotKeys` because the boot wedges.
 
 ### Arm it (the user runs these; the assistant never does)
 
-Add the boot-arg once:
-
-```bash
-sudo tools/efi.sh bootarg add -rbgpuaccelprobe
-```
-
-Then, for the boot itself — **all four one-shots** (rule 34):
+The boot-arg is already in `config.plist` (boot 186 had it). For the boot
+itself — **all four one-shots** (rule 34):
 
 ```bash
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
@@ -132,16 +133,19 @@ sudo tools/plugin_check.sh
 
 ### Reading it
 
-1. `rbgpu-boot` must be **186** (rule 8).
+1. `rbgpu-boot` must be **187** (rule 8).
 2. `agdc_oneshot`, `iop_oneshot` must be **0**, not 2 (rule 34).
+2b. **`ax_say` must exist at all** — if it is absent the probe did not run
+    again and nothing else in step 4 means anything (2w5).
 3. `diag_used` vs `diag_max` (rule 14).
 4. `ax0_gate` / `ax2_gate`. If **1**, read `ax0_vram`: zero means
    `getVRAMRange()`'s descriptor never survived its map, and the fix is in
    `src/fbkext/RBAMDFramebuffer.cpp`; non-zero means `display_mode_did_change`
    never reached the enable for the other reason (`this->0x10c` nesting or
    `vt[0x870]`).
-5. `display-log.txt` must still show non-zero `[INFO]` lines (rule 36 — the
-   summary prints a WARNING if it does not).
+5. `display-log.txt` must still show non-zero `[INFO]` **and** non-zero
+   kernel lines, with `display_change_handler` non-zero as the kernel-half
+   control (rule 36 — the summary prints a WARNING for either).
 
 ## 4b. The wedge is named (2w4) — a SECOND, separate defect
 
