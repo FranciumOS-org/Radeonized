@@ -208,6 +208,10 @@ bool RBAMDFramebuffer::start(IOService *provider)
     amtrPtr = 0;
     amtrRefused = 0;
     bzero(amtrSnap, sizeof(amtrSnap));
+    amtrFlipSnapped = false;
+    amtrFlipPtr = 0;
+    amtrFlipRefused = 0;
+    bzero(amtrFlipSnap, sizeof(amtrFlipSnap));
     {
         char amtrflag[16];
         amtrArmed = PE_parse_boot_argn("-rbgpufbamtr", amtrflag, sizeof(amtrflag));
@@ -857,6 +861,22 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
                 amtrSnapped = true;
             } else {
                 amtrRefused = (uint64_t)value;
+            }
+        }
+        /* 2wf: follow txn->0x10 to the _AMD_PIPE_FLIP and take the whole
+         * 0x220 bytes. Separate flag from amtrSnapped so the two failures are
+         * distinguishable: a header we could read with a plane state we could
+         * not is a different fact from never being called. The flag word's bit
+         * 0x1 is what makes txn->0x10 valid, and boot 193 measured it SET
+         * (0x75), so a null here would itself be a result. */
+        if (!amtrFlipSnapped && value >= 0xffffff8000000000ULL) {
+            uint64_t ps = ((const uint64_t *)value)[2];   /* txn->0x10 */
+            if (ps >= 0xffffff8000000000ULL) {
+                memcpy(amtrFlipSnap, (const void *)ps, sizeof(amtrFlipSnap));
+                amtrFlipPtr = ps;
+                amtrFlipSnapped = true;
+            } else {
+                amtrFlipRefused = ps;
             }
         }
         return kIOReturnSuccess;

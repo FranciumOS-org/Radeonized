@@ -42853,3 +42853,183 @@ needed.**
 Then, separately and on its own risk: the first write this kext has ever made
 to the display engine. And the wedge, which is now the only other defect left
 and is independent of all of this.
+
+---
+
+## 2wf — the transaction is read end to end, and the surface address is already in it (static, no boot)
+
+Static read only. `handleDisplayPipeTransaction` (`AMDFramebuffer` `0x2b4df0`)
+against boot 193's `RBFBAmtrSnap`, as 2we's handoff named. The function is
+compiled **unoptimized** — every local spilled to the frame — so unlike
+`executeTransaction` it reads almost like source.
+
+### The transaction struct is confirmed from the consumer side
+
+`SUPPORTED_TRANSACTIONS` is a file-static at `0x2bec98`, 8 bytes, value
+**`0x7d`**. The function's first act after its gates is
+
+    flags = txn->0x00 & 0x7d;
+    queueDisplayPipeTransactions(flags);
+    if (this->0xe80) finishDeferredDisplayPipeTransaction();
+
+and then one block per bit, highest first, each of the shape
+
+    if (this->0x1198 & bit) { log; dequeueDisplayPipeTransactions(bit); }
+    else if (flags & bit)   { ...handle... }
+
+Boot 193 measured the flag word **`0x75`**. `0x75 & ~0x7d == 0`: **every bit
+our transaction carries is a bit AMD supports.** Bit `0x2` (plane gamma) is the
+one bit *not* in `0x7d`, and it is clear in `0x75` anyway. If any unsupported
+bit were set the function logs a complaint against the `0x7d` literal at
+`0x2b584f` — a line to grep for later.
+
+Each handler dereferences exactly the pointer 2we's snapshot recorded, which
+makes this an independent confirmation of that field map from the other side:
+
+| bit | field | what the consumer does with it |
+|---|---|---|
+| 0x40 | `txn->0x40` | reads `+0x18` u16, compares to `0x10`, writes 0/1 to `this->0x1180` |
+| 0x20 | `txn->0x38` | **`setGammaTable(_AMD_PIPE_GAMMA_TABLE *)`** (`0x2a5100`) |
+| 0x10 | `txn->0x30` | `memcpy(this + 0x1130, p, 0x30)`; `this->0xd48 = this + 0x1130` |
+| 0x4  | `txn->0x20` | floats at `+0x8`, against `this->0x1168/0x116c` |
+| 0x1  | `txn->0x10` | the plane state — below |
+
+NULL in any of them is `kIOReturnBadArgument` (`0xe00002c2`). `txn->0x08` is a
+u32 **transaction ID**: the tail calls
+`processDisplayPipeTransaction(txn->0x8, false)` with it. The four gates above
+all of it are AMDFramebuffer's own state — `this->0x908` NULL and
+`(this->0x820 >> 1) & 1` clear give **`kIOReturnOffline`** (`0x2d7`), a call on
+`this->0xdd8` and `this->0xe00` give **`kIOReturnNotPermitted`** (`0x2e2`).
+
+### The plane state is an `_AMD_PIPE_FLIP`, 0x220 bytes, and it is `txn->0x10`
+
+    ps = txn->0x10;                         /* = pipe + 0x36b0 */
+    if (!ps) return kIOReturnBadArgument;
+    if (this->0xdf0 && enabled(this->0xdf0))
+        switch (query(this->0xdf0, *(uint16_t *)(ps + 0x6))) {
+        case 1: hw->vt[0xb58](fbIdx, 0); break;
+        case 2: hw->vt[0xb58](fbIdx, 1); break;
+        }
+    memcpy(this + 0xf10, ps, 0x220);
+    this->0xd40 = this + 0xf18;
+    r = saveFlipTransactionPixelFormat(*(uint32_t *)ps);
+
+**Three independent agreements on the size 0x220**, which is what makes it a
+measurement rather than a guess:
+
+1. the `memcpy` length here, in `AMDFramebuffer`;
+2. `pipe + 0x36b0 + 0x220 == 0x38d0`, and `pipe+0x38d0` is the next pointer
+   boot 193's snapshot already carries (`+0x40`, pre-CSC linearization) — field
+   adjacency in a third kext's object;
+3. `bzero(flip + 5, 0x21b)` at `0xbe88430` inside the **writer**: 5 + 0x21b =
+   0x220 exactly.
+
+The producer is `executeTransaction` at `0xbe49cf6`–`0xbe49dd2`:
+
+    res  = getPlaneResource(txn, 0, 0);      /* 0x14e62430 */
+    surf = getPlaneIOSurface(txn, 0, 0);     /* 0x14e5f936 */
+    if (!res) return kIOReturnBadArgument;
+    r9 = isSubmit ? pipe + 0x36b0 : NULL;    /* the out-parameter */
+    r11 = isSubmit ? NULL : &scratch;        /* memcpy of pipe+0x3948, 0x220 */
+    ok = pipe->0x330->vt[0x198](fbIdx, res, 0, mode, isSubmit, 0xff, r11);
+    if (!ok) return kIOReturnError;          /* 0x2bc */
+    txn->0x10 = pipe + 0x36b0;
+    planeState->0x6 = (uint16_t) ...;
+
+`pipe->0x330` is the **AMDHWDisplay** — the same object whose `vt[0x190]`
+(dump `0x1a0`) is 2wc's `'amtr'` gate — so `vt[0x198]` is dump **`0x1a8`**, one
+slot along, with 2wc's accessor and `isDisplayEnabled`/`isDisplayControlEnabled`
+as controls on the table alignment. It resolves to
+
+**`AMDRadeonX6000_AMDHWDisplay::getDisplayPipeTransactionFlip(unsigned int,
+IOAccelResource2 *, IOAccelResource2 *, _eAMDSwapInterval, _AMD_PIPE_FLIP *,
+bool, …PipeRotation, _AMD_PIPE_FLIP *)`** (`0xbe88392`).
+
+The signature matches the call register for register, including the two
+`_AMD_PIPE_FLIP *` out-parameters that the call site fills **one or the other
+of, never both** — `r9` on the submit arm, the last stack argument on the
+validate arm. So the plane state at `txn->0x10` *is* an `_AMD_PIPE_FLIP`, and
+`flip->0x00` is the u32 format (`0/6/7/8/9` at `0xbe887cb`–`0xbe88807`),
+`flip->0x04` the rotation byte, `flip->0x06` the u16 the caller fills after.
+
+**2pf's "never called once in a whole boot" is not refuted and not relied
+on.** It was measured when no transaction had ever executed — 2s9 through 2wd
+all recorded that — so it says nothing about a boot in which `setAttribute`
+ran 13 times. It is simply not evidence either way now.
+
+### The address is computed by a leaf helper, and it is a GPU VA
+
+`0xbe88846`, called on each `IOAccelResource2` (primary → `-0x80(%rbp)`,
+secondary → `-0x60(%rbp)`):
+
+    mem = res->0x88;  if (!mem) return 0;
+    base = mem->vt[0x158](0, 0);
+    k = (uint8_t)res->0x14;
+    off = (k == 0 || k == 0x80) ? res->0xf8        /* u64 */
+        : (k == 0x82)           ? (uint32_t)res->0xfc
+        :                         0;
+    return base + off;
+
+So what lands in the flip is a **GPU virtual address**, not a VRAM byte offset
+— which is a different kind of number from `ATY,fb_offset` (2w9), and worth
+holding separate. Both addresses are then passed as `%rcx` and `%r8` to a
+further `vt[0x230]` on a third object, three times over three branches, and
+*that* is what stores them into the flip.
+
+### Where this stops, deliberately
+
+**The chain is NOT followed to the store offset.** Three more vtable layers in
+three more classes separate the helper from it, and this project has now
+attached a correct static chain one link off **seven** times (rule 33), with
+2v9 spending five correct layers on the one link that was fine (rule 35). The
+one address store seen directly is `flip->0x58` at `0xbe885a4`, on a branch
+whose base also comes from a `vt[0x158]` call — a *candidate*, not a result.
+
+It does not need to be derived, because **Apple has already filled the struct
+before we are called.** `setAttribute('amtr', &pipe->0x410)` happens after
+`getDisplayPipeTransactionFlip` has returned, so the real addresses are
+sitting in memory we already hold a pointer to. Measuring beats deriving
+(rule 17).
+
+### And the AMDFramebuffer path could never have worked here anyway
+
+A new and independent confirmation of 2sj. The last thing
+`processDisplayPipeTransaction` does with the plane state is
+
+    hw = this->0xdd8;
+    hw->vt[0x8c0](this->0xd40);      /* 0x2b480e-0x2b481f */
+    this->0xd40 = 0;
+
+Rule 7: call `0x8c0` → dump `0x8d0` in `__ZTV13ATIController`, which is
+**`0x975800`** — a filler shared by **122** slots of that vtable, i.e. the
+pure-virtual stub. `ATIController` does not implement the plane-state program;
+a subclass does, and the journal already recorded (line 34452) that no
+controller personality matches `0x1681`, so none instantiates here. **Even
+Apple's own `AMDFramebuffer` could not have completed this flip on this
+machine.** The register write was always going to be ours; that is not a
+consequence of having replaced the framebuffer.
+
+### Build `A454F066`, no new boot-arg
+
+`-rbgpufbamtr` now also follows `txn->0x10` and takes the whole `0x220` bytes.
+`amtrFlipSnapped` is a **separate** flag from `amtrSnapped` so "header read,
+plane state not" is distinguishable from "never called"; `RBFBAmtrFlipRefused`
+publishes a pointer refused (rule 19, same kernel floor). Published:
+`RBFBAmtrFlipSnapped/Ptr/Refused/Snap`, plus `RBFBAmtrFlipFmt` (+0x00),
+`RBFBAmtrFlipRot` (+0x04) and `RBFBAmtrFlipA58` (+0x58) as named keys — the
+three fields the static read **predicts**, so the boot tests that read instead
+of assuming it.
+
+**Said before the boot.** Bit `0x1` is SET in `0x75`, so `txn->0x10` is valid
+and `RBFBAmtrFlipSnapped` must be **true**; false, or a non-zero
+`RBFBAmtrFlipRefused`, would mean the flag word and the pointer disagree and
+2we's decode is wrong somewhere. `RBFBAmtrFlipFmt` should be one of
+`0/6/7/8/9` and `RBFBAmtrFlipRot` small. If `RBFBAmtrFlipA58` holds a
+plausible GPU VA, the static read landed; if it is zero, the blob says where
+the address actually is and nothing is lost — which is the whole reason the
+blob is published beside the three fields. **The picture stays wrong either
+way**: nothing is written to the display engine in this build.
+
+Plugin stays **`0D1F953A`**, already installed in the EFI and proven by boot
+193 — no plugin rebuild, no `efi.sh install`. Only the framebuffer kext
+changed, so rule 15's install for this boot is the **auxiliary collection**.

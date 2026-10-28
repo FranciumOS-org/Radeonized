@@ -52,6 +52,11 @@ public:
     uint64_t amtrPtr=0;
     uint64_t amtrRefused=0;
     uint8_t amtrSnap[kAmtrSnapBytes]{};
+    static const unsigned kAmtrFlipBytes=0x220;
+    bool amtrFlipSnapped=false;
+    uint64_t amtrFlipPtr=0;
+    uint64_t amtrFlipRefused=0;
+    uint8_t amtrFlipSnap[kAmtrFlipBytes]{};
     // 2t0: the host substitute counts NVRAM writes instead of performing
     // them, which is what makes "bounded by construction" an assertion
     // rather than a claim in a comment.
