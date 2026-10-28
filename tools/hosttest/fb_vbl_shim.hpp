@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <vector>
 
 using UInt32=uint32_t;
 using UInt64=uint64_t;
@@ -42,6 +43,15 @@ public:
     bool vblRunning=false;
     uint64_t vblFires=0;
     uint32_t vblEnables=0;
+    // 2wc: the 'amtr' counters publishVBLState also reports.
+    static const unsigned kAmtrSnapBytes=0x80;
+    bool amtrArmed=false;
+    bool amtrSnapped=false;
+    uint64_t amtrGets=0;
+    uint64_t amtrSets=0;
+    uint64_t amtrPtr=0;
+    uint64_t amtrRefused=0;
+    uint8_t amtrSnap[kAmtrSnapBytes]{};
     // 2t0: the host substitute counts NVRAM writes instead of performing
     // them, which is what makes "bounded by construction" an assertion
     // rather than a claim in a comment.
@@ -55,6 +65,9 @@ public:
     std::map<std::string,uint64_t> properties;
     bool setProperty(const char *key,bool v) { properties[key]=v;return true; }
     bool setProperty(const char *key,uint64_t v,unsigned) { properties[key]=v;return true; }
+    std::map<std::string,std::vector<uint8_t>> blobs;
+    bool setProperty(const char *key,const void *b,unsigned n) {
+        const uint8_t *p=(const uint8_t *)b; blobs[key].assign(p,p+n); return true; }
     IOReturn registerForInterruptType(IOSelect,IOFBInterruptProc,OSObject *,void *,void **);
     IOReturn unregisterInterrupt(void *);
     IOReturn setInterruptState(void *,UInt32);

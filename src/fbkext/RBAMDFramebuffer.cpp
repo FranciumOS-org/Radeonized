@@ -197,6 +197,22 @@ bool RBAMDFramebuffer::start(IOService *provider)
     vblFires = 0;
     vblEnables = 0;
 
+    /* 2wc: 'amtr'. Armed with -rbgpufbamtr; the flag is published
+     * UNCONDITIONALLY a few lines below, because rule 15's cheapest
+     * independent check that the new binary is the one running is a key the
+     * new code publishes whatever the boot-args say. */
+    amtrArmed = false;
+    amtrSnapped = false;
+    amtrGets = 0;
+    amtrSets = 0;
+    amtrPtr = 0;
+    amtrRefused = 0;
+    bzero(amtrSnap, sizeof(amtrSnap));
+    {
+        char amtrflag[16];
+        amtrArmed = PE_parse_boot_argn("-rbgpufbamtr", amtrflag, sizeof(amtrflag));
+    }
+
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
      * is also called from the VBL thread_call and fromPath there would be a
      * registry walk per milestone. A failure is reported, not fatal - rule 14,
@@ -369,6 +385,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
         char atyflag[16];
         bool atyOn = PE_parse_boot_argn("-rbgpufbaty", atyflag, sizeof(atyflag));
         setProperty("RBFBAtyArmed", atyOn);
+        setProperty("RBFBAmtrArmed", amtrArmed);
         if (atyOn) {
             UInt32 mb = kAtyOffsetDefaultMB;
             int want = 0;
@@ -717,6 +734,85 @@ IOReturn RBAMDFramebuffer::setAttributeForConnection(IOIndex connectIndex,
     }
 }
 
+/* 2wc: 'amtr' - the attribute Apple's accelerator uses to ask a framebuffer
+ * whether it can take display-pipe transactions, and then to hand one over.
+ * Read end to end, no boot:
+ *
+ *   IOAccelDisplayPipeTransaction2::set_transaction_args (0x14e5ea68) ends in
+ *       r = pipe->vt[0x8a0](txn)           call 0x8a0 -> dump 0x8b0 (rule 7)
+ *                                          = IOAccelDisplayPipe::validateTransaction
+ *       if (r) { log "%s returning error 0x%x for transaction(%d)"; return r; }
+ *   and that is the ONLY site in the function that can return an arbitrary
+ *   code - the other two returns are the literals 0xe00002c2 and 0xe00002bd.
+ *   The base validateTransaction is `xorl %eax,%eax; ret`; ours is
+ *   AMDRadeonX6000_AMDAccelDisplayPipe::validateTransaction (0xbe49a9e), a
+ *   kdebug-signposted wrapper (0x85ad2009/0x85ad200a) around
+ *       AMDRadeonX6000_AMDAccelDisplayPipe::executeTransaction(txn, false)
+ *   (0xbe49b54), whose FIRST test is
+ *       ok = pipe->0x330 /-* the AMDDCNDisplay *-/ ->vt[0x190](getFramebufferIndex())
+ *       if (!txn || !ok) return 0xe00002c2 + 5*(txn != NULL)
+ *   and `0xe00002c2 + 5` is 0xe00002c7 = kIOReturnUnsupported. The assembler
+ *   writes it as `leal (%rax,%rax,4), %r12d; addl $0xe00002c2, %r12d`, so a
+ *   grep for the constant finds the five literal sites and MISSES this one -
+ *   rule 26, and it is the sixth.
+ *
+ * Slot 0x190 (dump 0x1a0 in both __ZTV27AMDRadeonX6000_AMDHWDisplay and
+ * __ZTV28AMDRadeonX6000_AMDDCNDisplay; 0x258 = isDisplayControlEnabled is the
+ * control that fixes the table's alignment) is an unnamed accessor at
+ * 0xbec02ce:  return ((uint8_t *)this->0x40)[idx * 0xd0 + 1] & 1;
+ * i.e. bit 8 of the per-display dword at the head of a 0xd0-stride array that
+ * AMDHWDisplay::init IOMallocs as `count * 0xd0`. Its SOLE writer is
+ * AMDRadeonX6000_AMDHWDisplay::getDisplayInfo (0xbe8700e), the same function
+ * 2w9 traced for ATY,fb_offset, forty bytes further on:
+ *
+ *   0xbe87165  r = fb->vt[0xa30]('amtr', &out)     call 0xa30 -> dump 0xa40
+ *                                                 = IOFramebuffer::getAttribute
+ *   0xbe8717e  if (r == 0 || r == kIOReturnNotReady) dstate |=  0x100
+ *   0xbe8718b  else                                  dstate &= ~0x100
+ *
+ * ('wsaa' = 0x77736161 is the control: the line above does the same thing for
+ * kIOWindowServerActiveAttribute and bit 0x80.) So the bit is ours, and ours
+ * alone, and IOFramebuffer's base getAttribute answers an unknown selector
+ * with kIOReturnUnsupported - which is exactly 122 refused transactions.
+ *
+ * Why this and not the gamma ceiling: with dirtyBits 0x3c1 and options 0x801
+ * (boot 191's measured inputs) the other five kIOReturnUnsupported sites are
+ * each gated on a dirty bit. Three are clear (0x4, 0x20, 0x400), one needs
+ * dirtyBits == 0x100 exactly, and the live one - bit 0x80 - returns it only
+ * when `getPipePostGammaTable()->getTableCount() > 0x100`. Boot 190's capture
+ * counts the LLUT CoreDisplay actually submits: 71 dumps of 256 entries and 2
+ * of 1024. A ceiling that 2 submissions in 73 cross cannot produce 122
+ * failures out of 122; an unconditional first-line gate can, and does.
+ *
+ * What AMDFramebuffer does with the two selectors, so the shape of the answer
+ * is copied rather than guessed:
+ *
+ *   getAttribute('amtr', out)            0x2a6faa
+ *       if (!(ctrl->0x31332 >> 9 & 1)) return kIOReturnUnsupported;
+ *       if (getOutstandingDisplayPipeTransactions()) return kIOReturnNotReady;
+ *       return kIOReturnSuccess;         // *out is never written
+ *   setAttribute('amtr', value)          0x2a65a4
+ *       if (!value) return kIOReturnBadArgument;
+ *       if (!tryAcquireIOPGuard()) return kIOReturnNotReady;
+ *       r = handleDisplayPipeTransaction((_AMD_PIPE_TRANSACTION *)value);
+ *       releaseIOPGuardNotify();
+ *       return r;
+ *
+ * The `value` is `&pipe->0x410`, the transaction struct executeTransaction has
+ * just finished filling: the flag word at +0x00 (it ORs 0x1, 0x2, 0x4, 0x8,
+ * 0x10, 0x20, 0x40, 0x100 and 0x201 into it), the plane resource at +0x10, the
+ * destination rect at +0x18/+0x20, the colour matrix at +0x30, the gamma
+ * tables from +0x220 on. We do not program DCN yet, so this answers success
+ * and SNAPSHOTS the first struct we are given - that snapshot is the whole
+ * point of the boot, because it is the first time this project has seen a
+ * cooked transaction, and the surface address in it is what the scanout
+ * eventually has to be pointed at.
+ *
+ * Nothing in either handler allocates. They run on the accelerator's thread
+ * with its locks held; the VBL thread_call publishes the counters (rule 31).
+ */
+static const IOSelect kRBAttrAMDTransaction = 0x616d7472; /* 'amtr' */
+
 IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
 {
     switch (attribute) {
@@ -727,12 +823,43 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
             *value = 0;
         }
         return kIOReturnSuccess;
+    case kRBAttrAMDTransaction:
+        if (!amtrArmed) {
+            break;
+        }
+        amtrGets++;
+        /* AMDFramebuffer never writes *out on this selector, and the one
+         * consumer (getDisplayInfo) presets its local and ignores it. */
+        return kIOReturnSuccess;
     default:
-        return IOFramebuffer::getAttribute(attribute, value);
+        break;
     }
+    return IOFramebuffer::getAttribute(attribute, value);
 }
 
 IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
+    if (attribute == kRBAttrAMDTransaction && amtrArmed) {
+        amtrSets++;
+        if (value == 0) {
+            /* AMDFramebuffer's own answer to a null transaction. */
+            return kIOReturnBadArgument;
+        }
+        if (!amtrSnapped) {
+            /* Rule 19: the right floor for a kalloc'd object is the KERNEL
+             * base, not the kext one, and a refusal publishes what it refused.
+             * This pointer is &pipe->0x410 inside an IOAccelDisplayPipe, whose
+             * own fields run past 0x3b68, so 0x80 bytes from it are inside the
+             * object by a wide margin. */
+            if (value >= 0xffffff8000000000ULL) {
+                memcpy(amtrSnap, (const void *)value, sizeof(amtrSnap));
+                amtrPtr = (uint64_t)value;
+                amtrSnapped = true;
+            } else {
+                amtrRefused = (uint64_t)value;
+            }
+        }
+        return kIOReturnSuccess;
+    }
     return IOFramebuffer::setAttribute(attribute, value);
 }
