@@ -24,7 +24,7 @@ never captured.
 
 ## The build
 
-**fbkext `A356BE21`** — instrumentation only, no behaviour change.
+**fbkext `7A6A56A9`** — 2wl's instrumentation plus 2wm's one experiment.
 
 - The crumb is **periodic**: 100, 1000, then every 10000 fires (~70 s), with
   `s=` the sample index (12 at 70 s, 29 at twenty minutes). The last crumb in
@@ -34,6 +34,12 @@ never captured.
   saw. A total over a boot length cannot tell a burst from a trickle.
 - `n=` — transactions whose flag word has bit `0x1` clear, the ones 2wh skips.
 - `K=`/`D=` — the 2wk retire kick and its delivery.
+- **`-rbgpufbflipall` (2wm)** — drops the flag-word bit `0x1` gate so a content
+  update into an unchanged surface is written too. Your adding-vs-deleting
+  asymmetry is exactly what being handed such transactions and refusing them
+  would look like: adding a character forces a new surface, deleting reuses
+  the one already allocated. Off unless the arg is in boot-args, and `n=`
+  says in the same boot whether it had anything to do.
 
 Plugin `0D1F953A` is unchanged; **do not rebuild or reinstall the EFI.**
 
@@ -52,8 +58,12 @@ sudo tools/fbload.sh
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 ```
 
-3. Boot-args are already correct and must stay as they are:
-   `-rbgpufbaty -rbgpufbamtr -rbgpufbhubp -rbgpufbretire`.
+3. Boot-args: keep `-rbgpufbaty -rbgpufbamtr -rbgpufbhubp -rbgpufbretire` and
+   **add one**:
+
+```bash
+sudo tools/efi.sh bootarg add -rbgpufbflipall
+```
 
 4. Reboot, let it come up, **then type**: a Terminal window is usable, because
    typing is the one interaction that updates the screen smoothly. Run the
@@ -83,8 +93,12 @@ sudo tools/plugin_check.sh
    WindowServer compose. **1 or 2** → the typing smoothness did not come
    through our HUBP write, and 2wi's "nothing but the HUBP write can change
    what the panel shows" must be re-examined before anything is built on it.
-4. `n=` — non-zero means we are handed content updates and refuse to write
-   them. That is ours and immediate.
+4. `n=` — the 2wm discriminator, and the arg and the counter are independent,
+   which is what lets one boot settle it. **0** → no bit-clear transaction
+   ever arrived, `-rbgpufbflipall` is provably inert and the line is closed.
+   **Large with the rate up** → that was it. **Large with the rate
+   unchanged** → we were dropping frames, drawing them changes nothing, and
+   bit `0x1` was right all along.
 5. `K=`/`D=` — the retire kick. With a capture, read `RBFBVBL1Fires` beside
    them: fires still 0 with `D=` > 0 means our delivery reaches the slot and
    Apple does nothing with it.

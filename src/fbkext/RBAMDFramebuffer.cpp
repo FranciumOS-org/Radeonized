@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* RBAMDFramebuffer: see RBAMDFramebuffer.hpp. */
 #include "RBAMDFramebuffer.hpp"
+#include "rb_hubp.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
@@ -259,6 +260,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * first boot; 0 or absent means unlimited, which is what a live display
      * needs. */
     hubpArmed = false;
+    hubpAll = false;
     hubpMax = 0;
     hubpRejectAddr = 0;
     hubpRejectWhy = 0;
@@ -266,6 +268,13 @@ bool RBAMDFramebuffer::start(IOService *provider)
         char hubpflag[16];
         hubpArmed = PE_parse_boot_argn("-rbgpufbhubp", hubpflag, sizeof(hubpflag))
                     && amtrArmed;
+        /* 2wm: rule 30 - NOT -rbgpufbhubpall, because `-rbgpufbhubp` would
+         * prefix it and a shell grep for the existing arg would then match
+         * the new one. -rbgpufbflipall neither prefixes nor is prefixed by
+         * any token already in use. */
+        char allflag[16];
+        hubpAll = PE_parse_boot_argn("-rbgpufbflipall", allflag, sizeof(allflag))
+                  && hubpArmed;
         int maxn = 0;
         if (PE_parse_boot_argn("rbgpufbhubpmax", &maxn, sizeof(maxn)) &&
             maxn > 0 && maxn <= 1000000) {
@@ -1034,7 +1043,8 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
              * colour matrix. */
             const uint64_t flags = ((const uint64_t *)value)[0];
             const uint64_t ps    = ((const uint64_t *)value)[2];  /* txn->0x10 */
-            if ((flags & 0x1) && ps >= 0xffffff8000000000ULL) {
+            if (rb_hubp_should_write(flags, hubpAll ? 1 : 0) &&
+                ps >= 0xffffff8000000000ULL) {
                 hubpProgram(((const uint64_t *)ps)[1]);           /* flip +0x08 */
             }
         }

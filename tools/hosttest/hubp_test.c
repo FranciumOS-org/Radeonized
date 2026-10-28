@@ -111,8 +111,28 @@ int hubp_tests(void)
     A(RB_HUBP_OK == 0);
     A(RB_HUBP_REFUSE_INDEX != RB_HUBP_OK && RB_HUBP_REFUSE_FRAME != RB_HUBP_OK);
 
+    /* 8. 2wm: the write gate. The measured flag word is 0x75 (2we), which
+     * carries bit 0x1, so the gated form must accept it - a regression here
+     * would silently stop the display that 2wi got working. */
+    A(rb_hubp_should_write(0x75, 0) == 1);
+    A(rb_hubp_should_write(0x75, 1) == 1);
+    /* A colour-matrix-only transaction (bit 0x10, bit 0x1 clear) is exactly
+     * the case 2wh refuses and -rbgpufbflipall deliberately accepts. The two
+     * must DIFFER, or the boot-arg cannot answer anything. */
+    A(rb_hubp_should_write(0x10, 0) == 0);
+    A(rb_hubp_should_write(0x10, 1) == 1);
+    /* An empty flag word is still refused when gated, still written when not:
+     * the override is the caller's choice, not a function of the flags. */
+    A(rb_hubp_should_write(0, 0) == 0);
+    A(rb_hubp_should_write(0, 1) == 1);
+    /* And the gate reads bit 0x1 ONLY - not "any bit set", which would accept
+     * 0x10 and make the whole experiment a no-op. */
+    A(rb_hubp_should_write(RB_HUBP_FLAG_PLANE, 0) == 1);
+    A(RB_HUBP_FLAG_PLANE == 0x1ull);
+
 #undef A
-    printf("hubp: offsets cross-checked against rb_regs.h, pipe-state and "
-           "address guards%s\n", bad ? " FAILED" : ": passed");
+    printf("hubp: offsets cross-checked against rb_regs.h, pipe-state, "
+           "address guards and the 2wm write gate%s\n",
+           bad ? " FAILED" : ": passed");
     return bad;
 }

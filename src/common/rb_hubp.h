@@ -144,4 +144,35 @@ static inline int rb_hubp_check_addr(uint64_t mc, uint32_t orig_hi, uint64_t fra
     return RB_HUBP_OK;
 }
 
+/* 2wm: WHICH transactions get a write.
+ *
+ * Bit 0x1 of the transaction's flag word is "the plane resource changed",
+ * and 2wf read AMDFramebuffer's own consumer making exactly this test before
+ * it dereferences txn->0x10. So 2wh gated the write on it: without it, a
+ * transaction that only changed the colour matrix would re-write a stale
+ * address from a stale pointer.
+ *
+ * But boot 196 showed the panel updating smoothly while the user TYPED and
+ * not otherwise, and adding characters counting while deleting them did not.
+ * Adding a character grows a text layer and so forces a NEW surface; deleting
+ * reuses the one already allocated. If a content update into an unchanged
+ * surface arrives as a transaction with bit 0x1 clear, we are being handed
+ * frames and refusing to draw them, and that asymmetry is exactly what it
+ * would look like.
+ *
+ * `all` is -rbgpufbflipall and drops the gate. It is NOT obviously safe to
+ * leave on: writing on a bit-clear transaction means trusting txn->0x10 to
+ * still point at a valid _AMD_PIPE_FLIP, which is the thing bit 0x1 is the
+ * consumer's own evidence for. The caller still range-checks the pointer and
+ * every address still passes rb_hubp_check_addr, so the failure mode is a
+ * refused write, not a wild one. It is an experiment with its own boot-arg,
+ * and `RBFBAmtrNoFlip` says in the same boot whether it had anything to do. */
+#define RB_HUBP_FLAG_PLANE 0x1ull
+
+static inline int rb_hubp_should_write(uint64_t flags, int all)
+{
+    if (all) { return 1; }
+    return (flags & RB_HUBP_FLAG_PLANE) ? 1 : 0;
+}
+
 #endif /* RB_HUBP_H */
