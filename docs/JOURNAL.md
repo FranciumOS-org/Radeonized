@@ -43860,3 +43860,101 @@ is what makes one boot settle it:
 **Build `7A6A56A9`** (2wl's `A356BE21` plus this). Plugin `0D1F953A`
 unchanged in the EFI. Boot-args add **`-rbgpufbflipall`** and keep everything
 else.
+
+## 2wn — boot 197: the retire kick WORKS, the display chain is clean, and the limiter is STAMP RETIREMENT at 2/s
+
+Armed, captured, 21 files. Rule 15 on both: plugin **`0D1F953A`**, fbkext
+**`7A6A56A9`**. `rbgpu-boot` **197**, boot-args carry
+`-rbgpufbaty -rbgpufbamtr -rbgpufbhubp -rbgpufbretire -rbgpufbflipall`.
+Crumb: `b=196 s=15 f=40000 e=82 r=1 h=0 w=41 k=0 t=41 p=11 n=0 K=80 D=79`.
+2wl's periodic crumb worked - `s=15` is the fourth 10000-fire sample, where
+boot 196 stopped at `s=12`.
+
+**2wk's KICK WORKS, AND APPLE'S HANDLER FIRES FOR THE FIRST TIME.**
+
+    RBFBRetireKicks     80      RBFBRetireDelivered  79
+    RBFBRetireEnables    0      RBFBVBL1Fires        79   (was 0 for four milestones)
+    RBFBVBLEnables      82      (boot 196: 11)
+
+So the off->on transition is the right trigger, the kick lands 79 times in 80,
+and `retireKicks - retireDelivered == 1` is exactly one closed window - the
+measurement 2wk owed. **`RBFBRetireEnables 0` confirms 2wk's diagnosis of the
+2wi mechanism**: Apple's slot was already enabled at `setAttribute` time, so
+the old `!enabled` guard could never fire. Boot 191 saw handler 1 fire once,
+ever; this boot it fired 79 times.
+
+**2wm IS CLOSED BY ITS OWN INSTRUMENT, AND THE HYPOTHESIS IS REFUTED.**
+`RBFBHubpAll True` (the arg was armed) and **`RBFBAmtrNoFlip 0`** with
+`AmtrSets 41` and `HubpWrites 41`. **Every transaction carried flag bit
+`0x1`; not one bit-clear transaction arrived all boot.** So
+`-rbgpufbflipall` was provably inert, we were never dropping frames, and the
+adding-vs-deleting asymmetry is **not** explained by our write gate. Exactly
+the outcome 2wm named first, settled in one boot because the arg and its
+counter are independent. The arg stays (it costs nothing and is now a control);
+the line of inquiry is closed.
+
+**THE DISPLAY CHAIN IS COMPLETELY CLEAN.** Control `display_change_handler`
+**26**, as in every boot since 189:
+
+    set_transaction_args   0     Failed to submit    0     IOReturn: 0x   0
+    Fallback               0     DisplayPipeState    0     no gamma       0
+    Metal compositor       2     Software            0
+
+Nothing in the display path fails any more.
+
+**THE RATE IS UP BUT NOT FIXED.** `AmtrSets 41` over `VBLFires 43200` =
+300.4 s -> **0.136 transactions/s** against boot 194's 0.093, and
+**`RBFBAmtrPeak 11`** - the fullest 1000-fire (6.95 s) window held 11
+transactions, so the chain reached **1.58/s** at its best. **NOT ESTABLISHED
+that the kick caused the improvement**: different workload, n=1, and 0.093 ->
+0.136 is well inside what a busier desktop could do on its own.
+
+**AND THE LIMITER IS NAMED AND MEASURED, FROM THE WEDGE.** GFX channel 52,
+25 timeouts over 350 s, first and last:
+
+    16:03:07  pending stamps [7..17]      backlog  10
+    16:08:57  pending stamps [738..856]   backlog 118
+
+    submitted  2.40 stamps/s        RETIRED  2.09 stamps/s
+
+**Work retires at ~2 per second and the backlog grows.** The display chain's
+peak of 1.58 transactions/s and the GFX retirement rate of 2.09/s are the same
+order of magnitude. **NOT ESTABLISHED as causal** - n=1, no shared timestamps
+between the two instruments, and "same order of magnitude" is not a
+correlation. But it is the first quantitative candidate for the frame rate
+that is not already excluded.
+
+**AND THE GPU IS NOT THE BOTTLENECK.** `rbgpu-ring` sampled three times this
+boot reads **`r=380 w=380`**, **`r=1800 w=1800`**, **`r=2980 w=2980`** -
+**read pointer equals write pointer every time**, with `vmf=0` (no VM faults)
+and `cps=0` (CP not stalled). The ring is fully consumed between samples: the
+chip executes everything submitted, immediately. So the 2 per second is **not
+the GPU doing work slowly, it is the driver learning that work finished
+slowly** - a completion-accounting problem, which is a different class of
+defect from everything the display half has been.
+
+`checkGPUProgress` signals 179 times at a median interval of 4 s, 135 `is not
+hung`, 135 `no channel associated`, 179 `GPURestartSignaled/Enqueued/Dequeued`,
+135 `GPURestartSkipped`. SDMA0_PAGE on channels 12 and 53 shows the same
+shape with the same slow advance. `bad bits` 4, unchanged for seven boots.
+
+**SO THE FRONTIER MOVES OFF THE DISPLAY HALF.** 2we called the wedge an
+independent second defect and that still holds - it is on GFX/SDMA channels,
+not the display interrupt - but it has never had a milestone of its own and it
+is now the only measured candidate left. **The display half is done**: every
+failure mode it ever had reads 0, the write lands, the swizzle agrees, the
+retire kick delivers.
+
+**THE NEXT EXPERIMENT NEEDS NO KERNEL CHANGE AND THE USER ALREADY WANTS TO RUN
+IT.** A GPU compute benchmark discriminates the two remaining readings
+directly, because it submits to the same channels and reports a throughput
+number:
+
+- **A normal score** -> the GPU executes at full speed and the defect is
+  purely the completion path, which is where every further boot should go.
+- **A score one or two orders low** -> submission itself stalls on the same
+  accounting, and the ~2/s is a global ceiling on all GPU work, not a display
+  problem at all.
+
+Either answer is worth more than another display-side boot, and the desktop is
+usable enough to type a command, which is all it takes.
