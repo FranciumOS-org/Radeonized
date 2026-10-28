@@ -362,6 +362,71 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 193: THE DISPLAY PIPE ACCEPTS TRANSACTIONS. EVERY FAILURE IN THE CHAIN
+IS GONE (2we).** `rbgpu-boot` 193, armed, both one-shots 0, `agdc_error 0`,
+`diag_used` 664/768, 20 files. Rule 15 on both: plugin **`0D1F953A`**, fb
+`6F1EB613`. The experiment's own arm check passed: **`agdc_gamma_elems1 =
+256`**. With `display_change_handler` **26** as the control in all five boots:
+
+    set_transaction_args ... 0xe00002c7   122 / 132 ->  0
+    transaction ID (N) generated error    122 / 132 ->  0
+    Failed to submit transaction                134 ->  0   (no IOReturn: 0x at all)
+    Fallback ... submission failed          69/73/3/66 ->  0
+    DisplayPipeState                         69/73/66 ->  0
+    3-channel linearization WARN                134 ->  3
+    no gamma                                      0 ->  0   (2u6 holds at 256)
+
+`Metal compositor activated` x4. **TRANSACTIONS REACH OUR FRAMEBUFFER**:
+`RBFBAmtrSets` **0 -> 13**, `RBFBAmtrGets` 3 -> 29, `RBFBAmtrSnapped` true,
+`RBFBAmtrPtr 0xffffff916784a410`. `setAttribute('amtr', &pipe->0x410)` lives
+past `executeTransaction`'s `bool` arm, so the **submit** path runs.
+**BOTH CHANGES WERE LOAD-BEARING, and that is now established.** 2wd could not
+separate "gate 1 opened and gate 2 met" from "gate 1 was never shut". Boot 193
+settles it the only way consistent with both: the `'amtr'` answer was
+**necessary and not sufficient** - it cannot be sufficient (192 refused
+everything with it in) and it cannot be unnecessary (the only route to
+`setAttribute` is through the first test `vt[0x190]` gates, and sets moved
+0 -> 13 with nothing else in that code changed). Two sequential gates, both
+ours.
+**THE TRANSACTION STRUCT IS CONFIRMED FIELD FOR FIELD FROM A LIVE POINTER.**
+`RBFBAmtrPtr` is **exactly `pipe + 0x410`** (pipe = `0xffffff916784a000`), and
+every pointer in the 0x80-byte snapshot is one of the `leaq 0xNNNN(%rbx)`
+addresses `executeTransaction` loads: `+0x10` = pipe+**0x36b0** (plane state),
+`+0x20` = pipe+**0x3660**, `+0x30` = pipe+**0x3680** (colour matrix), `+0x38`
+= pipe+**0x2650**, `+0x40` = pipe+**0x38d0**; `+0x18`/`+0x28`/`+0x48..0x7f`
+zero. Five independent controls on 2wc's field map in one reading.
+**And the flag word is `0x75`, which decomposes exactly as `dirtyBits 0x3c1`
+predicts on the submit arm**: 0x1 plane resource, 0x4 plane dst rect, 0x10
+colour matrix, **0x20 PIPE POST-GAMMA**, 0x40 pre-CSC linearization SET; 0x2
+(plane gamma), 0x8 (pipe pre-gamma) and 0x100 (postCSC VID) clear because
+their dirty bits are. `0x20` is written at `0xbe4a2b2`, the instruction right
+after the ceiling test that was refusing everything one boot earlier.
+**THE WEDGE IS AN INDEPENDENT SECOND DEFECT.** First `checkGPUProgress` at
+10:07:57.763, 15 s after boot, running the whole capture: 63 `Signaling
+hardware error`, 36 `not hung`, 36 `no channel associated`, 26 `SDMA0_PAGE
+event timeout`, 9 GFX, 1 VMPT, 3 `GPURestartDeferred`. 2w4 saw it start six
+seconds after the first submit failure and could not say which way the
+causation ran; **boot 193 has no submit failures at all and the wedge is
+unchanged in shape and slightly larger**. Not caused by the display path -
+clean differential, n=1. Stamp retirement: submitted, never retires, hang
+check says not hung, restart cannot find the channel.
+**NEW, NOT ATTRIBUTED**: `Setting main display 0x... offline` x7 and `Setting
+offline display 0x... main in CGXConstructVirtualFramebuffer` x7, both ERROR,
+absent from boot 192 - normal mode-set the earlier boots never reached, or a
+new defect, **not established**. `RBFBVBL1Fires` 0 with `RBFBVBLFires 21218`,
+also not attributed and now less interesting: the transactions go to
+`setAttribute`, not through the VBL ring. `bad bits` 4, unchanged five boots.
+**WHAT IS NOT FIXED**: nothing is written to the display engine.
+`setAttribute('amtr', ...)` answers success without doing the work, so the
+compositor believes 13 transactions landed and none did, and `-rbgpufbaty`
+still publishes 16 MB while OTG0 scans offset 0. **The pipe is accepted; the
+picture is not drawn** - exactly the state 2w9 aimed at.
+**NEXT, no boot**: read `handleDisplayPipeTransaction` (`AMDFramebuffer`
+`0x2b4df0`) against the snapshot's five pointers, above all the plane state at
+**pipe+0x36b0**, which carries the surface the compositor rendered into. That
+address is what DCN 3.1.2's `HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair must
+be pointed at, and taking it out of the transaction beats inventing it.
+
 **BOOT 192: `'amtr'` IS ANSWERED, THE REFUSALS DO NOT MOVE, AND THE GAMMA
 CEILING IS BACK (2wd).** `rbgpu-boot` 192, armed, both one-shots 0,
 `diag_used` 663/768, **all 17 files** - the first complete capture in four
