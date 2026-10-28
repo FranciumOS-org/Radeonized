@@ -41775,3 +41775,84 @@ and `init_framebuffer_resource` **0**. Three boots now agree:
 `kIOReturnNotReady` every time, `pipe->0x298` set every time.
 
 NEXT: unchanged experiment, but **install the build first**.
+
+================================================================================
+2w7 - BOOT 188: THE PROBE ANSWERS, AND IT REFUTES 2w4/2w5. THE GATE IS
+      `pipe->0x298`, AND 2w3 MISCOUNTED THE EXITS.
+================================================================================
+2026-10-27, logs/20261027-232901-plugin, boot 188, armed.
+
+Identity: `rbgpu-boot` **188**, `armed 1`, `agdc_oneshot 0`, `iop_oneshot 0`,
+`agdc_error 0`, `diag_used` **613** of 768. The capture is **incomplete** -
+six files, no `kexts.txt` and no `display-log.txt`, because the box rebooted
+~40 s into `plugin_check.sh` - but rule 15 is satisfied another way: the
+`ax*` keys exist at all, and **only build `D69D9B33` can produce them**. The
+hot-key ordering also paid off: `ax0_*` and `ax2_*` both survived into the
+512-byte note.
+
+**ALL THREE SAMPLES AGREE, 25 / 45 / 75 s:**
+
+    ax{0,1,2}_enabled   1        accel->0xc78 & 0x2  -- SET
+    ax{0,1,2}_flags     2
+    ax{0,1,2}_vram      1        accel->0x180        -- non-NULL
+    ax{0,1,2}_vmap      1        accel->0x188        -- non-NULL
+    ax{0,1,2}_defer     0        pipe->0x282
+    ax{0,1,2}_active    0        pipe->0x298         -- CLEAR
+    ax{0,1,2}_b280      0
+    ax{0,1,2}_b299      0
+    ax{0,1,2}_gate      3        "pipe NOT active (0x298)"
+    ax{0,1,2}_fbs       1        machine->0x108
+    ax{0,1,2}_n         1        one IOGraphicsAccelerator2
+    ax{0,1,2}_via       1        matched by the BASE class name
+    ax{0,1,2}_size      8168     accelerator getClassSize()
+    ax{0,1,2}_dmsize    408      display machine
+    ax{0,1,2}_dpsize    15216    display pipe
+
+**SO 2w4/2w5's ELIMINATION OF `pipe->0x298` IS REFUTED, AND THE
+ACCELERATOR-ENABLED BIT IS ELIMINATED INSTEAD.** Exactly the opposite of two
+milestones of deduction. `enabled 1` with `vram 1` and `vmap 1` is three
+fields agreeing - `enableAccelerator()` is called only when
+`accel->0x180 != 0`, and both are what they must be - so the pointer chain is
+right and the reading is sound.
+
+**WHY THE DEDUCTION FAILED: 2w3 MISCOUNTED `init_framebuffer_resource`'s
+EXITS.** It claimed three failure exits, all logging at os_log type 0x11 =
+FAULT, and three boots of FAULT-absence were then read as "it succeeded".
+`IOAccelDisplayPipe::init_framebuffer_resource` (`0x14e5d7ca`) actually has
+**five**, and **two are silent**:
+
+    0x14e5d836  fb->vt[0x9f0]() != 0        -> xorl %r15d; jmp exit   SILENT
+    0x14e5d866  fb->vt[0x9e8]() != 0        -> FAULT (fmt)
+    0x14e5d94b  bitsPerPixel switch gave 0  -> FAULT (fmt_0, fmt_1)
+    0x14e5d9d9  pipe->vt[0x858](0, res) ==0 -> je exit, r15 already 0 SILENT
+    0x14e5da45  res->vt[0x170]() == false   -> FAULT (fmt_2)
+
+Rule 14's sharper form: **the absence of a log is informative only once every
+exit has been enumerated.** Three boots were spent on an enumeration that was
+short by two.
+
+The first silent exit is `getCurrentDisplayMode` and **ours returns
+`kIOReturnSuccess`** (`RBAMDFramebuffer.cpp:515`), so it is not that one.
+
+**THE SECOND SILENT EXIT IS THE VENDOR HOOK.** Call offset `0x858` = dump
+`0x868` (rule 7) = `IOAccelDisplayPipe::initFramebufferResource(unsigned int,
+IOAccelResource2*)`, and the live class overrides it:
+**`AMDRadeonX6000_AMDAccelDisplayPipe::initFramebufferResource`**
+(`0xbe49356`). It returns 0 - silently, every time - on any of:
+
+    resource == NULL
+    pipe->getFramebuffer() == NULL          (= pipe->0x98; ours, non-NULL)
+    index != 0
+    pipe->0x340 == 0        after  pipe->0x330->vt[0x138](fbIndex, index,
+    pipe->0x348 == 0                        &pipe->0x340, resource)
+    pipe->0x35f != 1        on the alternate branch
+    pipe->0x380 == 0        the value it returns
+
+`pipe->0x330->vt[0x138](...)` is the one that writes `0x340` and `0x348` -
+an address and a size - and is the next thing to read.
+
+**WHAT IS NOW FIXED, NOT INFERRED:** the accelerator is enabled, its VRAM
+descriptor exists and its map succeeded, so `getVRAMRange()` and everything
+built on it are **correct** and `find_vram_descriptor` is off the list. The
+failure is one level down, inside AMD's own `initFramebufferResource`, and it
+is silent by construction.
