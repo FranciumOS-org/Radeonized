@@ -44350,3 +44350,82 @@ the absolute phase, comparable across processes), `--busy [S]` (keep work in
 flight from another process), `--heavy [N]` (the scaling control) and the
 per-iteration split columns. Captures in `logs/metalphase.txt`,
 `logs/metallattice.txt`, `logs/metalsplit.txt`, `logs/metalpipe.txt`.
+
+## 2wt — THE WEDGE IS REPRODUCIBLE FROM USERSPACE IN SIX SECONDS, AND IT IS A COMPUTE USER QUEUE COUNT
+
+No boot, boot 198 throughout. `metal_probe --queues K` creates K
+`MTLCommandQueue`s in one process, warms each, then commits one buffer to each
+and reads every buffer's `GPUStartTime`.
+
+**THE TICK IS PER-PROCESS, NOT PER-QUEUE.**
+
+    K=2    172.811  173.072                     spread 0.262 ms
+    K=3    171.472  171.731  171.861            spread 0.389 ms
+
+Every queue in a process is released by the **same** tick. Combined with 2ws's
+two-process result (same period, independent phase), the object that owns the
+~173 ms release quantum is the **client/process**, not the command queue and
+not the device. So adding queues buys no release events, and that route to
+144 Hz is closed.
+
+**AND AT FOUR QUEUES THERE IS A CLIFF.**
+
+    K=4    10004.996  10208.530  10208.660  10208.806
+    K=4     6105.441   6105.919   6106.070   6106.217   (repeat)
+    K=6    10107.057 10107.463 10107.627 10107.766 | 10281.486 10281.616
+
+**6.1 to 10.2 SECONDS**, not 173 ms, and the value varies between runs — the
+shape of a detect-and-recover timeout rather than a quantum. Three queues are
+fine; four are not.
+
+**IT IS 2we's WEDGE, CAUGHT ON DEMAND.** A sender-matched capture over the
+K=4 run (478 IOAcceleratorFamily2 + AMDRadeonX6000 lines as the control):
+
+    event timeout              5        no channel associated      5
+    checkGPUProgress          16        pending stamps             5
+    Signaling hardware error  16        GPURestart               412
+    not hung                   5
+
+Exactly 2we's signature — submitted, never retiring, hang check says not hung,
+restart cannot find the channel. **Since 2we the wedge has only ever been
+visible inside a full armed boot; it is now a userspace command that takes six
+seconds.** That is the cheapest instrument this project has gained in a long
+while, and it needs no kext, no arming and no reboot.
+
+**THE CHANNELS NAME THEMSELVES, AND THAT IS THE LEAD:**
+
+    channel  5 ComputeUQ2 event timeout; pending stamps [5..5]
+    channel  6 ComputeUQ3 event timeout; pending stamps [2080..2080]
+    channel  9 ComputeUQ6 event timeout; pending stamps [132..132]
+    channel 33 SDMA0      event timeout; pending stamps [3155..3155]
+
+So a Metal command queue becomes a **compute user queue**, the low ones work
+and the later ones never retire a single pending stamp. That is the same shape
+as the one chip fact already established about queue counts here — **one SDMA
+instance where Apple's Navi 21 path builds four** (2gc/2gi) — now appearing on
+the compute side.
+
+**THE CORRESPONDENCE WORTH NAMING, AND NOT YET A CLAIM.** 2wi measured the live
+accelerated desktop at *"a new frame only about every 10 seconds"*. The cliff
+here costs **6.1-10.2 s**. This is the first time the desktop's own number has
+been reproduced headlessly, and WindowServer plus a few apps will certainly
+hold four or more command queues. **NOT ESTABLISHED**: that they are the same
+defect. The desktop figure was read off a screen by eye, this one off
+`GPUStartTime`, and 2wi's 10 s was also matched quantitatively by the
+transaction rate (0.093 sets/s, one per 10.8 s), which is a different
+mechanism. Two numbers agreeing to one significant figure is a lead, not an
+identification — and rule 18 says do not build a table from it.
+
+**WHAT THIS DOES NOT EXPLAIN.** The ~173 ms tick is untouched: K=1..3 wedge
+nothing, log nothing, and still wait 173 ms with the GPU idle. There are **two
+independent defects**, and the tick is the one that caps the frame rate at
+5.7 Hz. The wedge adds multi-second spikes on top.
+
+**NEXT, no boot**: `AMDHardware::mapDoorbellMemory` (`0xbea9118`),
+`AMDUserQueue::updateDoorbell` (`0xbe6d14e`) and
+`AMDHardware::getChannelDoorbellOffset` (`0xbeab9be`, overridden by
+`AMDGFX10Hardware` at `0xbead0d2`). A doorbell write that does not reach the
+command processor would leave queued work invisible to the chip until something
+else poked it, which is the tick's shape; and `advance(HwChannelCtx&)` already
+reads `AMDUserQueue::isAttached` before calling `userQueueSwitch`. Rule 35:
+instrument before building on it.
