@@ -362,6 +362,80 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**THE FIRST WRITE TO THE DISPLAY ENGINE, BUILT (2wh, fbkext `D07493B1`).** No
+boot yet. **What it does on the chip**: HUBP is DCN's display-data fetch block
+and `HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS(_HIGH)` is the address it reads
+scanout pixels from, double-buffered, latched at the next vblank. It changes
+**which bytes in VRAM reach the panel and nothing else** - no timing, no
+clocks, no topology, no power state. A wrong value shows garbage or black
+until the next correct write; one boot-arg reverses it.
+**IT IS THE NARROWEST POSSIBLE WRITE**, because two measurements taken many
+milestones apart agree: 2os's live pipe reads pitch `0x077f` (1920), format
+`0x0008` (ARGB8888), address `0xf4:0x00000000`, and 2wg's surface is 1920
+pitch, 4 bpp, `0xf4:0x1002a000`. **Pitch, format and the HIGH dword already
+match - exactly one dword changes.** And the register **takes an MC address,
+measured not derived**: the pair holds the carve-out base today. 2os's
+`mc2pa(0xf400000000) = 0x7_8000_0000` is the *equivalent*, not the contents -
+**mc2pa is NOT applied.**
+**ALL DECISION LOGIC IS `src/common/rb_hubp.h`**, pure and freestanding;
+`src/fbkext/RBAMDFramebufferHUBP.cpp` is only the mechanism. **Everything the
+kext decides, the hosttest decides first** (`hubp_tests()`, 40 assertions) -
+the only honest way to write code that can blank the panel. The offset table is
+**cross-checked against `rb_regs.h`**, written from the same Linux header by a
+different hand at a different time; the 0xdc stride is **asserted, never
+used**; the **pitch-1 trap** is asserted explicitly (`0x77f` accepted, `1920`
+REFUSED, because 2os annotates `0x077f` as "1920 px"); and the realistic wrong
+inputs are named - a system-physical address (below the carve-out) and a GPUVM
+one (above) are both refused. **Mutation tested both ways**: deleting the
+format gate does not compile (`-Werror -Wunused-parameter`), and mutating the
+measured constant `0x8` -> `0xa` fails the assertion.
+**THREE GATES BEFORE ANY WRITE**, each publishing why it refused (rule 14):
+2oq's four-register OTG signature (refuse 5 - the DMU segment `0x34c0` is a
+constant, and a constant is an assumption); 2os's three HUBP0 values (6/7/8);
+and the project's existing **`rb_dcn_is_denied()`** policy (9), re-checked on
+the machine so a future edit cannot bypass it. Then per address: non-zero, in
+the measured carve-out, **256-byte aligned** (DCN latches in 256-byte units,
+so the low 8 bits are not address bits), HIGH unchanged, and one frame fits.
+**WRITTEN PER TRANSACTION, NOT ONCE** - 2wg said so before the code existed:
+a swap chain moves the surface each flip, so one write shows one stale frame.
+**Gated on flag-word bit `0x1`**, the same test 2wf read the consumer making
+before it touches `txn->0x10`; without it a colour-matrix-only transaction
+would re-write a stale address. `hubpProgram()` runs on the accelerator's
+thread with its locks held and so **allocates nothing, logs nothing, blocks on
+nothing** (rule 31) - the BAR5 map is made once in `start()`, the VBL
+`thread_call` publishes. HIGH before LOW, because DCN latches on the LOW write.
+Read back **once**, on write #1: a register reading back what we wrote is the
+difference between "the store executed" and "the store reached the chip"
+(2lq in its register form).
+**THE ONE UNMEASURED THING, AND THIS BUILD READS IT**: the **swizzle**. Pitch
+and format match but tiling need not - the GOP framebuffer is linear and a
+GPU-rendered surface may be `_X` tiled. `DCSURF_ADDR_CONFIG` /
+`DCSURF_TILING_CONFIG` have **never been read here**, so both are published.
+Deliberately **not gates** (nothing says what they should be, and refusing on
+them would substitute a value - rule 17): they exist so a **scrambled image is
+distinguishable from a wrong address**, the one ambiguity this experiment
+cannot otherwise resolve.
+**SAID BEFORE THE BOOT.** Arm `-rbgpufbhubp`, which **also requires
+`-rbgpufbamtr`** (the address only arrives through `setAttribute('amtr')`);
+`rbgpufbhubpmax=<N>` bounds the writes, absent = unlimited. Rule 30 checked, no
+token prefixes another. **Check the arm FIRST**: `RBFBHubpReady` **true**,
+`RBFBHubpRefuse` **0**, `RBFBHubpOrig` **`0xf400000000`**. If `Ready` is false
+read `Refuse` and stop. Then: `RBFBHubpWrites > 0` with
+**`RBFBHubpReadback == RBFBHubpLast`** means the write reached the chip, which
+is the milestone whatever the screen does. A legible desktop = the swizzle
+already agreed and the display half is DONE. A **regular, repeating,
+block-structured** wrongness = tiling mismatch, and the next step is a tiling
+write, **not** an address hunt. Black/noise with `Readback == Last` = the write
+landed and something the guards do not cover is wrong. **Nothing changing at
+all with `Readback == Last`** = DCN ignores the stores and wants
+`DCSURF_FLIP_CONTROL` / the `SURFACE_UPDATE_LOCK` dance this build
+deliberately omits. Tearing is expected and acceptable. **The screen is not
+the instrument** - SSH and `ioreg` are, and rule 10 says capture in the armed
+boot before rebooting: the last two captures were each cut to 6 files by an
+early reboot, which is why 2wg could check no regression control.
+**INSTALL**: plugin **`0D1F953A` unchanged in the EFI** (no rebuild, no
+`efi.sh install`); fbkext **`D07493B1`** to the **auxiliary collection**.
+
 **BOOT 194: THE SURFACE ADDRESS IS MEASURED, AND IT IS A LOW/HIGH PAIR
 (2wg).** `rbgpu-boot` **194**, `armed=1`, both samples all-open (`gate=0
 enabled=1 active=1 defer=0 vram=1 vmap=1`), `diag_used` 663/768, and the
@@ -1612,7 +1686,14 @@ picture with an active pipe), `-rbgpufbamtr` (2wc/2wf - answers the
 transaction, and snapshots the first transaction struct AMD hands us **plus
 the whole 0x220-byte `_AMD_PIPE_FLIP` it points at**, which already carries
 the GPU address of the surface the compositor rendered into;
-answered, NOT executed, so the picture stays wrong), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
+answered, NOT executed, so the picture stays wrong), `-rbgpufbhubp` (2wh - **the first write to the display
+engine**: HUBP0's primary surface address, taken from each transaction's
+`_AMD_PIPE_FLIP` and written per flip. Requires `-rbgpufbamtr`. Three gates
+before any write and six per address, all in `src/common/rb_hubp.h` and all
+run by the hosttest; restores the firmware's address on stop. **This one can
+blank the panel** - a wrong value shows garbage until the next correct write,
+and rule 12 says a black panel is indistinguishable from a hang, so keep SSH
+and read `ioreg`, not the screen), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
 (answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
 Cursor as well as 0x10 Scaler — off by default because three of the four carry
 a substituted field, 2sc).
@@ -1622,6 +1703,9 @@ the user's decision because its failure mode is a **hang**, not a panic.
 **Tunables:** `rbgpuvblhz=<millihertz>` (vblank rate, refused outside
 20000-400000), `rbgpufbvrammb=<N>` (the published VRAM size, refused outside
 256-16384), `rbgpufbvramrangemb=<N>` (8-256, default 64),
+`rbgpufbhubpmax=<N>` (bounds 2wh's HUBP writes; absent or 0 = unlimited, which
+is what a live display needs - a small N is for a deliberately conservative
+first boot),
 `rbgpumtlkpatch` (selects the inert cave-only patcher stage),
 `-rbgpuagdcpolicy` (leaves `NeedsPolicyDriver` absent, for the 2rk A/B),
 `rbprobe_level=N`, `rbprobe_smu=1`.

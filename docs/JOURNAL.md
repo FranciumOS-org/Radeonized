@@ -43162,3 +43162,171 @@ transaction in `setAttribute('amtr')` and program the DCN 3.1.2
 **grouping checked before adding one**. A readback and a restore path come
 with it, because a wrong write blanks the panel and rule 12 says a black panel
 is indistinguishable from a hang.
+
+---
+
+## 2wh — the first write to the display engine, built (fbkext `D07493B1`)
+
+No boot yet. This is the write every milestone since 2w9 has been pointing at.
+
+### What it does on the chip
+
+HUBP is DCN's display-data fetch block.
+`HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS` and `_HIGH` are the address it reads
+scanout pixels from — double-buffered, latched at the next vblank. Changing
+them changes **which bytes in VRAM reach the panel, and nothing else**: no
+timing, no clocks, no pipe topology, no power state, no PLL. OTG keeps
+scanning at the same 143.833 Hz either way. A wrong value shows garbage or
+black until the next correct write, and one boot-arg reverses the whole thing.
+
+### Why this is the narrowest possible first write
+
+Two measurements, taken a year of milestones apart, happen to agree:
+
+| | 2os, boot 133 (the live pipe) | 2wg, boot 194 (the compositor's surface) |
+|---|---|---|
+| pitch | `HUBP0_SURFACE_PITCH 0x077f` = 1920 px | `flip+0x14` = 1920 |
+| format | `HUBP0_SURFACE_CONFIG 0x0008` ARGB8888 | `flip+0x18` = 4 bytes/pixel |
+| address high | `0x000000f4` | `flip+0x0c` = `0x000000f4` |
+| address low | `0x00000000` | `flip+0x08` = `0x1002a000` |
+
+**Pitch, format and the HIGH dword already match. Exactly one dword changes.**
+
+**And the register takes an MC address, measured not derived.** The pair reads
+`0xf4:0x00000000` today, which is the carve-out base — an MC address. 2os also
+noted `mc2pa(0xf400000000) = 0x7_8000_0000` system-physical; that is the
+*equivalent*, not what the register holds. **`mc2pa` is not applied here**, and
+the reason is a reading of the hardware's own current contents rather than an
+inference.
+
+### Where the logic lives, and why
+
+`src/common/rb_hubp.h` — pure, freestanding, every offset citing
+`dcn_3_1_2_offset.h`. `src/fbkext/RBAMDFramebufferHUBP.cpp` is only the
+mechanism. **Everything the kext decides, the hosttest decides first**, which
+is the only honest way to write code that can blank the panel.
+
+`tools/hosttest/hubp_test.c` (`hubp_tests()`), 40 assertions:
+
+- **The offset table is cross-checked against `rb_regs.h`**, which was written
+  from the same Linux header by a different hand at a different time. Two
+  tables, one source — a typo in either shows up here. All sixteen
+  address/pitch/config offsets were also re-verified against the header
+  directly, and the tiling pair against it too.
+- The 0xdc stride is **asserted, never used** to compute an offset: the table
+  came from the header and stays authoritative.
+- Each of the three pipe-state fields is load-bearing on its own, with a
+  distinct refusal code, so a bare `return RB_HUBP_OK` fails three assertions.
+- **The pitch-1 trap is asserted explicitly**: `0x77f` is accepted and `1920`
+  is *refused*, because 2os's annotation reads "1920 px" for `0x077f` and a
+  fast reader would write the wrong constant.
+- Every address refusal is reachable on its own, with the realistic wrong
+  inputs named: a system-physical address (`0x7_8000_0000`, below the
+  carve-out) and a GPUVM one (`0xFF_BF..`, above) are both refused.
+- The last 256-byte slot is in range on its own but **cannot hold a frame**,
+  which is the check that stops a fetch running off the end of VRAM.
+
+**Both directions of the mutation test** (docs/RULES.md's requirement that a new
+test fail when the code it guards is broken): deleting the format gate does
+not even compile (`-Werror -Wunused-parameter` — the guard is load-bearing in
+the type system too), and mutating the measured constant `0x8` → `0xa` fails
+the assertion that the measured pipe is accepted. A tautological mutation
+(`config != config`) is also rejected by the compiler.
+
+### The gates, in order
+
+Three before anything is written, each publishing why it refused (rule 14):
+
+1. **2oq's four-register OTG signature** — `OTG0_CONTROL & OTG_MASTER_EN` set
+   with OTG1-3 at exactly `0x300`. The DMU segment `0x34c0` is a constant in
+   this kext, and a constant is an assumption; if it is wrong these four reads
+   are garbage and will not match. Refuse 5.
+2. **2os's three HUBP0 values** — pitch, format, address-high. Refuse 6/7/8.
+3. **`rb_dcn_is_denied()`**, the project's existing DCN write policy, which
+   exists because a base-2 dword can mean different things in dcn302 and
+   dcn312. Both our dwords are allowed (asserted on the host, re-checked on
+   the machine so a future edit cannot bypass the policy). Refuse 9.
+
+Then per address: non-zero, inside the measured carve-out, **256-byte
+aligned** (DCN latches the address in 256-byte units, so the low 8 bits are
+not address bits and a misaligned value is a guaranteed garbage fetch), HIGH
+unchanged, and one frame fits. The **first** refusal is kept with its address
+and code, because a last-wins key cannot express a per-entry fact (rule 14).
+
+### Written per transaction, and gated on the flag word
+
+Not once. 2wg said this before the code existed: a compositor swap chain hands
+a different surface each flip, so one write would show one stale frame. The
+address is taken fresh from **every** transaction.
+
+And it is gated on **flag-word bit `0x1`** — the same test 2wf read the
+consumer making before it touches `txn->0x10`. Without it, a transaction that
+only changed the colour matrix would make us re-write a stale address. Boot
+193 measured the bit set (`0x75`).
+
+`hubpProgram()` runs on the accelerator's thread with its locks held, so it
+**allocates nothing, logs nothing and blocks on nothing** (rule 31): the BAR5
+mapping is made once in `start()`, and the VBL `thread_call` publishes. HIGH is
+written before LOW because DCN latches the pair on the LOW write — on this
+machine HIGH never changes, so the first store is a no-op that exists to keep
+the order correct if that stops being true. The pair is read back **once**, on
+write #1 only: a register that reads back what we wrote is the difference
+between "the store executed" and "the store reached the chip", which is 2lq's
+lesson in its register form.
+
+### The one thing still unmeasured, and this build reads it
+
+Pitch and format match, but the **swizzle does not have to**. The firmware's
+GOP framebuffer is linear; a surface the GPU rendered into may be tiled — the
+`_X` family, which is the whole of this project's swizzle defect. HUBP fetches
+through `DCSURF_ADDR_CONFIG` / `DCSURF_TILING_CONFIG`, and **nothing has ever
+read them here**. So this build publishes both. They are deliberately **not
+gates**: nothing measured says what they should be, and refusing on them would
+be substituting a value (rule 17). They exist so that a scrambled image is
+distinguishable from a wrong address — the one ambiguity this experiment
+cannot otherwise resolve.
+
+### Said before the boot
+
+The arm is `-rbgpufbhubp`, which **also requires `-rbgpufbamtr`** (the address
+only arrives through `setAttribute('amtr')`); `rbgpufbhubpmax=<N>` bounds the
+writes, absent means unlimited, which is what a live display needs. Rule 30
+checked: no boot-arg token prefixes another.
+
+**First, the arm check, before anything else means anything**:
+`RBFBHubpArmed` true, `RBFBHubpReady` **true**, `RBFBHubpRefuse` **0**. If
+`Ready` is false, read `Refuse` and stop — 5 means the DMU segment is wrong and
+we were never addressing DCN, 6/7/8 mean the pipe is not what 2os measured,
+9 means the denylist caught us. `RBFBHubpOrig` must read **`0xf400000000`**;
+anything else and 2os's measurement no longer describes this machine.
+
+Then the outcomes, in the order I think them likely:
+
+- **`RBFBHubpWrites` > 0 and `RBFBHubpReadback == RBFBHubpLast`** — the write
+  reached the chip. That is the milestone whatever the screen does.
+- **A legible desktop.** Then the swizzle already agreed and the display half
+  is done.
+- **A recognisable but scrambled image** — regular, repeating, block-structured
+  wrongness. That is the tiling mismatch, and `RBFBHubpTiling` /
+  `RBFBHubpAddrCfg` say what the pipe is configured for. The next step is then
+  a tiling write, **not** an address hunt.
+- **Black or noise with `Readback == Last`.** The write landed and the address
+  is wrong in some way the guards do not cover, or the surface is not rendered
+  when we point at it.
+- **Nothing changes at all, with `Readback == Last`.** The stores land and DCN
+  ignores them — a flip needs `DCSURF_FLIP_CONTROL` or the
+  `SURFACE_UPDATE_LOCK` dance that this build deliberately does not do. Then
+  the address was never the missing piece and the lock sequence is.
+- **Tearing.** Expected and acceptable: we write unsynchronised to vblank.
+  DCN double-buffers, so it should be mild; it proves the path either way.
+
+**The screen is not the instrument** — SSH and `ioreg` are, exactly as in 2w9.
+And per rule 10 the capture must be taken **in the armed boot, over SSH,
+before rebooting**: the last two captures were each cut to 6 files by an early
+reboot, which is why 2wg could check no regression control.
+
+### Install
+
+Only the framebuffer kext changed. Plugin stays **`0D1F953A`**, already in the
+EFI — no rebuild, no `efi.sh install`. fbkext **`D07493B1`** to the
+**auxiliary collection** (rule 15).
