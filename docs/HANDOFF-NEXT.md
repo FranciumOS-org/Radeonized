@@ -61,22 +61,20 @@ artifact has its own install path and a rebuild refreshes none of them:
 `/Library/Extensions/RBAMDFramebuffer.kext` currently holds the old
 `45588775`.
 
-Commands for the user (the assistant never runs these and never asks for the
-password; **the assistant must not install into `/Library/Extensions` or the EFI**):
+**The install is already DONE** (2wa addendum). `/Library/Extensions` holds
+`59124B3A` and the AuxKC was verified by raw-UUID search to carry exactly that
+one copy — old build 0 occurrences, staged `beside` copy 0, nullmoth's
+`NVRMFB` still present as a control. `kmutil create -n aux -z` printed
+`Code=34 Missing Developer Kit` and the rebuild happened anyway; **verify the
+artifact, not the exit status**. `-rbgpufbaty` is already in boot-args and the
+plugin in the EFI is already `64D3D687`.
 
-```
-sudo tools/efi.sh install
-```
-
-Then replace the installed framebuffer kext with `build/out/RBAMDFramebuffer.kext`,
-rebuild the auxiliary collection so the new one is the copy that boots, and:
+So the next boot needs only:
 
 ```
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 sudo reboot
 ```
-
-`-rbgpufbaty` is already in boot-args (boot 190 confirmed it).
 
 After boot: wait past **75 s** (the probe's last sample), then
 `sudo tools/plugin_check.sh` over SSH **before** rebooting (rule 10).

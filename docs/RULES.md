@@ -1025,7 +1025,12 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     capture is two lines, not a registry dump; **`ioreg -c X -k Y` does not
     filter** and printed only `+-o Root` (2sn — use `ioreg -rl -c X`); a
     tool's **exit code can be its verdict**, so `make useiop && …` reported
-    "failed" under a perfectly good report (2so); **`timeout` does not exist
+    "failed" under a perfectly good report (2so); and the **mirror** of that, a
+    loud specific error sitting on top of a write that LANDED - `kmutil create
+    -n aux` errored `Code=34 Missing Developer Kit` while the AuxKC was
+    rebuilt correctly, proven by searching the collection for the raw UUID
+    bytes with four controls (2wa). **Verify the artifact, never the exit
+    status, in both directions**; **`timeout` does not exist
     on macOS**, so three `ioreg` reads came back as `timeout: command not
     found` and looked exactly like "the service is absent" (2v9); **a grep for
     a word the producing code never contains returns 0 forever** — `Clean` was counted

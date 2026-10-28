@@ -42159,3 +42159,56 @@ are 2w9's, minus `b35d` (already 1, and now known to come from the hardware):
 - `ax0_active` **1**, `ax0_gate` **0**
 - `IOReturn: 0x2d8` → **0**, `fb_vbl_ot_armed` present for the first time
 - the picture wrong or stale, by construction (the scanout still reads offset 0)
+
+### 2wa addendum — the AuxKC rebuild ERRORED and SUCCEEDED, and 2sy's KDK claim is refuted
+
+`sudo kmutil create -n aux -z --volume-root /` printed:
+
+```
+No variant specified, falling back to release
+Error Domain=KMErrorDomain Code=34 "Missing Developer Kit: As of macOS 13.0,
+you will need to install a KDK matching your build 24H32 to rebuild kernel
+collections."
+```
+
+**2sy's "The AuxKC alone needs none" is wrong on this machine** — `-n aux` is
+demanded a KDK too, and `/Library/Developer/KDKs` is still empty. (`kmutil
+create` does carry `--allow-missing-kdk` and `--kdk`; neither was needed.)
+
+**But the collection was rebuilt anyway.** Read from the artifact instead of
+the exit status:
+
+    /Library/Extensions/...RBAMDFramebuffer   UUID 59124B3A   (the new build)
+    AuxKC mtime                               00:21:25
+    installed bundle mtime                    00:21:15        -- 10 s earlier
+
+and searching the 18 694 144-byte
+`/Library/KernelCollections/AuxiliaryKernelExtensions.kc` for the raw UUID
+bytes, with controls:
+
+    NEW 59124B3A   1 occurrence      com.rembrandtgpu.fb    5   (control)
+    OLD 45588775   0 occurrences     com.nullmoth          22   (control)
+
+    1  /Library/Extensions/RBAMDFramebuffer.kext
+    0  /private/var/tmp/RBAMDFramebuffer.stage
+    0  RBAMDFramebufferBeside
+    1  /Library/Extensions/NVRMFB.kext                          (control)
+
+So the collection carries **exactly one** copy of our bundle, the installed
+displacing one, the old build is **gone**, the staged `beside` copy 2sp said to
+remove first is **not present**, and the user's nullmoth RTX driver survived
+the rewrite. Which agent did it is **not established** — either
+`kernelmanagerd` auto-rebuilt on the `/Library/Extensions` change (2sp's
+option 1, which is also how `45588775` got in, since `kmutil` never once
+succeeded) or `kmutil create` wrote the aux collection and then failed on a
+different variant. The timestamps fit both.
+
+**The reusable form, and it is the inverse of 2so's.** 2so recorded that a
+tool's *exit code can be its verdict* — `make useiop && …` reported failure
+under a perfectly good report. This is the mirror: **a loud, specific,
+correct-sounding error can sit on top of a write that landed.** Verify the
+artifact, never the exit status, in both directions. Rule 26 gains the
+sentence; the instrument here was a raw-byte search of the collection with
+four controls, which took one command.
+
+So **no further install step is needed** — arm and reboot.
