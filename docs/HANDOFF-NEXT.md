@@ -31,7 +31,47 @@ software**.
 **2wq and 2wr are withdrawn** — they concluded the completion signal was the
 defect, from two clocks that both sit downstream of execution.
 
-## Do this next — one boot, plugin only
+## The boot is BUILT and ready — plugin `0EE32DFA`
+
+`make plugin` done, checks clean: UUID moved to **0EE32DFA**, `kmutil libraries`
+resolves everything with **0** from `SystemKernelExtensions.kc` (the 2oz trap),
+`grep -c IOGraphicsFamily src/plugin/Info.plist` = **0**.
+
+It adds `-rbgpuschedprobe` (2wv), observe-only, hooking
+`AMDSWScheduler::submitCommandBuffer` and `AMDSWScheduler::advance()` and
+publishing `rbgpu-sched`. Rules checked before writing it: **rule 1** both
+defined in the kext per `nm -m`; **rule 3** neither already routed (only
+`addHWChannel` is); **rule 5** the mangled length prefix is
+`19submitCommandBuffer`, not 18, which a hand-written name would have got
+wrong; **rule 2** both prologues are `pushq %rbp / movq %rsp,%rbp / pushq r1x`
+with no relative branch in the patch window; **rule 30** `-rbgpuschedprobe`
+neither prefixes nor is prefixed by any of the 74 existing tokens. **rule 31**
+the hooks touch only plain statics — no allocation, no logging, and no
+`rbgpu_diag_set_num`, which takes `g_diagLock` and would deadlock exactly as
+2fz measured; the note is written from the phase flush instead.
+
+`deferredCallback` is deliberately **not** hooked: it is ten bytes and its tail
+`jmp` begins at offset 5, inside rule 2's window — and it tail-jumps into
+`advance()`, so it is already counted there.
+
+### Commands (the user's own steps)
+
+    sudo tools/efi.sh install
+    sudo tools/efi.sh bootarg add -rbgpuschedprobe
+    sudo nvram rbgpu-arm=1
+    # reboot, then EARLY in the boot:
+    env -u DYLD_INSERT_LIBRARIES ./build/out/metal_probe --bench 120
+    sudo tools/plugin_check.sh
+    nvram rbgpu-sched
+
+**Leave `rbgpu-fb` at 0 and `-rbgpuownfb` OUT of boot-args** (rule 38). The
+flush runs at every phase (+12 s, +100 s, +160 s), so the later notes include
+whatever the probe did; `--bench 120` takes about 21 s at the current rate.
+
+**Read `rbgpu-boot` first** (rule 8) and check `rbgpu-arm` was consumed
+(rule 34) before interpreting anything.
+
+## What the counters mean
 
 Instrument the three functions the shape points at and publish counters. All
 addresses are in `build/re/AMDRadeonX6000`, verified by `nm -m`:

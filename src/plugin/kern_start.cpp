@@ -13798,6 +13798,161 @@ void rbgpu_restart_flush_2iq(void) {
               "first restart was reacting to.");
 }
 
+// ---------------------------------------------------------------------------
+// 2wv: WHO RELEASES THE WORK? -rbgpuschedprobe, observe only.
+//
+// 2ws/2wt/2wu measured, entirely from userspace, that every GPU submission
+// waits ~175 ms before the chip starts it:
+//
+//     commit -> scheduled        0.092 ms   the driver has handed it on
+//     commit -> GPUStart       174.855 ms   THE GPU DOES NOT START
+//     GPUStart -> GPUEnd         0.014 ms
+//     GPUEnd  -> caller return   0.042 ms
+//
+// It is a tick, not a wake-up: twelve pipelined buffers all start within
+// 1.4 ms of each other after one 176 ms idle wait. It is load-independent, it
+// is the same on compute, SDMA and graphics, every queue in a process shares
+// it, and two processes get the SAME period at DIFFERENT phase - which rules
+// out a doorbell the CP cannot see, an MES timeslice and clock gating alike,
+// because those are chip properties and would give every client one phase.
+//
+// So the hold is in software, above the hardware, and the shape points here.
+// AMDSWScheduler::advance() walks every HwChannelCtx and pushes the ones
+// marked at +0x71 through advance(HwChannelCtx&). Its only two reachers are
+// deferredCallback(IOInterruptEventSource*) and timerCallback - and
+// timerCallback is referenced nowhere else in the kext, so that timer is never
+// installed. Meanwhile submitCommandBuffer either calls advance(ctx) directly
+// (0xbe943e9) or, on its other path (0xbe9440e), sets ctx->0x71 = 1 and calls
+// this->0x30->vt[0x1d8](0,0,0) - the same slot checkTimestamps and
+// gpu_progress_check_timer signal, i.e. the deferred event source.
+//
+// NOTHING ABOVE OBSERVES A SINGLE CALL INSIDE THE DRIVER (rule 35). This does.
+//
+// SAID BEFORE THE BOOT:
+//   advance() at ~5.7/s with submitCommandBuffer far higher, and smax > 1,
+//     means the release IS advance() and the fix is to drive it from submit.
+//   advance() tracking submitCommandBuffer one for one, with gmin tiny, means
+//     the hold is BELOW it and advance(HwChannelCtx&)'s own gates are next
+//     (AMDUserQueue::isAttached 0xbe94730, then userQueueSwitch 0xbe94762).
+//
+// Rule 31: both hooks run on the driver's own threads with its locks held, so
+// they touch nothing but plain statics - no allocation, no logging, and above
+// all no rbgpu_diag_set_num, which takes g_diagLock and would deadlock exactly
+// as 2fz measured. The note is written from the phase flush, a safe context.
+// Rule 2 checked on both: submitCommandBuffer opens pushq %rbp / movq / pushq
+// %r15 and advance() opens pushq %rbp / movq / pushq %r14, neither with a
+// relative branch in the patch window. deferredCallback is deliberately NOT
+// hooked - it is ten bytes and its tail jmp starts at offset 5, inside the
+// window - and it does not need to be, because it tail-jumps into advance()
+// and so is already counted there.
+// ---------------------------------------------------------------------------
+
+static uint64_t g_rb_2wv_submit = 0;
+static uint64_t g_rb_2wv_adv = 0;
+static uint64_t g_rb_2wv_last_adv = 0;
+static uint64_t g_rb_2wv_gap_sum_us = 0;
+static uint64_t g_rb_2wv_gap_n = 0;
+static uint64_t g_rb_2wv_gap_min_us = ~0ull;
+static uint64_t g_rb_2wv_gap_max_us = 0;
+// Gap histogram, log2 buckets in microseconds: [0]<64us, [1]<128us, ...
+// [11] < 128 ms, [12] < 256 ms (where a 175 ms tick lands), [13] the rest.
+static uint32_t g_rb_2wv_hist[14];
+static uint64_t g_rb_2wv_sub_since = 0;
+static uint32_t g_rb_2wv_sub_max = 0;
+static int      g_rb_2wv_hooked = 0;
+
+static bool (*orig_sched_submit_2wv)(void *, uint64_t, void *, void *) = nullptr;
+static void (*orig_sched_advance_2wv)(void *) = nullptr;
+
+static bool hooked_sched_submit_2wv(void *sched, uint64_t qid, void *info,
+                                    void *barrier) {
+    g_rb_2wv_submit++;
+    g_rb_2wv_sub_since++;
+    if (!orig_sched_submit_2wv) return false;
+    return orig_sched_submit_2wv(sched, qid, info, barrier);
+}
+
+static void hooked_sched_advance_2wv(void *sched) {
+    uint64_t now = mach_absolute_time();
+    if (g_rb_2wv_last_adv != 0 && now > g_rb_2wv_last_adv) {
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(now - g_rb_2wv_last_adv, &ns);
+        uint64_t us = ns / 1000ull;
+        g_rb_2wv_gap_sum_us += us;
+        g_rb_2wv_gap_n++;
+        if (us < g_rb_2wv_gap_min_us) g_rb_2wv_gap_min_us = us;
+        if (us > g_rb_2wv_gap_max_us) g_rb_2wv_gap_max_us = us;
+        uint32_t b = 0;
+        uint64_t t = us >> 6;           // 64 us per first bucket
+        while (t != 0 && b < 13) { b++; t >>= 1; }
+        g_rb_2wv_hist[b]++;
+    }
+    g_rb_2wv_last_adv = now;
+    if (g_rb_2wv_sub_since > g_rb_2wv_sub_max) {
+        g_rb_2wv_sub_max = static_cast<uint32_t>(g_rb_2wv_sub_since);
+    }
+    g_rb_2wv_sub_since = 0;
+    g_rb_2wv_adv++;
+    if (orig_sched_advance_2wv) orig_sched_advance_2wv(sched);
+}
+
+void rbgpu_sched_flush_2wv(void) {
+    if (!g_rb_2wv_hooked && g_rb_2wv_submit == 0 && g_rb_2wv_adv == 0) {
+        // Rule 14: say which of the two zeroes this is.
+        rbgpu_nvram_note("rbgpu-sched", "hk=0 not armed");
+        return;
+    }
+    uint64_t mean = g_rb_2wv_gap_n ? (g_rb_2wv_gap_sum_us / g_rb_2wv_gap_n) : 0;
+    char note[352];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note),
+                     "hk=%d sub=%llu adv=%llu smax=%u gmin=%llu gmean=%llu "
+                     "gmax=%llu h=",
+                     g_rb_2wv_hooked, g_rb_2wv_submit, g_rb_2wv_adv,
+                     g_rb_2wv_sub_max,
+                     g_rb_2wv_gap_min_us == ~0ull ? 0 : g_rb_2wv_gap_min_us,
+                     mean, g_rb_2wv_gap_max_us);
+    n = (w > 0) ? static_cast<size_t>(w) : 0;
+    for (uint32_t i = 0; i < 14 && n < sizeof(note) - 12; i++) {
+        w = snprintf(note + n, sizeof(note) - n, "%s%u",
+                     i ? "," : "", g_rb_2wv_hist[i]);
+        if (w > 0) n += static_cast<size_t>(w);
+    }
+    rbgpu_nvram_note("rbgpu-sched", note);
+    rbgpu_log("2wv: %s", note);
+    rbgpu_log("2wv: gmean near 175000 us with sub >> adv and smax > 1 means "
+              "advance() IS the release and the fix is to drive it from the "
+              "submit path. adv tracking sub one for one with a small gmin "
+              "means the hold is below advance() and the next targets are "
+              "advance(HwChannelCtx&)'s isAttached / userQueueSwitch gates. "
+              "Buckets are log2 microseconds from 64 us, so a 175 ms tick "
+              "piles into h[12].");
+}
+
+static void rbgpu_route_sched_2wv(KernelPatcher &patcher, size_t id,
+                                  mach_vm_address_t address, size_t size) {
+    if (!checkKernelArgument("-rbgpuschedprobe")) return;
+    KernelPatcher::RouteRequest reqs[] = {
+        KernelPatcher::RouteRequest(
+            "__ZN29AMDRadeonX6000_AMDSWScheduler19submitCommandBufferEmP30AMD_SUBMIT_COMMAND_BUFFER_INFOP16AMD_BARRIER_INFO",
+            hooked_sched_submit_2wv, orig_sched_submit_2wv),
+        KernelPatcher::RouteRequest(
+            "__ZN29AMDRadeonX6000_AMDSWScheduler7advanceEv",
+            hooked_sched_advance_2wv, orig_sched_advance_2wv),
+    };
+    if (patcher.routeMultiple(id, reqs, 2, address, size)) {
+        rbgpu_log("2wv: hooked AMDSWScheduler::submitCommandBuffer + advance "
+                  "(observe only)");
+        g_rb_2wv_hooked = 1;
+    } else {
+        rbgpu_log("2wv: FAILED to hook the scheduler release path - "
+                  "rbgpu-sched will say hk=0, so zero counts are the hook and "
+                  "not the driver");
+        g_rb_2wv_hooked = 0;
+        patcher.clearError();
+    }
+}
+
 static void rbgpu_route_restart_2iq(KernelPatcher &patcher, size_t id,
                                     mach_vm_address_t address, size_t size) {
     if (!checkKernelArgument("-rbgpuringprobe")) return;
@@ -14551,6 +14706,7 @@ void RGPU::processX6000(KernelPatcher &patcher, size_t id, mach_vm_address_t add
     rbgpu_route_hwregwrite_2ic(patcher, id, address, size);
     rbgpu_route_vmid_2if(patcher, id, address, size);
     rbgpu_route_restart_2iq(patcher, id, address, size);
+    rbgpu_route_sched_2wv(patcher, id, address, size);
 
     KernelPatcher::RouteRequest req_2gn[] = {
         KernelPatcher::RouteRequest(
@@ -18217,6 +18373,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
     rbgpu_ptfix_flush_2ih();
     rbgpu_restart_flush_2iq();
     rbgpu_mecntl_flush_2ir();
+    rbgpu_sched_flush_2wv();
 
     // 2hw: the PM4 itself, at the phase where the hang is established. Last,
     // after every other note is committed, because it is the newest and
