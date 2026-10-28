@@ -394,7 +394,7 @@ of marks.**
 **NUMBERING (rule 8)**: `rbgpu-boot` is **196** and the 14:18 capture read
 195, so the twenty-minute boot is nonce 196 and the boot numbers in 2wi/2wj/2wk
 were narrative, not nonces. Boot numbers are the nonce or they are nothing.
-**Build `A356BE21`, instrumentation only.** The crumb is **periodic** (every
+**Build `A356BE21` (2wl) + `7A6A56A9` (2wm, the one experiment).** The crumb is **periodic** (every
 10000 fires, `s=` says which sample, so the last one is the whole boot); `p=`
 is the fullest ~7 s window of transactions the boot ever saw (a total over a
 boot length cannot tell a burst from a trickle, and this boot contained both);
@@ -1886,6 +1886,17 @@ one-shot of its own**, so with `rbgpu-fb` failing to clear (2sq) it re-arms
 every power cycle; the durable disarm is removing the boot-arg - and
 **2wj made `rbgpu-fb` consume properly, so a plain power cycle now disarms the
 whole chain and the desktop comes back usable**),
+`-rbgpufbflipall` (2wm - drops 2wh's flag-word bit `0x1` gate so a content
+update into an UNCHANGED surface is written too. Boot 196's asymmetry - adding
+a character updated the panel, deleting one did not - is exactly what being
+handed such transactions and refusing them looks like, because adding forces a
+new surface and deleting reuses the allocation. **Not established**: boot 195
+wrote all 4 of its 4 transactions, but that is an idle desktop and the typing
+burst was never measured. The decision is `rb_hubp_should_write()` in
+`src/common/rb_hubp.h` with eight hosttest assertions; `RBFBAmtrNoFlip` / the
+crumb's `n=` says in the SAME boot whether the arg had anything to do, so the
+arg and its instrument are independent and one boot settles it. Rule 30: NOT
+`-rbgpufbhubpall`, which `-rbgpufbhubp` would prefix),
 `-rbgpufbretire` (2wi - re-enables the `'vbl '` slots Apple registered and
 then disabled, once a transaction has arrived, on the suspicion that the
 accelerator never learns a vblank happened and so never retires a transaction.
