@@ -20,6 +20,7 @@ using thread_call_t=FakeCall *;
 void clock_interval_to_deadline(uint32_t,unsigned,uint64_t *);
 void thread_call_enter_delayed(thread_call_t,uint64_t);
 void thread_call_cancel(thread_call_t);
+bool thread_call_enter(thread_call_t);
 #define LOG(...) ((void)0)
 
 // Only the non-virtual VBL methods are linked into the host executable. These
@@ -40,6 +41,7 @@ public:
     static constexpr uint64_t kVBLPeriodNs=1000000000ULL*65536ULL/kRefreshRate1616;
     Interrupt interrupts[kMaxInterrupts]{};
     thread_call_t vblCall=nullptr;
+    thread_call_t vblKickCall=nullptr;
     bool vblRunning=false;
     uint64_t vblFires=0;
     uint32_t vblEnables=0;
@@ -59,6 +61,8 @@ public:
     uint8_t amtrFlipSnap[kAmtrFlipBytes]{};
     bool retireArmed=false;
     uint64_t retireEnables=0;
+    uint64_t retireKicks=0;
+    uint64_t retireDelivered=0;
     bool hubpArmed=false;
     bool hubpReady=false;
     uint32_t hubpRefuse=0;
@@ -94,8 +98,10 @@ public:
     IOReturn unregisterInterrupt(void *);
     IOReturn setInterruptState(void *,UInt32);
     void armVBL();
+    void kickVBL();
     void deliverVBL();
     void publishVBLState();
     bool anyVBLEnabled();
     static void vblFired(thread_call_param_t,thread_call_param_t);
+    static void vblKicked(thread_call_param_t,thread_call_param_t);
 };

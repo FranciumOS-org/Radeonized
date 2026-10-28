@@ -197,8 +197,19 @@ private:
     uint32_t           hubpRejectWhy;
 
     /* 2wi: the transaction-retirement experiment. */
-    bool     retireArmed;
-    uint64_t retireEnables;
+    bool          retireArmed;
+    uint64_t      retireEnables;
+    /* 2wk: the immediate-delivery path. Boot 195 (nonce) measured Apple
+     * enabling its 'vbl ' slot 11 times with 4 transactions and its handler
+     * firing 0 times in 7200 ticks - so the enable window is shorter than our
+     * 7 ms period and the periodic tick never lands inside it. A SECOND
+     * thread_call, fired from the enable transition itself, delivers on our
+     * own thread microseconds later instead. Kept separate from vblCall so
+     * the 143.83 Hz clock stays a clean time reference for the crumb's rate
+     * formula, and so a kick can never cancel a pending periodic tick. */
+    thread_call_t vblKickCall;
+    uint64_t      retireKicks;      /* enable transitions we answered */
+    uint64_t      retireDelivered;  /* kicks that found the slot still enabled */
 
     bool hubpSetup(void);
     void hubpTeardown(void);
@@ -210,6 +221,8 @@ private:
     bool ownsPanel(void);
 
     static void vblFired(thread_call_param_t self, thread_call_param_t);
+    static void vblKicked(thread_call_param_t self, thread_call_param_t);
+    void kickVBL(void);
     void crumb(uint32_t stage);
     void deliverVBL(void);
     void armVBL(void);

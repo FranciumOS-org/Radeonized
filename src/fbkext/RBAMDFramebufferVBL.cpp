@@ -74,6 +74,8 @@ void RBAMDFramebuffer::publishVBLState(void)
      * because that is exactly the boot where they say why (rule 14). */
     setProperty("RBFBRetireArmed", retireArmed);
     setProperty("RBFBRetireEnables", retireEnables, 64);
+    setProperty("RBFBRetireKicks", retireKicks, 64);
+    setProperty("RBFBRetireDelivered", retireDelivered, 64);
     setProperty("RBFBHubpArmed", hubpArmed);
     setProperty("RBFBHubpReady", hubpReady);
     setProperty("RBFBHubpRefuse", (uint64_t)hubpRefuse, 32);
@@ -115,6 +117,39 @@ void RBAMDFramebuffer::publishVBLState(void)
     if (amtrSnapped) {
         setProperty("RBFBAmtrSnap", amtrSnap, (unsigned int)sizeof(amtrSnap));
     }
+}
+
+/* 2wk: one vblank, delivered to the slots we did NOT register, as soon as
+ * Apple enables one. It re-checks `enabled` here rather than trusting the
+ * reason it was scheduled, so a window that has already closed costs nothing
+ * and is counted as such - retireKicks minus retireDelivered is exactly how
+ * often we were too late, which is the measurement this experiment owes.
+ *
+ * It deliberately does NOT touch vblFires: that counter is the project's
+ * 143.83 Hz time reference (the crumb's rate formula divides by it), and an
+ * irregular extra tick would corrupt a clock that three milestones now rely
+ * on. The per-slot `fires` counter does move, because a fire really happened.
+ *
+ * This runs on our own thread_call, not on Apple's thread - the same context
+ * the periodic path would have called `proc` from if it had ever caught the
+ * window, so it is not a new hazard class, only better timing (rule 31). */
+void RBAMDFramebuffer::kickVBL(void)
+{
+    for (unsigned i = 0; i < kMaxInterrupts; i++) {
+        if (interrupts[i].used && interrupts[i].enabled &&
+            interrupts[i].target != this &&
+            interrupts[i].type == kIOFBVBLInterruptType && interrupts[i].proc) {
+            interrupts[i].fires++;
+            retireDelivered++;
+            interrupts[i].proc(interrupts[i].target, interrupts[i].ref);
+        }
+    }
+}
+
+void RBAMDFramebuffer::vblKicked(thread_call_param_t self, thread_call_param_t)
+{
+    auto fb = static_cast<RBAMDFramebuffer *>(self);
+    if (fb) { fb->kickVBL(); }
 }
 
 void RBAMDFramebuffer::armVBL(void)
@@ -243,6 +278,13 @@ IOReturn RBAMDFramebuffer::setInterruptState(void *interruptRef, UInt32 state)
             interrupts[i].enabled = (state != 0);
             if (!was && interrupts[i].enabled) {
                 vblEnables++;
+                /* 2wk: answer the enable NOW, not on the next 7 ms tick.
+                 * Field write plus a thread_call_enter only - no allocation,
+                 * no logging, no blocking on Apple's thread (rule 31). */
+                if (retireArmed && interrupts[i].target != this && vblKickCall) {
+                    retireKicks++;
+                    thread_call_enter(vblKickCall);
+                }
             }
             if (interrupts[i].enabled && !vblRunning) {
                 armVBL();
