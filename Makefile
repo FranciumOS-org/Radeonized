@@ -196,6 +196,10 @@ $(OUT)/vramtest: tools/vramtest.m | $(OUT)
 # mpPriv->accelerator, which SkyLight routes to CompositorSW when it is 0.
 # Prints its own precondition: an unarmed boot has no accelerator and every
 # number is 0 for an unrelated reason.
+metal_probe: $(OUT)/metal_probe
+$(OUT)/metal_probe: tools/metal_probe.m | $(OUT)
+	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal
+
 accelport: $(OUT)/accelport
 $(OUT)/accelport: tools/accelport.m | $(OUT)
 	clang -fobjc-arc -O2 -o $@ $< -framework Foundation -framework Metal \
