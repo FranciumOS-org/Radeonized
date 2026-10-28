@@ -42326,3 +42326,211 @@ Disassemble `IOAccelDisplayPipeTransaction2::set_transaction_args` in
 with `dirtyBits = 0x3c1` and `options = 0x801` as the measured inputs. No boot
 needed for that. Rule 35: if the chain ends at our own code again, instrument
 our end in the same change rather than a milestone later.
+
+## 2wc — `kIOReturnUnsupported` IS ONE FRAMEBUFFER ATTRIBUTE WE NEVER ANSWERED
+
+Static read, no boot. 2wb's frontier is closed, and the defect is in our own
+kext.
+
+### The chain, end to end
+
+`IOAccelDisplayPipeTransaction2::set_transaction_args` (`0x14e5ea68`,
+`IOAcceleratorFamily2`) is 0xae8 bytes with **one** `retq` returning `%r14d`.
+Three writers reach it: the literals `0xe00002c2` (`0x14e5f0df`) and
+`0xe00002bd` (`0x14e5f11f`), each after its own `os_log` at type `0x11`, and
+
+    14e5f4b5  rdi = this->0x28                  /* the IOAccelDisplayPipe   */
+    14e5f4bf  callq *0x8a0(%rax)                /* pipe->vt[0x8a0](this)    */
+    14e5f4c5  if (eax == 0) -> r14 = 0, return  /* 14e5f4ff                 */
+    14e5f4c9  r14 = eax
+              log "%s returning error 0x%x for transaction(%d).\n"
+              return r14
+
+so that call is the **only** site in the function that can return an arbitrary
+code, and the message we measured 122 times is its own. Rule 7: call `0x8a0`
+→ dump `0x8b0` = `IOAccelDisplayPipe::validateTransaction`, whose base is
+`xorl %eax,%eax; ret` (`0x14e61146`) — the slot above it,
+`IOAccelDisplayPipe::performTransaction` (`0x14e6114e`), is
+`movl $0xe00002c7,%eax; ret` unconditionally, which is worth knowing because
+it is the kext's own idiom for "not implemented".
+
+The override is `AMDRadeonX6000_AMDAccelDisplayPipe::validateTransaction`
+(`0xbe49a9e`): a kdebug-signposted wrapper (`0x85ad2009` before,
+`0x85ad200a` after) around
+
+    AMDRadeonX6000_AMDAccelDisplayPipe::executeTransaction(txn, false)
+
+(`0xbe49b54`, 0xc40 bytes), and it returns that call's value unchanged.
+
+### The sixth `kIOReturnUnsupported`, and why a grep could not see it
+
+`executeTransaction` has **five literal** `movl $0xe00002c7` sites —
+`0xbe49c40`, `0xbe49f99`, `0xbe4a17a`, `0xbe4a34a`, `0xbe4a47e` — and a
+**sixth** that the assembler writes as arithmetic:
+
+    be49b87  r13 = this->getFramebufferIndex()            /* 0x14e5d52c */
+    be49b94  al  = this->0x330->vt[0x190](r13)
+    be49b9d  if (txn == NULL) -> be49c78
+    be49ba5  if (!al)         -> be49c78
+    ...
+    be49c78  xorl %eax,%eax; testq %r14,%r14; setne %al
+    be49c80  leal (%rax,%rax,4), %r12d
+    be49c84  addl $0xe00002c2, %r12d       /* 0x2c2 + 5 == 0x2c7 */
+
+`0xe00002c2` is `kIOReturnBadArgument` and `0xe00002c2 + 5` is
+`0xe00002c7` = `kIOReturnUnsupported`. So **a non-NULL transaction whose
+`vt[0x190]` answers false gets kIOReturnUnsupported on the function's first
+test, before a single dirty bit is looked at.** `grep -n '2c7'` over the
+disassembly returns five sites and misses this one — **rule 26 again, and the
+sixth recorded instance**: a constant can be a sum.
+
+### Enumerating the other five against the measured inputs
+
+Boot 191 measured `dirtyBits = 0x3c1` and `options = 0x801`, and
+`validateTransaction` passes the `bool` as **0**. `0x3c1` is bits 0, 6, 7, 8,
+9. With `r12 = txn->getTransactionDirtyBits()` (`0x14e608fa`) and
+`txn->getTransactionOptions()` (`0x14e60904`):
+
+| site | guard | with 0x3c1 |
+|---|---|---|
+| `0xbe49c40` | `dirtyBits == 0x100` exactly, then `getPlaneResource(0,0)` NULL | not taken |
+| `0xbe49f99` | `dirtyBits & 0x4`, `getPlaneGammaTable(0)` count > 0x100 | bit clear |
+| `0xbe4a17a` | `dirtyBits & 0x20`, `getPipePreGammaTable()` count > 0x100 | bit clear |
+| `0xbe4a34a` | `dirtyBits & 0x80`, **`getPipePostGammaTable()` count > 0x100** | **live** |
+| `0xbe4a47e` | `dirtyBits & 0x400`, `getPipePostCSCGammaVID()` size/cid | bit clear |
+
+Every count check is `cmpl $0x100, %r13d; ja`, i.e. **AMD refuses a gamma
+table of more than 256 entries**, with `r13 = IOAccelDisplayPipeGammaTable2::
+getTableCount()` (`0x14e62a92`). That made the post-gamma ceiling a real
+candidate, and the capture settles it: counting the LUT CoreDisplay actually
+submits in boot 190's dumps gives **71 of 256 entries and 2 of 1024**, and in
+boot 189's **67 and 2**. A ceiling that two submissions in seventy-three
+cross cannot produce 122 failures out of 122. (A `sort -u` of those lines had
+shown both sizes and nothing else, which read as "1024 is what it sends" —
+rule 26: a de-duplicated list is not a count.)
+
+So the live candidate is the unconditional one.
+
+### `vt[0x190]`, and the one thing that writes it
+
+`pipe->0x330` is the HWDisplay (2w9). Rule 7: call `0x190` → dump `0x1a0`, in
+both `__ZTV27AMDRadeonX6000_AMDHWDisplay` and
+`__ZTV28AMDRadeonX6000_AMDDCNDisplay`; the control that fixes those tables'
+alignment is dump `0x258` = `AMDDCNDisplay::isDisplayControlEnabled`
+(`0xbec012e`), exactly where 2wa found it, and dump `0x138` =
+`isDisplayEnabled`, exactly where 2w9 found it. The slot is an unnamed
+accessor at `0xbec02ce`:
+
+    bool f(unsigned idx) { return ((uint8_t *)this->0x40)[idx * 0xd0 + 1] & 1; }
+
+`this->0x40` is `IOMalloc(this->0x58 * 0xd0)` in
+`AMDRadeonX6000_AMDHWDisplay::init` (`0xbe86c66`), one 0xd0-byte state struct
+per display, and `this->0x58` is the display count `isDisplayEnabled` bounds
+against. Byte +1 bit 0 is **bit 8 of the dword at +0x00**. Of the forty
+`imulq $0xd0` sites in the kext not one writes that dword — the sole writer
+uses a precomputed index, inside **`AMDRadeonX6000_AMDHWDisplay::
+getDisplayInfo` (`0xbe8700e`)**, forty bytes past the `ATY,fb_offset` read
+2w9 traced:
+
+    be870e2  orl  $0x40,       (%rax,%rbx)
+    be87100  r = fb->vt[0xa30]('wsaa', &out)
+    be87113  if (r)  andl $~0x80 ;  else { this->0x570[idx] = out; orl $0x80 }
+    be87165  r = fb->vt[0xa30]('amtr', &out)
+    be8717e  if (r == 0 || r == 0xe00002d8)  orl  $0x100,      (%rax,%rbx)
+    be8718b  else                            andl $~0x100,     (%rax,%rbx)
+
+Rule 7 on `IOFramebuffer`: call `0xa30` → dump `0xa40` =
+**`IOFramebuffer::getAttribute(IOSelect, uintptr_t *)`**, and call `0xa28` →
+dump `0xa38` = **`setAttribute(IOSelect, uintptr_t)`**. The four-character
+codes decode as C literals: `0x77736161` = `'wsaa'` =
+`kIOWindowServerActiveAttribute`, which is the **control** — it is a
+documented IOGraphics attribute and it sits in the same instruction shape —
+and `0x616d7472` = `'amtr'`.
+
+`'amtr'` is a real `AMDFramebuffer` attribute, not an inference:
+`AMDFramebuffer::setAttribute` and `::getAttribute` each have a `subl
+$0x616d7472` case (`0x2a580b`, `0x2a6cb1`), four code references in all, and
+`IOGraphicsFamily` has **zero** (the seven raw byte matches there are data —
+rule 26). Their bodies give the whole protocol:
+
+    getAttribute('amtr', out)                                0x2a6faa
+        if (!(ctrl->0x31332 >> 9 & 1)) return kIOReturnUnsupported;
+        if (getOutstandingDisplayPipeTransactions())  return kIOReturnNotReady;
+        return kIOReturnSuccess;              /* *out is never written */
+
+    setAttribute('amtr', value)                              0x2a65a4
+        if (!value) return kIOReturnBadArgument;
+        if (this->0xef0) this->0xe68 = 1;
+        if (!tryAcquireIOPGuard()) return kIOReturnNotReady;
+        this->0xe68 = 0;
+        r = handleDisplayPipeTransaction((_AMD_PIPE_TRANSACTION *)value);
+        releaseIOPGuardNotify();
+        return r;
+
+### So the defect is ours, and it is one selector
+
+`RBAMDFramebuffer` declared `getAttribute` and `setAttribute` and handled
+exactly one selector between them (`kIOHardwareCursorAttribute`), falling
+through to `IOFramebuffer`'s base for everything else — which answers an
+unknown attribute with `kIOReturnUnsupported`. That clears bit 8 on every
+`getDisplayInfo`, which fails `vt[0x190]`, which returns
+`kIOReturnUnsupported` from `executeTransaction`'s first test, which
+`validateTransaction` passes through, which `set_transaction_args` logs. **122
+transactions, 122 refusals, one cause, and it is a selector we never answered.**
+
+This also explains the shape of boot 191 that nothing else did: the pipe went
+**active** (`ax0_active 1`, `r380 1`) and transactions were **created and
+numbered** — everything up to and including `initFramebufferResource` works —
+and then every single one was refused identically with no variance across 62
+seconds. A gate that depends on a table size, a plane count or a capability
+reply would vary; a missing attribute cannot.
+
+It is the **seventh** time a correct static chain was attached one link off
+before the probe or the next read moved it, and the second time the answer was
+in the same function as the previous milestone's (`getDisplayInfo` gave 2w9
+the ATY pair and gives 2wc the `'amtr'` bit, forty bytes apart).
+
+### What is in build `6F1EB613`
+
+`-rbgpufbamtr`, off by default, in `src/fbkext`:
+
+- `getAttribute('amtr', *)` → `kIOReturnSuccess`, counted in `RBFBAmtrGets`.
+  It does **not** write `*value`, copying AMDFramebuffer, whose consumer
+  presets its local and ignores the out-parameter.
+- `setAttribute('amtr', value)` → `kIOReturnBadArgument` on a null value
+  (AMDFramebuffer's own answer), otherwise `kIOReturnSuccess`, counted in
+  `RBFBAmtrSets`, and the **first** call snapshots 0x80 bytes from `value`
+  into `RBFBAmtrSnap`. Rule 19: the floor checked is the **kernel** base
+  `0xffffff8000000000`, correct for a kalloc'd object, and a refusal publishes
+  the pointer it refused in `RBFBAmtrRefused`.
+- Neither handler allocates. They run on the accelerator's thread with its
+  locks held; the VBL `thread_call` publishes the counters (rule 31), and
+  `RBFBAmtrArmed` is published **unconditionally** in `start()` beside
+  `RBFBAtyArmed`, which is rule 15's cheap independent identity check.
+
+`value` is `&pipe->0x410` — `executeTransaction` ORs 0x1, 0x2, 0x4, 0x8,
+0x10, 0x20, 0x40, 0x100 and 0x201 into the flag word there, puts the plane
+resource at +0x10, the destination rect at +0x18/+0x20, the colour matrix at
++0x30 and the gamma tables from +0x220 — so `RBFBAmtrSnap` is the first
+cooked display-pipe transaction this project has ever been handed, and the
+surface address in it is what the scanout eventually has to be pointed at.
+
+The hosttest shim (`tools/hosttest/fb_vbl_shim.hpp`) grew the same fields and
+a blob `setProperty`, so `publishVBLState` stays host-compiled.
+
+### Said before the boot
+
+The transaction is **answered, not executed** — nothing is written to DCN, so
+the panel keeps showing whatever it shows and the composited image lands
+nowhere. A working PIPE with a wrong IMAGE is still the goal (2w9). Expect
+`RBFBAmtrGets` > 0, `RBFBAmtrSets` > 0, `RBFBAmtrSnapped` true, and the
+`set_transaction_args` error line **gone**. If the gets move and the sets do
+not, validation passed and the submit path is gated somewhere else; if neither
+moves, `getDisplayInfo` is not reaching us and the chain above the attribute
+is wrong.
+
+### Next
+
+An armed boot of fbkext `6F1EB613`, **installed to the auxiliary collection**
+(rule 15 — a rebuild refreshes nothing, and boot 190 was lost to exactly this
+omission), with `-rbgpufbaty` and `-rbgpufbamtr` both in boot-args.
