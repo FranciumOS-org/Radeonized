@@ -274,6 +274,9 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * one, and `-rbgpufbvbl` is already in use. */
     retireArmed = false;
     retireEnables = 0;
+    retireKicks = 0;
+    retireDelivered = 0;
+    vblKickCall = nullptr;
     {
         char retflag[16];
         retireArmed = PE_parse_boot_argn("-rbgpufbretire", retflag, sizeof(retflag));
@@ -357,6 +360,14 @@ bool RBAMDFramebuffer::start(IOService *provider)
     vblCall = thread_call_allocate(vblFired, this);
     if (!vblCall) {
         LOG("thread_call_allocate failed; the vblank will not be delivered");
+    }
+    /* 2wk: a separate call for the immediate kick, so it can never cancel or
+     * reschedule a pending periodic tick. A failure here is reported and not
+     * fatal - the periodic path still runs (rule 14). */
+    vblKickCall = thread_call_allocate(vblKicked, this);
+    if (!vblKickCall) {
+        LOG("kick thread_call_allocate failed; retirement will rely on the "
+            "periodic tick, which boot 195 measured as always too late");
     }
     setProperty("RBFBVBLTimerAllocated", vblCall != nullptr);
     publishVBLState();  // zero is a reading; missing properties are not
@@ -610,6 +621,11 @@ void RBAMDFramebuffer::stop(IOService *provider)
         thread_call_cancel(vblCall);
         thread_call_free(vblCall);
         vblCall = nullptr;
+    }
+    if (vblKickCall) {
+        thread_call_cancel(vblKickCall);
+        thread_call_free(vblKickCall);
+        vblKickCall = nullptr;
     }
     vblRunning = false;
     crumb(8);   /* stop() entered - a clean teardown, not a crash */

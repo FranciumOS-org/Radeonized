@@ -10,6 +10,12 @@ void thread_call_enter_delayed(thread_call_t c,uint64_t deadline) {
     c->queued=1;c->deadline=deadline;c->enters++;
 }
 void thread_call_cancel(thread_call_t c) {c->queued=0;c->cancels++;}
+/* 2wk: the immediate kick. Returns whether a call was ALREADY pending, which
+ * is what the real thread_call_enter reports, so the test can assert that a
+ * second enable while one kick is in flight does not queue a second. */
+bool thread_call_enter(thread_call_t c) {
+    bool was=c->queued; c->queued=1; c->enters++; return was;
+}
 struct Counts { unsigned fb=0, pipe=0; };
 static void fbCallback(OSObject *target,void *ref) {
     assert(target);static_cast<Counts *>(ref)->fb++;
@@ -90,5 +96,58 @@ int main() {
         // A lower stage must never walk the furthest point back.
         cr.crumb(2); assert(cr.crumbStage==13);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry and a bounded 4-write crumb budget passed");
+    /* 2wk: the immediate kick. Boot 195 (nonce) measured Apple enabling its
+     * slot 11 times with 4 transactions while its handler fired 0 times in
+     * 7200 periodic ticks, so the window is shorter than the 7 ms period.
+     * These assert the three things that reading depends on. */
+    {
+        RBAMDFramebuffer k; FakeCall kTimer, kKick;
+        k.vblCall=&kTimer; k.vblKickCall=&kKick; k.retireArmed=true;
+        Counts kc; void *mine=nullptr, *theirs=nullptr;
+        // Slot 0 is ours (target == &k); slot 1 is "Apple's" (a foreign target).
+        assert(k.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&k,&kc,&mine)==0);
+        assert(k.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&kc,&theirs)==0);
+
+        // 1. Our OWN slot's enable must NOT kick - otherwise every re-enable
+        //    of the handler we registered would deliver a spurious vblank.
+        uint64_t kicks0=k.retireKicks;
+        k.setInterruptState(mine,0); k.setInterruptState(mine,1);
+        assert(k.retireKicks==kicks0);
+
+        // 2. A foreign slot's off->on transition kicks exactly once, and the
+        //    kick delivers while the slot is still enabled.
+        k.setInterruptState(theirs,0);
+        unsigned before=kc.pipe;
+        k.setInterruptState(theirs,1);
+        assert(k.retireKicks==kicks0+1);
+        k.kickVBL();
+        assert(k.retireDelivered==1 && kc.pipe==before+1);
+
+        // 3. A window that closed before the kick ran costs nothing, and the
+        //    shortfall is visible: kicks - delivered is how often we were
+        //    late, which is the measurement this experiment owes.
+        k.setInterruptState(theirs,0);
+        k.setInterruptState(theirs,1);
+        assert(k.retireKicks==kicks0+2);
+        k.setInterruptState(theirs,0);      // Apple gives up before we run
+        unsigned held=kc.pipe;
+        k.kickVBL();
+        assert(k.retireDelivered==1 && kc.pipe==held);
+        assert(k.retireKicks-k.retireDelivered==1);
+
+        // 4. The kick must NOT move vblFires: that counter is the project's
+        //    143.83 Hz time reference and the crumb divides by it.
+        uint64_t fires=k.vblFires;
+        k.setInterruptState(theirs,1); k.kickVBL();
+        assert(k.vblFires==fires);
+
+        // 5. Disarmed, nothing is kicked at all.
+        RBAMDFramebuffer d; FakeCall dT,dK;
+        d.vblCall=&dT; d.vblKickCall=&dK; d.retireArmed=false;
+        void *dref=nullptr;
+        assert(d.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&kc,&dref)==0);
+        d.setInterruptState(dref,0); d.setInterruptState(dref,1);
+        assert(d.retireKicks==0);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a bounded 4-write crumb budget and the 2wk immediate kick passed");
 }
