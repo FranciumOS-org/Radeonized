@@ -41745,3 +41745,33 @@ One new kernel message shape not seen in 185:
 NEXT: the same experiment, build **`D69D9B33`**, nothing else changed. The
 boot-arg is already in `config.plist`, so only the four one-shots and the
 plugin install are needed.
+
+================================================================================
+2w6 - BOOT 187: THE EFI STILL HAS THE OLD BUILD. RULE 15 CAUGHT IT.
+================================================================================
+2026-10-27, logs/20261027-232014-plugin, boot 187, armed, captured at +2m12s.
+
+`rbgpu-boot` **187** (new), `armed 1`, `agdc_oneshot 0`, `iop_oneshot 0`,
+`diag_used` 564/768 - and **zero `ax*` keys** again.
+
+**The loaded plugin is `D8B1115C`. The built one is `D69D9B33`.**
+
+    kexts.txt:   com.rembrandtgpu.plugin (1.0.0) D8B1115C-EB6C-...
+    build/out:   UUID: D69D9B33-1EB3-...
+
+So boot 187 ran the **same binary as boot 186**, with the same dead call site
+2w5 found, and its silence carries no new information. 2w5's fix is in
+`build/out` and has never been on the machine: the plugin boots from the
+OpenCore EFI, and getting a new build there takes
+**`sudo tools/efi.sh install`**, which 2w5's handoff listed as "the plugin
+install" without the command. Rule 15 exists for exactly this and caught it
+on the first check; nothing was concluded from the absent keys.
+
+Boot 187's capture is otherwise a third consistent reading of the same
+failure, with 2w4's in-capture controls present: 4121 lines, 438 `[INFO]`,
+**513 kernel lines**, **26 `display_change_handler`**, 131
+`Failed to submit transaction` **all `IOReturn: 0x2d8`**, 37 `event timeout`,
+and `init_framebuffer_resource` **0**. Three boots now agree:
+`kIOReturnNotReady` every time, `pipe->0x298` set every time.
+
+NEXT: unchanged experiment, but **install the build first**.
