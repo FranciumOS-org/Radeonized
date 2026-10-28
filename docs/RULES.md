@@ -362,6 +362,74 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 185: THE ERROR IS NAMED, AND IT IS THREE BITS IN APPLE'S KERNEL
+(2w3).** 2w2's `--info` fix worked: **388 `[INFO]` lines** where boots 177-184
+had zero (controls: 203 `[ERROR]`, 139 `[WARN]`), and the message that had
+been invisible for eight boots is there **118** times -
+**`Failed to submit transaction: IOPRESENTMENT_METHOD_FAILURE: IOReturn:
+0x2d8`**. `0x2d8` is **`kIOReturnNotReady`** (IOReturn.h:126 on this
+machine). CoreDisplay's encoder packs `(ioreturn_low10 << 22) | 0x8f`, so the
+whole error is one kernel return code.
+Arm verified first (rule 34): `rbgpu-boot` 185, `agdc_oneshot 0`,
+`iop_oneshot 0`, `agdc_error 0`, `agdc_ec_scaler` **0x196C_00_01_00** again,
+`diag_used` **564** of 768. `Fallback ... submission failed` **58** (so
+Submit runs ~twice per Commit), `Failed to create IOPresentment transaction`
+**0** - 2w2's reading of `IOPresentmentBegin` confirmed in a capture that
+now carries the level it would have been logged at.
+**IOPresentment ITSELF is talking**, newly visible at INFO:
+*"Valid ADGC node found for this device"*, *"AGDC CSC / Gamma /
+Linearization / Plane Scaler / Cursor successful"* (x3 each, three gathers),
+*"Capabilities conversion successful"*, *"Successfully created presentment
+object type: 1024"*. **2w1's elimination of the whole AGDC reply surface is
+now confirmed by the consumer in words** - and before each failure it echoes
+our degamma entry back intact (`type 0x1 cid 0x20 min 0 max 1 num 1`).
+**The failing call is `IOAccelDisplayPipeUserClient2::transactionEnd`**
+(IOAcceleratorFamily2 `0x14e64620`), the only `kIOReturnNotReady` in the
+display-pipe path. `IOPresentmentEnd` is a trampoline (validate, tail-jump
+`obj->0xa0` vtable slot `0x80`), so the code is the kernel's. Exactly three
+conditions produce it:
+
+| gate | meaning | writer |
+|---|---|---|
+| `accel->0xc78 & 0x2` clear | accelerator not enabled | `enableAccelerator()` only |
+| `pipe->0x282 != 0` | WSAA defer in progress | `wsaaWill/DidEnter/ExitDefer` |
+| `pipe->0x298 == 0` | `IOAccelDisplayPipe::isActive()` false | `init_framebuffer_resource` only |
+
+**`0x298` is almost certainly SET**: `init_framebuffer_resource`
+(`0x14e5d7ca`) is called **unconditionally** by
+`IOAccelDisplayPipe::displayModeDidChange` (`0x14e5db14`), which is the
+**only site in the whole kext** that registers `'vbl '` - and boot 183
+measured that registration on our framebuffer. All three of its failure
+exits log at os_log type **0x11 = FAULT**, the capture carries
+IOAcceleratorFamily2 FAULTs (`checkGPUProgress`), and none of theirs
+(rule 26: control present, message absent).
+**The prime suspect is `accel->0xc78` bit 1.** `IOGraphicsAccelerator2::start`
+clears it; the sole setter is `enableAccelerator()`, called only from
+`IOAccelDisplayMachine::display_mode_did_change` (`0x14e2148e`) - and that
+function **skips the enable but still runs the per-pipe
+`displayModeDidChange` loop** when **`accel->0x180 == 0`**. That one branch
+fits every measurement: VBL registered, framebuffer resource inited,
+accelerator never enabled, `transactionEnd` answering NotReady 118 times.
+**`accel->0x180` is the VRAM descriptor, and it comes from OUR
+framebuffer**: `find_vram_descriptor()` (`0x14e53922`, called from
+`found_framebuffer` and `display_change_handler`) does `fb->vt[0x9b0]()` =
+**`IOFramebuffer::getVRAMRange()`** (2pq's slot), stores it at `0x180`, maps
+it (`vt[0x200](1)` -> `0x188`, `vt[0x118]()` -> `0x190`) and **on a failed
+map releases it and writes `0x180 = 0`**.
+`RBAMDFramebuffer::getVRAMRange()` returns the retained aperture, so the
+suspect is the **map** - or `found_framebuffer` never running for us.
+Offsets are from the accessors, not guessed: `machine+0x108` count
+(`getFramebufferCount`), `machine+0x88+8*i` pipe (`getDisplayPipe`),
+`pipe+0x298` (`isActive`), `accel+0x378` machine (`find_vram_descriptor`).
+**So the defect is in NONE of our replies** - not AGDC, not the plane count,
+not gamma, not a capability type. It is one enable bit.
+**NEXT IS A READ, build `27C88A57`**: `-rbgpuaccelprobe` schedules three
+read-only samples (25/45/75 s) that find the accelerator by class, check
+`getClassSize()` before touching an offset (rule 19, and refuse loudly),
+and publish `ax<i>_gate` (0 all open, 1 accel not enabled, 2 defer,
+3 not active) plus `enabled/active/defer/vram/vmap/fbs`, the numeric keys
+first in the hot list because the boot wedges and the note truncates.
+
 **`Submit()` IS READ IN FULL, AND OUR CAPTURE HAS BEEN DROPPING THE CAUSE FOR
 EIGHT BOOTS (2w2).** No boot. `IOPTransaction::Submit` (`0x7ff8040c8a56`) has
 one epilogue returning `%ebx` and three exits: success
@@ -900,7 +968,9 @@ and a measured 4096 MB we publish; macOS detects neither), `-rbgpufbaccel`
 (claims `kDisplayModeAcceleratorBackedFlag`; verified to take and to change
 nothing downstream, 2q7), `-rbgpuiop` (opens the IOPresentment vendor gate;
 correct, verified, inert without its one-shot — **keep it**), `-rbgpuagdc`
-(the AGDC bridge), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
+(the AGDC bridge), `-rbgpuaccelprobe` (2w3 - three read-only samples of the
+three bits behind `kIOReturnNotReady`; reads only, refuses on a class too
+small for the offsets), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
 (answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
 Cursor as well as 0x10 Scaler — off by default because three of the four carry
 a substituted field, 2sc).
