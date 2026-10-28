@@ -41537,3 +41537,128 @@ object at known offsets, so one armed boot with a read-only probe -
 accelerator by class, then `+0xc78`, `+0x180`, `+0x188`, `+0x378` ->
 `+0x108`, `+0x88[0]` -> `+0x298`, `+0x282`, `+0x280`, `+0x299` - says which
 gate is shut, with no hooks and no writes.
+
+================================================================================
+2w4 - THE KERNEL HALF OF OUR OWN CAPTURE WAS ONE FUNCTION NAME, AND BEHIND IT
+      WERE THE DISPLAY GATE AND THE WEDGE
+================================================================================
+2026-10-27. No boot. Boot 185's window re-queried, 213 lines recovered.
+
+**2w3's FAULT-absence argument was unsound, and this corrects it.** 2w3
+concluded that `init_framebuffer_resource` had not failed because its three
+FAULT exits were absent from `display-log.txt`. But that capture's kernel
+clause was `eventMessage CONTAINS "checkGPUProgress"` - a **literal single
+function name** - so no other IOAcceleratorFamily2 message could ever appear
+and the absence carried nothing. Rule 26, twice in two milestones: 2w2 lost
+eight boots to the log LEVEL, 2w3 nearly lost a conclusion to the
+PREDICATE. The reading was right; its control was not.
+
+Re-queried by **sender** over boot 185's window (18:55:59 boot,
+18:57:30 the next one; both Darwin banners checked, rule 28) - saved as
+`logs/20261027-185657-plugin/kernel-accel-log.txt`:
+
+    senderImagePath CONTAINS "IOAcceleratorFamily2"
+      OR senderImagePath CONTAINS "AMDRadeonX6000"
+
+FAULT-level messages persist across a reboot, which is the only reason this
+was recoverable at all - INFO ones do not (2w2).
+
+--- 1. `display_change_handler` logs EVERY notification, with its number ----
+
+`IOAccelDisplayPipe::display_change_handler` (`0x14e5cab4`) logs at os_log
+type **0x11 = FAULT** on entry and on completion, printing the event, and
+calls `IOGraphicsAccelerator2::find_vram_descriptor()` **unconditionally**
+before dispatching. Boot 185, 13 notifications:
+
+    18:56:04.974  event 1    DisplayModeWillChange
+    18:56:04.974  event 2    DisplayModeDidChange
+    18:56:04.975  event 40   OnlineChange
+    18:56:04.985  event 1, 2
+    18:56:04.991  event 91   WSAAWillExitDefer
+    18:56:04.991  event 93   WSAADidExitDefer
+    18:56:05.034  event 90   WSAAWillEnterDefer
+    18:56:05.034  event 92   WSAADidEnterDefer
+    18:56:05.408  event 1, 2
+    18:56:05.543  event 91, 93
+
+The numbers are `kIOFBNotify*` from `IOFramebuffer.h` - 40 OnlineChange
+(the handler's own `cmpl $0x28` arm confirms it), 90 WSAAWillEnterDefer,
+**91 WSAAWillExitDefer**, 92 WSAADidEnterDefer, **93 WSAADidExitDefer**.
+So our framebuffer's notification delivery is working, `found_framebuffer`
+ran, and `find_vram_descriptor` ran thirteen times with a non-zero
+framebuffer count.
+
+(Also found: `find_vram_descriptor`'s call from `found_framebuffer`
+(`0x14e21278`) happens **before** `0x108` is incremented, so on the first
+framebuffer `getFramebufferCount()` reads 0, the loop body never runs and
+`accel->0x180` is left NULL by that call. It is the handler's own calls that
+can fill it.)
+
+--- 2. TWO OF THE THREE GATES ARE NOW ELIMINATED --------------------------
+
+**The defer gate (`pipe->0x282`) is OPEN.**
+`IOAccelDisplayPipe::wsaaDidExitDefer` (`0x14e5dfe6`) ends
+`xorl %eax,%eax; movb %al,0x2ac; movb %al,0x282; movb $0x1,%al` - it zeroes
+the byte **unconditionally** and returns true. Event 93 last fired at
+**18:56:05.543**, and the submit failures run **18:56:05.516 -> 18:56:07**
+and again at **18:56:39** and **18:56:55**. A flag cleared at .543 cannot be
+what fails a call at 18:56:55.
+
+**The isActive gate (`pipe->0x298`) is OPEN**, now against a real control:
+213 IOAcceleratorFamily2 FAULT lines in the window, from the same thread
+(`kernel[0:3a4]`), and **not one** from `init_framebuffer_resource`, whose
+every failure exit logs at that level.
+
+**So the gate is `accel->0xc78 & 0x2` - the accelerator-enabled bit** - by
+elimination, from the log alone. `enableAccelerator()` is its only setter and
+is called only from `IOAccelDisplayMachine::display_mode_did_change`, which
+skips it (while still running the per-pipe loop) when **`accel->0x180 == 0`**.
+
+The vendor gate above it is now named too: `display_mode_did_change`'s
+`callq *0x870(%rax)` is dump offset 0x880 (rule 7) =
+**`AMDRadeonX6000_AMDAccelDisplayMachine::displayModeDidChange()`**
+(`0xbe48428`), which returns
+`AMDRadeonX6000_AMDAccelDisplayMachine::set_display_mode_and_vram()`. If that
+returned false, the pipe loop would be skipped too - and it was not, so it
+returned true at least once. Note `machine->0x180` in AMD's code is its own
+back-pointer to the accelerator (set in `init`), not the same field.
+
+--- 3. THE WEDGE, NAMED FOR THE FIRST TIME -------------------------------
+
+Starting at **18:56:11.410** - six seconds after the first submit failure -
+and repeating every ~5-6 s until 18:56:50:
+
+    (AMDRadeonX6000) channel 52 GFX event timeout;        pending stamps [1..289]
+    (AMDRadeonX6000) channel 12 SDMA0_PAGE event timeout; pending stamps [1..191]
+    (AMDRadeonX6000) channel 53 SDMA0_PAGE event timeout; pending stamps [1..184]
+    (AMDRadeonX6000) channel N is not hung, keep running                     x18
+    (IOAcceleratorFamily2) checkGPUProgress - Signaling hardware error on
+                           channel 12 / 25 / 52 / 53                         x22
+    (IOAcceleratorFamily2) signalHardwareError: GPURestartSignaled /
+                           GPURestartEnqueued                            x22 each
+    (IOAcceleratorFamily2) hardwareErrorEvent: setting restart type to 2     x22
+    (IOAcceleratorFamily2) restart_channel: GPURestartSkipped                x18
+    (IOAcceleratorFamily2) restart_channel: no channel associated with
+                           stamp_idx N (type 2)                              x18
+
+Work IS submitted - stamps 1..289 on GFX, 1..191 and 1..184 on SDMA0_PAGE -
+and **never retires**. The timeout fires, AMD's own hang check answers *"not
+hung, keep running"*, the restart path cannot find the channel for the stamp
+and skips, and the whole cycle repeats. That is the wedge, and it is a
+**stamp-retirement** failure, not a display one: it begins **after** the
+display-pipe failures, not before.
+
+Also new and unexplained: **`IOAccelSurface::set_id_mode(uint32_t,
+uint32_t): Surface mode contains bad bits`**, four times at 18:56:05.034 -
+in the same 1 ms as WSAAWillEnterDefer, and ~0.5 s before the first submit
+failure.
+
+--- 4. INSTRUMENT FIXED ---------------------------------------------------
+
+`tools/plugin_check.sh`'s `dl_pred` now matches by **sender**
+(`IOAcceleratorFamily2`, `AMDRadeonX6000`) instead of one function name, and
+the summary prints the kernel-line count plus a `display_change_handler`
+count, with a WARNING when the kernel count is zero against a non-zero
+total. `display_change_handler` logs once per notification unconditionally,
+so it is a genuine known-present control for the kernel half - the same
+shape rule 26 asks for, applied to a predicate rather than a level.
