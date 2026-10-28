@@ -68,6 +68,26 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAmtrSnapped", amtrSnapped);
     setProperty("RBFBAmtrPtr", amtrPtr, 64);
     setProperty("RBFBAmtrRefused", amtrRefused, 64);
+    /* 2wh: the HUBP write. RBFBHubpArmed is published UNCONDITIONALLY, so it
+     * is the rule-15 identity key for this build whatever the boot-args say.
+     * Refuse, Orig and the pipe state are published even when we never wrote,
+     * because that is exactly the boot where they say why (rule 14). */
+    setProperty("RBFBHubpArmed", hubpArmed);
+    setProperty("RBFBHubpReady", hubpReady);
+    setProperty("RBFBHubpRefuse", (uint64_t)hubpRefuse, 32);
+    setProperty("RBFBHubpOtgCtl", (uint64_t)hubpOtgCtl, 32);
+    setProperty("RBFBHubpPitch", (uint64_t)hubpPitch, 32);
+    setProperty("RBFBHubpConfig", (uint64_t)hubpConfig, 32);
+    setProperty("RBFBHubpAddrCfg", (uint64_t)hubpAddrCfg, 32);
+    setProperty("RBFBHubpTiling", (uint64_t)hubpTiling, 32);
+    setProperty("RBFBHubpOrig", hubpOrig, 64);
+    setProperty("RBFBHubpWrites", hubpWrites, 64);
+    setProperty("RBFBHubpLast", hubpLast, 64);
+    setProperty("RBFBHubpReadback", hubpReadback, 64);
+    setProperty("RBFBHubpRejects", hubpRejects, 64);
+    setProperty("RBFBHubpRejectAddr", hubpRejectAddr, 64);
+    setProperty("RBFBHubpRejectWhy", (uint64_t)hubpRejectWhy, 32);
+
     setProperty("RBFBAmtrFlipSnapped", amtrFlipSnapped);
     setProperty("RBFBAmtrFlipPtr", amtrFlipPtr, 64);
     setProperty("RBFBAmtrFlipRefused", amtrFlipRefused, 64);
