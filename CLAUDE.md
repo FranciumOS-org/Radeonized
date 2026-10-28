@@ -362,6 +362,53 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 196: THE DISPLAY REPRODUCES, AND THE ONE-SHOT IS FIXED BY OVERWRITING
+IT (2wj).** The user restarted **without** installing `452E6EE1` and
+**without** `-rbgpufbretire`, so boot 196 is boot 195's configuration again:
+same composited accelerated desktop, same ~1 frame per 10 s. **n=2 for 2wi**,
+and **`-rbgpufbretire` is STILL UNTESTED.**
+**THE SERIOUS FINDING IS OUR OWN CODE.** `rbgpu-fb` never consumed, so the
+framebuffer took over on every power cycle and the HUBP write with it (it has
+no one-shot of its own, 2wi) - and at the 0.09 Hz transaction rate **there is
+no usable desktop from which to edit boot-args**, so the only way out was to
+boot **WINDOWS** and edit the OpenCore config there. **A feature that cannot
+be disarmed from the machine it runs on is a worse failure mode than anything
+it was guarding against.** "The boot-arg is the durable disarm" has been the
+answer since 2sr, but it assumes a machine usable enough to run `efi.sh` -
+which 2wh removed as a side effect of succeeding.
+**AND THE FIX WAS ALREADY IN THAT FILE, MEASURED, SINCE 2sr.** The consume was
+`options->removeProperty("rbgpu-fb")`, and 2sr's own comment forty lines above
+says why that cannot work: `removeProperty` tail-jumps to
+`removePropertyWithGUIDAndName` which calls **no sync**, while `setProperty`
+reaches `setPropertyWithGUIDAndName` and **does** - which is exactly why
+`rbgpu-fbcrumb` has persisted reliably all along **through the same registry
+entry**. The two facts sat two screens apart for eleven milestones without
+being put together. **So CONSUME BY OVERWRITE, NOT BY REMOVAL**: build
+`DEB8918D` writes a literal `"0"`, and the arming check twenty lines above
+**already** treats `"0"` as not armed for both `OSData` and `OSString`, so
+nothing else had to change. `IONVRAM-FORCESYNCNOW-PROPERTY` is kept but
+evidently did **not** rescue the removal across boots 191-196, so on this
+machine it is no substitute for using a syncing path.
+**WHAT THIS CHANGES ABOUT PAST BOOTS**: the takeover was effectively **sticky
+from whenever it was last armed**, which is why it has never once failed to arm
+since 2st. **No earlier conclusion is invalidated** - the takeover is confirmed
+in every boot by `RBAMDFramebuffer`'s own registry keys, not by the one-shot -
+but "the fb armed again" was never evidence that a fresh key had been set. Rule
+9 held for the *plugin's* keys (`rbgpu-boot` increments, so those really were
+consumed) and not for this one.
+**AFTER THIS BUILD ONE POWER CYCLE IS A FULL DISARM**: `rbgpu-fb` reads `0`,
+`RBAMDFramebuffer` declines the panel, `IONDRVFramebuffer` matches as usual,
+and the desktop comes back on software compositing - **usable enough to run
+`efi.sh`**. A separate `rbgpu-hubp` one-shot is **available and not taken**:
+one power cycle already disarms the whole chain and the smaller change is the
+better one.
+**AND THE CRUMB ALREADY MEASURES THE FRAME RATE WITH NO CAPTURE** - 2wi's
+instrument is better than it was designed to be. It carries `f=` vblFires and
+`t=` amtrSets, and the VBL thread_call runs at the panel's 143.83 Hz, so
+**transactions/s = `t / (f / 143.83)`** from one `nvram rbgpu-fbcrumb` read
+after a power cycle. That resolves 0.09 Hz against 1 Hz or 60 Hz with room to
+spare, which is all the precision this question needs.
+
 **BOOT 195: THE DISPLAY WORKS. THE GPU COMPOSITES TO THE PANEL (2wi).** The
 HUBP write landed. Reported from the screen - the one instrument only the user
 can read: frozen at first, then the cursor, then the lock screen after ~30 s,
@@ -1409,10 +1456,14 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
   is the user's own step; Claude builds it and hands over the commands.
 - The user runs `sudo tools/fbload.sh [beside]`. Arming needs **both**
   `-rbgpuownfb` in boot-args **and** `sudo nvram rbgpu-fb=1` (2sr). The boot-arg
-  is the durable disarm; **the NVRAM one-shot is NOT** — `rbgpu-fb` survived a
-  reboot after being removed and read back absent (2sq), because
-  `IODTNVRAM::removePropertyWithGUIDAndName` calls no sync at all. So between
-  experiments take the boot-arg out with
+  is the durable disarm. **The one-shot DID NOT consume until 2wj** —
+  `rbgpu-fb` survived a reboot after being removed (2sq), because
+  `IODTNVRAM::removePropertyWithGUIDAndName` calls no sync at all, so the
+  takeover was effectively sticky for six boots and boot 196 had to be
+  disarmed from **Windows**. 2wj fixes it by **overwriting the key with a
+  literal `"0"` instead of removing it**, on the `setProperty` path 2sr
+  measured as the only one that syncs, so a plain power cycle is now a full
+  disarm. Between experiments still take the boot-arg out with
   `sudo tools/efi.sh bootarg remove -rbgpuownfb`, exactly as rule 9 says.
 - **Never run `kmutil unload` on the framebuffer kext — it PANICS** (2sq).
   `IOFramebuffer::stop+0x48` reads `*(this->0x1c8)`, which is NULL on an
@@ -1640,6 +1691,18 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     no data at all. The keys that would have caught it were already in the
     note and already read 2 = not armed. Rule 9 says the one-shots are
     one-shot; this adds **say which ones, and verify them first**. [2w0]
+37. **A one-shot that cannot consume itself is not a one-shot, and a feature
+    must stay disarmable FROM THE MACHINE IT RUNS ON.** `rbgpu-fb` was
+    consumed with `removeProperty`, which reaches no sync, while the crumb in
+    the same file used `setProperty`, which does - two facts two screens apart
+    for eleven milestones. The takeover therefore re-armed on every power
+    cycle, and once 2wh succeeded the desktop ran at 0.09 Hz, so there was no
+    usable machine from which to edit boot-args: boot 196 had to be disarmed
+    by booting **Windows**. **Consume by OVERWRITE on a path measured to
+    persist**, and before arming anything that can take the display, ask what
+    the recovery looks like when it works *and* when it half-works. A
+    `FORCESYNCNOW` key is not a substitute for using a syncing path. [2sq,
+    2wj]
 33. **Before reading anything from the LIVE machine, establish which boot it
     is**: `kern.boottime` against the capture's, and `rbgpu-boot` against the
     last nonce. The running box is not the armed boot merely because the armed
@@ -1773,7 +1836,9 @@ and rule 12 says a black panel is indistinguishable from a hang, so keep SSH
 and read `ioreg`, not the screen. **2wi: it WORKED** - the panel showed the
 composited accelerated desktop, and the swizzle already agreed. It has **no
 one-shot of its own**, so with `rbgpu-fb` failing to clear (2sq) it re-arms
-every power cycle; the durable disarm is removing the boot-arg),
+every power cycle; the durable disarm is removing the boot-arg - and
+**2wj made `rbgpu-fb` consume properly, so a plain power cycle now disarms the
+whole chain and the desktop comes back usable**),
 `-rbgpufbretire` (2wi - re-enables the `'vbl '` slots Apple registered and
 then disabled, once a transaction has arrived, on the suspicion that the
 accelerator never learns a vblank happened and so never retires a transaction.
