@@ -113,8 +113,19 @@ The numeric keys are first in `kRbgpuNvramHotKeys` because the boot wedges.
 
 ### Arm it (the user runs these; the assistant never does)
 
-The boot-arg is already in `config.plist` (boot 186 had it). For the boot
-itself — **all four one-shots** (rule 34):
+The boot-arg is already in `config.plist` (boot 186 had it).
+
+**Install the build first.** The plugin boots from the OpenCore EFI, so a new
+`build/out/RembrandtGPU.kext` does nothing until it is copied there — boots
+186 **and 187** both ran `D8B1115C` while `D69D9B33` sat in `build/out`
+(2w6, caught by rule 15):
+
+```bash
+sudo tools/efi.sh install
+```
+
+Then verify, in the next capture, that `kexts.txt` says **`D69D9B33`** — not
+`D8B1115C`. For the boot itself — **all four one-shots** (rule 34):
 
 ```bash
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
@@ -133,7 +144,8 @@ sudo tools/plugin_check.sh
 
 ### Reading it
 
-1. `rbgpu-boot` must be **187** (rule 8).
+1. `rbgpu-boot` must be **188** (rule 8), and `kexts.txt` must show
+   **`D69D9B33`** (rule 15 — boots 186 and 187 both ran the old build).
 2. `agdc_oneshot`, `iop_oneshot` must be **0**, not 2 (rule 34).
 2b. **`ax_say` must exist at all** — if it is absent the probe did not run
     again and nothing else in step 4 means anything (2w5).
