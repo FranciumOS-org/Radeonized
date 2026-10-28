@@ -36,6 +36,12 @@ const UInt32 kHeight                = 1080;
 const UInt32 kBytesPerRow           = 7680;
 const UInt32 kApertureBytes         = 8294400;      /* IOFBMemorySize, live */
 
+/* 2w9: the VRAM byte offset published as `ATY,fb_offset`. Non-zero because the
+ * accelerator's gate rejects 0 (see the long note in start()). 16 MB is the
+ * first offset that is both non-zero and clear of BAR0's first 16 MB, which
+ * this project's own probe rules already treat as the boot framebuffer's. */
+const UInt32 kAtyOffsetDefaultMB    = 16;
+
 /* 2sr: THE BOOT-ARG IS THE REAL DISARM. The NVRAM one-shot is not.
  *
  * `rbgpu-fb` survived a reboot after being removed and read back as absent
@@ -303,6 +309,100 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * 4096 MB is what the plugin publishes from the real carve-out size. */
     setProperty("VRAM,totalMB", 4096ULL, 32);
     setProperty("model", "AMD Radeon 680M");
+
+    /* 2w9: THE TWO PROPERTIES THE ACCELERATOR READS OFF THE FRAMEBUFFER.
+     *
+     * Boot 189 measured `pipe->0x340 == 0` as the single reason
+     * `AMDRadeonX6000_AMDAccelDisplayPipe::initFramebufferResource`
+     * (0xbe49356) returns 0 silently, which leaves `pipe->0x298` unset, which
+     * makes `IOAccelDisplayPipe::isActive()` false, which is why
+     * `IOAccelDisplayPipeUserClient2::transactionEnd` answered
+     * kIOReturnNotReady 140 times. Read from the consumer, not guessed:
+     *
+     *   AMDRadeonX6000_AMDHWDisplay::getDisplayInfo (0xbe8700e)
+     *       info+0x00 = *(uint64_t *)((OSData *)fb->getProperty
+     *                                  ("ATY,fb_offset"))->getBytesNoCopy()
+     *       info+0x0c = *(uint32_t *)((OSData *)fb->getProperty
+     *                                  ("ATY,fb_size"))->getBytesNoCopy()
+     *   AMDRadeonX6000_AMDHWDisplay::isDisplayEnabled (0xbe86f9c)
+     *       returns `*(uint64_t *)ATY,fb_size != 0`, and
+     *       set_display_mode_and_vram (0xbe48604) stores that in pipe->0x35d
+     *       and then REQUIRES it to be 1.
+     *
+     * `info` IS `&pipe->0x340`, passed as the out-parameter of slot 0x130
+     * (rule 7: dump 0x140 = getDisplayInfo) from set_display_mode_and_vram.
+     * So both of these are hard gates and BOTH VALUES MUST BE NON-ZERO.
+     *
+     * The class is OSData, established from the use and not from the GOT: the
+     * consumer calls vt[0x178] and then DEREFERENCES the result, which is
+     * getBytesNoCopy() returning a pointer. An OSNumber would have handed back
+     * the value itself. Hence setProperty(key, bytes, length) - the overload
+     * AMDFramebuffer itself uses at 0x2a4478/0x2a4523 with ecx = 8.
+     *
+     * fb_offset is a BYTE OFFSET, not an address. initFramebufferResource adds
+     * a base to it before reserving:
+     *     addr = pipe->0x340 + hw->0x370->vt[0x1e0]()   (= mem->0x50)
+     *     reserveFrameBuffer(pipe, addr, max(info+0x08, info+0x0c), resource)
+     * where pipe->0x328 is accel->0x1a38 = AMDRadeonX6000_AMDNavi21Hardware.
+     *
+     * WHY THE OFFSET IS NOT ZERO, WHICH WOULD BE THE TRUTHFUL VALUE. Our
+     * scanout IS at VRAM offset 0 - the GOP framebuffer is BAR0 offset 0 (2pr)
+     * and the aperture is withSubRange(bar0, 0, kApertureBytes). But the gate
+     * is `cmpq $0x0, (%r15); je fail`, so an offset of 0 is indistinguishable
+     * from the property being absent, and AMD's own driver never puts the
+     * scanout at offset 0. So this boot deliberately publishes a non-zero
+     * offset while the display engine keeps scanning offset 0.
+     *
+     * THE CONSEQUENCE, STATED PLAINLY: if this works, the pipe goes ACTIVE and
+     * the compositor renders at kAtyOffsetDefault while the panel still shows
+     * whatever is at offset 0 - so the expected outcome is a stale or wrong
+     * IMAGE with a working PIPE. SSH and the probe are the instruments, not the
+     * screen. Pointing the scanout at the same offset means writing DCN
+     * primary-surface registers, which this kext has never done and which is a
+     * separate, narrower step once the chain is proven.
+     *
+     * Off unless `-rbgpufbaty` is in boot-args. Rule 30: the token is tested
+     * whole by PE_parse_boot_argn, and `-rbgpufbaty` neither prefixes nor is
+     * prefixed by -rbgpufbvbl / -rbgpufbvram / -rbgpufbvramrange /
+     * -rbgpufbaccel / -rbgpufbmatch / -rbgpufbnocrumb. */
+    {
+        char atyflag[16];
+        bool atyOn = PE_parse_boot_argn("-rbgpufbaty", atyflag, sizeof(atyflag));
+        setProperty("RBFBAtyArmed", atyOn);
+        if (atyOn) {
+            UInt32 mb = kAtyOffsetDefaultMB;
+            int want = 0;
+            if (PE_parse_boot_argn("rbgpufbatymb", &want, sizeof(want))) {
+                if (want >= 1 && want <= 3072) {
+                    mb = (UInt32)want;
+                } else {
+                    /* Rule 19: a refusal path publishes the value it refused. */
+                    setProperty("RBFBAtyOffsetRefused", (UInt64)want, 32);
+                    LOG("rbgpufbatymb=%d is outside 1-3072; keeping %u MB",
+                        want, mb);
+                }
+            }
+            UInt64 offset = (UInt64)mb << 20;
+            UInt64 size   = kApertureBytes;
+
+            setProperty("ATY,fb_offset", &offset, (unsigned int)sizeof(offset));
+            setProperty("ATY,fb_size",   &size,   (unsigned int)sizeof(size));
+
+            /* Rule 31: IOLog is not an instrument here - publish what we wrote
+             * so `ioreg -rl -c RBAMDFramebuffer` can confirm it, and publish it
+             * under our OWN names so the ATY keys stay exactly 8 raw bytes. */
+            setProperty("RBFBAtyOffset", offset, 64);
+            setProperty("RBFBAtySize", size, 64);
+            setProperty("RBFBAtyOffsetMB", (UInt64)mb, 32);
+            LOG("published ATY,fb_offset = 0x%llx (%u MB) and "
+                "ATY,fb_size = %llu as 8-byte OSData",
+                offset, mb, size);
+        } else {
+            LOG("-rbgpufbaty is not in boot-args; ATY,fb_offset and "
+                "ATY,fb_size are NOT published, so initFramebufferResource "
+                "will keep failing on pipe->0x340 == 0 (2w9)");
+        }
+    }
     LOG("started; %s", ownsPanel()
         ? "OWNS THE PANEL (displaced IONDRVFramebuffer): console yes, 1 connection"
         : "attached BESIDE the boot framebuffer: console no, 0 connections - "

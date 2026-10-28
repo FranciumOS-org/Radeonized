@@ -777,7 +777,8 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // answered the three-gate question, so those keys move down and these
     // take the top of the note: `fi340`/`fi348` are what configureDisplay
     // must fill and `r380` is the value the hook returns.
-    "ax0_fi340", "ax0_fi348", "ax0_r380", "ax0_b35e", "ax0_b35f",
+    "ax0_fi340", "ax0_fi348", "ax0_fi34c", "ax0_b35d",
+    "ax0_r380", "ax0_b35e", "ax0_b35f",
     "ax0_w", "ax0_h", "ax0_bpp", "ax0_fmt", "ax0_hw330",
     "ax2_gate", "ax2_enabled", "ax2_active", "ax2_defer",
     // 2qw: first, because they say whether every OTHER absence in the capture
@@ -2512,6 +2513,11 @@ static void rbgpu_ax_action(thread_call_param_t p0, thread_call_param_t) {
                        *reinterpret_cast<const uint32_t *>(q + 0x348));
     rbgpu_diag_set_num(RB_AXKEY("fi34c"),
                        *reinterpret_cast<const uint32_t *>(q + 0x34c));
+    /* 2w9: 0x35d is AMDHWDisplay::isDisplayEnabled's answer, which
+     * set_display_mode_and_vram (0xbe48604) stores and then requires to be 1.
+     * It is TRUE iff the 64-bit ATY,fb_size property is non-zero - so this one
+     * byte separates "we published the property" from "we did not". */
+    rbgpu_diag_set_num(RB_AXKEY("b35d"), q[0x35d]);
     rbgpu_diag_set_num(RB_AXKEY("b35e"), q[0x35e]);
     rbgpu_diag_set_num(RB_AXKEY("b35f"), q[0x35f]);
     rbgpu_diag_set_num(RB_AXKEY("r380"),
