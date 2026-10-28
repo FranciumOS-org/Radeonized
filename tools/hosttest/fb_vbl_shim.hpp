@@ -51,6 +51,10 @@ public:
     bool amtrSnapped=false;
     uint64_t amtrGets=0;
     uint64_t amtrSets=0;
+    bool selfDisarmed=false;
+    unsigned disarmWrites=0;
+    // 2wp: the host substitute counts the NVRAM consume instead of doing it.
+    void disarmFB(){ selfDisarmed=true; disarmWrites++; }
     uint64_t amtrPeak=0;
     uint64_t amtrBucket=0;
     uint64_t amtrNoFlip=0;

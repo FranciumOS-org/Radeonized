@@ -1750,6 +1750,20 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the recovery looks like when it works *and* when it half-works. A
     `FORCESYNCNOW` key is not a substitute for using a syncing path. [2sq,
     2wj]
+38. **Two halves that are separately armed must still check EACH OTHER.**
+    `-rbgpuownfb`/`rbgpu-fb` arm the framebuffer and `-rbgpuarm`/`rbgpu-arm`
+    arm the accelerator, deliberately separately so the halves stay testable
+    alone. But the framebuffer writes HUBP from `setAttribute('amtr')` and
+    from nothing else, so with the panel taken and no accelerator underneath,
+    the screen freezes on whatever was last drawn - **guaranteed**, not
+    merely possible. It happened after boot 197: fb armed, plugin did not,
+    `amtrSets 0` at 70 s, and a machine that ran healthily for **ten minutes**
+    sat behind a frozen progress bar through three power cycles. Rule 9 was
+    satisfied by each half and the PAIR was never checked. 2wp adds a
+    no-transaction deadline that consumes `rbgpu-fb` for the next boot, so the
+    failure costs one power cycle instead of unbounded ones. **Before arming
+    anything that takes the display, name what it depends on and make it
+    refuse, or self-disarm, when that thing is absent.** [2wp]
 33. **Before reading anything from the LIVE machine, establish which boot it
     is**: `kern.boottime` against the capture's, and `rbgpu-boot` against the
     last nonce. The running box is not the armed boot merely because the armed

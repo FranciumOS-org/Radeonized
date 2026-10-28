@@ -150,6 +150,17 @@ private:
      * ones 2wh deliberately does not write - so "we were handed a content
      * update and dropped it" is distinguishable from "we were never handed
      * one". */
+    /* 2wp: the no-transaction self-disarm. The framebuffer arms off
+     * -rbgpuownfb + rbgpu-fb, INDEPENDENTLY of whether the accelerator is
+     * armed - and it can only ever show anything if the accelerator feeds it
+     * transactions. Taking the panel without one is a guaranteed frozen
+     * screen, which rule 12 says is indistinguishable from a hang. Boot 197's
+     * successor did exactly that: fb armed, plugin did not, zero transactions,
+     * and a healthy machine sat behind a frozen progress bar for ten minutes.
+     * So if nothing has arrived by the deadline, consume rbgpu-fb for the
+     * NEXT boot. It cannot rescue this one - the panel is already ours - but
+     * it turns "power cycle until you give up" into exactly one bad boot. */
+    bool     selfDisarmed;
     uint64_t amtrPeak;
     uint64_t amtrBucket;
     uint64_t amtrNoFlip;
@@ -241,6 +252,7 @@ private:
     static void vblFired(thread_call_param_t self, thread_call_param_t);
     static void vblKicked(thread_call_param_t self, thread_call_param_t);
     void kickVBL(void);
+    void disarmFB(void);
     void crumb(uint32_t stage);
     void deliverVBL(void);
     void armVBL(void);

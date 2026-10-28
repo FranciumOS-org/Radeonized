@@ -99,6 +99,40 @@ int main() {
         // A lower stage must never walk the furthest point back.
         cr.crumb(2); assert(cr.crumbStage==23);
     }
+    // 2wp: the no-transaction self-disarm. A framebuffer that took the panel
+    // and was never handed a transaction leaves a frozen screen, which rule 12
+    // says reads exactly like a hang - so it must consume its own arm for the
+    // next boot. The three cases that matter are "it fires", "it does NOT fire
+    // when transactions arrived", and "it fires at most once".
+    {
+        RBAMDFramebuffer d; FakeCall dT; d.vblCall=&dT; d.amtrArmed=true;
+        void *ref=nullptr;
+        assert(d.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&ref)==0);
+        for(unsigned i=0;i<17999;i++) d.deliverVBL();
+        assert(!d.selfDisarmed);           // not before the deadline
+        d.deliverVBL();                    // fire 18000
+        assert(d.selfDisarmed && d.disarmWrites==1);
+        for(unsigned i=0;i<2000;i++) d.deliverVBL();
+        assert(d.disarmWrites==1);         // and exactly once, ever
+    }
+    {
+        // One transaction is enough to prove the accelerator is there.
+        RBAMDFramebuffer k; FakeCall kT; k.vblCall=&kT; k.amtrArmed=true;
+        void *ref=nullptr;
+        assert(k.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&ref)==0);
+        k.amtrSets=1;
+        for(unsigned i=0;i<18001;i++) k.deliverVBL();
+        assert(!k.selfDisarmed && k.disarmWrites==0);
+    }
+    {
+        // A framebuffer that never armed for transactions is not this case
+        // and must be left alone.
+        RBAMDFramebuffer n; FakeCall nT; n.vblCall=&nT; n.amtrArmed=false;
+        void *ref=nullptr;
+        assert(n.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&ref)==0);
+        for(unsigned i=0;i<18001;i++) n.deliverVBL();
+        assert(!n.selfDisarmed);
+    }
     // 2wl: the rate bucket. The user reported typing in Spotlight making the
     // frames smooth while the idle desktop sat at ~0.09 transactions/s, and a
     // total divided by a boot length cannot tell a burst from a trickle. The
@@ -171,5 +205,5 @@ int main() {
         d.setInterruptState(dref,0); d.setInterruptState(dref,1);
         assert(d.retireKicks==0);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket and the 2wk immediate kick passed");
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm and the 2wk immediate kick passed");
 }
