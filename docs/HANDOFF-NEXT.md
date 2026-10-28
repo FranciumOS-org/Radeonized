@@ -1,116 +1,124 @@
-# HANDOFF — next session
+# HANDOFF — next step (2wf, 2026-10-28)
 
-**State: the display pipe ACCEPTS transactions. Every failure in the chain is
-at zero, and Apple's accelerator is handing cooked transactions to our
-framebuffer. What remains is that we answer them without drawing anything.**
-Read `CLAUDE.md`'s **2we** block first, then 2wd/2wc/2wb. `docs/JOURNAL.md`
-has the full reads under those tags.
+Live handoff. `docs/HANDOFF.md` is stale except its §7 rules and §6 procedure.
+`docs/JOURNAL.md` is the evidence journal — grep it by milestone tag.
 
-## 1. Where boot 193 left it
+## 1. Where this stands
 
-`logs/20261028-101029-plugin`, `rbgpu-boot` 193, armed, both one-shots 0,
-`diag_used` 664/768, 20 files. Rule 15 on both kexts: plugin **`0D1F953A`**,
-fb **`6F1EB613`**. Arm check for the experiment itself:
-**`agdc_gamma_elems1 = 256`**.
+**The display pipe accepts transactions** (2we, boot 193). Every failure in the
+chain is at zero against `display_change_handler` 26 as the control:
+`set_transaction_args … 0xe00002c7` 132 → 0, `Failed to submit transaction`
+134 → 0, `Fallback … submission failed` 66 → 0, `DisplayPipeState` 66 → 0.
+`RBFBAmtrSets` 0 → **13**: Apple's accelerator hands cooked display-pipe
+transactions to our framebuffer.
 
-With `display_change_handler` **26** as the control in all five boots:
+**And the transaction is now read end to end** (2wf, static). The struct is
+confirmed field for field from three directions — the live pointer in boot
+193's snapshot, `executeTransaction`'s `leaq` addresses, and every per-bit
+handler in `AMDFramebuffer::handleDisplayPipeTransaction`:
 
-| | 191 | 192 | **193** |
-|---|---|---|---|
-| `set_transaction_args … 0xe00002c7` | 122 | 132 | **0** |
-| `Failed to submit transaction` | — | 134 | **0** |
-| `Fallback … submission failed` | 3 | 66 | **0** |
-| `DisplayPipeState` | — | 66 | **0** |
-| `RBFBAmtrSets` | — | 0 | **13** |
-
-`Metal compositor activated` ×4. `no gamma` 0. `RBFBAmtrSnapped` true, and the
-snapshot's pointer is **exactly `pipe + 0x410`**, with all five of its interior
-pointers matching the `leaq` addresses in `executeTransaction` — five controls
-on 2wc's field map in one reading. The flag word `0x75` decomposes exactly as
-`dirtyBits 0x3c1` predicts, **including `0x20`, the pipe post-gamma block that
-was refusing everything one boot earlier**.
-
-**Both of this session's changes were necessary**: the `'amtr'` answer (2wc)
-and the 256 gamma ceiling (2wd). 193 proves the first was necessary and not
-sufficient; 192 proves the second alone would not have been reached.
-
-## 2. The next step needs NO boot
-
-Read **`AMDFramebuffer::handleDisplayPipeTransaction` (`0x2b4df0`)** against
-the snapshot's five pointers and work out what each sub-struct holds:
-
-| snapshot | pipe offset | what we know |
+| snapshot | pipe offset | what it is |
 |---|---|---|
-| +0x10 | `pipe + 0x36b0` | plane state — **carries the surface the compositor rendered into** |
-| +0x20 | `pipe + 0x3660` | written in the plane dst-rect block (flag 0x4) |
-| +0x30 | `pipe + 0x3680` | colour matrix (flag 0x10) |
-| +0x38 | `pipe + 0x2650` | pipe post-gamma (flag 0x20) |
-| +0x40 | `pipe + 0x38d0` | pre-CSC linearization (flag 0x40) |
+| +0x00 | — | flag word, `0x75`; AMD supports `0x7d`, so **all of ours** |
+| +0x08 | — | u32 transaction ID |
+| +0x10 | `pipe + 0x36b0` | **`_AMD_PIPE_FLIP`, 0x220 bytes — carries the GPU address** |
+| +0x20 | `pipe + 0x3660` | dst rect, 4 float pairs (0x20 bytes) |
+| +0x30 | `pipe + 0x3680` | colour matrix (0x30 bytes) |
+| +0x38 | `pipe + 0x2650` | pipe post-gamma → `setGammaTable` |
+| +0x40 | `pipe + 0x38d0` | pre-CSC linearization |
 
-The prize is the surface address at `pipe + 0x36b0`. That is what DCN 3.1.2's
-`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair has to be pointed at, and
-**taking it out of the transaction is strictly better than inventing one** —
-it is the only number in this project that is not a substitute (rule 17).
+**What is not fixed: nothing is written to the display engine.** We answer the
+transaction without doing the work, so the compositor believes 13 frames landed
+and none did, and `-rbgpufbaty` publishes 16 MB while OTG0 scans VRAM offset 0.
+The pipe is accepted; the picture is not drawn.
 
-Grep `docs/JOURNAL.md` before reading any Apple function in that path; three
-milestones have now re-read something already settled.
+## 2. The next step is ONE armed boot, and the build is already made
 
-## 3. Then, on its own risk: the first write to the display engine
+`build/out` holds fbkext **`A454F066`** (the only thing that changed) and
+plugin **`0D1F953A`** (unchanged, already installed in the EFI and proven by
+boot 193 — **no plugin rebuild and no `efi.sh install`**).
 
-This kext has **never** written to DCN. A wrong write blanks the panel.
-Registers from `docs/linux-ref/`, `DCN_VERSION_3_1` grouping, `dcn_3_1_2`
-offsets — **check the grouping before adding one**. Own milestone, own
-boot-arg, off by default, and the probe rules in `CLAUDE.md` still apply to
-everything that is not that one deliberate write.
+Rule 15's install for this boot is the **auxiliary collection only**:
 
-Until then the picture stays wrong by construction:
-`setAttribute('amtr', …)` answers success without doing the work, and
-`-rbgpufbaty` publishes a 16 MB offset while OTG0 scans VRAM offset 0.
+```bash
+sudo rm -rf /Library/Extensions/RBAMDFramebuffer.kext
+sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
+sudo kmutil create -n aux -z --volume-root /
+```
 
-## 4. The wedge is now the only other defect, and it is independent
+`kmutil create` may print `Code=34 Missing Developer Kit` over a write that
+**landed** (2wa) — verify the artifact, never the exit status (rule 26).
 
-First `checkGPUProgress` at 10:07:57.763, 15 s after boot, running the whole
-2 m 48 s capture: 63 `Signaling hardware error`, 36 `channel N is not hung`,
-36 `no channel associated with stamp_idx N`, 26 `SDMA0_PAGE event timeout`,
-9 GFX, 1 VMPT, 3 `GPURestartDeferred`.
-
-2w4 saw it start six seconds after the first submit failure and could not say
-which way causation ran. **Boot 193 has no submit failures at all and the
-wedge is unchanged in shape and slightly larger in count** — so it is not
-caused by the display path. Clean differential, n=1. It is a stamp-retirement
-failure: work submitted, never retires, hang check says not hung, restart
-cannot find the channel. It has never had a milestone of its own.
-
-## 5. Arming, unchanged
-
-Nothing to install — plugin `0D1F953A` is in the EFI, fb `6F1EB613` is in
-`/Library/Extensions` and the AuxKC, and boot-args already carry
-`-rbgpufbaty`, `-rbgpufbamtr`, `-rbgpuagdc`, `-rbgpuagdccaps`,
-`-rbgpuaccelprobe`, `-rbgpuownfb`. Every armed boot still needs all four
-one-shots (rule 9/34):
+Boot-args unchanged, `-rbgpufbaty` and `-rbgpufbamtr` both in. Arm all four
+one-shots (rule 34):
 
 ```bash
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 ```
 
-Reading order: `rbgpu-boot`, both kext UUIDs, the four `*_oneshot` keys,
-`diag_used` vs `diag_max`, `agdc_gamma_elems1`, the `ax0_*` probe keys as the
-control that the ATY chain is still open, then `RBFBAmtr*`, then the kernel
-log **by sender** with `display_change_handler` as the control (rule 36).
+Then in the armed boot, over SSH, **before rebooting**: `sudo tools/plugin_check.sh`.
 
-## 6. Carried over, unexplained
+## 3. What to check, in order
 
-- `Setting main display 0x… offline` ×7 and `Setting offline display 0x… main
-  in CGXConstructVirtualFramebuffer` ×7, both ERROR, **new in 193** and absent
-  from 192. Normal mode-set that the earlier boots never reached, or a new
-  defect — **not established**.
-- `IOAccelSurface::set_id_mode: Surface mode contains bad bits` ×4, unchanged
-  across five boots.
-- `RBFBVBL1Fires` 0 with `RBFBVBLFires` 21218, where 191 saw Apple's handler
-  fire once. Now less interesting: the transactions go to `setAttribute`, not
-  through the VBL ring.
-- 2sv's controlled zero for `IOAccelDisplayPipeCapabilities` against
-  2u1/2u2/2w0's three non-zero reads.
-- `IOAccelDisplayPipeUserClient2` counting 2 with `IONDRVFramebuffer`, 1 with ours.
-- WindowServer CPU% never attributed in a controlled read.
-- **~79 unpushed commits. Pushing needs asking.**
+1. **Arm first** (rules 8/15/34): `rbgpu-boot` must be **194**; `agdc_oneshot`
+   and `iop_oneshot` both 0; `agdc_error 0`; `diag_used` against `diag_max`;
+   fb UUID **`A454F066`**, plugin **`0D1F953A`**. `RBFBAmtrFlipSnapped` exists
+   at all only in the new binary — the cheapest independent check (rule 15).
+2. **`RBFBAmtrFlipSnapped` must be `true`.** Bit `0x1` is SET in `0x75`, so
+   `txn->0x10` is valid. False, or a non-zero `RBFBAmtrFlipRefused`, means the
+   flag word and the pointer disagree and 2we's decode is wrong somewhere.
+3. **The three predicted fields**, which test 2wf's static read rather than
+   assume it: `RBFBAmtrFlipFmt` should be one of `0/6/7/8/9`,
+   `RBFBAmtrFlipRot` small, and `RBFBAmtrFlipA58` a plausible GPU VA.
+   `A58` non-zero and plausible = the static read landed. `A58` zero = the
+   prediction was wrong and **nothing is lost**: decode `RBFBAmtrFlipSnap`
+   (0x220 bytes) and the address is somewhere in it. That is exactly why the
+   blob is published beside the three fields.
+4. **Decode the blob either way**, as 2we did for the 0x80 header. The
+   addresses are GPU VAs (`base + offset` off a `vt[0x158]` call,
+   `0xbe88846`), **not** VRAM byte offsets like `ATY,fb_offset` — keep the two
+   kinds of number apart.
+5. **Regression controls**, all of which were zero in 193 and must stay zero:
+   `set_transaction_args … 0x2c7`, `Failed to submit transaction`,
+   `Fallback … submission failed`, `DisplayPipeState`, `no gamma`. With
+   `display_change_handler` 26 as the control. And `agdc_gamma_elems1` must
+   still read **256**.
+6. The picture is **expected to stay wrong** — nothing is written to DCN in
+   this build. The screen is not the instrument; SSH and `ioreg` are.
+
+## 4. After that: the first write to the display engine
+
+Its own milestone, its own risk, its own boot-arg, and **not** to be bundled
+with step 3. Once the address is measured, the DCN 3.1.2
+`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair is what it has to be pointed at.
+Registers from `docs/linux-ref/`, `DCN_VERSION_3_1` grouping, `dcn_3_1_2`
+offsets, **grouping checked before adding one**. A wrong write blanks the
+panel, and rule 12 says a black panel is indistinguishable from a hang — so a
+readback and a restore path come with it. The current correct scanout value is
+known and measured, which is what makes the write cheap to validate.
+
+Note 2wf's finding before planning this: `AMDFramebuffer`'s own route ends at
+`ATIController` dump slot `0x8d0`, the pure-virtual stub shared by 122 slots,
+and no controller instantiates here. **Even Apple's own framebuffer could not
+have completed this flip on this machine** — the register write was always
+ours. Do not go looking for an Apple function that will do it.
+
+## 5. The other two open things
+
+- **The wedge**, now established as an **independent second defect** (2we):
+  boot 193 has no submit failures at all and the wedge is unchanged in shape
+  and slightly larger. Stamp retirement — submitted, never retires, hang check
+  says not hung, restart cannot find the channel. It has never had a milestone
+  of its own.
+- **Unattributed in 193**: `Setting main display 0x… offline` ×7 and
+  `Setting offline display 0x… main in CGXConstructVirtualFramebuffer` ×7,
+  both ERROR, absent from 192 — a normal mode-set the earlier boots never
+  reached, or a new defect; **not established**. `bad bits` 4, unchanged five
+  boots. `RBFBVBL1Fires` 0 with `RBFBVBLFires` 21218, and now less interesting
+  since transactions arrive through `setAttribute`, not the VBL ring.
+
+## 6. Standing
+
+Grep `docs/JOURNAL.md` before reading any Apple function — **eight** milestones
+have now re-read something already settled. ~82 unpushed commits; **pushing
+needs asking**.
