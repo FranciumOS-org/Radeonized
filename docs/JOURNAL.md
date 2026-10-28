@@ -43033,3 +43033,132 @@ way**: nothing is written to the display engine in this build.
 Plugin stays **`0D1F953A`**, already installed in the EFI and proven by boot
 193 — no plugin rebuild, no `efi.sh install`. Only the framebuffer kext
 changed, so rule 15's install for this boot is the **auxiliary collection**.
+
+---
+
+## 2wg — boot 194: the surface address is measured, and it is a low/high pair
+
+`rbgpu-boot` **194**, `armed=1`, both `ax0`/`ax2` samples all-open
+(`gate=0 enabled=1 active=1 defer=0 vram=1 vmap=1`), `ax0_fi340=0x1000000`,
+`ax0_w/h/bpp/fmt = 0x780/0x438/4/4`, `diag_used` **663** of 768 so absences
+are informative, and the experiment's own arm check passed:
+**`agdc_gamma_elems1 = 0x100` = 256**.
+
+**Rule 15 met without `kexts.txt`.** The capture is only **6 files** (no
+display log, no `ioreg`, no kext list — the box was rebooted early again), but
+`RBFBAmtrFlipSnapped`, `RBFBAmtrFlipFmt`, `RBFBAmtrFlipRot` and
+`RBFBAmtrFlipA58` **exist**, and only build `A454F066` publishes them. A key
+the new code publishes is again the cheapest identity check.
+
+**And rule 8 was met by differential, not by a bare read.** `RBFBCrumbBoot`
+reads **192** in the boot-193 capture and **193** in this one — it lags
+`rbgpu-boot` by exactly one in *both*, because the fbkext reads the nonce
+before the peer increments it. The crumb advancing is therefore the nonce
+advancing. `rbgpu-boot = 194` confirms it directly.
+
+**A grep read the WRONG BOOT'S TABLE.** The first pass over `nvram.txt`
+reported `armed=0`, `agdc_oneshot=2`, `agdc_error=3` and `diag_used=0xa3`, and
+every one of those came from **`rbgpu-diag-prev`** — the *previous* boot's
+table, sitting in the same flat file under a key whose name is a superstring
+of the one being matched. It read exactly like an unarmed boot and would have
+thrown the measurement away. Caught only by noticing that
+`agdc_gamma_elems1` was published at all, which an unarmed bridge cannot do.
+**Rule 26 again: a key name can be a prefix of another key's name, and a grep
+with no line structure will cross the boundary.** Match `rbgpu-diag` anchored,
+or read the value, never the file.
+
+### The transaction struct, confirmed a third time and now live
+
+`RBFBAmtrPtr = 0xffffff953cdba410`, `RBFBAmtrFlipPtr = 0xffffff953cdbd6b0`.
+The difference is **0x32a0**, and `0x36b0 - 0x410 == 0x32a0`. Both pointers
+give the same pipe base, `0xffffff953cdba000`, computed two independent ways.
+So `txn->0x10 == pipe + 0x36b0` is now measured on hardware in a second boot,
+at a different kernel address.
+
+### The `_AMD_PIPE_FLIP`, measured
+
+    +0x00  u32  6            pixel format
+    +0x04  u8   0            rotation
+    +0x05  u8   2
+    +0x08  u32  0x1002a000   SURFACE ADDRESS, LOW
+    +0x0c  u32  0x000000f4   SURFACE ADDRESS, HIGH
+    +0x14  u32  1920         width / pitch in pixels
+    +0x18  u32  4            bytes per pixel
+    +0x28  f32  1920.0       width
+    +0x2c  f32  1080.0       height
+    +0x30  u32  4
+    +0x38  u32  2
+    +0x3c  u32  4
+    +0x40 .. +0x21f          ALL ZERO
+
+**`+0x28`/`+0x2c` decoding as exactly `1920.0f` and `1080.0f` is the control
+that proves the whole struct is real** — two IEEE floats matching the panel's
+measured mode, at an offset nothing predicted them at. `+0x14 = 1920` and
+`+0x18 = 4` agree with `ax0_w` and `ax0_bpp` from a completely separate
+instrument in the same boot. Four fields, two instruments, one mode.
+
+**THE SURFACE ADDRESS IS `0xf4_1002_a000`.** The measured carve-out MC base is
+`0xF4_0000_0000`, so the surface sits **0x1002a000 = 256.164 MB** into VRAM.
+It is an **MC address**, not a GPUVM one (Apple's GPUVM space is `0xFF_BF..`),
+which is what HUBP wants.
+
+**And it is stored as a LOW/HIGH PAIR** at `+0x08`/`+0x0c` — exactly the shape
+of DCN's `HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS` and
+`..._SURFACE_ADDRESS_HIGH`. The struct holds it pre-split, in the register
+pair's own layout. That is a strong independent corroboration of which field
+it is: no other field in the struct is split that way.
+
+### 2wf's prediction was WRONG, and the instrument absorbed it
+
+`RBFBAmtrFlipA58` reads **0**. 2wf named `flip->0x58` (the one address store
+seen directly, at `0xbe885a4`) as a **candidate, not a result**, and published
+the raw blob beside it precisely so a wrong guess would cost nothing. It cost
+nothing: the blob names `+0x08`. The `0xbe885a4` store is on a different
+branch — a secondary/cursor path that did not run here, consistent with
+`+0x40..0x21f` being entirely zero and with `executeTransaction` passing
+`ecx = 0` for the second `IOAccelResource2`.
+
+`RBFBAmtrFlipFmt = 6` **is** in the predicted set `{0,6,7,8,9}` and
+`RBFBAmtrFlipRot = 0` is small, so two of the three predictions landed. This
+is rule 35 working as intended: the static chain was instrumented at our own
+end and the one link that was guessed is the one that was wrong.
+
+### What this boot does NOT say
+
+**The capture has no display log and no `ioreg`**, so every regression control
+from 2we — `set_transaction_args … 0x2c7`, `Failed to submit transaction`,
+`Fallback … submission failed`, `DisplayPipeState`, `no gamma`, the wedge
+counts, `display_change_handler` as the control — **is uncheckable, and their
+absence is not a result** (rules 14/36). What *is* positive evidence that the
+chain still runs: `RBFBAmtrSets` **13 → 17** and `RBFBAmtrGets` 29 → 37, so
+transactions are still being submitted to us.
+`RBFBVBLFires` 23098, `RBFBVBL1Fires` still **0**, `RBFBGammaCalls` 0,
+`RBFBAtyOffset` 16777216 — unchanged.
+
+### The consequence for the write, stated before it is attempted
+
+**The address is per-flip, not a constant.** We snapshot only the *first*
+transaction, and 17 arrived; a compositor swap chain hands a different surface
+each flip. So pointing the scanout at `0xf4_1002_a000` once is **not** the
+fix — it would show one stale frame. The write has to happen **per
+transaction**, and `setAttribute('amtr', …)` is exactly the hook that gets
+called with each one. That is a design consequence of a measurement, and it
+changes the shape of the next step from "write a constant" to "write the
+address this transaction carries".
+
+Also worth holding separate: the surface is at 256.164 MB while
+`ATY,fb_offset` publishes **16 MB** (2w9's deliberately untruthful value, as
+the gate rejects 0). Those two numbers have nothing to do with each other —
+the ATY offset only has to be non-zero to open `initFramebufferResource`,
+while the flip carries the real address. Do not try to reconcile them.
+
+### Next
+
+The first write this project has ever made to the display engine, as its own
+milestone with its own boot-arg: take `flip->0x08`/`+0x0c` out of each
+transaction in `setAttribute('amtr')` and program the DCN 3.1.2
+`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS` pair. Registers from
+`docs/linux-ref/`, `DCN_VERSION_3_1` grouping, `dcn_3_1_2` offsets,
+**grouping checked before adding one**. A readback and a restore path come
+with it, because a wrong write blanks the panel and rule 12 says a black panel
+is indistinguishable from a hang.
