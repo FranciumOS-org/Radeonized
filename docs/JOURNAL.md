@@ -42062,3 +42062,100 @@ Plugin build **`64D3D687`**. `SystemKernelExtensions.kc` count 0,
 If `b35d` is 1 and `fi340` is 0x1000000 but `active` is still 0, the remaining
 suspects are `index != 0` and `reserveFrameBuffer` failing, both inside
 `initFramebufferResource`, and `r380` names which.
+
+## 2wa — boot 190: the fbkext never changed, and `ATY,fb_size` is NOT a gate here
+
+Capture `logs/20261028-001439-plugin`, `rbgpu-boot` **190**, armed, both
+one-shots **0**, `diag_used` **662**/768, 21 files (the capture completed).
+
+### Rule 15 failed, on the second kext
+
+    plugin   64D3D687-62CB-3D4C-BE3F-B9541E2E1E4F   = build/out   CORRECT
+    fb       45588775-2890-3382-A5FE-BBFB108B49B2   build/out has 59124B3A   STALE
+
+`-rbgpufbaty` **was** in boot-args, and the framebuffer properties are absent:
+
+    ATY,fb_offset   absent        IOFBMemorySize   PRESENT   (control)
+    ATY,fb_size     absent        RBFBCrumbOn      PRESENT   (control)
+    RBFBAtyArmed    absent        VRAM,totalMB     PRESENT   (control)
+
+**`RBFBAtyArmed` is published unconditionally by the new code** — outside the
+`if (atyOn)` — so its absence establishes the old binary independently of the
+UUID. Two-way confirmation, which is what rule 15 is for.
+
+**Why it was stale, and it is not `fbload.sh`.** `fbload.sh` does
+`rm -rf "$stage"; cp -R "$src" "$stage/"` every run, so it always stages the
+current build. The kext that **owns the panel** comes up at boot from the
+**auxiliary collection**, i.e. from an **installed** copy:
+
+    /Library/Extensions/RBAMDFramebuffer.kext/Contents/MacOS/RBAMDFramebuffer
+        UUID 45588775-2890-3382-A5FE-BBFB108B49B2
+
+Rebuilding `build/out` never touches it. **This is 2w6's lesson repeated for
+the second kext, and 2w9's handoff contained the same omission it was written
+to fix**: it listed `sudo tools/efi.sh install` for the plugin and said nothing
+about refreshing the installed framebuffer. An install is the user's step, so
+the handoff has to *name* it. Generalised in rule 15: **every artifact a boot
+loads has its own install path, and a rebuild refreshes none of them.**
+
+### What the boot did buy: `ax0_b35d = 1`
+
+All three samples identical and, apart from the new key, byte-identical to
+boot 189's — a clean control on the probe extension itself, since the plugin
+changed and no reading moved:
+
+    ax0_b35d   1        *** NEW ***
+    ax0_fi340  0        ax0_fi34c 0        ax0_active 0        ax0_gate 3
+    IOReturn: 0x2d8  148      Fallback 73      init_framebuffer_resource 0
+    display_change_handler 26 (control)       [INFO] 483
+
+**`pipe->0x35d` is 1 with `ATY,fb_size` absent, which 2w9 predicted was
+impossible.** The reason is the early-out this journal quoted and then
+reasoned past:
+
+```c
+bool isDisplayEnabled(unsigned int idx, void *fb) {
+    bool a = this->vt[0x248]();
+    if (a || !fb) return a;              // 0xbe86fbb  <-- taken
+    ... the ATY,fb_size read ...
+}
+```
+
+`vt[0x248]` (rule 7: dump `0x258`) is
+**`AMDRadeonX6000_AMDDCNDisplay::isDisplayControlEnabled(unsigned int)`**
+(`0xbec012e`), and it is a **live register read**, 17 instructions:
+
+    0xbec0137  rdi = this->0x28                  the register accessor
+    0xbec0141  esi = this->0x5c0 + 0x38 * idx    the register id
+    0xbec014b  eax = rdi->vt[0x118](id)          vt[0x118] = READ (2fd/2fg)
+    0xbec0151  return (eax & this->0x6f0) != 0
+
+So the **firmware-lit panel satisfies this gate for free** — OTG0 is already
+running here (`OTG0_CONTROL = 0x00011201`, master enable set). It is the
+hardware answering, not a property of ours.
+
+**2w9 IS CORRECTED: `ATY,fb_size` is not a gate on this machine.** It still
+feeds `info+0x0c`, but `initFramebufferResource` reserves
+`max(info+0x08, info+0x0c)` and `info+0x08` is already 8294400, so it is
+optional. **Only `ATY,fb_offset` is load-bearing**, and `pipe->0x340 == 0`
+remains the single fatal check. The fix narrows rather than changes: publish
+both (harmless and consistent), but the one that matters is the offset.
+
+That is the fifth time a correct disassembly was attached one link off, and
+the second time in two milestones that the probe caught it. The pattern is
+specific enough to name: **when a function has an early-out above the branch
+you care about, read what makes the early-out fire before claiming the branch
+is reachable.** 2w9 had the instruction (`if (a || !fb) return a;`) in its own
+quoted listing and still called both properties hard gates.
+
+### Boot 191 — no new build needed
+
+`build/out` already holds fbkext `59124B3A` and plugin `64D3D687`. The
+framebuffer kext has to be **installed**, which is the user's step. Predictions
+are 2w9's, minus `b35d` (already 1, and now known to come from the hardware):
+
+- `RBFBAtyArmed Yes`, `RBFBAtyOffset 16777216` in `ioreg -rl -c RBAMDFramebuffer`
+- `ax0_fi340` **16777216**, `ax0_fi34c` **8294400**
+- `ax0_active` **1**, `ax0_gate` **0**
+- `IOReturn: 0x2d8` → **0**, `fb_vbl_ot_armed` present for the first time
+- the picture wrong or stale, by construction (the scanout still reads offset 0)

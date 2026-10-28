@@ -362,6 +362,44 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 190: THE FBKEXT NEVER CHANGED, AND `ATY,fb_size` IS NOT A GATE (2wa).**
+`rbgpu-boot` 190, armed, both one-shots 0, `diag_used` 662/768, capture
+complete. **Rule 15 failed on the SECOND kext**: plugin `64D3D687` correct,
+but `com.rembrandtgpu.fb` loaded **`45588775`** while `build/out` has
+`59124B3A`. `-rbgpufbaty` WAS in boot-args and `ATY,fb_offset`,
+`ATY,fb_size` and **`RBFBAtyArmed`** are all absent against three present
+controls - and `RBFBAtyArmed` is published **unconditionally** by the new code,
+so its absence proves the old binary independently of the UUID.
+**It is not `fbload.sh`** (it `rm -rf`s and re-copies from `build/out` every
+run). The kext that owns the panel comes up at boot from the **auxiliary
+collection**, i.e. from **`/Library/Extensions/RBAMDFramebuffer.kext`**, which
+holds `45588775`. A rebuild never touches it. **2w9's handoff repeated the very
+omission it was written to fix** - it named `efi.sh install` for the plugin and
+nothing for the installed framebuffer. **Every artifact a boot loads has its
+own install path, and a rebuild refreshes none of them.**
+**What the boot bought: `ax0_b35d = 1`** - with `ATY,fb_size` absent, which 2w9
+said was impossible. The cause is the early-out 2w9 quoted and reasoned past:
+`bool a = this->vt[0x248](); if (a || !fb) return a;`. `vt[0x248]` (dump
+`0x258`) is **`AMDDCNDisplay::isDisplayControlEnabled`** (`0xbec012e`), a
+**live register read** - `this->0x28`'s `vt[0x118]` (the project's known READ
+slot, 2fd/2fg) on id `this->0x5c0 + 0x38*idx`, masked with `this->0x6f0`. **The
+firmware-lit panel satisfies that gate for free** (OTG0 is already running,
+`OTG0_CONTROL = 0x00011201`). It is the hardware answering, not us.
+**So 2w9 is CORRECTED: `ATY,fb_size` is NOT a gate here** - it only feeds
+`info+0x0c`, and `max(info+0x08, info+0x0c)` makes it optional because
+`info+0x08` is already 8294400. **Only `ATY,fb_offset` is load-bearing** and
+`pipe->0x340 == 0` is the single fatal check. Everything else is byte-identical
+to boot 189 (`fi340` 0, `fi34c` 0, `active` 0, `gate` 3, `0x2d8` 148,
+`init_framebuffer_resource` 0, `display_change_handler` 26 as the control) -
+which is a clean control on the probe extension itself.
+Fifth time a correct disassembly was attached one link off, second in two
+milestones that the probe caught it: **when a function has an early-out above
+the branch you care about, read what makes the early-out fire before claiming
+the branch is reachable.**
+**NEXT needs NO new build** - `build/out` already holds fbkext `59124B3A` and
+plugin `64D3D687`. The framebuffer kext must be **installed** (the user's
+step).
+
 **BOOT 189: THE DEFECT IS TWO REGISTRY PROPERTIES WE NEVER PUBLISHED (2w9).**
 Build `C025F308`, armed, both one-shots 0, `diag_used` **658**/768, all three
 samples byte-identical. **`ax0_w/h/bpp/fmt` = 1920 / 1080 / 4 / 4**, so
@@ -913,7 +951,17 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     fact**: publish one key per entry. [2eh, 2ek, 2fb, 2db, 2ds, 2qw, 2s6]
 15. Before interpreting anything, check the loaded UUID against `build/out`,
     which one-shots were left set, and which boot-args are actually in
-    `config.plist`. [2cu, 2cv]
+    `config.plist`. **And check it for EVERY kext the boot loads, not just the
+    one that changed**: each artifact has its own install path and a rebuild
+    refreshes none of them. The plugin comes from the **OpenCore EFI**
+    (`sudo tools/efi.sh install`, 2w6) and the framebuffer that owns the panel
+    comes from the **auxiliary collection**, i.e. from
+    `/Library/Extensions/RBAMDFramebuffer.kext` (2wa) - `fbload.sh` is not that
+    path, it stages a fresh copy under `/private/var/tmp` for stages 1 and 2
+    only. Boots 187 and 190 were each lost to one of the two. **An arm
+    instruction must name the install for every artifact it depends on**, and a
+    key the new code publishes *unconditionally* is the cheapest independent
+    check that the new binary is the one running. [2cu, 2cv, 2w6, 2wa]
 
 **Instrumenting**
 
