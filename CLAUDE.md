@@ -362,6 +362,82 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**`kIOReturnUnsupported` IS ONE FRAMEBUFFER ATTRIBUTE WE NEVER ANSWERED
+(2wc).** Static read, no boot; 2wb's frontier is closed and the defect is in
+our own kext. `set_transaction_args` (`0x14e5ea68`) has ONE `retq` and only one
+site that can return an arbitrary code: `pipe->vt[0x8a0](txn)` at `0x14e5f4bf`,
+which is dump `0x8b0` = `IOAccelDisplayPipe::validateTransaction` (base:
+`xorl %eax,%eax; ret`). The override `AMDRadeonX6000_AMDAccelDisplayPipe::
+validateTransaction` (`0xbe49a9e`) is a kdebug wrapper around
+**`executeTransaction(txn, false)`** (`0xbe49b54`), whose **FIRST** test is
+
+    al = pipe->0x330->vt[0x190](getFramebufferIndex())
+    if (!txn || !al) return 0xe00002c2 + 5*(txn != NULL)     /* == 0x2c7 */
+
+**A grep for `2c7` finds five literal sites and MISSES this one** - the
+assembler writes it `leal (%rax,%rax,4),%r12d; addl $0xe00002c2,%r12d`. Rule
+26's sixth instance: **a constant can be a sum.** The other five are each
+gated on a dirty bit; with the measured `dirtyBits 0x3c1` three are clear
+(0x4/0x20/0x400), one needs `== 0x100` exactly, and the live one refuses a
+**gamma table of more than 256 entries** (`cmpl $0x100,%r13d; ja`, `r13 =
+getTableCount()`). That ceiling is **excluded by the captures**: the LUT
+CoreDisplay actually submits is 256 entries in **71 of 73** dumps in boot 190
+and 67 of 69 in 189, 1024 in only 2 of each. Two crossings in seventy-three
+cannot make 122 refusals out of 122; an unconditional first-line gate can.
+(A `sort -u` of those lines showed both sizes and read as "it sends 1024" -
+**a de-duplicated list is not a count**.)
+**AND THE GATE IS A FRAMEBUFFER ATTRIBUTE.** Rule 7: call `0x190` → dump
+`0x1a0` (controls: dump `0x138` = `isDisplayEnabled` per 2w9, dump `0x258` =
+`AMDDCNDisplay::isDisplayControlEnabled` per 2wa), an unnamed accessor at
+`0xbec02ce` = `((uint8_t *)this->0x40)[idx*0xd0 + 1] & 1` - bit 8 of the dword
+heading a `IOMalloc(this->0x58 * 0xd0)` per-display array. Its **sole** writer
+is **`AMDHWDisplay::getDisplayInfo`** (`0xbe8700e`), forty bytes past 2w9's
+ATY read:
+
+    be87100  r = fb->vt[0xa30]('wsaa', &out)   /* the control */
+    be87165  r = fb->vt[0xa30]('amtr', &out)   /* call 0xa30 -> dump 0xa40 = getAttribute */
+    be8717e  if (r == 0 || r == kIOReturnNotReady) dstate |= 0x100; else &= ~0x100
+
+`0x77736161` = `'wsaa'` = `kIOWindowServerActiveAttribute` (the control, a
+documented attribute in the same instruction shape); `0x616d7472` = `'amtr'`,
+a real `AMDFramebuffer` attribute with a case in **both** its `setAttribute`
+(`0x2a580b`) and `getAttribute` (`0x2a6cb1`) and **zero** code references in
+`IOGraphicsFamily`. Their bodies give the protocol:
+`getAttribute` = capability bit, else `NotReady` while
+`getOutstandingDisplayPipeTransactions()`, else 0, **never writing `*out`**;
+`setAttribute` = `BadArgument` on null, `NotReady` if `tryAcquireIOPGuard()`
+fails, else `handleDisplayPipeTransaction((_AMD_PIPE_TRANSACTION *)value)`.
+**`RBAMDFramebuffer` handled ONE selector (`kIOHardwareCursorAttribute`) and
+fell through to the base, which answers an unknown attribute with
+`kIOReturnUnsupported`** - so bit 8 was clear every time, and that is 122
+refusals with no variance across 62 seconds. A table size, a plane count or a
+capability reply would have varied; a missing attribute cannot. **Seventh time
+a correct static chain was attached one link off, and the second answer found
+inside `getDisplayInfo`.**
+**Build `6F1EB613`, `-rbgpufbamtr`, off by default**: `getAttribute('amtr')`
+→ success (counted, `*value` untouched, copying AMDFramebuffer);
+`setAttribute('amtr', v)` → `BadArgument` on 0 else success, and the **first**
+call snapshots 0x80 bytes from `v` into `RBFBAmtrSnap` (rule 19: floor is the
+**kernel** base `0xffffff8000000000`, and `RBFBAmtrRefused` publishes a
+pointer refused). Neither handler allocates - they run on the accelerator's
+thread with its locks held and the VBL `thread_call` publishes
+`RBFBAmtrGets/Sets/Snapped/Ptr` (rule 31); `RBFBAmtrArmed` is published
+**unconditionally** in `start()` beside `RBFBAtyArmed` (rule 15).
+`v` is **`&pipe->0x410`**, the struct `executeTransaction` just filled - flag
+word at +0x00 (0x1/0x2/0x4/0x8/0x10/0x20/0x40/0x100/0x201), plane resource
++0x10, dst rect +0x18/+0x20, colour matrix +0x30, gamma from +0x220 - so the
+snapshot is **the first cooked display-pipe transaction this project has been
+handed**, and the surface address in it is what the scanout has to be pointed
+at.
+**Said before the boot**: the transaction is **answered, not executed**, so
+the picture stays wrong; expect `RBFBAmtrGets` > 0, `RBFBAmtrSets` > 0, and
+the `set_transaction_args` line **gone**. Gets move but not sets → validation
+passed, the submit path is gated elsewhere. Neither moves → `getDisplayInfo`
+is not reaching us and the chain above the attribute is wrong.
+**NEXT**: one armed boot of fbkext `6F1EB613` **installed to the auxiliary
+collection** (rule 15 - boot 190 was lost to exactly that omission), with
+`-rbgpufbaty` and `-rbgpufbamtr` both in boot-args.
+
 **BOOT 191: THE PIPE IS ACTIVE AND TRANSACTIONS FLOW FOR THE FIRST TIME
 (2wb).** `rbgpu-boot` 191, armed, both one-shots 0, `diag_used` 661/768. Only
 6 files (rebooted ~52 s into the capture), both gaps recovered. Rule 15 met
@@ -1087,7 +1163,13 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     found` and looked exactly like "the service is absent" (2v9); **a grep for
     a word the producing code never contains returns 0 forever** — `Clean` was counted
     across five boots and six milestones while CoreDisplay's printer only ever
-    writes `Dirty` or spaces (2v8, the most expensive instance); and **when
+    writes `Dirty` or spaces (2v8, the most expensive instance); **a numeric
+    grep for a constant cannot see a constant the assembler built by
+    ARITHMETIC** - `kIOReturnUnsupported` reached `executeTransaction`'s
+    return as `leal (%rax,%rax,4); addl $0xe00002c2`, and five literal sites
+    were enumerated while the live one was invisible (2wc); **a `sort -u` is
+    not a count** - de-duplicating the LUT sizes in a capture showed 1024 and
+    256 and read as "it sends 1024" when 71 of 73 were 256 (2wc); and **when
     xrefing a string, xref the string's START** (find the preceding NUL first)
     — a substring's address can never be referenced.
     [2lw, 2rk, 2r4, 2s0, 2s5, 2sn, 2so, 2sr, 2v8]
@@ -1252,7 +1334,10 @@ small for the offsets), `-rbgpufbaty` (2w9 - publishes
 `ATY,fb_offset` and `ATY,fb_size`, the two properties `AMDHWDisplay` reads off
 the framebuffer; **the offset it publishes is deliberately not the truthful 0**,
 so the composited image lands where the scanout is not reading - expect a wrong
-picture with an active pipe), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
+picture with an active pipe), `-rbgpufbamtr` (2wc - answers the
+`'amtr'` framebuffer attribute, which is the gate on every display-pipe
+transaction, and snapshots the first transaction struct AMD hands us;
+answered, NOT executed, so the picture stays wrong), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
 (answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
 Cursor as well as 0x10 Scaler — off by default because three of the four carry
 a substituted field, 2sc).
