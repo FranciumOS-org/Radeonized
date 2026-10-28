@@ -190,6 +190,11 @@ private:
      * from setAttribute('amtr'), so it only does volatile stores - the map is
      * made once in start() and the VBL thread_call publishes (rule 31). */
     bool               hubpArmed;
+    /* 2wm: -rbgpufbflipall. Drops the flag-word bit 0x1 gate so a content
+     * update into an unchanged surface is written too. Its own boot-arg,
+     * because it trades 2wf's evidence that txn->0x10 is fresh for the
+     * chance that we have been refusing frames all along. */
+    bool               hubpAll;
     bool               hubpReady;
     uint64_t           hubpMax;        /* 0 = unlimited; rbgpufbhubpmax= */
     IOMemoryMap       *hubpMap;

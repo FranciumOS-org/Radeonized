@@ -92,6 +92,7 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpLast", hubpLast, 64);
     setProperty("RBFBHubpReadback", hubpReadback, 64);
     setProperty("RBFBHubpRejects", hubpRejects, 64);
+    setProperty("RBFBHubpAll", hubpAll);
     setProperty("RBFBHubpRejectAddr", hubpRejectAddr, 64);
     setProperty("RBFBHubpRejectWhy", (uint64_t)hubpRejectWhy, 32);
 

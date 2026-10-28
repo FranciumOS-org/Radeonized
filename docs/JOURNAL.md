@@ -43794,3 +43794,69 @@ together, which no amount of NVRAM can.
 `efi.sh install`); fbkext **`A356BE21`** to the auxiliary collection. Boot-args
 unchanged - all four of `-rbgpufbaty -rbgpufbamtr -rbgpufbhubp -rbgpufbretire`
 stay. All one-shots set again (rule 34).
+
+## 2wm — the flag-word gate is the one mechanism that fits the typing asymmetry, and it gets its own boot-arg
+
+No boot. Built on top of 2wl, same install.
+
+**The asymmetry is the evidence.** Boot 196: typing into Spotlight made the
+frames smooth, **adding characters counted and deleting them did not**. Adding
+a character grows a text layer, which forces a **new surface**; deleting
+reuses the allocation already made. So the one difference between the case
+that worked and the case that did not is **whether the surface address
+changed**.
+
+And that is exactly what 2wh gates the write on. `hubpProgram` runs only when
+the transaction's flag word carries bit `0x1`, "the plane resource changed" -
+2wf read AMDFramebuffer's own consumer making that test before it dereferences
+`txn->0x10`, and 2wh copied it so a colour-matrix-only transaction could not
+re-write a stale address from a stale pointer. **If a content update into an
+unchanged surface arrives with bit 0x1 clear, we are being handed frames and
+refusing to draw them**, and the symptom would be precisely the one observed.
+
+**It is NOT established that this is happening**, and boot 195 argues against
+it: `RBFBAmtrSets` 4 with `RBFBHubpWrites` 4, so every transaction in that
+boot's first 183 s carried the bit and none was dropped. But that is four
+transactions on an idle desktop, which is the case that does not matter; the
+typing burst was never measured. 2wl's `n=` counter answers it directly.
+
+**`-rbgpufbflipall`, off by default.** It drops the gate:
+`rb_hubp_should_write(flags, all)`, in `src/common/rb_hubp.h` with the rest of
+the decision logic, so the hosttest decides it before the kext does. Eight
+assertions: the measured flag word `0x75` is accepted by both forms (a
+regression there would silently kill the working display), a colour-matrix-only
+`0x10` is **refused gated and written ungated** - the two must differ or the
+arg answers nothing - and the gate reads bit `0x1` only, not "any bit set",
+which would accept `0x10` and make the experiment a no-op. Mutation tested:
+`flags & RB_HUBP_FLAG_PLANE` -> `flags` fails case 3.
+
+**What it trades.** Bit 0x1 is the consumer's own evidence that `txn->0x10`
+points at a fresh `_AMD_PIPE_FLIP`. Without it we trust a pointer Apple has
+not said it refreshed. The caller still range-checks that pointer against the
+kernel floor and every address still passes all six `rb_hubp_check_addr`
+guards, so the failure mode is a **refused** write, not a wild one - and the
+worst case is the one 2wh already covers, a stale address showing a stale
+frame until the next correct write.
+
+**Rule 30 on the name.** Not `-rbgpufbhubpall`: `-rbgpufbhubp` would prefix
+it, and 2ss cost a safety check to exactly that. Checked mechanically against
+every rbgpu token in the live boot-args - `-rbgpufbflipall` neither prefixes
+nor is prefixed by any of them (the only two prefix pairs present,
+`-rbgpuvbl`/`-rbgpuvblpump` and `-rbgpuagdc`/`-rbgpuagdccaps`, are
+pre-existing and already known safe).
+
+**SAID BEFORE THE BOOT.** The arg and the counter are **independent**, which
+is what makes one boot settle it:
+
+- `n=` **0** -> no bit-clear transaction ever arrived, `-rbgpufbflipall` is
+  provably inert, and this whole line is closed by its own instrument.
+- `n=` **large** and the frame rate **up** -> that was it, and the display
+  half is finished.
+- `n=` large and the rate **unchanged** -> we were dropping frames and drawing
+  them changes nothing, so the stale pointer is stale and bit 0x1 was right.
+- `p=` is the control on all three: it says whether the chain ever ran fast at
+  all, independently of which transactions we chose to write.
+
+**Build `7A6A56A9`** (2wl's `A356BE21` plus this). Plugin `0D1F953A`
+unchanged in the EFI. Boot-args add **`-rbgpufbflipall`** and keep everything
+else.
