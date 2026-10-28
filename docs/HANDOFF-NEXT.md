@@ -1,217 +1,116 @@
-# HANDOFF-NEXT — the live handoff
+# HANDOFF — next session
 
-Last updated **2026-10-27**, after milestone **2w8** (boot 188).
-Read this first, then `docs/RULES.md`'s rules, then grep `docs/JOURNAL.md` by tag.
+**State: the display half's defect is NAMED and a fix is built but NOT YET
+BOOTED.** Read `docs/RULES.md`'s 2w9 block first; `docs/JOURNAL.md` has the full
+read under the tag `2w9`.
 
----
+## 1. What boot 189 settled
 
-## 1. Where the display half stands
+`kIOReturnNotReady` (140x) comes from
+`IOAccelDisplayPipeUserClient2::transactionEnd` because
+`IOAccelDisplayPipe::isActive()` is false, because `pipe->0x298` was never set,
+because `AMDRadeonX6000_AMDAccelDisplayPipe::initFramebufferResource`
+(`0xbe49356`) returns 0 silently on `pipe->0x340 == 0`.
 
-The rendering half works. The display half composites in software, and the
-chain is now traced from WindowServer all the way into Apple's kernel driver.
-**Boot 185 named the failure.**
+**`pipe->0x340` and `pipe->0x34c` come from two registry properties on the
+framebuffer, and `RBAMDFramebuffer` published neither:**
 
-    WindowServer
-      -> CoreDisplay::DisplayPipe::Commit
-      -> RunGPUDisplayPipe (the GPU FALLBACK path)
-      -> BuildTransactions
-      -> IOPTransaction::Submit            0x7ff8040c8a56
-         -> IOPresentmentBegin             SUCCEEDS (2w2, confirmed 2w3)
-         -> CreateResource / BindIOSurfaceToResourcePlane / SetPlaneState
-         -> IOPresentmentEnd               0x7ff812e89211  <-- FAILS
-            -> (trampoline: obj->0xa0, vtable slot 0x80)
-            -> IOAccelDisplayPipeUserClient2::transactionEnd
-                                           IOAcceleratorFamily2 0x14e64620
-               returns kIOReturnNotReady (0x2d8), 118 times
+| property | format | consumed by | effect if absent |
+|---|---|---|---|
+| `ATY,fb_offset` | 8-byte `OSData`, `uint64` | `getDisplayInfo` -> `info+0x00` | `pipe->0x340 = 0` -> **fatal** |
+| `ATY,fb_size` | 8-byte `OSData`, `uint64` | `getDisplayInfo` -> `info+0x0c`, **and** `isDisplayEnabled` | `pipe->0x35d = 0` -> **fatal** |
 
-`Submit` logs that at **`[INFO]`** level, which `plugin_check.sh` dropped for
-eight boots (2w2, rule 36). With `--info` it reads:
+Both must be **non-zero**. `ATY,fb_offset` is a byte **offset** relative to the
+VRAM base (`hw->0x370->vt[0x1e0]()` = `mem->0x50`), not an address.
 
-    [INFO] - Failed to submit transaction:
-            IOPRESENTMENT_METHOD_FAILURE: IOReturn: 0x2d8
+Measured gate table, boot 189, all three samples identical:
 
-## 2. The three gates in `transactionEnd`
-
-**MEASURED, boot 188, three samples 25/45/75 s (2w7):**
-
-| gate | reading | status |
+| field | read | verdict |
 |---|---|---|
-| `accel->0xc78 & 0x2` | **1** (flags 2) | **ELIMINATED — the accelerator IS enabled** |
+| `accel->0xc78 & 0x2` | 1 | eliminated |
 | `pipe->0x282` | 0 | eliminated |
-| `pipe->0x298` | **0** | **THE GATE — `isActive()` is false** |
+| `pipe->0x298` | **0** | **the gate** |
+| `w / h / bpp / fmt` | 1920 / 1080 / 4 / 4 | `getPixelInformation` correct |
+| `fi348` | 8294400 | exact, correct |
+| `fi340` / `fi34c` | **0 / 0** | the two absent properties |
+| `pfb`, `hw328`, `hw330`, `vram`, `vmap` | all 1 | the pointer chain is right |
 
-`accel->0x180` and `0x188` both non-NULL, so `getVRAMRange()`,
-`find_vram_descriptor` and the whole VRAM line are **correct and closed**.
-2w4/2w5 eliminated `0x298` from the absence of a FAULT; 2w3 had enumerated
-only three of `init_framebuffer_resource`'s **five** exits, and the two it
-missed are silent.
+## 2. The next boot — ONE boot, builds already made
 
-**Defer (2w4):** `wsaaDidExitDefer` (`0x14e5dfe6`) zeroes `0x282`
-unconditionally and returns true. Boot 185's last `kIOFBNotifyWSAADidExitDefer`
-(event 93) was at **18:56:05.543**; the submit failures run
-18:56:05.516–18:56:07 **and again at 18:56:39 and 18:56:55**.
+Builds: **plugin `64D3D687`**, **fbkext `59124B3A`**. Both UUIDs verified moved;
+`kmutil libraries -p build/out/RembrandtGPU.kext | grep -c SystemKernelExtensions.kc`
+= 0; `grep -c IOGraphicsFamily src/plugin/Info.plist` = 0.
 
-**isActive (2w4):** `init_framebuffer_resource` (`0x14e5d7ca`) is called
-**unconditionally** by `IOAccelDisplayPipe::displayModeDidChange`
-(`0x14e5db14`), the only site in the kext that registers `'vbl '` — which
-boot 183 measured on our framebuffer. All three of its failure exits log at
-os_log type 0x11 = FAULT, and against a genuine control (213
-IOAcceleratorFamily2 FAULTs from the same thread, recovered by capturing by
-**sender** — 2w3's control was invalid) not one appears.
+The plugin boots **from the OpenCore EFI** — a rebuild does nothing until it is
+installed (2w6 lost a boot to exactly this). The new boot-arg must be added too.
 
-**So the enable bit is the gate.** It is skipped, while the per-pipe loop
-still runs, when `accel->0x180 == 0`. The vendor gate above it is
-`AMDRadeonX6000_AMDAccelDisplayMachine::displayModeDidChange()` (`0xbe48428`,
-call offset 0x870 = dump 0x880, rule 7), which returns
-`set_display_mode_and_vram()`; it returned true at least once, since the pipe
-loop ran.
+Commands for the user to run (the assistant never runs these and never asks for the
+password):
 
-Why the enable bit is the suspect: `IOGraphicsAccelerator2::start` clears it,
-`enableAccelerator()` is its sole setter, and that is called only from
-`IOAccelDisplayMachine::display_mode_did_change` (`0x14e2148e`), which
-**skips the enable but still runs the per-pipe `displayModeDidChange` loop**
-when `accel->0x180 == 0`. That single branch explains every measurement at
-once: VBL registered, framebuffer resource inited, accelerator never
-enabled, NotReady 118 times.
-
-`accel->0x180` is the **VRAM descriptor**, and it comes from our framebuffer:
-`find_vram_descriptor()` (`0x14e53922`) calls `fb->vt[0x9b0]()` =
-`IOFramebuffer::getVRAMRange()` (2pq's slot), stores it at `0x180`, maps it
-(`vt[0x200](1)` -> `0x188`, `vt[0x118]()` -> `0x190`), and **on a failed map
-releases it and writes `0x180 = 0`**.
-`RBAMDFramebuffer::getVRAMRange()` (`src/fbkext/RBAMDFramebuffer.cpp:437`)
-returns the retained aperture, so the suspect is the **map**, or
-`found_framebuffer` never running for our framebuffer.
-
-## 3. What is eliminated — do not spend a boot on these
-
-- **Every AGDC capability type** (1/4/0x8000 by 2sd, 2 by 2v6, 0x10 by 2w1).
-  2w3 has IOPresentment saying *"AGDC CSC / Gamma / Linearization / Plane
-  Scaler / Cursor successful"* three times each, in its own words.
-- **The plane count** — `IOPresentmentBegin` never fails (2w2, 2w3).
-- **System Gamma `Unknown`** — enum 0, never ours to write (2v8).
-- **`Clean` never appearing** — the printer cannot print it (2v8).
-- **The VBL half** — 144 Hz, right handler, right registration (2w0).
-- **The transactions-off route** — there isn't one (2s3).
-- **Page flipping** — never called in a whole boot (2pf).
-
-## 4. The next experiment: ONE armed boot, build `D69D9B33`
-
-A read, not a change. **Boot 186 already tried it and the probe never ran** —
-2w3 had put its call next to `rbgpu_heartbeat_start()`, which sits behind
-`-rbgpubeat` (absent since 2fg), so build `D8B1115C` produced not one `ax*`
-key. The call now lives in the peer's `start()` and is gated only by its own
-arg (2w5, build `D69D9B33`). The boot-arg is already in `config.plist`.
-
-`-rbgpuaccelprobe` schedules three read-only samples at
-25 / 45 / 75 s that find the accelerator by class, verify
-`getMetaClass()->getClassSize()` covers the offset before touching it
-(rule 19 — and refuse, publishing what was refused), and publish:
-
-    ax<i>_gate      0 all three open, 1 accel not enabled, 2 defer, 3 not active
-    ax<i>_enabled   accel->0xc78 bit 1
-    ax<i>_active    pipe->0x298
-    ax<i>_defer     pipe->0x282
-    ax<i>_vram      accel->0x180 non-NULL     <-- the enable gate's own input
-    ax<i>_vmap      accel->0x188 non-NULL
-    ax<i>_fbs       machine->0x108
-    ax<i>_say       the sentence (allowed to fall off the 512-byte note)
-
-The numeric keys are first in `kRbgpuNvramHotKeys` because the boot wedges.
-
-### Arm it (the user runs these; the assistant never does)
-
-The boot-arg is already in `config.plist` (boot 186 had it).
-
-**Install the build first.** The plugin boots from the OpenCore EFI, so a new
-`build/out/RembrandtGPU.kext` does nothing until it is copied there — boots
-186 **and 187** both ran `D8B1115C` while `D69D9B33` sat in `build/out`
-(2w6, caught by rule 15):
-
-```bash
+```
 sudo tools/efi.sh install
-```
-
-Then verify, in the next capture, that `kexts.txt` says **`D69D9B33`** — not
-`D8B1115C`. For the boot itself — **all four one-shots** (rule 34):
-
-```bash
+sudo tools/efi.sh bootarg add -rbgpufbaty
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
-```
-
-```bash
 sudo reboot
 ```
 
-After boot: `sudo tools/fbload.sh`, wait past 75 s, then **over SSH, before
-rebooting** (rule 10):
+Then after boot: `sudo tools/fbload.sh`, wait past **75 s** (the probe's last
+sample), and `sudo tools/plugin_check.sh` over SSH **before** rebooting
+(rule 10). Let it finish — boots 188's capture was cut off at six files.
 
-```bash
-sudo tools/plugin_check.sh
-```
+**EXPECT A WRONG OR STALE PICTURE.** The offset published is 16 MB while the
+display engine still scans VRAM offset 0, because the gate rejects the truthful
+0. A working pipe with a wrong image is the intended result of this boot. The
+screen is not the instrument; SSH and the probe are. Nothing is written to the
+display engine, so DCN cannot be wedged, and removing `-rbgpufbaty` reverts it.
 
-### Reading it
+## 3. Reading order for that capture
 
-1. `rbgpu-boot` must be **188** (rule 8), and `kexts.txt` must show
-   **`D69D9B33`** (rule 15 — boots 186 and 187 both ran the old build).
-2. `agdc_oneshot`, `iop_oneshot` must be **0**, not 2 (rule 34).
-2b. **`ax_say` must exist at all** — if it is absent the probe did not run
-    again and nothing else in step 4 means anything (2w5).
-3. `diag_used` vs `diag_max` (rule 14).
-4. `ax0_gate` / `ax2_gate`. If **1**, read `ax0_vram`: zero means
-   `getVRAMRange()`'s descriptor never survived its map, and the fix is in
-   `src/fbkext/RBAMDFramebuffer.cpp`; non-zero means `display_mode_did_change`
-   never reached the enable for the other reason (`this->0x10c` nesting or
-   `vt[0x870]`).
-5. `display-log.txt` must still show non-zero `[INFO]` **and** non-zero
-   kernel lines, with `display_change_handler` non-zero as the kernel-half
-   control (rule 36 — the summary prints a WARNING for either).
+1. `rbgpu-boot` must be **190** (rule 8).
+2. `kexts.txt` must show **`64D3D687`** and **`59124B3A`** (rule 15).
+3. `agdc_oneshot` / `iop_oneshot` must both be **0** (rule 34).
+4. `diag_used` vs `diag_max` before reading any absence (rule 14).
+5. `ioreg -rl -c RBAMDFramebuffer`: `RBFBAtyArmed Yes`, `RBFBAtyOffset
+   16777216`, `RBFBAtySize 8294400`. If `RBFBAtyArmed` is `No` the boot-arg did
+   not land and nothing else in the capture means anything.
+6. Then, in this order: `ax0_b35d`, `ax0_fi340`, `ax0_fi34c`, `ax0_active`,
+   `ax0_gate`, `ax0_say`.
 
-## 4b. The wedge is named (2w4) — a SECOND, separate defect
+Predictions written down before the boot:
 
-From **18:56:11.410**, six seconds after the first submit failure, repeating
-every ~5–6 s to 18:56:50:
+- `ax0_b35d` **1**, `ax0_fi340` **16777216**, `ax0_fi34c` **8294400**
+- `ax0_active` **1**, `ax0_gate` **0**, `ax0_say` "ALL THREE OPEN"
+- `Failed to submit transaction` and `IOReturn: 0x2d8` → **0**
+- `fb_vbl_ot_armed` **present for the first time** (a transaction finally queued)
 
-    channel 52 GFX event timeout;        pending stamps [1..289]
-    channel 12 SDMA0_PAGE event timeout; pending stamps [1..191]
-    channel 53 SDMA0_PAGE event timeout; pending stamps [1..184]
-    channel N is not hung, keep running                                  x18
-    checkGPUProgress - Signaling hardware error on channel 12/25/52/53   x22
-    signalHardwareError: GPURestartSignaled / GPURestartEnqueued    x22 each
-    hardwareErrorEvent: setting restart type to 2                        x22
-    restart_channel: GPURestartSkipped / no channel associated with
-                     stamp_idx N (type 2)                                x18
+Branches if it does not come out that way:
 
-Work is submitted and **never retires**; AMD's own hang check answers *"not
-hung, keep running"*; the restart path cannot find the channel for the stamp
-and skips. A **stamp-retirement** failure, beginning **after** the display
-failures. Whether it is their consequence or an independent second defect is
-**not established** — do not assume either.
+- `b35d 0` → the property did not land as `OSData`, or the arg is absent. Check 5 first.
+- `b35d 1`, `fi340 16777216`, `active 0` → the remaining silent returns inside
+  `initFramebufferResource` are `index != 0` and `reserveFrameBuffer` failing;
+  `ax0_r380` names which.
+- `active 1` but submits still fail → the defect moves past `transactionEnd` for
+  the first time; capture with `--info` (rule 36) and read the new message.
 
-Also new and unexplained: **`IOAccelSurface::set_id_mode(uint32_t, uint32_t):
-Surface mode contains bad bits`**, x4 at 18:56:05.034, ~0.5 s before the
-first submit failure.
+## 4. If it works: the follow-on, already scoped
 
-`tools/plugin_check.sh` now captures all of this by default (sender clauses
-for `IOAcceleratorFamily2` and `AMDRadeonX6000`, plus a kernel-line count and
-a `display_change_handler` control in the summary).
+Point the scanout at the offset we told the accelerator about, i.e. program the
+DCN 3.1.2 `HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair from
+`docs/linux-ref/` (`DCN_VERSION_3_1` grouping, `dcn_3_1_2` offsets — check the
+grouping before adding a register, per the workflow note). **This kext has never
+written to the display engine**, so that is its own milestone with its own
+risk: a wrong write blanks the panel. Do it only with the chain already proven
+and with the image as the only remaining defect.
 
-## 5. Still open, carried
+## 5. Carried over, unchanged
 
-- **The wedge** is now named (section 4b) but not explained: why stamps stop
-  retiring, and why `restart_channel` cannot find the channel. 177-182 and
-  184-185 all wedged with the AGDC bridge armed; boot 183 with it unarmed did
-  not. n=1 differential.
-- `pipe->0x290`, the hardware-pipe-vs-fallback choice, is a
-  transaction-carried `std::optional` (`txn+0x180`/`+0x181`) — CoreDisplay's
-  own, not ours (2w1).
-- `fb_vbl_ot_armed` still absent: no transaction has ever been queued.
-- The `je` at `0x7ff804117ff7` into the fallback cannot fire; which of
-  `0x290`'s conditions takes the `jmp` at `0x11812b` is unestablished.
-- WindowServer at 200.2 % (boot 183) vs 2su's 0.0 % idle — recorded, **not**
-  attributed.
-- 2sv's controlled zero for `IOAccelDisplayPipeCapabilities` against
-  2u1/2u2/2w0's three non-zero reads.
-- `IOAccelDisplayPipeUserClient2` counting 2 with `IONDRVFramebuffer` and 1
-  with ours.
-- ~62 unpushed commits. **Pushing needs asking.**
+- The **wedge**: `channel 52 GFX event timeout`, `checkGPUProgress - Signaling
+  hardware error`, `no channel associated with stamp_idx N`, from ~6 s after the
+  first submit failure. 41 `event timeout` lines in boot 189. Consequence or
+  independent second defect — **not established**.
+- `IOAccelSurface::set_id_mode: Surface mode contains bad bits` x4, unexplained.
+- 2sv's controlled zero for `IOAccelDisplayPipeCapabilities` against 2u1/2u2/2w0's
+  three non-zero reads.
+- `IOAccelDisplayPipeUserClient2` counting 2 with `IONDRVFramebuffer`, 1 with ours.
+- WindowServer CPU% never attributed in a controlled read.
+- **~70 unpushed commits. Pushing needs asking.**
