@@ -65,6 +65,9 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAmtrArmed", amtrArmed);
     setProperty("RBFBAmtrGets", amtrGets, 64);
     setProperty("RBFBAmtrSets", amtrSets, 64);
+    setProperty("RBFBAmtrPeak", amtrPeak, 64);
+    setProperty("RBFBAmtrBucket", amtrBucket, 64);
+    setProperty("RBFBAmtrNoFlip", amtrNoFlip, 64);
     setProperty("RBFBAmtrSnapped", amtrSnapped);
     setProperty("RBFBAmtrPtr", amtrPtr, 64);
     setProperty("RBFBAmtrRefused", amtrRefused, 64);
@@ -195,10 +198,25 @@ void RBAMDFramebuffer::deliverVBL(void)
         crumb(10);
     } else if (vblFires == 1000) {
         crumb(11);
-    } else if (vblFires == 10000) {
-        crumb(12);
-    } else if (vblFires == 100000) {
-        crumb(13);
+    } else if ((vblFires % 10000) == 0) {
+        /* 2wl: from here on the crumb is PERIODIC, every 10000 fires (~70 s),
+         * and s= says which sample it is - 12 at 70 s, 13 at 139 s, 29 at
+         * twenty minutes. Boot 197 ran for twenty minutes and left a crumb
+         * from its first seventy seconds, because the old form wrote at four
+         * fixed counts and then stopped; a boot that cannot be captured must
+         * leave a record of its WHOLE life, not its first minute (rule 10).
+         * One flash commit every 70 s is the same order as the four this
+         * already did. */
+        crumb(11 + (uint32_t)(vblFires / 10000));
+    }
+    /* 2wl: roll the rate bucket on the same clock. ~7 s is short enough that
+     * a burst of typing fills one window and long enough that a single flip
+     * does not read as a rate. */
+    if ((vblFires % 1000) == 0) {
+        if (amtrBucket > amtrPeak) {
+            amtrPeak = amtrBucket;
+        }
+        amtrBucket = 0;
     }
     armVBL();
 }

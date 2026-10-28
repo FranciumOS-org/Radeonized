@@ -362,6 +362,53 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 196: THE CHAIN IS NOT SLOW, IT IS UNASKED (2wl).** The user installed
+`F730123C` and armed `-rbgpufbretire` unprompted, and ran the box for **twenty
+minutes**. Verified from the live machine, not the handoff:
+`/Library/Extensions/RBAMDFramebuffer.kext` is `F730123C` and `boot-args` ends
+`-rbgpufbaty -rbgpufbamtr -rbgpufbhubp -rbgpufbretire`. Rule 33: the machine
+read afterwards booted at 14:55, one minute after the photo, `armed=0`, no
+`RBAMDFramebuffer` - the armed boot is over and only NVRAM survives.
+**THE DESKTOP IS CORRECT AND FULLY COMPOSITED** - translucent dock, colour
+widgets, window shadows, a sheet, menu-bar blur, and System Information reading
+**AMD Radeon 680M / GPU / 4 GB / Metal Supported / 1920x1080 @ 144.00Hz /
+24-Bit ARGB8888 / Main Display Yes / Online Yes**.
+**THE NEW FACT CHANGES THE QUESTION.** Typing into Spotlight made the frames
+**smooth while typing**, and **adding characters counted, deleting did not**.
+So the chain delivered at keystroke rate through the same
+`setAttribute('amtr')` -> `hubpProgram` path that idles at 0.09 Hz. **A
+timeout, a throttle and a missing vblank retirement all fail to explain a
+chain that runs fast on command.** The frontier is no longer "why is our frame
+delivery slow" but **"why does a change on screen not produce a transaction
+unless it is a keystroke"** - which is upstream of everything this project
+has built. 2wi's two candidates were both framed as throttles; neither fits.
+**AND THE BOOT MEASURED SEVENTY SECONDS OF ITSELF.** `rbgpu-fbcrumb` reads
+`b=195 s=12 f=10000 e=11 r=1 h=0 w=4 k=0 t=4` - the HUBP write set up, 4
+writes, VBL running, 4 transactions, **as of 10000 fires = 69.5 s**, because
+the crumb was written at four fixed counts (100/1000/10000/100000) and the
+fourth is 11.6 minutes away. A twenty-minute boot left a record of its first
+minute, and `RBFBRetireKicks`/`RBFBRetireDelivered` are registry-only, so
+**`-rbgpufbretire` is STILL UNTESTED, third boot running.** **Rule 10,
+sharper: what must survive an uncapturable boot has to be PERIODIC, not a set
+of marks.**
+**NUMBERING (rule 8)**: `rbgpu-boot` is **196** and the 14:18 capture read
+195, so the twenty-minute boot is nonce 196 and the boot numbers in 2wi/2wj/2wk
+were narrative, not nonces. Boot numbers are the nonce or they are nothing.
+**Build `A356BE21`, instrumentation only.** The crumb is **periodic** (every
+10000 fires, `s=` says which sample, so the last one is the whole boot); `p=`
+is the fullest ~7 s window of transactions the boot ever saw (a total over a
+boot length cannot tell a burst from a trickle, and this boot contained both);
+`n=` counts transactions with flag bit `0x1` clear, the ones 2wh skips, so
+"handed a content update and dropped it" differs from "never handed one"; and
+`K=`/`D=` carry the retire kick. **Said before the boot**: `p=` in the tens
+means the display half is finished and the defect is entirely upstream; `p=` at
+1 or 2 means the smoothness did not come through our write and 2wi needs
+re-examining; `n=` non-zero is ours and immediate.
+**AND THE MACHINE IS CAPTURABLE NOW** - typing is the one thing that updates
+smoothly, which is what a terminal is. `sudo tools/plugin_check.sh` in the
+armed boot carries `RBFBRetireKicks/Delivered`, `RBFBVBL1Fires`, `RBFBAmtrSets`
+and the display log together, which no amount of NVRAM can.
+
 **BOOT 196: THE DISPLAY REPRODUCES, AND THE ONE-SHOT IS FIXED BY OVERWRITING
 IT (2wj).** The user restarted **without** installing `452E6EE1` and
 **without** `-rbgpufbretire`, so boot 196 is boot 195's configuration again:
