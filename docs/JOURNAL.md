@@ -44429,3 +44429,74 @@ command processor would leave queued work invisible to the chip until something
 else poked it, which is the tick's shape; and `advance(HwChannelCtx&)` already
 reads `AMDUserQueue::isAttached` before calling `userQueueSwitch`. Rule 35:
 instrument before building on it.
+
+## 2wu — EVERY ENGINE, ONE TICK. THE DRIVER HOLDS THE WORK.
+
+No boot, boot 198. Two measurements close the characterisation.
+
+**THE BUFFER IS "SCHEDULED" IN 92 MICROSECONDS.** `addScheduledHandler` fires
+when the driver has handed the buffer on, before it completes, so it separates
+a deferred submission from a chip-side delay:
+
+    commit -> scheduled      0.092 ms
+    scheduled -> GPUstart  ~174.8 ms
+    GPUstart -> GPUend       0.014 ms
+    GPUend -> return         0.042 ms
+
+So **userspace is exonerated** — the dispatch source the `sample` caught
+(`com.Metal.CommandQueueDispatch` -> `_submitAvailableCommandBuffers` ->
+`IOAccelCommandQueueSubmitCommandBuffers` -> `IOConnectCallMethod`) runs at
+once, and `kernelStartTime`'s 0.025 ms is corroborated by a clock whose meaning
+is measured here rather than taken from Apple's documentation (rule 13).
+
+**AND IT IS NOT COMPUTE-SPECIFIC.** 2wt showed a Metal command queue becomes a
+compute user queue, which raised the real possibility that the tick never
+touches the desktop, since WindowServer renders rather than dispatching. One
+buffer per engine through the same queue, median of 8 after the random-phase
+first:
+
+    compute        wall 174.385 ms   commit->GPUstart 174.333 ms    5.7/s
+    blit (SDMA)    wall 173.103 ms   commit->GPUstart 173.043 ms    5.8/s
+    render (gfx)   wall 173.766 ms   commit->GPUstart 173.706 ms    5.8/s
+
+**Identical on all three.** The graphics ring is ticked exactly like the
+compute one, so the quantum *does* cap the desktop. 144 Hz needs 6.944 ms;
+this is **25x** too slow.
+
+**THE SHAPE, COMPLETE.** Collecting 2ws/2wt/2wu, the release quantum is:
+every engine, every queue in a process released together, one shared cadence
+per process, **independent phase between processes**, free-running, period
+173-180 ms, load-independent, releasing an unbounded batch at once, with the
+GPU demonstrably idle meanwhile and the work already submitted and marked
+scheduled.
+
+**THAT RULES OUT A CHIP-LEVEL MECHANISM.** Two processes submitting
+concurrently throughout were released on two cadences of the same period at
+**different phase**. A doorbell the command processor cannot see, an MES
+timeslice, or a clock/power gating cycle are all properties of the chip and
+would give every client the *same* phase. They do not. **So the decision to
+release is made per client, in software, above the hardware** — which is the
+first finding that points at a specific function rather than at a layer:
+`AMDSWScheduler::advance()` (`0xbe950e0`), whose only two reachers are
+`deferredCallback(IOInterruptEventSource*)` (`0xbe93e18`) and the never-
+installed `timerCallback` (`0xbe9513c`), and which pushes exactly those
+HwChannelCtx marked at `+0x71`.
+
+**NOT ESTABLISHED.** That `advance()` is the gate, and that `deferredCallback`
+is the thing running late. Everything above is measured from userspace and
+*nothing* in it observes a single call inside the driver. This is precisely the
+situation rule 35 names: a static chain ending at a function we have not
+instrumented. The next step instruments it.
+
+**NEXT, one boot, plugin-only.** Hook `AMDSWScheduler::submitCommandBuffer`
+(`0xbe942d0`), `advance()` (`0xbe950e0`) and `deferredCallback` (`0xbe93e18`)
+and publish, per second: call counts for each, and the delta from a
+`submitCommandBuffer` to the next `advance()`. Said before the boot:
+**advance() at ~5.7/s with submitCommandBuffer far higher** means the release
+is `advance()` and the fix is to drive it from the submit path; **advance()
+tracking submitCommandBuffer one-for-one** means the hold is below it and
+`advance(HwChannelCtx&)`'s own gates (`AMDUserQueue::isAttached` at `0xbe94730`,
+then `userQueueSwitch`) are next. Either way the counters are cheap, read-only,
+and the question is settled in one boot. No framebuffer, no display, no AGDC:
+`rbgpu-fb` stays **0** (rule 38 — the fb takes the panel and would freeze it
+with nothing to show).

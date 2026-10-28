@@ -414,6 +414,99 @@ static int busy_on(id<MTLDevice> dev, double secs) {
  * as possible, then read every buffer's GPUStartTime. Clustered within a
  * millisecond means one shared tick released them all; spread out across the
  * period means each queue has its own. */
+/* 2ws: --engines. DOES THE TICK APPLY TO EVERY ENGINE, OR ONLY TO COMPUTE?
+ *
+ * Everything measured so far used an MTLComputeCommandEncoder, which 2wt
+ * showed becomes a compute USER QUEUE (the log names ComputeUQ2/3/6). The
+ * desktop does not composite with compute user queues - WindowServer renders.
+ * So if the graphics ring is prompt and only compute is ticked, the 176 ms
+ * does not cap the frame rate at all and the whole aim has to move. That is
+ * worth one cheap test before anything is built on it.
+ *
+ * Three buffers, one per engine, each timed the same way: compute dispatch,
+ * blit copy (SDMA), and a render pass that only clears (graphics). A render
+ * pass with no draw call still goes down the graphics ring, which is the
+ * question being asked. */
+static int engines_on(id<MTLDevice> dev, int iters) {
+    NSError *err = nil;
+    id<MTLCommandQueue> q = [dev newCommandQueue];
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(kSrc) options:nil error:&err];
+    if (!q || !lib) { printf("  FAIL: no queue or library\n"); return 1; }
+    id<MTLComputePipelineState> ps =
+        [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill"]
+                                           error:&err];
+    id<MTLBuffer> a = [dev newBufferWithLength:N * sizeof(uint32_t)
+                                      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> b = [dev newBufferWithLength:N * sizeof(uint32_t)
+                                      options:MTLResourceStorageModeShared];
+    if (!ps || !a || !b) { printf("  FAIL: no pipeline or buffers\n"); return 1; }
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                     width:64 height:64 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    if (!tex) { printf("  FAIL: no render target\n"); return 1; }
+
+    const char *names[3] = { "compute", "blit(SDMA)", "render(gfx)" };
+    for (int e = 0; e < 3; e++) {
+        double *w = calloc(iters, sizeof(double));
+        double *g = calloc(iters, sizeof(double));
+        if (!w || !g) { printf("  FAIL: out of memory\n"); return 1; }
+        int failed = 0;
+        for (int i = 0; i < iters; i++) {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [q commandBuffer];
+                if (e == 0) {
+                    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                    [enc setComputePipelineState:ps];
+                    [enc setBuffer:a offset:0 atIndex:0];
+                    [enc dispatchThreads:MTLSizeMake(N, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+                    [enc endEncoding];
+                } else if (e == 1) {
+                    id<MTLBlitCommandEncoder> enc = [cb blitCommandEncoder];
+                    [enc copyFromBuffer:a sourceOffset:0 toBuffer:b
+                      destinationOffset:0 size:N * sizeof(uint32_t)];
+                    [enc endEncoding];
+                } else {
+                    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rp.colorAttachments[0].texture = tex;
+                    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+                    id<MTLRenderCommandEncoder> enc =
+                        [cb renderCommandEncoderWithDescriptor:rp];
+                    if (!enc) { failed = 1; break; }
+                    [enc endEncoding];
+                }
+                double t0 = now_s();
+                [cb commit];
+                [cb waitUntilCompleted];
+                w[i] = now_s() - t0;
+                /* GPUStartTime can be 0 for a buffer the GPU never timestamps,
+                 * so -1 marks "not reported" rather than pretending it is 0. */
+                g[i] = cb.GPUStartTime > 0 ? cb.GPUStartTime - t0 : -1.0;
+            }
+        }
+        if (failed) { printf("    %-12s could not encode\n", names[e]); free(w); free(g); continue; }
+        /* Medians over iterations 1.. so the first, random-phase one is out. */
+        int n = iters > 1 ? iters - 1 : iters, off = iters > 1 ? 1 : 0;
+        double *sw = malloc(n * sizeof(double)), *sg = malloc(n * sizeof(double));
+        memcpy(sw, w + off, n * sizeof(double));
+        memcpy(sg, g + off, n * sizeof(double));
+        qsort(sw, n, sizeof(double), cmp_d);
+        qsort(sg, n, sizeof(double), cmp_d);
+        printf("    %-12s wall median %9.3f ms   commit->GPUstart %9.3f ms   "
+               "-> %6.1f/s\n", names[e], sw[n / 2] * 1e3, sg[n / 2] * 1e3,
+               sw[n / 2] > 0 ? 1.0 / sw[n / 2] : 0.0);
+        free(w); free(g); free(sw); free(sg);
+    }
+    printf("    (144 Hz needs 6.944 ms, i.e. 144/s)\n");
+    return 0;
+}
+
 static int queues_on(id<MTLDevice> dev, int nq) {
     NSError *err = nil;
     id<MTLLibrary> lib = [dev newLibraryWithSource:@(kSrc) options:nil error:&err];
@@ -508,7 +601,8 @@ static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
     double *ksta = calloc(iters, sizeof(double));
     double *gsta = calloc(iters, sizeof(double));
     double *gend = calloc(iters, sizeof(double));
-    if (!wall || !gpu || !drv || !ksta || !gsta || !gend) {
+    double *sched = calloc(iters, sizeof(double));
+    if (!wall || !gpu || !drv || !ksta || !gsta || !gend || !sched) {
         printf("  FAIL: out of memory\n"); return 1;
     }
 
@@ -524,7 +618,22 @@ static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];
         __block double tHandler = 0;
+        /* 2ws: "scheduled" is the state AFTER the driver has handed the buffer
+         * to the GPU and BEFORE it finishes. It is the one clock that
+         * separates the two remaining stories:
+         *   scheduled at ~0 ms  -> submission happened at once, the 176 ms is
+         *                          on the chip side (ring kick / queue attach)
+         *   scheduled at ~176 ms -> submission ITSELF is deferred, and the
+         *                          dispatch source the sample caught is the
+         *                          thing to chase, in userspace.
+         * kernelStartTime already suggests the first, but its definition is
+         * Apple's and not measured here, so it is not something to lean on. */
+        __block double tSched = 0;
         double t0 = now_s();
+        [cb addScheduledHandler:^(id<MTLCommandBuffer> b) {
+            (void)b;
+            tSched = now_s();
+        }];
         [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
             (void)b;
             tHandler = now_s();
@@ -544,6 +653,7 @@ static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
          * sample showed Metal submitting from a dispatch source, which is
          * per-process - matching a per-process clock phase - so this is the
          * measurement that decides it. */
+        sched[i] = tSched > 0 ? tSched - t0 : -1.0;
         ksta[i] = cb.kernelStartTime - t0;
         gsta[i] = cb.GPUStartTime    - t0;
         gend[i] = cb.GPUEndTime      - t0;
@@ -551,10 +661,10 @@ static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
             printf("  iter %d ERROR: %s\n", i, cb.error.description.UTF8String);
         }
         /* Flushed every iteration so a hang keeps what already ran. */
-        printf("    %3d  wall %9.3f | kstart %9.3f  gstart %9.3f  gend %9.3f "
-               "| gpu %7.3f  drv %7.3f  hand %9.3f\n",
-               i, wall[i] * 1e3, ksta[i] * 1e3, gsta[i] * 1e3, gend[i] * 1e3,
-               gpu[i] * 1e3, drv[i] * 1e3, hand[i] * 1e3);
+        printf("    %3d  wall %9.3f | sched %9.3f  kstart %7.3f  gstart %9.3f "
+               " gend %9.3f | gpu %7.3f\n",
+               i, wall[i] * 1e3, sched[i] * 1e3, ksta[i] * 1e3, gsta[i] * 1e3,
+               gend[i] * 1e3, gpu[i] * 1e3);
         fflush(stdout);
     }
 
@@ -602,7 +712,21 @@ static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
             double mgs = a[n / 2], mge = b[n / 2];
             printf("  SPLIT median: commit -> GPUstart %.3f ms, GPUend -> "
                    "return %.3f ms\n", mgs * 1e3, (medw - mge) * 1e3);
-            printf("  SPLIT VERDICT: %s\n",
+            {
+            double *c = malloc(n * sizeof(double));
+            if (c) {
+                memcpy(c, sched + off, n * sizeof(double));
+                qsort(c, n, sizeof(double), cmp_d);
+                double ms = c[n / 2];
+                printf("  SCHEDULED median: %.3f ms  -> %s\n", ms * 1e3,
+                       ms < 0 ? "no scheduled handler fired - inconclusive" :
+                       (ms < mgs / 2.0)
+                           ? "submitted PROMPTLY, the delay is on the CHIP side"
+                           : "SUBMISSION itself is deferred (userspace)");
+                free(c);
+            }
+        }
+        printf("  SPLIT VERDICT: %s\n",
                    mgs > medw / 2.0
                        ? "the wait is BEFORE the work -> SUBMISSION is late"
                        : ((medw - mge) > medw / 2.0
@@ -669,7 +793,7 @@ static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
     }
     printf("  verify: %s (%d of %d wrong)\n", bad ? "FAIL" : "PASS", bad, N);
     free(hand); free(wall); free(gpu); free(drv); free(sw); free(sg);
-    free(ksta); free(gsta); free(gend);
+    free(ksta); free(gsta); free(gend); free(sched);
     return bad ? 1 : 0;
 }
 
@@ -684,11 +808,21 @@ int main(int argc, const char **argv) {
         uint32_t heavy = 0;
         bool wantQueues = false;
         int nq = 6;
+        bool wantEngines = false;
+        int engIters = 9;
         int samples = 120;
         int iters = 20;
         int reps = 7;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--dispatch")) { wantDispatch = true; }
+            else if (!strcmp(argv[i], "--engines")) {
+                wantEngines = true;
+                if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                    int n = atoi(argv[++i]);
+                    if (n >= 2 && n <= 200) { engIters = n; }
+                    else { printf("--engines N must be 2..200; using %d\n", engIters); }
+                }
+            }
             else if (!strcmp(argv[i], "--queues")) {
                 wantQueues = true;
                 if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
@@ -788,6 +922,7 @@ int main(int argc, const char **argv) {
             if (wantLattice)  { rc |= lattice_on(d, samples); }
             if (wantBusy)     { rc |= busy_on(d, busySecs); }
             if (wantQueues)   { rc |= queues_on(d, nq); }
+            if (wantEngines)  { rc |= engines_on(d, engIters); }
         }
         if (!wantDispatch && !wantBench) {
             printf("\n(enumerate only; --dispatch runs a kernel, "
