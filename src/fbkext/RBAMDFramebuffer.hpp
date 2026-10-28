@@ -196,6 +196,10 @@ private:
     uint64_t           hubpRejectAddr; /* the FIRST refused address, and why */
     uint32_t           hubpRejectWhy;
 
+    /* 2wi: the transaction-retirement experiment. */
+    bool     retireArmed;
+    uint64_t retireEnables;
+
     bool hubpSetup(void);
     void hubpTeardown(void);
     void hubpProgram(uint64_t mc);

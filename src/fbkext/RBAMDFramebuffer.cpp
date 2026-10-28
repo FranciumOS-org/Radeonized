@@ -238,6 +238,16 @@ bool RBAMDFramebuffer::start(IOService *provider)
             hubpMax = (uint64_t)maxn;
         }
     }
+    /* 2wi: -rbgpufbretire. Deliberately NOT named -rbgpufbvbl-something:
+     * rule 30 warns that a shell grep for an existing arg matches a longer
+     * one, and `-rbgpufbvbl` is already in use. */
+    retireArmed = false;
+    retireEnables = 0;
+    {
+        char retflag[16];
+        retireArmed = PE_parse_boot_argn("-rbgpufbretire", retflag, sizeof(retflag));
+    }
+
     hubpSetup();
 
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
@@ -533,15 +543,26 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
     if (stage > crumbStage) {
         crumbStage = stage;
     }
-    char buf[96];
+    char buf[160];
     /* 2t0 addendum: the nonce comes FIRST because it decides whether anything
      * after it is this boot's. rbgpu-fbcrumb persists in NVRAM, so without it
      * a boot that died before stage 1 leaves the PREVIOUS boot's crumb reading
      * exactly like this one's - rule 11, and rule 8's whole point. Compare b=
      * against `nvram rbgpu-boot` before believing a single other field. */
-    snprintf(buf, sizeof(buf), "b=%s s=%u f=%llu e=%u r=%u",
+    /* 2wi: the HUBP fields ride along, because boot 195 proved the display
+     * works and left NO capture - the box could not be driven well enough to
+     * run plugin_check.sh, so every RBFBHubp* value was unmeasured. Rule 10:
+     * a boot that cannot be captured leaves NVRAM only, so what must survive
+     * has to be here. h= is the refusal code (0 = set up), w= the write
+     * count, and k= 1 iff the pair read back exactly what we last wrote,
+     * which is the whole content of "the store reached the chip". */
+    snprintf(buf, sizeof(buf), "b=%s s=%u f=%llu e=%u r=%u h=%u w=%llu k=%u t=%llu",
              crumbBoot, crumbStage, (unsigned long long)vblFires, vblEnables,
-             vblRunning ? 1u : 0u);
+             vblRunning ? 1u : 0u,
+             hubpReady ? 0u : (hubpArmed ? (hubpRefuse ? hubpRefuse : 0xffu) : 0xfeu),
+             (unsigned long long)hubpWrites,
+             (hubpWrites && hubpReadback == hubpLast) ? 1u : 0u,
+             (unsigned long long)amtrSets);
     if (auto str = OSString::withCString(buf)) {
         /* 2sr measured that setPropertyWithGUIDAndName is the ONLY path that
          * reaches IODTNVRAM::syncInternal, so a plain setProperty here DOES
@@ -909,6 +930,31 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
          * the snapshot is the first one only, and a swap chain moves the
          * surface each flip. hubpProgram() is a no-op unless armed and set
          * up, and it refuses anything outside the measured carve-out. */
+        /* 2wi: transaction retirement. Boot 195 showed the display working at
+         * the TRANSACTION rate - 1 frame per ~10.8 s, which boots 193/194 had
+         * already measured as 0.093 sets/s before this code existed. The
+         * prime suspect is that Apple's accelerator never learns a vblank
+         * happened: it registers a 'vbl ' handler, disables its own slot
+         * immediately, and 192/193/194 all read RBFBVBL1Fires 0 WITH
+         * transactions in flight. 2s5 measured what should re-arm it
+         * (transaction_queue_gated -> enableTransactionInterrupt ->
+         * enableVBLInterrupt), and it is evidently not running here.
+         *
+         * So re-enable the slots we did not register, once a transaction has
+         * actually arrived - which is exactly the condition Apple's own
+         * enableTransactionInterrupt waits for. Field writes only: no
+         * allocation, no logging, no blocking (rule 31). Counted so the
+         * boot says whether it ever fired, and gated on its own boot-arg so
+         * this is a separable experiment and not a silent change to 2wh. */
+        if (retireArmed) {
+            for (unsigned i = 0; i < kMaxInterrupts; i++) {
+                if (interrupts[i].used && interrupts[i].target != this &&
+                    !interrupts[i].enabled) {
+                    interrupts[i].enabled = true;
+                    retireEnables++;
+                }
+            }
+        }
         if (hubpReady && value >= 0xffffff8000000000ULL) {
             /* Bit 0x1 of the flag word is what makes txn->0x10 a plane state
              * this transaction actually updated - 2wf read the consumer doing
