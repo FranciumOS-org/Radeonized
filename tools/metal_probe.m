@@ -400,6 +400,85 @@ static int busy_on(id<MTLDevice> dev, double secs) {
     return 0;
 }
 
+/* 2ws: --queues K. WHICH OBJECT OWNS THE TICK?
+ *
+ * Two concurrent processes showed the same period at independent phase, so the
+ * tick is per-client rather than one global heartbeat. "Client" is still
+ * ambiguous: it could be the process, the Metal device, or each
+ * MTLCommandQueue (ioreg shows fifteen AMDAccelCommandQueue objects live).
+ * Naming it matters twice over - it says which kernel object to look at, and
+ * if the tick is per-queue then K queues give K times the release events,
+ * which is a workaround rather than just a diagnosis.
+ *
+ * So: K queues in ONE process, one buffer committed to each as close together
+ * as possible, then read every buffer's GPUStartTime. Clustered within a
+ * millisecond means one shared tick released them all; spread out across the
+ * period means each queue has its own. */
+static int queues_on(id<MTLDevice> dev, int nq) {
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(kSrc) options:nil error:&err];
+    if (!lib) { printf("  FAIL: no library\n"); return 1; }
+    id<MTLComputePipelineState> ps =
+        [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill"]
+                                           error:&err];
+    id<MTLBuffer> buf = [dev newBufferWithLength:N * sizeof(uint32_t)
+                                         options:MTLResourceStorageModeShared];
+    if (!ps || !buf) { printf("  FAIL: no pipeline or buffer\n"); return 1; }
+
+    NSMutableArray *qs = [NSMutableArray array];
+    for (int i = 0; i < nq; i++) {
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        if (!q) { printf("  FAIL: only got %d queues\n", i); return 1; }
+        [qs addObject:q];
+    }
+    /* Warm every queue first: a queue's very first buffer pays a one-off cost
+     * (iteration 0 of the bench is always the odd one out), which would smear
+     * the clustering this test is reading. */
+    for (int i = 0; i < nq; i++) {
+        id<MTLCommandBuffer> cb = [(id<MTLCommandQueue>)qs[(NSUInteger)i] commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:ps];
+        [enc setBuffer:buf offset:0 atIndex:0];
+        [enc dispatchThreads:MTLSizeMake(N, 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+
+    printf("  queues: %d queues, one buffer each, committed together\n", nq);
+    NSMutableArray *cbs = [NSMutableArray array];
+    double t0 = now_s();
+    for (int i = 0; i < nq; i++) {
+        id<MTLCommandBuffer> cb = [(id<MTLCommandQueue>)qs[(NSUInteger)i] commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:ps];
+        [enc setBuffer:buf offset:0 atIndex:0];
+        [enc dispatchThreads:MTLSizeMake(N, 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cbs addObject:cb];
+    }
+    for (int i = 0; i < nq; i++) {
+        [(id<MTLCommandBuffer>)cbs[(NSUInteger)i] waitUntilCompleted];
+    }
+    double lo = 1e9, hi = -1e9;
+    printf("    queue   commit->GPUstart(ms)\n");
+    for (int i = 0; i < nq; i++) {
+        double g = (((id<MTLCommandBuffer>)cbs[(NSUInteger)i]).GPUStartTime - t0) * 1e3;
+        printf("    %5d   %18.3f\n", i, g);
+        if (g < lo) { lo = g; }
+        if (g > hi) { hi = g; }
+    }
+    printf("    GPUstart spread across %d queues = %.3f ms\n", nq, hi - lo);
+    printf("    VERDICT: %s\n",
+           (hi - lo) < 5.0
+               ? "clustered -> ONE tick shared by every queue in the process"
+               : "spread -> each queue has its OWN tick");
+    return 0;
+}
+
 static int bench_on(id<MTLDevice> dev, int iters, uint32_t heavy) {
     NSError *err = nil;
     id<MTLCommandQueue> q = [dev newCommandQueue];
@@ -603,11 +682,21 @@ int main(int argc, const char **argv) {
         bool wantBusy = false;
         double busySecs = 20;
         uint32_t heavy = 0;
+        bool wantQueues = false;
+        int nq = 6;
         int samples = 120;
         int iters = 20;
         int reps = 7;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--dispatch")) { wantDispatch = true; }
+            else if (!strcmp(argv[i], "--queues")) {
+                wantQueues = true;
+                if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                    int n = atoi(argv[++i]);
+                    if (n >= 2 && n <= 16) { nq = n; }
+                    else { printf("--queues N must be 2..16; using %d\n", nq); }
+                }
+            }
             else if (!strcmp(argv[i], "--heavy")) {
                 if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
                     long n = atol(argv[++i]);
@@ -698,6 +787,7 @@ int main(int argc, const char **argv) {
             if (wantPhase)    { rc |= phase_on(d, reps); }
             if (wantLattice)  { rc |= lattice_on(d, samples); }
             if (wantBusy)     { rc |= busy_on(d, busySecs); }
+            if (wantQueues)   { rc |= queues_on(d, nq); }
         }
         if (!wantDispatch && !wantBench) {
             printf("\n(enumerate only; --dispatch runs a kernel, "
