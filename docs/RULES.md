@@ -362,6 +362,48 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**THE KERNEL HALF OF OUR OWN CAPTURE WAS ONE FUNCTION NAME (2w4).** No boot.
+`dl_pred`'s only kernel clause was `eventMessage CONTAINS "checkGPUProgress"`
+- a literal - so **every other** IOAcceleratorFamily2 / AMDRadeonX6000 message
+was filtered out, and **2w3's "no `init_framebuffer_resource` FAULT" argument
+had no control**. Re-querying boot 185's window by **sender** recovered **213
+lines** the capture never had (FAULT persists across a reboot; INFO does not).
+Saved as `logs/20261027-185657-plugin/kernel-accel-log.txt`.
+**`IOAccelDisplayPipe::display_change_handler` logs EVERY framebuffer
+notification at FAULT with its `kIOFBNotify*` number**, and calls
+`find_vram_descriptor()` unconditionally before dispatching. Boot 185 got
+**13**: `1`/`2` (ModeWill/DidChange) x3, `40` OnlineChange, `91`/`93`
+(WSAAWillExitDefer / DidExitDefer), `90`/`92` (WSAAWill/DidEnterDefer),
+`91`/`93` again at 18:56:05.543. So our notification delivery works and
+`found_framebuffer` ran.
+**TWO OF THE THREE GATES ARE ELIMINATED.** `wsaaDidExitDefer` (`0x14e5dfe6`)
+zeroes `pipe->0x282` **unconditionally**; event 93 last fired at
+**18:56:05.543** and the failures run 18:56:05.516-18:56:07 **and again at
+18:56:39 and 18:56:55** - so the defer gate is open. And with 213
+IOAcceleratorFamily2 FAULTs from the same thread as a real control,
+`init_framebuffer_resource` logged nothing, so `pipe->0x298` is set.
+**By elimination the gate is `accel->0xc78 & 0x2`, the accelerator-enabled
+bit**, whose skip condition is `accel->0x180 == 0`. Also named: the vendor
+gate above it, `callq *0x870` = dump 0x880 (rule 7) =
+`AMDRadeonX6000_AMDAccelDisplayMachine::displayModeDidChange()` (`0xbe48428`),
+which returns `set_display_mode_and_vram()` - true at least once, since the
+pipe loop ran.
+**AND THE WEDGE IS NAMED.** From **18:56:11.410**, six seconds AFTER the
+first submit failure, repeating every ~5-6 s to 18:56:50:
+`channel 52 GFX event timeout; pending stamps [1..289]`,
+`channel 12 / 53 SDMA0_PAGE event timeout; pending stamps [1..191]/[1..184]`,
+`channel N is not hung, keep running` (x18),
+`checkGPUProgress - Signaling hardware error on channel 12/25/52/53` (x22),
+`GPURestartSignaled`/`Enqueued` (x22 each), `restart_channel: GPURestartSkipped`
+and **`no channel associated with stamp_idx N`** (x18). Work is submitted and
+**never retires**; the hang check says not hung; the restart cannot find the
+channel. That is a **stamp-retirement** failure and it starts AFTER the
+display failures, so it is a consequence or an independent second defect -
+**not** established which. Also new: **`IOAccelSurface::set_id_mode: Surface
+mode contains bad bits`** x4 at 18:56:05.034, unexplained.
+`tools/plugin_check.sh` now matches by sender and prints a kernel-line count
+with a `display_change_handler` control.
+
 **BOOT 185: THE ERROR IS NAMED, AND IT IS THREE BITS IN APPLE'S KERNEL
 (2w3).** 2w2's `--info` fix worked: **388 `[INFO]` lines** where boots 177-184
 had zero (controls: 203 `[ERROR]`, 139 `[WARN]`), and the message that had
@@ -400,9 +442,9 @@ conditions produce it:
 `IOAccelDisplayPipe::displayModeDidChange` (`0x14e5db14`), which is the
 **only site in the whole kext** that registers `'vbl '` - and boot 183
 measured that registration on our framebuffer. All three of its failure
-exits log at os_log type **0x11 = FAULT**, the capture carries
-IOAcceleratorFamily2 FAULTs (`checkGPUProgress`), and none of theirs
-(rule 26: control present, message absent).
+exits log at os_log type **0x11 = FAULT** and none of them appears -
+**but 2w3's control for that was invalid** and 2w4 had to re-establish it by
+capturing by sender; read 2w4, not this sentence.
 **The prime suspect is `accel->0xc78` bit 1.** `IOGraphicsAccelerator2::start`
 clears it; the sole setter is `enableAccelerator()`, called only from
 `IOAccelDisplayMachine::display_mode_did_change` (`0x14e2148e`) - and that
@@ -842,12 +884,17 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     the `Darwin Kernel Version` banner, once per boot. And `log` is a zsh
     builtin that shadows `/usr/bin/log`: always the absolute path, always with
     a known-present control. [2q0, 2s1]
-36. **A log capture has a LEVEL as well as a predicate and a window, and all
-    three can silently drop the answer.** `log show` omits
-    `OS_LOG_TYPE_INFO` unless `--info` is passed, and INFO messages do not
-    survive a reboot, so they must be captured in the armed boot. 2u5 lost a
-    boot to the window; 2w2 lost **eight** to the level. Count the levels you
-    need against a known-present control in the same capture. [2w2]
+36. **A log capture has a LEVEL, a PREDICATE and a WINDOW, and all three can
+    silently drop the answer.** `log show` omits `OS_LOG_TYPE_INFO` unless
+    `--info` is passed, and INFO messages do not survive a reboot, so they
+    must be captured in the armed boot; FAULT ones do survive. 2u5 lost a
+    boot to the window; 2w2 lost **eight** to the level; 2w3 nearly lost a
+    conclusion to the predicate, whose entire kernel half was the literal
+    `eventMessage CONTAINS "checkGPUProgress"` - so 213 IOAcceleratorFamily2
+    and AMDRadeonX6000 FAULT lines, including the wedge itself, were never
+    captured. **Match a subsystem by SENDER, not by one function name**, and
+    count what you need against a known-present control in the same capture.
+    [2w2, 2w4]
 35. **When a static chain ends at our own code, instrument our end FIRST and
     prove it correct before building on the chain.** 2v9 disassembled five
     layers correctly and attached them to the one link that turned out to be
