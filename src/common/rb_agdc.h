@@ -315,7 +315,28 @@ static inline int rb_agdc_scaler_entry(uint8_t *e, uint32_t slotA, uint32_t slot
  * `LUT: R - [0..0.500489..1] with 1024 entries` for this display - so 1024 is
  * the size of the table CoreDisplay has itself built, not a number of ours.
  * Apple's own segmented second entry uses 0x200 for its different stage. */
-#define RB_AGDC_GAMMA_CHANNELS    0x400u
+/* 2wd: 0x400 IS REFUSED BY APPLE'S OWN ACCELERATOR, and 256 is its ceiling.
+ * `AMDRadeonX6000_AMDAccelDisplayPipe::executeTransaction` (0xbe49b54) refuses
+ * the whole transaction when the pipe POST-gamma table carries more than 0x100
+ * entries - `cmpl $0x100, %r13d; ja` at 0xbe4a350 with
+ * `r13 = IOAccelDisplayPipeGammaTable2::getTableCount()` - and that count is
+ * `*(uint32_t *)(table->0x10)`, the first dword of the
+ * IOAccelDisplayPipeGammaTableData WindowServer itself supplied. So the size is
+ * CoreDisplay's choice, the only lever we have on it is this capability, and
+ * boot 192 measured `agdc_gamma_elems1 = 1024` against 132 refusals carrying
+ * `IOReturn: 0x2c7` all the way up into CoreDisplay.
+ * 2wc excluded this ceiling from boot 190's `DisplayPipeState` LUT counts (71
+ * of 256 entries, 2 of 1024) - and that was the WRONG TABLE. Those dumps are
+ * headed `Plane Index: 0` and their LUT is the PLANE gamma, whose dirty bit
+ * (0x4) is CLEAR in the measured dirtyBits 0x3c1; the gate is on bit 0x80, the
+ * PIPE post-gamma, which the dumps never print. Rule 33: name the object a
+ * number belongs to before retiring a line with it.
+ * 256 is still a substitute (rule 17) - Apple reads it from `vt[0x1b8](0xf)` on
+ * an AmdFbDisplayPath we do not have - but unlike 0x400 it is bounded by a
+ * measured fact about the consumer rather than by the size of a table
+ * CoreDisplay happened to print. It is non-zero, so 2u6's "plane with no
+ * 3-channel gamma table support" (which fired at ZERO) stays fixed. */
+#define RB_AGDC_GAMMA_CHANNELS    0x100u
 /* movq $0x200, 0x354(%rbx) in getFbCapabilityForGamma - Apple's LITERAL for
  * the second gamma entry's element count, not a substitute. [2u9] */
 #define RB_AGDC_GAMMA_ELEMENTS    0x200u

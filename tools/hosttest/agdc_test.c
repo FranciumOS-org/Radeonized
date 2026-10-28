@@ -260,9 +260,17 @@ int agdc_tests(void) {
          * dictionary key `MaximumSize`, and a zero there is the whole defect.
          * Asserted as a LITERAL, not against RB_AGDC_GAMMA_CHANNELS, for the
          * reason 2v1's addendum records: a field compared against the macro
-         * that wrote it is not a test. 1024 is the LUT size CoreDisplay's own
-         * DisplayPipeState dumps report for this display. */
-        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==0x400u);
+         * that wrote it is not a test.
+         * 2wd lowers it 0x400 -> 0x100. The old literal's justification - "the
+         * LUT size CoreDisplay's own DisplayPipeState dumps report" - was the
+         * PLANE gamma, not the PIPE post-gamma this field sizes; the new one is
+         * the ceiling Apple's own executeTransaction enforces
+         * (`cmpl $0x100,%r13d; ja` at 0xbe4a350), above which it refuses the
+         * whole transaction with kIOReturnUnsupported. */
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)==0x100u);
+        /* The consumer's hard ceiling, asserted on its own so a future raise
+         * fails here rather than on hardware. */
+        A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)<=0x100u);
         A(le(q+RB_AGDC_EXTCAP_ENTRY_OFF+0x28,4)!=0);
         /* Whatever the count, it must be a count of entries that FIT: a reply
          * that publishes 2 into a buffer holding one is worse than a refusal.
