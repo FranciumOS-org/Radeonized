@@ -362,6 +362,83 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 195: THE DISPLAY WORKS. THE GPU COMPOSITES TO THE PANEL (2wi).** The
+HUBP write landed. Reported from the screen - the one instrument only the user
+can read: frozen at first, then the cursor, then the lock screen after ~30 s,
+**showing correctly and accelerated**, but a new frame only about every 10
+seconds. **No capture** - the box could not be driven well enough to run
+`plugin_check.sh` - so every `RBFBHubp*` value is **unmeasured and that absence
+is not a result** (rule 14).
+**WHAT THE SCREEN ESTABLISHES ANYWAY.** Nothing but the HUBP write can change
+what the panel shows; before 2wh it displayed the firmware's GOP buffer at
+VRAM offset 0, static, forever. A correct moving accelerated desktop therefore
+proves the whole chain at once: all three `hubpSetup` gates passed (a refusal
+writes nothing), `rb_hubp_check_addr` accepted the address, **the store reached
+the chip**, and the address at `_AMD_PIPE_FLIP +0x08`/`+0x0c` is the right one -
+2wg's field identification confirmed by the display itself. **AND THE SWIZZLE
+ALREADY AGREED**: 2wh's one stated unmeasured risk, the thing most likely to
+make the experiment ambiguous. A tiled surface fetched as linear gives regular
+block-structured garbage; the image was *correct*. So `DCSURF_ADDR_CONFIG` /
+`DCSURF_TILING_CONFIG` already describe the compositor's layout and **no tiling
+write is needed** - that branch is CLOSED. **The display half of this project
+is solved.**
+**AND THE FRAME RATE WAS PREDICTED QUANTITATIVELY TWO BOOTS BEFORE IT WAS
+SEEN.** `RBFBAmtrSets` was **13 over 167 s** (boot 193) and **17 over 183 s**
+(boot 194), with no HUBP write in either build:
+
+    boot 193   0.078 sets/s   one frame every 12.8 s
+    boot 194   0.093 sets/s   one frame every 10.8 s
+
+The user saw "about every 10 seconds". **10.8 s, from data taken before the
+code existed.** So **1 frame per 10 s is the TRANSACTION rate, not a defect in
+the write** - it faithfully displays every transaction it is handed, and
+Apple's accelerator hands over 0.09 per second. **That rate was always there;
+2wh did not cause it, 2wh made it VISIBLE.** Same shape as 2su's
+"WindowServer idle at 0.0 %": the system was never compositing fast, and now
+the symptom has a number.
+**THE FRONTIER IS THE TRANSACTION RATE, AND THERE IS A NAMED CANDIDATE.**
+`RBFBVBL1Fires` has read 0 for three milestones as "not attributed" and is now
+the prime suspect. `RBAMDFramebufferVBL.cpp:204` registers **every** handler
+`enabled = true` deliberately, yet boot 194 read `RBFBVBL1Enabled` **False**
+with **0 fires** - so Apple registered its `'vbl '` handler, called
+`setInterruptState(0)` on its own slot, and **never re-enabled it with 17
+transactions in flight**. 2s5 measured the re-arm path
+(`transaction_queue_gated` -> `enableTransactionInterrupt` ->
+`enableVBLInterrupt`); it is evidently not running. If Apple's accelerator
+never learns a vblank happened it can never retire a transaction and submit the
+next, and **~10 s is the shape of a TIMEOUT, not of a throttle**. Boot 191 saw
+handler 1 fire **once**, the only time ever.
+**NOT ESTABLISHED - both candidates stay live**: (1) that VBL completion path;
+(2) **the wedge** (2we), work submitted and never retiring. 2we's finding that
+the wedge is an *independent* second defect still holds, but independent is not
+irrelevant - it is now in the critical path for frame rate. **Whether they are
+the same defect is NOT established** and must not be written as one: the wedge
+is on GFX/SDMA channels, a different mechanism from the display interrupt.
+**THE SAFETY GAP THIS BOOT EXPOSED IN OUR OWN ARMING.** The write re-armed on
+every power cycle and had to be rescued with `-rbgpuoff`. Two causes compose:
+`rbgpu-fb` **does not clear** (2sq - `removeProperty` calls no sync, commented
+at `RBAMDFramebuffer.cpp:47`), so the takeover re-arms by itself; and
+**`-rbgpufbhubp` has no one-shot of its own** - it is two boot-args, so once
+the framebuffer is up the write arms unconditionally. Every other dangerous
+feature needs a one-shot *and* an arg precisely so a bad boot cannot repeat
+(rule 9), and the most dangerous one was built without one. **The boot-arg is
+the documented durable disarm and it worked**, but the feature should not have
+depended on that.
+**Build `452E6EE1`, two changes.** (1) The crumb now carries `h=` refusal code,
+`w=` writes, `k=` 1 iff the pair read back what we last wrote, `t=` amtrSets -
+because boot 195 proved the display works and left **no evidence**, and rule 10
+says what must survive an uncapturable boot has to be in NVRAM, where
+`setProperty` does sync (2sr). **So read `nvram rbgpu-fbcrumb` even after a
+power cycle.** (2) `-rbgpufbretire` re-enables the `'vbl '` slots we did not
+register, once a transaction has actually arrived - the same condition Apple's
+own `enableTransactionInterrupt` waits for. Field writes only (rule 31), its
+own boot-arg so it stays separable from 2wh.
+**NEXT**: `-rbgpufbretire` added, `-rbgpufbhubp` kept, **`-rbgpuoff` removed**.
+If `RBFBRetireEnables` > 0 and `RBFBVBL1Fires` > 0 and the frame rate rises,
+the completion path was the answer. Enables > 0 with fires still 0 means our
+own delivery skips it. Fires > 0 with no rate change eliminates the VBL path
+and leaves the wedge.
+
 **THE FIRST WRITE TO THE DISPLAY ENGINE, BUILT (2wh, fbkext `D07493B1`).** No
 boot yet. **What it does on the chip**: HUBP is DCN's display-data fetch block
 and `HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS(_HIGH)` is the address it reads
@@ -1693,7 +1770,15 @@ before any write and six per address, all in `src/common/rb_hubp.h` and all
 run by the hosttest; restores the firmware's address on stop. **This one can
 blank the panel** - a wrong value shows garbage until the next correct write,
 and rule 12 says a black panel is indistinguishable from a hang, so keep SSH
-and read `ioreg`, not the screen), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
+and read `ioreg`, not the screen. **2wi: it WORKED** - the panel showed the
+composited accelerated desktop, and the swizzle already agreed. It has **no
+one-shot of its own**, so with `rbgpu-fb` failing to clear (2sq) it re-arms
+every power cycle; the durable disarm is removing the boot-arg),
+`-rbgpufbretire` (2wi - re-enables the `'vbl '` slots Apple registered and
+then disabled, once a transaction has arrived, on the suspicion that the
+accelerator never learns a vblank happened and so never retires a transaction.
+Requires `-rbgpufbamtr`-era transactions to be flowing to do anything),
+`-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
 (answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
 Cursor as well as 0x10 Scaler — off by default because three of the four carry
 a substituted field, 2sc).

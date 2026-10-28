@@ -1,25 +1,47 @@
-# HANDOFF — next step (2wh, 2026-10-28)
+# HANDOFF — next step (2wi, 2026-10-28)
 
 Live handoff. `docs/HANDOFF.md` is stale except its §7 rules and §6 procedure.
 `docs/JOURNAL.md` is the evidence journal — grep it by milestone tag.
 
-## 1. Where this stands
+## 1. THE DISPLAY WORKS
 
-**The display pipe accepts transactions** (2we, boot 193) and **the surface
-address is measured** (2wg, boot 194). The transaction struct is confirmed
-field for field from four directions. The address the compositor renders into
-is **`0xf4_1002_a000`**, an MC address 256.164 MB into the measured carve-out,
-carried at `_AMD_PIPE_FLIP +0x08`/`+0x0c` as a **low/high pair in exactly the
-layout DCN's register pair wants**.
+Boot 195: the HUBP write landed and **the panel showed the composited,
+accelerated desktop, correctly**. Nothing but that write can change what the
+panel shows, so the whole chain is proven — the setup gates, the address at
+`_AMD_PIPE_FLIP +0x08`/`+0x0c`, the store reaching the chip — and **the swizzle
+already agreed**, which was 2wh's one unmeasured risk. **No tiling write is
+needed.** The display half of this project is solved.
 
-**What was still missing: nothing was ever written to the display engine.**
-2wh is that write, and it is built but **not yet booted**.
+**The one thing wrong with it is how often it changes: about one frame every
+10 seconds.**
 
-## 2. One armed boot. The build is made.
+## 2. That rate is the TRANSACTION rate, and it was measured before the write existed
 
-`build/out` holds fbkext **`D07493B1`** and plugin **`0D1F953A`** (unchanged,
-already in the EFI and proven by boots 193/194 — **no plugin rebuild, no
-`efi.sh install`**).
+| boot | uptime at capture | `RBFBAmtrSets` | one frame every |
+|---|---|---|---|
+| 193 | 167 s | 13 | 12.8 s |
+| 194 | 183 s | 17 | **10.8 s** |
+
+Neither build wrote HUBP at all. The user saw ~10 s. **The write is not a
+throttle** — it displays every transaction it is handed, and Apple's
+accelerator hands over 0.09 per second. 2wh did not cause the rate; it made it
+visible.
+
+## 3. The next experiment: one armed boot, build is made
+
+`build/out` holds fbkext **`452E6EE1`**; plugin **`0D1F953A`** unchanged and
+already in the EFI (**no plugin rebuild, no `efi.sh install`**).
+
+**Boot-args: remove `-rbgpuoff`, add `-rbgpufbretire`, keep `-rbgpufbhubp`
+and `-rbgpufbamtr`.**
+
+```bash
+sudo tools/efi.sh bootarg remove -rbgpuoff
+```
+
+```bash
+sudo tools/efi.sh bootarg add -rbgpufbretire
+```
 
 Install the framebuffer kext to the **auxiliary collection** (rule 15 — the
 only artifact that changed):
@@ -30,14 +52,8 @@ sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
 sudo kmutil create -n aux -z --volume-root /
 ```
 
-`kmutil create` may print `Code=34 Missing Developer Kit` over a write that
-**landed** (2wa) — verify the artifact, never the exit status (rule 26).
-
-**Add one boot-arg**, `-rbgpufbhubp` (it also needs `-rbgpufbamtr`, already in):
-
-```bash
-sudo tools/efi.sh bootarg add -rbgpufbhubp
-```
+`kmutil create` may print `Code=34` over a write that **landed** (2wa) — verify
+the artifact, never the exit status.
 
 Arm all four one-shots (rule 34):
 
@@ -45,79 +61,71 @@ Arm all four one-shots (rule 34):
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 ```
 
-**Then, in the armed boot, over SSH, BEFORE rebooting** (rule 10 — the last
-two captures were each cut to 6 files by an early reboot, which is why 2wg
-could check no regression control):
+## 4. Getting a capture this time
+
+Boot 195 left **no evidence at all** because the desktop was too slow to use.
+Two ways round it, and both are now in place:
+
+- **SSH in from another machine** and run `sudo tools/plugin_check.sh` there.
+  The OS is live and responsive underneath; only the screen is slow.
+- **Failing that, the crumb now carries the answer and survives a power
+  cycle.** Build `452E6EE1` extends `rbgpu-fbcrumb`, and `setProperty` on
+  `/options` does sync (2sr), unlike `removeProperty`:
 
 ```bash
-sudo tools/plugin_check.sh
+nvram rbgpu-fbcrumb
 ```
 
-## 3. What this write does, and its one risk
+  reads `b=<boot> s=<stage> f=<vblFires> e=<enables> r=<running> h=<hubp
+  refusal, 0 = set up> w=<hubp writes> k=<1 iff the pair read back what we
+  wrote> t=<amtrSets>`. **Check `b=` against `nvram rbgpu-boot` first** — rule
+  11, the crumb persists and a stale one reads exactly like this boot's.
 
-HUBP is DCN's display-data fetch block. The register pair is the address it
-reads scanout pixels from, double-buffered and latched at the next vblank. It
-changes **which bytes in VRAM reach the panel and nothing else** — no timing,
-no clocks, no pipe topology, no power state. OTG keeps scanning at 143.833 Hz
-either way.
+## 5. What to read, in order
 
-**The risk is the panel, not the machine.** A wrong value shows garbage or
-black until the next correct write; rule 12 says a black panel is
-indistinguishable from a hang, so **keep the SSH session** and read `ioreg`.
-`-rbgpufbhubp` out of boot-args reverses the whole thing, and the kext
-restores the firmware's address on stop.
+1. **Arm first** (rules 8/15/34): `rbgpu-boot` must be **196**. Read the
+   `rbgpu-boot` *line*, not a grep of the file — `rbgpu-diag-prev` is the
+   previous boot's table and 2wg nearly lost a boot to exactly that.
+   `armed=1`, one-shots 0, `agdc_gamma_elems1 = 0x100`, fb UUID `452E6EE1`.
+2. **Did the write still land**: crumb `h=0`, `w>0`, `k=1`, or the registry's
+   `RBFBHubpReady` / `Writes` / `Readback == Last`.
+3. **The experiment**: `RBFBRetireArmed` true, **`RBFBRetireEnables` > 0**,
+   and then **`RBFBVBL1Fires`**.
+   - Enables > 0, fires > 0, **frame rate up** → the completion path was the
+     answer and the display is done.
+   - Enables > 0, **fires still 0** → our own delivery is skipping that slot;
+     the bug is in `vblDeliver`, not in Apple's accelerator.
+   - Fires > 0 but **no rate change** → the VBL completion path is
+     **eliminated**, and the wedge is what is left.
+   - Enables 0 → no transaction arrived, so read `RBFBAmtrSets` and go back to
+     the submit path.
+4. **The rate itself**, which is the actual measurement: `RBFBAmtrSets`
+   against uptime, compared against 193's 0.078 /s and 194's 0.093 /s. **That
+   number, not the screen, is the instrument** — the screen only shows it.
+5. **Regression controls**, all zero in 193, with `display_change_handler` 26
+   as the control in the same capture: `set_transaction_args … 0x2c7`,
+   `Failed to submit transaction`, `Fallback … submission failed`,
+   `DisplayPipeState`, `no gamma`. **Neither 194 nor 195 could check these.**
 
-## 4. What to read, in order
+## 6. Known gap, worth fixing when convenient
 
-1. **Arm first** (rules 8/15/34): `rbgpu-boot` must be **195**; read it from
-   the `rbgpu-boot` line, **not** by grepping the file — `rbgpu-diag-prev` is
-   the previous boot's table and 2wg nearly lost a boot to exactly that.
-   `armed=1`, both one-shots 0, `agdc_gamma_elems1 = 0x100`, fb UUID
-   `D07493B1`, plugin `0D1F953A`. `RBFBHubpArmed` exists only in the new
-   binary.
-2. **The write's own arm check, before anything else means anything**:
-   `RBFBHubpReady` **true**, `RBFBHubpRefuse` **0**, `RBFBHubpOrig`
-   **`0xf400000000`**. If `Ready` is false, read `Refuse` and stop: **5** = the
-   DMU segment is wrong and we were never addressing DCN; **6/7/8** = the pipe
-   is not what 2os measured (pitch / format / address-high); **9** = the DCN
-   denylist caught us; **2/3/4** = no PCI device, map failed, BAR5 too small.
-3. **Did the write reach the chip**: `RBFBHubpWrites` > 0 and
-   **`RBFBHubpReadback == RBFBHubpLast`**. That is the milestone whatever the
-   screen does. `RBFBHubpRejects` with `RejectAddr`/`RejectWhy` says if any
-   address was refused and which was the first.
-4. **What the screen did** — the one thing only the user can report:
-   - **legible desktop** → the swizzle already agreed, the display half is done;
-   - **regular, repeating, block-structured wrongness** → tiling mismatch; read
-     `RBFBHubpTiling` and `RBFBHubpAddrCfg`, and the next step is a **tiling
-     write, not an address hunt**;
-   - **black or noise** with `Readback == Last` → the write landed and
-     something the guards do not cover is wrong;
-   - **nothing changed at all** with `Readback == Last` → DCN ignores the
-     stores and wants `DCSURF_FLIP_CONTROL` / the `SURFACE_UPDATE_LOCK` dance
-     this build deliberately omits. Then the address was never the missing
-     piece and the lock sequence is.
-   - **tearing** is expected and acceptable; we write unsynchronised to vblank.
-5. **Regression controls** — all were zero in 193 and must stay zero, with
-   `display_change_handler` **26** as the control in the same capture:
-   `set_transaction_args … 0x2c7`, `Failed to submit transaction`,
-   `Fallback … submission failed`, `DisplayPipeState`, `no gamma`. **2wg could
-   check none of these** because its capture had no display log. Get the full
-   capture this time.
+`-rbgpufbhubp` has **no one-shot of its own** — two boot-args and nothing else
+— and `rbgpu-fb` does not clear (2sq), so the write re-arms on every power
+cycle. Boot 195 had to be rescued with `-rbgpuoff`. Rule 9 exists so a bad
+boot cannot repeat, and the most dangerous feature in the project was built
+without it. The boot-arg is the documented durable disarm and it worked, but
+this should not depend on that.
 
-## 5. The other two open things
+## 7. The other open thing
 
-- **The wedge**, established as an **independent second defect** (2we): boot
-  193 had no submit failures at all and the wedge was unchanged in shape and
-  slightly larger. Stamp retirement — submitted, never retires, hang check says
-  not hung, restart cannot find the channel. It has never had a milestone of
-  its own, and it is now the only other defect.
-- **Unattributed**: `Setting main display … offline` ×7 and
-  `CGXConstructVirtualFramebuffer` ×7 (new in 193), `bad bits` 4 unchanged five
-  boots, `RBFBVBL1Fires` 0 — less interesting now that transactions arrive
-  through `setAttribute` rather than the VBL ring.
+**The wedge** (2we): submitted, never retires, hang check says not hung,
+restart cannot find the channel. Established as an independent second defect
+in 2we, and now a live candidate for the frame rate. It has never had a
+milestone of its own. Whether it and the VBL path are one defect is **not
+established** — the wedge is on GFX/SDMA channels, a different mechanism.
 
-## 6. Standing
+## 8. Standing
 
-Grep `docs/JOURNAL.md` before reading any Apple function — **eight**
-milestones have re-read something already settled. ~85 unpushed commits;
-**pushing needs asking**.
+Grep `docs/JOURNAL.md` before reading any Apple function — eight milestones
+have re-read something already settled. ~88 unpushed commits; **pushing needs
+asking**.
