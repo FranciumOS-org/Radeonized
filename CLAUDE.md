@@ -362,6 +362,49 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 188: THE PROBE ANSWERS, AND IT REFUTES 2w4/2w5 (2w7).** `rbgpu-boot`
+188, armed, both one-shots 0, `diag_used` **613**/768. The capture is
+incomplete (six files - the box rebooted ~40 s into `plugin_check.sh`), but
+the `ax*` keys exist and **only build `D69D9B33` can produce them**, which
+satisfies rule 15 another way. All three samples (25/45/75 s) agree:
+
+    ax_enabled 1   accel->0xc78 & 0x2  SET        ax_vram 1   accel->0x180
+    ax_flags   2                                  ax_vmap 1   accel->0x188
+    ax_defer   0   pipe->0x282                    ax_fbs  1   machine->0x108
+    ax_active  0   pipe->0x298  CLEAR             ax_n/via 1 / 1
+    ax_gate    3   "pipe NOT active (0x298)"      sizes 8168 / 408 / 15216
+
+**So the accelerator-enabled bit is ELIMINATED and `pipe->0x298` is the
+gate** - the exact opposite of two milestones of deduction. `enabled 1` with
+`vram 1` and `vmap 1` is three fields agreeing (the enable is called only
+when `0x180 != 0`), so the pointer chain is right. **`getVRAMRange()` and
+`find_vram_descriptor` are correct and off the list.**
+**WHY THE DEDUCTION FAILED: 2w3 MISCOUNTED THE EXITS.** It said
+`init_framebuffer_resource` (`0x14e5d7ca`) has three failure exits all
+logging at FAULT. It has **five, and two are silent**:
+`fb->vt[0x9f0]()` (`getCurrentDisplayMode`) non-zero at `0x14e5d836`, and
+`pipe->vt[0x858](0, resource)` NULL at `0x14e5d9d9`. Three boots of
+FAULT-absence were read as success. **Rule 14's sharper form: the absence of
+a log is informative only once EVERY exit has been enumerated.**
+Ours returns `kIOReturnSuccess` from `getCurrentDisplayMode`
+(`RBAMDFramebuffer.cpp:515`), so **the failure is the vendor hook**: call
+offset `0x858` = dump `0x868` (rule 7) =
+`IOAccelDisplayPipe::initFramebufferResource`, overridden by
+**`AMDRadeonX6000_AMDAccelDisplayPipe::initFramebufferResource`**
+(`0xbe49356`), which returns 0 silently on any of: `resource` NULL,
+`getFramebuffer()` (`pipe->0x98`) NULL, `index != 0`, **`pipe->0x340 == 0`**,
+**`pipe->0x348 == 0`**, `pipe->0x35f != 1`, or **`pipe->0x380 == 0`** (the
+value it returns). `0x340`/`0x348` are the `_FRAMEBUFFER_INFO` that
+`AMDRadeonX6000_AMDHWDisplay::configureDisplay(fbIndex, index, info,
+resource)` (its `vt[0x138]`, `0xbe87bd4`) must fill, reached through
+`pipe->0x330 = accel->0x1a38->vt[0x2f8]()`.
+**NEXT, build `C025F308`**: the same probe, extended to publish those fields
+plus the base's own progress markers - `0x284` fb index, `0x28c` format,
+`0x290` width, `0x294` height, `0x296` bytes/pixel. **If `w/h/bpp/fmt` read
+1920 / 1080 / 4 / 4 then `getPixelInformation` succeeded and the failure is
+unambiguously inside AMD's hook**, and `fi340` / `fi348` / `r380` / `b35e` /
+`b35f` say which of its returns fired. One boot.
+
 **BOOT 186: THE PROBE NEVER RAN, AND THE TWO ELIMINATIONS RECONFIRMED
 (2w5).** Armed, `rbgpu-boot` 186, both one-shots 0, `diag_used` 564/768,
 `-rbgpuaccelprobe` in boot-args, build `D8B1115C` loaded - **and not one

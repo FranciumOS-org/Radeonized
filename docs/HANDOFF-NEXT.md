@@ -1,6 +1,6 @@
 # HANDOFF-NEXT — the live handoff
 
-Last updated **2026-10-27**, after milestone **2w5** (boot 186).
+Last updated **2026-10-27**, after milestone **2w8** (boot 188).
 Read this first, then `CLAUDE.md`'s rules, then grep `docs/JOURNAL.md` by tag.
 
 ---
@@ -32,11 +32,19 @@ eight boots (2w2, rule 36). With `--info` it reads:
 
 ## 2. The three gates in `transactionEnd`
 
-| gate | meaning | only writer | status |
-|---|---|---|---|
-| `accel->0xc78 & 0x2` clear | accelerator not enabled | `IOGraphicsAccelerator2::enableAccelerator()` | **THE GATE, by elimination** |
-| `pipe->0x282 != 0` | WSAA defer in progress | `wsaaWill/DidEnter/ExitDefer` | **ELIMINATED (2w4)** |
-| `pipe->0x298 == 0` | `isActive()` false | `init_framebuffer_resource` | **ELIMINATED (2w4)** |
+**MEASURED, boot 188, three samples 25/45/75 s (2w7):**
+
+| gate | reading | status |
+|---|---|---|
+| `accel->0xc78 & 0x2` | **1** (flags 2) | **ELIMINATED — the accelerator IS enabled** |
+| `pipe->0x282` | 0 | eliminated |
+| `pipe->0x298` | **0** | **THE GATE — `isActive()` is false** |
+
+`accel->0x180` and `0x188` both non-NULL, so `getVRAMRange()`,
+`find_vram_descriptor` and the whole VRAM line are **correct and closed**.
+2w4/2w5 eliminated `0x298` from the absence of a FAULT; 2w3 had enumerated
+only three of `init_framebuffer_resource`'s **five** exits, and the two it
+missed are silent.
 
 **Defer (2w4):** `wsaaDidExitDefer` (`0x14e5dfe6`) zeroes `0x282`
 unconditionally and returns true. Boot 185's last `kIOFBNotifyWSAADidExitDefer`
