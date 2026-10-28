@@ -87,7 +87,7 @@ returns the retained aperture, so the suspect is the **map**, or
 - **The transactions-off route** — there isn't one (2s3).
 - **Page flipping** — never called in a whole boot (2pf).
 
-## 4. The next experiment: ONE armed boot, build `27C88A57`
+## 4. The next experiment: ONE armed boot, build `D8B1115C`
 
 A read, not a change. `-rbgpuaccelprobe` schedules three read-only samples at
 25 / 45 / 75 s that find the accelerator by class, verify
