@@ -1,151 +1,116 @@
 # HANDOFF — next session
 
-**State: the pipe is ACTIVE, the failure code has moved from
-`kIOReturnNotReady` to `kIOReturnUnsupported` and now reaches CoreDisplay, and
-one capability number we publish is 1024 where Apple's own accelerator refuses
-anything over 256.** Read `docs/RULES.md`'s **2wd** block first, then 2wc and 2wb.
-`docs/JOURNAL.md` has the full reads under those tags.
+**State: the display pipe ACCEPTS transactions. Every failure in the chain is
+at zero, and Apple's accelerator is handing cooked transactions to our
+framebuffer. What remains is that we answer them without drawing anything.**
+Read `docs/RULES.md`'s **2we** block first, then 2wd/2wc/2wb. `docs/JOURNAL.md`
+has the full reads under those tags.
 
-## 1. Where boot 192 left it
+## 1. Where boot 193 left it
 
-Complete capture, `logs/20261028-005656-plugin`, `rbgpu-boot` 192, armed, both
-one-shots 0, `diag_used` 663/768, **rule 15 satisfied on both kexts** (plugin
-`64D3D687`, fb `6F1EB613`).
+`logs/20261028-101029-plugin`, `rbgpu-boot` 193, armed, both one-shots 0,
+`diag_used` 664/768, 20 files. Rule 15 on both kexts: plugin **`0D1F953A`**,
+fb **`6F1EB613`**. Arm check for the experiment itself:
+**`agdc_gamma_elems1 = 256`**.
 
-- The ATY chain from 2w9/2wb is **reproducible**: `fi340 16777216`, `r380 1`,
-  `active 1`, `gate 0`, all three samples identical.
-- **`'amtr'` is answered**: `RBFBAmtrGets 3`, `RBFBAmtrSets 0`. 2wc's chain
-  down to the attribute is a real call path; nothing reached `setAttribute`.
-- **The refusals did not move**: `set_transaction_args ... 0xe00002c7`
-  122 → 132, same `dirtyBits 0x3c1 / options 0x801`,
-  `display_change_handler` 26 as the control in both. So `vt[0x190]` is not,
-  or not the only, thing refusing — and boot 192 **cannot** tell "we opened
-  gate 1 and met gate 2" from "gate 1 was never shut". Do not write either as
-  established.
-- **What it did settle**: `Failed to submit transaction ... IOReturn: 0x` is
-  132 × `0x2c7` + 2 × `0x2bc`, where boots 185/186 had 118/152 **all `0x2d8`**.
-  The `kIOReturnNotReady` era is over, confirmed from the consumer.
-  `Fallback` 66, `DisplayPipeState` 66, **132 = 2 × 66**.
+With `display_change_handler` **26** as the control in all five boots:
 
-## 2. The experiment to run: ONE armed boot of plugin `0D1F953A`
+| | 191 | 192 | **193** |
+|---|---|---|---|
+| `set_transaction_args … 0xe00002c7` | 122 | 132 | **0** |
+| `Failed to submit transaction` | — | 134 | **0** |
+| `Fallback … submission failed` | 3 | 66 | **0** |
+| `DisplayPipeState` | — | 66 | **0** |
+| `RBFBAmtrSets` | — | 0 | **13** |
 
-`RB_AGDC_GAMMA_CHANNELS` 0x400 → **0x100**. `executeTransaction` refuses the
-whole transaction when the **pipe post-gamma** table carries more than 256
-entries (`cmpl $0x100,%r13d; ja` at `0xbe4a350`), and that count is
-`*(uint32_t *)(table->0x10)` — the first dword of the data **WindowServer
-supplied**, so the size is CoreDisplay's choice and `MaximumSize` is the only
-lever we hold. Boot 192 measured `agdc_gamma_elems1 = 1024`.
+`Metal compositor activated` ×4. `no gamma` 0. `RBFBAmtrSnapped` true, and the
+snapshot's pointer is **exactly `pipe + 0x410`**, with all five of its interior
+pointers matching the `leaq` addresses in `executeTransaction` — five controls
+on 2wc's field map in one reading. The flag word `0x75` decomposes exactly as
+`dirtyBits 0x3c1` predicts, **including `0x20`, the pipe post-gamma block that
+was refusing everything one boot earlier**.
 
-2wc had excluded this ceiling using the `LUT` line in `DisplayPipeState` — the
-dump's **per-plane** gamma, under `Plane Index: 0`, whose dirty bit `0x4` is
-**clear** in `0x3c1`. Wrong table; rule 33's third instance.
+**Both of this session's changes were necessary**: the `'amtr'` answer (2wc)
+and the 256 gamma ceiling (2wd). 193 proves the first was necessary and not
+sufficient; 192 proves the second alone would not have been reached.
 
-**The plugin boots from the OpenCore EFI** (rule 15 — each artifact has its own
-install path and a rebuild refreshes none of them):
+## 2. The next step needs NO boot
 
-```bash
-sudo tools/efi.sh install
-```
+Read **`AMDFramebuffer::handleDisplayPipeTransaction` (`0x2b4df0`)** against
+the snapshot's five pointers and work out what each sub-struct holds:
 
-The framebuffer is **unchanged** — `6F1EB613` is already in
-`/Library/Extensions` and in the AuxKC; do not reinstall it. No boot-arg
-change: `-rbgpufbaty`, `-rbgpufbamtr`, `-rbgpuaccelprobe` and
-`-rbgpuagdccaps` are all already there. Then, every armed boot (rule 9/34 —
-all four, every time):
+| snapshot | pipe offset | what we know |
+|---|---|---|
+| +0x10 | `pipe + 0x36b0` | plane state — **carries the surface the compositor rendered into** |
+| +0x20 | `pipe + 0x3660` | written in the plane dst-rect block (flag 0x4) |
+| +0x30 | `pipe + 0x3680` | colour matrix (flag 0x10) |
+| +0x38 | `pipe + 0x2650` | pipe post-gamma (flag 0x20) |
+| +0x40 | `pipe + 0x38d0` | pre-CSC linearization (flag 0x40) |
+
+The prize is the surface address at `pipe + 0x36b0`. That is what DCN 3.1.2's
+`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair has to be pointed at, and
+**taking it out of the transaction is strictly better than inventing one** —
+it is the only number in this project that is not a substitute (rule 17).
+
+Grep `docs/JOURNAL.md` before reading any Apple function in that path; three
+milestones have now re-read something already settled.
+
+## 3. Then, on its own risk: the first write to the display engine
+
+This kext has **never** written to DCN. A wrong write blanks the panel.
+Registers from `docs/linux-ref/`, `DCN_VERSION_3_1` grouping, `dcn_3_1_2`
+offsets — **check the grouping before adding one**. Own milestone, own
+boot-arg, off by default, and the probe rules in `docs/RULES.md` still apply to
+everything that is not that one deliberate write.
+
+Until then the picture stays wrong by construction:
+`setAttribute('amtr', …)` answers success without doing the work, and
+`-rbgpufbaty` publishes a 16 MB offset while OTG0 scans VRAM offset 0.
+
+## 4. The wedge is now the only other defect, and it is independent
+
+First `checkGPUProgress` at 10:07:57.763, 15 s after boot, running the whole
+2 m 48 s capture: 63 `Signaling hardware error`, 36 `channel N is not hung`,
+36 `no channel associated with stamp_idx N`, 26 `SDMA0_PAGE event timeout`,
+9 GFX, 1 VMPT, 3 `GPURestartDeferred`.
+
+2w4 saw it start six seconds after the first submit failure and could not say
+which way causation ran. **Boot 193 has no submit failures at all and the
+wedge is unchanged in shape and slightly larger in count** — so it is not
+caused by the display path. Clean differential, n=1. It is a stamp-retirement
+failure: work submitted, never retires, hang check says not hung, restart
+cannot find the channel. It has never had a milestone of its own.
+
+## 5. Arming, unchanged
+
+Nothing to install — plugin `0D1F953A` is in the EFI, fb `6F1EB613` is in
+`/Library/Extensions` and the AuxKC, and boot-args already carry
+`-rbgpufbaty`, `-rbgpufbamtr`, `-rbgpuagdc`, `-rbgpuagdccaps`,
+`-rbgpuaccelprobe`, `-rbgpuownfb`. Every armed boot still needs all four
+one-shots (rule 9/34):
 
 ```bash
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 ```
 
-**Run `sudo tools/plugin_check.sh` to completion** over SSH before rebooting.
+Reading order: `rbgpu-boot`, both kext UUIDs, the four `*_oneshot` keys,
+`diag_used` vs `diag_max`, `agdc_gamma_elems1`, the `ax0_*` probe keys as the
+control that the ATY chain is still open, then `RBFBAmtr*`, then the kernel
+log **by sender** with `display_change_handler` as the control (rule 36).
 
-## 3. What to read, in order
+## 6. Carried over, unexplained
 
-1. `rbgpu-boot` — must have increased (rule 8).
-2. Identity for **both** kexts (rule 15): `kexts.txt` must show plugin
-   **`0D1F953A`** and fb **`6F1EB613`**. The fallback identity check for the
-   framebuffer is `RBFBAmtrArmed` / `RBFBAtyArmed` in `framebuffer.plist`
-   (published *unconditionally*); for the plugin this boot it is
-   **`agdc_gamma_elems1 = 256`**, which is also the experiment's own arm check.
-3. All four `*_oneshot` keys (rule 34), then `diag_used` vs `diag_max` (rule 14).
-4. `agdc_gamma_elems1` from `peer.plist`, then the `ax*_` probe keys as the
-   control that the ATY chain is still open.
-5. `ioreg -rl -c RBAMDFramebuffer`: `RBFBAmtrGets`, `RBFBAmtrSets`,
-   `RBFBAmtrSnapped`, `RBFBAmtrPtr`, `RBFBAmtrRefused`, `RBFBAmtrSnap`.
-6. The kernel half of the log **by sender** (rule 36), counting
-   `set_transaction_args` against `display_change_handler` as the control, and
-   the `IOReturn: 0x` histogram (132 × `0x2c7` in boot 192).
-
-**Stated before the boot:**
-
-- **`agdc_gamma_elems1` must read 256.** If it reads 1024 the plugin did not
-  move and nothing else in the capture means anything (rule 15).
-- Refusals → **0** and `RBFBAmtrSets` non-zero = the ceiling was the gate, and
-  §4 becomes live.
-- Refusals → 0 but `RBFBAmtrSets` still 0 = it validates and CoreDisplay still
-  will not submit. Read `Fallback` and `DisplayPipeState` next, not the kernel.
-- Refusals still ~132 = the ceiling is **properly** excluded this time, and
-  the unconditional `vt[0x190]` gate is the live candidate again. **Then probe
-  it rather than guessing a third time**: publish
-  `((uint8_t *)hwd->0x40)[fbIdx*0xd0 + 1]` and the whole dword beside it from
-  `-rbgpuaccelprobe`, which already walks to `pipe->0x330`. 2w7 and 2wa were
-  both settled that way; 2wc was not.
-- `no gamma` must stay **0** (2u6). 256 is non-zero, so the WARN that fired
-  only at zero should not return — if it does, that is its own finding.
-- **The picture will still be wrong.** Nothing is written to DCN and
-  `-rbgpufbaty` still publishes a 16 MB offset while OTG0 scans offset 0. The
-  user reported boot 191 as the Apple logo and progress bar with the OS live
-  underneath over SSH, which is exactly what a never-composited panel looks
-  like.
-
-## 4. Then: `RBFBAmtrSnap` is the prize (still unreached — Sets was 0 in 192)
-
-The pointer `setAttribute('amtr', value)` receives is **`&pipe->0x410`** —
-the transaction struct `executeTransaction` has just finished filling. Known
-field map, relative to that pointer:
-
-| off | what `executeTransaction` writes |
-|---|---|
-| +0x00 | flag word: ORs 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x100, 0x201 |
-| +0x08 | `0x418`, mode bits 1/2 from the WSAA state and options |
-| +0x10 | plane `IOAccelResource2` (`0x420`) |
-| +0x18, +0x20 | `0x428`, `0x430` — destination rect / pipe scaler |
-| +0x30, +0x40, +0x50 | `0x440` colour matrix, `0x450`, `0x460` |
-| +0x210, +0x218 | `0x620` surface size, `0x628/0x62c` width/height from the txn |
-| +0x220 … | `0x630` onward: the gamma tables, 0x1010 bytes each |
-
-`AMDFramebuffer` passes exactly this to
-`handleDisplayPipeTransaction(_AMD_PIPE_TRANSACTION *)` (`0x2b4df0`), which is
-where the real DCN programming lives. Reading our snapshot against that
-function's disassembly is the next static step, and it is also the answer to
-§5 — the surface address the pipe wants is **in the transaction**, so the
-scanout no longer has to be guessed at.
-
-## 5. The picture, deliberately wrong (unchanged from 2wb)
-
-Pointing the scanout at the published offset means the DCN 3.1.2
-`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair, from `docs/linux-ref/`
-(`DCN_VERSION_3_1` grouping, `dcn_3_1_2` offsets — check the grouping before
-adding a register). **This kext has never written to the display engine**, so
-it is its own milestone with its own risk: a wrong write blanks the panel.
-Do it only once the transactions are accepted, and prefer taking the address
-out of `RBFBAmtrSnap` over inventing one.
-
-## 6. Carried over, unchanged
-
-- The **wedge**: `channel 52 GFX event timeout`, `checkGPUProgress - Signaling
-  hardware error`, `no channel associated with stamp_idx N`, from ~6 s after
-  the first submit failure. Consequence or independent second defect — **not
-  established**.
-- `IOAccelSurface::set_id_mode: Surface mode contains bad bits` x4, unexplained.
+- `Setting main display 0x… offline` ×7 and `Setting offline display 0x… main
+  in CGXConstructVirtualFramebuffer` ×7, both ERROR, **new in 193** and absent
+  from 192. Normal mode-set that the earlier boots never reached, or a new
+  defect — **not established**.
+- `IOAccelSurface::set_id_mode: Surface mode contains bad bits` ×4, unchanged
+  across five boots.
+- `RBFBVBL1Fires` 0 with `RBFBVBLFires` 21218, where 191 saw Apple's handler
+  fire once. Now less interesting: the transactions go to `setAttribute`, not
+  through the VBL ring.
 - 2sv's controlled zero for `IOAccelDisplayPipeCapabilities` against
   2u1/2u2/2w0's three non-zero reads.
 - `IOAccelDisplayPipeUserClient2` counting 2 with `IONDRVFramebuffer`, 1 with ours.
 - WindowServer CPU% never attributed in a controlled read.
-- **Boot 191 showed the Apple logo and progress bar and never reached the
-  desktop**, with the OS live underneath over SSH — the user's own report. That
-  is a reading, not a wedge diagnosis: with every transaction refused, nothing
-  was ever composited to the panel, which is exactly what a frozen boot screen
-  looks like. If `6F1EB613` accepts transactions and the screen still never
-  changes, the scanout address (§5) is the whole remaining gap.
-- **~76 unpushed commits. Pushing needs asking.**
+- **~79 unpushed commits. Pushing needs asking.**
