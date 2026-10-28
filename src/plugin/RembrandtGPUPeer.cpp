@@ -564,6 +564,21 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     }
     rbgpu_diag_set_num("armed", armed ? 1 : 0);
 
+    // 2w5: the accelerator-gate probe is armed HERE, and the reason is a lost
+    // boot. 2w3 put the call beside `rbgpu_heartbeat_start()` in
+    // kern_start.cpp because a grep found that name - and never read what
+    // gated it: the heartbeat sits inside `if (stage >= 40)` AND inside
+    // `if (checkKernelArgument("-rbgpubeat"))`, and `-rbgpubeat` has not been
+    // in boot-args since 2fg answered its question. So boot 186 ran with
+    // `-rbgpuaccelprobe` set and build D8B1115C loaded and produced not one
+    // `ax*` key, including the unconditional `ax_say`. Rule 16, on the
+    // instrument's own call site: a probe needs a call site that runs
+    // whenever ITS arg is set, not one borrowed from a neighbour.
+    //
+    // This line runs in the peer's start() on every boot, armed or not, and
+    // the probe's own `-rbgpuaccelprobe` check is the only gate it needs.
+    rbgpu_accelprobe_start();
+
     // 2li (2026-10-20): THE DISPLAY HALF WAS NEVER ASKED TO START.
     //
     // There is no AMD framebuffer because the chain that builds one never
