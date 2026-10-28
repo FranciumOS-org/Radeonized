@@ -1,101 +1,104 @@
 # HANDOFF — next session
 
-**State: the display pipe is ACTIVE, transactions flow, and the one thing that
-refused all 122 of them is now understood and fixed in our own kext.** Read
-`docs/RULES.md`'s **2wc** block first, then 2wb; `docs/JOURNAL.md` has the full
-reads under those tags.
+**State: the pipe is ACTIVE, the failure code has moved from
+`kIOReturnNotReady` to `kIOReturnUnsupported` and now reaches CoreDisplay, and
+one capability number we publish is 1024 where Apple's own accelerator refuses
+anything over 256.** Read `docs/RULES.md`'s **2wd** block first, then 2wc and 2wb.
+`docs/JOURNAL.md` has the full reads under those tags.
 
-## 1. The chain, now closed end to end
+## 1. Where boot 192 left it
 
-Boot 191 (2wb): publishing `ATY,fb_offset` as a non-zero 8-byte `OSData` made
-`IOAccelDisplayPipe::isActive()` true for the first time in this project, and
-transactions were created, numbered and handed to the kernel —
-`ax0_fi340 16777216`, `ax0_r380 1`, `ax0_active 1`, `ax0_gate 0`, and
-`Fallback ... submission failed` **69 / 73 / 3** across boots 189/190/191.
+Complete capture, `logs/20261028-005656-plugin`, `rbgpu-boot` 192, armed, both
+one-shots 0, `diag_used` 663/768, **rule 15 satisfied on both kexts** (plugin
+`64D3D687`, fb `6F1EB613`).
 
-2wc (static, no boot): every one of the 122 transactions was then refused by
-**`AMDRadeonX6000_AMDAccelDisplayPipe::executeTransaction`'s first test**:
+- The ATY chain from 2w9/2wb is **reproducible**: `fi340 16777216`, `r380 1`,
+  `active 1`, `gate 0`, all three samples identical.
+- **`'amtr'` is answered**: `RBFBAmtrGets 3`, `RBFBAmtrSets 0`. 2wc's chain
+  down to the attribute is a real call path; nothing reached `setAttribute`.
+- **The refusals did not move**: `set_transaction_args ... 0xe00002c7`
+  122 → 132, same `dirtyBits 0x3c1 / options 0x801`,
+  `display_change_handler` 26 as the control in both. So `vt[0x190]` is not,
+  or not the only, thing refusing — and boot 192 **cannot** tell "we opened
+  gate 1 and met gate 2" from "gate 1 was never shut". Do not write either as
+  established.
+- **What it did settle**: `Failed to submit transaction ... IOReturn: 0x` is
+  132 × `0x2c7` + 2 × `0x2bc`, where boots 185/186 had 118/152 **all `0x2d8`**.
+  The `kIOReturnNotReady` era is over, confirmed from the consumer.
+  `Fallback` 66, `DisplayPipeState` 66, **132 = 2 × 66**.
 
-    al = pipe->0x330->vt[0x190](getFramebufferIndex())
-    if (!txn || !al) return 0xe00002c2 + 5*(txn != NULL)      /* == 0x2c7 */
+## 2. The experiment to run: ONE armed boot of plugin `0D1F953A`
 
-`vt[0x190]` (dump `0x1a0`, rule 7) reads bit 8 of a per-display dword, and the
-**sole writer** is `AMDHWDisplay::getDisplayInfo` at `0xbe87165`:
+`RB_AGDC_GAMMA_CHANNELS` 0x400 → **0x100**. `executeTransaction` refuses the
+whole transaction when the **pipe post-gamma** table carries more than 256
+entries (`cmpl $0x100,%r13d; ja` at `0xbe4a350`), and that count is
+`*(uint32_t *)(table->0x10)` — the first dword of the data **WindowServer
+supplied**, so the size is CoreDisplay's choice and `MaximumSize` is the only
+lever we hold. Boot 192 measured `agdc_gamma_elems1 = 1024`.
 
-    r = fb->getAttribute('amtr', &out)      /* call 0xa30 -> dump 0xa40 */
-    if (r == 0 || r == kIOReturnNotReady) dstate |= 0x100; else &= ~0x100
+2wc had excluded this ceiling using the `LUT` line in `DisplayPipeState` — the
+dump's **per-plane** gamma, under `Plane Index: 0`, whose dirty bit `0x4` is
+**clear** in `0x3c1`. Wrong table; rule 33's third instance.
 
-`RBAMDFramebuffer` never handled `'amtr'`, so `IOFramebuffer`'s base answered
-`kIOReturnUnsupported` and the bit was clear on every call. **One selector, 122
-refusals, no variance.** The gamma ceiling in the same function is excluded by
-the captures (256-entry LUT in 71 of 73 dumps, 1024 in 2).
-
-## 2. The experiment to run: ONE armed boot of fbkext `6F1EB613`
-
-`build/out` holds fbkext **`6F1EB613`** (new) and plugin **`64D3D687`**
-(unchanged, already installed in the EFI).
-
-**Rule 15 — the framebuffer that owns the panel boots from the AUXILIARY
-COLLECTION, and a rebuild refreshes nothing.** Boot 190 was lost to exactly
-this omission. The install is the user's step:
-
-```bash
-sudo rm -rf /Library/Extensions/RBAMDFramebuffer.kext
-sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
-sudo chown -R root:wheel /Library/Extensions/RBAMDFramebuffer.kext
-sudo kmutil create -n aux -z --volume-root /
-```
-
-`kmutil create` may print `Code=34 "Missing Developer Kit"` **and still have
-rebuilt the collection** (2wa, rule 26's mirror). **Verify the artifact, never
-the exit status**: search the AuxKC for the new UUID's raw bytes with controls,
-or just check `RBFBAmtrArmed` exists in the boot's `framebuffer.plist`.
-
-Boot-arg to add (the only new one):
+**The plugin boots from the OpenCore EFI** (rule 15 — each artifact has its own
+install path and a rebuild refreshes none of them):
 
 ```bash
-sudo tools/efi.sh bootarg add -rbgpufbamtr
+sudo tools/efi.sh install
 ```
 
-`-rbgpufbaty` and `-rbgpuaccelprobe` are already in boot-args and must stay.
-Then, every armed boot (rule 9/34 — all four, every time):
+The framebuffer is **unchanged** — `6F1EB613` is already in
+`/Library/Extensions` and in the AuxKC; do not reinstall it. No boot-arg
+change: `-rbgpufbaty`, `-rbgpufbamtr`, `-rbgpuaccelprobe` and
+`-rbgpuagdccaps` are all already there. Then, every armed boot (rule 9/34 —
+all four, every time):
 
 ```bash
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 ```
 
-**Run `sudo tools/plugin_check.sh` to completion** before rebooting. Boots 188
-and 191 were both cut short and lost their `display-log.txt`; 191's evidence
-survived only because it happened to be ERROR-level, and INFO does not survive
-a reboot (rule 36).
+**Run `sudo tools/plugin_check.sh` to completion** over SSH before rebooting.
 
 ## 3. What to read, in order
 
 1. `rbgpu-boot` — must have increased (rule 8).
-2. Identity for **both** kexts (rule 15): `kexts.txt`, or the fallback
-   `RBFBAmtrArmed` / `RBFBAtyArmed` in `framebuffer.plist` — both are published
-   *unconditionally* by the new code, so either one present proves `6F1EB613`.
+2. Identity for **both** kexts (rule 15): `kexts.txt` must show plugin
+   **`0D1F953A`** and fb **`6F1EB613`**. The fallback identity check for the
+   framebuffer is `RBFBAmtrArmed` / `RBFBAtyArmed` in `framebuffer.plist`
+   (published *unconditionally*); for the plugin this boot it is
+   **`agdc_gamma_elems1 = 256`**, which is also the experiment's own arm check.
 3. All four `*_oneshot` keys (rule 34), then `diag_used` vs `diag_max` (rule 14).
-4. The new keys from `ioreg -rl -c RBAMDFramebuffer`:
-   `RBFBAmtrGets`, `RBFBAmtrSets`, `RBFBAmtrSnapped`, `RBFBAmtrPtr`,
-   `RBFBAmtrRefused`, `RBFBAmtrSnap` (0x80 raw bytes).
-5. The kernel half of the log **by sender** (rule 36), counting
-   `set_transaction_args` and `display_change_handler` as the control.
+4. `agdc_gamma_elems1` from `peer.plist`, then the `ax*_` probe keys as the
+   control that the ATY chain is still open.
+5. `ioreg -rl -c RBAMDFramebuffer`: `RBFBAmtrGets`, `RBFBAmtrSets`,
+   `RBFBAmtrSnapped`, `RBFBAmtrPtr`, `RBFBAmtrRefused`, `RBFBAmtrSnap`.
+6. The kernel half of the log **by sender** (rule 36), counting
+   `set_transaction_args` against `display_change_handler` as the control, and
+   the `IOReturn: 0x` histogram (132 × `0x2c7` in boot 192).
 
 **Stated before the boot:**
 
-- Expect `RBFBAmtrGets` > 0, `RBFBAmtrSets` > 0, `RBFBAmtrSnapped` true, and
-  the `set_transaction_args ... 0xe00002c7` line **gone**.
-- Gets move, sets do not → validation passed and the **submit** path is gated
-  somewhere else; `executeTransaction(txn, true)` is the arm to read, since
-  everything gated on its `bool` was skipped in the validate path.
-- Neither moves → `getDisplayInfo` is not reaching us, and the chain above the
-  attribute is wrong. Do not reason past that; read it.
-- **The picture will still be wrong.** We answer the transaction, we do not
-  execute it, and `-rbgpufbaty` still publishes a 16 MB offset while OTG0
-  scans VRAM offset 0.
+- **`agdc_gamma_elems1` must read 256.** If it reads 1024 the plugin did not
+  move and nothing else in the capture means anything (rule 15).
+- Refusals → **0** and `RBFBAmtrSets` non-zero = the ceiling was the gate, and
+  §4 becomes live.
+- Refusals → 0 but `RBFBAmtrSets` still 0 = it validates and CoreDisplay still
+  will not submit. Read `Fallback` and `DisplayPipeState` next, not the kernel.
+- Refusals still ~132 = the ceiling is **properly** excluded this time, and
+  the unconditional `vt[0x190]` gate is the live candidate again. **Then probe
+  it rather than guessing a third time**: publish
+  `((uint8_t *)hwd->0x40)[fbIdx*0xd0 + 1]` and the whole dword beside it from
+  `-rbgpuaccelprobe`, which already walks to `pipe->0x330`. 2w7 and 2wa were
+  both settled that way; 2wc was not.
+- `no gamma` must stay **0** (2u6). 256 is non-zero, so the WARN that fired
+  only at zero should not return — if it does, that is its own finding.
+- **The picture will still be wrong.** Nothing is written to DCN and
+  `-rbgpufbaty` still publishes a 16 MB offset while OTG0 scans offset 0. The
+  user reported boot 191 as the Apple logo and progress bar with the OS live
+  underneath over SSH, which is exactly what a never-composited panel looks
+  like.
 
-## 4. Then: `RBFBAmtrSnap` is the prize
+## 4. Then: `RBFBAmtrSnap` is the prize (still unreached — Sets was 0 in 192)
 
 The pointer `setAttribute('amtr', value)` receives is **`&pipe->0x410`** —
 the transaction struct `executeTransaction` has just finished filling. Known
@@ -145,4 +148,4 @@ out of `RBFBAmtrSnap` over inventing one.
   was ever composited to the panel, which is exactly what a frozen boot screen
   looks like. If `6F1EB613` accepts transactions and the screen still never
   changes, the scanout address (§5) is the whole remaining gap.
-- **~72 unpushed commits. Pushing needs asking.**
+- **~76 unpushed commits. Pushing needs asking.**
