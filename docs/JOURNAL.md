@@ -43958,3 +43958,58 @@ number:
 
 Either answer is worth more than another display-side boot, and the desktop is
 usable enough to type a command, which is all it takes.
+
+## 2wo — the instrument for the stamp-retirement defect: latency, not a score
+
+No boot. Built because the benchmark route is not usable: at ~1 frame per
+7 seconds with a cursor that freezes with everything else, a GUI benchmark app
+cannot be driven, and a *score* would not answer the question anyway.
+
+**What boot 197 left to decide.** GFX channel 52 submitted 2.40 stamps/s and
+retired 2.09 while `rbgpu-ring` read **`r == w` at all three samples** with
+`vmf=0` and `cps=0`. The chip executes everything it is handed, immediately,
+and the ~2/s is the driver learning that work finished. That is a statement
+about **latency**, and Metal already exposes the decomposition:
+
+    GPU      cb.GPUEndTime    - cb.GPUStartTime      what the chip took
+    driver   cb.kernelEndTime - cb.kernelStartTime   what the driver scheduled
+    wall     commit -> waitUntilCompleted            what the caller waited for
+
+`tools/metal_probe.m --bench [N]` (N bounded 1..1000, default 20) runs N
+serial command buffers, printing all three per iteration and the medians, then
+a **pipelined** pass - N committed back to back, waiting only for the last -
+because a per-buffer notification cost and a bandwidth ceiling are
+indistinguishable when every buffer is waited on individually. The dispatch is
+deliberately tiny (4096 threads, three arithmetic ops) so that anything above
+microseconds is overhead. The `--dispatch` verify is kept at the end: a fast
+wrong answer is not a result (rule 14).
+
+**The control is INTERNAL, and it has to be.** Run on this machine's
+*unarmed* boot, `MTLCopyAllDevices` returns **0 devices** - there is no
+software Metal path here to compare against. So the comparison is GPU time
+against wall time **inside one command buffer**, which is better: both numbers
+come from the same measurement and no second boot has to be matched to the
+first.
+
+**SAID BEFORE THE RUN.**
+
+- **wall ~500 ms with gpu in microseconds** (ratio in the thousands) -> the
+  completion path is the defect, it is proven on the RENDERING side with the
+  display nowhere in it, and `1/wall` should land near boot 197's measured
+  2.09 stamps/s. Every further boot goes to the stamp/fence path.
+- **wall tracking gpu closely** -> GPU work completes promptly, the ~2/s is
+  not a GPU-work ceiling, and the display-side scheduling is where to look -
+  which would also mean boot 197's "same order of magnitude" was coincidence,
+  as it was explicitly not claimed to be more than.
+- **pipelined much faster than serial** -> a per-buffer cost, i.e. a
+  notification problem. **Pipelined no faster** -> a real throughput ceiling,
+  a different defect from the one this is aimed at.
+
+It submits real GPU work on a machine whose channels already time out, so it
+can hang the GPU; the failure mode is a reboot, which is the existing one, and
+every iteration is flushed so a hang keeps whatever completed (rule 10).
+
+**Rule 16 applies to this too**: the probe is a suspect. It is read-only with
+respect to the kext, touches no register, and needs neither the framebuffer
+nor the display path - the one thing it shares with the frame rate is the
+channel the work goes on, which is the point.

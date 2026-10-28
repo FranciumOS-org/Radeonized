@@ -103,6 +103,32 @@ sudo tools/plugin_check.sh
    them: fires still 0 with `D=` > 0 means our delivery reaches the slot and
    Apple does nothing with it.
 
+## The one command that answers the next question (2wo)
+
+Boot 197 settled the display half: every failure in that chain reads 0, the
+retire kick lands (79 of 80), and `-rbgpufbflipall` is provably inert
+(`AmtrNoFlip 0`). What is left is the stamp-retirement defect — GFX submits
+2.40 stamps/s and retires 2.09 while the ring reads `r == w` with no VM
+faults, so the chip is immediate and the driver is slow to notice.
+
+`build/out/metal_probe` is already built and needs no GUI. In the **armed
+boot**, blind-type one line (typing is the interaction that works):
+
+```bash
+cd Developer/RembrandtGPU && ./build/out/metal_probe --bench 40 > logs/metalbench.txt 2>&1
+```
+
+Then reboot and I read the file. It submits real GPU work on channels that
+already time out, so it can hang the GPU — the recovery is a reboot, the same
+as always, and every iteration is flushed so a hang keeps what completed.
+
+Read it as: **wall ≈ 500 ms with gpu in microseconds** → the completion path
+is the defect, proven on the rendering side with no display involvement.
+**wall tracking gpu** → GPU work completes promptly and boot 197's
+"same order of magnitude" was coincidence. **pipelined ≫ serial** → a
+per-buffer notification cost; **pipelined ≈ serial** → a real throughput
+ceiling, a different defect.
+
 ## Standing rules that bite here
 
 - the assistant never runs `fbload.sh`, `load.sh`, `efi.sh` or `plugin_check.sh`, and
