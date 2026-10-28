@@ -44198,3 +44198,155 @@ nothing else in the chain is slow.
 **AND 144 Hz IS NOT BLOCKED BY SPEED.** A 144 Hz frame is 6.9 ms. The
 pipelined path already retires a buffer every 4.5 ms. Nothing has to get
 faster; the per-completion wait has to stop happening.
+
+## 2ws — THE 176 ms IS BEFORE THE WORK, NOT AFTER IT. 2wq AND 2wr ARE REFUTED.
+
+No boot. Boot 198 throughout (`rbgpu-boot` 198, `rbgpu-arm` consumed,
+`kern.boottime` 17:05:18, `RBAMDFramebuffer` NOT loaded) — so the display half
+is not in the picture at all and nothing here is about the framebuffer.
+
+**THE SPLIT.** `GPUStartTime`, `kernelStartTime` and `mach_absolute_time` share
+one host timebase, so subtracting the commit instant says WHERE the latency
+sits. Median of 13 serial command buffers:
+
+    commit -> kernelStart      0.025 ms     the driver has it immediately
+    commit -> GPUStart       175.951 ms     the GPU does not START for 176 ms
+    GPUStart -> GPUEnd         0.014 ms
+    GPUEnd  -> caller return   0.045 ms     completion reported instantly
+
+**So the completion path is FINE — 45 microseconds — and the work sits for
+176 ms before the GPU begins executing it.** 2wr concluded "the completion
+signal is the defect"; that is **WITHDRAWN**. Its measurement stands (the
+handler and the wait really are 9 us apart) but both of those are *downstream
+of execution*, so the test could not see a pre-execution delay even in
+principle. 2wq's "no throughput ceiling, the notification is the whole defect"
+is withdrawn for the same reason.
+
+**THE INSTRUMENT IS VALIDATED, WHICH IS WHY THE SPLIT CAN BE BELIEVED**
+(rule 16). The obvious failure mode is that `GPUStartTime`/`GPUEndTime` are the
+instant the driver *noticed* a stamp rather than real GPU timestamps — in which
+case the split would be an artefact. A control kernel with a caller-chosen loop
+count settles it:
+
+    loops        gpu(ms)   commit->GPUstart(ms)   GPUend->return(ms)
+    (none)         0.014          175.95                0.045
+    2000           0.232          176.38                0.042
+    200000         5.896          174.46                0.051
+
+GPU time moves over a **420x range** while `commit->GPUstart` stays pinned to
+the tick and `GPUend->return` stays at ~45 us. The pair is real.
+
+**IT IS A TICK, NOT A WAKE-UP.** Twelve pipelined buffers, GPUstart relative to
+the first commit: 175.253, 175.882, 175.990, 176.002, 176.014, 176.117,
+176.129, 176.140, 176.244, 176.255, 176.267, 176.644. **First-to-last spread
+1.391 ms over 12 buffers** — one periodic event releases the whole batch, which
+then runs back to back 12 us apart, with the GPU idle for the preceding 176 ms
+holding work it had already been given.
+
+**AND IT IS LOAD-INDEPENDENT.** With a second process keeping 8 buffers in
+flight continuously for 26 s, the first process still measured a 174.590 ms
+median — and the busy process itself managed **46.2 buffers/s, which is
+8 buffers x 5.78 ticks/s to three figures**. Both processes are release-rate
+limited, not bandwidth limited.
+
+**HOW THE PERIODICITY WAS ESTABLISHED, AND HOW 2wq GOT IT BACKWARDS.** 2wq
+wrote that the 167-181 ms cluster was "too tight for a uniform poll, which
+would spread over [0,T] and average T/2". That is wrong for a SERIAL loop: the
+next buffer is submitted microseconds after the previous one retired, i.e.
+microseconds after a tick, so it has just missed one and waits very nearly a
+FULL period. wall ~= T every time, tightly clustered. The spread over [0,T]
+applies only to a submission at random phase, and the bench has exactly one of
+those — **iteration 0, which read 97.9, 104.6, 45.4 and 101.2 ms across four
+runs.** The fix is to break the phase lock deliberately, by waiting d after
+each completion before submitting the next (`metal_probe --phase`):
+
+    d(ms)      0      50     100     150     170     180     240
+    wall     173.7   123.9   71.7    23.3     2.3   168.5   108.2
+    d+wall   173.7   173.9   171.7   173.3   172.3   348.5   348.2
+
+`d+wall` is **constant at ~173.7 ms** up to d=170 and then jumps to **~348 ms
+= 2T**; at d=170 the buffer retires in 2.3 ms because the tick was already due.
+A fixed per-buffer delay would have left the wall column flat. Two independent
+reads of the period from one table.
+
+**THE CLOCK IS FREE-RUNNING AND PER-CLIENT.** A lattice fit over absolute
+`mach_absolute_time` completion instants at pseudo-random phase
+(`metal_probe --lattice`) locks hard: **T = 175.77 ms, R = 0.966 over 191
+periods**, residual sigma 7.4 ms. Every round candidate is rejected by the same
+data — 25 panel vblanks (173.76 ms) R = 0.13, 6 Hz (166.67 ms) R = 0.05 — so
+the period is **not** a number anyone wrote down, which is the signature of a
+handler that re-arms after doing its own work. Two processes run concurrently
+read T = 176.016 and 176.080 ms, i.e. **the same period**, but phases of
+118.172 and 31.929 ms in the shared mach epoch, i.e. **independent phase**. So
+it is not one global driver heartbeat; each client has its own, built from the
+same interval.
+
+**WHAT THIS MEANS FOR THE FRAME RATE.** A client can cross at most ~5.7 release
+boundaries per second no matter how much it queues, so no client can present
+more than ~5.7 times a second. 144 Hz needs 6.9 ms; the release quantum is
+175 ms, **25x too slow**. Nothing needs to get faster — the GPU executes in
+microseconds and a batch of 40 drains in one tick. **The quantum has to go
+away.**
+
+**WHAT WAS READ STATICALLY, AND WHAT IT ELIMINATES.**
+- `AMDRadeonX6000_AMDHWChannel::waitForHwStamp` (`0xbe85536`) and
+  `AMDRadeonX6000_AMDAccelChannel::waitForTimestamp` (`0xbe46f9a`) both poll at
+  a **100 us** interval (`0x64`, scale 1000) with a 5 s + 20 s budget
+  (`0x4C4B40` us then `0x17D7840 - 0x4C4B40`), through
+  `IAMDHWInterface::pollWait` (`0xbeab6e0`) = `clock_get_uptime` ->
+  `absolutetime_to_nanoseconds` -> `assert_wait_timeout(100 us)` ->
+  `thread_block` on one shared global event. **A 100 us poll cannot produce
+  176 ms**, and the split now shows the completion side was never the problem,
+  so these are off the list.
+- `IOAccelEventMachine2::enableStampInterrupt` / `disableStampInterrupt`
+  (`0x14e2653c` / `0x14e26542`) are **empty stubs** — `push rbp; mov; pop; ret`
+  — i.e. vendor override points, and AMDRadeonX6000 only *calls* them. The AMD
+  side does implement the machinery:
+  `AMDHWChannel::registerTimestampInterrupt` (`0xbe85a02`),
+  `enableTimestampInterrupt` (`0xbe85904`, which returns 0 immediately unless
+  `channel->0xa8 != 0`, the per-ring IRQ id from
+  `AMDGFX10PM4Engine::getTimestampIRQSourcex` = `*(u32*)(this + 0x244 +
+  ring*0x20)`), `timeStampInterruptCallback` (`0xbe85838`), all gated by
+  `AMDHardware::useTimestampInterrupts` (`0xbea961c`) = `this->0x319 == 1 &&
+  (obj->0x98 - obj->0x90) < 1e9 ns`. **This whole line is now a side issue**,
+  not the frontier: it is about completion, and completion takes 45 us.
+- `AMDSWScheduler::advance()` (`0xbe950e0`) walks every HwChannelCtx (0x98
+  stride, count at `+0x60`) and pushes any marked `+0x71` through
+  `advance(HwChannelCtx&)` (`0xbe9442a`). It has exactly **two** reachers, both
+  tail jumps: `deferredCallback(IOInterruptEventSource*)` (`0xbe93e18`) and
+  `timerCallback(IOTimerEventSource*)` (`0xbe9513c`) — and **`timerCallback` is
+  referenced nowhere else in the kext**, so that timer is never installed.
+  `advance(HwChannelCtx&)` is also called directly from `submitCommandBuffer`
+  (`0xbe943e9`), so the submit path does reach the hardware push synchronously.
+  Neither kext imports any `setTimeout*`/`wakeAtTime` at all — only
+  `timerEventSource`, `interruptEventSource`, `clock_get_uptime`,
+  `clock_interval_to_deadline`, `nextIdleTimeout`, `setIdleTimerPeriod` — so
+  **whatever the 176 ms clock is, it is probably not an armed
+  IOTimerEventSource**, and that is a constraint on the answer rather than an
+  answer.
+
+**NOT ESTABLISHED — do not write any of these as fact.** What produces the
+176 ms is **unknown**. Its shape constrains it: free-running, per-client, the
+same interval in every client, load-independent, not a round number, releasing
+an unbounded batch at once. Candidates not yet separated: a doorbell write that
+never reaches the command processor with something periodic re-programming the
+ring pointers instead (`AMDGFX10GraphicsRing::programReadAndWritePointers`
+`0xbe99da4`, and note the family of `dummyWPTRUpdateDiag` helpers that exist at
+all); a user-queue attach/swap quantum (`advance(HwChannelCtx&)` calls
+`AMDUserQueue::isAttached` at `0xbe94730` then `userQueueSwitch` at
+`0xbe94762`); and a power/clock gating cycle. **Nothing measured here touches
+the ring kick**, and rule 35 applies — instrument our own end before building
+on a chain.
+
+**Rules.** Rule 33 again, in a new form: *name which side of the work a latency
+is on before attributing it.* 2wr measured two downstream clocks against each
+other and called the result the defect; the number was right and the object it
+belonged to was wrong. And rule 16 earned its keep positively for once — the
+heavy-kernel control is the only reason the split is believable.
+
+**Instrument.** `tools/metal_probe.m` gains `--phase [N]` (break the phase
+lock, read the period off the sawtooth), `--lattice [N]` (fit the period and
+the absolute phase, comparable across processes), `--busy [S]` (keep work in
+flight from another process), `--heavy [N]` (the scaling control) and the
+per-iteration split columns. Captures in `logs/metalphase.txt`,
+`logs/metallattice.txt`, `logs/metalsplit.txt`, `logs/metalpipe.txt`.
