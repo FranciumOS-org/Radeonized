@@ -44013,3 +44013,83 @@ every iteration is flushed so a hang keeps whatever completed (rule 10).
 respect to the kext, touches no register, and needs neither the framebuffer
 nor the display path - the one thing it shares with the frame rate is the
 channel the work goes on, which is the point.
+
+## 2wp — the frozen progress bar was a healthy machine, and the arming hole is ours
+
+Three power cycles, no capture, recovered with `-rbgpuoff`. Diagnosed from
+NVRAM and the persisted log; **no boot was spent on the diagnosis**.
+
+**Rule 8 first, and it is the whole finding.** After three attempts:
+
+    rbgpu-boot   197     UNCHANGED - the peer never armed, three times
+    rbgpu-arm    1       STILL SET, unconsumed
+    rbgpu-agdc   1       STILL SET
+    rbgpu-iop    1       STILL SET
+    rbgpu-fb     0       CONSUMED
+
+**The framebuffer armed and the plugin did not.** And the crumb from that boot
+says what followed:
+
+    b=197 s=12 f=10000 e=1 r=1 h=0 w=0 k=0 t=0 p=0 n=0 K=0 D=0
+
+`b=197` against a nonce still at 197 (the fb reads it before the peer
+increments, 2wg) places it in one of those boots. `h=0` - hubpSetup succeeded,
+so `start()` ran and the panel was **ours**. `f=10000` - our VBL clock ran for
+69.5 seconds. **`t=0` - not one transaction, ever.** `w=0`, `K=0`, `D=0`.
+
+**And the machine was FINE.** The persisted log shows that boot reaching
+`WindowServer: Server is starting up` and then logging normally until
+**16:19:59 - ten minutes**. Networking, power management, disk, Time Machine.
+The user was looking at a frozen picture of a working computer. **Rule 12,
+paid for a fourth time**: a frozen panel is indistinguishable from a hang, and
+this time it cost three power cycles and a rescue boot-arg.
+
+**THE HOLE IS IN OUR ARMING AND IT IS MINE.** `-rbgpuownfb` + `rbgpu-fb` arm
+the takeover **independently of whether the accelerator is armed** - they are
+different boot-args and different one-shots, by design, so the two halves
+stay separable. But the framebuffer can only ever show anything **if** the
+accelerator hands it transactions: it writes HUBP from
+`setAttribute('amtr')` and from nothing else. Taking the panel with no
+accelerator underneath is therefore a **guaranteed** frozen screen, and
+nothing refused it. Every other dangerous feature in this project needs an arg
+*and* a one-shot precisely so a bad boot cannot repeat (rule 9); this
+combination had both and still repeated, because **each half was armed
+correctly and the pair was never checked**.
+
+**WHY THE PLUGIN DID NOT ARM IS NOT ESTABLISHED.** The one-shots are
+untouched and the nonce never moved, so the peer's `start()` never completed -
+but the cause is open. **An attempt to read the hung boot's boot-args out of
+the log was invalid**: the kernel's `Boot args:` line is truncated by os_log
+(it ends mid-token at `-rtw`), so 17 tokens against the 54 in boot 197's
+`boot-args.txt` is the instrument cutting the line, not a difference. Rule 26
+on my own check; the comparison is withdrawn and the question stays open.
+
+**Build `3FB13023`: the no-transaction self-disarm.** If `amtrArmed` and
+`amtrSets == 0` at vblank **18000** (125 s at the measured 143.83 Hz), consume
+`rbgpu-fb` by overwrite on the syncing path (2wj's mechanism, for 2wj's
+reason) and drop a crumb at stage 99.
+
+- **It cannot rescue the running boot** and does not pretend to - the panel is
+  already ours and cannot be handed back. What it buys is that the **next**
+  power cycle comes up on `IONDRVFramebuffer` with a usable desktop. Three
+  power cycles into a frozen screen becomes exactly one.
+- **The deadline is measured, not guessed**: boot 196 had `amtrSets 4` by fire
+  10000 (70 s) and boot 197 had transactions flowing well before that, while
+  the frozen boot had 0 at the same point. n=2, so it is set nearly twice as
+  far out as the latest first transaction ever seen.
+- **The asymmetry is the design.** Firing in a merely slow boot costs one
+  power cycle to re-arm. Not firing costs power-cycling into a frozen screen
+  until the user gives up. Those are not comparable.
+- It runs on the VBL clock that is already there - no new `thread_call`, no
+  allocation - and only when `amtrArmed`, so a plain `-rbgpuownfb` boot is
+  untouched. Three hosttest cases: it fires at the deadline, it does **not**
+  fire when a single transaction arrived, and it fires at most once ever.
+  Mutation tested - dropping the `amtrSets == 0` term fails the second case.
+
+**RECOVERY IS STAGED, AND THE FIRST STEP CANNOT FREEZE.** With `rbgpu-fb`
+already 0, removing `-rbgpuoff` gives a boot where `IONDRVFramebuffer` keeps
+the panel and the desktop is usable whatever the plugin does - and
+`rbgpu-boot` then answers the open question directly: **198 means the peer
+arms fine and this was only the pairing hole; still 197 means the plugin
+itself is failing and that is the next defect.** Either way the machine comes
+back. The framebuffer goes back on only after that reads 198.

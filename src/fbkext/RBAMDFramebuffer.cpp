@@ -237,6 +237,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     amtrSnapped = false;
     amtrGets = 0;
     amtrSets = 0;
+    selfDisarmed = false;
     amtrPeak = 0;
     amtrBucket = 0;
     amtrNoFlip = 0;
@@ -589,6 +590,29 @@ IOReturn RBAMDFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount,
  * `-rbgpufbnocrumb` disables the mechanism outright.
  *
  * Read it after a crash with:  nvram rbgpu-fbcrumb */
+/* 2wp: consume rbgpu-fb for the next boot, by OVERWRITE on the syncing path -
+ * the same mechanism 2wj measured and for the same reason: removeProperty
+ * reaches no sync, setProperty does. The arming check already treats a literal
+ * "0" as not armed, for both OSData and OSString, so nothing else changes.
+ *
+ * This is deliberately NOT a rescue of the running boot. The panel is already
+ * ours and cannot be handed back; what it buys is that the NEXT power cycle
+ * comes up on IONDRVFramebuffer with a usable desktop instead of repeating
+ * the frozen screen. Rule 37 asked what recovery looks like when a feature
+ * half-works; this is that answer for the case where the accelerator is
+ * missing underneath us. */
+void RBAMDFramebuffer::disarmFB(void)
+{
+    if (selfDisarmed || !nvram) {
+        return;
+    }
+    selfDisarmed = true;
+    if (auto zero = OSString::withCString("0")) {
+        nvram->setProperty("rbgpu-fb", zero);
+        zero->release();
+    }
+}
+
 void RBAMDFramebuffer::crumb(uint32_t stage)
 {
     if (!crumbOn || !nvram) {

@@ -66,6 +66,7 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAmtrGets", amtrGets, 64);
     setProperty("RBFBAmtrSets", amtrSets, 64);
     setProperty("RBFBAmtrPeak", amtrPeak, 64);
+    setProperty("RBFBSelfDisarmed", selfDisarmed);
     setProperty("RBFBAmtrBucket", amtrBucket, 64);
     setProperty("RBFBAmtrNoFlip", amtrNoFlip, 64);
     setProperty("RBFBAmtrSnapped", amtrSnapped);
@@ -209,6 +210,22 @@ void RBAMDFramebuffer::deliverVBL(void)
          * One flash commit every 70 s is the same order as the four this
          * already did. */
         crumb(11 + (uint32_t)(vblFires / 10000));
+    }
+    /* 2wp: the no-transaction deadline, on the clock that is already running.
+     * 18000 fires at the panel's measured 143.83 Hz is 125 seconds. The
+     * separation is measured, not guessed: boot 196 had amtrSets 4 by fire
+     * 10000 (70 s) and boot 197 had transactions flowing well before that,
+     * while the boot that froze had amtrSets 0 at the same point. n=2, so the
+     * deadline is set nearly twice as far out as the latest first transaction
+     * seen. It only arms when the framebuffer actually took the panel for
+     * transactions (amtrArmed), so a plain -rbgpuownfb boot is untouched.
+     *
+     * Firing it in a merely slow boot costs one power cycle to re-arm; NOT
+     * firing it costs the user power-cycling into a frozen screen until they
+     * give up. The asymmetry is the whole design. */
+    if (amtrArmed && !selfDisarmed && vblFires == 18000 && amtrSets == 0) {
+        disarmFB();
+        crumb(99);
     }
     /* 2wl: roll the rate bucket on the same clock. ~7 s is short enough that
      * a burst of typing fills one window and long enough that a single flip
