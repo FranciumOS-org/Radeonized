@@ -362,6 +362,64 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 192: `'amtr'` IS ANSWERED, THE REFUSALS DO NOT MOVE, AND THE GAMMA
+CEILING IS BACK (2wd).** `rbgpu-boot` 192, armed, both one-shots 0,
+`diag_used` 663/768, **all 17 files** - the first complete capture in four
+boots. **Rule 15 met on BOTH kexts for the first time since 2w6**: plugin
+`64D3D687`, fb **`6F1EB613`**, so the AuxKC install worked and `kmutil
+create`'s `Code=34` was again a loud error over a write that landed.
+**The ATY chain is reproducible** - all three samples byte-identical to boot
+191's (`fi340 16777216`, `r380 1`, `active 1`, `gate 0`, `b35d/e/f 1`,
+`w/h/bpp/fmt 1920/1080/4/4`).
+**`'amtr'` WAS ASKED FOR AND ANSWERED**: `RBFBAmtrGets` **3**, `RBFBAmtrSets`
+**0**, `Snapped` false, `Refused` 0. So 2wc's path down to the attribute is a
+**real call path** - `getDisplayInfo` queried it once per call and we returned
+success - and nothing ever reached `setAttribute`, which only the `bool` arm
+calls.
+**AND THE REFUSALS DID NOT MOVE**: `set_transaction_args ... 0xe00002c7`
+**122 -> 132** with `dirtyBits 0x3c1 / options 0x801` unchanged and
+`display_change_handler` 26 as the control in both. **So `vt[0x190]` is not,
+or not the only, thing refusing.** Boot 192 **cannot** separate "we opened
+gate 1 and met gate 2" from "gate 1 was never shut" - same count, same code,
+two sites. Do not write either as established.
+**What it DID settle, from the consumer**: `Failed to submit transaction ...
+IOReturn: 0x` is 134 lines, **132 of `0x2c7`** and 2 of `0x2bc`, where boots
+185/186 measured that same message 118/152 times **all `0x2d8`**
+(`kIOReturnNotReady`). The NotReady era is over and the new code propagates
+into CoreDisplay. `Fallback` 66, `DisplayPipeState` 66, and **132 = 2 x 66** -
+exactly 2w3's "Submit runs ~twice per Commit". `no gamma` 0, `bad bits` 4, the
+wedge still there (34 `event timeout`, 53 `checkGPUProgress`), and
+`RBFBVBLFires 13200` with **`RBFBVBL1Fires` 0** where 191 saw it fire once -
+not attributed.
+**THE PIPE POST-GAMMA SIZE IS CoreDisplay's, AND WE ADVERTISE 1024.**
+`IOAccelDisplayPipeGammaTable2::getTableCount` (`0x14e62a92`) is
+`movq 0x10(%rdi),%rax; movl (%rax),%eax` - the first dword of the
+`IOAccelDisplayPipeGammaTableData` the **userspace client supplied**
+(`withGammaTableData` `0x14e62682`, `set_pipe_postgamma_table` `0x14e5e7e6`).
+So it is not a hardware fact and the only lever we hold is the AGDC type-2
+entry `+0x28` = `MaximumSize` = `RB_AGDC_GAMMA_CHANNELS`. Boot 192 measured it
+live: **`agdc_gamma_elems1 = 1024`** against a consumer that refuses anything
+over **0x100**.
+**Plugin `0D1F953A`: `RB_AGDC_GAMMA_CHANNELS` 0x400 -> 0x100.** Still a
+substitute (rule 17) but bounded by a **measured fact about the consumer**
+instead of by a table CoreDisplay happened to print; non-zero, so 2u6's "plane
+with no 3-channel gamma table support" (which fired only at ZERO) stays fixed,
+with boot 192's count of 0 as the control. The hosttest keeps the **literal**
+(2v1: a field compared against the macro that wrote it is not a test) and
+gains the ceiling as its own assertion.
+**Said before the boot**: `agdc_gamma_elems1` must read **256** or nothing
+else in the capture means anything. Refusals -> 0 and `RBFBAmtrSets` non-zero
+= the ceiling was the gate. Refusals -> 0 but sets still 0 = it validates and
+CoreDisplay still will not submit; read `Fallback`/`DisplayPipeState`, not the
+kernel. Refusals still ~132 = the ceiling is **properly** excluded and
+`vt[0x190]` is the live candidate again - and then **probe it**, publishing
+`((uint8_t *)hwd->0x40)[fbIdx*0xd0 + 1]` and the whole dword beside it, rather
+than guessing a third time. 2w7 and 2wa were both settled that way; 2wc was
+not. **The picture stays wrong either way.**
+**NEXT**: one armed boot of plugin `0D1F953A` **installed into the OpenCore
+EFI** (`sudo tools/efi.sh install`), fbkext `6F1EB613` unchanged in
+`/Library/Extensions`. No boot-arg change.
+
 **`kIOReturnUnsupported` IS ONE FRAMEBUFFER ATTRIBUTE WE NEVER ANSWERED
 (2wc).** Static read, no boot; 2wb's frontier is closed and the defect is in
 our own kext. `set_transaction_args` (`0x14e5ea68`) has ONE `retq` and only one
@@ -380,12 +438,15 @@ assembler writes it `leal (%rax,%rax,4),%r12d; addl $0xe00002c2,%r12d`. Rule
 gated on a dirty bit; with the measured `dirtyBits 0x3c1` three are clear
 (0x4/0x20/0x400), one needs `== 0x100` exactly, and the live one refuses a
 **gamma table of more than 256 entries** (`cmpl $0x100,%r13d; ja`, `r13 =
-getTableCount()`). That ceiling is **excluded by the captures**: the LUT
-CoreDisplay actually submits is 256 entries in **71 of 73** dumps in boot 190
-and 67 of 69 in 189, 1024 in only 2 of each. Two crossings in seventy-three
-cannot make 122 refusals out of 122; an unconditional first-line gate can.
-(A `sort -u` of those lines showed both sizes and read as "it sends 1024" -
-**a de-duplicated list is not a count**.)
+getTableCount()`). **THAT CEILING'S EXCLUSION IS
+WITHDRAWN BY 2wd - read 2wd, not the next three sentences.** 2wc wrote: the LUT
+CoreDisplay actually submits is 256 entries in 71 of 73 dumps in boot 190 and
+67 of 69 in 189, 1024 in only 2 of each, so two crossings in seventy-three
+cannot make 122 refusals out of 122. **Those dumps are headed `Plane Index: 0`
+and their LUT is the PLANE gamma, dirty bit 0x4, which is CLEAR in 0x3c1**; the
+gate is bit 0x80, the PIPE post-gamma, which `DisplayPipeState` never prints.
+(The `sort -u` lesson stands on its own: **a de-duplicated list is not a
+count**.)
 **AND THE GATE IS A FRAMEBUFFER ATTRIBUTE.** Rule 7: call `0x190` → dump
 `0x1a0` (controls: dump `0x138` = `isDisplayEnabled` per 2w9, dump `0x258` =
 `AMDDCNDisplay::isDisplayControlEnabled` per 2wa), an unnamed accessor at
@@ -1228,7 +1289,11 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     minutes later. **And an index is not a count**: 2u4 retired the
     plane-count line using `Plane Index: 0`, which is CoreDisplay's index of
     the first plane, not IOPresentment's count. Name the object a number
-    belongs to before retiring a line with it. [2v9]
+    belongs to before retiring a line with it. **Third instance, and it cost a
+    boot**: 2wc retired the post-gamma ceiling using the `LUT` line in
+    `DisplayPipeState`, which is the dump's **per-plane** gamma under
+    `Plane Index: 0`, while the gate is on the **per-pipe** post-gamma that
+    those dumps never print (2wd). [2v9, 2wd]
 32. **Read a `char*[]` table's LENGTH table too, and check the slot count
     against the bound in the code.** Cache string tables are concatenated with
     no separators, so names read without lengths run together and an
