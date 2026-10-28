@@ -43445,3 +43445,96 @@ already say, and it worked. But the feature should not have depended on that.
 The frame rate, not the address. The display is correct and the only thing
 wrong with it is how often it changes, which is a number we have measured
 three ways and never explained.
+
+---
+
+## 2wj — boot 196: the display reproduces, and the one-shot is fixed by overwriting it
+
+Two reports, one boot. The user restarted **without** installing `452E6EE1`
+and **without** adding `-rbgpufbretire`, so this is the boot-195
+configuration run again: fbkext `D07493B1`, `-rbgpufbhubp` + `-rbgpufbamtr`.
+
+### The display reproduces, n = 2
+
+> i restarted same frames thing
+
+So the composited accelerated desktop at ~1 frame per 10 s is **reproducible**,
+which upgrades 2wi from n=1. 2wi's reading stands: the write lands every time,
+and the rate is the transaction rate. **`-rbgpufbretire` is still untested** —
+it was never in boot-args.
+
+### The one-shot never consumed, and that made the machine unable to disarm itself
+
+> also power cycling didnt consume the flags i had to add gpuoff in windows
+
+**This is the serious finding, and it is about our own code, not the chip.**
+`rbgpu-fb` did not clear, so the framebuffer took over on every power cycle,
+and with it the HUBP write (which has no one-shot of its own, 2wi). At the
+0.09 Hz transaction rate there is **no usable desktop from which to edit
+boot-args** — so the only way out was to boot **Windows** and edit the
+OpenCore config from there.
+
+**A feature that cannot be disarmed from the machine it runs on is a worse
+failure mode than anything it was guarding against.** Rule 9 exists for
+exactly this and the project has written "the boot-arg is the durable disarm"
+since 2sr — but that assumes a machine usable enough to run `efi.sh`, which
+2wh removed as a side effect of succeeding.
+
+### The fix was already in this file, measured, since 2sr
+
+`RBAMDFramebuffer.cpp` consumed the key with:
+
+    options->removeProperty("rbgpu-fb");
+
+and 2sr's own comment forty lines above explains why that cannot work:
+`removeProperty` tail-jumps to `removePropertyWithGUIDAndName`, which calls
+**no sync**, while `setProperty` reaches `setPropertyWithGUIDAndName` and
+**does** — which is precisely why `rbgpu-fbcrumb` has persisted reliably all
+along through the same entry. The two facts have sat two screens apart for
+eleven milestones without being put together.
+
+**So consume by OVERWRITE, not by removal.** Build `DEB8918D` writes a literal
+`"0"`, and the arming check twenty lines above **already** treats `"0"` as not
+armed, for both `OSData` and `OSString` — nothing else had to change. The
+read-back is still only in-memory, but it is now on the path measured to sync,
+so the reading is worth something it was not worth before.
+
+`IONVRAM-FORCESYNCNOW-PROPERTY` is kept, but note it evidently did **not**
+rescue the removal across boots 191-196 — so on this machine that key is not a
+substitute for using a syncing path in the first place.
+
+### What this changes about past boots
+
+Because the key never consumed, **the framebuffer takeover was effectively
+sticky from whenever it was last armed**, and that is why it has never once
+failed to arm since 2st. No earlier conclusion is invalidated — the takeover
+is confirmed directly in every boot by `RBAMDFramebuffer`'s own registry keys,
+not by the one-shot — but "the fb armed again" was never evidence that a fresh
+key had been set. Rule 9's "every armed boot needs them set again" was true of
+the *plugin's* keys (`rbgpu-boot` increments, so those really were consumed)
+and false of this one.
+
+### After this build, one power cycle is a full disarm
+
+With the key consuming properly, a plain reboot leaves `rbgpu-fb` reading `0`,
+`RBAMDFramebuffer` declines the panel, `IONDRVFramebuffer` matches as usual,
+and the desktop comes back on software compositing — **usable, and usable
+enough to run `efi.sh`**. No Windows trip. The boot-arg remains the durable
+disarm; this makes the one-shot do its own job as well.
+
+A separate `rbgpu-hubp` one-shot for the write alone is **available and not
+taken**: with `rbgpu-fb` consuming, one power cycle already disarms the whole
+chain, and the smaller change is the better one here. Worth adding only if
+keeping the framebuffer armed while disarming just the write becomes useful.
+
+### The crumb is already sufficient to measure the frame rate without a capture
+
+Noted because 2wi's instrument fix turns out to be better than it was designed
+to be: the crumb carries `f=` vblFires and `t=` amtrSets, and the VBL
+thread_call runs at the panel's measured 143.83 Hz. So
+
+    transactions per second  =  t / (f / 143.83)
+
+from one `nvram rbgpu-fbcrumb` read, after a power cycle, with no capture at
+all. That resolves 0.09 Hz against 1 Hz or 60 Hz with room to spare, which is
+the only precision this question needs.

@@ -116,20 +116,51 @@ bool armedOnce(void)
         return false;
     }
 
-    options->removeProperty("rbgpu-fb");
+    /* 2wj: CONSUME BY OVERWRITE, NOT BY REMOVAL. This is the fix for 2sq, and
+     * the measurement that makes it work has been in this file since 2sr:
+     * `removeProperty` tail-jumps to `removePropertyWithGUIDAndName`, which
+     * calls NO sync, while `setProperty` reaches
+     * `setPropertyWithGUIDAndName` and DOES - which is why `rbgpu-fbcrumb`
+     * has persisted reliably all along while this key kept surviving its own
+     * deletion. So write a literal "0" instead of deleting, and the arming
+     * check twenty lines above already treats "0" as NOT armed, for both
+     * OSData and OSString.
+     *
+     * Boot 196 is what forced this: with the key never consuming, the
+     * framebuffer took over on every power cycle, and at the 0.09 Hz
+     * transaction rate 2wi measured there is no usable desktop from which to
+     * edit boot-args - the user had to boot WINDOWS to disarm. A one-shot
+     * that cannot consume itself is not a one-shot, and the feature could not
+     * disarm itself on the machine it runs on.
+     *
+     * The boot-arg remains the durable disarm (rule 9, and it is still what
+     * the log line says); this makes the one-shot do its own job as well. */
+    if (auto zero = OSString::withCString("0")) {
+        options->setProperty("rbgpu-fb", zero);
+        zero->release();
+    }
     if (auto sync = OSString::withCString("now")) {
         options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
         sync->release();
     }
-    /* This read-back proves the IN-MEMORY state only. 2sq measured the key
-     * coming back after a reboot having read as absent here, and the kernel
-     * path above explains how. So it is logged as what it is, and the boot-arg
-     * is what the disarm actually rests on. */
-    bool cleared = options->getProperty("rbgpu-fb") == nullptr;
+    /* Still an IN-MEMORY read-back: it proves the overwrite took in the
+     * registry, not that flash accepted it. The difference from 2sq is that
+     * the path taken is now the one measured to sync, so this reading is
+     * worth something it was not worth before. */
+    bool cleared = false;
+    if (OSObject *v = options->getProperty("rbgpu-fb")) {
+        if (auto d = OSDynamicCast(OSData, v)) {
+            cleared = d->getLength() >= 1 &&
+                      *static_cast<const char *>(d->getBytesNoCopy()) == '0';
+        } else if (auto t = OSDynamicCast(OSString, v)) {
+            cleared = t->isEqualTo("0");
+        }
+    }
     LOG("armed (-rbgpuownfb + rbgpu-fb); taking the panel for THIS BOOT. "
-        "one-shot removal %s IN MEMORY - this does NOT prove it reached flash "
-        "(2sq); the durable disarm is `sudo tools/efi.sh bootarg remove -rbgpuownfb`",
-        cleared ? "accepted" : "FAILED, so the key is definitely still set");
+        "one-shot overwrite to \"0\" %s IN MEMORY via the path 2sr measured as "
+        "syncing (2wj); the durable disarm is still "
+        "`sudo tools/efi.sh bootarg remove -rbgpuownfb`",
+        cleared ? "accepted" : "FAILED, so the key is definitely still armed");
     options->release();
     return true;
 }
