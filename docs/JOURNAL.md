@@ -42534,3 +42534,168 @@ is wrong.
 An armed boot of fbkext `6F1EB613`, **installed to the auxiliary collection**
 (rule 15 — a rebuild refreshes nothing, and boot 190 was lost to exactly this
 omission), with `-rbgpufbaty` and `-rbgpufbamtr` both in boot-args.
+
+## 2wd — BOOT 192: `'amtr'` IS ANSWERED, THE REFUSALS DO NOT MOVE, AND 2wc WITHDREW THE WRONG EXCLUSION
+
+Capture `logs/20261028-005656-plugin`, `rbgpu-boot` **192**, armed
+(`armed 1`, `agdc_oneshot 0`, `iop_oneshot 0`, `agdc_error 0`), `diag_used`
+**663**/768, **all 17 files** — the first complete capture in four boots.
+
+### Rule 15 met on both kexts, for the first time since 2w6
+
+`kexts.txt`: plugin **`64D3D687`**, `com.rembrandtgpu.fb` **`6F1EB613`** —
+the new framebuffer, so the auxiliary-collection install worked and
+`kmutil create`'s `Code=34` was again a loud error over a write that landed
+(2wa, rule 26's mirror). `RBFBAmtrArmed = True` and `RBFBAtyArmed = True`
+corroborate it from the registry. Boot-args carry `-rbgpufbaty` **and**
+`-rbgpufbamtr`.
+
+### The ATY chain is reproducible
+
+All three probe samples byte-identical to boot 191's, and to each other:
+
+    ax*_fi340 16777216   ax*_fi348 8294400   ax*_fi34c 8294400
+    ax*_r380         1   ax*_active       1   ax*_gate        0
+    ax*_b35d 1  ax*_b35e 1  ax*_b35f 1  ax*_w/h/bpp/fmt 1920/1080/4/4
+    ax*_hw328 1  ax*_hw330 1  ax*_pfb 1  ax*_pres 1  ax*_n 1  ax*_fbs 1
+
+So 2w9/2wb hold on a second boot. `IOAccelDisplayPipe::isActive()` is true,
+`initFramebufferResource` returns success, and none of 2w3's three
+`kIOReturnNotReady` gates is shut.
+
+### `'amtr'` was asked for, and answered
+
+From `ioreg -rl -c RBAMDFramebuffer`:
+
+    RBFBAmtrArmed    True       RBFBAmtrSets      0
+    RBFBAmtrGets     3          RBFBAmtrSnapped   False
+    RBFBAmtrPtr      0          RBFBAmtrRefused   0
+
+**Gets 3, Sets 0.** So `AMDHWDisplay::getDisplayInfo` did call
+`fb->getAttribute('amtr', &out)` — three times, which is one per
+`getDisplayInfo` — and our handler returned `kIOReturnSuccess` each time, so
+2wc's chain down to the attribute is **confirmed as a real call path**. Zero
+sets means nothing ever reached
+`setAttribute('amtr', &pipe->0x410)`, which in `executeTransaction` sits past
+the `bool` arm; the validate arm never calls it. No snapshot, and the refusal
+published nothing because no pointer was ever refused.
+
+### And the refusals did not move
+
+| | boot 191 | **boot 192** |
+|---|---|---|
+| `set_transaction_args ... 0xe00002c7` | 122 | **132** |
+| `transaction ID (N) generated error (0xe00002c7)` | 122 | **132** |
+| `dirtyBits` / `options` | 0x3c1 / 0x801 | **0x3c1 / 0x801** |
+| `display_change_handler` (control) | 26 | **26** |
+
+Unchanged, with the same inputs. **So `vt[0x190]` is not, or is not the only,
+thing refusing.** Boot 192 cannot separate "we opened gate 1 and met gate 2"
+from "gate 1 was never shut": both give an unchanged count and an unchanged
+code, and the error code is identical for the two sites. That is **not
+established** and must not be written as if it were.
+
+### What boot 192 DID settle, from the consumer's side
+
+`Failed to submit transaction: IOPRESENTMENT_METHOD_FAILURE: IOReturn: 0x…`
+appears 134 times, and the codes are **132 × `0x2c7`** and 2 × `0x2bc`
+(`kIOReturnError`). Boots 185 and 186 measured that same message **118 and 152
+times, all `0x2d8`** (`kIOReturnNotReady`). So the `kIOReturnNotReady` era is
+over, confirmed from CoreDisplay and not only from the kernel: the ATY pair
+moved the failure from `transactionEnd`'s three gates into
+`executeTransaction`, and the new code propagates the whole way up.
+`Fallback ... submission failed` is **66**, `DisplayPipeState` **66**, and
+**132 = 2 × 66** — exactly 2w3's "Submit runs ~twice per Commit".
+
+Also: `no gamma` **0** (2u6's fix still holds), `bad bits` 4 unchanged, the
+wedge still present (34 `event timeout`, 53 `checkGPUProgress`), and
+`RBFBVBLFires 13200` with `RBFBVBL1Fires` **0** — Apple's handler 1 did not
+fire this boot where boot 191 saw it once. Not attributed.
+
+### 2wc's EXCLUSION OF THE GAMMA CEILING IS WITHDRAWN — it was the wrong table
+
+2wc enumerated `executeTransaction`'s six `kIOReturnUnsupported` sites against
+`dirtyBits 0x3c1` and found one live besides the unconditional one: bit `0x80`,
+
+    be4a271  rax = txn->getPipePostGammaTable()
+    be4a28f  r13 = rax->getTableCount()
+    be4a34a  r12 = 0xe00002c7
+    be4a350  cmpl $0x100, %r13d
+    be4a35e  ja  -> return kIOReturnUnsupported
+
+and then dismissed it by counting the LUT in boot 190's `DisplayPipeState`
+dumps: 71 of **256** entries, 2 of 1024 (67 and 2 in boot 189; 64 and 2 in
+boot 192). **Those dumps are headed `Plane Index: 0`, and their `LUT` is the
+PLANE gamma** — whose dirty bit is `0x4`, which is **CLEAR** in `0x3c1`. The
+gate is on bit `0x80`, the **PIPE post-gamma**, and `DisplayPipeState` never
+prints it. A per-plane number was used to retire a per-pipe line: **rule 33,
+third recorded instance** (2u4's `Plane Index` for a plane count, 2v9's note,
+now this).
+
+### Where the pipe post-gamma's size comes from
+
+`IOAccelDisplayPipeGammaTable2::getTableCount` (`0x14e62a92`) is four
+instructions:
+
+    movq 0x10(%rdi), %rax ; movl (%rax), %eax
+
+— the **first dword of the `IOAccelDisplayPipeGammaTableData` the userspace
+client supplied** (`withGammaTableData` `0x14e62682`,
+`IOAccelDisplayPipeTransaction2::set_pipe_postgamma_table` `0x14e5e7e6`). So
+the count is **CoreDisplay's choice**, not AMD's and not a hardware fact, and
+the only lever this project holds on it is the one capability field that tells
+CoreDisplay how large a table the pipe accepts: our AGDC attribute-`0x711`
+type-2 entry `+0x28`, published as the dictionary key `MaximumSize`
+(2u6/2v5), i.e. `RB_AGDC_GAMMA_CHANNELS`.
+
+Boot 192 measured it live: **`agdc_gamma_elems1 = 1024`**, with
+`agdc_gamma_entries 1`, `agdc_gamma_elems2 0`, `agdc_extcap_answered 15`,
+`agdc_extcap_calls 48`. We are advertising 1024 to a consumer whose own
+accelerator refuses anything above 256.
+
+### The change: `RB_AGDC_GAMMA_CHANNELS` 0x400 → 0x100, plugin `0D1F953A`
+
+One constant in `src/common/rb_agdc.h`. It is **still a substitute** (rule 17
+— Apple reads it from `vt[0x1b8](0xf)` on an `AmdFbDisplayPath` we do not
+have), but unlike 0x400 it is bounded by a **measured fact about the
+consumer** rather than by the size of a table CoreDisplay happened to print.
+It is non-zero, so 2u6's *"plane with no 3-channel gamma table support"* —
+which fired only at **zero** — stays fixed; boot 192 counts it 0 as the
+control.
+
+The hosttest keeps asserting the **literal**, for 2v1's reason (a field
+compared against the macro that wrote it is not a test), and gains the
+consumer's ceiling as a second assertion of its own, so a future raise fails
+on the host rather than on hardware.
+
+`make plugin`: hosttest green, `kmutil libraries` 0 symbols from
+`SystemKernelExtensions.kc`, `grep -c IOGraphicsFamily src/plugin/Info.plist`
+0.
+
+### Said before the boot
+
+- `agdc_gamma_elems1` must read **256**. If it reads 1024 the plugin did not
+  move and nothing else in the capture means anything (rule 15).
+- If the post-gamma ceiling was the live gate, `set_transaction_args ...
+  0xe00002c7` goes to **0** and `RBFBAmtrSets` becomes non-zero — because the
+  only thing past the gamma block in the validate arm is the success return,
+  and `setAttribute` is then reached on the submit arm.
+- If it goes to 0 but `RBFBAmtrSets` stays 0, the transaction validates and
+  CoreDisplay still does not submit; read `Fallback` and `DisplayPipeState`
+  next, not the kernel.
+- If it stays at ~132, the gamma ceiling is excluded *properly* this time and
+  the unconditional `vt[0x190]` gate is back as the live candidate — in which
+  case the next step is not another guess but the **probe**: publish
+  `((uint8_t *)hwd->0x40)[fbIdx*0xd0 + 1]` and the whole dword beside it, so
+  the bit is read instead of reasoned about. 2w7 and 2wa were both settled
+  that way and 2wc was not.
+- **The picture stays wrong either way** — nothing is written to DCN, and
+  `-rbgpufbaty` still publishes a 16 MB offset while OTG0 scans offset 0. The
+  user reported boot 191 as the Apple logo and progress bar with the OS live
+  underneath over SSH, which is what a never-composited panel looks like.
+
+### Next
+
+One armed boot of plugin **`0D1F953A`** — **installed into the OpenCore EFI**
+(`sudo tools/efi.sh install`; rule 15, the plugin's own path) — with fbkext
+`6F1EB613` already in `/Library/Extensions` and unchanged. No boot-arg change.
