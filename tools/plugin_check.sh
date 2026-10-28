@@ -132,7 +132,25 @@ rb_display_log() {
     # recovered afterwards: they must be captured in the armed boot.
     /usr/bin/log show --last boot --info --style compact --predicate "$1" 2>"$2"
 }
-dl_pred='(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR eventMessage CONTAINS "checkGPUProgress"'
+# 2w4: THE KERNEL HALF OF THIS PREDICATE WAS ONE FUNCTION NAME.
+# `eventMessage CONTAINS "checkGPUProgress"` is a literal, so every other
+# IOAcceleratorFamily2 and AMDRadeonX6000 kernel message was filtered out -
+# and boot 185's own capture was read as though their absence meant something
+# (rule 26, and this is the second time in two milestones that a capture's
+# own filter produced the silence). Re-querying boot 185's window by SENDER
+# instead recovered 213 lines the capture never had, including:
+#   - IOAccelDisplayPipe::display_change_handler logging EVERY framebuffer
+#     notification it receives, with the kIOFBNotify* event number, at
+#     os_log type 0x11 = FAULT. That is the ground truth for which
+#     notifications our framebuffer actually delivers.
+#   - IOAccelSurface::set_id_mode "Surface mode contains bad bits" x4.
+#   - the whole GPU-restart machinery: "channel 52 GFX event timeout;
+#     pending stamps [1..289]", "channel 12 SDMA0_PAGE event timeout",
+#     "channel N is not hung, keep running", "no channel associated with
+#     stamp_idx N" - repeating every ~5 s. THE WEDGE.
+# FAULT-level messages persist across a reboot, which is the only reason
+# boot 185 was recoverable at all; INFO ones do not (2w2). Capture by sender.
+dl_pred='(process == "WindowServer" AND (subsystem == "com.apple.CoreDisplay" OR subsystem == "com.apple.SkyLight" OR senderImagePath CONTAINS "IOPresentment")) OR subsystem == "com.apple.GPUWrangler" OR senderImagePath CONTAINS "IOAcceleratorFamily2" OR senderImagePath CONTAINS "AMDRadeonX6000" OR eventMessage CONTAINS "checkGPUProgress"'
 dl_ctl_pred='process == "WindowServer"'
 dl_tries=0
 while : ; do
@@ -147,7 +165,18 @@ while : ; do
     sleep 15
 done
 dl_i="$(grep -c '\[INFO\]' "$out/display-log.txt" 2>/dev/null || echo 0)"
+dl_k="$(grep -c 'kernel\[' "$out/display-log.txt" 2>/dev/null || echo 0)"
+dl_e="$(grep -c 'display_change_handler' "$out/display-log.txt" 2>/dev/null || echo 0)"
 echo "  $dl_n display log lines saved (WindowServer control: $dl_c lines, [INFO] lines: $dl_i)"
+# 2w4: the kernel half has its own control. display_change_handler logs once
+# per framebuffer notification received, unconditionally, so zero of those in
+# a boot where the desktop came up means the predicate is wrong again - not
+# that our framebuffer sent nothing.
+echo "  kernel lines: $dl_k (display_change_handler: $dl_e)"
+if [ "$dl_k" -eq 0 ] && [ "$dl_n" -gt 0 ]; then
+    echo "  WARNING: ZERO kernel lines. The sender clauses (2w4) are not matching;"
+    echo "           every IOAcceleratorFamily2 / AMDRadeonX6000 FAULT is missing."
+fi
 if [ "$dl_n" -gt 0 ] && [ "$dl_i" -eq 0 ]; then
     echo "  WARNING: ZERO [INFO] lines. --info is supposed to include them (2w2);"
     echo "           without them Submit's 'Failed to submit transaction: %s' is invisible."
