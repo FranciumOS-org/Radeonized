@@ -362,6 +362,77 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 194: THE SURFACE ADDRESS IS MEASURED, AND IT IS A LOW/HIGH PAIR
+(2wg).** `rbgpu-boot` **194**, `armed=1`, both samples all-open (`gate=0
+enabled=1 active=1 defer=0 vram=1 vmap=1`), `diag_used` 663/768, and the
+experiment's own arm check passed: **`agdc_gamma_elems1 = 0x100` = 256**.
+Only **6 files** (rebooted early again). Rule 15 met without `kexts.txt`:
+`RBFBAmtrFlip*` exists and only `A454F066` publishes it. **Rule 8 met by
+differential**: `RBFBCrumbBoot` is 192 in the boot-193 capture and 193 in this
+one - it lags the nonce by exactly one in *both*, because the fbkext reads
+`rbgpu-boot` before the peer increments it.
+**A GREP READ THE WRONG BOOT'S TABLE.** The first pass over `nvram.txt` gave
+`armed=0 agdc_oneshot=2 agdc_error=3 diag_used=0xa3`, all of it from
+**`rbgpu-diag-prev`** - the previous boot's table, under a key whose name is a
+superstring of the one matched. It read exactly like an unarmed boot and would
+have thrown the measurement away; caught only because `agdc_gamma_elems1` was
+published at all, which an unarmed bridge cannot do. **Rule 26: a key name can
+be a PREFIX of another key's name, and a grep with no line structure crosses
+the boundary.**
+**THE STRUCT IS CONFIRMED A THIRD TIME, LIVE.** `RBFBAmtrPtr
+0xffffff953cdba410`, `RBFBAmtrFlipPtr 0xffffff953cdbd6b0`, difference
+**0x32a0** = `0x36b0 - 0x410`, both giving pipe `0xffffff953cdba000` two ways.
+So `txn->0x10 == pipe + 0x36b0` is measured in a second boot at a different
+kernel address.
+**THE `_AMD_PIPE_FLIP`, MEASURED:**
+
+    +0x00 u32 6          pixel format      +0x04 u8 0   rotation
+    +0x05 u8  2                            +0x08 u32 0x1002a000  ADDRESS LOW
+    +0x0c u32 0x000000f4 ADDRESS HIGH      +0x14 u32 1920  width/pitch
+    +0x18 u32 4          bytes/pixel       +0x28 f32 1920.0  width
+    +0x2c f32 1080.0     height            +0x30 u32 4
+    +0x38 u32 2          +0x3c u32 4       +0x40..+0x21f  ALL ZERO
+
+**`+0x28`/`+0x2c` decoding as exactly `1920.0f`/`1080.0f` is the control that
+proves the struct is real** - two IEEE floats matching the panel's measured
+mode at an offset nothing predicted them at - and `+0x14 = 1920`, `+0x18 = 4`
+agree with `ax0_w`/`ax0_bpp` from a separate instrument in the same boot.
+**THE SURFACE ADDRESS IS `0xf4_1002_a000`** - the measured carve-out MC base is
+`0xF4_0000_0000`, so **0x1002a000 = 256.164 MB** into VRAM. An **MC** address,
+not GPUVM (`0xFF_BF..`), which is what HUBP wants. **And it is stored as a
+LOW/HIGH PAIR** at `+0x08`/`+0x0c` - exactly the layout of DCN's
+`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS` and `..._HIGH`. No other field in the
+struct is split that way, which is strong independent corroboration of which
+field it is.
+**2wf's PREDICTION WAS WRONG AND THE INSTRUMENT ABSORBED IT.**
+`RBFBAmtrFlipA58` reads **0**. 2wf named `flip->0x58` a **candidate, not a
+result**, and published the raw blob beside it so a wrong guess would cost
+nothing - it cost nothing. The `0xbe885a4` store is on a secondary/cursor
+branch that did not run, consistent with `+0x40..0x21f` all zero and with
+`executeTransaction` passing `ecx = 0` for the second `IOAccelResource2`.
+`Fmt = 6` **is** in the predicted `{0,6,7,8,9}` and `Rot = 0` is small, so two
+of three landed. Rule 35 working as intended.
+**WHAT THIS BOOT DOES NOT SAY**: no display log and no `ioreg`, so every 2we
+regression control (`set_transaction_args … 0x2c7`, `Failed to submit`,
+`Fallback`, `DisplayPipeState`, `no gamma`, the wedge, `display_change_handler`
+as the control) is **uncheckable and its absence is NOT a result** (rules
+14/36). Positive evidence the chain still runs: `RBFBAmtrSets` **13 -> 17**,
+`RBFBAmtrGets` 29 -> 37. `RBFBVBLFires` 23098, `RBFBVBL1Fires` still 0.
+**THE ADDRESS IS PER-FLIP, NOT A CONSTANT** - said before the write is
+attempted. We snapshot only the FIRST transaction and 17 arrived; a compositor
+swap chain hands a different surface each flip. So pointing the scanout at
+`0xf4_1002_a000` once would show **one stale frame**. The write must happen
+**per transaction**, and `setAttribute('amtr', …)` is exactly the hook called
+with each one. That changes the next step from "write a constant" to "write
+the address this transaction carries". Also hold separate: the surface is at
+256.164 MB while `ATY,fb_offset` publishes **16 MB** (2w9's deliberately
+untruthful value, since the gate rejects 0) - the ATY offset only has to be
+non-zero to open `initFramebufferResource`. **Do not try to reconcile them.**
+**NEXT**: the first write this project has ever made to the display engine,
+its own milestone and its own boot-arg - take `flip->0x08`/`+0x0c` out of each
+transaction and program the DCN 3.1.2 `HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS`
+pair, with a readback and a restore path.
+
 **THE TRANSACTION IS READ END TO END, AND THE ADDRESS IS ALREADY IN IT
 (2wf).** Static, no boot. `handleDisplayPipeTransaction` (`AMDFramebuffer`
 `0x2b4df0`) is compiled **unoptimized**, so it reads almost like source.
@@ -1362,7 +1433,12 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     return as `leal (%rax,%rax,4); addl $0xe00002c2`, and five literal sites
     were enumerated while the live one was invisible (2wc); **a `sort -u` is
     not a count** - de-duplicating the LUT sizes in a capture showed 1024 and
-    256 and read as "it sends 1024" when 71 of 73 were 256 (2wc); and **when
+    256 and read as "it sends 1024" when 71 of 73 were 256 (2wc); **a KEY NAME CAN BE A PREFIX OF ANOTHER KEY'S NAME** - a
+    flat grep over `nvram.txt` for `rbgpu-diag` matched **`rbgpu-diag-prev`**,
+    the PREVIOUS boot's table, and reported `armed=0 agdc_oneshot=2
+    agdc_error=3`, which reads exactly like an unarmed boot and nearly threw
+    away boot 194 (2wg); anchor the match or read the value, never the file;
+    and **when
     xrefing a string, xref the string's START** (find the preceding NUL first)
     — a substring's address can never be referenced.
     [2lw, 2rk, 2r4, 2s0, 2s5, 2sn, 2so, 2sr, 2v8]
