@@ -360,18 +360,26 @@ static int lattice_on(id<MTLDevice> dev, int samples) {
  *
  * So run this in one process and --bench in another, and compare the second
  * one's median against the 176 ms it reads on an idle machine. */
-static int busy_on(id<MTLDevice> dev, double secs) {
+static int busy_on(id<MTLDevice> dev, double secs, uint32_t heavy, int depth) {
     NSError *err = nil;
     id<MTLCommandQueue> q = [dev newCommandQueue];
     id<MTLLibrary> lib = [dev newLibraryWithSource:@(kSrc) options:nil error:&err];
     if (!q || !lib) { printf("  FAIL: no queue or library\n"); return 1; }
     id<MTLComputePipelineState> ps =
-        [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill"]
-                                           error:&err];
+        [dev newComputePipelineStateWithFunction:
+                 [lib newFunctionWithName:heavy ? @"spin" : @"fill"] error:&err];
     id<MTLBuffer> buf = [dev newBufferWithLength:N * sizeof(uint32_t)
                                          options:MTLResourceStorageModeShared];
     if (!ps || !buf) { printf("  FAIL: no pipeline or buffer\n"); return 1; }
-    printf("  busy: keeping work in flight for %.1f s\n", secs);
+    /* 2wv: the earlier --busy could not actually load the GPU, because the
+     * load generator is throttled by the very tick it is trying to defeat:
+     * 46 light buffers a second is 0.6 ms of GPU work per second, i.e. idle.
+     * With a heavy kernel and a deep pipeline one tick releases `depth`
+     * buffers that then run back to back, so depth * gpu_time of CONTINUOUS
+     * work per tick - enough to exceed the tick itself and keep the chip
+     * genuinely busy. That is the only way to test whether the slow state is
+     * an idle state. */
+    printf("  busy: %.1f s, depth %d, heavy %u\n", secs, depth, heavy);
     fflush(stdout);
     double t0 = now_s();
     unsigned long long n = 0;
@@ -380,11 +388,12 @@ static int busy_on(id<MTLDevice> dev, double secs) {
     while (now_s() - t0 < secs) {
         @autoreleasepool {
             id<MTLCommandBuffer> last = nil;
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < depth; i++) {
                 id<MTLCommandBuffer> cb = [q commandBuffer];
                 id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
                 [enc setComputePipelineState:ps];
                 [enc setBuffer:buf offset:0 atIndex:0];
+                if (heavy) { [enc setBytes:&heavy length:sizeof(heavy) atIndex:1]; }
                 [enc dispatchThreads:MTLSizeMake(N, 1, 1)
                threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
                 [enc endEncoding];
@@ -806,6 +815,7 @@ int main(int argc, const char **argv) {
         bool wantBusy = false;
         double busySecs = 20;
         uint32_t heavy = 0;
+        int depth = 8;
         bool wantQueues = false;
         int nq = 6;
         bool wantEngines = false;
@@ -836,6 +846,13 @@ int main(int argc, const char **argv) {
                     long n = atol(argv[++i]);
                     if (n >= 1 && n <= 10000000) { heavy = (uint32_t)n; }
                     else { printf("--heavy N must be 1..10000000\n"); }
+                }
+            }
+            else if (!strcmp(argv[i], "--depth")) {
+                if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                    int n = atoi(argv[++i]);
+                    if (n >= 1 && n <= 256) { depth = n; }
+                    else { printf("--depth N must be 1..256; using %d\n", depth); }
                 }
             }
             else if (!strcmp(argv[i], "--busy")) {
@@ -920,7 +937,7 @@ int main(int argc, const char **argv) {
             if (wantBench)    { rc |= bench_on(d, iters, heavy); }
             if (wantPhase)    { rc |= phase_on(d, reps); }
             if (wantLattice)  { rc |= lattice_on(d, samples); }
-            if (wantBusy)     { rc |= busy_on(d, busySecs); }
+            if (wantBusy)     { rc |= busy_on(d, busySecs, heavy, depth); }
             if (wantQueues)   { rc |= queues_on(d, nq); }
             if (wantEngines)  { rc |= engines_on(d, engIters); }
         }

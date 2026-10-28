@@ -44500,3 +44500,102 @@ then `userQueueSwitch`) are next. Either way the counters are cheap, read-only,
 and the question is settled in one boot. No framebuffer, no display, no AGDC:
 `rbgpu-fb` stays **0** (rule 38 — the fb takes the panel and would freeze it
 with nothing to show).
+
+## 2ww — BOOT 199: THE MACHINE DID 632 BUFFERS/s. THE 175 ms IS A STATE, NOT A PROPERTY.
+
+Rule 8/15/33/34 first: `rbgpu-boot` **199**, `rbgpu-arm` consumed, plugin
+**`0EE32DFA`** = `build/out` exactly, `kern.boottime` **18:13:09**. `rbgpu-fb`
+reads **`0`**, so the framebuffer declined and the display half is not in this
+at all - though note `-rbgpuownfb` and the whole `-rbgpufb*` family ARE in
+boot-args and `com.rembrandtgpu.fb` (`7A6A56A9`) is loaded from the AuxKC;
+loading is not arming.
+
+**THE USER'S OWN RUN, EARLY IN BOOT 199:**
+
+    SERIAL median: wall 1.582 ms  gpu 0.013 ms  -> 632.0 buffers/s
+    SPLIT median: commit -> GPUstart 1.522 ms, GPUend -> return 0.037 ms
+    SCHEDULED median: 0.082 ms
+    PIPELINED: 120 buffers in 0.050 s -> 2377.6 buffers/s
+    first->last GPUstart spread = 31.776 ms over 120 buffers
+
+**MINE, SAME BOOT, A FEW MINUTES LATER:**
+
+    SERIAL median: wall 175.728 ms  gpu 0.014 ms  -> 5.7 buffers/s
+    SPLIT median: commit -> GPUstart 175.671 ms, GPUend -> return 0.043 ms
+
+Same boot, same binary, same `gpu` time to one microsecond - so the shader
+clock is identical and this is not a faster chip. **632 buffers/s is 4.4x what
+144 Hz needs.** The hardware, the driver and the completion path can all do it.
+**So every reading in 2ws/2wt/2wu was taken inside one state of the machine,
+and "the quantum has to go" was describing a state rather than a property.**
+The characterisation (tick, per-client phase, T = 175.77 ms, R = 0.966) stands
+as a description of the slow state; nothing in it was ever a property of the
+hardware, and 2ws should not have written it as one from a single boot.
+
+**WHAT `rbgpu-sched` SAYS, AND IT KILLS THE FIRST PREDICTION.** The flush runs
+at the phase marks (+12/+100/+160 s), so this note covers the **fast** window:
+
+    b=199 hk=1 sub=12191 adv=46457 smax=589 gmin=0 gmean=3412 gmax=6007470
+    h=876,38808,6177,13,14,16,38,81,111,68,65,52,54,83
+
+`advance()` ran **46 457 times against 12 191 submits** - four times more often
+than work was submitted - with mean gap **3.4 ms** and **38 808 of the gaps
+under 128 us**. 2wv predicted "advance() at ~5.7/s with submitCommandBuffer far
+higher means advance() IS the release". It is the other branch: `advance()` runs
+constantly and is **not** a 5.7 Hz gate. What is not yet known is its rate in
+the SLOW state, because the note is only written at three fixed phases - the
+same mistake 2wl had to fix for the crumb, in a different file. **A counter that
+flushes at fixed marks cannot compare two regimes.**
+
+**THREE CANDIDATES KILLED, ALL FREE, ALL IN THE SLOW STATE.**
+1. *The wedge.* Boot 199 wedged on its own at **+19 s** (`channel 10
+   ComputeUQ7`, `channel 53 SDMA0_PAGE`, `channel 52 GFX`; 31 `event timeout`,
+   167 `GPURestart` within boot 199, separated from boot 198's by the
+   timestamp - rule 28, the first `--last 70m` window spanned both boots).
+   Churn ran 18:13:28-18:15:41 and the fast reading sits inside it, the slow
+   ones after. Inducing it deliberately with `--queues 4` and benching through
+   it: **180.0 / 178.7 / 179.6 ms.** Wedge churn does not restore the fast
+   state and does not cause the slow one.
+2. *Load.* A keep-alive of 64 light-ish buffers deep gave the keep-alive
+   process **354.9 buffers/s** and a concurrent client **182.7 ms**; at depth
+   128, **366.4/s** and **179.3 ms**. 354.9/64 = **5.55 batches/s** - the tick
+   is untouched, it simply released 64 buffers at once.
+3. *Saturation.* 64 x 5.9 ms = 378 ms of continuous GPU work per batch ran at
+   **149.2 buffers/s = 2.33 batches/s (429 ms)**, and a concurrent client read
+   **430.932 ms - exactly that batch period**. So releases **serialise across
+   clients**. An intermediate reading that the release "follows the work with
+   ~50 ms overhead" was over-fitted to `429 - 378` and is **withdrawn**: 429 is
+   not a multiple of 175 either, and one number is not a model.
+
+**AND 2ws's `--busy` TEST WAS INVALID AS RUN.** It concluded load-independence
+from a generator producing 46 light buffers/s = **0.6 ms of GPU work per
+second**, i.e. an idle GPU. The conclusion survives - load really does not
+matter, now shown three ways - but it survives by luck. **A load generator
+throttled by the thing it is testing measures nothing**, and `--busy` now takes
+`--heavy` and `--depth` so it can actually saturate.
+
+**NOT EVIDENCE (rule 14).** `PerformanceStatistics` on the accelerator carries
+`Core Clock(MHz)=0`, `Memory Clock(MHz)=0`, `Total Power(W)=0`,
+`Temperature(C)=0` - those fields are **not populated for this chip**, so they
+say nothing about clocks either way, and `Device Utilization % = 1` beside four
+dead siblings is not worth a reading. Also: the plugin's own `rbgpu_log` is
+**not visible in the unified log** live (predicate matched 2 lines, both my own
+command), so rule 31's lesson covers the plugin too and a live readout needs
+NVRAM or the registry, not a log line.
+
+**THE ONE NUMBER THAT MAKES THE NEXT EXPERIMENT DESIGNABLE** is when the flip
+happens. The fast reading is somewhere inside the first ~2 minutes and every
+slow reading is from +200 s on; the plugin's probe phases are +12/+100/+160 s,
+which fits suspiciously well and makes **our own probes a suspect** (rule 16) -
+`-rbgpuringprobe`, `-rbgpuringdump`, `-rbgpumcprobe` and `-rbgpuaccelprobe` are
+all in boot-args. Equally consistent: anything else with a ~3 minute
+constant. **Not established, and not to be written either way.**
+
+**`tools/ratesweep.sh`** samples `--bench 6` on a clock and prints each median
+against **seconds since boot**, labelling FAST (<20 ms) or slow - 20 ms is far
+from both observed states, so the label cannot straddle them. Reads only; no
+kext, no arming, no NVRAM writes; run it as the first thing in a boot. Its own
+smoke test caught a bug in it immediately: `sed 's/.*sec = \([0-9]*\).*/\1/p'`
+on `kern.boottime` is **greedy through to "usec = "** and captured the
+microseconds field, printing boot+1792667083 s. Rule 16 again, and rule 26 -
+the instrument was wrong in a way that still produced plausible-looking rows.
