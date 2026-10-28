@@ -42699,3 +42699,157 @@ on the host rather than on hardware.
 One armed boot of plugin **`0D1F953A`** — **installed into the OpenCore EFI**
 (`sudo tools/efi.sh install`; rule 15, the plugin's own path) — with fbkext
 `6F1EB613` already in `/Library/Extensions` and unchanged. No boot-arg change.
+
+## 2we — BOOT 193: THE DISPLAY PIPE ACCEPTS TRANSACTIONS. EVERY FAILURE IN THE CHAIN IS GONE.
+
+Capture `logs/20261028-101029-plugin`, `rbgpu-boot` **193**, armed
+(`armed 1`, `agdc_oneshot 0`, `iop_oneshot 0`, `agdc_error 0`,
+`agdc_say "PUBLISHED"`), `diag_used` **664**/768, 20 files, complete.
+
+**Rule 15 on both kexts**: plugin **`0D1F953A`** (new), fb **`6F1EB613`**
+(unchanged). The experiment's own arm check: **`agdc_gamma_elems1 = 256`**,
+`agdc_gamma_entries 1`, `agdc_extcap_answered 15`, `agdc_extcap_calls 48`.
+
+### The whole failure cascade is at zero
+
+| | 189 | 190 | 191 | 192 | **193** |
+|---|---|---|---|---|---|
+| `display_change_handler` (control) | 26 | 26 | 26 | 26 | **26** |
+| `set_transaction_args … 0xe00002c7` | — | — | 122 | 132 | **0** |
+| `transaction ID (N) generated error` | — | — | 122 | 132 | **0** |
+| `Failed to submit transaction` | 152* | — | — | 134 | **0** |
+| `Fallback … submission failed` | 69 | 73 | 3 | 66 | **0** |
+| `DisplayPipeState` | 69 | 73 | — | 66 | **0** |
+| `Attempting to get 3-channel linearization …` | — | — | — | 134 | **3** |
+
+(*boot 186's count; 189's log was not captured at INFO.) The control is
+identical in all five boots, so the zeros are zeros and not a dropped
+predicate (rule 36). `IOReturn: 0x` has **no matches at all** — there is no
+longer a failing submit to carry a code. 2v9 proved the dumps *are* the
+failure's own diagnostic, so `DisplayPipeState` 0 follows from `Fallback` 0
+rather than being a separate reading.
+
+`Metal compositor activated` ×4 from SkyLight. `no gamma` 0 — 2u6's fix holds
+at 256, as predicted.
+
+### Transactions reach OUR framebuffer
+
+    RBFBAmtrArmed    True        RBFBAmtrSets      13      (was 0)
+    RBFBAmtrGets     29  (was 3) RBFBAmtrSnapped   True    (was False)
+    RBFBAmtrRefused  0           RBFBAmtrPtr  0xffffff916784a410
+
+**`setAttribute('amtr', &pipe->0x410)` is being called.** That call lives past
+the `bool` arm of `executeTransaction`, i.e. on `submitTransaction`'s side, and
+in boot 192 it was reached **zero** times. So the submit path runs now, and
+2wc's `handleDisplayPipeTransaction` shape is the live one: Apple's accelerator
+hands the cooked transaction to the framebuffer and we answer it.
+
+### Both changes were load-bearing, and that is now established
+
+Boot 192 (fbkext with `'amtr'`, `MaximumSize` still 1024): refusals 132,
+sets 0.
+Boot 193 (same fbkext, `MaximumSize` 256): refusals 0, sets 13.
+
+Boot 192 could not separate "gate 1 opened and gate 2 met" from "gate 1 was
+never shut" (2wd). Boot 193 settles it in the only direction consistent with
+both: **the `'amtr'` answer was necessary and not sufficient.** It cannot have
+been sufficient (192 still refused everything) and it cannot have been
+unnecessary (the only path to `setAttribute` is through
+`executeTransaction`'s first test, which `vt[0x190]` gates, and sets moved
+0 → 13 with no other change to that code). Two sequential gates, both ours,
+both now open.
+
+### The transaction struct, confirmed field for field from the hardware
+
+`RBFBAmtrPtr` is `0xffffff916784a410`, so the pipe is at
+`0xffffff916784a000` and the pointer is **exactly `pipe + 0x410`** — 2wc's
+reading of the argument, confirmed from a live pointer rather than from the
+disassembly. `RBFBAmtrSnap`, 0x80 bytes from there:
+
+| off | value | field | self-reference |
+|---|---|---|---|
+| +0x00 | `0x75` | `0x410` flag word | |
+| +0x08 | `0x1` | `0x418` mode word | |
+| +0x10 | `0xffffff916784d6b0` | `0x420` plane state | **= pipe + 0x36b0** |
+| +0x18 | 0 | `0x428` | |
+| +0x20 | `0xffffff916784d660` | `0x430` | **= pipe + 0x3660** |
+| +0x28 | 0 | `0x438` | |
+| +0x30 | `0xffffff916784d680` | `0x440` colour matrix | **= pipe + 0x3680** |
+| +0x38 | `0xffffff916784c650` | `0x450` | **= pipe + 0x2650** |
+| +0x40 | `0xffffff916784d8d0` | `0x460` | **= pipe + 0x38d0** |
+| +0x48…+0x7f | 0 | | |
+
+Every pointer is one of the `leaq 0xNNNN(%rbx)` addresses `executeTransaction`
+loads — `0x36b0`, `0x3660`, `0x3680`, `0x2650`, `0x38d0`. The struct is a
+table of pointers into the pipe object's own tail, and the snapshot agrees
+with the disassembly at every one of them. That is five independent controls
+on 2wc's field map in a single reading.
+
+**And the flag word decomposes exactly as `dirtyBits 0x3c1` predicts** on the
+submit arm, where every block runs:
+
+    0x001 SET    plane resource          (0xbe49e02)
+    0x002 clear  plane gamma             (0xbe49f01)   dirty bit 0x4   clear
+    0x004 SET    plane dst rect          (0xbe49fc4)
+    0x008 clear  pipe pre-gamma          (0xbe4a0e2)   dirty bit 0x20  clear
+    0x010 SET    colour matrix           (0xbe4a1b8)   dirty bit 0x40  set
+    0x020 SET    PIPE POST-GAMMA         (0xbe4a2b2)   dirty bit 0x80  set
+    0x040 SET    pre-CSC linearization   (0xbe4a4c1)   dirty bit 0x200 set
+    0x100 clear  postCSC gamma VID       (0xbe4a3bb)   dirty bit 0x400 clear
+
+**`0x20` is set**, and `0xbe4a2b2` is the instruction immediately after the
+ceiling test that was refusing every transaction four hours ago. The block
+that returned `kIOReturnUnsupported` now completes and sets its flag.
+
+### THE WEDGE IS AN INDEPENDENT SECOND DEFECT
+
+First `checkGPUProgress` at **10:07:57.763**, fifteen seconds after boot, and
+running the whole 2 m 48 s capture: 63 `Signaling hardware error`, 63
+`GPURestartSignaled`/`Enqueued`/`Dequeued`, 36 `channel N is not hung, keep
+running`, 36 `no channel associated with stamp_idx N`, 36 `GPURestartSkipped`,
+26 `SDMA0_PAGE event timeout`, 9 `GFX event timeout`, 1 `VMPT event timeout`,
+3 `GPURestartDeferred`.
+
+2w4 recorded the wedge starting **six seconds after** the first submit failure
+and could not say whether it was a consequence. **Boot 193 answers it**: there
+are no submit failures at all and the wedge is unchanged in shape and slightly
+larger in count. So it is **not caused by the display submit path** — a clean
+differential, n=1 but the right shape. It is a stamp-retirement failure: work
+is submitted, never retires, the hang check says not hung, and the restart
+cannot find the channel.
+
+`IOAccelSurface::set_id_mode: Surface mode contains bad bits` ×4, still
+unexplained, unchanged across five boots.
+
+### New shapes, not attributed
+
+`Setting main display 0x… offline` ×7 and `Setting offline display 0x… main
+in CGXConstructVirtualFramebuffer` ×7, both `[ERROR]`. They do not appear in
+boot 192's log. Whether they are part of the normal mode-set sequence that the
+earlier boots never reached, or a new defect, is **not established**.
+`RBFBVBL1Fires` is **0** with `RBFBVBLFires 21218`, where boot 191 saw Apple's
+handler fire once — also not attributed, and now less interesting, because the
+transactions are not going through the VBL ring at all but straight to
+`setAttribute`.
+
+### What is NOT fixed, and why the screen is still wrong
+
+Nothing is written to the display engine. `setAttribute('amtr', …)` returns
+`kIOReturnSuccess` without doing the work, so the compositor believes thirteen
+transactions landed and none of them did; `-rbgpufbaty` still publishes a 16 MB
+offset while OTG0 scans VRAM offset 0. **The pipe is accepted; the picture is
+not drawn.** That is exactly the state 2w9 said to aim for, reached.
+
+### Next
+
+`handleDisplayPipeTransaction` (`AMDFramebuffer` `0x2b4df0`) read against
+`RBFBAmtrSnap`'s five pointers, to learn what each sub-struct holds — above
+all the plane state at `pipe + 0x36b0`, which carries the surface the
+compositor rendered into. That address is what the DCN 3.1.2
+`HUBP*_DCSURF_PRIMARY_SURFACE_ADDRESS*` pair has to be pointed at, and taking
+it out of the transaction is strictly better than inventing it. **No boot
+needed.**
+
+Then, separately and on its own risk: the first write this kext has ever made
+to the display engine. And the wedge, which is now the only other defect left
+and is independent of all of this.
