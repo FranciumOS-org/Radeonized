@@ -28,6 +28,10 @@ void rbgpu_heartbeat_start(void);
 // 2fw: two delayed samples of the progress stage, so one boot says whether
 // the chain is stopped or crawling without the user running anything.
 void rbgpu_progwatch_start(void);
+// 2w3: three delayed READS of the three bits that make
+// IOAccelDisplayPipeUserClient2::transactionEnd answer kIOReturnNotReady -
+// accel->0xc78 bit 1, pipe->0x282 and pipe->0x298. `-rbgpuaccelprobe`.
+void rbgpu_accelprobe_start(void);
 extern volatile uint32_t g_rb_prog_stage;
 extern volatile uint32_t g_rb_step;   // 2fz: lock-free, log-free position marker
 #define RB_STEP(n) do { g_rb_step = (n); } while (0)

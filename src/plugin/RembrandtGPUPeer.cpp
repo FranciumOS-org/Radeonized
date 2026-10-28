@@ -751,6 +751,14 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
+    // 2w3: the three bits behind kIOReturnNotReady, at the very top because
+    // every boot that carries them wedges and the note truncates at 512.
+    // `ax<i>_gate` is the whole verdict in one digit (0 all open, 1 accel not
+    // enabled, 2 WSAA defer, 3 pipe not active); the sentences are further
+    // down and are allowed to fall off the end.
+    "ax0_gate", "ax0_enabled", "ax0_active", "ax0_defer",
+    "ax0_vram", "ax0_vmap", "ax0_fbs", "ax0_n",
+    "ax2_gate", "ax2_enabled", "ax2_active", "ax2_defer",
     // 2qw: first, because they say whether every OTHER absence in the capture
     // means anything. diag_used == diag_max means keys were dropped.
     "diag_max", "diag_used",
@@ -2280,3 +2288,179 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
     return super::callPlatformFunction(functionName, waitForFunction, p1, p2, p3, p4);
 }
 
+
+// ---------------------------------------------------------------------------
+// 2w3: THE THREE BITS THAT DECIDE `transactionEnd`.
+//
+// Boot 185 named the failure at last: `IOPRESENTMENT_METHOD_FAILURE:
+// IOReturn: 0x2d8` = kIOReturnNotReady, 118 times, from
+// `IOAccelDisplayPipeUserClient2::transactionEnd` (IOAcceleratorFamily2
+// 0x14e64620). Exactly three conditions produce that code there:
+//
+//     (accel->0xc78 & 0x2) == 0   the accelerator-enabled bit
+//     pipe->0x282 != 0            the WSAA defer flag
+//     pipe->0x298 == 0            IOAccelDisplayPipe::isActive() false
+//
+// All three live in Apple's own kernel objects at offsets taken from the
+// accessors rather than guessed: `getFramebufferCount` reads machine+0x108,
+// `getDisplayPipe` reads machine+0x88+8*i, `isActive` reads pipe+0x298, and
+// `find_vram_descriptor` reaches the machine through accel+0x378.
+//
+// This is a READ. No hooks, no writes, no vtable work: find the accelerator
+// by class, check its OSMetaClass size is large enough to contain the
+// offsets we are about to touch (rule 19 - and refuse, loudly, when it is
+// not), then publish the bytes. One armed boot says which gate is shut.
+//
+// Rule 14: one key per sample, never a last-wins key, because the whole
+// question is whether the bit is clear the WHOLE time or only early.
+// ---------------------------------------------------------------------------
+
+#define RB_AX_FLAGS_OFF     0xc78u   // IOGraphicsAccelerator2 flags; bit 1 = enabled
+#define RB_AX_VRAMDESC_OFF  0x180u   // getVRAMRange() result, or 0 if its map failed
+#define RB_AX_VRAMMAP_OFF   0x188u
+#define RB_AX_MACHINE_OFF   0x378u   // IOAccelDisplayMachine *
+#define RB_AX_MIN_SIZE      0xca0u
+#define RB_DM_COUNT_OFF     0x108u   // getFramebufferCount()
+#define RB_DM_PIPES_OFF     0x088u   // getDisplayPipe(i)
+#define RB_DM_ACCEL_OFF     0x128u
+#define RB_DM_MIN_SIZE      0x140u
+#define RB_DP_ACTIVE_OFF    0x298u   // isActive()
+#define RB_DP_DEFER_OFF     0x282u   // wsaa defer
+#define RB_DP_280_OFF       0x280u
+#define RB_DP_299_OFF       0x299u
+#define RB_DP_MIN_SIZE      0x2a0u
+
+static thread_call_t g_rbgpuAxCalls[3];
+static const uint32_t kRbgpuAxDelaysMs[3] = { 25000, 45000, 75000 };
+static volatile uint32_t g_rbgpuAxSeq;
+
+// A kext symbol floor is the WRONG yardstick for a kalloc'd object (rule 19);
+// these are OSObjects, so the kernel's own base is the right one.
+static bool rbgpu_ax_plausible(const void *p) {
+    return reinterpret_cast<uintptr_t>(p) >= 0xffffff8000000000ULL;
+}
+
+static void rbgpu_ax_action(thread_call_param_t p0, thread_call_param_t) {
+    const unsigned idx = static_cast<unsigned>(reinterpret_cast<uintptr_t>(p0));
+    char k[48];
+    #define RB_AXKEY(suffix) (snprintf(k, sizeof(k), "ax%u_" suffix, idx), k)
+
+    OSDictionary *m = IOService::serviceMatching("IOGraphicsAccelerator2");
+    if (!m) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "no matching dictionary");
+        return;
+    }
+    OSIterator *it = IOService::getMatchingServices(m);
+    m->release();
+    if (!it) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "getMatchingServices NULL");
+        return;
+    }
+    IOService *accel = OSDynamicCast(IOService, it->getNextObject());
+    uint32_t n = accel ? 1 : 0;
+    while (it->getNextObject()) n++;
+    it->release();
+    rbgpu_diag_set_num(RB_AXKEY("n"), n);
+    if (!accel) {
+        // Rule 14: a silent return and an absent key look identical.
+        rbgpu_diag_set_str(RB_AXKEY("say"), "no IOGraphicsAccelerator2 yet");
+        return;
+    }
+
+    const OSMetaClass *mc = accel->getMetaClass();
+    const unsigned sz = mc ? static_cast<unsigned>(mc->getClassSize()) : 0;
+    rbgpu_diag_set_num(RB_AXKEY("size"), sz);
+    if (sz < RB_AX_MIN_SIZE) {
+        // The offsets came from a disassembly of THIS machine's kext; a class
+        // too small to hold them means the read would be off the end, so
+        // refuse and say what was refused rather than publishing garbage.
+        rbgpu_diag_set_str(RB_AXKEY("say"), "accel too small - REFUSED");
+        return;
+    }
+    const uint8_t *a = reinterpret_cast<const uint8_t *>(accel);
+    const uint32_t flags = *reinterpret_cast<const uint32_t *>(a + RB_AX_FLAGS_OFF);
+    const void *vram = *reinterpret_cast<void *const *>(a + RB_AX_VRAMDESC_OFF);
+    const void *vmap = *reinterpret_cast<void *const *>(a + RB_AX_VRAMMAP_OFF);
+    IOService *dm = *reinterpret_cast<IOService *const *>(a + RB_AX_MACHINE_OFF);
+
+    rbgpu_diag_set_num(RB_AXKEY("flags"), flags);
+    // The one bit the whole chain turns on, published on its own so it cannot
+    // be lost in a word nobody decodes.
+    rbgpu_diag_set_num(RB_AXKEY("enabled"), (flags & 0x2u) ? 1u : 0u);
+    rbgpu_diag_set_num(RB_AXKEY("vram"), vram ? 1u : 0u);
+    rbgpu_diag_set_num(RB_AXKEY("vmap"), vmap ? 1u : 0u);
+
+    if (!rbgpu_ax_plausible(dm)) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "no display machine");
+        return;
+    }
+    const OSMetaClass *dmc = dm->getMetaClass();
+    const unsigned dsz = dmc ? static_cast<unsigned>(dmc->getClassSize()) : 0;
+    rbgpu_diag_set_num(RB_AXKEY("dmsize"), dsz);
+    if (dsz < RB_DM_MIN_SIZE) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "machine too small - REFUSED");
+        return;
+    }
+    const uint8_t *d = reinterpret_cast<const uint8_t *>(dm);
+    const uint32_t fbs = *reinterpret_cast<const uint32_t *>(d + RB_DM_COUNT_OFF);
+    rbgpu_diag_set_num(RB_AXKEY("fbs"), fbs);
+    if (fbs == 0 || fbs > 8) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "framebuffer count out of range");
+        return;
+    }
+    IOService *pipe = *reinterpret_cast<IOService *const *>(d + RB_DM_PIPES_OFF);
+    if (!rbgpu_ax_plausible(pipe)) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "pipe 0 absent");
+        return;
+    }
+    const OSMetaClass *pmc = pipe->getMetaClass();
+    const unsigned psz = pmc ? static_cast<unsigned>(pmc->getClassSize()) : 0;
+    rbgpu_diag_set_num(RB_AXKEY("dpsize"), psz);
+    if (psz < RB_DP_MIN_SIZE) {
+        rbgpu_diag_set_str(RB_AXKEY("say"), "pipe too small - REFUSED");
+        return;
+    }
+    const uint8_t *q = reinterpret_cast<const uint8_t *>(pipe);
+    rbgpu_diag_set_num(RB_AXKEY("active"), q[RB_DP_ACTIVE_OFF]);
+    rbgpu_diag_set_num(RB_AXKEY("defer"), q[RB_DP_DEFER_OFF]);
+    rbgpu_diag_set_num(RB_AXKEY("b280"), q[RB_DP_280_OFF]);
+    rbgpu_diag_set_num(RB_AXKEY("b299"), q[RB_DP_299_OFF]);
+
+    // The verdict, in the form the next step needs: which of the three gates
+    // would make transactionEnd answer kIOReturnNotReady right now.
+    // A number as well as a sentence: the NVRAM note is 512 bytes and strings
+    // are what pushed the 2s8 keys past the cut.  0 all three open,
+    // 1 accel not enabled, 2 WSAA defer, 3 pipe not active.
+    const char *verdict = "ALL THREE OPEN - NotReady is elsewhere";
+    uint32_t gate = 0;
+    if (!(flags & 0x2u))           { gate = 1; verdict = "accel NOT enabled (0xc78 bit1)"; }
+    else if (q[RB_DP_DEFER_OFF])   { gate = 2; verdict = "WSAA defer (pipe 0x282)"; }
+    else if (!q[RB_DP_ACTIVE_OFF]) { gate = 3; verdict = "pipe NOT active (0x298)"; }
+    rbgpu_diag_set_num(RB_AXKEY("gate"), gate);
+    rbgpu_diag_set_str(RB_AXKEY("say"), verdict);
+    #undef RB_AXKEY
+}
+
+void rbgpu_accelprobe_start(void) {
+    if (!checkKernelArgument("-rbgpuaccelprobe")) {
+        return;
+    }
+    if (g_rbgpuAxSeq) {
+        return;             // single entry; the arg is read from two places
+    }
+    g_rbgpuAxSeq = 1;
+    for (unsigned i = 0; i < 3; i++) {
+        g_rbgpuAxCalls[i] = thread_call_allocate(
+            rbgpu_ax_action, reinterpret_cast<thread_call_param_t>(
+                static_cast<uintptr_t>(i)));
+        if (!g_rbgpuAxCalls[i]) {
+            rbgpu_diag_set_str("ax_say", "thread_call_allocate FAILED");
+            continue;
+        }
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(kRbgpuAxDelaysMs[i], kMillisecondScale,
+                                   &deadline);
+        thread_call_enter_delayed(g_rbgpuAxCalls[i], deadline);
+    }
+    rbgpu_diag_set_str("ax_say", "ARMED: 25/45/75 s reads of the three gates");
+}
