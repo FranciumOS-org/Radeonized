@@ -1,6 +1,6 @@
 # HANDOFF-NEXT — the live handoff
 
-Last updated **2026-10-27**, after milestone **2w3** (boot 185).
+Last updated **2026-10-27**, after milestone **2w4** (boot 185, re-read).
 Read this first, then `CLAUDE.md`'s rules, then grep `docs/JOURNAL.md` by tag.
 
 ---
@@ -34,17 +34,29 @@ eight boots (2w2, rule 36). With `--info` it reads:
 
 | gate | meaning | only writer | status |
 |---|---|---|---|
-| `accel->0xc78 & 0x2` clear | accelerator not enabled | `IOGraphicsAccelerator2::enableAccelerator()` | **prime suspect** |
-| `pipe->0x282 != 0` | WSAA defer in progress | `wsaaWill/DidEnter/ExitDefer` | unlikely |
-| `pipe->0x298 == 0` | `isActive()` false | `init_framebuffer_resource` | almost certainly OPEN |
+| `accel->0xc78 & 0x2` clear | accelerator not enabled | `IOGraphicsAccelerator2::enableAccelerator()` | **THE GATE, by elimination** |
+| `pipe->0x282 != 0` | WSAA defer in progress | `wsaaWill/DidEnter/ExitDefer` | **ELIMINATED (2w4)** |
+| `pipe->0x298 == 0` | `isActive()` false | `init_framebuffer_resource` | **ELIMINATED (2w4)** |
 
-Why `0x298` is almost certainly fine: `init_framebuffer_resource`
-(`0x14e5d7ca`) is called **unconditionally** by
-`IOAccelDisplayPipe::displayModeDidChange` (`0x14e5db14`), which is the only
-site in the whole kext that registers `'vbl '` — and boot 183 measured that
-registration on our framebuffer. Its three failure exits all log at os_log
-type **0x11 = FAULT**; the capture carries IOAcceleratorFamily2 FAULTs and
-none of those.
+**Defer (2w4):** `wsaaDidExitDefer` (`0x14e5dfe6`) zeroes `0x282`
+unconditionally and returns true. Boot 185's last `kIOFBNotifyWSAADidExitDefer`
+(event 93) was at **18:56:05.543**; the submit failures run
+18:56:05.516–18:56:07 **and again at 18:56:39 and 18:56:55**.
+
+**isActive (2w4):** `init_framebuffer_resource` (`0x14e5d7ca`) is called
+**unconditionally** by `IOAccelDisplayPipe::displayModeDidChange`
+(`0x14e5db14`), the only site in the kext that registers `'vbl '` — which
+boot 183 measured on our framebuffer. All three of its failure exits log at
+os_log type 0x11 = FAULT, and against a genuine control (213
+IOAcceleratorFamily2 FAULTs from the same thread, recovered by capturing by
+**sender** — 2w3's control was invalid) not one appears.
+
+**So the enable bit is the gate.** It is skipped, while the per-pipe loop
+still runs, when `accel->0x180 == 0`. The vendor gate above it is
+`AMDRadeonX6000_AMDAccelDisplayMachine::displayModeDidChange()` (`0xbe48428`,
+call offset 0x870 = dump 0x880, rule 7), which returns
+`set_display_mode_and_vram()`; it returned true at least once, since the pipe
+loop ran.
 
 Why the enable bit is the suspect: `IOGraphicsAccelerator2::start` clears it,
 `enableAccelerator()` is its sole setter, and that is called only from
@@ -131,10 +143,41 @@ sudo tools/plugin_check.sh
 5. `display-log.txt` must still show non-zero `[INFO]` lines (rule 36 — the
    summary prints a WARNING if it does not).
 
+## 4b. The wedge is named (2w4) — a SECOND, separate defect
+
+From **18:56:11.410**, six seconds after the first submit failure, repeating
+every ~5–6 s to 18:56:50:
+
+    channel 52 GFX event timeout;        pending stamps [1..289]
+    channel 12 SDMA0_PAGE event timeout; pending stamps [1..191]
+    channel 53 SDMA0_PAGE event timeout; pending stamps [1..184]
+    channel N is not hung, keep running                                  x18
+    checkGPUProgress - Signaling hardware error on channel 12/25/52/53   x22
+    signalHardwareError: GPURestartSignaled / GPURestartEnqueued    x22 each
+    hardwareErrorEvent: setting restart type to 2                        x22
+    restart_channel: GPURestartSkipped / no channel associated with
+                     stamp_idx N (type 2)                                x18
+
+Work is submitted and **never retires**; AMD's own hang check answers *"not
+hung, keep running"*; the restart path cannot find the channel for the stamp
+and skips. A **stamp-retirement** failure, beginning **after** the display
+failures. Whether it is their consequence or an independent second defect is
+**not established** — do not assume either.
+
+Also new and unexplained: **`IOAccelSurface::set_id_mode(uint32_t, uint32_t):
+Surface mode contains bad bits`**, x4 at 18:56:05.034, ~0.5 s before the
+first submit failure.
+
+`tools/plugin_check.sh` now captures all of this by default (sender clauses
+for `IOAcceleratorFamily2` and `AMDRadeonX6000`, plus a kernel-line count and
+a `display_change_handler` control in the summary).
+
 ## 5. Still open, carried
 
-- **The wedge itself.** 177-182 and 184-185 all wedged with the AGDC bridge
-  armed; boot 183 with it unarmed did not. n=1 differential.
+- **The wedge** is now named (section 4b) but not explained: why stamps stop
+  retiring, and why `restart_channel` cannot find the channel. 177-182 and
+  184-185 all wedged with the AGDC bridge armed; boot 183 with it unarmed did
+  not. n=1 differential.
 - `pipe->0x290`, the hardware-pipe-vs-fallback choice, is a
   transaction-carried `std::optional` (`txn+0x180`/`+0x181`) — CoreDisplay's
   own, not ours (2w1).
