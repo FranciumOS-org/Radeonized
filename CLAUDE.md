@@ -362,6 +362,58 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 191: THE PIPE IS ACTIVE AND TRANSACTIONS FLOW FOR THE FIRST TIME
+(2wb).** `rbgpu-boot` 191, armed, both one-shots 0, `diag_used` 661/768. Only
+6 files (rebooted ~52 s into the capture), both gaps recovered. Rule 15 met
+without `kexts.txt`: **`RBFBAtyArmed = True`**, a key the 2w9 code publishes
+*unconditionally*, so only `59124B3A` can produce it - 2wa's own prescription
+used one boot later. The bytes are right: `ATY,fb_offset` =
+`00 00 00 01 00 00 00 00` (16777216), `ATY,fb_size` = `00 90 7e 00 ...`
+(8294400), 8 bytes each.
+**THE GATE IS OPEN.** All three samples identical:
+
+    ax0_fi340 16777216 (was 0)   ax0_fi34c 8294400 (was 0)
+    ax0_r380         1 (was 0)   ax0_active       1 (was 0)
+    ax0_gate         0 (was 3)   "ALL THREE OPEN - NotReady is elsewhere"
+
+`r380` is `initFramebufferResource`'s own return, so none of its seven silent
+exits fired; `active` is `pipe->0x298`. **`isActive()` is true for the first
+time in this project**, and every prediction written down in 2w9/2wa landed.
+**THE SUBMIT FAILURES COLLAPSED, at a level that survives a reboot.** The live
+box is NOT boot 191 (rule 33), so INFO is gone and **`IOReturn: 0x2d8`
+reading 0 is NOT a result** (that message is INFO-level, 2w2). `Fallback ...
+submission failed` is ERROR and ERROR persists. Re-queried by sender, one pid:
+**69 / 73 / 3** for boots 189 / 190 / 191, `display_change_handler` 26 in all
+three as the control. And the three are at **00:24:23.762/.766/.849**, inside
+90 ms, at the same instant as the last `display_change_handler` - then
+**113 seconds of silence**. It failed until the pipe went active, then stopped.
+**THE NEW FRONTIER IS PAST EVERYTHING WE HAVE EVER REACHED**, 122 times from
+00:24:23.734 to 00:25:25.045:
+
+    IOAccelDisplayPipeTransaction2::set_transaction_args(...)
+        returning error 0xe00002c7 for transaction(N)
+    AMDRadeonAccelerator [0]: transaction ID (N) generated error (0xe00002c7).
+        dirtyBits=0x3c1, options=0x801
+
+`0xe00002c7` is **`kIOReturnUnsupported`** (`IOReturn.h:109`, this machine).
+**Transactions are created, numbered and handed to the kernel.** Every
+milestone since 2s9 recorded "no transaction has EVER been queued"; that is
+now **false**, and what changed is one 8-byte registry property. It also
+explains **`RBFBVBL1Fires = 1`** where 2w0 measured Apple's handler 1 at 0
+fires over 375 s - `enableTransactionInterrupt` -> `enableVBLInterrupt` (2s5)
+finally ran.
+**Rule 13 before anything is built on that code**: this project has already
+been burned by `kIOReturnUnsupported` specifically - request 0x1B's *success*
+path returns it (2ha). **Disassemble `set_transaction_args` first.**
+**Unchanged**: the wedge (22 `event timeout`, 33 `checkGPUProgress`, 22 `no
+channel associated`, first at 00:24:29.6), `bad bits` 4. **Not measured**: what
+the screen showed - by construction it should be wrong, since the compositor
+was told 16 MB while OTG0 still scans offset 0.
+**NEXT, no boot**: disassemble
+`IOAccelDisplayPipeTransaction2::set_transaction_args` in
+`IOAcceleratorFamily2`, find every `kIOReturnUnsupported` path, with
+`dirtyBits = 0x3c1` and `options = 0x801` as the measured inputs.
+
 **BOOT 190: THE FBKEXT NEVER CHANGED, AND `ATY,fb_size` IS NOT A GATE (2wa).**
 `rbgpu-boot` 190, armed, both one-shots 0, `diag_used` 662/768, capture
 complete. **Rule 15 failed on the SECOND kext**: plugin `64D3D687` correct,

@@ -42212,3 +42212,117 @@ sentence; the instrument here was a raw-byte search of the collection with
 four controls, which took one command.
 
 So **no further install step is needed** — arm and reboot.
+
+## 2wb — BOOT 191: THE PIPE GOES ACTIVE, AND TRANSACTIONS FLOW FOR THE FIRST TIME
+
+Capture `logs/20261028-002545-plugin`, `rbgpu-boot` **191**, armed, both
+one-shots **0**, `diag_used` **661**/768. Only 6 files — the box was rebooted
+at 00:26:17, ~52 s into `plugin_check.sh`, so there is no `display-log.txt`
+and no `kexts.txt`. Both gaps were recovered; see below.
+
+### Rule 15, satisfied without `kexts.txt`
+
+`framebuffer.plist` carries `RBFBAtyArmed = True`, and that key is published
+**unconditionally** by the 2w9 code, outside the `if (atyOn)`. Only build
+`59124B3A` can produce it. 2wa's own prescription, used in anger one boot
+later. The raw property bytes are right too:
+
+    ATY,fb_offset  00 00 00 01 00 00 00 00   = 0x0000000001000000 = 16777216
+    ATY,fb_size    00 90 7e 00 00 00 00 00   = 0x00000000007e9000 =  8294400
+
+eight bytes each, little-endian, exactly the `OSData` shape `getDisplayInfo`
+dereferences.
+
+### The gate is OPEN. All three samples, 25/45/75 s, identical:
+
+    ax0_fi340   16777216   *** was 0 ***        ax0_b35d   1
+    ax0_fi348    8294400                        ax0_b35e   1
+    ax0_fi34c    8294400   *** was 0 ***        ax0_b35f   1
+    ax0_r380           1   *** was 0 ***        ax0_enabled 1
+    ax0_active         1   *** was 0 ***        ax0_defer   0
+    ax0_gate           0   *** was 3 ***
+    ax0_say   "ALL THREE OPEN - NotReady is elsewhere"
+
+`r380 = 1` is `initFramebufferResource`'s own return value, so it did not take
+any of its seven silent zero-exits; `active = 1` is `pipe->0x298`, which only
+`init_framebuffer_resource` writes. **`IOAccelDisplayPipe::isActive()` is true
+for the first time in this project.** Every prediction written down in 2w9 and
+2wa landed.
+
+### The submit failures COLLAPSED, measured at a level that survives a reboot
+
+The live machine is **not** boot 191 (rule 33): `kern.boottime` 00:26:17 vs the
+capture's 00:24:16, different `kern.bootsessionuuid`, and `rbgpu-boot` still
+reads 191 because the following boot was unarmed. So INFO is gone — which means
+**`Failed to submit transaction` / `IOReturn: 0x2d8` reading 0 is NOT a
+result** (rule 14/36: that message is INFO-level, 2w2). `Fallback ... submission
+failed` is **ERROR**, and 2w2 established that ERROR persists by recovering boot
+184's 56-line control after a reboot. Re-queried by sender over
+00:24:10-00:26:17, one pid (`WindowServer[162]`), 596 lines:
+
+| | boot 189 | boot 190 | **boot 191** |
+|---|---|---|---|
+| `Fallback ... submission failed` | 69 | 73 | **3** |
+| `display_change_handler` (control) | 26 | 26 | **26** |
+| `init_framebuffer_resource` | 0 | 0 | 0 |
+
+And the three are not scattered — they are at **00:24:23.762, .766 and .849**,
+inside 90 ms, at the same instant as the **last** `display_change_handler`
+(00:24:23.762484). After 00:24:23.857 CoreDisplay says nothing further for the
+remaining **113 seconds** of the boot. That is the shape of "it failed until
+the pipe went active, then stopped", not of a count that happened to be low.
+
+### THE NEW FRONTIER, AND IT IS PAST EVERYTHING WE HAVE EVER REACHED
+
+113 lines after 00:24:24, two messages, **122 occurrences each** across the
+boot, from 00:24:23.734 to 00:25:25.045 — a full minute:
+
+```
+IOAccelDisplayPipeTransaction2::set_transaction_args(sIOAccelDisplayPipeTransactionArgs *)
+    returning error 0xe00002c7 for transaction(N).
+AMDRadeonAccelerator [0]: transaction ID (N) generated error (0xe00002c7).
+    dirtyBits=0x3c1, options=0x801
+```
+
+`0xe00002c7` is **`kIOReturnUnsupported`** (`IOReturn.h:109` on this machine;
+`0x2d8` on line 126 is the old `kIOReturnNotReady`, for contrast).
+`options` is `0x801` ×120 and `0x800` ×2; `dirtyBits` is `0x3c1` throughout.
+
+**Transactions are being created, numbered and handed to the kernel.** Since
+2s9 (boot 168) every milestone has recorded `fb_vbl_ot_armed` absent and "no
+transaction has EVER been queued" — across boots 168, 171, 177-191. That
+statement is now **false**, and the thing that changed is one 8-byte registry
+property. It also explains the other new reading in this capture:
+**`RBFBVBL1Fires = 1`**, where 2w0 measured Apple's handler 1 registered,
+disabled and at **0 fires** over 375 s. `transaction_queue_gated` →
+`enableTransactionInterrupt` → `enableVBLInterrupt` (2s5) fired at last.
+
+**Rule 13 applies before anything is built on `kIOReturnUnsupported`**: a named
+constant says what the NAME means, not what the function meant by it, and this
+project has already been burned by precisely this code — request 0x1B's
+*success* path returns `kIOReturnUnsupported` (2ha). `set_transaction_args`
+must be disassembled before a single line is written against it.
+
+### What has NOT changed
+
+The wedge is intact and unexplained: 22 `event timeout`, 33 `checkGPUProgress`
+hardware-error signals, 22 `no channel associated with stamp_idx`, 22 `channel
+N is not hung, keep running`. First `event timeout` at 00:24:29.6, still
+~6 s after the display activity. `bad bits` still 4. Whether it is a
+consequence of the display path or an independent second defect remains
+**not established** — but it now has a competitor for the frontier.
+
+### Not measured
+
+What the screen showed. By construction it should be wrong or stale: the
+compositor was told the framebuffer is at VRAM offset 16 MB while OTG0 still
+scans offset 0. The user rebooted two minutes in, which is consistent with a
+bad picture but does not establish one.
+
+### Next
+
+Disassemble `IOAccelDisplayPipeTransaction2::set_transaction_args` in
+`IOAcceleratorFamily2` and find every path returning `kIOReturnUnsupported`,
+with `dirtyBits = 0x3c1` and `options = 0x801` as the measured inputs. No boot
+needed for that. Rule 35: if the chain ends at our own code again, instrument
+our end in the same change rather than a milestone later.
