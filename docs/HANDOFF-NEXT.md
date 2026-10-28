@@ -18,9 +18,15 @@ framebuffer, and `RBAMDFramebuffer` published neither:**
 | property | format | consumed by | effect if absent |
 |---|---|---|---|
 | `ATY,fb_offset` | 8-byte `OSData`, `uint64` | `getDisplayInfo` -> `info+0x00` | `pipe->0x340 = 0` -> **fatal** |
-| `ATY,fb_size` | 8-byte `OSData`, `uint64` | `getDisplayInfo` -> `info+0x0c`, **and** `isDisplayEnabled` | `pipe->0x35d = 0` -> **fatal** |
+| `ATY,fb_size` | 8-byte `OSData`, `uint64` | `getDisplayInfo` -> `info+0x0c` | optional — see below |
 
-Both must be **non-zero**. `ATY,fb_offset` is a byte **offset** relative to the
+**Only `ATY,fb_offset` is load-bearing** (2wa). 2w9 called `ATY,fb_size` a gate
+too, via `isDisplayEnabled`; boot 190 measured `pipe->0x35d = 1` with the
+property absent, because `isDisplayEnabled` early-outs on
+`AMDDCNDisplay::isDisplayControlEnabled` — a live register read that the
+firmware-lit panel satisfies for free. `info+0x0c` is covered by
+`max(info+0x08, info+0x0c)` since `info+0x08` is already 8294400. Publish both
+anyway; the offset is the one that matters, and it must be **non-zero**. `ATY,fb_offset` is a byte **offset** relative to the
 VRAM base (`hw->0x370->vt[0x1e0]()` = `mem->0x50`), not an address.
 
 Measured gate table, boot 189, all three samples identical:
@@ -35,28 +41,45 @@ Measured gate table, boot 189, all three samples identical:
 | `fi340` / `fi34c` | **0 / 0** | the two absent properties |
 | `pfb`, `hw328`, `hw330`, `vram`, `vmap` | all 1 | the pointer chain is right |
 
-## 2. The next boot — ONE boot, builds already made
+## 2. The next boot — ONE boot, NO new build needed
 
-Builds: **plugin `64D3D687`**, **fbkext `59124B3A`**. Both UUIDs verified moved;
-`kmutil libraries -p build/out/RembrandtGPU.kext | grep -c SystemKernelExtensions.kc`
-= 0; `grep -c IOGraphicsFamily src/plugin/Info.plist` = 0.
+`build/out` already holds **fbkext `59124B3A`** and **plugin `64D3D687`**, both
+verified moved, `SystemKernelExtensions.kc` count 0,
+`IOGraphicsFamily` in the plugin's `Info.plist` 0.
 
-The plugin boots **from the OpenCore EFI** — a rebuild does nothing until it is
-installed (2w6 lost a boot to exactly this). The new boot-arg must be added too.
+**Boot 190 was lost because the framebuffer kext was never installed.** Each
+artifact has its own install path and a rebuild refreshes none of them:
 
-Commands for the user to run (the assistant never runs these and never asks for the
-password):
+| artifact | loads from | refresh with |
+|---|---|---|
+| `RembrandtGPU.kext` (plugin) | the OpenCore EFI | `sudo tools/efi.sh install` |
+| `RBAMDFramebuffer.kext` (owns the panel) | the **auxiliary collection**, i.e. `/Library/Extensions` | an **install** — the user's step |
+
+`tools/fbload.sh` is **not** that path: it stages a fresh copy under
+`/private/var/tmp` for stages 1 and 2 only. The kext that displaces
+`IONDRVFramebuffer` comes up at boot from the auxiliary collection, and
+`/Library/Extensions/RBAMDFramebuffer.kext` currently holds the old
+`45588775`.
+
+Commands for the user (the assistant never runs these and never asks for the
+password; **the assistant must not install into `/Library/Extensions` or the EFI**):
 
 ```
 sudo tools/efi.sh install
-sudo tools/efi.sh bootarg add -rbgpufbaty
+```
+
+Then replace the installed framebuffer kext with `build/out/RBAMDFramebuffer.kext`,
+rebuild the auxiliary collection so the new one is the copy that boots, and:
+
+```
 sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1
 sudo reboot
 ```
 
-Then after boot: `sudo tools/fbload.sh`, wait past **75 s** (the probe's last
-sample), and `sudo tools/plugin_check.sh` over SSH **before** rebooting
-(rule 10). Let it finish — boots 188's capture was cut off at six files.
+`-rbgpufbaty` is already in boot-args (boot 190 confirmed it).
+
+After boot: wait past **75 s** (the probe's last sample), then
+`sudo tools/plugin_check.sh` over SSH **before** rebooting (rule 10).
 
 **EXPECT A WRONG OR STALE PICTURE.** The offset published is 16 MB while the
 display engine still scans VRAM offset 0, because the gate rejects the truthful
@@ -70,23 +93,28 @@ display engine, so DCN cannot be wedged, and removing `-rbgpufbaty` reverts it.
 2. `kexts.txt` must show **`64D3D687`** and **`59124B3A`** (rule 15).
 3. `agdc_oneshot` / `iop_oneshot` must both be **0** (rule 34).
 4. `diag_used` vs `diag_max` before reading any absence (rule 14).
-5. `ioreg -rl -c RBAMDFramebuffer`: `RBFBAtyArmed Yes`, `RBFBAtyOffset
-   16777216`, `RBFBAtySize 8294400`. If `RBFBAtyArmed` is `No` the boot-arg did
-   not land and nothing else in the capture means anything.
-6. Then, in this order: `ax0_b35d`, `ax0_fi340`, `ax0_fi34c`, `ax0_active`,
+5. **`kexts.txt` must show `com.rembrandtgpu.fb ... 59124B3A`.** Boot 190
+   showed `45588775` and that alone invalidated the experiment.
+6. `ioreg -rl -c RBAMDFramebuffer`: `RBFBAtyArmed Yes`, `RBFBAtyOffset
+   16777216`, `RBFBAtySize 8294400`. **`RBFBAtyArmed` absent means the OLD
+   binary is running** (the new code publishes it unconditionally);
+   `RBFBAtyArmed No` means the boot-arg did not land. Different faults.
+7. Then, in this order: `ax0_fi340`, `ax0_fi34c`, `ax0_active`,
    `ax0_gate`, `ax0_say`.
 
 Predictions written down before the boot:
 
-- `ax0_b35d` **1**, `ax0_fi340` **16777216**, `ax0_fi34c` **8294400**
+- `ax0_fi340` **16777216**, `ax0_fi34c` **8294400** (`ax0_b35d` is already 1
+  and comes from the hardware, so it is a control now, not a prediction)
 - `ax0_active` **1**, `ax0_gate` **0**, `ax0_say` "ALL THREE OPEN"
 - `Failed to submit transaction` and `IOReturn: 0x2d8` → **0**
 - `fb_vbl_ot_armed` **present for the first time** (a transaction finally queued)
 
 Branches if it does not come out that way:
 
-- `b35d 0` → the property did not land as `OSData`, or the arg is absent. Check 5 first.
-- `b35d 1`, `fi340 16777216`, `active 0` → the remaining silent returns inside
+- `fi340 0` with `RBFBAtyOffset 16777216` → the property landed but is not
+  being read as `OSData`, or `getDisplayInfo` took a different path.
+- `fi340 16777216`, `active 0` → the remaining silent returns inside
   `initFramebufferResource` are `index != 0` and `reserveFrameBuffer` failing;
   `ax0_r380` names which.
 - `active 1` but submits still fail → the defect moves past `transactionEnd` for
