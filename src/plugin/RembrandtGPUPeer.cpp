@@ -773,6 +773,12 @@ static const char *const kRbgpuNvramHotKeys[] = {
     // down and are allowed to fall off the end.
     "ax0_gate", "ax0_enabled", "ax0_active", "ax0_defer",
     "ax0_vram", "ax0_vmap", "ax0_fbs", "ax0_n",
+    // 2w8: the branch selectors inside AMD's initFramebufferResource. 2w7
+    // answered the three-gate question, so those keys move down and these
+    // take the top of the note: `fi340`/`fi348` are what configureDisplay
+    // must fill and `r380` is the value the hook returns.
+    "ax0_fi340", "ax0_fi348", "ax0_r380", "ax0_b35e", "ax0_b35f",
+    "ax0_w", "ax0_h", "ax0_bpp", "ax0_fmt", "ax0_hw330",
     "ax2_gate", "ax2_enabled", "ax2_active", "ax2_defer",
     // 2qw: first, because they say whether every OTHER absence in the capture
     // means anything. diag_used == diag_max means keys were dropped.
@@ -2454,6 +2460,62 @@ static void rbgpu_ax_action(thread_call_param_t p0, thread_call_param_t) {
     rbgpu_diag_set_num(RB_AXKEY("defer"), q[RB_DP_DEFER_OFF]);
     rbgpu_diag_set_num(RB_AXKEY("b280"), q[RB_DP_280_OFF]);
     rbgpu_diag_set_num(RB_AXKEY("b299"), q[RB_DP_299_OFF]);
+
+    // 2w8: boot 188 measured `active 0`, so `init_framebuffer_resource`
+    // (0x14e5d7ca) returned false - and the two exits that can do that
+    // without logging are `getCurrentDisplayMode` (ours returns success) and
+    // `pipe->vt[0x858](0, resource)`, which on this machine is
+    // `AMDRadeonX6000_AMDAccelDisplayPipe::initFramebufferResource`
+    // (0xbe49356). These are the fields that decide which of ITS seven silent
+    // returns fired, plus the fields the BASE fills just before the call, as
+    // positive progress markers.
+    //
+    // The base writes, from our getPixelInformation: 0x290 activeWidth,
+    // 0x294 activeHeight (16-bit), 0x296 bytes-per-pixel (bitsPerPixel >> 3),
+    // 0x28c the pixel-format enum (4 for 32bpp/8-bit components), and 0x284
+    // is the framebuffer index. If those read 1920 / 1080 / 4 / 4 then
+    // getPixelInformation succeeded and the failure IS the vendor hook.
+    //
+    // AMD's hook then reads: 0x98 getFramebuffer(), 0xe0 the resource,
+    // 0x328/0x330 the HW objects (0x330 = accel->0x1a38->vt[0x2f8]()),
+    // 0x340 + 0x348 the _FRAMEBUFFER_INFO that
+    // `AMDRadeonX6000_AMDHWDisplay::configureDisplay(fbIndex, index, info,
+    // resource)` (vt[0x138], 0xbe87bd4) must fill, the 0x35e / 0x35f branch
+    // selectors, and 0x380 - the value it RETURNS, so a zero there is a
+    // silent failure all by itself.
+    //
+    // Every offset is inside the measured class size (boot 188: 15216), and
+    // the RB_DP_MIN_SIZE guard above already covers them.
+    rbgpu_diag_set_num(RB_AXKEY("fbidx"),
+                       *reinterpret_cast<const uint32_t *>(q + 0x284));
+    rbgpu_diag_set_num(RB_AXKEY("fmt"),
+                       *reinterpret_cast<const uint32_t *>(q + 0x28c));
+    rbgpu_diag_set_num(RB_AXKEY("w"),
+                       *reinterpret_cast<const uint32_t *>(q + 0x290));
+    rbgpu_diag_set_num(RB_AXKEY("h"),
+                       *reinterpret_cast<const uint16_t *>(q + 0x294));
+    rbgpu_diag_set_num(RB_AXKEY("bpp"),
+                       *reinterpret_cast<const uint16_t *>(q + 0x296));
+    rbgpu_diag_set_num(RB_AXKEY("pfb"),
+                       *reinterpret_cast<void *const *>(q + 0x98) ? 1u : 0u);
+    rbgpu_diag_set_num(RB_AXKEY("pres"),
+                       *reinterpret_cast<void *const *>(q + 0xe0) ? 1u : 0u);
+    rbgpu_diag_set_num(RB_AXKEY("hw328"),
+                       *reinterpret_cast<void *const *>(q + 0x328) ? 1u : 0u);
+    rbgpu_diag_set_num(RB_AXKEY("hw330"),
+                       *reinterpret_cast<void *const *>(q + 0x330) ? 1u : 0u);
+    // 0x340 is an address and 0x348 a size: publish them whole, because
+    // "non-zero" would not tell a plausible value from a garbage one.
+    rbgpu_diag_set_num(RB_AXKEY("fi340"),
+                       *reinterpret_cast<const uint64_t *>(q + 0x340));
+    rbgpu_diag_set_num(RB_AXKEY("fi348"),
+                       *reinterpret_cast<const uint32_t *>(q + 0x348));
+    rbgpu_diag_set_num(RB_AXKEY("fi34c"),
+                       *reinterpret_cast<const uint32_t *>(q + 0x34c));
+    rbgpu_diag_set_num(RB_AXKEY("b35e"), q[0x35e]);
+    rbgpu_diag_set_num(RB_AXKEY("b35f"), q[0x35f]);
+    rbgpu_diag_set_num(RB_AXKEY("r380"),
+                       *reinterpret_cast<void *const *>(q + 0x380) ? 1u : 0u);
 
     // The verdict, in the form the next step needs: which of the three gates
     // would make transactionEnd answer kIOReturnNotReady right now.
