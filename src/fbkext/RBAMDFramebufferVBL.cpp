@@ -72,6 +72,8 @@ void RBAMDFramebuffer::publishVBLState(void)
      * is the rule-15 identity key for this build whatever the boot-args say.
      * Refuse, Orig and the pipe state are published even when we never wrote,
      * because that is exactly the boot where they say why (rule 14). */
+    setProperty("RBFBRetireArmed", retireArmed);
+    setProperty("RBFBRetireEnables", retireEnables, 64);
     setProperty("RBFBHubpArmed", hubpArmed);
     setProperty("RBFBHubpReady", hubpReady);
     setProperty("RBFBHubpRefuse", (uint64_t)hubpRefuse, 32);

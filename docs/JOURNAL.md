@@ -43330,3 +43330,118 @@ reboot, which is why 2wg could check no regression control.
 Only the framebuffer kext changed. Plugin stays **`0D1F953A`**, already in the
 EFI — no rebuild, no `efi.sh install`. fbkext **`D07493B1`** to the
 **auxiliary collection** (rule 15).
+
+---
+
+## 2wi — boot 195: THE DISPLAY WORKS. The GPU composites to the panel, and the frame rate is the transaction rate
+
+**The write landed and the display half is done.** No capture — the box could
+not be driven well enough to run `plugin_check.sh`, and it was power cycled —
+so the registry is absent and **every `RBFBHubp*` value is unmeasured** (rule
+14: that absence is not a result). But the **screen** is an instrument here,
+and it is the one only the user can read. Reported:
+
+> frozen at first, then the screen came up with cursor, then after 30 s the
+> lock screen — **it was showing correctly and accelerated** — but a new frame
+> only about every 10 seconds. Not usable.
+
+### What that establishes
+
+**Nothing but the HUBP write can change what the panel shows.** Before 2wh the
+panel displayed the firmware's GOP framebuffer at VRAM offset 0, static,
+forever; the compositor's output never reached it. A correct, moving,
+accelerated desktop appearing on the panel is therefore proof of the whole
+chain at once:
+
+- `hubpSetup()` passed all three gates — the OTG signature, 2os's three HUBP0
+  values and the denylist — because a refusal writes nothing at all;
+- `rb_hubp_check_addr()` accepted the address, so it was non-zero, in the
+  carve-out, 256-byte aligned and HIGH-stable;
+- **the write reached the chip**, since the picture changed;
+- the address in `_AMD_PIPE_FLIP +0x08`/`+0x0c` is the right one, so 2wg's
+  field identification is confirmed by the display itself;
+- **THE SWIZZLE ALREADY AGREED.** This was 2wh's one stated unmeasured risk
+  and the thing most likely to make the experiment ambiguous. A tiled surface
+  fetched as linear produces regular, repeating, block-structured garbage. The
+  image was *correct*. So `DCSURF_ADDR_CONFIG` / `DCSURF_TILING_CONFIG`
+  already describe the layout the compositor renders into, and **no tiling
+  write is needed**. That branch of 2wh's prediction list is closed.
+- pitch and format agreed, as 2os and 2wg jointly predicted.
+
+So **the display half of this project is solved**: the GPU composites and the
+result reaches the panel. Every milestone from 2pd to 2wh was aimed at this.
+
+### And the frame rate was predicted, quantitatively, two boots before it was seen
+
+**1 frame per ~10 s is not a defect in the write. It is the transaction rate**,
+and it was already measured — with no HUBP write anywhere in the build:
+
+| boot | uptime at capture | `RBFBAmtrSets` | rate | one frame every |
+|---|---|---|---|---|
+| 193 | 167 s | 13 | 0.078 /s | **12.8 s** |
+| 194 | 183 s | 17 | 0.093 /s | **10.8 s** |
+
+The user saw "about every 10 seconds". **10.8 s, from data taken before the
+code existed.** The write is not a throttle: it faithfully displays every
+transaction it is handed, and Apple's accelerator hands over 0.09 per second.
+
+**That rate was always there. 2wh did not cause it — 2wh made it visible.**
+The panel could not reveal it while it showed a static firmware buffer, and no
+earlier milestone could have measured it as a *frame* rate. This is the same
+shape as 2su's "WindowServer idle at 0.0 %": the system was never compositing
+fast, and now the symptom has a number.
+
+### The frontier is now the transaction rate, and there is a named candidate
+
+**`RBFBVBL1Fires` has been 0 for three milestones and "not attributed" in each
+of them. It is now the prime suspect.**
+
+`RBAMDFramebufferVBL.cpp:204` registers **every** handler `enabled = true`,
+deliberately, because Apple never performs an initial enable. Boot 194 read
+`RBFBVBL1Enabled` **False** and `RBFBVBL1Fires` **0** — so Apple registered
+its `'vbl '` handler and then called `setInterruptState(0)` on its own slot,
+exactly as the comment there anticipates, **and never re-enabled it, with 17
+transactions in flight.**
+
+2s5 measured what re-arms it: `transaction_queue_gated` →
+`enableTransactionInterrupt` → `enableVBLInterrupt`. If that is not running,
+Apple's accelerator never receives a vblank, so it can never retire a
+transaction and submit the next one — and ~10 s is the shape of a **timeout**,
+not of a throttle. Boot 191 saw handler 1 fire **once**, the only time it ever
+has; 192, 193 and 194 all read 0.
+
+**Not established**, and both candidates stay live:
+
+1. **The VBL completion path** above — cheap, specific, testable.
+2. **The wedge** (2we): work submitted, never retires, hang check says not
+   hung, restart cannot find the channel. If the compositor's render work does
+   not retire, the next frame cannot be submitted either. 2we established the
+   wedge as an *independent* second defect, which is still true, but
+   independent is not irrelevant: it is now in the critical path for frame
+   rate. Whether the two are the same defect is **not** established — the
+   wedge is on GFX/SDMA channels, a different mechanism from the display
+   interrupt — and must not be written as one.
+
+### The safety gap this boot exposed, in our own arming
+
+The user had to rescue with `-rbgpuoff` because **the write re-armed on every
+power cycle**. Two causes compose:
+
+- `rbgpu-fb`, the framebuffer's one-shot, **does not clear**. That is 2sq,
+  already measured and already commented at `RBAMDFramebuffer.cpp:47`:
+  `removeProperty` calls no sync, so the key survives the reboot that was
+  supposed to consume it. The takeover therefore re-arms by itself.
+- **`-rbgpufbhubp` has no one-shot of its own.** It is `PE_parse_boot_argn`
+  and `amtrArmed`, both boot-args, so once the framebuffer is up the write
+  arms unconditionally. Every other dangerous feature in this project needs a
+  one-shot *and* an arg precisely so a bad boot cannot repeat (rule 9), and
+  the single most dangerous one was built without one.
+
+The documented disarm is the **boot-arg**, which is what the hard rules
+already say, and it worked. But the feature should not have depended on that.
+
+### Next
+
+The frame rate, not the address. The display is correct and the only thing
+wrong with it is how often it changes, which is a number we have measured
+three ways and never explained.

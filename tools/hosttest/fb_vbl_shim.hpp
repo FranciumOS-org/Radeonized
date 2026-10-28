@@ -57,6 +57,8 @@ public:
     uint64_t amtrFlipPtr=0;
     uint64_t amtrFlipRefused=0;
     uint8_t amtrFlipSnap[kAmtrFlipBytes]{};
+    bool retireArmed=false;
+    uint64_t retireEnables=0;
     bool hubpArmed=false;
     bool hubpReady=false;
     uint32_t hubpRefuse=0;
