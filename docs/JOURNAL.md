@@ -44093,3 +44093,68 @@ the panel and the desktop is usable whatever the plugin does - and
 arms fine and this was only the pairing hole; still 197 means the plugin
 itself is failing and that is the next defect.** Either way the machine comes
 back. The framebuffer goes back on only after that reads 198.
+
+## 2wq — boot 198: the GPU is 12 000x faster than the notification, and there is no throughput ceiling
+
+Armed, usable desktop, **`RBAMDFramebuffer` not loaded at all** (`rbgpu-fb` 0,
+three `IONDRVFramebuffer` instances). Rule 8: `rbgpu-boot` **198**, `armed=1`,
+all three one-shots consumed. Rule 33: `kern.boottime` 17:05:18, this is that
+boot. `tools/metal_probe --bench 40`, output in `logs/metalbench.txt`.
+
+**2wp's open question is ANSWERED: the plugin arms fine on its own.** The
+nonce moved 197 -> 198 with `rbgpu-fb` at 0 and the framebuffer declining the
+panel. So the three frozen boots were **the pairing hole and nothing else** -
+rule 38 stands as written, and there is no second plugin defect to chase.
+
+**THE MEASUREMENT:**
+
+    SERIAL median: wall 172.557 ms   gpu 0.014 ms   driver 0.054 ms  -> 5.8/s
+    SERIAL range : wall  97.878 .. 180.985 ms
+    OVERHEAD RATIO: wall / gpu = 12220.7x
+    PIPELINED: 40 buffers in 0.182 s -> 220.2 buffers/s   (38.0x speedup)
+    verify: PASS (0 of 4096 wrong)
+
+**The GPU takes 14 microseconds. The caller waits 172 milliseconds.** The
+driver's own scheduling interval (`kernelEndTime - kernelStartTime`) is 54
+microseconds, so the driver is not slow either - the time is spent entirely
+between "the work finished" and "the caller was told".
+
+**AND THERE IS NO THROUGHPUT CEILING.** Forty command buffers committed back
+to back complete in **0.182 s**, which is *one serial wait*. The chip, the
+ring and the driver retire **220 buffers/s** when nobody waits per buffer. So
+the ~2/s is **not** a bandwidth limit, not GPU speed, and not work the chip
+is slow at - it is a **per-completion notification cost**, paid once per wait.
+That is exactly the "pipelined much faster than serial" branch 2wo named
+before the run, and the serial figure of 5.8/s sits in the same class as boot
+197's 2.09 GFX stamps retired per second.
+
+**THE DISPLAY HALF IS NOT INVOLVED, AND THIS BOOT PROVES IT.**
+`RBAMDFramebuffer` was never loaded: no takeover, no HUBP write, no `'amtr'`,
+`IONDRVFramebuffer` owning the panel throughout. The defect is present at full
+strength regardless. Every reading since 2wi that wondered whether the frame
+rate was a display problem is settled - **it is not**, and the display half's
+clean sheet in boot 197 was telling the truth.
+
+**WHAT 172 ms MEANS FOR 144 Hz.** A compositor must wait for its own render to
+complete before presenting it, so a serial completion latency is a hard frame
+ceiling: 1/0.172 = **5.8 fps**, against the 6.9 ms a 144 Hz frame is allowed.
+The gap is now one named number rather than a mystery, and the pipelined 220/s
+says the machinery underneath is **already fast enough** - nothing has to get
+faster, something has to stop waiting.
+
+**NOT ESTABLISHED - do not write any of these as fact yet.** What produces the
+172 ms is unknown. The shape is suggestive and no more: iterations 1-39 cluster
+tightly in 167-181 ms (iteration 0 is 97.9 ms, a warm-up), which is **too tight
+for a uniform poll** of period T - that would spread over [0, T] and average
+T/2. A fixed sleep, a timeout, or a wake-up tied to something else on a ~172 ms
+cadence all fit. A missing or mis-routed GPU completion interrupt is the
+obvious candidate given 2we's wedge shape (work submitted, never retiring,
+hang check says not hung), but **nothing here measures the interrupt path** and
+rule 13 applies to the number as much as to a return code.
+
+**THE NEXT STEP IS CHEAP, NEEDS NO BOOT, AND DISCRIMINATES.** Compare
+`waitUntilCompleted` against `addCompletedHandler` on the same command buffer:
+if the handler fires promptly and only the wait is late, the defect is in the
+**wait primitive**; if both are late by 172 ms, it is the **notification** and
+the interrupt path is where to look. The machine is usable and the
+framebuffer is out of the picture, so this costs one command and no risk.
