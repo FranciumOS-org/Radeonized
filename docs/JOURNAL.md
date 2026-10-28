@@ -43538,3 +43538,259 @@ thread_call runs at the panel's measured 143.83 Hz. So
 from one `nvram rbgpu-fbcrumb` read, after a power cycle, with no capture at
 all. That resolves 0.09 Hz against 1 Hz or 60 Hz with room to spare, which is
 the only precision this question needs.
+
+---
+
+## 2wk — boot 195: the write is confirmed in full, and the retire experiment never ran
+
+`rbgpu-boot` **195**, `armed=1`, `diag_used` 631/768, `agdc_gamma_elems1`
+**0x100** = 256, **21 files — the first complete capture since boot 192**.
+Rule 15 met on both kexts: fb **`DEB8918D`**, plugin **`0D1F953A`**.
+`RBFBCrumbBoot` 194 against nonce 195 — the lag-by-one holds a third time.
+
+### 2wj's one-shot fix works, confirmed on hardware
+
+**`rbgpu-fb = 0`.** That key has never cleared in the history of this project —
+2sq measured it surviving its own removal, and six boots re-armed off it.
+Consuming by **overwrite** on the `setProperty` path 2sr measured as syncing
+does what `removeProperty` could not. So a plain power cycle is now a real
+disarm, and the Windows trip of boot 196 cannot recur.
+
+### Every prediction about the write landed
+
+| key | read | predicted in 2wh |
+|---|---|---|
+| `RBFBHubpReady` | **True** | true |
+| `RBFBHubpRefuse` | **0** | 0 |
+| `RBFBHubpOrig` | **`0xf400000000`** | `0xf400000000` |
+| `RBFBHubpPitch` | **1919** = `0x77f` | `0x77f`, and `1920` refused |
+| `RBFBHubpConfig` | **8** | 8 = ARGB8888 |
+| `RBFBHubpOtgCtl` | **`0x11201`** | 2oq's measured value |
+| `RBFBHubpWrites` | **4** | > 0 |
+| `RBFBHubpRejects` | **0** | 0 |
+
+`RBFBHubpReadback` = **`0xf41002a000`**, taken off the chip after write #1,
+where the register held `0xf400000000` before — **the store reaches the
+hardware**, which is 2wh's stated milestone whatever the screen does. And that
+address is **boot 194's measured surface address, in a different boot**: the
+compositor allocates the same first surface twice, an agreement nothing forced.
+
+**`RBFBHubpLast` = `0xf41192a000` ≠ `Readback`.** The address moved by
+`0x1900000` between write #1 and write #4, so **2wg's "per-flip, not a
+constant" is confirmed** and writing per transaction was necessary, not
+cautious. (Note for future readers: `Readback` is write #1's value by design —
+it is taken once, on the accelerator's thread — so **`Readback == Last` is the
+wrong check whenever `Writes > 1`**. 2wh's handoff stated it carelessly;
+compare `Readback` against the first address, or just against `Orig` to see it
+moved.)
+
+### Every 2we regression control is still zero — checkable at last
+
+With `display_change_handler` **26** as the control, the same number as every
+boot since 189:
+
+    set_transaction_args            0
+    Failed to submit transaction    0
+    Fallback ... submission failed  0
+    DisplayPipeState                0
+    no gamma                        0
+    Metal compositor activated      2
+
+Boots 194, and the two uncaptured ones, could check **none** of these. The
+display chain is clean and has stayed clean through the HUBP write.
+
+### The frame rate, a third time
+
+`RBFBVBLFires` 7200 at the panel's 143.83 Hz = **50.1 s**, `RBFBAmtrSets`
+**4** → **one transaction every 12.5 s**. With 193's 12.8 s and 194's 10.8 s
+that is **n=3** on a rate that has never changed. The user's report this boot —
+"first mouse appears in the Apple-logo freeze, then 15 s later one frame of
+lock screen" — is the same phenomenon.
+
+### THE EXPERIMENT DID NOT RUN, and why is measured
+
+`RBFBRetireArmed` **True**, `RBFBRetireEnables` **0** — with `RBFBAmtrSets`
+**4**, so the code ran four times and enabled nothing. Per 2wi's own
+pre-registered reading that would mean "no transaction arrived", and that
+reading is **wrong**. The capture says what actually happened:
+
+| | boot 194 | boot 195 |
+|---|---|---|
+| `RBFBVBLEnables` | **36** | **11** |
+| `RBFBAmtrSets` | 17 | 4 |
+| enables per transaction | 2.1 | 2.75 |
+| `RBFBVBL1Fires` | 0 | **0 of 7200** |
+
+slot 1 reads `Used=True`, `Enabled=False`, `Self=False`, so all three of my
+loop's conditions hold **at capture time**. The only way the loop can see
+nothing is if `!enabled` was false **when it looked** — i.e. the slot was
+**already enabled at `setAttribute` time**.
+
+**So Apple does enable its `'vbl '` slot, about two to three times per
+transaction, and its handler still fires zero times in seven thousand two
+hundred ticks.** That is now a measurement, not an inference, and it inverts
+2wi's suspicion: the problem is not that Apple fails to re-arm the interrupt
+(2s5's path evidently *does* run) — **it is that our vblank never arrives
+while the window is open.**
+
+**The defect is ours, and it is timing granularity.** Our `'vbl '` is a
+`thread_call` at 143.83 Hz, so delivery is quantised to ~7 ms, and Apple's
+enable window is shorter than that. Boot 191 fired handler 1 **once**, ever —
+which is exactly what winning that race occasionally looks like.
+
+### Build `F730123C`: answer the enable, not the clock
+
+A **second** `thread_call`, `vblKickCall`, fired from the off→on transition in
+`setInterruptState` itself, delivering on our own thread microseconds later
+instead of up to 7 ms later. Design points, each for a reason:
+
+- **Separate from `vblCall`**, so a kick can never cancel or reschedule a
+  pending periodic tick, and so the periodic cadence stays undisturbed.
+- **It does not touch `vblFires`.** That counter is this project's 143.83 Hz
+  time reference — 2wj's crumb rate formula and this milestone's own frame-rate
+  numbers all divide by it — and irregular extra ticks would corrupt a clock
+  three milestones now rely on. The per-slot `fires` counter does move, because
+  a fire really happened.
+- **It re-checks `enabled` at delivery**, so a window that has already closed
+  costs nothing, and **`retireKicks - retireDelivered` is exactly how often we
+  were too late** — the measurement this experiment owes.
+- **Only non-self slots**, so re-enabling the handler we registered ourselves
+  can never deliver a spurious vblank.
+- On Apple's thread it does a field write and a `thread_call_enter`, nothing
+  more (rule 31). `proc` is then called from the same context the periodic path
+  would have used if it had ever caught the window — not a new hazard class,
+  only better timing.
+
+Five hosttest cases, and the suite **bites** when the self-filter is dropped.
+
+### Two instrument corrections
+
+**`0xe00002c7` appears 91 times and is entirely benign.** Every one is
+`InstallTiming ... FAILED for mode 0x80001000 (800x600 ...)` — CoreDisplay
+enumerating legacy timings our framebuffer does not report. `set_transaction_args`
+is 0 and `Failed to submit` is 0. **A raw `0xe00002c7` count is no longer
+diagnostic of the transaction path**; match the message, not the code.
+
+**`rbgpu-fbcrumb` has never appeared in any capture, and the crumb is not
+broken — the capture never looked.** `nvram.txt` is a hand-curated key list in
+`plugin_check.sh` and `rbgpu-fbcrumb` was not in it. 2wi and 2wj both built a
+recovery plan on reading that crumb after a power cycle, and neither checked
+that the instrument reading it existed. Rule 26 again, on my own tooling.
+Added to the list; **the crumb remains UNVERIFIED on hardware** until a boot
+shows it, so do not rely on it yet.
+
+## 2wl — boot 196: the chain is not slow, it is UNASKED; and the crumb stopped 70 seconds into a twenty-minute boot
+
+**The configuration is verified from the live machine, not from the handoff.**
+`/Library/Extensions/RBAMDFramebuffer.kext` holds **`F730123C`**, the 2wk
+retire build, and `boot-args` ends `... -rbgpufbaty -rbgpufbamtr -rbgpufbhubp
+-rbgpufbretire`. So the user installed it and armed it without being handed the
+commands — the experiment 2wk designed really did run.
+
+**Rule 33 first.** The machine I read is NOT that boot: `kern.boottime`
+14:55:15, the photo's menu bar says 14:54, uptime 11 minutes, `rbgpu-diag`
+`armed=0`, no `RBAMDFramebuffer` in `ioreg`. The armed boot is over. What
+survives is NVRAM.
+
+**THE DESKTOP IS CORRECT AND IT IS FULLY COMPOSITED.** From the photograph, the
+one instrument only the user can read: translucent dock with vibrancy, colour
+widgets (weather, stocks), window shadows, a sheet over a window, menu-bar
+blur, and System Information open on Graphics/Displays reading **AMD Radeon
+680M**, Type **GPU**, VRAM 4 GB, Metal **Supported**, Device ID 0x1681,
+**1920 x 1080 @ 144.00Hz**, 24-Bit Color (ARGB8888), Main Display **Yes**,
+Online **Yes**. Twenty minutes of uptime. 2wi's reading holds and gets
+stronger: no tiling garbage, no colour error, no alpha error.
+
+**THE NEW FACT, AND IT CHANGES THE QUESTION.** In the user's own words:
+typing into a text field (Spotlight) made the frames **smooth while they
+typed**, and **adding characters counted while deleting them did not**.
+
+So the chain is **not** rate-limited. It delivered at keystroke rate - call it
+5-10 Hz - on demand, through the same `setAttribute('amtr')` -> `hubpProgram`
+path that sits at 0.09 Hz on an idle desktop. **A timeout does not do that. A
+throttle does not do that. A missing vblank retirement does not do that** - if
+the accelerator could not retire a transaction, typing would not be smooth
+either. Whatever decides to produce a transaction is **event-driven**, and at
+idle it simply has nothing it believes it must draw.
+
+That retires the shape of the question carried since 2wi. **The frontier is no
+longer "why is our frame delivery slow"; it is "why does a change on screen
+not produce a transaction unless it is a keystroke".** 2wi named two
+candidates - the VBL completion path and the wedge - and both were framed as
+throttles. Neither explains a chain that runs fast on command.
+
+**WHAT THE BOOT MEASURED: SEVENTY SECONDS OF IT.**
+
+    nvram rbgpu-fbcrumb -> b=195 s=12 f=10000 e=11 r=1 h=0 w=4 k=0 t=4
+
+`b=195` against `rbgpu-boot` 196 is the expected one-boot lag (2wg), so this
+crumb **is** from the twenty-minute boot. It says the HUBP write was set up
+(`h=0`), had written 4 times (`w=4`), the VBL clock was running (`r=1`), 11
+enable transitions (`e=11`), 4 transactions (`t=4`) - and `f=10000` says all
+of that is **as of 10000 vblank fires = 69.5 seconds**. Shape-identical to boot
+195 at the same point.
+
+**And then it stopped, for eighteen more minutes.** The crumb was written at
+four fixed fire counts - 100, 1000, 10000, 100000 - and at 143.83 Hz the fourth
+is 11.6 minutes away while the third is 70 seconds in. A twenty-minute boot
+left a record of its first minute. `RBFBRetireKicks` and `RBFBRetireDelivered`,
+the two numbers 2wk exists to produce, are registry-only and the box has since
+rebooted, so **`-rbgpufbretire` is STILL UNTESTED - third boot running.**
+
+**Rule 10, sharper: a record that must survive an uncapturable boot has to be
+PERIODIC, not a set of marks.** Four fixed counts answer "how far did it get"
+for a boot that dies. They answer nothing for a boot that lives, which is the
+case that now matters - the desktop is usable for twenty minutes and the
+interesting behaviour is late in it.
+
+**A NUMBERING CORRECTION (rule 8).** `rbgpu-boot` reads **196**, and the
+14:18 capture read **195**. So the twenty-minute boot is nonce 196 and the boot
+numbers in 2wi/2wj/2wk were **narrative** - counted from user reports - not
+nonces. Boot numbers in this journal are the nonce or they are nothing.
+
+**Build `A356BE21`, instrumentation only, no behaviour change.**
+
+- **The crumb is periodic**: 100, 1000, then **every 10000 fires (~70 s)**,
+  with `s=` carrying which sample it is (12 at 70 s, 13 at 139 s, 29 at twenty
+  minutes). The last crumb in NVRAM is then the whole boot. One flash commit
+  per 70 s is the same order as the four this already did.
+- **`p=` is the rate**: the fullest 1000-fire (~7 s) window the boot ever saw.
+  A total divided by a boot length cannot tell a burst from a trickle, and the
+  user's report is precisely that the boot contained both.
+- **`n=` is what we dropped**: transactions whose flag word has bit `0x1`
+  clear, the ones 2wh deliberately does not write. "We were handed a content
+  update and skipped it" and "we were never handed one" look identical today.
+- **`K=`/`D=` are the retire kick** and its delivery, so 2wk's measurement
+  survives a boot that cannot be captured.
+
+Hosttest: the rate bucket's peak must survive a later quiet window and must
+not be the running bucket (otherwise it reads 0 whenever a boot ends quiet),
+and the crumb budget assertion is rewritten from a total to a rate. Mutation
+tested both ways - suppressing the max and suppressing the reset each fail the
+same assertion.
+
+**SAID BEFORE THE BOOT.**
+
+- **`p=` in the tens** -> the chain can run at tens of transactions per 7 s on
+  demand, the display half is finished, and the whole remaining defect is
+  upstream of everything this project has built: WindowServer is not asking.
+- **`p=` at 1 or 2** -> the smoothness while typing did NOT come through our
+  HUBP write, and 2wi's "nothing but the HUBP write can change what the panel
+  shows" needs re-examining before anything else is built on it.
+- **`n=` non-zero** -> we are being handed transactions and refusing to write
+  them, which is ours and immediate.
+- **`K=` > 0 with `D=` close behind** -> the 2wk kick fires and lands, and
+  `RBFBVBL1Fires` in a capture says whether Apple does anything with it.
+
+**AND THE MACHINE IS CAPTURABLE NOW.** Typing is the one interaction that
+updates the screen smoothly, which is exactly what a terminal does. Boots
+195/196 were never captured because the box "could not be driven"; a Terminal
+window, or SSH from another machine, can run `sudo tools/plugin_check.sh` in
+the armed boot - and that single capture carries `RBFBRetireKicks`,
+`RBFBRetireDelivered`, `RBFBVBL1Fires`, `RBFBAmtrSets` and the display log
+together, which no amount of NVRAM can.
+
+**INSTALL**: plugin `0D1F953A` unchanged in the EFI (no rebuild, no
+`efi.sh install`); fbkext **`A356BE21`** to the auxiliary collection. Boot-args
+unchanged - all four of `-rbgpufbaty -rbgpufbamtr -rbgpufbhubp -rbgpufbretire`
+stay. All one-shots set again (rule 34).

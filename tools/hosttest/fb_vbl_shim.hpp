@@ -51,6 +51,9 @@ public:
     bool amtrSnapped=false;
     uint64_t amtrGets=0;
     uint64_t amtrSets=0;
+    uint64_t amtrPeak=0;
+    uint64_t amtrBucket=0;
+    uint64_t amtrNoFlip=0;
     uint64_t amtrPtr=0;
     uint64_t amtrRefused=0;
     uint8_t amtrSnap[kAmtrSnapBytes]{};

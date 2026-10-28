@@ -140,6 +140,19 @@ private:
     bool     amtrSnapped;
     uint64_t amtrGets;
     uint64_t amtrSets;
+    /* 2wl: the transaction RATE, not just the count. amtrBucket fills over
+     * one 1000-fire window (~7 s at the measured 143.83 Hz) and amtrPeak
+     * keeps the fullest window the boot ever saw, so a boot that cannot be
+     * captured still says whether the chain EVER ran fast. The user reported
+     * typing in Spotlight making frames smooth while the idle desktop sat at
+     * ~0.09/s, and a total divided by a boot length cannot tell those apart.
+     * amtrNoFlip counts transactions whose flag word has bit 0x1 CLEAR - the
+     * ones 2wh deliberately does not write - so "we were handed a content
+     * update and dropped it" is distinguishable from "we were never handed
+     * one". */
+    uint64_t amtrPeak;
+    uint64_t amtrBucket;
+    uint64_t amtrNoFlip;
     uint64_t amtrPtr;
     uint64_t amtrRefused;
     uint8_t  amtrSnap[kAmtrSnapBytes];

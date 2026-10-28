@@ -236,6 +236,9 @@ bool RBAMDFramebuffer::start(IOService *provider)
     amtrSnapped = false;
     amtrGets = 0;
     amtrSets = 0;
+    amtrPeak = 0;
+    amtrBucket = 0;
+    amtrNoFlip = 0;
     amtrPtr = 0;
     amtrRefused = 0;
     bzero(amtrSnap, sizeof(amtrSnap));
@@ -585,7 +588,7 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
     if (stage > crumbStage) {
         crumbStage = stage;
     }
-    char buf[160];
+    char buf[192];
     /* 2t0 addendum: the nonce comes FIRST because it decides whether anything
      * after it is this boot's. rbgpu-fbcrumb persists in NVRAM, so without it
      * a boot that died before stage 1 leaves the PREVIOUS boot's crumb reading
@@ -598,13 +601,25 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
      * has to be here. h= is the refusal code (0 = set up), w= the write
      * count, and k= 1 iff the pair read back exactly what we last wrote,
      * which is the whole content of "the store reached the chip". */
-    snprintf(buf, sizeof(buf), "b=%s s=%u f=%llu e=%u r=%u h=%u w=%llu k=%u t=%llu",
+    /* 2wl: p= is the fullest 1000-fire (~7 s) window the boot ever saw and
+     * n= the transactions whose flag word had bit 0x1 clear; K=/D= are the
+     * retire kick and its delivery. Boot 197 ran for twenty minutes with the
+     * retire build installed and left NOTHING readable, because the crumb was
+     * written at four fixed fire counts and the last of them is 70 seconds in
+     * - so this one is REWRITTEN every 10000 fires and s= carries which
+     * sample it is. The last crumb in NVRAM is then the whole boot. */
+    snprintf(buf, sizeof(buf),
+             "b=%s s=%u f=%llu e=%u r=%u h=%u w=%llu k=%u t=%llu "
+             "p=%llu n=%llu K=%llu D=%llu",
              crumbBoot, crumbStage, (unsigned long long)vblFires, vblEnables,
              vblRunning ? 1u : 0u,
              hubpReady ? 0u : (hubpArmed ? (hubpRefuse ? hubpRefuse : 0xffu) : 0xfeu),
              (unsigned long long)hubpWrites,
              (hubpWrites && hubpReadback == hubpLast) ? 1u : 0u,
-             (unsigned long long)amtrSets);
+             (unsigned long long)amtrSets,
+             (unsigned long long)amtrPeak, (unsigned long long)amtrNoFlip,
+             (unsigned long long)retireKicks,
+             (unsigned long long)retireDelivered);
     if (auto str = OSString::withCString(buf)) {
         /* 2sr measured that setPropertyWithGUIDAndName is the ONLY path that
          * reaches IODTNVRAM::syncInternal, so a plain setProperty here DOES
@@ -940,6 +955,14 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
         if (value == 0) {
             /* AMDFramebuffer's own answer to a null transaction. */
             return kIOReturnBadArgument;
+        }
+        /* 2wl: the rate instrument, before anything that can return early.
+         * One increment and one bit test - rule 31 still holds. */
+        if (value >= 0xffffff8000000000ULL) {
+            amtrBucket++;
+            if ((((const uint64_t *)value)[0] & 0x1) == 0) {
+                amtrNoFlip++;
+            }
         }
         if (!amtrSnapped) {
             /* Rule 19: the right floor for a kalloc'd object is the KERNEL

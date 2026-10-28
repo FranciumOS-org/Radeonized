@@ -82,19 +82,41 @@ int main() {
     RBAMDFramebuffer noTimer;
     assert(noTimer.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&extra)==0);
     assert(!noTimer.vblRunning && noTimer.properties.at("RBFBVBLRunning")==0);
-    // 2t0: the breadcrumb budget. An NVRAM write is a flash commit, so the
-    // count must NOT scale with the fire count. Drive past every milestone
-    // and assert the writes stay at exactly the four defined ones.
+    // 2t0/2wl: the breadcrumb budget. An NVRAM write is a flash commit, so
+    // the count must stay bounded - but 2wl makes it PERIODIC, because boot
+    // 197 ran twenty minutes and its last crumb was seventy seconds old. The
+    // budget is now one write per 10000 fires (~70 s) and the stage says
+    // which sample it is, so the test pins the RATE rather than a total.
     {
         RBAMDFramebuffer cr; FakeCall crTimer; cr.vblCall=&crTimer;
         void *ref=nullptr;
         assert(cr.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&ref)==0);
         for(unsigned i=0;i<120000;i++) cr.deliverVBL();
         assert(cr.vblFires==120000);
-        assert(cr.crumbWrites==4);          // 100, 1000, 10000, 100000 - no more
-        assert(cr.lastCrumb==13);           // and monotonic to the last one
+        // 100, 1000, then one per 10000 - twelve of those in 120000 fires.
+        assert(cr.crumbWrites==2+12);
+        assert(cr.lastCrumb==11+12);        // and monotonic to the last one
         // A lower stage must never walk the furthest point back.
-        cr.crumb(2); assert(cr.crumbStage==13);
+        cr.crumb(2); assert(cr.crumbStage==23);
+    }
+    // 2wl: the rate bucket. The user reported typing in Spotlight making the
+    // frames smooth while the idle desktop sat at ~0.09 transactions/s, and a
+    // total divided by a boot length cannot tell a burst from a trickle. The
+    // peak must survive later quiet windows, and must not be the running
+    // bucket - otherwise it would read as 0 whenever the boot ends quiet.
+    {
+        RBAMDFramebuffer rt; FakeCall rtTimer; rt.vblCall=&rtTimer;
+        void *ref=nullptr;
+        assert(rt.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,nullptr,&counts,&ref)==0);
+        rt.amtrBucket=37;                      // a burst
+        for(unsigned i=0;i<1000;i++) rt.deliverVBL();
+        assert(rt.amtrPeak==37 && rt.amtrBucket==0);
+        rt.amtrBucket=2;                       // a quieter window after it
+        for(unsigned i=0;i<1000;i++) rt.deliverVBL();
+        assert(rt.amtrPeak==37);               // the burst is not forgotten
+        rt.amtrBucket=900;                     // and a bigger one replaces it
+        for(unsigned i=0;i<1000;i++) rt.deliverVBL();
+        assert(rt.amtrPeak==900 && rt.amtrBucket==0);
     }
     /* 2wk: the immediate kick. Boot 195 (nonce) measured Apple enabling its
      * slot 11 times with 4 transactions while its handler fired 0 times in
@@ -149,5 +171,5 @@ int main() {
         d.setInterruptState(dref,0); d.setInterruptState(dref,1);
         assert(d.retireKicks==0);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a bounded 4-write crumb budget and the 2wk immediate kick passed");
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket and the 2wk immediate kick passed");
 }
