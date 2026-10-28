@@ -362,6 +362,83 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**THE LIMITER IS ONE NUMBER AND IT IS NOT WHERE 2wq/2wr SAID (2ws/2wt/2wu).**
+No boot - all of this is `build/out/metal_probe` on the live armed boot 198,
+with `RBAMDFramebuffer` **not loaded**, so the display half is not involved.
+**THE SPLIT, from one host timebase:**
+
+    commit -> scheduled        0.092 ms   the driver has handed it on
+    commit -> kernelStart      0.025 ms
+    commit -> GPUStart       174.855 ms   THE GPU DOES NOT START
+    GPUStart -> GPUEnd         0.014 ms
+    GPUEnd  -> caller return   0.042 ms   completion is instant
+
+So **the completion path is fine and the work waits 175 ms before the chip
+begins it**. **2wr's "the completion signal is the defect" and 2wq's "the
+notification is the whole defect" are WITHDRAWN** - their measurement (handler
+and wait 9 us apart) stands, but both of those clocks are *downstream of
+execution* and could not see a pre-execution delay. Rule 33 in a new form:
+**name which side of the work a latency is on before attributing it.**
+**THE READING IS VALIDATED** (rule 16): a control kernel with a caller-chosen
+loop count moves GPU time over a **420x** range (0.014 -> 0.232 -> 5.896 ms)
+while `commit->GPUstart` stays pinned to the tick, so `GPUStartTime`/`GPUEndTime`
+are real GPU timestamps and not a detection time.
+**IT IS A TICK.** 12 pipelined buffers all start within **1.391 ms** of each
+other after a 176 ms idle wait, then run 12 us apart - one event releases the
+whole batch. Load-independent: a second process holding 8 buffers in flight for
+26 s changes nothing and itself gets **8 x 5.78 ticks/s = 46.2 buffers/s**.
+Free-running: a lattice fit over absolute `mach_absolute_time` completions at
+random phase locks at **T = 175.77 ms, R = 0.966 over 191 periods**, and
+rejects every round candidate (25 vblanks 173.76 ms R=0.13, 6 Hz R=0.05) - so
+the period is a number nobody wrote down.
+**2wq's "too tight for a uniform poll" was simply wrong**: a serial loop
+PHASE-LOCKS to the tick, so it always just misses one and waits a full period.
+`--phase` breaks the lock and reads the period off a clean sawtooth - `d+wall`
+constant at 173.7 ms to d=170, then **348 ms = 2T**.
+**EVERY ENGINE, AND EVERY QUEUE IN A PROCESS, SHARE ONE TICK**: compute
+174.385, blit/SDMA 173.103, render/graphics 173.766 ms; K=2 and K=3 command
+queues released together (spread 0.26 / 0.39 ms). **So it caps the desktop** -
+the graphics ring is ticked identically. 144 Hz needs **6.944 ms**; this is
+**25x** too slow. Nothing needs to get faster; the quantum has to go.
+**AND IT IS PER CLIENT, WHICH RULES OUT THE CHIP.** Two processes submitting
+concurrently read the same period at **different phase** (118.172 vs 31.929 ms
+in the shared mach epoch). A doorbell the CP cannot see, an MES timeslice and
+clock gating are all chip properties and would give every client the same
+phase. **The release decision is made per client, in software** - which points
+at `AMDSWScheduler::advance()` (`0xbe950e0`), reachable only from
+`deferredCallback(IOInterruptEventSource*)` (`0xbe93e18`) and the
+**never-installed** `timerCallback` (`0xbe9513c`).
+**ELIMINATED by measurement**: the whole timestamp-interrupt line
+(`useTimestampInterrupts` `0xbea961c`, `enableTimestampInterrupt` `0xbe85904`
+gated on `channel->0xa8`, the empty base stubs `enableStampInterrupt`/
+`disableStampInterrupt` at `0x14e2653c`/`0x14e26542`) - it is about
+*completion*, and completion takes 42 us. Also the 100 us poll loops
+(`waitForHwStamp` `0xbe85536`, `waitForTimestamp` `0xbe46f9a`,
+`IAMDHWInterface::pollWait` `0xbeab6e0` = `assert_wait_timeout(100 us)` +
+`thread_block`): far too fast to be 175 ms, and on the wrong side of the work.
+**NOT ESTABLISHED**: that `advance()` is the gate. Nothing above observes a
+single call inside the driver - rule 35 exactly.
+
+**THE WEDGE IS NOW A SIX-SECOND USERSPACE COMMAND (2wt).** `metal_probe
+--queues K`: K<=3 is normal (171-173 ms), **K>=4 costs 6.1-10.2 s** and varies
+run to run, the shape of detect-and-recover. A sender-matched capture over a
+K=4 run is 2we's signature exactly - 5 `event timeout`, 16 `checkGPUProgress`,
+16 `Signaling hardware error`, 5 `not hung`, 5 `no channel associated`, 412
+`GPURestart`, against 478 lines as the control. **The channels name
+themselves**: `channel 5 ComputeUQ2`, `channel 6 ComputeUQ3`, `channel 9
+ComputeUQ6`, `channel 33 SDMA0`, each with a single pending stamp. So a Metal
+command queue becomes a **compute user queue** and the later ones never retire
+- the same shape as the one queue-count fact already established here, **one
+SDMA instance where Apple's Navi 21 path builds four** (2gc/2gi). Since 2we the
+wedge was only ever visible inside an armed boot; it now needs no kext, no
+arming and no reboot. **A LEAD, NOT A CLAIM**: 2wi's desktop ran at *"a new
+frame about every 10 seconds"* and this cliff costs 6-10 s, but 2wi's 10 s was
+*also* matched quantitatively by the transaction rate (0.093 sets/s = one per
+10.8 s), a different mechanism. Two numbers agreeing to one figure is not an
+identification (rule 18).
+**TWO INDEPENDENT DEFECTS**: the tick caps the rate at 5.7 Hz; the wedge adds
+multi-second spikes on top. K=1..3 wedge nothing and still wait 175 ms.
+
 **BOOT 196: THE CHAIN IS NOT SLOW, IT IS UNASKED (2wl).** The user installed
 `F730123C` and armed `-rbgpufbretire` unprompted, and ran the box for **twenty
 minutes**. Verified from the live machine, not the handoff:
