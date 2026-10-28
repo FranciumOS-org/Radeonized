@@ -4552,7 +4552,6 @@ static void rbgpu_gate_2en(uint32_t stage, const char *what) {
         // the gates and tests that directly.
         if (checkKernelArgument("-rbgpubeat")) {
             rbgpu_heartbeat_start();
-            rbgpu_accelprobe_start();   // 2w3, read-only, gated on -rbgpuaccelprobe
         }
     }
     rbgpu_diag_set_num("gate_stage", stage);

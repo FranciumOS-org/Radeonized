@@ -41662,3 +41662,86 @@ count, with a WARNING when the kernel count is zero against a non-zero
 total. `display_change_handler` logs once per notification unconditionally,
 so it is a genuine known-present control for the kernel half - the same
 shape rule 26 asks for, applied to a predicate rather than a level.
+
+================================================================================
+2w5 - BOOT 186: THE PROBE NEVER RAN, AND THE TWO ELIMINATIONS RECONFIRMED
+================================================================================
+2026-10-27, logs/20261027-230204-plugin, boot 186, armed, captured at +3m21s.
+
+Identity first (rules 8/15/33/34): `rbgpu-boot` **186** (new), `armed 1`,
+`agdc_oneshot 0`, `iop_oneshot 0`, `diag_used` **564** of 768 so absences are
+informative, boot 22:58:45 and the capture at 23:02:04 - **and the loaded
+plugin is `D8B1115C`**, the build that carries the probe, with
+`-rbgpuaccelprobe` present in boot-args (token 49).
+
+**AND NOT ONE `ax*` KEY EXISTS.** Not even `ax_say`, which
+`rbgpu_accelprobe_start()` writes unconditionally once the arg check passes.
+The cause is the **call site**, not the probe: 2w3 added
+`rbgpu_accelprobe_start()` next to `rbgpu_heartbeat_start()` in
+`kern_start.cpp` because a grep found that name, and never read what gates
+it -
+
+    if (stage >= 40) {
+        ...
+        if (checkKernelArgument("-rbgpubeat")) {
+            rbgpu_heartbeat_start();
+            rbgpu_accelprobe_start();      <-- 2w3 put it here
+        }
+    }
+
+`-rbgpubeat` has not been in boot-args since 2fg answered its question, so
+the branch is dead. Rule 16 applied to a probe's own call site: **a probe
+needs a call site that runs whenever ITS arg is set, not one borrowed from a
+neighbour.** Moved to `RembrandtGPUPeer.cpp` immediately after
+`rbgpu_diag_set_num("armed", ...)`, which runs in the peer's `start()` on
+every boot; build **`D69D9B33`**.
+
+--- THE BOOT WAS NOT WASTED -----------------------------------------------
+
+2w4's widened predicate works, and it turns boot 186 into an independent
+confirmation of the two eliminations 2w4 had to reach by re-querying:
+
+    display-log.txt                4919 lines (control: 5193)
+    [INFO]                          494
+    kernel[                         801     <-- 2w4's sender clauses
+    display_change_handler           26     <-- the kernel-half control
+    Failed to submit transaction    152, ALL `IOReturn: 0x2d8`
+    Fallback GPU Display Pipe        75
+    event timeout / not hung      46 / 46
+    set_id_mode "bad bits"            4
+    init_framebuffer_resource         0
+
+**The notification sequence is identical to boot 185's**, to the millisecond
+offset from boot:
+
+    22:58:50.975  event 1    DisplayModeWillChange
+    22:58:50.976  event 2    DisplayModeDidChange
+    22:58:50.976  event 40   OnlineChange
+    22:58:50.986  event 1, 2
+    22:58:50.993  event 91   WSAAWillExitDefer
+    22:58:50.993  event 93   WSAADidExitDefer
+    22:58:51.038  event 90   WSAAWillEnterDefer
+    22:58:51.038  event 92   WSAADidEnterDefer
+    22:58:51.415  event 1, 2
+    22:58:51.552  event 91, 93
+
+**The defer gate is closed as an explanation, by 194 seconds.**
+`wsaaDidExitDefer` zeroes `pipe->0x282` unconditionally; the last event 93 is
+at **22:58:51.552** and the last submit failure is at **23:02:06.182** -
+**3 min 14 s later**. 2w4 had 51 seconds of separation; this has 194.
+
+**And `init_framebuffer_resource` is silent against a control that is now
+INSIDE the capture** - 801 kernel lines, 26 of them the unconditional
+`display_change_handler` entry/exit pair - so `pipe->0x298` is set and
+`isActive()` is true. 2w4 reached that by re-querying boot 185; boot 186
+captured it directly.
+
+**So `accel->0xc78 & 0x2`, the accelerator-enabled bit, is the gate in two
+boots**, and the probe that reads it is one call site away.
+
+One new kernel message shape not seen in 185:
+`hardwareErrorEvent(): GPURestartDeferred stampIdx=N type=N`.
+
+NEXT: the same experiment, build **`D69D9B33`**, nothing else changed. The
+boot-arg is already in `config.plist`, so only the four one-shots and the
+plugin install are needed.
