@@ -41856,3 +41856,209 @@ descriptor exists and its map succeeded, so `getVRAMRange()` and everything
 built on it are **correct** and `find_vram_descriptor` is off the list. The
 failure is one level down, inside AMD's own `initFramebufferResource`, and it
 is silent by construction.
+
+## 2w9 — boot 189: the accelerator reads two properties off the framebuffer, and we publish neither
+
+Capture `logs/20261027-233944-plugin`, build `C025F308`, `rbgpu-boot` 189.
+
+Arm verified first (rules 8/15/34): `rbgpu-boot` 189 (was 188), `kexts.txt`
+shows `com.rembrandtgpu.plugin ... C025F308-4D1D-3329-BF0E-35696F851631`
+matching `build/out`, `agdc_oneshot 0`, `iop_oneshot 0`, `agdc_error 0`,
+`armed 1`, `diag_used` **658** of 768 — so absences are informative.
+`ax_say` present, and all three samples (25/45/75 s) are byte-identical.
+
+### What the probe measured
+
+    ax0_w / h / bpp / fmt   1920 / 1080 / 4 / 4   getPixelInformation SUCCEEDED
+    ax0_pfb                 1                     pipe->0x98 (getFramebuffer) non-NULL
+    ax0_pres                1
+    ax0_hw328 / hw330       1 / 1                 Navi21Hardware -> HWDisplay chain up
+    ax0_b35e / b35f         1 / 1
+    ax0_fi348               8294400               = 1920 * 1080 * 4 EXACTLY
+    ax0_fi340               0                     *** the address is ZERO ***
+    ax0_fi34c               0
+    ax0_enabled / defer     1 / 0                 both still eliminated
+    ax0_active / gate       0 / 3                 "pipe NOT active (0x298)"
+
+Display log (4417 lines, 461 `[INFO]`, 599 kernel, 26 `display_change_handler`
+as the kernel-half control): `Failed to submit transaction` **140**, all
+`IOReturn: 0x2d8`, `Fallback` 69, `init_framebuffer_resource` 0, `no gamma` 0,
+`event timeout` 41, `bad bits` 4.
+
+So the base's half of the work is **done and correct** — 1920/1080/4/4 is
+`getPixelInformation` answering properly — and the failure is unambiguously
+inside AMD's hook, as 2w8 predicted.
+
+### The chain, read end to end (no boot spent)
+
+2w7 said `configureDisplay` must fill `0x340`/`0x348`. **That is corrected.**
+`AMDRadeonX6000_AMDHWDisplay::configureDisplay` (`0xbe87bd4`) *is* the real
+target of call slot `0x138` (rule 7: dump `0x148`), but it **never touches its
+`_FRAMEBUFFER_INFO*` argument** — `%rcx` is clobbered at `0xbe87c34`, and the
+`%rbx` it writes `0x1b4`/`0x1b9`/`0x1ba`/`0x1bd`/`0x1dc` into is the
+**`IOAccelResource2`**, the fifth argument. The filler is one slot earlier.
+
+`AMDRadeonX6000_AMDAccelDisplayMachine::set_display_mode_and_vram`
+(`0xbe48604`), the vendor gate 2w4 named, per pipe:
+
+    r13   = pipe + 0x340                       *** the _FRAMEBUFFER_INFO IS &pipe->0x340
+    0x35d = hwd->vt[0x128](i, fb)              = isDisplayEnabled
+    ok    = hwd->vt[0x130](i, 0x35d, 1, fb, r13)  = getDisplayInfo
+            pipe->initAffineTransform()
+    if (!ok)                     fail          (0xbe4870e)
+    if (pipe->0x35d != 1)        fail          (0xbe4871c)
+    if (pipe->0x340 == 0)        fail          (0xbe48727)
+
+where `hwd` is `machine->0x188`. Rule 7 on `AMDRadeonX6000_AMDHWDisplay`'s
+vtable: call `0x128` → dump `0x138` = `isDisplayEnabled(unsigned int, void*)`;
+call `0x130` → dump `0x140` =
+`getDisplayInfo(unsigned int, bool, bool, void*, _FRAMEBUFFER_INFO*)` — a
+signature that matches the five registers exactly.
+
+**`getDisplayInfo` (`0xbe8700e`) fills the struct from two registry properties
+on the framebuffer.** It zeroes `info+0x00/08/10/18/1e` at entry
+(`0xbe870bf`), then:
+
+    0xbe87192  rax = fb->vt[0x2b8]("ATY,fb_offset")        getProperty
+    0xbe871bb  rax = OSMetaClassBase::safeMetaCast(rax, <class>)
+    0xbe871cb  rax = rax->vt[0x178]()                      getBytesNoCopy
+    0xbe871d9  *(uint64_t *)(info + 0x00) = *(uint64_t *)rax
+
+    0xbe871e9  rax = fb->vt[0x2b8]("ATY,fb_size")
+    0xbe8720c  rax = rax->vt[0x178]()
+    0xbe87219  *(uint32_t *)(info + 0x0c) = *(uint32_t *)rax
+
+    0xbe8722b  r13 = fb->vt[0x9a8](0)      0xbe87240  r12 = fb->vt[0x9b0]()
+    0xbe87257  if (r13 && r12) info+0x1e = 1
+
+`0x9b0` is `getVRAMRange` (2pq's slot), so the aperture/VRAM pair is read here
+too and both of ours are non-NULL (boot 188's `ax_vram`/`ax_vmap` = 1/1).
+
+**And the second property gates `0x35d` as well.** `isDisplayEnabled`
+(`0xbe86f9c`) in full:
+
+```c
+bool AMDHWDisplay::isDisplayEnabled(unsigned int idx, void *fb) {
+    if (this->0x58 <= idx) return false;            // 0xbe86f9f
+    bool a = this->vt[0x248]();
+    if (a || !fb) return a;                         // 0xbe86fbb
+    OSData *d = OSDynamicCast(OSData, fb->getProperty("ATY,fb_size"));
+    if (!d) return false;                           // 0xbe86fe5
+    void *p = d->getBytesNoCopy();
+    if (!p) return false;                           // 0xbe86ff6
+    return *(uint64_t *)p != 0;                     // 0xbe86ff8
+}
+```
+
+**So both properties are hard gates and both values must be NON-ZERO.**
+
+### `fb_offset` is an OFFSET, not an address
+
+`AMDRadeonX6000_AMDAccelDisplayPipe::initFramebufferResource` (`0xbe49356`),
+on the path past the two checks:
+
+    0xbe49424  rdi = pipe->0x328
+    0xbe4942b  r12 = pipe->0x340
+    0xbe49435  rax = rdi->vt[0x2d8]()         = hw->0x370
+    0xbe49441  rax = rax->vt[0x1e0]()         = mem->0x50
+    0xbe49447  r12 += rax                     *** a BASE is added ***
+    0xbe49456  reserveFrameBuffer(pipe, r12, max(0x34c, 0x348), resource)
+
+`pipe->0x328 = accel->0x1a38` (`0xbe49051`, in
+`AMDAccelDisplayPipe::init`), and `accel->0x1a38` is built by
+`AMDGraphicsAccelerator::createHWInterface` → `vt[0xb48]` →
+`AMDNavi21GraphicsAccelerator::newHWInterface` (`0xbe82fda`) →
+`new AMDRadeonX6000_AMDNavi21Hardware` (size `0x20850`). Its `vt[0x2d8]`
+returns `hw->0x370` and its `vt[0x2f8]` returns `hw->0x398` — which is
+`pipe->0x330`, the HWDisplay, closing that loop. `hw->0x370`'s `vt[0x1e0]`
+returns `mem->0x50` (the accessor at `0xbe9aae2`, inside
+`AMDGFX10HWMemory`'s table), the VRAM base.
+
+So `ATY,fb_offset` is a **byte offset relative to the VRAM base**, and
+`max(info+0x08, info+0x0c)` is the length reserved — `info+0x08` is already
+correct at 8294400, so `ATY,fb_size` is belt-and-braces for the length and
+load-bearing only for `isDisplayEnabled`.
+
+### We publish neither, and the control is valid
+
+`grep -c ATY framebuffer.plist` = **0**, against a control in the same file:
+`IOFBMemorySize`, `IOFBGammaCount` and the whole `RBFB*` family are present
+(rule 26 — the first version of this check had no control and proved nothing).
+`ax0_fi340 = 0` and `ax0_fi34c = 0` are **exactly those two absences
+agreeing** — two fields, one cause.
+
+Counted with a control across the extracted kexts (`ATY,SurfInfo` present in
+`AMDSupport`, absent in `AMDFramebuffer`):
+
+| kext | `ATY,fb_offset` | `ATY,fb_size` | role |
+|---|---|---|---|
+| `AMDFramebuffer` | 1 | 1 | producer |
+| `AMDRadeonX6000Framebuffer` | 1 | 1 | producer |
+| `AMDRadeonX6000` | 1 | 1 | consumer |
+| `AMDSupport` | 0 | 0 | — |
+| `IOGraphicsFamily` | 0 | 0 | — |
+| `IONDRVSupport` | 0 | 0 | — |
+
+**Neither string exists in `IOGraphicsFamily` or `IONDRVSupport`**, so the
+`IONDRVFramebuffer` desktop could never have obtained a hardware display pipe
+either. That is an independent corroboration from the opposite direction, and
+it retires the long-standing puzzle of why the software compositor was never
+one flag away.
+
+`AMDFramebuffer` publishes them in `initializeSetDisplayMode` (`0x2a34e0`) and
+`resetDriverModeParameters` (`0x2afa10`) via `vt[0x288]` =
+`setProperty(key, bytes, length)` with **`ecx = 8`** for both:
+`&this->0x7e0` for the offset, and for the size
+`(this->0x800 ? this->0x800 : this->0x818)` where
+`this->0x818 = this->0x850 * this->0x870`.
+
+**The class is `OSData`, established from the use and not from the GOT**: the
+consumer calls `vt[0x178]` and then *dereferences* the result, which is
+`getBytesNoCopy()` returning a pointer. An `OSNumber` would have returned the
+value itself. Rule 13's habit applied to a type.
+
+### The change, and the one thing it deliberately gets wrong
+
+Build **`59124B3A`** (fbkext) publishes both as 8-byte `OSData` behind
+`-rbgpufbaty`, offset defaulting to **16 MB** and tunable with
+`rbgpufbatymb=<1-3072>` (refusal publishes the refused value, rule 19). Rule 30:
+`-rbgpufbaty` neither prefixes nor is prefixed by `-rbgpufbvbl`,
+`-rbgpufbvram`, `-rbgpufbvramrange`, `-rbgpufbaccel`, `-rbgpufbmatch` or
+`-rbgpufbnocrumb`.
+
+**The truthful offset is 0 and 0 cannot be used.** Our scanout *is* at VRAM
+offset 0 — the GOP framebuffer is BAR0 offset 0 (2pr) and the aperture is
+`withSubRange(bar0, 0, kApertureBytes)` — but the gate is
+`cmpq $0x0, (%r15); je fail`, so an offset of 0 is indistinguishable from the
+property being absent, and AMD's own driver never puts the scanout there.
+
+**So state the expected outcome before the boot**: the display engine keeps
+scanning offset 0 while the compositor is told the framebuffer lives at 16 MB.
+If the chain works, the pipe goes **ACTIVE** and the panel shows a **stale or
+wrong image**. That is a working PIPE with a wrong IMAGE, and it is the point
+of the boot — SSH and the probe are the instruments, not the screen. Nothing
+is written to the display engine, so this cannot wedge DCN; it is reversible by
+removing one boot-arg. Pointing the scanout at the same offset means writing
+the DCN 3.1.2 primary-surface registers, which this kext has never done, and is
+a separate and much narrower step **once the chain is proven**.
+
+Also added: `ax*_b35d`. `pipe->0x35d` was never probed and is now known to be
+a gate; it is `1` iff `ATY,fb_size` is published non-zero, so it separates
+"the property landed" from "it did not" without inference.
+
+Plugin build **`64D3D687`**. `SystemKernelExtensions.kc` count 0,
+`IOGraphicsFamily` in the plugin's `Info.plist` 0.
+
+### Predictions for boot 190, written down first
+
+- `ax0_b35d` **1** (was unread; 0 would mean the property did not land)
+- `ax0_fi340` **0x1000000** (16 MB), `ax0_fi34c` **8294400**
+- `ax0_active` **1**, `ax0_gate` **0**, `ax0_say` "ALL THREE OPEN"
+- `Failed to submit transaction` / `IOReturn: 0x2d8` → **0**
+- `fb_vbl_ot_armed` **present for the first time** — a transaction finally queued
+- `RBFBAtyArmed Yes`, `RBFBAtyOffset 16777216` in `ioreg -rl -c RBAMDFramebuffer`
+- the screen wrong or stale, by construction
+
+If `b35d` is 1 and `fi340` is 0x1000000 but `active` is still 0, the remaining
+suspects are `index != 0` and `reserveFrameBuffer` failing, both inside
+`initFramebufferResource`, and `r380` names which.

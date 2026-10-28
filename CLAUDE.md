@@ -362,6 +362,65 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**BOOT 189: THE DEFECT IS TWO REGISTRY PROPERTIES WE NEVER PUBLISHED (2w9).**
+Build `C025F308`, armed, both one-shots 0, `diag_used` **658**/768, all three
+samples byte-identical. **`ax0_w/h/bpp/fmt` = 1920 / 1080 / 4 / 4**, so
+`getPixelInformation` succeeded and the base's half is correct; the failure is
+unambiguously inside AMD's hook, as 2w8 predicted. And
+**`ax0_fi348` = 8294400 = 1920x1080x4 EXACTLY while `ax0_fi340` = 0** - the
+size right, the address zero.
+**THE CHAIN IS NOW CLOSED, READ END TO END.**
+`set_display_mode_and_vram` (`0xbe48604`) passes **`&pipe->0x340`** as the
+`_FRAMEBUFFER_INFO*` out-parameter of `machine->0x188`'s slot `0x130` and then
+requires `ok`, `pipe->0x35d == 1` and `pipe->0x340 != 0`. Rule 7 on
+`AMDRadeonX6000_AMDHWDisplay`: call `0x128` -> dump `0x138` =
+**`isDisplayEnabled`**, call `0x130` -> dump `0x140` =
+**`getDisplayInfo(unsigned, bool, bool, void*, _FRAMEBUFFER_INFO*)`**. And:
+
+    getDisplayInfo (0xbe8700e)
+        info+0x00 = *(uint64_t *)OSDynamicCast(OSData,
+                        fb->getProperty("ATY,fb_offset"))->getBytesNoCopy()
+        info+0x0c = *(uint32_t *)  ...  ("ATY,fb_size")   ...
+    isDisplayEnabled (0xbe86f9c)
+        returns *(uint64_t *)ATY,fb_size != 0      -> pipe->0x35d
+
+**So BOTH properties are hard gates and both values must be NON-ZERO**, and
+`ATY,fb_offset` is a byte **OFFSET**, not an address: `initFramebufferResource`
+computes `pipe->0x340 + hw->0x370->vt[0x1e0]()` (= `mem->0x50`, the VRAM base)
+and reserves `max(info+0x08, info+0x0c)` there. `pipe->0x328` is
+`accel->0x1a38` = **`AMDRadeonX6000_AMDNavi21Hardware`** (`newHWInterface`
+`0xbe82fda`), whose `vt[0x2f8]` returns `hw->0x398` = `pipe->0x330`, the
+HWDisplay - closing that loop too.
+**The class is `OSData`, established from the USE not the GOT**: the consumer
+calls `vt[0x178]` and then dereferences the result, so it is
+`getBytesNoCopy()`. An `OSNumber` would have returned the value itself.
+**WE PUBLISHED NEITHER.** `grep -c ATY framebuffer.plist` = 0 against a valid
+in-file control (`IOFBMemorySize`, `IOFBGammaCount`, the `RBFB*` family all
+present). `fi340 = 0` and `fi34c = 0` are **exactly those two absences
+agreeing** - two fields, one cause.
+**AND NEITHER STRING EXISTS IN `IOGraphicsFamily` OR `IONDRVSupport`**
+(control: `ATY,SurfInfo` present in `AMDSupport`), so the `IONDRVFramebuffer`
+desktop could never have got a hardware display pipe either. The producers are
+`AMDFramebuffer` / `AMDRadeonX6000Framebuffer` (`setProperty(key, bytes, 8)`
+via `vt[0x288]`, from `this->0x7e0` and
+`this->0x800 ? : this->0x850 * this->0x870`); the consumer is `AMDRadeonX6000`.
+**2w7 IS CORRECTED**: `configureDisplay` (`0xbe87bd4`) is slot `0x138`'s real
+target but **never touches its `_FRAMEBUFFER_INFO*`** - `%rcx` is clobbered at
+`0xbe87c34` and its `%rbx` is the `IOAccelResource2`. `getDisplayInfo` is the
+filler. Third milestone in a row where the right static chain was attached one
+link off; the probe caught it again.
+**NEXT, fbkext `59124B3A` + plugin `64D3D687`**: `-rbgpufbaty` publishes both
+as 8-byte `OSData`, offset default **16 MB**, tunable `rbgpufbatymb=<1-3072>`.
+**The truthful offset is 0 and 0 cannot be used** - the gate rejects it and our
+scanout IS at VRAM offset 0 (2pr). **So say the outcome before the boot: if the
+chain works the pipe goes ACTIVE and the panel shows a STALE or WRONG image.**
+A working PIPE with a wrong IMAGE is the point; SSH and the probe are the
+instruments, not the screen. Nothing is written to the display engine, so this
+cannot wedge DCN, and one boot-arg reverses it. Pointing the scanout at the
+offset needs DCN 3.1.2 primary-surface writes - a separate, narrower step
+**once the chain is proven**. `ax*_b35d` added: never probed, now known to be a
+gate, and `1` iff `ATY,fb_size` landed.
+
 **BOOT 188: THE PROBE ANSWERS, AND IT REFUTES 2w4/2w5 (2w7).** `rbgpu-boot`
 188, armed, both one-shots 0, `diag_used` **613**/768. The capture is
 incomplete (six files - the box rebooted ~40 s into `plugin_check.sh`), but
@@ -1084,7 +1143,11 @@ nothing downstream, 2q7), `-rbgpuiop` (opens the IOPresentment vendor gate;
 correct, verified, inert without its one-shot — **keep it**), `-rbgpuagdc`
 (the AGDC bridge), `-rbgpuaccelprobe` (2w3 - three read-only samples of the
 three bits behind `kIOReturnNotReady`; reads only, refuses on a class too
-small for the offsets), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
+small for the offsets), `-rbgpufbaty` (2w9 - publishes
+`ATY,fb_offset` and `ATY,fb_size`, the two properties `AMDHWDisplay` reads off
+the framebuffer; **the offset it publishes is deliberately not the truthful 0**,
+so the composited image lands where the scanout is not reading - expect a wrong
+picture with an active pipe), `-rbgpuflipprobe` (already answered, writes nothing), `-rbgpuagdccaps`
 (answers AGDC extended-capability types 1 CSC, 2 Gamma, 4 Degamma and 0x8000
 Cursor as well as 0x10 Scaler — off by default because three of the four carry
 a substituted field, 2sc).
