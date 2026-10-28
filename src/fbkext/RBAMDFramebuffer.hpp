@@ -130,6 +130,20 @@ private:
     uint64_t gammaCalls;
     char crumbBoot[12];   /* rbgpu-boot, the nonce (rule 11) */
 
+    /* 2wc: the 'amtr' attribute, which is how Apple's accelerator talks to an
+     * AMD framebuffer about display-pipe transactions. See the long note on
+     * setAttribute() in the .cpp. Nothing here allocates: setAttribute runs on
+     * the accelerator's own thread, so it only touches these fields and the
+     * VBL thread_call publishes them (rule 31). */
+    static const unsigned kAmtrSnapBytes = 0x80;
+    bool     amtrArmed;
+    bool     amtrSnapped;
+    uint64_t amtrGets;
+    uint64_t amtrSets;
+    uint64_t amtrPtr;
+    uint64_t amtrRefused;
+    uint8_t  amtrSnap[kAmtrSnapBytes];
+
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection
      * count; see the comment on the definition. */

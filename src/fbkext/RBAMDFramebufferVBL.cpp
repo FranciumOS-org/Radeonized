@@ -56,6 +56,21 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBVBLEnables", (UInt64)vblEnables, 32);
     setProperty("RBFBVBLFires", vblFires, 64);
     setProperty("RBFBVBLRunning", vblRunning);
+
+    /* 2wc: the 'amtr' counters. They live here and not in the attribute
+     * handlers because those run on the accelerator's thread with its locks
+     * held and must not allocate; this is the thread_call. Rule 14 - the
+     * counts are published whether or not they moved, so zero is a reading
+     * and not an absence, and the refusal path has its own key (rule 19). */
+    setProperty("RBFBAmtrArmed", amtrArmed);
+    setProperty("RBFBAmtrGets", amtrGets, 64);
+    setProperty("RBFBAmtrSets", amtrSets, 64);
+    setProperty("RBFBAmtrSnapped", amtrSnapped);
+    setProperty("RBFBAmtrPtr", amtrPtr, 64);
+    setProperty("RBFBAmtrRefused", amtrRefused, 64);
+    if (amtrSnapped) {
+        setProperty("RBFBAmtrSnap", amtrSnap, (unsigned int)sizeof(amtrSnap));
+    }
 }
 
 void RBAMDFramebuffer::armVBL(void)
