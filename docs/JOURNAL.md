@@ -44960,3 +44960,78 @@ instrument - but the `NOMEDIAN` branch made that a legible fact instead of an
 empty file, which is the whole point of rule 14. **And the daemon did not cause
 the wedge**: boot 203's first timeout at **+21 s** sits inside the +19..+25.8 s
 band measured in three boots that ran no early load at all.
+
+## 2x0 — CORRECTION to 2wz: the wedge is NOT the GPU-framebuffer blocker
+
+**2wz's closing claim "the frontier is the wedge" is WITHDRAWN**, on the user's
+correction, made in one line: *"we are in CPU framebuffer instead of our own
+GPU one which the problem is in... this one never had a issue."*
+
+**THE FLAW IN 2wz'S REASONING.** Boot 203 is an `rbgpu-fb=0` boot:
+`IONDRVFramebuffer` owns the panel and `CompositorSW` rasterises on the CPU.
+**That boot had the wedge (+21 s to +84 s) and its desktop was fine** - a
+stable ~25 fps and usable (2wy, reported from the screen). So 2wz measured the
+wedge's effect on **a benchmark**, in a configuration whose desktop never had
+the defect, and then promoted it to the frontier. A GPU wedge is *structurally
+invisible* to a CPU-composited desktop, because that desktop never submits GPU
+work; only a GPU client like `metal_probe` can see it. **Every "slow reading"
+in 2wz is metal_probe's, not the product's.**
+
+**AND THE WEDGE IS POSITIVELY ELIMINATED AS THE GPU-FB BLOCKER, BY A
+MEASUREMENT ALREADY IN HAND.** 2wl recorded that in boot 196, with the GPU
+framebuffer up and the desktop at ~0.09 fps, **typing into Spotlight made the
+frames smooth while typing**, and *adding* characters counted while *deleting*
+did not. A wedged GPU running at 0.2 buffers/s cannot produce smooth frames on
+demand - it does not care what is typed. **So during boot 196's typing the GPU
+was not wedged, and the 0.09 fps idle rate was therefore not a wedge.** 2wl's
+frontier stands untouched: *why does a change on screen not produce a
+transaction unless it is a keystroke?* The chain runs fast when asked; it is
+not being asked.
+
+**THE ~10 SECOND COINCIDENCE IS NOW THREEFOLD, AND RULE 18 APPLIES WITH MORE
+FORCE, NOT LESS.** Three independent mechanisms each predict ~10 s per frame:
+
+    2wi  transaction rate     0.093 sets/s  = one per 10.8 s
+    2wt  the K>=4 wedge cliff               = 6-10 s
+    2wz  0.2 buffers/s during churn, ~2 buffers per frame
+                                            = one per ~10 s
+
+docs/RULES.md already warns that two numbers agreeing on one figure is not an
+identification. **Three is more suspicious, not less.** The tempting
+unification - that transaction supply is low *because* the GPU cannot retire
+work, collapsing 2wi's two candidates into one with the wedge upstream - is
+**refuted by the typing observation above**, so it must not be written as the
+story. Do not spend a boot on it.
+
+**THE CORRECTED PICTURE.** For a GPU-composited desktop at 144 Hz, two
+conditions must hold, and they are not equally binding:
+
+    (a) transaction SUPPLY        2wl's frontier.  THE BINDING CONSTRAINT -
+                                  0.09 fps, and typing proves the chain is
+                                  capable and merely unasked.
+    (b) the wedge not active      Caps ANY GPU client at 0.2 buffers/s while
+                                  it runs, measured 265x in 2wz. But it ran
+                                  only +21..+84 s in boot 203, so once (a) is
+                                  fixed it is a ~60 s stutter near boot, not a
+                                  standing cap - unless it runs continuously,
+                                  which boot 200 showed it can (+20..+460 s).
+
+**So the wedge is a real, measured, 265x defect and it is the SECOND problem,
+not the first.** 2wt's "two independent defects" was right and 2wz got their
+order wrong.
+
+**WHAT SURVIVES 2wz UNCHANGED**, because none of it depends on the framing:
+the rate tracks the churn at both edges in one boot; permanent degradation is
+refuted (recovery at +85 s to 26.985 ms); the 175 ms quantum is not a quantum
+(7.645-6104 ms, an 800x continuum); the contention lead is backwards (submits
+low while slow, high while fast); `adv/sub` is not a discriminator; and
+**144 Hz needs 6.944 ms while the chip measured 7.645 ms (91 %) and, in boot
+199, 632 buffers/s (4.4x)**. The hardware does the target rate.
+
+**RULE, PAID FOR HERE.** *A measurement of a defect in a configuration that
+does not exhibit the defect does not locate the defect.* Boot 203's desktop was
+healthy throughout; nothing in it could have told us what breaks the GPU
+framebuffer. State which configuration a reading comes from, and whether that
+configuration has the symptom, **before** promoting the reading to a frontier.
+Rule 33's shape - name the object a number belongs to - applied to a whole
+experiment rather than a field.
