@@ -44715,3 +44715,125 @@ resolves everything with **0** from `SystemKernelExtensions.kc`,
 `grep -c IOGraphicsFamily src/plugin/Info.plist` = 0, and
 `nm | grep -c rbgpu_rate_start_2wx` = 1 so the symbol is really in the shipped
 binary.
+
+## 2wy — boot 201: the sampler read an IDLE GPU, and the user reordered the limiters
+
+**BOOT 201, armed, `rbgpu-boot` 201, `rbgpu-fb` 0 so `RBAMDFramebuffer`
+declined and the desktop ran on `IONDRVFramebuffer`.** The 2wx sampler
+delivered, and the first reading of it was mine to get wrong.
+
+    rbgpu-rate   b=201 rate w=10 n=15
+                 a=11,91,7,53,4,2,5,5,73,7,1518,1882,70,21,117
+                 u=6,102,27,45,0,11,0,40,143,0,2140,4569,168,108,255
+    rbgpu-sched  b=201 hk=1 sub=891 adv=506 smax=105 gmin=0
+                 gmean=197777 gmax=9515289
+                 h=38,358,25,7,6,6,1,3,4,4,8,13,4,28
+
+**THE PRE-STATED PREDICTION'S PREMISE WAS UNMET, SO NONE OF ITS THREE BRANCHES
+APPLY.** 2wx said: "`a=` high (order 2000-3000 per 10 s window) in the first one
+or two windows and then falling by ~8x ... **confirms** it", and "`a=` flat and
+low from window 0 means boot 199's 1.582 ms was something else entirely". `a=`
+was **11** in window 0. But `u=` was **6** - and **four of the fifteen windows
+have ZERO submits**. The GPU was not slow in those windows, it was **idle**.
+With `rbgpu-fb=0` the desktop composites on the CPU (`CompositorSW`, 2pd) and
+never asks the GPU for a frame, so no sampler of work *done* can read a rate
+there. **The second branch is therefore NOT triggered: "flat and low from
+window 0" is fully explained by an absent load and says nothing about whether
+the fast state existed.** The user put it in one line - *"of course its cpu
+cause we are in the CPU ran framebuffer"* - and it is the correct reading.
+The recurring error, thirty-odd instances now: I did not say what would have
+to be true for the series to mean anything. **What saved the boot is that `u=`
+was published beside `a=`**, so the dead windows are legible instead of being
+read as a refutation. A rate instrument must carry its own demand.
+
+**THE INSTRUMENT SELF-CHECKS, AND IT PASSES.** `rbgpu-rate`'s windows are
+deltas of the same counters `rbgpu-sched` totals, and the two keys are written
+by different code at different times. Cumulative `u` runs
+6,108,135,180,180,191,191,231,374,374,**2514**; cumulative `a` runs
+11,102,109,162,166,168,173,178,251,258,**1776**. `sub=891` and `adv=506` both
+fall **inside window 10** - so the two independently written keys agree on the
+same counters and date the sched flush to ~+100 s. 2wx is sound; only its
+interpretation was wrong.
+
+**THE CHURN TIMELINE, BOOT-SEPARATED.** Rule 28 bit immediately: the first
+`event timeout` in an 8-minute window reads **22:40:32**, which **predates
+`kern.boottime` 22:41:06** - it is boot 200's tail. Split at the boundary,
+boot 201 has 345 of the 436 lines: **29 `event timeout`, 42
+`checkGPUProgress`, 29 `not hung`, 29 `no channel associated`, 157
+`GPURestart`**, running **+25.8 s to +104 s**, then silence.
+
+**THREE BOOTS NOW AGREE ON WHEN THE WEDGE STARTS**: first timeout at
+**+19 s** (199), **+20 s** (200), **+25.8 s** (201). And three boots agree on
+the post-churn rate: **175.7** (199), **184-190** (200), and boot 201 measured
+by hand at **+608 s, quiet: 181.157 ms, 5.5 buffers/s**, pipelined spread
+0.576 ms over 6 buffers - the same single-release tick. The correlation
+*churn quiet -> ~180 ms* is now three for three.
+
+**THE REGIME DISCRIMINATOR IS THE RATIO, NOT THE ABSOLUTE COUNT.** `adv/sub`:
+
+    boot 199 fast window   46457/12191 = 3.81
+    boot 200 whole boot     5686/10728 = 0.53
+    boot 201 w10            1518/2140  = 0.71
+    boot 201 w11            1882/4569  = 0.41
+
+Boot 201's only two loaded windows (+100-120 s, the burst that overlaps the end
+of churn) are **slow-regime**, which is what boot 200 already said about the
+post-wedge state. A ~6-9x separation, and it normalises out the load - which
+the absolute `a=` does not, as window 0 just demonstrated.
+
+**THE USER REORDERED THE LIMITERS, AND IT CHANGES THE TARGET.** Reported from
+the screen, the one instrument only they can read: **in this CPU-framebuffer
+boot the desktop is a stable ~25 fps and usable**; the frame-presentation
+defect belongs to the GPU-framebuffer configuration.
+
+    software FB, boot 201      ~25 fps  usable   CPU rasterisation (2pd, ~48% of
+                                                 WindowServer's main thread)
+    GPU FB, boots 195/196      0.09 fps          transaction supply
+                                                 (RBFBAmtrSets 13 in 167 s)
+    the tick's ceiling on any GPU work  5.7/s    the 175 ms release quantum
+
+**So the 175 ms tick was NEVER what held the GPU-framebuffer desktop to one
+frame per 10 s** - 0.09 fps is **60x below** what even the slow tick allows.
+Two independent limiters are stacked and the transaction supply is by far the
+tighter; the quantum only becomes binding once supply is fixed, and then caps
+us at 5.7 fps, still **25x** short of 144. And 25 fps says the CPU path is a
+usable fallback, not a road to 144 Hz. **2wt's "two independent defects" stands
+and gains a third**: supply, quantum, wedge.
+
+**THE UNMEASURED WINDOW IS +0 TO +19 s**, and it is the only place the fast
+state has ever been seen. Boot 199's 1.582 ms has no timestamp; whether it
+preceded that boot's first timeout is **inferred from how long a 120-buffer
+bench takes plus Metal init, not measured** (unchanged since 2ww). No terminal
+exists that early and the desktop will never load the GPU in an `rbgpu-fb=0`
+boot, so **the load has to be ours and it has to come from launchd**.
+
+**`tools/earlybench.sh` + `tools/com.rembrandtgpu.earlybench.plist` (2wy).**
+A `RunAtLoad` daemon, no `KeepAlive`, self-stopping at +180 s, sampling every
+3 s into `/var/log/rbgpu-earlybench.log` with seconds-since-boot on every line.
+It is a **120x DISCRIMINATOR, not a rate measurement**: `--bench 2` separates
+1.5 ms from 180 ms with vast margin, every line carries `n=` so no later reader
+takes a median of 2 for a rate (rule 18), and the last sample is `--bench 20`
+for a figure comparable to the 181.157 ms measured by hand here.
+**Rule 16 - the instrument is a suspect**: this submits GPU work and
+`--queues 4` is a known wedge trigger, so it uses ONE queue via `--bench` and
+never `--queues`; the control is already in hand, because three boots with no
+early load put the first timeout at +19..+25.8 s. **Rule 21**: it unsets
+`DYLD_INSERT_LIBRARIES` explicitly rather than trusting launchd's clean
+environment. **Rule 14**: four paths out, each saying something different -
+`FATAL` missing binary, `NOMEDIAN` with the raw head (so a Metal device that
+cannot be created before login is distinguishable from a crash), a non-zero
+`rc=`, and the sample itself. **All four were smoke-tested on boot 201**, and
+the awk parser was checked against the real 181.157 ms and 1.582 ms lines plus
+a negative control (rule 26 - a parser is an instrument too).
+
+**SAID BEFORE THE BOOT.** A sample at +5..+15 s reading **~1.5 ms** and the
+first `event timeout` landing after it **confirms** the hypothesis: the healthy
+state exists and the wedge ends it. A sample that early reading **~180 ms**
+**kills** it - the quantum is present from the start and boot 199's 1.582 ms
+was something else, which would make it the outlier needing explanation rather
+than the baseline. `NOMEDIAN` throughout means Metal needs a user session and
+the daemon cannot reach that window at all, which is a result about the
+instrument, not the chip. And if this boot's first timeout lands markedly
+earlier than +19 s, **the load itself provokes the wedge** - also a result.
+**No kext change, no boot-arg change, no plugin rebuild**; `rbgpu-fb` stays 0
+(rule 38), so this boot risks nothing on the display side.

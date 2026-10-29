@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rembrandtgpu.earlybench</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/rbgpu-earlybench.sh</string>
+    </array>
+    <!-- RunAtLoad with NO KeepAlive: one run per boot, and the script itself
+         stops at +180 s. A daemon that relaunches forever is a worse failure
+         mode than the measurement is worth (rule 37's shape: it must stay
+         removable from the machine it runs on). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>AbandonProcessGroup</key>
+    <false/>
+    <key>StandardErrorPath</key>
+    <string>/var/log/rbgpu-earlybench.stderr</string>
+</dict>
+</plist>
