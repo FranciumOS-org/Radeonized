@@ -45967,3 +45967,60 @@ TCC grant, once, against a binary whose identity does not change.
 **The real fix is the open question above**: what makes WindowServer treat the
 panel as a consumer that needs frames. A workaround that needs a screen
 recorder running forever is not a driver.
+
+## 2xb — THE BRIDGE IS BUILT, AND IT IS NOT A FIX
+
+`tools/dstream.m` + `make dstream` -> `build/out/RBDisplayStream.app`, plus
+`tools/com.rembrandtgpu.displaystream.plist` (a LaunchAgent, which the **user**
+installs). It holds a display stream open on the main display and **discards
+every frame**, which 2xa measured as worth 0.05 -> 71.30 sets/s.
+
+**CGDisplayStream IS ALIVE AT RUNTIME ON 15.8.1.** The SDK marks every entry
+point `unavailable: obsoleted in macOS 15.0`, so the calls **will not compile**
+and `-Wno-deprecated-declarations` does not help. But `dlopen` +
+`dlsym` resolves `CGDisplayStreamCreateWithDispatchQueue`,
+`...Start`, `...Stop` and `...UpdateGetRects`, with **`CGMainDisplayID` as a
+positive control and a made-up name as a negative one** - and AnyDesk requires
+the same symbols and runs here (2x9). So `dstream.m` binds them by hand.
+**The first version of that check was itself wrong** and is worth recording:
+it used `RTLD_DEFAULT` from a binary that linked no CoreGraphics, so it searched
+nothing and reported all four `missing`. Rule 26 on a four-line probe.
+
+**It reports its own effect.** frames/s *and* `RBFBAmtrSets`/s side by side,
+with the panel's vblank as the clock, and it names the failure when a stream
+creates but delivers nothing - which is the precise shape of `framepump`'s
+three-exchange failure in 2x5, where "didn't work" meant TCC-denied, then
+ran-with-zero-frames, then TCC-denied again.
+
+**NOT TESTED END TO END. `CGDisplayStreamCreateWithDispatchQueue` returned
+NULL under this session's shell** - Screen Recording is keyed to a code
+identity and a bare CLI binary inherits whichever terminal launched it, which
+here is the Claude app. The tool said so in one line instead of reporting a
+quiet zero, which is the whole point of the design, but **no measurement here
+shows the bridge working**; rule 14 applies to it exactly as to anything else.
+The `.app` bundle exists only to give it a stable TCC identity:
+**ad-hoc signed with a fixed `CFBundleIdentifier`, re-signed by the make target
+rather than by hand**, because 2x5 lost `framepump`'s grant to a rebuild.
+
+**AND IT IS A WORKAROUND.** A driver that needs a screen recorder running
+forever is not a driver. The open question is unchanged and is the real fix:
+**what makes WindowServer believe the panel itself needs no frame?**
+
+### WHERE THE REAL FIX IS BEING LOOKED FOR, AND WHY IT STOPPED HERE
+
+SkyLight has exactly one throttle symbol, **`WS::Updater::UpdateState::
+add_non_throttled_display`** (`0x7ff807e2db64`), and `WS::Updater::` is the
+compositing scheduler (`UpdateDisplays` `0x7ff807e2e609`, `note_will_update`,
+`process_per_display_prep_data`, `prepare_coreanimation`,
+`composite_windows_to_destination_and_region`). `add_non_throttled_display` is
+**a plain `vector<shared_ptr<Display>>::push_back`** onto `UpdateState+0x140`,
+so the decision is in its callers - of which there are **two**, both inside
+`UpdateDisplays` (`0x7ff807e2f0af`, `0x7ff807e2f2b6`), and **both are
+wholesale loops** adding every display in a vector, selected by
+`testb $0x1, -0x557(%rbp)`. So there is no per-display throttle predicate
+there, and `process_per_display_prep_data` does not call it at all.
+**Deliberately stopped**: following spilled stack slots through a 57 000-line
+region is how this project attached a correct chain one link off **seven**
+times (rules 33/35). The better instrument now exists - a reversible
+40-second reproducer with two controls - and the next step should use it
+rather than a static chain.
