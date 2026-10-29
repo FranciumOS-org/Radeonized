@@ -45326,3 +45326,76 @@ address must be found elsewhere. `G=` high with the screen **still** stale, or
 scanout surface. The user's proposal - a synthetic typing source at 144 Hz -
 is deliberately **not** taken: it would force damage and still show only one
 frame in three, because it treats the symptom rather than the stale pointer.
+
+## 2x4 — the poll is DEAD by its own kill condition, and nullarc does not flip at all
+
+**BOOT 208, live, fbkext `4C28785D` confirmed running** (`RBFBPollArmed`
+present; rule 15), `-rbgpufbpoll` a whole token in boot-args (rule 30),
+uptime 256 s.
+
+    RBFBPollArmed     Yes
+    RBFBPollReads     32772      of RBFBVBLFires 32985  = 99.4 %
+    RBFBPollChanges   1          <-- the kill condition
+    RBFBHubpRejects   0          RejectAddr 0, RejectWhy 0
+    RBFBPollFirstSeen 0xf4_1002_a000
+    RBFBHubpLast      0xf4_110e_2000
+    RBFBHubpWrites    213  ==  RBFBAmtrSets 213   (0.83/s)
+
+**2x3 said before the boot: "`G=` near 0 means Apple does NOT update that
+field outside a transaction, the poll reads a constant, and the address must
+be found elsewhere." `G=1` in 32772 reads. So `-rbgpufbpoll` is ELIMINATED**,
+and cleanly - it ran on 99.4 % of vblanks, refused nothing, and simply had
+nothing to follow. `_AMD_PIPE_FLIP +0x08` is a **snapshot written at
+transaction time**, not a live mirror of the scanout surface. The screen is
+unchanged, as the user reports.
+
+**WHAT NULLARC ACTUALLY DOES - and it is not what 2sj recorded.** Read from
+the source (MIT/GPL-2.0 + PolyForm-NC for `src/phxaccel`, **no AI
+restriction**; NootedRed and NootRX remain unread under their licence).
+
+- `Dcn314Scanout::program_scanout` writes `DCSURF_PRIMARY_SURFACE_ADDR_LO/HI`
+  **once**, with the timing. **There is no flip anywhere in nullarc** - no
+  `SURFACE_UPDATE_LOCK`, no `FLIP_CONTROL`, no per-frame address change. The
+  grep is empty against a file that names both address registers.
+- `phxfb.cpp` contains **zero** `write32`/`mmio` calls: their framebuffer
+  touches no registers at all.
+- `getVRAMRange()` **returns `getApertureRange(kIOFBSystemAperture)`** - the
+  same single scanout buffer. (**Ours already does this**, so that is not the
+  difference.)
+- **The difference is who presents.** Their accelerator is *NullMoth's*,
+  written against an **NVIDIA RM**: "nothing on the GPU reads those surfaces -
+  **the display pipe copies finished frames by CPU**". Their "VRAM" is
+  physically contiguous system memory and their GPU addresses are numbers from
+  a private range **that never enter a page table**.
+- They measured the copy path: through the BAR a 2560x1600 frame took
+  **~110 ms (~7 fps, the whole desktop lagged)**, so they copy through the
+  **system-RAM alias** of the carve-out instead, with **non-temporal stores**
+  (the alias comes back write-back though it asks for write-combine, and plain
+  stores stayed in the CPU cache - "stripes").
+
+**SO NULLARC NEVER SOLVED THE FLIP PROBLEM - IT AVOIDS IT.** One fixed
+scanout buffer, and every finished frame is CPU-copied into it. That is why
+they need no flip registers and no transaction cadence. **Their 120 Hz is not
+evidence that Apple's accelerator can be made to flip**, because their
+compositor is their own and the GPU never presents.
+
+**WHAT THAT MEANS FOR US.** We are in a strictly different configuration:
+Apple's real `AMDRadeonX6000` composites into real VRAM surfaces and presents
+through the display-pipe transaction, which we receive at **0.08-0.83/s**. The
+fork is now explicit:
+
+    A  COPY, nullarc's way.   Map the carve-out through its system-physical
+       alias - already measured here, MC 0xF4_0000_0000 = 0x7_8000_0000 - and
+       non-temporal-copy the composited surface into the scanout buffer on
+       each vblank. Independent of flips entirely. Costs 8.29 MB/frame;
+       1.19 GB/s at 144 Hz. Proven to work on comparable hardware.
+    B  FIX THE CADENCE.  Find why Apple submits 0.08/s. Zero-copy and correct
+       if it can be answered, and it is where this project has been since 2wi.
+
+**B IS NOT YET ELIMINATED AND MUST NOT BE ABANDONED ON THE EVIDENCE SO FAR**,
+because the one measurement that would settle it has never been taken
+cleanly: **transactions during typing, in a window provably containing the
+typing**. 2x3's trace missed its own event, and the cumulative recovery
+(36 in 451 s) spans seven idle minutes around a short burst, so it bounds the
+burst only weakly. `tools/fbphase.py` exists precisely for this and has not
+been run.
