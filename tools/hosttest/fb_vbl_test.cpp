@@ -244,5 +244,19 @@ int main() {
         assert(f.foreignFires()==before+5);   // only the ONE foreign slot
         assert(c.fb>before);                  // ours fired plenty meanwhile
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick and 2x1's foreignFires passed");
+    // 2x3: the surface poll must run on EVERY vblank, because the whole
+    // point is to follow a swap chain we are not told about. One missed tick
+    // is one stale frame on the panel.
+    {
+        RBAMDFramebuffer f; FakeCall t,k; Counts c{};
+        f.vblCall=&t; f.vblKickCall=&k;
+        void *r=nullptr;
+        assert(f.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&f,&c,&r)==0);
+        uint64_t before=f.pollCalls;
+        for(int i=0;i<7;i++) tick(f,t);
+        assert(f.pollCalls==before+7);          // once per fire, no more, no less
+        assert(f.vblFires==7);
+        assert(f.pollCalls==f.vblFires);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires and 2x3's per-vblank poll passed");
 }

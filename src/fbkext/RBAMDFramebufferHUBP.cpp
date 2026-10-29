@@ -210,3 +210,60 @@ void RBAMDFramebuffer::hubpProgram(uint64_t mc)
         hubpReadback = ((uint64_t)rhi << 32) | rlo;
     }
 }
+
+/* 2x3: FOLLOW THE SWAP CHAIN, instead of waiting to be told about it.
+ *
+ * WHY. Boot 206, traced live at 4 Hz: during fifteen seconds of 100 WPM
+ * typing with the screen updating smoothly at the panel rate, `RBFBAmtrSets`
+ * advanced exactly TWICE - 0.13/s, identical to the idle phases either side.
+ * Two transactions cannot draw eight characters a second, so the screen was
+ * updating WITHOUT transactions: the compositor renders into the surface our
+ * HUBP write already points at, and the panel shows those renders live.
+ *
+ * The trace also showed exactly three addresses cycling - 0xf41002a000,
+ * 0xf4110e2000, 0xf41192a000, about one 1920x1080x4 frame apart - i.e. a
+ * TRIPLE-BUFFERED swap chain. We are told which buffer is current only when a
+ * transaction arrives, roughly every six seconds. In between, the compositor
+ * rotates and we keep scanning a stale buffer. That is the freeze, and it is
+ * why "typing works, stopping freezes": typing keeps re-rendering whichever
+ * buffer we happen to be on.
+ *
+ * So the transaction is the wrong thing to wait for. Apple fills the
+ * `_AMD_PIPE_FLIP` with the current surface address (2wg measured the field;
+ * 2wf measured the struct), and we already hold a validated pointer to it
+ * from the first transaction. Read it every vblank and follow it.
+ *
+ * SAFETY. This runs on our own thread_call, never Apple's thread, and
+ * allocates nothing, logs nothing and blocks on nothing (rule 31). It reads
+ * sixteen bytes from a pointer that was range-checked when it was snapped
+ * (rule 19) and that belongs to the pipe object, which outlives us. A torn
+ * read - Apple writing the pair while we read it - cannot reach the hardware,
+ * because hubpProgram() re-validates every address against the measured
+ * carve-out, the 256-byte alignment and the frame size, and counts what it
+ * refuses. Worst case is one stale frame until the next good read.
+ *
+ * It is gated on its own boot-arg AND on a transaction having arrived, so a
+ * boot without the display pipe up cannot poll a pointer that was never set.
+ */
+void RBAMDFramebuffer::hubpPoll(void)
+{
+    if (!pollArmed || !hubpReady || !amtrFlipSnapped || !amtrSets) {
+        return;
+    }
+    /* volatile: Apple updates this behind our back, which is the entire
+     * point - the compiler must not hoist the load out of the vblank. */
+    const volatile uint64_t *flip = (const volatile uint64_t *)amtrFlipPtr;
+    const uint64_t mc = flip[1];        /* +0x08 LOW, +0x0c HIGH (2wg) */
+
+    pollReads++;
+    if (!pollFirstSeen) {
+        pollFirstSeen = mc;
+    }
+    /* hubpLast is only updated by a write that passed every guard, so
+     * comparing against it means a refused address is retried next vblank
+     * rather than latching us out of the chain. */
+    if (mc != hubpLast) {
+        pollChanges++;
+        hubpProgram(mc);
+    }
+}
