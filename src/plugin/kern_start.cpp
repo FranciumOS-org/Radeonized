@@ -13896,6 +13896,118 @@ static void hooked_sched_advance_2wv(void *sched) {
     if (orig_sched_advance_2wv) orig_sched_advance_2wv(sched);
 }
 
+// ---------------------------------------------------------------------------
+// 2wx: THE REGIME TIMELINE, SAMPLED FROM THE FIRST SECOND.
+//
+// The submission rate has now been measured at three values on one binary:
+// 1.582 ms/buffer (boot 199, inside its first ~2 min), ~180 ms (boots 198 and
+// 199 late, and boot 200 once quiet) and 3.7-11 s (boot 200 while wedged).
+// Wedge activity explains the last two - active churn gives seconds, quiet
+// gives ~180 ms, measured both ways in boot 200 alone. It does NOT explain
+// 1.582 ms, and that reading is the only one taken before the boot's FIRST
+// channel timeout, which lands at +19-20 s in both boots that logged one.
+//
+// So the hypothesis is: the GPU is healthy until the first wedge and degraded
+// afterwards, permanently, even after the churn stops. If that is right then
+// the wedge is not a second defect sitting beside a quantum - it is the whole
+// thing, and 632 buffers/s (4.4x what 144 Hz needs) is what this chip does
+// when nothing has timed out yet.
+//
+// It cannot be tested from userspace: `tools/ratesweep.sh` could not start
+// before +117 s because a terminal does not exist that early, and that is
+// exactly the window that matters. But 2wv's counters already discriminate
+// the regimes on their own - advance() ran ~290/s in boot 199's fast window
+// and ~35/s in boot 200's slow one, an 8x split measured over the same phase
+// window in both - and the kext is running from the first second.
+//
+// So sample advance() and submitCommandBuffer per 10 s window into a ring and
+// write the series to NVRAM after every window. Eighteen windows = the first
+// 180 s, then it STOPS: the early window is the whole point and nothing later
+// may overwrite it. Correlating the series against the log's first
+// `event timeout` timestamp answers the hypothesis with no userspace at all.
+//
+// Reads counters only; no new boot-arg (it shares -rbgpuschedprobe, so rule 30
+// needs nothing new). The NVRAM write happens on a thread_call, the same
+// context the heartbeat has written from since 2ey - never from the hooks,
+// which stay plain statics (rule 31).
+// ---------------------------------------------------------------------------
+
+#define RB_2WX_WINDOWS 18
+#define RB_2WX_MS      10000
+
+static thread_call_t g_rb_2wx_call = nullptr;
+static uint32_t g_rb_2wx_n = 0;
+static uint16_t g_rb_2wx_adv[RB_2WX_WINDOWS];
+static uint16_t g_rb_2wx_sub[RB_2WX_WINDOWS];
+static uint64_t g_rb_2wx_last_adv_total = 0;
+static uint64_t g_rb_2wx_last_sub_total = 0;
+
+static void rbgpu_2wx_flush(void) {
+    char note[344];
+    size_t n = 0;
+    int w = snprintf(note, sizeof(note), "rate w=%u n=%u a=",
+                     (unsigned)(RB_2WX_MS / 1000), g_rb_2wx_n);
+    n = (w > 0) ? (size_t)w : 0;
+    for (uint32_t i = 0; i < g_rb_2wx_n && n < sizeof(note) - 8; i++) {
+        w = snprintf(note + n, sizeof(note) - n, "%s%u", i ? "," : "",
+                     g_rb_2wx_adv[i]);
+        if (w > 0) { n += (size_t)w; }
+    }
+    if (n < sizeof(note) - 6) {
+        w = snprintf(note + n, sizeof(note) - n, " u=");
+        if (w > 0) { n += (size_t)w; }
+    }
+    for (uint32_t i = 0; i < g_rb_2wx_n && n < sizeof(note) - 8; i++) {
+        w = snprintf(note + n, sizeof(note) - n, "%s%u", i ? "," : "",
+                     g_rb_2wx_sub[i]);
+        if (w > 0) { n += (size_t)w; }
+    }
+    rbgpu_nvram_note("rbgpu-rate", note);
+}
+
+static void rbgpu_2wx_action(thread_call_param_t a, thread_call_param_t b) {
+    (void)a; (void)b;
+    if (g_rb_2wx_n < RB_2WX_WINDOWS) {
+        uint64_t adv = g_rb_2wv_adv, sub = g_rb_2wv_submit;
+        uint64_t da = adv - g_rb_2wx_last_adv_total;
+        uint64_t ds = sub - g_rb_2wx_last_sub_total;
+        g_rb_2wx_last_adv_total = adv;
+        g_rb_2wx_last_sub_total = sub;
+        /* Saturate rather than wrap: a wrapped count reads as a small number
+         * and would look exactly like the slow regime (rule 14's shape). */
+        g_rb_2wx_adv[g_rb_2wx_n] = (da > 65535) ? 65535 : (uint16_t)da;
+        g_rb_2wx_sub[g_rb_2wx_n] = (ds > 65535) ? 65535 : (uint16_t)ds;
+        g_rb_2wx_n++;
+        rbgpu_2wx_flush();
+    }
+    if (g_rb_2wx_n < RB_2WX_WINDOWS && g_rb_2wx_call) {
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(RB_2WX_MS, kMillisecondScale, &deadline);
+        thread_call_enter_delayed(g_rb_2wx_call, deadline);
+    }
+}
+
+void rbgpu_rate_start_2wx(void) {
+    if (!checkKernelArgument("-rbgpuschedprobe")) {
+        return;
+    }
+    if (g_rb_2wx_call) {
+        return;
+    }
+    g_rb_2wx_call = thread_call_allocate(rbgpu_2wx_action, nullptr);
+    if (!g_rb_2wx_call) {
+        rbgpu_log("2wx: thread_call_allocate FAILED - no rate timeline this "
+                  "boot, and rbgpu-rate being absent means THAT, not a zero "
+                  "rate");
+        return;
+    }
+    rbgpu_log("2wx: rate timeline armed (%u windows of %u ms, rbgpu-rate)",
+              (unsigned)RB_2WX_WINDOWS, (unsigned)RB_2WX_MS);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(RB_2WX_MS, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(g_rb_2wx_call, deadline);
+}
+
 void rbgpu_sched_flush_2wv(void) {
     if (!g_rb_2wv_hooked && g_rb_2wv_submit == 0 && g_rb_2wv_adv == 0) {
         // Rule 14: say which of the two zeroes this is.

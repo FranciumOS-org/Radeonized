@@ -44599,3 +44599,119 @@ smoke test caught a bug in it immediately: `sed 's/.*sec = \([0-9]*\).*/\1/p'`
 on `kern.boottime` is **greedy through to "usec = "** and captured the
 microseconds field, printing boot+1792667083 s. Rule 16 again, and rule 26 -
 the instrument was wrong in a way that still produced plausible-looking rows.
+
+## 2wx — BOOT 200: A THIRD REGIME, AND THE WEDGE EXPLAINS TWO OF THE THREE
+
+Rule 8/15/33/34: `rbgpu-boot` **200**, `kern.boottime` **22:21:25**,
+`rbgpu-arm` consumed, `rbgpu-fb` **0** (the framebuffer declined again, so the
+display half is still not involved).
+
+**THE SWEEP, AND IT IS WORSE THAN ANYTHING MEASURED BEFORE.**
+`tools/ratesweep.sh` from +117 s:
+
+    boot+s    median(ms)   buffers/s
+       117      3690.382         0.3
+       151       645.148         1.6
+       199      4853.574         0.2
+       262     10590.280         0.1
+       340     11106.244         0.1
+       427      7129.548         0.1
+
+**Seconds per command buffer**, and 10.6 s is the number 2wi read off the
+screen as *"a new frame only about every 10 seconds"* - the first time that
+figure has appeared in a headless measurement. (The sweep's own interval
+stretched from 10 s to 34-87 s because each `--bench 6` costs six buffers; at
+0.1/s that is a minute. The interval is not the instrument's error, but the
+sampler should use fewer buffers.)
+
+**AND THE SAME BOOT RECOVERED.** At +~570 s the same binary read **186-190 ms**
+(`--perqueue`) and **184.396 ms** (`--bench`). So boot 200 went
+seconds -> ~180 ms **within one boot**, and boot 199 went 1.582 ms -> 175.7 ms
+within one boot. Three regimes now stand on one binary:
+
+    1.582 ms   632 buffers/s     boot 199, before its first channel timeout
+    ~180 ms    5.4-5.7/s         boots 198, 199 late, 200 late
+    3.7-11 s   0.1-0.3/s         boot 200 while wedged
+
+**THE WEDGE EXPLAINS TWO OF THEM, MEASURED BOTH WAYS INSIDE BOOT 200.** While
+slow, the wedge ran **continuously from +20 s to +460 s** (82 `event timeout`,
+139 `checkGPUProgress`, 82 `no channel associated`, 503 `GPURestart`, boot-200
+lines separated from 199's by timestamp against a 1040-line control). In the
+~180 ms state just now, a 3-minute window carries **0** of all three against a
+6-line control. Boot 199 is the same shape from the other side: its churn ran
+18:13:28-18:15:41 and **stopped**, and the rate settled at 175.7 ms. So:
+**churn active -> seconds; churn quiet -> ~180 ms.**
+Boot 200 also wedged far wider than 199 - **nine** distinct channels against
+four, led by `channel 5 ComputeUQ2` **47 times**, plus `SDMA0_PAGE` 53 and 12,
+`ComputeUQ7`, `SDMA0` 29 and 28, `GFX` 52, `ComputeUQ4`, `VMPT` 25.
+
+**THE SLOT LOTTERY IS DEAD.** The obvious reading of "ComputeUQ2 times out 47
+times" is that a Metal queue lands on a good slot or a bad one and the rate is
+whichever you drew. `--perqueue` holds five queues at once and times each
+**separately** (which `--queues` could not - it committed one buffer per queue
+together, so a slow slot hid inside the batch):
+
+    queue 0  186.093 ms    queue 3  188.580 ms
+    queue 1  189.988 ms    queue 4  187.988 ms
+    queue 2  186.619 ms    ratio 1.0x -> UNIFORM
+
+Every slot behaves identically. The rate is a property of the **machine's
+state**, not of the queue you were given.
+
+**AND `advance()` TRACKS THE REGIME, 8x.** `rbgpu-sched` from the same phase
+window in two boots:
+
+    boot 199 (fast)   sub=12191  adv=46457  gmean=3412 us   h[1]=38808
+    boot 200 (slow)   sub=10728  adv=5686   gmean=27956 us  h[1]=4426
+
+So `advance()` runs ~290/s in the fast regime and ~35/s in the slow one. **It
+is still not the gate** - 35/s is two orders of magnitude above the 0.1-0.3
+buffers/s actually completing - but it is a *proxy* that discriminates the
+regimes from inside the kernel, which is what the next experiment needs.
+
+**THE HYPOTHESIS, AND WHAT MAKES IT TESTABLE.** 1.582 ms is the only reading
+ever taken **before a boot's first channel timeout**, and that first timeout
+lands at **+19-20 s** in both boots that logged one (18:13:28 of a 18:13:09
+boot; 22:21:45 of a 22:21:25 boot). So: *the GPU is healthy until the first
+wedge and degraded afterwards, permanently, even once the churn stops.* If that
+holds, the wedge is not a second defect beside a quantum - **it is the whole
+defect**, the "175 ms tick" is its aftermath, and 632 buffers/s (4.4x what
+144 Hz needs) is what this chip does untouched.
+**NOT ESTABLISHED, and it must not be written as fact**: n=1 for the fast
+reading, its exact timestamp was never recorded, and whether it preceded
+18:13:28 is inferred from how long a 120-buffer bench takes (~0.25 s) plus
+Metal init, not measured. 2ws's whole characterisation of the slow state - the
+sawtooth, T = 175.77 ms at R = 0.966, the per-client phase - stands as a
+description and is now **unexplained by this hypothesis**, which says nothing
+about why the degraded state should be periodic at all.
+
+**WHY USERSPACE CANNOT TEST IT.** `ratesweep.sh` could not start before
++117 s - a terminal does not exist that early - and that is precisely the
+window in question.
+
+**SO THE INSTRUMENT MOVES INTO THE KEXT (plugin `F991B506`).**
+`rbgpu_rate_start_2wx()` samples `advance()` and `submitCommandBuffer` per
+**10 s window** into a ring and writes the series to **`rbgpu-rate`** after
+every window, for **eighteen windows = the first 180 s**, then stops so nothing
+later can overwrite the early window. Shares `-rbgpuschedprobe` (no new token,
+so rule 30 needs nothing). Counts saturate rather than wrap, because a wrapped
+count reads as a small number and would be indistinguishable from the slow
+regime. The write is on a `thread_call`, the context the heartbeat has written
+NVRAM from since 2ey - never from the hooks, which stay plain statics (rule 31).
+Armed from the peer's `start()` beside `rbgpu_accelprobe_start()`, which is
+**the** site 2w5 established runs every boot - the heartbeat path is gated on
+`-rbgpubeat` and silently did nothing for a whole boot.
+
+**SAID BEFORE THE BOOT.** `a=` high (order 2000-3000 per 10 s window) in the
+first one or two windows and then falling by ~8x, with the log's first
+`event timeout` landing at that same window boundary, **confirms** it: the
+healthy state exists and the wedge ends it. `a=` flat and low from window 0
+means boot 199's 1.582 ms was something else entirely and the fast state is not
+simply "before the first timeout". `a=` high throughout with the rate still
+slow kills `advance()` as a proxy and the series is then worth nothing.
+
+**Checks on `F991B506`**: UUID moved from `0EE32DFA`, `kmutil libraries`
+resolves everything with **0** from `SystemKernelExtensions.kc`,
+`grep -c IOGraphicsFamily src/plugin/Info.plist` = 0, and
+`nm | grep -c rbgpu_rate_start_2wx` = 1 so the symbol is really in the shipped
+binary.

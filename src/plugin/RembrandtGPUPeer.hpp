@@ -32,6 +32,8 @@ void rbgpu_progwatch_start(void);
 // IOAccelDisplayPipeUserClient2::transactionEnd answer kIOReturnNotReady -
 // accel->0xc78 bit 1, pipe->0x282 and pipe->0x298. `-rbgpuaccelprobe`.
 void rbgpu_accelprobe_start(void);
+/* 2wx: the per-window advance()/submit rate timeline -> rbgpu-rate. */
+void rbgpu_rate_start_2wx(void);
 extern volatile uint32_t g_rb_prog_stage;
 extern volatile uint32_t g_rb_step;   // 2fz: lock-free, log-free position marker
 #define RB_STEP(n) do { g_rb_step = (n); } while (0)

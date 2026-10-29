@@ -436,6 +436,95 @@ static int busy_on(id<MTLDevice> dev, double secs, uint32_t heavy, int depth) {
  * blit copy (SDMA), and a render pass that only clears (graphics). A render
  * pass with no draw call still goes down the graphics ring, which is the
  * question being asked. */
+/* 2wx: --perqueue K. IS THE RATE A QUEUE-SLOT LOTTERY?
+ *
+ * The rate has now been measured at three wildly different values on the same
+ * binary: 1.582 ms (boot 199 early), ~175 ms (boots 198 and 199 late) and
+ * 3.7-11 s (boot 200 throughout). Across those, the wedge log scales with the
+ * slowness and names the channels: boot 200 had NINE distinct channels timing
+ * out with channel 5 "ComputeUQ2" doing it 47 times, boot 199 had four.
+ * 2wt already measured that within one process queues 1-3 are fine and the
+ * fourth falls off a cliff.
+ *
+ * So the hypothesis is that a Metal command queue lands on a compute user
+ * queue slot that either works or does not, and which slot you get depends on
+ * what else on the system is holding slots. If true, the rate is not a
+ * property of the machine's "state" at all - it is which slot this process
+ * happened to be given, and the defect is a queue COUNT, not a timer.
+ *
+ * The test has to measure each queue SEPARATELY, which no earlier mode did:
+ * --queues timed one buffer per queue committed together, so a single slow
+ * slot hid behind the batch. Here each queue gets its own serial run and its
+ * own median, so a per-slot split is visible as a split.
+ *
+ * Bounded deliberately: this machine currently takes up to 11 s per buffer, so
+ * K * iters is capped and every buffer is printed as it lands. */
+static int perqueue_on(id<MTLDevice> dev, int nq, int iters) {
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(kSrc) options:nil error:&err];
+    if (!lib) { printf("  FAIL: no library\n"); return 1; }
+    id<MTLComputePipelineState> ps =
+        [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill"]
+                                           error:&err];
+    id<MTLBuffer> buf = [dev newBufferWithLength:N * sizeof(uint32_t)
+                                         options:MTLResourceStorageModeShared];
+    if (!ps || !buf) { printf("  FAIL: no pipeline or buffer\n"); return 1; }
+
+    /* All K queues are created UP FRONT, so they hold their slots
+     * simultaneously - which is the situation being tested. Creating and
+     * releasing them one at a time would hand the same slot back each time. */
+    NSMutableArray *qs = [NSMutableArray array];
+    for (int i = 0; i < nq; i++) {
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        if (!q) { printf("  FAIL: only got %d queues\n", i); return 1; }
+        [qs addObject:q];
+    }
+    printf("  perqueue: %d queues held at once, %d serial buffers each\n",
+           nq, iters);
+    printf("    queue   median(ms)     min        max      buffers/s\n");
+    fflush(stdout);
+
+    double *w = malloc(iters * sizeof(double));
+    if (!w) { printf("  FAIL: out of memory\n"); return 1; }
+    double slowest = -1, fastest = 1e9;
+    for (int i = 0; i < nq; i++) {
+        id<MTLCommandQueue> q = qs[(NSUInteger)i];
+        for (int k = 0; k < iters; k++) {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [q commandBuffer];
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                [enc setComputePipelineState:ps];
+                [enc setBuffer:buf offset:0 atIndex:0];
+                [enc dispatchThreads:MTLSizeMake(N, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+                [enc endEncoding];
+                double t0 = now_s();
+                [cb commit];
+                [cb waitUntilCompleted];
+                w[k] = now_s() - t0;
+                if (cb.error) { printf("      q%d buf%d ERROR\n", i, k); }
+            }
+        }
+        qsort(w, iters, sizeof(double), cmp_d);
+        double med = w[iters / 2];
+        printf("    %5d   %10.3f  %9.3f  %9.3f  %11.2f\n",
+               i, med * 1e3, w[0] * 1e3, w[iters - 1] * 1e3,
+               med > 0 ? 1.0 / med : 0.0);
+        fflush(stdout);
+        if (med > slowest) { slowest = med; }
+        if (med < fastest) { fastest = med; }
+    }
+    printf("    spread across queues: fastest %.3f ms, slowest %.3f ms, "
+           "ratio %.1fx\n", fastest * 1e3, slowest * 1e3,
+           fastest > 0 ? slowest / fastest : 0.0);
+    printf("    VERDICT: %s\n",
+           (fastest > 0 && slowest / fastest > 5.0)
+               ? "SPLIT - the slot decides, this is a queue-count defect"
+               : "UNIFORM - every slot behaves the same, not a slot lottery");
+    free(w);
+    return 0;
+}
+
 static int engines_on(id<MTLDevice> dev, int iters) {
     NSError *err = nil;
     id<MTLCommandQueue> q = [dev newCommandQueue];
@@ -820,11 +909,21 @@ int main(int argc, const char **argv) {
         int nq = 6;
         bool wantEngines = false;
         int engIters = 9;
+        bool wantPerQueue = false;
+        int pqn = 5;
         int samples = 120;
         int iters = 20;
         int reps = 7;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--dispatch")) { wantDispatch = true; }
+            else if (!strcmp(argv[i], "--perqueue")) {
+                wantPerQueue = true;
+                if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                    int n = atoi(argv[++i]);
+                    if (n >= 2 && n <= 12) { pqn = n; }
+                    else { printf("--perqueue N must be 2..12; using %d\n", pqn); }
+                }
+            }
             else if (!strcmp(argv[i], "--engines")) {
                 wantEngines = true;
                 if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
@@ -940,6 +1039,7 @@ int main(int argc, const char **argv) {
             if (wantBusy)     { rc |= busy_on(d, busySecs, heavy, depth); }
             if (wantQueues)   { rc |= queues_on(d, nq); }
             if (wantEngines)  { rc |= engines_on(d, engIters); }
+            if (wantPerQueue) { rc |= perqueue_on(d, pqn, 3); }
         }
         if (!wantDispatch && !wantBench) {
             printf("\n(enumerate only; --dispatch runs a kernel, "
