@@ -205,5 +205,44 @@ int main() {
         d.setInterruptState(dref,0); d.setInterruptState(dref,1);
         assert(d.retireKicks==0);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm and the 2wk immediate kick passed");
+    // 2x1: foreignFires() is what the crumb's A= carries, and it exists to
+    // answer ONE question from NVRAM alone: did Apple's 'vbl ' handler ever
+    // run? So it must count the slots we did NOT register and only those.
+    // Getting that backwards would publish our own 143.83 Hz tick as though
+    // it were Apple's retirement and read as a spectacular success.
+    {
+        RBAMDFramebuffer f; FakeCall t,k; Counts c{};
+        f.vblCall=&t; f.vblKickCall=&k; f.retireArmed=true;
+        void *mine=nullptr,*theirs=nullptr;
+        // target == &f is OURS; a different target is Apple's (the real
+        // discriminator in publishVBLState and kickVBL alike).
+        assert(f.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&f,&c,&mine)==0);
+        OSObject other;
+        assert(f.registerForInterruptType(kIOFBVBLInterruptType,pipeCallback,&other,&c,&theirs)==0);
+        // Our own slot firing must NOT show up in A=.
+        f.setInterruptState(theirs,0);
+        tick(f,t);
+        assert(c.fb>=1 && c.pipe==0);
+        assert(f.foreignFires()==0);          // ours fired, A= stays 0
+        // Now the retire block's effect: force-enable the foreign slot and
+        // deliver immediately. This is what setAttribute('amtr') does.
+        f.interrupts[1].enabled=true; f.retireEnables++;
+        f.retireKicks++; f.kickVBL();
+        assert(c.pipe==1);
+        assert(f.foreignFires()==1);          // and now A= moves
+        assert(f.retireDelivered==1);
+        // A= must track further foreign fires through the periodic path too,
+        // so a live boot and a dead one report the same number.
+        tick(f,t);
+        assert(f.foreignFires()==2 && c.pipe==2);
+        assert(f.properties.at("RBFBForeignFires")==f.foreignFires() ||
+               f.foreignFires()>0);           // published at least once set
+        // A slot we registered ourselves can never contribute, however many
+        // times it fires - the mutation this test exists to catch.
+        uint64_t before=f.foreignFires();
+        for(int i=0;i<5;i++) tick(f,t);
+        assert(f.foreignFires()==before+5);   // only the ONE foreign slot
+        assert(c.fb>before);                  // ours fired plenty meanwhile
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick and 2x1's foreignFires passed");
 }

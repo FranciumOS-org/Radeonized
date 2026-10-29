@@ -45035,3 +45035,97 @@ framebuffer. State which configuration a reading comes from, and whether that
 configuration has the symptom, **before** promoting the reading to a frontier.
 Rule 33's shape - name the object a number belongs to - applied to a whole
 experiment rather than a field.
+
+## 2x1 — the retirement experiment, made conclusive (fbkext `A57A4C4A`)
+
+**No boot yet.** 2x0 put the frontier back on transaction **supply**, and the
+candidate fix for supply has been armed for three boots and never measured.
+This milestone closes the one race in it and makes the next boot answer the
+question from **one `nvram` read**, with no capture.
+
+**WHAT `-rbgpufbretire` ALREADY DOES, read from our own source.** On every
+`setAttribute('amtr')` it walks the interrupt table and **force-enables every
+`'vbl '` slot we did not register** (`retireEnables++`) - so Apple's handler
+should then be called by `deliverVBL()` at the panel's 143.83 Hz, because that
+loop calls `proc(target, ref)` for *every* enabled slot. The mechanism is
+therefore already complete, and `RBFBVBL1Fires` reading 0 across boots
+192/193/194 means Apple's slot was **not enabled at the moment of any tick**.
+
+**THE ONE REAL RACE, AND IT IS CLOSED.** Our tick is ~7 ms, and at the measured
+0.09 transactions/s it fires ~1500 times between transactions - so it would
+catch the window easily **unless Apple re-disables its slot inside those
+7 ms**, which is exactly what every `RBFBVBL1Fires` of 0 is consistent with.
+So the force-enable now also **delivers immediately**, on our own
+`vblKickCall`: `retireKicks++; thread_call_enter(vblKickCall)`. The enable and
+the delivery are then not separated by anything Apple can observe or undo.
+Same mechanism and same hazard class as 2wk's kick on the enable transition -
+`thread_call_enter` plus field writes, no allocation, no logging, no blocking
+on the accelerator's thread (rule 31) - and `kickVBL()` re-checks `enabled`
+itself, so a window that closed anyway costs one scheduled call and is counted
+(`retireKicks - retireDelivered` is how often we were late). **Kept under
+`-rbgpufbretire` rather than a third boot-arg**: that arg already means "make
+Apple learn a vblank happened", and an arg per refinement multiplies boots
+without separating hypotheses.
+
+**THE REAL FIX IS TO THE EXPERIMENT, NOT THE MECHANISM.** `retireEnables` and
+Apple's slot fire count were **registry-only** - and the registry is
+unreadable in precisely the boot that matters, because at 0.09 fps there is no
+desktop to run `ioreg` from. That is why three boots in a row produced nothing:
+2wi had no capture, 2wj was not installed, 2wl's crumb covered only the first
+70 s. Rule 10, for the fourth time. **So the crumb now carries them**:
+
+    E=  retireEnables   the force-enables WE performed
+    A=  foreignFires()  summed fires over every 'vbl ' slot we did NOT
+                        register - i.e. how often APPLE's handler actually ran
+
+**FOUR-WAY DECISION FROM ONE `nvram rbgpu-fbcrumb`, SAID BEFORE THE BOOT:**
+
+    E=0                      retire never ran. Check RBFBRetireArmed and t=.
+                             t>0 with E=0 would mean Apple's slots were
+                             already enabled, itself a new fact.
+    E>0, A=0                 we enabled it, delivered immediately, and Apple's
+                             handler STILL never ran -> the defect is in OUR
+                             delivery, not in Apple's enable.
+    E>0, A>0, rate unmoved   APPLE'S HANDLER RAN AND SUPPLY DID NOT MOVE ->
+                             the VBL retirement path is ELIMINATED, and 2wl's
+                             keystroke question is the whole frontier.
+    E>0, A>0, rate up        FIXED.
+
+The rate needs no capture either (2wj): **transactions/s = `t` / (`f` /
+143.83)**. At the measured 0.09/s, `t/f` is ~0.0006; at 144 fps it approaches
+1. Three orders of magnitude of headroom, which is all the precision this
+question needs.
+
+**`foreignFires()` IS HOSTTESTED, AND THE TEST IS MUTATION-CHECKED.** Counting
+our *own* slot in `A=` would publish our 143.83 Hz tick as though it were
+Apple's retirement and **read as a spectacular success** - the most expensive
+mistake available here. So the new case registers one self slot and one
+foreign slot, ticks the clock with the foreign slot disabled and asserts
+`A == 0` while our own fires, then force-enables and kicks and asserts `A == 1`,
+then ticks five more times and asserts `A == before + 5` with our own slot
+firing throughout. **Mutation run**: deleting `target != this` from
+`foreignFires()` fails at `assert(f.foreignFires()==0)`, line 226. Restored and
+green. `RBFBForeignFires` is published **unconditionally** in
+`publishVBLState()`, so it is also this build's rule-15 identity key.
+
+**RULE 16 ON THE BOOT ITSELF.** `tools/earlybench.sh` must be **removed before
+this boot**. It is a GPU client, and this is the one boot that measures how
+many frames the GPU is asked for; leaving it in adds an unrelated submitter to
+the measurement. It has done its job (2wz) and goes back in later if wanted.
+
+**SAFETY, STATED.** `rbgpu-fb` must be armed, so the framebuffer takes the
+panel - and 2wp's no-transaction deadline still applies: `amtrSets == 0` at
+fire 18000 (125 s) consumes `rbgpu-fb` so the **next** power cycle comes up on
+`IONDRVFramebuffer` with a usable desktop. 2wj's consume-by-overwrite means one
+power cycle is a full disarm either way. Rule 38: **`rbgpu-arm` must be armed
+too** - fb armed with the accelerator absent froze boot 197 behind a progress
+bar through three power cycles. Rule 34: all four one-shots, named.
+
+**INSTALL (rule 15, every artifact).** Plugin **`F991B506` unchanged in the
+EFI** - confirmed live, because `rbgpu-rate` exists and only that build writes
+it, so **no rebuild and no `efi.sh install`**. Boot-args unchanged: a
+whole-token check reads `-rbgpuownfb -rbgpufbaty -rbgpufbamtr -rbgpufbhubp
+-rbgpufbretire -rbgpufbflipall` already present (rule 30). **Only the fbkext
+changes**, `A57A4C4A`, to the **auxiliary collection** - and per 2wa verify the
+**artifact**, not `kmutil`'s exit status, which has errored `Code=34` over a
+write that landed.

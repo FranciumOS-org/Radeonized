@@ -110,6 +110,7 @@ public:
     void deliverVBL();
     void publishVBLState();
     bool anyVBLEnabled();
+    uint64_t foreignFires() const;
     static void vblFired(thread_call_param_t,thread_call_param_t);
     static void vblKicked(thread_call_param_t,thread_call_param_t);
 };

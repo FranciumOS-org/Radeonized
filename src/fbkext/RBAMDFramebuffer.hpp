@@ -257,6 +257,13 @@ private:
     void deliverVBL(void);
     void armVBL(void);
     bool anyVBLEnabled(void);
+    /* 2x1: summed fires over every 'vbl ' slot we did NOT register - i.e.
+     * Apple's. The per-slot facts stay in the registry (rule 14: a last-wins
+     * key cannot express a per-entry fact), but the SUM answers the one
+     * question the crumb must survive to answer: did Apple's handler ever
+     * run? Zero with E= non-zero means we enabled its slot and it still
+     * never ran. */
+    uint64_t foreignFires(void) const;
     void publishVBLState(void);
 };
 
