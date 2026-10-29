@@ -26,6 +26,19 @@ dyld cryptex path still refuses writes with EROFS because its files carry the
 
 ## Where this stands
 
+**HDMI IS THE FULL PROJECT - MEASURED, NOT ASSUMED (2xq, boot 221).** Booted
+with the display attached and `-rbgpufbotgany` armed: `RBFBHubpOtg1/2/3` all
+read **768 = 0x300**, so **the GOP does not light HDMI on this machine** and
+there is no firmware-lit OTG to adopt. 2or's one cheap exception is spent and
+HDMI needs the whole stack (HPD, EDID over DDC/AUX, link training, a second
+OTG + HUBP + stream/link encoder, DML watermarks). Gate 1 passed with the
+display attached (`RBFBHubpRefuse 0`, `RBFBHubpOrig 0xF4_0000_0000`, 14456
+writes), and the NotReady hold held a second boot: `RBFBAmtrHeld` **19802** of
+48707 gets with **`RBFBAmtrHoldExpired` 0**. **`RBFBAmtrSets` 52.9/s is an IDLE
+figure and must NOT be compared to 2xo's controlled 81.89/s.** The tractable
+ask left is **brightness**, and its next step is a STATIC read: how `IODisplay`
+maps the parameter name `"brightness"` to the selector it calls.
+
 **THE FLICKER IS FIXED, AND IT COST 27 % OF THE FRAME RATE (2xo, boot 220).**
 `-rbgpufbnotready` answers the `'amtr'` GET the way Apple's own framebuffer
 does - `kIOReturnNotReady` while our flip is unlatched - and the user reports
@@ -2279,7 +2292,14 @@ All four are now read unconditionally and published even on refusal
 (`RBFBHubpOtg1/2/3`, `RBFBHubpOtgAnyArmed`). Mutation-tested both ways. **Said
 before the boot**: one OTG not `0x300` with bit 0 set = firmware lit HDMI and a
 fixed-mode external display is reachable; all three still `0x300` = the GOP did
-not, and HDMI is the full project),
+not, and HDMI is the full project. **2xq RAN IT, boot 221, and all three read
+`0x300`**: the firmware does NOT light HDMI here, so there is no OTG to adopt
+and 2or's cheap exception is spent. Corroborated by one `IOFramebuffer`, one
+display in `system_profiler`, and nothing in macOS seeing a sink. **The trap
+did NOT fire** - with OTG1-3 at `0x300` the OLD build would not have refused
+either, so the relaxation was never exercised and must not be recorded as
+having saved the boot; what the boot does establish is that **gate 1 passes
+with a display attached** (`RBFBHubpRefuse 0`, 14456 writes)),
 `-rbgpufbflippend` (2xm - **the tearing fix**, requires `-rbgpufbhubp`.
 Boot 217 read `RBFBHubpPendHits` **593** of `RBFBHubpPendChecks` **33877** =
 **1.75 % of flips, 1.26 a second**, programmed over a flip DCN had armed and
