@@ -45872,3 +45872,98 @@ alive and its file is growing (which it also does): it is the producer's own
 word, and it catches AnyDesk still being connected — which would make arm A
 and arm C capture arms too and destroy the contrast without saying so. Rule 16
 applied to the test's premise rather than to its reading.
+
+## 2xa — AN ACTIVE SCREEN CAPTURE IS THE LEVER. MEASURED, WITH TWO CONTROLS
+
+Live boot **210** (`kern.boottime` 10:33:11, `rbgpu-boot` 210, `rbgpu-fb`
+consumed to `0`, `RBAMDFramebuffer` publishing, **no `AnyDesk --backend`
+process**) - rule 33 and the control condition both established first. Boot
+average before the test: `RBFBAmtrSets 601` over `RBFBVBLFires 80656` =
+**1.07 sets/s** over 9.3 minutes, so the defect is present.
+
+`tools/levertest.sh`, three arms, each a **discarded 15 s settle** then a
+**25 s measured window**:
+
+| arm | sets | writes | vbl | window | rate |
+|---|---|---|---|---|---|
+| **A** idle, no capture | 1 | 1 | 3006 | 20.90 s | **0.05 sets/s** |
+| **B** capture ACTIVE | 1626 | 1626 | 3280 | 22.80 s | **71.30 sets/s** |
+| **C** idle again | 2 | 2 | 3600 | 25.03 s | **0.08 sets/s** |
+
+**A 1426x step, bracketed by two independent controls** that read 0.05 and
+0.08 - which is 2x5's frozen 0.08 sets/s reproduced twice. The capture was
+real: **21 858 347 bytes** of video written.
+
+**AND THE RATE IS THE SAME NUMBER ANYDESK GIVES, TO THREE SIGNIFICANT
+FIGURES.** 2x9 measured a connected AnyDesk session at **71.3 sets/s**; arm B
+reads **71.30 sets/s** with no AnyDesk, no network, no input and no GPU load.
+So capture accounts for the whole of AnyDesk's effect, and nothing else about
+that session needs explaining. 2x5's open question is **closed**.
+
+**`RBFBHubpWrites` tracked `RBFBAmtrSets` EXACTLY in all three arms** (1/1,
+1626/1626, 2/2), from one `ioreg` snapshot per sample. **2x5 holds**, and
+rule 38's cross-check is satisfied properly this time rather than firing on
+sampling skew.
+
+### WHAT IS AND IS NOT ESTABLISHED
+
+**Established**: an active display stream takes the transaction rate from
+0.05-0.08 to 71.30 sets/s, reversibly, in one boot, with the panel's own
+vblank counter as the clock.
+**NOT established**: *why*. `WSDisplayStreamNeedsRecomposite` (2x9) names the
+mechanism on WindowServer's side - a stream needs a frame, so WindowServer
+recomposites - but nothing here shows what makes WindowServer believe **the
+panel itself** needs no frame. That is the remaining question and it is now
+upstream of everything this project has built.
+**NOT independently confirmed**: arm B's `capstatus` line read `none` with
+only 1 SkyLight line in the window, so WindowServer did not corroborate the
+capture *inside B's window*. The stream was created during the 9 s pre-check
+before B began, and the recomposite lines are evidently not logged per frame.
+What does corroborate it: the 21.8 MB file, and **arm C catching
+`system screen capture status 0`** - the capture ending, exactly where it
+should land.
+
+### FIVE INSTRUMENT DEFECTS, ALL IN CODE WRITTEN THIS SESSION
+
+The first run of this test was **void**, and said so in three places. Each
+fault and its fix is in the script's header; the ones worth the rule:
+
+1. **PARSE THE VALUE, NEVER A BYTE OFFSET.** `substr($0, RSTART+18, ...)`
+   dropped the **leading digit** of every counter - 465 read as 65, 66000 as
+   6000 - and once a truncated value rolled (499->500 becomes 99->00) the
+   delta went **negative**. The run printed `sets -98` and `vbl -6421`, which
+   is the only reason it was caught. `$NF` is the value. **An impossible
+   reading is the cheapest bug report there is: print the delta, not just the
+   rate.**
+2. **`screencapture -v` NEEDS `-V <seconds>`.** Backgrounded without it, it
+   stayed alive, wrote **0 bytes** and created no stream - indistinguishable
+   from a TCC refusal, which is what 2x5 wrongly concluded about `framepump`.
+   With `-V` it records and exits by itself (375 327 bytes, exit 0). **TCC was
+   never the problem; the invocation was.** And `-V` buffers to disk at the
+   end, so the "is the file growing" guard is ALSO wrong for this mode - it
+   fired on a capture that was working perfectly.
+3. **THE LOG PREDICATE'S SENDER IS `SkyLight`, NOT `WindowServer`.** The lines
+   read `WindowServer: (SkyLight) [com.apple.SkyLight:default]`, so
+   `sender == "WindowServer"` returned **1** line where the OR form returns
+   **45**. 2x9's finding survived only because its exploratory query happened
+   to carry the OR clause. **Rule 36's third instance in this project**, and
+   the fix is now verified against a known-present case in the same boot: a
+   6 s capture yields `CreateDisplayStreamState` 1, `status 1`, `status 0`,
+   `WSDisplayStreamNeedsRecomposite` 1.
+4. **The counters reset between the two runs** and the negative deltas were
+   the first sign: boot 208's 80173/618000 became 465/66000, i.e. a **new
+   boot** (210). Rule 33 is not a one-time check at the start of a session -
+   it is a check before **every** reading.
+
+### THE BRIDGE, AND THE REAL FIX
+
+**The bridge is available now**: anything holding a display stream open makes
+this machine usable at ~71 Hz. `screencapture -v -V` proves it but writes
+~450 KB/s to disk, so the usable form is a minimal `CGDisplayStream` or
+`SCStream` consumer that discards every frame - and **`CGDisplayStream`
+resolves on 15.8.1** (2x9, from AnyDesk's own link table), so the obsoletion
+notice that made 2x5 rewrite `framepump` was not a reason to avoid it. One
+TCC grant, once, against a binary whose identity does not change.
+**The real fix is the open question above**: what makes WindowServer treat the
+panel as a consumer that needs frames. A workaround that needs a screen
+recorder running forever is not a driver.
