@@ -45468,3 +45468,203 @@ grant and no rebuild. If the desktop runs while that recording is active, the
 lever is capture and a minimal always-on stream is the bridge; if it stays
 frozen, capture is dead too and what remains is whatever else a live AnyDesk
 session holds open, which `lsof` on its pid will name.
+
+## 2x6 — THE DISPLAY TRANSACTION WAITS ON A GPU STAMP, AND THE STAMP NEVER RETIRES
+
+No boot. Everything here is read off captures already on disk plus a static
+read of `IOAcceleratorFamily2` and `AMDRadeonX6000`.
+
+### The frozen desktop's own log names the blocker 219 times
+
+`logs/20261028-160856-plugin/display-log.txt`, a GPU-framebuffer boot with
+`RBFBAmtrSets 41` against `RBFBVBLFires 46800` (= **0.126 transactions/s**, the
+frozen state):
+
+    (IOAcceleratorFamily2) AMDRadeonAccelerator: IOAccelDisplayPipe
+        (fbindex=0) transaction stamp index 59 time out              x219
+
+16:03:01.030 to 16:08:59.410 — six minutes, always **stamp index 59**,
+interleaved line for line with the wedge:
+
+    channel 12 SDMA0_PAGE event timeout; pending stamps [10..24]
+    channel 12 is not hung, keep running
+    restart_channel(): GPURestartSkipped stampIdx=12 type=2
+    restart_channel(): no channel associated with stamp_idx 12 (type 2)
+
+So the display-pipe transaction is **paired with a GPU stamp**, that stamp does
+not retire, and the recovery machinery declines to act: the hang check reads the
+hardware and says *not hung*, and the restart cannot map the stamp to a channel.
+
+### THE DIFFERENTIAL, which is what makes this a result and not a reading
+
+Ten consecutive captures, `display_change_handler` as the control in each:
+
+| boot | config | stamp time outs | `event timeout` | `RBFBAmtrSets` |
+|---|---|---|---|---|
+| 20261028-181533 | CPU-fb | **0** | 30 | — |
+| 20261028-005656 | CPU-fb | **0** | 34 | 0 |
+| 20261028-104455 | CPU-fb | 0 | 0 | — |
+| 20261028-002545 | CPU-fb | 0 | 0 | — |
+| 20261027-232901 | CPU-fb | 0 | 0 | — |
+| 20261028-141825 | **GPU-fb** | **43** | 14 | 4 |
+| 20261028-101029 | **GPU-fb** | **103** | 36 | 14 |
+| 20261028-160856 | **GPU-fb** | **219** | 135 | 41 |
+| 20261028-001439 | GPU-fb | 0 | 45 | no transactions |
+| 20261027-233944 | GPU-fb | 0 | 41 | no transactions |
+
+Two rows carry it. **20261028-181533 and 20261028-005656 are CPU-framebuffer
+boots that HAVE the wedge — 30 and 34 `event timeout` — and ZERO stamp time
+outs.** And the two GPU-framebuffer boots in which no transaction ever flowed
+have the wedge and zero stamp time outs as well. The line appears **iff
+transactions flow through our framebuffer**, and it scales with them: 4 -> 43,
+14 -> 103, 41 -> 219.
+
+**So this reading is taken in the configuration that exhibits the defect, and
+the configuration that lacks the symptom gives zero — rule 39 satisfied in both
+directions**, which is exactly what 2wz failed and 2x0 corrected.
+
+### WHAT THIS DOES TO THE WEDGE'S STATUS
+
+**2wl's elimination of the wedge is WITHDRAWN. It was reasoning, not
+measurement.** The argument was *"a GPU wedged at 0.2 buffers/s cannot make the
+screen smooth on demand"* — which treats the wedge as a throughput ceiling. It
+is not one. 2we read it correctly at the time and the words were already right:
+*"work is submitted and never retires; the hang check says not hung; the restart
+cannot find the channel"* — a **stamp-retirement** failure. A retirement failure
+is kicked by new submissions; a throughput ceiling is not. Typing submits work.
+A connected AnyDesk session submits work continuously. An idle desktop submits
+none.
+
+2x0 and rule 39 stand exactly as written: boot 203's **numbers** could not
+locate the defect, because an `rbgpu-fb=0` desktop cannot see a GPU wedge. The
+error that followed was to drop the wedge from the candidate list on the
+strength of 2wl's argument rather than re-measuring it in the configuration that
+does exhibit the symptom. **The captures that settle it were already on disk
+when 2wl was written.** Same shape as 2kx/2la/2lc and 2s5: read the evidence in
+hand before designing the next experiment.
+
+Nothing about the **driver** changes. 2x5 stands: `RBFBHubpWrites` tracks
+`RBFBAmtrSets` exactly, 2 rejects in a whole boot, 83.43/s with AnyDesk
+connected. Every frame macOS hands us still reaches the panel. What is corrected
+is the **frontier**: it is not "macOS does not draw", it is "the transaction
+macOS is drawing for cannot retire, so it does not draw the next one".
+
+### THE KERNEL RETIREMENT CHAIN IS READ END TO END, AND IT IS ARMED
+
+Static, `IOAcceleratorFamily2`. Rule 7 applied throughout.
+
+    IOAccelDisplayPipe::transaction_queue_gated(txn)          0x14e60466
+        if (pipe->0x2a4 == 0) { pipe->0x2a4 = 1;
+                                pipe->vt[call 0x888 -> dump 0x898]() }
+                                   /* = AMD's enableTransactionInterrupt */
+        txn->0x58 = pipe->vt[call 0x8b8 -> dump 0x8c8](txn)   /* submitTransaction */
+        ring: slot = pipe + 0x118 + 0x48 * (pipe->0x23c % 4); slot->0x40 = txn
+        accel->0x380->vt[0x1b0](&txn->0x60)                   /* arm the stamp */
+        sfence; pipe->0x23c++
+        pipe->0xc0->vt[0x1d8](0,0,0)                          /* signal */
+
+    IOAccelDisplayPipe::enableTransactionInterrupt             0x14e609ba
+        pipe->vt[call 0x878 -> dump 0x888]()  /* = enableVBLInterrupt */
+        pipe->0x281 = 1
+
+    IOAccelDisplayPipe::enableVBLInterrupt                     0x14e60946
+        refcount pipe->0x2a8; on 0 -> 1:
+            fb->vt[0xae0](pipe->0xd8, 1)      /* IOFramebuffer::setInterruptState */
+
+    IOAccelDisplayPipe::signalVBLInterrupt(pipe)               0x14e5dcb8
+        clock_get_uptime(&pipe->0x268)
+        if (pipe->0x281)      signalTransactionInterrupt(pipe)
+        if (pipe->0x2a0)      pipe->0xc8->vt[0x1d8](0,0,0)
+
+    IOAccelDisplayPipe::signalTransactionInterrupt(pipe)       0x14e5e0ec
+        if (pipe->0x2a4 == 0) return;
+        pipe->0x2d0 = mach_absolute_time();
+        pipe->0xd0->vt[0x1d8](0,0,0)
+
+`signalTransactionInterrupt` has **exactly one caller**, `signalVBLInterrupt`,
+and `signalVBLInterrupt` is registered **once**, at `0x14e5db41` inside
+`displayModeDidChange`, for `'vbl '`. There is **no second interrupt type** the
+retirement wants and no page-flip-complete interrupt we are failing to deliver:
+the retire path is the `'vbl '` path, and both of its gates (`0x281`, `0x2a4`)
+are set by `transaction_queue_gated` on the first transaction — which is on our
+path, because `submitTransaction` is called **from** it.
+
+**So 2x1's conclusion is reconfirmed from the other side**: our VBL delivery and
+Apple's handler are both correct and armed, and the retirement this chain
+performs really does happen. It is the **GPU stamp** that does not retire, which
+is a different object from the `'vbl '` retirement 2x1 forced, and that is why
+forcing the latter moved nothing. **Rule 33 again — name the object a number
+belongs to.** "Retirement" was eliminated; two different retirements wear the
+name.
+
+### AND COMPLETION IS DECIDED BY AN ATTRIBUTE WE ANSWER UNCONDITIONALLY
+
+`AMDRadeonX6000_AMDAccelDisplayPipe::isTransactionComplete` (`0xbe4a794`):
+
+    fbIdx = getFramebufferIndex()
+    if (!pipe->0x328->vt[0x2a0]())        return true
+    if (!pipe->0x330->vt[0x190](fbIdx))   return false      /* 2wc's 'amtr' gate */
+    if (txn && pipe->0x248 == txn) {
+        fb = getFramebuffer()
+        return fb->vt[0xa30]('amtr', NULL) == 0             /* getAttribute */
+    }
+    return IOAccelDisplayPipe::isTransactionComplete(txn)   /* dump 0x8c0, base */
+
+So for the **current** transaction, "complete" is literally
+`getAttribute('amtr')` returning 0, and AMDFramebuffer's own answer is
+`kIOReturnNotReady` while `getOutstandingDisplayPipeTransactions()` is non-zero
+(2wc). `RBAMDFramebuffer` returns 0 unconditionally, i.e. **always complete** —
+the optimistic answer, so it cannot be what stalls anything, and it is not a
+candidate. Recorded so the next reader does not spend a boot on it.
+
+Also found and **not** the answer, recorded to close them:
+`IOAccelDisplayPipe::beginTransaction` and `signalTransactionComplete` are
+`push/mov/pop/ret` **empty base stubs** (`0x14e609fa`, `0x14e60a00`), and
+`ktraceStateChanged` likewise. And the 300 ms constant in
+`%s: IOAccelDisplayPipeTransaction time out after 300ms. framebufferIndex=%d`
+appears **0 times** in the capture — so the per-frame waiter is not that one and
+the ~10 s figure does not come from it.
+
+### THE TEST, AND IT NEEDS NO BUILD, NO BOOT, NO KEXT AND NO TCC GRANT
+
+A connected AnyDesk session does two things at once: it **captures the screen**
+and it **keeps the GPU continuously busy** encoding. 2x5 named capture as the
+remaining hypothesis and never separated the two. `build/out/metal_probe
+--busy` separates them: continuous GPU work on **one** command queue (never
+`--queues`, which is 2wt's known wedge trigger), and **no capture at all**.
+
+In the frozen GPU-framebuffer boot, AnyDesk disconnected:
+
+    env -u DYLD_INSERT_LIBRARIES build/out/metal_probe --busy 45 --heavy 20000 --depth 16
+
+**Said before the test.** Desktop smooth for those 45 s and frozen again after
+= the lever is **GPU activity**, capture is dead, and the defect is stamp
+retirement. Still frozen while it runs = GPU activity is not the lever and
+capture comes back, to be tested with Cmd-Shift-5. Either way one 45-second
+command settles what 2x5 left open, and the instrument reports its own buffer
+rate so a dead run cannot read as a negative result (rule 39's corollary).
+
+### WHERE THE FIX WOULD GO IF THE TEST CONFIRMS
+
+2ws already named the software side and already named the gap, one milestone
+before it was needed: the release decision is **per client, in software**,
+pointing at `AMDSWScheduler::advance()` (`0xbe950e0`), which is reachable only
+from `deferredCallback(IOInterruptEventSource *)` (`0xbe93e18`) and from
+`timerCallback` (`0xbe9513c`) — **which is never installed**. So the only
+installed trigger for advancing the scheduler is an interrupt event source. If
+the stamp interrupt does not arrive (`enableStampInterrupt` /
+`disableStampInterrupt` at `0x14e2653c` / `0x14e26542` are **empty base stubs**,
+never overridden), nothing advances until some unrelated interrupt happens to
+fire — which is what typing and a busy encoder supply.
+
+**And we already own a 143.83 Hz timer in the right process context**: the
+framebuffer's VBL `thread_call`. Driving the scheduler's advance from it would
+tick retirement at **6.95 ms** where 2ws measured a free-running
+**175.77 ms**, which is 25x and is exactly the 144 Hz target. **NOT
+ESTABLISHED** — nothing here observes a single call to `advance()`, which is
+rule 35 precisely, and 2ws said the same about it. Instrument our end first.
+
+**NOT established either**: that the stamp timeout and the wedge are one defect.
+They interleave in the log and share a shape, but the wedge lives on
+GFX/SDMA/Compute user queues and the display stamp is index 59 on `fbindex=0`.
+Two numbers agreeing is not an identification (rule 18).
