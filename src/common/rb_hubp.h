@@ -139,6 +139,42 @@ static inline int rb_hubp_flip_pending(uint32_t flip_ctl)
     return (flip_ctl & RB_HUBP_FLIP_PENDING) != 0u;
 }
 
+/* DCSURF_FLIP_CONTROL2, from dcn_3_1_2_sh_mask.h (see UPSTREAM.md, 2xk). */
+#define RB_HUBP_FLIP2_PENDING_MIN_TIME 0x000000ffu
+#define RB_HUBP_FLIP2_GSL_ENABLE       0x00000100u
+#define RB_HUBP_FLIP2_TRIPLE_BUFFER    0x00000400u
+
+/* 2xm: would programming the primary surface address RIGHT NOW throw away a
+ * flip the hardware has already armed and not yet latched?
+ *
+ * 2xk measured SURFACE_FLIP_TYPE == 0, so DCN latches our address pair at
+ * VUPDATE rather than immediately - which means there is a window between the
+ * write and the latch during which the register holds an address the panel is
+ * not yet reading. Writing again inside that window replaces the armed
+ * address, so the frame we armed first never reaches the screen and the one
+ * that does reach it changes partway down: the tear 2wh predicted in writing.
+ *
+ * The triple-buffer guard is the reason this is a function and not a mask
+ * test. SURFACE_FLIP_PENDING describes ONE pending slot; with
+ * SURFACE_TRIPLE_BUFFER_ENABLE set there is more than one, so a pending flip
+ * no longer implies that a second write discards anything, and deferring
+ * would drop frames for nothing. Boot 216 and boot 217 both read
+ * FLIP_CONTROL2 == 0x40, i.e. PENDING_MIN_TIME = 64 with triple buffering
+ * OFF, so the guard is inert on this machine today - it exists so that a
+ * machine (or a future compositor) where it is on does not inherit a
+ * conclusion measured where it was off.
+ *
+ * Returns 1 to defer, 0 to write.
+ */
+static inline int rb_hubp_flip_would_discard(uint32_t flip_ctl,
+                                             uint32_t flip_ctl2)
+{
+    if ((flip_ctl2 & RB_HUBP_FLIP2_TRIPLE_BUFFER) != 0u) {
+        return 0;               /* more than one slot: nothing is discarded */
+    }
+    return rb_hubp_flip_pending(flip_ctl);
+}
+
 #define RB_HUBP_EXPECT_PITCH    0x0000077fu   /* 1920 px, pitch-1 encoding */
 #define RB_HUBP_EXPECT_CONFIG   0x00000008u   /* ARGB8888 */
 #define RB_HUBP_EXPECT_ADDR_HI  0x000000f4u   /* the carve-out's high dword */

@@ -125,6 +125,8 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpFlipCtl2", (uint64_t)hubpFlipCtl2, 32);
     setProperty("RBFBHubpPendChecks", hubpPendChecks, 64);
     setProperty("RBFBHubpPendHits", hubpPendHits, 64);
+    setProperty("RBFBHubpDeferArmed", hubpDeferPend);
+    setProperty("RBFBHubpDeferrals", hubpDeferrals, 64);
     setProperty("RBFBHubpTiling", (uint64_t)hubpTiling, 32);
     setProperty("RBFBHubpOrig", hubpOrig, 64);
     setProperty("RBFBHubpWrites", hubpWrites, 64);
