@@ -621,7 +621,7 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
     if (stage > crumbStage) {
         crumbStage = stage;
     }
-    char buf[192];
+    char buf[256];
     /* 2t0 addendum: the nonce comes FIRST because it decides whether anything
      * after it is this boot's. rbgpu-fbcrumb persists in NVRAM, so without it
      * a boot that died before stage 1 leaves the PREVIOUS boot's crumb reading
@@ -641,9 +641,17 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
      * written at four fixed fire counts and the last of them is 70 seconds in
      * - so this one is REWRITTEN every 10000 fires and s= carries which
      * sample it is. The last crumb in NVRAM is then the whole boot. */
+    /* 2x1: E= and A= are the two numbers this experiment has owed for three
+     * boots, and they were registry-only - which is unreadable in exactly the
+     * boot that matters, because at the measured 0.09 fps there is no desktop
+     * to run ioreg from (rule 10, and the reason 2wl made the crumb periodic).
+     * E= is retireEnables, the force-enables WE performed; A= is the summed
+     * fire count of every 'vbl ' slot we did NOT register, i.e. how often
+     * Apple's own handler actually ran. Together with t= they decide it four
+     * ways without a capture - see the handoff. */
     snprintf(buf, sizeof(buf),
              "b=%s s=%u f=%llu e=%u r=%u h=%u w=%llu k=%u t=%llu "
-             "p=%llu n=%llu K=%llu D=%llu",
+             "p=%llu n=%llu K=%llu D=%llu E=%llu A=%llu",
              crumbBoot, crumbStage, (unsigned long long)vblFires, vblEnables,
              vblRunning ? 1u : 0u,
              hubpReady ? 0u : (hubpArmed ? (hubpRefuse ? hubpRefuse : 0xffu) : 0xfeu),
@@ -652,7 +660,9 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
              (unsigned long long)amtrSets,
              (unsigned long long)amtrPeak, (unsigned long long)amtrNoFlip,
              (unsigned long long)retireKicks,
-             (unsigned long long)retireDelivered);
+             (unsigned long long)retireDelivered,
+             (unsigned long long)retireEnables,
+             (unsigned long long)foreignFires());
     if (auto str = OSString::withCString(buf)) {
         /* 2sr measured that setPropertyWithGUIDAndName is the ONLY path that
          * reaches IODTNVRAM::syncInternal, so a plain setProperty here DOES
@@ -1049,13 +1059,38 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
          * allocation, no logging, no blocking (rule 31). Counted so the
          * boot says whether it ever fired, and gated on its own boot-arg so
          * this is a separable experiment and not a silent change to 2wh. */
+        /* 2x1: and DELIVER one immediately, instead of waiting for the next
+         * periodic tick. The force-enable above has been armed for three
+         * boots and never measured; the one race it leaves is real. Our tick
+         * is 7 ms, so between transactions at the measured 0.09/s it fires
+         * ~1500 times and would catch the window easily - UNLESS Apple
+         * re-disables its slot inside those 7 ms, which is precisely what
+         * every RBFBVBL1Fires reading of 0 is consistent with. Delivering on
+         * our own thread_call closes it: the enable and the delivery are then
+         * not separated by anything Apple can observe or undo.
+         *
+         * This is the same mechanism and hazard class as 2wk's kick on the
+         * enable transition - thread_call_enter plus field writes, no
+         * allocation, no logging, no blocking on the accelerator's thread
+         * (rule 31) - and kickVBL re-checks `enabled` itself, so a window
+         * that has already closed costs one scheduled call and is counted as
+         * such. Kept under -rbgpufbretire rather than a third boot-arg: that
+         * arg already means "make Apple learn a vblank happened", and adding
+         * an arg per refinement multiplies boots without separating
+         * hypotheses. */
         if (retireArmed) {
+            bool forced = false;
             for (unsigned i = 0; i < kMaxInterrupts; i++) {
                 if (interrupts[i].used && interrupts[i].target != this &&
                     !interrupts[i].enabled) {
                     interrupts[i].enabled = true;
                     retireEnables++;
+                    forced = true;
                 }
+            }
+            if (forced && vblKickCall) {
+                retireKicks++;
+                thread_call_enter(vblKickCall);
             }
         }
         if (hubpReady && value >= 0xffffff8000000000ULL) {

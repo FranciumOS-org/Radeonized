@@ -30,6 +30,18 @@ bool RBAMDFramebuffer::anyVBLEnabled(void)
     return false;
 }
 
+uint64_t RBAMDFramebuffer::foreignFires(void) const
+{
+    uint64_t n = 0;
+    for (unsigned i = 0; i < kMaxInterrupts; i++) {
+        if (interrupts[i].used && interrupts[i].target != this &&
+            interrupts[i].type == kIOFBVBLInterruptType) {
+            n += interrupts[i].fires;
+        }
+    }
+    return n;
+}
+
 void RBAMDFramebuffer::publishVBLState(void)
 {
     static const char *const usedKeys[] = {
@@ -78,6 +90,7 @@ void RBAMDFramebuffer::publishVBLState(void)
      * because that is exactly the boot where they say why (rule 14). */
     setProperty("RBFBRetireArmed", retireArmed);
     setProperty("RBFBRetireEnables", retireEnables, 64);
+    setProperty("RBFBForeignFires", foreignFires(), 64);
     setProperty("RBFBRetireKicks", retireKicks, 64);
     setProperty("RBFBRetireDelivered", retireDelivered, 64);
     setProperty("RBFBHubpArmed", hubpArmed);
