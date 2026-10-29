@@ -579,6 +579,11 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // the probe's own `-rbgpuaccelprobe` check is the only gate it needs.
     rbgpu_accelprobe_start();
     rbgpu_rate_start_2wx();
+    /* 2xg: same reasoning as 2w5's fix above - its own arg is its only gate,
+     * and this line runs in the peer's start() on every boot. The one-shot is
+     * consumed inside, BEFORE the first tick is armed (rule 37), so a panic
+     * costs exactly one power cycle. */
+    rbgpu_schedtick_start_2xg();
 
     // 2li (2026-10-20): THE DISPLAY HALF WAS NEVER ASKED TO START.
     //
@@ -1814,6 +1819,94 @@ bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why) {
                         "by hand: sudo nvram -d <var>");
     out(cleared ? 0 : 4);
     // Fail closed: `why = 4` now means "armed, but we did NOT run".
+    return cleared;
+}
+
+// 2xg: THE SAME GATE, CONSUMED BY OVERWRITE INSTEAD OF BY REMOVAL.
+//
+// `rbgpu_nvram_consume_oneshot` above removes the variable and then reads it
+// back as absent - and 2sq measured that exact sequence SURVIVING A REBOOT for
+// `rbgpu-fb`, because `IODTNVRAMVariables::removeProperty` tail-jumps to
+// `removePropertyWithGUIDAndName`, which calls no sync at all. Its read-back
+// therefore proves the in-memory registry and nothing about flash, and it
+// reports `why = 0` ("consumed; clear OK") on a key that is still armed. Six
+// boots re-armed the framebuffer takeover that way and boot 196 had to be
+// disarmed from Windows (rule 37).
+//
+// 2wj fixed it in `src/fbkext/RBAMDFramebuffer.cpp` by writing a literal "0"
+// instead of deleting: `setProperty` reaches `setPropertyWithGUIDAndName`,
+// which DOES call `IODTNVRAM::syncInternal`, and that is the single referrer
+// of `IONVRAM-FORCESYNCNOW-PROPERTY` in the whole kernel. This is the same
+// fix for the plugin side, and it exists as a separate function rather than a
+// change to the one above because that one is load-bearing for four shipped
+// one-shots and this is the first caller whose failure mode is a PANIC.
+//
+// `why` codes are deliberately the same as the removal form's, so a reader
+// does not have to know which helper produced them:
+//   0 armed and consumed    1 /options unreachable
+//   2 variable absent       3 variable present but a literal "0"
+//   4 armed, but the overwrite did not take - the next boot is armed too
+bool rbgpu_nvram_consume_oneshot_ow(const char *var, uint32_t *why) {
+    auto out = [why](uint32_t v) { if (why) *why = v; };
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            out(1);
+            return false;
+        }
+        g_rbgpuOptions = options;   // retained by fromPath; kept for the boot
+    }
+
+    OSObject *val = options->getProperty(var);
+    if (!val) {
+        out(2);
+        return false;
+    }
+    // `nvram var=1` stores an OSData, so check the first byte rather than
+    // expecting a string - the 2cs lesson, unchanged.
+    if (auto data = OSDynamicCast(OSData, val)) {
+        if (data->getLength() >= 1 &&
+            *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
+            out(3);
+            return false;
+        }
+    } else if (auto str = OSDynamicCast(OSString, val)) {
+        if (str->isEqualTo("0")) {
+            out(3);
+            return false;
+        }
+    }
+
+    if (auto zero = OSString::withCString("0")) {
+        options->setProperty(var, zero);
+        zero->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    // Still an in-memory read-back - it proves the overwrite took in the
+    // registry, not that flash accepted it. What differs from the removal
+    // form is that the path taken is the one measured to sync, so this
+    // reading is worth something it was not worth before (2wj).
+    bool cleared = false;
+    if (OSObject *v = options->getProperty(var)) {
+        if (auto d = OSDynamicCast(OSData, v)) {
+            cleared = d->getLength() >= 1 &&
+                      *static_cast<const char *>(d->getBytesNoCopy()) == '0';
+        } else if (auto t = OSDynamicCast(OSString, v)) {
+            cleared = t->isEqualTo("0");
+        }
+    }
+    rbgpu_log("Peer: one-shot `%s` overwritten with \"0\" %s", var,
+              cleared ? "and read back as \"0\" (next boot comes up normally)"
+                      : "but the read-back FAILED - REFUSING to run, because "
+                        "the next boot would be armed too. Clear it by hand: "
+                        "sudo nvram <var>=0");
+    out(cleared ? 0 : 4);
+    // Fail closed, exactly as the removal form does: `why = 4` means
+    // "armed, but we did NOT run".
     return cleared;
 }
 

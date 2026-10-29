@@ -46364,3 +46364,132 @@ carry a one-shot, and that is the plumbing to get right rather than rush.
 Said before the boot: if the display rate rises with the tick, retirement was
 the gate; if it does not, the gate is below `checkTimestamps` and the next
 target is what `channel->vt[0x1a8]` reads.
+
+--------------------------------------------------------------------------
+2xg (2026-10-29) — THE SCHEDULER TICK, BUILT WITH ITS ONE-SHOT.
+Plugin `23D86D68`. No boot yet.
+
+WHAT IT IS. A `thread_call` at the panel's measured 143.83 Hz (6944 us,
+tunable `rbgpuschedtickus=<500..1000000>`) that calls Apple's
+`AMDRadeonX6000_AMDSWScheduler::checkTimestamps()`. Armed by
+`-rbgpuschedtick` **and** `sudo nvram rbgpu-tick=1`.
+
+WHY `checkTimestamps` AND NOT `advance`. Disassembled this milestone, and it
+says it plainly (`0xbe94e3c`):
+
+    for (i = 0; i < this->0x60; i++) {                /* stride 0x98 */
+        ctx = this->0x58 + i * 0x98;
+        if (ctx->0x6c == ctx->0x68) { if (ctx->0x8) ctx->0x71 = 1; }
+        else {
+            ctx->0x8->vt[0x1a8]();                    /* THE HARDWARE POLL */
+            if (ctx->0x72 == 1) { IOLockLock(this->0x48);
+                                  checkPreemption(*ctx);
+                                  IOLockUnlock(this->0x48); }
+        }
+    }
+    return this->0x30->vt[0x1d8](0, 0, 0);            /* signal the source */
+
+`advance()` (`0xbe950e0`) only walks channels whose `ctx->0x71` is ALREADY
+set, so on an idle scheduler it is a no-op by construction — ticking it would
+measure nothing, and 2ww had already measured it running four times per
+submit. `checkTimestamps` is the sole hardware stamp poll, it is what SETS the
+`0x71` flag `advance()` needs, and it tail-jumps into the event source 2xe
+measured being created with **`provider = 0`** (software), so nothing else
+will ever fire it on an idle machine.
+
+NO NEW ROUTE, which rule 3 would forbid. The scheduler pointer arrives as the
+first argument of both 2wv hooks on every call, so it is captured there;
+`-rbgpuschedtick` turns those routes on by itself, so a tick can never be
+armed without the capture that feeds it. Rule 1 satisfied:
+`nm -m build/re/AMDRadeonX6000` shows
+`__ZN29AMDRadeonX6000_AMDSWScheduler15checkTimestampsEv` **defined** at
+`0xbe94e3c`. Rule 2 does not apply — nothing is routed, the address is solved
+and called.
+
+THE SAFETY ARGUMENT IS APPLE'S OWN CODE, not an assumption. The function's
+seven callers are all WAITERS (`AMDAccelChannel::waitForTimestamp` x4,
+`AMDAccelEventMachine::waitForStamp`, `eventTimeout`,
+`checkChannelIsActive`), i.e. arbitrary client threads and not the workloop —
+which is both why it is starved when nobody is waiting, and why a
+`thread_call` is the same class of context it already runs in. It takes
+`this->0x48` itself. Re-entrancy is likewise Apple's design: those waiters can
+be inside it concurrently already, with no outer lock over the
+`ctx->0x71`/`0x72` byte writes or the stamp read, so one more caller is the
+same shape as a second waiting client thread.
+
+RULE 37, APPLIED BEFORE THE BUILD AND NOT AFTER. **The failure mode is a
+PANIC, not a hang**, and a boot-arg alone would panic-loop across power
+cycles. So the tick also needs `rbgpu-tick`, consumed **by overwrite** and
+consumed **before the first tick is ever armed**. The existing
+`rbgpu_nvram_consume_oneshot` could not be used: it removes the variable and
+reads it back as absent, and 2sq measured that exact sequence SURVIVING A
+REBOOT, because `removePropertyWithGUIDAndName` calls no sync — so it can
+report `why = 0` ("consumed; clear OK") on a key that is still armed, which is
+how boot 196 ended up being disarmed from Windows. So a second helper,
+`rbgpu_nvram_consume_oneshot_ow`, writes a literal `"0"` on the `setProperty`
+path 2sr measured as the only one reaching `IODTNVRAM::syncInternal`, verifies
+the read-back, and **fails closed**. Same `why` codes as the removal form so a
+reader need not know which helper produced them.
+
+EVERY DEREFERENCE IS RE-CHECKED ON EVERY TICK, and refusals are counted and
+published with their reason (rules 14/19): the object above the **kalloc**
+floor `0xffffff8000000000` (not the kext-symbol floor), a non-NULL channel
+array also above it, a channel count in 1..64, and the event source
+(`+0x30`) and the IOLock (`+0x48`) both non-NULL. `tw=` carries which test
+failed, because "the pointer was never captured" and "the object looks wrong"
+are different answers. Sixteen CONSECUTIVE refusals *after at least one
+successful call* stop the tick for the boot rather than keep calling into an
+object being torn down — the "after a successful call" qualifier matters,
+because before the first submit there is no pointer to tick and that is
+normal, not teardown.
+
+AND THE TICK'S OWN CADENCE USES 2xe'S FIX. `rbgpu_2xg_arm_next()` walks the
+PREVIOUS deadline forward and resyncs only when a whole period has already
+been missed. Writing `now + period` after the work is the exact defect this
+project just removed from its own vblank, and it would have been reintroduced
+here by default.
+
+THE FIELDS GO IN `rbgpu-sched`, BEFORE THE HISTOGRAM. The note is the only
+thing that survives a boot this experiment might wedge (rule 10), and a gap
+histogram is only interpretable beside the number of kicks that produced it.
+The histogram is the part that truncates, so the tick's fields are placed
+ahead of it: `tarm` armed, `tos` one-shot code, `tus` period, `tc` ticks that
+fired, `tk` calls that reached `checkTimestamps`, `tr` refusals, `tw` last
+refusal reason, `ts` the stop flag. The "not armed" early-out carries
+`tarm`/`tos` too, so a `hk=0` note still says whether the tick was asked for.
+
+SAID BEFORE THE BOOT, so the reading cannot be fitted afterwards:
+  `tc` climbing with `tk` tracking it and `tr` at 0 means the tick is really
+    running. **That is the arm check — read it before anything else**, and
+    `tarm=0` with `tos=` 1/2/3/4 says exactly why nothing ran.
+  If the DISPLAY RATE RISES — `RBFBAmtrSets` over `RBFBVBLUptimeNs`, never
+    over 143.83 (2xe) — retirement was the gate, and the fix belongs where
+    2ws named it: driven from the framebuffer's own VBL `thread_call`, which
+    is already a 143.83 Hz timer in the right context.
+  If `gmean`/`gmax` collapse but the display rate does NOT move, then
+    `advance()` starvation was real and **not the cause** — the gate is below
+    `checkTimestamps` and the next target is what `channel->vt[0x1a8]` reads.
+  If `gmean`/`gmax` do not move either, the scheduler was idle with nothing
+    pending all along, 2xf's 4 ms correspondence between `gmax` 6.0016 s and
+    the watchdog's 5.99733 s is a coincidence of two unrelated 6 s timers,
+    and this whole line closes.
+
+WHAT IS STILL NOT ESTABLISHED, unchanged from 2xf and the reason this
+experiment exists at all: nothing has observed pending work at `advance()`'s
+entry, so an idle scheduler with nothing to do looks identical in that note
+(rule 35). The tick is what tells the two apart.
+
+AND A FLAG FROM THE PREVIOUS MILESTONE IS WITHDRAWN. I said `-rbgpuforceenable`
+was armed without `wdt=-1`. It is not: `boot-args` reads
+`-rbgpuforceenable wdt=-1`, adjacent. Read the token, not the memory of it.
+
+HONEST GAP: `rbgpu_2xg_sane()` is decision logic with no hosttest, because it
+lives in `src/plugin` and the hosttest harness covers `src/common` and the
+fbkext. Its four offsets are cross-checked against the disassembly quoted
+above and nothing else.
+
+INSTALL (rule 15, every artifact): plugin **`23D86D68`** to the OpenCore EFI
+(`sudo tools/efi.sh install`); fbkext **`39190382`** UNCHANGED in
+`/Library/Extensions` — verified byte-identical to `build/out` this milestone,
+no re-install. Boot-arg: add `-rbgpuschedtick`. One-shots (rule 34, all five):
+`sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1 rbgpu-tick=1`.

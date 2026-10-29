@@ -2152,7 +2152,15 @@ nothing downstream, 2q7), `-rbgpuiop` (opens the IOPresentment vendor gate;
 correct, verified, inert without its one-shot — **keep it**), `-rbgpuagdc`
 (the AGDC bridge), `-rbgpuaccelprobe` (2w3 - three read-only samples of the
 three bits behind `kIOReturnNotReady`; reads only, refuses on a class too
-small for the offsets), `-rbgpufbaty` (2w9 - publishes
+small for the offsets), `-rbgpuschedtick` (2xg - a 143.83 Hz
+`thread_call` calling Apple's `AMDSWScheduler::checkTimestamps()`, the sole
+hardware stamp poll and the only thing that sets the `ctx->0x71` flag
+`advance()` needs. **Its failure mode is a PANIC**, so it needs
+`sudo nvram rbgpu-tick=1` as well, consumed by OVERWRITE before the first tick
+arms - rule 37. It turns `-rbgpuschedprobe`'s routes on by itself, because the
+scheduler pointer it calls arrives only as those hooks' first argument. Read
+`tarm`/`tc`/`tk`/`tr` in `rbgpu-sched` BEFORE anything else in the boot;
+`tunable rbgpuschedtickus=<500..1000000>`), `-rbgpufbaty` (2w9 - publishes
 `ATY,fb_offset` and `ATY,fb_size`, the two properties `AMDHWDisplay` reads off
 the framebuffer; **the offset it publishes is deliberately not the truthful 0**,
 so the composited image lands where the scanout is not reading - expect a wrong

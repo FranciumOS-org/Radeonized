@@ -22,6 +22,12 @@ void rbgpu_nvram_note(const char *var, const char *text);
 // recovered by a plain power cycle - no boot-arg edit and no second OS.
 // `why` is written on every path; see the definition for the codes.
 bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why);
+// 2xg: the same gate, CONSUMED BY OVERWRITE with a literal "0" instead of by
+// removal - the only path measured to reach IODTNVRAM::syncInternal (2sr/2wj).
+// Use this, not the form above, for anything whose failure mode is a panic or
+// a hang: the removal form read back as absent on a key that then survived a
+// reboot (2sq), so it can report `why = 0` on a still-armed boot.
+bool rbgpu_nvram_consume_oneshot_ow(const char *var, uint32_t *why);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the
 // gate trail can be told apart from a machine that died under it.
 void rbgpu_heartbeat_start(void);
@@ -34,6 +40,10 @@ void rbgpu_progwatch_start(void);
 void rbgpu_accelprobe_start(void);
 /* 2wx: the per-window advance()/submit rate timeline -> rbgpu-rate. */
 void rbgpu_rate_start_2wx(void);
+/* 2xg: the scheduler tick - a periodic AMDSWScheduler::checkTimestamps() at
+ * the panel's rate, to test whether display-transaction retirement is the gate
+ * on the frame cadence. `-rbgpuschedtick` + a `rbgpu-tick` one-shot. */
+void rbgpu_schedtick_start_2xg(void);
 extern volatile uint32_t g_rb_prog_stage;
 extern volatile uint32_t g_rb_step;   // 2fz: lock-free, log-free position marker
 #define RB_STEP(n) do { g_rb_step = (n); } while (0)
