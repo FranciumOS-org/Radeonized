@@ -46886,3 +46886,74 @@ so there is no group to make atomic.
 INSTALL (rule 15): fbkext **`07B0C4A2`** to `/Library/Extensions`; plugin
 **`DFEAFF02`** unchanged in the EFI, no `efi.sh install`. Boot-args unchanged.
 One-shots, all five.
+
+--------------------------------------------------------------------------
+2xl (2026-10-29) — THE 175 ms SUBMISSION LATENCY IS 13.5 ms. No boot, no
+build: `build/out/metal_probe --bench` on the live armed boot 216.
+
+The user asked why a Metal score reads 9633 against a figure of 33 000 they
+found for this APU, and named clocks, power mode and CU count. The measurement
+that answers it first was already available and had **never been re-run since
+the tick landed**. 2ws measured this on boot 198, one queue, same binary:
+
+                              boot 198      boot 216
+    commit -> GPUstart       174.855 ms     13.494 ms      13.0x
+    GPUstart -> GPUend         0.014 ms      0.016 ms      unchanged
+    commit -> scheduled        0.092 ms      0.161 ms      prompt in both
+    GPUend -> return           0.042 ms      0.205 ms
+    serial throughput          5.7 /s        72.9 /s       12.8x
+    pipelined throughput      46.2 /s       291.1 /s        6.3x
+
+**The chip's execution time did not move** (0.014 -> 0.016 ms) and the work is
+still handed over promptly (0.161 ms). The whole 13x is the wait BEFORE the
+work, which is exactly the quantity 2ws isolated and exactly what the tick was
+built to remove. `verify: PASS (0 of 4096 wrong)` in both.
+
+**AND THE LIMITER CHANGED CHARACTER, NOT JUST SIZE.** 2wu's `--phase` sweep
+read a clean lattice on boot 198 - `d+wall` constant at 173.7 ms, T = 175.77
+with R = 0.966 over 191 periods. On boot 216 `d+wall` **climbs linearly with
+d** (90.5, 100.2, 111.0, ... 249.9) with `wall` hovering 6.1-11.6 ms, and the
+tool's own printed criterion for that shape is *"a FIXED per-buffer delay"*,
+not a periodic quantum. So the 175 ms lattice is gone rather than shortened.
+The `--bench` pipelined listing is the one reading that still looks periodic -
+release clusters at 12.6, 25.8, 33.0, 40.1, 47.3, 54.5, 60.8 ms, i.e. **~7 ms
+apart, which is our 6944 us period** - and the serial median of 13.715 ms is
+close to **two** periods, which is 2wu's phase-lock argument (a serial loop
+always just misses one). Two instruments, two slightly different characters:
+recorded as such, **not reconciled**.
+
+**CAUSATION IS NOT CLEAN, AND THIS IS THE RULE-39 CAVEAT.** Boot 198 ran with
+`RBAMDFramebuffer` **not loaded**; boot 216 has the framebuffer takeover AND
+the tick. **Two variables differ, not one**, so "the tick did this" is the
+likely reading given 2ws's mechanism analysis pointed at `advance()` by name,
+but it is not established by this comparison alone. **The A/B that settles it
+costs no code and no risk**: `rbgpuschedtickus=<500..1000000>` is already a
+tunable, so sweeping the tick PERIOD tests the same mechanism from the other
+side. If `commit -> GPUstart` tracks the period, the tick is the release; if it
+floors out, the remaining latency is elsewhere. That keeps a working desktop,
+unlike un-arming `rbgpu-tick`, which would also answer it but at the cost of
+the boot.
+
+**ON THE USER'S THREE HYPOTHESES, honestly.**
+*Clocks and power mode are genuinely UNWIRED*, and the registry says so in its
+own words: the accelerator's `PerformanceStatistics` carries
+**`"Core Clock(MHz)"=0`** and **`"Memory Clock(MHz)"=0`**. Rule 14 - that is
+"nothing in our stack reports it", **not** "the clocks are at zero", and the
+two are indistinguishable from this reading. What IS certain is that this
+project has never set a clock or a power state: `rb_smu.c` is query-only with a
+three-message allowlist (GetSmuVersion, GetDriverIfVersion,
+GetEnabledSmuFeatures), nothing is sent unless the response register reads 1,
+and adding a message group is the user's decision by standing rule. So it is
+unwired and **its effect is unmeasured**; it must not be written as the cause.
+*The CU / shader-array configuration has never been read here.* What is
+measured is `GB_ADDR_CONFIG` = **0x242** = 4 pipes, 4 packers, 1 SE, and it
+lives in `kern_start.cpp`, **not** `rb_regs.h` - a first grep for it over
+`rb_regs.h` returned 0 and that zero was meaningless, rule 26 again, caught
+only by checking the file's naming convention. No CU-enable or harvest
+register has been read, and **no registry property reports a core count**.
+*The 33 000 figure is not verified and the comparison may not be one.* Geekbench
+Metal, Vulkan and OpenCL scores for the same chip differ by large factors, and
+GB5 and GB6 Metal are not comparable either - naming which suite, which API
+and which version produced each number is rule 33 applied to a benchmark. **And
+9633 was almost certainly measured BEFORE the tick**, since the tick first ran
+in boot 215 today, so the first thing to do is re-run it.
