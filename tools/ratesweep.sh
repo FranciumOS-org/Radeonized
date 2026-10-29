@@ -53,9 +53,12 @@ START=$(boot_s)
 while :; do
     T=$(boot_s)
     [ $((T - START)) -ge "$TOTAL" ] && break
-    # --bench 6 costs ~10 ms in the fast state and ~1.1 s in the slow one, so
-    # the sweep itself is never the reason a sample is late.
-    LINE=$(env -u DYLD_INSERT_LIBRARIES "$PROBE" --bench 6 2>/dev/null \
+    # 6 buffers was too many: boot 200 ran at 0.1 buffers/s, so a sample cost
+    # a minute and the 10 s interval stretched to 34-87 s. 4 buffers is the
+    # floor that still excludes the warm-up - the median of 4 takes index 2,
+    # and iteration 0 is always the fastest of a serial run because it alone
+    # has random phase.
+    LINE=$(env -u DYLD_INSERT_LIBRARIES "$PROBE" --bench 4 2>/dev/null \
            | grep "SERIAL median")
     MS=$(echo "$LINE" | sed -n 's/.*wall \([0-9.]*\) ms.*/\1/p')
     BPS=$(echo "$LINE" | sed -n 's/.*-> \([0-9.]*\) buffers\/s.*/\1/p')
