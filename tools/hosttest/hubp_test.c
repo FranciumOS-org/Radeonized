@@ -52,6 +52,24 @@ int hubp_tests(void)
     A(rb_hubp_dw(0, RB_HUBP_REG_TILING)   == 0x05e7);
     A(rb_hubp_dw(1, RB_HUBP_REG_TILING)   == 0x06c3);
 
+    /* 2c. 2xj's flip-control pair, read-only. Stated here directly from
+     * dcn_3_1_2_offset.h (regHUBPREQ<n>_DCSURF_FLIP_CONTROL / _CONTROL2),
+     * which is a SECOND independent statement of the same four numbers - the
+     * stride loop above already checks them a third way, and would fail if
+     * any one of them were off the 0xdc lattice. rb_regs.h does not carry
+     * them, so there is no third table to cross-check against. */
+    A(rb_hubp_dw(0, RB_HUBP_REG_FLIP_CTL)  == 0x061b);
+    A(rb_hubp_dw(0, RB_HUBP_REG_FLIP_CTL2) == 0x061c);
+    A(rb_hubp_dw(1, RB_HUBP_REG_FLIP_CTL)  == 0x06f7);
+    A(rb_hubp_dw(2, RB_HUBP_REG_FLIP_CTL)  == 0x07d3);
+    A(rb_hubp_dw(3, RB_HUBP_REG_FLIP_CTL)  == 0x08af);
+    A(rb_hubp_dw(3, RB_HUBP_REG_FLIP_CTL2) == 0x08b0);
+    /* And they must sit just past SURFACE_CONTROL (0x061a, rb_regs.h), which
+     * is the family cross-check: a flip-control register that did not land
+     * adjacent to it would mean we are reading a different block. */
+    A(rb_hubp_dw(0, RB_HUBP_REG_FLIP_CTL) ==
+      reg_from_defs("HUBP0_SURFACE_CONTROL") + 1);
+
     /* 3. Out-of-range asks answer 0, not a wild offset. */
     A(rb_hubp_dw(RB_HUBP_COUNT, RB_HUBP_REG_ADDR) == 0);
     A(rb_hubp_dw(0, RB_HUBP_REG_COUNT) == 0);

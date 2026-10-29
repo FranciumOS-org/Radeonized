@@ -84,6 +84,8 @@ public:
     uint32_t hubpRefuse=0;
     uint32_t hubpOtgCtl=0;
     uint32_t hubpAddrCfg=0;
+    uint32_t hubpFlipCtl=0;   /* 2xj */
+    uint32_t hubpFlipCtl2=0;  /* 2xj */
     uint32_t hubpTiling=0;
     uint32_t hubpPitch=0;
     uint32_t hubpConfig=0;

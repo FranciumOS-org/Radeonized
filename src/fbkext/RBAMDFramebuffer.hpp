@@ -236,6 +236,8 @@ private:
     uint32_t           hubpConfig;
     uint32_t           hubpOtgCtl;
     uint32_t           hubpAddrCfg;   /* DCSURF_ADDR_CONFIG, read-only */
+    uint32_t           hubpFlipCtl;   /* 2xj: DCSURF_FLIP_CONTROL, read-only */
+    uint32_t           hubpFlipCtl2;  /* 2xj: DCSURF_FLIP_CONTROL2, read-only */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;

@@ -71,15 +71,32 @@ enum rb_hubp_reg {
     RB_HUBP_REG_CONFIG,
     RB_HUBP_REG_ADDR_CFG,   /* DCSURF_ADDR_CONFIG   - swizzle / pipe interleave */
     RB_HUBP_REG_TILING,     /* DCSURF_TILING_CONFIG - the swizzle mode itself */
+    /* 2xj: DCSURF_FLIP_CONTROL / _CONTROL2. READ-ONLY, and the reason they
+     * exist is the tearing the user reported once 2xi made the panel actually
+     * flip. 2wh wrote the prediction down before any of this ran: it programs
+     * the surface address and "deliberately omits" the
+     * DCSURF_FLIP_CONTROL / SURFACE_UPDATE_LOCK dance, and said in the same
+     * paragraph that "tearing is expected and acceptable". At boot 213's 0.16
+     * flips/s a mid-scanout latch was one chance every six seconds; at 2xi's
+     * 112 flips/s it is 112 chances a second. So the tear was always in the
+     * design and the fix made it VISIBLE - the same shape as 2wi, where the
+     * 0.09 Hz rate was always there and 2wh only revealed it.
+     * These are NOT written and NOT gates. The field layout of this register
+     * is in dcn_3_1_2_sh_mask.h, which this repo does NOT carry, so the bit
+     * that selects an immediate flip over a vsync'd one is UNKNOWN here and
+     * deriving it from memory into a display-engine write is exactly rule 17.
+     * Read it first; decide afterwards. */
+    RB_HUBP_REG_FLIP_CTL,   /* DCSURF_FLIP_CONTROL  - flip type / update lock */
+    RB_HUBP_REG_FLIP_CTL2,  /* DCSURF_FLIP_CONTROL2 */
     RB_HUBP_REG_COUNT
 };
 
 static const uint32_t rb_hubp_regs[RB_HUBP_COUNT][RB_HUBP_REG_COUNT] = {
-    /*            ADDR     ADDR_HI   PITCH    CONFIG   ADDR_CFG  TILING */
-    /* HUBP0 */ { 0x060a,  0x060b,   0x0607,  0x05e5,  0x05e6,   0x05e7 },
-    /* HUBP1 */ { 0x06e6,  0x06e7,   0x06e3,  0x06c1,  0x06c2,   0x06c3 },
-    /* HUBP2 */ { 0x07c2,  0x07c3,   0x07bf,  0x079d,  0x079e,   0x079f },
-    /* HUBP3 */ { 0x089e,  0x089f,   0x089b,  0x0879,  0x087a,   0x087b },
+    /*            ADDR     ADDR_HI   PITCH    CONFIG   ADDR_CFG  TILING   FLIP_CTL FLIP_CTL2 */
+    /* HUBP0 */ { 0x060a,  0x060b,   0x0607,  0x05e5,  0x05e6,   0x05e7,  0x061b,  0x061c },
+    /* HUBP1 */ { 0x06e6,  0x06e7,   0x06e3,  0x06c1,  0x06c2,   0x06c3,  0x06f7,  0x06f8 },
+    /* HUBP2 */ { 0x07c2,  0x07c3,   0x07bf,  0x079d,  0x079e,   0x079f,  0x07d3,  0x07d4 },
+    /* HUBP3 */ { 0x089e,  0x089f,   0x089b,  0x0879,  0x087a,   0x087b,  0x08af,  0x08b0 },
 };
 
 /* 2os, boot 133, this machine. These are not defaults to fall back on - they
