@@ -46580,3 +46580,18 @@ the only state in which anything else in the boot means anything. `tarm=1`
 with `tk=0` and `tr` climbing at `tw=7` means the symbol never resolved —
 then read `tick_solved`: 0 says `solveSymbol` failed, absent says the
 callback never ran at all.
+
+2xh addendum — RULE 37'S FIX IS NOW VERIFIED ACROSS A POWER CYCLE, on new
+code, by accident. Boot 213 armed `rbgpu-tick`, the tick's arm consumed it
+with `rbgpu_nvram_consume_oneshot_ow` (`tos=0`), the box was power cycled, and
+**boot 214 reads `rbgpu-tick` as `0%00`** — the literal "0" plus the
+`OSString` NUL, still there. `rbgpu-fb` reads the same. So the overwrite path
+persisted through flash, which is precisely what 2sq measured the *removal*
+path failing to do for `rbgpu-fb` across six boots. n=1, but it is the exact
+experiment that rule 37 exists for, and the arming check's first-byte test
+treats it as not armed, so boot 214 came up with `IONDRVFramebuffer` owning
+the panel, no accelerator, and a usable software-composited desktop.
+**A plain power cycle is a full disarm, measured, for the new one-shot too.**
+Also worth keeping: `rbgpu-sched` in boot 214 still reads **`b=213`** — rule
+11, a note is evidence only when its nonce is new, and that one is this boot's
+stale copy of the previous boot's answer.
