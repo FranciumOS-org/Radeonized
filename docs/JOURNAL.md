@@ -46493,3 +46493,90 @@ INSTALL (rule 15, every artifact): plugin **`23D86D68`** to the OpenCore EFI
 `/Library/Extensions` — verified byte-identical to `build/out` this milestone,
 no re-install. Boot-arg: add `-rbgpuschedtick`. One-shots (rule 34, all five):
 `sudo nvram rbgpu-arm=1 rbgpu-agdc=1 rbgpu-iop=1 rbgpu-fb=1 rbgpu-tick=1`.
+
+--------------------------------------------------------------------------
+2xh (2026-10-29) — BOOT 213: THE TICK'S CALL SITE WAS WRONG, AND THE NOTE
+SAID SO IN THREE FIELDS. Plugin `DFEAFF02`.
+
+Rule 8 first: `rbgpu-boot` **213**, `kern.boottime` 13:32:17, plugin
+`23D86D68` loaded (the 2xg build), fbkext `39190382`, `-rbgpuschedtick` in
+boot-args as a whole token, and all five one-shots consumed — so this is a
+genuinely armed boot of the new code and `rbgpu-sched` carries `b=213`.
+
+**THE TICK DID NOT TICK, AND THE ARM CHECK IS WHY IT COST NOTHING TO FIND
+OUT.** `tarm=0 tos=0`, with `tick_us` **absent** from the diag table:
+
+  `tos=0` is `rbgpu_nvram_consume_oneshot_ow`'s "armed and consumed", and it
+    returns true only on that code — so the one-shot path worked exactly as
+    designed, including the overwrite read-back.
+  `tarm=0` with the consume having succeeded leaves exactly one branch:
+    `g_rb_2xg_check` was still NULL.
+  `tick_us` absent confirms it from the other side — that key is published
+    only after `thread_call_allocate`, which is past the refusal.
+
+**THE CAUSE IS ORDERING.** `rbgpu_schedtick_start_2xg()` is called from the
+peer's `start()`, which was 2w5's hard-won fix for a probe gated on a
+neighbour's boot-arg — and it is still the right place for the one-shot and
+the allocation. But the tick's *target* is solved in `processX6000`, the
+AMDRadeonX6000 patcher callback, which runs **later**: the peer matches on the
+PCI device early, the accelerator is patched when its kext loads. `hk=1` in
+the same note proves the routes themselves took, so the callback did run — it
+just ran after the arm. **2w5's lesson in a new form: a probe needs a call
+site that runs when ITS arg is set, and this one did — but it also needed a
+target that only exists later, and nothing reconciled the two.**
+
+**THE FIX IS NOT TO MOVE THE CONSUME.** Moving it into the patcher callback
+would "fix the ordering" by putting a flash commit inside a kext load, which
+is 2fo's wedge. Instead the tick now **arms anyway**: the `thread_call` is
+allocated and started from the peer's `start()`, where NVRAM and allocation
+are safe, and the action refuses harmlessly — counted — until the route
+callback fills the target in. Rule 37 is untouched: the one-shot is still
+consumed before the first tick fires, which is all it requires.
+
+**AND TWO FIELDS WERE ADDED BECAUSE BOOT 213 COULD NOT ANSWER ITS OWN
+QUESTION** (rule 14). `tw` stayed **0** through the whole boot, because the
+action short-circuits on `!g_rb_2xg_check` and never reaches
+`rbgpu_2xg_sane()`, so the one refusal that mattered had no reason recorded.
+Now: `tw=7` means "the target is not resolved", distinct from `tw=1..6`, which
+mean the scheduler object itself looked wrong. And `tw=7` *still* cannot say
+whether the callback has not run yet or `solveSymbol` failed, so
+`tick_solved` is published from the patcher callback itself — safe, because
+`processX6000` already writes the diag table twelve times. The four tick keys
+also went to the **top** of the NVRAM hot-key list, ahead of 2w3's gates,
+because a boot carrying this feature can panic.
+
+**THE SIX-SECOND GAP REPRODUCED, AND THAT IS THE REAL RESULT OF THIS BOOT.**
+
+    boot 199 (fast)   gmean   3 400 us
+    boot 212 (slow)   gmean  32 314 us   gmax 6 001 590 us
+    boot 213 (slow)   gmean  72 321 us   gmax 6 005 202 us
+
+So `gmax` is **6.0016 s and 6.0052 s in two independent boots**, against
+SkyLight's watchdog at 5.99733 s — and 2xf's 4 ms agreement was a single
+reading that could have been coincidence. It is now reproducible to 3.6 ms
+across two boots of different builds. The histogram sums to **2177 = adv − 1**
+(371,694,969,18,11,10,9,10,12,5,1,9,6,52), so the gap accounting is
+arithmetically sound, and **52 gaps are ≥ 262 ms**.
+**STILL NOT ESTABLISHED, unchanged**: nothing observes pending work at
+`advance()`'s entry, so an idle scheduler looks identical (rule 35). That is
+what the tick is for, and it has not run yet.
+
+Also read live, not promoted: `RBFBVBLResyncs` **7** over 334 s of uptime
+(boot 212 read 0 over 30 s). Seven whole periods missed on a loaded machine
+is what the counted resync was built to show rather than hide; it is not a
+clock fault and it is **not** attributed to anything.
+
+Boot 213's own display rate: `RBFBAmtrSets` 55 over 334 s = **0.16 sets/s**,
+i.e. the exhibiting configuration, which is what the tick needs.
+
+INSTALL (rule 15, every artifact): plugin **`DFEAFF02`** to the OpenCore EFI
+(`sudo tools/efi.sh install`); fbkext **`39190382`** UNCHANGED in
+`/Library/Extensions`, verified byte-identical to `build/out` — no re-install.
+Boot-arg `-rbgpuschedtick` is ALREADY in boot-args, no edit needed.
+One-shots (rule 34, all five): `sudo nvram rbgpu-arm=1 rbgpu-agdc=1
+rbgpu-iop=1 rbgpu-fb=1 rbgpu-tick=1`.
+**Read `tarm` FIRST**: `tarm=1` with `tc` climbing and `tk` tracking it is
+the only state in which anything else in the boot means anything. `tarm=1`
+with `tk=0` and `tr` climbing at `tw=7` means the symbol never resolved —
+then read `tick_solved`: 0 says `solveSymbol` failed, absent says the
+callback never ran at all.
