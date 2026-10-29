@@ -45668,3 +45668,98 @@ rule 35 precisely, and 2ws said the same about it. Instrument our end first.
 They interleave in the log and share a shape, but the wedge lives on
 GFX/SDMA/Compute user queues and the display stamp is index 59 on `fbindex=0`.
 Two numbers agreeing is not an identification (rule 18).
+
+## 2x7 — GPU ACTIVITY IS NOT THE LEVER. 2x6'S HYPOTHESIS IS REFUTED BY ITS OWN TEST
+
+`tools/setsrate.sh` on the live armed GPU-framebuffer boot, AnyDesk
+disconnected. Five load profiles, one command queue in every arm (never
+`--queues`, 2wt's wedge trigger), with `RBFBAmtrSets` read against the panel's
+vblank counter:
+
+| arm | what the GPU managed | `RBFBAmtrSets`/s |
+|---|---|---|
+| idle (control) | — | **6.83** |
+| `--busy 20 --heavy 20000 --depth 16` | 32 buffers / 20.25 s = 1.6/s | 0.24 |
+| `--busy 20 --depth 256` | 256 buffers / 32.07 s = 8.0/s | 0.16 |
+| `--busy 20 --depth 64` | 64 buffers / 100.43 s = 0.6/s | **0.09** |
+| `--bench 400` | pipelined submit 17265/s | 0.25 |
+
+**Every loaded arm reads BELOW the control.** 2x6 said in advance that a row
+near 83/s would mean GPU work is the lever and capture is dead, and that every
+row near 0.1/s would mean the reverse. The rows came in at 0.09-0.25.
+
+**So 2x6's hypothesis is REFUTED, and by the test 2x6 itself specified.** GPU
+work does not kick the display transaction's stamp; it **starves** it, which is
+what a transaction waiting behind the same wedged queue would do. **Capture is
+back as the remaining candidate** and 2x5's open question is open again.
+
+**2x6's stamp-timeout finding is NOT withdrawn** — the 219
+`transaction stamp index 59 time out` lines and the ten-capture differential
+(CPU-framebuffer boots with the wedge logging zero) are measurements and stand.
+What is refuted is the *mechanism* stacked on them: that new submissions are
+what retire the stamp. **Eighth instance of a correct reading with a wrong
+inference attached** (rule 35), and the first one this project refuted inside a
+single milestone because the prediction was written down before the test.
+
+### THE FIRST ATTEMPT TESTED THE WRONG KNOB, AND SAYING SO IS THE POINT
+
+2x6's own first run was `--busy 45 --heavy 20000 --depth 16` and bought
+**18.9 buffers/s**. That is GPU **occupancy**, not submission **rate**, and
+AnyDesk's profile is many small buffers — so the knob and the hypothesis did
+not match. `--depth 256` with the light kernel was added for exactly that
+reason and is the arm that matters here. It also read 0.16/s.
+
+### TWO INSTRUMENT DEFECTS THE RUN EXPOSED, BOTH IN CODE WRITTEN THIS SESSION
+
+1. **`writes != sets` fired twice and both were FALSE ALARMS.** `setsrate.sh`'s
+   `key()` ran a **separate `ioreg` per counter**, seconds apart, against a
+   counter pair that advances at up to 83/s — so the 117-vs-118 and 418-vs-415
+   skews are the **sampling**, not the driver. **2x5 holds.** The check was
+   written to satisfy rule 38 and became rule 16's example instead: *a check is
+   an instrument and can be wrong in the direction that stops the work.* A
+   cross-check between two counters must read them in **one** snapshot.
+2. **The idle control was contaminated by the keystroke that launched it.**
+   6.83 sets/s is not the frozen 0.08/s; it is the decaying tail of pressing
+   Return, because typing is the one thing that makes this machine composite
+   (2wl) and the control began immediately after it. **A control for a defect
+   that input suppresses must start after the input's effect has decayed** —
+   the ~10 s figure has been in this journal since 2wi. Same family as 2x3's
+   lost trace: the script must own the clock *and* the settle.
+
+### AND A NEW FACT, IN THE EXHIBITING CONFIGURATION
+
+**64 light buffers took 100.43 seconds — 1.57 s per buffer** — where the same
+binary standalone, minutes earlier in the same boot, managed 18.9/s. And
+`--depth 256` produced exactly 256 buffers in 32 s, i.e. **the loop body ran
+once**: one batch never completed inside a 20 s window. 2wz's worst single-queue
+reading was 6104 ms; this is worse and it is measured **with the display path
+live**, which is the configuration 2wz could not reach (rule 39). Not yet
+explained, and not attributed: the wedge may deepen because the display
+transaction is itself queued behind it.
+
+## 2x8 — THE CAPTURE TEST, WITH THE INSTRUMENT VERIFIED FIRST
+
+`tools/levertest.sh`. No build, no boot, no kext, no sudo. Three arms, each a
+discarded **15 s settle** followed by a measured **25 s window**:
+**A** idle, **B** an active screen capture, **C** idle again — two controls,
+not a trend (rule 18).
+
+Every defect 2x7 exposed is fixed in it: **one `ioreg` per sample** so the
+counters cannot skew against each other, a **settle before every window** so no
+arm measures the keystroke that started it, and the script **owns the capture
+as well as the clock** so no phase can be entered at the wrong time.
+
+**The capture is `screencapture -v -x -D 1 -C`**, started and stopped by the
+script, and **it is verified before arm B is believed**: the process must still
+be alive after 4 s and the output file must be **growing** between two stats.
+2x5 lost three exchanges to "didn't work" meaning three different things — TCC
+denied, ran with zero frames, TCC denied again — and a capture that produced no
+bytes is not a capture (rule 14). If `screencapture` exits at once it is almost
+certainly TCC, and the script says so and names the GUI fallback instead of
+reporting a quiet zero.
+
+**Said before the test.** B near 83/s with A and C near 0.1/s = **capture is
+the lever**; a minimal always-on stream is the bridge and the real fix is
+whatever makes WindowServer treat the panel itself as a consumer. A, B and C
+alike = **capture is dead too**, and what remains is whatever else a live
+AnyDesk session holds open, which `lsof` on its pid will name.
