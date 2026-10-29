@@ -578,6 +578,7 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // This line runs in the peer's start() on every boot, armed or not, and
     // the probe's own `-rbgpuaccelprobe` check is the only gate it needs.
     rbgpu_accelprobe_start();
+    rbgpu_rate_start_2wx();
 
     // 2li (2026-10-20): THE DISPLAY HALF WAS NEVER ASKED TO START.
     //
