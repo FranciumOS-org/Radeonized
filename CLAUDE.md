@@ -26,6 +26,28 @@ dyld cryptex path still refuses writes with EROFS because its files carry the
 
 ## Where this stands
 
+**THE FLICKER IS FIXED, AND IT COST 27 % OF THE FRAME RATE (2xo, boot 220).**
+`-rbgpufbnotready` answers the `'amtr'` GET the way Apple's own framebuffer
+does - `kIOReturnNotReady` while our flip is unlatched - and the user reports
+the flicker **"almost gone maybe even fully gone"**. `RBFBAmtrHeld` **4506** of
+11465 gets, and **`RBFBAmtrHoldExpired` 0**: every hold was resolved by the
+hardware, so the safety bound was never load-bearing. **It SUBSUMES 2xm** -
+`RBFBHubpPendHits` 693 -> **0** idle and **1 in 2478** under load, because a
+compositor held until the latch cannot hand us a flip over an unlatched one, so
+`-rbgpufbflippend` is now near-inert.
+**The cost, on 2xi's own animtest (same binary, same 30 s)**: `RBFBAmtrSets`
+**111.98/s -> 81.89/s**, against a display link measuring 143.34/s in the same
+run. **The idle `sets/s` figures (71.97 / 51.33 / 29.94) must NOT be compared**
+- idle transaction rate is demand-limited (2xe) and those boots differ in
+activity and window length. **The trade is the user's**: 82/s with no flicker
+against 112/s with it, and dropping one token reverses it.
+**AND 2xi's JITTER TAIL COLLAPSED**: spread 3.81-29.01 -> **4.04-12.32 ms**
+with stddev essentially unchanged (13.9 % -> 13.3 %), so the *extreme*
+improved, not the variance. Mean 143.451 Hz vs the panel's 143.830.
+**Unexplained**: `nominal refresh` reports 126.55 Hz against a measured 143.45,
+another value in 2xe's moving series. And ~5 ms per frame is neither the panel
+period nor the latch.
+
 **THE DISPLAY HALF IS FIXED (2xi, boot 215).** `-rbgpuschedtick` ticks Apple's
 `AMDSWScheduler::checkTimestamps()` at the panel's 6944 us, and the chain 2xe
 read end to end now runs: the stamps retire, the transactions complete, the

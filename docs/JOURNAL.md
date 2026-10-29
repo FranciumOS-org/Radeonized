@@ -47262,3 +47262,110 @@ this is Geekbench **7**, and GB5/GB6/GB7 Metal scores are not interchangeable
 detail. Clocks remain unwired (`Core Clock(MHz)` reports 0, 2xl).
 
 Artifact: fbkext **`4BDC7A2C`**. Plugin `3A8EAB07` unchanged.
+
+---
+
+## 2xo — boot 220: the NotReady hold works, SUBSUMES 2xm, and its safety bound never fired once
+
+Boot 220, rule 15 clean on both: plugin `3A8EAB07`, fbkext **`4BDC7A2C`**.
+`rbgpu-boot` 220, `rbgpu-tick`/`rbgpu-fb` both `0`, `tarm=1 tos=0 ts=0`,
+**`tus=6944`** (so `rbgpuschedtickus` came out and 2xn's A/B result was acted
+on). Boot-args carry `-rbgpufbhubp -rbgpufbflippend -rbgpufbnotready`.
+**The user reports the flicker "almost gone maybe even fully gone."**
+
+### THE HOLD FIRES, AND THE BOUND NEVER DECIDED ANYTHING
+
+    RBFBAmtrNotReadyArmed  Yes
+    RBFBAmtrHeld          4506   of RBFBAmtrGets 11465   = 39.3 %
+    RBFBAmtrHoldExpired      0
+
+**`HoldExpired = 0` is the result that matters most.** Every one of 4506 holds
+was resolved by `SURFACE_FLIP_PENDING` clearing in hardware, not by the
+two-period deadline expiring. So the bound 2xn built as a safety property
+against a pending bit that never clears was **never load-bearing**, which is
+exactly what it should look like when the register means what 2xk read it to
+mean. The hold is 1.3 per transaction here and 1.44 under load, i.e. Apple
+asks more than once per transaction and we answer honestly each time.
+
+### AND IT SUBSUMES 2xm ENTIRELY
+
+    RBFBHubpDeferArmed  Yes       RBFBHubpDeferrals    0
+    RBFBHubpPendChecks  3479      RBFBHubpPendHits     0      Writes 3479
+
+**`PendHits` went 693 -> 0**, and under the animtest load below it is **1 in
+2478**. That is a causal chain, not a coincidence: holding the compositor
+until our flip latches makes "program a new address over an armed, unlatched
+one" *impossible*, because the next transaction cannot arrive until the
+previous flip has latched. So 2xm's mechanism is **eliminated upstream** - the
+deferral is now near-inert dead weight rather than a fix. It costs nothing and
+still catches the 1-in-2478 residue, so it stays; nothing measured argues
+either way and the honest statement is that **2xn did the work 2xm was
+reaching for.**
+
+### THE COST, MEASURED THE ONLY WAY THAT IS VALID
+
+**The idle comparison I was about to make is NOT valid and is recorded as
+such.** Idle `sets/s` read 71.97 (boot 217), 51.33 (219) and **29.94** (220),
+but idle transaction rate is *demand*-limited - 2xe killed frame demand as a
+lever precisely because an idle desktop composites what it feels like - and
+the three boots differ in activity and in window length (470 s mixed vs ~110 s
+post-login). Comparing them would attribute a workload difference to the code.
+**The controlled instrument is 2xi's `animtest`: same binary, same 30 s test.**
+
+    boot 210 (before the tick)         2 sets  =   0.07 /s
+    boot 215 (2xi, the tick)        3375 sets  = 111.98 /s
+    boot 220 (this, + notready)     2478 sets  =  81.89 /s
+
+So the NotReady answer costs **27 %** of frame rate under identical load, and
+that is the price of the flicker going away. 81.89/s against a display link
+measuring **143.34/s** in the same run means we present ~57 % of vblanks where
+2xi presented 78 %. **Not established**: whether the 27 % is the hardware latch
+wait itself or granularity in Apple's waiter; 12.2 ms per frame against a
+6.95 ms period leaves ~5 ms unaccounted, and nothing here observes Apple's side
+of the wait.
+
+### AND 2xi'S OPEN JITTER QUESTION MOVED, IN THE GOOD DIRECTION
+
+Same instrument, `CVTimeStamp` hostTime, 4322 intervals:
+
+                        2xi (boot 215)      2xo (boot 220)
+    mean                143.446 Hz          143.451 Hz   (panel 143.830)
+    stddev              0.9684 ms 13.9 %    0.9242 ms 13.3 %
+    spread              3.81 - 29.01 ms     4.04 - 12.32 ms
+
+**The long tail collapsed**: worst-case interval 29.01 -> 12.32 ms, and the
+histogram's 12-16 ms bucket holds exactly 1 of 4322 intervals. The stddev is
+essentially unchanged, so this is not "the jitter is fixed" - it is the
+*extreme* that improved, which is what pacing against a hardware latch would
+do. 2xi recorded the widened jitter with cause **NOT established**; that is
+still true, but the worst case is now bounded by something.
+**Unexplained, carried forward**: `nominal refresh` reports **126.55 Hz**
+against a measured 143.45. 2xe saw this value move across runs
+(115.94 / 119.97 / 120.00 / 133.72) and it moved again. Still not attributed.
+
+### INSTRUMENT ERROR, SELF-CAUGHT (rule 16, rule 26)
+
+The first animtest run was invoked as `animtest 30`, and the tool takes
+`--secs N`. It printed its usage and exited in **28 ms**, during which 3
+transactions happened - and the bracketed counters dutifully computed
+**108.18/s from n=3 over a 28 ms window**, a number that would have read as a
+triumph (108 vs 2xi's 112) and meant nothing at all. Caught only because the
+elapsed time was printed beside it. **An instrument's own usage error produces
+a plausible number, not an error** - print the window with every rate, which
+is what 2xe's `RBFBVBLUptimeNs` was added for.
+
+### WHAT IS OPEN
+
+- The 27 % cost. The clean A/B is one token: drop `-rbgpufbnotready` and
+  re-run the same animtest. **That is also the trade to put to the user** -
+  82/s with no flicker against 112/s with it - and it is their call, not a
+  defect to be fixed silently.
+- Whether a shorter hold would buy rate back at some flicker. `HoldExpired 0`
+  says the bound is never reached today, so shortening it would start
+  *truncating* real holds, which is a genuine dial and is **not built** - no
+  measurement yet says it would help.
+- The ~5 ms per frame that is neither the panel period nor the latch.
+- 2xn's `-rbgpufbflippend` is near-inert now; keep or drop, no measured
+  difference.
+
+No new artifact: plugin `3A8EAB07`, fbkext `4BDC7A2C`, both unchanged.
