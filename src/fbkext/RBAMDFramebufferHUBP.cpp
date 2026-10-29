@@ -60,6 +60,8 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpOrig = 0;
     hubpLast = 0;
     hubpReadback = 0;
+    hubpFlipCtl = 0;
+    hubpFlipCtl2 = 0;
     hubpPitch = 0;
     hubpConfig = 0;
     hubpOtgCtl = 0;
@@ -123,6 +125,10 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * resolve. */
     hubpAddrCfg = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_ADDR_CFG));
     hubpTiling  = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_TILING));
+    /* 2xj: and the two the tearing question turns on. Same standing as the two
+     * above - read, published, never written and never a gate. */
+    hubpFlipCtl  = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL));
+    hubpFlipCtl2 = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL2));
 
     const int state = rb_hubp_check_state(hubpPitch, hubpConfig, hi);
     if (state != RB_HUBP_OK) {

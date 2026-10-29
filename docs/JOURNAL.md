@@ -46715,3 +46715,83 @@ source created with `provider = 0`, i.e. software, so nothing else would ever
 fire it on an idle machine. Boot 215 closes it: tick the poll at the panel's
 rate and the stamps retire, the transactions complete, the surfaces are
 released, readiness is regained and the compositor draws the next frame.
+
+--------------------------------------------------------------------------
+2xj (2026-10-29) — THE TEARING WAS PREDICTED IN WRITING BEFORE THE DISPLAY
+EVER WORKED. fbkext `A058AEA0`, read-only, no boot yet.
+
+The user reported tearing at the bottom of the screen once 2xi landed — a
+strip of the window behind showing through for a moment, worse while
+`animtest` ran — and asked whether it is VSync or FreeSync. **It is neither,
+and the answer has been in this file since 2wh:**
+
+> *"Nothing changing at all with `Readback == Last` = DCN ignores the stores
+> and wants `DCSURF_FLIP_CONTROL` / the `SURFACE_UPDATE_LOCK` dance this
+> build deliberately omits. Tearing is expected and acceptable."*
+
+So the flip-arming sequence was never written, by choice, to keep 2wh the
+narrowest possible write. A `grep` confirms it: `FLIP_CONTROL` and
+`SURFACE_UPDATE_LOCK` appear **nowhere** in `src/common/rb_hubp.h` or
+`src/fbkext/RBAMDFramebufferHUBP.cpp`.
+
+**AND IT SCALES WITH THE FLIP RATE, WHICH IS WHY IT APPEARED NOW.** A tear
+needs the address latch to land mid-scanout. Boot 213 flipped at **0.16/s** —
+roughly one opportunity every six seconds. 2xi flips at **112/s** under
+animation. The tear was in the design from 2wh onward and nothing revealed it
+until the rate came up. **Same shape as 2wi**: the 0.09 Hz frame rate was
+always there, and 2wh did not cause it, 2wh made it VISIBLE. Note it the other
+way round too — `animtest` tearing harder than the desktop is the predicted
+behaviour, not a new defect.
+
+**WHAT IS NOT KNOWN, AND WHY NOTHING IS WRITTEN THIS MILESTONE.**
+`DCSURF_FLIP_CONTROL` carries the field that selects an **immediate** flip
+over a **vsync'd** one, which is plausibly the whole fix in one bit. But the
+field layout lives in `dcn_3_1_2_sh_mask.h`, **which this repo does not
+carry** — `docs/linux-ref/` has the offset header only. Deriving a bit
+position from memory and writing it into the display engine is rule 17
+exactly, and this register can blank the panel. So: **read it first, decide
+afterwards.**
+
+**THE OFFSETS, CROSS-CHECKED FOUR WAYS.** From
+`dcn_3_1_2_offset.h`, `regHUBPREQ<n>_DCSURF_FLIP_CONTROL` =
+**0x061b / 0x06f7 / 0x07d3 / 0x08af** and `_CONTROL2` = 0x061c / 0x06f8 /
+0x07d4 / 0x08b0. Those sit exactly on the **0xdc stride** the table has
+asserted-but-never-used since 2wh (0x061b + 0xdc = 0x06f7 = the header's own
+value, three times over), and 0x061b is **adjacent to `HUBP0_SURFACE_CONTROL`
+= 0x061a** in `rb_regs.h`, which is the family check: a flip-control register
+that did not land next to the surface-control register would mean we are
+reading a different block.
+A note on how this was nearly missed: the first grep for
+`mmHUBPREQ0_DCSURF_FLIP_CONTROL` returned **nothing**, because this header
+spells them `reg...`, not `mm...`. **Rule 26, and it was caught only by
+controlling the grep against an offset already in `rb_hubp.h`** (0x060a),
+which the header does carry.
+
+**THE CHANGE IS A READ, in 2wh's own established pattern** — the same
+standing as `DCSURF_ADDR_CONFIG` / `DCSURF_TILING_CONFIG`: read in
+`hubpSetup()`, published as `RBFBHubpFlipCtl` / `RBFBHubpFlipCtl2`, **never
+written, never a gate.** Mutation-tested: changing one hex digit of HUBP0's
+offset fails **five** assertions across **three independent statements** of
+the same number (the stride lattice, the direct header value, and the
+adjacency to `HUBP0_SURFACE_CONTROL`). It also hit 2xe's trap again — the
+hosttest compiles `RBAMDFramebufferVBL.cpp` against
+`tools/hosttest/fb_vbl_shim.hpp`, a separate stub class, so the two fields had
+to be added there as well.
+
+**SAID BEFORE THE BOOT.** `RBFBHubpFlipCtl` is the whole point of this
+build: it is the firmware's own setting for a pipe that has been scanning
+correctly since before macOS booted. If a field in it reads as "immediate",
+the next step is one bit on one register with a readback and a restore path,
+and the fix is as small as the user guessed. If it already reads as vsync'd,
+then the tear is NOT the flip type and the next suspect is that our write is
+not atomic with respect to the scanout at all — the `SURFACE_UPDATE_LOCK`
+half, which brackets the address pair rather than selecting when it latches.
+**Either way no bit is written until the register has been read**, and
+`RBFBHubpFlipCtl2` is published beside it so a wrong guess about which of the
+two carries the field costs nothing (rule 35, the shape 2wf used for
+`flip->0x58`).
+
+INSTALL (rule 15): fbkext **`A058AEA0`** to the **auxiliary collection**, i.e.
+`/Library/Extensions` — it is the only artifact that changed. Plugin
+**`DFEAFF02`** is unchanged and already in the EFI; **no `efi.sh install`, no
+rebuild.** Boot-args unchanged. One-shots, all five as 2xi.
