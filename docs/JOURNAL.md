@@ -46265,3 +46265,102 @@ between the fast and slow states — 2ww named this gap and it is the one
 measurement that decides whether the scheduler is the gate. Install fbkext
 **`39190382`** for the clock fix; it needs no boot-arg and changes no
 behaviour but the cadence.
+
+## 2xf — `advance()` HAS SIX-SECOND GAPS IN THE SLOW STATE, AND THE NOTE WAS ALREADY ON THE MACHINE
+
+Boot 212, armed, `RBAMDFramebuffer` owning the panel, `rbgpu-fb` consumed to
+`0` by 2wj's overwrite. No boot spent. Rule 8/33 first: `rbgpu-boot` **212**,
+`kern.boottime` 12:59:18, `RBFBVBLUptimeNs` present — a key only the 2xe
+fbkext publishes — so the installed framebuffer is **`39190382`** and rule 15
+is met by a key the new code writes unconditionally.
+
+**THE CLOCK FIX IS VERIFIED ON HARDWARE.** A 30 s window, timed by the new
+stamp rather than by an assumed rate:
+
+    vbl fires   4322 over 30.054 s = 143.807 Hz    (the panel is 143.830)
+    resyncs        0                               (no period ever missed)
+    amtr sets   2087               =  69.44 sets/s
+    hubp writes 2087               (tracks sets exactly - 2x5 holds)
+
+**143.807 against 143.830 is 0.016 %**, where 2xe measured **134.70 Hz** from
+userspace before the change, and zero resyncs means the handler never ran a
+whole period long. The drift was arithmetic and it is gone.
+
+**AND 2ww's MISSING MEASUREMENT WAS SITTING IN NVRAM, UNREAD.** 2xe closed
+with "the deciding measurement is the one 2ww named: `rbgpu-sched` flushes at
+three fixed phase marks, so `advance()`'s rate in the SLOW state has never
+been read" — and then `nvram rbgpu-sched` answered it on the first try,
+because `-rbgpuschedprobe` is in this boot's boot-args and the flush runs at
++12/+100/+160 s, **before** keepalive was started at ~250 s uptime. The window
+is the slow state by construction.
+
+    b=212 hk=1 sub=8390 adv=4790 smax=748
+    gmin=0 gmean=32314 gmax=6001590
+    h=821,3739,113,6,2,4,1,4,11,4,3,7,5,69
+
+| | boot 199, fast window | **boot 212, slow window** |
+|---|---|---|
+| mean gap between `advance()` calls | 3.4 ms | **32.3 ms** |
+| max gap | — | **6 001 590 us = 6.0016 s** |
+| gaps >= 262 ms (`h[13]`) | — | **69** |
+
+**`gmax` IS 6.0016 s AND 2xe's WATCHDOG READ 5.99733 s.** Two instruments with
+nothing in common — our own Lilu hook on Apple's `advance()`, and SkyLight's
+`ReadinessTelemetry` log line — **4 ms apart**. 2xe measured the same 6 s as
+the gaps in the 1 Hz `transaction stamp index 59 time out` stream, three of
+them against three transactions. Rule 18 says two numbers agreeing to one
+figure is not an identification; three instruments agreeing to **four
+milliseconds** is a different kind of claim, and it is the first time this
+project has had one.
+The histogram sums to 4789 = `adv - 1`, which is the arithmetic control that
+the gap accounting is self-consistent.
+**`adv/sub` is deliberately NOT used here**: 2wy proposed it as a regime
+discriminator and withdrew it one milestone later when three fast readings
+gave 0.66, 3.81 and 15.22. That it reads 0.57 now is recorded and leaned on
+for nothing.
+
+**WHAT THIS DOES AND DOES NOT ESTABLISH.** Established: in the exhibiting
+configuration, `advance()` — the only path that retires a GPU stamp, reachable
+only from `deferredCallback` off a software event source and from the
+never-installed `timerCallback` (2xe) — goes **six seconds** without running,
+69 times over 262 ms in one window, against a 3.4 ms mean when the machine is
+busy. **Not established**: that this *causes* the display stall. During those
+gaps stamp 59 is pending (2xe's 1 Hz timeouts) and `advance()` is the only
+thing that could retire it, but **no instrument has yet shown pending work at
+`advance()`'s entry** — rule 35, our own end, and the thing a tick experiment
+must measure rather than assume. An idle scheduler with nothing pending is
+correct behaviour and looks identical in this note.
+
+**THIRD TIME THIS SESSION.** 2xe built an `advance()` tick on an inference,
+withdrew it against 2ww, and named the next measurement — which already
+existed, in NVRAM, under a key the boot-args had armed. **Read the evidence
+already in hand** is the project's oldest recurring error and it cost three
+separate detours in one session.
+
+**THE BRIDGE, MEASURED HONESTLY.** `tools/keepalive.sh` on this boot: cycles
+2-5 ran full 60 s at **72.62 / 78.40 / 60.50 / 60.03 sets/s**, 30-43 MB
+written and deleted per cycle, with a live cross-check of 55.06 sets/s taken
+independently of the script's own arithmetic. **But cycles 1 and 6 exited at
+10.91 s and 9.02 s with 4 and 0 sets** — `screencapture` bails early
+periodically, so the bridge has recurring ~10 s holes, not just the hitch per
+cycle that 2xd advertised. Also fixed here: keepalive timed its windows with
+`fires / 143.83`, which 2xe showed is wrong twice over, and its
+"bridge is not working" guard fired on those short cycles — a working bridge
+judged dead by a cycle that never ran, the same shape as the `-V` guard 2xa
+had to remove. It now times with `RBFBVBLUptimeNs` and refuses to judge a
+cycle under half its requested length.
+
+**NEXT, AND ITS RISK STATED BEFORE ANYTHING IS BUILT.** The experiment is a
+periodic `AMDSWScheduler::checkTimestamps()` — not `advance()`, because
+`advance()` only walks channels whose `ctx->0x71` is already set and
+`checkTimestamps` is the sole function that performs the hardware poll
+(`channel->vt[0x1a8]()`) and then sets that flag and signals the event source
+(2xe). **It needs no new route**, which rule 3 would forbid: the existing
+`-rbgpuschedprobe` hook already receives the scheduler pointer as its first
+argument on every call, so a static capture there plus one `solveSymbol` is
+the whole mechanism. **Its failure mode is a panic, not a hang**, and a
+boot-arg alone would panic-loop across power cycles — rule 37 — so it must
+carry a one-shot, and that is the plumbing to get right rather than rush.
+Said before the boot: if the display rate rises with the tick, retirement was
+the gate; if it does not, the gate is below `checkTimestamps` and the next
+target is what `channel->vt[0x1a8]` reads.
