@@ -26,6 +26,28 @@ dyld cryptex path still refuses writes with EROFS because its files carry the
 
 ## Where this stands
 
+**THE DISPLAY HALF IS FIXED (2xi, boot 215).** `-rbgpuschedtick` ticks Apple's
+`AMDSWScheduler::checkTimestamps()` at the panel's 6944 us, and the chain 2xe
+read end to end now runs: the stamps retire, the transactions complete, the
+surfaces are released, readiness is regained and the compositor draws the next
+frame. **Same `animtest` binary and the same 30 s test**: boot 210's
+continuously animating window gave **2** `RBFBAmtrSets`; boot 215 gives
+**3375 = 111.98/s**, so **1687x** with nothing about the measurement changed.
+`advance()`'s gaps went `gmean` 72 321 -> **2 921 us** and `gmax` 6 005 202 ->
+**88 346 us**, with the histogram's dominant bucket being [4096, 8192) us -
+our own period. Against `display_change_handler` = 26 as the control,
+`transaction stamp index N time out` went 219/48 -> **0**, and the WEDGE went
+`event timeout` 26-46 -> **0** (a larger claim than the tick was built to
+make, **n=1**, but coherent: 2we read the wedge as a *retirement* failure and
+`checkTimestamps` is the retirement poll). The clock is 143.446 Hz vs the
+panel's 143.830 (0.27 %), **but its jitter WIDENED** - stddev 6.2 % -> 13.9 %,
+spread 5.96-10.66 -> 3.81-29.01 ms - cause **NOT established**.
+**NOT DONE**: 111.98/s is **78 %** of 143.83 and the idle desktop reads 68-90,
+so the last ~22 % is a new, smaller question and it is **not known** whether it
+is demand-limited or still gated. Arm with all five one-shots
+(`rbgpu-arm rbgpu-agdc rbgpu-iop rbgpu-fb rbgpu-tick`) and **read `tarm`
+first**.
+
 **The rendering half works.** An armed boot is a usable, accelerated Mac: the
 CP halt is fixed (`-rbgpuvramadj`, 2ks/2ku/2kw), zero VM faults, Metal compute
 bit-exact, System Profiler reads `AMD Radeon 680M` / 4 GB. The swizzle defect

@@ -46595,3 +46595,123 @@ the panel, no accelerator, and a usable software-composited desktop.
 Also worth keeping: `rbgpu-sched` in boot 214 still reads **`b=213`** — rule
 11, a note is evidence only when its nonce is new, and that one is this boot's
 stale copy of the previous boot's answer.
+
+--------------------------------------------------------------------------
+2xi (2026-10-29) — **THE TICK WORKS. THE DISPLAY HALF IS FIXED.**
+Boot 215, plugin `DFEAFF02`, fbkext `39190382`. The user reported it from the
+screen first; everything below is the instruments agreeing.
+
+**THE ARM CHECK, READ FIRST as 2xg prescribed.** `tarm=1 tos=0 tus=6944`,
+`tick_solved=1`, `ts=0`, and:
+
+    tc=23934   ticks fired
+    tk=23011   calls that reached checkTimestamps
+    tr=923     refusals, ALL of them tw=1 (the scheduler pointer was NULL)
+
+`tk + tr = 23011 + 923 = 23934 = tc` **exactly** — the arithmetic control on
+the tick's own accounting. And `tr` was already 923 at the first reading and
+had not moved 148 s later, so every refusal is the pre-first-submit window
+2xh's lazy arm was designed to absorb: 923 × 6944 us = 6.4 s of boot before
+the accelerator submitted anything. `tw=1` rather than `tw=7` also says the
+symbol was resolved the whole time, which `tick_solved=1` confirms from the
+patcher callback independently.
+
+**THE SCHEDULER GAPS COLLAPSED, and the histogram names our own period.**
+
+                  gmean         gmax          gaps >= 262 ms
+    boot 212     32 314 us   6 001 590 us          69
+    boot 213     72 321 us   6 005 202 us          52
+    boot 215      2 921 us      88 346 us    **     0 **
+
+**25x on the mean and 68x on the max**, and the 88 ms maximum predates the
+tick engaging. `h=608,234,47,13,5,10,34,1582,103,0,0,1,0,0` sums to 2637 =
+`adv - 1` (the control), and its dominant bucket is **h[7] = 1582**, i.e.
+[4096, 8192) us — **which is where 6944 us lands.** `advance()` is now paced
+by our tick and by nothing else. Buckets 12 and 13 are zero where boot 213 had
+52 entries.
+
+**THE DISPLAY RATE, timed by `RBFBVBLUptimeNs` and never by 143.83 (2xe).**
+
+    20.03 s window    1805 sets    90.13 sets/s
+    45.02 s window    3097 sets    68.79 sets/s
+
+**With no bridge running**, verified properly after a first attempt failed:
+`keepalive` 0, `AnyDesk` 0, `metal_probe` 0 in a `ps` snapshot taken to a
+file, with `WindowServer` 1 and `launchd` 12 as known-present controls and a
+check that the snapshot contains none of the search words. The first attempt
+printed `2` for all four categories because the labels in the `echo` strings
+were sitting in the wrapper shell's own command line and matching themselves
+— **rule 26 again, and self-inflicted.** The nine `screencapture` hits are
+<app>.app helpers carrying the word inside a Chromium `--disable-features`
+list, not recorders.
+
+**AND 2xe'S OWN TEST, THE SAME BINARY AND THE SAME 30 SECONDS:**
+
+    boot 210   a continuously animating window ->       2 sets in 30 s
+    boot 215   the same window, same build     ->    3375 sets in 30.14 s
+                                                    = 111.98 sets/s
+
+**1687x on one instrument, one test, one duration.** That is the cleanest
+before/after this project has, because nothing about the measurement changed.
+2xe's *"an animating window produces NOTHING"* — the finding that killed
+frame-demand as the lever — is now the finding that measures the fix.
+
+**THE KERNEL BLOCKER IS GONE, against the control that has held since 2w4.**
+Captured by SENDER (rule 36), `display_change_handler` = **26**, the same
+value every boot from 185 to 193 read:
+
+    transaction stamp index N time out       219 / 48  ->  0
+    channel N ... event timeout (the wedge)     26-46  ->  0
+    checkGPUProgress                            36-63  ->  0
+    no channel associated with stamp_idx        18-36  ->  0
+
+So 2x6's blocker — *"the transaction it is drawing for cannot retire, so it
+does not draw the next one"* — is answered, and **the wedge is absent too**.
+That second part is a LARGER claim than the tick was built to make and it is
+**n=1**. It is mechanistically coherent rather than coincidental: 2we read the
+wedge as *"work is submitted and never retires, the hang check says not hung,
+the restart cannot find the channel"*, i.e. a **retirement** failure, and
+`checkTimestamps` is the retirement poll. But one boot is one boot.
+
+**RULE 39, BOTH DIRECTIONS.** This reading is taken in the configuration that
+exhibits the defect — an armed GPU-framebuffer boot on the **same fbkext
+`39190382`** as boots 212 and 213, which read 0.16 and 0.05-0.08 sets/s. The
+plugin differs from 2xg's `23D86D68` only in the tick's arm ordering and two
+diag keys, so **the single variable is whether the tick ran.**
+
+**THE CLOCK IS RIGHT AND ITS JITTER IS WORSE — stated, not buried.**
+CVDisplayLink now fires 143.35/s, and over 4322 intervals the mean is
+**6.9713 ms = 143.446 Hz** against the panel's 6.9527 ms = 143.830 — **0.27 %
+off, where 2xe measured 6.3 %** and the nominal refresh read 115.94 / 119.97 /
+120.00 / 133.72 Hz across four runs. But the spread widened: stddev
+**0.4615 ms (6.2 %) -> 0.9684 ms (13.9 %)**, min 5.96 -> **3.81 ms**, max
+10.66 -> **29.01 ms**. A sub-period minimum is a catch-up. The obvious
+candidate is that a machine actually compositing 112 frames/s carries real
+load where before it was idle and regular-but-slow, and **a clock whose MEAN
+is correct under load is a different animal from one whose RATE moved with
+load** — but the cause is **NOT established** and must not be written as if it
+were.
+
+**WHAT IS NOT DONE.** 111.98 sets/s under continuous animation is **78 % of
+the panel's 143.83**, and the idle-ish desktop reads 68-90. The user's goal
+was native 144 Hz, so the last ~22 % is a **new and much smaller question**,
+and it is not known whether it is demand-limited (a compositor composites when
+there is something to composite) or still gate-limited. Do not assume either.
+Also unexplained and trivial: `RBFBHubpWrites` exceeds `RBFBAmtrSets` by 1-4
+in every reading (3376 vs 3375, 1809 vs 1805). Sampling skew between two
+`ioreg` key reads taken at different instants is the obvious candidate and is
+**not measured**. `WindowServer` sits at **14.9 %** — neither 2su's 0.0 % idle
+nor 2v9/2w0's ~200 %.
+
+**THE CHAIN, END TO END, now that it runs.** 2xe read the readiness predicate
+down to `DisplaySurfacePool::IsReady` and found both the surface release and
+SkyLight's push notification coming from one function,
+`IOPAttachment::HandleTransactionCompletionEvent` — so the frame cadence hung
+on the kernel's transaction-completion event. 2xf measured `advance()`, the
+retirement driver, starved with 6.0 s gaps. 2xg built the tick on
+`checkTimestamps` because it is the sole hardware stamp poll, the only setter
+of the `ctx->0x71` flag `advance()` walks, and the tail-jump into an event
+source created with `provider = 0`, i.e. software, so nothing else would ever
+fire it on an idle machine. Boot 215 closes it: tick the poll at the panel's
+rate and the stamps retire, the transactions complete, the surfaces are
+released, readiness is regained and the compositor draws the next frame.
