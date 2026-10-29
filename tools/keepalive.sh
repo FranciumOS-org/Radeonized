@@ -33,11 +33,16 @@ OUT="$DIR/rbgpu-keepalive.mov"
 cleanup() { rm -f "$OUT"; echo; echo "keepalive: stopped, temp video removed"; exit 0; }
 trap cleanup INT TERM HUP
 
+# 2xe: time the window with RBFBVBLUptimeNs, NOT with fires/143.83. The old
+# form was wrong two ways at once - the cadence was really ~134.7 Hz before
+# the clock fix, and RBFBVBLFires is published only every few hundred fires,
+# so it is a staircase. Both numbers here come from the same publish, so the
+# quantisation cancels instead of compounding.
 snap() {
     ioreg -rl -c RBAMDFramebuffer 2>/dev/null | awk '
-        /"RBFBAmtrSets" = / { s = $NF }
-        /"RBFBVBLFires" = / { f = $NF }
-        END { if (s == "" || f == "") exit 1; print s, f }'
+        /"RBFBAmtrSets" = /    { s = $NF }
+        /"RBFBVBLUptimeNs" = / { u = $NF }
+        END { if (s == "" || u == "") exit 1; print s, u }'
 }
 
 echo "keepalive: holding the desktop up with ${CYCLE}s screencapture cycles"
@@ -54,11 +59,19 @@ while :; do
     n=$((n + 1))
     sz=$(stat -f%z "$OUT" 2>/dev/null || echo 0)
     rm -f "$OUT"
-    echo "$a $b" | awk -v n="$n" -v sz="$sz" '{
-        ds = $3 - $1; df = $4 - $2; sec = (df > 0) ? df / 143.83 : 0
+    echo "$a $b" | awk -v n="$n" -v sz="$sz" -v cyc="$CYCLE" '{
+        ds = $3 - $1; sec = ($4 - $2) / 1e9
         printf "  cycle %-4d sets %6d  %6.2f s  -> %6.2f sets/s   (%.1f MB written, deleted)\n",
                n, ds, sec, (sec > 0 ? ds / sec : 0), sz / 1048576
         if (ds < 0) print "    *** negative - counters reset, new boot"
-        if (sec > 0 && ds / sec < 5) print "    *** recording ran but the rate did NOT rise - this bridge is not working"
+        # 2xe: only call the bridge dead on a cycle that actually RAN. The
+        # first screencapture after a boot can exit in a few seconds, and the
+        # old guard read that short cycle as a failure on a working bridge -
+        # the same shape as the -V guard it replaced. A cycle is judged only
+        # once it covered most of what it asked for.
+        else if (sec > cyc * 0.5 && ds / sec < 5)
+            print "    *** recording ran a full cycle and the rate did NOT rise - bridge not working"
+        else if (sec <= cyc * 0.5)
+            printf "    (short cycle - %.0f%% of %ds, not judged)\n", 100 * sec / cyc, cyc
     }'
 done
