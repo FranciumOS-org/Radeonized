@@ -175,6 +175,49 @@ static inline int rb_hubp_flip_would_discard(uint32_t flip_ctl,
     return rb_hubp_flip_pending(flip_ctl);
 }
 
+/* 2xn: should getAttribute('amtr') answer kIOReturnNotReady right now?
+ *
+ * Apple's own AMDFramebuffer::getAttribute('amtr') (0x2a6faa, disassembled in
+ * 2wc and recorded in the journal) is:
+ *
+ *     if (!(ctrl->0x31332 >> 9 & 1)) return kIOReturnUnsupported;
+ *     if (getOutstandingDisplayPipeTransactions()) return kIOReturnNotReady;
+ *     return kIOReturnSuccess;
+ *
+ * Ours has answered kIOReturnSuccess UNCONDITIONALLY since 2wc, so the
+ * compositor is told every transaction completed the instant it was handed
+ * over - which frees it to draw into a surface that is still the live
+ * scanout. That corrupts the WHOLE frame, which is the shape the user
+ * reports, where a flip programmed over an unlatched one (2xm) can only
+ * corrupt the part of the frame below the scanline.
+ * Our stand-in for getOutstandingDisplayPipeTransactions() is DCN's own
+ * SURFACE_FLIP_PENDING: our flip is outstanding exactly while the hardware
+ * has it armed and unlatched. The triple-buffer guard of
+ * rb_hubp_flip_would_discard() does NOT apply here - with more than one slot
+ * a pending flip still means OUR address has not been latched - so this is
+ * the bare pending bit by design, not by omission.
+ *
+ * THE DEADLINE IS THE SAFETY PROPERTY, not a refinement. 2x6 recorded that
+ * isTransactionComplete (0xbe4a794) decides the current transaction by
+ * `getAttribute('amtr', NULL) == 0`, so answering NotReady makes Apple's
+ * accelerator WAIT. Answering 0 always, as we do today, is the optimistic
+ * answer and cannot stall anything; this one can. If the pending bit never
+ * clears - a mode set, a disabled pipe, a register we have misread - an
+ * unbounded hold would wedge the display for good. So the hold is bounded and
+ * the caller passes the deadline: past it we answer ready whatever the
+ * hardware says, and the kext counts how often that happened.
+ *
+ * Returns 1 to answer kIOReturnNotReady, 0 to answer success.
+ */
+static inline int rb_hubp_hold_notready(uint32_t flip_ctl, uint64_t now,
+                                        uint64_t deadline)
+{
+    if (!rb_hubp_flip_pending(flip_ctl)) {
+        return 0;               /* latched already: nothing is outstanding */
+    }
+    return now < deadline ? 1 : 0;
+}
+
 #define RB_HUBP_EXPECT_PITCH    0x0000077fu   /* 1920 px, pitch-1 encoding */
 #define RB_HUBP_EXPECT_CONFIG   0x00000008u   /* ARGB8888 */
 #define RB_HUBP_EXPECT_ADDR_HI  0x000000f4u   /* the carve-out's high dword */

@@ -303,6 +303,15 @@ bool RBAMDFramebuffer::start(IOService *provider)
         char pendflag[16];
         hubpDeferPend = PE_parse_boot_argn("-rbgpufbflippend", pendflag,
                                            sizeof(pendflag)) && hubpArmed;
+        /* 2xn: -rbgpufbnotready answers the 'amtr' GET the way Apple's own
+         * AMDFramebuffer does - NotReady while a transaction is outstanding -
+         * instead of claiming instant completion. Rule 30: NOT
+         * `-rbgpufbamtrwait`, because `-rbgpufbamtr` would prefix it; nothing
+         * in use prefixes `-rbgpufbnotready` or is prefixed by it
+         * (`-rbgpufbnocrumb` shares only `-rbgpufbn`). */
+        char nrflag[16];
+        amtrNotReady = PE_parse_boot_argn("-rbgpufbnotready", nrflag,
+                                          sizeof(nrflag)) && hubpArmed;
     }
     /* 2wi: -rbgpufbretire. Deliberately NOT named -rbgpufbvbl-something:
      * rule 30 warns that a shell grep for an existing arg matches a longer
@@ -1006,6 +1015,15 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
             break;
         }
         amtrGets++;
+        /* 2xn: answer the way Apple's AMDFramebuffer does. The decision is
+         * rb_hubp_hold_notready() in src/common/rb_hubp.h, which the hosttest
+         * runs first and which is BOUNDED by hubpFlipDeadline - answering
+         * NotReady makes Apple's isTransactionComplete WAIT (2x6), so an
+         * unbounded hold would wedge the display. Reads two words of MMIO and
+         * nothing else: no allocation, no log, no block (rule 31). */
+        if (hubpHoldNotReady()) {
+            return kIOReturnNotReady;
+        }
         /* AMDFramebuffer never writes *out on this selector, and the one
          * consumer (getDisplayInfo) presets its local and ignores it. */
         return kIOReturnSuccess;

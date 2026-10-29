@@ -242,6 +242,10 @@ private:
     uint64_t           hubpPendHits;   /* 2xk: ...and was already set */
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
+    bool               amtrNotReady;   /* 2xn: -rbgpufbnotready */
+    uint64_t           hubpFlipDeadline; /* 2xn: abs time the hold expires */
+    uint64_t           amtrHeld;       /* 2xn: NotReady answers given */
+    uint64_t           amtrHoldExpired;/* 2xn: pending but past the deadline */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;
@@ -269,6 +273,9 @@ private:
     bool hubpSetup(void);
     void hubpTeardown(void);
     void hubpProgram(uint64_t mc);
+    /* 2xn: is OUR flip still unlatched? Lives in RBAMDFramebufferHUBP.cpp
+     * so the DMU segment constant stays in exactly one file. */
+    bool hubpHoldNotReady(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
     void hubpPoll(void);

@@ -2201,7 +2201,14 @@ scheduler pointer it calls arrives only as those hooks' first argument. Read
 `tunable rbgpuschedtickus=<500..1000000>` - **which never worked until 2xm**:
 boot 217 had it set to 2000 and ticked at 6944 anyway, because the value came
 back as a binary int and was parsed as ASCII. Rule 40. `tick_us_refused` now
-says when one is rejected), `-rbgpufbaty` (2w9 - publishes
+says when one is rejected. **2xn ran it and 2000 us is WORSE**: `advance()`'s
+gaps tightened as the theory predicts (`gmean` 2712 -> 1538, `gmax` 54191 ->
+13183, the dominant histogram bucket straddling the new period) but `sets/s`
+went **71.97 -> 51.33** and our own vblank cadence **141.377 -> 133.878 Hz**,
+because a 3.5x faster `thread_call` competes with the VBL one that delivers
+frames. **Two variables differed** (`-rbgpufbflippend` came on in the same
+boot), so this is not attributed to the period alone - but **6944 is the better
+value on the evidence in hand**, and the clean A/B is one token either way), `-rbgpufbaty` (2w9 - publishes
 `ATY,fb_offset` and `ATY,fb_size`, the two properties `AMDHWDisplay` reads off
 the framebuffer; **the offset it publishes is deliberately not the truthful 0**,
 so the composited image lands where the scanout is not reading - expect a wrong
@@ -2250,6 +2257,30 @@ for all the tearing** - the user's "appears for a second" is far longer than
 one frame at 144 Hz, and 2xk's second candidate (a surface recycled while
 still being scanned) is untested. Publishes `RBFBHubpDeferArmed` /
 `RBFBHubpDeferrals`; one token reverses it without losing 2wh's write),
+`-rbgpufbnotready` (2xn - **the flicker fix that matches its SHAPE**, requires
+`-rbgpufbhubp`. Boot 219 ran `-rbgpufbflippend` and the user reported the
+flicker ~30 % reduced, still present, and **"across the whole screen"** - and a
+flip programmed over an unlatched one can only corrupt the frame BELOW the
+scanline, so 2xm is a real mechanism and not the main one. The main one is ours
+since 2wc: Apple's `AMDFramebuffer::getAttribute('amtr')` (`0x2a6faa`) returns
+**`kIOReturnNotReady` while `getOutstandingDisplayPipeTransactions()`**, and
+ours returns success **unconditionally** - so the compositor is told every
+transaction completed instantly and is free to draw into a surface that is
+still the live scanout, which corrupts the WHOLE frame. Answering NotReady does
+**not** close the gate 2wc opened: `getDisplayInfo` at `0xbe8717e` sets bit
+0x100 on `r == 0 || r == kIOReturnNotReady`, measured. Our stand-in for
+"outstanding" is DCN's `SURFACE_FLIP_PENDING`, and the triple-buffer guard
+deliberately does NOT apply (our address is unlatched either way).
+**THE HOLD IS BOUNDED AND THAT IS THE SAFETY PROPERTY**: 2x6 read
+`isTransactionComplete` (`0xbe4a794`) deciding by `getAttribute('amtr',NULL) ==
+0`, so NotReady makes Apple's accelerator **WAIT** - today's unconditional 0
+cannot stall anything and this can. `rb_hubp_hold_notready()` expires after two
+vblank periods and a deadline never set reads 0 = already expired, so the arm
+fails safe; **removing the bound FAILS the hosttest**. Read `RBFBAmtrHeld`
+(non-zero = firing), `RBFBAmtrHoldExpired` (large vs Held = the bound is
+deciding, not the hardware - re-read the period, do not raise it blindly), and
+`Held` zero with `RBFBAmtrNotReadyArmed` true **eliminates** this candidate.
+Risk is a stuttering or frozen desktop; one token reverses it),
 `-rbgpufbretire` (2wi - re-enables the `'vbl '` slots Apple registered and
 then disabled, once a transaction has arrived, on the suspicion that the
 accelerator never learns a vblank happened and so never retires a transaction.
