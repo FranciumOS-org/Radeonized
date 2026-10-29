@@ -68,6 +68,20 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBVBLEnables", (UInt64)vblEnables, 32);
     setProperty("RBFBVBLFires", vblFires, 64);
     setProperty("RBFBVBLRunning", vblRunning);
+    /* 2xe: the fire count's own clock, published in the SAME pass so a reader
+     * can divide without assuming a rate. Every sets/s figure in this project
+     * came from `fires / 143.83`, which was wrong two ways at once: the
+     * cadence was really ~134.7 Hz (fixed above), and this publish only runs
+     * every few hundred fires, so the registry value is a staircase. Taking
+     * elapsed time from a stamp written beside the counter removes both
+     * errors - the quantisation now cancels, because both numbers are from
+     * the same instant. */
+    uint64_t uptime = 0;
+    clock_get_uptime(&uptime);
+    uint64_t uptimeNs = 0;
+    absolutetime_to_nanoseconds(uptime, &uptimeNs);
+    setProperty("RBFBVBLUptimeNs", uptimeNs, 64);
+    setProperty("RBFBVBLResyncs", (UInt64)vblResyncs, 32);
 
     /* 2wc: the 'amtr' counters. They live here and not in the attribute
      * handlers because those run on the accelerator's thread with its locks
@@ -181,12 +195,43 @@ void RBAMDFramebuffer::armVBL(void)
 {
     if (!vblCall || !anyVBLEnabled()) {
         vblRunning = false;
+        /* Forget the phase: the next enable starts a fresh cadence rather
+         * than inheriting a deadline from however long ago we stopped. */
+        vblNextDeadline = 0;
         return;
     }
     vblRunning = true;
-    uint64_t deadline = 0;
-    clock_interval_to_deadline((uint32_t)kVBLPeriodNs, 1, &deadline);
-    thread_call_enter_delayed(vblCall, deadline);
+
+    /* 2xe: a FIXED CADENCE, not a fixed delay. The old form was
+     *     clock_interval_to_deadline(kVBLPeriodNs, 1, &deadline)
+     * which is `now + period` - and because armVBL() runs at the END of
+     * deliverVBL(), `now` already includes delivering to every handler and
+     * hubpPoll()'s MMIO read. That overhead was added to every period and
+     * cost a measured 0.47 ms a tick (134.70 Hz instead of 143.83 Hz).
+     * Advancing the PREVIOUS deadline makes the error non-cumulative: a slow
+     * tick is absorbed by the next interval instead of shifting all of them.
+     */
+    uint64_t period = 0;
+    nanoseconds_to_absolutetime(kVBLPeriodNs, &period);
+    uint64_t now = 0;
+    clock_get_uptime(&now);
+
+    if (vblNextDeadline == 0) {
+        vblNextDeadline = now + period;
+    } else {
+        vblNextDeadline += period;
+        if (vblNextDeadline <= now) {
+            /* A whole period late. Arming a deadline in the past makes
+             * thread_call fire immediately and again and again until it has
+             * caught up - a burst at the panel's expense, delivering ticks
+             * the panel never had. Resync instead, and COUNT it: a silent
+             * resync would make the fire count a lie about elapsed time,
+             * which is the exact defect this change exists to fix. */
+            vblNextDeadline = now + period;
+            vblResyncs++;
+        }
+    }
+    thread_call_enter_delayed(vblCall, vblNextDeadline);
 }
 
 void RBAMDFramebuffer::deliverVBL(void)
@@ -212,7 +257,9 @@ void RBAMDFramebuffer::deliverVBL(void)
     /* Publish rather than log: at the measured refresh a per-fire IOLog
      * would be ~144 lines a second and would itself become the suspect
      * (rule 16). ioreg reads this live. */
-    if ((vblFires % 1200) == 0) {
+    /* 2xe: 1200 fires is ~8.3 s, so a 25 s measurement window carried a
+     * +/-33 % quantisation error on its own time base. 288 is ~2 s. */
+    if ((vblFires % 288) == 0) {
         publishVBLState();
         setProperty("RBFBVBLHandlers", (UInt64)delivered, 32);
     }

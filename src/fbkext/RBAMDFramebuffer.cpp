@@ -228,6 +228,8 @@ bool RBAMDFramebuffer::start(IOService *provider)
     vblRunning = false;
     vblFires = 0;
     vblEnables = 0;
+    vblNextDeadline = 0;
+    vblResyncs = 0;
 
     /* 2wc: 'amtr'. Armed with -rbgpufbamtr; the flag is published
      * UNCONDITIONALLY a few lines below, because rule 15's cheapest

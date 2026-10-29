@@ -122,6 +122,21 @@ private:
      * enable transition and the delivery observable (rule 14). */
     uint64_t vblFires;
     uint32_t vblEnables;
+    /* 2xe: THE VBLANK WAS NOT A CLOCK. armVBL() re-armed from `now`, at the
+     * END of deliverVBL(), so the handler's own duration was added to every
+     * single period. Measured from userspace with CVDisplayLink's CVTimeStamp
+     * hostTime: mean interval 7.4240 ms = 134.70 Hz against the panel's
+     * 6.9527 ms = 143.83 Hz, i.e. 0.47 ms long on every tick, and the rate
+     * moved with system load across four runs (115.94 / 119.97 / 120.00 /
+     * 133.72 Hz nominal). Three milestones' worth of "transactions/s =
+     * sets / (fires / 143.83)" were therefore overstated by up to 17 %.
+     * These two make the arm drift-free: the next deadline is one period
+     * after the LAST DEADLINE, never after `now`, so handler duration cannot
+     * accumulate - and when we really do fall a whole period behind we
+     * resync instead of firing a catch-up burst, counting it so the gap is
+     * visible rather than silent (rule 14). */
+    uint64_t vblNextDeadline;
+    uint32_t vblResyncs;
     /* 2t0: crash breadcrumbs. Rule 10 - a boot that dies leaves NVRAM only,
      * and rule 31's registry properties vanish with the machine. */
     IORegistryEntry *nvram;

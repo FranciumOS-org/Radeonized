@@ -362,6 +362,71 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**THE CONSUMER IS NAMED, AND READINESS IS A SURFACE POOL (2xe).** No boot;
+boot 210, armed, exhibiting. **An animating window produces NOTHING**: a
+`CABasicAnimation` repeating forever in a visible window gave `RBFBAmtrSets`
+**2** in 30 s where `screencapture -v` gave **1827** (~61/s) in the same
+minute - **900x**, so "an idle desktop composites nothing, which is normal" is
+**dead**, and so is frame-demand as the lever. **WindowServer says why in
+words**: `[ Watchdog ] display 5b81c5c0 has become stuck after 10.00390s of
+unreadiness (2402 failures)`, and five readings give one constant -
+1440/5.99733, 1438/5.98810, 2402/10.00390, 1042/4.33713, 1382/5.75765 =
+**240.1 failures/s**. **The predicate is read end to end**:
+`update_display_callback` (`0x7ff807e21dab`) -> `vt[0x4b8]` =
+`WS::Displays::CDDisplay::is_ready` (`0x7ff807d6c14e`) ->
+`CoreDisplay::Display::IsReady` (`0x7ff80408e316`) ->
+**`DisplaySurfacePool::IsReady`** (`0x7ff804134cbe`) = *"some surface in the
+pool has use count `+0x170` == 0"*. Apple names the field itself -
+`UseCountProxy<CoreDisplay::DisplaySurface*>`, incremented by `GetNextSurface`
+and released via `DisplaySurface::AccessComplete`. **And both the release and
+the push notification come from ONE function**:
+`CoreDisplay::IOPAttachment::HandleTransactionCompletionEvent`, which calls
+`GetAndRemovePresentSurfaceForTransactionSurface` and
+`DisplayPipe::NotifyIsReady` (what SkyLight's `display_ready_cd_callback` is
+registered for). **The frame cadence hangs on the kernel's
+transaction-completion event.** In the same configuration: 48
+`transaction stamp index 59 time out` at a steady **1.0 Hz** over 63 s, with
+exactly **three six-second gaps** and exactly **three** transactions - n=3,
+a correspondence, not a law. **Wrinkle, not papered over**: `regained
+readiness` was 0 in that window while 3 frames presented, so those three are
+not accounted for by a readiness transition, and the surface chain is a
+**static** read - nothing observed one surface's use count.
+**WITHDRAWN IN THE SAME MILESTONE - do not build the tick yet.** The static
+chain is sound: `AMDSWScheduler::initialize` creates its event source with
+**`provider = 0`** (software, so there is no missing GPU interrupt to find),
+`timerCallback`/`statCallback` have **zero** references in the kext, the
+source is signalled from only `submitCommandBuffer` / `timestampUpdated` /
+`swTimestampUpdated` / `checkTimestamps`, and `checkTimestamps` - the only
+hardware poll - has **seven callers and every one is a waiter**. But "nothing
+kicks the scheduler when idle, so tick `advance()`" is **refuted by 2ww**,
+which measured `sub=12191 adv=46457`, mean gap 3.4 ms: `advance()` runs four
+times more often than submits and is not starved. **Read the evidence already
+in hand.** `advance()` is cheap and safe to call (its own `IOLock`, a no-op
+when `ctx->0x71` is clear), so the option stays open - it is just not
+indicated. **The deciding measurement is the one 2ww named**: `rbgpu-sched`
+flushes at three fixed phase marks, so `advance()`'s rate in the SLOW state
+has never been read.
+**THE VBLANK WAS NEVER A CLOCK - OURS, AND FIXED (fbkext `39190382`).**
+CVDisplayLink's `CVTimeStamp` hostTime over 5510 intervals: mean **7.4240 ms
+= 134.70 Hz** against the panel's 6.9527 ms = 143.83 Hz, stddev 0.4615 ms
+(6.2 %), spread 5.96-10.66 ms, and the nominal refresh read **115.94 /
+119.97 / 120.00 / 133.72 Hz** across four runs - **a clock whose rate moves
+with load is not a clock**. `armVBL()` computed `now + period` at the END of
+`deliverVBL()`, so every tick paid for the handler before it: 0.47 ms, every
+time, forever. Fixed by advancing the PREVIOUS deadline, with a **counted**
+resync when a whole period is missed (arming into the past fires a catch-up
+burst of ticks the panel never had). Mutation-tested: restoring `now + period`
+fails the new assertion at tick 1.
+**AND THE PROJECT'S RATE FORMULA WAS WRONG TWICE OVER.** `sets / (fires /
+143.83)` (2wj, used by 2wi/2xa/2xd) divided by a rate that was ~134.7, and
+`RBFBVBLFires` was published only every **1200 fires** - a staircase with
+8.3-second treads, so a 25 s window carried +/-33 % error on its own time
+base. **2xa's "71.30 == AnyDesk's 71.3 to three significant figures" is NOT
+SUPPORTED**; its 1426x conclusion survives, the precision claim does not. Now
+publishes **`RBFBVBLUptimeNs`** beside the counter (take elapsed time from
+that, never from 143.83) plus `RBFBVBLResyncs`, at 288 fires. Rule 16: the
+instrument was a suspect and both its errors pointed the same way.
+
 **THE DISPLAY TRANSACTION WAITS ON A GPU STAMP THAT NEVER RETIRES (2x6).**
 No boot - captures already on disk, plus a static read. The frozen
 GPU-framebuffer boot names its own blocker **219 times**:
