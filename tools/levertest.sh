@@ -44,14 +44,28 @@ snap() {
         END { if (s == "" || f == "") exit 1; print s, w, f }'
 }
 
+# WindowServer's OWN state variable for "something is capturing the screen".
+# 2x9 found it in the SkyLight log beside WSDisplayStreamNeedsRecomposite, the
+# function that forces a recomposite because a display stream needs a frame.
+# This beats checking our capture process is alive: it is the producer's word,
+# and it catches AnyDesk or anything else capturing behind our back.
+capstatus() {
+    /usr/bin/log show --start "$1" --end "$2" --info \
+        --predicate 'sender == "WindowServer"' 2>/dev/null \
+        | grep -oE 'system screen capture status [0-9]+|WSDisplayStreamNeedsRecomposite|CreateDisplayStreamState' \
+        | sort | uniq -c | awk '{ $1=$1; printf "%s; ", $0 }'
+}
+
 measure() {
     label="$1"
     printf '  %-34s settling %ss ... ' "$label" "$SETTLE"
     sleep "$SETTLE"
+    t_a=$(date '+%Y-%m-%d %H:%M:%S')
     a=$(snap) || { echo "RBAMDFramebuffer not publishing - armed GPU-fb boot?"; return 1; }
     printf 'measuring %ss ... ' "$WINDOW"
     sleep "$WINDOW"
     b=$(snap) || { echo "lost the framebuffer mid-window"; return 1; }
+    t_b=$(date '+%Y-%m-%d %H:%M:%S')
     echo "$a $b" | awk -v l="$label" -v hz="$HZ" '{
         ds = $4 - $1; dw = $5 - $2; df = $6 - $3
         sec = (df > 0) ? df / hz : 0
@@ -59,6 +73,8 @@ measure() {
                l, ds, dw, df, sec, (sec > 0 ? ds / sec : 0)
         if (df == 0) print "    *** vbl did not advance - the VBL thread_call is stopped, stop here"
     }'
+    ev=$(capstatus "$t_a" "$t_b")
+    echo "      WindowServer said: ${ev:-(nothing - no capture activity logged)}"
 }
 
 echo "levertest: is an active screen capture the lever?"
@@ -110,3 +126,9 @@ echo "    WindowServer treat the panel itself as a consumer."
 echo "  A, B and C all alike = capture is dead too, and what remains is"
 echo "    whatever else a live AnyDesk session holds open: lsof on its pid."
 echo "  n=1 per arm (rule 18). A and C are two controls, not a trend."
+echo
+echo "  READ THE 'WindowServer said' LINES FIRST. Arm B is only a test of"
+echo "    capture if it shows 'system screen capture status 1'. If arm A or C"
+echo "    shows it too, something else is capturing - AnyDesk still connected,"
+echo "    or a stream outliving its process - and the arms are not the"
+echo "    contrast they claim to be (rule 16)."

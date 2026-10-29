@@ -45763,3 +45763,112 @@ the lever**; a minimal always-on stream is the bridge and the real fix is
 whatever makes WindowServer treat the panel itself as a consumer. A, B and C
 alike = **capture is dead too**, and what remains is whatever else a live
 AnyDesk session holds open, which `lsof` on its pid will name.
+
+## 2x9 — WINDOWSERVER NAMES THE MECHANISM: A DISPLAY STREAM FORCES A RECOMPOSITE
+
+Live boot **208** (`kern.boottime` 00:21:13 EDT, `rbgpu-boot` 208, `rbgpu-fb`
+consumed to `0`, `RBAMDFramebuffer` publishing) — rule 33 established before
+anything was read.
+
+### GEEKBENCH 7 RAN TO COMPLETION IN THIS BOOT, AND SCORED
+
+`browser.geekbench.com/v7/gpu/340163`, uploaded 05:38 **UTC** = **01:38 EDT**,
+i.e. inside boot 208, the armed GPU-framebuffer boot. Metal, device
+`AMD Radeon HD GFX10 Family Unknown Prototype`, macOS 15.8.1 (24H32).
+**Metal score 9336**, all eleven subtests complete, nothing zero or blank:
+
+    Background Blur    6509    16.8 images/sec      Horizon Detection 12275  473.2 Mpixels/sec
+    Face Tracking     22373    27.7 images/sec      Photo Filter      14656
+    Super Resolution   5090    9.39 Kimages/sec     Video Filter       9761  2.65 Gpixels/sec
+    RAW                1738    70.3 Mpixels/sec     Feature Matching  21404   40.4 Mpixels/sec
+    Path Tracer       12086    21.6 Mpixels/sec     Particle Physics  18579  3330.8 FPS
+    Fluid Simulation   4322    63.7 FPS
+
+**This is a real result for the project, not just a datum**: Apple's
+accelerator on an unsupported APU completes a full industry benchmark suite
+without a hang, in the same boot whose desktop freezes.
+
+**It is CONSISTENT with 2ws, not a refutation, and the distinction matters.**
+2ws measured a 175.77 ms **command-buffer round-trip** tick and validated it
+against a 420x control that moved GPU time while `commit->GPUstart` stayed
+pinned — i.e. **work inside a buffer is unthrottled; round trips are not**.
+Geekbench's figures are work throughput (3330.8 FPS, 2.65 Gpixels/s) and say
+nothing about how many command buffers it used. Do **not** read them as
+refuting the tick, and do not read them as confirming it either: its
+submission granularity is unmeasured.
+**What it does establish, with 2x7 beside it**: the same boot that runs
+2.65 Gpixels/s in Geekbench took **100.43 s for 64 light command buffers**.
+Few-big-buffers is at full speed; many-small-buffers is catastrophic. That is
+the signature of a **per-command-buffer** cost, not a throughput limit — and
+the display path is many small transactions, so it sits on the bad side. Held
+as a lead; nothing here measures Geekbench's buffer count.
+
+### THE LIVE FAST STATE, MEASURED
+
+With AnyDesk connected (an `AnyDesk --backend` process present, pid respawning
+3826 -> 3891), a 15 s settle then a 15 s window:
+
+    RBFBAmtrSets  80830 -> 81834   = 1004
+    RBFBVBLFires 623768 -> 625793  = 2025  = 14.08 s
+                                   -> 71.3 sets/s
+
+Boot average over 72 minutes is **18.66 sets/s** with `RBFBAmtrPeak 671` per
+~7 s window (**95.9/s**). So the fast state is real, reproducible and live, and
+it is not a few lucky frames.
+
+### ANYDESK CAPTURES THE SCREEN — FROM ITS OWN LINK TABLE
+
+`otool -L` / `nm -u` on `/Applications/AnyDesk.app/Contents/MacOS/AnyDesk`:
+
+    ScreenCaptureKit.framework (weak)
+    _OBJC_CLASS_$_SCStream / SCStreamConfiguration / SCShareableContent
+    _CGDisplayStreamCreateWithDispatchQueue / Start / Stop / UpdateGetRects
+    _kCGDisplayStreamMinimumFrameTime / _kCGDisplayStreamColorSpace
+    _CVDisplayLinkCreateWithCGDisplay / GetNominalOutputVideoRefreshPeriod
+    _IOSurfaceLock / GetBaseAddress / GetBytesPerRow
+    _CGWindowListCreateImage
+
+Note **`CGDisplayStream` resolves on 15.8.1**. 2x5 rewrote `framepump` *away*
+from that API because it is obsoleted in 15.0; AnyDesk still links it, so the
+rewrite was unnecessary and it cost the TCC grant (permission is keyed to
+binary identity).
+
+### AND WINDOWSERVER NAMES THE MECHANISM IN ITS OWN LOG
+
+`/usr/bin/log show --last 3m --info --predicate 'sender == "WindowServer"'`,
+468 lines, in the fast state:
+
+    CreateDisplayStreamState: Display stream 0x85307 created
+    0[outside of RPC]: system screen capture status 1
+    WSDisplayStreamNeedsRecomposite: Display stream 0x85307 ...
+    0[outside of RPC]: system screen capture status 0
+
+**`WSDisplayStreamNeedsRecomposite`** — WindowServer has a function whose name
+is *a display stream needs a recomposite*. Streams are created at 01:40:34,
+01:41:00 and 01:41:44 and `system screen capture status` toggles 1/0 around
+each, matching the backend pid respawning and overlapping the 71.3 sets/s
+window.
+
+**So the capture hypothesis now has a named mechanism and a system state
+variable to test against**, instead of an impression. It is still a
+**correlation** (rule 18): nothing here varies the stream while holding
+everything else fixed, which is what `levertest.sh` does.
+
+### AND CAPTURE WAS NEVER ACTUALLY TESTED BEFORE
+
+Worth stating plainly, because it is why 2x5 left this open on two instrument
+failures rather than a measurement: `framepump` delivered **zero** frames at
+64x36 (SCK de-duplicates identical downscaled frames), then was rebuilt at
+native resolution and **TCC denied it**. `vblclock` used CVDisplayLink only
+and never captured. So no working capture stream has ever existed in this
+project, and "capture is dead" was never a result — rule 14 twice over.
+
+### THE INSTRUMENT, FIXED AGAIN
+
+`tools/levertest.sh` now asks **WindowServer** whether each arm had a capture,
+via `capstatus()` over the arm's own wall-clock bounds, and prints it beside
+the rate. That is strictly better than checking our `screencapture` child is
+alive and its file is growing (which it also does): it is the producer's own
+word, and it catches AnyDesk still being connected — which would make arm A
+and arm C capture arms too and destroy the contrast without saying so. Rule 16
+applied to the test's premise rather than to its reading.
