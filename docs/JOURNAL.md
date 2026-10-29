@@ -45129,3 +45129,108 @@ whole-token check reads `-rbgpuownfb -rbgpufbaty -rbgpufbamtr -rbgpufbhubp
 changes**, `A57A4C4A`, to the **auxiliary collection** - and per 2wa verify the
 **artifact**, not `kmutil`'s exit status, which has errored `Code=34` over a
 write that landed.
+
+## 2x2 — BOOT 204: THE RETIREMENT PATH WORKS, AND IT IS NOT THE LIMITER
+
+**fbkext `A57A4C4A`, armed, GPU framebuffer up.** Identity by field presence
+(rule 15): `E=` and `A=` exist, and only this build publishes them. Rule 8:
+the crumb reads `b=203` and the nonce lag of one (2wg) makes that **boot 204**;
+the live box is now 205 on `IONDRVFramebuffer`, so the crumb is all there is.
+
+    s=11 f=1000  e=6    r=1 h=0 w=1   k=1 t=1   p=0   n=0 K=4    D=4   E=0 A=4
+    s=12 f=10000 e=10   r=1 h=0 w=3   k=0 t=3   p=1   n=0 K=8    D=8   E=0 A=8
+    s=13 f=20000 e=1036 r=1 h=0 w=517 k=0 t=517 p=186 n=0 K=1034 D=942 E=0 A=944
+
+**`E=0` WITH `K=1034` REFUTES THE HYPOTHESIS THIS EXPERIMENT WAS BUILT ON.**
+`retireEnables` is **zero**: in 517 transactions, our force-enable never found
+a foreign `'vbl '` slot disabled. And `retireKicks` is **1034**, which with
+`E=0` can only have come from `setInterruptState` - i.e. **Apple performed
+1034 off->on transitions on its own slot.** So 2wi/2wl's
+*"Apple registers its handler, disables it and never re-enables it"* is
+**measured FALSE**. `enableTransactionInterrupt` (2s5) runs, constantly, at
+**exactly 2.000 enables per transaction** (1034/517; 1.996 over the typing
+phase alone).
+
+**AND THE REASON `RBFBVBL1Fires` READ 0 FOR FOUR MILESTONES IS NOW A NUMBER.**
+`A=944` splits as **942 from our immediate kick** and **2 from the 143.83 Hz
+periodic path**. Two catches in 20000 ticks is a duty cycle of 1.0e-4, so the
+total time Apple's slot spent enabled is ~13.9 ms across 1034 windows:
+**Apple's enable window is ~13 us wide, against our 6.95 ms tick** - about
+500x too narrow. The periodic delivery never had a chance, and that is the
+whole explanation for four boots of zero. **2x1's race was real and the
+immediate kick closes it**: 942 of 1034 caught, 8.9 % too late.
+
+**SO THE MECHANISM NOW WORKS - AND THE RATE DID NOT MOVE.**
+
+    idle   (+7.0 -> +69.5 s)    2 transactions  =   0.032 /s   one per 31 s
+    typing (+69.5 -> +139.1 s)  514             =   7.393 /s
+    peak 1000-fire window       p=186           =  26.8   /s
+                                                  837x the idle rate
+
+**THE VBL RETIREMENT PATH IS ELIMINATED AS THE SUPPLY LIMITER.** Apple's
+handler fires ~1.8 times per transaction, its enable path runs twice per
+transaction, and idle supply is still ~0.03/s. This is 2x1's third predicted
+branch reached by a route 2x1 did not name (`E=0, A>0` rather than
+`E>0, A>0`), and the conclusion is the same and **stronger**, because `E=0`
+refutes the premise as well as the cure. **Spend no further boot on vblank
+retirement.**
+
+**`n=0` FOR THE WHOLE BOOT REFUTES 2wm.** Not one of 517 transactions had flag
+bit `0x1` clear, so **`-rbgpufbflipall` had nothing to do**, and 2wm's account
+of the add/delete asymmetry - *"deleting reuses the allocation, hands us a
+transaction with the bit clear, and we refuse it"* - is **false**. Deleting
+does not hand us a transaction we drop. **It produces no transaction at all.**
+The asymmetry is entirely upstream of our kext.
+
+**AND OUR HALF IS COMPLETE: `w=517 == t=517`.** Every transaction handed to us
+was written to the display engine, with `h=0` (HUBP set up) all boot. There is
+nothing left to fix below `setAttribute('amtr')`.
+*(Instrument note: `k=` reads 1 at `w=1` and 0 afterwards, because
+`hubpReadback` is captured once on write #1 while `hubpLast` keeps moving.
+`k` is meaningful only at `w=1`; **`k=0` at `w>1` is not a failure** and must
+not be read as one.)*
+
+**THE USER'S REPORT, WHICH IS THE SHARPEST STATEMENT OF THE DEFECT YET.**
+Spamming characters into a password box: *"the screen was responding, the
+faster i typed the higher the Hz, then as soon as i stop it stops until either
+another write or 10s... delete key and enter dont have same behaviour, only
+typing does."* The crumb's 837x and `p=186` are that sentence in numbers.
+
+**THE FRONTIER IS NOW ONE QUESTION WITH A CONTROL ALREADY MEASURED.** Same
+WindowServer, same CoreDisplay; the CPU-framebuffer boot composites
+continuously and ours only on a keystroke. The one structural difference is
+**which `IOFramebuffer` serves the panel** - so: *does the compositor have a
+frame clock on ours?* A compositor paces on the display's vblank, which
+userspace gets through CVDisplayLink -> CoreDisplay -> IOFramebuffer's vblank
+timestamps. **We implement none of that surface** - a grep for `getTimeOfVBL`,
+`getVBLTime`, `setVBLTiming`, `updateVBL`, `deferredVBLDisable` and `vblCount`
+across `src/fbkext` returns **nothing**, while `nm` finds all six defined in
+`IOGraphicsFamily` (`0x14fba970`, `0x14fc0736`, `0x14fc317c`, `0x14fc0412`,
+`0x14fc0456`, plus `handleVBL` `0x14fc0484` and the throttle globals
+`gIOFBVBLThrottle` / `gIOFBVBLDrift` / `gIOFBMaxVBLDelta` /
+`gIOFBVblDeltaMult`). **NOT a claim that this is the cause** - `f=20000`
+continuous over 139 s proves at least one slot was enabled at every tick, and
+since Apple's windows are 13 us that slot must be `handleVBL`'s, so Apple's
+own bookkeeping *was* being driven. Which is exactly why this needs measuring
+rather than assuming.
+
+**`tools/vblclock.m` (build `build/out/vblclock`), and its CONTROL IS ALREADY
+RUN.** It creates a CVDisplayLink on the main display, counts callbacks, and
+prints the nominal period beside the measured rate - because the advertised
+period and the delivered one differ exactly when timestamps are published but
+the interrupt never arrives. Rule 16: **on the live boot 205,
+`IONDRVFramebuffer` reads `133.89 Hz` measured, nominal 140.92 Hz, mode
+1920x1080 @ 144.00 Hz.** So the instrument is sound and a low reading in the
+armed boot means something. Reads only; no kext, no arming, no reboot of its
+own; and the armed boot can run it because **typing is the one thing that
+works**, which is what a terminal is.
+
+**SAID BEFORE THE BOOT.** `~134 Hz` in the armed boot **eliminates the frame
+clock** and the defect is in what marks the display dirty, not in cadence -
+and then the next question is why a keystroke marks it and a delete does not.
+**`0` or a handful of Hz** means WindowServer has no cadence from our
+framebuffer, which explains the idle rate, the keystroke dependence and the
+~10 s floor together, and names a concrete API surface to implement.
+Anything in between is its own reading. **No new build and no install** -
+`A57A4C4A` is already in the auxiliary collection, proven by `E=`/`A=` being
+published at all.
