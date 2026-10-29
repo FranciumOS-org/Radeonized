@@ -47369,3 +47369,141 @@ is what 2xe's `RBFBVBLUptimeNs` was added for.
   difference.
 
 No new artifact: plugin `3A8EAB07`, fbkext `4BDC7A2C`, both unchanged.
+
+---
+
+## 2xp — the three asks were already scoped in 2or, and the free HDMI test would have frozen the panel
+
+No boot. The user asked for HDMI, brightness, and a refresh-rate menu in
+Settings. **All three were scoped in 2or on 2026-10-23** and the journal's own
+summary table answers them; this milestone re-reads that, corrects one thing,
+and removes a trap. Rule: *read the evidence already in hand before designing
+the next experiment* — the practice that has caught this repeatedly.
+
+### FIRST, THE 133 Hz: THREE DIFFERENT NUMBERS, ALL REAL
+
+The user ran a browser Hz test, got 133, and said *"i think that number is kind
+of fake... its still 144hz, feels like it and looks like it"*. They are right
+about the panel and the instinct is sound, but the honest decomposition is that
+these are measurements of **different things**, not one thing measured wrong:
+
+    panel scanout (OTG, 2rn)                 143.830 Hz   hardware
+    our VBL delivery (CVTimeStamp, 2xo)      143.451 Hz   0.27 % off the panel
+    what macOS REPORTS for the mode          144.00 Hz    System Profiler, live
+    frames actually presented under load      81.89 /s    2xo's animtest
+    CVDisplayLink "nominal"                  126.55 Hz    moves run to run
+
+`System Profiler` reads **144.00Hz** right now, from our own
+`kRefreshRate1616 = 0x008fd53f`, so the mode we publish is correct and macOS
+agrees. The moving value is `CVDisplayLinkGetNominalOutputVideoRefreshPeriod`,
+which animtest prints and which CoreVideo **measures** rather than reads when
+the display supplies no nominal of its own — 2xe saw it give 115.94 / 119.97 /
+120.00 / 133.72 across four runs and 2xo got 126.55. **133 sits squarely in
+that series.** And an app that counts how often *its own* content reaches the
+screen can legitimately read below 144, because 2xo measured that we present
+81.89 of every 143 vblanks. So: the panel is 144, our clock is 144, the
+reported mode is 144, and frame delivery is 82 — nothing is lying.
+
+### THE THREE ASKS, AGAINST WHAT IS ALREADY MEASURED
+
+**Brightness — the hardware half is DONE and was done in 2os.** Measured on
+this machine:
+
+    BL_PWM_CNTL          0xc00056ea   EN=1  FRACTIONAL=1  count 22250
+    BL_PWM_PERIOD_CNTL   0x000c0fa0   period 4000, 12-bit
+    BL_PWM_GRP1_REG_LOCK 0x80000000   lock free, no update pending
+      -> level 22784 / 65535 = 34.8 %
+
+and 2or's own falsification test **passed**: it said *"`BL_PWM_PERIOD == 0`
+would mean the panel is driven some other way and this route is wrong"*. It is
+4000. So the PWM is live, ours to read, and a brightness change is one
+duty-cycle write with `GRP1_REG_LOCK` for atomicity — Linux's
+`dce_panel_cntl` / `dcn31_panel_cntl`. Offsets confirmed against the right
+header this milestone: DCN 3.1.2 spells them `regPWRSEQ0_BL_PWM_*` at
+**0x2f19-0x2f1c** base_idx 2, which is exactly what `rb_regs.h` carries.
+**And the apparent deny-list conflict is not one**: `rb_dcn_deny.h` lists
+`0x288b`, which in dcn_3_0_2 *was* `BL_PWM_GRP1_REG_LOCK` but in **3.1.2 is
+`DCIO_BL_PWM_FRAME_START_DISP_SEL`** — a different register, and the deny
+list's own comment already records that rename. Verified: none of
+0x2f19-0x2f1c is on the deny list, with 0x288b present as the control.
+**The blocker is the UI, not the chip, and 2or measured that too**: the display
+reports `_spdisplays_display-vendor-id = "unkn"` and `"Unknown Display"`, there
+is **no EDID** (nothing ever read one), and **`AppleBacklightDisplay` has 0
+instances** — the display is a plain `AppleDisplay`.
+**NEW this milestone, and it is the way through**: a framebuffer does not need
+`AppleBacklightDisplay`. `IOGraphicsTypes.h` documents
+**`kConnectionDisplayParameterCount` (`'pcnt'`)** and
+**`kConnectionDisplayParameters` (`'parm'`)** as connection attributes, which
+is how `IODisplay` builds the `IODisplayParameters` dictionary that carries
+`kIODisplayBrightnessKey = "brightness"`. The string `brightness` is present in
+`IOGraphicsFamily` (controlled against `IOFBWaitCursorPeriod`), so the consumer
+is there. **NOT established**: how `IODisplay` maps a parameter name to the
+selector it then calls, which is a static read of `IOGraphicsFamily` and is
+the next step for this ask — **not** a guess at a four-char code (the key is a
+*string*, so there is no FourCC to infer; rule 13/17).
+
+**A refresh-rate menu — 2or's answer stands and it is no.** *"'144 Hz' yes; 'a
+refresh-rate menu' no."* Choosing a rate is mode setting: OTG timing plus the
+DCCG pixel clock, i.e. real writes to the display engine's timing, where a
+wrong value is no signal at all. We publish **one** mode (`kModeID = 100`) and
+publishing more that all map to one timing would be substituting values
+(rule 17). This is not refused, it is **sequenced after** HDMI's machinery,
+because it needs the same code.
+
+**HDMI — 2or's honest no stands**: HPD, EDID over DDC/AUX, TMDS or DP link
+training, a second OTG + HUBP + DIO stream encoder + link encoder, and DML
+watermarks. HDMI audio is downstream of all of it. **But its one cheap
+exception is now cheaper than 2or thought** — and carried a trap.
+
+### THE TRAP: THE FREE HDMI TEST WOULD HAVE FROZEN THE LAPTOP PANEL
+
+2or proposed: *"boot with HDMI connected and read `OTG1_CONTROL`"*, needing the
+level-2 probe. It needs nothing — **the fbkext already reads all four
+OTG_CONTROL registers every boot**, at `kRbOtgControl[4] = {0x1b41, 0x1bc1,
+0x1c41, 0x1cc1}` in the BAR5 window it already maps, as 2wh's gate 1.
+**And that gate requires OTG1, OTG2 and OTG3 to read exactly `0x300`.** So if
+the UEFI GOP lights an attached HDMI display, a second OTG comes up live, gate
+1 refuses with `hubpRefuse = 5`, `hubpReady` stays false, and **no HUBP write
+ever happens** — while the panel is still taken, because `-rbgpuownfb` is
+armed independently of this (rule 38 exactly). The laptop screen freezes on its
+last frame. One power cycle recovers it (2wj's overwrite consume), so the cost
+is bounded, but the test could not have yielded its answer: the old loop
+short-circuited on the first live OTG and published **nothing** about which one
+it was.
+
+**Fixed, and the fix names what it gives up.** Gate 1 is now
+`rb_hubp_otg_gate()` in `src/common/rb_hubp.h`, hosttested. Its OTG1-3 clause
+was doing a job nobody assigned it: 2wh's stated reason for the signature is
+*"if the segment constant is wrong, these four reads are garbage and will not
+match"*, and that argument holds for OTG0 but **not** for OTG1-3 — a *live*
+OTG is a plausible `OTG_CONTROL` value at a plausible offset, so it
+corroborates the segment rather than impeaching it. What the clause actually
+asserts is "nothing else is scanning", which gate 2 never needed.
+`-rbgpufbotgany` relaxes it **to OTG0's master-enable only**, which is never
+relaxed. Given up: three corroborating reads of the segment constant. Kept:
+OTG0's own enable, plus **gate 2's three separately measured values** (pitch,
+format, address-high — the far stronger addressing check), plus
+`rb_dcn_is_denied()` and the six per-address gates. Default stays strict.
+All four OTGs are now read **unconditionally and published even when the gate
+refuses** (`RBFBHubpOtg1/2/3`, `RBFBHubpOtgAnyArmed`) — rule 14: a refusal
+must publish what it refused on.
+**Mutation tested both ways**: dropping the OTG1-3 clause entirely FAILS the
+hosttest, and letting `allow_live` relax OTG0's master-enable FAILS it.
+
+### SAID BEFORE THE BOOT
+
+Arm `-rbgpufbotgany` **and plug the HDMI display in before powering on.** Then
+read `RBFBHubpOtg1/2/3`:
+- one of them **not** `0x300` with bit 0 set = **firmware lit it**, 2or's
+  exception is real, and a fixed-mode external display with no hotplug becomes
+  reachable by adopting that OTG the way OTG0 was adopted. That is the only
+  cheap HDMI result available.
+- all three still `0x300` = the GOP did not light it, and HDMI is the full
+  project 2or described. **That is a real answer too** and it costs one boot
+  with no code.
+- `RBFBHubpRefuse 5` with the arg armed would mean OTG0 itself failed, which
+  has never happened — read `RBFBHubpOtg1/2/3` before concluding anything.
+The laptop panel should behave exactly as in boot 220 either way, because the
+relaxed gate changes nothing about what is written.
+
+Artifact: fbkext **`C7278266`**. Plugin `3A8EAB07` unchanged.

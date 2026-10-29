@@ -166,6 +166,36 @@ int hubp_tests(void)
                                 100u, 200u) == 1);
     }
 
+    /* 2g (2xp). Gate 1, and the HDMI case it was silently failing. */
+    {
+        const uint32_t on  = 0x00011201u;  /* OTG0_CONTROL, measured (2oq) */
+        const uint32_t off = RB_HUBP_OTG_OFF_VALUE;
+        A((on & RB_HUBP_OTG_MASTER_EN) != 0u);
+        A(RB_HUBP_OTG_OFF_VALUE == 0x300u);
+
+        /* The machine as it has booted every time so far: passes either way. */
+        A(rb_hubp_otg_gate(on, off, off, off, 0) == 1);
+        A(rb_hubp_otg_gate(on, off, off, off, 1) == 1);
+
+        /* OTG0 not master-enabled is NEVER relaxed - that is the one read the
+         * segment argument really rests on. */
+        A(rb_hubp_otg_gate(0u,   off, off, off, 1) == 0);
+        A(rb_hubp_otg_gate(0x300u, off, off, off, 1) == 0);
+
+        /* THE HDMI CASE: firmware lit a second output, so OTG1 is live. Strict
+         * refuses (which freezes the panel); relaxed passes. This is the whole
+         * reason the arg exists, and mutating the clause away fails here. */
+        A(rb_hubp_otg_gate(on, on,  off, off, 0) == 0);
+        A(rb_hubp_otg_gate(on, on,  off, off, 1) == 1);
+        A(rb_hubp_otg_gate(on, off, on,  off, 0) == 0);
+        A(rb_hubp_otg_gate(on, off, off, on,  0) == 0);
+        A(rb_hubp_otg_gate(on, off, off, on,  1) == 1);
+
+        /* A garbage segment: OTG0 reads something with bit 0 clear, and no
+         * amount of relaxing lets that through. */
+        A(rb_hubp_otg_gate(0xffffff00u, off, off, off, 1) == 0);
+    }
+
     /* 3. Out-of-range asks answer 0, not a wild offset. */
     A(rb_hubp_dw(RB_HUBP_COUNT, RB_HUBP_REG_ADDR) == 0);
     A(rb_hubp_dw(0, RB_HUBP_REG_COUNT) == 0);

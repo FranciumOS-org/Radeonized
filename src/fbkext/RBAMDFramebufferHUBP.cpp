@@ -66,6 +66,9 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpPendHits = 0;
     hubpDeferrals = 0;
     hubpFlipDeadline = 0;
+    hubpOtgCtl1 = 0;
+    hubpOtgCtl2 = 0;
+    hubpOtgCtl3 = 0;
     hubpPitch = 0;
     hubpConfig = 0;
     hubpOtgCtl = 0;
@@ -102,16 +105,23 @@ bool RBAMDFramebuffer::hubpSetup(void)
         reinterpret_cast<const volatile uint32_t *>(map->getVirtualAddress());
     if (!regs) { hubpRefuse = 3; map->release(); return false; }
 
-    /* Gate 1: are we addressing DCN at all? 2oq's signature. If the segment
-     * constant is wrong, these four reads are garbage and will not match. */
-    hubpOtgCtl = rbRead(regs, kRbDmuSeg2 + kRbOtgControl[0]);
-    bool otgOk = (hubpOtgCtl & RB_OTG_MASTER_EN) != 0;
-    for (unsigned i = 1; i < 4 && otgOk; i++) {
-        if (rbRead(regs, kRbDmuSeg2 + kRbOtgControl[i]) != RB_OTG_OFF_VALUE) {
-            otgOk = false;
-        }
+    /* Gate 1: are we addressing DCN at all? 2oq's signature, now decided by
+     * rb_hubp_otg_gate() so the hosttest owns it and the HDMI case is
+     * explicit. 2xp: all four are read UNCONDITIONALLY and published even
+     * when the gate refuses - the old loop short-circuited, so a boot that
+     * refused with code 5 could not say WHICH OTG was live, which is exactly
+     * the answer 2or's cheap HDMI test is for (rule 14: a refusal must
+     * publish what it refused on). */
+    hubpOtgCtl  = rbRead(regs, kRbDmuSeg2 + kRbOtgControl[0]);
+    hubpOtgCtl1 = rbRead(regs, kRbDmuSeg2 + kRbOtgControl[1]);
+    hubpOtgCtl2 = rbRead(regs, kRbDmuSeg2 + kRbOtgControl[2]);
+    hubpOtgCtl3 = rbRead(regs, kRbDmuSeg2 + kRbOtgControl[3]);
+    if (!rb_hubp_otg_gate(hubpOtgCtl, hubpOtgCtl1, hubpOtgCtl2, hubpOtgCtl3,
+                          hubpOtgAny ? 1 : 0)) {
+        hubpRefuse = 5;
+        map->release();
+        return false;
     }
-    if (!otgOk) { hubpRefuse = 5; map->release(); return false; }
 
     /* Gate 2: is the pipe the one 2os measured? Pitch, format and the high
      * dword of the address, all three, decided by the pure function the

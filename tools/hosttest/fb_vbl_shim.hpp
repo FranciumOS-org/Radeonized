@@ -90,6 +90,10 @@ public:
     uint64_t hubpPendHits=0;   /* 2xk */
     bool     hubpDeferPend=false; /* 2xm */
     uint64_t hubpDeferrals=0;     /* 2xm */
+    uint32_t hubpOtgCtl1=0;       /* 2xp */
+    uint32_t hubpOtgCtl2=0;       /* 2xp */
+    uint32_t hubpOtgCtl3=0;       /* 2xp */
+    bool     hubpOtgAny=false;    /* 2xp */
     bool     amtrNotReady=false;  /* 2xn */
     uint64_t amtrHeld=0;          /* 2xn */
     uint64_t amtrHoldExpired=0;   /* 2xn */
