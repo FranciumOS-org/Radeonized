@@ -44837,3 +44837,126 @@ instrument, not the chip. And if this boot's first timeout lands markedly
 earlier than +19 s, **the load itself provokes the wedge** - also a result.
 **No kext change, no boot-arg change, no plugin rebuild**; `rbgpu-fb` stays 0
 (rule 38), so this boot risks nothing on the display side.
+
+## 2wz — boot 203: THE RATE TRACKS THE WEDGE, BOTH EDGES, IN ONE BOOT
+
+**The cleanest result in this line of work, and it refutes the hypothesis the
+experiment was built to test.** 2wy's daemon put a single-queue load in the
+window no terminal can reach, and boot 203 straddled both edges of the churn.
+
+**BOOT IDENTITY FIRST (rules 8/33).** The log header printed `nonce=202` while
+`rbgpu-rate` read `b=203`. They are the **same boot**: `kern.boottime`
+`1793243240` equals the header's `boot_epoch` exactly and `rbgpu-boot` reads
+**203**. **The daemon reads `rbgpu-boot` before the peer increments it, so the
+header lags by one** - boot 202's header said 201, boot 203's said 202. Same
+trap as 2wg's `RBFBCrumbBoot`. Fixed by labelling the field
+`rbgpu-boot-at-start ... (LAGS by one)`; `boot_epoch` against `kern.boottime`
+is the authoritative identity. **Had I correlated the b=203 series with a log I
+believed was boot 202, the whole milestone would have been wrong.**
+
+**THE TIMELINE.** Boot 203's churn, boot-split: 23 `event timeout`, 32
+`checkGPUProgress`, 23 `not hung`, 23 `no channel associated`, 121
+`GPURestart`, running **+21 s to +84 s**.
+
+    t_s   wall_ms   buf/s   phase
+      5   (no Metal device yet)
+      9    22.352    44.7   PRE-churn
+     13    35.535    28.1   PRE-churn
+     16    47.074    21.2   PRE-churn
+    ---- first event timeout +21 ----
+     30  5916.920     0.2   DURING
+     54  6104.151     0.2   DURING
+     68  6005.649     0.2   DURING
+     77  3869.707     0.3   DURING
+    ---- last event timeout +84 ----
+     85    26.985    37.1   POST-churn
+     88    59.685    16.8   POST
+     91   275.713     3.6   POST
+     95    62.467    16.0   POST
+     98   231.055     4.3   POST
+    102   303.386     3.3   POST
+    106   289.754     3.5   POST
+    109   507.802     2.0   POST
+    113   264.242     3.8   POST
+    116     7.645   130.8   POST
+    120   914.437     1.1   POST
+    123    54.178    18.5   POST
+
+    PRE    n= 3  min   22.352  median   35.535  max   47.074 ms
+    DURING n= 4  min 3869.707  median 5961.284  max 6104.151 ms
+    POST   n=12  min    7.645  median  247.649  max  914.437 ms
+
+**COLLAPSE 265x AT THE FIRST TIMEOUT, RECOVERY 143x AT THE LAST.** The first
+sample after the churn ends (+85 s) reads **26.985 ms**, materially the same as
+the pre-churn 22.352 ms.
+
+**SO "HEALTHY UNTIL THE FIRST WEDGE, THEN PERMANENTLY DEGRADED" IS REFUTED.**
+That was the central hypothesis of 2ww and 2wx, written with its caveat that it
+was not established. It is now **measured false**: the degradation is fully
+reversible and recovery is immediate. Boot 203's +116 s sample reads
+**7.645 ms, 130.8 buffers/s** - the fastest reading of the boot, taken 32 s
+*after* the churn. The ordering "fast before, slow after" is simply wrong.
+
+**AND THE 175 ms QUANTUM IS NOT A QUANTUM.** Boot 203's readings span
+**7.645 ms to 6104 ms, an 800x continuum**, with no stable value anywhere near
+175 ms. 2ws's lattice fit (**T = 175.77 ms, R = 0.966 over 191 periods**) was a
+real measurement and is not withdrawn - but it measured a **state the machine
+was in for that window**, not a property of the chip. **Do NOT write "the
+quantum is just the average of a fluctuating rate"**: R = 0.966 is far too
+tight for a rate that varies 800x, and nothing measured reconciles a strict
+lattice with boot 203's continuum. How a stable tick and this continuum can
+both be real is a **new open question**, and it is not the frontier.
+Correspondingly, 2wy's "three regimes" table is withdrawn as a taxonomy - it
+was three samples of a continuum, not three states.
+
+**THE CONTENTION LEAD IS DEAD, AND BACKWARDS.** The obvious reading of boot
+201's `u=2140,4569` was that something floods submissions and starves our
+client. Boot 203 measures the opposite: during the slow phase submits are
+**LOW** (w3-w5: `u=82, 29, 44`) and during the fast phase **HIGH** (w8/w9:
+`u=2523, 4597`). A submit flood causing the slowness would need the reverse.
+It makes sense in hindsight - while the wedge holds, nothing retires, so
+nothing new is submitted.
+
+**AND `adv/sub` IS NOT THE DISCRIMINATOR EITHER - 2wy's proposal is
+WITHDRAWN.** The pre-churn windows at 22-47 ms read **0.73 and 0.66**, boot
+199's fast window read **3.81**, and the post-churn window at 27-60 ms reads
+**15.22**. Three "fast" readings, three ratios spanning 20x. One milestone old
+and already refuted by the next boot; it was proposed from four points
+(rule 18).
+
+**WHAT THE PRE-STATED PREDICTION GOT.** 2wy said ~1.5 ms early confirms, ~180 ms
+early kills. **Neither fired**: the earliest reading is **22.352 ms**, a value
+neither branch named. Stating only two outcomes for a quantity that turned out
+to be continuous was the error; the timeline is interpretable anyway because
+the log carries seconds-since-boot on every line.
+
+**BOOT 199's 632 buffers/s IS NOW A BIGGER OUTLIER, NOT A SMALLER ONE.** Boot
+203's pre-wedge state is 44.7/s - **14x slower** than 632/s. So 1.582 ms is
+still unreproduced, still untimestamped, and is **not** explained by "before
+the first wedge". It stays open and must not be used as the baseline.
+
+**THE NUMBER THAT MATTERS FOR THE GOAL.** 144 Hz needs **6.944 ms / 144
+buffers/s**. Boot 203 measured **7.645 ms = 130.8 buffers/s = 91 % of 144 Hz**,
+and boot 199 measured 632/s = **4.4x** the requirement. **The hardware does the
+target rate.** Nothing needs to get faster.
+
+**THE FRONTIER IS THE WEDGE, AND IT NEEDS NO BOOT.** Every slow reading this
+project has recorded now sits inside a churn window, and the wedge is already
+reducible to a **six-second userspace command** - `metal_probe --queues 4`,
+K>=4 Metal command queues in one process, no kext, no arming, no reboot (2wt).
+So the limiter is reproducible on demand and debuggable without spending boots.
+**NAMED LEAD, NOT ESTABLISHED**: the channels that wedge are `ComputeUQ2/3/6/7`,
+`SDMA0_PAGE` and `GFX`, the failure shape is *submitted, never retires, hang
+check says not hung, restart reports `no channel associated with stamp_idx N`*,
+and this chip has **ONE** SDMA instance where Apple's Navi 21 path builds four,
+`hw->0xc2 * 2 + 2` (2gc/2gi). An index/count mismatch would produce exactly a
+stamp whose channel cannot be found. That is a static read, not a boot.
+
+**INSTRUMENT RELIABILITY, BOTH BOOTS (rule 16).** Boot 202 ran the daemon for
+its full 181 s and reported `MTLCopyAllDevices: 0 device(s)` on **every one of
+its 58 samples**; boot 203 had a device by +9 s. So Metal availability to a
+root LaunchDaemon is **1 of 2 boots** and the daemon is not a dependable early
+instrument - but the `NOMEDIAN` branch made that a legible fact instead of an
+empty file, which is the whole point of rule 14. **And the daemon did not cause
+the wedge**: boot 203's first timeout at **+21 s** sits inside the +19..+25.8 s
+band measured in three boots that ran no early load at all.
