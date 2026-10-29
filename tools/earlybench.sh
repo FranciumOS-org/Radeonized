@@ -48,7 +48,11 @@ say() { echo "$(boot_s) $*" >> "$LOG"; }
 bt=$(sysctl -n kern.boottime | awk -F'[=,]' '{ print $2 + 0 }')
 {
     echo "=== rbgpu earlybench  boot_epoch=$bt  $(date '+%Y-%m-%d %H:%M:%S') ==="
-    echo "=== nonce=$(nvram rbgpu-boot 2>/dev/null | awk '{print $2}') ==="
+    # NOT a nonce. The daemon runs before the peer increments rbgpu-boot, so
+    # this reads N-1 (boot 202 printed 201, boot 203 printed 202) - the same lag
+    # 2wg found in RBFBCrumbBoot. boot_epoch above is the authoritative identity:
+    # match it against kern.boottime. Rule 8/33.
+    echo "=== rbgpu-boot-at-start=$(nvram rbgpu-boot 2>/dev/null | awk '{print $2}')  (LAGS by one, do not read as the nonce) ==="
     echo "# t_s  n  wall_median_ms  buffers_s      (t_s = seconds since boot)"
 } >> "$LOG"
 
