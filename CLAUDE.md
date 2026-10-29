@@ -362,6 +362,42 @@ exactly like "service absent"; only a control in the same command
 (`ioreg -rl -c IOPCIDevice` -> 4577 lines) caught it. **Before reading
 anything from the live machine, establish which boot it is.**
 
+**THE WEDGE IS A 265x DEFECT, AND IT IS THE SECOND PROBLEM (2wy-2x0).**
+A `RunAtLoad` daemon (`tools/earlybench.sh`) put a single-queue bench in the
+window no terminal reaches. Boot 203 straddled both edges of the churn
+(+21 s to +84 s): **pre 22.4/35.5/47.1 ms, during 3870-6104 ms, and the first
+sample after the last timeout (+85 s) back to 26.985 ms** - a **265x collapse
+and a 143x recovery**, in one boot.
+**So 2ww/2wx's "healthy until the first wedge, then permanently degraded" is
+MEASURED FALSE**: the boot's fastest reading, **7.645 ms = 130.8 buffers/s**,
+came 32 s AFTER the churn. **And the 175 ms quantum is NOT a quantum** -
+boot 203 spans **7.645 to 6104 ms, an 800x continuum** with no stable value
+near 175 ms. 2ws's lattice (T=175.77, R=0.966) is **not** withdrawn; it
+measured a *state*. **Do not reduce it to "an average"** - R=0.966 is far too
+tight for an 800x spread and nothing reconciles them yet.
+**144 Hz needs 6.944 ms. Measured 7.645 ms (91 %), and boot 199's 632/s is
+4.4x. THE HARDWARE DOES THE TARGET RATE; nothing needs to get faster.**
+**BUT 2wz's "the frontier is the wedge" IS WITHDRAWN (2x0, the user's
+correction).** Boot 203 is an `rbgpu-fb=0` boot - **it had the wedge and its
+desktop was fine** (~25 fps, usable), because a CPU-composited desktop never
+submits GPU work and so cannot see a GPU wedge. Every slow reading in 2wz is
+**metal_probe's**, not the product's. **And the wedge is positively eliminated
+as the GPU-FB blocker by 2wl**: typing made boot 196 smooth *while typing*, and
+a GPU wedged at 0.2 buffers/s cannot do that on demand. **2wl's frontier
+stands - why does a change on screen not produce a transaction unless it is a
+keystroke?** Supply is the binding constraint; the wedge caps any GPU client
+while it runs and is the second problem, not the first. **The ~10 s figure now
+has THREE independent mechanisms predicting it** (2wi's 0.093 sets/s, 2wt's
+6-10 s cliff, 2wz's 0.2 buffers/s) - rule 18 applies with more force, not less,
+and the unification they suggest is refuted by the typing observation.
+**ELIMINATED in passing**: contention (submits are LOW while slow - 82/29/44 -
+and HIGH while fast - 2523/4597); and `adv/sub` as a regime discriminator
+(2wy's proposal, withdrawn one milestone later - three fast readings give 0.66,
+3.81 and 15.22). **INSTRUMENT**: Metal reached the daemon in 1 of 2 boots
+(boot 202 logged `0 device(s)` on all 58 samples), and the daemon's header
+`rbgpu-boot-at-start` **lags the nonce by one** - it runs before the peer
+increments it, the same trap as 2wg's `RBFBCrumbBoot`.
+
 **THE LIMITER IS ONE NUMBER AND IT IS NOT WHERE 2wq/2wr SAID (2ws/2wt/2wu).**
 No boot - all of this is `build/out/metal_probe` on the live armed boot 198,
 with `RBAMDFramebuffer` **not loaded**, so the display half is not involved.
@@ -1514,6 +1550,13 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
   `RembrandtGPUPeer.cpp` (the IOService peer, the diag table and the NVRAM
   hot-key list), `rbgpu_agdc.cpp` (the AGDC bridge), `rbgpu_agdc_otg.cpp` (the
   read-only BAR5 OTG sampler). Boots from the EFI.
+- `tools/earlybench.sh` + `tools/com.rembrandtgpu.earlybench.plist` — a
+  `RunAtLoad` daemon that benches the GPU in the +0..+20 s window no terminal
+  can reach, self-stopping at +180 s, logging seconds-since-boot to
+  `/var/log/rbgpu-earlybench.log`. A **120x discriminator, not a rate
+  measurement** (`--bench 2`); ONE queue, never `--queues`, which is a known
+  wedge trigger. **The user installs it** (`/usr/local/libexec`,
+  `/Library/LaunchDaemons`); Claude never does. 2wy/2wz.
 - `tools/hosttest/` — the probe against a simulated chip + parser fuzzing,
   ASan/UBSan. `make kext` runs it first; never load a kext whose hosttest
   fails. Add a case whenever `src/common` changes, and check the new test
@@ -1841,6 +1884,19 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     failure costs one power cycle instead of unbounded ones. **Before arming
     anything that takes the display, name what it depends on and make it
     refuse, or self-disarm, when that thing is absent.** [2wp]
+39. **A measurement of a defect, taken in a configuration that does not
+    exhibit the defect, does not locate the defect.** Boot 203 measured the
+    wedge collapsing GPU throughput 265x - in an `rbgpu-fb=0` boot whose
+    desktop was a healthy, usable ~25 fps throughout, because a CPU-composited
+    desktop never submits GPU work and cannot see a GPU wedge. 2wz promoted
+    that to "the frontier is the wedge"; the user corrected it in one line, and
+    2wl's typing observation had already eliminated the wedge as the GPU-FB
+    blocker. **Say which configuration a reading comes from, and whether that
+    configuration has the symptom, before promoting it to a frontier.** Rule
+    33's shape - name the object a number belongs to - applied to a whole
+    experiment instead of a field. **Corollary**: an instrument that needs its
+    own load (2wy's `a=`/`u=` read an idle GPU) must publish the load beside
+    the result, or a dead window reads as a slow one. [2wy, 2wz, 2x0]
 33. **Before reading anything from the LIVE machine, establish which boot it
     is**: `kern.boottime` against the capture's, and `rbgpu-boot` against the
     last nonce. The running box is not the armed boot merely because the armed
