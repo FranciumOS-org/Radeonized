@@ -45399,3 +45399,72 @@ typing**. 2x3's trace missed its own event, and the cumulative recovery
 (36 in 451 s) spans seven idle minutes around a short burst, so it bounds the
 burst only weakly. `tools/fbphase.py` exists precisely for this and has not
 been run.
+
+## 2x5 — BOOT 208: THE DRIVER IS DONE. THE DEFECT IS THAT MACOS DOES NOT DRAW.
+
+**The user found it, and the way they found it is the measurement: they opened
+AnyDesk, connected it to their phone, and the desktop came alive.**
+*"Without even typing... EVERYTHING is 144Hz, everything, all animations are
+back, all widgets work."*
+
+**MEASURED, with AnyDesk connected and no typing:**
+
+    RBFBAmtrSets     0.08 /s  ->  83.43 /s      a 1000x step
+    RBFBHubpWrites   0.08 /s  ->  83.43 /s      IDENTICAL, every frame written
+    RBFBAmtrPeak     139      ->  671           (~96/s in a ~7 s window)
+    RBFBHubpRejects  2        in the WHOLE boot
+    RBFBVBLFires                 134.83 /s
+
+**SO THE KERNEL CHAIN IS CORRECT AND COMPLETE, AND HAS BEEN ALL ALONG.**
+`RBFBHubpWrites` tracks `RBFBAmtrSets` *exactly* at 58-83/s. Every frame macOS
+produces, we present. The HUBP write (2wh), the `'amtr'` gate (2wc), the ATY
+properties (2w9), the AGDC bridge, the gamma chain (2u6-2v7) and the VBL
+delivery are all right. **144 Hz with animations and widgets has now been seen
+on this panel.** Everything this project built below `setAttribute('amtr')` is
+finished, and **2x4's branch A (CPU-copying frames, nullarc's way) is
+unnecessary** - we are zero-copy and structurally faster than that design.
+
+**THE DEFECT IS ENTIRELY UPSTREAM: macOS does not PRODUCE frames.** It is not
+supply through a broken pipe, not a throttle, not retirement, not cadence.
+WindowServer simply does not composite, and something about a live AnyDesk
+session makes it.
+
+**AND THE USER NARROWED IT FURTHER, WHICH KILLED THE FIRST GUESS:** *"no moving
+in anydesk is fine, just has to be connected."* So it is not input, not cursor
+motion, not damage from a remote pointer. **The session's existence is the
+lever.**
+
+**ELIMINATED TODAY, each by measurement:**
+
+1. **Power assertions.** A connected AnyDesk holds **two**: `UserIsActive`
+   ("Awake display for incoming Anydesk connection") and
+   `NoDisplaySleepAssertion`. Both are reproducible with `caffeinate -d -u`
+   and neither needs any permission. Held both, disconnected AnyDesk:
+   **`RBFBAmtrSets` = 0.00/s**, flat frozen, with `UserIsActive 1` and
+   `PreventUserIdleDisplaySleep 1` confirmed in `pmset -g assertions`. **DEAD.**
+2. **`-rbgpufbpoll`** (2x4), by its own stated kill condition.
+3. **The frame clock** (2x3): `vblclock` reads 138.51 Hz on our framebuffer.
+4. **Failures anywhere in the chain** (2x3): 0 `Fallback`, 0 `DisplayPipeState`,
+   0 submit failures against 929 WindowServer lines as control.
+
+**AN INSTRUMENT THAT COST THREE EXCHANGES, AND THE RULE IT PAYS FOR.**
+`tools/framepump.m` holds a ScreenCaptureKit stream open to act as a frame
+consumer. Across three runs it reported, in order: **TCC denied** (never ran -
+indistinguishable from "ran and did not help" if the output is not read);
+**ran, 0 frames** at 64x36 - which is *dedup*, since SCK only delivers a
+visibly changed frame and a static desktop downscales to identical pixels, so
+it could neither observe the desktop nor be trusted to drive it; and **TCC
+denied again, because the rebuild revoked the grant** - permission is keyed to
+the binary. **Rule 14's sharpest form yet: "it didn't work" has meant three
+different things in one session, and only reading the tool's own output
+separated them.** A tool whose first run needs a permission grant must say so
+before it is handed over, and **rebuilding it revokes that grant**.
+
+**STILL LIVE, AND THE NEXT TEST NEEDS NO SETUP AT ALL**: that an active screen
+**capture** is the lever. A connected session captures; a disconnected app does
+not. It can be tested with the system's own recorder - **Cmd-Shift-5 -> Record
+Entire Screen** - which is already permitted and needs no new binary, no TCC
+grant and no rebuild. If the desktop runs while that recording is active, the
+lever is capture and a minimal always-on stream is the bridge; if it stays
+frozen, capture is dead too and what remains is whatever else a live AnyDesk
+session holds open, which `lsof` on its pid will name.
