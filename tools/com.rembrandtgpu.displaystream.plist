@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 2xb: a LaunchAGENT, not a daemon. Screen Recording is a per-user TCC
+         grant and a root daemon has no user session to own it. The user
+         installs this; the assistant never does.
+
+           cp -R build/out/RBDisplayStream.app /Applications/
+           cp tools/com.rembrandtgpu.displaystream.plist ~/Library/LaunchAgents/
+           launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.rembrandtgpu.displaystream.plist
+
+         Undo:
+           launchctl bootout gui/$(id -u)/com.rembrandtgpu.displaystream
+           rm ~/Library/LaunchAgents/com.rembrandtgpu.displaystream.plist
+
+         This is a BRIDGE, not a fix: it keeps a display stream open so
+         WindowServer keeps compositing. Every frame is discarded. -->
+    <key>Label</key>                 <string>com.rembrandtgpu.displaystream</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/RBDisplayStream.app/Contents/MacOS/RBDisplayStream</string>
+        <string>--every</string>
+        <string>300</string>
+    </array>
+    <key>RunAtLoad</key>             <true/>
+    <key>KeepAlive</key>             <true/>
+    <key>ProcessType</key>           <string>Interactive</string>
+    <key>StandardOutPath</key>       <string>/tmp/rbgpu-dstream.log</string>
+    <key>StandardErrorPath</key>     <string>/tmp/rbgpu-dstream.log</string>
+</dict>
+</plist>

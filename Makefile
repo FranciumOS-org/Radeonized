@@ -427,3 +427,33 @@ fbpresent:
 	@clang -fobjc-arc -O2 -Wall -framework Cocoa -framework Metal \
 	    -framework QuartzCore tools/fbpresent.m -o $(OUT)/fbpresent
 	@echo "  OBJC $(OUT)/fbpresent"
+
+# dstream (2xb): the BRIDGE. 2xa measured that an active display stream takes
+# RBFBAmtrSets from 0.05-0.08 to 71.30 sets/s, reversibly, with two controls -
+# the same rate a connected AnyDesk session gives. This holds such a stream
+# open and discards every frame.
+#
+# CGDisplayStream is marked `unavailable: obsoleted in macOS 15.0` by the SDK,
+# so the calls will not compile at all and -Wno-deprecated-declarations does
+# not help - but every symbol RESOLVES at runtime here (checked with
+# CGMainDisplayID as a positive control and a made-up name as a negative one),
+# and AnyDesk requires the same ones. So dstream.m binds them with dlsym.
+#
+# The .app bundle exists only for TCC: Screen Recording is keyed to a code
+# identity, and a bare CLI binary inherits whichever terminal launched it. The
+# bundle is ad-hoc signed with a FIXED identifier so the grant survives a
+# rebuild of the executable inside it. **A rebuild still rewrites the bundle,
+# so re-sign is part of the target, not a manual step** (2x5 lost framepump's
+# grant to exactly this).
+.PHONY: dstream
+dstream: $(OUT)/RBDisplayStream.app
+$(OUT)/dstream: tools/dstream.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -o $@ $< \
+	      -framework CoreGraphics -framework CoreFoundation -framework IOSurface
+$(OUT)/RBDisplayStream.app: $(OUT)/dstream tools/dstream-Info.plist | $(OUT)
+	rm -rf $@
+	mkdir -p $@/Contents/MacOS
+	cp $(OUT)/dstream $@/Contents/MacOS/RBDisplayStream
+	cp tools/dstream-Info.plist $@/Contents/Info.plist
+	codesign --force --sign - --identifier com.rembrandtgpu.displaystream $@
+	@codesign -dv $@ 2>&1 | grep -E 'Identifier|Signature' | sed 's/^/  /'
