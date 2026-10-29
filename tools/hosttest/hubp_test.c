@@ -70,6 +70,32 @@ int hubp_tests(void)
     A(rb_hubp_dw(0, RB_HUBP_REG_FLIP_CTL) ==
       reg_from_defs("HUBP0_SURFACE_CONTROL") + 1);
 
+    /* 2d. 2xk's flip-pending predicate, and the field masks it rests on,
+     * from dcn_3_1_2_sh_mask.h. The LIVE value boot 216 read is the control:
+     * 0x04100000 must decode to PENDING_DELAY = 65 with every other field
+     * zero and NO leftover bits - if the masks were wrong, bits would be left
+     * over or FLIP_TYPE would not read 0. */
+    A(RB_HUBP_FLIP_UPDATE_LOCK   == 0x00000001u);
+    A(RB_HUBP_FLIP_TYPE          == 0x00000002u);
+    A(RB_HUBP_FLIP_PENDING       == 0x00000100u);
+    A(RB_HUBP_FLIP_PENDING_DELAY == 0x3ff00000u);
+    {
+        const uint32_t live = 0x04100000u;   /* boot 216, HUBP0, measured */
+        const uint32_t known = RB_HUBP_FLIP_UPDATE_LOCK | RB_HUBP_FLIP_TYPE |
+                               0x000000f0u | RB_HUBP_FLIP_PENDING |
+                               0x00000200u | 0x00001000u | 0x00010000u |
+                               0x00020000u | 0x00040000u |
+                               RB_HUBP_FLIP_PENDING_DELAY;
+        A((live & ~known) == 0u);                               /* no leftover */
+        A((live & RB_HUBP_FLIP_TYPE) == 0u);                    /* vsync'd */
+        A((live & RB_HUBP_FLIP_UPDATE_LOCK) == 0u);             /* not locked */
+        A(((live & RB_HUBP_FLIP_PENDING_DELAY) >> 20) == 65u);  /* the one set field */
+        A(rb_hubp_flip_pending(live) == 0);
+    }
+    A(rb_hubp_flip_pending(0x00000100u) == 1);
+    A(rb_hubp_flip_pending(0x00000000u) == 0);
+    A(rb_hubp_flip_pending(0xfffffeffu) == 0);   /* every OTHER bit set */
+
     /* 3. Out-of-range asks answer 0, not a wild offset. */
     A(rb_hubp_dw(RB_HUBP_COUNT, RB_HUBP_REG_ADDR) == 0);
     A(rb_hubp_dw(0, RB_HUBP_REG_COUNT) == 0);
