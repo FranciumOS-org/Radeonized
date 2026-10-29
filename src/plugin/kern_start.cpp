@@ -14182,6 +14182,11 @@ static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
     (void)a; (void)b;
     g_rb_2xg_ticks++;
     void *s = g_rb_2xg_sched;
+    /* 2xh: tw=7 is "the target was not resolved yet" and is DIFFERENT from
+     * tw=1..6, which mean the scheduler object itself looked wrong. Boot 213
+     * could not tell those apart because the short-circuit below never
+     * reached rbgpu_2xg_sane() and tw stayed 0 (rule 14). */
+    if (!g_rb_2xg_check) g_rb_2xg_refuse_why = 7;
     if (g_rb_2xg_check && rbgpu_2xg_sane(s)) {
         g_rb_2xg_refuse_run = 0;
         g_rb_2xg_calls++;
@@ -14238,14 +14243,25 @@ void rbgpu_schedtick_start_2xg(void) {
         rbgpu_diag_set_num("tick_armed", 0);
         return;
     }
+    /* 2xh: BOOT 213 SPENT ITS ONE-SHOT HERE AND TICKED NOTHING.
+     * `tarm=0 tos=0` with `tus` absent: the one-shot consumed cleanly and
+     * then this function refused because `g_rb_2xg_check` was still NULL -
+     * the peer's start() runs BEFORE AMDRadeonX6000 is patched, so the
+     * symbol does not exist yet. 2w5's lesson in a new form: a probe needs a
+     * call site that runs when ITS arg is set, and this one did - but it also
+     * needed a target that only exists later, and nothing reconciled the two.
+     *
+     * So do NOT refuse. Arm the thread_call now, while this is still an
+     * ordinary IOService::start context where NVRAM and allocation are safe,
+     * and let the action refuse harmlessly (counted, `tw=7`) until the route
+     * callback fills in the target. The one-shot is still consumed BEFORE the
+     * first tick, which is all rule 37 requires; moving the consume into the
+     * patcher callback to "fix the ordering" would put a flash commit inside
+     * a kext load, which is 2fo's wedge. */
     if (!g_rb_2xg_check) {
-        rbgpu_log("2xg: one-shot consumed but checkTimestamps was never "
-                  "resolved - the AMDRadeonX6000 route callback either did "
-                  "not run or solveSymbol failed. NOT ticking; this boot is "
-                  "spent and the key is already clear.");
-        rbgpu_diag_set_num("tick_oneshot", g_rb_2xg_oneshot);
-        rbgpu_diag_set_num("tick_armed", 0);
-        return;
+        rbgpu_log("2xg: checkTimestamps not resolved YET (AMDRadeonX6000 is "
+                  "patched after the peer starts) - arming anyway; the tick "
+                  "refuses with tw=7 until the route callback fills it in");
     }
     g_rb_2xg_call = thread_call_allocate(rbgpu_2xg_action, nullptr);
     if (!g_rb_2xg_call) {
@@ -14324,12 +14340,19 @@ rbgpu_2xg_solve(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
         id, "__ZN29AMDRadeonX6000_AMDSWScheduler15checkTimestampsEv",
         address, size);
     if (!ct) {
-        rbgpu_log("2xg: checkTimestamps NOT resolved - the tick will refuse to "
-                  "arm and say so (it does NOT fall back to advance())");
+        rbgpu_log("2xg: checkTimestamps NOT resolved - the tick keeps refusing "
+                  "with tw=7 forever (it does NOT fall back to advance())");
         patcher.clearError();
+        /* 2xh, rule 14: tw=7 alone cannot say WHY the target is missing -
+         * "the callback has not run yet" and "solveSymbol failed" look
+         * identical from the tick's side. This key separates them, and it is
+         * published from the patcher callback because processX6000 already
+         * writes the diag table twelve times, so the context is established. */
+        rbgpu_diag_set_num("tick_solved", 0);
         return;
     }
     g_rb_2xg_check = reinterpret_cast<void (*)(void *)>(ct);
+    rbgpu_diag_set_num("tick_solved", 1);
     rbgpu_log("2xg: resolved AMDSWScheduler::checkTimestamps at %p",
               reinterpret_cast<void *>(ct));
 }

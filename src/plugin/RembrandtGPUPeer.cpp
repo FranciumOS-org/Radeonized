@@ -772,6 +772,14 @@ void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call
 // move down into the main list.
 static const char *const kRbgpuNvramHotKeys[] = {
     "armed",
+    // 2xg/2xh: the scheduler tick's arm check, ahead of everything, because a
+    // boot carrying it can PANIC and because boot 213 proved these three are
+    // what the reading turns on. `tick_armed` 1 means it is ticking;
+    // `tick_oneshot` says why not (0 consumed, 1 /options, 2 absent,
+    // 3 literal "0", 4 the overwrite would not take); and `tick_solved`
+    // separates "the route callback has not run yet" from "solveSymbol
+    // failed", which `tw=7` in rbgpu-sched cannot do on its own.
+    "tick_armed", "tick_oneshot", "tick_solved", "tick_us",
     // 2w3: the three bits behind kIOReturnNotReady, at the very top because
     // every boot that carries them wedges and the note truncates at 512.
     // `ax<i>_gate` is the whole verdict in one digit (0 all open, 1 accel not
