@@ -46795,3 +46795,94 @@ INSTALL (rule 15): fbkext **`A058AEA0`** to the **auxiliary collection**, i.e.
 `/Library/Extensions` — it is the only artifact that changed. Plugin
 **`DFEAFF02`** is unchanged and already in the EFI; **no `efi.sh install`, no
 rebuild.** Boot-args unchanged. One-shots, all five as 2xi.
+
+--------------------------------------------------------------------------
+2xk (2026-10-29) — BOOT 216: THE FLIP TYPE IS ELIMINATED BY A READ, AND THE
+TEAR'S NEXT CANDIDATE IS COUNTED RATHER THAN ACTED ON. fbkext `07B0C4A2`.
+
+Rule 8/15 first: `rbgpu-boot` **216**, 16:21:50, plugin **`DFEAFF02`**, fbkext
+**`A058AEA0`** — both the artifacts 2xj named, so the read is this build's.
+
+**THE TICK REPRODUCED, n=2.** `tarm=1 tos=0 tus=6944`, `tc=2605 tk=1695
+tr=910 tw=1 ts=0` (`tk + tr = tc`, and every refusal is again the
+pre-first-submit window), `gmean` **4595 us**, `gmax` **97 275 us**, histogram
+`587,250,14,7,9,12,10,1600,92,0,0,1,0,0` — sum 2582 = `adv − 1`, dominant
+bucket **h[7] = 1600**, i.e. [4096, 8192) us, our own 6944 us period, and
+**zero gaps over 262 ms** for the second boot running. Display rate **95.44
+sets/s** over 25.03 s. So 2xi is not a one-boot result.
+
+**AND IT CLOSES ONE OF 2xi'S OWN CAVEATS.** `RBFBHubpWrites` and
+`RBFBAmtrSets` moved **2389 and 2389** — exactly equal. 2xi reported writes
+exceeding sets by 1-4 and named sampling skew as the obvious unmeasured
+candidate; reading both keys in ONE `awk` pass over ONE `ioreg` makes them
+agree exactly, so that is what it was. The caveat is retired, not carried.
+
+**THE REGISTER, DECODED AGAINST MEASURED FIELD NAMES.** `RBFBHubpFlipCtl` =
+**0x04100000**, `RBFBHubpFlipCtl2` = **0x40**. The field map comes from
+`dcn_3_1_2_sh_mask.h` at torvalds/linux
+`4dd16e31135ea8437a720222df34e8745f385d6d` (6.5 MB, not copied; the fields are
+listed in `docs/linux-ref/UPSTREAM.md` and in `rb_hubp.h`, which is the
+convention that file already states for the offset headers):
+
+    SURFACE_UPDATE_LOCK                = 0
+    SURFACE_FLIP_TYPE                  = 0
+    SURFACE_FLIP_VUPDATE_SKIP_NUM      = 0
+    SURFACE_FLIP_PENDING               = 0
+    HUBPREQ_MASTER_UPDATE_LOCK_STATUS  = 0
+    SURFACE_FLIP_PENDING_DELAY         = 65
+    leftover bits                      = 0x00000000
+    FLIP_CONTROL2: PENDING_MIN_TIME 64, SURFACE_TRIPLE_BUFFER_ENABLE 0
+
+**The zero leftover is the control** — if the mask map were wrong, bits would
+be unaccounted for. It is asserted in the hosttest against the live value.
+
+**SURFACE_FLIP_TYPE IS 0, AND 0 IS VSYNC'D.** That is established from Linux's
+own driver, not from recall: `hubp1_program_surface_flip_and_addr` writes
+`REG_UPDATE(DCSURF_FLIP_CONTROL, SURFACE_FLIP_TYPE, flip_immediate)`
+(`dcn10_hubp.c:361`), so the field *is* the immediate flag and 0 is the
+vsync'd setting. **The firmware already latches at VUPDATE, so the tearing is
+NOT the flip type, and 2xj's "one bit" hope is dead.** It cost a read and
+nothing was written. 2xj's own alternative branch — *"if it already reads as
+vsync'd, then the tear is NOT the flip type"* — is the one that fired, which
+is what writing both outcomes down beforehand is for.
+A note on how the masks were obtained at all: the first grep for
+`mmHUBPREQ0_...` found nothing because this header family spells them `reg...`.
+**Rule 26, caught only by controlling the grep against an offset `rb_hubp.h`
+already carries.** The same control was used on the 6.5 MB download before
+reading anything out of it.
+
+**THE NEXT CANDIDATE, NAMED AND COUNTED, NOT ACTED ON.**
+`SURFACE_FLIP_PENDING` is the hardware's "armed but not yet latched" status,
+and `SURFACE_TRIPLE_BUFFER_ENABLE` reads **0**, so there is exactly **one**
+pending slot. We have **never** read that bit before programming the next
+address. So programming over a pending flip discards it — and, separately, our
+`setAttribute('amtr')` answers success the instant it is called (2we: *"answers
+success without doing the work"*), so Apple's compositor is told the flip
+completed while DCN may not have latched it and the surface may still be live.
+That is a mechanism that would put *newer* content in the lower part of a
+frame, which is where the user sees it. **It is a hypothesis with no
+measurement behind it yet** (rule 35), so this build **counts** it:
+`RBFBHubpPendChecks` / `RBFBHubpPendHits` in `hubpProgram()`, a register read
+only, with **the write itself unchanged** — nothing skipped, deferred or
+reordered, so this build cannot alter what the panel shows.
+
+Mutation-tested: moving the `SURFACE_FLIP_PENDING` mask one bit fails three
+assertions, including the live-value decode. `rb_hubp_flip_pending()` is a
+pure predicate in `src/common/rb_hubp.h` so the hosttest decides it before the
+kext does, like every other HUBP decision; it is checked against 0x100 alone,
+zero, and **every other bit set but that one**.
+
+**SAID BEFORE THE BOOT.** `RBFBHubpPendHits` near zero out of ~2400 checks
+means a pending flip is NOT being overwritten and this candidate dies too —
+then the remaining suspect is the surface's *contents* changing under the
+scanout, which is a completion-signalling problem in our `'amtr'` answer and
+not a register at all. A large fraction means the mechanism is found, and the
+fix is to **skip or defer** the write while pending, which is strictly fewer
+writes and so cannot show DCN a value it has not already seen. **Do not write
+`SURFACE_UPDATE_LOCK` on the strength of this**: it brackets a GROUP of
+register writes, and we change exactly one dword whose HIGH half never moves,
+so there is no group to make atomic.
+
+INSTALL (rule 15): fbkext **`07B0C4A2`** to `/Library/Extensions`; plugin
+**`DFEAFF02`** unchanged in the EFI, no `efi.sh install`. Boot-args unchanged.
+One-shots, all five.

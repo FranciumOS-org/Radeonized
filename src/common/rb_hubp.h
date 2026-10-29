@@ -104,6 +104,41 @@ static const uint32_t rb_hubp_regs[RB_HUBP_COUNT][RB_HUBP_REG_COUNT] = {
  * addressing HUBP0 of a firmware-lit ARGB8888 1920-pitch pipe. If any has
  * moved, we are either misaddressed or the pipe is not what was measured, and
  * the right answer is to refuse rather than to write. */
+/* 2xk: DCSURF_FLIP_CONTROL field masks, taken from
+ * drivers/gpu/drm/amd/include/asic_reg/dcn/dcn_3_1_2_sh_mask.h at
+ * torvalds/linux 4dd16e31135ea8437a720222df34e8745f385d6d. That header is
+ * 6.5 MB and is NOT copied into docs/linux-ref (the same decision UPSTREAM.md
+ * records for the offset headers); the fields used are listed here with their
+ * source, which is the convention that file states.
+ *
+ * Boot 216 read the live register as 0x04100000 and it decodes with NO
+ * leftover bits - SURFACE_FLIP_PENDING_DELAY = 65 and every other field zero -
+ * which is the control that this map is the right one.
+ *
+ * SURFACE_FLIP_TYPE is the field 2xj went looking for, and it reads **0**.
+ * Linux's own hubp1_program_surface_flip_and_addr writes
+ * `REG_UPDATE(DCSURF_FLIP_CONTROL, SURFACE_FLIP_TYPE, flip_immediate)`
+ * (dcn10_hubp.c:361), so 1 is immediate and 0 is vsync'd: the firmware
+ * already latches at VUPDATE and **the tearing is not the flip type**. That
+ * candidate is eliminated by a read, with nothing written.
+ *
+ * SURFACE_FLIP_PENDING is the hardware's "armed but not yet latched" status,
+ * and with SURFACE_TRIPLE_BUFFER_ENABLE = 0 (read live, FLIP_CONTROL2 = 0x40
+ * is entirely PENDING_MIN_TIME = 64) there is exactly ONE pending slot. We
+ * have never read it before programming the next address. */
+#define RB_HUBP_FLIP_UPDATE_LOCK   0x00000001u
+#define RB_HUBP_FLIP_TYPE          0x00000002u   /* 1 = immediate, 0 = vsync'd */
+#define RB_HUBP_FLIP_PENDING       0x00000100u
+#define RB_HUBP_FLIP_PENDING_DELAY 0x3ff00000u
+
+/* True iff DCN still has a flip armed that has not latched. A pure predicate
+ * so the hosttest decides it before the kext does, exactly as every other
+ * HUBP decision in this file. */
+static inline int rb_hubp_flip_pending(uint32_t flip_ctl)
+{
+    return (flip_ctl & RB_HUBP_FLIP_PENDING) != 0u;
+}
+
 #define RB_HUBP_EXPECT_PITCH    0x0000077fu   /* 1920 px, pitch-1 encoding */
 #define RB_HUBP_EXPECT_CONFIG   0x00000008u   /* ARGB8888 */
 #define RB_HUBP_EXPECT_ADDR_HI  0x000000f4u   /* the carve-out's high dword */

@@ -62,6 +62,8 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpReadback = 0;
     hubpFlipCtl = 0;
     hubpFlipCtl2 = 0;
+    hubpPendChecks = 0;
+    hubpPendHits = 0;
     hubpPitch = 0;
     hubpConfig = 0;
     hubpOtgCtl = 0;
@@ -192,6 +194,21 @@ void RBAMDFramebuffer::hubpProgram(uint64_t mc)
     }
 
     if (hubpMax && hubpWrites >= hubpMax) { return; }
+
+    /* 2xk: THE INSTRUMENT, NOT THE FIX (rule 35). 2xj eliminated the flip
+     * type by reading it; this counts the next candidate instead of acting on
+     * it. SURFACE_FLIP_PENDING set here means DCN still has the PREVIOUS
+     * address armed and unlatched, and with one pending slot (triple
+     * buffering reads 0) programming over it discards that flip. A read only
+     * - this function runs on the accelerator's thread with its locks held,
+     * so it allocates nothing and logs nothing (rule 31), and it already
+     * performs a register read on write #1. The write below is UNCHANGED:
+     * nothing is skipped, deferred or reordered, so this build cannot alter
+     * what the panel shows. */
+    const uint32_t fc = hubpRegs[kRbDmuSeg2 +
+                                 rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL)];
+    hubpPendChecks++;
+    if (rb_hubp_flip_pending(fc)) { hubpPendHits++; }
 
     /* HIGH first, then LOW. DCN latches the pair when the LOW dword is
      * written, so this order means the hardware never sees a half-updated

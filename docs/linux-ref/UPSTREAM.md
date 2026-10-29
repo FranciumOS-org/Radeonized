@@ -222,3 +222,16 @@ Fetched from kernel.org (GitHub raw was rate-limiting), tag **v6.11**,
 Note the prefix change: the 3.0.x headers use `mm<REG>`, the 3.1.x headers use
 `reg<REG>`. A parser that handles only one silently reports near-total
 disagreement - that cost one wrong table in 2pg before it was caught (rule 26).
+
+Added 2026-10-29 (2xk), from master at
+`4dd16e31135ea8437a720222df34e8745f385d6d`. **Not copied** - the same decision
+this file already records for the large offset headers - so the fields taken
+are listed here with their source and are asserted by the hosttest:
+
+| Source | Taken |
+|---|---|
+| drivers/gpu/drm/amd/include/asic_reg/dcn/dcn_3_1_2_sh_mask.h | `HUBPREQ0_DCSURF_FLIP_CONTROL` field masks: `SURFACE_UPDATE_LOCK` 0x1, `SURFACE_FLIP_TYPE` 0x2, `SURFACE_FLIP_PENDING` 0x100, `SURFACE_FLIP_PENDING_DELAY` 0x3ff00000; and `..._FLIP_CONTROL2`: `SURFACE_FLIP_PENDING_MIN_TIME` 0xff, `SURFACE_TRIPLE_BUFFER_ENABLE` 0x400 |
+| drivers/gpu/drm/amd/display/dc/hubp/dcn10/dcn10_hubp.c | line 361, `REG_UPDATE(DCSURF_FLIP_CONTROL, SURFACE_FLIP_TYPE, flip_immediate)` - which is what establishes that 1 is immediate and 0 is vsync'd, rather than it being assumed |
+
+They live in `src/common/rb_hubp.h` with the live boot-216 value `0x04100000`
+as the control: it decodes with no leftover bits.
