@@ -47122,3 +47122,143 @@ Artifacts: plugin **`3A8EAB07`**, fbkext **`51336968`**. Both UUIDs checked
 moved; `kmutil libraries -p` resolves 0 symbols from
 `SystemKernelExtensions.kc` for the plugin and
 `grep -c IOGraphicsFamily src/plugin/Info.plist` is 0.
+
+---
+
+## 2xn — boot 219: the tunable works, 2000 us is WORSE, and the flicker's shape names a different defect
+
+Boot 219, rule 15 clean on both: plugin **`3A8EAB07`**, fbkext **`51336968`**,
+both the 2xm artifacts. `rbgpu-boot` 219 (218 was the Geekbench boot),
+`rbgpu-tick`/`rbgpu-fb` both `0`, `tarm=1 tos=0 ts=0`, `tick_solved=1`.
+Boot-args carry `-rbgpufbflippend` and `rbgpuschedtickus=2000`.
+
+### RULE 40'S FIX IS CONFIRMED ON HARDWARE
+
+`tus=2000` in the note and `tick_us=7d0` (= 2000) in the diag table, where
+boot 217 had the identical boot-arg and read 6944 in both. The tick ran at
+**486 ticks/s** (`tc=52986` over 108.9 s = 2057 us), so the period took.
+
+### AND 2000 us IS WORSE FOR THE PRODUCT, WHICH 2xl DID NOT ANTICIPATE
+
+`advance()` is paced tighter, exactly as the tick's theory says:
+
+                      boot 217 (6944 us)   boot 219 (2000 us)
+    adv gmean              2712 us              1538 us
+    adv gmax              54191 us             13183 us
+    dominant bucket   h[7] [4096,8192)     h[5] [1024,2048) + h[6]
+
+and the dominant bucket straddles 2000 us just as 217's straddled 6944, so
+the pacing is real and the histogram tracks the period both times.
+**But both product-facing numbers went DOWN**: `sets/s` **71.97 -> 51.33**
+and our own vblank cadence **141.377 -> 133.878 Hz** (`RBFBVBLFires /
+RBFBVBLUptimeNs`). A 3.5x faster `thread_call` competes with the VBL
+`thread_call` that delivers frames, and the VBL clock is the one that lost.
+**NOT established that the period alone did this** - boot 219 also turned
+`-rbgpufbflippend` on, so **two variables differ** and 2xl's own caveat
+applies again, one milestone after it was written. The clean next A/B is one
+token: put `rbgpuschedtickus` back to 6944 and keep `-rbgpufbflippend`, or
+drop the arg and keep 2000. Either way **the tick period is a tunable with a
+real optimum and 6944 is better than 2000 on the evidence in hand.**
+
+### THE DEFERRAL DOES EXACTLY WHAT IT SAYS, AND IT IS NOT ENOUGH
+
+    RBFBHubpDeferArmed   Yes
+    RBFBHubpPendChecks   6243     RBFBHubpPendHits  693
+    RBFBHubpDeferrals    693      RBFBHubpWrites   5550
+    RBFBAmtrSets         5590     FlipCtl 0x04100000  FlipCtl2 0x40
+
+**Internally exact**: `PendChecks 6243 = HubpWrites 5550 + Deferrals 693`, and
+`Deferrals == PendHits` to the unit - so every pending flip was deferred and
+nothing else was, which is the triple-buffer guard reading clear as boots 216
+and 217 both measured. The mechanism is wired correctly.
+**The hit rate is NOT comparable to 2xm's 1.75 %.** 693/6243 = **11.1 %**, but
+that is measured in a *different configuration* (deferring) over 109 s of
+post-login activity against 470 s of mixed desktop. Rule 39: say which
+configuration a reading comes from. No mechanism is proposed for the
+difference; burstiness over a much shorter and busier window is the obvious
+candidate and it is **not** established.
+**The user reports the flicker roughly 30 % reduced and still present** - and,
+decisively, **"still across the whole screen"**, where 2xm's first description
+was "tears up at bottom".
+
+### THE SHAPE IS THE EVIDENCE, AND IT NAMES A DIFFERENT DEFECT
+
+A flip programmed over an unlatched one replaces the armed address partway
+through a scan, so it can only corrupt the frame **below the current
+scanline**. It cannot produce a whole-screen event. So 2xm's stated open
+question is answered in the direction 2xm predicted it might be: the
+pending-overwrite is **a** mechanism, worth ~30 % by the user's eye, and
+**not the main one**.
+**And the main one is a protocol divergence from Apple that has been in our
+code since 2wc.** From the journal's own disassembly of
+`AMDFramebuffer::getAttribute('amtr')` (`0x2a6faa`, read in 2wc):
+
+    if (!(ctrl->0x31332 >> 9 & 1)) return kIOReturnUnsupported;
+    if (getOutstandingDisplayPipeTransactions()) return kIOReturnNotReady;
+    return kIOReturnSuccess;              /* *out is never written */
+
+Ours is `amtrGets++; return kIOReturnSuccess;` - **unconditionally**, in every
+boot since 2wc. So we tell the compositor that every transaction completed
+the instant it was handed over, which frees it to draw into a surface that is
+still the live scanout. That corrupts the **whole** frame, which is the shape
+reported. 2we already wrote *"the compositor believes 13 transactions landed
+and none did"* about the same answer; what is new is that the lie has a
+visible consequence and the reference implementation does not tell it.
+**Answering NotReady does NOT close the gate 2wc opened**, which is why this
+is safe to try: `getDisplayInfo` at `0xbe8717e` sets the capability bit on
+`r == 0 || r == kIOReturnNotReady`, measured, so both answers keep bit 0x100.
+
+### `-rbgpufbnotready`, OFF BY DEFAULT, AND THE DEADLINE IS THE POINT
+
+Our stand-in for `getOutstandingDisplayPipeTransactions()` is DCN's own
+`SURFACE_FLIP_PENDING`: our flip is outstanding exactly while the hardware
+holds it armed and unlatched. The triple-buffer guard of
+`rb_hubp_flip_would_discard()` deliberately does **not** apply - with more
+than one slot our address is still unlatched - so this is the bare pending
+bit by design, asserted as such.
+**`rb_hubp_hold_notready(flip_ctl, now, deadline)` is BOUNDED, and that is a
+safety property rather than a refinement.** 2x6 recorded that
+`isTransactionComplete` (`0xbe4a794`) decides the current transaction by
+`getAttribute('amtr', NULL) == 0`, so NotReady makes Apple's accelerator
+**wait**. Answering 0 always, as we do today, is the optimistic answer and
+cannot stall anything; this one can, and an unbounded hold on a pending bit
+that never clears (a mode set, a disabled pipe, a register we have misread)
+would wedge the display outright. So the hold expires after **two vblank
+periods** - the address latches at the next VUPDATE, and one period of slack
+costs nothing - and past it we answer ready whatever the hardware says.
+`hubpFlipDeadline` is set **after** the stores land, so a refused or deferred
+transaction never opens a hold, and a deadline that was never set reads `0`,
+which the policy treats as **already expired**: the arm fails safe, asserted
+both ways.
+**Mutation tested, and the safety property is the one that is tested**:
+removing the deadline (an unbounded hold) FAILS the hosttest, and holding
+when `PENDING` is clear FAILS it. Also asserted: `0xfffffeff` with `PENDING`
+clear answers ready, so an unidentified field cannot stall every frame.
+The register read lives in `RBAMDFramebufferHUBP.cpp` rather than beside
+`getAttribute`, because `kRbDmuSeg2` is that file's static and 2wh's rule
+stands - the DMU segment is a constant, a constant is an assumption, and one
+copy of an assumption beats two.
+Publishes `RBFBAmtrNotReadyArmed`, `RBFBAmtrHeld`, `RBFBAmtrHoldExpired`.
+**Said before the boot**: `RBFBAmtrHeld` non-zero means the hold is firing and
+the arm took; `RBFBAmtrHoldExpired` large compared with `Held` means the
+pending bit is clearing slower than two periods and the bound, not the
+hardware, is deciding - re-read the period, do not raise it blindly.
+`Held` zero with `NotReadyArmed` true means the GET never arrives while
+pending and this candidate is **eliminated**, which is worth the boot either
+way. A frozen or stuttering desktop is the risk the deadline exists to
+bound; one token reverses it.
+
+### GEEKBENCH 7, FOR THE RECORD
+
+`browser.geekbench.com/v7/gpu/342617`: **Metal 12587**, Geekbench **7.1.0**,
+macOS 15.8.1 (24H32), Ryzen 7 7735HS, 32 GB at 4800 MT/s, Metal device name
+**"AMD Radeon HD GFX10 Family Unknown Prototype"**. Subtests 5825 (Background
+Blur) to 24340 (Feature Matching).
+Against the user's earlier **9633** that is **+30.7 %**, though whether 9633
+was the same suite and version is **not** established. **The 33 000 figure
+remains unverifiable and is now less likely to be comparable, not more**:
+this is Geekbench **7**, and GB5/GB6/GB7 Metal scores are not interchangeable
+- naming the suite and version is a precondition for the comparison, not a
+detail. Clocks remain unwired (`Core Clock(MHz)` reports 0, 2xl).
+
+Artifact: fbkext **`4BDC7A2C`**. Plugin `3A8EAB07` unchanged.

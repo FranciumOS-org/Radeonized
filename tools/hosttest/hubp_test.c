@@ -132,6 +132,40 @@ int hubp_tests(void)
         A(rb_hubp_flip_would_discard(0x00000100u, 0u) == 1);
     }
 
+    /* 2f (2xn). The NotReady hold, and above all that it is BOUNDED. */
+    {
+        const uint32_t idle = 0x04100000u;   /* measured, not pending */
+        const uint32_t pend = 0x04100100u;   /* same, PENDING set */
+
+        /* Not pending: always ready, deadline irrelevant - including a
+         * deadline far in the future, which is the case that would otherwise
+         * hold forever. */
+        A(rb_hubp_hold_notready(idle, 0u, 0u) == 0);
+        A(rb_hubp_hold_notready(idle, 0u, ~0ull) == 0);
+        A(rb_hubp_hold_notready(idle, 100u, 200u) == 0);
+
+        /* Pending and inside the deadline: hold. */
+        A(rb_hubp_hold_notready(pend, 100u, 200u) == 1);
+
+        /* THE SAFETY PROPERTY: pending but past the deadline answers ready,
+         * so a pending bit that never clears cannot wedge the display. */
+        A(rb_hubp_hold_notready(pend, 200u, 200u) == 0);   /* == is expired */
+        A(rb_hubp_hold_notready(pend, 201u, 200u) == 0);
+        A(rb_hubp_hold_notready(pend, ~0ull, 200u) == 0);
+        /* A deadline never set (0) is expired for every clock value, so an
+         * arm that forgets to set one fails SAFE, not open. */
+        A(rb_hubp_hold_notready(pend, 0u, 0u) == 0);
+        A(rb_hubp_hold_notready(pend, 1u, 0u) == 0);
+
+        /* Only PENDING holds: every other bit set with PENDING clear must
+         * answer ready, or an unidentified field could stall every frame. */
+        A(rb_hubp_hold_notready(0xfffffeffu, 0u, ~0ull) == 0);
+        /* ...and triple buffering does NOT exempt it here (unlike
+         * rb_hubp_flip_would_discard): our address is still unlatched. */
+        A(rb_hubp_hold_notready(pend | RB_HUBP_FLIP2_TRIPLE_BUFFER,
+                                100u, 200u) == 1);
+    }
+
     /* 3. Out-of-range asks answer 0, not a wild offset. */
     A(rb_hubp_dw(RB_HUBP_COUNT, RB_HUBP_REG_ADDR) == 0);
     A(rb_hubp_dw(0, RB_HUBP_REG_COUNT) == 0);

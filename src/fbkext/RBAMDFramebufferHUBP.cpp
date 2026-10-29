@@ -65,6 +65,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpPendChecks = 0;
     hubpPendHits = 0;
     hubpDeferrals = 0;
+    hubpFlipDeadline = 0;
     hubpPitch = 0;
     hubpConfig = 0;
     hubpOtgCtl = 0;
@@ -246,6 +247,19 @@ void RBAMDFramebuffer::hubpProgram(uint64_t mc)
     hubpRegs[kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_ADDR)] =
         (uint32_t)mc;
 
+    /* 2xn: the window in which getAttribute('amtr') may answer NotReady.
+     * Two periods, because the address latches at the NEXT VUPDATE (2xk read
+     * SURFACE_FLIP_TYPE = 0) and one period of slack costs nothing while a
+     * tighter bound would expire before a legitimately pending flip latched.
+     * Set AFTER the stores, so a refused or deferred transaction never opens
+     * a hold - and if this is ever not reached, the deadline stays at 0,
+     * which rb_hubp_hold_notready() treats as already expired (asserted). */
+    {
+        uint64_t two = 0;
+        nanoseconds_to_absolutetime(kVBLPeriodNs * 2, &two);
+        hubpFlipDeadline = mach_absolute_time() + two;
+    }
+
     hubpWrites++;
     hubpLast = mc;
 
@@ -315,4 +329,28 @@ void RBAMDFramebuffer::hubpPoll(void)
         pollChanges++;
         hubpProgram(mc);
     }
+}
+
+/* 2xn: the 'amtr' GET's answer, kept here because kRbDmuSeg2 is this file's
+ * and 2wh's rule stands - the DMU segment is a constant, a constant is an
+ * assumption, and one copy of an assumption is better than two. The policy
+ * itself is rb_hubp_hold_notready() in src/common/rb_hubp.h, run by the
+ * hosttest; this is only the register read. Called from getAttribute on the
+ * accelerator's thread: two MMIO reads, no allocation, no log, no block. */
+bool RBAMDFramebuffer::hubpHoldNotReady(void)
+{
+    if (!amtrNotReady || !hubpReady || !hubpRegs) {
+        return false;
+    }
+    const uint32_t fc = hubpRegs[kRbDmuSeg2 +
+                                 rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL)];
+    if (!rb_hubp_flip_pending(fc)) {
+        return false;
+    }
+    if (rb_hubp_hold_notready(fc, mach_absolute_time(), hubpFlipDeadline)) {
+        amtrHeld++;
+        return true;
+    }
+    amtrHoldExpired++;
+    return false;
 }
