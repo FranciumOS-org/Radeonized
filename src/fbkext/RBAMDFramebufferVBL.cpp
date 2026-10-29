@@ -127,6 +127,10 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpPendHits", hubpPendHits, 64);
     setProperty("RBFBHubpDeferArmed", hubpDeferPend);
     setProperty("RBFBHubpDeferrals", hubpDeferrals, 64);
+    setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
+    setProperty("RBFBHubpOtg2", hubpOtgCtl2, 32);
+    setProperty("RBFBHubpOtg3", hubpOtgCtl3, 32);
+    setProperty("RBFBHubpOtgAnyArmed", hubpOtgAny);
     setProperty("RBFBAmtrNotReadyArmed", amtrNotReady);
     setProperty("RBFBAmtrHeld", amtrHeld, 64);
     setProperty("RBFBAmtrHoldExpired", amtrHoldExpired, 64);

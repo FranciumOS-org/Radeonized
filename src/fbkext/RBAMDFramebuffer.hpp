@@ -242,6 +242,10 @@ private:
     uint64_t           hubpPendHits;   /* 2xk: ...and was already set */
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
+    uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */
+    uint32_t           hubpOtgCtl2;
+    uint32_t           hubpOtgCtl3;
+    bool               hubpOtgAny;     /* 2xp: -rbgpufbotgany */
     bool               amtrNotReady;   /* 2xn: -rbgpufbnotready */
     uint64_t           hubpFlipDeadline; /* 2xn: abs time the hold expires */
     uint64_t           amtrHeld;       /* 2xn: NotReady answers given */

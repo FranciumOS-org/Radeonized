@@ -2263,6 +2263,23 @@ burst was never measured. The decision is `rb_hubp_should_write()` in
 crumb's `n=` says in the SAME boot whether the arg had anything to do, so the
 arg and its instrument are independent and one boot settles it. Rule 30: NOT
 `-rbgpufbhubpall`, which `-rbgpufbhubp` would prefix),
+`-rbgpufbotgany` (2xp - relaxes gate 1's OTG1-3 clause to OTG0's master-enable
+only, so **2or's cheap HDMI test can be run without freezing the laptop
+panel**. The fbkext already reads all four `OTG_CONTROL` every boot as gate 1,
+and that gate requires OTG1-3 to read exactly `0x300` - so booting with HDMI
+attached, if the GOP lights it, refuses with `hubpRefuse 5`, writes no HUBP
+address, and freezes the panel while `-rbgpuownfb` still holds it (rule 38).
+2wh's stated reason for the signature - "if the segment constant is wrong these
+reads are garbage" - holds for OTG0 and NOT for OTG1-3, since a *live* OTG
+corroborates the segment rather than impeaching it. Given up: three
+corroborating reads. Kept: OTG0's enable, gate 2's three measured values
+(pitch/format/address-high, the stronger check), the deny policy and six
+per-address gates. OTG0's master-enable is **never** relaxed, asserted.
+All four are now read unconditionally and published even on refusal
+(`RBFBHubpOtg1/2/3`, `RBFBHubpOtgAnyArmed`). Mutation-tested both ways. **Said
+before the boot**: one OTG not `0x300` with bit 0 set = firmware lit HDMI and a
+fixed-mode external display is reachable; all three still `0x300` = the GOP did
+not, and HDMI is the full project),
 `-rbgpufbflippend` (2xm - **the tearing fix**, requires `-rbgpufbhubp`.
 Boot 217 read `RBFBHubpPendHits` **593** of `RBFBHubpPendChecks` **33877** =
 **1.75 % of flips, 1.26 a second**, programmed over a flip DCN had armed and

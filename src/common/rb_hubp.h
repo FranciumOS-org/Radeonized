@@ -218,6 +218,50 @@ static inline int rb_hubp_hold_notready(uint32_t flip_ctl, uint64_t now,
     return now < deadline ? 1 : 0;
 }
 
+/* 2xp: gate 1 - "are we addressing DCN at all?" - as a decision rather than a
+ * loop, because its OTG1-3 clause turns out to do a job nobody assigned it.
+ *
+ * 2oq measured OTG0 master-enabled and OTG1-3 all reading exactly 0x300, and
+ * 2wh made that whole signature the gate, on the stated grounds that "if the
+ * segment constant is wrong, these four reads are garbage and will not match".
+ * For OTG0 that argument holds. For OTG1-3 it does not do what it says: an
+ * OTG that is LIVE is not evidence that our segment is wrong - it is a
+ * plausible OTG_CONTROL value at a plausible offset, so if anything it
+ * corroborates the segment. What the clause actually asserts is "nothing else
+ * is scanning", which gate 2 never needed and which 2or's own cheap HDMI test
+ * makes false on purpose: boot with HDMI attached, and if the UEFI GOP lights
+ * it, a second OTG comes up live.
+ *
+ * With the strict clause that boot refuses with code 5, writes nothing, and -
+ * because the panel is taken by -rbgpuownfb independently of this (rule 38) -
+ * FREEZES the laptop panel on its last frame. One power cycle recovers it
+ * (2wj's overwrite consume), but the test cannot be run for its answer.
+ *
+ * So `allow_live` (-rbgpufbotgany) relaxes it to OTG0 only. What is given up
+ * is named: three corroborating reads of the segment constant. What remains
+ * is OTG0's own master-enable plus gate 2, which checks THREE separately
+ * measured values (pitch, format, the address high dword) and is the far
+ * stronger addressing check, plus the deny policy and six per-address gates.
+ * Default stays strict - this relaxes only when asked.
+ *
+ * Returns 1 if gate 1 passes.
+ */
+#define RB_HUBP_OTG_MASTER_EN  0x1u
+#define RB_HUBP_OTG_OFF_VALUE  0x300u   /* 2oq measured OTG1-3 at exactly this */
+
+static inline int rb_hubp_otg_gate(uint32_t otg0, uint32_t otg1, uint32_t otg2,
+                                   uint32_t otg3, int allow_live)
+{
+    if ((otg0 & RB_HUBP_OTG_MASTER_EN) == 0u) {
+        return 0;               /* OTG0 is our panel; this one is never relaxed */
+    }
+    if (allow_live) {
+        return 1;
+    }
+    return (otg1 == RB_HUBP_OTG_OFF_VALUE && otg2 == RB_HUBP_OTG_OFF_VALUE &&
+            otg3 == RB_HUBP_OTG_OFF_VALUE) ? 1 : 0;
+}
+
 #define RB_HUBP_EXPECT_PITCH    0x0000077fu   /* 1920 px, pitch-1 encoding */
 #define RB_HUBP_EXPECT_CONFIG   0x00000008u   /* ARGB8888 */
 #define RB_HUBP_EXPECT_ADDR_HI  0x000000f4u   /* the carve-out's high dword */

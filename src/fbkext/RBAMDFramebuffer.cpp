@@ -312,6 +312,12 @@ bool RBAMDFramebuffer::start(IOService *provider)
         char nrflag[16];
         amtrNotReady = PE_parse_boot_argn("-rbgpufbnotready", nrflag,
                                           sizeof(nrflag)) && hubpArmed;
+        /* 2xp: -rbgpufbotgany relaxes gate 1's OTG1-3 clause so 2or's cheap
+         * HDMI test can be run WITHOUT freezing the laptop panel. Rule 30:
+         * no token in use prefixes it or is prefixed by it. */
+        char otgflag[16];
+        hubpOtgAny = PE_parse_boot_argn("-rbgpufbotgany", otgflag,
+                                        sizeof(otgflag)) && hubpArmed;
     }
     /* 2wi: -rbgpufbretire. Deliberately NOT named -rbgpufbvbl-something:
      * rule 30 warns that a shell grep for an existing arg matches a longer
