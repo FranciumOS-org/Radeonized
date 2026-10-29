@@ -13864,8 +13864,11 @@ static int      g_rb_2wv_hooked = 0;
 static bool (*orig_sched_submit_2wv)(void *, uint64_t, void *, void *) = nullptr;
 static void (*orig_sched_advance_2wv)(void *) = nullptr;
 
+static void *g_rb_2xg_sched = nullptr;   /* 2xg, see below */
+
 static bool hooked_sched_submit_2wv(void *sched, uint64_t qid, void *info,
                                     void *barrier) {
+    if (!g_rb_2xg_sched) g_rb_2xg_sched = sched;   /* 2xg */
     g_rb_2wv_submit++;
     g_rb_2wv_sub_since++;
     if (!orig_sched_submit_2wv) return false;
@@ -13873,6 +13876,7 @@ static bool hooked_sched_submit_2wv(void *sched, uint64_t qid, void *info,
 }
 
 static void hooked_sched_advance_2wv(void *sched) {
+    if (!g_rb_2xg_sched) g_rb_2xg_sched = sched;   /* 2xg */
     uint64_t now = mach_absolute_time();
     if (g_rb_2wv_last_adv != 0 && now > g_rb_2wv_last_adv) {
         uint64_t ns = 0;
@@ -14008,22 +14012,290 @@ void rbgpu_rate_start_2wx(void) {
     thread_call_enter_delayed(g_rb_2wx_call, deadline);
 }
 
+// ---------------------------------------------------------------------------
+// 2xg: THE SCHEDULER TICK. -rbgpuschedtick + the `rbgpu-tick` one-shot.
+//
+// WHAT IT TESTS. 2xe read the frame-readiness predicate end to end and it
+// bottoms out in a surface pool: `DisplaySurfacePool::IsReady()` is true iff
+// some surface's use count `+0x170` is zero, that count is taken by
+// `GetNextSurface` and released by `DisplaySurface::AccessComplete`, and both
+// the release and SkyLight's push notification come from ONE function,
+// `CoreDisplay::IOPAttachment::HandleTransactionCompletionEvent`. So the frame
+// cadence hangs on the kernel's transaction-completion event. 2x6 measured the
+// kernel side of the same thing from the other end: 219 lines of
+// `IOAccelDisplayPipe (fbindex=0) transaction stamp index 59 time out`, always
+// stamp 59, in the configuration that exhibits the defect, and zero in the one
+// that lacks the symptom (rule 39 satisfied both ways).
+//
+// 2xf then measured the retirement driver's own cadence, from our hook on
+// Apple's `advance()`, and found it starved in exactly the state that stalls:
+//
+//                       boot 199 (fast)   boot 212 (slow)
+//   mean gap                    3.4 ms          32.3 ms
+//   max gap                          -   6 001 590 us
+//   gaps >= 262 ms                   -              69
+//
+// `gmax` is 6.0016 s and SkyLight's watchdog read 5.99733 s - two instruments
+// with nothing in common, 4 ms apart, and the same 6 s as the gaps in the 1 Hz
+// stamp-timeout stream. NOT ESTABLISHED, and this is the whole reason the
+// experiment exists: nothing has observed pending work at `advance()`'s entry,
+// so an idle scheduler with nothing to do looks identical in that note
+// (rule 35). This tick is what tells the two apart.
+//
+// WHY `checkTimestamps` AND NOT `advance`. 2xe named it and the disassembly
+// says it plainly. `advance()` (0xbe950e0) walks the HwChannelCtx array and
+// only pushes channels whose `ctx->0x71` is already SET, so on an idle
+// scheduler it is a no-op by construction - ticking it would measure nothing
+// and 2ww already measured it running four times per submit anyway.
+// `checkTimestamps()` (0xbe94e3c) is the one function that does the work:
+//
+//   for (i = 0; i < this->0x60; i++) {                /* stride 0x98 */
+//       ctx = this->0x58 + i * 0x98;
+//       if (ctx->0x6c == ctx->0x68) { if (ctx->0x8) ctx->0x71 = 1; }
+//       else {
+//           ctx->0x8->vt[0x1a8]();                    /* THE HARDWARE POLL */
+//           if (ctx->0x72 == 1) { IOLockLock(this->0x48);
+//                                 checkPreemption(*ctx);
+//                                 IOLockUnlock(this->0x48); }
+//       }
+//   }
+//   return this->0x30->vt[0x1d8](0, 0, 0);            /* signal the source */
+//
+// It is the sole hardware stamp poll, it is what sets the `0x71` flag
+// `advance()` needs, and it tail-jumps into the event source our chain already
+// knows about - `initialize` creates that source with `provider = 0`, i.e.
+// SOFTWARE, so there is no missing GPU interrupt to find and nothing else will
+// ever fire it on an idle machine. Its seven callers are all WAITERS
+// (`AMDAccelChannel::waitForTimestamp` x4, `AMDAccelEventMachine::waitForStamp`,
+// `eventTimeout`, `checkChannelIsActive`), which is both why it is starved
+// when nobody is waiting and why calling it from a thread_call is the same
+// class of context it already runs in: those waiters are arbitrary client
+// threads, not the workloop, and it takes `this->0x48` itself. Re-entrancy is
+// Apple's own design and not something this adds: those seven waiters can be
+// inside it concurrently with each other already, with no outer lock over the
+// `ctx->0x71`/`0x72` byte writes or the stamp read, so one more caller is the
+// same shape as a second waiting client thread.
+//
+// NO NEW ROUTE, which rule 3 would forbid. The scheduler pointer arrives as
+// the first argument of both 2wv hooks on every call, so it is captured there
+// and the mechanism is one `solveSymbol`. `-rbgpuschedtick` turns the 2wv
+// routes on by itself, so a tick can never be armed without the capture that
+// feeds it.
+//
+// SAFETY, SAID BEFORE THE BUILD. The failure mode is a PANIC, not a hang, and
+// a boot-arg alone would panic-loop across power cycles - rule 37. So it also
+// needs `sudo nvram rbgpu-tick=1`, consumed BY OVERWRITE (the only path
+// measured to sync, 2sr/2wj - the removal form reads back as absent on a key
+// that survives the reboot, 2sq) and consumed BEFORE the first tick is ever
+// armed, so a panic costs one power cycle and not an unbounded number.
+// Everything the tick dereferences is re-checked on EVERY tick and refusals
+// are counted and published (rules 14/19): the object above the kalloc floor,
+// a non-NULL channel array also above it, a channel count in 1..64, and the
+// event source and the IOLock both non-NULL. Sixteen consecutive refusals
+// stop the tick for the boot rather than keep calling into an object that is
+// being torn down.
+//
+// SAID BEFORE THE BOOT, so the reading cannot be fitted afterwards:
+//   `tc` climbing with `t` and `r` at 0 means the tick is really running, and
+//     that is the arm check - read it before anything else.
+//   If the DISPLAY RATE RISES (`RBFBAmtrSets` per `RBFBVBLUptimeNs`, never
+//     per 143.83 - 2xe), retirement was the gate, and the fix belongs where
+//     2ws named it: driven from the framebuffer's own VBL thread_call, which
+//     is already a 143.83 Hz timer in the right context.
+//   If `gmean`/`gmax` collapse but the display rate does NOT move, then
+//     `advance()` starvation was real and NOT the cause - the gate is below
+//     `checkTimestamps`, and the next target is what `channel->vt[0x1a8]`
+//     reads.
+//   If `gmean`/`gmax` do not move either, the scheduler was idle with nothing
+//     pending all along, 2xf's correspondence is a coincidence of two
+//     unrelated 6 s timers, and this whole line closes.
+// ---------------------------------------------------------------------------
+
+#define RB_2XG_DEFAULT_US   6944    /* the panel's 143.83 Hz, measured (2rn) */
+#define RB_2XG_MIN_US        500
+#define RB_2XG_MAX_US    1000000
+#define RB_2XG_MAX_REFUSE     16
+
+static thread_call_t g_rb_2xg_call = nullptr;
+static void (*g_rb_2xg_check)(void *) = nullptr;
+static uint64_t g_rb_2xg_ticks = 0;
+static uint64_t g_rb_2xg_calls = 0;
+static uint32_t g_rb_2xg_refuse = 0;
+static uint32_t g_rb_2xg_refuse_run = 0;
+static uint32_t g_rb_2xg_refuse_why = 0;
+static uint32_t g_rb_2xg_us = RB_2XG_DEFAULT_US;
+static uint32_t g_rb_2xg_oneshot = 9;   /* 9 = never asked; see the ow codes */
+static uint32_t g_rb_2xg_armed = 0;
+static uint32_t g_rb_2xg_stopped = 0;
+static uint64_t g_rb_2xg_deadline = 0;
+
+/* Rule 19: the floor for a kalloc'd object, which is what the scheduler is -
+ * NOT the kext-symbol floor. Every refusal records which test failed, because
+ * "the pointer was never captured" and "the object looks wrong" are different
+ * answers and a single counter cannot tell them apart (rule 14). */
+static bool rbgpu_2xg_sane(void *s) {
+    const uintptr_t kFloor = 0xffffff8000000000ull;
+    if (!s) { g_rb_2xg_refuse_why = 1; return false; }
+    if (reinterpret_cast<uintptr_t>(s) < kFloor) {
+        g_rb_2xg_refuse_why = 2; return false;
+    }
+    uint8_t *b = static_cast<uint8_t *>(s);
+    void *arr = *reinterpret_cast<void **>(b + 0x58);
+    uint64_t cnt = *reinterpret_cast<uint64_t *>(b + 0x60);
+    void *src = *reinterpret_cast<void **>(b + 0x30);
+    void *lck = *reinterpret_cast<void **>(b + 0x48);
+    if (!arr || reinterpret_cast<uintptr_t>(arr) < kFloor) {
+        g_rb_2xg_refuse_why = 3; return false;
+    }
+    if (cnt == 0 || cnt > 64) { g_rb_2xg_refuse_why = 4; return false; }
+    if (!src || reinterpret_cast<uintptr_t>(src) < kFloor) {
+        g_rb_2xg_refuse_why = 5; return false;
+    }
+    if (!lck || reinterpret_cast<uintptr_t>(lck) < kFloor) {
+        g_rb_2xg_refuse_why = 6; return false;
+    }
+    return true;
+}
+
+static void rbgpu_2xg_arm_next(void) {
+    if (!g_rb_2xg_call || g_rb_2xg_stopped) return;
+    /* 2xe, and the same defect this project just fixed in its own vblank:
+     * `now + period` computed after the work pays for the handler on every
+     * tick, so the cadence drifts slow by however long the handler took. Walk
+     * the PREVIOUS deadline forward instead, and resync only when a whole
+     * period has already been missed (arming into the past fires a catch-up
+     * burst). The resync is counted, not hidden. */
+    uint64_t period = 0;
+    clock_interval_to_absolutetime_interval(g_rb_2xg_us, kMicrosecondScale,
+                                            &period);
+    uint64_t now = mach_absolute_time();
+    if (g_rb_2xg_deadline == 0) {
+        g_rb_2xg_deadline = now + period;
+    } else {
+        g_rb_2xg_deadline += period;
+        if (g_rb_2xg_deadline <= now) g_rb_2xg_deadline = now + period;
+    }
+    thread_call_enter_delayed(g_rb_2xg_call, g_rb_2xg_deadline);
+}
+
+static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
+    (void)a; (void)b;
+    g_rb_2xg_ticks++;
+    void *s = g_rb_2xg_sched;
+    if (g_rb_2xg_check && rbgpu_2xg_sane(s)) {
+        g_rb_2xg_refuse_run = 0;
+        g_rb_2xg_calls++;
+        g_rb_2xg_check(s);
+    } else {
+        g_rb_2xg_refuse++;
+        g_rb_2xg_refuse_run++;
+        /* Before the first submit there is no pointer to tick, which is normal
+         * and must not stop the tick; a RUN of refusals after it existed is
+         * what teardown looks like. */
+        if (g_rb_2xg_calls != 0 && g_rb_2xg_refuse_run >= RB_2XG_MAX_REFUSE) {
+            g_rb_2xg_stopped = 1;
+            rbgpu_log("2xg: STOPPED after %u consecutive refusals (why=%u) - "
+                      "the scheduler object stopped looking like one and this "
+                      "tick will not call into it again this boot",
+                      g_rb_2xg_refuse_run, g_rb_2xg_refuse_why);
+            return;
+        }
+    }
+    rbgpu_2xg_arm_next();
+}
+
+void rbgpu_schedtick_start_2xg(void) {
+    if (!checkKernelArgument("-rbgpuschedtick")) {
+        return;
+    }
+    if (g_rb_2xg_call) {
+        return;
+    }
+    char buf[24];
+    if (PE_parse_boot_argn("rbgpuschedtickus", buf, sizeof(buf))) {
+        uint32_t v = 0;
+        for (size_t i = 0; i < sizeof(buf) && buf[i] >= '0' && buf[i] <= '9'; i++) {
+            v = v * 10 + static_cast<uint32_t>(buf[i] - '0');
+        }
+        if (v >= RB_2XG_MIN_US && v <= RB_2XG_MAX_US) {
+            g_rb_2xg_us = v;
+        } else {
+            rbgpu_log("2xg: rbgpuschedtickus=%u REFUSED (outside %u-%u us); "
+                      "keeping %u us", v, (unsigned)RB_2XG_MIN_US,
+                      (unsigned)RB_2XG_MAX_US, g_rb_2xg_us);
+        }
+    }
+    /* Rule 37: consume the one-shot BEFORE the first tick can fire, on the
+     * overwrite path, and fail closed. A panic after this point costs exactly
+     * one power cycle. */
+    if (!rbgpu_nvram_consume_oneshot_ow("rbgpu-tick", &g_rb_2xg_oneshot)) {
+        rbgpu_log("2xg: -rbgpuschedtick is set but the one-shot did not arm "
+                  "(why=%u: 1 /options unreachable, 2 rbgpu-tick absent, "
+                  "3 it reads \"0\", 4 the overwrite would not take). NOT "
+                  "ticking. Arm with: sudo nvram rbgpu-tick=1",
+                  g_rb_2xg_oneshot);
+        rbgpu_diag_set_num("tick_oneshot", g_rb_2xg_oneshot);
+        rbgpu_diag_set_num("tick_armed", 0);
+        return;
+    }
+    if (!g_rb_2xg_check) {
+        rbgpu_log("2xg: one-shot consumed but checkTimestamps was never "
+                  "resolved - the AMDRadeonX6000 route callback either did "
+                  "not run or solveSymbol failed. NOT ticking; this boot is "
+                  "spent and the key is already clear.");
+        rbgpu_diag_set_num("tick_oneshot", g_rb_2xg_oneshot);
+        rbgpu_diag_set_num("tick_armed", 0);
+        return;
+    }
+    g_rb_2xg_call = thread_call_allocate(rbgpu_2xg_action, nullptr);
+    if (!g_rb_2xg_call) {
+        rbgpu_log("2xg: thread_call_allocate FAILED - no tick this boot, and "
+                  "tc=0 in rbgpu-sched means THAT, not a tick that did "
+                  "nothing");
+        rbgpu_diag_set_num("tick_armed", 0);
+        return;
+    }
+    g_rb_2xg_armed = 1;
+    rbgpu_diag_set_num("tick_oneshot", g_rb_2xg_oneshot);
+    rbgpu_diag_set_num("tick_armed", 1);
+    rbgpu_diag_set_num("tick_us", g_rb_2xg_us);
+    rbgpu_log("2xg: scheduler tick ARMED at %u us (%u.%02u Hz) -> "
+              "AMDSWScheduler::checkTimestamps(); read tc/t/r in rbgpu-sched",
+              g_rb_2xg_us, 1000000u / g_rb_2xg_us,
+              (100000000u / g_rb_2xg_us) % 100u);
+    rbgpu_2xg_arm_next();
+}
+
 void rbgpu_sched_flush_2wv(void) {
     if (!g_rb_2wv_hooked && g_rb_2wv_submit == 0 && g_rb_2wv_adv == 0) {
         // Rule 14: say which of the two zeroes this is.
-        rbgpu_nvram_note("rbgpu-sched", "hk=0 not armed");
+        char na[96];
+        snprintf(na, sizeof(na), "hk=0 not armed tarm=%u tos=%u",
+                 g_rb_2xg_armed, g_rb_2xg_oneshot);
+        rbgpu_nvram_note("rbgpu-sched", na);
         return;
     }
     uint64_t mean = g_rb_2wv_gap_n ? (g_rb_2wv_gap_sum_us / g_rb_2wv_gap_n) : 0;
+    /* 2xg: the tick's own fields ride in THIS note, because it is the only
+     * thing that survives a boot this experiment might wedge (rule 10), and
+     * because a gap histogram is only interpretable beside the number of kicks
+     * that produced it. They go BEFORE the histogram, which is the part that
+     * truncates: `tarm` is the arm check, `tc` ticks that actually fired, `tk`
+     * calls that reached checkTimestamps, `tr` refusals, `tw` the last
+     * refusal's reason, `ts` whether the run-of-refusals stop fired. */
     char note[352];
     size_t n = 0;
     int w = snprintf(note, sizeof(note),
                      "hk=%d sub=%llu adv=%llu smax=%u gmin=%llu gmean=%llu "
-                     "gmax=%llu h=",
+                     "gmax=%llu tarm=%u tos=%u tus=%u tc=%llu tk=%llu tr=%u "
+                     "tw=%u ts=%u h=",
                      g_rb_2wv_hooked, g_rb_2wv_submit, g_rb_2wv_adv,
                      g_rb_2wv_sub_max,
                      g_rb_2wv_gap_min_us == ~0ull ? 0 : g_rb_2wv_gap_min_us,
-                     mean, g_rb_2wv_gap_max_us);
+                     mean, g_rb_2wv_gap_max_us,
+                     g_rb_2xg_armed, g_rb_2xg_oneshot, g_rb_2xg_us,
+                     g_rb_2xg_ticks, g_rb_2xg_calls, g_rb_2xg_refuse,
+                     g_rb_2xg_refuse_why, g_rb_2xg_stopped);
     n = (w > 0) ? static_cast<size_t>(w) : 0;
     for (uint32_t i = 0; i < 14 && n < sizeof(note) - 12; i++) {
         w = snprintf(note + n, sizeof(note) - n, "%s%u",
@@ -14041,9 +14313,34 @@ void rbgpu_sched_flush_2wv(void) {
               "piles into h[12].");
 }
 
+/* Kept out of line deliberately: `processX6000` is already within 8 bytes of
+ * the 1024-byte frame limit the build enforces, and inlining one more
+ * mach_vm_address_t here fails the build rather than growing the frame
+ * silently. */
+static void __attribute__((noinline))
+rbgpu_2xg_solve(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
+                size_t size) {
+    mach_vm_address_t ct = patcher.solveSymbol(
+        id, "__ZN29AMDRadeonX6000_AMDSWScheduler15checkTimestampsEv",
+        address, size);
+    if (!ct) {
+        rbgpu_log("2xg: checkTimestamps NOT resolved - the tick will refuse to "
+                  "arm and say so (it does NOT fall back to advance())");
+        patcher.clearError();
+        return;
+    }
+    g_rb_2xg_check = reinterpret_cast<void (*)(void *)>(ct);
+    rbgpu_log("2xg: resolved AMDSWScheduler::checkTimestamps at %p",
+              reinterpret_cast<void *>(ct));
+}
+
 static void rbgpu_route_sched_2wv(KernelPatcher &patcher, size_t id,
                                   mach_vm_address_t address, size_t size) {
-    if (!checkKernelArgument("-rbgpuschedprobe")) return;
+    /* 2xg: the tick turns these routes on by itself, because the scheduler
+     * pointer it calls arrives only as these hooks' first argument - so a tick
+     * can never be armed without the capture that feeds it. */
+    bool want_tick = checkKernelArgument("-rbgpuschedtick");
+    if (!checkKernelArgument("-rbgpuschedprobe") && !want_tick) return;
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
             "__ZN29AMDRadeonX6000_AMDSWScheduler19submitCommandBufferEmP30AMD_SUBMIT_COMMAND_BUFFER_INFOP16AMD_BARRIER_INFO",
@@ -14063,6 +14360,13 @@ static void rbgpu_route_sched_2wv(KernelPatcher &patcher, size_t id,
         g_rb_2wv_hooked = 0;
         patcher.clearError();
     }
+
+    /* 2xg: resolve the tick target. `nm -m build/re/AMDRadeonX6000` shows
+     * `__ZN29AMDRadeonX6000_AMDSWScheduler15checkTimestampsEv` DEFINED at
+     * 0xbe94e3c in this kext, which is rule 1's test - solveSymbol on an
+     * import would hand back a bare slide. Nothing is routed here, so rule 2
+     * does not apply; we only take the address and call it. */
+    if (want_tick) rbgpu_2xg_solve(patcher, id, address, size);
 }
 
 static void rbgpu_route_restart_2iq(KernelPatcher &patcher, size_t id,
