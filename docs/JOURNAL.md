@@ -47507,3 +47507,66 @@ The laptop panel should behave exactly as in boot 220 either way, because the
 relaxed gate changes nothing about what is written.
 
 Artifact: fbkext **`C7278266`**. Plugin `3A8EAB07` unchanged.
+
+## 2xq — boot 221: the GOP does NOT light HDMI, and the answer cost one boot
+
+**Arm verified first (rules 8/15/34).** `rbgpu-boot` **221** (was 220),
+`kern.boottime` 17:32:29 against a live read at 17:37, `rbgpu-fb 0` and
+`rbgpu-tick 0` (both consumed by overwrite, 2wj). Loaded: plugin
+**`3A8EAB07`**, fbkext **`C7278266`** — the 2xp build, and
+**`RBFBHubpOtgAnyArmed = Yes`** is a key only `C7278266` publishes, so the
+binary running is the one built (rule 15, the cheap independent check).
+
+**THE READING, which is the whole experiment:**
+
+    RBFBHubpOtgCtl  70145 = 0x00011201   OTG0, the laptop panel, unchanged
+    RBFBHubpOtg1      768 = 0x300        OFF
+    RBFBHubpOtg2      768 = 0x300        OFF
+    RBFBHubpOtg3      768 = 0x300        OFF
+
+The display was plugged in before power-on, as 2xp prescribed. **All three
+are exactly `RB_OTG_OFF_VALUE`**, so the second branch of 2xp's said-before-the-boot
+prediction is the one that fired: **the firmware does not light HDMI on this
+machine, and there is no OTG to adopt.** HDMI is the full project 2or
+described — HPD, EDID over DDC/AUX, link training, a second OTG + HUBP +
+stream/link encoder, DML watermarks — and that is now a measurement rather
+than an expectation.
+
+**Corroborated three more ways, all from the same boot.** Exactly **one**
+`IOFramebuffer` in the registry (ours); `system_profiler` lists **one**
+display, 1920x1080 @ 144.00Hz, Main Display Yes, Mirror Off, with no second
+entry; and `IODisplayConnect` count 4 is the framebuffer's own connection
+slots, not four displays. Nothing in macOS saw a sink.
+
+**AND THE TRAP DID NOT FIRE — say so plainly.** 2xp removed gate 1's
+freeze-the-panel failure mode on the grounds that a GOP-lit HDMI would make
+OTG1-3 read something other than `0x300` and refuse with `hubpRefuse = 5`.
+They read `0x300`, so **the old build would not have refused either** and
+`-rbgpufbotgany`'s relaxation was never exercised. That is not a wasted
+change — the value could not be known before the boot, and the cost was one
+boot-arg — but it must not be recorded as "the relaxed gate saved the boot".
+What the boot establishes about the gate is narrower and still worth having:
+**gate 1 passes with a display physically attached**, `RBFBHubpRefuse 0`,
+`RBFBHubpReady Yes`, `RBFBHubpOrig 1047972020224 = 0xF4_0000_0000`, and
+**14456 HUBP writes**, so attaching HDMI changes nothing about the laptop
+panel's path.
+
+**The flicker fix held for 273 seconds.** `RBFBAmtrHeld` **19802** of
+`RBFBAmtrGets` **48707**, and **`RBFBAmtrHoldExpired` 0** again — every hold
+resolved in hardware, the two-vblank safety bound still never load-bearing
+in a second boot. `RBFBVBLFires` 38140 over `RBFBVBLUptimeNs` 273.053 s.
+**`RBFBAmtrSets` 14451 = 52.9/s and this must NOT be compared to 2xo's
+81.89/s** — that figure came from the controlled `animtest` run and this is
+an idle desktop, whose transaction rate is demand-limited (2xe) and whose
+window is a different length. Same error docs/RULES.md already forbids for the
+71.97/51.33/29.94 series.
+
+**What this closes and what it opens.** 2or's cheap HDMI exception is now
+spent and answered: there is no free path to an external display. The
+remaining tractable ask is **brightness** — 2os measured the hardware half
+done (`BL_PWM_CNTL 0xc00056ea`, period 4000, level 34.8 %) and 2xp found the
+UI path (`kConnectionDisplayParameterCount` / `kConnectionDisplayParameters`,
+no `AppleBacklightDisplay` needed). The next step there is a **static read**,
+no boot: how `IODisplay` in `IOGraphicsFamily` maps the parameter name
+`"brightness"` to the selector it then calls on the framebuffer. The
+refresh-rate menu stays sequenced behind HDMI's mode-setting code.
