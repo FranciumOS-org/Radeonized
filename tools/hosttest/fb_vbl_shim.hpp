@@ -18,6 +18,12 @@ using IOFBInterruptProc=void (*)(OSObject *,void *);
 struct FakeCall { unsigned queued=0, enters=0, cancels=0; uint64_t deadline=0; };
 using thread_call_t=FakeCall *;
 void clock_interval_to_deadline(uint32_t,unsigned,uint64_t *);
+/* 2xe: armVBL() now advances a lattice instead of adding a delay to `now`,
+ * so the host needs the same three clock primitives the kext uses. The fake
+ * clock runs in nanoseconds, so absolute units and nanoseconds are 1:1. */
+void clock_get_uptime(uint64_t *);
+void nanoseconds_to_absolutetime(uint64_t,uint64_t *);
+void absolutetime_to_nanoseconds(uint64_t,uint64_t *);
 void thread_call_enter_delayed(thread_call_t,uint64_t);
 void thread_call_cancel(thread_call_t);
 bool thread_call_enter(thread_call_t);
@@ -45,6 +51,8 @@ public:
     bool vblRunning=false;
     uint64_t vblFires=0;
     uint32_t vblEnables=0;
+    uint64_t vblNextDeadline=0;
+    uint32_t vblResyncs=0;
     // 2wc: the 'amtr' counters publishVBLState also reports.
     static const unsigned kAmtrSnapBytes=0x80;
     bool amtrArmed=false;

@@ -46066,3 +46066,202 @@ shell**, not the machine - the user's own terminal had the grant all along.
 `RBFBAmtrSets` to ~144/s. The prediction is explicit - frames/s and sets/s
 should stay equal and both rise to the `--fps` value - and the tool prints
 both, so one 60-second run settles it either way.
+
+## 2xe — THE CONSUMER IS NAMED: SKYLIGHT'S READINESS WATCHDOG, AND IT IS A SURFACE POOL
+
+Boot 210, armed, GPU framebuffer live, exhibiting the defect throughout (rule
+39: every reading below is from the configuration that has the symptom, and
+arm A/C are controls taken in the same minute). No boot spent.
+
+**THE FIRST FORK, AND IT KILLS THE COMFORTABLE ANSWER.** Every lever this
+project has found — typing (2wl), AnyDesk (2x5), `screencapture` (2xa/2xd) —
+is an external agent poking WindowServer. None of them is what a user means by
+a smooth desktop, and nobody had asked the plain question: *when something on
+screen changes by itself, continuously, does the chain run?* Because an idle
+desktop composites nothing on **every** Mac, 0.09 sets/s at idle might have
+been correct behaviour and the whole frontier might have been about
+interaction only.
+
+`tools/animtest.m` (new): a visible window with a `CABasicAnimation` on
+position and opacity, `repeatCount` infinite — WindowServer animates it
+itself, no IPC per frame, the plainest continuous on-screen change there is.
+Back to back in the same minute, same boot:
+
+| arm | 30 s | `RBFBAmtrSets` delta |
+|---|---|---|
+| **B** animating window | | **2** |
+| **C** `screencapture -v -V 30` | | **1827** (~61/s, 14.1 MB written) |
+
+**900x.** So an animating desktop produces nothing and a capture produces the
+panel's rate, and "idle composites nothing, which is normal" is **dead**. Also
+dead: frame-demand as the lever — 2xc had already been withdrawn when an SCK
+stream's *idle* frames arrived at 37–77/s while sets tracked only the
+*complete* column.
+
+**AND WINDOWSERVER SAYS WHY, IN WORDS, IN ARM B's OWN LOG.**
+
+    [ Watchdog ] display 5b81c5c0 regained readiness after 5.99733s (1440 failures)
+    [ Watchdog ] display 5b81c5c0 regained readiness after 5.98810s (1438 failures)
+    [ Watchdog ] display 5b81c5c0 has become stuck after 10.00390s of unreadiness (2402 failures)
+    [ Watchdog ] Inform the watchdog that all displays are stuck.
+
+**Five independent readings give one constant**: 1440/5.99733, 1438/5.98810,
+2402/10.00390, 1042/4.33713, 1382/5.75765 = **240.1 failures/s** every time.
+WindowServer asks whether our display can take a frame **240 times a second**
+and is told no. Arm C has two of these at its start and then **none** for its
+remaining 24 s while 1827 frames flow.
+
+**THE PREDICATE, READ END TO END.** The three watchdog strings
+(`0x7ff807feadd0`, `0x7ff807fead30`, `0x7ff807feae20`) have exactly **one**
+`ripall` referencer each, all in one region of SkyLight:
+`ReadinessTelemetry::mark_ready(double)` (`0x7ff807e235b0`),
+`mark_unready(double)` (`0x7ff807e23708`), both called from
+`update_display_callback(void*, double)` (`0x7ff807e21dab`). The decision there
+is **one virtual call**:
+
+    movq (%rbx), %rdi        ; the WS::Displays::Display
+    movq (%rdi), %rax
+    xorl %esi, %esi          ; arg = false
+    callq *0x4b8(%rax)       ; -> bool
+    testb %al, %al
+    je   -> mark_unready     ; else mark_ready
+
+Slot `0x4b8` is **`WS::Displays::CDDisplay::is_ready(unsigned) const`**
+(`0x7ff807d6c14e`), which ignores its argument:
+
+    dev = this->0x158                                   ; CGXDisplayDevice*
+    if (!dev) return true
+    cd = CoreDisplay_GetDisplayForCGXDisplayDevice(dev)
+    if (cd) return CoreDisplay_Display_IsReady(cd)
+    return CGXDisplayDeviceSurfaceIsReady(dev)
+
+`CoreDisplay::Display::IsReady()` (`0x7ff80408e316`) gates on
+`CoreDisplay::UseIOPresentment()` (true here since 2t7) and then asks
+`CoreDisplay::DisplaySurfacePool::IsReady()` (`0x7ff804134cbe`) for its own
+pool and for each active pipe's pool at `+0x270`:
+
+    count = (this->0x60 - this->0x58) / 16      ; surfaces in the pool
+    if (count < (int)this->0x48) return true    ; pool not full yet -> READY
+    return (some surface s has s->0x170 == 0)   ; else: a FREE one must exist
+
+**SO "DISPLAY READINESS" IS A FREE SURFACE IN A POOL, and `+0x170` is a use
+count** — named by Apple itself: `RunFullDisplayPipe` and `BuildTransactions`
+both take a **`UseCountProxy<CoreDisplay::DisplaySurface*>`**, and
+`GetNextSurface` (`0x7ff8041341c6`) does `incl 0x170(%rdi)` when it hands one
+out. `DisplaySurface::AccessComplete()` (`0x7ff8040b95e4`) has six callers:
+`Display::Present`, `CoreDisplay_DisplaySurface_Free`, `RunFullDisplayPipe`
+(x2) and `RunGPUDisplayPipe`.
+
+**AND THE RELEASE IS DRIVEN BY ONE EVENT.** Both the pool release and the push
+notification come from the same function,
+**`CoreDisplay::IOPAttachment::HandleTransactionCompletionEvent(unsigned long*,
+unsigned int)`**: it calls `DisplayPipe::GetAndRemovePresentSurfaceFor`
+`TransactionSurface` (`0x7ff80410e030`, the only other caller being
+`0x7ff804085afe`) and then `DisplayPipe::NotifyIsReady()` (`0x7ff80411b0d8`,
+two callers, both in `IOPAttachment`), which is what SkyLight's
+`display_ready_cd_callback` is registered for. **The whole frame cadence hangs
+on the kernel's transaction-completion event arriving.** Remove `Clean` from
+the open questions and put this in its place.
+
+**THE OTHER END, MEASURED IN THE SAME CONFIGURATION.** 63 s, keepalive off,
+sender-matched with 29 SkyLight lines as the control:
+
+| | count |
+|---|---|
+| `transaction stamp index 59 time out` | **48**, steady **1.0 Hz**, always index 59 |
+| `[ Watchdog ] become stuck after` | 4, at **10.00271 / 10.00096 / 10.00364 / 10.00238 s** |
+| `channel N … event timeout` (the wedge) | 14 |
+| `RBFBAmtrSets` delta | **3** |
+
+The stamp-timeout stream runs at 1 Hz with exactly **three six-second gaps**
+(01.657→07.659, 13.661→19.664, 43.681→49.685) and exactly **three**
+transactions landed. Each gap is one frame getting through. **n=3** — said as a
+correspondence, not a law. **And a wrinkle not papered over**: `regained
+readiness` was **0** in this window while 3 frames presented, where arm B gave
+2 and 2. Once the watchdog has declared the display stuck the transition stops
+being logged, so those three frames are **not** accounted for by a readiness
+transition, and the surface-release chain above is a **static read** — no
+reading here observes one surface's use count.
+
+**MY OWN INFERENCE, BUILT AND THEN WITHDRAWN IN THE SAME MILESTONE.** The
+static chain into AMDRadeonX6000 is real and worth keeping:
+`AMDSWScheduler::initialize` (`0xbe93ce2`) creates its event source with
+**`provider = 0`** — `IOInterruptEventSource::interruptEventSource(owner,
+deferredCallback, 0, 0)` — so `deferredCallback` is a **software** source, not
+a hardware interrupt, and there is no missing GPU interrupt to find.
+`timerCallback` (`0xbe9513c`) and `statCallback` (`0xbe95146`) have **zero**
+references in the whole kext; both are 5-byte trampolines and `timerCallback`
+tail-jumps into `advance()` (`0xbe950e0`), whose only other reacher is
+`deferredCallback`. The source is signalled (`es->vt[0x1d8](0,0,0)`) from
+exactly four sites: **`submitCommandBuffer`** (`0xbe94412`, right after
+`movb $1, 0x71(%rsi)`), `timestampUpdated` (`0xbe94dc4`),
+`swTimestampUpdated` (`0xbe94e24`) and `checkTimestamps` (`0xbe94eb4`). And
+`checkTimestamps()` (`0xbe94e3c`) — the only function that performs the
+hardware poll, `channel->vt[0x1a8]()` — has **seven callers and every one is a
+waiter**: `AMDAccelChannel::waitForTimestamp` (x4),
+`AMDAccelEventMachine::waitForStamp`, `eventTimeout`, `checkChannelIsActive`.
+**There is no periodic poll anywhere.**
+
+From that I concluded "nothing kicks the scheduler when the desktop is idle,
+so tick `advance()` from the framebuffer's VBL thread_call" — which is 2x6's
+proposal, and **it is not supported, because 2ww had already measured the
+opposite**: boot 199's `rbgpu-sched` note reads `sub=12191 adv=46457`, i.e.
+`advance()` ran **four times more often than work was submitted**, mean gap
+**3.4 ms**, 38 808 gaps under 128 us. `advance()` is not a 5.7 Hz gate and it
+is not starved. **Rule: read the evidence already in hand before designing the
+next experiment — 2ww was in the journal the whole time, and it even names the
+gap this would need**: that note flushes only at three fixed phase marks, so
+`advance()`'s rate in the **slow** state has never been read. That, not a
+tick, is the next measurement, and it is the same defect 2wl had to fix for
+the crumb in a different file. `advance()` is at least cheap and safe to call
+— it takes its own `IOLock` (`this->0x48`) and is a no-op for channels whose
+`ctx->0x71` is clear — so the option stays open; it is simply not yet indicated.
+
+**THE VBLANK WAS NEVER A CLOCK, AND THAT ONE IS OURS AND FIXED.** `animtest`
+reads CVDisplayLink's `CVTimeStamp` hostTime, whose source is the
+framebuffer's vblank. 5510 intervals over 40.9 s:
+
+    mean    7.4240 ms  = 134.699 Hz          target 6.9527 ms = 143.830 Hz
+    stddev  0.4615 ms  (6.2 % of mean)
+    min     5.9619 ms   max 10.6553 ms   spread 4.6934 ms
+    histogram  6.5-7 18.8 %  |  7-7.5 40.6 %  |  7.5-8 26.5 %  |  8-8.5 12.7 %
+
+The mean is **0.47 ms long on every tick**, which is exactly the shape of
+`armVBL()` computing `clock_interval_to_deadline(period)` — `now + period` —
+at the **END** of `deliverVBL()`, so every period paid for the handler that
+preceded it. And `CVDisplayLinkGetNominalOutputVideoRefreshPeriod` read
+**115.94 / 119.97 / 120.00 / 133.72 Hz** across four runs: **a clock whose
+rate moves with system load is not a clock**, and CoreVideo measures ours.
+Fixed in `armVBL()` by advancing the **previous deadline** instead of `now`,
+with a counted resync when we fall a whole period behind (arming into the past
+would fire a catch-up burst of ticks the panel never had). Eight assertions in
+`fb_vbl_test.cpp`, and **mutation-tested both ways**: restoring `now + period`
+fails `t.deadline == first + i*P` at tick 1.
+
+**AND THE PROJECT'S RATE FORMULA WAS WRONG TWICE OVER.** `transactions/s =
+RBFBAmtrSets / (RBFBVBLFires / 143.83)` (2wj, used by 2wi/2xa/2xd) divided by
+a rate that was really ~134.7 Hz — and `RBFBVBLFires` is published only every
+**1200 fires**, so the registry value is a **staircase with 8.3-second
+treads**. A 25-second window therefore carried a ±33 % quantisation error on
+its own time base; my first `animtest` run read "fb clock 6.4 s vs wall 12.1 s"
+and that was the publish interval, not the panel. **2xa's "71.30 == AnyDesk's
+71.3 to three significant figures" is NOT SUPPORTED** — three significant
+figures were never there. 2xa's 1426x conclusion survives easily; the
+precision claim does not. Fixed by publishing **`RBFBVBLUptimeNs`** (and
+`RBFBVBLResyncs`) in the same pass as the counter, so elapsed time comes from
+a stamp written beside the count and the quantisation cancels, and by dropping
+the interval to 288 fires (~2 s). **Rule 16 again: the instrument was a
+suspect, and both of its errors pointed the same way.**
+
+**PREDICTED, NOT CLAIMED**: if the transaction-completion event is what gates
+the surface pool, then the wedge (2we/2wt — work submitted and never retiring,
+`no channel associated with stamp_idx`) and the display defect share a cause,
+because both are stamp retirement. 2x6 said this was not established and it
+still is not.
+
+**NEXT, no boot needed to prepare it**: make `rbgpu-sched` flush periodically
+instead of at three fixed phase marks, so `advance()`'s rate can be compared
+between the fast and slow states — 2ww named this gap and it is the one
+measurement that decides whether the scheduler is the gate. Install fbkext
+**`39190382`** for the clock fix; it needs no boot-arg and changes no
+behaviour but the cadence.

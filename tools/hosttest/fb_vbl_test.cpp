@@ -6,6 +6,9 @@ static uint64_t clockNs;
 void clock_interval_to_deadline(uint32_t n,unsigned scale,uint64_t *out) {
     assert(scale==1);*out=clockNs+n;
 }
+void clock_get_uptime(uint64_t *out) {*out=clockNs;}
+void nanoseconds_to_absolutetime(uint64_t ns,uint64_t *out) {*out=ns;}
+void absolutetime_to_nanoseconds(uint64_t a,uint64_t *out) {*out=a;}
 void thread_call_enter_delayed(thread_call_t c,uint64_t deadline) {
     c->queued=1;c->deadline=deadline;c->enters++;
 }
@@ -23,6 +26,15 @@ static void fbCallback(OSObject *target,void *ref) {
 static void pipeCallback(OSObject *,void *ref) {static_cast<Counts *>(ref)->pipe++;}
 static void tick(RBAMDFramebuffer &fb,FakeCall &call) {
     assert(call.queued);clockNs=call.deadline;call.queued=0;
+    RBAMDFramebuffer::vblFired(&fb,nullptr);
+}
+/* 2xe: the same tick, but the handler takes `overheadNs` to run before it
+ * re-arms - which is what really happens (delivery to every handler plus
+ * hubpPoll()'s MMIO read). The old armVBL() added that to every period and
+ * the panel ran 0.47 ms slow on every tick; this is the case that catches
+ * it, and it is the ONLY difference from tick() above. */
+static void tickSlow(RBAMDFramebuffer &fb,FakeCall &call,uint64_t overheadNs) {
+    assert(call.queued);clockNs=call.deadline+overheadNs;call.queued=0;
     RBAMDFramebuffer::vblFired(&fb,nullptr);
 }
 int main() {
@@ -258,5 +270,51 @@ int main() {
         assert(f.vblFires==7);
         assert(f.pollCalls==f.vblFires);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires and 2x3's per-vblank poll passed");
+    // 2xe: THE VBLANK IS A CLOCK, NOT A DELAY. Measured from userspace with
+    // CVDisplayLink: mean interval 7.4240 ms = 134.70 Hz against the panel's
+    // 6.9527 ms = 143.83 Hz. The cause is arithmetic, not scheduling - the
+    // old armVBL() computed `now + period` at the END of deliverVBL(), so
+    // every tick paid for the handler that preceded it, forever.
+    //
+    // This case is the whole fix in two assertions: with a handler that
+    // takes 1.4 ms (about what was measured), the deadlines must stay on an
+    // EXACT lattice, and the elapsed panel time over N ticks must equal
+    // N periods rather than N*(period+overhead).
+    {
+        RBAMDFramebuffer f; FakeCall t,k; Counts c{};
+        f.vblCall=&t; f.vblKickCall=&k;
+        void *r=nullptr;
+        clockNs=0;
+        assert(f.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&f,&c,&r)==0);
+        const uint64_t P=RBAMDFramebuffer::kVBLPeriodNs;
+        const uint64_t first=t.deadline;
+        assert(first==P);                       // armed from clockNs==0
+        const uint64_t overhead=1400000;        // 1.4 ms, the measured shape
+        for(unsigned i=1;i<=200;i++) {
+            tickSlow(f,t,overhead);
+            // The i-th re-arm must land exactly (i+1) periods out. Any
+            // dependence on `overhead` here is the defect returning.
+            assert(t.deadline==first+(uint64_t)i*P);
+        }
+        assert(f.vblFires==200);
+        assert(f.vblResyncs==0);                // 1.4 ms < one period
+        // The rate the project's formula depends on, to a nanosecond.
+        assert(t.deadline-first==200*P);
+
+        // And a stall LONGER than a period must resync once, not queue a
+        // burst of catch-up ticks with a deadline in the past.
+        uint64_t resBefore=f.vblResyncs;
+        tickSlow(f,t,P*3);                      // three periods late
+        assert(f.vblResyncs==resBefore+1);
+        assert(t.deadline>clockNs);             // never armed into the past
+        assert(t.deadline==clockNs+P);
+        // Having resynced, the lattice continues from the NEW phase.
+        uint64_t base=t.deadline;
+        for(unsigned i=1;i<=5;i++) {
+            tickSlow(f,t,overhead);
+            assert(t.deadline==base+(uint64_t)i*P);
+        }
+        assert(f.vblResyncs==resBefore+1);      // no further resyncs
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll and 2xe's drift-free cadence passed");
 }
