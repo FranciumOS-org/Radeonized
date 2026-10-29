@@ -448,8 +448,9 @@ fbpresent:
 .PHONY: dstream
 dstream: $(OUT)/RBDisplayStream.app
 $(OUT)/dstream: tools/dstream.m | $(OUT)
-	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -o $@ $< \
-	      -framework CoreGraphics -framework CoreFoundation -framework IOSurface
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework CoreGraphics -framework CoreFoundation -framework IOSurface \
+	      -framework Foundation -framework ScreenCaptureKit -framework CoreMedia
 $(OUT)/RBDisplayStream.app: $(OUT)/dstream tools/dstream-Info.plist | $(OUT)
 	rm -rf $@
 	mkdir -p $@/Contents/MacOS

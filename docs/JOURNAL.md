@@ -46024,3 +46024,45 @@ region is how this project attached a correct chain one link off **seven**
 times (rules 33/35). The better instrument now exists - a reversible
 40-second reproducer with two controls - and the next step should use it
 rather than a static chain.
+
+## 2xc — THE CONSUMER IS THE CLOCK: ONE COMPOSITE PER FRAME ASKED FOR
+
+First live run of `dstream` (user's own terminal, so Screen Recording was
+granted to it; the stream created and frames arrived):
+
+    +10s  frames  33 (3.27/s)  idle 0 blank 0   fb 3.24 sets/s
+    +20s  frames  70 (3.64/s)  idle 0 blank 0   fb 3.34 sets/s
+    +30s  frames  80 (0.99/s)  idle 0 blank 0   fb 0.99 sets/s
+
+**frames/s and `RBFBAmtrSets`/s are the SAME NUMBER in every sample.** So
+WindowServer composites **exactly once per frame the consumer asks for**, and
+the consumer is the clock. That is a much sharper statement than 2xa's "a
+capture is the lever", and it came from the tool reporting both numbers side
+by side - the one design decision that made this run informative instead of
+another "kind of didn't work".
+
+**WHY IT STALLED AT 1/s, AND IT IS THE API NOT THE MACHINE.**
+`CGDisplayStream` only asks for a frame when something **changed**. Here that
+is circular: nothing changes, so it does not ask, so WindowServer does not
+composite, so nothing changes. It decays to ~1/s. `screencapture -v` reached
+**71.3/s** in 2xa because a **video recording demands a frame on a fixed
+cadence** whether or not the screen changed.
+
+So the bridge needs an API that **demands a rate**, which is
+ScreenCaptureKit's `minimumFrameInterval` - the one `screencapture` itself
+uses on 15.x. `dstream` now defaults to **SCK at `--fps` (144)** and keeps
+`--cgs` for the CGDisplayStream path, **one binary so both modes run under one
+TCC grant**. It counts SCK's idle and blank frames separately via
+`SCStreamFrameInfoStatus`, because an unchanged frame still costs a
+recomposite and that is exactly what we want.
+
+**2x5's framepump verdict is now fully explained and withdrawn as a
+conclusion**: it failed at 64x36 because SCK de-duplicates identical
+downscaled frames, and again because rebuilding revoked its grant. Neither was
+evidence about capture. 2xb's "TCC blocks it" was also about **this session's
+shell**, not the machine - the user's own terminal had the grant all along.
+
+**NOT YET MEASURED**: that SCK's demanded rate actually drives
+`RBFBAmtrSets` to ~144/s. The prediction is explicit - frames/s and sets/s
+should stay equal and both rise to the `--fps` value - and the tool prints
+both, so one 60-second run settles it either way.
