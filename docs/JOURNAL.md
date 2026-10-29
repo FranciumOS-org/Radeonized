@@ -46957,3 +46957,168 @@ GB5 and GB6 Metal are not comparable either - naming which suite, which API
 and which version produced each number is rule 33 applied to a benchmark. **And
 9633 was almost certainly measured BEFORE the tick**, since the tick first ran
 in boot 215 today, so the first thing to do is re-run it.
+
+---
+
+## 2xm — boot 217: the tearing mechanism is measured at 1.75 %, and the A/B never ran because of a bug in my own boot-arg parse
+
+Boot 217, armed, rule 15 clean on **both** kexts for the first time in this
+line of work: plugin `DFEAFF02`, fbkext **`07B0C4A2`** — so 2xk's flip-pending
+counter was installed and running. `rbgpu-boot` 217, `rbgpu-tick` and
+`rbgpu-fb` both read `0` (consumed by overwrite, 2wj/2xh), `rbgpu-arm` /
+`rbgpu-agdc` / `rbgpu-iop` absent (consumed by removal). `tarm=1 tos=0
+ts=0`, `tick_solved=1`, `tk + tr = tc` exactly (23015 + 959 = 23974) with all
+959 refusals in the pre-first-submit window (`tw=1`).
+
+### THE TEAR IS A FLIP PROGRAMMED OVER AN ARMED, UNLATCHED ONE
+
+The one thing 2xk was built to read:
+
+    RBFBHubpPendChecks   33877
+    RBFBHubpPendHits       593     = 1.75 % of flips, 1.26 per second
+    RBFBHubpFlipCtl   0x04100000   (= 68157440; identical to boot 216)
+    RBFBHubpFlipCtl2        0x40   (= 64;        identical to boot 216)
+    RBFBAmtrSets         33829     RBFBHubpWrites 33867
+    RBFBVBLFires         66451     RBFBVBLUptimeNs 470025770818  (470.026 s)
+    sets/s 71.97      our own thread_call rate 141.377 Hz, 3 resyncs
+
+`hubpRegs` is the `volatile uint32_t *` BAR5 map, so `fc` is a **live hardware
+read taken immediately before the write**. `PendHits` therefore means exactly
+this: **593 times we programmed a new primary surface address while DCN still
+had the previous one armed and not yet latched.** 2xk measured
+`SURFACE_FLIP_TYPE = 0` (vsync'd, latched at VUPDATE), so between our write
+and the latch the register holds an address the panel is not yet reading;
+writing again inside that window replaces the armed address, and the frame
+that does reach the panel changes partway down. That is the tear 2wh
+predicted in writing.
+
+**Said before the boot, and honoured**: "near zero out of ~2400 kills the
+pending-overwrite candidate; a large fraction means the mechanism is found."
+1.75 % is **neither**, and it is stated as neither. It is non-zero and at a
+rate (1.26/s) consistent with an occasional visible tear, and the mechanism is
+real and now quantified — but it is **not** the majority of flips, so **it is
+not established that it accounts for everything the user sees**. In
+particular the user's description ("a bit of the browser behind appears for a
+second") is far longer than one frame at 144 Hz, and a one-frame tear cannot
+last a second. The second candidate from 2xk stands untested: our
+`setAttribute('amtr')` answers success instantly (2we), so the compositor may
+recycle a surface still being scanned.
+**Arithmetic control**: at 72 flips/s the gaps average 14 ms against a ~7 ms
+latch window, so if `PENDING` were simply the tail of our own previous write
+the hit rate would be near 50 %, not 1.75 %. The 593 are genuine back-to-back
+pairs, not an artefact of sampling our own store.
+Also: `PendChecks` 33877 ≈ `HubpWrites` 33867 + 10 and `AmtrSets` 33829, so
+the counter sits on essentially every write, as intended.
+
+### THE A/B DID NOT RUN, AND THE CAUSE IS MY OWN CODE
+
+`rbgpuschedtickus=2000` was in boot-args (offset 843 of 864 — not truncation,
+the kernel's limit is 1024) and the tick ran at **6944 µs** anyway:
+`tus=6944` in the note and `tick_us=1b20` in the diag table, two instruments
+agreeing. So **2xl's free causation experiment silently did not happen.**
+
+**`PE_parse_boot_argn` hands back a NUMBER as a BINARY INT, never ASCII.**
+Measured from this machine's own kernel, `_PE_parse_boot_argn`
+`0xffffff8000b92970`. For `name=<digits>` with `force_string = 0` (which is
+what the public entry point passes, `xorl %r8d,%r8d` at `0xffffff8000b92987`)
+the numeric path reaches `0xffffff8000b92c77`:
+
+    testl %ecx,%ecx           ; ecx = max_len
+    jle   ...                 ; <= 0: store nothing
+    cmpl  $0x7,%r14d          ; r14d = max_len - 1
+    ja    0xffffff8000b92db9  ; max_len > 8  -> movl %edx,(%r15)
+    jmpq  *table(,%r14,4)
+
+and the jump table, decoded from the file:
+
+    max_len=1 -> 0xb92c99  movb        max_len=5..7 -> 0xb92db9  movl
+    max_len=2 -> 0xb92d9e  (2 bytes)   max_len=8    -> 0xb92dc3  movq
+    max_len=3 -> 0xb92da9  (3 bytes)
+    max_len=4 -> 0xb92db9  movl %edx,(%r15)
+
+So the accumulated value is stored as a **raw integer of the caller's width**,
+and a *wide* buffer gets the same 4-byte `movl`. It then `movl $0x1,%edi` and
+**returns 1**. My code passed `char buf[24]` and read ASCII digits out of it,
+so for `=2000` it read `D0 07 00 00`, failed `buf[0] >= '0'` on the first
+byte, produced `v = 0`, and refused it as out of range — keeping 6944.
+
+**And the refusal was logged where nothing can read it.** `rbgpu_log` does not
+reach the unified log: a `--last boot` query for the plugin's own tag returns
+only my own command line (rule 26's self-match trap again — the one "2xg" hit
+was `log`'s record of my `log` invocation), against a control of 142 `rbgpu`
+lines that are all sandbox-violation noise about `nvram-get`. **Rule 31 one
+layer up: `IOLog` is not an instrument in the PLUGIN either.** The refusal is
+now published as `tick_us_refused` in the diag table, so the next boot can
+tell "out of range" from "never parsed" (rule 14).
+
+**Two other tunables have the same bug and have therefore always been inert**:
+`rbgpufbvrammb` (2pa) and `rbgpufbvramrangemb` (2pq), both `char[16]` with an
+ASCII loop. **No past reading is invalidated** — no boot ever passed either of
+them a value, which is why `VRAM,totalMB` reading 4096 was always the default
+and never evidence that the tunable worked. `rbgpudalenc` is unaffected: it
+takes `"dword"`/`"byte"`, a non-numeric value, which goes down the STR_VALUE
+path. The fbkext's `rbgpufbhubpmax` and `rbgpufbatymb` were **always correct**
+— they pass `&int, sizeof(int)` — and neither had ever been exercised either,
+so the project held both idioms side by side with no measurement
+distinguishing them.
+
+Fixed with one helper, `rbgpu_boot_argn_u32(name, lo, hi, out, refused)`,
+which encodes the disassembly in a single place, writes `*out` only on
+success, and carries the rejected value out for publication (rule 19). All
+three sites now use it.
+
+### THE FIX FOR THE TEAR, BEHIND ITS OWN ARG
+
+`rb_hubp_flip_would_discard(flip_ctl, flip_ctl2)` in `src/common/rb_hubp.h`,
+run by the hosttest before the kext ever calls it. It defers iff
+`SURFACE_FLIP_PENDING` is set **and** `SURFACE_TRIPLE_BUFFER_ENABLE` is clear
+— the guard is why this is a function and not a mask test: `FLIP_PENDING`
+describes **one** pending slot, so with triple buffering on a second write
+discards nothing and deferring would drop frames for no reason. Boots 216 and
+217 both read `FLIP_CONTROL2 = 0x40` (`PENDING_MIN_TIME` 64, triple buffering
+**off**), so the guard is **inert on this machine today**; it exists so a
+machine or compositor where the bit is on does not inherit a conclusion
+measured where it was off (rule 39's shape).
+
+`-rbgpufbflippend`, off by default, requires `-rbgpufbhubp`. Rule 30 checked:
+it neither prefixes nor is prefixed by `-rbgpufbflipall` (they differ at the
+character after `flip`). `FLIP_CONTROL2` is read **live** rather than reused
+from `hubpSetup()`, because triple buffering is the compositor's to change.
+Publishes `RBFBHubpDeferArmed` and `RBFBHubpDeferrals`.
+
+**The trade, stated before the boot**: a deferral **drops** that frame — the
+previous address latches instead — and since `setAttribute('amtr')` already
+answers success instantly the compositor is not waiting on us either way. So
+it is one stale frame per deferral against one torn frame, 1.26 times a
+second. If deferring looks worse, one token reverses it without giving up the
+write that made the display work.
+
+**Mutation tested, and the first two attempts were worthless**: deleting the
+guard outright and replacing the body with `return 0` both failed to
+**compile** (`-Werror -Wunused-parameter`), which is a real guard but not a
+test of the assertions. Re-done keeping both parameters used — `(void)flip_ctl2`
+with the guard dropped, and the pending test inverted — and **both fail the
+hosttest**, with the restored version passing. Also asserted: `FLIP_CONTROL2
+= 0x40` decodes with **zero leftover bits**, and every bit except `PENDING`
+set with `PENDING` clear must still write, so an unidentified field cannot
+silently stall every flip.
+
+### WHAT IS OPEN
+
+- Whether 1.75 % of flips accounts for the tearing the user sees, or only part
+  of it. **Not established**, and the duration does not fit.
+- The jitter. `RBFBVBLFires / RBFBVBLUptimeNs` gives **141.377 Hz** against the
+  panel's 143.830 (1.7 % slow) with **3 resyncs**, where 2xi's CVDisplayLink
+  figure was 143.446 (0.27 %). **Different instruments** — ours is the
+  `thread_call`'s own self-measured cadence, 2xi's was `CVTimeStamp` hostTime
+  — so these are two readings of different things and are **not reconciled**.
+- 2xl's causation caveat is **still open**, because the A/B it needed never
+  ran. It costs one boot and no build now that the parse is fixed.
+- The remaining ~22 % to 143.83 Hz: `sets/s` 71.97 here on an idle-ish
+  desktop, inside the 68-95 band already measured. Still unknown whether it is
+  demand-limited or gated.
+
+Artifacts: plugin **`3A8EAB07`**, fbkext **`51336968`**. Both UUIDs checked
+moved; `kmutil libraries -p` resolves 0 symbols from
+`SystemKernelExtensions.kc` for the plugin and
+`grep -c IOGraphicsFamily src/plugin/Info.plist` is 0.

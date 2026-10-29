@@ -295,6 +295,14 @@ bool RBAMDFramebuffer::start(IOService *provider)
             maxn > 0 && maxn <= 1000000) {
             hubpMax = (uint64_t)maxn;
         }
+        /* 2xm: -rbgpufbflippend defers a flip programmed over an armed,
+         * unlatched one - the tearing mechanism boot 217 measured at 1.75 %
+         * of flips. Rule 30: it neither prefixes nor is prefixed by
+         * -rbgpufbflipall (they differ at the character after "flip"), and
+         * PE_parse_boot_argn matches a whole token regardless. */
+        char pendflag[16];
+        hubpDeferPend = PE_parse_boot_argn("-rbgpufbflippend", pendflag,
+                                           sizeof(pendflag)) && hubpArmed;
     }
     /* 2wi: -rbgpufbretire. Deliberately NOT named -rbgpufbvbl-something:
      * rule 30 warns that a shell grep for an existing arg matches a longer

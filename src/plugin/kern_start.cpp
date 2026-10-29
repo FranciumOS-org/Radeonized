@@ -10026,6 +10026,44 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     }
 }
 
+/* 2xm: PE_parse_boot_argn hands back a NUMBER as a BINARY INT, never ASCII.
+ *
+ * Measured, not assumed, from this machine's own kernel
+ * (build/re/kernel, _PE_parse_boot_argn at 0xffffff8000b92970). For a token
+ * of the form `name=<digits>` the numeric path reaches 0xffffff8000b92c77:
+ *
+ *     testl %ecx,%ecx          ; ecx = max_len
+ *     jle   ...                ; <= 0: store nothing
+ *     cmpl  $0x7,%r14d         ; r14d = max_len - 1
+ *     ja    0xffffff8000b92db9 ; max_len > 8  -> movl %edx,(%r15)
+ *     jmpq  *table(,%r14,4)    ; 1->movb 2->movw 3->3-byte 4..7->movl 8->movq
+ *
+ * so the accumulated value is bcopied in as a raw integer of the caller's
+ * width, and a wide buffer gets the SAME 4-byte movl. Passing a char[] and
+ * then reading ASCII digits out of it therefore reads 0xD0,0x07,0x00,0x00 for
+ * `=2000` and parses to 0 - which is exactly how boot 217 ran the scheduler
+ * tick at its 6944 us default with rbgpuschedtickus=2000 in boot-args, and
+ * logged a refusal nobody could see (the plugin's IOLog does not reach the
+ * unified log either - rule 31's shape, one layer up).
+ *
+ * Returns false when the token is absent OR when the value is outside
+ * [lo, hi]; *out is written only on success, and *refused carries the value
+ * that was rejected so a refusal path publishes what it refused (rule 19).
+ */
+static bool rbgpu_boot_argn_u32(const char *name, uint32_t lo, uint32_t hi,
+                                uint32_t *out, uint32_t *refused) {
+    int v = 0;
+    if (!PE_parse_boot_argn(name, &v, sizeof(v))) {
+        return false;
+    }
+    if (v < 0 || (uint32_t)v < lo || (uint32_t)v > hi) {
+        if (refused) { *refused = (uint32_t)v; }
+        return false;
+    }
+    if (out) { *out = (uint32_t)v; }
+    return true;
+}
+
 void RGPU::init() {
     noSmuHook    = checkKernelArgument("-rbgpunosmu");
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
@@ -10090,20 +10128,18 @@ void RGPU::init() {
     // 2pa: the VRAM label. Independent of the vblank - one boot can fix the
     // "7 MB" and the pacing separately, and say which of them took.
     g_vram_on = checkKernelArgument("-rbgpufbvram");
-    char vrambuf[16] = {};
-    if (PE_parse_boot_argn("rbgpufbvrammb", vrambuf, sizeof(vrambuf)) &&
-        vrambuf[0]) {
-        uint32_t mb = 0;
-        for (const char *c = vrambuf; *c >= '0' && *c <= '9'; c++)
-            mb = mb * 10 + static_cast<uint32_t>(*c - '0');
-        // Refuse anything that is not plausibly this carve-out. 4096 MB is
-        // what three independent measurements say; a wrong label here is a
-        // cosmetic lie, but it would also be a lie in a bug report.
-        if (mb >= 256 && mb <= 16384)
-            g_vram_mb = mb;
-        else
-            rbgpu_log("2pa: rbgpufbvrammb=%s is outside 256-16384 - ignored, "
-                      "keeping %u", vrambuf, g_vram_mb);
+    // Refuse anything that is not plausibly this carve-out. 4096 MB is
+    // what three independent measurements say; a wrong label here is a
+    // cosmetic lie, but it would also be a lie in a bug report.
+    // 2xm: the ASCII form here never worked - PE_parse_boot_argn stores a
+    // numeric value as a binary int, so this tunable has been silently inert
+    // since 2pa. No past reading is affected: no boot ever passed it.
+    uint32_t vram_refused = 0;
+    if (!rbgpu_boot_argn_u32("rbgpufbvrammb", 256, 16384, &g_vram_mb,
+                             &vram_refused) && vram_refused) {
+        rbgpu_log("2pa: rbgpufbvrammb=%u is outside 256-16384 - ignored, "
+                  "keeping %u", vram_refused, g_vram_mb);
+        rbgpu_diag_set_num("vrammb_refused", vram_refused);
     }
 
     // 2pq: the accelerator's flip window. Separate arg from 2pa on purpose -
@@ -10112,21 +10148,17 @@ void RGPU::init() {
     // make a bad boot unattributable.
     g_fbvr_on  = checkKernelArgument("-rbgpufbvramrange");
     g_fbvr_all = checkKernelArgument("-rbgpufbvramrangeall");
-    char fbvrbuf[16] = {};
-    if (PE_parse_boot_argn("rbgpufbvramrangemb", fbvrbuf, sizeof(fbvrbuf)) &&
-        fbvrbuf[0]) {
-        uint32_t mb = 0;
-        for (const char *c = fbvrbuf; *c >= '0' && *c <= '9'; c++)
-            mb = mb * 10 + static_cast<uint32_t>(*c - '0');
-        // Clamped to BAR0, which is 256 MB on this chip (measured from
-        // assigned-addresses: 0x8_8000_0000, length 0x1000_0000). Claiming
-        // more than the aperture would hand the accelerator a range whose far
-        // end is not VRAM, and find_vram_descriptor MAPS the whole thing.
-        if (mb >= 8 && mb <= 256)
-            g_fbvr_mb = mb;
-        else
-            rbgpu_log("2pq: rbgpufbvramrangemb=%s is outside 8-256 (BAR0 is "
-                      "256 MB) - ignored, keeping %u", fbvrbuf, g_fbvr_mb);
+    // Clamped to BAR0, which is 256 MB on this chip (measured from
+    // assigned-addresses: 0x8_8000_0000, length 0x1000_0000). Claiming
+    // more than the aperture would hand the accelerator a range whose far
+    // end is not VRAM, and find_vram_descriptor MAPS the whole thing.
+    // 2xm: same binary-int fix as rbgpufbvrammb above.
+    uint32_t fbvr_refused = 0;
+    if (!rbgpu_boot_argn_u32("rbgpufbvramrangemb", 8, 256, &g_fbvr_mb,
+                             &fbvr_refused) && fbvr_refused) {
+        rbgpu_log("2pq: rbgpufbvramrangemb=%u is outside 8-256 (BAR0 is "
+                  "256 MB) - ignored, keeping %u", fbvr_refused, g_fbvr_mb);
+        rbgpu_diag_set_num("fbvrmb_refused", fbvr_refused);
     }
     rbgpu_log("2pq: the accelerator's flip window %s%s. It writes NO DCN "
               "register; offset 0 stays the live scanout.",
@@ -14216,19 +14248,19 @@ void rbgpu_schedtick_start_2xg(void) {
     if (g_rb_2xg_call) {
         return;
     }
-    char buf[24];
-    if (PE_parse_boot_argn("rbgpuschedtickus", buf, sizeof(buf))) {
-        uint32_t v = 0;
-        for (size_t i = 0; i < sizeof(buf) && buf[i] >= '0' && buf[i] <= '9'; i++) {
-            v = v * 10 + static_cast<uint32_t>(buf[i] - '0');
-        }
-        if (v >= RB_2XG_MIN_US && v <= RB_2XG_MAX_US) {
-            g_rb_2xg_us = v;
-        } else {
-            rbgpu_log("2xg: rbgpuschedtickus=%u REFUSED (outside %u-%u us); "
-                      "keeping %u us", v, (unsigned)RB_2XG_MIN_US,
-                      (unsigned)RB_2XG_MAX_US, g_rb_2xg_us);
-        }
+    /* 2xm: was an ASCII digit loop over a char[24], which PE_parse_boot_argn
+     * never fills with ASCII for a numeric token - so boot 217 ran at the
+     * 6944 us default with rbgpuschedtickus=2000 in boot-args, and the A/B
+     * silently did not happen. rbgpu_boot_argn_u32 encodes the measured
+     * behaviour; tick_us_refused publishes a rejected value so the next boot
+     * can tell "out of range" from "never parsed" (rule 14). */
+    uint32_t tick_refused = 0;
+    if (!rbgpu_boot_argn_u32("rbgpuschedtickus", RB_2XG_MIN_US, RB_2XG_MAX_US,
+                             &g_rb_2xg_us, &tick_refused) && tick_refused) {
+        rbgpu_log("2xg: rbgpuschedtickus=%u REFUSED (outside %u-%u us); "
+                  "keeping %u us", tick_refused, (unsigned)RB_2XG_MIN_US,
+                  (unsigned)RB_2XG_MAX_US, g_rb_2xg_us);
+        rbgpu_diag_set_num("tick_us_refused", tick_refused);
     }
     /* Rule 37: consume the one-shot BEFORE the first tick can fire, on the
      * overwrite path, and fail closed. A panic after this point costs exactly

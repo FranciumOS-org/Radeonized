@@ -1985,6 +1985,22 @@ tag in brackets; `docs/HANDOFF.md` §7 states them with their reasoning.
     then read as armed. Test a whole token
     (`tr ' \t' '\n\n' | grep -qx`), and do not name an arg so that it
     prefixes an existing one. [2ss]
+40. **Boot-arg VALUES: a NUMBER comes back as a BINARY INT, not ASCII.**
+    `PE_parse_boot_argn` with `force_string = 0` (what the public entry point
+    passes) stores a numeric value as a raw integer of the caller's width -
+    `0xffffff8000b92c77` jump-tables on `max_len - 1` for 1..8 and sends
+    **max_len > 8 to the same 4-byte `movl`** - and then returns 1. So
+    `char buf[24]` plus an ASCII digit loop reads `D0 07 00 00` for `=2000`,
+    parses 0, and refuses it; boot 217 ran the scheduler tick at its 6944 us
+    default with `rbgpuschedtickus=2000` in boot-args and 2xl's free A/B
+    silently did not happen. The correct idiom is
+    `int v = 0; PE_parse_boot_argn(name, &v, sizeof(v))`, now in
+    `rbgpu_boot_argn_u32()`. The project carried BOTH idioms for twenty
+    milestones with no measurement separating them, because **no boot had ever
+    passed any of these tunables a value** - a default that reads correctly is
+    not evidence that the tunable works. Corollary, rule 31 one layer up:
+    **`IOLog` is not an instrument in the PLUGIN either** - the refusal was
+    logged and the unified log does not have it. [2xm]
 27. **No vnode work at plugin init — the root filesystem is not mounted yet.**
     `RGPU::init()` runs during early kernel bootstrap, so a file read there
     panics before the progress bar, with no report written. Read files from a
@@ -2182,7 +2198,10 @@ hardware stamp poll and the only thing that sets the `ctx->0x71` flag
 arms - rule 37. It turns `-rbgpuschedprobe`'s routes on by itself, because the
 scheduler pointer it calls arrives only as those hooks' first argument. Read
 `tarm`/`tc`/`tk`/`tr` in `rbgpu-sched` BEFORE anything else in the boot;
-`tunable rbgpuschedtickus=<500..1000000>`), `-rbgpufbaty` (2w9 - publishes
+`tunable rbgpuschedtickus=<500..1000000>` - **which never worked until 2xm**:
+boot 217 had it set to 2000 and ticked at 6944 anyway, because the value came
+back as a binary int and was parsed as ASCII. Rule 40. `tick_us_refused` now
+says when one is rejected), `-rbgpufbaty` (2w9 - publishes
 `ATY,fb_offset` and `ATY,fb_size`, the two properties `AMDHWDisplay` reads off
 the framebuffer; **the offset it publishes is deliberately not the truthful 0**,
 so the composited image lands where the scanout is not reading - expect a wrong
@@ -2215,6 +2234,22 @@ burst was never measured. The decision is `rb_hubp_should_write()` in
 crumb's `n=` says in the SAME boot whether the arg had anything to do, so the
 arg and its instrument are independent and one boot settles it. Rule 30: NOT
 `-rbgpufbhubpall`, which `-rbgpufbhubp` would prefix),
+`-rbgpufbflippend` (2xm - **the tearing fix**, requires `-rbgpufbhubp`.
+Boot 217 read `RBFBHubpPendHits` **593** of `RBFBHubpPendChecks` **33877** =
+**1.75 % of flips, 1.26 a second**, programmed over a flip DCN had armed and
+not yet latched - which with 2xk's measured `SURFACE_FLIP_TYPE = 0` (latched
+at VUPDATE) replaces the armed address and changes the frame partway down the
+panel. The decision is `rb_hubp_flip_would_discard()` in
+`src/common/rb_hubp.h`, mutation-tested two ways, and it defers only when
+`SURFACE_TRIPLE_BUFFER_ENABLE` is clear - one pending slot - which boots 216
+and 217 both measured (`FLIP_CONTROL2 = 0x40`). **A deferral DROPS that
+frame**: the previous address latches, and `setAttribute('amtr')` already
+answers success instantly (2we) so the compositor never waits on us. One
+stale frame against one torn frame. **NOT established that 1.75 % accounts
+for all the tearing** - the user's "appears for a second" is far longer than
+one frame at 144 Hz, and 2xk's second candidate (a surface recycled while
+still being scanned) is untested. Publishes `RBFBHubpDeferArmed` /
+`RBFBHubpDeferrals`; one token reverses it without losing 2wh's write),
 `-rbgpufbretire` (2wi - re-enables the `'vbl '` slots Apple registered and
 then disabled, once a transaction has arrived, on the suspicion that the
 accelerator never learns a vblank happened and so never retires a transaction.

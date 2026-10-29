@@ -64,6 +64,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;
     hubpPendHits = 0;
+    hubpDeferrals = 0;
     hubpPitch = 0;
     hubpConfig = 0;
     hubpOtgCtl = 0;
@@ -209,6 +210,31 @@ void RBAMDFramebuffer::hubpProgram(uint64_t mc)
                                  rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL)];
     hubpPendChecks++;
     if (rb_hubp_flip_pending(fc)) { hubpPendHits++; }
+
+    /* 2xm: THE FIX, and it only runs with -rbgpufbflippend. Boot 217 turned
+     * 2xk's counter into a measurement - 593 of 33 877 flips, 1.75 %, were
+     * programmed over an armed and unlatched one - so the write below is what
+     * replaces a frame partway down the panel. Deferring costs that frame:
+     * the PREVIOUS address latches instead, and because setAttribute('amtr')
+     * already answers success instantly (2we) the compositor is not waiting
+     * on us either way. So the trade is one stale frame per deferral against
+     * one torn frame, at 1.26 deferrals a second.
+     *
+     * The decision is rb_hubp_flip_would_discard() in src/common/rb_hubp.h,
+     * which the hosttest runs first, and FLIP_CONTROL2 is read live rather
+     * than reused from hubpSetup() because triple buffering is the compositor
+     * 's to change at any time. Separate arg from -rbgpufbhubp on purpose: if
+     * deferring makes things worse, one token reverses it without giving up
+     * the write that made the display work. */
+    if (hubpDeferPend) {
+        const uint32_t fc2 = hubpRegs[kRbDmuSeg2 +
+                                      rb_hubp_dw(hubpIndex,
+                                                 RB_HUBP_REG_FLIP_CTL2)];
+        if (rb_hubp_flip_would_discard(fc, fc2)) {
+            hubpDeferrals++;
+            return;
+        }
+    }
 
     /* HIGH first, then LOW. DCN latches the pair when the LOW dword is
      * written, so this order means the hardware never sees a half-updated

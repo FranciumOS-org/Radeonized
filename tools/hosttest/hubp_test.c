@@ -96,6 +96,42 @@ int hubp_tests(void)
     A(rb_hubp_flip_pending(0x00000000u) == 0);
     A(rb_hubp_flip_pending(0xfffffeffu) == 0);   /* every OTHER bit set */
 
+    /* 2e (2xm). The defer decision. Boot 217 measured 593 hits in 33 877
+     * checks - 1.75 % of flips programmed over an armed, unlatched one - so
+     * this is the mechanism behind the tearing, counted before it was acted
+     * on (2xk was the instrument, this is the fix). */
+    A(RB_HUBP_FLIP2_PENDING_MIN_TIME == 0x000000ffu);
+    A(RB_HUBP_FLIP2_GSL_ENABLE       == 0x00000100u);
+    A(RB_HUBP_FLIP2_TRIPLE_BUFFER    == 0x00000400u);
+    {
+        /* The two live values, both measured: boot 216 and boot 217 agree. */
+        const uint32_t ctl2_live = 0x00000040u;  /* PENDING_MIN_TIME 64 only */
+        A((ctl2_live & RB_HUBP_FLIP2_TRIPLE_BUFFER) == 0u);
+        A((ctl2_live & RB_HUBP_FLIP2_GSL_ENABLE) == 0u);
+        A((ctl2_live & RB_HUBP_FLIP2_PENDING_MIN_TIME) == 64u);
+        A((ctl2_live & ~(uint32_t)(RB_HUBP_FLIP2_PENDING_MIN_TIME |
+                                   RB_HUBP_FLIP2_GSL_ENABLE |
+                                   RB_HUBP_FLIP2_TRIPLE_BUFFER)) == 0u);
+
+        /* Idle: nothing pending, so write. This is 98.25 % of boot 217. */
+        A(rb_hubp_flip_would_discard(0x04100000u, ctl2_live) == 0);
+        /* Pending with one slot: deferring is the whole point. */
+        A(rb_hubp_flip_would_discard(0x04100100u, ctl2_live) == 1);
+        /* The guard: pending but triple-buffered discards nothing, so write.
+         * Mutating it away makes this assertion fail, which is the only
+         * reason the guard can be trusted on a machine that does not set
+         * the bit (rule 39's shape - the configuration lacks the symptom). */
+        A(rb_hubp_flip_would_discard(0x04100100u,
+                                     ctl2_live | RB_HUBP_FLIP2_TRIPLE_BUFFER) == 0);
+        A(rb_hubp_flip_would_discard(0x04100000u,
+                                     ctl2_live | RB_HUBP_FLIP2_TRIPLE_BUFFER) == 0);
+        /* PENDING is the ONLY bit that defers: every other bit set, pending
+         * clear, must still write - otherwise a field we have not identified
+         * could silently stall every flip. */
+        A(rb_hubp_flip_would_discard(0xfffffeffu, 0u) == 0);
+        A(rb_hubp_flip_would_discard(0x00000100u, 0u) == 1);
+    }
+
     /* 3. Out-of-range asks answer 0, not a wild offset. */
     A(rb_hubp_dw(RB_HUBP_COUNT, RB_HUBP_REG_ADDR) == 0);
     A(rb_hubp_dw(0, RB_HUBP_REG_COUNT) == 0);

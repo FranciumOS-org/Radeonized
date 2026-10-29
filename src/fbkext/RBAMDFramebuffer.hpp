@@ -240,6 +240,8 @@ private:
     uint32_t           hubpFlipCtl2;  /* 2xj: DCSURF_FLIP_CONTROL2, read-only */
     uint64_t           hubpPendChecks; /* 2xk: flips where PENDING was read */
     uint64_t           hubpPendHits;   /* 2xk: ...and was already set */
+    bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
+    uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;

@@ -88,6 +88,8 @@ public:
     uint32_t hubpFlipCtl2=0;  /* 2xj */
     uint64_t hubpPendChecks=0; /* 2xk */
     uint64_t hubpPendHits=0;   /* 2xk */
+    bool     hubpDeferPend=false; /* 2xm */
+    uint64_t hubpDeferrals=0;     /* 2xm */
     uint32_t hubpTiling=0;
     uint32_t hubpPitch=0;
     uint32_t hubpConfig=0;
