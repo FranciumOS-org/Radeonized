@@ -1,0 +1,304 @@
+/* animtest - does a CONTINUOUSLY ANIMATING on-screen window produce display
+ * transactions, and is CoreVideo's display clock alive?
+ *
+ * Why this tool exists (2xe). Every lever found so far - typing (2wl),
+ * AnyDesk (2x5), screencapture (2xa/2xd) - is an EXTERNAL agent poking
+ * WindowServer. None of them is what a user means by "a smooth desktop".
+ * The question nobody has asked is the plain one: when something on screen
+ * changes by itself, continuously, does the chain run at the panel's rate?
+ *
+ * An idle desktop composites nothing on EVERY Mac - that is correct
+ * behaviour, not a defect. So 0.09 sets/s at idle may be no defect at all,
+ * and the whole frontier would then be about interaction, not about idle.
+ * This separates the two for the first time.
+ *
+ * TWO measurements, deliberately in one process so they share a window:
+ *
+ *   1. CVDisplayLink callbacks/s - CoreVideo's own view of the panel clock.
+ *      If this is not ~143.8 then userspace has no display clock, and
+ *      nothing above it can schedule a frame. It is also the control for
+ *      arm 2: a dead link makes a dead animation unreadable (rule 39's
+ *      corollary - an instrument that needs a load must publish the load).
+ *
+ *   2. RBFBAmtrSets/s while a CoreAnimation animation runs forever in a
+ *      visible window. The animation is driven by WindowServer itself from
+ *      a CABasicAnimation, NOT by this process per frame, so it is exactly
+ *      the shape of real UI motion and costs no IPC per frame.
+ *
+ * --link-only runs arm 1 with no window at all, which is the control for
+ * arm 2 in the same boot: same process, same clock, no on-screen change.
+ */
+#import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
+#import <CoreVideo/CoreVideo.h>
+#include <stdatomic.h>
+#include <mach/mach_time.h>
+#include <math.h>
+
+static atomic_ullong gLinkFires = 0;
+
+/* 2xe: the vblank's REGULARITY, not just its rate. CVDisplayLink's callback
+ * carries the hostTime CoreVideo believes the vblank happened at, and that
+ * number comes from the framebuffer's vblank, so the spread of consecutive
+ * deltas is a direct read on whether our thread_call is a CLOCK or merely a
+ * timer that fires about that often. A real vblank interrupt is rock steady;
+ * thread_call_enter_delayed is coalesced by the kernel timer subsystem and
+ * is re-armed AFTER the handler runs, so it drifts by the handler's own
+ * duration every single tick. The two are indistinguishable by rate alone,
+ * which is why every earlier reading of "144 Hz" could not see this. */
+#define kJitMax 40000
+static double  gJit[kJitMax];
+static unsigned gJitN = 0;
+static uint64_t gLastHost = 0;
+static double  gTbNs = 1.0;
+
+static CVReturn linkCB(CVDisplayLinkRef l, const CVTimeStamp *now,
+                       const CVTimeStamp *out, CVOptionFlags in,
+                       CVOptionFlags *f, void *ctx)
+{
+    (void)l; (void)out; (void)in; (void)f; (void)ctx;
+    atomic_fetch_add(&gLinkFires, 1);
+    if (now && (now->flags & kCVTimeStampHostTimeValid)) {
+        uint64_t h = now->hostTime;
+        if (gLastHost && gJitN < kJitMax) {
+            gJit[gJitN++] = (double)(h - gLastHost) * gTbNs / 1.0e6; /* ms */
+        }
+        gLastHost = h;
+    }
+    return kCVReturnSuccess;
+}
+
+/* One ioreg per sample. 2x7's key() ran a separate ioreg per counter and
+ * produced two false "writes != sets" alarms; the counters must be read in
+ * one pass or they are read seconds apart at up to 85/s. */
+static int fbsnap(unsigned long long *sets, unsigned long long *fires,
+                  unsigned long long *writes)
+{
+    FILE *p = popen("ioreg -rl -c RBAMDFramebuffer 2>/dev/null | awk '"
+                    "/\"RBFBAmtrSets\" = /   { s = $NF } "
+                    "/\"RBFBVBLFires\" = /   { f = $NF } "
+                    "/\"RBFBHubpWrites\" = / { w = $NF } "
+                    "END { if (s == \"\" || f == \"\") exit 1; "
+                    "print s, f, w }'", "r");
+    if (!p) { return 0; }
+    unsigned long long a = 0, b = 0, c = 0;
+    int n = fscanf(p, "%llu %llu %llu", &a, &b, &c);
+    int st = pclose(p);
+    if (n < 2 || st != 0) { return 0; }
+    *sets = a; *fires = b; *writes = c;
+    return 1;
+}
+
+int main(int argc, char **argv)
+{
+    double secs = 30.0, every = 10.0;
+    int window = 1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--secs") && i + 1 < argc)  { secs  = atof(argv[++i]); }
+        else if (!strcmp(argv[i], "--every") && i + 1 < argc) { every = atof(argv[++i]); }
+        else if (!strcmp(argv[i], "--link-only")) { window = 0; }
+        else {
+            fprintf(stderr, "usage: animtest [--secs N] [--every N] [--link-only]\n");
+            return 2;
+        }
+    }
+
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    gTbNs = (double)tb.numer / (double)tb.denom;
+
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+
+        NSWindow *win = nil;
+        if (window) {
+            NSRect r = NSMakeRect(60, 60, 360, 220);
+            win = [[NSWindow alloc] initWithContentRect:r
+                        styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable
+                          backing:NSBackingStoreBuffered defer:NO];
+            [win setTitle:@"rbgpu animtest"];
+            [win setLevel:NSFloatingWindowLevel];
+
+            NSView *v = [win contentView];
+            [v setWantsLayer:YES];
+            CALayer *root = [v layer];
+            root.backgroundColor = CGColorCreateGenericRGB(0.07, 0.07, 0.09, 1.0);
+
+            CALayer *dot = [CALayer layer];
+            dot.frame = CGRectMake(0, 80, 56, 56);
+            dot.cornerRadius = 28;
+            dot.backgroundColor = CGColorCreateGenericRGB(0.95, 0.35, 0.15, 1.0);
+            [root addSublayer:dot];
+
+            /* WindowServer runs this; we do nothing per frame. A repeating,
+             * autoreversing position animation is the plainest continuous
+             * on-screen change there is. */
+            CABasicAnimation *move = [CABasicAnimation animationWithKeyPath:@"position.x"];
+            move.fromValue   = @(28);
+            move.toValue     = @(332);
+            move.duration    = 0.8;
+            move.repeatCount = HUGE_VALF;
+            move.autoreverses = YES;
+            move.timingFunction =
+                [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+            [dot addAnimation:move forKey:@"move"];
+
+            CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            fade.fromValue   = @(1.0);
+            fade.toValue     = @(0.25);
+            fade.duration    = 0.37;
+            fade.repeatCount = HUGE_VALF;
+            fade.autoreverses = YES;
+            [root addAnimation:fade forKey:@"fade"];
+
+            [win orderFrontRegardless];
+        }
+
+        CVDisplayLinkRef link = NULL;
+        CGDirectDisplayID disp = CGMainDisplayID();
+        CVReturn cv = CVDisplayLinkCreateWithCGDisplay(disp, &link);
+        if (cv != kCVReturnSuccess || !link) {
+            fprintf(stderr, "CVDisplayLinkCreateWithCGDisplay failed: %d\n", cv);
+            return 1;
+        }
+        CVDisplayLinkSetOutputCallback(link, linkCB, NULL);
+        cv = CVDisplayLinkStart(link);
+        if (cv != kCVReturnSuccess) {
+            fprintf(stderr, "CVDisplayLinkStart failed: %d\n", cv);
+            return 1;
+        }
+
+        /* The link's own idea of the period, independent of our counting. */
+        CVTime nom = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+        double nomHz = 0.0;
+        if (!(nom.flags & kCVTimeIsIndefinite) && nom.timeValue) {
+            nomHz = (double)nom.timeScale / (double)nom.timeValue;
+        }
+
+        printf("mode: %s\n", window ? "animating window + display link"
+                                    : "display link only (no window)");
+        printf("nominal refresh: %.2f Hz%s\n", nomHz,
+               (nom.flags & kCVTimeIsIndefinite) ? " (INDEFINITE)" : "");
+        fflush(stdout);
+
+        unsigned long long s0 = 0, f0 = 0, w0 = 0;
+        int haveFB = fbsnap(&s0, &f0, &w0);
+        if (!haveFB) {
+            printf("RBAMDFramebuffer: ABSENT - fb columns will read n/a\n");
+        }
+        unsigned long long l0 = atomic_load(&gLinkFires);
+        double t0 = CFAbsoluteTimeGetCurrent();
+
+        __block double lastT = t0;
+        __block unsigned long long lastL = l0, lastS = s0, lastF = f0;
+        __block int done = 0;
+
+        dispatch_source_t tick =
+            dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                   dispatch_get_main_queue());
+        dispatch_source_set_timer(tick,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(every * NSEC_PER_SEC)),
+            (uint64_t)(every * NSEC_PER_SEC), NSEC_PER_SEC / 10);
+        dispatch_source_set_event_handler(tick, ^{
+            double t = CFAbsoluteTimeGetCurrent();
+            unsigned long long l = atomic_load(&gLinkFires);
+            unsigned long long s = 0, f = 0, w = 0;
+            int ok = fbsnap(&s, &f, &w);
+            double dt = t - lastT;
+            printf("+%4.0fs  link %6.2f/s", t - t0, (double)(l - lastL) / dt);
+            if (ok && haveFB) {
+                /* The panel's own vblank counter as the clock (2wj). */
+                double vdt = (double)(f - lastF) / 143.83;
+                printf("   sets %7.2f/s (fb clock %.1fs vs wall %.1fs)",
+                       vdt > 0 ? (double)(s - lastS) / vdt : 0.0, vdt, dt);
+            } else {
+                printf("   sets      n/a");
+            }
+            printf("\n");
+            fflush(stdout);
+            lastT = t; lastL = l; lastS = s; lastF = f;
+            if (t - t0 >= secs) {
+                done = 1;
+                [NSApp stop:nil];
+                /* stop: only takes effect on the next event; post one. */
+                [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                   location:NSZeroPoint modifierFlags:0
+                                  timestamp:0 windowNumber:0 context:nil
+                                    subtype:0 data1:0 data2:0] atStart:YES];
+            }
+        });
+        dispatch_resume(tick);
+
+        [app run];
+        (void)done;
+
+        CVDisplayLinkStop(link);
+        unsigned long long l1 = atomic_load(&gLinkFires);
+        unsigned long long s1 = 0, f1 = 0, w1 = 0;
+        int ok = fbsnap(&s1, &f1, &w1);
+        double t1 = CFAbsoluteTimeGetCurrent();
+        printf("\n--- totals over %.2f s wall ---\n", t1 - t0);
+        printf("display link : %llu fires = %.2f/s\n", l1 - l0,
+               (double)(l1 - l0) / (t1 - t0));
+        if (ok && haveFB) {
+            double vdt = (double)(f1 - f0) / 143.83;
+            printf("fb vbl fires : %llu = %.2f s of panel time\n", f1 - f0, vdt);
+            printf("amtr sets    : %llu = %.2f/s\n", s1 - s0,
+                   vdt > 0 ? (double)(s1 - s0) / vdt : 0.0);
+            printf("hubp writes  : %llu%s\n", w1 - w0,
+                   (w1 - w0) == (s1 - s0) ? " (tracks sets exactly)"
+                                          : "  <-- DIVERGES from sets");
+        }
+        if (gJitN >= 8) {
+            double mn = 1e30, mx = -1e30, sum = 0.0;
+            for (unsigned i = 0; i < gJitN; i++) {
+                if (gJit[i] < mn) { mn = gJit[i]; }
+                if (gJit[i] > mx) { mx = gJit[i]; }
+                sum += gJit[i];
+            }
+            double mean = sum / gJitN, var = 0.0;
+            for (unsigned i = 0; i < gJitN; i++) {
+                double d = gJit[i] - mean;
+                var += d * d;
+            }
+            var /= gJitN;
+            printf("\n--- vblank regularity, %u intervals (CVTimeStamp hostTime) ---\n",
+                   gJitN);
+            printf("mean   %8.4f ms  = %7.3f Hz\n", mean, 1000.0 / mean);
+            printf("stddev %8.4f ms  (%.1f%% of mean)\n", sqrt(var),
+                   100.0 * sqrt(var) / mean);
+            printf("min    %8.4f ms   max %8.4f ms   spread %.4f ms\n",
+                   mn, mx, mx - mn);
+            printf("target %8.4f ms  = 143.830 Hz  (the panel, measured 2rn)\n",
+                   1000.0 / 143.83);
+            /* A histogram, because a mean and a sigma cannot tell a steady
+             * clock with a few long stalls from a uniformly sloppy one, and
+             * those two have different fixes. */
+            static const double edge[] = {6.5, 7.0, 7.5, 8.0, 8.5, 9.0,
+                                          10.0, 12.0, 16.0, 1e30};
+            static const char *lbl[] = {"<6.5", "6.5-7", "7-7.5", "7.5-8",
+                                        "8-8.5", "8.5-9", "9-10", "10-12",
+                                        "12-16", ">16"};
+            unsigned bin[10] = {0};
+            for (unsigned i = 0; i < gJitN; i++) {
+                for (unsigned b = 0; b < 10; b++) {
+                    if (gJit[i] < edge[b]) { bin[b]++; break; }
+                }
+            }
+            printf("histogram (ms):\n");
+            for (unsigned b = 0; b < 10; b++) {
+                if (!bin[b]) { continue; }
+                printf("  %-7s %6u  %5.1f%%  ", lbl[b], bin[b],
+                       100.0 * bin[b] / gJitN);
+                unsigned n = (unsigned)(60.0 * bin[b] / gJitN);
+                for (unsigned k = 0; k < n; k++) { putchar('#'); }
+                printf("\n");
+            }
+        } else {
+            printf("\nvblank regularity: only %u intervals - NOT a result\n", gJitN);
+        }
+        CVDisplayLinkRelease(link);
+    }
+    return 0;
+}
