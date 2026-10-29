@@ -45234,3 +45234,95 @@ framebuffer, which explains the idle rate, the keystroke dependence and the
 Anything in between is its own reading. **No new build and no install** -
 `A57A4C4A` is already in the auxiliary collection, proven by `E=`/`A=` being
 published at all.
+
+## 2x3 — BOOT 206: THE PANEL IS PARKED ON A STALE BUFFER (fbkext `4C28785D`)
+
+**The live armed boot answered three questions and the user's own observation
+answered the fourth, which is the one that mattered.**
+
+**THE FRAME CLOCK IS ELIMINATED, POSITIVELY.** `tools/vblclock.m` creates a
+CVDisplayLink and counts callbacks. On **our** framebuffer in boot 206:
+**693 callbacks in 5.003 s = 138.51 Hz**, nominal period 7.214 ms. The control
+on `IONDRVFramebuffer` in boot 205 read **133.89 Hz**. And
+`RBFBVBL0Fires = RBFBVBLFires = 42397` - IOFramebuffer's own `handleVBL` is
+driven on every single tick. **WindowServer has a perfect cadence from us**, so
+2x2's named candidate (`getTimeOfVBL` / `getVBLTime` / `setVBLTiming`, none of
+which we implement) is **not the defect**. Closed.
+
+**NOTHING IN THE CHAIN IS FAILING.** Display log captured in the armed boot
+(rule 36 - INFO does not survive a reboot): **0** `Fallback`, **0**
+`DisplayPipeState`, **0** `Failed to submit transaction`, **0**
+`IOPRESENTMENT`, against **929 WindowServer lines** plus CoreDisplay and
+SkyLight subsystems as the control. Every transaction that exists succeeds.
+`RBFBAmtrNoFlip = 0` and `RBFBHubpWrites == RBFBAmtrSets` (585/585) across the
+whole boot: **we drop nothing and write everything.**
+
+**THE SWAP CHAIN IS MEASURED.** Sampling `RBFBHubpLast` live shows exactly
+**three** addresses cycling - `0xf4_1002_a000`, `0xf4_110e_2000`,
+`0xf4_1192_a000` - about one 1920x1080x4 frame (8.29 MB) apart. **Triple
+buffered.** Idle transaction supply, two independent ways: **0.071/s**
+(14 s direct read) and **0.080/s** (36 transactions over 451 s).
+
+**AN EXPERIMENT THAT MEASURED NOTHING, AND WHY.** A 75 s 4 Hz trace was
+started and the phase instructions were sent *afterwards*, so the user read
+them after the window had closed and ran the phases at **00:04** against a
+trace that ended at **00:00:44**. The per-phase table built from it is
+**WITHDRAWN IN FULL** - it described an idle machine. **Rule 28's shape applied
+to an experiment rather than a log: the window and the event must be tied
+together at the source.** `tools/fbphase.py` is the fix - it owns the clock AND
+prompts the user itself, printing one line per phase (not a countdown, because
+printing is screen damage and that is the quantity under test).
+**What the dead trace does validly say**: idle behaviour is 7 transactions in
+75 s at a ~6 s cadence.
+**And the event was recovered anyway**, because the counter is cumulative:
+00:00:44 -> 00:08:15 is 36 transactions in 451 s = **0.080/s**, a window that
+*provably contains* the typing, with `RBFBAmtrPeak` still **139** and unmoved
+since 23:54. So the typing produced no measurable excess of transactions.
+
+**THE USER'S OBSERVATION IS THE DECISIVE MEASUREMENT.** *"The time like 00:07
+stays like that until 00:09 when i type."* The menu-bar clock froze at 00:07,
+and on the next keystroke the panel showed **00:09 - not 00:07**. **So the
+compositor had been drawing every one of those minutes and we were not showing
+them.** The panel was parked on a stale buffer and the keystroke re-pointed it.
+
+**THAT RESOLVES THE CONTRADICTION.** With three buffers rotating and HUBP
+pinned to one, roughly **one frame in three** is visible while anything is
+being drawn, and the screen is **frozen** once drawing stops - which is exactly
+"typing is smooth, stopping freezes", with no need for typing to generate
+transactions at all. The transaction rate and the *frame* rate were never the
+same quantity, and every milestone since 2wi that treated "transaction supply"
+as the frontier was measuring the wrong thing. **2wi's "1 frame per 10 s is the
+TRANSACTION rate" stands as a measurement and is withdrawn as an explanation.**
+
+**THE FIX: FOLLOW THE SWAP CHAIN AT VBLANK RATE (`-rbgpufbpoll`).** We learn
+the current surface only when a transaction arrives (0.08/s). Apple keeps the
+live address in the `_AMD_PIPE_FLIP` (2wg measured the field, 2wf the struct)
+and **we already hold a range-checked pointer to it** from the first
+transaction. So read it on every vblank and reprogram HUBP when it moves.
+`hubpPoll()` runs on our own thread_call, never Apple's thread, and allocates
+nothing, logs nothing and blocks on nothing (rule 31). A torn read cannot reach
+the hardware: `hubpProgram()` re-validates every address against the measured
+carve-out, the 256-byte alignment and the frame size, and counts refusals
+(`RBFBHubpRejects`). Gated on the boot-arg **and** on `amtrSets > 0`, so a boot
+whose pipe never came up cannot poll a pointer that was never set. Rule 30
+checked against all ten existing `-rbgpufb*` tokens: `-rbgpufbpoll` neither
+prefixes nor is prefixed by any.
+**Hosttested and mutation-checked**: the contract is *one poll per vblank*,
+because one missed tick is one stale frame - the exact defect it fixes. The
+case asserts `pollCalls == vblFires == 7` over seven ticks; mutating the call
+site to poll on alternate fires **fails at line 257**. `RBFBPollArmed` is
+published unconditionally as the rule-15 identity key, and the crumb gains
+`R=` (`pollReads`) and `G=` (`pollChanges`).
+
+**SAID BEFORE THE BOOT.** `R=` should run at ~143.83 per second of uptime; if
+it is 0 with `-rbgpufbpoll` in boot-args, the arg or the pointer gate is wrong
+and nothing else means anything. **`G=` is the whole experiment**: it counts
+vblanks on which the live address differed from what we had written. `G=` in
+the thousands with a smooth, self-updating desktop **confirms it** - the panel
+was simply pointed at the wrong buffer. `G=` near 0 means Apple does *not*
+update that field outside a transaction, the poll reads a constant, and the
+address must be found elsewhere. `G=` high with the screen **still** stale, or
+`RBFBHubpRejects` climbing, means we are following something that is not the
+scanout surface. The user's proposal - a synthetic typing source at 144 Hz -
+is deliberately **not** taken: it would force damage and still show only one
+frame in three, because it treats the symptom rather than the stale pointer.

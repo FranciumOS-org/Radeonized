@@ -190,6 +190,11 @@ private:
      * rather than attach a correct chain one link off for the eighth time.
      * So dump the struct and read the offset out of it. */
     static const unsigned kAmtrFlipBytes = 0x220;
+    /* 2x3: the surface poll. */
+    bool     pollArmed;
+    uint64_t pollReads;      /* vblanks on which we looked           */
+    uint64_t pollChanges;    /* looks that saw a NEW surface address */
+    uint64_t pollFirstSeen;  /* the first address the poll ever read  */
     bool     amtrFlipSnapped;
     uint64_t amtrFlipPtr;
     uint64_t amtrFlipRefused;
@@ -243,6 +248,9 @@ private:
     bool hubpSetup(void);
     void hubpTeardown(void);
     void hubpProgram(uint64_t mc);
+    /* 2x3: follow the compositor's swap chain at vblank rate instead of only
+     * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
+    void hubpPoll(void);
 
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection

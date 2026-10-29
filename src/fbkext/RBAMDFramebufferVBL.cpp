@@ -91,6 +91,13 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBRetireArmed", retireArmed);
     setProperty("RBFBRetireEnables", retireEnables, 64);
     setProperty("RBFBForeignFires", foreignFires(), 64);
+    /* Rule 15: RBFBPollArmed is published UNCONDITIONALLY, so it is this
+     * build's identity key whatever the boot-args say. Rule 14: the counts
+     * are published whether or not they moved. */
+    setProperty("RBFBPollArmed", pollArmed);
+    setProperty("RBFBPollReads", pollReads, 64);
+    setProperty("RBFBPollChanges", pollChanges, 64);
+    setProperty("RBFBPollFirstSeen", pollFirstSeen, 64);
     setProperty("RBFBRetireKicks", retireKicks, 64);
     setProperty("RBFBRetireDelivered", retireDelivered, 64);
     setProperty("RBFBHubpArmed", hubpArmed);
@@ -193,6 +200,10 @@ void RBAMDFramebuffer::deliverVBL(void)
             delivered++;
         }
     }
+    /* 2x3: follow the swap chain on every vblank. Placed after delivery so
+     * the handlers see a consistent tick, and before the telemetry so the
+     * published counters describe this fire. */
+    hubpPoll();
     vblFires++;
     if (vblFires == 1) {
         LOG("first vblank delivered to %u handler(s)", delivered);

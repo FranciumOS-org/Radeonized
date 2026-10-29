@@ -262,6 +262,18 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * needs. */
     hubpArmed = false;
     hubpAll = false;
+    /* 2x3: -rbgpufbpoll. Rule 30 checked against every existing token: it
+     * neither prefixes nor is prefixed by -rbgpufbaty / -rbgpufbamtr /
+     * -rbgpufbhubp / -rbgpufbretire / -rbgpufbflipall / -rbgpufbvbl /
+     * -rbgpufbvram / -rbgpufbaccel / -rbgpufbmatch / -rbgpufbnocrumb. */
+    pollArmed = false;
+    pollReads = 0;
+    pollChanges = 0;
+    pollFirstSeen = 0;
+    {
+        char pollflag[16];
+        pollArmed = PE_parse_boot_argn("-rbgpufbpoll", pollflag, sizeof(pollflag));
+    }
     hubpMax = 0;
     hubpRejectAddr = 0;
     hubpRejectWhy = 0;
@@ -651,7 +663,7 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
      * ways without a capture - see the handoff. */
     snprintf(buf, sizeof(buf),
              "b=%s s=%u f=%llu e=%u r=%u h=%u w=%llu k=%u t=%llu "
-             "p=%llu n=%llu K=%llu D=%llu E=%llu A=%llu",
+             "p=%llu n=%llu K=%llu D=%llu E=%llu A=%llu R=%llu G=%llu",
              crumbBoot, crumbStage, (unsigned long long)vblFires, vblEnables,
              vblRunning ? 1u : 0u,
              hubpReady ? 0u : (hubpArmed ? (hubpRefuse ? hubpRefuse : 0xffu) : 0xfeu),
@@ -662,7 +674,9 @@ void RBAMDFramebuffer::crumb(uint32_t stage)
              (unsigned long long)retireKicks,
              (unsigned long long)retireDelivered,
              (unsigned long long)retireEnables,
-             (unsigned long long)foreignFires());
+             (unsigned long long)foreignFires(),
+             (unsigned long long)pollReads,
+             (unsigned long long)pollChanges);
     if (auto str = OSString::withCString(buf)) {
         /* 2sr measured that setPropertyWithGUIDAndName is the ONLY path that
          * reaches IODTNVRAM::syncInternal, so a plain setProperty here DOES

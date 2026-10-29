@@ -111,6 +111,10 @@ public:
     void publishVBLState();
     bool anyVBLEnabled();
     uint64_t foreignFires() const;
+    uint64_t pollCalls=0;
+    bool pollArmed=false;
+    uint64_t pollReads=0, pollChanges=0, pollFirstSeen=0;
+    void hubpPoll() { pollCalls++; }
     static void vblFired(thread_call_param_t,thread_call_param_t);
     static void vblKicked(thread_call_param_t,thread_call_param_t);
 };
