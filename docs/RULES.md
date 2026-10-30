@@ -214,15 +214,22 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
 - **Always check the UUID moved** (`dwarfdump --uuid build/out/...`). Two boots
   were lost to a stale build.
 - **And for `src/fbkext`, check the UUID inside the COLLECTION, not in
-  `/Library/Extensions`** — they are different facts and three more boots went
-  to the gap (2xy):
+  `/Library/Extensions`** — they are different facts and three boots went to
+  the gap (2xy):
   `kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc
-  --show-kext-uuids | grep rembrandt`. The install needs
-  `sudo kmutil install --update-all --force --allow-missing-kdk
-  --update-preboot`: without `--force` kmutil believes the bundle DIRECTORY's
-  mtime, which `cp -R` into an existing bundle never updates, and without
-  `--allow-missing-kdk` it cannot build the **release** collection on a machine
-  with no KDK.
+  --show-kext-uuids | grep rembrandt`.
+- **`kmutil install --update-all` is the WRONG TOOL and cannot work on this
+  machine.** It rebuilds the boot and system collections as well, which needs
+  a kernel variant and a KDK this machine does not have, and it dies there
+  *before* reaching the auxiliary collection:
+  `failed to build release collection: Unable to resolve dependencies:
+  'com.apple.driver.SCSIDeviceSpecifics' names a dependency on
+  'com.apple.kpi.mach', which was not found` plus four
+  `Could not find: kernel mach-o at /System/Library/Kernels/kernel.<variant>`.
+  Build **only the auxiliary collection**, linking against the boot and system
+  collections that are already there — then no KDK and no kernel variant is
+  needed at all. Back the old one up first; it is what the next boot loads.
+  (Not yet confirmed on hardware as of this commit.)
 - After any plugin change: `kmutil libraries -p build/out/RembrandtGPU.kext`
   must resolve everything with **0 from `SystemKernelExtensions.kc`** (the 2oz
   trap) and `grep -c IOGraphicsFamily src/plugin/Info.plist` must be **0**.
