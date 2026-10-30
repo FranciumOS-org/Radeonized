@@ -49595,3 +49595,76 @@ Stated before the boot:
   measurement failed and nothing was written at all.
 - `RBFBDrrStep` 3 with `Reverted` true is a complete run whatever the Mhz
   values say.
+
+## 2y5 DONE on hardware (boot 255) — the panel accepts 60 Hz, and it does it without a link retrain
+
+fbkext `74BCE3CD-1141-323B-8FA7-5FCE023A5A2D` loaded, `rbgpu-boot` **255**,
+`rbgpu-safe` 0, `-rbgpufbdrr` in boot-args. Plugin still **`43775C76`** - 2y3's
+EFI half has never been installed, three milestones running. It cannot affect
+this reading (the DRR path is entirely src/fbkext and reads its own compiled
+copy of `rb_defaults.h`), but it is recorded because rule 15 is about the habit,
+not about whether this particular boot was spoiled.
+
+The read, `ioreg -rl -c RBAMDFramebuffer`:
+
+    RBFBDrrArmed   Yes      RBFBDrrMhzBefore  143843
+    RBFBDrrDone    Yes      RBFBDrrMhzDuring   60025
+    RBFBDrrStep      3      RBFBDrrMhzAfter   143821
+    RBFBDrrReverted Yes     RBFBDrrMinRb        2707
+    RBFBDrrRefuse    0      RBFBDrrMaxRb        2707
+    RBFBDrrRuns      3      RBFBDrrCtlRb           3
+    RBFBDrrLines  2707      RBFBDrrCtl0            0
+    RBFBDrrSecs      8      RBFBDrrVTotalLive   1129
+
+The first of the five outcomes stated in 2y5, the one that was written down
+before the boot: `MhzDuring` near 59989 with `MhzAfter` back at ~143836.
+
+**Why 60025 against a predicted 59989 is a pass and not a near-miss.** 36 mHz
+is 0.06 %, and the quantity to compare it against is not a tolerance picked
+after the fact - it is this instrument's own noise, measured in the same run by
+the same code. `MhzBefore` 143843 and `MhzAfter` 143821 are two measurements of
+an **unchanged** raster taken 8 s apart, and they differ by 22 mHz. The
+prediction is therefore correct to the resolution the measurement can offer,
+and `rb_drr.h`'s model - `clk/(H_TOTAL x V_TOTAL)`, inverted to lines - is
+confirmed against the chip in both directions rather than only in the direction
+the hosttest can check.
+
+**Two independent facts, and they needed separating.** `MinRb`/`MaxRb` reading
+back 2707 and `CtlRb` reading 3 (MIN_SEL|MAX_SEL) says the **write landed in
+the register**. `MhzDuring` 60025 says the **OTG obeyed it**. 2y5's second
+stated outcome was precisely the case where the first is true and the second is
+false, which is why both are published: a readback is not a behaviour, and had
+only the readback been checked, `V_TOTAL_MID` would now be under suspicion for
+no reason.
+
+**The user reports no black screen**, and that is a result, not an aside. The
+panel re-synced to a 2707-line frame while scanning. This is what boot 254's
+`OTG0_V_BLANK_START_END` = 1311820 predicted and the reason DRR was chosen over
+a modeset: start 1100 / end 20 pins the 1080-line **active** window
+independently of V_TOTAL, so lengthening V_TOTAL stretches vertical blank and
+nothing else - same active raster, same sync widths, same pixel clock, same DP
+link, no retraining. Had the active window been derived from V_TOTAL, 2707
+lines would have been a mode change and the link would have had to come back up.
+
+The revert is complete and verified by agreement rather than by assertion:
+`RBFBOtgVTotalMin/Max/Mid/Cntl` all still read **0**. Those four are the
+`start()`-time snapshot, so they are boot 254's reading of the firmware's
+state; the registers were put back to exactly the values that were *read* at
+boot, not to values inferred from a datasheet. `Ctl0` 0 recorded live before
+the write agrees with them.
+
+**What this does and does not establish.** It establishes that this panel and
+this OTG accept a 60 Hz frame length applied live, and that our arithmetic
+picks the right number of lines. It does **not** make 60 Hz a mode: macOS still
+advertises one mode at 143.836 Hz and the VBL thread_call still ticks at that
+rate, so for those 8 s the compositor was paced against a rate the raster was
+not running at. That mispacing was invisible to the user, which is a mild
+surprise worth not over-reading - 8 s of a static desktop is the easiest
+possible case for it.
+
+Next, and it is now a wiring job rather than a question: `getDisplayModeCount()`
+-> 2, a refresh field in `getInformationForDisplayMode`, and `setDisplayMode`
+changing the timing **and** `rbgpuvblhz` together, since rule 38's lesson is
+that two separately-set halves disagree. The DRR experiment stays as it is,
+opt-in and self-reverting, because it is the instrument that will say whether a
+future mode switch landed.
