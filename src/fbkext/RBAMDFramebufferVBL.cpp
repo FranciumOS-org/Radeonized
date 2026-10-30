@@ -193,6 +193,38 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBDrrCtl0", (uint64_t)drrCtl0, 32);
     setProperty("RBFBDrrVTotalLive", (uint64_t)drrVTotalLive, 32);
     setProperty("RBFBDrrStep", (uint64_t)drrStep, 32);
+    /* 2y6: the mode table. ModeCur against ModeLastAsked is what separates
+     * "the compositor never asked" from "it asked and we refused" - the two
+     * that looked identical for the whole of the brightness work (rule 14).
+     * Switches counts real transitions; Applies counts every call including
+     * the compositor re-asking for the mode it is already in, which it does
+     * on wake and on every reconfigure. */
+    setProperty("RBFBModeArmed", modeArmed);
+    setProperty("RBFBModeRefuse", (uint64_t)modeRefuse, 32);
+    setProperty("RBFBModeCur", (uint64_t)(uint32_t)modeCur, 32);
+    setProperty("RBFBModeLastAsked", (uint64_t)modeLastAsked, 32);
+    setProperty("RBFBModeCount", (uint64_t)getDisplayModeCount(), 32);
+    setProperty("RBFBModeSwitches", modeSwitches, 64);
+    setProperty("RBFBModeApplies", modeApplies, 64);
+    /* Derived, not read: clk = measured mHz * H_TOTAL * V_TOTAL. Published so
+     * a boot can check the derivation rather than take it on trust - BaseMhz
+     * and HTotal0/VTotal0 are the three inputs it came from. */
+    setProperty("RBFBModeClkHz", (uint64_t)modeClkHz, 32);
+    setProperty("RBFBModeBaseMhz", (uint64_t)modeBaseMhz, 32);
+    setProperty("RBFBModeHTotal0", (uint64_t)modeHTotal0, 32);
+    setProperty("RBFBModeVTotal0", (uint64_t)modeVTotal0, 32);
+    setProperty("RBFBModeLines60", (uint64_t)modeLines60, 32);
+    setProperty("RBFBModeMhz60", (uint64_t)modeMhz60, 32);
+    setProperty("RBFBModeRate60", (uint64_t)modeRate60, 32);
+    setProperty("RBFBModePeriod60", modePeriod60, 64);
+    setProperty("RBFBModeMinRb", (uint64_t)modeMinRb, 32);
+    setProperty("RBFBModeMaxRb", (uint64_t)modeMaxRb, 32);
+    setProperty("RBFBModeCtlRb", (uint64_t)modeCtlRb, 32);
+    /* The frame clock itself, so "the mode switched" and "the compositor is
+     * being paced for it" are two readable facts rather than one assumed one.
+     * This is the whole gap boot 255 left open on purpose. */
+    setProperty("RBFBVBLPeriodNs", vblPeriodNs, 64);
+    setProperty("RBFBVBLRetunes", vblRetunes, 64);
     setProperty("RBFBOtgHTotal", (uint64_t)otgHTotal, 32);
     setProperty("RBFBOtgVTotal", (uint64_t)otgVTotal, 32);
     setProperty("RBFBOtgVTotalMin", (uint64_t)otgVTotalMin, 32);
@@ -288,7 +320,7 @@ void RBAMDFramebuffer::armVBL(void)
     vblRunning = true;
 
     /* 2xe: a FIXED CADENCE, not a fixed delay. The old form was
-     *     clock_interval_to_deadline(kVBLPeriodNs, 1, &deadline)
+     *     clock_interval_to_deadline(vblPeriodNs, 1, &deadline)
      * which is `now + period` - and because armVBL() runs at the END of
      * deliverVBL(), `now` already includes delivering to every handler and
      * hubpPoll()'s MMIO read. That overhead was added to every period and
@@ -297,7 +329,7 @@ void RBAMDFramebuffer::armVBL(void)
      * tick is absorbed by the next interval instead of shifting all of them.
      */
     uint64_t period = 0;
-    nanoseconds_to_absolutetime(kVBLPeriodNs, &period);
+    nanoseconds_to_absolutetime(vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast, &period);
     uint64_t now = 0;
     clock_get_uptime(&now);
 
@@ -439,7 +471,8 @@ IOReturn RBAMDFramebuffer::registerForInterruptType(IOSelect interruptType,
             armVBL();
         }
         publishVBLState();
-        LOG("registered 'vbl ' handler %u (period %llu ns)", i, kVBLPeriodNs);
+        LOG("registered 'vbl ' handler %u (period %llu ns)", i,
+            vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast);
         return kIOReturnSuccess;
     }
     LOG("no free interrupt slot for 'vbl ' (%u in use)", kMaxInterrupts);
@@ -495,4 +528,29 @@ IOReturn RBAMDFramebuffer::setInterruptState(void *interruptRef, UInt32 state)
         }
     }
     return kIOReturnBadArgument;
+}
+
+/* 2y6: retune the frame clock to a new mode's period.
+ *
+ * Deliberately NOT a cancel-and-rearm. The thread_call is live and delivering
+ * 'vbl ' to the compositor; stopping it to change a number is a gap in the
+ * frame clock, and 2xe is the standing lesson that this clock's cadence is
+ * load-bearing. Instead the period is a plain member the callout re-reads each
+ * time it arms, so the worst case of a switch racing a tick is one tick armed
+ * at the old period - 7 ms, once. The store is an aligned 64-bit write on
+ * x86_64 and cannot tear.
+ *
+ * vblNextDeadline is zeroed because armVBL() ACCUMULATES (`+= period`) rather
+ * than re-basing from now, which is exactly what 2xe fixed and must not be
+ * undone. Accumulating against a deadline computed from the old period would
+ * carry the old cadence forward across the switch; zero makes the next arm
+ * re-base once, at the cost of a single frame of phase.
+ */
+void RBAMDFramebuffer::vblRetune(uint64_t periodNs)
+{
+    if (!periodNs) { return; }
+    vblPeriodNs = periodNs;
+    vblNextDeadline = 0;
+    vblRetunes++;
+    setProperty("RBFBVBLPeriodNs", vblPeriodNs, 64);
 }

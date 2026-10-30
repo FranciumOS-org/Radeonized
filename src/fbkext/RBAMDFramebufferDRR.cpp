@@ -77,7 +77,7 @@ static const uint32_t kDrrSeg2 = 0x34c0;
  * measures the sleep and not the raster. Bounded at 1.2 s of 100 us polls,
  * which covers 16 frames at 60 Hz (266 ms) with room, where the plugin's
  * 400 ms bound would not have. */
-static uint32_t drrMeasureMhz(volatile uint32_t *regs)
+uint32_t RBAMDFramebuffer::measureMhz(volatile uint32_t *regs)
 {
     const uint32_t kFrames  = 16;
     const uint32_t kPollUs  = 100;
@@ -151,7 +151,7 @@ void RBAMDFramebuffer::drrRun(void)
          * a refusal rather than a baseline of zero to compare against
          * (rule 14). Nothing has been written yet, so returning here leaves
          * the chip untouched. */
-        drrMhzBefore = drrMeasureMhz(regs);
+        drrMhzBefore = measureMhz(regs);
         if (drrMhzBefore == 0u) { drrRefuse = DRR_REFUSE_MEAS_BEFORE; return; }
 
         /* Arm step 2 BEFORE writing, so the revert is already scheduled when
@@ -185,7 +185,7 @@ void RBAMDFramebuffer::drrRun(void)
     }
 
     if (drrStep == 1u) {
-        drrMhzDuring = drrMeasureMhz(regs);
+        drrMhzDuring = measureMhz(regs);
 
         /* CONTROL first, then MIN/MAX - the mirror of the arming order, for
          * the same reason. */
@@ -206,7 +206,7 @@ void RBAMDFramebuffer::drrRun(void)
     /* The control. If this does not come back to drrMhzBefore the revert did
      * not take, and that has to be a finding from THIS boot rather than a
      * question for the next one. */
-    drrMhzAfter = drrMeasureMhz(regs);
+    drrMhzAfter = measureMhz(regs);
     drrStep = 3u;
     if (drrRefuse == 0u) { drrDone = true; }
 }
@@ -244,6 +244,15 @@ void RBAMDFramebuffer::drrReset(void)
 bool RBAMDFramebuffer::drrSetup(void)
 {
     if (!argEnabled("-rbgpufbdrr")) { return false; }
+
+    /* 2y6: the two features would fight over V_TOTAL_MIN/MAX, and the fight
+     * would MISREPORT itself - with the mode table holding 60 Hz,
+     * rb_drr_check() sees a non-zero V_TOTAL_CONTROL and refuses with
+     * RB_DRR_FW_DRR, which reads "the firmware owns DRR" when in fact we do.
+     * A published value that can mean two things is rule 14's complaint, so
+     * this declines outright and says which. The mode table is the better of
+     * the two in any case: it is the same write with somebody listening. */
+    if (modeArmed) { drrRefuse = 27u; return false; }
 
     /* Defaults are the measured 60 Hz, a short visit and enough delay that a
      * boot which goes black is still a boot somebody can reach over SSH. */

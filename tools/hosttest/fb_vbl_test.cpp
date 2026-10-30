@@ -286,7 +286,7 @@ int main() {
         void *r=nullptr;
         clockNs=0;
         assert(f.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&f,&c,&r)==0);
-        const uint64_t P=RBAMDFramebuffer::kVBLPeriodNs;
+        const uint64_t P=RBAMDFramebuffer::kVBLPeriodNsFast;
         const uint64_t first=t.deadline;
         assert(first==P);                       // armed from clockNs==0
         const uint64_t overhead=1400000;        // 1.4 ms, the measured shape
@@ -316,5 +316,60 @@ int main() {
         }
         assert(f.vblResyncs==resBefore+1);      // no further resyncs
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll and 2xe's drift-free cadence passed");
+
+    // 2y6: the retune. A mode switch changes the frame clock UNDER a running
+    // thread_call, and the thing that must not happen is 2xe coming back: a
+    // deadline accumulated from the OLD period would carry the old cadence
+    // across the switch forever, which looks exactly like a working switch
+    // for the first few frames.
+    {
+        RBAMDFramebuffer f; FakeCall t,k; Counts c{};
+        f.vblCall=&t; f.vblKickCall=&k;
+        void *r=nullptr;
+        clockNs=0;
+        assert(f.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&f,&c,&r)==0);
+        const uint64_t fast=RBAMDFramebuffer::kVBLPeriodNsFast;
+        const uint64_t slow=16668887ULL;        // 60 Hz, from rb_drr_period_ns
+        assert(t.deadline==fast);
+        for(unsigned i=1;i<=10;i++) { tickSlow(f,t,0); }
+        const uint64_t before=t.deadline;
+        assert(before==11*fast);
+
+        f.vblRetune(slow);
+        assert(f.vblRetunes==1);
+        assert(f.vblPeriodNs==slow);
+        // Re-based, NOT accumulated. The next tick is taken with a NON-ZERO
+        // overhead on purpose: tickSlow sets clockNs=deadline+overhead, so
+        // with overhead 0 the clock lands exactly on the old deadline and
+        // `clockNs+slow` and `before+slow` are the same number - the
+        // assertion could not have told a re-base from an accumulation at
+        // all. Off the lattice they differ, and that difference IS 2xe.
+        const uint64_t off=1234567ULL;
+        tickSlow(f,t,off);
+        assert(clockNs==before+off);
+        assert(t.deadline==clockNs+slow);       // re-based from now
+        assert(t.deadline!=before+slow);        // not accumulated
+        // And from there the new period is the lattice.
+        const uint64_t nbase=t.deadline;
+        for(unsigned i=1;i<=10;i++) {
+            tickSlow(f,t,0);
+            assert(t.deadline==nbase+(uint64_t)i*slow);
+        }
+        // Back again, by the same path, because a mode switch happens in both
+        // directions and only one of them had ever been exercised.
+        f.vblRetune(fast);
+        assert(f.vblRetunes==2);
+        tickSlow(f,t,0);
+        const uint64_t fbase=t.deadline;
+        assert(fbase==clockNs+fast);
+        for(unsigned i=1;i<=10;i++) {
+            tickSlow(f,t,0);
+            assert(t.deadline==fbase+(uint64_t)i*fast);
+        }
+        // A zero period is refused rather than stopping the frame clock.
+        f.vblRetune(0);
+        assert(f.vblRetunes==2);
+        assert(f.vblPeriodNs==fast);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune passed");
 }

@@ -24,6 +24,20 @@
 #define DRR_MEAS_MHZ  143836u
 #define DRR_CTL_FW    0u          /* firmware has DRR off: MIN/MAX/MID/CTL all 0 */
 
+/* Boot 255, the boot where the write worked (2y5 DONE). These are the anchor
+ * for the mode table: a measured before, a measured 60 Hz, and a measured
+ * after, all from one run. */
+#define B255_BEFORE      143843u
+#define B255_DURING       60025u
+#define B255_AFTER       143821u
+#define B255_CLK      342011761u   /* 143843 * 2106 * 1129 / 1000 */
+#define B255_MODE60_MHZ   59992u   /* what 2707 lines actually gives */
+
+/* The 16.16 refreshRate in `.Display_boot`'s own live IOFBConfig, which is
+ * what the kext has advertised and ticked at since 2xe. Not re-derived: it is
+ * the value already in the registry, and the mode table must not change it. */
+#define DRR_RATE1616_LIVE 0x008fd53fu
+
 int drr_tests(void);
 
 int drr_tests(void)
@@ -89,6 +103,73 @@ int drr_tests(void)
           "disarming returns the register exactly to where it started");
     CHECK(rb_drr_ctl_off(0u) == 0u,
           "disarming an already-clear register is a no-op");
+
+    /* --- 2y6: the mode table -------------------------------------------
+     *
+     * Anchored on boot 255, which is a different and stronger anchor than the
+     * rest of this file: these are the numbers from the boot where the write
+     * WORKED. Measured 143843 mHz before, 60025 during at 2707 lines, 143821
+     * after. The before/after pair bounds this instrument's own noise at
+     * 22 mHz on an unchanged raster, and that is the tolerance every
+     * comparison below is allowed - not a figure picked to make a test pass.
+     */
+    CHECK(rb_drr_clk_from_mhz(B255_BEFORE, DRR_HTOTAL, DRR_VTOTAL) == B255_CLK,
+          "the pixel clock comes from the measurement, not from a register");
+    CHECK(rb_drr_clk_from_mhz(0u, DRR_HTOTAL, DRR_VTOTAL) == 0u &&
+          rb_drr_clk_from_mhz(B255_BEFORE, 0u, DRR_VTOTAL) == 0u &&
+          rb_drr_clk_from_mhz(B255_BEFORE, DRR_HTOTAL, 0u) == 0u,
+          "and is 0 rather than a guess when an input is missing");
+
+    /* The self-consistency check, and the only reason a derived clock is
+     * trustworthy at all: feed it back and it must return the raster it came
+     * from. A clock derived wrongly would still produce a plausible 60 Hz line
+     * count, so the 60 Hz answer alone proves nothing. */
+    CHECK(rb_drr_lines_for_mhz(B255_CLK, DRR_HTOTAL, B255_BEFORE) == DRR_VTOTAL,
+          "the derived clock round-trips to the V_TOTAL it was derived from");
+    CHECK(rb_drr_lines_for_mhz(B255_CLK, DRR_HTOTAL, 60000u) == 2707u,
+          "and independently reproduces 2707 lines for 60 Hz");
+
+    /* What the chip will actually do at 2707 lines, which is what gets
+     * advertised - not the 60000 that was asked for. The difference is 8 mHz
+     * and publishing the request instead of the achievable value is how a
+     * mode list comes to lie. */
+    CHECK(rb_drr_mhz(B255_CLK, DRR_HTOTAL, 2707u) == B255_MODE60_MHZ,
+          "the advertised rate is what 2707 lines gives, not what was asked");
+    {
+        const uint32_t d = (B255_DURING > B255_MODE60_MHZ)
+                               ? (B255_DURING - B255_MODE60_MHZ)
+                               : (B255_MODE60_MHZ - B255_DURING);
+        const uint32_t noise = (B255_BEFORE > B255_AFTER)
+                                   ? (B255_BEFORE - B255_AFTER)
+                                   : (B255_AFTER - B255_BEFORE);
+        CHECK(noise == 22u, "the before/after pair bounds the noise at 22 mHz");
+        CHECK(d <= 2u * noise,
+              "and the computed 60 Hz rate matches boot 255's MEASURED 60025 "
+              "inside that noise");
+    }
+
+    /* 16.16, the format IODisplayModeInformation::refreshRate is in. */
+    CHECK(rb_drr_rate1616(B255_MODE60_MHZ) == 0x003bfdf4u,
+          "60 Hz in 16.16 fixed point");
+    CHECK(rb_drr_rate1616(0u) == 0u, "and 0 mHz is 0, not a division fault");
+    /* An exact one, so a sign or shift error cannot hide behind rounding. */
+    CHECK(rb_drr_rate1616(1000u) == 65536u, "1 Hz is exactly 1.0 in 16.16");
+
+    /* THE CONTINUITY CHECK. The 143.83 Hz mode must keep ticking at the period
+     * the kext has used since 2xe, because that constant is what three
+     * milestones of frame-rate work was measured against. If this changes, the
+     * mode table has silently retimed the compositor. */
+    CHECK(rb_drr_period_ns(DRR_RATE1616_LIVE) == 6952507ull,
+          "mode 100's VBL period is bit-identical to the live 2xe constant");
+    CHECK(rb_drr_period_ns(rb_drr_rate1616(B255_MODE60_MHZ)) == 16668887ull,
+          "and 60 Hz ticks at 16.669 ms");
+    CHECK(rb_drr_period_ns(0u) == 0ull, "a zero rate has no period");
+    /* The two periods must differ by the ratio of the two rates, within
+     * rounding - the cheapest guard against one mode being handed the other's
+     * clock, which is the bug this whole table exists to prevent. */
+    CHECK(rb_drr_period_ns(rb_drr_rate1616(B255_MODE60_MHZ)) >
+              2u * rb_drr_period_ns(DRR_RATE1616_LIVE),
+          "60 Hz is more than twice the period of 143.83 Hz");
 
     return failures;
 }

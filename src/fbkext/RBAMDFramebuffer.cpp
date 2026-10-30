@@ -35,7 +35,10 @@ namespace {
  * IOFBMemorySize reads 8294400 = 1920 * 1080 * 4, so the rows are NOT padded
  * and bytesPerRow is exactly 7680. The GOP framebuffer is BAR0 offset 0 (2pr).
  */
-const IODisplayModeID kModeID       = 100;
+/* 2y6: the mode ids moved to CLASS constants in the header
+ * (kModeIDFast = 100, kModeID60 = 101) because RBAMDFramebufferModes.cpp
+ * needs them and this namespace is anonymous - the same trap 2y5 hit with
+ * argOn. Nothing here redefines them. */
 const UInt32 kWidth                 = 1920;
 const UInt32 kHeight                = 1080;
 const UInt32 kBytesPerRow           = 7680;
@@ -522,6 +525,9 @@ bool RBAMDFramebuffer::start(IOService *provider)
 
     hubpSetup();
     drrReset();       /* 2y5: before anything can publish it */
+    modeReset();      /* 2y6: and before getDisplayModeCount can be asked */
+    vblPeriodNs = kVBLPeriodNsFast;
+    vblRetunes = 0;
     otgTimingReset(); /* 2y4: before blSetup, which may not run at all */
     blSetup();        /* 2xs: independent of hubpSetup's result by design */
     /* 2y0: AFTER blSetup, because it refuses unless blReady, and BEFORE
@@ -530,6 +536,11 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * registered afterwards would be racing the display's own driver to
      * exist before IODisplay walks our children. */
     blParamsSetup();
+    /* 2y6: BEFORE drrSetup, which declines if the mode table is armed, and
+     * before IOFramebuffer::start() below, because that is what asks
+     * getDisplayModeCount() - a second mode appearing afterwards would be a
+     * mode list that changed under the compositor. */
+    modeSetup();
     drrSetup();       /* 2y5: needs blSetup's BAR5 map, so it follows it */
 
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
@@ -944,6 +955,16 @@ void RBAMDFramebuffer::stop(IOService *provider)
     OSSafeReleaseNULL(nvram);
     OSSafeReleaseNULL(aperture);
     hubpTeardown();
+    /* 2y6: both of these put OTG timing back and both need blSetup's BAR5
+     * map, so they run BEFORE blTeardown() unmaps it. drrTeardown() was
+     * written in 2y5 and never called from here at all - it only mattered on
+     * an unload, and this kext panics on `kmutil unload` (2sq) so stop() has
+     * effectively never run. It is wired up now because "never reached" and
+     * "correct" are different claims, and the mode table makes the same
+     * teardown genuinely load-bearing: a kext that stopped while the panel
+     * was at 60 Hz would leave the raster at a refresh nothing advertises. */
+    modeTeardown();
+    drrTeardown();
     blTeardown();
     IOFramebuffer::stop(provider);
 }
@@ -978,9 +999,13 @@ const char *RBAMDFramebuffer::getPixelFormats(void)
     return IO32BitDirectPixels "\0\0";
 }
 
+/* 2y6: two modes when the table is armed, one otherwise. The "otherwise" is
+ * the configuration every boot since 2sl has been read against, and a refusal
+ * anywhere in modeSetup() lands here rather than advertising a mode we cannot
+ * deliver. */
 IOItemCount RBAMDFramebuffer::getDisplayModeCount(void)
 {
-    return 1;
+    return modeArmed ? 2 : 1;
 }
 
 IOReturn RBAMDFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes)
@@ -988,23 +1013,41 @@ IOReturn RBAMDFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes)
     if (!allDisplayModes) {
         return kIOReturnBadArgument;
     }
-    allDisplayModes[0] = kModeID;
+    allDisplayModes[0] = kModeIDFast;
+    if (modeArmed) {
+        allDisplayModes[1] = kModeID60;
+    }
     return kIOReturnSuccess;
+}
+
+/* One place that decides whether an id is ours, so the five query methods
+ * cannot disagree about it. */
+bool RBAMDFramebuffer::modeKnown(IODisplayModeID id) const
+{
+    return id == kModeIDFast || (modeArmed && id == kModeID60);
 }
 
 IOReturn RBAMDFramebuffer::getInformationForDisplayMode(IODisplayModeID displayMode,
                                                         IODisplayModeInformation *info)
 {
-    if (displayMode != kModeID || !info) {
+    if (!modeKnown(displayMode) || !info) {
         return kIOReturnBadArgument;
     }
     bzero(info, sizeof(*info));
     info->nominalWidth  = kWidth;
     info->nominalHeight = kHeight;
-    info->refreshRate   = kRefreshRate1616;
+    /* The only field that differs between the two: same 1920x1080 active
+     * raster, same depth, same everything else, because a longer V_TOTAL is a
+     * longer vertical blank and nothing more (2y5). */
+    info->refreshRate   = modeRate1616(displayMode);
     info->maxDepthIndex = 0;
-    info->flags         = kDisplayModeValidFlag | kDisplayModeSafeFlag |
-                          kDisplayModeDefaultFlag;
+    info->flags         = kDisplayModeValidFlag | kDisplayModeSafeFlag;
+    /* 143.83 Hz stays the default and the safe mode. 60 Hz is offered, never
+     * imposed: it is ours, it is three milestones younger, and a boot that
+     * comes up in it would be a boot where nothing has been measured. */
+    if (displayMode == kModeIDFast) {
+        info->flags |= kDisplayModeDefaultFlag;
+    }
     return kIOReturnSuccess;
 }
 
@@ -1019,7 +1062,7 @@ IOReturn RBAMDFramebuffer::getPixelInformation(IODisplayModeID displayMode, IOIn
                                                IOPixelAperture aperture_,
                                                IOPixelInformation *info)
 {
-    if (displayMode != kModeID || depth != 0 || aperture_ != kIOFBSystemAperture || !info) {
+    if (!modeKnown(displayMode) || depth != 0 || aperture_ != kIOFBSystemAperture || !info) {
         return kIOReturnBadArgument;
     }
     bzero(info, sizeof(*info));
@@ -1040,7 +1083,7 @@ IOReturn RBAMDFramebuffer::getPixelInformation(IODisplayModeID displayMode, IOIn
 IOReturn RBAMDFramebuffer::getCurrentDisplayMode(IODisplayModeID *displayMode, IOIndex *depth)
 {
     if (displayMode) {
-        *displayMode = kModeID;
+        *displayMode = modeArmed ? modeCur : kModeIDFast;
     }
     if (depth) {
         *depth = 0;
@@ -1050,11 +1093,32 @@ IOReturn RBAMDFramebuffer::getCurrentDisplayMode(IODisplayModeID *displayMode, I
 
 IOReturn RBAMDFramebuffer::setDisplayMode(IODisplayModeID displayMode, IOIndex depth)
 {
-    /* Accept the one mode the firmware already set and write NOTHING to the
-     * display engine. Anything else is refused rather than silently ignored. */
-    if (displayMode != kModeID || depth != 0) {
-        LOG("setDisplayMode(%d, %d) refused; only mode %d depth 0 exists",
-            displayMode, (int)depth, kModeID);
+    if (depth != 0 || !modeKnown(displayMode)) {
+        LOG("setDisplayMode(%d, %d) refused; depth 0 and mode %d%s",
+            displayMode, (int)depth, kModeIDFast,
+            modeArmed ? " or 101" : " only");
+        return kIOReturnUnsupported;
+    }
+
+    /* Unarmed: accept the one mode the firmware already set and write NOTHING
+     * to the display engine. This is the pre-2y6 behaviour verbatim. */
+    if (!modeArmed) {
+        return kIOReturnSuccess;
+    }
+
+    modeLastAsked = (uint32_t)displayMode;
+    if (displayMode == modeCur) {
+        /* Not a no-op worth skipping silently: the compositor asks for the
+         * current mode on wake and on every display reconfigure, and counting
+         * it separately from a real switch is what keeps modeSwitches
+         * meaningful (rule 33 - an index is not a count). */
+        modeApplies++;
+        return kIOReturnSuccess;
+    }
+
+    if (!modeApply(displayMode)) {
+        LOG("setDisplayMode(%d) failed, refuse %u; staying at %d",
+            displayMode, modeRefuse, modeCur);
         return kIOReturnUnsupported;
     }
     return kIOReturnSuccess;
@@ -1062,12 +1126,32 @@ IOReturn RBAMDFramebuffer::setDisplayMode(IODisplayModeID displayMode, IOIndex d
 
 IOReturn RBAMDFramebuffer::getStartupDisplayMode(IODisplayModeID *displayMode, IOIndex *depth)
 {
-    return getCurrentDisplayMode(displayMode, depth);
+    /* The mode the machine BOOTS in, which is the firmware's 143.83 Hz and not
+     * whatever is current - those are different questions and forwarding to
+     * getCurrentDisplayMode answered the wrong one as soon as a second mode
+     * existed. */
+    return getStartupDisplayMode_fast(displayMode, depth);
+}
+
+IOReturn RBAMDFramebuffer::getStartupDisplayMode_fast(IODisplayModeID *displayMode,
+                                                      IOIndex *depth)
+{
+    if (displayMode) { *displayMode = kModeIDFast; }
+    if (depth)       { *depth = 0; }
+    return kIOReturnSuccess;
 }
 
 IOReturn RBAMDFramebuffer::setStartupDisplayMode(IODisplayModeID displayMode, IOIndex depth)
 {
-    return setDisplayMode(displayMode, depth);
+    /* Accepted and NOT persisted. There is nowhere to persist it to - the
+     * firmware lights the panel before this kext exists - and a startup mode
+     * that silently did not take would be worse than one that was never
+     * offered. The boot always comes up at 143.83 Hz; the compositor can
+     * switch once the desktop is up. */
+    if (depth != 0 || !modeKnown(displayMode)) {
+        return kIOReturnUnsupported;
+    }
+    return kIOReturnSuccess;
 }
 
 /* -- controller and connection ------------------------------------------ */

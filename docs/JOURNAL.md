@@ -49668,3 +49668,147 @@ changing the timing **and** `rbgpuvblhz` together, since rule 38's lesson is
 that two separately-set halves disagree. The DRR experiment stays as it is,
 opt-in and self-reverting, because it is the instrument that will say whether a
 future mode switch landed.
+
+## 2y6 — 60 Hz as a display mode, built and NEVER BOOTED (`A5479DEA-1219-3793-8C8A-9673DF7CE010`)
+
+Boot 255 settled that the panel accepts a 2707-line frame applied live. What it
+deliberately did not do is tell anybody: macOS advertised one mode at
+143.836 Hz and the VBL thread_call kept ticking there, so for eight seconds the
+compositor was paced against a rate the raster was not running at. This
+milestone is entirely about making those three things move together, and it is
+a wiring job rather than a question - which is why it is written as a feature
+with a mode list rather than as another experiment.
+
+**Three numbers per mode, from one source.** A mode needs the line count to
+write, the 16.16 `refreshRate` IOFramebuffer advertises, and the nanosecond
+period the VBL ticks at. `rb_drr.h` now derives the second from the first and
+the third **from the second**, in that order. That ordering is the point: there
+is one rate per mode instead of three expressions of it that can drift apart,
+and the thing that drifts in this project is always the second copy
+(`argOn` in 2y5, the stale dyld base in 2xz, the two halves in rule 38).
+
+**The pixel clock is derived, and the round-trip is what makes that honest.**
+It comes from the DP PLL, this project has never located it, and it does not
+need to: `clk = mHz * H_TOTAL * V_TOTAL`, and boot 255 measured all three on
+the live raster. 143843 * 2106 * 1129 / 1000 = **342 011 761 Hz**. On its own
+that would be rule 18's objection - a number built from one row - so the
+hosttest makes it prove itself: fed back through `rb_drr_lines_for_mhz` with
+the refresh it was derived from, it must return **1129**, the V_TOTAL it came
+from. A clock wrong by a factor would still produce a plausible-looking 60 Hz
+line count, so the 60 Hz answer alone would prove nothing. It then gives 2707
+for 60 Hz independently, agreeing with the hand-computed value the earlier
+assertions pin.
+
+**What gets advertised is what the chip will do, not what was asked for.**
+2707 lines gives **59992 mHz**, not 60000. Publishing the request instead of
+the achievable value is how a mode list comes to lie about a panel, so
+`modeMhz60` is computed from the line count and everything downstream - the
+16.16 rate, the VBL period - comes from that. Boot 255 *measured* 60025 at
+these lines; the computed 59992 is 33 mHz away, and the hosttest asserts that
+gap against the instrument's own noise rather than a tolerance picked to pass:
+`MhzBefore` 143843 and `MhzAfter` 143821 are two measurements of an unchanged
+raster 8 s apart, so 22 mHz is what this sampler can resolve, and the
+assertion allows twice that.
+
+**THE CONTINUITY CHECK, which is the one that matters most.** The 143.83 Hz
+mode must keep ticking at the period the kext has used since 2xe, because
+three milestones of frame-rate work were measured against it. The hosttest
+asserts `rb_drr_period_ns(0x008fd53f) == 6952507` exactly. If the mode table
+ever silently retimes the compositor, the build fails rather than the next boot
+being inexplicable. Mode 100 also keeps the 16.16 value out of
+`.Display_boot`'s own live IOFBConfig rather than a re-derived one - re-deriving
+it moves it by 0.01 Hz for no gain, and it is what every boot since 2sl has
+been read against.
+
+**The VBL period stopped being a constant**, and the retune is deliberately not
+a cancel-and-rearm: the thread_call is live and delivering `'vbl '`, and
+stopping it to change a number is a gap in the frame clock. It is a plain
+member the callout re-reads when it arms, so the worst case of a switch racing
+a tick is one tick armed at the old period. `vblRetune()` also zeroes
+`vblNextDeadline`, because `armVBL()` ACCUMULATES (`+= period`) - that is 2xe's
+fix and must not be undone, but accumulating against a deadline computed from
+the old period would carry the old cadence across the switch.
+
+**My own assertion caught my own untestable assertion.** The first version of
+the retune test asserted `t.deadline != before + slow` after ticking with zero
+overhead - and `tickSlow` sets `clockNs = deadline + overhead`, so with
+overhead 0 the clock lands exactly on the old deadline and `clockNs + slow` and
+`before + slow` are **the same number**. The assertion could not have told a
+re-base from an accumulation at all; it failed only because the arithmetic
+happened to be visible. Rewritten to tick 1.234567 ms off the lattice, it
+discriminates, and the control confirms it: deleting `vblNextDeadline = 0`
+fails exactly that assertion and nothing else. This is rule 26 in its most
+uncomfortable form - the instrument was the test, and it was wrong in the
+direction of passing.
+
+**Why opt-in when the write is already proven.** The write is not the new risk.
+ADVERTISING is: `getDisplayModeCount()` has returned 1 since 2sl and every boot
+since has been read against that, so a second mode changes what WindowServer
+sees at the moment the framebuffer comes up, before any user has asked for
+anything. 2xx is the standing lesson on what a WindowServer that dislikes its
+framebuffer costs to diagnose - nine boots and a nine-stage bisect. So
+`-rbgpufbmodes` is opt-in, and **any** refusal inside `modeSetup()` collapses
+the table back to the single mode the last six milestones were measured on
+rather than offering a mode it cannot deliver. 143.83 Hz keeps
+`kDisplayModeDefaultFlag`; 60 Hz is offered, never imposed, and
+`setStartupDisplayMode` accepts without persisting because there is nowhere to
+persist to - the firmware lights the panel before this kext exists.
+
+**Mutually exclusive with `-rbgpufbdrr`, checked rather than documented.** With
+the mode table holding 60 Hz, the experiment's `rb_drr_check` would see our own
+`V_TOTAL_CONTROL` and refuse with `RB_DRR_FW_DRR` - a published value reading
+"the firmware owns DRR" when in fact we do. Rule 14's complaint about a value
+that can mean two things, so `drrSetup()` declines with its own code 27.
+
+**Two things found while wiring, both pre-existing.** `drrTeardown()` was
+written in 2y5 and **never called from `stop()`** - it only mattered on an
+unload, and this kext panics on `kmutil unload` (2sq), so `stop()` has
+effectively never run. It is wired up now, before `blTeardown()` unmaps the
+BAR5 map both teardowns need, because "never reached" and "correct" are
+different claims - and the mode table makes it genuinely load-bearing, since a
+kext that stopped while the panel was at 60 Hz would leave the raster at a
+refresh nothing advertises. And `getStartupDisplayMode` forwarded to
+`getCurrentDisplayMode`, which answered the wrong question the moment a second
+mode existed.
+
+`kModeID` moved from the anonymous namespace in `RBAMDFramebuffer.cpp` to class
+constants, for exactly the reason 2y5 paid for with `argOn`: a header
+declaration of a name that is already file-local creates a second one.
+
+Dependency tracking verified in both directions after 2y3's defect: touching
+`rb_drr.h` rebuilds exactly `RBAMDFramebufferDRR.cpp` and
+`RBAMDFramebufferModes.cpp`, and touching an unrelated `src/common` source
+rebuilds no fbkext object.
+
+Install: fbkext `A5479DEA`, plus the plugin `C518C319` which has now been
+uninstalled for four milestones, and `-rbgpufbmodes` in boot-args.
+
+Stated before the boot:
+- `RBFBModeArmed` Yes with `RBFBModeCount` **2** and `RBFBModeRefuse` 0 is the
+  table up. `RBFBModeClkHz` should read **342011761** and `RBFBModeLines60`
+  **2707**, `RBFBModeMhz60` **59992**, `RBFBModeRate60` **0x3bfdf4**,
+  `RBFBModePeriod60` **16668887** - all four derived on this boot from this
+  boot's own measurement, so disagreement with those numbers means the raster
+  is not what boot 255 found, not that the arithmetic is wrong.
+- The real test is the Displays panel offering a refresh-rate choice at all.
+  If it does and 60 Hz is selected: `RBFBModeCur` **101**, `RBFBModeSwitches`
+  1, `RBFBMinRb`/`MaxRb` **2707**, `RBFBModeCtlRb` **3**, and - the number
+  that distinguishes this milestone from 2y5 - `RBFBVBLPeriodNs` **16668887**
+  with `RBFBVBLRetunes` 1. A mode switch where the period did NOT move is the
+  2y5 state with a nicer UI, and is the failure this whole milestone exists to
+  prevent.
+- `RBFBModeRefuse` **21** means `blSetup` did not give us the BAR5 map (so the
+  backlight is also dead this boot); **22** the refresh could not be measured;
+  **24** 60 Hz is unreachable on this raster; **25** the write did not read
+  back **and was put back**; **27** `-rbgpufbdrr` is also in boot-args, which
+  is a boot-args mistake rather than a finding.
+- `RBFBModeLastAsked` non-zero with `RBFBModeCur` unchanged means the
+  compositor asked and we refused - distinct from `LastAsked` 0, which means it
+  never asked and the mode list is being ignored rather than rejected. Those
+  two looked identical for the whole of the brightness work.
+- `RBFBModeApplies` moving while `RBFBModeSwitches` stays put is normal: the
+  compositor re-asks for the mode it is already in on wake and on every
+  reconfigure.
+- If WindowServer dislikes two modes, the symptom is a boot with no desktop,
+  and the recovery costs nothing: the boot sentinel makes the next boot stock,
+  or remove `-rbgpufbmodes`. That is the whole reason it is opt-in.

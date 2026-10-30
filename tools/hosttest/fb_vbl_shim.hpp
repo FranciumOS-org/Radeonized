@@ -44,7 +44,22 @@ public:
     };
     static const unsigned kMaxInterrupts=4;
     static constexpr uint32_t kRefreshRate1616=0x008fd53f;
-    static constexpr uint64_t kVBLPeriodNs=1000000000ULL*65536ULL/kRefreshRate1616;
+    static constexpr uint64_t kVBLPeriodNsFast=1000000000ULL*65536ULL/kRefreshRate1616;
+    // 2y6: the period is a runtime value now, so the host tests exercise the
+    // same retune path the mode switch uses rather than a constant.
+    uint64_t vblPeriodNs=kVBLPeriodNsFast;
+    uint64_t vblRetunes=0;
+    void vblRetune(uint64_t periodNs);
+    // 2y6: publishVBLState reports the mode table too; the host build needs
+    // the members to exist, with the same defaults start() gives them.
+    bool modeArmed=false;
+    uint32_t modeRefuse=20, modeLastAsked=0, modeClkHz=0, modeBaseMhz=0;
+    uint32_t modeLines60=0, modeMhz60=0, modeRate60=0;
+    uint32_t modeMinRb=0, modeMaxRb=0, modeCtlRb=0;
+    uint32_t modeHTotal0=0, modeVTotal0=0;
+    int32_t modeCur=100;
+    uint64_t modePeriod60=0, modeSwitches=0, modeApplies=0;
+    unsigned getDisplayModeCount() const { return modeArmed?2u:1u; }
     Interrupt interrupts[kMaxInterrupts]{};
     thread_call_t vblCall=nullptr;
     thread_call_t vblKickCall=nullptr;

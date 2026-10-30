@@ -54,6 +54,10 @@ public:
      * file keep its own copy of the boot-arg rule - two copies is how two
      * halves come to disagree about whether a feature is on. */
     static bool argEnabled(const char *tok);
+    /* 2y6: ONE copy of the 2rn edge-latch sampler, defined in
+     * RBAMDFramebufferDRR.cpp and used by the mode table too. Two copies is
+     * how two halves come to disagree about what the panel is doing. */
+    static uint32_t measureMhz(volatile uint32_t *regs);
     /* IOService */
     IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
     bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -128,8 +132,19 @@ private:
     };
     static const unsigned kMaxInterrupts = 4;
     static constexpr UInt32 kRefreshRate1616 = 0x008fd53f; /* measured 143.83 Hz */
-    static constexpr uint64_t kVBLPeriodNs =
+    static constexpr uint64_t kVBLPeriodNsFast =
         1000000000ULL * 65536ULL / kRefreshRate1616;
+
+public:
+    /* 2y6: CLASS constants, not file-scope ones. kModeID used to live in an
+     * anonymous namespace in RBAMDFramebuffer.cpp, and 2y5 spent a build
+     * discovering what that costs when a second file needs the same name -
+     * a header declaration there created a SECOND global and every call site
+     * went ambiguous. One definition, reachable from both files. */
+    static constexpr IODisplayModeID kModeIDFast = 100;  /* 143.83 Hz, the firmware's */
+    static constexpr IODisplayModeID kModeID60   = 101;  /* 60 Hz, ours (2y6) */
+
+private:
 
     IOPCIDevice *pci;
     IODeviceMemory *aperture;
@@ -338,6 +353,46 @@ private:
     uint32_t           drrMax0;
     thread_call_t      drrCall;
 
+    /* 2y6: the mode table. Opt-in via -rbgpufbmodes; on any refusal the whole
+     * thing collapses back to the single mode every boot since 2sl has been
+     * measured against, rather than advertising one it cannot deliver.
+     *   Refuse 20 -> not armed (the boot-arg is absent): one mode, as before
+     *          21 -> no BAR5 map (rule 38, said at setup not at switch time)
+     *          22 -> the refresh could not be measured, so there is no clock
+     *          23 -> the clock or the derived rate came out zero
+     *          24 -> 60 Hz is not reachable on this raster
+     *          25 -> the timing write did not read back; it was put back
+     *          26 -> a mode id that is not one of ours
+     *          27 -> -rbgpufbdrr is also armed; they would fight (see below)
+     *   and 0..5 are rb_drr.h's own, so a published number means one thing. */
+    bool               modeArmed;
+    uint32_t           modeRefuse;
+    IODisplayModeID    modeCur;
+    uint32_t           modeClkHz;      /* DERIVED from the measurement (2y6) */
+    uint32_t           modeBaseMhz;    /* what the raster measured at setup */
+    uint32_t           modeLines60;
+    uint32_t           modeMhz60;      /* what those lines actually give */
+    uint32_t           modeRate60;     /* 16.16, as advertised */
+    uint64_t           modePeriod60;   /* ns, what the VBL ticks at */
+    uint64_t           modeSwitches;
+    uint64_t           modeApplies;
+    uint32_t           modeLastAsked;
+    uint32_t           modeMinRb;
+    uint32_t           modeMaxRb;
+    uint32_t           modeCtlRb;
+    uint32_t           modeCtl0;
+    uint32_t           modeMin0;
+    uint32_t           modeMax0;
+    uint32_t           modeHTotal0;
+    uint32_t           modeVTotal0;
+    /* 2y6: the VBL period is no longer a constant. One aligned 64-bit store
+     * on x86_64, read by the thread_call each time it re-arms, so the worst
+     * case of a switch racing a tick is ONE tick armed at the old period -
+     * not a torn value. vblRetune() also zeroes vblNextDeadline so the clock
+     * re-bases from now instead of accumulating against the old period. */
+    uint64_t           vblPeriodNs;
+    uint64_t           vblRetunes;
+
     /* 2y4: OTG0's timing and DRR group as the firmware left it, read once in
      * blSetup(). The starting point for any refresh-rate change, and the
      * restore values if one is ever written. */
@@ -401,6 +456,14 @@ private:
     void drrReset(void);         /* 2y5 */
     bool drrSetup(void);
     void drrTeardown(void);
+    bool modeKnown(IODisplayModeID id) const;
+    IOReturn getStartupDisplayMode_fast(IODisplayModeID *displayMode, IOIndex *depth);
+    void modeReset(void);        /* 2y6, RBAMDFramebufferModes.cpp */
+    bool modeSetup(void);
+    void modeTeardown(void);
+    bool modeApply(IODisplayModeID want);
+    UInt32 modeRate1616(IODisplayModeID id) const;
+    void vblRetune(uint64_t periodNs);
     bool blParamsSetup(void);
     void blParamsTeardown(void);
     uint32_t blCurrentLevel(void);
