@@ -48064,3 +48064,83 @@ boot-args (the user's rescue — `sudo tools/efi.sh on` takes it out) and
 would otherwise spend one stock boot clearing itself.
 
 Built: plugin `BCE9FC13`, framebuffer `353A1D24`.
+
+## 2xx (continued) — confirmed on hardware, and a second, separate defect
+
+**2xx works.** Boot 237, read from the following `-rbgpuoff` boot:
+
+```
+rbgpu-gen   1          <- the migration ran and read back
+rbgpu-tick  1          <- was "0"; rewritten by rbgpu_gen_migrate()
+rbgpu-fb    1          <- was "0"; rewritten
+rbgpu-diag  d=132 armed=1 tick_armed=1 tick_oneshot=0 tick_solved=1 tick_us=1b20
+            agdc_on=1 agdc_solved=3ff agdc_error=0 otg_err=0
+```
+
+`tick_oneshot` 3 → **0** and `tick_armed` 0 → **1**, `tick_us` 0x1b20 = 6944 µs,
+the panel's own period. The frame-rate regression the user reported is closed:
+d=131 (boot 236, pre-2xx) reads `tick_armed=0 tick_oneshot=3` beside it, in the
+same NVRAM, which is as clean a before/after as this project gets.
+
+### The WindowServer crash loop is NOT 2xx
+
+The user reported, on the 2xx boot: lock screen fine, password accepted,
+desktop for about a second, back to the lock screen, repeating.
+`/Library/Logs/DiagnosticReports` settles what it is and is not:
+
+| crash | uptime | asserting frame |
+|---|---|---|
+| 10-24 01:28, 01:30 | 7 s, 6 s | `CoreDisplay::Assert` ← `CGXMappedDisplayStart` |
+| 10-30 00:58:12 / 00:58:56 / 00:59:52 | 23 / 80 / 130 s | `CA::OGL::Context::push_surface` |
+| 10-30 01:03:24 / 01:03:33 | 28 / 51 s | `CA::OGL::Context::push_surface` |
+| 10-30 01:52:31 / 01:52:40 | 24 / 38 s | `CA::OGL::Context::push_surface` |
+
+Six `push_surface` aborts across **three** armed boots — 235 (00:58),
+236 (01:03) and 237 (01:52, the 2xx boot). The counter only increments in the
+peer, which `-rbgpuoff` stops before (rule 27), so the two `-rbgpuoff` boots in
+between did not consume a nonce. **The loop predates 2xx by two boots**; 2xx
+made the desktop reachable enough to meet it, and nothing more.
+
+What every one of the six carries, identically:
+
+- `ktriageinfo`: **`VM - (arg = 0x0) Returned success with no page`, twice.**
+- `SIGABRT` from `__assert_rtn` inside
+  `CA::OGL::Context::push_surface` ← `FlattenNode::retain_surface`, i.e. CA
+  rendering a flattened sublayer tree into an offscreen surface.
+- The whole compositor is the **software** path: `CompositorSW`,
+  `CA::OGL::SW::scanline` / `rect_sdf_sampler` on a dozen worker threads.
+- In the 01:52:40 report, thread 7297 is in `layer_blit_byte_ANY` with
+  `trap 14 "(no mapping for user data write)"`, `cr2 = 0x16E6E4xx`.
+- The VM summary, **byte-identical in all three boots**:
+  `CG framebuffers 903.0M / 8` and `CG framebuffers (reserved) 582.1M / 7
+  reserved VM address space (unallocated)`. The 10-24 crash, a different
+  assert, reads `CG framebuffers (reserved) 135.0M / 1` and has no mapped
+  line at all.
+
+So WindowServer's software compositor is writing into framebuffer mappings
+whose pages never materialize: the fault returns KERN_SUCCESS with no page,
+one worker takes an unmapped-write trap in the blit, and the main thread then
+asserts on the surface. 903 MB over 8 regions for a 1920×1080 panel, with 7 of
+the 8 reserved and uncommitted, is the number to explain. Our aperture is
+`kApertureBytes` = 8 294 400 = exactly 1920·1080·4, and
+`VRAM,totalMB` is published as 4096.
+
+**What is NOT established, said plainly rather than guessed (rules 16, 39).**
+Whether this is our framebuffer's aperture or the accelerator half. The
+deciding reads live in the armed boot's `ioreg` and a login screen that
+crash-loops cannot be captured from (rule 10), and NVRAM does not settle it
+either: `rbgpu-fbcrumb` carries **`b=235`**, so boots 236 and 237 left no
+framebuffer crumb at all, which is consistent both with the framebuffer having
+declined and with it dying before a crumb synced. Boot 236 declined for a
+known reason (`rbgpu-fb` still read "0" then). Boot 237 should have armed, and
+its diag says the accelerator did (`armed=1`, `agdc_solved=3ff`), yet there is
+no crumb. That gap is the next thing to close.
+
+**The one boot that answers it, and is usable while it does:**
+`-rbgpunoownfb`. The accelerator stays armed and the panel goes back to
+`IONDRVFramebuffer`, a configuration 2wl measured as usable, so the user gets
+a desktop they can capture from. If WindowServer still crash-loops, the fault
+is in the accelerator half and our framebuffer is exonerated; if the desktop is
+clean, the 903 MB of CG framebuffers is ours and the aperture is the lead.
+Either way one boot splits it, and `sudo nvram -d rbgpu-safe` first so the
+sentinel latch boot 237 left set does not spend it on a stock boot.
