@@ -49272,3 +49272,63 @@ means CoreBrightness is not writing `IODisplayParameters` at all and the next
 place to look is `BrightnessSystemClient`'s own path, not another key name.
 `SetsUsable` non-zero alone would mean it drives the panel through the ceiling
 parameter, which would be worth knowing before obeying.
+
+## 2y2 DONE on hardware (boot 253) — the slider works, and the key was `linear-brightness`
+
+`38BA90BE`, boot 253, no panic. The per-key counters answer the question the
+boot was built to ask, and they answer it the way 2y2 said in advance:
+
+| key | sets | |
+|---|---|---|
+| `RBFBBlParmSetsLin` | 143, then **258** four seconds later | what the UI writes |
+| `RBFBBlParmSetsPerc` | **2** | initial sync only, never a drag |
+| `RBFBBlParmSetsUsable` | **2** | attempted, declined, counted |
+
+`RBFBBlSets` 146 hardware writes, `RBFBBlParmSetFails` 0, and the live
+dictionary holds `"linear-brightness"={"min"=5120,"max"=65536,"value"=28617}`
+and `"brightness"={...,"value"=28617}` in step, beside
+`"usable-linear-brightness"={...,"value"=65536}` and everything Apple
+publishes. **The user's report: "shit the slider works".**
+
+So the diagnosis from the static read was right end to end: CoreBrightness
+drives the built-in panel through `linear-brightness`, a set naming an
+unpublished key is dropped by `IODisplay` with nothing recorded anywhere, and
+the fix was to publish the name it asks for. `brightness` alone produced a
+slider that rendered and did nothing — which is the most misleading possible
+half-success, because the UI reads one key and writes another, so the slider
+tracked our value and we read that as the publish having worked.
+
+**Two notes worth keeping.**
+
+*Declining the ceiling was the right call and the counter proves it was a real
+case.* `RBFBBlParmSetsUsable` is 2: something genuinely tried to WRITE
+`usable-linear-brightness`, the parameter that reports a capability. It was
+declined and counted rather than obeyed, the slider works anyway, so nothing
+needed that write — and had it been obeyed silently, a client could have moved
+the panel through a parameter whose meaning is "this is the most you can ask
+for". The counter is what makes this a fact rather than a guess about what
+would have happened.
+
+*`'brig'` is now stale and deliberately left alone.* The dictionary reads
+`"brig"={...,"value"=22784}` while the real level is 28617, because `'brig'`
+belongs to `IOFramebufferParameterHandler`'s own `+0x88` dictionary and it
+updates that on its own path, not ours. Nothing reads `'brig'` but
+`./build/out/blset`, and keeping it in sync would mean writing a parameter we
+do not own into a copy we do, for cosmetic benefit, on a binary that is
+measured working. Recorded instead of changed, because the trap it sets is a
+future reading taking 22784 for the current level — which is exactly the
+mistake rule 31 and 2xs's `RBFBBlLevel0` already cost once each.
+
+**Brightness is DONE**, in four measured pieces: 2xs writes the duty cycle
+(boot 249), 2xy makes `AppleBacklightDisplay` match the connection (boot 250),
+2y1 publishes a full-length parameter name without panicking on a registry
+collection (boot 252, after 2y0's panic on boot 251 established the mechanism),
+and 2y2 publishes the name the UI actually writes (boot 253). The slider moves
+the panel.
+
+Still opt-in, and the obvious next step: `-rbgpufbbacklight`,
+`-rbgpufbbuiltin` and `-rbgpufbblparm` are now each measured working on this OS
+across consecutive boots, which is the standard 2xw asks of anything in
+`rb_defaults.h`. Moving them into the default-on table is a one-line change per
+token plus the hosttest's own assertions, and the boot sentinel is the recovery
+if a default turns out to be wrong.

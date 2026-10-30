@@ -119,37 +119,30 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness** — three pieces, two confirmed on hardware, one built and
-  unbooted. **2xs (DONE, boot 249)** `-rbgpufbbacklight` writes the PWM duty
-  cycle; written and read back bit-identical, and the user confirmed the panel
-  physically changes. **2xy (DONE, boot 250)** `-rbgpufbbuiltin` answers
-  `kConnectionFlags` with `kIOConnectionBuiltIn` and `getAppleSense` with
-  `kPanelTFTConnect`, and `AppleBacklightDisplay` now matches the connection
-  (`IOProbeScore` 3000, `IODisplayConnectFlags <00080000>`, `AppleSense 0`,
-  `AppleDisplayType 2`, `RBFBBlFlagsGets`/`RBFBBlSenseGets` both 2). **Neither
-  produced a slider or working brightness keys**, because the parameter is
-  named `"brig"` — `IOFramebufferParameterHandler` builds each key from the
-  4-BYTE FourCC in the `'parm'` list, so four characters is all a framebuffer
-  can name, while every client looks for `kIODisplayBrightnessKey`, the string
-  `"brightness"`, and gets `kIOReturnUnsupported`. 2xy's commit guessed
-  `IOBacklightDisplay` would publish the full name once it matched; boot 250
-  settled that it does not. **2y0 (BOOTED 251, PANICKED) / 2y1 (built,
-  NEVER BOOTED)** `-rbgpufbblparm` publishes `"brightness"` from our own
-  `IODisplayParameterHandler`, attached as a service-plane child of the
-  framebuffer. **The mechanism is confirmed by the panic backtrace** —
-  `searchParameterHandlers` (0x14ce7d66) found us as the framebuffer's child,
-  `setDisplay` returned true, we joined the `OSArray` (0x14ce7e04) and
-  `IODisplay::doUpdate` called ours — so the plane was right and `'brig'` keeps
-  working. What panicked was the *target*: 2y0 mutated the dictionary it
-  fetched with `getProperty`, and every collection reachable as a registry
-  property is `kImmutable` ("Trying to change a collection in the registry"
-  @OSCollection.cpp:70). `IOFramebufferParameterHandler::displayModeChange`
-  (0x14d01126) shows the legal shape — allocate your own dictionary, merge the
-  old contents in, mutate yours, `display->setProperty` it, release — which is
-  why Apple's own `setParameter` against its `+0x88` member is legal and ours
-  was not: ownership, not timing. **2y1 (`D0F419E8`)** does that, and fixes the
-  same bug waiting in `doIntegerSet`. Rule 42. `./build/out/blset <0..1>`
-  drives brightness today with no slider.
+- **Brightness — DONE, four pieces, all measured on hardware.** The slider
+  moves the panel. **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
+  cycle — note `BL_PWM_PERIOD` is **4000** with `BITCNT` **12** and
+  `BL_PWM_FRACTIONAL_EN` SET, so the count field is fixed point with 4
+  fractional bits and a count larger than the period is not a saturated PWM
+  (2y2 nearly reported that as a bug). **2xy (boot 250)**
+  `-rbgpufbbuiltin` answers `kConnectionFlags` with `kIOConnectionBuiltIn` and
+  `getAppleSense` with `kPanelTFTConnect`, so `AppleBacklightDisplay` matches
+  the connection. **2y1 (boot 252)** `-rbgpufbblparm` publishes a full-length
+  parameter name from our own `IODisplayParameterHandler`, attached as a
+  service-plane child of the framebuffer — 2y0 PANICKED on boot 251 doing this
+  by mutating the dictionary it fetched with `getProperty` (rule 42), and that
+  panic's own backtrace is what confirmed the mechanism. **2y2 (boot 253)**
+  publishes the key the UI actually writes: the brightness UI is
+  **CoreBrightness** (`BrightnessSystem`, `BrightnessSystemClient`) and it
+  writes **`linear-brightness`**, never `kIODisplayBrightnessKey` —
+  `RBFBBlParmSetsLin` 258 against `RBFBBlParmSetsPerc` 2 settles it. A set
+  naming an unpublished key is dropped by `IODisplay` with nothing recorded
+  anywhere, which is why `"brightness"` alone gave a slider that rendered and
+  did nothing. `usable-linear-brightness` reports the ceiling and its writes
+  are **declined and counted** (`RBFBBlParmSetsUsable` 2 - it is a real case).
+  `'brig'` in the dictionary is stale by design: it belongs to
+  `IOFramebufferParameterHandler`'s own dictionary, so do not read it as the
+  current level. `./build/out/blset <0..1>` still drives it from the shell.
 - **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
   established whether that is demand-limited or still gated (2xi/2xo).
 - **The wedge**, an independent second defect: work submitted that never
@@ -554,11 +547,13 @@ prints which NVRAM keys would disarm a half.
 - The **boot sentinel** needs no command: a boot that does not survive 60 s
   makes the next one stock automatically.
 
-**Still opt-in, and why:** `-rbgpufbbacklight` (2xs, booted and working),
-`-rbgpufbbuiltin` (2xy, booted and working - changes which `IODisplay`
-subclass matches the connection), `-rbgpufbblparm` (2y1, **never booted; 2y0 PANICKED
-on boot 251** - creates and registers a new IOKit service as a child of the
-framebuffer and replaces the display's parameters property),
+**Still opt-in, and why:** the three brightness tokens
+`-rbgpufbbacklight` (2xs), `-rbgpufbbuiltin` (2xy - changes which `IODisplay`
+subclass matches the connection) and `-rbgpufbblparm` (2y1/2y2 - registers a
+new IOKit service as a child of the framebuffer and replaces the display's
+parameters property) are **each measured working on this OS across consecutive
+boots** and are candidates for `rb_defaults.h`; they are opt-in only because
+nothing has moved them yet,
 `-rbgpuosforce` (2xz - arms the default-on table on an
 OS none of the measured offsets came from; a safety gate's override is never
 default-on),
