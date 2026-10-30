@@ -49885,3 +49885,88 @@ path is covered by the host retune test in both directions and by
 `modeTeardown`, but no boot has yet asked for mode 100 after mode 101
 (`Switches` is 1, not 2). That is the next cheap reading and needs no new
 build.
+
+## 2y7 (boot 256, no new build) — why 60 Hz feels worse, and the frame ceiling finally has a shape
+
+The user reported the switch back working and 60 Hz feeling **choppier** than
+143.83. The reverse path read exactly as stated in advance: `RBFBModeCur` 100,
+`RBFBModeSwitches` **2**, `RBFBVBLRetunes` **2**, and `RBFBVBLPeriodNs` back to
+**6952507** - the precise 2xe constant. The hosttest's continuity assertion
+paid for itself on hardware rather than in a harness.
+
+Then `animtest --secs 30` in both modes, same boot, same binary, same window
+length - because 2xo's 81.89/s came from a controlled animtest run and the
+journal already forbids comparing an idle desktop against it.
+
+**THE INSTRUMENT LIED, AND IN THE FLATTERING DIRECTION.** animtest turned
+vblank counts into seconds of panel time by dividing by a literal **143.83**,
+then used that as the DENOMINATOR for sets/s. Correct while 143.83 Hz was the
+only mode the kext had. At 60 Hz it reported **11.94 s of panel time for a
+30.14 s window** and a headline **"137.72 sets/s"** for a true **54.58/s** -
+2.5x overstated, i.e. 2.3 surface writes per scanout, which read as a
+spectacular result and would have been reported as one. Nothing in the output
+said anything was wrong. Rule 41 in a userspace tool instead of a kext, and
+rule 16: the instrument is a suspect, including the instrument that has been
+right for six milestones. Fixed to read `RBFBVBLPeriodNs`, to rate sets/s
+against WALL time, and to print the delivery fraction as a separate number -
+dividing by panel time conflates "we fed every scanout" with "the panel scans
+slowly". The jitter histogram's target was the same constant and is now live.
+
+Corrected, over 30.14 s wall:
+
+                      143.83 Hz mode        60 Hz mode
+    display link       143.66/s              59.95/s
+    nominal refresh    134.31 Hz             61.01 Hz
+    our vbl fires      144.06/s  (+0.16%)    57.00/s  (-5.0%)
+    amtr sets           76.51/s              54.58/s
+    scanouts fed        53.1%                95.8%
+    jitter stddev       0.491 ms (7.1%)      0.458 ms (2.7%)
+    jitter spread       17.36 ms             3.12 ms
+
+**CoreVideo DID learn the new rate** - nominal 61.01 Hz, link 59.95/s. The
+prediction that `setDisplayMode` was missing a notification is **refuted**: the
+mode change propagates all the way up to CoreVideo on its own. That was the
+outcome I expected and it is wrong.
+
+**The user's perception is correct and expected, and the reason is the plain
+one.** Unique frames per second FELL, 76.5 -> 54.6. The eye counts unique
+images, not scanouts, so 60 Hz is simply worse on this machine. Nothing is
+broken about the 60 Hz path; it is working and it is worse.
+
+**THE CEILING HAS A SHAPE FOR THE FIRST TIME SINCE 2xi.** One model fits both
+columns: throughput tops out at an ABSOLUTE ~76 frames/s. At 143.83 Hz that is
+53 % of scanouts, which is the long-standing "82/s against 143.83". At 60 Hz we
+are BELOW that ceiling, so 95.8 % of scanouts get fed. This kills two
+hypotheses at once:
+  - **not demand-limited.** A continuously animating window is continuous
+    demand at the panel rate; if demand were the limit, 143.83 Hz would have
+    been fed at 100 %.
+  - **not a fractional loss.** My own reasoning last turn argued a proportional
+    drop rate, which predicted ~34/s at 60 Hz. Measured 54.6/s. Refuted by the
+    experiment I designed to test it, which is the useful outcome.
+So the frontier is now "an absolute ~76 frames/s cap, cause unknown" rather
+than "82/s, cause unknown" - a sharper statement, and it predicts that any
+mode below ~76 Hz will be nearly fully fed while any mode above it will not.
+
+**A NEW DEFECT, AND IT IS OURS.** Our thread_call delivers **57.00/s when
+asked for 60.00/s, -5.0 %**, where at 143.83 Hz it delivers 144.06/s for a
+requested 143.83, **+0.16 %**. The error appears only on the long period, which
+is the signature of **macOS timer coalescing**: `thread_call_enter_delayed`
+grants slack that scales with the deadline, so a 16.67 ms deadline is allowed
+to drift where a 6.95 ms one is not. 90 ticks were lost over 30 s. Worth ~3
+frames/s of the 54.6, so fixing it should take delivery from 95.8 % to ~100 %.
+The fix is to arm with an explicit small leeway rather than the default.
+
+**A jitter number that looks like an improvement and is not.** Relative stddev
+fell from 7.1 % to 2.7 %, which reads as the 60 Hz clock being far steadier.
+ABSOLUTE stddev is 0.491 ms against 0.458 ms - essentially unchanged. The
+"improvement" is almost entirely the larger mean in the denominator. ~0.47 ms
+is the thread_call's own jitter and is a property of the delivery mechanism,
+not of the mode. The genuine difference is the spread: 17.36 ms against
+3.12 ms, with the 143.83 Hz run showing a 21.56 ms outlier (three periods) -
+at 6.95 ms a hiccup costs multiple frames, at 16.67 ms it is absorbed.
+
+**What 60 Hz was actually for.** Not smoothness - it was never going to win on
+this panel. It proved the raster can be retimed live, which is the mechanism an
+external display's mode setting needs (2xq/2xr), and it produced the first
+characterisation of the frame ceiling. Both of those were the point.
