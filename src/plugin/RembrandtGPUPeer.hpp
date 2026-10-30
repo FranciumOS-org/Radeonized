@@ -21,6 +21,16 @@ void rbgpu_nvram_note(const char *var, const char *text);
 // FLUSHED TO FLASH before returning, so a boot that ends in a black screen is
 // recovered by a plain power cycle - no boot-arg edit and no second OS.
 // `why` is written on every path; see the definition for the codes.
+// 2xw: the default-on gate, the durable-disarm key read and the boot
+// sentinel. `rbgpu_arg` is what every feature check goes through now;
+// `rbgpu_nvram_armed` replaces the one-shot consumers for the three arms that
+// used to need one; `rbgpu_sentinel_begin` must run BEFORE anything is armed
+// and returns true on a recovery boot.
+bool rbgpu_arg(const char *tok);
+bool rbgpu_stock(void);
+bool rbgpu_nvram_armed(const char *var, uint32_t *why);
+bool rbgpu_sentinel_begin(void);
+
 bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why);
 // 2xg: the same gate, CONSUMED BY OVERWRITE with a literal "0" instead of by
 // removal - the only path measured to reach IODTNVRAM::syncInternal (2sr/2wj).

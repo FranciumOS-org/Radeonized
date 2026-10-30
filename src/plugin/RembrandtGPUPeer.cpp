@@ -12,6 +12,7 @@
 #include <libkern/c++/OSBoolean.h>
 
 #include "RembrandtGPUPeer.hpp"
+#include "rb_defaults.h"
 #include "vbios_data.h"
 
 #define super IOService
@@ -405,6 +406,30 @@ static bool rbgpuConsumeArming() {
         return true;
     }
 
+    // 2xw: ARMED BY DEFAULT, and the key is now only a disarm.
+    //
+    // Everything below this point is the one-shot machinery and is kept,
+    // commented, as the record of what it was for - but it no longer decides
+    // anything. The sentinel has already run in start(), so a boot that did
+    // not survive the last one is stock here and `rbgpu_nvram_armed` answers
+    // false for it; `nvram rbgpu-arm=0` is the durable disarm; and
+    // `-rbgpustock` or `-rbgpuoff` turns it off from boot-args, which is the
+    // one disarm that works even when NVRAM cannot be read.
+    uint32_t why = 0;
+    bool armed = rbgpu_nvram_armed("rbgpu-arm", &why);
+    rbgpu_diag_set_num("arm_why", why);
+    rbgpu_log("Peer: accelerator %s (arm_why %u: 0 default, 1 /options "
+              "unreachable, 3 rbgpu-arm=0, 5 stock, 6 sentinel latch)",
+              armed ? "ARMED by default (2xw)" : "NOT armed", why);
+    return armed;
+}
+
+// Kept for the record: the one-shot form this replaced (2cs/2dg/2in). It is no
+// longer called. Nothing in it was wrong - it was right for a feature that
+// could cost the desktop, and the desktop has been stable since boot 215.
+static bool rbgpuConsumeArmingOneShot() __attribute__((unused));
+static bool rbgpuConsumeArmingOneShot() {
+
     // 2in (2026-10-18): a BOUNDED RETRY, the 2gy debt paid.
     //
     // This lookup was tried exactly once. On a boot where the peer runs
@@ -496,6 +521,13 @@ bool RembrandtGPUPeer::start(IOService *provider) {
         rbgpu_log("Peer: disabled by -rbgpuoff; aborting start");
         return false;
     }
+
+    // 2xw: the sentinel runs before anything is armed, and a recovery boot
+    // makes everything consulted from here on stock. The hooks installed in
+    // processKernel ran before this point and are NOT covered - they are the
+    // same code every boot since 2ks has run, and the latch exists for the
+    // display chain, which is all downstream of here.
+    rbgpu_sentinel_begin();
 
     if (!super::start(provider)) {
         return false;
@@ -1753,6 +1785,253 @@ void rbgpu_nvram_note(const char *var, const char *text) {
     g_rbgpuNvramBusy = 0;
 }
 
+// 2xw: THE CONFIGURATION IS THE DEFAULT NOW.
+//
+// Boots 215-231 ran the same forty-five `-rbgpu*` tokens and five NVRAM
+// one-shots, and the machine is a usable accelerated Mac. Re-typing that set
+// before every boot is no longer a safety measure, it is just a way to lose a
+// boot to a token nobody noticed was missing (rule 15's shape, applied to
+// boot-args). So `src/common/rb_defaults.h` holds that exact set and
+// everything in it is ON with nothing in boot-args.
+//
+// What replaces the one-shots as the safety net is the BOOT SENTINEL below.
+// What is deliberately NOT replaced: `-rbgpuoff` still stops the plugin dead,
+// and it is still the documented rescue.
+static int g_rbStock      = -1;   // -1 not decided, 1 stock, 0 armed
+static int g_rbSafeLatch  = -1;   // 1 the latch was set when the peer looked
+static thread_call_t g_rbSentinelCall = nullptr;
+
+// Stock means "behave as though none of our tokens were in boot-args". It is
+// set by `-rbgpustock`, by `-rbgpuoff`, and by the sentinel finding its latch.
+bool rbgpu_stock(void) {
+    if (g_rbStock < 0) {
+        g_rbStock = (checkKernelArgument("-rbgpustock") ||
+                     checkKernelArgument("-rbgpuoff")) ? 1 : 0;
+    }
+    return g_rbStock != 0;
+}
+
+// The one gate every feature goes through.
+//
+// A token in the default table is on unless its negative is in boot-args; a
+// token that is not in the table keeps the old meaning exactly, so an
+// experiment stays opt-in. A positive token still in boot-args is harmless
+// and redundant, which is what lets this build be installed without editing
+// boot-args first.
+bool rbgpu_arg(const char *tok) {
+    if (!rb_default_on(tok)) {
+        return checkKernelArgument(tok);
+    }
+    if (rbgpu_stock()) {
+        return false;
+    }
+    char off[64];
+    if (!rb_off_token(tok, off, sizeof(off))) {
+        // Cannot happen for a table entry - the hosttest asserts every one of
+        // them derives a negative - but if it ever did, the feature stays on
+        // and says so rather than silently flipping.
+        rbgpu_log("2xw: no negative token derivable for `%s`; leaving it ON", tok);
+        return true;
+    }
+    return !checkKernelArgument(off);
+}
+
+// Armed-by-default, with the NVRAM key kept as a DURABLE DISARM.
+//
+// The one-shots were armed by the key's presence and consumed on use, so a
+// boot that broke the desktop could not repeat. That direction is now
+// inverted: the feature is armed by default and `nvram <var>=0` turns it off
+// until the user says otherwise. The key is read, never written, so nothing
+// here can produce the 2wj failure where a key would not clear.
+//
+// `why`, on every path (rule 14):
+//   0 armed by default            1 /options unreachable, armed anyway
+//   3 the key reads "0" - disarmed by hand
+//   5 stock (`-rbgpustock` / `-rbgpuoff`)
+//   6 the boot sentinel's latch was set, so the previous boot did not survive
+bool rbgpu_nvram_armed(const char *var, uint32_t *why) {
+    auto out = [why](uint32_t v) { if (why) *why = v; };
+    if (rbgpu_stock()) {
+        out(g_rbSafeLatch == 1 ? 6 : 5);
+        return false;
+    }
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            // Default-on means an unreadable /options cannot hide a disarm, so
+            // the only disarm left this boot is the boot-arg. Said out loud
+            // because it is the opposite of what the one-shot form did.
+            out(1);
+            return true;
+        }
+        g_rbgpuOptions = options;
+    }
+    if (OSObject *val = options->getProperty(var)) {
+        if (auto data = OSDynamicCast(OSData, val)) {
+            if (data->getLength() >= 1 &&
+                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
+                out(3);
+                return false;
+            }
+        } else if (auto str = OSDynamicCast(OSString, val)) {
+            if (str->isEqualTo("0")) {
+                out(3);
+                return false;
+            }
+        }
+    }
+    out(0);
+    return true;
+}
+
+// THE BOOT SENTINEL - what the one-shots were actually for.
+//
+// A one-shot made a bad boot un-repeatable: the key was consumed before the
+// dangerous work, so a hang or a panic left it cleared. Arming by default
+// gives that up, and 2wj is the record of what it costs when there is no way
+// back - boot 196 had to be disarmed from Windows.
+//
+// So the key is written the other way round. `rbgpu-safe` is set to "1" here,
+// before anything is armed, and overwritten with "0" from a thread_call
+// kRbSentinelMs later. A boot that reaches that call was alive long enough to
+// be driven; a boot that panics, hangs or is power-cycled before it leaves the
+// latch set, and the NEXT boot sees it, comes up stock, and clears it - so one
+// bad boot costs exactly one stock boot and never a trip to another OS.
+//
+// Both writes go through setProperty, the only path measured to sync (2sr),
+// and the stock boot clears the latch BEFORE arming anything, in the same
+// order 2dg established for the arming one-shot.
+//
+// The window is a trade and it is stated rather than tuned: a deliberate
+// restart inside kRbSentinelMs looks exactly like a boot that did not survive
+// (rule 12 in its original form - a user rebooting a black screen and a user
+// rebooting a working machine are indistinguishable from NVRAM). It costs one
+// stock boot. `-rbgpunosentinel` turns the whole mechanism off for a session
+// of rapid reboots, and then a bad boot is the user's problem again.
+static const uint32_t kRbSentinelMs = 60000;
+
+static void rbgpu_sentinel_clear(thread_call_param_t, thread_call_param_t) {
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            rbgpu_diag_set_num("sentinel_cleared", 2);
+            return;
+        }
+        g_rbgpuOptions = options;
+    }
+    if (auto zero = OSString::withCString("0")) {
+        options->setProperty("rbgpu-safe", zero);
+        zero->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    bool ok = false;
+    if (OSObject *v = options->getProperty("rbgpu-safe")) {
+        if (auto d = OSDynamicCast(OSData, v)) {
+            ok = d->getLength() >= 1 &&
+                 *static_cast<const char *>(d->getBytesNoCopy()) == '0';
+        } else if (auto t = OSDynamicCast(OSString, v)) {
+            ok = t->isEqualTo("0");
+        }
+    }
+    rbgpu_diag_set_num("sentinel_cleared", ok ? 1 : 0);
+    rbgpu_log("2xw: sentinel cleared after %u ms: %s", kRbSentinelMs,
+              ok ? "this boot counts as survived" :
+                   "the read-back FAILED, so the next boot may come up stock");
+}
+
+// Returns true if this boot is a recovery boot (the latch was set).
+bool rbgpu_sentinel_begin(void) {
+    if (checkKernelArgument("-rbgpunosentinel")) {
+        rbgpu_diag_set_num("sentinel", 2);
+        g_rbSafeLatch = 0;
+        return false;
+    }
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            // No latch readable and none writable: this boot is armed and
+            // unprotected. Publish it - an absent key and an unreachable
+            // /options must not read the same (rule 14).
+            rbgpu_diag_set_num("sentinel", 3);
+            g_rbSafeLatch = 0;
+            return false;
+        }
+        g_rbgpuOptions = options;
+    }
+
+    bool latched = false;
+    if (OSObject *val = options->getProperty("rbgpu-safe")) {
+        latched = true;
+        if (auto data = OSDynamicCast(OSData, val)) {
+            if (data->getLength() >= 1 &&
+                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
+                latched = false;
+            }
+        } else if (auto str = OSDynamicCast(OSString, val)) {
+            if (str->isEqualTo("0")) {
+                latched = false;
+            }
+        }
+    }
+    g_rbSafeLatch = latched ? 1 : 0;
+
+    if (latched) {
+        // Clear first, then run stock: the order 2dg paid for.
+        if (auto zero = OSString::withCString("0")) {
+            options->setProperty("rbgpu-safe", zero);
+            zero->release();
+        }
+        if (auto sync = OSString::withCString("now")) {
+            options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+            sync->release();
+        }
+        g_rbStock = 1;
+        rbgpu_diag_set_num("sentinel", 4);
+        rbgpu_diag_set_num("safe_latch", 1);
+        rbgpu_log("2xw: rbgpu-safe was still set, so the previous boot did not "
+                  "survive its first %u ms. Coming up STOCK this boot and the "
+                  "latch is cleared, so the next boot is armed again.",
+                  kRbSentinelMs);
+        return true;
+    }
+
+    if (auto one = OSString::withCString("1")) {
+        options->setProperty("rbgpu-safe", one);
+        one->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    if (!g_rbSentinelCall) {
+        g_rbSentinelCall = thread_call_allocate(rbgpu_sentinel_clear, nullptr);
+    }
+    if (g_rbSentinelCall) {
+        uint64_t deadline = 0;
+        clock_interval_to_deadline(kRbSentinelMs, kMillisecondScale, &deadline);
+        thread_call_enter_delayed(g_rbSentinelCall, deadline);
+        rbgpu_diag_set_num("sentinel", 1);
+    } else {
+        // The latch is set and nothing will clear it: that would make EVERY
+        // following boot a stock boot. Clear it again rather than leave the
+        // machine in that state, and say so.
+        if (auto zero = OSString::withCString("0")) {
+            options->setProperty("rbgpu-safe", zero);
+            zero->release();
+        }
+        rbgpu_diag_set_num("sentinel", 0);
+        rbgpu_log("2xw: thread_call_allocate FAILED, so nothing would clear the "
+                  "sentinel; latch removed again and this boot runs unprotected");
+    }
+    return false;
+}
+
 // 2qo: a one-shot NVRAM gate for an experiment that can cost the desktop.
 //
 // Same contract as `rbgpu-arm` (2cs/2dg), for the same reason and with the
@@ -2151,7 +2430,7 @@ void RembrandtGPUPeer::handlePostRegister() {
     // for the boot where powerUpHW finally succeeds and the answer is
     // expected to arrive.
     static int force1b = -1;
-    if (force1b < 0) { force1b = checkKernelArgument("-rbgpuforce1b") ? 1 : 0; }
+    if (force1b < 0) { force1b = rbgpu_arg("-rbgpuforce1b") ? 1 : 0; }
     // 2gc: hold 0x1B back while the SDMA instance rewrite is being tested,
     // even if powerUpHW now SUCCEEDS. Otherwise the one boot that answers the
     // SDMA question would also be the first boot ever to send 0x1B with the
@@ -2167,7 +2446,7 @@ void RembrandtGPUPeer::handlePostRegister() {
     if (hold1b < 0) {
         hold1b = (checkKernelArgument("-rbgpusdmainst0") ||
                   checkKernelArgument("-rbgpusdma0skip") ||
-                  checkKernelArgument("-rbgpusdmaone")) ? 1 : 0;
+                  rbgpu_arg("-rbgpusdmaone")) ? 1 : 0;
     }
     if ((!g_rb_poweruphw_ok || hold1b) && !force1b) {
         rbgpu_log("handlePostRegister: Request 0x1B (Controller Enabled) is "
@@ -2228,7 +2507,7 @@ void RembrandtGPUPeer::handlePostRegister() {
     // sleeps on accel->0x88, so that is the lock. Calling an unlocked-variant
     // function with no lock held is the shape that produced the 2fz/2ga and
     // 2gg panics, so if the lock pointer is not plausible we do NOT call.
-    if (checkKernelArgument("-rbgpuforceenable")) {
+    if (rbgpu_arg("-rbgpuforceenable")) {
         if (!g_rb_enableAccelerator_2hg) {
             rbgpu_log("2hg: -rbgpuforceenable set but enableAccelerator was "
                       "never solved - nothing done");
@@ -2641,7 +2920,7 @@ static void rbgpu_ax_action(thread_call_param_t p0, thread_call_param_t) {
 }
 
 void rbgpu_accelprobe_start(void) {
-    if (!checkKernelArgument("-rbgpuaccelprobe")) {
+    if (!rbgpu_arg("-rbgpuaccelprobe")) {
         return;
     }
     if (g_rbgpuAxSeq) {

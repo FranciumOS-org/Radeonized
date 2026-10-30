@@ -236,7 +236,7 @@ static gc_set_fw_entry_info_fn_t        orig_gc_set_fw_entry_info           = nu
 static int g_rb_2jp_on = -1;
 static bool rbgpu_2jp_enabled(void) {
     if (g_rb_2jp_on < 0) {
-        g_rb_2jp_on = checkKernelArgument("-rbgpurlcsub") ? 1 : 0;
+        g_rb_2jp_on = rbgpu_arg("-rbgpurlcsub") ? 1 : 0;
         rbgpu_log("2jp: RLC sub-image substitution %s - ids 26/27/28/29/30, "
                   "the srlist cntl/gpm/srm lists and the LX6 iram/dram that "
                   "2aj left as Apple's Navi21 images",
@@ -666,7 +666,7 @@ static int slot_internal_hw_init(void *ctx) {
     // group beyond the queries the project allows by default, and the user's
     // decision per docs/RULES.md. Fixing the check must not silently start
     // sending them, so bringup needs its own opt-in.
-    if (!checkKernelArgument("-rbgpusmubringup")) {
+    if (!rbgpu_arg("-rbgpusmubringup")) {
         rbgpu_log("2as: MC address verified (0x%llx) but -rbgpusmubringup not set "
                   "-> SKIPPING rb_smu13_bringup (no SMU message sent)", smu_mc);
         rbgpu_diag_set_num("smu_bringup_armed", 0);
@@ -2597,7 +2597,7 @@ static void rbgpu_dump_gc_regs(const char *tag) {
     // points it at another wrong page and the same MAPPING_ERROR comes back -
     // no worse than now. No TLB invalidate is issued, so a stale negative
     // translation is a second candidate if the fault persists.
-    if (g_rb_2em_done == 0 && checkKernelArgument("-rbgpuptbase") &&
+    if (g_rb_2em_done == 0 && rbgpu_arg("-rbgpuptbase") &&
         g_rb_gart_mc != 0 && g_rb_2ed_fb_base != 0 && g_rb_2ed_fb_off != 0) {
         const uint32_t dwPTB_LO = 0x1667, dwPTB_HI = 0x1668;
         uint64_t fb_base = static_cast<uint64_t>(g_rb_2ed_fb_base) << 24;
@@ -3593,7 +3593,7 @@ static uint32_t g_rb_2gv_remaps = 0;
 
 static void *hooked_hw_getHWChannel_2gv(void *hw, uint32_t engine, uint32_t ring) {
     if (g_rb_2gv_on < 0) {
-        g_rb_2gv_on = checkKernelArgument("-rbgpuvmpteng1") ? 1 : 0;
+        g_rb_2gv_on = rbgpu_arg("-rbgpuvmpteng1") ? 1 : 0;
         rbgpu_log("2gv: VMPT engine remap %s", g_rb_2gv_on ? "ON (2 -> 1)" : "OFF");
     }
     uint32_t use = engine;
@@ -4514,7 +4514,7 @@ static void rbgpu_gate_2en(uint32_t stage, const char *what) {
     // identically with nothing of ours writing flash, which exonerates the
     // trail and makes the stop real.
     static int nogate = -1;
-    if (nogate < 0) { nogate = checkKernelArgument("-rbgpunogates") ? 1 : 0; }
+    if (nogate < 0) { nogate = rbgpu_arg("-rbgpunogates") ? 1 : 0; }
     if (nogate) {
         rbgpu_diag_set_num("gate_stage", stage);
         return;
@@ -4843,7 +4843,7 @@ static bool hooked_hwchannel_waitForHwStamp_2cx(void *ch, uint32_t stamp) {
 
     uint64_t t0 = mach_absolute_time();
     bool ret;
-    if (checkKernelArgument("-rbgpustampwait")) {
+    if (rbgpu_arg("-rbgpustampwait")) {
         // 2dr: this is now the expected path, not the daring one. The 2dq boot
         // read RPTR = WPTR = 0x20 at this very point with CP_STAT = 0x88000000,
         // so the CP fetched and executed the SET_RESOURCES packet. RPTR is
@@ -5908,7 +5908,7 @@ static uint32_t g_rb_2gi_zeroed = 0;
 
 static void rbgpu_sdma_one_2gi(uint32_t idx, uintptr_t ep) {
     if (g_rb_2gi_on < 0) {
-        g_rb_2gi_on = checkKernelArgument("-rbgpusdmaone") ? 1 : 0;
+        g_rb_2gi_on = rbgpu_arg("-rbgpusdmaone") ? 1 : 0;
         if (!g_rb_2gi_on) {
             rbgpu_log("2gi: one-SDMA-engine mode OFF (-rbgpusdmaone not set); "
                       "all four engines will ask the layer and engine[1] is "
@@ -6810,7 +6810,7 @@ static bool patchGcAutoloadCheck(KernelPatcher &patcher, size_t id) {
     // told the truth and we find out what Apple does about it: a different
     // error path, a backdoor fallback, or the same bring-up with one more
     // 50 ms wait. It costs one boot and no chip state of ours.
-    if (checkKernelArgument("-rbgpuautoloadtruth")) {
+    if (rbgpu_arg("-rbgpuautoloadtruth")) {
         rbgpu_log("2jc: GC autoload check NOT patched (-rbgpuautoloadtruth) - "
                   "Apple will see BOOTLOAD_COMPLETE=0 as it really is");
         rbgpu_diag_set_num("gc_autoload_patched", 0);
@@ -7342,7 +7342,7 @@ static void rbgpu_mtlk_probe(task_t task) {
 static void rbgpu_iop_try(task_t task, const char *pname) {
     if (!g_rbIopChecked) {
         g_rbIopChecked = true;
-        g_rbIopOn = checkKernelArgument("-rbgpuiop");
+        g_rbIopOn = rbgpu_arg("-rbgpuiop");
         rbgpu_diag_set_num("iop_on", g_rbIopOn ? 1 : 0);
     }
     if (!g_rbIopOn || g_rbIopDone) {
@@ -7370,7 +7370,7 @@ static void rbgpu_iop_try(task_t task, const char *pname) {
     // The one-shot comes LAST among the checks and immediately before the
     // write, so a boot that fails a precondition does not burn the arming.
     uint32_t why = 0;
-    bool armed = rbgpu_nvram_consume_oneshot("rbgpu-iop", &why);
+    bool armed = rbgpu_nvram_armed("rbgpu-iop", &why);
     rbgpu_diag_set_num("iop_oneshot", why);
     if (!armed) {
         rbgpu_log("2qo: -rbgpuiop is set but the one-shot `rbgpu-iop` is not "
@@ -9496,7 +9496,7 @@ static void rbgpu_mcprobe_2qt(KernelPatcher &patcher, size_t id,
     }
     done = true;
 
-    if (!checkKernelArgument("-rbgpumcprobe")) {
+    if (!rbgpu_arg("-rbgpumcprobe")) {
         rbgpu_diag_set_num("mcp_on", 0);
         return;
     }
@@ -10092,7 +10092,7 @@ void RGPU::processNDRV(KernelPatcher &patcher, size_t id, mach_vm_address_t addr
     // never a second one for the same function.
     rbgpu_diag_set_num("fbvram_on", g_vram_on ? 1 : 0);
     if (g_vram_on || g_mcp_on || checkKernelArgument("-rbgpumcnew") ||
-        checkKernelArgument("-rbgpumcreg") || checkKernelArgument("-rbgpuagdc")) {
+        checkKernelArgument("-rbgpumcreg") || rbgpu_arg("-rbgpuagdc")) {
         KernelPatcher::RouteRequest vr(
             "__ZN17IONDRVFramebuffer16enableControllerEv",
             hooked_ndrv_enablectl_2pa, orig_ndrv_enablectl_2pa);
@@ -10208,9 +10208,9 @@ void RGPU::init() {
     noTrap3Guard = checkKernelArgument("-rbgpunoguard");
     noLogCapture = checkKernelArgument("-rbgpunocapture");
     safeTtlMode  = checkKernelArgument("-rbgpusafettl");
-    sync570Mode  = checkKernelArgument("-rbgpusync570");
-    spoofTtlMode = checkKernelArgument("-rbgpuspoofttl");
-    pspHwMode    = checkKernelArgument("-rbgpupsphw");
+    sync570Mode  = rbgpu_arg("-rbgpusync570");
+    spoofTtlMode = rbgpu_arg("-rbgpuspoofttl");
+    pspHwMode    = rbgpu_arg("-rbgpupsphw");
     g_safe_ttl_mode  = safeTtlMode;
     g_sync_570_mode  = sync570Mode;
     g_spoof_ttl_mode = spoofTtlMode;
@@ -10228,10 +10228,10 @@ void RGPU::init() {
     rbgpu_pkrs_init_2ly();
 
     // 2ou: the 30 Hz fix. OFF by default - its first boot has not happened.
-    g_fbaccel_on = checkKernelArgument("-rbgpufbaccel");
+    g_fbaccel_on = rbgpu_arg("-rbgpufbaccel");
     rbgpu_diag_set_num("fbaccel_on", g_fbaccel_on ? 1 : 0);
 
-    g_vbl_on = checkKernelArgument("-rbgpuvbl");
+    g_vbl_on = rbgpu_arg("-rbgpuvbl");
     char vblbuf[32] {};
     if (lilu_get_boot_args("rbgpuvblhz", vblbuf, sizeof(vblbuf) - 1) && vblbuf[0]) {
         uint32_t v = 0;
@@ -10245,7 +10245,7 @@ void RGPU::init() {
     }
     // 2ov: the vblank pump, separate from -rbgpuvbl so the two halves stay
     // independently attributable. The period follows the same rate.
-    g_vblp_on = checkKernelArgument("-rbgpuvblpump");
+    g_vblp_on = rbgpu_arg("-rbgpuvblpump");
     g_vblp_us = g_vbl_mhz ? static_cast<uint32_t>(1000000000ull / g_vbl_mhz) : 6953;
     rbgpu_log("2ov: vblank pump %s (period %u us)",
               g_vblp_on ? "ARMED by -rbgpuvblpump" : "off (add -rbgpuvblpump)",
@@ -10255,7 +10255,7 @@ void RGPU::init() {
     // because the timer is what calls the proc - but NOT `-rbgpuvblpump`'s
     // direct handleVBL call, which stays the fallback for the case where
     // IOFramebuffer never asks for a 'vbl ' interrupt at all.
-    g_vbli_on = checkKernelArgument("-rbgpufbvbl");
+    g_vbli_on = rbgpu_arg("-rbgpufbvbl");
     if (g_vbli_on && !g_vblp_on) {
         g_vblp_on = true;        // the timer is the delivery mechanism
         rbgpu_log("2oz: -rbgpufbvbl implies the timer; pump enabled to drive "
@@ -10266,7 +10266,7 @@ void RGPU::init() {
 
     // 2pa: the VRAM label. Independent of the vblank - one boot can fix the
     // "7 MB" and the pacing separately, and say which of them took.
-    g_vram_on = checkKernelArgument("-rbgpufbvram");
+    g_vram_on = rbgpu_arg("-rbgpufbvram");
     // Refuse anything that is not plausibly this carve-out. 4096 MB is
     // what three independent measurements say; a wrong label here is a
     // cosmetic lie, but it would also be a lie in a bug report.
@@ -10340,7 +10340,7 @@ void RGPU::init() {
 
     // 2pe: observe-only, so it is safe to leave armed. Separate arg because a
     // diagnostic must be removable without disturbing the two fixes.
-    g_flip_on = checkKernelArgument("-rbgpuflipprobe");
+    g_flip_on = rbgpu_arg("-rbgpuflipprobe");
     rbgpu_log("2pe: flip probe %s (observe only, writes nothing)",
               g_flip_on ? "ARMED by -rbgpuflipprobe" : "off (add -rbgpuflipprobe)");
 
@@ -11126,7 +11126,7 @@ static uint32_t g_rb_2km_lvl    = 0xFFFFFFFFu;
 static uint64_t rbgpu_pdeenc_apply_2km(uint32_t level, uint64_t v, void *ret) {
     rbgpu_pdeenc_caller_2ko(ret);   // 2ko: Apple's call site, from the hook
     if (g_rb_2km_on < 0) {
-        g_rb_2km_on = checkKernelArgument("-rbgpupdeenc") ? 1 : 0;
+        g_rb_2km_on = rbgpu_arg("-rbgpupdeenc") ? 1 : 0;
         rbgpu_log("2km: PDE encode correction %s",
                   g_rb_2km_on ? "ARMED (-rbgpupdeenc)" : "OFF (observe only)");
     }
@@ -11481,7 +11481,7 @@ static uint32_t g_rb_2kr_nofb   = 0;   // 2ks: fb_off unknown, nothing done
 static uint64_t hooked_adjustVRAM_2kr(void *mem, uint64_t a) {
     uint64_t v = orig_adjustVRAM_2kr ? orig_adjustVRAM_2kr(mem, a) : a;
     if (g_rb_2kr_on < 0) {
-        g_rb_2kr_on = checkKernelArgument("-rbgpuvramadj") ? 1 : 0;
+        g_rb_2kr_on = rbgpu_arg("-rbgpuvramadj") ? 1 : 0;
         rbgpu_log("2kr: VRAM-address stripping %s",
                   g_rb_2kr_on ? "NEUTRALISED in mapVMPT (-rbgpuvramadj)"
                               : "left alone (observe only)");
@@ -13277,7 +13277,7 @@ void rbgpu_microengine_flush_2iy(void) {
 
 static void rbgpu_route_microengine_2iy(KernelPatcher &patcher, size_t id,
                                         mach_vm_address_t address, size_t size) {
-    if (!checkKernelArgument("-rbgpuringprobe")) return;
+    if (!rbgpu_arg("-rbgpuringprobe")) return;
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest("_gc_unhalt_micro_engines_10_3",
                                     hooked_unhalt_me_2iy, orig_unhalt_me_2iy),
@@ -13309,7 +13309,7 @@ static void rbgpu_route_autoload_2jc(KernelPatcher &patcher, size_t id,
                   "2jd took them out after two blank boots");
         return;
     }
-    if (!checkKernelArgument("-rbgpuringprobe")) return;
+    if (!rbgpu_arg("-rbgpuringprobe")) return;
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest("_gc_parse_rlc_toc_10_3",
                                     hooked_toc_2jc, orig_toc_2jc),
@@ -13333,7 +13333,7 @@ static void rbgpu_route_autoload_2jc(KernelPatcher &patcher, size_t id,
 
 static void rbgpu_route_gvmwrite_2ie(KernelPatcher &patcher, size_t id,
                                      mach_vm_address_t address, size_t size) {
-    if (!checkKernelArgument("-rbgpuringprobe")) {
+    if (!rbgpu_arg("-rbgpuringprobe")) {
         rbgpu_log("2ie: -rbgpuringprobe not set, _gvm_cgs_write_register left "
                   "alone");
         return;
@@ -13530,7 +13530,7 @@ static void rbgpu_ptfix_2ih(void *ctx, uint32_t vmid) {
         return;                      // 2em owns context 0; leave it alone
     }
     if (g_rb_2ih_armed < 0) {
-        g_rb_2ih_armed = checkKernelArgument("-rbgpuptfix") ? 1 : 0;
+        g_rb_2ih_armed = rbgpu_arg("-rbgpuptfix") ? 1 : 0;
     }
     g_rb_2ih_calls++;
 
@@ -13825,7 +13825,7 @@ void rbgpu_vmid_flush_2if(void) {
 __attribute__((noinline))
 static void rbgpu_route_vmid_2if(KernelPatcher &patcher, size_t id,
                                  mach_vm_address_t address, size_t size) {
-    if (!checkKernelArgument("-rbgpuringprobe")) {
+    if (!rbgpu_arg("-rbgpuringprobe")) {
         rbgpu_log("2if: -rbgpuringprobe not set, assignVMID/getPDEValue left "
                   "alone");
         return;
@@ -14166,7 +14166,7 @@ static void rbgpu_2wx_action(thread_call_param_t a, thread_call_param_t b) {
 }
 
 void rbgpu_rate_start_2wx(void) {
-    if (!checkKernelArgument("-rbgpuschedprobe")) {
+    if (!rbgpu_arg("-rbgpuschedprobe")) {
         return;
     }
     if (g_rb_2wx_call) {
@@ -14384,7 +14384,7 @@ static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
 }
 
 void rbgpu_schedtick_start_2xg(void) {
-    if (!checkKernelArgument("-rbgpuschedtick")) {
+    if (!rbgpu_arg("-rbgpuschedtick")) {
         return;
     }
     if (g_rb_2xg_call) {
@@ -14407,7 +14407,7 @@ void rbgpu_schedtick_start_2xg(void) {
     /* Rule 37: consume the one-shot BEFORE the first tick can fire, on the
      * overwrite path, and fail closed. A panic after this point costs exactly
      * one power cycle. */
-    if (!rbgpu_nvram_consume_oneshot_ow("rbgpu-tick", &g_rb_2xg_oneshot)) {
+    if (!rbgpu_nvram_armed("rbgpu-tick", &g_rb_2xg_oneshot)) {
         rbgpu_log("2xg: -rbgpuschedtick is set but the one-shot did not arm "
                   "(why=%u: 1 /options unreachable, 2 rbgpu-tick absent, "
                   "3 it reads \"0\", 4 the overwrite would not take). NOT "
@@ -14536,8 +14536,8 @@ static void rbgpu_route_sched_2wv(KernelPatcher &patcher, size_t id,
     /* 2xg: the tick turns these routes on by itself, because the scheduler
      * pointer it calls arrives only as these hooks' first argument - so a tick
      * can never be armed without the capture that feeds it. */
-    bool want_tick = checkKernelArgument("-rbgpuschedtick");
-    if (!checkKernelArgument("-rbgpuschedprobe") && !want_tick) return;
+    bool want_tick = rbgpu_arg("-rbgpuschedtick");
+    if (!rbgpu_arg("-rbgpuschedprobe") && !want_tick) return;
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
             "__ZN29AMDRadeonX6000_AMDSWScheduler19submitCommandBufferEmP30AMD_SUBMIT_COMMAND_BUFFER_INFOP16AMD_BARRIER_INFO",
@@ -14568,7 +14568,7 @@ static void rbgpu_route_sched_2wv(KernelPatcher &patcher, size_t id,
 
 static void rbgpu_route_restart_2iq(KernelPatcher &patcher, size_t id,
                                     mach_vm_address_t address, size_t size) {
-    if (!checkKernelArgument("-rbgpuringprobe")) return;
+    if (!rbgpu_arg("-rbgpuringprobe")) return;
     g_rb_2iq_t0 = mach_absolute_time();
     KernelPatcher::RouteRequest reqs[] = {
         KernelPatcher::RouteRequest(
@@ -14608,7 +14608,7 @@ static void hooked_programAndInvalidateVM_2id(void *vmm, const void *info) {
 
 static void rbgpu_route_hwregwrite_2ic(KernelPatcher &patcher, size_t id,
                                        mach_vm_address_t address, size_t size) {
-    if (!checkKernelArgument("-rbgpuringprobe")) {
+    if (!rbgpu_arg("-rbgpuringprobe")) {
         rbgpu_log("2ic: -rbgpuringprobe not set, AMDHWRegisters::write left "
                   "alone");
         return;
@@ -15530,7 +15530,7 @@ static bool hooked_set_display_mode_2kt(void *machine) {
     bool real = orig_set_display_mode_2kt ? orig_set_display_mode_2kt(machine)
                                           : false;
     if (g_rb_2kt_on < 0) {
-        g_rb_2kt_on = checkKernelArgument("-rbgpudisplaypipe") ? 1 : 0;
+        g_rb_2kt_on = rbgpu_arg("-rbgpudisplaypipe") ? 1 : 0;
         rbgpu_log("2kt: set_display_mode_and_vram guard %s",
                   g_rb_2kt_on ? "ARMED (a false cannot panic the machine)"
                               : "observe only (-rbgpudisplaypipe not set)");
@@ -15599,7 +15599,7 @@ static void rbgpu_route_disp_2kt(KernelPatcher &patcher, size_t id,
 
 static bool hooked_accel_found_framebuffer_2ct(void *machine, void *framebuffer) {
     g_rb_2ct_found_fb_calls++;
-    if (checkKernelArgument("-rbgpudisplaypipe")) {
+    if (rbgpu_arg("-rbgpudisplaypipe")) {
         bool ret = orig_accel_found_framebuffer_2ct
                        ? orig_accel_found_framebuffer_2ct(machine, framebuffer)
                        : false;
@@ -17020,7 +17020,7 @@ static void rbgpu_pdwalk_2kk(void *obj, uint32_t (*resolve)(void *, uint64_t),
 
 static void rbgpu_ringdump_2hw(uint64_t ring_va, uint32_t rptr, uint32_t wptr) {
     if (g_rb_2hw_on < 0) {
-        g_rb_2hw_on = checkKernelArgument("-rbgpuringdump") ? 1 : 0;
+        g_rb_2hw_on = rbgpu_arg("-rbgpuringdump") ? 1 : 0;
         rbgpu_log("2hw: ring PM4 dump %s", g_rb_2hw_on ? "ON" : "OFF (-rbgpuringdump)");
     }
     if (!g_rb_2hw_on || g_rb_2hw_done) {
@@ -17423,7 +17423,7 @@ static int             g_rb_2js_on  = -1;
 
 void rbgpu_mewatch_sample_2js(unsigned idx) {
     if (g_rb_2js_on < 0) {
-        g_rb_2js_on = checkKernelArgument("-rbgpumewatch") ? 1 : 0;
+        g_rb_2js_on = rbgpu_arg("-rbgpumewatch") ? 1 : 0;
     }
     if (g_rb_2js_on != 1 || idx >= RB_2JS_N || !g_hw.rreg) {
         return;
@@ -17855,7 +17855,7 @@ static int             g_rb_2ju_on  = -1;
 
 static bool rbgpu_2ju_enabled(void) {
     if (g_rb_2ju_on < 0) {
-        g_rb_2ju_on = checkKernelArgument("-rbgpunocgcg") ? 1 : 0;
+        g_rb_2ju_on = rbgpu_arg("-rbgpunocgcg") ? 1 : 0;
         rbgpu_log("2ju: CGCG/PG disable %s",
                   g_rb_2ju_on ? "ARMED (-rbgpunocgcg)" : "off");
         rbgpu_diag_set_num("nocgcg_on", static_cast<uint32_t>(g_rb_2ju_on));
@@ -17990,7 +17990,7 @@ void rbgpu_nocgcg_flush_2ju(void) {
 }
 void rbgpu_ring_probe_2hk(unsigned phase) {
     if (g_rb_2hk_on < 0) {
-        g_rb_2hk_on = checkKernelArgument("-rbgpuringprobe") ? 1 : 0;
+        g_rb_2hk_on = rbgpu_arg("-rbgpuringprobe") ? 1 : 0;
         rbgpu_log("2hk: ring probe %s", g_rb_2hk_on ? "ON" : "OFF (-rbgpuringprobe)");
     }
     if (!g_rb_2hk_on) {
@@ -18591,7 +18591,7 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                      ? "DEFAULT - routing is not the problem"
                      : "NOT DEFAULT - CP access is being misrouted");
 
-        if (checkKernelArgument("-rbgpugrbmfix")) {
+        if (rbgpu_arg("-rbgpugrbmfix")) {
             uint32_t me_before = g_hw.rreg(g_hw.ctx, kMEb);
             g_hw.wreg(g_hw.ctx, kGIDX, 0xE0000000u);
             g_hw.wreg(g_hw.ctx, kGCNTL, 0);
