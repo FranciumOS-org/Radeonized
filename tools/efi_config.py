@@ -7,6 +7,7 @@ tools/efi.sh; works on any path, so it can be tried on a copy first.
     python3 tools/efi_config.py CONFIG remove-kext
     python3 tools/efi_config.py CONFIG bootarg add -rbgpuoff
     python3 tools/efi_config.py CONFIG bootarg remove -rbgpuoff
+    python3 tools/efi_config.py CONFIG bootarg strip      # every rbgpu token
     python3 tools/efi_config.py CONFIG sysreport on|off   # Misc -> Debug -> SysReport
 
 Only these keys are touched: the RembrandtGPU entry of Kernel -> Add,
@@ -19,6 +20,7 @@ then moved over it, so an error never leaves a half-written config.
 """
 import os
 import plistlib
+import re
 import sys
 
 BOOT_GUID = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
@@ -98,6 +100,76 @@ def bootarg(cfg, op, arg):
     return f"boot-args now: {v['boot-args']}"
 
 
+DEFAULTS_H = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "src", "common", "rb_defaults.h")
+
+
+def default_tokens(path=DEFAULTS_H):
+    """The default-on tokens, read out of src/common/rb_defaults.h.
+
+    Read, not copied: the header is the list the kext compiles against and the
+    hosttest checks, so a second copy here could only ever disagree with it.
+    """
+    with open(path) as f:
+        src = f.read()
+    try:
+        body = src.split("rb_default_on_tokens[] = {", 1)[1].split("};", 1)[0]
+    except IndexError:
+        raise ConfigError(f"{path}: no rb_default_on_tokens[] table")
+    toks = re.findall(r'"(-rbgpu[A-Za-z0-9]+)"', body)
+    if len(toks) < 40:
+        raise ConfigError(f"{path}: only {len(toks)} tokens parsed; refusing to "
+                          f"strip boot-args from a table that looks wrong")
+    return toks
+
+
+def bootarg_strip(cfg):
+    """Take the now-redundant tokens of ours out of boot-args (2xw).
+
+    Since 2xw every token in `rb_defaults.h` is the default, so one in
+    boot-args changes nothing - and a redundant token is still a token that can
+    be mistyped, half-removed, or read as evidence that a feature needs it.
+
+    What it removes is EXACTLY that table, matched by name, which is why the
+    table is read from the header rather than restated here. Everything else
+    stays, and the three classes that matters for are worth naming:
+
+      * `wdt=-1` and the rest of the boot-args that are not ours.
+        `-rbgpuforceenable` is default-on now and that watchdog arg is Apple's,
+        so we cannot set it from a kext, and without it a frozen boot panics at
+        120 s with no SSH window (2hh).
+      * every DISARM: `-rbgpunofbhubp`, `-rbgpustock`, `-rbgpuoff`, and - the
+        case a name-shaped rule gets wrong - `-rbgpugates` and `-rbgpucgcg`,
+        which are the positive forms that turn the two already-negative
+        defaults off. Silently undoing a disarm would be the opposite of a
+        cleanup.
+      * tunables with a value (`rbgpuschedtickus=2000`). Those are deliberate,
+        so they are reported and left alone.
+    """
+    v = boot_vars(cfg)
+    table = set(default_tokens())
+    kept, gone, left = [], [], []
+    for a in v["boot-args"].split():
+        if a in table:
+            gone.append(a)
+            continue
+        kept.append(a)
+        name = a.split("=", 1)[0]
+        if name.startswith("-rbgpu") or name.startswith("rbgpu"):
+            left.append(a)
+    v["boot-args"] = " ".join(kept)
+    out = []
+    if gone:
+        out.append(f"boot-args: removed {len(gone)} redundant token(s): {' '.join(gone)}")
+    else:
+        out.append("boot-args: nothing of ours left to remove")
+    if left:
+        out.append("KEPT, because each one still means something - check them: "
+                   + " ".join(left))
+    out.append(f"boot-args now: {v['boot-args']}")
+    return "\n".join(out)
+
+
 def sysreport(cfg, on):
     try:
         dbg = cfg["Misc"]["Debug"]
@@ -150,6 +222,8 @@ def main(argv):
             msg = sysreport(cfg, argv[3] == "on")
         elif cmd == "bootarg" and len(argv) == 5 and argv[3] in ("add", "remove"):
             msg = bootarg(cfg, argv[3], argv[4])
+        elif cmd == "bootarg" and len(argv) == 4 and argv[3] == "strip":
+            msg = bootarg_strip(cfg)
         else:
             print(__doc__, file=sys.stderr)
             return 2

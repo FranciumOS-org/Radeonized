@@ -57,6 +57,40 @@ def main():
         with open(p, "wb") as f:
             plistlib.dump(orig, f, sort_keys=False)
 
+        # 2xw: `bootarg strip` removes exactly the rb_defaults.h table
+        with open(p, "wb") as f:
+            cfg = sample()
+            cfg["NVRAM"]["Add"][ec.BOOT_GUID]["boot-args"] = (
+                "keepsyms=1 -rbgpufbhubp wdt=-1 rbgpumtlkscope=* -rbgpunofbaty "
+                "-wegnoegpu -rbgpuschedtick -rbgpunogates -rbgpugates "
+                "rbgpuschedtickus=2000 -rbgpustock -rbgpuagdcearly")
+            plistlib.dump(cfg, f, sort_keys=False)
+        r = run(p, "bootarg", "strip")
+        after = plistlib.load(open(p, "rb"))["NVRAM"]["Add"][ec.BOOT_GUID]["boot-args"].split()
+        check(r.returncode == 0 and "-rbgpufbhubp" not in after
+              and "-rbgpuschedtick" not in after and "-rbgpunogates" not in after,
+              "strip removes exactly the default-on tokens, the negative-named ones too")
+        check("keepsyms=1" in after and "wdt=-1" in after and "-wegnoegpu" in after,
+              "strip keeps everything that is not ours, wdt=-1 above all (2hh)")
+        check("-rbgpunofbaty" in after and "-rbgpustock" in after
+              and "-rbgpugates" in after,
+              "strip keeps every DISARM, including the positive form of a "
+              "negative-named default (-rbgpugates)")
+        check("rbgpuschedtickus=2000" in after and "rbgpumtlkscope=*" in after,
+              "strip keeps tunables that carry a value")
+        check("-rbgpuagdcearly" in after,
+              "strip keeps an opt-in experiment it did not put there")
+        check("check them" in r.stdout and "rbgpumtlkscope" in r.stdout,
+              "strip REPORTS every rbgpu token it kept")
+        r2 = run(p, "bootarg", "strip")
+        check(r2.returncode == 0 and "nothing of ours left" in r2.stdout,
+              "a second strip is a no-op and says so")
+        check(len(ec.default_tokens()) == 45,
+              "the table is read from src/common/rb_defaults.h, not copied here")
+
+        with open(p, "wb") as f:
+            plistlib.dump(sample(), f, sort_keys=False)
+
         r = run(p, "add-kext")
         cfg = plistlib.load(open(p, "rb"))
         check(r.returncode == 0, "add-kext succeeds")

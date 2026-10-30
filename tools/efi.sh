@@ -11,6 +11,7 @@
 #   sudo tools/efi.sh vbios          # after that boot: extract the 680M VBIOS, turn SysReport off
 #   sudo tools/efi.sh sysreport-off
 #   sudo tools/efi.sh bootarg add|remove ARG   # e.g. msgbuf=1048576 (bigger kernel log buffer)
+#   sudo tools/efi.sh defaults    # take our now-redundant tokens out of boot-args (2xw)
 #   sudo tools/efi.sh usbintr0 on|off|status  # the XHCI interrupter-0 patches
 #   sudo tools/efi.sh usbpoke on|off          # XHCIPoke.kext (the 10 ms polling fallback)
 #
@@ -23,7 +24,7 @@ set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo tools/efi.sh ${1:-status}" >&2; exit 1; }
 cmd="${1:-}"
-case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg|usbintr0|usbpoke) ;; *)
+case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg|usbintr0|usbpoke|defaults) ;; *)
     sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
@@ -133,6 +134,30 @@ on)
     backup
     edit bootarg remove -rbgpuoff
     sync
+    ;;
+defaults)
+    # 2xw: the 45 tokens are the default now, so take them out of boot-args and
+    # then say what is left to check by hand. Negative tokens are kept - they
+    # are the user turning something off - and so is everything not ours.
+    backup
+    edit bootarg strip
+    sync
+    echo
+    echo "NVRAM keys that would DISARM a half (2xw reads them as disarms now):"
+    for k in rbgpu-arm rbgpu-fb rbgpu-agdc rbgpu-iop rbgpu-tick; do
+        v="$(nvram "$k" 2>/dev/null | sed "s/^$k[[:space:]]*//")"
+        if [ -z "$v" ]; then
+            echo "  $k: absent (armed)"
+        elif [ "$v" = "0" ]; then
+            echo "  $k: \"0\" - DISARMED. Re-arm with: sudo nvram -d $k"
+        else
+            echo "  $k: \"$v\" (armed; any value but \"0\" counts)"
+        fi
+    done
+    echo "  rbgpu-safe: $(nvram rbgpu-safe 2>/dev/null | sed 's/^rbgpu-safe[[:space:]]*//' || echo absent) \
+(the boot sentinel writes this one; \"1\" at the start of a boot is normal)"
+    echo
+    echo "Reboot. Then: ioreg -rl -c RembrandtGPUPeer | grep -o '\"RBGPUDiag\" = {.*}'"
     ;;
 bootarg)
     op="${2:-}"; arg="${3:-}"
