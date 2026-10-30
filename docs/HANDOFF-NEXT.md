@@ -18,8 +18,8 @@ hardware:
 
 ## WHAT TO INSTALL AND WHAT TO READ
 
-    plugin  build/out/RembrandtGPU.kext      17C9A3A7     -> the OpenCore EFI
-    fbkext  build/out/RBAMDFramebuffer.kext  DE391320     -> the auxiliary collection
+    plugin  build/out/RembrandtGPU.kext      64957171     -> the OpenCore EFI
+    fbkext  build/out/RBAMDFramebuffer.kext  33D9C184     -> the auxiliary collection
 
     sudo tools/efi.sh install          # the plugin
     # the framebuffer is the user's install into /Library/Extensions
@@ -65,8 +65,13 @@ over from an earlier boot it is harmless unless it reads `0`, which now means
   configuration (rule 39).
 * **No `RBAMDFramebuffer` in `ioreg` at all** = it declined. There is no
   service to publish why, so read it from outside: `-rbgpuoff`/`-rbgpustock`/
-  `-rbgpunoownfb` in boot-args, `rbgpu-fb=0`, `rbgpu-arm=0`, or `rbgpu-safe`
-  still set. Those are the only five reasons.
+  `-rbgpunoownfb` in boot-args, `rbgpu-fb=0`, `rbgpu-arm=0`, `rbgpu-safe` still
+  set, or the peer having run first and said stock. Those are the only six
+  reasons.
+* `RBFBArmWhy` **10** means the framebuffer probed AFTER the peer and took the
+  peer's own answer - correct, but it is the opposite of the order 2wg
+  measured, so note it: `RBGPUStock` on the peer is then the authoritative
+  input and the sentinel latch is not read at all.
 * A desktop that is correct but frozen is rule 38's failure: the panel taken
   with no accelerator underneath. One power cycle fixes it by itself now,
   because the sentinel latch will be set.

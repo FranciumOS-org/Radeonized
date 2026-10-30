@@ -529,6 +529,25 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // display chain, which is all downstream of here.
     rbgpu_sentinel_begin();
 
+    // 2xw: publish the verdict for the OTHER kext to read.
+    //
+    // `RBAMDFramebuffer` has to answer the same question at probe time - is
+    // the accelerator going to be armed? - because rule 38 says the panel
+    // taken without one freezes. It can read the same NVRAM keys, but not the
+    // sentinel latch: the latch is "1" both when the PREVIOUS boot failed and
+    // while THIS boot is still proving itself, and which of the two it is
+    // depends on whether the framebuffer probed before this point.
+    //
+    // 2wg measured the order - the framebuffer's `RBFBCrumbBoot` lags
+    // `rbgpu-boot` by exactly one in two separate boots, so it reads the
+    // counter before this function increments it and therefore probes first.
+    // That is a measurement of two boots, not a guarantee, so instead of
+    // relying on it this property makes the order irrelevant: if the
+    // framebuffer finds it, the peer has already decided and its answer is
+    // authoritative; if it does not, the peer has not run yet and a latch can
+    // only be the previous boot's.
+    setProperty("RBGPUStock", rbgpu_stock());
+
     if (!super::start(provider)) {
         return false;
     }

@@ -100,7 +100,9 @@ const UInt32 kAtyOffsetDefaultMB    = 16;
 uint32_t armRefuseWhy = 0;   /* 0 armed, 2 -rbgpuoff/-rbgpustock, 3 rbgpu-fb=0,
                               * 4 /options unreachable (armed anyway),
                               * 5 -rbgpunoownfb, 6 the sentinel latch,
-                              * 7 rbgpu-arm=0 (rule 38) */
+                              * 7 rbgpu-arm=0 (rule 38), 9 the peer ran first
+                              * and said stock, 10 the peer ran first and said
+                              * armed */
 
 bool argOn(const char *tok)
 {
@@ -200,6 +202,33 @@ bool armedOnce(void)
         options->release();
         return false;
     }
+    /* 2xw: if the peer has already run, its answer beats any key we could
+     * read - see the long note at its setProperty("RBGPUStock"). This is the
+     * only thing that makes the sentinel latch unambiguous for us: "1" means
+     * "the previous boot did not survive" when we probe first, and "this boot
+     * is still proving itself" when we probe second, and nothing in NVRAM
+     * tells the two apart. */
+    if (OSDictionary *match = IOService::serviceMatching("RembrandtGPUPeer")) {
+        IOService *peer = IOService::copyMatchingService(match);
+        match->release();
+        if (peer) {
+            OSBoolean *stock = OSDynamicCast(OSBoolean,
+                                             peer->getProperty("RBGPUStock"));
+            bool peerStock = stock != nullptr && stock->isTrue();
+            peer->release();
+            if (stock) {
+                LOG("the peer has already run and says stock=%d; %s (rule 38 - "
+                    "its answer decides, not the sentinel latch, which cannot "
+                    "be told apart from this boot's own)",
+                    peerStock ? 1 : 0,
+                    peerStock ? "declining the panel" : "taking the panel");
+                armRefuseWhy = peerStock ? 9 : 10;
+                options->release();
+                return !peerStock;
+            }
+        }
+    }
+
     bool safePresent = false;
     bool safeZero = keyReadsZero(options, "rbgpu-safe", &safePresent);
     if (safePresent && !safeZero) {
