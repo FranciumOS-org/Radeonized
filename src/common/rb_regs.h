@@ -125,6 +125,20 @@ static const struct rb_reg_def rb_reg_defs[] = {
     { "OTG0_V_BLANK_START_END", RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b36 },
     { "OTG0_V_SYNC_A",          RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b37 },
     { "OTG0_V_SYNC_A_CNTL",     RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b38 },
+    /* 2y4: the DRR group, which is how a refresh rate is changed on a raster
+     * that is already scanning. OTG_V_TOTAL itself is what Linux programs
+     * during a MODESET, with the pipe locked - not available to us, because
+     * the panel is live and the desktop is on it. V_TOTAL_MIN/MAX plus the
+     * MIN_SEL/MAX_SEL bits in V_TOTAL_CONTROL are the variable-refresh path
+     * and are designed to be written while scanning; pinning MIN == MAX fixes
+     * the frame length, and clk/(H_TOTAL * V_TOTAL) is then the refresh.
+     * Offsets from docs/linux-ref/dcn_3_1_2_offset.h:8769-8776, base_idx 2.
+     * READ-ONLY here: nothing writes these yet, and rb_dcn_deny.h is the gate
+     * that has to be opened deliberately before anything does. */
+    { "OTG0_V_TOTAL_MIN",       RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b30 },
+    { "OTG0_V_TOTAL_MAX",       RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b31 },
+    { "OTG0_V_TOTAL_MID",       RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b32 },
+    { "OTG0_V_TOTAL_CONTROL",   RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x1b33 },
     { "HUBP0_SURFACE_PITCH",    RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x0607 },
     { "HUBP0_SURFACE_CONTROL",  RB_HWID_DMU, 2, RB_LEVEL_DC, 3, 1, 1, 0x061a },
 

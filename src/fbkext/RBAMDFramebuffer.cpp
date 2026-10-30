@@ -515,6 +515,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     }
 
     hubpSetup();
+    otgTimingReset(); /* 2y4: before blSetup, which may not run at all */
     blSetup();        /* 2xs: independent of hubpSetup's result by design */
     /* 2y0: AFTER blSetup, because it refuses unless blReady, and BEFORE
      * IOFramebuffer::start() below, because that is what can create an

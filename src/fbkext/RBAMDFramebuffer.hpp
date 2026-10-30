@@ -310,6 +310,17 @@ private:
     uint64_t           blParmPublished;
     uint64_t           blParmPublishFails;
     uint64_t           blParmNoDict;
+    /* 2y4: OTG0's timing and DRR group as the firmware left it, read once in
+     * blSetup(). The starting point for any refresh-rate change, and the
+     * restore values if one is ever written. */
+    uint32_t           otgHTotal;
+    uint32_t           otgVTotal;
+    uint32_t           otgVTotalMin;
+    uint32_t           otgVTotalMax;
+    uint32_t           otgVTotalMid;
+    uint32_t           otgVTotalCntl;
+    uint32_t           otgVBlankSE;
+    uint32_t           otgFrameCount0;
     uint64_t           blParmSets;
     /* 2y2: per KEY, not one total. The whole question the boot answers is
      * WHICH name the brightness UI writes, and a single counter cannot say
@@ -358,6 +369,7 @@ private:
     bool blSetup(void);
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */
+    void otgTimingReset(void);   /* 2y4 */
     bool blParamsSetup(void);
     void blParamsTeardown(void);
     uint32_t blCurrentLevel(void);

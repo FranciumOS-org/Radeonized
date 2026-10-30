@@ -130,6 +130,14 @@ public:
     uint64_t blParmPublished=0;   /* 2y0 */
     uint64_t blParmPublishFails=0;/* 2y0 */
     uint64_t blParmNoDict=0;      /* 2y0 */
+    uint32_t otgHTotal=0;         /* 2y4 */
+    uint32_t otgVTotal=0;         /* 2y4 */
+    uint32_t otgVTotalMin=0;      /* 2y4 */
+    uint32_t otgVTotalMax=0;      /* 2y4 */
+    uint32_t otgVTotalMid=0;      /* 2y4 */
+    uint32_t otgVTotalCntl=0;     /* 2y4 */
+    uint32_t otgVBlankSE=0;       /* 2y4 */
+    uint32_t otgFrameCount0=0;    /* 2y4 */
     uint64_t blParmSets=0;        /* 2y0 */
     uint64_t blParmSetsPerc=0;    /* 2y2 */
     uint64_t blParmSetsLin=0;     /* 2y2 */
