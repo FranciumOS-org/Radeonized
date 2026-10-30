@@ -262,7 +262,12 @@ The numbering is cited all over the journal — **keep the numbers**.
     boot loads** — the plugin from the EFI, the framebuffer from
     `/Library/Extensions`. A rebuild refreshes neither. A key the new code
     publishes *unconditionally* is the cheapest proof the new binary is
-    running. [2cu, 2w6, 2wa]
+    running. **2xx is the expensive case: nine boots, a WindowServer crash
+    loop and a nine-stage boot-arg bisect, all because the plugin was
+    reinstalled every time and the framebuffer never was.** Every "cleared"
+    result in that bisect was taken against a two-milestone-old second binary.
+    `kextstat | grep rembrandt` against the UUIDs the build printed is the
+    first reading of any boot, not an afterthought. [2cu, 2w6, 2wa, 2xx]
 
 **Instrumenting**
 

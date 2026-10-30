@@ -48485,3 +48485,57 @@ reading - 0 means it took the panel, and anything else names which of the six
 reasons it declined. A `Metal compositor activated` line in the display log and
 no `CompositorSW` in a crash report is the result; it may simply be boot 231's
 working state, reached again.
+
+### 2xx RESOLVED — the WindowServer crash loop was a stale framebuffer kext
+
+Boot 247, full 45 defaults with only `-rbgpunosentinel`, the matching 2xx
+framebuffer installed. **Accelerated, smooth, no crash.** User's words: "its
+accelerated and smooth 144hz".
+
+The machine's own counters, 602 s of uptime:
+
+```
+kextstat   plugin FE3200B0   fb 353A1D24        both 2xx, agreeing for the first time
+ioreg      1 RBAMDFramebuffer, 0 IONDRVFramebuffer
+RBFBArmWhy      = 10        took the peer's RBGPUStock answer
+RBFBVBLFires    = 85491     / 602 s = 142.0 Hz against the panel's 143.83
+RBFBAmtrSets    = 19066     / 602 s = 31.7/s on a mostly-idle desktop
+RBFBHubpWrites  = 19072     one per set
+peer: armed=1 arm_why=0 gen=1 tick_armed=1 tick_us=6944 cap_tbl_patched=1
+      agdc_on=1 sentinel=2
+System Profiler: AMD Radeon 680M, 4 GB, 0x1681 rev 0x000a
+```
+
+**`RBFBArmWhy = 10` is the proof of the diagnosis.** That key, and the
+`RBGPUStock` handshake it records, exist only in the 2xw+ framebuffer. The
+`C7278266` binary that was loaded for every one of the nine crashing boots
+could not perform it, had no `rbgpu-gen` generation rule and no rule-38 check.
+
+So the whole crash loop was **rule 15**: the plugin was reinstalled nine times
+and the framebuffer never was. Everything the bisect "cleared" was cleared
+against a two-milestone-old second binary, and the one reading that would have
+caught it on the first boot - `kextstat | grep rembrandt`, checked against the
+UUID the build printed - was the reading never taken. 2xw's own HANDOFF listed
+both artifacts and both UUIDs; only one of them was installed.
+
+What that means for the eight `push_surface` aborts, now attributable: with the
+2xw+ framebuffer declining the panel for reasons the old binary did not
+understand, `IONDRVFramebuffer` kept it, SkyLight fell back to **`CompositorSW`**
+and its `SWContext::create_surface_with_properties` asked `mmap` for 816 MB of
+RGBAh half-float that could not be backed - `VM - Returned success with no
+page`, twice, every time. Nothing we wrote was corrupting a surface. The
+`_DeviceCapabilityTbl` clone, the linear force, the userspace patcher, AGDC and
+all 45 tokens were innocent, which is why disarming each of them in turn
+changed nothing.
+
+Standing corrections from this milestone:
+- **`cap_tbl_patched` is now a three-value key** (0 not patched/failed, 1
+  patched, 2 skipped by `-rbgpunocaptbl`) and the record is **load-bearing**:
+  `_ttl_hw_init` returns `kIOReturnError` without it, measured in boot 246.
+  `-rbgpunocaptbl` is therefore a diagnostic, not a usable configuration.
+- **`efi.sh bootarg add|remove` takes several tokens in one call.**
+- `-rbgpunosentinel` is the right setting for a session of rapid reboots, and
+  without it every crashing test boot costs a second, stock boot.
+- `ioreg` prints these counters as `"RBFBArmWhy" = 10`, not `"RBFBArmWhy"="10"`.
+  A grep written for the quoted form reports the service as absent - rule 26,
+  and it cost a wrong reading in this very milestone.
