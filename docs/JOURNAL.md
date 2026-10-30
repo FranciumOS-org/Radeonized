@@ -48869,3 +48869,71 @@ and I then read them too early.
 Net: **2xs is done and confirmed on hardware** - the mechanism, the arithmetic,
 the floor and the effect. 2xy is still unmeasured, now for the second boot
 running, because the auxiliary collection was never rebuilt.
+
+---
+
+## 2xy boot 250 - AppleBacklightDisplay MATCHES, and that does not publish "brightness"
+
+Boot 250, `EBF63EB0` finally the loaded framebuffer, `-rbgpufbbacklight` and
+`-rbgpufbbuiltin` both in boot-args, `rbgpu-boot` 250, accelerated
+(`RBFBArmWhy = 10`).
+
+**2xy works.** IOGraphics wrote every one of our answers down:
+
+```
++-o AppleBacklightDisplay  <class AppleBacklightDisplay, id 0x10000059d>
+      "IOProbeScore"           = 3000        <- beats AppleDisplay's 2000
+      "IODisplayConnectFlags"  = <00080000>  <- kIOConnectionBuiltIn, byte-swapped
+      "AppleSense"             = 0           <- our getAppleSense senseType
+      "AppleDisplayType"       = 2           <- our kPanelTFTConnect
+      "IODisplayPrefsKey" = ".../IGPU@0-756e6b6e-0-0"
+```
+
+and our side counted the asking (rule 14, the three outcomes named before the
+boot): `RBFBBlBuiltIn Yes`, **`RBFBBlFlagsGets 2`**, **`RBFBBlSenseGets 2`**.
+So `IOBacklightDisplay::probe` asked for `kConnectionFlags`, accepted it, asked
+`getAppleSense`, accepted that too, and took the category. The chain read
+statically in 2xy is confirmed end to end on hardware.
+
+**And the second of the three predicted outcomes is what happened.** The
+parameter dictionary is unchanged:
+
+```
+6 parameter(s): bgsc rgsc vblm brig ownr ggsc
+set via "brightness"(0.55) -> 0xe00002c7 (kIOReturnUnsupported)
+set via "brig"(0.55)       -> 0x0 (OK), value 38349, and the kext writes:
+                              RBFBBlSets 3, LastLevel 22786 -> LastCount 22252
+                              -> Readback 22252, PendTimeouts 0
+```
+
+`AppleBacklightDisplay` owning the connection does **not** add a full-name
+`"brightness"` parameter. It serves our framebuffer's list through
+`IOFramebufferParameterHandler` and nothing more, so `kIODisplayBrightnessKey`
+still answers `kIOReturnUnsupported` and only `"brig"` works.
+
+**This corrects what 2xy was written on.** The commit that built it said "the
+full-name parameter is `IOBacklightDisplay`'s to publish, which is what makes
+2xy necessary". 2xy *was* necessary - nothing else makes that class match - but
+the inference that the class match would therefore produce `"brightness"` was
+wrong, and the boot is what settled it. The name gap is a third thing, downstream
+of both halves, and it is now the only thing between here and the slider.
+
+Where that leaves it: the brightness is fully controllable
+(`./build/out/blset <0..1>`, three round-tripped writes this boot), by any
+client that asks for `"brig"`. What is unknown is what `IOBacklightDisplay`
+requires before it publishes `kIODisplayBrightnessKey` itself - on Apple
+hardware `AppleBacklight.kext`'s only personality is `AppleIntelPanelA`,
+matching `IOACPIPlatformDevice` / `IONameMatch backlight` with
+`IOMatchCategory IODisplayParameters` and `IODisplayParameters = {commit}`, so
+the full-name parameters plausibly come from a separate driver that claims the
+`IODisplayParameters` match category rather than from the framebuffer at all.
+That is a static question and needs no boot.
+
+**And one instrument failure, caught by its control.** The first attempt to
+answer it was `strings -a build/re/IOGraphicsFamily | grep -i backlight`, which
+returned nothing - against the same file that had returned
+`AppleBacklightDisplay`, `IOBacklightDisplay` and `site.IOBacklightDisplay`
+earlier the same day. The file was gone: **`make clean` does `rm -rf
+$(BUILD_DIR)`, which includes `build/re/`**, and 2xz's clean rebuild deleted
+every extracted Apple binary in the tree. Rule 26's control is the only reason
+that did not become a finding about IOGraphicsFamily.

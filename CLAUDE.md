@@ -119,7 +119,20 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness.** 2xs is **DONE, boot 249** — the parameter is published, the
+- **Brightness.** 2xs **DONE, boot 249**; 2xy **DONE, boot 250** -
+  `AppleBacklightDisplay` matches (`IOProbeScore` 3000,
+  `IODisplayConnectFlags <00080000>`, `AppleSense 0`, `AppleDisplayType 2`,
+  and `RBFBBlFlagsGets`/`RBFBBlSenseGets` both 2, so the probe asked and
+  accepted). **The name gap survived both** and is now the only thing left:
+  the class match does NOT add a full-name `"brightness"` parameter, so
+  `kIODisplayBrightnessKey` still answers `kIOReturnUnsupported` and only
+  `"brig"` works. `./build/out/blset <0..1>` drives it today. What publishes
+  `kIODisplayBrightnessKey` on Apple hardware is a STATIC question needing no
+  boot: `AppleBacklight.kext`'s only personality is `AppleIntelPanelA`, which
+  claims `IOMatchCategory IODisplayParameters` against an
+  `IOACPIPlatformDevice` named `backlight` - so the full-name parameters may
+  come from a separate driver claiming that category, not from the framebuffer.
+  Superseded detail, kept because it was acted on: 2xs is **DONE, boot 249** — the parameter is published, the
   duty cycle is written and reads back bit-identical, and `make blset` changes
   it from userspace with no boot. What is left is the System Settings slider,
   and the gap is a NAME: our parameter is keyed `"brig"` because
@@ -253,6 +266,12 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
   this chip reports MMHUB 2.4.0 (`mmhub_v2_3`) and DMU 3.1.3
   (`DCN_VERSION_3_1`, `dcn_3_1_2`). Check the grouping before adding one.
 - Captures land in `logs/<timestamp>-plugin/`.
+- **`make clean` deletes `build/re/` and every extracted Apple binary with
+  it** (`rm -rf $(BUILD_DIR)`). They are slow to rebuild - `kc_extract.py` over
+  a 369 MB system collection - and their absence looks exactly like a finding:
+  a `strings`/`grep` over a path that no longer exists returns nothing (2xy,
+  caught only by rule 26's control). Re-extract before trusting a static
+  search that comes back empty.
 
 ## Hard rules
 
