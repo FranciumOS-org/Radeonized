@@ -182,5 +182,98 @@ int drr_tests(void)
               2u * rb_drr_period_ns(DRR_RATE1616_LIVE),
           "60 Hz is more than twice the period of 143.83 Hz");
 
+    /* --- 2z0: the mode list, built from the panel ----------------------- */
+    {
+        struct rb_drr_mode m[RB_DRR_MAX_MODES];
+        unsigned n = rb_drr_build_modes(B255_CLK, DRR_HTOTAL, DRR_VTOTAL,
+                                        DRR_RATE1616_LIVE, m,
+                                        RB_DRR_MAX_MODES);
+        CHECK(n == 8u, "this 143.8 Hz panel yields 8 modes (native + 7)");
+        CHECK(m[0].native == 1u && m[0].lines == DRR_VTOTAL,
+              "index 0 is NATIVE and carries the firmware's own V_TOTAL");
+        /* Strictly descending: a mode list out of order is a mode list the
+         * Displays panel renders in a confusing order, and a duplicate is a
+         * mode that cannot be selected twice. */
+        {
+            int ordered = 1, grows = 1;
+            unsigned i;
+            for (i = 1; i < n; i++) {
+                if (m[i].mhz >= m[i - 1].mhz)     { ordered = 0; }
+                if (m[i].lines <= m[i - 1].lines) { grows = 0; }
+                if (m[i].native != 0u)            { ordered = 0; }
+            }
+            CHECK(ordered, "every later mode is strictly slower, and non-native");
+            CHECK(grows, "and strictly longer in lines - the two must agree");
+        }
+        /* Ladder order is 120/100/90/75/60/50/48, so index 4 is 75 Hz and 5
+         * is 60 Hz. The line counts are those of BOOT 255'S clock: boot 256
+         * measured 341826303 and got 2164/2705 for the same two modes. That
+         * difference is the whole reason the list is derived per boot rather
+         * than tabulated (2y6), so it is asserted here rather than smoothed
+         * over. */
+        CHECK(m[5].lines == 2707u && m[5].mhz == B255_MODE60_MHZ,
+              "60 Hz is 2707 lines on boot 255's clock - 2y6's own answer");
+        CHECK(m[4].lines == 2165u && m[4].mhz > 74900u && m[4].mhz < 75100u,
+              "75 Hz is 2165 lines, the mode just under the ~76/s ceiling");
+        CHECK(rb_drr_lines_for_mhz(341826303u, DRR_HTOTAL, 60000u) == 2705u &&
+              rb_drr_lines_for_mhz(341826303u, DRR_HTOTAL, 75000u) == 2164u,
+              "and boot 256's clock gives 2705/2164 for the same two modes");
+        /* The native mode must advertise the REGISTRY's rate, not a derived
+         * one - it moves between boots and every boot since 2sl was read
+         * against the constant. */
+        CHECK(m[0].rate1616 == DRR_RATE1616_LIVE &&
+              m[0].period_ns == 6952507ull,
+              "native advertises the registry rate and the 2xe period");
+        {
+            struct rb_drr_mode d[RB_DRR_MAX_MODES];
+            (void)rb_drr_build_modes(B255_CLK, DRR_HTOTAL, DRR_VTOTAL, 0u, d,
+                                     RB_DRR_MAX_MODES);
+            CHECK(d[0].rate1616 == rb_drr_rate1616(B255_BEFORE) &&
+                  d[0].rate1616 != DRR_RATE1616_LIVE,
+                  "and passing 0 derives it instead, which is a DIFFERENT "
+                  "number - the reason the caller supplies the constant");
+        }
+
+        /* A 75 Hz panel must NOT be offered 120 or 144. This is the whole
+         * reason the list is derived: 2y6's hardcoded table would have
+         * claimed 143.8 Hz on hardware that has never run it. */
+        n = rb_drr_build_modes(166587000u, 2200u, 1010u, 0u, m,
+                               RB_DRR_MAX_MODES);
+        CHECK(n == 4u, "a 75 Hz panel yields exactly 4 modes");
+        CHECK(m[0].native == 1u && m[0].mhz > 74000u && m[0].mhz < 76000u,
+              "whose native mode is its own 75 Hz");
+        {
+            int none_faster = 1;
+            unsigned i;
+            for (i = 0; i < n; i++) {
+                if (m[i].mhz > m[0].mhz) { none_faster = 0; }
+            }
+            CHECK(none_faster,
+                  "and nothing faster than native is ever offered");
+        }
+
+        /* The bound is honoured even when the ladder could fill more. */
+        n = rb_drr_build_modes(B255_CLK, DRR_HTOTAL, DRR_VTOTAL, 0u, m, 3u);
+        CHECK(n == 3u, "max is respected rather than overrun");
+
+        /* No raster, no modes - not one fabricated native entry. */
+        CHECK(rb_drr_build_modes(0u, DRR_HTOTAL, DRR_VTOTAL, 0u, m,
+                                 RB_DRR_MAX_MODES) == 0u &&
+              rb_drr_build_modes(B255_CLK, 0u, DRR_VTOTAL, 0u, m,
+                                 RB_DRR_MAX_MODES) == 0u &&
+              rb_drr_build_modes(B255_CLK, DRR_HTOTAL, 0u, 0u, m,
+                                 RB_DRR_MAX_MODES) == 0u &&
+              rb_drr_build_modes(B255_CLK, DRR_HTOTAL, DRR_VTOTAL, 0u, m,
+                                 0u) == 0u,
+              "a missing input yields NO modes rather than a guessed one");
+
+        /* A panel already at 48 Hz has nothing below it on the ladder, so the
+         * list is native ALONE - which must still be a valid list. */
+        n = rb_drr_build_modes(B255_CLK, DRR_HTOTAL, 3381u, 0u, m,
+                               RB_DRR_MAX_MODES);
+        CHECK(n == 1u && m[0].native == 1u,
+              "a panel at the bottom of the ladder gets native only");
+    }
+
     return failures;
 }

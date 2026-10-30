@@ -145,4 +145,102 @@ static inline uint64_t rb_drr_period_ns(uint32_t rate1616)
     return 1000000000ull * 65536ull / (uint64_t)rate1616;
 }
 
+/* ---- 2z0: the mode LIST, derived from this panel ------------------------
+ *
+ * 2y6 hardcoded one extra mode at 60 Hz, which was right for a measurement and
+ * wrong for a driver: it would offer 60 Hz on a 75 Hz panel and claim 143.8 Hz
+ * on a machine that has neither. What a panel can do is three measured numbers
+ * - clk, H_TOTAL, V_TOTAL - and everything else follows, so the list is built
+ * rather than written down.
+ *
+ * ONLY LOWER RATES. V_TOTAL can be lengthened on a live raster and nothing
+ * here has established what any panel tolerates ABOVE its native rate, so the
+ * native mode is always index 0 and every other entry is slower. A 75 Hz panel
+ * therefore gets 75/60/50/48 and never sees 120.
+ *
+ * The native entry carries lines == vtotal and native == 1, which means "do
+ * not write the timing at all" - the firmware already set it, and the one
+ * thing worse than a mode that fails is a write that was never needed.
+ */
+#define RB_DRR_MAX_MODES 8u
+
+/* The rates a desktop actually wants, highest first. Not a standards table:
+ * each is offered only if this panel can reach it by lengthening V_TOTAL. */
+#define RB_DRR_LADDER_N 7u
+static const uint32_t rb_drr_ladder[RB_DRR_LADDER_N] = {
+    120000u, 100000u, 90000u, 75000u, 60000u, 50000u, 48000u
+};
+
+struct rb_drr_mode {
+    uint32_t lines;      /* V_TOTAL to program; for native, the current one */
+    uint32_t mhz;        /* what those lines actually give, not what was asked */
+    uint32_t rate1616;   /* IODisplayModeInformation::refreshRate */
+    uint64_t period_ns;  /* what the VBL thread_call ticks at */
+    uint32_t native;     /* 1 = the firmware's own timing, never written */
+};
+
+/* Returns how many entries were filled, always >= 1 on a live raster (the
+ * native mode) and 0 only if there is no raster to describe. */
+/* native_rate1616: the rate to ADVERTISE for the native mode, or 0 to derive
+ * it. Not cosmetic. The panel's measured refresh moves ~0.05 % between boots
+ * (DP spread-spectrum, 2y6), so a derived native rate is a different number
+ * every boot - while the registry's own IOFBConfig carries a fixed
+ * 0x008fd53f that every boot since 2sl has been read against. The caller
+ * passes that constant so the native mode keeps advertising it, and the
+ * DERIVED rate is still what drives the line counts of every other mode. One
+ * place decides, and the test runs both ways. */
+static inline unsigned rb_drr_build_modes(uint32_t clk, uint32_t htotal,
+                                          uint32_t vtotal,
+                                          uint32_t native_rate1616,
+                                          struct rb_drr_mode *out, unsigned max)
+{
+    unsigned n = 0, i, j;
+    uint32_t nat;
+
+    if (!out || max == 0u || clk == 0u || htotal == 0u || vtotal == 0u) {
+        return 0u;
+    }
+
+    nat = rb_drr_mhz(clk, htotal, vtotal);
+    if (nat == 0u) { return 0u; }
+
+    out[0].lines     = vtotal;
+    out[0].mhz       = nat;
+    out[0].rate1616  = native_rate1616 ? native_rate1616
+                                       : rb_drr_rate1616(nat);
+    out[0].period_ns = rb_drr_period_ns(out[0].rate1616);
+    out[0].native    = 1u;
+    n = 1u;
+
+    for (i = 0; i < RB_DRR_LADDER_N && n < max; i++) {
+        const uint32_t lines = rb_drr_lines_for_mhz(clk, htotal,
+                                                    rb_drr_ladder[i]);
+        uint32_t mhz;
+        int dup = 0;
+
+        /* Unreachable, or not actually slower than what the panel is doing. */
+        if (lines == 0u || lines <= vtotal) { continue; }
+
+        mhz = rb_drr_mhz(clk, htotal, lines);
+        if (mhz == 0u) { continue; }
+        /* Within 1 Hz of native is not a second mode, it is a duplicate with a
+         * different label - exactly what offering "120" on a 120.5 Hz panel
+         * would be. */
+        if (nat < mhz + 1000u) { continue; }
+
+        for (j = 0; j < n; j++) {
+            if (out[j].lines == lines) { dup = 1; break; }
+        }
+        if (dup) { continue; }
+
+        out[n].lines     = lines;
+        out[n].mhz       = mhz;
+        out[n].rate1616  = rb_drr_rate1616(mhz);
+        out[n].period_ns = rb_drr_period_ns(out[n].rate1616);
+        out[n].native    = 0u;
+        n++;
+    }
+    return n;
+}
+
 #endif /* RB_DRR_H */

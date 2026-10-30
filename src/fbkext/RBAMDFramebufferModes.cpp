@@ -81,10 +81,14 @@ void RBAMDFramebuffer::modeReset(void)
     modeCur = kModeIDFast;
     modeClkHz = 0;
     modeBaseMhz = 0;
-    modeLines60 = 0;
-    modeMhz60 = 0;
-    modeRate60 = 0;
-    modePeriod60 = 0;
+    modeCount = 0;
+    for (unsigned i = 0; i < RB_DRR_MAX_MODES; i++) {
+        modeList[i].lines = 0;
+        modeList[i].mhz = 0;
+        modeList[i].rate1616 = 0;
+        modeList[i].period_ns = 0;
+        modeList[i].native = 0;
+    }
     modeSwitches = 0;
     modeApplies = 0;
     modeLastAsked = 0;
@@ -127,22 +131,33 @@ bool RBAMDFramebuffer::modeSetup(void)
     modeClkHz = rb_drr_clk_from_mhz(modeBaseMhz, htotal, vtotal);
     if (modeClkHz == 0u) { modeRefuse = MODE_REFUSE_NO_CLK; return false; }
 
-    modeLines60 = rb_drr_lines_for_mhz(modeClkHz, htotal, 60000u);
-    if (modeLines60 == 0u ||
-        rb_drr_check(htotal, vtotal, modeCtl0, modeLines60) != RB_DRR_OK) {
+    /* 2z0: the whole list, derived from this raster. The native rate is the
+     * registry's own constant rather than a derived one - the measured refresh
+     * moves ~0.05 % between boots (2y6), and every boot since 2sl has been
+     * read against 0x008fd53f. */
+    modeCount = rb_drr_build_modes(modeClkHz, htotal, vtotal,
+                                   kRefreshRate1616, modeList,
+                                   RB_DRR_MAX_MODES);
+    if (modeCount == 0u) {
         modeRefuse = MODE_REFUSE_NO_LINES;
         return false;
     }
 
-    /* What the chip will DO at that line count, not the 60000 that was asked
-     * for. Advertising the request instead of the achievable value is how a
-     * mode list comes to lie about the panel. */
-    modeMhz60 = rb_drr_mhz(modeClkHz, htotal, modeLines60);
-    modeRate60 = rb_drr_rate1616(modeMhz60);
-    modePeriod60 = rb_drr_period_ns(modeRate60);
-    if (modeRate60 == 0u || modePeriod60 == 0u) {
-        modeRefuse = MODE_REFUSE_NO_CLK;
-        return false;
+    /* Drop any non-native entry this raster will not accept, rather than
+     * advertising it. rb_drr_check is asked per mode because it is what
+     * modeApply will ask later, and a mode that would be refused at switch
+     * time must not be in the list at all (rule 14: a refusal the user can
+     * only discover by selecting it is indistinguishable from a bug). */
+    {
+        unsigned keep = 1;
+        for (unsigned i = 1; i < modeCount; i++) {
+            if (rb_drr_check(htotal, vtotal, modeCtl0,
+                             modeList[i].lines) == RB_DRR_OK &&
+                modeList[i].rate1616 != 0u && modeList[i].period_ns != 0u) {
+                modeList[keep++] = modeList[i];
+            }
+        }
+        modeCount = keep;
     }
 
     modeCur = kModeIDFast;
@@ -171,65 +186,64 @@ bool RBAMDFramebuffer::modeApply(IODisplayModeID want)
 {
     if (!modeArmed)          { modeRefuse = MODE_REFUSE_NOT_ARMED; return false; }
     if (!blReady || !blRegs) { modeRefuse = MODE_REFUSE_NO_MAP; return false; }
-    if (want != kModeIDFast && want != kModeID60) {
-        modeRefuse = MODE_REFUSE_BAD_MODE;
-        return false;
-    }
+
+    const int idx = modeIndexOf(want);
+    if (idx < 0) { modeRefuse = MODE_REFUSE_BAD_MODE; return false; }
 
     volatile uint32_t *regs = blRegs;
     modeApplies++;
 
-    if (want == kModeID60) {
-        /* Live, not the setup snapshot - rule 41's question asked of a
-         * register. This computes nothing from them, but it refuses on them,
-         * and what the raster was doing at start() is not what it is doing
-         * when a user opens the Displays panel twenty minutes later. */
-        const uint32_t htotal = regs[kModeSeg2 + MODE_DW_H_TOTAL] & RB_DRR_TOTAL_MASK;
-        const uint32_t vtotal = regs[kModeSeg2 + MODE_DW_V_TOTAL] & RB_DRR_TOTAL_MASK;
-        const uint32_t ctl0   = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
-
-        const int why = rb_drr_check(htotal, vtotal, ctl0, modeLines60);
-        if (why != RB_DRR_OK) { modeRefuse = (uint32_t)why; return false; }
-
-        /* MIN and MAX first, CONTROL last - the reverse order would arm a SEL
-         * bit over a MIN of zero, which is a frame length of nothing. */
-        regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN] =
-            (modeMin0 & ~RB_DRR_TOTAL_MASK) | (modeLines60 & RB_DRR_TOTAL_MASK);
-        regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] =
-            (modeMax0 & ~RB_DRR_TOTAL_MASK) | (modeLines60 & RB_DRR_TOTAL_MASK);
-        regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = rb_drr_ctl_on(ctl0);
-
-        modeMinRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN] & RB_DRR_TOTAL_MASK;
-        modeMaxRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] & RB_DRR_TOTAL_MASK;
-        modeCtlRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
-
-        /* "The store executed" and "the store reached the chip" are different
-         * facts (2lq in its register form). A lost write is put back rather
-         * than left half-applied, because the alternative is a raster at a
-         * length nothing advertises. */
-        if (modeMinRb != (modeLines60 & RB_DRR_TOTAL_MASK) ||
-            modeMaxRb != (modeLines60 & RB_DRR_TOTAL_MASK)) {
-            regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = ctl0;
-            regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN]  = modeMin0;
-            regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX]  = modeMax0;
-            modeRefuse = MODE_REFUSE_WRITE_LOST;
-            return false;
-        }
-
-        vblRetune(modePeriod60);
-    } else {
-        /* CONTROL first, then MIN/MAX - the mirror, for the same reason. The
-         * restore values are the ones read at setup, which boot 254 and boot
-         * 255 both found to be zeros; they are READ rather than inferred. */
+    if (modeList[idx].native) {
+        /* NATIVE IS A RESTORE, NOT A WRITE. The firmware set this timing
+         * before the kext existed, so the correct action is to put MIN/MAX/CTL
+         * back to the values read at setup - CONTROL first, then MIN/MAX, the
+         * mirror of the arming order, so a SEL bit is never left set over a
+         * MIN of zero. */
         regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = modeCtl0;
         regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN]  = modeMin0;
         regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX]  = modeMax0;
         modeMinRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN] & RB_DRR_TOTAL_MASK;
         modeMaxRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] & RB_DRR_TOTAL_MASK;
         modeCtlRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
+    } else {
+        const uint32_t lines = modeList[idx].lines;
+        /* Live, not the setup snapshot - rule 41 asked of a register. What the
+         * raster was doing at start() is not what it is doing when a user
+         * opens the Displays panel twenty minutes later. */
+        const uint32_t htotal = regs[kModeSeg2 + MODE_DW_H_TOTAL] & RB_DRR_TOTAL_MASK;
+        const uint32_t vtotal = regs[kModeSeg2 + MODE_DW_V_TOTAL] & RB_DRR_TOTAL_MASK;
+        const uint32_t ctl0   = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
 
-        vblRetune(kVBLPeriodNsFast);
+        const int why = rb_drr_check(htotal, vtotal, ctl0, lines);
+        if (why != RB_DRR_OK) { modeRefuse = (uint32_t)why; return false; }
+
+        /* MIN and MAX first, CONTROL last. */
+        regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN] =
+            (modeMin0 & ~RB_DRR_TOTAL_MASK) | (lines & RB_DRR_TOTAL_MASK);
+        regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] =
+            (modeMax0 & ~RB_DRR_TOTAL_MASK) | (lines & RB_DRR_TOTAL_MASK);
+        regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = rb_drr_ctl_on(ctl0);
+
+        modeMinRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN] & RB_DRR_TOTAL_MASK;
+        modeMaxRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] & RB_DRR_TOTAL_MASK;
+        modeCtlRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
+
+        /* "The store executed" and "the store reached the chip" differ (2lq).
+         * A lost write is put back rather than left half-applied. */
+        if (modeMinRb != (lines & RB_DRR_TOTAL_MASK) ||
+            modeMaxRb != (lines & RB_DRR_TOTAL_MASK)) {
+            regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = ctl0;
+            regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN]  = modeMin0;
+            regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX]  = modeMax0;
+            modeRefuse = MODE_REFUSE_WRITE_LOST;
+            return false;
+        }
     }
+
+    /* The clock follows the timing, and only after the write that can fail has
+     * succeeded - retuning after a failed write would leave the frame clock
+     * lying about the raster (2y6). */
+    vblRetune(modeList[idx].period_ns);
 
     if (modeCur != want) { modeSwitches++; }
     modeCur = want;
@@ -242,8 +256,19 @@ bool RBAMDFramebuffer::modeApply(IODisplayModeID want)
  * re-derived one: it is what the registry already carries and what every boot
  * since 2sl has been read against, and re-deriving it would move it by 0.01 Hz
  * for no gain. Mode 101's comes from the chip, because nothing published it. */
+/* -1 when the id is not one of ours. One place decides, so the five query
+ * methods and modeApply cannot disagree about it. */
+int RBAMDFramebuffer::modeIndexOf(IODisplayModeID id) const
+{
+    const int i = (int)(id - kModeIDBase);
+    if (i < 0) { return -1; }
+    if (!modeArmed) { return i == 0 ? 0 : -1; }
+    return ((unsigned)i < modeCount) ? i : -1;
+}
+
 UInt32 RBAMDFramebuffer::modeRate1616(IODisplayModeID id) const
 {
-    if (id == kModeID60 && modeArmed) { return modeRate60; }
-    return kRefreshRate1616;
+    const int i = modeIndexOf(id);
+    if (i < 0 || !modeArmed) { return kRefreshRate1616; }
+    return modeList[i].rate1616 ? modeList[i].rate1616 : kRefreshRate1616;
 }

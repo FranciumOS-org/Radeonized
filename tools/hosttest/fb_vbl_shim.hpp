@@ -1,6 +1,11 @@
 // Host substitutes for IOKit scheduling; production VBL methods are unchanged.
 #pragma once
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+extern "C" {
+#include "rb_drr.h"
+}
 #include <map>
 #include <string>
 #include <vector>
@@ -58,11 +63,19 @@ public:
     // the members to exist, with the same defaults start() gives them.
     bool modeArmed=false;
     uint32_t modeRefuse=20, modeLastAsked=0, modeClkHz=0, modeBaseMhz=0;
-    uint32_t modeLines60=0, modeMhz60=0, modeRate60=0;
+    // 2z0: the derived mode list.
+    struct rb_drr_mode modeList[RB_DRR_MAX_MODES]{};
+    unsigned modeCount=0;
+    int modeIndexOf(int id) const {
+        const int i=id-100;
+        if(i<0) return -1;
+        if(!modeArmed) return i==0?0:-1;
+        return ((unsigned)i<modeCount)?i:-1;
+    }
     uint32_t modeMinRb=0, modeMaxRb=0, modeCtlRb=0;
     uint32_t modeHTotal0=0, modeVTotal0=0;
     int32_t modeCur=100;
-    uint64_t modePeriod60=0, modeSwitches=0, modeApplies=0;
+    uint64_t modeSwitches=0, modeApplies=0;
     unsigned getDisplayModeCount() const { return modeArmed?2u:1u; }
     Interrupt interrupts[kMaxInterrupts]{};
     thread_call_t vblCall=nullptr;
@@ -203,7 +216,12 @@ public:
         lastCrumb=crumbStage; crumbWrites++;
     }
     std::map<std::string,uint64_t> properties;
+    std::map<std::string,std::string> strings;   // 2z0
     bool setProperty(const char *key,bool v) { properties[key]=v;return true; }
+    // 2z0: the real IORegistryEntry has a (const char*, const char*) overload;
+    // without it here, setProperty(key, buf) binds to the BOOL one and
+    // publishes 1 for every string. -Wpointer-bool-conversion caught it.
+    bool setProperty(const char *key,const char *v) { strings[key]=v;return true; }
     bool setProperty(const char *key,uint64_t v,unsigned) { properties[key]=v;return true; }
     std::map<std::string,std::vector<uint8_t>> blobs;
     bool setProperty(const char *key,const void *b,unsigned n) {

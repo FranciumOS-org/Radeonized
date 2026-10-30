@@ -50125,3 +50125,85 @@ never this tool's measurement anyway.
 Also now correct in `CLAUDE.md`: the frame-rate line said "not established
 whether that is demand-limited or still gated", which 2xo had already answered
 - 82/s with the hold against 112/s without it, recorded as the user's trade.
+
+## 2z0 — the mode list is DERIVED from the panel, not written down (`D05FD4D9`)
+
+The user's point, and it is the right one: 2y6 hardcoded one extra mode at
+60 Hz, which is correct for a measurement and wrong for a driver. It would
+offer 60 Hz on a 75 Hz panel and advertise 143.8 Hz on hardware that has never
+run it. What a panel can do is three measured numbers - clk, H_TOTAL, V_TOTAL -
+and every mode follows from them.
+
+`rb_drr_build_modes()` in `rb_drr.h` builds the list; the hosttest decides it,
+as everything in `src/common` must. Index 0 is always NATIVE and carries the
+firmware's own V_TOTAL, which means *do not write the timing at all* - the one
+thing worse than a mode that fails is a write that was never needed. Every
+other entry is strictly slower, because V_TOTAL can only be LENGTHENED on a
+live raster and nothing has established what any panel tolerates above its
+native rate. The ladder is 120/100/90/75/60/50/48 and an entry appears only if
+this panel can reach it.
+
+Measured against three panel shapes in the hosttest:
+
+    this panel (143.765 Hz)   native + 120/100/90/75/60/50/48   = 8 modes
+    a 75 Hz panel             native +          60/50/48        = 4 modes
+    a 60 Hz panel             native +             50/48        = 3 modes
+
+The 75 Hz case is asserted explicitly, including that **nothing faster than
+native is ever offered** - that is the defect the derivation exists to prevent.
+
+**A design conflict the test caught before it shipped.** The first version
+derived the native mode's advertised 16.16 rate like every other mode's. That
+would have changed the advertised native refresh away from the `0x008fd53f` in
+`.Display_boot`'s own live IOFBConfig, which every boot since 2sl has been read
+against - and worse, it would be a DIFFERENT number every boot, because the
+measured refresh moves ~0.05 % with DP spread-spectrum (2y6: 143843 against
+143765). So `rb_drr_build_modes` takes the native rate as an argument, 0 meaning
+derive, and the test asserts both paths AND that they differ. The derived clock
+still drives every other mode's line count; only what native *advertises* is
+the fixed constant.
+
+**Modes the raster would refuse are dropped from the list rather than
+advertised.** `modeSetup()` asks `rb_drr_check` per entry - the same question
+`modeApply` will ask later - and keeps only those that pass. Rule 14: a refusal
+a user can only discover by selecting the mode is indistinguishable from a bug.
+
+**Native is a RESTORE, not a write.** `modeApply` on index 0 puts
+MIN/MAX/CONTROL back to the values read at setup, CONTROL first, rather than
+programming the native line count. The firmware set that timing before the kext
+existed.
+
+Two bugs found while wiring, both by the compiler rather than by a boot:
+  - `setProperty("RBFBModeList", buf)` bound to the **bool** overload in the
+    host shim, which would have published `1` for every string.
+    `-Wpointer-bool-conversion` caught it; the real `IORegistryEntry` has a
+    `(const char*, const char*)` overload and the shim now does too. A shim
+    that is missing an overload does not fail - it silently picks another.
+  - my own 75 Hz line count was 2166 by hand and **2165** by the code, and the
+    assertion is the code's. Two line counts differ by 34 mHz of refresh.
+
+Ids are now `kModeIDBase + index` and `modeIndexOf()` is the single place that
+decides whether an id is ours, so the five query methods and `modeApply` cannot
+disagree. Published: `RBFBModeListN`, `RBFBModeList` (lines@mHz per entry, so a
+reading is checkable against its own inputs), `RBFBModeCurMhz`,
+`RBFBModeCurLines`.
+
+Control: forcing the native-rate override to be ignored fails exactly one
+assertion, and restoring it passes.
+
+Stated before the boot:
+- `RBFBModeListN` **8** with `RBFBModeList` reading eight `lines@mHz` pairs,
+  the first `1129@~143765` and the rest descending, is the list up. The 60 Hz
+  entry's line count will be whatever THIS boot's clock gives - 2705 and 2707
+  have both been measured - and a different value is not a finding.
+- The Displays panel should now offer the whole ladder, not two entries.
+- **75 Hz is the mode to try**, and it is also this session's open experiment:
+  if throughput really caps near 76 frames/s, 75 Hz should be the first mode
+  that is BOTH flicker-free and ~100 % fed, i.e. the best-looking desktop this
+  machine can produce. `RBFBAmtrSets` against `RBFBVBLFires` in one animtest
+  snapshot answers it.
+- **120 Hz discriminates the two competing models** of the ceiling: an
+  absolute ~76/s cap predicts ~76 sets/s and ~63 % fed, while a
+  latch-phase/every-other-vblank defect predicts ~60/s and ~50 % fed. That
+  distinction is what decides whether real 143.8 Hz is reachable at all, and
+  it costs one mode selection rather than a boot.

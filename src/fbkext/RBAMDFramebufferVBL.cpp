@@ -214,10 +214,29 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBModeBaseMhz", (uint64_t)modeBaseMhz, 32);
     setProperty("RBFBModeHTotal0", (uint64_t)modeHTotal0, 32);
     setProperty("RBFBModeVTotal0", (uint64_t)modeVTotal0, 32);
-    setProperty("RBFBModeLines60", (uint64_t)modeLines60, 32);
-    setProperty("RBFBModeMhz60", (uint64_t)modeMhz60, 32);
-    setProperty("RBFBModeRate60", (uint64_t)modeRate60, 32);
-    setProperty("RBFBModePeriod60", modePeriod60, 64);
+    /* 2z0: the whole DERIVED list, so a boot can see what this panel was
+     * offered rather than inferring it from a count. Millihertz per entry,
+     * index 0 native; the line counts travel beside them because the mHz is
+     * computed FROM the lines and a reading should be checkable. */
+    setProperty("RBFBModeListN", (uint64_t)modeCount, 32);
+    {
+        char buf[160];
+        unsigned o = 0;
+        for (unsigned i = 0; i < modeCount && o + 24 < sizeof(buf); i++) {
+            o += (unsigned)snprintf(buf + o, sizeof(buf) - o, "%s%u@%u",
+                                    i ? " " : "", modeList[i].lines,
+                                    modeList[i].mhz);
+        }
+        buf[o < sizeof(buf) ? o : sizeof(buf) - 1] = '\0';
+        setProperty("RBFBModeList", buf);
+    }
+    {
+        const int ci = modeIndexOf(modeCur);
+        setProperty("RBFBModeCurMhz",
+                    (uint64_t)(ci >= 0 ? modeList[ci].mhz : 0u), 32);
+        setProperty("RBFBModeCurLines",
+                    (uint64_t)(ci >= 0 ? modeList[ci].lines : 0u), 32);
+    }
     setProperty("RBFBModeMinRb", (uint64_t)modeMinRb, 32);
     setProperty("RBFBModeMaxRb", (uint64_t)modeMaxRb, 32);
     setProperty("RBFBModeCtlRb", (uint64_t)modeCtlRb, 32);
