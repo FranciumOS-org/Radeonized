@@ -7095,6 +7095,7 @@ static uint64_t g_mtlk2Read     = 0;   // last place() verdict, 0xFFFF = no read
 static int      g_mtlk2Pids[96] = {};
 static int      g_mtlk2NPids    = 0;
 static int      g_mtlk2LastPid  = -1;
+static uint64_t g_mtlk2UCCalls  = 0;   // 2xu: newUserClient entries
 static bool     g_mtlkMovedSaid = false;
 // place()'s verdict, set on EVERY call: 1 = original found, 2 = already
 // placed, 0 = neither, 0xFFFF = the read itself failed. The diag key of the
@@ -15639,6 +15640,38 @@ static bool hooked_accel_found_framebuffer_2ct(void *machine, void *framebuffer)
 // solved under THIS kext's id, not X6000's.
 void (*g_rb_enableAccelerator_2hg)(void *) = nullptr;
 
+// 2xu: THE EARLIEST CLIENT-CONTEXT POINT WE HAVE.
+//
+// Boot 227 proved rbgpu_mtlk_try_late() works - mtlk2_patched 9, every cave
+// and detour verified from the target's own memory, zero failures - but it was
+// driven from getPreferredSwizzleMode2, which is PER SURFACE. So a process was
+// patched only after its FIRST surface had already been laid out, and that is
+// exactly the case that still shows artifacts: Chromium (the Claude app, and
+// any Electron app) allocates one long-lived glyph atlas at GPU-process
+// startup and reuses it for the process's whole life, so one wrong surface is
+// permanently wrong text while the desktop around it is correct.
+//
+// newUserClient fires when a process OPENS the accelerator, before it can have
+// allocated anything, so the patch lands ahead of the first texture. It is
+// still the client's own thread, which is what makes current_map() the target
+// map and keeps _vm_map_read_user on its fast copyin path.
+//
+// Rule 1: external in __TEXT. Rule 2: prologue is 55 48 89 e5 41 57 ... - no
+// rel8/rel32 branch begins in the first five bytes. Rule 3: grepped, not
+// routed anywhere else in this plugin.
+static IOReturn (*orig_newuc_2xu)(void *, task_t, void *, uint32_t, void **) = nullptr;
+
+static IOReturn hooked_newuc_2xu(void *self, task_t owningTask, void *sid,
+                                 uint32_t type, void **handler) {
+    g_mtlk2UCCalls++;
+    rbgpu_diag_set_num("mtlk2_uc", g_mtlk2UCCalls);
+    // BEFORE the original: the point of this hook is to be ahead of anything
+    // the new user client does.
+    rbgpu_mtlk_try_late();
+    return orig_newuc_2xu ? orig_newuc_2xu(self, owningTask, sid, type, handler)
+                          : kIOReturnUnsupported;
+}
+
 void RGPU::processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address_t address,
                               size_t size) {
     // 2pq first: this is where the one return address we enlarge for becomes
@@ -15660,6 +15693,21 @@ void RGPU::processAccelFamily(KernelPatcher &patcher, size_t id, mach_vm_address
         rbgpu_log("2hg: FAILED to solve enableAccelerator - -rbgpuforceenable "
                   "CANNOT do anything this boot, whatever the boot-args say");
         rbgpu_diag_set_num("ea_solved", 0);
+    }
+
+    {   // 2xu: patch the Metal driver in a client BEFORE its first surface.
+        KernelPatcher::RouteRequest ruc(
+            "__ZN22IOGraphicsAccelerator213newUserClientEP4taskPvjPP12IOUserClient",
+            hooked_newuc_2xu, orig_newuc_2xu);
+        if (patcher.routeMultiple(id, &ruc, 1, address, size)) {
+            rbgpu_diag_set_num("mtlk2_uc_hk", 1);
+        } else {
+            patcher.clearError();
+            // Absence is not a result (rule 14): say so, or a boot where the
+            // Claude app is still broken reads as "the earlier hook did not
+            // help" when it never ran.
+            rbgpu_diag_set_num("mtlk2_uc_hk", 0);
+        }
     }
 
     KernelPatcher::RouteRequest req(
