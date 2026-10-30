@@ -13,13 +13,23 @@
 # exactly that reason. An absent name is not an absent function.
 set -e
 cd "$(dirname "$0")/../.."
+# 2xz: the base and the length come from this machine's cache, not from a
+# table. The table they came from held macOS 15 addresses - SkyLight
+# 0x7FF807B42000 against 0x7FF8091F1000 on macOS 26 - so the grid was laid
+# over whatever lives at the old address and every name in the inventory would
+# have belonged to another library. One of them was even marked
+# "# approximate", which is the honest version of the same problem. dscbase.sh
+# reads the load commands, so the answer cannot go stale.
 case "$1" in
-  SkyLight)     BASE=0x7FF807B42000; LEN=0x4CE000 ;;
-  CoreDisplay)  BASE=0x7FF80404C000; LEN=0x12A800 ;;
-  CoreGraphics) BASE=0x7FF807D00000; LEN=0x400000 ;;   # approximate
-  IOPresentment) BASE=0x7FF812E88000; LEN=0x1C000 ;;   # dyld_info -segments
-  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment>" >&2; exit 2 ;;
+  SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit) ;;
+  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit>" >&2; exit 2 ;;
 esac
+read -r B L _P <<EOF
+$("$(dirname "$0")/dscbase.sh" "$1")
+EOF
+[ -n "$B" ] && [ -n "$L" ] || { echo "dscbase.sh could not place $1 in this cache" >&2; exit 1; }
+BASE=0x$B; LEN=0x$L
+printf 'inventory of %s: unslid __TEXT %s, %s bytes\n' "$1" "$BASE" "$LEN" >&2
 mkdir -p build/re
 OUT="build/re/$1-funcs.txt"
 G=$(mktemp -t dscinv); N=$(mktemp -t dscinv)
