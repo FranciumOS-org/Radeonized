@@ -3,6 +3,7 @@
 #include "RBAMDFramebuffer.hpp"
 #include "rb_backlight.h"
 #include "rb_hubp.h"
+#include "rb_defaults.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
@@ -68,15 +69,99 @@ const UInt32 kAtyOffsetDefaultMB    = 16;
  *
  * Also mirrors RembrandtGPUPeer::armed()'s bounded retry for the /options race
  * (2in); shorter here because probe() runs after IODT matching has begun. */
+/* 2xw: THE PANEL IS OURS BY DEFAULT, AND THE KEYS CHANGED DIRECTION.
+ *
+ * Until 2xw this needed `-rbgpuownfb` in boot-args AND `nvram rbgpu-fb=1`,
+ * re-armed before every boot, because a framebuffer that takes the panel and
+ * then fails leaves a screen that cannot be used to undo it - 2wj's boot 196
+ * had to be disarmed from Windows. The configuration has been stable since
+ * boot 215, so the default is now to take the panel, and the two keys that
+ * used to arm it are read the other way round:
+ *
+ *   `-rbgpuoff` / `-rbgpustock` in boot-args  -> decline, always. RULE 38 is
+ *       why this is not optional: the panel taken with no accelerator
+ *       underneath freezes on the last frame drawn, so the boot-arg that
+ *       disarms the accelerator must disarm this too, in the same boot.
+ *   `nvram rbgpu-fb=0`                        -> decline. The user's durable
+ *       disarm; we never write this key any more.
+ *   `rbgpu-safe` still set                    -> decline. The plugin's boot
+ *       sentinel (2xw) sets it before arming and clears it once a boot has
+ *       survived a minute, so a boot that froze or panicked leaves it set and
+ *       this one comes up stock. The plugin clears it, not us - one writer
+ *       per key, so a stuck key can only ever mean "be careful".
+ *
+ * Everything on the refuse path says which of those it was (rule 14), because
+ * "declined on purpose" and "never ran" look identical from the registry.
+ *
+ * Keeps 2in's bounded retry for the /options race. A difference worth stating:
+ * if /options cannot be read at all, we now take the panel, where the one-shot
+ * form declined - default-on means an unreadable NVRAM cannot hide a disarm,
+ * and the boot-arg is the disarm that still works in that case. */
+uint32_t armRefuseWhy = 0;   /* 0 armed, 2 -rbgpuoff/-rbgpustock, 3 rbgpu-fb=0,
+                              * 4 /options unreachable (armed anyway),
+                              * 5 -rbgpunoownfb, 6 the sentinel latch,
+                              * 7 rbgpu-arm=0 (rule 38) */
+
+bool argOn(const char *tok)
+{
+    char buf[16], off[64];
+
+    if (!rb_default_on(tok)) {
+        return PE_parse_boot_argn(tok, buf, sizeof(buf)) != 0;
+    }
+    if (PE_parse_boot_argn("-rbgpustock", buf, sizeof(buf)) ||
+        PE_parse_boot_argn("-rbgpuoff", buf, sizeof(buf))) {
+        return false;
+    }
+    if (!rb_off_token(tok, off, sizeof(off))) {
+        return true;
+    }
+    return PE_parse_boot_argn(off, buf, sizeof(buf)) == 0;
+}
+
+bool keyReadsZero(IORegistryEntry *options, const char *var, bool *present)
+{
+    OSObject *val = options->getProperty(var);
+    if (present) {
+        *present = val != nullptr;
+    }
+    if (!val) {
+        return false;
+    }
+    /* `nvram var=1` stores an OSData, so check the first byte rather than
+     * expecting a string - the 2cs lesson, unchanged. */
+    if (auto data = OSDynamicCast(OSData, val)) {
+        return data->getLength() >= 1 &&
+               *static_cast<const char *>(data->getBytesNoCopy()) == '0';
+    }
+    if (auto str = OSDynamicCast(OSString, val)) {
+        return str->isEqualTo("0");
+    }
+    return false;
+}
+
 bool armedOnce(void)
 {
     char flag[16];
-    if (!PE_parse_boot_argn("-rbgpuownfb", flag, sizeof(flag))) {
-        LOG("-rbgpuownfb is not in boot-args; NOT arming whatever NVRAM says "
-            "(rule 9: the feature needs the arg AND the key, so a key that "
-            "failed to clear is inert). IONDRVFramebuffer keeps the panel.");
+
+    if (PE_parse_boot_argn("-rbgpuoff", flag, sizeof(flag)) ||
+        PE_parse_boot_argn("-rbgpustock", flag, sizeof(flag))) {
+        LOG("-rbgpuoff or -rbgpustock is in boot-args, so the accelerator is "
+            "not armed either; declining the panel (rule 38 - the panel taken "
+            "with no accelerator underneath freezes). IONDRVFramebuffer keeps "
+            "it.");
+        armRefuseWhy = 2;
         return false;
     }
+
+    if (!argOn("-rbgpuownfb")) {
+        LOG("-rbgpunoownfb is in boot-args; declining the panel, so "
+            "IONDRVFramebuffer keeps it and the desktop composites in "
+            "software (2wl measured that configuration as usable).");
+        armRefuseWhy = 5;
+        return false;
+    }
+
     IORegistryEntry *options = nullptr;
     unsigned tries = 0;
     for (; tries < 5; tries++) {
@@ -87,82 +172,49 @@ bool armedOnce(void)
         IOSleep(100);
     }
     if (!options) {
-        LOG("/options not found after %u tries; NOT arming, so IONDRVFramebuffer "
-            "matches as usual. rbgpu-fb is untouched - a plain reboot retries.",
-            tries);
+        LOG("/options not found after %u tries; taking the panel anyway (2xw: "
+            "armed by default, and an unreadable NVRAM cannot hold a disarm - "
+            "`-rbgpuoff` in boot-args is the disarm that always works)", tries);
+        armRefuseWhy = 4;
+        return true;
+    }
+
+    /* RULE 38, as a check instead of a comment. The framebuffer writes HUBP
+     * from `setAttribute('amtr')` and from nowhere else, so with the panel
+     * taken and no accelerator underneath the screen freezes on whatever was
+     * last drawn - guaranteed, not merely possible. It happened after boot
+     * 197. The accelerator's own durable disarm is `nvram rbgpu-arm=0`, so
+     * that key has to decline the panel too, in the same boot. */
+    if (keyReadsZero(options, "rbgpu-arm", nullptr)) {
+        LOG("rbgpu-arm reads \"0\", so the accelerator will not arm; declining "
+            "the panel as well (rule 38 - the panel with no accelerator "
+            "underneath freezes on the last frame).");
+        armRefuseWhy = 7;
+        options->release();
         return false;
     }
-
-    bool armed = false;
-    if (OSObject *val = options->getProperty("rbgpu-fb")) {
-        /* `nvram rbgpu-fb=1` stores an OSData, so check the first byte rather
-         * than expecting a string. Any value counts except a literal "0". */
-        armed = true;
-        if (auto data = OSDynamicCast(OSData, val)) {
-            if (data->getLength() >= 1 &&
-                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
-                armed = false;
-            }
-        } else if (auto str = OSDynamicCast(OSString, val)) {
-            if (str->isEqualTo("0")) {
-                armed = false;
-            }
-        }
+    if (keyReadsZero(options, "rbgpu-fb", nullptr)) {
+        LOG("rbgpu-fb reads \"0\"; declining the panel. That is the durable "
+            "disarm - re-arm with `sudo nvram -d rbgpu-fb`.");
+        armRefuseWhy = 3;
+        options->release();
+        return false;
     }
-
-    if (!armed) {
-        LOG("-rbgpuownfb present but rbgpu-fb not set; staying out of the way "
-            "(the desktop keeps IONDRVFramebuffer). Arm with: "
-            "sudo nvram rbgpu-fb=1");
+    bool safePresent = false;
+    bool safeZero = keyReadsZero(options, "rbgpu-safe", &safePresent);
+    if (safePresent && !safeZero) {
+        LOG("rbgpu-safe is still set, so the previous boot did not survive its "
+            "first minute; declining the panel for this boot. The plugin "
+            "clears the latch, so the next boot takes it again.");
+        armRefuseWhy = 6;
         options->release();
         return false;
     }
 
-    /* 2wj: CONSUME BY OVERWRITE, NOT BY REMOVAL. This is the fix for 2sq, and
-     * the measurement that makes it work has been in this file since 2sr:
-     * `removeProperty` tail-jumps to `removePropertyWithGUIDAndName`, which
-     * calls NO sync, while `setProperty` reaches
-     * `setPropertyWithGUIDAndName` and DOES - which is why `rbgpu-fbcrumb`
-     * has persisted reliably all along while this key kept surviving its own
-     * deletion. So write a literal "0" instead of deleting, and the arming
-     * check twenty lines above already treats "0" as NOT armed, for both
-     * OSData and OSString.
-     *
-     * Boot 196 is what forced this: with the key never consuming, the
-     * framebuffer took over on every power cycle, and at the 0.09 Hz
-     * transaction rate 2wi measured there is no usable desktop from which to
-     * edit boot-args - the user had to boot WINDOWS to disarm. A one-shot
-     * that cannot consume itself is not a one-shot, and the feature could not
-     * disarm itself on the machine it runs on.
-     *
-     * The boot-arg remains the durable disarm (rule 9, and it is still what
-     * the log line says); this makes the one-shot do its own job as well. */
-    if (auto zero = OSString::withCString("0")) {
-        options->setProperty("rbgpu-fb", zero);
-        zero->release();
-    }
-    if (auto sync = OSString::withCString("now")) {
-        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
-        sync->release();
-    }
-    /* Still an IN-MEMORY read-back: it proves the overwrite took in the
-     * registry, not that flash accepted it. The difference from 2sq is that
-     * the path taken is now the one measured to sync, so this reading is
-     * worth something it was not worth before. */
-    bool cleared = false;
-    if (OSObject *v = options->getProperty("rbgpu-fb")) {
-        if (auto d = OSDynamicCast(OSData, v)) {
-            cleared = d->getLength() >= 1 &&
-                      *static_cast<const char *>(d->getBytesNoCopy()) == '0';
-        } else if (auto t = OSDynamicCast(OSString, v)) {
-            cleared = t->isEqualTo("0");
-        }
-    }
-    LOG("armed (-rbgpuownfb + rbgpu-fb); taking the panel for THIS BOOT. "
-        "one-shot overwrite to \"0\" %s IN MEMORY via the path 2sr measured as "
-        "syncing (2wj); the durable disarm is still "
-        "`sudo tools/efi.sh bootarg remove -rbgpuownfb`",
-        cleared ? "accepted" : "FAILED, so the key is definitely still armed");
+    LOG("taking the panel (2xw: armed by default). Disarm for one boot with "
+        "`sudo nvram rbgpu-fb=0`, or durably with `sudo tools/efi.sh bootarg "
+        "add -rbgpuoff`.");
+    armRefuseWhy = 0;
     options->release();
     return true;
 }
@@ -252,8 +304,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     amtrFlipRefused = 0;
     bzero(amtrFlipSnap, sizeof(amtrFlipSnap));
     {
-        char amtrflag[16];
-        amtrArmed = PE_parse_boot_argn("-rbgpufbamtr", amtrflag, sizeof(amtrflag));
+        amtrArmed = argOn("-rbgpufbamtr");
     }
 
     /* 2wh: the HUBP write. Armed with -rbgpufbhubp, and it needs
@@ -274,22 +325,19 @@ bool RBAMDFramebuffer::start(IOService *provider)
     pollChanges = 0;
     pollFirstSeen = 0;
     {
-        char pollflag[16];
-        pollArmed = PE_parse_boot_argn("-rbgpufbpoll", pollflag, sizeof(pollflag));
+        pollArmed = argOn("-rbgpufbpoll");
     }
     hubpMax = 0;
     hubpRejectAddr = 0;
     hubpRejectWhy = 0;
     {
-        char hubpflag[16];
-        hubpArmed = PE_parse_boot_argn("-rbgpufbhubp", hubpflag, sizeof(hubpflag))
+        hubpArmed = argOn("-rbgpufbhubp")
                     && amtrArmed;
         /* 2wm: rule 30 - NOT -rbgpufbhubpall, because `-rbgpufbhubp` would
          * prefix it and a shell grep for the existing arg would then match
          * the new one. -rbgpufbflipall neither prefixes nor is prefixed by
          * any token already in use. */
-        char allflag[16];
-        hubpAll = PE_parse_boot_argn("-rbgpufbflipall", allflag, sizeof(allflag))
+        hubpAll = argOn("-rbgpufbflipall")
                   && hubpArmed;
         int maxn = 0;
         if (PE_parse_boot_argn("rbgpufbhubpmax", &maxn, sizeof(maxn)) &&
@@ -301,24 +349,18 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * of flips. Rule 30: it neither prefixes nor is prefixed by
          * -rbgpufbflipall (they differ at the character after "flip"), and
          * PE_parse_boot_argn matches a whole token regardless. */
-        char pendflag[16];
-        hubpDeferPend = PE_parse_boot_argn("-rbgpufbflippend", pendflag,
-                                           sizeof(pendflag)) && hubpArmed;
+        hubpDeferPend = argOn("-rbgpufbflippend") && hubpArmed;
         /* 2xn: -rbgpufbnotready answers the 'amtr' GET the way Apple's own
          * AMDFramebuffer does - NotReady while a transaction is outstanding -
          * instead of claiming instant completion. Rule 30: NOT
          * `-rbgpufbamtrwait`, because `-rbgpufbamtr` would prefix it; nothing
          * in use prefixes `-rbgpufbnotready` or is prefixed by it
          * (`-rbgpufbnocrumb` shares only `-rbgpufbn`). */
-        char nrflag[16];
-        amtrNotReady = PE_parse_boot_argn("-rbgpufbnotready", nrflag,
-                                          sizeof(nrflag)) && hubpArmed;
+        amtrNotReady = argOn("-rbgpufbnotready") && hubpArmed;
         /* 2xp: -rbgpufbotgany relaxes gate 1's OTG1-3 clause so 2or's cheap
          * HDMI test can be run WITHOUT freezing the laptop panel. Rule 30:
          * no token in use prefixes it or is prefixed by it. */
-        char otgflag[16];
-        hubpOtgAny = PE_parse_boot_argn("-rbgpufbotgany", otgflag,
-                                        sizeof(otgflag)) && hubpArmed;
+        hubpOtgAny = argOn("-rbgpufbotgany") && hubpArmed;
     }
     /* 2xs: -rbgpufbbacklight. Deliberately NOT gated on hubpArmed or
      * amtrArmed: the backlight needs only the panel, and coupling it to the
@@ -363,8 +405,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     retireDelivered = 0;
     vblKickCall = nullptr;
     {
-        char retflag[16];
-        retireArmed = PE_parse_boot_argn("-rbgpufbretire", retflag, sizeof(retflag));
+        retireArmed = argOn("-rbgpufbretire");
     }
 
     hubpSetup();
@@ -547,9 +588,15 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * prefixed by -rbgpufbvbl / -rbgpufbvram / -rbgpufbvramrange /
      * -rbgpufbaccel / -rbgpufbmatch / -rbgpufbnocrumb. */
     {
-        char atyflag[16];
-        bool atyOn = PE_parse_boot_argn("-rbgpufbaty", atyflag, sizeof(atyflag));
+        bool atyOn = argOn("-rbgpufbaty");
         setProperty("RBFBAtyArmed", atyOn);
+        /* 2xw: why the panel was taken, published unconditionally beside the
+         * other arm keys (rule 15). 0 armed by default, 4 /options was not
+         * readable and we armed anyway. A DECLINE cannot publish anything -
+         * there is no service - and is read the other way round: an
+         * IONDRVFramebuffer in ioreg means we declined, and boot-args plus
+         * `nvram rbgpu-fb rbgpu-safe` say which of the three reasons it was. */
+        setProperty("RBFBArmWhy", (UInt64)armRefuseWhy, 32);
         setProperty("RBFBAmtrArmed", amtrArmed);
         if (atyOn) {
             UInt32 mb = kAtyOffsetDefaultMB;
@@ -680,9 +727,19 @@ void RBAMDFramebuffer::disarmFB(void)
         return;
     }
     selfDisarmed = true;
-    if (auto zero = OSString::withCString("0")) {
-        nvram->setProperty("rbgpu-fb", zero);
-        zero->release();
+    /* 2xw: this used to write `rbgpu-fb=0`, which is now the USER's durable
+     * disarm - and a self-disarm that sets it would stay set until they
+     * noticed and cleared it. So it sets the sentinel latch instead: the next
+     * boot comes up stock, the plugin clears the latch, and the boot after
+     * that is armed again. One bad boot costs one stock boot, and the key the
+     * user owns is never written by us. */
+    if (auto one = OSString::withCString("1")) {
+        nvram->setProperty("rbgpu-safe", one);
+        one->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        nvram->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
     }
 }
 

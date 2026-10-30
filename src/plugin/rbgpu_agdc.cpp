@@ -673,12 +673,12 @@ void run(thread_call_param_t,thread_call_param_t) {
 } // namespace
 
 void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t size) {
-    rbgpu_diag_set_num("agdc_on",checkKernelArgument("-rbgpuagdc") ? 1 : 0);
+    rbgpu_diag_set_num("agdc_on",rbgpu_arg("-rbgpuagdc") ? 1 : 0);
     // 2rh, rule 14: seed the verdict so an ABSENT agdc_tim_err is impossible.
     // 9 means sampleTiming() was never reached at all, which is exactly what
     // boot 157 could not distinguish from a full diag table.
-    if (checkKernelArgument("-rbgpuagdc")) rbgpu_diag_set_num("agdc_tim_err",9);
-    if (!checkKernelArgument("-rbgpuagdc")) return;
+    if (rbgpu_arg("-rbgpuagdc")) rbgpu_diag_set_num("agdc_tim_err",9);
+    if (!rbgpu_arg("-rbgpuagdc")) return;
     rbgpu_diag_set_num("agdc_error",0);
     rbgpu_diag_set_num("agdc_base",base);
     rbgpu_diag_set_num("agdc_size",size);
@@ -734,7 +734,7 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     rbgpu_diag_set_num("agdc_layout_ok",1);
     rbgpu_diag_set_num("agdc_stage",10);
     uint32_t why=0;
-    if (!rbgpu_nvram_consume_oneshot("rbgpu-agdc",&why)) {
+    if (!rbgpu_nvram_armed("rbgpu-agdc",&why)) {
         rbgpu_diag_set_num("agdc_oneshot",why);
         refuse(3,"UNARMED: no class or service created"); return;
     }
@@ -768,7 +768,7 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
     rbgpu_diag_set_num("agdc_resample_alloc",resample ? 1u : 0u);
     early=checkKernelArgument("-rbgpuagdcearly");
     rbgpu_diag_set_num("agdc_early",early ? 1u : 0u);
-    extcapAll=checkKernelArgument("-rbgpuagdccaps");
+    extcapAll=rbgpu_arg("-rbgpuagdccaps");
     rbgpu_diag_set_num("agdc_extcap_all",extcapAll ? 1u : 0u);
     if (!early) {
         // 2rz: the pre-2rx shape, which is the one boot 163 booted clean. The
@@ -810,7 +810,7 @@ void rbgpu_agdc_load(KernelPatcher &p,size_t id,mach_vm_address_t base,size_t si
 }
 
 void rbgpu_agdc_timing_source(RbNdrvCurrentMode cur,RbNdrvTimingInfo info) {
-    if (!checkKernelArgument("-rbgpuagdc")) return;
+    if (!rbgpu_arg("-rbgpuagdc")) return;
     ndrvCurrentMode=cur; ndrvTimingInfo=info;
     rbgpu_diag_set_num("agdc_tim_src",(cur?1u:0u)|(info?2u:0u)); // 3 required
 }
@@ -828,7 +828,7 @@ static bool rbgpuAgdcIsFramebufferClass(const char *name) {
 }
 
 void rbgpu_agdc_framebuffer(IOService *fb) {
-    if (!checkKernelArgument("-rbgpuagdc") || framebuffer) return;
+    if (!rbgpu_arg("-rbgpuagdc") || framebuffer) return;
     if (reinterpret_cast<uintptr_t>(fb)<0xffffff8000000000ULL ||
         !fb->getMetaClass() || !fb->getMetaClass()->getClassName() ||
         !rbgpuAgdcIsFramebufferClass(fb->getMetaClass()->getClassName())) {
