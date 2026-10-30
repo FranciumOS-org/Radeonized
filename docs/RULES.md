@@ -173,9 +173,25 @@ table and refuses to install one that does not match the running kernel;
   apart, 0.054 %, the shape of DP spread-spectrum clocking), so it chose **2705**
   lines and landed at 60.004 Hz where a hardcoded 2707 would have given 59.96.
   `RBFBModeRate60` is therefore not a constant between boots - a changed value
-  is not a finding. Not yet exercised: the switch BACK to 143.83 Hz.
-- **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
-  established whether that is demand-limited or still gated (2xi/2xo).
+  is not a finding. The switch BACK is exercised too (boot 256:
+  `RBFBModeSwitches` 2, `RBFBVBLPeriodNs` returning to the exact 2xe constant
+  6952507). **Our frame clock is accurate in both modes** - boot 257's
+  `RBFBVBLModeMhz` 60033 against a requested 60002 is +0.05 % - and the -5 %
+  that 2y7 reported was `animtest` dividing a STALE published counter by a
+  fresh wall clock (2y9, rule 31). Per-mode rates are published as
+  `RBFBVBLMode{Fires,Ns,Enables,Mhz}` because `VBLFires`/`UptimeNs` are
+  cumulative across modes and their ratio is a blend.
+- **The last ~22 % of the frame rate — and it is a TRADE, not an open
+  question.** 2xo measured **82/s with the `kIOReturnNotReady` hold against
+  112/s without it**, which is the user's call rather than a defect to fix
+  silently. 2y7 characterised it further: throughput tops out at an ABSOLUTE
+  ~76 frames/s, so at 143.83 Hz only **53 % of scanouts are fed** while at
+  60 Hz the hold barely bites and **96 %** are - 60 Hz is flicker-free AND
+  nearly fully delivered, which is a real option. It is **not**
+  demand-limited: a continuously animating window is continuous demand, and
+  143.83 Hz would then have been fed at 100 %. The one untried dial is a
+  SHORTER hold, and `RBFBAmtrHoldExpired` 0 argues against it - the bound is
+  never reached today, so shortening it would start truncating real holds.
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker

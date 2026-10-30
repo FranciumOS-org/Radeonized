@@ -85,6 +85,23 @@ static CVReturn linkCB(CVDisplayLinkRef l, const CVTimeStamp *now,
  * RBFBVBLPeriodNs, so read it. If it is absent (an older framebuffer), say
  * so loudly and fall back - never silently. */
 static double gPeriodNs = 0.0;
+/* 2y9: THE TIME BASE MUST COME FROM THE SAME SNAPSHOT AS THE COUNTERS.
+ *
+ * 2y7 reported our VBL delivering 57.00/s against a requested 60.00 and called
+ * it a -5.0 % defect, then blamed macOS timer coalescing. Both wrong, and the
+ * mechanism is rule 31 aimed at this tool: these counters are read from
+ * PUBLISHED PROPERTIES, which are refreshed periodically and so are stale by
+ * design. Dividing a stale-bracketed counter delta by a FRESH wall-clock delta
+ * undercounts by however far behind the last publish was - and that error
+ * scales with the publish interval in wall time, so it appeared at 60 Hz and
+ * not at 143.83 Hz. The kext's own RBFBVBLModeMhz read 60033 against a
+ * requested 60002, +0.05 %, with nothing wrong at all.
+ *
+ * So rates are now counter-delta over RBFBVBLUptimeNs-delta, both taken from
+ * the SAME ioreg pass, and the staleness cancels instead of being charged to
+ * the kext. Wall time is still printed, as the control: if the two disagree,
+ * that is a finding about this tool and not about the framebuffer. */
+static unsigned long long gUptimeNs = 0;
 
 static double fbRateHz(void)
 {
@@ -99,15 +116,18 @@ static int fbsnap(unsigned long long *sets, unsigned long long *fires,
                     "/\"RBFBVBLFires\" = /     { f = $NF } "
                     "/\"RBFBHubpWrites\" = /   { w = $NF } "
                     "/\"RBFBVBLPeriodNs\" = /  { p = $NF } "
+                    "/\"RBFBVBLUptimeNs\" = /  { u = $NF } "
                     "END { if (s == \"\" || f == \"\") exit 1; "
-                    "print s, f, w, (p == \"\" ? 0 : p) }'", "r");
+                    "print s, f, w, (p == \"\" ? 0 : p), "
+                    "(u == \"\" ? 0 : u) }'", "r");
     if (!p) { return 0; }
-    unsigned long long a = 0, b = 0, c = 0, d = 0;
-    int n = fscanf(p, "%llu %llu %llu %llu", &a, &b, &c, &d);
+    unsigned long long a = 0, b = 0, c = 0, d = 0, e = 0;
+    int n = fscanf(p, "%llu %llu %llu %llu %llu", &a, &b, &c, &d, &e);
     int st = pclose(p);
     if (n < 2 || st != 0) { return 0; }
     *sets = a; *fires = b; *writes = c;
     if (d > 0) { gPeriodNs = (double)d; }
+    gUptimeNs = e;   /* the KEXT's own clock, same snapshot as the counters */
     return 1;
 }
 
@@ -206,6 +226,8 @@ int main(int argc, char **argv)
 
         unsigned long long s0 = 0, f0 = 0, w0 = 0;
         int haveFB = fbsnap(&s0, &f0, &w0);
+        /* 2y9: latch the kext's own clock from the SAME snapshot. */
+        const unsigned long long u0 = gUptimeNs;
         if (!haveFB) {
             printf("RBAMDFramebuffer: ABSENT - fb columns will read n/a\n");
         }
@@ -271,20 +293,35 @@ int main(int argc, char **argv)
         if (ok && haveFB) {
             const double hz = fbRateHz();
             const double wall = t1 - t0;
+            /* The kext's own elapsed time between the two snapshots. */
+            const double kdt = (gUptimeNs > u0) ? (double)(gUptimeNs - u0) / 1e9
+                                                : 0.0;
+            const double base = kdt > 0.0 ? kdt : wall;
+            if (kdt > 0.0) {
+                printf("time base    : kext %.2f s vs wall %.2f s (%+.2f %%)%s\n",
+                       kdt, wall, (kdt / wall - 1.0) * 100.0,
+                       (kdt / wall < 0.97 || kdt / wall > 1.03)
+                           ? "   <-- published counters are STALE; "
+                             "rates below use the kext clock"
+                           : "");
+            } else {
+                printf("time base    : wall only "
+                       "(RBFBVBLUptimeNs not published)\n");
+            }
             if (hz <= 0.0) {
                 printf("fb vbl period: NOT PUBLISHED by this framebuffer - "
                        "delivery fractions below are omitted rather than "
                        "computed from a guessed rate\n");
             }
             printf("fb vbl fires : %llu = %.2f/s", f1 - f0,
-                   (double)(f1 - f0) / wall);
+                   (double)(f1 - f0) / base);
             if (hz > 0.0) {
                 printf("   (asked %.2f/s, %+.1f%%)", hz,
-                       ((double)(f1 - f0) / wall / hz - 1.0) * 100.0);
+                       ((double)(f1 - f0) / base / hz - 1.0) * 100.0);
             }
             printf("\n");
             printf("amtr sets    : %llu = %.2f/s", s1 - s0,
-                   (double)(s1 - s0) / wall);
+                   (double)(s1 - s0) / base);
             if (f1 - f0) {
                 printf("   = %.1f%% of scanouts fed",
                        (double)(s1 - s0) / (double)(f1 - f0) * 100.0);
