@@ -92,7 +92,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext fbkext tools plugin fbperf fbpresent iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext fbkext tools plugin fbperf fbpresent mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -104,7 +104,7 @@ HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hos
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
 	@mkdir -p $(OUT)
-	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
+	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref -Isrc/plugin $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -Isrc/plugin tools/hosttest/agdc_lookup_test.cpp -o $(OUT)/agdc_lookup_test
 	@$(OUT)/agdc_lookup_test
@@ -449,6 +449,14 @@ $(BUILD_DIR)/plugin/kmod_info.o: $(PLUGIN_SRC)/kmod_info.c
 # the plugin loaded only because `-lilubetaall` was in boot-args. Rule 26: the
 # grep is anchored on the enumerator name, and it is checked against a
 # known-present case by requiring EXACTLY one hit for each.
+.PHONY: mtlcave
+# 2xz: derive this machine's AMDRadeonX6000MTLDriver cave row. Reads the
+# running shared cache, writes src/plugin/mtlcave/darwin<N>.h, and tells you
+# the two edits that are deliberately left by hand. Safe to run any time: it
+# only reads the cache, and a row it rewrites it also re-verifies.
+mtlcave:
+	@env -u DYLD_INSERT_LIBRARIES python3 tools/gen_cavepatch.py
+
 .PHONY: osrange
 osrange:
 	@minname=$$(awk '/#define RB_OS_MIN_DARWIN/ {print $$3}' src/common/rb_osver.h | sed 's/RB_OS_//'); 	 maxname=$$(awk '/#define RB_OS_MAX_DARWIN/ {print $$3}' src/common/rb_osver.h | sed 's/RB_OS_//'); 	 minw=$$(python3 -c "print('$$minname'.capitalize())"); 	 maxw=$$(python3 -c "print('$$maxname'.capitalize())"); 	 n=$$(grep -c "KernelVersion::$$minw,"  src/plugin/kern_start.cpp); 	 m=$$(grep -c "KernelVersion::$$maxw,"  src/plugin/kern_start.cpp); 	 if [ "$$n" != 1 ] || [ "$$m" != 1 ]; then 	   echo "  FAIL rb_osver.h declares $$minw..$$maxw but kern_start.cpp's PluginConfiguration"; 	   echo "       has $$n KernelVersion::$$minw and $$m KernelVersion::$$maxw (want 1 each)."; 	   echo "       The two must agree or the kext's declared range is a fiction."; 	   exit 1; 	 fi; 	 echo "  OSVER declared range $$minw..$$maxw, matrix and PluginConfiguration agree"
