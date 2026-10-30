@@ -97,6 +97,30 @@ public:
     bool     amtrNotReady=false;  /* 2xn */
     uint64_t amtrHeld=0;          /* 2xn */
     uint64_t amtrHoldExpired=0;   /* 2xn */
+    /* 2xs: mirrored for the backlight publish. The hosttest compiles
+     * RBAMDFramebufferVBL.cpp against THIS class, so every newly published
+     * field has to exist here too - the fifth time this file has been the
+     * thing that broke the build. Note the declarations here carry an
+     * initializer, so a regex anchored on `bool blReady;` will not match
+     * them; that is exactly how the previous attempt silently did nothing. */
+    bool     blArmed=false;       /* 2xs */
+    bool     blReady=false;       /* 2xs */
+    uint32_t blRefuse=0;          /* 2xs */
+    uint32_t blOtgCtl=0;          /* 2xs */
+    uint32_t blCntl=0;            /* 2xs */
+    uint32_t blCntl2=0;           /* 2xs */
+    uint32_t blPeriod=0;          /* 2xs */
+    uint32_t blLock=0;            /* 2xs */
+    uint32_t blLevel0=0;          /* 2xs */
+    uint32_t blFloor=0;           /* 2xs */
+    uint32_t blFloorRefused=0;    /* 2xs */
+    uint32_t blLastLevel=0;       /* 2xs */
+    uint32_t blLastCount=0;       /* 2xs */
+    uint32_t blReadback=0;        /* 2xs */
+    uint64_t blSets=0;            /* 2xs */
+    uint64_t blGets=0;            /* 2xs */
+    uint64_t blPendTimeouts=0;    /* 2xs */
+    uint64_t blParmAdds=0;        /* 2xs */
     uint32_t hubpTiling=0;
     uint32_t hubpPitch=0;
     uint32_t hubpConfig=0;

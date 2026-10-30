@@ -29,6 +29,7 @@ int smu13_tests(const struct rb_disc *real_table);   /* smu13_test.c */
 int agdc_tests(void);
 int otg_tests(void);
 int hubp_tests(void);
+int backlight_tests(void);
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -845,6 +846,7 @@ int main(int argc, char **argv)
     failures += agdc_tests();
     failures += otg_tests();
     failures += hubp_tests();
+    failures += backlight_tests();
     test_fuzz();
 
     if (failures) {
