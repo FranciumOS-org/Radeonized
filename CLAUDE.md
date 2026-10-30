@@ -13,8 +13,9 @@
 > including the removed `docs/HANDOFF.md` and `docs/HANDOFF-FULL.md`.
 
 Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev 0a,
-GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on macOS. Plan:
-`docs/PLAN.md`. Machine: ASUS TUF A15 FA507NU (Ryzen 7 7735HS), **macOS 26.7.2
+GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on macOS **Ventura and
+up** (2xz: `src/common/rb_osver.h` says what that claims per version, which is
+not the same thing for every version). Plan: `docs/PLAN.md`. Machine: ASUS TUF A15 FA507NU (Ryzen 7 7735HS), **macOS 26.7.2
 (25G332, Darwin 25.6.0)**, OpenCore. csr-active-config **0xA43** (SIP reports
 Filesystem Protections disabled, yet the dyld cryptex path still refuses writes
 with EROFS because its files carry the `restricted` flag, enforced
@@ -55,6 +56,37 @@ and the next boot comes up stock and clears it. One bad boot costs one stock
 boot. `-rbgpunosentinel` opts out; a deliberate restart inside the minute also
 costs one stock boot.
 
+**Which macOS, and what has been measured on it (2xz).** "Supports Ventura and
+up" is two claims and `src/common/rb_osver.h` keeps them apart, because
+conflating them is how a wrong address gets written to a chip. **(1)** The kext
+LOADS from Darwin 22 up: everything done by symbol name is version-independent
+and rule 1 already makes each of those fail safe. **(2)** A version-dependent
+artifact has been MEASURED on a given OS - per OS, per artifact, recorded as a
+bit, and never inferable from a version number. Sequoia claims the object
+offsets (derived there) and a cave row; Tahoe claims both plus the USB table -
+the offsets not because they were re-derived but because **boot 247 is an
+accelerated desktop running them**. Ventura and Sonoma claim **nothing**, which
+is the honest state. On an OS with no `RB_OSD_KEXTOFF` claim `rbgpu_stock()` is
+true, so the whole default-on table comes up off and the boot says so with the
+Darwin number in it; `-rbgpuosforce` arms it for the boot that goes and
+measures. Both kexts read `version_major` and ask the same function (rule 38).
+`make osrange` fails the build if the declared Lilu range drifts from the
+matrix - it was Monterey..Sequoia on a Tahoe machine, loading only because
+`-lilubetaall` is in boot-args. Every boot publishes `os_major`, `os_derived`,
+`os_forced`, `os_measured`, and `rbgpu_nvram_armed` why **9** is "no measured
+offsets for this OS", distinct from 5's "the user asked for stock".
+
+**The cave is a table, and the generator derives it (2xz).**
+`src/plugin/mtlcave/darwin<N>.h` holds one row per OS build;
+`rbgpu_mtlcave.h` is the table and the lookup. A row says where to LOOK - what
+authorises a write is still the byte-pattern compare in every process, so a row
+right for the major and wrong for the point release writes nothing and 2r6's
+verdict fires. `make mtlcave` derives this machine's row off its own cache
+(symbol, prologue uniqueness, a unique zero-run anchor; the mangled length
+prefix computed, rule 5) and names the two edits left by hand. It reproduced
+2xt's by-hand derivation byte for byte. `make cavecheck` reads the row for its
+own kernel and said CAVE+DETOUR PRESENT on the live boot 247 desktop.
+
 **How the display half got here**, each step measured and in the journal:
 `RBAMDFramebuffer` subclasses `IOFramebuffer` and displaces
 `IONDRVFramebuffer` (2sl/2sm/2st) — its class name carrying "AMD" is what
@@ -87,11 +119,16 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness.** `-rbgpufbbacklight` is built, hosttested and mutation-tested
-  and has **never been booted** (2xs). The follow-on that brings the System
-  Settings slider is making `AppleBacklightDisplay` match — `kConnectionFlags`
-  at `src/fbkext/RBAMDFramebuffer.cpp:898` plus `getAppleSense` — which
-  changes which `IODisplay` subclass matches, so it needs its own arg and boot.
+- **Brightness.** Both halves are built and neither has been booted.
+  `-rbgpufbbacklight` writes the PWM duty cycle (2xs); `-rbgpufbbuiltin`
+  answers `kConnectionFlags` with `kIOConnectionBuiltIn` and `getAppleSense`
+  with `kPanelTFTConnect`, the two things `IOBacklightDisplay::probe` requires
+  before `AppleBacklightDisplay` can match the connection and System Settings
+  can draw the slider (2xy). Separately armed on purpose: the match reaches the
+  display-prefs key, mirroring and the wrangler's dimming, the write only
+  reaches a duty cycle. `RBFBBlBuiltIn` / `RBFBBlFlagsGets` / `RBFBBlSenseGets`
+  tell "the probe never asked" from "it asked and still did not match"; the
+  outcome is `ioreg -rl -c IODisplayConnect`.
 - **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
   established whether that is demand-limited or still gated (2xi/2xo).
 - **The wedge**, an independent second defect: work submitted that never
@@ -100,12 +137,17 @@ table and refuses to install one that does not match the running kernel;
   (2x0, rule 39).
 - **HDMI is the full project** and the panel is wired to the dGPU, so it is
   unreachable rather than merely unbuilt (2xq/2xr).
-- **Every Apple address in this repo and the journal is a macOS 15 address.**
-  `AMDRadeonX6000MTLDriver __TEXT` 0x7FFB08BF3000 → **0x7FFB110D4000**;
-  CoreDisplay 0x7FF80404C000 → **0x7FF805348000**. Re-derive before any static
-  read. `RBGPU_IOP_SITE_VM` is stale and fails safe (2t7 won that gate
-  unpatched, so it is not load-bearing). `tools/re/dscsym.sh` hardcodes macOS
-  15 bases.
+- **Every Apple address in a COMMENT here and in the journal is a macOS 15
+  address.** `AMDRadeonX6000MTLDriver __TEXT` 0x7FFB08BF3000 →
+  **0x7FFB110D4000**; CoreDisplay 0x7FF80404C000 → **0x7FF805348000**;
+  SkyLight 0x7FF807B42000 → **0x7FF8091F1000**. Re-derive before any static
+  read: **`tools/re/dscbase.sh <Lib>`** reads the live unslid `__TEXT` base and
+  size out of `dyld_info -segments`, and dscsym.sh / dscinv.sh take their bases
+  from it instead of a table (2xz - the table was stale and both tools reported
+  confidently anyway). In LIVE code the only hardcoded Apple address left is
+  `RBGPU_IOP_SITE_VM`, stale and failing safe (2t7 won that gate unpatched, so
+  it is not load-bearing); everything else is a symbol lookup or a cave-table
+  row.
 - **ASan is broken on CLT 16.4 + macOS 26**: a two-line `printf` program
   SIGILLs. The Makefile probes it and degrades loudly (`SAN=auto`); every
   assertion passes unsanitized. Never commit a change whose only passing run
@@ -194,7 +236,8 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
   `IOFramebuffer::stop+0x48` reads `*(this->0x1c8)`, NULL on an instance that
   never completed configuration. To remove it, reboot.
 - Before any load, **commit** so a hang loses nothing. Claude may commit at any
-  time without asking (2026-10-04); **pushing still needs asking**.
+  time without asking (2026-10-04), and **pushing no longer needs asking
+  either** (user, 2026-10-30: "also push whenever u need").
 - **Deliberate diagnostic panics are off the table** (user's decision,
   2026-10-12).
 - **Adding an SMU message group is the user's decision** — say what it changes
@@ -366,6 +409,19 @@ The numbering is cited all over the journal — **keep the numbers**.
     (`rbgpu_boot_argn_u32()`). A default that reads correctly is not evidence
     that the tunable works. [2xm]
 
+41. **A constant is only a constant on the OS it was measured on - and an
+    instrument that re-measures something every run can still be subtracting a
+    stale base.** `dscsym.sh` measured the shared-cache slide on every single
+    invocation, said so in its own header comment, and then subtracted a macOS
+    15 SkyLight base from it, so `atos` answered for an address 0x16AF000 away
+    from the one asked about and never once said anything was wrong. The fix is
+    structural, not a corrected number: derive the base too
+    (`tools/re/dscbase.sh`), and for anything that cannot be derived at use
+    time, record PER OS whether it was measured there and refuse to use it
+    where it was not (`src/common/rb_osver.h`). Ask of every written-down
+    address: **which OS was this measured on, and is that the one running?**
+    [2xz]
+
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
 keeps catching it: **say in the code what would have to be true for the reading
@@ -433,6 +489,10 @@ prints which NVRAM keys would disarm a half.
   makes the next one stock automatically.
 
 **Still opt-in, and why:** `-rbgpufbbacklight` (never booted, 2xs),
+`-rbgpufbbuiltin` (never booted, 2xy - changes which `IODisplay` subclass
+matches the connection), `-rbgpuosforce` (2xz - arms the default-on table on an
+OS none of the measured offsets came from; a safety gate's override is never
+default-on),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbmatch` (spoofs
 `device-id` and **kills the accelerator**), `-rbgpupdefix` (composes with the
 upstream fix and the halt returns), `-rbgpufbvramrange` (hypothesis dead,
