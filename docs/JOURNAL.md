@@ -48298,3 +48298,52 @@ destroyed captures. If the desktop survives, an instrument is the crasher. If
 not, it is the 19-token accelerator group, and `-rbgpuvramadj`
 (`rbgpu-adj ... fixed=416`), `-rbgpuptfix`, `-rbgpupdeenc` and
 `-rbgpuspoofttl` lead it.
+
+### 2xx: 26 of 45 eliminated; the capability spoof is the motivated next cut
+
+Boot 244 ran armed with the 6 instruments disarmed as well
+(`rbgpu-diag d=76 armed=1 mcp_on=0`) and WindowServer crashed at 09:38:11 and
+09:38:54. The "wedge" the user saw is the crash loop going further, not a clean
+boot. **The instruments are cleared.**
+
+`-rbgpuiop` is cleared twice over: it is gated behind `rbgpu_arg("-rbgpuiop")`,
+`-rbgpunoiop` was in boot-args, and `iop_on` is absent from the diag entirely
+because `-rbgpumtlkoff` installs no exec hooks at all, so `rbgpu_iop_try` never
+runs. Worth recording because it patches **WindowServer's own address space**
+and was the best-shaped suspect in the display half.
+
+The 2xw diff was also checked rather than asserted: `git diff 0241698..HEAD --
+src/plugin/kern_start.cpp` contains **nothing** but the mechanical
+`checkKernelArgument` → `rbgpu_arg` swaps and the three one-shot → durable
+swaps. So the arming rework cannot have changed an armed boot's behaviour, and
+the boot-231-vs-now difference is not hiding there.
+
+A false lead, recorded so it is not re-walked: two crash threads sit in
+`AMBDapplyIntentionFromPreferencesForDisplayID` and
+`ColorSyncUtilsUpdateDisplayProfilesCallback`, and
+`/Library/ColorSync/Profiles/Displays/Unknown Display-FFFFFFFF-....icc` was
+written 2026-10-29 21:10 - a display profile for a panel with no EDID, which is
+what ours enumerates as, and `Display: Unknown Display` is what the crash
+footer reads. Decoded, it is a plain ICC v4 `mntr`/RGB matrix-TRC profile with
+`desc cprt wtpt rXYZ gXYZ bXYZ rTRC chad mmod bTRC gTRC` and no `vcgt`/`ndin`.
+Nothing in it forces half-float. Not the cause.
+
+**19 remain, and 18 of them are hardware bring-up** - ring, page tables, SMU and
+PSP, CP halt, clock gating. The exception is **`-rbgpuspoofttl`**, which is the
+only one that changes what the driver is *told the device is* rather than how
+the hardware is poked: it overrides `_ttlIsSupportedDevice` to 1, spoofs
+`asic_type` 19 → 8 for PSP table binding, spoofs the GC `hw_version`, patches
+the GC firmware version gate 0x000A0300 → 0x000A0303, and patches HWLibs'
+**`_DeviceCapabilityTbl`**. The crash is a capability-driven decision - an
+816 MB RGBAh half-float surface on an SDR 1080p panel - so a capability table
+carrying another part's entries is the shape that fits.
+
+Next boot: **`-rbgpunospoofttl`**, a motivated single-token cut rather than a
+blind halving of eighteen bring-up flags. Stated in advance so the reading can
+be judged: this may stop the accelerator binding at all, in which case a clean
+desktop is only weakly informative (rule 39 - it would be a configuration that
+does not exhibit acceleration, so it cannot locate much). A clean **accelerated**
+desktop would be the strong result, and if the spoof is the cause the fix is to
+narrow it - keep the version and asic-type spoofs that make the chip bind, drop
+or correct the capability-table entries that advertise a display pipeline this
+panel does not have.
