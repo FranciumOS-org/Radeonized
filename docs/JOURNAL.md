@@ -48539,3 +48539,29 @@ Standing corrections from this milestone:
 - `ioreg` prints these counters as `"RBFBArmWhy" = 10`, not `"RBFBArmWhy"="10"`.
   A grep written for the quoted form reports the service as absent - rule 26,
   and it cost a wrong reading in this very milestone.
+
+### 2xx postscript — the "pre-existing hosttest failure" did not exist
+
+Stated three times during 2xx that `hosttest` had one standing failure,
+`smu13: FAIL needs tests/data/rembrandt-680m-tufa15.bin`, and that it was
+unchanged on `288a87b`. Both halves were wrong in the same way.
+
+The fixture is passed as **argv**: the Makefile runs
+`$(OUT)/hosttest $(wildcard tests/data/*.bin)` (Makefile:108), `main` loops
+over `argv[1..]`, and `smu13_tests` is handed `NULL` when no file matched
+`rembrandt-680m`. Running `./build/out/hosttest` bare therefore cannot pass,
+and the file was present all along - 10 240 bytes, dated Oct 3.
+
+```
+./build/out/hosttest                                       -> hosttest: 1 FAILED
+./build/out/hosttest tests/data/rembrandt-680m-tufa15.bin   -> hosttest: all passed
+```
+
+Rule 26 twice in one milestone: once on `ioreg` printing `"RBFBArmWhy" = 10`
+rather than `"RBFBArmWhy"="10"`, which reported the live framebuffer as absent
+in the very boot that fixed everything, and once here - **running a tool the
+wrong way and reading its output as the tool's verdict.** The "unchanged on
+288a87b" check compounded it: stashing and re-running reproduced the failure
+because it reproduced the mistake, which is exactly the known-present case
+rule 26 says to check a search against. Always invoke the suite as the Makefile
+does, or through `make`.
