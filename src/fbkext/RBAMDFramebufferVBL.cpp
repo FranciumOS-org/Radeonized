@@ -157,6 +157,12 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBBlGets", blGets, 64);
     setProperty("RBFBBlPendTimeouts", blPendTimeouts, 64);
     setProperty("RBFBBlParmAdds", blParmAdds, 64);
+    /* 2xy: the AppleBacklightDisplay match. RBFBBlBuiltIn says the boot armed
+     * it; the two counters separate "the probe never asked" from "it asked
+     * and still did not match" (rule 14). */
+    setProperty("RBFBBlBuiltIn", blBuiltIn);
+    setProperty("RBFBBlFlagsGets", blFlagsGets, 64);
+    setProperty("RBFBBlSenseGets", blSenseGets, 64);
     setProperty("RBFBHubpTiling", (uint64_t)hubpTiling, 32);
     setProperty("RBFBHubpOrig", hubpOrig, 64);
     setProperty("RBFBHubpWrites", hubpWrites, 64);
