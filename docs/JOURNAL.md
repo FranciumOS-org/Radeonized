@@ -49970,3 +49970,73 @@ at 6.95 ms a hiccup costs multiple frames, at 16.67 ms it is absorbed.
 this panel. It proved the raster can be retimed live, which is the mechanism an
 external display's mode setting needs (2xq/2xr), and it produced the first
 characterisation of the frame ceiling. Both of those were the point.
+
+## 2y8 — the -5 % is NOT coalescing, and the instrument to settle it (fbkext `A8A2417A`, plugin `1AAABBA1`)
+
+**A fix I did not build, and why.** 2y7 attributed boot 256's -5.0 % VBL
+delivery at 60 Hz to macOS timer coalescing and proposed arming with an
+explicit leeway. Two things killed that before a line was written:
+  - **`thread_call_enter_delayed_with_leeway` is not in MacKernelSDK at all.**
+    Only `thread_call_enter_delayed` and `thread_call_enter1_delayed` are
+    declared, so the fix as described could not be built against our headers.
+  - **`RBFBVBLResyncs` reads 3.** That is decisive against the mechanism:
+    `armVBL` ACCUMULATES (`+= period`), so a tick that merely runs LATE does
+    not lose a tick - the next deadline is still on the lattice. The only path
+    that loses phase is the resync branch, and 3 resyncs cannot account for 90
+    missing ticks over 30 s. Coalescing would have had to show up as resyncs.
+So the proposed fix addressed a mechanism the counters already excluded. Rule
+35's lesson in its cheapest form: instrument our end before building anything.
+
+**The better lead, from the same read: `RBFBVBLEnables` = 55789** over
+1261 s of uptime, i.e. the compositor toggling the vblank interrupt ~44 times a
+second. If an enable re-bases the clock, that loses fractional ticks
+continuously and would be invisible in `vblResyncs`. Not yet established -
+which is the point of this milestone rather than its conclusion.
+
+**Why it could not be settled from the live machine.** `RBFBVBLFires` and
+`RBFBVBLUptimeNs` are CUMULATIVE across modes, so after boot 256 switched
+143 -> 60 -> 143 -> 60 (`RBFBVBLRetunes` 3) their ratio is a blend of two rates
+and means nothing. The -5 % had to be computed from animtest's 30 s window
+instead of from the kext - an external tool measuring something the kext knows
+better, which is the same shape of mistake as reading a rate off an idle
+desktop. Rule 33: name the object a number belongs to.
+
+So `vblRetune()` now latches `vblFiresAtRetune`, `vblNsAtRetune` and
+`vblEnablesAtRetune` BEFORE the new period takes effect, and
+`publishVBLState()` derives:
+
+    RBFBVBLModeFires    delivered since this mode began
+    RBFBVBLModeNs       how long this mode has been current
+    RBFBVBLModeEnables  interrupt enables since this mode began
+    RBFBVBLModeMhz      the delivered rate, millihertz
+
+published beside its own inputs so the reading can be checked rather than
+trusted, and 0 before any retune rather than a division by a zero window.
+
+**The plugin is rebuilt and no longer five milestones stale**: `1AAABBA1`,
+against the `43775C76` that has been loading since boot 254. Both install gates
+pass - `kmutil libraries` resolves **0** symbols from
+`SystemKernelExtensions.kc` (the 2oz trap) and `IOGraphicsFamily` appears **0**
+times in the plugin's Info.plist - and `make osrange` reports the declared
+range Ventura..Tahoe agreeing with the matrix and PluginConfiguration.
+
+**Not re-attacked: the ~76/s ceiling.** 2y7 called it "cause unknown"; the
+journal already answers it. 2xo measured **82/s with the hold against 112/s
+without it** and recorded it explicitly as the user's trade rather than a
+defect to fix silently. What 2y7 genuinely adds is that at 60 Hz the hold
+barely bites - 95.8 % of scanouts fed, `RBFBAmtrHoldExpired` still 0 - so 60 Hz
+is flicker-free AND nearly fully delivered, which is a real option the project
+did not have before. The open sub-question, also already recorded, is whether a
+SHORTER hold buys rate back at some flicker; `HoldExpired 0` says the bound is
+never reached today, so shortening it would start truncating real holds, and no
+measurement yet says that would help.
+
+Stated before the boot:
+- `RBFBVBLModeMhz` near **143830** at 143.83 Hz and near **60000** at 60 Hz
+  means the -5 % was an artifact of animtest's window and there is nothing to
+  fix. Near **57000** at 60 Hz confirms it is real and in our clock.
+- `RBFBVBLModeEnables` scaling with `ModeFires` (~44/s either way) says the
+  toggling is mode-independent; markedly higher per second at 60 Hz would make
+  the enable path the cause and the next change obvious.
+- `RBFBVBLModeNs` must track wall time since the last switch. If it does not,
+  this instrument is wrong and nothing else here is readable (rule 16).

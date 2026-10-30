@@ -392,6 +392,17 @@ private:
      * re-bases from now instead of accumulating against the old period. */
     uint64_t           vblPeriodNs;
     uint64_t           vblRetunes;
+    /* 2y7: Fires and UptimeNs are cumulative across modes, so neither can
+     * give a per-mode rate - boot 256's -5.0 % at 60 Hz had to be computed
+     * from animtest's window instead of from the kext. These latch at each
+     * retune so "delivered since this mode began" is readable directly, and
+     * EnablesAtRetune tests the live lead: the compositor toggled the vblank
+     * interrupt ~44 times/s, and if an enable re-bases the clock that loses
+     * fractional ticks continuously (vblResyncs was only 3, which rules out
+     * the resync path and with it the coalescing guess). */
+    uint64_t           vblFiresAtRetune;
+    uint64_t           vblNsAtRetune;
+    uint32_t           vblEnablesAtRetune;
 
     /* 2y4: OTG0's timing and DRR group as the firmware left it, read once in
      * blSetup(). The starting point for any refresh-rate change, and the
