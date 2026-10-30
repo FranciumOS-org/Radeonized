@@ -48243,3 +48243,32 @@ framebuffer stays out, and add **`-rbgpunoagdc -rbgpunoagdccaps`**. Clean ⇒
 the AGDC capability answers are the crasher and the fix is to scope them to
 the case where we own the panel. Still crashing ⇒ `-rbgpunodisplaypipe` is
 next, and after it the accelerator-core group.
+
+### 2xx: AGDC cleared, and the bisect made affordable
+
+Boot 240 (09:29) ran `armed=1 tick_armed=1 tick_us=1b20` with
+`-rbgpunoagdc -rbgpunoagdccaps -rbgpunolinear -rbgpumtlkoff -rbgpunoownfb`,
+and WindowServer crashed twice, 14 s uptime each. **AGDC is cleared**, so the
+capability-bridge reading of the RGBAh surface was wrong. Boot 241 then came up
+`sentinel=4 safe_latch=1 arm_why=6`, stock, because boot 240 did not survive a
+minute - the third test boot in a row to be spent that way.
+
+Two changes to stop paying for the bisect rather than running it:
+
+- **`efi.sh bootarg add|remove` now takes several tokens in one call**, one
+  backup and one sync for the lot. One invocation per token meant twenty backup
+  directories per experiment and a typo in any of them silently measured a
+  different configuration (rule 16: the instrument is a suspect).
+- **`-rbgpunosentinel` goes in for the duration.** A boot that crashes inside
+  60 s leaves the latch and makes the NEXT boot stock, so each failed test was
+  costing two boots and the user kept landing in a boot that measures nothing.
+  That is the sentinel working as designed, and exactly the "session of rapid
+  reboots" its opt-out was written for.
+
+Cleared so far: our framebuffer, the configuration (identical to boot 231's),
+the 2xv USB patches, `-rbgpustock` as a whole (boot 238, clean), the kernel
+linear force, the userspace patcher, and AGDC. Next boot disarms **the other
+17 of the display chain's 20** in one command - the group the table names, and
+the half the crash lives in if it is a display fault at all. Clean ⇒ it is in
+the display chain and three more halvings name it; still crashing ⇒ it is the
+19-token accelerator group or the 6 instruments.

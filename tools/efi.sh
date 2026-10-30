@@ -176,11 +176,19 @@ defaults)
     echo "Reboot. Then: ioreg -rl -c RembrandtGPUPeer | grep -o '\"RBGPUDiag\" = {.*}'"
     ;;
 bootarg)
-    op="${2:-}"; arg="${3:-}"
-    case "$op" in add|remove) ;; *) echo "usage: sudo tools/efi.sh bootarg add|remove ARG" >&2; exit 2 ;; esac
-    [ -n "$arg" ] || { echo "usage: sudo tools/efi.sh bootarg add|remove ARG" >&2; exit 2; }
+    # 2xx: SEVERAL tokens in one call. The WindowServer bisect needs a whole
+    # group of derived negatives turned on for one boot, and one `efi.sh`
+    # invocation per token meant one mount, one backup and one sync each -
+    # twenty backup directories for a single experiment, and a typo in any of
+    # them silently measured the wrong configuration. One backup, one sync,
+    # and the arguments are applied in order.
+    op="${2:-}"; shift 2 2>/dev/null || true
+    case "$op" in add|remove) ;; *) echo "usage: sudo tools/efi.sh bootarg add|remove ARG [ARG...]" >&2; exit 2 ;; esac
+    [ "$#" -gt 0 ] || { echo "usage: sudo tools/efi.sh bootarg add|remove ARG [ARG...]" >&2; exit 2; }
     backup
-    edit bootarg "$op" "$arg"
+    for arg in "$@"; do
+        edit bootarg "$op" "$arg"
+    done
     sync
     ;;
 usbintr0)
