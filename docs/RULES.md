@@ -213,6 +213,16 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
   `make kext tools` does NOT rebuild it.** CommandLineTools only, no Xcode.
 - **Always check the UUID moved** (`dwarfdump --uuid build/out/...`). Two boots
   were lost to a stale build.
+- **And for `src/fbkext`, check the UUID inside the COLLECTION, not in
+  `/Library/Extensions`** — they are different facts and three more boots went
+  to the gap (2xy):
+  `kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc
+  --show-kext-uuids | grep rembrandt`. The install needs
+  `sudo kmutil install --update-all --force --allow-missing-kdk
+  --update-preboot`: without `--force` kmutil believes the bundle DIRECTORY's
+  mtime, which `cp -R` into an existing bundle never updates, and without
+  `--allow-missing-kdk` it cannot build the **release** collection on a machine
+  with no KDK.
 - After any plugin change: `kmutil libraries -p build/out/RembrandtGPU.kext`
   must resolve everything with **0 from `SystemKernelExtensions.kc`** (the 2oz
   trap) and `grep -c IOGraphicsFamily src/plugin/Info.plist` must be **0**.

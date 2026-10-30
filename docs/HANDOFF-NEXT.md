@@ -40,10 +40,41 @@ is the cheapest proof the new framebuffer is the one running, because only
 
     sudo tools/efi.sh install
     sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
-    sudo kmutil install --update-all     # the KDK warnings are for the
-                                         # debug/kasan variants and are noise;
-                                         # check AuxiliaryKernelExtensions.kc's
-                                         # mtime and `kmutil inspect -B` it
+    sudo kmutil install --update-all --force --allow-missing-kdk --update-preboot
+
+**`--force` and `--allow-missing-kdk` are not optional on this machine, and
+leaving them off cost three boots (2xy).** Plain
+`kmutil install --update-all` SILENTLY SKIPS the rebuild here:
+
+* `--force` - "rebuild even if none of the contents has changed". `cp -R` into
+  an existing bundle rewrites the files inside and leaves the bundle
+  DIRECTORY's mtime alone (it read `Oct 29 00:20` while the binary inside read
+  `Oct 30 11:57`), and kmutil's change detection believed the bundle.
+* `--allow-missing-kdk` - there is no KDK for 25G332 on this machine and
+  `/Library/Developer/KDKs` does not exist. The handoff used to say those KDK
+  warnings were noise for the debug/kasan variants. That stopped being true:
+  the run also printed `unable to create RELEASE extension manager`, and the
+  release collection is the one that matters.
+* `--update-preboot` forces `personalize_macos` and `kcditto` afterwards.
+
+### VERIFY THE COLLECTION BEFORE REBOOTING - this is the whole lesson
+
+    kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
+        --show-kext-uuids | grep rembrandt
+
+That prints the UUID **actually inside the collection**, which is the only
+thing a boot will load. It must be the UUID `make fbkext` just printed. The
+file's mtime is a weaker check and the command's exit code is no check at all
+(rule 26, both directions).
+
+Two things that do NOT work and were tried: `strings -a` on the `.kc` cannot
+see a kext's strings at all - the CONTROL token `rbgpufbbacklight`, which is
+certainly in there, also counts 0 (rule 26's own `strings -a` entry, now paid
+for twice) - and `kmutil rebuild` is not a kmutil verb.
+
+Also in that collection, for awareness: `com.nullmoth.NVRMAGDC` and
+`org.franciumos.mhelper.driver` (the latter staged out of `/private/var/tmp`).
+NVRMAGDC is AGDC-adjacent and has never been accounted for in any reading here.
 
 **Boot-args: `wdt=-1` and nothing of ours.** `rbgpumtlkscope=*` is harmless and
 `-rbgpunosentinel` is worth keeping only while rebooting repeatedly - put it
