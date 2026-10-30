@@ -48272,3 +48272,29 @@ linear force, the userspace patcher, and AGDC. Next boot disarms **the other
 the half the crash lives in if it is a display fault at all. Clean ⇒ it is in
 the display chain and three more halvings name it; still crashing ⇒ it is the
 19-token accelerator group or the 6 instruments.
+
+### 2xx: the display chain is cleared, including VRAM,totalMB
+
+Boot 243 ran the other 17 display-chain tokens disarmed in one `bootarg add`,
+and `rbgpu-diag-prev` records it as genuinely armed: `d=89 armed=1 agdc_on=0`,
+`mcp_on=1`, and **no `fb*` or `vbl*` keys at all**. WindowServer crashed again.
+
+That also clears the one hypothesis the 816 MB most invited: `VRAM,totalMB`
+/ `VRAM,totalsize` = 4096 published on the framebuffer AND its PCI provider
+(2pa, `kern_start.cpp` ~8370) is gated by **`-rbgpufbvram`**, which was off in
+that boot. So SkyLight is not sizing its backing store from a VRAM figure of
+ours.
+
+Cleared now: our framebuffer, the boot-arg configuration, the 2xv USB patches,
+`-rbgpustock` entirely (boot 238 clean), the kernel linear force, the userspace
+patcher, AGDC and its capability answers, and the whole 20-token display chain.
+25 of the 45 remain: 19 accelerator and 6 instruments.
+
+Next: **the 6 instruments**, disarmed together. They are the cheaper half and
+the table's comment on them - "they cost diag-table slots and nothing else" -
+is precisely the sort of claim rule 16 was written about, the rule that has
+already paid for a wedge, a crawl mistaken for a hang, two panics and three
+destroyed captures. If the desktop survives, an instrument is the crasher. If
+not, it is the 19-token accelerator group, and `-rbgpuvramadj`
+(`rbgpu-adj ... fixed=416`), `-rbgpuptfix`, `-rbgpupdeenc` and
+`-rbgpuspoofttl` lead it.
