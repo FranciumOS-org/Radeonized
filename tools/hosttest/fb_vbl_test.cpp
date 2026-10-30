@@ -9,6 +9,7 @@ void clock_interval_to_deadline(uint32_t n,unsigned scale,uint64_t *out) {
 void clock_get_uptime(uint64_t *out) {*out=clockNs;}
 void nanoseconds_to_absolutetime(uint64_t ns,uint64_t *out) {*out=ns;}
 void absolutetime_to_nanoseconds(uint64_t a,uint64_t *out) {*out=a;}
+uint64_t mach_absolute_time(void) {return clockNs;}
 void thread_call_enter_delayed(thread_call_t c,uint64_t deadline) {
     c->queued=1;c->deadline=deadline;c->enters++;
 }

@@ -24,6 +24,8 @@ void clock_interval_to_deadline(uint32_t,unsigned,uint64_t *);
 void clock_get_uptime(uint64_t *);
 void nanoseconds_to_absolutetime(uint64_t,uint64_t *);
 void absolutetime_to_nanoseconds(uint64_t,uint64_t *);
+// 2y7: the per-mode VBL accounting timestamps its baselines.
+uint64_t mach_absolute_time(void);
 void thread_call_enter_delayed(thread_call_t,uint64_t);
 void thread_call_cancel(thread_call_t);
 bool thread_call_enter(thread_call_t);
@@ -49,6 +51,8 @@ public:
     // same retune path the mode switch uses rather than a constant.
     uint64_t vblPeriodNs=kVBLPeriodNsFast;
     uint64_t vblRetunes=0;
+    uint64_t vblFiresAtRetune=0, vblNsAtRetune=0;
+    uint32_t vblEnablesAtRetune=0;
     void vblRetune(uint64_t periodNs);
     // 2y6: publishVBLState reports the mode table too; the host build needs
     // the members to exist, with the same defaults start() gives them.

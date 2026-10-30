@@ -6,6 +6,7 @@
 #include "RBAMDFramebuffer.hpp"
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
+#include <mach/mach_time.h>
 #define LOG(fmt, ...) IOLog("RBAMDFramebuffer: " fmt "\n", ##__VA_ARGS__)
 #endif
 
@@ -225,6 +226,22 @@ void RBAMDFramebuffer::publishVBLState(void)
      * This is the whole gap boot 255 left open on purpose. */
     setProperty("RBFBVBLPeriodNs", vblPeriodNs, 64);
     setProperty("RBFBVBLRetunes", vblRetunes, 64);
+    /* 2y7: the rate SINCE the current mode began, in millihertz, which is the
+     * number boot 256 could not read from the kext at all. Published beside
+     * its own inputs so a reading can be checked rather than trusted, and 0
+     * before any retune rather than a division by a zero window. */
+    {
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+        const uint64_t dn = (ns > vblNsAtRetune) ? (ns - vblNsAtRetune) : 0;
+        const uint64_t df = vblFires - vblFiresAtRetune;
+        setProperty("RBFBVBLModeFires", df, 64);
+        setProperty("RBFBVBLModeNs", dn, 64);
+        setProperty("RBFBVBLModeEnables",
+                    (uint64_t)(vblEnables - vblEnablesAtRetune), 32);
+        setProperty("RBFBVBLModeMhz",
+                    dn ? (df * 1000000000000ull / dn) : 0ull, 64);
+    }
     setProperty("RBFBOtgHTotal", (uint64_t)otgHTotal, 32);
     setProperty("RBFBOtgVTotal", (uint64_t)otgVTotal, 32);
     setProperty("RBFBOtgVTotalMin", (uint64_t)otgVTotalMin, 32);
@@ -552,5 +569,15 @@ void RBAMDFramebuffer::vblRetune(uint64_t periodNs)
     vblPeriodNs = periodNs;
     vblNextDeadline = 0;
     vblRetunes++;
+    /* Latch the baselines BEFORE the new period takes effect, so the next
+     * mode's rate is measurable from the kext rather than from a tool's
+     * window (2y7). */
+    vblFiresAtRetune = vblFires;
+    vblEnablesAtRetune = vblEnables;
+    {
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+        vblNsAtRetune = ns;
+    }
     setProperty("RBFBVBLPeriodNs", vblPeriodNs, 64);
 }
