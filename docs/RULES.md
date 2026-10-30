@@ -391,6 +391,10 @@ to a field** (2q9/2qa, which saved a boot twice over in 2s3).
 
 **The right boot-args are none of ours.** `src/common/rb_defaults.h` is the
 list and the hosttest checks it; read that file, not a copy of it here.
+**`sudo tools/efi.sh defaults`** takes the redundant ones out of the EFI in one
+edit - exactly that table, matched by name - keeps every disarm and everything
+not ours (`wdt=-1` above all), reports any `rbgpu` token it kept, and then
+prints which NVRAM keys would disarm a half.
 
 **Rescue, in order of bluntness:**
 - `sudo nvram rbgpu-arm=0` — accelerator off next boot (and the framebuffer

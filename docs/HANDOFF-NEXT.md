@@ -24,7 +24,9 @@ hardware:
     sudo tools/efi.sh install          # the plugin
     # the framebuffer is the user's install into /Library/Extensions
 
-**Boot-args: take ours out.** Every `-rbgpu*` token can go; they are the
+**Boot-args: take ours out**, with `sudo tools/efi.sh defaults` - one edit,
+and it also prints the state of the five keys that would disarm a half. Every
+`-rbgpu*` token in `rb_defaults.h` can go; they are the
 default now and any that stay are redundant, not harmful, so the install is
 safe either way. **Keep `wdt=-1`** — `-rbgpuforceenable` is default-on and that
 is Apple's arg, which we cannot set (2hh: without it a frozen boot panics at
