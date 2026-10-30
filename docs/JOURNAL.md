@@ -50069,3 +50069,59 @@ but "unexplained" is not "fine" and a future session should not read a changed
 plugin UUID as proof of changed source without this note. The useful general
 fact in the other direction: the plugin UUID IS a valid identity check on this
 toolchain, which is what makes rule 15 work for it at all.
+
+## 2y9 (boot 257) — the -5 % was never real, and the instrument was wrong a SECOND time in the same tool
+
+`RBFBVBLModeMhz` = **60033** against a requested 60002 - **+0.053 %**. The
+first of 2y8's three stated outcomes: *"near 60000 means the -5 % was an
+artifact of animtest's window and there is nothing to fix."* There is nothing
+to fix. Published beside its own inputs, as required: `ModeFires` 1136,
+`ModeNs` 18922736306 = 18.923 s, and 1136/18.923 = 60.034/s, which reproduces
+the published mHz to four figures.
+
+`RBFBVBLModeEnables` 593 over 18.923 s = **31.3/s**, LOWER than the 44.2/s the
+cumulative counter implied. So the vblank-enable path is not elevated at 60 Hz
+and the second lead dies with the first. Both hypotheses this session raised
+for the "defect" are dead, and the defect with them.
+
+**THE MECHANISM, AND IT IS RULE 31 AIMED AT ME.** animtest reads `RBFBVBLFires`
+from a PUBLISHED PROPERTY, which `publishVBLState()` refreshes periodically and
+which is therefore stale by design - the rule this project has written down
+since 2sv and paid for again in 2xs. The tool then divided that
+stale-bracketed counter delta by a FRESH wall-clock delta. The implied bracket
+is **1.52 s of the 30.14 s window**, which is exactly a -5.0 % undercount. And
+it scales with the publish interval measured in WALL time, which is why it
+appeared at 60 Hz and not at 143.83 Hz, where the same staleness is a smaller
+fraction of a faster count. Everything about the number was an artifact, and
+2y7 escalated it to a hardware claim and then to a named cause (timer
+coalescing) on the strength of it.
+
+**Second defect in the same tool in two milestones.** 2y7 fixed animtest
+dividing by a hardcoded 143.83; this one is a different error in the same
+arithmetic - a mismatched TIME BASE rather than a mismatched rate - and the
+first fix did not touch it. Rule 16 says the instrument is a suspect; what this
+pair adds is that **fixing one bug in an instrument is not evidence about the
+others**, and both of these inflated a result in the direction that made it
+look worth reporting.
+
+Fixed structurally rather than by correcting a number: `fbsnap()` now also
+reads `RBFBVBLUptimeNs`, and every rate is counter-delta over
+kext-uptime-delta **from the same ioreg pass**, so the staleness cancels in the
+ratio instead of being charged to the framebuffer. Wall time is still printed
+as the control, with the two compared explicitly and a loud marker when they
+diverge by more than 3 % - so the next time the published counters lag, the
+tool says so instead of inventing a defect.
+
+**What this leaves standing from 2y7**, all of it independent of the bad
+number: the corrected delivery figures (76.51 sets/s and 53.1 % of scanouts at
+143.83 Hz against 54.58/s and 95.8 % at 60 Hz) came from `AmtrSets` and
+`VBLFires` read in the SAME snapshot, so the stale bracket cancels in that
+ratio - the 95.8 % is unaffected. The absolute sets/s figures carry the same
+~5 % undercount at 60 Hz, so 54.58/s is really ~57.5/s, which moves nothing:
+unique frames per second still FELL from 76.5 to 57.5, so the user's
+"choppier" stands and its explanation stands. The ~76/s ceiling stands, and was
+never this tool's measurement anyway.
+
+Also now correct in `CLAUDE.md`: the frame-rate line said "not established
+whether that is demand-limited or still gated", which 2xo had already answered
+- 82/s with the hold against 112/s without it, recorded as the user's trade.
