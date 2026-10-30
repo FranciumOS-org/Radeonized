@@ -1005,7 +1005,7 @@ const char *RBAMDFramebuffer::getPixelFormats(void)
  * deliver. */
 IOItemCount RBAMDFramebuffer::getDisplayModeCount(void)
 {
-    return modeArmed ? 2 : 1;
+    return modeArmed ? (IOItemCount)modeCount : 1;
 }
 
 IOReturn RBAMDFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes)
@@ -1013,9 +1013,9 @@ IOReturn RBAMDFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes)
     if (!allDisplayModes) {
         return kIOReturnBadArgument;
     }
-    allDisplayModes[0] = kModeIDFast;
-    if (modeArmed) {
-        allDisplayModes[1] = kModeID60;
+    const IOItemCount n = getDisplayModeCount();
+    for (IOItemCount i = 0; i < n; i++) {
+        allDisplayModes[i] = kModeIDBase + (IODisplayModeID)i;
     }
     return kIOReturnSuccess;
 }
@@ -1024,7 +1024,7 @@ IOReturn RBAMDFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes)
  * cannot disagree about it. */
 bool RBAMDFramebuffer::modeKnown(IODisplayModeID id) const
 {
-    return id == kModeIDFast || (modeArmed && id == kModeID60);
+    return modeIndexOf(id) >= 0;
 }
 
 IOReturn RBAMDFramebuffer::getInformationForDisplayMode(IODisplayModeID displayMode,
@@ -1094,9 +1094,9 @@ IOReturn RBAMDFramebuffer::getCurrentDisplayMode(IODisplayModeID *displayMode, I
 IOReturn RBAMDFramebuffer::setDisplayMode(IODisplayModeID displayMode, IOIndex depth)
 {
     if (depth != 0 || !modeKnown(displayMode)) {
-        LOG("setDisplayMode(%d, %d) refused; depth 0 and mode %d%s",
-            displayMode, (int)depth, kModeIDFast,
-            modeArmed ? " or 101" : " only");
+        LOG("setDisplayMode(%d, %d) refused; depth 0 and modes %d..%d",
+            displayMode, (int)depth, kModeIDBase,
+            kModeIDBase + (modeArmed ? (int)modeCount : 1) - 1);
         return kIOReturnUnsupported;
     }
 

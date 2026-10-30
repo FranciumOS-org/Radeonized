@@ -32,6 +32,12 @@
 #ifndef RBAMDFRAMEBUFFER_HPP
 #define RBAMDFRAMEBUFFER_HPP
 
+/* 2z0: the derived mode list lives in the shared header so the hosttest
+ * decides it (and so one definition of a mode exists, not two). */
+extern "C" {
+#include "rb_drr.h"
+}
+
 #include <IOKit/graphics/IOFramebuffer.h>
 
 class IOPCIDevice;
@@ -141,8 +147,12 @@ public:
      * discovering what that costs when a second file needs the same name -
      * a header declaration there created a SECOND global and every call site
      * went ambiguous. One definition, reachable from both files. */
-    static constexpr IODisplayModeID kModeIDFast = 100;  /* 143.83 Hz, the firmware's */
-    static constexpr IODisplayModeID kModeID60   = 101;  /* 60 Hz, ours (2y6) */
+    /* 2z0: ids are kModeIDBase + index into the DERIVED list. Index 0 is
+     * always the panel's native timing, which is never written. 2y6's
+     * kModeIDFast/kModeID60 were a two-entry table that would have claimed
+     * 143.8 Hz on a 75 Hz panel; the list now comes from the raster. */
+    static constexpr IODisplayModeID kModeIDBase = 100;
+    static constexpr IODisplayModeID kModeIDFast = 100;  /* == native, index 0 */
 
 private:
 
@@ -370,10 +380,8 @@ private:
     IODisplayModeID    modeCur;
     uint32_t           modeClkHz;      /* DERIVED from the measurement (2y6) */
     uint32_t           modeBaseMhz;    /* what the raster measured at setup */
-    uint32_t           modeLines60;
-    uint32_t           modeMhz60;      /* what those lines actually give */
-    uint32_t           modeRate60;     /* 16.16, as advertised */
-    uint64_t           modePeriod60;   /* ns, what the VBL ticks at */
+    struct rb_drr_mode modeList[RB_DRR_MAX_MODES];
+    unsigned           modeCount;
     uint64_t           modeSwitches;
     uint64_t           modeApplies;
     uint32_t           modeLastAsked;
@@ -474,6 +482,7 @@ private:
     void modeTeardown(void);
     bool modeApply(IODisplayModeID want);
     UInt32 modeRate1616(IODisplayModeID id) const;
+    int modeIndexOf(IODisplayModeID id) const;
     void vblRetune(uint64_t periodNs);
     bool blParamsSetup(void);
     void blParamsTeardown(void);
