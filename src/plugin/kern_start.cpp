@@ -7000,7 +7000,59 @@ void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
 // packs __text so tightly that this driver has no run of 32 identical bytes
 // anywhere in it; __const is inside the r-x __TEXT segment, so code placed
 // there executes, and it has 27 runs of >= 200 zero bytes.
+#include "rb_osver.h"
 #include "rbgpu_mtlcave.h"
+
+// 2xz: WHICH PATCH ROW, AND WHAT HAPPENS WHEN THERE IS NONE.
+//
+// Every value in a cave row is an address inside one build of one dylib, so
+// the row is picked by the Darwin major and the BYTES decide - see the header
+// comment, and rbgpu_mtlk_place(), which reads the place and writes only if
+// what is there is exactly `cave_find` (or already `cave_repl`). A row that is
+// right for the major and wrong for the point release therefore writes
+// nothing and 2r6's verdict says the driver moved, with the unslid addresses
+// and this boot's slide in the log.
+//
+// An OS with no row at all is the Ventura and Sonoma state: g_mtlRow stays
+// null, every path that would place bytes declines before computing an
+// address, and `mtlk_row` is 0 in the diag table so the boot says which case
+// it was. Rule 14 - "no row for this OS" and "the row missed" must not look
+// the same, so they are mtlk_row=0 and mtlk_match=0 respectively.
+static const struct rb_mtlcave_row *g_mtlRow = nullptr;
+
+// Resolved once, from the same kernel global both kexts read. Logs the row it
+// chose, or the fact that there is none, with the Darwin number either way.
+static void rbgpu_mtlk_row_init(void) {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    const int major = getKernelVersion();
+    g_mtlRow = rbgpu_mtlcave_row(major);
+    rbgpu_diag_set_num("mtlk_row", g_mtlRow ? static_cast<uint32_t>(major) : 0);
+    if (g_mtlRow) {
+        rbgpu_log("2xz: cave row for Darwin %d (%s): __TEXT 0x%llx, fn 0x%llx, "
+                  "cave 0x%llx (%u of %u bytes used). These are where to LOOK; "
+                  "the byte-pattern compare at each place is what authorises a "
+                  "write, so a row right for the major and wrong for the point "
+                  "release writes nothing.",
+                  major, g_mtlRow->os,
+                  (unsigned long long)g_mtlRow->text_vm,
+                  (unsigned long long)g_mtlRow->fn_vm,
+                  (unsigned long long)g_mtlRow->cave_vm,
+                  g_mtlRow->cave_used, g_mtlRow->cave_reserved);
+    } else {
+        rbgpu_log("2xz: NO cave row has been derived on Darwin %d (%s), so the "
+                  "userspace half of the swizzle fix is not placed in this "
+                  "boot - nothing is written anywhere. The kernel linear force "
+                  "still applies; 2on-2op is why both halves are wanted. "
+                  "Derive a row with `python3 tools/gen_cavepatch.py` on this "
+                  "machine and rebuild.",
+                  major, rb_os_name(major));
+    }
+}
 
 static void rbgpu_pkrs_init_2ly(void);
 
@@ -7272,7 +7324,7 @@ static bool rbgpu_mtlk_place(vm_map_t map, mach_vm_address_t place,
                              const char *kWrite, const char *kVerify,
                              bool report) {
 #define RB_MTLK_SET(k, v) do { if (report) rbgpu_diag_set_num((k), (v)); } while (0)
-    static uint8_t buf[sizeof(kRbMtlCaveFind)];
+    static uint8_t buf[RBGPU_MTL_MAXLEN];
     if (len > sizeof(buf)) {
         return false;
     }
@@ -7356,18 +7408,26 @@ static void rbgpu_mtlk_probe(task_t task) {
         rbgpu_diag_set_num("mtlk_probe_read", 0xFFFE);
         return;
     }
+    rbgpu_mtlk_row_init();
+    if (!g_mtlRow) {
+        // 2xz: no row for this OS. Distinct from a read failure and from a
+        // pattern miss, which is why it has its own code rather than a 0.
+        rbgpu_diag_set_num("mtlk_probe_read", 0xFFFD);
+        return;
+    }
+    const size_t clen = g_mtlRow->cave_len;
     mach_vm_address_t place =
-        (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
+        (g_mtlRow->cave_vm - g_mtlRow->cave_anchor) + g_mtlkSlide;
     rbgpu_diag_set_num("mtlk_place", place);
 
-    static uint8_t pbuf[sizeof(kRbMtlCaveFind)];
-    kern_return_t r = g_mtlkVmMapReadUser(map, place, pbuf, sizeof(pbuf));
+    static uint8_t pbuf[RBGPU_MTL_MAXLEN];
+    kern_return_t r = g_mtlkVmMapReadUser(map, place, pbuf, clen);
     rbgpu_diag_set_num("mtlk_probe_read", static_cast<uint64_t>(r));
     if (r != KERN_SUCCESS) {
         return;
     }
-    bool isFind = memcmp(pbuf, kRbMtlCaveFind, sizeof(pbuf)) == 0;
-    bool isRepl = memcmp(pbuf, kRbMtlCaveRepl, sizeof(pbuf)) == 0;
+    bool isFind = memcmp(pbuf, g_mtlRow->cave_find, clen) == 0;
+    bool isRepl = memcmp(pbuf, g_mtlRow->cave_repl, clen) == 0;
     rbgpu_diag_set_num("mtlk_probe_match", isFind ? 1 : (isRepl ? 2 : 0));
     rbgpu_diag_set_num("mtlk_probe_b0", pbuf[0]);
 }
@@ -7552,17 +7612,28 @@ static void rbgpu_mtlk_on_exec(task_t task) {
         rbgpu_diag_set_num("mtlk_map", 1);
     }
 
+    // 2xz: no row derived on this OS means no address to compute. Checked
+    // here and not only at the write, so nothing downstream ever holds an
+    // address built from a null row.
+    rbgpu_mtlk_row_init();
+    if (!g_mtlRow) {
+        g_mtlkFailed++;
+        rbgpu_mtlk_counters();
+        return;
+    }
+
     // The patch site is ANCHOR bytes before the cave (the cave sits in a zero
     // run and needs preceding context to be identifiable).
     mach_vm_address_t cavePlace =
-        (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
-    mach_vm_address_t fnPlace = RBGPU_MTL_FN_VM + g_mtlkSlide;
+        (g_mtlRow->cave_vm - g_mtlRow->cave_anchor) + g_mtlkSlide;
+    mach_vm_address_t fnPlace = g_mtlRow->fn_vm + g_mtlkSlide;
     if (report) {
         rbgpu_diag_set_num("mtlk_place", cavePlace);
     }
 
     bool caveOk = rbgpu_mtlk_place(map, cavePlace,
-                                   kRbMtlCaveFind, kRbMtlCaveRepl, sizeof(kRbMtlCaveFind),
+                                   g_mtlRow->cave_find, g_mtlRow->cave_repl,
+                                   g_mtlRow->cave_len,
                                    "mtlk_match", "mtlk_prot_rw", "mtlk_write", "mtlk_verify",
                                    report);
     if (!caveOk) {
@@ -7595,9 +7666,9 @@ static void rbgpu_mtlk_on_exec(task_t task) {
                       "src/plugin/rbgpu_mtlcave.h and rebuild. Slide this "
                       "boot 0x%llx.",
                       (unsigned long long)g_mtlkMoved,
-                      (unsigned long long)RBGPU_MTL_CAVE_VM,
-                      (unsigned)RBGPU_MTL_CAVE_ANCHOR,
-                      (unsigned long long)RBGPU_MTL_FN_VM,
+                      (unsigned long long)g_mtlRow->cave_vm,
+                      (unsigned)g_mtlRow->cave_anchor,
+                      (unsigned long long)g_mtlRow->fn_vm,
                       (unsigned long long)g_mtlkSlide);
         }
         rbgpu_mtlk_counters();
@@ -7619,7 +7690,8 @@ static void rbgpu_mtlk_on_exec(task_t task) {
     // cave must be verified present in THIS process first. Each process gets
     // its own copy-on-write copy, so "patched elsewhere" is worth nothing.
     bool detOk = rbgpu_mtlk_place(map, fnPlace,
-                                  kRbMtlFnFind, kRbMtlFnRepl, sizeof(kRbMtlFnFind),
+                                  g_mtlRow->fn_find, g_mtlRow->fn_repl,
+                                  g_mtlRow->fn_len,
                                   "mtlkd_match", "mtlkd_prot", "mtlkd_write", "mtlkd_verify",
                                   report);
     if (detOk) {
@@ -7775,17 +7847,25 @@ static void rbgpu_mtlk_try_late(void) {
     }
     g_mtlk2Calls++;
 
+    rbgpu_mtlk_row_init();
+    if (!g_mtlRow) {
+        // 2xz: as on the exec path - no row, no address, nothing written.
+        g_mtlk2Failed++;
+        rbgpu_diag_set_num("mtlk2_failed", g_mtlk2Failed);
+        return;
+    }
+
     const bool report = g_mtlk2Patched == 0 && g_mtlk2Failed < 8;
     mach_vm_address_t cavePlace =
-        (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
-    mach_vm_address_t fnPlace = RBGPU_MTL_FN_VM + g_mtlkSlide;
+        (g_mtlRow->cave_vm - g_mtlRow->cave_anchor) + g_mtlkSlide;
+    mach_vm_address_t fnPlace = g_mtlRow->fn_vm + g_mtlkSlide;
 
     // ORDER IS THE SAFETY PROPERTY, exactly as on the exec path: the detour is
     // a jmp into the cave, so the cave must be verified present in THIS
     // process before the detour is written.
     bool caveOk = rbgpu_mtlk_place(map, cavePlace,
-                                   kRbMtlCaveFind, kRbMtlCaveRepl,
-                                   sizeof(kRbMtlCaveFind),
+                                   g_mtlRow->cave_find, g_mtlRow->cave_repl,
+                                   g_mtlRow->cave_len,
                                    "mtlk2_cmatch", "mtlk2_cprot",
                                    "mtlk2_cwrite", "mtlk2_cverify", report);
     g_mtlk2Read = g_mtlkLastMatch;
@@ -7800,8 +7880,8 @@ static void rbgpu_mtlk_try_late(void) {
         return;
     }
     bool detOk = rbgpu_mtlk_place(map, fnPlace,
-                                  kRbMtlFnFind, kRbMtlFnRepl,
-                                  sizeof(kRbMtlFnFind),
+                                  g_mtlRow->fn_find, g_mtlRow->fn_repl,
+                                  g_mtlRow->fn_len,
                                   "mtlk2_dmatch", "mtlk2_dprot",
                                   "mtlk2_dwrite", "mtlk2_dverify", report);
     if (detOk) {

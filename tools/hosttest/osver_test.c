@@ -10,6 +10,11 @@
 #include <string.h>
 
 #include "rb_osver.h"
+/* 2xz: the cave rows are checked AGAINST the matrix here, because they are
+ * the one artifact whose claim bit and whose data live in two different
+ * files. A row with no bit, or a bit with no row, is drift that nothing else
+ * in the build would notice. */
+#include "rbgpu_mtlcave.h"
 
 #define CHECK(cond, what) do { \
     printf((cond) ? "ok   %s\n" : "FAIL %s\n", (what)); \
@@ -111,6 +116,84 @@ int osver_tests(void)
           "a newer OS prints that it is newer, not nothing");
     CHECK(strcmp(rb_os_name(RB_OS_VENTURA - 1), "out-of-range") == 0,
           "an older OS prints that it is out of range");
+
+    /* --- the cave rows against the matrix ---------------------------- */
+
+    /* The invariant: a row exists for a Darwin major IF AND ONLY IF that OS's
+     * matrix entry claims RB_OSD_MTLCAVE. Either half alone is a lie - a row
+     * without the bit is data nothing will reach, and a bit without a row
+     * makes `rb_os_derived` promise a patch that cannot be placed. */
+    for (i = 0; i < RB_OS_ROW_COUNT; i++) {
+        const int d = rb_os_rows[i].darwin;
+        const int claims = rb_os_derived(d, RB_OSD_MTLCAVE);
+        const int has = rbgpu_mtlcave_row(d) != 0;
+
+        CHECK(claims == has,
+              "each OS claims RB_OSD_MTLCAVE exactly when a cave row exists for it");
+    }
+    CHECK(rbgpu_mtlcave_row(RB_OS_VENTURA) == 0 &&
+          rbgpu_mtlcave_row(RB_OS_SONOMA) == 0,
+          "Ventura and Sonoma have no cave row - stated twice, in the matrix and in the table");
+    CHECK(rbgpu_mtlcave_row(RB_OS_SEQUOIA) != 0 &&
+          rbgpu_mtlcave_row(RB_OS_TAHOE) != 0,
+          "Sequoia's row survived 2xt instead of being replaced, and Tahoe has its own");
+    CHECK(rbgpu_mtlcave_row(RB_OS_MAX_DARWIN + 1) == 0,
+          "the lookup is exact, never nearest-neighbour - a wrong build's addresses are worth nothing");
+
+    for (i = 0; i < RB_MTLCAVE_ROW_COUNT; i++) {
+        const struct rb_mtlcave_row *r = &rb_mtlcave_rows[i];
+
+        /* The read buffer in rbgpu_mtlk_place() is sized from MAXLEN, not from
+         * a row's own array, so a longer pattern must fail HERE and not
+         * silently truncate a compare there. */
+        CHECK(r->cave_len <= RBGPU_MTL_MAXLEN && r->fn_len <= RBGPU_MTL_MAXLEN,
+              "every pattern fits the fixed read buffer (RBGPU_MTL_MAXLEN)");
+        CHECK(r->cave_len == r->cave_anchor + r->cave_reserved,
+              "cave_len is exactly the anchor plus the reserved run it covers");
+        CHECK(r->cave_used > 0 && r->cave_used <= r->cave_reserved,
+              "the cave code fits the zero run it replaces");
+        /* The find pattern's reserved tail is the all-zero run the cave goes
+         * into. If it is not zero, the row was derived against something that
+         * was not a zero run and the write would clobber real data. */
+        {
+            int nonzero = 0;
+            for (j = (int)r->cave_anchor; j < (int)r->cave_len; j++) {
+                nonzero += r->cave_find[j] != 0;
+            }
+            CHECK(nonzero == 0,
+                  "the reserved area of every find pattern is all zero - it is a zero run, not live data");
+        }
+        /* The anchor is what makes an all-zero cave identifiable at all, so a
+         * replacement that changed it would move the match. */
+        CHECK(memcmp(r->cave_find, r->cave_repl, r->cave_anchor) == 0,
+              "the replacement leaves the anchor bytes alone - it is context, not payload");
+        CHECK(memcmp(r->cave_find, r->cave_repl, r->cave_len) != 0,
+              "...and does change something past it");
+        /* find and repl must differ, or a verify after the write cannot tell
+         * a landed write from an untouched page (2lq in byte form). */
+        CHECK(memcmp(r->fn_find, r->fn_repl, r->fn_len) != 0,
+              "the detour's replacement differs from its find - otherwise the verify proves nothing");
+        /* The detour is a jmp, so the first byte changes and the rest of the
+         * prologue is left as context. */
+        CHECK(r->fn_repl[0] == 0xE9,
+              "the detour starts with a rel32 jmp");
+        CHECK(r->cave_vm > r->text_vm && r->fn_vm > r->text_vm,
+              "both addresses are inside the image, above its __TEXT base");
+        CHECK(r->cave_vm >= r->cave_anchor,
+              "the anchor does not underflow the cave address");
+        CHECK(r->os != 0 && r->os[0] != '\0' && rb_os_row_for(r->darwin) != 0,
+              "every cave row names an OS the matrix knows");
+        for (j = i + 1; j < RB_MTLCAVE_ROW_COUNT; j++) {
+            CHECK(rb_mtlcave_rows[i].darwin != rb_mtlcave_rows[j].darwin,
+                  "no two cave rows share a Darwin major");
+            /* 2xt's whole lesson: the rows must be DIFFERENT data. Two rows
+             * with the same addresses would mean one was copied rather than
+             * derived. */
+            CHECK(rb_mtlcave_rows[i].fn_vm != rb_mtlcave_rows[j].fn_vm &&
+                  rb_mtlcave_rows[i].cave_vm != rb_mtlcave_rows[j].cave_vm,
+                  "no two cave rows share addresses - a copied row is not a derived one");
+        }
+    }
 
     return failures;
 }
