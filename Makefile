@@ -92,7 +92,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext fbkext tools plugin fbperf fbpresent mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext fbkext tools plugin fbperf fbpresent blset mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -449,6 +449,16 @@ $(BUILD_DIR)/plugin/kmod_info.o: $(PLUGIN_SRC)/kmod_info.c
 # the plugin loaded only because `-lilubetaall` was in boot-args. Rule 26: the
 # grep is anchored on the enumerator name, and it is checked against a
 # known-present case by requiring EXACTLY one hit for each.
+# blset (2xs/2xy): the ORACLE for "can we actually CHANGE the brightness?".
+# Boot 249 proved the mechanism (written field read back bit-identical) but
+# only ever wrote the value the firmware already had, so the EFFECT is
+# unproven. This asks for the change through the documented userspace entry
+# point, which is the same chain the System Settings slider uses - so the
+# effect can be settled with no boot.
+blset: $(OUT)/blset
+$(OUT)/blset: tools/blset.m | $(OUT)
+	clang -fobjc-arc -O2 -Wall -o $@ $< -framework IOKit -framework CoreFoundation
+
 .PHONY: mtlcave
 # 2xz: derive this machine's AMDRadeonX6000MTLDriver cave row. Reads the
 # running shared cache, writes src/plugin/mtlcave/darwin<N>.h, and tells you
