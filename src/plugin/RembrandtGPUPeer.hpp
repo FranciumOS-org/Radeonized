@@ -28,6 +28,12 @@ void rbgpu_nvram_note(const char *var, const char *text);
 // and returns true on a recovery boot.
 bool rbgpu_arg(const char *tok);
 bool rbgpu_stock(void);
+/* 2xz: 1 if the measured Apple-object offsets in this tree were measured on
+ * the OS this boot is running, or -rbgpuosforce says to use them anyway.
+ * Folded into rbgpu_stock(), so nothing has to ask it to be safe - it is here
+ * for the paths that must distinguish "the user asked for stock" from "the
+ * kext refused to guess". */
+bool rbgpu_os_measured(void);
 bool rbgpu_nvram_armed(const char *var, uint32_t *why);
 
 // 2xx: has the generation key been written? See `rb_defaults.h` - before it
