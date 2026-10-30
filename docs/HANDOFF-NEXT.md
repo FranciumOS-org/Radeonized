@@ -1,6 +1,7 @@
 # HANDOFF — next step
 
-**Written 2026-10-30, after 2xx resolved. `docs/RULES.md` has the standing rules,
+**Written 2026-10-30, after 2xx resolved; updated the same day for 2xy and
+2xz. `docs/RULES.md` has the standing rules,
 the chip facts and the boot-arg contract; this file is only what is in flight.**
 
 ---
@@ -18,11 +19,16 @@ user and by its own counters.
 | **2xw** armed by default, no boot-args | **WORKING**, boot 247 |
 | **2xx** our own `"0"` read as a disarm | **FIXED**, boot 237 then 247 |
 | **2xx** the WindowServer crash loop | **FIXED** — it was a stale fbkext, rule 15 |
+| **2xy** the System Settings brightness slider | built, **NEEDS A BOOT** |
+| **2xz** Ventura-and-up support matrix, cave table | built, no boot needed on Tahoe |
 
 ### Installed, and this is the part that bit
 
-    plugin  build/out/RembrandtGPU.kext      FE3200B0   -> the OpenCore EFI
-    fbkext  build/out/RBAMDFramebuffer.kext  353A1D24   -> /Library/Extensions
+    plugin  build/out/RembrandtGPU.kext      43775C76   -> the OpenCore EFI
+    fbkext  build/out/RBAMDFramebuffer.kext  EBF63EB0   -> /Library/Extensions
+
+(boot 247's were FE3200B0 / 353A1D24. Both moved for 2xy/2xz; the plugin's
+moves again on any rebuild, so take the UUID from the build, not from here.)
 
 **Install BOTH, every time, and check both UUIDs in `kextstat` before reading
 anything else.** The nine-boot crash loop and the whole boot-arg bisect of
@@ -55,12 +61,69 @@ in its first minute.
     peer: armed=1 arm_why=0 gen=1 tick_armed=1 tick_us=6944
           cap_tbl_patched=1 agdc_on=1 sentinel=2
 
-### Open, and none of it blocking
+## THE NEXT BOOT: BRIGHTNESS (2xs + 2xy)
 
-- **Brightness.** `-rbgpufbbacklight` is built and hosttested and has **never
-  been booted** (2xs). Its follow-on is `kConnectionFlags` at
-  `src/fbkext/RBAMDFramebuffer.cpp:898` plus `getAppleSense`, which changes
-  which `IODisplay` subclass matches, so it needs its own arg and boot.
+Both halves of the backlight are built and **neither has ever been booted**.
+They are separately armed because rule 38's question has different answers for
+them: the write reaches a PWM duty cycle, the match reaches which `IODisplay`
+subclass owns the connection - and through it the display-prefs key, mirroring
+and the wrangler's idle dimming.
+
+Install both kexts as above, then:
+
+    sudo tools/efi.sh bootarg remove -rbgpunosentinel
+    sudo tools/efi.sh bootarg add -rbgpufbbacklight -rbgpufbbuiltin
+    nvram boot-args                  # VERIFY before rebooting: -rbgpuoff must
+                                     # NOT be there, and the two new tokens must
+
+Removing `-rbgpunosentinel` first is deliberate: these two args have never run,
+so this is exactly the boot the sentinel exists for. If it does not survive 60
+seconds the next boot comes up stock on its own and costs nothing.
+
+**What to read, in this order.** Rule 8 first (`nvram rbgpu-boot` must have
+increased), then rule 34 - the args this experiment depends on are
+`-rbgpufbbacklight` and `-rbgpufbbuiltin`, so check they are in `boot-args`
+before interpreting a single counter.
+
+    ioreg -rl -c RBAMDFramebuffer | grep -E 'RBFBBl|RBFBArmWhy'
+        RBFBBlArmed     1 = -rbgpufbbacklight was seen
+        RBFBBlBuiltIn   1 = -rbgpufbbuiltin was seen
+        RBFBBlReady     1 = BAR5 mapped and PWRSEQ0 identified
+        RBFBBlRefuse    0 = set up; else WHY it will not write (2xs' codes)
+        RBFBBlFlagsGets  how many times anything asked kConnectionFlags
+        RBFBBlSenseGets  ...and getAppleSense
+        RBFBBlLevel0 / RBFBBlLastLevel / RBFBBlLastCount / RBFBBlReadback
+        RBFBBlSets / RBFBBlGets / RBFBBlParmAdds / RBFBBlPendTimeouts
+
+    ioreg -rl -c IODisplayConnect | grep -E 'class |IODisplayConnectFlags'
+
+**Said before the boot, so the reading cannot be bent to fit (rule 14):**
+
+* The *only* thing that settles 2xy is the class name under `display0`. Today
+  it is `AppleDisplay` with `IODisplayConnectFlags = <00000000>`. Success is
+  `AppleBacklightDisplay` (or `IOBacklightDisplay`) and flags `<00080000>` -
+  0x800 byte-swapped, since `ioreg` prints the raw data.
+* `RBFBBlFlagsGets` **0** means nothing ever asked, so IOBacklightDisplay never
+  probed this connection and the two answers are not the reason it did not
+  match. That is a different failure from `RBFBBlFlagsGets` non-zero with
+  `RBFBBlSenseGets` 0, which means it asked for the flags, did not like them,
+  and stopped - and both are different again from both counters non-zero with
+  `AppleDisplay` still matching, which means the probe passed and something
+  else won the category. Three outcomes, three distinct readings.
+* A brightness slider in System Settings is the user-visible form, but it is
+  **downstream of the class name** - do not read its absence as 2xy failing
+  until the class has been checked.
+* `RBFBBlReady 0` with `RBFBBlRefuse` non-zero is 2xs failing, not 2xy. The two
+  are independent by construction and must be attributed separately.
+* The panel going **dim** is 2xs' documented worst case, not a hang: the floor
+  is non-zero (`rbgpufbblfloor=`, refused outside 1 %..50 %) precisely so the
+  screen can never be driven black. `sudo nvram rbgpu-fb=0` or removing
+  `-rbgpufbbacklight` undoes it.
+
+Outstanding paperwork once it has booted: the three new `docs/linux-ref/` files
+in `UPSTREAM.md`, and a 2xs journal entry (2xy's is written).
+
+### Open, and none of it blocking
 - **The frame rate ceiling.** 82/s busy against 143.83; never established
   whether that is demand-limited or still gated (2xi/2xo).
 - **`-rbgpunocaptbl` is a diagnostic, not a configuration.** Boot 246 measured
@@ -130,26 +193,53 @@ the next boot stock by itself. That is the whole point of 2xw.
 
 Small, and each one is named in `docs/RULES.md` with its journal tag:
 
-1. **Brightness.** `-rbgpufbbacklight` is built, hosttested, mutation-tested
-   and **never booted** (2xs). Arm check first: `RBFBBlArmed` / `RBFBBlReady` /
-   `RBFBBlRefuse`. Outstanding paperwork for it: the three new
-   `docs/linux-ref/` files in `UPSTREAM.md` and a 2xs journal entry. The
-   follow-on that brings the real System Settings slider is making
-   `AppleBacklightDisplay` match (`kConnectionFlags` at
-   `src/fbkext/RBAMDFramebuffer.cpp:898`, plus `getAppleSense`) — it changes
-   which `IODisplay` subclass matches, so it needs its own arg and its own boot.
+1. **Brightness** — both halves built, neither booted. The whole procedure and
+   what each outcome would mean is under "THE NEXT BOOT" above.
 2. **The last ~22 % of the frame rate** — 82/s against the panel's 143.83. Not
    established whether that is demand-limited or still gated.
 3. **The wedge**, the independent second defect. `metal_probe --queues 4`
    reproduces it with no kext, no arming and no reboot (2wt).
 4. **HDMI is unreachable** — wired to the dGPU (2xr), not merely unbuilt.
 
-## THE TRAP THAT IS STILL LIVE
+## OS COVERAGE, AND WHAT IT DOES AND DOES NOT CLAIM (2xz)
 
-**Every Apple address in this repo and in the journal is a macOS 15 address.**
-`AMDRadeonX6000MTLDriver __TEXT` moved 0x7FFB08BF3000 → 0x7FFB110D4000 and
-CoreDisplay 0x7FF80404C000 → 0x7FF805348000. `tools/re/dscsym.sh` still
-hardcodes the old bases. The cache is at
+`src/common/rb_osver.h` is the matrix and `tools/hosttest/osver_test.c` pins
+it. Darwin 22 (Ventura) up is the declared range, and within it:
+
+| Darwin | OS | measured here | in practice |
+|---|---|---|---|
+| 22 | Ventura | nothing | loads, comes up **stock**, every probe reports |
+| 23 | Sonoma | nothing | same |
+| 24 | Sequoia | offsets, cave row | the OS it was all derived on |
+| 25 | Tahoe | offsets, cave row, USB | the machine, boot 247 |
+
+An OS with nothing measured comes up stock on purpose: the object offsets into
+Apple's driver were measured, not inferred, and writing a ring pointer through
+an offset that moved is an unbounded write into another driver's object.
+`-rbgpuosforce` arms the table anyway, for the boot that goes and measures -
+and that boot should keep the sentinel on.
+
+**To bring up a third OS**, in order and none of it needing a boot until the
+last step: `make mtlcave` on that machine (derives its cave row off its own
+cache), add the include and the row to `src/plugin/rbgpu_mtlcave.h`, add
+`RB_OSD_MTLCAVE` to that Darwin's row in `rb_osver.h` with a note saying where
+it came from, `make hosttest` (it cross-checks those two and fails if only one
+was done), then one `-rbgpuosforce` boot with the sentinel armed, reading
+`os_major` / `os_derived` / `os_forced` and every ring counter before trusting
+any of them.
+
+## THE TRAP, NOW HALF-CLOSED
+
+**Every Apple address in a COMMENT in this repo and in the journal is a macOS
+15 address.** `AMDRadeonX6000MTLDriver __TEXT` moved 0x7FFB08BF3000 →
+0x7FFB110D4000, CoreDisplay 0x7FF80404C000 → 0x7FF805348000 and SkyLight
+0x7FF807B42000 → 0x7FF8091F1000. **`tools/re/dscsym.sh` and `dscinv.sh` no
+longer hardcode anything** - `tools/re/dscbase.sh <Lib>` reads the live unslid
+`__TEXT` base and size out of `dyld_info -segments` and both take their bases
+from it (2xz: dscsym.sh had been measuring the slide every run and subtracting
+a stale base from it, so `atos` answered for an address 0x16AF000 off, every
+time, silently). In live code the only hardcoded Apple address left is
+`RBGPU_IOP_SITE_VM`, which is stale and fails safe. The cache is at
 `/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/` (7 files) and
 `tools/re/dyldcache.py` reads it — `Cache.images()` returns `(loadAddress,
 textSize, path)`, `symtab(cache, Image)` returns `(addr, name, ntype)`.
@@ -170,4 +260,5 @@ passes unsanitized. The real fix is updating CommandLineTools.
 **the assistant never runs these and never asks for the password**, never installs
 into the EFI or `/Library/Extensions`, and asks before any kext load.
 **Never `kmutil unload` the framebuffer kext — it panics**; reboot instead.
-Commit freely; **ask before pushing**.
+Commit freely; **pushing was authorised on 2026-10-30** ("also push whenever u
+need") — before that it needed asking every time.
