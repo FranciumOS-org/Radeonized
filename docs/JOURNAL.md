@@ -48192,3 +48192,54 @@ plugin alive with every default off. Clean ⇒ the fault is one of the 45 and
 the bisect proceeds by halves. Still crashing ⇒ it is the always-on core,
 which 2xv/2xw/2xx never touched, and the frontier moves off the arming
 entirely. Clear `rbgpu-safe` first or the sentinel spends the boot.
+
+### 2xx: the swizzle fix is cleared, and the 903 MB is finally named
+
+Boot at 09:19 with `-rbgpustock` removed and **`-rbgpunolinear -rbgpumtlkoff`**
+added - the accelerator armed with BOTH halves of the swizzle fix off - still
+crash-looped (`consecutiveCrashCount 2`, uptime 39 s). So the kernel linear
+force and the userspace patcher are both cleared, as is `-rbgpustock`'s own
+boot (09:13, boot 238: `armed=0 arm_why=5 sentinel=1`, `rbgpu-safe` cleared to
+`0` by the 60 s thread_call, no crash) which proved the fault is one of the 45.
+
+**This report carries two threads the earlier six did not, and they name the
+903 MB.**
+
+- Thread 8620: `CA::OGL::SWContext::create_surface_with_properties` →
+  `CA::Render::aligned_malloc` → `mmap`, with **`r14 = 855638016 = 0x33000000
+  = 816 MB`** for ONE software surface. That is the `CG framebuffers 903.0M / 8`
+  line, and the 582.1 M reserved-and-uncommitted is the part `mmap` never
+  backed - hence `VM - Returned success with no page`, twice, in all seven
+  crashes.
+- Thread 7115: `CA::OGL::SW::Format::RGBAh::load_1` and
+  `image_sampler<Format::RGBAh, ...>`. **RGBAh is half-float RGBA, 8 bytes per
+  pixel** - the EDR/wide-gamut compositing format, not the 4-byte path a
+  1920x1080 SDR panel needs. Thread 7110 is simultaneously in
+  `CA::OGL::MetalContext::create_pipeline_state`, so CA is standing up the
+  Metal context and the software context at once.
+
+So WindowServer is not mis-mapping our framebuffer: it is being told the
+display wants a deep-colour EDR pipeline, sizes a half-float surface
+accordingly, and the allocation cannot be backed. The question becomes **who
+told it that**, and in a `-rbgpunoownfb` boot our framebuffer told it nothing -
+it declined the panel, and `.Display_boot` owns it.
+
+The one display-side thing we still publish in that boot is
+**`/RembrandtGPUAGDC`**, which the GPUWrangler line names explicitly
+(`agdc 0x100000575`), and whose diag records exactly the capability answers
+that would decide this: `agdc_extcap_all=1`, `agdc_ec_csc`, `agdc_ec_gamma`,
+`agdc_ec_degamma=196c00000200`, `agdc_gamma_entries=1`. Thread 6820 sits in
+`AMBDapplyIntentionFromPreferencesForDisplayID` (AmbientDisplay) off a
+ColorSync display-profile callback, which is the consumer side of the same
+surface. And the 01:52 boot logged QuartzCore's
+`NULL color space set on context`.
+
+That is rule 38 a third time: AGDC armed while our framebuffer does not own
+the panel, so CoreDisplay reads the boot framebuffer's modest display through
+*our* capability bridge.
+
+Next boot, still a halving and not a guess: keep `-rbgpunoownfb` so the
+framebuffer stays out, and add **`-rbgpunoagdc -rbgpunoagdccaps`**. Clean ⇒
+the AGDC capability answers are the crasher and the fix is to scope them to
+the case where we own the panel. Still crashing ⇒ `-rbgpunodisplaypipe` is
+next, and after it the accelerator-core group.
