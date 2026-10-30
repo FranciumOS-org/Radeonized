@@ -153,7 +153,50 @@ mechanism. Say it that narrowly; the mechanism is not established.
 
 ---
 
-## THE NEXT STEP — needs NO new kernel route
+## THE LATE PATH IS BUILT — plugin `6233FE63`, NOT YET BOOTED
+
+**Built, hosttest green, never run on hardware.** `rbgpu_mtlk_try_late()` in
+`src/plugin/kern_start.cpp`, called from `hooked_swizmode_2la` — the existing
+`AMDHWAlignManager2::getPreferredSwizzleMode2` hook, which runs in the Metal
+client's own process. **No new kernel route**; it adds two solved symbols,
+`_current_map` and `_proc_selfpid`, and reuses `rbgpu_mtlk_place` unchanged so
+2om's compare-before-write fail-safe is intact — a wrong address still writes
+nothing.
+
+**`mtlk_syms` IS NOW A SIX-BIT MASK.** "All resolved" is **0x3F = 63**, not the
+`0xF = 15` that every macOS 15 capture shows. Do not read 15 as healthy now.
+
+Default **ON** (the desktop is unusable without it); off with
+**`-rbgpumtlknolate`**. Rescue remains `-rbgpuoff`.
+
+**Read these first, in this order:**
+
+    mtlk2_on        1 = armed, 2 = off by -rbgpumtlknolate
+    mtlk2_ready     absent = fine; 0 = a symbol or the slide is missing
+    mtlk2_read      the LAST place() verdict: 1 found, 2 already placed,
+                    0 neither, 0xFFFF THE READ FAILED AGAIN
+    mtlk2_patched   non-zero = THE FIX WORKS
+    mtlk2_failed / mtlk2_moved / mtlk2_calls / mtlk2_pid
+
+**Said before the boot:**
+* `mtlk2_patched` > 0 and the artifacts gone = done.
+* `mtlk2_read` **0xFFFF** = the client-context read fails too, so the problem
+  is not the exec hook's timing at all and the whole 2xu reading needs
+  re-examining — **do not** just try another hook point.
+* `mtlk2_read` **0** with `mtlk2_moved` > 0 = the read finally worked and the
+  BYTES are wrong, i.e. 2xt's addresses are wrong after all. That is the
+  measurement `mtlk_moved_verdict` could never make.
+* `mtlk2_ready` 0 = `_current_map`/`_proc_selfpid` did not solve.
+* Artifacts gone but a few wrong surfaces at app start = the known per-surface
+  limitation below; move the call to the client's user-client open.
+
+**KNOWN LIMITATION, stated before the boot:** the hook is per-surface, so a
+process's FIRST surface can be laid out before the patch lands. One surface per
+process. **NOT ESTABLISHED** that the hook always runs on the client's thread —
+if it runs on a workloop thread, `current_map()` is the kernel map and the read
+fails, which is exactly what `mtlk2_read` = 0xFFFF would say.
+
+### The original reasoning — needs NO new kernel route
 
 The plugin **already** hooks
 `AMDRadeonX6000_AMDHWAlignManager2::getPreferredSwizzleMode2`
@@ -227,7 +270,8 @@ Committed on `main`, nothing uncommitted:
 
 Built artifacts and their UUIDs:
 
-    plugin  build/out/RembrandtGPU.kext      FCEA5698  (installed in the EFI, boot 226)
+    plugin  build/out/RembrandtGPU.kext      6233FE63  (the LATE PATH, not yet booted)
+            previously                      FCEA5698  (2xt only; was in the EFI for boot 226)
     fbkext  build/out/RBAMDFramebuffer.kext  7F312381  (NOT installed; see below)
 
 **The framebuffer kext still links on macOS 26** — `make fbkext` reports
