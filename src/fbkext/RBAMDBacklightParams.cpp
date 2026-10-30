@@ -124,16 +124,43 @@ bool RBAMDBacklightParams::publish(void)
     if (!fb || !display) {
         return false;
     }
-    /* The dictionary IODisplay keeps its parameters in. It is the display's
-     * own property, not ours, and it is the same one
-     * IOFramebufferParameterHandler has already filled with 'brig' and the
-     * three gamma scales - which is why this appends rather than replaces. */
-    OSDictionary *params =
+    /* 2y1: NEVER mutate the dictionary the display already published.
+     *
+     * Boot 251 panicked here - "Trying to change a collection in the
+     * registry" @OSCollection.cpp:70, from OSCollection::haveUpdated under
+     * IODisplay::addParameter under this function - because the dictionary
+     * fetched out of the registry with getProperty() carries kImmutable, and
+     * every collection reachable as a registry property does.
+     *
+     * IOFramebufferParameterHandler::displayModeChange (0x14d01126) shows the
+     * legal shape, and it never fetches the published dictionary to write to:
+     * it allocates a dictionary of its OWN, merges the previous contents into
+     * it, calls addParameter/setParameter on that private copy, and only then
+     * hands it to the display with setProperty (its vtable 0x258) before
+     * releasing it. That is also why Apple's own setParameter calls against
+     * its +0x88 member are legal while ours were not - its object is one it
+     * allocated, not one it took out of the registry.
+     *
+     * So: copy, fill the copy, publish the copy. withDictionary() copies by
+     * reference, so 'brig' and the three gamma scales carry forward as the
+     * same objects and keep working; we add a key beside them and replace the
+     * property as a whole. */
+    OSDictionary *cur =
         OSDynamicCast(OSDictionary, display->getProperty(gIODisplayParametersKey));
-    if (!params) {
+    if (!cur) {
+        /* Not a failure: at setDisplay() time the display may not have
+         * published its parameters yet. Counted because "there was nothing to
+         * merge" and "the merge dropped something" look identical later. */
         fb->blParmNoDict++;
+    }
+
+    OSDictionary *next = cur ? OSDictionary::withDictionary(cur, cur->getCount() + 4)
+                             : OSDictionary::withCapacity(4);
+    if (!next) {
+        fb->blParmPublishFails++;
         return false;
     }
+
     const uint32_t floor = fb->blFloor;
     const uint32_t level = fb->blCurrentLevel();
 
@@ -142,18 +169,20 @@ bool RBAMDBacklightParams::publish(void)
      * one and writes the other moves the panel somewhere neither asked for.
      * The minimum is the floor and not zero, so no client can ask for a dark
      * panel (rule 12 - a state we cannot diagnose from). */
-    bool ok = IODisplay::addParameter(params, gIODisplayBrightnessKey,
+    bool ok = IODisplay::addParameter(next, gIODisplayBrightnessKey,
                                       static_cast<SInt32>(floor),
                                       static_cast<SInt32>(RB_BL_LEVEL_FULL));
     if (ok) {
-        ok = IODisplay::setParameter(params, gIODisplayBrightnessKey,
+        ok = IODisplay::setParameter(next, gIODisplayBrightnessKey,
                                      static_cast<SInt32>(level));
     }
     if (ok) {
+        display->setProperty(gIODisplayParametersKey, next);
         fb->blParmPublished++;
     } else {
         fb->blParmPublishFails++;
     }
+    next->release();
     return ok;
 }
 
@@ -188,11 +217,15 @@ bool RBAMDBacklightParams::doIntegerSet(OSDictionary *params,
     }
     /* Reflect what the panel actually took, not what was asked: blSetLevel
      * clamps to the floor, and a dictionary that disagrees with the register
-     * is how a slider ends up fighting the hardware. */
-    if (params) {
-        IODisplay::setParameter(params, paramName,
-                                static_cast<SInt32>(fb->blLastLevel));
-    }
+     * is how a slider ends up fighting the hardware.
+     *
+     * Through publish(), NOT by writing `params`: that argument is the
+     * display's published dictionary, which is exactly the immutable
+     * collection whose mutation panicked boot 251. publish() re-reads the
+     * level off the chip, so what lands in the dictionary is the register's
+     * value and not our idea of it. */
+    (void)params;
+    (void)publish();
     return true;
 }
 
