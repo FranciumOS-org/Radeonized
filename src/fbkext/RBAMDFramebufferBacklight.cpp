@@ -68,6 +68,8 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
+/* 2xy: kPanelTFTConnect, the csDisplayType value getAppleSense reports. */
+#include <IOKit/ndrvsupport/IOMacOSVideo.h>
 
 /* DMU segment 2. Deliberately a second copy of the constant rather than a
  * shared one: 2wh's own note says "the segment is a constant in this kext,
@@ -111,6 +113,8 @@ bool RBAMDFramebuffer::blSetup(void)
     blReadback = 0;
     blPendTimeouts = 0;
     blParmAdds = 0;
+    blFlagsGets = 0;
+    blSenseGets = 0;
 
     if (!blArmed) {
         blRefuse = 1;
@@ -280,4 +284,79 @@ bool RBAMDFramebuffer::blSetLevel(uint32_t level)
     blLastLevel = want;
     blSets++;
     return true;
+}
+
+/* 2xy: THE SYSTEM SETTINGS SLIDER, and why it is two answers and not a write.
+ *
+ * 2xs made the panel's duty cycle writable and published 'brig' in the
+ * connection's parameter list, which is everything a client needs to SET the
+ * brightness. It did not make anything ASK. The live registry says why: the
+ * IODisplay that matched our connection is plain `AppleDisplay`
+ * (IODisplayConnectFlags = <00000000>), and System Settings' Display pane
+ * draws its brightness slider for the IODisplay subclass that owns a
+ * backlight, `IOBacklightDisplay` / `AppleBacklightDisplay` - both defined in
+ * IOGraphicsFamily, confirmed present in this OS's binary by name.
+ *
+ * `IOBacklightDisplay::probe` walks its framebuffer's connections and takes
+ * the first one that passes BOTH of these, in this order:
+ *
+ *     getAttributeForConnection(idx, kConnectionFlags, &flags)
+ *         must succeed AND have kIOConnectionBuiltIn (0x800) set
+ *     getAppleSense(idx, NULL, NULL, NULL, &displayType)
+ *         must succeed AND report a panel - kPanelTFTConnect (2)
+ *
+ * We answered 0 to the first and declined the second, so the probe returned
+ * nothing and the generic AppleDisplay won the category on its own score.
+ * Both answers are therefore true statements about this machine that we were
+ * simply not making: the panel IS built in, and it IS a TFT panel wired to
+ * the APU's eDP - 2xq/2xr established that the removable port is the dGPU's.
+ *
+ * WHY ITS OWN BOOT-ARG, separate from -rbgpufbbacklight. These two answers
+ * change which driver matches a connection, and IOGraphics reads
+ * kIOConnectionBuiltIn for more than the slider: it marks the display
+ * internal for the display-prefs key, for mirroring and for the wrangler's
+ * idle dimming. That is a different and larger blast radius than writing a
+ * PWM duty cycle, and rule 38's question - what does each half depend on -
+ * has different answers for the two. So a boot can arm the write without the
+ * match, or the match without the write. Arming the match alone is a
+ * deliberate and useful state: it answers "does AppleBacklightDisplay match
+ * at all on this machine" without any register write in the boot.
+ *
+ * Rule 30, checked against every token in use: the arg is `-rbgpufbbuiltin`,
+ * which shares `-rbgpufbb` with `-rbgpufbbacklight` and diverges at the next
+ * character ('a' against 'u'), so neither prefixes the other; no other
+ * `-rbgpufb*` token comes within `-rbgpufb` of it, and the mechanical
+ * negative `-rbgpunofbbuiltin` is likewise distinct from
+ * `-rbgpunofbbacklight`. The hosttest asserts the whole table for this.
+ *
+ * Rule 14: both answers are COUNTED, because a probe that never asked and a
+ * probe that asked and rejected us look identical from the registry
+ * otherwise. RBFBBlFlagsGets and RBFBBlSenseGets separate them, and
+ * RBFBBlBuiltIn says which boot this was.
+ */
+IOReturn RBAMDFramebuffer::getAppleSense(IOIndex connectIndex,
+                                         UInt32 *senseType,
+                                         UInt32 *primary,
+                                         UInt32 *extended,
+                                         UInt32 *displayType)
+{
+    if (connectIndex != 0) {
+        return kIOReturnBadArgument;
+    }
+    if (!blBuiltIn) {
+        /* 2xs' answer: we have no DDC or 3-pin sense path to this panel, so
+         * declining is the honest one when the match is not armed. */
+        return kIOReturnUnsupported;
+    }
+    /* There is no sense hardware here and we are not pretending there is.
+     * What is being reported is what the firmware's own modeset already
+     * proves: one fixed-in-place TFT panel on connection 0. senseType 0 is
+     * "not the Apple CRT sense codes", and primary/extended are the sense
+     * lines, which do not exist - zero is the only truthful value. */
+    if (senseType)   { *senseType = 0; }
+    if (primary)     { *primary = 0; }
+    if (extended)    { *extended = 0; }
+    if (displayType) { *displayType = kPanelTFTConnect; }
+    blSenseGets++;
+    return kIOReturnSuccess;
 }

@@ -121,6 +121,9 @@ public:
     uint64_t blGets=0;            /* 2xs */
     uint64_t blPendTimeouts=0;    /* 2xs */
     uint64_t blParmAdds=0;        /* 2xs */
+    bool     blBuiltIn=false;     /* 2xy */
+    uint64_t blFlagsGets=0;       /* 2xy */
+    uint64_t blSenseGets=0;       /* 2xy */
     uint32_t hubpTiling=0;
     uint32_t hubpPitch=0;
     uint32_t hubpConfig=0;

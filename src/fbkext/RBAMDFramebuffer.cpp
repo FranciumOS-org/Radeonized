@@ -423,11 +423,19 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * -rbgpufbbacklight and it prefixes none of them (the longest shared
      * prefix with any of them is `-rbgpufb`). */
     blArmed = false;
+    blBuiltIn = false;
     blFloor = RB_BL_LEVEL_FLOOR;
     blFloorRefused = 0;
     {
-        char blflag[16];
-        blArmed = PE_parse_boot_argn("-rbgpufbbacklight", blflag, sizeof(blflag));
+        blArmed = argOn("-rbgpufbbacklight");
+        /* 2xy: -rbgpufbbuiltin, the AppleBacklightDisplay match. Deliberately
+         * NOT `&& blArmed`: arming the match with the write off is a useful
+         * boot - it answers "does AppleBacklightDisplay match on this
+         * machine" without one register write - and arming the write with the
+         * match off is 2xs' own never-booted configuration. Rule 30 and the
+         * full reasoning are on getAppleSense in
+         * RBAMDFramebufferBacklight.cpp. */
+        blBuiltIn = argOn("-rbgpufbbuiltin");
         /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
          * scale. Rule 40: the value comes back as a BINARY INT of the
          * caller's width, so this is an int and not a char buffer - the bug
@@ -1039,14 +1047,36 @@ IOReturn RBAMDFramebuffer::getAttributeForConnection(IOIndex connectIndex,
         }
         return kIOReturnSuccess;
     case kConnectionFlags:
+        /* 2xy: kIOConnectionBuiltIn is the first of the two things
+         * IOBacklightDisplay::probe requires before AppleBacklightDisplay can
+         * match this connection and System Settings can draw a brightness
+         * slider. The reasoning, and why it is armed separately from the
+         * backlight WRITE, is on getAppleSense in
+         * RBAMDFramebufferBacklight.cpp. Counted, not just answered: a probe
+         * that never asked and a probe that asked and rejected us are
+         * otherwise indistinguishable (rule 14). */
         if (value) {
-            *value = 0;
+            *value = blBuiltIn ? (uintptr_t)kIOConnectionBuiltIn : 0;
+        }
+        if (blBuiltIn) {
+            blFlagsGets++;
         }
         return kIOReturnSuccess;
     case kConnectionSupportsAppleSense:
+        /* 2xy: this says whether getAppleSense is worth calling, and with the
+         * match armed it is - we answer it for connection 0. With the match
+         * disarmed we decline, which is 2xs' behaviour unchanged. */
+        if (blBuiltIn) {
+            if (value) {
+                *value = 1;
+            }
+            return kIOReturnSuccess;
+        }
+        return kIOReturnUnsupported;
     case kConnectionSupportsHLDDCSense:
         /* We have no DDC path to the internal panel, so decline rather than
-         * claim a sense we cannot perform. */
+         * claim a sense we cannot perform. This one stays declined in every
+         * configuration: there is no I2C to the eDP panel to answer with. */
         return kIOReturnUnsupported;
 
     /* 2xs: the backlight parameter. IOFramebufferParameterHandler::

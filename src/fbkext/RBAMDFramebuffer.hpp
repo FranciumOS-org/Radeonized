@@ -75,6 +75,11 @@ public:
                                        uintptr_t *value) APPLE_KEXT_OVERRIDE;
     IOReturn setAttributeForConnection(IOIndex connectIndex, IOSelect attribute,
                                        uintptr_t value) APPLE_KEXT_OVERRIDE;
+    /* 2xy: the two answers IOBacklightDisplay::probe needs. See the comment
+     * on the definition in RBAMDFramebufferBacklight.cpp. */
+    IOReturn getAppleSense(IOIndex connectIndex, UInt32 *senseType,
+                           UInt32 *primary, UInt32 *extended,
+                           UInt32 *displayType) APPLE_KEXT_OVERRIDE;
     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) APPLE_KEXT_OVERRIDE;
     IOReturn setAttribute(IOSelect attribute, uintptr_t value) APPLE_KEXT_OVERRIDE;
 
@@ -271,6 +276,13 @@ private:
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
     uint64_t           blParmAdds;    /* times we appended 'brig' to 'parm' */
+    /* 2xy: -rbgpufbbuiltin, the System Settings slider. Separately armed from
+     * -rbgpufbbacklight because it changes which IODisplay subclass matches
+     * this connection, which is a different risk from writing a PWM duty
+     * cycle: the slider needs both, a dark panel needs only the second. */
+    bool               blBuiltIn;
+    uint64_t           blFlagsGets;   /* kConnectionFlags answers given */
+    uint64_t           blSenseGets;   /* getAppleSense answers given */
     bool               amtrNotReady;   /* 2xn: -rbgpufbnotready */
     uint64_t           hubpFlipDeadline; /* 2xn: abs time the hold expires */
     uint64_t           amtrHeld;       /* 2xn: NotReady answers given */

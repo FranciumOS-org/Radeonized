@@ -16,7 +16,8 @@
 static const char *const known[] = {
     "-rbgpuoff", "-rbgpustock", "-rbgpuarm", "-rbgpunolinear", "-rbgpumtlkoff",
     "-rbgpumtlknolate", "-rbgpufbmatch", "-rbgpuagdcearly", "-rbgpuagdcpolicy",
-    "-rbgpumcnew", "-rbgpumcreg", "-rbgpufbbacklight", "-rbgpufbnocrumb",
+    "-rbgpumcnew", "-rbgpumcreg", "-rbgpufbbacklight", "-rbgpufbbuiltin",
+    "-rbgpufbnocrumb",
     "-rbgpufbvramrange", "-rbgpufbvramrangeall", "-rbgpunosentinel",
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",
     "-rbgpupdefix", "-rbgpubeat", "-rbgpunosmu", "-rbgpunoguard",
@@ -107,6 +108,10 @@ int defaults_tests(void)
     CHECK(!rb_default_on("-rbgpupdefix"), "-rbgpupdefix stays OFF (the halt returns)");
     CHECK(!rb_default_on("-rbgpumcreg"), "-rbgpumcreg stays OFF (its failure is a hang)");
     CHECK(!rb_default_on("-rbgpufbbacklight"), "-rbgpufbbacklight stays OFF (never booted)");
+    /* 2xy: -rbgpufbbuiltin changes which IODisplay subclass matches the
+     * connection, which reaches the display-prefs key, mirroring and the
+     * wrangler's dimming as well as the slider. Never booted either. */
+    CHECK(!rb_default_on("-rbgpufbbuiltin"), "-rbgpufbbuiltin stays OFF (never booted)");
     CHECK(!rb_default_on(""), "the empty token is not on");
     CHECK(!rb_default_on(NULL), "a NULL token is not on");
 
