@@ -131,6 +131,9 @@ public:
     uint64_t blParmPublishFails=0;/* 2y0 */
     uint64_t blParmNoDict=0;      /* 2y0 */
     uint64_t blParmSets=0;        /* 2y0 */
+    uint64_t blParmSetsPerc=0;    /* 2y2 */
+    uint64_t blParmSetsLin=0;     /* 2y2 */
+    uint64_t blParmSetsUsable=0;  /* 2y2 */
     uint64_t blParmSetFails=0;    /* 2y0 */
     uint32_t blParmLastAsked=0;   /* 2y0 */
     uint32_t hubpTiling=0;

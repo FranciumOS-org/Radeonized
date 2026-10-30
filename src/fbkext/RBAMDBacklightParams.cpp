@@ -119,6 +119,21 @@ bool RBAMDBacklightParams::doUpdate(void)
     return publish();
 }
 
+/* One key: declare its range, then set its value. Both halves must land -
+ * addParameter without setParameter leaves a parameter with no "value", which
+ * a client reads as a parameter that exists and is unreadable. */
+bool RBAMDBacklightParams::publishOne(OSDictionary *dict, const OSSymbol *key,
+                                      SInt32 lo, SInt32 hi, SInt32 value)
+{
+    if (!dict || !key) {
+        return false;
+    }
+    if (!IODisplay::addParameter(dict, key, lo, hi)) {
+        return false;
+    }
+    return IODisplay::setParameter(dict, key, value);
+}
+
 bool RBAMDBacklightParams::publish(void)
 {
     if (!fb || !display) {
@@ -169,12 +184,51 @@ bool RBAMDBacklightParams::publish(void)
      * one and writes the other moves the panel somewhere neither asked for.
      * The minimum is the floor and not zero, so no client can ask for a dark
      * panel (rule 12 - a state we cannot diagnose from). */
-    bool ok = IODisplay::addParameter(next, gIODisplayBrightnessKey,
-                                      static_cast<SInt32>(floor),
-                                      static_cast<SInt32>(RB_BL_LEVEL_FULL));
+    /* 2y2: THREE names for one register, because the UI does not use the
+     * obvious one.
+     *
+     * Boot 252 published "brightness" alone. The slider appeared and tracked
+     * our value, so the UI reads this dictionary - but `RBFBBlParmSets` moved
+     * only for ./build/out/blset and never once for a drag, and the value in
+     * the dictionary stayed whatever WE last put there. The brightness UI
+     * goes through CoreBrightness (`BrightnessSystem` /
+     * `BrightnessSystemClient`), and that library holds the strings
+     * "linear-brightness" (0x7ff814e8d332, 0x7ff814e8d364) and
+     * "usable-linear-brightness" (0x7ff814e8d35d) - both inside its __TEXT
+     * (0x7ff814d69000 + 0x172000) - while "brightness" is the one it does not
+     * write. A set naming a key no handler claims is dropped by IODisplay
+     * with nothing recorded anywhere, which is exactly a slider that moves
+     * and a panel that does not.
+     *
+     * The SCALE is an assumption and is stated as one: neither header nor
+     * disassembly documents the units of "linear-brightness", so it is
+     * published on the same [floor, RB_BL_LEVEL_FULL] scale as "brightness".
+     * That is defensible for this panel rather than merely convenient - the
+     * PWM duty cycle is linear in our level by construction
+     * (level / 0x10000 == duty fraction, rb_bl_count_from_level), so our
+     * level IS a linear brightness. If the slider's travel turns out
+     * non-monotonic or compressed, the perceptual/linear distinction is the
+     * thing to revisit and "brightness" is the one that should carry a curve.
+     *
+     * "usable-linear-brightness" reports the usable ceiling, which for this
+     * panel is the full scale; a client that tries to WRITE it is declined
+     * and counted, because a capability being treated as a control is worth
+     * knowing rather than silently obeying. */
+    bool ok = publishOne(next, gIODisplayBrightnessKey,
+                         static_cast<SInt32>(floor),
+                         static_cast<SInt32>(RB_BL_LEVEL_FULL),
+                         static_cast<SInt32>(level));
     if (ok) {
-        ok = IODisplay::setParameter(next, gIODisplayBrightnessKey,
-                                     static_cast<SInt32>(level));
+        ok = publishOne(next, gIODisplayLinearBrightnessKey,
+                        static_cast<SInt32>(floor),
+                        static_cast<SInt32>(RB_BL_LEVEL_FULL),
+                        static_cast<SInt32>(level));
+    }
+    if (ok) {
+        ok = publishOne(next, gIODisplayUsableLinearBrightnessKey,
+                        static_cast<SInt32>(floor),
+                        static_cast<SInt32>(RB_BL_LEVEL_FULL),
+                        static_cast<SInt32>(RB_BL_LEVEL_FULL));
     }
     if (ok) {
         display->setProperty(gIODisplayParametersKey, next);
@@ -202,12 +256,25 @@ bool RBAMDBacklightParams::doIntegerSet(OSDictionary *params,
      * created before the global was initialised would not be the same
      * object, and a silent no-match here is indistinguishable from "the UI
      * never asked" (rule 14). */
-    const bool mine = (paramName == gIODisplayBrightnessKey) ||
-                      (strcmp(paramName->getCStringNoCopy(),
-                              kIODisplayBrightnessKey) == 0);
-    if (!mine) {
+    const char *name = paramName->getCStringNoCopy();
+    const bool perc = (paramName == gIODisplayBrightnessKey) ||
+                      (name && strcmp(name, kIODisplayBrightnessKey) == 0);
+    const bool lin  = (paramName == gIODisplayLinearBrightnessKey) ||
+                      (name && strcmp(name, kIODisplayLinearBrightnessKey) == 0);
+    const bool usab = (paramName == gIODisplayUsableLinearBrightnessKey) ||
+                      (name && strcmp(name, kIODisplayUsableLinearBrightnessKey) == 0);
+
+    /* The usable ceiling is a capability we report, not a control. Declined
+     * so another handler could still claim it, and counted so that a client
+     * driving the panel through it is visible rather than inferred. */
+    if (usab) {
+        fb->blParmSetsUsable++;
         return false;
     }
+    if (!perc && !lin) {
+        return false;
+    }
+    if (perc) { fb->blParmSetsPerc++; } else { fb->blParmSetsLin++; }
 
     fb->blParmSets++;
     fb->blParmLastAsked = value;
@@ -247,6 +314,9 @@ bool RBAMDFramebuffer::blParamsSetup(void)
     blParmPublishFails = 0;
     blParmNoDict = 0;
     blParmSets = 0;
+    blParmSetsPerc = 0;
+    blParmSetsLin = 0;
+    blParmSetsUsable = 0;
     blParmSetFails = 0;
     blParmLastAsked = 0;
 

@@ -311,6 +311,14 @@ private:
     uint64_t           blParmPublishFails;
     uint64_t           blParmNoDict;
     uint64_t           blParmSets;
+    /* 2y2: per KEY, not one total. The whole question the boot answers is
+     * WHICH name the brightness UI writes, and a single counter cannot say
+     * (rule 14). CoreBrightness holds the strings "linear-brightness" and
+     * "usable-linear-brightness" and never wrote "brightness" once across
+     * boot 252, so these three counters are the experiment. */
+    uint64_t           blParmSetsPerc;   /* "brightness"               */
+    uint64_t           blParmSetsLin;    /* "linear-brightness"        */
+    uint64_t           blParmSetsUsable; /* "usable-linear-brightness" */
     uint64_t           blParmSetFails;
     uint32_t           blParmLastAsked;
     bool               amtrNotReady;   /* 2xn: -rbgpufbnotready */

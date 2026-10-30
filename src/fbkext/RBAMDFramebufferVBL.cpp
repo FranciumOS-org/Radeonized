@@ -172,6 +172,9 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBBlParmPublishFails", blParmPublishFails, 64);
     setProperty("RBFBBlParmNoDict", blParmNoDict, 64);
     setProperty("RBFBBlParmSets", blParmSets, 64);
+    setProperty("RBFBBlParmSetsPerc", blParmSetsPerc, 64);
+    setProperty("RBFBBlParmSetsLin", blParmSetsLin, 64);
+    setProperty("RBFBBlParmSetsUsable", blParmSetsUsable, 64);
     setProperty("RBFBBlParmSetFails", blParmSetFails, 64);
     setProperty("RBFBBlParmLastAsked", (uint64_t)blParmLastAsked, 32);
     setProperty("RBFBHubpTiling", (uint64_t)hubpTiling, 32);
