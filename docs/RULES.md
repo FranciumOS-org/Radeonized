@@ -133,14 +133,23 @@ table and refuses to install one that does not match the running kernel;
   can name, while every client looks for `kIODisplayBrightnessKey`, the string
   `"brightness"`, and gets `kIOReturnUnsupported`. 2xy's commit guessed
   `IOBacklightDisplay` would publish the full name once it matched; boot 250
-  settled that it does not. **2y0 (built, NEVER BOOTED)**
-  `-rbgpufbblparm` publishes `"brightness"` from our own
+  settled that it does not. **2y0 (BOOTED 251, PANICKED) / 2y1 (built,
+  NEVER BOOTED)** `-rbgpufbblparm` publishes `"brightness"` from our own
   `IODisplayParameterHandler`, attached as a service-plane child of the
-  framebuffer — which is exactly where `IODisplay::searchParameterHandlers`
-  (0x14ce7d66) looks, its first caller passing the framebuffer itself
-  (0x14ce8ba4). Handlers live in an `OSArray` (0x14ce7e04), so ours does not
-  displace the framebuffer's and `'brig'` keeps working. `./build/out/blset
-  <0..1>` drives brightness today with no slider.
+  framebuffer. **The mechanism is confirmed by the panic backtrace** —
+  `searchParameterHandlers` (0x14ce7d66) found us as the framebuffer's child,
+  `setDisplay` returned true, we joined the `OSArray` (0x14ce7e04) and
+  `IODisplay::doUpdate` called ours — so the plane was right and `'brig'` keeps
+  working. What panicked was the *target*: 2y0 mutated the dictionary it
+  fetched with `getProperty`, and every collection reachable as a registry
+  property is `kImmutable` ("Trying to change a collection in the registry"
+  @OSCollection.cpp:70). `IOFramebufferParameterHandler::displayModeChange`
+  (0x14d01126) shows the legal shape — allocate your own dictionary, merge the
+  old contents in, mutate yours, `display->setProperty` it, release — which is
+  why Apple's own `setParameter` against its `+0x88` member is legal and ours
+  was not: ownership, not timing. **2y1 (`D0F419E8`)** does that, and fixes the
+  same bug waiting in `doIntegerSet`. Rule 42. `./build/out/blset <0..1>`
+  drives brightness today with no slider.
 - **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
   established whether that is demand-limited or still gated (2xi/2xo).
 - **The wedge**, an independent second defect: work submitted that never
@@ -468,6 +477,17 @@ The numbering is cited all over the journal — **keep the numbers**.
     address: **which OS was this measured on, and is that the one running?**
     [2xz]
 
+42. **A collection you did not allocate is not yours to write to.**
+    `getProperty` returns a borrowed pointer to something the registry owns,
+    and IOKit enforces that with a **panic**, not a return code — so there is
+    no failure path to test and no counter that can record it, and the first
+    wrong write ends the boot. Ask of every `OSDictionary*`/`OSArray*`/`OSSet*`
+    before writing: **who allocated this?** "I fetched it from a service" means
+    copy it first (`OSDictionary::withDictionary`), mutate the copy, then
+    `setProperty` the copy. The two pointers look identical and the immutable
+    one is indistinguishable by value. The mirror of rule 13: not every call
+    that can fail reports failure. [2y1]
+
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
 keeps catching it: **say in the code what would have to be true for the reading
@@ -536,8 +556,9 @@ prints which NVRAM keys would disarm a half.
 
 **Still opt-in, and why:** `-rbgpufbbacklight` (2xs, booted and working),
 `-rbgpufbbuiltin` (2xy, booted and working - changes which `IODisplay`
-subclass matches the connection), `-rbgpufbblparm` (2y0, **never booted** -
-creates and registers a new IOKit service as a child of the framebuffer),
+subclass matches the connection), `-rbgpufbblparm` (2y1, **never booted; 2y0 PANICKED
+on boot 251** - creates and registers a new IOKit service as a child of the
+framebuffer and replaces the display's parameters property),
 `-rbgpuosforce` (2xz - arms the default-on table on an
 OS none of the measured offsets came from; a safety gate's override is never
 default-on),

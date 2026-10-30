@@ -49036,3 +49036,124 @@ Built, 97 symbols from the system collection, 0 unresolved;
 `_gIODisplayBrightnessKey`, `IODisplay::addParameter` and
 `IODisplay::setParameter` each checked bound individually against a control
 (rule 1, rule 26). `hosttest: all passed`. **Never booted.**
+
+## 2y1 — boot 251 PANICKED, and the panic proves 2y0's mechanism was right
+
+Boot 251 loaded the fbkext `C97B9CDD` with `-rbgpufbblparm` and panicked
+twice (15:35:01 and 15:37:30, `Kernel-2026-10-30-1535*.panic`), both
+identically, in WindowServer:
+
+```
+panic(cpu 4 caller 0xffffff800bc208ba):
+    Trying to change a collection in the registry @OSCollection.cpp:70
+Panicked task ... pid 204: WindowServer
+    OSCollection::haveUpdated
+    OSDictionary::setObject(OSSymbol const*, OSMetaClassBase const*, bool)
+    IOGraphicsFamily : IODisplay::addParameter(OSDictionary*, OSSymbol const*, int, int)
+    com.rembrandtgpu.fb : RBAMDBacklightParams::publish()            <- ours
+    IOGraphicsFamily : IODisplay::doUpdate()
+    IOGraphicsFamily : IODisplay::framebufferEvent(IOFramebuffer*, int, void*)
+    IOGraphicsFamily : IOFramebuffer::deliverGroupNotification(...)
+    IOGraphicsFamily : IOFramebuffer::deliverFramebufferNotification(int, void*)
+    IOGraphicsFamily : IOFramebuffer::deliverDisplayModeDidChangeNotification()
+    IOGraphicsFamily : IOFramebuffer::doSetup(bool)
+    IOGraphicsFamily : IOFramebuffer::setupForCurrentConfig()
+    IOGraphicsFamily : IOFramebuffer::doSetDisplayMode(int, int)
+    IOGraphicsFamily : IOFramebufferUserClient::externalMethod(...)
+```
+
+**Read the backtrace as a result before reading it as a failure.** Every
+inference 2y0 made off the static read is confirmed by it, in Apple's own
+frames:
+
+- `IODisplay::searchParameterHandlers` walked **our framebuffer's own
+  service-plane children** and found us. The plane was `gIOServicePlane` and
+  `attach()` + `registerService()` was the whole requirement, as 2y0 argued
+  from `AppleBacklight.kext`'s personality.
+- `setDisplay` returned true, so `addParameterHandler` put us in the `OSArray`
+  at `IODisplay+0x90`.
+- `IODisplay::doUpdate` walked that array and **called our `doUpdate`** —
+  vtable 0x868, as read.
+
+So `RBFBBlParmSetDisplays 0`, the outcome 2y0 named as "the plane is wrong and
+the device tree is next", is excluded. None of that work needs redoing.
+
+**The defect is one line's worth and it is a rule, not a number.** The
+dictionary `publish()` fetched with
+`display->getProperty(gIODisplayParametersKey)` is a registry property, and
+every collection reachable as one carries `kImmutable`;
+`OSCollection::haveUpdated` panics on any mutation of it by design. 2y0 wrote
+`append rather than replace` into the comment as though appending were the
+conservative choice. It is the opposite: appending is a mutation.
+
+`IOFramebufferParameterHandler::displayModeChange` (0x14d01126) shows the legal
+shape, and it never writes to the published dictionary at all:
+
+```
+  0x14d0124f   r12 = this->0x88          ; the handler's OWN previous dict
+  0x14d01256   this->0x88 = 0
+  0x14d0126a-  iterate r12's keys, copy each into r15 (a FRESH dictionary)
+  0x14d015a0   IODisplay::addParameter(0x88(this), gIODisplaySelectedColorModeKey, ...)
+  0x14d015b5   IODisplay::setParameter(0x88(this), ...)
+  0x14d0132e   display->vtable[0x258]  = setProperty(gIODisplayParametersKey, r15)
+  0x14d0133a   r15->release()
+```
+
+Allocate your own, merge the old in, mutate yours, `setProperty` it, release.
+That also explains the fact that looked contradictory: Apple calls
+`setParameter` on `this+0x88` **after** having `setProperty`'d that same
+object (`IOFramebufferParameterHandler::doIntegerSet`, 0x14d067d3) and does not
+panic — because the object is one it allocated and holds, not one it took out
+of the registry. The distinction is ownership, not timing, and it is not
+knowable from the value: the two dictionaries look identical.
+
+And `IOFramebufferParameterHandler::doUpdate` (0x14d0687e) is **four
+instructions — `mov $1, %al; ret`**. Apple publishes nothing from `doUpdate`.
+2y0 published from both `setDisplay` and `doUpdate` on the reasoning that the
+contract does not say *when* `doUpdate` is called; the frames above say where:
+inside `doSetup`'s display-mode-change notification chain, in WindowServer's
+`extSetDisplayMode`. Publishing there is not wrong by itself — the mutation
+was — but it is worth knowing that Apple's handler treats that context as
+read-only.
+
+**The fix (`D0F419E8`), and what it deliberately does not change.**
+`publish()` now takes `OSDictionary::withDictionary(cur, cur->getCount() + 4)`
+of whatever is published — a copy that is ours and mutable — calls
+`addParameter`/`setParameter` on the copy, hands the copy to
+`display->setProperty(gIODisplayParametersKey, ...)` and releases it. The copy
+is by reference, so `'brig'`, `'rgsc'`, `'ggsc'`, `'bgsc'` and `'vblm'` carry
+forward as the same objects and keep working. A null `cur` is no longer a
+failure (the display may not have published yet) but is still counted, because
+"there was nothing to merge" and "the merge dropped something" are
+indistinguishable afterwards.
+
+`doIntegerSet` had a second instance of the same bug waiting one keypress
+away — it wrote the clamped level back with
+`IODisplay::setParameter(params, ...)`, and `params` there is the published
+dictionary. It now ignores that argument and calls `publish()`, which re-reads
+the level off the chip, so what lands in the dictionary is the register's value
+rather than our idea of it.
+
+`doUpdate` still publishes. Apple's being a no-op is not a reason to stop:
+`displayModeChange` **replaces** the whole property, and its merge loop
+iterates the handler's own old `+0x88` dictionary rather than the registry's,
+so our key would be dropped on every mode change with nothing to re-assert it.
+Re-asserting from `doUpdate` is now safe for the same reason the publish is —
+it no longer mutates a registry collection.
+
+Verified before handover: `hosttest: all passed`; `LINK 97 symbols from the
+system collection, 321 from boot` (319 before, +2 for the dictionary copy);
+`OSDictionary::withDictionary`, `OSDictionary::withCapacity`,
+`IORegistryEntry::setProperty(OSSymbol const*, OSObject*)`,
+`IODisplay::addParameter`, `gIODisplayParametersKey` and
+`gIODisplayBrightnessKey` each bound individually; 0 unresolved; UUID moved
+`C97B9CDD` → **`D0F419E8`**.
+
+**Rule 42, which this cost a panic to learn.** *A collection you did not
+allocate is not yours to write to.* `getProperty` returns a borrowed pointer to
+something the registry owns; IOKit enforces that with a panic rather than a
+return code, so there is no failure path to test and no counter that can
+record it — the first wrong write ends the boot. The question to ask of every
+`OSDictionary*`, `OSArray*` or `OSSet*` before writing to it is **who
+allocated this**, and the answer "I fetched it from a service" means copy it
+first. The mirror of rule 13: not every call that can fail reports failure.
