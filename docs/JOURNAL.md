@@ -50040,3 +50040,32 @@ Stated before the boot:
   the enable path the cause and the next change obvious.
 - `RBFBVBLModeNs` must track wall time since the last switch. If it does not,
   this instrument is wrong and nothing else here is readable (rule 16).
+
+## 2y8a — the plugin UUID I quoted was not the one installed, and the UUID is deterministic
+
+`sudo tools/efi.sh install` reported the EFI carrying **636F3584**, against the
+**1AAABBA1** this session had just built and quoted. Rule 15 caught it before a
+boot was spent reading results against the wrong binary.
+
+**Mechanism, and it is by design.** `efi.sh install` deletes
+`build/plugin/kern_start.o` and `RembrandtGPUPeer.o` and re-runs `make plugin`
+itself, because GNU make 3.81 compares whole seconds and a same-second edit
+could otherwise ship a stale binary. So it relinked; the UUID quoted was from
+this session's earlier link.
+
+**The check that matters passes.** 636F3584 is REPRODUCIBLE from the committed
+tree - three independent relinks (the install's, a `touch`-driven rebuild, and
+a clean-object rebuild) all produce it, and there is no `__DATE__`, `__TIME__`
+or `__TIMESTAMP__` anywhere in `src/plugin`, `src/common` or the Makefile. So
+the installed plugin is exactly what the committed source builds. 2y8 also
+changed no plugin source at all - only `src/fbkext` and `tools/hosttest` - so
+there was no plugin behaviour to lose either way.
+
+**The part that stays open, because deterministic cuts both ways.** Since the
+UUID is content-derived and stable, 1AAABBA1 and 636F3584 differ in CONTENT,
+and this session cannot account for what. Not load-bearing (the installed
+binary reproduces from the committed tree, which is the claim that matters),
+but "unexplained" is not "fine" and a future session should not read a changed
+plugin UUID as proof of changed source without this note. The useful general
+fact in the other direction: the plugin UUID IS a valid identity check on this
+toolchain, which is what makes rule 15 work for it at all.
