@@ -47841,3 +47841,115 @@ Then, and only then, `sudo tools/efi.sh usbpoke off` removes the 10 ms poll
 from the next boot. Rescue for both is the same as every other EFI change:
 `sudo tools/efi.sh restore`, or the Windows procedure in
 `RECOVERY-INTR0.txt` on the EFI.
+
+## 2xw — THE CONFIGURATION IS THE DEFAULT, AND THE ONE-SHOTS ARE INVERTED
+
+No boot. The user's instruction, and the reasoning behind how it was done.
+
+**What it replaces.** A working desktop needed **forty-five** `-rbgpu*` tokens
+in boot-args and **five** NVRAM one-shots (`rbgpu-arm`, `rbgpu-agdc`,
+`rbgpu-iop`, `rbgpu-tick`, `rbgpu-fb`) re-armed by hand before every boot. Each
+of those gates was right when it was written: every one guarded something that
+could cost the desktop, and rule 9 exists because a bad boot that re-arms
+itself is a boot loop. But boots 215-231 all ran the *same* set and the machine
+is a usable accelerated Mac, so the set is no longer an experiment - it is the
+product's configuration, and re-typing it is now the main way to lose a boot to
+a token nobody noticed was missing.
+
+**The table is a copy, not a judgement.** `src/common/rb_defaults.h` holds the
+exact 45 tokens read out of boot 231's own `nvram boot-args`, nothing added and
+nothing dropped. That includes the six instruments (`-rbgpuringprobe`,
+`-rbgpuringdump`, `-rbgpumcprobe`, `-rbgpuaccelprobe`, `-rbgpuschedprobe`,
+`-rbgpuflipprobe`), which cost diag-table slots and nothing else: a boot that
+reads differently from boot 231 should differ in the hardware, not in what we
+can see of it. The known-dangerous args are absent and the hosttest asserts
+each one by name - `-rbgpuagdcearly` (wedges, 2rz), `-rbgpufbmatch` (kills the
+accelerator), `-rbgpupdefix` (the halt returns), `-rbgpumcreg` (hangs),
+`-rbgpufbbacklight` (never booted, 2xs).
+
+**Every entry turns off by a derived negative**, so no new names had to be
+invented and none can be forgotten: `-rbgpufbhubp` -> `-rbgpunofbhubp`, and for
+the two entries that are already negative, `-rbgpunocgcg` -> `-rbgpucgcg`.
+`rb_off_token()` is pure and the hosttest checks the whole namespace with it:
+45 entries, no duplicates, every entry derives a negative, negating twice
+returns the original, and **no derived negative collides with or prefixes any
+other token** - rule 30 applied to our own greps, since the kernel's own parse
+is exact. 18 assertions, four of them on refusal paths (a short buffer empties
+its output rather than truncating into somebody else's token; a token without
+the `-rbgpu` prefix is refused).
+
+**A positive token left in boot-args is now redundant rather than required**,
+which is the property that makes this installable without editing boot-args
+first - the install boot and the boot after it run the same configuration.
+
+**THE ONE-SHOTS ARE INVERTED, NOT DELETED.** `rbgpu_nvram_armed()` reads the
+same five keys in the opposite direction: armed unless the key reads a literal
+`"0"`. The plugin **never writes them any more**, so the 2wj failure mode - a
+key that would not clear - cannot happen to them. One difference is stated
+rather than hidden: when `/options` cannot be read at all the one-shot form
+declined and this one arms, because default-on means an unreadable NVRAM cannot
+hold a disarm, and `arm_why 1` says so.
+
+**WHAT THE ONE-SHOTS WERE ACTUALLY FOR, AND WHAT REPLACES IT.** Their real
+property was that a bad boot could not repeat: the key was consumed *before*
+the dangerous work, so a hang or a panic left it cleared (2dg, which was paid
+for by the 2026-10-12 boot loop). Arming by default gives that up, and 2wj is
+the record of what it costs when there is no way back - boot 196 had to be
+disarmed from **Windows**.
+
+So the key is written the other way round. **`rbgpu-safe` is the boot
+sentinel**: set to `"1"` in the peer's `start()` before anything is armed, and
+overwritten with `"0"` from a `thread_call` 60 s later. Both writes go through
+`setProperty`, the only path 2sr measured as syncing. A boot that reaches the
+clear was alive long enough to be driven; a boot that panics, hangs or is
+power-cycled inside that minute leaves the latch set, and the next boot finds
+it, **comes up stock, and clears it** - so one bad boot costs exactly one stock
+boot and never a trip to another OS. The stock boot clears the latch *before*
+arming anything, which is the order 2dg established.
+
+**The window is a trade and it is stated, not tuned.** A deliberate restart
+inside 60 s is indistinguishable from a boot that did not survive - rule 12 in
+its original form, a user rebooting a black screen and a user rebooting a
+working machine look identical from NVRAM - and it costs one stock boot.
+`-rbgpunosentinel` turns the mechanism off for a session of rapid reboots, and
+then a bad boot is the user's problem again. Two failure paths publish rather
+than guess: `sentinel 3` when `/options` is unreadable (armed and unprotected),
+and `sentinel 0` when `thread_call_allocate` fails - in which case the latch is
+**removed again**, because a latch nothing will clear would make every
+following boot a stock boot.
+
+**The framebuffer's 2wp self-disarm now sets that latch instead of writing the
+user's key.** It used to write `rbgpu-fb=0`, which under the new reading is the
+*user's* durable disarm and would have stayed set until they noticed. One
+writer per key: the user owns `rbgpu-fb`, we own `rbgpu-safe`, and a stuck key
+can then only ever mean "be careful".
+
+**RULE 38 IS A CHECK NOW, NOT A COMMENT.** The framebuffer declines the panel
+on `-rbgpuoff`, `-rbgpustock`, `-rbgpunoownfb`, `rbgpu-fb=0`, the sentinel
+latch, and - the new one - **`rbgpu-arm=0`**. That last one is the gap 2wp
+described and did not close: the framebuffer writes HUBP from
+`setAttribute('amtr')` and from nowhere else, so the panel taken with no
+accelerator underneath freezes on the last frame drawn, *guaranteed*, and the
+accelerator's own durable disarm therefore has to disarm the panel in the same
+boot. `armRefuseWhy` distinguishes all six (2 boot-arg, 3 `rbgpu-fb=0`,
+4 `/options` unreachable and armed anyway, 5 `-rbgpunoownfb`, 6 the latch,
+7 `rbgpu-arm=0`), and `RBFBArmWhy` publishes it on the armed path.
+**A decline cannot publish anything** - there is no service - so it is read
+from outside instead: an `IONDRVFramebuffer` in `ioreg` means we declined, and
+those are the only five reasons it can have been.
+
+**What is NOT covered, said plainly.** The sentinel runs in the peer's
+`start()`, so the hooks installed in `processKernel` have already been decided
+by then and a recovery boot does not undo them. They are the same code every
+boot since 2ks has run, and the latch exists for the display chain, which is
+entirely downstream of that point.
+
+**Also in this change:** `CLAUDE.md` goes from 2 461 lines to 425 - a reference
+card again, with every rule's number preserved because the journal cites them
+by number, and with the boot-arg list replaced by a pointer to
+`rb_defaults.h`, which is the list and is checked by the hosttest.
+`docs/HANDOFF.md` (1 347 lines, stale since 2ry) and `docs/HANDOFF-FULL.md`
+(6 925 lines, stale since 2026-10-05) are **deleted**: everything in them is in
+this journal under its tag, their §7 rules are in `CLAUDE.md`, their §9
+boot-args are now `rb_defaults.h`, and git history holds both files intact.
+The stray `src/plugin/kern_start.cpp.before-rgfix` backup is dropped too.
