@@ -48565,3 +48565,218 @@ wrong way and reading its output as the tool's verdict.** The "unchanged on
 because it reproduced the mistake, which is exactly the known-present case
 rule 26 says to check a search against. Always invoke the suite as the Makefile
 does, or through `make`.
+
+---
+
+## 2xy - the System Settings brightness slider: two answers, not a write
+
+2xs made the panel's duty cycle writable, proved the register sequence against
+Linux, hosttested and mutation-tested it, and published `'brig'` in the
+connection's parameter list. **Nothing ever asked for it.** The live registry
+says why, and it says it without a boot:
+
+```
++-o display0  <class IODisplayConnect>
+  +-o AppleDisplay  <class AppleDisplay>
+        "IODisplayConnectFlags" = <00000000>
+        "IODisplayParameters" = {"bgsc"=..,"rgsc"=..,"vblm"=..,"ggsc"=..}
+```
+
+The IODisplay that matched our connection is plain `AppleDisplay`. The
+brightness slider belongs to `IOBacklightDisplay` / `AppleBacklightDisplay`,
+both of which are defined in IOGraphicsFamily and both of which are present in
+this OS's binary (`strings -a build/re/IOGraphicsFamily` names
+`IOBacklightDisplay`, `AppleBacklightDisplay`, `site.IOBacklightDisplay`,
+`site.AppleBacklightDisplay`). `IOBacklightDisplay::probe` walks its
+framebuffer's connections and takes the first that passes **both**, in order:
+
+```
+getAttributeForConnection(idx, kConnectionFlags, &flags)
+    must succeed AND (flags & kIOConnectionBuiltIn)        // 0x800
+getAppleSense(idx, NULL, NULL, NULL, &displayType)
+    must succeed AND displayType is a panel                // kPanelTFTConnect = 2
+```
+
+`kIOConnectionBuiltIn = 0x00000800` is in the public header
+(`IOGraphicsTypes.h:1104`); `kPanelTFTConnect = 2` is
+`IOMacOSVideo.h:232`, a `csDisplayType` value. We answered 0 to the first and
+declined the second, so the probe returned nothing and `AppleDisplay` took the
+category on its own score. The `IODisplayConnectFlags = <00000000>` in the
+registry is IOGraphics writing down our own answer, which makes it the proof
+that the path is live and that our answer is what closed it.
+
+Both answers are **true statements about this machine that we were simply not
+making.** The panel is built in, and it is a fixed-in-place TFT on the APU's
+eDP - 2xq/2xr established that the removable port is wired to the dGPU. There
+is no sense hardware, so `senseType`, `primary` and `extended` are zero, which
+is the only truthful value for lines that do not exist;
+`kConnectionSupportsHLDDCSense` stays declined in every configuration because
+there is no I2C to answer with.
+
+**Armed by `-rbgpufbbuiltin`, separately from `-rbgpufbbacklight`.** Rule 38
+asks what each half depends on and the two answers differ.
+`kIOConnectionBuiltIn` is read by IOGraphics for more than the slider: the
+display-prefs key, mirroring, and the wrangler's idle dimming. That is a
+larger blast radius than writing a PWM duty cycle. So a boot can arm the match
+without the write - which answers "does `AppleBacklightDisplay` match on this
+machine at all" with no register write in the boot - or the write without the
+match, which is 2xs' own never-booted configuration.
+
+Rule 30: `-rbgpufbbuiltin` shares `-rbgpufbb` with `-rbgpufbbacklight` and
+diverges at the next character, so neither prefixes the other; the hosttest's
+collision check covers the whole namespace and passes with it added.
+
+Rule 14: both answers are counted. `RBFBBlFlagsGets` and `RBFBBlSenseGets`
+separate "the probe never asked" from "it asked and still did not match", and
+`RBFBBlBuiltIn` says which boot this was. Without them a boot that did not
+match and a boot where IOBacklightDisplay never ran look identical.
+
+Neither arg has been booted. `hosttest: all passed`; fbkext links with 80
+symbols from the system collection.
+
+---
+
+## 2xz - "supports Ventura and up" is two claims, and they are now kept apart
+
+The ask was to support every macOS from Ventura. The first thing worth writing
+down is what the tree's state actually was, because it was worse than
+"untested on older OSes":
+
+* `PluginConfiguration` declared **Monterey..Sequoia** while the machine runs
+  **Tahoe (Darwin 25)**. The plugin loaded only because `-lilubetaall` is in
+  this machine's boot-args - a flag that loosens the version check for *every*
+  Lilu plugin, and whose removal would have made this one quietly not load at
+  all. Nothing in the tree would have said why.
+* `tools/re/dscsym.sh` and `tools/re/dscinv.sh` each carried a table of unslid
+  `__TEXT` bases written down on macOS 15. SkyLight's real base here is
+  `0x7FF8091F1000`; the table said `0x7FF807B42000`. dscsym.sh measures the
+  slide every run and says so in a comment - and then subtracted the wrong
+  base from it, handing `atos` an address `0x16AF000` away from the one asked
+  about, confidently. One of dscinv.sh's four entries was even marked
+  `# approximate`.
+* `rbgpu_mtlcave.h` held exactly one OS's addresses. 2xt had **replaced** the
+  macOS 15 row with the macOS 26 one, so the row boot 231 ran existed only in
+  git history.
+
+**The split.** "Support" is two separate claims and conflating them is how a
+wrong address gets written to a chip:
+
+1. **The kext loads and the version-independent half runs.** That is the whole
+   range, Darwin 22 up. Everything this project does by *symbol name* is in
+   this half - routing, solving, the `IOFramebuffer` subclass, the registers,
+   the SMU, the probes - and rule 1 already makes each of those check the name
+   is defined before using it, so a renamed or absent symbol fails safe alone.
+2. **A particular version-dependent artifact has been measured on this OS.**
+   Per OS and per artifact. An address inside the dyld cache, a byte offset
+   into an Apple driver's object, an instruction offset inside an Apple
+   function: none can be inferred from a version number, only measured.
+
+`src/common/rb_osver.h` is the matrix. Rows and what each rests on:
+
+| Darwin | OS | claims | on what evidence |
+|--------|------|--------|-----------------|
+| 22 | Ventura | nothing | no boot of this project has happened there |
+| 23 | Sonoma | nothing | no boot of this project has happened there |
+| 24 | Sequoia | KEXTOFF, MTLCAVE | where every offset was derived; boots 1-231 |
+| 25 | Tahoe | KEXTOFF, MTLCAVE, XHCI | offsets re-measured *in use* by boot 247; cave re-derived (2xt); USB table derived (2xv) |
+
+Tahoe's `KEXTOFF` claim is worth stating precisely: the offsets were **not**
+re-derived for it. Boot 247 is an accelerated desktop on Tahoe running the
+offsets derived on Sequoia, and for an offset that is the only kind of
+evidence that matters. The cave is the opposite - macOS 26 moved the driver
+and its row had to be measured again from scratch.
+
+Rule 14 in version form: "we do not support that OS" and "we have not measured
+that OS" look identical from a log that says nothing. So:
+
+* `rbgpu_stock()` now also means "this OS has no measured offsets". On such an
+  OS the whole default-on table comes up off - a live macOS with the panel
+  declined - and the boot logs one line with the Darwin number in it.
+  `-rbgpuosforce` arms it for the boot that goes and measures.
+* The framebuffer asks the identical question off the identical kernel global
+  (`version_major`), because rule 38 is only satisfied if both halves answer
+  the same way and this half can probe before the plugin runs. It has no Apple
+  object offsets of its own; it honours the gate so the panel is not taken with
+  no accelerator underneath, which is rule 38's own case.
+* `rbgpu_nvram_armed` gains **why 9**, distinct from 5. "The user asked for
+  stock" and "the kext refused to guess at another OS's offsets" are different
+  facts and one code for both is rule 14's failure, not a tidier table.
+* Every boot publishes `os_major`, `os_derived`, `os_forced`, `os_measured`.
+* A Darwin newer than the tree names is deliberately **in** range with an empty
+  claim mask, not refused: a boot that refuses to load teaches nothing.
+* `make osrange` fails the build if the declared Lilu range and the matrix
+  drift apart again. Verified against the failing case, rule 26: flipping the
+  matrix floor to Sonoma makes it print `FAIL rb_osver.h declares
+  Sonoma..Tahoe but ... PluginConfiguration has 0 KernelVersion::Sonoma`.
+
+**The cave became a table.** `src/plugin/mtlcave/darwin24.h` and `darwin25.h`
+hold one row each; `rbgpu_mtlcave.h` is the table and the lookup. Sequoia's
+row was recovered from `8e4d142~1` and sits *beside* Tahoe's; both were checked
+byte-identical to their sources after extraction, all four arrays each.
+
+A row says where to **look**. What authorises a write is still the
+byte-pattern compare `rbgpu_mtlk_place()` does in every single process: read
+the place, write only if the bytes are exactly `cave_find` or already
+`cave_repl`. So a row right for the Darwin major and wrong for the point
+release writes nothing anywhere, and 2r6's verdict says the driver moved with
+the unslid addresses and this boot's slide in the log. **That property is why
+keying per-build addresses on the Darwin major is honest: the key picks a
+candidate, the bytes decide.** An OS with no row at all gets no patch and says
+which case it was - `mtlk_row = 0` for "no row for this OS" against
+`mtlk_match = 0` for "the row missed".
+
+**The generator now derives instead of carrying.** `tools/gen_cavepatch.py`
+held macOS 26's addresses as module constants and printed a header that
+replaced the previous OS's. It now reads everything off the running machine's
+cache: the image, `__TEXT`, `__TEXT,__const`, the function from `LC_SYMTAB`
+with the mangled length prefix **computed** from the name rather than typed
+(rule 5 - the symbol is `__Z31amdMtl_HWL_DetermineSwizzleModeP18AMD...`, and 31
+is `strlen` of the name), the prologue checked against the known bytes *and*
+checked unique in `__TEXT` (rule 26 in both directions, with a distinct message
+for 0 hits and for more than 1), and a 16-aligned zero run in `__const` whose
+48-byte anchor is unique there. `make mtlcave` runs it and names the two edits
+left deliberately by hand.
+
+Run on this machine it reproduced 2xt's by-hand derivation **exactly**:
+
+```
+__TEXT 0x7ffb110d4000   fn 0x7ffb1121622d   cave 0x7ffb1147d710
+cave 163B of 176 reserved; anchor 48B unique in __const; prologue unique in __TEXT
+-> all four byte arrays identical to the header it replaced
+```
+
+Two independent derivations agreeing is the only reason to believe either -
+rule 18 taken the useful way round. It is also what lets a user on Ventura or
+Sonoma have the userspace half of the swizzle fix at all: one command on their
+own machine, no disassembly and no boot.
+
+**Verified against the running machine with no boot spent.**
+`tools/cavecheck.m` now reads the row for its own kernel (`kern.osrelease` via
+sysctl - the same number the kexts key on) and says so when there is none. On
+the live boot 247 desktop:
+
+```
+row: Darwin 25 (Tahoe)
+  slide 0xaf59000
+  CAVE (stage A)     PRESENT
+  DETOUR (stage B)   PRESENT
+VERDICT: cave AND detour present - the fix is live for every process.
+```
+
+`tools/re/dscbase.sh` reads the unslid `__TEXT` base and size out of
+`dyld_info -segments`, so no table can go stale, and dscsym.sh / dscinv.sh both
+take their bases from it. The repaired dscsym.sh reports slide `0xaf59000` -
+**the same slide cavecheck measured independently** - and symbolizes
+`0x7FF8091F1000 -> (in SkyLight)` and `0x7FF805348000 -> (in CoreDisplay)`,
+the latter being the macOS 26 CoreDisplay base CLAUDE.md already recorded.
+
+`tools/hosttest/osver_test.c` pins every claim: Ventura and Sonoma claim
+nothing, the all-or-nothing rule on a multi-bit mask, a newer Darwin loads and
+claims nothing, and the cross-check that an OS claims `RB_OSD_MTLCAVE`
+**exactly** when a cave row exists for it - the one artifact whose claim bit
+and whose data live in different files, which nothing else in the build would
+notice drifting. Adding a bit without a boot behind it now breaks a named test.
+
+`hosttest: all passed`. Nothing here has been booted; the Tahoe path is
+unchanged by construction and the live-machine checks above are what stands in
+for a boot.
