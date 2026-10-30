@@ -39,21 +39,51 @@ KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
                -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
                -I$(MKSDK)/Headers -I$(COMMON) -Wall -Werror -MMD -MP
 
-# 2xt: the sanitizers are ON by default and must stay on - they have caught
-# real parser bugs. But they are an INSTRUMENT, and on macOS 26.7.2 with
-# CommandLineTools 16.4 the ASan RUNTIME is broken: a two-line program that
-# only calls printf dies with SIGILL when built with -fsanitize=address, while
-# the same program built plain runs fine. That made `make plugin` fail with
-# "Illegal instruction: 4" and look exactly like the new backlight code
-# breaking the hosttest, when every assertion in fact passes (rule 16). The
-# real fix is updating CommandLineTools; until then `make SAN=0` runs the same
-# tests unsanitized so a broken runtime cannot block a build. Never commit a
-# change whose only passing run was SAN=0.
-SAN ?= 1
-ifeq ($(SAN),1)
+# 2xt: the sanitizers are ON whenever they WORK, and they have caught real
+# parser bugs, so they are never turned off to make a build pass. But a
+# sanitizer is an INSTRUMENT (rule 16), and on macOS 26.7.2 with
+# CommandLineTools 16.4 the ASan RUNTIME is broken on this machine: a
+# two-line program that only calls printf dies with SIGILL when built with
+# -fsanitize=address, while the same program built plain runs fine. That made
+# every entry point - `make plugin`, `tools/efi.sh install`, `fbload.sh` -
+# fail with a bare "Illegal instruction: 4", which looks exactly like the
+# hosttest failing when in fact every assertion in it passes.
+#
+# So the runtime is PROBED rather than assumed, and a broken one degrades
+# loudly instead of blocking the build. SAN=1 forces it on (and the build
+# then fails if it is broken, which is what you want when checking whether an
+# OS or CLT update fixed it); SAN=0 forces it off. The probe is cached in
+# $(BUILD_DIR)/.san_ok, keyed by the compiler version so a CLT update
+# re-probes by itself; `make clean` drops it.
+SAN ?= auto
+SAN_KEY := $(shell $(CC) --version 2>/dev/null | head -1 | tr -cd 'A-Za-z0-9.')
+ifeq ($(SAN),auto)
+SAN_OK := $(shell \
+  c="$(BUILD_DIR)/.san_ok"; \
+  if [ -f "$$c" ] && [ "$$(head -1 "$$c")" = "$(SAN_KEY)" ]; then \
+    tail -1 "$$c"; \
+  else \
+    mkdir -p "$(BUILD_DIR)" 2>/dev/null; \
+    t="$(BUILD_DIR)/.santest"; \
+    printf 'int main(void){return 0;}\n' > "$$t.c" 2>/dev/null; \
+    if $(CC) -fsanitize=address,undefined "$$t.c" -o "$$t" >/dev/null 2>&1 \
+       && env -u DYLD_INSERT_LIBRARIES "$$t" >/dev/null 2>&1; then r=1; else r=0; fi; \
+    printf '%s\n%s\n' "$(SAN_KEY)" "$$r" > "$$c" 2>/dev/null; \
+    echo "$$r"; \
+  fi)
+else
+SAN_OK := $(SAN)
+endif
+
+ifeq ($(SAN_OK),1)
 HOST_SAN := -fsanitize=address,undefined -fno-sanitize-recover=all
 else
 HOST_SAN :=
+ifeq ($(SAN),auto)
+$(info *** ASan/UBSan runtime is BROKEN on this toolchain ($(SAN_KEY)) - the)
+$(info *** host tests are running UNSANITIZED. They still all have to pass.)
+$(info *** Fix by updating CommandLineTools, then re-check with `make SAN=1`.)
+endif
 endif
 HOST_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -I$(COMMON) $(HOST_SAN)
 
