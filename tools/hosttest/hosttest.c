@@ -32,6 +32,7 @@ int hubp_tests(void);
 int backlight_tests(void);
 int defaults_tests(void);
 int osver_tests(void);
+int drr_tests(void);
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -856,6 +857,7 @@ int main(int argc, char **argv)
     failures += backlight_tests();
     failures += defaults_tests();
     failures += osver_tests();
+    failures += drr_tests();
     test_fuzz();
 
     if (failures) {

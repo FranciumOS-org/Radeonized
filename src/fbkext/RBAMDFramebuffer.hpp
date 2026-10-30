@@ -48,6 +48,12 @@ class RBAMDFramebuffer : public IOFramebuffer {
     friend class RBAMDBacklightParams;
 
 public:
+    void drrRun(void);           /* 2y5: reached from the thread_call thunk */
+    /* 2y5: argOn() lives in RBAMDFramebuffer.cpp's anonymous namespace, so it
+     * is TU-local on purpose. This forwards to it rather than letting another
+     * file keep its own copy of the boot-arg rule - two copies is how two
+     * halves come to disagree about whether a feature is on. */
+    static bool argEnabled(const char *tok);
     /* IOService */
     IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
     bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -310,6 +316,28 @@ private:
     uint64_t           blParmPublished;
     uint64_t           blParmPublishFails;
     uint64_t           blParmNoDict;
+    /* 2y5: the refresh-rate experiment. Opt-in, runs once, reverts itself. */
+    bool               drrArmed;
+    bool               drrDone;
+    bool               drrReverted;
+    uint32_t           drrRefuse;
+    uint32_t           drrLines;
+    uint32_t           drrSecs;
+    uint32_t           drrDelay;
+    uint64_t           drrRuns;
+    uint32_t           drrMhzBefore;
+    uint32_t           drrMhzDuring;
+    uint32_t           drrMhzAfter;
+    uint32_t           drrMinRb;
+    uint32_t           drrMaxRb;
+    uint32_t           drrCtlRb;
+    uint32_t           drrCtl0;
+    uint32_t           drrVTotalLive;
+    uint32_t           drrStep;
+    uint32_t           drrMin0;
+    uint32_t           drrMax0;
+    thread_call_t      drrCall;
+
     /* 2y4: OTG0's timing and DRR group as the firmware left it, read once in
      * blSetup(). The starting point for any refresh-rate change, and the
      * restore values if one is ever written. */
@@ -370,6 +398,9 @@ private:
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */
     void otgTimingReset(void);   /* 2y4 */
+    void drrReset(void);         /* 2y5 */
+    bool drrSetup(void);
+    void drrTeardown(void);
     bool blParamsSetup(void);
     void blParamsTeardown(void);
     uint32_t blCurrentLevel(void);

@@ -49472,3 +49472,126 @@ Built: hosttest all passed with the four new offsets cross-checked, fbkext
 UUID **C7873213-6565-3F13-B6D2-E43DE5B6899A**, plugin **C518C319-7CD5-37B4-A6CD-21127211D39F** (unchanged by 2y4 - `rb_regs.h` is included only
 by src/fbkext, the hosttest and rb_probe.c; all four apparent plugin matches
 were comments, rule 26).
+
+## 2y4 READ (boot 254) — the firmware has DRR off, so the restore state is four zeros
+
+Boot 254, fbkext `C7873213`. **Rule 15 catch: the plugin is still
+`43775C76`, not `C518C319`** - the EFI half of 2y3 was not installed. It
+does not invalidate this reading, and the reason is specific rather than
+hand-waved: 2y3's only plugin-side change was `rb_defaults.h`, and the three
+tokens it adds gate `src/fbkext` behaviour which the fbkext decides from its
+OWN compiled copy of that table. Brightness is default-on this boot regardless,
+and everything below comes from the new fbkext.
+
+| register | value |
+|---|---|
+| `RBFBOtgHTotal` | 2106 |
+| `RBFBOtgVTotal` | 1129 |
+| `RBFBOtgVBlankSE` | 1311820 (start 1100, end 20) |
+| `RBFBOtgVTotalMin` | **0** |
+| `RBFBOtgVTotalMax` | **0** |
+| `RBFBOtgVTotalMid` | **0** |
+| `RBFBOtgVTotalCntl` | **0** |
+
+H_TOTAL, V_TOTAL and V_BLANK_START_END agree exactly with the plugin's
+independent OTG sampler, which is the cross-check that says the fbkext is
+addressing the same registers.
+
+**The firmware has DRR switched off entirely.** MIN_SEL and MAX_SEL both clear,
+so V_TOTAL alone drives the raster and MIN/MAX/MID are untouched zeros. Two
+consequences, both good: there is nothing of the firmware's to preserve, and
+the restore state is **four zeros that were read rather than inferred**. That
+is why `rb_drr_check()` makes a non-zero `V_TOTAL_CONTROL` a REFUSAL rather
+than a case to handle - on a boot or a machine where the firmware IS using DRR,
+what to restore is unknown and fighting it is the wrong move. Rule 37's
+question asked of a register instead of an NVRAM key.
+
+**The write gate corroborates the offsets independently.** None of 0x1b2f,
+0x1b30, 0x1b31, 0x1b32, 0x1b33, 0x1b36 or 0x1b4c is in `rb_dcn_deny.h`,
+against a control of 0x288b which is - so dcn302 and dcn312 agree on the OTG0
+V_TOTAL group and a write there lands on the register we think it does. That
+denylist exists for a different purpose (Apple's dcn302 DAL writing raw dword
+offsets) and answering this question was free.
+
+## 2y5 — the refresh-rate change, built and NEVER BOOTED (`74BCE3CD-1141-323B-8FA7-5FCE023A5A2D`)
+
+`rb_drr.h` holds every decision and `tools/hosttest/drr_test.c` runs all of
+them. The anchor assertion is the one that matters: `rb_drr_mhz(341995117,
+2106, 1129)` must equal the **measured** 143836 mHz, from the registers alone.
+It does, and it inverts: 143836 mHz -> 1129 lines, 60000 mHz -> **2707** lines,
+landing at 59989 mHz - and the 11 mHz shortfall is asserted rather than
+rounded away. 120 Hz is 1353 lines, 90 Hz is 1804.
+
+The gate, each refusal distinguishable (rule 14): `NO_RASTER` (H_TOTAL or
+V_TOTAL zero), `FW_DRR` (V_TOTAL_CONTROL non-zero), `NOT_LONGER` (only
+lengthening the frame is allowed - shortening it would raise the refresh above
+the rate the panel is known to run at, which is a different experiment with a
+different failure mode), `TOO_LONG` (past the 15-bit field; all three totals
+are 0x7FFF, `sh_mask.h`:29331/29356/29359/29362, so one mask covers H and V
+rather than two constants that could drift apart).
+
+**The new assertions were checked to FAIL when the code they guard is broken**,
+as the workflow requires - and the first attempt at that check proved nothing:
+deleting the `ctl != 0` line made `-Werror -Wunused-parameter` reject the
+build, so the test never ran and no FAIL was printed. A compile error is not an
+assertion failing. Rewritten as `ctl == 0xffffffff`, which compiles, the
+build printed exactly `FAIL any non-zero V_TOTAL_CONTROL refuses` and
+`hosttest: 1 FAILED`, and restoring it passed. Rule 16 applied to a control
+rather than to an instrument.
+
+The kext half is `-rbgpufbdrr`, opt-in, asserted OFF by the hosttest, with
+`rbgpudrrlines` (default 2707), `rbgpudrrsecs` (8) and `rbgpudrrdelay`
+(45), all read with the binary-int idiom and bounded (rule 40). It runs **once**
+and reverts itself.
+
+**It is a three-step state machine and the first version was wrong.** That
+version did `IOSleep(drrSecs * 1000)` inside the callout - and our own VBL
+delivery is a thread_call that must fire every 6944 us, on a shared worker
+pool. Occupying a worker for eight seconds to wait out an experiment puts the
+panel's frame clock behind a sleep. So the wait is a deadline on the next step
+instead, and the only blocking left is the bounded ~300 ms poll inside the
+measurement, which is the same busy-wait the plugin's sampler has always done
+once at startup.
+
+Write order is load-bearing in both directions: MIN and MAX first then CONTROL
+on the way in, CONTROL first then MIN/MAX on the way back, so the window where
+a SEL bit is set over a MIN of zero never exists. Step 2 is **armed before step
+1 writes anything**, so if the panel drops sync the thing that puts it back is
+already on the clock. `drrTeardown` reverts too if it catches the experiment
+at step 1, because cancelling the callout would otherwise leave the raster at a
+refresh nothing advertises and nothing will ever undo.
+
+Measurement mirrors 2rn exactly - both endpoints latched ON a FRAME_COUNT edge,
+never over a fixed window - with the poll bound raised from 400 ms to 1.2 s,
+because 16 frames at 60 Hz is 266 ms and the plugin's bound would not have
+covered it. A measurement that fails is a refusal, not a baseline of zero.
+
+**What this is NOT yet:** a display mode. macOS still advertises one mode at
+143.836 Hz and the VBL thread_call still ticks at that rate, so while the
+raster is at 60 Hz the compositor is paced against a rate it is not running at.
+That is exactly why this reverts and why it is a measurement: the mode list and
+the VBL clock have to move with the timing, and none of that is worth building
+before the panel has been shown to accept 2707 lines at all.
+
+One incidental fix: `argOn()` lives in `RBAMDFramebuffer.cpp`'s anonymous
+namespace (opens line 24, closes line 311), so declaring it in the header
+created a SECOND global function and every call site in that file became
+ambiguous. Resolved with a `static bool argEnabled()` member that forwards to
+it, rather than letting src/fbkext keep two copies of the boot-arg rule - two
+copies is how two halves come to disagree about whether a feature is on.
+
+Stated before the boot:
+- `RBFBDrrMhzDuring` near **59989** with `MhzAfter` back at ~143836 is the
+  result: the panel accepts a stretched vertical blank, and a real 60 Hz mode is
+  a matter of wiring it to `setDisplayMode` and the VBL clock.
+- `MhzDuring` still ~143836 with `MinRb`/`MaxRb` reading 2707 means the
+  write landed and the OTG ignored it - the SEL bits are not sufficient and
+  `V_TOTAL_MID` or `OTG_SET_V_TOTAL_MIN_MASK` is the next variable.
+- `MhzDuring` 0 means the raster stopped advancing: the panel did not accept
+  it. `MhzAfter` back at ~143836 then proves the revert works, which is the
+  outcome that makes a second attempt safe to try.
+- `RBFBDrrRefuse` 2 would mean the firmware enabled DRR between boot 254 and
+  this boot; 14 means the write did not read back; 13 means the baseline
+  measurement failed and nothing was written at all.
+- `RBFBDrrStep` 3 with `Reverted` true is a complete run whatever the Mhz
+  values say.
