@@ -40,24 +40,42 @@ is the cheapest proof the new framebuffer is the one running, because only
 
     sudo tools/efi.sh install
     sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
-    sudo kmutil install --update-all --force --allow-missing-kdk --update-preboot
+    sudo cp /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
+            /Library/KernelCollections/AuxiliaryKernelExtensions.kc.bak
+    sudo kmutil create -n aux -a x86_64 \
+        -B /System/Library/KernelCollections/BootKernelExtensions.kc \
+        -S /System/Library/KernelCollections/SystemKernelExtensions.kc \
+        -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
+        -r /Library/Extensions
 
-**`--force` and `--allow-missing-kdk` are not optional on this machine, and
-leaving them off cost three boots (2xy).** Plain
-`kmutil install --update-all` SILENTLY SKIPS the rebuild here:
+**`kmutil install --update-all` is the WRONG TOOL here and three boots went to
+believing it was the right one.** `--update-all` means every collection, so it
+tries to rebuild the boot kernel collection and the system kext collection as
+well, for every kernel variant - and this machine has no KDK for 25G332 and no
+`/System/Library/Kernels/kernel.{debug,development,kasan,research}`. It dies
+there, *before* the auxiliary collection is ever built:
 
-* `--force` - "rebuild even if none of the contents has changed". `cp -R` into
-  an existing bundle rewrites the files inside and leaves the bundle
-  DIRECTORY's mtime alone (it read `Oct 29 00:20` while the binary inside read
-  `Oct 30 11:57`), and kmutil's change detection believed the bundle.
-* `--allow-missing-kdk` - there is no KDK for 25G332 on this machine and
-  `/Library/Developer/KDKs` does not exist. The handoff used to say those KDK
-  warnings were noise for the debug/kasan variants. That stopped being true:
-  the run also printed `unable to create RELEASE extension manager`, and the
-  release collection is the one that matters.
-* `--update-preboot` forces `personalize_macos` and `kcditto` afterwards.
+    failed to build release collection:
+      Unable to resolve dependencies: 'com.apple.driver.SCSIDeviceSpecifics'
+      names a dependency on 'com.apple.kpi.mach', which was not found.
+
+That is an APPLE kext failing against an APPLE KPI, which is the tell that the
+rebuild being attempted is not the one we want. `-n aux` builds only the
+auxiliary collection and LINKS against the boot and system collections already
+on disk, so no KDK and no kernel variant is involved.
+
+Keep the backup. `AuxiliaryKernelExtensions.kc` is what the next boot loads,
+and `sudo cp` the `.bak` back over it if a build produces something worse.
+
+Two false leads recorded so that they are not re-run: `--force` and
+`--allow-missing-kdk` do not help, and neither does parking
+`HoRNDIS.kext` - it is missing from the collection, and it does declare
+`com.apple.kpi.unsupported`, but it is NOT what fails the build and the error
+never mentioned it. That was an inference from "which bundle is missing" made
+while only the tail of the error was in hand, and it was wrong.
 
 ### VERIFY THE COLLECTION BEFORE REBOOTING - this is the whole lesson
+
 
     kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
         --show-kext-uuids | grep rembrandt
