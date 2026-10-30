@@ -153,7 +153,48 @@ mechanism. Say it that narrowly; the mechanism is not established.
 
 ---
 
-## THE LATE PATH IS BUILT — plugin `6233FE63`, NOT YET BOOTED
+## 2xu IS CONFIRMED WORKING ON HARDWARE (boot 227, plugin `6233FE63`)
+
+The client-context retry **works**, and it proves the whole 2xu reading:
+
+    mtlk_syms      63 = 0x3F   all six symbols resolved
+    mtlk2_on        1          armed
+    mtlk2_cmatch    1          cave pattern FOUND (not 0xFFFF - the read works)
+    mtlk2_cwrite    0          KERN_SUCCESS
+    mtlk2_cverify   1          verified from the target's own memory
+    mtlk2_dmatch/dwrite/dverify  1 / 0 / 1
+    mtlk2_patched   9          nine processes, ZERO failures
+    mtlk_patched    0 of 1536  the EXEC path still fails exactly as diagnosed
+
+So 2xt's addresses were right, and the exec-time context was the entire
+problem. **The desktop and ordinary apps are fixed** (user-confirmed).
+
+### The remaining case, and it is the limitation that was stated in advance
+
+**Electron apps (the the assistant app) are still wrong.** `getPreferredSwizzleMode2`
+is **per surface**, so a process was patched only *after* its first surface
+was laid out — and Chromium allocates one long-lived glyph atlas at
+GPU-process startup and reuses it for the process's whole life. One wrong
+surface is therefore permanently wrong text in that app while everything
+around it is correct. Relaunching the app does **not** help: the new process
+hits the same ordering.
+
+**FIX BUILT, NOT YET BOOTED — plugin `E53C20EF`.** Route
+`IOGraphicsAccelerator2::newUserClient` (IOAcceleratorFamily2, from
+`processAccelFamily`) and call `rbgpu_mtlk_try_late()` **before** the original.
+That fires when a process OPENS the accelerator, before it can have allocated
+anything, and it is still the client's own thread. Rules 1/2/3 checked:
+external in `__TEXT`; prologue `55 48 89 e5 41 57 ...` with no rel8/rel32 in
+the first five bytes; not routed anywhere else in the plugin.
+
+**Read after the boot:** `mtlk2_uc_hk` **1** = the route took (0 = it did not,
+and nothing else that boot means anything); `mtlk2_uc` = how many user clients
+opened; `mtlk2_patched` should now exceed boot 227's 9 and the the assistant app
+should render correctly. `mtlk2_read` 0xFFFF would mean `newUserClient` is not
+on the client's thread after all, in which case go back to the
+per-surface hook, which is proven, and accept one bad surface per process.
+
+### The earlier state — plugin `6233FE63`
 
 **Built, hosttest green, never run on hardware.** `rbgpu_mtlk_try_late()` in
 `src/plugin/kern_start.cpp`, called from `hooked_swizmode_2la` — the existing
@@ -270,7 +311,8 @@ Committed on `main`, nothing uncommitted:
 
 Built artifacts and their UUIDs:
 
-    plugin  build/out/RembrandtGPU.kext      6233FE63  (the LATE PATH, not yet booted)
+    plugin  build/out/RembrandtGPU.kext      E53C20EF  (newUserClient hook, not yet booted)
+            boot 227 ran             6233FE63  (late path, CONFIRMED WORKING)
             previously                      FCEA5698  (2xt only; was in the EFI for boot 226)
     fbkext  build/out/RBAMDFramebuffer.kext  7F312381  (NOT installed; see below)
 
