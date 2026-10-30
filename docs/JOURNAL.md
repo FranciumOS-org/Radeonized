@@ -48780,3 +48780,92 @@ notice drifting. Adding a bit without a boot behind it now breaks a named test.
 `hosttest: all passed`. Nothing here has been booted; the Tahoe path is
 unchanged by construction and the live-machine checks above are what stands in
 for a boot.
+
+---
+
+## 2xs/2xy boot 249 - the backlight works end to end, and the slider's gap is a NAME
+
+Boot 249: the full default configuration, accelerated (`RBFBArmWhy = 10`,
+`RBFBAmtrSets = 3130`, `RBFBHubpWrites = 3131`, `RBFBVBLFires = 22687`),
+`-rbgpufbbacklight` and `-rbgpufbbuiltin` both in boot-args, plugin `43775C76`
+loaded. **The framebuffer loaded was still `353A1D24`** - the new `EBF63EB0`
+was sitting in `/Library/Extensions` but the auxiliary collection had not been
+rebuilt, so this boot measures 2xs with 2xy absent. Rule 39: that is the
+configuration these readings come from and 2xy is not in it. (`strings` on the
+installed bundle says `rbgpufbbuiltin` 1 hit; on the loaded one, 0.)
+
+**2xs' first boot ever, and it works.**
+
+```
+RBFBBlArmed Yes   RBFBBlReady Yes   RBFBBlRefuse 0   RBFBBlPendTimeouts 0
+RBFBBlOtgCtl 70145 = 0x11201        <- OTG0_CONTROL, exactly CLAUDE.md's value
+RBFBBlPeriod 790432   RBFBBlFloor 5120   RBFBBlLevel0 22784
+```
+
+`RBFBBlOtgCtl` reading `0x00011201` is the cheap proof that the BAR5 map and
+the DMU segment are right: it is the same value the OTG sampler measured
+independently, from a different mapping, in a different kext.
+
+The 2xs register sequence round-trips. Three writes across this boot, each one
+written and read back bit-identical:
+
+| | level (u16.16) | count written | count read back |
+|---|---|---|---|
+| firmware's own, written back unchanged | 22784 | 22250 | 22250 |
+| via blset 0.60 | ~41370 | - | - |
+| via blset 0.2924 | 22786 | **22252** | **22252** |
+
+The last row is the one that matters: 22252 is a value the firmware never set,
+chosen by us, written to `BL_PWM_CNTL`'s active-count field and read back
+identical, with zero `RBFBBlPendTimeouts`. `RBFBBlCntl` as captured decodes to
+`0xC0000000 | 22250` - the enable bits plus the firmware's own duty - which is
+why the first write was a no-op: `rb_bl_level_from_pwm` converted the
+firmware's level straight back to the count already there. **A no-op round trip
+proves the store executed and nothing about the panel changing** (rule 20 in
+register form), which is why the effect needed its own instrument.
+
+**The instrument: `tools/blset.m`, `make blset`.** It asks for the change
+through `IODisplaySetFloatParameter`, the documented entry point and the same
+chain the System Settings slider uses - the one 2xs read end to end. No boot,
+no kext, no arming.
+
+**And it found the slider's actual gap, which is not the class match.**
+
+```
+6 parameter(s): bgsc rgsc vblm brig ownr ggsc
+found it under the key "brig"
+brightness: value 22784, min 5120, max 65536   (29.2 % of range, floor 7.8 %)
+
+set via "brightness"(0.6) -> 0xe00002c7 (kIOReturnUnsupported)
+set via "brig"(0.6)       -> 0x0 (OK)
+```
+
+`IOFramebufferParameterHandler` builds that dictionary from the FourCCs we
+returned in the `'parm'` list, turning each 4-byte attribute into a
+**4-character key**. So our parameter is literally named `"brig"`, while
+`kIODisplayBrightnessKey` is the string `"brightness"`. The reverse direction
+still works - `doIntegerSet` byte-swaps only the first four characters of the
+name, so both map to `'brig'` - but a client that looks the parameter up BY
+NAME finds nothing under `"brightness"`, and gets `kIOReturnUnsupported`.
+
+A framebuffer cannot fix this from its side: the `'parm'` list carries four
+bytes per entry and the key string is Apple's to construct from them. On a real
+Mac the full-name `"brightness"` parameter is published by `IOBacklightDisplay`
+itself, not by the framebuffer - which is the same conclusion 2xy reached from
+the other end, and makes 2xy necessary rather than merely cosmetic.
+
+**A reading I got wrong, in the most ordinary way available.** Immediately
+after the 0.60 set I read `RBFBBlSets` and it was still 1, and I said the write
+had never reached the kext. It had. These properties are published from the
+periodic VBL path, not on change, so between publishes the registry holds the
+previous values - and a counter that **has not moved yet** is not a counter
+that did not move. Seconds later it read 2, then 3. Rule 31 says to publish
+with `setProperty` and read `ioreg` instead of `IOLog`; the addendum it needed
+is that a periodically-published property is *stale by design*, so a counter
+must be read twice, or after at least one publish interval, before "it did not
+change" is a result. My own tool printed the warning to check the kext counters
+and I then read them too early.
+
+Net: **2xs is done and confirmed on hardware** - the mechanism, the arithmetic,
+the floor and the effect. 2xy is still unmeasured, now for the second boot
+running, because the auxiliary collection was never rebuilt.
