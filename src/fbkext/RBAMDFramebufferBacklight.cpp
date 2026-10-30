@@ -92,6 +92,23 @@ static const uint32_t kRbDmuSeg2Bl = 0x34c0;
 #define RB_BL_OTG0_DW        0x1b41u
 #define RB_BL_OTG_MASTER_EN  0x1u
 
+/* 2y4: OTG0's timing and DRR group, READ-ONLY. dcn_3_1_2_offset.h:8767-8776
+ * and 0x1b2a/0x1b36/0x1b4c, base_idx 2; the same values rb_regs.h carries and
+ * the hosttest cross-checks. Read here because the framebuffer already has
+ * this exact BAR5 map and has already proved the segment with OTG0_CONTROL,
+ * so the values cost one boot that was happening anyway rather than one of
+ * their own. Nothing writes them: changing a refresh rate means writing
+ * V_TOTAL_MIN/MAX, and what the current values of this group ARE is the thing
+ * that has to be known before a restore can be written at all. */
+#define RB_OTG0_DW_H_TOTAL        0x1b2au
+#define RB_OTG0_DW_V_TOTAL        0x1b2fu
+#define RB_OTG0_DW_V_TOTAL_MIN    0x1b30u
+#define RB_OTG0_DW_V_TOTAL_MAX    0x1b31u
+#define RB_OTG0_DW_V_TOTAL_MID    0x1b32u
+#define RB_OTG0_DW_V_TOTAL_CNTL   0x1b33u
+#define RB_OTG0_DW_V_BLANK_SE     0x1b36u
+#define RB_OTG0_DW_FRAME_COUNT    0x1b4cu
+
 /* Bounded wait for BL_PWM_GRP1_REG_UPDATE_PENDING to clear. Linux waits
  * 1 us x 10000; this runs on IOGraphics' gated workloop, so it is bounded
  * far tighter and a timeout is COUNTED rather than retried (rule 14: a path
@@ -100,6 +117,24 @@ static const uint32_t kRbDmuSeg2Bl = 0x34c0;
  * not frame-synced - a frame-synced update would need ~7 ms, which is why
  * this is worth stating rather than assuming. */
 #define RB_BL_PENDING_SPINS  2000u
+
+/* 2y4: zeroed from start(), not from blSetup(), because blSetup() does not
+ * run at all on a `-rbgpunofbbacklight` boot and these are published
+ * unconditionally - uninitialised memory in a published property is
+ * indistinguishable from a reading (rule 14, and rule 19's "publish the value
+ * you refused"). Zero is a value this group can never legitimately hold: a
+ * live raster cannot have H_TOTAL 0. */
+void RBAMDFramebuffer::otgTimingReset(void)
+{
+    otgHTotal = 0;
+    otgVTotal = 0;
+    otgVTotalMin = 0;
+    otgVTotalMax = 0;
+    otgVTotalMid = 0;
+    otgVTotalCntl = 0;
+    otgVBlankSE = 0;
+    otgFrameCount0 = 0;
+}
 
 bool RBAMDFramebuffer::blSetup(void)
 {
@@ -148,6 +183,20 @@ bool RBAMDFramebuffer::blSetup(void)
     /* Gate 1: are we addressing DCN at all? OTG0's master-enable, which the
      * firmware set when it lit this panel. Published either way. */
     blOtgCtl = regs[kRbDmuSeg2Bl + RB_BL_OTG0_DW];
+
+    /* 2y4: sampled here, before gate 1's refusal, so they are published even
+     * on a boot where the backlight declines - a refusal tells us nothing
+     * about the raster, and these are the numbers a refresh-rate change has
+     * to start from. */
+    otgHTotal      = regs[kRbDmuSeg2Bl + RB_OTG0_DW_H_TOTAL];
+    otgVTotal      = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL];
+    otgVTotalMin   = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL_MIN];
+    otgVTotalMax   = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL_MAX];
+    otgVTotalMid   = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL_MID];
+    otgVTotalCntl  = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL_CNTL];
+    otgVBlankSE    = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_BLANK_SE];
+    otgFrameCount0 = regs[kRbDmuSeg2Bl + RB_OTG0_DW_FRAME_COUNT];
+
     if ((blOtgCtl & RB_BL_OTG_MASTER_EN) == 0u) {
         blRefuse = 5;
         map->release();

@@ -49386,3 +49386,89 @@ Built: hosttest all passed, `LINK 99 symbols from the system collection, 321
 from boot`, fbkext UUID **F2DCD77C-8082-3E2E-828F-23C168C5865A**, plugin UUID **C518C319-7CD5-37B4-A6CD-21127211D39F**. Both halves change here
 because `rb_defaults.h` is compiled into both (rule 38, rule 15: this install
 is two artifacts, not one).
+
+## 2y4 — the refresh-rate question, and the read it needs first
+
+The ask: switch between 60 Hz and 144 Hz. Today `getDisplayModeCount()`
+returns **1** and `getInformationForDisplayMode` hardcodes
+`kRefreshRate1616`, so macOS has no refresh-rate UI at all - there is nothing
+to choose between. That is the whole reason no such control exists, and it is
+not a capability question.
+
+**The model is confirmed against the live raster before any of it is used.**
+From this boot's own read-only OTG sampler: `agdc_tim_clk` 341995117,
+`agdc_otg_htot` 2106, `agdc_otg_vtot` 1129, measured
+`agdc_otg_mhz` **143836**. And clk/(htot*vtot) = **143.836 Hz** - the model
+reproduces the measurement to the digit, which is what makes it safe to invert.
+
+`OTG_V_BLANK_START_END` decodes to start 1100, end 20, so the active window
+is **1080 lines and is defined independently of V_TOTAL**. Changing V_TOTAL
+therefore stretches the vertical blank and leaves the active raster, the sync
+widths, the pixel clock and the DP link untouched. Inverting the model:
+
+| target | V_TOTAL | actual | lines added |
+|---|---|---|---|
+| 60 Hz | **2707** | 59.9892 | +1578 |
+| 90 Hz | 1804 | 90.0171 | +675 |
+| 120 Hz | 1353 | 120.0228 | +224 |
+| current | 1129 | 143.8360 | 0 |
+
+The field is 13 bits, so 2707 fits with room to spare.
+
+**The register group decides the method, and it rules out the obvious one.**
+`dcn_3_1_2_offset.h` names more than `rb_regs.h` carried:
+
+    regOTG0_OTG_V_TOTAL          0x1b2f   (already in the table)
+    regOTG0_OTG_V_TOTAL_MIN      0x1b30
+    regOTG0_OTG_V_TOTAL_MAX      0x1b31
+    regOTG0_OTG_V_TOTAL_MID      0x1b32
+    regOTG0_OTG_V_TOTAL_CONTROL  0x1b33
+
+Writing `OTG_V_TOTAL` directly is what Linux does during a **modeset**, with
+the pipe locked - which is not available here, because the panel is live and
+the desktop is on it. `V_TOTAL_MIN`/`MAX` with the `MIN_SEL`/`MAX_SEL`
+bits of `V_TOTAL_CONTROL` (`dcn_3_1_2_sh_mask.h:29367-29382`) are the
+variable-refresh path and are **designed to be written while the raster
+scans**; pinning MIN == MAX fixes the frame length. So the method is the one
+the hardware provides for exactly this, not a modeset we cannot perform.
+
+**Which makes the next step a READ, not a write.** The current values of
+MIN/MAX/MID/CONTROL are unknown - the firmware may already have DRR enabled -
+and a restore cannot be written before the thing being restored has been read.
+So 2y4 adds the four to `rb_regs.h` (cited, and cross-checked by the
+hosttest's offset table against 0x34C0 + dword) and reads OTG0's timing plus
+the DRR group in `blSetup()`, which already has this exact BAR5 map and has
+already proved the segment with OTG0_CONTROL. **Nothing is written.**
+`rb_dcn_deny.h` remains the gate that has to be opened deliberately before
+anything is.
+
+Published as `RBFBOtgHTotal`, `RBFBOtgVTotal`, `RBFBOtgVTotalMin`,
+`RBFBOtgVTotalMax`, `RBFBOtgVTotalMid`, `RBFBOtgVTotalCntl`,
+`RBFBOtgVBlankSE`, `RBFBOtgFrameCount0`. Sampled **before** gate 1's
+refusal, so a boot where the backlight declines still reports the raster, and
+zeroed from `start()` by `otgTimingReset()` rather than from `blSetup()` -
+because `blSetup()` does not run at all on a `-rbgpunofbbacklight` boot and
+an uninitialised published property is indistinguishable from a reading (rule
+14 / rule 19). Zero is a value this group can never legitimately hold: a live
+raster cannot have H_TOTAL 0.
+
+The plan after the read, each step with its own verdict: pin MIN == MAX == 2707
+behind an opt-in boot-arg with a **self-reverting thread_call**, measure the
+result with the FRAME_COUNT edge latch (2rn) rather than a fixed window, and
+revert unconditionally after a few seconds - so the failure mode of a panel
+that will not accept 2707 lines is a black screen that ends by itself rather
+than one that needs a power cycle. Only then expose a second display mode and
+wire `setDisplayMode` to the timing change plus the VBL clock, since the
+advertised refresh and our VBL cadence have to move together or the compositor
+is paced against a raster it is not on.
+
+A reason to want this beyond battery: the desktop currently holds ~82
+transactions/s against a 143.836 Hz raster (2xi/2xo, still open). A genuine
+60 Hz mode is fully achievable at that throughput, so it is also the cleanest
+experiment on the frame-rate ceiling - if 60 Hz holds a solid 60, the ceiling
+is demand or pacing rather than a hard gate.
+
+Built: hosttest all passed with the four new offsets cross-checked, fbkext
+UUID **C7873213-6565-3F13-B6D2-E43DE5B6899A**, plugin **C518C319-7CD5-37B4-A6CD-21127211D39F** (unchanged by 2y4 - `rb_regs.h` is included only
+by src/fbkext, the hosttest and rb_probe.c; all four apparent plugin matches
+were comments, rule 26).

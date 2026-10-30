@@ -447,6 +447,11 @@ static void test_dcn_timing_regs(void)
         { "OTG0_V_BLANK_START_END", 0x1b36 },
         { "OTG0_V_SYNC_A",          0x1b37 },
         { "OTG0_V_SYNC_A_CNTL",     0x1b38 },
+        /* 2y4: the DRR group, dcn_3_1_2_offset.h:8769-8776 */
+        { "OTG0_V_TOTAL_MIN",       0x1b30 },
+        { "OTG0_V_TOTAL_MAX",       0x1b31 },
+        { "OTG0_V_TOTAL_MID",       0x1b32 },
+        { "OTG0_V_TOTAL_CONTROL",   0x1b33 },
         { "HUBP0_SURFACE_PITCH",    0x0607 },
         { "HUBP0_SURFACE_CONTROL",  0x061a },
         { "BL_PWM_CNTL",            0x2f19 },

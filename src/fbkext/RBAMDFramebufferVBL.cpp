@@ -172,6 +172,18 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBBlParmPublishFails", blParmPublishFails, 64);
     setProperty("RBFBBlParmNoDict", blParmNoDict, 64);
     setProperty("RBFBBlParmSets", blParmSets, 64);
+    /* 2y4: OTG0's timing as the firmware left it, plus the DRR group. Live
+     * each publish for FRAME_COUNT's sake is NOT what this is - these are the
+     * blSetup() snapshot, so they do not move, and the refresh they imply is
+     * clk/(H_TOTAL * V_TOTAL). */
+    setProperty("RBFBOtgHTotal", (uint64_t)otgHTotal, 32);
+    setProperty("RBFBOtgVTotal", (uint64_t)otgVTotal, 32);
+    setProperty("RBFBOtgVTotalMin", (uint64_t)otgVTotalMin, 32);
+    setProperty("RBFBOtgVTotalMax", (uint64_t)otgVTotalMax, 32);
+    setProperty("RBFBOtgVTotalMid", (uint64_t)otgVTotalMid, 32);
+    setProperty("RBFBOtgVTotalCntl", (uint64_t)otgVTotalCntl, 32);
+    setProperty("RBFBOtgVBlankSE", (uint64_t)otgVBlankSE, 32);
+    setProperty("RBFBOtgFrameCount0", (uint64_t)otgFrameCount0, 32);
     setProperty("RBFBBlParmSetsPerc", blParmSetsPerc, 64);
     setProperty("RBFBBlParmSetsLin", blParmSetsLin, 64);
     setProperty("RBFBBlParmSetsUsable", blParmSetsUsable, 64);
