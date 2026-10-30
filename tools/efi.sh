@@ -11,6 +11,8 @@
 #   sudo tools/efi.sh vbios          # after that boot: extract the 680M VBIOS, turn SysReport off
 #   sudo tools/efi.sh sysreport-off
 #   sudo tools/efi.sh bootarg add|remove ARG   # e.g. msgbuf=1048576 (bigger kernel log buffer)
+#   sudo tools/efi.sh usbintr0 on|off|status  # the XHCI interrupter-0 patches
+#   sudo tools/efi.sh usbpoke on|off          # XHCIPoke.kext (the 10 ms polling fallback)
 #
 # Only a person runs this (see docs/RULES.md). Every change first saves the EFI's
 # config.plist to logs/efi-backups/<time>/; edits go through
@@ -21,12 +23,13 @@ set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo tools/efi.sh ${1:-status}" >&2; exit 1; }
 cmd="${1:-}"
-case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg) ;; *)
+case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg|usbintr0|usbpoke) ;; *)
     sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 editor="$root/tools/efi_config.py"
+usbeditor="$root/tools/xhci_intr0.py"
 kext="$root/build/out/RembrandtGPU.kext"
 user="${SUDO_USER:-root}"
 
@@ -79,6 +82,7 @@ backup() {
 }
 
 edit() { python3 "$editor" "$config" "$@"; }
+usbedit() { python3 "$usbeditor" "$config" "$@"; }
 
 show_status() {
     edit status
@@ -137,6 +141,41 @@ bootarg)
     backup
     edit bootarg "$op" "$arg"
     sync
+    ;;
+usbintr0)
+    # Force every Transfer TRB to interrupter 0, the only one that can raise an
+    # interrupt on this machine's single-MSI xHCI controllers. XHCIPoke.kext is
+    # the polling fallback for the same defect; leave it enabled for the first
+    # boot after this, then compare its counters (see docs/HANDOFF-NEXT.md).
+    case "${2:-}" in
+    status) usbedit status ;;
+    on)
+        python3 "$usbeditor" verify || { echo "not installing: the patch table does not match this kernel" >&2; exit 1; }
+        backup
+        usbedit add
+        sync
+        usbedit status
+        echo "done. Reboot, then read: ioreg -rl -c XHCIPoke | grep -o '\"Controllers\".*'"
+        ;;
+    off)
+        backup
+        usbedit remove
+        sync
+        usbedit status
+        ;;
+    *) echo "usage: sudo tools/efi.sh usbintr0 on|off|status" >&2; exit 2 ;;
+    esac
+    ;;
+usbpoke)
+    case "${2:-}" in
+    on|off)
+        backup
+        usbedit poke "$2"
+        sync
+        usbedit status
+        ;;
+    *) echo "usage: sudo tools/efi.sh usbpoke on|off" >&2; exit 2 ;;
+    esac
     ;;
 sysreport-on)
     if [ -d "$efi/SysReport" ]; then

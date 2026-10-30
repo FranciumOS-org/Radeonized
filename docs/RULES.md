@@ -82,6 +82,27 @@ is stale too (it fails safe the same way, and 2t7 measured gate 1 as won
 unpatched, so it is not load-bearing). Re-derive before any further static read
 of CoreDisplay, SkyLight or IOPresentment.
 
+**USB IS THE SAME DEFECT AS 2xt, ONE SUBSYSTEM OVER (2xv).** The five xHCI
+controllers each expose **one** MSI vector, so only interrupter 0 can raise an
+interrupt, and `AppleUSBXHCI` targets interrupters 1 and 2 for transfer events;
+a ~2 s watchdog collects them instead. `XHCIPoke.kext` + `xhcipoke=10` polls
+every controller every 10 ms as the workaround, and that is what boot 231 is
+running (`i1 erdpChg` 107-485 on the three controllers with devices, `ipSeen 0`
+on all five - the poke has never once found `IMAN.IP` set). The real fix is
+nine OpenCore patches zeroing every Transfer TRB's Interrupter Target field;
+the 2026-10-09 set was `MinKernel 24.0.0` and went inert on the upgrade, with
+three of its eight Find patterns no longer matching the rebuilt binary.
+Re-derived and verified in `tools/xhci_intr0.py` (table + config edits, refuses
+a table that does not match the running kernel),
+`tools/re/xhci_intr0_derive.py` (re-derives it from the boot collection) and
+`tools/xhci_intr0_test.py` (15 assertions, four mutations). Arm with
+**`sudo tools/efi.sh usbintr0 on`**, which leaves the poke enabled so its
+counters are the instrument, then `sudo tools/efi.sh usbpoke off` once
+`i1 erdpChg` is measured stuck at 1. **`ipSeen` is not expected to move** - the
+poke samples at 10 ms. Not patched, deliberately:
+`AppleUSBXHCIPort::interruptOccurred`'s `0x400000`/`0x800000`, which are bits
+of a port state word, not a TRB.
+
 **HDMI IS THE FULL PROJECT - MEASURED, NOT ASSUMED (2xq, boot 221).** Booted
 with the display attached and `-rbgpufbotgany` armed: `RBFBHubpOtg1/2/3` all
 read **768 = 0x300**, so **the GOP does not light HDMI on this machine** and
@@ -1811,6 +1832,13 @@ sites, and it selects the whole IOPresentment world rather than an allocator.
   measurement** (`--bench 2`); ONE queue, never `--queues`, which is a known
   wedge trigger. **The user installs it** (`/usr/local/libexec`,
   `/Library/LaunchDaemons`); the assistant never does. 2wy/2wz.
+- `tools/xhci_intr0.py` + `tools/re/xhci_intr0_derive.py` — the USB
+  interrupter-0 patch table and its derivation (2xv). `verify` checks every
+  Find against the running system's `AppleUSBXHCI` and the install refuses a
+  table that does not match, so an OS update leaves an inert patch set
+  impossible to install rather than silently present. Tests:
+  `tools/xhci_intr0_test.py`. **The user runs `sudo tools/efi.sh usbintr0 on`
+  / `usbpoke off`; the assistant never touches the EFI.**
 - `tools/hosttest/` — the probe against a simulated chip + parser fuzzing,
   ASan/UBSan. `make kext` runs it first; never load a kext whose hosttest
   fails. Add a case whenever `src/common` changes, and check the new test

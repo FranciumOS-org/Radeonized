@@ -27,6 +27,64 @@ stops `init()` running, so such a boot is not a control for the init path).
 
 ---
 
+## 2xv — USB: THE SAME DEFECT AS 2xt, IN A DIFFERENT SUBSYSTEM. READY TO ARM.
+
+**The machine's USB runs on a 10 ms polling workaround right now.** Each of the
+five xHCI controllers exposes **one** MSI vector, so only interrupter 0 can
+raise an interrupt, and `AppleUSBXHCI` puts transfer events on interrupters 1
+and 2 — where nothing can signal them, so a ~2 s watchdog collects them.
+`XHCIPoke.kext` (`xhcipoke=10` in boot-args) polls instead. The real fix is
+nine OpenCore patches forcing every Transfer TRB's Interrupter Target to 0.
+
+**Why it is broken again**: the 2026-10-09 patch set is `MinKernel 24.0.0 /
+MaxKernel 24.99.99` and the machine is Darwin 25.6.0, so it went inert on the
+macOS 26 upgrade — and three of its eight Find patterns no longer match the
+rebuilt binary anyway. Re-derived, verified, nine sites (one is new:
+`AppleUSBXHCISparseRequest::prepare`). Full reading in `docs/JOURNAL.md` 2xv.
+
+**ARM IT — the first boot is free, USB cannot get worse:**
+
+    sudo tools/efi.sh usbintr0 on      # verifies against this kernel, then adds
+    # reboot
+    ioreg -rl -c XHCIPoke | grep -o '"Controllers" = (.*)'
+
+The patches go in as Darwin 25 only; the Darwin 24 set stays for a rollback to
+macOS 15; **`XHCIPoke.kext` stays enabled**, so its counters are the
+instrument. Boot 231's baseline, for the differential:
+
+    XHC3  i1 erdpChg 284     XHC0  i1 erdpChg 107     XHC1  i1 erdpChg 485
+    eintSeen 407-566 per controller, eintClears matching, ipSeen 0 on all five
+    XHC4 / XHC2: i1 erdpChg 1   (no devices — the negative controls)
+
+* **`i1 erdpChg` stuck at 1 on XHC0/XHC1/XHC3, with `i0 erdpChg` climbing =
+  the patches applied.** `i0` is the control that the window was long enough.
+* `eintSeen` / `eintClears` should fall sharply — the controller's own handler
+  now services EINT first.
+* **`ipSeen` is NOT expected to move.** The poke samples at 10 ms; a real
+  interrupt is serviced in microseconds, so `IMAN.IP` reads 0 whenever it
+  looks. Do not read `ipSeen 0` as "nothing changed".
+* `i1 erdpChg` still climbing = they did not apply. There is **no OpenCore log
+  on disk** (`Misc -> Debug -> Target` is 3, no file bit), so this counter is
+  the only in-boot evidence either way.
+
+Then, once that reads right:
+
+    sudo tools/efi.sh usbpoke off      # drops the 10 ms poll from the next boot
+
+Undo either with `sudo tools/efi.sh usbintr0 off` / `usbpoke on`, or
+`sudo tools/efi.sh restore`, or the Windows procedure in `RECOVERY-INTR0.txt`
+on the EFI.
+
+**If a future OS update breaks it again**: `python3 tools/re/xhci_intr0_derive.py`
+re-derives the whole table from the running system's boot collection and
+checks it; paste the new Find/Replace pairs into `SITES` in
+`tools/xhci_intr0.py`, bump `MIN_KERNEL`/`MAX_KERNEL`, run
+`python3 tools/xhci_intr0_test.py`. `usbintr0 on` refuses a table that does not
+match the running kernel, so an inert patch set cannot be installed silently
+again.
+
+---
+
 ## 2xt — FIXED, AND PROVEN. Do not re-open this.
 
 `AMDRadeonX6000MTLDriver` moved and was rebuilt:
