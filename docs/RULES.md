@@ -119,7 +119,15 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness.** Both halves are built and neither has been booted.
+- **Brightness.** 2xs is **DONE, boot 249** — the parameter is published, the
+  duty cycle is written and reads back bit-identical, and `make blset` changes
+  it from userspace with no boot. What is left is the System Settings slider,
+  and the gap is a NAME: our parameter is keyed `"brig"` because
+  `IOFramebufferParameterHandler` builds the key from the 4-byte FourCC, while
+  `kIODisplayBrightnessKey` is `"brightness"`, which answers
+  `kIOReturnUnsupported`. A framebuffer cannot fix that from its side — the
+  full-name parameter is `IOBacklightDisplay`'s to publish, which is what
+  makes **2xy necessary**. 2xy is still unmeasured.
   `-rbgpufbbacklight` writes the PWM duty cycle (2xs); `-rbgpufbbuiltin`
   answers `kConnectionFlags` with `kIOConnectionBuiltIn` and `getAppleSense`
   with `kPanelTFTConnect`, the two things `IOBacklightDisplay::probe` requires
@@ -370,7 +378,12 @@ The numbering is cited all over the journal — **keep the numbers**.
 31. **`IOLog` is not an instrument** — in `src/fbkext` or in the plugin.
     32 554 kernel-sender lines reached one boot's log and not one was ours.
     `setProperty` it and read `ioreg -rl -c <class>`, or publish a diag key.
-    [2sv, 2xm]
+    **And what you then read is published PERIODICALLY, so it is stale by
+    design: a counter that has not moved YET is not a counter that did not
+    move.** Read it twice, or after at least one publish interval, before
+    "it did not change" is a result — boot 249 had `RBFBBlSets` still reading
+    1 immediately after a write that had in fact landed, and it read 2 seconds
+    later. [2sv, 2xm, 2xs]
 32. Read a `char*[]` table's **length** table too, and check the slot count
     against the bound in the code. An enum value of 0 is a value; an unwritten
     field is an absence that looks the same. [2v8]
