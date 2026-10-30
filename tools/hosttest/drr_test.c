@@ -109,9 +109,20 @@ int drr_tests(void)
      * Anchored on boot 255, which is a different and stronger anchor than the
      * rest of this file: these are the numbers from the boot where the write
      * WORKED. Measured 143843 mHz before, 60025 during at 2707 lines, 143821
-     * after. The before/after pair bounds this instrument's own noise at
-     * 22 mHz on an unchanged raster, and that is the tolerance every
-     * comparison below is allowed - not a figure picked to make a test pass.
+     * after. The before/after pair bounds this instrument's SHORT-TERM noise
+     * at 22 mHz, and that is the tolerance the comparison below is allowed.
+     *
+     * NOT run-to-run noise, and boot 256 is the correction: it measured the
+     * same unchanged raster at 143765, which is 78 mHz - 3.5x that band - off
+     * boot 255. Two measurements 8 s apart bound jitter within one run and say
+     * nothing about variation across boots; 0.054 % is the shape of
+     * DisplayPort spread-spectrum clocking, which modulates the link clock by
+     * design. So every constant below is correct FOR BOOT 255'S RASTER and is
+     * not a property of the panel, which is exactly why the kext derives the
+     * line count at runtime from its own measurement instead of using 2707:
+     * boot 256 computed 2705 and landed at 60.004 Hz, where a hardcoded 2707
+     * would have given 59.96. The derivation is self-correcting; the number
+     * is not. Rule 41, asked of a measurement rather than an address.
      */
     CHECK(rb_drr_clk_from_mhz(B255_BEFORE, DRR_HTOTAL, DRR_VTOTAL) == B255_CLK,
           "the pixel clock comes from the measurement, not from a register");

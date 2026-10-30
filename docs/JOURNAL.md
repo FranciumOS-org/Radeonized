@@ -49812,3 +49812,76 @@ Stated before the boot:
 - If WindowServer dislikes two modes, the symptom is a boot with no desktop,
   and the recovery costs nothing: the boot sentinel makes the next boot stock,
   or remove `-rbgpufbmodes`. That is the whole reason it is opt-in.
+
+## 2y6 DONE on hardware (boot 256) — 60 Hz is a mode the user can pick, and the compositor is paced for it
+
+fbkext `A5479DEA-1219-3793-8C8A-9673DF7CE010` loaded, `rbgpu-boot` **256**,
+`rbgpu-safe` 0, `-rbgpufbmodes` in boot-args and `-rbgpufbdrr` removed.
+`RBFBDrrArmed` No with `RBFBDrrRefuse` **10** confirms the experiment stood
+down because its boot-arg is absent - NOT via the new mutual-exclusion code 27,
+which is the distinction those two numbers exist to make. Plugin still
+`43775C76`, now five milestones stale; it cannot affect this reading (the mode
+table is entirely src/fbkext) but it is recorded, because rule 15 is about the
+habit.
+
+    RBFBModeArmed     Yes      RBFBModeCur          101
+    RBFBModeCount       2      RBFBModeLastAsked    101
+    RBFBModeRefuse      0      RBFBModeSwitches       1
+    RBFBModeBaseMhz 143765     RBFBModeApplies        3
+    RBFBModeClkHz 341826303    RBFBModeMinRb       2705
+    RBFBModeHTotal0  2106      RBFBModeMaxRb       2705
+    RBFBModeVTotal0  1129      RBFBModeCtlRb          3
+    RBFBModeLines60  2705      RBFBModeMhz60      60004
+    RBFBModeRate60 3932422     RBFBModePeriod60 16665556
+
+    RBFBVBLPeriodNs 16665556   RBFBVBLRetunes         1
+
+**The one number that distinguishes this milestone from 2y5**:
+`RBFBVBLPeriodNs` is 16665556, identical to `ModePeriod60`, with `Retunes` 1.
+The frame clock moved with the timing. A mode switch where the period had NOT
+moved would have been boot 255 with a nicer UI, and it was stated in advance as
+the failure this milestone existed to prevent.
+
+**Independent corroboration, from outside our own instrument.**
+`system_profiler SPDisplaysDataType` reports **`1920 x 1080 @ 60.00Hz`**. That
+is macOS stating its own mode, not a property of ours read back to us, which is
+the control the whole 2y5/2y6 pair wanted - every other number here is
+ultimately our own arithmetic about our own write.
+
+All five derived values re-derive exactly from this boot's own three inputs
+(143765, 2106, 1129), and the derived clock round-trips to V_TOTAL 1129.
+`ModeApplies` 3 against `Switches` 1 is the documented shape: the compositor
+asked twice more for the mode it was already in, which it does on wake and on
+reconfigure, and counting those separately is what keeps Switches meaningful.
+
+**A CLAIM OF MINE THAT THIS BOOT DISPROVES, and it matters.** 2y6 asserted
+22 mHz as "what this sampler can resolve", taken from boot 255's before/after
+pair. Boot 256 measured the same unchanged raster at **143765** - 78 mHz, or
+3.5x that band, off boot 255's 143843. Two measurements 8 s apart bound JITTER
+WITHIN ONE RUN and say nothing about variation across boots. 0.054 % is the
+shape of DisplayPort spread-spectrum clocking, which modulates the link clock
+by design. The hosttest comment is corrected: its constants are correct for
+boot 255's raster and are not properties of the panel.
+
+**And that is precisely why the derivation is load-bearing rather than
+decorative.** This boot computed **2705** lines, not 2707, and landed at
+60.004 Hz. A hardcoded 2707 - which is exactly what `-rbgpufbdrr`'s
+`rbgpudrrlines` default is - would have scanned this boot at 59.96 Hz. Still
+fine, but right by luck. Deriving the line count from the same measurement that
+sets the clock is self-correcting: whatever the clock is doing on a given boot,
+the lines chosen for it land on 60.00. Rule 41 asked of a measurement instead
+of an address: **which boot was this measured on, and is that the one
+running?** - and the structural answer is to re-measure rather than to record a
+better number.
+
+A consequence to hold onto rather than fix: the advertised 16.16 rate is
+derived per boot, so the mode's refresh will vary by a few mHz between boots
+(60.004 here, 59.992 by boot 255's clock). Harmless - it is below what the
+Displays panel renders - but it means `RBFBModeRate60` is not a constant and a
+future reading should not treat a changed value as a finding.
+
+**Still unexercised on hardware: the switch BACK to 143.83 Hz.** The reverse
+path is covered by the host retune test in both directions and by
+`modeTeardown`, but no boot has yet asked for mode 100 after mode 101
+(`Switches` is 1, not 2). That is the next cheap reading and needs no new
+build.
