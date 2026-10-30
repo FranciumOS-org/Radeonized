@@ -143,6 +143,28 @@ table and refuses to install one that does not match the running kernel;
   `'brig'` in the dictionary is stale by design: it belongs to
   `IOFramebufferParameterHandler`'s own dictionary, so do not read it as the
   current level. `./build/out/blset <0..1>` still drives it from the shell.
+- **Refresh rate — the panel accepts 60 Hz, measured (2y5, boot 255).** Writing
+  `OTG0_V_TOTAL_MIN`/`MAX` with the `MIN_SEL`/`MAX_SEL` bits of
+  `V_TOTAL_CONTROL` changed the live raster from 143843 mHz to **60025** at
+  2707 lines and the revert put 143821 back, **with no black screen and no link
+  retrain** - because `OTG_V_BLANK_START_END` (1311820: start 1100, end 20)
+  pins the 1080-line active window independently of V_TOTAL, so a longer
+  V_TOTAL is a longer vertical blank and nothing else. `OTG_V_TOTAL` itself is
+  Linux's *modeset* path and wants the pipe locked; MIN/MAX is the
+  variable-refresh path, designed to be written while scanning. The firmware
+  has DRR off (MIN/MAX/MID/CONTROL all **0**, boot 254), so the restore state
+  was *read* rather than inferred - and `rb_drr_check` REFUSES on a non-zero
+  `V_TOTAL_CONTROL`, because then the restore values are unknown.
+  **The pixel clock is derived, not read:** it comes from the DP PLL and this
+  project has never located it, but `clk = mHz * H_TOTAL * V_TOTAL` =
+  342 011 761 Hz from boot 255's own three measurements, and the hosttest makes
+  it round-trip back to V_TOTAL 1129 - a derived clock that reproduces its own
+  input. **2y6 turns it into a mode** (`-rbgpufbmodes`, opt-in): two modes, 60 Hz
+  advertised at what 2707 lines actually gives (**59992 mHz**) rather than at
+  the 60000 asked for, and `setDisplayMode` moves the timing **and** the VBL
+  period together - `rb_drr.h` derives the 16.16 rate from the line count and
+  the period from that rate, so there is one rate per mode instead of three
+  expressions that can drift. NEVER BOOTED.
 - **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
   established whether that is demand-limited or still gated (2xi/2xo).
 - **The wedge**, an independent second defect: work submitted that never
@@ -519,7 +541,11 @@ to a field** (2q9/2qa, which saved a boot twice over in 2s3).
 - **`getPDEValue` returns flags only** — the address is ORed in by its caller.
   Never hook it to correct an address. [2ko]
 - The panel: 1920x1080, `H_TOTAL` 2106, `V_TOTAL` 1129, pixel clock
-  **341 987 984 Hz**, **143.83 Hz** measured. OTG0 is already running
+  **341 987 984 Hz** - and **342 011 761 Hz** derived from boot 255's own
+  measurement as mHz * H_TOTAL * V_TOTAL, 0.007 % apart, the derived one being
+  the one that round-trips back to V_TOTAL 1129 - **143.83 Hz** measured.
+  `V_BLANK_START_END` is 1311820 (start 1100, end 20), which is why V_TOTAL can
+  be changed without touching the active raster. OTG0 is already running
   (`OTG0_CONTROL = 0x00011201`, OTG1-3 at 0x300 = off, DMCUB 4.0.15.47), DMU
   segment 2 = **0x34c0**, BAR5 is 512 KB. Measure the refresh by latching both
   endpoints on an `OTG0_FRAME_COUNT` edge, never over a fixed window (2rn).
@@ -557,6 +583,13 @@ prints which NVRAM keys would disarm a half.
 `-rbgpuosforce` (2xz - arms the default-on table on an
 OS none of the measured offsets came from; a safety gate's override is never
 default-on),
+`-rbgpufbmodes` (2y6 - the
+timing write itself is measured working, but this advertises a SECOND display
+mode, and `getDisplayModeCount()` has returned 1 since 2sl with every boot read
+against that; 2xx is what a WindowServer that dislikes its framebuffer costs.
+Mutually exclusive with `-rbgpufbdrr`, checked in `drrSetup()` rather than
+documented, because the experiment would see our own `V_TOTAL_CONTROL` and
+refuse with "the firmware owns DRR"),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbmatch` (spoofs
 `device-id` and **kills the accelerator**), `-rbgpupdefix` (composes with the
 upstream fix and the halt returns), `-rbgpufbvramrange` (hypothesis dead,

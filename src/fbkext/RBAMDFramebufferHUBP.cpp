@@ -266,7 +266,7 @@ void RBAMDFramebuffer::hubpProgram(uint64_t mc)
      * which rb_hubp_hold_notready() treats as already expired (asserted). */
     {
         uint64_t two = 0;
-        nanoseconds_to_absolutetime(kVBLPeriodNs * 2, &two);
+        nanoseconds_to_absolutetime((vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast) * 2, &two);
         hubpFlipDeadline = mach_absolute_time() + two;
     }
 

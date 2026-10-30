@@ -17,7 +17,7 @@ static const char *const known[] = {
     "-rbgpuoff", "-rbgpustock", "-rbgpuarm", "-rbgpunolinear", "-rbgpumtlkoff",
     "-rbgpumtlknolate", "-rbgpufbmatch", "-rbgpuagdcearly", "-rbgpuagdcpolicy",
     "-rbgpumcnew", "-rbgpumcreg", "-rbgpufbbacklight", "-rbgpufbbuiltin",
-    "-rbgpufbblparm", "-rbgpufbdrr",
+    "-rbgpufbblparm", "-rbgpufbdrr", "-rbgpufbmodes",
     "-rbgpufbnocrumb",
     "-rbgpufbvramrange", "-rbgpufbvramrangeall", "-rbgpunosentinel",
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",
@@ -145,6 +145,21 @@ int defaults_tests(void)
      * panel will even sync to 2707 lines. */
     CHECK(!rb_default_on("-rbgpufbdrr"),
           "-rbgpufbdrr stays OFF - it writes OTG timing on a live panel");
+    /* 2y6. The WRITE is no longer the new risk - boot 255 measured it working.
+     * ADVERTISING is: getDisplayModeCount() has returned 1 since 2sl and every
+     * boot since has been read against that, so a second mode changes what
+     * WindowServer sees before any user has asked for anything. 2xx is the
+     * standing lesson on what a WindowServer that dislikes its framebuffer
+     * costs to diagnose. */
+    CHECK(!rb_default_on("-rbgpufbmodes"),
+          "-rbgpufbmodes stays OFF - it changes the mode list WindowServer "
+          "sees at startup, which no boot has yet done");
+    {
+        char off[64];
+        rb_off_token("-rbgpufbmodes", off, sizeof(off));
+        CHECK(!strcmp(off, "-rbgpunofbmodes"),
+              "and its derived negative is the usual one");
+    }
     CHECK(!rb_default_on("-rbgpuosforce"),
           "-rbgpuosforce stays OFF - a default-on override of a safety gate is not an override");
     CHECK(!rb_default_on(""), "the empty token is not on");
