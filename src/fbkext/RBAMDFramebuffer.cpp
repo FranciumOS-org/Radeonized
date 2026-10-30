@@ -121,6 +121,26 @@ bool argOn(const char *tok)
     return PE_parse_boot_argn(off, buf, sizeof(buf)) == 0;
 }
 
+bool keyReadsZero(IORegistryEntry *options, const char *var, bool *present);
+
+/* 2xx: does a "0" in this key mean the user disarmed us, or is it the value
+ * one of our own pre-2xw builds wrote when it spent a one-shot by overwrite?
+ * `rb_key_disarms` in rb_defaults.h holds the rule, and the plugin asks it
+ * the same question with the same inputs - rule 38 is only satisfied if both
+ * halves answer identically, and the framebuffer may well probe BEFORE the
+ * plugin's migration has run. */
+bool keyDisarms(IORegistryEntry *options, const char *var)
+{
+    bool zero = keyReadsZero(options, var, nullptr);
+    bool gen  = options->getProperty(RB_GEN_KEY) != nullptr;
+
+    if (zero && !gen && !rb_key_disarms(var, 1, 0)) {
+        LOG("%s reads \"0\" but " RB_GEN_KEY " is absent, so that is a spent "
+            "pre-2xw one-shot and not a disarm (2xx); ignoring it.", var);
+    }
+    return rb_key_disarms(var, zero ? 1 : 0, gen ? 1 : 0) != 0;
+}
+
 bool keyReadsZero(IORegistryEntry *options, const char *var, bool *present)
 {
     OSObject *val = options->getProperty(var);
@@ -187,7 +207,7 @@ bool armedOnce(void)
      * last drawn - guaranteed, not merely possible. It happened after boot
      * 197. The accelerator's own durable disarm is `nvram rbgpu-arm=0`, so
      * that key has to decline the panel too, in the same boot. */
-    if (keyReadsZero(options, "rbgpu-arm", nullptr)) {
+    if (keyDisarms(options, "rbgpu-arm")) {
         LOG("rbgpu-arm reads \"0\", so the accelerator will not arm; declining "
             "the panel as well (rule 38 - the panel with no accelerator "
             "underneath freezes on the last frame).");
@@ -195,7 +215,7 @@ bool armedOnce(void)
         options->release();
         return false;
     }
-    if (keyReadsZero(options, "rbgpu-fb", nullptr)) {
+    if (keyDisarms(options, "rbgpu-fb")) {
         LOG("rbgpu-fb reads \"0\"; declining the panel. That is the durable "
             "disarm - re-arm with `sudo nvram -d rbgpu-fb`.");
         armRefuseWhy = 3;

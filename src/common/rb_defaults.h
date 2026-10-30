@@ -128,4 +128,72 @@ static inline int rb_off_token(const char *tok, char *out, size_t n)
     return 1;
 }
 
+/* 2xx: TELLING OUR OWN "0" APART FROM THE USER'S.
+ *
+ * 2xw inverted the five NVRAM one-shots: `rbgpu-<x>=0` is now a durable
+ * disarm and the plugin never writes those keys. But two of them were
+ * consumed by OVERWRITE before 2xw - `rbgpu_nvram_consume_oneshot_ow` wrote
+ * a literal "0" into the key as the way of spending it (rbgpu-fb in 2wj,
+ * rbgpu-tick in 2xg). So on any machine that ever ran an armed pre-2xw boot
+ * those two keys already hold exactly the value the new reader treats as "the
+ * user turned this off", and the first 2xw boot came up with the scheduler
+ * tick disarmed and the panel declined: boot 236's own record reads
+ * `tick_armed=0 tick_oneshot=3`, why 3 being "the key reads 0".
+ *
+ * Nothing in the VALUE can separate the two cases - a hand-typed
+ * `sudo nvram rbgpu-tick=0` stores the same byte. So they are separated by
+ * GENERATION instead. `rbgpu-gen` is written once, by the first 2xw+ boot
+ * that gets far enough to write it; before it exists, a "0" in one of the two
+ * overwrite-consumed keys is our own spent one-shot and is ignored, and after
+ * it exists every "0" is the user's and is obeyed. The other three keys
+ * (`rbgpu-arm`, `rbgpu-agdc`, `rbgpu-iop`) were consumed by REMOVAL, so a "0"
+ * in one of them was always hand-written and is obeyed either way - which the
+ * live machine confirms: arm/agdc/iop read "1", tick/fb read "0".
+ *
+ * Rule 37's question, asked the other way round: what does a stale value
+ * written by our own earlier build look like to the new reader? */
+#define RB_GEN_KEY     "rbgpu-gen"
+#define RB_GEN_CURRENT "1"
+
+static const char *const rb_legacy_zero_keys[] = {
+    "rbgpu-tick",   /* 2xg: consumed by overwrite before the first tick armed */
+    "rbgpu-fb",     /* 2wj: consumed by overwrite so a disarm could not stick */
+};
+#define RB_LEGACY_ZERO_COUNT \
+    ((int)(sizeof(rb_legacy_zero_keys) / sizeof(rb_legacy_zero_keys[0])))
+
+/* 1 if a literal "0" in `var` could have been written by our own pre-2xw
+ * consume-by-overwrite path rather than by the user. */
+static inline int rb_legacy_zero_key(const char *var)
+{
+    int i;
+
+    if (!var) {
+        return 0;
+    }
+    for (i = 0; i < RB_LEGACY_ZERO_COUNT; i++) {
+        if (rb_streq(var, rb_legacy_zero_keys[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The whole decision, in one place because the plugin and the framebuffer are
+ * separately armed and must answer it identically (rule 38).
+ *   reads_zero  - the key exists and its first byte is '0'
+ *   gen_present - RB_GEN_KEY exists in /options
+ * Returns 1 if the key disarms this feature. */
+static inline int rb_key_disarms(const char *var, int reads_zero,
+                                 int gen_present)
+{
+    if (!reads_zero) {
+        return 0;
+    }
+    if (gen_present) {
+        return 1;
+    }
+    return !rb_legacy_zero_key(var);
+}
+
 #endif /* RB_DEFAULTS_H */

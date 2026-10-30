@@ -13,6 +13,11 @@
 
 #include "RembrandtGPUPeer.hpp"
 #include "rb_defaults.h"
+
+// 2xx: the one-time migration off the pre-2xw consume-by-overwrite values.
+// Defined with the rest of the arming gate, far below; called from start()
+// before anything reads an NVRAM key for a decision.
+static uint32_t rbgpu_gen_migrate(void);
 #include "vbios_data.h"
 
 #define super IOService
@@ -527,6 +532,10 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // processKernel ran before this point and are NOT covered - they are the
     // same code every boot since 2ks has run, and the latch exists for the
     // display chain, which is all downstream of here.
+    // 2xx: correct the two keys a pre-2xw boot left holding "0" and write
+    // the generation key, before anything reads a key for a decision.
+    rbgpu_gen_migrate();
+
     rbgpu_sentinel_begin();
 
     // 2xw: publish the verdict for the OTHER kext to read.
@@ -1818,7 +1827,106 @@ void rbgpu_nvram_note(const char *var, const char *text) {
 // and it is still the documented rescue.
 static int g_rbStock      = -1;   // -1 not decided, 1 stock, 0 armed
 static int g_rbSafeLatch  = -1;   // 1 the latch was set when the peer looked
+static int g_rbGenPresent = -1;   // -1 not looked, 1 RB_GEN_KEY exists
 static thread_call_t g_rbSentinelCall = nullptr;
+
+// 2xx: /options, cached, for the generation key and the sentinel.
+static IORegistryEntry *rbgpu_options(void) {
+    if (!g_rbgpuOptions) {
+        g_rbgpuOptions = IORegistryEntry::fromPath("/options", gIODTPlane);
+    }
+    return g_rbgpuOptions;
+}
+
+// 2xx: does RB_GEN_KEY exist? Its PRESENCE is the whole signal - the value is
+// there only so a human reading `nvram -p` can see which generation wrote it.
+bool rbgpu_gen_present(void) {
+    if (g_rbGenPresent < 0) {
+        IORegistryEntry *options = rbgpu_options();
+        if (!options) {
+            // Unreadable /options cannot hold a disarm either (why 1 above),
+            // so the answer that changes nothing is "not present".
+            return false;
+        }
+        g_rbGenPresent = options->getProperty(RB_GEN_KEY) != nullptr ? 1 : 0;
+    }
+    return g_rbGenPresent == 1;
+}
+
+// 2xx: the one-time migration off the pre-2xw consume-by-overwrite values.
+//
+// Two keys hold a literal "0" that our own older builds wrote as the way of
+// spending a one-shot, and 2xw's reader treats that as the user's disarm. The
+// generation rule already ignores those, so this is what makes the rule stop
+// being needed: rewrite the stale values, then write the generation key.
+//
+// The ORDER is the whole safety property and it is the 2dg order again: the
+// keys are corrected FIRST and RB_GEN_KEY is written LAST, so a boot that
+// dies in the middle leaves the generation key absent and the next boot still
+// ignores the stale zeros. Nothing here can disarm anything - every write
+// moves a key from "0" to "1", which is the armed direction - so it is safe
+// to run on a stock boot too, and it does, because a stock boot is exactly
+// the boot that most needs the next one to come up clean.
+//
+// A disarm the user types AFTER this runs is obeyed: the key will read "0"
+// with RB_GEN_KEY present, and rb_key_disarms says yes.
+static uint32_t rbgpu_gen_migrate(void) {
+    IORegistryEntry *options = rbgpu_options();
+    uint32_t fixed = 0;
+
+    if (!options) {
+        rbgpu_diag_set_num("gen", 3);   // /options unreachable
+        return 0;
+    }
+    if (options->getProperty(RB_GEN_KEY)) {
+        g_rbGenPresent = 1;
+        rbgpu_diag_set_num("gen", 1);   // already migrated, nothing to do
+        return 0;
+    }
+
+    for (int i = 0; i < RB_LEGACY_ZERO_COUNT; i++) {
+        const char *var = rb_legacy_zero_keys[i];
+        bool zero = false;
+        if (OSObject *val = options->getProperty(var)) {
+            if (auto data = OSDynamicCast(OSData, val)) {
+                zero = data->getLength() >= 1 &&
+                       *static_cast<const char *>(data->getBytesNoCopy()) == '0';
+            } else if (auto str = OSDynamicCast(OSString, val)) {
+                zero = str->isEqualTo("0");
+            }
+        }
+        if (!zero) {
+            continue;
+        }
+        if (auto one = OSString::withCString("1")) {
+            options->setProperty(var, one);
+            one->release();
+            fixed++;
+            rbgpu_log("2xx: `%s` held the \"0\" a pre-2xw boot wrote when it "
+                      "spent the one-shot; rewriting it to \"1\" so it stops "
+                      "reading as a disarm.", var);
+        }
+    }
+
+    if (auto gen = OSString::withCString(RB_GEN_CURRENT)) {
+        options->setProperty(RB_GEN_KEY, gen);
+        gen->release();
+    }
+    if (auto sync = OSString::withCString("now")) {
+        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+        sync->release();
+    }
+    // Read the generation key back: a migration that did not land has to say
+    // so, because the rule above keeps working and the next boot repeats this
+    // (rule 14 - the write and the silent failure must not look the same).
+    bool landed = options->getProperty(RB_GEN_KEY) != nullptr;
+    g_rbGenPresent = landed ? 1 : 0;
+    rbgpu_diag_set_num("gen", landed ? 2 : 0);
+    rbgpu_diag_set_num("gen_fixed", fixed);
+    rbgpu_log("2xx: migration %s, %u stale key(s) rewritten",
+              landed ? "written" : "FAILED to read back", fixed);
+    return fixed;
+}
 
 // Stock means "behave as though none of our tokens were in boot-args". It is
 // set by `-rbgpustock`, by `-rbgpuoff`, and by the sentinel finding its latch.
@@ -1868,6 +1976,8 @@ bool rbgpu_arg(const char *tok) {
 //   3 the key reads "0" - disarmed by hand
 //   5 stock (`-rbgpustock` / `-rbgpuoff`)
 //   6 the boot sentinel's latch was set, so the previous boot did not survive
+//   8 the key reads "0" but RB_GEN_KEY is absent, so that "0" is our own
+//     pre-2xw consume-by-overwrite artifact and not a disarm (2xx)
 bool rbgpu_nvram_armed(const char *var, uint32_t *why) {
     auto out = [why](uint32_t v) { if (why) *why = v; };
     if (rbgpu_stock()) {
@@ -1886,19 +1996,29 @@ bool rbgpu_nvram_armed(const char *var, uint32_t *why) {
         }
         g_rbgpuOptions = options;
     }
+    bool zero = false;
     if (OSObject *val = options->getProperty(var)) {
         if (auto data = OSDynamicCast(OSData, val)) {
-            if (data->getLength() >= 1 &&
-                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
-                out(3);
-                return false;
-            }
+            zero = data->getLength() >= 1 &&
+                   *static_cast<const char *>(data->getBytesNoCopy()) == '0';
         } else if (auto str = OSDynamicCast(OSString, val)) {
-            if (str->isEqualTo("0")) {
-                out(3);
-                return false;
-            }
+            zero = str->isEqualTo("0");
         }
+    }
+    if (zero) {
+        // 2xx: our own pre-2xw builds wrote this exact value when they spent
+        // a one-shot by overwrite, so it only counts as a disarm once the
+        // generation key exists. See the note in rb_defaults.h.
+        if (rb_key_disarms(var, 1, rbgpu_gen_present() ? 1 : 0)) {
+            out(3);
+            return false;
+        }
+        rbgpu_log("2xx: `%s` reads \"0\" but " RB_GEN_KEY " is absent, so that "
+                  "is a spent pre-2xw one-shot and not a disarm; arming. "
+                  "`sudo nvram %s=0` after this boot disarms it for real.",
+                  var, var);
+        out(8);
+        return true;
     }
     out(0);
     return true;
@@ -2147,74 +2267,15 @@ bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why) {
 // change to the one above because that one is load-bearing for four shipped
 // one-shots and this is the first caller whose failure mode is a PANIC.
 //
-// `why` codes are deliberately the same as the removal form's, so a reader
-// does not have to know which helper produced them:
-//   0 armed and consumed    1 /options unreachable
-//   2 variable absent       3 variable present but a literal "0"
-//   4 armed, but the overwrite did not take - the next boot is armed too
-bool rbgpu_nvram_consume_oneshot_ow(const char *var, uint32_t *why) {
-    auto out = [why](uint32_t v) { if (why) *why = v; };
-    IORegistryEntry *options = g_rbgpuOptions;
-    if (!options) {
-        options = IORegistryEntry::fromPath("/options", gIODTPlane);
-        if (!options) {
-            out(1);
-            return false;
-        }
-        g_rbgpuOptions = options;   // retained by fromPath; kept for the boot
-    }
-
-    OSObject *val = options->getProperty(var);
-    if (!val) {
-        out(2);
-        return false;
-    }
-    // `nvram var=1` stores an OSData, so check the first byte rather than
-    // expecting a string - the 2cs lesson, unchanged.
-    if (auto data = OSDynamicCast(OSData, val)) {
-        if (data->getLength() >= 1 &&
-            *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
-            out(3);
-            return false;
-        }
-    } else if (auto str = OSDynamicCast(OSString, val)) {
-        if (str->isEqualTo("0")) {
-            out(3);
-            return false;
-        }
-    }
-
-    if (auto zero = OSString::withCString("0")) {
-        options->setProperty(var, zero);
-        zero->release();
-    }
-    if (auto sync = OSString::withCString("now")) {
-        options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
-        sync->release();
-    }
-    // Still an in-memory read-back - it proves the overwrite took in the
-    // registry, not that flash accepted it. What differs from the removal
-    // form is that the path taken is the one measured to sync, so this
-    // reading is worth something it was not worth before (2wj).
-    bool cleared = false;
-    if (OSObject *v = options->getProperty(var)) {
-        if (auto d = OSDynamicCast(OSData, v)) {
-            cleared = d->getLength() >= 1 &&
-                      *static_cast<const char *>(d->getBytesNoCopy()) == '0';
-        } else if (auto t = OSDynamicCast(OSString, v)) {
-            cleared = t->isEqualTo("0");
-        }
-    }
-    rbgpu_log("Peer: one-shot `%s` overwritten with \"0\" %s", var,
-              cleared ? "and read back as \"0\" (next boot comes up normally)"
-                      : "but the read-back FAILED - REFUSING to run, because "
-                        "the next boot would be armed too. Clear it by hand: "
-                        "sudo nvram <var>=0");
-    out(cleared ? 0 : 4);
-    // Fail closed, exactly as the removal form does: `why = 4` means
-    // "armed, but we did NOT run".
-    return cleared;
-}
+// 2xx: `rbgpu_nvram_consume_oneshot_ow` lived here. It spent a one-shot by
+// OVERWRITING the key with a literal "0", which is precisely the value
+// 2xw's reader treats as the user's durable disarm - so every machine that
+// ran an armed pre-2xw boot came up with the scheduler tick off and the
+// panel declined. It has no callers left and is deleted rather than left
+// unused, so nothing in this plugin can write that value again (rule 6:
+// "redundant" and "inert" differ). Its behaviour is in git history at
+// 288a87b. `rbgpu_nvram_consume_oneshot` stays - it consumes by REMOVAL,
+// so it cannot leave a value behind, and `rbgpu-mcreg` still uses it.
 
 void rbgpu_gate_nvram(uint32_t stage, const char *what) {
     IORegistryEntry *options = g_rbgpuOptions;
