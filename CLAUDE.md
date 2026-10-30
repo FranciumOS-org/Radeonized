@@ -164,7 +164,16 @@ table and refuses to install one that does not match the running kernel;
   the 60000 asked for, and `setDisplayMode` moves the timing **and** the VBL
   period together - `rb_drr.h` derives the 16.16 rate from the line count and
   the period from that rate, so there is one rate per mode instead of three
-  expressions that can drift. NEVER BOOTED.
+  expressions that can drift. **DONE on hardware, boot 256**: the Displays panel
+  offers the choice, `system_profiler` independently reports
+  `1920 x 1080 @ 60.00Hz`, and `RBFBVBLPeriodNs` moved to 16665556 with
+  `RBFBVBLRetunes` 1 - the frame clock followed the timing, which is the whole
+  difference from 2y5. **The line count must be DERIVED, not written down:**
+  boot 256 measured the raster at 143765 mHz where boot 255 read 143843 (78 mHz
+  apart, 0.054 %, the shape of DP spread-spectrum clocking), so it chose **2705**
+  lines and landed at 60.004 Hz where a hardcoded 2707 would have given 59.96.
+  `RBFBModeRate60` is therefore not a constant between boots - a changed value
+  is not a finding. Not yet exercised: the switch BACK to 143.83 Hz.
 - **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
   established whether that is demand-limited or still gated (2xi/2xo).
 - **The wedge**, an independent second defect: work submitted that never
