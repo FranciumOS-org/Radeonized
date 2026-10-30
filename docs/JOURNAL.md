@@ -48388,3 +48388,44 @@ boot-arg at all.
 
 Built: plugin `FE3200B0`. 0 from `SystemKernelExtensions.kc`, 0
 `IOGraphicsFamily` in `Info.plist`.
+
+### 2xx: the bisect itself became the suspect — reset to one variable
+
+The `-rbgpunocaptbl` boot came up clean and **unaccelerated**, and it measures
+nothing. The live peer publishes only `armed=1 arm_why=0`: no `starthw*`, no
+`cap_tbl_patched` at all - not even the `2` the skip path sets - and
+`rbgpu-diag` / `rbgpu-diag-prev` both read `d=0`. The log carries
+`RembrandtGPUPeer(0x100000300) published` and then nothing of ours. So
+`patchDeviceCapabilityTable` was never *called*: the accelerator never loaded,
+HWLibs never loaded, and the new token cannot be what stopped the bind because
+it is only read inside a function that never ran. `rbgpu-boot` has also been
+stuck at **245** for three boots, which says the peer's own NVRAM write is not
+landing either.
+
+**The cause is the bisect.** Thirty of our tokens were in boot-args at once,
+accumulated one group per boot, and somewhere in that pile the accelerator
+stopped binding - so the last two or three boots have been measuring an
+unaccelerated machine while being read as if they were measuring the armed one.
+That is rule 16 with the roles reversed: the instrument here is the
+*configuration*, and rule 39 is the exact failure - a reading taken in a
+configuration that does not exhibit acceleration cannot locate a fault that
+needs it. Boots 243 and 244 did start the hardware (`starthw_c2=1
+starthw_count=4`), so the break happened after them; attributing it further is
+not worth a boot, because the fix is the same either way.
+
+So: back to **one variable against a baseline known to crash**. Strip all 27
+accumulated negatives and keep exactly two tokens - `-rbgpunosentinel`, so a
+crash does not spend the following boot, and `-rbgpunocaptbl`. That is boot
+231's configuration, which is also boot 237's, which crashed, minus the
+capability-table clone and nothing else.
+
+Then the reading is unambiguous for the first time since 240:
+- accelerated and **no** crash ⇒ the cloned `_DeviceCapabilityTbl` record is
+  the cause, and the fix is to carry only the fields the chip needs to bind
+  and leave the display capabilities as the real part reports them;
+- accelerated and still crashing ⇒ the table is cleared and the frontier moves
+  to the accelerator working at all, which is not a boot-arg;
+- unaccelerated ⇒ the capability record is load-bearing for binding, the
+  separation cannot be done by disarming it, and the next step is static: dump
+  the donor record with `tools/re/` and find which fields advertise the display
+  pipeline.
