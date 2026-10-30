@@ -17,7 +17,7 @@ static const char *const known[] = {
     "-rbgpuoff", "-rbgpustock", "-rbgpuarm", "-rbgpunolinear", "-rbgpumtlkoff",
     "-rbgpumtlknolate", "-rbgpufbmatch", "-rbgpuagdcearly", "-rbgpuagdcpolicy",
     "-rbgpumcnew", "-rbgpumcreg", "-rbgpufbbacklight", "-rbgpufbbuiltin",
-    "-rbgpufbblparm",
+    "-rbgpufbblparm", "-rbgpufbdrr",
     "-rbgpufbnocrumb",
     "-rbgpufbvramrange", "-rbgpufbvramrangeall", "-rbgpunosentinel",
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",
@@ -139,6 +139,12 @@ int defaults_tests(void)
     /* 2xz: -rbgpuosforce must never be in the table. It exists to arm the
      * table on an OS where none of the measured offsets were measured, and a
      * default-on override of a safety gate is not an override at all. */
+    /* 2y5: the refresh-rate experiment WRITES the display pipe's timing on a
+     * live raster. It reverts itself, but a default-on timing write is not a
+     * thing this project does, and nothing has yet measured whether this
+     * panel will even sync to 2707 lines. */
+    CHECK(!rb_default_on("-rbgpufbdrr"),
+          "-rbgpufbdrr stays OFF - it writes OTG timing on a live panel");
     CHECK(!rb_default_on("-rbgpuosforce"),
           "-rbgpuosforce stays OFF - a default-on override of a safety gate is not an override");
     CHECK(!rb_default_on(""), "the empty token is not on");

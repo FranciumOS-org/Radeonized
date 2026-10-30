@@ -310,6 +310,12 @@ bool armedOnce(void)
 
 } /* namespace */
 
+/* 2y5: the one way out of this file's anonymous namespace. */
+bool RBAMDFramebuffer::argEnabled(const char *tok)
+{
+    return argOn(tok);
+}
+
 /* Did we DISPLACE the boot framebuffer, or are we attached beside it?
  *
  * This is not a configuration flag, it is a fact about this instance, and it is
@@ -515,6 +521,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     }
 
     hubpSetup();
+    drrReset();       /* 2y5: before anything can publish it */
     otgTimingReset(); /* 2y4: before blSetup, which may not run at all */
     blSetup();        /* 2xs: independent of hubpSetup's result by design */
     /* 2y0: AFTER blSetup, because it refuses unless blReady, and BEFORE
@@ -523,6 +530,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * registered afterwards would be racing the display's own driver to
      * exist before IODisplay walks our children. */
     blParamsSetup();
+    drrSetup();       /* 2y5: needs blSetup's BAR5 map, so it follows it */
 
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
      * is also called from the VBL thread_call and fromPath there would be a

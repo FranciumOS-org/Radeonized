@@ -176,6 +176,23 @@ void RBAMDFramebuffer::publishVBLState(void)
      * each publish for FRAME_COUNT's sake is NOT what this is - these are the
      * blSetup() snapshot, so they do not move, and the refresh they imply is
      * clk/(H_TOTAL * V_TOTAL). */
+    setProperty("RBFBDrrArmed", drrArmed);
+    setProperty("RBFBDrrDone", drrDone);
+    setProperty("RBFBDrrReverted", drrReverted);
+    setProperty("RBFBDrrRefuse", (uint64_t)drrRefuse, 32);
+    setProperty("RBFBDrrLines", (uint64_t)drrLines, 32);
+    setProperty("RBFBDrrSecs", (uint64_t)drrSecs, 32);
+    setProperty("RBFBDrrDelay", (uint64_t)drrDelay, 32);
+    setProperty("RBFBDrrRuns", drrRuns, 64);
+    setProperty("RBFBDrrMhzBefore", (uint64_t)drrMhzBefore, 32);
+    setProperty("RBFBDrrMhzDuring", (uint64_t)drrMhzDuring, 32);
+    setProperty("RBFBDrrMhzAfter", (uint64_t)drrMhzAfter, 32);
+    setProperty("RBFBDrrMinRb", (uint64_t)drrMinRb, 32);
+    setProperty("RBFBDrrMaxRb", (uint64_t)drrMaxRb, 32);
+    setProperty("RBFBDrrCtlRb", (uint64_t)drrCtlRb, 32);
+    setProperty("RBFBDrrCtl0", (uint64_t)drrCtl0, 32);
+    setProperty("RBFBDrrVTotalLive", (uint64_t)drrVTotalLive, 32);
+    setProperty("RBFBDrrStep", (uint64_t)drrStep, 32);
     setProperty("RBFBOtgHTotal", (uint64_t)otgHTotal, 32);
     setProperty("RBFBOtgVTotal", (uint64_t)otgVTotal, 32);
     setProperty("RBFBOtgVTotalMin", (uint64_t)otgVTotalMin, 32);
