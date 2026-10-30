@@ -71,21 +71,43 @@ static CVReturn linkCB(CVDisplayLinkRef l, const CVTimeStamp *now,
 /* One ioreg per sample. 2x7's key() ran a separate ioreg per counter and
  * produced two false "writes != sets" alarms; the counters must be read in
  * one pass or they are read seconds apart at up to 85/s. */
+/* 2y6: the VBL period is READ, not assumed.
+ *
+ * This tool used to divide by a literal 143.83 to turn vblank counts into
+ * seconds of panel time, and then used that as the DENOMINATOR for sets/s.
+ * That was correct while 143.83 Hz was the only mode the kext had. The
+ * moment boot 256 ran at 60 Hz it silently reported 11.94 s of panel time
+ * for a 30.14 s window and "137.72 sets/s" for a true 54.58/s - a 2.5x
+ * overstatement, in the direction of looking like a triumph. Nothing in the
+ * output said anything was wrong.
+ *
+ * Rule 41 in a userspace tool rather than a kext: the kext publishes
+ * RBFBVBLPeriodNs, so read it. If it is absent (an older framebuffer), say
+ * so loudly and fall back - never silently. */
+static double gPeriodNs = 0.0;
+
+static double fbRateHz(void)
+{
+    return gPeriodNs > 0.0 ? 1e9 / gPeriodNs : 0.0;
+}
+
 static int fbsnap(unsigned long long *sets, unsigned long long *fires,
                   unsigned long long *writes)
 {
     FILE *p = popen("ioreg -rl -c RBAMDFramebuffer 2>/dev/null | awk '"
-                    "/\"RBFBAmtrSets\" = /   { s = $NF } "
-                    "/\"RBFBVBLFires\" = /   { f = $NF } "
-                    "/\"RBFBHubpWrites\" = / { w = $NF } "
+                    "/\"RBFBAmtrSets\" = /     { s = $NF } "
+                    "/\"RBFBVBLFires\" = /     { f = $NF } "
+                    "/\"RBFBHubpWrites\" = /   { w = $NF } "
+                    "/\"RBFBVBLPeriodNs\" = /  { p = $NF } "
                     "END { if (s == \"\" || f == \"\") exit 1; "
-                    "print s, f, w }'", "r");
+                    "print s, f, w, (p == \"\" ? 0 : p) }'", "r");
     if (!p) { return 0; }
-    unsigned long long a = 0, b = 0, c = 0;
-    int n = fscanf(p, "%llu %llu %llu", &a, &b, &c);
+    unsigned long long a = 0, b = 0, c = 0, d = 0;
+    int n = fscanf(p, "%llu %llu %llu %llu", &a, &b, &c, &d);
     int st = pclose(p);
     if (n < 2 || st != 0) { return 0; }
     *sets = a; *fires = b; *writes = c;
+    if (d > 0) { gPeriodNs = (double)d; }
     return 1;
 }
 
@@ -208,10 +230,15 @@ int main(int argc, char **argv)
             double dt = t - lastT;
             printf("+%4.0fs  link %6.2f/s", t - t0, (double)(l - lastL) / dt);
             if (ok && haveFB) {
-                /* The panel's own vblank counter as the clock (2wj). */
-                double vdt = (double)(f - lastF) / 143.83;
-                printf("   sets %7.2f/s (fb clock %.1fs vs wall %.1fs)",
-                       vdt > 0 ? (double)(s - lastS) / vdt : 0.0, vdt, dt);
+                /* sets/s against WALL time, which is the rate a human sees.
+                 * The delivery fraction - sets per vblank - is a SEPARATE
+                 * number, because dividing by panel time conflates "we fed
+                 * every scanout" with "the panel scans slowly". */
+                unsigned long long dv = f - lastF;
+                printf("   sets %7.2f/s  vbl %6.2f/s  fed %5.1f%%",
+                       (double)(s - lastS) / dt,
+                       (double)dv / dt,
+                       dv ? (double)(s - lastS) / (double)dv * 100.0 : 0.0);
             } else {
                 printf("   sets      n/a");
             }
@@ -242,10 +269,27 @@ int main(int argc, char **argv)
         printf("display link : %llu fires = %.2f/s\n", l1 - l0,
                (double)(l1 - l0) / (t1 - t0));
         if (ok && haveFB) {
-            double vdt = (double)(f1 - f0) / 143.83;
-            printf("fb vbl fires : %llu = %.2f s of panel time\n", f1 - f0, vdt);
-            printf("amtr sets    : %llu = %.2f/s\n", s1 - s0,
-                   vdt > 0 ? (double)(s1 - s0) / vdt : 0.0);
+            const double hz = fbRateHz();
+            const double wall = t1 - t0;
+            if (hz <= 0.0) {
+                printf("fb vbl period: NOT PUBLISHED by this framebuffer - "
+                       "delivery fractions below are omitted rather than "
+                       "computed from a guessed rate\n");
+            }
+            printf("fb vbl fires : %llu = %.2f/s", f1 - f0,
+                   (double)(f1 - f0) / wall);
+            if (hz > 0.0) {
+                printf("   (asked %.2f/s, %+.1f%%)", hz,
+                       ((double)(f1 - f0) / wall / hz - 1.0) * 100.0);
+            }
+            printf("\n");
+            printf("amtr sets    : %llu = %.2f/s", s1 - s0,
+                   (double)(s1 - s0) / wall);
+            if (f1 - f0) {
+                printf("   = %.1f%% of scanouts fed",
+                       (double)(s1 - s0) / (double)(f1 - f0) * 100.0);
+            }
+            printf("\n");
             printf("hubp writes  : %llu%s\n", w1 - w0,
                    (w1 - w0) == (s1 - s0) ? " (tracks sets exactly)"
                                           : "  <-- DIVERGES from sets");
@@ -270,8 +314,16 @@ int main(int argc, char **argv)
                    100.0 * sqrt(var) / mean);
             printf("min    %8.4f ms   max %8.4f ms   spread %.4f ms\n",
                    mn, mx, mx - mn);
-            printf("target %8.4f ms  = 143.830 Hz  (the panel, measured 2rn)\n",
-                   1000.0 / 143.83);
+            /* 2y6: the target is whatever mode is CURRENT, not the 143.83 Hz
+             * the panel had when this histogram was written. A jitter plot
+             * against the wrong target reads as a defect. */
+            const double thz = fbRateHz();
+            if (thz > 0.0) {
+                printf("target %8.4f ms  = %7.3f Hz  (RBFBVBLPeriodNs, live)\n",
+                       gPeriodNs / 1e6, thz);
+            } else {
+                printf("target        ?  (RBFBVBLPeriodNs not published)\n");
+            }
             /* A histogram, because a mean and a sigma cannot tell a steady
              * clock with a few long stalls from a uniformly sloppy one, and
              * those two have different fixes. */
