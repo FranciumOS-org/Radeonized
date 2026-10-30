@@ -29,15 +29,13 @@ void rbgpu_nvram_note(const char *var, const char *text);
 bool rbgpu_arg(const char *tok);
 bool rbgpu_stock(void);
 bool rbgpu_nvram_armed(const char *var, uint32_t *why);
+
+// 2xx: has the generation key been written? See `rb_defaults.h` - before it
+// exists, a "0" in `rbgpu-tick` or `rbgpu-fb` is our own spent one-shot.
+bool rbgpu_gen_present(void);
 bool rbgpu_sentinel_begin(void);
 
 bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why);
-// 2xg: the same gate, CONSUMED BY OVERWRITE with a literal "0" instead of by
-// removal - the only path measured to reach IODTNVRAM::syncInternal (2sr/2wj).
-// Use this, not the form above, for anything whose failure mode is a panic or
-// a hang: the removal form read back as absent on a key that then survived a
-// reboot (2sq), so it can report `why = 0` on a still-armed boot.
-bool rbgpu_nvram_consume_oneshot_ow(const char *var, uint32_t *why);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the
 // gate trail can be told apart from a machine that died under it.
 void rbgpu_heartbeat_start(void);

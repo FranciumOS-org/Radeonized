@@ -143,11 +143,27 @@ defaults)
     edit bootarg strip
     sync
     echo
+    # 2xx: a "0" in rbgpu-tick or rbgpu-fb is only a disarm once rbgpu-gen
+    # exists - before that it is the value a pre-2xw boot wrote when it spent
+    # the one-shot, and the plugin ignores it and then migrates it. Report the
+    # same rule the two kexts apply, or this is an instrument that lies.
+    gen="$(nvram rbgpu-gen 2>/dev/null | sed 's/^rbgpu-gen[[:space:]]*//')"
+    if [ -z "$gen" ]; then
+        echo "rbgpu-gen: absent - the next armed boot migrates the two keys a"
+        echo "           pre-2xw build consumed by overwrite (2xx)."
+    else
+        echo "rbgpu-gen: \"$gen\" - migrated, so every \"0\" below is yours."
+    fi
+    echo
     echo "NVRAM keys that would DISARM a half (2xw reads them as disarms now):"
     for k in rbgpu-arm rbgpu-fb rbgpu-agdc rbgpu-iop rbgpu-tick; do
         v="$(nvram "$k" 2>/dev/null | sed "s/^$k[[:space:]]*//")"
+        legacy=no
+        case "$k" in rbgpu-tick|rbgpu-fb) legacy=yes ;; esac
         if [ -z "$v" ]; then
             echo "  $k: absent (armed)"
+        elif [ "$v" = "0" ] && [ "$legacy" = yes ] && [ -z "$gen" ]; then
+            echo "  $k: \"0\" - IGNORED, a spent pre-2xw one-shot, not a disarm (2xx)"
         elif [ "$v" = "0" ]; then
             echo "  $k: \"0\" - DISARMED. Re-arm with: sudo nvram -d $k"
         else

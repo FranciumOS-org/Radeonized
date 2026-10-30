@@ -124,5 +124,52 @@ int defaults_tests(void)
     CHECK(!rb_off_token("nonsense", off, sizeof(off)),
           "a token without the -rbgpu prefix is refused");
 
+    /* 2xx: our own "0" against the user's. The two keys a pre-2xw build
+     * consumed by OVERWRITE hold a literal "0" on every machine that ever ran
+     * an armed pre-2xw boot, and boot 236 came up with the scheduler tick off
+     * because of it (`tick_armed=0 tick_oneshot=3`). The rule is generational,
+     * and these are the four corners of it. */
+    CHECK(rb_legacy_zero_key("rbgpu-tick") && rb_legacy_zero_key("rbgpu-fb"),
+          "the two overwrite-consumed keys are the legacy-zero keys");
+    CHECK(!rb_legacy_zero_key("rbgpu-arm") && !rb_legacy_zero_key("rbgpu-agdc") &&
+          !rb_legacy_zero_key("rbgpu-iop"),
+          "the three removal-consumed keys are NOT, so a \"0\" in them is the "
+          "user's and is always obeyed");
+    CHECK(!rb_legacy_zero_key("rbgpu-safe") && !rb_legacy_zero_key(RB_GEN_KEY) &&
+          !rb_legacy_zero_key("") && !rb_legacy_zero_key(NULL),
+          "the sentinel latch, the generation key and the degenerate inputs "
+          "are not legacy-zero keys");
+    CHECK(RB_LEGACY_ZERO_COUNT == 2,
+          "exactly two keys were ever consumed by overwrite");
+
+    /* the decision table, every cell */
+    CHECK(!rb_key_disarms("rbgpu-tick", 0, 0) && !rb_key_disarms("rbgpu-tick", 0, 1),
+          "a key that does not read \"0\" never disarms, either generation");
+    CHECK(!rb_key_disarms("rbgpu-tick", 1, 0),
+          "THE BUG: rbgpu-tick=\"0\" with no generation key is our own spent "
+          "one-shot and must NOT disarm the scheduler tick");
+    CHECK(!rb_key_disarms("rbgpu-fb", 1, 0),
+          "rbgpu-fb=\"0\" with no generation key must NOT decline the panel");
+    CHECK(rb_key_disarms("rbgpu-tick", 1, 1) && rb_key_disarms("rbgpu-fb", 1, 1),
+          "once the generation key exists, a hand-typed \"0\" in either key "
+          "disarms - the migration is one-shot, not a permanent override");
+    CHECK(rb_key_disarms("rbgpu-arm", 1, 0) && rb_key_disarms("rbgpu-arm", 1, 1),
+          "rbgpu-arm=\"0\" disarms in BOTH generations - it is the documented "
+          "first rescue rung and no migration may ignore it");
+    CHECK(rb_key_disarms("rbgpu-agdc", 1, 0) && rb_key_disarms("rbgpu-iop", 1, 0),
+          "the other two rescue keys are obeyed before the migration too");
+    CHECK(rb_key_disarms(NULL, 1, 0) && rb_key_disarms(NULL, 1, 1),
+          "an unnamed key reading \"0\" disarms - the safe direction when the "
+          "caller cannot say which key it read");
+
+    /* the generation key must not collide with the keys it arbitrates over,
+     * and rule 26's prefix trap applies to NVRAM names as well as boot-args */
+    CHECK(!rb_streq(RB_GEN_KEY, "rbgpu-gen-prev"),
+          "the generation key is matched exactly, not by prefix");
+    for (i = 0; i < RB_LEGACY_ZERO_COUNT; i++) {
+        CHECK(!rb_streq(rb_legacy_zero_keys[i], RB_GEN_KEY),
+              "no legacy-zero key is the generation key");
+    }
+
     return failures;
 }

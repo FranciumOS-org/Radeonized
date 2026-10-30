@@ -47953,3 +47953,114 @@ by number, and with the boot-arg list replaced by a pointer to
 this journal under its tag, their §7 rules are in `CLAUDE.md`, their §9
 boot-args are now `rb_defaults.h`, and git history holds both files intact.
 The stray `src/plugin/kern_start.cpp.before-rgfix` backup is dropped too.
+
+## 2xx — the regression after 2xw: our own `"0"` read as the user's disarm
+
+**Symptom, in the user's words:** "the thing that used to make screen work
+without typing broke... it only works per 10s with typing again".
+
+That is 2wi/2wl's signature exactly — 0.078–0.093 `RBFBAmtrSets`/s, one frame
+every 10.8 s, smooth while typing into Spotlight — which 2xi's
+`-rbgpuschedtick` had fixed from 2 to 3375 transactions in 30 s. So the
+question was never "what is slow", it was "why is the tick not armed".
+
+**Read from the live machine first (rule 33, rule 8).** Boot 236, `kern.boottime`
+Fri Oct 30 01:35:43, read at 01:39:52.
+
+```
+rbgpu-boot  236
+boot-args   ... -rbgpuschedtick ... xhcipoke=10 -rbgpuoff
+rbgpu-arm   1     rbgpu-agdc 1    rbgpu-iop 1
+rbgpu-fb    0     rbgpu-tick 0
+rbgpu-safe  1
+```
+
+`ioreg -rl -c RembrandtGPUPeer` returns **nothing** and
+`ioreg -rl -c RBAMDFramebuffer` returns nothing; `IOKitDiagnostics` reports
+`"IONDRVFramebuffer"=1`. So *this* boot is not a measurement of anything of
+ours: `-rbgpuoff` is in boot-args, the documented rescue, which is how the
+user got in ("im in"). Rule 39 — a reading taken in a configuration that does
+not run the code says nothing about the code.
+
+**The evidence for the armed boot was already in NVRAM** (rule: read what is
+in hand before designing an experiment):
+
+```
+rbgpu-diag  d=131 armed=1 tick_armed=0 tick_oneshot=3 tick_solved=1 ...
+            agdc_started=1 agdc_stage=46 agdc_on=1 agdc_error=0 agdc_solved=3ff
+```
+
+`tick_oneshot` is the `why` out of `rbgpu_nvram_armed("rbgpu-tick", &why)`,
+and **3 is "the key reads \"0\" — disarmed by hand"**. The AGDC half came up
+clean (`agdc_solved=3ff`, `agdc_on=1`); the tick alone was off. Predicted
+before the read and confirmed by it.
+
+**Why the key reads `"0"`.** 2xw inverted the five one-shots: the key is now a
+durable disarm and the plugin never writes it. But the pre-2xw code spent two
+of those keys by OVERWRITE — `rbgpu_nvram_consume_oneshot_ow` wrote a literal
+`"0"` into the key as the act of consuming it (`rbgpu-fb` in 2wj so a disarm
+could not fail to stick, `rbgpu-tick` in 2xg because the tick's failure mode
+is a panic). So on any machine that ever ran an armed pre-2xw boot those two
+keys already hold the exact value the new reader treats as the user's disarm.
+
+The live machine separates the two groups perfectly and is the proof:
+`rbgpu-arm`, `rbgpu-agdc` and `rbgpu-iop` were consumed by **removal**
+(`rbgpu_nvram_consume_oneshot`) and read `1` — hand-written arms, left over.
+`rbgpu-tick` and `rbgpu-fb` were consumed by **overwrite** and read `0`.
+
+Both halves were therefore disarmed, and by rule 38's check `rbgpu-fb = "0"`
+also declines the panel (`armRefuseWhy` 3), so the composited desktop was
+gone as well as the tick.
+
+**The fix is generational, because the value cannot carry the answer.** A
+hand-typed `sudo nvram rbgpu-tick=0` stores the same byte as the spent
+one-shot; no nonce, timestamp or length distinguishes them. So the two cases
+are separated by *when*:
+
+- `rbgpu-gen` is written once, by the first 2xx+ boot that reaches it.
+- Before it exists, a `"0"` in `rbgpu-tick` or `rbgpu-fb` is our own spent
+  one-shot and is **ignored** (`why` 8, published, rule 14).
+- After it exists, every `"0"` is the user's and is **obeyed**.
+- The other three keys are obeyed in both generations — `nvram rbgpu-arm=0` is
+  the documented first rescue rung and no migration may ignore it.
+
+`rb_key_disarms()` and `rb_legacy_zero_keys[]` in `src/common/rb_defaults.h`
+hold the whole rule, and **both kexts ask it**: the plugin in
+`rbgpu_nvram_armed()`, the framebuffer in a new `keyDisarms()`. That is rule 38
+again — two separately armed halves must answer the same question identically,
+and the framebuffer can probe *before* the plugin's migration has run.
+
+`rbgpu_gen_migrate()` then makes the rule stop being needed: it rewrites each
+legacy key that reads `"0"` to `"1"`, and writes `rbgpu-gen` **last**. The
+order is 2dg's order for the third time — a boot that dies in the middle
+leaves the generation key absent and the next boot still ignores the stale
+zeros. Every write it makes moves a key in the armed direction, so it is safe
+on a stock boot, and it runs on one, because a stock boot is exactly the boot
+that most needs the next one to come up clean. It reads `rbgpu-gen` back and
+publishes `gen` (0 failed read-back, 1 already migrated, 2 written, 3
+`/options` unreachable) and `gen_fixed`.
+
+**`rbgpu_nvram_consume_oneshot_ow` is deleted**, not left unused — rule 6,
+"redundant" and "inert" differ. It had no callers after 2xw and it is the only
+thing that could ever write that value again. `rbgpu_nvram_consume_oneshot`
+stays: it consumes by removal, so it cannot leave a value behind, and
+`rbgpu-mcreg` still uses it.
+
+`tools/efi.sh defaults` reports the same rule rather than its own — a `"0"` in
+a legacy key with `rbgpu-gen` absent prints as "IGNORED, a spent pre-2xw
+one-shot", because an instrument that contradicts the code is rule 16's
+instrument-as-suspect.
+
+**Hosttest:** 14 new assertions in `tools/hosttest/defaults_test.c`, including
+the bug itself stated as a test (`rb_key_disarms("rbgpu-tick", 1, 0)` must be
+false), the inverse (with the generation key present it must be true, so the
+migration is one-shot and not a permanent override), `rbgpu-arm` disarming in
+both generations, and the degenerate inputs. The pre-existing `smu13` data
+failure is unchanged and identical on `288a87b`.
+
+**Not fixed by this and still in the way of an armed boot:** `-rbgpuoff` in
+boot-args (the user's rescue — `sudo tools/efi.sh on` takes it out) and
+`rbgpu-safe = "1"`, the sentinel latch the rescue sequence left set, which
+would otherwise spend one stock boot clearing itself.
+
+Built: plugin `BCE9FC13`, framebuffer `353A1D24`.

@@ -29,6 +29,21 @@ owns the panel, Apple's `AMDRadeonX6000` composites for it, SkyLight logs
 no flicker and no tearing. USB runs on real interrupts. The remaining asks are
 small and named below.
 
+**A "0" our own old builds wrote is not a disarm (2xx).** Two of the five
+keys were consumed by *overwrite* before 2xw — the way a one-shot was spent
+was to write a literal `"0"` into it — which is exactly the value 2xw's reader
+treats as the user's durable disarm. So the first 2xw boot came up with the
+scheduler tick off and the panel declined, and the desktop went back to one
+frame per 10 s: boot 236's own record reads `tick_armed=0 tick_oneshot=3`. The
+value cannot be told from a hand-typed `=0`, so they are told apart by
+generation: `rbgpu-gen` is written once, before it exists a `"0"` in
+`rbgpu-tick` or `rbgpu-fb` is ignored, after it exists every `"0"` is obeyed.
+`rb_key_disarms()` in `rb_defaults.h` is the rule and both kexts ask it, and
+`rbgpu_nvram_consume_oneshot_ow` is **deleted** so nothing can write that
+value again. The other three keys were consumed by removal and were never
+ambiguous. Rule 37, asked the other way round: **what does a stale value our
+own earlier build wrote look like to the new reader?**
+
 **Arming is now the default (2xw).** Empty boot-args give the configuration
 boot 231 ran: `src/common/rb_defaults.h` holds those 45 tokens and everything
 in it is on. The five NVRAM one-shots are gone in that direction —
@@ -225,7 +240,10 @@ The numbering is cited all over the journal — **keep the numbers**.
 9. One-shots are one-shot — **and since 2xw there are none left to arm**;
    `rbgpu-*=0` is a durable disarm and the sentinel is the recovery. The
    surviving lesson: a feature needs a boot-arg *and* a key only when a stuck
-   key must be harmless. [2iz, 2qy, 2xw]
+   key must be harmless. And when you invert what a key MEANS, ask what values
+   your own earlier builds left in it — `rbgpu-tick` and `rbgpu-fb` held the
+   `"0"` the old consume-by-overwrite path wrote, and the inversion read it as
+   the user's disarm. [2iz, 2qy, 2xw, 2xx]
 10. **Capture in the armed boot, over SSH, before rebooting.** What must
     survive an uncapturable boot has to be in NVRAM and **periodic**, not a set
     of fixed marks. [2jg, 2gw, 2s5, 2wl]
