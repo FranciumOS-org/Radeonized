@@ -6669,6 +6669,32 @@ bool RGPU::patchDeviceCapabilityTable(KernelPatcher &patcher, size_t id) {
         return false;
     }
 
+    /* 2xx: this patch alone, separable from the rest of -rbgpuspoofttl.
+     *
+     * The WindowServer crash loop is a capability-driven decision - an 816 MB
+     * RGBAh half-float surface on an SDR 1080p panel - and this is the only
+     * thing in the armed set that tells Apple's driver what the device IS
+     * rather than how to bring it up. It CLONES another index's capability
+     * record and relabels it 0x1681, so whatever display capabilities that
+     * part advertises, this chip now advertises too.
+     *
+     * `-rbgpunospoofttl` cannot test that: it also drops the supported-device
+     * override, the asic_type 19->8 bind and both version spoofs, so the
+     * accelerator does not come up at all and the boot cannot locate anything
+     * (rule 39 - it was tried, and it came up clean and unaccelerated).
+     * This token keeps every spoof that makes the chip BIND and drops only the
+     * capability record, which is the one boot that separates "the table" from
+     * "the accelerator working". Defaults to patching, exactly as before, so
+     * it changes no existing configuration. */
+    if (checkKernelArgument("-rbgpunocaptbl")) {
+        rbgpu_log("2xx: -rbgpunocaptbl is in boot-args, so _DeviceCapabilityTbl "
+                  "is left alone while the rest of -rbgpuspoofttl still runs. "
+                  "An accelerated desktop that does NOT crash WindowServer "
+                  "makes this table the cause.");
+        rbgpu_diag_set_num("cap_tbl_patched", 2);   /* 2 = skipped by boot-arg */
+        return false;
+    }
+
     mach_vm_address_t tbl_addr = patcher.solveSymbol(id, "_DeviceCapabilityTbl");
     if (!tbl_addr) {
         rbgpu_log("HWLibs: symbol _DeviceCapabilityTbl not resolved; skipping capability table patch");

@@ -48347,3 +48347,44 @@ desktop would be the strong result, and if the spoof is the cause the fix is to
 narrow it - keep the version and asic-type spoofs that make the chip bind, drop
 or correct the capability-table entries that advertise a display pipeline this
 panel does not have.
+
+### 2xx: `-rbgpunocaptbl` — the one boot that separates the table from the GPU
+
+`-rbgpunospoofttl` came up **clean and unaccelerated**, which is the weak
+outcome stated in advance: rule 39, a configuration that does not exhibit
+acceleration cannot locate a fault that needs it. It does not clear the
+capability table and it does not implicate it.
+
+The reason it cannot is that `-rbgpuspoofttl` bundles five separate things:
+the `_ttlIsSupportedDevice` override, the `asic_type` 19 → 8 PSP table bind,
+the GC `hw_version` spoof, the GC firmware version gate
+`0x000A0300 → 0x000A0303`, and the `_DeviceCapabilityTbl` patch. The first
+four are what make the chip bind at all; only the fifth says what the device
+*is*. And that fifth one **clones another index's capability record and
+relabels it `deviceId=0x1681`** (`+0x18`, `+0x20` also set), so every display
+capability the donor part advertises, this APU now advertises - which is the
+shape of an 816 MB RGBAh half-float surface on an SDR 1080p panel.
+
+So the capability table gets its own disarm, `-rbgpunocaptbl`, checked inside
+`patchDeviceCapabilityTable` after the `spoofTtlMode` gate. It keeps every
+spoof that makes the chip bind and drops only the capability record. It
+defaults to patching, so no existing configuration changes, and it publishes
+`cap_tbl_patched = 2` - distinct from 0, which already meant "not patched or
+failed" (rule 14: a skip and a failure must not read the same). Added to the
+hosttest's `known[]` so rule 30's collision check covers it.
+
+This is the first point in the bisect where a build was cheaper than a boot:
+eighteen hardware bring-up flags cannot be halved informatively, because any
+half that breaks the ring gives another clean, unaccelerated, uninformative
+desktop.
+
+Said before the boot: an **accelerated** desktop that does not crash
+WindowServer makes the capability table the cause, and the fix is then to stop
+cloning the donor record wholesale - carry only the fields the chip needs to
+bind and leave the display capabilities as the real part reports them. A boot
+that is accelerated and still crashes clears the table and leaves the crash
+with "the accelerator working at all", which is a different frontier and not a
+boot-arg at all.
+
+Built: plugin `FE3200B0`. 0 from `SystemKernelExtensions.kc`, 0
+`IOGraphicsFamily` in `Info.plist`.

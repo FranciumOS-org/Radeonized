@@ -20,7 +20,7 @@ static const char *const known[] = {
     "-rbgpufbvramrange", "-rbgpufbvramrangeall", "-rbgpunosentinel",
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",
     "-rbgpupdefix", "-rbgpubeat", "-rbgpunosmu", "-rbgpunoguard",
-    "-rbgpunocapture", "-rbgpunosrm", "-rbgpunorotate",
+    "-rbgpunocapture", "-rbgpunosrm", "-rbgpunorotate", "-rbgpunocaptbl",
 };
 #define KNOWN_COUNT (sizeof(known) / sizeof(known[0]))
 
