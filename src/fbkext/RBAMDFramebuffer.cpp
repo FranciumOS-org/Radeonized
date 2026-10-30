@@ -4,6 +4,8 @@
 #include "rb_backlight.h"
 #include "rb_hubp.h"
 #include "rb_defaults.h"
+#include "rb_osver.h"
+#include <libkern/version.h>
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
@@ -104,6 +106,43 @@ uint32_t armRefuseWhy = 0;   /* 0 armed, 2 -rbgpuoff/-rbgpustock, 3 rbgpu-fb=0,
                               * and said stock, 10 the peer ran first and said
                               * armed */
 
+/* 2xz: the framebuffer's half of the OS gate. The plugin asks the identical
+ * question in rbgpu_os_measured(), off the identical kernel global, because
+ * rule 38 is only satisfied when both halves answer it the same way - and
+ * this half can probe before the plugin has run at all, so it cannot ask the
+ * plugin.
+ *
+ * What it gates here is narrower than in the plugin and that is deliberate.
+ * This kext has no offsets into any Apple driver object: it is an
+ * IOFramebuffer subclass, every register it touches is the APU's own and
+ * carries a Linux header citation, and the one Apple structure it reads is
+ * IODetailedTimingInformationV2 through the public header. So nothing here
+ * NEEDS RB_OSD_KEXTOFF. It still honours it, for one reason: rule 38's own
+ * case. The panel taken with no accelerator underneath freezes on the last
+ * frame drawn, and on an OS where the plugin comes up stock there IS no
+ * accelerator underneath. Declining the panel together is the whole point. */
+static bool osMeasured(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        char buf[16];
+        const int major = version_major;
+        const bool ok   = rb_os_derived(major, RB_OSD_KEXTOFF) != 0;
+
+        cached = (ok || PE_parse_boot_argn("-rbgpuosforce", buf, sizeof(buf)))
+                 ? 1 : 0;
+        if (!ok) {
+            LOG("2xz: Darwin %d (%s) - nothing in this tree was measured here; "
+                "%s", major, rb_os_name(major),
+                cached ? "-rbgpuosforce is in boot-args, so arming anyway"
+                       : "declining the panel so it is not taken with no "
+                         "accelerator underneath (rule 38)");
+        }
+    }
+    return cached != 0;
+}
+
 bool argOn(const char *tok)
 {
     char buf[16], off[64];
@@ -112,7 +151,8 @@ bool argOn(const char *tok)
         return PE_parse_boot_argn(tok, buf, sizeof(buf)) != 0;
     }
     if (PE_parse_boot_argn("-rbgpustock", buf, sizeof(buf)) ||
-        PE_parse_boot_argn("-rbgpuoff", buf, sizeof(buf))) {
+        PE_parse_boot_argn("-rbgpuoff", buf, sizeof(buf)) ||
+        !osMeasured()) {
         return false;
     }
     if (!rb_off_token(tok, off, sizeof(off))) {

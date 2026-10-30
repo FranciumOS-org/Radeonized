@@ -99,7 +99,7 @@ all: kext tools
 # rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
 # docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
 # freestanding; nothing links it yet.
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/osver_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
@@ -441,7 +441,19 @@ $(BUILD_DIR)/plugin/kmod_info.o: $(PLUGIN_SRC)/kmod_info.c
 	@mkdir -p $(dir $@)
 	@$(CC) $(filter-out -I$(COMMON),$(KEXT_CFLAGS)) $(PLUGIN_DEFS) -c $< -o $@
 
-plugin: hosttest $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
+# 2xz: the Lilu version range and the support matrix must agree. They are in
+# two files that nothing links together - the range is an argument to a Lilu
+# struct, the matrix is a freestanding header the hosttest owns - so this check
+# is the only thing that would catch them drifting apart. It drifted once
+# already: the range said Monterey..Sequoia while the machine ran Tahoe, and
+# the plugin loaded only because `-lilubetaall` was in boot-args. Rule 26: the
+# grep is anchored on the enumerator name, and it is checked against a
+# known-present case by requiring EXACTLY one hit for each.
+.PHONY: osrange
+osrange:
+	@minname=$$(awk '/#define RB_OS_MIN_DARWIN/ {print $$3}' src/common/rb_osver.h | sed 's/RB_OS_//'); 	 maxname=$$(awk '/#define RB_OS_MAX_DARWIN/ {print $$3}' src/common/rb_osver.h | sed 's/RB_OS_//'); 	 minw=$$(python3 -c "print('$$minname'.capitalize())"); 	 maxw=$$(python3 -c "print('$$maxname'.capitalize())"); 	 n=$$(grep -c "KernelVersion::$$minw,"  src/plugin/kern_start.cpp); 	 m=$$(grep -c "KernelVersion::$$maxw,"  src/plugin/kern_start.cpp); 	 if [ "$$n" != 1 ] || [ "$$m" != 1 ]; then 	   echo "  FAIL rb_osver.h declares $$minw..$$maxw but kern_start.cpp's PluginConfiguration"; 	   echo "       has $$n KernelVersion::$$minw and $$m KernelVersion::$$maxw (want 1 each)."; 	   echo "       The two must agree or the kext's declared range is a fiction."; 	   exit 1; 	 fi; 	 echo "  OSVER declared range $$minw..$$maxw, matrix and PluginConfiguration agree"
+
+plugin: hosttest osrange $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
 	@rm -rf $(PLUGIN_BUNDLE)
 	@mkdir -p $(dir $(PLUGIN_BIN))
 	@sed -e 's/$$(EXECUTABLE_NAME)/RembrandtGPU/g' -e 's/$$(PRODUCT_NAME)/RembrandtGPU/g' \

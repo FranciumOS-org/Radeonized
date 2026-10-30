@@ -22,6 +22,7 @@ static const char *const known[] = {
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",
     "-rbgpupdefix", "-rbgpubeat", "-rbgpunosmu", "-rbgpunoguard",
     "-rbgpunocapture", "-rbgpunosrm", "-rbgpunorotate", "-rbgpunocaptbl",
+    "-rbgpuosforce",
 };
 #define KNOWN_COUNT (sizeof(known) / sizeof(known[0]))
 
@@ -112,6 +113,11 @@ int defaults_tests(void)
      * connection, which reaches the display-prefs key, mirroring and the
      * wrangler's dimming as well as the slider. Never booted either. */
     CHECK(!rb_default_on("-rbgpufbbuiltin"), "-rbgpufbbuiltin stays OFF (never booted)");
+    /* 2xz: -rbgpuosforce must never be in the table. It exists to arm the
+     * table on an OS where none of the measured offsets were measured, and a
+     * default-on override of a safety gate is not an override at all. */
+    CHECK(!rb_default_on("-rbgpuosforce"),
+          "-rbgpuosforce stays OFF - a default-on override of a safety gate is not an override");
     CHECK(!rb_default_on(""), "the empty token is not on");
     CHECK(!rb_default_on(NULL), "a NULL token is not on");
 

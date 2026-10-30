@@ -46,8 +46,18 @@ PluginConfiguration ADDPR(config) = {
     arrsize(bootargDebug),
     bootargBeta,
     arrsize(bootargBeta),
-    KernelVersion::Monterey,
-    KernelVersion::Sequoia,
+    // 2xz: Ventura through Tahoe. This was Monterey..Sequoia while the
+    // machine ran Tahoe, so the plugin loaded ONLY because `-lilubetaall` is
+    // in boot-args - a flag that loosens the check for every Lilu plugin and
+    // whose removal would have made this one quietly not load at all. The
+    // floor is the declared support floor; the ceiling is the newest Darwin
+    // this tree has a name for. See src/common/rb_osver.h for what "support"
+    // does and does not claim per version, and note that the ceiling here is
+    // a CLAIM, not a refusal: rb_os_in_range() lets a newer OS through and
+    // rbgpu_stock() brings it up stock, because a boot that refuses to load
+    // teaches nothing.
+    KernelVersion::Ventura,
+    KernelVersion::Tahoe,
     pluginStart
 };
 

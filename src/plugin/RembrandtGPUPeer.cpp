@@ -13,6 +13,7 @@
 
 #include "RembrandtGPUPeer.hpp"
 #include "rb_defaults.h"
+#include "rb_osver.h"
 
 // 2xx: the one-time migration off the pre-2xw consume-by-overwrite values.
 // Defined with the rest of the arming gate, far below; called from start()
@@ -1928,12 +1929,77 @@ static uint32_t rbgpu_gen_migrate(void) {
     return fixed;
 }
 
+// 2xz: WHICH macOS, AND WHETHER ANYTHING HERE WAS MEASURED ON IT.
+//
+// `version_major` is the Darwin major - the kernel's own exported integer,
+// which is also what Lilu's getKernelVersion() returns. Both kexts read THAT
+// and not their own notion of the version, because rule 38 is only satisfied
+// if the two halves answer this identically: the plugin gets the declaration
+// from Lilu's kern_util.hpp, which already declares it, and the framebuffer -
+// which has no Lilu - gets it from <libkern/version.h>. Same symbol.
+//
+// `rb_osver.h` holds the matrix and the reasoning. The short version: this
+// kext LOADS from Ventura up, because everything it does by symbol name is
+// version-independent and rule 1 already makes each of those fail safe on its
+// own. But the offsets into Apple's driver objects - pm4+0x30, hw->0x368,
+// hw+0x3b0, the [0x148]/[0x118]/[0x120] accessors - were MEASURED on Sequoia
+// and re-measured in use on Tahoe, and they cannot be inferred for an OS
+// nobody has booted this on. Writing a ring pointer through an offset that
+// moved is not a failed experiment, it is an unbounded write into another
+// driver's object.
+//
+// So on an OS with no RB_OSD_KEXTOFF claim the whole default-on table comes up
+// OFF - the same state `-rbgpustock` produces, which is a live, usable macOS
+// with our framebuffer declining the panel - and the boot says exactly that.
+// `-rbgpuosforce` overrides it for the boot that goes and measures. That boot
+// is how a row earns its bit; nothing earns it from this file.
+static int g_rbOsMeasured = -1;   // -1 not decided, 1 measured here, 0 not
+static int g_rbOsForced   = 0;
+
+bool rbgpu_os_measured(void) {
+    if (g_rbOsMeasured < 0) {
+        const int major = version_major;
+        const bool ok   = rb_os_derived(major, RB_OSD_KEXTOFF) != 0;
+        g_rbOsForced    = (!ok && checkKernelArgument("-rbgpuosforce")) ? 1 : 0;
+        g_rbOsMeasured  = (ok || g_rbOsForced) ? 1 : 0;
+
+        const struct rb_os_row *row = rb_os_row_for(major);
+        rbgpu_log("2xz: Darwin %d (%s)%s%s", major, rb_os_name(major),
+                  row ? " - " : "", row ? row->note : "");
+        if (ok) {
+            rbgpu_log("2xz: this OS claims the measured object offsets; the "
+                      "default-on table applies normally.");
+        } else if (g_rbOsForced) {
+            rbgpu_log("2xz: nothing in this tree was measured on Darwin %d, "
+                      "and -rbgpuosforce is in boot-args, so the default-on "
+                      "table applies ANYWAY. Every offset into an Apple "
+                      "driver object is now a guess - read every counter "
+                      "before trusting any of them, and expect a stock boot "
+                      "from the sentinel if this does not survive 60 s.",
+                      major);
+        } else {
+            rbgpu_log("2xz: nothing in this tree was measured on Darwin %d, so "
+                      "coming up STOCK rather than writing offsets measured on "
+                      "another OS. The plugin is alive and every probe still "
+                      "reports; add -rbgpuosforce to arm it and measure.",
+                      major);
+        }
+        rbgpu_diag_set_num("os_major", static_cast<uint32_t>(major));
+        rbgpu_diag_set_num("os_derived", rb_os_derived_mask(major));
+        rbgpu_diag_set_num("os_forced", static_cast<uint32_t>(g_rbOsForced));
+        rbgpu_diag_set_num("os_measured", static_cast<uint32_t>(g_rbOsMeasured));
+    }
+    return g_rbOsMeasured != 0;
+}
+
 // Stock means "behave as though none of our tokens were in boot-args". It is
-// set by `-rbgpustock`, by `-rbgpuoff`, and by the sentinel finding its latch.
+// set by `-rbgpustock`, by `-rbgpuoff`, by the sentinel finding its latch, and
+// since 2xz by running on an OS none of the measured offsets came from.
 bool rbgpu_stock(void) {
     if (g_rbStock < 0) {
         g_rbStock = (checkKernelArgument("-rbgpustock") ||
-                     checkKernelArgument("-rbgpuoff")) ? 1 : 0;
+                     checkKernelArgument("-rbgpuoff") ||
+                     !rbgpu_os_measured()) ? 1 : 0;
     }
     return g_rbStock != 0;
 }
@@ -1978,10 +2044,20 @@ bool rbgpu_arg(const char *tok) {
 //   6 the boot sentinel's latch was set, so the previous boot did not survive
 //   8 the key reads "0" but RB_GEN_KEY is absent, so that "0" is our own
 //     pre-2xw consume-by-overwrite artifact and not a disarm (2xx)
+//   9 this OS has no measured offsets and -rbgpuosforce is absent (2xz).
+//     Distinct from 5 on purpose: "the user asked for stock" and "the kext
+//     refused to guess at another OS's offsets" are different facts and a
+//     single code for both is rule 14's failure, not a tidier table.
 bool rbgpu_nvram_armed(const char *var, uint32_t *why) {
     auto out = [why](uint32_t v) { if (why) *why = v; };
     if (rbgpu_stock()) {
-        out(g_rbSafeLatch == 1 ? 6 : 5);
+        if (g_rbSafeLatch == 1) {
+            out(6);
+        } else if (!rbgpu_os_measured()) {
+            out(9);
+        } else {
+            out(5);
+        }
         return false;
     }
     IORegistryEntry *options = g_rbgpuOptions;
