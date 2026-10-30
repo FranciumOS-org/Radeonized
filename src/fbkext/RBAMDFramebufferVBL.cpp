@@ -163,6 +163,17 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBBlBuiltIn", blBuiltIn);
     setProperty("RBFBBlFlagsGets", blFlagsGets, 64);
     setProperty("RBFBBlSenseGets", blSenseGets, 64);
+    /* 2y0: each of these separates a distinct outcome - see the comment on
+     * the members in RBAMDFramebuffer.hpp. */
+    setProperty("RBFBBlParmArmed", blParmArmed);
+    setProperty("RBFBBlParmSetDisplays", blParmSetDisplays, 64);
+    setProperty("RBFBBlParmUpdates", blParmUpdates, 64);
+    setProperty("RBFBBlParmPublished", blParmPublished, 64);
+    setProperty("RBFBBlParmPublishFails", blParmPublishFails, 64);
+    setProperty("RBFBBlParmNoDict", blParmNoDict, 64);
+    setProperty("RBFBBlParmSets", blParmSets, 64);
+    setProperty("RBFBBlParmSetFails", blParmSetFails, 64);
+    setProperty("RBFBBlParmLastAsked", (uint64_t)blParmLastAsked, 32);
     setProperty("RBFBHubpTiling", (uint64_t)hubpTiling, 32);
     setProperty("RBFBHubpOrig", hubpOrig, 64);
     setProperty("RBFBHubpWrites", hubpWrites, 64);

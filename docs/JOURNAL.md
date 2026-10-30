@@ -48937,3 +48937,102 @@ earlier the same day. The file was gone: **`make clean` does `rm -rf
 $(BUILD_DIR)`, which includes `build/re/`**, and 2xz's clean rebuild deleted
 every extracted Apple binary in the tree. Rule 26's control is the only reason
 that did not become a finding about IOGraphicsFamily.
+
+---
+
+## 2y0 - publishing "brightness" ourselves, since nothing else will
+
+Boot 250 left exactly one thing between the working backlight and the slider:
+the parameter is named `"brig"` and every client asks for
+`kIODisplayBrightnessKey`, which is `"brightness"`.
+`IOFramebufferParameterHandler` builds each key from the **4-byte FourCC** we
+return in the `'parm'` list, so four characters is all a framebuffer can ever
+name. 2xy's commit said the full name was `IOBacklightDisplay`'s to publish;
+boot 250 proved it is not, because `AppleBacklightDisplay` matched and the
+dictionary did not change.
+
+So the full name has to come from an `IODisplayParameterHandler`, and the whole
+mechanism was read out of IOGraphicsFamily with **no boot spent**:
+
+```
+IODisplay::searchParameterHandlers(this, entry)        0x14ce7d66
+    iter = entry->getChildIterator(plane)
+    while ((obj = iter->getNextObject()))
+        if (OSDynamicCast(IODisplayParameterHandler, obj))
+            this->addParameterHandler(obj)
+
+  callers:  0x14ce8ba4   searchParameterHandlers(this, FRAMEBUFFER)   <- unconditional
+            0x14ce8c1c   ... and, only if OSDynamicCast(IOBacklightDisplay, this),
+                         the children of a service found by nameMatching("backlight")
+
+IODisplay::addParameterHandler(this, h)                0x14ce7e04
+    arr = OSDynamicCast(OSArray, this->fParameterHandler)   ; +0x90
+    if (arr && arr->getNextIndexOfObject(h, 0) != -1) return true
+    if (!h->setDisplay(this)) return false                  ; vtable 0x850
+    if (!arr) { arr = OSArray::withCapacity(2); this->fParameterHandler = arr; }
+    arr->setObject(h); return true
+
+IODisplay::doUpdate(this)                              0x14cea4be
+    walks the same array, calling each handler's doUpdate   ; vtable 0x868
+```
+
+Three things fall out of that, and each one is why this is cheap:
+
+* **The first caller passes the framebuffer.** We have no ACPI backlight
+  device and do not need one - the unconditional call walks our own
+  framebuffer's children, and a child of our framebuffer is something this
+  kext creates for itself.
+* **The handler list is an `OSArray`.** Adding ours does not displace
+  `IOFramebufferParameterHandler`, so `'brig'`, `'rgsc'`, `'ggsc'`, `'bgsc'`
+  and `'vblm'` all keep working and `"brightness"` appears beside them.
+* **`IODisplay::addParameter` / `setParameter` are public statics taking an
+  `OSSymbol *`**, so an arbitrary-length name is publishable. The FourCC limit
+  is the framebuffer path's, not IODisplay's.
+
+`src/fbkext/RBAMDBacklightParams.cpp` is the handler. It is created after
+`blSetup()` (it refuses unless `blReady` - a parameter whose writes cannot
+reach the register is worse than an absent one) and **before**
+`IOFramebuffer::start()`, because that is what can create an
+`IODisplayConnect` and IOKit matching is asynchronous: registering afterwards
+would race the display's own driver. It publishes the SAME bounds 2xs answers
+for `'brig'` - floor 5120, full 65536 - because two parameters naming one
+register must agree about its range, and it writes back what `blSetLevel`
+actually clamped to rather than what was asked, so the dictionary cannot end
+up fighting the hardware.
+
+**The plane is settled from the other end, not from the GOT.** The plane in
+`searchParameterHandlers` is one of two imported globals and the slot does not
+name itself. Apple's own handler for this category is `AppleIntelPanelA`,
+whose personality is `IOProviderClass = IOACPIPlatformDevice`,
+`IOMatchCategory = IODisplayParameters` - it is its provider's SERVICE-plane
+child, and the entry searched for it is that provider. So `gIOServicePlane`,
+and `attach()` + `registerService()` is the whole requirement. Rule 14 rather
+than trust: **`RBFBBlParmSetDisplays` counts the calls we actually receive**,
+so if this reasoning is wrong the boot says 0 instead of being silent, and the
+next step is the device tree rather than another guess.
+
+Every counter separates one distinct outcome, named before the boot:
+
+| reading | what it means |
+|---|---|
+| `SetDisplays` 0 | IODisplay never found us walking its framebuffer's children - the plane is wrong, NOT a publish failure |
+| `NoDict` non-zero | found us, but the display had no `IODisplayParameters` |
+| `PublishFails` non-zero | found us, had the dict, and `addParameter` refused |
+| `Sets` 0 with the rest fine | published and nothing ever asked - the UI does not use `kIODisplayBrightnessKey` either |
+
+`-rbgpufbblparm` is its own arg because it creates and registers a NEW IOKit
+service as a child of this one, which is a different risk from answering two
+attributes (2xy) or writing a duty cycle (2xs). Rule 30: it shares
+`-rbgpufbb` with the other two and diverges at the next character (l against a
+and u), and the hosttest's collision check covers the whole namespace.
+
+Deliberately NOT published: `"linear-brightness"` and
+`"usable-linear-brightness"`, whose scale and meaning differ (linear against
+perceptual). Publishing both would change two things in one boot and could
+produce a slider whose position disagrees with the panel. If the keys still do
+not respond with `"brightness"` present, that is the next single variable.
+
+Built, 97 symbols from the system collection, 0 unresolved;
+`_gIODisplayBrightnessKey`, `IODisplay::addParameter` and
+`IODisplay::setParameter` each checked bound individually against a control
+(rule 1, rule 26). `hosttest: all passed`. **Never booted.**

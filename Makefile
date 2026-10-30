@@ -364,7 +364,7 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 # check_imports.py's 0-from-SystemKernelExtensions rule does NOT apply here -
 # this kext is REQUIRED to resolve against the system collection.
 FBKEXT_SRC    := $(PROJ_ROOT)/src/fbkext
-FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/RBAMDFramebufferHUBP.o $(BUILD_DIR)/fbkext/RBAMDFramebufferBacklight.o $(BUILD_DIR)/fbkext/kmod_info.o
+FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/RBAMDFramebufferHUBP.o $(BUILD_DIR)/fbkext/RBAMDFramebufferBacklight.o $(BUILD_DIR)/fbkext/RBAMDBacklightParams.o $(BUILD_DIR)/fbkext/kmod_info.o
 FBKEXT_BUNDLE := $(OUT)/RBAMDFramebuffer.kext
 FBKEXT_BIN    := $(FBKEXT_BUNDLE)/Contents/MacOS/RBAMDFramebuffer
 

@@ -119,37 +119,28 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness.** 2xs **DONE, boot 249**; 2xy **DONE, boot 250** -
-  `AppleBacklightDisplay` matches (`IOProbeScore` 3000,
-  `IODisplayConnectFlags <00080000>`, `AppleSense 0`, `AppleDisplayType 2`,
-  and `RBFBBlFlagsGets`/`RBFBBlSenseGets` both 2, so the probe asked and
-  accepted). **The name gap survived both** and is now the only thing left:
-  the class match does NOT add a full-name `"brightness"` parameter, so
-  `kIODisplayBrightnessKey` still answers `kIOReturnUnsupported` and only
-  `"brig"` works. `./build/out/blset <0..1>` drives it today. What publishes
-  `kIODisplayBrightnessKey` on Apple hardware is a STATIC question needing no
-  boot: `AppleBacklight.kext`'s only personality is `AppleIntelPanelA`, which
-  claims `IOMatchCategory IODisplayParameters` against an
-  `IOACPIPlatformDevice` named `backlight` - so the full-name parameters may
-  come from a separate driver claiming that category, not from the framebuffer.
-  Superseded detail, kept because it was acted on: 2xs is **DONE, boot 249** — the parameter is published, the
-  duty cycle is written and reads back bit-identical, and `make blset` changes
-  it from userspace with no boot. What is left is the System Settings slider,
-  and the gap is a NAME: our parameter is keyed `"brig"` because
-  `IOFramebufferParameterHandler` builds the key from the 4-byte FourCC, while
-  `kIODisplayBrightnessKey` is `"brightness"`, which answers
-  `kIOReturnUnsupported`. A framebuffer cannot fix that from its side — the
-  full-name parameter is `IOBacklightDisplay`'s to publish, which is what
-  makes **2xy necessary**. 2xy is still unmeasured.
-  `-rbgpufbbacklight` writes the PWM duty cycle (2xs); `-rbgpufbbuiltin`
-  answers `kConnectionFlags` with `kIOConnectionBuiltIn` and `getAppleSense`
-  with `kPanelTFTConnect`, the two things `IOBacklightDisplay::probe` requires
-  before `AppleBacklightDisplay` can match the connection and System Settings
-  can draw the slider (2xy). Separately armed on purpose: the match reaches the
-  display-prefs key, mirroring and the wrangler's dimming, the write only
-  reaches a duty cycle. `RBFBBlBuiltIn` / `RBFBBlFlagsGets` / `RBFBBlSenseGets`
-  tell "the probe never asked" from "it asked and still did not match"; the
-  outcome is `ioreg -rl -c IODisplayConnect`.
+- **Brightness** — three pieces, two confirmed on hardware, one built and
+  unbooted. **2xs (DONE, boot 249)** `-rbgpufbbacklight` writes the PWM duty
+  cycle; written and read back bit-identical, and the user confirmed the panel
+  physically changes. **2xy (DONE, boot 250)** `-rbgpufbbuiltin` answers
+  `kConnectionFlags` with `kIOConnectionBuiltIn` and `getAppleSense` with
+  `kPanelTFTConnect`, and `AppleBacklightDisplay` now matches the connection
+  (`IOProbeScore` 3000, `IODisplayConnectFlags <00080000>`, `AppleSense 0`,
+  `AppleDisplayType 2`, `RBFBBlFlagsGets`/`RBFBBlSenseGets` both 2). **Neither
+  produced a slider or working brightness keys**, because the parameter is
+  named `"brig"` — `IOFramebufferParameterHandler` builds each key from the
+  4-BYTE FourCC in the `'parm'` list, so four characters is all a framebuffer
+  can name, while every client looks for `kIODisplayBrightnessKey`, the string
+  `"brightness"`, and gets `kIOReturnUnsupported`. 2xy's commit guessed
+  `IOBacklightDisplay` would publish the full name once it matched; boot 250
+  settled that it does not. **2y0 (built, NEVER BOOTED)**
+  `-rbgpufbblparm` publishes `"brightness"` from our own
+  `IODisplayParameterHandler`, attached as a service-plane child of the
+  framebuffer — which is exactly where `IODisplay::searchParameterHandlers`
+  (0x14ce7d66) looks, its first caller passing the framebuffer itself
+  (0x14ce8ba4). Handlers live in an `OSArray` (0x14ce7e04), so ours does not
+  displace the framebuffer's and `'brig'` keeps working. `./build/out/blset
+  <0..1>` drives brightness today with no slider.
 - **The last ~22 % of the frame rate.** 82/s against the panel's 143.83; not
   established whether that is demand-limited or still gated (2xi/2xo).
 - **The wedge**, an independent second defect: work submitted that never
@@ -543,9 +534,11 @@ prints which NVRAM keys would disarm a half.
 - The **boot sentinel** needs no command: a boot that does not survive 60 s
   makes the next one stock automatically.
 
-**Still opt-in, and why:** `-rbgpufbbacklight` (never booted, 2xs),
-`-rbgpufbbuiltin` (never booted, 2xy - changes which `IODisplay` subclass
-matches the connection), `-rbgpuosforce` (2xz - arms the default-on table on an
+**Still opt-in, and why:** `-rbgpufbbacklight` (2xs, booted and working),
+`-rbgpufbbuiltin` (2xy, booted and working - changes which `IODisplay`
+subclass matches the connection), `-rbgpufbblparm` (2y0, **never booted** -
+creates and registers a new IOKit service as a child of the framebuffer),
+`-rbgpuosforce` (2xz - arms the default-on table on an
 OS none of the measured offsets came from; a safety gate's override is never
 default-on),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbmatch` (spoofs
