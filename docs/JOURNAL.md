@@ -48429,3 +48429,59 @@ Then the reading is unambiguous for the first time since 240:
   separation cannot be done by disarming it, and the next step is static: dump
   the donor record with `tools/re/` and find which fields advertise the display
   pipeline.
+
+### 2xx: the capability record is load-bearing, and the fbkext was never updated
+
+The reset boot (246) is the first attributable reading since 240: boot-args hold
+exactly `rbgpumtlkscope=* -rbgpunosentinel -rbgpunocaptbl`, `rbgpu-boot`
+incremented again, 217 diag keys published, `armed=1 arm_why=0`, and
+**`cap_tbl_patched=2`** - the skip genuinely took. The desktop was clean and
+**unaccelerated**, and the diag says exactly where it stopped:
+
+```
+ttl_is_supp_calls=1  ttl_is_supp_ret=1        the supported-device override worked
+cap_tbl_patched=2                             the table was skipped
+ttl_init_ret=0xE00002BC                       kIOReturnError
+ttl_raw_init_ret=4
+gc_vercheck_patched=1  gc_regcheck_patched=1  smu_hook_routed=1
+```
+
+So `_ttl_hw_init` fails with `kIOReturnError` when `_DeviceCapabilityTbl`
+carries no record for 0x1681. **The cloned record is required to bind**, which
+is outcome three of the three named in advance: the separation cannot be done
+by disarming it, and it also means the table is still only the last unexplained
+token, not a demonstrated cause - HWLibs' capability table is about IP and
+firmware capability, not display colour depth.
+
+Then the RE descent was cut short, because rule 15 had been skipped for nine
+boots. `kextstat`:
+
+```
+com.rembrandtgpu.plugin  FE3200B0   = 2xx, current
+com.rembrandtgpu.fb      C7278266   != 33D9C184 (2xw) and != 353A1D24 (2xx)
+```
+
+**The loaded framebuffer predates 2xw.** Its `armedOnce()` has none of
+2xw/2xx: no `rbgpu-gen` generation rule, no rule-38 check, no `RBGPUStock`
+handshake with the peer. Every reading about "our framebuffer declined" has
+been taken against a binary two milestones old, and boot 237 leaving no
+`rbgpu-fbcrumb` - the gap flagged as "the next thing to close" - is explained
+by it.
+
+That reframes the crash, and the reframing fits every observation: all eight
+aborts run on **`CompositorSW`**, SkyLight's *software* compositor. Boot 231,
+the one that worked, logged `Metal compositor activated`. If the Metal
+compositor is active the software path never runs, so neither does
+`SWContext::create_surface_with_properties` and its 816 MB `mmap`. The crash is
+plausibly not something we corrupt at all - it is SkyLight falling back to a
+software compositor whose surface this configuration cannot back, and what
+keeps SkyLight on the Metal path is our framebuffer owning the panel and
+answering `'amtr'`.
+
+Next boot is therefore the configuration the user actually wants, with the one
+thing that was never true made true: **the full 45 defaults, `-rbgpunosentinel`
+only, and the matching 2xx framebuffer installed.** `RBFBArmWhy` is the
+reading - 0 means it took the panel, and anything else names which of the six
+reasons it declined. A `Metal compositor activated` line in the display log and
+no `CompositorSW` in a crash report is the result; it may simply be boot 231's
+working state, reached again.
