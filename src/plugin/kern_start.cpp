@@ -7059,6 +7059,42 @@ static uint64_t g_mtlkFailed  = 0;   // matched the scope but did not complete
 // there - which is a different thing from a failed read, a missing map or an
 // unsolved symbol, and is the only one of them an OS update produces.
 static uint64_t g_mtlkMoved     = 0;
+
+// 2xu: THE LATE PATH. macOS 26 made _vm_map_read_user fail with
+// KERN_INVALID_ADDRESS for EVERY one of boot 226's 1280 exec-time attempts -
+// mtlk_match 0xFFFF, mtlk_patched 0, and mtlk_moved ABSENT, which proves not
+// one of them ever completed a read, because g_mtlkMoved increments only on a
+// successful read whose bytes mismatched. The addresses are right (mtlk_place
+// matched the header exactly, mtlk_slide matched dyld, and the cave pattern
+// reads back byte for byte from a live process), so what broke is the READ at
+// the exec hook, not the target.
+//
+// The fix needs no new kernel route. The plugin already hooks
+// AMDHWAlignManager2::getPreferredSwizzleMode2, which runs in the Metal
+// CLIENT'S OWN process context, long after exec, where the cache is
+// demonstrably readable and current_map() IS the target map - which takes
+// _vm_map_read_user's fast copyin path instead of the map-switch path that is
+// failing. So retry the placement from there, once per pid.
+//
+// KNOWN AND STATED: that hook is per-surface, so a process's FIRST surface can
+// be laid out before the patch lands. One surface per process, against a
+// desktop that is currently unreadable. If that proves visible, the right
+// point is the client's user-client open, not the swizzle query.
+// NOT ESTABLISHED: that the hook always runs on the client's thread. If it
+// runs on a workloop thread current_map() is the kernel map and the read
+// fails - which is why mtlk2_read publishes the kern_return verbatim rather
+// than a bool (rule 14).
+static vm_map_t (*g_mtlkCurrentMap)(void)  = nullptr;
+static int      (*g_mtlkProcSelfPid)(void) = nullptr;
+static uint32_t g_mtlk2On       = 0;   // 0 unchecked, 1 armed, 2 off by arg
+static uint64_t g_mtlk2Calls    = 0;   // entered with everything ready
+static uint64_t g_mtlk2Patched  = 0;   // cave AND detour verified in a client
+static uint64_t g_mtlk2Failed   = 0;
+static uint64_t g_mtlk2Moved    = 0;   // read OK, bytes were neither
+static uint64_t g_mtlk2Read     = 0;   // last place() verdict, 0xFFFF = no read
+static int      g_mtlk2Pids[96] = {};
+static int      g_mtlk2NPids    = 0;
+static int      g_mtlk2LastPid  = -1;
 static bool     g_mtlkMovedSaid = false;
 // place()'s verdict, set on EVERY call: 1 = original found, 2 = already
 // placed, 0 = neither, 0xFFFF = the read itself failed. The diag key of the
@@ -7608,6 +7644,13 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
         { "_vm_map_read_user", reinterpret_cast<void **>(&g_mtlkVmMapReadUser) },
         { "_vm_map_write_user", reinterpret_cast<void **>(&g_mtlkVmMapWriteUser) },
         { "_get_bsdtask_info", reinterpret_cast<void **>(&g_mtlkGetBsdTaskInfo) },
+        // 2xu: the late path needs the CURRENT map, not a task's, because it
+        // runs on the client's own thread - which is the whole point, since
+        // current_map() == map takes vm_map_read_user's fast copyin path.
+        // NOTE: mtlk_syms is now a SIX-bit mask, so "all resolved" is 0x3F,
+        // not the 0xF that macOS 15 captures show.
+        { "_current_map",      reinterpret_cast<void **>(&g_mtlkCurrentMap) },
+        { "_proc_selfpid",     reinterpret_cast<void **>(&g_mtlkProcSelfPid) },
     };
     uint64_t have = 0;
     for (size_t i = 0; i < arrsize(syms); i++) {
@@ -7642,6 +7685,101 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
               "ARMED IS NOT EVIDENCE - scoped to cavecheck, cave only, no "
               "detour; read mtlk_* from the IORegistry (rule 20).",
               have, okSlide && g_mtlkOrgSlide ? 1 : 0, okQos && g_mtlkOrgQos ? 1 : 0);
+}
+
+// 2xu: called from a hook that runs in the Metal client's own process. Does
+// nothing at all unless the exec path's machinery is up, and refuses loudly
+// rather than silently (rule 14). Reuses rbgpu_mtlk_place unchanged, so 2om's
+// compare-before-write fail-safe still means a wrong address writes NOTHING.
+static void rbgpu_mtlk_try_late(void) {
+    if (g_mtlk2On == 0) {
+        g_mtlk2On = checkKernelArgument("-rbgpumtlknolate") ? 2u : 1u;
+        rbgpu_diag_set_num("mtlk2_on", g_mtlk2On);
+    }
+    if (g_mtlk2On != 1) {
+        return;
+    }
+    // The same four symbols the exec path needs, plus the two this path adds.
+    if (!g_mtlkSlideSeen || !g_mtlkCurrentMap || !g_mtlkProcSelfPid ||
+        !g_mtlkVmMapReadUser || !g_mtlkVmMapWriteUser) {
+        rbgpu_diag_set_num("mtlk2_ready", 0);
+        return;
+    }
+
+    const int pid = g_mtlkProcSelfPid();
+    if (pid <= 0) {
+        return;
+    }
+    // Cheap same-pid short circuit first: this hook fires per surface, so the
+    // overwhelmingly common case is the pid we just handled (rule 16 - do not
+    // put a linear scan on a hot path when one compare answers it).
+    if (pid == g_mtlk2LastPid) {
+        return;
+    }
+    for (int i = 0; i < g_mtlk2NPids; i++) {
+        if (g_mtlk2Pids[i] == pid) {
+            g_mtlk2LastPid = pid;
+            return;
+        }
+    }
+    // The table is small and a desktop outlives it. When it fills, stop
+    // recording rather than evicting: a forgotten pid would be re-patched on
+    // every surface, and place() would answer "already placed" (isRepl) every
+    // time - correct, but a read and a memcmp per surface forever.
+    if (g_mtlk2NPids < (int)arrsize(g_mtlk2Pids)) {
+        g_mtlk2Pids[g_mtlk2NPids++] = pid;
+    }
+    g_mtlk2LastPid = pid;
+
+    vm_map_t map = g_mtlkCurrentMap();
+    if (map == nullptr) {
+        rbgpu_diag_set_num("mtlk2_map", 0);
+        return;
+    }
+    g_mtlk2Calls++;
+
+    const bool report = g_mtlk2Patched == 0 && g_mtlk2Failed < 8;
+    mach_vm_address_t cavePlace =
+        (RBGPU_MTL_CAVE_VM - RBGPU_MTL_CAVE_ANCHOR) + g_mtlkSlide;
+    mach_vm_address_t fnPlace = RBGPU_MTL_FN_VM + g_mtlkSlide;
+
+    // ORDER IS THE SAFETY PROPERTY, exactly as on the exec path: the detour is
+    // a jmp into the cave, so the cave must be verified present in THIS
+    // process before the detour is written.
+    bool caveOk = rbgpu_mtlk_place(map, cavePlace,
+                                   kRbMtlCaveFind, kRbMtlCaveRepl,
+                                   sizeof(kRbMtlCaveFind),
+                                   "mtlk2_cmatch", "mtlk2_cprot",
+                                   "mtlk2_cwrite", "mtlk2_cverify", report);
+    g_mtlk2Read = g_mtlkLastMatch;
+    rbgpu_diag_set_num("mtlk2_read", g_mtlk2Read);
+    if (!caveOk) {
+        g_mtlk2Failed++;
+        if (g_mtlkLastMatch == 0) {
+            g_mtlk2Moved++;
+        }
+        rbgpu_diag_set_num("mtlk2_failed", g_mtlk2Failed);
+        rbgpu_diag_set_num("mtlk2_moved", g_mtlk2Moved);
+        return;
+    }
+    bool detOk = rbgpu_mtlk_place(map, fnPlace,
+                                  kRbMtlFnFind, kRbMtlFnRepl,
+                                  sizeof(kRbMtlFnFind),
+                                  "mtlk2_dmatch", "mtlk2_dprot",
+                                  "mtlk2_dwrite", "mtlk2_dverify", report);
+    if (detOk) {
+        g_mtlk2Patched++;
+        rbgpu_diag_set_num("mtlk2_patched", g_mtlk2Patched);
+        rbgpu_diag_set_num("mtlk2_pid", pid);
+    } else {
+        g_mtlk2Failed++;
+        if (g_mtlkLastMatch == 0) {
+            g_mtlk2Moved++;
+        }
+        rbgpu_diag_set_num("mtlk2_failed", g_mtlk2Failed);
+        rbgpu_diag_set_num("mtlk2_moved", g_mtlk2Moved);
+    }
+    rbgpu_diag_set_num("mtlk2_calls", g_mtlk2Calls);
 }
 
 
@@ -11782,6 +11920,9 @@ static uint32_t rbgpu_2ld_state(void) {
 static uint32_t hooked_swizmode_2la(void *mgr, void *in) {
     uint32_t r = orig_swizmode_2la ? orig_swizmode_2la(mgr, in) : 0;
     g_rb_2la_swz_calls++;
+    // 2xu: this hook runs in the Metal client's own process, which is the one
+    // context where the exec-time patch's failing read works. Once per pid.
+    rbgpu_mtlk_try_late();
     if (g_rb_2lb_on == 0) {
         g_rb_2lb_on = checkKernelArgument("-rbgpunorotate") ? 1u : 2u;
         rbgpu_log("2lb: rotation remap %s",
