@@ -47732,3 +47732,112 @@ RUNTIME is broken: a two-line program that only calls `printf` SIGILLs when
 built `-fsanitize=address` and runs fine built plain. Every hosttest assertion
 passes unsanitized. The build now probes the runtime and degrades loudly
 (`SAN=auto`), so a broken sanitizer cannot masquerade as a failing test.
+
+## 2xv — THE USB DEFECT IS THE SAME SHAPE AS 2xt: macOS 26 MOVED THE PATCH SITES
+
+No boot. Static read of macOS 26.7.2 (25G332) `AppleUSBXHCI`, plus the live
+registry of boot 231.
+
+**The defect, measured back on 2026-10-08 and still true:** each of the five
+xHCI controllers on this machine exposes **one** MSI vector, so only
+interrupter 0 can raise an interrupt. `AppleUSBXHCI` targets interrupter **1**
+for bulk/control transfer events and **2** for isochronous, and nothing here
+can signal those, so completions are collected by a ~2 s watchdog instead.
+The workaround in place since then is `XHCIPoke.kext`, which polls every
+controller every 10 ms (`xhcipoke=10` in boot-args). The real fix, written the
+next day, is eight OpenCore kernel patches that force every Transfer TRB's
+**Interrupter Target** field to 0.
+
+**Those patches are `MinKernel 24.0.0 / MaxKernel 24.99.99`, and the machine
+is now Darwin 25.6.0.** So on the macOS 26 upgrade they went inert and the
+poke came back — exactly 2xt's shape, two subsystems, one cause: *a patch set
+keyed to a kernel version and to the bytes of a rebuilt Apple binary*. The
+version gate is why they went inert rather than misapplying, which is the
+right failure and worth keeping.
+
+**The live confirmation that the poke is still carrying USB (boot 231,
+`ioreg -rl -c XHCIPoke`):** `pokes 78400` per controller, and for the three
+controllers with devices attached, interrupter 1's event-ring dequeue pointer
+is **moving** — `i1 erdpChg` 284 (XHC3), 107 (XHC0), 485 (XHC1) — while
+`ipSeen 0` on all five says the poke has **never** once found `IMAN.IP` set,
+i.e. no XHCI interrupt is ever pending when it looks. `eintSeen` 407-566 with
+`eintClears` matching: the poke is finding `USBSTS.EINT` set and clearing it
+itself. MSI is programmed correctly (`MSI ctl 0081 en 1 addr fee00000 data
+4074`, vector 116) and MSI-X is off with a table size of 1 — so the
+single-vector fact is the hardware's, not a configuration mistake.
+
+**THE SITES ARE RE-DERIVED, AND THERE ARE NINE, NOT EIGHT.** A Transfer TRB is
+16 bytes and dword 2 (`+0x8`) is
+`TRB-Transfer-Length[16:0] | TD-Size[21:17] | Interrupter-Target[31:22]`, so an
+interrupter of 1 is the immediate `0x00400000`, 2 is `0x00800000`, and a
+run-time index is a `shl $0x16`. Every such site inside the transfer-ring
+builders, in macOS 26's `AppleUSBXHCI` (`__TEXT 0xffffff8002f15000`):
+
+    AppleUSBXHCIRequest::prepare          +0x646  mov $0x400000, 0x8(%rax,%rcx)
+                                          +0x8a2  mov $0x400000, %ecx
+                                          +0xb0b  mov $0x400000, 0x8(%rax,%rbx)
+                                          +0xb5c  mov $0x400000, 0x8(%rax,%rcx)
+    AppleUSBXHCIRequest::addTD            +0x48   shl $0x16, %r12d
+    AppleUSBXHCIIsochronousRequest::prepare +0x6e5 mov $0x800000, 0x8(%rcx,%rdx)
+                                          +0x9f6  or  $0x800000, %eax
+                                          +0xb6d  mov $0x800000, 0x8(%rax,%rcx)
+    AppleUSBXHCISparseRequest::prepare    +0x127  mov $0x400000, %r8d
+
+**Five of the eight macOS 15 Find patterns still match byte for byte; three do
+not** (`prepare+0x910`, `Isoch+0x6d9`, `Isoch+0x9d2`) — the compiler changed
+the instruction that follows in each case. **And the ninth site is new to this
+patch set**: `AppleUSBXHCISparseRequest::prepare` writes interrupter 1 into the
+status dword the same way, and the 2026-10-09 set did not cover it.
+
+**Two sites were found and deliberately NOT patched** (rule 26's shape — a
+constant can be a coincidence): `AppleUSBXHCIPort::interruptOccurred` ORs
+`0x400000` and `0x800000` into the value of a `vt[0xa90]` getter and passes it
+to a `vt[0xa98]` setter. That is a **port state word**, not a TRB, and bits 22
+and 23 of it mean something else entirely.
+
+**Site `prepare+0x8a2` needed its own read before it could be patched**, since
+the immediate goes to `%ecx`, not to memory: `movl $0x400000,%ecx` is the
+**fallback** value of the status dword, and the alternate path at `+0x8b3`
+recomputes `%ecx` as `((min(31,n)|0x20) << 17)` — TD size only, interrupter 0
+already. Both arms converge on `orl %r14d,%ecx; movl %ecx,0x8(%rdx,%r15)` at
+`+0x905`. So zeroing the immediate is correct and changes nothing else.
+
+**THE PATCH TABLE IS SELF-VERIFYING, WHICH IS THE POINT.**
+`tools/re/xhci_intr0_derive.py` re-derives the sites from the kext in the
+running system's boot collection, prints the Find/Replace table, and checks
+that every interrupter immediate in the whole kext is either patched or
+explained, that each Find is **unique** (OpenCore applies with `Count 1`), and
+that Find and Replace are the same length. `tools/xhci_intr0.py verify` runs
+the same uniqueness check from the install path and **refuses** to write a
+table that does not match the running kernel — so the next OS update cannot
+quietly leave an inert patch set in the EFI the way this one did. It also
+refuses an image that already contains the *patched* bytes, because then a hit
+and a miss are indistinguishable. `tools/xhci_intr0_test.py` has 15
+assertions, four of them mutations of the table (duplicate Find, absent Find,
+pre-patched image, a Replace that still carries an interrupter immediate).
+
+**Said before the boot, and the first boot is free.** `sudo tools/efi.sh
+usbintr0 on` adds the nine patches as Darwin 25 only, **leaves `XHCIPoke.kext`
+enabled**, and leaves the Darwin 24 set in place so a rollback to macOS 15
+still works. The poke staying on means USB cannot get worse, and its counters
+are the instrument:
+
+* If the patches applied, **interrupter 1 and 2 stop being used**, so
+  `i1 erdpChg` must stay at its initial 1 on XHC0/XHC1/XHC3 while `i0 erdpChg`
+  keeps climbing — `i0` is the in-boot control that the window was long
+  enough, and XHC4/XHC2 (no devices, `i1 erdpChg` already 1) are the negative
+  controls.
+* `eintSeen` and `eintClears` should fall sharply: the controller's own
+  handler now services `EINT` before the poke looks.
+* `ipSeen` is **not** expected to move. The poke samples at 10 ms and a real
+  interrupt is serviced in microseconds, so `IMAN.IP` being 0 every time it
+  looks stays the normal reading. Do not read `ipSeen 0` after the boot as
+  "the patches did nothing".
+* `i1 erdpChg` still climbing = the patches did not apply. There is **no
+  OpenCore log on disk** to check against (`Misc -> Debug -> Target` is 3, no
+  file bit), so this counter is the only in-boot evidence either way.
+
+Then, and only then, `sudo tools/efi.sh usbpoke off` removes the 10 ms poll
+from the next boot. Rescue for both is the same as every other EFI change:
+`sudo tools/efi.sh restore`, or the Windows procedure in
+`RECOVERY-INTR0.txt` on the EFI.
