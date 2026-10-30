@@ -37,8 +37,12 @@ int defaults_tests(void)
 
     printf("\n-- default-on table (2xw) --\n");
 
-    CHECK(RB_DEFAULT_ON_COUNT == 45,
-          "the table holds the 45 tokens boot 231 ran with");
+    /* 45 was boot 231's token set; 2y2 added the three brightness tokens,
+     * each measured working on its own boot (249, 250, 252/253). The number
+     * is asserted so the table cannot drift by accident - a token arriving or
+     * leaving should cost a line in a journal entry, not go unnoticed. */
+    CHECK(RB_DEFAULT_ON_COUNT == 48,
+          "the table holds boot 231's 45 tokens plus 2y2's three brightness tokens");
 
     /* no duplicates: a token listed twice would hide a typo */
     int dup = 0;
@@ -109,14 +113,29 @@ int defaults_tests(void)
     CHECK(!rb_default_on("-rbgpufbmatch"), "-rbgpufbmatch stays OFF (kills the accelerator)");
     CHECK(!rb_default_on("-rbgpupdefix"), "-rbgpupdefix stays OFF (the halt returns)");
     CHECK(!rb_default_on("-rbgpumcreg"), "-rbgpumcreg stays OFF (its failure is a hang)");
-    CHECK(!rb_default_on("-rbgpufbbacklight"), "-rbgpufbbacklight stays OFF (never booted)");
-    /* 2xy: -rbgpufbbuiltin changes which IODisplay subclass matches the
-     * connection, which reaches the display-prefs key, mirroring and the
-     * wrangler's dimming as well as the slider. Never booted either. */
-    CHECK(!rb_default_on("-rbgpufbbuiltin"), "-rbgpufbbuiltin stays OFF (never booted)");
-    /* 2y0: creates and registers a new IOKit service as a child of the
-     * framebuffer, which is a different risk from the other two. */
-    CHECK(!rb_default_on("-rbgpufbblparm"), "-rbgpufbblparm stays OFF (never booted)");
+    /* 2y2: the three brightness tokens are IN the table now. Each was
+     * measured working on this OS on its own boot - 249, 250, 252/253 - which
+     * is exactly what this table asks of an entry, and the boot sentinel is
+     * the recovery if one turns out wrong. The assertions are kept rather
+     * than deleted, inverted, so that a token silently dropping out of the
+     * table fails the build instead of quietly reverting the feature. */
+    CHECK(rb_default_on("-rbgpufbbacklight"), "-rbgpufbbacklight is default-on (2xs, boot 249)");
+    CHECK(rb_default_on("-rbgpufbbuiltin"), "-rbgpufbbuiltin is default-on (2xy, boot 250)");
+    CHECK(rb_default_on("-rbgpufbblparm"), "-rbgpufbblparm is default-on (2y1/2y2, boots 252-253)");
+    /* Each must still be switchable off from the machine it runs on - rule 37.
+     * A default-on feature with no reachable negative is not a default, it is
+     * a hardcode. The table-wide loop above already asserts this for every
+     * entry; these name the three explicitly so the negative a user would
+     * actually type is written down somewhere checkable. */
+    rb_off_token("-rbgpufbbacklight", off, sizeof(off));
+    CHECK(!strcmp(off, "-rbgpunofbbacklight"),
+          "-rbgpufbbacklight negates to -rbgpunofbbacklight");
+    rb_off_token("-rbgpufbbuiltin", off, sizeof(off));
+    CHECK(!strcmp(off, "-rbgpunofbbuiltin"),
+          "-rbgpufbbuiltin negates to -rbgpunofbbuiltin");
+    rb_off_token("-rbgpufbblparm", off, sizeof(off));
+    CHECK(!strcmp(off, "-rbgpunofbblparm"),
+          "-rbgpufbblparm negates to -rbgpunofbblparm");
     /* 2xz: -rbgpuosforce must never be in the table. It exists to arm the
      * table on an OS where none of the measured offsets were measured, and a
      * default-on override of a safety gate is not an override at all. */

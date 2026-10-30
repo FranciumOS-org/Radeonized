@@ -52,6 +52,14 @@ static const char *const rb_default_on_tokens[] = {
     "-rbgpuagdccaps", "-rbgpuownfb", "-rbgpufbaty", "-rbgpufbamtr",
     "-rbgpufbhubp", "-rbgpufbflipall", "-rbgpufbflippend", "-rbgpufbnotready",
     "-rbgpufbotgany", "-rbgpufbretire", "-rbgpufbpoll", "-rbgpuschedtick",
+    /* brightness, measured working on this OS across consecutive boots:
+     * 2xs the duty cycle (boot 249), 2xy the AppleBacklightDisplay match
+     * (boot 250), 2y1 the full-length parameter name (boot 252), 2y2 the
+     * `linear-brightness` key CoreBrightness actually writes (boot 253 - the
+     * slider and the brightness keys both move the panel). These were opt-in
+     * while each was unbooted; the standard this table asks for is a measured
+     * boot, and they now have four between them. */
+    "-rbgpufbbacklight", "-rbgpufbbuiltin", "-rbgpufbblparm",
     /* instruments. They cost diag-table slots and nothing else, and they are
      * part of the measured configuration, so they stay on: a boot that reads
      * differently from boot 231 should differ in the hardware, not in what we

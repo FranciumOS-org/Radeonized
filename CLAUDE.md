@@ -218,7 +218,13 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
 - `make kext tools`, `make fbkext`, and **`make plugin` for the Lilu plugin —
   `make kext tools` does NOT rebuild it.** CommandLineTools only, no Xcode.
 - **Always check the UUID moved** (`dwarfdump --uuid build/out/...`). Two boots
-  were lost to a stale build.
+  were lost to a stale build - and 2y3 found `make fbkext` printing `KEXT` over
+  objects it had not recompiled, because the Makefile's `-include` of the
+  depfiles never named `FBKEXT_OBJS`: for every milestone before 2y3, a
+  src/fbkext object rebuilt only when `RBAMDFramebuffer.hpp` changed, so a
+  `src/common` header edit alone rebuilt **nothing**. Fixed, and verified in
+  both directions. The UUID check is what caught it, which is why it is a hard
+  rule and not advice.
 - **And for `src/fbkext`, check the UUID inside the COLLECTION, not in
   `/Library/Extensions`** — they are different facts and three boots went to
   the gap (2xy):
@@ -547,13 +553,7 @@ prints which NVRAM keys would disarm a half.
 - The **boot sentinel** needs no command: a boot that does not survive 60 s
   makes the next one stock automatically.
 
-**Still opt-in, and why:** the three brightness tokens
-`-rbgpufbbacklight` (2xs), `-rbgpufbbuiltin` (2xy - changes which `IODisplay`
-subclass matches the connection) and `-rbgpufbblparm` (2y1/2y2 - registers a
-new IOKit service as a child of the framebuffer and replaces the display's
-parameters property) are **each measured working on this OS across consecutive
-boots** and are candidates for `rb_defaults.h`; they are opt-in only because
-nothing has moved them yet,
+**Still opt-in, and why:**
 `-rbgpuosforce` (2xz - arms the default-on table on an
 OS none of the measured offsets came from; a safety gate's override is never
 default-on),

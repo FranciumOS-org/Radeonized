@@ -487,7 +487,16 @@ plugin: hosttest osrange $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(KEXT_OBJS:.o=.d) $(PLUGIN_OBJS:.o=.d)
+# 2y2: FBKEXT_OBJS was missing here, and the compiler had been writing its
+# depfiles all along - `-MMD -MP` is in the same CXXFLAGS. So src/fbkext
+# objects rebuilt only on the one prerequisite hardcoded into their rule
+# ($(FBKEXT_SRC)/RBAMDFramebuffer.hpp) and a change to rb_defaults.h,
+# rb_backlight.h, rb_regs.h or any other src/common header silently rebuilt
+# NOTHING. Every 2y1/2y2 build happened to touch RBAMDFramebuffer.hpp, which
+# is why it never showed; making the three brightness tokens default-on did
+# not, and `make fbkext` reported KEXT over a binary whose UUID had not moved.
+# Caught only by the UUID check, which is why that check is a hard rule.
+-include $(KEXT_OBJS:.o=.d) $(PLUGIN_OBJS:.o=.d) $(FBKEXT_OBJS:.o=.d)
 
 # 2pb: where the display time actually goes. fbperf compares a GPU-side blit
 # (the control) against the scanout read path; fbpresent measures the real

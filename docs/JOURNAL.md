@@ -49332,3 +49332,57 @@ across consecutive boots, which is the standard 2xw asks of anything in
 `rb_defaults.h`. Moving them into the default-on table is a one-line change per
 token plus the hosttest's own assertions, and the boot sentinel is the recovery
 if a default turns out to be wrong.
+
+## 2y3 — brightness goes default-on, and the fbkext had no header dependency tracking
+
+The user's word on boot 253: the slider works and **the brightness keys work**.
+That closes the original ask whole. So the three tokens move into
+`rb_defaults.h`: `-rbgpufbbacklight`, `-rbgpufbbuiltin`,
+`-rbgpufbblparm`. Each is measured working on this OS on its own boot (249,
+250, 252/253), which is the standard 2xw asks of a table entry, and the boot
+sentinel is the recovery if a default turns out wrong. The count assertion
+moves 45 -> 48 deliberately, and the three "stays OFF (never booted)" checks
+are **inverted rather than deleted**, so a token silently dropping out of the
+table fails the build instead of quietly reverting the feature. Each one's
+derived negative is asserted by name as well as by the table-wide loop:
+`-rbgpunofbbacklight`, `-rbgpunofbbuiltin`, `-rbgpunofbblparm` (rule 37 -
+a default-on feature with no reachable negative is a hardcode, not a default).
+
+**And making that change found a silent stale build.** `make fbkext` printed
+`KEXT` and relinked over objects it had not recompiled: `rb_defaults.h` was
+modified at 17:07:34 and every `build/fbkext/*.o` was still from 16:47:17.
+The cause is one line - the Makefile's
+
+    -include $(KEXT_OBJS:.o=.d) $(PLUGIN_OBJS:.o=.d)
+
+never named `FBKEXT_OBJS`. The compiler had been writing those depfiles the
+whole time (`-MMD -MP` is in the same CXXFLAGS, and
+`build/fbkext/RBAMDFramebuffer.d` already named `rb_defaults.h` twice);
+nothing read them. So src/fbkext objects rebuilt **only** on the single
+prerequisite hardcoded into their rule, `$(FBKEXT_SRC)/RBAMDFramebuffer.hpp`,
+and a change to any `src/common` header rebuilt nothing at all.
+
+Why it never showed before: every 2y0/2y1/2y2 change added counters, so every
+one of those builds touched `RBAMDFramebuffer.hpp` and rebuilt by accident.
+This change touched only `src/common` and `tools/hosttest`, so it rebuilt
+nothing - and `make` said `KEXT` over it. **Caught only by the UUID check**,
+which is exactly why that is a hard rule and not advice. Rule 16 in its build
+form: the build system is an instrument and it is a suspect.
+
+Fixed by adding `$(FBKEXT_OBJS:.o=.d)`, and verified in both directions
+rather than once: touching `rb_backlight.h` now rebuilds exactly the three
+files that include it (`RBAMDFramebuffer`, `RBAMDFramebufferBacklight`,
+`RBAMDBacklightParams`) and touching `rb_smu13.c`, which nothing in
+src/fbkext includes, rebuilds **0** files. The negative control matters as much
+as the positive one here: `-include` of a wrong variable would also have
+"worked" by rebuilding everything every time.
+
+How many earlier boots this cost is not knowable and is not claimed. What is
+knowable: any src/fbkext reading taken after a src/common-only edit, in any
+milestone before this one, was taken against a binary that did not contain the
+edit unless RBAMDFramebuffer.hpp also changed in that commit.
+
+Built: hosttest all passed, `LINK 99 symbols from the system collection, 321
+from boot`, fbkext UUID **F2DCD77C-8082-3E2E-828F-23C168C5865A**, plugin UUID **C518C319-7CD5-37B4-A6CD-21127211D39F**. Both halves change here
+because `rb_defaults.h` is compiled into both (rule 38, rule 15: this install
+is two artifacts, not one).
