@@ -48144,3 +48144,51 @@ is in the accelerator half and our framebuffer is exonerated; if the desktop is
 clean, the 903 MB of CG framebuffers is ours and the aperture is the lead.
 Either way one boot splits it, and `sudo nvram -d rbgpu-safe` first so the
 sentinel latch boot 237 left set does not spend it on a stock boot.
+
+### 2xx: the crash localised to the accelerator half, and two suspects killed
+
+Boot at 02:04:19 with `-rbgpunoownfb` (capture
+`logs/20261030-020547-plugin`): accelerator armed, panel back to
+`IONDRVFramebuffer` (`fb0:0 /.Display_boot` in the GPUWrangler lines), and
+**WindowServer still crash-looped** — pids 851 → 1150 → 1199 in eleven
+seconds. `arm_why 0`, `armed 1`, `gen 1`, `linear_force 1`, `mtlk_scope *`,
+`mtlk2_patched 33`, `mtlk2_uc 155`, `agdc_link_result 0`.
+
+**Our framebuffer is exonerated.** It declined the panel in that boot and the
+crash was unchanged.
+
+**The configuration is exonerated too.** The pre-strip EFI backup
+(`logs/efi-backups/20261030-015122-defaults/config.plist`) holds 46 rbgpu
+tokens: the 45 in `rb_defaults.h` plus `rbgpumtlkscope=*`, and the set
+difference against the table is empty in both directions. So the armed set
+after `efi.sh defaults` is *exactly* boot 231's, which did not crash. 2xw's
+50 `checkKernelArgument` → `rbgpu_arg` swaps cannot have changed it either:
+a table token is on unless its negative is present, and a non-table token
+keeps `checkKernelArgument` verbatim.
+
+**The 2xv USB patches are exonerated.** They were installed at 00:32 and are
+live in every boot since, including the half-dozen `-rbgpuoff` boots the user
+has logged into normally all night.
+
+So: plugin off ⇒ fine. Accelerator armed ⇒ crash, in **all four** armed boots
+and independently of both halves that were suspected —
+
+| boot | our fb | sched tick | WindowServer |
+|---|---|---|---|
+| 231 (10-29) | owns panel | armed | fine |
+| 235 | owns panel (`rbgpu-fbcrumb b=235`, h=0 w=0) | off (`tos=3`) | **crash** |
+| 236 | declined (`rbgpu-fb` read "0") | off | **crash** |
+| 237 | — (no crumb) | armed (`tick_us=1b20`) | **crash** |
+| 02:04 | declined (`-rbgpunoownfb`) | armed | **crash** |
+
+The fault is therefore in the accelerator half and in neither the framebuffer
+nor the tick, and it is not a difference in which tokens are on. What remains
+is which of the 45 defaults, or the always-on `processKernel` core, and that
+is a 45-way space: guessing one and wedging the desktop costs more boots than
+splitting it. **No fix is committed here, deliberately** — rules 16 and 39.
+
+Next boot, and it is a halving rather than a guess: **`-rbgpustock`**, the
+plugin alive with every default off. Clean ⇒ the fault is one of the 45 and
+the bisect proceeds by halves. Still crashing ⇒ it is the always-on core,
+which 2xv/2xw/2xx never touched, and the frontier moves off the arming
+entirely. Clear `rbgpu-safe` first or the sentinel spends the boot.
