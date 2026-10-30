@@ -44,16 +44,28 @@ spec.loader.exec_module(cp)
 sys.path.insert(0, "tools/re")
 from dyldcache import Cache                                   # noqa: E402
 
-FN_VM      = 0x7FFB08D35A11        # amdMtl_HWL_DetermineSwizzleMode
-TEXT_VM    = 0x7FFB08BF3000        # the dylib's __TEXT, as the .map reports it
-CONST_VM   = 0x7FFB08FB46A0        # __const
-CONST_LEN  = 906664
-CAVE_VM    = 0x7FFB08FB75A0        # 16-aligned, inside a 273-byte zero run
+# 2xt: re-derived for macOS 26.7.2 (25G332). The driver's __TEXT moved
+# 0x7FFB08BF3000 -> 0x7FFB110D4000 (0x84E1000) and the image was rebuilt, so
+# every one of these had to be measured again. The function was confirmed three
+# independent ways: its 30-byte prologue is unique in the new __TEXT, its
+# offset within __TEXT barely moved (0x142A11 -> 0x14222D), and LC_SYMTAB lands
+# EXACTLY on the address with the name amdMtl_HWL_DetermineSwizzleMode. The
+# macOS 15 values are in git history; do not reuse them.
+FN_VM      = 0x7FFB1121622D        # amdMtl_HWL_DetermineSwizzleMode
+TEXT_VM    = 0x7FFB110D4000        # the dylib's __TEXT, as the .map reports it
+TEXT_LEN   = 0x4E8570              # .map's __TEXT end minus TEXT_VM
+CONST_VM   = 0x7FFB1147A7C0        # __const
+CONST_LEN  = 0xDDB98
+CAVE_VM    = 0x7FFB1147D710        # 16-aligned, inside a 273-byte zero run
 ANCHOR     = 48                    # bytes of context before the cave
 ZEROS      = 176                   # bytes of the run the cave replaces
 
 c = Cache()
 cp.CAVE_VM = CAVE_VM               # re-base the verified cave builder
+# 2xt: build_cave()'s jump back to FN+30 and detour()'s rel32 both read
+# cachepatch.py's OWN FN_VM, not this file's. They were equal until macOS
+# 26 moved the driver, so this line was latent and is now load-bearing.
+cp.FN_VM = FN_VM
 cave = cp.build_cave()
 assert len(cave) <= ZEROS, f"cave is {len(cave)} bytes, only {ZEROS} reserved"
 
@@ -66,7 +78,7 @@ repl = find[:ANCHOR] + cave + bytes(ZEROS - len(cave))
 
 fnfind = c.read(FN_VM, 30)
 assert fnfind == cp.PROLOGUE, "the function prologue moved"
-text = c.read(TEXT_VM, 0x5029AE)
+text = c.read(TEXT_VM, TEXT_LEN)
 assert text.count(fnfind) == 1, "the prologue is not unique in __TEXT"
 fnrepl = cp.detour() + fnfind[5:]
 

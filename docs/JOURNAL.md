@@ -47570,3 +47570,49 @@ no `AppleBacklightDisplay` needed). The next step there is a **static read**,
 no boot: how `IODisplay` in `IOGraphicsFamily` maps the parameter name
 `"brightness"` to the selector it then calls on the framebuffer. The
 refresh-rate menu stays sequenced behind HDMI's mode-setting code.
+
+## 2xr — HDMI is wired to the dGPU, so it is UNREACHABLE, not merely unbuilt
+
+**The user's own words, which is the allowed channel for a Windows fact:**
+*"in Windows, when im in Eco mode the HDMI never works, i have to be in Hybrid
+so both 4050 and the iGPU have to be on."*
+
+**Eco mode is iGPU-only by definition** - that is what it is for, and the
+laptop panel works in it. A port that works in Hybrid and **never** in Eco
+therefore tells us which chip its TMDS lanes leave from: **the RTX 4050**, not
+the Radeon 680M. The user raised the alternative themselves ("is it a windows
+driver limitation") and the shape of the symptom answers it: a driver
+limitation presents as degraded, intermittent, or needing a replug. *Never, in
+every Eco boot,* is a wiring fact.
+
+**AND IT EXPLAINS 2xq EXACTLY.** Boot 221 read OTG1/2/3 all `0x300` with a
+display physically attached, and the reason is now not "the GOP chose not to
+light it" but **there is no HDMI connector on the 680M's display engine to
+light**. Two independent measurements agreeing - one on the chip, one in
+Windows - where 2xq had only one and read it as a policy decision.
+
+**So HDMI moves from "the full project 2or described" to UNREACHABLE.** Every
+line of DCN 3.1.2 HPD / DDC / link-training / stream-encoder code would drive
+an encoder with nothing wired to it. The chip the port IS wired to is an
+NVIDIA RTX 4050, which macOS has had no driver for since Mojave, and which
+does not even appear in this machine's PCI tree: a full `ioreg -rl -c
+IOPCIDevice` scan gives vendor ids **0x1022, 0x1002, 0x10ec, 0x2646, 0x1344
+and zero occurrences of 0x10de** (`-wegnoegpu` is in boot-args, so the absence
+is expected and is not itself the finding).
+
+**What is NOT established, and is the one remaining external-display path.**
+Whether a MUX sits on the HDMI line that the iGPU could in principle be
+switched onto - some ASUS designs mux the *internal panel* and hard-wire HDMI,
+others mux both. **Do not settle this from general knowledge** (rule 25): it
+needs either the user's own observation or an ACPI/_DOD read. It changes
+nothing about the verdict, because a mux that only powers up with the dGPU is
+equally out of reach here. **The reachable candidate, if the machine has one,
+is a USB-C port carrying DisplayPort alt mode wired to the iGPU** - that is a
+hardware question for the user, not a code question, and it costs no boot.
+
+**Consequence for the refresh-rate ask**: 2or sequenced the Hz menu behind
+"the same mode-setting code HDMI needs". That sequencing is now **void** - the
+mode-setting code is no longer going to be written for HDMI's sake. If a
+refresh-rate menu is ever wanted it has to be justified on the internal
+panel's own terms (OTG timing + the DCCG pixel clock, writes where a wrong
+value is no signal), and nothing has changed to make that cheaper.

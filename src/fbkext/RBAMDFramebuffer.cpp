@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* RBAMDFramebuffer: see RBAMDFramebuffer.hpp. */
 #include "RBAMDFramebuffer.hpp"
+#include "rb_backlight.h"
 #include "rb_hubp.h"
 
 #include <IOKit/IOLib.h>
@@ -319,6 +320,40 @@ bool RBAMDFramebuffer::start(IOService *provider)
         hubpOtgAny = PE_parse_boot_argn("-rbgpufbotgany", otgflag,
                                         sizeof(otgflag)) && hubpArmed;
     }
+    /* 2xs: -rbgpufbbacklight. Deliberately NOT gated on hubpArmed or
+     * amtrArmed: the backlight needs only the panel, and coupling it to the
+     * HUBP write would mean a boot that cannot test one cannot test the
+     * other (rule 38 names what each half depends on - this half depends on
+     * nothing but owning the panel). Rule 30 checked against every token in
+     * use: -rbgpufbaty / -rbgpufbamtr / -rbgpufbhubp / -rbgpufbflipall /
+     * -rbgpufbflippend / -rbgpufbnotready / -rbgpufbotgany / -rbgpufbretire
+     * / -rbgpufbvbl / -rbgpufbvram / -rbgpufbaccel / -rbgpufbmatch /
+     * -rbgpufbvramrange / -rbgpufbnocrumb / -rbgpufbpoll - none prefixes
+     * -rbgpufbbacklight and it prefixes none of them (the longest shared
+     * prefix with any of them is `-rbgpufb`). */
+    blArmed = false;
+    blFloor = RB_BL_LEVEL_FLOOR;
+    blFloorRefused = 0;
+    {
+        char blflag[16];
+        blArmed = PE_parse_boot_argn("-rbgpufbbacklight", blflag, sizeof(blflag));
+        /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
+         * scale. Rule 40: the value comes back as a BINARY INT of the
+         * caller's width, so this is an int and not a char buffer - the bug
+         * that made three tunables inert for twenty milestones. Refused
+         * outside 1 %..50 %: a floor of 0 is the one state rule 12 says we
+         * cannot diagnose from, and a floor above half the range would make
+         * the control useless. */
+        int floorn = 0;
+        if (PE_parse_boot_argn("rbgpufbblfloor", &floorn, sizeof(floorn))) {
+            if (floorn >= (int)(RB_BL_LEVEL_FULL / 100u) &&
+                floorn <= (int)(RB_BL_LEVEL_FULL / 2u)) {
+                blFloor = (uint32_t)floorn;
+            } else {
+                blFloorRefused = (uint32_t)floorn;
+            }
+        }
+    }
     /* 2wi: -rbgpufbretire. Deliberately NOT named -rbgpufbvbl-something:
      * rule 30 warns that a shell grep for an existing arg matches a longer
      * one, and `-rbgpufbvbl` is already in use. */
@@ -333,6 +368,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
     }
 
     hubpSetup();
+    blSetup();        /* 2xs: independent of hubpSetup's result by design */
 
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
      * is also called from the VBL thread_call and fromPath there would be a
@@ -730,6 +766,7 @@ void RBAMDFramebuffer::stop(IOService *provider)
     OSSafeReleaseNULL(nvram);
     OSSafeReleaseNULL(aperture);
     hubpTeardown();
+    blTeardown();
     IOFramebuffer::stop(provider);
 }
 
@@ -905,6 +942,63 @@ IOReturn RBAMDFramebuffer::getAttributeForConnection(IOIndex connectIndex,
         /* We have no DDC path to the internal panel, so decline rather than
          * claim a sense we cannot perform. */
         return kIOReturnUnsupported;
+
+    /* 2xs: the backlight parameter. IOFramebufferParameterHandler::
+     * displayModeChange (IOGraphicsFamily 0x14fc8ece) asks 'pcnt' for a
+     * count, allocates count * 8 bytes, asks 'parm' to fill it with 8-byte
+     * entries whose low dword is a FourCC, and then asks us for each FourCC
+     * with a three-word buffer { value, min, max }. All three steps are
+     * answered here; the base already answers the first two for its own four
+     * parameters ('rgsc', 'ggsc', 'bgsc', 'vblm' - visible in our live
+     * AppleDisplay's IODisplayParameters), so we APPEND rather than replace. */
+    case kConnectionDisplayParameterCount: {
+        const IOReturn r =
+            IOFramebuffer::getAttributeForConnection(connectIndex, attribute, value);
+        if (r == kIOReturnSuccess && value && blReady) {
+            *value += 1;
+        }
+        return r;
+    }
+    case kConnectionDisplayParameters: {
+        if (!value) {
+            return IOFramebuffer::getAttributeForConnection(connectIndex,
+                                                            attribute, value);
+        }
+        /* Ask the base how many entries IT will write, so our one goes after
+         * the last of them. The caller sized the buffer from the count we
+         * returned above, which is this number plus one, so index [n] is in
+         * bounds exactly when the base agrees with itself between the two
+         * calls - and if it does not, we append nothing rather than writing
+         * past the end. */
+        uintptr_t n = 0;
+        const IOReturn rc =
+            IOFramebuffer::getAttributeForConnection(connectIndex,
+                                                     kConnectionDisplayParameterCount,
+                                                     &n);
+        const IOReturn r =
+            IOFramebuffer::getAttributeForConnection(connectIndex, attribute, value);
+        if (r == kIOReturnSuccess && rc == kIOReturnSuccess && blReady &&
+            n > 0 && n < RB_BL_PARM_MAX) {
+            value[n] = RB_BL_ATTR_BRIGHTNESS;
+            blParmAdds++;
+        }
+        return r;
+    }
+    case RB_BL_ATTR_BRIGHTNESS:
+        /* { value, min, max }, the layout displayModeChange reads at
+         * 0x14fc92fa: -0xb8 is a lower bound it raises the value to and
+         * -0xb0 an upper bound it lowers it to. The minimum is our floor,
+         * not zero, so the UI cannot ask for a dark panel (rule 12). */
+        if (!blReady) {
+            return kIOReturnUnsupported;
+        }
+        if (value) {
+            value[0] = blCurrentLevel();
+            value[1] = blFloor;
+            value[2] = RB_BL_LEVEL_FULL;
+        }
+        return kIOReturnSuccess;
+
     default:
         return IOFramebuffer::getAttributeForConnection(connectIndex, attribute, value);
     }
@@ -922,6 +1016,16 @@ IOReturn RBAMDFramebuffer::setAttributeForConnection(IOIndex connectIndex,
     case kConnectionProbe:
         /* Acknowledged; the firmware's modeset is the only one there is. */
         return kIOReturnSuccess;
+    /* 2xs: the brightness write. 'brig' is not a constant anybody chose -
+     * IOFramebufferParameterHandler::doIntegerSet byte-swaps the first four
+     * characters of the parameter NAME into the attribute it sends, and
+     * kIODisplayBrightnessKey is the string "brightness". */
+    case RB_BL_ATTR_BRIGHTNESS:
+        if (!blReady) {
+            return kIOReturnUnsupported;
+        }
+        return blSetLevel((uint32_t)value) ? kIOReturnSuccess
+                                           : kIOReturnNotReady;
     default:
         return IOFramebuffer::setAttributeForConnection(connectIndex, attribute, value);
     }

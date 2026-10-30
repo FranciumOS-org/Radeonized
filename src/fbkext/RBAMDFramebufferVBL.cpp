@@ -134,6 +134,29 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAmtrNotReadyArmed", amtrNotReady);
     setProperty("RBFBAmtrHeld", amtrHeld, 64);
     setProperty("RBFBAmtrHoldExpired", amtrHoldExpired, 64);
+    /* 2xs: the backlight. Published unconditionally so `RBFBBlArmed` is the
+     * cheap independent check that this binary is the one running (rule 15),
+     * and so a refusal says WHICH gate refused and with what register values
+     * (rule 14) - "we did not write" and "the period read zero, so 2or's
+     * falsification test fired" are different findings. */
+    setProperty("RBFBBlArmed", blArmed);
+    setProperty("RBFBBlReady", blReady);
+    setProperty("RBFBBlRefuse", (uint64_t)blRefuse, 32);
+    setProperty("RBFBBlOtgCtl", (uint64_t)blOtgCtl, 32);
+    setProperty("RBFBBlCntl", (uint64_t)blCntl, 32);
+    setProperty("RBFBBlCntl2", (uint64_t)blCntl2, 32);
+    setProperty("RBFBBlPeriod", (uint64_t)blPeriod, 32);
+    setProperty("RBFBBlLock", (uint64_t)blLock, 32);
+    setProperty("RBFBBlLevel0", (uint64_t)blLevel0, 32);
+    setProperty("RBFBBlFloor", (uint64_t)blFloor, 32);
+    setProperty("RBFBBlFloorRefused", (uint64_t)blFloorRefused, 32);
+    setProperty("RBFBBlLastLevel", (uint64_t)blLastLevel, 32);
+    setProperty("RBFBBlLastCount", (uint64_t)blLastCount, 32);
+    setProperty("RBFBBlReadback", (uint64_t)blReadback, 32);
+    setProperty("RBFBBlSets", blSets, 64);
+    setProperty("RBFBBlGets", blGets, 64);
+    setProperty("RBFBBlPendTimeouts", blPendTimeouts, 64);
+    setProperty("RBFBBlParmAdds", blParmAdds, 64);
     setProperty("RBFBHubpTiling", (uint64_t)hubpTiling, 32);
     setProperty("RBFBHubpOrig", hubpOrig, 64);
     setProperty("RBFBHubpWrites", hubpWrites, 64);

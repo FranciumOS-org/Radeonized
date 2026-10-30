@@ -39,8 +39,23 @@ KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
                -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
                -I$(MKSDK)/Headers -I$(COMMON) -Wall -Werror -MMD -MP
 
-HOST_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -I$(COMMON) \
-               -fsanitize=address,undefined -fno-sanitize-recover=all
+# 2xt: the sanitizers are ON by default and must stay on - they have caught
+# real parser bugs. But they are an INSTRUMENT, and on macOS 26.7.2 with
+# CommandLineTools 16.4 the ASan RUNTIME is broken: a two-line program that
+# only calls printf dies with SIGILL when built with -fsanitize=address, while
+# the same program built plain runs fine. That made `make plugin` fail with
+# "Illegal instruction: 4" and look exactly like the new backlight code
+# breaking the hosttest, when every assertion in fact passes (rule 16). The
+# real fix is updating CommandLineTools; until then `make SAN=0` runs the same
+# tests unsanitized so a broken runtime cannot block a build. Never commit a
+# change whose only passing run was SAN=0.
+SAN ?= 1
+ifeq ($(SAN),1)
+HOST_SAN := -fsanitize=address,undefined -fno-sanitize-recover=all
+else
+HOST_SAN :=
+endif
+HOST_CFLAGS := -std=gnu11 -O1 -g -Wall -Wextra -Werror -I$(COMMON) $(HOST_SAN)
 
 KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUILD_DIR)/kext/rb_smu.o \
              $(BUILD_DIR)/kext/RembrandtProbe.o $(BUILD_DIR)/kext/kmod_info.o
@@ -54,7 +69,7 @@ all: kext tools
 # rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
 # docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
 # freestanding; nothing links it yet.
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/backlight_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
@@ -319,7 +334,7 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 # check_imports.py's 0-from-SystemKernelExtensions rule does NOT apply here -
 # this kext is REQUIRED to resolve against the system collection.
 FBKEXT_SRC    := $(PROJ_ROOT)/src/fbkext
-FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/RBAMDFramebufferHUBP.o $(BUILD_DIR)/fbkext/kmod_info.o
+FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/RBAMDFramebufferHUBP.o $(BUILD_DIR)/fbkext/RBAMDFramebufferBacklight.o $(BUILD_DIR)/fbkext/kmod_info.o
 FBKEXT_BUNDLE := $(OUT)/RBAMDFramebuffer.kext
 FBKEXT_BIN    := $(FBKEXT_BUNDLE)/Contents/MacOS/RBAMDFramebuffer
 

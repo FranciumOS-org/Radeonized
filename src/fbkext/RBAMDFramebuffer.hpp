@@ -246,6 +246,31 @@ private:
     uint32_t           hubpOtgCtl2;
     uint32_t           hubpOtgCtl3;
     bool               hubpOtgAny;     /* 2xp: -rbgpufbotgany */
+    /* 2xs: the backlight. Independently armed (-rbgpufbbacklight): it needs
+     * only the panel, not the accelerator, so it shares neither the HUBP
+     * arm nor the HUBP BAR5 map - the segment constant is re-checked by its
+     * own gate rather than inherited. */
+    bool               blArmed;
+    bool               blReady;
+    uint32_t           blRefuse;      /* 0 = set up; else why we will not write */
+    IOMemoryMap       *blMap;
+    volatile uint32_t *blRegs;
+    uint32_t           blOtgCtl;      /* gate 1, published either way */
+    uint32_t           blCntl;        /* the four PWRSEQ0 registers as found */
+    uint32_t           blCntl2;
+    uint32_t           blPeriod;
+    uint32_t           blLock;
+    uint32_t           blOrigCntl;    /* restored on stop() */
+    uint32_t           blLevel0;      /* the level the firmware left, u16.16 */
+    uint32_t           blFloor;       /* rbgpufbblfloor=, u16.16 */
+    uint32_t           blFloorRefused; /* rule 40: a refused value is published */
+    uint32_t           blLastLevel;   /* what we last asked for, clamped */
+    uint32_t           blLastCount;   /* ...and the duty cycle it became */
+    uint32_t           blReadback;    /* ...and what the register read back */
+    uint64_t           blSets;
+    uint64_t           blGets;
+    uint64_t           blPendTimeouts;
+    uint64_t           blParmAdds;    /* times we appended 'brig' to 'parm' */
     bool               amtrNotReady;   /* 2xn: -rbgpufbnotready */
     uint64_t           hubpFlipDeadline; /* 2xn: abs time the hold expires */
     uint64_t           amtrHeld;       /* 2xn: NotReady answers given */
@@ -280,6 +305,10 @@ private:
     /* 2xn: is OUR flip still unlatched? Lives in RBAMDFramebufferHUBP.cpp
      * so the DMU segment constant stays in exactly one file. */
     bool hubpHoldNotReady(void);
+    bool blSetup(void);
+    void blTeardown(void);
+    uint32_t blCurrentLevel(void);
+    bool blSetLevel(uint32_t level);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
     void hubpPoll(void);
