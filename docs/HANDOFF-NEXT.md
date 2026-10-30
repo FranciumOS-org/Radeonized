@@ -42,11 +42,19 @@ is the cheapest proof the new framebuffer is the one running, because only
     sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
     sudo cp /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
             /Library/KernelCollections/AuxiliaryKernelExtensions.kc.bak
-    sudo kmutil create -n aux -a x86_64 \
+    sudo kmutil create -n aux -a x86_64 --allow-missing-kdk \
         -B /System/Library/KernelCollections/BootKernelExtensions.kc \
         -S /System/Library/KernelCollections/SystemKernelExtensions.kc \
         -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
         -r /Library/Extensions
+
+**This exact invocation was run to a scratch output path before being handed
+over**, which is how it should always be settled: `-A` anywhere writable costs
+nothing, needs no `sudo`, and the result can be inspected. It produced a
+collection with `com.rembrandtgpu.fb` at the new UUID and every OTHER kext at
+a byte-identical one, with only `org.franciumos.mhelper.driver` dropping out -
+correct, since its bundle lived in `/private/var/tmp` and is gone. Do that
+again rather than aiming a first attempt at the live file.
 
 **`kmutil install --update-all` is the WRONG TOOL here and three boots went to
 believing it was the right one.** `--update-all` means every collection, so it
@@ -62,7 +70,13 @@ there, *before* the auxiliary collection is ever built:
 That is an APPLE kext failing against an APPLE KPI, which is the tell that the
 rebuild being attempted is not the one we want. `-n aux` builds only the
 auxiliary collection and LINKS against the boot and system collections already
-on disk, so no KDK and no kernel variant is involved.
+on disk, so no kernel variant is involved - `/System/Library/Kernels/` here
+holds `kernel` and a dozen Apple-Silicon `kernel.release.t*` and nothing else.
+
+**`--allow-missing-kdk` is still required on the `create` form**, and leaving
+it off is its own silent failure: `kmutil create -n aux` without it prints only
+`Missing Developer Kit ...` and writes nothing, while exiting 0. An exit code
+is not a verdict (rule 26) - the output file's existence is.
 
 Keep the backup. `AuxiliaryKernelExtensions.kc` is what the next boot loads,
 and `sudo cp` the `.bak` back over it if a build produces something worse.

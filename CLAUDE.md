@@ -227,9 +227,15 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
   'com.apple.kpi.mach', which was not found` plus four
   `Could not find: kernel mach-o at /System/Library/Kernels/kernel.<variant>`.
   Build **only the auxiliary collection**, linking against the boot and system
-  collections that are already there — then no KDK and no kernel variant is
-  needed at all. Back the old one up first; it is what the next boot loads.
-  (Not yet confirmed on hardware as of this commit.)
+  collections that are already there: `kmutil create -n aux -a x86_64
+  --allow-missing-kdk -B <BootKernelExtensions.kc> -S
+  <SystemKernelExtensions.kc> -A <AuxiliaryKernelExtensions.kc> -r
+  /Library/Extensions`. **`--allow-missing-kdk` is required on `create` too**,
+  and without it the command prints `Missing Developer Kit`, writes nothing and
+  **exits 0** — so check the output file, never the exit code (rule 26).
+  Point `-A` at a scratch path first: it needs no `sudo`, costs nothing, and
+  `kmutil inspect --show-kext-uuids` on the result settles it before the live
+  collection is touched. Back the live one up; it is what the next boot loads.
 - After any plugin change: `kmutil libraries -p build/out/RembrandtGPU.kext`
   must resolve everything with **0 from `SystemKernelExtensions.kc`** (the 2oz
   trap) and `grep -c IOGraphicsFamily src/plugin/Info.plist` must be **0**.
