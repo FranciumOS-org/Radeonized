@@ -47616,3 +47616,119 @@ mode-setting code is no longer going to be written for HDMI's sake. If a
 refresh-rate menu is ever wanted it has to be justified on the internal
 panel's own terms (OTG timing + the DCCG pixel clock, writes where a wrong
 value is no signal), and nothing has changed to make that cheaper.
+
+## 2xu - macOS 26 BREAKS THE PATCHER A SECOND WAY: THE KERNEL CANNOT READ THE TARGET
+
+Boot 226, armed (`rbgpu-boot` 226, `armed=1`), plugin **`FCEA5698`** confirmed
+loaded against `build/out` (rule 15). 2xt's re-derivation is INSTALLED and the
+artifacts are STILL THERE, so 2xt fixed a real defect and was not sufficient.
+
+**2xt's RE-DERIVATION IS PROVEN CORRECT, AND IS NOT THE REMAINING PROBLEM.**
+Three independent confirmations, none of which needed a boot:
+
+  * `mtlk_place` reads **0x7FFB2339B6E0**, which is exactly
+    `(RBGPU_MTL_CAVE_VM - ANCHOR) + slide` for the new header. The kext's own
+    arithmetic agrees with the header to the byte.
+  * `mtlk_slide` reads **0x11F1E000** and dyld independently reports the live
+    shared-cache slide as **0x11F1E000** (CoreDisplay's live header
+    0x7FF817266000 against its unslid 0x7FF805348000). The slide is right.
+  * Reading **0x7FFB2339B6E0 from a live userspace process returns
+    `kRbMtlCaveFind` byte for byte**. The pattern is there, at the address we
+    compute, in this boot.
+
+**THE REMAINING BLOCKER IS THE READ ITSELF.** `mtlk_match` = **0xFFFF**, which
+`rbgpu_mtlk_place` writes on one condition only - `g_mtlkVmMapReadUser`
+returned non-KERN_SUCCESS - and `mtlk_probe_read` = **1** =
+`KERN_INVALID_ADDRESS`. The bytes were never compared, because the read never
+produced any.
+
+**AND IT FAILED THAT WAY EVERY SINGLE TIME, which the telemetry proves without
+a second boot.** `mtlk_cavehits` **1280**, `mtlk_failed` **1280**,
+`mtlk_patched` **0** - and **`mtlk_moved` is ABSENT**. `g_mtlkMoved` increments
+only when `g_mtlkLastMatch == 0`, i.e. on a successful read whose bytes
+mismatched, and it is set on EVERY call, not only reported ones. So an absent
+`mtlk_moved` means **not one of the 1280 attempts ever got a successful read**.
+That also explains why `mtlk_moved_verdict` never fired: the fail-safe's
+"the driver moved" verdict is reachable only through a byte mismatch, and this
+boot never reached a byte comparison at all. **The verdict being absent is not
+evidence the addresses are right - it is evidence the read never got that far.**
+
+**THE DIFFERENTIAL AGAINST macOS 15 IS CLEAN**, from 45 captures already on
+disk (rule: read the evidence already in hand):
+
+| | macOS 15 (45 captures) | macOS 26, boot 226 |
+|---|---|---|
+| `mtlk_probe_read` | **0** = KERN_SUCCESS | **1** = KERN_INVALID_ADDRESS |
+| `mtlk_match` | **1** = pattern found | **0xFFFF** = read failed |
+| `mtlk_patched` / `mtlk_cavehits` | **763 / 768** | **0 / 1280** |
+| `mtlk_moved` | 1-2 (a few stragglers) | **absent** |
+
+Same hook, same mechanism, same four symbols. So this is a **second,
+independent macOS 26 change**, stacked on top of 2xt's driver move.
+
+**IT IS NOT THE SYMBOLS AND IT IS NOT A BAD MAP.** `mtlk_syms` = **15** =
+all four resolved, and `nm -m` confirms `_get_task_map`, `_vm_map_read_user`,
+`_vm_map_write_user` and `_get_bsdtask_info` are all real `__TEXT,__text`
+definitions in the macOS 26 kernel, not stubs. `mtlk_ready` = 1 and
+`mtlk_map` = 1, so `get_task_map(task)` returned non-NULL.
+And `_vm_map_read_user` (`0xffffff800034c8a0`) was disassembled: its
+not-current-map path **zone-validates the `vm_map_t`** (checks it against
+`_zone_info`'s range and requires zone index `0xf`), and a map that fails that
+check does **not** return an error - it branches to `0xffffff800034cb27`,
+which calls into the panic path. **We did not panic, so the map we passed was
+a valid zone-allocated `vm_map`.** The only remaining producer of the `1` we
+observed is the `copyin` at `0xffffff800034cab8` / `0xffffff800034ca02`
+returning non-zero (`setne r15b`, `r15` -> `eax`). The page genuinely was not
+readable in that task at that moment.
+
+**SO THE HOOK POINT IS NOW TOO EARLY.** The patch runs from
+`wrap_rbMtlkTaskSetMainThreadQos`, i.e. `_task_set_main_thread_qos`. Call-site
+scan of the macOS 26 kernel (`E8 rel32` targets, over `__TEXT,__text`):
+
+    _vm_shared_region_enter     1 site  0xFFFFFF8000346B51  inside _vm_map_exec
+    _task_set_main_thread_qos   2 sites 0xFFFFFF80007B231A  inside _posix_spawn
+                                        0xFFFFFF80007B6FB6  inside ___mac_execve
+
+`vm_map_exec` runs early in exec and `task_set_main_thread_qos` late, so the
+naive reading - "the shared region has not been entered yet" - is **refuted by
+the call graph**, and is recorded here so it is not proposed again. What is
+established is narrower and is what the measurement actually says: **at that
+point the new task's map does not yet have the cache readable**, whatever the
+mechanism.
+
+**ALSO REFUTED, by a free experiment:** "macOS 26 maps the subcaches on demand,
+so the Metal subcache is absent until something loads Metal". A fresh process
+that never loads Metal.framework reads `0x7FFB2339B6E0` **successfully**. The
+region is mapped in any running process; the failure is specific to the exec
+hook.
+
+**`_thread_bootstrap_return` IS NOT A CANDIDATE - RULE 2 REFUSES IT.** It is
+**five bytes**, a bare `callq _dtrace_thread_bootstrap` rel32 at offset 0,
+falling straight into `_thread_exception_return`. Lilu copies displaced
+instructions byte for byte, so routing it relocates a rel32 into Lilu's buffer
+and lands somewhere else entirely; it also never returns. Recorded so the next
+session does not spend a boot finding out.
+
+**THE CANDIDATE THAT NEEDS NO NEW ROUTE.** The plugin already hooks
+`AMDRadeonX6000_AMDHWAlignManager2::getPreferredSwizzleMode2`
+(`g_rb_2la_hk_swz`, `rbgpu-surf` reads `swz hk=1 calls=1466` in boot 224), and
+that hook runs **in the Metal client's own process context**, long after exec,
+where the cache is demonstrably readable and `current_map()` IS the target map
+- which takes `_vm_map_read_user`'s fast `copyin` path rather than the
+map-switch path that is failing. Retrying the cave+detour placement from
+there, once per task, needs **no new kernel route** and inherits 2om's
+compare-before-write fail-safe unchanged.
+**NOT ESTABLISHED, and it is the one thing to check before building it**:
+whether that hook fires before the client's first
+`amdMtl_HWL_DetermineSwizzleMode` call or after it. If after, the patch lands
+from the second texture onward and early surfaces in each process would still
+be wrong - in which case the right point is the client's user-client open, not
+the swizzle query.
+
+**AND THE BUILD ITSELF WAS BLOCKED BY A BROKEN INSTRUMENT (2xt, rule 16).**
+`sudo tools/efi.sh install` died with a bare `Illegal instruction: 4` because
+it runs `make plugin`, and on macOS 26.7.2 with CommandLineTools 16.4 the ASan
+RUNTIME is broken: a two-line program that only calls `printf` SIGILLs when
+built `-fsanitize=address` and runs fine built plain. Every hosttest assertion
+passes unsanitized. The build now probes the runtime and degrades loudly
+(`SAN=auto`), so a broken sanitizer cannot masquerade as a failing test.

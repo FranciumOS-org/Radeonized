@@ -26,6 +26,62 @@ dyld cryptex path still refuses writes with EROFS because its files carry the
 
 ## Where this stands
 
+**THE MACHINE IS ON macOS 26.7.2 (25G332, Darwin 25.6.0) AND THE SWIZZLE
+ARTIFACTS ARE BACK (2xt/2xu).** The user upgraded. **Nothing is corrupted and
+nothing was half-written** - the userspace half of the swizzle fix stopped
+being applied, which is the 2r6 fail-safe working. **TWO separate macOS 26
+changes broke it and only the first is fixed.**
+**2xt, FIXED**: `AMDRadeonX6000MTLDriver` moved `__TEXT` 0x7FFB08BF3000 ->
+**0x7FFB110D4000** and was rebuilt, so both patch sites held unrelated code.
+Re-derived: `amdMtl_HWL_DetermineSwizzleMode` is **0x7FFB1121622D**, confirmed
+three ways (prologue unique in the new `__TEXT`; offset within `__TEXT` barely
+moved, 0x142A11 -> 0x14222D; **LC_SYMTAB lands exactly on it**). Cave
+**0x7FFB1147D710**. `tools/gen_cavepatch.py` overrode `cp.CAVE_VM` but never
+`cp.FN_VM`, which `build_cave()`'s jump-back and `detour()`'s rel32 both read -
+equal by luck for the whole macOS 15 era, and **mutation-tested as a 132.9 MB
+wrong jump in every Metal process** if left. Fixed, and every displacement
+hand-verified independently of the generator.
+**2xu, OPEN - THE KERNEL CANNOT READ THE TARGET.** Boot 226 with the new
+plugin (`FCEA5698`) still shows artifacts. `mtlk_match` **0xFFFF** and
+`mtlk_probe_read` **1 = KERN_INVALID_ADDRESS**: `_vm_map_read_user` fails, so
+the bytes are never compared. `mtlk_cavehits` **1280**, `mtlk_failed` **1280**,
+`mtlk_patched` **0**, and **`mtlk_moved` ABSENT** - which proves **not one of
+the 1280 attempts ever completed a read**, because `g_mtlkMoved` increments
+only on a successful read with mismatched bytes. Against 45 macOS 15 captures
+(`mtlk_probe_read` 0, `mtlk_match` 1, **763/768 patched**) the differential is
+clean. **The addresses are NOT the problem**: `mtlk_place` 0x7FFB2339B6E0
+matches the new header exactly, `mtlk_slide` 0x11F1E000 matches what dyld
+reports, and **that address reads `kRbMtlCaveFind` byte for byte from a live
+process**. Not the symbols either (`mtlk_syms` 15; all four are real
+`__TEXT,__text` definitions), and not a bad map - `_vm_map_read_user`
+zone-validates the `vm_map_t` and **panics** rather than returning on failure,
+so the surviving `1` can only be the `copyin` faulting.
+**ELIMINATED, do not re-propose**: "the shared region is not entered yet" - the
+call graph refutes it (`_vm_shared_region_enter` has ONE site, inside
+`_vm_map_exec`, early in exec; `_task_set_main_thread_qos` is called from
+`_posix_spawn` and `___mac_execve`, late). "macOS 26 maps subcaches on demand"
+- a fresh process that never loads Metal still reads the address fine.
+**`_thread_bootstrap_return` is NOT routable (rule 2)**: five bytes, a bare
+rel32 `callq` at offset 0 falling into `_thread_exception_return`.
+**THE NEXT STEP NEEDS NO NEW KERNEL ROUTE**: the plugin already hooks
+`AMDHWAlignManager2::getPreferredSwizzleMode2` (`swz hk=1 calls=1466`), which
+runs **in the Metal client's own process context** where the cache is readable
+and `current_map()` IS the target map - the fast `copyin` path, not the
+failing map-switch one. Retry the placement there, once per task. **Check
+first** whether it fires before or after the client's first
+`amdMtl_HWL_DetermineSwizzleMode`; if after, use the user-client open instead.
+**AND ASan IS BROKEN ON THIS TOOLCHAIN** (CLT 16.4 + macOS 26): a two-line
+`printf` program SIGILLs under `-fsanitize=address`. It made `efi.sh install`
+die with a bare `Illegal instruction: 4` that looked exactly like a failing
+hosttest. The build now probes the runtime and degrades **loudly** (`SAN=auto`,
+`SAN=1` forces and still fails, `SAN=0` forces off). Every assertion passes
+unsanitized. Rule 16.
+**EVERY APPLE ADDRESS IN THIS FILE AND THE JOURNAL IS A macOS 15 ADDRESS.**
+CoreDisplay moved 0x7FF80404C000 -> **0x7FF805348000**, so `RBGPU_IOP_SITE_VM`
+is stale too (it fails safe the same way, and 2t7 measured gate 1 as won
+unpatched, so it is not load-bearing). Re-derive before any further static read
+of CoreDisplay, SkyLight or IOPresentment.
+
 **HDMI IS THE FULL PROJECT - MEASURED, NOT ASSUMED (2xq, boot 221).** Booted
 with the display attached and `-rbgpufbotgany` armed: `RBFBHubpOtg1/2/3` all
 read **768 = 0x300**, so **the GOP does not light HDMI on this machine** and
