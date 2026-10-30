@@ -1,64 +1,73 @@
 # HANDOFF — next step
 
-**Written 2026-10-30, after 2xx. `docs/RULES.md` has the standing rules, the chip
-facts and the boot-arg contract; this file is only what is in flight.**
+**Written 2026-10-30, after 2xx resolved. `docs/RULES.md` has the standing rules,
+the chip facts and the boot-arg contract; this file is only what is in flight.**
 
 ---
 
-## THE 2xw BOOT CAME UP WITH TWO HALVES DISARMED. 2xx FIXES THAT.
+## THE MACHINE WORKS, ON NO BOOT-ARGS OF OURS BUT ONE.
+
+Boot 247 is an accelerated, smooth desktop at the panel's refresh with the
+full default configuration and nothing disarmed. Confirmed on hardware by the
+user and by its own counters.
 
 | | state |
 |---|---|
-| **2xu** the Electron/the assistant-app artifacts | **FIXED, boot 231** — `mtlk2_uc_hk 1`, `mtlk2_uc 196`, `mtlk2_patched 43`, zero failures |
-| **2xv** USB on real interrupts | **FIXED**, user-confirmed, the 10 ms poll is gone |
-| **2xw** armed by default, no boot-args | **BOOTED, boot 236** — and it exposed 2xx |
-| **2xx** our own `"0"` read as a disarm | **BUILT, NOT YET BOOTED** — this is the next boot |
+| **2xu** Electron/the assistant-app artifacts | FIXED, boot 231 |
+| **2xv** USB on real interrupts | FIXED, user-confirmed |
+| **2xw** armed by default, no boot-args | **WORKING**, boot 247 |
+| **2xx** our own `"0"` read as a disarm | **FIXED**, boot 237 then 247 |
+| **2xx** the WindowServer crash loop | **FIXED** — it was a stale fbkext, rule 15 |
 
-**What boot 236 showed.** `rbgpu-tick` and `rbgpu-fb` read `"0"` — the value
-the pre-2xw `rbgpu_nvram_consume_oneshot_ow` wrote as the act of spending a
-one-shot — and 2xw's reader treats `"0"` as the user's durable disarm. So the
-scheduler tick never armed (`rbgpu-diag` reads `tick_armed=0 tick_oneshot=3`,
-why 3 = "the key reads 0") and the framebuffer declined the panel by rule 38.
-The desktop fell back to one frame per 10 s except while typing — 2wi's
-signature, which 2xi had fixed. The AGDC half was clean the whole time
-(`agdc_on=1`, `agdc_solved=3ff`). Full account: journal, 2xx.
+### Installed, and this is the part that bit
 
-**What 2xx changes.** `rbgpu-gen` is written once; before it exists a `"0"` in
-`rbgpu-tick` or `rbgpu-fb` is our own spent one-shot and is ignored, after it
-exists every `"0"` is the user's and is obeyed. `rb_key_disarms()` in
-`rb_defaults.h` is the rule and both kexts ask it. `rbgpu_gen_migrate()`
-rewrites the stale keys and writes the generation key last.
-`rbgpu_nvram_consume_oneshot_ow` is deleted. **No key needs clearing by hand.**
+    plugin  build/out/RembrandtGPU.kext      FE3200B0   -> the OpenCore EFI
+    fbkext  build/out/RBAMDFramebuffer.kext  353A1D24   -> /Library/Extensions
 
-## WHAT TO INSTALL AND WHAT TO READ
+**Install BOTH, every time, and check both UUIDs in `kextstat` before reading
+anything else.** The nine-boot crash loop and the whole boot-arg bisect of
+2xx happened because the plugin was reinstalled nine times and the framebuffer
+never was; the loaded `C7278266` predated 2xw and had neither the `rbgpu-gen`
+rule nor the rule-38 check nor the `RBGPUStock` handshake. `RBFBArmWhy = 10`
+is the cheapest proof the new framebuffer is the one running, because only
+2xw+ can publish it.
 
-    plugin  build/out/RembrandtGPU.kext      BCE9FC13     -> the OpenCore EFI
-    fbkext  build/out/RBAMDFramebuffer.kext  353A1D24     -> the auxiliary collection
+    sudo tools/efi.sh install
+    sudo cp -R build/out/RBAMDFramebuffer.kext /Library/Extensions/
+    sudo kmutil install --update-all     # the KDK warnings are for the
+                                         # debug/kasan variants and are noise;
+                                         # check AuxiliaryKernelExtensions.kc's
+                                         # mtime and `kmutil inspect -B` it
 
-Both are needed — the framebuffer carries half of the fix (it probes before
-the plugin migrates, so it must apply the same rule itself).
+**Boot-args: `wdt=-1` and nothing of ours.** `rbgpumtlkscope=*` is harmless and
+`-rbgpunosentinel` is worth keeping only while rebooting repeatedly - put it
+back out for normal use, since it is the only recovery from a boot that dies
+in its first minute.
 
-    sudo tools/efi.sh install          # the plugin
-    # the framebuffer is the user's install into /Library/Extensions
-    sudo tools/efi.sh on               # takes `-rbgpuoff` back out of boot-args
-    sudo nvram -d rbgpu-safe           # the latch the rescue left set
+### What boot 247 reads, as the baseline to compare against
 
-That last command is not housekeeping: `rbgpu-safe` reads `"1"`, so without it
-the first armed boot sees the sentinel latch, comes up **stock**, clears it,
-and the boot after that is the armed one. Deleting it is worth one boot.
+    kextstat   plugin FE3200B0   fb 353A1D24
+    ioreg      1 RBAMDFramebuffer, 0 IONDRVFramebuffer
+    RBFBArmWhy      = 10
+    RBFBVBLFires    = 142.0 Hz    against the panel's measured 143.83
+    RBFBAmtrSets    = 31.7/s      mostly-idle desktop; 82/s was measured busy
+    RBFBHubpWrites  = one per set
+    peer: armed=1 arm_why=0 gen=1 tick_armed=1 tick_us=6944
+          cap_tbl_patched=1 agdc_on=1 sentinel=2
 
-**Boot-args: ours can come out**, with `sudo tools/efi.sh defaults` — one
-edit, and it prints `rbgpu-gen` and the five keys under the same rule the
-kexts apply. Every `-rbgpu*` token in `rb_defaults.h` can go; they are the
-default now and any that stay are redundant, not harmful, so the install is
-safe either way. **Keep `wdt=-1`** — `-rbgpuforceenable` is default-on and that
-is Apple's arg, which we cannot set (2hh: without it a frozen boot panics at
-120 s with no SSH window). Keep `keepsyms=1`, `msgbuf=1048576`, `-wegnoegpu`,
-`amfi*`, `alcid=66`, `xhcipoke=10` (inert once 2xv's patches are in, and the
-poke's counters are still the instrument for them) and anything not ours.
-**`-rbgpuoff` must go** or none of this runs.
+### Open, and none of it blocking
 
-**NVRAM: nothing to set and nothing to clear** except `rbgpu-safe` above.
+- **Brightness.** `-rbgpufbbacklight` is built and hosttested and has **never
+  been booted** (2xs). Its follow-on is `kConnectionFlags` at
+  `src/fbkext/RBAMDFramebuffer.cpp:898` plus `getAppleSense`, which changes
+  which `IODisplay` subclass matches, so it needs its own arg and boot.
+- **The frame rate ceiling.** 82/s busy against 143.83; never established
+  whether that is demand-limited or still gated (2xi/2xo).
+- **`-rbgpunocaptbl` is a diagnostic, not a configuration.** Boot 246 measured
+  `_ttl_hw_init` returning `kIOReturnError` without the `_DeviceCapabilityTbl`
+  clone, so the record is load-bearing for binding. Keep it out of boot-args.
+- **The wedge**, independent (2wt/2x0). **HDMI** is unreachable, wired to the
+  dGPU (2xq/2xr).
 
 **Read these first, in this order (rule 8, then rule 34):**
 
