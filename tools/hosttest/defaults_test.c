@@ -17,6 +17,7 @@ static const char *const known[] = {
     "-rbgpuoff", "-rbgpustock", "-rbgpuarm", "-rbgpunolinear", "-rbgpumtlkoff",
     "-rbgpumtlknolate", "-rbgpufbmatch", "-rbgpuagdcearly", "-rbgpuagdcpolicy",
     "-rbgpumcnew", "-rbgpumcreg", "-rbgpufbbacklight", "-rbgpufbbuiltin",
+    "-rbgpufbblparm",
     "-rbgpufbnocrumb",
     "-rbgpufbvramrange", "-rbgpufbvramrangeall", "-rbgpunosentinel",
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",
@@ -113,6 +114,9 @@ int defaults_tests(void)
      * connection, which reaches the display-prefs key, mirroring and the
      * wrangler's dimming as well as the slider. Never booted either. */
     CHECK(!rb_default_on("-rbgpufbbuiltin"), "-rbgpufbbuiltin stays OFF (never booted)");
+    /* 2y0: creates and registers a new IOKit service as a child of the
+     * framebuffer, which is a different risk from the other two. */
+    CHECK(!rb_default_on("-rbgpufbblparm"), "-rbgpufbblparm stays OFF (never booted)");
     /* 2xz: -rbgpuosforce must never be in the table. It exists to arm the
      * table on an OS where none of the measured offsets were measured, and a
      * default-on override of a safety gate is not an override at all. */

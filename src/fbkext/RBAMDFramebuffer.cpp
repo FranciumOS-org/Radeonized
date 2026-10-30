@@ -476,6 +476,15 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * full reasoning are on getAppleSense in
          * RBAMDFramebufferBacklight.cpp. */
         blBuiltIn = argOn("-rbgpufbbuiltin");
+        /* 2y0: -rbgpufbblparm publishes the full-name "brightness" parameter
+         * through our own IODisplayParameterHandler. Rule 30 against every
+         * token in use: it shares `-rbgpufbb` with -rbgpufbbacklight and
+         * -rbgpufbbuiltin and diverges at the next character (l against a
+         * and u), so no two of the three prefix each other, and the derived
+         * negatives -rbgpunofbblparm / -rbgpunofbbacklight /
+         * -rbgpunofbbuiltin are distinct for the same reason. The hosttest
+         * asserts it over the whole namespace. */
+        blParmArmed = argOn("-rbgpufbblparm");
         /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
          * scale. Rule 40: the value comes back as a BINARY INT of the
          * caller's width, so this is an int and not a char buffer - the bug
@@ -507,6 +516,12 @@ bool RBAMDFramebuffer::start(IOService *provider)
 
     hubpSetup();
     blSetup();        /* 2xs: independent of hubpSetup's result by design */
+    /* 2y0: AFTER blSetup, because it refuses unless blReady, and BEFORE
+     * IOFramebuffer::start() below, because that is what can create an
+     * IODisplayConnect - and IOKit matching is asynchronous, so a handler
+     * registered afterwards would be racing the display's own driver to
+     * exist before IODisplay walks our children. */
+    blParamsSetup();
 
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
      * is also called from the VBL thread_call and fromPath there would be a

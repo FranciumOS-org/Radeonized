@@ -124,6 +124,15 @@ public:
     bool     blBuiltIn=false;     /* 2xy */
     uint64_t blFlagsGets=0;       /* 2xy */
     uint64_t blSenseGets=0;       /* 2xy */
+    bool     blParmArmed=false;   /* 2y0 */
+    uint64_t blParmSetDisplays=0; /* 2y0 */
+    uint64_t blParmUpdates=0;     /* 2y0 */
+    uint64_t blParmPublished=0;   /* 2y0 */
+    uint64_t blParmPublishFails=0;/* 2y0 */
+    uint64_t blParmNoDict=0;      /* 2y0 */
+    uint64_t blParmSets=0;        /* 2y0 */
+    uint64_t blParmSetFails=0;    /* 2y0 */
+    uint32_t blParmLastAsked=0;   /* 2y0 */
     uint32_t hubpTiling=0;
     uint32_t hubpPitch=0;
     uint32_t hubpConfig=0;

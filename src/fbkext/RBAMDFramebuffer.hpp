@@ -35,9 +35,17 @@
 #include <IOKit/graphics/IOFramebuffer.h>
 
 class IOPCIDevice;
+class RBAMDBacklightParams;
 
 class RBAMDFramebuffer : public IOFramebuffer {
     OSDeclareDefaultStructors(RBAMDFramebuffer)
+
+    /* 2y0: the parameter handler reaches blCurrentLevel(), blSetLevel(),
+     * blFloor and blLastLevel, all of which are private and should stay that
+     * way - they are this class's register arithmetic, not an API. The two
+     * classes ship in one bundle and are meaningless apart, so friendship is
+     * the honest expression of that rather than four new public accessors. */
+    friend class RBAMDBacklightParams;
 
 public:
     /* IOService */
@@ -283,6 +291,28 @@ private:
     bool               blBuiltIn;
     uint64_t           blFlagsGets;   /* kConnectionFlags answers given */
     uint64_t           blSenseGets;   /* getAppleSense answers given */
+    /* 2y0: -rbgpufbblparm, the full-name "brightness" parameter. Separately
+     * armed again, because it creates and registers a NEW IOKit service as a
+     * child of this one - a different risk from answering two attributes
+     * (2xy) or writing a duty cycle (2xs). Counters rather than a log, and
+     * every one of them separates a distinct outcome (rule 14):
+     *   SetDisplays 0 -> IODisplay never found us walking its framebuffer's
+     *                    children, so the service plane is the wrong plane
+     *                    and the device tree is next - NOT a publish failure
+     *   NoDict        -> found, but the display had no IODisplayParameters
+     *   PublishFails  -> found and had the dict, and addParameter refused
+     *   Sets 0        -> published and nothing ever asked, i.e. the UI does
+     *                    not use kIODisplayBrightnessKey either */
+    bool               blParmArmed;
+    RBAMDBacklightParams *blParams;
+    uint64_t           blParmSetDisplays;
+    uint64_t           blParmUpdates;
+    uint64_t           blParmPublished;
+    uint64_t           blParmPublishFails;
+    uint64_t           blParmNoDict;
+    uint64_t           blParmSets;
+    uint64_t           blParmSetFails;
+    uint32_t           blParmLastAsked;
     bool               amtrNotReady;   /* 2xn: -rbgpufbnotready */
     uint64_t           hubpFlipDeadline; /* 2xn: abs time the hold expires */
     uint64_t           amtrHeld;       /* 2xn: NotReady answers given */
@@ -319,6 +349,9 @@ private:
     bool hubpHoldNotReady(void);
     bool blSetup(void);
     void blTeardown(void);
+    /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */
+    bool blParamsSetup(void);
+    void blParamsTeardown(void);
     uint32_t blCurrentLevel(void);
     bool blSetLevel(uint32_t level);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
