@@ -29,6 +29,8 @@ public:
 
 private:
     bool publish(void);
+    bool publishOne(OSDictionary *dict, const OSSymbol *key,
+                    SInt32 lo, SInt32 hi, SInt32 value);
 
     RBAMDFramebuffer *fb      = nullptr;
     IODisplay        *display = nullptr;

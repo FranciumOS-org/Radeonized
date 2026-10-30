@@ -49157,3 +49157,118 @@ record it — the first wrong write ends the boot. The question to ask of every
 `OSDictionary*`, `OSArray*` or `OSSet*` before writing to it is **who
 allocated this**, and the answer "I fetched it from a service" means copy it
 first. The mirror of rule 13: not every call that can fail reports failure.
+
+## 2y1 CONFIRMED on hardware (boot 252), and 2y2 — the UI writes a different key
+
+**2y1 works, in full.** Boot 252 came up with `D0F419E8`, no panic, and the
+live dictionary on the matched `AppleBacklightDisplay` reads:
+
+```
+"IODisplayParameters" = {
+    "brightness" = {"min"=5120,"max"=65536,"value"=22784},
+    "brig"       = {"min"=5120,"max"=65536,"value"=22784},
+    "rgsc"/"ggsc"/"bgsc" = {...65536}, "vblm" = {...},
+    "fade-time1"/"fade-time2"/"fade-time3"/"fade-style" = {...}, "ownr" = ...
+}
+```
+
+The full-length name is published beside the FourCC one, both agreeing, and
+the copy-and-replace merge carried `'brig'`, the three gamma scales, `'vblm'`
+and Apple's own `fade-*` through untouched — so rule 42's fix costs nothing it
+was meant to preserve. `RBFBBlParmSetDisplays 1`, `RBFBBlParmPublished 7`,
+`RBFBBlParmPublishFails 0`, `RBFBBlParmNoDict 1` (the display had not published
+its parameters yet at `setDisplay` time, which is why `publish()` tolerating a
+null source was right). **And the slider exists**, which it never did through
+2xs or 2xy.
+
+**The hardware path is confirmed end-to-end through the new handler.** Driving
+it from userspace moved `RBFBBlParmSets` (so it entered OUR `doIntegerSet`) and
+then the register:
+
+| asked | level | count written | readback | user |
+|---|---|---|---|---|
+| `blset 1.00` | 65536 | 64000 | **64000** | visible |
+| `blset 0.15` | 14182 | 13850 | **13850** | visible |
+
+a 4.6x duty change, each read back bit-identical, user-confirmed physically
+("yes your changes work"). So 2xs, 2xy, 2y1 together are done: the register,
+the match, the parameter and the write path all work.
+
+**Two readings corrected here, both of which looked like findings.**
+
+*`RBFBBlLevel0` is not a live sample.* It read 22784 and stayed there across 18
+seconds and six reads while `RBFBBlReadback` said 64000, which looks exactly
+like the chip reverting our write — the ABM/DMCUB story, and a tempting one.
+It is not: `RBFBBlGets` sat frozen at 10 through all six reads, so
+`blCurrentLevel()` was never called in that window and `blLevel0` is a snapshot
+from the last `publish()`, not a periodic re-read. Rule 31's addendum again,
+with the twist that the stale value was stale for a *different* reason than
+"the publish interval has not elapsed" — nothing was sampling it at all. The
+counter that proved it is the one beside it.
+
+*The duty arithmetic is right, and the obvious reason to think otherwise is
+wrong.* `BL_PWM_PERIOD` is **4000** with `BITCNT` **12**, not 16, and the count
+we write for 34.8 % is 22250 — 5.5x the period, which reads as a saturated PWM
+and would explain "the slider does nothing" perfectly. It is not a bug:
+`BL_PWM_FRACTIONAL_EN` is set (`BL_PWM_CNTL` 0xC003502A, bit 30), so the field
+is fixed point with `16 - BITCNT` = 4 fractional bits and 22250 means 1390.6
+ticks of 4000 = 34.8 %. `docs/linux-ref/dce_panel_cntl.c:224` shifts by
+`bit_count` exactly as `rb_bl_count_from_level()` does, and the read inverts it
+exactly (22250 * 2^12 / 4000 = 22784 = the level asked). Both directions agree
+with each other AND with Linux. Comparing a fixed-point field against an
+integer period is the error; the units are in the FRACTIONAL_EN bit, not in the
+field.
+
+**So why does the slider do nothing? It writes a key we do not publish.**
+`RBFBBlParmSets` moved for every `blset` and **never once for a drag**, and the
+`"brightness"` value in the dictionary stayed whatever we last put there. The
+brightness UI does not go through `kIODisplayBrightnessKey` at all: it goes
+through **CoreBrightness**, whose exports are `BrightnessSystem`,
+`BrightnessSystemClient`, `BrightnessSystemClientInternal` and
+`KeyboardBrightnessClient`, and which holds
+
+```
+"linear-brightness"         0x7ff814e8d332, 0x7ff814e8d364
+"usable-linear-brightness"  0x7ff814e8d35d
+```
+
+all inside its `__TEXT` (0x7ff814d69000 + 0x172000, measured with
+`tools/re/dscbase.sh`, rule 41). A cache-wide byte scan finds
+`linear-brightness` 3 times (the third at 0x7ff805453a42, inside CoreDisplay)
+and `usable-linear-brightness` once, against a control of 21 for
+`DisplayServices`. A set naming a key no handler claims is dropped by
+`IODisplay` with nothing recorded anywhere — which is precisely a slider that
+moves, a panel that does not, and a counter that never increments. The kernel
+exports all three symbols (`gIODisplayBrightnessKey`,
+`gIODisplayLinearBrightnessKey`, `gIODisplayUsableLinearBrightnessKey`) and
+`IOGraphicsTypes.h:1674-1676` names them, so this needs no new string.
+
+**2y2 (`38BA90BE`, built, NEVER BOOTED)** publishes all three from the same
+handler, with **one counter per key** — `RBFBBlParmSetsPerc`,
+`RBFBBlParmSetsLin`, `RBFBBlParmSetsUsable` — because the question the boot
+answers is *which name the UI writes*, and one total cannot say it (rule 14).
+`"usable-linear-brightness"` reports the ceiling and its sets are **declined
+and counted**: a capability treated as a control is worth seeing rather than
+silently obeying.
+
+The scale is **an assumption, recorded as one**: neither the SDK header nor the
+disassembly documents the units of `"linear-brightness"`, so it is published on
+the same `[blFloor, RB_BL_LEVEL_FULL]` scale as `"brightness"`. That is
+defensible for this panel rather than merely convenient — the PWM duty is
+linear in our level by construction, so our level already *is* a linear
+brightness. If the slider's travel comes out compressed or non-monotonic, the
+perceptual/linear distinction is what to revisit, and `"brightness"` is the one
+that should then carry a curve.
+
+Verified: `hosttest: all passed`; `LINK 99 symbols from the system collection,
+321 from boot` (97 before, +2 for the two key globals); each of
+`gIODisplayBrightnessKey`, `gIODisplayLinearBrightnessKey`,
+`gIODisplayUsableLinearBrightnessKey` and `gIODisplayParametersKey` bound
+individually; 0 unresolved. UUID `D0F419E8` → **`38BA90BE`**.
+
+Stated before the boot: `SetsLin` non-zero is the answer and the slider should
+move the panel. `SetsLin` 0 with `SetsUsable` 0 and `SetsPerc` 0 across a drag
+means CoreBrightness is not writing `IODisplayParameters` at all and the next
+place to look is `BrightnessSystemClient`'s own path, not another key name.
+`SetsUsable` non-zero alone would mean it drives the panel through the ceiling
+parameter, which would be worth knowing before obeying.
