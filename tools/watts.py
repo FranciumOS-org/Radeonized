@@ -37,6 +37,8 @@ import subprocess
 import sys
 import time
 
+LOG = "logs/watts.log"
+
 FIELDS = ("InstantAmperage", "Amperage", "Voltage", "AppleRawCurrentCapacity")
 
 
@@ -98,7 +100,13 @@ def signed64(v):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         return selftest()
-    secs = int(sys.argv[1]) if len(sys.argv) > 1 else 300
+    args = sys.argv[1:]
+    label = ""
+    if "--label" in args:
+        i = args.index("--label")
+        label = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+    secs = int(args[0]) if args else 300
     first = sample()
     if first["ExternalConnected"] == "Yes":
         sys.stderr.write(
@@ -154,9 +162,28 @@ def main():
           % (w, dt, dmah, v, 100.0 / dmah))
     # Advisory only, and labelled: see the header on why this field is not trusted.
     a = signed64(s_end["InstantAmperage"])
+    adv = (-a) * v / 1e6 if a is not None else float("nan")
     if a is not None:
         print("InstantAmperage says %.2f W - ADVISORY ONLY, this field is "
-              "filtered and goes stale." % ((-a) * v / 1e6))
+              "filtered and goes stale." % adv)
+
+    # A run made with the the assistant app quit cannot be read back from its
+    # terminal, so every result is appended here with the boot it came from.
+    # Rule 33: a reading without the boot it belongs to is not evidence.
+    try:
+        boot = subprocess.run(["nvram", "rbgpu-boot"], capture_output=True,
+                              text=True).stdout.split()[-1]
+    except Exception:
+        boot = "?"
+    try:
+        with open(LOG, "a") as f:
+            f.write("%s boot=%s label=%s  %.2f W  (%d mAh @ %d mV over %.0fs, "
+                    "+-%.0f%%)  advisory=%.2f W\n"
+                    % (time.strftime("%Y-%m-%dT%H:%M:%S"), boot,
+                       label or "-", w, dmah, v, dt, 100.0 / dmah, adv))
+        print("appended to %s" % LOG)
+    except OSError as e:
+        print("could not write %s: %s" % (LOG, e))
     return 0
 
 
