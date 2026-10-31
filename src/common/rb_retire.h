@@ -48,6 +48,33 @@ struct rb_retire {
     uint64_t takebacks;    /* vblank -> timer, the watchdog firing */
 };
 
+/* 2zf: IS THIS MODE ONE THE VBLANK CAN CARRY?
+ *
+ * Boot 267 measured the handover as a +24 % gain at native refresh and a
+ * REGRESSION below it: 90.4 sets/s at 143.85 Hz against a 73.1 baseline, but
+ * 59.45 at 119.97 (was ~74.5) and 30.04 at 60.01 (was ~52), the last two
+ * pinned at exactly 50 % of their vblank rate.
+ *
+ * The cause is not new, it is 2zc's own curve. Retirement used to run at a
+ * FIXED 6944 us - 144/s - whatever the display was doing; driving it from the
+ * vblank ties it to the display rate instead, so a 60 Hz mode runs it at
+ * 0.42x the measured optimum, and 2zc measured that halving the rate costs
+ * about a third. The retire wants a RATE, and only the native vblank supplies
+ * it.
+ *
+ * So the vblank takes the job only where it can do it at least as often as
+ * the timer would. `native_ns` is the framebuffer's own native period, which
+ * it already knows, so this needs no value carried across the collection
+ * boundary. Slack is one part in sixteen: the period is derived per boot from
+ * a spread-spectrum clock (2y6) and must not fail an exact compare against
+ * itself.
+ */
+static inline int rb_retire_vbl_suits(uint64_t period_ns, uint64_t native_ns)
+{
+    if (!period_ns || !native_ns) { return 0; }
+    return period_ns <= native_ns + (native_ns >> 4);
+}
+
 static inline void rb_retire_reset(struct rb_retire *r, uint32_t armed)
 {
     if (!r) { return; }

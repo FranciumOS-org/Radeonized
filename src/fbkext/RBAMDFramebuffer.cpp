@@ -1609,6 +1609,19 @@ void RBAMDFramebuffer::vblRetOffer(void)
     if (!vblRetArmed || !vblRetPeer || !vblRetSym) {
         return;
     }
+    /* 2zf: ONLY AT A MODE THE VBLANK CAN CARRY. Retirement used to run at a
+     * fixed 6944 us whatever the display did; driving it from here ties it to
+     * the display rate, and boot 267 measured that as +24 % at native and
+     * -42 % at 60 Hz with `fed` pinned at exactly half. Below native the timer
+     * keeps the job - which is every boot's behaviour before 2zd, so this is
+     * the status quo and not a new risk. Checked per offer rather than per
+     * setup because the mode changes at runtime and without a reboot (2z1),
+     * and counted so a boot can say which side of the gate it sat on. */
+    if (!rb_retire_vbl_suits(vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast,
+                             kVBLPeriodNsFast)) {
+        vblRetModeSkips++;
+        return;
+    }
     uint32_t drove = 0;
     vblRetCalls++;
     const IOReturn r = vblRetPeer->callPlatformFunction(vblRetSym, false,

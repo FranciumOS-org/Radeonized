@@ -6,6 +6,7 @@
 extern "C" {
 #include "rb_drr.h"
 #include "rb_hubp.h"
+#include "rb_retire.h"
 }
 #include <map>
 #include <string>
@@ -133,6 +134,7 @@ public:
     uint64_t vblRetCalls{0};
     uint64_t vblRetDrove{0};
     uint64_t vblRetRefused{0};
+    uint64_t vblRetModeSkips{0};  /* 2zf */
     void vblRetSetup(void) {}
     void vblRetOffer(void) {}
     bool     hubpDeferPend=false; /* 2xm */

@@ -37,6 +37,7 @@
 extern "C" {
 #include "rb_drr.h"
 #include "rb_hubp.h"
+#include "rb_retire.h"
 }
 
 #include <IOKit/graphics/IOFramebuffer.h>
@@ -299,6 +300,7 @@ private:
     uint64_t        vblRetCalls{0};
     uint64_t        vblRetDrove{0};
     uint64_t        vblRetRefused{0};
+    uint64_t        vblRetModeSkips{0}; /* 2zf: offers the mode gate declined */
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
     uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */

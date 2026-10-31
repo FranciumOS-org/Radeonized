@@ -239,6 +239,34 @@ table and refuses to install one that does not match the running kernel;
   never ran. This also weakens 2zb's "74.6 at 144 = 74.8 at 120, therefore a
   hard cap", which rested on two samples per mode and sits inside the band;
   2zc's -34 % is outside it and stands.
+- **Retiring from the vblank: +24 % at native, a REGRESSION below it, so it is
+  gated on the mode (2zd/2zf, boot 267).** `-rbgpuretirevbl` on **both** kexts
+  moves frame retirement onto the vblank, deleting the second timer instead of
+  tuning it. Measured with the handover live and exclusive (`Drove` = `Calls`,
+  `Refused` 0, `vblret_take` **0**, 45 715 vblank retires against 1 083 timer
+  ones, all of those from before the first vblank existed): **143.85 Hz 90.4
+  sets/s against a 73.1 baseline (+24 %)**, but **119.97 → 59.45 (−20 %)** and
+  **60.01 → 30.04 (−42 %)**, the slow two pinned at exactly **half** their
+  vblank rate, ±0.4 % over six samples. The cause is 2zc's curve, not a new
+  effect: retirement used to run at a fixed 6944 µs - 144/s - **whatever the
+  display was doing**, and driving it from the vblank ties the retire rate to
+  the display rate, so 60 Hz runs it at 0.42x the optimum. **The retire wants a
+  RATE and only the native vblank supplies it**, so
+  `rb_retire_vbl_suits()` lets the vblank take the job only where it fires at
+  least as often as the timer would; below native the timer keeps it, which is
+  the pre-2zd status quo. Checked per offer, because the mode changes without a
+  reboot (2z1), and `RBFBVblRetModeSkips` counts the declines.
+  **This retires 2za and 2zb's "latch latency" as an artifact of the beat:**
+  `mean vblanks` is now **1.00-1.02 at every mode** where it was 1.04-1.63, and
+  bin2+ is 1.3 % at 60 Hz. It also explains the bin-2 share that alternated
+  across modes and would not reproduce - that was beat phase, structured rather
+  than random. **Still open: the 37 % missing at native**, where `fed` is
+  62-66 % with the latch ceiling now at the panel rate itself, so the latch is
+  no longer the constraint and whatever costs the rest is unmeasured.
+  The counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag`, which
+  prints **decimal**; `nvram rbgpu-diag` comes back empty for them because the
+  note is capped near 520 bytes while `diag_used` 693 of 768 says the table is
+  not full - absence from one is not absence from the other.
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker

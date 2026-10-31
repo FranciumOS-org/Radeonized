@@ -151,6 +151,7 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBVblRetDrove", vblRetDrove, 64);
     setProperty("RBFBVblRetRefused", vblRetRefused, 64);
     setProperty("RBFBVblRetLookups", vblRetLookups, 32);
+    setProperty("RBFBVblRetModeSkips", vblRetModeSkips, 64);
     setProperty("RBFBHubpDeferArmed", hubpDeferPend);
     setProperty("RBFBHubpDeferrals", hubpDeferrals, 64);
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
