@@ -17979,6 +17979,48 @@ static bool rbgpu_2ju_enabled(void) {
     return g_rb_2ju_on == 1;
 }
 
+// 2z4 (2026-10-30): the POWER-gating half, behind its own token.
+//
+// 2ju turned off two registers in one go and the evidence only ever indicted
+// one of them. Its own halt analysis reads `pg=0, safe=0` and (2js) `srst=0`
+// **rule out power gating**: what moved with the 49 ms re-halt was
+// RLC_GPM_STAT's CNTX_IDLE_BEING_PROCESSED, i.e. CGCG entry gating the GFX
+// clock out from under the CP. RLC_PG_CNTL was written to 0 beside it because
+// Linux's non-PSP `gfx_v10_0_rlc_resume` writes both bare, not because power
+// gating was ever measured to do harm here.
+//
+// That matters for efficiency: with both writes armed the GPU never gates its
+// clock AND never gates its power domain, and `gfxoff_status` 2 says it is
+// awake. Re-enabling CGCG is expected to halt the CP again, so the all-or-
+// nothing `-rbgpucgcg` can only confirm what 2ju already measured. Power
+// gating alone is the untested half and the one with no evidence against it.
+//
+// So `-rbgpunopg` is its own default-on entry and `-rbgpupg` re-enables
+// Apple's power gating while leaving CGCG off. Three outcomes have to be
+// told apart (rule 14, 2ju's own list):
+//   1 our write never happens          -> nopg_on 0
+//   2 Apple's value is there and holds -> pg_pre_or non-zero, every tick
+//   3 it is there and something zeroes  it -> pg_pre_or non-zero, tick count
+//                                             below the total
+// A last-wins key cannot express a per-tick fact, so the OR of every `pre`
+// seen and a COUNT of the ticks that saw a non-zero one are published instead
+// of one sample's value.
+static int g_rb_2ju_pg_on = -1;
+static uint32_t g_rb_2ju_pg_pre_or = 0;
+static uint32_t g_rb_2ju_pg_post_or = 0;
+static uint32_t g_rb_2ju_pg_nz = 0;
+static uint32_t g_rb_2ju_pg_ticks = 0;
+
+static bool rbgpu_2ju_pg_enabled(void) {
+    if (g_rb_2ju_pg_on < 0) {
+        g_rb_2ju_pg_on = rbgpu_arg("-rbgpunopg") ? 1 : 0;
+        rbgpu_log("2z4: power-gating write %s",
+                  g_rb_2ju_pg_on ? "ARMED (-rbgpunopg)" : "off (-rbgpupg)");
+        rbgpu_diag_set_num("nopg_on", static_cast<uint32_t>(g_rb_2ju_pg_on));
+    }
+    return g_rb_2ju_pg_on == 1;
+}
+
 void rbgpu_nocgcg_tick_2ju(unsigned idx) {
     if (!rbgpu_2ju_enabled() || idx >= RB_2JU_N || !g_hw.rreg || !g_hw.wreg) {
         return;
@@ -17991,7 +18033,22 @@ void rbgpu_nocgcg_tick_2ju(unsigned idx) {
     e->ms   = static_cast<uint32_t>(rbgpu_2iq_ms());
     e->pre  = g_hw.rreg(g_hw.ctx, CGCG);
     g_hw.wreg(g_hw.ctx, CGCG, 0);
-    g_hw.wreg(g_hw.ctx, PGC,  0);
+    // 2z4: the power-gating write is a SEPARATE decision from the clock-gating
+    // one. Read before and after either way, so a boot that leaves Apple's
+    // value in place still records what that value is and whether it holds.
+    {
+        const uint32_t pg_pre = g_hw.rreg(g_hw.ctx, PGC);
+        if (rbgpu_2ju_pg_enabled()) { g_hw.wreg(g_hw.ctx, PGC, 0); }
+        const uint32_t pg_post = g_hw.rreg(g_hw.ctx, PGC);
+        g_rb_2ju_pg_pre_or  |= pg_pre;
+        g_rb_2ju_pg_post_or |= pg_post;
+        if (pg_pre != 0u) { g_rb_2ju_pg_nz++; }
+        g_rb_2ju_pg_ticks++;
+        rbgpu_diag_set_num("pg_pre_or",  g_rb_2ju_pg_pre_or);
+        rbgpu_diag_set_num("pg_post_or", g_rb_2ju_pg_post_or);
+        rbgpu_diag_set_num("pg_nz_ticks", g_rb_2ju_pg_nz);
+        rbgpu_diag_set_num("pg_ticks",   g_rb_2ju_pg_ticks);
+    }
     e->post = g_hw.rreg(g_hw.ctx, CGCG);
     e->me   = g_hw.rreg(g_hw.ctx, (0x1260u + 0x0F56u) * 4);
     // 2jw (2026-10-19): the save/restore machine, behind its own arg.

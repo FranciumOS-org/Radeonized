@@ -50525,3 +50525,61 @@ the cave is real work, per OS, and is not a quick experiment.
 **So the next efficiency move is 2z3's boot-arg, unchanged:** `-rbgpucgcg`
 disarms our own `RLC_CGCG_CGLS_CTRL=0` / `RLC_PG_CNTL=0` write and costs no
 code. It is the only candidate on the table that is both ours and free.
+
+## 2z4 — split 2ju's two gating writes, because only one of them was ever indicted
+
+**The reasoning, not a new measurement.** 2ju (boot 68) turned off two
+registers in one function: `RLC_CGCG_CGLS_CTRL = 0` and `RLC_PG_CNTL = 0`. Its
+own halt analysis indicts exactly one of them. What moved with the 49 ms
+re-halt was `RLC_GPM_STAT`'s CNTX_IDLE_BEING_PROCESSED - CGCG entry gating the
+GFX clock out from under the CP - and the same note reads **`pg=0, safe=0`**
+and (2js) `srst=0`, i.e. **power gating was positively RULED OUT** as the
+mechanism. `RLC_PG_CNTL` was written beside it because Linux's non-PSP
+`gfx_v10_0_rlc_resume` writes both bare, not because it was measured to harm
+anything here.
+
+That is a live cost. With both armed the GPU never gates its clock AND never
+gates its power domain, and `gfxoff_status` 2 says it is awake, which 2z3
+named as the first suspect for ~27 W. But `-rbgpucgcg` disarms both at once,
+so the only experiment available was the one 2ju has already answered - the
+user's own words for what it does are "freeze my screen like it was off or
+black", which is what a halted CP looks like. **An experiment that can only
+confirm a known result is not worth a boot.**
+
+`-rbgpunopg` is now its own default-on entry (table 48 -> 49) and `-rbgpupg`
+re-enables Apple's power gating while leaving CGCG off. Today's behaviour is
+unchanged: both default on, so a boot without the new token writes exactly
+what it wrote before.
+
+**Three outcomes have to be told apart** (rule 14, and 2ju's own list of three
+for the CGCG write):
+
+    1  our write never happens            -> nopg_on 0
+    2  Apple's value is there and HOLDS   -> pg_pre_or non-zero, pg_nz_ticks
+                                             == pg_ticks
+    3  it is there and something zeroes it -> pg_pre_or non-zero,
+                                              pg_nz_ticks < pg_ticks
+
+A last-wins diag key cannot express a per-tick fact (rule 14 again), so the
+**OR of every `pre` seen** and a **count of ticks that saw a non-zero one**
+are published rather than one sample: `pg_pre_or`, `pg_post_or`,
+`pg_nz_ticks`, `pg_ticks`. The read happens on every tick whether or not the
+write is armed, so a disarmed boot still records what Apple's value IS - which
+is the thing this tree has never seen.
+
+The count assertion in `defaults_test.c` is what made this say so out loud:
+adding a token failed `RB_DEFAULT_ON_COUNT == 48` immediately, exactly as its
+comment intends. Control run: renaming the token to `-rbgpunopq` fails the new
+derivation assertion and restoring it passes.
+
+Plugin `D7B408A0-71C7-3ADA-B313-0D7412D54C84`, 2oz gates clean (0 symbols from
+`SystemKernelExtensions.kc`, 0 `IOGraphicsFamily` in Info.plist). Needs an EFI
+install and a boot.
+
+**What the boot should read.** With `-rbgpupg` in boot-args: `nopg_on` **0**,
+and then `pg_pre_or` is the question - non-zero means Apple's power gating is
+live and this tree has been suppressing it since boot 68. `gfxoff_status` 0 or
+3 would mean the GPU finally sleeps (2jv: 2 is awake). Rule 39 applies to the
+power number: it only means something from a boot that still composites, so
+`RBFBAmtrSets` climbing is part of the measurement. And per 2z3b, measure with
+the Claude app QUIT - it was ~20 % of CPU in the baseline samples.
