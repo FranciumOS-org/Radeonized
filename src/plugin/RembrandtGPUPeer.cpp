@@ -1185,7 +1185,15 @@ void RembrandtGPUPeer::saveDiagToNvram() {
                 if (s_snapDiags[i].type != DIAG_TYPE_NUM) {
                     break;
                 }
-                int n = snprintf(body + len, kBodyLimit - len, "%s%s=%llx",
+                /* 2zc: "0x" IS NOT DECORATION. Every diag number is printed
+                 * in hex, and a value whose digits happen to all be 0-9
+                 * reads as a perfectly plausible decimal: boot 265 published
+                 * tick_us=3640 for a tick armed at 13888 us (0x3640), which
+                 * looked exactly like a refused or clamped parse, and 2z4's
+                 * "pg_ticks=24" was really 36 ticks. The base has to be in
+                 * the value, because the reader cannot tell from the digits
+                 * (rule 26 - an instrument must say what it means). */
+                int n = snprintf(body + len, kBodyLimit - len, "%s%s=0x%llx",
                                  len ? " " : "", key, s_snapDiags[i].numVal);
                 if (n > 0 && static_cast<size_t>(n) < kBodyLimit - len) {
                     len += static_cast<size_t>(n);
