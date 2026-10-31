@@ -50931,3 +50931,77 @@ Mode (the one power lever available on this CPU, untested here); **avoid
 release ZIPs cannot be downloaded, while source can be read via jsDelivr. The
 fork ships **no prebuilt kexts** (source only, 197 files). Diagnosing this as
 "the network is down" was wrong - the user corrected it.
+
+## 2za — measure the latch latency instead of fitting a fourth model to the ratio
+
+Boot 259 gave four display modes on one binary: 78.10 / 69.40 / 58.01 / 52.87
+unique frames a second at 143.96 / 120.03 / 75.00 / 59.99 Hz, fed 54.3 / 57.8 /
+77.3 / 88.2 %. **Three models were fitted to that and all three died** (2z2):
+the absolute ~76/s cap predicts a constant and the number is not constant; the
+latch-phase every-other-vblank model predicts a flat 50 % at every refresh; and
+my own FIXED ~14 ms latency predicts a STEP in fed% as the frame period crosses
+it, where the data is a smooth ramp. What survives is a latency DISTRIBUTION
+with `fed` = P(latency < frame period) - and a fourth curve fitted to the same
+four ratios would be worth no more than the first three.
+
+So this milestone measures the quantity itself and nothing else: **how many
+vblanks does a flip take to latch?**
+
+**It costs almost nothing, because 2x3 already built the hook.** `hubpPoll()`
+runs on every vblank and `hubpProgram()` already reads `DCSURF_FLIP_CONTROL` on
+every flip (2xk). The instrument is one more volatile read per vblank - 144 a
+second on a path whose budget 2xk already proved - plus a state machine that
+lives in `src/common/rb_hubp.h` so the hosttest decides it before the kext
+does, like every other HUBP decision in that file.
+
+`rb_hubp_latch_write()` starts the clock beside `hubpWrites++`, so an armed
+latch always corresponds to a flip that was really programmed and never to a
+refused one. `rb_hubp_latch_vbl()` runs **before** the poll decides whether to
+program again, so a flip that landed during this frame is credited to the
+vblank that saw it. Published: `RBFBHubpLatchHist` (`1:n 2:n 3:n 4:n 5+:n`),
+`RBFBHubpLatched`, `RBFBHubpLatchPreempted`, `RBFBHubpLatchSamples`,
+`RBFBHubpLatchMax`.
+
+Sampling at the vblank quantises latency to whole frames. That is not a
+limitation: whether a flip makes ITS frame is the only thing `fed` depends on.
+
+**Every path accounted for (rule 14).** A flip seen to latch lands in a bin; a
+flip superseded before a latch was observed counts as **preempted** rather
+than vanishing - a real case when flips arrive faster than they land, and the
+count is itself evidence; vblanks sampled while armed are counted so the bins
+can be checked against them; `maxVbls` keeps the true worst case so bin 5's
+clamp hides nothing. The hosttest asserts the bins SUM to `latched`.
+
+### THE VERDICTS, STATED BEFORE THE BOOT
+
+- **Bin 1 dominant** - flips latch inside their own frame. Then latency is NOT
+  the cause, the surviving model dies too, and the ~78/s ceiling is something
+  else entirely. This instrument can refute the only model left, which is why
+  it is worth a boot.
+- **Bin 2 dominant at 143.96 Hz** - the distribution model holds, half rate is
+  the mechanism, and real 143.8 Hz requires getting the latch inside 6.95 ms.
+- **High `Preempted` with few latches** - flips arrive faster than they land,
+  which is a different statement from "they land late" and would redirect the
+  work at the submission rate rather than the latch.
+- **A mixture across bins 1-3 that MOVES with the display mode** is the
+  distribution made visible, and is the outcome the model predicts.
+
+**The null-result trap, named in advance.** 2xk measured
+`RBFBHubpPendHits` **0 against `PendChecks` 12787** on one boot - the PENDING
+bit never read set at flip time - while 2xn measured 693 of 6243 (11.1 %) in a
+different configuration (rule 39: different configurations). **If that bit
+never reads 1, this sampler sees "already latched" on the first vblank every
+time and reports 100 % bin 1 - a null instrument, not a finding.** So the first
+thing to read is `PendHits` against `PendChecks`, and only then the histogram.
+A 100 % bin 1 result with `PendHits` 0 means the instrument, not the hardware
+(rule 16).
+
+Read the histogram at **143.96 Hz and again at 60 Hz** via `modeset` - no
+reboot between them (2z1 made mode -> mode work). The model predicts the
+distribution shifts toward bin 1 as the frame lengthens, since the same
+latency fits inside a longer frame. If the histogram does NOT move with the
+mode, the quantity is not what sets `fed` and the whole framing is wrong.
+
+fbkext `281D946F-6E34-3713-8464-012B12861F09`. Controls: dropping the clock
+re-base on preemption fails exactly that assertion; counting an unarmed vblank
+fails three. Needs a boot.

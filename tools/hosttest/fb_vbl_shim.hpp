@@ -5,6 +5,7 @@
 #include <cstring>
 extern "C" {
 #include "rb_drr.h"
+#include "rb_hubp.h"
 }
 #include <map>
 #include <string>
@@ -120,6 +121,7 @@ public:
     uint32_t hubpFlipCtl2=0;  /* 2xj */
     uint64_t hubpPendChecks=0; /* 2xk */
     uint64_t hubpPendHits=0;   /* 2xk */
+    struct rb_hubp_latch hubpLatch{};  /* 2za */
     bool     hubpDeferPend=false; /* 2xm */
     uint64_t hubpDeferrals=0;     /* 2xm */
     uint32_t hubpOtgCtl1=0;       /* 2xp */

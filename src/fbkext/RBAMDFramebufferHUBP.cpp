@@ -64,6 +64,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;
     hubpPendHits = 0;
+    rb_hubp_latch_reset(&hubpLatch);
     hubpDeferrals = 0;
     hubpFlipDeadline = 0;
     hubpOtgCtl1 = 0;
@@ -271,6 +272,10 @@ void RBAMDFramebuffer::hubpProgram(uint64_t mc)
     }
 
     hubpWrites++;
+    /* 2za: the write is out; start its latch clock. Placed with the counter
+     * that records the write actually happened, so an armed latch always
+     * corresponds to a programmed flip and never to a refused one. */
+    rb_hubp_latch_write(&hubpLatch);
     hubpLast = mc;
 
     /* Read the pair back once, on the first write only. A register that reads
@@ -323,6 +328,18 @@ void RBAMDFramebuffer::hubpPoll(void)
     if (!pollArmed || !hubpReady || !amtrFlipSnapped || !amtrSets) {
         return;
     }
+    /* 2za: sample the latch BEFORE deciding whether to program again, so a
+     * flip that landed during this frame is credited to the vblank that saw
+     * it and not to the next one. One volatile register read per vblank -
+     * 144 a second, allocating nothing and logging nothing (rule 31), the
+     * same budget 2xk's read already proved acceptable on this path. */
+    if (hubpRegs) {
+        const uint32_t lfc = hubpRegs[kRbDmuSeg2 +
+                                      rb_hubp_dw(hubpIndex,
+                                                 RB_HUBP_REG_FLIP_CTL)];
+        rb_hubp_latch_vbl(&hubpLatch, rb_hubp_flip_pending(lfc));
+    }
+
     /* volatile: Apple updates this behind our back, which is the entire
      * point - the compiler must not hoist the load out of the vblank. */
     const volatile uint64_t *flip = (const volatile uint64_t *)amtrFlipPtr;

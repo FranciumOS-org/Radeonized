@@ -275,8 +275,107 @@ int hubp_tests(void)
     A(RB_HUBP_FLAG_PLANE == 0x1ull);
 
 #undef A
+
+    /* 2za: the latch-latency state machine. The quantity it measures - how
+     * many vblanks a flip takes to latch - is what decides whether real
+     * 143.8 Hz is reachable, so the bookkeeping has to be right before a boot
+     * is spent on it. */
+    {
+        struct rb_hubp_latch l;
+        unsigned i;
+
+        rb_hubp_latch_reset(&l);
+        if (l.armed || l.latched || l.preempted || l.samples || l.maxVbls) {
+            printf("FAIL latch: reset left state behind\n"); bad++;
+        }
+
+        /* A vblank with nothing armed must change nothing: the poll runs on
+         * every vblank including before the first flip. */
+        rb_hubp_latch_vbl(&l, 0);
+        rb_hubp_latch_vbl(&l, 1);
+        if (l.samples || l.latched) {
+            printf("FAIL latch: an unarmed vblank was counted\n"); bad++;
+        }
+
+        /* The good case: programmed, then the very next vblank sees PENDING
+         * clear. That is a flip which made its own frame - bin 1 - and it is
+         * what 100 %% fed would look like. */
+        rb_hubp_latch_write(&l);
+        rb_hubp_latch_vbl(&l, 0);
+        if (!(l.latched == 1 && l.hist[1] == 1 && l.armed == 0 &&
+              l.samples == 1 && l.maxVbls == 1)) {
+            printf("FAIL latch: a one-vblank latch did not land in bin 1\n");
+            bad++;
+        }
+
+        /* Half rate: pending through one vblank, clear on the second. This is
+         * the shape the surviving model predicts at 143.83 Hz. */
+        rb_hubp_latch_write(&l);
+        rb_hubp_latch_vbl(&l, 1);
+        rb_hubp_latch_vbl(&l, 0);
+        if (!(l.hist[2] == 1 && l.latched == 2 && l.maxVbls == 2)) {
+            printf("FAIL latch: a two-vblank latch did not land in bin 2\n");
+            bad++;
+        }
+
+        /* Clamping: anything at or past five vblanks shares the top bin, and
+         * maxVbls keeps the true figure so the clamp hides nothing. */
+        rb_hubp_latch_write(&l);
+        for (i = 0; i < 6; i++) { rb_hubp_latch_vbl(&l, 1); }
+        rb_hubp_latch_vbl(&l, 0);
+        if (!(l.hist[5] == 1 && l.maxVbls == 7)) {
+            printf("FAIL latch: 7 vblanks did not clamp to bin 5 with "
+                   "maxVbls 7 (hist[5]=%llu max=%llu)\n",
+                   (unsigned long long)l.hist[5],
+                   (unsigned long long)l.maxVbls);
+            bad++;
+        }
+
+        /* Preemption, and that it is COUNTED rather than lost (rule 14): a
+         * second write before the first was seen to latch. At 143.83 Hz with
+         * flips arriving faster than they land this is a real case, and the
+         * count of it is itself evidence. */
+        {
+            const uint64_t pre = l.preempted, lat = l.latched;
+            rb_hubp_latch_write(&l);
+            rb_hubp_latch_vbl(&l, 1);
+            rb_hubp_latch_write(&l);       /* supersedes it */
+            if (!(l.preempted == pre + 1 && l.latched == lat &&
+                  l.armed == 1 && l.vbls == 0)) {
+                printf("FAIL latch: preemption not counted, or the clock "
+                       "not re-based\n");
+                bad++;
+            }
+        }
+
+        /* The bins must account for every latch, which is what makes the
+         * histogram readable as a distribution rather than a sample. */
+        {
+            uint64_t sum = 0;
+            for (i = 0; i < RB_HUBP_LATCH_BINS; i++) { sum += l.hist[i]; }
+            if (sum != l.latched) {
+                printf("FAIL latch: bins sum to %llu, latched is %llu\n",
+                       (unsigned long long)sum,
+                       (unsigned long long)l.latched);
+                bad++;
+            }
+        }
+
+        /* NULL is a real argument here: hubpRegs can be absent on a refused
+         * setup and the kext calls through anyway. */
+        rb_hubp_latch_write(NULL);
+        rb_hubp_latch_vbl(NULL, 0);
+        rb_hubp_latch_reset(NULL);
+
+        if (rb_hubp_latch_bin(0) != 0 || rb_hubp_latch_bin(1) != 1 ||
+            rb_hubp_latch_bin(4) != 4 || rb_hubp_latch_bin(5) != 5 ||
+            rb_hubp_latch_bin(9999) != 5) {
+            printf("FAIL latch: binning\n"); bad++;
+        }
+    }
+
     printf("hubp: offsets cross-checked against rb_regs.h, pipe-state, "
-           "address guards and the 2wm write gate%s\n",
+           "address guards, the 2wm write gate and 2za's latch latency%s\n",
            bad ? " FAILED" : ": passed");
     return bad;
 }
