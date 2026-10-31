@@ -1547,3 +1547,76 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
     }
     return IOFramebuffer::setAttribute(attribute, value);
 }
+
+/* 2zd: find the plugin's peer ONCE, off the vblank.
+ *
+ * copyMatchingService and NOT waitForMatchingService: the latter blocks until
+ * a match appears, and a block inside IOFramebuffer::open would hang the boot
+ * on exactly the configuration this lookup exists to tolerate - no plugin.
+ * copyMatchingService asks once and returns null if nothing is published. The
+ * plugin lives in BootKernelExtensions.kc and starts long before an
+ * auxiliary-collection kext loads, so if it is going to be there at all it is
+ * there now. Even so this runs off the vblank, because matching takes locks
+ * and rule 31 forbids that on the vblank thread_call. A null peer is
+ * not an error: it is the configuration where the plugin is absent, disarmed
+ * or older than this build, and rule 38 says the two halves must check each
+ * other rather than assume. The timer keeps retiring in that case and the
+ * only cost is 2zc's beat, which is the behaviour of every boot before this
+ * one.
+ *
+ * The OSSymbol is created here too, because creating it per vblank would be
+ * an allocation at 144 Hz. */
+void RBAMDFramebuffer::vblRetSetup(void)
+{
+    if (vblRetPeer || vblRetLookups) {
+        return;
+    }
+    vblRetLookups++;
+    if (!argOn("-rbgpuretirevbl")) {
+        return;
+    }
+    OSDictionary *match = IOService::serviceMatching("RembrandtGPUPeer");
+    if (!match) {
+        return;
+    }
+    vblRetPeer = IOService::copyMatchingService(match);
+    match->release();
+    if (!vblRetPeer) {
+        LOG("2zd: -rbgpuretirevbl is set but RembrandtGPUPeer was not found - "
+            "the timer keeps the job");
+        return;
+    }
+    vblRetSym = OSSymbol::withCString("RBGPURetireNow");
+    if (!vblRetSym) {
+        vblRetPeer->release();
+        vblRetPeer = nullptr;
+        return;
+    }
+    vblRetArmed = 1;
+    LOG("2zd: retiring frames from the vblank");
+}
+
+/* 2zd: offer this vblank to the retire path. Runs on the vblank thread_call:
+ * one virtual call by name, nothing allocated, nothing logged, nothing locked.
+ *
+ * The answer is READ rather than assumed (rule 13): the plugin returns
+ * kIOReturnNotReady when the offer did not drive a retire - the handover is
+ * disarmed on its side, the scheduler object is not sane yet, or the
+ * consecutive-refusal stop has fired - and each case is counted here so that
+ * "the vblank is driving" is a measurement and not a configuration. */
+void RBAMDFramebuffer::vblRetOffer(void)
+{
+    if (!vblRetArmed || !vblRetPeer || !vblRetSym) {
+        return;
+    }
+    uint32_t drove = 0;
+    vblRetCalls++;
+    const IOReturn r = vblRetPeer->callPlatformFunction(vblRetSym, false,
+                                                        &drove, nullptr,
+                                                        nullptr, nullptr);
+    if (r == kIOReturnSuccess && drove) {
+        vblRetDrove++;
+    } else {
+        vblRetRefused++;
+    }
+}

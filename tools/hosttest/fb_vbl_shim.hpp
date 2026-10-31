@@ -122,6 +122,19 @@ public:
     uint64_t hubpPendChecks=0; /* 2xk */
     uint64_t hubpPendHits=0;   /* 2xk */
     struct rb_hubp_latch hubpLatch{};  /* 2za */
+    /* 2zd: mirrored because RBAMDFramebufferVBL.cpp compiles into BOTH the
+     * kext and this host test. Five milestones have now paid this tax; the
+     * host has no IOKit, so the peer is a void* that is always null and
+     * vblRetOffer() takes its early return. */
+    void *vblRetPeer{nullptr};
+    const void *vblRetSym{nullptr};
+    uint32_t vblRetArmed{0};
+    uint32_t vblRetLookups{0};
+    uint64_t vblRetCalls{0};
+    uint64_t vblRetDrove{0};
+    uint64_t vblRetRefused{0};
+    void vblRetSetup(void) {}
+    void vblRetOffer(void) {}
     bool     hubpDeferPend=false; /* 2xm */
     uint64_t hubpDeferrals=0;     /* 2xm */
     uint32_t hubpOtgCtl1=0;       /* 2xp */

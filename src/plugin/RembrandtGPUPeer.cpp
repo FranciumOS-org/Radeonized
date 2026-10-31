@@ -88,6 +88,11 @@ static char      s_capture_buf[RBGPU_BUF_SIZE];
 static char      s_line_scratch[RBGPU_LINE_MAX];
 
 extern uint64_t g_guard_calls;
+/* 2zd: the vblank-driven retire. rbgpu_retire_from_vbl_2zd() is what the
+ * framebuffer reaches through callPlatformFunction below; the publisher is
+ * called from the periodic refresh because the vblank must not take a lock. */
+extern bool rbgpu_retire_from_vbl_2zd(void);
+extern void rbgpu_retire_publish_2zd(void);
 extern volatile int g_rb_2gn_in1b;
 extern void rbgpu_2gx_req(uint32_t req, int refused);
 extern void rbgpu_2gx_flush(void);
@@ -2475,6 +2480,11 @@ void RembrandtGPUPeer::performRefreshDiag() {
         return;
     }
 
+    /* 2zd: BEFORE the lock, because rbgpu_diag_set_num() takes it and
+     * IOLock is not recursive - publishing from inside here would deadlock
+     * the refresh thread_call on its own lock. */
+    rbgpu_retire_publish_2zd();
+
     IOLockLock(g_diagLock);
     rbgpu_diag_set_num_locked("guard_calls", g_guard_calls);
 
@@ -2728,6 +2738,22 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
                                                 bool waitForFunction,
                                                 void *p1, void *p2,
                                                 void *p3, void *p4) {
+    /* 2zd: THE CROSS-COLLECTION HANDOVER. RBAMDFramebuffer lives in the
+     * auxiliary kernel collection and this plugin in BootKernelExtensions.kc,
+     * so neither can link against the other; a virtual call by name is the
+     * only way across. Checked FIRST and answered with nothing allocated,
+     * nothing logged and nothing locked, because this runs on the
+     * framebuffer's vblank thread_call at up to 144 Hz (rule 31).
+     *
+     * p1, when non-NULL, receives 1 if this offer actually drove a retire, so
+     * the framebuffer can count refusals on its own side rather than assuming
+     * the call did something (rule 13 - a return code is not a result). */
+    if (functionName && functionName->isEqualTo("RBGPURetireNow")) {
+        const bool did = rbgpu_retire_from_vbl_2zd();
+        if (p1) { *reinterpret_cast<uint32_t *>(p1) = did ? 1u : 0u; }
+        return did ? kIOReturnSuccess : kIOReturnNotReady;
+    }
+
     if (functionName && symSpecialAMDKey && functionName->isEqualTo(symSpecialAMDKey)) {
         if (!p1) {
             rbgpu_log("SpecialAMDKey received NULL p1");

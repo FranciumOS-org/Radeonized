@@ -7001,6 +7001,7 @@ void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
 // anywhere in it; __const is inside the r-x __TEXT segment, so code placed
 // there executes, and it has 27 runs of >= 200 zero bytes.
 #include "rb_osver.h"
+#include "rb_retire.h"   /* 2zd: who drives frame retirement */
 #include "rbgpu_mtlcave.h"
 
 // 2xz: WHICH PATCH ROW, AND WHAT HAPPENS WHEN THERE IS NONE.
@@ -14405,6 +14406,13 @@ void rbgpu_rate_start_2wx(void) {
 #define RB_2XG_MIN_US        500
 #define RB_2XG_MAX_US    1000000
 #define RB_2XG_MAX_REFUSE     16
+/* 2zd: the watchdog period the timer falls back to once the vblank has taken
+ * over, and how long the vblank may be quiet before the timer takes the job
+ * back. 50 ms is seven native frames - long enough that a demoted timer is
+ * not the thing it was demoted for being (2zc), short enough that a vblank
+ * killed by a mode switch costs well under the 10 s that 2xe measured. */
+#define RB_2ZD_WATCH_US    50000
+#define RB_2ZD_QUIET_US    50000
 
 static thread_call_t g_rb_2xg_call = nullptr;
 static void (*g_rb_2xg_check)(void *) = nullptr;
@@ -14418,6 +14426,10 @@ static uint32_t g_rb_2xg_oneshot = 9;   /* 9 = never asked; see the ow codes */
 static uint32_t g_rb_2xg_armed = 0;
 static uint32_t g_rb_2xg_stopped = 0;
 static uint64_t g_rb_2xg_deadline = 0;
+/* 2zd: who is driving retirement. The logic is rb_retire.h so the hosttest
+ * decides the handover before either kext runs it. */
+static struct rb_retire g_rb_2zd;
+static uint64_t g_rb_2zd_quiet_abs = 0;   /* RB_2ZD_QUIET_US in abs units */
 
 /* Rule 19: the floor for a kalloc'd object, which is what the scheduler is -
  * NOT the kext-symbol floor. Every refusal records which test failed, because
@@ -14456,8 +14468,9 @@ static void rbgpu_2xg_arm_next(void) {
      * period has already been missed (arming into the past fires a catch-up
      * burst). The resync is counted, not hidden. */
     uint64_t period = 0;
-    clock_interval_to_absolutetime_interval(g_rb_2xg_us, kMicrosecondScale,
-                                            &period);
+    clock_interval_to_absolutetime_interval(
+        rb_retire_timer_period_us(&g_rb_2zd, g_rb_2xg_us, RB_2ZD_WATCH_US),
+        kMicrosecondScale, &period);
     uint64_t now = mach_absolute_time();
     if (g_rb_2xg_deadline == 0) {
         g_rb_2xg_deadline = now + period;
@@ -14468,9 +14481,12 @@ static void rbgpu_2xg_arm_next(void) {
     thread_call_enter_delayed(g_rb_2xg_call, g_rb_2xg_deadline);
 }
 
-static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
-    (void)a; (void)b;
-    g_rb_2xg_ticks++;
+/* 2zd: THE RETIRE ITSELF, lifted out of the timer action so that the vblank
+ * can perform exactly the same guarded call. Returns true if it called in.
+ * Every refusal path that existed in 2xg/2xh is preserved here unchanged,
+ * including the consecutive-refusal stop - which now protects both drivers
+ * rather than only the timer. */
+static bool rbgpu_2zd_retire_once(void) {
     void *s = g_rb_2xg_sched;
     /* 2xh: tw=7 is "the target was not resolved yet" and is DIFFERENT from
      * tw=1..6, which mean the scheduler object itself looked wrong. Boot 213
@@ -14481,6 +14497,7 @@ static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
         g_rb_2xg_refuse_run = 0;
         g_rb_2xg_calls++;
         g_rb_2xg_check(s);
+        return true;
     } else {
         g_rb_2xg_refuse++;
         g_rb_2xg_refuse_run++;
@@ -14490,12 +14507,52 @@ static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
         if (g_rb_2xg_calls != 0 && g_rb_2xg_refuse_run >= RB_2XG_MAX_REFUSE) {
             g_rb_2xg_stopped = 1;
             rbgpu_log("2xg: STOPPED after %u consecutive refusals (why=%u) - "
-                      "the scheduler object stopped looking like one and this "
-                      "tick will not call into it again this boot",
+                      "the scheduler object stopped looking like one and "
+                      "nothing will call into it again this boot",
                       g_rb_2xg_refuse_run, g_rb_2xg_refuse_why);
-            return;
         }
     }
+    return false;
+}
+
+/* 2zd: the vblank's entry point, called from RBAMDFramebuffer's vblank through
+ * the peer's callPlatformFunction - the two kexts are in different kernel
+ * collections and cannot link against each other, so a virtual call by name
+ * is the only way across. Returns true if this offer drove a retire.
+ *
+ * Runs on the framebuffer's vblank thread_call: it allocates nothing, logs
+ * nothing and blocks on nothing (rule 31), exactly as the timer action did. */
+bool rbgpu_retire_from_vbl_2zd(void) {
+    if (g_rb_2xg_stopped) { return false; }
+    if (!rb_retire_vbl_offer(&g_rb_2zd, mach_absolute_time())) { return false; }
+    return rbgpu_2zd_retire_once();
+}
+
+/* 2zd: published from the peer's periodic refresh, never from the vblank -
+ * rbgpu_diag_set_num() takes a lock, and 144 lock acquisitions a second on the
+ * vblank thread_call is exactly the kind of cost this milestone exists to
+ * remove. Rule 31 applies to our own instrument too. */
+void rbgpu_retire_publish_2zd(void) {
+    rbgpu_diag_set_num("vblret_src",   g_rb_2zd.src);
+    rbgpu_diag_set_num("vblret_vbl",   g_rb_2zd.vblRetires);
+    rbgpu_diag_set_num("vblret_timer", g_rb_2zd.timerRetires);
+    rbgpu_diag_set_num("vblret_decl",  g_rb_2zd.vblDeclined);
+    rbgpu_diag_set_num("vblret_hand",  g_rb_2zd.handoffs);
+    rbgpu_diag_set_num("vblret_take",  g_rb_2zd.takebacks);
+}
+
+static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
+    (void)a; (void)b;
+    g_rb_2xg_ticks++;
+    /* 2zd: while the vblank is driving, this tick is a WATCHDOG and must not
+     * call into the scheduler - two drivers calling it is precisely the
+     * configuration 2zc measured as costing a third of the frame rate. It
+     * takes the job back only when the vblank has gone quiet. */
+    if (rb_retire_timer_should(&g_rb_2zd, mach_absolute_time(),
+                               g_rb_2zd_quiet_abs)) {
+        (void)rbgpu_2zd_retire_once();
+    }
+    if (g_rb_2xg_stopped) { return; }
     rbgpu_2xg_arm_next();
 }
 
@@ -14553,6 +14610,16 @@ void rbgpu_schedtick_start_2xg(void) {
                   "patched after the peer starts) - arming anyway; the tick "
                   "refuses with tw=7 until the route callback fills it in");
     }
+    /* 2zd: arm the handover BEFORE the thread_call exists, so the very first
+     * tick already knows which role it has. Opt-in for its first boot: if the
+     * vblank stops offering and the watchdog were wrong, the cost is 2xe's
+     * one-frame-per-ten-seconds desktop, and a feature whose failure mode is
+     * that does not get to be default-on before a boot has run it. */
+    rb_retire_reset(&g_rb_2zd, rbgpu_arg("-rbgpuretirevbl") ? 1u : 0u);
+    clock_interval_to_absolutetime_interval(RB_2ZD_QUIET_US, kMicrosecondScale,
+                                            &g_rb_2zd_quiet_abs);
+    rbgpu_diag_set_num("vblret_armed", g_rb_2zd.armed);
+
     g_rb_2xg_call = thread_call_allocate(rbgpu_2xg_action, nullptr);
     if (!g_rb_2xg_call) {
         rbgpu_log("2xg: thread_call_allocate FAILED - no tick this boot, and "

@@ -288,6 +288,17 @@ private:
     /* 2za: latch latency in vblanks - the state machine is in rb_hubp.h so
      * the hosttest decides it before the kext does. */
     struct rb_hubp_latch hubpLatch;
+
+    /* 2zd: the vblank-driven frame retire. The plugin owns the retire target
+     * and lives in a different kernel collection, so this is reached by name
+     * through callPlatformFunction. Looked up ONCE, off the vblank. */
+    IOService      *vblRetPeer{nullptr};
+    const OSSymbol *vblRetSym{nullptr};
+    uint32_t        vblRetArmed{0};
+    uint32_t        vblRetLookups{0};
+    uint64_t        vblRetCalls{0};
+    uint64_t        vblRetDrove{0};
+    uint64_t        vblRetRefused{0};
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
     uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */
@@ -495,6 +506,8 @@ private:
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
     void hubpPoll(void);
+    void vblRetSetup(void);
+    void vblRetOffer(void);
 
     /* True iff this instance won the `IOFramebuffer` match category, i.e.
      * displaced IONDRVFramebuffer. Gates the console claim and the connection

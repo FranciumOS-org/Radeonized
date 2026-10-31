@@ -144,6 +144,13 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpLatchPreempted", hubpLatch.preempted, 64);
     setProperty("RBFBHubpLatchSamples", hubpLatch.samples, 64);
     setProperty("RBFBHubpLatchMax", (UInt64)hubpLatch.maxVbls, 32);
+    /* 2zd: "the vblank is driving" must be a measurement, not a
+     * configuration - Drove against Calls is what says so. */
+    setProperty("RBFBVblRetArmed", vblRetArmed, 32);
+    setProperty("RBFBVblRetCalls", vblRetCalls, 64);
+    setProperty("RBFBVblRetDrove", vblRetDrove, 64);
+    setProperty("RBFBVblRetRefused", vblRetRefused, 64);
+    setProperty("RBFBVblRetLookups", vblRetLookups, 32);
     setProperty("RBFBHubpDeferArmed", hubpDeferPend);
     setProperty("RBFBHubpDeferrals", hubpDeferrals, 64);
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
@@ -407,6 +414,13 @@ void RBAMDFramebuffer::armVBL(void)
 
 void RBAMDFramebuffer::deliverVBL(void)
 {
+    /* 2zd: BEFORE delivery, not after. The retire is what frees a surface and
+     * makes DisplaySurfacePool::IsReady() true (2xe), and the handlers called
+     * below are the ones that ask - so retiring first lets this frame's
+     * handler see this frame's retire, where retiring afterwards would make it
+     * wait for the next vblank. */
+    vblRetOffer();
+
     unsigned delivered = 0;
     for (unsigned i = 0; i < kMaxInterrupts; i++) {
         if (interrupts[i].used && interrupts[i].enabled &&
@@ -521,6 +535,11 @@ IOReturn RBAMDFramebuffer::registerForInterruptType(IOSelect interruptType,
         interrupts[i].fires   = 0;
         *interruptRef = &interrupts[i];
         vblEnables++;
+        /* 2zd: look the plugin's peer up HERE, not on the vblank. This runs
+         * from IOFramebuffer::open - an ordinary IOService context where
+         * taking locks and matching services is safe - and it must happen
+         * before armVBL() starts delivering. */
+        vblRetSetup();
         if (!vblRunning) {
             armVBL();
         }
