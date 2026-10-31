@@ -200,33 +200,36 @@ table and refuses to install one that does not match the running kernel;
   never reached the kext** (rule 13 on an Apple API) - read `RBFBModeCur`, not
   the return code. `tools/modeset.m` (`make modeset`) lists and selects modes
   from the shell, userspace only.
-- **The frame rate: TWO bounds, and which one binds depends on the mode
-  (2zb, boot 264).** `sets/s = min(vbl_rate / mean_latch_vblanks, ~75)` fits
-  eight paired rows to within 2 %. **Below 75 Hz the flip latch is the whole
-  story** - a flip takes 1.0-1.4 vblanks to latch and the measured frame rate
-  is **97-100 %** of what that alone implies, reproduced over three passes.
-  **At and above 120 Hz a hard ~75/s cap binds instead** and the latch leaves
-  30-38 % on the table. So **2y7's "absolute ~76 frames/s" was right and 2z2
-  only appeared to refute it**: 2z2's evidence was the 75 and 60 Hz rows, where
-  the latch ceiling sits *below* the cap and the cap is not what binds. The cap
-  is **ours, not the workload's** - one, two and three concurrent `animtest`
-  instances give 72.43 / 68.53 / 76.15 sets/s, flat under triple demand. And it
-  is **not a HUBP backlog**: `Preempted` 7 of 19 669 and `PendHits` **0** of
-  19 669, two instruments at different frame phases agreeing that every new
-  flip finds the previous one already latched. The residual ~5 ms per frame at
-  144 Hz, which vanishes at 60 Hz, is the shape of waiting on a **fixed-rate**
-  retire tick (`tick_us` 6944, not derived from the mode): mean wait half a
-  period, 3.47 ms. **The one-boot test is `rbgpuschedtickus=13888`** - doubling
-  it should drop the 144 Hz cap to ~61/s, and if it stays ~75 the retire path
-  is exonerated. Lengthen rather than shorten: 2xn measured 2000 µs as *worse*
-  (71.97 → 51.33) from thread_call contention, which only decreases as the
-  period grows. The `kIOReturnNotReady` hold is **already conditional on the
-  live PENDING bit** (2xn) with the deadline only a backstop, so "make the hold
-  conditional" is not an available dial; `RBFBAmtrHoldExpired` 0 says the
-  backstop is never reached. `tools/paired.sh` pairs the latch histogram with
-  the frame rate over one measured window and **refuses any row whose `vbl/s`
-  disagrees with the mode's own rate by over 5 %** - that guard exists because
-  without it the script reported a 194 Hz panel (2zb).
+- **The frame rate: the retire tick is the binding constraint, and 6944 µs is
+  an INTERIOR optimum (2zc, boot 265).** The dose-response, 143.8 Hz `sets/s`
+  against `rbgpuschedtickus`: **2000 → 51.33** (2xn), **6944 → 74.6** (2zb),
+  **13888 → 49.2** (2zc). Both directions cost a third of the frame rate, and
+  the peak sits exactly at the native panel period. **A cost that rises in both
+  directions is not a rate limit** - a rate limit is one-sided - it is two
+  periodic timers beating, the retire `thread_call` against the VBL
+  `thread_call`. So the fix is to **retire frames from the VBL handler**, which
+  deletes the second timer rather than tuning it; that now rests on a measured
+  two-sided curve instead of on an inference, which matters because **five
+  models of this ceiling have died**, three of them to residual arithmetic.
+  **Do not take another dose point.**
+  What 2zb established and 2zc did not disturb: a flip latches in **1.0-1.5
+  vblanks, never past 3**, and it is **not a HUBP backlog** - `Preempted` 7 of
+  19 669 and `PendHits` **0** of 19 669, two instruments at different frame
+  phases agreeing every new flip finds the previous one already latched. The
+  cap is **ours, not the workload's**: 1, 2 and 3 concurrent `animtest`
+  instances give 72.43 / 68.53 / 76.15 sets/s, flat under triple demand.
+  **2zb's `min(latch_ceiling, ~75)` describes the stock tick only** - the ~75
+  term is a function of `tick_us`, not a constant of the hardware, which is how
+  2zc refuted it: `actual / latch_ceiling` at 60 Hz was 97-100 % in all three
+  of 2zb's passes and 83-87 % with the tick doubled. The `kIOReturnNotReady`
+  hold is **already conditional on the live PENDING bit** (2xn) with the
+  deadline only a backstop, so "make the hold conditional" is not an available
+  dial; `RBFBAmtrHoldExpired` 0 says the backstop is never reached.
+  `tools/paired.sh` pairs the latch histogram with the frame rate over one
+  **measured** window and **refuses any row whose `vbl/s` disagrees with the
+  mode's own rate by over 5 %** - that guard exists because without it the
+  script reported a 194 Hz panel, having divided a real counter delta by
+  `animtest`'s `--secs` argument rather than the elapsed time (2zb).
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker
@@ -484,7 +487,10 @@ The numbering is cited all over the journal — **keep the numbers**.
     assembler built by **arithmetic**; a `sort -u` read as a count; and **a key
     name that is a prefix of another key's name** (`rbgpu-diag` matching
     `rbgpu-diag-prev`). Anchor the match or read the value, never the file; and
-    xref a string's **start**. [2v8, 2wc, 2wg, 2v9]
+    xref a string's **start**. **And the NVRAM diag table prints every number
+    as hex** - until 2zc with no `0x`, so `tick_us=3640` was 13888 and looked
+    exactly like a refused parse, and 2z4's `pg_ticks=24` was 36. Ask what base
+    a number is in before reading it. [2v8, 2wc, 2wg, 2v9, 2zc]
 27. **No vnode work at plugin init** — the root filesystem is not mounted yet.
     `-rbgpuoff` stops `init()` entirely, so such a boot is not a control for
     it. [2oe]
@@ -674,8 +680,10 @@ default-on and still wants `wdt=-1` in boot-args** — it is Apple's arg, we
 cannot set it, and without it a frozen boot panics at 120 s with no SSH window
 (2hh). Keep `wdt=-1`.
 
-**Tunables:** `rbgpuschedtickus=<500..1000000>` (6944 is the better value on
-the evidence, 2xn), `rbgpuvblhz=<millihertz>` (20000-400000),
+**Tunables:** `rbgpuschedtickus=<500..1000000>` (**6944 is a measured
+interior optimum** - 2xn/2zb/2zc put 2000, 6944 and 13888 at 51.33, 74.6 and
+49.2 sets/s, so both directions cost a third of the frame rate; do not change
+it without reading 2zc), `rbgpuvblhz=<millihertz>` (20000-400000),
 `rbgpufbvrammb=<256..16384>`, `rbgpufbvramrangemb=<8..256>`,
 `rbgpufbhubpmax=<N>` (0 = unlimited), `rbgpufbatymb=<1..3072>`,
 `rbgpufbblfloor=`, `rbgpumtlkscope=` / `rbgpumtlkexclude=` (exclude wins),
