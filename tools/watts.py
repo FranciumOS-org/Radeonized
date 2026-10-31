@@ -175,11 +175,41 @@ def main():
                               text=True).stdout.split()[-1]
     except Exception:
         boot = "?"
+    # 2z6: boot 260 read 17.93 W and boot 261 read 36.44 W on identical
+    # binaries, and neither row recorded what the machine was DOING or which
+    # timing it was running, so a 2x surprise could not be attributed. These
+    # three turn that into a question with an answer. `armed` matters most:
+    # 2z6's "stock" control was read off a boot that was never stock, and a
+    # row that carries the arming cannot be mistaken for one that does not.
+    env = {}
+    try:
+        env["load"] = "%.2f" % __import__("os").getloadavg()[0]
+    except Exception:
+        env["load"] = "?"
+    env["mhz"] = "?"
+    env["armed"] = "?"
+    try:
+        fb = subprocess.run(["ioreg", "-rl", "-c", "RBAMDFramebuffer"],
+                            capture_output=True, text=True).stdout
+        m = re.search(r'"RBFBModeCurMhz"\s*=\s*(\d+)', fb)
+        if m:
+            env["mhz"] = m.group(1)
+    except Exception:
+        pass
+    try:
+        pr = subprocess.run(["ioreg", "-rl", "-c", "RembrandtGPUPeer"],
+                            capture_output=True, text=True).stdout
+        m = re.search(r'"armed"=(\d+)', pr)
+        if m:
+            env["armed"] = m.group(1)
+    except Exception:
+        pass
     try:
         with open(LOG, "a") as f:
-            f.write("%s boot=%s label=%s  %.2f W  (%d mAh @ %d mV over %.0fs, "
-                    "+-%.0f%%)  advisory=%.2f W\n"
+            f.write("%s boot=%s armed=%s mhz=%s load=%s label=%s  %.2f W  "
+                    "(%d mAh @ %d mV over %.0fs, +-%.0f%%)  advisory=%.2f W\n"
                     % (time.strftime("%Y-%m-%dT%H:%M:%S"), boot,
+                       env["armed"], env["mhz"], env["load"],
                        label or "-", w, dmah, v, dt, 100.0 / dmah, adv))
         print("appended to %s" % LOG)
     except OSError as e:
