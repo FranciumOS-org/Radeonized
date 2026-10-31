@@ -50870,3 +50870,64 @@ corroborated at the time by its own advisory field (15.96 W), against five
 later readings between 34.82 and 42.03 W. Half of everything measured since,
 on the same binaries. No mechanism proposed. Boot 260 predates 2z6a, so no
 `load=` or `mhz=` was recorded for it; every row from here carries both.
+
+## 2z9 — efficiency handed off: a Zen 3+ idle kext is a SEPARATE project, and the licences allow it
+
+2z8 closed efficiency as a RembrandtGPU problem (stock idles at 34.82 W, our
+whole stack worth <=4 W, inside the noise). The user's next idea is to build a
+Ryzen power-management kext out of the existing ones. Recorded here because the
+groundwork is this project's evidence and the hazards are this project's rules.
+
+**The licences permit it, and that was checked FIRST.** Both
+`trulyspinach/SMCAMDProcessor` and the active fork
+`DrogaBox/SMCAMDProcessor-personal` v3.34.0 are **BSD 3-Clause** - read from
+their own LICENSE files, not assumed. So reading, deriving and redistributing
+are allowed with the copyright notices retained (`(c) 2020, trulyspinach`,
+`(c) 2026, Droga`) and the no-endorsement clause honoured. This is the opposite
+of the ChefKiss OKL case that docs/RULES.md forbids, and the check is the point:
+**read the LICENSE before reading the source**, every time.
+
+**The gap is specific, not a research programme.** Their own support table says
+PM Dispatch and Legacy P-States are **YES for Zen 1/2 and NO for Zen 3+**, with
+CPPC YES and the note that Zen 3+ runs "in telemetry-only mode". So on this CPU
+(family 0x19, model 0x44, inside their Rembrandt row 40h-5Fh) that kext is a
+SENSOR and nothing more - the idle path it implements for Zen 1/2 is switched
+off for us. Two design facts fall out of their CHANGELOG:
+- **MWAIT was removed in v3.31.0**: MONITOR/MWAIT is Intel technology that AMD
+  exposes at CPUID level for compatibility but which does not enter a low-power
+  C-state on Zen - a no-op that wastes power. **`sti; hlt` is the only idle
+  strategy that works on real AMD hardware.**
+- They had a latent scheduler hang from a **missing `sti` after MWAIT exit**, so
+  interrupt enabling on the idle path is where this breaks.
+- Package wattage is RAPL, **MSR `0xC0010299`**, decoded `1ULL << energyStatusUnits`.
+
+**Telemetry comes first, because this evening is the argument for it.** The
+wattmeter failed three times before working: a zero printed over a real draw
+(awk doubles, 2z3a), manufactured sample counts from a frozen `InstantAmperage`
+(2z5), and 17915 W from a 1000x unit error (2z5a). An MSR-based package-power
+reading would make every later question cheap, and `tools/watts.py` stays as the
+independent cross-check - two methods agreeing is the only reason any wattage
+here is believed.
+
+**The hazard that is bigger than ours.** A CPU power-management kext that panics
+at boot is worse than a GPU one: **the boot sentinel does not cover it**, since
+it only disarms RembrandtGPU's own features. Recovery means Recovery or a USB.
+So the disarm gate has to exist before the first load, defaulting off. And our
+plugin writes the SMU (`smu_writes` 21, `smu_nmsgs` 7, `mp1_hw_index` 16), so
+two drivers on the MP1 mailbox is a real interaction - mitigated by Zen 3+ being
+telemetry-only there, Curve Optimizer writes blocked, and CPPC being MSR-based
+rather than mailbox-based. `-rbgpustock` takes our SMU path out for comparison.
+
+**Prerequisites for installing theirs, if it is ever wanted:**
+`ProvideCurrentCpuInfo` quirk enabled; load order Lilu -> VirtualSMC ->
+AMDRyzenCPUPowerManagement -> SMCAMDProcessor; `-amdcppcactive` for CPPC Active
+Mode (the one power lever available on this CPU, untested here); **avoid
+`-amdpnopchk`**, which lets any local process issue privileged hardware writes.
+
+**Network note that cost real time tonight.** The connection is IPv6-only.
+`raw.githubusercontent.com`, `cdn.jsdelivr.net` and `data.jsdelivr.com` work;
+`github.com`, `api.github.com`, `codeload.github.com` and
+`objects.githubusercontent.com` do **not**. So `git push` fails and GitHub
+release ZIPs cannot be downloaded, while source can be read via jsDelivr. The
+fork ships **no prebuilt kexts** (source only, 197 files). Diagnosing this as
+"the network is down" was wrong - the user corrected it.
