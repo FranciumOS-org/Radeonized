@@ -50583,3 +50583,72 @@ live and this tree has been suppressing it since boot 68. `gfxoff_status` 0 or
 power number: it only means something from a boot that still composites, so
 `RBFBAmtrSets` climbing is part of the measurement. And per 2z3b, measure with
 the the assistant app QUIT - it was ~20 % of CPU in the baseline samples.
+
+## 2z5 — boot 260: 2ju's power-gating write was ALWAYS a no-op, and the wattmeter is retired
+
+Boot 260, rule 15 clean: plugin **`D7B408A0`** (2z4), fbkext `D669FE2E`,
+`rbgpu-boot` 260, armed.
+
+### THE EXPERIMENT ANSWERED ITSELF WITHOUT ITS BOOT-ARG
+
+`-rbgpupg` **never reached boot-args** - the dedup command stripped
+`-rbgpucgcg` as intended but the append did not happen, and boot-args carries
+neither token. So `nopg_on` **1** is correct and expected, not a defect: our
+power-gating write stayed armed exactly as it has since boot 68.
+
+And with it armed, 2z4's instrumentation settles the question anyway:
+
+    pg_pre_or     0        OR of RLC_PG_CNTL across every tick, BEFORE our write
+    pg_nz_ticks   0        ticks that saw a non-zero one
+    pg_ticks     24
+
+The first tick's `pre` is the only clean read of "before we ever wrote", and it
+is **0** - as are all 24, spanning ~2.0 s to ~11.2 s. **`RLC_PG_CNTL` is
+already 0 without us.** Power gating was never ours to suppress, our write has
+never changed a bit, and `-rbgpupg` has nothing to restore. The lever does not
+exist.
+
+This is the whole value of 2z4's read-whether-or-not-armed design: the boot-arg
+is moot and no boot was spent on it. **Honest bound:** established for the
+2.0-11.2 s window the ticks cover only; Apple enabling PG after 11.2 s is not
+excluded, and the ticks stop there.
+
+`gfxoff_status` is still **2** (awake). So of 2z3's two named suspects for the
+idle power, the power-gating half is now dead and what remains is CGCG - which
+2ju measured halts the CP, and which the user's own description of
+`-rbgpucgcg` ("freeze my screen like it was off or black") independently
+confirms. **The gating route to efficiency is closed from both ends**, and
+`linear_force` is what is left.
+
+### THE WATTMETER IS WITHDRAWN - THIRD FAILURE OF THE SAME INSTRUMENT
+
+`InstantAmperage * Voltage` is not a power sensor. One machine, one evening:
+
+    24.75 W   (-1525 mA)
+    ~27 W     (three A/B legs, two of which never updated across 24 s)
+     2.33 W   (-143 mA, IDENTICAL for 40 consecutive seconds, and the leading
+               sample read -1.66 W i.e. CHARGING while on battery)
+
+2.33 W cannot run this laptop. The field is filtered and goes stale, so a tight
+loop reports one number many times and calls it many samples - which is
+precisely how 2z3b's "12 samples" were manufactured out of a gauge that never
+moved. **Every absolute wattage in 2z3 and 2z3b is withdrawn.** The one thing
+that survives is the differential conclusion, and only because its legs were
+within the noise of each other: refresh rate is not where the power goes.
+
+Rule 16, third strike: this instrument has now reported a zero over a real
+draw (2z3a, awk doubles), manufactured sample counts from a frozen field, and
+disagreed with itself by 10x.
+
+**`tools/watts.py` now measures ENERGY, not current.**
+`AppleRawCurrentCapacity` is in mAh and must fall; drained charge over a
+measured wall interval is average power, and a counter that must decrease
+cannot be faked by a stale read. It **refuses until capacity has actually
+moved** (rule 31: a counter that has not moved YET is not one that did not
+move) and prints the resolution it achieved, so the figure is never better
+than it reads. 1 mAh resolution means time is the cost: ~15 mAh/min at ~15 W,
+so one minute is +-7 % and five minutes +-1.5 %. Verified refusing over 15 s
+with capacity unmoved at 4621 mAh - and 4621 against 4666 earlier in the
+evening is real drain, just below resolution for the window.
+
+`InstantAmperage` is still printed, labelled ADVISORY ONLY with the reason.
