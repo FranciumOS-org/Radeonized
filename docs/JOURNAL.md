@@ -50819,3 +50819,54 @@ Also unexplained and now harder to attribute: boot 260's 17.93 W against boot
 261's 36.44 W on identical binaries. 2z6a added `armed=`, `mhz=` and `load=`
 to every log line so the next surprise is attributable; it cannot retroactively
 explain this one.
+
+## 2z8 — boot 263 STOCK: 34.82 W. Efficiency is NOT a RembrandtGPU problem.
+
+The control 2z7 lost four boots to, finally armed - and armed the way rule 43
+now requires, **verified after the boot from the running system**:
+`-rbgpustock` present in boot-args (it survived, because
+`sudo tools/efi.sh bootarg add` edits the config.plist), `armed` **0**,
+`linear_force` and `nocgcg_on` absent because stock short-circuits before
+either is decided, and `RBAMDFramebuffer` loaded but publishing **no `RBFB*`
+keys at all** - it declined the panel, which is rule 38 behaving exactly as
+designed and why the desktop was unaccelerated.
+
+    config                        W       load   advisory
+    STOCK  armed=0, Claude out  34.82     0.96    38.26
+    armed  boot 261, Claude out 36.44       ?     35.76
+    armed  boot 263, Claude out 41.35     ~0.6    34.58
+    armed  boot 261, Claude in  38.46       ?     35.46
+
+**The verdict: our entire stack is worth at most ~4 W, and that is inside the
+noise.** Stock idles at 34.82 W against an armed mean of 38.9 W, while the two
+armed readings differ from EACH OTHER by 4.9 W. There is no 20 W win in our
+code, and the hypothesis 2z6 offered - "our two periodic thread_calls block
+deep package C-states and that is ours to fix" - is **measured false as a
+material contributor**.
+
+What remains is the platform: a Ryzen 7735HS under macOS has no CPU
+power-management driver, so the cores never reach deep idle. ~35 W is the
+floor this machine has with no RembrandtGPU code doing anything, and at a
+~35 W floor a 45 W adapter has ~10 W of headroom - which is the user's
+reported symptom in full, and not caused by this project.
+
+**The caveat that keeps this honest.** Stock is not "our work removed", it is
+"the CPU does the compositing instead". The comparison therefore bounds what
+disabling our stack BUYS (nothing measurable) rather than what our stack
+COSTS; a configuration with our code off AND no compositing demand would be a
+different number. For the user's question - "would turning RembrandtGPU off
+help my battery?" - the bound is the answer, and it is no.
+
+**Closed as an efficiency target:** the gating route (2z3/2z5 - PG already 0
+without us, CGCG blacks the screen), the refresh rate (2z3b, and its
+instrument withdrawn, but the stock number now settles the magnitude anyway),
+and the schedtick/VBL timer hypothesis (here). `linear_force` survives as the
+**Metal score** suspect only - 2z6's flip rate of 3.78/s already removed it as
+an idle-power explanation, and 2z8 removes the headroom that would have made
+it worth chasing for power.
+
+**Still unexplained, and now clearly an outlier:** boot 260's **17.93 W**,
+corroborated at the time by its own advisory field (15.96 W), against five
+later readings between 34.82 and 42.03 W. Half of everything measured since,
+on the same binaries. No mechanism proposed. Boot 260 predates 2z6a, so no
+`load=` or `mhz=` was recorded for it; every row from here carries both.
