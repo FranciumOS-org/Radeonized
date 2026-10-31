@@ -50652,3 +50652,37 @@ with capacity unmoved at 4621 mAh - and 4621 against 4666 earlier in the
 evening is real drain, just below resolution for the window.
 
 `InstantAmperage` is still printed, labelled ADVISORY ONLY with the reason.
+
+### 2z5a — the first trustworthy power number: 17.93 W idle, after a 1000x unit error
+
+The capacity-drain meter worked on its first real run and then reported
+**17915.43 W**. `mAh * mV` is **micro**-watt-hours (1e-3 A.h * 1e-3 V), so the
+divisor is 1e6; the code had 1e3. The correct reading of boot 260's own data -
+93 mAh at 16117 mV over 301 s - is **17.93 W**.
+
+Fourth instrument error in one evening, and the fix is structural rather than a
+corrected constant: the formula is now one function `power_w()` with the units
+spelled out in its docstring, and `watts.py --selftest` pins three measured
+cases plus **a plausibility bound no laptop violates** (1 W < W < 200 W). That
+bound is specifically what would have caught this: the three ratio cases all
+pass under a wrong divisor because they are all wrong by the same factor.
+Control: reinstating `/1e3` fails three assertions including the magnitude
+bound, and restoring passes.
+
+**And the advisory field agrees for once**: `InstantAmperage` said 15.96 W
+against the drain method's 17.93 W, ~12 % apart. That is not a vindication of
+`InstantAmperage` - 2z5 withdrew it for being frozen and 10x inconsistent -
+but two independent methods inside 12 % is the first corroborated wattage this
+project has.
+
+**17.93 W at idle is the baseline, with one caveat stated:** it is not
+established that the Claude app was quit for this run, and 2z3b measured it at
+~20 % of CPU. So 17.93 W is an upper bound on idle. For reference a tuned
+7735HS laptop idles nearer 7-12 W, so there is real headroom, and an 18 W
+floor is exactly the shape of "discharges on a 45 W charger": any load that
+puts the package at 40 W+ leaves nothing for charging.
+
+Sawtooth note for whoever reads a running log: the per-15 s figures fall within
+each mAh plateau and jump when capacity ticks, because the numerator is
+quantised and the denominator is not. **Only the final line is the
+measurement**; the intermediate ones are a convergence trace.

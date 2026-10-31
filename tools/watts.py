@@ -52,6 +52,42 @@ def sample():
     return vals
 
 
+def power_w(dmah, mv, secs):
+    """Average watts from charge drained over an interval.
+
+    THE UNITS, SPELLED OUT, because getting them wrong is how this tool
+    reported 17915 W for a real 17.93 W draw: mAh * mV is micro-watt-hours
+    (1e-3 A.h * 1e-3 V), so the divisor is 1e6 and not 1e3. selftest() pins a
+    measured case so the constant cannot drift again.
+    """
+    if secs <= 0:
+        return 0.0
+    return (dmah * mv / 1e6) / (secs / 3600.0)
+
+
+def selftest():
+    """Boot 260's own reading: 93 mAh at 16117 mV over 301 s was 17.93 W."""
+    cases = [
+        (93, 16117, 301, 17.93),
+        (18, 16200, 45, 23.33),    # a plateau from the same run
+        (0, 16000, 60, 0.0),
+    ]
+    bad = 0
+    for dmah, mv, secs, want in cases:
+        got = power_w(dmah, mv, secs)
+        ok = abs(got - want) < 0.05
+        print("%s %4d mAh %5d mV %4ds -> %8.2f W (want %.2f)"
+              % ("ok  " if ok else "FAIL", dmah, mv, secs, got, want))
+        bad += 0 if ok else 1
+    # a sanity bound no laptop violates: this is what would have caught 1e3
+    w = power_w(93, 16117, 301)
+    if not (1.0 < w < 200.0):
+        print("FAIL implausible magnitude %.2f W - check the unit divisor" % w)
+        bad += 1
+    print("selftest: %s" % ("all passed" if bad == 0 else "%d FAILED" % bad))
+    return 1 if bad else 0
+
+
 def signed64(v):
     """Fold an unsigned 64-bit field back to signed, exactly."""
     if v is None:
@@ -60,6 +96,8 @@ def signed64(v):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        return selftest()
     secs = int(sys.argv[1]) if len(sys.argv) > 1 else 300
     first = sample()
     if first["ExternalConnected"] == "Yes":
@@ -94,7 +132,7 @@ def main():
         if time.time() - last_report >= 15:
             last_report = time.time()
             if dmah > 0:
-                w = dmah * v / 1000.0 / (dt / 3600.0)
+                w = power_w(dmah, v, dt)
                 print("  t+%4ds  %5d mAh drained  -> %6.2f W  (+-%.0f%%)"
                       % (int(dt), dmah, w, 100.0 / dmah))
             else:
@@ -111,7 +149,7 @@ def main():
             "          That is not a measurement of 0 W - run longer.\n"
             % (int(dt), cap0, cap1))
         return 1
-    w = dmah * v / 1000.0 / (dt / 3600.0)
+    w = power_w(dmah, v, dt)
     print("\n%.2f W mean over %.0fs   (%d mAh at %d mV, resolution +-%.0f%%)"
           % (w, dt, dmah, v, 100.0 / dmah))
     # Advisory only, and labelled: see the header on why this field is not trusted.
