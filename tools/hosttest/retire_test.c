@@ -177,8 +177,41 @@ int retire_tests(void)
         }
     }
 
+    /* 2zf: the mode gate. The vblank may only take the job where it fires at
+     * least as often as the timer would, because boot 267 measured the
+     * handover as +24 % at native and -42 % at 60 Hz, pinned at exactly half
+     * the vblank rate - the retire wants a RATE and only the native vblank
+     * supplies it. */
+    {
+        const uint64_t native = 6952507u;          /* the measured native period */
+        if (!rb_retire_vbl_suits(native, native)) {
+            printf("FAIL retire: native mode refused by its own period\n"); bad++;
+        }
+        if (!rb_retire_vbl_suits(native - 50000u, native)) {
+            printf("FAIL retire: a FASTER mode refused\n"); bad++;
+        }
+        /* Spread-spectrum moves the derived period boot to boot (2y6), so a
+         * period a hair longer than native is still native. */
+        if (!rb_retire_vbl_suits(native + (native / 32u), native)) {
+            printf("FAIL retire: slack too tight for a re-derived period\n");
+            bad++;
+        }
+        if (rb_retire_vbl_suits(16665556u, native)) {
+            printf("FAIL retire: 60 Hz accepted - this is boot 267's -42 %%\n");
+            bad++;
+        }
+        if (rb_retire_vbl_suits(8331041u, native)) {
+            printf("FAIL retire: 120 Hz accepted - boot 267 measured -20 %%\n");
+            bad++;
+        }
+        if (rb_retire_vbl_suits(0u, native) || rb_retire_vbl_suits(native, 0u)) {
+            printf("FAIL retire: a zero period must never arm the handover\n");
+            bad++;
+        }
+    }
+
     printf("retire: the 2zd handover - unarmed decline, single handoff, the "
            "watchdog takeback, a non-advancing clock, role-dependent period "
-           "and 200 interleaved frames%s\n", bad ? " FAILED" : ": passed");
+           "and 200 interleaved frames, plus 2zf's mode gate%s\n", bad ? " FAILED" : ": passed");
     return bad;
 }

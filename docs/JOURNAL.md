@@ -51399,3 +51399,99 @@ Both halves. `sudo tools/efi.sh install` for plugin
 `2B35749B-AEBA-323F-BAF4-377D3E0D3F43`; the framebuffer `FE82F367` is already
 in the collection and correct. Then read `vblret_armed` and `RBFBVblRetDrove`
 **before** any rate, and take six samples per mode, not one.
+
+## 2zf (boot 267) — the handover WORKS, +24 % at native, and it is a REGRESSION below native; the "latch latency" was the beat all along
+
+Boot 267 carried both halves: plugin `2B35749B-AEBA-323F-BAF4-377D3E0D3F43`
+and framebuffer `FE82F367-7C43-3688-94E5-8116947D81ED`. The handover is live
+and exclusive:
+
+- `RBFBVblRetCalls` **6450** / `Drove` **6450** / `Refused` **0**, later
+  8854/8854.
+- `vblret_src` **1** (the vblank is driving), `vblret_hand` **1**,
+  `vblret_take` **0**, `vblret_decl` 0.
+- `vblret_vbl` **45715** against `vblret_timer` **1083** - and with zero
+  takebacks those 1083 are all from BEFORE the first vblank offer, the boot
+  window in which the framebuffer's vblank did not yet exist. 97.7 % of
+  retires are vblank-driven and the watchdog has never fired.
+
+**Where to read those.** `nvram rbgpu-diag | grep vblret` comes back EMPTY and
+that is not a finding: `diag_used` 693 of `diag_max` 768 says the table is not
+full, but the NVRAM note is capped at ~520 bytes, so most keys never reach it.
+The full table is `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` dictionary,
+which prints **decimal**, unlike the NVRAM note's hex (2zc). Two readings of
+the same counters in two different bases, and absence from one is not absence
+from the other - rule 14 and rule 26 in one place.
+
+### THE RESULT, AND ONE HALF OF IT IS A REGRESSION
+
+| mode | sets/s now | baseline | change | `fed` |
+|---|---|---|---|---|
+| 143.85 | **90.4** (n=6) | 73.1 (n=10, 2ze) | **+24 %** | 62-66 % |
+| 119.97 | 59.45 (n=3) | ~74.5 (2zb) | **−20 %** | **49.5 %** |
+| 60.01 | 30.04 (n=6) | ~52 (2ze) | **−42 %** | **50.0 %** |
+
+The native gain is real by 2ze's own standard: 2ze measured the 144 Hz noise
+band as 63.98-100.77 over ten samples with median 70.0, and the new minimum
+(78.14) sits ABOVE that median while five of six new samples beat nine of ten
+old ones. The 60 Hz numbers are tighter still - 29.93 to 30.14, ±0.4 % over six
+- and pinned at exactly **half** the vblank rate, as is 120 Hz. That is not
+noise, it is a divide-by-two.
+
+**My signed prediction was wrong in the more useful direction.** 2zd predicted
+60 Hz would "barely move" because 2zb had it at 97-100 % of its latch ceiling
+with nothing to recover. It moved further than 144 Hz did, and the other way.
+
+### THE CAUSE IS 2zc'S OWN CURVE, NOT A NEW EFFECT
+
+Retirement used to run at a **fixed 6944 µs - 144/s - whatever the display was
+doing** (2z2 measured `tick_us` identical in all four modes and called that
+out). Driving it from the vblank ties the retire rate to the DISPLAY rate. At
+native those are the same number and the beat disappears, which is the +24 %.
+At 60 Hz the vblank supplies 60/s, **0.42x the measured optimum**, and 2zc
+already measured that halving the retire rate costs about a third. So the
+regression was predictable from evidence in hand and I did not look for it
+(the recurring error, second variant: read the evidence already in hand before
+designing the next experiment).
+
+**The retire wants a RATE, and only the native vblank supplies it.**
+
+### AND IT EXPLAINS TWO MILESTONES RETROSPECTIVELY
+
+`mean vblanks` is now **1.00-1.02 at every mode**, where it was 1.04-1.63;
+bin2+ is **1.3 %** at 60 Hz. The flip latch now completes inside its own frame
+essentially always.
+
+So **the "latch latency" 2za and 2zb spent two milestones measuring was an
+artifact of the two-timer beat.** Merging the timers removed it at every mode.
+That also retires the loose end 2zb could not explain: the bin-2 share
+alternated across modes (43.6 / 8.0 / 39.2 / 6.0 %) and then failed to
+reproduce over two sweeps, so 2zb wrote it off as noise. It was beat phase -
+structured, not random, and sampled at whatever phase the 20 s window happened
+to catch. 2zb's instinct not to build a fifth model on it was right for the
+wrong reason.
+
+### THE FIX: GATE THE HANDOVER ON THE MODE
+
+`rb_retire_vbl_suits(period_ns, native_ns)` - the vblank takes the job only
+where it fires at least as often as the timer would. Below native the timer
+keeps it, which is every boot's behaviour before 2zd, so the slow modes return
+to the status quo rather than to a new risk. Checked **per offer**, not per
+setup, because the mode changes at runtime without a reboot (2z1), and
+`RBFBVblRetModeSkips` counts the declined offers so a boot can say which side
+of the gate it sat on. Slack is one part in sixteen because the native period
+is re-derived per boot off a spread-spectrum clock (2y6) and must not fail an
+exact compare against itself.
+
+The native period lives in the framebuffer (`kVBLPeriodNsFast`), so nothing
+has to cross the collection boundary to make this decision. Hosttest asserts
+native passes, a faster mode passes, a re-derived period one part in 32 long
+still passes, 60 Hz and 120 Hz are refused, and a zero period never arms;
+the control widens the gate and fails exactly the 60 Hz and 120 Hz
+assertions.
+
+fbkext `D79228C7-B5C7-3D90-A575-AB73F492E17B`. **What remains open is the 37 %
+still missing at native**: `fed` is 62-66 % with the latch ceiling now at the
+panel rate itself, so the latch is no longer the constraint at all and whatever
+costs the remaining third is unmeasured. That is the next frontier, and it is
+now a clean one - one timer, no beat, no latch cost.
