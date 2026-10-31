@@ -636,6 +636,22 @@ The numbering is cited all over the journal — **keep the numbers**.
     which is the only side that matters - and ask of any value written for a
     future boot: **who else writes this, and when?** [2z7]
 
+44. **A measurement needs enough samples to resolve the difference it claims,
+    and "enough" is counted in BOOTS, not rows.** 2ze: ten runs at 143.85 Hz
+    on ONE boot gave 63.98-100.77, mean 73.1, median 70.0 - so one 20 s sample
+    cannot resolve under ~20 %, and the first run of that boot read 100.77 and
+    would have recorded a feature as a 38 % success on a boot whose own
+    counters said it never ran. The prescription that followed ("n>=6 per
+    side") was then ALSO wrong: 2zg found boot 267's six internally consistent
+    samples (78.14-94.90, mean 90.4) irreproducible, boot 268 giving 72.50
+    (n=12) in the same configuration with the gate provably inert.
+    **Boot-to-boot variance exceeds within-boot variance**, so six samples
+    inside one boot measure that boot. A configuration claim needs **at least
+    two boots per side**, or an A/B inside one boot. Rule 18 applied to boots
+    rather than rows - and the variance itself can be the finding: the two
+    timers beating were the noise source, so the same change that bought no
+    mean bought +-3.5 % where it had been +-20 %. [2ze, 2zg]
+
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
 keeps catching it: **say in the code what would have to be true for the reading

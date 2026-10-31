@@ -1,34 +1,69 @@
 # HANDOFF — next step
 
-**Written 2026-10-30, after 2xx resolved; updated the same day for 2xy and
-2xz. `CLAUDE.md` has the standing rules,
-the chip facts and the boot-arg contract; this file is only what is in flight.**
+**Rewritten 2026-10-31 at boot 268, after the 2z-series closed out the frame-rate
+work. `CLAUDE.md` has the standing rules, the chip facts and the boot-arg
+contract; `docs/JOURNAL.md` is the evidence record, grepped by milestone tag
+(`2zc`, `2zg`); this file is only what is in flight.**
 
 ---
 
-## THE MACHINE WORKS, ON NO BOOT-ARGS OF OURS BUT ONE.
+## THE MACHINE WORKS, ON NO BOOT-ARGS OF OURS BUT TWO.
 
-Boot 247 is an accelerated, smooth desktop at the panel's refresh with the
-full default configuration and nothing disarmed. Confirmed on hardware by the
-user and by its own counters.
+An armed boot is an accelerated Mac: Metal compute bit-exact, `AMD Radeon
+680M` / 4 GB in System Profiler, our `RBAMDFramebuffer` owning the panel,
+Apple's `AMDRadeonX6000` compositing for it, no flicker, no tearing, USB on
+real interrupts, the brightness slider moving the panel, and a Displays panel
+offering eight refresh rates derived from the panel itself.
 
 | | state |
 |---|---|
-| **2xu** Electron/Claude-app artifacts | FIXED, boot 231 |
-| **2xv** USB on real interrupts | FIXED, user-confirmed |
-| **2xw** armed by default, no boot-args | **WORKING**, boot 247 |
-| **2xx** our own `"0"` read as a disarm | **FIXED**, boot 237 then 247 |
-| **2xx** the WindowServer crash loop | **FIXED** — it was a stale fbkext, rule 15 |
-| **2xy** the System Settings brightness slider | built, **NEEDS A BOOT** |
-| **2xz** Ventura-and-up support matrix, cave table | built, no boot needed on Tahoe |
+| **2xw** armed by default, no boot-args | WORKING |
+| **2xy/2y1/2y2** brightness slider | **DONE**, boots 249-253 |
+| **2y5-2z1** refresh-rate ladder, mode switching | **DONE**, boots 255-259 |
+| **2z8** efficiency | **CLOSED** — not a RembrandtGPU problem; ~35 W is the platform floor |
+| **2zc** the retire tick is a two-sided cost | **MEASURED**, boot 265 |
+| **2zd/2zf/2zg** retire from the vblank | **DONE and gated**, boots 267-268 |
+| **the last ~50 % of the frame rate** | **OPEN, and it is the only thing open** |
+
+### Boot-args in the EFI right now
+
+    rbgpumtlkscope=*  -rbgpufbbacklight  -rbgpufbbuiltin  -rbgpufbblparm
+    -rbgpufbmodes     -rbgpuretirevbl
+    (plus wdt=-1, which is Apple's and must stay)
+
+`-rbgpufbmodes` and `-rbgpuretirevbl` are the two opt-ins worth keeping on.
+Everything else of ours is default-on since 2xw.
+
+### What boot 268 reads, as the baseline to compare against
+
+    kextstat   plugin 2B35749B   fb D79228C7
+    ioreg      1 RBAMDFramebuffer, 0 IONDRVFramebuffer
+    RBFBModeCur        = 100 (native, 143898 mHz)
+    RBFBVblRetArmed    = 1      Drove = Calls, Refused = 0
+    RBFBVblRetModeSkips= 0 at native, climbing at 60 Hz   <- the mode gate
+    peer: vblret_src=1 vblret_hand=1 vblret_take=0 tick_us=6944
+          armed=1 gen=1 tick_armed=1 agdc_on=1
+
+    sets/s at native   72.5  (n=12, 69.41-74.53)
+    sets/s at 60 Hz    49.0  (n=6, timer-driven by the gate)
+    mean vblanks       1.00 when the vblank drives, 1.04-1.63 when the timer does
+
+**Two places to read counters, in two different bases.** The framebuffer's are
+`ioreg -rl -c RBAMDFramebuffer` (`RBFB*`). The plugin's are the `RBGPUDiag`
+dictionary in `ioreg -rl -c RembrandtGPUPeer`, which prints **decimal**.
+`nvram rbgpu-diag` prints **hex with an `0x` prefix since 2zc** and is
+**truncated near 520 bytes**, so most keys never reach it even though
+`diag_used` 693 of `diag_max` 768 says the table is not full — absence from
+`nvram` is not absence from the table (rule 14, rule 26).
 
 ### Installed, and this is the part that bit
 
-    plugin  build/out/RembrandtGPU.kext      43775C76   -> the OpenCore EFI
-    fbkext  build/out/RBAMDFramebuffer.kext  EBF63EB0   -> /Library/Extensions
+    plugin  build/out/RembrandtGPU.kext      2B35749B   -> the OpenCore EFI
+    fbkext  build/out/RBAMDFramebuffer.kext  D79228C7   -> /Library/Extensions
 
-(boot 247's were FE3200B0 / 353A1D24. Both moved for 2xy/2xz; the plugin's
-moves again on any rebuild, so take the UUID from the build, not from here.)
+(Those are what boot 268 is running. BOTH move on any rebuild, so take the
+UUID from `dwarfdump --uuid build/out/...` at the time you build, never from
+this file — it is a record of one boot, not a constant.)
 
 **Install BOTH, every time, and check both UUIDs in `kextstat` before reading
 anything else.** The nine-boot crash loop and the whole boot-arg bisect of
@@ -113,156 +148,129 @@ NVRMAGDC is AGDC-adjacent and has never been accounted for in any reading here.
 back out for normal use, since it is the only recovery from a boot that dies
 in its first minute.
 
-### What boot 247 reads, as the baseline to compare against
 
-    kextstat   plugin FE3200B0   fb 353A1D24
-    ioreg      1 RBAMDFramebuffer, 0 IONDRVFramebuffer
-    RBFBArmWhy      = 10
-    RBFBVBLFires    = 142.0 Hz    against the panel's measured 143.83
-    RBFBAmtrSets    = 31.7/s      mostly-idle desktop; 82/s was measured busy
-    RBFBHubpWrites  = one per set
-    peer: armed=1 arm_why=0 gen=1 tick_armed=1 tick_us=6944
-          cap_tbl_patched=1 agdc_on=1 sentinel=2
+## THE ONE THING LEFT: WHERE HALF OF EVERY FRAME PERIOD GOES
 
-## THE NEXT BOOT: BRIGHTNESS (2xs + 2xy)
+`fed` is **~50 %** at native — 72.5 sets/s against a 144 Hz panel — and the
+latch ceiling now sits at the panel rate itself, so nothing currently measured
+accounts for the other half.
 
-Both halves of the backlight are built and **neither has ever been booted**.
-They are separately armed because rule 38's question has different answers for
-them: the write reaches a PWM duty cycle, the match reaches which `IODisplay`
-subclass owns the connection - and through it the display-prefs key, mirroring
-and the wrangler's idle dimming.
+**What has been eliminated, each by measurement, and must not be re-opened
+without new evidence:**
 
-Install both kexts as above, then:
+| candidate | how it died |
+|---|---|
+| demand / the workload | 1, 2, 3 concurrent `animtest`: 72.43 / 68.53 / 76.15. Flat under triple demand (2zb) |
+| a HUBP backlog | `Preempted` 7 of 19 669, `PendHits` **0** of 19 669 (2zb) |
+| the `kIOReturnNotReady` hold | already conditional on the live PENDING bit; `AmtrHoldExpired` 0, the backstop is never reached (2xn) |
+| flip latch latency | removed entirely by 2zd — `mean vblanks` 1.63 → 1.00 — **and throughput did not move** (2zg) |
+| the retire tick's period | 6944 µs is a measured interior optimum; 2000 and 13888 both cost a third (2zc) |
+| the retire tick's phase | fixed by driving from the vblank; buys variance, not mean (2zg) |
 
-    sudo tools/efi.sh bootarg remove -rbgpunosentinel
-    sudo tools/efi.sh bootarg add -rbgpufbbacklight -rbgpufbbuiltin
-    nvram boot-args                  # VERIFY before rebooting: -rbgpuoff must
-                                     # NOT be there, and the two new tokens must
+**The mean has sat at 70-75 sets/s through every configuration ever tried.**
+Tick 2000, 6944, 13888; timer-driven and vblank-driven; one workload and
+three. Something sets ~73 and it is none of the above.
 
-Removing `-rbgpunosentinel` first is deliberate: these two args have never run,
-so this is exactly the boot the sentinel exists for. If it does not survive 60
-seconds the next boot comes up stock on its own and costs nothing.
+**So the next step is an instrument, not another configuration sweep.** The
+question that has never been asked directly: *where does the frame period
+actually go?* The useful shape is a timestamp at each stage of one frame —
+`setAttribute('amtr')` arriving, the HUBP write, the latch, the retire, the
+next `getAttribute` — accumulated as a histogram per stage, published
+per-stage. 2zb's latch sampler is the model: cheap, on a path that already
+runs, decided in `src/common` so the hosttest checks it first.
 
-**What to read, in this order.** Rule 8 first (`nvram rbgpu-boot` must have
-increased), then rule 34 - the args this experiment depends on are
-`-rbgpufbbacklight` and `-rbgpufbbuiltin`, so check they are in `boot-args`
-before interpreting a single counter.
+### SIX MODELS OF THIS CEILING HAVE DIED. READ THIS BEFORE BUILDING A SEVENTH.
 
-    ioreg -rl -c RBAMDFramebuffer | grep -E 'RBFBBl|RBFBArmWhy'
-        RBFBBlArmed     1 = -rbgpufbbacklight was seen
-        RBFBBlBuiltIn   1 = -rbgpufbbuiltin was seen
-        RBFBBlReady     1 = BAR5 mapped and PWRSEQ0 identified
-        RBFBBlRefuse    0 = set up; else WHY it will not write (2xs' codes)
-        RBFBBlFlagsGets  how many times anything asked kConnectionFlags
-        RBFBBlSenseGets  ...and getAppleSense
-        RBFBBlLevel0 / RBFBBlLastLevel / RBFBBlLastCount / RBFBBlReadback
-        RBFBBlSets / RBFBBlGets / RBFBBlParmAdds / RBFBBlPendTimeouts
+1. An absolute ~76 frames/s cap (2y7) — looked right, then wasn't, then partly was.
+2. A latch-phase half-rate model (2z2).
+3. A fixed ~14 ms latency (2z2).
+4. A latency *distribution* that shifts with the frame period (2za/2zb) — the
+   bin-2 share alternated across modes and would not reproduce.
+5. `min(latch_ceiling, ~75)` as two hardware bounds (2zb) — the ~75 turned out
+   to be a function of `tick_us`.
+6. The latch as a *constraint* (2zd) — it was a correlate; deleting it moved
+   nothing.
 
-    ioreg -rl -c IODisplayConnect | grep -E 'class |IODisplayConnectFlags'
+Every one died the same way: structure read out of too little data, then
+engineered against. **Measure the quantity directly and let the instrument be
+able to refute the model** — that is what 2za did right even though its model
+was wrong.
 
-**Said before the boot, so the reading cannot be bent to fit (rule 14):**
+## THE TWO SAMPLING RULES THIS COST US, BOTH LEARNED THE HARD WAY
 
-* The *only* thing that settles 2xy is the class name under `display0`. Today
-  it is `AppleDisplay` with `IODisplayConnectFlags = <00000000>`. Success is
-  `AppleBacklightDisplay` (or `IOBacklightDisplay`) and flags `<00080000>` -
-  0x800 byte-swapped, since `ioreg` prints the raw data.
-* `RBFBBlFlagsGets` **0** means nothing ever asked, so IOBacklightDisplay never
-  probed this connection and the two answers are not the reason it did not
-  match. That is a different failure from `RBFBBlFlagsGets` non-zero with
-  `RBFBBlSenseGets` 0, which means it asked for the flags, did not like them,
-  and stopped - and both are different again from both counters non-zero with
-  `AppleDisplay` still matching, which means the probe passed and something
-  else won the category. Three outcomes, three distinct readings.
-* A brightness slider in System Settings is the user-visible form, but it is
-  **downstream of the class name** - do not read its absence as 2xy failing
-  until the class has been checked.
-* `RBFBBlReady 0` with `RBFBBlRefuse` non-zero is 2xs failing, not 2xy. The two
-  are independent by construction and must be attributed separately.
-* The panel going **dim** is 2xs' documented worst case, not a hang: the floor
-  is non-zero (`rbgpufbblfloor=`, refused outside 1 %..50 %) precisely so the
-  screen can never be driven black. `sudo nvram rbgpu-fb=0` or removing
-  `-rbgpufbbacklight` undoes it.
+**One sample cannot resolve a configuration change (2ze).** Ten runs at
+143.85 Hz on one boot: 63.98-100.77, mean 73.1, median 70.0. The *first* run of
+that boot read 100.77 and would have recorded a feature as a 38 % success on a
+boot whose own counters said it never ran.
 
-Outstanding paperwork once it has booted: the three new `docs/linux-ref/` files
-in `UPSTREAM.md`, and a 2xs journal entry (2xy's is written).
+**And six samples inside one boot measure that boot, not that configuration
+(2zg).** Boot 267 had six internally consistent samples (78.14-94.90, mean
+90.4) and boot 268 gave 72.50 (n=12) in the same configuration with the gate
+provably inert. **Boot-to-boot variance exceeds within-boot variance.** A
+configuration claim needs **at least two boots per side**, or an A/B inside one
+boot. This is rule 18 applied to boots rather than rows, and it is rule 44 in
+`CLAUDE.md`.
 
-### Open, and none of it blocking
-- **The frame rate ceiling.** 82/s busy against 143.83; never established
-  whether that is demand-limited or still gated (2xi/2xo).
-- **`-rbgpunocaptbl` is a diagnostic, not a configuration.** Boot 246 measured
-  `_ttl_hw_init` returning `kIOReturnError` without the `_DeviceCapabilityTbl`
-  clone, so the record is load-bearing for binding. Keep it out of boot-args.
-- **The wedge**, independent (2wt/2x0). **HDMI** is unreachable, wired to the
-  dGPU (2xq/2xr).
+`tools/paired.sh [secs]` is the instrument: it pairs the latch histogram with
+the frame rate over one **measured** window and refuses any row whose `vbl/s`
+disagrees with the mode's own rate by more than 5 %. That guard exists because
+without it the script reported a **194 Hz panel**, having divided a real
+counter delta by `animtest`'s `--secs` argument instead of the elapsed time.
+`JOBS=N` runs N concurrent workloads. `./build/out/modeset <hz>` switches mode
+from the shell with no reboot — but read `RBFBModeCur`, never the return code
+(2z1).
 
-**Read these first, in this order (rule 8, then rule 34):**
+## STILL OPEN, NOT BLOCKING, EACH NAMED IN CLAUDE.md
 
-    nvram rbgpu-boot                     # must have increased
-    ioreg -rl -c RembrandtGPUPeer | grep -o '"RBGPUDiag" = {.*}'
-        sentinel      1 armed and the clear is scheduled, 4 THIS IS A RECOVERY
-                      BOOT (the previous one did not survive 60 s), 2 opted out
-                      with -rbgpunosentinel, 3 /options unreadable, 0 allocate
-                      failed
-        safe_latch    1 only on a recovery boot
-        sentinel_cleared  1 the boot survived its first minute
-        arm_why       0 armed by default, 1 /options unreachable (armed anyway),
-                      3 rbgpu-arm=0, 5 stock, 6 the latch, 8 a "0" ignored as a
-                      spent pre-2xw one-shot (2xx)
-        gen           2 migrated THIS boot, 1 already migrated, 0 the write did
-                      not read back, 3 /options unreachable
-        gen_fixed     how many stale keys were rewritten - expect 2 on the
-                      first 2xx boot of this machine and 0 forever after
-        tick_armed / tick_oneshot   the regression 2xx fixes: tick_armed must be
-                      1, and tick_oneshot 0 (or 8 on the migrating boot), never 3
-    ioreg -rl -c RBAMDFramebuffer | grep RBFBArmWhy    # 0 = took the panel
+1. **The wedge**, an independent second defect: work submitted that never
+   retires on GFX/SDMA/compute user queues. `metal_probe --queues 4`
+   reproduces it in userspace with no kext and no reboot (2wt). Not the
+   display blocker (2x0).
+2. **Metal score ~11k.** The only live lead is re-deriving the 254-byte
+   per-OS code cave in `rbgpu_mtlcave.h` to target `64KB_S` (mode 9) instead
+   of LINEAR. **Both halves of the swizzle fix must agree or the display
+   corrupts** — it is not a one-constant change. `linear_force` survives as a
+   suspect here and only here; 2z8 demoted it as a power cause (3.78 flips/s
+   on a static desktop has no bandwidth to pay for).
+3. **HDMI is unreachable**, wired to the dGPU (2xr), not merely unbuilt.
+4. **Ventura and Sonoma claim nothing** in `rb_osver.h`. See the OS coverage
+   section below.
+5. Housekeeping: `UPSTREAM.md` entries owed for 2xs' three `docs/linux-ref/`
+   files; `com.nullmoth.NVRMAGDC` never accounted for.
 
-**Said before the boot:**
-* `gen 2` + `gen_fixed 2` + `tick_armed 1` + `RBFBArmWhy 0` + a desktop that
-  moves without typing = 2xx is done. `gen_fixed 0` with `gen 2` would mean the
-  keys had already been cleared by hand and 2xx was never exercised.
-* `sentinel 1` + `arm_why 0` + `RBFBArmWhy 0` + an accelerated desktop = 2xw is
-  done and the project needs no boot-args.
-* `sentinel 4` on the FIRST boot after installing means the install boot itself
-  did not survive a minute — read `rbgpu-fbcrumb` and the display log, and
-  remember that boot came up **stock**, so nothing in it measures the armed
-  configuration (rule 39).
-* **No `RBAMDFramebuffer` in `ioreg` at all** = it declined. There is no
-  service to publish why, so read it from outside: `-rbgpuoff`/`-rbgpustock`/
-  `-rbgpunoownfb` in boot-args, `rbgpu-fb=0`, `rbgpu-arm=0`, `rbgpu-safe` still
-  set, or the peer having run first and said stock. Those are the only six
-  reasons.
-* `RBFBArmWhy` **10** means the framebuffer probed AFTER the peer and took the
-  peer's own answer - correct, but it is the opposite of the order 2wg
-  measured, so note it: `RBGPUStock` on the peer is then the authoritative
-  input and the sentinel latch is not read at all.
-* A desktop that is correct but frozen is rule 38's failure: the panel taken
-  with no accelerator underneath. One power cycle fixes it by itself now,
-  because the sentinel latch will be set.
+## EFFICIENCY IS CLOSED, AND HANDED OFF (2z8/2z9)
+
+Stock 34.82 W against armed 36.44/41.35 W — **our whole stack is ≤4 W, inside
+the noise**, and ~35 W is the platform floor because a 7735HS has no CPU
+power-management driver under macOS. At that floor a 45 W adapter has ~10 W of
+headroom, which is the user's charging symptom exactly. CPU power work lives
+in a **separate repo, `~/Developer/Econized`**, not here.
+
+Two instrument lessons from that work, both expensive: `InstantAmperage ×
+Voltage` is **not a power sensor** (filtered, goes stale, disagreed with itself
+by 10×) — `tools/watts.py` measures energy by `AppleRawCurrentCapacity` drain
+instead, with a `--selftest` and a plausibility bound, because a 1000× unit
+error passed every ratio check. And `nvram boot-args` **does not survive a
+reboot on this machine** (rule 43).
+
 
 ## IF IT GOES WRONG
 
 In order of bluntness, and none of them needs another OS:
 
-    sudo nvram rbgpu-arm=0          # accelerator off, and the panel with it
+    sudo nvram rbgpu-arm=0                       # accelerator off, and the panel with it
     sudo tools/efi.sh bootarg add -rbgpustock    # every default off
     sudo tools/efi.sh bootarg add -rbgpuoff      # the plugin does nothing
 
-and if the machine cannot be driven at all, **do nothing**: the sentinel makes
-the next boot stock by itself. That is the whole point of 2xw.
+and if the machine cannot be driven at all, **do nothing**: the boot sentinel
+makes the next boot stock by itself. That is the whole point of 2xw. One bad
+boot costs one stock boot.
 
----
+To back a single feature out, derive the negative from its own name:
+`-rbgpunoschedtick`, `-rbgpunofbhubp`, and for this series simply drop
+`-rbgpuretirevbl`. **Never `kmutil unload` the framebuffer kext — it panics
+(2sq); reboot instead.**
 
-## WHAT IS ACTUALLY LEFT
-
-Small, and each one is named in `CLAUDE.md` with its journal tag:
-
-1. **Brightness** — both halves built, neither booted. The whole procedure and
-   what each outcome would mean is under "THE NEXT BOOT" above.
-2. **The last ~22 % of the frame rate** — 82/s against the panel's 143.83. Not
-   established whether that is demand-limited or still gated.
-3. **The wedge**, the independent second defect. `metal_probe --queues 4`
-   reproduces it with no kext, no arming and no reboot (2wt).
-4. **HDMI is unreachable** — wired to the dGPU (2xr), not merely unbuilt.
 
 ## OS COVERAGE, AND WHAT IT DOES AND DOES NOT CLAIM (2xz)
 
