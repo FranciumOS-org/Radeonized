@@ -51005,3 +51005,128 @@ mode, the quantity is not what sets `fed` and the whole framing is wrong.
 fbkext `281D946F-6E34-3713-8464-012B12861F09`. Controls: dropping the clock
 re-base on preemption fails exactly that assertion; counting an unarmed vblank
 fails three. Needs a boot.
+
+## 2zb (boot 264) — the latch IS the whole story below 75 Hz, and a hard ~73/s cap is the whole story above 120
+
+2za asked one question: **how many vblanks does a flip take to latch?** The
+answer, over ~20 000 flips: **1 or 2, never more than 3.** `LatchMax` 3 with
+two instances; bins 4 and 5+ empty. And the two counters that bound the whole
+pipeline:
+
+- **`RBFBHubpLatchPreempted` 7 of 19 669 writes (0.036 %).**
+- **`RBFBHubpPendHits` 0 of 19 669.**
+
+`Latched` 19 662 + `Preempted` 7 = `HubpWrites` 19 669 **exactly**, so no flip
+is unaccounted for (rule 14). Two independent instruments, sampling at
+different points in the frame, agree: **we are never backed up at the HUBP.**
+Every new flip finds the previous one already latched. The null-result trap
+named in 2za did NOT fire - `PendHits` is 0 at *flip-write* time, but the
+vblank-path read sees PENDING set on 20-46 % of flips, so the sampler is live,
+not null. Those are consistent: `getAttribute` is called 3.4x per flip, so by
+the time the accelerator actually programs the next address, the previous has
+landed.
+
+### THE PREDICTION DIED, AND SO DID THE FRAMING
+
+2za predicted the distribution shifts toward bin 1 as the frame lengthens. The
+first three ad-hoc mode deltas came back **alternating** - 43.6 % bin 2+ at
+144 Hz, 8.0 % at 120, 39.2 % at 75, 6.0 % at 60 - which is not a function of
+the frame period at all, 75 Hz having nearly twice the period of 120 Hz. **It
+did not reproduce**: two repeat sweeps gave 48/40/17/17 and 20/8/22/4. The
+alternation was noise, and a fifth model was not built on it. `bin2+` share is
+not a stable function of the mode; `mean vblanks` per latch is, as a mean.
+
+### THE INSTRUMENT WAS THE SUSPECT, TWICE (rule 16)
+
+The paired script divided counter deltas by `animtest`'s `--secs` **argument**.
+`animtest` runs ~20.3 s whatever it is asked for, so every rate in the first
+three passes came out **1.353x high** and the panel appeared to scan at
+**194 Hz** at a 143.88 Hz mode. That is 2y9's error with the terms swapped:
+2y9 divided a stale counter by a fresh clock, this divided a fresh counter by
+an **assumed** clock. What caught it was the *uniformity* - 1.352, 1.358,
+1.353, 1.354 across four modes - because a panel cannot scan 35 % faster than
+its own timing. The fix is structural: **time the run, and refuse the row if
+`vbl/s` disagrees with the mode's own rate by more than 5 %**, `vbl/s` being
+the one quantity whose true value is known in advance. All twelve rows below
+self-check to **+0.2 … +0.6 %**.
+
+Then the replacement clock was wrong too: **`time.monotonic()` is
+process-relative in this python build** - a fresh process reads 0.0088 - so
+two invocations cannot be differenced. `time.time()` is absolute and is what
+the script uses. Neither failure announced itself; the first manufactured a
+194 Hz panel and the second a 0.00 s window.
+
+### THE RESULT, THREE PASSES, SAME BOOT, SAME WINDOW PER ROW
+
+`latch ceiling` = `vbl/s ÷ mean vblanks per latch` - the rate implied if the
+latch were the only cost. The last column is the measured `sets/s` as a
+fraction of it:
+
+| mode | mean vbls | sets/s | latch ceiling | actual / ceiling (A / B / C) |
+|---|---|---|---|---|
+| 143.880 | 1.20-1.42 | 70-76 | 102-121 | **69 / 62 / 63 %** |
+| 119.971 | 1.08-1.46 | 63-75 | 83-112 | **77 / 68 / 67 %** |
+| 74.996 | 1.21-1.42 | 51-61 | 53-63 | **97 / 98 / 97 %** |
+| 60.008 | 1.04-1.19 | 50-58 | 51-58 | **98 / 100 / 100 %** |
+
+**Below 75 Hz the latch latency accounts for the ENTIRE shortfall** - `fed` is
+`1 / mean vblanks` and nothing else is needed. **At and above 120 Hz a second,
+independent cost takes a further third.** That column is the most reproducible
+thing measured here: three passes, 97-100 % at the slow modes, 62-69 % at the
+fast ones.
+
+### 2y7 AND 2z2 WERE BOTH RIGHT, AND THIS IS WHY THEY LOOKED CONTRADICTORY
+
+Taking the two settled passes (B and C; pass A ran while the display was still
+settling from the earlier thrash and is uniformly ~5 % low): `sets/s` is
+**74.6 at 143.88 Hz and 74.8 at 119.97 Hz** - *identical*. That is 2y7's
+"absolute ~76 frames/s" ceiling, vindicated. 2z2 reported it refuted, but 2z2's
+evidence was the 75 and 60 Hz rows, where the latch ceiling (61 and 58) sits
+**below** the cap, so the cap is not what binds there. Both findings are real;
+whichever bound is lower wins. One expression fits all four rows of both
+passes to within 2 %:
+
+> **`sets/s ≈ min( vbl_rate ÷ mean_latch_vblanks , ~75 )`**
+
+144: min(119, 75)=75 vs 74.6 · 120: min(110, 75)=75 vs 74.8 ·
+75: min(61, 75)=61 vs 59.8 · 60: min(57.6, 75)=57.6 vs 57.5.
+
+Stated as a description of eight paired rows, not as a mechanism - the right
+of a fifth model to exist having been earned by the fourth one dying above.
+
+### THE ~75/s CAP IS OURS, NOT THE WORKLOAD'S
+
+The confound 2y7 asserted away ("a continuously animating window is continuous
+demand") is now measured. One, two and three concurrent `animtest` instances at
+143.88 Hz: **72.43, 68.53, 76.15 sets/s.** Flat under triple demand, with
+`Preempted` still 0-2 and `PendHits` still 0. The cap is in our stack or
+Apple's, upstream of the HUBP write, and raising demand does not move it.
+
+### WHERE THE SECOND TERM POINTS, AND THE ONE-BOOT TEST FOR IT
+
+At 143.88 Hz: frame interval 1/74.6 = **13.4 ms**, latch 1.21 x 6.947 =
+**8.4 ms**, residual **~5 ms**. At 60.008 Hz the residual is **0** - the whole
+interval is latch. A per-frame cost that appears at short frame periods and
+vanishes at long ones is what waiting on a **fixed-rate** retire tick looks
+like: `tick_us` is **6944 and is not derived from the display mode** (2z2
+measured the same value in all four rows), so a frame waits a mean **half tick
+period, 3.47 ms**, for `AMDSWScheduler::checkTimestamps()` to retire it - and
+at 60 Hz that wait hides inside a 16.7 ms frame.
+
+**The cheap decisive test is to LENGTHEN the tick, not shorten it.** Shortening
+is known-bad for a reason the model does not contain - 2xn measured 2000 µs as
+*worse* (71.97 → 51.33) from thread_call contention with the VBL thread_call -
+and contention can only decrease as the period grows. So:
+
+> **`rbgpuschedtickus=13888`** (double). The model predicts the 143.88 Hz cap
+> falls from ~75 to **~61/s**: residual 6.94 ms + latch 8.4 ms = 15.3 ms. If
+> it instead stays near 75, **the tick wait is not the second term** and the
+> retire path is exonerated.
+
+A boot-arg, no code change, one boot, and a signed number either way. If it
+confirms, the fix is the one already named: retire frames from the VBL handler
+instead of the competing fixed-rate thread_call, which removes the wait and the
+contention together.
+
+Measured on fbkext `281D946F-6E34-3713-8464-012B12861F09`, boot 264, no
+reboot between modes (2z1). Script: `tools/paired.sh`.

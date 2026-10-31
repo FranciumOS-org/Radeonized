@@ -200,17 +200,33 @@ table and refuses to install one that does not match the running kernel;
   never reached the kext** (rule 13 on an Apple API) - read `RBFBModeCur`, not
   the return code. `tools/modeset.m` (`make modeset`) lists and selects modes
   from the shell, userspace only.
-- **The last ~22 % of the frame rate — and it is a TRADE, not an open
-  question.** 2xo measured **82/s with the `kIOReturnNotReady` hold against
-  112/s without it**, which is the user's call rather than a defect to fix
-  silently. 2y7 characterised it further: throughput tops out at an ABSOLUTE
-  ~76 frames/s, so at 143.83 Hz only **53 % of scanouts are fed** while at
-  60 Hz the hold barely bites and **96 %** are - 60 Hz is flicker-free AND
-  nearly fully delivered, which is a real option. It is **not**
-  demand-limited: a continuously animating window is continuous demand, and
-  143.83 Hz would then have been fed at 100 %. The one untried dial is a
-  SHORTER hold, and `RBFBAmtrHoldExpired` 0 argues against it - the bound is
-  never reached today, so shortening it would start truncating real holds.
+- **The frame rate: TWO bounds, and which one binds depends on the mode
+  (2zb, boot 264).** `sets/s = min(vbl_rate / mean_latch_vblanks, ~75)` fits
+  eight paired rows to within 2 %. **Below 75 Hz the flip latch is the whole
+  story** - a flip takes 1.0-1.4 vblanks to latch and the measured frame rate
+  is **97-100 %** of what that alone implies, reproduced over three passes.
+  **At and above 120 Hz a hard ~75/s cap binds instead** and the latch leaves
+  30-38 % on the table. So **2y7's "absolute ~76 frames/s" was right and 2z2
+  only appeared to refute it**: 2z2's evidence was the 75 and 60 Hz rows, where
+  the latch ceiling sits *below* the cap and the cap is not what binds. The cap
+  is **ours, not the workload's** - one, two and three concurrent `animtest`
+  instances give 72.43 / 68.53 / 76.15 sets/s, flat under triple demand. And it
+  is **not a HUBP backlog**: `Preempted` 7 of 19 669 and `PendHits` **0** of
+  19 669, two instruments at different frame phases agreeing that every new
+  flip finds the previous one already latched. The residual ~5 ms per frame at
+  144 Hz, which vanishes at 60 Hz, is the shape of waiting on a **fixed-rate**
+  retire tick (`tick_us` 6944, not derived from the mode): mean wait half a
+  period, 3.47 ms. **The one-boot test is `rbgpuschedtickus=13888`** - doubling
+  it should drop the 144 Hz cap to ~61/s, and if it stays ~75 the retire path
+  is exonerated. Lengthen rather than shorten: 2xn measured 2000 µs as *worse*
+  (71.97 → 51.33) from thread_call contention, which only decreases as the
+  period grows. The `kIOReturnNotReady` hold is **already conditional on the
+  live PENDING bit** (2xn) with the deadline only a backstop, so "make the hold
+  conditional" is not an available dial; `RBFBAmtrHoldExpired` 0 says the
+  backstop is never reached. `tools/paired.sh` pairs the latch histogram with
+  the frame rate over one measured window and **refuses any row whose `vbl/s`
+  disagrees with the mode's own rate by over 5 %** - that guard exists because
+  without it the script reported a 194 Hz panel (2zb).
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker
