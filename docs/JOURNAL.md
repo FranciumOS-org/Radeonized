@@ -50298,3 +50298,105 @@ other mode worth a run: if the cap model holds it should be the first mode both
 flicker-free and ~100 % fed.
 
 fbkext `D669FE2E-DEFD-3D2E-A7AD-0F0A4A9883EF`. Needs a boot.
+
+## 2z2 — boot 259: the ceiling is a LATENCY DISTRIBUTION, not a cap, and two of my models died
+
+Boot 259, rule 15 clean: plugin `636F3584`, fbkext **`D669FE2E`** in the
+auxiliary collection and loaded. `rbgpu-boot` 259. `tick_us` **6944**,
+`tick_armed` 1, `tick_solved` 1. Boot-args carry only `wdt=-1`.
+
+**2z1's fix works.** `modeset 120` took the raster straight from 60 Hz to
+120 Hz with no native detour: `ModeCur` 101, `ModeCurLines` 1354,
+`VBLPeriodNs` **8331041**, `ModeRefuse` **0**, `ModeSwitches` 2,
+`VBLRetunes` 2. The one-way door is gone, and mode -> mode is now exercised on
+hardware rather than only in the hosttest. This boot's clock gave a FOURTH
+distinct set of line counts (`1129@143955 1354@120033 1625@100016 1806@89992
+2167@75000 2709@59995 3251@49992 3386@47999`) - 2709 lines for 60 Hz where
+boots 255/258 chose 2707 and boot 256 chose 2705.
+
+### FOUR POINTS, ONE BOOT, ONE BINARY
+
+The first 30 s run at 120 Hz is **WITHDRAWN**: it read 52.94 sets/s with the
+per-10s column falling 66.26 -> 53.82 -> 38.81, and two fresh 20 s runs
+immediately after held steady at 70.16 and 68.55. The decay was transient and
+is most likely my own `ioreg` polling 3 s after a mode switch. Rule 16: the
+instrument's environment is part of the instrument.
+
+    mode        sets/s   fed     interval   interval/period
+    143.96 Hz    78.10   54.3 %   12.8 ms      1.84
+    120.03 Hz    69.40   57.8 %   14.4 ms      1.73
+     75.00 Hz    58.01   77.3 %   17.2 ms      1.29
+     59.99 Hz    52.87   88.2 %   18.9 ms      1.13
+
+`fb vbl fires` matched the asked rate to +0.0 % in every mode (143.84/s against
+143.83, 75.03 against 75.00), so **the panel really is scanning at the
+advertised rate in all four**. What is not at the advertised rate is UNIQUE
+frames.
+
+### THREE MODELS ENTERED AND TWO DIED
+
+**Dead: the absolute ~76 frames/s cap (2y7).** It predicted ~76 sets/s at
+120 Hz. Measured 69.4, and 58.0 at 75 Hz and 52.9 at 60 Hz. The number is not
+constant, so it was never a cap - 2y7 averaged across modes whose true values
+differ, and the ~76 it reported is simply the 144 Hz point.
+
+**Dead: the latch-phase / every-other-vblank model.** It predicted ~60 sets/s
+and ~50 % fed at 120 Hz. Measured 69.4 and 57.8 %, and 54.3 % at 144 Hz is not
+50 % either. A clean half-rate would hold 50 % at every refresh and does not.
+
+**Dead: my own fixed ~14 ms flip-to-latch latency.** Stated in advance, it
+predicted 75 Hz (13.3 ms period) would be the first mode both flicker-free and
+~100 % fed, because a fixed 14 ms would fit inside one frame. **Measured 58/s
+and 77.3 %.** A fixed latency gives a STEP in fed% as the period crosses it;
+the measurement is a smooth ramp, so the latency is distributed, not fixed.
+
+### WHAT FITS: A LATENCY DISTRIBUTION WITH A MEDIAN NEAR 10 ms
+
+Reading `fed` as `P(latency < period)` makes all four points one curve:
+
+    period 16.67 ms -> 13 % of flips overran
+    period 13.33 ms -> 29 %
+    period  8.33 ms -> 73 %
+    period  6.95 ms -> 84 %
+
+A monotone distribution with its median somewhere near 10 ms and a wide spread.
+The `kIOReturnNotReady` hold then converts "this flip overran its frame" into
+"lose that frame", which is why `fed` falls and `sets/s` rises as the period
+shrinks: a shorter frame catches less of the distribution but there are more
+frames.
+
+**This reframes the whole question.** There is no ceiling to lift and no phase
+bug to fix. To feed 144 Hz fully, the TAIL of the flip-completion distribution
+has to come under 6.95 ms - a distribution to compress, which is a different
+engineering problem from a cap to raise, and it is measurable per-mode rather
+than being one number.
+
+### THE TICK QUANTUM IS THE PRIME SUSPECT, AND THE OBVIOUS FIX IS ALREADY REFUTED
+
+`tick_us` is **6944** and is NOT derived from the display mode - it is the same
+6944 in all four rows above, which is exactly why the latency distribution
+barely moves while the period does. A frame retires only when
+`AMDSWScheduler::checkTimestamps()` runs, so a flip waits a mean half-quantum
+(3.5 ms) plus its work before it can retire, which puts a 6944 µs quantum in
+the right place to produce a ~10 ms median.
+
+**But shrinking the quantum is already measured WORSE.** 2xn ran
+`rbgpuschedtickus=2000` on boot 219: `sets/s` **71.97 -> 51.33** and our own
+VBL cadence 141.377 -> 133.878 Hz, because a 3.5x faster `thread_call` competes
+with the VBL `thread_call` that delivers frames and the VBL clock lost. (2xn
+also flipped `-rbgpufbflippend` in the same boot, so it is two variables - but
+the direction is loud and the mechanism named.)
+
+So the next move is **not** a smaller number. It is structural: retire from the
+VBL handler itself, in phase with the vblank and once per frame, instead of
+from an independent `thread_call` that competes with it. That removes the
+half-quantum wait AND the contention 2xn measured, rather than trading one for
+the other. Untried, unbuilt, and the reasoning above is a hypothesis, not a
+result.
+
+### SECONDARY
+
+`tools/modeset.m` is now load-bearing for this kind of A/B: four modes measured
+in one session with no reboot and no Displays panel. Worth remembering that the
+first 120 Hz run of this boot had to be thrown away, so an A/B wants a settling
+gap and a repeat before either number is believed.
