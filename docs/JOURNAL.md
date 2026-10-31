@@ -51495,3 +51495,94 @@ still missing at native**: `fed` is 62-66 % with the latch ceiling now at the
 panel rate itself, so the latch is no longer the constraint at all and whatever
 costs the remaining third is unmeasured. That is the next frontier, and it is
 now a clean one - one timer, no beat, no latch cost.
+
+## 2zg (boot 268) — RETRACTION: the +24 % does not reproduce. The latch was a correlate, not a constraint. What survives is a variance collapse and a working gate.
+
+Boot 268, plugin `2B35749B`, fbkext `D79228C7` (the gated build). At native the
+gate is provably inert - `RBFBVblRetModeSkips` **0**, `vblret_src` 1,
+`Drove` = `Calls`, `Refused` 0 - so this boot runs the same thing boot 267 ran,
+and the comparison is clean.
+
+**Twelve samples at 143.9 Hz: mean 72.50, range 69.41-74.53.**
+
+Boot 267 measured **90.4** (n=6, 78.14-94.90) in the same configuration.
+Boot 266's pre-handover baseline was **73.1** (n=10). So boot 268 lands on the
+baseline and **boot 267 is the outlier.** 2zf's "+24 % at native" is
+**WITHDRAWN**. The handover does not raise mean throughput at native refresh.
+
+### THE METHODOLOGICAL FAILURE IS ONE LEVEL UP FROM THE ONE I JUST FIXED
+
+2ze prescribed "n>=6 per side at 144 Hz" after one sample fooled me. Boot 267
+HAD six samples, internally consistent across a tight 78-95 band, and they were
+still unreproducible. **Boot-to-boot variance exceeds within-boot variance**, so
+six samples inside one boot measure that boot, not that configuration. Rule 18
+at a higher level: do not build a table from n=1 **boots**. A configuration
+claim needs at least two boots per side, or an A/B inside one boot.
+
+I have now been wrong about this ceiling in three successive milestones - 2zb's
+hard cap, 2zd's prediction, 2zf's gain - and each time the error was reading
+structure out of too little data.
+
+### THE LATCH WAS REAL AND NOT LOAD-BEARING
+
+This is the substantive finding and it is reproducible. `mean vblanks` is
+**1.00 if and only if the vblank drives**, independent of mode:
+
+| boot | mode | driver | mean vblanks | sets/s |
+|---|---|---|---|---|
+| 268 | 143.9 | vblank | 1.000-1.164 | 72.5 (n=12) |
+| 268 | 60.0 | **timer** | 1.037-1.477 | 49.0 (n=6) |
+| 267 | 60.0 | vblank | 1.000-1.020 | 30.0 (n=6) |
+| 266 | 143.9 | timer | 1.103-1.629 | 73.1 (n=10) |
+
+Both modes, both drivers, two boots: the beat IS the latch, confirmed in both
+directions. **And removing it changed throughput by nothing** - boot 268 native
+is 72.5 with the latch gone, boot 266 native is 73.1 with it present.
+
+So the latch cost was a **correlate, not a constraint**, and 2zb's whole "latch
+ceiling" framing - which 2zd used to predict 110-120 sets/s - was measuring a
+symptom. `actual / latch_ceiling` was never a budget to be recovered. That is
+the sixth model of this ceiling to die, and it died in the most useful way
+available: the quantity was eliminated by removing it and watching nothing
+happen.
+
+### WHAT DOES SURVIVE, AND IT IS WORTH KEEPING
+
+**1. The variance collapses when the vblank drives.** Four datasets, both
+modes, consistent direction:
+
+| boot / mode | driver | spread |
+|---|---|---|
+| 268 / 143.9 | vblank | 69.41-74.53, **±3.5 %** (n=12) |
+| 266 / 143.9 | timer | 63.98-100.77, **±20 %** + a 40 % outlier (n=10) |
+| 267 / 60.0 | vblank | 29.93-30.14, **±0.4 %** (n=6) |
+| 268 / 60.0 | timer | 40.19-57.38, **±17 %** (n=6) |
+
+A desktop whose frame delivery varies ±3.5 % instead of ±20 % is a better
+desktop at the same mean, and it is the first thing in this whole sequence that
+reproduced across boots in both modes. It also explains every variance surprise
+earlier in the sequence, 2ze's ten-sample band included: **the beat was the
+noise source**, not the measurement.
+
+**2. The gate works.** At 60 Hz: `ModeSkips` **7530** climbing, `vblret_src`
+**0**, `vblret_take` **1** - the watchdog took the job back exactly once - and
+60 Hz recovered from 2zf's **30.04** to **49.0** against a ~51.6 baseline.
+Switching back to native gave `vblret_hand` **2**, the resume path that
+`retire_test.c` asserts and that had never been exercised on hardware.
+
+**3. The state machine is now fully exercised on hardware**: handoff, exclusive
+operation, the mode gate, a watchdog takeback, and a resume - every transition,
+with counters agreeing on both sides of the collection boundary.
+
+### WHERE THIS LEAVES THE FRAME RATE
+
+`fed` is ~50 % at native with the latch ceiling at the panel rate itself, so
+**half of every frame period is unaccounted for and nothing currently measures
+it.** The retire tick is no longer a candidate: 2zc proved it binds, and 2zg
+proves that fixing its phase buys stability but no throughput. The honest state
+is that the mean has sat at 70-75 sets/s through every configuration tried -
+tick 2000, 6944, 13888, timer-driven, vblank-driven - except boot 267, which
+did not reproduce. **Something sets ~73 and it is none of the things measured
+so far.**
+
+`-rbgpuretirevbl` stays opt-in, now justified by variance rather than by mean.
