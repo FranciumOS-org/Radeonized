@@ -51327,3 +51327,75 @@ is nothing there for this to recover, and a large gain at 60 Hz would mean the
 mechanism is not what this change assumes. If 144 Hz stays at ~75 with
 `vblRetDrove` climbing and `vblret_timer` at 0, the beat was not the cause and
 the two-sided curve of 2zc needs another explanation.
+
+## 2ze (boot 266) — the 2zd experiment did NOT run, the fail-safe did, and 144 Hz has a noise band I had been reading through
+
+Boot 266 carried `-rbgpuretirevbl` and the new framebuffer
+`FE82F367-7C43-3688-94E5-8116947D81ED`. It did **not** carry the new plugin:
+`kextstat` reads `com.rembrandtgpu.plugin ... D7B408A0-71C7-3ADA-B313-0D7412D54C84`,
+which is neither 2zd's `2B35749B` nor 2zc's `4B145845`. So the handover had
+nothing on the other end.
+
+**And it said so, which is the part worth keeping.** `RBFBVblRetArmed` 1 and
+`RBFBVblRetLookups` 1 - the framebuffer found a `RembrandtGPUPeer` and built
+its symbol - then `RBFBVblRetCalls` **6361** against `RBFBVblRetDrove`
+**0**, every single offer refused, and `nvram rbgpu-diag` has no `vblret_*`
+keys at all because the plugin that publishes them is not loaded. That is
+exactly the version-mismatch path 2zd designed for and predicted the shape of
+(rule 38: two halves that are separately armed must check each other). The old
+peer does not know `RBGPURetireNow`, falls through to
+`super::callPlatformFunction`, and answers non-success. **Retirement stayed
+100 % timer-driven and nothing was at risk.**
+
+### THE 100.77 WAS ONE SAMPLE IN TEN
+
+The first `paired.sh` run of the boot read **100.77 sets/s** at 143.85 Hz
+against 2zb's ~73 baseline - a 38 % gain from a feature that had just been
+measured doing nothing. Ten samples at 143.85 Hz on this one boot:
+
+> 63.98 · 64.24 · 65.71 · 68.20 · 68.34 · 71.59 · 72.97 · 76.46 · 78.90 · **100.77**
+
+**mean 73.1, median 70.0, and 73.1 is exactly 2zb's mean on the OLD
+framebuffer.** The new framebuffer with its handover refused is neutral to
+within nothing: no gain, and - worth stating separately - **no regression**
+either, so the per-vblank `callPlatformFunction` that falls through to the
+default implementation costs nothing measurable. The 100.77 was scatter.
+
+Had that number been taken as the result, 2zd would have been recorded as a
+success on the strength of a configuration in which its own instrument said it
+never ran. The counters are what prevented it, and they only prevented it
+because they were read FIRST, before the frame rate (2zd's own handover
+instruction said to, for this reason).
+
+### THE CORRECTION I OWE, AND IT IS MINE
+
+**144 Hz `sets/s` has roughly a ±10 % run-to-run spread with a 40 % outlier in
+ten samples; 60 Hz is much tighter** (47.02 / 55.82 / 52.09, and its
+`actual / latch_ceiling` pinned at **100 / 100 / 100 %**, reproducing 2zb
+exactly). A single 20 s sample at 144 Hz therefore **cannot resolve a
+difference smaller than about 20 %**, and three cannot resolve much better.
+
+That retroactively weakens a claim I presented as settled. **2zb's "74.6 at
+143.88 Hz and 74.8 at 119.97 Hz - identical, therefore a hard ~75/s cap" rested
+on two samples per mode** and is inside this band; the equality was asserted
+with more confidence than two samples can carry (rule 18, which I cited at 2zb
+about someone else's table and then did not apply to my own). 2zc's finding
+survives untouched: 74.6 → 49.2 is −34 %, well outside the band, and it moved
+in the same direction at both modes.
+
+What also survives, because it is a ratio rather than a rate and is tight at
+both modes: **at 60 Hz the latch explains 100 % of the frame rate and at
+143.85 Hz only 60-82 %.** That is the structure worth designing against, and it
+is not noise.
+
+**From here, a configuration comparison needs n>=6 per side at 144 Hz**, or it
+should be made at 60 Hz where the ratio is stable. `tools/paired.sh` already
+refuses a row whose `vbl/s` is wrong; what it cannot do is tell one sample from
+a distribution, and that is on the person reading it.
+
+### WHAT THE NEXT BOOT MUST CARRY
+
+Both halves. `sudo tools/efi.sh install` for plugin
+`2B35749B-AEBA-323F-BAF4-377D3E0D3F43`; the framebuffer `FE82F367` is already
+in the collection and correct. Then read `vblret_armed` and `RBFBVblRetDrove`
+**before** any rate, and take six samples per mode, not one.

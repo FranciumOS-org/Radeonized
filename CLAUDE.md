@@ -230,6 +230,15 @@ table and refuses to install one that does not match the running kernel;
   mode's own rate by over 5 %** - that guard exists because without it the
   script reported a 194 Hz panel, having divided a real counter delta by
   `animtest`'s `--secs` argument rather than the elapsed time (2zb).
+  **And one sample cannot resolve a configuration change (2ze, boot 266):**
+  ten runs at 143.85 Hz on one boot gave 63.98-100.77, mean 73.1, median 70.0 -
+  a ~±10 % spread with a 40 % outlier - so **a comparison needs n>=6 per side
+  at 144 Hz**, or should be made at 60 Hz, where `actual / latch_ceiling` pins
+  at 100 % run after run. The first run of boot 266 read 100.77 and would have
+  recorded 2zd as a success on a boot whose own counters said the handover
+  never ran. This also weakens 2zb's "74.6 at 144 = 74.8 at 120, therefore a
+  hard cap", which rested on two samples per mode and sits inside the band;
+  2zc's -34 % is outside it and stands.
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker
