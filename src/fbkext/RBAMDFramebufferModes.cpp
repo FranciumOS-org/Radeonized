@@ -212,9 +212,15 @@ bool RBAMDFramebuffer::modeApply(IODisplayModeID want)
          * opens the Displays panel twenty minutes later. */
         const uint32_t htotal = regs[kModeSeg2 + MODE_DW_H_TOTAL] & RB_DRR_TOTAL_MASK;
         const uint32_t vtotal = regs[kModeSeg2 + MODE_DW_V_TOTAL] & RB_DRR_TOTAL_MASK;
-        const uint32_t ctl0   = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
+        /* Live CONTROL is read to be CHECKED, never to be built on: once a
+         * non-native mode is armed it carries our own SEL bits, and using it
+         * as the write base would make our arming its own precondition. The
+         * base and the restore values are the setup snapshot, which is the
+         * only thing that can put the firmware's timing back. */
+        const uint32_t ctlLive = regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL];
 
-        const int why = rb_drr_check(htotal, vtotal, ctl0, lines);
+        const int why = rb_drr_check_owned(htotal, vtotal, ctlLive,
+                                           modeCtl0, lines);
         if (why != RB_DRR_OK) { modeRefuse = (uint32_t)why; return false; }
 
         /* MIN and MAX first, CONTROL last. */
@@ -222,7 +228,7 @@ bool RBAMDFramebuffer::modeApply(IODisplayModeID want)
             (modeMin0 & ~RB_DRR_TOTAL_MASK) | (lines & RB_DRR_TOTAL_MASK);
         regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] =
             (modeMax0 & ~RB_DRR_TOTAL_MASK) | (lines & RB_DRR_TOTAL_MASK);
-        regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = rb_drr_ctl_on(ctl0);
+        regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = rb_drr_ctl_on(modeCtl0);
 
         modeMinRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN] & RB_DRR_TOTAL_MASK;
         modeMaxRb = regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX] & RB_DRR_TOTAL_MASK;
@@ -232,7 +238,7 @@ bool RBAMDFramebuffer::modeApply(IODisplayModeID want)
          * A lost write is put back rather than left half-applied. */
         if (modeMinRb != (lines & RB_DRR_TOTAL_MASK) ||
             modeMaxRb != (lines & RB_DRR_TOTAL_MASK)) {
-            regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = ctl0;
+            regs[kModeSeg2 + MODE_DW_V_TOTAL_CNTL] = modeCtl0;
             regs[kModeSeg2 + MODE_DW_V_TOTAL_MIN]  = modeMin0;
             regs[kModeSeg2 + MODE_DW_V_TOTAL_MAX]  = modeMax0;
             modeRefuse = MODE_REFUSE_WRITE_LOST;

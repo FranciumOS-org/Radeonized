@@ -93,6 +93,35 @@ static inline uint32_t rb_drr_ctl_off(uint32_t ctl0)
     return ctl0 & ~(uint32_t)(RB_DRR_CTL_MIN_SEL | RB_DRR_CTL_MAX_SEL);
 }
 
+/* Is this live V_TOTAL_CONTROL exactly our own arming of `ctl0` and nothing
+ * else? Used to tell "we own DRR" from "someone else does". */
+static inline int rb_drr_ctl_is_ours(uint32_t ctl, uint32_t ctl0)
+{
+    return ctl == rb_drr_ctl_on(ctl0);
+}
+
+/* rb_drr_check for a transition that may start from a mode WE already armed.
+ *
+ * rb_drr_check refuses any non-zero V_TOTAL_CONTROL, because a non-zero one
+ * means the firmware is driving DRR and the values to restore are unknown.
+ * That is correct for the first write and WRONG for every one after it: our
+ * own arming sets the SEL bits, so once a non-native mode is entered the live
+ * CONTROL is non-zero and the check refuses every further mode - a one-way
+ * door that made 60 Hz the last mode a boot could reach (2z1).
+ *
+ * `ctl` is the live register, `ctl0` what was read before we ever wrote. If
+ * the live value is ctl0 or our own arming of it, the restore values ARE
+ * known and the decision is the one ctl0 implies; anything else is a third
+ * party and still refuses.
+ */
+static inline int rb_drr_check_owned(uint32_t htotal, uint32_t vtotal,
+                                     uint32_t ctl, uint32_t ctl0,
+                                     uint32_t lines)
+{
+    if (ctl != ctl0 && !rb_drr_ctl_is_ours(ctl, ctl0)) { return RB_DRR_FW_DRR; }
+    return rb_drr_check(htotal, vtotal, ctl0, lines);
+}
+
 /* ---- 2y6: from a one-shot experiment to a display mode ------------------
  *
  * Boot 255 measured the write WORKING: 2707 lines gave 60025 mHz against a

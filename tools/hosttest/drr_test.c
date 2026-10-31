@@ -275,5 +275,79 @@ int drr_tests(void)
               "a panel at the bottom of the ladder gets native only");
     }
 
+    /* 2z1: mode -> mode. Boot 258 reached 60 Hz and then refused every other
+     * mode with RB_DRR_FW_DRR, because the live V_TOTAL_CONTROL it checked
+     * carried the SEL bits OUR OWN arming had just set. The door locked
+     * behind us and 60 Hz was the last mode the boot could reach. */
+    {
+        const uint32_t armed = rb_drr_ctl_on(0u);   /* what we leave behind */
+
+        CHECK(armed == 3u, "arming a zero CONTROL sets exactly MIN_SEL|MAX_SEL");
+        CHECK(rb_drr_ctl_is_ours(armed, 0u) &&
+              !rb_drr_ctl_is_ours(5u, 0u) &&
+              !rb_drr_ctl_is_ours(0u, 0u),
+              "ours is the armed value; neither a foreign CONTROL nor the "
+              "unarmed snapshot is");
+
+        /* The regression itself, stated as the old call and the new one on the
+         * identical inputs. The old one is what shipped in 2z0. */
+        CHECK(rb_drr_check(DRR_HTOTAL, DRR_VTOTAL, armed, 2707u) == RB_DRR_FW_DRR,
+              "the 2z0 check refuses a mode change from a mode WE armed");
+        CHECK(rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, armed, 0u, 2707u)
+                  == RB_DRR_OK,
+              "mode -> mode is allowed when the live CONTROL is our own");
+
+        /* Native -> mode, the path that already worked, must not change. */
+        CHECK(rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, 0u, 0u, 2707u)
+                  == RB_DRR_OK,
+              "native -> mode still passes");
+
+        /* And the refusal this check EXISTS for survives: a CONTROL that is
+         * neither the snapshot nor our arming of it belongs to someone else,
+         * and the restore values really are unknown. */
+        CHECK(rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, 5u, 0u, 2707u)
+                  == RB_DRR_FW_DRR,
+              "a third party owning CONTROL still refuses");
+        CHECK(rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, 2u, 0u, 2707u)
+                  == RB_DRR_FW_DRR,
+              "a PARTIAL arming is not ours - MAX_SEL alone refuses");
+
+        /* A boot whose firmware had DRR on refuses whatever the live value is,
+         * because ctl0 itself is non-zero: 2y5 read MIN/MAX/MID/CONTROL all 0
+         * on this panel, and that reading is what makes the restore knowable. */
+        CHECK(rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, 1u, 1u, 2707u)
+                  == RB_DRR_FW_DRR &&
+              rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, 3u, 1u, 2707u)
+                  == RB_DRR_FW_DRR,
+              "a firmware that owns DRR refuses from either state");
+
+        /* The non-CONTROL refusals must still come through unchanged, or the
+         * new wrapper would be a hole rather than a door. */
+        CHECK(rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, armed, 0u, DRR_VTOTAL)
+                  == RB_DRR_NOT_LONGER &&
+              rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, armed, 0u, 0x8000u)
+                  == RB_DRR_TOO_LONG &&
+              rb_drr_check_owned(0u, DRR_VTOTAL, armed, 0u, 2707u)
+                  == RB_DRR_NO_RASTER,
+              "every other refusal still fires through the owned check");
+
+        /* Boot 258's own three modes, pairwise: from 60 Hz every other mode on
+         * the ladder must now be reachable without passing through native. */
+        {
+            struct rb_drr_mode mm[RB_DRR_MAX_MODES];
+            const unsigned k = rb_drr_build_modes(342056937u, DRR_HTOTAL,
+                                                  DRR_VTOTAL, 0u, mm,
+                                                  RB_DRR_MAX_MODES);
+            unsigned i, ok = 0;
+            CHECK(k == 8u, "boot 258's clock gives the same eight modes");
+            for (i = 1; i < k; i++) {
+                if (rb_drr_check_owned(DRR_HTOTAL, DRR_VTOTAL, armed, 0u,
+                                       mm[i].lines) == RB_DRR_OK) { ok++; }
+            }
+            CHECK(ok == k - 1u,
+                  "from an armed mode, all seven non-native modes are reachable");
+        }
+    }
+
     return failures;
 }
