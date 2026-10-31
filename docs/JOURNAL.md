@@ -50686,3 +50686,80 @@ Sawtooth note for whoever reads a running log: the per-15 s figures fall within
 each mAh plateau and jump when capacity ticks, because the numerator is
 quantised and the denominator is not. **Only the final line is the
 measurement**; the intermediate ones are a convergence trace.
+
+## 2z6 — boots 261/262: the first corroborated wattages, and the control that never ran
+
+Three measurements with the capacity-drain meter, each with its advisory
+`InstantAmperage` figure beside it for corroboration:
+
+    boot 261  idle, Claude app OPEN    38.46 W   advisory 35.46 W   (-8 %)
+    boot 261  idle, Claude app QUIT    36.44 W   advisory 35.76 W   (-2 %)
+    boot 262  labelled "stock-idle"    42.03 W   advisory 36.95 W   (-12 %)
+
+### THE CLAUDE APP IS NOT THE CAUSE
+
+38.46 -> 36.44 W is **2.0 W**, so the app this session runs through accounts for
+~5 % of the draw, not the ~20 % of CPU that 2z3b's `top` samples suggested it
+might be worth. 2z3b's caveat is discharged: **~36 W is the machine idling**,
+and every absolute figure in 2z3/2z3b stays withdrawn for the instrument
+reason, not this one.
+
+### AND THE COMPOSITE-BANDWIDTH EXPLANATION IS DEMOTED BY OUR OWN COUNTERS
+
+`RBFBAmtrSets` 11975 over `RBFBVBLUptimeNs` 3165.9 s is **3.78 flips/s** -
+against `RBFBVBLFires` 189813 = 59.95/s, so the frame clock is healthy and the
+desktop is simply static. There is almost no traffic through the compositor,
+so the ~36 W cannot be the linear-tiling bandwidth penalty: there is nothing
+flowing to pay it. `linear_force` remains the prime suspect for the **Metal
+score** and is demoted as an explanation for **idle power**. 2z3b named it the
+leading candidate for both; that was one hypothesis doing two jobs, and the
+flip rate separates them.
+
+What fits an idle GPU at ~36 W is the CPU package never reaching deep idle,
+and the leading candidate is **not ours**: a 7735HS under macOS has no CPU
+power-management driver at all. Our two periodic `thread_call`s (schedtick
+6944 us, VBL 16.7 ms) are a real second contributor - a timer firing every few
+ms forever blocks deep package C-states - and they ARE ours.
+
+### THE CONTROL DID NOT RUN, AND I READ ITS RESULT ANYWAY
+
+Boot 262 was asked to be `-rbgpustock`. It was not: boot-args carries no such
+token and the boot reports `armed` **1**, `linear_force` **1**, `nocgcg_on`
+**1**. So 42.03 W is a third ARMED reading wearing the control's label, and the
+comparison "stock 42 W vs armed 36 W, therefore our stack is free" that it
+invites is worthless.
+
+It is also not an idle reading at all: **uptime 8 minutes, load average 3.74**.
+A 5-minute window starting ~3 minutes after boot catches login and Spotlight
+work, which is on its own a candidate for the whole 36 -> 42 W difference.
+
+**Rule 34 exists for precisely this and I did not apply it.** "An arm
+instruction must list every one-shot the experiment needs and the reader must
+check each before interpreting anything" - restated in 2xw's terms as *say
+which keys and args the experiment depends on and verify them first*. I handed
+over the boot-arg and then read the number without checking the arg had taken.
+The row in `logs/watts.log` is relabelled rather than deleted, because a
+withdrawn reading is evidence about the method.
+
+**The procedure this needs, next time:** set the arg, **verify it with
+`nvram boot-args` before rebooting**, verify `armed`/`linear_force` read 0
+after the boot, wait for load average below ~0.5, and only then measure.
+
+### THE BATTERY ARITHMETIC THE USER ASKED FOR
+
+4667 -> 2824 mAh in about an hour is **1843 mAh at ~15.5 V = ~28.6 Wh, so
+~29 W average**, and a ~2.4 hour runtime. That average sits below the 36-42 W
+spot readings because the measurement runs themselves keep the machine busier
+than the gaps between them. The complaint "discharges with 45 W" is now a
+number: at a ~36 W idle floor a 45 W adapter has ~9 W of headroom, so anything
+the user actually does outruns the charger - exactly as reported.
+
+### STILL UNEXPLAINED
+
+Boot 260 measured **17.93 W** and boot 261 measured **36.44 W** on the same two
+binaries - a 2x gap between consecutive boots, both corroborated by their
+advisory field (15.96 and 35.76 W respectively, so it is not an instrument
+artifact in either direction). Unresolved. Boot 260's display mode and load
+average were not recorded, which is the gap; `watts.py` should capture load
+average and the current mode beside each result so a 2x surprise is
+attributable rather than a mystery.
