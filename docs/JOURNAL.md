@@ -51215,3 +51215,115 @@ measurement of a quantity that is about to be deleted.
 
 Revert first: `sudo tools/efi.sh bootarg remove rbgpuschedtickus=13888`.
 Leaving it costs a third of the frame rate on every boot.
+
+## 2zd — retiring frames from the vblank, which DELETES the second timer instead of tuning it
+
+2zc measured the retire tick as a two-sided cost: 51.33 / 74.6 / 49.2 sets/s
+at 2000 / 6944 / 13888 µs, so the default sits on an **interior optimum** at
+exactly the native panel period. A cost that rises in both directions is not a
+rate limit - a rate limit is one-sided - it is two periodic timers beating, the
+retire `thread_call` against the VBL `thread_call`. So this does not tune the
+period. It moves the retire onto the vblank that is already firing and leaves
+nothing for the second timer to beat against.
+
+### THE HARD PART IS NOT THE CALL, IT IS THAT NEITHER HALF CAN SEE THE OTHER
+
+The retire target (`AMDSWScheduler::checkTimestamps`) is resolved by the plugin
+in **BootKernelExtensions.kc**; the vblank belongs to `RBAMDFramebuffer` in the
+**auxiliary collection**. Neither can link against the other, so the handover
+is a virtual call by name - `callPlatformFunction("RBGPURetireNow")` on the
+peer, which already overrides that method. The framebuffer looks the peer up
+**once**, from `registerForInterruptType` (an ordinary `IOService::open`
+context), with **`copyMatchingService` and not `waitForMatchingService`**: the
+latter blocks until a match appears, and blocking inside `IOFramebuffer::open`
+would hang the boot on precisely the configuration the lookup exists to
+tolerate - no plugin present.
+
+**The timer is never removed, only DEMOTED.** 2xe measured what stopping
+retirement looks like: one frame per ten seconds. The framebuffer may be
+absent, may decline the panel (rule 38), may have its vblank disabled by a mode
+switch - boot 259 did that on purpose - or may be an older build with no
+handover at all, and the plugin cannot tell those apart from a vblank that is
+simply late. So `rb_retire.h` is a state machine, not an `if`: once the vblank
+offers, the timer re-arms at a **50 ms watchdog** period and calls into nothing;
+if the vblank is quiet for 50 ms it **takes the job back**, once, as a state
+change. Both failure directions are safe AND counted - an fbkext newer than the
+plugin sees `vblRetDrove` stay 0 while `vblRetRefused` climbs, a plugin newer
+than the fbkext never leaves TIMER mode - so "the vblank is driving" is a
+measurement rather than a configuration.
+
+The retire is offered **before** delivery, not after: the retire is what frees
+a surface and makes `DisplaySurfacePool::IsReady()` true (2xe), and the
+handlers called immediately below are the ones that ask, so this frame's
+handler sees this frame's retire instead of waiting a vblank.
+
+### THE INVARIANT IS ASSERTED, AND THE ASSERTIONS WERE CHECKED BY BREAKING THE CODE
+
+`tools/hosttest/retire_test.c`: the unarmed decline is counted (rule 14), the
+handoff happens exactly once, the timer retires **nothing** while the vblank is
+live, the watchdog takeback is a single state change, a clock that has not
+advanced reads as a gap of 0 rather than 2^64-something, the period follows the
+role, every entry point is NULL-safe, and **200 interleaved frames** followed by
+a dead vblank must still retire on every tick. Two controls, both firing on the
+right assertions: removing the quiet-window guard fails
+`timer retired while the vblank was live` with **`vbl=200 timer=200`** - which
+is literally 2zc's both-drivers-running beat made visible in a unit test - and
+making the takeback not a state change fails
+`takeback counted more than once`.
+
+### FOUR COLLISIONS, THREE OF THEM MINE, ALL CAUGHT BY RULES THIS PROJECT
+### ALREADY PAID FOR
+
+1. **`retireArmed` already existed** (line 466, 2x1's vblKick retire). My
+   duplicate member shadowed it and the fbkext **did not rebuild** - caught
+   because the UUID had not moved, which is why that is a hard rule and not
+   advice.
+2. **`RBFBRetireArmed` already existed** as an ioreg key, so my publish was a
+   silent last-wins overwrite of a different fact (rule 26's duplicate-key
+   trap). Everything of mine is now `vblRet*` / `RBFBVblRet*`.
+3. **`-rbgpuvblretire` extends `-rbgpuvbl`**, an existing token. The kernel's
+   own parse is exact so the kernel would have been fine, but rule 30 forbids
+   the name because our shell greps are not - and `-rbgpuvblpump` being an
+   existing violation does not license another. Renamed **`-rbgpuretirevbl`**,
+   checked against all 112 tokens in the tree: no prefix either way.
+4. **The shim tax, fifth time.** `RBAMDFramebufferVBL.cpp` compiles into both
+   the kext and the hosttest, so the new methods had to move to
+   `RBAMDFramebuffer.cpp` - which the hosttest does not compile - with inline
+   stubs in `fb_vbl_shim.hpp`, the same shape `hubpPoll` already uses.
+
+A fifth near-miss: the diag publisher cannot be called from inside
+`performRefreshDiag`'s locked region, because `rbgpu_diag_set_num` takes the
+same non-recursive `IOLock` and the refresh thread_call would deadlock on its
+own lock. It is called before the lock. And it is **never** called from the
+vblank: 144 lock acquisitions a second on the vblank thread_call is the exact
+kind of cost this milestone exists to remove, so rule 31 applies to our own
+instrument too.
+
+### OPT-IN FOR ITS FIRST BOOT, AND WHAT TO READ
+
+`-rbgpuretirevbl`, and **both** kexts must carry it. Opt-in deliberately: if
+the vblank stops offering and the watchdog were wrong, the cost is 2xe's
+one-frame-per-ten-seconds desktop, and a feature whose failure mode is that
+does not get to be default-on before a boot has run it.
+
+Plugin `2B35749B-AEBA-323F-BAF4-377D3E0D3F43`, fbkext
+`FE82F367-7C43-3688-94E5-8116947D81ED`. 0 symbols from the system collection,
+0 `IOGraphicsFamily`.
+
+Read in this order. **First, is the handover live at all** - `vblret_armed` 1,
+`RBFBVblRetArmed` 1, `RBFBVblRetLookups` 1 and `RBFBVblRetDrove` climbing. If
+`vblRetDrove` is 0 while `vblRetCalls` climbs, the two halves disagree and
+every rate below is the old configuration (rule 39). `vblret_timer` should be
+small and `vblret_take` **0**; a climbing `vblret_take` means the vblank keeps
+going quiet and the watchdog is carrying the boot. Remember 2zc: **every diag
+number is hex**, and now says so with `0x`.
+
+**Then `tools/paired.sh 20` at 144 and at 60.** The prediction, signed before
+the boot: at 143.8 Hz `sets/s` rises from ~74.6 toward the latch ceiling of
+~110-120, because the ~75 term was never a hardware cap but the beat, and
+removing the second timer removes it. **At 60 Hz it should barely move** -
+2zb measured 60 Hz already running at 97-100 % of its latch ceiling, so there
+is nothing there for this to recover, and a large gain at 60 Hz would mean the
+mechanism is not what this change assumes. If 144 Hz stays at ~75 with
+`vblRetDrove` climbing and `vblret_timer` at 0, the beat was not the cause and
+the two-sided curve of 2zc needs another explanation.
