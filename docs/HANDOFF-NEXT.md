@@ -25,6 +25,19 @@ offering eight refresh rates derived from the panel itself.
 | **2zd/2zf/2zg** retire from the vblank | **DONE and gated**, boots 267-268 |
 | **the last ~50 % of the frame rate** | **OPEN, and it is the only thing open** |
 
+### Power is a SEPARATE project now: `~/Developer/Econized`
+
+The ~35 W idle moved out of this repo on 2026-10-31 (2z9, 2zh). It lives in
+**`~/Developer/Econized`**, its own git repo (local only, no remote yet). Read
+its `docs/HANDOFF.md` first; it is self-contained. Two things from 2zh qualify
+"platform floor" in the table above: XNU already idles with `sti; hlt`, so
+porting the SMCAMDProcessor fork's PM dispatch gains nothing; and the RTX
+4050's PCIe link is UP (`GPP0` Gen4 x8, link active) under `-wegnoegpu`, so
+the dGPU is hidden but not powered off. Econized's first instrument, the
+`EconRAPL` package wattmeter, is built and waiting for its first load.
+**Journal tag note:** 2zh was first committed as "2za" on a side branch while
+another session used 2za for latch latency on main. 2zh is its real tag.
+
 ### Boot-args in the EFI right now
 
     rbgpumtlkscope=*  -rbgpufbbacklight  -rbgpufbbuiltin  -rbgpufbblparm

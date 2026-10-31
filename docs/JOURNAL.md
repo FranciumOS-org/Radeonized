@@ -51586,3 +51586,83 @@ did not reproduce. **Something sets ~73 and it is none of the things measured
 so far.**
 
 `-rbgpuretirevbl` stays opt-in, now justified by variance rather than by mean.
+
+## 2zh — why the fork turns PM dispatch off on Zen 3+, and why porting it would buy nothing
+
+Static only, no boot. Sources: `DrogaBox/SMCAMDProcessor-personal@3.34.0`
+(BSD-3, LICENSE re-read before any source was opened), fetched over IPv6 from
+jsDelivr into the session scratchpad; XNU `xnu-12377.121.6` (APSL); and the
+live kernel `/System/Library/Kernels/kernel` (`xnu-12377.161.15.701.48~2`).
+
+**The decision is deliberate, and it is one table row.**
+`AMDRyzenCPUPowerManagement.hpp`'s `ZenCpuFeatureMap` gives
+`ZEN3_PLUS_PROFILE = { 0x19, 0x40, 0x5F, "Zen 3+", 3, true, false, false,
+false, true }` - the two `false`s in the middle are `legacyPstateAllowed` and
+`pmDispatchAllowed`. `start()` matches family/model against the table, copies
+the flag, and calls `pmRyzen_init(this, pmDispatchAllowed ? 1 : 0)`; with 0,
+`pmRyzen_init` calls `pmKextRegister(PM_DISPATCH_VERSION, NULL, &cb)` - it
+registers only to get the topology callbacks and installs no dispatch table.
+Their CHANGELOG v3.23.2 ("Vermeer PM Dispatch Decouple") gives the reason: on
+Zen 3 the kext and "macOS's native XCPM" were competing for MSR frequency
+control, giving races and `#GP` panics, and "macOS AMD Vanilla handles CPPC
+natively". Zen 3+ and later inherited the same row.
+
+**What their PM dispatch actually is.** `pmRyzen_cpuFuncs` fills exactly two
+slots: `MachineIdle = pmRyzen_machine_idle` and `pmChooseCPU`. `MachineIdle`
+does `cli`, timestamps, **`sti; hlt`**, then per-core load accounting that
+drives `set_PState()` -> `wrmsr(MSR_PSTATE_CTL 0xC0010062)`. So "PM dispatch"
+in that kext IS the legacy P-state governor; the idle instruction is just the
+place it runs. Turning dispatch off is how they turn the governor off.
+
+**And XNU already halts.** `machine_idle()` calls `pmDispatch->MachineIdle`
+only if `pmInitDone && pmDispatch && pmDispatch->MachineIdle`; otherwise it
+does `pal_hlt()` = `sti; hlt` then `pal_cli()`. **Confirmed in the running
+kernel, not only the published source:** `_machine_idle` at
+0xffffff80003efa30 tests `_pmInitDone` (0xffffff8000e01bb0) and `_pmDispatch`
+(0xffffff8000e01ba8), loads slot `+0x10` (MachineIdle, the third pointer),
+and falls through to `sti; hlt; cli` at 0xffffff80003efbfc. With no CPU PM kext
+loaded here (`machdep.xcpm.mode` 0, no AMD or Intel CPU PM kext in kextstat),
+**this machine already idles every core with exactly the instruction the fork
+would install.** Porting their Zen 1/2 `MachineIdle` to Zen 3+ swaps `hlt` for
+`hlt`; the only behavioural change would be the P-state governor, and that is
+what they disabled on purpose.
+
+**Their stated reason is half wrong, and it does not matter.** XCPM is not
+running on this machine (`machdep.xcpm.mode: 0`), and nothing found here drives
+CPPC either. But the conclusion stands for a different reason: the idle half
+gives nothing, and the P-state half is a frequency governor that does not
+change what an idle core does.
+
+**So the real question is how deep `hlt` goes, and it is NOT answered.** On
+Zen, HLT is C1. Deeper core C6 is normally entered through the ACPI `_CST`
+SystemIO entry - a read from the I/O port that MSR `0xC0010073`
+(CStateBaseAddr) points at. The fork HAD such a path (`PMRYZEN_IDLE_IO_CSTATE`)
+and removed it in v3.31.0 as never correctly implemented. Whether this chip
+promotes C1 to CC6 by itself is a hardware fact to MEASURE (rule 25), not to
+assume.
+
+**Correction to 2z9: `0xC0010299` holds the UNITS, not the energy.** The fork's
+own header: `kMSR_RAPL_PWR_UNIT = 0xC0010299`, `kMSR_CORE_ENERGY_STAT =
+0xC001029A`, `kMSR_PKG_ENERGY_STAT = 0xC001029B`. Package power is the delta
+of `0xC001029B` scaled by the energy-status-unit field of `0xC0010299`.
+(`kMSR_PKG_C6_RES = 0xC0010296` is in their header too; the name is
+unverified, so check it against the PPR before trusting it.)
+
+**"Telemetry-only" still writes on Zen 3+.** `pmRyzen_init` calls
+`pmRyzen_init_PState()` and `pmRyzen_PState_reset()` whatever `allowDispatch`
+says: the first rewrites P-state 1's FID (`MSR 0xC0010065`) to 80 % of P0's
+frequency, the second writes `PSTATE_CTL = 0` on every core through
+`mp_rendezvous_no_intrs`. Anyone who installs their binary for the
+`-amdcppcactive` A/B is accepting those two writes.
+
+**A lead that outranks the CPU: the RTX 4050's PCIe link is UP.**
+`-wegnoegpu` is in boot-args and 0x10de appears nowhere in the PCI tree (2xr),
+but the root port above it does: `GPP0@1,1` reports `IOPCIExpressLinkStatus`
+0x7084 = **Gen4 x8, Data Link Layer Link Active = 1**. Control in the same
+boot: `GP11@3,1` reads 0x1101, link active 0 - this is what an unused port
+looks like - while the NVMe and WLAN ports read active. A link that is trained
+and active means the device behind it is not in D3cold. Hiding a GPU from the
+OS does not power it off. **What this does not establish:** how many watts the
+dGPU draws (one register read, rule 18). RAPL can split the bill: it measures
+the CPU package only, so `tools/watts.py` minus RAPL package power is roughly
+everything else, the dGPU included.
