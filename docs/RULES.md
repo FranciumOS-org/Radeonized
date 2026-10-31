@@ -181,6 +181,25 @@ table and refuses to install one that does not match the running kernel;
   fresh wall clock (2y9, rule 31). Per-mode rates are published as
   `RBFBVBLMode{Fires,Ns,Enables,Mhz}` because `VBLFires`/`UptimeNs` are
   cumulative across modes and their ratio is a blend.
+  **2z0 derives the whole ladder from the panel** rather than hardcoding one
+  rate: `rb_drr_build_modes()` offers native plus every ladder entry slower
+  than it, so a 75 Hz panel sees 75/60/50/48 and **nothing faster than native
+  is ever offered**. Boot 258 published eight modes
+  (`1129@143862 ... 2707@60000 ... 3384@47997`) and a third distinct clock,
+  342 056 937 - three boots, three clocks, two different line counts for the
+  same requested 60 Hz. **2z1 is the trap underneath it:** `modeApply` checked
+  the LIVE `V_TOTAL_CONTROL` against `rb_drr_check`, which refuses a non-zero
+  one as "the firmware owns DRR" - but **our own arming is what makes it
+  non-zero**, so entering 60 Hz refused every further mode and the
+  precondition had become its own violation. `rb_drr_check_owned()` takes the
+  live value *and* the setup snapshot; the live CONTROL is now read only to be
+  checked, never built on. Two further facts from that boot: **macOS remembers
+  the mode selection across a reboot** and restores it through
+  `setDisplayMode` before anything asks, so a boot can come up non-native; and
+  `CGCompleteDisplayConfiguration` **returns success over a mode change that
+  never reached the kext** (rule 13 on an Apple API) - read `RBFBModeCur`, not
+  the return code. `tools/modeset.m` (`make modeset`) lists and selects modes
+  from the shell, userspace only.
 - **The last ~22 % of the frame rate — and it is a TRADE, not an open
   question.** 2xo measured **82/s with the `kIOReturnNotReady` hold against
   112/s without it**, which is the user's call rather than a defect to fix
