@@ -553,6 +553,20 @@ The numbering is cited all over the journal — **keep the numbers**.
     one is indistinguishable by value. The mirror of rule 13: not every call
     that can fail reports failure. [2y1]
 
+43. **A value you read back is not a value that SURVIVES.** `nvram boot-args`
+    accepts a write, reads back correctly, and is then **overwritten from
+    OpenCore's `config.plist` on the next boot** - so four boots (260-263) were
+    spent arming `-rbgpucgcg`, `-rbgpupg` and `-rbgpustock` and not one was in
+    effect on the boot that followed. The verification step made it worse:
+    reading the token back before rebooting passed every time and manufactured
+    confidence, because it is a true statement about the current value and says
+    nothing about the next boot's. Boot-args on this machine are changed with
+    **`sudo tools/efi.sh bootarg add|remove ARG [ARG...]`** (2xx built it to
+    take several at once), never with `nvram`. Rule 34 asks you to verify an
+    experiment's arm; verify it **after the boot, from the running system**,
+    which is the only side that matters - and ask of any value written for a
+    future boot: **who else writes this, and when?** [2z7]
+
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
 keeps catching it: **say in the code what would have to be true for the reading

@@ -50763,3 +50763,59 @@ artifact in either direction). Unresolved. Boot 260's display mode and load
 average were not recorded, which is the gap; `watts.py` should capture load
 average and the current mode beside each result so a 2x surprise is
 attributable rather than a mystery.
+
+## 2z7 — FOUR BOOTS LOST: `nvram boot-args` does not survive a reboot on this machine
+
+Boots 260-263 were spent trying to arm three different boot-args and **not one
+of them was in effect on the boot that followed.** The tokens were set, the
+set was verified by reading `nvram boot-args` back, and they were gone after
+the restart:
+
+    -rbgpucgcg    set 2z3, absent on the next boot (read as "the dedup worked")
+    -rbgpupg      set 2z4, never appeared at all
+    -rbgpustock   set 2z6 TWICE, verified printing `-rbgpustock`, absent on
+                  boots 262 AND 263
+
+**OpenCore rewrites `boot-args` from its own `config.plist` on every boot.**
+Anything written with `nvram` lives until the next restart and is then wiped.
+So every "the arg did not take" in 2z5 and 2z6 had one cause, and the
+diagnosis offered at the time - "the append did not happen", "you ran the
+verify half but not the set half" - was wrong twice over and blamed the user
+for a defect in the instruction.
+
+**The tool for this has existed all along and is in docs/RULES.md:**
+`sudo tools/efi.sh bootarg add|remove ARG [ARG...]`, which edits the
+config.plist, backs it up and syncs - and 2xx already built it to take several
+tokens in one call precisely because per-token invocations were error-prone.
+docs/RULES.md's own boot-args section says the args live in the EFI and that
+`efi.sh defaults` edits them there. The notes were right and were not read.
+
+### WHY THE VERIFICATION PASSED AND STILL PROVED NOTHING
+
+`nvram boot-args` was read back immediately after the write and showed the
+token. That is a true statement about the CURRENT value and says nothing about
+the value the NEXT boot will see, because something else writes it in between.
+Rule 20's shape ("a registration that reports success is not evidence that a
+patch applied") with a new subject: **a value read back is not a value that
+survives.** The verification step I added in 2z6 - "it must print
+`-rbgpustock` before you reboot" - was itself the wrong check, and it passed,
+which is worse than no check because it manufactured confidence.
+
+And rule 34 was applied to the wrong half. 2z6 correctly concluded "verify the
+arm before interpreting anything" and then verified it BEFORE the reboot
+instead of AFTER, which is the only side that matters.
+
+### WHAT IS THEREFORE STILL UNMEASURED
+
+The stock control. Every wattage in `logs/watts.log` is an ARMED reading:
+38.46, 36.44, 42.03 and 41.35 W across boots 261-262. 41.35 W is the cleanest
+(load average ~0.6, the assistant quit), and 2z6's relabelled 42.03 W row was armed
+for this reason and not the one given there. **Nothing is known about stock
+power**, so "efficiency is a platform problem, not a RembrandtGPU problem"
+remains an expectation with an argument behind it (3.78 flips/s cannot burn
+36 W; a 7735HS with no CPU power-management driver can) and no measurement.
+
+Also unexplained and now harder to attribute: boot 260's 17.93 W against boot
+261's 36.44 W on identical binaries. 2z6a added `armed=`, `mhz=` and `load=`
+to every log line so the next surprise is attributable; it cannot retroactively
+explain this one.
