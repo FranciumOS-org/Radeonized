@@ -50462,3 +50462,66 @@ temperatures from the chip need `SmuMetrics` via `TransferTableSmu2Dram`, which
 is `RB_SMU13_ALLOW_TABLES` - a new SMU group, and therefore the user's
 decision. Neither is needed to run the gating A/B, which is why neither was
 asked for yet.
+
+### 2z3a — the wattmeter was broken, and the first number it printed was a zero over a real draw
+
+`tools/watts.sh` as committed in 2z3 printed **0.00 W** against
+`InstantAmperage` 18446744073709551374 - which is 2^64 - 242, i.e. a real
+242 mA discharge. The fold to signed was present and correct; the arithmetic
+was in **awk**, whose doubles round that value to exactly 2^64, so
+`a - 2^64` evaluated to exactly 0.
+
+This is worse than a wrong number. The script's own header says it refuses to
+print a comforting zero because an absence is not a measurement (rule 14), and
+then it printed exactly that zero over a live reading. Rule 16 with the
+instrument's own stated policy as the thing it violated.
+
+Replaced by `tools/watts.py` - Python ints are arbitrary precision, and the
+header now says awk must never touch this field. It reads: 24.75 W at
+-1525 mA @ 16230 mV.
+
+### 2z3b — the power baseline, and what it is NOT
+
+**~27 W on battery**, and the confound is stated first: `top` shows
+**WindowServer 30-40 %** AND **the assistant Helper ~20 %** in the same samples, so
+the session this was measured from is part of the load. No absolute wattage
+from this boot is a clean idle figure. The clean baseline wants the the assistant app
+quit and `watts.py` run from Terminal alone.
+
+**Refresh rate costs nothing measurable - a clean negative.** Three legs, same
+session load in each, `modeset` between them:
+
+    144 Hz   27.46 W
+     60 Hz   26.96 W
+    144 Hz   26.92 W
+
+The second 144 Hz leg is BELOW the 60 Hz leg, so between-leg drift already
+exceeds the effect. **And the instrument's resolution is the headline here:**
+two legs reported `min == max` across 24 s, meaning the gauge never updated at
+all during them, and only two distinct values (26.92, 27.46) appear anywhere.
+The gauge is quantised and slow, those 12 "samples" are not 12 independent
+measurements, and **nothing under ~1 W is resolvable by this method**. What it
+does establish is that turning the panel down to save power is pointless.
+
+So the ~27 W is structural, and WindowServer's 30-40 % is the sink to explain.
+`linear_force` **1**: every GPU surface is ADDR_SW_LINEAR, rewritten at the one
+site `hooked_surfinfo_2lf` (`p32[0x08/4] = 0`). The mechanism by which that
+would cost both power and Metal score is bandwidth, not shading: in a linear
+1920-wide BGRA surface vertically adjacent pixels are 7680 bytes apart, so
+every 2D access a compositor makes - blit, filter, rounded corner, blur -
+misses cache per row and goes to DRAM, and on an APU DRAM and fabric traffic
+IS package power. One cause for the 11k Metal score and the 27 W would be a
+satisfying unification and is **not established**.
+
+**The cheap version of the obvious fix does not exist.** The chip facts list
+`9 = 64KB_S` as outside the defective `_X` family, so forcing 9 instead of 0
+looks like a one-constant change at `hooked_surfinfo_2lf`. It is not: the
+swizzle fix has two halves, and the userspace half is a **254-byte code cave
+derived per macOS build** (`rbgpu_mtlcave.h`), not a mode constant. Changing
+only the kernel side would leave userspace believing linear and the two
+disagreeing, which is the corruption the fix exists to prevent. Retargeting
+the cave is real work, per OS, and is not a quick experiment.
+
+**So the next efficiency move is 2z3's boot-arg, unchanged:** `-rbgpucgcg`
+disarms our own `RLC_CGCG_CGLS_CTRL=0` / `RLC_PG_CNTL=0` write and costs no
+code. It is the only candidate on the table that is both ours and free.
