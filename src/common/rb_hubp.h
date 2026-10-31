@@ -350,4 +350,88 @@ static inline int rb_hubp_should_write(uint64_t flags, int all)
     return (flags & RB_HUBP_FLAG_PLANE) ? 1 : 0;
 }
 
+/* ------------------------------------------------------------------------
+ * 2za: LATCH LATENCY, MEASURED IN VBLANKS.
+ *
+ * Why this and not another model. Four display modes measured on boot 259
+ * gave 78.10 / 69.40 / 58.01 / 52.87 unique frames a second at 143.96 / 120 /
+ * 75 / 60 Hz, with 54.3 / 57.8 / 77.3 / 88.2 % of scanouts fed. Three models
+ * were fitted to that and all three died: an absolute ~76 frames/s cap (2y7)
+ * predicts a constant, and the number is not constant; a latch-phase
+ * every-other-vblank defect predicts a flat 50 % at every refresh; and a
+ * FIXED ~14 ms flip latency predicts a STEP in fed% as the frame period
+ * crosses it, where the measurement is a smooth ramp. What survives is a
+ * latency DISTRIBUTION, and `fed` reads as P(latency < frame period).
+ *
+ * So stop fitting curves to a ratio and measure the quantity itself. The
+ * question that decides whether real 143.8 Hz is reachable is exactly:
+ * **how many vblanks does a flip take to latch?** Almost always one means
+ * the distribution is not the cause and the ~78/s ceiling is something else
+ * entirely - this instrument can refute the surviving model, which is why it
+ * is worth a boot.
+ *
+ * Sampling at the vblank quantises latency to whole frames, which is not a
+ * limitation here: whether a flip makes ITS frame is the only thing `fed`
+ * depends on, and the histogram of that is the answer with no arithmetic in
+ * between.
+ *
+ * Every path is accounted for (rule 14): a flip observed to latch lands in a
+ * bin, a flip superseded before we saw it latch counts as PREEMPTED rather
+ * than vanishing, and vblanks sampled while waiting are counted so the bins
+ * can be checked against them.
+ */
+#define RB_HUBP_LATCH_BINS 6u   /* [0] unused, [1..4] that many vblanks, [5] 5+ */
+
+struct rb_hubp_latch {
+    uint32_t armed;          /* a programmed flip is awaiting its latch */
+    uint32_t vbls;           /* vblanks seen since that write */
+    uint64_t hist[RB_HUBP_LATCH_BINS];
+    uint64_t latched;        /* flips observed to latch */
+    uint64_t preempted;      /* superseded before a latch was observed */
+    uint64_t samples;        /* vblanks sampled while armed */
+    uint64_t maxVbls;        /* worst latch seen, unclamped */
+};
+
+static inline unsigned rb_hubp_latch_bin(uint32_t vbls)
+{
+    if (vbls == 0u)  { return 0u; }   /* cannot happen from rb_hubp_latch_vbl */
+    if (vbls >= 5u)  { return 5u; }
+    return (unsigned)vbls;
+}
+
+static inline void rb_hubp_latch_reset(struct rb_hubp_latch *l)
+{
+    unsigned i;
+    if (!l) { return; }
+    l->armed = 0u; l->vbls = 0u;
+    l->latched = 0u; l->preempted = 0u; l->samples = 0u; l->maxVbls = 0u;
+    for (i = 0; i < RB_HUBP_LATCH_BINS; i++) { l->hist[i] = 0u; }
+}
+
+/* A flip was just programmed. Re-arming while already armed means the
+ * previous one was replaced before we ever saw it latch - a real case at
+ * 143.83 Hz, and the count of it is itself evidence that flips arrive faster
+ * than they land. */
+static inline void rb_hubp_latch_write(struct rb_hubp_latch *l)
+{
+    if (!l) { return; }
+    if (l->armed) { l->preempted++; }
+    l->armed = 1u;
+    l->vbls = 0u;
+}
+
+/* One vblank has elapsed; `pending` is SURFACE_FLIP_PENDING read live. */
+static inline void rb_hubp_latch_vbl(struct rb_hubp_latch *l, int pending)
+{
+    if (!l || !l->armed) { return; }
+    l->samples++;
+    if (l->vbls < 0xffffffffu) { l->vbls++; }
+    if (pending) { return; }            /* still armed and unlatched */
+    if (l->vbls > l->maxVbls) { l->maxVbls = l->vbls; }
+    l->hist[rb_hubp_latch_bin(l->vbls)]++;
+    l->latched++;
+    l->armed = 0u;
+    l->vbls = 0u;
+}
+
 #endif /* RB_HUBP_H */

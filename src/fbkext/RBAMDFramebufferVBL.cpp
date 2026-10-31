@@ -126,6 +126,24 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpFlipCtl2", (uint64_t)hubpFlipCtl2, 32);
     setProperty("RBFBHubpPendChecks", hubpPendChecks, 64);
     setProperty("RBFBHubpPendHits", hubpPendHits, 64);
+    /* 2za: the latch-latency histogram. Published as a string because the
+     * shape IS the result - "how many vblanks did each flip take to latch" -
+     * and six separate keys would be read one at a time and compared by hand.
+     * Bin 1 is a flip that made its own frame; bin 2 is half rate. */
+    {
+        char lb[160];
+        snprintf(lb, sizeof(lb), "1:%llu 2:%llu 3:%llu 4:%llu 5+:%llu",
+                 (unsigned long long)hubpLatch.hist[1],
+                 (unsigned long long)hubpLatch.hist[2],
+                 (unsigned long long)hubpLatch.hist[3],
+                 (unsigned long long)hubpLatch.hist[4],
+                 (unsigned long long)hubpLatch.hist[5]);
+        setProperty("RBFBHubpLatchHist", lb);
+    }
+    setProperty("RBFBHubpLatched", hubpLatch.latched, 64);
+    setProperty("RBFBHubpLatchPreempted", hubpLatch.preempted, 64);
+    setProperty("RBFBHubpLatchSamples", hubpLatch.samples, 64);
+    setProperty("RBFBHubpLatchMax", (UInt64)hubpLatch.maxVbls, 32);
     setProperty("RBFBHubpDeferArmed", hubpDeferPend);
     setProperty("RBFBHubpDeferrals", hubpDeferrals, 64);
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);

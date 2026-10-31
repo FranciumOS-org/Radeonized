@@ -36,6 +36,7 @@
  * decides it (and so one definition of a mode exists, not two). */
 extern "C" {
 #include "rb_drr.h"
+#include "rb_hubp.h"
 }
 
 #include <IOKit/graphics/IOFramebuffer.h>
@@ -284,6 +285,9 @@ private:
     uint32_t           hubpFlipCtl2;  /* 2xj: DCSURF_FLIP_CONTROL2, read-only */
     uint64_t           hubpPendChecks; /* 2xk: flips where PENDING was read */
     uint64_t           hubpPendHits;   /* 2xk: ...and was already set */
+    /* 2za: latch latency in vblanks - the state machine is in rb_hubp.h so
+     * the hosttest decides it before the kext does. */
+    struct rb_hubp_latch hubpLatch;
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
     uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */
