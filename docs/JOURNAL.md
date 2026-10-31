@@ -50400,3 +50400,65 @@ result.
 in one session with no reboot and no Displays panel. Worth remembering that the
 first 120 Hz run of this boot had to be thrown away, so an A/B wants a settling
 gap and a repeat before either number is believed.
+
+## 2z3 — efficiency: we turn clock gating AND power gating off by default, and the GPU is awake
+
+Boot 259, same binaries. Read-only; nothing sent to the SMU beyond the QUERY
+group already allowed, no kext loaded, no boot.
+
+**The machine's own power state, from this boot's diag table:**
+
+    nocgcg_on       1          our RLC_CGCG_CGLS_CTRL=0 / RLC_PG_CNTL=0 is ARMED
+    gfxoff_status   2          NOT in GFXOFF (2jv: 0 or 3 is gfxoff, 2 is awake)
+    df_pstate_0     fclk 1800  memclk 2400  volt 3639
+    df_pstate_1     fclk  500  memclk 1000  volt 2600
+    soc_clk_0..7    400 .. 1200
+
+So at idle the GFX clock is **not** gated, the GFX power domain is **not**
+gated, and the core is **not** in GFXOFF. That is the most expensive of the
+available idle states, and on an APU sharing one package budget with a 7735HS
+it is the obvious first suspect for "macOS discharges on a charger where
+Windows charges slowly".
+
+**And it is ours, not Apple's.** `-rbgpunocgcg` is in `rb_defaults.h`'s
+default-on table, and it writes BOTH registers (kern_start.cpp:17987):
+`RLC_CGCG_CGLS_CTRL` (0x4c49) = 0 and `RLC_PG_CNTL` (0x4c43) = 0. Apple's own
+default is the opposite: `_gc_set_clock_gating_feature_flag_10_3` computes
+0x7cf with AMD_CG_SUPPORT_GFX_CGCG and CGLS set, and boot 66 read
+`cgcg=0x363f` (CGCG_EN=1, CGLS_EN=1, idle threshold 54).
+
+**Why it was turned off, and why that reason may be stale.** 2ju added it at
+boot 68 as a CORRECTNESS fix: 2jt bracketed a CP re-halt to 49 ms and the one
+bit that moved was `RLC_GPM_STAT`'s CNTX_IDLE_BEING_PROCESSED, i.e. CGCG entry
+gating the GFX clock out from under the CP. That was before the display path
+existed and before `mc2pa`'s missing term was found. Whether CGCG still halts
+the CP on a boot that composites a desktop is **not established** - it has
+never been retested since.
+
+**The experiment is one boot-arg and no code change.** `-rbgpucgcg` is the
+derived positive form (`rb_defaults.h`'s already-negative rule) and disarms our
+write, leaving Apple's gating in place. Failure modes are bounded: if CGCG
+halts the CP again the boot loses acceleration, and if it hangs the boot
+sentinel makes the next boot stock. Rule 39: the reading only means something
+from a boot that still composites, so `RBFBAmtrSets` and the desktop itself are
+part of the measurement, not a precondition to assume.
+
+**`tools/watts.sh` (new) - the wattmeter this project did not have.**
+`AppleSmartBattery`'s `InstantAmperage` (mA, signed, carried in an unsigned
+64-bit field and folded back) times `Voltage` (mV) is whole-system draw. No
+kext, no sudo, no SMU, and it works at 100 % charge. **It REFUSES while the
+adapter is connected** rather than printing the 0 W the gauge reports, because
+with a full pack nothing flows through it and 0 there is an absence, not a
+measurement (rule 14). Verified refusing on this boot.
+
+This matters beyond gating: it means every efficiency claim from here on can be
+a number instead of an impression, and the A/B is baseline-on-battery against
+`-rbgpucgcg`-on-battery at the same brightness and idle.
+
+**Not yet read, and what each would cost:** GFX clock and FCLK are in the
+already-allowed QUERY group (`GetGfxclkFrequency` 0x17, `GetFclkFrequency`
+0x18) but live in the probe kext, so they cost a kext load. Actual watts and
+temperatures from the chip need `SmuMetrics` via `TransferTableSmu2Dram`, which
+is `RB_SMU13_ALLOW_TABLES` - a new SMU group, and therefore the user's
+decision. Neither is needed to run the gating A/B, which is why neither was
+asked for yet.
