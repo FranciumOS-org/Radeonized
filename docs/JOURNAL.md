@@ -51130,3 +51130,88 @@ contention together.
 
 Measured on fbkext `281D946F-6E34-3713-8464-012B12861F09`, boot 264, no
 reboot between modes (2z1). Script: `tools/paired.sh`.
+
+## 2zc (boot 265) — the retire tick IS the second term, 6944 µs is an INTERIOR optimum, and my mechanism was wrong again
+
+2zb's one-boot test was `rbgpuschedtickus=13888`, double the default, with a
+signed prediction: the 143.88 Hz cap falls from ~75 to **~61/s** if the second
+term is the fixed-rate retire tick, and stays at ~75 if it is not.
+
+### FIRST, THE ARM - AND A TRAP IN THE INSTRUMENT (rule 26)
+
+Boot 265 published **`tick_us=3640`** against a boot-arg of 13888, which looks
+exactly like a refused or clamped parse, and `rbgpuschedtickus` has a 500 -
+1 000 000 range that would do precisely that. It is neither.
+**`RembrandtGPUPeer.cpp:1188` prints every diag number with `%llx` and no
+prefix**, and `0x3640` **is** 13888. The arm was correct all along.
+
+This is rule 26 in a new place: the diag table's numbers are hex, so **any
+value whose digits all happen to be 0-9 reads as a plausible decimal and is
+silently wrong.** It has already bitten once unnoticed - 2z4's `pg_ticks=24`
+was **36** ticks, not 24 (the conclusion there survives, because `pg_pre_or=0`
+is 0 in every base). Fixed structurally rather than by remembering: the
+formatter now writes `0x%llx`, so the base is in the value and the reader
+cannot have to guess. Nothing parses these numerically - `plugin_check.sh`,
+`metal_check.sh` and `fbvr_check.sh` only print them - so the prefix is safe.
+Plugin `D9E6A74B-7405-3C7C-BB51-62720C1D7451`, 0 symbols from the system
+collection, 0 `IOGraphicsFamily`.
+
+### THE RESULT: THE TICK IS A BINDING CONSTRAINT, AT BOTH MODES
+
+Three runs per mode, `tools/paired.sh`, each row self-checked to +0.3 %:
+
+| mode | sets/s with tick 13888 | 2zb baseline (6944) | change |
+|---|---|---|---|
+| 143.798 | 43.46 / 54.57 / 49.43 → **~49** | 70-76 → ~74.6 | **−34 %** |
+| 59.996 | 35.80 / 38.12 / 38.49 → **~37.5** | ~57.5 | **−35 %** |
+
+**The tick is confirmed as a cause.** Doubling its period costs a third of the
+frame rate. 2zb's residual arithmetic pointed at the right subsystem.
+
+### AND THE MECHANISM IS REFUTED - THE FIFTH MODEL TO DIE
+
+Both halves of the prediction are wrong. 144 Hz fell to ~49, not ~61, and
+**60 Hz fell by the same proportion** when the model said it should be
+near-unaffected, the tick wait "hiding inside a 16.7 ms frame". The cost is not
+a mean half-period added to the frame interval and absorbed by a long one: it
+scales with the mode instead of being hidden by it. The sharpest form of this
+is a number that had never moved before: **`actual / latch ceiling` at 60 Hz
+was 97-100 % in all three of 2zb's passes and is 83-87 % here.** The latch
+stopped explaining 60 Hz the moment the tick changed, which is exactly what
+2zb said would *not* happen.
+
+So the "min(latch ceiling, ~75)" expression of 2zb describes the stock tick and
+nothing more. The ~75 term is not a constant of the hardware; it is a function
+of `tick_us`, and 2zb had no right to call it a cap.
+
+### WHAT SURVIVES IS A TWO-SIDED DOSE-RESPONSE, WHICH IS WORTH MORE
+
+Put beside 2xn's shorter-tick measurement:
+
+| `tick_us` | 143.8 Hz sets/s |
+|---|---|
+| 2000 | 51.33 (2xn) |
+| **6944** | **74.6** (2zb) |
+| 13888 | 49.2 (here) |
+
+**6944 µs is an INTERIOR optimum, not an arbitrary default** - both directions
+cost a third of the frame rate, and the optimum sits at the native panel
+period. A quantity whose cost rises in *both* directions from a point is not a
+rate limit; a rate limit is one-sided. It is the signature of two periodic
+timers beating against each other - the retire `thread_call` and the VBL
+`thread_call` - which is why 2xn saw the short side as "contention" and why
+the stock value being exactly the panel period is not a coincidence.
+
+**This is a better argument for the structural fix than any model was.**
+Retiring frames from the VBL handler removes the second timer entirely: there
+is nothing left to beat against, and no period to tune. It was already the
+named next step; it now rests on a measured two-sided curve rather than on a
+residual-arithmetic inference, and three of the five dead models were killed by
+exactly that kind of inference.
+
+**Do not take another dose point.** The curve has three points on both sides of
+its peak and the next boot should spend itself on the fix, not on a fourth
+measurement of a quantity that is about to be deleted.
+
+Revert first: `sudo tools/efi.sh bootarg remove rbgpuschedtickus=13888`.
+Leaving it costs a third of the frame rate on every boot.
