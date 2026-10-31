@@ -50207,3 +50207,94 @@ Stated before the boot:
   latch-phase/every-other-vblank defect predicts ~60/s and ~50 % fed. That
   distinction is what decides whether real 143.8 Hz is reachable at all, and
   it costs one mode selection rather than a boot.
+
+## 2z1 — the mode list is up, and 60 Hz was a one-way door (boot 258)
+
+**Boot 258 is the first boot of 2z0's derived mode list, and it both worked and
+exposed a defect that the hosttest could not have caught as written.**
+
+Identity first (rule 15): plugin `636F3584`, fb `D05FD4D9`, `rbgpu-boot` 258.
+
+**The list is up and the derivation earned its keep.** `RBFBModeListN` 8,
+`RBFBModeList` = `1129@143862 1354@119956 1624@100012 1805@89983 2166@74986
+2707@60000 3248@50006 3384@47997`, and all eight are visible to CoreGraphics
+(`tools/modeset.m`, new here) as ids 100..107. This boot measured the raster at
+**143862** mHz against 143843 on boot 255 and 143765 on boot 256 - a 97 mHz
+spread - giving `RBFBModeClkHz` **342 056 937** where the earlier boots derived
+342 011 761 and 341 826 303. 143862 x 2106 x 1129 / 1000 re-derives that clock
+exactly, and 2707 lines against it lands on **60000** mHz dead on where boot
+256's clock gave 2705 lines. Three boots, three clocks, two different line
+counts for the same requested 60 Hz: a hardcoded table would have been wrong on
+at least two of the three.
+
+**macOS remembered the mode across the reboot.** Nothing in the kext does this:
+`RBFBModeCur` came up **105** with `ModeSwitches` 1 and `system_profiler`
+independently reporting `1920 x 1080 @ 60.00Hz`. WindowServer restored the
+user's last selection through `setDisplayMode` on its own. Worth recording
+because it means **a mode selection is durable state the kext does not own**,
+and a boot can therefore come up in a non-native mode before anything has
+asked it to.
+
+**The defect: every mode -> mode transition refused with RB_DRR_FW_DRR.**
+Asking for 120 Hz moved `RBFBModeLastAsked` to 101 and `ModeApplies` 3 -> 4,
+left `ModeCur` at 105, and set `ModeRefuse` **2**. The Displays panel refused
+identically (`ModeApplies` -> 5), and CoreGraphics snapped its own idea of the
+current mode back to 105. So 60 Hz was the last mode the boot could reach, and
+with WindowServer restoring 60 Hz at login the machine came up already inside
+the trap.
+
+The cause is one argument. `modeApply` re-reads `V_TOTAL_CONTROL` live, which
+is right (rule 41), and then passed that live value to `rb_drr_check`, which
+refuses any non-zero CONTROL on the grounds that the firmware must own DRR and
+the restore values are therefore unknown. That reasoning is correct for the
+FIRST write and false for every one after it, because **our own arming is what
+makes CONTROL non-zero**: `rb_drr_ctl_on(0)` = 3, and the check then reads our
+own SEL bits as a stranger's. The precondition had become its own violation.
+
+Two separate things were wrong and both are fixed:
+
+1. `rb_drr_check_owned(htotal, vtotal, ctl, ctl0, lines)` takes the live value
+   AND the setup snapshot. If the live value is `ctl0` or exactly
+   `rb_drr_ctl_on(ctl0)`, the restore values are known and the decision is the
+   one `ctl0` implies; anything else is a third party and still refuses. The
+   refusal the check exists for survives - including a boot whose firmware
+   really does own DRR (`ctl0 != 0` refuses from either state) and a PARTIAL
+   arming (MAX_SEL alone is not ours).
+2. The live CONTROL is now read only to be **checked**, never built on.
+   `modeApply` writes `rb_drr_ctl_on(modeCtl0)` and restores `modeCtl0` on a
+   lost write. Using the live value as the write base is how arming became its
+   own precondition, and the setup snapshot is the only value that can put the
+   firmware's timing back.
+
+**Why the hosttest passed 2z0.** `modeSetup` filters the ladder with
+`rb_drr_check(htotal, vtotal, modeCtl0, lines)` - the BOOT snapshot, which is
+0 - and the test exercised that call. `modeApply` uses the live register. The
+two call sites disagreed about which value they meant and the test only ever
+saw the one that was right. The new cases assert the old call and the new one
+on identical inputs, so the regression is stated rather than described, and the
+control confirms they discriminate: breaking `rb_drr_check_owned` to delegate
+with the live value fails exactly the three mode -> mode assertions while
+**"native -> mode still passes" stays green**.
+
+**`tools/modeset.m` (new).** `modeset` lists what CoreGraphics reports with the
+current mode marked, `modeset <hz>` selects the nearest. Pure userspace
+CoreGraphics, no kext and no reboot. It earned itself immediately: it is what
+showed `CGCompleteDisplayConfiguration` returning success over a mode change
+that never happened - rule 13 on an Apple API, and the reason the first 120 Hz
+`animtest` run of this boot is a 60 Hz measurement wearing a 120 Hz label.
+
+**The 60 Hz baseline for this boot** (the only honest number taken so far):
+52.87 amtr sets/s, **88.2 % of scanouts fed**, 1809 VBL fires at 60.00/s
+against 60.00 asked. The time base now agrees with wall clock to +0.02 % over
+30 s, so 2y9's fix holds and animtest can be believed.
+
+**Still open and now actually reachable: the 120 Hz discriminator.** Nothing
+below has been measured, because no 120 Hz measurement exists yet.
+- An absolute ~76 frames/s cap predicts ~76 sets/s and ~63 % fed at 120 Hz.
+- A latch-phase defect - flips missing the vblank latch window and landing on
+  the next one - predicts ~60/s and ~50 % fed.
+That number decides whether genuine 143.8 Hz is reachable at all. 75 Hz is the
+other mode worth a run: if the cap model holds it should be the first mode both
+flicker-free and ~100 % fed.
+
+fbkext `D669FE2E-DEFD-3D2E-A7AD-0F0A4A9883EF`. Needs a boot.

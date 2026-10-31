@@ -529,7 +529,13 @@ fbpresent:
 # rebuild of the executable inside it. **A rebuild still rewrites the bundle,
 # so re-sign is part of the target, not a manual step** (2x5 lost framepump's
 # grant to exactly this).
-.PHONY: dstream animtest
+.PHONY: dstream animtest modeset
+modeset: $(OUT)/modeset
+$(OUT)/modeset: tools/modeset.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework ApplicationServices -framework CoreGraphics \
+	      -framework CoreFoundation -framework Foundation
+
 animtest: $(OUT)/animtest
 $(OUT)/animtest: tools/animtest.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
