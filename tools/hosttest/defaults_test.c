@@ -38,11 +38,27 @@ int defaults_tests(void)
     printf("\n-- default-on table (2xw) --\n");
 
     /* 45 was boot 231's token set; 2y2 added the three brightness tokens,
-     * each measured working on its own boot (249, 250, 252/253). The number
-     * is asserted so the table cannot drift by accident - a token arriving or
-     * leaving should cost a line in a journal entry, not go unnoticed. */
-    CHECK(RB_DEFAULT_ON_COUNT == 48,
-          "the table holds boot 231's 45 tokens plus 2y2's three brightness tokens");
+     * each measured working on its own boot (249, 250, 252/253); 2z4 added
+     * -rbgpunopg, splitting 2ju's power-gating write off from its clock-gating
+     * one so the half with no evidence against it can be disarmed alone. The
+     * number is asserted so the table cannot drift by accident - a token
+     * arriving or leaving should cost a line in a journal entry, not go
+     * unnoticed, and this assertion is what made 2z4 say so. */
+    CHECK(RB_DEFAULT_ON_COUNT == 49,
+          "the table holds boot 231's 45 tokens, 2y2's three brightness "
+          "tokens and 2z4's -rbgpunopg");
+
+    /* 2z4: the new token must be disarmable, and its negative must not
+     * collide with anything. The generic prefix and derivation checks below
+     * cover every entry, so this only pins the one value a reader would want
+     * to see written down. */
+    {
+        char off[64];
+        CHECK(rb_default_on("-rbgpunopg") &&
+              rb_off_token("-rbgpunopg", off, sizeof(off)) &&
+              strcmp(off, "-rbgpupg") == 0,
+              "-rbgpunopg is default-on and disarmed by -rbgpupg");
+    }
 
     /* no duplicates: a token listed twice would hide a typo */
     int dup = 0;

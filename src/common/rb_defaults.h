@@ -43,7 +43,8 @@ static const char *const rb_default_on_tokens[] = {
     /* the accelerator: ring, page tables, SMU/PSP bring-up, the CP-halt fix */
     "-rbgpusync570", "-rbgpuspoofttl", "-rbgpupsphw", "-rbgpusmubringup",
     "-rbgpustampwait", "-rbgpuptbase", "-rbgpuptfix", "-rbgpugrbmfix",
-    "-rbgpurlcsub", "-rbgpunogates", "-rbgpunocgcg", "-rbgpupdeenc",
+    "-rbgpurlcsub", "-rbgpunogates", "-rbgpunocgcg", "-rbgpunopg",
+    "-rbgpupdeenc",
     "-rbgpuvramadj", "-rbgpuvmpteng1", "-rbgpuforce1b", "-rbgpusdmaone",
     "-rbgpuforceenable", "-rbgpumewatch", "-rbgpuautoloadtruth",
     /* the display chain, in the order it was built */
