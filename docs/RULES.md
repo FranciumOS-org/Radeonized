@@ -289,6 +289,14 @@ table and refuses to install one that does not match the running kernel;
   unaccounted for. The mean has sat at 70-75 sets/s through tick 2000, 6944,
   13888, timer-driven and vblank-driven alike. **Something sets ~73 and it is
   none of the things measured so far.**
+  **2zk found one thing that was never measured**: `publishVBLState()` runs
+  **227 times a second** from `setInterruptState` — twice per transaction,
+  because Apple arms and disarms the vblank around each one — at ~110
+  `setProperty` calls each, on Apple's own thread, inside the call that gates
+  every frame. Rule 16, unexamined through six dead models. Throttled by
+  `rbgpufbpubms` (default 500 ms, `0` is the A side); **measure at 60 Hz**,
+  where 2zg found the spread is ±0.4 % rather than ±20 %, against the current
+  49.0 sets/s.
   Counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` (**decimal**);
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
