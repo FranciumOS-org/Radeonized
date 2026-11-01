@@ -271,6 +271,16 @@ bool RBAMDFramebuffer::blSetup(void)
     blRegs = reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress());
     blOrigCntl = blCntl;
     blReady = true;
+
+    /* 2zn: now that the segment is corroborated and the mapping is live,
+     * locate DMCUB's inbox-1 ring and read what the firmware put in it.
+     * Read-only, unconditional, and NOT gated on -rbgpufbdmubbl: the whole
+     * question 2zl left open is whether the address derivation is right, and
+     * the firmware's own 37 bring-up commands are the answer. A boot that
+     * refuses to WRITE still gets to read them. Both calls publish their own
+     * refusals and neither can fail the backlight. */
+    if (dmubSetup()) { dmubScan(); }
+
     return true;
 }
 
@@ -287,6 +297,13 @@ void RBAMDFramebuffer::blTeardown(void)
         blRegs[kRbDmuSeg2Bl + RB_BL_DW_LOCK] =
             blLock & ~(RB_BL_LOCK_REG_LOCK | RB_BL_LOCK_UPDATE_PENDING);
     }
+    /* Before blRegs goes: the ring mapping is independent of the BL_PWM
+     * mapping but its pointers are read through blRegs, so it is released
+     * first. Nothing is sent on the way out - a backlight command to a
+     * microcontroller that outlives this kext would be a change we could not
+     * then undo. */
+    dmubTeardown();
+
     blReady = false;
     blRegs = nullptr;
     if (blMap) { blMap->release(); blMap = nullptr; }

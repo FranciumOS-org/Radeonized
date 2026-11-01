@@ -17,7 +17,7 @@ static const char *const known[] = {
     "-rbgpuoff", "-rbgpustock", "-rbgpuarm", "-rbgpunolinear", "-rbgpumtlkoff",
     "-rbgpumtlknolate", "-rbgpufbmatch", "-rbgpuagdcearly", "-rbgpuagdcpolicy",
     "-rbgpumcnew", "-rbgpumcreg", "-rbgpufbbacklight", "-rbgpufbbuiltin",
-    "-rbgpufbblparm", "-rbgpufbdrr", "-rbgpufbmodes",
+    "-rbgpufbblparm", "-rbgpufbdrr", "-rbgpufbmodes", "-rbgpufbdmubbl",
     "-rbgpufbnocrumb",
     "-rbgpufbvramrange", "-rbgpufbvramrangeall", "-rbgpunosentinel",
     "-rbgpunodisppanic", "-rbgpusdmahook", "-rbgpustampraw", "-rbgpuregdump",

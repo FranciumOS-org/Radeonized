@@ -255,3 +255,19 @@ is where the AUX variants live (`BACKLIGHT_CONTROL_VESA_AUX`,
 `BACKLIGHT_CONTROL_AMD_AUX`), and they are reached only from
 `edp_set_backlight_level_nits`, not from the ordinary PWM path - so eDP AUX
 was the wrong first candidate.
+
+### 2zn — the DMUB command ABI and the ring
+
+`dmub_cmd.h`, `dmub_srv.c`, `dmub_dcn31.c`, `dce/dmub_abm_lcd.c`, all at
+`cbbddb6b08cc9900a87cccaa9b22bbe06aa4f50a`, were read for 2zn but are **not**
+vendored here: `dmub_cmd.h` alone is 8407 lines and only four structures and
+seven constants from it are used. Every one of those is quoted with its line
+number at its point of use in `src/common/rb_dmub.h` — the command header's
+bit positions (dmub_cmd.h:2125-2134), `dmub_cmd_abm_set_backlight_data`
+(:5785-5845), `dmub_cmd_abm_set_pipe_data` (:5716-5747), the ring geometry
+(:1867-1877), the push and full/empty helpers (:8100-8200), the window layout
+and the push-then-flush-then-WPTR sequence (dmub_srv.c:700-720, 880-892,
+1037-1041), the CW4 translation (dmub_dcn31.c:56-80, 247-265) and what
+`dmub_abm_set_backlight_level` actually fills in (dmub_abm_lcd.c:280-300).
+Re-fetch from that commit before changing any of them; the line numbers are
+the provenance.

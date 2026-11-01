@@ -32,6 +32,7 @@ int hubp_tests(void);
 int retire_tests(void);
 int backlight_tests(void);
 int defaults_tests(void);
+int dmub_tests(void);          /* 2zn */
 int osver_tests(void);
 int drr_tests(void);
 
@@ -858,6 +859,7 @@ int main(int argc, char **argv)
     failures += retire_tests();
     failures += backlight_tests();
     failures += defaults_tests();
+    failures += dmub_tests();
     failures += osver_tests();
     failures += drr_tests();
     test_fuzz();

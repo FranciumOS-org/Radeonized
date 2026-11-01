@@ -147,9 +147,38 @@ table and refuses to install one that does not match the running kernel;
   `RBFBDmubWptrMoves` **0** and `RptrMoves` **0** across 125 samples, with
   `WPTR == RPTR == 2368` and `InboxSize` 8192 — and 2368 is **37 × 64**, i.e.
   37 `dmub_rb_cmd`s at bring-up and then nothing, the live confirmation of the
-  static read. **So a DMUB ABM command is a live route.** It is a new
-  hardware-write surface — producing on the DMCUB's inbox — so it is **the
-  user's decision before it is designed**, and that is where brightness rests.
+  static read. **So a DMUB ABM command is a live route.**
+  **2zn designs it; nothing has touched hardware yet.**
+  `src/common/rb_dmub.h` DERIVES where the ring is rather than guessing:
+  `DMCUB_INBOX1_BASE_ADDRESS` is a DMCUB-side window address
+  (`DMUB_CW4_BASE` 0x80000000, exactly what boot 271 read), and the memory is
+  at `DMCUB_REGION3_CW4_OFFSET`/`_HIGH` — which needs **no inversion**,
+  because `dmub_dcn31.c:80`'s `gpu_addr - fb_base + fb_offset` is the same
+  transform as this project's own `mc2pa()`, so that pair already holds a
+  **system-physical** address. Checked, not trusted: the locate refuses
+  anything outside the carve-out, which catches both wrong values lying in the
+  neighbouring registers (the DMCUB-side 0x80000000 below it, the MC address
+  0xF4_.. above it). **The control runs before any write**: `dmubScan()` reads
+  `[0, WPTR)` and publishes the slot count beside the plausible-header count
+  **and the raw bytes** (`RBFBDmubRingDump`) — 37 plausible headers at a
+  64-byte stride is not what a wrong address gives, and those bytes are
+  firmware 4.0.15.47's own ABM traffic, the only direct evidence of the layout
+  this chip accepts. Locate and scan are read-only and **ungated**, so a boot
+  that will not write still reads them. Two commands, **separately
+  triggered**: `SET_BACKLIGHT` alone first, `SET_PIPE` only if the panel does
+  not move — `dcn21_set_backlight_level` binds ABM to the pipe first, but the
+  firmware's bring-up may already have, and sending both would make a moving
+  panel ambiguous between them (rule 45 again). `dmub_srv.c:1037-1041` is the
+  whole push: 64 bytes at WPTR, read every byte back
+  (`dmub_rb_flush_pending`'s entire body is a write-combine flush), write
+  WPTR — no interrupt, no doorbell register. **RPTR reaching our WPTR is the
+  only acknowledgement** and it is counted (`RBFBDmubAcks` / `AckTimeouts`):
+  it says the microcontroller CONSUMED the command, which is not the panel
+  moving but does separate "never arrived" from "arrived and did nothing".
+  **The slider is deliberately not wired to it** — `-rbgpufbdmubbl` arms it
+  and `build/out/dmubbl` (`make dmubbl`) is the only trigger, so every change
+  has a known cause. 62 hosttest assertions, verified failing in both
+  directions.
   **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
@@ -810,7 +839,10 @@ against that; 2xx is what a WindowServer that dislikes its framebuffer costs.
 Mutually exclusive with `-rbgpufbdrr`, checked in `drrSetup()` rather than
 documented, because the experiment would see our own `V_TOTAL_CONTROL` and
 refuse with "the firmware owns DRR"),
-`-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbmatch` (spoofs
+`-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbdmubbl` (2zn - producing on
+DMCUB's inbox 1 is a new hardware-write surface, and even armed nothing is
+sent until `build/out/dmubbl` names a level; the locate and the bring-up scan
+are read-only and run unarmed), `-rbgpufbmatch` (spoofs
 `device-id` and **kills the accelerator**), `-rbgpupdefix` (composes with the
 upstream fix and the halt returns), `-rbgpufbvramrange` (hypothesis dead,
 2pr), `-rbgpumcnew`/`-rbgpumcreg` (`mcreg`'s failure mode is a **hang**, so it

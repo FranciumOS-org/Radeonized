@@ -52072,3 +52072,140 @@ Build **`440EEE76`**. One boot, then: `pubms` (confirm 500), six runs at 60 Hz,
 `pubms 0`, six more, `pubms 500`, six more. That is an A/B/A inside one boot,
 and it is the first configuration claim this project will be able to make
 without spending a boot per arm.
+
+## 2zn — the DMUB ABM backlight write, designed so ONE boot does all of it
+
+**What this is.** 2zl identified the route and eliminated the one it
+replaced: on DCN 3.1 the CPU never writes `BL_PWM_CNTL` to change brightness.
+`dcn31_panel_cntl.c` has no `.set_backlight_level`, `dcn21_set_backlight_level`
+takes the register-writing `dce110` path only `if (dc->dc->res_pool->dmcu)` —
+the old DMCU this chip has not got — and otherwise ends at
+`dmub_abm_set_backlight()`, a 64-byte command pushed onto DMCUB's inbox 1.
+Boot 271 then measured that ring **free**: `WptrMoves` 0 and `RptrMoves` 0
+across 125 samples, `WPTR == RPTR == 2368`, `InboxSize` 8192, and 2368 is
+**37 × 64** — thirty-seven `dmub_rb_cmd`s at bring-up and then silence. No
+second producer to race.
+
+**The constraint the design is built around.** This is a new hardware-write
+surface and boots are the scarce resource, so everything that could cost a
+boot of its own happens on one: the address derivation and its control are
+read-only and unconditional, and both commands are live-triggered from
+userspace rather than armed by a boot-arg value. One restart, then as many
+attempts as the evidence asks for.
+
+**Where the ring is, derived rather than assumed.** `dmub_srv.c:880-892` says
+the inbox is the first `DMUB_RB_SIZE` of window 4, `cw4.region.base =
+DMUB_CW4_BASE`, and `DMUB_CW4_BASE` is **0x80000000** — exactly the
+`DMCUB_INBOX1_BASE_ADDRESS` boot 271 read, and `DMUB_RB_SIZE` is 8192, exactly
+the `DMCUB_INBOX1_SIZE` it read. So that register is a **DMCUB-side window
+address**, not a system address, and the memory is wherever
+`DMCUB_REGION3_CW4_OFFSET`/`_HIGH` (0x01bd/0x01be, base_idx 2) point.
+
+And those two need no inversion. `dmub_dcn31.c:80` writes that pair as
+`gpu_addr - fb_base + fb_offset`; this project's own `mc2pa()` is
+`mc - vram_start + vram_base_offset` with `vram_start` the MC base
+(0xF4_0000_0000) and `vram_base_offset` the system-physical base
+(0x7_8000_0000, `FB_OFFSET` 0x780). **They are the same transform**, so
+`CW4_OFFSET` already holds a system-physical address. That is a claim with a
+consequence, so `rb_dmub_locate()` checks it instead of trusting it: the
+derived address must lie inside `[FB_OFFSET<<24, +16 GB)`, which is false for
+both wrong values actually lying around in the neighbouring registers — the
+DMCUB-side 0x80000000 (below) and the MC address 0xF4_.. (above). Both cases
+are hosttest assertions.
+
+**The control, and why it is the best read this project will get.** Rule 26:
+a search is an instrument. If the derivation is right, reading `[0, WPTR)`
+must yield 37 plausible `dmub_cmd_header`s at a 64-byte stride, which a wrong
+address does not produce. `dmubScan()` reads them, counts the plausible ones
+and the ABM ones, and publishes **the raw bytes** as `RBFBDmubRingDump` — not
+just a verdict, because those bytes are firmware 4.0.15.47's **own ABM
+traffic** and therefore the only direct evidence about the command layout this
+chip accepts. The plausibility test is deliberately weak in the one direction
+that matters: it checks `type != 0` and `payload_bytes <= 60` and nothing
+else, so a command type this project has never heard of is still counted. It
+does not check the reserved bits, because a future firmware may use them and
+this would then reject a real command.
+
+Scan and locate are **not** gated on the arm. A boot that refuses to write
+still gets to read the firmware's commands, and that reading is what decides
+whether anything should be written at all.
+
+**The two commands.** `rb_dmub_build_set_backlight()` lays out
+`dmub_cmd_abm_set_backlight_data` (dmub_cmd.h:5785-5845) byte by byte —
+32 payload bytes: `frame_ramp`, `backlight_user_level` in u16.16,
+`version = DMUB_CMD_ABM_CONTROL_VERSION_1`, `panel_mask = 1`, `aux_inst` 0,
+`backlight_control_type = DMU_BACKLIGHT_CONTROL_PWM` (0), and the four
+luminance/pwm bounds left **zero**, which is what `dmub_abm_lcd.c` leaves them
+for a PWM panel. Nothing here is a C bitfield or a struct cast: the header
+word is assembled from dmub_cmd.h:2125-2134's measured bit positions, because
+a compiler's bitfield layout is a belief and this struct crosses to firmware.
+
+`rb_dmub_build_set_pipe()` is the second command and it is separately
+triggered. `dcn21_set_backlight_level` sends `ABM_SET_PIPE` with
+`SET_ABM_PIPE_NORMAL` **before** the level, so a `SET_BACKLIGHT` on a pipe ABM
+is not bound to may be ignored — but the firmware's own 37 bring-up commands
+may already have bound it, and `SET_PIPE` is the more invasive of the two.
+Sending both unasked would make a moving panel ambiguous between them, which
+is precisely the mistake brightness has already made four times (rule 45). So:
+the level alone first; if the panel does not move, bind the pipe and try the
+level again.
+
+**The push, and the one acknowledgement this protocol has.**
+`dmub_srv.c:1037-1041` is the whole sequence and there is no interrupt and no
+scratch register: push 64 bytes at `WPTR`, then `dmub_rb_flush_pending`, whose
+entire body (dmub_cmd.h:8351-8370) is **reading every byte back** — a
+write-combine flush, not a cache operation — then write `WPTR`. `dmubPush()`
+then spins up to 1 ms for `RPTR` to reach that `WPTR`, counted as
+`RBFBDmubAcks` against `RBFBDmubAckTimeouts`. **An ack is not the panel.** It
+says the microcontroller consumed the command, which is a measurable
+intermediate that boot 271's predecessors did not have: without it a dark
+panel has two explanations, and with it, one.
+
+**The slider is deliberately not wired to it.** A brightness change that
+happens only when it is asked for by name is a brightness change whose cause
+is known. `build/out/dmubbl` (`make dmubbl`) is the trigger and the oracle:
+with no argument it prints the locate, the scan verdict and every counter;
+`dmubbl <0..65536>` sends one `SET_BACKLIGHT`; `dmubbl pipe` sends one
+`SET_PIPE`. It reaches `setProperties`, which is the surface 2zm opened.
+
+**What is armed and what is not.** `-rbgpufbdmubbl` is opt-in and will stay
+opt-in. Rule 30 checked against every token in use: the only one sharing more
+than `-rbgpufb` is `-rbgpufbdrr`, and the two diverge at the next character
+(m against r), so neither prefixes the other and the derived negatives are
+distinct for the same reason; the hosttest's `known[]` table now carries it so
+the collision check covers the whole namespace.
+
+**Hosttest.** `tools/hosttest/dmub_test.c`, 62 assertions over every decision
+in `src/common/rb_dmub.h`: the locate's eight refusal clauses including both
+wrong-address cases, the ring arithmetic and its wrap, the full/empty
+distinction with the always-unusable slot, the pointer legality check, the
+header word asserted against the literal **0x20000242**, the plausibility
+test in both directions including the unknown-type case, and both commands
+asserted as **literal bytes** rather than through the builders' own accessors
+(the 2u9 tautology). Verified to fail in both directions: moving
+`payload_bytes` from bit 24 to bit 16 fails three cases, and removing the
+carve-out range check fails the DMCUB-side-address case.
+
+**Build `133200C1`** (from `440EEE76`), so the same install also carries 2zm's
+live `RBFBPubMs` dial and 2zk's throttle — one restart, both experiments.
+
+**What the next boot does, in order.** Read before writing, and stop if the
+control fails:
+1. `./build/out/dmubbl` — read-only. If `scan` does not say `slots ==
+   plausible` and non-zero, **send nothing**: the derivation is wrong and the
+   next thing to do is read `RBFBDmubRingDump` and the locate registers, not
+   to try a command.
+2. `./build/out/pubms` then six `tools/paired.sh 20` at 60 Hz, `pubms 0`, six
+   more, `pubms 500`, six more — 2zk's A/B/A inside this one boot (rule 44).
+3. `sudo ./build/out/dmubbl 65536` then `sudo ./build/out/dmubbl 4096`, and
+   look at the panel. `RBFBDmubAcks` says whether the firmware took it.
+4. Only if the panel did not move and the acks did: `sudo ./build/out/dmubbl
+   pipe`, then repeat 3.
+
+**Not a claim.** Nothing here has touched hardware. What is established is
+that the route exists, that the ring has no second producer, that the address
+is derivable from registers rather than guessed, and that the derivation has a
+control which runs before any write. The panel moving is the deliverable and
+rule 45 says it needs its own instrument — on this path that instrument is
+the user's eyes, and the acks are what separate "the command never arrived"
+from "it arrived and did nothing".
