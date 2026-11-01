@@ -92,6 +92,16 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubReplyVerdict = RB_DMUB_REPLY_NONE;
     dmubReplySlot = 0;
     dmubConfirms = 0;
+    dmubWinSel = 0;
+    dmubInboxInR3 = 0;
+    for (unsigned i = 0; i < 9u; i++) { dmubRegRegs[i] = 0; dmubRegScan[i] = 0; }
+    for (unsigned i = 0; i < RB_DMUB_WINSEL_COUNT; i++) {
+        dmubCand[i].md = nullptr; dmubCand[i].map = nullptr;
+        dmubCand[i].mem = nullptr; dmubCand[i].pa = 0;
+        dmubCand[i].memAddr = 0; dmubCand[i].span = 0;
+        dmubCand[i].route = 0; dmubCand[i].kind = 0;
+        dmubCand[i].refuse = RB_DMUB_LOC_NO_WINDOW;
+    }
     dmubGpintSends = 0;
     dmubGpintRefuse = 0;
     dmubGpintSent = 0;
@@ -285,18 +295,85 @@ bool RBAMDFramebuffer::dmubSetup(void)
         dmubWinScan[i * 4u + 2u] = bad;
         dmubWinScan[i * 4u + 3u] = abm;
 
+        /* 2zs: EVERY resolvable window is kept mapped, not just the one
+         * the layout names. Boot 275 wrote a caps query into CW4 and the
+         * firmware never cleared ret_status, and INBOX1_BASE_ADDRESS says
+         * why: 0x80000000 is outside the whole region-3 range, so the
+         * mailbox is behind a fixed-base aperture and CW4 was never it. The
+         * caps query is a working byte-level test - it only ever needed the
+         * right address - so one boot can try each candidate. */
+        dmubCand[i].md = md; dmubCand[i].map = map; dmubCand[i].mem = mem;
+        dmubCand[i].pa = out.ring_pa; dmubCand[i].memAddr = out.dmub_mem;
+        dmubCand[i].span = out.span; dmubCand[i].route = route;
+        dmubCand[i].kind = (uint32_t)out.addr_kind;
+        dmubCand[i].refuse = RB_DMUB_LOC_OK;
+
         if (mem && (int)i == want) {
-            dmubRingMap = map;
-            dmubRingMD = md;
-            dmubRoute = route;
             best = out;
             best.refuse = RB_DMUB_LOC_OK;
-            continue;                  /* keep this mapping */
         }
-
-        map->release();
-        md->release();
     }
+
+    /* Regions 4, 5 and 6: offset and size only, no base register, because
+     * their DMCUB-space base is fixed in hardware. dmub_dcn31_setup_windows
+     * programs REGION5_OFFSET and REGION5_TOP_ADDRESS and never a base,
+     * which is the shape of an aperture rather than a relocatable window -
+     * and one of these three is the aperture at 0x80000000. */
+    {
+        static const uint32_t offLo[3] = { RB_DMUB_DW_REGION4_OFFSET,
+                                           RB_DMUB_DW_REGION5_OFFSET,
+                                           RB_DMUB_DW_REGION6_OFFSET };
+        static const uint32_t offHi[3] = { RB_DMUB_DW_REGION4_OFFSET_HI,
+                                           RB_DMUB_DW_REGION5_OFFSET_HI,
+                                           RB_DMUB_DW_REGION6_OFFSET_HI };
+        static const uint32_t topR[3]  = { RB_DMUB_DW_REGION4_TOP,
+                                           RB_DMUB_DW_REGION5_TOP,
+                                           RB_DMUB_DW_REGION6_TOP };
+        for (unsigned r = 0; r < 3u; r++) {
+            const unsigned slot = RB_DMUB_WINSEL_REGION4 + r;
+            const uint32_t lo = blRegs[kRbDmuSeg2Dmub + offLo[r]];
+            const uint32_t hi = blRegs[kRbDmuSeg2Dmub + offHi[r]];
+            const uint32_t tp = blRegs[kRbDmuSeg2Dmub + topR[r]];
+            struct rb_dmub_loc_out ro;
+            const int rc = rb_dmub_reg_locate(&loc, lo, hi, tp, &ro);
+
+            dmubRegRegs[r * 3u + 0u] = lo;
+            dmubRegRegs[r * 3u + 1u] = hi;
+            dmubRegRegs[r * 3u + 2u] = tp;
+            dmubCand[slot].refuse = (uint32_t)rc;
+            dmubCand[slot].memAddr = ro.dmub_mem;
+            if (rc != RB_DMUB_LOC_OK) { continue; }
+
+            IOMemoryDescriptor *rmd = nullptr;
+            IOMemoryMap *rmap = nullptr;
+            const uint32_t rroute =
+                dmubMapWin(ro.ring_pa, ro.ring_pa - rb_dmub_fb_offset(&loc),
+                           ro.span, &rmd, &rmap);
+            if (!rroute || !rmap) {
+                dmubCand[slot].refuse = RB_DMUB_LOC_MAP_FAILED;
+                continue;
+            }
+            dmubCand[slot].md = rmd; dmubCand[slot].map = rmap;
+            dmubCand[slot].mem = reinterpret_cast<volatile uint8_t *>(
+                rmap->getVirtualAddress());
+            dmubCand[slot].pa = ro.ring_pa;
+            dmubCand[slot].span = ro.span;
+            dmubCand[slot].route = rroute;
+            dmubCand[slot].kind = (uint32_t)ro.addr_kind;
+
+            uint32_t rr = 0, rb = 0, ra = 0;
+            if (dmubCand[slot].mem) {
+                dmubScanRun(dmubCand[slot].mem, ro.span, &rr, &rb, &ra);
+            }
+            dmubRegScan[r * 3u + 0u] = rr;
+            dmubRegScan[r * 3u + 1u] = rb;
+            dmubRegScan[r * 3u + 2u] = ra;
+        }
+    }
+
+    /* The finding that reframes four milestones: the inbox base the firmware
+     * itself wrote is OUTSIDE region 3 entirely. */
+    dmubInboxInR3 = rb_dmub_inbox_in_region3(loc.inbox_base) ? 1u : 0u;
 
     /* The signature is now an observation, published beside the choice and
      * never consulted for it. Boot 273: CW4's 8192 bytes read ALL ZEROS with
@@ -315,9 +392,7 @@ bool RBAMDFramebuffer::dmubSetup(void)
     dmubLocRefuse = (uint32_t)best.refuse;
     dmubWin = best.win;
 
-    if (best.refuse != RB_DMUB_LOC_OK || !dmubRingMap) {
-        if (dmubRingMap) { dmubRingMap->release(); dmubRingMap = nullptr; }
-        if (dmubRingMD)  { dmubRingMD->release();  dmubRingMD = nullptr; }
+    if (best.refuse != RB_DMUB_LOC_OK) {
         dmubRoute = 0;
         dmubLocRefuse = RB_DMUB_LOC_NO_WINDOW;
         LOG("DMUB: layout score %u of %u, no mailbox chosen (inbox %#x/%#x, "
@@ -327,12 +402,11 @@ bool RBAMDFramebuffer::dmubSetup(void)
         return false;
     }
 
-    dmubAddrKind = (uint32_t)best.addr_kind;
-    dmubMem = best.dmub_mem;
-    dmubRingPA = best.ring_pa;
     dmubRingOff = rb_dmub_ring_fb_off(&loc, &best);
-    dmubCap = best.span;
-    dmubRing = reinterpret_cast<volatile uint8_t *>(dmubRingMap->getVirtualAddress());
+    if (!dmubSelect((uint32_t)best.win)) {
+        dmubLocRefuse = RB_DMUB_LOC_NO_WINDOW;
+        return false;
+    }
     dmubScanSlots = dmubCap / RB_DMUB_CMD_SIZE;
     dmubScanPlaus = dmubWinScan[(unsigned)dmubWin * 4u + 1u];
     dmubScanAbm = dmubWinScan[(unsigned)dmubWin * 4u + 3u];
@@ -346,11 +420,39 @@ bool RBAMDFramebuffer::dmubSetup(void)
     return true;
 }
 
+/* Point the push at one candidate window. The default is whatever dmubSetup
+ * chose; this is how one boot tries every address the registers name instead
+ * of one per boot, which is what the last four milestones each cost. */
+bool RBAMDFramebuffer::dmubSelect(uint32_t n)
+{
+    if (n >= RB_DMUB_WINSEL_COUNT) { return false; }
+    if (dmubCand[n].refuse != RB_DMUB_LOC_OK || !dmubCand[n].mem) {
+        return false;
+    }
+    dmubWinSel = n;
+    dmubRing = dmubCand[n].mem;
+    dmubCap = dmubCand[n].span;
+    dmubRingPA = dmubCand[n].pa;
+    dmubMem = dmubCand[n].memAddr;
+    dmubRoute = dmubCand[n].route;
+    dmubAddrKind = dmubCand[n].kind;
+    dmubLocRefuse = RB_DMUB_LOC_OK;
+    dmubWin = (int)n;
+    return true;
+}
+
 void RBAMDFramebuffer::dmubTeardown(void)
 {
     dmubRing = nullptr;
-    if (dmubRingMap) { dmubRingMap->release(); dmubRingMap = nullptr; }
-    if (dmubRingMD)  { dmubRingMD->release();  dmubRingMD = nullptr; }
+    dmubCap = 0;
+    /* Every candidate is mapped now (2zs), so every one is released. */
+    for (unsigned i = 0; i < RB_DMUB_WINSEL_COUNT; i++) {
+        if (dmubCand[i].map) { dmubCand[i].map->release(); dmubCand[i].map = nullptr; }
+        if (dmubCand[i].md)  { dmubCand[i].md->release();  dmubCand[i].md = nullptr; }
+        dmubCand[i].mem = nullptr;
+    }
+    dmubRingMap = nullptr;
+    dmubRingMD = nullptr;
 }
 
 /* Publish the winner's bytes. The run was already counted during the search;
@@ -641,6 +743,20 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubScratch0", (uint64_t)dmubScratch0, 32);
     setProperty("RBFBDmubScratch7", (uint64_t)dmubScratch7, 32);
     setProperty("RBFBDmubDataout", (uint64_t)dmubDataout, 32);
+    setProperty("RBFBDmubWinSel", (uint64_t)dmubWinSel, 32);
+    setProperty("RBFBDmubInboxInR3", (uint64_t)dmubInboxInR3, 32);
+    {
+        OSData *d = OSData::withBytes(dmubRegRegs, sizeof(dmubRegRegs));
+        if (d) { setProperty("RBFBDmubRegions", d); d->release(); }
+        d = OSData::withBytes(dmubRegScan, sizeof(dmubRegScan));
+        if (d) { setProperty("RBFBDmubRegScan", d); d->release(); }
+        uint32_t cand[RB_DMUB_WINSEL_COUNT];
+        for (unsigned i = 0; i < RB_DMUB_WINSEL_COUNT; i++) {
+            cand[i] = dmubCand[i].refuse;
+        }
+        d = OSData::withBytes(cand, sizeof(cand));
+        if (d) { setProperty("RBFBDmubCandOk", d); d->release(); }
+    }
     {
         OSData *d = OSData::withBytes(dmubReplySent, RB_DMUB_CMD_SIZE);
         if (d) { setProperty("RBFBDmubReplySent", d); d->release(); }

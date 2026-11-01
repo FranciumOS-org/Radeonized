@@ -199,6 +199,63 @@
  * the panel, so halting it is not a diagnostic, it is the end of the boot.
  * rb_dmub_gpint_allowed() therefore allowlists exactly ONE code and the
  * hosttest asserts 2 is refused. Not a comment - a gate. */
+/* ---- regions 4/5/6: the windows this project never read (2zs) ----
+ *
+ * DMCUB_INBOX1_BASE_ADDRESS reads 0x80000000 and has been published as
+ * "unexplained, unused" since boot 271. It is not unexplained: it is the
+ * inbox base IN DMCUB ADDRESS SPACE. dmub_dcn31_setup_mailbox writes
+ * `inbox1->base` with no translation, and on Linux dmub_srv.c sets
+ * inbox1.base = cw4.region.base = DMUB_CW4_BASE = 0x64000000. **This
+ * firmware wrote 0x80000000**, and no region-3 window covers it: CW0..CW6
+ * are 0x60000000..0x66000000. So the mailbox is NOT in CW4 on this machine,
+ * and six exact layout matches never contradicted that - they confirmed the
+ * CODE windows sit where Linux puts them and said nothing about where this
+ * firmware put its ring.
+ *
+ * Regions 4, 5 and 6 are the other apertures. Their DMCUB-space bases are
+ * fixed in hardware (nothing writes them), so only OFFSET - the framebuffer
+ * address - and TOP - the size - are programmable, which is why
+ * dmub_dcn31_setup_windows programs REGION5_OFFSET/_TOP_ADDRESS and never a
+ * REGION5 base. One of them is the aperture at 0x80000000.
+ *
+ * So: read all three, resolve each offset by the same MC-vs-physical range
+ * test the CW windows use, and let the CAPS QUERY say which one is right.
+ * That instrument now works - boot 276 proved the DMCUB answers us over
+ * GPINT with no address in the path, and the caps query's ret_status bit is
+ * a byte-level test that only needs the correct address to be conclusive.
+ * One boot tries every candidate. */
+#define RB_DMUB_DW_REGION4_OFFSET      0x0196u
+#define RB_DMUB_DW_REGION4_OFFSET_HI   0x0197u
+#define RB_DMUB_DW_REGION5_OFFSET      0x0198u
+#define RB_DMUB_DW_REGION5_OFFSET_HI   0x0199u
+#define RB_DMUB_DW_REGION6_OFFSET      0x019au
+#define RB_DMUB_DW_REGION6_OFFSET_HI   0x019bu
+#define RB_DMUB_DW_REGION4_TOP         0x01a1u
+#define RB_DMUB_DW_REGION5_TOP         0x01a2u
+#define RB_DMUB_DW_REGION6_TOP         0x01a3u
+
+/* The candidate windows a push may target. 0..6 are region-3 CW0..CW6,
+ * 7/8/9 are regions 4/5/6. */
+#define RB_DMUB_WINSEL_CW0     0u
+#define RB_DMUB_WINSEL_REGION4 7u
+#define RB_DMUB_WINSEL_REGION5 8u
+#define RB_DMUB_WINSEL_REGION6 9u
+#define RB_DMUB_WINSEL_COUNT   10u
+
+static inline int rb_dmub_winsel_ok(long v)
+{
+    return v >= 0 && v < (long)RB_DMUB_WINSEL_COUNT;
+}
+
+/* Does this DMCUB-space address fall inside the region-3 window set? If not,
+ * the mailbox is behind one of the fixed-base apertures and CW4 cannot be
+ * it, whatever the layout agrees about. */
+static inline int rb_dmub_inbox_in_region3(uint32_t inbox_base)
+{
+    return inbox_base >= RB_DMUB_CW0_BASE &&
+           inbox_base <= RB_DMUB_CW6_BASE + 0x00ffffffu;
+}
+
 #define RB_DMUB_DW_SCRATCH0        0x01e3u
 #define RB_DMUB_DW_SCRATCH7        0x01eau
 #define RB_DMUB_DW_GPINT_DATAIN0   0x01f7u
@@ -684,6 +741,50 @@ static inline void rb_dmub_build_set_pipe(uint8_t *buf,
     buf[7] = 0u;                /* ramping_boundary, "Unused" upstream */
     buf[8] = pwrseq_inst;
     /* 9..11: pad[3] - zero. */
+}
+
+/* Resolve a fixed-base aperture (region 4/5/6). These have no BASE register -
+ * their DMCUB-space base is fixed in hardware - so there is nothing to match
+ * a layout against and the only question is where the offset points and how
+ * big TOP says it is. Same MC-vs-physical range test as the CW windows, so
+ * the address convention is measured in one place. */
+static inline int rb_dmub_reg_locate(const struct rb_dmub_loc *l,
+                                      uint32_t off_lo, uint32_t off_hi,
+                                      uint32_t top,
+                                      struct rb_dmub_loc_out *o)
+{
+    uint64_t fb_base, fb_off, mem, pa;
+    uint32_t span;
+
+    o->refuse = RB_DMUB_LOC_OK; o->win = -1; o->dmub_mem = 0;
+    o->ring_pa = 0; o->addr_kind = RB_DMUB_ADDR_NONE; o->span = 0;
+
+    if ((top & RB_DMUB_CW_ENABLE) == 0u) { return o->refuse = RB_DMUB_LOC_NO_WINDOW; }
+    span = (top & RB_DMUB_CW_ADDR_MASK) + 1u;
+    if (span > RB_DMUB_RB_SIZE) { span = RB_DMUB_RB_SIZE; }
+    span &= ~(RB_DMUB_CMD_SIZE - 1u);
+    if (span < RB_DMUB_CMD_SIZE) { return o->refuse = RB_DMUB_LOC_NO_WINDOW; }
+
+    mem = ((uint64_t)off_hi << 32) | (uint64_t)off_lo;
+    if (mem == 0ull) { return o->refuse = RB_DMUB_LOC_NO_OFFSET; }
+    fb_base = rb_dmub_fb_base(l); fb_off = rb_dmub_fb_offset(l);
+    if (fb_base == 0ull || fb_off == 0ull) { return o->refuse = RB_DMUB_LOC_FB; }
+
+    if (mem >= fb_base && mem + span <= fb_base + RB_DMUB_FB_SPAN) {
+        o->addr_kind = RB_DMUB_ADDR_MC;
+        pa = mem - fb_base + fb_off;
+    } else if (mem >= fb_off && mem + span <= fb_off + RB_DMUB_FB_SPAN) {
+        o->addr_kind = RB_DMUB_ADDR_PA;
+        pa = mem;
+    } else {
+        o->dmub_mem = mem;
+        return o->refuse = RB_DMUB_LOC_ADDR;
+    }
+    if ((pa & (uint64_t)(RB_DMUB_CMD_SIZE - 1u)) != 0ull) {
+        o->dmub_mem = mem; return o->refuse = RB_DMUB_LOC_ALIGN;
+    }
+    o->dmub_mem = mem; o->ring_pa = pa; o->span = span;
+    return RB_DMUB_LOC_OK;
 }
 
 /* QUERY_FEATURE_CAPS, with ret_status pre-set to 1 so the firmware has a bit

@@ -761,6 +761,16 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
+    {
+        OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDmubSel"));
+        if (w) {
+            const long n = (long)w->unsigned32BitValue();
+            if (!rb_dmub_winsel_ok(n)) { return kIOReturnBadArgument; }
+            const bool ok = dmubSelect((uint32_t)n);
+            LOG("RBFBDmubSel %ld -> %s", n, ok ? "selected" : "unavailable");
+            return ok ? kIOReturnSuccess : kIOReturnNotPermitted;
+        }
+    }
     if (dict->getObject("RBFBDmubGpint")) {
         const uint32_t rc = dmubGpint(RB_DMUB_GPINT_GET_FW_VERSION);
         LOG("RBFBDmubGpint -> refuse %u, sent %#x, back %#x, acked %u, "

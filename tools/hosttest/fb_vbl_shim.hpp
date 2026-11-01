@@ -218,6 +218,8 @@ public:
     uint32_t dmubGpintBack=0, dmubGpintAcked=0, dmubGpintSpins=0;
     uint32_t dmubScratch0=0, dmubScratch7=0, dmubDataout=0;
     uint32_t dmubScratch0Pre=0, dmubScratch7Pre=0;
+    uint32_t dmubWinSel=0, dmubInboxInR3=0;
+    uint32_t dmubRegRegs[9]={0}, dmubRegScan[9]={0};
     uint8_t  dmubReplySent[RB_DMUB_CMD_SIZE]={0};
     uint8_t  dmubReplyGot[RB_DMUB_CMD_SIZE]={0};
     uint64_t blSets=0;            /* 2xs */

@@ -532,5 +532,70 @@ int dmub_tests(void)
           "the control and the answer are different registers, or the "
           "positive control would be the instrument reading itself");
 
+    /* --- 2zs: the inbox base is OUTSIDE region 3 --- */
+    CHECK(RB_DMUB_DW_REGION4_OFFSET == 0x0196u &&
+          RB_DMUB_DW_REGION5_OFFSET == 0x0198u &&
+          RB_DMUB_DW_REGION6_OFFSET == 0x019au,
+          "regDMCUB_REGION4/5/6_OFFSET are 0x0196/0x0198/0x019a, base_idx 2");
+    CHECK(RB_DMUB_DW_REGION4_TOP == 0x01a1u &&
+          RB_DMUB_DW_REGION5_TOP == 0x01a2u &&
+          RB_DMUB_DW_REGION6_TOP == 0x01a3u,
+          "regDMCUB_REGION4/5/6_TOP_ADDRESS are 0x01a1/0x01a2/0x01a3");
+
+    /* THE FINDING. dmub_dcn31_setup_mailbox writes inbox1->base with no
+     * translation, and on Linux that is cw4.region.base = 0x64000000. This
+     * machine's firmware wrote 0x80000000, which is past CW6's window - so
+     * the mailbox is behind a fixed-base aperture and CW4 was never it,
+     * however exactly the six CODE windows match dmub_srv.c. */
+    CHECK(!rb_dmub_inbox_in_region3(0x80000000u),
+          "0x80000000 - what this firmware actually wrote to "
+          "DMCUB_INBOX1_BASE_ADDRESS - is OUTSIDE the region-3 window range, "
+          "so CW4 cannot be the mailbox and boot 275's unanswered caps query "
+          "was the correct reading of a wrong address");
+    CHECK(rb_dmub_inbox_in_region3(RB_DMUB_CW4_BASE),
+          "Linux's 0x64000000 IS inside region 3 - the control, so the test "
+          "is not simply refusing everything");
+    CHECK(rb_dmub_inbox_in_region3(RB_DMUB_CW0_BASE) &&
+          rb_dmub_inbox_in_region3(RB_DMUB_CW6_BASE),
+          "both ends of the region-3 range are inside it");
+    CHECK(!rb_dmub_inbox_in_region3(0u),
+          "a zero inbox base is not inside region 3 either");
+
+    CHECK(rb_dmub_winsel_ok(0) && rb_dmub_winsel_ok(9) &&
+          !rb_dmub_winsel_ok(10) && !rb_dmub_winsel_ok(-1),
+          "the window selector takes 0..9 - seven region-3 windows plus "
+          "regions 4, 5 and 6 - and refuses anything else");
+    CHECK(RB_DMUB_WINSEL_REGION4 == 7u && RB_DMUB_WINSEL_REGION5 == 8u,
+          "regions 4 and 5 are selector slots 7 and 8");
+
+    {
+        struct rb_dmub_loc l;
+        struct rb_dmub_loc_out o;
+
+        fill_boot273(&l);
+
+        /* An aperture with TOP enabled and an MC offset resolves the same way
+         * a CW window does - one range test for the whole file. */
+        CHECK(rb_dmub_reg_locate(&l, 0xffe40000u, 0xf4u, 0x80001fffu, &o)
+                  == RB_DMUB_LOC_OK,
+              "an enabled aperture with an MC offset resolves");
+        CHECK(o.addr_kind == RB_DMUB_ADDR_MC && o.ring_pa == 0x87fe40000ull,
+              "...to the same system-physical address mc2pa gives the CW "
+              "windows, since both go through one range test");
+        CHECK(o.span == 8192u, "TOP 0x1fff means 8192 bytes");
+
+        CHECK(rb_dmub_reg_locate(&l, 0xffe40000u, 0xf4u, 0x00001fffu, &o)
+                  == RB_DMUB_LOC_NO_WINDOW,
+              "a DISABLED aperture is refused - bit 31 is the enable and a "
+              "zero there is not a window");
+        CHECK(rb_dmub_reg_locate(&l, 0u, 0u, 0x80001fffu, &o)
+                  == RB_DMUB_LOC_NO_OFFSET,
+              "an enabled aperture with a zero offset is refused");
+        CHECK(rb_dmub_reg_locate(&l, 0x10u, 0u, 0x80001fffu, &o)
+                  == RB_DMUB_LOC_ADDR,
+              "an offset in neither the MC nor the physical range is refused "
+              "rather than guessed at");
+    }
+
     return failures;
 }
