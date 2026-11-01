@@ -63,8 +63,12 @@ static const uint32_t kRbDmuSeg2Dmub = 0x34c0;
 void RBAMDFramebuffer::dmubInit(void)
 {
     dmubLocRefuse = RB_DMUB_LOC_NO_MAP;
+    dmubWin = -1;
+    dmubAddrKind = RB_DMUB_ADDR_NONE;
+    dmubMem = 0;
     dmubRingPA = 0;
     dmubRingOff = 0;
+    dmubCap = 0;
     dmubRingMD = nullptr;
     dmubRingMap = nullptr;
     dmubRing = nullptr;
@@ -82,15 +86,111 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubBlLast = -1;
     dmubPipeSends = 0;
     dmubBlSends = 0;
-    for (unsigned i = 0; i < 8; i++) { dmubLocRegs[i] = 0; }
+    dmubInbox[0] = 0; dmubInbox[1] = 0;
+    dmubFb[0] = 0; dmubFb[1] = 0;
+    for (unsigned i = 0; i < RB_DMUB_CW_COUNT * 4u; i++) {
+        dmubWinRegs[i] = 0;
+        dmubWinScan[i] = 0;
+    }
 }
 
-/* Read the window registers and decide. Called from blSetup()'s tail, where
- * blRegs is live and the segment has already been corroborated by OTG0 -
- * this adds eight reads to a mapping that exists. */
+/* Map one window's memory, read-only as far as this function is concerned.
+ *
+ * Route 1, preferred: a sub-range of BAR0. 2pr measured the GOP framebuffer
+ * at BAR0 offset 0, so BAR0 IS the carve-out seen through the aperture and
+ * the ring's offset inside the carve-out is its offset inside BAR0 - device
+ * memory the PCI device owns, with the ordering and cacheability IOKit
+ * already gets right for MMIO.
+ *
+ * Route 2, fallback: map the system-physical address directly. BAR0's length
+ * is whatever the firmware programmed and the mailbox is wherever the
+ * firmware put it, so "inside BAR0" is a hope and not a fact - and a window
+ * we can resolve but not reach would be the worst of the three outcomes to
+ * misread as a resolve failure. Which route was taken is published. */
+uint32_t RBAMDFramebuffer::dmubMapWin(uint64_t pa, uint64_t fbOff,
+                                      uint32_t span,
+                                      IOMemoryDescriptor **mdOut,
+                                      IOMemoryMap **mapOut)
+{
+    *mdOut = nullptr;
+    *mapOut = nullptr;
+
+    if (pci) {
+        IODeviceMemory *bar0 = pci->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+        if (bar0 && fbOff + span <= bar0->getLength()) {
+            IODeviceMemory *sub = IODeviceMemory::withSubRange(bar0, fbOff, span);
+            if (sub) {
+                IOMemoryMap *m = sub->map(kIOMapInhibitCache);
+                if (m) { *mdOut = sub; *mapOut = m; return 1; }
+                sub->release();
+            }
+        }
+    }
+
+    IOMemoryDescriptor *md =
+        IOMemoryDescriptor::withPhysicalAddress(pa, span, kIODirectionOutIn);
+    if (md) {
+        IOMemoryMap *m = md->map(kIOMapInhibitCache);
+        if (m) { *mdOut = md; *mapOut = m; return 2; }
+        md->release();
+    }
+    return 0;
+}
+
+/* Count the leading run of plausible command headers, and whether anything
+ * breaks it. See rb_dmub_sig_ok() for what the pair means and why.
+ *
+ * `run` is how many consecutive 64-byte slots from offset 0 read as
+ * dmub_cmd_headers; `bad` counts slots AFTER that run which are neither a
+ * header nor empty - a ring written once and never wrapped has none, and a
+ * window of unrelated data almost certainly does. */
+void RBAMDFramebuffer::dmubScanRun(volatile uint8_t *mem, uint32_t span,
+                                   uint32_t *run, uint32_t *bad, uint32_t *abm)
+{
+    uint8_t slot[RB_DMUB_CMD_SIZE];
+    uint32_t off, inRun = 1;
+
+    *run = 0; *bad = 0; *abm = 0;
+
+    for (off = 0; off + RB_DMUB_CMD_SIZE <= span; off += RB_DMUB_CMD_SIZE) {
+        for (uint32_t i = 0; i < 4u; i++) { slot[i] = mem[off + i]; }
+        const uint32_t h = rb_dmub_get32(slot, 0);
+
+        if (rb_dmub_hdr_plausible(h)) {
+            if (inRun) {
+                (*run)++;
+                if (rb_dmub_hdr_type(h) == RB_DMUB_CMD_ABM) { (*abm)++; }
+            } else {
+                (*bad)++;
+            }
+        } else if (h == 0u) {
+            inRun = 0;                 /* unwritten memory - the run ended */
+        } else {
+            inRun = 0;
+            (*bad)++;
+        }
+    }
+}
+
+/* Find the mailbox by LOOKING for it.
+ *
+ * Called from blSetup()'s tail, where blRegs is live and the segment has
+ * already been corroborated by OTG0. Read-only throughout: it maps each
+ * candidate window, counts headers, and unmaps everything but the winner.
+ *
+ * WHY A SEARCH. 2zn named the window (CW4, from dmub_srv.c) and boot 272
+ * refuted it on the first read; the correction then found that 2zn's
+ * DMUB_CW4_BASE was 0x80000000 where dmub_srv.c:84 says 0x64000000, a
+ * constant taken from the register it was meant to be checked against. Two
+ * conventions wrong in two milestones is enough: this names nothing and
+ * believes nothing. The firmware wrote 37 commands into the real mailbox at
+ * bring-up (boot 271: WPTR == RPTR == 2368 == 37 * 64), and those commands
+ * are a signature no other window should carry. */
 bool RBAMDFramebuffer::dmubSetup(void)
 {
     struct rb_dmub_loc loc;
+    struct rb_dmub_loc_out out, best;
+    uint32_t bestRun = 0;
 
     if (!blReady || !blRegs) {
         dmubLocRefuse = RB_DMUB_LOC_NO_MAP;
@@ -99,117 +199,110 @@ bool RBAMDFramebuffer::dmubSetup(void)
 
     loc.inbox_base  = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_BASE];
     loc.inbox_size  = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_SIZE];
-    loc.cw4_base    = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW4_BASE_ADDRESS];
-    loc.cw4_top     = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW4_TOP_ADDRESS];
-    loc.cw4_off_lo  = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW4_OFFSET];
-    loc.cw4_off_hi  = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW4_OFFSET_HIGH];
     loc.fb_location = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_FB_LOCATION_BASE];
     loc.fb_offset   = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_FB_OFFSET];
 
-    /* Published raw, before any judgement: a refusal code says which clause
-     * fired and these say what it fired on, and the second is what a wrong
-     * derivation would be diagnosed from (rule 14). The TOP_ADDRESS register
-     * carries an ENABLE bit above the address, so the published value is the
-     * register and not a cleaned-up address - cleaning it here would hide
-     * whether CW4 is enabled at all. */
-    dmubLocRegs[0] = loc.inbox_base;
-    dmubLocRegs[1] = loc.inbox_size;
-    dmubLocRegs[2] = loc.cw4_base;
-    dmubLocRegs[3] = loc.cw4_top;
-    dmubLocRegs[4] = loc.cw4_off_lo;
-    dmubLocRegs[5] = loc.cw4_off_hi;
-    dmubLocRegs[6] = loc.fb_location;
-    dmubLocRegs[7] = loc.fb_offset;
+    for (unsigned i = 0; i < RB_DMUB_CW_COUNT; i++) {
+        loc.cw[i].base   = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW_BASE_ADDRESS + i];
+        loc.cw[i].top    = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW_TOP_ADDRESS + i];
+        loc.cw[i].off_lo = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW_OFFSET + 2u * i];
+        loc.cw[i].off_hi = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_CW_OFFSET + 2u * i + 1u];
+        dmubWinRegs[i * 4u + 0u] = loc.cw[i].base;
+        dmubWinRegs[i * 4u + 1u] = loc.cw[i].top;
+        dmubWinRegs[i * 4u + 2u] = loc.cw[i].off_lo;
+        dmubWinRegs[i * 4u + 3u] = loc.cw[i].off_hi;
+    }
 
-    /* CW4_TOP_ADDRESS's low bits are the address and bit 31 the enable
-     * (dcn31 writes them together with REG_SET_2), so the window check is
-     * made against the address field alone while the published value keeps
-     * the enable bit. 0x7fffffff is the full address field: masking wider
-     * than the field would be inventing a layout, masking narrower would
-     * refuse a legal window. */
-    loc.cw4_top &= 0x7fffffffu;
+    /* Published raw, before any judgement - TOP values keeping their enable
+     * bit and BASE values their untruncated form, because the whole table is
+     * what refuted 2zn and a search that published only its own winner would
+     * have had nothing to say (rule 14). The inbox pair goes out too: it is
+     * no longer used to locate anything, and 0x80000000 being neither
+     * 0x64000000 nor its 29-bit truncation is an open finding, not noise. */
+    dmubInbox[0] = loc.inbox_base;
+    dmubInbox[1] = loc.inbox_size;
+    dmubFb[0] = loc.fb_location;
+    dmubFb[1] = loc.fb_offset;
 
-    dmubLocRefuse = (uint32_t)rb_dmub_locate(&loc);
-    if (dmubLocRefuse != RB_DMUB_LOC_OK) {
-        LOG("DMUB inbox locate refused %u (inbox %#x/%#x cw4 %#x..%#x "
-            "off %#x%08x fb %#x/%#x)", dmubLocRefuse, loc.inbox_base,
-            loc.inbox_size, loc.cw4_base, loc.cw4_top, loc.cw4_off_hi,
-            loc.cw4_off_lo, loc.fb_location, loc.fb_offset);
+    best.refuse = RB_DMUB_LOC_NO_WINDOW;
+    best.win = -1;
+
+    for (unsigned i = 0; i < RB_DMUB_CW_COUNT; i++) {
+        const int rc = rb_dmub_win_locate(&loc, i, &out);
+        uint32_t run = 0, bad = 0, abm = 0, route = 0;
+
+        dmubWinScan[i * 4u + 0u] = (uint32_t)rc;
+        dmubWinScan[i * 4u + 1u] = 0;
+        dmubWinScan[i * 4u + 2u] = 0;
+        dmubWinScan[i * 4u + 3u] = 0;
+        if (rc != RB_DMUB_LOC_OK) { continue; }
+
+        IOMemoryDescriptor *md = nullptr;
+        IOMemoryMap *map = nullptr;
+        const uint64_t fbOff = rb_dmub_ring_fb_off(&loc, &out);
+        route = dmubMapWin(out.ring_pa, fbOff, out.span, &md, &map);
+        if (!route || !map) {
+            dmubWinScan[i * 4u + 0u] = RB_DMUB_LOC_MAP_FAILED;
+            continue;
+        }
+
+        volatile uint8_t *mem =
+            reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress());
+        if (mem) { dmubScanRun(mem, out.span, &run, &bad, &abm); }
+
+        dmubWinScan[i * 4u + 1u] = run;
+        dmubWinScan[i * 4u + 2u] = bad;
+        dmubWinScan[i * 4u + 3u] = abm;
+
+        /* The longest clean run wins. A tie keeps the first, and nothing is
+         * chosen at all unless the signature passes - so a boot where no
+         * window looks like a ring maps nothing and sends nothing, which is
+         * the state boot 272 should have produced and did. */
+        if (mem && rb_dmub_sig_ok(run, bad) && run > bestRun) {
+            if (dmubRingMap) { dmubRingMap->release(); }
+            if (dmubRingMD)  { dmubRingMD->release(); }
+            dmubRingMap = map;
+            dmubRingMD = md;
+            dmubRoute = route;
+            bestRun = run;
+            best = out;
+            best.refuse = RB_DMUB_LOC_OK;
+            continue;                  /* keep this mapping */
+        }
+
+        map->release();
+        md->release();
+    }
+
+    dmubLocRefuse = (uint32_t)best.refuse;
+    dmubWin = best.win;
+
+    if (best.refuse != RB_DMUB_LOC_OK || !dmubRingMap) {
+        if (dmubRingMap) { dmubRingMap->release(); dmubRingMap = nullptr; }
+        if (dmubRingMD)  { dmubRingMD->release();  dmubRingMD = nullptr; }
+        dmubRoute = 0;
+        dmubLocRefuse = RB_DMUB_LOC_NO_WINDOW;
+        LOG("DMUB: no window carries a command signature (inbox %#x/%#x, "
+            "fb %#x/%#x) - nothing mapped, nothing will be sent",
+            loc.inbox_base, loc.inbox_size, loc.fb_location, loc.fb_offset);
         return false;
     }
 
-    dmubRingPA = rb_dmub_ring_pa(&loc);
-    dmubRingOff = rb_dmub_ring_fb_off(&loc);
-
-    /* Route 1, preferred: a sub-range of BAR0. 2pr measured the GOP
-     * framebuffer at BAR0 offset 0, so BAR0 IS the carve-out seen through the
-     * aperture and the ring's offset inside the carve-out is its offset
-     * inside BAR0. This is device memory the PCI device owns, with the
-     * ordering and cacheability IOKit already gets right for MMIO, and it
-     * needs no physical-address mapping of our own.
-     *
-     * Route 2, fallback: map the system-physical address directly. BAR0's
-     * length is whatever the firmware programmed and the mailbox is wherever
-     * the firmware put it, so "inside BAR0" is a hope and not a fact - and a
-     * ring we can locate but not reach would be the worst of the three
-     * outcomes to misread as a locate failure. Which route was taken is
-     * published. */
-    if (pci) {
-        IODeviceMemory *bar0 = pci->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
-        if (bar0) {
-            const uint64_t len = bar0->getLength();
-            if (dmubRingOff + RB_DMUB_RB_SIZE <= len) {
-                IODeviceMemory *sub =
-                    IODeviceMemory::withSubRange(bar0, dmubRingOff,
-                                                 RB_DMUB_RB_SIZE);
-                if (sub) {
-                    IOMemoryMap *m = sub->map(kIOMapInhibitCache);
-                    if (m) {
-                        dmubRingMD = sub;
-                        dmubRingMap = m;
-                        dmubRoute = 1;
-                    } else {
-                        sub->release();
-                    }
-                }
-            }
-        }
-    }
-
-    if (!dmubRingMap) {
-        IOMemoryDescriptor *md =
-            IOMemoryDescriptor::withPhysicalAddress(dmubRingPA,
-                                                    RB_DMUB_RB_SIZE,
-                                                    kIODirectionOutIn);
-        if (md) {
-            IOMemoryMap *m = md->map(kIOMapInhibitCache);
-            if (m) {
-                dmubRingMD = md;
-                dmubRingMap = m;
-                dmubRoute = 2;
-            } else {
-                md->release();
-            }
-        }
-    }
-
-    if (!dmubRingMap) {
-        dmubLocRefuse = RB_DMUB_LOC_MAP_FAILED;
-        LOG("DMUB inbox at pa %#llx (fb+%#llx) located and NOT mappable",
-            dmubRingPA, dmubRingOff);
-        return false;
-    }
-
+    dmubAddrKind = (uint32_t)best.addr_kind;
+    dmubMem = best.dmub_mem;
+    dmubRingPA = best.ring_pa;
+    dmubRingOff = rb_dmub_ring_fb_off(&loc, &best);
+    dmubCap = best.span;
     dmubRing = reinterpret_cast<volatile uint8_t *>(dmubRingMap->getVirtualAddress());
-    if (!dmubRing) {
-        dmubLocRefuse = RB_DMUB_LOC_MAP_FAILED;
-        dmubRingMap->release(); dmubRingMap = nullptr;
-        dmubRingMD->release(); dmubRingMD = nullptr;
-        return false;
-    }
+    dmubScanSlots = dmubCap / RB_DMUB_CMD_SIZE;
+    dmubScanPlaus = bestRun;
+    dmubScanAbm = dmubWinScan[(unsigned)dmubWin * 4u + 3u];
+    dmubScanBytes = dmubCap;
 
-    LOG("DMUB inbox: pa %#llx (fb+%#llx), %u bytes, route %u",
-        dmubRingPA, dmubRingOff, RB_DMUB_RB_SIZE, dmubRoute);
+    LOG("DMUB mailbox: window %d, mem %#llx (kind %u), pa %#llx (fb+%#llx), "
+        "%u bytes, route %u, %u-command signature",
+        dmubWin, dmubMem, dmubAddrKind, dmubRingPA, dmubRingOff, dmubCap,
+        dmubRoute, bestRun);
     return true;
 }
 
@@ -220,62 +313,19 @@ void RBAMDFramebuffer::dmubTeardown(void)
     if (dmubRingMD)  { dmubRingMD->release();  dmubRingMD = nullptr; }
 }
 
-/* The CONTROL. Read every slot the firmware wrote and say how many of them
- * look like commands.
- *
- * The verdict is the pair (slots, plausible): equal and non-zero is the
- * address derivation confirmed, and anything else is it refuted. A count
- * alone would not do - rule 18 - and neither would a yes/no, because the
- * bytes themselves are the thing worth having: they are firmware
- * 4.0.15.47's own ABM traffic, which is the only direct evidence about the
- * command layout this chip accepts. So the whole rptr..wptr region is
- * published as RBFBDmubRingDump and the length beside it.
- *
- * Run once, from setup, on the way to a desktop - never from the frame path.
- * It allocates. */
+/* Publish the winner's bytes. The run was already counted during the search;
+ * this is the evidence itself - firmware 4.0.15.47's own ABM traffic, which
+ * is the only direct statement about the command layout this chip accepts.
+ * Runs once, from setup, on the way to a desktop; it allocates. */
 void RBAMDFramebuffer::dmubScan(void)
 {
-    if (!dmubRing) { return; }
+    if (!dmubRing || dmubCap == 0u) { return; }
 
-    const uint32_t rptr = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_RPTR];
-    const uint32_t wptr = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_WPTR];
-
-    if (!rb_dmub_ptr_ok(rptr, RB_DMUB_RB_SIZE) ||
-        !rb_dmub_ptr_ok(wptr, RB_DMUB_RB_SIZE)) {
-        /* Not legal ring positions, so there is nothing to scan and the
-         * zeroes below are not a reading. Say so by leaving slots 0 with the
-         * pointers published next to it. */
-        return;
-    }
-
-    /* The producer's own history is [0, wptr) when the ring has not yet
-     * wrapped, which boot 271 says is the case (rptr == wptr == 2368, both
-     * having started there). Scanning from 0 rather than from rptr is
-     * deliberate: rptr == wptr means "empty", so a scan of the OUTSTANDING
-     * region would read nothing at all, and what is wanted is the commands
-     * already consumed. If the ring has wrapped, wptr is still where the
-     * producer stopped and [0, wptr) is still 64-byte slots of real
-     * commands, just older ones. */
-    const uint32_t bytes = (wptr == 0u) ? RB_DMUB_RB_SIZE : wptr;
-
+    const uint32_t bytes = dmubCap;
     uint8_t *buf = (uint8_t *)IOMalloc(bytes);
     if (!buf) { return; }
 
     for (uint32_t i = 0; i < bytes; i++) { buf[i] = dmubRing[i]; }
-
-    uint32_t slots = 0, plaus = 0, abm = 0;
-    for (uint32_t off = 0; off + RB_DMUB_CMD_SIZE <= bytes;
-         off += RB_DMUB_CMD_SIZE) {
-        const uint32_t h = rb_dmub_get32(buf, off);
-        slots++;
-        if (rb_dmub_hdr_plausible(h)) { plaus++; }
-        if (rb_dmub_hdr_type(h) == RB_DMUB_CMD_ABM) { abm++; }
-    }
-
-    dmubScanSlots = slots;
-    dmubScanPlaus = plaus;
-    dmubScanAbm = abm;
-    dmubScanBytes = bytes;
 
     OSData *d = OSData::withBytes(buf, bytes);
     if (d) {
@@ -283,9 +333,6 @@ void RBAMDFramebuffer::dmubScan(void)
         d->release();
     }
     IOFree(buf, bytes);
-
-    LOG("DMUB ring scan: %u slots, %u plausible headers, %u ABM, %u bytes",
-        slots, plaus, abm, bytes);
 }
 
 /* Push one 64-byte command and ring the only doorbell there is.
@@ -302,7 +349,9 @@ void RBAMDFramebuffer::dmubScan(void)
 uint32_t RBAMDFramebuffer::dmubPush(const uint8_t *cmd)
 {
     if (!dmubBlArmed) { dmubSendsRefused++; return dmubSendRefuse = 1; }
-    if (!dmubRing || !blRegs) { dmubSendsRefused++; return dmubSendRefuse = 2; }
+    if (!dmubRing || !blRegs || dmubCap == 0u) {
+        dmubSendsRefused++; return dmubSendRefuse = 2;
+    }
     if (dmubLocRefuse != RB_DMUB_LOC_OK) {
         dmubSendsRefused++; return dmubSendRefuse = 3;
     }
@@ -310,11 +359,11 @@ uint32_t RBAMDFramebuffer::dmubPush(const uint8_t *cmd)
     const uint32_t wptr = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_WPTR];
     const uint32_t rptr = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_RPTR];
 
-    if (!rb_dmub_ptr_ok(wptr, RB_DMUB_RB_SIZE) ||
-        !rb_dmub_ptr_ok(rptr, RB_DMUB_RB_SIZE)) {
+    if (!rb_dmub_ptr_ok(wptr, dmubCap) ||
+        !rb_dmub_ptr_ok(rptr, dmubCap)) {
         dmubSendsRefused++; return dmubSendRefuse = 4;
     }
-    if (rb_dmub_rb_full(wptr, rptr, RB_DMUB_RB_SIZE)) {
+    if (rb_dmub_rb_full(wptr, rptr, dmubCap)) {
         dmubSendsRefused++; return dmubSendRefuse = 5;
     }
 
@@ -337,7 +386,7 @@ uint32_t RBAMDFramebuffer::dmubPush(const uint8_t *cmd)
     }
 
     /* 3. The doorbell. */
-    const uint32_t next = rb_dmub_next_wptr(wptr, RB_DMUB_RB_SIZE);
+    const uint32_t next = rb_dmub_next_wptr(wptr, dmubCap);
     blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_INBOX1_WPTR] = next;
     dmubSendWptr = next;
     dmubSendsOk++;
@@ -396,15 +445,29 @@ void RBAMDFramebuffer::dmubPublish(void)
 {
     setProperty("RBFBDmubBlArmed", dmubBlArmed);
     setProperty("RBFBDmubLocRefuse", (uint64_t)dmubLocRefuse, 32);
+    setProperty("RBFBDmubInbox1Base", (uint64_t)dmubInbox[0], 32);
+    setProperty("RBFBDmubInbox1Size", (uint64_t)dmubInbox[1], 32);
+    setProperty("RBFBDmubFbLocation", (uint64_t)dmubFb[0], 32);
+    setProperty("RBFBDmubFbOffset", (uint64_t)dmubFb[1], 32);
+    /* The covering window and what its offset turned out to be. Boot 272 is
+     * the reason the KIND is published: 2zn predicted a system-physical
+     * address and the firmware had written an MC one. */
+    setProperty("RBFBDmubWin", (uint64_t)(int64_t)dmubWin, 32);
+    setProperty("RBFBDmubAddrKind", (uint64_t)dmubAddrKind, 32);
+    setProperty("RBFBDmubMem", dmubMem, 64);
     setProperty("RBFBDmubRoute", (uint64_t)dmubRoute, 32);
     setProperty("RBFBDmubRingPA", dmubRingPA, 64);
     setProperty("RBFBDmubRingFbOff", dmubRingOff, 64);
-    setProperty("RBFBDmubCw4Base", (uint64_t)dmubLocRegs[2], 32);
-    setProperty("RBFBDmubCw4Top", (uint64_t)dmubLocRegs[3], 32);
-    setProperty("RBFBDmubCw4OffLo", (uint64_t)dmubLocRegs[4], 32);
-    setProperty("RBFBDmubCw4OffHi", (uint64_t)dmubLocRegs[5], 32);
-    setProperty("RBFBDmubFbLocation", (uint64_t)dmubLocRegs[6], 32);
-    setProperty("RBFBDmubFbOffset", (uint64_t)dmubLocRegs[7], 32);
+    setProperty("RBFBDmubCap", (uint64_t)dmubCap, 32);
+    /* All seven windows as read, raw, enable bits intact - the table is what
+     * refuted 2zn, and a locate that published only its own chosen window
+     * would have had nothing to say. */
+    {
+        OSData *d = OSData::withBytes(dmubWinRegs, sizeof(dmubWinRegs));
+        if (d) { setProperty("RBFBDmubWindows", d); d->release(); }
+        d = OSData::withBytes(dmubWinScan, sizeof(dmubWinScan));
+        if (d) { setProperty("RBFBDmubWinScan", d); d->release(); }
+    }
     /* The control, and its denominator beside it. */
     setProperty("RBFBDmubScanSlots", (uint64_t)dmubScanSlots, 32);
     setProperty("RBFBDmubScanPlaus", (uint64_t)dmubScanPlaus, 32);
@@ -419,5 +482,7 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubAckTimeouts", dmubAckSpins, 64);
     setProperty("RBFBDmubBlSends", dmubBlSends, 64);
     setProperty("RBFBDmubPipeSends", dmubPipeSends, 64);
+    /* -1 until one is sent, which reads as 4294967295 - distinguishable from
+     * a real level, since the trigger refuses anything above 65536. */
     setProperty("RBFBDmubBlLast", (uint64_t)(uint32_t)dmubBlLast, 32);
 }

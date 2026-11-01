@@ -36,11 +36,45 @@
 #define RB_DMUB_MAX_ENTRY  128u
 #define RB_DMUB_RB_SIZE    (RB_DMUB_CMD_SIZE * RB_DMUB_MAX_ENTRY)
 
-/* dmub_srv.c:881 - cw4.region.base = DMUB_CW4_BASE, and :891-892
- * inbox1.base = cw4.region.base, inbox1.top = base + DMUB_RB_SIZE. So the
- * value DMCUB_INBOX1_BASE_ADDRESS reads is a DMCUB-side window address, NOT
- * a system address, and boot 271 read exactly this. */
-#define RB_DMUB_CW4_BASE   0x80000000u
+/* dmub_srv.c:81-86. THESE ARE THE REAL VALUES and 2zn had one of them
+ * wrong: DMUB_CW4_BASE is 0x64000000, not 0x80000000.
+ *
+ * HOW THAT HAPPENED, because the shape of the error matters more than the
+ * number: boot 271 read DMCUB_INBOX1_BASE_ADDRESS as 0x80000000, 2zn wrote
+ * 0x80000000 into this file as "DMUB_CW4_BASE", and the hosttest then
+ * asserted that the constant equalled what the register read. That assertion
+ * passed and proved nothing at all - it compared the reading with itself.
+ * Rule 26 in its purest form: a search is an instrument, and so is a
+ * CONSTANT. Ask of any value written down from a header: has anyone looked
+ * at the header, or only at the thing it was supposed to agree with?
+ *
+ * AND THE ADDRESS FIELDS ARE 29 BITS. dcn_3_1_2_sh_mask.h:5881/5914 give
+ * DMCUB_REGION3_CW4_BASE_ADDRESS and _TOP_ADDRESS a mask of 0x1FFFFFFF, with
+ * the enable at bit 31 - so a window address is written TRUNCATED, and
+ * 0x64000000 & 0x1FFFFFFF is 0x04000000, which is exactly what boot 272 read
+ * in CW4_BASE. So CW4 IS the mailbox window on this firmware after all, with
+ * a 64 KB window (0x04000000..0x0400ffff) rather than Linux's 2 * 8192.
+ * DMCUB_INBOX1_BASE_ADDRESS is a full 32 bits (sh_mask.h:6154) and reads
+ * 0x80000000, which is neither 0x64000000 nor its truncation, and nothing in
+ * hand explains it. That is a FINDING, not a convention to pick. */
+#define RB_DMUB_CW0_BASE   0x60000000u
+#define RB_DMUB_CW1_BASE   0x61000000u
+#define RB_DMUB_CW3_BASE   0x63000000u
+#define RB_DMUB_CW4_BASE   0x64000000u
+#define RB_DMUB_CW5_BASE   0x65000000u
+#define RB_DMUB_CW6_BASE   0x66000000u
+
+/* All seven region-3 windows, dcn_3_1_2_offset.h:921-979, base_idx 2. The
+ * three groups are contiguous and the offset pair interleaves lo,hi - so the
+ * register for window n is BASE + n, TOP + n, and OFFSET + 2n. */
+#define RB_DMUB_CW_COUNT             7u
+#define RB_DMUB_DW_CW_BASE_ADDRESS   0x01a5u
+#define RB_DMUB_DW_CW_TOP_ADDRESS    0x01adu
+#define RB_DMUB_DW_CW_OFFSET         0x01b5u
+
+/* dcn_3_1_2_sh_mask.h:5881, 5913-5915. */
+#define RB_DMUB_CW_ENABLE            0x80000000u
+#define RB_DMUB_CW_ADDR_MASK         0x1fffffffu
 
 /* dcn_3_1_2_offset.h, all base_idx 2 - the same segment and the same BAR5
  * mapping the BL_PWM block already uses. */
@@ -53,10 +87,6 @@
 #define RB_DMUB_DW_INBOX1_SIZE       0x01d5u
 #define RB_DMUB_DW_INBOX1_WPTR       0x01d6u
 #define RB_DMUB_DW_INBOX1_RPTR       0x01d7u
-#define RB_DMUB_DW_CW4_BASE_ADDRESS  0x01a9u
-#define RB_DMUB_DW_CW4_TOP_ADDRESS   0x01b1u
-#define RB_DMUB_DW_CW4_OFFSET        0x01bdu
-#define RB_DMUB_DW_CW4_OFFSET_HIGH   0x01beu
 #define RB_DMUB_DW_FB_LOCATION_BASE  0x0475u
 #define RB_DMUB_DW_FB_OFFSET         0x0477u
 
@@ -83,31 +113,64 @@
 #define RB_DMUB_LEVEL_FULL  0x10000u
 
 /* Why a locate was refused. Published, never inferred: "we did not write"
- * and "we did not write BECAUSE the window registers disagreed" are
- * different findings (rule 14). */
+ * and "we did not write BECAUSE no enabled window covers the inbox" are
+ * different findings (rule 14).
+ *
+ * RENUMBERED after boot 272. The old codes 2/3/4 asserted Linux's window
+ * assignment and 6 asserted that the offset pair was already
+ * system-physical; both were wrong, so the codes do not mean what the 2zn
+ * journal entry says they meant. Boot 272's printed "locate 2" was the old
+ * INBOX_BASE check firing on `inbox_base != cw4_base` - it is the reading
+ * that refuted the design, and it is not comparable to a 2 from this table. */
 enum {
     RB_DMUB_LOC_OK = 0,
-    RB_DMUB_LOC_NO_MAP = 1,        /* no BAR5 registers to read at all */
-    RB_DMUB_LOC_INBOX_BASE = 2,    /* INBOX1_BASE_ADDRESS is not CW4's base */
-    RB_DMUB_LOC_INBOX_SIZE = 3,    /* INBOX1_SIZE is not DMUB_RB_SIZE */
-    RB_DMUB_LOC_CW4_WINDOW = 4,    /* CW4 base/top cannot contain the ring */
-    RB_DMUB_LOC_NO_OFFSET = 5,     /* CW4_OFFSET pair is zero - no mailbox */
-    RB_DMUB_LOC_FB = 6,            /* the ring is not inside the carve-out */
-    RB_DMUB_LOC_ALIGN = 7,         /* the ring is not 64-byte aligned */
-    RB_DMUB_LOC_MAP_FAILED = 8     /* the kext could not map it */
+    RB_DMUB_LOC_NO_MAP = 1,      /* no BAR5 registers to read at all */
+    RB_DMUB_LOC_INBOX = 2,       /* INBOX1_BASE/SIZE cannot be a ring */
+    RB_DMUB_LOC_NO_WINDOW = 3,   /* no ENABLED CWn contains the inbox */
+    RB_DMUB_LOC_NO_OFFSET = 4,   /* that window's offset pair is zero */
+    RB_DMUB_LOC_FB = 5,          /* FB_LOCATION/FB_OFFSET give no ranges */
+    RB_DMUB_LOC_ADDR = 6,        /* derived address is neither MC nor sysphys */
+    RB_DMUB_LOC_ALIGN = 7,       /* the ring is not 64-byte aligned */
+    RB_DMUB_LOC_MAP_FAILED = 8   /* the kext could not map it */
+};
+
+/* What kind of address the covering window's offset pair turned out to hold.
+ * Boot 272 settled this and it was NOT what 2zn predicted, so it is a
+ * measured output of the locate rather than a constant of the design. */
+enum {
+    RB_DMUB_ADDR_NONE = 0,
+    RB_DMUB_ADDR_MC = 1,        /* an MC address; mc2pa() applies */
+    RB_DMUB_ADDR_PA = 2         /* already system-physical */
+};
+
+/* One region-3 window, as its three registers read. */
+struct rb_dmub_win {
+    uint32_t base;      /* DMCUB_REGION3_CWn_BASE_ADDRESS */
+    uint32_t top;       /* DMCUB_REGION3_CWn_TOP_ADDRESS, enable at bit 31 */
+    uint32_t off_lo;    /* DMCUB_REGION3_CWn_OFFSET */
+    uint32_t off_hi;    /* DMCUB_REGION3_CWn_OFFSET_HIGH */
 };
 
 /* The whole register-derived picture, so the decision below is a pure
  * function of what was read and the hosttest can hand it any boot's values. */
 struct rb_dmub_loc {
-    uint32_t inbox_base;    /* DMCUB_INBOX1_BASE_ADDRESS */
-    uint32_t inbox_size;    /* DMCUB_INBOX1_SIZE */
-    uint32_t cw4_base;      /* DMCUB_REGION3_CW4_BASE_ADDRESS */
-    uint32_t cw4_top;       /* DMCUB_REGION3_CW4_TOP_ADDRESS */
-    uint32_t cw4_off_lo;    /* DMCUB_REGION3_CW4_OFFSET */
-    uint32_t cw4_off_hi;    /* DMCUB_REGION3_CW4_OFFSET_HIGH */
+    uint32_t inbox_base;    /* DMCUB_INBOX1_BASE_ADDRESS, a DMCUB address */
+    uint32_t inbox_size;    /* DMCUB_INBOX1_SIZE, the ring's capacity */
+    struct rb_dmub_win cw[RB_DMUB_CW_COUNT];
     uint32_t fb_location;   /* DCN_VM_FB_LOCATION_BASE, FB_BASE field */
     uint32_t fb_offset;     /* DCN_VM_FB_OFFSET, FB_OFFSET field */
+};
+
+/* Everything the locate worked out, so a refusal can be diagnosed from the
+ * same structure a success is read from (rule 14: a zero that was never
+ * written must not look like a zero that was). */
+struct rb_dmub_loc_out {
+    int      refuse;
+    int      win;          /* the covering window, -1 if none */
+    uint64_t dmub_mem;     /* the address as the window register holds it */
+    uint64_t ring_pa;      /* ...translated to system-physical */
+    int      addr_kind;    /* RB_DMUB_ADDR_* */
+    uint32_t span;         /* how many bytes of it are a candidate ring */
 };
 
 /* dmub_dcn31.c:69-72 - both are the register field shifted left by 24. */
@@ -121,71 +184,148 @@ static inline uint64_t rb_dmub_fb_offset(const struct rb_dmub_loc *l)
     return (uint64_t)l->fb_offset << 24;
 }
 
-/* The system-physical address of the ring.
- *
- * dmub_dcn31.c:80 writes CW4_OFFSET as `gpu_addr - fb_base + fb_offset`, and
- * this project's own mc2pa() is `mc - vram_start + vram_base_offset` with
- * vram_start the MC base (0xF4_0000_0000) and vram_base_offset the
- * system-physical base (0x7_8000_0000, FB_OFFSET 0x780). They are the SAME
- * transform, so CW4_OFFSET already holds a system-physical address and there
- * is nothing to invert. That is a claim with a consequence, so it is checked
- * rather than assumed: rb_dmub_locate() requires the derived address to lie
- * inside [fb_offset, fb_offset + 16 GB), which is false for a DMCUB-side or
- * an MC-side value. */
-static inline uint64_t rb_dmub_ring_pa(const struct rb_dmub_loc *l)
+static inline uint64_t rb_dmub_win_off(const struct rb_dmub_win *w)
 {
-    return ((uint64_t)l->cw4_off_hi << 32) | (uint64_t)l->cw4_off_lo;
+    return ((uint64_t)w->off_hi << 32) | (uint64_t)w->off_lo;
+}
+
+static inline int rb_dmub_win_enabled(const struct rb_dmub_win *w)
+{
+    return (w->top & RB_DMUB_CW_ENABLE) != 0u;
+}
+
+static inline uint32_t rb_dmub_win_top(const struct rb_dmub_win *w)
+{
+    return w->top & RB_DMUB_CW_ADDR_MASK;
+}
+
+/* How much of this window we are willing to treat as a ring. The mailbox
+ * window on boot 272 is 64 KB; Linux's inbox is the first DMUB_RB_SIZE of
+ * it, so a candidate ring is the window's first 8192 bytes or the whole
+ * window if it is smaller. The TOP convention is not assumed: dmub_srv.c:882
+ * computes `top = base + size` while boot 272 read base 0x04000000 against
+ * top 0x0400ffff, which is base + size - 1. Treating top as the LAST byte is
+ * correct under that reading and one byte conservative under the other, and
+ * being one byte short cannot produce a wrong address while guessing can. */
+static inline uint32_t rb_dmub_win_span(const struct rb_dmub_win *w)
+{
+    uint32_t base = w->base & RB_DMUB_CW_ADDR_MASK;
+    uint32_t top = rb_dmub_win_top(w);
+    uint32_t span;
+
+    if (!rb_dmub_win_enabled(w)) { return 0u; }
+    if (top <= base) { return 0u; }
+    span = top - base + 1u;
+    if (span > RB_DMUB_RB_SIZE) { span = RB_DMUB_RB_SIZE; }
+    span &= ~(RB_DMUB_CMD_SIZE - 1u);      /* whole commands only */
+    return span;
 }
 
 /* 16 GB: larger than any carve-out this machine can have (4 GB measured) and
- * small enough that an MC address (0xF4_..) or a DMCUB window address
- * (0x8000_0000, below fb_offset) falls outside. */
+ * small enough that the MC range (0xF4_..) and the system-physical range
+ * (0x7_8000_0000) stay disjoint, so an address can be CLASSIFIED rather than
+ * guessed at. */
 #define RB_DMUB_FB_SPAN  (16ull * 1024ull * 1024ull * 1024ull)
 
-static inline int rb_dmub_locate(const struct rb_dmub_loc *l)
+/* One window, resolved to memory we could map.
+ *
+ * WHY PER-WINDOW AND NOT "the mailbox is CW<n>". 2zn located the ring by
+ * naming a window, got the name from dmub_srv.c, and was refuted on the
+ * first boot. The replacement does not name one: every enabled window is
+ * resolved, the kext maps each and looks for the firmware's own 37 commands,
+ * and the window that SHOWS them is the mailbox. That is a search with its
+ * control built in, and it needs no convention at all - which matters
+ * because the one register that was supposed to settle it,
+ * DMCUB_INBOX1_BASE_ADDRESS, reads 0x80000000 and nothing in hand explains
+ * that.
+ *
+ * The address KIND is measured, not assumed. dmub_dcn31.c:80 writes a window
+ * offset as `gpu_addr - fb_base + fb_offset`, which is this project's own
+ * mc2pa(), so 2zn concluded the register already held a system-physical
+ * address. Boot 272 read 0xf4_ffe40000 in CW4 - an MC address, untranslated,
+ * because this machine's FIRMWARE wrote that register and not Linux. Both
+ * conventions are therefore accepted and told apart by range. */
+static inline int rb_dmub_win_locate(const struct rb_dmub_loc *l,
+                                     unsigned idx,
+                                     struct rb_dmub_loc_out *o)
 {
-    uint64_t pa, fb;
+    uint64_t fb_base, fb_off, mem, pa;
+    uint32_t span;
 
-    /* dmub_srv.c:891 - the ring IS cw4's base, not somewhere inside it. A
-     * mismatch means this firmware laid the mailbox out differently and
-     * every offset below would be wrong. */
-    if (l->inbox_base != l->cw4_base) { return RB_DMUB_LOC_INBOX_BASE; }
-    if (l->inbox_base != RB_DMUB_CW4_BASE) { return RB_DMUB_LOC_INBOX_BASE; }
-    if (l->inbox_size != RB_DMUB_RB_SIZE) { return RB_DMUB_LOC_INBOX_SIZE; }
+    o->refuse = RB_DMUB_LOC_OK;
+    o->win = -1;
+    o->dmub_mem = 0;
+    o->ring_pa = 0;
+    o->addr_kind = RB_DMUB_ADDR_NONE;
+    o->span = 0;
 
-    /* dmub_srv.c:882 - cw4.top = base + mail_fb->size, and the mailbox is
-     * 2 * DMUB_RB_SIZE, so the inbox has to fit with room to spare. */
-    if (l->cw4_top <= l->cw4_base) { return RB_DMUB_LOC_CW4_WINDOW; }
-    if ((l->cw4_top - l->cw4_base) < RB_DMUB_RB_SIZE) {
-        return RB_DMUB_LOC_CW4_WINDOW;
+    if (idx >= RB_DMUB_CW_COUNT) { return o->refuse = RB_DMUB_LOC_NO_WINDOW; }
+
+    span = rb_dmub_win_span(&l->cw[idx]);
+    if (span < RB_DMUB_CMD_SIZE) { return o->refuse = RB_DMUB_LOC_NO_WINDOW; }
+
+    mem = rb_dmub_win_off(&l->cw[idx]);
+    if (mem == 0ull) { return o->refuse = RB_DMUB_LOC_NO_OFFSET; }
+
+    fb_base = rb_dmub_fb_base(l);
+    fb_off = rb_dmub_fb_offset(l);
+    if (fb_base == 0ull || fb_off == 0ull) {
+        return o->refuse = RB_DMUB_LOC_FB;
     }
 
-    if (l->cw4_off_lo == 0u && l->cw4_off_hi == 0u) {
-        return RB_DMUB_LOC_NO_OFFSET;
+    if (mem >= fb_base && mem + span <= fb_base + RB_DMUB_FB_SPAN) {
+        o->addr_kind = RB_DMUB_ADDR_MC;
+        pa = mem - fb_base + fb_off;
+    } else if (mem >= fb_off && mem + span <= fb_off + RB_DMUB_FB_SPAN) {
+        o->addr_kind = RB_DMUB_ADDR_PA;
+        pa = mem;
+    } else {
+        o->addr_kind = RB_DMUB_ADDR_NONE;
+        o->dmub_mem = mem;
+        return o->refuse = RB_DMUB_LOC_ADDR;
     }
 
-    pa = rb_dmub_ring_pa(l);
-    fb = rb_dmub_fb_offset(l);
-    if (fb == 0ull) { return RB_DMUB_LOC_FB; }
-    if (pa < fb || pa >= fb + RB_DMUB_FB_SPAN) { return RB_DMUB_LOC_FB; }
-    if (pa + RB_DMUB_RB_SIZE > fb + RB_DMUB_FB_SPAN) { return RB_DMUB_LOC_FB; }
-
-    /* Every command is 64 bytes and the firmware's own WPTR is a multiple of
-     * 64, so a ring that is not 64-byte aligned is not this ring. */
     if ((pa & (uint64_t)(RB_DMUB_CMD_SIZE - 1u)) != 0ull) {
-        return RB_DMUB_LOC_ALIGN;
+        o->dmub_mem = mem;
+        return o->refuse = RB_DMUB_LOC_ALIGN;
     }
 
+    o->win = (int)idx;
+    o->dmub_mem = mem;
+    o->ring_pa = pa;
+    o->span = span;
     return RB_DMUB_LOC_OK;
 }
 
-/* The offset of the ring inside the carve-out, which is also its offset
- * inside BAR0 - 2pr measured the GOP framebuffer at BAR0 offset 0, i.e. BAR0
- * is the carve-out seen through the aperture. Only meaningful once
- * rb_dmub_locate() has returned OK. */
-static inline uint64_t rb_dmub_ring_fb_off(const struct rb_dmub_loc *l)
+/* Does a window's memory look like the DMCUB's inbox?
+ *
+ * This is the whole decision now, so it is stated once and tested. A window
+ * qualifies when at least two consecutive 64-byte slots from its start read
+ * as plausible dmub_cmd_headers and EVERY slot up to the last non-empty one
+ * does - i.e. a contiguous run of commands followed by unwritten memory,
+ * which is what a ring written once at bring-up and never wrapped looks
+ * like. Boot 271 says that run should be 37 long.
+ *
+ * Two is the floor rather than one because a single plausible header is
+ * cheap for arbitrary memory to produce: the test is only `type != 0` and
+ * `payload_bytes <= 60`, which roughly one word in five satisfies by
+ * accident. Two consecutive at a 64-byte stride is ~1 in 25, thirty-seven is
+ * not reachable by accident, and requiring the run to be contiguous from
+ * offset 0 is what rules out a window of unrelated data with a few lucky
+ * words in it. */
+static inline int rb_dmub_sig_ok(uint32_t run, uint32_t bad)
 {
-    return rb_dmub_ring_pa(l) - rb_dmub_fb_offset(l);
+    return run >= 2u && bad == 0u;
+}
+
+/* The ring's offset inside the carve-out, which is also its offset inside
+ * BAR0 - 2pr measured the GOP framebuffer at BAR0 offset 0, i.e. BAR0 is the
+ * carve-out seen through the aperture. Only meaningful once a window has
+ * located OK. */
+static inline uint64_t rb_dmub_ring_fb_off(const struct rb_dmub_loc *l,
+                                           const struct rb_dmub_loc_out *o)
+{
+    return o->ring_pa - rb_dmub_fb_offset(l);
 }
 
 /* dmub_cmd.h:8155-8165, with the capacity passed in rather than assumed:

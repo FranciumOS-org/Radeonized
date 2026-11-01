@@ -52209,3 +52209,131 @@ control which runs before any write. The panel moving is the deliverable and
 rule 45 says it needs its own instrument — on this path that instrument is
 the user's eyes, and the acks are what separate "the command never arrived"
 from "it arrived and did nothing".
+
+## 2zo — boot 272 refutes 2zn on the first read, and the second error was the constant
+
+**The reading.** Build `133200C1` loaded and armed, `-rbgpufbdmubbl` in
+boot-args, `./build/out/dmubbl`:
+
+```
+armed            1
+locate           2  INBOX1_BASE_ADDRESS is not CW4's base
+  CW4 base/top   0x4000000 .. 0xffffffff8400ffff
+  CW4 offset     0xf4_ffffffffffe40000
+  FB loc/offset  0xf400 / 0x780
+  ring pa        0x0
+  map route      0
+scan             0 slots, 0 plausible, 0 ABM, 0 bytes
+```
+
+The `0xffffffff8400ffff` and `0xffffffffffe40000` are the TOOL sign-extending
+32-bit published values, not registers — fixed. The registers are CW4 base
+**0x04000000**, top **0x8400ffff**, offset **0xf4_ffe40000**, `FB_LOCATION`
+0xf400, `FB_OFFSET` 0x780.
+
+**Everything downstream behaved exactly as designed, which is the one good
+thing here.** The locate refused, `dmubRoute` stayed 0, both
+`dmubbl 65536` and `dmubbl 4096` returned `0xe00002e2`
+(`kIOReturnNotPermitted`) with `last refusal 2 no ring mapping`, and nothing
+was written to any ring. The control ran before the write and stopped it.
+2zn's staging was the only reason this cost no more than one boot.
+`pubms` printing `sets ok/ref/other 0 / 0 / 0` with `last asked -1` is rule
+15: those keys exist only in `133200C1`, so the new binary was the one
+running.
+
+**ERROR 1: the window assignment was Linux's, not this chip's.** 2zn took
+"the mailbox is CW4" from `dmub_srv.c:880-892` and never asked the machine.
+
+**ERROR 2, worse, and the one worth the entry: the constant was never
+checked against its header.** 2zn wrote
+
+    #define RB_DMUB_CW4_BASE   0x80000000u
+
+and `dmub_srv.c:84` says **0x64000000**. The value 0x80000000 came from boot
+271's `DMCUB_INBOX1_BASE_ADDRESS` reading. The hosttest then asserted
+
+    CHECK(RB_DMUB_CW4_BASE == 0x80000000u,
+          "DMUB_CW4_BASE is 0x80000000 - exactly the
+           DMCUB_INBOX1_BASE_ADDRESS boot 271 read");
+
+which passed, and proved **nothing**: it compared a reading with itself.
+The journal entry and CLAUDE.md both went on to state the agreement as
+corroboration. **Rule 26 extended: a CONSTANT is an instrument too.** A
+number written down from a header has to be checked against the header, and
+"it matches the register" is not that check — it is the hypothesis.
+
+**And the address fields are 29 bits.** `dcn_3_1_2_sh_mask.h:5881/5914` give
+`DMCUB_REGION3_CW4_BASE_ADDRESS` and `_TOP_ADDRESS` a mask of **0x1FFFFFFF**
+with the enable at bit 31, so window addresses are stored TRUNCATED — and
+`0x64000000 & 0x1FFFFFFF` is **0x04000000**, exactly what boot 272 read. So
+**CW4 is the mailbox window after all**, 64 KB of it (0x04000000..0x0400ffff)
+where Linux allocates 2 × 8192. 2zn's first error was real but its diagnosis
+("CW4 is something else entirely") was wrong, and the second error is what
+made the first one look like that.
+
+**What is genuinely unexplained: `DMCUB_INBOX1_BASE_ADDRESS` reads
+0x80000000.** That register is a full 32 bits (sh_mask.h:6154), and
+0x80000000 is neither `DMUB_CW4_BASE` (0x64000000) nor its 29-bit truncation
+(0x04000000). Nothing in hand accounts for it. It is recorded as an open
+finding and **nothing locates from it any more**.
+
+**The address kind was also predicted wrong, and this one is substantive.**
+2zn argued that `dmub_dcn31.c:80`'s `gpu_addr - fb_base + fb_offset` is this
+project's own `mc2pa()`, so `CW4_OFFSET` would already hold a
+system-physical address and there would be nothing to invert. The reasoning
+about Linux was right and the conclusion was wrong, because **this machine's
+firmware wrote that register, not Linux**: 0xf4_ffe40000 is an MC address,
+untranslated. `mc2pa()` gives system-physical **0x8_7FE4_0000**, i.e.
+0xffe40000 into the carve-out — asserted in the hosttest off boot 272's own
+registers.
+
+**The fix is structural: stop having a convention.** Two conventions wrong in
+two milestones is enough. `rb_dmub_win_locate()` resolves ONE window at a
+time — span from its own base/top with the 29-bit mask, offset classified as
+MC or system-physical **by range** rather than assumed, both ranges disjoint
+by construction so the classification is a measurement. The kext then
+**searches**: every enabled window that resolves is mapped, its memory read,
+and the leading run of plausible `dmub_cmd_header`s counted. The window
+carrying the firmware's own bring-up commands **is** the mailbox. Boot 271
+says that run should be **37**.
+
+`rb_dmub_sig_ok(run, bad)` is the whole decision and it is stated once:
+`run >= 2 && bad == 0` — a contiguous run of commands from the window's start
+followed by unwritten memory. Two is the floor rather than one because the
+plausibility test is deliberately weak (`type != 0`, `payload_bytes <= 60`),
+which roughly one word in five satisfies by accident; two consecutive at a
+64-byte stride is ~1 in 25, and requiring the run to start at offset 0 with
+nothing broken after it is what rules out a window of unrelated data with a
+few lucky words in it. A boot where no window passes maps nothing and sends
+nothing — which is the state boot 272 produced, and now produces by design
+rather than by a refusal that happened to be right.
+
+Per-window working is published whole: `RBFBDmubWindows` (all seven
+base/top/offset, raw, enable bits intact) and `RBFBDmubWinScan` (resolve
+code, run, bad, abm per window). The window TABLE is what refuted 2zn, and a
+search that published only its own winner would have had nothing to say
+(rule 14). The capacity comes from the registers too, not from Linux's
+`DMUB_RB_SIZE`.
+
+**The tool caught its own version skew, which is new.** Run against the
+still-loaded `133200C1`, the rewritten `dmubbl` printed
+`INBOX1 base 0xffffffff   size 4294967295` — absent keys read back as -1 and
+-1 printed as 32-bit hex is indistinguishable from a register. It now checks
+for its own keys first and says the running kext is older, printing nothing
+else. Rule 15 with teeth: the instrument refuses to produce a reading it
+cannot make.
+
+**Hosttest: 77 assertions**, the locate half rewritten around boot 272's own
+register values rather than constructed ones — `RB_DMUB_CW4_BASE ==
+0x64000000` against the header, the truncation identity
+`0x64000000 & 0x1FFFFFFF == 0x04000000`, CW4's 8192-byte span out of its
+64 KB window, the MC classification, `ring_pa == 0x8_7FE4_0000`, the
+`inbox_base` mismatch recorded as an assertion so the open finding cannot be
+quietly forgotten, and every refusal clause. Verified failing in both
+directions: weakening `rb_dmub_sig_ok` fails 3, widening the address mask to
+31 bits fails 2.
+
+**Build `5DC87350`** (from `133200C1`). Still nothing on hardware, and
+brightness is no closer than 2zl left it — what has changed is that the route
+is now looked for instead of assumed, and that the two ways 2zn could be
+wrong are both assertions.

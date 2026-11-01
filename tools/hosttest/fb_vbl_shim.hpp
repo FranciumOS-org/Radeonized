@@ -196,7 +196,13 @@ public:
     void dmubPublish(void) {}
     bool     dmubBlArmed=false;
     uint32_t dmubLocRefuse=0;
-    uint32_t dmubLocRegs[8]={0,0,0,0,0,0,0,0};
+    uint32_t dmubInbox[2]={0,0};
+    uint32_t dmubFb[2]={0,0};
+    uint32_t dmubWinRegs[7*4]={0};
+    uint32_t dmubWinScan[7*4]={0};
+    int      dmubWin=-1;
+    uint32_t dmubAddrKind=0, dmubCap=0;
+    uint64_t dmubMem=0;
     uint64_t dmubRingPA=0, dmubRingOff=0;
     uint32_t dmubRoute=0;
     uint32_t dmubScanSlots=0, dmubScanPlaus=0, dmubScanAbm=0, dmubScanBytes=0;

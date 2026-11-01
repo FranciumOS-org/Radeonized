@@ -148,37 +148,54 @@ table and refuses to install one that does not match the running kernel;
   `WPTR == RPTR == 2368` and `InboxSize` 8192 — and 2368 is **37 × 64**, i.e.
   37 `dmub_rb_cmd`s at bring-up and then nothing, the live confirmation of the
   static read. **So a DMUB ABM command is a live route.**
-  **2zn designs it; nothing has touched hardware yet.**
-  `src/common/rb_dmub.h` DERIVES where the ring is rather than guessing:
-  `DMCUB_INBOX1_BASE_ADDRESS` is a DMCUB-side window address
-  (`DMUB_CW4_BASE` 0x80000000, exactly what boot 271 read), and the memory is
-  at `DMCUB_REGION3_CW4_OFFSET`/`_HIGH` — which needs **no inversion**,
-  because `dmub_dcn31.c:80`'s `gpu_addr - fb_base + fb_offset` is the same
-  transform as this project's own `mc2pa()`, so that pair already holds a
-  **system-physical** address. Checked, not trusted: the locate refuses
-  anything outside the carve-out, which catches both wrong values lying in the
-  neighbouring registers (the DMCUB-side 0x80000000 below it, the MC address
-  0xF4_.. above it). **The control runs before any write**: `dmubScan()` reads
-  `[0, WPTR)` and publishes the slot count beside the plausible-header count
-  **and the raw bytes** (`RBFBDmubRingDump`) — 37 plausible headers at a
-  64-byte stride is not what a wrong address gives, and those bytes are
-  firmware 4.0.15.47's own ABM traffic, the only direct evidence of the layout
-  this chip accepts. Locate and scan are read-only and **ungated**, so a boot
-  that will not write still reads them. Two commands, **separately
-  triggered**: `SET_BACKLIGHT` alone first, `SET_PIPE` only if the panel does
-  not move — `dcn21_set_backlight_level` binds ABM to the pipe first, but the
-  firmware's bring-up may already have, and sending both would make a moving
-  panel ambiguous between them (rule 45 again). `dmub_srv.c:1037-1041` is the
-  whole push: 64 bytes at WPTR, read every byte back
-  (`dmub_rb_flush_pending`'s entire body is a write-combine flush), write
-  WPTR — no interrupt, no doorbell register. **RPTR reaching our WPTR is the
-  only acknowledgement** and it is counted (`RBFBDmubAcks` / `AckTimeouts`):
-  it says the microcontroller CONSUMED the command, which is not the panel
-  moving but does separate "never arrived" from "arrived and did nothing".
-  **The slider is deliberately not wired to it** — `-rbgpufbdmubbl` arms it
-  and `build/out/dmubbl` (`make dmubbl`) is the only trigger, so every change
-  has a known cause. 62 hosttest assertions, verified failing in both
-  directions.
+  **2zn designed it, boot 272 refuted it, and 2zo rewrote it to stop having
+  a convention. Nothing has touched hardware.** 2zn named the mailbox window
+  (CW4, from `dmub_srv.c`) and wrote `DMUB_CW4_BASE` as **0x80000000** -
+  which is boot 271's `DMCUB_INBOX1_BASE_ADDRESS` reading, not the header's
+  value. `dmub_srv.c:84` says **0x64000000**, and the hosttest had asserted
+  the constant equalled the register, which **compared a reading with
+  itself**. Rule 26 extended: **a constant is an instrument too.** The
+  window address fields are **29 bits** (`sh_mask.h:5881`, enable at 31), so
+  `0x64000000 & 0x1FFFFFFF` is **0x04000000** - exactly boot 272's CW4_BASE,
+  so **CW4 IS the mailbox**, 64 KB of it. What is genuinely open:
+  `DMCUB_INBOX1_BASE_ADDRESS` reads **0x80000000**, which is neither value,
+  and **nothing locates from it any more**. The address kind was predicted
+  wrong too: CW4_OFFSET reads **0xf4_ffe40000**, an MC address, because this
+  machine's FIRMWARE wrote it and not Linux - so `mc2pa()` does apply and
+  the ring is at system-physical **0x8_7FE4_0000**.
+  **2zo's fix is to search instead of name.** `rb_dmub_win_locate()`
+  resolves one window from its own registers (span from base/top under the
+  29-bit mask; the offset classified MC-or-system-physical **by range**, the
+  two ranges disjoint by construction so it is a measurement), and the kext
+  maps **every** enabled window that resolves, reads its memory, and counts
+  the leading run of plausible `dmub_cmd_header`s. **The window carrying the
+  firmware's own bring-up commands IS the mailbox** - boot 271 says that run
+  is **37**. `rb_dmub_sig_ok(run, bad)` is the decision: `run >= 2 &&
+  bad == 0`, two being the floor because the plausibility test is
+  deliberately weak and one lucky word is ~1 in 5. No window passing means
+  nothing mapped and nothing sent. All seven windows and the per-window
+  (resolve, run, bad, abm) are published whole (`RBFBDmubWindows`,
+  `RBFBDmubWinScan`) - the TABLE is what refuted 2zn, and a search that
+  published only its winner would have had nothing to say.
+  Two commands, **separately triggered**: `SET_BACKLIGHT` alone first,
+  `SET_PIPE` only if the panel does not move - `dcn21_set_backlight_level`
+  binds ABM to the pipe first, but the firmware's bring-up may already have,
+  and sending both would make a moving panel ambiguous between them (rule 45
+  again). `dmub_srv.c:1037-1041` is the whole push: 64 bytes at WPTR, read
+  every byte back (`dmub_rb_flush_pending`'s entire body is a write-combine
+  flush), write WPTR - no interrupt, no doorbell register. **RPTR reaching
+  our WPTR is the only acknowledgement** and it is counted (`RBFBDmubAcks` /
+  `AckTimeouts`): the microcontroller CONSUMED the command, which is not the
+  panel moving but does separate "never arrived" from "arrived and did
+  nothing". **The slider is deliberately not wired to it** -
+  `-rbgpufbdmubbl` arms it and `build/out/dmubbl` is the only trigger, and
+  the tool **refuses to print a reading against an older kext** (absent keys
+  read back as -1, and -1 as 32-bit hex is indistinguishable from a
+  register - boot 272 printed exactly that). 77 hosttest assertions off boot
+  272's own registers, verified failing in both directions.
+  **What boot 272 proved works:** the locate refused, nothing was mapped,
+  both sends returned `kIOReturnNotPermitted` with `last refusal 2`, and no
+  byte reached any ring. 2zn's staging is why a wrong design cost one boot.
   **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
