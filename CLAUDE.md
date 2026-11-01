@@ -232,9 +232,47 @@ table and refuses to install one that does not match the running kernel;
   payload answers a second question free: slot byte 16 is
   **`abm_aux_backlight_support`** - if set, a PWM-typed SET_BACKLIGHT is the
   wrong control type and this is rule 46 a second time on the same chain.
-  **`dmubbl caps` goes FIRST on boot 275**, before any further level: until it
-  answers, "the panel did not move" has two explanations and nothing separates
-  them.
+  **2zr (boot 275): the firmware did NOT clear `ret_status`, and the ring
+  cannot say why.** The caps command went into slot **0x940**, WPTR advanced to
+  **0x980**, RPTR followed (`acks 1`, no timeout) - and the slot read back
+  `06 00 01 0e`, **byte 2 still `01`**, verdict **UNCHANGED**. No caps payload.
+  So: our store reaches that memory and persists (boot 273 read all 8192 bytes
+  as zero; the slot now holds our command), and the mapping is
+  `kIOMapInhibitCache` on both routes so the read-back is not a stale cache
+  line - checked before blaming the chip. **The write works; the reply does
+  not come.** Three explanations and the ring produces the same reading for all
+  three: (1) 4.0.15.47 does not implement command 6; (2) the DMCUB reads a
+  different base and consumed a zeroed slot; (3) it is not processing inbox
+  commands at all and RPTR advances for another reason. **2zq's caps query
+  shared the suspect with the thing it was testing** - a test that depends on
+  the address cannot clear the address - which is the seventh instrument on
+  this surface undone by a shared assumption.
+  **2zr takes the address out of the path: GPINT.** `dmub_dcn31.c`'s
+  `set_gpint` writes **one register**, `DMCUB_GPINT_DATAIN1` (0x01f8), and
+  `is_gpint_acked` reads it back against the sent value with the status field
+  **cleared** - the firmware clears a bit we set, with no memory, window,
+  `mc2pa`, mapping or ring anywhere in the path. `union
+  dmub_gpint_data_register` is param:16, command_code:12, status:4, so the
+  version query's word is **0x10010000** and an ack is **0x00010000**.
+  **The positive control comes from a different register than the answer:**
+  `GET_FW_VERSION` = 1 answers in `DMCUB_SCRATCH7` (0x01ea), while this
+  project read **4.0.15.47 running / 4.0.21.71 ROM** off `DMCUB_SCRATCH0`
+  (0x01e3) in a level-2 probe long before any of this. A hosttest asserts the
+  two offsets differ, since equal ones would make the control the instrument
+  reading itself (2zp's error). Both scratch registers are sampled **before and
+  after** the write so a pre-existing value cannot read as a reply.
+  **`DMUB_GPINT__STOP_FW` = 2 HALTS THE FIRMWARE DRIVING THIS PANEL.**
+  `rb_dmub_gpint_allowed()` allowlists exactly one code and the hosttest walks
+  **every code 2..144** asserting none passes - a gate, not a comment.
+  Linux's DATAOUT path also pulses `DMCUB_GPINT_IH_INT_ACK` with the enable
+  off; this reads DATAOUT and touches **nothing** in
+  `DMCUB_INTERRUPT_ENABLE`/`_ACK`, because here the DMCUB serves Apple's stack.
+  **Boot 276: `dmubbl gpint` FIRST, and no further backlight send until it
+  answers.** Acked -> the DMCUB is alive, the ring is the problem, and the next
+  instrument is the **outbox** (CW4 is 64 KB and `dmub_srv_hw_init` puts
+  outbox1 at `cpu_addr + DMUB_RB_SIZE`, the 8192..16384 half nothing has read).
+  Not acked -> an advancing inbox RPTR is not the firmware executing our
+  commands, and 2zq's four acks meant something else.
   Two commands, **separately triggered**: `SET_BACKLIGHT` alone first,
   `SET_PIPE` only if the panel does not move (rule 45 again - sending both
   would make a moving panel ambiguous). `dmub_srv.c:1037-1041` is the whole

@@ -159,6 +159,93 @@
  * puts it after type:8 and sub_type:8. */
 #define RB_DMUB_HDR_RET_STATUS  (1u << 16)
 
+/* ---- GPINT: the general-purpose interrupt, which needs no ring at all ----
+ *
+ * Boot 275 is why this exists. The caps command went into slot 0x940, WPTR
+ * advanced to 0x980, RPTR followed - and the slot still read
+ * `06 00 01 0e`, with ret_status STILL SET. The firmware stepped its read
+ * pointer over our slot and did not clear the one bit
+ * dc_dmub_srv_query_caps_cmd's whole contract depends on. Both routes are
+ * now suspect and the ring cannot arbitrate between them:
+ *
+ *   (1) this firmware does not implement command 6 and discarded it;
+ *   (2) the DMCUB reads a DIFFERENT base, so it consumed a zero slot
+ *       (DMUB_CMD__NULL) from memory we have never looked at;
+ *   (3) the DMCUB is not processing commands at all and RPTR advances for
+ *       some other reason.
+ *
+ * GPINT separates (1) from (2) and (3) because **no address is involved**.
+ * dmub_dcn31.c's set_gpint writes one register, DMCUB_GPINT_DATAIN1, and
+ * is_gpint_acked reads that same register back and compares it against the
+ * value sent with the status field CLEARED - so the firmware clears a bit we
+ * set, in a register, with no memory, no window, no mc2pa and no mapping. If
+ * that comes back acked, the DMCUB is alive and talking to us and the
+ * problem is the ring or the command; if it does not, the ring was never the
+ * question.
+ *
+ * And there is a POSITIVE CONTROL, from a different register than the answer
+ * (rule 26: an instrument needs a known-present case). DMUB_GPINT__GET_FW_
+ * VERSION = 1 returns the firmware version in DMCUB_SCRATCH7, and this
+ * project read **4.0.15.47 running, 4.0.21.71 on ROM** off DMCUB_SCRATCH0 in
+ * a level-2 probe long before any of this - 0x01e3 against 0x01ea, two
+ * different registers. So the answer can be checked against something that
+ * was not measured by the instrument producing it.
+ *
+ * union dmub_gpint_data_register: param:16, command_code:12, status:4.
+ * Registers from dcn_3_1_2_offset.h, all base_idx 2 (DMU segment 2, 0x34c0).
+ *
+ * DMUB_GPINT__STOP_FW = 2 **HALTS THE FIRMWARE** - dmub_dcn31_reset sends it
+ * and polls SCRATCH7 for 0xDEADDEAD. On this machine the DMCUB is what lit
+ * the panel, so halting it is not a diagnostic, it is the end of the boot.
+ * rb_dmub_gpint_allowed() therefore allowlists exactly ONE code and the
+ * hosttest asserts 2 is refused. Not a comment - a gate. */
+#define RB_DMUB_DW_SCRATCH0        0x01e3u
+#define RB_DMUB_DW_SCRATCH7        0x01eau
+#define RB_DMUB_DW_GPINT_DATAIN0   0x01f7u
+#define RB_DMUB_DW_GPINT_DATAIN1   0x01f8u
+#define RB_DMUB_DW_GPINT_DATAOUT   0x01f9u
+
+#define RB_DMUB_GPINT_GET_FW_VERSION  1u
+#define RB_DMUB_GPINT_STOP_FW         2u    /* NEVER SEND. See above. */
+#define RB_DMUB_GPINT_STOP_RESPONSE   0xDEADDEADu
+
+#define RB_DMUB_GPINT_STATUS_SHIFT  28u
+#define RB_DMUB_GPINT_STATUS_MASK   (0xfu << RB_DMUB_GPINT_STATUS_SHIFT)
+#define RB_DMUB_GPINT_CODE_SHIFT    16u
+#define RB_DMUB_GPINT_CODE_MASK     0xfffu
+
+/* The only code this file will build a word for. */
+static inline int rb_dmub_gpint_allowed(uint32_t code)
+{
+    return code == RB_DMUB_GPINT_GET_FW_VERSION;
+}
+
+static inline uint32_t rb_dmub_gpint_word(uint32_t code, uint32_t param)
+{
+    return (param & 0xffffu) |
+           ((code & RB_DMUB_GPINT_CODE_MASK) << RB_DMUB_GPINT_CODE_SHIFT) |
+           (1u << RB_DMUB_GPINT_STATUS_SHIFT);
+}
+
+/* dmub_dcn31_is_gpint_acked: clear status in the local copy and compare the
+ * whole word against the readback. An ack is the firmware having cleared
+ * that field and left everything else alone - so a readback of 0, or of
+ * garbage, or of our own word unchanged, are all NOT acks, and each is a
+ * different reading. */
+static inline int rb_dmub_gpint_acked(uint32_t sent, uint32_t readback)
+{
+    return readback == (sent & ~RB_DMUB_GPINT_STATUS_MASK);
+}
+
+static inline uint32_t rb_dmub_gpint_status(uint32_t w)
+{
+    return (w & RB_DMUB_GPINT_STATUS_MASK) >> RB_DMUB_GPINT_STATUS_SHIFT;
+}
+static inline uint32_t rb_dmub_gpint_code(uint32_t w)
+{
+    return (w >> RB_DMUB_GPINT_CODE_SHIFT) & RB_DMUB_GPINT_CODE_MASK;
+}
+
 /* Why a locate was refused. Published, never inferred: "we did not write"
  * and "we did not write BECAUSE no enabled window covers the inbox" are
  * different findings (rule 14).

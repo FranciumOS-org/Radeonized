@@ -761,6 +761,13 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
+    if (dict->getObject("RBFBDmubGpint")) {
+        const uint32_t rc = dmubGpint(RB_DMUB_GPINT_GET_FW_VERSION);
+        LOG("RBFBDmubGpint -> refuse %u, sent %#x, back %#x, acked %u, "
+            "scratch7 %#x -> %#x", rc, dmubGpintSent, dmubGpintBack,
+            dmubGpintAcked, dmubScratch7Pre, dmubScratch7);
+        return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+    }
     if (dict->getObject("RBFBDmubCaps")) {
         const uint32_t rc = dmubSendCaps();
         LOG("RBFBDmubCaps -> refuse %u, wptr %#x, verdict %u",

@@ -450,6 +450,12 @@ private:
     uint32_t           dmubReplyVerdict;   /* RB_DMUB_REPLY_* */
     uint32_t           dmubReplySlot;      /* the ring offset we wrote */
     uint32_t           dmubConfirms;       /* how many came back CONFIRMED */
+    /* GPINT (2zr): the one test on this surface with no address in it. */
+    uint32_t           dmubGpintSends, dmubGpintRefuse;
+    uint32_t           dmubGpintSent, dmubGpintBack, dmubGpintAcked;
+    uint32_t           dmubGpintSpins;
+    uint32_t           dmubScratch0, dmubScratch7, dmubDataout;
+    uint32_t           dmubScratch0Pre, dmubScratch7Pre;
     uint64_t           blSets;
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
@@ -646,6 +652,7 @@ private:
     uint32_t dmubSendBacklight(uint32_t level);
     uint32_t dmubSendPipe(void);
     uint32_t dmubSendCaps(void);
+    uint32_t dmubGpint(uint32_t code);
     void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */

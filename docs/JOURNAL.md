@@ -52527,3 +52527,109 @@ Nothing in this milestone has touched hardware.
 only send whose result is self-interpreting. Only after it answers is there any
 point sending another level, because until then "the panel did not move" has two
 explanations and no instrument separates them.
+
+## 2zr - boot 275: the firmware did NOT clear ret_status, and the ring cannot say why
+
+Boot 275, build 9AE534ED. `dmubbl caps` pushed QUERY_FEATURE_CAPS into slot
+**0x940**, WPTR advanced to **0x980**, RPTR followed (`acks 1`, no timeout),
+and the slot read back:
+
+```
+    sent 06 00 01 0e 00 00 ...
+    got  06 00 01 0e 00 00 ...
+  verdict 2 UNCHANGED
+```
+
+Byte 2 is `01`. **`ret_status` is still SET.** The firmware stepped its read
+pointer over our slot and did not clear the one bit
+`dc_dmub_srv_query_caps_cmd`'s entire contract depends on, and wrote no caps
+payload.
+
+**What IS now established, and it is not nothing.** Boot 273 read all 8192
+bytes of CW4 as zero; slot 0x940 now holds our command and reads back
+byte-identical. The mapping is `kIOMapInhibitCache` on both routes, so that
+read-back is uncached and not a stale line - checked before blaming the chip
+(rule 16). So our store reaches that memory and persists in it. The write
+works. The reply does not come.
+
+**And the ring cannot arbitrate.** Three explanations, and every one of them
+produces exactly the reading boot 275 and boot 274 gave:
+
+ 1. this firmware (4.0.15.47) does not implement command 6 and discarded it;
+ 2. the DMCUB reads a DIFFERENT base, so it consumed a zeroed slot
+    (`DMUB_CMD__NULL`) out of memory nothing here has ever looked at;
+ 3. the DMCUB is not processing inbox commands at all, and RPTR advances for
+    some other reason.
+
+2zq's claim was that the caps query would discriminate. It did not, and the
+reason is that the discriminator shares the suspect: **a test that depends on
+the address cannot clear the address.** 2zq's own hosttest named ZERO as the
+failure mode that would retire CW4 and never considered that the slot could
+come back UNCHANGED - our bytes intact, no reply - which is what happened and
+which the verdict table correctly refuses to call either way. Seventh
+instrument on this surface whose weakness was its shared assumption.
+
+**2zr takes the address out of the path entirely: GPINT.** `dmub_dcn31.c`'s
+`set_gpint` writes **one register**, `DMCUB_GPINT_DATAIN1` (0x01f8, base_idx 2),
+and `is_gpint_acked` reads that same register back and compares it against the
+value sent with the status field **cleared**:
+
+```c
+    reg.bits.status = 0;
+    test.all = REG_READ(DMCUB_GPINT_DATAIN1);
+    return test.all == reg.all;
+```
+
+So the firmware clears a bit we set, in a register, with no memory, no window,
+no `mc2pa`, no mapping and no ring. `union dmub_gpint_data_register` is
+param:16, command_code:12, status:4, so the version query's word is
+**0x10010000** (computed, not eyeballed - the first draft of the hosttest said
+0x10001000 and failed, rule 26 again), and an ack is **0x00010000**.
+
+**There is a genuine positive control, from a different register than the
+answer.** `DMUB_GPINT__GET_FW_VERSION` = 1 returns the version in
+`DMCUB_SCRATCH7` (0x01ea) - and this project read **"DMCUB firmware 4.0.15.47
+running (4.0.21.71 on ROM)"** off `DMCUB_SCRATCH0` (0x01e3) in a level-2 probe
+in `logs/20261020-175624-plugin/pci.txt`, long before any of this. Two
+different registers, one of them measured years of milestones ago by an
+instrument that knew nothing about GPINT. A hosttest asserts the two offsets
+differ, because if they were the same the control would be the instrument
+reading itself - which is precisely 2zp's error.
+
+**Both scratch registers are sampled before AND after the write**, so a
+SCRATCH7 that already held the answer cannot be read as a reply. The tool says
+which it was.
+
+**Two things Linux does that this deliberately does not.**
+`dmub_dcn31_get_gpint_dataout` clears `DMCUB_GPINT_DATAOUT` and pulses
+`DMCUB_GPINT_IH_INT_ACK` with `DMCUB_GPINT_IH_INT_EN` off around it. That is
+interrupt plumbing belonging to a driver that owns the DMCUB; here the DMCUB
+lit the panel and is serving Apple's stack, so DATAOUT is **read** and nothing
+in `DMCUB_INTERRUPT_ENABLE`/`_ACK` is touched. The command word is also not
+zeroed afterwards: once status reads 0 the command is spent.
+
+**`DMUB_GPINT__STOP_FW` = 2 halts the firmware** - `dmub_dcn31_reset` sends it
+and polls SCRATCH7 for 0xDEADDEAD. On this machine that is not a diagnostic,
+it is the end of the boot and of the panel. `rb_dmub_gpint_allowed()`
+allowlists exactly one code, and the hosttest walks **every code from 2 to 144**
+asserting none is permitted - a gate, not a comment, and verified failing:
+relaxing it to `code != 0` fails 2 assertions.
+
+What boot 276 decides:
+
+ - **acked** -> the DMCUB is alive and answers register writes, so the
+   microcontroller is fine and the ring is the problem: either command 6 is
+   unimplemented by 4.0.15.47 or it reads a base other than CW4's offset.
+   Explanation 1 or 2, and the next instrument is the outbox (CW4 is 64 KB and
+   `dmub_srv_hw_init` puts outbox1 at `cpu_addr + DMUB_RB_SIZE`, i.e. the
+   8192..16384 half of this window, which nothing has ever read).
+ - **not acked** -> explanation 3, and it retires the ring as the question
+   entirely: an advancing inbox RPTR is then not the firmware executing our
+   commands, and 2zq's four acks meant something else.
+
+Build F9B7513F, 17 new hosttest assertions, verified failing in both
+directions. Nothing in this milestone has touched hardware.
+
+**And no further backlight send until GPINT answers.** Boot 275's reading made
+"the panel did not move" strictly less informative, not more: there are now
+three live explanations where there were two, and none of them is about ABM.
