@@ -412,7 +412,9 @@ private:
      * signature says which ones were even candidates and why the rest were
      * not (rule 14). */
     uint32_t           dmubWinScan[7 * 4];
-    int                dmubWin;        /* the covering window, -1 if none */
+    int                dmubWin;        /* the mailbox window, -1 if none */
+    uint32_t           dmubLayout;     /* how many of the six CW bases match */
+    uint32_t           dmubSigOk;      /* an OBSERVATION, never the selector */
     uint32_t           dmubAddrKind;   /* RB_DMUB_ADDR_MC or _PA, measured */
     uint64_t           dmubMem;        /* the address the window holds */
     uint32_t           dmubCap;        /* the ring's capacity, from the register */

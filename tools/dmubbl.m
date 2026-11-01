@@ -50,6 +50,32 @@ static long num(io_service_t fb, const char *key)
 
 /* rb_dmub.h's RB_DMUB_LOC_*. RENUMBERED after boot 272 - a code printed by
  * the old build does not mean what this table says. */
+/* A 32-bit published value, masked.
+ *
+ * RULE 16, PAID FOR TWICE IN ONE MILESTONE. The kext publishes with
+ * setProperty(..., 32), and a 32-bit OSNumber whose bit 31 is set comes back
+ * through CFNumberGetValue as a NEGATIVE long - so DMCUB_INBOX1_BASE_ADDRESS
+ * of 0x80000000 read as -2147483648. Boot 272 printed it as 0xffffffff8400ffff
+ * and I read that as the register; boot 273's version guard then saw the
+ * negative value, concluded the kext was too old, and SUPPRESSED A
+ * SUCCESSFUL LOCATE. Mask here, and never test a reading's sign to decide
+ * whether a key exists. */
+static uint32_t u32(io_service_t fb, const char *key)
+{
+    return (uint32_t)(num(fb, key) & 0xffffffffLL);
+}
+
+/* Does the key exist at all? The only honest version check. */
+static int have(io_service_t fb, const char *key)
+{
+    CFTypeRef v = IORegistryEntryCreateCFProperty(
+        fb, (__bridge CFStringRef)[NSString stringWithUTF8String:key],
+        kCFAllocatorDefault, 0);
+    if (!v) { return 0; }
+    CFRelease(v);
+    return 1;
+}
+
 static const char *locWhy(long c)
 {
     switch (c) {
@@ -123,12 +149,12 @@ static void dump(io_service_t fb)
     int nwr = words(fb, "RBFBDmubWindows", wr, 28);
     int nws = words(fb, "RBFBDmubWinScan", ws, 28);
 
-    /* Rule 15, as the FIRST thing printed. A key the running kext does not
-     * publish reads back as -1 here, and -1 printed as a 32-bit hex value is
-     * 0xffffffff - which looks exactly like a register reading. The first
-     * run of this tool against the previous build showed "INBOX1 base
-     * 0xffffffff, size 4294967295" and that was not a reading at all. */
-    if (num(fb, "RBFBDmubInbox1Base") < 0 || nwr < 28) {
+    /* Rule 15, as the FIRST thing printed - and by PRESENCE, not by sign.
+     * The previous version tested `num(...) < 0`, which is true for any
+     * 32-bit value with bit 31 set, so on boot 273 it declared the kext too
+     * old and hid a locate that had in fact succeeded. The instrument is a
+     * suspect (rule 16). */
+    if (!have(fb, "RBFBDmubLayout") || nwr < 28) {
         printf("the running kext does not publish this tool's keys - it is\n"
                "OLDER than this build (rule 15). Nothing below is a reading;\n"
                "install the kext this tool was built with and reboot.\n");
@@ -138,12 +164,14 @@ static void dump(io_service_t fb)
     printf("armed            %ld   (-rbgpufbdmubbl)\n",
            num(fb, "RBFBDmubBlArmed"));
     printf("locate           %ld  %s\n", loc, locWhy(loc));
-    printf("  INBOX1 base    0x%08x   size %u\n",
-           (uint32_t)num(fb, "RBFBDmubInbox1Base"),
-           (uint32_t)num(fb, "RBFBDmubInbox1Size"));
+    printf("  layout         %u of %u CW bases match dmub_srv.c%s\n",
+           u32(fb, "RBFBDmubLayout"), u32(fb, "RBFBDmubLayoutOf"),
+           u32(fb, "RBFBDmubLayout") == u32(fb, "RBFBDmubLayoutOf")
+               ? "  <- the identification" : "  <- INCOMPLETE");
+    printf("  INBOX1 base    0x%08x   size %u   (unexplained, unused)\n",
+           u32(fb, "RBFBDmubInbox1Base"), u32(fb, "RBFBDmubInbox1Size"));
     printf("  FB loc/offset  0x%x / 0x%x\n",
-           (uint32_t)num(fb, "RBFBDmubFbLocation"),
-           (uint32_t)num(fb, "RBFBDmubFbOffset"));
+           u32(fb, "RBFBDmubFbLocation"), u32(fb, "RBFBDmubFbOffset"));
 
     /* The whole window table, raw. This is what refuted 2zn, and a search
      * that printed only its own winner would have had nothing to say. */
@@ -178,12 +206,20 @@ static void dump(io_service_t fb)
         printf("  capacity       %u bytes\n", (uint32_t)num(fb, "RBFBDmubCap"));
         printf("  map route      %ld   (1 = BAR0 sub-range, 2 = physical)\n",
                num(fb, "RBFBDmubRoute"));
-        printf("  signature      %ld of %ld slots, %ld ABM\n",
+        printf("  live WPTR/RPTR 0x%x / 0x%x\n",
+               u32(fb, "RBFBDmubWptr"), u32(fb, "RBFBDmubRptr"));
+        printf("  signature      %ld of %ld slots, %ld ABM  -> %s\n",
                num(fb, "RBFBDmubScanPlaus"), num(fb, "RBFBDmubScanSlots"),
-               num(fb, "RBFBDmubScanAbm"));
-        printf("  -> the run of consecutive command headers from the window's\n"
-               "     start. Boot 271 says it should be 37. Those bytes are in\n"
-               "     RBFBDmubRingDump - firmware 4.0.15.47's own ABM traffic.\n");
+               num(fb, "RBFBDmubScanAbm"),
+               u32(fb, "RBFBDmubSigOk") ? "present" : "ABSENT");
+        if (!u32(fb, "RBFBDmubSigOk")) {
+            printf("  -> NO byte-level confirmation. Boot 273 read this ring as\n"
+                   "     ALL ZEROS while the registers said WPTR == RPTR ==\n"
+                   "     2368, so \"37 commands sit at bring-up\" was an\n"
+                   "     inference from the POINTER and never from memory. The\n"
+                   "     address rests on the layout agreement alone, which is\n"
+                   "     six exact matches - strong, but not the same thing.\n");
+        }
     } else {
         printf("mailbox          NONE FOUND - nothing is mapped and nothing\n"
                "                 will be sent. Read the per-window [resolve,\n"
@@ -201,10 +237,13 @@ static void dump(io_service_t fb)
            num(fb, "RBFBDmubBlLast"));
     printf("  acks/timeouts  %ld / %ld   last WPTR 0x%x\n",
            num(fb, "RBFBDmubAcks"), num(fb, "RBFBDmubAckTimeouts"),
-           (uint32_t)num(fb, "RBFBDmubSendWptr"));
-    printf("  -> an ack is RPTR reaching our WPTR: the firmware CONSUMED the\n"
-           "     command. That is not the panel moving - the panel is the\n"
-           "     deliverable and your eyes are its only instrument.\n");
+           u32(fb, "RBFBDmubSendWptr"));
+    printf("  -> an ack is RPTR reaching our WPTR, i.e. the DMCUB consumed\n"
+           "     whatever was at the REAL ring's WPTR. On boot 273 that was a\n"
+           "     zeroed slot - DMUB_CMD__NULL - because the command had gone\n"
+           "     into the wrong window, so the ack said nothing about it. An\n"
+           "     ack is necessary and nowhere near sufficient; the panel is\n"
+           "     the deliverable and your eyes are its only instrument.\n");
 }
 
 int main(int argc, char **argv)
@@ -223,6 +262,15 @@ int main(int argc, char **argv)
                "  dmubbl pipe         SET_PIPE, bind ABM to OTG0\n");
         IOObjectRelease(fb);
         return 0;
+    }
+
+    /* Say what the address rests on, immediately before acting on it. Boot
+     * 273 wrote into the trace buffer because the selector was wrong, and
+     * there is still no byte-level confirmation of the right one. */
+    if (!u32(fb, "RBFBDmubSigOk")) {
+        printf("\nNOTE: the mailbox is identified by the LAYOUT (six exact CW\n"
+               "matches) and not by its contents, which read empty. That is\n"
+               "the best evidence available and it is not proof.\n");
     }
 
     NSDictionary *d;

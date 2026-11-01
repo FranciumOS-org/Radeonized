@@ -201,6 +201,7 @@ public:
     uint32_t dmubWinRegs[7*4]={0};
     uint32_t dmubWinScan[7*4]={0};
     int      dmubWin=-1;
+    uint32_t dmubLayout=0, dmubSigOk=0;
     uint32_t dmubAddrKind=0, dmubCap=0;
     uint64_t dmubMem=0;
     uint64_t dmubRingPA=0, dmubRingOff=0;
