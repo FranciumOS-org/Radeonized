@@ -64,6 +64,8 @@ void RBAMDFramebuffer::dmubInit(void)
 {
     dmubLocRefuse = RB_DMUB_LOC_NO_MAP;
     dmubWin = -1;
+    dmubLayout = 0;
+    dmubSigOk = 0;
     dmubAddrKind = RB_DMUB_ADDR_NONE;
     dmubMem = 0;
     dmubRingPA = 0;
@@ -190,7 +192,6 @@ bool RBAMDFramebuffer::dmubSetup(void)
 {
     struct rb_dmub_loc loc;
     struct rb_dmub_loc_out out, best;
-    uint32_t bestRun = 0;
 
     if (!blReady || !blRegs) {
         dmubLocRefuse = RB_DMUB_LOC_NO_MAP;
@@ -224,6 +225,20 @@ bool RBAMDFramebuffer::dmubSetup(void)
     dmubFb[0] = loc.fb_location;
     dmubFb[1] = loc.fb_offset;
 
+    /* THE SELECTOR IS THE LAYOUT, not the contents. Boot 273 read six of the
+     * seven windows exactly where dmub_srv.c:81-86 puts them (after the
+     * 29-bit truncation), which identifies this firmware's layout as Linux's
+     * and therefore CW4 as the mailbox. 2zo's byte signature chose CW5 -
+     * DMUB_WINDOW_5_TRACEBUFF - because a trace buffer is dense records and
+     * so passes any weak "looks like a header" test, and that mistake put 64
+     * bytes into the trace buffer. */
+    dmubLayout = rb_dmub_layout_score(&loc);
+    const int want = rb_dmub_mailbox_win(&loc);
+
+    /* Every enabled window is still resolved and READ, because the table is
+     * the evidence and a chosen window published alone says nothing (rule
+     * 14) - and because the per-window runs are what showed CW5 was dense
+     * and CW4 was empty. Only the one the layout names is kept. */
     best.refuse = RB_DMUB_LOC_NO_WINDOW;
     best.win = -1;
 
@@ -254,17 +269,10 @@ bool RBAMDFramebuffer::dmubSetup(void)
         dmubWinScan[i * 4u + 2u] = bad;
         dmubWinScan[i * 4u + 3u] = abm;
 
-        /* The longest clean run wins. A tie keeps the first, and nothing is
-         * chosen at all unless the signature passes - so a boot where no
-         * window looks like a ring maps nothing and sends nothing, which is
-         * the state boot 272 should have produced and did. */
-        if (mem && rb_dmub_sig_ok(run, bad) && run > bestRun) {
-            if (dmubRingMap) { dmubRingMap->release(); }
-            if (dmubRingMD)  { dmubRingMD->release(); }
+        if (mem && (int)i == want) {
             dmubRingMap = map;
             dmubRingMD = md;
             dmubRoute = route;
-            bestRun = run;
             best = out;
             best.refuse = RB_DMUB_LOC_OK;
             continue;                  /* keep this mapping */
@@ -272,6 +280,20 @@ bool RBAMDFramebuffer::dmubSetup(void)
 
         map->release();
         md->release();
+    }
+
+    /* The signature is now an observation, published beside the choice and
+     * never consulted for it. Boot 273: CW4's 8192 bytes read ALL ZEROS with
+     * the registers saying WPTR == RPTR == 2368, so "37 commands sit there"
+     * was an inference from the pointer and never from memory. There is
+     * nothing to recognise, which is precisely why the selector must not
+     * depend on recognising it. */
+    dmubSigOk = 0;
+    if (best.win >= 0) {
+        const uint32_t run = dmubWinScan[(unsigned)best.win * 4u + 1u];
+        const uint32_t bad = dmubWinScan[(unsigned)best.win * 4u + 2u];
+        const uint32_t slots = best.span / RB_DMUB_CMD_SIZE;
+        dmubSigOk = rb_dmub_sig_ok(run, bad, slots) ? 1u : 0u;
     }
 
     dmubLocRefuse = (uint32_t)best.refuse;
@@ -282,9 +304,10 @@ bool RBAMDFramebuffer::dmubSetup(void)
         if (dmubRingMD)  { dmubRingMD->release();  dmubRingMD = nullptr; }
         dmubRoute = 0;
         dmubLocRefuse = RB_DMUB_LOC_NO_WINDOW;
-        LOG("DMUB: no window carries a command signature (inbox %#x/%#x, "
+        LOG("DMUB: layout score %u of %u, no mailbox chosen (inbox %#x/%#x, "
             "fb %#x/%#x) - nothing mapped, nothing will be sent",
-            loc.inbox_base, loc.inbox_size, loc.fb_location, loc.fb_offset);
+            dmubLayout, RB_DMUB_LAYOUT_CHECKED, loc.inbox_base,
+            loc.inbox_size, loc.fb_location, loc.fb_offset);
         return false;
     }
 
@@ -295,14 +318,15 @@ bool RBAMDFramebuffer::dmubSetup(void)
     dmubCap = best.span;
     dmubRing = reinterpret_cast<volatile uint8_t *>(dmubRingMap->getVirtualAddress());
     dmubScanSlots = dmubCap / RB_DMUB_CMD_SIZE;
-    dmubScanPlaus = bestRun;
+    dmubScanPlaus = dmubWinScan[(unsigned)dmubWin * 4u + 1u];
     dmubScanAbm = dmubWinScan[(unsigned)dmubWin * 4u + 3u];
     dmubScanBytes = dmubCap;
 
-    LOG("DMUB mailbox: window %d, mem %#llx (kind %u), pa %#llx (fb+%#llx), "
-        "%u bytes, route %u, %u-command signature",
-        dmubWin, dmubMem, dmubAddrKind, dmubRingPA, dmubRingOff, dmubCap,
-        dmubRoute, bestRun);
+    LOG("DMUB mailbox: CW%d by layout %u/%u, mem %#llx (kind %u), pa %#llx "
+        "(fb+%#llx), %u bytes, route %u, signature %s",
+        dmubWin, dmubLayout, RB_DMUB_LAYOUT_CHECKED, dmubMem, dmubAddrKind,
+        dmubRingPA, dmubRingOff, dmubCap, dmubRoute,
+        dmubSigOk ? "present" : "ABSENT (the ring reads empty)");
     return true;
 }
 
@@ -453,6 +477,10 @@ void RBAMDFramebuffer::dmubPublish(void)
      * the reason the KIND is published: 2zn predicted a system-physical
      * address and the firmware had written an MC one. */
     setProperty("RBFBDmubWin", (uint64_t)(int64_t)dmubWin, 32);
+    /* The selector, and the observation that is NOT the selector. */
+    setProperty("RBFBDmubLayout", (uint64_t)dmubLayout, 32);
+    setProperty("RBFBDmubLayoutOf", (uint64_t)RB_DMUB_LAYOUT_CHECKED, 32);
+    setProperty("RBFBDmubSigOk", (uint64_t)dmubSigOk, 32);
     setProperty("RBFBDmubAddrKind", (uint64_t)dmubAddrKind, 32);
     setProperty("RBFBDmubMem", dmubMem, 64);
     setProperty("RBFBDmubRoute", (uint64_t)dmubRoute, 32);

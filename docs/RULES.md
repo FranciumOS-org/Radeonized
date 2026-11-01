@@ -163,39 +163,55 @@ table and refuses to install one that does not match the running kernel;
   wrong too: CW4_OFFSET reads **0xf4_ffe40000**, an MC address, because this
   machine's FIRMWARE wrote it and not Linux - so `mc2pa()` does apply and
   the ring is at system-physical **0x8_7FE4_0000**.
-  **2zo's fix is to search instead of name.** `rb_dmub_win_locate()`
-  resolves one window from its own registers (span from base/top under the
-  29-bit mask; the offset classified MC-or-system-physical **by range**, the
-  two ranges disjoint by construction so it is a measurement), and the kext
-  maps **every** enabled window that resolves, reads its memory, and counts
-  the leading run of plausible `dmub_cmd_header`s. **The window carrying the
-  firmware's own bring-up commands IS the mailbox** - boot 271 says that run
-  is **37**. `rb_dmub_sig_ok(run, bad)` is the decision: `run >= 2 &&
-  bad == 0`, two being the floor because the plausibility test is
-  deliberately weak and one lucky word is ~1 in 5. No window passing means
-  nothing mapped and nothing sent. All seven windows and the per-window
-  (resolve, run, bad, abm) are published whole (`RBFBDmubWindows`,
-  `RBFBDmubWinScan`) - the TABLE is what refuted 2zn, and a search that
-  published only its winner would have had nothing to say.
+  **2zp settles it on boot 273: the LAYOUT is the identification.** All seven
+  windows read, and **six sit exactly where `dmub_srv.c:81-86` puts them**
+  after the 29-bit truncation (0x60/61/63/64/65/66000000 -> 0x00/01/03/04/05/
+  06000000); CW2 is disabled, which is correct since `dmub_srv.c:873` bases it
+  inside CW0. Six exact matches of a published layout, read off the machine -
+  rule 18's answer to "two numbers agreeing". **CW4 is the mailbox**, at MC
+  `0xf4_ffe40000` -> system-physical **0x8_7FE4_0000**. `rb_dmub_mailbox_win()`
+  returns it only when the **whole** layout corroborates; one window out of
+  place and nothing is chosen.
+  **2zo's byte signature chose CW5, which is `DMUB_WINDOW_5_TRACEBUFF`** -
+  128 plausible slots of 128 with no empties, because a trace buffer is dense
+  records and so passes any weak "looks like a header" test, while the real
+  mailbox read **all zeros**. **So 64 bytes went into the trace buffer** at
+  0x8_7FE5_0000 + 2368 - diagnostic-only, but the first wrong hardware write
+  on this surface. The lesson is not "tighten the test": a weak test plus a
+  permissive selector finds the densest data in the search space, so **the
+  selector must be what is actually known**. The signature survives as a
+  published observation (`RBFBDmubSigOk`, now requiring an empty tail) and is
+  never consulted for the choice.
+  **The ack was a no-op, and this is the sharpest rule-13 case in the
+  journal.** `SendsOk` 1, `Acks` 1, RPTR 2368 -> 2432 - but the command went
+  into CW5 while the WPTR written was the REAL inbox register, so the DMCUB
+  consumed the real ring's zeroed slot (`DMUB_CMD__NULL`). **An ack says the
+  microcontroller consumed the slot our WPTR named, and nothing about what we
+  wrote unless both went to the same memory.**
+  **The "37 commands at bring-up" belief is withdrawn**: CW4's 8192 bytes are
+  all zeros while the registers say `WPTR == RPTR == 2368`, so it was always
+  an inference from the POINTER. There are no bytes to recognise.
+  **And rule 16 was paid twice in one milestone, the second time by an
+  instrument added to catch a reading problem.** A 32-bit `OSNumber` with bit
+  31 set returns NEGATIVE through `CFNumberGetValue`, so
+  `DMCUB_INBOX1_BASE_ADDRESS` 0x80000000 read as -2147483648: boot 272's
+  `0xffffffff8400ffff` was the tool, not the register, and boot 273's version
+  guard then tested `num(...) < 0`, declared a correct current kext "older"
+  and **suppressed a successful locate**. Fixed structurally: `u32()` masks
+  every 32-bit field and the version check tests whether the property
+  **exists**. **Never test a reading's sign to decide whether a key is
+  present.**
+  Still unexplained and published so it cannot be forgotten:
+  `DMCUB_INBOX1_BASE_ADDRESS` reads **0x80000000**, neither 0x64000000 nor its
+  truncation. Nothing locates from it.
   Two commands, **separately triggered**: `SET_BACKLIGHT` alone first,
-  `SET_PIPE` only if the panel does not move - `dcn21_set_backlight_level`
-  binds ABM to the pipe first, but the firmware's bring-up may already have,
-  and sending both would make a moving panel ambiguous between them (rule 45
-  again). `dmub_srv.c:1037-1041` is the whole push: 64 bytes at WPTR, read
-  every byte back (`dmub_rb_flush_pending`'s entire body is a write-combine
-  flush), write WPTR - no interrupt, no doorbell register. **RPTR reaching
-  our WPTR is the only acknowledgement** and it is counted (`RBFBDmubAcks` /
-  `AckTimeouts`): the microcontroller CONSUMED the command, which is not the
-  panel moving but does separate "never arrived" from "arrived and did
-  nothing". **The slider is deliberately not wired to it** -
-  `-rbgpufbdmubbl` arms it and `build/out/dmubbl` is the only trigger, and
-  the tool **refuses to print a reading against an older kext** (absent keys
-  read back as -1, and -1 as 32-bit hex is indistinguishable from a
-  register - boot 272 printed exactly that). 77 hosttest assertions off boot
-  272's own registers, verified failing in both directions.
-  **What boot 272 proved works:** the locate refused, nothing was mapped,
-  both sends returned `kIOReturnNotPermitted` with `last refusal 2`, and no
-  byte reached any ring. 2zn's staging is why a wrong design cost one boot.
+  `SET_PIPE` only if the panel does not move (rule 45 again - sending both
+  would make a moving panel ambiguous). `dmub_srv.c:1037-1041` is the whole
+  push: 64 bytes at WPTR, read every byte back, write WPTR - no interrupt, no
+  doorbell. `-rbgpufbdmubbl` arms it, `build/out/dmubbl` is the only trigger,
+  and it now says before each send that the address rests on the layout
+  agreement and not on its contents. 79 hosttest assertions off boot 273's own
+  window table, verified failing in both directions.
   **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty

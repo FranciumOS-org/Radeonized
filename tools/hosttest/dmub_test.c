@@ -24,32 +24,40 @@
     failures += !(cond); \
 } while (0)
 
-/* Boot 272's OWN CW4 registers, measured, and boot 271's inbox pair.
+/* BOOT 273's OWN WINDOW TABLE, all seven, measured - plus boot 271's inbox
+ * pair and the carve-out registers. Nothing here is constructed.
  *
- * CW4 base 0x04000000, top 0x8400ffff (enable set, address 0x0400ffff) and
- * offset 0xf4_ffe40000 are what the machine printed - and they are why this
- * file was rewritten: CW4 is a 64 KB window somewhere else entirely, so the
- * inbox at DMCUB-side 0x80000000 is mapped by a DIFFERENT window, and the
- * offset is an MC address with no translation applied. WHICH window covers
- * it is still unknown, so the covering window below is CONSTRUCTED and
- * nothing about window 3 may be quoted as a hardware fact (rule 17). */
-#define B272_CW4_BASE  0x04000000u
-#define B272_CW4_TOP   0x8400ffffu
-#define B272_CW4_OFFLO 0xffe40000u
-#define B272_CW4_OFFHI 0xf4u
-
-static void fill_measured(struct rb_dmub_loc *l)
+ * Six of the seven sit exactly where dmub_srv.c:81-86 puts them after the
+ * 29-bit truncation, which is the identification; CW2 is disabled, which is
+ * correct because dmub_srv.c:873 bases it inside CW0. The per-window reads
+ * from the same boot are in the comments: CW5 scored 128 plausible slots of
+ * 128 with no empties (it is DMUB_WINDOW_5_TRACEBUFF) and CW4 - the real
+ * mailbox - read ALL ZEROS. */
+static void fill_boot273(struct rb_dmub_loc *l)
 {
     memset(l, 0, sizeof(*l));
-    l->inbox_base  = 0x80000000u;    /* measured, boot 271 */
-    l->inbox_size  = 8192u;          /* measured, boot 271 */
-    l->fb_location = 0xf400u;        /* measured: MC base 0xF4_0000_0000 */
-    l->fb_offset   = 0x780u;         /* measured: sysphys 0x7_8000_0000 */
-    l->cw[4].base   = B272_CW4_BASE; /* measured, boot 272 */
-    l->cw[4].top    = B272_CW4_TOP;
-    l->cw[4].off_lo = B272_CW4_OFFLO;
-    l->cw[4].off_hi = B272_CW4_OFFHI;
+    l->inbox_base  = 0x80000000u;    /* boot 271, and still unexplained */
+    l->inbox_size  = 8192u;
+    l->fb_location = 0xf400u;        /* MC base 0xF4_0000_0000 */
+    l->fb_offset   = 0x780u;         /* sysphys 0x7_8000_0000 */
+
+    /* base, top (enable at 31), off_lo, off_hi */
+    l->cw[0].base = 0x00000000u; l->cw[0].top = 0x8002d08fu;
+    l->cw[0].off_lo = 0x7ffb0000u; l->cw[0].off_hi = 0x8u;   /* run 0, bad 98 */
+    l->cw[1].base = 0x01000000u; l->cw[1].top = 0x810d2f6fu;
+    l->cw[1].off_lo = 0x7ffdd100u; l->cw[1].off_hi = 0x8u;   /* run 17, bad 111 */
+    /* CW2 disabled, all zero */
+    l->cw[3].base = 0x03000000u; l->cw[3].top = 0x8301ffffu;
+    l->cw[3].off_lo = 0xffe20000u; l->cw[3].off_hi = 0xf4u;  /* run 1, bad 67 */
+    l->cw[4].base = 0x04000000u; l->cw[4].top = 0x8400ffffu;
+    l->cw[4].off_lo = 0xffe40000u; l->cw[4].off_hi = 0xf4u;  /* ALL ZEROS */
+    l->cw[5].base = 0x05000000u; l->cw[5].top = 0x8500ffffu;
+    l->cw[5].off_lo = 0xffe50000u; l->cw[5].off_hi = 0xf4u;  /* run 128, bad 0 */
+    l->cw[6].base = 0x06000000u; l->cw[6].top = 0x8600ffffu;
+    l->cw[6].off_lo = 0xffe60000u; l->cw[6].off_hi = 0xf4u;  /* run 0, bad 7 */
 }
+
+#define B272_CW4_BASE  0x04000000u
 
 int dmub_tests(void);
 
@@ -71,156 +79,163 @@ int dmub_tests(void)
           "boot 271's WPTR of 2368 is 37 whole commands, which is why the "
           "ring is believed to hold 37 of the firmware's own");
 
-    /* --- THE REGRESSION TESTS. Boot 272's registers, nothing constructed.
-     *
-     * Both errors this milestone made are nailed down here: the constant
-     * that was never checked against its header, and the convention that
-     * named a window instead of looking for one. --- */
+    /* --- THE IDENTIFICATION. Boot 273's table, nothing constructed. --- */
     CHECK(RB_DMUB_CW4_BASE == 0x64000000u,
           "DMUB_CW4_BASE is 0x64000000 (dmub_srv.c:84) - 2zn had 0x80000000, "
           "copied from the register it was meant to be checked against, and "
-          "the old hosttest asserted the two were equal, which compared a "
-          "reading with itself");
+          "asserted the two were equal, comparing a reading with itself");
     CHECK(RB_DMUB_CW_ADDR_MASK == 0x1fffffffu,
           "a window address field is 29 bits (sh_mask.h:5881), so an address "
           "is written TRUNCATED");
-    CHECK((RB_DMUB_CW4_BASE & RB_DMUB_CW_ADDR_MASK) == B272_CW4_BASE,
-          "and 0x64000000 truncated IS boot 272's CW4_BASE of 0x04000000 - "
-          "so CW4 really is the mailbox window, 64 KB of it");
 
-    fill_measured(&l);
-    CHECK(rb_dmub_win_enabled(&l.cw[4]),
-          "boot 272's CW4 is enabled");
-    CHECK(rb_dmub_win_top(&l.cw[4]) == 0x0400ffffu,
-          "its top address is 0x0400ffff once the enable bit at 31 is masked "
-          "off with the 29-bit field mask");
-    CHECK(rb_dmub_win_span(&l.cw[4]) == 8192u,
-          "its 64 KB window yields an 8192-byte candidate ring - Linux puts "
-          "the inbox in the first DMUB_RB_SIZE of the mailbox");
-    CHECK(rb_dmub_win_off(&l.cw[4]) == 0xf4ffe40000ull,
-          "and its offset is 0xf4_ffe40000, an MC address - so this "
-          "machine's FIRMWARE did not apply dmub_dcn31.c's translation");
+    fill_boot273(&l);
+    CHECK(rb_dmub_layout_score(&l) == 6u,
+          "boot 273 puts SIX of the seven windows exactly where dmub_srv.c "
+          "does - that is the identification, and rule 18's answer to two "
+          "numbers agreeing");
+    CHECK(rb_dmub_mailbox_win(&l) == 4,
+          "so the mailbox is CW4, by the layout rather than by a guess about "
+          "its contents");
+    CHECK(!rb_dmub_win_enabled(&l.cw[2]),
+          "CW2 is disabled, which is correct - dmub_srv.c:873 bases it inside "
+          "CW0 rather than at a constant of its own");
 
+    /* Each of the six, individually, so a future firmware that moves one is
+     * a named failure rather than a score that quietly drops to five. */
+    {
+        unsigned i;
+        int all = 1;
+        for (i = 0; i < RB_DMUB_CW_COUNT; i++) {
+            if (i == 2u) { continue; }
+            if ((l.cw[i].base & RB_DMUB_CW_ADDR_MASK) !=
+                (rb_dmub_cw_base_expected(i) & RB_DMUB_CW_ADDR_MASK)) {
+                all = 0;
+            }
+        }
+        CHECK(all, "and every one of the six matches its own constant, not "
+              "just six of them in aggregate");
+    }
+
+    /* --- THE 2zo REGRESSION: the trace buffer must never be chosen. --- */
+    CHECK(rb_dmub_mailbox_win(&l) != 5,
+          "CW5 is NOT chosen - it is DMUB_WINDOW_5_TRACEBUFF, and 2zo's byte "
+          "signature picked it, which is how 64 bytes went into the trace "
+          "buffer");
+    CHECK(!rb_dmub_sig_ok(128u, 0u, 128u),
+          "and boot 273's actual CW5 reading - 128 plausible slots of 128 "
+          "with no empties - is REFUSED by the signature now: a ring written "
+          "37 times has 91 empty slots after the run, dense data has none");
+    CHECK(rb_dmub_sig_ok(37u, 0u, 128u),
+          "while 37 of 128 with a clean tail is what a ring should look like");
+    CHECK(!rb_dmub_sig_ok(0u, 0u, 128u),
+          "boot 273's CW4 reading - all zeros - carries no signature either, "
+          "which is why the signature is an observation and NOT the selector");
+    CHECK(!rb_dmub_sig_ok(17u, 111u, 128u),
+          "and CW1's 17-run with 111 broken slots is not a ring");
+
+    /* Degrade the layout and nothing is chosen at all. */
+    fill_boot273(&l);
+    l.cw[5].base = 0x07000000u;
+    CHECK(rb_dmub_layout_score(&l) == 5u && rb_dmub_mailbox_win(&l) == -1,
+          "ONE window out of place and no mailbox is chosen - a partial match "
+          "is the 2zn error again, so it is refused rather than scored");
+
+    fill_boot273(&l);
+    l.cw[4].top &= ~RB_DMUB_CW_ENABLE;
+    CHECK(rb_dmub_mailbox_win(&l) == -1,
+          "and a disabled CW4 is no mailbox, whatever the rest of the layout "
+          "says");
+
+    /* --- CW4 resolved, off boot 273's own registers --- */
+    fill_boot273(&l);
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_OK,
-          "boot 272's own CW4 resolves to mappable memory");
-    CHECK(o.win == 4 && o.addr_kind == RB_DMUB_ADDR_MC,
-          "...classified as MC by RANGE, not assumed either way");
+          "boot 273's CW4 resolves to mappable memory");
+    CHECK(o.addr_kind == RB_DMUB_ADDR_MC,
+          "...classified as MC by RANGE - this machine's FIRMWARE wrote that "
+          "register and did not apply dmub_dcn31.c's translation");
     CHECK(o.dmub_mem == 0xf4ffe40000ull && o.span == 8192u,
-          "...carrying the address the register holds and the span to scan");
+          "...at MC 0xf4_ffe40000, 8192 bytes of its 64 KB window");
     CHECK(o.ring_pa == 0x87fe40000ull,
-          "...and mc2pa() gives system-physical 0x8_7FE4_0000: "
-          "mem - 0xF4_0000_0000 + 0x7_8000_0000");
+          "...and mc2pa() gives system-physical 0x8_7FE4_0000");
     CHECK(rb_dmub_ring_fb_off(&l, &o) == 0xffe40000ull,
-          "...at 0xffe40000 into the carve-out, which 2pr's BAR0-offset-0 "
+          "...0xffe40000 into the carve-out, which 2pr's BAR0-offset-0 "
           "finding makes its BAR0 offset too");
+
+    /* The window 2zo actually wrote into, so the wrong answer is on record
+     * as a value and not only as prose. */
+    CHECK(rb_dmub_win_locate(&l, 5, &o) == RB_DMUB_LOC_OK &&
+          o.ring_pa == 0x87fe50000ull,
+          "CW5 resolves to 0x8_7FE5_0000 - the trace buffer 2zo put 64 bytes "
+          "into, one 64 KB window above the real mailbox");
 
     CHECK(l.inbox_base != RB_DMUB_CW4_BASE &&
           l.inbox_base != (RB_DMUB_CW4_BASE & RB_DMUB_CW_ADDR_MASK),
           "DMCUB_INBOX1_BASE_ADDRESS reads 0x80000000, which is NEITHER "
-          "0x64000000 nor its truncation - an open finding, and the reason "
-          "nothing locates from that register any more");
+          "0x64000000 nor its truncation - still unexplained, and nothing "
+          "locates from it");
 
-    /* Every other window on boot 272 was zero, so none of them resolves -
-     * and a search that found a candidate in unprogrammed registers would be
-     * the error this whole rewrite exists to prevent. */
-    {
-        int others = 0;
-        unsigned i;
-        for (i = 0; i < RB_DMUB_CW_COUNT; i++) {
-            if (i == 4u) { continue; }
-            if (rb_dmub_win_locate(&l, i, &o) == RB_DMUB_LOC_OK) { others++; }
-        }
-        CHECK(others == 0,
-              "and no OTHER window on boot 272 resolves at all - zeroed "
-              "registers are not candidates");
-    }
-
-    /* --- the signature, which is now the whole decision --- */
-    CHECK(rb_dmub_sig_ok(37u, 0u),
-          "boot 271's 37 commands with nothing after them is a mailbox");
-    CHECK(rb_dmub_sig_ok(2u, 0u),
-          "two consecutive headers is the floor - one is ~1 in 5 by accident "
-          "at this test's strength, two at a 64-byte stride is ~1 in 25");
-    CHECK(!rb_dmub_sig_ok(1u, 0u),
-          "one header alone is not enough to call a window a ring");
-    CHECK(!rb_dmub_sig_ok(0u, 0u),
-          "an all-empty window is not a ring, and must not read as one just "
-          "because nothing contradicted it");
-    CHECK(!rb_dmub_sig_ok(37u, 1u),
-          "a single non-header, non-empty slot after the run disqualifies "
-          "it - a ring written once and never wrapped has none");
-
-    /* --- the resolve's refusals --- */
-    fill_measured(&l);
-    l.cw[4].top &= ~RB_DMUB_CW_ENABLE;
-    CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_NO_WINDOW,
-          "a window with the enable bit CLEAR is not mapped, whatever its "
-          "address says");
-
-    fill_measured(&l);
+    /* --- the resolve's refusals, on the real CW4 --- */
+    fill_boot273(&l);
     l.cw[4].off_lo = 0u; l.cw[4].off_hi = 0u;
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_NO_OFFSET,
           "an enabled window with a zero offset pair maps nowhere");
 
-    fill_measured(&l);
+    fill_boot273(&l);
     l.cw[4].off_lo = 0x8abc0000u; l.cw[4].off_hi = 0x7u;
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_OK &&
           o.addr_kind == RB_DMUB_ADDR_PA && o.ring_pa == 0x78abc0000ull,
           "an offset already inside the system-physical range is taken as "
-          "such and NOT translated a second time - dmub_dcn31.c's own "
-          "translation produces this, so a firmware update could start");
+          "such and NOT translated twice - dmub_dcn31.c's own translation "
+          "produces this, so a firmware update could start");
 
-    fill_measured(&l);
-    l.cw[4].off_lo = 0u; l.cw[4].off_hi = 0x1u;      /* 0x1_0000_0000 */
+    fill_boot273(&l);
+    l.cw[4].off_lo = 0u; l.cw[4].off_hi = 0x1u;
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_ADDR,
           "an address in neither range is refused - the two are disjoint "
           "precisely so this cannot be guessed at");
 
-    fill_measured(&l);
+    fill_boot273(&l);
     l.cw[4].off_lo = 0xffe40020u;
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_ALIGN,
           "a ring that is not 64-byte aligned is not this ring");
 
-    fill_measured(&l);
+    fill_boot273(&l);
     l.fb_offset = 0u;
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_FB,
-          "a zero FB_OFFSET gives no range to classify against, so the "
-          "resolve refuses instead of accepting everything");
-    fill_measured(&l);
+          "a zero FB_OFFSET gives no range to classify against");
+    fill_boot273(&l);
     l.fb_location = 0u;
     CHECK(rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_FB,
           "and a zero FB_LOCATION_BASE likewise");
 
-    fill_measured(&l);
+    fill_boot273(&l);
     CHECK(rb_dmub_win_locate(&l, RB_DMUB_CW_COUNT, &o) == RB_DMUB_LOC_NO_WINDOW,
           "an index past the last window is refused, not read");
+    CHECK(rb_dmub_win_locate(&l, 2, &o) == RB_DMUB_LOC_NO_WINDOW,
+          "and the disabled CW2 resolves to nothing");
 
-    fill_measured(&l);
-    l.cw[4].top = (l.cw[4].base & RB_DMUB_CW_ADDR_MASK) | RB_DMUB_CW_ENABLE;
-    CHECK(rb_dmub_win_span(&l.cw[4]) == 0u &&
-          rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_NO_WINDOW,
-          "a window whose top equals its base spans nothing, and does not "
-          "underflow into an enormous span");
-
-    /* A window larger than Linux's ring is clamped rather than scanned
-     * whole; a smaller one is taken at its own size. */
-    fill_measured(&l);
-    l.cw[4].top = ((l.cw[4].base & RB_DMUB_CW_ADDR_MASK) + 0xfffffu) |
-                  RB_DMUB_CW_ENABLE;
-    CHECK(rb_dmub_win_span(&l.cw[4]) == RB_DMUB_RB_SIZE,
-          "a 1 MB window still yields an 8192-byte candidate ring");
-    fill_measured(&l);
+    /* Spans, from the registers rather than from Linux's constant. */
+    fill_boot273(&l);
+    CHECK(rb_dmub_win_span(&l.cw[4]) == 8192u,
+          "CW4's 64 KB window yields an 8192-byte ring - Linux puts the inbox "
+          "in the first DMUB_RB_SIZE of the mailbox");
+    CHECK(rb_dmub_win_span(&l.cw[0]) == RB_DMUB_RB_SIZE,
+          "CW0's much larger window is clamped to the same 8192");
     l.cw[4].top = ((l.cw[4].base & RB_DMUB_CW_ADDR_MASK) + 0xfffu) |
                   RB_DMUB_CW_ENABLE;
     CHECK(rb_dmub_win_span(&l.cw[4]) == 4096u,
-          "and a 4 KB window yields 4096 - the REGISTERS supply the size, "
-          "not a constant copied out of Linux");
-    fill_measured(&l);
+          "and a 4 KB window yields 4096 - the REGISTERS supply the size");
     l.cw[4].top = ((l.cw[4].base & RB_DMUB_CW_ADDR_MASK) + 0x6fu) |
                   RB_DMUB_CW_ENABLE;
     CHECK(rb_dmub_win_span(&l.cw[4]) == 64u,
           "a 112-byte window is rounded DOWN to one whole command, so a "
           "partial slot is never scanned or written");
+    fill_boot273(&l);
+    l.cw[4].top = (l.cw[4].base & RB_DMUB_CW_ADDR_MASK) | RB_DMUB_CW_ENABLE;
+    CHECK(rb_dmub_win_span(&l.cw[4]) == 0u &&
+          rb_dmub_win_locate(&l, 4, &o) == RB_DMUB_LOC_NO_WINDOW,
+          "a window whose top equals its base spans nothing, and does not "
+          "underflow into an enormous span");
 
     /* --- ring arithmetic --- */
     CHECK(rb_dmub_next_wptr(2368u, 8192u) == 2432u,

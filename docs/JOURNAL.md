@@ -52337,3 +52337,98 @@ directions: weakening `rb_dmub_sig_ok` fails 3, widening the address mask to
 brightness is no closer than 2zl left it — what has changed is that the route
 is now looked for instead of assumed, and that the two ways 2zn could be
 wrong are both assertions.
+
+## 2zp — boot 273: the layout IS the identification, and 2zo's signature wrote into the trace buffer
+
+**What boot 273 read.** Build `5DC87350` loaded (`kextstat` confirms), locate
+**succeeded**, and all seven region-3 windows came back. Decoded from
+`RBFBDmubWindows` / `RBFBDmubWinScan`:
+
+| CW | base | top | offset | enabled | run | bad |
+|----|------|-----|--------|---------|-----|-----|
+| 0 | 0x00000000 | 0x0002d08f | 0x8_7ffb0000 | Y | 0 | 98 |
+| 1 | 0x01000000 | 0x010d2f6f | 0x8_7ffdd100 | Y | 17 | 111 |
+| 2 | 0x00000000 | 0x00000000 | 0 | **N** | - | - |
+| 3 | 0x03000000 | 0x0301ffff | 0xf4_ffe20000 | Y | 1 | 67 |
+| 4 | 0x04000000 | 0x0400ffff | 0xf4_ffe40000 | Y | **0** | **0** |
+| 5 | 0x05000000 | 0x0500ffff | 0xf4_ffe50000 | Y | **128** | **0** |
+| 6 | 0x06000000 | 0x0600ffff | 0xf4_ffe60000 | Y | 0 | 7 |
+
+**SIX OF THE SEVEN SIT EXACTLY WHERE `dmub_srv.c:81-86` PUTS THEM**, after the
+29-bit truncation: 0x60000000 / 0x61000000 / 0x63000000 / 0x64000000 /
+0x65000000 / 0x66000000 truncate to precisely the six bases read. CW2 is
+disabled, which is also right — `dmub_srv.c:873` bases it inside CW0 rather
+than at a constant of its own. **That is the identification, and it is what
+2zn should have had**: rule 18 says two numbers agreeing to one figure is not
+an identification, and this is six exact matches of a published layout read
+off the machine. **CW4 is the mailbox. `dmub_srv.c` was right all along** —
+2zn's error was the constant (0x80000000 for 0x64000000) and 2zo's was
+believing a byte signature could do better.
+
+**2zo's signature chose CW5, which is `DMUB_WINDOW_5_TRACEBUFF.** 128
+plausible slots of 128 with zero empties, `abm` 0, and `RBFBDmubRingDump` is
+visibly a record table full of kernel pointers. A trace buffer is a dense
+array of records and therefore **the one structure guaranteed to pass a weak
+"looks like a header" test**. The real mailbox, CW4, scored run 0 / bad 0 —
+all zeros — so the selector preferred the densest data in the search space
+over the right answer, which is what a permissive selector plus a weak test
+will always do. The lesson is not "tighten the test": it is that **the
+selector must be the thing that is actually known**, and the layout is known.
+
+**CONSEQUENCE: 64 bytes were written into the DMCUB's trace buffer** at
+system-physical `0x8_7FE5_0000 + 2368`. A trace buffer is diagnostic-only, so
+the practical cost is a corrupted trace record, but it was a real write to the
+wrong place and 2zo's design is what permitted it. Recorded as the first wrong
+hardware write this project has made on the DMUB surface.
+
+**And the ack was not what it looked like.** `SendsOk` 1, `Acks` 1,
+`AckTimeouts` 0, `SendWptr` 0x980, with `RBFBDmubRptr` 2432 and `Wptr` 2432
+against boot 271's 2368 — RPTR followed WPTR, so something was consumed. But
+the command went into CW5 while the WPTR written was the **real** inbox
+register, so the DMCUB read the real ring at offset 2368, which is **zeroed**,
+i.e. `DMUB_CMD__NULL`. **It acked a no-op.** An ack means the microcontroller
+consumed the slot our WPTR pointed at; it says nothing about what we wrote
+unless the write went to the same memory. Necessary, nowhere near sufficient —
+and a cleaner illustration of rule 13 on a hardware handshake than anything
+designed on purpose.
+
+**The signature's premise is dead.** CW4's 8192 bytes read **all zeros** while
+the registers said `WPTR == RPTR == 2368`. So "37 `dmub_rb_cmd`s sit there
+from bring-up", carried from 2zl through 2zn and 2zo, was always an inference
+from the **pointer** and never an observation of memory. There are no bytes
+there to recognise. `rb_dmub_sig_ok` survives as a published OBSERVATION
+(tightened to require an empty tail, `run < slots`, which refuses boot 273's
+CW5 reading outright) and is **never consulted for the choice**.
+
+**THE INSTRUMENT ERROR, and it cost the whole reading.** The rewritten
+`dmubbl` printed "the running kext is OLDER than this build" against a kext
+that was correct, current and had just succeeded. Its version guard tested
+`num(...) < 0`, and a 32-bit `OSNumber` with bit 31 set comes back through
+`CFNumberGetValue` as a **negative** long — `DMCUB_INBOX1_BASE_ADDRESS` of
+0x80000000 reads as -2147483648. **The same sign extension had already
+misled this milestone once**: boot 272's `0xffffffff8400ffff` and
+`0xf4_ffffffffffe40000` were the tool, not the registers. Rule 16 paid for
+twice in one milestone, the second time by an instrument added *to catch* a
+reading problem. Fixed properly: `u32()` masks every 32-bit field, and the
+version check tests whether the property **exists** rather than what its value
+looks like. Never test a reading's sign to decide whether a key is present.
+
+**What is still unexplained:** `DMCUB_INBOX1_BASE_ADDRESS` reads 0x80000000,
+which is neither 0x64000000 nor its truncation. Nothing locates from it; it is
+published and asserted so it cannot be quietly forgotten.
+
+**Hosttest: 79 assertions**, the locate half rebuilt on boot 273's own window
+table with nothing constructed — the six-way layout match individually and in
+aggregate, CW2 correctly disabled, `rb_dmub_mailbox_win` returning 4, **CW5
+explicitly never chosen**, boot 273's actual CW5 reading (128/128/0) refused
+by the tightened signature, CW4's all-zero reading refused too (so the
+observation cannot be mistaken for the selector), CW5 resolving to
+0x8_7FE5_0000 so the wrong answer is on record as a value, and one window
+moved out of place dropping the score to 5 and refusing everything. Verified
+failing in both directions.
+
+**Build `A74673A0`** (from `5DC87350`). Brightness is no closer than 2zl left
+it. What is closer: the mailbox address now rests on six independent
+agreements instead of one inherited constant, the trace buffer can no longer
+be selected, and the two instruments that lied — the sign-extended print and
+the version guard — are fixed.

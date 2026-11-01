@@ -227,6 +227,99 @@ static inline uint32_t rb_dmub_win_span(const struct rb_dmub_win *w)
  * guessed at. */
 #define RB_DMUB_FB_SPAN  (16ull * 1024ull * 1024ull * 1024ull)
 
+/* Linux's window layout, which is the identification.
+ *
+ * BOOT 273 READ ALL SEVEN AND SIX OF THEM MATCH, after the 29-bit
+ * truncation: CW0 0x00000000, CW1 0x01000000, CW3 0x03000000, CW4
+ * 0x04000000, CW5 0x05000000, CW6 0x06000000, against dmub_srv.c:81-86's
+ * 0x60000000 / 0x61000000 / 0x63000000 / 0x64000000 / 0x65000000 /
+ * 0x66000000. CW2 is disabled, which is also correct - dmub_srv.c:873 bases
+ * it inside CW0 rather than at a constant of its own.
+ *
+ * SIX AGREEMENTS IS THE IDENTIFICATION, and it is what 2zn should have had.
+ * Rule 18 says two numbers agreeing to one figure is not an identification;
+ * this is six exact matches of a published layout, read off the machine
+ * rather than assumed onto it. So CW4 is the mailbox - dmub_srv.c was right
+ * all along, and what was wrong in 2zn was the CONSTANT (0x80000000 for
+ * 0x64000000) and in 2zo the idea that a byte signature could do better.
+ *
+ * 2zo's signature chose CW5, which is DMUB_WINDOW_5_TRACEBUFF. A trace
+ * buffer is a dense table of records and therefore the ONE structure
+ * guaranteed to pass a weak `looks like a header` test - boot 273 scored it
+ * 128 of 128 slots with zero empties, where a command ring written 37 times
+ * must have 91 empty slots after the run. The lesson is not "tighten the
+ * test": it is that a weak test plus a permissive selector will find the
+ * densest data in the search space, so the selector must be the thing that
+ * is actually known. The layout is known. */
+#define RB_DMUB_LAYOUT_CHECKED  6u
+
+static inline uint32_t rb_dmub_cw_base_expected(unsigned idx)
+{
+    switch (idx) {
+    case 0: return RB_DMUB_CW0_BASE;
+    case 1: return RB_DMUB_CW1_BASE;
+    case 3: return RB_DMUB_CW3_BASE;
+    case 4: return RB_DMUB_CW4_BASE;
+    case 5: return RB_DMUB_CW5_BASE;
+    case 6: return RB_DMUB_CW6_BASE;
+    default: return 0u;        /* CW2 has no constant of its own */
+    }
+}
+
+/* How many of the six windows with a published base sit where Linux puts
+ * them. Enabled and matching counts; anything else does not. */
+static inline uint32_t rb_dmub_layout_score(const struct rb_dmub_loc *l)
+{
+    uint32_t n = 0;
+    unsigned i;
+
+    for (i = 0; i < RB_DMUB_CW_COUNT; i++) {
+        const uint32_t want = rb_dmub_cw_base_expected(i);
+        if (i == 2u) { continue; }      /* no constant of its own */
+        if (!rb_dmub_win_enabled(&l->cw[i])) { continue; }
+        if ((l->cw[i].base & RB_DMUB_CW_ADDR_MASK) ==
+            (want & RB_DMUB_CW_ADDR_MASK)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The mailbox window index, or -1.
+ *
+ * Nothing is chosen unless the WHOLE layout corroborates. One window
+ * matching a constant is the 2zn error again; six matching is a layout this
+ * firmware demonstrably follows, and then CW4 is the mailbox by that layout
+ * and not by a guess about its contents. */
+static inline int rb_dmub_mailbox_win(const struct rb_dmub_loc *l)
+{
+    if (rb_dmub_layout_score(l) < RB_DMUB_LAYOUT_CHECKED) { return -1; }
+    if (!rb_dmub_win_enabled(&l->cw[4])) { return -1; }
+    if ((l->cw[4].base & RB_DMUB_CW_ADDR_MASK) !=
+        (RB_DMUB_CW4_BASE & RB_DMUB_CW_ADDR_MASK)) { return -1; }
+    return 4;
+}
+
+/* What a command ring's memory should look like, kept as an OBSERVATION and
+ * no longer as the selector.
+ *
+ * It is still worth computing and publishing, because it is the only thing
+ * that could ever confirm the address at byte level - but boot 273 showed
+ * CW4's 8192 bytes read ALL ZEROS while the registers said WPTR == RPTR ==
+ * 2368, so the "37 commands sit at bring-up" belief was an inference from
+ * the POINTER and never from memory. There are no bytes there to recognise,
+ * which is exactly why the selector cannot depend on them.
+ *
+ * A ring that does hold commands has a leading run followed by empty slots,
+ * so `run < slots` is required: a window with no empty tail at all is dense
+ * data, which is what the trace buffer was. */
+static inline int rb_dmub_sig_ok(uint32_t run, uint32_t bad, uint32_t slots)
+{
+    if (run < 2u || bad != 0u) { return 0; }
+    if (slots == 0u || run >= slots) { return 0; }
+    return 1;
+}
+
 /* One window, resolved to memory we could map.
  *
  * WHY PER-WINDOW AND NOT "the mailbox is CW<n>". 2zn located the ring by
@@ -295,27 +388,6 @@ static inline int rb_dmub_win_locate(const struct rb_dmub_loc *l,
     o->ring_pa = pa;
     o->span = span;
     return RB_DMUB_LOC_OK;
-}
-
-/* Does a window's memory look like the DMCUB's inbox?
- *
- * This is the whole decision now, so it is stated once and tested. A window
- * qualifies when at least two consecutive 64-byte slots from its start read
- * as plausible dmub_cmd_headers and EVERY slot up to the last non-empty one
- * does - i.e. a contiguous run of commands followed by unwritten memory,
- * which is what a ring written once at bring-up and never wrapped looks
- * like. Boot 271 says that run should be 37 long.
- *
- * Two is the floor rather than one because a single plausible header is
- * cheap for arbitrary memory to produce: the test is only `type != 0` and
- * `payload_bytes <= 60`, which roughly one word in five satisfies by
- * accident. Two consecutive at a 64-byte stride is ~1 in 25, thirty-seven is
- * not reachable by accident, and requiring the run to be contiguous from
- * offset 0 is what rules out a window of unrelated data with a few lucky
- * words in it. */
-static inline int rb_dmub_sig_ok(uint32_t run, uint32_t bad)
-{
-    return run >= 2u && bad == 0u;
 }
 
 /* The ring's offset inside the carve-out, which is also its offset inside
