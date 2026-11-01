@@ -372,5 +372,63 @@ int main() {
         assert(f.vblRetunes==2);
         assert(f.vblPeriodNs==fast);
     }
+    /* 2zk: the hot-path publish throttle.
+     *
+     * Boot 270 measured publishVBLState() running 227 times a second from
+     * setInterruptState, ~110 setProperty calls each, on the thread that
+     * gates every frame. The throttle has to actually ELIDE the publish, so
+     * these assertions count the shim's setProperty calls rather than the
+     * throttle's own pubHotDone - asserting a counter the throttle itself
+     * bumps against the throttle would be 2u9's tautology, which left a
+     * suite that could not fail.
+     *
+     * The literals here are deliberate: 500 and 0 are written out rather
+     * than read from the member, so a future edit that changes the default
+     * stops agreeing with a number this test states independently. */
+    {
+        RBAMDFramebuffer f;
+        clockNs=1000000000ull;                  // 1 s in, away from zero
+        f.pubMs=500;
+        f.pubIntervalAbs=500ull*1000000ull;     // abs == ns in this harness
+        f.pubNextAbs=0; f.pubHotCalls=0; f.pubHotDone=0;
+        f.setPropertyCalls=0;
+
+        // First call in a quiet window publishes.
+        f.publishVBLStateHot();
+        assert(f.pubHotCalls==1);
+        assert(f.pubHotDone==1);
+        const uint64_t oneProps=f.setPropertyCalls;
+        assert(oneProps>50);                    // a publish is many properties
+
+        // The next 200 calls inside the interval publish NOTHING - not one
+        // setProperty - which is the whole point of the change.
+        for(unsigned i=0;i<200;i++) { f.publishVBLStateHot(); }
+        assert(f.pubHotCalls==201);
+        assert(f.pubHotDone==1);
+        assert(f.setPropertyCalls==oneProps);
+
+        // One nanosecond before the deadline is still inside it.
+        clockNs += 500ull*1000000ull - 1;
+        f.publishVBLStateHot();
+        assert(f.pubHotDone==1);
+        assert(f.setPropertyCalls==oneProps);
+
+        // And on the deadline it publishes again, once.
+        clockNs += 1;
+        f.publishVBLStateHot();
+        assert(f.pubHotDone==2);
+        assert(f.setPropertyCalls==2*oneProps);
+
+        // pubMs == 0 is the A side: every call publishes, and the clock is
+        // never consulted, so a stale pubNextAbs cannot suppress anything.
+        RBAMDFramebuffer g;
+        g.pubMs=0;
+        g.pubNextAbs=~0ull;                     // would block if it were read
+        g.pubHotCalls=0; g.pubHotDone=0; g.setPropertyCalls=0;
+        for(unsigned i=0;i<5;i++) { g.publishVBLStateHot(); }
+        assert(g.pubHotCalls==5);
+        assert(g.pubHotDone==5);
+        assert(g.setPropertyCalls>=5*50);
+    }
     puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune passed");
 }

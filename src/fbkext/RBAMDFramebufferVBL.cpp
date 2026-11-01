@@ -43,6 +43,25 @@ uint64_t RBAMDFramebuffer::foreignFires(void) const
     return n;
 }
 
+/* 2zk: publish from a frame-path call site, at most once per pubMs.
+ *
+ * The throttle is a deadline comparison and two counter bumps on the fast
+ * path - no clock conversion, because pubIntervalAbs is converted once at
+ * setup - against ~110 setProperty calls on the slow one. pubMs == 0 keeps
+ * the old unconditional behaviour so the A side of the comparison is one
+ * boot-arg away. */
+void RBAMDFramebuffer::publishVBLStateHot(void)
+{
+    pubHotCalls++;
+    if (pubMs != 0) {
+        const uint64_t now = mach_absolute_time();
+        if (now < pubNextAbs) { return; }
+        pubNextAbs = now + pubIntervalAbs;
+    }
+    pubHotDone++;
+    publishVBLState();
+}
+
 void RBAMDFramebuffer::publishVBLState(void)
 {
     static const char *const usedKeys[] = {
@@ -109,6 +128,11 @@ void RBAMDFramebuffer::publishVBLState(void)
     /* Rule 15: RBFBPollArmed is published UNCONDITIONALLY, so it is this
      * build's identity key whatever the boot-args say. Rule 14: the counts
      * are published whether or not they moved. */
+    /* 2zk: published unconditionally, so pubMs is this build's identity key
+     * and the two counters say what the throttle actually elided (rule 14). */
+    setProperty("RBFBPubMs", (uint64_t)pubMs, 32);
+    setProperty("RBFBPubHotCalls", pubHotCalls, 64);
+    setProperty("RBFBPubHotDone", pubHotDone, 64);
     setProperty("RBFBPollArmed", pollArmed);
     setProperty("RBFBPollReads", pollReads, 64);
     setProperty("RBFBPollChanges", pollChanges, 64);
@@ -604,7 +628,11 @@ IOReturn RBAMDFramebuffer::setInterruptState(void *interruptRef, UInt32 state)
                     "enables %u, fires %llu)", i, was ? "on" : "off",
                     interrupts[i].enabled ? "on" : "off", vblRunning,
                     vblEnables, vblFires);
-                publishVBLState();
+                /* 2zk: throttled. This is the 227/s site - Apple arms and
+                 * disarms the vblank twice per transaction, so an
+                 * unthrottled publish here is ~25 000 registry insertions a
+                 * second inside the call that gates every frame. */
+                publishVBLStateHot();
             }
             return kIOReturnSuccess;
         }

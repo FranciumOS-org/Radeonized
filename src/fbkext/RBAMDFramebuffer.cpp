@@ -442,6 +442,29 @@ bool RBAMDFramebuffer::start(IOService *provider)
             maxn > 0 && maxn <= 1000000) {
             hubpMax = (uint64_t)maxn;
         }
+        /* 2zk: rbgpufbpubms=<0..10000>, the hot-path publish throttle in
+         * milliseconds. Default 500, which is already four times slower than
+         * the 288-vblank periodic publish and so changes nothing anyone
+         * reads. 0 restores the unthrottled pre-2zk behaviour and is the A
+         * side of the comparison (rule 44). Rule 40: parsed as a binary int,
+         * and a value outside the range leaves the default rather than being
+         * clamped silently - RBFBPubMs publishes what took effect. */
+        pubMs = 500;
+        {
+            int pms = -1;
+            if (PE_parse_boot_argn("rbgpufbpubms", &pms, sizeof(pms)) &&
+                pms >= 0 && pms <= 10000) {
+                pubMs = (uint32_t)pms;
+            }
+        }
+        pubIntervalAbs = 0;
+        pubNextAbs = 0;
+        pubHotCalls = 0;
+        pubHotDone = 0;
+        if (pubMs != 0) {
+            nanoseconds_to_absolutetime((uint64_t)pubMs * 1000000ull,
+                                        &pubIntervalAbs);
+        }
         /* 2xm: -rbgpufbflippend defers a flip programmed over an armed,
          * unlatched one - the tearing mechanism boot 217 measured at 1.75 %
          * of flips. Rule 30: it neither prefixes nor is prefixed by
