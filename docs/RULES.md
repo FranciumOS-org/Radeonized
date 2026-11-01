@@ -119,8 +119,22 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness — DONE, four pieces, all measured on hardware.** The slider
-  moves the panel. **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
+- **Brightness — THE REGISTER WORK IS DONE AND THE PANEL DOES NOT FOLLOW IT
+  (2zj, boot 270).** The slider moves, tracks our value, and changes nothing.
+  **Nothing else writes `BL_PWM_CNTL`**: across a 40 s quiet window
+  `RBFBBlLiveReads` climbed 10472 → 20218 with `RBFBBlLiveDiffs` **25 → 25**
+  and the count pinned at what we wrote, so ABM in the DMCUB is eliminated and
+  the register sits enabled, fractional, period 4000, holding our duty cycle
+  with the panel unmoved. **This panel's backlight does not follow PWRSEQ0's
+  BL_PWM** — 2or's own falsification test, reached by a route a zero period
+  cannot detect. Apple has no competing path either: `AppleIntelPanelA` *is*
+  matched on PNLF but publishes `{"commit"={"reg"=0}}` and no `brightness` at
+  all, because it is the *Intel* backlight driver. Next candidate: **eDP AUX**,
+  the VESA DPCD backlight interface at 0x720-0x72F, which a 144 Hz eDP panel
+  normally uses and which needs no PWM pin; static read first. **What is
+  withdrawn is only the panel claim** (rule 45) — everything below is register
+  and parameter plumbing and all of it still stands.
+  **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
   cycle — note `BL_PWM_PERIOD` is **4000** with `BITCNT` **12** and
   `BL_PWM_FRACTIONAL_EN` SET, so the count field is fixed point with 4
   fractional bits and a count larger than the period is not a saturated PWM
@@ -142,7 +156,9 @@ table and refuses to install one that does not match the running kernel;
   are **declined and counted** (`RBFBBlParmSetsUsable` 2 - it is a real case).
   `'brig'` in the dictionary is stale by design: it belongs to
   `IOFramebufferParameterHandler`'s own dictionary, so do not read it as the
-  current level. `./build/out/blset <0..1>` still drives it from the shell.
+  current level. `./build/out/blset <0..1>` still drives it from the shell —
+  and note what it measures: the API return code, not the panel. That is how
+  2zj's gap survived four milestones.
 - **Refresh rate — the panel accepts 60 Hz, measured (2y5, boot 255).** Writing
   `OTG0_V_TOTAL_MIN`/`MAX` with the `MIN_SEL`/`MAX_SEL` bits of
   `V_TOTAL_CONTROL` changed the live raster from 143843 mHz to **60025** at
@@ -652,6 +668,21 @@ The numbering is cited all over the journal — **keep the numbers**.
     timers beating were the noise source, so the same change that bought no
     mean bought +-3.5 % where it had been +-20 %. [2ze, 2zg]
 
+45. **A chain of verified links is not a verified chain.** Brightness had
+    four milestones, every link checked - the arithmetic two independent ways,
+    the floor, the `AppleBacklightDisplay` match, the registry-collection
+    panic, the `linear-brightness` identification - and the **last** link, the
+    panel actually changing, was never instrumented. 2xs even stated the rule
+    it was about to break ("a no-op round trip proves the store executed and
+    nothing about the panel changing... which is why the effect needed its own
+    instrument") and then named `blset` as that instrument, which measures the
+    API return code. The only panel evidence in the whole chain was one
+    unprompted user sentence on boot 253, and boot 270 does not reproduce it.
+    When the deliverable is something a **human observes** - a panel, a sound,
+    a frame - that observation is a measurement like any other and needs its
+    own instrument, control and repeat. Ask which link in the chain the user
+    can actually see, and whether anything measures *that*. [2zj]
+
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
 keeps catching it: **say in the code what would have to be true for the reading
@@ -743,7 +774,15 @@ default-on and still wants `wdt=-1` in boot-args** — it is Apple's arg, we
 cannot set it, and without it a frozen boot panics at 120 s with no SSH window
 (2hh). Keep `wdt=-1`.
 
-**Tunables:** `rbgpuschedtickus=<500..1000000>` (**6944 is a measured
+**Tunables:** `rbgpufbpubms=<0..10000>` (2zk - the frame-path publish
+throttle in ms, default **500**; `0` restores the unthrottled pre-2zk
+behaviour and is the A side. `publishVBLState()` is ~110 `setProperty` calls
+and boot 270 measured it at **227/s** from `setInterruptState`, because Apple
+arms and disarms the vblank twice per transaction - ~25 000 registry
+insertions a second inside the call that gates every frame, and the one
+suspect in the frame path that six dead models of the ~73 sets/s ceiling never
+examined. Not yet claimed as the cause: rule 44 wants two boots per side),
+`rbgpuschedtickus=<500..1000000>` (**6944 is a measured
 interior optimum** - 2xn/2zb/2zc put 2000, 6944 and 13888 at 51.33, 74.6 and
 49.2 sets/s, so both directions cost a third of the frame rate; do not change
 it without reading 2zc), `rbgpuvblhz=<millihertz>` (20000-400000),
