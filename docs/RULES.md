@@ -129,10 +129,26 @@ table and refuses to install one that does not match the running kernel;
   BL_PWM** — 2or's own falsification test, reached by a route a zero period
   cannot detect. Apple has no competing path either: `AppleIntelPanelA` *is*
   matched on PNLF but publishes `{"commit"={"reg"=0}}` and no `brightness` at
-  all, because it is the *Intel* backlight driver. Next candidate: **eDP AUX**,
-  the VESA DPCD backlight interface at 0x720-0x72F, which a 144 Hz eDP panel
-  normally uses and which needs no PWM pin; static read first. **What is
-  withdrawn is only the panel claim** (rule 45) — everything below is register
+  all, because it is the *Intel* backlight driver. **2zl says why, and eDP AUX
+  was the wrong guess**: on DCN 3.1 the CPU never writes `BL_PWM_CNTL` to
+  change brightness. `dcn31_panel_cntl.c` has **no `.set_backlight_level`** —
+  every member of `dcn31_link_panel_cntl_funcs` is a DMUB round trip — and
+  `dcn21_set_backlight_level` takes the register-writing `dce110` path only
+  `if (res_pool->dmcu)`, the old DMCU this chip has not got, and otherwise ends
+  at `dmub_abm_set_backlight()`. The AUX control types exist but only under
+  `edp_set_backlight_level_nits`. **So 2xs transcribed `dce_panel_cntl.c`:
+  right offsets (2xp checked those), wrong METHOD for the version grouping**
+  (rule 46) — the register is real and writable, just not the live input to the
+  PWM, which is why nothing overwrote it. Apple has no path to borrow either:
+  `AMDRadeonX6000Framebuffer` has `initializeDmcuB` and two DMCUB version reads
+  and **no abm/backlight symbol at all** (3314 symbols as the control), and
+  `AMDSupport`'s `ATIPanel` route needs an `ATIController`, which never
+  instantiates here. **Next: 2zl samples
+  `DMCUB_INBOX1_{BASE,SIZE,WPTR,RPTR}` read-only.** If `RBFBDmubWptrMoves`
+  stays 0 the ring has no other producer and a DMUB ABM command becomes a route
+  worth designing — a new hardware-write surface, so the user's decision; if it
+  moves, that route is closed and only the ASUS EC via an SSDT the user chooses
+  to add is left. **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
   cycle — note `BL_PWM_PERIOD` is **4000** with `BITCNT` **12** and
@@ -690,6 +706,19 @@ The numbering is cited all over the journal — **keep the numbers**.
     a frame - that observation is a measurement like any other and needs its
     own instrument, control and repeat. Ask which link in the chain the user
     can actually see, and whether anything measures *that*. [2zj]
+
+46. **Check the version grouping of the METHOD, not just of the offsets.**
+    2xs transcribed `dce_panel_cntl.c`'s direct `BL_PWM_CNTL` write onto a
+    DCN 3.1.2 chip; 2xp then verified all four offsets against
+    `dcn_3_1_2_offset.h` and they were **right**, which is exactly why it
+    stood for four milestones. On this generation `dcn31_panel_cntl.c` has no
+    `.set_backlight_level` at all and the level goes to
+    `dmub_abm_set_backlight()`, so the register exists at the right address
+    and is the wrong control surface. A register that is real, writable and
+    reads back can still have a different owner - here the DMCUB, which reads
+    it at `HW_INIT` and reports it through a query rather than polling it.
+    Ask which Linux file the *function* comes from and whether this chip's
+    `dc` would call it: `dce_*` vs `dcn31_*` is not a naming detail. [2zl]
 
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
