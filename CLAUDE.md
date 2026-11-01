@@ -143,12 +143,14 @@ table and refuses to install one that does not match the running kernel;
   `AMDRadeonX6000Framebuffer` has `initializeDmcuB` and two DMCUB version reads
   and **no abm/backlight symbol at all** (3314 symbols as the control), and
   `AMDSupport`'s `ATIPanel` route needs an `ATIController`, which never
-  instantiates here. **Next: 2zl samples
-  `DMCUB_INBOX1_{BASE,SIZE,WPTR,RPTR}` read-only.** If `RBFBDmubWptrMoves`
-  stays 0 the ring has no other producer and a DMUB ABM command becomes a route
-  worth designing — a new hardware-write surface, so the user's decision; if it
-  moves, that route is closed and only the ASUS EC via an SSDT the user chooses
-  to add is left. **What is withdrawn is only the panel claim** (rule 45) — everything below is register
+  instantiates here. **THE DMUB RING IS FREE, measured (2zl, boot 271):**
+  `RBFBDmubWptrMoves` **0** and `RptrMoves` **0** across 125 samples, with
+  `WPTR == RPTR == 2368` and `InboxSize` 8192 — and 2368 is **37 × 64**, i.e.
+  37 `dmub_rb_cmd`s at bring-up and then nothing, the live confirmation of the
+  static read. **So a DMUB ABM command is a live route.** It is a new
+  hardware-write surface — producing on the DMCUB's inbox — so it is **the
+  user's decision before it is designed**, and that is where brightness rests.
+  **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
   cycle — note `BL_PWM_PERIOD` is **4000** with `BITCNT` **12** and
@@ -310,9 +312,16 @@ table and refuses to install one that does not match the running kernel;
   because Apple arms and disarms the vblank around each one — at ~110
   `setProperty` calls each, on Apple's own thread, inside the call that gates
   every frame. Rule 16, unexamined through six dead models. Throttled by
-  `rbgpufbpubms` (default 500 ms, `0` is the A side); **measure at 60 Hz**,
-  where 2zg found the spread is ±0.4 % rather than ±20 %, against the current
-  49.0 sets/s.
+  `rbgpufbpubms` (default 500 ms, `0` is the A side). **Boot 271 measured it at
+  60 Hz: 98.6 % of the publishes elided, and six paired runs gave 59.43 mean
+  over runs 2-6 (±1.2 %) against boot 268's 49.0, with `fed` 97-99 % where it
+  was ~82 % and `mean vblanks` 1.000-1.002.** NOT a claim yet — rule 44 wants
+  two boots per side and 2zg is the entry that exists because six consistent
+  samples on one boot did not reproduce. **2zm removes that cost:**
+  `setProperties` accepts `{"RBFBPubMs": N}` and `build/out/pubms` (`make
+  pubms`) writes it, so the A/B/A fits in ONE boot — six runs, `pubms 0`, six,
+  `pubms 500`, six. Every dial this project owned was a boot-arg until now,
+  which is why 2xn/2zb/2zc cost three boots for three points of one curve.
   Counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` (**decimal**);
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
