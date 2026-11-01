@@ -400,7 +400,22 @@ private:
      * are the control for the address derivation and they cost nothing. */
     bool               dmubBlArmed;
     uint32_t           dmubLocRefuse;  /* rb_dmub.h's RB_DMUB_LOC_* */
-    uint32_t           dmubLocRegs[8]; /* the eight registers as read, raw */
+    uint32_t           dmubInbox[2];   /* INBOX1 BASE_ADDRESS, SIZE */
+    uint32_t           dmubFb[2];      /* FB_LOCATION_BASE, FB_OFFSET */
+    /* 2zn/boot 272: ALL SEVEN region-3 windows, base/top/off_lo/off_hi each,
+     * raw with the enable bits intact. The table is what refuted the design
+     * - CW4 is not the mailbox on this firmware - so it is published whole
+     * rather than reduced to the window the locate picked. */
+    uint32_t           dmubWinRegs[7 * 4];
+    /* ...and what each window's memory LOOKED like: refuse, run, bad, abm.
+     * The search's whole working, so a boot where no window carries a
+     * signature says which ones were even candidates and why the rest were
+     * not (rule 14). */
+    uint32_t           dmubWinScan[7 * 4];
+    int                dmubWin;        /* the covering window, -1 if none */
+    uint32_t           dmubAddrKind;   /* RB_DMUB_ADDR_MC or _PA, measured */
+    uint64_t           dmubMem;        /* the address the window holds */
+    uint32_t           dmubCap;        /* the ring's capacity, from the register */
     uint64_t           dmubRingPA;     /* derived system-physical address */
     uint64_t           dmubRingOff;    /* ...and its offset inside the carve-out */
     uint32_t           dmubRoute;      /* 0 none, 1 BAR0 sub-range, 2 physical */
@@ -608,6 +623,10 @@ private:
     bool     dmubSetup(void);
     void     dmubTeardown(void);
     void     dmubScan(void);
+    uint32_t dmubMapWin(uint64_t pa, uint64_t fbOff, uint32_t span,
+                        IOMemoryDescriptor **mdOut, IOMemoryMap **mapOut);
+    void     dmubScanRun(volatile uint8_t *mem, uint32_t span,
+                         uint32_t *run, uint32_t *bad, uint32_t *abm);
     uint32_t dmubPush(const uint8_t *cmd);
     uint32_t dmubSendBacklight(uint32_t level);
     uint32_t dmubSendPipe(void);

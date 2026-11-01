@@ -48,20 +48,51 @@ static long num(io_service_t fb, const char *key)
     return out;
 }
 
+/* rb_dmub.h's RB_DMUB_LOC_*. RENUMBERED after boot 272 - a code printed by
+ * the old build does not mean what this table says. */
 static const char *locWhy(long c)
 {
     switch (c) {
     case 0: return "OK";
     case 1: return "no BAR5 map (is -rbgpufbbacklight on?)";
-    case 2: return "INBOX1_BASE_ADDRESS is not CW4's base";
-    case 3: return "INBOX1_SIZE is not 8192";
-    case 4: return "CW4 window cannot hold the ring";
-    case 5: return "CW4_OFFSET pair is zero - no mailbox placed";
-    case 6: return "the derived address is not inside the carve-out";
+    case 2: return "INBOX1_BASE/SIZE cannot be a ring";
+    case 3: return "no enabled window carries a command signature";
+    case 4: return "that window's offset pair is zero";
+    case 5: return "FB_LOCATION/FB_OFFSET give no ranges to classify against";
+    case 6: return "the address is neither MC nor system-physical";
     case 7: return "the ring is not 64-byte aligned";
-    case 8: return "located but NOT mappable";
+    case 8: return "resolved but NOT mappable";
     default: return "unknown";
     }
+}
+
+static const char *kindWhy(long k)
+{
+    switch (k) {
+    case 1: return "MC (mc2pa applied)";
+    case 2: return "already system-physical";
+    default: return "none";
+    }
+}
+
+/* A CFData property as an array of 28 uint32s: seven windows, four each. */
+static int words(io_service_t fb, const char *key, uint32_t *out, int n)
+{
+    CFTypeRef v = IORegistryEntryCreateCFProperty(
+        fb, (__bridge CFStringRef)[NSString stringWithUTF8String:key],
+        kCFAllocatorDefault, 0);
+    int got = 0;
+    if (v) {
+        if (CFGetTypeID(v) == CFDataGetTypeID()) {
+            const CFIndex len = CFDataGetLength((CFDataRef)v);
+            const uint8_t *p = CFDataGetBytePtr((CFDataRef)v);
+            for (; got < n && (CFIndex)((got + 1) * 4) <= len; got++) {
+                memcpy(&out[got], p + got * 4, 4);
+            }
+        }
+        CFRelease(v);
+    }
+    return got;
 }
 
 static const char *sendWhy(long c)
@@ -78,42 +109,89 @@ static const char *sendWhy(long c)
     }
 }
 
-/* The scan IS the control for the address derivation (rule 26). slots ==
- * plausible and non-zero means the 37 commands the firmware wrote at
- * bring-up are being read, which a wrong address does not produce. */
+/* The SEARCH is the control for the whole derivation (rule 26). 2zn named a
+ * window and boot 272 refuted it; the correction then found 2zn's
+ * DMUB_CW4_BASE had been copied out of the register it was meant to be
+ * checked against. So nothing is named now: every enabled window is
+ * resolved, mapped and read, and the one carrying the firmware's own 37
+ * bring-up commands is the mailbox. */
 static void dump(io_service_t fb)
 {
-    long slots = num(fb, "RBFBDmubScanSlots");
-    long plaus = num(fb, "RBFBDmubScanPlaus");
-    long loc   = num(fb, "RBFBDmubLocRefuse");
+    long loc = num(fb, "RBFBDmubLocRefuse");
+    long win = num(fb, "RBFBDmubWin");
+    uint32_t wr[28] = {0}, ws[28] = {0};
+    int nwr = words(fb, "RBFBDmubWindows", wr, 28);
+    int nws = words(fb, "RBFBDmubWinScan", ws, 28);
+
+    /* Rule 15, as the FIRST thing printed. A key the running kext does not
+     * publish reads back as -1 here, and -1 printed as a 32-bit hex value is
+     * 0xffffffff - which looks exactly like a register reading. The first
+     * run of this tool against the previous build showed "INBOX1 base
+     * 0xffffffff, size 4294967295" and that was not a reading at all. */
+    if (num(fb, "RBFBDmubInbox1Base") < 0 || nwr < 28) {
+        printf("the running kext does not publish this tool's keys - it is\n"
+               "OLDER than this build (rule 15). Nothing below is a reading;\n"
+               "install the kext this tool was built with and reboot.\n");
+        return;
+    }
 
     printf("armed            %ld   (-rbgpufbdmubbl)\n",
            num(fb, "RBFBDmubBlArmed"));
     printf("locate           %ld  %s\n", loc, locWhy(loc));
-    printf("  CW4 base/top   0x%lx .. 0x%lx\n",
-           num(fb, "RBFBDmubCw4Base"), num(fb, "RBFBDmubCw4Top"));
-    printf("  CW4 offset     0x%lx_%08lx\n",
-           num(fb, "RBFBDmubCw4OffHi"), num(fb, "RBFBDmubCw4OffLo"));
-    printf("  FB loc/offset  0x%lx / 0x%lx\n",
-           num(fb, "RBFBDmubFbLocation"), num(fb, "RBFBDmubFbOffset"));
-    printf("  ring pa        0x%lx  (carve-out + 0x%lx)\n",
-           num(fb, "RBFBDmubRingPA"), num(fb, "RBFBDmubRingFbOff"));
-    printf("  map route      %ld   (1 = BAR0 sub-range, 2 = physical)\n",
-           num(fb, "RBFBDmubRoute"));
-    printf("scan             %ld slots, %ld plausible, %ld ABM, %ld bytes\n",
-           slots, plaus, num(fb, "RBFBDmubScanAbm"),
-           num(fb, "RBFBDmubScanBytes"));
-    if (slots > 0 && slots == plaus) {
-        printf("  -> CONTROL PASSES: every slot the firmware wrote reads as a\n"
-               "     dmub_cmd_header, which a wrong address does not do.\n");
-    } else if (slots > 0) {
-        printf("  -> CONTROL FAILS: %ld of %ld slots are not headers. Do NOT\n"
-               "     send anything; the derivation is wrong.\n",
-               slots - plaus, slots);
-    } else {
-        printf("  -> nothing scanned. The ring was not mapped or the pointers\n"
-               "     were not legal positions - read the locate line.\n");
+    printf("  INBOX1 base    0x%08x   size %u\n",
+           (uint32_t)num(fb, "RBFBDmubInbox1Base"),
+           (uint32_t)num(fb, "RBFBDmubInbox1Size"));
+    printf("  FB loc/offset  0x%x / 0x%x\n",
+           (uint32_t)num(fb, "RBFBDmubFbLocation"),
+           (uint32_t)num(fb, "RBFBDmubFbOffset"));
+
+    /* The whole window table, raw. This is what refuted 2zn, and a search
+     * that printed only its own winner would have had nothing to say. */
+    if (nwr >= 28) {
+        printf("  region-3 windows (base / top / offset, * = enabled):\n");
+        for (int i = 0; i < 7; i++) {
+            const uint32_t b = wr[i * 4 + 0], t = wr[i * 4 + 1];
+            const uint32_t ol = wr[i * 4 + 2], oh = wr[i * 4 + 3];
+            printf("    CW%d %c 0x%08x .. 0x%08x   off 0x%x_%08x",
+                   i, (t & 0x80000000u) ? '*' : ' ', b & 0x1fffffffu,
+                   t & 0x1fffffffu, oh, ol);
+            if (nws >= 28) {
+                printf("   [resolve %u, run %u, bad %u, abm %u]",
+                       ws[i * 4 + 0], ws[i * 4 + 1], ws[i * 4 + 2],
+                       ws[i * 4 + 3]);
+            }
+            printf("\n");
+        }
+        printf("    (addresses are 29-bit fields, so 0x64000000 is written "
+               "as 0x04000000)\n");
     }
+
+    if (win >= 0) {
+        printf("mailbox          CW%ld\n", win);
+        printf("  address kind   %ld  %s\n", num(fb, "RBFBDmubAddrKind"),
+               kindWhy(num(fb, "RBFBDmubAddrKind")));
+        printf("  window mem     0x%llx\n",
+               (unsigned long long)num(fb, "RBFBDmubMem"));
+        printf("  ring pa        0x%llx  (carve-out + 0x%llx)\n",
+               (unsigned long long)num(fb, "RBFBDmubRingPA"),
+               (unsigned long long)num(fb, "RBFBDmubRingFbOff"));
+        printf("  capacity       %u bytes\n", (uint32_t)num(fb, "RBFBDmubCap"));
+        printf("  map route      %ld   (1 = BAR0 sub-range, 2 = physical)\n",
+               num(fb, "RBFBDmubRoute"));
+        printf("  signature      %ld of %ld slots, %ld ABM\n",
+               num(fb, "RBFBDmubScanPlaus"), num(fb, "RBFBDmubScanSlots"),
+               num(fb, "RBFBDmubScanAbm"));
+        printf("  -> the run of consecutive command headers from the window's\n"
+               "     start. Boot 271 says it should be 37. Those bytes are in\n"
+               "     RBFBDmubRingDump - firmware 4.0.15.47's own ABM traffic.\n");
+    } else {
+        printf("mailbox          NONE FOUND - nothing is mapped and nothing\n"
+               "                 will be sent. Read the per-window [resolve,\n"
+               "                 run, bad] columns above: resolve 0 means the\n"
+               "                 window was a candidate and its memory did not\n"
+               "                 look like a ring.\n");
+    }
+
     printf("sends ok/refused %ld / %ld   last refusal %ld %s\n",
            num(fb, "RBFBDmubSendsOk"), num(fb, "RBFBDmubSendsRefused"),
            num(fb, "RBFBDmubSendRefuse"),
@@ -121,9 +199,9 @@ static void dump(io_service_t fb)
     printf("  backlight/pipe %ld / %ld   last level %ld\n",
            num(fb, "RBFBDmubBlSends"), num(fb, "RBFBDmubPipeSends"),
            num(fb, "RBFBDmubBlLast"));
-    printf("  acks/timeouts  %ld / %ld   last WPTR 0x%lx\n",
+    printf("  acks/timeouts  %ld / %ld   last WPTR 0x%x\n",
            num(fb, "RBFBDmubAcks"), num(fb, "RBFBDmubAckTimeouts"),
-           num(fb, "RBFBDmubSendWptr"));
+           (uint32_t)num(fb, "RBFBDmubSendWptr"));
     printf("  -> an ack is RPTR reaching our WPTR: the firmware CONSUMED the\n"
            "     command. That is not the panel moving - the panel is the\n"
            "     deliverable and your eyes are its only instrument.\n");
