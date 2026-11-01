@@ -456,6 +456,25 @@ private:
     uint32_t           dmubGpintSpins;
     uint32_t           dmubScratch0, dmubScratch7, dmubDataout;
     uint32_t           dmubScratch0Pre, dmubScratch7Pre;
+    /* 2zs: every candidate window, mapped and selectable. INBOX1_BASE_ADDRESS
+     * reads 0x80000000, which no region-3 window covers, so CW4 cannot be the
+     * mailbox on this firmware however well the CODE windows match Linux. */
+    struct RBDmubCand {
+        IOMemoryDescriptor *md;
+        IOMemoryMap        *map;
+        volatile uint8_t   *mem;
+        uint64_t            pa;
+        uint64_t            memAddr;
+        uint32_t            span;
+        uint32_t            route;
+        uint32_t            refuse;
+        uint32_t            kind;
+    };
+    RBDmubCand         dmubCand[RB_DMUB_WINSEL_COUNT];
+    uint32_t           dmubWinSel;
+    uint32_t           dmubInboxInR3;
+    uint32_t           dmubRegRegs[9];   /* r4/r5/r6: off_lo, off_hi, top */
+    uint32_t           dmubRegScan[9];   /* r4/r5/r6: run, bad, abm */
     uint64_t           blSets;
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
@@ -653,6 +672,7 @@ private:
     uint32_t dmubSendPipe(void);
     uint32_t dmubSendCaps(void);
     uint32_t dmubGpint(uint32_t code);
+    bool dmubSelect(uint32_t n);
     void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */

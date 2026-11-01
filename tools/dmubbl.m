@@ -130,6 +130,52 @@ static const char *replyWhy(long v)
     }
 }
 
+static int words(io_service_t fb, const char *key, uint32_t *out, int n);
+
+/* Regions 4/5/6 and the candidate table (2zs). */
+static void dumpRegions(io_service_t fb)
+{
+    uint32_t rr[9] = {0}, rs[9] = {0}, ck[10] = {0};
+    const uint32_t inbox = u32(fb, "RBFBDmubInbox1Base");
+    int i;
+
+    if (!have(fb, "RBFBDmubInboxInR3")) { return; }
+    words(fb, "RBFBDmubRegions", rr, 9);
+    words(fb, "RBFBDmubRegScan", rs, 9);
+    words(fb, "RBFBDmubCandOk", ck, 10);
+
+    printf("the inbox base the FIRMWARE wrote: 0x%08x\n", inbox);
+    if (!num(fb, "RBFBDmubInboxInR3")) {
+        printf("  -> OUTSIDE region 3 (CW0..CW6 span 0x60000000..0x66ffffff).\n"
+               "     dmub_dcn31_setup_mailbox writes inbox1->base UNTRANSLATED,\n"
+               "     and Linux sets it to cw4.region.base = 0x64000000. This\n"
+               "     firmware wrote something else, so CW4 is NOT the mailbox -\n"
+               "     and boot 275's unanswered caps query was a correct reading\n"
+               "     of a wrong address. Regions 4/5/6 are the other apertures:\n"
+               "     fixed base in hardware, only OFFSET and TOP programmable.\n");
+    } else {
+        printf("  -> inside region 3, so a CW window can be the mailbox.\n");
+    }
+    printf("  apertures (offset / top, * = enabled):\n");
+    for (i = 0; i < 3; i++) {
+        const uint32_t lo = rr[i * 3 + 0], hi = rr[i * 3 + 1];
+        const uint32_t tp = rr[i * 3 + 2];
+        printf("    REGION%d %c 0x%x_%08x  top 0x%08x   [resolve %u, run %u, "
+               "bad %u, abm %u]\n", 4 + i, (tp & 0x80000000u) ? '*' : ' ',
+               hi, lo, tp, ck[7 + i], rs[i * 3 + 0], rs[i * 3 + 1],
+               rs[i * 3 + 2]);
+    }
+    printf("  selector       %ld   (0..6 = CW0..CW6, 7/8/9 = REGION4/5/6)\n",
+           num(fb, "RBFBDmubWinSel"));
+    printf("  candidates OK  ");
+    for (i = 0; i < 10; i++) {
+        if (ck[i] == 0) { printf("%d ", i); }
+    }
+    printf("\n  -> `dmubbl win <n>` points the push at one of those, then\n"
+           "     `dmubbl caps` says whether the firmware answers THERE. The\n"
+           "     caps query works; it only ever needed the right address.\n");
+}
+
 /* The GPINT block. No address appears anywhere in it, which is why it exists:
  * boot 275's ring result is consistent with an unimplemented command, a wrong
  * base and a DMCUB that is not running commands at all, and every one of
@@ -395,6 +441,7 @@ static void dump(io_service_t fb)
            "     the deliverable and your eyes are its only instrument.\n");
     dumpReply(fb);
     dumpGpint(fb);
+    dumpRegions(fb);
 }
 
 int main(int argc, char **argv)
@@ -418,7 +465,10 @@ int main(int argc, char **argv)
                "                      an ack into a byte-level identification.\n"
                "  dmubbl gpint        GET_FW_VERSION over GPINT - ONE register\n"
                "                      write, no address anywhere. Answers\n"
-               "                      whether the DMCUB talks to us at all.\n");
+               "                      whether the DMCUB talks to us at all.\n"
+               "  dmubbl win <0..9>   point the push at a window: 0..6 are\n"
+               "                      CW0..CW6, 7/8/9 are REGION4/5/6. Then\n"
+               "                      `dmubbl caps` tests THAT address.\n");
         IOObjectRelease(fb);
         return 0;
     }
@@ -433,7 +483,16 @@ int main(int argc, char **argv)
     }
 
     NSDictionary *d;
-    if (strcmp(argv[1], "gpint") == 0) {
+    if (strcmp(argv[1], "win") == 0) {
+        long n = argc > 2 ? atol(argv[2]) : -1;
+        if (n < 0 || n > 9) {
+            fprintf(stderr, "dmubbl win <0..9>\n");
+            IOObjectRelease(fb);
+            return 1;
+        }
+        d = @{ @"RBFBDmubSel": @(n) };
+        printf("\nselecting window %ld...\n", n);
+    } else if (strcmp(argv[1], "gpint") == 0) {
         d = @{ @"RBFBDmubGpint": @(1) };
         printf("\nsending GPINT GET_FW_VERSION (one register, no address)...\n");
     } else if (strcmp(argv[1], "caps") == 0) {
