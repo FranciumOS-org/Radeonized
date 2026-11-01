@@ -170,6 +170,14 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBBlReady", blReady);
     setProperty("RBFBBlRefuse", (uint64_t)blRefuse, 32);
     setProperty("RBFBBlOtgCtl", (uint64_t)blOtgCtl, 32);
+    /* 2zi: sample the live registers BEFORE publishing them, so the values in
+     * this publish describe this moment rather than the previous one. */
+    blSampleLive();
+    setProperty("RBFBBlLiveCntl", (uint64_t)blLiveCntl, 32);
+    setProperty("RBFBBlLiveLock", (uint64_t)blLiveLock, 32);
+    setProperty("RBFBBlLiveCount", (uint64_t)blLiveCount, 32);
+    setProperty("RBFBBlLiveReads", blLiveReads, 64);
+    setProperty("RBFBBlLiveDiffs", blLiveDiffs, 64);
     setProperty("RBFBBlCntl", (uint64_t)blCntl, 32);
     setProperty("RBFBBlCntl2", (uint64_t)blCntl2, 32);
     setProperty("RBFBBlPeriod", (uint64_t)blPeriod, 32);

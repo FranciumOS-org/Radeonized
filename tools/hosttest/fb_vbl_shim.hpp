@@ -166,6 +166,14 @@ public:
     uint32_t blLastLevel=0;       /* 2xs */
     uint32_t blLastCount=0;       /* 2xs */
     uint32_t blReadback=0;        /* 2xs */
+    uint32_t blLiveCntl=0;        /* 2zi */
+    uint32_t blLiveLock=0;        /* 2zi */
+    uint32_t blLiveCount=0;       /* 2zi */
+    uint64_t blLiveReads=0;       /* 2zi */
+    uint64_t blLiveDiffs=0;       /* 2zi */
+    /* 2zi: the real one reads MMIO; here it only has to exist and be
+     * side-effect free, like the other register samplers this shim stubs. */
+    void blSampleLive(void) {}
     uint64_t blSets=0;            /* 2xs */
     uint64_t blGets=0;            /* 2xs */
     uint64_t blPendTimeouts=0;    /* 2xs */

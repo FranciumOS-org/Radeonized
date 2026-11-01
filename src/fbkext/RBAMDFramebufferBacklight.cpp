@@ -146,6 +146,11 @@ bool RBAMDFramebuffer::blSetup(void)
     blGets = 0;
     blLastCount = 0;
     blReadback = 0;
+    blLiveCntl = 0;
+    blLiveLock = 0;
+    blLiveCount = 0;
+    blLiveReads = 0;
+    blLiveDiffs = 0;
     blPendTimeouts = 0;
     blParmAdds = 0;
     blFlagsGets = 0;
@@ -333,6 +338,31 @@ bool RBAMDFramebuffer::blSetLevel(uint32_t level)
     blLastLevel = want;
     blSets++;
     return true;
+}
+
+/* 2zi: what the register holds BETWEEN our writes.
+ *
+ * blReadback is taken microseconds after our own store, so it can only say
+ * the store reached the chip; blCntl is a start() snapshot and never moves.
+ * Neither can see a second writer, and boot 269 needs exactly that: the duty
+ * cycle round-trips and the panel does not move. Called from the periodic
+ * publish (every 288 vblanks, ~2 s), which already does read-only MMIO in
+ * hubpPoll(), so this adds a read and no new context.
+ *
+ * blLiveDiffs only counts once we have written at least once, because before
+ * that the live value IS the firmware's and disagreeing with a zero
+ * blLastCount would be an artefact of the counter rather than a finding
+ * (rule 14: say what would have to be true for the reading to mean
+ * anything). */
+void RBAMDFramebuffer::blSampleLive(void)
+{
+    if (!blReady || !blRegs) { return; }
+
+    blLiveCntl  = blRegs[kRbDmuSeg2Bl + RB_BL_DW_CNTL];
+    blLiveLock  = blRegs[kRbDmuSeg2Bl + RB_BL_DW_LOCK];
+    blLiveCount = blLiveCntl & RB_BL_CNTL_ACTIVE_CNT_MASK;
+    blLiveReads++;
+    if (blSets > 0 && blLiveCount != blLastCount) { blLiveDiffs++; }
 }
 
 /* 2xy: THE SYSTEM SETTINGS SLIDER, and why it is two answers and not a write.
