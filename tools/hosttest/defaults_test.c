@@ -242,5 +242,18 @@ int defaults_tests(void)
               "no legacy-zero key is the generation key");
     }
 
+    /* 2zm: the rbgpufbpubms bound, asserted against LITERALS rather than the
+     * macro that defines it - the 2u9 trap. 0 must be INSIDE the range,
+     * because 0 is the A side of 2zk's comparison and a bound that refused it
+     * would silently leave the throttle on for every boot and make the
+     * comparison unrunnable. */
+    CHECK(rb_pub_ms_ok(0), "pubms 0 is in range - it is the A side");
+    CHECK(rb_pub_ms_ok(500), "pubms 500, the default, is in range");
+    CHECK(rb_pub_ms_ok(10000), "pubms 10000 is the inclusive ceiling");
+    CHECK(!rb_pub_ms_ok(10001), "pubms 10001 is refused");
+    CHECK(!rb_pub_ms_ok(-1), "pubms -1 is refused, so a signed read cannot "
+          "wrap into a huge interval");
+    CHECK(RB_PUB_MS_MAX == 10000u, "the ceiling is 10000");
+
     return failures;
 }

@@ -461,6 +461,10 @@ bool RBAMDFramebuffer::start(IOService *provider)
         pubNextAbs = 0;
         pubHotCalls = 0;
         pubHotDone = 0;
+        pubSetsOk = 0;
+        pubSetsRefused = 0;
+        pubSetsOther = 0;
+        pubMsLast = -1;
         if (pubMs != 0) {
             nanoseconds_to_absolutetime((uint64_t)pubMs * 1000000ull,
                                         &pubIntervalAbs);
