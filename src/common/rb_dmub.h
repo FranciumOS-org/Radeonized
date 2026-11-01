@@ -112,6 +112,53 @@
  * the same units rb_backlight.h's levels are already in. */
 #define RB_DMUB_LEVEL_FULL  0x10000u
 
+/* dmub_cmd.h, enum dmub_cmd_type: DMUB_CMD__QUERY_FEATURE_CAPS = 6, doc
+ * comment "Command type used to query FW feature caps".
+ *
+ * WHY A CAPS QUERY IS IN A BACKLIGHT FILE. Boot 274 measured four commands
+ * pushed at CW4's WPTR and RPTR following every one of them inside the 1 ms
+ * spin - and that is exactly what boot 273 measured while the command was
+ * going into the TRACE BUFFER and the DMCUB was consuming a zeroed slot of
+ * the real ring. An ack says the microcontroller advanced over the slot our
+ * WPTR named; it says nothing about whose bytes were in it. Four milestones
+ * of this surface have now rested on a layout agreement with no byte-level
+ * confirmation, and the tool says so on every run.
+ *
+ * QUERY_FEATURE_CAPS closes that gap and costs nothing on the chip, because
+ * it is a read. dc_dmub_srv.c's dc_dmub_srv_query_caps_cmd sets
+ * header.ret_status = 1 BEFORE sending and then accepts the reply only
+ * `if (... && cmd.query_feature_caps.header.ret_status == 0)` - so the
+ * firmware CLEARS that bit. And the reply lands in our own slot:
+ * dmub_srv_cmd_get_response ends at dmub_rb_get_return_data, whose address
+ * is `base_address + rptr - DMUB_RB_CMD_SIZE`, i.e. the slot just consumed,
+ * which is the slot we wrote. So after the ack, byte 2 bit 0 of our own 64
+ * bytes going 1 -> 0 is a change only the DMCUB can have made, in memory we
+ * chose the address of. That is the identification the layout could not
+ * give, and it is one bit that cannot be confused with a reading of itself
+ * (2zp's error, rule 26).
+ *
+ * The payload is one struct dmub_feature_caps, 14 bytes, all uint8_t:
+ * psr, fw_assisted_mclk_switch_ver, reserved[4], subvp_psr_support,
+ * gecc_enable, replay_supported, replay_reserved[3],
+ * abm_aux_backlight_support, lsdma_support_in_dmu. Under
+ * #pragma pack(push, 1), so the offsets below are the declaration order. */
+#define RB_DMUB_CMD_QUERY_FEATURE_CAPS  6u
+#define RB_DMUB_CAPS_PAYLOAD            14u
+
+#define RB_DMUB_CAPS_OFF_PSR          4u
+#define RB_DMUB_CAPS_OFF_MCLK_VER     5u
+/* 6..9 reserved[4] */
+#define RB_DMUB_CAPS_OFF_SUBVP_PSR    10u
+#define RB_DMUB_CAPS_OFF_GECC         11u
+#define RB_DMUB_CAPS_OFF_REPLAY       12u
+/* 13..15 replay_reserved[3] */
+#define RB_DMUB_CAPS_OFF_ABM_AUX_BL   16u
+#define RB_DMUB_CAPS_OFF_LSDMA        17u
+
+/* ret_status is bit 16 of the header word - dmub_cmd.h's dmub_cmd_header
+ * puts it after type:8 and sub_type:8. */
+#define RB_DMUB_HDR_RET_STATUS  (1u << 16)
+
 /* Why a locate was refused. Published, never inferred: "we did not write"
  * and "we did not write BECAUSE no enabled window covers the inbox" are
  * different findings (rule 14).
@@ -444,6 +491,7 @@ static inline uint32_t rb_dmub_hdr(uint32_t type, uint32_t sub_type,
 static inline uint32_t rb_dmub_hdr_type(uint32_t h)    { return h & 0xffu; }
 static inline uint32_t rb_dmub_hdr_sub(uint32_t h)     { return (h >> 8) & 0xffu; }
 static inline uint32_t rb_dmub_hdr_payload(uint32_t h) { return (h >> 24) & 0x3fu; }
+static inline uint32_t rb_dmub_hdr_ret(uint32_t h)     { return (h >> 16) & 0x1u; }
 
 /* Could this word be a dmub_cmd_header a producer wrote?
  *
@@ -549,6 +597,77 @@ static inline void rb_dmub_build_set_pipe(uint8_t *buf,
     buf[7] = 0u;                /* ramping_boundary, "Unused" upstream */
     buf[8] = pwrseq_inst;
     /* 9..11: pad[3] - zero. */
+}
+
+/* QUERY_FEATURE_CAPS, with ret_status pre-set to 1 so the firmware has a bit
+ * to clear. Everything else is zero: the payload is the firmware's to fill
+ * in, and dc_dmub_srv_query_caps_cmd memsets the command before sending. */
+static inline void rb_dmub_build_query_caps(uint8_t *buf)
+{
+    uint32_t i;
+
+    for (i = 0; i < RB_DMUB_CMD_SIZE; i++) { buf[i] = 0u; }
+
+    rb_dmub_put32(buf, 0, rb_dmub_hdr(RB_DMUB_CMD_QUERY_FEATURE_CAPS, 0u,
+                                      RB_DMUB_CAPS_PAYLOAD) |
+                          RB_DMUB_HDR_RET_STATUS);
+}
+
+/* What the slot read back after the ack MEANS.
+ *
+ * The four answers are deliberately separate, because they point at four
+ * different next steps and three of them have already happened on this
+ * surface in one form or another:
+ *
+ *  ZERO       the 64 bytes read all zero. Our store did not land in the
+ *             memory we read, or the mapping is not coherent with it. Boot
+ *             273 read the REAL ring as all zeros while its registers said
+ *             37 commands sat in it, so this is a measured failure mode and
+ *             not a hypothetical one.
+ *  UNCHANGED  byte-identical to what we sent. The write landed and stuck,
+ *             and the firmware did not reply - which is the EXPECTED answer
+ *             for an ABM command, since those do not set ret_status. It is
+ *             inconclusive about the address, so it must not read as either
+ *             success or failure.
+ *  CONFIRMED  same type and sub_type, ret_status 1 -> 0. Only the DMCUB
+ *             clears that bit, and it cleared it here. The mailbox address
+ *             is identified at the byte level.
+ *  CHANGED    the bytes differ but not that way. Something writes this
+ *             memory and it is not doing what dc_dmub_srv.c describes -
+ *             worth reading the bytes rather than guessing, so the caller
+ *             publishes both buffers and this verdict says only "look".
+ *
+ * `sent` must be the 64 bytes handed to the push, not a rebuild of them. */
+enum {
+    RB_DMUB_REPLY_NONE      = 0,
+    RB_DMUB_REPLY_ZERO      = 1,
+    RB_DMUB_REPLY_UNCHANGED = 2,
+    RB_DMUB_REPLY_CONFIRMED = 3,
+    RB_DMUB_REPLY_CHANGED   = 4
+};
+
+static inline int rb_dmub_reply_verdict(const uint8_t *sent,
+                                        const uint8_t *got)
+{
+    uint32_t i;
+    int all_zero = 1, same = 1;
+    uint32_t hs, hg;
+
+    for (i = 0; i < RB_DMUB_CMD_SIZE; i++) {
+        if (got[i] != 0u)      { all_zero = 0; }
+        if (got[i] != sent[i]) { same = 0; }
+    }
+    if (all_zero) { return RB_DMUB_REPLY_ZERO; }
+    if (same)     { return RB_DMUB_REPLY_UNCHANGED; }
+
+    hs = rb_dmub_get32(sent, 0);
+    hg = rb_dmub_get32(got, 0);
+    if (rb_dmub_hdr_type(hg) == rb_dmub_hdr_type(hs) &&
+        rb_dmub_hdr_sub(hg)  == rb_dmub_hdr_sub(hs)  &&
+        rb_dmub_hdr_ret(hs) == 1u && rb_dmub_hdr_ret(hg) == 0u) {
+        return RB_DMUB_REPLY_CONFIRMED;
+    }
+    return RB_DMUB_REPLY_CHANGED;
 }
 
 /* The level a userspace trigger asked for, bounded. 0 is a legal request -

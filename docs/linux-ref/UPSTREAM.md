@@ -271,3 +271,29 @@ and the push-then-flush-then-WPTR sequence (dmub_srv.c:700-720, 880-892,
 `dmub_abm_set_backlight_level` actually fills in (dmub_abm_lcd.c:280-300).
 Re-fetch from that commit before changing any of them; the line numbers are
 the provenance.
+
+2zq additionally read, and did not vendor, at the same commit
+(cbbddb6b08cc9900a87cccaa9b22bbe06aa4f50a):
+
+- `dmub/inc/dmub_cmd.h` - `DMUB_CMD__QUERY_FEATURE_CAPS = 6`;
+  `struct dmub_feature_caps` (psr, fw_assisted_mclk_switch_ver, reserved[4],
+  subvp_psr_support, gecc_enable, replay_supported, replay_reserved[3],
+  abm_aux_backlight_support, lsdma_support_in_dmu - all uint8_t under
+  `#pragma pack(push, 1)`, 14 bytes); `struct dmub_cmd_query_feature_caps_data`
+  (one `feature_caps` member); `struct dmub_rb_cmd_query_feature_caps`
+  (header + that); `dmub_cmd_header`'s `ret_status : 1` at bit 16, commented
+  "1 if returned data, 0 otherwise"; and the ring inlines
+  `dmub_rb_get_return_data` (`base_address + rptr - DMUB_RB_CMD_SIZE`, wrapping
+  to `base_address + capacity - DMUB_RB_CMD_SIZE` when rptr is 0),
+  `dmub_rb_push_front` (`base_address + wrpt`), `dmub_rb_front`
+  (`base_address + rptr`), `dmub_rb_empty` (`wrpt == rptr`).
+- `dc/dc_dmub_srv.c` - `dc_dmub_srv_query_caps_cmd`: memsets the command, sets
+  type, sub_type 0, **`ret_status = 1`**, `payload_bytes =
+  sizeof(struct dmub_cmd_query_feature_caps_data)`, sends with
+  `DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY`, and copies the reply only if the send
+  succeeded **and `ret_status == 0`**.
+- `dmub/src/dmub_srv.c` - `dmub_srv_cmd_get_response` (register inbox only for
+  `DMUB_CMD_INTERFACE_REG`, otherwise `dmub_rb_get_return_data` on
+  `inbox1.rb`); `dmub_srv_wait_for_idle` (polls until `dmub_rb_empty` on
+  inbox1); `default_inbox_type = DMUB_CMD_INTERFACE_FB` with the REG inbox
+  reserved for DCN42/42B, DCN401, DCN60 - so DCN 3.1 replies through the ring.

@@ -761,6 +761,12 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
+    if (dict->getObject("RBFBDmubCaps")) {
+        const uint32_t rc = dmubSendCaps();
+        LOG("RBFBDmubCaps -> refuse %u, wptr %#x, verdict %u",
+            rc, dmubSendWptr, dmubReplyVerdict);
+        return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+    }
     if (dict->getObject("RBFBDmubPipe")) {
         const uint32_t rc = dmubSendPipe();
         LOG("RBFBDmubPipe -> refuse %u, wptr %#x, acks %llu",

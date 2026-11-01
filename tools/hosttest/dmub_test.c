@@ -352,5 +352,105 @@ int dmub_tests(void)
     CHECK(RB_DMUB_LEVEL_FULL == 0x10000u,
           "full scale is u16.16, the same units rb_backlight.h already uses");
 
+    /* --- 2zq: QUERY_FEATURE_CAPS, the byte-level identification ---
+     *
+     * The command's bytes are asserted as LITERALS and not through this
+     * file's own accessors: 2zp's hosttest asserted that a constant equalled
+     * a register reading and thereby compared a reading with itself, and the
+     * same shape here would be rb_dmub_hdr() checked against rb_dmub_hdr(). */
+    CHECK(RB_DMUB_CMD_QUERY_FEATURE_CAPS == 6u,
+          "DMUB_CMD__QUERY_FEATURE_CAPS is 6 in dmub_cmd_type");
+    CHECK(RB_DMUB_CAPS_PAYLOAD == 14u,
+          "struct dmub_feature_caps is 14 packed uint8_t fields: psr, "
+          "fw_assisted_mclk_switch_ver, reserved[4], subvp_psr_support, "
+          "gecc_enable, replay_supported, replay_reserved[3], "
+          "abm_aux_backlight_support, lsdma_support_in_dmu");
+    CHECK(RB_DMUB_HDR_RET_STATUS == 0x10000u,
+          "ret_status is bit 16 - after type:8 and sub_type:8");
+    CHECK(RB_DMUB_CAPS_OFF_ABM_AUX_BL == 16u,
+          "abm_aux_backlight_support sits at payload byte 12, slot byte 16");
+    CHECK(RB_DMUB_CAPS_OFF_LSDMA == 17u, "lsdma_support_in_dmu follows it");
+
+    {
+        uint8_t caps[RB_DMUB_CMD_SIZE];
+        uint8_t got[RB_DMUB_CMD_SIZE];
+        uint32_t i;
+        int tail_zero = 1;
+
+        rb_dmub_build_query_caps(caps);
+        CHECK(caps[0] == 6u && caps[1] == 0u,
+              "QUERY_FEATURE_CAPS's type byte is 6 and sub_type is 0");
+        CHECK(caps[2] == 1u,
+              "ret_status is SET on send - dc_dmub_srv_query_caps_cmd sets "
+              "it to 1 and then accepts the reply only if it reads 0, so the "
+              "firmware clears it and that bit is the identification");
+        CHECK(caps[3] == 14u, "payload_bytes is 14");
+        for (i = 4u; i < RB_DMUB_CMD_SIZE; i++) {
+            if (caps[i] != 0u) { tail_zero = 0; }
+        }
+        CHECK(tail_zero,
+              "the payload is left zero - it is the firmware's to fill in");
+
+        /* ZERO: the slot reads empty. This is boot 273's measured failure
+         * mode, not a hypothetical one. */
+        for (i = 0; i < RB_DMUB_CMD_SIZE; i++) { got[i] = 0u; }
+        CHECK(rb_dmub_reply_verdict(caps, got) == RB_DMUB_REPLY_ZERO,
+              "an all-zero slot is ZERO - our bytes are not in the memory we "
+              "read, which is exactly what boot 273 measured of the real ring");
+
+        /* UNCHANGED: the write stuck and nobody replied. The expected answer
+         * for an ABM command, and it must not read as success OR failure. */
+        for (i = 0; i < RB_DMUB_CMD_SIZE; i++) { got[i] = caps[i]; }
+        CHECK(rb_dmub_reply_verdict(caps, got) == RB_DMUB_REPLY_UNCHANGED,
+              "a byte-identical slot is UNCHANGED - inconclusive, which is "
+              "its own answer and not a verdict either way");
+
+        /* CONFIRMED: ret_status cleared, type and sub_type intact. */
+        got[2] = 0u;
+        CHECK(rb_dmub_reply_verdict(caps, got) == RB_DMUB_REPLY_CONFIRMED,
+              "ret_status 1 -> 0 with the type intact is CONFIRMED - only "
+              "the DMCUB clears that bit, in memory we chose the address of");
+
+        /* ...and the clear alone is not enough: the command must still be
+         * recognisable, or we are reading something that merely happens to
+         * have a zero there. */
+        got[0] = 99u;
+        CHECK(rb_dmub_reply_verdict(caps, got) == RB_DMUB_REPLY_CHANGED,
+              "a cleared ret_status with a DIFFERENT type is only CHANGED - "
+              "a zero bit in unrelated bytes is not a reply");
+
+        /* A payload written with ret_status left set is CHANGED, not
+         * CONFIRMED: the bit is the claim, not the data beside it. */
+        for (i = 0; i < RB_DMUB_CMD_SIZE; i++) { got[i] = caps[i]; }
+        got[RB_DMUB_CAPS_OFF_ABM_AUX_BL] = 1u;
+        CHECK(rb_dmub_reply_verdict(caps, got) == RB_DMUB_REPLY_CHANGED,
+              "payload bytes appearing with ret_status still set is CHANGED");
+
+        /* An ABM command can never come back CONFIRMED, because it never
+         * sets ret_status - so the verdict cannot flatter the thing we are
+         * actually trying to make work. */
+        {
+            uint8_t bl[RB_DMUB_CMD_SIZE];
+            rb_dmub_build_set_backlight(bl, 4096u, 0u, 0x01u);
+            CHECK(rb_dmub_hdr_ret(rb_dmub_get32(bl, 0)) == 0u,
+                  "SET_BACKLIGHT does not set ret_status - dmub_abm_lcd.c "
+                  "does not, so no ABM send can be read as CONFIRMED");
+            for (i = 0; i < RB_DMUB_CMD_SIZE; i++) { got[i] = bl[i]; }
+            got[2] = 0u;
+            CHECK(rb_dmub_reply_verdict(bl, got) == RB_DMUB_REPLY_UNCHANGED,
+                  "clearing an already-clear ret_status changes nothing, so "
+                  "it stays UNCHANGED");
+        }
+
+        CHECK(rb_dmub_hdr_ret(rb_dmub_get32(caps, 0)) == 1u,
+              "the accessor reads back the bit the builder set");
+        CHECK(rb_dmub_hdr_type(rb_dmub_get32(caps, 0)) == 6u &&
+              rb_dmub_hdr_payload(rb_dmub_get32(caps, 0)) == 14u,
+              "ret_status does not bleed into type or payload_bytes");
+        CHECK(rb_dmub_hdr_plausible(rb_dmub_get32(caps, 0)),
+              "the caps command passes the scan's own header test, so the "
+              "scan would not reject a slot holding one");
+    }
+
     return failures;
 }

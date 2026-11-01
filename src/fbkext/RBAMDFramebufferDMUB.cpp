@@ -88,6 +88,14 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubBlLast = -1;
     dmubPipeSends = 0;
     dmubBlSends = 0;
+    dmubCapsSends = 0;
+    dmubReplyVerdict = RB_DMUB_REPLY_NONE;
+    dmubReplySlot = 0;
+    dmubConfirms = 0;
+    for (unsigned i = 0; i < RB_DMUB_CMD_SIZE; i++) {
+        dmubReplySent[i] = 0;
+        dmubReplyGot[i] = 0;
+    }
     dmubInbox[0] = 0; dmubInbox[1] = 0;
     dmubFb[0] = 0; dmubFb[1] = 0;
     for (unsigned i = 0; i < RB_DMUB_CW_COUNT * 4u; i++) {
@@ -391,10 +399,15 @@ uint32_t RBAMDFramebuffer::dmubPush(const uint8_t *cmd)
         dmubSendsRefused++; return dmubSendRefuse = 5;
     }
 
-    /* 1. The command, at WPTR. */
+    /* 1. The command, at WPTR. Keep the slot and the exact bytes: step 5
+     * compares the memory against them, and a rebuilt copy would be
+     * comparing a reading with itself (2zp). */
+    dmubReplySlot = wptr;
     for (uint32_t i = 0; i < RB_DMUB_CMD_SIZE; i++) {
+        dmubReplySent[i] = cmd[i];
         dmubRing[wptr + i] = cmd[i];
     }
+    dmubReplyVerdict = RB_DMUB_REPLY_NONE;
 
     /* 2. dmub_rb_flush_pending: read it back. The reads are what flush the
      * store buffer; the values are deliberately not checked against what was
@@ -434,6 +447,21 @@ uint32_t RBAMDFramebuffer::dmubPush(const uint8_t *cmd)
         if (spins == (unsigned)-1) { dmubAckSpins++; }
     }
 
+    /* 5. THE IDENTIFICATION. dmub_srv_cmd_get_response ends at
+     * dmub_rb_get_return_data, which reads `base_address + rptr -
+     * DMUB_RB_CMD_SIZE` - the slot just consumed, which is the slot we
+     * wrote. So the firmware's reply, if there is one, is in these 64 bytes
+     * and nowhere else. Read them back unconditionally, for every command:
+     * it costs 16 dword loads from a mapping we already hold, and an ABM
+     * command coming back UNCHANGED is itself a reading worth having (the
+     * write landed and stuck) where a ZERO would retire this address. */
+    for (uint32_t i = 0; i < RB_DMUB_CMD_SIZE; i++) {
+        dmubReplyGot[i] = dmubRing[dmubReplySlot + i];
+    }
+    dmubReplyVerdict = (uint32_t)rb_dmub_reply_verdict(dmubReplySent,
+                                                       dmubReplyGot);
+    if (dmubReplyVerdict == RB_DMUB_REPLY_CONFIRMED) { dmubConfirms++; }
+
     dmubSendRefuse = 0;
     return 0;
 }
@@ -462,6 +490,19 @@ uint32_t RBAMDFramebuffer::dmubSendPipe(void)
      * pwrseq_inst 0 for the same reason panel_mask is 1. */
     rb_dmub_build_set_pipe(cmd, 0u, 0u, 0u, RB_DMUB_SET_ABM_PIPE_NORMAL);
     dmubPipeSends++;
+    return dmubPush(cmd);
+}
+
+/* The caps query. Read-only on the chip - it asks the firmware what it
+ * supports and changes nothing - and it is the only command on this surface
+ * whose reply the driver is documented to read back out of the ring, which
+ * is what makes it the instrument rather than another backlight attempt. */
+uint32_t RBAMDFramebuffer::dmubSendCaps(void)
+{
+    uint8_t cmd[RB_DMUB_CMD_SIZE];
+
+    rb_dmub_build_query_caps(cmd);
+    dmubCapsSends++;
     return dmubPush(cmd);
 }
 
@@ -513,4 +554,17 @@ void RBAMDFramebuffer::dmubPublish(void)
     /* -1 until one is sent, which reads as 4294967295 - distinguishable from
      * a real level, since the trigger refuses anything above 65536. */
     setProperty("RBFBDmubBlLast", (uint64_t)(uint32_t)dmubBlLast, 32);
+    /* The reply, and the bytes it was read from. Rule 26: the verdict is a
+     * derived number, so both buffers go out beside it and the tool decodes
+     * them itself rather than trusting the verdict alone. */
+    setProperty("RBFBDmubCapsSends", (uint64_t)dmubCapsSends, 32);
+    setProperty("RBFBDmubReplyVerdict", (uint64_t)dmubReplyVerdict, 32);
+    setProperty("RBFBDmubReplySlot", (uint64_t)dmubReplySlot, 32);
+    setProperty("RBFBDmubConfirms", (uint64_t)dmubConfirms, 32);
+    {
+        OSData *d = OSData::withBytes(dmubReplySent, RB_DMUB_CMD_SIZE);
+        if (d) { setProperty("RBFBDmubReplySent", d); d->release(); }
+        d = OSData::withBytes(dmubReplyGot, RB_DMUB_CMD_SIZE);
+        if (d) { setProperty("RBFBDmubReplyGot", d); d->release(); }
+    }
 }

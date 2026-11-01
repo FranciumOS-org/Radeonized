@@ -38,6 +38,7 @@ extern "C" {
 #include "rb_drr.h"
 #include "rb_hubp.h"
 #include "rb_retire.h"
+#include "rb_dmub.h"
 }
 
 #include <IOKit/graphics/IOFramebuffer.h>
@@ -437,6 +438,18 @@ private:
     uint64_t           dmubBlSends;
     uint64_t           dmubPipeSends;
     long               dmubBlLast;     /* -1 until one is sent */
+    /* The byte-level identification (2zq). dmubPush copies the command it
+     * was handed into dmubReplySent and, after the ack, copies the same 64
+     * bytes back out of the ring into dmubReplyGot; the verdict is
+     * rb_dmub.h's, never computed here. Both buffers are published whole
+     * because a verdict without the bytes it was derived from is exactly
+     * what rule 26 keeps paying for. */
+    uint32_t           dmubCapsSends;
+    uint8_t            dmubReplySent[RB_DMUB_CMD_SIZE];
+    uint8_t            dmubReplyGot[RB_DMUB_CMD_SIZE];
+    uint32_t           dmubReplyVerdict;   /* RB_DMUB_REPLY_* */
+    uint32_t           dmubReplySlot;      /* the ring offset we wrote */
+    uint32_t           dmubConfirms;       /* how many came back CONFIRMED */
     uint64_t           blSets;
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
@@ -632,6 +645,7 @@ private:
     uint32_t dmubPush(const uint8_t *cmd);
     uint32_t dmubSendBacklight(uint32_t level);
     uint32_t dmubSendPipe(void);
+    uint32_t dmubSendCaps(void);
     void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */

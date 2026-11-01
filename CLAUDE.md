@@ -204,6 +204,37 @@ table and refuses to install one that does not match the running kernel;
   Still unexplained and published so it cannot be forgotten:
   `DMCUB_INBOX1_BASE_ADDRESS` reads **0x80000000**, neither 0x64000000 nor its
   truncation. Nothing locates from it.
+  **2zq (boot 274): the DMCUB consumes CW4's slots, and an ack is STILL not
+  an identification.** Four commands pushed, `sends ok/refused 4 / 0`,
+  `acks/timeouts 4 / 0`, and the inbox registers moved `WPTR/RPTR 0x940 ->
+  0xa40` - 2368 -> 2624, exactly 4 x 64, RPTR following every push inside the
+  1 ms spin. **The panel did not move**, at either command, in either order.
+  But boot 273 measured that same shape while the bytes were in the TRACE
+  BUFFER and the DMCUB was consuming a zeroed slot, so boot 274 is consistent
+  with two different worlds and discriminates neither: (a) our bytes are not
+  where the DMCUB reads, or (b) they are and ABM ignored them.
+  **2zq builds the discriminator and it is a READ.**
+  `DMUB_CMD__QUERY_FEATURE_CAPS` = 6: `dc_dmub_srv_query_caps_cmd` sets
+  `header.ret_status = 1` before sending and accepts the reply only
+  `if (... ret_status == 0)`, so the **firmware clears that bit** - and the
+  reply lands in **our own slot**, because `dmub_srv_cmd_get_response` ends at
+  `dmub_rb_get_return_data` at `base_address + rptr - DMUB_RB_CMD_SIZE`, the
+  slot just consumed. DCN 3.1 takes the FB inbox path, not
+  `DMUB_CMD_INTERFACE_REG` (that is DCN42/401/60). So one bit, in memory whose
+  address we chose, that nothing we wrote can satisfy - which is what 2zp's
+  "constant equals a register reading" hosttest could not be. The read-back is
+  in `dmubPush` for **every** command; the verdict is `rb_dmub.h`'s, four-way,
+  and both 64-byte buffers are published beside it: **ZERO** (boot 273's
+  measured mode - retires CW4 despite six layout matches), **UNCHANGED** (the
+  expected answer for an ABM command, which never sets `ret_status`, so it is
+  inconclusive and reads as neither success nor failure - a hosttest asserts no
+  ABM send can come back CONFIRMED), **CONFIRMED**, **CHANGED**. And the caps
+  payload answers a second question free: slot byte 16 is
+  **`abm_aux_backlight_support`** - if set, a PWM-typed SET_BACKLIGHT is the
+  wrong control type and this is rule 46 a second time on the same chain.
+  **`dmubbl caps` goes FIRST on boot 275**, before any further level: until it
+  answers, "the panel did not move" has two explanations and nothing separates
+  them.
   Two commands, **separately triggered**: `SET_BACKLIGHT` alone first,
   `SET_PIPE` only if the panel does not move (rule 45 again - sending both
   would make a moving panel ambiguous). `dmub_srv.c:1037-1041` is the whole
