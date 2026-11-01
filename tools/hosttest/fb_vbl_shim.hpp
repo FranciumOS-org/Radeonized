@@ -186,6 +186,24 @@ public:
     /* 2zi: the real one reads MMIO; here it only has to exist and be
      * side-effect free, like the other register samplers this shim stubs. */
     void blSampleLive(void) {}
+    /* 2zn: the DMUB inbox. The real dmubPublish() is ~20 setProperty calls
+     * in RBAMDFramebufferDMUB.cpp, which this build does not compile; here
+     * it only has to exist, and it bumps setPropertyCalls by nothing so the
+     * 2zk throttle test still counts only publishVBLState's own publishes.
+     * Mirrored members below for the same reason every other block is
+     * mirrored - this file is the fifth-and-counting cause of a broken
+     * build, and an unmirrored member is a compile error, not a surprise. */
+    void dmubPublish(void) {}
+    bool     dmubBlArmed=false;
+    uint32_t dmubLocRefuse=0;
+    uint32_t dmubLocRegs[8]={0,0,0,0,0,0,0,0};
+    uint64_t dmubRingPA=0, dmubRingOff=0;
+    uint32_t dmubRoute=0;
+    uint32_t dmubScanSlots=0, dmubScanPlaus=0, dmubScanAbm=0, dmubScanBytes=0;
+    uint64_t dmubSendsOk=0, dmubSendsRefused=0;
+    uint32_t dmubSendRefuse=0, dmubSendWptr=0;
+    uint64_t dmubAcks=0, dmubAckSpins=0, dmubBlSends=0, dmubPipeSends=0;
+    long     dmubBlLast=-1;
     uint64_t blSets=0;            /* 2xs */
     uint64_t blGets=0;            /* 2xs */
     uint64_t blPendTimeouts=0;    /* 2xs */

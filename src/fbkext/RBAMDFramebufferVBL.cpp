@@ -217,6 +217,8 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBDmubReads", dmubReads, 64);
     setProperty("RBFBDmubWptrMoves", dmubWptrMoves, 64);
     setProperty("RBFBDmubRptrMoves", dmubRptrMoves, 64);
+    /* 2zn: the locate, the scan control and every send, in one place. */
+    dmubPublish();
     setProperty("RBFBBlCntl", (uint64_t)blCntl, 32);
     setProperty("RBFBBlCntl2", (uint64_t)blCntl2, 32);
     setProperty("RBFBBlPeriod", (uint64_t)blPeriod, 32);
@@ -698,6 +700,7 @@ void RBAMDFramebuffer::vblRetune(uint64_t periodNs)
  * testable is being excluded here (the throttle itself, publishVBLStateHot,
  * stays in the host build and has its own case). */
 #include "rb_defaults.h"   /* rb_pub_ms_ok() */
+#include "rb_dmub.h"      /* rb_dmub_level_ok() */
 
 /* 2zm: the live tunable, reached from userspace by
  * IORegistryEntrySetCFProperties.
@@ -728,6 +731,42 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
 {
     OSDictionary *dict = OSDynamicCast(OSDictionary, props);
     if (!dict) { return kIOReturnBadArgument; }
+
+    /* 2zn: the DMCUB triggers, checked before RBFBPubMs because they are the
+     * reason this setter now takes more than one key. Each one sends ONE
+     * command and returns what the push decided, so a userspace trigger
+     * reports its own outcome instead of leaving the caller to infer it from
+     * counters read later (rule 31: a published counter is stale by design).
+     *
+     * Two keys and not one: dcn21_set_backlight_level binds ABM to the pipe
+     * with SET_PIPE before it sets a level, and whether this chip needs that
+     * is unknown - the firmware's 37 bring-up commands may already have done
+     * it. Sending both unasked would make a moving panel ambiguous between
+     * them, which is exactly the mistake brightness has already made four
+     * times (rule 45). So: RBFBDmubBl alone first; if the panel does not
+     * move, RBFBDmubPipe and then RBFBDmubBl again. Both inside one boot,
+     * which is the point. */
+    {
+        OSNumber *b = OSDynamicCast(OSNumber, dict->getObject("RBFBDmubBl"));
+        if (b) {
+            const long want = (long)b->unsigned32BitValue();
+            if (!rb_dmub_level_ok(want)) {
+                dmubSendsRefused++;
+                dmubSendRefuse = 6;
+                return kIOReturnBadArgument;
+            }
+            const uint32_t rc = dmubSendBacklight((uint32_t)want);
+            LOG("RBFBDmubBl %ld -> refuse %u, wptr %#x, acks %llu",
+                want, rc, dmubSendWptr, dmubAcks);
+            return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+        }
+    }
+    if (dict->getObject("RBFBDmubPipe")) {
+        const uint32_t rc = dmubSendPipe();
+        LOG("RBFBDmubPipe -> refuse %u, wptr %#x, acks %llu",
+            rc, dmubSendWptr, dmubAcks);
+        return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+    }
 
     OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBFBPubMs"));
     if (!n) {

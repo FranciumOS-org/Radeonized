@@ -393,6 +393,33 @@ private:
     uint64_t           dmubReads;
     uint64_t           dmubWptrMoves;
     uint64_t           dmubRptrMoves;
+    /* 2zn: producing on that ring. Separately armed (-rbgpufbdmubbl) and,
+     * even armed, never sent except on an explicit userspace trigger - see
+     * RBAMDFramebufferDMUB.cpp for why the slider is deliberately not wired
+     * to it. The locate and the scan are read-only and unconditional: they
+     * are the control for the address derivation and they cost nothing. */
+    bool               dmubBlArmed;
+    uint32_t           dmubLocRefuse;  /* rb_dmub.h's RB_DMUB_LOC_* */
+    uint32_t           dmubLocRegs[8]; /* the eight registers as read, raw */
+    uint64_t           dmubRingPA;     /* derived system-physical address */
+    uint64_t           dmubRingOff;    /* ...and its offset inside the carve-out */
+    uint32_t           dmubRoute;      /* 0 none, 1 BAR0 sub-range, 2 physical */
+    IOMemoryDescriptor *dmubRingMD;
+    IOMemoryMap       *dmubRingMap;
+    volatile uint8_t  *dmubRing;
+    uint32_t           dmubScanSlots;  /* 64-byte slots read at bring-up */
+    uint32_t           dmubScanPlaus;  /* ...of those, plausible headers */
+    uint32_t           dmubScanAbm;    /* ...of those, type == DMUB_CMD__ABM */
+    uint32_t           dmubScanBytes;
+    uint64_t           dmubSendsOk;
+    uint64_t           dmubSendsRefused;
+    uint32_t           dmubSendRefuse; /* the last refusal's code */
+    uint32_t           dmubSendWptr;   /* the WPTR we last wrote */
+    uint64_t           dmubAcks;       /* sends where RPTR reached that WPTR */
+    uint64_t           dmubAckSpins;   /* ...and sends where it never did */
+    uint64_t           dmubBlSends;
+    uint64_t           dmubPipeSends;
+    long               dmubBlLast;     /* -1 until one is sent */
     uint64_t           blSets;
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
@@ -573,6 +600,18 @@ private:
     /* 2zi: re-read BL_PWM_CNTL and the group lock on the periodic path, so a
      * second writer between our stores becomes visible. Read-only. */
     void blSampleLive(void);
+    /* 2zn: the DMCUB inbox. dmubInit/dmubSetup/dmubTeardown bracket the
+     * mapping, dmubScan is the read-only control, and dmubPush is the only
+     * function in the project that writes to the ring - every send goes
+     * through it. See RBAMDFramebufferDMUB.cpp. */
+    void     dmubInit(void);
+    bool     dmubSetup(void);
+    void     dmubTeardown(void);
+    void     dmubScan(void);
+    uint32_t dmubPush(const uint8_t *cmd);
+    uint32_t dmubSendBacklight(uint32_t level);
+    uint32_t dmubSendPipe(void);
+    void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
     void hubpPoll(void);

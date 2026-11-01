@@ -498,6 +498,8 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * -rbgpufbvramrange / -rbgpufbnocrumb / -rbgpufbpoll - none prefixes
      * -rbgpufbbacklight and it prefixes none of them (the longest shared
      * prefix with any of them is `-rbgpufb`). */
+    dmubInit();
+    dmubBlArmed = false;
     blArmed = false;
     blBuiltIn = false;
     blFloor = RB_BL_LEVEL_FLOOR;
@@ -521,6 +523,17 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * -rbgpunofbbuiltin are distinct for the same reason. The hosttest
          * asserts it over the whole namespace. */
         blParmArmed = argOn("-rbgpufbblparm");
+        /* 2zn: -rbgpufbdmubbl arms the DMCUB route - the one 2zl identified
+         * as the real one. Opt-in and will stay opt-in: it is a new
+         * hardware-write surface, a 64-byte command into memory the
+         * microcontroller reads, and even armed nothing is sent until a
+         * userspace trigger names a level (RBAMDFramebufferDMUB.cpp says
+         * why the slider is not wired to it). Rule 30 against every token in
+         * use: the only one sharing more than `-rbgpufb` is -rbgpufbdrr, and
+         * the two diverge at the next character (m against r), so neither
+         * prefixes the other and the derived negatives -rbgpunofbdmubbl /
+         * -rbgpunofbdrr are distinct for the same reason. */
+        dmubBlArmed = argOn("-rbgpufbdmubbl");
         /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
          * scale. Rule 40: the value comes back as a BINARY INT of the
          * caller's width, so this is an int and not a char buffer - the bug
