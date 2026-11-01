@@ -130,6 +130,65 @@ static const char *replyWhy(long v)
     }
 }
 
+/* The GPINT block. No address appears anywhere in it, which is why it exists:
+ * boot 275's ring result is consistent with an unimplemented command, a wrong
+ * base and a DMCUB that is not running commands at all, and every one of
+ * those produces an advancing RPTR. */
+static void dumpGpint(io_service_t fb)
+{
+    const uint32_t sent = u32(fb, "RBFBDmubGpintSent");
+    const uint32_t back = u32(fb, "RBFBDmubGpintBack");
+    const uint32_t s7p  = u32(fb, "RBFBDmubScratch7Pre");
+    const uint32_t s7   = u32(fb, "RBFBDmubScratch7");
+    const uint32_t s0   = u32(fb, "RBFBDmubScratch0");
+    const long acked = num(fb, "RBFBDmubGpintAcked");
+    const long sends = num(fb, "RBFBDmubGpintSends");
+
+    if (!have(fb, "RBFBDmubGpintSends")) { return; }
+
+    printf("GPINT (no address involved)\n");
+    printf("  sends/refuse   %ld / %ld\n", sends,
+           num(fb, "RBFBDmubGpintRefuse"));
+    if (sends == 0) {
+        printf("  -> not sent yet. `dmubbl gpint` writes ONE register,\n"
+               "     DMCUB_GPINT_DATAIN1, with DMUB_GPINT__GET_FW_VERSION and\n"
+               "     reads DMCUB_SCRATCH7. STOP_FW is refused in src/common,\n"
+               "     exhaustively over codes 2..144, because it would halt the\n"
+               "     firmware that is driving this panel.\n");
+        return;
+    }
+    printf("  sent / back    0x%08x / 0x%08x   acked %ld\n", sent, back, acked);
+    printf("  SCRATCH7       0x%08x -> 0x%08x   (pre -> post)\n", s7p, s7);
+    printf("  SCRATCH0       0x%08x   DATAOUT 0x%08x\n", s0,
+           u32(fb, "RBFBDmubDataout"));
+    printf("  version bytes  %u.%u.%u.%u from SCRATCH0,  %u.%u.%u.%u "
+           "from SCRATCH7\n",
+           (s0 >> 24) & 0xff, (s0 >> 16) & 0xff, (s0 >> 8) & 0xff, s0 & 0xff,
+           (s7 >> 24) & 0xff, (s7 >> 16) & 0xff, (s7 >> 8) & 0xff, s7 & 0xff);
+
+    if (acked) {
+        printf("  -> THE DMCUB IS ALIVE AND ANSWERING US. It cleared the status\n"
+               "     field of a register we wrote, with no memory, no window and\n"
+               "     no mc2pa anywhere in the path. So the ring is the problem,\n"
+               "     not the microcontroller: either command 6 is not implemented\n"
+               "     by 4.0.15.47 or it reads a base other than CW4's offset.\n");
+        if (s7 != s7p) {
+            printf("     SCRATCH7 MOVED, so that value is a reply and not a\n"
+                   "     leftover. Check it against 4.0.15.47, which a level-2\n"
+                   "     probe read from SCRATCH0 - a DIFFERENT register.\n");
+        } else {
+            printf("     SCRATCH7 did NOT move, so whatever it holds was already\n"
+                   "     there and is not this query's answer (rule 26's control).\n");
+        }
+    } else {
+        printf("  -> NO ACK. The status field we set is still set, so the DMCUB\n"
+               "     did not take a register write that involves no addressing\n"
+               "     at all. That retires the ring as the question: the inbox\n"
+               "     RPTR advancing is then not the firmware executing our\n"
+               "     commands, and 2zq's four acks meant something else.\n");
+    }
+}
+
 /* The reply block: the two buffers and what the difference means. This is
  * the one reading on this surface that is not an inference from a pointer. */
 static void dumpReply(io_service_t fb)
@@ -335,6 +394,7 @@ static void dump(io_service_t fb)
            "     ack is necessary and nowhere near sufficient; the panel is\n"
            "     the deliverable and your eyes are its only instrument.\n");
     dumpReply(fb);
+    dumpGpint(fb);
 }
 
 int main(int argc, char **argv)
@@ -355,7 +415,10 @@ int main(int argc, char **argv)
                "                      chip, and the only command whose reply\n"
                "                      the firmware writes back into our own\n"
                "                      slot. Send this FIRST: it is what turns\n"
-               "                      an ack into a byte-level identification.\n");
+               "                      an ack into a byte-level identification.\n"
+               "  dmubbl gpint        GET_FW_VERSION over GPINT - ONE register\n"
+               "                      write, no address anywhere. Answers\n"
+               "                      whether the DMCUB talks to us at all.\n");
         IOObjectRelease(fb);
         return 0;
     }
@@ -370,7 +433,10 @@ int main(int argc, char **argv)
     }
 
     NSDictionary *d;
-    if (strcmp(argv[1], "caps") == 0) {
+    if (strcmp(argv[1], "gpint") == 0) {
+        d = @{ @"RBFBDmubGpint": @(1) };
+        printf("\nsending GPINT GET_FW_VERSION (one register, no address)...\n");
+    } else if (strcmp(argv[1], "caps") == 0) {
         d = @{ @"RBFBDmubCaps": @(1) };
         printf("\nsending QUERY_FEATURE_CAPS (read-only, ret_status set)...\n");
     } else if (strcmp(argv[1], "pipe") == 0) {

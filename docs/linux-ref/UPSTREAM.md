@@ -297,3 +297,24 @@ the provenance.
   `inbox1.rb`); `dmub_srv_wait_for_idle` (polls until `dmub_rb_empty` on
   inbox1); `default_inbox_type = DMUB_CMD_INTERFACE_FB` with the REG inbox
   reserved for DCN42/42B, DCN401, DCN60 - so DCN 3.1 replies through the ring.
+
+2zr additionally read, and did not vendor, at the same commit:
+
+- `dmub/inc/dmub_cmd.h` - `union dmub_gpint_data_register` (`param : 16`,
+  `command_code : 12`, `status : 4`, plus `uint32_t all`);
+  `enum dmub_gpint_command` with `DMUB_GPINT__INVALID_COMMAND = 0`,
+  `DMUB_GPINT__GET_FW_VERSION = 1` ("Queries the firmware version"),
+  `DMUB_GPINT__STOP_FW = 2` ("Halts the firmware"); and
+  `#define DMUB_GPINT__STOP_FW_RESPONSE 0xDEADDEAD`.
+- `dmub/src/dmub_dcn31.c` - `dmub_dcn31_set_gpint`
+  (`REG_WRITE(DMCUB_GPINT_DATAIN1, reg.all)`), `dmub_dcn31_is_gpint_acked`
+  (clears `status` in the local copy, reads `DMCUB_GPINT_DATAIN1`, compares
+  the whole word), `dmub_dcn31_get_gpint_response`
+  (`REG_READ(DMCUB_SCRATCH7)`), and `dmub_dcn31_get_gpint_dataout` (reads
+  `DMCUB_GPINT_DATAOUT`, then clears it and pulses `DMCUB_GPINT_IH_INT_ACK`
+  with `DMCUB_GPINT_IH_INT_EN` off - **deliberately not reproduced**, see 2zr).
+
+Already vendored and used here: `dcn_3_1_2_offset.h`'s `regDMCUB_SCRATCH0`
+0x01e3, `regDMCUB_SCRATCH7` 0x01ea, `regDMCUB_GPINT_DATAIN0` 0x01f7,
+`regDMCUB_GPINT_DATAIN1` 0x01f8, `regDMCUB_GPINT_DATAOUT` 0x01f9, all
+base_idx 2.

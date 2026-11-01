@@ -452,5 +452,85 @@ int dmub_tests(void)
               "scan would not reject a slot holding one");
     }
 
+    /* --- 2zr: GPINT, the one test with no address in it ---
+     *
+     * Boot 275 pushed QUERY_FEATURE_CAPS into slot 0x940, RPTR followed, and
+     * the slot still read `06 00 01 0e` - ret_status STILL SET. The ring
+     * cannot say whether that is an unimplemented command, a wrong base, or
+     * a DMCUB that is not processing commands, because every one of those
+     * answers produces an advancing RPTR. GPINT has no base. */
+    CHECK(RB_DMUB_GPINT_GET_FW_VERSION == 1u,
+          "DMUB_GPINT__GET_FW_VERSION is 1, documented 'Queries the firmware "
+          "version' - and the answer is checkable against DMCUB_SCRATCH0's "
+          "4.0.15.47, read by a level-2 probe from a DIFFERENT register");
+    CHECK(RB_DMUB_GPINT_STOP_FW == 2u, "DMUB_GPINT__STOP_FW is 2");
+    CHECK(RB_DMUB_GPINT_STOP_RESPONSE == 0xDEADDEADu,
+          "STOP_FW answers 0xDEADDEAD in SCRATCH7");
+
+    /* THE GATE. The DMCUB is what lit this panel; halting it ends the boot. */
+    CHECK(rb_dmub_gpint_allowed(RB_DMUB_GPINT_GET_FW_VERSION),
+          "the version query is the one allowed code");
+    CHECK(!rb_dmub_gpint_allowed(RB_DMUB_GPINT_STOP_FW),
+          "STOP_FW IS REFUSED - it halts the firmware driving this panel, so "
+          "this is a gate and not a comment");
+    CHECK(!rb_dmub_gpint_allowed(0u), "INVALID_COMMAND is refused");
+    {
+        int any = 0;
+        uint32_t c;
+        for (c = 2u; c <= 144u; c++) {
+            if (rb_dmub_gpint_allowed(c)) { any = 1; }
+        }
+        CHECK(!any,
+              "no code from 2 to 144 is allowed - the allowlist is exactly "
+              "one entry, checked exhaustively rather than by inspection");
+    }
+
+    {
+        const uint32_t w = rb_dmub_gpint_word(RB_DMUB_GPINT_GET_FW_VERSION, 0u);
+
+        /* param:16, command_code:12, status:4 - asserted as a literal word,
+         * not through this file's own accessors. */
+        CHECK(w == 0x10010000u,
+              "the version query's word is 0x10010000: param 0, code 1 at "
+              "bit 16, status 1 at bit 28");
+        CHECK(rb_dmub_gpint_code(w) == 1u, "the accessor reads code 1 back");
+        CHECK(rb_dmub_gpint_status(w) == 1u, "status is set on send");
+
+        /* The ack: the firmware clears the status FIELD and leaves the rest. */
+        CHECK(rb_dmub_gpint_acked(w, 0x00010000u),
+              "status cleared with code and param intact is an ACK");
+        CHECK(!rb_dmub_gpint_acked(w, w),
+              "our own word read back unchanged is NOT an ack - the status "
+              "field is still set, which is the pending state");
+        CHECK(!rb_dmub_gpint_acked(w, 0u),
+              "a zero readback is NOT an ack, though it has a clear status "
+              "field - the code must survive, or a dead register reads as a "
+              "reply (rule 14: absence is not a result)");
+        CHECK(!rb_dmub_gpint_acked(w, 0xffffffffu),
+              "all-ones is not an ack");
+        CHECK(!rb_dmub_gpint_acked(w, 0x00020000u),
+              "a cleared status under a DIFFERENT code is not our ack");
+
+        /* A parameter rides in the low 16 bits and must not reach the code. */
+        CHECK(rb_dmub_gpint_word(1u, 0xffffu) == 0x1001ffffu,
+              "a full 16-bit parameter does not bleed into command_code");
+        CHECK(rb_dmub_gpint_code(rb_dmub_gpint_word(1u, 0xffffu)) == 1u,
+              "...and the code still reads 1 beneath it");
+    }
+
+    /* The registers, against docs/linux-ref/dcn_3_1_2_offset.h. */
+    CHECK(RB_DMUB_DW_GPINT_DATAIN1 == 0x01f8u,
+          "regDMCUB_GPINT_DATAIN1 is 0x01f8, base_idx 2");
+    CHECK(RB_DMUB_DW_GPINT_DATAOUT == 0x01f9u,
+          "regDMCUB_GPINT_DATAOUT is 0x01f9");
+    CHECK(RB_DMUB_DW_SCRATCH7 == 0x01eau,
+          "regDMCUB_SCRATCH7 is 0x01ea - where the answer lands");
+    CHECK(RB_DMUB_DW_SCRATCH0 == 0x01e3u,
+          "regDMCUB_SCRATCH0 is 0x01e3 - where the INDEPENDENT 4.0.15.47 "
+          "reading came from, and it is not 0x01ea");
+    CHECK(RB_DMUB_DW_SCRATCH0 != RB_DMUB_DW_SCRATCH7,
+          "the control and the answer are different registers, or the "
+          "positive control would be the instrument reading itself");
+
     return failures;
 }

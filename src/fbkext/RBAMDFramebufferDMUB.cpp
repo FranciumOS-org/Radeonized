@@ -92,6 +92,14 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubReplyVerdict = RB_DMUB_REPLY_NONE;
     dmubReplySlot = 0;
     dmubConfirms = 0;
+    dmubGpintSends = 0;
+    dmubGpintRefuse = 0;
+    dmubGpintSent = 0;
+    dmubGpintBack = 0;
+    dmubGpintAcked = 0;
+    dmubGpintSpins = 0;
+    dmubScratch0 = 0; dmubScratch7 = 0; dmubDataout = 0;
+    dmubScratch0Pre = 0; dmubScratch7Pre = 0;
     for (unsigned i = 0; i < RB_DMUB_CMD_SIZE; i++) {
         dmubReplySent[i] = 0;
         dmubReplyGot[i] = 0;
@@ -506,6 +514,67 @@ uint32_t RBAMDFramebuffer::dmubSendCaps(void)
     return dmubPush(cmd);
 }
 
+/* One GPINT, and only the version query.
+ *
+ * This is the whole of dmub_dcn31.c's set_gpint / is_gpint_acked /
+ * get_gpint_response for a query: write DMCUB_GPINT_DATAIN1, read it back
+ * until the status field clears, then read DMCUB_SCRATCH7. There is no
+ * memory, no window, no mc2pa and no mapping anywhere in it, which is the
+ * entire point after boot 275.
+ *
+ * TWO THINGS LINUX DOES THAT THIS DELIBERATELY DOES NOT.
+ * dmub_dcn31_get_gpint_dataout clears DMCUB_GPINT_DATAOUT and pulses
+ * DMCUB_GPINT_IH_INT_ACK with DMCUB_GPINT_IH_INT_EN off around it. That is
+ * interrupt plumbing belonging to a driver that owns the DMCUB; here the
+ * DMCUB is what lit the panel and is servicing whatever Apple's stack asks
+ * of it, so DATAOUT is READ and nothing in DMCUB_INTERRUPT_ENABLE or
+ * _ACK is touched. And the word is not cleared afterwards: once the status
+ * field reads 0 the command is spent, so a write to put a zero there would
+ * be a second write for no reading.
+ *
+ * The control is read on BOTH sides. DMCUB_SCRATCH0 is where a level-2 probe
+ * read "4.0.15.47 running, 4.0.21.71 on ROM" long before this file existed,
+ * and SCRATCH7 is where the answer lands - 0x01e3 against 0x01ea. Both are
+ * sampled before the write and after it, so a SCRATCH7 that already held the
+ * answer cannot be mistaken for a reply (rule 26's control, and 2zp's error
+ * was exactly a reading compared with itself). */
+uint32_t RBAMDFramebuffer::dmubGpint(uint32_t code)
+{
+    if (!dmubBlArmed) { return dmubGpintRefuse = 1; }
+    if (!blRegs) { return dmubGpintRefuse = 2; }
+    /* The gate, not a comment: DMUB_GPINT__STOP_FW halts the firmware that
+     * is driving this panel, so exactly one code is buildable. */
+    if (!rb_dmub_gpint_allowed(code)) { return dmubGpintRefuse = 3; }
+
+    dmubScratch0Pre = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_SCRATCH0];
+    dmubScratch7Pre = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_SCRATCH7];
+
+    dmubGpintSent = rb_dmub_gpint_word(code, 0u);
+    dmubGpintAcked = 0;
+    dmubGpintSends++;
+    blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_GPINT_DATAIN1] = dmubGpintSent;
+
+    {
+        unsigned spins = 1000;                /* 1 ms at 1 us a turn */
+        while (spins--) {
+            dmubGpintBack =
+                blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_GPINT_DATAIN1];
+            if (rb_dmub_gpint_acked(dmubGpintSent, dmubGpintBack)) {
+                dmubGpintAcked = 1;
+                break;
+            }
+            IODelay(1);
+        }
+        if (spins == (unsigned)-1) { dmubGpintSpins++; }
+    }
+
+    dmubScratch0 = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_SCRATCH0];
+    dmubScratch7 = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_SCRATCH7];
+    dmubDataout  = blRegs[kRbDmuSeg2Dmub + RB_DMUB_DW_GPINT_DATAOUT];
+
+    return dmubGpintRefuse = 0;
+}
+
 void RBAMDFramebuffer::dmubPublish(void)
 {
     setProperty("RBFBDmubBlArmed", dmubBlArmed);
@@ -561,6 +630,17 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubReplyVerdict", (uint64_t)dmubReplyVerdict, 32);
     setProperty("RBFBDmubReplySlot", (uint64_t)dmubReplySlot, 32);
     setProperty("RBFBDmubConfirms", (uint64_t)dmubConfirms, 32);
+    setProperty("RBFBDmubGpintSends", (uint64_t)dmubGpintSends, 32);
+    setProperty("RBFBDmubGpintRefuse", (uint64_t)dmubGpintRefuse, 32);
+    setProperty("RBFBDmubGpintSent", (uint64_t)dmubGpintSent, 32);
+    setProperty("RBFBDmubGpintBack", (uint64_t)dmubGpintBack, 32);
+    setProperty("RBFBDmubGpintAcked", (uint64_t)dmubGpintAcked, 32);
+    setProperty("RBFBDmubGpintSpins", (uint64_t)dmubGpintSpins, 32);
+    setProperty("RBFBDmubScratch0Pre", (uint64_t)dmubScratch0Pre, 32);
+    setProperty("RBFBDmubScratch7Pre", (uint64_t)dmubScratch7Pre, 32);
+    setProperty("RBFBDmubScratch0", (uint64_t)dmubScratch0, 32);
+    setProperty("RBFBDmubScratch7", (uint64_t)dmubScratch7, 32);
+    setProperty("RBFBDmubDataout", (uint64_t)dmubDataout, 32);
     {
         OSData *d = OSData::withBytes(dmubReplySent, RB_DMUB_CMD_SIZE);
         if (d) { setProperty("RBFBDmubReplySent", d); d->release(); }

@@ -214,6 +214,10 @@ public:
     long     dmubBlLast=-1;
     uint32_t dmubCapsSends=0, dmubReplyVerdict=0, dmubReplySlot=0;
     uint32_t dmubConfirms=0;
+    uint32_t dmubGpintSends=0, dmubGpintRefuse=0, dmubGpintSent=0;
+    uint32_t dmubGpintBack=0, dmubGpintAcked=0, dmubGpintSpins=0;
+    uint32_t dmubScratch0=0, dmubScratch7=0, dmubDataout=0;
+    uint32_t dmubScratch0Pre=0, dmubScratch7Pre=0;
     uint8_t  dmubReplySent[RB_DMUB_CMD_SIZE]={0};
     uint8_t  dmubReplyGot[RB_DMUB_CMD_SIZE]={0};
     uint64_t blSets=0;            /* 2xs */
