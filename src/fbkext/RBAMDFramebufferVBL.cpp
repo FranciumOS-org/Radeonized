@@ -202,6 +202,17 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBBlLiveCount", (uint64_t)blLiveCount, 32);
     setProperty("RBFBBlLiveReads", blLiveReads, 64);
     setProperty("RBFBBlLiveDiffs", blLiveDiffs, 64);
+    /* 2zl: DMCUB inbox 1. RBFBDmubReads is the rule-14 denominator - without
+     * it a zero move count cannot be told from a sampler that never ran. */
+    setProperty("RBFBDmubInboxBase", (uint64_t)dmubInboxBase, 32);
+    setProperty("RBFBDmubInboxSize", (uint64_t)dmubInboxSize, 32);
+    setProperty("RBFBDmubWptr0", (uint64_t)dmubWptr0, 32);
+    setProperty("RBFBDmubRptr0", (uint64_t)dmubRptr0, 32);
+    setProperty("RBFBDmubWptr", (uint64_t)dmubWptr, 32);
+    setProperty("RBFBDmubRptr", (uint64_t)dmubRptr, 32);
+    setProperty("RBFBDmubReads", dmubReads, 64);
+    setProperty("RBFBDmubWptrMoves", dmubWptrMoves, 64);
+    setProperty("RBFBDmubRptrMoves", dmubRptrMoves, 64);
     setProperty("RBFBBlCntl", (uint64_t)blCntl, 32);
     setProperty("RBFBBlCntl2", (uint64_t)blCntl2, 32);
     setProperty("RBFBBlPeriod", (uint64_t)blPeriod, 32);

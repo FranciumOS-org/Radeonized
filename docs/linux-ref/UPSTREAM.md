@@ -235,3 +235,23 @@ are listed here with their source and are asserted by the hosttest:
 
 They live in `src/common/rb_hubp.h` with the live boot-216 value `0x04100000`
 as the control: it decodes with no leftover bits.
+
+Added 2026-11-01, from master at `cbbddb6b08cc9900a87cccaa9b22bbe06aa4f50a`:
+
+| File | Upstream path |
+|---|---|
+| dcn31_panel_cntl.c | drivers/gpu/drm/amd/display/dc/dcn31/dcn31_panel_cntl.c |
+| link_edp_panel_control.c | drivers/gpu/drm/amd/display/dc/link/protocols/link_edp_panel_control.c |
+| dcn21_hwseq.c | drivers/gpu/drm/amd/display/dc/hwss/dcn21/dcn21_hwseq.c |
+
+These three are why 2zj's backlight route is wrong for this chip (2zk). The
+local `dce_panel_cntl.c`, which 2xs transcribed, writes `BL_PWM_CNTL`
+directly; `dcn31_panel_cntl.c` has **no `.set_backlight_level` at all** and
+every member of `dcn31_link_panel_cntl_funcs` is a DMUB round trip, and
+`dcn21_set_backlight_level` takes the register-writing `dce110` path only
+`if (dc->dc->res_pool->dmcu)` - the old DMCU, which Rembrandt does not have -
+and otherwise ends at `dmub_abm_set_backlight()`. `link_edp_panel_control.c`
+is where the AUX variants live (`BACKLIGHT_CONTROL_VESA_AUX`,
+`BACKLIGHT_CONTROL_AMD_AUX`), and they are reached only from
+`edp_set_backlight_level_nits`, not from the ordinary PWM path - so eDP AUX
+was the wrong first candidate.

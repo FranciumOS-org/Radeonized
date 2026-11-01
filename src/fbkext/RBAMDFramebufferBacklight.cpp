@@ -85,6 +85,25 @@ static const uint32_t kRbDmuSeg2Bl = 0x34c0;
 #define RB_BL_DW_PERIOD  0x2f1bu
 #define RB_BL_DW_LOCK    0x2f1cu
 
+/* 2zl: DMCUB's inbox-1 ring, dcn_3_1_2_offset.h:1015-1022, base_idx 2 - the
+ * same segment and the same read-only mapping as the BL_PWM block above, and
+ * at a far lower dword than BL_PWM_GRP1_REG_LOCK, so the bound blSetup()
+ * already checks covers them with nothing new to map.
+ *
+ * WHY THESE AND NOT MORE PWM REGISTERS. 2zk read dcn31_panel_cntl.c: on
+ * DCN 3.1 the CPU does not write BL_PWM_CNTL to change brightness. The whole
+ * of `dcn31_link_panel_cntl_funcs` is DMUB round trips and it has NO
+ * .set_backlight_level at all; dcn21_set_backlight_level takes the
+ * register-writing dce110 path only `if (dc->dc->res_pool->dmcu)`, which is
+ * the old DMCU, and otherwise ends at `dmub_abm_set_backlight()`. So the
+ * level lives in the DMCUB and the route to it is a command on this ring.
+ * Before any of that can be considered, ONE thing has to be known: whether
+ * anything else is producing on it. These four say so, read-only. */
+#define RB_DMUB_DW_INBOX1_BASE  0x01d4u
+#define RB_DMUB_DW_INBOX1_SIZE  0x01d5u
+#define RB_DMUB_DW_INBOX1_WPTR  0x01d6u
+#define RB_DMUB_DW_INBOX1_RPTR  0x01d7u
+
 /* OTG0, for the segment check. 2xp established that OTG0's master-enable is
  * the clause that corroborates the segment and that OTG1-3 do NOT - a live
  * OTG is a plausible value at a plausible offset - so only OTG0 is used
@@ -151,6 +170,15 @@ bool RBAMDFramebuffer::blSetup(void)
     blLiveCount = 0;
     blLiveReads = 0;
     blLiveDiffs = 0;
+    dmubInboxBase = 0;
+    dmubInboxSize = 0;
+    dmubWptr0 = 0;
+    dmubRptr0 = 0;
+    dmubWptr = 0;
+    dmubRptr = 0;
+    dmubReads = 0;
+    dmubWptrMoves = 0;
+    dmubRptrMoves = 0;
     blPendTimeouts = 0;
     blParmAdds = 0;
     blFlagsGets = 0;
@@ -363,6 +391,40 @@ void RBAMDFramebuffer::blSampleLive(void)
     blLiveCount = blLiveCntl & RB_BL_CNTL_ACTIVE_CNT_MASK;
     blLiveReads++;
     if (blSets > 0 && blLiveCount != blLastCount) { blLiveDiffs++; }
+
+    /* 2zl: is anything producing on DMCUB's inbox 1?
+     *
+     * A ring whose WPTR never moves after bring-up has one producer at most,
+     * and 2zk's read of Apple's own binary says which: nm over
+     * AMDRadeonX6000Framebuffer finds `initializeDmcuB` and two DMCUB
+     * VERSION reads and NO abm/backlight symbol of any kind (3314 symbols,
+     * so the empty result is against a known-present control, rule 26) -
+     * Apple boots the DMCUB on this part and never sends it an ABM command.
+     * If that is right, dmubWptrMoves stays at zero for the whole boot and
+     * the ring is free. If it moves, we would be a SECOND producer on it and
+     * that route is closed rather than merely difficult - which is a fact
+     * worth having before writing anything, not after (rule: find the
+     * consumer before writing to a field).
+     *
+     * Published whether or not it moved, with the first value kept beside
+     * the current one so "never moved" and "we never looked" are different
+     * readings (rule 14). */
+    {
+        const uint32_t w = blRegs[kRbDmuSeg2Bl + RB_DMUB_DW_INBOX1_WPTR];
+        const uint32_t r = blRegs[kRbDmuSeg2Bl + RB_DMUB_DW_INBOX1_RPTR];
+        if (dmubReads == 0) {
+            dmubInboxBase = blRegs[kRbDmuSeg2Bl + RB_DMUB_DW_INBOX1_BASE];
+            dmubInboxSize = blRegs[kRbDmuSeg2Bl + RB_DMUB_DW_INBOX1_SIZE];
+            dmubWptr0 = w;
+            dmubRptr0 = r;
+        } else {
+            if (w != dmubWptr) { dmubWptrMoves++; }
+            if (r != dmubRptr) { dmubRptrMoves++; }
+        }
+        dmubWptr = w;
+        dmubRptr = r;
+        dmubReads++;
+    }
 }
 
 /* 2xy: THE SYSTEM SETTINGS SLIDER, and why it is two answers and not a write.
