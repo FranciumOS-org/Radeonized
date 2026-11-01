@@ -328,6 +328,26 @@ private:
     uint32_t           blLastLevel;   /* what we last asked for, clamped */
     uint32_t           blLastCount;   /* ...and the duty cycle it became */
     uint32_t           blReadback;    /* ...and what the register read back */
+    /* 2zi: the same two registers re-read on the PERIODIC path, which is a
+     * different fact from blReadback. blReadback is sampled microseconds
+     * after our own store, so it answers "did the store reach the chip" and
+     * nothing else; blCntl/blLock are a snapshot from start() and never move.
+     * Neither can see a SECOND writer. On boot 269 the duty cycle round-trips
+     * (69 % -> 17 %, read back bit-identical) and the panel does not change at
+     * all, which leaves exactly two worlds: either something else owns
+     * BL_PWM_CNTL between our writes - ABM in the DMCUB firmware is the
+     * candidate, it is running 4.0.15.47 - or this panel's backlight does not
+     * follow PWRSEQ0's PWM at all, which is 2or's own falsification test
+     * reached by a route a zero period cannot detect. blLiveDiffs separates
+     * them: it counts publishes where the live active-count disagrees with
+     * blLastCount, so a climbing counter is a second writer and a pinned zero
+     * is the wrong pin. Read-only, on the path that already does MMIO reads
+     * (hubpPoll), published whether or not it moved (rule 14). */
+    uint32_t           blLiveCntl;    /* BL_PWM_CNTL as it reads NOW */
+    uint32_t           blLiveLock;    /* BL_PWM_GRP1_REG_LOCK as it reads NOW */
+    uint32_t           blLiveCount;   /* ...its ACTIVE_CNT field alone */
+    uint64_t           blLiveReads;   /* publishes that sampled it at all */
+    uint64_t           blLiveDiffs;   /* ...of those, how many disagreed */
     uint64_t           blSets;
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
@@ -505,6 +525,9 @@ private:
     void blParamsTeardown(void);
     uint32_t blCurrentLevel(void);
     bool blSetLevel(uint32_t level);
+    /* 2zi: re-read BL_PWM_CNTL and the group lock on the periodic path, so a
+     * second writer between our stores becomes visible. Read-only. */
+    void blSampleLive(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
     void hubpPoll(void);
