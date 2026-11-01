@@ -358,6 +358,19 @@ private:
     uint32_t           blLiveCount;   /* ...its ACTIVE_CNT field alone */
     uint64_t           blLiveReads;   /* publishes that sampled it at all */
     uint64_t           blLiveDiffs;   /* ...of those, how many disagreed */
+    /* 2zl: DMCUB inbox 1, read-only. The question is only whether anything
+     * else produces on the ring, so the FIRST values are kept beside the
+     * current ones and the move counts are separate - "never moved" and "we
+     * never looked" must not read alike (rule 14). */
+    uint32_t           dmubInboxBase;
+    uint32_t           dmubInboxSize;
+    uint32_t           dmubWptr0;
+    uint32_t           dmubRptr0;
+    uint32_t           dmubWptr;
+    uint32_t           dmubRptr;
+    uint64_t           dmubReads;
+    uint64_t           dmubWptrMoves;
+    uint64_t           dmubRptrMoves;
     uint64_t           blSets;
     uint64_t           blGets;
     uint64_t           blPendTimeouts;
