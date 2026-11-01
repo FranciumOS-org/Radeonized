@@ -205,4 +205,23 @@ static inline int rb_key_disarms(const char *var, int reads_zero,
     return !rb_legacy_zero_key(var);
 }
 
+/* 2zm: the bound on rbgpufbpubms, and on the live set of the same tunable.
+ *
+ * It lives here rather than inline in the kext for the reason everything else
+ * in this header does: the boot-arg parse and the runtime setProperties path
+ * are two separately-written callers of one decision, and rule 38 says two
+ * such callers must answer identically. The hosttest owns it, so a change to
+ * the range cannot land on only one of them.
+ *
+ * 0 is IN range and means "do not throttle" - the unthrottled pre-2zk
+ * behaviour, which is the A side of the comparison rule 44 wants. The ceiling
+ * is 10 s because beyond that the periodic publish every 288 vblanks is the
+ * only publisher left and the tunable has stopped meaning anything. */
+#define RB_PUB_MS_MAX 10000u
+
+static inline int rb_pub_ms_ok(long v)
+{
+    return v >= 0 && v <= (long)RB_PUB_MS_MAX;
+}
+
 #endif /* RB_DEFAULTS_H */

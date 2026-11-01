@@ -92,6 +92,8 @@ public:
     uint64_t pubNextAbs=0;
     uint64_t pubHotCalls=0;
     uint64_t pubHotDone=0;
+    uint64_t pubSetsOk=0, pubSetsRefused=0, pubSetsOther=0;   /* 2zm */
+    long     pubMsLast=-1;
     uint64_t vblNextDeadline=0;
     uint32_t vblResyncs=0;
     // 2wc: the 'amtr' counters publishVBLState also reports.

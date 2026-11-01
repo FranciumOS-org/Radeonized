@@ -133,6 +133,10 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBPubMs", (uint64_t)pubMs, 32);
     setProperty("RBFBPubHotCalls", pubHotCalls, 64);
     setProperty("RBFBPubHotDone", pubHotDone, 64);
+    setProperty("RBFBPubSetsOk", pubSetsOk, 64);
+    setProperty("RBFBPubSetsRefused", pubSetsRefused, 64);
+    setProperty("RBFBPubSetsOther", pubSetsOther, 64);
+    setProperty("RBFBPubMsLast", (uint64_t)(int64_t)pubMsLast, 64);
     setProperty("RBFBPollArmed", pollArmed);
     setProperty("RBFBPollReads", pollReads, 64);
     setProperty("RBFBPollChanges", pollChanges, 64);
@@ -685,3 +689,71 @@ void RBAMDFramebuffer::vblRetune(uint64_t periodNs)
     }
     setProperty("RBFBVBLPeriodNs", vblPeriodNs, 64);
 }
+
+#ifndef RBGPU_FB_VBL_HOSTTEST
+/* 2zm: the live setter is kext-only. The host build of this file compiles
+ * against fb_vbl_shim.hpp, which has no OSDictionary, no OSNumber and no
+ * IOReturn codes - and the DECISION it makes is rb_pub_ms_ok(), which lives
+ * in src/common and is asserted by defaults_test.c on the host, so nothing
+ * testable is being excluded here (the throttle itself, publishVBLStateHot,
+ * stays in the host build and has its own case). */
+#include "rb_defaults.h"   /* rb_pub_ms_ok() */
+
+/* 2zm: the live tunable, reached from userspace by
+ * IORegistryEntrySetCFProperties.
+ *
+ * WHY THIS EXISTS. Rule 44 says a configuration claim needs two boots per
+ * side OR an A/B inside one boot, and until now this project has only ever
+ * had the first option, because every dial it owns is a boot-arg: 2xn, 2zb
+ * and 2zc spent three boots on three points of one dose-response curve, and
+ * 2zg then spent two more discovering that boot-to-boot variance exceeds
+ * within-boot variance - which is precisely the thing a single-boot A/B is
+ * immune to. One tunable that can be moved while the frame clock keeps
+ * running turns that into six runs, a write, and six more.
+ *
+ * WHAT IT WILL AND WILL NOT DO. `RBFBPubMs` only, bounded by the same
+ * rb_pub_ms_ok() the boot-arg path uses so the two cannot drift (rule 38).
+ * No register is written, no hardware state moves and nothing about the panel
+ * changes - it sets how often an INSTRUMENT publishes. Any other key is
+ * counted in pubSetsOther and declined, so a misspelled key is a reading and
+ * not silence (rule 14), and a refused value is published in pubMsLast
+ * (rule 19).
+ *
+ * Note what is NOT done here: the deadline is reset to zero rather than
+ * recomputed from `now`, so the first publish after a change happens at once.
+ * A new interval that first had to expire would put a window of the OLD
+ * behaviour at the start of the new arm - which is exactly the kind of seam
+ * that makes an A/B measure the transition instead of the two states. */
+IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
+{
+    OSDictionary *dict = OSDynamicCast(OSDictionary, props);
+    if (!dict) { return kIOReturnBadArgument; }
+
+    OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBFBPubMs"));
+    if (!n) {
+        pubSetsOther++;
+        return kIOReturnUnsupported;
+    }
+
+    /* Signed on purpose: a value that arrived negative must be REFUSED, not
+     * wrapped into an interval of half an eternity. rb_pub_ms_ok() takes a
+     * long and the hosttest asserts the -1 case. */
+    const long want = (long)n->unsigned32BitValue();
+    pubMsLast = want;
+    if (!rb_pub_ms_ok(want)) {
+        pubSetsRefused++;
+        return kIOReturnBadArgument;
+    }
+
+    pubMs = (uint32_t)want;
+    pubIntervalAbs = 0;
+    if (pubMs != 0) {
+        nanoseconds_to_absolutetime((uint64_t)pubMs * 1000000ull,
+                                    &pubIntervalAbs);
+    }
+    pubNextAbs = 0;                  /* publish immediately, see above */
+    pubSetsOk++;
+    LOG("RBFBPubMs set live to %u ms", pubMs);
+    return kIOReturnSuccess;
+}
+#endif /* RBGPU_FB_VBL_HOSTTEST */

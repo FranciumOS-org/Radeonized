@@ -56,6 +56,20 @@ class RBAMDFramebuffer : public IOFramebuffer {
     friend class RBAMDBacklightParams;
 
 public:
+    /* 2zm: the live tunable channel. `IORegistryEntrySetCFProperties` from
+     * userspace lands here, which is how an A/B can be run INSIDE one boot -
+     * rule 44's preferred form, and the one this project could never reach,
+     * because every dial it has ever had was a boot-arg. Six boots went into
+     * three dose points for the retire tick for exactly that reason.
+     *
+     * Deliberately narrow: it accepts `RBFBPubMs` and nothing else, bounded by
+     * rb_pub_ms_ok() so the boot-arg path and this one cannot disagree
+     * (rule 38), and it changes the rate of an INSTRUMENT - no register is
+     * written and no hardware state moves, which is why this is not in the
+     * class of things that need the user's decision. Every other key is
+     * refused and counted, so a typo is a reading rather than silence
+     * (rule 14). */
+    virtual IOReturn setProperties(OSObject *props) APPLE_KEXT_OVERRIDE;
     void drrRun(void);           /* 2y5: reached from the thread_call thunk */
     /* 2y5: argOn() lives in RBAMDFramebuffer.cpp's anonymous namespace, so it
      * is TU-local on purpose. This forwards to it rather than letting another
@@ -178,6 +192,14 @@ private:
     uint64_t pubNextAbs;
     uint64_t pubHotCalls;
     uint64_t pubHotDone;
+    /* 2zm: the live setter's own record. Accepted and refused are separate so
+     * "nobody asked" and "asked for something out of range" cannot read
+     * alike, and pubMsLast keeps what was refused (rule 19's form: a refusal
+     * path must publish the value it refused). */
+    uint64_t pubSetsOk;
+    uint64_t pubSetsRefused;
+    uint64_t pubSetsOther;
+    long     pubMsLast;
     /* 2xe: THE VBLANK WAS NOT A CLOCK. armVBL() re-armed from `now`, at the
      * END of deliverVBL(), so the handler's own duration was added to every
      * single period. Measured from userspace with CVDisplayLink's CVTimeStamp

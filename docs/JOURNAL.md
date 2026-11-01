@@ -51965,3 +51965,110 @@ chooses to add, since no `_BCM` exists today) or nothing.
 Build `A3124291`. Carries 2zk's throttle as well, so one boot answers both:
 `RBFBPubMs` / `RBFBPubHotCalls` / `RBFBPubHotDone` and the 60 Hz frame rate for
 2zk, `RBFBDmubWptrMoves` against `RBFBDmubReads` for 2zl.
+
+## 2zl CONFIRMED and 2zk measured (boot 271) — the DMUB ring is free, and 60 Hz is now fully fed
+
+Boot 271, framebuffer `A3124291` (UUID moved, rule 15), plugin unchanged at
+`2B35749B`. Boot-args unchanged from boot 268, so `-rbgpuretirevbl` is armed
+and the 60 Hz mode gate still hands retirement back to the timer.
+
+### 2zl: nothing else produces on DMCUB inbox 1
+
+```
+RBFBDmubReads      125        <- the denominator (rule 14)
+RBFBDmubWptrMoves  0
+RBFBDmubRptrMoves  0
+RBFBDmubWptr0/Wptr 2368 / 2368
+RBFBDmubRptr0/Rptr 2368 / 2368
+RBFBDmubInboxSize  8192
+RBFBDmubInboxBase  0x80000000
+```
+
+`WPTR == RPTR` and neither moved across 125 samples, so the ring is **empty,
+quiescent, and has no second producer**. And **2368 = 37 x 64**: a
+`dmub_rb_cmd` is 64 bytes, so Apple sent 37 commands during bring-up and then
+stopped — which is exactly what 2zk's symbol read predicted from
+`initializeDmcuB` present and no abm/backlight symbol anywhere in
+`AMDRadeonX6000Framebuffer`. Two independent routes to the same statement, one
+static and one live.
+
+**So a DMUB ABM command is a LIVE route, not a closed one.** It is also a new
+hardware-write surface — producing on the DMCUB's inbox — and therefore the
+user's decision before it is designed, which is where brightness now rests.
+
+### 2zk: the throttle, and what 60 Hz does with it
+
+`RBFBPubMs` 500, `RBFBPubHotCalls` 6852, `RBFBPubHotDone` 95 — **98.6 % of the
+frame-path publishes elided**, the rate down from 227/s to ~2.4/s. Later in
+the same boot: 43055 calls, 713 published, same ratio.
+
+Six 20 s `tools/paired.sh` runs at 60 Hz (`ModeCur` 105, 2708 lines,
+60006 mHz, `VBLPeriodNs` 16665001):
+
+| run | sets/s | mean vblanks | fed |
+|---|---|---|---|
+| 1 | 46.29 | 1.294 | 76.6 % |
+| 2 | 58.80 | 1.021 | 97.1 % |
+| 3 | 59.58 | 1.001 | 98.8 % |
+| 4 | 59.45 | 1.002 | 98.5 % |
+| 5 | 59.06 | 1.001 | 99.0 % |
+| 6 | 60.26 | 1.000 | 98.9 % |
+
+Runs 2-6: mean **59.43**, spread **±1.2 %**, against boot 268's **49.0** in the
+same configuration. `fed` is **97-99 %** where 60 Hz had been ~82 % and native
+~50 %, and `mean vblanks` sits at 1.000-1.002 — every frame latching in one
+vblank and essentially every vblank carrying a frame. Run 1 is the first run
+after a mode switch and is the only one with `mean vblanks` away from 1; it is
+reported rather than dropped.
+
+**This is NOT yet a claim.** Rule 44: one boot per side is one boot per side,
+and 2zg is the entry that exists because six internally consistent samples on
+one boot did not reproduce on the next. Boot 268 is also not a clean A — it ran
+a binary without 2zi/2zl's samplers, though at the same 227/s publish rate.
+
+### 2zm — so make the dial live, instead of spending two more boots
+
+Rule 44 offers two ways to earn a configuration claim and this project has only
+ever been able to use one of them, because **every dial it owns is a boot-arg**.
+2xn, 2zb and 2zc spent three boots on three points of one dose-response curve.
+2zg spent two more discovering that boot-to-boot variance exceeds within-boot
+variance — which is precisely the error a single-boot A/B cannot make.
+
+`RBAMDFramebuffer::setProperties()` now accepts `{"RBFBPubMs": N}` from
+`IORegistryEntrySetCFProperties`, and `tools/pubms.m` (`make pubms`) writes it.
+So the comparison becomes: six runs, one write, six runs, **on one boot**.
+
+Deliberately narrow:
+- **One key.** Anything else is counted in `pubSetsOther` and declined, so a
+  misspelled key is a reading rather than silence (rule 14).
+- **The same bound as the boot-arg**, `rb_pub_ms_ok()` in
+  `src/common/rb_defaults.h`, because two separately-written callers of one
+  decision must answer identically (rule 38). `0` is **inside** the range: it
+  is the A side, and a bound that refused it would quietly make the comparison
+  unrunnable. Asserted in `defaults_test.c` against literals, not against the
+  macro (the 2u9 trap), including the `-1` case so a signed read cannot wrap
+  into an interval of half an eternity. A refused value is published in
+  `RBFBPubMsLast` (rule 19).
+- **No register is written and nothing about the panel moves** — it sets how
+  often an instrument publishes. That is why this is not in the class of
+  changes that need the user's decision, unlike the DMUB route above.
+- `pubNextAbs` is reset to **zero**, not recomputed from `now`, so the first
+  publish after a change happens at once. An interval that first had to expire
+  would put a window of the OLD behaviour at the start of the new arm, and an
+  A/B would then measure the transition instead of the two states.
+
+The live setter is `#ifndef RBGPU_FB_VBL_HOSTTEST`, because the host build of
+that file compiles against `fb_vbl_shim.hpp`, which has no `OSDictionary`. The
+*decision* it makes is `rb_pub_ms_ok()`, which is in `src/common` and is
+asserted on the host, and the throttle itself (`publishVBLStateHot`) stays in
+the host build with 2zk's own case — so nothing testable is excluded by the
+guard.
+
+`tools/pubms.m` run against the *running* `A3124291` prints
+`sets ok/ref/other  -1 / -1 / -1`, which is rule 15 working: those keys exist
+only in the new binary, so the absent value says which kext is answering.
+
+Build **`440EEE76`**. One boot, then: `pubms` (confirm 500), six runs at 60 Hz,
+`pubms 0`, six more, `pubms 500`, six more. That is an A/B/A inside one boot,
+and it is the first configuration claim this project will be able to make
+without spending a boot per arm.
