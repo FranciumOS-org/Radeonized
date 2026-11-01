@@ -52432,3 +52432,98 @@ it. What is closer: the mailbox address now rests on six independent
 agreements instead of one inherited constant, the trace buffer can no longer
 be selected, and the two instruments that lied — the sign-extended print and
 the version guard — are fixed.
+
+## 2zq - boot 274: the DMCUB consumes CW4's slots, and an ack still is not an identification
+
+Boot 274, build A74673A0, `-rbgpufbdmubbl` armed. The locate came up exactly as
+2zp designed it: `layout 6 of 6`, `mailbox CW4`, address kind 1 MC, window mem
+`0xf4_ffe40000`, ring pa `0x8_7fe4_0000`, capacity 8192, map route 2, and the
+signature ABSENT with the tool saying so before every send.
+
+**What was measured.** Four commands pushed - two SET_BACKLIGHT (65536) and two
+SET_PIPE - `sends ok/refused 4 / 0`, `acks/timeouts 4 / 0`, and the inbox
+registers moved `WPTR/RPTR 0x940 -> 0xa40`, which is 2368 -> 2624, exactly
+4 x 64. RPTR followed every single push inside the 1 ms spin. **The DMCUB is
+servicing the inbox at the WPTR register we write, and it consumed all four
+slots.** The panel did not move, at either command, in either order.
+
+**And that is still not an identification.** Boot 273 measured the same shape -
+`SendsOk 1`, `Acks 1`, RPTR advancing one slot - while the 64 bytes had gone
+into `DMUB_WINDOW_5_TRACEBUFF` and the DMCUB had consumed the real ring's zeroed
+slot. An ack says the microcontroller advanced over the slot our WPTR named. It
+says nothing about whose bytes were in it. So boot 274's four acks are
+consistent with two completely different worlds:
+
+ (a) our bytes are not where the DMCUB reads, and it consumed four NULLs;
+ (b) our bytes are exactly there, and ABM ignored them.
+
+Four milestones of this surface have now rested on the layout agreement with no
+byte-level confirmation, and the tool has said so on every run since 2zp. The
+honest reading of boot 274 is that it did not discriminate.
+
+**2zq builds the discriminator, and it costs nothing on the chip.**
+`DMUB_CMD__QUERY_FEATURE_CAPS` = 6 is a *read*: it asks the firmware what it
+supports. Three facts from upstream make it the instrument:
+
+ - `dc_dmub_srv.c`'s `dc_dmub_srv_query_caps_cmd` sets `header.ret_status = 1`
+   **before sending** and then accepts the reply only
+   `if (... && cmd.query_feature_caps.header.ret_status == 0)`. The firmware
+   CLEARS that bit. It is one bit, and only the DMCUB can change it.
+ - the reply lands **in our own slot**: `dmub_srv_cmd_get_response` ends at
+   `dmub_rb_get_return_data`, whose address is
+   `base_address + rptr - DMUB_RB_CMD_SIZE` - the slot just consumed, which is
+   the slot we wrote. Not an outbox, not a register. Confirmed against
+   `dmub_rb_push_front` (`base_address + wrpt`) and `dmub_rb_front`
+   (`base_address + rptr`) so the arithmetic is read and not assumed.
+ - DCN 3.1 takes the FB inbox path, not `DMUB_CMD_INTERFACE_REG`: the register
+   inbox is set for DCN42/42B, DCN401 and DCN60 only.
+
+So: push QUERY_FEATURE_CAPS with `ret_status` set, wait for the ack, read those
+same 64 bytes back. **Byte 2 bit 0 going 1 -> 0, with type and sub_type intact,
+is a change only the DMCUB can have made, in memory whose address we chose.**
+That is what the layout agreement could not give, and - unlike 2zp's hosttest,
+which asserted a constant equalled a register reading and so compared a reading
+with itself - it cannot be satisfied by anything we wrote.
+
+**The read-back is in `dmubPush`, for every command.** It is 16 dword loads from
+a mapping already held, and the verdict is `rb_dmub.h`'s, never computed in the
+kext. Four answers, each pointing somewhere different, and three are measured
+failure modes of this project rather than hypotheticals:
+
+ - **ZERO** - the slot reads all zeros. Our store did not land in the memory
+   this mapping reads. This is precisely what boot 273 measured of the real
+   ring, and it would retire CW4 despite six exact layout matches.
+ - **UNCHANGED** - byte-identical to what we sent. The write landed and stuck
+   and nobody replied. This is the EXPECTED answer for an ABM command, since
+   `dmub_abm_lcd.c` never sets `ret_status` - so it is inconclusive about the
+   address, and must read as neither success nor failure. A hosttest asserts
+   that no ABM send can ever come back CONFIRMED, so the verdict cannot flatter
+   the thing we are trying to make work.
+ - **CONFIRMED** - type and sub_type intact, `ret_status` 1 -> 0.
+ - **CHANGED** - the bytes differ but not that way. Something writes this
+   memory and is not doing what `dc_dmub_srv.c` describes; the tool prints the
+   two rows and the verdict says only "look".
+
+Both buffers are published whole beside the verdict (`RBFBDmubReplySent`,
+`RBFBDmubReplyGot`) and the tool prints them with a `^^` marker under every
+differing byte, because a derived verdict without the bytes it came from is the
+shape rule 26 keeps charging for.
+
+**And the caps payload answers a second question for free.**
+`struct dmub_feature_caps` is 14 packed `uint8_t`s, and byte 12 of the payload -
+slot byte 16 - is **`abm_aux_backlight_support`**. If this firmware drives the
+backlight over AUX then a `DMU_BACKLIGHT_CONTROL_PWM`-typed SET_BACKLIGHT is the
+wrong control type, which would be rule 46 a second time on the same chain: the
+right command, the right ring, the wrong type. If it reads 0, PWM is right and
+the level should take, which puts the remaining suspicion on ABM binding and
+ABM config.
+
+Build 9AE534ED. 93 hosttest assertions on this file now, the 14 new ones
+verified failing in both directions: dropping `RB_DMUB_HDR_RET_STATUS` from the
+builder fails 3, and removing the type-match clause from the verdict fails 1.
+Nothing in this milestone has touched hardware.
+
+**Order on boot 275: `caps` FIRST.** It is read-only on the chip and it is the
+only send whose result is self-interpreting. Only after it answers is there any
+point sending another level, because until then "the panel did not move" has two
+explanations and no instrument separates them.

@@ -7,6 +7,7 @@ extern "C" {
 #include "rb_drr.h"
 #include "rb_hubp.h"
 #include "rb_retire.h"
+#include "rb_dmub.h"
 }
 #include <map>
 #include <string>
@@ -211,6 +212,10 @@ public:
     uint32_t dmubSendRefuse=0, dmubSendWptr=0;
     uint64_t dmubAcks=0, dmubAckSpins=0, dmubBlSends=0, dmubPipeSends=0;
     long     dmubBlLast=-1;
+    uint32_t dmubCapsSends=0, dmubReplyVerdict=0, dmubReplySlot=0;
+    uint32_t dmubConfirms=0;
+    uint8_t  dmubReplySent[RB_DMUB_CMD_SIZE]={0};
+    uint8_t  dmubReplyGot[RB_DMUB_CMD_SIZE]={0};
     uint64_t blSets=0;            /* 2xs */
     uint64_t blGets=0;            /* 2xs */
     uint64_t blPendTimeouts=0;    /* 2xs */

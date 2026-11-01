@@ -101,6 +101,96 @@ static const char *kindWhy(long k)
     }
 }
 
+/* A CFData property's raw bytes, up to n. */
+static int rawbytes(io_service_t fb, const char *key, uint8_t *out, int n)
+{
+    CFTypeRef v = IORegistryEntryCreateCFProperty(
+        fb, (__bridge CFStringRef)[NSString stringWithUTF8String:key],
+        kCFAllocatorDefault, 0);
+    int got = 0;
+    if (v) {
+        if (CFGetTypeID(v) == CFDataGetTypeID()) {
+            const CFIndex len = CFDataGetLength((CFDataRef)v);
+            const uint8_t *p = CFDataGetBytePtr((CFDataRef)v);
+            for (; got < n && (CFIndex)got < len; got++) { out[got] = p[got]; }
+        }
+        CFRelease(v);
+    }
+    return got;
+}
+
+static const char *replyWhy(long v)
+{
+    switch (v) {
+    case 1: return "ZERO       - the slot reads all zeros";
+    case 2: return "UNCHANGED  - our bytes, untouched";
+    case 3: return "CONFIRMED  - the firmware cleared ret_status";
+    case 4: return "CHANGED    - differs, but not that way";
+    default: return "NONE       - nothing sent yet";
+    }
+}
+
+/* The reply block: the two buffers and what the difference means. This is
+ * the one reading on this surface that is not an inference from a pointer. */
+static void dumpReply(io_service_t fb)
+{
+    uint8_t sent[64] = {0}, got[64] = {0};
+    const int ns = rawbytes(fb, "RBFBDmubReplySent", sent, 64);
+    const int ng = rawbytes(fb, "RBFBDmubReplyGot", got, 64);
+    const long v = num(fb, "RBFBDmubReplyVerdict");
+    int i;
+
+    if (!have(fb, "RBFBDmubReplyVerdict")) { return; }
+
+    printf("  caps sends     %ld   confirms %ld\n",
+           num(fb, "RBFBDmubCapsSends"), num(fb, "RBFBDmubConfirms"));
+    printf("  reply slot     0x%x   verdict %ld %s\n",
+           u32(fb, "RBFBDmubReplySlot"), v, replyWhy(v));
+    if (ns < 64 || ng < 64) {
+        printf("  (buffers absent - the kext did not publish 64 bytes)\n");
+        return;
+    }
+    printf("    sent");
+    for (i = 0; i < 20; i++) { printf(" %02x", sent[i]); }
+    printf("\n    got ");
+    for (i = 0; i < 20; i++) { printf(" %02x", got[i]); }
+    printf("\n           ");
+    for (i = 0; i < 20; i++) { printf(" %s", sent[i] == got[i] ? "  " : "^^"); }
+    printf("\n");
+
+    if (v == 3) {
+        printf("  -> THE MAILBOX IS IDENTIFIED AT THE BYTE LEVEL. byte 2 is\n"
+               "     ret_status; we sent it SET and it came back CLEAR, with\n"
+               "     type and sub_type intact. dc_dmub_srv_query_caps_cmd is\n"
+               "     the code that does that, and dmub_rb_get_return_data\n"
+               "     reads the reply at rptr - 64, which is this slot. Only\n"
+               "     the DMCUB clears that bit, so CW4 is its inbox and our\n"
+               "     stores land in the memory it reads.\n");
+        printf("     feature caps: psr %u  mclk_sw_ver %u  subvp_psr %u\n"
+               "                   gecc %u  replay %u  ABM_AUX_BL %u  lsdma %u\n",
+               got[4], got[5], got[10], got[11], got[12], got[16], got[17]);
+        printf("     -> abm_aux_backlight_support %u: %s\n", got[16],
+               got[16] ? "this firmware drives the backlight over AUX, so a "
+                         "PWM-typed SET_BACKLIGHT is the wrong control type"
+                       : "NOT over AUX, so DMU_BACKLIGHT_CONTROL_PWM is the "
+                         "right type and the level should take");
+    } else if (v == 2) {
+        printf("  -> our bytes are in that memory and nothing replied. For an\n"
+               "     ABM command that is EXPECTED (dmub_abm_lcd.c never sets\n"
+               "     ret_status), so it says the write stuck and nothing about\n"
+               "     the address. Send `dmubbl caps` for the discriminator.\n");
+    } else if (v == 1) {
+        printf("  -> THE SLOT READS ZERO. Our store did not land in the memory\n"
+               "     this mapping reads, so every ack so far was the DMCUB\n"
+               "     consuming someone else's bytes - boot 273's failure mode\n"
+               "     again, and CW4 is retired as the mailbox despite six\n"
+               "     exact layout matches.\n");
+    } else if (v == 4) {
+        printf("  -> something writes this memory and not the way dc_dmub_srv.c\n"
+               "     describes. Read the two rows above rather than the verdict.\n");
+    }
+}
+
 /* A CFData property as an array of 28 uint32s: seven windows, four each. */
 static int words(io_service_t fb, const char *key, uint32_t *out, int n)
 {
@@ -244,6 +334,7 @@ static void dump(io_service_t fb)
            "     into the wrong window, so the ack said nothing about it. An\n"
            "     ack is necessary and nowhere near sufficient; the panel is\n"
            "     the deliverable and your eyes are its only instrument.\n");
+    dumpReply(fb);
 }
 
 int main(int argc, char **argv)
@@ -259,7 +350,12 @@ int main(int argc, char **argv)
     if (argc < 2) {
         printf("\nread-only. to send one command:\n"
                "  dmubbl <0..65536>   SET_BACKLIGHT, u16.16 (65536 = full)\n"
-               "  dmubbl pipe         SET_PIPE, bind ABM to OTG0\n");
+               "  dmubbl pipe         SET_PIPE, bind ABM to OTG0\n"
+               "  dmubbl caps         QUERY_FEATURE_CAPS - READ-ONLY on the\n"
+               "                      chip, and the only command whose reply\n"
+               "                      the firmware writes back into our own\n"
+               "                      slot. Send this FIRST: it is what turns\n"
+               "                      an ack into a byte-level identification.\n");
         IOObjectRelease(fb);
         return 0;
     }
@@ -274,7 +370,10 @@ int main(int argc, char **argv)
     }
 
     NSDictionary *d;
-    if (strcmp(argv[1], "pipe") == 0) {
+    if (strcmp(argv[1], "caps") == 0) {
+        d = @{ @"RBFBDmubCaps": @(1) };
+        printf("\nsending QUERY_FEATURE_CAPS (read-only, ret_status set)...\n");
+    } else if (strcmp(argv[1], "pipe") == 0) {
         d = @{ @"RBFBDmubPipe": @(1) };
         printf("\nsending SET_PIPE (bind ABM to OTG0)...\n");
     } else {
