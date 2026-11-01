@@ -85,6 +85,13 @@ public:
     bool vblRunning=false;
     uint64_t vblFires=0;
     uint32_t vblEnables=0;
+    /* 2zk: the hot-path publish throttle. Mirrored here because the hosttest
+     * compiles RBAMDFramebufferVBL.cpp against THIS class. */
+    uint32_t pubMs=500;
+    uint64_t pubIntervalAbs=0;
+    uint64_t pubNextAbs=0;
+    uint64_t pubHotCalls=0;
+    uint64_t pubHotDone=0;
     uint64_t vblNextDeadline=0;
     uint32_t vblResyncs=0;
     // 2wc: the 'amtr' counters publishVBLState also reports.
@@ -242,12 +249,16 @@ public:
     }
     std::map<std::string,uint64_t> properties;
     std::map<std::string,std::string> strings;   // 2z0
-    bool setProperty(const char *key,bool v) { properties[key]=v;return true; }
+    /* 2zk: count every setProperty so the throttle test can assert that
+     * publishVBLState was SKIPPED rather than that the throttle's own
+     * counter was not bumped - 2u9's tautology, avoided. */
+    uint64_t setPropertyCalls=0;
+    bool setProperty(const char *key,bool v) { setPropertyCalls++;properties[key]=v;return true; }
     // 2z0: the real IORegistryEntry has a (const char*, const char*) overload;
     // without it here, setProperty(key, buf) binds to the BOOL one and
     // publishes 1 for every string. -Wpointer-bool-conversion caught it.
-    bool setProperty(const char *key,const char *v) { strings[key]=v;return true; }
-    bool setProperty(const char *key,uint64_t v,unsigned) { properties[key]=v;return true; }
+    bool setProperty(const char *key,const char *v) { setPropertyCalls++;strings[key]=v;return true; }
+    bool setProperty(const char *key,uint64_t v,unsigned) { setPropertyCalls++;properties[key]=v;return true; }
     std::map<std::string,std::vector<uint8_t>> blobs;
     bool setProperty(const char *key,const void *b,unsigned n) {
         const uint8_t *p=(const uint8_t *)b; blobs[key].assign(p,p+n); return true; }
@@ -258,6 +269,7 @@ public:
     void kickVBL();
     void deliverVBL();
     void publishVBLState();
+    void publishVBLStateHot();   /* 2zk, defined in RBAMDFramebufferVBL.cpp */
     bool anyVBLEnabled();
     uint64_t foreignFires() const;
     uint64_t pollCalls=0;

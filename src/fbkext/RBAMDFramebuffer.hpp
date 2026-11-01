@@ -168,6 +168,16 @@ private:
      * enable transition and the delivery observable (rule 14). */
     uint64_t vblFires;
     uint32_t vblEnables;
+    /* 2zk: the hot-path publish throttle. pubMs is `rbgpufbpubms=<0..10000>`
+     * in milliseconds; 0 restores the pre-2zk behaviour, which is the A side
+     * of the A/B rule 44 asks for. pubHotCalls counts what the frame path
+     * wanted and pubHotDone what it got, so the ratio says how much was
+     * actually elided rather than how much we intended to (rule 14). */
+    uint32_t pubMs;
+    uint64_t pubIntervalAbs;
+    uint64_t pubNextAbs;
+    uint64_t pubHotCalls;
+    uint64_t pubHotDone;
     /* 2xe: THE VBLANK WAS NOT A CLOCK. armVBL() re-armed from `now`, at the
      * END of deliverVBL(), so the handler's own duration was added to every
      * single period. Measured from userspace with CVDisplayLink's CVTimeStamp
@@ -555,6 +565,19 @@ private:
      * never ran. */
     uint64_t foreignFires(void) const;
     void publishVBLState(void);
+    /* 2zk: the throttled form, for the call sites that sit in the frame path.
+     * publishVBLState() is ~110 setProperty calls - an OSObject allocation and
+     * a registry-dictionary insert each - and boot 270 measured it running
+     * 227 times a second, because setInterruptState publishes on every
+     * enabled-state change and Apple's compositor arms and disarms the
+     * vblank twice per transaction (VBLEnables +2269 in 20 s, publishes
+     * +4547 = 2x). That is ~25 000 registry insertions a second on Apple's
+     * own thread, inside the call that gates every frame. Rule 16: the
+     * instrument is a suspect, and this one has never been examined while
+     * six models of the ~73 sets/s ceiling have died. The periodic publish
+     * every 288 vblanks already carries every field this one does, so the
+     * hot-path call is throttled rather than needed. */
+    void publishVBLStateHot(void);
 };
 
 #endif /* RBAMDFRAMEBUFFER_HPP */

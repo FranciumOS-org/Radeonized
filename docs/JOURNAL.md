@@ -51666,3 +51666,171 @@ OS does not power it off. **What this does not establish:** how many watts the
 dGPU draws (one register read, rule 18). RAPL can split the bill: it measures
 the CPU package only, so `tools/watts.py` minus RAPL package power is roughly
 everything else, the dGPU included.
+
+## 2zi/2zj (boot 270) — the panel does not follow PWRSEQ0's BL_PWM, and the slider never did
+
+The user, returning after boot 269: "my brightness slider moves but doesn't
+work... is it a removed arg?"
+
+**It is not an arg.** Boot 269 read `rbgpu-arm`/`-fb`/`-agdc`/`-iop`/`-tick`
+all `1`, both kexts loaded, and all three brightness tokens present in
+boot-args — they have been default-on since 2y3. `RBFBBlArmed`, `BlReady`,
+`BlBuiltIn` and `BlParmArmed` all `Yes`.
+
+**And the software chain is whole.** `RBFBBlParmSets` 175 of which
+`ParmSetsLin` 173 — the `linear-brightness` key 2y2 identified as the one
+CoreBrightness writes — `BlSets` 176, `ParmSetFails` 0, `BlRefuse` 0,
+`PendTimeouts` 0, `AppleBacklightDisplay` matched with
+`IODisplayConnectFlags = 0x800`. `blset` lists all thirteen parameters.
+
+**The write reaches the chip, repeatedly.** Driven from the shell: 69 % → 17 %
+moved `RBFBBlReadback` 44224 → 10900, and fourteen 8 %↔100 % cycles each
+landed. The mode machinery is not involved — native 1129 lines,
+`V_TOTAL_CONTROL` 0, `RBFBDrrArmed` No.
+
+**Apple has no competing path here.** `AppleIntelPanelA` *is* matched, on the
+PNLF ACPI device (`com.apple.driver.AppleBacklight`,
+`IOMatchCategory = IODisplayParameters`), but its own `IODisplayParameters` is
+`{"commit"={"reg"=0}}` — **no `brightness` at all**. It is the Intel backlight
+driver and cannot reach an AMD PWM. So the "our handler is stealing the set
+from the one that works" theory is dead on arrival: there is no other
+publisher, which is also why the slider renders our value.
+
+That left exactly two worlds, and neither `blReadback` (sampled microseconds
+after our own store) nor `blCntl` (a `start()` snapshot) can tell them apart,
+because neither can see a **second writer**. 2zi added the missing instrument:
+`blSampleLive()` re-reads `BL_PWM_CNTL` and `BL_PWM_GRP1_REG_LOCK` from the
+periodic publish, and `RBFBBlLiveDiffs` counts publishes where the live
+`ACTIVE_CNT` disagrees with `blLastCount` — only once `blSets > 0`, so the
+firmware's own value is not scored as a disagreement.
+
+### Boot 270 answers it
+
+Framebuffer `1A6ADCD6` loaded (UUID moved, rule 15). While the user dragged
+the slider:
+
+| | |
+|---|---|
+| `RBFBBlLiveCntl` | `0xC000A4FE` — `PWM_EN` 1, `FRACTIONAL_EN` 1, count 42238 |
+| `RBFBBlLiveCount` | equal to `RBFBBlLastCount` and `RBFBBlReadback` |
+| `RBFBBlLiveLock` | `0x80000000`, unchanged from boot: no stuck lock, nothing pending |
+| `RBFBBlLiveReads` / `LiveDiffs` | 7905 / **25** |
+
+The diffs scale with **our own** sets, not with time: across two reads
+`BlSets` went 132 → 156 (+24) and `LiveDiffs` 20 → 25 (+5), which is the
+expected race where a set lands between `blSampleLive()`'s read and its
+comparison.
+
+**And the quiet window settles it.** Forty seconds with no brightness
+activity:
+
+```
+A  BlSets 156  LiveReads 10472  LiveDiffs 25  LiveCount 39689
+B  BlSets 156  LiveReads 20218  LiveDiffs 25  LiveCount 39689
+```
+
+**9746 further samples, zero further disagreements**, the count pinned at the
+value we wrote. So nothing else on this machine writes `BL_PWM_CNTL` — ABM in
+the DMCUB (4.0.15.47) is **eliminated** — and the register sits enabled,
+fractional, period 4000, holding our duty cycle, with the panel unmoved.
+
+**This panel's backlight does not follow PWRSEQ0's BL_PWM.** That is 2or's own
+falsification test for the whole route, reached by a path a zero period could
+never surface: 2or only ever armed it against `BL_PWM_PERIOD == 0`, and the
+period here is a perfectly plausible 4000.
+
+### What that retracts, and what it does not
+
+2xs, 2xy, 2y1 and 2y2 stand as **register and parameter-plumbing** work: the
+arithmetic (checked two independent ways against 2os's hand calculation), the
+floor, the `AppleBacklightDisplay` match, the registry-collection panic 2y0
+paid for, and the `linear-brightness` identification are all unaffected and
+all still correct.
+
+**What is withdrawn is the claim that the panel followed.** 2xs's verdict said
+"the mechanism, the arithmetic, the floor and the effect", and *the effect was
+never instrumented* — 2xs wrote, in the same entry, "a no-op round trip proves
+the store executed and nothing about the panel changing (rule 20 in register
+form), which is why the effect needed its own instrument", and then named
+`blset` as that instrument. But `blset` measures the **API return code**, not
+the panel. The only panel evidence in the entire four-milestone chain is one
+human sentence on boot 253 — "shit the slider works" — and it does not
+reproduce.
+
+So **rule 20 in its register form was stated correctly and then not applied**:
+every link was verified except the last one, and the last one is the only one
+the user can see. The reusable form, and it is a new rule:
+
+> **A chain of verified links is not a verified chain.** When the deliverable
+> is something a human observes — a panel, a sound, a frame — the observation
+> is a measurement like any other and needs its own instrument, its own
+> control and its own repeat. One unprompted sentence from the user is n=1 on
+> the only link that mattered, and four milestones were built on top of it.
+
+Where the backlight actually lives is now the open question, and the first
+candidate is **eDP AUX** — the VESA DPCD backlight interface at 0x720-0x72F,
+which is what a 144 Hz eDP panel normally uses and which needs no PWM pin at
+all. That is a static read before it is a boot.
+
+## 2zk — publishVBLState runs 227 times a second, inside the call that gates every frame
+
+Found by accident: `RBFBBlLiveReads`, which 2zi increments once per periodic
+publish, climbed by 9746 in 40 s. The publish was supposed to run every 288
+vblanks, i.e. twice a second.
+
+Measured directly over 20 s on boot 270:
+
+| | delta | rate |
+|---|---|---|
+| `RBFBVBLEnables` | +2269 | 113.5/s |
+| publishes (`BlLiveReads`) | +4547 | **227/s**, exactly 2x the enables |
+| `RBFBVBLFires` | +2880 | 144/s, the native panel rate |
+| `RBFBAmtrSets` | +1291 | **64.6/s**, the frame rate |
+
+The mechanism is not in doubt: `setInterruptState` calls `publishVBLState()`
+on every enabled-state **change**, and Apple's compositor arms and disarms the
+vblank once per transaction — so two state changes, two publishes, per
+transaction. `publishVBLState()` is ~110 `setProperty` calls, each an OSObject
+allocation plus a registry-dictionary insert under the registry lock. That is
+**~25 000 registry insertions a second, on Apple's own thread, inside the call
+that gates every frame.**
+
+This is rule 16 in its purest available form. Six models of the ~73 sets/s
+ceiling have now died (2zb's latch ceiling, 2zc's tick beat, 2zd's vblank
+handover among them), three of them to residual arithmetic, and CLAUDE.md's
+own summary of the open problem reads: *"Something sets ~73 and it is none of
+the things measured so far."* The instrument sitting in the frame path at
+227 Hz has never been one of the things measured.
+
+**It is not claimed to be the cause.** Rule 44: a configuration claim needs at
+least two boots per side or an A/B inside one boot, and this has neither yet.
+What is claimed is the rate, which is a direct measurement, and that the
+suspect should be removed rather than reasoned about.
+
+So `publishVBLStateHot()` throttles the frame-path call site to at most once
+per `rbgpufbpubms=<0..10000>` milliseconds, default **500** — already four
+times slower than the 288-vblank periodic publish, which carries every field
+this call site does, so nothing that anyone reads changes. **`rbgpufbpubms=0`
+restores the unthrottled pre-2zk behaviour and is the A side.** The three cold
+call sites (`registerForInterruptType`, `unregisterInterrupt`, and the two
+inside `deliverVBL`) are untouched.
+
+`RBFBPubMs`, `RBFBPubHotCalls` and `RBFBPubHotDone` publish unconditionally,
+so `PubMs` is this build's identity key and the two counters say what was
+actually elided rather than what was intended (rule 14).
+
+**The hosttest counts the shim's `setProperty` calls, not `pubHotDone`.**
+Asserting the throttle's own counter against the throttle would be 2u9's
+tautology — a suite that cannot fail — so the case asserts that 200 calls
+inside the interval produce **not one** `setProperty`, that one nanosecond
+before the deadline is still inside it, that the deadline itself publishes
+again, and that `pubMs == 0` never consults the clock at all (its
+`pubNextAbs` is seeded to `~0ull`, which would block every publish if it were
+read). The 500 and the 0 are written as literals so a changed default stops
+agreeing with a number the test states independently. Verified to fail: with
+the `pubMs != 0` test forced false, `fb_vbl_test.cpp:407` asserts.
+
+Next: measure it. **At 60 Hz**, where 2zg measured `actual / latch_ceiling`
+pinning at 100 % run after run and the spread is ±0.4 % rather than ±20 %, so
+a real change is visible without the twelve-sample budget 144 Hz needs. The
+current 60 Hz figure is 49.0 sets/s.
