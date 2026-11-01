@@ -51834,3 +51834,134 @@ Next: measure it. **At 60 Hz**, where 2zg measured `actual / latch_ceiling`
 pinning at 100 % run after run and the spread is ±0.4 % rather than ±20 %, so
 a real change is visible without the twelve-sample budget 144 Hz needs. The
 current 60 Hz figure is 49.0 sets/s.
+
+## 2zl — eDP AUX was the wrong candidate: on DCN 3.1 the backlight is a DMUB command
+
+2zj named eDP AUX as the first candidate for where the backlight actually
+lives. It is **wrong**, and the right answer was in Linux all along, one
+version grouping away from a file this repo has carried since 2xs.
+
+### The journal had nothing, and the ACPI route is empty
+
+`grep -niE "\baux\b|dpcd|edp_backlight|0x720|panel_cntl"` over the journal
+returns no prior DPCD or AUX read; `dcn31_panel_cntl` is *named* in 2or and
+2xp but was never read. And the ACPI side is a dead end as configured: PNLF
+publishes only `_STA 11`, `_UID "19"`, `name "APP0002"`,
+`compatible "backlight"` — **no `_BCM`, no `_BCL`, no `RMCF`, no `address`**.
+`AppleIntelPanelA` matched it on `IONameMatch = "backlight"` and published
+`{"commit"={"reg"=0}}` and nothing else, because it is the *Intel* backlight
+driver and there is no Intel GPU here. So there is no EC method exposed to
+call and no Apple path to defer to.
+
+### What Linux actually does on this chip
+
+Three files fetched to `docs/linux-ref/` at
+`cbbddb6b08cc9900a87cccaa9b22bbe06aa4f50a`:
+
+**`dcn31_panel_cntl.c` has no `.set_backlight_level` at all.** The whole of
+`dcn31_link_panel_cntl_funcs` is `destroy`, `hw_init`,
+`is_panel_backlight_on`, `is_panel_powered_on`, `store_backlight_level`,
+`get_current_backlight` — and every one of those that touches the panel is a
+**DMUB round trip** through `dcn31_query_backlight_info()`:
+`DMUB_CMD__PANEL_CNTL` with sub-types `QUERY_BACKLIGHT_INFO`, `HW_INIT`,
+`PANEL_DEBUG_PWM_FREQ`. `BL_PWM_CNTL` appears only inside
+`stored_backlight_registers`, i.e. as a value *carried to and from* the DMUB,
+never as something the CPU programs.
+
+**`dcn21_set_backlight_level` (dcn21_hwseq.c:274) takes the register-writing
+path only on the old DMCU**:
+
+```c
+if (dc->dc->res_pool->dmcu) {
+        dce110_set_backlight_level(pipe_ctx, backlight_level_params);
+        return true;
+}
+...
+dmub_abm_set_backlight(dc, backlight_pwm_u16_16, frame_ramp, panel_cntl->inst);
+```
+
+Rembrandt has a **DMCUB**, not a DMCU, so the first branch is not taken and
+the level goes to `dmub_abm_set_backlight()` — an ABM command on the DMCUB's
+inbox, carrying the u16.16 level and a frame ramp.
+
+**`link_edp_panel_control.c` is where AUX lives, and it is not on this path.**
+`BACKLIGHT_CONTROL_VESA_AUX` and `BACKLIGHT_CONTROL_AMD_AUX` appear only
+inside `edp_set_backlight_level_nits()`, reached from the nits/HDR entry
+point, never from `edp_set_backlight_level()`. So 2zj's first candidate is
+eliminated by reading rather than by a boot, which is what it was supposed to
+be.
+
+### What that makes 2xs
+
+**2xs transcribed the right offsets and the wrong method.** `dce_panel_cntl.c`
+— the file this repo has carried since 2xs and which 2xs copied both
+directions from — does `REG_UPDATE` on `BL_PWM_CNTL` directly, and that is
+correct for DCE/DCN1 parts *with a DMCU*. 2xp then checked the four offsets
+against `dcn_3_1_2_offset.h` and they were right, which is exactly why this
+survived: the offsets were verified and the **mechanism** was not.
+
+CLAUDE.md's own rule says *"Register gates follow Linux's **version
+grouping**, not the exact version... Check the grouping before adding one."*
+It was applied to the addresses and not to the operation. The sharpened form:
+
+> **Check the grouping of the METHOD, not just of the offsets.** A register
+> that exists at the right address on this generation can still be the wrong
+> control surface for it. Ask which Linux file the *function* comes from and
+> whether this chip's `dc` would call it — `dce_*` vs `dcn31_*` is not a
+> naming detail, it is a different owner.
+
+And it explains every measurement in 2zi/2zj exactly, including the one that
+looked strangest: nothing overwrites `BL_PWM_CNTL` because the DMCUB is not
+polling it. It is a real, writable register whose value the firmware reads at
+`HW_INIT` and reports back through a query — not the live input to the PWM
+generator. So 2zj's wording, "this panel's backlight does not follow
+PWRSEQ0's BL_PWM", is observationally right and attributes it to the wrong
+thing: the block is right, the **owner** is the DMCUB.
+
+### Apple has no path here to borrow
+
+`nm` over the re-extracted kexts, with the symbol totals as the rule-26
+control:
+
+| kext | symbols | abm / backlight / dmub hits |
+|---|---|---|
+| `AMDRadeonX6000Framebuffer` | 3314 | `initializeDmcuB`, `readDmcubVersionString`, two `getDmcubVersion` — **and no abm or backlight symbol of any kind** |
+| `AMDSupport` | 7704 | `ATIController::shallManageInternalPanelBacklight`, `ATIPanel::populateBacklightProperties` |
+
+So Apple boots the DMCUB on Navi 21 and never sends it an ABM command, which
+fits the part: Navi 21 ships in desktop Macs driving external panels. The
+laptop backlight path is `ATIController`/`ATIPanel` in `AMDSupport`, and the
+journal already records that `ATIController` never instantiates here (line
+34452) because `0x1681` matches no controller personality, with the only route
+to one being `-rbgpufbmatch`, which kills the accelerator.
+
+`build/re/` had to be re-extracted first: `make clean` deletes it, and the
+first `nm` returned nothing at all for all three kexts. The symbol-count
+control is what separated "no such symbol" from "no such file" — the trap
+CLAUDE.md records under `make clean`, paid for again and caught this time.
+
+### The one thing to know before anything else
+
+A DMUB command means producing on `DMCUB_INBOX1`, and **two producers on one
+ring is not a thing to discover by trying it.** The reads above say Apple
+should not be producing after bring-up, but that is an inference from an
+absent symbol, not a measurement of the ring.
+
+So 2zl samples `DMCUB_INBOX1_{BASE_ADDRESS,SIZE,WPTR,RPTR}` (dwords
+0x01d4-0x01d7, base_idx 2, `dcn_3_1_2_offset.h:1015-1022`) from the periodic
+publish — the same read-only mapping and inside the same bound `blSetup()`
+already checks, so nothing new is mapped and nothing is written. The first
+values are kept beside the current ones and the move counts are separate, so
+"never moved" cannot read like "never looked" (rule 14), and `RBFBDmubReads`
+is the denominator.
+
+**If `RBFBDmubWptrMoves` stays 0 for a whole boot, the ring has no other
+producer** and a DMUB ABM command becomes a route worth designing — writing to
+it would still be a new hardware-write surface and so the user's decision.
+**If it moves, that route is closed rather than merely difficult**, and the
+remaining candidates are the ASUS EC (which would need an SSDT the user
+chooses to add, since no `_BCM` exists today) or nothing.
+
+Build `A3124291`. Carries 2zk's throttle as well, so one boot answers both:
+`RBFBPubMs` / `RBFBPubHotCalls` / `RBFBPubHotDone` and the 60 Hz frame rate for
+2zk, `RBFBDmubWptrMoves` against `RBFBDmubReads` for 2zl.
