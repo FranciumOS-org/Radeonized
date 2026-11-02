@@ -101,8 +101,9 @@ at the panel's 6944 µs is what makes frames retire (2xe/2xi) — 2 transactions
 in 30 s became 3375. Answering `kIOReturnNotReady` while our flip is unlatched
 is what fixed the flicker, at 27 % of the frame rate (2xo) - **the cost is
 really ~36 % (2A4), 2A6 reproduced the flicker without it, and 2A8 measured
-the wait at 1.00 vblanks: the hold pays the HARDWARE, so there is nothing to
-recover and the FRAME-RATE LINE IS CLOSED.** ~91 sets/s with a correct desktop
+the wait at 1.00 vblanks and 2B0 measured the whole DISTRIBUTION as bimodal at
+that boundary with no early tail: the hold pays the HARDWARE, there is no
+partial hold to build, and the FRAME-RATE LINE IS CLOSED.** ~91 sets/s with a correct desktop
 is one vblank of vsync latch per frame plus Apple's pipeline, not a ceiling to
 be beaten.
 
@@ -524,9 +525,50 @@ table and refuses to install one that does not match the running kernel;
   setup snapshot published as `RBFBHubpFlipCtl`, and reusing it would have
   overwritten a published setup fact with frame-path noise ~300x/s with no
   symptom - rule 42's "who owns this?" asked of a scalar.
+  **2B0 ANSWERED 2A9: NO MIDDLE SETTING, and 2A9's verdict line was WRONG
+  (boot 289).** Five windows, both regimes: **the first three quarters of the
+  vblank period are EMPTY in every one.** The distribution is **bimodal at the
+  vblank boundary** - [0.75,1.00) 27-53 % and [>=1.00) 47-73 %, with buckets
+  0-2 at 0.0-0.8 %. Every flip needs essentially the whole period, so there is
+  no tail to exempt and **a partial hold has nothing to be partial about.**
+  **2A8 stands; 91 with a correct desktop or ~140 with occasional flicker is
+  the entire menu, and the choice is the user's.**
+  **And `ftbudget` printed "A MIDDLE SETTING MAY EXIST: 53 %" off this very
+  data.** `rb_ft_hist_early_pm()` returned "everything not in the overflow
+  bucket"; bucket 3 is **0.75-1.00 of a period**, i.e. 5.2-6.9 ms of exposed
+  scanout, which is the whole hazard and not a reduced one. The bucket counts
+  "resolved before a FULL period elapsed" and the verdict needed "resolved
+  early enough to be SAFE". **Third recorded instance of one error: a
+  statistic must be derived from what the consumer DOES with it, not from
+  whichever summary is easiest** (2A1's invented 2.0x, 2A2's "the ratio is the
+  wrong statistic", now this - one milestone after writing 2A2 down). The
+  histogram was published RAW and refuted its own verdict in the same output,
+  which is why this cost a verdict and not a milestone. Corrected to buckets
+  0-2; boot 289 reads **4-7 per-mille against a 100 per-mille threshold**, two
+  orders clear, **stated because after 2A1 a threshold must be SHOWN not to be
+  load-bearing.** `ftbudget` now computes the verdict from the raw
+  `RBFBFtPendQ*` buckets, so the interpretation no longer depends on which
+  build is installed.
+  **The rule-39 caveat is DISCHARGED:** pending wait is 1.00-1.01 vblanks with
+  the hold ON and **1.01 with it OFF**, same shape - the regime change does not
+  move the latch phase, so the verdict rests on the regime that actually
+  flickers.
+  Also from boot 289: **`preempted` moves +4/+2 (hold on) to +81/+26 (hold
+  off)** - `rb_hubp_latch_write()` counting a flip programmed while the
+  previous was still unlatched, so 2zb's "negligible" was negligible *because
+  of the hold*. Not the flicker (that is the compositor drawing into a live
+  surface; a preempted flip never got scanned) - related, counted, different.
+  **Hold-off 139.24/139.60 sets/s at `fed` 98.1/98.2 % reproduces 2A4's 141.24
+  on a second boot**, so rule 44 is satisfied and ~140 is a finding.
+  Framebuffer **BB81C37D**; the corrected `early_pm` only changes a number the
+  tool no longer reads, so **no reinstall is needed.**
   **The only loose thread left here: the FIRST-RUN TRANSIENT** (2A4 - run 1 of
-  a phase reads ~73-76 where runs 2-6 read ~92). It has biased every
-  single-window measurement since 2zb and nobody has looked at it.
+  a phase reads ~73-76 where runs 2-6 read ~92), and **2B0 is the first new
+  information about it: run 1 is more contended in EVERY counter, not just
+  `sets/s`** - hold-on `mean vblanks` 1.022 -> 1.002, hold-off `preempt`
+  +81 -> +26, `bin2+` 7.1 % -> 0.2 %, `asks per run` 1.59 -> 1.00. It has
+  biased every single-window measurement since 2zb and nobody has looked at
+  it.
   **The trade is therefore real - but the cost is Apple's RETRY GRANULARITY,
   not the serialisation.** 2A2 measured the post-hold gap at 4.384 ms against
   2.771 ms after a ready answer, while the flip latches in ~1.07 vblanks
