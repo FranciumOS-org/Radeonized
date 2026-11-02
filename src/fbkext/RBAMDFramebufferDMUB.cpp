@@ -86,6 +86,9 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubAcks = 0;
     dmubAckSpins = 0;
     dmubBlLast = -1;
+    dmubBlType = RB_DMUB_BL_CONTROL_PWM;
+    dmubBlAuxInst = 0u;
+    dmubBlTypeSets = 0u;
     dmubPipeSends = 0;
     dmubBlSends = 0;
     dmubCapsSends = 0;
@@ -585,7 +588,8 @@ uint32_t RBAMDFramebuffer::dmubSendBacklight(uint32_t level)
      * instance 0 is measured rather than assumed. frame_ramp 0 is what
      * Linux passes for an immediate change; a ramp would make the panel's
      * response a function of a number nothing here can observe. */
-    rb_dmub_build_set_backlight(cmd, level, 0u, 0x01u);
+    rb_dmub_build_set_backlight(cmd, level, 0u, 0x01u,
+                                dmubBlType, (uint8_t)dmubBlAuxInst);
     dmubBlLast = (long)level;
     dmubBlSends++;
     return dmubPush(cmd);
@@ -725,6 +729,9 @@ void RBAMDFramebuffer::dmubPublish(void)
     /* -1 until one is sent, which reads as 4294967295 - distinguishable from
      * a real level, since the trigger refuses anything above 65536. */
     setProperty("RBFBDmubBlLast", (uint64_t)(uint32_t)dmubBlLast, 32);
+    setProperty("RBFBDmubBlType", dmubBlType, 32);
+    setProperty("RBFBDmubBlAuxInst", dmubBlAuxInst, 32);
+    setProperty("RBFBDmubBlTypeSets", dmubBlTypeSets, 32);
     /* The reply, and the bytes it was read from. Rule 26: the verdict is a
      * derived number, so both buffers go out beside it and the tool decodes
      * them itself rather than trusting the verdict alone. */

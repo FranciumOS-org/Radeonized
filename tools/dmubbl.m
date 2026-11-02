@@ -390,7 +390,16 @@ static void dump(io_service_t fb)
     }
 
     if (win >= 0) {
-        printf("mailbox          CW%ld\n", win);
+        /* 2zt: NAME THE WINDOW THE SELECTOR'S OWN WAY. Slots 0..6 are the
+         * region-3 CW windows; 7, 8 and 9 are REGION4/5/6, which are not CW
+         * windows at all and printing them as "CW7" was a reading hazard of
+         * exactly the kind rule 33 is about - 2zs identified REGION4 as the
+         * mailbox and the tool kept calling it CW7. */
+        static const char *const wn[] = { "CW0", "CW1", "CW2", "CW3", "CW4",
+                                          "CW5", "CW6", "REGION4", "REGION5",
+                                          "REGION6" };
+        printf("mailbox          %s\n",
+               (win >= 0 && win < 10) ? wn[win] : "?");
         printf("  address kind   %ld  %s\n", num(fb, "RBFBDmubAddrKind"),
                kindWhy(num(fb, "RBFBDmubAddrKind")));
         printf("  window mem     0x%llx\n",
@@ -430,6 +439,22 @@ static void dump(io_service_t fb)
     printf("  backlight/pipe %ld / %ld   last level %ld\n",
            num(fb, "RBFBDmubBlSends"), num(fb, "RBFBDmubPipeSends"),
            num(fb, "RBFBDmubBlLast"));
+    {
+        const long t = num(fb, "RBFBDmubBlType");
+        printf("  control type   %ld (%s), aux_inst %ld, changed %ld time(s)\n",
+               t, t == 0 ? "PWM" : (t == 1 ? "VESA_AUX"
+                                            : (t == 2 ? "AMD_AUX" : "?")),
+               num(fb, "RBFBDmubBlAuxInst"), num(fb, "RBFBDmubBlTypeSets"));
+        if (t == 0) {
+            printf("  -> PWM is the type boot 270 already FALSIFIED on its "
+                   "own:\n"
+                   "     BL_PWM_CNTL held our duty cycle for 40 s with "
+                   "RBFBBlLiveDiffs\n"
+                   "     pinned at 25 (nothing else writing it) and the panel "
+                   "unmoved.\n"
+                   "     `dmubbl type 1` then a level is the untried case.\n");
+        }
+    }
     printf("  acks/timeouts  %ld / %ld   last WPTR 0x%x\n",
            num(fb, "RBFBDmubAcks"), num(fb, "RBFBDmubAckTimeouts"),
            u32(fb, "RBFBDmubSendWptr"));
@@ -498,6 +523,28 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "caps") == 0) {
         d = @{ @"RBFBDmubCaps": @(1) };
         printf("\nsending QUERY_FEATURE_CAPS (read-only, ret_status set)...\n");
+    } else if (strcmp(argv[1], "type") == 0) {
+        /* 2zt: the control type for every SUBSEQUENT send. Sends nothing
+         * itself, so a type change and a level change are never the same
+         * observation. `dmubbl type 1` then `dmubbl 65536`. */
+        if (argc < 3) {
+            printf("usage: dmubbl type <0=PWM|1=VESA_AUX|2=AMD_AUX> "
+                   "[aux_inst]\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+        long t = atol(argv[2]);
+        long ai = (argc > 3) ? atol(argv[3]) : 0;
+        if (t < 0 || t > 2 || ai < 0 || ai > 255) {
+            printf("refusing type %ld aux_inst %ld - type is 0..2, "
+                   "aux_inst 0..255\n", t, ai);
+            IOObjectRelease(fb);
+            return 2;
+        }
+        d = @{ @"RBFBDmubBlType": @(t), @"RBFBDmubBlAuxInst": @(ai) };
+        printf("\nsetting backlight_control_type = %ld (%s), aux_inst %ld "
+               "- NO COMMAND IS SENT\n", t,
+               t == 0 ? "PWM" : (t == 1 ? "VESA_AUX" : "AMD_AUX"), ai);
     } else if (strcmp(argv[1], "pipe") == 0) {
         d = @{ @"RBFBDmubPipe": @(1) };
         printf("\nsending SET_PIPE (bind ABM to OTG0)...\n");

@@ -746,6 +746,30 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
      * times (rule 45). So: RBFBDmubBl alone first; if the panel does not
      * move, RBFBDmubPipe and then RBFBDmubBl again. Both inside one boot,
      * which is the point. */
+    /* 2zt: RBFBDmubBlType sets the control type for every SUBSEQUENT send,
+     * and sends nothing itself - so the three values cost one boot instead
+     * of three, and a type change is never confounded with a level change
+     * (rule 45: one dial per observation). aux_inst rides with it because
+     * for an AUX type it is load-bearing and for PWM it must stay 0. */
+    {
+        OSNumber *t = OSDynamicCast(OSNumber,
+                                    dict->getObject("RBFBDmubBlType"));
+        if (t) {
+            const long n = (long)t->unsigned32BitValue();
+            if (!rb_dmub_bl_type_ok(n)) { return kIOReturnBadArgument; }
+            dmubBlType = (uint32_t)n;
+            dmubBlAuxInst = 0u;
+            {
+                OSNumber *a = OSDynamicCast(OSNumber,
+                                        dict->getObject("RBFBDmubBlAuxInst"));
+                if (a) { dmubBlAuxInst = a->unsigned32BitValue() & 0xffu; }
+            }
+            dmubBlTypeSets++;
+            LOG("RBFBDmubBlType -> %u, aux_inst %u (no command sent)",
+                dmubBlType, dmubBlAuxInst);
+            return kIOReturnSuccess;
+        }
+    }
     {
         OSNumber *b = OSDynamicCast(OSNumber, dict->getObject("RBFBDmubBl"));
         if (b) {

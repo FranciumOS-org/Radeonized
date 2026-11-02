@@ -292,7 +292,8 @@ int dmub_tests(void)
 
     /* --- the bytes --- */
     memset(cmd, 0xaa, sizeof(cmd));
-    rb_dmub_build_set_backlight(cmd, 0x8000u, 0u, 0x01u);
+    rb_dmub_build_set_backlight(cmd, 0x8000u, 0u, 0x01u,
+                                RB_DMUB_BL_CONTROL_PWM, 0u);
     /* Asserted as literal bytes rather than through rb_dmub_get32 and
      * rb_dmub_hdr, which would only prove the builder agrees with itself
      * (the 2u9 tautology). */
@@ -307,6 +308,57 @@ int dmub_tests(void)
     CHECK(cmd[14] == 0u && cmd[15] == 0u, "aux_inst and its pad are zero");
     CHECK(cmd[16] == 0u && cmd[17] == 0u && cmd[18] == 0u && cmd[19] == 0u,
           "backlight_control_type is PWM (0), not either AUX method");
+
+    /* 2zt: THE CONTROL TYPE IS THE LAST UNTRIED DIAL, so the builder must
+     * carry all three and nothing else in the 64 bytes may move with it.
+     * Asserted as literal bytes at literal offsets, never through the
+     * builder's own accessors. */
+    {
+        uint8_t a[RB_DMUB_CMD_SIZE], b[RB_DMUB_CMD_SIZE];
+        uint32_t i;
+        int only16 = 1;
+
+        CHECK(RB_DMUB_BL_CONTROL_PWM == 0u &&
+              RB_DMUB_BL_CONTROL_VESA_AUX == 1u &&
+              RB_DMUB_BL_CONTROL_AMD_AUX == 2u,
+              "dmub_cmd.h's enum dmub_backlight_control_type is PWM 0, "
+              "VESA_AUX 1, AMD_AUX 2 - the order is the ABI");
+
+        CHECK(rb_dmub_bl_type_ok(0) && rb_dmub_bl_type_ok(1) &&
+              rb_dmub_bl_type_ok(2),
+              "all three control types are accepted");
+        CHECK(!rb_dmub_bl_type_ok(3) && !rb_dmub_bl_type_ok(-1) &&
+              !rb_dmub_bl_type_ok(255),
+              "a fourth control type, a negative one and a byte-wide one "
+              "are all refused - the gate is a range, not a cast");
+
+        memset(a, 0xaa, sizeof(a));
+        memset(b, 0xaa, sizeof(b));
+        rb_dmub_build_set_backlight(a, 0x8000u, 0u, 0x01u,
+                                    RB_DMUB_BL_CONTROL_PWM, 0u);
+        rb_dmub_build_set_backlight(b, 0x8000u, 0u, 0x01u,
+                                    RB_DMUB_BL_CONTROL_VESA_AUX, 0u);
+        CHECK(b[16] == 1u && b[17] == 0u && b[18] == 0u && b[19] == 0u,
+              "VESA_AUX lands as 1 little-endian at offset 16");
+        for (i = 0u; i < RB_DMUB_CMD_SIZE; i++) {
+            if (i != 16u && a[i] != b[i]) { only16 = 0; }
+        }
+        CHECK(only16,
+              "changing the control type changes byte 16 and NOTHING else - "
+              "so a panel that moves on type 1 and not type 0 cannot be "
+              "moving for any other reason (rule 45: one dial per "
+              "observation)");
+
+        rb_dmub_build_set_backlight(b, 0x8000u, 0u, 0x01u,
+                                    RB_DMUB_BL_CONTROL_AMD_AUX, 3u);
+        CHECK(b[16] == 2u, "AMD_AUX lands as 2 at offset 16");
+        CHECK(b[14] == 3u,
+              "aux_inst is the caller's at offset 14 - load-bearing only for "
+              "an AUX type, which is why it is not hardcoded");
+        CHECK(a[14] == 0u,
+              "...and a PWM send still leaves aux_inst 0, the value "
+              "dmub_abm_lcd.c leaves it");
+    }
     {
         int tail_zero = 1;
         uint32_t i;
@@ -431,7 +483,8 @@ int dmub_tests(void)
          * actually trying to make work. */
         {
             uint8_t bl[RB_DMUB_CMD_SIZE];
-            rb_dmub_build_set_backlight(bl, 4096u, 0u, 0x01u);
+            rb_dmub_build_set_backlight(bl, 4096u, 0u, 0x01u,
+                                        RB_DMUB_BL_CONTROL_PWM, 0u);
             CHECK(rb_dmub_hdr_ret(rb_dmub_get32(bl, 0)) == 0u,
                   "SET_BACKLIGHT does not set ret_status - dmub_abm_lcd.c "
                   "does not, so no ABM send can be read as CONFIRMED");

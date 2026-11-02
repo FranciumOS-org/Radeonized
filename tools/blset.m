@@ -160,18 +160,43 @@ int main(int argc, char **argv)
                     if (f < 0.0f || f > 1.0f) {
                         printf("  refusing %g - the parameter is 0.0..1.0\n", f);
                     } else {
-                        // Try BOTH names. A failure under one and success
-                        // under the other is the finding, not a retry.
-                        IOReturn r = IODisplaySetFloatParameter(
-                            disp, kNilOptions, CFSTR(kIODisplayBrightnessKey), f);
-                        printf("  set via \"%s\"(%g) -> 0x%x %s\n",
-                               kIODisplayBrightnessKey, f, r,
-                               r == kIOReturnSuccess ? "(OK)" : "(FAILED)");
-                        if (r != kIOReturnSuccess) {
+                        // A SECOND ARGUMENT FORCES THE KEY (2zt). Until now
+                        // this fell back to "brig" only when "brightness"
+                        // FAILED - and 2y2 made "brightness" succeed, so the
+                        // route boot 249 actually used has not been exercised
+                        // since boot 249. The two keys reach DIFFERENT code:
+                        // "brightness" is RBAMDBacklightParams.cpp, our own
+                        // IODisplayParameterHandler added in 2y1; "brig" is
+                        // IOFramebufferParameterHandler turning the 'parm'
+                        // FourCC into a 4-character key and calling
+                        // setAttributeForConnection. Same register at the end,
+                        // not the same path to it - and the user's own
+                        // recollection is that the panel moved on boot 249,
+                        // before the slider was wired up at all.
+                        const char *force = (argc > 2) ? argv[2] : NULL;
+                        IOReturn r = kIOReturnUnsupported;
+                        if (!force || strcmp(force, kIODisplayBrightnessKey) == 0) {
+                            r = IODisplaySetFloatParameter(
+                                disp, kNilOptions,
+                                CFSTR(kIODisplayBrightnessKey), f);
+                            printf("  set via \"%s\"(%g) -> 0x%x %s\n",
+                                   kIODisplayBrightnessKey, f, r,
+                                   r == kIOReturnSuccess ? "(OK)" : "(FAILED)");
+                        }
+                        if (force ? strcmp(force, "brig") == 0
+                                  : r != kIOReturnSuccess) {
                             r = IODisplaySetFloatParameter(
                                 disp, kNilOptions, CFSTR("brig"), f);
                             printf("  set via \"brig\"(%g)       -> 0x%x %s\n",
                                    f, r, r == kIOReturnSuccess ? "(OK)" : "(FAILED)");
+                        }
+                        if (force ? strcmp(force, "lin") == 0 : 0) {
+                            r = IODisplaySetFloatParameter(
+                                disp, kNilOptions,
+                                CFSTR("linear-brightness"), f);
+                            printf("  set via \"linear-brightness\"(%g) -> "
+                                   "0x%x %s\n", f, r,
+                                   r == kIOReturnSuccess ? "(OK)" : "(FAILED)");
                         }
                         if (r == kIOReturnSuccess) {
                             printf("  after:\n");

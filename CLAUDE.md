@@ -281,6 +281,59 @@ table and refuses to install one that does not match the running kernel;
   and it now says before each send that the address rests on the layout
   agreement and not on its contents. 79 hosttest assertions off boot 273's own
   window table, verified failing in both directions.
+  **2zs (boots 276-277): the DMCUB is alive, and the mailbox is REGION4, not
+  CW4.** GPINT settles the microcontroller with no address in the path at all:
+  `0x10010000` in, `0x00010000` back - the firmware cleared the status nibble -
+  `acked 1`, `SCRATCH7` `0x1 -> 0x04001547`, which read as **hex digits** is
+  **4.0.15.47**, the exact running version this project read off `SCRATCH0` in
+  a level-2 probe (I first decoded it as decimal and printed 4.0.21.71 - rule
+  26, **ask what base a number is in**). So the ring was the problem - and the
+  thing that located it had been published as "unexplained" since boot 271.
+  `DMCUB_INBOX1_BASE_ADDRESS` = **0x80000000** is **outside region 3**
+  (CW0-CW6 span 0x60000000-0x66ffffff), and `dmub_dcn31_setup_mailbox` writes
+  `inbox1->base` **untranslated**, so that register is the firmware's own
+  statement of where its inbox is. **2zp's six exact CW-base matches were never
+  wrong and never relevant**: they identify where the *code* windows sit. Boot
+  277 read **REGION4** at MC `0xf4_ffe00000` -> PA `0x8_7fe00000` with
+  **`run 37, bad 0`** - 37 plausible headers at a 64-byte stride then empties -
+  against `WPTR == RPTR == 2368 == 37 x 64` from an independent register. That
+  is the byte-level identification four milestones lacked, and it is not 2zo's
+  mistake: CW5's "128 of 128" was dense trace data with **no empty tail**,
+  while REGION4 stops at exactly the count a second register predicts. Regions
+  4/5/6 are **fixed-base apertures** - `setup_windows` programs their OFFSET
+  and TOP and never a base - which is why no base register exists to compare.
+  The "37 commands at bring-up" belief, withdrawn in 2zp, is **reinstated with
+  bytes behind it**. On that ring `caps` still read back `06 00 01 0e` with
+  byte 2 `01`: **4.0.15.47 does not implement QUERY_FEATURE_CAPS**, so
+  `abm_aux_backlight_support` is not obtainable that way. And SET_PIPE +
+  SET_BACKLIGHT there, byte-correct and acked, **did not move the panel**.
+  **2zt (boot 278): the three parameter keys are ONE write, so the regression
+  hypothesis is dead and the control type is the last untried dial.**
+  `rb_backlight.h` is **byte-identical since boot 249** (the diff is
+  `RBAMDBacklightParams.cpp`, 374 new lines, plus 158 lines of reads and
+  counters) - and boot 249's own entry shows `"brightness"` FAILING with
+  `kIOReturnUnsupported` while `"brig"` carried it, so once 2y2 made
+  `"brightness"` succeed the working route **was never exercised again**.
+  `blset <level> [brightness|brig|lin]` now forces the key, and boot 278 ran
+  all three: `RBFBBlSets` 52, `RBFBBlLastCount` 16800 == `RBFBBlReadback`
+  16800, `RBFBBlLastLevel` 17203 != `RBFBBlLevel0` 22784, `RBFBBlLiveDiffs`
+  **0** over 2164 reads - **the same write, landing, uncontested, on all three
+  paths, and the panel moved on none.** 2zl stands unqualified. What the
+  boot-249 observation was cannot be recovered from the evidence in hand, and
+  inventing a reconciliation would be rule 17.
+  **The one byte never varied is `backlight_control_type`**, payload offset 16,
+  always **0 = PWM** - the method boot 270 independently falsified. `VESA_AUX`
+  **1** and `AMD_AUX` **2** have never been sent. 2zl read them as reachable
+  only from `edp_set_backlight_level_nits`, which is true of **Linux's call
+  graph** and says nothing about the **firmware's command handler**:
+  `dmub_cmd.h` puts the field in `dmub_cmd_abm_set_backlight_data` itself, so
+  any SET_BACKLIGHT may carry any of the three. **Linux's choice of caller is
+  not the firmware's validation** - rule 46 one level further in. It is a
+  settable property, not a constant: `RBFBDmubBlType` sets the type for every
+  subsequent send and sends nothing itself, so `dmubbl type 1 && dmubbl 65536`
+  and `dmubbl type 2 && dmubbl 65536` fit in **one boot** (2zm's lesson paid
+  before it costs anything). Nine hosttest assertions, the discriminating one
+  being that changing the type changes **byte 16 and nothing else** in the 64.
   **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
