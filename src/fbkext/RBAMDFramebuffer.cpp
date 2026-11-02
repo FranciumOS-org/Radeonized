@@ -16,6 +16,7 @@
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
 #include <pexpert/pexpert.h>
+#include <mach/mach_time.h>
 
 #define LOG(fmt, ...) IOLog("RBAMDFramebuffer: " fmt "\n", ##__VA_ARGS__)
 
@@ -397,6 +398,17 @@ bool RBAMDFramebuffer::start(IOService *provider)
     amtrPtr = 0;
     amtrRefused = 0;
     bzero(amtrSnap, sizeof(amtrSnap));
+    /* 2A0: the frame-time budget starts ON. It is two mach_absolute_time()
+     * reads and four adds per transaction at ~73 transactions a second, and
+     * the control for that claim is `{"RBFBFtOn": 0}` inside the same boot
+     * (rule 16 wants the suspect removable, not absent). */
+    ftOn = true;
+    ftPrevExit = 0;
+    ftResets = 0;
+    rb_ft_reset(&ftWork);
+    rb_ft_reset(&ftGap);
+    rb_ft_reset(&ftGet);
+    rb_ft_reset(&ftVbl);
     amtrFlipSnapped = false;
     amtrFlipPtr = 0;
     amtrFlipRefused = 0;
@@ -1444,23 +1456,40 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
             *value = 0;
         }
         return kIOReturnSuccess;
-    case kRBAttrAMDTransaction:
+    case kRBAttrAMDTransaction: {
+        /* Braced: 2A0 declares a local here, and a declaration with an
+         * initialiser in an unbraced case is a jump across an initialisation
+         * once another label follows it. */
         if (!amtrArmed) {
             break;
         }
         amtrGets++;
+        /* 2A0: time the GET. This measures only our own decision, NOT the
+         * wait it causes: hubpHoldNotReady() reads two words of MMIO and
+         * returns, and what blocks is Apple's isTransactionComplete calling
+         * back (2x6). So the hold's cost lands in `gap` and therefore in
+         * RBFBFtUpstreamNs even though it is ours - read RBFBAmtrHeld against
+         * RBFBAmtrGets to attribute that share, because a budget that labelled
+         * it upstream without saying so would be exactly the kind of
+         * confidently mislabelled number rule 17 is about. */
+        const uint64_t ftG0 = ftOn ? mach_absolute_time() : 0;
         /* 2xn: answer the way Apple's AMDFramebuffer does. The decision is
          * rb_hubp_hold_notready() in src/common/rb_hubp.h, which the hosttest
          * runs first and which is BOUNDED by hubpFlipDeadline - answering
          * NotReady makes Apple's isTransactionComplete WAIT (2x6), so an
          * unbounded hold would wedge the display. Reads two words of MMIO and
          * nothing else: no allocation, no log, no block (rule 31). */
-        if (hubpHoldNotReady()) {
-            return kIOReturnNotReady;
+        {
+            const bool hold = hubpHoldNotReady();
+            if (ftOn) { ftFile(&ftGet, ftG0, mach_absolute_time(), true); }
+            if (hold) {
+                return kIOReturnNotReady;
+            }
         }
         /* AMDFramebuffer never writes *out on this selector, and the one
          * consumer (getDisplayInfo) presets its local and ignores it. */
         return kIOReturnSuccess;
+    }
     default:
         break;
     }
@@ -1471,6 +1500,16 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
     if (attribute == kRBAttrAMDTransaction && amtrArmed) {
         amtrSets++;
+        /* 2A0: the transaction clock. t0 is taken before anything that can
+         * return early, and the gap is filed from the PREVIOUS transaction's
+         * exit, so mean(gap) + mean(work) reconstructs the interval between
+         * transactions - the quantity whose reciprocal is the ~73 sets/s this
+         * project has been unable to move seven times.
+         *
+         * The null transaction below returns without filing either piece. It
+         * is not a frame, and including it would put a near-zero interval
+         * into a mean of ~13.7 ms ones. */
+        const uint64_t ftT0 = ftOn ? mach_absolute_time() : 0;
         if (value == 0) {
             /* AMDFramebuffer's own answer to a null transaction. */
             return kIOReturnBadArgument;
@@ -1582,6 +1621,20 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
                 ps >= 0xffffff8000000000ULL) {
                 hubpProgram(((const uint64_t *)ps)[1]);           /* flip +0x08 */
             }
+        }
+        /* 2A0: close the budget. The gap is filed first and BOUNDED, because
+         * an idle desktop makes it arbitrarily large (rb_frametime.h explains
+         * why that one has to be discarded rather than averaged); the work is
+         * unbounded, since nothing about an idle desktop lengthens the inside
+         * of this function. ftPrevExit is stamped last so the next gap starts
+         * where this transaction really ended, past hubpProgram. */
+        if (ftOn) {
+            const uint64_t ftT1 = mach_absolute_time();
+            if (ftPrevExit != 0) {
+                ftFile(&ftGap, ftPrevExit, ftT0, true);
+            }
+            ftFile(&ftWork, ftT0, ftT1, false);
+            ftPrevExit = ftT1;
         }
         return kIOReturnSuccess;
     }

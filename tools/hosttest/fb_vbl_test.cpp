@@ -430,5 +430,89 @@ int main() {
         assert(g.pubHotDone==5);
         assert(g.setPropertyCalls>=5*50);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune passed");
+    /* 2A0: the frame-time budget.
+     *
+     * The thing being asserted is NOT that the accumulators add up - that is
+     * arithmetic. It is that the two failure modes which would make the
+     * instrument lie are visible:
+     *
+     *   - an idle desktop's one-second gap must be DROPPED, not averaged in,
+     *     because averaged in it reports the idle desktop as the frame cost
+     *     and there is nothing in the published numbers to show it happened;
+     *   - a backwards interval (the vblank thread_call and Apple's thread can
+     *     interleave) must be dropped rather than becoming a ~584-year sample
+     *     that the bound then silently discards anyway.
+     *
+     * And the budget must reconstruct an interval this test chooses itself,
+     * because that is the self-check tools/paired.sh will compare against
+     * (rule 26: the instrument has to be able to say its premise failed).
+     */
+    {
+        RBAMDFramebuffer f;
+        f.vblPeriodNs = 6952507;                 // the measured native period
+        const uint64_t bound = rb_ft_gap_bound_ns(f.vblPeriodNs);
+        assert(bound == 6952507ull*8ull);
+
+        // A transaction interval of 13.888 ms - one 144 Hz frame period
+        // doubled, which is what fed ~50 % means - split into 200 us of our
+        // own work and the rest upstream.
+        const uint64_t want = 13888888ull;
+        for (unsigned i=0;i<100;i++) {
+            f.ftFile(&f.ftWork, 0, 200000, false);
+            f.ftFile(&f.ftGap, 0, want-200000, true);
+        }
+        assert(f.ftWork.n==100 && f.ftGap.n==100);
+        assert(rb_ft_interval_ns(&f.ftWork,&f.ftGap)==want);
+        // 1e12/13888888 = 72000 milli-transactions a second. THE number this
+        // whole line of work is about, arrived at from a timing budget rather
+        // than from a counter delta.
+        assert(rb_ft_rate_mhz(want)==72000);
+
+        // The idle desktop. One second is 144 frame periods; without the
+        // bound it would move the mean from 13.69 ms to 23.5 ms, and nothing
+        // published would say why.
+        const uint64_t meanBefore = rb_ft_mean_ns(&f.ftGap);
+        f.ftFile(&f.ftGap, 0, 1000000000ull, true);
+        assert(f.ftGap.dropped==1);
+        assert(f.ftGap.n==100);
+        assert(rb_ft_mean_ns(&f.ftGap)==meanBefore);
+
+        // A backwards interval is a drop, not a 584-year sample.
+        f.ftFile(&f.ftWork, 500, 400, false);
+        assert(f.ftWork.dropped==1);
+        assert(f.ftWork.n==100);
+        assert(f.ftWork.max_ns==200000);
+
+        // The shares of one interval sum to the whole, give or take integer
+        // truncation - so a reader can subtract one from 100 % and not be
+        // misled about the other.
+        const uint64_t ours = 200000;
+        const uint64_t up = rb_ft_upstream_ns(want, ours);
+        assert(up == want-ours);
+        const uint64_t sum = rb_ft_share_pm(ours,want)+rb_ft_share_pm(up,want);
+        assert(sum>=999 && sum<=1000);
+
+        // ftOn == false is the CONTROL and must be completely inert: not a
+        // sample, not a drop. A control that still accumulated would make the
+        // A/B compare two instrumented sides (rule 16).
+        f.ftOn = false;
+        const uint64_t nBefore = f.ftWork.n, dBefore = f.ftWork.dropped;
+        f.ftFile(&f.ftWork, 0, 200000, false);
+        f.ftFile(&f.ftWork, 500, 400, false);
+        assert(f.ftWork.n==nBefore && f.ftWork.dropped==dBefore);
+
+        // And a reset leaves no residue, including the previous exit stamp -
+        // otherwise the first gap of a new window is measured from the last
+        // transaction of the old one, which is precisely the cross-window
+        // sample a reset exists to exclude.
+        f.ftOn = true;
+        f.ftPrevExit = 12345;
+        rb_ft_reset(&f.ftWork); rb_ft_reset(&f.ftGap);
+        f.ftPrevExit = 0;
+        assert(f.ftWork.n==0 && f.ftWork.sum_ns==0 && f.ftWork.max_ns==0 &&
+               f.ftWork.dropped==0);
+        assert(rb_ft_interval_ns(&f.ftWork,&f.ftGap)==0);  // half a budget is none
+        assert(rb_ft_rate_mhz(0)==0);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget passed");
 }

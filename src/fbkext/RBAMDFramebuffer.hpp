@@ -39,6 +39,7 @@ extern "C" {
 #include "rb_hubp.h"
 #include "rb_retire.h"
 #include "rb_dmub.h"
+#include "rb_frametime.h"
 }
 
 #include <IOKit/graphics/IOFramebuffer.h>
@@ -609,6 +610,29 @@ private:
     uint64_t           hubpFlipDeadline; /* 2xn: abs time the hold expires */
     uint64_t           amtrHeld;       /* 2xn: NotReady answers given */
     uint64_t           amtrHoldExpired;/* 2xn: pending but past the deadline */
+    /* 2A0: the frame-time budget. Four accumulators that tile the wall clock
+     * between one transaction and the next - see src/common/rb_frametime.h
+     * for why a DECOMPOSITION is the next step and not an eighth dial.
+     *
+     * ftOn is a RUNTIME dial (`{"RBFBFtOn": 0|1}`), not a boot-arg, because
+     * 2zm's lesson is that a dial you can move inside one boot costs one boot
+     * instead of four - and the instrument must have a control, since it adds
+     * two mach_absolute_time() reads per transaction and rule 16 says the
+     * instrument is a suspect. ftReset zeroes the accumulators so a window is
+     * EXACT: cumulative sums over a boot that spent minutes idle describe the
+     * idle desktop, not the frame path.
+     *
+     * ftPrevExit is the previous setAttribute's exit stamp, in mach units; 0
+     * means "no previous one", which is the first transaction and after every
+     * reset, and those produce no gap sample rather than a gap measured from
+     * the epoch. */
+    bool               ftOn;
+    uint64_t           ftPrevExit;
+    uint64_t           ftResets;
+    struct rb_ft_acc   ftWork;      /* inside setAttribute('amtr')       */
+    struct rb_ft_acc   ftGap;       /* between transactions              */
+    struct rb_ft_acc   ftGet;       /* inside getAttribute('amtr')       */
+    struct rb_ft_acc   ftVbl;       /* inside deliverVBL()               */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;
@@ -708,6 +732,11 @@ private:
      * never ran. */
     uint64_t foreignFires(void) const;
     void publishVBLState(void);
+    /* 2A0: convert a mach-unit delta to ns and file it, bounded. Inline-cheap
+     * and called from the frame path, so it does nothing at all when ftOn is
+     * false - the control side of the instrument costs one bool test. */
+    void ftFile(struct rb_ft_acc *acc, uint64_t t0, uint64_t t1, bool bound);
+    void publishFrameTime(void);
     /* 2zk: the throttled form, for the call sites that sit in the frame path.
      * publishVBLState() is ~110 setProperty calls - an OSObject allocation and
      * a registry-dictionary insert each - and boot 270 measured it running

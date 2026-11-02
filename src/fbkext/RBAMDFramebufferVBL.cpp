@@ -336,6 +336,7 @@ void RBAMDFramebuffer::publishVBLState(void)
         setProperty("RBFBVBLModeMhz",
                     dn ? (df * 1000000000000ull / dn) : 0ull, 64);
     }
+    publishFrameTime();
     setProperty("RBFBOtgHTotal", (uint64_t)otgHTotal, 32);
     setProperty("RBFBOtgVTotal", (uint64_t)otgVTotal, 32);
     setProperty("RBFBOtgVTotalMin", (uint64_t)otgVTotalMin, 32);
@@ -400,6 +401,104 @@ void RBAMDFramebuffer::publishVBLState(void)
  * This runs on our own thread_call, not on Apple's thread - the same context
  * the periodic path would have called `proc` from if it had ever caught the
  * window, so it is not a new hazard class, only better timing (rule 31). */
+/* 2A0: file one interval into an accumulator.
+ *
+ * The conversion to nanoseconds happens HERE, once, at the boundary -
+ * mach_absolute_time() units are not nanoseconds on every machine, and a
+ * sum kept in mach units with a conversion applied at publish time would be
+ * one more place for a stale scale factor to hide (rule 41).
+ *
+ * t1 <= t0 files nothing. That is not paranoia: deliverVBL runs on a
+ * thread_call and setAttribute on Apple's thread, so the two can interleave,
+ * and a subtraction that went negative would become a ~584-year sample that
+ * the bound would merely DROP - silently losing the very samples the
+ * instrument exists to collect, while the dropped counter looked like idle
+ * desktop. Counting it as a drop keeps that visible.
+ */
+void RBAMDFramebuffer::ftFile(struct rb_ft_acc *acc, uint64_t t0, uint64_t t1,
+                              bool bound)
+{
+    if (!ftOn || !acc) { return; }
+    if (t1 <= t0) { acc->dropped++; return; }
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(t1 - t0, &ns);
+    rb_ft_add(acc, ns,
+              bound ? rb_ft_gap_bound_ns(vblPeriodNs ? vblPeriodNs
+                                                     : kVBLPeriodNsFast)
+                    : 0ull);
+}
+
+/* 2A0: the budget, published whole.
+ *
+ * Every piece is published with its own count, max and drop count, not just
+ * its mean - a mean over 3 samples and a mean over 1500 are different facts
+ * and `ioreg` cannot tell them apart from the mean alone (rule 18). And the
+ * derived quantities are published BESIDE their inputs, so the reader can
+ * redo the arithmetic rather than trust it (the 2y7 lesson).
+ *
+ * RBFBFtRateMhz is the self-check: it is sets/s computed from the timing
+ * budget, and tools/paired.sh computes sets/s from a counter delta over a
+ * measured window. Two independent routes to one number. If they disagree,
+ * the budget is wrong and nothing else here means anything - which is the
+ * check 2zb's 194 Hz panel did not have until it was given one.
+ *
+ * Called from publishVBLState(), so it inherits 2zk's throttle and adds no
+ * unthrottled registry traffic to the frame path. 2zz measured that cost at
+ * -1.4 % and these are ~20 more properties on an already-~110 publish, but
+ * the measurement whose cost is being measured must not be the one adding it.
+ */
+void RBAMDFramebuffer::publishFrameTime(void)
+{
+    setProperty("RBFBFtOn", ftOn);
+    setProperty("RBFBFtResets", ftResets, 64);
+
+    const uint64_t work = rb_ft_mean_ns(&ftWork);
+    const uint64_t gap  = rb_ft_mean_ns(&ftGap);
+    const uint64_t get  = rb_ft_mean_ns(&ftGet);
+    const uint64_t vbl  = rb_ft_mean_ns(&ftVbl);
+
+    setProperty("RBFBFtWorkNs", work, 64);
+    setProperty("RBFBFtWorkN",  ftWork.n, 64);
+    setProperty("RBFBFtWorkMax", ftWork.max_ns, 64);
+    setProperty("RBFBFtWorkDrop", ftWork.dropped, 64);
+
+    setProperty("RBFBFtGapNs", gap, 64);
+    setProperty("RBFBFtGapN",  ftGap.n, 64);
+    setProperty("RBFBFtGapMax", ftGap.max_ns, 64);
+    setProperty("RBFBFtGapDrop", ftGap.dropped, 64);
+
+    setProperty("RBFBFtGetNs", get, 64);
+    setProperty("RBFBFtGetN",  ftGet.n, 64);
+    setProperty("RBFBFtGetMax", ftGet.max_ns, 64);
+
+    setProperty("RBFBFtVblNs", vbl, 64);
+    setProperty("RBFBFtVblN",  ftVbl.n, 64);
+    setProperty("RBFBFtVblMax", ftVbl.max_ns, 64);
+
+    const uint64_t interval = rb_ft_interval_ns(&ftWork, &ftGap);
+    setProperty("RBFBFtIntervalNs", interval, 64);
+    setProperty("RBFBFtRateMhz", rb_ft_rate_mhz(interval), 64);
+
+    /* The two 'amtr' GETs and the vblank handlers that fall inside one
+     * transaction interval, rather than one of each: at fed ~50 % Apple arms
+     * and disarms around every transaction (2zk measured 227 publishes a
+     * second against ~73 transactions) and the panel delivers ~2 vblanks per
+     * transaction. Scaled by the counts actually observed in this window
+     * instead of by an assumed ratio - if the ratio changes, this follows it.
+     */
+    const uint64_t perTxn = ftWork.n ? ftWork.n : 1;
+    const uint64_t oursNs = work
+                          + (get * ftGet.n) / perTxn
+                          + (vbl * ftVbl.n) / perTxn;
+    setProperty("RBFBFtOursNs", oursNs, 64);
+    setProperty("RBFBFtUpstreamNs",
+                rb_ft_upstream_ns(interval, oursNs), 64);
+    setProperty("RBFBFtUpstreamPm",
+                rb_ft_share_pm(rb_ft_upstream_ns(interval, oursNs),
+                               interval), 64);
+    setProperty("RBFBFtOursPm", rb_ft_share_pm(oursNs, interval), 64);
+}
+
 void RBAMDFramebuffer::kickVBL(void)
 {
     for (unsigned i = 0; i < kMaxInterrupts; i++) {
@@ -464,6 +563,14 @@ void RBAMDFramebuffer::armVBL(void)
 
 void RBAMDFramebuffer::deliverVBL(void)
 {
+    /* 2A0: the vblank handler's own duration. Taken around EVERYTHING this
+     * function does, because all of it is inside the gap between two
+     * transactions and all of it is ours - the retire offer, Apple's
+     * handlers that we call synchronously, and hubpPoll. Unbounded: there is
+     * no idle-desktop failure mode here, since this runs every period
+     * whatever the compositor is doing. */
+    const uint64_t ftT0 = ftOn ? mach_absolute_time() : 0;
+
     /* 2zd: BEFORE delivery, not after. The retire is what frees a surface and
      * makes DisplaySurfacePool::IsReady() true (2xe), and the handlers called
      * below are the ones that ask - so retiring first lets this frame's
@@ -543,6 +650,7 @@ void RBAMDFramebuffer::deliverVBL(void)
         amtrBucket = 0;
     }
     armVBL();
+    if (ftOn) { ftFile(&ftVbl, ftT0, mach_absolute_time(), false); }
 }
 
 void RBAMDFramebuffer::vblFired(thread_call_param_t self, thread_call_param_t)
@@ -813,6 +921,34 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         LOG("RBFBDmubPipe -> refuse %u, wptr %#x, acks %llu",
             rc, dmubSendWptr, dmubAcks);
         return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+    }
+
+    /* 2A0: the frame-time instrument's own dial, ahead of RBFBPubMs because
+     * it is the newer one and the two are independent. Setting it RESETS the
+     * accumulators either way, including when the value is unchanged, so
+     * `ftreset` before a window and `ftreset` after it bracket exactly that
+     * window - a cumulative sum across an idle desktop is not a frame-path
+     * measurement (rule 39's shape: say which window a reading comes from).
+     * Turning it OFF is the control for rule 16: two mach_absolute_time()
+     * reads per transaction is small, and "small" is a claim to be measured
+     * like any other. */
+    {
+        OSNumber *f = OSDynamicCast(OSNumber, dict->getObject("RBFBFtOn"));
+        if (f) {
+            const long want = (long)f->unsigned32BitValue();
+            if (want != 0 && want != 1) { return kIOReturnBadArgument; }
+            ftOn = (want != 0);
+            rb_ft_reset(&ftWork);
+            rb_ft_reset(&ftGap);
+            rb_ft_reset(&ftGet);
+            rb_ft_reset(&ftVbl);
+            ftPrevExit = 0;
+            ftResets++;
+            publishFrameTime();
+            LOG("RBFBFtOn -> %d, accumulators reset (%llu)",
+                ftOn ? 1 : 0, (unsigned long long)ftResets);
+            return kIOReturnSuccess;
+        }
     }
 
     OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBFBPubMs"));
