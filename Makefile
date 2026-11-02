@@ -547,8 +547,8 @@ $(OUT)/holdset: tools/holdset.m | $(OUT)
 
 # 2A0: the frame-time budget - the decomposition that replaces an eighth dial.
 ftbudget: $(OUT)/ftbudget
-$(OUT)/ftbudget: tools/ftbudget.m | $(OUT)
-	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+$(OUT)/ftbudget: tools/ftbudget.m src/common/rb_frametime.h | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -Isrc/common -o $@ $< \
 	      -framework IOKit -framework CoreFoundation -framework Foundation
 	@echo "  TOOL  $@"
 

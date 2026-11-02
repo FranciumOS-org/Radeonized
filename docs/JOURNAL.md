@@ -53737,3 +53737,74 @@ configuration that is now settled: the hold is on, and the question is whether
 its price is physics or phase.
 
 Framebuffer **614ED4BC** (2A4-2A6 ran A80C7720).
+
+---
+
+## 2A8 — THE FRAME-RATE LINE IS CLOSED: the hold pays the HARDWARE (boot 288)
+
+`sudo tools/ftwindow.sh` on boot 288, framebuffer **614ED4BC**, native, hold
+ON, cross-check passing (**budget 93.50 /s vs counter 91.90 /s, +1.7 %**):
+
+```
+latch wait            6.975 ms  = 1.00 vblanks   n 1856
+asks to get through       1.31
+```
+
+**6.975 ms against a 6.953 ms vblank period is 1.003 vblanks.** The flip is
+vsync-latched (`RB_HUBP_FLIP_TYPE` 0), so one vblank is the time the hardware
+needs and no answer of ours can shorten it. 2A7 posed the question as "physics
+or phase"; the answer is **physics**, by a measurement that lands on 1.00 to
+three figures with 1856 closed runs behind it.
+
+**So the ~36 % is the real price of the 2xo fix, and the line that began at
+2zb ends here.** `~91 sets/s with a correct desktop` is not a ceiling to be
+beaten - it is one vblank of latch per frame plus Apple's own pipeline, and
+the only way past it was the thing 2A6 proved unsafe. Eight models died, the
+ninth answer was our own code, and the tenth measurement says that code is
+right.
+
+**And the instrument refuted itself in the same output, which is the other
+finding.** The 2A2 share arithmetic printed:
+
+```
+SO THE 2xo HOLD OWNS 42.3 % of the interval  -> ~162.3 /s without it
+```
+
+**162.3 /s on a panel that scans at 143.8 Hz is not optimistic, it is
+impossible** - the compositor cannot be handed more frames per second than
+there are vblanks - and 2A4 had already MEASURED the no-hold rate at 141, the
+panel's own rate. The share is a true share of *this* interval; what is false
+is extrapolating a rate from it.
+
+**2A4's lesson was half right and this completes it.** 2A4 said the marginal
+penalty is a *lower bound* on the effect of removing the thing, because
+removal changes the regime. Boot 288 shows it is **not a bound at all** - it
+is a different quantity, and here it overshoots. A marginal measurement
+answers "what does this cost inside the current regime"; only an A/B answers
+"what happens if it goes". The two had better not be confused again, so:
+`rb_ft_hold_free_interval_ns()` returns 0 - **no usable prediction** - the
+moment the implied interval falls below one vblank period, and `ftbudget` then
+says in full why, pointing at `holdaba.sh` instead. The share keeps being
+printed; only the rate is refused.
+
+The hosttest pins this to **boot 288's own numbers** (interval 10.696 ms,
+penalty 3.469 ms, 1.31 holds/txn, vblank 6.953 ms -> share 42.3 % reportable,
+rate refused), asserts the boundary in both directions (exactly one vblank
+left passes, one nanosecond less does not), asserts a small penalty still
+yields a prediction so the check cannot be a constant 0 (rule 26's control),
+and asserts a penalty exceeding the interval gives 0 rather than a wrap.
+Breaking the vblank comparison makes the suite exit 2.
+
+**What the whole arc cost and bought.** 2zb-2zz: eight models of a "~73
+ceiling" that was partly a first-run transient (2A4) and mostly our own hold.
+2A0-2A2: the budget that located it, with two over-claimed mechanisms
+withdrawn along the way (2A1's invented vblank-per-hold, 2A6's retry
+granularity). 2A4-2A7: the hold measured at ~36 %, the flicker reproduced, the
+trade settled. **2A8: the cost is hardware, so there is nothing left to
+attack.** The frame-rate work is done, and what remains open in this project
+is the wedge and HDMI.
+
+**Still unexplained, and now the only loose thread here:** the first-run
+transient (2A4 - run 1 of a phase reads ~73-76 where runs 2-6 read ~92). It
+has silently biased every single-window measurement since 2zb and nobody has
+looked at it.

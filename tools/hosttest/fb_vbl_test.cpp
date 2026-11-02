@@ -658,5 +658,46 @@ int main() {
         struct rb_ft_acc open{};
         assert(open.n == 0 && rb_ft_mean_ns(&open) == 0);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers and 2A7's hardware-vs-phase split passed");
+    /* 2A8: a share that implies an impossible rate must be REFUSED.
+     *
+     * Boot 288's own numbers: interval 10.696 ms, penalty 3.469 ms, 1.31
+     * holds/txn, vblank 6.953 ms. Subtracting gives 6.15 ms = 162.6 /s on a
+     * panel that can deliver at most 143.8 - so the prediction is not merely
+     * optimistic, it is arithmetically impossible, and 2A4 had already
+     * measured the no-hold rate at 141. The instrument printed it anyway.
+     */
+    {
+        const uint64_t iv = 10696000, pen = 3469000, hpt = 1310;
+        const uint64_t vbl = 6953000;
+
+        /* The share itself is fine and stays reportable. */
+        const uint64_t shr = rb_ft_hold_share_pm(pen, hpt, iv);
+        assert(shr >= 420 && shr <= 426);           /* ~42.3 % */
+
+        /* The RATE is refused, because 10.696 - 4.544 = 6.15 ms < one vblank. */
+        assert(rb_ft_hold_free_interval_ns(iv, pen, hpt, vbl) == 0);
+
+        /* A share that leaves more than a vblank is allowed through - the
+         * check must not refuse everything, or it would be a constant 0 and
+         * could not fail. This is the control for it (rule 26). */
+        const uint64_t small = 500000;              /* 0.5 ms penalty */
+        const uint64_t ok = rb_ft_hold_free_interval_ns(iv, small, 1000, vbl);
+        assert(ok == iv - 500000);
+        assert(ok > vbl);
+
+        /* Exactly one vblank left is allowed; one nanosecond less is not -
+         * the boundary is where an impossible answer begins. */
+        assert(rb_ft_hold_free_interval_ns(vbl, 0, 0, vbl) == vbl);
+        assert(rb_ft_hold_free_interval_ns(vbl - 1, 0, 0, vbl) == 0);
+
+        /* A penalty that swallows the whole interval gives 0, not a wrap. */
+        assert(rb_ft_hold_free_interval_ns(iv, iv, 1000, vbl) == 0);
+        assert(rb_ft_hold_free_interval_ns(iv, iv * 2, 1000, vbl) == 0);
+
+        /* Missing inputs give no prediction rather than a plausible one. */
+        assert(rb_ft_hold_free_interval_ns(0, pen, hpt, vbl) == 0);
+        assert(rb_ft_hold_free_interval_ns(iv, pen, hpt, 0) == 0);
+    }
+
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers and 2A7's hardware-vs-phase split and 2A8's impossible-rate refusal passed");
 }

@@ -20,6 +20,7 @@
  * does; reading does not.
  */
 #import <Foundation/Foundation.h>
+#include "rb_frametime.h"
 #import <IOKit/IOKitLib.h>
 
 static io_service_t findFB(void)
@@ -171,23 +172,32 @@ int main(int argc, char **argv)
             const long shr = rd(fb, "RBFBFtHoldSharePm");
             printf("  penalty per hold     %8.3f ms   x %.2f holds/txn\n",
                    pen / 1000000.0, hpt / 1000.0);
-            printf("  SO THE 2xo HOLD OWNS %.1f %% of the interval",
+            printf("  the hold owns        %8.1f %% of the interval\n",
                    shr / 10.0);
-            if (shr >= 50) {
-                const double iv = rd(fb, "RBFBFtIntervalNs") / 1000000.0;
-                const double without = iv - (pen / 1000000.0) * (hpt / 1000.0);
-                printf("  -> ~%.1f /s without it\n",
-                       without > 0.0 ? 1000.0 / without : 0.0);
-                printf("  2xo recorded this hold costing 27 %% of the frame\n"
-                       "  rate when it was introduced, so that is an\n"
-                       "  independent corroboration, not a new finding.\n"
-                       "  IT IS A TRADE: the hold is what stopped the\n"
-                       "  compositor drawing into the live scanout. Turning it\n"
-                       "  off brings 2xo's flicker back, which is the thing to\n"
-                       "  look at while measuring - run tools/holdaba.sh.\n");
-            } else {
-                printf("\n  Under 5 %%: the hold is not where the frame rate\n"
-                       "  goes, and `upstream` is Apple's own pacing.\n");
+            {
+                const long vblp = rd(fb, "RBFBVBLPeriodNs");
+                const long iv = rd(fb, "RBFBFtIntervalNs");
+                const uint64_t freei = rb_ft_hold_free_interval_ns(
+                    (uint64_t)(iv > 0 ? iv : 0), (uint64_t)(pen > 0 ? pen : 0),
+                    (uint64_t)(hpt > 0 ? hpt : 0),
+                    (uint64_t)(vblp > 0 ? vblp : 0));
+                if (freei == 0) {
+                    printf("  NO RATE IS PREDICTED FROM THIS. Subtracting the\n"
+                           "  share implies a rate at or above the panel's own\n"
+                           "  vblank rate, which is impossible - the compositor\n"
+                           "  cannot be handed more frames than there are\n"
+                           "  vblanks. The share is a true share of THIS\n"
+                           "  interval; it is not the effect of removing the\n"
+                           "  hold, because removing it changes the GET count\n"
+                           "  and the feed rate too (2A4/2A8). Measure that\n"
+                           "  with tools/holdaba.sh, never by subtraction.\n");
+                } else {
+                    printf("  implied without it   %8.1f /s   (and %.2f /s is\n"
+                           "  the panel's own ceiling, so this is at least\n"
+                           "  possible - it is still not a measurement)\n",
+                           1000000000.0 / (double)freei,
+                           1000000000.0 / (double)vblp);
+                }
             }
         }
     }
