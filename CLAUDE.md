@@ -128,10 +128,17 @@ table and refuses to install one that does not match the running kernel;
   43125, `RBFBBlRefuse` 0, `RBFBBlLiveDiffs` 0, and `IODisplayParameters`
   carrying `brightness`/`linear-brightness` at **min 5120** (our floor) and
   **max 65536** (our scale).
-  **What was wrong for six milestones was not the code - it was the MUX.** In
-  hybrid (iGPU + dGPU) mode this chassis wires the eDP panel **and its
-  backlight** to the dGPU, so the 680M's PWRSEQ0 `BL_PWM_CNTL` was a real,
-  writable, perfectly functioning register attached to **nothing**. Every
+  **What was wrong for six milestones was not the code - it was the firmware
+  graphics mode.** What is MEASURED, and all that should be recorded (2zx):
+  in hybrid mode the 680M's `BL_PWM_CNTL` write lands, reads back
+  bit-identical, is contested by nobody and the panel does not move; in Eco
+  mode the identical code moves it. **The mechanism is NOT established** - a
+  MUX on the backlight PWM pin, the EC owning the PWM, or the firmware
+  configuring the backlight onto a different source per mode would all give
+  that reading, and nothing discriminates them. (2zw asserted "the MUX routes
+  the panel and its backlight to the dGPU"; the panel half cannot be right,
+  since our HUBP0 writes have been scanning the desktop onto it since boot
+  ~230.) So the register was real, writable and attached to **nothing**. Every
   reading 2zj-2zv took was correct and every inference from them was wrong,
   because they shared one unexamined premise: that the output was connected to
   the silicon under test. It explains all of it - the register holding our duty
@@ -139,7 +146,13 @@ table and refuses to install one that does not match the running kernel;
   using it), the DMUB ABM commands acked on the right ring at all three control
   types (2zs/2zt/2zu), and Apple's own stack publishing no brightness parameter
   at all (2zv). **The configuration requirement is part of what an armed boot
-  means: iGPU-only / Eco mode in the ASUS firmware setup.**
+  means: iGPU-only / Eco mode in the ASUS firmware setup** - and
+  `./build/out/blset` now REPORTS the mode before anything else, because Eco
+  mode takes the dGPU off the PCI bus entirely, so a device with vendor-id
+  **0x10de** present is an unambiguous "hybrid mode, the backlight will not
+  reach the panel" (2zx; the match is anchored on the `vendor-id` property,
+  since an unanchored `grep -ic 10de` over ioreg returned 3 on a machine with
+  no NVIDIA device at all - rule 26 in the same session that wrote rule 47).
   **2zl IS WITHDRAWN.** It said 2xs had transcribed `dce_panel_cntl.c`'s direct
   PWM write onto a chip whose `dc` would never call it - rule 46, right
   offsets, wrong method. False: the direct `BL_PWM_CNTL` write **does** drive
@@ -325,12 +338,29 @@ table and refuses to install one that does not match the running kernel;
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker
   (2x0, rule 39).
-- **HDMI is the full project**, and "unreachable" was a fact about the MUX
-  MODE, not about the chassis (2xq/2xr, reframed by 2zw). The port being wired
-  to the dGPU is true in hybrid mode and the MUX is user-switchable from the
-  firmware setup - which is exactly what moved the panel's backlight onto the
-  680M. **Whether the HDMI port also moves to the iGPU in Eco mode is now
-  worth measuring rather than assumed closed.**
+- **HDMI is the full project, and on THIS chassis it is mutually exclusive
+  with brightness (2xq/2xr, settled by 2zx).** The physical HDMI connector is
+  wired to the **dGPU** entry, so it works in hybrid and dGPU-only mode and
+  **cannot** work in iGPU-only mode - 2xq was right about this machine, and
+  2zw's reframing of it as "a fact about the MUX mode" was wrong. Brightness
+  needs Eco mode, HDMI needs hybrid, so today it is one or the other. The only
+  part of 2zw that survives is that the arrangement is **per-chassis** and
+  another laptop may differ, which is why `blset` reports what it finds
+  instead of assuming this one.
+  **A dGPU driver cannot help in Eco mode**: Eco removes the dGPU from the PCI
+  bus entirely (measured, boot 282 - zero `0x10de` devices), so there is
+  nothing to bind to. In HYBRID mode it could, and the right shape is not the
+  "wake the firmware only" idea: if the port belongs to the dGPU and the dGPU
+  has a driver, HDMI is **that driver's** job as a second GPU, with our
+  framebuffer keeping the panel - the ordinary multi-GPU case, no
+  reverse-PRIME path of ours. **NullMoth's `nvidia-macos-driver`** (README and
+  press only, source NOT read) is Turing-Blackwell on NVIDIA's own open GPU
+  kernel modules r610 with unmodified GSP firmware, Metal via AIR -> SPIR-V ->
+  NVK. Blockers: it targets **macOS 15 Sequoia with no Tahoe claim** and this
+  machine is 26.7.2; **Ada is pending validation** (validated on an RTX 5060,
+  this chassis is an RTX 4050). Its licence is source-available and
+  **non-commercial, not open source** - **read the LICENCE before reading the
+  code**, which is why the ChefKiss rule below exists.
 - **Every Apple address in a COMMENT here and in the journal is a macOS 15
   address.** `AMDRadeonX6000MTLDriver __TEXT` 0x7FFB08BF3000 →
   **0x7FFB110D4000**; CoreDisplay 0x7FF80404C000 → **0x7FF805348000**;
