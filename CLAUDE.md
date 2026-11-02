@@ -99,7 +99,9 @@ primary-surface pair is what puts the composited desktop on the panel
 (2wh/2wi). `-rbgpuschedtick` ticking Apple's `AMDSWScheduler::checkTimestamps()`
 at the panel's 6944 µs is what makes frames retire (2xe/2xi) — 2 transactions
 in 30 s became 3375. Answering `kIOReturnNotReady` while our flip is unlatched
-is what fixed the flicker, at 27 % of the frame rate (2xo).
+is what fixed the flicker, at 27 % of the frame rate (2xo) - **and 2A4
+measured that cost at ~36 % and found no flicker without it on boot 286, so
+this hold is now the open question rather than a settled fix.**
 
 **The swizzle fix has two halves and both are needed**: the kernel linear force
 and the kernel-side userspace patcher (2on–2op). macOS 26 broke the userspace
@@ -428,6 +430,41 @@ table and refuses to install one that does not match the running kernel;
   boot, refuses a boot with the hold unarmed (no A side, rule 34), and says in
   its banner that **the flicker during B is data** - a fast AND clean B would
   mean 2xo's diagnosis was wrong (rule 45).
+  **2A4: THE HOLD WAS THE CEILING - 141.24 sets/s at `fed` 98 %, and the
+  frame-rate line is CLOSED (boot 286).** A/B/A in one boot, A = hold ON:
+  **A1 89.41, B 141.24, A2 92.62**, A1->A2 drift **+3.6 %** (inside the band,
+  so B is attributable) and **B vs mean(A) +55.2 %**. The panel scans at
+  143.4 Hz and B delivers **96.1-98.3 %** of its vblanks. The answer was our
+  own `kIOReturnNotReady` hold and the ceiling was never 73.
+  **The user looked at it** (`sudo tools/holdlook.sh 10`, hold off, animation
+  running): **"perfect, no flicker no nothing"** - 2xo's whole-frame flicker
+  did not appear. Recorded as what it is: ten seconds of one workload observed,
+  plus two minutes of B phase unobserved.
+  **Both earlier estimates of the hold were LOWER BOUNDS, for one reason.**
+  2A2 put it at 21 % and 2xo at 27 %; it is **~36 %** of the achievable rate
+  (1 - 91.02/141.24). The retry-gap arithmetic was sound and its tiling
+  premise held, but it measured the **marginal** penalty per held GET with the
+  GET count and the feed rate held FIXED - and removing the hold takes `fed`
+  from ~63 % to ~98 %, so it is a regime change, not a subtraction. **General
+  lesson: a marginal measurement is a lower bound on the effect of removing
+  the thing.**
+  **2A3's "two states" is WITHDRAWN.** A1 run 1 read 73.57 / `fed` 51.5 % and
+  runs 2-6 averaged 92.58 on the SAME boot in the SAME configuration -
+  excluding first runs, A1 92.58 against A2 92.62, **0.04 % apart**. Boot
+  284's 75.72 was one window (a first run), 2zy's boot 271 already discarded
+  run 1, and the 70-75 era is at least partly **a first-run transient**. What
+  the transient IS remains unmeasured. 2A3's own warning about n=1 boots
+  applied to itself one milestone later.
+  **The default is NOT flipped yet.** `-rbgpufbnotready` stays in
+  `rb_defaults.h`: the evidence against 2xo is 10 s of `animtest` plus six
+  unobserved runs, and 2xo's flicker came from real desktop use, where a
+  window drag, a video or a particular surface format could still show it. The
+  test is a whole boot under ordinary use -
+  **`sudo tools/efi.sh bootarg add -rbgpunofbnotready`** (the derived negative,
+  already produced by `rb_off_token()` and honoured by `argOn()`, no code
+  needed). A plausible and UNMEASURED reason it may be clean now: 2zd moved
+  retirement onto the vblank and `mean vblanks` became 1.00-1.19, so an
+  unlatched flip is exposed for far less time than when 2xo was written.
   **2A3: the A/B refused its own B phase, and it was right to (boot 285).**
   `holdset 0` set `amtrNotReady` and the REGISTRY went on saying `Yes`,
   because `RBFBAmtrNotReady` was published in `start()` - right for a

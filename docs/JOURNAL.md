@@ -53461,3 +53461,81 @@ from it** - three boots, two of them n=1.
 
 Framebuffer **A80C7720** carries both fixes. The A/B is unchanged otherwise
 and still needs its B phase.
+
+---
+
+## 2A4 — THE HOLD WAS THE CEILING. 141.24 sets/s at fed 98 %, and no flicker (boot 286)
+
+`sudo tools/holdaba.sh` on boot 286, framebuffer **A80C7720**, native, A/B/A
+in one boot:
+
+```
+A1  73.57  91.64  94.42  86.53  96.41  93.91    mean  89.41   fed 51.5-66.0 %
+B  138.39 143.04 140.36 142.90 139.64 143.09    mean 141.24   fed 96.1-98.3 %
+A2  94.38  92.01  89.82  93.92  96.11  89.50    mean  92.62   fed 62.2-65.9 %
+
+A1 -> A2 drift  +3.6 %   (inside +-8 %, so B is attributable to the dial)
+B vs mean(A)   +55.2 %   (141.24 against 91.02)
+```
+
+**The panel scans at 143.4 Hz and B delivers 98 % of its vblanks.** That is
+the end of the frame-rate line this project has been on since 2zb: the answer
+was our own `kIOReturnNotReady` hold, and the ceiling was never 73.
+
+**And the user looked at it: `sudo tools/holdlook.sh 10`, hold off, animation
+running - "perfect, no flicker no nothing".** 2xo's whole-frame flicker did
+not appear. That observation is the whole reason the dial is a dial, and it is
+recorded as what it is: **ten seconds of one workload with a person watching,
+plus two minutes of B phase with nobody watching.** Not yet enough to flip a
+default (see below).
+
+**Two of my own numbers were underestimates, both in the safe direction, and
+both for the same reason.**
+
+- **2A2 put the hold at 21 % and it is ~36 %** of the achievable rate
+  (1 - 91.02/141.24). The retry-gap arithmetic was sound and its tiling
+  premise held; it measured the **marginal** penalty per held GET *with the
+  GET count and the compositor's feed rate held fixed*. Neither stays fixed.
+  Removing the hold takes `fed` from ~63 % to ~98 %, so this is a regime
+  change and not a subtraction. **A marginal measurement is a lower bound on
+  the effect of removing the thing**, which is a general lesson and the honest
+  reading of why 2A2's prediction (~97/s) undershot 141.
+- **2xo's own 27 % was the same kind of underestimate** by a different route,
+  four milestones earlier. Two independent marginal estimates, 21 % and 27 %,
+  and the real cost is a third of the frame rate.
+
+**2A3's "two states" is WITHDRAWN as boot-to-boot bimodality.** A1 run 1 read
+**73.57 at fed 51.5 %** and runs 2-6 averaged **92.58** on the same boot in
+the same configuration. Excluding first runs, A1 92.58 against A2 92.62 -
+**agreement to 0.04 %**. So:
+
+- boot 284's 75.72 was **one window**, i.e. a first run;
+- 2zy's boot 271 already discarded run 1 (59.43 was "runs 2-6");
+- the ~70-75 readings across the 2zb-2zz era are at least partly **a
+  first-run transient**, not a second stable state.
+
+What the first run is remains unmeasured - a cold cache, a power state, the
+compositor settling - and no model is proposed for it. But "the machine has
+two states" was the wrong framing one milestone after it was written, and
+**2A3's own warning about three boots with two of them n=1 applied to itself.**
+
+**What this does NOT yet justify: flipping the default.** `-rbgpufbnotready`
+is in `rb_defaults.h` and stays there for now. The evidence against 2xo is ten
+seconds of `animtest` plus six unobserved 20 s runs; 2xo's flicker came from
+real desktop use, and a corruption that needs a window drag, a video or a
+particular surface format would not show up in either. The next step is a
+**whole boot** with the hold off under ordinary use:
+`sudo tools/efi.sh bootarg add -rbgpunofbnotready` (the derived negative,
+which `rb_off_token()` already produces and `argOn()` already honours - no
+code needed), then live with it.
+
+**Why it might genuinely be clean now, stated as the open question it is.**
+2xo's hold exists because the compositor could draw into a surface still being
+scanned out, and the hold is conditional on the live `SURFACE_FLIP_PENDING`
+bit. Since 2xo, 2zd moved retirement onto the vblank and `mean vblanks` became
+**1.00-1.19** - a flip latches within about one vblank, so the window in which
+an unlatched flip is exposed is far smaller than it was when 2xo was written.
+That is a plausible mechanism and **nothing here measures it**; the only
+discriminating evidence is a long look at a real desktop.
+
+Framebuffer **A80C7720** is unchanged and carries the dial.
