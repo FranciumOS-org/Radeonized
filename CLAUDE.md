@@ -724,6 +724,35 @@ table and refuses to install one that does not match the running kernel;
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker
   (2x0, rule 39).
+- **A USB4 TYPE-C PORT ON THIS CHASSIS CARRIES DP ALT MODE FROM THE iGPU
+  (user, 2026-11-02) - which the HDMI-A bullet below does NOT cover.** It is a
+  different connector from the HDMI-A jack, so "HDMI needs hybrid mode" is a
+  fact about that jack and not about display output in Eco mode. Plugged in
+  live it is **black** and macOS sees one display
+  (`system_profiler`: Color LCD only, Connection Type Internal). Two things
+  are established and the third is not:
+  **(1)** macOS has no USB4/Thunderbolt router here (`SPThunderboltDataType`:
+  "No hardware was found"), and that does **not** block DP alt mode - the
+  lanes are switched by the Type-C PD controller, not by an OS driver, so the
+  only OS-side requirement is that something drives the GPU's DIG and a second
+  pipe. **(2)** We drive exactly one head: `RBAMDFramebuffer` writes OTG0 and
+  HUBP0 and nothing else, and `getDisplayModeCount()` has returned 1 since
+  2sl, so a black external display is the **expected** reading whether or not
+  the port is wired to the 680M. **(3) NOT established: whether the port is
+  wired to the 680M's display engine in Eco mode at all** - rule 47 asked of
+  a new output, and the `otg_ctl1..3` = 0x300 in `RBGPUDiag` **cannot answer
+  it**, because `rbgpu_agdc_otg.cpp` samples once at init and that boot had no
+  cable (rule 33: establish when a reading was taken).
+  **The free measurement is PRE-BOOT**: plug the display in before power-on
+  and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
+  drives whatever it is wired to, so an image there says the port reaches the
+  680M in this mode **and** that the firmware trained the link - which is the
+  whole reason the internal panel was tractable (2wh wrote HUBP surface
+  addresses onto a pipe the firmware had already lit, and never trained
+  anything). No image pre-boot means link training is ours, which is DP AUX,
+  EDID and `dc_link`'s DMUB-assisted sequence - the largest single piece of
+  work left in the display path. The same boot reads `otg_ctl1..3` with the
+  cable present, which is the instrument we have.
 - **HDMI is the full project, and on THIS chassis it is mutually exclusive
   with brightness (2xq/2xr, settled by 2zx).** The physical HDMI connector is
   wired to the **dGPU** entry, so it works in hybrid and dGPU-only mode and
