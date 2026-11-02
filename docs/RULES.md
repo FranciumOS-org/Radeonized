@@ -1031,6 +1031,36 @@ table and refuses to install one that does not match the running kernel;
   timing totals (a wrong field then reads as an absurd rate, not a plausible
   one) and compares the mode's bandwidth against 2BB's measured link.
   Framebuffer **67F28153**.
+  **2BD: THE EDID IS READ - "MSI MP2412C" off the wire (boot 295).** 128
+  bytes, header OK, checksum OK, refusal 0, **`defers 16`** - the retry loop
+  was **load-bearing**, and without it the read would have failed
+  indistinguishably from an unreachable sink. The model string is unfakeable:
+  the manufacturer is **5-bit-packed** in bytes 8-9 (0x3669 -> M,S,I), the name
+  is in a **0xFC-tagged** descriptor, and the block **sums to zero**. Panel
+  52 x 29 cm (~23.4 in), gamma 2.20, digital input - none needed, all agreeing.
+  **AND THE 100 Hz MODE IS IN THE SECOND DESCRIPTOR, WHICH THE TOOL DID NOT
+  READ.** It parsed only 0x36 and printed **60.00 Hz** - true of the
+  *preferred* timing, read as the whole answer, on a monitor the user had
+  already said is 100 Hz. All four slots: 0x36 = 1920x1080 @ 60.00 Hz
+  (148.5 MHz), **0x48 = 1920x1080 @ 99.65 Hz (228 MHz)**, 0x5a = name,
+  **0x6c = range limits, V 48-100 Hz, max clock 230 MHz**. **Three independent
+  corroborations of 100 Hz** (the timing, `vmax` 100, and 228 under the stated
+  230), and **5.47 Gbps against the ~8.64 2BB measured - it FITS**, so DP alt
+  mode's lane count is not the obstacle. Fixed structurally: all four slots,
+  the range-limits descriptor since it bounds the others, and a "fastest mode"
+  line checked against the **measured** link. **A correct reading of ONE
+  element of a list, presented as the reading of the list** - 2B0's bucket 3
+  and 2A1's threshold are the same error about which quantity answers the
+  question; this one is about which SLOT.
+  Smaller, same breath: decoding by hand I **retyped** the dump instead of
+  parsing it, dropped a byte, and got "V 0-48 Hz" and a 0.017 Hz descriptor.
+  **The nonsense is why it cost nothing** - which is the reason every refresh
+  is DERIVED from the totals rather than read. Do not hand-transcribe hex.
+  **Established end to end now: wired (2B4), engine configured and bound
+  (2B9), our own transactions carried (2BB), full capability and timing set
+  readable (2BD). Every remaining step is OUTPUT-side**: link training, a
+  second OTG and HUBP, a DIG encoder, and a second `IOFramebuffer` -
+  `getDisplayModeCount()` has returned 1 since 2sl.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the
