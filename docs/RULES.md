@@ -493,6 +493,37 @@ table and refuses to install one that does not match the running kernel;
   and points at `holdaba.sh`; the share is still printed, only the rate is
   refused. Hosttested against boot 288's own numbers, both sides of the
   boundary, with a control so the check cannot be a constant 0.
+  **2A9 reopens exactly one question, and only because 2A8 closed it on a
+  MEAN.** The user runs hold-OFF for 144 Hz and asked for a middle setting -
+  "feed 91 % of the vblanks instead of 98 %". **That dial cannot work: the
+  hazard is PER FLIP**, so 7 % fewer flips is 7 % less flicker for 7 % less
+  frame rate, and the flicker is already rare enough that the dilution is
+  invisible. There is no safe intermediate either - anything answering `ready`
+  while our flip is unlatched carries the full hazard, and the 91-vs-141 gap
+  is Apple's post-ready pipeline, which only overlaps our latch if a second
+  flip is in flight, which is what the hold forbids. **But 1.00 vblanks is a
+  mean**, and a mean cannot tell "every flip needs the whole period" (no
+  middle, 2A8 stands) from "most resolve at once and a TAIL is exposed" (a
+  partial hold removes most of the hazard for a fraction of the cost). So
+  `rb_ft_hist` counts the distribution in **quarters of a vblank** and
+  `RBFBFtPendEarlyPm` is the answer: ~0 is no middle, large names the prize.
+  **The instrument was blind in the regime under investigation** -
+  `hubpHoldNotReady()` returned on `!amtrNotReady` BEFORE reading
+  `SURFACE_FLIP_PENDING`, so turning the hold off turned the measurement off.
+  Split into `hubpFlipPending()` (read, no side effect) and
+  `hubpHoldNotReady(pending)` (decide). **General shape: when a dial turns a
+  feature off, check whether it also turns the MEASUREMENT off** - an A/B
+  whose B side cannot be instrumented is not an A/B. A PENDING run files in
+  both regimes, so the hold-on reading is the CONTROL and must not be read as
+  evidence about hold-off (rule 39 applied to a histogram; `ftbudget` prints
+  the regime on every line and the setter zeroes the histogram on a switch).
+  With the hold on it reproduces `ftLatchWait`, refused over +-5 % - a free
+  cross-check. **Nothing is claimed: no reading has been taken, and 2A8's
+  closure stands until the histogram says otherwise WITH THE HOLD OFF.**
+  Framebuffer **3E09FBD5**. Caught pre-build: `hubpFlipCtl` is 2xj's one-shot
+  setup snapshot published as `RBFBHubpFlipCtl`, and reusing it would have
+  overwritten a published setup fact with frame-path noise ~300x/s with no
+  symptom - rule 42's "who owns this?" asked of a scalar.
   **The only loose thread left here: the FIRST-RUN TRANSIENT** (2A4 - run 1 of
   a phase reads ~73-76 where runs 2-6 read ~92). It has biased every
   single-window measurement since 2zb and nobody has looked at it.
