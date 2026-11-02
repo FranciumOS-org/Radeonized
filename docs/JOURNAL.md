@@ -52999,3 +52999,76 @@ software).
 **Brightness is DONE.** Nothing to build. The configuration requirement is
 **iGPU-only / Eco mode in the ASUS firmware**, which belongs beside the
 boot-args as part of what an armed boot means.
+
+## 2zx — boot 282: two corrections to 2zw, and the firmware mode is READABLE
+
+**Correction 1: 2zw asserted a mechanism it had not measured.** It said "the
+MUX routes the eDP panel *and its backlight* to the dGPU in hybrid mode." The
+panel half cannot be right as stated: in hybrid mode our HUBP0 surface writes
+put the composited desktop on that panel (2wh/2wi) and have done since boot
+~230, so the iGPU's display pipe was scanning out to it the whole time. What is
+measured is narrower and is the only thing that should be recorded:
+
+> In hybrid mode the 680M's `BL_PWM_CNTL` write lands, reads back
+> bit-identical, is contested by nobody, and the panel does not move. In
+> iGPU-only / Eco mode the identical code moves the panel.
+
+**The mechanism is NOT established** — a MUX on the backlight PWM pin, the EC
+owning the PWM in hybrid mode, or the firmware simply configuring the panel's
+backlight onto a different source per mode would all produce that reading, and
+nothing here discriminates them. Writing one of them down as the cause would be
+rule 17, which is the error that cost this project fifteen milestones once
+already. Rule 47 does not depend on the mechanism and stands as written.
+
+**Correction 2: HDMI is hardwired, not MUX-switchable (user, from the firmware
+setup).** 2zw reframed 2xq/2xr's "HDMI is unreachable" as a fact about the MUX
+mode rather than the chassis. That was wrong in the other direction: on this
+motherboard the physical HDMI connector is wired to the **dGPU** entry, so it
+works in hybrid and dGPU-only mode and **cannot** work in iGPU-only mode. 2xq's
+original claim was right about this chassis; what 2zw correctly added is only
+that the arrangement is per-chassis and another laptop may differ.
+
+**And the firmware mode is readable, anchored, from userspace.** Boot 282 in
+Eco mode:
+
+```
+vendor-ids on the PCI bus:  1022 x34, 10ec x2, 1002 x2, 2646, 1344
+devices with vendor-id 10de:  0
+```
+
+**Eco mode removes the dGPU from the PCI bus altogether** — it is not merely
+powered down. So a present `0x10de` is an unambiguous "hybrid mode", which is
+the configuration in which the backlight write looks perfect and does nothing.
+`tools/blset.m` now reports the mode before anything else and says so in that
+case, which is the fallback for other chassis: report what was found instead
+of assuming this laptop's arrangement.
+
+(The match is anchored on the `vendor-id` property. An unanchored
+`ioreg | grep -ic 10de` returned **3** on a machine with no NVIDIA device on
+the bus at all — rule 26 again, in the same session that wrote rule 47.)
+
+**The consequence for the dGPU-driver idea: on this chassis brightness and
+HDMI are mutually exclusive today.** HDMI needs hybrid mode because the port
+is wired to the dGPU; hybrid mode is where our backlight does not reach the
+panel. And Eco mode cannot host any dGPU driver at all, because there is no
+device on the bus to bind to.
+
+**On NullMoth's `nvidia-macos-driver` specifically** (read from its README and
+press coverage, not from its source): Turing through Blackwell, kernel side is
+NVIDIA's **own open GPU kernel modules, r610 branch, with unmodified GSP
+firmware**, ported to kexts; Metal via an AIR -> SPIR-V translator into NVK.
+Two blockers before it is even a candidate here: it targets **macOS 15
+Sequoia and makes no Tahoe claim**, and this machine runs 26.7.2 (Darwin
+25.6.0); and **Ada is listed but pending validation** — the developer validated
+on an RTX 5060, while this chassis has an RTX 4050. Its licence is
+source-available and non-commercial rather than open source in the strict
+sense, so **read the LICENCE before reading the code** — the ChefKiss rule in
+CLAUDE.md exists because a licence can forbid exactly that.
+
+**The idea is sound but does not need the hard part.** "Wake the firmware and
+not the GPU" is unnecessary: if the HDMI port belongs to the dGPU and the dGPU
+has a driver, HDMI is **that driver's** job in ordinary hybrid mode — our
+framebuffer keeps the panel, the NVIDIA driver drives HDMI as a second GPU.
+That is the normal multi-GPU case and needs no reverse-PRIME path invented on
+our side. The power claim should be stated honestly though: GSP booted plus a
+live display engine plus VRAM refresh is a few watts, not zero.

@@ -60,6 +60,87 @@
 //
 // So this prints every key it finds and tries both names, which is what turns
 // "the slider is absent" from one fact into two separable ones (rule 14).
+// 2zw/2zx: THE FIRMWARE GRAPHICS MODE IS PART OF THE CONFIGURATION, AND IT IS
+// READABLE. Six milestones and ten boots went into a backlight register that
+// was real, writable, uncontested and attached to NOTHING, because in hybrid
+// (iGPU + dGPU) mode this chassis does not give the 680M's PWM block the
+// panel's backlight. Switching the ASUS firmware to iGPU-only / Eco mode made
+// the identical code work (boot 282). That is rule 47, and the whole cost of
+// it was nobody asking which mode the machine was in.
+//
+// So ask, here, in the tool whose only job is brightness. The detector is the
+// PCI bus and it is unambiguous: boot 282 in Eco mode has **zero** devices
+// with vendor-id 0x10de - the firmware removes the dGPU from the bus
+// altogether, it is not merely powered down. A present 0x10de therefore means
+// hybrid mode, which is the configuration where the backlight write lands
+// perfectly and the panel does not move.
+//
+// The match is ANCHORED on the vendor-id property (rule 26). A grep for
+// "10de" over whole ioreg output returned 3 hits in a mode with no NVIDIA
+// device on the bus at all, which is exactly the instrument error this
+// project has paid for repeatedly.
+//
+// This is also the fallback for OTHER machines: the wiring differs per
+// chassis, so the tool reports what it found rather than assuming this
+// laptop's arrangement.
+static int dgpuPresent(void)
+{
+    int found = 0;
+    io_iterator_t it = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+                                     IOServiceMatching("IOPCIDevice"),
+                                     &it) != kIOReturnSuccess) {
+        return -1;                      /* could not look, != "not there" */
+    }
+    io_service_t dev;
+    while ((dev = IOIteratorNext(it))) {
+        CFTypeRef v = IORegistryEntryCreateCFProperty(
+            dev, CFSTR("vendor-id"), NULL, kNilOptions);
+        if (v) {
+            if (CFGetTypeID(v) == CFDataGetTypeID() &&
+                CFDataGetLength((CFDataRef)v) >= 2) {
+                const UInt8 *b = CFDataGetBytePtr((CFDataRef)v);
+                /* little-endian: 0x10de reads as de 10 */
+                if (b[0] == 0xde && b[1] == 0x10) { found = 1; }
+            }
+            CFRelease(v);
+        }
+        IOObjectRelease(dev);
+    }
+    IOObjectRelease(it);
+    return found;
+}
+
+static void reportMode(void)
+{
+    const int d = dgpuPresent();
+    if (d < 0) {
+        printf("firmware graphics mode: UNKNOWN - could not enumerate "
+               "IOPCIDevice\n");
+        return;
+    }
+    if (d == 0) {
+        printf("firmware graphics mode: iGPU-only / Eco "
+               "(no 0x10de device on the PCI bus)\n"
+               "  -> the backlight reaches the panel in this mode (2zw, "
+               "boot 282).\n");
+        return;
+    }
+    printf("firmware graphics mode: HYBRID - an NVIDIA device (0x10de) is on "
+           "the PCI bus\n"
+           "  *** THE BACKLIGHT WRITE WILL LAND AND THE PANEL WILL NOT "
+           "MOVE. ***\n"
+           "  This is not a bug in the driver and not a stale build. In this\n"
+           "  mode the 680M's BL_PWM block does not drive the panel's\n"
+           "  backlight, so every counter below will look perfect while\n"
+           "  nothing changes - that cost six milestones and ten boots\n"
+           "  (journal 2zj..2zw, rule 47).\n"
+           "  Switch the ASUS firmware to iGPU-only / Eco mode.\n"
+           "  Note the trade on this chassis: the HDMI port is wired to the\n"
+           "  dGPU, and Eco mode takes the dGPU off the bus entirely - so it\n"
+           "  is brightness OR HDMI, not both.\n");
+}
+
 static CFDictionaryRef findBl(CFDictionaryRef p, const char **which)
 {
     static const char *const names[] = { kIODisplayBrightnessKey, "brig" };
@@ -137,6 +218,9 @@ int main(int argc, char **argv)
         printf("no IODisplayConnect at all\n");
         return 2;
     }
+
+    reportMode();
+    printf("\n");
 
     int n = 0;
     io_service_t conn;
