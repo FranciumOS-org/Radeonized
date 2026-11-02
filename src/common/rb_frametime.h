@@ -236,4 +236,43 @@ static inline uint64_t rb_ft_gets_tile_pm(uint64_t retry_mean_ns,
     return (per_txn * 1000ull) / interval_ns;
 }
 
+/* 2A8: is a hold share even POSSIBLE?
+ *
+ * Boot 288 printed "the 2xo hold owns 42.3 % of the interval -> ~162.3 /s
+ * without it" on a panel that scans at 143.4 Hz. A rate above the refresh is
+ * not a surprising result, it is an arithmetical impossibility - the
+ * compositor cannot be handed more frames per second than there are vblanks -
+ * so the share that implied it is wrong, and 2A4 had already MEASURED the
+ * no-hold rate at 141, i.e. the panel.
+ *
+ * The cause is 2A4's own lesson, overshooting instead of undershooting: the
+ * marginal penalty per held GET times the holds per transaction is not the
+ * effect of REMOVING the hold, because removing it changes the GET count, the
+ * feed rate and the regime. 2A4 said that makes it a lower bound; boot 288
+ * shows it is not even a bound - it is a different quantity, and extrapolating
+ * a rate from it is the error.
+ *
+ * So the subtraction is only reported when its own conclusion is physically
+ * possible. The vblank rate is the hard ceiling, and this returns 0 - "no
+ * usable prediction" - the moment the implied interval drops below one vblank
+ * period. The share of the interval is still true and still printed; what is
+ * refused is the extrapolated RATE.
+ */
+static inline uint64_t rb_ft_hold_free_interval_ns(uint64_t interval_ns,
+                                                   uint64_t penalty_ns,
+                                                   uint64_t holds_pm,
+                                                   uint64_t vbl_period_ns)
+{
+    if (interval_ns == 0 || vbl_period_ns == 0) { return 0; }
+    if (penalty_ns > UINT64_MAX / (holds_pm ? holds_pm : 1u)) { return 0; }
+    const uint64_t owned = (penalty_ns * holds_pm) / 1000ull;
+    if (owned >= interval_ns) { return 0; }        /* would be <= 0 */
+    const uint64_t left = interval_ns - owned;
+    /* One transaction per vblank is the most the hardware can deliver. An
+     * implied interval shorter than a vblank period is the instrument saying
+     * its own premise failed, not a fast machine. */
+    if (left < vbl_period_ns) { return 0; }
+    return left;
+}
+
 #endif /* RB_FRAMETIME_H */
