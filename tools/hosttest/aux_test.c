@@ -107,6 +107,64 @@ int aux_tests(void)
         }
     }
 
+    /* 2B9: boot 293's own words, so the decode is pinned against a real
+     * reading and not against my arithmetic. AUX0 and AUX2 enabled, HPD_SEL
+     * 0 and 2, both DONE with a non-zero sticky reply count; AUX1/3/4 never
+     * brought up. */
+    {
+        const uint32_t ctl[5]  = { 0x01040101u, 0x01040000u, 0x01240101u,
+                                   0x01040000u, 0x01040000u };
+        const uint32_t stat[5] = { 0x02000001u, 0x00000000u, 0x01000001u,
+                                   0x00000000u, 0x00000000u };
+        if (rb_aux_hpd_sel(ctl[0]) != 0 || rb_aux_hpd_sel(ctl[2]) != 2) {
+            printf("FAIL aux: HPD_SEL %u/%u want 0/2\n",
+                   rb_aux_hpd_sel(ctl[0]), rb_aux_hpd_sel(ctl[2])); bad++;
+        }
+        if (rb_aux_reply_count(stat[0]) != 2 ||
+            rb_aux_reply_count(stat[2]) != 1) {
+            printf("FAIL aux: reply count %u/%u want 2/1\n",
+                   rb_aux_reply_count(stat[0]),
+                   rb_aux_reply_count(stat[2])); bad++;
+        }
+        if (!rb_aux_sink_replied(ctl[2], stat[2])) {
+            printf("FAIL aux: AUX2 sink reply not recognised\n"); bad++;
+        }
+        /* A disabled engine with a stale non-zero status must NOT count as a
+         * reply, or every dark engine reads as a connected sink. */
+        if (rb_aux_sink_replied(ctl[1], 0x01000001u)) {
+            printf("FAIL aux: a disabled engine reported a reply\n"); bad++;
+        }
+        /* DONE without a byte count is a completed transaction with NO data
+         * back - an engine that ran and heard nothing, which is the case that
+         * must not read as a sink. */
+        if (rb_aux_sink_replied(ctl[0], 0x00000001u)) {
+            printf("FAIL aux: DONE with a zero byte count read as a reply\n");
+            bad++;
+        }
+        /* THE LOOKUP THAT REPLACES THE GUESS. */
+        if (rb_aux_for_hpd(ctl, 5, 2u) != 2u) {
+            printf("FAIL aux: HPD2 engine not found\n"); bad++;
+        }
+        if (rb_aux_for_hpd(ctl, 5, 0u) != 0u) {
+            printf("FAIL aux: HPD0 engine not found\n"); bad++;
+        }
+        /* An HPD block with no engine bound to it must come back as "none",
+         * not as instance 0 - the whole point is that nothing is assumed. */
+        if (rb_aux_for_hpd(ctl, 5, 3u) != RB_AUX_COUNT) {
+            printf("FAIL aux: an unbound HPD did not return none\n"); bad++;
+        }
+        /* And a DISABLED engine whose HPD_SEL happens to match must not be
+         * returned: its selector is whatever was left in the register. */
+        const uint32_t dark[5] = { 0x00240000u, 0u, 0u, 0u, 0u };
+        if (rb_aux_for_hpd(dark, 5, 2u) != RB_AUX_COUNT) {
+            printf("FAIL aux: a disabled engine was returned for an HPD\n");
+            bad++;
+        }
+        if (rb_aux_for_hpd(0, 5, 2u) != RB_AUX_COUNT) {
+            printf("FAIL aux: NULL did not return none\n"); bad++;
+        }
+    }
+
     printf("aux: 2B8's DCN 3.1.2 offsets (DCE110 engine, rule 46 checked in "
            "dcn31_resource.c), the bound, and the reference comparison%s\n",
            bad ? " FAILED" : ": passed");

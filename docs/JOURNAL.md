@@ -54756,3 +54756,86 @@ against the currently-running older kext, which is what produced that path.
   step.
 - **OTG1..3 all 0x300 live** - nothing lit a second pipe, so the black screen
   is not a half-configured pipe we could finish, and the whole chain is ours.
+
+---
+
+## 2B9 — THE AUX CHANNEL REACHES THE TYPE-C SINK, and the mapping was one field away all along (boot 293)
+
+**The survey answered with the best of its four outcomes, and then answered a
+question 2B8 had written off as unanswerable.**
+
+| | ctl | dphy | stat | arb |
+|---|---|---|---|---|
+| AUX0 | 0x01040101 | **0x00016400** | 0x02000001 | 0 |
+| AUX1 | 0x01040000 | 0x00004500 | 0 | 0 |
+| **AUX2** | 0x01240101 | **0x00016400** | 0x01000001 | 0 |
+| AUX3 | 0x01040000 | 0x00004500 | 0 | 0 |
+| AUX4 | 0x01040000 | 0x00004500 | 0 | 0 |
+
+**AUX2's engine is configured and its receive timing is BIT-IDENTICAL to the
+panel's** - 0x00016400 against the 0x00004500 of the three that were never
+brought up. The reference comparison did exactly the job it was built for.
+
+**Two independent instruments agree**: `AUX_EN` mask **0x05** is the same pair
+as 2B4's HPD sink mask **0x05**. The only two connectors with sinks are the
+only two with live AUX engines. Neither reading was derived from the other.
+
+**THE MAPPING IS NOT MISSING - IT IS A FIELD, AND THE FIRMWARE FILLED IT IN.**
+`AUX_CONTROL.AUX_HPD_SEL` (bits 20-22, mask 0x00700000) reads **0 on AUX0** and
+**2 on AUX2**. The only difference between those two control words is that
+selector. So the engine for the Type-C port **names its own connector**, 2B8's
+"instance 0 is the assumed reference" stops being an assumption, and so does
+the implicit instance-N-pairs-with-HPD-N that `auxMatchMask` was built on.
+`rb_aux_for_hpd()` now looks the binding up instead. **2B8 wrote twice that
+this mapping "is in no header" and built a cable-unplugging difference method
+around it; it was one field away the whole time**, in a file already in the
+tree - the same shape as the triple-buffer bit documented in our own header
+since 2xm and never asked about (2B1). The lesson is not about AUX: **when a
+fact looks unobtainable, read the register definition before designing an
+experiment to infer it.**
+
+**AND A SINK HAS ALREADY REPLIED ON AUX2.** `AUX_SW_STATUS` carries
+`AUX_SW_DONE` plus `AUX_SW_REPLY_BYTE_COUNT` (bits 24-28): **2 bytes on AUX0,
+1 byte on AUX2**, both DONE. A reply came back from the Type-C sink on that
+engine - so **the AUX channel is proven end to end without this project
+issuing a single transaction.** The firmware probed that connector.
+**Stated in the past tense on purpose: the status register is STICKY**, so the
+reply could be from boot and this says the channel reaches a sink, not that the
+sink is answering now (rule 33 asked of a status register - it cannot say when
+its reading is from). `rb_aux_sink_replied()` therefore requires enabled +
+DONE + a non-zero count, and the hosttest asserts that **DONE with a zero byte
+count does NOT read as a reply** - a transaction that ran and heard nothing is
+the case that must not be confused with a sink.
+
+**`arb` is 0 on both engines**, so nothing holds the arbitration lock, and
+**OTG1..3 all read 0x300 LIVE with the cable in** - the first time this project
+could answer that at all (2B5: both earlier OTG readings were setup one-shots).
+So nothing lit a second pipe, and the black screen is not a half-configured
+pipe we could finish: the pipe chain is entirely ours.
+
+**Where this leaves the external display.** Wired (2B4), engine configured and
+bound to HPD2 by the firmware's own selector, channel proven to reach the sink,
+nothing holding the lock, no pipe lit. **Every remaining unknown is downstream
+of AUX**: DPCD, EDID, link training, then OTG/HUBP/DIG and a second
+`IOFramebuffer`. That is a long road but a located one, and the four-way
+ambiguity 2B8 was built to resolve is gone.
+
+**And the risk shape of the next step is better than it looked.** A DPCD read
+means taking `AUX_ARB_CONTROL` and writing `AUX_SW_DATA`/`AUX_SW_CONTROL` - on
+**AUX2**, an engine that drives nothing this desktop depends on, with the live
+panel's engine (AUX0) untouched. 2B8 declined to write because the DMCUB also
+arbitrates; that is still true, and it is now true about a *spare* engine
+rather than about the one holding the display up.
+
+Hosttested against boot 293's own words rather than against my arithmetic:
+HPD_SEL 0/2, reply counts 2/1, the lookup finding both engines, an unbound HPD
+returning **none rather than instance 0**, a disabled engine with a matching
+selector **not** returned (its selector is whatever was left in the register),
+and NULL. Three breaks verified to fail and to compile: `for_hpd` ignoring
+`AUX_EN` (1 case), a HPD_SEL shift of 19 (2), and `sink_replied` ignoring the
+byte count (1).
+
+**No rebuild was needed for any of this** - the raw words were already
+published by E24F30C2, so `tools/auxlook.sh` decodes the binding and the reply
+from what is in the registry. Publishing the raw words beside the summary paid
+for itself for the third time (2B0, 2B4, now this).
