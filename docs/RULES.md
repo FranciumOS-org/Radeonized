@@ -119,293 +119,59 @@ table and refuses to install one that does not match the running kernel;
 `tools/re/xhci_intr0_derive.py` re-derives it after an OS update.
 
 **Open, small, and each one named:**
-- **Brightness — THE REGISTER WORK IS DONE AND THE PANEL DOES NOT FOLLOW IT
-  (2zj, boot 270).** The slider moves, tracks our value, and changes nothing.
-  **Nothing else writes `BL_PWM_CNTL`**: across a 40 s quiet window
-  `RBFBBlLiveReads` climbed 10472 → 20218 with `RBFBBlLiveDiffs` **25 → 25**
-  and the count pinned at what we wrote, so ABM in the DMCUB is eliminated and
-  the register sits enabled, fractional, period 4000, holding our duty cycle
-  with the panel unmoved. **This panel's backlight does not follow PWRSEQ0's
-  BL_PWM** — 2or's own falsification test, reached by a route a zero period
-  cannot detect. Apple has no competing path either: `AppleIntelPanelA` *is*
-  matched on PNLF but publishes `{"commit"={"reg"=0}}` and no `brightness` at
-  all, because it is the *Intel* backlight driver. **2zl says why, and eDP AUX
-  was the wrong guess**: on DCN 3.1 the CPU never writes `BL_PWM_CNTL` to
-  change brightness. `dcn31_panel_cntl.c` has **no `.set_backlight_level`** —
-  every member of `dcn31_link_panel_cntl_funcs` is a DMUB round trip — and
-  `dcn21_set_backlight_level` takes the register-writing `dce110` path only
-  `if (res_pool->dmcu)`, the old DMCU this chip has not got, and otherwise ends
-  at `dmub_abm_set_backlight()`. The AUX control types exist but only under
-  `edp_set_backlight_level_nits`. **So 2xs transcribed `dce_panel_cntl.c`:
-  right offsets (2xp checked those), wrong METHOD for the version grouping**
-  (rule 46) — the register is real and writable, just not the live input to the
-  PWM, which is why nothing overwrote it. Apple has no path to borrow either:
-  `AMDRadeonX6000Framebuffer` has `initializeDmcuB` and two DMCUB version reads
-  and **no abm/backlight symbol at all** (3314 symbols as the control), and
-  `AMDSupport`'s `ATIPanel` route needs an `ATIController`, which never
-  instantiates here. **THE DMUB RING IS FREE, measured (2zl, boot 271):**
-  `RBFBDmubWptrMoves` **0** and `RptrMoves` **0** across 125 samples, with
-  `WPTR == RPTR == 2368` and `InboxSize` 8192 — and 2368 is **37 × 64**, i.e.
-  37 `dmub_rb_cmd`s at bring-up and then nothing, the live confirmation of the
-  static read. **So a DMUB ABM command is a live route.**
-  **2zn designed it, boot 272 refuted it, and 2zo rewrote it to stop having
-  a convention. Nothing has touched hardware.** 2zn named the mailbox window
-  (CW4, from `dmub_srv.c`) and wrote `DMUB_CW4_BASE` as **0x80000000** -
-  which is boot 271's `DMCUB_INBOX1_BASE_ADDRESS` reading, not the header's
-  value. `dmub_srv.c:84` says **0x64000000**, and the hosttest had asserted
-  the constant equalled the register, which **compared a reading with
-  itself**. Rule 26 extended: **a constant is an instrument too.** The
-  window address fields are **29 bits** (`sh_mask.h:5881`, enable at 31), so
-  `0x64000000 & 0x1FFFFFFF` is **0x04000000** - exactly boot 272's CW4_BASE,
-  so **CW4 IS the mailbox**, 64 KB of it. What is genuinely open:
-  `DMCUB_INBOX1_BASE_ADDRESS` reads **0x80000000**, which is neither value,
-  and **nothing locates from it any more**. The address kind was predicted
-  wrong too: CW4_OFFSET reads **0xf4_ffe40000**, an MC address, because this
-  machine's FIRMWARE wrote it and not Linux - so `mc2pa()` does apply and
-  the ring is at system-physical **0x8_7FE4_0000**.
-  **2zp settles it on boot 273: the LAYOUT is the identification.** All seven
-  windows read, and **six sit exactly where `dmub_srv.c:81-86` puts them**
-  after the 29-bit truncation (0x60/61/63/64/65/66000000 -> 0x00/01/03/04/05/
-  06000000); CW2 is disabled, which is correct since `dmub_srv.c:873` bases it
-  inside CW0. Six exact matches of a published layout, read off the machine -
-  rule 18's answer to "two numbers agreeing". **CW4 is the mailbox**, at MC
-  `0xf4_ffe40000` -> system-physical **0x8_7FE4_0000**. `rb_dmub_mailbox_win()`
-  returns it only when the **whole** layout corroborates; one window out of
-  place and nothing is chosen.
-  **2zo's byte signature chose CW5, which is `DMUB_WINDOW_5_TRACEBUFF`** -
-  128 plausible slots of 128 with no empties, because a trace buffer is dense
-  records and so passes any weak "looks like a header" test, while the real
-  mailbox read **all zeros**. **So 64 bytes went into the trace buffer** at
-  0x8_7FE5_0000 + 2368 - diagnostic-only, but the first wrong hardware write
-  on this surface. The lesson is not "tighten the test": a weak test plus a
-  permissive selector finds the densest data in the search space, so **the
-  selector must be what is actually known**. The signature survives as a
-  published observation (`RBFBDmubSigOk`, now requiring an empty tail) and is
-  never consulted for the choice.
-  **The ack was a no-op, and this is the sharpest rule-13 case in the
-  journal.** `SendsOk` 1, `Acks` 1, RPTR 2368 -> 2432 - but the command went
-  into CW5 while the WPTR written was the REAL inbox register, so the DMCUB
-  consumed the real ring's zeroed slot (`DMUB_CMD__NULL`). **An ack says the
-  microcontroller consumed the slot our WPTR named, and nothing about what we
-  wrote unless both went to the same memory.**
-  **The "37 commands at bring-up" belief is withdrawn**: CW4's 8192 bytes are
-  all zeros while the registers say `WPTR == RPTR == 2368`, so it was always
-  an inference from the POINTER. There are no bytes to recognise.
-  **And rule 16 was paid twice in one milestone, the second time by an
-  instrument added to catch a reading problem.** A 32-bit `OSNumber` with bit
-  31 set returns NEGATIVE through `CFNumberGetValue`, so
-  `DMCUB_INBOX1_BASE_ADDRESS` 0x80000000 read as -2147483648: boot 272's
-  `0xffffffff8400ffff` was the tool, not the register, and boot 273's version
-  guard then tested `num(...) < 0`, declared a correct current kext "older"
-  and **suppressed a successful locate**. Fixed structurally: `u32()` masks
-  every 32-bit field and the version check tests whether the property
-  **exists**. **Never test a reading's sign to decide whether a key is
-  present.**
-  Still unexplained and published so it cannot be forgotten:
-  `DMCUB_INBOX1_BASE_ADDRESS` reads **0x80000000**, neither 0x64000000 nor its
-  truncation. Nothing locates from it.
-  **2zq (boot 274): the DMCUB consumes CW4's slots, and an ack is STILL not
-  an identification.** Four commands pushed, `sends ok/refused 4 / 0`,
-  `acks/timeouts 4 / 0`, and the inbox registers moved `WPTR/RPTR 0x940 ->
-  0xa40` - 2368 -> 2624, exactly 4 x 64, RPTR following every push inside the
-  1 ms spin. **The panel did not move**, at either command, in either order.
-  But boot 273 measured that same shape while the bytes were in the TRACE
-  BUFFER and the DMCUB was consuming a zeroed slot, so boot 274 is consistent
-  with two different worlds and discriminates neither: (a) our bytes are not
-  where the DMCUB reads, or (b) they are and ABM ignored them.
-  **2zq builds the discriminator and it is a READ.**
-  `DMUB_CMD__QUERY_FEATURE_CAPS` = 6: `dc_dmub_srv_query_caps_cmd` sets
-  `header.ret_status = 1` before sending and accepts the reply only
-  `if (... ret_status == 0)`, so the **firmware clears that bit** - and the
-  reply lands in **our own slot**, because `dmub_srv_cmd_get_response` ends at
-  `dmub_rb_get_return_data` at `base_address + rptr - DMUB_RB_CMD_SIZE`, the
-  slot just consumed. DCN 3.1 takes the FB inbox path, not
-  `DMUB_CMD_INTERFACE_REG` (that is DCN42/401/60). So one bit, in memory whose
-  address we chose, that nothing we wrote can satisfy - which is what 2zp's
-  "constant equals a register reading" hosttest could not be. The read-back is
-  in `dmubPush` for **every** command; the verdict is `rb_dmub.h`'s, four-way,
-  and both 64-byte buffers are published beside it: **ZERO** (boot 273's
-  measured mode - retires CW4 despite six layout matches), **UNCHANGED** (the
-  expected answer for an ABM command, which never sets `ret_status`, so it is
-  inconclusive and reads as neither success nor failure - a hosttest asserts no
-  ABM send can come back CONFIRMED), **CONFIRMED**, **CHANGED**. And the caps
-  payload answers a second question free: slot byte 16 is
-  **`abm_aux_backlight_support`** - if set, a PWM-typed SET_BACKLIGHT is the
-  wrong control type and this is rule 46 a second time on the same chain.
-  **2zr (boot 275): the firmware did NOT clear `ret_status`, and the ring
-  cannot say why.** The caps command went into slot **0x940**, WPTR advanced to
-  **0x980**, RPTR followed (`acks 1`, no timeout) - and the slot read back
-  `06 00 01 0e`, **byte 2 still `01`**, verdict **UNCHANGED**. No caps payload.
-  So: our store reaches that memory and persists (boot 273 read all 8192 bytes
-  as zero; the slot now holds our command), and the mapping is
-  `kIOMapInhibitCache` on both routes so the read-back is not a stale cache
-  line - checked before blaming the chip. **The write works; the reply does
-  not come.** Three explanations and the ring produces the same reading for all
-  three: (1) 4.0.15.47 does not implement command 6; (2) the DMCUB reads a
-  different base and consumed a zeroed slot; (3) it is not processing inbox
-  commands at all and RPTR advances for another reason. **2zq's caps query
-  shared the suspect with the thing it was testing** - a test that depends on
-  the address cannot clear the address - which is the seventh instrument on
-  this surface undone by a shared assumption.
-  **2zr takes the address out of the path: GPINT.** `dmub_dcn31.c`'s
-  `set_gpint` writes **one register**, `DMCUB_GPINT_DATAIN1` (0x01f8), and
-  `is_gpint_acked` reads it back against the sent value with the status field
-  **cleared** - the firmware clears a bit we set, with no memory, window,
-  `mc2pa`, mapping or ring anywhere in the path. `union
-  dmub_gpint_data_register` is param:16, command_code:12, status:4, so the
-  version query's word is **0x10010000** and an ack is **0x00010000**.
-  **The positive control comes from a different register than the answer:**
-  `GET_FW_VERSION` = 1 answers in `DMCUB_SCRATCH7` (0x01ea), while this
-  project read **4.0.15.47 running / 4.0.21.71 ROM** off `DMCUB_SCRATCH0`
-  (0x01e3) in a level-2 probe long before any of this. A hosttest asserts the
-  two offsets differ, since equal ones would make the control the instrument
-  reading itself (2zp's error). Both scratch registers are sampled **before and
-  after** the write so a pre-existing value cannot read as a reply.
-  **`DMUB_GPINT__STOP_FW` = 2 HALTS THE FIRMWARE DRIVING THIS PANEL.**
-  `rb_dmub_gpint_allowed()` allowlists exactly one code and the hosttest walks
-  **every code 2..144** asserting none passes - a gate, not a comment.
-  Linux's DATAOUT path also pulses `DMCUB_GPINT_IH_INT_ACK` with the enable
-  off; this reads DATAOUT and touches **nothing** in
-  `DMCUB_INTERRUPT_ENABLE`/`_ACK`, because here the DMCUB serves Apple's stack.
-  **Boot 276: `dmubbl gpint` FIRST, and no further backlight send until it
-  answers.** Acked -> the DMCUB is alive, the ring is the problem, and the next
-  instrument is the **outbox** (CW4 is 64 KB and `dmub_srv_hw_init` puts
-  outbox1 at `cpu_addr + DMUB_RB_SIZE`, the 8192..16384 half nothing has read).
-  Not acked -> an advancing inbox RPTR is not the firmware executing our
-  commands, and 2zq's four acks meant something else.
-  Two commands, **separately triggered**: `SET_BACKLIGHT` alone first,
-  `SET_PIPE` only if the panel does not move (rule 45 again - sending both
-  would make a moving panel ambiguous). `dmub_srv.c:1037-1041` is the whole
-  push: 64 bytes at WPTR, read every byte back, write WPTR - no interrupt, no
-  doorbell. `-rbgpufbdmubbl` arms it, `build/out/dmubbl` is the only trigger,
-  and it now says before each send that the address rests on the layout
-  agreement and not on its contents. 79 hosttest assertions off boot 273's own
-  window table, verified failing in both directions.
-  **2zs (boots 276-277): the DMCUB is alive, and the mailbox is REGION4, not
-  CW4.** GPINT settles the microcontroller with no address in the path at all:
-  `0x10010000` in, `0x00010000` back - the firmware cleared the status nibble -
-  `acked 1`, `SCRATCH7` `0x1 -> 0x04001547`, which read as **hex digits** is
-  **4.0.15.47**, the exact running version this project read off `SCRATCH0` in
-  a level-2 probe (I first decoded it as decimal and printed 4.0.21.71 - rule
-  26, **ask what base a number is in**). So the ring was the problem - and the
-  thing that located it had been published as "unexplained" since boot 271.
-  `DMCUB_INBOX1_BASE_ADDRESS` = **0x80000000** is **outside region 3**
-  (CW0-CW6 span 0x60000000-0x66ffffff), and `dmub_dcn31_setup_mailbox` writes
-  `inbox1->base` **untranslated**, so that register is the firmware's own
-  statement of where its inbox is. **2zp's six exact CW-base matches were never
-  wrong and never relevant**: they identify where the *code* windows sit. Boot
-  277 read **REGION4** at MC `0xf4_ffe00000` -> PA `0x8_7fe00000` with
-  **`run 37, bad 0`** - 37 plausible headers at a 64-byte stride then empties -
-  against `WPTR == RPTR == 2368 == 37 x 64` from an independent register. That
-  is the byte-level identification four milestones lacked, and it is not 2zo's
-  mistake: CW5's "128 of 128" was dense trace data with **no empty tail**,
-  while REGION4 stops at exactly the count a second register predicts. Regions
-  4/5/6 are **fixed-base apertures** - `setup_windows` programs their OFFSET
-  and TOP and never a base - which is why no base register exists to compare.
-  The "37 commands at bring-up" belief, withdrawn in 2zp, is **reinstated with
-  bytes behind it**. On that ring `caps` still read back `06 00 01 0e` with
-  byte 2 `01`: **4.0.15.47 does not implement QUERY_FEATURE_CAPS**, so
-  `abm_aux_backlight_support` is not obtainable that way. And SET_PIPE +
-  SET_BACKLIGHT there, byte-correct and acked, **did not move the panel**.
-  **2zt (boot 278): the three parameter keys are ONE write, so the regression
-  hypothesis is dead and the control type is the last untried dial.**
-  `rb_backlight.h` is **byte-identical since boot 249** (the diff is
-  `RBAMDBacklightParams.cpp`, 374 new lines, plus 158 lines of reads and
-  counters) - and boot 249's own entry shows `"brightness"` FAILING with
-  `kIOReturnUnsupported` while `"brig"` carried it, so once 2y2 made
-  `"brightness"` succeed the working route **was never exercised again**.
-  `blset <level> [brightness|brig|lin]` now forces the key, and boot 278 ran
-  all three: `RBFBBlSets` 52, `RBFBBlLastCount` 16800 == `RBFBBlReadback`
-  16800, `RBFBBlLastLevel` 17203 != `RBFBBlLevel0` 22784, `RBFBBlLiveDiffs`
-  **0** over 2164 reads - **the same write, landing, uncontested, on all three
-  paths, and the panel moved on none.** 2zl stands unqualified. What the
-  boot-249 observation was cannot be recovered from the evidence in hand, and
-  inventing a reconciliation would be rule 17.
-  **The one byte never varied is `backlight_control_type`**, payload offset 16,
-  always **0 = PWM** - the method boot 270 independently falsified. `VESA_AUX`
-  **1** and `AMD_AUX` **2** have never been sent. 2zl read them as reachable
-  only from `edp_set_backlight_level_nits`, which is true of **Linux's call
-  graph** and says nothing about the **firmware's command handler**:
-  `dmub_cmd.h` puts the field in `dmub_cmd_abm_set_backlight_data` itself, so
-  any SET_BACKLIGHT may carry any of the three. **Linux's choice of caller is
-  not the firmware's validation** - rule 46 one level further in. It is a
-  settable property, not a constant: `RBFBDmubBlType` sets the type for every
-  subsequent send and sends nothing itself, so `dmubbl type 1 && dmubbl 65536`
-  and `dmubbl type 2 && dmubbl 65536` fit in **one boot** (2zm's lesson paid
-  before it costs anything). Nine hosttest assertions, the discriminating one
-  being that changing the type changes **byte 16 and nothing else** in the 64.
-  **2zu (boot 279): ALL THREE control types, with ABM bound to the pipe, and
-  the panel does not move.** `dmubbl pipe` then `type 1` + level then `type 2`
-  + level, live on one boot: `sends ok/refused 7 / 0`, `acks/timeouts 7 / 0`,
-  `backlight/pipe 6 / 2`, byte 16 carrying **01** then **02**, level
-  `0x00010000` at offset 8, version 1, panel_mask 1. Nothing refuses, nothing
-  times out, and **nothing moves**. With 2zt's PWM result and boot 270's
-  independent falsification of PWM, **every value of `backlight_control_type`
-  is falsified on hardware, with and without the pipe bound** - the DMUB ABM
-  command route is exhausted at the command level.
-  **And `signature 0 of 128 slots ... ABSENT` was never a reading**:
-  `dmubScanPlaus` indexed `dmubWinScan[dmubWin * 4 + 1]` where that array
-  holds the **seven CW windows** (28 entries), so `dmubWin` 7 read entries 29
-  and 31 **past the end of the member array**, and the boot's own output had it
-  contradicting `dmubRegScan`'s `run 37` on the same memory. Fixed by indexing
-  the table the window is in. Rule 16 and rule 14 together.
-  **2zv (boot 280) CLOSES THE DC SIDE: Apple's own stack has no brightness
-  parameter either, and boot 249 never had a working backlight.** The user's
-  restart tripped the sentinel, so boot 280 came up **stock** - an unarranged
-  control. `RBAMDFramebuffer` published **0 properties** (not in the registry
-  at all; it loaded and declined the panel, rule 38) and `.Display_boot` is
-  `IONDRVFramebuffer` with Apple's `AppleDisplay`,
-  `AppleMCCSParameterHandler` and `AppleUpstreamUserClientDriver` under it.
-  **None of our code is in the display path and the brightness keys still do
-  not move the panel.** And Apple's own `AppleDisplay` there publishes
-  `IODisplayParameters = bgsc, rgsc, vblm, ownr, ggsc` - three gamma scales, a
-  vblank mask, an owner, and **no brightness parameter of any kind**. There was
-  never a route of theirs to borrow.
-  **Boot 249's own list retires the recollection**: `bgsc rgsc vblm brig ownr
-  ggsc` against boot 280's `bgsc rgsc vblm ownr ggsc` - the five Apple keys
-  **identical**, the only difference `brig`, which was **ours**, published for
-  the first time on that boot by 2xs. Boot 249 was the boot our PARAMETER
-  arrived, not a boot the panel was controllable. Rule 45's exact failure: the
-  observation was never instrumented, so a recollection became the premise for
-  four milestones.
-  **Nothing was blocked and nothing regressed.** Three independent routes, two
-  configurations: the PWM register on all three parameter keys (writes land,
-  read back bit-identical, uncontested); the DMUB ABM command on all three
-  control types, pipe bound and unbound (accepted, acked, no refusals); and
-  Apple's stock stack with our code absent (no parameter at all).
-  **So brightness is an EC/ACPI project, not a DC one.** The panel is lit by
-  platform firmware at one level and nothing in macOS reaches what sets it; on
-  this chassis the keys are ASUS WMI/EC events and `AppleIntelPanelA` matching
-  PNLF with `{"commit"={"reg"=0}}` is the *Intel* driver finding a PNLF device
-  and having nothing to drive. An `_BCM`/`_BCL` route or an EC driver is the
-  work. **Do not re-open the DC side without new evidence.**
-  **What is withdrawn is only the panel claim** (rule 45) — everything below is register
-  and parameter plumbing and all of it still stands.
-  **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
-  cycle — note `BL_PWM_PERIOD` is **4000** with `BITCNT` **12** and
-  `BL_PWM_FRACTIONAL_EN` SET, so the count field is fixed point with 4
-  fractional bits and a count larger than the period is not a saturated PWM
-  (2y2 nearly reported that as a bug). **2xy (boot 250)**
-  `-rbgpufbbuiltin` answers `kConnectionFlags` with `kIOConnectionBuiltIn` and
-  `getAppleSense` with `kPanelTFTConnect`, so `AppleBacklightDisplay` matches
-  the connection. **2y1 (boot 252)** `-rbgpufbblparm` publishes a full-length
-  parameter name from our own `IODisplayParameterHandler`, attached as a
-  service-plane child of the framebuffer — 2y0 PANICKED on boot 251 doing this
-  by mutating the dictionary it fetched with `getProperty` (rule 42), and that
-  panic's own backtrace is what confirmed the mechanism. **2y2 (boot 253)**
-  publishes the key the UI actually writes: the brightness UI is
-  **CoreBrightness** (`BrightnessSystem`, `BrightnessSystemClient`) and it
-  writes **`linear-brightness`**, never `kIODisplayBrightnessKey` —
-  `RBFBBlParmSetsLin` 258 against `RBFBBlParmSetsPerc` 2 settles it. A set
-  naming an unpublished key is dropped by `IODisplay` with nothing recorded
-  anywhere, which is why `"brightness"` alone gave a slider that rendered and
-  did nothing. `usable-linear-brightness` reports the ceiling and its writes
-  are **declined and counted** (`RBFBBlParmSetsUsable` 2 - it is a real case).
-  `'brig'` in the dictionary is stale by design: it belongs to
-  `IOFramebufferParameterHandler`'s own dictionary, so do not read it as the
-  current level. `./build/out/blset <0..1>` still drives it from the shell —
-  and note what it measures: the API return code, not the panel. That is how
-  2zj's gap survived four milestones.
+- **Brightness — WORKS (2zw, boot 282). The chassis must be in iGPU-only /
+  Eco mode.** The slider and the keyboard keys both move the panel, driven by
+  our own code: `RBAMDFramebuffer` owns the panel with `AppleBacklightDisplay`
+  matched on it, `RBFBBlSets` 247 with `RBFBBlParmSetsLin` **244** (that is
+  CoreBrightness writing `linear-brightness`, 2y2's identification),
+  `RBFBBlLastLevel` 44160 -> `RBFBBlLastCount` 43125 == `RBFBBlReadback`
+  43125, `RBFBBlRefuse` 0, `RBFBBlLiveDiffs` 0, and `IODisplayParameters`
+  carrying `brightness`/`linear-brightness` at **min 5120** (our floor) and
+  **max 65536** (our scale).
+  **What was wrong for six milestones was not the code - it was the MUX.** In
+  hybrid (iGPU + dGPU) mode this chassis wires the eDP panel **and its
+  backlight** to the dGPU, so the 680M's PWRSEQ0 `BL_PWM_CNTL` was a real,
+  writable, perfectly functioning register attached to **nothing**. Every
+  reading 2zj-2zv took was correct and every inference from them was wrong,
+  because they shared one unexamined premise: that the output was connected to
+  the silicon under test. It explains all of it - the register holding our duty
+  cycle uncontested across 40 s (2zj: nobody contested it because nobody was
+  using it), the DMUB ABM commands acked on the right ring at all three control
+  types (2zs/2zt/2zu), and Apple's own stack publishing no brightness parameter
+  at all (2zv). **The configuration requirement is part of what an armed boot
+  means: iGPU-only / Eco mode in the ASUS firmware setup.**
+  **2zl IS WITHDRAWN.** It said 2xs had transcribed `dce_panel_cntl.c`'s direct
+  PWM write onto a chip whose `dc` would never call it - rule 46, right
+  offsets, wrong method. False: the direct `BL_PWM_CNTL` write **does** drive
+  this panel on this chip. The Linux reading was accurate
+  (`dcn31_panel_cntl.c` really has no `.set_backlight_level`) and the inference
+  was wrong, because what Linux's `dc` chooses to call says nothing about what
+  the hardware block can do. **2xs was right from the start and stood
+  unimproved for six milestones while being described as a mistake.**
+  The plumbing underneath, all still true: **2xs** writes the PWM duty cycle
+  (`BL_PWM_PERIOD` **4000**, `BITCNT` **12**, `BL_PWM_FRACTIONAL_EN` set, so
+  the count is fixed point with 4 fractional bits and a count above the period
+  is not a saturated PWM - 2y2 nearly reported that as a bug). **2xy**
+  answers `kConnectionFlags` with `kIOConnectionBuiltIn` and `getAppleSense`
+  with `kPanelTFTConnect`, so `AppleBacklightDisplay` matches. **2y1**
+  publishes a full-length parameter name from our own
+  `IODisplayParameterHandler` - 2y0 PANICKED doing this by mutating a
+  dictionary fetched with `getProperty` (rule 42). **2y2** publishes the key
+  the UI writes: **CoreBrightness**, `linear-brightness`, never
+  `kIODisplayBrightnessKey`; a set naming an unpublished key is dropped by
+  `IODisplay` with nothing recorded anywhere.
+  `usable-linear-brightness` reports the ceiling and its writes are declined
+  and counted. `'brig'` in the dictionary belongs to
+  `IOFramebufferParameterHandler` and is stale by design - do not read it as
+  the current level. `./build/out/blset <0..1> [brightness|brig|lin]` drives it
+  from the shell and `build/out/dmubbl` is the DMUB instrument; the whole
+  2zn-2zu DMUB apparatus is **not needed for brightness** and is kept because
+  the mailbox identification and the GPINT round trip are real findings about
+  this firmware (journal 2zs).
+  **The full narrative of the six dead milestones is in the journal under
+  2zj, 2zl, 2zn-2zv** - including every withdrawn reading, the trace-buffer
+  write, the out-of-bounds scan index, and why each instrument could not
+  discriminate what it was built for.
 - **Refresh rate — the panel accepts 60 Hz, measured (2y5, boot 255).** Writing
   `OTG0_V_TOTAL_MIN`/`MAX` with the `MIN_SEL`/`MAX_SEL` bits of
   `V_TOTAL_CONTROL` changed the live raster from 143843 mHz to **60025** at
@@ -559,8 +325,12 @@ table and refuses to install one that does not match the running kernel;
   retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
   it in userspace with no kext and no reboot (2wt). Not the display blocker
   (2x0, rule 39).
-- **HDMI is the full project** and the panel is wired to the dGPU, so it is
-  unreachable rather than merely unbuilt (2xq/2xr).
+- **HDMI is the full project**, and "unreachable" was a fact about the MUX
+  MODE, not about the chassis (2xq/2xr, reframed by 2zw). The port being wired
+  to the dGPU is true in hybrid mode and the MUX is user-switchable from the
+  firmware setup - which is exactly what moved the panel's backlight onto the
+  680M. **Whether the HDMI port also moves to the iGPU in Eco mode is now
+  worth measuring rather than assumed closed.**
 - **Every Apple address in a COMMENT here and in the journal is a macOS 15
   address.** `AMDRadeonX6000MTLDriver __TEXT` 0x7FFB08BF3000 →
   **0x7FFB110D4000**; CoreDisplay 0x7FF80404C000 → **0x7FF805348000**;
@@ -966,6 +736,24 @@ The numbering is cited all over the journal — **keep the numbers**.
     Ask which Linux file the *function* comes from and whether this chip's
     `dc` would call it: `dce_*` vs `dcn31_*` is not a naming detail. [2zl]
 
+47. **Before concluding that a register is the wrong control surface,
+    establish that the output is WIRED to this chip right now.** On this
+    chassis the MUX routes the eDP panel *and its backlight* to the dGPU in
+    hybrid mode, so the 680M's `BL_PWM_CNTL` was a real, writable, perfectly
+    functioning register attached to **nothing** - and a write that lands,
+    reads back bit-identical and is contested by nobody is the **expected**
+    reading of a working block with nothing attached to it. It is
+    indistinguishable from success at the register and from failure at the
+    panel, which is why 2zj's strongest-looking evidence (`RBFBBlLiveDiffs`
+    pinned across 40 s, "so nothing else writes it") was actually the
+    signature of a disconnected block. Six milestones, ten boots and three
+    hypotheses went into the gap between "the chip accepted the value" and
+    "the chip drives the thing", and the fix was a firmware setup menu. Ask it
+    of any output - display, backlight, audio codec, USB port. On a laptop
+    with switchable graphics the answer changes without a line of code
+    changing, so **the firmware setup mode is part of the configuration a
+    reading comes from** - rule 39 one level out from software. [2zw]
+
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
 keeps catching it: **say in the code what would have to be true for the reading
@@ -1015,6 +803,13 @@ to a field** (2q9/2qa, which saved a boot twice over in 2s3).
   `registerForInterruptType`, `0xae0` `setInterruptState` (2pq, 2s5).
 
 ## Boot-args
+
+**THE FIRMWARE MUX MODE IS PART OF THE CONFIGURATION (2zw).** The chassis
+must be in **iGPU-only / Eco** mode, set in the ASUS firmware setup (the user
+switches it from Windows). In hybrid (iGPU + dGPU) mode the eDP panel and its
+backlight are wired to the dGPU, and the 680M's backlight registers drive
+nothing - which cost six milestones before rule 47 was written down. Read the
+mode before reading anything about an output.
 
 **The right boot-args are none of ours.** `src/common/rb_defaults.h` is the
 list and the hosttest checks it; read that file, not a copy of it here.
