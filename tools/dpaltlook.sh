@@ -106,19 +106,32 @@ ack   = bool(w & 0x00040000)
 rclk  = bool(w & 0x00080000)
 rreq  = bool(w & 0x00100000)
 
-if not (act & bit):
-    state = "dark (no ref clock, no MPLL)"
+# POWER and ALT MODE ARE INDEPENDENT AXES and must be printed as two.
+# The first version of this tool let the power axis win - a dark PHY printed
+# "dark (no ref clock, no MPLL)" and never reached the alt-mode bits - which
+# on boot 297 hid the only difference among the four dark PHYs: PHY1 had
+# DPALT_DISABLE asserted and NOT acked where PHY2-4 had both. One axis
+# reported as the state, which is the same error as reading one EDID
+# descriptor and calling it the mode list (2BD).
+if act & bit:
+    power = "ACTIVE - ref clock and/or MPLL on"
+else:
+    power = "dark - no ref clock, no MPLL (pstate %s)" % \
+            (" ".join(str(p) for p in pst))
+
+if dis and ack:
+    alt = "DPALT_DISABLE asserted AND acked - alt mode is off on this PHY"
 elif dis:
-    state = "ALT MODE DISABLED" + ("" if ack else " (not yet acked - settling)")
+    alt = "DPALT_DISABLE asserted, NOT acked - the PHY has not released it"
 else:
     # The honest one. Without an is_usb bit these two cannot be told apart.
-    state = "alt mode NOT disabled - ACTIVE, or not a Type-C PHY at all"
+    alt = "DPALT_DISABLE clear - active alt mode, OR not a Type-C PHY at all"
 
 print("  PHY%d  0x%08x" % (i, w))
-print("        %s" % state)
+print("        power: %s" % power)
+print("        alt:   %s" % alt)
 print("        lanes with MPLL on: %s   (%d)" %
       (",".join("TX%d" % t for t in lanes) if lanes else "none", len(lanes)))
-print("        pstate TX0-3: %s" % " ".join(str(p) for p in pst))
 print("        DPALT_DP4 %d  ref_clk en %d req %d" % (dp4, rclk, rreq))
 PY
     i=$((i + 1))

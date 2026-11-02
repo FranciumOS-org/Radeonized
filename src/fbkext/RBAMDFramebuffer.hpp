@@ -416,6 +416,7 @@ private:
     uint32_t           dpaltEverNotDisabled;
     uint64_t           dpaltChanges;   /* transitions of the not-disabled mask */
     int                dpaltSweep;     /* enum rb_dpalt_sweep: the control   */
+    bool               dpaltSampled;   /* a sample has been taken: see below */
     bool               dpaltArmed;     /* -rbgpufbdpalt                      */
     bool               dpaltReady;     /* the aperture covered the registers */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */

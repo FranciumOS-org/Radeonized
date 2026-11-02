@@ -664,7 +664,20 @@ void RBAMDFramebuffer::dpaltSample(void)
     dpaltActiveMask = rb_dpalt_active_mask(dpaltWord, RB_DPALT_COUNT);
 
     const uint32_t nd = rb_dpalt_not_disabled_mask(dpaltWord, RB_DPALT_COUNT);
-    if (nd != dpaltNotDisabledMask) { dpaltChanges++; }
+    /* Boot 297 published `transitions 1` with no cable ever attached: the
+     * mask starts at 0, the first sample made it 0x01, and the counter
+     * recorded that as a transition. A counter that counts its own first
+     * reading cannot be read as a cable event, so the first sample is
+     * excluded - the quantity wanted is CHANGES SINCE the baseline, and the
+     * baseline is the first sample rather than the zero the field was born
+     * with (rule 14's shape for a counter).
+     *
+     * The test is its own flag rather than `dpaltSweep != NOT_SAMPLED`, which
+     * also works today only because the sweep verdict is assigned BELOW this
+     * line - a silent ordering dependency that the next edit to this function
+     * would break with no symptom. */
+    if (dpaltSampled && nd != dpaltNotDisabledMask) { dpaltChanges++; }
+    dpaltSampled = true;
     dpaltNotDisabledMask  = nd;
     dpaltEverNotDisabled |= nd;
 
