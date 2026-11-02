@@ -99,11 +99,12 @@ primary-surface pair is what puts the composited desktop on the panel
 (2wh/2wi). `-rbgpuschedtick` ticking Apple's `AMDSWScheduler::checkTimestamps()`
 at the panel's 6944 µs is what makes frames retire (2xe/2xi) — 2 transactions
 in 30 s became 3375. Answering `kIOReturnNotReady` while our flip is unlatched
-is what fixed the flicker, at 27 % of the frame rate (2xo) - **and the cost is
-really ~36 % (2A4), but 2A6 reproduced the flicker without it in ordinary use,
-so 2xo STANDS and the hold stays default-on.** What is open is not whether to
-keep it but how to stop paying Apple's ~1.6 ms retry granularity for a latch
-that completes inside one vblank.
+is what fixed the flicker, at 27 % of the frame rate (2xo) - **the cost is
+really ~36 % (2A4), 2A6 reproduced the flicker without it, and 2A8 measured
+the wait at 1.00 vblanks: the hold pays the HARDWARE, so there is nothing to
+recover and the FRAME-RATE LINE IS CLOSED.** ~91 sets/s with a correct desktop
+is one vblank of vsync latch per frame plus Apple's pipeline, not a ceiling to
+be beaten.
 
 **The swizzle fix has two halves and both are needed**: the kernel linear force
 and the kernel-side userspace patcher (2on–2op). macOS 26 broke the userspace
@@ -474,6 +475,27 @@ table and refuses to install one that does not match the running kernel;
   good; ~2 vblanks / ~2 asks means the phase is the cost and there is
   something to attack.** Instrumentation only - nothing about the hold
   changed. Framebuffer **614ED4BC**.
+  **2A8 ANSWERED IT: PHYSICS. latch wait 6.975 ms = 1.00 vblanks, n 1856,
+  asks 1.31 (boot 288, cross-check +1.7 %).** Against a 6.953 ms period that
+  is **1.003 vblanks**: the flip is vsync-latched and cannot resolve sooner,
+  so **there is nothing to recover and THE FRAME-RATE LINE IS CLOSED.** Eight
+  models died, the answer was our own hold, and the hold is right. **Do not
+  reopen it without new evidence.**
+  **And the instrument refuted itself in the same output.** It printed "the
+  hold owns 42.3 % -> **~162.3 /s** without it" on a panel that scans at
+  143.8 Hz - not optimistic but **impossible**, and 2A4 had already measured
+  the no-hold rate at 141. **2A4's "a marginal measurement is a lower bound"
+  is itself corrected: it is not a bound at all, it is a different quantity**,
+  answering "what does this cost inside the current regime" and never "what
+  happens if it goes" - only an A/B answers that.
+  `rb_ft_hold_free_interval_ns()` now returns 0 (**no usable prediction**) as
+  soon as the implied interval falls under one vblank, and `ftbudget` says why
+  and points at `holdaba.sh`; the share is still printed, only the rate is
+  refused. Hosttested against boot 288's own numbers, both sides of the
+  boundary, with a control so the check cannot be a constant 0.
+  **The only loose thread left here: the FIRST-RUN TRANSIENT** (2A4 - run 1 of
+  a phase reads ~73-76 where runs 2-6 read ~92). It has biased every
+  single-window measurement since 2zb and nobody has looked at it.
   **The trade is therefore real - but the cost is Apple's RETRY GRANULARITY,
   not the serialisation.** 2A2 measured the post-hold gap at 4.384 ms against
   2.771 ms after a ready answer, while the flip latches in ~1.07 vblanks
