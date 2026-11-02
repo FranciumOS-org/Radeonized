@@ -53539,3 +53539,64 @@ That is a plausible mechanism and **nothing here measures it**; the only
 discriminating evidence is a long look at a real desktop.
 
 Framebuffer **A80C7720** is unchanged and carries the dial.
+
+---
+
+## 2A5 — a whole boot with the hold off, in ordinary use: clean so far (boot 287)
+
+`sudo tools/efi.sh bootarg add -rbgpunofbnotready`, rebooted into boot 287.
+The user's own words after being in it: **"holy its SO BUTTERY BRO I LOVE every
+animation of macOS rn its so satisfying... no flickering no not yet at least"**
+- and the "not yet" is the correct caveat, which is why this entry is titled
+"so far".
+
+**The configuration is verified from the RUNNING system** (rule 43 - the only
+side that matters), read-only out of `ioreg`:
+
+```
+RBFBAmtrNotReady  No        <- the hold is OFF
+RBFBAmtrHeld      0         <- and it held NOTHING, so the dial is inert
+RBFBFtRetryN      0         <- no held-GET gaps exist to accumulate
+RBFBFtPollN       8033      <- the control bucket has all the samples
+mode              143792 mHz / 1129 lines   (native)
+RBFBFtOursPm      4         <- ours 0.4 %
+RBFBFtUpstreamPm  995       <- upstream 99.5 %
+latched/samples   3865 / 4122   -> mean vblanks 1.066
+```
+
+Three independent confirmations in that block: the property says off, the hold
+COUNT is zero, and the retry accumulator has no samples at all. 2A3's bug is
+what makes the first of those trustworthy now, and the other two are the
+cross-checks that would have caught it anyway.
+
+**`ours` is 0.4 % on a THIRD boot** (283, 284, 287) across frame rates from 76
+to 141. That is as settled as anything in this project: **nothing this kext
+does inside a frame period is the ceiling.**
+
+**The first evidence bearing on WHY 2xo's flicker is absent.** `mean vblanks`
+is **1.066** with the hold gone - flips still latch within about one vblank.
+2xo's hazard is the compositor drawing into a surface still being scanned, and
+the exposure window is however long a flip stays unlatched; at 1.07 vblanks
+that window is at most ~6.9 ms and usually much less. 2zd moved retirement
+onto the vblank after 2xo was written, which is the plausible reason the
+window shrank. **This is consistent with the hazard being much smaller than it
+was, NOT a demonstration that it is gone** - a latch mean is an average, and a
+single long-unlatched flip during a window drag is exactly what would corrupt
+one frame without moving that average.
+
+**One number that must NOT be read as a frame rate.** Cumulative
+`AmtrSets` 4049 against `VBLFires` 9674 is ~42 %, which looks like a bad `fed`
+and is not one: the boot includes an idle desktop that submits nothing, so the
+ratio is demand-limited, not capped. Only a bracketed window under load
+(`tools/ftwindow.sh`) measures the rate - rule 39's shape, and the same class
+of error as 2y9's stale-counter-over-fresh-clock.
+
+**Still not flipping the default**, and the reason is now about the shape of
+the evidence rather than its quantity: the flicker is a **rare-event** hazard,
+and minutes of pleasant use cannot distinguish "the hazard is gone" from "the
+hazard needs a window drag over a video and has not happened yet". What would:
+a second clean boot, and specifically exercising the cases `animtest` cannot -
+dragging a window while something plays, fullscreen video, Spaces
+transitions, and wake from sleep. `-rbgpufbnotready` stays in `rb_defaults.h`
+until then; the boot-arg is how this boot runs without it, and
+`sudo ./build/out/holdset 1` restores the hold live if anything appears.
