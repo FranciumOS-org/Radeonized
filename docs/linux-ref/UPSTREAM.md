@@ -367,3 +367,27 @@ decision rests on it.
   `DP_LOCAL_EDID_PRESENT` bit 1 of 0x008, `DP_EDP_CONFIGURATION_CAP` 0x00d,
   `DP_EXTENDED_RECEIVER_CAP_FIELD_PRESENT` bit 7 of 0x00e, `DP_LINK_BW_5_4`
   0x14. Fetched from kernel.org torvalds/linux plain/ on 2026-11-02.
+
+Added 2026-11-02, from master at `6628e7d4c6b25c8d18f1345e3a20d21829aae7e4`
+(the source milestone 2BE reads; fetched from git.kernel.org, since
+raw.githubusercontent.com was reset by the network in use):
+
+| File | Upstream path |
+|---|---|
+| dmub_cmd.h | drivers/gpu/drm/amd/display/dmub/inc/dmub_cmd.h |
+| command_table2.c | drivers/gpu/drm/amd/display/dc/bios/command_table2.c |
+| dcn31_dio_link_encoder.c | drivers/gpu/drm/amd/display/dc/dio/dcn31/dcn31_dio_link_encoder.c |
+| link_dp_training.c | drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training.c |
+| link_dp_training_8b_10b.c | drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training_8b_10b.c |
+| link_dp_training_dpia.c | drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_training_dpia.c |
+| link_dp_dpia.c | drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_dpia.c |
+| link_detection.c | drivers/gpu/drm/amd/display/dc/link/link_detection.c |
+| dal_asic_id.h | drivers/gpu/drm/amd/display/include/dal_asic_id.h |
+
+`dmub_cmd.h` is the authoritative DMUB command surface; 2BE reads the
+`DMUB_CMD__VBIOS` sub-types out of it and `command_table2.c` for which BIOS
+calls DCN 3.1 routes to DMCUB. The two `link_dp_training*` files are vendored
+for the NEGATIVE result - they contain no DMUB reference, which is what
+establishes that native DP training is driver-side. The DPIA pair is vendored
+for contrast only: DPIA is USB4-tunnelled DP and needs a USB4 router, which
+macOS does not expose on this machine (2B4).
