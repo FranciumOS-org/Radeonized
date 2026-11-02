@@ -135,6 +135,33 @@ int main(int argc, char **argv)
                100.0 * (double)held / (double)gets);
     }
 
+    /* 2A1: the one comparison that can attribute the hold. Same quantity,
+     * same clock, same window, split only by what we told Apple last time. */
+    const long rtry = rd(fb, "RBFBFtRetryNs"), rtryN = rd(fb, "RBFBFtRetryN");
+    const long poll = rd(fb, "RBFBFtPollNs"), pollN = rd(fb, "RBFBFtPollN");
+    printf("\nhow fast Apple asks again (gap between 'amtr' GETs):\n");
+    printf("  after we HELD        %8.3f ms   n %ld\n",
+           rtry / 1000000.0, rtryN);
+    printf("  after we said ready  %8.3f ms   n %ld   <- the control\n",
+           poll / 1000000.0, pollN);
+    if (rtryN < 30 || pollN < 30) {
+        printf("  NOT A COMPARISON YET: one bucket has under 30 samples, so a\n"
+               "  difference between the means is not resolvable (rule 18).\n");
+    } else if (poll > 0) {
+        const double ratio = (double)rtry / (double)poll;
+        printf("  held/ready ratio     %8.2fx\n", ratio);
+        if (ratio < 2.0) {
+            printf("  The hold does NOT delay Apple measurably, so `upstream`\n"
+                   "  is Apple's own pacing and the hold is not the ceiling.\n");
+        } else {
+            printf("  The hold DOES delay Apple. %.3f ms x %.2f held GETs per\n"
+                   "  transaction is the share of the interval it owns.\n",
+                   (rtry - poll) / 1000000.0,
+                   rd(fb, "RBFBFtGetN") > 0
+                     ? (double)rtryN / (double)(rd(fb, "RBFBFtWorkN") ?: 1) : 0.0);
+        }
+    }
+
     printf("\n  rate from budget     %8.3f /s\n",
            rd(fb, "RBFBFtRateMhz") / 1000.0);
     printf("  CROSS-CHECK: tools/paired.sh computes this from a counter delta\n"

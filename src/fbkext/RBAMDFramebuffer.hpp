@@ -633,6 +633,25 @@ private:
     struct rb_ft_acc   ftGap;       /* between transactions              */
     struct rb_ft_acc   ftGet;       /* inside getAttribute('amtr')       */
     struct rb_ft_acc   ftVbl;       /* inside deliverVBL()               */
+    /* 2A1: how fast Apple comes back, split by what we told it.
+     *
+     * 2A1 measured `upstream` at 99.5 % of the interval and the one piece of
+     * it we own is the 2xo kIOReturnNotReady hold - but the WAIT happens in
+     * Apple's isTransactionComplete loop (2x6), not in our call, so the
+     * budget cannot attribute it. These two accumulate the same quantity -
+     * the gap from one 'amtr' GET's exit to the next one's entry - separated
+     * only by whether we HELD the previous one.
+     *
+     * ftRetry is the treatment, ftPoll the control, and they are the same
+     * measurement on the same clock in the same window, which is what makes
+     * the comparison mean anything (rule 45: one dial per observation). If
+     * they are alike the hold costs nothing and upstream is Apple's own
+     * pacing; if ftRetry is a vblank and ftPoll is microseconds, the hold is
+     * the ceiling and it is ours. */
+    uint64_t           ftPrevGetExit;
+    bool               ftPrevGetHeld;
+    struct rb_ft_acc   ftRetry;     /* previous GET was HELD              */
+    struct rb_ft_acc   ftPoll;      /* previous GET answered ready        */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;

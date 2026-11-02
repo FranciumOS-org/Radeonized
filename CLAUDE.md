@@ -370,6 +370,38 @@ table and refuses to install one that does not match the running kernel;
   suspect. One thing it is honest about rather than silent on: the 2xo
   `kIOReturnNotReady` hold is ours but Apple spends the wait, so its cost sits
   inside `upstream` - read `RBFBAmtrHeld`/`RBFBAmtrGets` to attribute it.
+  **2A1 RAN IT, and the answer is that the ceiling is not ours (boot 283).**
+  One 20 s native window, cross-check passing (**budget 95.51 /s vs
+  paired.sh's 93.95 /s, +1.7 %**): `work` **0.003 ms**, `gap` 10.467 ms, GET
+  0.002 ms, vblank 0.023 ms, so **ours 0.044 ms (0.4 %) and upstream 10.426 ms
+  (99.5 %)** of a 10.470 ms interval. **Our entire cost per transaction is 44
+  microseconds.** That is why all seven dials returned 70-75 - there was never
+  enough of our own time in a frame period for any of them to be the ceiling,
+  and 2zz's -1.4 % was the right order of magnitude for the whole of our
+  bookkeeping. Two gap samples were dropped above the bound and counted, which
+  is the instrument working rather than averaging a long interval in.
+  **That boot also read `sets/s` 93.95 and `fed` 65.6 %, and the user reported
+  the desktop "lowkey way smoother" before seeing a number** - the one link a
+  human can see (rule 45), unprompted and agreeing with the counter. **Not a
+  claim:** n=1 on one boot, and 2zg exists because boot 267's 90.4 did not
+  reproduce on boot 268 (72.50). 2A0 adds two `mach_absolute_time()` reads per
+  transaction and changes nothing about frame delivery, so it cannot be the
+  cause. Rule 44 still wants two boots or an A/B.
+  **The one piece of `upstream` we own is the 2xo hold, and its cost is
+  UNMEASURED** - `held/gets` was 38 % over the window, but Apple spends the
+  wait inside `isTransactionComplete` (2x6) and the budget cannot attribute
+  it. A first reading of 2A1 called 38 % held inconsistent with `mean vblanks`
+  1.001 and multiplied 1.2 held GETs by a vblank to claim ~8.3 ms; **both
+  steps are withdrawn in the journal** - the GETs arrive ~3.2x per transaction
+  so 38 % pending is consistent, and `amtrHoldExpired` 0 says only that the
+  bit clears before the deadline, never how fast Apple retries. **2A1 adds the
+  measurement with its control:** `RBFBFtRetryNs` is the gap from a GET we HELD
+  to the next GET, `RBFBFtPollNs` the same gap after we answered ready - one
+  quantity, one clock, one window, split only by what we told Apple. Alike
+  means the hold is not the ceiling and `upstream` is Apple's pacing; a vblank
+  against microseconds means the hold is the ceiling and it is ours.
+  `ftbudget` prints the ratio and REFUSES the comparison under 30 samples a
+  side (rule 18).
   Counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` (**decimal**);
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
