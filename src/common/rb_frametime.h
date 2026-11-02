@@ -159,4 +159,81 @@ static inline uint64_t rb_ft_gap_bound_ns(uint64_t vbl_period_ns)
     return vbl_period_ns * 8ull;
 }
 
+/* 2A2: what our kIOReturnNotReady hold costs, from measurements only.
+ *
+ * 2A1 printed "the hold does NOT delay Apple measurably" off a ratio under
+ * 2.0x, and that threshold was invented. Boot 284 read retry 4.384 ms against
+ * poll 2.771 ms - a ratio of 1.58x, which the threshold called nothing - and
+ * the hold in fact owned ~21 % of the interval, because the ratio is the wrong
+ * statistic: what matters is the per-hold PENALTY times HOW MANY holds there
+ * are per transaction, and 1.58x of a 2.77 ms base applied 1.7 times is
+ * 2.75 ms of a 12.99 ms interval.
+ *
+ * THE PREMISE IS CHECKABLE, AND IS CHECKED. This arithmetic is only valid if
+ * the GET gaps tile the interval - if the GETs are the only thing happening
+ * between transactions. rb_ft_gets_tile_pm() returns how well they do, as a
+ * fraction of the interval in per-mille, and boot 284 gave 1001: the weighted
+ * mean gap (3.513 ms) times the GETs per transaction (3.7) reproduced the
+ * 12.993 ms interval to 0.1 %. Below ~900 or above ~1100 the gaps do NOT
+ * account for the interval and the penalty cannot be attributed this way -
+ * the caller must say so rather than print a share (rule 14: a premise that
+ * failed has to be audible).
+ *
+ * A withdrawn version of this arithmetic exists in 2A1 and the difference is
+ * the whole point: there, one vblank per hold was INVENTED. Here the penalty
+ * is the difference between two accumulators measured on the same clock in the
+ * same window, and the tiling check says they describe the interval.
+ */
+static inline uint64_t rb_ft_hold_penalty_ns(uint64_t retry_mean_ns,
+                                             uint64_t poll_mean_ns)
+{
+    return retry_mean_ns > poll_mean_ns ? retry_mean_ns - poll_mean_ns : 0;
+}
+
+/* Holds per transaction, in per-mille (1.70 reads as 1700), so the share
+ * below needs no floating point. */
+static inline uint64_t rb_ft_holds_per_txn_pm(uint64_t retry_n, uint64_t txn_n)
+{
+    if (txn_n == 0) { return 0; }
+    if (retry_n > UINT64_MAX / 1000ull) { return 0; }
+    return (retry_n * 1000ull) / txn_n;
+}
+
+/* The share of the interval the hold owns: penalty x holds-per-transaction,
+ * over the interval, in per-mille. 0 when any input is missing, because a
+ * share computed from a half-populated window is worse than no share. */
+static inline uint64_t rb_ft_hold_share_pm(uint64_t penalty_ns,
+                                           uint64_t holds_pm,
+                                           uint64_t interval_ns)
+{
+    if (interval_ns == 0 || penalty_ns == 0 || holds_pm == 0) { return 0; }
+    if (penalty_ns > UINT64_MAX / holds_pm) { return 1000; }
+    const uint64_t owned_ns = (penalty_ns * holds_pm) / 1000ull;
+    return rb_ft_share_pm(owned_ns, interval_ns);
+}
+
+/* Do the GET gaps account for the interval? Weighted mean gap times GETs per
+ * transaction, over the interval, in per-mille. ~1000 means yes. This is the
+ * premise of rb_ft_hold_share_pm() and must be read before it. */
+static inline uint64_t rb_ft_gets_tile_pm(uint64_t retry_mean_ns,
+                                          uint64_t retry_n,
+                                          uint64_t poll_mean_ns,
+                                          uint64_t poll_n,
+                                          uint64_t txn_n,
+                                          uint64_t interval_ns)
+{
+    const uint64_t n = retry_n + poll_n;
+    if (n == 0 || txn_n == 0 || interval_ns == 0) { return 0; }
+    /* Sum of all gaps, which is already "the time the GETs account for". No
+     * need for the mean and the count separately - and summing avoids a
+     * rounding step that at 3.5 ms x 5665 would be visible. */
+    const uint64_t total_ns = retry_mean_ns * retry_n + poll_mean_ns * poll_n;
+    const uint64_t per_txn = total_ns / txn_n;
+    /* NOT rb_ft_share_pm(), which clamps at 1000: a tiling of 1300 is a
+     * REFUSAL - the gaps overlap or the counts come from different windows -
+     * and clamping it to "100 %" would read as the premise holding. */
+    if (per_txn > UINT64_MAX / 1000ull) { return 0; }
+    return (per_txn * 1000ull) / interval_ns;
+}
+
 #endif /* RB_FRAMETIME_H */

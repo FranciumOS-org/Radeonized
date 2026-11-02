@@ -402,6 +402,41 @@ table and refuses to install one that does not match the running kernel;
   against microseconds means the hold is the ceiling and it is ours.
   `ftbudget` prints the ratio and REFUSES the comparison under 30 samples a
   side (rule 18).
+  **2A2 ANSWERED IT: the hold owns ~21 % of the interval, and 2A1's verdict
+  was wrong (boot 284).** `retry` **4.384 ms** (n 2606) against `poll`
+  **2.771 ms** (n 3059) = a **1.613 ms** penalty x **1.70** holds per
+  transaction = **2.75 ms of 12.993 ms, 21.1 %**. 2A1's `ftbudget` printed
+  "the hold does NOT delay Apple measurably" off a ratio under **2.0x**; that
+  threshold was invented and **the ratio is the wrong statistic** - what costs
+  frame rate is penalty x holds-per-transaction. **The premise is now checked
+  rather than assumed:** the attribution is valid only if the GET gaps account
+  for the interval, and they do to 0.1 % (`4.384x2606 + 2.771x3059` over 1531
+  transactions = 13.00 ms vs 12.993 ms), published as `RBFBFtGetsTilePm` and
+  printed BEFORE the share, with the share refused outside 900-1100 and the
+  tiling deliberately NOT clamped at 1000 since 1300 is a refusal. This is the
+  same multiplication 2A1 withdrew - the difference is that the factor is
+  MEASURED here, not invented.
+  **It corroborates 2xo independently**, which recorded this hold costing
+  **27 %** of the frame rate by a different route four milestones earlier.
+  Without it the interval would be 10.25 ms -> **~97/s against 75.72**.
+  **So it is a TRADE and the dial is a dial, not a removal:** the hold is what
+  stopped the compositor drawing into the live scanout, and 2xo's whole-frame
+  flicker is what turning it off costs. `{"RBFBNotReady": 0|1}` via
+  `build/out/holdset`, with `RBFBAmtrNotReady` publishing the live state so an
+  A/B can verify its side (rule 20) and the write zeroing the frame-time
+  window (rule 39). **`sudo tools/holdaba.sh`** runs A/B/A at native in one
+  boot, refuses a boot with the hold unarmed (no A side, rule 34), and says in
+  its banner that **the flicker during B is data** - a fast AND clean B would
+  mean 2xo's diagnosis was wrong (rule 45).
+  **And boot 283's 93.95 did not reproduce: boot 284 read 75.72, so the
+  "smoother" desktop was boot-to-boot variance.** 2A1 recorded it as an
+  observation and not a claim, which is the only reason it cost one window
+  instead of a milestone. What DID reproduce is the split itself - **ours
+  0.4 % on both boots** with frame rates 24 % apart, which makes it a two-boot
+  claim: nothing this kext does inside a frame period is the ceiling. Also
+  recorded, as two boots and therefore not a finding: `actual /
+  latch_ceiling` was **63-66 % on both** while the ceiling itself moved 19 %
+  (1.001 -> 1.194 mean vblanks).
   Counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` (**decimal**);
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
@@ -960,7 +995,11 @@ cannot set it, and without it a frozen boot panics at 120 s with no SSH window
 **Runtime dials** (`setProperties`, no boot needed - 2zm, and 2zz is what
 they bought): `{"RBFBPubMs": N}` via `build/out/pubms`, and
 `{"RBFBFtOn": 0|1}` via `build/out/ftbudget` (2A0 - the frame-time budget,
-whose write also zeroes the measurement window).
+whose write also zeroes the measurement window), and
+`{"RBFBNotReady": 0|1}` via `build/out/holdset` (2A2 - the 2xo hold, worth
+~21 % of the frame rate and traded against 2xo's whole-frame flicker; it can
+only arm what the boot set up, and `RBFBAmtrNotReady` publishes the live
+state).
 
 **Tunables:** `rbgpufbpubms=<0..10000>` (2zk - the frame-path publish
 throttle in ms, default **500**; `0` restores the unthrottled pre-2zk

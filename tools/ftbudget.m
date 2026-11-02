@@ -135,8 +135,15 @@ int main(int argc, char **argv)
                100.0 * (double)held / (double)gets);
     }
 
-    /* 2A1: the one comparison that can attribute the hold. Same quantity,
-     * same clock, same window, split only by what we told Apple last time. */
+    /* 2A1/2A2: the one comparison that can attribute the hold, and the
+     * premise that makes the attribution valid.
+     *
+     * 2A1 printed "the hold does NOT delay Apple measurably" whenever the
+     * retry/ready RATIO was under 2.0x. That threshold was invented, and boot
+     * 284's 1.58x in fact owned ~21 % of the interval - because the ratio is
+     * the wrong statistic. What costs frame rate is the per-hold PENALTY times
+     * the number of holds per transaction. The ratio is printed for context
+     * and no longer decides anything. */
     const long rtry = rd(fb, "RBFBFtRetryNs"), rtryN = rd(fb, "RBFBFtRetryN");
     const long poll = rd(fb, "RBFBFtPollNs"), pollN = rd(fb, "RBFBFtPollN");
     printf("\nhow fast Apple asks again (gap between 'amtr' GETs):\n");
@@ -144,21 +151,44 @@ int main(int argc, char **argv)
            rtry / 1000000.0, rtryN);
     printf("  after we said ready  %8.3f ms   n %ld   <- the control\n",
            poll / 1000000.0, pollN);
+
     if (rtryN < 30 || pollN < 30) {
-        printf("  NOT A COMPARISON YET: one bucket has under 30 samples, so a\n"
+        printf("  NOT A COMPARISON: one bucket has under 30 samples, so a\n"
                "  difference between the means is not resolvable (rule 18).\n");
-    } else if (poll > 0) {
-        const double ratio = (double)rtry / (double)poll;
-        printf("  held/ready ratio     %8.2fx\n", ratio);
-        if (ratio < 2.0) {
-            printf("  The hold does NOT delay Apple measurably, so `upstream`\n"
-                   "  is Apple's own pacing and the hold is not the ceiling.\n");
+    } else {
+        const long tile = rd(fb, "RBFBFtGetsTilePm");
+        printf("  GET gaps account for %.1f %% of the interval", tile / 10.0);
+        if (tile < 900 || tile > 1100) {
+            printf("  <- PREMISE FAILED\n");
+            printf("  The GET gaps do NOT account for the interval, so the\n"
+                   "  hold's share CANNOT be attributed from them. Something\n"
+                   "  else happens between transactions, or the counts come\n"
+                   "  from different windows. No share is printed.\n");
         } else {
-            printf("  The hold DOES delay Apple. %.3f ms x %.2f held GETs per\n"
-                   "  transaction is the share of the interval it owns.\n",
-                   (rtry - poll) / 1000000.0,
-                   rd(fb, "RBFBFtGetN") > 0
-                     ? (double)rtryN / (double)(rd(fb, "RBFBFtWorkN") ?: 1) : 0.0);
+            printf("  (so the attribution below is valid)\n");
+            const long pen = rd(fb, "RBFBFtHoldPenaltyNs");
+            const long hpt = rd(fb, "RBFBFtHoldsPerTxnPm");
+            const long shr = rd(fb, "RBFBFtHoldSharePm");
+            printf("  penalty per hold     %8.3f ms   x %.2f holds/txn\n",
+                   pen / 1000000.0, hpt / 1000.0);
+            printf("  SO THE 2xo HOLD OWNS %.1f %% of the interval",
+                   shr / 10.0);
+            if (shr >= 50) {
+                const double iv = rd(fb, "RBFBFtIntervalNs") / 1000000.0;
+                const double without = iv - (pen / 1000000.0) * (hpt / 1000.0);
+                printf("  -> ~%.1f /s without it\n",
+                       without > 0.0 ? 1000.0 / without : 0.0);
+                printf("  2xo recorded this hold costing 27 %% of the frame\n"
+                       "  rate when it was introduced, so that is an\n"
+                       "  independent corroboration, not a new finding.\n"
+                       "  IT IS A TRADE: the hold is what stopped the\n"
+                       "  compositor drawing into the live scanout. Turning it\n"
+                       "  off brings 2xo's flicker back, which is the thing to\n"
+                       "  look at while measuring - run tools/holdaba.sh.\n");
+            } else {
+                printf("\n  Under 5 %%: the hold is not where the frame rate\n"
+                       "  goes, and `upstream` is Apple's own pacing.\n");
+            }
         }
     }
 

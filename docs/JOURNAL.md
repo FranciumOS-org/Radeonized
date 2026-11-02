@@ -53294,3 +53294,97 @@ the next GET, against the gap from a GET we answered ready to the next GET. If
 the two are alike, the hold costs nothing and `upstream` is Apple's own
 pacing. If the held gap is a vblank and the ready gap is microseconds, the hold
 is the ceiling and it is ours.
+
+---
+
+## 2A2 — the hold owns ~21 %, the smoothness was variance, and 2A1's verdict was wrong
+
+Boot 284, framebuffer **D1EB488F**, native 143929 mHz / 1129 lines, one 20 s
+window. Cross-check passing again: **budget 76.96 /s vs paired.sh's 75.72 /s,
++1.6 %**.
+
+**1. `sets/s` came back 75.72, not boot 283's 93.95 — so the smoothness was
+boot-to-boot variance.** The user's unprompted "lowkey way smoother" on boot
+283 agreed with that boot's counter and does not reproduce, which is exactly
+2zg's shape (boot 267's 90.4 against boot 268's 72.50) and exactly what rule
+44 exists to catch. It cost one window to settle instead of a milestone built
+on it. 2A1 recorded it as an observation rather than a claim, and that was the
+right call for the right reason.
+
+**2. The `ours`/`upstream` split REPRODUCED across two boots:**
+
+```
+boot 283   interval 10.470 ms   ours 0.044 ms (0.4 %)   upstream 99.5 %   sets/s 93.95
+boot 284   interval 12.993 ms   ours 0.061 ms (0.4 %)   upstream 99.5 %   sets/s 75.72
+```
+
+Two boots, frame rates 24 % apart, and **our own cost is 0.4 % of the interval
+in both**. That is a two-boot claim by rule 44's own standard, and it is the
+one that matters: nothing this kext does inside a frame period is the ceiling.
+
+**3. 2A1's verdict was WRONG, and the instrument printed it confidently.**
+`ftbudget` said *"The hold does NOT delay Apple measurably"* because the
+retry/ready ratio was 1.58x and the threshold was 2.0x. **The threshold was
+invented and the ratio is the wrong statistic.** What costs frame rate is the
+per-hold penalty times the number of holds per transaction:
+
+```
+after we HELD        4.384 ms   n 2606
+after we said ready  2.771 ms   n 3059      <- the control
+penalty              1.613 ms   x 1.70 holds/txn  =  2.75 ms
+interval            12.993 ms   ->  the hold owns 21.1 %
+```
+
+**And the premise is checkable, so it is now checked.** This arithmetic is
+only valid if the GET gaps account for the interval. They do, to 0.1 %:
+`4.384 x 2606 + 2.771 x 3059` over 1531 transactions is **13.00 ms** against a
+**12.993 ms** interval. `rb_ft_gets_tile_pm()` publishes that as
+`RBFBFtGetsTilePm` and `ftbudget` prints it BEFORE the share and refuses the
+share outside 900-1100 per-mille — deliberately NOT clamped at 1000, because a
+tiling of 1300 is a refusal (overlapping gaps, or counts from two windows) and
+clamping it would read as the premise holding.
+
+**This is the same multiplication 2A1 withdrew, and the difference is why it
+stands now.** In 2A1 the per-hold cost was INVENTED (one vblank, giving
+~8.3 ms). Here it is the difference between two accumulators measured on the
+same clock in the same window, and the tiling check says they describe the
+interval. The lesson is not "don't multiply" — it is that a factor has to be
+measured and its premise stated.
+
+**4. It independently corroborates 2xo.** 2xo recorded the
+`kIOReturnNotReady` hold costing **27 % of the frame rate** when it was
+introduced, from a completely different measurement. 21 % from a timing
+decomposition four milestones later is the same number twice by different
+routes. Without the hold the interval would be `3.7 x 2.771` = 10.25 ms, so
+**~97/s against 75.72** — and note boot 283 read 93.95 with `mean vblanks`
+1.001, which is the neighbourhood this predicts.
+
+**5. So it is a TRADE, not a bug, and the next step is a dial rather than a
+removal.** The hold is what stopped the compositor drawing into a surface that
+is still the live scanout; 2xo's whole-frame flicker is what turning it off
+costs. `{"RBFBNotReady": 0|1}` is now a runtime property
+(`build/out/holdset`), `RBFBAmtrNotReady` publishes the live state so an A/B
+can verify which side it is on (rule 20), and writing it zeroes the frame-time
+window so a budget is never a blend of both configurations (rule 39).
+`sudo tools/holdaba.sh` runs A/B/A at native in one boot, refuses a boot where
+`RBFBAmtrNotReady` is not armed (there would be no A side, rule 34), and
+**says in its own banner that the flicker during B is data** — the deliverable
+there is something only a human can see (rule 45), so whether B is fast *and*
+clean is the result, not a footnote. A clean fast B would mean 2xo's diagnosis
+was wrong.
+
+**The latch tracked the frame rate across these two boots**, which 2zg called
+a correlate rather than a constraint and which this does not resolve either
+way: boot 283 `mean vblanks` 1.001 / latch ceiling 143.1 / actual 66 % of it;
+boot 284 `mean vblanks` 1.194 / ceiling 120.1 / actual 63 %. **`actual /
+latch_ceiling` is 63-66 % on both** while the ceiling itself moved 19 %. Two
+boots is not a finding and no dial here is being proposed from it — recorded
+because the ratio's stability across a 24 % change in throughput is the kind
+of thing a later milestone will want to have been written down.
+
+Hosttest pins the share arithmetic to **boot 284's own numbers** (penalty
+exactly 1613000 ns, holds/txn 1700-1703, share 205-215 per-mille, tiling
+990-1010), asserts the case that makes the old verdict wrong (ratio under 2.0x
+while owning over 15 % of the interval), asserts a failed tiling reads above
+1100 rather than clamping, and asserts every missing input gives no share
+instead of a plausible one. Breaking the penalty makes the suite exit 2.

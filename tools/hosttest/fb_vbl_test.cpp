@@ -553,5 +553,64 @@ int main() {
         assert(f.ftRetry.n==0 && f.ftRetry.dropped==0 && f.ftPoll.n==0);
         assert(f.ftPrevGetExit==0 && !f.ftPrevGetHeld);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison passed");
+
+    /* 2A2: the hold's share, pinned to boot 284's own reading.
+     *
+     * The numbers below are that boot's, not invented: retry 4.384 ms
+     * (n=2606), poll 2.771 ms (n=3059), 1531 transactions, 12.993 ms
+     * interval. The point of using them is that the arithmetic has to
+     * reproduce a measurement that already exists, so a future edit that
+     * changes the formula stops agreeing with a boot (rule 18's spirit, and
+     * the same trick 2y5's derived pixel clock used to check itself).
+     *
+     * And the PREMISE is asserted first, because 2A1 printed a verdict with
+     * no premise at all: the share is only attributable if the GET gaps
+     * account for the interval.
+     */
+    {
+        const uint64_t retry=4384000, retryN=2606;
+        const uint64_t poll=2771000,  pollN=3059;
+        const uint64_t txn=1531, iv=12993000;
+
+        // The gaps tile the interval: 4.384x2606 + 2.771x3059 over 1531
+        // transactions is 13.00 ms against a 12.993 ms interval.
+        const uint64_t tile = rb_ft_gets_tile_pm(retry,retryN,poll,pollN,txn,iv);
+        assert(tile>=990 && tile<=1010);
+
+        // 1.613 ms per hold, 1.70 holds per transaction, 2.75 ms of 12.993.
+        const uint64_t pen = rb_ft_hold_penalty_ns(retry,poll);
+        assert(pen==1613000);
+        const uint64_t hpt = rb_ft_holds_per_txn_pm(retryN,txn);
+        assert(hpt>=1700 && hpt<=1703);
+        const uint64_t shr = rb_ft_hold_share_pm(pen,hpt,iv);
+        assert(shr>=205 && shr<=215);        // ~21 %, which 2xo put at 27 %
+
+        // THE RATIO IS THE WRONG STATISTIC, asserted directly: 1.58x would
+        // have passed 2A1's "under 2.0x means no effect" threshold while
+        // owning a fifth of the interval. This is the case that makes the
+        // old verdict wrong, so it is the case that must not regress.
+        assert(retry*100ull/poll < 200ull);  // ratio 1.58x, "no effect"
+        assert(shr > 150);                   // yet >15 % of the interval
+
+        // A tiling that does not hold must be visible as such, NOT clamped to
+        // 100 %: gaps that overlap, or counts from two different windows,
+        // produce more than one interval's worth and that is a refusal.
+        const uint64_t bad = rb_ft_gets_tile_pm(retry,retryN*3,poll,pollN*3,txn,iv);
+        assert(bad > 1100);
+
+        // Missing inputs give no share rather than a plausible one.
+        assert(rb_ft_hold_share_pm(0,hpt,iv)==0);
+        assert(rb_ft_hold_share_pm(pen,0,iv)==0);
+        assert(rb_ft_hold_share_pm(pen,hpt,0)==0);
+        assert(rb_ft_holds_per_txn_pm(retryN,0)==0);
+        assert(rb_ft_gets_tile_pm(retry,0,poll,0,txn,iv)==0);
+
+        // And the hold being OFF is a real state the dial can reach: no
+        // retries at all, so no penalty and no share - distinguishable from
+        // a window nobody measured only by ftWork.n, which is why the share
+        // is published beside its counts.
+        assert(rb_ft_hold_penalty_ns(0,poll)==0);
+        assert(rb_ft_hold_share_pm(0,0,iv)==0);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers passed");
 }
