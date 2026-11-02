@@ -14,6 +14,7 @@
  * too, which is the 2B1 lesson about the shim. */
 #include "rb_hpd.h"
 #include "rb_aux.h"
+#include "rb_dpalt.h"
 #include "rb_dpcd.h"
 
 /* -- the vblank ---------------------------------------------------------- */
@@ -226,6 +227,26 @@ void RBAMDFramebuffer::publishVBLState(void)
         setProperty(key, (uint64_t)hpdStatus[i], 64);
         snprintf(key, sizeof(key), "RBFBHpd%uCtl", i);
         setProperty(key, (uint64_t)hpdControl[i], 64);
+    }
+    /* 2C0: the RDPCSTX PHY blocks. dpaltSample() returns immediately unless
+     * the boot armed -rbgpufbdpalt AND the aperture covered them, so an
+     * unarmed boot pays nothing and publishes the refusal rather than
+     * silence (rule 14). RBFBDpaltArmed and RBFBDpaltReady are published
+     * separately because "the user did not ask" and "the aperture was too
+     * small" are different facts a single flag would merge. */
+    dpaltSample();
+    setProperty("RBFBDpaltArmed", dpaltArmed);
+    setProperty("RBFBDpaltReady", dpaltReady);
+    setProperty("RBFBDpaltSweep", (uint64_t)dpaltSweep, 32);
+    setProperty("RBFBDpaltActive", (uint64_t)dpaltActiveMask, 32);
+    setProperty("RBFBDpaltNotDisabled", (uint64_t)dpaltNotDisabledMask, 32);
+    setProperty("RBFBDpaltEverNotDisabled", (uint64_t)dpaltEverNotDisabled, 32);
+    setProperty("RBFBDpaltChanges", dpaltChanges, 64);
+    for (unsigned i = 0; i < RB_DPALT_COUNT; i++) {
+        char key[24];
+        /* 64 bits for the same 2B4 reason as the HPD words above. */
+        snprintf(key, sizeof(key), "RBFBDpalt%uCntl6", i);
+        setProperty(key, (uint64_t)dpaltWord[i], 64);
     }
     /* 2B8: the AUX engines and the LIVE OTG words. */
     auxSample();

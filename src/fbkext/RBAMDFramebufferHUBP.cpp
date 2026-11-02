@@ -24,6 +24,7 @@
 #include "rb_hubp.h"
 #include "rb_hpd.h"
 #include "rb_aux.h"
+#include "rb_dpalt.h"
 #include "rb_dcn_deny.h"
 #include "rb_regs.h"
 #include <IOKit/pci/IOPCIDevice.h>
@@ -72,6 +73,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpTripleRefusedVal = 0;
     hubpTripleReadback = 0;
     hpdReady = false;
+    dpaltReady = false;
     hpdSinkMask = 0;
     hpdSinkEver = 0;
     hpdEnMask = 0;
@@ -154,6 +156,20 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * check appearing beside it. */
     const uint32_t auxNeeded = kRbDmuSeg2 + rb_aux_dw_max();
     if (auxNeeded > needed) { needed = auxNeeded; }
+    /* 2C0: the RDPCSTX PHY blocks sit far above all of those - 0x2ca6
+     * against the AUX engines' 0x1fcb - and they are DELIBERATELY NOT folded
+     * into `needed`.
+     *
+     * Folding them in would make every boot's panel depend on an aperture
+     * large enough for a block only an opt-in read ever touches: a boot that
+     * does not arm -rbgpufbdpalt would gain a stricter check for no benefit,
+     * and if it ever failed, hubpSetup() would refuse and the panel would go
+     * with it. So the core bound is unchanged and the PHY read gets its own,
+     * checked separately and failing only itself (rule 16: the instrument
+     * must not be able to break what it is measured beside). */
+    const uint32_t dpaltNeeded = kRbDmuSeg2 + rb_dpalt_dw_max();
+    const bool dpaltFits =
+        length >= ((uint64_t)dpaltNeeded + 1) * sizeof(uint32_t);
     /* Every dword we will touch has to be inside the aperture, checked before
      * the first dereference and not after (rule 19's shape for a mapping). */
     if (length < ((uint64_t)needed + 1) * sizeof(uint32_t)) {
@@ -165,6 +181,10 @@ bool RBAMDFramebuffer::hubpSetup(void)
     const volatile uint32_t *regs =
         reinterpret_cast<const volatile uint32_t *>(map->getVirtualAddress());
     if (!regs) { hubpRefuse = 3; map->release(); return false; }
+
+    /* Armed AND the aperture covers it. Both halves are required and both are
+     * published, so "no reading" can be told from "refused" (rule 14). */
+    dpaltReady = dpaltArmed && dpaltFits;
 
     /* Gate 1: are we addressing DCN at all? 2oq's signature, now decided by
      * rb_hubp_otg_gate() so the hosttest owns it and the HDMI case is
@@ -235,6 +255,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hpdReady = true;
     hpdSample();
     auxSample();
+    dpaltSample();
     hpdSetupMask   = hpdSinkMask;
     hpdSetupEnMask = hpdEnMask;
     hpdChanges     = 0;
@@ -609,3 +630,44 @@ void RBAMDFramebuffer::auxSample(void)
         otgLive[i] = hubpRegs[kRbDmuSeg2 + kRbOtgControl[i]];
     }
 }
+
+/* 2C0: the five RDPCSTX PHY blocks - DP alt mode, lane power, reference
+ * clock. Read-only, no writer, and gated on dpaltArmed as well as on the
+ * aperture, because this is the one block in this kext whose documented
+ * failure mode is a HANG rather than a refused value: Linux marks the
+ * register path "Legacy path, avoid if possible" and prefers a DMUB query to
+ * avoid "hanging the RDCPSPIPE if DMCUB wasn't already running".
+ *
+ * Why it is read here anyway, and why the register beats the DMUB query on
+ * THIS machine, is argued in rb_dpalt.h; the short form is that boot 275
+ * measured the inbox reply path returning nothing (2zr) while DMCUB 4.0.15.47
+ * is demonstrably alive on the GPINT route (2zs), so the stated precondition
+ * for the hang is measured false and the alternative is measured dead.
+ *
+ * The verdict is NOT computed here - rb_dpalt.h owns every judgement so the
+ * hosttest owns it too, and the raw words are published whichever way the
+ * verdict falls (publishing raw beside the summary has now paid for itself in
+ * 2B0, 2B4 and 2B9). */
+void RBAMDFramebuffer::dpaltSample(void)
+{
+    if (!dpaltReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_DPALT_COUNT; i++) {
+        const uint32_t dw = rb_dpalt_dw(i);
+        /* RB_DPALT_DW_INVALID cannot happen for i < RB_DPALT_COUNT, but a
+         * read of dword 0 of the segment is a read of another block
+         * entirely, so it is refused rather than trusted (rule 19). */
+        if (dw == RB_DPALT_DW_INVALID) { continue; }
+        dpaltWord[i] = hubpRegs[kRbDmuSeg2 + dw];
+    }
+
+    dpaltActiveMask = rb_dpalt_active_mask(dpaltWord, RB_DPALT_COUNT);
+
+    const uint32_t nd = rb_dpalt_not_disabled_mask(dpaltWord, RB_DPALT_COUNT);
+    if (nd != dpaltNotDisabledMask) { dpaltChanges++; }
+    dpaltNotDisabledMask  = nd;
+    dpaltEverNotDisabled |= nd;
+
+    dpaltSweep = (int)rb_dpalt_sweep_verdict(dpaltWord, RB_DPALT_COUNT);
+}
+
