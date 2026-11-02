@@ -70,8 +70,25 @@
 #define RB_AUX_SWD_INDEX_SHIFT      16u
 #define RB_AUX_SWD_AUTOINC_DIS      0x80000000u
 
-/* dc_ddc_types.h: I2CAUX_TRANSACTION_ACTION_DP_READ. */
-#define RB_DPCD_ACTION_READ         0x90u
+/* dc_ddc_types.h: enum i2caux_transaction_action, verbatim. MOT is
+ * "middle of transaction" - the bit that keeps an I2C transaction open across
+ * several AUX transactions, which is how a 128-byte EDID is read 16 bytes at
+ * a time from one I2C read. */
+#define RB_DPCD_ACTION_READ         0x90u   /* DP_READ                     */
+#define RB_I2C_ACTION_WRITE         0x00u   /* I2C_WRITE                   */
+#define RB_I2C_ACTION_READ          0x10u   /* I2C_READ                    */
+#define RB_I2C_ACTION_WRITE_MOT     0x40u   /* I2C_WRITE_MOT               */
+#define RB_I2C_ACTION_READ_MOT      0x50u   /* I2C_READ_MOT                */
+
+/* The EDID's I2C slave address on the DDC bus. */
+#define RB_EDID_I2C_ADDR            0x50u
+#define RB_EDID_BLOCK_LEN           128u
+
+/* A real sink DEFERs an I2C-over-AUX transaction routinely while its own DDC
+ * bus is busy - it is not an error and a single-shot read would report a
+ * working monitor as silent. Bounded, because the mirror of that mistake is
+ * spinning forever on a sink that always defers. */
+#define RB_AUX_DEFER_RETRIES        8u
 
 /* dc_ddc_types.h: enum aux_transaction_reply, after the >> 4. */
 #define RB_DPCD_REPLY_ACK           0x0u
@@ -104,17 +121,74 @@ static inline uint32_t rb_aux_arb_release_word(uint32_t arb)
  * header and the 20 bit address (that is 3 byte)" plus a length byte.
  * Returns the number of bytes to program, or 0 on a refusal.
  */
+/* The general encoder. A ZERO length is legal and gives THREE bytes, not
+ * four - dce_aux.c's `length = request->length ? 4 : 3`, "the 4 bit header
+ * and the 20 bit address (that is 3 byte). If the requested length is non
+ * zero this means an addition byte specifying the length is required." That
+ * form is how an I2C transaction is ended with an address-only request, so
+ * refusing length 0 outright (as 2BA's DPCD-only encoder did) would make the
+ * MOT protocol unexpressible. */
+static inline uint32_t rb_aux_request_bytes(uint32_t action, uint32_t address,
+                                            uint32_t length, uint8_t *out,
+                                            uint32_t out_len)
+{
+    if (!out || out_len < 3u) { return 0; }
+    if (length > RB_DPCD_MAX_READ) { return 0; }
+    if (address > 0xFFFFFu) { return 0; }   /* 20 bits, per the COMPOSE macros */
+    if (action & 0x0Fu) { return 0; }        /* the low nibble is the address */
+    out[0] = (uint8_t)(action | ((address & 0xF0000u) >> 16));
+    out[1] = (uint8_t)((address & 0xFF00u) >> 8);
+    out[2] = (uint8_t)(address & 0xFFu);
+    if (length == 0u) { return 3u; }
+    if (out_len < 4u) { return 0; }
+    out[3] = (uint8_t)(length - 1u);
+    return 4u;
+}
+
+/* 2BA's DPCD read, now a wrapper. It keeps the stricter rule that a zero
+ * length is meaningless for a DPCD read even though the encoder allows it. */
 static inline uint32_t rb_dpcd_read_request(uint32_t address, uint32_t length,
                                             uint8_t *out, uint32_t out_len)
 {
-    if (!out || out_len < 4u) { return 0; }
-    if (length == 0u || length > RB_DPCD_MAX_READ) { return 0; }
-    if (address > 0xFFFFFu) { return 0; }   /* 20-bit DPCD address space */
-    out[0] = (uint8_t)(RB_DPCD_ACTION_READ | ((address & 0xF0000u) >> 16));
-    out[1] = (uint8_t)((address & 0xFF00u) >> 8);
-    out[2] = (uint8_t)(address & 0xFFu);
-    out[3] = (uint8_t)(length - 1u);
-    return 4u;
+    if (length == 0u) { return 0; }
+    if (out_len < 4u) { return 0; }
+    return rb_aux_request_bytes(RB_DPCD_ACTION_READ, address, length,
+                                out, out_len);
+}
+
+/* Which action each step of an EDID block read uses. The LAST read drops MOT,
+ * which is what ends the I2C transaction - leaving MOT set on the final chunk
+ * holds the sink's DDC bus open, and the next reader finds it busy. */
+static inline uint32_t rb_edid_read_action(uint32_t chunk, uint32_t chunks)
+{
+    if (chunk + 1u >= chunks) { return RB_I2C_ACTION_READ; }
+    return RB_I2C_ACTION_READ_MOT;
+}
+
+static inline int rb_dpcd_reply_is_defer(uint32_t code)
+{ return code == RB_DPCD_REPLY_DEFER; }
+
+/* EDID block 0 sanity, before any field of it is believed: the eight-byte
+ * header is fixed by the standard, and the whole 128-byte block sums to zero
+ * modulo 256. Two independent checks, because a half-read block can satisfy
+ * the header and a corrupt one can satisfy neither. */
+static inline int rb_edid_header_ok(const uint8_t *b, uint32_t n)
+{
+    static const uint8_t hdr[8] = { 0x00, 0xff, 0xff, 0xff,
+                                    0xff, 0xff, 0xff, 0x00 };
+    if (!b || n < 8u) { return 0; }
+    for (unsigned i = 0; i < 8u; i++) {
+        if (b[i] != hdr[i]) { return 0; }
+    }
+    return 1;
+}
+
+static inline int rb_edid_checksum_ok(const uint8_t *b, uint32_t n)
+{
+    if (!b || n < RB_EDID_BLOCK_LEN) { return 0; }
+    uint32_t sum = 0;
+    for (unsigned i = 0; i < RB_EDID_BLOCK_LEN; i++) { sum += b[i]; }
+    return (sum & 0xffu) == 0u;
 }
 
 static inline uint32_t rb_aux_swc_request_word(uint32_t wr_bytes)

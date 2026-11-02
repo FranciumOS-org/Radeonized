@@ -1000,6 +1000,37 @@ table and refuses to install one that does not match the running kernel;
   `dce_aux.c` has and `rb_dpcd.h`'s encoder already takes an action byte for.
   Also now worth reading: the extended receiver caps at 0x02200, since 0x0e
   bit 7 says they exist.
+  **2BC BUILDS THE EDID READ (I2C-over-AUX, the MOT protocol). Hosttested, not
+  run.** `auxTransact()` is now general - `dce_aux.c` branches on nothing but
+  `is_write`, so one function serves the DP read and all four I2C forms, and
+  `auxDpcdRead()` is a wrapper. The sequence: an **I2C WRITE with MOT**
+  carrying the byte offset (**the only write to a sink this project makes**),
+  **eight 16-byte READs** (16 is the AUX payload max), and **the last drops
+  MOT** to end the I2C transaction - leaving it set holds the sink's DDC bus
+  and the next reader finds it busy, so `rb_edid_read_action()` owns that and
+  the hosttest pins every chunk. **A zero-length request is THREE bytes, not
+  four** (`length = request->length ? 4 : 3`), which 2BA's DPCD-only encoder
+  refused and which the MOT protocol needs; the general encoder also refuses an
+  action with its low nibble set, since that nibble is the address's.
+  **DEFER is normal**, bounded at 8 retries, with `RBFBEdidDefers` published so
+  "worked after retries" is visible. **Two INDEPENDENT checks before anything
+  is parsed**: the fixed header and the 128-byte checksum - a partial read can
+  pass the header and fail the sum, and **128 zeros pass the sum and fail the
+  header** - and `edidread` refuses to parse unless both pass. Published as one
+  `OSData` blob, not 128 keys (rule 16: 128 more `setProperty` calls on Apple's
+  thread would make the instrument the defect).
+  **A hosttest case passed for the WRONG REASON and only the break-it check
+  found it**: it asserted the length guard on a block an earlier case had
+  corrupted, so it returned 0 for the corruption and deleting the guard changed
+  nothing. **Rule 26 on a test: a case that passes for the wrong reason is not
+  coverage.** **And 2B1's `-Werror` trap fired again** - the first break left
+  `n` unused, the build died, and the `FAIL` grep came back empty, which reads
+  exactly like "the test does not catch it". **Second instance; grep for
+  `error` as well as `FAIL`, or read the exit status.**
+  `build/out/edidread [block [hpd]]`, which derives the refresh from the
+  timing totals (a wrong field then reads as an absurd rate, not a plausible
+  one) and compares the mode's bandwidth against 2BB's measured link.
+  Framebuffer **67F28153**.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the

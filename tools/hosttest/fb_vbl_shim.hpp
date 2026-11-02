@@ -297,6 +297,12 @@ public:
     uint32_t auxDpcdHpd=2;
     unsigned char auxDpcdData[16]={0};
     bool auxDpcdRead(uint32_t, uint32_t, uint32_t) { return false; }
+    /* 2BC, mirrored. */
+    uint64_t auxEdidAttempts=0, auxEdidOks=0;
+    uint32_t auxEdidRefuse=0, auxEdidInst=0, auxEdidBytes=0, auxEdidDefers=0;
+    bool auxEdidHeaderOk=false, auxEdidSumOk=false;
+    unsigned char auxEdidData[128]={0};
+    bool auxEdidRead(uint32_t, uint32_t) { return false; }
     bool amtrNotReadySetup=false, amtrNotReadySetupHave=false;
     uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
     bool hubpTripleApply(bool enable);

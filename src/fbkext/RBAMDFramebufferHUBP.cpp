@@ -98,6 +98,15 @@ bool RBAMDFramebuffer::hubpSetup(void)
     auxDpcdBytes = 0;
     auxDpcdSuspect = false;
     auxDpcdHpd = 2;   /* 2B4: the Type-C port */
+    auxEdidAttempts = 0;
+    auxEdidOks = 0;
+    auxEdidRefuse = 0;
+    auxEdidInst = RB_AUX_COUNT;
+    auxEdidBytes = 0;
+    auxEdidDefers = 0;
+    auxEdidHeaderOk = false;
+    auxEdidSumOk = false;
+    for (unsigned i = 0; i < 128; i++) { auxEdidData[i] = 0; }
     for (unsigned i = 0; i < 16; i++) { auxDpcdData[i] = 0; }
     for (unsigned i = 0; i < 4; i++) { otgLive[i] = 0; }
     hubpFlipCtl2 = 0;

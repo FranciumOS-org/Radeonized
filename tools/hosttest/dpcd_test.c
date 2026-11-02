@@ -182,8 +182,149 @@ int dpcd_tests(void)
         }
     }
 
+    /* 2BC: the general encoder, the I2C actions and the EDID checks. */
+    {
+        uint8_t req[4];
+        /* A ZERO length gives THREE bytes, not four - dce_aux.c's
+         * `length = request->length ? 4 : 3`. 2BA's DPCD-only encoder refused
+         * length 0, which would have made the MOT protocol unexpressible. */
+        memset(req, 0xaa, sizeof(req));
+        if (rb_aux_request_bytes(RB_I2C_ACTION_READ, 0x50u, 0u,
+                                 req, sizeof(req)) != 3u) {
+            printf("FAIL dpcd: a zero-length request was not 3 bytes\n"); bad++;
+        }
+        if (req[0] != 0x10u || req[1] != 0x00u || req[2] != 0x50u ||
+            req[3] != 0xaau) {
+            printf("FAIL dpcd: zero-length wrote a 4th byte or a bad header\n");
+            bad++;
+        }
+        /* The four I2C actions, against dc_ddc_types.h as vendored. */
+        if (RB_I2C_ACTION_WRITE != 0x00u || RB_I2C_ACTION_READ != 0x10u ||
+            RB_I2C_ACTION_WRITE_MOT != 0x40u ||
+            RB_I2C_ACTION_READ_MOT != 0x50u) {
+            printf("FAIL dpcd: an I2C action constant is wrong\n"); bad++;
+        }
+        /* The EDID slave address shares its value with READ_MOT (0x50), which
+         * is a coincidence worth pinning so a future edit cannot swap them. */
+        if (RB_EDID_I2C_ADDR != 0x50u || RB_EDID_BLOCK_LEN != 128u) {
+            printf("FAIL dpcd: EDID address or block length\n"); bad++;
+        }
+        if (rb_aux_request_bytes(RB_I2C_ACTION_READ_MOT, 0x50u, 16u,
+                                 req, sizeof(req)) != 4u ||
+            req[0] != 0x50u || req[2] != 0x50u || req[3] != 0x0fu) {
+            printf("FAIL dpcd: READ_MOT request %02x %02x %02x %02x\n",
+                   req[0], req[1], req[2], req[3]); bad++;
+        }
+        /* The low nibble of byte 0 belongs to the ADDRESS, so an action that
+         * sets it would silently corrupt the top address nibble. */
+        if (rb_aux_request_bytes(0x91u, 0u, 1u, req, sizeof(req)) != 0u) {
+            printf("FAIL dpcd: an action with a low nibble was accepted\n");
+            bad++;
+        }
+        /* And a 3-byte buffer is enough for a zero-length request but not a
+         * sized one - the bound differs by form. */
+        if (rb_aux_request_bytes(RB_I2C_ACTION_READ, 0x50u, 0u, req, 3u) != 3u ||
+            rb_aux_request_bytes(RB_I2C_ACTION_READ, 0x50u, 1u, req, 3u) != 0u) {
+            printf("FAIL dpcd: out_len bound wrong for one of the forms\n");
+            bad++;
+        }
+    }
+
+    /* THE MOT CHOICE, which is the one that affects the sink's own bus state:
+     * every chunk but the last keeps the I2C transaction open, and the last
+     * MUST drop MOT or the sink's DDC bus stays held and the next reader
+     * finds it busy. */
+    {
+        for (uint32_t c = 0; c < 7u; c++) {
+            if (rb_edid_read_action(c, 8u) != RB_I2C_ACTION_READ_MOT) {
+                printf("FAIL dpcd: chunk %u of 8 dropped MOT early\n", c);
+                bad++;
+            }
+        }
+        if (rb_edid_read_action(7u, 8u) != RB_I2C_ACTION_READ) {
+            printf("FAIL dpcd: the LAST chunk kept MOT set\n"); bad++;
+        }
+        /* A single-chunk read is the last chunk, so it must not set MOT. */
+        if (rb_edid_read_action(0u, 1u) != RB_I2C_ACTION_READ) {
+            printf("FAIL dpcd: a one-chunk read set MOT\n"); bad++;
+        }
+        if (!rb_dpcd_reply_is_defer(RB_DPCD_REPLY_DEFER) ||
+            rb_dpcd_reply_is_defer(RB_DPCD_REPLY_ACK)) {
+            printf("FAIL dpcd: defer detection\n"); bad++;
+        }
+    }
+
+    /* The two EDID checks, which must be INDEPENDENT: a block can pass the
+     * header and fail the sum, which is exactly what a partial chunked read
+     * looks like. */
+    {
+        uint8_t e[128];
+        memset(e, 0, sizeof(e));
+        e[0] = 0x00; e[1] = 0xff; e[2] = 0xff; e[3] = 0xff;
+        e[4] = 0xff; e[5] = 0xff; e[6] = 0xff; e[7] = 0x00;
+        /* Make the block sum to zero mod 256 by setting the checksum byte. */
+        uint32_t sum = 0;
+        for (unsigned i = 0; i < 127u; i++) { sum += e[i]; }
+        e[127] = (uint8_t)((256u - (sum & 0xffu)) & 0xffu);
+        if (!rb_edid_header_ok(e, 128u)) {
+            printf("FAIL dpcd: a valid EDID header was rejected\n"); bad++;
+        }
+        if (!rb_edid_checksum_ok(e, 128u)) {
+            printf("FAIL dpcd: a valid EDID checksum was rejected\n"); bad++;
+        }
+        /* One byte of the header wrong is not an EDID. */
+        e[3] = 0xfe;
+        if (rb_edid_header_ok(e, 128u)) {
+            printf("FAIL dpcd: a broken header passed\n"); bad++;
+        }
+        e[3] = 0xff;
+        /* HEADER OK, SUM WRONG - the partial-read case, and the reason both
+         * checks exist. Without this the two could be one function. */
+        e[50] ^= 0x01;
+        if (!rb_edid_header_ok(e, 128u)) {
+            printf("FAIL dpcd: header check depends on the payload\n"); bad++;
+        }
+        if (rb_edid_checksum_ok(e, 128u)) {
+            printf("FAIL dpcd: a corrupt block passed the checksum\n"); bad++;
+        }
+        if (rb_edid_header_ok(e, 4u) ||
+            rb_edid_checksum_ok(0, 128u) || rb_edid_header_ok(0, 128u)) {
+            printf("FAIL dpcd: a short or NULL block passed a check\n"); bad++;
+        }
+        e[50] ^= 0x01;   /* restore the valid block */
+        if (!rb_edid_checksum_ok(e, 128u)) {
+            printf("FAIL dpcd: the restore of the test block failed\n"); bad++;
+        }
+        /* THE LENGTH GUARD, ISOLATED. The first version of this case asserted
+         * rb_edid_checksum_ok(e, 64) on a CORRUPT block and passed whether or
+         * not the guard existed - the function sums a fixed 128 bytes and the
+         * corruption made it fail for the wrong reason, so removing the guard
+         * caused no FAIL. It had to be asserted on a block whose 128 bytes ARE
+         * valid, where only the guard can make it refuse. That is rule 26 on a
+         * test: a case that passes for the wrong reason is not coverage, and
+         * the break-it check is what exposed it. */
+        if (rb_edid_checksum_ok(e, 127u)) {
+            printf("FAIL dpcd: a 127-byte partial read passed the checksum\n");
+            bad++;
+        }
+        if (rb_edid_checksum_ok(e, 0u) || rb_edid_checksum_ok(e, 64u)) {
+            printf("FAIL dpcd: a short partial read passed the checksum\n");
+            bad++;
+        }
+        /* An all-zero block has a zero sum - so the checksum ALONE would
+         * accept 128 zeros, which is why the header check is not optional. */
+        memset(e, 0, sizeof(e));
+        if (!rb_edid_checksum_ok(e, 128u)) {
+            printf("FAIL dpcd: the zero-block checksum changed\n"); bad++;
+        }
+        if (rb_edid_header_ok(e, 128u)) {
+            printf("FAIL dpcd: 128 zeros passed the header check\n"); bad++;
+        }
+    }
+
     printf("dpcd: 2BA's request layout, the DMCUB arbitration refusal, the "
-           "reply decode and the stuck-index signature%s\n",
+           "reply decode, the stuck-index signature, and 2BC's I2C/MOT "
+           "encoding and EDID checks%s\n",
            bad ? " FAILED" : ": passed");
     return bad;
 }
