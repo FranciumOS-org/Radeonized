@@ -600,9 +600,34 @@ table and refuses to install one that does not match the running kernel;
   standing in for them costs). Snapshot-based restore (`tripleset 0` puts the
   firmware's own word back), an unrecognised `FLIP_CONTROL2` **refused** with
   the value published, and the **hardware readback** decides success, not the
-  store (rules 19/20/13). Framebuffer **60F39344**. **Nothing claimed on
-  hardware - never set on this machine**, and 2A8/2B0 stand for the one-slot
-  configuration they were measured in.
+  store (rules 19/20/13). Framebuffer **60F39344**.
+  **2B2: IT WORKS - 141.03/143.12 sets/s at `fed` 96.9/98.2 %, and the
+  flicker is GONE from ordinary use (boot 290).** `tripleset 1` +
+  `holdset 0`, two 20 s windows, cross-check +1.6 %/+0.1 %. The user, rule
+  45, unprompted: **"artifacts only happen on fast typing now... doing
+  animations and even claude code doesn't trigger artifacts anymore"** - so
+  2A6's own trigger no longer reproduces, and ~142 against the shipping ~91
+  is **+56 %**. **The measurement agrees with the MECHANISM, not just the
+  outcome:** 2B1 predicted one more frame of pipeline and NOT a faster latch,
+  and the latch did not move - `mean vblanks` 1.000/1.002 and the pending
+  wait still **bimodal at the boundary** (52.0/48.0, first three quarters
+  empty), identical to 2B0. So 2A8 and 2B0 are both still true: the hazard
+  was never the latch time, it was the OVERLAP, and the slot count sets the
+  overlap. `preempted` corroborates independently and in the predicted
+  direction: **+81/+26 -> +13/+15**, a 5x drop with the hold still off.
+  **What is LEFT is the same hazard at a higher rate: fast key repeat.**
+  Holding Delete still artifacts, which is consistent with `preempt` being
+  +13/+15 rather than 0 - a THIRD flip inside one period still preempts and
+  there is no third slot, so this is not another dial of the same kind. The
+  exposure window is one generation further away, not closed.
+  **RULE 44 IS NOT SATISFIED: one boot, n=2 windows, and 2A4 is what one
+  boot of this kind of good news cost last time.** The difference is that
+  the clean report comes from ordinary use over a working session - 2A6's
+  identified workload - and the mechanism predicted the result's shape in
+  advance. A second boot turns it into a finding, and costs two commands
+  because the dial is runtime-only. **Nothing arms it by default yet**, and
+  Linux's `triplebuffer_lock` protocol is still not reproduced, so the rare
+  failure modes 2B1 named are untested rather than excluded.
   **And on "does another driver fix this":** not a hardware gap and not an
   RDNA2-vs-3 thing - the bit exists on RDNA 3 and Linux `amdgpu` runs this
   chip at full refresh with no flicker. What Linux has is the **release path**
