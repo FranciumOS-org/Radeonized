@@ -372,23 +372,53 @@ static inline uint64_t rb_ft_hist_share_pm(const struct rb_ft_hist *h,
 
 /* Is there a middle setting? The question the histogram exists to answer.
  *
- * Returns the per-mille of flips that are NOT in the overflow bucket - the
- * ones that resolved inside the vblank they were submitted in, and which a
- * partial hold would therefore let through for free. World (a) returns ~0:
- * every flip needs the whole period, holding is all-or-nothing, and the line
- * stays closed. A large value is world (b) and names the prize: that fraction
- * of flips could keep running unheld.
+ * 2B0 CORRECTS THIS FUNCTION, and the correction is the milestone. The first
+ * version returned "everything not in the overflow bucket" and the tool
+ * narrated that as "flips that resolve inside their own vblank, which a
+ * partial hold would let through for free". Boot 289 then read, in all five
+ * windows and in both hold regimes:
  *
- * This is a DESCRIPTION of a measured distribution, not a predicted rate.
- * 2A8 is the reason for the distinction - extrapolating a rate from a
- * marginal share produced 162 /s on a 144 Hz panel - so nothing here returns
- * a frame rate. What a partial hold would actually deliver is an A/B.
+ *   [0.00-0.25)  0.0 %     [0.75-1.00)  42.9 - 52.6 %
+ *   [0.25-0.50)  0.0 %     [>= 1.00  )  46.8 - 72.7 %
+ *   [0.50-0.75)  0.3 - 0.8 %
+ *
+ * so the old definition printed "a middle setting MAY exist: 53 %" off a
+ * distribution that is **bimodal at the vblank boundary with nothing early in
+ * it at all**. A flip in bucket 3 waits 0.75-1.00 of a period; letting it
+ * through unheld exposes 5.2-6.9 ms of scanout, which is not a reduced hazard
+ * but the whole one. The bucket counts "resolved before a FULL period
+ * elapsed" and the verdict needed "resolved early enough to be safe", and
+ * those are different questions about the same number.
+ *
+ * This is 2A2's lesson again - "the ratio is the wrong statistic" - repeated
+ * one milestone after it was written down, and 2A1's invented 2.0x threshold
+ * in a new costume. The statistic has to be derived from what the consumer
+ * does with it, not from whichever partition of the buckets is easiest.
+ *
+ * So: early means buckets 0..2, strictly under three quarters of a period.
+ * Boot 289 reads 5-8 per-mille, which is two orders of magnitude below any
+ * threshold a caller might reasonably pick - stated because after 2A1 a
+ * threshold must be shown not to be load-bearing rather than merely chosen.
  */
 static inline uint64_t rb_ft_hist_early_pm(const struct rb_ft_hist *h)
 {
     const uint64_t n = rb_ft_hist_n(h);
     if (n == 0) { return 0; }
-    return ((n - h->b[RB_FT_HIST_BUCKETS - 1u]) * 1000ull) / n;
+    /* Buckets 0..RB_FT_HIST_BUCKETS-3, i.e. everything strictly below the
+     * last quarter. Written against the bucket count rather than as 0+1+2 so
+     * changing RB_FT_HIST_BUCKETS cannot silently change the meaning. */
+    uint64_t early = 0;
+    for (unsigned i = 0; i + 2u < RB_FT_HIST_BUCKETS; i++) { early += h->b[i]; }
+    return (early * 1000ull) / n;
+}
+
+/* The share waiting at or beyond a full period: the other end of the same
+ * distribution, published so a reader can see the bimodality rather than
+ * taking "early is small" on trust (rule 14 - the premise has to be audible).
+ */
+static inline uint64_t rb_ft_hist_late_pm(const struct rb_ft_hist *h)
+{
+    return rb_ft_hist_share_pm(h, RB_FT_HIST_BUCKETS - 1u);
 }
 
 #endif /* RB_FRAMETIME_H */
