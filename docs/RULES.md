@@ -968,9 +968,38 @@ table and refuses to install one that does not match the running kernel;
   `-rbgpufb`, but **`-rbgpufbaccel` exists**, so it is `-rbgpufba` diverging at
   u/c - rule 30 still holds, and **`rb_defaults.h`'s hosttest does not cover an
   opt-in token**, so it was checked by hand. Framebuffer **49174106**.
-  **A result would mean the AUX channel works under our own transaction and
-  link training has its input. It would NOT be a trained link, an EDID, a pipe
-  or a display** - each its own step, none attempted.
+  **2BB ANSWERED IT: THE AUX CHANNEL WORKS. ACK, 16 bytes of real DPCD from
+  the Type-C sink on boot 294** - `arb` 0x0, refusal 0, `SW_STATUS` 0x11000001
+  (DONE plus a reply count of 17 = status + the 16 asked for, so the
+  transaction is consistent before any byte is read):
+  `12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00`. **DP 1.2, HBR2
+  (5.4 Gbps/lane), 2 lanes**, every offset and bit checked against
+  `docs/linux-ref/drm_dp.h` (vendored, not recalled).
+  **THREE BYTES ARE CONTROLS, which is why this is proof and not a plausible
+  number.** `DP_EDP_CONFIGURATION_CAP` (0x0d) is **0x00 - NOT an eDP panel**,
+  so this is not the laptop's own display answering, which was the single
+  biggest way the experiment could have fooled itself; **2B9's `AUX_HPD_SEL`
+  routing is confirmed by the sink's own answer.** **2 lanes is physically
+  right for Type-C** (DP alt mode keeps two pairs for USB 3) in a way no
+  misread field would land on. And `DP_LOCAL_EDID_PRESENT` (0x08 bit 1) is
+  set, with 0x0c declaring the I2C-over-AUX speeds reading it needs - **the
+  next step is named by the data, not guessed.**
+  **AND 2BA's OPEN QUESTION IS ANSWERED BY THE SAME READING:** sixteen
+  DISTINCT bytes came back, so `AUX_SW_DATA`'s index **does** advance on read
+  even with `AUX_SW_AUTOINCREMENT_DISABLE` set - Linux's loop is right and the
+  field is narrower than its name. The suspicion check passed, which is the
+  good outcome: **an instrument built to catch one specific lie retired the
+  uncertainty it was guarding.**
+  **Bandwidth:** 2 x 5.4 = 10.8 Gbps raw, ~8.64 after 8b/10b; 1080p100 at
+  24 bpp needs ~4.98 and fits, 1440p100 needs ~8.85 and would not. **The
+  sink's native mode comes from the EDID and has NOT been read.**
+  **What it does NOT establish: a trained link, an EDID, a pipe or a
+  display** - each its own step. What it removes is every doubt upstream of
+  them. **Next: EDID over I2C-over-AUX** (DDC 0x50), a different transaction
+  type - `I2C_READ_MOT` and the middle-of-transaction protocol, which
+  `dce_aux.c` has and `rb_dpcd.h`'s encoder already takes an action byte for.
+  Also now worth reading: the extended receiver caps at 0x02200, since 0x0e
+  bit 7 says they exist.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the

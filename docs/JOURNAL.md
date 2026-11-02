@@ -54947,3 +54947,91 @@ an EDID, not a pipe and not a display** - each is its own step and none has
 been attempted. A NACK or DEFER is still proof the channel carries traffic.
 Refusal 6 means the DMCUB holds that engine, which is a finding about the
 firmware and not a failure of this code.
+
+---
+
+## 2BB — THE AUX CHANNEL WORKS: the Type-C sink answered our own transaction, 16 bytes of real DPCD (boot 294)
+
+**First successful conversation with a device the firmware had not already set
+up for us.** `dpcdread 0x0 16 2`, framebuffer 49174106, `-rbgpufbaux` armed:
+
+```
+engine     AUX2   (chosen from AUX_HPD_SEL, not assumed)
+arb seen   0x00000000   SW_STATUS 0x11000001
+refusal    0   reply 0 (ACK)   bytes 16
+12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00
+```
+
+`SW_STATUS` 0x11000001 decodes to `AUX_SW_DONE` plus a reply byte count of
+**17** - the status byte plus exactly the 16 payload bytes asked for - so the
+transaction is internally consistent before any byte is interpreted.
+
+**EVERY OFFSET AND BIT BELOW IS CHECKED AGAINST
+`docs/linux-ref/drm_dp.h`, now vendored, not recalled** (the mirror of rule 17,
+and the same discipline that got `DP_READ` 0x90 from `dc_ddc_types.h`):
+
+| off | name | value | meaning |
+|---|---|---|---|
+| 0x00 | `DP_DPCD_REV` | 0x12 | **DP 1.2** |
+| 0x01 | `DP_MAX_LINK_RATE` | 0x14 | `DP_LINK_BW_5_4` - **HBR2, 5.4 Gbps/lane** |
+| 0x02 | `DP_MAX_LANE_COUNT` | 0xc2 | **2 lanes** (`_MASK` 0x1f) + `TPS3_SUPPORTED` + `ENHANCED_FRAME_CAP` |
+| 0x03 | `DP_MAX_DOWNSPREAD` | 0x81 | TPS4 supported, downspread |
+| 0x05 | `DP_DOWNSTREAMPORT_PRESENT` | 0x1d | `DWN_STRM_PORT_PRESENT` + `DETAILED_CAP_INFO_AVAILABLE` |
+| 0x06 | `DP_MAIN_LINK_CHANNEL_CODING` | 0x01 | ANSI 8b/10b |
+| 0x08 | `DP_RECEIVE_PORT0_CAP_0` | 0x02 | **`DP_LOCAL_EDID_PRESENT`** |
+| 0x0c | I2C speed control caps | 0x3e | several I2C-over-AUX speeds |
+| 0x0d | `DP_EDP_CONFIGURATION_CAP` | **0x00** | **NOT an eDP panel** |
+| 0x0e | `DP_TRAINING_AUX_RD_INTERVAL` | 0x84 | `EXTENDED_RECEIVER_CAP_FIELD_PRESENT` |
+
+**THREE OF THOSE ARE CONTROLS, NOT JUST DATA, AND THAT IS WHY THIS READS AS
+PROOF RATHER THAN AS A PLAUSIBLE NUMBER.**
+- **`DP_EDP_CONFIGURATION_CAP` = 0 says this is NOT the internal panel.** The
+  single biggest way this experiment could have fooled itself was reading
+  AUX0 - the eDP engine - and decoding the laptop's own panel as a triumph.
+  An eDP sink sets bits here; an external monitor does not. **So 2B9's
+  `AUX_HPD_SEL` routing is confirmed by the sink's own answer**, independently
+  of our own selector arithmetic.
+- **2 lanes is PHYSICALLY RIGHT FOR A TYPE-C PORT, in a way no bug would
+  produce.** DP alt mode over USB-C commonly allocates two of the four
+  high-speed pairs to DisplayPort and keeps two for USB 3. A stuck register, a
+  misread field or an off-by-one would have no reason to land on exactly the
+  lane count the connector implies. 0xc2's upper bits are capability flags,
+  and reading all eight would have given "194 lanes" - the hosttest asserts
+  the 5-bit mask for that reason.
+- **`DP_LOCAL_EDID_PRESENT` means the sink declares an EDID to read**, and
+  0x0c says it supports the I2C-over-AUX speeds that reading it needs. The
+  next step is named by the data rather than guessed.
+
+**AND THE ONE OPEN QUESTION FROM 2BA IS ANSWERED BY THIS READING.** 2BA
+transcribed Linux's reply loop without knowing whether `AUX_SW_DATA`'s index
+advances on read while `AUX_SW_AUTOINCREMENT_DISABLE` is **set**, and built
+`rb_dpcd_reply_suspect_norepeat()` to catch the failure. **Sixteen distinct
+bytes came back, so the index DOES advance on read regardless of that bit** -
+Linux's sequence is right and the field governs something narrower than its
+name. The suspicion check passed, which is the good outcome: it was there to
+make a stuck index impossible to misread, and instead it retired the
+uncertainty. **An instrument built to catch one specific lie can settle the
+question it was guarding.**
+
+**Bandwidth, since the user's monitor is 100 Hz:** 2 lanes x 5.4 Gbps =
+10.8 Gbps raw, ~8.64 Gbps after 8b/10b. 1920x1080 at 100 Hz and 24 bpp needs
+~4.98 Gbps, so it fits with room; 2560x1440 at 100 Hz would need ~8.85 Gbps
+and would not. **The sink's actual native mode comes from the EDID and has not
+been read**, so nothing here says what mode it will take.
+
+**What this does and does not establish.** It establishes that the DP AUX
+channel from this chip to that connector carries a transaction **we** issued
+and that the sink answers correctly - the arbitration refusal never fired
+(`arb` 0x0, refusal 0), the engine was chosen from the hardware's own selector,
+and the whole sequence is Linux's with the two steps the register list says
+this chip does not need. **It is not a trained link, not an EDID, not a pipe
+and not a display.** Each is its own step. What it removes is every doubt
+upstream of those steps.
+
+**The next step is EDID over I2C-over-AUX** (DDC address 0x50), which is a
+different transaction type from everything here: `I2CAUX_TRANSACTION_ACTION_
+I2C_READ_MOT` and the middle-of-transaction protocol, where a request's length
+and the MOT bit sequence a multi-part read. `dce_aux.c` has it and
+`rb_dpcd.h`'s request encoder already takes an action byte. The extended
+receiver capability field at 0x02200 is also now worth reading, since 0x0e
+bit 7 says it exists.
