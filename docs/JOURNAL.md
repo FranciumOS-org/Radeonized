@@ -54577,3 +54577,84 @@ boot, the no-hold regime degrades over a boot's life and that is a measurable,
 located thing. If it reads 1.7 immediately, it is a property of the boot and
 the question goes back to what differs at boot - 2A3's question, still open
 and now with four occurrences behind it.
+
+---
+
+## 2B7 — THE SECOND FLIP SLOT IS INERT, and 2B2's `preempt` corroboration is WITHDRAWN (boot 292)
+
+**2B1's actual claim, tested in the regime it was for.** Hold OFF throughout,
+`triple` interleaved 0/1/0/1 so the boot's drift cannot order the result,
+every cross-check passing (+1.1, +1.0, +0.2, -1.0 %):
+
+| triple | `sets/s` | pending wait | `preempt` | `bin2+` |
+|---|---|---|---|---|
+| 0 | 93.79 | 1.59 vblanks | +15 | 7.9 % |
+| 1 | 96.61 | **1.47** | +5 | 0.1 % |
+| 0 | 96.96 | 1.48 | +2 | 0.05 % |
+| 1 | 97.18 | **1.58** | **+121** | 3.3 % |
+
+**Rate 95.4 (off) against 96.9 (on), +1.6 %, inside the noise. Pending wait
+1.535 against 1.525 - NO DIFFERENCE.** With 2B6's hold-ON pair (83.61 vs
+82.65, `preempt` +0 vs +2) that is **both regimes, interleaved, within one
+boot: the `SURFACE_TRIPLE_BUFFER_ENABLE` bit changes no quantity this project
+can measure.** The bit arms correctly - readback 0x440, `PENDING_MIN_TIME`
+preserved, restore verified - and does nothing.
+
+**AND `preempt` DOES NOT ORDER BY THE DIAL, WHICH WITHDRAWS 2B2's STRONGEST
+ARGUMENT.** 2B2 recorded "+81/+26 -> +13/+15, a 5x drop... corroborates it
+independently and in the direction predicted". Here `preempt` runs +15, +5,
++2, **+121** with the bit toggling under it, and **the largest value is a
+triple=1 run**. So the counter was never tracking the slot count; it was
+tracking whatever else moves within a boot, and 2B2 read it as mechanism
+because it pointed the expected way. **This is rule 17's shape yet again -
+two numbers turned into a mechanism - and this time the number was a counter I
+had just finished arguing was "related, counted, different" in 2B0.** The
+lesson that keeps not sticking: a counter that moves with a change in a
+non-interleaved comparison has not been shown to move *because* of it, and the
+cheap fix is the one used here - toggle it back and forth.
+
+**What survives of 2B1/2B2 is one flicker observation, and it is confounded.**
+The user's report ("animations and even claude code don't trigger artifacts
+anymore") was made with `triple 1` + `holdset 0` on a boot feeding **141-143
+sets/s at a 1.01-vblank latch**. The flicker is a race whose odds depend on
+both the feed rate and the latch, and neither is reproducible: this boot feeds
+93-97 at 1.5 vblanks. So the observation cannot be attributed to the bit any
+more than to the boot. **It is not withdrawn as an observation** - rule 45
+says a human seeing it is a measurement - but it is not evidence for the dial.
+
+**THE DIAL STAYS OFF BY DEFAULT, and now for a measured reason rather than a
+precautionary one.** It is inert in both regimes, so there is nothing to
+trade against the unreproduced `triplebuffer_lock` protocol (rule 46, still
+not reproduced). `tripleset` stays as an instrument; `rb_hubp.h`'s bit
+documentation and `rb_hubp_flip_would_discard` stay correct and stay inert.
+
+**AND RULE 44 IS ITSELF WRONG AS WRITTEN - THIS IS THE REAL RESULT OF THE
+LAST THREE MILESTONES.** Rule 44 says boot-to-boot variance exceeds
+within-boot variance, so a configuration claim needs two boots per side **or
+an A/B inside one boot**. The second half is now refuted: earlier in boot 292,
+same dials, same cable state, the hold-off configuration read **83-84**; an
+hour later the same configuration reads **93-97**. **The boot drifted ~15 %
+inside itself**, which is exactly the +15.1 % A1->A2 drift that made 2B6's
+A/B/A unattributable - the drift happened *inside* the instrument that was
+supposed to be immune to drift. So:
+- **An A/B inside one boot is only valid INTERLEAVED**, A/B/A/B at the
+  granularity of single windows, not as three blocks of six runs. Blocked
+  phases cannot distinguish a dial from a trend, and `holdaba.sh`'s whole
+  shape - A1 x6, B x6, A2 x6 - is the wrong shape. Its new computed refusal
+  (added in 2B6) is what makes that visible rather than fixing it.
+- **This invalidates nothing measured by an interleaved or self-consistent
+  method** - 2A1/2A2's budget decomposition, 2A8's latch, 2B0's distribution,
+  2zz's A/B/A at 0.2 % agreement - and it does weaken every single-window
+  comparison, which is most of 2zb onward.
+- The frontier stated in 2B5 and 2B6 is therefore one question, not two:
+  **what drifts, within a boot and between boots, while `ours` stays pinned at
+  0.4 %?** Four boot-level occurrences and now one within-boot occurrence.
+  `preempt` growing +2 -> +121 inside a fixed configuration is the only
+  counter yet seen that moves with it and is not `fed` or the latch.
+
+**No model is proposed, and the standing instruction holds: do not propose an
+eighth model of this ceiling from counters already in hand.** What the next
+measurement has to do is establish the TIME COURSE - the same window repeated
+every few minutes from boot, in one fixed configuration, plotting rate, latch
+and `preempt` against uptime. That is a different kind of experiment from
+every one in 2zb-2B7, all of which compared configurations.

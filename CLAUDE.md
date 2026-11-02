@@ -620,6 +620,44 @@ table and refuses to install one that does not match the running kernel;
   +13/+15 rather than 0 - a THIRD flip inside one period still preempts and
   there is no third slot, so this is not another dial of the same kind. The
   exposure window is one generation further away, not closed.
+  **2B7: THE BIT IS INERT. Interleaved 0/1/0/1 with the hold OFF, all four
+  cross-checks passing: rate 95.4 (off) vs 96.9 (on), +1.6 %, and pending wait
+  1.535 vs 1.525 - NO DIFFERENCE.** With 2B6's hold-ON pair that is **both
+  regimes, interleaved, one boot: `SURFACE_TRIPLE_BUFFER_ENABLE` changes no
+  quantity this project can measure.** It arms correctly (readback 0x440,
+  `PENDING_MIN_TIME` preserved) and does nothing. **The dial stays OFF for a
+  measured reason now, not a precautionary one.**
+  **AND `preempt` DOES NOT ORDER BY THE DIAL, which withdraws 2B2's strongest
+  argument**: +15, +5, +2, **+121**, with the largest on a triple=1 run. 2B2
+  called +81/+26 -> +13/+15 "independent corroboration in the predicted
+  direction"; it was variance read as mechanism because it pointed the expected
+  way - **rule 17 again, on a counter 2B0 had just finished calling "related,
+  counted, different".** A counter that moves in a NON-INTERLEAVED comparison
+  has not been shown to move because of the change.
+  **What survives is one flicker observation, and it is confounded**: it was
+  made at 141-143 sets/s with a 1.01-vblank latch, and the flicker is a race
+  whose odds depend on both; this boot feeds 93-97 at 1.5 vblanks. Not
+  withdrawn as an observation (rule 45), but not evidence for the dial.
+  **RULE 44 IS WRONG AS WRITTEN, and this is the real result of 2B5-2B7.**
+  Its "or an A/B inside one boot" is refuted: earlier in boot 292 the hold-off
+  configuration read **83-84** and an hour later the same configuration read
+  **93-97**, so **the boot drifted ~15 % inside itself** - which IS the
+  +15.1 % A1->A2 drift that made 2B6 unattributable. The drift happened inside
+  the instrument meant to be immune to it. **An A/B inside one boot is only
+  valid INTERLEAVED**, at single-window granularity; `holdaba.sh`'s A1x6/Bx6/
+  A2x6 shape cannot tell a dial from a trend. This invalidates nothing measured
+  interleaved or self-consistently (2A1/2A2's budget, 2A8's latch, 2B0's
+  distribution, 2zz's A/B/A at 0.2 %) and weakens every single-window
+  comparison from 2zb onward.
+  **The frontier is ONE question: what drifts, within a boot and between boots,
+  while `ours` stays pinned at 0.4 %?** Four boot-level occurrences plus one
+  within-boot. `preempt` +2 -> +121 inside a fixed configuration is the only
+  counter yet seen that moves with it and is neither `fed` nor the latch.
+  **The next measurement must establish the TIME COURSE** - one fixed
+  configuration, the same window repeated every few minutes from boot, rate /
+  latch / `preempt` against uptime. Every experiment from 2zb to 2B7 compared
+  configurations instead, and **no eighth model is to be proposed from counters
+  already in hand.**
   **2B6: 2B2 IS WITHDRAWN AS A CLAIM. The A/B/A refused its own attribution -
   A1 76.93, B 95.93, A2 88.54, so A1->A2 drift +15.1 % against B's +15.9 %:
   THE DRIFT IS THE SAME SIZE AS THE EFFECT** (`holdaba.sh`'s own ~8 % rule,
