@@ -53808,3 +53808,113 @@ is the wedge and HDMI.
 transient (2A4 - run 1 of a phase reads ~73-76 where runs 2-6 read ~92). It
 has silently biased every single-window measurement since 2zb and nobody has
 looked at it.
+
+## 2A9 - the latch wait's SHAPE, because a mean cannot answer the user's question
+
+The user turned the 2xo hold off to get 144 Hz, is living with the occasional
+flicker, and asked for a middle setting: "isnt there a way we can forcefully
+only feed 91% instead of 98 or more so enough time is there for it to scan?"
+
+**That particular dial cannot work, and the reason is worth recording rather
+than re-deriving. The hazard is PER FLIP, not per second.** Every flip
+accepted while the previous surface is still being scanned carries an exposure
+window of up to one vblank (2A5: `mean vblanks` 1.066). Feeding 91 % of the
+vblanks instead of 98 % does not shrink that window - it buys 7 % fewer of
+them. So the flicker goes down 7 % and the frame rate goes down 7 %, linearly,
+for ever. A rate throttle dilutes a correctness defect; it does not fix one.
+And the user's own evidence already says the dilution is invisible: the
+flicker is *already* rare with the hold off and only appears on transients
+(2A6), so removing 7 % of the opportunities changes nothing a human sees.
+
+Nor is there a safe intermediate answer available: anything that reports
+`ready` while our flip is unlatched carries the full hazard. 91 sets/s is one
+flip per 1.58 vblanks, 141 is one per vblank, and the 0.58 difference is
+Apple's post-ready pipeline, which only overlaps our latch if a second flip is
+in flight - which is exactly what the hold forbids. That is the whole trade.
+
+**But the ask points at a real question nobody has measured, and 2A8 closed
+the line on a statistic that cannot settle it.** 2A8 read the latch wait as a
+MEAN - 6.975 ms, 1.00 vblanks, n 1856 - and a mean of one vblank cannot
+distinguish two worlds:
+
+- **(a)** every flip waits the whole period. Exposure is constant per flip,
+  no subset is safer than another, the choice really is 91-or-141, and the
+  frame-rate line stays closed.
+- **(b)** the waits are spread over the period. Then most flips are nearly
+  latched when Apple asks, a TAIL is badly exposed, and holding only that tail
+  would remove most of the hazard for a fraction of the 91-vs-141 cost. A real
+  middle setting, and a cheap one.
+
+A mean of 1.00 is weak evidence for (a) - a uniform phase would read ~0.5 -
+but "weak evidence from one statistic" is how six of the eight dead frame-rate
+models started. So this milestone counts the distribution instead of arguing
+from its mean. `rb_ft_hist` buckets the wait in **quarters of a vblank** (not
+fixed milliseconds, so the same histogram means the same thing at 144 Hz and
+at 48 - the mistake `rb_ft_gap_bound_ns` already avoids one line up), and
+`rb_ft_hist_early_pm()` reports the fraction resolving inside their own
+vblank: ~0 is world (a), large is world (b) and names the prize.
+
+**The instrument was blind in exactly the configuration under investigation,
+and that is the finding underneath this one.** `hubpHoldNotReady()` opened
+with `if (!amtrNotReady || !hubpReady || !hubpRegs) return false;` - so with
+the 2xo hold turned off, `SURFACE_FLIP_PENDING` **was never read at all**. The
+decision and the observation were one function, which meant every instrument
+built on that bit went silent the moment the dial that creates the flicker was
+moved. Split: `hubpFlipPending()` reads the word and returns the bit with no
+side effect, `hubpHoldNotReady(bool pending)` takes that answer and decides,
+behaviour unchanged. The GET path reads the bit when `amtrNotReady || ftOn`,
+so a hold-off boot measures too, at one MMIO read per GET - the same cost the
+hold-on path has always paid. **General shape: when a dial turns a feature
+off, check whether it also turns the MEASUREMENT off.** An A/B whose B side
+cannot be instrumented is not an A/B.
+
+**And the regime caveat is enforced, not documented.** A PENDING run is filed
+whether or not we held, so the histogram can be taken on both sides - which
+matters because removing the hold takes `fed` from ~63 % to ~98 % (2A4), a
+regime change, so the phase distribution measured with the hold on is not
+evidence about the hold-off world. Rule 39 applied to a histogram. `ftbudget`
+therefore prints which regime the reading came from on every line, keeps
+"absent" distinct from "off" (reading a missing `RBFBAmtrNotReady` as OFF
+would mislabel the regime, which is the one thing this block must not do),
+and says explicitly to re-read it with the hold off before acting. Switching
+the hold zeroes the histogram in the setter, so the two regimes cannot be
+averaged together by accident.
+
+With the hold ON the pending run is the same physical interval `ftLatchWait`
+measures, so the two must agree - **a free cross-check between a new
+instrument and an old one**, refused over +-5 %. An unknown vblank period
+sends every sample to the overflow bucket, so a missing premise reads as "no
+middle setting" rather than manufacturing the result that would reopen a
+closed line.
+
+**A bug caught before the build, worth recording because the silent version
+had no symptom.** The new read wanted somewhere to stash the word it had read,
+and `hubpFlipCtl` was sitting there - except that is 2xj's **one-shot setup
+snapshot**, published as `RBFBHubpFlipCtl` and read once during bring-up.
+Reusing it would have overwritten a published setup fact with frame-path noise
+~300 times a second, and nothing downstream would have said so: the key would
+still have been present, still numeric, still plausible. A duplicate member
+made it a compile error instead; a reused one would not have been. Rule 42's
+question - *who owns this?* - asked of a scalar rather than a collection.
+
+Hosttested: the two worlds asserted as distributions with the SAME mean and
+`early_pm` 0 vs 500 (if the function ever answered alike for both it could not
+do its job), both sides of every bucket boundary against a period divisible by
+4, the mode-scaling case, the unknown-period refusal, shares summing to 1000,
+an empty histogram, out-of-bounds, and `ftFileHist` dropping from the mean and
+the histogram together so the published counts cannot disagree except for a
+real drop. Both breaks verified to fail the suite: fixed-millisecond buckets
+(line 747) and an unknown period falling into bucket 0 (line 771).
+
+One test bug found and fixed in passing: `vbl/4` on the panel's 6952507 ns
+period truncates to just **below** its own boundary, so a boundary assertion
+written as `vbl/4 -> bucket 1` fails on correct code. Boundaries are now
+pinned against a divisible period with both sides asserted.
+
+Framebuffer **3E09FBD5** (was 614ED4BC). Instrumentation only - nothing about
+the hold changed, and the default is still hold-ON.
+
+**What this does NOT claim.** No reading has been taken. (a) and (b) are both
+live, and 2A8's closure stands until this histogram says otherwise on the
+machine - with the hold off, which is the regime that matters.
+

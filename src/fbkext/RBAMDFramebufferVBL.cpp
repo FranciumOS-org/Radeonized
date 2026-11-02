@@ -428,6 +428,29 @@ void RBAMDFramebuffer::ftFile(struct rb_ft_acc *acc, uint64_t t0, uint64_t t1,
                     : 0ull);
 }
 
+/* 2A9: ftFile plus a histogram of the same sample.
+ *
+ * One conversion, one bound, two consumers - so the mean and the
+ * distribution can never describe different sample sets, which is the
+ * failure a second call site would quietly introduce. Always bounded: a
+ * pending run spanning an idle desktop is the same nonsense here as
+ * everywhere else, and a dropped sample must be dropped from BOTH or the
+ * histogram's n and the accumulator's n stop agreeing - and that
+ * disagreement is itself the published check. */
+void RBAMDFramebuffer::ftFileHist(struct rb_ft_acc *acc,
+                                  struct rb_ft_hist *hist,
+                                  uint64_t t0, uint64_t t1)
+{
+    if (!ftOn || !acc) { return; }
+    if (t1 <= t0) { acc->dropped++; return; }
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(t1 - t0, &ns);
+    const uint64_t period = vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast;
+    if (ns > rb_ft_gap_bound_ns(period)) { acc->dropped++; return; }
+    rb_ft_add(acc, ns, 0);
+    rb_ft_hist_add(hist, ns, period);
+}
+
 /* 2A0: the budget, published whole.
  *
  * Every piece is published with its own count, max and drop count, not just
@@ -495,6 +518,30 @@ void RBAMDFramebuffer::publishFrameTime(void)
                 ftHoldRunAsks.n ? (ftHoldRunAsks.sum_ns * 1000ull)
                                   / ftHoldRunAsks.n : 0ull, 64);
     setProperty("RBFBFtHoldRunsN", ftHoldRunAsks.n, 64);
+
+    /* 2A9: the pending run, and its SHAPE. Published with the vblank period
+     * beside it, because every bucket is a quarter of that period and a
+     * reader who has to guess the scale cannot check the arithmetic (the 2y7
+     * lesson). RBFBFtPendEarlyPm is the answer to "is there a middle
+     * setting": ~0 means every flip needs the whole vblank and the 91-or-141
+     * choice is real; large means a partial hold would let that fraction
+     * through unheld. It is a share of a measured distribution and NOT a
+     * predicted frame rate - 2A8 is what extrapolating a rate from a share
+     * costs. */
+    setProperty("RBFBFtPendWaitNs", rb_ft_mean_ns(&ftPendWait), 64);
+    setProperty("RBFBFtPendWaitN",  ftPendWait.n, 64);
+    setProperty("RBFBFtPendWaitMax", ftPendWait.max_ns, 64);
+    setProperty("RBFBFtPendDropped", ftPendWait.dropped, 64);
+    setProperty("RBFBFtPendAsksPm",
+                ftPendRunAsks.n ? (ftPendRunAsks.sum_ns * 1000ull)
+                                  / ftPendRunAsks.n : 0ull, 64);
+    for (unsigned i = 0; i < RB_FT_HIST_BUCKETS; i++) {
+        char key[24];
+        snprintf(key, sizeof(key), "RBFBFtPendQ%u", i);
+        setProperty(key, ftPendHist.b[i], 64);
+    }
+    setProperty("RBFBFtPendHistN", rb_ft_hist_n(&ftPendHist), 64);
+    setProperty("RBFBFtPendEarlyPm", rb_ft_hist_early_pm(&ftPendHist), 64);
     setProperty("RBFBFtPollN",  ftPoll.n, 64);
     setProperty("RBFBFtPollMax", ftPoll.max_ns, 64);
 
@@ -1021,6 +1068,9 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             rb_ft_reset(&ftGet);  rb_ft_reset(&ftVbl);
             rb_ft_reset(&ftRetry); rb_ft_reset(&ftPoll);
             rb_ft_reset(&ftLatchWait); rb_ft_reset(&ftHoldRunAsks);
+            rb_ft_reset(&ftPendWait); rb_ft_reset(&ftPendRunAsks);
+            rb_ft_hist_reset(&ftPendHist);
+            ftPendStart = 0; ftPendAsks = 0;
             ftPrevExit = 0; ftPrevGetExit = 0; ftPrevGetHeld = false;
             ftHoldStart = 0; ftHoldAsks = 0;
             ftResets++;
@@ -1044,6 +1094,11 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             rb_ft_reset(&ftPoll);
             rb_ft_reset(&ftLatchWait);
             rb_ft_reset(&ftHoldRunAsks);
+            rb_ft_reset(&ftPendWait);
+            rb_ft_reset(&ftPendRunAsks);
+            rb_ft_hist_reset(&ftPendHist);
+            ftPendStart = 0;
+            ftPendAsks = 0;
             ftPrevExit = 0;
             ftPrevGetExit = 0;
             ftPrevGetHeld = false;

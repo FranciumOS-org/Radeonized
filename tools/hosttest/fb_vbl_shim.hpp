@@ -323,6 +323,13 @@ public:
     struct rb_ft_acc ftRetry{}, ftPoll{};
     uint64_t ftHoldStart=0, ftHoldAsks=0;
     struct rb_ft_acc ftLatchWait{}, ftHoldRunAsks{};
+    /* 2A9 */
+    struct rb_ft_acc ftPendWait{}, ftPendRunAsks{};
+    struct rb_ft_hist ftPendHist{};
+    uint64_t ftPendStart=0, ftPendAsks=0;
+    uint32_t hubpPendCtl=0;
+    void ftFileHist(struct rb_ft_acc *acc, struct rb_ft_hist *hist,
+                    uint64_t t0, uint64_t t1);
     void ftFile(struct rb_ft_acc *acc,uint64_t t0,uint64_t t1,bool bound);
     void publishFrameTime();
     void deliverVBL();
