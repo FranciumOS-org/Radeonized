@@ -360,3 +360,10 @@ decision rests on it.
   `enum aux_transaction_reply` (ACK 0, NACK 1, DEFER 2), used by 2BA's
   `rb_dpcd.h`. Vendored so the constants are read from the tree rather than
   recalled. Fetched from kernel.org torvalds/linux plain/ on 2026-11-02.
+- `include/drm/display/drm_dp.h` — the DPCD register map and its bit fields.
+  Vendored for 2BB so every byte of boot 294's reply is decoded against the
+  tree rather than from memory: `DP_MAX_LANE_COUNT_MASK` 0x1f,
+  `DP_TPS3_SUPPORTED` bit 6, `DP_ENHANCED_FRAME_CAP` bit 7,
+  `DP_LOCAL_EDID_PRESENT` bit 1 of 0x008, `DP_EDP_CONFIGURATION_CAP` 0x00d,
+  `DP_EXTENDED_RECEIVER_CAP_FIELD_PRESENT` bit 7 of 0x00e, `DP_LINK_BW_5_4`
+  0x14. Fetched from kernel.org torvalds/linux plain/ on 2026-11-02.
