@@ -53388,3 +53388,76 @@ exactly 1613000 ns, holds/txn 1700-1703, share 205-215 per-mille, tiling
 while owning over 15 % of the interval), asserts a failed tiling reads above
 1100 rather than clamping, and asserts every missing input gives no share
 instead of a plausible one. Breaking the penalty makes the suite exit 2.
+
+---
+
+## 2A3 — the A/B refused its own B phase, and A1 is six runs at 92.94 (boot 285)
+
+`sudo tools/holdaba.sh` on boot 285, framebuffer **724D1F6B**, native, hold
+armed. A1 completed and B refused:
+
+```
+=== A1 : hold ON (6 runs of 20s) ===
+  91.20  92.54  89.93  93.81  93.97  96.21     fed 62.6-65.9 %
+REFUSED: asked RBFBAmtrNotReady=0, the kext reports Yes.
+```
+
+**The refusal is a bug in 2A2 and the script was right to stop.** `holdset 0`
+set `amtrNotReady` correctly; what did not change was the *property*.
+`RBFBAmtrNotReady` was published in `start()`, beside the other arm keys -
+which is right for a boot-arg and wrong for a runtime dial, because `start()`
+runs once. So the field moved and the registry went on reporting the value
+`start()` wrote, forever.
+
+**Rule 31 with the terms swapped.** Its usual form is "a counter that has not
+moved YET is not a counter that did not move". This is the mirror: **a property
+that is never republished cannot move at all**, so reading it back can only
+ever confirm what the one-time publish wrote. The general statement, which is
+new: **any field a runtime dial can change must be published everywhere it is
+read, and the periodic publish is the only one that tracks.** 2A2 added the
+publish in exactly the place rule 15 wants arm keys (start(), unconditional)
+and that was the wrong place for a value that now changes.
+
+Two fixes, because the instrument and its verifier both failed:
+`publishVBLState()` now republishes `RBFBAmtrNotReady` every interval, and
+**`holdset` verifies from the registry itself** after one publish interval
+instead of trusting `kern_return_t`. `kr` was `KERN_SUCCESS` and correct - it
+says the setter ran, not that the state is readable (rule 13) - and a caller
+scripting an A/B has no other way to tell. `holdset` now exits 3 on a mismatch
+and says the field and the property have come apart.
+
+**The guard worked.** `holdaba.sh` read the property rather than the exit
+status (rule 20/26), caught a B phase that would have been six rows of hold-ON
+data labelled hold-OFF, and restored A before exiting. That is the whole
+reason the check is there, and it has now paid for itself once.
+
+**A1 is a real result and it is the fourth boot in a row that will not sit
+still.** Six runs, mean **92.94**, range 89.93-96.21 (±3.4 %), `fed` 62.6-65.9
+%, hold ON - the shipping configuration. Against the recent boots:
+
+```
+boot 283  2A0 build  sets/s 93.95  (n=1)   fed 65.6 %
+boot 284  2A1 build  sets/s 75.72  (n=1)   fed 52.8 %
+boot 285  2A2 build  sets/s 92.94  (n=6)   fed 62.6-65.9 %
+```
+
+and the whole 2zb-2zz era measured **70-75** across many boots. So **two of
+the last three boots sit near 93 and one near 76**, with `fed` tracking it
+(~65 % against ~53 %), and none of the builds explain the ordering - 2A0 fast,
+2A1 slow, 2A2 fast, where 2A1 only added accumulators. **This is boot-to-boot
+bimodality, not a trend and not a build effect**, and 2A2's withdrawal of the
+"smoother desktop" claim was still correct: one boot could not tell these
+apart, and six runs on boot 285 only measure boot 285 (rule 44).
+
+**What is newly worth asking, and is NOT being chased yet:** the project has
+treated 70-75 as the number to explain since 2zb, and the last three boots
+say the machine also has a ~93 state. The old question was "what sets 73"; the
+better one is **"what differs at boot between the two states"** - and because
+`fed` moves with it, whatever it is changes how often the compositor hands us
+a transaction, not how fast we handle one (`ours` was 0.4 % on both). The
+latch numbers differed too (boot 283 `mean vblanks` 1.001, boot 284 1.194), so
+that is the first place to look. **Not a model, and no dial is being proposed
+from it** - three boots, two of them n=1.
+
+Framebuffer **A80C7720** carries both fixes. The A/B is unchanged otherwise
+and still needs its B phase.

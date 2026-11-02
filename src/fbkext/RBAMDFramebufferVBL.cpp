@@ -488,6 +488,21 @@ void RBAMDFramebuffer::publishFrameTime(void)
 
     const uint64_t interval = rb_ft_interval_ns(&ftWork, &ftGap);
 
+    /* 2A2: the hold's LIVE state, published from the PERIODIC publish and not
+     * only from start().
+     *
+     * It was published once in start() beside the other arm keys, which is
+     * right for a boot-arg and wrong for a runtime dial: `holdset 0` set the
+     * field and the registry kept saying `Yes`, so tools/holdaba.sh refused
+     * its own B phase after a correct write. Rule 31 with the terms swapped -
+     * the usual form is "a counter that has not moved YET has not failed to
+     * move", and this is the mirror: a property that is never republished
+     * cannot move at all, so reading it back can only ever confirm the value
+     * start() wrote. Any field a runtime dial can change has to be published
+     * everywhere it is read, and the periodic publish is the one that tracks.
+     */
+    setProperty("RBFBAmtrNotReady", amtrNotReady);
+
     /* 2A2: the hold's measured share, published WITH its premise. The share
      * is only meaningful if the GET gaps account for the interval, so
      * RBFBFtGetsTilePm is published next to it and a reader that ignores it
