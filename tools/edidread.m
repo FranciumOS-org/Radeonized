@@ -159,40 +159,73 @@ int main(int argc, char **argv)
         }
     }
 
-    /* The PREFERRED timing is the first detailed timing descriptor, at 0x36.
-     * Everything here is derived from its own bytes and the refresh is
-     * computed from the totals, not read - so a wrong field shows up as an
-     * absurd rate rather than as a plausible one. */
-    const unsigned char *d0 = &e[0x36];
-    const unsigned pclk10k = d0[0] | (d0[1] << 8);
-    if (pclk10k == 0) {
-        printf("\n  the first descriptor is not a detailed timing\n");
-        IOObjectRelease(fb);
-        return 0;
-    }
-    const unsigned hact = d0[2] | ((d0[4] & 0xf0) << 4);
-    const unsigned hbl  = d0[3] | ((d0[4] & 0x0f) << 8);
-    const unsigned vact = d0[5] | ((d0[7] & 0xf0) << 4);
-    const unsigned vbl  = d0[6] | ((d0[7] & 0x0f) << 8);
-    const unsigned long clk = (unsigned long)pclk10k * 10000ul;
-    const unsigned long htot = hact + hbl, vtot = vact + vbl;
-    printf("\n  PREFERRED TIMING\n");
-    printf("    %u x %u\n", hact, vact);
-    printf("    pixel clock    %lu Hz\n", clk);
-    printf("    H total        %lu   V total %lu\n", htot, vtot);
-    if (htot && vtot) {
+    /* EVERY descriptor, not just the first. 2BD: the first version parsed
+     * only 0x36 and reported "60 Hz" for a monitor whose 100 Hz mode sits in
+     * the SECOND slot - a true statement about the preferred timing that read
+     * as the whole answer. Four slots, and the range-limits descriptor too,
+     * because it bounds what the others claim.
+     *
+     * Every refresh here is DERIVED from the timing totals rather than read,
+     * so a misparsed field shows up as an absurd rate instead of a plausible
+     * one - which is how the hand-transcription error behind this fix
+     * announced itself (0.017 Hz).
+     */
+    double bestHz = 0.0; unsigned bestW = 0, bestH = 0; double bestGbps = 0.0;
+    printf("\n  TIMING DESCRIPTORS\n");
+    static const unsigned slots[4] = { 0x36, 0x48, 0x5a, 0x6c };
+    for (unsigned s = 0; s < 4; s++) {
+        const unsigned char *d = &e[slots[s]];
+        const unsigned pclk10k = d[0] | (d[1] << 8);
+        if (pclk10k == 0) {
+            /* A zero pixel clock means this slot is a non-timing descriptor,
+             * and byte 3 is its tag. */
+            if (d[3] == 0xfd) {
+                printf("    0x%02x  RANGE LIMITS: V %u-%u Hz, H %u-%u kHz,"
+                       " max pixel clock %u MHz\n",
+                       slots[s], d[5], d[6], d[7], d[8], d[9] * 10);
+            } else if (d[3] == 0xfc) {
+                printf("    0x%02x  monitor name\n", slots[s]);
+            } else if (d[3] == 0xff || d[3] == 0xfe) {
+                printf("    0x%02x  text descriptor (tag 0x%02x)\n",
+                       slots[s], d[3]);
+            } else if (d[3] != 0x10) {   /* 0x10 is the "unused" tag */
+                printf("    0x%02x  descriptor tag 0x%02x\n", slots[s], d[3]);
+            }
+            continue;
+        }
+        const unsigned hact = d[2] | ((d[4] & 0xf0) << 4);
+        const unsigned hbl  = d[3] | ((d[4] & 0x0f) << 8);
+        const unsigned vact = d[5] | ((d[7] & 0xf0) << 4);
+        const unsigned vbl  = d[6] | ((d[7] & 0x0f) << 8);
+        const unsigned long clk = (unsigned long)pclk10k * 10000ul;
+        const unsigned long htot = hact + hbl, vtot = vact + vbl;
+        if (!htot || !vtot) {
+            printf("    0x%02x  a timing with a zero total - not usable\n",
+                   slots[s]);
+            continue;
+        }
         const double hz = (double)clk / (double)(htot * vtot);
-        printf("    refresh        %.3f Hz   (derived from the totals)\n", hz);
-        /* The bandwidth this needs against what 2BB measured the link can
-         * carry: 2 lanes x 5.4 Gbps is 10.8 raw, ~8.64 after 8b/10b. */
-        const double need = (double)clk * 24.0 / 1e9;
-        printf("    needs          %.2f Gbps at 24 bpp, and 2BB measured the\n"
-               "                   link at 2 lanes x HBR2 = ~8.64 Gbps usable\n",
-               need);
-        if (need > 8.64) {
-            printf("    THAT DOES NOT FIT. This mode needs more than the\n"
-                   "    measured link can carry, so it would need 3 or 4\n"
-                   "    lanes, a lower rate, or fewer bits per pixel.\n");
+        const double gbps = (double)clk * 24.0 / 1e9;
+        printf("    0x%02x  %u x %u  @ %.2f Hz   clk %lu Hz   "
+               "Htot %lu Vtot %lu   %.2f Gbps%s\n",
+               slots[s], hact, vact, hz, clk, htot, vtot, gbps,
+               s == 0 ? "   <- PREFERRED" : "");
+        if (hz > bestHz) {
+            bestHz = hz; bestW = hact; bestH = vact; bestGbps = gbps;
+        }
+    }
+
+    if (bestHz > 0.0) {
+        printf("\n  FASTEST MODE THE SINK DESCRIBES: %u x %u @ %.2f Hz\n",
+               bestW, bestH, bestHz);
+        /* Against 2BB's MEASURED link, not a datasheet number: 2 lanes at
+         * HBR2 is 10.8 Gbps raw and ~8.64 after 8b/10b. */
+        printf("    needs %.2f Gbps at 24 bpp; 2BB measured this link at\n"
+               "    2 lanes x HBR2 = ~8.64 Gbps usable, so it %s\n",
+               bestGbps, bestGbps <= 8.64 ? "FITS" : "DOES NOT FIT");
+        if (bestGbps > 8.64) {
+            printf("    It would need more lanes, a lower rate, or fewer\n"
+                   "    bits per pixel.\n");
         }
     }
 

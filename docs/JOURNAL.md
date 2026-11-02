@@ -55136,3 +55136,83 @@ plainly when a mode does not fit.
 **Still not attempted, and each is its own step:** link training, a second OTG
 and HUBP, a DIG encoder, and a second `IOFramebuffer` so macOS attaches a
 display.
+
+---
+
+## 2BD — THE EDID IS READ: "MSI MP2412C" off the wire, and the 100 Hz mode located (boot 295)
+
+**The I2C-over-AUX MOT protocol works on the first attempt on hardware.**
+`edidread 0 2`, framebuffer 67F28153:
+
+```
+engine AUX2   bytes 128   defers 16
+refusal 0 - none
+header OK   checksum OK
+manufacturer MSI   product 0x40a9   EDID 1.3   name "MSI MP2412C"
+```
+
+**The monitor's own model string, decoded out of bytes this project fetched
+through a channel it built.** Three things make that unfakeable rather than
+plausible: the manufacturer comes from **5-bit-packed** letters in bytes 8-9
+(0x3669 -> 13,19,9 -> M,S,I), the name comes from a descriptor **tagged
+0xFC**, and the whole 128-byte block **sums to zero mod 256**. A stuck index,
+a wrong offset or a half-read block cannot produce a correct checksum over a
+correct header with a readable product name inside it.
+
+**`defers 16` - THE RETRY LOOP WAS LOAD-BEARING.** Sixteen DEFER replies
+across nine transactions on a first-time read. 2BC built that loop on the
+reasoning that a sink defers while its own DDC bus is busy and a single-shot
+read would report a working monitor as silent; **without it this read would
+have failed and been indistinguishable from an unreachable sink.** The count
+is published for exactly this reason - "it worked after retries" is visible
+rather than hidden.
+
+**EVERYTHING CROSS-CHECKS.** Panel size bytes give 52 x 29 cm, a ~23.4 inch
+diagonal, which is the MP2412C's class; gamma byte 0x78 is 2.20; byte 0x14 is
+0x80, a digital input. None of those was needed and all of them agree, which
+is what a correctly parsed block looks like.
+
+**AND THE 100 Hz MODE IS IN THE SECOND DESCRIPTOR, WHICH THE TOOL DID NOT
+READ.** `edidread` parsed only slot 0x36 and printed **60.00 Hz** - a true
+statement about the *preferred* timing that read as the whole answer, on a
+monitor the user had already said is 100 Hz. All four slots:
+
+| slot | | clock | derived refresh | at 24 bpp |
+|---|---|---|---|---|
+| 0x36 | 1920x1080 **preferred** | 148.5 MHz | **60.00 Hz** | 3.56 Gbps |
+| **0x48** | **1920x1080** | **228 MHz** | **99.65 Hz** | **5.47 Gbps** |
+| 0x5a | name descriptor | | | |
+| 0x6c | **range limits** | **max 230 MHz** | **V 48-100 Hz** | |
+
+**Three independent corroborations of the 100 Hz mode**: the detailed timing
+at 0x48, the range-limits `vmax` of **100**, and 228 MHz sitting under the
+monitor's own stated 230 MHz ceiling. And **5.47 Gbps against the ~8.64 Gbps
+2BB measured this link to carry - it fits with room**, so the lane count DP
+alt mode leaves us is not the obstacle.
+
+**The fix is structural, not a second parse**: all four slots, the
+range-limits descriptor (because it *bounds* what the others claim), and a
+"fastest mode the sink describes" line checked against the measured link
+rather than a datasheet. **The general shape, and it is a new instance of an
+old error: a correct reading of ONE element of a list, presented as the
+reading of the list.** 2B0's bucket 3 and 2A1's invented threshold are the
+same mistake about which quantity answers the question; this one is about
+which *slot*.
+
+**And a smaller one in the same breath.** Decoding those descriptors by hand,
+I retyped the hex dump instead of parsing it, dropped a byte, and got a
+129-byte block whose range limits read "V 0-48 Hz" and whose fourth
+descriptor read **0.017 Hz**. **The nonsense is the only reason it cost
+nothing** - which is exactly why every refresh in this tool is DERIVED from
+the timing totals rather than read from a field: a misparse shows up as an
+absurd rate instead of a believable one. The real fix is not to hand-transcribe
+at all; the second pass parsed the dump text and the checksum verified to zero
+independently of the kext's own check.
+
+**What is now established end to end:** the Type-C port is wired to the 680M
+(2B4), its AUX engine is configured and bound by the firmware's own selector
+(2B9), the channel carries our own native transactions (2BB), and the sink's
+full capability and timing set is readable over I2C-over-AUX (this). **Every
+remaining step is output-side**: link training, a second OTG and HUBP, a DIG
+encoder, and a second `IOFramebuffer` so macOS attaches a display. None has
+been attempted, and `getDisplayModeCount()` has returned 1 since 2sl.
