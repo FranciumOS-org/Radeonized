@@ -266,6 +266,22 @@ void RBAMDFramebuffer::publishVBLState(void)
         snprintf(key, sizeof(key), "RBFBAuxDpcd%02u", i);
         setProperty(key, (uint64_t)auxDpcdData[i], 64);
     }
+    /* 2BC: the EDID. As ONE OSData blob and not 128 keys - this publish runs
+     * on Apple's thread and 2zz measured ~110 setProperty calls there at
+     * 1.4 % of the frame rate, so 128 more would be the instrument becoming
+     * the defect (rule 16). ioreg prints it as bytes, which is what the tool
+     * parses. */
+    setProperty("RBFBEdidAttempts", auxEdidAttempts, 64);
+    setProperty("RBFBEdidOks", auxEdidOks, 64);
+    setProperty("RBFBEdidRefuse", (uint64_t)auxEdidRefuse, 64);
+    setProperty("RBFBEdidInst", (uint64_t)auxEdidInst, 64);
+    setProperty("RBFBEdidBytes", (uint64_t)auxEdidBytes, 64);
+    setProperty("RBFBEdidDefers", (uint64_t)auxEdidDefers, 64);
+    setProperty("RBFBEdidHeaderOk", auxEdidHeaderOk);
+    setProperty("RBFBEdidSumOk", auxEdidSumOk);
+    if (auxEdidBytes > 0) {
+        setProperty("RBFBEdid", auxEdidData, (unsigned int)auxEdidBytes);
+    }
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
     setProperty("RBFBHubpOtg2", hubpOtgCtl2, 32);
     setProperty("RBFBHubpOtg3", hubpOtgCtl3, 32);
@@ -1204,6 +1220,20 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             auxDpcdHpd = want;
             publishVBLState();
             return kIOReturnSuccess;
+        }
+    }
+    /* 2BC: the EDID trigger. Its own key, because an EDID read is a different
+     * transaction type (I2C-over-AUX with MOT) and a shared key would make
+     * "which protocol ran" unreadable afterwards. */
+    {
+        OSNumber *e = OSDynamicCast(OSNumber, dict->getObject("RBFBEdidRead"));
+        if (e) {
+            if (!auxDpcdArmed) { return kIOReturnNotReady; }
+            const uint32_t blk = e->unsigned32BitValue();
+            if (blk > 1) { return kIOReturnBadArgument; }
+            const bool ok = auxEdidRead(auxDpcdHpd, blk);
+            publishVBLState();
+            return ok ? kIOReturnSuccess : kIOReturnIOError;
         }
     }
     {

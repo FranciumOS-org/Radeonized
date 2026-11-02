@@ -55035,3 +55035,104 @@ and the MOT bit sequence a multi-part read. `dce_aux.c` has it and
 `rb_dpcd.h`'s request encoder already takes an action byte. The extended
 receiver capability field at 0x02200 is also now worth reading, since 0x0e
 bit 7 says it exists.
+
+---
+
+## 2BC — the EDID over I2C-over-AUX: the MOT protocol, and a test that passed for the wrong reason
+
+**Built, hosttested, not run on hardware.** 2BB's DPCD read found
+`DP_LOCAL_EDID_PRESENT` set and the I2C-over-AUX speeds declared, so the data
+named this step rather than a guess.
+
+**ONE AUX TRANSACTION BECAME A GENERAL FUNCTION, and that was the right
+refactor rather than a second copy.** `dce_aux.c`'s
+`submit_channel_request()` branches on nothing but `is_write` - the request
+layout is identical for a DP read and all four I2C forms - so
+`auxTransact(inst, action, address, wdata, wlen, rbuf, rlen, ...)` serves
+every one, and `auxDpcdRead()` became a thin wrapper over it. Everything 2BA
+bounded still holds for every caller: the engine comes from the hardware's
+`AUX_HPD_SEL`, the DMCUB refusal fires before anything is written, every poll
+is bounded, and the release runs on every path out.
+
+**THE PROTOCOL, AND WHY IT IS THREE KINDS OF TRANSACTION.** The EDID lives on
+the sink's own I2C bus at slave address **0x50**, reached through AUX, and one
+I2C transaction has to span several AUX ones. The **MOT** ("middle of
+transaction") bit is what holds it open:
+1. an **I2C WRITE with MOT** carrying the byte offset, which sets the EDID
+   read pointer - **the only write to a sink this project performs**;
+2. **eight I2C READs of 16 bytes**, since 16 is the AUX payload maximum and a
+   128-byte block cannot be one transaction;
+3. the **last read drops MOT**, which ends the I2C transaction. Leaving MOT
+   set on the final chunk holds the sink's DDC bus open and the next reader
+   finds it busy, so `rb_edid_read_action()` owns that decision and the
+   hosttest pins every chunk of it, including the one-chunk case.
+
+**A ZERO-LENGTH REQUEST IS THREE BYTES, NOT FOUR, and 2BA's encoder could not
+express it.** `dce_aux.c`: `length = request->length ? 4 : 3` - "the 4 bit
+header and the 20 bit address (that is 3 byte). If the requested length is non
+zero this means an addition byte specifying the length is required." 2BA's
+`rb_dpcd_read_request()` refused length 0 as meaningless, which is right for
+DPCD and would have made the MOT protocol unexpressible. Generalised into
+`rb_aux_request_bytes()`, with the DPCD wrapper keeping the stricter rule. It
+also **refuses an action whose low nibble is set**, because that nibble
+belongs to the address and would silently corrupt its top bits.
+
+**DEFER IS NORMAL AND NOT AN ERROR.** A sink defers an I2C-over-AUX
+transaction whenever its own DDC bus is busy, so a single-shot read would
+report a perfectly good monitor as silent - rule 14's shape, where the two are
+identical in a failed read. Bounded at 8 retries with a 500 us gap, because
+the mirror of that mistake is spinning on a sink that always defers, and
+`RBFBEdidDefers` publishes the count so "it worked after retries" is visible
+rather than hidden.
+
+**THE RESULT IS CHECKED TWICE AND THE TWO CHECKS ARE INDEPENDENT.** The fixed
+eight-byte header `00 ff ff ff ff ff ff 00`, and the 128-byte checksum summing
+to zero mod 256. **A partial chunked read can satisfy the header and fail the
+sum** - which is exactly the failure mode this read has - and **128 zeros pass
+the checksum and fail the header**, so neither alone is validation. Both are
+published and `edidread` refuses to parse anything unless both pass, because a
+plausible-looking mode parsed out of a half-read block is the class of result
+that has cost this project milestones.
+
+**The EDID is published as ONE `OSData` blob, not 128 keys** - this publish
+runs on Apple's thread and 2zz measured ~110 `setProperty` calls there at
+1.4 % of the frame rate, so 128 more would be the instrument becoming the
+defect (rule 16).
+
+**AND A HOSTTEST CASE PASSED FOR THE WRONG REASON, caught only by the
+break-it check.** The first version asserted `rb_edid_checksum_ok(e, 64)` on a
+block whose payload had been **corrupted** by an earlier case - so it returned
+0 because of the corruption, not because of the length guard, and **deleting
+the guard produced no failure at all.** `rb_edid_checksum_ok()` sums a fixed
+`RB_EDID_BLOCK_LEN` regardless of `n`, so only a case on a block whose 128
+bytes ARE valid can isolate the guard: `rb_edid_checksum_ok(e, 127)` must
+refuse. **Rule 26 applied to a test: a case that passes for the wrong reason
+is not coverage**, and the only thing that distinguishes the two is breaking
+the code and watching.
+
+**AND THE SAME TRAP AS 2B1 FIRED AGAIN, IN THE SAME PROJECT AREA.** The first
+attempt at that break left `n` unused, so the build died on `-Werror` and the
+`grep "^FAIL dpcd"` came back **empty - which reads exactly like "the test
+does not catch it"**. 2B1 recorded this verbatim ("the second break first
+failed to COMPILE under -Werror and the FAIL grep came back empty") and it
+still happened. **Second recorded instance. The fix is procedural: a break
+that produces no FAIL must be checked for a BUILD failure before it is read as
+missing coverage** - grep for `error` as well as `FAIL`, or read the exit
+status instead of the output. Redone as
+`(n < RB_EDID_BLOCK_LEN && 0)` so it compiles, and then it failed correctly.
+
+Four breaks verified and verified to compile: the last chunk keeping MOT
+(2 cases), a zero-length request still writing 4 bytes (3), the header check
+ignoring one byte (1), and the checksum accepting a partial read (2).
+
+Framebuffer **67F28153** (was 49174106). `build/out/edidread [block [hpd]]`
+drives it, prints the bytes, and parses only on both checks passing:
+manufacturer, product code, name, and **the preferred timing with its refresh
+DERIVED from the totals** rather than read - so a wrong field shows up as an
+absurd rate instead of a plausible one. It also compares the mode's bandwidth
+against 2BB's measured link (2 lanes x HBR2, ~8.64 Gbps usable) and says
+plainly when a mode does not fit.
+
+**Still not attempted, and each is its own step:** link training, a second OTG
+and HUBP, a DIG encoder, and a second `IOFramebuffer` so macOS attaches a
+display.

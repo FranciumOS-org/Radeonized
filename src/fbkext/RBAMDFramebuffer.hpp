@@ -392,6 +392,19 @@ private:
     uint8_t            auxDpcdData[16];
     bool               auxDpcdSuspect;
     uint32_t           auxDpcdHpd;     /* which HPD block to target, def 2 */
+    /* 2BC: the EDID. auxEdidRefuse shares 1-9 with the DPCD codes and adds
+     * 10 (the offset write never ACKed) and 11 (a chunk read failed), and
+     * auxEdidBytes says how far it got, because a partial block is a
+     * different finding from none. */
+    uint64_t           auxEdidAttempts;
+    uint64_t           auxEdidOks;
+    uint32_t           auxEdidRefuse;
+    uint32_t           auxEdidInst;
+    uint32_t           auxEdidBytes;
+    uint32_t           auxEdidDefers;
+    bool               auxEdidHeaderOk;
+    bool               auxEdidSumOk;
+    uint8_t            auxEdidData[128];
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -816,6 +829,14 @@ private:
      * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
      * bounded; refuses rather than racing when the DMCUB owns the engine. */
     bool auxDpcdRead(uint32_t hpd, uint32_t address, uint32_t length);
+    /* 2BC: one AUX transaction of any of the five actions, and one 128-byte
+     * EDID block over I2C-over-AUX (the MOT protocol). */
+    bool auxTransact(unsigned inst, uint32_t action, uint32_t address,
+                     const uint8_t *wdata, uint32_t wlen,
+                     uint8_t *rbuf, uint32_t rlen,
+                     uint32_t *replyOut, uint32_t *gotOut);
+    unsigned auxEngineFor(uint32_t hpd);
+    bool auxEdidRead(uint32_t hpd, uint32_t block);
     bool blSetup(void);
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */
