@@ -55337,3 +55337,58 @@ the OTG/HUBP timing this project already writes for the panel, plus a second
 `IOFramebuffer`. **The cheapest first step is a read** (`QUERY_DP_ALT`), it
 needs no cable to be meaningful about `is_usb`, and it would exercise the
 reply path before any command that changes state.
+
+## 2BF — the HPD-to-PHY mapping is NOT a register, and `is_usb` makes that not matter
+
+Still a source read; nothing measured. 2BE left "which UNIPHY carries HPD2" as
+the first thing needing an answer, and 2B9's lesson said to look for a register
+field before designing an experiment to infer one. **Applied here, that search
+comes back empty, and the empty result is the finding.**
+
+Every field in `dcn_3_1_2_sh_mask.h` whose name contains `HPD`:
+`AUX_HPD_SEL` (2B9's, mapping an AUX engine to an HPD block), the four
+`AUX_*_HPD_DISCON` controls, and the `DC_GPIO_HPD*` pad controls. **There is no
+PHY-side or transmitter-side HPD select.** On the software side the association
+arrives as data rather than being read: `dcn31_resource.c:1170-1178` indexes
+`link_enc_hpd_regs[enc_init_data->hpd_source]`, and `hpd_source` is filled in
+by the caller from the VBIOS display-object table, which is ROM content and not
+a register. **So 2B9's method was right to try and the answer is simply no** -
+which is a different situation from 2B8, where the field existed and had not
+been looked for. Recording the negative so the next session does not repeat the
+search.
+
+**But the mapping does not need to be inferred, because the chip will name the
+port itself.** `DMUB_CMD__VBIOS_TRANSMITTER_QUERY_DP_ALT` takes `phy_id` as an
+**input** and returns `is_usb` as an **output**, so sweeping `phy_id` 0..5 and
+keeping the one (or ones) with `is_usb` set **identifies the USB-C PHY
+directly**, with no mapping assumed, no cable required, and nothing inferred
+from an index convention. The convenient guess - that AUX instance 2 pairs with
+`TRANSMITTER_UNIPHY_C`, `phy_id` 2 - is exactly the kind of index-convention
+inference this project has been wrong about before, and the sweep makes it
+unnecessary rather than confirming it.
+
+**Why the sweep is a good instrument and not just a query:**
+
+- **It has a built-in control.** The eDP panel is on this die and is *not* a
+  USB-C PHY, so at least one `phy_id` must come back with `is_usb` clear. An
+  all-set or all-clear answer across six ids is a refusal, not a reading -
+  the same shape as 2B4 using HPD0 as the control for HPD2 and 2B9 using the
+  panel's AUX0 as the reference for AUX2.
+- **`is_dp4` is a second, independent reading on the same trip**, against a
+  number already measured from the other end: 2BB read **2 lanes** out of the
+  sink's DPCD, and `is_dp4` is the chip's own view. Agreement is corroboration
+  from opposite ends of the link; disagreement is informative about which end
+  is being believed.
+- **`is_dp_alt_disable` says whether alt mode is live**, which with no cable
+  attached should read disabled - so the campus-with-no-monitor state is a
+  *usable* control condition rather than a blocked one, and the cable-in
+  reading later becomes a difference measurement like 2B4's.
+
+**What it costs, stated plainly: it is a PRODUCE on the DMUB inbox**, not a
+register read. 2zn built that apparatus and the user authorised producing on
+inbox 1 for `-rbgpufbdmubbl`; this is a different command type on the same
+inbox, and the reply path is the part 2zs never exercised (that round trip was
+a GPINT). So it is a new surface in the same sense the DPCD read was in 2BA,
+and it is the user's decision on the same grounds. **It is the cheapest
+remaining step that teaches anything**, and unlike every other output-side
+step it needs no display plugged in.
