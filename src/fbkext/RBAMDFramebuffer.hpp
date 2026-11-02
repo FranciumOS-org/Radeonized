@@ -348,6 +348,24 @@ private:
     uint32_t           hubpTripleRefusedVal;
     uint32_t           hubpTripleReadback;
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
+    /* 2B3: the five HPD blocks, read-only, out of the aperture HUBP already
+     * maps. hpdSetupMask is the sample taken at setup (which cable state that
+     * was is a fact about the boot, not about the hardware - rule 33), and
+     * hpdSinkMask is resampled on every periodic publish so a hotplug AFTER
+     * boot is visible without a reboot. hpdSinkEver ORs every mask ever seen,
+     * because a cable plugged and pulled between two publishes would
+     * otherwise leave nothing behind (rule 31: what is published periodically
+     * is stale by design). hpdEnMask is the CONTROL, published beside the
+     * sense so "no sink" cannot be confused with "the block is off". */
+    uint32_t           hpdSinkMask;
+    uint32_t           hpdSinkEver;
+    uint32_t           hpdEnMask;
+    uint32_t           hpdSetupMask;
+    uint32_t           hpdSetupEnMask;
+    uint64_t           hpdChanges;     /* transitions of hpdSinkMask         */
+    uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
+    uint32_t           hpdControl[5];
+    bool               hpdReady;       /* the aperture covered the registers */
     uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */
     uint32_t           hubpOtgCtl2;
     uint32_t           hubpOtgCtl3;
@@ -752,6 +770,9 @@ private:
      * a setter that reports success is not evidence the field changed). */
     bool hubpTripleApply(bool enable);
     bool hubpHoldNotReady(bool pending);
+    /* 2B3: resample the HPD blocks. Read-only; safe to call from the publish
+     * path because it touches no state the frame path reads. */
+    void hpdSample(void);
     bool blSetup(void);
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */

@@ -54217,3 +54217,108 @@ read `0x40` at setup as it has on every boot since 216, the firmware word read
 `0x0`, the arm wrote and the **hardware readback** returned `0x440` - so
 `PENDING_MIN_TIME` 64 survived the arm bit for bit, which is what the hosttest
 asserted and what rule 20 required the hardware to confirm.
+
+---
+
+## 2B3 — an instrument for "does this chip SEE the Type-C display": the five HPD blocks, read-only
+
+**Nothing is claimed. No reading has been taken.** This is the instrument that
+makes the Type-C question answerable at all, built before the boot that asks
+it, because the alternative is reading a black screen and inferring.
+
+**THE PROBLEM IT SOLVES IS THAT THE OBVIOUS READING IS WORTHLESS.** The user
+reports the chassis carries DP alt mode from the iGPU on a USB4 Type-C port -
+a **different connector** from the HDMI-A jack 2xq established is dGPU-wired,
+so 2zx's "HDMI needs hybrid mode" is a fact about that jack and does not
+settle this. Plugged in, the external display is **black** and
+`system_profiler` reports one display, Color LCD, Connection Type Internal.
+That is the **expected** reading either way: `RBAMDFramebuffer` writes OTG0 and
+HUBP0 and nothing else and `getDisplayModeCount()` has returned 1 since 2sl,
+so a port wired *straight to this silicon* would also be black. Rule 47's
+question - is the output wired to this chip right now - cannot be answered by
+looking at the output.
+
+**DC_HPD_SENSE is the chip's own answer, and it is a read.**
+`src/common/rb_hpd.h`, offsets straight out of
+`docs/linux-ref/dcn_3_1_2_offset.h`:
+`regHPD0_DC_HPD_INT_STATUS` **0x1f14**, `regHPD0_DC_HPD_CONTROL` **0x1f16**,
+stride **8** dwords, five instances HPD0..HPD4, all **BASE_IDX 2**. That is
+the same base this project already reads OTG and HUBP from -
+`regOTG0_OTG_CONTROL` 0x1b41 BASE_IDX 2, read at `kRbDmuSeg2 + 0x1b41` and
+returning 2oq's 0x00011201 exactly - so **no new mapping and no new write
+surface**: the HPD read rides on `hubpSetup()`'s existing BAR5 map and is armed
+by the same success. The header has **no setter**, by construction: enabling an
+HPD block is a write to the display engine on behalf of a port we have not
+established is ours.
+
+**THE APERTURE BOUND HAD TO GROW WITH IT, and this is the part that would have
+been a silent out-of-bounds read.** `hubpSetup()` checks the map length
+against `kRbDmuSeg2 + rb_hubp_dw(..., ADDR_HI)` before the first dereference -
+and HPD at 0x1f36 sits **above every register this kext previously touched**
+(OTG3 is 0x1cc1). So the bound is now one comparison against
+`rb_hpd_dw_max()`, the highest dword of the highest instance, rather than a
+check per block that the next addition can forget. Asserted in the hosttest
+from both directions: `dw_max` is pinned at 0x1f36 **and** asserted to be no
+lower than `rb_hpd_dw_control(RB_HPD_COUNT-1)`, so changing the instance count
+cannot leave the bound behind.
+
+**WHAT MAKES IT AN INSTRUMENT RATHER THAN A NUMBER: DC_HPD_EN.** Bit 28 of
+`DC_HPD_CONTROL` gates the block, and with it clear **SENSE reads 0 whatever is
+plugged in** - so a bare "sense 0" is indistinguishable from "the instrument is
+off". That is rule 14 precisely, and it is the same shape as 2zw's six dead
+milestones one level out: a register that was real, writable, perfectly
+functioning and attached to nothing. So `rb_hpd_verdict()` returns four states
+and **`RB_HPD_DISABLED` is not `RB_HPD_NO_SINK`**: EN clear says *nothing*,
+including when the sense bit is set. `RB_HPD_SETTLING` keeps raw `DC_HPD_SENSE`
+apart from debounced `DC_HPD_SENSE_DELAYED` - Linux believes the delayed one,
+so reporting a sink off the raw bit would make a bouncing connector read as a
+display. The EN mask is published **beside** the sense mask, so the refusal is
+visible in the data and not only in the tool.
+
+**ONE SAMPLE IDENTIFIES NOTHING, AND THE CODE SAYS SO.** DCN numbers the HPD
+blocks; the board wires them; that mapping is in no header. The usable reading
+is a **difference** - sample cable out, sample cable in, and the instance whose
+bit moved is the port - which is why the masks are published as scalars (one
+XOR) and why `tools/hpdlook.sh` tells the user to run it twice. Rule 18, and
+rule 33: three separate keys say *when* a sample was taken. `RBFBHpdSetup` is
+the sample from `hubpSetup()`, and **which cable state that boot had is a fact
+about the boot, not about the hardware** - the pre-existing
+`otg_ctl1..3` = 0x300 in `RBGPUDiag` is exactly this trap already sprung, since
+`rbgpu_agdc_otg.cpp` samples once at init on a boot that had no cable, so it
+**cannot** be read as "no second pipe with the display attached".
+
+**It resamples on every periodic publish**, so a hotplug after boot is visible
+with no reboot - and `RBFBHpdSinkEver` ORs every mask ever seen, because what
+is published periodically is stale by design and a cable in and out between two
+publishes would otherwise leave nothing behind (rule 31). Ten MMIO reads at the
+publish interval, against a path 2zz measured at -1.4 % when it ran 227 times a
+second; the `RBFBPubMs` dial throttles this with it.
+
+Hosttested: the five instances' offsets **pinned per instance** rather than
+recomputed by the formula under test, the out-of-range refusal, `dw_max` from
+both sides, each field's bit position, all four verdicts including EN-clear
+with the sense bit set, the masks going through `rb_hpd_verdict()` so an
+EN-clear instance with sense set does **not** appear as a sink, the clamp, the
+NULL, and a changed cable state producing a non-zero XOR. **Both breaks
+verified to fail and verified to COMPILE first** (2B1's lesson, where a break
+died on `-Werror` and the empty FAIL grep read exactly like "the test does not
+catch it"): the EN gate disabled caught 3 cases, a stride of 7 caught 8.
+
+**What the next boot reads, and what each answer means.** Cable plugged in
+*before power-on*, so the firmware's GOP gets its chance:
+- **an image pre-boot** - the port reaches the 680M in Eco mode **and the
+  firmware trained the link**, which is the whole reason the internal panel was
+  tractable (2wh wrote HUBP surface addresses onto a pipe the firmware had
+  already lit and never trained anything). Then a second head is plausibly the
+  same shape of work as 2wh.
+- **no image, HPD sense SET on some instance** - the port is wired to this
+  chip, nothing trained it, so link training is ours: DP AUX, EDID, and
+  `dc_link`'s DMUB-assisted sequence. The largest single piece of work left in
+  the display path, but a *located* one.
+- **no image, blocks ENABLED and no sense anywhere** - the port does not reach
+  this chip's display engine in this firmware mode, and the line is closed the
+  way 2xq closed the HDMI-A jack.
+- **blocks DISABLED** - no verdict, and the next question is who enables them.
+
+Framebuffer **A5BDF3D2** (was 60F39344). The HPD read is unconditional and
+read-only; the 2B1 triple-buffer dial is unchanged and still off by default.

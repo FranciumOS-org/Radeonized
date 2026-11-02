@@ -22,6 +22,7 @@
 
 #include "RBAMDFramebuffer.hpp"
 #include "rb_hubp.h"
+#include "rb_hpd.h"
 #include "rb_dcn_deny.h"
 #include "rb_regs.h"
 #include <IOKit/pci/IOPCIDevice.h>
@@ -69,6 +70,17 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpTripleRefused = 0;
     hubpTripleRefusedVal = 0;
     hubpTripleReadback = 0;
+    hpdReady = false;
+    hpdSinkMask = 0;
+    hpdSinkEver = 0;
+    hpdEnMask = 0;
+    hpdSetupMask = 0;
+    hpdSetupEnMask = 0;
+    hpdChanges = 0;
+    for (unsigned i = 0; i < RB_HPD_COUNT; i++) {
+        hpdStatus[i] = 0;
+        hpdControl[i] = 0;
+    }
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;
     hubpPendHits = 0;
@@ -100,8 +112,15 @@ bool RBAMDFramebuffer::hubpSetup(void)
     if (!map) { hubpRefuse = 3; return false; }
 
     const uint64_t length = map->getLength();
-    const uint32_t needed = kRbDmuSeg2 +
+    uint32_t needed = kRbDmuSeg2 +
         rb_hubp_dw(hubpIndex, RB_HUBP_REG_ADDR_HI);
+    /* 2B3: the HPD blocks sit ABOVE everything else this kext reads
+     * (0x1f16+32 against OTG's 0x1cc1), so the bound has to grow with them or
+     * the first HPD read is outside what was checked. The check stays one
+     * comparison against the HIGHEST dword, rather than becoming a check per
+     * block that a later addition can forget. */
+    const uint32_t hpdNeeded = kRbDmuSeg2 + rb_hpd_dw_max();
+    if (hpdNeeded > needed) { needed = hpdNeeded; }
     /* Every dword we will touch has to be inside the aperture, checked before
      * the first dereference and not after (rule 19's shape for a mapping). */
     if (length < ((uint64_t)needed + 1) * sizeof(uint32_t)) {
@@ -174,6 +193,18 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpMap = map;
     hubpRegs = reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress());
     hubpReady = true;
+
+    /* 2B3: the HPD read rides on this mapping and this bound check, so it is
+     * armed by the same success and by nothing of its own. The setup sample is
+     * kept separately from the live one because WHICH CABLE STATE it was taken
+     * in is a fact about the boot (rule 33) - the usable reading is the
+     * difference between two samples, not either one. */
+    hpdReady = true;
+    hpdSample();
+    hpdSetupMask   = hpdSinkMask;
+    hpdSetupEnMask = hpdEnMask;
+    hpdChanges     = 0;
+
     return true;
 }
 
@@ -453,4 +484,40 @@ bool RBAMDFramebuffer::hubpHoldNotReady(bool pending)
     }
     amtrHoldExpired++;
     return false;
+}
+
+
+/* 2B3: read all five HPD blocks. Read-only, no side effect on the chip, and
+ * nothing here decides anything about the frame path - it exists so the
+ * question "does this silicon see a display on that port" has an answer that
+ * is a measurement rather than an inference.
+ *
+ * Called at setup and from the periodic publish, so a cable plugged in after
+ * boot shows up without a reboot. hpdSinkEver is the OR of every mask seen,
+ * because the publish is periodic and a cable in and out between two of them
+ * would otherwise leave no trace (rule 31).
+ */
+void RBAMDFramebuffer::hpdSample(void)
+{
+    if (!hpdReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_HPD_COUNT; i++) {
+        const uint32_t dwStat = rb_hpd_dw_int_status(i);
+        const uint32_t dwCtl  = rb_hpd_dw_control(i);
+        /* RB_HPD_DW_INVALID cannot happen for i < RB_HPD_COUNT, but a read of
+         * dword 0 of the segment is a read of some other block entirely, so
+         * it is refused here rather than trusted (rule 19). */
+        if (dwStat == RB_HPD_DW_INVALID || dwCtl == RB_HPD_DW_INVALID) {
+            continue;
+        }
+        hpdStatus[i]  = hubpRegs[kRbDmuSeg2 + dwStat];
+        hpdControl[i] = hubpRegs[kRbDmuSeg2 + dwCtl];
+    }
+
+    const uint32_t sink = rb_hpd_sink_mask(hpdStatus, hpdControl,
+                                           RB_HPD_COUNT);
+    if (sink != hpdSinkMask) { hpdChanges++; }
+    hpdSinkMask  = sink;
+    hpdSinkEver |= sink;
+    hpdEnMask    = rb_hpd_enabled_mask(hpdControl, RB_HPD_COUNT);
 }

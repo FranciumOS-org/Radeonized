@@ -274,6 +274,15 @@ public:
     /* 2B1 */
     bool hubpTripleArmed=false, hubpTripleHaveOrig=false;
     uint32_t hubpTripleOrig=0, hubpTripleRefusedVal=0, hubpTripleReadback=0;
+    /* 2B3: mirrored because RBAMDFramebufferVBL.cpp compiles into the
+     * hosttest - the same reason 2B1's triple members are here. */
+    uint32_t hpdSinkMask=0, hpdSinkEver=0, hpdEnMask=0;
+    uint32_t hpdSetupMask=0, hpdSetupEnMask=0;
+    uint64_t hpdChanges=0;
+    uint32_t hpdStatus[5]={0,0,0,0,0};
+    uint32_t hpdControl[5]={0,0,0,0,0};
+    bool hpdReady=false;
+    void hpdSample(void) {}
     uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
     bool hubpTripleApply(bool enable);
     uint32_t hubpPitch=0;
