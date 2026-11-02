@@ -54322,3 +54322,94 @@ catch it"): the EN gate disabled caught 3 cases, a stride of 7 caught 8.
 
 Framebuffer **A5BDF3D2** (was 60F39344). The HPD read is unconditional and
 read-only; the 2B1 triple-buffer dial is unchanged and still off by default.
+
+---
+
+## 2B4 — THE TYPE-C PORT IS HPD2 AND IT IS WIRED TO THE 680M (boot 291)
+
+**Rule 47 discharged for a new output, by a difference with a control.** Three
+samples on one boot, `tools/hpdlook.sh`:
+
+| | cable in | cable out | cable in again |
+|---|---|---|---|
+| HPD0 | sink | sink | sink |
+| HPD1 | - | - | - |
+| **HPD2** | **sink** | **no sink** | **sink** |
+| HPD3/HPD4 | - | - | - |
+| `RBFBHpdSink` | 0x05 | 0x01 | 0x05 |
+
+`RBFBHpdChanges` **2**, `RBFBHpdEn` **0x1f** - all five blocks enabled, so the
+`RB_HPD_DISABLED` refusal never fired and every "no sink" above is a real
+reading rather than a disabled instrument. **HPD0 never moved**, which is the
+control: the internal eDP panel is always attached, so a boot where every
+instance moved together would have meant something systemic rather than a port.
+
+**So the answer is the OPPOSITE of the HDMI-A jack.** 2xq/2zx established that
+connector is wired to the dGPU and therefore cannot work in Eco mode. This one
+**reaches the 680M's display engine in Eco mode**, with the dGPU not even on
+the PCI bus. The "HDMI needs hybrid, brightness needs Eco, pick one" bind is a
+fact about that jack and **not** about external display output on this chassis.
+
+**The raw word says something the mask cannot.** HPD2 reads **0xff0ff013**:
+`DC_HPD_SENSE` and `DC_HPD_SENSE_DELAYED` set as expected, and
+`DC_HPD_INT_STATUS` (bit 0) **also set** - a latched hotplug interrupt that
+**nobody has serviced**, which is exactly right, because nothing in macOS knows
+this connector exists. HPD0 reads 0x14000012: the same two sense bits and
+**bit 0 clear**, i.e. an attached display whose interrupt was serviced. The
+difference between those two words is the whole state of the project on this
+port in one byte.
+
+**AND MY OWN TOOL MISREPORTED THE REGISTER IN THE SAME OUTPUT.** ioreg prints a
+32-bit `OSNumber` **whose bit 31 is set** as a sign-extended 64-bit decimal, so
+0xff0ff013 came back as `18446744073693818899` and `printf %08x` rendered it
+`0xffffffffff0ff013` - a forty-bit "register value" that is not a register
+value at all. HPD0's 0x14000012 has bit 31 clear and printed correctly, which
+is why four of the five lines looked fine. **The decoded verdict was never
+affected** - it comes from the kext's own `rb_hpd_verdict()` mask, which is the
+reason 2B0's lesson (publish the raw beside the summary) is worth its cost in
+both directions: here the summary was right and the raw was wrong. Fixed with
+an explicit 32-bit mask, and **not in shell arithmetic**: these values exceed
+2^63, where awk's doubles lose precision and zsh's signed 64-bit integers
+overflow, so both would have produced a different wrong answer. **Rule 26: a
+display format is an instrument.** Worth generalising - any 32-bit register
+this project publishes reads back sign-extended when bit 31 is set, and
+several do (`RBFBBlCntl`, `RBFBHubpTripleRefusedVal`, the OTG words).
+
+**THE FRAME-RATE RUNS ON THIS BOOT ARE NOT A REPEAT OF 2B2 AND MUST NOT BE
+READ AS ONE.** Same dials (`tripleset 1` + `holdset 0`), and:
+
+| | boot 290 | boot 291 |
+|---|---|---|
+| `sets/s` | 141.03 / 143.12 | **83.99 / 75.17** |
+| `fed` | 96.9 / 98.2 % | 57.4 / 51.6 % |
+| pending wait | 1.01 vblanks | **1.74 / 1.95** |
+| `bin2+` | 0.0 / 0.1 % | 0.4 / **5.0 %** |
+| `preempt` | +13 / +15 | +17 / +18 |
+| `ours` | 0.4 % | 0.4 % |
+
+**The configuration differs, so rule 39 applies before any of this is read as
+evidence about the dials: boot 291 has a second sink detected on HPD2 with an
+unserviced latched HPD interrupt.** And this is more than a bare confound -
+there is a mechanism with the right shape. **The latch itself slowed down**
+(1.01 -> 1.74-1.95 vblanks) while `ours` stayed at 0.4 %, and the latch is a
+*display engine* quantity, not a compositor one: no amount of extra
+WindowServer work moves when a vsync'd flip resolves. Something is using the
+display engine that was not using it on boot 290. `preempt` barely moved,
+which says the second slot is still doing its job - the flips are not being
+discarded, they are taking longer to land. Run 2 being worse than run 1
+(`bin2+` 0.4 % -> 5.0 %, and the direction is **opposite** to the usual
+first-run transient, where run 1 is the contended one) says something is
+accumulating rather than steady.
+
+**So 2B2 is neither confirmed nor refuted and rule 44 is still unsatisfied.**
+What this boot does establish is the port, which was the more valuable of the
+two questions and is now settled. The rate repeat needs a boot with the cable
+**out**, which is two commands.
+
+**Still unread on this boot, and both matter:** whether anything appeared on
+the external display **pre-boot** (the firmware GOP question - `RBFBHpdSetup`
+0x05 says the cable was already detected at setup, so the firmware saw it), and
+the **live** `OTG1..3` state with the cable attached. The `otg_ctl1..3` = 0x300
+in `RBGPUDiag` is still the init-time sample from `rbgpu_agdc_otg.cpp` and
+**cannot** answer the second - the same trap 2B3 flagged, unchanged by this
+boot, which is why the framebuffer publishes `RBFBHubpOtg1..3` separately.

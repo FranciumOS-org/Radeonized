@@ -16,6 +16,20 @@ read_key() {
         tr ',' '\n' | sed -n "s/.*\"$1\" = \([0-9][0-9]*\).*/\1/p" | head -1
 }
 
+# ioreg prints a 32-bit OSNumber whose BIT 31 IS SET as a sign-extended
+# 64-bit decimal: HPD2's 0xff0ff013 came back as 18446744073693818899, and
+# `printf %08x` on that gave 0xffffffffff0ff013 - a 40-bit "register value"
+# that is not a register value at all. The decoded verdict was unaffected
+# (it comes from the kext's own mask) but the raw word beside it was
+# misleading, which is exactly what the raw word is published FOR. So every
+# register word goes through this, and shell arithmetic is NOT used: these
+# values exceed 2^63 and both awk's doubles and zsh's signed 64-bit integers
+# get them wrong. Rule 26: the tool is an instrument too.
+as_u32() {
+    python3 -I -c 'import sys; print("0x%08x" % (int(sys.argv[1]) & 0xffffffff))' \
+        "${1:-0}" 2>/dev/null || echo "0x????????"
+}
+
 ready=$(read_key RBFBHpdReady)
 sink=$(read_key RBFBHpdSink)
 ever=$(read_key RBFBHpdSinkEver)
@@ -54,8 +68,8 @@ while [ "$i" -lt 5 ]; do
         # says nothing at all, which is not the same fact as "no sink".
         verdict="BLOCK DISABLED - says nothing either way"
     fi
-    printf "  HPD%d  status 0x%08x  control 0x%08x   %s\n" \
-        "$i" "${st:-0}" "${ct:-0}" "$verdict"
+    printf "  HPD%d  status %s  control %s   %s\n" \
+        "$i" "$(as_u32 "${st:-0}")" "$(as_u32 "${ct:-0}")" "$verdict"
     i=$((i + 1))
 done
 
