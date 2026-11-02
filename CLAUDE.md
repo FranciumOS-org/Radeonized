@@ -334,6 +334,29 @@ table and refuses to install one that does not match the running kernel;
   and `dmubbl type 2 && dmubbl 65536` fit in **one boot** (2zm's lesson paid
   before it costs anything). Nine hosttest assertions, the discriminating one
   being that changing the type changes **byte 16 and nothing else** in the 64.
+  **2zu (boot 279): ALL THREE control types, with ABM bound to the pipe, and
+  the panel does not move.** `dmubbl pipe` then `type 1` + level then `type 2`
+  + level, live on one boot: `sends ok/refused 7 / 0`, `acks/timeouts 7 / 0`,
+  `backlight/pipe 6 / 2`, byte 16 carrying **01** then **02**, level
+  `0x00010000` at offset 8, version 1, panel_mask 1. Nothing refuses, nothing
+  times out, and **nothing moves**. With 2zt's PWM result and boot 270's
+  independent falsification of PWM, **every value of `backlight_control_type`
+  is falsified on hardware, with and without the pipe bound** - the DMUB ABM
+  command route is exhausted at the command level.
+  **And `signature 0 of 128 slots ... ABSENT` was never a reading**:
+  `dmubScanPlaus` indexed `dmubWinScan[dmubWin * 4 + 1]` where that array
+  holds the **seven CW windows** (28 entries), so `dmubWin` 7 read entries 29
+  and 31 **past the end of the member array**, and the boot's own output had it
+  contradicting `dmubRegScan`'s `run 37` on the same memory. Fixed by indexing
+  the table the window is in. Rule 16 and rule 14 together.
+  **What is left is a question for the panel, not another instrument.** Every
+  software route reachable here now writes correctly and changes nothing: the
+  PWM register on three parameter keys, the ABM command on three control
+  types. The cheapest remaining discriminator is outside the driver - **do the
+  keyboard's own brightness keys move this panel?** If they do, something on
+  this machine moves the backlight and that is the route; if they do not,
+  nothing moves it in software. Rule 45: the human observation is the
+  instrument, and this is the one nobody has recorded.
   **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty
