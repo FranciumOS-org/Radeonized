@@ -212,6 +212,7 @@ public:
     uint32_t dmubSendRefuse=0, dmubSendWptr=0;
     uint64_t dmubAcks=0, dmubAckSpins=0, dmubBlSends=0, dmubPipeSends=0;
     long     dmubBlLast=-1;
+    uint32_t dmubBlType=RB_DMUB_BL_CONTROL_PWM, dmubBlAuxInst=0, dmubBlTypeSets=0;
     uint32_t dmubCapsSends=0, dmubReplyVerdict=0, dmubReplySlot=0;
     uint32_t dmubConfirms=0;
     uint32_t dmubGpintSends=0, dmubGpintRefuse=0, dmubGpintSent=0;

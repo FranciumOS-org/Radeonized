@@ -102,7 +102,41 @@
 /* dmub_cmd.h:5767-5780. 0 is the PWM control this panel's BL_PWM block is
  * wired for; 1 and 2 are the AUX methods that 2zl showed are reachable only
  * from edp_set_backlight_level_nits. */
-#define RB_DMUB_BL_CONTROL_PWM  0u
+#define RB_DMUB_BL_CONTROL_PWM       0u
+#define RB_DMUB_BL_CONTROL_VESA_AUX  1u
+#define RB_DMUB_BL_CONTROL_AMD_AUX   2u
+#define RB_DMUB_BL_CONTROL_COUNT     3u
+
+/* 2zt: THE CONTROL TYPE IS NOW A DIAL, AND IT IS THE LAST UNTRIED ONE.
+ *
+ * Boot 278 settled the other live hypothesis by exercising it: the three
+ * parameter keys ("brightness" -> RBAMDBacklightParams.cpp, "brig" ->
+ * IOFramebufferParameterHandler -> setAttributeForConnection, and
+ * "linear-brightness") all land the SAME write, read back bit-identical
+ * (RBFBBlLastCount == RBFBBlReadback == 16800, RBFBBlLastLevel 17203 !=
+ * RBFBBlLevel0 22784), with RBFBBlLiveDiffs 0 over 2164 reads - and the
+ * panel moved on none of them. So the boot-249 route is not a regression
+ * and 2zl stands: BL_PWM_CNTL is real, writable, uncontested and not the
+ * control surface.
+ *
+ * What has never been varied is the ONE byte the ABM command carries that
+ * says which output stage the level is for. Every send so far has written
+ * 0 = PWM, which boot 270 falsified independently - the register held our
+ * duty cycle for 40 s with nothing else writing it and the panel unmoved.
+ * 1 = VESA_AUX and 2 = AMD_AUX are the two the firmware also understands.
+ *
+ * 2zl read these as reachable only from edp_set_backlight_level_nits, which
+ * is true of LINUX's call graph and is not a statement about the FIRMWARE's
+ * command handler: dmub_cmd.h puts the field in dmub_cmd_abm_set_backlight_data
+ * itself, so any SET_BACKLIGHT may carry any of the three. Linux's choice of
+ * caller is not the firmware's validation.
+ *
+ * It is a settable property rather than a build-time constant because three
+ * values of one byte would otherwise cost three boots, and 2zm already
+ * established that every dial this project owned being a boot-arg is why
+ * 2xn/2zb/2zc spent three boots on three points of one curve. */
+static inline int rb_dmub_bl_type_ok(long t)
+{ return t >= 0 && t < (long)RB_DMUB_BL_CONTROL_COUNT; }
 
 /* dmub_cmd.h:63-74. */
 #define RB_DMUB_SET_ABM_PIPE_NORMAL             1u
@@ -689,7 +723,9 @@ static inline uint32_t rb_dmub_get32(const uint8_t *buf, uint32_t off)
 static inline void rb_dmub_build_set_backlight(uint8_t *buf,
                                                uint32_t level_u16_16,
                                                uint32_t frame_ramp,
-                                               uint8_t panel_mask)
+                                               uint8_t panel_mask,
+                                               uint32_t ctrl_type,
+                                               uint8_t aux_inst)
 {
     uint32_t i;
 
@@ -702,9 +738,14 @@ static inline void rb_dmub_build_set_backlight(uint8_t *buf,
     rb_dmub_put32(buf, 8, level_u16_16);
     buf[12] = (uint8_t)RB_DMUB_ABM_CONTROL_VERSION_1;
     buf[13] = panel_mask;
-    buf[14] = 0u;                               /* aux_inst */
+    /* aux_inst is documented in dmub_cmd.h only as "AUX HW Instance", so for
+     * a PWM send it stays the zero dmub_abm_lcd.c leaves it (the recurring
+     * error: no value invented for a field whose consumer is unread). For an
+     * AUX send it is the caller's, because then it is load-bearing and the
+     * only instance this machine has an eDP on is 0. */
+    buf[14] = aux_inst;
     buf[15] = 0u;                               /* pad[1] */
-    rb_dmub_put32(buf, 16, RB_DMUB_BL_CONTROL_PWM);
+    rb_dmub_put32(buf, 16, ctrl_type);
     /* 20..35: min/max_luminance, min/max_backlight_pwm - all zero. */
 }
 

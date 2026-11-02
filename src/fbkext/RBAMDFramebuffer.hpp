@@ -438,6 +438,13 @@ private:
     uint64_t           dmubBlSends;
     uint64_t           dmubPipeSends;
     long               dmubBlLast;     /* -1 until one is sent */
+    /* 2zt: the SET_BACKLIGHT control type, settable so one boot can try all
+     * three. Defaults to RB_DMUB_BL_CONTROL_PWM, which is what every send
+     * before 2zt carried, so an unset boot reproduces boot 274/277 exactly.
+     * aux_inst is only non-zero for an AUX type. */
+    uint32_t           dmubBlType;
+    uint32_t           dmubBlAuxInst;
+    uint32_t           dmubBlTypeSets;   /* how many times it was changed */
     /* The byte-level identification (2zq). dmubPush copies the command it
      * was handed into dmubReplySent and, after the ack, copies the same 64
      * bytes back out of the ring into dmubReplyGot; the verdict is

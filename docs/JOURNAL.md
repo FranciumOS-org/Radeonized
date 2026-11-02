@@ -52633,3 +52633,171 @@ directions. Nothing in this milestone has touched hardware.
 **And no further backlight send until GPINT answers.** Boot 275's reading made
 "the panel did not move" strictly less informative, not more: there are now
 three live explanations where there were two, and none of them is about ABM.
+
+## 2zs — boot 276/277: `INBOX1_BASE_ADDRESS` was never unexplained, and the mailbox is REGION4
+
+**Boot 276 settled the DMCUB itself.** `dmubbl gpint` sent `0x10010000` to
+`DMCUB_GPINT_DATAIN1` and read back `0x00010000` — the firmware cleared the
+status nibble we set — `acked 1`, with `DMCUB_SCRATCH7` moving
+`0x00000001 -> 0x04001547` and `DMCUB_SCRATCH0` reading `0x00000002`. No
+memory, no window, no `mc2pa`, no mapping and no ring anywhere in that path.
+**The microcontroller is alive, is executing commands, and answers.** And the
+positive control came from a different register than the answer: `0x04001547`
+read as hex digits is **4.0.15.47**, the exact running version this project
+read off `DMCUB_SCRATCH0` in a level-2 probe long before any of this.
+
+(I misread my own tool first: it decoded the bytes as decimal and printed
+`4.0.21.71`. Rule 26 one more time — **ask what base a number is in**. The
+value only agreed with an independent reading once read as hex.)
+
+**So the ring was the problem, and the thing that located it had been
+published as "unexplained" since boot 271.** `DMCUB_INBOX1_BASE_ADDRESS`
+reads **0x80000000**, which is neither `DMUB_CW4_BASE` (0x64000000) nor its
+29-bit truncation (0x04000000) — and CW0..CW6 span 0x60000000..0x66ffffff, so
+**0x80000000 is outside region 3 entirely**. `dmub_dcn31_setup_mailbox` writes
+`REG_WRITE(DMCUB_INBOX1_BASE_ADDRESS, inbox1->base)` **untranslated**, so that
+register is the firmware's own statement of where its inbox is, and it is not
+in any CW window. `dmub_dcn31_setup_windows` programs
+`REGION5_OFFSET`/`_TOP_ADDRESS` but never a REGION5 *base* — regions 4/5/6 are
+**fixed-base apertures**, which is why no base register exists to compare.
+
+**2zp's six exact CW-base matches were never wrong and never relevant.** They
+confirm the *code* windows sit where Linux puts them. They say nothing about
+where this firmware put its ring. The layout agreement was a real
+identification of the wrong thing — which is the whole 2zo lesson at one level
+up: a selector built from what is known can still be known about the wrong
+object.
+
+**Boot 277 read REGION4 and it is the mailbox, at byte level.**
+
+```
+REGION4 * 0xf4_ffe00000 top 0x8000ffff [resolve 0, run 37, bad 0]
+REGION5   disabled
+REGION6   disabled
+```
+
+**`run 37, bad 0`** — 37 plausible command headers at a 64-byte stride,
+followed by empty slots, zero implausible ones — against WPTR == RPTR ==
+**2368 == 37 x 64** read from an independent register. **That is the byte-level
+identification four milestones lacked.** Note the shape of the evidence and
+why it is not 2zo's mistake: CW5's "128 of 128" was *dense trace data with no
+empty tail*, which any weak header test passes; REGION4 has exactly 37 and
+then **stops**, at exactly the count a second register predicts.
+
+And the "37 commands at bring-up" belief, withdrawn in 2zp because CW4's 8192
+bytes were all zeros, is **reinstated with bytes behind it** — it was an
+inference from a pointer, and now it is a reading of memory that agrees with
+that pointer.
+
+MC `0xf4_ffe00000` -> system-physical **0x8_7fe00000**. `rb_dmub.h` resolves
+regions 4/5/6 into selector slots 7/8/9 (`rb_dmub_reg_locate`), keeps every
+resolvable window mapped in `dmubCand[]`, and publishes
+`rb_dmub_inbox_in_region3()` so a boot says whether a CW window could even be
+the mailbox. 13 new hosttest assertions, the controls included
+(`rb_dmub_inbox_in_region3(RB_DMUB_CW4_BASE)` is true, `0x80000000` is not).
+
+**`dmubbl win 7 && dmubbl caps` on the real ring: verdict still UNCHANGED.**
+`06 00 01 0e` went in and `06 00 01 0e` came back, byte 2 still `01`. So on
+the window the firmware itself names, with 37 of its own commands in it,
+**4.0.15.47 does not answer `QUERY_FEATURE_CAPS`** — explanation (1) of 2zr's
+three, now that (2) is excluded. `abm_aux_backlight_support` is therefore not
+obtainable this way.
+
+**And `SET_PIPE` + `SET_BACKLIGHT` on that ring did not move the panel.**
+`sends ok/refused 4 / 0`, `backlight/pipe 2 / 1`, `acks/timeouts 4 / 0`, bytes
+`42 02 00 20 | 00 00 00 00 | 00 10 00 00 | 01 01 00 00 | 00 00 00 00` — a
+byte-correct SET_BACKLIGHT, version 1, panel_mask 1, on the ring the firmware
+points at, acked. The command is right, the address is right, the
+microcontroller is alive, and the panel does not move.
+
+## 2zt — boot 278: the three parameter keys are the same write, so the regression hypothesis is dead and the control type is the last dial
+
+**The user's own account was the reason to stop building instruments:** the
+panel moved on boot **249**, by the direct command, *before* the slider was
+wired up at all. That makes this a regression hunt, not a design problem, and
+reading the evidence already in hand is this project's own stated practice.
+
+`git diff 6f4c88c..HEAD` over the backlight path:
+
+```
+ src/common/rb_regs.h                     |  14 ++
+ src/fbkext/RBAMDBacklightParams.cpp      | 374 +++++++++++++++++++++++++++++++
+ src/fbkext/RBAMDFramebufferBacklight.cpp | 158 +++++++++++++
+```
+
+**`src/common/rb_backlight.h` has ZERO changes since boot 249**, and the +158
+in `RBAMDFramebufferBacklight.cpp` are all reads and counters. The register
+write is byte-identical. What changed is **which key the write arrives on**,
+and boot 249's own journal entry says which one it used:
+
+```
+6 parameter(s): bgsc rgsc vblm brig ownr ggsc
+found it under the key "brig"
+set via "brightness"(0.6) -> 0xe00002c7 (kIOReturnUnsupported)
+set via "brig"(0.6)       -> 0x0 (OK)
+```
+
+`"brightness"` **failed** on boot 249 and `"brig"` carried it. Since 2y1/2y2
+`"brightness"` succeeds through `RBAMDBacklightParams.cpp`, a 374-line file
+that did not exist on boot 249 — and `blset` only fell back to `"brig"` **if
+`"brightness"` failed**, so **the route that worked has not been exercised
+once since boot 249.** A second argument now forces the key.
+
+**Boot 278 ran all three and they are the same write.**
+
+```
+blset 0.2 brightness   blset 0.9 brig   blset 0.2 lin     -> all 0x0 (OK)
+RBFBBlSets 52   RBFBBlLastLevel 17203 (!= RBFBBlLevel0 22784)
+RBFBBlLastCount 16800 == RBFBBlReadback 16800
+RBFBBlLiveDiffs 0 over RBFBBlLiveReads 2164
+RBFBBlRefuse 0   RBFBBlFloorRefused 0
+```
+
+`"brightness"` (`RBAMDBacklightParams.cpp`, an `IODisplayParameterHandler`),
+`"brig"` (`IOFramebufferParameterHandler` turning the `'parm'` FourCC into a
+4-character key and calling `setAttributeForConnection`) and
+`"linear-brightness"` (the key CoreBrightness actually writes) are three
+different paths to the same register, and the register takes the value, reads
+back bit-identical, is contested by nobody, and **the panel moves on none of
+them.** The boot-249 route is exercised and behaves exactly like the other
+two.
+
+**So hypothesis (b) — a path regression since boot 249 — is dead**, and 2zl
+stands unqualified: `BL_PWM_CNTL` is real, writable, uncontested and **not the
+control surface**. What the boot-249 observation was cannot be recovered from
+the evidence in hand, and inventing a reconciliation would be rule 17.
+
+**What has NEVER been varied is one byte.** Every SET_BACKLIGHT this project
+has sent carries `backlight_control_type` = **0 = PWM** at payload offset 16 —
+the one method **boot 270 independently falsified**, with `BL_PWM_CNTL`
+holding our duty cycle across a 40 s window, `RBFBBlLiveDiffs` pinned at 25
+proving no other writer, and the panel unmoved. `DMU_BACKLIGHT_CONTROL_PWM` 0,
+`_VESA_AUX` **1** and `_AMD_AUX` **2** are the three the ABI defines, and 1
+and 2 have never been sent.
+
+2zl read the AUX types as reachable only from
+`edp_set_backlight_level_nits`. That is true of **Linux's call graph** and is
+not a statement about the **firmware's command handler**: `dmub_cmd.h` puts
+the field in `dmub_cmd_abm_set_backlight_data` itself, so any SET_BACKLIGHT
+may carry any of the three. **Linux's choice of caller is not the firmware's
+validation** — the same distinction as rule 46, one level further in.
+
+**It is a settable property, not a build-time constant.** `RBFBDmubBlType`
+(with `RBFBDmubBlAuxInst`) sets the type for every *subsequent* send and sends
+nothing itself, so `dmubbl type 1 && dmubbl 65536` tries VESA_AUX and
+`dmubbl type 2 && dmubbl 65536` tries AMD_AUX **inside one boot** instead of
+three. 2zm's lesson applied before it costs anything: every dial this project
+owned was a boot-arg, which is why 2xn/2zb/2zc spent three boots on three
+points of one curve.
+
+Nine new hosttest assertions, the discriminating one being that changing the
+control type changes **byte 16 and nothing else** in the 64 — so a panel that
+moves on type 1 and not type 0 cannot be moving for any other reason (rule 45:
+one dial per observation). Verified failing in both directions: ignoring
+`ctrl_type` fails 2, also ignoring `aux_inst` fails 3.
+
+Also fixed, because it was a reading hazard the next boot would have been read
+against: with a region selected, `dmubbl` printed the mailbox as **"CW7"**.
+Slots 7/8/9 are REGION4/5/6 and are not CW windows at all — 2zs identified
+REGION4 as the mailbox and the tool kept calling it CW7 (rule 33: name the
+object a number belongs to).
