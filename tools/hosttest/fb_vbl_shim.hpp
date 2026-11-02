@@ -289,6 +289,17 @@ public:
     uint32_t auxEnMask=0, auxMatchMask=0;
     uint32_t otgLive[4]={0,0,0,0};
     void auxSample(void) {}
+    /* 2C0: the RDPCSTX PHY survey. Mirrored here because
+     * RBAMDFramebufferVBL.cpp compiles into the hosttest and publishes
+     * these - the 2B1 lesson, which cost three separate build breaks in one
+     * session. dpaltSample() lives in RBAMDFramebufferHUBP.cpp, which does
+     * not, so it is a stub exactly as hpdSample() and auxSample() are. */
+    uint32_t dpaltWord[5]={0,0,0,0,0};
+    uint32_t dpaltActiveMask=0, dpaltNotDisabledMask=0, dpaltEverNotDisabled=0;
+    uint64_t dpaltChanges=0;
+    int dpaltSweep=0;
+    bool dpaltArmed=false, dpaltReady=false;
+    void dpaltSample(void) {}
     /* 2BA, mirrored - the hosttest compiles RBAMDFramebufferVBL.cpp. */
     bool auxDpcdArmed=false, auxDpcdSuspect=false;
     uint64_t auxDpcdAttempts=0, auxDpcdOks=0;

@@ -573,6 +573,19 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * prefix property for tokens IN its table, and an opt-in token is not
          * in the table - so this one is checked by hand, here. */
         auxDpcdArmed = argOn("-rbgpufbaux");
+        /* 2C0. Rule 30 by hand again, for the same reason: this is an
+         * opt-in token and rb_defaults.h's hosttest only covers its own
+         * table. The kernel's parse is exact (token_len == strlen), so a
+         * shared prefix is harmless to it; what matters is that no token
+         * EQUALS another. -rbgpufbdpalt shares -rbgpufbd with -rbgpufbdrr and
+         * -rbgpufbdmubbl and diverges at p/r/m, and the derived negative
+         * -rbgpunofbdpalt is distinct on the same reasoning.
+         *
+         * Opt-in rather than default-on because this is the only register
+         * block in this kext whose documented failure mode is a HANG: Linux
+         * calls the path "Legacy path, avoid if possible". A boot that does
+         * not pass this reads exactly what every boot before it read. */
+        dpaltArmed = argOn("-rbgpufbdpalt");
         /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
          * scale. Rule 40: the value comes back as a BINARY INT of the
          * caller's width, so this is an int and not a char buffer - the bug

@@ -32,6 +32,7 @@ int hubp_tests(void);
 int hpd_tests(void);
 int aux_tests(void);
 int dpcd_tests(void);
+int dpalt_tests(void);
 int retire_tests(void);
 int backlight_tests(void);
 int defaults_tests(void);
@@ -862,6 +863,7 @@ int main(int argc, char **argv)
     failures += hpd_tests();
     failures += aux_tests();
     failures += dpcd_tests();
+    failures += dpalt_tests();
     failures += retire_tests();
     failures += backlight_tests();
     failures += defaults_tests();

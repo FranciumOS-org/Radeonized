@@ -1104,6 +1104,33 @@ table and refuses to install one that does not match the running kernel;
   inbox rather than reading a register, and the reply path is what 2zs never
   exercised (a GPINT, not an inbox reply) - a new surface in 2BA's sense, so
   the user's decision.
+  **2C0 REVERSES 2BE's recommendation, and the evidence was already in the
+  journal when 2BE wrote it.** Setting out to build the DMUB sweep, the first
+  check was whether this firmware answers an inbox command at all - and
+  **2zr measured that it does NOT**: boot 275's `QUERY_FEATURE_CAPS` came back
+  byte-identical with `ret_status` still set, no payload. `QUERY_DP_ALT`
+  replies by that same mechanism, so the sweep would have reproduced a known
+  failure. **GPINT cannot substitute** - 45 `DMUB_GPINT__*` commands, none for
+  DP alt. So the register it is, and the hang Linux warns of is conditioned on
+  DMCUB not running, which is **measured false** here (2zs's round trip).
+  **Rule 46 in the resource file a third time:** `dcn31_resource.c:86` includes
+  **`dpcs_4_2_0_offset.h`** - DCN 3.1.2 uses **DPCS 4.2.0**, and `RDPCS`
+  appears ZERO times in `dcn_3_1_2_offset.h`, so a guess at `dpcs_3_1_4` (which
+  exists) would have been wrong. `regRDPCSTX0..4_RDPCSTX_PHY_CNTL6` =
+  **0x2946 + i*0xd8**, BASE_IDX 2, five instances.
+  **The register is richer in the way that matters:** `PHY_CNTL6` carries four
+  per-lane `DP_TX{0..3}_{PSTATE,MPLL_EN}` pairs plus `DP_REF_CLK_EN`/`REQ`, so
+  the panel's own PHY must read active - **a positive control inside the
+  sample**, and an independent reading of the 2 lanes 2BB got from the sink's
+  DPCD. **And poorer in one: there is no `is_usb` bit**, so `DPALT_DISABLE`
+  clear is ambiguous between "active alt mode" and "not a Type-C PHY at all" -
+  2zw's shape exactly, so the enum has an explicit `ALT_AMBIGUOUS` member and
+  **the identification is a DIFFERENCE across a cable event** (2B4's method).
+  Opt-in **`-rbgpufbdpalt`**, read-only, no setter; the aperture bound is
+  deliberately NOT folded into `needed`, so an unarmed boot is unchanged and a
+  too-small aperture fails only the PHY read, never the panel.
+  `tools/dpaltlook.sh`. Framebuffer **13533FFA**. **Built and hosttested, NOT
+  RUN** - no boot has taken a reading.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the
@@ -1648,6 +1675,12 @@ against that; 2xx is what a WindowServer that dislikes its framebuffer costs.
 Mutually exclusive with `-rbgpufbdrr`, checked in `drrSetup()` rather than
 documented, because the experiment would see our own `V_TOTAL_CONTROL` and
 refuse with "the firmware owns DRR"),
+`-rbgpufbdpalt` (2C0 - the RDPCSTX PHY read. Read-only
+with no setter, but it is the one register block in this kext whose documented
+failure mode is a **hang**: Linux marks the path "Legacy path, avoid if
+possible". The hang is conditioned on DMCUB not running and 2zs measured it
+running, so the condition is measured false rather than assumed - which is an
+argument for trying it, not for defaulting it on),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbdmubbl` (2zn - producing on
 DMCUB's inbox 1 is a new hardware-write surface, and even armed nothing is
 sent until `build/out/dmubbl` names a level; the locate and the bring-up scan

@@ -405,6 +405,19 @@ private:
     bool               auxEdidHeaderOk;
     bool               auxEdidSumOk;
     uint8_t            auxEdidData[128];
+    /* 2C0: the five RDPCSTX PHY blocks (DP alt mode, lane power, ref clock).
+     * Opt-in, read-only, resampled every periodic publish so a cable event
+     * needs no reboot. dpaltEverNotDisabled ORs every not-disabled mask seen,
+     * because the IDENTIFICATION is a difference across a cable event (2B4's
+     * method) and a periodic publish is stale by design (rule 31). */
+    uint32_t           dpaltWord[5];   /* RB_DPALT_COUNT, last raw words     */
+    uint32_t           dpaltActiveMask;
+    uint32_t           dpaltNotDisabledMask;
+    uint32_t           dpaltEverNotDisabled;
+    uint64_t           dpaltChanges;   /* transitions of the not-disabled mask */
+    int                dpaltSweep;     /* enum rb_dpalt_sweep: the control   */
+    bool               dpaltArmed;     /* -rbgpufbdpalt                      */
+    bool               dpaltReady;     /* the aperture covered the registers */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -825,6 +838,11 @@ private:
     /* 2B8: read the AUX engines and the live OTG words. Read-only, same
      * mapping, same arming as hpdSample(). */
     void auxSample(void);
+    /* 2C0: the RDPCSTX PHY survey. Same segment and same arming shape as
+     * hpdSample(), but gated on dpaltArmed as well, because this is a PHY
+     * block this project has never read and Linux's own comment warns the
+     * access can hang when DMCUB is not running. */
+    void dpaltSample(void);
     /* 2BA: a native AUX read of the sink's DPCD on the engine bound to `hpd`.
      * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
      * bounded; refuses rather than racing when the DMCUB owns the engine. */

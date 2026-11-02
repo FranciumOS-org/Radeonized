@@ -55392,3 +55392,137 @@ a GPINT). So it is a new surface in the same sense the DPCD read was in 2BA,
 and it is the user's decision on the same grounds. **It is the cheapest
 remaining step that teaches anything**, and unlike every other output-side
 step it needs no display plugged in.
+
+## 2C0 — the RDPCSTX PHY read, and why the REGISTER beats the DMUB query here
+
+Built and hosttested, **not run**. Framebuffer **13533FFA**.
+
+**2BE's own recommendation is reversed, and the evidence for reversing it was
+already in the journal when 2BE was written.** 2BE ended by naming the
+`QUERY_DP_ALT` DMUB command as the cheapest next step and the register path as
+"the RISKY one", on the strength of Linux's comment that it prefers DMUB to
+avoid "hanging the RDCPSPIPE if DMCUB wasn't already running". Setting out to
+build the DMUB sweep, the first thing worth checking was whether this firmware
+answers an inbox command at all - and **2zr already measured that it does
+not.** Boot 275 pushed `QUERY_FEATURE_CAPS` into slot 0x940, WPTR advanced,
+RPTR followed, and the slot read back **byte-identical with `ret_status` still
+set**: verdict UNCHANGED, no payload. `QUERY_DP_ALT` returns its answer by
+exactly that mechanism - `DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY` writes the reply
+into the command slot - so on this firmware the sweep would very likely have
+returned nothing, for the three reasons 2zr could not discriminate.
+
+**So the instrument would have reproduced a known failure, and the cost of
+finding that out was one grep of the journal.** This is the recurring error in
+its "read the evidence already in hand before designing the next experiment"
+form (2kx/2la/2lc tested something a photograph had excluded; 2s5 found the
+answer in nine captures nobody had read together). The difference this time is
+only that it was caught before the build rather than after a boot.
+
+**And GPINT cannot substitute.** The GPINT route is the one measured working
+on this firmware (2zs, with a positive control from a different register), but
+the full `DMUB_GPINT__*` enumeration in `dmub_cmd.h` has **no DP alt entry** -
+45 commands, none of them this. So the working transport does not carry the
+question.
+
+**That leaves the register, and three things make it the better option here
+rather than merely the remaining one.** The hang Linux warns about is
+conditioned on DMCUB not running, and DMCUB 4.0.15.47 is demonstrably alive on
+the GPINT round trip, so the precondition is **measured false** instead of
+assumed false. It is BASE_IDX 2, the same segment the OTG, HUBP, HPD and AUX
+reads already come from, so there is no new mapping. And it is read-only with
+no setter, like 2B3 and 2B8. **None of that makes it free** - it is still a PHY
+block this project has never touched, and the failure mode Linux names is a
+hang rather than a refused value, which is why it is opt-in.
+
+**RULE 46 DISCHARGED IN THE RESOURCE FILE FOR THE THIRD TIME.**
+`dcn31_resource.c:86` includes **`dpcs/dpcs_4_2_0_offset.h`** - DCN 3.1.2 uses
+the **DPCS 4.2.0** register set. `dpcs_3_1_4_offset.h` exists upstream, which
+is precisely what makes the wrong guess plausible, and `RDPCS` appears **zero**
+times in `dcn_3_1_2_offset.h`, so the registers are not in the DCN header at
+all. The version came out of an include line rather than out of the DCN
+version number. Same shape as 2B8 finding DCN 3.1 uses the DCE110 AUX engine
+verbatim, and as 2B9 finding the AUX-to-HPD mapping was a field.
+
+`regRDPCSTX0..4_RDPCSTX_PHY_CNTL6` = **0x2946, 0x2a1e, 0x2af6, 0x2bce,
+0x2ca6**, all BASE_IDX 2, stride **0xd8** checked across all four gaps rather
+than derived from the first two (rule 18).
+
+**THE REGISTER IS RICHER THAN THE DMUB QUERY, IN THE ONE WAY THAT MATTERS AND
+POORER IN ANOTHER.** `PHY_CNTL6` carries thirteen fields, not three:
+
+```
+  RDPCS_PHY_DPALT_DP4           0x00010000   bit 16
+  RDPCS_PHY_DPALT_DISABLE       0x00020000   bit 17
+  RDPCS_PHY_DPALT_DISABLE_ACK   0x00040000   bit 18
+  RDPCS_PHY_DP_REF_CLK_EN       0x00080000   bit 19
+  RDPCS_PHY_DP_REF_CLK_REQ      0x00100000   bit 20
+  RDPCS_PHY_DP_TX{0..3}_PSTATE  0x3 << (tx*4)
+  RDPCS_PHY_DP_TX{0..3}_MPLL_EN 0x4 << (tx*4)
+```
+
+**Richer: the four per-lane MPLL bits give a POSITIVE CONTROL INSIDE THE
+SAMPLE.** The panel is scanning while this runs - our HUBP0 writes have put the
+desktop on it since boot ~230 - so some PHY on this die must have its reference
+clock on or an MPLL enabled. If none of the five does, the five words are not
+the five PHY blocks, and a wrong base, a wrong stride or a gated aperture all
+produce that reading. **That failure mode is measured, not hypothetical: boot
+273 read 8192 bytes of a correctly located DMUB ring as zeros.** So
+`rb_dpalt_sweep_verdict()` refuses an all-dark sweep, and the control comes
+from the same read as the answer rather than from a separate arrangement. The
+lane count is also a second, independent reading of `DPALT_DP4`, and a reading
+of the same quantity 2BB measured as **2 lanes** from the sink's own DPCD at
+the far end of the link - two ends of one link, by two unrelated routes.
+
+**Poorer: there is no `is_usb` bit, and that is the one thing the DMUB query
+has.** A PHY with `DPALT_DISABLE` clear is either in active alt mode or wired
+to nothing at all; the two read identically. **This is exactly 2zw's shape** -
+a register that is real, readable and attached to nothing reads like a working
+one - so the verdict enum has an explicitly ambiguous member,
+`RB_DPALT_ALT_AMBIGUOUS`, and the tool keeps saying "ACTIVE, or not a Type-C
+PHY at all" rather than picking the flattering branch. **The identification is
+therefore a DIFFERENCE across a cable event, which is how 2B4 identified HPD2
+in the first place.** With no monitor to hand, the no-cable run is the baseline
+half of that measurement rather than a wasted one.
+
+**Three design decisions worth recording, each the result of asking what the
+reading would mean:**
+
+ - **The aperture bound is NOT folded into `needed`.** 0x2ca6 is far above the
+   AUX engines' 0x1fcb, and folding it in would make every boot's panel depend
+   on an aperture large enough for a block only an opt-in read ever touches: an
+   unarmed boot would gain a stricter check for no benefit, and if it ever
+   failed, `hubpSetup()` would refuse and take the panel with it. The core
+   bound is unchanged and the PHY read gets its own, failing only itself.
+   Rule 16, in the form "the instrument must not be able to break what it is
+   measured beside".
+ - **A uniform sweep is deliberately NOT a refusal.** Five identical words is
+   a plausible and even expected reading with no cable attached, and refusing
+   it would make the instrument blind in the regime it exists to measure -
+   2A9's defect, where turning the hold off turned the measurement off. It is
+   reported as a fact and every raw word is published.
+ - **`RB_DPALT_SWEEP_NOT_SAMPLED` is 0.** Caught while wiring the publish: the
+   kext's `dpaltSweep` is zero before the first sample, and in the first draft
+   zero was `SWEEP_OK`, so an unsampled field would have published a **passing
+   control**. That is 2A3's defect from the other side - there a property that
+   was never republished could not move, here one never written would have
+   claimed success. The hosttest now pins NOT_SAMPLED to the zero value and
+   asserts `SWEEP_OK != 0`, so renumbering the enum cannot silently undo it.
+
+**The hosttest fails when the code it guards is broken, checked in three
+directions and not assumed.** Breaking the stride 0xd8 -> 0xd7 produced five
+`FAIL dpalt` lines; making `rb_dpalt_phy_active()` always true (which kills the
+sweep control) produced five more including "an all-dark sweep was accepted";
+and making `DISABLE` clear read as `ALT_DISABLED` - the false identification
+this whole header exists to refuse - produced "DISABLE clear is not
+AMBIGUOUS". The grep was for `error:` as well as `^FAIL`, because 2B1's
+`-Werror` trap has now fired twice and an empty FAIL grep reads exactly like
+"the test does not catch it".
+
+`tools/dpaltlook.sh` reads it, decodes per lane from the raw word, prints the
+sweep verdict **before** any value, and refuses to interpret an unrecognised
+one. Its per-lane decode was exercised against four synthetic words including
+a sign-extended `0xff0ff013`, since that path is in a shell script and not
+under the hosttest.
+
+**What this does NOT establish:** nothing. No boot has run it. The next
+reading is a no-cable baseline, and the identification needs the cable.
