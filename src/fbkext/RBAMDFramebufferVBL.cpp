@@ -487,6 +487,25 @@ void RBAMDFramebuffer::publishFrameTime(void)
     setProperty("RBFBFtPollMax", ftPoll.max_ns, 64);
 
     const uint64_t interval = rb_ft_interval_ns(&ftWork, &ftGap);
+
+    /* 2A2: the hold's measured share, published WITH its premise. The share
+     * is only meaningful if the GET gaps account for the interval, so
+     * RBFBFtGetsTilePm is published next to it and a reader that ignores it
+     * can be misled - which is why ftbudget prints the tiling first and
+     * refuses the share when it is off. */
+    {
+        const uint64_t pen = rb_ft_hold_penalty_ns(rb_ft_mean_ns(&ftRetry),
+                                                   rb_ft_mean_ns(&ftPoll));
+        const uint64_t hpt = rb_ft_holds_per_txn_pm(ftRetry.n, ftWork.n);
+        setProperty("RBFBFtHoldPenaltyNs", pen, 64);
+        setProperty("RBFBFtHoldsPerTxnPm", hpt, 64);
+        setProperty("RBFBFtHoldSharePm",
+                    rb_ft_hold_share_pm(pen, hpt, interval), 64);
+        setProperty("RBFBFtGetsTilePm",
+                    rb_ft_gets_tile_pm(rb_ft_mean_ns(&ftRetry), ftRetry.n,
+                                       rb_ft_mean_ns(&ftPoll), ftPoll.n,
+                                       ftWork.n, interval), 64);
+    }
     setProperty("RBFBFtIntervalNs", interval, 64);
     setProperty("RBFBFtRateMhz", rb_ft_rate_mhz(interval), 64);
 
@@ -943,6 +962,45 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
      * Turning it OFF is the control for rule 16: two mach_absolute_time()
      * reads per transaction is small, and "small" is a claim to be measured
      * like any other. */
+    /* 2A2: the 2xo hold, switchable live.
+     *
+     * 2A1 measured it owning ~21 % of the transaction interval, which matches
+     * the 27 % 2xo recorded when it was introduced - so this is a TRADE, not
+     * a bug: the hold is what stopped the compositor drawing into the live
+     * scanout, and 2xo's flicker is the cost of turning it off. It is a dial
+     * and not a removal for exactly that reason.
+     *
+     * Runtime rather than the existing -rbgpufbnotready boot-arg, because an
+     * A/B of this costs one reboot per side as an arg and nothing as a
+     * property - the 2zm lesson that 2zz and 2A1 both cashed in. It also
+     * means the recovery from the flicker is a command, not a power cycle.
+     *
+     * It can only ARM what the boot already set up: hubpArmed/hubpReady gate
+     * hubpHoldNotReady() regardless, so a 1 here on an unarmed boot changes
+     * nothing and the reader sees RBFBAmtrNotReady stay 0 (rule 38 - the two
+     * halves check each other instead of assuming).
+     *
+     * Switching it also zeroes the frame-time window, because a budget
+     * spanning both sides of this dial is a blend of two configurations and
+     * would read as a third (rule 39). */
+    {
+        OSNumber *h = OSDynamicCast(OSNumber,
+                                    dict->getObject("RBFBNotReady"));
+        if (h) {
+            const long want = (long)h->unsigned32BitValue();
+            if (want != 0 && want != 1) { return kIOReturnBadArgument; }
+            amtrNotReady = (want != 0);
+            rb_ft_reset(&ftWork); rb_ft_reset(&ftGap);
+            rb_ft_reset(&ftGet);  rb_ft_reset(&ftVbl);
+            rb_ft_reset(&ftRetry); rb_ft_reset(&ftPoll);
+            ftPrevExit = 0; ftPrevGetExit = 0; ftPrevGetHeld = false;
+            ftResets++;
+            publishVBLState();
+            LOG("RBFBNotReady -> %d (2xo hold %s), frame-time window zeroed",
+                amtrNotReady ? 1 : 0, amtrNotReady ? "ON" : "OFF");
+            return kIOReturnSuccess;
+        }
+    }
     {
         OSNumber *f = OSDynamicCast(OSNumber, dict->getObject("RBFBFtOn"));
         if (f) {

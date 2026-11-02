@@ -786,6 +786,9 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * `nvram rbgpu-fb rbgpu-safe` say which of the three reasons it was. */
         setProperty("RBFBArmWhy", (UInt64)armRefuseWhy, 32);
         setProperty("RBFBAmtrArmed", amtrArmed);
+        /* 2A2: the hold is a runtime dial now, so its state must be readable
+         * or an A/B cannot verify which side it is on (rule 20). */
+        setProperty("RBFBAmtrNotReady", amtrNotReady);
         if (atyOn) {
             UInt32 mb = kAtyOffsetDefaultMB;
             int want = 0;
