@@ -7,10 +7,11 @@
 # could plausibly run on. An engine with AUX_EN clear or a zero DPHY word was
 # never brought up.
 #
-# The AUX-instance-to-connector mapping is in NO header - 2B4 had to find the
-# HPD one by unplugging the cable. So instance 0 is compared against as a
-# stated assumption and every raw word is printed, because the assumption may
-# be wrong and the words are what settle it.
+# 2B9: the AUX-to-connector mapping is NOT missing after all - AUX_CONTROL
+# carries AUX_HPD_SEL (bits 20-22) and the firmware filled it in. So the
+# binding below is READ, not assumed, and the reply byte count says whether a
+# sink has ever answered on that engine. The count is STICKY, so it is past
+# tense: it proves the channel reaches a sink, not that the sink answers now.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
@@ -35,10 +36,18 @@ while [ "$i" -lt 5 ]; do
     c=$(rd "RBFBAux${i}Ctl"); d=$(rd "RBFBAux${i}Dphy")
     s=$(rd "RBFBAux${i}Stat"); a=$(rd "RBFBAux${i}Arb")
     if [ $((en & bit)) -ne 0 ]; then
-        if [ "$i" = 0 ]; then note="ENABLED (the assumed reference)"
-        elif [ $((match & bit)) -ne 0 ]; then
-            note="ENABLED and matches instance 0  <-- a transaction could run here"
-        else note="ENABLED but timed differently from instance 0"
+        sel=$(python3 -I -c 'import sys; print((int(sys.argv[1]) >> 20) & 7)' "${c:-0}" 2>/dev/null)
+        rep=$(python3 -I -c 'import sys; print((int(sys.argv[1]) >> 24) & 31)' "${s:-0}" 2>/dev/null)
+        done_bit=$((${s:-0} & 1))
+        if [ "${rep:-0}" -gt 0 ] && [ "$done_bit" -ne 0 ]; then
+            said="a sink HAS replied here (${rep} bytes, sticky)"
+        else
+            said="no reply recorded"
+        fi
+        if [ $((match & bit)) -ne 0 ] || [ "$i" = 0 ]; then
+            note="ENABLED, bound to HPD${sel:-?}, timed like the panel - $said"
+        else
+            note="ENABLED, bound to HPD${sel:-?}, timed DIFFERENTLY - $said"
         fi
     else
         # AUX_EN clear: this engine was never brought up, and a transaction on
@@ -71,9 +80,10 @@ done
 
 echo
 echo "How to read it, with the cable PLUGGED IN:"
-echo "  * AUX2 enabled and matching instance 0 -> the engine for the Type-C"
-echo "    port is already configured, and a DPCD read is the next step."
-echo "  * AUX2 with AUX_EN clear -> the engine is ours to bring up first,"
-echo "    which is a new write surface on a block the DMCUB also arbitrates."
+echo "  * the engine bound to HPD2 is the Type-C port's (2B4). Enabled, timed"
+echo "    like the panel and with a recorded reply -> the channel reaches the"
+echo "    sink and a DPCD read is the next step."
+echo "  * AUX_EN clear on it -> the engine is ours to bring up first, a new"
+echo "    write surface on a block the DMCUB also arbitrates."
 echo "  * OTG1..3 all 0x300 -> nothing has lit a second pipe, so the black"
 echo "    screen is not a half-configured pipe we could finish."

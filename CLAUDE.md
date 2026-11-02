@@ -900,10 +900,38 @@ table and refuses to install one that does not match the running kernel;
   pipe lit with the cable in; **`RBFBAmtrNotReadyArmed` is now a real
   snapshot**; and the HPD raw words publish at 64 bits.
   `tools/auxlook.sh` reads it. Framebuffer **E24F30C2**.
-  **What the reading decides, cable in:** AUX2 enabled and matching instance 0
-  -> a DPCD read is a small bounded next step. AUX2 with `AUX_EN` clear -> the
-  engine is ours to bring up, a new write surface and a decision. OTG1..3 all
-  0x300 live -> nothing lit a second pipe, so the whole chain is ours.
+  **2B9 ANSWERED IT, with the best of the four outcomes (boot 293).** AUX2 is
+  **enabled with `dphy` 0x00016400, BIT-IDENTICAL to the panel's AUX0**,
+  against 0x00004500 on the three never brought up. **`AUX_EN` mask 0x05 is
+  the same pair as 2B4's HPD sink mask 0x05** - two independent instruments,
+  neither derived from the other.
+  **THE MAPPING WAS A FIELD ALL ALONG: `AUX_CONTROL.AUX_HPD_SEL` (bits 20-22)
+  reads 0 on AUX0 and 2 on AUX2**, the only difference between those two
+  control words. So the engine names its own connector, and 2B8's "the
+  AUX-to-connector mapping is in no header" - written twice, with a
+  cable-unplugging method built around it - was wrong; `rb_aux_for_hpd()` now
+  looks it up. **Same shape as 2B1's triple-buffer bit: documented in a file
+  already in the tree and never asked about. When a fact looks unobtainable,
+  read the register definition before designing an experiment to infer it.**
+  **AND A SINK HAS ALREADY REPLIED ON AUX2**: `AUX_SW_DONE` set with
+  `AUX_SW_REPLY_BYTE_COUNT` **2 on AUX0, 1 on AUX2**. The AUX channel is proven
+  end to end **without this project issuing a transaction** - the firmware
+  probed that connector. **Past tense on purpose: the status is STICKY**, so it
+  says the channel reaches a sink, not that the sink answers now (rule 33 of a
+  status register). `rb_aux_sink_replied()` needs enabled + DONE + a non-zero
+  count, and DONE with a zero count must NOT read as a reply.
+  `arb` 0 on both (nothing holds the lock) and **OTG1..3 all 0x300 LIVE with
+  the cable in** - answerable for the first time - so no pipe is lit and the
+  pipe chain is entirely ours.
+  **Every remaining unknown is DOWNSTREAM of AUX**: DPCD, EDID, link training,
+  then OTG/HUBP/DIG and a second `IOFramebuffer`. Long but located.
+  **And the next step's risk is better than it looked**: a DPCD read takes
+  `AUX_ARB_CONTROL` on **AUX2**, an engine driving nothing this desktop needs,
+  with the panel's AUX0 untouched. The DMCUB still arbitrates - now over a
+  spare engine rather than the one holding the display up.
+  **No rebuild was needed**: the raw words were already published, so
+  `auxlook.sh` decodes it from the registry. Publishing raw beside summary paid
+  for itself a third time (2B0, 2B4, this).
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the

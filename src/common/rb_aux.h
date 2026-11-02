@@ -75,6 +75,24 @@
 #define RB_AUX_EN                 0x00000001u
 #define RB_AUX_LS_READ_EN         0x00000100u
 
+/* 2B9: the AUX-to-HPD binding is NOT absent from the headers after all - it
+ * is a field in AUX_CONTROL, and the firmware filled it in. Boot 293 read
+ * AUX0 HPD_SEL 0 and AUX2 HPD_SEL 2, so the engine for the Type-C port names
+ * its own connector and 2B8's "instance 0 is the assumed reference" stops
+ * being an assumption. Which is the better lesson for the next time something
+ * looks unobtainable: the mapping was one field away the whole time. */
+#define RB_AUX_HPD_SEL_MASK       0x00700000u
+#define RB_AUX_HPD_SEL_SHIFT      20u
+
+/* AUX_SW_STATUS. The byte count is STICKY - it survives the transaction it
+ * belonged to - so a non-zero count with DONE set says the sink replied at
+ * least once on this engine, and says NOTHING about whether it is replying
+ * now (rule 33's shape for a status register: establish WHEN a reading is
+ * from, and this one cannot say). */
+#define RB_AUX_SW_DONE            0x00000001u
+#define RB_AUX_REPLY_COUNT_MASK   0x1f000000u
+#define RB_AUX_REPLY_COUNT_SHIFT  24u
+
 enum rb_aux_reg {
     RB_AUX_REG_CONTROL = 0,
     RB_AUX_REG_SW_CONTROL,
@@ -119,6 +137,43 @@ static inline uint32_t rb_aux_dw_max(void)
 
 static inline int rb_aux_enabled(uint32_t control)
 { return (control & RB_AUX_EN) != 0u; }
+
+/* Which HPD block this engine is bound to, straight out of the hardware. */
+static inline uint32_t rb_aux_hpd_sel(uint32_t control)
+{ return (control & RB_AUX_HPD_SEL_MASK) >> RB_AUX_HPD_SEL_SHIFT; }
+
+static inline int rb_aux_sw_done(uint32_t status)
+{ return (status & RB_AUX_SW_DONE) != 0u; }
+
+static inline uint32_t rb_aux_reply_count(uint32_t status)
+{ return (status & RB_AUX_REPLY_COUNT_MASK) >> RB_AUX_REPLY_COUNT_SHIFT; }
+
+/* Has a sink ever replied on this engine? Enabled, DONE, and a non-zero reply
+ * byte count. Deliberately past tense: the status is sticky, so this is
+ * evidence the channel reaches a sink and NOT evidence about the sink now. */
+static inline int rb_aux_sink_replied(uint32_t control, uint32_t status)
+{
+    if (!rb_aux_enabled(control)) { return 0; }
+    if (!rb_aux_sw_done(status)) { return 0; }
+    return rb_aux_reply_count(status) != 0u;
+}
+
+/* The engine bound to a given HPD block, or RB_AUX_COUNT when none is. This
+ * is what replaces "assume instance 0" and "assume instance N pairs with
+ * HPD N" - both guesses, where the hardware carries the answer. */
+static inline unsigned rb_aux_for_hpd(const uint32_t *control, unsigned count,
+                                      uint32_t hpd)
+{
+    if (!control) { return RB_AUX_COUNT; }
+    if (count > RB_AUX_COUNT) { count = RB_AUX_COUNT; }
+    for (unsigned i = 0; i < count; i++) {
+        if (rb_aux_enabled(control[i]) &&
+            rb_aux_hpd_sel(control[i]) == hpd) {
+            return i;
+        }
+    }
+    return RB_AUX_COUNT;
+}
 
 static inline uint32_t rb_aux_enabled_mask(const uint32_t *control,
                                            unsigned count)
