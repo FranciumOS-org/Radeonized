@@ -53673,3 +53673,67 @@ decision not to flip it is what made this a reverted boot-arg instead of a
 regression shipped to every armed boot. `sudo ./build/out/holdset 1` restores
 the hold live; `sudo tools/efi.sh bootarg remove -rbgpunofbnotready` puts the
 next boot back.
+
+---
+
+## 2A7 — the hold ON is the answer; and 2A6's mechanism claim is CORRECTED
+
+**The user resolved 2A6's ambiguity: the flicker has NEVER been seen with the
+hold on.** So "80 % less flickering" meant less than expected, not that the
+hazard survives the fix. **2xo stands in full**, the hold removes the hazard
+as far as anyone has observed, and the configuration question is closed: the
+hold stays default-on, 141 sets/s is not available, and ~91 with a correct
+desktop is the shipping behaviour.
+
+**And a mechanism I asserted in 2A6 is wrong.** 2A6 said the hardware
+"finishes well inside the next vblank" and framed the whole cost as Apple's
+retry granularity. `rb_hubp.h` already records that the flip is **vsync'd**
+(`RB_HUBP_FLIP_TYPE` 0 = vsync'd, 1 = immediate), so `SURFACE_FLIP_PENDING`
+**cannot** clear before the next vblank - and 2A5's `mean vblanks` **1.066**
+says it clears *at* about the next one, not well inside it. I took two numbers
+(4.384 ms retry, 2.771 ms poll) and narrated a mechanism from their
+difference, which is rule 17's exact shape in a session that had already
+caught itself doing it twice.
+
+**What survives, as a weaker and testable statement.** One vblank of every
+hold is hardware time no answer of ours can skip. Apple asks again every
+~4.4 ms while the latch resolves on a ~6.95 ms boundary, so **an ask can miss
+the boundary and cost another whole round trip** - and that part, if it is
+happening, is phase rather than physics. The arithmetic is consistent with it:
+no-hold ran 141/s = 7.08 ms interval, about one vblank per transaction, while
+hold-on ran ~91/s = ~11 ms, about 1.6 vblanks. The missing ~0.6 vblank is
+either the phase or something else, and **2A6 asserted the first without
+measuring.**
+
+**So this milestone measures it instead of arguing about it.** Two
+accumulators, filed from the same `getAttribute('amtr')` path:
+
+- **`ftLatchWait`** - wall time from the FIRST held GET of a run to the GET
+  that finally answers ready, which is the one that saw the flip latched. That
+  is everything one flip cost Apple.
+- **`ftHoldRunAsks`** - how many GETs that run took.
+
+Published as `RBFBFtLatchWaitNs/N/Max`, `RBFBFtHoldAsksPm` and
+`RBFBFtHoldRunsN`, and `ftbudget` prints the wait **in vblanks** with its ask
+count. The two readings discriminate, which is the whole point:
+
+- **~1 vblank, ~1 ask** -> the hold pays the HARDWARE. The flip cannot latch
+  sooner, there is nothing to recover, and ~36 % is simply the price of the
+  2xo fix. That closes the frame-rate line for good.
+- **~2 vblanks, ~2 asks** -> the second ask arrived after the latch was
+  already done, the phase is the cost, and there is something to attack.
+
+A run that never closes (a mode set, the pipe going away) files nothing, and
+that is visible as `RBFBFtLatchWaitN` **below** `RBFBFtWorkN` rather than as a
+cheap-looking mean (rule 14).
+
+**The hosttest asserts the two cases land on opposite sides of the 1.35-vblank
+line `ftbudget` uses**, that the ask counts corroborate independently so a
+wrong latch reading cannot pass alone, and that an unclosed run reads as a
+zero count. Breaking `rb_ft_add`'s max tracking makes the suite exit 2.
+
+**Nothing about the hold changed.** This is instrumentation only, on a
+configuration that is now settled: the hold is on, and the question is whether
+its price is physics or phase.
+
+Framebuffer **614ED4BC** (2A4-2A6 ran A80C7720).

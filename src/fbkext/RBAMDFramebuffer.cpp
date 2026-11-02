@@ -413,6 +413,10 @@ bool RBAMDFramebuffer::start(IOService *provider)
     ftPrevGetHeld = false;
     rb_ft_reset(&ftRetry);
     rb_ft_reset(&ftPoll);
+    ftHoldStart = 0;
+    ftHoldAsks = 0;
+    rb_ft_reset(&ftLatchWait);
+    rb_ft_reset(&ftHoldRunAsks);
     amtrFlipSnapped = false;
     amtrFlipPtr = 0;
     amtrFlipRefused = 0;
@@ -1503,6 +1507,28 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
                 }
                 ftPrevGetExit = ftG1;
                 ftPrevGetHeld = hold;
+
+                /* 2A7: bracket one flip's worth of holding. The run opens on
+                 * the first held GET and closes on the first GET after it
+                 * that answers ready, which is the one that saw the flip
+                 * latched - so ftLatchWait is everything this flip cost
+                 * Apple, and ftHoldRunAsks is how many round trips it took.
+                 * A run that never closes (a mode set, the pipe going away)
+                 * simply files nothing, which is the right answer: rule 14
+                 * wants the absence visible, and it is - as an ftLatchWait.n
+                 * lower than ftWork.n. */
+                if (hold) {
+                    if (ftHoldStart == 0) { ftHoldStart = ftG0; }
+                    ftHoldAsks++;
+                } else if (ftHoldStart != 0) {
+                    ftFile(&ftLatchWait, ftHoldStart, ftG1, true);
+                    /* The ask count rides in an rb_ft_acc so it gets the same
+                     * mean/max/n treatment as everything else; the unit is a
+                     * count, not ns, and nothing divides it by a clock. */
+                    rb_ft_add(&ftHoldRunAsks, ftHoldAsks, 0);
+                    ftHoldStart = 0;
+                    ftHoldAsks = 0;
+                }
             }
             if (hold) {
                 return kIOReturnNotReady;

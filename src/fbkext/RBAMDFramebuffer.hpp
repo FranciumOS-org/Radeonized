@@ -652,6 +652,29 @@ private:
     bool               ftPrevGetHeld;
     struct rb_ft_acc   ftRetry;     /* previous GET was HELD              */
     struct rb_ft_acc   ftPoll;      /* previous GET answered ready        */
+    /* 2A7: how much of a hold is the LATCH and how much is Apple's phase.
+     *
+     * The flip is vsync'd (RB_HUBP_FLIP_TYPE 0), so SURFACE_FLIP_PENDING
+     * cannot clear before the next vblank - the wait is real hardware time,
+     * not something a cleverer answer can skip. What MIGHT be recoverable is
+     * the part after it: Apple asks again every ~4.4 ms (2A2) while the latch
+     * resolves on a ~6.95 ms boundary, so an ask can miss the boundary and
+     * cost another whole round trip.
+     *
+     * ftLatchWait is the wall time from the FIRST held GET of a run to the
+     * GET that finally finds the flip latched - everything we cost Apple for
+     * one flip. ftHoldAsks is how many GETs that run took. Together they
+     * separate the two: if the wait is ~1 vblank and the asks are ~1, we are
+     * paying the hardware and there is nothing to win; if the wait is ~2
+     * vblanks and the asks are ~2, the second ask arrived after the latch was
+     * already done and the phase is the cost.
+     *
+     * This measures; it changes nothing about the hold (2A6: the hold stays,
+     * because the flicker is real). */
+    uint64_t           ftHoldStart;  /* stamp of the run's first held GET  */
+    uint64_t           ftHoldAsks;   /* held GETs in the current run       */
+    struct rb_ft_acc   ftLatchWait;  /* run start -> the GET that saw clear */
+    struct rb_ft_acc   ftHoldRunAsks;/* asks per run, in "ns" (count*1)    */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;

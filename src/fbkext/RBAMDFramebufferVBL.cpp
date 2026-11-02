@@ -483,6 +483,18 @@ void RBAMDFramebuffer::publishFrameTime(void)
     setProperty("RBFBFtRetryN",  ftRetry.n, 64);
     setProperty("RBFBFtRetryMax", ftRetry.max_ns, 64);
     setProperty("RBFBFtPollNs", rb_ft_mean_ns(&ftPoll), 64);
+    /* 2A7: the two halves of a hold. LatchWait is hardware time the flip
+     * genuinely needs (it is vsync'd, so it cannot clear early); HoldAsks
+     * says how many round trips Apple spent discovering that. Published with
+     * their counts, and LatchWait.n below ftWork.n means some runs never
+     * closed rather than that holding was cheap. */
+    setProperty("RBFBFtLatchWaitNs", rb_ft_mean_ns(&ftLatchWait), 64);
+    setProperty("RBFBFtLatchWaitN",  ftLatchWait.n, 64);
+    setProperty("RBFBFtLatchWaitMax", ftLatchWait.max_ns, 64);
+    setProperty("RBFBFtHoldAsksPm",
+                ftHoldRunAsks.n ? (ftHoldRunAsks.sum_ns * 1000ull)
+                                  / ftHoldRunAsks.n : 0ull, 64);
+    setProperty("RBFBFtHoldRunsN", ftHoldRunAsks.n, 64);
     setProperty("RBFBFtPollN",  ftPoll.n, 64);
     setProperty("RBFBFtPollMax", ftPoll.max_ns, 64);
 
@@ -1008,7 +1020,9 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             rb_ft_reset(&ftWork); rb_ft_reset(&ftGap);
             rb_ft_reset(&ftGet);  rb_ft_reset(&ftVbl);
             rb_ft_reset(&ftRetry); rb_ft_reset(&ftPoll);
+            rb_ft_reset(&ftLatchWait); rb_ft_reset(&ftHoldRunAsks);
             ftPrevExit = 0; ftPrevGetExit = 0; ftPrevGetHeld = false;
+            ftHoldStart = 0; ftHoldAsks = 0;
             ftResets++;
             publishVBLState();
             LOG("RBFBNotReady -> %d (2xo hold %s), frame-time window zeroed",
@@ -1028,9 +1042,13 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             rb_ft_reset(&ftVbl);
             rb_ft_reset(&ftRetry);
             rb_ft_reset(&ftPoll);
+            rb_ft_reset(&ftLatchWait);
+            rb_ft_reset(&ftHoldRunAsks);
             ftPrevExit = 0;
             ftPrevGetExit = 0;
             ftPrevGetHeld = false;
+            ftHoldStart = 0;
+            ftHoldAsks = 0;
             ftResets++;
             publishFrameTime();
             LOG("RBFBFtOn -> %d, accumulators reset (%llu)",
