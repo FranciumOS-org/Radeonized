@@ -61,6 +61,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpLast = 0;
     hubpReadback = 0;
     hubpFlipCtl = 0;
+    hubpPendCtl = 0;
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;
     hubpPendHits = 0;
@@ -364,17 +365,35 @@ void RBAMDFramebuffer::hubpPoll(void)
  * itself is rb_hubp_hold_notready() in src/common/rb_hubp.h, run by the
  * hosttest; this is only the register read. Called from getAttribute on the
  * accelerator's thread: two MMIO reads, no allocation, no log, no block. */
-bool RBAMDFramebuffer::hubpHoldNotReady(void)
+/* 2A9: the read, with no decision and no side effect.
+ *
+ * This used to be the first half of hubpHoldNotReady(), behind its
+ * `!amtrNotReady` guard - so turning the 2xo hold off stopped the bit being
+ * read at all, and every instrument built on it went silent in the one
+ * configuration where the flicker happens. Splitting them costs nothing (the
+ * caller reads the word once either way) and lets the frame-time budget
+ * bracket a pending run in both regimes. */
+bool RBAMDFramebuffer::hubpFlipPending(void)
 {
-    if (!amtrNotReady || !hubpReady || !hubpRegs) {
+    if (!hubpReady || !hubpRegs) {
         return false;
     }
     const uint32_t fc = hubpRegs[kRbDmuSeg2 +
                                  rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL)];
-    if (!rb_hubp_flip_pending(fc)) {
+    hubpPendCtl = fc;
+    return rb_hubp_flip_pending(fc);
+}
+
+/* The decision, on a pending flag the caller already read. Unchanged in
+ * behaviour: !amtrNotReady or a clear bit still answers ready, and the
+ * deadline is still the backstop that keeps the hold bounded (2xn). */
+bool RBAMDFramebuffer::hubpHoldNotReady(bool pending)
+{
+    if (!amtrNotReady || !pending) {
         return false;
     }
-    if (rb_hubp_hold_notready(fc, mach_absolute_time(), hubpFlipDeadline)) {
+    if (rb_hubp_hold_notready(hubpPendCtl, mach_absolute_time(),
+                              hubpFlipDeadline)) {
         amtrHeld++;
         return true;
     }

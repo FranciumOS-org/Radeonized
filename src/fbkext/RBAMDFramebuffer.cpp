@@ -417,6 +417,11 @@ bool RBAMDFramebuffer::start(IOService *provider)
     ftHoldAsks = 0;
     rb_ft_reset(&ftLatchWait);
     rb_ft_reset(&ftHoldRunAsks);
+    rb_ft_reset(&ftPendWait);
+    rb_ft_reset(&ftPendRunAsks);
+    rb_ft_hist_reset(&ftPendHist);
+    ftPendStart = 0;
+    ftPendAsks = 0;
     amtrFlipSnapped = false;
     amtrFlipPtr = 0;
     amtrFlipRefused = 0;
@@ -1491,7 +1496,13 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
          * unbounded hold would wedge the display. Reads two words of MMIO and
          * nothing else: no allocation, no log, no block (rule 31). */
         {
-            const bool hold = hubpHoldNotReady();
+            /* 2A9: read the bit when EITHER the hold needs it or the
+             * budget is on, so a hold-off boot still measures the pending
+             * run. One MMIO read per GET either way - the same cost the
+             * hold-on path has always paid. */
+            const bool pending = (amtrNotReady || ftOn) ? hubpFlipPending()
+                                                        : false;
+            const bool hold = hubpHoldNotReady(pending);
             if (ftOn) {
                 const uint64_t ftG1 = mach_absolute_time();
                 ftFile(&ftGet, ftG0, ftG1, true);
@@ -1528,6 +1539,24 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
                     rb_ft_add(&ftHoldRunAsks, ftHoldAsks, 0);
                     ftHoldStart = 0;
                     ftHoldAsks = 0;
+                }
+
+                /* 2A9: the same bracket keyed on the PENDING BIT instead of
+                 * on our answer, so it is filed in both regimes. With the
+                 * hold on this should reproduce ftLatchWait; with it off it
+                 * is the only measurement of the exposure window there is.
+                 * The histogram goes beside the mean because the mean cannot
+                 * tell "every flip needs a whole vblank" from "most are
+                 * nearly done and a tail is exposed" - and only the second
+                 * has a middle setting in it (rb_frametime.h). */
+                if (pending) {
+                    if (ftPendStart == 0) { ftPendStart = ftG0; }
+                    ftPendAsks++;
+                } else if (ftPendStart != 0) {
+                    ftFileHist(&ftPendWait, &ftPendHist, ftPendStart, ftG1);
+                    rb_ft_add(&ftPendRunAsks, ftPendAsks, 0);
+                    ftPendStart = 0;
+                    ftPendAsks = 0;
                 }
             }
             if (hold) {

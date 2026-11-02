@@ -699,5 +699,141 @@ int main() {
         assert(rb_ft_hold_free_interval_ns(iv, pen, hpt, 0) == 0);
     }
 
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers and 2A7's hardware-vs-phase split and 2A8's impossible-rate refusal passed");
+    /* 2A9: the latch wait's SHAPE, which is what decides whether a middle
+     * setting between 91 and 141 sets/s exists at all.
+     *
+     * The two worlds the mean cannot separate, asserted as two distributions
+     * that produce the SAME mean of ~1 vblank:
+     *
+     *   (a) every flip waits the whole period  -> early 0 per-mille
+     *   (b) half resolve in the first quarter, half take two periods
+     *                                          -> early 500 per-mille
+     *
+     * If rb_ft_hist_early_pm() ever returned the same answer for both, the
+     * instrument could not do the job it exists for, so the test is that the
+     * two are far apart - not that either number is right.
+     */
+    {
+        const uint64_t vbl = 6952507;
+
+        /* World (a): 200 flips, each needing a full period. */
+        struct rb_ft_hist a{};
+        for (unsigned i=0;i<200;i++) { rb_ft_hist_add(&a, vbl, vbl); }
+        assert(rb_ft_hist_n(&a)==200);
+        assert(a.b[RB_FT_HIST_BUCKETS-1]==200);
+        assert(rb_ft_hist_early_pm(&a)==0);          /* no middle setting */
+
+        /* World (b): 100 resolve almost at once, 100 take two periods. The
+         * mean is ~1 period either way, which is the whole point. */
+        struct rb_ft_hist b{};
+        for (unsigned i=0;i<100;i++) { rb_ft_hist_add(&b, vbl/100, vbl); }
+        for (unsigned i=0;i<100;i++) { rb_ft_hist_add(&b, vbl*2, vbl); }
+        assert(rb_ft_hist_n(&b)==200);
+        assert(b.b[0]==100 && b.b[RB_FT_HIST_BUCKETS-1]==100);
+        assert(rb_ft_hist_early_pm(&b)==500);        /* half could run free */
+        /* The two worlds must be FAR apart, or the histogram is useless. */
+        assert(rb_ft_hist_early_pm(&b) > rb_ft_hist_early_pm(&a) + 400);
+
+        /* Bucket boundaries are quarters of the period and are half-open, so
+         * a sample exactly on a boundary lands in the HIGHER bucket and
+         * nothing can be double-counted. Asserted against a period divisible
+         * by 4, because with 6952507 every vbl*k/4 truncates to just BELOW
+         * its own boundary - which is correct behaviour and a trap for a test
+         * that writes the boundary as vbl/4 and expects bucket 1. Both sides
+         * of each boundary, so an off-by-one in either direction fails. */
+        const uint64_t q = 6952504;               /* divisible by 4 */
+        assert(rb_ft_hist_bucket(0, q)==0);
+        assert(rb_ft_hist_bucket(q/4 - 1, q)==0);
+        assert(rb_ft_hist_bucket(q/4,     q)==1);
+        assert(rb_ft_hist_bucket(q/2 - 1, q)==1);
+        assert(rb_ft_hist_bucket(q/2,     q)==2);
+        assert(rb_ft_hist_bucket(q*3/4 - 1, q)==2);
+        assert(rb_ft_hist_bucket(q*3/4,     q)==3);
+        assert(rb_ft_hist_bucket(q - 1, q)==3);
+        assert(rb_ft_hist_bucket(q,     q)==RB_FT_HIST_BUCKETS-1);
+        assert(rb_ft_hist_bucket(q*9,   q)==RB_FT_HIST_BUCKETS-1);
+        /* And on the panel's real, non-divisible period the floor still keeps
+         * every bucket inside 0..4 with no gap. */
+        assert(rb_ft_hist_bucket(vbl - 1, vbl)==3);
+        assert(rb_ft_hist_bucket(vbl, vbl)==RB_FT_HIST_BUCKETS-1);
+
+        /* The buckets SCALE with the mode. The same 3.5 ms wait is most of a
+         * 144 Hz frame and a quarter of a 48 Hz one, and a histogram in fixed
+         * milliseconds would have called both the same thing. */
+        assert(rb_ft_hist_bucket(3476253, 6952507)==1);          /* ~0.5 */
+        assert(rb_ft_hist_bucket(3476253, 6952507*3)==0);        /* ~0.17 */
+
+        /* An unknown period must not manufacture evidence for world (b) -
+         * the reading that would reopen a closed line. Everything piles into
+         * the overflow bucket, so early_pm reads 0: "no middle". */
+        struct rb_ft_hist u{};
+        for (unsigned i=0;i<10;i++) { rb_ft_hist_add(&u, 1234, 0); }
+        assert(u.b[RB_FT_HIST_BUCKETS-1]==10 && rb_ft_hist_early_pm(&u)==0);
+
+        /* Shares sum back to the whole, and an empty histogram answers 0
+         * rather than dividing by zero. */
+        uint64_t sum=0;
+        for (unsigned i=0;i<RB_FT_HIST_BUCKETS;i++) {
+            sum += rb_ft_hist_share_pm(&b,i);
+        }
+        assert(sum==1000);
+        struct rb_ft_hist e{};
+        assert(rb_ft_hist_n(&e)==0 && rb_ft_hist_early_pm(&e)==0);
+        assert(rb_ft_hist_share_pm(&e,0)==0);
+        assert(rb_ft_hist_share_pm(&b,RB_FT_HIST_BUCKETS)==0);   /* no OOB */
+
+        rb_ft_hist_reset(&b);
+        assert(rb_ft_hist_n(&b)==0);
+    }
+
+    /* 2A9: ftFileHist files the mean and the histogram from ONE sample, and
+     * drops from BOTH. A sample counted in one and not the other would make
+     * the published counts disagree, and that disagreement is the check a
+     * reader has - so it must never happen for a reason other than a real
+     * drop. */
+    {
+        RBAMDFramebuffer f;
+        f.vblPeriodNs = 6952507;
+        f.ftOn = true;
+
+        for (unsigned i=0;i<40;i++) {
+            f.ftFileHist(&f.ftPendWait, &f.ftPendHist, 0, 6952507);
+        }
+        assert(f.ftPendWait.n==40);
+        assert(rb_ft_hist_n(&f.ftPendHist)==40);
+        assert(rb_ft_mean_ns(&f.ftPendWait)==6952507);
+        assert(rb_ft_hist_early_pm(&f.ftPendHist)==0);
+
+        /* An idle desktop inside a pending run: dropped from both, so the
+         * two counts stay equal and the drop is counted. */
+        f.ftFileHist(&f.ftPendWait, &f.ftPendHist, 0, 1000000000ull);
+        assert(f.ftPendWait.dropped==1);
+        assert(f.ftPendWait.n==40 && rb_ft_hist_n(&f.ftPendHist)==40);
+
+        /* A backwards interval is a counted drop, not a 584-year sample. */
+        f.ftFileHist(&f.ftPendWait, &f.ftPendHist, 500, 400);
+        assert(f.ftPendWait.dropped==2);
+        assert(f.ftPendWait.n==40 && rb_ft_hist_n(&f.ftPendHist)==40);
+
+        /* ftOn false is fully inert - the instrument is a suspect (rule 16),
+         * so it must be possible to take it out of the frame path entirely. */
+        f.ftOn = false;
+        f.ftFileHist(&f.ftPendWait, &f.ftPendHist, 0, 6952507);
+        assert(f.ftPendWait.n==40 && f.ftPendWait.dropped==2);
+        assert(rb_ft_hist_n(&f.ftPendHist)==40);
+
+        /* And a reset clears the run phase, not just the sums: a leftover
+         * ftPendStart would file the first run of a new window from a stamp
+         * taken in the old one - across a hold-regime change, which is
+         * exactly what must not be mixed (rule 39). */
+        f.ftPendStart = 12345; f.ftPendAsks = 7;
+        rb_ft_reset(&f.ftPendWait);
+        rb_ft_hist_reset(&f.ftPendHist);
+        f.ftPendStart = 0; f.ftPendAsks = 0;
+        assert(f.ftPendWait.n==0 && f.ftPendWait.dropped==0);
+        assert(rb_ft_hist_n(&f.ftPendHist)==0);
+        assert(f.ftPendStart==0 && f.ftPendAsks==0);
+    }
+
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers and 2A7's hardware-vs-phase split and 2A8's impossible-rate refusal and 2A9's latch-wait histogram passed");
 }

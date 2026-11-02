@@ -675,7 +675,34 @@ private:
     uint64_t           ftHoldAsks;   /* held GETs in the current run       */
     struct rb_ft_acc   ftLatchWait;  /* run start -> the GET that saw clear */
     struct rb_ft_acc   ftHoldRunAsks;/* asks per run, in "ns" (count*1)    */
+
+    /* 2A9: the same bracket, but regime-independent - and a HISTOGRAM.
+     *
+     * ftLatchWait above only exists when we hold, so it says nothing about
+     * the configuration the flicker actually happens in. A PENDING run is
+     * the same physical interval observed without reference to our answer:
+     * from the first GET that sees SURFACE_FLIP_PENDING set to the first
+     * that sees it clear. With the hold on it should reproduce ftLatchWait
+     * (a free cross-check between a new instrument and an old one); with the
+     * hold off it is the only thing that can measure the exposure window at
+     * all, because hubpHoldNotReady() used to return before reading the bit.
+     *
+     * The histogram is the point, not the mean: see rb_frametime.h for why a
+     * mean of 1.00 vblanks cannot distinguish "every flip needs the whole
+     * period" from "most are nearly done and a tail is exposed", and only
+     * the second has a middle setting in it. */
+    uint64_t           ftPendStart;   /* first GET of the run that saw set  */
+    uint64_t           ftPendAsks;    /* GETs in the current pending run    */
+    struct rb_ft_acc   ftPendWait;    /* run start -> the GET that saw clear */
+    struct rb_ft_acc   ftPendRunAsks; /* asks per run, as a count           */
+    struct rb_ft_hist  ftPendHist;    /* that wait, in quarters of a vblank */
     uint32_t           hubpTiling;    /* DCSURF_TILING_CONFIG, read-only */
+    /* 2A9: the word hubpFlipPending() last read. A SEPARATE member from
+     * hubpFlipCtl, which is 2xj's one-shot setup snapshot published as
+     * RBFBHubpFlipCtl - reusing it would have overwritten a published
+     * setup fact with frame-path noise ~300 times a second, and nothing
+     * downstream would have said so. */
+    uint32_t           hubpPendCtl;
     uint64_t           hubpOrig;       /* the firmware's address: restore path */
     uint64_t           hubpWrites;
     uint64_t           hubpLast;
@@ -704,7 +731,13 @@ private:
     void hubpProgram(uint64_t mc);
     /* 2xn: is OUR flip still unlatched? Lives in RBAMDFramebufferHUBP.cpp
      * so the DMU segment constant stays in exactly one file. */
-    bool hubpHoldNotReady(void);
+    /* 2A9: split the OBSERVATION from the DECISION. hubpFlipPending() reads
+     * SURFACE_FLIP_PENDING and nothing else; hubpHoldNotReady() takes that
+     * answer and decides. They were one function, which meant the bit was
+     * only ever read when the hold was armed - so the instrument was blind
+     * in exactly the configuration under investigation. */
+    bool hubpFlipPending(void);
+    bool hubpHoldNotReady(bool pending);
     bool blSetup(void);
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */
@@ -778,6 +811,10 @@ private:
      * and called from the frame path, so it does nothing at all when ftOn is
      * false - the control side of the instrument costs one bool test. */
     void ftFile(struct rb_ft_acc *acc, uint64_t t0, uint64_t t1, bool bound);
+    /* 2A9: ftFile plus a histogram of the same sample, so the conversion to
+     * nanoseconds still happens exactly once (rule 41). */
+    void ftFileHist(struct rb_ft_acc *acc, struct rb_ft_hist *hist,
+                    uint64_t t0, uint64_t t1);
     void publishFrameTime(void);
     /* 2zk: the throttled form, for the call sites that sit in the frame path.
      * publishVBLState() is ~110 setProperty calls - an OSObject allocation and

@@ -236,6 +236,109 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 2A9: is there a middle setting between 91 and 141 sets/s?
+     *
+     * 2A8 read the latch wait as a MEAN and closed the frame-rate line on it.
+     * A mean of one vblank cannot distinguish "every flip needs the whole
+     * period" from "most resolve at once and a tail is exposed", and only the
+     * second has a partial hold in it - so this prints the DISTRIBUTION.
+     *
+     * The run is keyed on SURFACE_FLIP_PENDING rather than on our own answer,
+     * so it is filed with the hold on AND with it off. Which matters: the
+     * flicker only happens with the hold off, and a phase distribution
+     * measured in the other regime is not evidence about it (rule 39). The
+     * tool therefore says which regime the reading came from, every time.
+     */
+    {
+        const long pw   = rd(fb, "RBFBFtPendWaitNs");
+        const long pn   = rd(fb, "RBFBFtPendHistN");
+        const long earl = rd(fb, "RBFBFtPendEarlyPm");
+        const long asks = rd(fb, "RBFBFtPendAsksPm");
+        const long vbl  = rd(fb, "RBFBVBLPeriodNs");
+        const long lw   = rd(fb, "RBFBFtLatchWaitNs");
+        const long lwN  = rd(fb, "RBFBFtLatchWaitN");
+        /* rd() returns 1/0 for a bool and -1 when the key is absent, and the
+         * three must stay distinct: reading "absent" as OFF would label a
+         * reading with the wrong regime, which is the one thing this block
+         * must not do. */
+        const long heldv = rd(fb, "RBFBAmtrNotReady");
+        const bool holdOn = (heldv == 1);
+        const bool holdKnown = (heldv == 0 || heldv == 1);
+
+        if (pn >= 30 && vbl > 0) {
+            printf("\nthe exposure window, as a DISTRIBUTION (2A9):\n");
+            if (!holdKnown) {
+                printf("  hold is UNKNOWN - RBFBAmtrNotReady is not published,\n"
+                       "  so this histogram cannot be attributed to a regime\n"
+                       "  and must not be read as evidence either way.\n");
+            } else {
+                printf("  hold is %s  -  %s\n",
+                       holdOn ? "ON " : "OFF",
+                       holdOn ? "this is the CONTROL regime; the flicker does"
+                                " not happen here"
+                              : "this is the regime the flicker happens in");
+            }
+            printf("  pending wait         %8.3f ms  = %.2f vblanks   n %ld\n",
+                   pw / 1000000.0, (double)pw / (double)vbl, pn);
+            printf("  asks per run         %8.2f\n", asks / 1000.0);
+            for (unsigned i = 0; i < 4; i++) {
+                char key[24];
+                snprintf(key, sizeof(key), "RBFBFtPendQ%u", i);
+                const long c = rd(fb, key);
+                printf("  [%.2f-%.2f vblanks)  %8ld  %5.1f %%\n",
+                       i * 0.25, (i + 1) * 0.25, c, 100.0 * c / pn);
+            }
+            const long over = rd(fb, "RBFBFtPendQ4");
+            printf("  [>= 1.00 vblanks  )  %8ld  %5.1f %%\n",
+                   over, 100.0 * over / pn);
+
+            /* The cross-check, free: with the hold on this run is the same
+             * physical interval ftLatchWait measures, so the two must agree.
+             * A disagreement means one of them is bracketing the wrong thing
+             * and neither number means anything (rule 26). */
+            if (holdOn && lwN >= 30 && lw > 0) {
+                const double disagree = 100.0 * (double)(pw - lw) / (double)lw;
+                printf("  cross-check vs 2A7 latch wait: %+.1f %%", disagree);
+                if (disagree > 5.0 || disagree < -5.0) {
+                    printf("   REFUSED - over 5 %%,\n"
+                           "  so one of the two brackets the wrong interval "
+                           "and neither is usable.\n");
+                } else {
+                    printf("   (agrees)\n");
+                }
+            }
+
+            printf("\n");
+            if (earl < 50) {
+                printf("  NO MIDDLE SETTING. %.1f %% of flips resolve inside\n"
+                       "  the vblank they were submitted in, so essentially\n"
+                       "  every flip needs the whole period. There is no\n"
+                       "  subset that is safer than the rest to let through,\n"
+                       "  and no rate throttle helps: the hazard is PER FLIP,\n"
+                       "  so feeding 91 %% instead of 98 %% buys 7 %% less\n"
+                       "  flicker for 7 %% less frame rate. 2A8 stands and\n"
+                       "  the choice really is 91-or-141.\n", earl / 10.0);
+            } else {
+                printf("  A MIDDLE SETTING MAY EXIST: %.1f %% of flips\n"
+                       "  resolve inside their own vblank. A hold that\n"
+                       "  engaged only on the rest would let that fraction\n"
+                       "  run unheld. This is a measured SHARE, not a\n"
+                       "  predicted rate - 2A8 is what extrapolating a rate\n"
+                       "  from a share costs. What a partial hold delivers\n"
+                       "  is an A/B and nothing else.\n", earl / 10.0);
+            }
+            if (holdOn) {
+                printf("  Read this again with the hold OFF before acting on\n"
+                       "  it: `holdset 0` changes the feed rate from ~63 %% to\n"
+                       "  ~98 %% of vblanks, which is a regime change, and\n"
+                       "  this histogram describes the regime it was taken in.\n");
+            }
+        } else if (pn > 0) {
+            printf("\nthe exposure window: only %ld closed pending runs, "
+                   "under 30 - not resolvable (rule 18).\n", pn);
+        }
+    }
+
     printf("\n  rate from budget     %8.3f /s\n",
            rd(fb, "RBFBFtRateMhz") / 1000.0);
     printf("  CROSS-CHECK: tools/paired.sh computes this from a counter delta\n"

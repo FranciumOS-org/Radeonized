@@ -275,4 +275,120 @@ static inline uint64_t rb_ft_hold_free_interval_ns(uint64_t interval_ns,
     return left;
 }
 
+/* 2A9: the latch wait's SHAPE, because the user asked for a middle setting.
+ *
+ * THE QUESTION. With the 2xo hold off the desktop runs at 141 sets/s and
+ * flickers occasionally (2A6); with it on, 91 and never. The natural ask is
+ * for something in between - "feed 91 % of the vblanks instead of 98 %, so
+ * there is time to scan". That particular dial cannot work, and the reason is
+ * worth writing down rather than re-deriving: the hazard is PER FLIP, not per
+ * second. Every flip we accept while the previous one is still being scanned
+ * carries an exposure window, so cutting the flip count by 7 % cuts the
+ * flicker by 7 % and the frame rate by 7 %. A rate throttle dilutes a
+ * correctness defect; it does not fix one.
+ *
+ * But the ask points at a real question nobody has measured. 2A8 read the
+ * latch wait as a MEAN - 6.975 ms, 1.00 vblanks - and a mean cannot tell
+ * these two worlds apart:
+ *
+ *   (a) every flip waits ~1 vblank. Exposure is constant per flip, there is
+ *       no subset that is safer than the rest, and the user's choice really
+ *       is 91-or-141. The frame-rate line stays closed.
+ *   (b) the waits are spread over the vblank. Then MOST flips are nearly
+ *       latched when Apple asks, a TAIL is badly exposed, and holding only
+ *       that tail would remove most of the hazard for a fraction of the
+ *       91-vs-141 cost. A real middle setting, and a cheap one.
+ *
+ * A mean of 1.00 vblanks is weak evidence for (a) - under a uniform phase it
+ * would read ~0.5 - but "weak evidence from one statistic" is how six of the
+ * eight dead frame-rate models started, so this counts the distribution
+ * instead of arguing from its mean.
+ *
+ * THE BUCKETS ARE QUARTERS OF A VBLANK, not fixed milliseconds, so the same
+ * histogram means the same thing at 144 Hz and at 48 (the mistake
+ * rb_ft_gap_bound_ns already avoids one line up). Bucket 4 is the overflow:
+ * >= one whole period, which is where (a) puts everything.
+ *
+ * AND IT MUST BE READ IN THE RIGHT REGIME. rb_ft_hist is filed from a PENDING
+ * run - first GET that sees SURFACE_FLIP_PENDING set, to the first that sees
+ * it clear - which is observable whether or not we held, so the same
+ * histogram can be taken with the hold on and with it off. That matters:
+ * removing the hold takes `fed` from ~63 % to ~98 % (2A4), so it is a regime
+ * change and the phase distribution measured in one regime is not evidence
+ * about the other. Rule 39, applied to a histogram: the flicker only happens
+ * with the hold OFF, so the hold-off histogram is the one that answers the
+ * question and the hold-on one is its control.
+ */
+#define RB_FT_HIST_BUCKETS 5u
+
+struct rb_ft_hist {
+    uint64_t b[RB_FT_HIST_BUCKETS];
+};
+
+static inline void rb_ft_hist_reset(struct rb_ft_hist *h)
+{
+    if (!h) { return; }
+    for (unsigned i = 0; i < RB_FT_HIST_BUCKETS; i++) { h->b[i] = 0; }
+}
+
+/* Which quarter of a vblank period does this wait fall in? 0 = [0,0.25),
+ * 3 = [0.75,1.0), 4 = >= one whole period. Returns the overflow bucket when
+ * the period is unknown rather than bucket 0, because an unknown period must
+ * not manufacture evidence for (b) - the reading that would reopen a closed
+ * line (rule 14: a missing premise has to be audible, and here it is audible
+ * as everything piling into the bucket that says "no middle"). */
+static inline uint32_t rb_ft_hist_bucket(uint64_t ns, uint64_t vbl_period_ns)
+{
+    if (vbl_period_ns == 0) { return RB_FT_HIST_BUCKETS - 1u; }
+    if (ns >= vbl_period_ns) { return RB_FT_HIST_BUCKETS - 1u; }
+    /* ns < period, so ns*4 cannot overflow for any period this side of
+     * 4.6 billion seconds, and the quotient is 0..3. */
+    return (uint32_t)((ns * 4ull) / vbl_period_ns);
+}
+
+static inline void rb_ft_hist_add(struct rb_ft_hist *h, uint64_t ns,
+                                  uint64_t vbl_period_ns)
+{
+    if (!h) { return; }
+    h->b[rb_ft_hist_bucket(ns, vbl_period_ns)]++;
+}
+
+static inline uint64_t rb_ft_hist_n(const struct rb_ft_hist *h)
+{
+    uint64_t n = 0;
+    if (!h) { return 0; }
+    for (unsigned i = 0; i < RB_FT_HIST_BUCKETS; i++) { n += h->b[i]; }
+    return n;
+}
+
+/* Share of one bucket, in per-mille. */
+static inline uint64_t rb_ft_hist_share_pm(const struct rb_ft_hist *h,
+                                           uint32_t bucket)
+{
+    const uint64_t n = rb_ft_hist_n(h);
+    if (n == 0 || bucket >= RB_FT_HIST_BUCKETS) { return 0; }
+    return (h->b[bucket] * 1000ull) / n;
+}
+
+/* Is there a middle setting? The question the histogram exists to answer.
+ *
+ * Returns the per-mille of flips that are NOT in the overflow bucket - the
+ * ones that resolved inside the vblank they were submitted in, and which a
+ * partial hold would therefore let through for free. World (a) returns ~0:
+ * every flip needs the whole period, holding is all-or-nothing, and the line
+ * stays closed. A large value is world (b) and names the prize: that fraction
+ * of flips could keep running unheld.
+ *
+ * This is a DESCRIPTION of a measured distribution, not a predicted rate.
+ * 2A8 is the reason for the distinction - extrapolating a rate from a
+ * marginal share produced 162 /s on a 144 Hz panel - so nothing here returns
+ * a frame rate. What a partial hold would actually deliver is an A/B.
+ */
+static inline uint64_t rb_ft_hist_early_pm(const struct rb_ft_hist *h)
+{
+    const uint64_t n = rb_ft_hist_n(h);
+    if (n == 0) { return 0; }
+    return ((n - h->b[RB_FT_HIST_BUCKETS - 1u]) * 1000ull) / n;
+}
+
 #endif /* RB_FRAMETIME_H */
