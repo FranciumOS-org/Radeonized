@@ -409,6 +409,10 @@ bool RBAMDFramebuffer::start(IOService *provider)
     rb_ft_reset(&ftGap);
     rb_ft_reset(&ftGet);
     rb_ft_reset(&ftVbl);
+    ftPrevGetExit = 0;
+    ftPrevGetHeld = false;
+    rb_ft_reset(&ftRetry);
+    rb_ft_reset(&ftPoll);
     amtrFlipSnapped = false;
     amtrFlipPtr = 0;
     amtrFlipRefused = 0;
@@ -1481,7 +1485,22 @@ IOReturn RBAMDFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
          * nothing else: no allocation, no log, no block (rule 31). */
         {
             const bool hold = hubpHoldNotReady();
-            if (ftOn) { ftFile(&ftGet, ftG0, mach_absolute_time(), true); }
+            if (ftOn) {
+                const uint64_t ftG1 = mach_absolute_time();
+                ftFile(&ftGet, ftG0, ftG1, true);
+                /* 2A1: the gap SINCE THE LAST GET, filed into whichever
+                 * accumulator the LAST GET's answer selects - so the bucket is
+                 * chosen by what we told Apple, and the quantity measured is
+                 * how long Apple then took to ask again. Bounded, because an
+                 * idle desktop stops asking entirely and one idle second in
+                 * either bucket would read as the retry cost. */
+                if (ftPrevGetExit != 0) {
+                    ftFile(ftPrevGetHeld ? &ftRetry : &ftPoll,
+                           ftPrevGetExit, ftG0, true);
+                }
+                ftPrevGetExit = ftG1;
+                ftPrevGetHeld = hold;
+            }
             if (hold) {
                 return kIOReturnNotReady;
             }

@@ -475,6 +475,17 @@ void RBAMDFramebuffer::publishFrameTime(void)
     setProperty("RBFBFtVblN",  ftVbl.n, 64);
     setProperty("RBFBFtVblMax", ftVbl.max_ns, 64);
 
+    /* 2A1: the retry comparison. Published with both counts, because the
+     * interesting failure is one bucket being nearly empty - a mean over 7
+     * samples beside a mean over 6000 is not a comparison (rule 18), and
+     * nothing in the means themselves would say so. */
+    setProperty("RBFBFtRetryNs", rb_ft_mean_ns(&ftRetry), 64);
+    setProperty("RBFBFtRetryN",  ftRetry.n, 64);
+    setProperty("RBFBFtRetryMax", ftRetry.max_ns, 64);
+    setProperty("RBFBFtPollNs", rb_ft_mean_ns(&ftPoll), 64);
+    setProperty("RBFBFtPollN",  ftPoll.n, 64);
+    setProperty("RBFBFtPollMax", ftPoll.max_ns, 64);
+
     const uint64_t interval = rb_ft_interval_ns(&ftWork, &ftGap);
     setProperty("RBFBFtIntervalNs", interval, 64);
     setProperty("RBFBFtRateMhz", rb_ft_rate_mhz(interval), 64);
@@ -942,7 +953,11 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             rb_ft_reset(&ftGap);
             rb_ft_reset(&ftGet);
             rb_ft_reset(&ftVbl);
+            rb_ft_reset(&ftRetry);
+            rb_ft_reset(&ftPoll);
             ftPrevExit = 0;
+            ftPrevGetExit = 0;
+            ftPrevGetHeld = false;
             ftResets++;
             publishFrameTime();
             LOG("RBFBFtOn -> %d, accumulators reset (%llu)",

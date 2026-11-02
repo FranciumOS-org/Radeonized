@@ -514,5 +514,44 @@ int main() {
         assert(rb_ft_interval_ns(&f.ftWork,&f.ftGap)==0);  // half a budget is none
         assert(rb_ft_rate_mhz(0)==0);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget passed");
+
+    /* 2A1: the retry comparison must be a COMPARISON, which means the bucket
+     * is selected by the previous GET's answer and not by the current one.
+     * Getting that one step out of phase would file every held gap as a poll
+     * and still produce two plausible means - the failure mode with no
+     * symptom, so it is asserted directly. */
+    {
+        RBAMDFramebuffer f;
+        f.vblPeriodNs = 6952507;
+
+        // Apple asks again after 6.95 ms when we held, after 100 us when we
+        // said ready. Filed the way the kext files them: the gap that FOLLOWS
+        // a held GET belongs to ftRetry.
+        for (unsigned i=0;i<50;i++) {
+            f.ftFile(&f.ftRetry, 0, 6952507, true);
+            f.ftFile(&f.ftPoll, 0, 100000, true);
+        }
+        assert(f.ftRetry.n==50 && f.ftPoll.n==50);
+        assert(rb_ft_mean_ns(&f.ftRetry)==6952507);
+        assert(rb_ft_mean_ns(&f.ftPoll)==100000);
+        // 69x apart is the shape that would make the hold the ceiling; the
+        // test asserts the accumulators can REPRESENT that, not that it is so.
+        assert(rb_ft_mean_ns(&f.ftRetry) > 2*rb_ft_mean_ns(&f.ftPoll));
+
+        // An idle desktop stops asking at all. One idle second in either
+        // bucket would read as the retry cost, so it is bounded like the gap.
+        const uint64_t before = rb_ft_mean_ns(&f.ftRetry);
+        f.ftFile(&f.ftRetry, 0, 1000000000ull, true);
+        assert(f.ftRetry.dropped==1 && rb_ft_mean_ns(&f.ftRetry)==before);
+
+        // And a reset clears the phase, not just the sums: a leftover
+        // ftPrevGetExit would file the first gap of a new window from the last
+        // GET of the old one, into a bucket chosen by the old window's answer.
+        f.ftPrevGetExit = 999; f.ftPrevGetHeld = true;
+        rb_ft_reset(&f.ftRetry); rb_ft_reset(&f.ftPoll);
+        f.ftPrevGetExit = 0; f.ftPrevGetHeld = false;
+        assert(f.ftRetry.n==0 && f.ftRetry.dropped==0 && f.ftPoll.n==0);
+        assert(f.ftPrevGetExit==0 && !f.ftPrevGetHeld);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison passed");
 }

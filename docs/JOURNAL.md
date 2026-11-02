@@ -53218,3 +53218,79 @@ locate it).
 
 Framebuffer UUID **F1A78DAD** (the 2zz build was B25E93E5). Not yet run on
 hardware - what it predicts is nothing, which is the point.
+
+---
+
+## 2A1 — the budget's first reading: 99.5 % upstream, 0.4 % ours (boot 283)
+
+`sudo tools/ftwindow.sh`, one 20 s native window, framebuffer **F1A78DAD**,
+mode 143768 mHz / 1129 lines. The cross-check passed, which is what makes the
+rest of it readable: **budget 95.51 /s against paired.sh's counter-derived
+93.95 /s, +1.7 %** — two independent routes to one number, agreeing.
+
+```
+work (setAttribute)   0.003 ms   n 1897   max 0.076 ms   dropped 0
+gap (between)        10.467 ms   n 1894   max 21.678 ms  dropped 2
+  of which: GET       0.002 ms   n 6122   max 0.041 ms
+  of which: vblank    0.023 ms   n 2887   max 0.367 ms
+
+interval             10.470 ms
+ours                  0.044 ms  ( 0.4 %)
+upstream             10.426 ms  (99.5 %)
+```
+
+**Our entire cost per transaction is 44 microseconds out of 10.47 ms.** That
+is the answer to the question seven experiments could not reach, and it
+retires all seven at once rather than adding an eighth: there was never enough
+of our own time inside a frame period for the retire tick, the timer beat, the
+latch, the workload, the HUBP backlog or the publish cost to have been the
+ceiling. 2zz measured the publish cost at -1.4 % of the frame rate and this
+says why that was the right order of magnitude — the whole of our bookkeeping
+is 0.4 %.
+
+**The two dropped gap samples are the instrument working.** 1894 gap samples
+against 1897 work samples, `max 21.678 ms`, and 2 discarded above the
+`8 x vblPeriodNs` bound: the window was not perfectly exclusive, two intervals
+ran long, and they were dropped and COUNTED instead of being averaged into the
+mean (rb_frametime.h's note, and the hosttest case for it).
+
+**And `sets/s` read 93.95, with `fed` 65.6 %.** Not 70-75, and not fed ~50 %.
+The user independently reported the desktop "lowkey way smoother" on this boot
+before seeing any number, which is an observation of the one link a human can
+see (rule 45) arriving unprompted and agreeing with the counter. **It is NOT a
+claim.** 2zg is the entry that exists because boot 267 read **90.4** mean
+(n=6) and boot 268 read 72.50 (n=12) in the same configuration, and 93.95 sits
+squarely in boot-267 territory with n=1 on one boot. Rule 44: this needs two
+boots per side or an A/B, and nothing in 2A0 changed frame delivery — it adds
+two `mach_absolute_time()` reads per transaction — so there is no mechanism by
+which the instrument could have caused it. Recorded as an observation with its
+configuration, which is all it is.
+
+**What the decomposition points at, stated as what is and is not measured.**
+The largest *identifiable* thing inside `upstream` is our own 2xo
+`kIOReturnNotReady` hold: `held/gets 38.0 %` over the window (2331 of 6129),
+~3.2 GETs per transaction of which ~1.2 are held. Apple's
+`isTransactionComplete` decides by `getAttribute('amtr', NULL) == 0` (2x6), so
+answering NotReady makes it WAIT — and the waiting happens in Apple's loop,
+not in our call, so it lands in `upstream` and **the budget cannot attribute
+it**. `ftbudget` says so in its own output rather than letting the number be
+read as Apple's.
+
+**A first reading of this was wrong and is withdrawn inside the same
+milestone.** It called `held/gets 38 %` inconsistent with `mean vblanks 1.001`
+("the flip is already latched, so what is the hold waiting for?") and
+multiplied 1.2 held GETs by one vblank to get ~8.3 ms of the 10.43 ms gap.
+Neither step holds. The latch histogram counts vblanks per flip; the GETs
+arrive ~3.2 times per transaction, so ~38 % of them finding
+`SURFACE_FLIP_PENDING` set is exactly what a flip pending for ~38 % of the
+interval looks like — no inconsistency. And one vblank per hold was invented:
+`amtrHoldExpired` 0 says only that the pending bit always clears before the
+deadline, never how fast Apple retries. **The cost of the hold is unmeasured**,
+and asserting 8.3 ms from a counter would have been rule 17 one more time.
+
+**So the next measurement is the retry interval, with a control**, and it is
+one more accumulator rather than a hypothesis: the gap from a GET we HELD to
+the next GET, against the gap from a GET we answered ready to the next GET. If
+the two are alike, the hold costs nothing and `upstream` is Apple's own
+pacing. If the held gap is a vblank and the ready gap is microseconds, the hold
+is the ceiling and it is ours.
