@@ -55526,3 +55526,97 @@ under the hosttest.
 
 **What this does NOT establish:** nothing. No boot has run it. The next
 reading is a no-cable baseline, and the identification needs the cable.
+
+## 2C1 — boot 297: the PHY read WORKS, the control is strong, and the tool hid the one difference
+
+Boot 297, `rbgpu-boot` read **297** before anything was interpreted (rule 8).
+The `RBFBDpalt*` keys exist, which is itself the proof the new binary is
+running - no build before this one published them (rule 15's cheapest check).
+
+**It did not hang.** Linux marks this register path "Legacy path, avoid if
+possible" and 2C0 argued the warning's precondition was measured false because
+DMCUB 4.0.15.47 is alive. That argument now has a boot behind it rather than
+only a reading of someone else's comment. **Stated narrowly: one boot, one
+configuration.** Nothing here says the access is safe when DMCUB is NOT
+running, which is the case the warning is actually about and which this project
+has no reason to enter.
+
+**THE CONTROL PASSED, AND IT PASSED STRONGLY** - which matters more than the
+answer, because it is what makes the five words readings at all:
+
+```
+  PHY0  0x00194444   mpll TX0-3 ALL ON   pstate 0 0 0 0   DP4 REF_CLK_EN REF_CLK_REQ
+  PHY1  0x00023333   mpll none           pstate 3 3 3 3   DPALT_DISABLE
+  PHY2  0x00063333   mpll none           pstate 3 3 3 3   DPALT_DISABLE DPALT_DISABLE_ACK
+  PHY3  0x00063333   (identical to PHY2)
+  PHY4  0x00063333   (identical to PHY2)
+```
+
+PHY0 has all four MPLLs enabled, **PSTATE 0 on all four lanes** (the active
+state) and the reference clock both **enabled and requested**. That is a PHY in
+full operation. Random memory does not look like that, a wrong base does not,
+and a wrong stride does not - so **0x2946 with stride 0xd8 from
+`dpcs_4_2_0_offset.h` is confirmed on hardware**, and the four dark instances
+at PSTATE 3 with their MPLLs off are the expected shape of unused PHYs. The
+active mask is **0x01**: PHY0 is the panel, which is the only PHY anything is
+driving, exactly as the desktop being on it requires.
+
+**AND PHY0 CORRECTS 2C0 ON WHAT `DPALT_DP4` MEANS.** 2C0 grouped it with the
+alt-mode fields, its name being `RDPCS_PHY_DPALT_DP4`. It is **set on the eDP
+panel's PHY**, which is not a Type-C port and is not in alt mode at all - and
+the same PHY independently shows four MPLLs on. So on this chip the bit reads
+as **"this PHY is in a four-lane configuration"**, full stop, and it is a
+second reading of the lane count rather than a statement about alt mode. The
+two agree here (DP4 set, four MPLLs), which is the first time the lane decode
+has been checked against a link whose width is known from another direction.
+**2BB's "2 lanes" is about the Type-C SINK and is not in tension with this** -
+that PHY is dark, so the chip currently drives zero lanes to it.
+
+**THE ONE DIFFERENCE AMONG THE DARK FOUR WAS HIDDEN BY MY OWN TOOL.** PHY1 has
+`DPALT_DISABLE` asserted and **NOT acked**; PHY2, PHY3 and PHY4 have both
+bits. `dpaltlook.sh` printed `dark (no ref clock, no MPLL)` for all four,
+because its state line let the POWER axis win and never reached the alt-mode
+axis. Power and alt mode are independent, and `rb_dpalt_verdict()` in
+`rb_dpalt.h` gets this right - it returns `ALT_SETTLING` for PHY1 and
+`ALT_DISABLED` for PHY2-4 - **but the tool does not call it and reimplemented
+the decision wrongly in a shell heredoc.** Two lessons, one old and one new:
+
+ - **One axis reported as the state.** Same shape as 2BD reading one EDID
+   descriptor and printing it as the mode list, and as 2B0's bucket 3. The
+   recurring error, in its "which quantity answers the question" form.
+ - **The judgement existed in `src/common` and the tool duplicated it.** The
+   whole reason `rb_dpalt.h` owns every verdict is so the hosttest owns it
+   too, and a second implementation in a shell script is outside that -
+   hosttested logic was correct while the thing a human reads was wrong. The
+   fix prints both axes and the hosttest's enum is what they are named after.
+
+**Second defect, smaller and also mine: `transitions 1` with no cable ever
+attached.** `dpaltNotDisabledMask` is born 0, the first sample made it 0x01,
+and the counter recorded that as a transition. **A counter that counts its own
+first reading cannot be read as a cable event**, which is precisely what this
+counter exists for. Fixed with an explicit `dpaltSampled` flag - and
+deliberately not with `dpaltSweep != NOT_SAMPLED`, which would also work today
+only because the sweep verdict is assigned *below* that line, a silent
+ordering dependency the next edit would break with no symptom.
+
+**WHAT IS NOT IDENTIFIED, AND IS NOT BEING GUESSED: which PHY is the Type-C
+port.** PHY1 is the odd one out and is therefore the candidate by difference -
+but **the numbering does not line up with what is already known**: 2B4 put the
+Type-C on HPD**2** and 2B9 put its AUX engine at AUX**2**, with `AUX_EN` mask
+0x05 naming instances 0 and 2. If PHY numbering followed AUX and HPD numbering
+the odd one out would be PHY2, and it is not. So either the PHY instances are
+numbered independently of the AUX and HPD instances, or PHY1 differs for a
+reason that has nothing to do with Type-C. **One sample cannot separate
+those**, which is the ambiguity 2C0 built `ALT_AMBIGUOUS` to admit, and the
+temptation to read PHY1 as the port is exactly the index-convention inference
+2BF declined to make.
+
+**The baseline is now recorded and it is half a measurement.** The cable-in
+run is the other half: the PHY whose DPALT bits move is the port (2B4's
+method, which is what identified HPD2). What makes it a usable difference is
+that the no-cable state is not uniform - four dark PHYs in two distinct
+states, so there is something for a change to be a change *from*.
+
+Framebuffer **5AB98303** carries the counter fix; the tool fix is userspace
+only and needs no install, so the corrected two-axis reading is available on
+boot 297 as it stands.

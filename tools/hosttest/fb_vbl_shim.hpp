@@ -298,7 +298,7 @@ public:
     uint32_t dpaltActiveMask=0, dpaltNotDisabledMask=0, dpaltEverNotDisabled=0;
     uint64_t dpaltChanges=0;
     int dpaltSweep=0;
-    bool dpaltArmed=false, dpaltReady=false;
+    bool dpaltSampled=false, dpaltArmed=false, dpaltReady=false;
     void dpaltSample(void) {}
     /* 2BA, mirrored - the hosttest compiles RBAMDFramebufferVBL.cpp. */
     bool auxDpcdArmed=false, auxDpcdSuspect=false;
