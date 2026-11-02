@@ -55216,3 +55216,124 @@ full capability and timing set is readable over I2C-over-AUX (this). **Every
 remaining step is output-side**: link training, a second OTG and HUBP, a DIG
 encoder, and a second `IOFramebuffer` so macOS attaches a display. None has
 been attempted, and `getDisplayModeCount()` has returned 1 since 2sl.
+
+## 2BE — who owns link bring-up on DCN 3.1: a SOURCE READ, nothing measured
+
+**Nothing in this milestone touched the hardware.** No boot, no load, no
+register read, no transaction. Every statement below is a reading of Linux
+source vendored into `docs/linux-ref/` at commit
+`6628e7d4c6b25c8d18f1345e3a20d21829aae7e4`, and it is recorded as such because
+the project's own history is full of correct source readings attached to wrong
+machines (2zl, 2xs, rule 46). It answers the question 2BD left open - *before
+writing the PHY ourselves, can we ask DMCUB to train the link?* - and the
+answer splits in a way that is better than either branch of the question.
+
+**(1) There is no link-training command. Training is ours.** The full
+`DMUB_CMD__*` enumeration in `dmub/inc/dmub_cmd.h` has no training entry, and
+`link_dp_training.c` (58 KB) and `link_dp_training_8b_10b.c` (16 KB) contain
+**zero** occurrences of `dmub`, case-insensitive. The clock-recovery and
+equalization loops, the DPCD writes (`DP_LINK_BW_SET`, `DP_LANE_COUNT_SET`,
+`DP_TRAINING_PATTERN_SET`), the lane-status readbacks and the voltage-swing /
+pre-emphasis adjustment are all driver-side for a native DP link. **That half
+is ours, and the engine for it already works** - 2BB carried our own AUX
+transaction and 2BD read 128 bytes over I2C-over-AUX, so what training needs
+from us is DPCD *writes* on a channel whose reads are proven.
+
+**(2) But every HARDWARE bring-up step is a DMUB command, and that is the
+half we would otherwise have had to reverse.** `dcn31_resource.c:934` sets
+**`.dmub_command_table = true`** and `:919` sets `.disable_dmcu = true`, so on
+this generation the atom BIOS command table executes on DMCUB and there is no
+DMCU. `command_table2.c` has ten sites gated on that flag, in these functions:
+
+```
+  encoder_control_digx_v1_5          DMUB_CMD__VBIOS_DIGX_ENCODER_CONTROL      = 0
+  transmitter_control_v1_6/v1_7      DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL  = 1
+  set_pixel_clock_v7                 DMUB_CMD__VBIOS_SET_PIXEL_CLOCK           = 2
+  enable_disp_power_gating_v2_1      DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING  = 3
+  enable_lvtma_control               DMUB_CMD__VBIOS_LVTMA_CONTROL             = 15
+```
+plus a `_fallback` beside each. All are sub-types of `DMUB_CMD__VBIOS` = 128.
+**So the DIG encoder, the UNIPHY transmitter, display power gating and the
+pixel clock are all reachable through the inbox this project already built and
+measured (2zn-2zu).** The 2zn apparatus was kept on the grounds that the
+mailbox identification was a real finding about this firmware even though
+brightness did not need it; this is what it is for.
+
+**The pixel clock in particular.** docs/RULES.md records it as derived and never
+located: *"it comes from the DP PLL and this project has never located it"*,
+with 341 987 984 / 342 011 761 / 342 056 937 Hz computed across three boots
+from `mHz * H_TOTAL * V_TOTAL`. It is `DMUB_CMD__VBIOS_SET_PIXEL_CLOCK`,
+sub-type 2. Not read, not verified on this chip - but it is no longer
+unlocated.
+
+**(3) A free READ exists that would answer a question we have not been able to
+ask.** `DMUB_CMD__VBIOS_TRANSMITTER_QUERY_DP_ALT` = 26 takes a `phy_id` in and
+returns three bytes out:
+
+```c
+struct dmub_rb_cmd_transmitter_query_dp_alt_data {
+    uint8_t phy_id;             /* 0=UNIPHYA .. 5=UNIPHYF */
+    uint8_t is_usb;             /* is phy is usb */
+    uint8_t is_dp_alt_disable;  /* is dp alt disable */
+    uint8_t is_dp4;             /* is dp in 4 lane */
+};
+```
+`is_dp4` is worth the trip on its own: **2BB measured 2 lanes from the sink's
+DPCD, and this field is the chip's own view of the same question.** Two lanes
+is what DP alt mode normally keeps (the other pair goes to USB 3), and
+`is_dp4` would say whether this port is in a four-lane configuration - which
+would roughly double the ~8.64 Gbps 2BB measured, and 2BD's fastest described
+mode needs only 5.47.
+
+**Our firmware passes the version gate.** `has_query_dp_alt()` returns true
+unless the firmware is in `[4.0.0, 4.0.10]`; DMCUB here is **4.0.15.47**
+(recorded in the chip-facts section since the earliest boots), so the query is
+available. Stated as a source reading about a version number we measured, not
+as a successful call.
+
+**(4) AND THE REGISTER PATH IS THE RISKY ONE, WHICH INVERTS THIS PROJECT'S
+USUAL PREFERENCE.** `dcn31_link_encoder_is_in_alt_mode()` also has a legacy
+path reading `RDPCSTX_PHY_CNTL6.RDPCS_PHY_DPALT_DISABLE` (or
+`RDPCSPIPE_PHY_CNTL6` on a `YELLOW_CARP_B0` PHY that is not UNIPHY A, B or E),
+and a read-only register field is exactly the shape of 2B4's HPD and 2B9's
+AUX surveys - which is why it deserves to be written down that **Linux's own
+comment says it prefers the DMUB query to avoid "hanging the RDCPSPIPE if
+DMCUB wasn't already running"**, and marks the register path "Legacy path,
+avoid if possible". A *read* that can hang the register pipe is not the cheap
+option. DMCUB is running on this machine, so the stated precondition is
+satisfied, but the failure mode of being wrong is a dead machine rather than a
+refused value, and nothing here establishes which power domain that PHY's
+registers sit in with no display attached. **Rule 16 asked of a read instead
+of a write: the instrument is a suspect even when it only reads.**
+
+**What is NOT established, and must be before anything is sent:**
+
+- **Which PHY / transmitter the Type-C port is.** 2B9 found `AUX_HPD_SEL`
+  mapping AUX2 to HPD2 and the lesson was *"when a fact looks unobtainable,
+  read the register definition before designing an experiment to infer it"* -
+  so the HPD-to-PHY mapping should be looked for the same way before any
+  cable-swapping method is designed. `phy_id_from_transmitter()` is a plain
+  `TRANSMITTER_UNIPHY_A..G -> 0..6`, so the open question is which UNIPHY
+  carries HPD2, not how to name it.
+- **Whether the chip flags that PHY as USB-C at all.**
+  `is_in_alt_mode()` returns false immediately unless
+  `enc->features.flags.bits.DP_IS_USB_C`, which comes from VBIOS connector
+  data, not from a register.
+- **`YELLOW_CARP_B0` is `0x20` and is an INTERNAL rev, not the PCI revision.**
+  Our device is `1002:1681` rev **0x0a**; `hw_internal_rev` is a different
+  field and the two must not be conflated. Which branch of the legacy path
+  applies here is therefore unknown, and it only matters if the register path
+  is taken at all.
+- **Whether a reply can be read back.** `query_dp_alt_from_dmub()` uses
+  `DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY`, and 2zs's round trip was a GPINT, not
+  an inbox command with a reply. Producing on inbox 1 is already a measured
+  capability; reading a reply out of the command slot afterwards is not.
+
+**So the shape of the remaining work changed.** Before this, "link training"
+was one large undifferentiated piece whose biggest unknown was the PHY
+register set. It is now: a driver-side training loop over an AUX channel that
+works, plus four DMUB commands for hardware we do not have to reverse, plus
+the OTG/HUBP timing this project already writes for the panel, plus a second
+`IOFramebuffer`. **The cheapest first step is a read** (`QUERY_DP_ALT`), it
+needs no cable to be meaningful about `is_usb`, and it would exercise the
+reply path before any command that changes state.

@@ -1061,6 +1061,33 @@ table and refuses to install one that does not match the running kernel;
   readable (2BD). Every remaining step is OUTPUT-side**: link training, a
   second OTG and HUBP, a DIG encoder, and a second `IOFramebuffer` -
   `getDisplayModeCount()` has returned 1 since 2sl.
+  **2BE SPLITS THE OUTPUT SIDE, AS A SOURCE READ WITH NOTHING MEASURED.**
+  Asked whether DMCUB can train the link for us, the answer is no *and* the
+  better half is yes. **Training is ours**: `link_dp_training.c` and
+  `link_dp_training_8b_10b.c` contain **zero** `dmub` references, so the
+  CR/EQ loops, the DPCD writes and the lane settings are driver-side - over
+  the AUX channel 2BB/2BD already proved. **Every HARDWARE bring-up step is a
+  DMUB command**, because `dcn31_resource.c:934` sets
+  `.dmub_command_table = true` (and `:919` `.disable_dmcu = true`), so the
+  atom BIOS table runs on DMCUB: `DMUB_CMD__VBIOS` (128) sub-types **0**
+  DIGx encoder control, **1** DIG1 transmitter control, **2 SET_PIXEL_CLOCK**,
+  **3** display power gating, **15** LVTMA. **The pixel clock this card calls
+  "never located" is sub-type 2** - not verified on this chip, but no longer
+  unlocated - and the inbox to reach all of it is the 2zn-2zu apparatus.
+  **The cheapest next step is a READ**: `..._TRANSMITTER_QUERY_DP_ALT` (26)
+  returns `is_usb`, `is_dp_alt_disable` and **`is_dp4`**, the chip's own view
+  of the lane count 2BB measured as 2 from the sink. DMCUB 4.0.15.47 passes
+  `has_query_dp_alt()` (which excludes only 4.0.0-4.0.10).
+  **And the register path is the RISKY one, which inverts the usual
+  preference here**: `RDPCSTX_PHY_CNTL6.RDPCS_PHY_DPALT_DISABLE` looks exactly
+  like 2B4's and 2B9's read-only surveys, but Linux marks it "Legacy path,
+  avoid if possible" and prefers DMUB to avoid **hanging the RDCPSPIPE** -
+  rule 16 asked of a read. **Unestablished and needed first: which UNIPHY
+  carries HPD2** (look for a register field before designing an experiment -
+  2B9's lesson), whether the PHY is flagged `DP_IS_USB_C` at all (VBIOS
+  connector data, not a register), and whether an inbox reply can be read back
+  (2zs's round trip was a GPINT). `YELLOW_CARP_B0` is **0x20, an internal
+  rev** - not our PCI rev 0x0a; do not conflate them.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the
