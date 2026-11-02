@@ -1131,6 +1131,34 @@ table and refuses to install one that does not match the running kernel;
   too-small aperture fails only the PHY read, never the panel.
   `tools/dpaltlook.sh`. Framebuffer **13533FFA**. **Built and hosttested, NOT
   RUN** - no boot has taken a reading.
+  **2C1 RAN IT (boot 297): it did not hang, and THE CONTROL PASSED STRONGLY.**
+  PHY0 reads **0x00194444** - all four MPLLs on, **PSTATE 0** on every lane,
+  ref clock **enabled and requested** - a PHY in full operation, which random
+  memory and a wrong base or stride do not produce, so **0x2946 + i*0xd8 is
+  confirmed on hardware**. Active mask **0x01**: PHY0 is the panel and nothing
+  else is driven. The dark four sit at PSTATE 3 with MPLLs off.
+  **`DPALT_DP4` is NOT an alt-mode field: it is SET on the eDP panel's PHY**,
+  which is not Type-C and not in alt mode, and that PHY independently shows
+  four MPLLs - so the bit reads "four-lane configuration" and is a second
+  reading of the lane count. 2BB's 2 lanes is the Type-C SINK and is not in
+  tension; that PHY is dark.
+  **And the dark four are NOT alike - PHY1 `0x00023333` has `DPALT_DISABLE`
+  asserted and NOT acked, PHY2-4 `0x00063333` have both.** `dpaltlook.sh`
+  printed "dark" for all four because its state line let the POWER axis win
+  and never reached the alt-mode axis - power and alt mode are independent,
+  `rb_dpalt_verdict()` gets it right, and **the tool had reimplemented the
+  decision in a shell heredoc instead of calling it**, so hosttested logic was
+  correct while the thing a human reads was wrong. Both axes printed now.
+  Also fixed: `transitions` read **1 with no cable ever attached**, the
+  counter recording its own first sample.
+  **NOT identified and not guessed: which PHY is Type-C.** PHY1 is the odd one
+  out, but 2B4 put Type-C on HPD**2** and 2B9 on AUX**2**, so the numbering
+  does not line up - either PHY instances are numbered independently or PHY1
+  differs for an unrelated reason, and one sample cannot say (2BF declined
+  exactly this index inference). **The baseline is half a measurement; the
+  cable-in run is the other half**, and it is usable because the no-cable
+  state is NOT uniform. Framebuffer **5AB98303** (counter fix); the tool fix
+  is userspace only.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the
