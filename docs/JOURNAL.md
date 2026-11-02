@@ -54132,7 +54132,7 @@ hardware; it has never been set on this machine.** The default is off, and
 
 ---
 
-## 2B2 — THE SECOND FLIP SLOT WORKS: 141-143 sets/s AND the flicker is gone from ordinary use (boot 290)
+## 2B2 — THE SECOND FLIP SLOT WORKS: 141-143 sets/s AND the flicker is gone from ordinary use (boot number NOT READ - see 2B5)
 
 **2B1's lever is real, and it is the first thing in this project to buy both
 halves of the trade at once.** Framebuffer **60F39344**,
@@ -54419,3 +54419,80 @@ cannot say whether anything lit a second pipe with the cable attached. The fix
 is one line in `hpdSample()`, which already runs on every publish off the same
 mapping - and it belongs in the same build as anything else that needs a
 reboot, not in a boot of its own.
+
+
+---
+
+## 2B5 — 2B2 DOES NOT REPRODUCE, and two instrument defects found on the way (boot 292)
+
+**The dials are identical and the rate is not.** `tripleset 1` + `holdset 0`,
+cable OUT (`RBFBHpdSink` 0x01, confirmed from the registry, not assumed):
+
+| | 2B2's boot | boot 292 |
+|---|---|---|
+| `sets/s` | 141.03 / 143.12 | **84.43 / 83.02** |
+| `fed` | 96.9 / 98.2 % | 59.1 / 57.9 % |
+| pending wait | 1.01 vblanks | **1.73 / 1.81** |
+| `preempt` per 20 s | +13 / +15 | **+60 / +120** |
+| `ours` | 0.4 % | 0.4 % |
+| cross-check | +1.6 / +0.1 % | +1.0 / +0.4 % |
+
+The cross-checks pass on both sides, so neither reading is an instrument
+artifact. **The hold is genuinely off**: cumulative `held/gets` sat frozen at
+5638 while `gets` climbed 17 933 -> 52 083 -> 55 517 across four windows, so
+nothing was being held. **So 2B2's +56 % is one boot that did not reproduce,
+and rule 44 bit exactly where 2B2 said it might.** 2B2's own entry said a
+second boot was what would turn it into a finding; this is that boot, and the
+answer is no.
+
+**What moved is the LATCH, and that is the same shape as 2A3's withdrawn "two
+states".** 1.01 -> 1.73-1.81 vblanks while `ours` stayed pinned at 0.4 % on
+both boots. A vsync'd flip's resolve time is a *display engine* quantity - no
+amount of compositor or bookkeeping work changes when it latches - so whatever
+differs between these boots is in the display path, not in ours. That is the
+third time this project has measured two boots in one configuration with `ours`
+identical and the rate 40-70 % apart (2A1/2A2, 2zg, now this), and **it is
+still unexplained.** No model is proposed from it.
+
+**`preempt` climbing within the boot is new**: +17, +18, +60, +120 over four
+successive windows. 2B2 read +13/+15 and boot 289 read +81/+26 one-slot. A
+counter that grows window over window in a fixed configuration is not variance,
+and nothing in the frame path is supposed to drift. Unexplained, recorded, and
+the first thing worth a glance if this gets picked up.
+
+**INSTRUMENT DEFECT 1: `RBFBAmtrNotReadyArmed` IS A DUPLICATE OF
+`RBFBAmtrNotReady`.** `RBAMDFramebufferVBL.cpp:227` publishes it as
+`amtrNotReady` - the same variable. So the key whose NAME claims "the boot set
+this up" carries the LIVE value instead, and after a `holdset 0` it reads `No`
+for a boot that armed the hold perfectly well. **I read that `No` and started
+reasoning that the boot had come up without the hold** - caught only by
+checking `boot-args`, which has no `-rbgpunofbnotready` in it. Two consequences
+worth more than the typo: **no boot can say afterwards whether the hold was
+armed at setup**, which is precisely the fact rule 34 wants established before
+an A/B is interpreted; and CLAUDE.md's "it can only arm what the boot set up"
+describes no code - the setter has no such gate, it just assigns. This is 2A3's
+error inverted: 2A3 had a property that could never move, this is a property
+that moves when its name says it cannot. **A key's name is a claim about its
+provenance, and nothing checks it.** The fix is a `amtrNotReadySetup` captured
+once in `start()`, which needs a build and therefore a boot - so it is bundled
+rather than taken alone.
+
+**INSTRUMENT DEFECT 2: I labelled 2B2 "boot 290" without reading
+`rbgpu-boot`.** It reads **292** now, and nothing establishes what 2B2's was.
+**Rule 8 exists for exactly this and is the first rule in the "reading a boot"
+section.** The entry is retitled rather than guessed at. It costs little here
+because 2B2's own numbers are intact and this entry's comparison does not
+depend on the gap being one boot or two - but a project that labels boots by
+inference cannot later order its own measurements, which is how 2A3's "two
+states" became unfalsifiable.
+
+**THE RIGHT NEXT MEASUREMENT IS THE A/B INSIDE THIS BOOT, and it needs no
+reboot.** Rule 44's own prescription: boot-to-boot variance exceeds
+within-boot variance, so comparing boot 292 against 2B2's boot cannot separate
+the dials from the boot - only toggling inside one boot can. With `triple` left
+ON, `holdset 1` then `holdset 0` gives this boot's own A/B; `tripleset 0` with
+the hold off gives 2B1's direct A/B on this boot. If hold-ON reads ~50 here
+then two slots plus no hold is still a large win *on this boot* and 2B2's
+mechanism survives with a smaller number; if hold-ON reads ~91 as it always
+has, then this boot is slow only in the no-hold regime and the second slot is
+not buying what 2B2 said it bought.
