@@ -13,6 +13,7 @@
 /* 2B3: needed on BOTH sides of the guard - the hosttest compiles this file
  * too, which is the 2B1 lesson about the shim. */
 #include "rb_hpd.h"
+#include "rb_aux.h"
 
 /* -- the vblank ---------------------------------------------------------- */
 
@@ -215,16 +216,50 @@ void RBAMDFramebuffer::publishVBLState(void)
      * histogram beside it is what refuted it in the same output). */
     for (unsigned i = 0; i < RB_HPD_COUNT; i++) {
         char key[20];
+        /* 2B4: 64 bits, not 32. ioreg prints a 32-bit OSNumber whose bit 31
+         * is set as a sign-extended 64-bit decimal, which is how HPD2's
+         * 0xff0ff013 came back as 18446744073693818899. Publishing the width
+         * the value is read at fixes it at the source, for every reader,
+         * instead of only in the one tool that was patched. */
         snprintf(key, sizeof(key), "RBFBHpd%uStatus", i);
-        setProperty(key, (uint64_t)hpdStatus[i], 32);
+        setProperty(key, (uint64_t)hpdStatus[i], 64);
         snprintf(key, sizeof(key), "RBFBHpd%uCtl", i);
-        setProperty(key, (uint64_t)hpdControl[i], 32);
+        setProperty(key, (uint64_t)hpdControl[i], 64);
+    }
+    /* 2B8: the AUX engines and the LIVE OTG words. */
+    auxSample();
+    setProperty("RBFBAuxEn", (uint64_t)auxEnMask, 32);
+    setProperty("RBFBAuxMatch0", (uint64_t)auxMatchMask, 32);
+    for (unsigned i = 0; i < RB_AUX_COUNT; i++) {
+        char key[24];
+        snprintf(key, sizeof(key), "RBFBAux%uCtl", i);
+        setProperty(key, (uint64_t)auxControl[i], 64);
+        snprintf(key, sizeof(key), "RBFBAux%uDphy", i);
+        setProperty(key, (uint64_t)auxDphy[i], 64);
+        snprintf(key, sizeof(key), "RBFBAux%uStat", i);
+        setProperty(key, (uint64_t)auxStatus[i], 64);
+        snprintf(key, sizeof(key), "RBFBAux%uArb", i);
+        setProperty(key, (uint64_t)auxArb[i], 64);
+    }
+    for (unsigned i = 0; i < 4; i++) {
+        char key[24];
+        snprintf(key, sizeof(key), "RBFBOtgLive%u", i);
+        setProperty(key, (uint64_t)otgLive[i], 64);
     }
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
     setProperty("RBFBHubpOtg2", hubpOtgCtl2, 32);
     setProperty("RBFBHubpOtg3", hubpOtgCtl3, 32);
     setProperty("RBFBHubpOtgAnyArmed", hubpOtgAny);
-    setProperty("RBFBAmtrNotReadyArmed", amtrNotReady);
+    /* 2B5: this used to publish amtrNotReady - the LIVE value - under a name
+     * claiming the boot set it up, so it read No after a runtime holdset 0 on
+     * a boot that armed the hold fine, and nothing recorded the boot's own
+     * state at all (rule 34). The snapshot is taken once, on the first
+     * publish, before any setProperties can have reached us. */
+    if (!amtrNotReadySetupHave) {
+        amtrNotReadySetup = amtrNotReady;
+        amtrNotReadySetupHave = true;
+    }
+    setProperty("RBFBAmtrNotReadyArmed", amtrNotReadySetup);
     setProperty("RBFBAmtrHeld", amtrHeld, 64);
     setProperty("RBFBAmtrHoldExpired", amtrHoldExpired, 64);
     /* 2xs: the backlight. Published unconditionally so `RBFBBlArmed` is the

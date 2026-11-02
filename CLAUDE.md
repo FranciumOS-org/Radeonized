@@ -855,6 +855,55 @@ table and refuses to install one that does not match the running kernel;
   bit moved is the port, and one sample identifies nothing (rule 18) because
   the DCN-instance-to-connector mapping is in no header.
   Framebuffer **A5BDF3D2**.
+  **2B4 ANSWERED IT: the Type-C port is HPD2 and IS wired to the 680M in Eco
+  mode.** Three samples, one boot: HPD2's sink bit follows the cable (0x05 ->
+  0x01 -> 0x05, `RBFBHpdChanges` 2) while **HPD0 - the internal panel - never
+  moves**, which is the control, and all five blocks were enabled so every "no
+  sink" is a real reading. **The opposite of the HDMI-A verdict below**: that
+  jack is dGPU-wired, this port reaches the 680M with the dGPU off the bus
+  entirely. HPD2 reads **0xff0ff013** - both sense bits plus
+  `DC_HPD_INT_STATUS` **latched and unserviced**, which is correct since
+  nothing in macOS knows the connector exists; HPD0 reads 0x14000012, the same
+  sense bits with bit 0 clear. (`hpdlook.sh` printed that word as
+  `0xffffffffff0ff013`: **ioreg renders a 32-bit OSNumber with bit 31 set as a
+  sign-extended 64-bit decimal.** The verdict column was right because it
+  comes from the kext's mask - 2B0's "publish the raw beside the summary"
+  paying off in the other direction. Fixed at the source in 2B8 by publishing
+  at 64 bits; **several other 32-bit keys have the same trap**.)
+  **2B8 IS THE NEXT STEP AND IT IS A SURVEY, NOT A TRANSACTION.** A DPCD read
+  would be **uninterpretable**: an AUX timeout is indistinguishable between an
+  unconfigured engine, an unwired channel and a silent sink (rule 14, the gap
+  2zw's six milestones lived in). So `src/common/rb_aux.h` reads the five DP
+  AUX engines - `AUX_CONTROL` 0x1f50, `SW_CONTROL` 0x1f51, `ARB_CONTROL`
+  0x1f52, `INT_CONTROL` 0x1f53, `SW_STATUS` 0x1f54, `SW_DATA` 0x1f56,
+  `DPHY_RX_CONTROL1` 0x1f5b, stride **0x1c**, all **BASE_IDX 2**, so no new
+  mapping - and **decides nothing else. There is no writer**: a transaction
+  takes `AUX_ARB_CONTROL` on a block the **DMCUB also arbitrates for**, and
+  taking that lock wrongly on the engine driving the live panel loses the
+  display.
+  **The reference instance is the instrument**: the firmware trained eDP on
+  this die, so one engine is in a known-working configuration now, which beats
+  any absolute judgement - **2zw's lesson applied BEFORE the fact.**
+  `rb_aux_matches_ref()` compares `AUX_EN` + the DPHY receive timing and
+  **returns 0 when the reference itself is not enabled.** Instance 0 is the
+  assumed reference and every raw word is published, because the
+  AUX-to-connector mapping is in **no header** - as the HPD one was not.
+  **Rule 46 discharged in the resource file, not by reasoning**: these are
+  **DCE's** registers on a DCN chip, the exact 2xs/2zl trap, and
+  `dcn31_resource.c`'s `dcn31_aux_engine_create()` calls
+  `dce110_aux_engine_construct()` with `AUX_COMMON_REG_LIST0(id)` - **DCN 3.1
+  uses the DCE110 AUX engine verbatim.** That construct touches **no
+  hardware**, so whatever configures these engines is elsewhere.
+  **Bundled into the same build** (each needed one and none deserved its own
+  boot): **`RBFBOtgLive0..3`**, re-read every publish - 2B5 found **both**
+  earlier OTG readings are setup one-shots, so nothing could say whether a
+  pipe lit with the cable in; **`RBFBAmtrNotReadyArmed` is now a real
+  snapshot**; and the HPD raw words publish at 64 bits.
+  `tools/auxlook.sh` reads it. Framebuffer **E24F30C2**.
+  **What the reading decides, cable in:** AUX2 enabled and matching instance 0
+  -> a DPCD read is a small bounded next step. AUX2 with `AUX_EN` clear -> the
+  engine is ours to bring up, a new write surface and a decision. OTG1..3 all
+  0x300 live -> nothing lit a second pipe, so the whole chain is ours.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the

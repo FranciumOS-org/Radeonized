@@ -23,6 +23,7 @@
 #include "RBAMDFramebuffer.hpp"
 #include "rb_hubp.h"
 #include "rb_hpd.h"
+#include "rb_aux.h"
 #include "rb_dcn_deny.h"
 #include "rb_regs.h"
 #include <IOKit/pci/IOPCIDevice.h>
@@ -81,6 +82,13 @@ bool RBAMDFramebuffer::hubpSetup(void)
         hpdStatus[i] = 0;
         hpdControl[i] = 0;
     }
+    for (unsigned i = 0; i < RB_AUX_COUNT; i++) {
+        auxControl[i] = 0; auxDphy[i] = 0;
+        auxStatus[i] = 0;  auxArb[i] = 0;
+    }
+    auxEnMask = 0;
+    auxMatchMask = 0;
+    for (unsigned i = 0; i < 4; i++) { otgLive[i] = 0; }
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;
     hubpPendHits = 0;
@@ -121,6 +129,11 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * block that a later addition can forget. */
     const uint32_t hpdNeeded = kRbDmuSeg2 + rb_hpd_dw_max();
     if (hpdNeeded > needed) { needed = hpdNeeded; }
+    /* 2B8: and the AUX engines sit above even those (0x1fcb against HPD's
+     * 0x1f36), so the same one comparison grows again rather than a new
+     * check appearing beside it. */
+    const uint32_t auxNeeded = kRbDmuSeg2 + rb_aux_dw_max();
+    if (auxNeeded > needed) { needed = auxNeeded; }
     /* Every dword we will touch has to be inside the aperture, checked before
      * the first dereference and not after (rule 19's shape for a mapping). */
     if (length < ((uint64_t)needed + 1) * sizeof(uint32_t)) {
@@ -201,6 +214,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * difference between two samples, not either one. */
     hpdReady = true;
     hpdSample();
+    auxSample();
     hpdSetupMask   = hpdSinkMask;
     hpdSetupEnMask = hpdEnMask;
     hpdChanges     = 0;
@@ -520,4 +534,58 @@ void RBAMDFramebuffer::hpdSample(void)
     hpdSinkMask  = sink;
     hpdSinkEver |= sink;
     hpdEnMask    = rb_hpd_enabled_mask(hpdControl, RB_HPD_COUNT);
+}
+
+
+/* 2B8: read the five DP AUX engines, and the OTG pipe words LIVE.
+ *
+ * Read-only, on hubpSetup()'s mapping and bound, armed by the same success as
+ * hpdSample(). Nothing here decides anything and there is no writer - taking
+ * the AUX arbitration lock on the engine driving the live panel is a way to
+ * lose the display, and that decision is not taken in a survey (rb_aux.h).
+ *
+ * THE LIVE OTG WORDS ARE THE OTHER HALF. 2B5 found that BOTH existing OTG
+ * readings are one-shots from setup - the plugin's rbgpu_agdc_otg.cpp sampler
+ * and this kext's own hubpOtgCtl1..3 - so when the user attached a display and
+ * asked whether a second pipe had lit, nothing in the registry could answer.
+ * These are re-read on every publish, so OTG1..3 leaving 0x300 is visible the
+ * moment it happens.
+ */
+void RBAMDFramebuffer::auxSample(void)
+{
+    if (!hpdReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_AUX_COUNT; i++) {
+        const uint32_t dwCtl  = rb_aux_dw(i, RB_AUX_REG_CONTROL);
+        const uint32_t dwDphy = rb_aux_dw(i, RB_AUX_REG_DPHY_RX_CTL1);
+        const uint32_t dwStat = rb_aux_dw(i, RB_AUX_REG_SW_STATUS);
+        const uint32_t dwArb  = rb_aux_dw(i, RB_AUX_REG_ARB_CONTROL);
+        if (dwCtl == RB_AUX_DW_INVALID || dwDphy == RB_AUX_DW_INVALID ||
+            dwStat == RB_AUX_DW_INVALID || dwArb == RB_AUX_DW_INVALID) {
+            continue;
+        }
+        auxControl[i] = hubpRegs[kRbDmuSeg2 + dwCtl];
+        auxDphy[i]    = hubpRegs[kRbDmuSeg2 + dwDphy];
+        auxStatus[i]  = hubpRegs[kRbDmuSeg2 + dwStat];
+        auxArb[i]     = hubpRegs[kRbDmuSeg2 + dwArb];
+    }
+    auxEnMask = rb_aux_enabled_mask(auxControl, RB_AUX_COUNT);
+
+    /* Compared against instance 0 as a STATED ASSUMPTION, not a finding: the
+     * AUX-instance-to-connector mapping is in no header (the same gap 2B4 hit
+     * for HPD, where the answer came from a difference and not a datasheet).
+     * Every raw word is published, so the comparison can be redone by hand
+     * against a different reference if instance 0 turns out not to be the
+     * panel's. */
+    auxMatchMask = 0;
+    for (unsigned i = 0; i < RB_AUX_COUNT; i++) {
+        if (rb_aux_matches_ref(auxControl[i], auxDphy[i],
+                               auxControl[0], auxDphy[0])) {
+            auxMatchMask |= (1u << i);
+        }
+    }
+
+    for (unsigned i = 0; i < 4; i++) {
+        otgLive[i] = hubpRegs[kRbDmuSeg2 + kRbOtgControl[i]];
+    }
 }
