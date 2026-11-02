@@ -52920,3 +52920,82 @@ driver — not another DC register and not another DMUB command.
 
 **Do not re-open the DC side without new evidence.** Three independent routes,
 two configurations, and Apple's own absence of a parameter all agree.
+
+## 2zw — boot 282: BRIGHTNESS WORKS. The MUX had the panel on the dGPU, and 2xs was right all along
+
+The user switched the ASUS firmware from hybrid (iGPU + dGPU) to **Eco / iGPU-only**
+mode in Windows, rebooted into macOS, and the slider and the keyboard keys both
+move the panel. Nothing in our code changed.
+
+**Boot 282, and every number is ours:**
+
+```
+RBAMDFramebuffer owns the panel; AppleBacklightDisplay matched on it
+RBFBBlArmed Yes   RBFBBlReady Yes   RBFBBlRefuse 0   RBFBBlFloorRefused 0
+RBFBBlSets 247    RBFBBlParmSets 246   RBFBBlParmSetsLin 244
+RBFBBlLastLevel 44160 -> RBFBBlLastCount 43125 == RBFBBlReadback 43125
+RBFBBlLevel0 22784   RBFBBlFloor 5120   RBFBBlLiveDiffs 0 over 515 reads
+IODisplayParameters: brightness / linear-brightness = 44160, min 5120, max 65536
+```
+
+`min 5120` is **our** floor and `max 65536` **our** scale, and 244 of the 246
+parameter sets arrived on `linear-brightness` — CoreBrightness, exactly as 2y2
+identified it. The write lands, reads back bit-identical, nothing contests it,
+**and now the panel follows it.**
+
+**What was actually wrong: the panel was not wired to the chip we were
+writing.** On this chassis the MUX routes the eDP panel — *and its backlight
+control* — to the dGPU in hybrid mode. So the 680M's PWRSEQ0 `BL_PWM_CNTL`
+was a real, writable, perfectly functioning register attached to **nothing**.
+Every reading this project took was correct and every inference from them was
+wrong, because they all shared one unexamined premise: that the output was
+connected to the silicon under test.
+
+**This is the explanation for the entire 2zj → 2zv sequence, and it fits every
+measurement without exception:**
+
+- `BL_PWM_CNTL` enabled, fractional, period 4000, holding our duty cycle with
+  `RBFBBlLiveDiffs` pinned across a 40 s window (2zj, boot 270) — **nobody
+  contested it because nobody was using it.** The "no other writer" result that
+  looked like such strong evidence was the signature of a disconnected block.
+- The DMUB ABM commands, byte-correct and acked on the right ring, all three
+  control types, pipe bound and unbound (2zs/2zt/2zu) — the 680M's DMCUB also
+  was not driving the panel's backlight.
+- Apple's stock stack publishing **no brightness parameter at all** (2zv) —
+  correct, and now explained: in hybrid mode there is no backlight on that
+  GPU's display for a parameter to describe.
+- Boot 249's `brig` appearing and the panel not moving — our parameter was
+  real, the write was real, the wire was not there.
+
+**2zl IS WITHDRAWN.** It concluded that 2xs had transcribed
+`dce_panel_cntl.c`'s direct PWM write onto a chip whose `dc` would never call
+it — rule 46, right offsets and wrong method for the version grouping. That
+conclusion is false: the direct `BL_PWM_CNTL` write **does** drive this panel
+on this chip, measured on boot 282. The Linux reading behind 2zl was accurate
+(`dcn31_panel_cntl.c` really has no `.set_backlight_level`) and the inference
+from it was wrong, because what Linux's `dc` chooses to call is not a statement
+about what the hardware block is capable of. 2xs was right from the start and
+stood unimproved for six milestones while being described as a mistake.
+
+**2xq/2xr are also reframed.** "The panel is wired to the dGPU, so HDMI is
+unreachable" was recorded as a fixed fact about this chassis. It is a fact
+about the **MUX mode**, and the MUX is user-switchable from the firmware
+setup. Whether the HDMI port also moves to the iGPU in Eco mode is now worth
+measuring rather than assumed closed.
+
+**RULE 47, and it is cheap to state and expensive to have learned: before
+concluding that a register is the wrong control surface, establish that the
+output is WIRED to this chip right now.** A write that lands, reads back
+bit-identical and is contested by nobody is the expected reading of a
+functioning block with nothing attached to it — it is indistinguishable from
+success at the register and from failure at the panel. Six milestones, ten
+boots and three hypotheses went into the gap between "the chip accepted the
+value" and "the chip drives the thing". Ask it of any output: display,
+backlight, audio codec, USB port. On a laptop with switchable graphics the
+answer can change without a line of code changing, and the firmware setup menu
+is part of the configuration a reading comes from (rule 39, one level out from
+software).
+
+**Brightness is DONE.** Nothing to build. The configuration requirement is
+**iGPU-only / Eco mode in the ASUS firmware**, which belongs beside the
+boot-args as part of what an armed boot means.
