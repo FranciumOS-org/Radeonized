@@ -620,8 +620,33 @@ table and refuses to install one that does not match the running kernel;
   +13/+15 rather than 0 - a THIRD flip inside one period still preempts and
   there is no third slot, so this is not another dial of the same kind. The
   exposure window is one generation further away, not closed.
-  **RULE 44 IS NOT SATISFIED: one boot, n=2 windows, and 2A4 is what one
-  boot of this kind of good news cost last time.** The difference is that
+  **2B5: IT DID NOT REPRODUCE. Boot 292, same dials, cable out: 84.43/83.02
+  sets/s with pending wait 1.73/1.81 vblanks** (cross-checks +1.0/+0.4 %, hold
+  provably off - cumulative `held/gets` frozen at 5638 while gets climbed to
+  55 517). **So 2B2's +56 % is one boot, and rule 44 bit where 2B2 said it
+  might.** What moved is the LATCH while `ours` stayed 0.4 % on both boots -
+  a display-engine quantity, so the difference is not ours; **third time this
+  project has seen two boots in one configuration with `ours` identical and
+  the rate 40-70 % apart** (2A1/2A2, 2zg, this), still unexplained, no model
+  proposed. `preempt` also climbed WITHIN the boot - +17, +18, +60, +120 over
+  four windows - which is not variance and is unexplained.
+  **The next measurement is the A/B inside ONE boot, which needs no reboot**:
+  `holdset 1` / `holdset 0` with triple left on, and `tripleset 0` with the
+  hold off. Comparing across boots cannot separate the dials from the boot.
+  **Two instrument defects found on the way (2B5).**
+  **(1) `RBFBAmtrNotReadyArmed` is a DUPLICATE of `RBFBAmtrNotReady`** -
+  `RBAMDFramebufferVBL.cpp:227` publishes `amtrNotReady` for both, so the key
+  whose name claims "the boot set this up" carries the live value and reads
+  `No` after a `holdset 0` on a boot that armed it fine. **No boot can say
+  afterwards whether the hold was armed at setup** (the fact rule 34 wants),
+  and **"it can only arm what the boot set up", written in this card, describes
+  no code** - the setter has no such gate. 2A3 inverted: a property that moves
+  when its name says it cannot. Fix is an `amtrNotReadySetup` snapshot in
+  `start()`, bundled rather than given its own boot.
+  **(2) 2B2 was labelled "boot 290" without reading `rbgpu-boot`** (it reads
+  **292** now) - rule 8, the first rule in the reading-a-boot section.
+  **RULE 44 WAS NOT SATISFIED: 2B2 was one boot, n=2 windows, and 2A4 is what
+  one boot of this kind of good news cost last time.** The difference is that
   the clean report comes from ordinary use over a working session - 2A6's
   identified workload - and the mechanism predicted the result's shape in
   advance. A second boot turns it into a finding, and costs two commands
