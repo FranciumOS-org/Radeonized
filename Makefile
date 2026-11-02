@@ -529,7 +529,7 @@ fbpresent:
 # rebuild of the executable inside it. **A rebuild still rewrites the bundle,
 # so re-sign is part of the target, not a manual step** (2x5 lost framepump's
 # grant to exactly this).
-.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset
+.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset
 # 2zn: the DMCUB inbox oracle - reads the locate and the bring-up scan, and
 # sends ONE ABM command by name. See tools/dmubbl.m for why it is a tool and
 # not the slider.
@@ -546,6 +546,12 @@ $(OUT)/holdset: tools/holdset.m | $(OUT)
 	@echo "  TOOL  $@"
 
 # 2A0: the frame-time budget - the decomposition that replaces an eighth dial.
+tripleset: $(OUT)/tripleset
+$(OUT)/tripleset: tools/tripleset.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework IOKit -framework CoreFoundation -framework Foundation
+	@echo "  TOOL  $@"
+
 ftbudget: $(OUT)/ftbudget
 $(OUT)/ftbudget: tools/ftbudget.m src/common/rb_frametime.h | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -Isrc/common -o $@ $< \

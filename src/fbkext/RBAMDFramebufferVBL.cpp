@@ -152,6 +152,16 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpAddrCfg", (uint64_t)hubpAddrCfg, 32);
     setProperty("RBFBHubpFlipCtl", (uint64_t)hubpFlipCtl, 32);
     setProperty("RBFBHubpFlipCtl2", (uint64_t)hubpFlipCtl2, 32);
+    /* 2B1: the live state of the second pending slot, from the REGISTRY's
+     * point of view - published periodically, because 2A3's lesson is that a
+     * field a runtime dial can change must be published where it is read. */
+    setProperty("RBFBHubpTriple", hubpTripleArmed);
+    setProperty("RBFBHubpTripleWrites", hubpTripleWrites, 64);
+    setProperty("RBFBHubpTripleReadback", (uint64_t)hubpTripleReadback, 32);
+    setProperty("RBFBHubpTripleOrig", (uint64_t)hubpTripleOrig, 32);
+    setProperty("RBFBHubpTripleRefused", hubpTripleRefused, 64);
+    setProperty("RBFBHubpTripleRefusedVal",
+                (uint64_t)hubpTripleRefusedVal, 32);
     setProperty("RBFBHubpPendChecks", hubpPendChecks, 64);
     setProperty("RBFBHubpPendHits", hubpPendHits, 64);
     /* 2za: the latch-latency histogram. Published as a string because the
@@ -1078,6 +1088,50 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             LOG("RBFBNotReady -> %d (2xo hold %s), frame-time window zeroed",
                 amtrNotReady ? 1 : 0, amtrNotReady ? "ON" : "OFF");
             return kIOReturnSuccess;
+        }
+    }
+
+    /* 2B1: the second pending flip slot, as a RUNTIME dial.
+     *
+     * A dial and not a boot-arg for 2zm's reason, which 2zz and 2A4 both
+     * cashed in: this has to be A/B'd against the 2xo hold inside ONE boot,
+     * because the thing it is supposed to buy is "hold off AND no flicker"
+     * and the only instrument for the flicker is the user's eyes (rule 45).
+     * Four combinations, no reboots.
+     *
+     * The write is verified from the hardware readback, and a failure to move
+     * the bit returns an error rather than success - rule 20, and the reason
+     * holdset learned to re-read the registry in 2A3.
+     *
+     * Zeroes the frame-time window for the same reason the hold does: a
+     * budget spanning both sides of this is a blend of two configurations.
+     */
+    {
+        OSNumber *t = OSDynamicCast(OSNumber,
+                                    dict->getObject("RBFBTriple"));
+        if (t) {
+            const long want = (long)t->unsigned32BitValue();
+            if (want != 0 && want != 1) { return kIOReturnBadArgument; }
+            if (!hubpReady || !hubpRegs) {
+                LOG("RBFBTriple refused: HUBP not armed this boot");
+                return kIOReturnNotReady;
+            }
+            const bool ok = hubpTripleApply(want != 0);
+            rb_ft_reset(&ftWork); rb_ft_reset(&ftGap);
+            rb_ft_reset(&ftGet);  rb_ft_reset(&ftVbl);
+            rb_ft_reset(&ftRetry); rb_ft_reset(&ftPoll);
+            rb_ft_reset(&ftLatchWait); rb_ft_reset(&ftHoldRunAsks);
+            rb_ft_reset(&ftPendWait); rb_ft_reset(&ftPendRunAsks);
+            rb_ft_hist_reset(&ftPendHist);
+            ftPendStart = 0; ftPendAsks = 0;
+            ftPrevExit = 0; ftPrevGetExit = 0; ftPrevGetHeld = false;
+            ftHoldStart = 0; ftHoldAsks = 0;
+            ftResets++;
+            publishVBLState();
+            LOG("RBFBTriple -> %ld (readback 0x%x, %s), window zeroed",
+                want, (unsigned)hubpTripleReadback,
+                ok ? "took" : "DID NOT TAKE");
+            return ok ? kIOReturnSuccess : kIOReturnIOError;
         }
     }
     {

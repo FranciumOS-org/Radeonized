@@ -318,3 +318,26 @@ Already vendored and used here: `dcn_3_1_2_offset.h`'s `regDMCUB_SCRATCH0`
 0x01e3, `regDMCUB_SCRATCH7` 0x01ea, `regDMCUB_GPINT_DATAIN0` 0x01f7,
 `regDMCUB_GPINT_DATAIN1` 0x01f8, `regDMCUB_GPINT_DATAOUT` 0x01f9, all
 base_idx 2.
+
+## 2B1 - SURFACE_TRIPLE_BUFFER_ENABLE
+
+Not vendored as a file; read from upstream and recorded here because the
+decision rests on it.
+
+- `drivers/gpu/drm/amd/display/dc/hubp/dcn20/dcn20_hubp.c`,
+  `hubp2_enable_triplebuffer(struct hubp *, bool enable)`:
+  `REG_UPDATE(DCSURF_FLIP_CONTROL2, SURFACE_TRIPLE_BUFFER_ENABLE, enable ?
+  DC_TRIPLEBUFFER_ENABLE : DC_TRIPLEBUFFER_DISABLE)`, guarded by a
+  `REG_GET` so it only writes when the state differs. No lock, no sequencing.
+- `drivers/gpu/drm/amd/display/dc/hubp/dcn31/dcn31_hubp.c`,
+  `dcn31_hubp_funcs`: `.hubp_enable_tripleBuffer = hubp2_enable_triplebuffer`,
+  `.hubp_is_triplebuffer_enabled = hubp2_is_triplebuffer_enabled`. **So DCN 3.1
+  uses the DCN 2.0 writer unchanged** - the version grouping rule 46 asks for.
+- `drivers/gpu/drm/amd/display/dc/hwss/dcn20/dcn20_hwseq.c`:
+  `dcn20_program_triple_buffer()` is a thin forwarder;
+  `dcn20_program_front_end_for_ctx()` calls it only when
+  `dc->debug.enable_tri_buf` is set, and per-plane use is driven by
+  `plane_state->triplebuffer_flips`, which also selects
+  `triplebuffer_lock`/`triplebuffer_unlock` in `dcn20_tg_lock()` instead of the
+  normal lock pair. **We set the HUBP bit without that lock protocol**, which
+  is the part of the method this project does not reproduce.

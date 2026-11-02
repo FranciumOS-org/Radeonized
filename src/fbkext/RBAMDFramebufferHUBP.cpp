@@ -62,6 +62,13 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpReadback = 0;
     hubpFlipCtl = 0;
     hubpPendCtl = 0;
+    hubpTripleArmed = false;
+    hubpTripleOrig = 0;
+    hubpTripleHaveOrig = false;
+    hubpTripleWrites = 0;
+    hubpTripleRefused = 0;
+    hubpTripleRefusedVal = 0;
+    hubpTripleReadback = 0;
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;
     hubpPendHits = 0;
@@ -373,6 +380,53 @@ void RBAMDFramebuffer::hubpPoll(void)
  * configuration where the flicker happens. Splitting them costs nothing (the
  * caller reads the word once either way) and lets the frame-time budget
  * bracket a pending run in both regimes. */
+/* 2B1: set or clear SURFACE_TRIPLE_BUFFER_ENABLE, and VERIFY it.
+ *
+ * Follows hubp2_enable_triplebuffer(): a plain read-modify-write of
+ * DCSURF_FLIP_CONTROL2, which dcn31_hubp_funcs maps verbatim, so the method
+ * is grouped right for this chip (rule 46; see docs/linux-ref/UPSTREAM.md).
+ * What Linux ALSO does and we do not is pair a triple-buffered flip with
+ * triplebuffer_lock/unlock on the timing generator - stated in rb_hubp.h and
+ * repeated here because it is the reason this is opt-in.
+ *
+ * Three things make it a dial rather than a write:
+ *   - the pre-write snapshot is taken ONCE and kept, so `triple 0` restores
+ *     the firmware's own word rather than a reconstruction of it;
+ *   - a FLIP_CONTROL2 carrying bits outside the three documented fields is
+ *     REFUSED and the refused value published (rule 19), because then this is
+ *     not the register this code believes it is;
+ *   - the readback decides the return value, not the fact that the store ran
+ *     (rule 20, and rule 13 - a store cannot report failure here at all).
+ */
+bool RBAMDFramebuffer::hubpTripleApply(bool enable)
+{
+    if (!hubpReady || !hubpRegs) {
+        return false;
+    }
+    const unsigned idx = kRbDmuSeg2 + rb_hubp_dw(hubpIndex,
+                                                 RB_HUBP_REG_FLIP_CTL2);
+    const uint32_t cur = hubpRegs[idx];
+    if (!rb_hubp_triple_may_write(cur)) {
+        hubpTripleRefused++;
+        hubpTripleRefusedVal = cur;
+        return false;
+    }
+    if (!hubpTripleHaveOrig) {
+        hubpTripleOrig = cur;
+        hubpTripleHaveOrig = true;
+    }
+    /* Restoring puts the firmware's own word back, bit for bit. Arming only
+     * ever changes bit 10 of whatever is live. */
+    const uint32_t want = enable ? rb_hubp_triple_set(cur, 1)
+                                 : hubpTripleOrig;
+    hubpRegs[idx] = want;
+    hubpTripleWrites++;
+    const uint32_t back = hubpRegs[idx];
+    hubpTripleReadback = back;
+    hubpTripleArmed = rb_hubp_triple_enabled(back) ? true : false;
+    return rb_hubp_triple_enabled(back) == (enable ? 1 : 0);
+}
+
 bool RBAMDFramebuffer::hubpFlipPending(void)
 {
     if (!hubpReady || !hubpRegs) {

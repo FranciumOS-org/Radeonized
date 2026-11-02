@@ -175,6 +175,79 @@ static inline int rb_hubp_flip_would_discard(uint32_t flip_ctl,
     return rb_hubp_flip_pending(flip_ctl);
 }
 
+/* 2B1: TURN THE SECOND PENDING SLOT ON.
+ *
+ * WHY THIS IS THE ONE REMAINING LEVER. 2A8 and 2B0 established that the 2xo
+ * hold costs exactly one vblank of vsync latch and that the latch
+ * distribution has no early tail, so neither a rate throttle nor a partial
+ * hold can exist - given ONE pending slot. That premise has been read on
+ * every boot since 216 and never questioned: FLIP_CONTROL2 reads 0x40, which
+ * is PENDING_MIN_TIME = 64 with SURFACE_TRIPLE_BUFFER_ENABLE CLEAR.
+ *
+ * With the bit set there are two. That changes the two things the hold exists
+ * for at once: programming an address no longer discards an unlatched flip
+ * (boot 289 counted that happening 81 and 26 times per 20 s window with the
+ * hold off, against 4 and 2 with it on), and there is one more frame of
+ * pipeline between Apple accepting a transaction and that surface reaching
+ * the panel - which is the slack the 2xo hazard needs, because CoreDisplay
+ * releases the surface and signals readiness in ONE event
+ * (IOPAttachment::HandleTransactionCompletionEvent, journal) and we cannot
+ * separate them.
+ *
+ * THE METHOD IS GROUPED CORRECTLY, CHECKED THE WAY 2zl SAYS TO (rule 46).
+ * Linux writes this in hubp2_enable_triplebuffer() - a plain read-modify-write
+ * of DCSURF_FLIP_CONTROL2 with no lock and no sequencing - and
+ * dcn31_hubp_funcs maps `.hubp_enable_tripleBuffer = hubp2_enable_triplebuffer`
+ * verbatim, so DCN 3.1 uses the DCN 2.0 writer unchanged. It is not a
+ * dce_*-vs-dcn31_* mismatch like 2xs's.
+ *
+ * AND HERE IS WHAT IS *NOT* ESTABLISHED, stated before anything is written.
+ * Linux only enables this behind the `dc->debug.enable_tri_buf` debug option,
+ * and a triple-buffered flip there is paired with a DIFFERENT timing-generator
+ * lock: dcn20_build_pipe_control_lock_sequence() sets
+ * tg_lock.triplebuffer_flips and dcn20_tg_lock() then calls triplebuffer_lock
+ * / triplebuffer_unlock instead of the normal pair. We would be setting the
+ * HUBP bit WITHOUT that lock protocol. So the register write is grouped right
+ * and the surrounding METHOD is not fully reproduced - rule 46 one level
+ * deeper - which makes this an experiment whose failure mode is unknown
+ * (a tear, a dropped frame or a wedge; not a panic, since it is one display
+ * register in the same class as every write hubpSetup() already does).
+ *
+ * Returns the word to write. Touches bit 10 and nothing else, so
+ * PENDING_MIN_TIME and GSL_ENABLE are preserved whatever they hold - the
+ * restore path is then simply the snapshot taken before the first write, and
+ * a caller that loses the snapshot can still undo this exactly.
+ */
+static inline uint32_t rb_hubp_triple_set(uint32_t flip_ctl2, int enable)
+{
+    if (enable) {
+        return flip_ctl2 | RB_HUBP_FLIP2_TRIPLE_BUFFER;
+    }
+    return flip_ctl2 & ~RB_HUBP_FLIP2_TRIPLE_BUFFER;
+}
+
+static inline int rb_hubp_triple_enabled(uint32_t flip_ctl2)
+{
+    return (flip_ctl2 & RB_HUBP_FLIP2_TRIPLE_BUFFER) != 0u;
+}
+
+/* Is a FLIP_CONTROL2 word one we are willing to touch?
+ *
+ * Rule 47's question asked of a register we are about to WRITE rather than
+ * one we read: the value says whether this is the block we think it is. 0x40
+ * is what boots 216-289 all read. A word with bits set outside the three
+ * fields the DCN 3.1.2 mask header defines means the register is not what
+ * this code believes, and the right answer is to refuse and publish the value
+ * refused (rule 19) rather than to RMW a field inside something unrecognised.
+ */
+static inline int rb_hubp_triple_may_write(uint32_t flip_ctl2)
+{
+    const uint32_t known = RB_HUBP_FLIP2_PENDING_MIN_TIME |
+                           RB_HUBP_FLIP2_GSL_ENABLE |
+                           RB_HUBP_FLIP2_TRIPLE_BUFFER;
+    return (flip_ctl2 & ~known) == 0u;
+}
+
 /* 2xn: should getAttribute('amtr') answer kIOReturnNotReady right now?
  *
  * Apple's own AMDFramebuffer::getAttribute('amtr') (0x2a6faa, disassembled in

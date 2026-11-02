@@ -336,6 +336,17 @@ private:
     uint64_t        vblRetRefused{0};
     uint64_t        vblRetModeSkips{0}; /* 2zf: offers the mode gate declined */
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
+    /* 2B1: SURFACE_TRIPLE_BUFFER_ENABLE, the second pending flip slot.
+     * hubpTripleOrig is the word read BEFORE anything is written, so the
+     * restore is a snapshot rather than a reconstruction (2y5's rule about
+     * reading the restore state instead of inferring it). */
+    bool               hubpTripleArmed;   /* the dial's current intent     */
+    uint32_t           hubpTripleOrig;    /* FLIP_CONTROL2 before we wrote */
+    bool               hubpTripleHaveOrig;
+    uint64_t           hubpTripleWrites;
+    uint64_t           hubpTripleRefused; /* rb_hubp_triple_may_write said no */
+    uint32_t           hubpTripleRefusedVal;
+    uint32_t           hubpTripleReadback;
     uint64_t           hubpDeferrals;  /* 2xm: writes skipped because of it */
     uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */
     uint32_t           hubpOtgCtl2;
@@ -737,6 +748,9 @@ private:
      * only ever read when the hold was armed - so the instrument was blind
      * in exactly the configuration under investigation. */
     bool hubpFlipPending(void);
+    /* 2B1: returns true iff the readback confirms the bit moved (rule 20 -
+     * a setter that reports success is not evidence the field changed). */
+    bool hubpTripleApply(bool enable);
     bool hubpHoldNotReady(bool pending);
     bool blSetup(void);
     void blTeardown(void);

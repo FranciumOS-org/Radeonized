@@ -271,6 +271,11 @@ public:
     uint64_t blParmSetFails=0;    /* 2y0 */
     uint32_t blParmLastAsked=0;   /* 2y0 */
     uint32_t hubpTiling=0;
+    /* 2B1 */
+    bool hubpTripleArmed=false, hubpTripleHaveOrig=false;
+    uint32_t hubpTripleOrig=0, hubpTripleRefusedVal=0, hubpTripleReadback=0;
+    uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
+    bool hubpTripleApply(bool enable);
     uint32_t hubpPitch=0;
     uint32_t hubpConfig=0;
     uint64_t hubpOrig=0;
