@@ -289,6 +289,14 @@ public:
     uint32_t auxEnMask=0, auxMatchMask=0;
     uint32_t otgLive[4]={0,0,0,0};
     void auxSample(void) {}
+    /* 2BA, mirrored - the hosttest compiles RBAMDFramebufferVBL.cpp. */
+    bool auxDpcdArmed=false, auxDpcdSuspect=false;
+    uint64_t auxDpcdAttempts=0, auxDpcdOks=0;
+    uint32_t auxDpcdRefuse=0, auxDpcdInst=0, auxDpcdArbSeen=0;
+    uint32_t auxDpcdStatus=0, auxDpcdReplyCode=0, auxDpcdBytes=0;
+    uint32_t auxDpcdHpd=2;
+    unsigned char auxDpcdData[16]={0};
+    bool auxDpcdRead(uint32_t, uint32_t, uint32_t) { return false; }
     bool amtrNotReadySetup=false, amtrNotReadySetupHave=false;
     uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
     bool hubpTripleApply(bool enable);
