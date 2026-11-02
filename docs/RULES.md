@@ -1088,6 +1088,22 @@ table and refuses to install one that does not match the running kernel;
   connector data, not a register), and whether an inbox reply can be read back
   (2zs's round trip was a GPINT). `YELLOW_CARP_B0` is **0x20, an internal
   rev** - not our PCI rev 0x0a; do not conflate them.
+  **2BF closes the first of those by a NEGATIVE: there is no HPD-to-PHY
+  register.** Every `HPD`-named field in `dcn_3_1_2_sh_mask.h` is
+  `AUX_HPD_SEL` (2B9's), the four `AUX_*_HPD_DISCON` controls, or a
+  `DC_GPIO_HPD*` pad control; `dcn31_resource.c:1170` indexes
+  `link_enc_hpd_regs[enc_init_data->hpd_source]` and `hpd_source` comes from
+  the **VBIOS display-object table**, which is ROM, not a register. 2B9's
+  method was right to try and the answer is no - **do not search for this
+  again.** **Instead the chip names the port itself:** `QUERY_DP_ALT` takes
+  `phy_id` IN and returns `is_usb` OUT, so a sweep of `phy_id` 0..5 identifies
+  the USB-C PHY with no index-convention inference, carries its own control
+  (the eDP panel is not USB-C, so all-set or all-clear across six ids is a
+  refusal), checks `is_dp4` against the 2 lanes 2BB read from the sink, and
+  **needs no display attached.** Its cost is that it PRODUCES on the DMUB
+  inbox rather than reading a register, and the reply path is what 2zs never
+  exercised (a GPINT, not an inbox reply) - a new surface in 2BA's sense, so
+  the user's decision.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the
