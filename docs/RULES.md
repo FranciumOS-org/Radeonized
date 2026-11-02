@@ -313,23 +313,37 @@ table and refuses to install one that does not match the running kernel;
   **Still open, and now the only thing open: `fed` is ~50 % at native** with
   the latch ceiling at the panel rate, so half of every frame period is
   unaccounted for. The mean has sat at 70-75 sets/s through tick 2000, 6944,
-  13888, timer-driven and vblank-driven alike. **Something sets ~73 and it is
-  none of the things measured so far.**
-  **2zk found one thing that was never measured**: `publishVBLState()` runs
-  **227 times a second** from `setInterruptState` — twice per transaction,
-  because Apple arms and disarms the vblank around each one — at ~110
-  `setProperty` calls each, on Apple's own thread, inside the call that gates
-  every frame. Rule 16, unexamined through six dead models. Throttled by
-  `rbgpufbpubms` (default 500 ms, `0` is the A side). **Boot 271 measured it at
-  60 Hz: 98.6 % of the publishes elided, and six paired runs gave 59.43 mean
-  over runs 2-6 (±1.2 %) against boot 268's 49.0, with `fed` 97-99 % where it
-  was ~82 % and `mean vblanks` 1.000-1.002.** NOT a claim yet — rule 44 wants
-  two boots per side and 2zg is the entry that exists because six consistent
-  samples on one boot did not reproduce. **2zm removes that cost:**
-  `setProperties` accepts `{"RBFBPubMs": N}` and `build/out/pubms` (`make
-  pubms`) writes it, so the A/B/A fits in ONE boot — six runs, `pubms 0`, six,
-  `pubms 500`, six. Every dial this project owned was a boot-arg until now,
-  which is why 2xn/2zb/2zc cost three boots for three points of one curve.
+  13888, timer-driven and vblank-driven alike, and through the publish throttle
+  both ways (2zz). **Something sets ~73, it is none of the seven things
+  measured so far, and 2zz showed it does not respond to our own frame-path
+  cost at all.**
+  **2zk's suspect is RETIRED, and it is the seventh model to die (2zz, boot
+  282).** `publishVBLState()` really does run **227 times a second** from
+  `setInterruptState` - twice per transaction, because Apple arms and disarms
+  the vblank around each one - at ~110 `setProperty` calls each, on Apple's own
+  thread, inside the call that gates every frame, which is ~25 000 registry
+  insertions a second and was rule 16 unexamined through six dead models.
+  **It costs 1.4 % of the frame rate.** 2zm made the dial writable at runtime
+  (`setProperties` takes `{"RBFBPubMs": N}`, `build/out/pubms` writes it) so
+  `tools/pubms_aba.sh` could run the whole A/B/A in ONE boot at native: 18 runs
+  of 20 s, A=500 / B=0 / A=500, giving **A1 71.23, B 70.18, A2 71.06** - the A
+  phases agreeing to **0.2 %** and B at **-1.4 %**, inside the band. The
+  throttle stays (the cost is real and the default is still 500 ms) but it is
+  not the frontier. Boot 271's 49.0 -> 59.43 at 60 Hz was one side on one boot
+  and could not separate the dial from the boot; this is what rule 44's "or an
+  A/B inside one boot" was for, and it cost one boot instead of four.
+  **The result that outlived the question: `fed` is 48.0-50.3 % in ALL EIGHTEEN
+  runs** - two configurations differing by ~98 % of the frame path's registry
+  traffic, and the fed fraction does not move beyond its own noise. So the
+  missing half of every frame period is **insensitive to our own bookkeeping**,
+  which retires that whole family of hypotheses rather than just this one. The
+  variance also reproduces 2zg's surviving half independently: all 18 runs span
+  65.86-73.42 (+-5.4 %) vblank-driven, against 2ze's 63.98-100.77 timer-driven.
+  **Do not propose an eighth model from the counters already in hand.** Seven
+  dials have been moved - tick down, tick up, the timer beat, the latch, the
+  workload, the HUBP backlog, the publish cost - and all seven returned 70-75.
+  The next step must measure where the time in a frame period actually goes,
+  not test another hypothesis by reading `sets/s`.
   Counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` (**decimal**);
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
@@ -892,7 +906,8 @@ and boot 270 measured it at **227/s** from `setInterruptState`, because Apple
 arms and disarms the vblank twice per transaction - ~25 000 registry
 insertions a second inside the call that gates every frame, and the one
 suspect in the frame path that six dead models of the ~73 sets/s ceiling never
-examined. Not yet claimed as the cause: rule 44 wants two boots per side),
+examined - and **2zz measured it at -1.4 %**, so the cost is real and is not
+the ceiling; keep the default),
 `rbgpuschedtickus=<500..1000000>` (**6944 is a measured
 interior optimum** - 2xn/2zb/2zc put 2000, 6944 and 13888 at 51.33, 74.6 and
 49.2 sets/s, so both directions cost a third of the frame rate; do not change

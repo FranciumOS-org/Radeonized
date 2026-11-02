@@ -53072,3 +53072,63 @@ framebuffer keeps the panel, the NVIDIA driver drives HDMI as a second GPU.
 That is the normal multi-GPU case and needs no reverse-PRIME path invented on
 our side. The power claim should be stated honestly though: GSP booted plus a
 live display engine plus VRAM refresh is a few watts, not zero.
+
+---
+
+## 2zz — the publish throttle is NOT the ~73 ceiling (boot 282, A/B/A at native)
+
+`sudo tools/pubms_aba.sh`, 18 runs of 20 s on one boot at 143820 mHz / 1129
+lines, vblank-driven, `ModeSkips` 0. Three phases, A = `RBFBPubMs` 500
+(throttled, ~98 % of publishes elided), B = 0 (the unthrottled pre-2zk
+behaviour).
+
+```
+A1  n=6  mean 71.23  min 68.05  max 73.42   fed 49.3 %
+B   n=6  mean 70.18  min 65.86  max 71.99   fed 48.7 %
+A2  n=6  mean 71.06  min 68.82  max 72.45   fed 49.2 %
+
+A1 -> A2 drift  -0.2 %
+B vs mean(A)    -1.4 %   (70.18 against 71.14)
+```
+
+**Verdict: inside the band, so 2zk joins the six dead models** (2zb's latch
+ceiling, 2zc's beat, 2zd's vblank handover as a throughput win, 2zg, and the
+two residual-arithmetic models before them). ~25 000 registry insertions a
+second on Apple's thread inside the call that gates every frame costs **1.4 %
+of the frame rate**, not half of it. The throttle stays — it is a real cost
+and the default remains 500 ms — but it is not the frontier.
+
+**Boot 271's 49.0 -> 59.43 at 60 Hz was never the same claim**, and this is
+the rule-44 payoff rather than a contradiction: that was one side on one boot
+at a mode where `actual / latch_ceiling` pins at 100 %, so it could not
+separate the dial from the boot. Here both A phases bracket B inside one boot
+and agree to 0.2 %, which is the strongest form of the n>=2-boots requirement
+and cost one boot instead of four.
+
+**What this boot buys that the verdict does not: `fed` is 48.0-50.3 % in all
+eighteen runs.** Eighteen samples, two configurations differing by ~98 % of
+the registry traffic in the frame path, and the fed fraction does not move by
+more than its own noise. So whatever consumes the other half of every frame
+period is **insensitive to our publish load**, which retires the whole family
+of "our own bookkeeping in the frame path is the cost" hypotheses, not just
+`publishVBLState`. That is a stronger result than the A/B it was built for.
+
+**And the variance confirms 2zg's surviving half independently.** All 18 runs
+span 65.86-73.42, ±5.4 % about 70.8, against 2ze's 63.98-100.77 (±20 % with a
+40 % outlier) timer-driven on one boot. Vblank-driven delivery is steady;
+2ze's prescription of n>=6 was calibrated on timer-driven noise that no longer
+exists in this configuration.
+
+**Where this leaves the ceiling.** Eliminated so far, each by measurement:
+the HUBP backlog (`PendHits` 0 of 19 669, 2zb), the workload (flat under 3x
+demand, 2zb), the retire tick in both directions (2zc's two-sided curve), the
+timer beat (2zd/2zg: removing it moved the mean by nothing), the latch as a
+constraint rather than a correlate (2zg), and now our own frame-path publishing
+(this entry). Seven models, and the number has sat at 70-75 through every one
+of them.
+
+**Do not propose an eighth model from the counters already in hand.** The next
+step has to be a measurement of where the time in a frame period actually
+goes - the half that `fed ~49 %` names and nothing so far has looked at
+directly - not another hypothesis tested by moving a dial and reading
+`sets/s`. Seven dials have now been moved and all seven returned 70-75.
