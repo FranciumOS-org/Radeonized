@@ -54658,3 +54658,101 @@ measurement has to do is establish the TIME COURSE - the same window repeated
 every few minutes from boot, in one fixed configuration, plotting rate, latch
 and `preempt` against uptime. That is a different kind of experiment from
 every one in 2zb-2B7, all of which compared configurations.
+
+---
+
+## 2B8 — the DP AUX engine survey, read-only: is the Type-C port's engine even configured?
+
+**The project pivots to the external display, at the user's decision**, with
+the frame-rate line left where 2B7 put it: the shipping default unchanged and
+the drift unexplained. **Nothing is claimed here either - no reading has been
+taken.**
+
+**WHY A SURVEY AND NOT A TRANSACTION, which is the whole design.** 2B4
+established HPD2 is the Type-C port and is wired to this chip. The obvious next
+move is a DPCD read over AUX - and it would be **uninterpretable**, because an
+AUX transaction that times out is indistinguishable between three causes: the
+engine was never configured, the channel is not wired, or the sink is not
+answering. Rule 14, and the exact gap 2zw's six dead milestones lived in. So
+the step before the transaction is to read the engines, and that is all this
+does.
+
+**THE REFERENCE INSTANCE IS THE INSTRUMENT.** The firmware trained the eDP
+panel on this die at this firmware revision, so one of the five AUX engines is
+in a known-working configuration *right now*. That is a far better standard
+than any absolute judgement about what a configured engine should look like -
+and it is 2zw's lesson applied **before** the fact rather than after: the
+680M's `BL_PWM_CNTL` looked perfect in isolation and drove nothing.
+`rb_aux_matches_ref()` compares `AUX_EN` plus the `AUX_DPHY_RX_CONTROL1`
+receive timing against the reference, and **returns 0 when the reference
+itself is not enabled**, because then there is no reference and "matches"
+would be a statement about nothing. The kext publishes all five engines' raw
+words so the comparison can be redone against a different reference - the
+AUX-instance-to-connector mapping is in **no header**, exactly as the HPD one
+was not, which is why 2B4 had to find it by unplugging a cable.
+
+**RULE 46 DISCHARGED PROPERLY, AND IT IS THE SAME TRAP AS 2xs/2zl.** These
+registers belong to **DCE's** AUX engine, not a DCN one - a `dce_*` file on a
+DCN 3.1.2 chip is precisely the argument that stood for four milestones and
+was wrong. So the grouping was checked in the resource file rather than
+reasoned about: `dcn31_resource.c`'s `dcn31_aux_engine_create()` calls
+**`dce110_aux_engine_construct()`** with `aux_engine_regs[inst]` built from
+`AUX_COMMON_REG_LIST0(id)`, five instances - **DCN 3.1 uses the DCE110 AUX
+engine verbatim**, the same relationship 2B1 found for the HUBP triple-buffer
+writer. And a second fact from reading it: `dce110_aux_engine_construct()`
+touches **no hardware at all**, it is pure software state, so whatever
+configures these engines is somewhere else - which is the other reason to go
+and look.
+
+**Offsets**, `docs/linux-ref/dcn_3_1_2_offset.h`, instance 0 with a **0x1c**
+dword stride, all **BASE_IDX 2** - the same base as HPD (0x1f14), OTG (0x1b41)
+and HUBP, so **no new mapping**: `AUX_CONTROL` 0x1f50, `AUX_SW_CONTROL` 0x1f51,
+`AUX_ARB_CONTROL` 0x1f52, `AUX_INTERRUPT_CONTROL` 0x1f53, `AUX_SW_STATUS`
+0x1f54, `AUX_SW_DATA` 0x1f56, `AUX_DPHY_RX_CONTROL1` 0x1f5b. `AUX_EN` is bit 0.
+The aperture bound grew a third time, to `rb_aux_dw_max()` **0x1fcb**, as one
+comparison rather than a check per block.
+
+**THERE IS NO WRITER, DELIBERATELY.** A transaction means writing
+`AUX_SW_DATA`, `AUX_SW_CONTROL` and taking `AUX_ARB_CONTROL` on a resource the
+**DMCUB also arbitrates for** - and taking that lock wrongly on the engine
+driving the live panel is a way to lose the display. That is a separate
+decision with its own evidence and it is not folded into a survey.
+
+**Bundled, because both needed a build and neither deserved its own boot:**
+- **The live OTG words** (`RBFBOtgLive0..3`), re-read on every publish. 2B5
+  found that **both** existing OTG readings are one-shots from setup - the
+  plugin's `rbgpu_agdc_otg.cpp` and this kext's own `hubpOtgCtl1..3` - so when
+  the user attached a display and asked whether a second pipe had lit,
+  **nothing in the registry could answer.** Now OTG1..3 leaving 0x300 is
+  visible the moment it happens.
+- **`RBFBAmtrNotReadyArmed` is now a real snapshot** (2B5's defect 1), taken
+  once on the first publish, before any `setProperties` can have arrived. It
+  had been publishing `amtrNotReady` itself.
+- **The HPD raw words are published at 64 bits** (2B4's defect), fixing the
+  sign-extension at the source for every reader rather than only in the one
+  tool that was patched.
+
+Hosttested: offsets pinned per instance against the header read directly (not
+recomputed by the formula under test), the three registers that are *not* on
+the `CONTROL+n` pattern checked individually, the out-of-range refusal, the
+bound asserted against **every** instance-register pair rather than just its
+own arithmetic, `AUX_EN`, the mask with its clamp and NULL, and five
+`matches_ref` cases including the two that matter: **enabled-but-differently-
+timed must NOT match** (without it the function could be a constant 1) and
+**an unconfigured reference must give 0 even when both words are identical**.
+Three breaks verified to fail and to compile first: a 0x1b stride (10 cases), a
+`matches_ref` that ignores the reference (1), and a `dw_max` one instance short
+(4, including the per-pair bound check catching it).
+
+Framebuffer **E24F30C2** (was A5BDF3D2). `tools/auxlook.sh` reads it and says
+what each outcome means; its no-keys path cites rule 15, and it was exercised
+against the currently-running older kext, which is what produced that path.
+
+**What the reading decides, with the cable plugged in:**
+- **AUX2 enabled and matching instance 0** - the engine is already configured
+  and a DPCD read is a small, bounded next step.
+- **AUX2 with `AUX_EN` clear** - the engine is ours to bring up first, a new
+  write surface on a block the DMCUB arbitrates, and a decision rather than a
+  step.
+- **OTG1..3 all 0x300 live** - nothing lit a second pipe, so the black screen
+  is not a half-configured pipe we could finish, and the whole chain is ours.

@@ -363,9 +363,27 @@ private:
     uint32_t           hpdSetupMask;
     uint32_t           hpdSetupEnMask;
     uint64_t           hpdChanges;     /* transitions of hpdSinkMask         */
+    /* 2B8: the five DP AUX engines, read-only, and the LIVE OTG words.
+     * otgLive exists because 2B5 found that both existing OTG readings
+     * (the plugin's and hubpOtgCtl1..3) are one-shots taken at setup, so
+     * nothing could say whether a second pipe lit with the cable attached. */
+    uint32_t           auxControl[5];
+    uint32_t           auxDphy[5];
+    uint32_t           auxStatus[5];
+    uint32_t           auxArb[5];
+    uint32_t           auxEnMask;
+    uint32_t           auxMatchMask;   /* vs instance 0 - see rb_aux.h      */
+    uint32_t           otgLive[4];
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
+    /* 2B5: what the BOOT set up, captured once and never written again.
+     * RBFBAmtrNotReadyArmed used to publish amtrNotReady itself, so the key
+     * whose name claimed provenance carried the live value and read No after
+     * a runtime holdset 0 on a boot that armed the hold perfectly well -
+     * which is the fact rule 34 wants before an A/B is interpreted. */
+    bool               amtrNotReadySetup;
+    bool               amtrNotReadySetupHave;
     uint32_t           hubpOtgCtl1;    /* 2xp: OTG1-3, read even on refuse 5 */
     uint32_t           hubpOtgCtl2;
     uint32_t           hubpOtgCtl3;
@@ -773,6 +791,9 @@ private:
     /* 2B3: resample the HPD blocks. Read-only; safe to call from the publish
      * path because it touches no state the frame path reads. */
     void hpdSample(void);
+    /* 2B8: read the AUX engines and the live OTG words. Read-only, same
+     * mapping, same arming as hpdSample(). */
+    void auxSample(void);
     bool blSetup(void);
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */

@@ -341,3 +341,18 @@ decision rests on it.
   `triplebuffer_lock`/`triplebuffer_unlock` in `dcn20_tg_lock()` instead of the
   normal lock pair. **We set the HUBP bit without that lock protocol**, which
   is the part of the method this project does not reproduce.
+
+## 2B8 — the DP AUX engine
+
+- `dce/dce_aux.c`, `dce/dce_aux.h` — the AUX engine. The transaction sequence
+  (`AUX_SW_CONTROL.AUX_SW_GO`, `AUX_SW_STATUS.AUX_SW_DONE`,
+  `AUX_SW_REPLY_BYTE_COUNT`) and the arbitration (`AUX_ARB_CONTROL`). Fetched
+  from kernel.org torvalds/linux plain/ on 2026-11-02. **No writer derived
+  from this yet** — `rb_aux.h` is a read-only survey; this file is here for
+  the sequence a transaction would have to follow.
+- `resource/dcn31/dcn31_resource.c` — **the rule-46 check**:
+  `dcn31_aux_engine_create()` → `dce110_aux_engine_construct()` with
+  `aux_engine_regs[inst]` from `AUX_COMMON_REG_LIST0(id)`, five instances. So
+  DCN 3.1 uses the DCE110 AUX engine **verbatim**, which is what makes the
+  `dce_*` file the right one for this chip. Same relationship as
+  `hubp2_enable_triplebuffer` in 2B1.

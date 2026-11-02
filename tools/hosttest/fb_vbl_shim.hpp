@@ -283,6 +283,13 @@ public:
     uint32_t hpdControl[5]={0,0,0,0,0};
     bool hpdReady=false;
     void hpdSample(void) {}
+    /* 2B8, mirrored for the same reason as the rest. */
+    uint32_t auxControl[5]={0,0,0,0,0}, auxDphy[5]={0,0,0,0,0};
+    uint32_t auxStatus[5]={0,0,0,0,0}, auxArb[5]={0,0,0,0,0};
+    uint32_t auxEnMask=0, auxMatchMask=0;
+    uint32_t otgLive[4]={0,0,0,0};
+    void auxSample(void) {}
+    bool amtrNotReadySetup=false, amtrNotReadySetupHave=false;
     uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
     bool hubpTripleApply(bool enable);
     uint32_t hubpPitch=0;
