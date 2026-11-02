@@ -53132,3 +53132,89 @@ step has to be a measurement of where the time in a frame period actually
 goes - the half that `fed ~49 %` names and nothing so far has looked at
 directly - not another hypothesis tested by moving a dial and reading
 `sets/s`. Seven dials have now been moved and all seven returned 70-75.
+
+---
+
+## 2A0 — the frame-time budget: measure where the interval goes, not whether a dial moved it
+
+Built after 2zz, because 2zz was the seventh experiment of one shape (move a
+dial, read `sets/s`, compare) and all seven returned 70-75. That shape cannot
+locate a cost; it can only test a guess. This is the other shape.
+
+**It starts from a re-reading of a number already in hand, not a new
+hypothesis.** `fed` in `tools/paired.sh` is `AmtrSets/s / vbl/s`, so `fed
+~49 %` has never meant "half of every frame period is unaccounted for" - it
+means **the compositor hands us a transaction only on every second vblank**.
+And boot 271 at 60 Hz read `fed` **97-99 %**: there it feeds every vblank. Two
+facts together: the ceiling is an absolute rate near 73/s, not a fraction of
+the refresh. ~73/s is a **period** - ~13.7 ms - and a period is measured by
+timing it.
+
+**The budget.** Per transaction the wall clock is tiled by exactly two pieces:
+
+```
+work = exit(setAttribute('amtr')) - entry(setAttribute('amtr'))
+gap  = entry(setAttribute('amtr')) - exit(previous setAttribute)
+```
+
+so `mean(work) + mean(gap)` **is** the mean inter-transaction interval, whose
+reciprocal is `sets/s`. Inside `gap` we own the `'amtr'` GETs and our own
+vblank handler; the remainder is time in which Apple's accelerator had the
+frame and did not call us. `src/common/rb_frametime.h` holds the accumulator
+and the arithmetic (freestanding C, so the hosttest runs what the kext runs);
+`RBAMDFramebuffer` takes the stamps; `publishFrameTime()` rides inside
+`publishVBLState()` so it inherits 2zk's throttle and adds no unthrottled
+registry traffic to the frame path.
+
+**If `upstream` dominates the interval, the ceiling is upstream of this kext
+and no dial of ours can move it** - which would explain all seven dead models
+at once instead of adding an eighth.
+
+**What the instrument is honest about, up front.** The 2xo/2xn
+`kIOReturnNotReady` hold is OURS, but `hubpHoldNotReady()` only reads two
+words of MMIO and returns - what blocks is Apple's `isTransactionComplete`
+calling back (2x6). So the hold's cost lands in `gap`, and therefore in
+`RBFBFtUpstreamNs`, even though we caused it. Both the kext comment and
+`ftbudget`'s output say so and print `RBFBAmtrHeld / RBFBAmtrGets` beside it,
+because a budget that labelled our own wait "upstream" silently would be
+exactly the confidently-mislabelled number rule 17 is about.
+
+**Two failure modes would make it lie, and both are asserted in the
+hosttest** (`tools/hosttest/fb_vbl_test.cpp`, and breaking the bound was
+checked to FAIL the suite):
+
+- **An idle desktop's one-second gap must be DROPPED, not averaged.** The
+  desktop is idle most of the time; one idle second against 100 samples of
+  13.7 ms moves the mean from 13.69 ms to 23.5 ms, and nothing published would
+  say why. `rb_ft_add()` discards anything above `8 x vblPeriodNs` and
+  **counts the discards**, so the bound scales with the mode instead of being
+  a constant right at 144 Hz and wrong at 48.
+- **A backwards interval must be a drop, not a 584-year sample.**
+  `deliverVBL` runs on a thread_call and `setAttribute` on Apple's thread, so
+  the two interleave; an unsigned subtraction that went negative would become
+  a huge sample that the bound then merely drops - losing exactly the samples
+  the instrument exists to collect while `dropped` looked like idle desktop.
+
+**The self-check, which is the real design decision.** `RBFBFtRateMhz` is
+`sets/s` computed from the timing budget; `tools/paired.sh` computes `sets/s`
+from a counter delta over a measured window. Two independent routes to one
+number. `tools/ftwindow.sh` runs both over ONE bracketed window and prints the
+disagreement, and **refuses the verdict if it exceeds +-5 %** - the guard 2zb's
+"194 Hz panel" did not have until it was given one (rule 26).
+
+**And the instrument has a control, because rule 16 says it is a suspect.**
+`{"RBFBFtOn": 0}` through `setProperties` stops the two `mach_absolute_time()`
+reads per transaction, inside the same boot - 2zm's lesson, which 2zz just
+cashed in for one boot instead of four. Writing the key either way also ZEROES
+the accumulators, so `ftbudget reset` before a window and a read after it
+bracket exactly that window. The hosttest asserts the off state files neither
+a sample nor a drop: a control that still accumulated would compare two
+instrumented sides.
+
+**`tools/ftwindow.sh` refuses any mode but native**, because `fed ~50 %` and
+the ~73 ceiling are native-mode facts and at 60 Hz there is no missing half to
+decompose (rule 39: a measurement taken where the symptom is absent does not
+locate it).
+
+Framebuffer UUID **F1A78DAD** (the 2zz build was B25E93E5). Not yet run on
+hardware - what it predicts is nothing, which is the point.

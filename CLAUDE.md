@@ -344,6 +344,32 @@ table and refuses to install one that does not match the running kernel;
   workload, the HUBP backlog, the publish cost - and all seven returned 70-75.
   The next step must measure where the time in a frame period actually goes,
   not test another hypothesis by reading `sets/s`.
+  **2A0 is that measurement, and it starts by re-reading a number already in
+  hand.** `fed` is `AmtrSets/s / vbl/s`, so `fed ~49 %` never meant "half the
+  frame period is unaccounted for" - it means **the compositor hands us a
+  transaction only on every second vblank**, and boot 271 at 60 Hz read `fed`
+  **97-99 %**, feeding every vblank there. So the ceiling is an absolute rate
+  near 73/s rather than a fraction of the refresh: a **period**, ~13.7 ms,
+  which is measured by timing it. `src/common/rb_frametime.h` tiles that
+  interval into `work` (inside `setAttribute('amtr')`) and `gap` (between
+  transactions), with our `'amtr'` GETs and our vblank handler accumulated
+  separately inside the gap, so the remainder is time Apple had the frame and
+  did not call us. **If `upstream` dominates, the ceiling is upstream of this
+  kext and no dial of ours can move it** - which explains all seven dead
+  models at once instead of adding an eighth. `sudo tools/ftwindow.sh` brackets
+  one native window and prints the budget; `build/out/ftbudget` reads it and
+  `ftbudget reset|off` is the dial (`{"RBFBFtOn": 0|1}`, runtime, which also
+  zeroes the window). Three things make it an instrument rather than a number:
+  **the self-check** - `RBFBFtRateMhz` is sets/s from the timings and
+  `paired.sh` is sets/s from a counter delta, and `ftwindow.sh` refuses its own
+  verdict if the two disagree by over 5 % (the guard 2zb's 194 Hz panel
+  lacked); **the gap bound** - `8 x vblPeriodNs`, because the desktop is idle
+  most of the time and one idle second averaged into 100 samples of 13.7 ms
+  reads as the frame cost with nothing published to say so, so it is dropped
+  and COUNTED; and **the off switch**, since rule 16 makes the instrument a
+  suspect. One thing it is honest about rather than silent on: the 2xo
+  `kIOReturnNotReady` hold is ours but Apple spends the wait, so its cost sits
+  inside `upstream` - read `RBFBAmtrHeld`/`RBFBAmtrGets` to attribute it.
   Counters live in `ioreg -rl -c RembrandtGPUPeer`'s `RBGPUDiag` (**decimal**);
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
@@ -898,6 +924,11 @@ is the user's decision), `-rbgpunodisppanic`, `-rbgpusdmahook`,
 default-on and still wants `wdt=-1` in boot-args** — it is Apple's arg, we
 cannot set it, and without it a frozen boot panics at 120 s with no SSH window
 (2hh). Keep `wdt=-1`.
+
+**Runtime dials** (`setProperties`, no boot needed - 2zm, and 2zz is what
+they bought): `{"RBFBPubMs": N}` via `build/out/pubms`, and
+`{"RBFBFtOn": 0|1}` via `build/out/ftbudget` (2A0 - the frame-time budget,
+whose write also zeroes the measurement window).
 
 **Tunables:** `rbgpufbpubms=<0..10000>` (2zk - the frame-path publish
 throttle in ms, default **500**; `0` restores the unthrottled pre-2zk

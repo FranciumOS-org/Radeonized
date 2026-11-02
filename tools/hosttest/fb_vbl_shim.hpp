@@ -8,6 +8,7 @@ extern "C" {
 #include "rb_hubp.h"
 #include "rb_retire.h"
 #include "rb_dmub.h"
+#include "rb_frametime.h"
 }
 #include <map>
 #include <string>
@@ -309,6 +310,16 @@ public:
     IOReturn setInterruptState(void *,UInt32);
     void armVBL();
     void kickVBL();
+    /* 2A0: the frame-time budget. Real members and the real functions, not a
+     * stub, so the hosttest runs the arithmetic the kext runs - including
+     * through the fake mach_absolute_time(), which is what lets a test assert
+     * that mean(work)+mean(gap) reconstructs an interval it chose itself. */
+    bool ftOn=true;
+    uint64_t ftPrevExit=0;
+    uint64_t ftResets=0;
+    struct rb_ft_acc ftWork{}, ftGap{}, ftGet{}, ftVbl{};
+    void ftFile(struct rb_ft_acc *acc,uint64_t t0,uint64_t t1,bool bound);
+    void publishFrameTime();
     void deliverVBL();
     void publishVBLState();
     void publishVBLStateHot();   /* 2zk, defined in RBAMDFramebufferVBL.cpp */
