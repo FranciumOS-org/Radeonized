@@ -46,8 +46,16 @@ fi
 
 ./build/out/ftbudget reset >/dev/null || exit 4
 got=$(prop RBFBFtOn)
-# Rule 20/26: read the property, not the command's exit status.
-[ "$got" = "1" ] || { echo "REFUSED: RBFBFtOn reads '$got', not 1." >&2; exit 5; }
+# Rule 20/26: read the property, not the command's exit status - and read it in
+# the REPRESENTATION it is published in. RBFBFtOn is a bool, so ioreg prints
+# `Yes`, and the first version of this check compared it to "1" and refused a
+# correctly-armed kext. Rule 26 inside the guard that exists to enforce rule
+# 26: a search is an instrument, and so is a string compare.
+case "$got" in
+  Yes|yes|true|1) ;;
+  *) echo "REFUSED: RBFBFtOn reads '$got' - the kext did not arm the budget." >&2
+     exit 5 ;;
+esac
 
 echo
 echo "=== window: $SECS s of animtest, paired with the latch histogram ==="
