@@ -99,9 +99,11 @@ primary-surface pair is what puts the composited desktop on the panel
 (2wh/2wi). `-rbgpuschedtick` ticking Apple's `AMDSWScheduler::checkTimestamps()`
 at the panel's 6944 µs is what makes frames retire (2xe/2xi) — 2 transactions
 in 30 s became 3375. Answering `kIOReturnNotReady` while our flip is unlatched
-is what fixed the flicker, at 27 % of the frame rate (2xo) - **and 2A4
-measured that cost at ~36 % and found no flicker without it on boot 286, so
-this hold is now the open question rather than a settled fix.**
+is what fixed the flicker, at 27 % of the frame rate (2xo) - **and the cost is
+really ~36 % (2A4), but 2A6 reproduced the flicker without it in ordinary use,
+so 2xo STANDS and the hold stays default-on.** What is open is not whether to
+keep it but how to stop paying Apple's ~1.6 ms retry granularity for a latch
+that completes inside one vblank.
 
 **The swizzle fix has two halves and both are needed**: the kernel linear force
 and the kernel-side userspace patcher (2on–2op). macOS 26 broke the userspace
@@ -436,10 +438,36 @@ table and refuses to install one that does not match the running kernel;
   so B is attributable) and **B vs mean(A) +55.2 %**. The panel scans at
   143.4 Hz and B delivers **96.1-98.3 %** of its vblanks. The answer was our
   own `kIOReturnNotReady` hold and the ceiling was never 73.
-  **The user looked at it** (`sudo tools/holdlook.sh 10`, hold off, animation
-  running): **"perfect, no flicker no nothing"** - 2xo's whole-frame flicker
-  did not appear. Recorded as what it is: ten seconds of one workload observed,
-  plus two minutes of B phase unobserved.
+  **2A6 WITHDRAWS the "no flicker" half of this. THE FLICKER IS REAL and 2xo
+  STANDS.** In ordinary use on boot 287 with the hold off, a Claude animation
+  gave **"the top part of Claude blended with wallpaper behind with 10
+  flickers, then it stopped"** - the compositor drawing into a surface still
+  being scanned, which is exactly 2xo's hazard seen from the outside. 2A4's
+  ten seconds of `holdlook.sh` and 2A5's minutes of use missed it because
+  **`animtest` is one steady stream of flips and an idle desktop submits
+  almost nothing**, while the trigger is **animated window content
+  compositing OVER something else** - a bursty transient neither produces.
+  **A benchmark is not a workload, and "a rare event did not occur" is not
+  "it cannot".** Rule 45 again, in the expected direction.
+  Two things in the report that are NOT established: **"80 % less
+  flickering"** is ambiguous - it may mean the flicker happens with the hold
+  ON too, which would be a bigger fact and would reopen 2xo's "fixed the
+  flicker" (dozens of hold-ON boots with no flicker report is weak evidence
+  against it, not a measurement); and "then it stopped" hints the hazard is
+  tied to the appearance transient rather than to steady animation, unmeasured.
+  **The trade is therefore real - but the cost is Apple's RETRY GRANULARITY,
+  not the serialisation.** 2A2 measured the post-hold gap at 4.384 ms against
+  2.771 ms after a ready answer, while the flip latches in ~1.07 vblanks
+  (2A5): we answer NotReady, the hardware finishes well inside the next
+  vblank, and Apple does not ask again for ~1.6 ms. **The next experiment is
+  "hold for the actual latch, not until Apple's next poll"** - open, and
+  constrained by rule 31 (no blocking on Apple's thread) with 2x6's
+  `isTransactionComplete` as the waiter, so a bounded wait there is a design
+  decision whose failure mode is a wedge. **Nothing changed on this evidence.**
+  **The default was never flipped, and that is what went right:**
+  `-rbgpufbnotready` stayed in `rb_defaults.h` through 2A4 and 2A5 because the
+  evidence was ten seconds of one workload, so this cost a reverted boot-arg
+  instead of a regression in every armed boot.
   **Both earlier estimates of the hold were LOWER BOUNDS, for one reason.**
   2A2 put it at 21 % and 2xo at 27 %; it is **~36 %** of the achievable rate
   (1 - 91.02/141.24). The retry-gap arithmetic was sound and its tiling
@@ -455,16 +483,15 @@ table and refuses to install one that does not match the running kernel;
   run 1, and the 70-75 era is at least partly **a first-run transient**. What
   the transient IS remains unmeasured. 2A3's own warning about n=1 boots
   applied to itself one milestone later.
-  **The default is NOT flipped yet.** `-rbgpufbnotready` stays in
-  `rb_defaults.h`: the evidence against 2xo is 10 s of `animtest` plus six
-  unobserved runs, and 2xo's flicker came from real desktop use, where a
-  window drag, a video or a particular surface format could still show it. The
-  test is a whole boot under ordinary use -
-  **`sudo tools/efi.sh bootarg add -rbgpunofbnotready`** (the derived negative,
-  already produced by `rb_off_token()` and honoured by `argOn()`, no code
-  needed). A plausible and UNMEASURED reason it may be clean now: 2zd moved
-  retirement onto the vblank and `mean vblanks` became 1.00-1.19, so an
-  unlatched flip is exposed for far less time than when 2xo was written.
+  **The default stays hold-ON: 2A6 reproduced the flicker (boot 287).** The
+  boot-arg `-rbgpunofbnotready` (derived by `rb_off_token()`, honoured by
+  `argOn()`) is how a boot runs without the hold, and `holdset 1` restores it
+  live. 2A5's boot 287 ran the whole boot exposed and was clean for minutes
+  before the hazard appeared, which is what a rare event looks like. `mean
+  vblanks` 1.066 with the hold off (2A5) says the exposure window is at most
+  ~6.9 ms - **much smaller than when 2xo was written, and not zero**, which is
+  the honest reading of both the ~80 % the user reported and the flicker they
+  still saw.
   **2A3: the A/B refused its own B phase, and it was right to (boot 285).**
   `holdset 0` set `amtrNotReady` and the REGISTRY went on saying `Yes`,
   because `RBFBAmtrNotReady` was published in `start()` - right for a

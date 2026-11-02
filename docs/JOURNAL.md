@@ -53600,3 +53600,76 @@ dragging a window while something plays, fullscreen video, Spaces
 transitions, and wake from sleep. `-rbgpufbnotready` stays in `rb_defaults.h`
 until then; the boot-arg is how this boot runs without it, and
 `sudo ./build/out/holdset 1` restores the hold live if anything appears.
+
+---
+
+## 2A6 — THE FLICKER IS REAL. 2xo stands, 2A4's "no flicker" is WITHDRAWN (boot 287)
+
+The user, in ordinary use on boot 287 with the hold off, while a Claude
+animation was running: **"the top part of Claude blended with wallpaper behind
+with 10 flickers, then it stopped and no more flicker after... its 80 % less
+flickering but there occasionally"**.
+
+**That is 2xo's hazard, described from the outside.** The compositor drew into
+a surface that was still being scanned out, so one frame carried the old
+content (wallpaper) and the new content (the window's top) at once. 2xo's
+diagnosis was right, the hold does a real job, and **every "clean" reading in
+2A4 and 2A5 is withdrawn.**
+
+**What the earlier observations actually were.** 2A4's ten seconds of
+`holdlook.sh` and 2A5's minutes of pleasant use did not show the hazard
+because `animtest` draws one steady full-window animation and an idle desktop
+submits almost nothing. The trigger is **animated window content compositing
+over something else** - a window appearing or animating OVER the wallpaper -
+which is a transient, bursty submission pattern neither of those produces.
+2A5 said this in as many words ("minutes of pleasant use cannot distinguish
+'the hazard is gone' from 'the hazard needs a window drag over a video and has
+not happened yet'") and that caution was correct; what was wrong was 2A4
+leading with "and no flicker" in its title.
+
+**Rule 45, paid for again and in the expected direction.** The deliverable is
+something only a human can see, and the human saw it the moment the workload
+stopped being the instrument's workload. A benchmark is not a workload: ten
+seconds of `animtest` is one steady stream of flips, and the hazard lives in
+the bursts. **An observation that a rare event did not occur is not an
+observation that it cannot.**
+
+**Two things in the report that are NOT yet established and must not be read
+as findings:**
+
+- **"80 % less flickering"** is ambiguous and nothing here resolves it. It may
+  mean "much less than I expected", or it may mean **the flicker also happens
+  with the hold ON**, which would be a different and more important fact - the
+  hold would then be reducing a hazard rather than removing it, and 2xo's
+  "fixed the flicker" would need its own re-examination. The hold-ON
+  configuration has run for dozens of boots without a flicker report, which is
+  weak evidence against the second reading but not a measurement.
+- **"then it stopped and no more flicker after"** suggests the hazard is tied
+  to a transient - the window's appearance animation - rather than to steady
+  animated content. Consistent with a burst of flips per vblank raising the
+  chance that a new flip overwrites an unlatched one, and **not measured**.
+
+**So the trade is real and the engineering question is sharp now:** the hold
+costs ~36 % of the frame rate (2A4) and buys correctness, and 141 vs 91 is not
+a free choice. But **the cost is not the serialisation, it is Apple's RETRY
+GRANULARITY.** 2A2 measured the gap after a held GET at **4.384 ms** against
+**2.771 ms** after a ready one, while the flip itself latches in ~1.07 vblanks
+(2A5) - so we answer NotReady, the hardware finishes well inside the next
+vblank, and Apple does not come back to ask for another ~1.6 ms. We pay for
+Apple's polling interval, not for the hardware.
+
+That names the next experiment without proposing a model: **hold for the
+actual latch, not until Apple's next poll.** Whether that is reachable from
+inside `getAttribute('amtr')` is an open question with a hard constraint -
+rule 31 forbids blocking on Apple's thread, and 2x6 established that
+`isTransactionComplete` is the caller that waits - so a bounded short wait
+there is a design decision with a wedge as its failure mode, not an obvious
+win. Nothing is being changed on this evidence.
+
+**The default was never flipped, which is the one thing that went right.**
+`-rbgpufbnotready` stayed in `rb_defaults.h` through all of 2A4 and 2A5
+precisely because the evidence was ten seconds of one workload, and the
+decision not to flip it is what made this a reverted boot-arg instead of a
+regression shipped to every armed boot. `sudo ./build/out/holdset 1` restores
+the hold live; `sudo tools/efi.sh bootarg remove -rbgpunofbnotready` puts the
+next boot back.
