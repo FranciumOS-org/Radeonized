@@ -54412,4 +54412,10 @@ the external display **pre-boot** (the firmware GOP question - `RBFBHpdSetup`
 the **live** `OTG1..3` state with the cable attached. The `otg_ctl1..3` = 0x300
 in `RBGPUDiag` is still the init-time sample from `rbgpu_agdc_otg.cpp` and
 **cannot** answer the second - the same trap 2B3 flagged, unchanged by this
-boot, which is why the framebuffer publishes `RBFBHubpOtg1..3` separately.
+boot. **And `RBFBHubpOtg1..3` cannot answer it either**, which a first draft of
+this entry got wrong: those are read in `hubpSetup()` and are a one-shot too,
+so **this project currently has NO live reading of the OTG pipe state** and
+cannot say whether anything lit a second pipe with the cable attached. The fix
+is one line in `hpdSample()`, which already runs on every publish off the same
+mapping - and it belongs in the same build as anything else that needs a
+reboot, not in a boot of its own.
