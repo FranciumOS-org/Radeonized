@@ -595,6 +595,14 @@ measurement (2sd/2v6/2w1); the plane-count line (2u3/2v9 both directions);
   the gap (2xy):
   `kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc
   --show-kext-uuids | grep rembrandt`.
+- **Installing the framebuffer is ONE command: `sudo tools/fbinstall.sh`**
+  (2zt). It reads the built binary's UUID, stages into `/Library/Extensions`,
+  builds the auxiliary collection to a **scratch** path first, refuses unless
+  that collection actually carries the UUID, backs the live one up, writes it,
+  and verifies the UUID **inside the live collection** - restoring the backup
+  if it is absent. Both expensive failure modes below live in the gaps between
+  the hand-typed commands it replaces, which is why it is a script and not a
+  checklist.
 - **`kmutil install --update-all` is the WRONG TOOL and cannot work on this
   machine.** It rebuilds the boot and system collections as well, which needs
   a kernel variant and a KDK this machine does not have, and it dies there
