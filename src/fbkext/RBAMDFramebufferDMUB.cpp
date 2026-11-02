@@ -410,9 +410,28 @@ bool RBAMDFramebuffer::dmubSetup(void)
         dmubLocRefuse = RB_DMUB_LOC_NO_WINDOW;
         return false;
     }
+    /* 2zu: INDEX THE TABLE THE WINDOW IS ACTUALLY IN. dmubWinScan holds the
+     * seven region-3 CW windows, 4 entries each - 28 in all - and selector
+     * slots 7/8/9 are REGION4/5/6, whose scan lives in dmubRegScan. Indexing
+     * dmubWinScan at dmubWin*4 with dmubWin == 7 reads entries 29 and 31,
+     * past the end of the member array, and the two numbers that came out
+     * were published as "signature 0 of 128 slots, 0 ABM -> ABSENT" beside a
+     * heading that said REGION4. It was not a reading of anything, and boot
+     * 279's own output showed it contradicting the aperture scan's run 37 on
+     * the same memory. Rule 16: the instrument is a suspect, and rule 14: a
+     * number that means nothing must not be published as if it did. */
     dmubScanSlots = dmubCap / RB_DMUB_CMD_SIZE;
-    dmubScanPlaus = dmubWinScan[(unsigned)dmubWin * 4u + 1u];
-    dmubScanAbm = dmubWinScan[(unsigned)dmubWin * 4u + 3u];
+    if (dmubWin >= 0 && dmubWin < 7) {
+        dmubScanPlaus = dmubWinScan[(unsigned)dmubWin * 4u + 1u];
+        dmubScanAbm   = dmubWinScan[(unsigned)dmubWin * 4u + 3u];
+    } else if (dmubWin >= 7 && dmubWin < (int)RB_DMUB_WINSEL_COUNT) {
+        const unsigned r = (unsigned)dmubWin - 7u;
+        dmubScanPlaus = dmubRegScan[r * 3u + 0u];   /* run */
+        dmubScanAbm   = dmubRegScan[r * 3u + 2u];   /* abm */
+    } else {
+        dmubScanPlaus = 0u;
+        dmubScanAbm = 0u;
+    }
     dmubScanBytes = dmubCap;
 
     LOG("DMUB mailbox: CW%d by layout %u/%u, mem %#llx (kind %u), pa %#llx "

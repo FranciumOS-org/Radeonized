@@ -52801,3 +52801,52 @@ against: with a region selected, `dmubbl` printed the mailbox as **"CW7"**.
 Slots 7/8/9 are REGION4/5/6 and are not CW windows at all — 2zs identified
 REGION4 as the mailbox and the tool kept calling it CW7 (rule 33: name the
 object a number belongs to).
+
+## 2zu — boot 279: all three control types, with ABM bound to the pipe, and the panel does not move
+
+`dmubbl pipe`, then `type 1` + level, then `type 2` + level, all live on the
+one boot the settable type was built for:
+
+```
+sends ok/refused 7 / 0      acks/timeouts 7 / 0
+backlight/pipe  6 / 2       last level 65536
+WPTR/RPTR 0xb00 / 0xb00     selector 7 (REGION4)
+sent 42 02 00 20 | 00 00 00 00 | 00 00 01 00 | 01 01 00 00 | 01 00 00 00
+sent 42 02 00 20 | 00 00 00 00 | 00 00 01 00 | 01 01 00 00 | 02 00 00 00
+verdict 2 UNCHANGED (expected - an ABM command never sets ret_status)
+```
+
+Byte 16 carried **01 = VESA_AUX** and then **02 = AMD_AUX**, the level is
+`0x00010000` = 65536 at offset 8, version 1, panel_mask 1, ABM bound to OTG0
+by a SET_PIPE that went first. Every send accepted, every send acked, no
+refusals, no timeouts. **The panel did not move on any of them.**
+
+So with 2zt's PWM result and boot 270's independent falsification of PWM:
+**all three values of `backlight_control_type` are falsified on hardware, with
+and without the pipe bound.** The DMUB ABM command route is exhausted at the
+command level. Nothing in our kext refuses, gates or drops anything —
+`RBFBDmubBlArmed` Yes, `SendsRefused` 0, `SendRefuse` 0.
+
+**And one number in that output was never a reading.** `signature 0 of 128
+slots, 0 ABM -> ABSENT` printed under a heading that said REGION4:
+`dmubScanPlaus` indexes `dmubWinScan[dmubWin * 4 + 1]`, and `dmubWinScan` holds
+the **seven region-3 CW windows**, 4 entries each, 28 in all — so with
+`dmubWin` = 7 it read entries **29 and 31, past the end of the member array**.
+The scan for selector slots 7/8/9 lives in `dmubRegScan`, where REGION4 reads
+`run 37`. The boot's own output had the two disagreeing about the same memory
+and I would have read the next boot against the wrong one. Fixed by indexing
+the table the window is actually in, with an explicit zero for a slot that has
+no table. Rule 16 and rule 14 together: **the instrument is a suspect, and a
+number that means nothing must not be published as if it did.**
+
+**What this leaves, and it is a question for the panel rather than another
+instrument.** Every software route this project can reach now writes correctly
+and changes nothing: the PWM register (three parameter keys, 2zt), and the ABM
+command (three control types, pipe bound, 2zu). The cheapest remaining
+discriminator is not in the driver at all — **do the keyboard's own brightness
+keys move this panel?** If they do, something on this machine moves the
+backlight and whatever that is, is the route. If they do not, nothing on this
+machine moves it in software, and the boot-249 recollection is the only
+evidence to the contrary. Rule 45 says the human observation is the
+instrument; this is the one human observation nobody has recorded, and it
+costs nothing.
