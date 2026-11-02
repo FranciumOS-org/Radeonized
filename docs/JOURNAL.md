@@ -53918,3 +53918,106 @@ the hold changed, and the default is still hold-ON.
 live, and 2A8's closure stands until this histogram says otherwise on the
 machine - with the hold off, which is the regime that matters.
 
+
+## 2B0 - NO MIDDLE SETTING. The distribution is bimodal, and 2A9's verdict line was wrong (boot 289)
+
+2A9 built the histogram to answer whether a partial hold could exist. Boot 289
+read it, five windows, both hold regimes, and **the answer is world (a): there
+is no middle setting.** 2A8 stands.
+
+**The measurement.** Bucket shares, as quarters of the 6.953 ms period:
+
+| window | [0,.25) | [.25,.5) | [.5,.75) | [.75,1.0) | [>=1.0) | n |
+|---|---|---|---|---|---|---|
+| hold ON run 1  | 0.1 % | 0.0 % | 0.5 % | 52.6 % | 46.8 % | 1830 |
+| hold ON run 2  | 0.0 % | 0.0 % | 0.5 % | 52.2 % | 47.3 % | 1893 |
+| hold OFF run 1 | 0.0 % | 0.0 % | 0.3 % | 42.9 % | 56.8 % | 2165 |
+| hold OFF run 2 | 0.0 % | 0.0 % | 0.8 % | 46.6 % | 52.6 % | 2823 |
+| desktop, OFF   | 0.0 % | 0.0 % | 0.0 % | 27.3 % | 72.7 % |  282 |
+
+**The first three quarters of the period are empty in every single window.**
+The distribution is **bimodal at the vblank boundary** - just under one period,
+or at/over it, and nothing else. Every flip needs essentially the whole period
+to latch, so there is no subset that is safer to let through and **a partial
+hold has nothing to be partial about.**
+
+**AND THE TOOL PRINTED THE OPPOSITE, off this very data: "A MIDDLE SETTING MAY
+EXIST: 53.2 %".** `rb_ft_hist_early_pm()` returned "everything not in the
+overflow bucket", and 2A9 narrated that partition as "flips that resolve
+inside their own vblank, which a partial hold would let through for free".
+Bucket 3 is **0.75-1.00 of a period** - 5.2 to 6.9 ms of exposed scanout if
+let through, which is the whole hazard and not a reduced one. The bucket
+counts "resolved before a FULL period elapsed"; the verdict needed "resolved
+early enough to be safe". Two different questions about one number, and the
+easiest partition of the buckets answered the wrong one.
+
+**This is 2A2's lesson - "the ratio is the wrong statistic" - repeated one
+milestone after writing it down, and 2A1's invented 2.0x threshold in a new
+costume.** 2A9's own header even says a mean cannot settle the question and
+then picked a partition with the same defect. **The general form, which is now
+the third recorded instance: a statistic has to be derived from what the
+consumer DOES with it, not from whichever summary of the data is easiest to
+compute.** The histogram itself was right, published raw, and refuted its own
+verdict line in the same output - which is the only reason this cost a verdict
+and not a milestone.
+
+Corrected: early is **buckets 0..2, strictly under three quarters of a
+period**, written against `RB_FT_HIST_BUCKETS` so changing the bucket count
+cannot silently change the meaning. Boot 289 reads **4-7 per-mille** against a
+100 per-mille threshold - two orders of magnitude clear, **stated because
+after 2A1 a threshold must be shown not to be load-bearing rather than merely
+chosen.** `rb_ft_hist_late_pm()` publishes the other end so the bimodality is
+visible rather than taken on trust. `ftbudget` now computes the verdict from
+the raw `RBFBFtPendQ*` buckets instead of the kext's published `EarlyPm`, so
+the interpretation does not depend on which build is installed - the buckets
+are the measurement, the partition is the interpretation, and only one of
+those should need a reinstall to change.
+
+**THE REGIME CAVEAT IS DISCHARGED, and this is what makes the conclusion
+solid.** 2A9 insisted the hold-on histogram was only a control, because
+removing the hold takes `fed` from ~63 % to ~98 % and that is a regime change
+(rule 39). Boot 289 measured both: **pending wait 1.00-1.01 vblanks with the
+hold ON, 1.01 vblanks with it OFF** (run 2 each), with the same bimodal shape
+either side. So the regime change does **not** move the latch phase, the
+caveat was right to state and turns out not to bite, and the verdict rests on
+a reading taken in the configuration that actually flickers.
+
+**Four further things boot 289 settled or reproduced:**
+
+1. **`preempted` is a counted measure of flips arriving faster than they land,
+   and it moves with the hold: +4 and +2 per 20 s window with the hold ON,
+   **+81 and +26 with it OFF**.** `rb_hubp_latch_write()` increments it when a
+   flip is programmed while the previous is still awaiting latch - our HUBP
+   write landing on an unlatched flip. 2zb read 7 of 19 669 and called it
+   negligible, which it is *with the hold on*; the hold is what was keeping it
+   negligible. **Not claimed as the flicker**: the flicker is the compositor
+   drawing into a live surface, and a preempted flip is a surface that never
+   got scanned. Related, counted, and not the same quantity.
+2. **The hold-off rate reproduces across boots.** 139.24 and 139.60 sets/s at
+   `fed` 98.1/98.2 % here, against 2A4's 141.24 at 96-98 % on boot 286. Two
+   boots, so rule 44 is satisfied and ~140 at `fed` ~98 % is a finding rather
+   than a boot.
+3. **The hold-on rate too**: 88.75 and 93.31 against boot 285's six runs at
+   mean 92.94 and boot 283's 93.95.
+4. **The first-run transient shows up again**, in both regimes: hold-on 88.75
+   -> 93.31 and `mean vblanks` 1.022 -> 1.002; hold-off `preempt` +81 -> +26,
+   `bin2+` 7.1 % -> 0.2 %, `asks per run` 1.59 -> 1.00. **Run 1 of a phase is
+   measurably more contended than run 2 in every counter, not just in
+   `sets/s`** - the first new information about this transient since 2A4
+   named it. Still unexplained, and now the only loose thread in the
+   frame-rate area.
+
+**What the user asked for, answered.** There is no way to feed 91 % instead of
+98 % that buys safety: the hazard is per flip, so a rate throttle is a 7 %
+dilution of a correctness defect. And there is no partial hold either, because
+the latch distribution has no early tail to exempt. **91 with a correct
+desktop or ~140 with occasional flicker is the entire menu, and the choice is
+the user's rather than a thing left to find.**
+
+Framebuffer **BB81C37D** (was 3E09FBD5) - the corrected `early_pm` only
+changes a published number the tool no longer reads, so **no reinstall is
+needed to act on any of this.** Hosttested against boot 289's own five
+windows, with both failure directions verified: restoring the old partition
+fails on the hold-on window (line 810) and a constant 0 fails the
+discrimination case (line 733).
+

@@ -733,6 +733,8 @@ int main() {
         assert(rb_ft_hist_early_pm(&b)==500);        /* half could run free */
         /* The two worlds must be FAR apart, or the histogram is useless. */
         assert(rb_ft_hist_early_pm(&b) > rb_ft_hist_early_pm(&a) + 400);
+        assert(rb_ft_hist_late_pm(&a)==1000);
+        assert(rb_ft_hist_late_pm(&b)==500);
 
         /* Bucket boundaries are quarters of the period and are half-open, so
          * a sample exactly on a boundary lands in the HIGHER bucket and
@@ -784,6 +786,74 @@ int main() {
 
         rb_ft_hist_reset(&b);
         assert(rb_ft_hist_n(&b)==0);
+    }
+
+    /* 2B0: boot 289's own five windows, and the partition that was WRONG.
+     *
+     * The measurement: in every window, in BOTH hold regimes, buckets 0..2
+     * are essentially empty and everything sits in [0.75,1.00) or [>=1.00).
+     * The first version of rb_ft_hist_early_pm() counted bucket 3 as "resolves
+     * inside its own vblank, so a partial hold could let it through" and
+     * printed "a middle setting MAY exist: 53 %" off exactly this shape.
+     *
+     * So the regression test is the DISCRIMINATION: on boot 289's numbers the
+     * corrected statistic must say "no middle" (a few per-mille) where the old
+     * partition said "half". A distribution with the same bucket-4 share but
+     * genuinely early flips must still say "middle", or the fix would have
+     * replaced one blind statistic with another.
+     */
+    {
+        /* hold ON, run 2: Q = 0, 0, 9, 989, 895  (n 1893) */
+        struct rb_ft_hist on{};
+        on.b[0]=0; on.b[1]=0; on.b[2]=9; on.b[3]=989; on.b[4]=895;
+        assert(rb_ft_hist_n(&on)==1893);
+        assert(rb_ft_hist_early_pm(&on)==4);            /* 0.4 %: no middle */
+        assert(rb_ft_hist_early_pm(&on) < 100);
+
+        /* hold OFF, run 2 - the regime the flicker happens in:
+         * Q = 0, 0, 22, 1316, 1485  (n 2823) */
+        struct rb_ft_hist off{};
+        off.b[0]=0; off.b[1]=0; off.b[2]=22; off.b[3]=1316; off.b[4]=1485;
+        assert(rb_ft_hist_n(&off)==2823);
+        assert(rb_ft_hist_early_pm(&off)==7);           /* 0.7 %: no middle */
+        assert(rb_ft_hist_early_pm(&off) < 100);
+
+        /* Ordinary desktop use, hold off: Q = 0, 0, 0, 77, 205  (n 282).
+         * Real use pushes the wait LONGER, not shorter - further from a
+         * middle setting, not closer. */
+        struct rb_ft_hist desk{};
+        desk.b[0]=0; desk.b[1]=0; desk.b[2]=0; desk.b[3]=77; desk.b[4]=205;
+        assert(rb_ft_hist_n(&desk)==282);
+        assert(rb_ft_hist_early_pm(&desk)==0);
+        assert(rb_ft_hist_late_pm(&desk) > 700);
+
+        /* THE CASE THAT MAKES THE OLD VERDICT WRONG. The old partition was
+         * "everything except bucket 4", which on the hold-off window is
+         * (2823-1485)/2823 = 47 % - the "53 %"/"47 %" the tool printed. The
+         * corrected one reads 0.7 %. If this assertion ever stops holding,
+         * the fix has been undone. */
+        const uint64_t old_partition =
+            ((rb_ft_hist_n(&off) - off.b[RB_FT_HIST_BUCKETS-1]) * 1000ull)
+            / rb_ft_hist_n(&off);
+        assert(old_partition > 400);                    /* said "middle!" */
+        assert(rb_ft_hist_early_pm(&off) < 10);         /* says "none" */
+
+        /* And the fix must not be a constant 0: a distribution with the SAME
+         * bucket-4 share as the hold-off window but genuinely early flips
+         * still reports a middle setting. Without this the check could pass
+         * by always answering "no". */
+        struct rb_ft_hist mid{};
+        mid.b[0]=900; mid.b[1]=300; mid.b[2]=138; mid.b[3]=0; mid.b[4]=1485;
+        assert(rb_ft_hist_n(&mid)==2823);
+        assert(rb_ft_hist_late_pm(&mid)==rb_ft_hist_late_pm(&off));
+        assert(rb_ft_hist_early_pm(&mid) > 400);        /* and says "middle" */
+
+        /* Bucket 3 alone is NEVER early, whatever else is in the histogram -
+         * the single assertion the old code would have failed. */
+        struct rb_ft_hist q3{};
+        q3.b[3]=1000;
+        assert(rb_ft_hist_early_pm(&q3)==0);
+        assert(rb_ft_hist_late_pm(&q3)==0);
     }
 
     /* 2A9: ftFileHist files the mean and the histogram from ONE sample, and

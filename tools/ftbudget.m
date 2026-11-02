@@ -252,7 +252,11 @@ int main(int argc, char **argv)
     {
         const long pw   = rd(fb, "RBFBFtPendWaitNs");
         const long pn   = rd(fb, "RBFBFtPendHistN");
-        const long earl = rd(fb, "RBFBFtPendEarlyPm");
+        /* 2B0: computed HERE from the raw buckets, not read from
+         * RBFBFtPendEarlyPm, so the verdict does not depend on which build of
+         * the kext is installed - the buckets are the measurement and the
+         * partition of them is the interpretation. */
+        long earl = -1;
         const long asks = rd(fb, "RBFBFtPendAsksPm");
         const long vbl  = rd(fb, "RBFBVBLPeriodNs");
         const long lw   = rd(fb, "RBFBFtLatchWaitNs");
@@ -292,6 +296,21 @@ int main(int argc, char **argv)
             printf("  [>= 1.00 vblanks  )  %8ld  %5.1f %%\n",
                    over, 100.0 * over / pn);
 
+            /* EARLY is buckets 0..2 - strictly under three quarters of a
+             * period. NOT bucket 3: a flip waiting 0.75-1.00 vblanks exposes
+             * 5.2-6.9 ms of scanout if let through, which is the whole hazard
+             * and not a reduced one. The first version of this verdict
+             * counted bucket 3 as free and printed "a middle setting may
+             * exist: 53 %" off boot 289's bimodal distribution (2B0). */
+            long early = 0;
+            for (unsigned i = 0; i < 3; i++) {
+                char k2[24];
+                snprintf(k2, sizeof(k2), "RBFBFtPendQ%u", i);
+                const long c = rd(fb, k2);
+                if (c > 0) { early += c; }
+            }
+            earl = (early * 1000) / pn;
+
             /* The cross-check, free: with the hold on this run is the same
              * physical interval ftLatchWait measures, so the two must agree.
              * A disagreement means one of them is bracketing the wrong thing
@@ -309,23 +328,34 @@ int main(int argc, char **argv)
             }
 
             printf("\n");
-            if (earl < 50) {
-                printf("  NO MIDDLE SETTING. %.1f %% of flips resolve inside\n"
-                       "  the vblank they were submitted in, so essentially\n"
-                       "  every flip needs the whole period. There is no\n"
-                       "  subset that is safer than the rest to let through,\n"
-                       "  and no rate throttle helps: the hazard is PER FLIP,\n"
-                       "  so feeding 91 %% instead of 98 %% buys 7 %% less\n"
-                       "  flicker for 7 %% less frame rate. 2A8 stands and\n"
-                       "  the choice really is 91-or-141.\n", earl / 10.0);
+            printf("  early (< 0.75 vblanks)  %5.1f %%   "
+                   "late (>= 1.00)  %5.1f %%\n",
+                   earl / 10.0, 100.0 * over / pn);
+            /* 100 per-mille, and the threshold is deliberately not
+             * load-bearing: boot 289 reads 5-8 per-mille in every window in
+             * both regimes, two orders of magnitude clear of it. After 2A1's
+             * invented 2.0x ratio a threshold has to be SHOWN not to decide
+             * the answer, not merely chosen. */
+            if (earl < 100) {
+                printf("\n  NO MIDDLE SETTING. Almost nothing resolves early:\n"
+                       "  the distribution is BIMODAL at the vblank boundary,\n"
+                       "  sitting in [0.75-1.00) and [>= 1.00) with the first\n"
+                       "  three quarters empty. So every flip needs\n"
+                       "  essentially the whole period, there is no tail that\n"
+                       "  is safer to let through, and a partial hold has\n"
+                       "  nothing to be partial about. 2A8 stands: the hold\n"
+                       "  pays the hardware, and 91-or-141 is the whole menu.\n"
+                       "  No rate throttle helps either - the hazard is PER\n"
+                       "  FLIP, so feeding 91 %% instead of 98 %% buys 7 %%\n"
+                       "  less flicker for 7 %% less frame rate.\n");
             } else {
-                printf("  A MIDDLE SETTING MAY EXIST: %.1f %% of flips\n"
-                       "  resolve inside their own vblank. A hold that\n"
-                       "  engaged only on the rest would let that fraction\n"
-                       "  run unheld. This is a measured SHARE, not a\n"
+                printf("\n  A MIDDLE SETTING MAY EXIST: %.1f %% of flips\n"
+                       "  resolve under 0.75 vblanks, so a hold that engaged\n"
+                       "  only on the rest would let that fraction run with\n"
+                       "  materially less exposure. A measured SHARE, not a\n"
                        "  predicted rate - 2A8 is what extrapolating a rate\n"
-                       "  from a share costs. What a partial hold delivers\n"
-                       "  is an A/B and nothing else.\n", earl / 10.0);
+                       "  from a share costs. What a partial hold delivers is\n"
+                       "  an A/B and nothing else.\n", earl / 10.0);
             }
             if (holdOn) {
                 printf("  Read this again with the hold OFF before acting on\n"
