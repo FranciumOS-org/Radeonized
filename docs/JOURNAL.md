@@ -54129,3 +54129,91 @@ Framebuffer **60F39344**. **Nothing is claimed about what this does on
 hardware; it has never been set on this machine.** The default is off, and
 2A8/2B0 stand for the one-slot configuration they were measured in.
 
+
+---
+
+## 2B2 — THE SECOND FLIP SLOT WORKS: 141-143 sets/s AND the flicker is gone from ordinary use (boot 290)
+
+**2B1's lever is real, and it is the first thing in this project to buy both
+halves of the trade at once.** Framebuffer **60F39344**,
+`tripleset 1` + `holdset 0`, two 20 s windows:
+
+| | boot 289, one slot, hold off | boot 290, TWO slots, hold off |
+|---|---|---|
+| `sets/s` | 139.24 / 139.60 | **141.03 / 143.12** |
+| `fed` | 98.1 / 98.2 % | 96.9 / **98.2 %** |
+| `preempt` per 20 s | **+81 / +26** | **+13 / +15** |
+| `mean vblanks` | 1.00 / 1.00 | 1.000 / 1.002 |
+| pending wait | 1.01 vblanks | 1.01 vblanks |
+| cross-check | pass | +1.6 % / **+0.1 %** |
+
+And the flicker, measured the only way it can be (rule 45, the user's own
+words): **"artifacts only happen on fast typing now... fast erasing by holding
+the Delete key causes artifacts but doing animations and even the assistant code
+doesn't trigger artifacts anymore"**. 2A6's trigger - animated window content
+compositing over something else - **no longer reproduces it.** That is the
+exact workload that refuted 2A4's "no flicker" claim, reported unprompted by
+the same observer on the same machine.
+
+So the configuration that was unavailable through eight dead models and four
+milestones of "91 or 141, pick one" exists: **~142 sets/s at 98 % of the
+panel's vblanks with ordinary use clean.** Against the shipping hold-on
+configuration's ~91, that is **+56 %**.
+
+**THE MEASUREMENT AGREES WITH THE MECHANISM, NOT JUST THE OUTCOME, and that
+is what makes this more than a lucky dial.** 2B1 predicted two slots would buy
+"one more frame of pipeline between Apple accepting a transaction and that
+surface being scanned" - it did **not** predict a faster latch. And the latch
+did not move: `mean vblanks` 1.000/1.002 and the pending-wait distribution is
+**still bimodal at the vblank boundary**, 52.0/48.0 and 52.2/47.8 with the
+first three quarters empty, identical in shape to 2B0's five windows. 2A8's
+"the flip is vsync-latched and cannot resolve sooner" and 2B0's "no middle
+setting" are **both still true and both still measured here.** What changed is
+which generation of surface Apple's fused release event frees: with two slots
+the surface released on acceptance is a generation older and is no longer the
+one being scanned. **The hazard was never the latch time; it was the overlap,
+and the slot count is what sets the overlap.** A dial that moved the outcome
+without moving the latch is the signature of the predicted mechanism rather
+than of a confound.
+
+**`preempted` corroborates it independently, in the direction predicted.**
+2B1 said programming an address would stop discarding an unlatched flip:
+**+81/+26 becomes +13/+15**, a 5x drop with the hold still off. The second slot
+is absorbing flips that previously overwrote a pending one. (Note the counter
+is not zero and should not be - a *third* flip arriving inside one period still
+preempts, and there is no third slot.)
+
+**WHAT IS LEFT, AND IT IS THE SAME HAZARD AT A HIGHER RATE: fast key repeat.**
+Holding Delete still artifacts. That is the one workload that submits damage
+faster than two slots of pipeline absorb - which is consistent with
+`preempt` +13/+15 rather than 0, and is the honest reading of "mostly fixed":
+**the exposure window is one generation further away, not closed.** Two slots
+is the last slot the hardware has, so this is not another dial of the same
+kind. Untested and named rather than claimed: a game, or anything with a
+sustained submission rate above the panel's.
+
+**RULE 44 IS NOT SATISFIED AND NOTHING HERE IS A DEFAULT YET.** This is one
+boot, n=2 windows per the frame rate and n=1 observer-session for the flicker,
+and 2A4 is exactly what one boot of this kind of good news cost last time
+(ten seconds of `animtest` recorded as "no flicker"; 2A6 withdrew it). The
+difference is that this time the clean report comes from **ordinary use over a
+working session**, which is the workload 2A6 identified, and the mechanism
+predicted the shape of the result in advance. **A second boot in the same
+configuration is what turns it into a finding** - and the dial is runtime-only
+with no boot-arg, so the second boot costs two commands rather than an EFI
+edit.
+
+**What is NOT reproduced remains not reproduced (rule 46, one level deeper):**
+Linux pairs a triple-buffered flip with `triplebuffer_lock`/`unlock` on the
+timing generator instead of the normal pair, and we set the HUBP bit without
+that protocol. Nothing bad has been observed in two 20 s windows and a working
+session, which is **evidence and not proof** - the failure modes 2B1 named (a
+tear, a dropped frame, a wedge) are rare-event shaped, which is the same class
+of thing 2A4 missed. The boot sentinel is the recovery if a future boot arms
+this by default and wedges; today nothing arms it by default.
+
+**And the register state is recorded rather than assumed:** `FLIP_CONTROL2`
+read `0x40` at setup as it has on every boot since 216, the firmware word read
+`0x0`, the arm wrote and the **hardware readback** returned `0x440` - so
+`PENDING_MIN_TIME` 64 survived the arm bit for bit, which is what the hosttest
+asserted and what rule 20 required the hardware to confirm.
