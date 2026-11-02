@@ -54839,3 +54839,111 @@ byte count (1).
 published by E24F30C2, so `tools/auxlook.sh` decodes the binding and the reply
 from what is in the registry. Publishing the raw words beside the summary paid
 for itself for the third time (2B0, 2B4, now this).
+
+---
+
+## 2BA — a native AUX read of the sink's DPCD: the first write outside the panel's own pipe
+
+**The user's decision (2026-11-02), and nothing is claimed - no transaction has
+been run.** 2B9 left every remaining unknown downstream of AUX; this is the
+first step down that road, and it is deliberately the smallest one that can
+fail informatively.
+
+**WHAT BOUNDS IT, each one a property and not a hope:**
+- **It runs on the engine the HARDWARE says is bound to the target HPD block**
+  (`rb_aux_for_hpd()`, 2B9's `AUX_HPD_SEL`), defaulting to HPD2. The panel's
+  engine is never the target unless someone asks for HPD 0.
+- **The arbitration is REFUSED, not raced.** `AUX_ARB_CONTROL.AUX_REG_RW_CNTL_
+  STATUS` names the owner and Linux's `acquire_engine()` declines on
+  `DMCU_CAN_ACCESS_AUX` (2); `rb_aux_may_acquire()` does the same. **2B8
+  declined to write at all because "the DMCUB also arbitrates for this
+  block" - the answer was that the hardware publishes the owner**, which is
+  the same shape as 2B9's mapping: the thing that looked like a reason not to
+  proceed was a readable field.
+- **It is a native READ.** No DPCD write, no I2C-over-AUX, no training.
+  Reading DPCD cannot change the sink's state, so the worst outcome at the far
+  end is no answer.
+- **`-rbgpufbaux` arms it and NOTHING is sent until a userspace trigger names
+  an address** - 2zn's shape. An armed boot nobody pokes performs no
+  transaction, and `RBFBAuxDpcdAttempts` says so.
+- **Every poll is bounded** (600 x 10 us) and this runs from `setProperties`
+  on a userspace thread, never the frame path, so rule 31's prohibition on
+  blocking Apple's thread is not engaged.
+- **The release is unconditional on every path out**, because an engine left
+  with our REQ bit set is one the DMCUB cannot take back.
+
+**TWO OF LINUX'S STEPS ARE SKIPPED, AND THE REASON IS IN THE REGISTER LIST
+RATHER THAN IN A JUDGEMENT.** `submit_channel_request()` opens with an
+`AUXN_IMPCAL`/`AUXP_IMPCAL` calibration block guarded by `if (REG(AUXN_IMPCAL))`
+- and `AUX_COMMON_REG_LIST0(id)`, which `dcn31_resource.c` uses verbatim, has
+**seven** registers and `AUXN_IMPCAL` is not one of them, so that guard is
+false on this chip and Linux itself does not run it. `acquire_engine()`'s
+AUX_EN enable path is guarded by `if (field == 0)`; 2B9 measured AUX_EN already
+set on both live engines, so it is skipped too - **and a dark engine is
+REFUSED rather than enabled**, because enabling one is a different decision
+from using a configured one.
+
+**THE ONE THING NOT REPRODUCED HAS A DETECTABLE SIGNATURE, which is the whole
+design of this milestone.** Linux's `read_channel_reply()` sets `AUX_SW_INDEX`
+0, **`AUX_SW_AUTOINCREMENT_DISABLE` 1** and `AUX_SW_DATA_RW` 1, then reads
+`AUX_SW_DATA` in a loop expecting **successive** bytes - with the
+auto-increment nominally disabled. Either the index advances on read
+regardless of that bit, or the field is narrower than its name. **This project
+does not know which**, so the sequence is transcribed exactly and the failure
+mode is made visible instead of guessed at: `rb_dpcd_reply_suspect_norepeat()`
+flags a reply whose bytes are all identical, which is what a stuck index looks
+like and which a real DPCD 0x000 block is not - byte 0 is the revision, byte 1
+the max link rate, byte 2 the lane count, and they differ. `dpcdread` then
+**refuses to decode a suspect reply at all**, because a plausible decode off a
+stuck index is worse than no decode. All-zeros counts as suspect, since a sink
+replying sixteen zeros is indistinguishable from a stuck index.
+
+**And a second control on top of it:** `rb_dpcd_rev_plausible()` refuses a
+first byte that is not DP 1.0-1.4, so a reply that is really register noise
+announces itself rather than being read as a display.
+
+**EVERY CONSTANT IS READ, NOT RECALLED** - the mirror of rule 17.
+`I2CAUX_TRANSACTION_ACTION_DP_READ` **0x90** and the ACK/NACK/DEFER codes come
+from `dc_ddc_types.h`, now vendored; the request layout is `dce_aux.c`'s
+`COMPOSE_AUX_SW_DATA_*`; the field masks are `dcn_3_1_2_sh_mask.h`.
+
+**The refusal is a CODE, not a flag** (rule 14): 1 unarmed, 2 no map, 3 no
+engine bound to that HPD, 4 malformed request, 5 engine dark, **6 the DMCUB
+owns it**, 7 a stale DONE never fell, 8 no DONE after GO, 9 DONE with a zero
+reply count. "The DMCUB had the engine" and "nothing is bound to that HPD" are
+different findings and a single failure bool would merge them.
+
+**Caught while writing it:** the arming comment claimed `-rbgpufbaux` shares
+only `-rbgpufb` with the tokens in use. **It does not - `-rbgpufbaccel` is in
+`rb_defaults.h`**, so the shared prefix is `-rbgpufba` and the two diverge at
+`u` against `c`. Neither prefixes the other and the derived negatives are
+distinct, so rule 30 holds - but the comment asserting it was wrong, and
+`rb_defaults.h`'s hosttest does **not** cover this token because it asserts
+the prefix property only for tokens in its own table and an opt-in token is
+not in it. Checked by hand, and the comment now says that it had to be.
+
+Hosttested: the request layout including a 20-bit address whose top nibble
+rides in byte 0 with the action, five malformed-request refusals, the register
+words with `AUX_SW_DATA_RW` asserted 0 on every write word, `WR_BYTES` asserted
+not to overflow its 5-bit field, the reply decode, **an ACK with one replied
+byte asserted to be zero payload and not an error**, the stuck-index signature
+from both sides plus the all-zero case, the revision plausibility control, and
+the lane count asserted to be the low 5 bits (reading all 8 gives 129 lanes
+from an ordinary sink). Critically, **the arbitration refusal is asserted from
+both sides and against boot 293's own `arb` word 0**, so a version that
+refuses everything would fail too. Four breaks verified to fail and to
+compile: acquiring an engine the DMCUB owns (2 cases), the action byte becoming
+**0x80, a WRITE** (2), the lane count reading all 8 bits (1), and the
+stuck-index check always passing (2).
+
+Framebuffer **49174106** (was E24F30C2). `build/out/dpcdread` drives it and
+reads the verdict back from the registry after one publish interval, never from
+`kern_return_t` (rules 13/20, 2A3's lesson).
+
+**What a result would and would not mean.** An ACK with a plausible revision,
+link rate and lane count means the AUX channel works end to end under our own
+transaction and link training has its input. **It is not a trained link, not
+an EDID, not a pipe and not a display** - each is its own step and none has
+been attempted. A NACK or DEFER is still proof the channel carries traffic.
+Refusal 6 means the DMCUB holds that engine, which is a finding about the
+firmware and not a failure of this code.

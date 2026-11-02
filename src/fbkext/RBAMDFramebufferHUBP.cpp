@@ -88,6 +88,17 @@ bool RBAMDFramebuffer::hubpSetup(void)
     }
     auxEnMask = 0;
     auxMatchMask = 0;
+    auxDpcdAttempts = 0;
+    auxDpcdOks = 0;
+    auxDpcdRefuse = 0;
+    auxDpcdInst = RB_AUX_COUNT;
+    auxDpcdArbSeen = 0;
+    auxDpcdStatus = 0;
+    auxDpcdReplyCode = 0xff;
+    auxDpcdBytes = 0;
+    auxDpcdSuspect = false;
+    auxDpcdHpd = 2;   /* 2B4: the Type-C port */
+    for (unsigned i = 0; i < 16; i++) { auxDpcdData[i] = 0; }
     for (unsigned i = 0; i < 4; i++) { otgLive[i] = 0; }
     hubpFlipCtl2 = 0;
     hubpPendChecks = 0;

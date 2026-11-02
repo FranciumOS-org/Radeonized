@@ -356,3 +356,7 @@ decision rests on it.
   DCN 3.1 uses the DCE110 AUX engine **verbatim**, which is what makes the
   `dce_*` file the right one for this chip. Same relationship as
   `hubp2_enable_triplebuffer` in 2B1.
+- `dc_ddc_types.h` — `I2CAUX_TRANSACTION_ACTION_DP_READ = 0x90` and
+  `enum aux_transaction_reply` (ACK 0, NACK 1, DEFER 2), used by 2BA's
+  `rb_dpcd.h`. Vendored so the constants are read from the tree rather than
+  recalled. Fetched from kernel.org torvalds/linux plain/ on 2026-11-02.

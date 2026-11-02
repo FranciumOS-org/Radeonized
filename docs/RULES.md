@@ -932,6 +932,45 @@ table and refuses to install one that does not match the running kernel;
   **No rebuild was needed**: the raw words were already published, so
   `auxlook.sh` decodes it from the registry. Publishing raw beside summary paid
   for itself a third time (2B0, 2B4, this).
+  **2BA IS THE FIRST WRITE OUTSIDE THE PANEL'S OWN PIPE (user's decision,
+  2026-11-02): a native AUX read of the sink's DPCD.** Opt-in
+  **`-rbgpufbaux`**, and even armed **nothing is sent until
+  `build/out/dpcdread` names an address** (2zn's shape;
+  `RBFBAuxDpcdAttempts` says so). What bounds it: it runs on the engine the
+  **hardware** says is bound to the target HPD (2B9's `AUX_HPD_SEL`, default
+  HPD2, so the panel's engine is never the target); **the arbitration is
+  REFUSED, not raced** - `AUX_ARB_CONTROL.AUX_REG_RW_CNTL_STATUS` names the
+  owner and we decline on `DMCU_CAN_ACCESS_AUX`, which is **2B8's reason for
+  not writing turned into a readable field**; it is a native **READ**, so it
+  cannot change the sink; every poll is bounded (600 x 10 us) and it runs from
+  `setProperties`, never the frame path (rule 31 not engaged); and the release
+  is unconditional on every path out, since an engine left with our REQ bit is
+  one the DMCUB cannot take back. **A dark engine is refused, not enabled.**
+  **Two of Linux's steps are skipped for a reason in the register list, not a
+  judgement**: `AUX_COMMON_REG_LIST0` has seven registers and `AUXN_IMPCAL` is
+  not one, so Linux's own `if (REG(AUXN_IMPCAL))` is false here; and AUX_EN is
+  already set (2B9), so `acquire_engine()`'s enable path does not run.
+  **THE ONE THING NOT REPRODUCED HAS A DETECTABLE SIGNATURE, and that is the
+  design**: Linux reads `AUX_SW_DATA` in a loop expecting successive bytes with
+  `AUX_SW_AUTOINCREMENT_DISABLE` **set**, and this project does not know
+  whether the index advances anyway - so the sequence is transcribed exactly
+  and `rb_dpcd_reply_suspect_norepeat()` flags an all-identical reply (what a
+  stuck index looks like; a real DPCD 0x000 block differs byte to byte).
+  `dpcdread` then **refuses to decode a suspect reply at all** - a plausible
+  decode off a stuck index is worse than none - and `rb_dpcd_rev_plausible()`
+  refuses a first byte outside DP 1.0-1.4 so register noise announces itself.
+  **Every constant is read, not recalled** (the mirror of rule 17): DP_READ
+  **0x90** and the ACK/NACK/DEFER codes from `dc_ddc_types.h` (vendored), the
+  layout from `dce_aux.c`'s `COMPOSE_AUX_SW_DATA_*`, the masks from the sh_mask
+  header. **The refusal is a CODE** (rule 14) - 6 is "the DMCUB owns it",
+  3 is "no engine bound to that HPD", and a single bool would merge them.
+  Caught while writing: the arming comment claimed the only shared prefix was
+  `-rbgpufb`, but **`-rbgpufbaccel` exists**, so it is `-rbgpufba` diverging at
+  u/c - rule 30 still holds, and **`rb_defaults.h`'s hosttest does not cover an
+  opt-in token**, so it was checked by hand. Framebuffer **49174106**.
+  **A result would mean the AUX channel works under our own transaction and
+  link training has its input. It would NOT be a trained link, an EDID, a pipe
+  or a display** - each its own step, none attempted.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the

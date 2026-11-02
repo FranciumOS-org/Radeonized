@@ -374,6 +374,24 @@ private:
     uint32_t           auxEnMask;
     uint32_t           auxMatchMask;   /* vs instance 0 - see rb_aux.h      */
     uint32_t           otgLive[4];
+    /* 2BA: the DPCD read. auxDpcdRefuse is a CODE and not a bool, because
+     * "the DMCUB had the engine" and "no engine is bound to that HPD" are
+     * different facts that a single failure flag would merge (rule 14):
+     * 1 unarmed, 2 no map, 3 no engine for that HPD, 4 bad request,
+     * 5 engine dark, 6 DMCUB owns it, 7 stale DONE never fell,
+     * 8 no DONE after GO, 9 DONE with a zero reply count. */
+    bool               auxDpcdArmed;
+    uint64_t           auxDpcdAttempts;
+    uint64_t           auxDpcdOks;
+    uint32_t           auxDpcdRefuse;
+    uint32_t           auxDpcdInst;
+    uint32_t           auxDpcdArbSeen;
+    uint32_t           auxDpcdStatus;
+    uint32_t           auxDpcdReplyCode;
+    uint32_t           auxDpcdBytes;
+    uint8_t            auxDpcdData[16];
+    bool               auxDpcdSuspect;
+    uint32_t           auxDpcdHpd;     /* which HPD block to target, def 2 */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -794,6 +812,10 @@ private:
     /* 2B8: read the AUX engines and the live OTG words. Read-only, same
      * mapping, same arming as hpdSample(). */
     void auxSample(void);
+    /* 2BA: a native AUX read of the sink's DPCD on the engine bound to `hpd`.
+     * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
+     * bounded; refuses rather than racing when the DMCUB owns the engine. */
+    bool auxDpcdRead(uint32_t hpd, uint32_t address, uint32_t length);
     bool blSetup(void);
     void blTeardown(void);
     /* 2y0: lives in RBAMDBacklightParams.cpp beside the class it creates. */

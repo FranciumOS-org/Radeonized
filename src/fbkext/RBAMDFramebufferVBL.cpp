@@ -14,6 +14,7 @@
  * too, which is the 2B1 lesson about the shim. */
 #include "rb_hpd.h"
 #include "rb_aux.h"
+#include "rb_dpcd.h"
 
 /* -- the vblank ---------------------------------------------------------- */
 
@@ -245,6 +246,25 @@ void RBAMDFramebuffer::publishVBLState(void)
         char key[24];
         snprintf(key, sizeof(key), "RBFBOtgLive%u", i);
         setProperty(key, (uint64_t)otgLive[i], 64);
+    }
+    setProperty("RBFBAuxDpcdArmed", auxDpcdArmed);
+    setProperty("RBFBAuxDpcdAttempts", auxDpcdAttempts, 64);
+    setProperty("RBFBAuxDpcdOks", auxDpcdOks, 64);
+    setProperty("RBFBAuxDpcdRefuse", (uint64_t)auxDpcdRefuse, 64);
+    setProperty("RBFBAuxDpcdInst", (uint64_t)auxDpcdInst, 64);
+    setProperty("RBFBAuxDpcdArbSeen", (uint64_t)auxDpcdArbSeen, 64);
+    setProperty("RBFBAuxDpcdStatus", (uint64_t)auxDpcdStatus, 64);
+    setProperty("RBFBAuxDpcdReply", (uint64_t)auxDpcdReplyCode, 64);
+    setProperty("RBFBAuxDpcdBytes", (uint64_t)auxDpcdBytes, 64);
+    setProperty("RBFBAuxDpcdSuspect", auxDpcdSuspect);
+    /* The payload as raw bytes. Published individually rather than as one
+     * packed word for 2B0's reason: the summary (revision, link rate, lanes)
+     * is a reading OF this, and a wrong decode has to be refutable from the
+     * same output. */
+    for (unsigned i = 0; i < RB_DPCD_MAX_READ; i++) {
+        char key[24];
+        snprintf(key, sizeof(key), "RBFBAuxDpcd%02u", i);
+        setProperty(key, (uint64_t)auxDpcdData[i], 64);
     }
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
     setProperty("RBFBHubpOtg2", hubpOtgCtl2, 32);
@@ -1169,6 +1189,43 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
      * Zeroes the frame-time window for the same reason the hold does: a
      * budget spanning both sides of this is a blend of two configurations.
      */
+    /* 2BA: the DPCD read trigger. Two keys, because WHICH connector and
+     * WHICH address are separate decisions and encoding them in one number
+     * would make a typo in either look like the other. RBFBAuxHpd selects the
+     * HPD block (default 2, the Type-C port per 2B4) and only records the
+     * choice; RBFBAuxRead carries the address and is what actually runs a
+     * transaction - so an armed boot where nobody writes RBFBAuxRead has
+     * performed none, which is the property the arming promises. */
+    {
+        OSNumber *h = OSDynamicCast(OSNumber, dict->getObject("RBFBAuxHpd"));
+        if (h) {
+            const uint32_t want = h->unsigned32BitValue();
+            if (want >= RB_AUX_COUNT) { return kIOReturnBadArgument; }
+            auxDpcdHpd = want;
+            publishVBLState();
+            return kIOReturnSuccess;
+        }
+    }
+    {
+        OSNumber *a = OSDynamicCast(OSNumber, dict->getObject("RBFBAuxRead"));
+        if (a) {
+            if (!auxDpcdArmed) { return kIOReturnNotReady; }
+            const uint32_t addr = a->unsigned32BitValue();
+            OSNumber *l = OSDynamicCast(OSNumber,
+                                        dict->getObject("RBFBAuxLen"));
+            uint32_t len = l ? l->unsigned32BitValue() : RB_DPCD_MAX_READ;
+            if (len == 0 || len > RB_DPCD_MAX_READ) {
+                return kIOReturnBadArgument;
+            }
+            const bool ok = auxDpcdRead(auxDpcdHpd, addr, len);
+            publishVBLState();
+            /* Rule 13/20: the return code says the setter ran. The verdict is
+             * the published reply, which the tool reads back. An IOError here
+             * means the transaction did not ACK with data - the refusal code
+             * says why. */
+            return ok ? kIOReturnSuccess : kIOReturnIOError;
+        }
+    }
     {
         OSNumber *t = OSDynamicCast(OSNumber,
                                     dict->getObject("RBFBTriple"));

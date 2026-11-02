@@ -559,6 +559,20 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * prefixes the other and the derived negatives -rbgpunofbdmubbl /
          * -rbgpunofbdrr are distinct for the same reason. */
         dmubBlArmed = argOn("-rbgpufbdmubbl");
+        /* 2BA: the DPCD read. Opt-in, and the user's decision - it is the
+         * first write this project makes to a display block outside the
+         * panel's own pipe. Even armed, NOTHING is sent until a userspace
+         * trigger names an address (RBAMDFramebufferAux.cpp says what bounds
+         * it). Rule 30 against every token in use, and the first draft of
+         * this comment got it wrong: the longest shared prefix is NOT
+         * `-rbgpufb` but `-rbgpufba`, with **-rbgpufbaccel** in
+         * rb_defaults.h. The two diverge at the next character (u against c),
+         * so neither prefixes the other and the derived negatives
+         * -rbgpunofbaux / -rbgpunofbaccel are distinct for the same reason.
+         * Note what does NOT cover this: rb_defaults.h's hosttest asserts the
+         * prefix property for tokens IN its table, and an opt-in token is not
+         * in the table - so this one is checked by hand, here. */
+        auxDpcdArmed = argOn("-rbgpufbaux");
         /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
          * scale. Rule 40: the value comes back as a BINARY INT of the
          * caller's width, so this is an int and not a char buffer - the bug
