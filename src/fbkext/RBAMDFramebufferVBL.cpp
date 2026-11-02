@@ -10,6 +10,10 @@
 #define LOG(fmt, ...) IOLog("RBAMDFramebuffer: " fmt "\n", ##__VA_ARGS__)
 #endif
 
+/* 2B3: needed on BOTH sides of the guard - the hosttest compiles this file
+ * too, which is the 2B1 lesson about the shim. */
+#include "rb_hpd.h"
+
 /* -- the vblank ---------------------------------------------------------- */
 
 /* Why a thread_call rather than a real interrupt: the display engine's own
@@ -192,6 +196,30 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBVblRetModeSkips", vblRetModeSkips, 64);
     setProperty("RBFBHubpDeferArmed", hubpDeferPend);
     setProperty("RBFBHubpDeferrals", hubpDeferrals, 64);
+    /* 2B3: resample the HPD blocks on every publish, so a cable plugged in
+     * after boot is visible without a reboot. Five register reads at the
+     * publish interval, which 2zz measured as a path costing 1.4 % of the
+     * frame rate at ~110 setProperty calls - ten MMIO reads is not a
+     * meaningful addition to that, and the dial that throttles it
+     * (RBFBPubMs) throttles this with it. */
+    hpdSample();
+    setProperty("RBFBHpdSink", (uint64_t)hpdSinkMask, 32);
+    setProperty("RBFBHpdSinkEver", (uint64_t)hpdSinkEver, 32);
+    setProperty("RBFBHpdEn", (uint64_t)hpdEnMask, 32);
+    setProperty("RBFBHpdSetup", (uint64_t)hpdSetupMask, 32);
+    setProperty("RBFBHpdSetupEn", (uint64_t)hpdSetupEnMask, 32);
+    setProperty("RBFBHpdChanges", hpdChanges, 64);
+    setProperty("RBFBHpdReady", hpdReady);
+    /* The raw words too: a mask is a decoded summary and 2B0 is what it costs
+     * to publish only the summary (the verdict was wrong and the raw
+     * histogram beside it is what refuted it in the same output). */
+    for (unsigned i = 0; i < RB_HPD_COUNT; i++) {
+        char key[20];
+        snprintf(key, sizeof(key), "RBFBHpd%uStatus", i);
+        setProperty(key, (uint64_t)hpdStatus[i], 32);
+        snprintf(key, sizeof(key), "RBFBHpd%uCtl", i);
+        setProperty(key, (uint64_t)hpdControl[i], 32);
+    }
     setProperty("RBFBHubpOtg1", hubpOtgCtl1, 32);
     setProperty("RBFBHubpOtg2", hubpOtgCtl2, 32);
     setProperty("RBFBHubpOtg3", hubpOtgCtl3, 32);

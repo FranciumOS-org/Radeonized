@@ -743,6 +743,22 @@ table and refuses to install one that does not match the running kernel;
   a new output, and the `otg_ctl1..3` = 0x300 in `RBGPUDiag` **cannot answer
   it**, because `rbgpu_agdc_otg.cpp` samples once at init and that boot had no
   cable (rule 33: establish when a reading was taken).
+  **2B3 BUILDS THE INSTRUMENT: the five HPD blocks, read-only.**
+  `src/common/rb_hpd.h` - `regHPD0_DC_HPD_INT_STATUS` 0x1f14,
+  `..._CONTROL` 0x1f16, stride 8 dwords, HPD0..HPD4, all **BASE_IDX 2**, the
+  same base the OTG and HUBP reads already come from, so **no new mapping and
+  no new write surface** and **no setter**. `DC_HPD_EN` (bit 28) is published
+  beside the sense, because with EN clear SENSE reads 0 whatever is plugged in
+  and "no sink" would be indistinguishable from "the instrument is off" (rule
+  14, and 2zw's shape one level out). The aperture bound in `hubpSetup()` had
+  to **grow** with it - HPD at 0x1f36 is above every register this kext
+  previously touched - and is now one comparison against `rb_hpd_dw_max()`.
+  Resampled every periodic publish so a hotplug needs no reboot, with
+  `RBFBHpdSinkEver` ORing every sample (rule 31). **The reading is the
+  DIFFERENCE**: `tools/hpdlook.sh` cable out, then cable in; the instance whose
+  bit moved is the port, and one sample identifies nothing (rule 18) because
+  the DCN-instance-to-connector mapping is in no header.
+  Framebuffer **A5BDF3D2**.
   **The free measurement is PRE-BOOT**: plug the display in before power-on
   and watch for the OpenCore picker / Apple logo on it. The firmware's GOP
   drives whatever it is wired to, so an image there says the port reaches the

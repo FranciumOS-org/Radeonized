@@ -29,6 +29,7 @@ int smu13_tests(const struct rb_disc *real_table);   /* smu13_test.c */
 int agdc_tests(void);
 int otg_tests(void);
 int hubp_tests(void);
+int hpd_tests(void);
 int retire_tests(void);
 int backlight_tests(void);
 int defaults_tests(void);
@@ -856,6 +857,7 @@ int main(int argc, char **argv)
     failures += agdc_tests();
     failures += otg_tests();
     failures += hubp_tests();
+    failures += hpd_tests();
     failures += retire_tests();
     failures += backlight_tests();
     failures += defaults_tests();
