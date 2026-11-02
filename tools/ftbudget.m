@@ -192,6 +192,40 @@ int main(int argc, char **argv)
         }
     }
 
+    /* 2A7: split a hold into the hardware wait and Apple's phase. */
+    {
+        const long lw = rd(fb, "RBFBFtLatchWaitNs");
+        const long lwN = rd(fb, "RBFBFtLatchWaitN");
+        const long asks = rd(fb, "RBFBFtHoldAsksPm");
+        const long vbl = rd(fb, "RBFBVBLPeriodNs");
+        if (lwN >= 30 && vbl > 0) {
+            const double vbls = (double)lw / (double)vbl;
+            printf("\nwhat one hold actually costs:\n");
+            printf("  latch wait           %8.3f ms  = %.2f vblanks   n %ld\n",
+                   lw / 1000000.0, vbls, lwN);
+            printf("  asks to get through  %8.2f\n", asks / 1000.0);
+            /* The flip is vsync-latched (RB_HUBP_FLIP_TYPE 0), so one vblank
+             * of any hold is hardware time no answer of ours can skip.
+             * Anything beyond one vblank is a round trip that arrived after
+             * the latch had already happened. */
+            if (vbls > 1.35) {
+                printf("  Beyond one vblank: %.2f vblanks of this is Apple\n"
+                       "  asking again AFTER the flip had already latched.\n"
+                       "  One vblank is hardware we cannot skip; the rest is\n"
+                       "  phase, and phase is the only part worth attacking.\n",
+                       vbls - 1.0);
+            } else {
+                printf("  At or near one vblank: the hold pays the HARDWARE,\n"
+                       "  not Apple's polling phase. The flip cannot latch\n"
+                       "  sooner, so there is nothing to recover and the\n"
+                       "  ~36 percent is the real price of the 2xo fix.\n");
+            }
+        } else if (lwN > 0) {
+            printf("\nwhat one hold actually costs: only %ld closed runs, "
+                   "under 30 - not resolvable (rule 18).\n", lwN);
+        }
+    }
+
     printf("\n  rate from budget     %8.3f /s\n",
            rd(fb, "RBFBFtRateMhz") / 1000.0);
     printf("  CROSS-CHECK: tools/paired.sh computes this from a counter delta\n"

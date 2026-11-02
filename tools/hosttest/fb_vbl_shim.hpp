@@ -321,6 +321,8 @@ public:
     uint64_t ftPrevGetExit=0;
     bool ftPrevGetHeld=false;
     struct rb_ft_acc ftRetry{}, ftPoll{};
+    uint64_t ftHoldStart=0, ftHoldAsks=0;
+    struct rb_ft_acc ftLatchWait{}, ftHoldRunAsks{};
     void ftFile(struct rb_ft_acc *acc,uint64_t t0,uint64_t t1,bool bound);
     void publishFrameTime();
     void deliverVBL();

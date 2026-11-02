@@ -449,12 +449,31 @@ table and refuses to install one that does not match the running kernel;
   compositing OVER something else** - a bursty transient neither produces.
   **A benchmark is not a workload, and "a rare event did not occur" is not
   "it cannot".** Rule 45 again, in the expected direction.
-  Two things in the report that are NOT established: **"80 % less
-  flickering"** is ambiguous - it may mean the flicker happens with the hold
-  ON too, which would be a bigger fact and would reopen 2xo's "fixed the
-  flicker" (dozens of hold-ON boots with no flicker report is weak evidence
-  against it, not a measurement); and "then it stopped" hints the hazard is
-  tied to the appearance transient rather than to steady animation, unmeasured.
+  **2A7: the user resolved the ambiguity - the flicker has NEVER been seen
+  with the hold ON.** So "80 % less" meant less than expected, and **2xo
+  stands in full.** The configuration question is CLOSED: the hold stays
+  default-on, 141 is not available, and ~91 with a correct desktop is the
+  shipping behaviour. ("then it stopped" still hints the hazard is tied to the
+  appearance transient rather than steady animation - unmeasured.)
+  **And 2A6's MECHANISM is corrected.** It said the hardware "finishes well
+  inside the next vblank" and blamed Apple's retry granularity; but
+  `rb_hubp.h` records the flip as **vsync'd** (`RB_HUBP_FLIP_TYPE` 0), so
+  `SURFACE_FLIP_PENDING` **cannot** clear before the next vblank, and 2A5's
+  `mean vblanks` 1.066 says it clears *at* about the next one. Two numbers
+  (4.384 vs 2.771 ms) were turned into a mechanism - rule 17's shape, in a
+  session that had already caught itself twice.
+  What survives is weaker and testable: **one vblank of every hold is physics,
+  and an ask that misses the latch boundary costs a whole extra round trip.**
+  No-hold ran 7.08 ms per transaction (~1 vblank), hold-on ~11 ms (~1.6), and
+  the missing ~0.6 vblank is either that phase or something else. **2A7
+  measures it rather than arguing**: `ftLatchWait` is the wall time from a
+  run's first held GET to the GET that sees the flip latched, `ftHoldRunAsks`
+  is how many asks that took, and `ftbudget` prints the wait IN VBLANKS beside
+  the ask count. **~1 vblank / ~1 ask means the hold pays the hardware, ~36 %
+  is simply the price of the 2xo fix, and the frame-rate line is closed for
+  good; ~2 vblanks / ~2 asks means the phase is the cost and there is
+  something to attack.** Instrumentation only - nothing about the hold
+  changed. Framebuffer **614ED4BC**.
   **The trade is therefore real - but the cost is Apple's RETRY GRANULARITY,
   not the serialisation.** 2A2 measured the post-hold gap at 4.384 ms against
   2.771 ms after a ready answer, while the flip latches in ~1.07 vblanks

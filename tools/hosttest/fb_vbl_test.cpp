@@ -612,5 +612,51 @@ int main() {
         assert(rb_ft_hold_penalty_ns(0,poll)==0);
         assert(rb_ft_hold_share_pm(0,0,iv)==0);
     }
-    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers passed");
+
+    /* 2A7: a hold splits into hardware time and Apple's phase, and the test
+     * is that the two cases are DISTINGUISHABLE - because 2A6 asserted the
+     * phase reading from two numbers without one.
+     *
+     * The flip is vsync'd (RB_HUBP_FLIP_TYPE 0), so one vblank of any hold is
+     * hardware time no answer of ours can skip. A latch wait at ~1 vblank
+     * with ~1 ask means we are paying the hardware and nothing is
+     * recoverable; ~2 vblanks with ~2 asks means the second ask arrived after
+     * the latch and the phase is the cost.
+     */
+    {
+        const uint64_t vbl = 6952507;
+        struct rb_ft_acc wait1{}, asks1{};
+        struct rb_ft_acc wait2{}, asks2{};
+
+        // Case A: one vblank, one ask. Paying the hardware.
+        for (unsigned i=0;i<40;i++) {
+            rb_ft_add(&wait1, 7000000, 0);
+            rb_ft_add(&asks1, 1, 0);
+        }
+        // Case B: two vblanks, two asks. Paying the phase.
+        for (unsigned i=0;i<40;i++) {
+            rb_ft_add(&wait2, 13900000, 0);
+            rb_ft_add(&asks2, 2, 0);
+        }
+
+        const uint64_t m1 = rb_ft_mean_ns(&wait1), m2 = rb_ft_mean_ns(&wait2);
+        // In vblanks, scaled by 100 so there is no floating point here.
+        assert((m1*100ull)/vbl >= 100 && (m1*100ull)/vbl <= 105);   // ~1.01
+        assert((m2*100ull)/vbl >= 195 && (m2*100ull)/vbl <= 205);   // ~2.00
+        // The two cases must land on opposite sides of the 1.35 line
+        // ftbudget uses, or the tool cannot tell them apart at all.
+        assert((m1*100ull)/vbl < 135);
+        assert((m2*100ull)/vbl > 135);
+        // And the ask counts corroborate independently, so a wrong latch
+        // reading cannot pass on its own.
+        assert((asks1.sum_ns*1000ull)/asks1.n == 1000);
+        assert((asks2.sum_ns*1000ull)/asks2.n == 2000);
+
+        // An unclosed run files nothing, and that shows up as a count BELOW
+        // the transaction count rather than as a cheap-looking mean - the
+        // absence has to be visible (rule 14).
+        struct rb_ft_acc open{};
+        assert(open.n == 0 && rb_ft_mean_ns(&open) == 0);
+    }
+    puts("framebuffer VBL: registration starts clock; per-handler disable, re-arm, cancellation, telemetry, a periodic crumb, the 2wl rate bucket, the 2wp self-disarm, the 2wk immediate kick 2x1's foreignFires, 2x3's per-vblank poll, 2xe's drift-free cadence and 2y6's mode retune and 2A0's frame-time budget and 2A1's retry comparison and 2A2's hold share against boot 284's own numbers and 2A7's hardware-vs-phase split passed");
 }
