@@ -428,6 +428,31 @@ table and refuses to install one that does not match the running kernel;
   boot, refuses a boot with the hold unarmed (no A side, rule 34), and says in
   its banner that **the flicker during B is data** - a fast AND clean B would
   mean 2xo's diagnosis was wrong (rule 45).
+  **2A3: the A/B refused its own B phase, and it was right to (boot 285).**
+  `holdset 0` set `amtrNotReady` and the REGISTRY went on saying `Yes`,
+  because `RBFBAmtrNotReady` was published in `start()` - right for a
+  boot-arg, wrong for a runtime dial, since `start()` runs once. **Rule 31
+  with the terms swapped: a property that is never republished cannot move at
+  all**, so reading it back only ever confirms the one-time publish. The
+  general rule, new: **any field a runtime dial can change must be published
+  everywhere it is read, and the periodic publish is the one that tracks.**
+  Fixed in `publishVBLState()`, and **`holdset` now verifies from the registry
+  after one publish interval instead of trusting `kern_return_t`** (which was
+  SUCCESS and correct - it says the setter ran, not that the state is
+  readable, rule 13) and exits 3 on a mismatch. `holdaba.sh`'s own
+  read-the-property guard caught it and restored A, which is what it is for.
+  **A1 (hold ON, the shipping configuration) is six runs at mean 92.94**,
+  89.93-96.21, `fed` 62.6-65.9 %.
+  **THE MACHINE HAS TWO STATES AND THIS IS NOT YET EXPLAINED.** boot 283
+  93.95 / fed 65.6 (n=1), boot 284 75.72 / fed 52.8 (n=1), boot 285 92.94 /
+  fed 62.6-65.9 (n=6), against 70-75 across the whole 2zb-2zz era - and the
+  builds do not order it (2A0 fast, 2A1 slow, 2A2 fast, where 2A1 only added
+  accumulators). `fed` tracks it while `ours` was 0.4 % on both measured
+  boots, so whatever it is changes **how often the compositor hands us a
+  transaction**, not how fast we handle one; the latch differed too (1.001 vs
+  1.194 mean vblanks), which is the first place to look. **The question is no
+  longer "what sets 73" but "what differs at boot between the two states" -
+  and no model or dial is proposed from three boots, two of them n=1.**
   **And boot 283's 93.95 did not reproduce: boot 284 read 75.72, so the
   "smoother" desktop was boot-to-boot variance.** 2A1 recorded it as an
   observation and not a claim, which is the only reason it cost one window

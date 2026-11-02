@@ -61,6 +61,40 @@ int main(int argc, char **argv)
                "whether it appears is part of the measurement. `holdset 1`\n"
                "puts it back with no reboot.\n");
     }
+    /* 2A2: verify from the REGISTRY, not from the return code.
+     *
+     * The first version of this trusted kr, and the first run of
+     * tools/holdaba.sh then refused its B phase because the write had landed
+     * while RBFBAmtrNotReady still read `Yes` - the property was published
+     * only in start(). kr was KERN_SUCCESS and correct; it says the setter
+     * ran, not that the state is readable (rule 13). So read it back here,
+     * after one publish interval, and say plainly if the two disagree -
+     * a caller scripting an A/B has no other way to tell.
+     */
+    if (kr == KERN_SUCCESS) {
+        sleep(1);                       /* one publish interval, rule 31 */
+        CFTypeRef back = IORegistryEntryCreateCFProperty(
+            fb, CFSTR("RBFBAmtrNotReady"), kCFAllocatorDefault, 0);
+        int now = -1;
+        if (back) {
+            if (CFGetTypeID(back) == CFBooleanGetTypeID()) {
+                now = CFBooleanGetValue((CFBooleanRef)back) ? 1 : 0;
+            }
+            CFRelease(back);
+        }
+        printf("RBFBAmtrNotReady now reads %s\n",
+               now == 1 ? "ON" : now == 0 ? "OFF" : "unreadable");
+        if (now != (int)want) {
+            fprintf(stderr,
+                    "MISMATCH: the setter returned success and the registry "
+                    "still reports %s.\nThe field and the published property "
+                    "have come apart - do not run an A/B against this.\n",
+                    now == 1 ? "ON" : now == 0 ? "OFF" : "nothing");
+            IOObjectRelease(fb);
+            return 3;
+        }
+    }
+
     IOObjectRelease(fb);
     return kr == KERN_SUCCESS ? 0 : 1;
 }
