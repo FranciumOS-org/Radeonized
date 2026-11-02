@@ -620,6 +620,39 @@ table and refuses to install one that does not match the running kernel;
   +13/+15 rather than 0 - a THIRD flip inside one period still preempts and
   there is no third slot, so this is not another dial of the same kind. The
   exposure window is one generation further away, not closed.
+  **2B6: 2B2 IS WITHDRAWN AS A CLAIM. The A/B/A refused its own attribution -
+  A1 76.93, B 95.93, A2 88.54, so A1->A2 drift +15.1 % against B's +15.9 %:
+  THE DRIFT IS THE SAME SIZE AS THE EFFECT** (`holdaba.sh`'s own ~8 % rule,
+  which 2A4 passed at +3.6 %), with four of A2's six hold-ON runs inside B's
+  range. The configuration was verified per phase, so the dial moved and the
+  MACHINE is what drifted. **This boot is slow in BOTH regimes** - hold-ON
+  76.9-88.5 against the ~92 of 2A3/2A4/2B0, hold-OFF 95.9 against ~140.
+  **The one new fact worth carrying: the latch separates the regimes.** Hold
+  ON reads **1.00/1.01 vblanks** with the 2A7 cross-check at +0.0 % and the
+  usual bimodal shape - identical to 2A8's boot, nothing abnormal - while hold
+  OFF reads **1.73-1.81**. So this boot's problem **only manifests when flips
+  are PIPELINED**; `preempt` +0/+2 with the hold on against +17/+18/+60/+120
+  without it is the same division. Stated as a division, **not a mechanism -
+  no eighth model from counters in hand.**
+  **And one result IS valid, the control 2B1 needed: with the hold ON the
+  second slot changes nothing** (83.61 vs 82.65, `preempt` +0 vs +2,
+  cross-checks +1.1/+0.9 %) - expected, since the hold forbids a second
+  in-flight flip, and it shows arming the bit is harmless by itself.
+  **Method error, mine:** `holdaba.sh` restores the shipping configuration as
+  its last act, so the `tripleset 0/1` pair handed over after it ran with the
+  hold ON and measured that control instead of 2B1's claim. **A dial's state at
+  the start of an experiment is part of its arm (rule 34), and a script that
+  restores a default is what invalidates the next command typed after it.**
+  2B1's direct A/B needs `holdset 0` first and has NOT been run.
+  **The shipping default (hold ON, triple OFF) is unchanged and its latch is
+  1.00 vblanks on every boot that measured it.** Its RATE is now ~92 on three
+  boots and ~77-88 here - the **fourth** time two boots in one configuration
+  came apart by 15-70 % with `ours` pinned at 0.4 % (2A1/2A2, 2zg, 2B5, this).
+  **That is the frontier here, it is not a dial, and no single-boot reading can
+  resolve it.** Cheapest discriminating step, not another dial: take the
+  hold-OFF latch reading in the FIRST MINUTES of a fresh boot, since `preempt`
+  grows within a boot. 1.0 early and 1.7 later means the no-hold regime
+  degrades over a boot's life; 1.7 immediately makes it a property of the boot.
   **2B5: IT DID NOT REPRODUCE. Boot 292, same dials, cable out: 84.43/83.02
   sets/s with pending wait 1.73/1.81 vblanks** (cross-checks +1.0/+0.4 %, hold
   provably off - cumulative `held/gets` frozen at 5638 while gets climbed to
