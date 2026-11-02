@@ -75,12 +75,16 @@ phase() {                      # phase <label> <0|1>
     row=$(sh tools/paired.sh "$SECS" 2>&1)
     case "$row" in
       *REFUSED*) echo "  run $i: REFUSED (discarded)" ;;
-      *) echo "$row" | awk -v n="$i" '/sets\/s/ {
-             printf "  run %d: sets/s %-8s fed %s %%\n", n, $2, $8 }' ;;
+      *) echo "$row" | awk -v n="$i" -v f="$MEANDIR/$lbl" '/sets\/s/ {
+             printf "  run %d: sets/s %-8s fed %s %%\n", n, $2, $8
+             print $2 >> f }' ;;
     esac
     i=$((i+1))
   done
 }
+
+MEANDIR=$(mktemp -d) || exit 1
+trap 'rm -rf "$MEANDIR"' EXIT INT TERM
 
 phase A1 1
 phase B  0
@@ -90,8 +94,45 @@ echo
 echo "restoring the shipping configuration"
 ./build/out/holdset 1 >/dev/null 2>&1
 echo "RBFBAmtrNotReady now $(prop RBFBAmtrNotReady)"
+# 2B6: COMPUTE the verdict rather than describing it. The old ending printed
+# "if A1 and A2 disagree by more than ~8 % the boot drifted" and left the
+# arithmetic to the reader - and boot 292 came in at +15.1 % drift against
+# B's +15.9 % gain, i.e. the drift was the SAME SIZE as the effect, which is
+# easy to miss by eye across eighteen rows. 2A1's lesson: a threshold stated
+# in prose is not a guard, and after 2A1 a threshold must also be shown not to
+# be load-bearing - so the drift and the gain are both PRINTED, and the
+# refusal names which one it is refusing on.
+mean() { [ -s "$1" ] && awk '{s+=$1; n++} END {if (n) printf "%.2f", s/n}' "$1"; }
+a1=$(mean "$MEANDIR/A1"); b=$(mean "$MEANDIR/B"); a2=$(mean "$MEANDIR/A2")
 echo
-echo "Read it the way 2zy's summary was read: if A1 and A2 disagree by more"
-echo "than ~8 % the boot drifted and B is not attributable. If they agree and"
+if [ -z "$a1" ] || [ -z "$b" ] || [ -z "$a2" ]; then
+    echo "NO VERDICT: a phase produced no usable rows."
+else
+    awk -v a1="$a1" -v b="$b" -v a2="$a2" 'BEGIN {
+        printf "A1 %.2f   B %.2f   A2 %.2f\n", a1, b, a2
+        drift = (a2 - a1) / a1 * 100.0
+        base  = (a1 + a2) / 2.0
+        gain  = (b - base) / base * 100.0
+        printf "A1 -> A2 drift %+.1f %%     B vs mean(A) %+.1f %%\n", drift, gain
+        ad = drift < 0 ? -drift : drift
+        ag = gain  < 0 ? -gain  : gain
+        if (ad > 8.0 && ad >= ag * 0.5) {
+            print "REFUSED: the boot drifted by as much as the effect, so B is"
+            print "NOT attributable to the dial. Rule 44 - this needs another boot,"
+            print "and 2B6 is what reading it anyway would have recorded."
+        } else if (ad > 8.0) {
+            print "CAUTION: drift above 8 %, but small against the effect."
+            print "Treat the gain as a lower bound and repeat on a second boot."
+        } else {
+            print "A1 and A2 agree, so B IS attributable to the dial."
+            print "Then the question is the FLICKER, not the frame rate (rule 45):"
+            print "a fast AND clean B would mean the 2xo diagnosis was wrong."
+        }
+    }'
+fi
+echo
+echo "The original reading, kept because it is what the thresholds mean:"
+echo "if A1 and A2 disagree by more than ~8 % the boot drifted and B is not"
+echo "attributable. If they agree and"
 echo "B is ~+25 %, the hold's measured 21 % share is confirmed end to end -"
 echo "and then the question is the flicker, not the frame rate."
