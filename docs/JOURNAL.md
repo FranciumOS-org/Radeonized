@@ -54021,3 +54021,111 @@ windows, with both failure directions verified: restoring the old partition
 fails on the hold-on window (line 810) and a constant 0 fails the
 discrimination case (line 733).
 
+
+## 2B1 - "THE FRAME-RATE LINE IS CLOSED" WAS WRONG, and the lever has a name
+
+The user asked whether there is genuinely no fix - whether some other driver,
+RDNA 3 or NVIDIA, does something we cannot. **The honest answer is that 2A8
+and 2B0 were both correct and both rested on an unexamined premise, and the
+premise is a hardware bit that reads 0.**
+
+**What was actually established.** The 2xo hold costs one vblank of vsync
+latch (2A8), the latch distribution is bimodal with no early tail (2B0), and
+`CoreDisplay::IOPAttachment::HandleTransactionCompletionEvent` does the
+surface release **and** `DisplayPipe::NotifyIsReady()` in **one event**
+(journal, the `DisplaySurfacePool` read) - so we cannot tell Apple "take
+another frame" without also telling it "the previous surface is free", and
+the hold is the only way to make the second statement true. All correct.
+
+**The premise none of that examined.** Every one of those statements assumes
+**one pending flip slot**. `DCSURF_FLIP_CONTROL2` has read **0x40** on every
+boot since 216 - `PENDING_MIN_TIME` 64 with **`SURFACE_TRIPLE_BUFFER_ENABLE`
+CLEAR** - and `rb_hubp.h` has carried a comment since 2xm saying what the bit
+means and that `rb_hubp_flip_would_discard()` is **inert on this machine
+because it is off**. The project read the bit, reasoned about it correctly,
+wrote a guard for it, and **never asked whether to set it.** The comment even
+records why: "triple buffering is the compositor's to change" - inherited from
+a stock-driver mental model that does not apply here, because **we** are the
+one writing HUBP's surface address and Apple's compositor does not know HUBP
+exists. Rule 47's question asked of a WRITE instead of a read: before
+concluding a limit is physics, establish that the hardware is configured the
+way the conclusion assumes.
+
+**What two slots would change, and why it is the right shape for THIS
+hazard.** Programming an address no longer discards an unlatched flip - boot
+289 counted that happening **81 and 26 times per 20 s window with the hold
+off, against 4 and 2 with it on** (`rb_hubp_latch_write`'s `preempted`), so
+2zb's "negligible" was negligible *because of the hold*. And there is one more
+frame of pipeline between Apple accepting a transaction and that surface
+reaching the panel, which is exactly the slack the fused release event denies
+us: the surface released on acceptance becomes a generation older, so it is no
+longer the one being scanned. **That is a mechanism for "full rate AND no
+flicker", which no dial examined so far could have produced.**
+
+**The method is grouped correctly, checked the way 2zl says to (rule 46).**
+Linux writes this in `hubp2_enable_triplebuffer()` - a plain read-modify-write
+of `DCSURF_FLIP_CONTROL2`, no lock, no sequencing - and `dcn31_hubp_funcs`
+maps `.hubp_enable_tripleBuffer = hubp2_enable_triplebuffer` **verbatim**, so
+DCN 3.1 uses the DCN 2.0 writer unchanged. This is not 2xs's `dce_*`-on-a-
+`dcn31_*`-chip mistake. Recorded in `docs/linux-ref/UPSTREAM.md` with the
+three file paths.
+
+**AND WHAT IS NOT REPRODUCED, stated before anything is written.** Linux
+enables this only behind `dc->debug.enable_tri_buf`, and a triple-buffered
+flip there is paired with a **different timing-generator lock**:
+`dcn20_build_pipe_control_lock_sequence()` sets `tg_lock.triplebuffer_flips`
+and `dcn20_tg_lock()` then calls `triplebuffer_lock`/`triplebuffer_unlock`
+instead of the normal pair. **We set the HUBP bit without that protocol.** So
+the register write is grouped right and the surrounding METHOD is not fully
+reproduced - **rule 46 one level deeper** - and the failure mode is genuinely
+unknown: a tear, a dropped frame, or a wedge. Not a panic; it is one display
+register in the same class as every write `hubpSetup()` already does.
+
+**Shipped as a runtime dial, off by default.** `{"RBFBTriple": 0|1}` via
+`build/out/tripleset`, for 2zm's reason and more sharply than usual: the thing
+it is supposed to buy is "hold OFF **and** no flicker", so it must be A/B'd
+against `holdset` inside one boot - four combinations, no reboots - and the
+only instrument for the flicker is the user's eyes (rule 45, and 2A6 is what
+happens when `animtest` stands in for them). Three things make it a dial
+rather than a write: the pre-write snapshot is taken **once** and kept, so
+`tripleset 0` restores the firmware's own word rather than a reconstruction
+(2y5's rule about reading the restore state instead of inferring it); a
+`FLIP_CONTROL2` carrying bits outside the three documented fields is
+**refused** with the value published (rule 19), because then it is not the
+register this code believes it is; and the **hardware readback** decides the
+return value, not the fact that the store ran (rule 20, and rule 13 - a store
+to MMIO cannot report failure at all). `tripleset` re-reads the registry after
+one publish interval and exits 3 on a mismatch, exactly as `holdset` learned
+to in 2A3.
+
+**On the user's actual question - does another driver fix this?**
+- **Not a hardware gap and not an RDNA 2 vs 3 thing.** The same bit exists on
+  RDNA 3, and Linux's `amdgpu` runs *this* chip at full refresh with no
+  flicker. The silicon can do it.
+- **What Linux has that we do not is the release path**, not the display
+  engine: `dma-fence` plus DRM vblank events signal buffer release
+  independently of "accept the next flip". On macOS those two are **fused into
+  one CoreDisplay event**, which is Apple's design and the structural reason
+  we pay a vblank for correctness. Two slots is the way to buy slack inside
+  that constraint rather than around it.
+- **The NVIDIA driver is irrelevant here** - different display engine, and in
+  Eco mode the dGPU is not on the PCI bus at all (boot 282).
+- **NootedRed drives Rembrandt on macOS and cannot be read** (ChefKiss OKL
+  §2/§3). If it runs this chip at full refresh without flicker that is an
+  existence proof, but it has to come from the user in their own words.
+
+Hosttested: the arm preserves `PENDING_MIN_TIME` and `GSL_ENABLE` bit for bit,
+the round trip is the identity from either start, the refusal accepts the
+three documented fields and rejects anything above them, and
+`rb_hubp_flip_would_discard()` is asserted from both sides of the bit - the
+same fact 2xm wrote inert, now exercised. Both breaks verified to fail: an arm
+that clobbers `PENDING_MIN_TIME`, and a refusal that accepts any word. **The
+second break first failed to COMPILE under `-Werror` and the FAIL grep came
+back empty, which read exactly like "the test does not catch it" - rule 26 in
+the same hour it was being relied on.** Redone so it compiles, then it failed
+correctly.
+
+Framebuffer **60F39344**. **Nothing is claimed about what this does on
+hardware; it has never been set on this machine.** The default is off, and
+2A8/2B0 stand for the one-slot configuration they were measured in.
+

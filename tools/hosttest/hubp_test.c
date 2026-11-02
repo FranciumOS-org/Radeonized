@@ -374,8 +374,75 @@ int hubp_tests(void)
         }
     }
 
+    /* 2B1: the second pending flip slot.
+     *
+     * The premise under 2A8's "the hold pays the hardware" and 2B0's "no
+     * middle setting" is ONE pending slot, which is FLIP_CONTROL2 bit 10
+     * clear - the value every boot since 216 has read. These cases pin the
+     * arithmetic that flips it, and above all that it touches NOTHING else:
+     * PENDING_MIN_TIME is the panel's own setting and GSL belongs to display
+     * synchronisation, so an RMW that disturbed either would be changing the
+     * display configuration while claiming to add a buffer.
+     */
+    {
+        const uint32_t live = 0x40u;        /* boots 216-289: MIN_TIME 64 */
+
+        if (rb_hubp_triple_enabled(live) != 0) {
+            printf("FAIL triple: this machine reads it OFF\n"); bad++;
+        }
+        const uint32_t on = rb_hubp_triple_set(live, 1);
+        if (on != 0x440u) {
+            printf("FAIL triple: arm gave 0x%x, want 0x440\n", on); bad++;
+        }
+        if (rb_hubp_triple_enabled(on) != 1) {
+            printf("FAIL triple: armed word does not read armed\n"); bad++;
+        }
+        /* PENDING_MIN_TIME survives, bit for bit. */
+        if ((on & RB_HUBP_FLIP2_PENDING_MIN_TIME) !=
+            (live & RB_HUBP_FLIP2_PENDING_MIN_TIME)) {
+            printf("FAIL triple: PENDING_MIN_TIME disturbed\n"); bad++;
+        }
+        /* So does GSL, on a machine that has it set. */
+        const uint32_t gsl = live | RB_HUBP_FLIP2_GSL_ENABLE;
+        if ((rb_hubp_triple_set(gsl, 1) & RB_HUBP_FLIP2_GSL_ENABLE) == 0u) {
+            printf("FAIL triple: GSL_ENABLE cleared by arming\n"); bad++;
+        }
+        /* Round trip: arm then disarm is the identity, from any start. */
+        if (rb_hubp_triple_set(on, 0) != live ||
+            rb_hubp_triple_set(live, 0) != live ||
+            rb_hubp_triple_set(on, 1) != on) {
+            printf("FAIL triple: not idempotent / not a round trip\n"); bad++;
+        }
+
+        /* THE REFUSAL. A FLIP_CONTROL2 carrying bits outside the three
+         * documented fields is not the register this code believes it is, so
+         * it is refused rather than read-modify-written (rule 19). */
+        if (!rb_hubp_triple_may_write(0x40u) ||
+            !rb_hubp_triple_may_write(0x440u) ||
+            !rb_hubp_triple_may_write(0x5ffu)) {   /* all three fields full */
+            printf("FAIL triple: refused a word it should accept\n"); bad++;
+        }
+        if (rb_hubp_triple_may_write(0x800u) ||    /* one bit above the top */
+            rb_hubp_triple_may_write(0x200u) ||    /* the gap at bit 9 */
+            rb_hubp_triple_may_write(0xffffffffu)) {
+            printf("FAIL triple: accepted an unrecognised word\n"); bad++;
+        }
+
+        /* And the CONSEQUENCE that makes this worth doing: with the bit set,
+         * rb_hubp_flip_would_discard() stops deferring, because a pending
+         * flip no longer means a second write throws one away. That function
+         * has been inert on this machine since 2xm precisely because the bit
+         * reads 0 - these two lines are the same fact from both sides. */
+        if (rb_hubp_flip_would_discard(RB_HUBP_FLIP_PENDING, live) != 1) {
+            printf("FAIL triple: one slot should defer\n"); bad++;
+        }
+        if (rb_hubp_flip_would_discard(RB_HUBP_FLIP_PENDING, on) != 0) {
+            printf("FAIL triple: two slots should not defer\n"); bad++;
+        }
+    }
+
     printf("hubp: offsets cross-checked against rb_regs.h, pipe-state, "
-           "address guards, the 2wm write gate and 2za's latch latency%s\n",
+           "address guards, the 2wm write gate, 2za's latch latency and 2B1's second slot%s\n",
            bad ? " FAILED" : ": passed");
     return bad;
 }
