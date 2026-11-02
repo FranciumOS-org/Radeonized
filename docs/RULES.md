@@ -349,14 +349,36 @@ table and refuses to install one that does not match the running kernel;
   and 31 **past the end of the member array**, and the boot's own output had it
   contradicting `dmubRegScan`'s `run 37` on the same memory. Fixed by indexing
   the table the window is in. Rule 16 and rule 14 together.
-  **What is left is a question for the panel, not another instrument.** Every
-  software route reachable here now writes correctly and changes nothing: the
-  PWM register on three parameter keys, the ABM command on three control
-  types. The cheapest remaining discriminator is outside the driver - **do the
-  keyboard's own brightness keys move this panel?** If they do, something on
-  this machine moves the backlight and that is the route; if they do not,
-  nothing moves it in software. Rule 45: the human observation is the
-  instrument, and this is the one nobody has recorded.
+  **2zv (boot 280) CLOSES THE DC SIDE: Apple's own stack has no brightness
+  parameter either, and boot 249 never had a working backlight.** The user's
+  restart tripped the sentinel, so boot 280 came up **stock** - an unarranged
+  control. `RBAMDFramebuffer` published **0 properties** (not in the registry
+  at all; it loaded and declined the panel, rule 38) and `.Display_boot` is
+  `IONDRVFramebuffer` with Apple's `AppleDisplay`,
+  `AppleMCCSParameterHandler` and `AppleUpstreamUserClientDriver` under it.
+  **None of our code is in the display path and the brightness keys still do
+  not move the panel.** And Apple's own `AppleDisplay` there publishes
+  `IODisplayParameters = bgsc, rgsc, vblm, ownr, ggsc` - three gamma scales, a
+  vblank mask, an owner, and **no brightness parameter of any kind**. There was
+  never a route of theirs to borrow.
+  **Boot 249's own list retires the recollection**: `bgsc rgsc vblm brig ownr
+  ggsc` against boot 280's `bgsc rgsc vblm ownr ggsc` - the five Apple keys
+  **identical**, the only difference `brig`, which was **ours**, published for
+  the first time on that boot by 2xs. Boot 249 was the boot our PARAMETER
+  arrived, not a boot the panel was controllable. Rule 45's exact failure: the
+  observation was never instrumented, so a recollection became the premise for
+  four milestones.
+  **Nothing was blocked and nothing regressed.** Three independent routes, two
+  configurations: the PWM register on all three parameter keys (writes land,
+  read back bit-identical, uncontested); the DMUB ABM command on all three
+  control types, pipe bound and unbound (accepted, acked, no refusals); and
+  Apple's stock stack with our code absent (no parameter at all).
+  **So brightness is an EC/ACPI project, not a DC one.** The panel is lit by
+  platform firmware at one level and nothing in macOS reaches what sets it; on
+  this chassis the keys are ASUS WMI/EC events and `AppleIntelPanelA` matching
+  PNLF with `{"commit"={"reg"=0}}` is the *Intel* driver finding a PNLF device
+  and having nothing to drive. An `_BCM`/`_BCL` route or an EC driver is the
+  work. **Do not re-open the DC side without new evidence.**
   **What is withdrawn is only the panel claim** (rule 45) — everything below is register
   and parameter plumbing and all of it still stands.
   **2xs (boot 249)** `-rbgpufbbacklight` writes the PWM duty

@@ -52850,3 +52850,73 @@ machine moves it in software, and the boot-249 recollection is the only
 evidence to the contrary. Rule 45 says the human observation is the
 instrument; this is the one human observation nobody has recorded, and it
 costs nothing.
+
+## 2zv — boot 280: the STOCK control, and Apple's own stack has no brightness parameter either
+
+The user restarted inside the sentinel's 60 s window, so boot 280 came up
+**stock** — a cleaner control than the `nvram rbgpu-arm=0` one that was asked
+for, because it was not arranged.
+
+```
+rbgpu-boot        280          rbgpu-diag  armed=0x0
+RBAMDFramebuffer  0 properties published - NOT IN THE REGISTRY AT ALL
+.Display_boot     IONDRVFramebuffer  (+ AppleDisplay,
+                  AppleMCCSParameterHandler, AppleUpstreamUserClientDriver)
+```
+
+So on this boot **none of our code is in the display path**. Our framebuffer
+loaded (`kextstat` shows `com.rembrandtgpu.fb` at the 2zt UUID) and declined
+the panel, which is rule 38 working. Apple's stack owns the panel end to end.
+
+**And the brightness keys still do not move the panel.** (User's own
+observation, and the configuration is attributed — rule 39.)
+
+**Apple's own `AppleDisplay` on that path publishes no brightness parameter.**
+
+```
+IODisplayParameters = bgsc, rgsc, vblm, ownr, ggsc
+```
+
+Three gamma scales, a vblank mask, an owner. No `brig`, no `brightness`, no
+`linear-brightness`, nothing. **Apple's stock display stack on this machine
+has never had a route to this backlight**, so there was never anything of
+theirs to borrow and nothing of ours to blame.
+
+**This also retires the boot-249 recollection, by reading boot 249's own
+parameter list against boot 280's.**
+
+```
+boot 249:  bgsc rgsc vblm brig ownr ggsc
+boot 280:  bgsc rgsc vblm      ownr ggsc
+```
+
+The five Apple keys are **identical**. The only difference is `brig` — and
+`brig` was **ours**, published for the first time on that very boot by 2xs's
+`-rbgpufbbacklight`. So boot 249 was not a configuration in which the panel
+was controllable; it was the boot on which our own parameter first appeared in
+the dictionary. The user's memory of "the command moved it" attaches to the
+boot where the *parameter* arrived, which is exactly the confusion rule 45
+exists to prevent: the observation was never instrumented, so a recollection
+became the premise for four milestones.
+
+**Nothing was blocked and nothing regressed.** Every software route reachable
+from macOS on this machine has now been exercised and falsified, in both the
+armed and the stock configuration:
+
+| route | result |
+|---|---|
+| `BL_PWM_CNTL` via `"brightness"` / `"brig"` / `"linear-brightness"` | writes land, read back bit-identical, uncontested (2zt) |
+| DMUB `SET_BACKLIGHT`, control type 0 / 1 / 2, pipe bound and unbound | accepted, acked, no refusals (2zu, boot 270) |
+| Apple's stock stack, our code absent | publishes no brightness parameter at all (2zv) |
+
+**So brightness is not a DC problem and never was.** The panel is lit by the
+platform firmware at one level and nothing in macOS reaches the thing that
+sets it. On this chassis the brightness keys are ASUS WMI/EC events and the
+backlight sits behind the EC, which macOS has no driver for; `AppleIntelPanelA`
+matching PNLF and publishing `{"commit"={"reg"=0}}` (2zj) is the *Intel*
+backlight driver finding a PNLF device and having nothing to drive. Making the
+panel dim is therefore an EC/ACPI project — an `_BCM`/`_BCL` route or an EC
+driver — not another DC register and not another DMUB command.
+
+**Do not re-open the DC side without new evidence.** Three independent routes,
+two configurations, and Apple's own absence of a parameter all agree.
