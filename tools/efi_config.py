@@ -9,9 +9,13 @@ tools/efi.sh; works on any path, so it can be tried on a copy first.
     python3 tools/efi_config.py CONFIG bootarg remove -rbgpuoff
     python3 tools/efi_config.py CONFIG bootarg strip      # every rbgpu token
     python3 tools/efi_config.py CONFIG sysreport on|off   # Misc -> Debug -> SysReport
+    python3 tools/efi_config.py CONFIG csr show
+    python3 tools/efi_config.py CONFIG csr add task_for_pid dtrace
+    python3 tools/efi_config.py CONFIG csr remove dtrace
 
 Only these keys are touched: the RembrandtGPU entry of Kernel -> Add,
-boot-args under NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82, and
+boot-args and csr-active-config under
+NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82, and
 Misc -> Debug -> SysReport (OpenCore DEBUG builds dump ACPI tables, among
 them the VBIOS table VFCT, to the EFI's SysReport folder at boot).
 Everything else is written back as read (plistlib keeps key order, data and
@@ -98,6 +102,87 @@ def bootarg(cfg, op, arg):
         args = [a for a in args if a != arg]
     v["boot-args"] = " ".join(args)
     return f"boot-args now: {v['boot-args']}"
+
+
+# csr-active-config, the SIP mask the kernel reads at boot. It is four
+# little-endian bytes of <data> in the same NVRAM -> Add dict as boot-args, and
+# NVRAM -> Delete lists it, so OpenCore rewrites it from config.plist on every
+# boot: `sudo nvram csr-active-config=...` does not survive a restart and this
+# is the only place worth editing.
+CSR_BITS = {
+    "untrusted_kexts": 0x001,      # CSR_ALLOW_UNTRUSTED_KEXTS
+    "unrestricted_fs": 0x002,      # CSR_ALLOW_UNRESTRICTED_FS
+    "task_for_pid": 0x004,         # CSR_ALLOW_TASK_FOR_PID - lldb on a sandboxed daemon
+    "kernel_debugger": 0x008,      # CSR_ALLOW_KERNEL_DEBUGGER
+    "apple_internal": 0x010,       # CSR_ALLOW_APPLE_INTERNAL
+    "dtrace": 0x020,               # CSR_ALLOW_UNRESTRICTED_DTRACE - the pid provider
+    "nvram": 0x040,                # CSR_ALLOW_UNRESTRICTED_NVRAM
+    "device_configuration": 0x080,  # CSR_ALLOW_DEVICE_CONFIGURATION
+    "any_recovery_os": 0x100,      # CSR_ALLOW_ANY_RECOVERY_OS
+    "unapproved_kexts": 0x200,     # CSR_ALLOW_UNAPPROVED_KEXTS
+    "executable_policy": 0x400,    # CSR_ALLOW_EXECUTABLE_POLICY_OVERRIDE
+    "unauthenticated_root": 0x800,  # CSR_ALLOW_UNAUTHENTICATED_ROOT
+}
+
+# Bits this machine needs to boot at all and to load our unsigned kexts. The
+# EFI is the only way back from a mask that will not boot, so clearing one of
+# these needs a deliberate hex value, not a name.
+CSR_KEEP = CSR_BITS["untrusted_kexts"] | CSR_BITS["unrestricted_fs"] \
+    | CSR_BITS["unapproved_kexts"] | CSR_BITS["unauthenticated_root"]
+
+
+def csr_value(cfg):
+    v = boot_vars(cfg)
+    b = v.get("csr-active-config")
+    if not isinstance(b, bytes) or len(b) != 4:
+        raise ConfigError("no four-byte csr-active-config data in NVRAM -> Add")
+    return v, int.from_bytes(b, "little")
+
+
+def csr_describe(mask):
+    on = [n for n, b in CSR_BITS.items() if mask & b]
+    extra = mask & ~sum(CSR_BITS.values())
+    if extra:
+        on.append(f"unknown:{extra:#x}")
+    return f"{mask:#06x} ({' '.join(on) if on else 'none'})"
+
+
+def csr_mask_of(names):
+    """A mask from bit names, or from one hex/decimal number.
+
+    Returns (mask, by_name). A bare number is the deliberate escape hatch that
+    CSR_KEEP does not guard, so the caller needs to know which form was used.
+    """
+    if len(names) == 1:
+        try:
+            return int(names[0], 0), False
+        except ValueError:
+            pass
+    mask = 0
+    for n in names:
+        if n not in CSR_BITS:
+            raise ConfigError(f"no SIP bit called {n}; known: {' '.join(sorted(CSR_BITS))}")
+        mask |= CSR_BITS[n]
+    return mask, True
+
+
+def csr(cfg, op, names):
+    v, old = csr_value(cfg)
+    if op == "show":
+        return f"csr-active-config: {csr_describe(old)}"
+    mask, by_name = csr_mask_of(names)
+    new = old | mask if op == "add" else old & ~mask
+    if op == "remove" and by_name and mask & CSR_KEEP & old:
+        lost = [n for n, b in CSR_BITS.items() if b & mask & CSR_KEEP & old]
+        raise ConfigError(f"refusing to clear {' '.join(lost)}: this machine needs those "
+                          f"to boot and to load unsigned kexts. Pass the whole mask as a "
+                          f"hex number if you really mean it")
+    if new == old:
+        return f"csr-active-config unchanged: {csr_describe(old)}"
+    v["csr-active-config"] = new.to_bytes(4, "little")
+    return (f"csr-active-config: {csr_describe(old)}\n"
+            f"              now: {csr_describe(new)}\n"
+            f"takes effect at the next reboot")
 
 
 DEFAULTS_H = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -194,6 +279,10 @@ def status(cfg):
         out.append(f"{BUNDLE}: index {i}, Enabled={e.get('Enabled')}, {where}")
     v = boot_vars(cfg)
     out.append(f"boot-args: {v['boot-args']}")
+    try:
+        out.append(f"csr-active-config: {csr_describe(csr_value(cfg)[1])}")
+    except ConfigError as e:
+        out.append(f"csr-active-config: {e}")
     sr = cfg.get("Misc", {}).get("Debug", {}).get("SysReport")
     out.append(f"SysReport: {sr}")
     deletes = cfg.get("NVRAM", {}).get("Delete", {}).get(BOOT_GUID, [])
@@ -224,6 +313,11 @@ def main(argv):
             msg = bootarg(cfg, argv[3], argv[4])
         elif cmd == "bootarg" and len(argv) == 4 and argv[3] == "strip":
             msg = bootarg_strip(cfg)
+        elif cmd == "csr" and len(argv) == 4 and argv[3] == "show":
+            print(csr(cfg, "show", []))
+            return 0
+        elif cmd == "csr" and len(argv) >= 5 and argv[3] in ("add", "remove"):
+            msg = csr(cfg, argv[3], argv[4:])
         else:
             print(__doc__, file=sys.stderr)
             return 2

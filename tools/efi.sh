@@ -11,6 +11,8 @@
 #   sudo tools/efi.sh vbios          # after that boot: extract the 680M VBIOS, turn SysReport off
 #   sudo tools/efi.sh sysreport-off
 #   sudo tools/efi.sh bootarg add|remove ARG   # e.g. msgbuf=1048576 (bigger kernel log buffer)
+#   sudo tools/efi.sh csr show                 # the SIP mask, decoded
+#   sudo tools/efi.sh csr add|remove BIT...    # e.g. task_for_pid dtrace
 #   sudo tools/efi.sh defaults    # take our now-redundant tokens out of boot-args (2xw)
 #   sudo tools/efi.sh usbintr0 on|off|status  # the XHCI interrupter-0 patches
 #   sudo tools/efi.sh usbpoke on|off          # XHCIPoke.kext (the 10 ms polling fallback)
@@ -24,8 +26,8 @@ set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo tools/efi.sh ${1:-status}" >&2; exit 1; }
 cmd="${1:-}"
-case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg|usbintr0|usbpoke|defaults) ;; *)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+case "$cmd" in install|uninstall|on|off|status|restore|sysreport-on|sysreport-off|vbios|bootarg|csr|usbintr0|usbpoke|defaults) ;; *)
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -190,6 +192,22 @@ bootarg)
         edit bootarg "$op" "$arg"
     done
     sync
+    ;;
+csr)
+    # The SIP mask the kernel reads at boot. NVRAM -> Delete lists
+    # csr-active-config, so OpenCore rewrites it from config.plist every boot
+    # and `nvram csr-active-config=...` never survives a restart.
+    op="${2:-}"; shift 2 2>/dev/null || true
+    case "$op" in
+    show) edit csr show ;;
+    add|remove)
+        [ "$#" -gt 0 ] || { echo "usage: sudo tools/efi.sh csr add|remove BIT [BIT...]" >&2; exit 2; }
+        backup
+        edit csr "$op" "$@"
+        sync
+        ;;
+    *) echo "usage: sudo tools/efi.sh csr show|add BIT...|remove BIT..." >&2; exit 2 ;;
+    esac
     ;;
 usbintr0)
     # Force every Transfer TRB to interrupter 0, the only one that can raise an

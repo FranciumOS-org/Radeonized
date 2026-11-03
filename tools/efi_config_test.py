@@ -156,6 +156,38 @@ def main():
         check(r.returncode == 1 and open(p, "rb").read() == before, "no SysReport key: refused, unchanged")
         check(run(p, "sysreport", "maybe").returncode == 2, "sysreport needs on or off")
 
+        # csr-active-config: the sample starts at 0x0a03.
+        check("csr-active-config: 0x0a03" in run(p, "status").stdout,
+              "status decodes csr-active-config")
+        check("task_for_pid" not in run(p, "csr", "show").stdout, "csr show: 0x4 is clear")
+        run(p, "csr", "add", "task_for_pid", "dtrace")
+        got = plistlib.load(open(p, "rb"))["NVRAM"]["Add"][ec.BOOT_GUID]["csr-active-config"]
+        check(got == b"\x27\x0a\x00\x00", f"csr add set 0x0a27, got {got.hex()}")
+        check("dtrace" in run(p, "csr", "show").stdout, "csr show names the new bits")
+        run(p, "csr", "remove", "dtrace", "task_for_pid")
+        check(plistlib.load(open(p, "rb"))["NVRAM"]["Add"][ec.BOOT_GUID]["csr-active-config"]
+              == b"\x03\x0a\x00\x00", "csr remove restores the original mask")
+        before = open(p, "rb").read()
+        r = run(p, "csr", "remove", "untrusted_kexts")
+        check(r.returncode == 1 and open(p, "rb").read() == before,
+              "csr refuses to clear a bit the machine boots with")
+        r = run(p, "csr", "remove", "0x1")
+        check(r.returncode == 0, "a bare hex mask may clear it anyway")
+        plistlib.dump(sample(), open(p, "wb"), sort_keys=False)
+        r = run(p, "csr", "add", "nosuchbit")
+        check(r.returncode == 1, "csr refuses an unknown bit name")
+        run(p, "csr", "add", "0x24")
+        check(plistlib.load(open(p, "rb"))["NVRAM"]["Add"][ec.BOOT_GUID]["csr-active-config"]
+              == b"\x27\x0a\x00\x00", "csr add takes a hex mask too")
+        nocsr = sample(); del nocsr["NVRAM"]["Add"][ec.BOOT_GUID]["csr-active-config"]
+        plistlib.dump(nocsr, open(p, "wb"), sort_keys=False)
+        before = open(p, "rb").read()
+        r = run(p, "csr", "add", "dtrace")
+        check(r.returncode == 1 and open(p, "rb").read() == before,
+              "no csr-active-config key: refused, unchanged")
+        plistlib.dump(sample(), open(p, "wb"), sort_keys=False)
+        check(run(p, "csr", "maybe").returncode == 2, "csr needs show, add or remove")
+
         r = run(p, "frobnicate")
         check(r.returncode == 2, "unknown command refused")
 
