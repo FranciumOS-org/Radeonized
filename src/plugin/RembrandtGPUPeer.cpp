@@ -96,6 +96,7 @@ extern bool rbgpu_retire_from_vbl_2zd(void);
 extern void rbgpu_retire_publish_2zd(void);
 /* 2C2: the retire-drain dial, defined in kern_start.cpp beside the loop that
  * reads it. */
+static uint64_t g_rbgpu_drain_sets = 0;   /* 2C3 */
 extern void rbgpu_retire_drain_set_2C2(uint32_t want);
 extern uint32_t rbgpu_retire_drain_get_2C2(void);
 extern volatile int g_rb_2gn_in1b;
@@ -2758,12 +2759,32 @@ IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
     OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBGPURetireDrain"));
     if (!n) { return kIOReturnUnsupported; }
 
+    /* 2C3: SAY WHAT ARRIVED, NOT JUST WHAT WAS DECIDED.
+     *
+     * On boot 410 this setter took `8` and then refused to go back to `1`:
+     * `drainset 1` returned KERN_SUCCESS three times and `vblret_drain` kept
+     * reading 8, with `drain_refused` absent so the bounds check was not it.
+     * Three writers of the global exist and none writes 8, the code is
+     * symmetric in 1 and 8, and reading it harder could not distinguish
+     * "setProperties never ran" from "it ran and the write was lost" from
+     * "the registry snapshot is stale" - which is rule 14 exactly, and the
+     * reason the A/B degenerated to one sample a side.
+     *
+     * So publish the raw value received and a monotonic count of accepted
+     * sets. `drain_recv` differing from `drain_want` names a decode problem;
+     * `drain_sets` not advancing names a call that never arrived; both moving
+     * with `vblret_drain` stale names the publish path. One of the three, and
+     * no inference needed. */
     const uint32_t want = n->unsigned32BitValue();
+    rbgpu_diag_set_num("drain_recv", n->unsigned64BitValue());
+    rbgpu_diag_set_num("drain_want", want);
     if (want < 1 || want > RB_RETIRE_DRAIN_MAX) {
         rbgpu_diag_set_num("drain_refused", want);
         return kIOReturnBadArgument;
     }
     rbgpu_retire_drain_set_2C2(want);
+    g_rbgpu_drain_sets++;
+    rbgpu_diag_set_num("drain_sets", g_rbgpu_drain_sets);
     /* Publish immediately as well as periodically: the dial's own value is
      * not a frame-path counter and the caller should not have to wait a
      * publish interval to see the arm it just set (rule 31's other side). */

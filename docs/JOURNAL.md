@@ -55620,3 +55620,90 @@ states, so there is something for a change to be a change *from*.
 Framebuffer **5AB98303** carries the counter fix; the tool fix is userspace
 only and needs no install, so the corrected two-axis reading is available on
 boot 297 as it stands.
+
+2C2/2C3 (boots 409/410) - THE QUEUE LADDER IS REAL AND `checkTimestamps()` IS
+NOT THE LEVER.
+
+THE MEASUREMENT (boot 409, twelve runs, userspace, no kext change).
+`build/out/metal_probe --queues N` commits one buffer per queue, together, and
+reports `commit->GPUstart` per queue. The ladder is the same every run:
+
+    queue 0           13.3 - 14.5 ms   (n=12, tight)
+    each queue after  +6.9 to +7.2 ms
+
+and the ABSOLUTE slots land at the same times - 27, 35, 41, 48, 55, 62, 69 ms -
+whether N is 2, 4 or 8. So it is a fixed lattice and not contention.
+`RBFBVBLPeriodNs` is 6952507, so the spacing IS the vblank period to three
+figures. `vblret_src` 1 with `vblret_vbl` 201206 against `vblret_timer` 1231
+says the vblank owns retirement.
+
+WHY IT MATTERS AND WHY IT WAS INVISIBLE. One steady stream gets a retire every
+6.95 ms = 144/s, which is exactly what the compositor wants - that is the
+smooth desktop, and 2A1 measured our whole per-transaction cost at 44
+microseconds. The cost falls entirely on work that needs SEVERAL units of GPU
+work finished BEFORE anything can be drawn, which is per queue and serialised.
+The user's report was Settings' icons reloading slowly on every open, laggy
+menus and animation hitches - and 2A1-2B7 measured the frame path to death
+without ever measuring a SECOND concurrent stream.
+
+THE HYPOTHESIS AND ITS REFUTATION (boot 410). `stamp_calls` 42337 against
+`stamp_completed` 42314 reads as about one stamp per call, and we poll
+`checkTimestamps()` exactly once per vblank offer - so N queues would need N
+vblanks. 2C2 added `rbgpuretiredrain=`/`RBGPURetireDrain` to poll `drain`
+times per offer, bounded at 8, default 1.
+**IT DOES NOTHING.** Six interleaved runs at `--queues 8`: 55.386, 56.308,
+55.598, 55.295, 55.850, 55.895 ms - a range of 1.0 ms, +-0.9 %, with
+`vblret_extra` **50897** proving the extra polls genuinely ran. The one true
+drain=1 run (55.386, the boot default before any set) sits INSIDE the drain=8
+range. So polling `checkTimestamps()` harder is eliminated by measurement, and
+the default stays 1.
+
+THE A/B DEGENERATED, AND THE FINDING SURVIVES IT ANYWAY. `drainset 1` returned
+KERN_SUCCESS three times and `vblret_drain` kept reading **8**, so runs 2-6
+were all the B side and the A side is n=1. That is not a valid interleaved A/B
+(rule 44) - but it cannot rescue the drain, because the five runs that
+provably DID drain are the ones indistinguishable from the one that did not.
+A degenerate A/B is fatal to a positive claim and harmless to a negative one.
+
+THE DIAL BUG IS UNDIAGNOSED AND IS NOW INSTRUMENTED INSTEAD OF REASONED ABOUT.
+`drain_refused` is absent so the bounds check is not it; three writers of the
+global exist and none writes 8; the code is symmetric in 1 and 8. Reading it
+harder cannot separate "setProperties never ran" from "it ran and the write
+was lost" from "the registry snapshot is stale". Rule 14. 2C3 publishes
+`drain_recv` (the raw OSNumber), `drain_want` (after the cast) and
+`drain_sets` (a monotonic count of accepted sets), which distinguishes all
+three with no inference.
+
+AND THE READING 2ww ASKED FOR IS NOW TAKEABLE. `advance()`'s call count has
+only ever gone to `rbgpu-sched`, which flushes at three fixed phase marks -
+two reads three seconds apart on boot 410 both returned `sub=106125
+adv=48183`, so it is a snapshot and cannot be delta-read around an experiment.
+That is exactly why "advance()'s rate in the SLOW state has never been read"
+has stood since 2ww. 2C3 publishes `adv_calls`, `adv_sub`, `adv_submax`,
+`adv_qids` (a bitmap of the queue ids `submitCommandBuffer` is handed) and
+`adv_hk` into the PERIODIC table.
+**Said before the boot:** read `adv_calls` either side of ONE
+`metal_probe --queues 8`. Eight advances for eight queues means the release is
+one channel per advance and calling `advance()` directly is the lever - we
+already hold `orig_sched_advance_2wv`. One or two advances means `advance()` is
+not the gate and the serialisation is on the submit side, which no dial of
+ours reaches. `adv_qids` says whether 8 Metal queues are even 8 scheduler
+queues. `smax` 589 on boot 410 already argues against one-item-per-call, so
+this is not a formality.
+
+NOT ESTABLISHED, and deliberately not inferred: that the gate is event-source
+coalescing. An `IOInterruptEventSource` does collapse multiple signals into
+one action run, and 2xe read `checkTimestamps` as signalling rather than
+advancing - which would explain the null result exactly - but nothing here
+observes one call to `advance()`, which is rule 35 verbatim. `adv_calls` is
+what settles it.
+
+ALSO: the wedge did NOT reproduce. 2wt's `--queues 4` trigger, measured at
+6.1-10.2 s then, gives 14-49 ms now. But boot 409 logged one real wedge of its
+own - channel 52 GFX, stamp frozen at 0x27a1b, `GPURestartBegin` to
+`GPURestartEnd` spanning **3.5 seconds** - so it is rarer, not gone, and it is
+the "random" lag. `stamp_ticks` 125666 says our retire tick polled 125
+thousand times while that stamp never advanced, which retires the whole
+"nothing polls it" family for the wedge the same way 2xe retired it for the
+display. Instrument defect found in passing: `metal_probe --queues 1` runs 6
+queues.

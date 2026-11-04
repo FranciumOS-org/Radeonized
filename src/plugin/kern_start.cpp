@@ -14139,6 +14139,10 @@ void rbgpu_restart_flush_2iq(void) {
 // ---------------------------------------------------------------------------
 
 static uint64_t g_rb_2wv_submit = 0;
+/* 2C3: see the submit hook. A bitmap, not a count, because the question is
+ * WHICH ids rather than how many events. */
+static uint64_t g_rb_2C3_qids = 0;
+static uint64_t g_rb_2C3_qid_big = 0;
 static uint64_t g_rb_2wv_adv = 0;
 static uint64_t g_rb_2wv_last_adv = 0;
 static uint64_t g_rb_2wv_gap_sum_us = 0;
@@ -14162,6 +14166,18 @@ static bool hooked_sched_submit_2wv(void *sched, uint64_t qid, void *info,
     if (!g_rb_2xg_sched) g_rb_2xg_sched = sched;   /* 2xg */
     g_rb_2wv_submit++;
     g_rb_2wv_sub_since++;
+    /* 2C3: which queue ids exist at all. The ladder is per Metal command
+     * queue and `qid` is the only queue identity any hook on this path is
+     * handed, so a bitmap of the ones seen says whether 8 Metal queues are 8
+     * scheduler queues or get folded into fewer - which decides whether the
+     * serialisation can be per queue at all. Bounded to 64 so a large or
+     * garbage qid cannot shift out of range (an unbounded shift is undefined,
+     * not merely wrong). */
+    if (qid < 64) {
+        g_rb_2C3_qids |= (1ull << qid);
+    } else {
+        g_rb_2C3_qid_big++;
+    }
     if (!orig_sched_submit_2wv) return false;
     return orig_sched_submit_2wv(sched, qid, info, barrier);
 }
@@ -14569,6 +14585,33 @@ void rbgpu_retire_publish_2zd(void) {
      * (rule 34) and a zero `extra` separates "the dial is 1" from "the dial
      * is 8 and nothing ever offered" (rule 14). */
     rbgpu_diag_set_num("vblret_drain", g_rb_2C2_drain);
+    /* 2C3: THE READING 2ww ASKED FOR AND NOBODY COULD TAKE.
+     *
+     * `advance()`'s call count has only ever been published into
+     * `rbgpu-sched`, which flushes at three fixed phase marks (2ww) - two
+     * reads three seconds apart on boot 410 returned the same `adv=48183`,
+     * so it is a snapshot and cannot be delta-read around an experiment.
+     * That is precisely why "advance()'s rate in the SLOW state has never
+     * been read" has stood since 2ww.
+     *
+     * Publishing it in the PERIODIC table makes the decisive measurement
+     * free and boot-less: read `adv_calls` before and after one
+     * `metal_probe --queues 8` run. Eight queues costing eight advances
+     * means the release is one channel per advance and calling `advance()`
+     * directly is the lever; one or two advances means `advance()` is not
+     * the gate and the serialisation is on the submit side, which no dial of
+     * ours reaches. 2C2 eliminated `checkTimestamps()` call count; this says
+     * which way to go next instead of guessing a second time. */
+    rbgpu_diag_set_num("adv_calls", g_rb_2wv_adv);
+    rbgpu_diag_set_num("adv_sub",   g_rb_2wv_submit);
+    rbgpu_diag_set_num("adv_submax", g_rb_2wv_sub_max);
+    rbgpu_diag_set_num("adv_qids",  g_rb_2C3_qids);
+    if (g_rb_2C3_qid_big) {
+        rbgpu_diag_set_num("adv_qid_big", g_rb_2C3_qid_big);
+    }
+    /* The hook is the precondition for all four: zero counts with hk=0 are
+     * the hook and not the driver (rule 14/20). */
+    rbgpu_diag_set_num("adv_hk", static_cast<uint64_t>(g_rb_2wv_hooked));
     rbgpu_diag_set_num("vblret_extra", g_rb_2C2_extra);
 }
 
