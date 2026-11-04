@@ -816,10 +816,53 @@ table and refuses to install one that does not match the running kernel;
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
   absence from the other.
+- **CONCURRENT QUEUES SERIALISE AT ONE PER VBLANK, AND IT IS NOT
+  `checkTimestamps()` (2C2/2C3, boots 409/410).** `metal_probe --queues N`
+  starts queue 0's first buffer at **13.3-14.5 ms** (n=12, tight) and every
+  queue after it **+6.9 to +7.2 ms**, with the absolute slots landing at the
+  same times for N = 2, 4 and 8 - a fixed lattice, not contention.
+  `RBFBVBLPeriodNs` 6952507, so the spacing IS the vblank period;
+  `vblret_src` 1 says the vblank owns retirement. **This is what "efficiency
+  good, performance not" is**: one steady stream gets 144 retires/s, which is
+  all the compositor wants (2A1: our whole cost is 44 us), and the price falls
+  entirely on work needing SEVERAL units of GPU work finished before anything
+  can be drawn - Settings' icon loads, menu blurs, animation first frames.
+  2A1-2B7 measured the frame path exhaustively and never measured a SECOND
+  concurrent stream.
+  **The obvious fix is MEASURED DEAD.** `rbgpuretiredrain=` /
+  `{"RBGPURetireDrain": N}` polls `checkTimestamps()` up to 8 times per offer;
+  six interleaved `--queues 8` runs gave 55.295-56.308 ms (+-0.9 %) with
+  `vblret_extra` **50897** proving the polls ran, and the one true drain=1 run
+  sits inside that range. **Default stays 1. Do not propose polling it harder
+  again.** The A/B degenerated - `drainset 1` returned SUCCESS three times and
+  `vblret_drain` stayed 8, so the A side is n=1 - which is fatal to a positive
+  claim and harmless to this negative one, since the runs that provably DID
+  drain are the ones indistinguishable from the one that did not. That dial
+  bug is **undiagnosed**: `drain_refused` absent, three writers and none
+  writes 8, the code symmetric in 1 and 8. 2C3 instruments it rather than
+  reasoning further (`drain_recv`, `drain_want`, `drain_sets` - rule 14).
+  **NEXT, and it needs no boot after one install:** 2ww's unanswerable
+  question is now takeable. `advance()`'s count only ever went to
+  `rbgpu-sched`, which flushes at fixed phase marks - two reads three seconds
+  apart both gave `adv=48183` - so it could never be delta-read. 2C3 publishes
+  `adv_calls`/`adv_sub`/`adv_submax`/`adv_qids`/`adv_hk` periodically. Read
+  `adv_calls` either side of ONE `metal_probe --queues 8`: **eight advances
+  for eight queues** means one channel per advance and calling `advance()`
+  directly is the lever (we already hold `orig_sched_advance_2wv`); **one or
+  two** means `advance()` is not the gate and the serialisation is on the
+  submit side, which no dial of ours reaches. `smax` 589 already argues
+  against one-item-per-call. **Not inferred:** that the gate is
+  `IOInterruptEventSource` signal coalescing - it would explain the null
+  result exactly, and nothing has observed one call to `advance()` (rule 35).
 - **The wedge**, an independent second defect: work submitted that never
-  retires, on GFX/SDMA/compute user queues. `metal_probe --queues 4` reproduces
-  it in userspace with no kext and no reboot (2wt). Not the display blocker
-  (2x0, rule 39).
+  retires, on GFX/SDMA/compute user queues. **2wt's `--queues 4` trigger no
+  longer fires** - 14-49 ms where it cost 6.1-10.2 s - but boot 409 logged a
+  real one of its own: channel 52 GFX, stamp frozen at 0x27a1b,
+  `GPURestartBegin` to `GPURestartEnd` spanning **3.5 s**. So it is rarer, not
+  gone, and it is the "random" lag the user reports. **`stamp_ticks` 125666
+  says our retire tick polled 125 thousand times while that stamp never
+  advanced**, which retires the "nothing polls it" family for the wedge as
+  2xe did for the display. Not the display blocker (2x0, rule 39).
 - **A USB4 TYPE-C PORT ON THIS CHASSIS CARRIES DP ALT MODE FROM THE iGPU
   (user, 2026-11-02) - which the HDMI-A bullet below does NOT cover.** It is a
   different connector from the HDMI-A jack, so "HDMI needs hybrid mode" is a
