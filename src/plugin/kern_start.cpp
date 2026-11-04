@@ -14419,8 +14419,11 @@ void rbgpu_rate_start_2wx(void) {
 // ---------------------------------------------------------------------------
 
 #define RB_2XG_DEFAULT_US   6944    /* the panel's 143.83 Hz, measured (2rn) */
-#define RB_2XG_MIN_US        500
-#define RB_2XG_MAX_US    1000000
+/* 2C4: aliases now, not copies. The boot-arg parse, the runtime dial and the
+ * hosttest all have to agree about the range, and three literals that can
+ * drift apart is the defect `rb_drr.h` was restructured to remove. */
+#define RB_2XG_MIN_US    RB_TICK_US_MIN
+#define RB_2XG_MAX_US    RB_TICK_US_MAX
 #define RB_2XG_MAX_REFUSE     16
 /* 2zd: the watchdog period the timer falls back to once the vblank has taken
  * over, and how long the vblank may be quiet before the timer takes the job
@@ -14510,6 +14513,20 @@ static void rbgpu_2xg_arm_next(void) {
  * one offer at the old value. */
 static volatile uint32_t g_rb_2C2_drain = 1;
 static uint64_t g_rb_2C2_extra = 0;   /* polls beyond the first, cumulative */
+
+/* 2C4: the retire-tick dial. `g_rb_2xg_us` is read by
+ * `rbgpu_2xg_arm_next()` on every arm, so this write is the whole mechanism -
+ * no reschedule, no teardown, no lock. Counted so that "the setter never ran"
+ * is distinguishable from "it ran and nothing moved", which is the exact
+ * ambiguity 2C2's drain bug spent a milestone in. */
+static uint64_t g_rb_2C4_sets = 0;
+
+void rbgpu_tick_us_set_2C4(uint32_t want) {
+    g_rb_2xg_us = rb_tick_us_clamp(want);
+    g_rb_2C4_sets++;
+}
+uint32_t rbgpu_tick_us_get_2C4(void) { return g_rb_2xg_us; }
+uint64_t rbgpu_tick_sets_get_2C4(void) { return g_rb_2C4_sets; }
 
 void rbgpu_retire_drain_set_2C2(uint32_t want) {
     g_rb_2C2_drain = rb_retire_drain_clamp(want);
@@ -14613,6 +14630,13 @@ void rbgpu_retire_publish_2zd(void) {
      * the hook and not the driver (rule 14/20). */
     rbgpu_diag_set_num("adv_hk", static_cast<uint64_t>(g_rb_2wv_hooked));
     rbgpu_diag_set_num("vblret_extra", g_rb_2C2_extra);
+    /* 2C4, and this is 2A3's defect in its original form: `tick_us` has been
+     * published exactly once, from `rbgpu_schedtick_start_2xg()`, since 2xm.
+     * That was correct while it could only come from a boot-arg; the moment a
+     * runtime dial can move it, a once-published key can only ever confirm
+     * the boot value and an A/B reading it back is reading a constant. */
+    rbgpu_diag_set_num("tick_us", g_rb_2xg_us);
+    rbgpu_diag_set_num("tick_sets", g_rb_2C4_sets);
 }
 
 static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
