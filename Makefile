@@ -529,7 +529,7 @@ fbpresent:
 # rebuild of the executable inside it. **A rebuild still rewrites the bundle,
 # so re-sign is part of the target, not a manual step** (2x5 lost framepump's
 # grant to exactly this).
-.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset dpcdread edidread
+.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset drainset dpcdread edidread
 # 2zn: the DMCUB inbox oracle - reads the locate and the bring-up scan, and
 # sends ONE ABM command by name. See tools/dmubbl.m for why it is a tool and
 # not the slider.
@@ -548,6 +548,13 @@ $(OUT)/holdset: tools/holdset.m | $(OUT)
 # 2A0: the frame-time budget - the decomposition that replaces an eighth dial.
 tripleset: $(OUT)/tripleset
 $(OUT)/tripleset: tools/tripleset.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework IOKit -framework CoreFoundation -framework Foundation
+
+# 2C2: the retire-drain dial - how many times one vblank polls the GPU
+# retirement. The instrument for it is metal_probe's queue ladder.
+drainset: $(OUT)/drainset
+$(OUT)/drainset: tools/drainset.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
 	      -framework IOKit -framework CoreFoundation -framework Foundation
 	@echo "  TOOL  $@"

@@ -106,6 +106,10 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
 
+    // 2C2: the retire-drain runtime dial. A dial and not only a boot-arg
+    // because rule 44 wants the A/B INTERLEAVED inside one boot.
+    IOReturn setProperties(OSObject *properties) override;
+
     IOReturn callPlatformFunction(const OSSymbol *functionName,
                                   bool waitForFunction,
                                   void *p1, void *p2,

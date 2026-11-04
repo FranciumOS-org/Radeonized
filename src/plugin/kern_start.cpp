@@ -14486,6 +14486,23 @@ static void rbgpu_2xg_arm_next(void) {
  * Every refusal path that existed in 2xg/2xh is preserved here unchanged,
  * including the consecutive-refusal stop - which now protects both drivers
  * rather than only the timer. */
+/* 2C2: how many times one offer polls the retirement. 1 = pre-2C2. Set from
+ * `rbgpuretiredrain=` at start and from the peer's setProperties at runtime,
+ * so the A/B can be INTERLEAVED inside one boot - rule 44, which 2B5-2B7
+ * paid for. Written by setProperties, read on the vblank thread: a single
+ * aligned u32, so a torn read is not possible and the worst a race costs is
+ * one offer at the old value. */
+static volatile uint32_t g_rb_2C2_drain = 1;
+static uint64_t g_rb_2C2_extra = 0;   /* polls beyond the first, cumulative */
+
+void rbgpu_retire_drain_set_2C2(uint32_t want) {
+    g_rb_2C2_drain = rb_retire_drain_clamp(want);
+}
+
+uint32_t rbgpu_retire_drain_get_2C2(void) {
+    return g_rb_2C2_drain;
+}
+
 static bool rbgpu_2zd_retire_once(void) {
     void *s = g_rb_2xg_sched;
     /* 2xh: tw=7 is "the target was not resolved yet" and is DIFFERENT from
@@ -14495,8 +14512,17 @@ static bool rbgpu_2zd_retire_once(void) {
     if (!g_rb_2xg_check) g_rb_2xg_refuse_why = 7;
     if (g_rb_2xg_check && rbgpu_2xg_sane(s)) {
         g_rb_2xg_refuse_run = 0;
-        g_rb_2xg_calls++;
-        g_rb_2xg_check(s);
+        /* 2C2: poll `drain` times, not once. The sanity check above is NOT
+         * re-run per iteration on purpose - it reads the scheduler object and
+         * nothing between two calls microseconds apart can make it stop being
+         * one, while re-reading it would put a second unbounded-looking read
+         * on the vblank thread for no information. The bound is the clamp. */
+        const uint32_t drain = rb_retire_drain_clamp(g_rb_2C2_drain);
+        for (uint32_t i = 0; i < drain; i++) {
+            g_rb_2xg_calls++;
+            g_rb_2xg_check(s);
+        }
+        if (drain > 1) { g_rb_2C2_extra += (drain - 1); }
         return true;
     } else {
         g_rb_2xg_refuse++;
@@ -14539,6 +14565,11 @@ void rbgpu_retire_publish_2zd(void) {
     rbgpu_diag_set_num("vblret_decl",  g_rb_2zd.vblDeclined);
     rbgpu_diag_set_num("vblret_hand",  g_rb_2zd.handoffs);
     rbgpu_diag_set_num("vblret_take",  g_rb_2zd.takebacks);
+    /* 2C2: the arm and its effect, so a boot can say which side it ran
+     * (rule 34) and a zero `extra` separates "the dial is 1" from "the dial
+     * is 8 and nothing ever offered" (rule 14). */
+    rbgpu_diag_set_num("vblret_drain", g_rb_2C2_drain);
+    rbgpu_diag_set_num("vblret_extra", g_rb_2C2_extra);
 }
 
 static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
@@ -14576,6 +14607,18 @@ void rbgpu_schedtick_start_2xg(void) {
                   "keeping %u us", tick_refused, (unsigned)RB_2XG_MIN_US,
                   (unsigned)RB_2XG_MAX_US, g_rb_2xg_us);
         rbgpu_diag_set_num("tick_us_refused", tick_refused);
+    }
+    /* 2C2: the initial drain, same idiom (rule 40 - a number comes back as a
+     * binary int). The runtime dial overrides it without a reboot. */
+    uint32_t drain_want = 1, drain_refused = 0;
+    if (rbgpu_boot_argn_u32("rbgpuretiredrain", 1, RB_RETIRE_DRAIN_MAX,
+                            &drain_want, &drain_refused)) {
+        g_rb_2C2_drain = rb_retire_drain_clamp(drain_want);
+    } else if (drain_refused) {
+        rbgpu_log("2C2: rbgpuretiredrain=%u REFUSED (outside 1-%u); "
+                  "keeping %u", drain_refused, (unsigned)RB_RETIRE_DRAIN_MAX,
+                  (unsigned)g_rb_2C2_drain);
+        rbgpu_diag_set_num("drain_refused", drain_refused);
     }
     /* Rule 37: consume the one-shot BEFORE the first tick can fire, on the
      * overwrite path, and fail closed. A panic after this point costs exactly

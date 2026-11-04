@@ -210,8 +210,49 @@ int retire_tests(void)
         }
     }
 
+    /* 2C2: the retire-drain clamp. The dial decides how many times one
+     * offer polls `checkTimestamps()`; a value that escaped the bound would
+     * put an unbounded loop on the vblank thread_call (rule 31), and 0 would
+     * stop retirement altogether, which is the one value that must map to
+     * today's behaviour rather than to nothing. */
+    {
+        if (rb_retire_drain_clamp(0u) != 1u) {
+            printf("FAIL retire: drain 0 must clamp to 1, not stop the "
+                   "retirement\n");
+            bad++;
+        }
+        if (rb_retire_drain_clamp(1u) != 1u) {
+            printf("FAIL retire: drain 1 must stay 1 - it is the A side\n");
+            bad++;
+        }
+        if (rb_retire_drain_clamp(RB_RETIRE_DRAIN_MAX) !=
+            RB_RETIRE_DRAIN_MAX) {
+            printf("FAIL retire: the max must be reachable\n");
+            bad++;
+        }
+        if (rb_retire_drain_clamp(RB_RETIRE_DRAIN_MAX + 1u) !=
+            RB_RETIRE_DRAIN_MAX) {
+            printf("FAIL retire: over the max must clamp DOWN\n");
+            bad++;
+        }
+        if (rb_retire_drain_clamp(0xFFFFFFFFu) != RB_RETIRE_DRAIN_MAX) {
+            printf("FAIL retire: a huge drain must clamp, not wrap\n");
+            bad++;
+        }
+        /* The bound has to be small enough that the worst case is bounded
+         * CPU and not a stall: at the panel's 143.83 Hz, MAX polls per
+         * vblank is MAX*144 calls a second. Assert the ORDER, so raising the
+         * constant to something that changes the risk fails here. */
+        if (RB_RETIRE_DRAIN_MAX > 16u) {
+            printf("FAIL retire: DRAIN_MAX %u would be over 2300 calls/s on "
+                   "the vblank thread - rule 31\n",
+                   (unsigned)RB_RETIRE_DRAIN_MAX);
+            bad++;
+        }
+    }
+
     printf("retire: the 2zd handover - unarmed decline, single handoff, the "
            "watchdog takeback, a non-advancing clock, role-dependent period "
-           "and 200 interleaved frames, plus 2zf's mode gate%s\n", bad ? " FAILED" : ": passed");
+           "and 200 interleaved frames, plus 2zf's mode gate and 2C2's drain clamp%s\n", bad ? " FAILED" : ": passed");
     return bad;
 }
