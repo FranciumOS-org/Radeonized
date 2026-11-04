@@ -816,13 +816,27 @@ table and refuses to install one that does not match the running kernel;
   `nvram rbgpu-diag` omits them because the note caps near 520 bytes while
   `diag_used` 693 of 768 says the table is not full - absence from one is not
   absence from the other.
-- **CONCURRENT QUEUES SERIALISE AT ONE PER VBLANK, AND IT IS NOT
-  `checkTimestamps()` (2C2/2C3, boots 409/410).** `metal_probe --queues N`
-  starts queue 0's first buffer at **13.3-14.5 ms** (n=12, tight) and every
-  queue after it **+6.9 to +7.2 ms**, with the absolute slots landing at the
-  same times for N = 2, 4 and 8 - a fixed lattice, not contention.
-  `RBFBVBLPeriodNs` 6952507, so the spacing IS the vblank period;
-  `vblret_src` 1 says the vblank owns retirement. **This is what "efficiency
+- **CONCURRENT QUEUES SERIALISE AT ONE PER RETIRE OCCASION - NOT per vblank,
+  which is 2C2's own correction (2C2/2C3/2C4, boots 409/410/413).**
+  `metal_probe --queues N` starts queue 0's first buffer at **13.3-14.5 ms**
+  (n=12, tight) and every queue after it **+6.9 to +7.2 ms**, with the
+  absolute slots landing at the same times for N = 2, 4 and 8 - a fixed
+  lattice, not contention.
+  **2C2 called the step the vblank period and could not have established
+  that**: `RBFBVBLPeriodNs` 6952507 matched it to three figures, but the
+  retire tick is **6944 us**, tuned in 2xe to the panel's measured 143.83 Hz,
+  so at native the two candidate periods are **0.12 % apart** and nothing
+  measured there can tell them apart. Rule 18 applied to the two CANDIDATES
+  rather than to one number.
+  **Boot 413 separates them 2.4x and the ladder did not move.** That boot runs
+  the 60 Hz mode (`RBFBVBLPeriodNs` **16669443**, `system_profiler` agrees),
+  so `rb_retire_vbl_suits()` handed retirement back to the timer
+  (`vblret_src` **0**) at `tick_us` 6944 - and `--queues 8` spread
+  **56.009 ms** against boot 410's 55.295-56.308 at native. The vblank would
+  have cost **~117 ms**. So the quantum is the **retire occasion**, supplied
+  by the vblank at native and by the timer below it, at deliberately the same
+  rate - and **the pacing is OURS after all**, which is the opposite of what
+  2C2 concluded. **This is what "efficiency
   good, performance not" is**: one steady stream gets 144 retires/s, which is
   all the compositor wants (2A1: our whole cost is 44 us), and the price falls
   entirely on work needing SEVERAL units of GPU work finished before anything
@@ -854,6 +868,36 @@ table and refuses to install one that does not match the running kernel;
   against one-item-per-call. **Not inferred:** that the gate is
   `IOInterruptEventSource` signal coalescing - it would explain the null
   result exactly, and nothing has observed one call to `advance()` (rule 35).
+  **AND THE TICK IS NOW A RUNTIME DIAL, which is the other half of the next
+  step (2C4).** `{"RBGPUTickUs": N}` via `build/out/tickset`;
+  `rbgpu_2xg_arm_next()` recomputes its period from the global on every arm,
+  so the write is the whole mechanism. Interleaved at 60 Hz:
+  `tickset 6944 && metal_probe --queues 8` against `tickset 3472 && ...`.
+  **Said before the reading:** the spread halving to ~28 ms means the
+  concurrency latency is buyable and 2zc names the price (2000 us cost a
+  third of the frame rate, so expect the ladder to improve while `sets/s`
+  gets worse - do NOT leave the tick fast because the ladder looked better);
+  the spread not moving means the tick only correlated and the pacing is on
+  the submit side, which is what `adv_calls` decides.
+  **The tool REFUSES when `vblret_src` is 1**, because the timer runs at the
+  50 ms watchdog period while the vblank drives, so the dial is inert there
+  and the A/B would report a null indistinguishable from "the tick does not
+  matter" - rule 39, and both branches of `rb_retire_timer_period_us()` are
+  pinned by the hosttest so that is tested, not asserted. The experiment
+  belongs in a timer-driven configuration: the 60 Hz mode, or
+  `-rbgpunoretirevbl` at native.
+  **`tick_us` was published ONCE from `start()` from 2xm until 2C4** - correct
+  for a boot-arg, **2A3's defect verbatim** for a dial, since a
+  once-published key can only confirm the boot value and an A/B reading it
+  back reads a constant. Now periodic, with `tick_sets` counting accepted
+  writes so "the call never arrived" is separable from "it arrived and the
+  write was lost" - 2C2's drain bug spent a milestone in that exact gap.
+  **Also measured negative on boot 413:** `diag_used` 695 of 768 are ENTRY
+  counts, not bytes, so 2C3's eight keys land at 703 and a full table was
+  never why `adv_calls` read absent - the 2C3 plugin simply was not installed
+  (`kextstat` 2BD0493E against a built 0F810A48, rule 15). And the drain dial
+  does not stick across a boot: `vblret_drain` 1, `vblret_extra` 0 here, so
+  `drain_recv`/`drain_want`/`drain_sets` are still unexercised.
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. **2wt's `--queues 4` trigger no
   longer fires** - 14-49 ms where it cost 6.1-10.2 s - but boot 409 logged a
@@ -1773,6 +1817,12 @@ whose write also zeroes the measurement window), and
 ~21 % of the frame rate and traded against 2xo's whole-frame flicker; it can
 only arm what the boot set up, and `RBFBAmtrNotReady` publishes the live
 state).
+**`{"RBGPUTickUs": N}` via `build/out/tickset` (2C4 - the retire-tick period,
+500..1000000 us, default 6944. The queue ladder's step when the TIMER drives
+retirement, which is what 2C2 mistook for the vblank period; `tickset` exits
+5 rather than measuring when `vblret_src` is 1, because the dial is inert
+while the vblank drives. 2zc's dose-response is the cost: both directions off
+6944 cost about a third of the frame rate.)**
 **`{"RBFBTriple": 0|1}` via `build/out/tripleset` (2B1 - DCN's SECOND pending
 flip slot, `SURFACE_TRIPLE_BUFFER_ENABLE`, which reads 0 on every boot since
 216. OFF by default and a new hardware-write surface in the display path:

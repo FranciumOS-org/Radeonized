@@ -178,4 +178,75 @@ static inline uint32_t rb_retire_drain_clamp(uint32_t want)
     return want;
 }
 
+
+/* 2C4: THE RETIRE-TICK PERIOD AS A RUNTIME DIAL, AND WHY IT IS THE LEVER.
+ *
+ * 2C2 read the queue ladder on boot 409/410 at the panel's native 143.8 Hz
+ * and concluded "one queue released per VBLANK", because `RBFBVBLPeriodNs`
+ * 6952507 matched the ~6.95 ms step to three figures. Boot 413 shows that
+ * identification could not have been made there: that boot runs the 60 Hz
+ * mode, so the vblank period is 16669443 ns, the timer is driving
+ * (`vblret_src` 0 - `rb_retire_vbl_suits()` hands sub-native modes back),
+ * `tick_us` is 6944 - and `metal_probe --queues 8` spread 56.009 ms,
+ * indistinguishable from boot 410's 55.295-56.308 ms at native.
+ *
+ * Had the vblank been the quantum, 60 Hz would have cost 2.4x as much:
+ * ~117 ms for eight queues against the ~56 measured. It is therefore NOT
+ * the vblank. What is equal across the two boots is the RETIRE-OCCASION
+ * rate: ~144/s, supplied by the vblank at native and by this timer at
+ * 60 Hz, which are deliberately the same number (RB_2XG_DEFAULT_US 6944 was
+ * tuned to the measured 143.83 Hz in 2xe). 2C2 measured a real lattice and
+ * attached it to the one of two equal periods that happens not to be ours.
+ *
+ * The consequence is that there IS a dial, where 2C2's reading said there
+ * was none: when the timer drives, the ladder's step is this value. The
+ * prediction, stated before the boot that tests it - halving `tick_us` to
+ * 3472 at 60 Hz halves the eight-queue spread to ~28 ms. If it does, the
+ * concurrency latency the user feels as "Settings icons reload every time"
+ * is buyable, and 2zc's dose-response says the price is frame rate (2000 us
+ * cost a third of it). If it does not, the tick merely correlates and the
+ * pacing is elsewhere - which is a different answer, not a null one.
+ *
+ * It is a DIAL and not a boot-arg because rule 44 is now "interleaved inside
+ * one boot or two boots per side", boot 292 having drifted 15 % inside
+ * itself - and because `rbgpu_2xg_arm_next()` recomputes the period from
+ * this value on every single arm, so a write here needs no reschedule, no
+ * teardown and no lock: the next arm picks it up. The worst a race costs is
+ * one tick at the old period.
+ *
+ * The bounds are the boot-arg's own (2xm's RB_2XG_MIN_US/MAX_US), defined
+ * here so one definition serves the parse, the dial and the hosttest rather
+ * than three that can drift - which is what `rb_drr.h` was built to avoid.
+ *
+ * NOTE ON WHERE IT BITES: while the vblank drives retirement,
+ * `rb_retire_timer_period_us()` above runs this timer at the WATCHDOG period
+ * instead, so the dial moves nothing at native with `-rbgpuretirevbl`. The
+ * experiment belongs in a timer-driven configuration - the 60 Hz mode boot
+ * 413 is already in - and `tickset` must publish `vblret_src` beside the
+ * value so a null result cannot be the dial being inert (rule 39).
+ */
+#define RB_TICK_US_MIN      500u
+#define RB_TICK_US_MAX  1000000u
+
+static inline uint32_t rb_tick_us_clamp(uint32_t want)
+{
+    if (want < RB_TICK_US_MIN) { return RB_TICK_US_MIN; }
+    if (want > RB_TICK_US_MAX) { return RB_TICK_US_MAX; }
+    return want;
+}
+
+/* Rule 14 as a code rather than a bool: the setter must be able to say WHICH
+ * way a value was out of range, because "too fast" and "too slow" are
+ * different mistakes and a single refusal merges them. */
+#define RB_TICK_OK        0u
+#define RB_TICK_TOO_FAST  1u
+#define RB_TICK_TOO_SLOW  2u
+
+static inline uint32_t rb_tick_us_verdict(uint32_t want)
+{
+    if (want < RB_TICK_US_MIN) { return RB_TICK_TOO_FAST; }
+    if (want > RB_TICK_US_MAX) { return RB_TICK_TOO_SLOW; }
+    return RB_TICK_OK;
+}
+
 #endif /* RB_RETIRE_H */

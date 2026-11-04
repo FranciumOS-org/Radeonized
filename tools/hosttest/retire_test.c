@@ -251,8 +251,91 @@ int retire_tests(void)
         }
     }
 
+    /* 2C4: THE TICK DIAL. */
+    {
+        /* The default must survive the clamp untouched - it is the A side of
+         * every A/B and 2zc measured it as an interior optimum. */
+        if (rb_tick_us_clamp(6944u) != 6944u) {
+            printf("FAIL tick: 6944 is the measured optimum and must pass "
+                   "through unchanged\n");
+            bad++;
+        }
+        /* The value the experiment actually sets. If this were clamped the
+         * B side would silently become the A side - 2C2's degenerate A/B. */
+        if (rb_tick_us_clamp(3472u) != 3472u) {
+            printf("FAIL tick: 3472 is half the native period and is the B "
+                   "side of the 2C4 experiment - it must be reachable\n");
+            bad++;
+        }
+        if (rb_tick_us_clamp(RB_TICK_US_MIN) != RB_TICK_US_MIN ||
+            rb_tick_us_clamp(RB_TICK_US_MAX) != RB_TICK_US_MAX) {
+            printf("FAIL tick: both bounds must be reachable\n");
+            bad++;
+        }
+        if (rb_tick_us_clamp(0u) != RB_TICK_US_MIN) {
+            printf("FAIL tick: 0 must clamp UP - a zero period is an "
+                   "unbounded timer loop, not a fast one\n");
+            bad++;
+        }
+        if (rb_tick_us_clamp(0xFFFFFFFFu) != RB_TICK_US_MAX) {
+            printf("FAIL tick: a huge period must clamp, not wrap\n");
+            bad++;
+        }
+        /* The verdict is a CODE and the two directions must not merge -
+         * rule 14. A single bool here is what the drain's `drain_refused`
+         * was, and it could not tell a typo'd 50 from a typo'd 50000000. */
+        if (rb_tick_us_verdict(6944u) != RB_TICK_OK) {
+            printf("FAIL tick: the default must verdict OK\n");
+            bad++;
+        }
+        if (rb_tick_us_verdict(RB_TICK_US_MIN - 1u) != RB_TICK_TOO_FAST) {
+            printf("FAIL tick: under the floor must say TOO_FAST\n");
+            bad++;
+        }
+        if (rb_tick_us_verdict(RB_TICK_US_MAX + 1u) != RB_TICK_TOO_SLOW) {
+            printf("FAIL tick: over the ceiling must say TOO_SLOW\n");
+            bad++;
+        }
+        if (RB_TICK_TOO_FAST == RB_TICK_TOO_SLOW) {
+            printf("FAIL tick: the two refusal codes must differ or the "
+                   "code is a bool with extra steps\n");
+            bad++;
+        }
+        /* The floor has to bound the worst case. At RB_TICK_US_MIN the timer
+         * fires 1000000/MIN times a second on a thread_call; assert the
+         * ORDER so lowering the constant to something that changes the risk
+         * fails here rather than on the machine (rule 31). */
+        if (RB_TICK_US_MIN < 100u) {
+            printf("FAIL tick: a %u us floor is over 10000 ticks/s - "
+                   "rule 31\n", (unsigned)RB_TICK_US_MIN);
+            bad++;
+        }
+        /* 2C4's premise, asserted so it cannot drift: the dial is inert
+         * while the vblank drives, because the timer runs at the watchdog
+         * period then. A null result in that configuration is the dial not
+         * being connected, not the tick not mattering (rule 39) - which is
+         * why `tickset` has to print `vblret_src`. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.src = RB_RETIRE_SRC_VBL;
+            if (rb_retire_timer_period_us(&r, 3472u, 50000u) != 50000u) {
+                printf("FAIL tick: with the vblank driving, the timer must "
+                       "run at the WATCHDOG period - the dial is inert "
+                       "there and the tool must say so\n");
+                bad++;
+            }
+            r.src = RB_RETIRE_SRC_TIMER;
+            if (rb_retire_timer_period_us(&r, 3472u, 50000u) != 3472u) {
+                printf("FAIL tick: with the timer driving, the dial IS the "
+                       "period - this is the whole experiment\n");
+                bad++;
+            }
+        }
+    }
+
     printf("retire: the 2zd handover - unarmed decline, single handoff, the "
            "watchdog takeback, a non-advancing clock, role-dependent period "
-           "and 200 interleaved frames, plus 2zf's mode gate and 2C2's drain clamp%s\n", bad ? " FAILED" : ": passed");
+           "and 200 interleaved frames, plus 2zf's mode gate, 2C2's drain clamp and 2C4's tick dial%s\n", bad ? " FAILED" : ": passed");
     return bad;
 }

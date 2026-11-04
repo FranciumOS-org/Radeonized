@@ -99,6 +99,10 @@ extern void rbgpu_retire_publish_2zd(void);
 static uint64_t g_rbgpu_drain_sets = 0;   /* 2C3 */
 extern void rbgpu_retire_drain_set_2C2(uint32_t want);
 extern uint32_t rbgpu_retire_drain_get_2C2(void);
+/* 2C4: the retire-tick dial. */
+extern void rbgpu_tick_us_set_2C4(uint32_t want);
+extern uint32_t rbgpu_tick_us_get_2C4(void);
+extern uint64_t rbgpu_tick_sets_get_2C4(void);
 extern volatile int g_rb_2gn_in1b;
 extern void rbgpu_2gx_req(uint32_t req, int refused);
 extern void rbgpu_2gx_flush(void);
@@ -2756,8 +2760,37 @@ IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
     OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     if (!dict) { return kIOReturnBadArgument; }
 
+    /* 2C4: more than one dial now, so an unrecognised dictionary must still
+     * be distinguishable from a recognised one that refused. Each key is
+     * handled independently and `handled` is what separates them; returning
+     * on the first missing key (which is what this did while there was only
+     * one) would make a second dial silently unreachable. */
+    unsigned handled = 0;
+    IOReturn rc = kIOReturnSuccess;
+
+    OSNumber *t = OSDynamicCast(OSNumber, dict->getObject("RBGPUTickUs"));
+    if (t) {
+        handled++;
+        const uint32_t twant = t->unsigned32BitValue();
+        rbgpu_diag_set_num("tick_recv", t->unsigned64BitValue());
+        rbgpu_diag_set_num("tick_want", twant);
+        const uint32_t v = rb_tick_us_verdict(twant);
+        if (v != RB_TICK_OK) {
+            /* Rule 14 as a code: 1 is too fast, 2 is too slow. A single
+             * "refused" would merge a typo'd 50 with a typo'd 50000000. */
+            rbgpu_diag_set_num("tick_refused", twant);
+            rbgpu_diag_set_num("tick_refuse_why", v);
+            rc = kIOReturnBadArgument;
+        } else {
+            rbgpu_tick_us_set_2C4(twant);
+            rbgpu_diag_set_num("tick_us",   rbgpu_tick_us_get_2C4());
+            rbgpu_diag_set_num("tick_sets", rbgpu_tick_sets_get_2C4());
+        }
+    }
+
     OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBGPURetireDrain"));
-    if (!n) { return kIOReturnUnsupported; }
+    if (!n) { return handled ? rc : kIOReturnUnsupported; }
+    handled++;
 
     /* 2C3: SAY WHAT ARRIVED, NOT JUST WHAT WAS DECIDED.
      *
@@ -2789,7 +2822,7 @@ IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
      * not a frame-path counter and the caller should not have to wait a
      * publish interval to see the arm it just set (rule 31's other side). */
     rbgpu_diag_set_num("vblret_drain", rbgpu_retire_drain_get_2C2());
-    return kIOReturnSuccess;
+    return rc;
 }
 
 IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,

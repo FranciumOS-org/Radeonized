@@ -55707,3 +55707,186 @@ thousand times while that stamp never advanced, which retires the whole
 "nothing polls it" family for the wedge the same way 2xe retired it for the
 display. Instrument defect found in passing: `metal_probe --queues 1` runs 6
 queues.
+
+---
+
+## 2C4 — the ladder is not the vblank: 2C2's identification was two equal periods, and the other one is ours
+
+**Boot 413, read live. No new boot was spent on this.**
+
+### The empty output that started it
+
+The 2C3 hand-over asked for `adv_calls` either side of one
+`metal_probe --queues 8`. The user ran it and both greps came back empty:
+
+```
+    GPUstart spread across 8 queues = 56.009 ms
+    VERDICT: spread -> each queue has its OWN tick
+ ->
+```
+
+`adv_calls` is absent because **the 2C3 plugin was never installed**:
+`kextstat` reads `2BD0493E` where the build is `0F810A48`. Rule 15, and the
+cheap failure mode — an absent key rather than a wrong number. The install
+instruction is re-issued below.
+
+Two candidate explanations were checked and both are **negative**, which is
+worth recording because each would have cost a milestone:
+
+- `diag_used` 695 of `diag_max` 768. Those are **entry counts**, not bytes
+  (`rbgpu_diag_reserve_locked()` seeds slots 0 and 1 with the counts
+  themselves). 2C3's eight keys land at 703 of 768, so a full table was never
+  the explanation and `g_diagFullPending` would have said so anyway. The
+  ~520-byte cap that `rbgpu-diag` lives under is a different fact about a
+  different sink; conflating them is rule 26's shape.
+- `vblret_drain` reads **1** and `vblret_extra` **0** on this boot, so boot
+  410's stuck-at-8 did not persist. It is a RAM global, not NVRAM, and the
+  2C3 instruments for it (`drain_recv`, `drain_want`, `drain_sets`) are still
+  unexercised.
+
+### The reading nobody asked for
+
+Boot 413 is **not at native**:
+
+| | |
+|---|---|
+| `RBFBVBLPeriodNs` | **16669443** (16.669 ms) |
+| `RBFBVBLModeMhz` | 59990 |
+| `RBFBModeCur` / `ModeCount` | 105 / 8 |
+| `system_profiler` | `1920 x 1080 @ 60.00Hz` |
+| `vblret_src` | **0 — the TIMER is driving** |
+| `tick_us` | **6944** |
+| `vblret_timer` / `vblret_vbl` | 135813 / 727 |
+
+`-rbgpufbmodes` is in boot-args and 2z1 recorded that macOS restores a
+remembered mode through `setDisplayMode` before anything asks, so the boot
+came up at 60 Hz on its own. `rb_retire_vbl_suits()` then handed retirement
+back to the timer, because at 60 Hz the vblank cannot supply the ~144
+retires/s the tick does (2zf measured exactly that failure: 30.04 sets/s,
+half the vblank rate).
+
+**And the eight-queue spread is 56.009 ms — the same as boot 410's
+55.295–56.308 ms at native.**
+
+### Why that refutes 2C2's headline
+
+2C2 concluded "concurrent queues serialise at **one per vblank**", on the
+grounds that `RBFBVBLPeriodNs` 6952507 matched the ~6.95 ms ladder step to
+three figures. The problem is that the retire tick is **6944 µs**, tuned in
+2xe to the panel's measured 143.83 Hz — so at native the vblank period and
+the tick period are **0.12 % apart**, and no measurement taken there can tell
+which of them the ladder follows. Rule 18, applied to the two candidates
+rather than to one number: two periods agreeing to three figures are not
+distinguishable by a quantity that agrees with both.
+
+Boot 413 separates them by a factor of **2.4**. Had the vblank been the
+quantum, eight queues at 60 Hz would have spanned **~117 ms**. They spanned
+56.0.
+
+So the quantum is the **retire occasion** — supplied by the vblank at native
+and by this timer at 60 Hz, at deliberately the same rate. 2C2 measured a
+real lattice and attached it to whichever of two equal periods was not ours.
+
+**The consequence is the opposite of 2C2's:** where that reading said the
+pacing belonged to the display and no dial of ours reached it, the pacing is
+`tick_us` whenever the timer drives — and that is a number this project owns.
+
+### 2C4 makes it a dial
+
+`rbgpu_2xg_arm_next()` recomputes its period from `g_rb_2xg_us` on **every
+single arm**, so a runtime write needs no reschedule, no teardown and no
+lock; the next arm picks it up and the worst a race costs is one tick at the
+old period. A dial and not a boot-arg because rule 44 now wants the A/B
+**interleaved** inside one boot, boot 292 having drifted ~15 % inside itself.
+
+- `src/common/rb_retire.h`: `RB_TICK_US_MIN`/`MAX`, `rb_tick_us_clamp()` and
+  `rb_tick_us_verdict()`. The bounds live here and `kern_start.cpp`'s
+  `RB_2XG_MIN_US`/`MAX_US` are now **aliases**, so the boot-arg parse, the
+  dial and the hosttest cannot drift apart — the defect `rb_drr.h` was
+  restructured to remove.
+- The verdict is a **code**, not a bool: `RB_TICK_TOO_FAST` vs
+  `RB_TICK_TOO_SLOW`, published as `tick_refuse_why`. Rule 14 — a single
+  refusal flag cannot tell a typo'd `50` from a typo'd `50000000`.
+- `{"RBGPUTickUs": N}` in `RembrandtGPUPeer::setProperties`. That function
+  returned `kIOReturnUnsupported` on the first missing key while there was
+  only one dial, which would have made a second dial silently unreachable;
+  each key is now independent and `handled` separates "unrecognised
+  dictionary" from "recognised and refused".
+- **`tick_us` is now published PERIODICALLY.** It had been published exactly
+  once, from `rbgpu_schedtick_start_2xg()`, since 2xm — correct while only a
+  boot-arg could set it, and **2A3's defect verbatim** the moment a runtime
+  dial can move it: a once-published key can only ever confirm the boot value,
+  so an A/B reading it back is reading a constant. `tick_sets` counts accepted
+  writes, which is what separates "the call never arrived" from "it arrived
+  and the write was lost" — the exact ambiguity 2C2's drain bug spent a
+  milestone inside.
+
+### The tool refuses rather than warns
+
+While the vblank drives, `rb_retire_timer_period_us()` runs this timer at the
+**50 ms watchdog** period, so the dial is **inert** and an A/B would compare
+two identical configurations and report a null indistinguishable from "the
+tick does not matter". That is rule 39, and it is the shape of 2A9's
+instrument that was blind in the regime under investigation.
+
+So `tools/tickset.m` reads `vblret_src` **before** anything else and **exits 5
+with the reason** when the vblank is driving, rather than printing a caution
+under a number. It also refuses on `tick_armed` 0, and says "the running
+plugin predates 2C4, check the UUID" when `tick_us` is absent instead of
+reporting `-1`. Verification is from the registry after the set, never from
+`kern_return_t` (2A3), exit 3 on a mismatch with the `tick_sets` delta printed
+beside it.
+
+Both branches of `rb_retire_timer_period_us()` are **pinned by the hosttest**,
+so the claim that the dial is inert under the vblank is tested rather than
+asserted.
+
+### Said before the reading
+
+Interleaved, at 60 Hz, `vblret_src` 0:
+
+```
+tickset 6944 && metal_probe --queues 8      # A: today
+tickset 3472 && metal_probe --queues 8      # B: half the period
+```
+
+- The spread **halves to ~28 ms** → the quantum is the retire occasion, the
+  concurrency latency the user feels as "Settings icons load every time" is
+  buyable, and 2zc's dose-response names the price (2000 µs cost a third of
+  the frame rate).
+- The spread **does not move** → the tick only correlated, the pacing is
+  elsewhere, and that points back at the submit side which 2C3's `adv_calls`
+  reading is built to decide. A different answer, not a null one.
+
+**The price is expected to be real and in the other direction.** 2zc measured
+2000/6944/13888 µs at 51.33/74.6/49.2 sets/s, so 6944 is an interior optimum
+**for frame rate**. This experiment is about a different quantity, and
+`tickset`'s own header says not to leave the tick fast because the ladder
+looked better.
+
+### Not established, and deliberately not inferred
+
+- **That the retire occasion is the mechanism rather than another correlate.**
+  Two configurations with equal occasion rates gave equal ladders; that
+  excludes the vblank and is consistent with the tick, and only the A/B
+  above promotes it. Three periods have now been candidates for this step and
+  two of them were the same number.
+- **How this sits with 2C2's negative.** The drain polled
+  `checkTimestamps()` eight times back-to-back inside one occasion and moved
+  nothing, while the ladder tracks the number of occasions. Those two facts
+  together are informative and are recorded as a **pair of measurements, not
+  a model** — nothing here observes what happens between two occasions, which
+  is rule 35, and the event-source-coalescing story that would explain both
+  remains the thing 2C3 refused to infer.
+- `metal_probe --queues 1` still runs 6 queues (noted 2C2, unfixed).
+
+### Hand-over
+
+Plugin **379F6FE4** — 0 symbols from `SystemKernelExtensions.kc`, 0
+`IOGraphicsFamily`, hosttest clean including a break-it check on the clamp
+that fails in both directions when the bounds are deleted (grepped for
+`error` as well as `FAIL`, which is 2BC's second instance). Framebuffer UUID
+**unchanged at 5AB98303**, so this is a plugin-only install.
+
+This install also carries 2C3, so the `adv_calls` reading is available on the
+same boot and costs nothing extra.
