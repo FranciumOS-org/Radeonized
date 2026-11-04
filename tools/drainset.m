@@ -57,13 +57,15 @@ int main(int argc, char **argv)
      * code (rule 13). */
     CFTypeRef d = IORegistryEntryCreateCFProperty(peer, CFSTR("RBGPUDiag"),
                                                   kCFAllocatorDefault, 0);
-    long live = -1, extra = -1;
+    long live = -1, extra = -1, sets = -1;   /* 2C4: drain_sets */
     if (d && CFGetTypeID(d) == CFDictionaryGetTypeID()) {
         NSDictionary *nd = (__bridge NSDictionary *)d;
         NSNumber *v = nd[@"vblret_drain"];
         NSNumber *e = nd[@"vblret_extra"];
+        NSNumber *k = nd[@"drain_sets"];
         if (v) { live  = [v longValue]; }
         if (e) { extra = [e longValue]; }
+        if (k) { sets  = [k longValue]; }
     }
     if (d) { CFRelease(d); }
 
@@ -102,25 +104,52 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Verify from the registry, not from kr - 2A3 cost an A/B phase to that
-     * lesson. The peer publishes this key immediately on the set, so no
-     * publish-interval wait is needed; one short sleep covers the registry
-     * round trip. */
-    usleep(200000);
-    d = IORegistryEntryCreateCFProperty(peer, CFSTR("RBGPUDiag"),
-                                        kCFAllocatorDefault, 0);
-    long now = -1;
-    if (d && CFGetTypeID(d) == CFDictionaryGetTypeID()) {
-        NSNumber *v = ((__bridge NSDictionary *)d)[@"vblret_drain"];
-        if (v) { now = [v longValue]; }
+    /* 2C4 FIXES THIS, AND IT IS WHY 2C2's A/B DEGENERATED - AT LEAST IN PART.
+     *
+     * The comment here used to say "the peer publishes this key immediately
+     * on the set, so no publish-interval wait is needed". That is false.
+     * `RBGPUDiag` is a memcpy'd SNAPSHOT published by `performRefreshDiag()`,
+     * and `scheduleRefreshDiag()` permits at most one refresh per 250 ms and
+     * DROPS a request inside that window instead of deferring it (the
+     * throttle is 2ez's fix for a crawl indistinguishable from a wedge, so it
+     * stays). A 200 ms sleep reads INSIDE that window and returns the
+     * previous value.
+     *
+     * Boot 414 demonstrated it on the tick dial: four of seven sets reported
+     * MISMATCH while `tick_sets` proved all seven writes had landed. So poll
+     * the monotonic counter until it passes its pre-set value - that proves
+     * the snapshot is FRESH as well as proving the call arrived, which a
+     * stale read cannot distinguish.
+     *
+     * NOTE, and deliberately not overstated: this does NOT establish that it
+     * is the whole of 2C2's drain bug. `vblret_drain` has a SECOND writer -
+     * `rbgpu_retire_publish_2zd()` republishes it from the live global
+     * several times a second - so a stale read of that key should not have
+     * persisted the way boot 410's did. The drain bug stays open and
+     * `drain_recv`/`drain_want`/`drain_sets` are still what settles it. */
+    long now = -1, nset = sets;
+    for (int i = 0; i < 30 && (sets < 0 || nset <= sets); i++) {  /* ~3 s */
+        usleep(100000);
+        d = IORegistryEntryCreateCFProperty(peer, CFSTR("RBGPUDiag"),
+                                            kCFAllocatorDefault, 0);
+        if (d && CFGetTypeID(d) == CFDictionaryGetTypeID()) {
+            NSNumber *k = ((__bridge NSDictionary *)d)[@"drain_sets"];
+            NSNumber *v = ((__bridge NSDictionary *)d)[@"vblret_drain"];
+            if (k) { nset = [k longValue]; }
+            if (v) { now  = [v longValue]; }
+        }
+        if (d) { CFRelease(d); }
+        if (sets < 0 && now == want) { break; }  /* pre-2C3 plugin: no counter */
     }
-    if (d) { CFRelease(d); }
 
-    printf("vblret_drain now reads %ld\n", now);
+    printf("vblret_drain now reads %ld   (drain_sets %ld -> %ld)\n",
+           now, sets, nset);
     if (now != want) {
         fprintf(stderr,
-                "MISMATCH: the setter succeeded and the table reports %ld.\n"
-                "Do not run an A/B against this.\n", now);
+                "MISMATCH: the setter succeeded and a FRESH snapshot still\n"
+                "reports %ld. `drain_sets` %ld -> %ld says whether the call\n"
+                "arrived. This is no longer the stale-snapshot race (2C4) -\n"
+                "do not run an A/B against it.\n", now, sets, nset);
         IOObjectRelease(peer);
         return 3;
     }
