@@ -896,19 +896,43 @@ table and refuses to install one that does not match the running kernel;
   identical**, against 2A4's 96.1-98.3 % for an unconstrained feed - B is
   pinned at the ceiling, and a saturating quantity resists drift far better
   than a mean.
-  **CANDIDATE MECHANISM, NOT ESTABLISHED (rule 17 - two numbers and a
-  story):** 6944 against a 16669 us vblank is **vbl/2.401**, non-integer, so a
-  retire can land anywhere in a 6.944 ms window inside a 16.669 ms budget -
-  worst case 42 % of the period, halved to 21 % at 3472. That would explain
-  the ladder and `fed` together, and explain 2zc's opposite result at native
-  where 6944 IS the period and halving it ADDED a beat. **Nothing here
-  measures phase**, and the prediction is sharp: **vbl/2 = 8334.6 us should
-  feed BETTER than 6944 while supplying FEWER occasions (120 vs 144)** - a
-  dissociation no "more polling is better" account can produce - with
-  vbl/3 = 5556.4 and vbl/4 = 4167.3 testing it twice more. If the ordering is
-  strictly by occasion count instead, granularity alone matters. The best
-  setting may be a **fine integer divisor**, if phase helps `fed` and fineness
-  helps the ladder.
+  **2C7: THE PHASE CANDIDATE IS REFUTED BY ITS OWN PREDICTION, AND THE LATTICE
+  IS A STRAIGHT LINE.** Five ticks, one boot, 60 Hz: 8334 (**vbl/2 integer**,
+  120 occ/s) fed **95.0 %** against 6944's (vbl/2.401, 144 occ/s) **95.5 %** -
+  the prediction was the opposite, and 8334 is the WORST row in the table.
+  `fed` is monotonic in **occasion count** (120->95.0, 144->95.5, 180->97.6,
+  240->97.6, 288->98.2) with integer ratios showing no advantage at either end.
+  **Phase does nothing; granularity is everything**, and 2C6's whole
+  non-integer-placement story is withdrawn - it cost one sweep instead of a
+  milestone only because the prediction was written down falsifiably first.
+  **WHAT IT PRODUCED INSTEAD IS STRONGER: `spread = 8.036 x tick - 0.20 ms`,
+  residuals within +-1.0 % over a 2.4x range of tick**, intercept zero against
+  27-67 ms spreads, `spread/tick` = 7.98/8.09/7.93/7.99/8.00. One parameter,
+  five points, no curvature. **The lattice IS the tick**, and 2C2's vblank
+  attribution is refuted three independent ways now.
+  **The coefficient is 8 and should be 7 - NOT explained.** `queues_on()`
+  creates exactly `nq` queues, so eight span seven intervals. Boot 409's
+  `--queues 4` shows the gaps are NOT uniform (14.223/34.935/41.642/49.377 -
+  a FIRST gap of ~3 ticks then ~1 each, 5.06 ticks over three intervals), so
+  there is a fixed multi-tick startup before the per-queue ladder. 5.06 at
+  nq=4 against 8.00 at nq=8 is ~0.74 ticks/queue, which is not 1.0 and not an
+  account - and that nq=4 row is a DIFFERENT boot, at native, vblank-driven
+  (rule 39/18, do not build the table). **Cheap and decisive: capture the
+  per-queue `commit->GPUstart` column** - every run so far grepped `spread`
+  and discarded it - **at two ticks, and see whether the FIRST gap scales
+  too.** If it does, the user's first-paint latency scales with the tick; if
+  not, it is a fixed floor on what any tick can buy.
+  **THE TWO QUANTITIES SEPARATE, on the other axis: `sets/s` SATURATES at
+  ~180 occasions/s** (57.59/57.37 at 120/144, then 59.73/59.76/59.89 at
+  180/240/288 against `vbl/s` 60-61) **while the ladder does NOT** (66.5 ->
+  27.8 ms, linear, no knee). **So past vbl/3 every further halving is FREE
+  latency** - the tick is one-sided at 60 Hz, not 2zc's two-sided optimum, and
+  **the binding constraint is now CPU and power, which are UNMEASURED.** 288
+  occ/s is 288 `checkTimestamps()` calls a second and `RB_TICK_US_MIN` 500
+  would allow 2000/s; the user's standing concern is efficiency, so that is
+  the number that decides how far down to go.
+  **At 60 Hz the evidence supports 4167 (vbl/4) or 3472 as a RUNTIME
+  setting** - saturated frame rate, 33 or 28 ms ladder against 56 ms today.
   **THE DEFAULT DID NOT MOVE and should not yet:** the rate magnitude is not a
   finding, the default is **shared with native** where 2zc measured 6944 as a
   two-sided optimum, and the real design question - whether the default should

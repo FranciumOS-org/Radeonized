@@ -56100,3 +56100,100 @@ up 2zg's variance collapse (±3.5 % -> ±20 %), **or** a retire occasion armed
 *from the vblank handler* at a fraction of its period - phase-locked by
 construction, hence not 2zc's two independent beating timers. That is the
 design 2C5 opened and 2C6's candidate mechanism now argues for.
+
+---
+
+## 2C7 — the phase candidate is REFUTED by its own prediction, and the lattice is a straight line: spread = 8.0 x tick (boot 414)
+
+Five ticks, one boot, 60 Hz, `vblret_src` 0, each row ladder + frame rate:
+
+| tick µs | ratio to vbl | occ/s | spread ms | `sets/s` | `fed` |
+|---|---|---|---|---|---|
+| 8334 | **vbl/2, INTEGER** | 120 | 66.540 | 57.59 | **95.0 %** |
+| 6944 | vbl/2.401 | 144 | 56.175 | 57.37 | **95.5 %** |
+| 5556 | **vbl/3, INTEGER** | 180 | 44.040 | 59.73 | 97.6 % |
+| 4167 | **vbl/4, INTEGER** | 240 | 33.273 | 59.76 | 97.6 % |
+| 3472 | vbl/4.801 | 288 | 27.780 | 59.89 | 98.2 % |
+
+### 2C6's mechanism is dead, and it is the one that predicted this run
+
+2C6 said: *if phase is what matters, 8334 feeds BETTER than 6944 while
+supplying FEWER occasions (120 against 144) - a dissociation no "more polling
+is better" account can produce.*
+
+**8334 fed 95.0 % against 6944's 95.5 %.** It is the worst row in the table,
+and it is the one with the exact integer ratio. `fed` is monotonic
+non-decreasing in **occasion count** across all five rows - 120 -> 95.0,
+144 -> 95.5, 180 -> 97.6, 240 -> 97.6, 288 -> 98.2 - and the integer ratios
+show no advantage at either end (6944 non-integer beats 8334 integer;
+3472 non-integer beats 4167 integer).
+
+**Phase does nothing. Granularity is everything.** The whole non-integer-ratio
+story - 42 % worst-case placement inside the budget, which also tidily
+explained 2zc's opposite sign at native - is withdrawn. It was two numbers and
+a story, labelled as such, and it cost one sweep instead of a milestone
+because the prediction was written down in a falsifiable form first.
+
+### What the sweep produced instead is stronger than what it killed
+
+A least-squares fit over the five rows:
+
+**`spread = 8.036 x tick - 0.20 ms`, residuals -0.35 / +1.02 / -0.93 / -0.04
+/ +0.29 %** across a **2.4x** range of tick, with an intercept of -0.2 ms
+against spreads of 27-67 ms, i.e. zero. `spread / tick` reads 7.98, 8.09,
+7.93, 7.99, 8.00 - **mean 7.997**.
+
+One free parameter, five points, no curvature, no offset. This is no longer
+"the ladder correlates with the tick": **the lattice IS the tick**, and 2C2's
+attribution of it to the vblank is now refuted three independent ways (the
+60 Hz spread, the 2x A/B, and this line).
+
+### The coefficient is 8 and it should be 7 - NOT explained, and not guessed
+
+`queues_on()` in `tools/metal_probe.m` creates exactly `nq` queues, warms each
+one, then commits one buffer per queue and reports `max - min` of
+`GPUStartTime`. Eight queues span **seven** intervals, so a pure
+one-release-per-occasion lattice gives **7** ticks, not 8.0.
+
+Boot 409's `--queues 4` numbers say the gaps are **not uniform**:
+14.223 / 34.935 / 41.642 / 49.377 ms, i.e. a FIRST gap of 20.7 ms (~3 ticks)
+then 6.707 and 7.735 (~1 tick each) - 5.06 ticks over three intervals. So
+there is a fixed multi-tick startup before the per-queue ladder begins.
+
+**That is as far as it goes here.** 5.06 at nq=4 and 8.00 at nq=8 imply ~0.74
+ticks per queue, which is not 1.0 and not a clean account - and the nq=4 row
+is from a **different boot, at native, vblank-driven** (rule 39/18: do not
+build this table). The structure needs the per-queue `commit->GPUstart`
+column, which every run so far discarded by grepping `spread`. Cheap and
+decisive: capture the full table at two ticks and see whether the FIRST gap
+scales with the tick as well as the per-queue ones. If it does, the startup
+cost is the same mechanism and the user's first-paint latency scales with it;
+if it does not, it is a fixed cost and sets a floor on what any tick can buy.
+
+### The two quantities DO separate - just not on the axis 2C6 proposed
+
+- **`sets/s` saturates at ~180 occasions/s.** 57.59 / 57.37 at 120 / 144, then
+  59.73 / 59.76 / 59.89 at 180 / 240 / 288 against a `vbl/s` of 60-61. From
+  vbl/3 upward the frame rate is pinned at the display rate and further
+  halving buys nothing.
+- **The ladder does NOT saturate.** It falls linearly across the entire range
+  with no knee, 66.5 -> 27.8 ms.
+
+**So past ~180 occasions/s, every further halving of the tick is free
+latency.** That inverts the question 2zc left: the tick is not a two-sided
+optimum at 60 Hz, it is one-sided, and **the binding constraint is no longer
+the frame rate - it is CPU and power, which are UNMEASURED.** 288 occasions/s
+is 288 `checkTimestamps()` calls a second on a `thread_call`; the floor
+`RB_TICK_US_MIN` 500 would allow 2000/s. The user's standing concern is
+efficiency, so this is the number that decides how far down to go, and no
+reading has been taken.
+
+### Nothing changed and the default still has not moved
+
+At 60 Hz the evidence now supports **4167 (vbl/4)** or **3472** as a runtime
+setting: saturated frame rate with a 33 or 28 ms ladder against 56 ms today.
+But `RB_2XG_DEFAULT_US` is **shared with native**, where 2zc measured 6944 as
+a genuine two-sided optimum and where this dial is inert while the vblank
+drives - so a changed literal would be wrong in the other mode. **The right
+change is to derive the default from the live vblank period**, which is the
+milestone this opens, and it should not be smuggled in as a constant edit.
