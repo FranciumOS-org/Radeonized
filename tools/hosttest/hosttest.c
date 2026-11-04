@@ -34,6 +34,7 @@ int aux_tests(void);
 int dpcd_tests(void);
 int dpalt_tests(void);
 int retire_tests(void);
+int gpuname_tests(void);   /* 2C9 */
 int backlight_tests(void);
 int defaults_tests(void);
 int dmub_tests(void);          /* 2zn */
@@ -865,6 +866,7 @@ int main(int argc, char **argv)
     failures += dpcd_tests();
     failures += dpalt_tests();
     failures += retire_tests();
+    failures += gpuname_tests();
     failures += backlight_tests();
     failures += defaults_tests();
     failures += dmub_tests();

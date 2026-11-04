@@ -1030,6 +1030,67 @@ table and refuses to install one that does not match the running kernel;
   contribute is a narrowing - **the `setProperties` path works, 7 writes for 7
   calls** - so the drain bug is drain-specific, still open, and still the job
   of `drain_recv`/`drain_want`/`drain_sets`.
+- **THE GPU'S NAME AND MEMORY SIZE (2C9). THERE IS NO OPENCORE SPOOF - the
+  strings are OURS, and the 4 GB is REAL.** The EFI backup's
+  `DeviceProperties/Add` carries only `acpi-wake-type` and `built-in`, with no
+  `model`, no `VRAM,*` and no Radeon `Kernel/Patch`. "AMD Radeon 680M / 4 GB"
+  comes from three hardcodes: `RBAMDFramebuffer.cpp:756` (`VRAM,totalMB`
+  4096ULL), `:757` (`model`), and `kern_start.cpp:8500` (`kModel[]`, **dead** -
+  `rbgpu_vram_publish()` refuses anything that is not `IONDRVFramebuffer` and
+  2sl/2sm/2st displaced that class with ours). The live `model` sits on the
+  **RBAMDFramebuffer** node. So a disarmed boot shows NO model at all.
+  **The 4096 MB is not fabricated**: Metal's `recommendedMaxWorkingSetSize`
+  reads 4096 MB, corroborating 2pa's `RCC_CONFIG_MEMSIZE` note. It is the
+  right number *written down instead of read*, which is only wrong on a
+  different board - and `rb_probe.c` already reads
+  `RB_mmRCC_CONFIG_MEMSIZE` (0xde3) into `memsize_mb`.
+  **MACOS CANNOT NAME THIS CHIP ITSELF.** The marketing name is a device-id ->
+  string table inside Apple's driver and 1002:1681 is not in it - that lookup
+  failing IS the Metal name **"AMD Radeon HD GFX10 Family Unknown
+  Prototype"**. The choice is a string we DERIVE versus one we hardcode.
+  **`src/common/rb_gpuname.h` is the derivation, hosttested, NOT WIRED.** CU
+  from the chip's own geometry (discovery GC info `NUM_SE`/`NUM_SA_PER_SE`/
+  `NUM_WGP0_PER_SA`, hosttested on captured 680M data as 1x2x3 = 6 WGP =
+  **12 CU**) minus the harvest (`CC_GC_SHADER_ARRAY_CONFIG` **0x100f**
+  BASE_IDX 0, bits 31:16 `INACTIVE_WGPS`, offsets and mask read from the
+  vendored headers). **The table has exactly TWO rows** - 12 CU -> 680M,
+  6 CU -> 660M, both verified against three sources. **A 640M was confirmed by
+  none of them and the 610M's sources disagree about whether it is even
+  Rembrandt** (one puts it on Mendocino/Navi III), so neither gets a row:
+  a guessed row is strictly worse than the hardcode it replaces. Everything
+  else gets `AMD Radeon Graphics (Rembrandt, N CU)` so an unknown part
+  announces itself. Refusals are distinct codes (1 known / 0 derived / -1
+  nothing sayable, buffer emptied) and a short buffer refuses rather than
+  truncating a name into a different name.
+  **WIRING COSTS A FRAMEBUFFER INSTALL and is NOT done:** `RBAMDFramebuffer`
+  runs no discovery, holds no GC info, and its `ATY,fb_size` comes from the
+  `rbgpufbatymb` boot-arg, not the carve-out; the plugin's `g_disc` is a
+  hand-built two-IP structure for MP1. So the plugin must grow both register
+  reads and hand the values over the 2zd `callPlatformFunction` channel, with
+  the framebuffer falling back to today's literals if the plugin stays silent
+  (rule 38).
+- **METAL 3 IS ALREADY SUPPORTED; System Profiler under-reports it (2C9).**
+  `supportsFamily:MTLGPUFamilyMetal3` = **YES** (Mac2 YES, Common3 YES,
+  Apple7 no), yet the reporter emits the legacy
+  `spdisplays_metal = spdisplays_supported` and **omits
+  `spdisplays_metalfamily` entirely**. Established about
+  `SPDisplaysReporter.spreporter`: it HAS the keys (`spdisplays_metal2/3/4`,
+  `_metalfamily` in `__cstring`); it calls `MTLCopyAllDevices` with
+  `supportsFamily:`, `name`, **`registryID`**, `location`, `peerGroupID` in
+  its selector table; the pairing path is INTACT - our Metal device's
+  `registryID` **0x100000523** resolves to
+  `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` directly under `IGPU@0`; and
+  `MetalPluginName`/`MetalPluginClassName` are published, which is why
+  "Supported" appears at all.
+  **NOT ESTABLISHED: the condition for writing `spdisplays_metalfamily`.** Two
+  inferences were formed and discarded here - that it pairs by `name`
+  (refuted: `registryID` is in the selector table) and that the cfstring
+  xrefs resolve with simple section arithmetic (the keys sit outside the
+  `__cstring` range it assumes). **No mechanism is recorded**; settling it is
+  a symbolicated disassembly of the reporter's Metal block, a `tools/re/` job.
+  Unverified target worth noting: fixing Apple's device-id -> name lookup
+  (the `rbgpu_mtlcave.h` machinery already patches that driver in-process)
+  would correct the Metal name and MIGHT incidentally satisfy the reporter.
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. **2wt's `--queues 4` trigger no
   longer fires** - 14-49 ms where it cost 6.1-10.2 s - but boot 409 logged a
