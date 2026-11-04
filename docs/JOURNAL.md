@@ -56004,3 +56004,99 @@ a boot-410 prior to be checked against.
 The cost side is **unmeasured here** and 2zc says it is real: 2000 µs cost a
 third of the frame rate. `tools/paired.sh` is the instrument and the ladder
 must not be left fast on the strength of the ladder alone.
+
+---
+
+## 2C6 — there is no trade: halving the tick halves the ladder AND feeds every vblank (boot 414)
+
+**The cost measurement 2C5 demanded, and it came back negative. Both
+quantities improved.**
+
+### The two readings together
+
+Interleaved, boot 414, 60 Hz, `vblret_src` 0:
+
+| `tick_us` | 8-queue spread (n=3) | `sets/s` (n=2) | `fed` |
+|---|---|---|---|
+| **6944** | **55.941 ms** ±0.63 % | 52.59, 55.89 | **86.9 %, 93.1 %** |
+| **3472** | **27.819 ms** ±0.79 % | 58.97, 60.38 | **98.5 %, 98.5 %** |
+
+2zc is what made a cost the expectation: 2000 µs cost a third of the frame
+rate at native. **It does not transfer to 60 Hz**, and the reason is visible
+in the numbers rather than argued - at native, 6944 µs *equals* the vblank
+period, and at 60 Hz it does not.
+
+### What is a finding and what is not
+
+**FINDING - the latency halves.** Interleaved A/B/A/B/A/B at single-window
+granularity, n=3 a side, ratio **2.011** against a tick ratio of **2.000**,
+A1->A3 drift **+0.19 %** against a **101 %** effect, and the sides do not
+overlap (1.985x separation). Rule 44 satisfied in the form 2B5-2B7 rewrote it.
+
+**FINDING - the frame rate does not get worse.** Both B runs exceed both A
+runs. This is the claim 2zc put at risk and it is answered.
+
+**NOT a finding - the +10 % magnitude.** `sets/s` A drifted **+6.3 %** between
+its own two runs, which is the same order as the +10.0 % effect; that is
+exactly `holdaba.sh`'s ~8 % rule and 2B6's failure mode. n=2 a side cannot
+carry it. **The direction is established, the size is not.**
+
+**STRONGEST SINGLE NUMBER - `fed` 98.5 % twice, identical.** Against 86.9 %
+and 93.1 %, with both A runs below both B runs. 2A4 measured 96.1-98.3 % as
+what an unconstrained feed looks like, so **B is pinned at the ceiling**: at
+3472 the compositor gets a transaction on essentially every vblank. A
+saturating quantity is far harder to fake with drift than a mean is.
+
+### The mechanism is a CANDIDATE, explicitly not established
+
+Marked because this is rule 17's shape - two numbers and a story:
+
+A retire occasion every 6.944 ms against a vblank every 16.669 ms is a
+**non-integer** ratio (vbl/2.401), so a frame's retire can land anywhere in a
+6.944 ms window inside a 16.669 ms budget - a worst case of 42 % of the
+period. Halving the tick halves that worst case to 21 %. That would explain
+both results at once: finer granularity releases queued work sooner (the
+ladder) *and* misses fewer vblank deadlines (`fed`).
+
+It also explains why 2zc saw the opposite at native: there 6944 **is** the
+vblank period, so the occasions are already frequency-locked, and halving it
+introduced a beat instead of removing one.
+
+**Nothing here measures phase.** The candidate makes a sharp, cheap and
+falsifiable prediction, which is why it is worth stating at all:
+
+| tick | ratio to vbl | occasions/s |
+|---|---|---|
+| 8334.6 µs | **vbl/2, integer** | 120.0 |
+| 6944 µs | vbl/2.401 | 144.0 |
+| 5556.4 µs | **vbl/3, integer** | 180.0 |
+| 4167.3 µs | **vbl/4, integer** | 240.0 |
+| 3472 µs | vbl/4.801 | 288.0 |
+
+**If phase is what matters, 8334 feeds better than 6944 while supplying
+FEWER occasions (120 against 144)** - a dissociation no "more polling is
+better" account can produce. If granularity alone matters, 8334 feeds worse
+than 6944 and the ordering is strictly by occasion count. The pairs
+4167-vs-3472 and 5556-vs-6944 test it twice more in the same run.
+
+The two quantities may also separate here, and that would be new: phase
+helps `fed`, fineness helps the ladder, and the best setting would be a
+**fine integer divisor** (vbl/4) rather than either extreme.
+
+### Nothing changed, and the default did not move
+
+`RB_2XG_DEFAULT_US` is still 6944. Three reasons not to touch it on this
+evidence: the rate magnitude is not a finding; **the default is shared with
+native**, where 2zc measured 6944 as a two-sided optimum and where this dial
+is inert anyway while the vblank drives; and the per-mode question - whether
+the default should be a function of the live vblank period rather than a
+constant - is the actual design question this opens and it deserves its own
+milestone rather than a changed literal.
+
+**The practical ceiling on all of it, stated plainly:** `-rbgpuretirevbl` is
+in boot-args, so at native the vblank drives and `tickset` exits 5. Today
+this win is a 60 Hz win. Reaching native means `-rbgpunoretirevbl` and giving
+up 2zg's variance collapse (±3.5 % -> ±20 %), **or** a retire occasion armed
+*from the vblank handler* at a fraction of its period - phase-locked by
+construction, hence not 2zc's two independent beating timers. That is the
+design 2C5 opened and 2C6's candidate mechanism now argues for.
