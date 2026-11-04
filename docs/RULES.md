@@ -881,9 +881,45 @@ table and refuses to install one that does not match the running kernel;
   ticks, so `spread/7` is not the step), and why B's second run beat its first
   by 12 % (the direction of 2A4/2B0's first-run transient; consistent with,
   not attributed to).
-  **THE COST IS UNMEASURED AND 2zc SAYS IT IS REAL** - 2000 us cost a third of
-  the frame rate - so `tools/paired.sh` is the other half of any decision and
-  the tick must not be left fast on the ladder alone.
+  **2C6: THERE IS NO TRADE. The cost came back NEGATIVE - both quantities
+  improve.** Interleaved at 60 Hz: spread **55.941 ms** (n=3, +-0.63 %) and
+  `fed` **86.9/93.1 %** at 6944, against spread **27.819** (n=3, +-0.79 %) and
+  `fed` **98.5/98.5 %** at 3472, with `sets/s` 52.59/55.89 -> 58.97/60.38.
+  2zc's -34 % does NOT transfer to 60 Hz, and the reason is in the numbers:
+  at native 6944 us *equals* the vblank period and at 60 Hz it does not.
+  **Finding:** the latency halves (ratio 2.011 vs 2.000, A1->A3 drift +0.19 %
+  against a 101 % effect, no overlap) and **the frame rate does not get
+  worse** - both B runs beat both A runs. **NOT a finding: the +10 % rate
+  magnitude** - A drifted +6.3 % between its own two runs, the same order as
+  the effect, which is `holdaba.sh`'s ~8 % rule and 2B6's failure mode;
+  direction established, size not. **Strongest number: `fed` 98.5 % TWICE,
+  identical**, against 2A4's 96.1-98.3 % for an unconstrained feed - B is
+  pinned at the ceiling, and a saturating quantity resists drift far better
+  than a mean.
+  **CANDIDATE MECHANISM, NOT ESTABLISHED (rule 17 - two numbers and a
+  story):** 6944 against a 16669 us vblank is **vbl/2.401**, non-integer, so a
+  retire can land anywhere in a 6.944 ms window inside a 16.669 ms budget -
+  worst case 42 % of the period, halved to 21 % at 3472. That would explain
+  the ladder and `fed` together, and explain 2zc's opposite result at native
+  where 6944 IS the period and halving it ADDED a beat. **Nothing here
+  measures phase**, and the prediction is sharp: **vbl/2 = 8334.6 us should
+  feed BETTER than 6944 while supplying FEWER occasions (120 vs 144)** - a
+  dissociation no "more polling is better" account can produce - with
+  vbl/3 = 5556.4 and vbl/4 = 4167.3 testing it twice more. If the ordering is
+  strictly by occasion count instead, granularity alone matters. The best
+  setting may be a **fine integer divisor**, if phase helps `fed` and fineness
+  helps the ladder.
+  **THE DEFAULT DID NOT MOVE and should not yet:** the rate magnitude is not a
+  finding, the default is **shared with native** where 2zc measured 6944 as a
+  two-sided optimum, and the real design question - whether the default should
+  be a function of the live vblank period rather than a constant - deserves
+  its own milestone, not a changed literal.
+  **And the practical ceiling: `-rbgpuretirevbl` is in boot-args, so at native
+  the vblank drives and `tickset` exits 5. Today this is a 60 Hz win only.**
+  Reaching native means `-rbgpunoretirevbl` and giving up 2zg's variance
+  collapse (+-3.5 % -> +-20 %), **or** a retire occasion armed *from the vblank
+  handler* at a fraction of its period - phase-locked by construction, so NOT
+  2zc's two independent beating timers.
   **AND THE TICK IS A RUNTIME DIAL (2C4).** `{"RBGPUTickUs": N}` via
   `build/out/tickset`;
   `rbgpu_2xg_arm_next()` recomputes its period from the global on every arm,
