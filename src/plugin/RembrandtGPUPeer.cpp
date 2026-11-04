@@ -14,6 +14,7 @@
 #include "RembrandtGPUPeer.hpp"
 #include "rb_defaults.h"
 #include "rb_osver.h"
+#include "rb_retire.h"   /* 2C2: RB_RETIRE_DRAIN_MAX for the dial's bound */
 
 // 2xx: the one-time migration off the pre-2xw consume-by-overwrite values.
 // Defined with the rest of the arming gate, far below; called from start()
@@ -93,6 +94,10 @@ extern uint64_t g_guard_calls;
  * called from the periodic refresh because the vblank must not take a lock. */
 extern bool rbgpu_retire_from_vbl_2zd(void);
 extern void rbgpu_retire_publish_2zd(void);
+/* 2C2: the retire-drain dial, defined in kern_start.cpp beside the loop that
+ * reads it. */
+extern void rbgpu_retire_drain_set_2C2(uint32_t want);
+extern uint32_t rbgpu_retire_drain_get_2C2(void);
 extern volatile int g_rb_2gn_in1b;
 extern void rbgpu_2gx_req(uint32_t req, int refused);
 extern void rbgpu_2gx_flush(void);
@@ -2732,6 +2737,38 @@ void RembrandtGPUPeer::handlePostRegister() {
         snprintf(buf, sizeof(buf), "s=6 0x1B RETURNED 0x%08X", ret1B);
         rbgpu_nvram_note("rbgpu-prog", buf);
     }
+}
+
+/* 2C2: the one runtime dial this peer takes. Boot 409 measured each Metal
+ * command queue's first buffer starting exactly one vblank after the
+ * previous one, because `checkTimestamps()` is polled once per vblank and
+ * retires about one stamp per call - so N queues serialise over N vblanks.
+ * This sets how many times one offer polls.
+ *
+ * Returns kIOReturnBadArgument on a value outside 1..RB_RETIRE_DRAIN_MAX
+ * rather than clamping silently: a dial that quietly substitutes a value is
+ * rule 17, and an A/B whose B side was clamped to A is worse than one that
+ * refused. The caller verifies from `vblret_drain` in the diag table, never
+ * from this return code (rule 13).
+ */
+IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
+    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    if (!dict) { return kIOReturnBadArgument; }
+
+    OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBGPURetireDrain"));
+    if (!n) { return kIOReturnUnsupported; }
+
+    const uint32_t want = n->unsigned32BitValue();
+    if (want < 1 || want > RB_RETIRE_DRAIN_MAX) {
+        rbgpu_diag_set_num("drain_refused", want);
+        return kIOReturnBadArgument;
+    }
+    rbgpu_retire_drain_set_2C2(want);
+    /* Publish immediately as well as periodically: the dial's own value is
+     * not a frame-path counter and the caller should not have to wait a
+     * publish interval to see the arm it just set (rule 31's other side). */
+    rbgpu_diag_set_num("vblret_drain", rbgpu_retire_drain_get_2C2());
+    return kIOReturnSuccess;
 }
 
 IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,

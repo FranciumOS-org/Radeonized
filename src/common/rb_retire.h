@@ -136,4 +136,46 @@ static inline uint32_t rb_retire_timer_period_us(const struct rb_retire *r,
     return (r->src == RB_RETIRE_SRC_VBL) ? watch_us : fast_us;
 }
 
+
+/* 2C2: HOW MANY TIMES TO POLL THE RETIREMENT PER OFFER.
+ *
+ * Boot 409 measured `metal_probe --queues N` starting each queue's first
+ * command buffer exactly ONE vblank after the previous one: 13.3-14.5 ms for
+ * queue 0 (n=12, tight) and then +6.9 to +7.2 ms per queue, with the absolute
+ * slots landing at the same times for N = 2, 4 and 8. `RBFBVBLPeriodNs` is
+ * 6952507, so the spacing IS the vblank period to three figures, and
+ * `stamp_calls` 42337 against `stamp_completed` 42314 says about one stamp
+ * retires per call. We call `checkTimestamps()` once per vblank, so N queues
+ * with pending work need N vblanks and nothing runs concurrently.
+ *
+ * That is invisible to a single stream - one buffer every 6.95 ms is the
+ * 144/s the compositor wants, which is why the desktop is smooth and 2A1
+ * measured our own cost at 44 microseconds - and it is exactly what an app
+ * needing several units of GPU work BEFORE it can draw pays for: the cost is
+ * per queue, serialised.
+ *
+ * So poll more than once per offer. Deliberately NOT progress-detected:
+ * 2xe read the event source as signalled by `checkTimestamps` rather than
+ * advanced by it, so `advance()` runs on the event source's own thread and a
+ * counter delta across our call would not be a synchronous progress signal -
+ * inferring otherwise is rule 35 exactly. An unconditional bounded loop needs
+ * no such inference, and the instrument is EXTERNAL: metal_probe's ladder,
+ * which is userspace, instant and reproduced twelve times.
+ *
+ * 1 is today's behaviour and the A side. The bound exists because this runs
+ * on the framebuffer's vblank thread_call (rule 31): at 144 Hz, 8 is 1152
+ * calls a second where today's is 144, and 2zc measured that making the
+ * retirement run MORE often can cost a third of the frame rate when it
+ * contends - which is why this is a dial with an interleaved A/B and not a
+ * default.
+ */
+#define RB_RETIRE_DRAIN_MAX 8u
+
+static inline uint32_t rb_retire_drain_clamp(uint32_t want)
+{
+    if (want == 0u) { return 1u; }
+    if (want > RB_RETIRE_DRAIN_MAX) { return RB_RETIRE_DRAIN_MAX; }
+    return want;
+}
+
 #endif /* RB_RETIRE_H */
