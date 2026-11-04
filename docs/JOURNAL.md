@@ -56293,3 +56293,142 @@ Asked for twice, discarded twice by `grep spread`. The per-queue
 with the tick (so first-paint latency scales too) or is fixed (a floor on
 what any tick can buy). Boot 409's native `--queues 4` showed that first gap
 at ~3 ticks against ~1 per queue afterwards.
+
+---
+
+## 2C9 — the GPU's name and memory: the premise was wrong, the VRAM was already real, and Metal 3 is already supported
+
+Asked to replace an OpenCore spoof with real data. Three findings before any
+code, and each changes what has to be built.
+
+### (1) THERE IS NO OPENCORE SPOOF. The strings are ours.
+
+`logs/efi-backups/20261104-155823-install/config.plist`:
+`DeviceProperties/Add` carries exactly two entries - `acpi-wake-type` on one
+device and `built-in` on another - and **no** `model`, no `VRAM,*`, and no
+`Kernel/Patch` mentioning Radeon, 1681, VRAM or GFX. The "AMD Radeon 680M /
+4 GB" in System Information comes from **three hardcodes of ours**:
+
+- `src/fbkext/RBAMDFramebuffer.cpp:756` - `setProperty("VRAM,totalMB", 4096ULL, 32)`
+- `src/fbkext/RBAMDFramebuffer.cpp:757` - `setProperty("model", "AMD Radeon 680M")`
+- `src/plugin/kern_start.cpp:8500` - `static const char kModel[]`, **dead**:
+  `rbgpu_vram_publish()` refuses any object whose class is not
+  `IONDRVFramebuffer`, and 2sl/2sm/2st displaced that class with ours. It is
+  also gated on `-rbgpufbvram`. `ioreg` confirms the live `model` sits on the
+  **RBAMDFramebuffer** node, among the `RBFB*` keys.
+
+So "even if the kext is active or not" cannot be right - with the kext
+disarmed there is no `model` property at all. Worth recording because the
+belief pointed the fix at the wrong file.
+
+### (2) THE 4 GB IS REAL. It is the hardcoding that is wrong.
+
+Metal's own `recommendedMaxWorkingSetSize` reads **4096 MB** on this machine
+(`maxBufferLength` 3072 MB, `hasUnifiedMemory` 0), which corroborates 2pa's
+note that `RCC_CONFIG_MEMSIZE` and `MMMC_VM_FB_LOCATION_TOP` agreed. So this
+is not a fabricated number being passed off as data - it is the right number
+written down instead of read, which is only wrong on a *different* board.
+`rb_probe.c` already reads `RB_mmRCC_CONFIG_MEMSIZE` (0xde3) into
+`memsize_mb`, so the live value exists in shared code today.
+
+### (3) METAL 3 IS SUPPORTED. System Profiler is under-reporting it.
+
+`[MTLDevice supportsFamily:MTLGPUFamilyMetal3]` = **YES** (Mac2 YES, Common3
+YES, Apple7 no). System Profiler nevertheless emits
+`spdisplays_metal = spdisplays_supported`, the legacy string, and
+**`spdisplays_metalfamily` is absent from the output entirely.**
+
+What is established about the reporter
+(`/System/Library/SystemProfiler/SPDisplaysReporter.spreporter`):
+- it **has** the keys: `spdisplays_metal2`, `_metal3`, `_metal4`,
+  `_metalfamily` are all in `__cstring`;
+- it **calls** `MTLCopyAllDevices`, and its selector table includes
+  `supportsFamily:`, `name`, **`registryID`**, `location`, `peerGroupID`;
+- the pairing path is **intact**: our Metal device's `registryID`
+  `0x100000523` resolves to
+  `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` directly under `IGPU@0`
+  (`IOPCIDevice` `0x1000002a6`), which is where it should be;
+- `MetalPluginName` = `AMDRadeonX6000MTLDriver` and
+  `MetalPluginClassName` = `AMDMTLGFX10Device` are both published, which is
+  why "Supported" appears at all.
+
+**NOT established: the condition under which the reporter writes
+`spdisplays_metalfamily`.** Two inferences were formed and discarded during
+this work - first that it pairs by `name` string (refuted: `registryID` is in
+the selector table), then that the cfstring xrefs could be resolved with the
+section arithmetic used here (the key strings sit outside the `__cstring`
+range that arithmetic assumes, so the resolver returned nothing). Settling it
+is a proper symbolicated disassembly of the reporter's Metal block - a
+`tools/re/` job - and **no mechanism is recorded here**, because the
+alternative is this project's most expensive habit.
+
+One thing the investigation does make likely enough to state as a *target*
+rather than a plan: Metal's device name is **"AMD Radeon HD GFX10 Family
+Unknown Prototype"**, which is Apple's driver failing to find 1002:1681 in
+its own device-id -> name table. Fixing *that* would correct the Metal name
+and might incidentally satisfy whatever the reporter wants, and the machinery
+for patching that driver in a client process already exists (2xt/2xu's
+`rbgpu_mtlcave.h`). Unverified either way.
+
+### What macOS cannot do, said plainly
+
+The ask was "macOS finds it and shows it itself". It cannot. The marketing
+name lives in a device-id -> string table inside Apple's driver and 1002:1681
+is not in it - the "Unknown Prototype" string is that lookup failing. No code
+path in macOS knows what a 680M is. So the real choice is **a string we
+DERIVE from the silicon** versus **a string we hardcode**, and that is what
+2C9 builds.
+
+### `src/common/rb_gpuname.h` - built, hosttested, NOT yet wired
+
+Pure logic so the hosttest decides what the kext will publish:
+
+- `rb_gpu_cu_count(se, sa_per_se, wgp_per_sa, inactive_wgps)` - CU from the
+  chip's own geometry. The geometry is the IP discovery GC info table we
+  already parse (`RB_GC_NUM_SE` / `RB_GC_NUM_SA_PER_SE` /
+  `RB_GC_NUM_WGP0_PER_SA`, hosttested against captured 680M data: 1 x 2 x 3 =
+  6 WGP = **12 CU**), and the harvest is
+  `CC_GC_SHADER_ARRAY_CONFIG` **0x100f** BASE_IDX 0 bits 31:16
+  `INACTIVE_WGPS` - both offsets and the mask read out of the vendored
+  `gc_10_3_0_offset.h` / `gc_10_3_0_sh_mask.h`, not recalled. One WGP is two
+  CUs on RDNA.
+- **The table has exactly two rows**: 12 CU -> `AMD Radeon 680M`, 6 CU ->
+  `AMD Radeon 660M`. Both verified against three independent sources. A 640M
+  was confirmed by **none** of them, and the 610M's sources **disagree about
+  whether it is even Rembrandt** (one puts it on Mendocino / Navi III), so
+  neither gets a row. **Publishing a guessed row would be strictly worse than
+  the hardcode it replaces.**
+- Anything else gets a derived generic name carrying the measured count -
+  `AMD Radeon Graphics (Rembrandt, N CU)` - so an unknown part announces
+  itself instead of being rounded to the nearest known one.
+- Every refusal is a distinct return: **1** known name, **0** derived generic,
+  **-1** nothing sayable (and the buffer is emptied, so a caller that ignores
+  the code publishes nothing rather than a stale name). A zero or implausible
+  geometry, a fully-harvested mask, and a short buffer all refuse rather than
+  truncate or multiply out silently.
+- `rb_gpu_vram_mb()` applies `rb_probe.c`'s existing discipline to the
+  carve-out: `0xFFFFFFFF` is an unmapped read, 0 is a chip not told its size,
+  and out-of-range refuses - **no substituted default**, which is the whole
+  point of the milestone.
+
+Hosttested, including a **break-it check**: adding a guessed `2 CU -> 610M`
+row fails two assertions. (Grepped for `error` as well as `FAIL` - 2BC's
+second instance - and the post-restore `grep -ci FAIL` returning 2 was itself
+rule 26: both hits were "a failed table transfer" and "its failure is a
+hang", with exit status 0 and an empty diff.)
+
+### What wiring it costs, and why it is not done in this commit
+
+Neither kext can derive this where the properties are published.
+`RBAMDFramebuffer` runs **no discovery**, holds no GC info, and its
+`ATY,fb_size` comes from the `rbgpufbatymb` boot-arg rather than the
+carve-out; the plugin's `g_disc` is a hand-built two-IP structure for MP1, not
+a full discovery parse. So the plugin must grow the GC geometry read plus the
+`CC_GC_SHADER_ARRAY_CONFIG` read, and hand both values to the framebuffer
+over the existing 2zd `callPlatformFunction` channel, with the framebuffer
+falling back to today's literals if the plugin does not answer (rule 38: two
+separately armed halves must check each other).
+
+That is a **framebuffer change**, so it costs an install and a boot - which
+is why the logic lands first, decided and tested, with nothing claimed about
+hardware.
