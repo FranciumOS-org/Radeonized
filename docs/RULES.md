@@ -931,8 +931,43 @@ table and refuses to install one that does not match the running kernel;
   occ/s is 288 `checkTimestamps()` calls a second and `RB_TICK_US_MIN` 500
   would allow 2000/s; the user's standing concern is efficiency, so that is
   the number that decides how far down to go.
-  **At 60 Hz the evidence supports 4167 (vbl/4) or 3472 as a RUNTIME
-  setting** - saturated frame rate, 33 or 28 ms ladder against 56 ms today.
+  **2C8: THE LAW HOLDS OVER 6x AND NO CPU COST APPEARS. `spread/tick` =
+  7.996 +- 0.037 (sd 0.5 %) across SEVEN ticks from 8334 down to 1389 us** -
+  one parameter, no curvature. **The shipping 55.9 ms becomes 11.1 ms at
+  1389 (5.0x)**, with `sets/s` 58.96-59.76 and `fed` 97.6-98.4 throughout and
+  **no downturn anywhere** - 2zc's two-sided curve does NOT reappear at 60 Hz.
+  (The 3472 row's 57.02 comes with `vbl/s` **-1.9 %** and `fed` 96.9, so the
+  DISPLAY ran slow in that window - the row is suspect, not the tick.)
+  **THE THRESHOLD WORTH NAMING: `tick = vbl/8` makes the eight-queue spread
+  exactly ONE FRAME.** At 60 Hz that is **2084 us**, measured **16.676 ms**
+  against a 16.669 ms vblank. Below it the whole serialisation fits inside a
+  frame, so multi-queue work stops costing extra frames to first paint. A
+  consequence of the law, not a new measurement.
+  **CPU: idle 97.54/98.40/98.24/98.14 % at 144/288/480/720 occ/s, with `sys`
+  DECREASING 1.90->1.50 %** - backwards from a cost story, so noise. **Rule 14:
+  this is NOT "no CPU cost".** 720 short calls/s is well under 0.1 % of one
+  core on a 16-thread machine at 98 % idle sampled for one second - **the
+  instrument cannot resolve what it was pointed at.** What is established is
+  no GROSS regression. The cost the user cares about is **idle-state
+  residency** (a `thread_call` at 720/s prevents deep package idle), which
+  `idle %` cannot see at all; `powermetrics` is that instrument and has NOT
+  been run.
+  **DO NOT DERIVE A NATIVE TICK FROM THIS.** 2zc measured native timer-driven
+  at 2000 us = 51.33 `sets/s` against 6944 = 74.6, **-34 %** - two-sided there,
+  one-sided here, two observations on two boots and 2C7 removed the story that
+  linked them. The practical recommendation is safe only because
+  `-rbgpuretirevbl` is in boot-args, so **at native the vblank drives and the
+  dial is INERT** - 2084 does nothing there rather than harm. The dangerous
+  combination is `-rbgpunoretirevbl` at native with a fine tick.
+  **THE MEASUREMENT THAT MATTERS HAS NOT BEEN TAKEN - RULE 45.** Every number
+  above is a counter; the deliverable is "icons in settings load every time
+  and it's slow... iMessage animations... the wifi menu being laggy", which a
+  human observes. `metal_probe --queues 8` is a SYNTHETIC eight-queue burst
+  and that it stands for the Settings icon path is an **assumption** - 2A6 is
+  what letting a benchmark stand in for a workload cost last time. **Next step
+  is USE, not a counter:** `tickset 2084`, then open/close Settings, the wifi
+  menu, iMessage animations. A null there retires the line however clean the
+  lattice is.
   **THE DEFAULT DID NOT MOVE and should not yet:** the rate magnitude is not a
   finding, the default is **shared with native** where 2zc measured 6944 as a
   two-sided optimum, and the real design question - whether the default should
