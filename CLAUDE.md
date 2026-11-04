@@ -868,8 +868,24 @@ table and refuses to install one that does not match the running kernel;
   against one-item-per-call. **Not inferred:** that the gate is
   `IOInterruptEventSource` signal coalescing - it would explain the null
   result exactly, and nothing has observed one call to `advance()` (rule 35).
-  **AND THE TICK IS NOW A RUNTIME DIAL, which is the other half of the next
-  step (2C4).** `{"RBGPUTickUs": N}` via `build/out/tickset`;
+  **2C5 ANSWERED IT ON HARDWARE: HALVING THE TICK HALVED THE LADDER, 1.995x
+  for a 2.000x tick change (boot 414).** `--queues 8` spread **55.456 ms** at
+  `tick_us` 6944 against **27.798** and **24.406 ms** at 3472, `vblret_src` 0.
+  The A side is corroborated nine-plus times across two boots and two
+  retirement drivers inside +-0.9 % (56.009 earlier on this boot, 55.295-56.308
+  on boot 410), so the effect is two orders larger than the noise it has to
+  clear. **So the quantum IS the retire occasion and the dial is OURS** -
+  2C2's "the serialisation is on the submit side, which no dial of ours
+  reaches" is reversed. **Deliberately not derived:** the per-queue step
+  (`spread` is last-minus-first and boot 409 showed the FIRST gap is several
+  ticks, so `spread/7` is not the step), and why B's second run beat its first
+  by 12 % (the direction of 2A4/2B0's first-run transient; consistent with,
+  not attributed to).
+  **THE COST IS UNMEASURED AND 2zc SAYS IT IS REAL** - 2000 us cost a third of
+  the frame rate - so `tools/paired.sh` is the other half of any decision and
+  the tick must not be left fast on the ladder alone.
+  **AND THE TICK IS A RUNTIME DIAL (2C4).** `{"RBGPUTickUs": N}` via
+  `build/out/tickset`;
   `rbgpu_2xg_arm_next()` recomputes its period from the global on every arm,
   so the write is the whole mechanism. Interleaved at 60 Hz:
   `tickset 6944 && metal_probe --queues 8` against `tickset 3472 && ...`.
@@ -898,6 +914,27 @@ table and refuses to install one that does not match the running kernel;
   (`kextstat` 2BD0493E against a built 0F810A48, rule 15). And the drain dial
   does not stick across a boot: `vblret_drain` 1, `vblret_extra` 0 here, so
   `drain_recv`/`drain_want`/`drain_sets` are still unexercised.
+  **`RBGPUDiag` IS A SNAPSHOT ON A 250 ms THROTTLE THAT DROPS, NOT DEFERS -
+  and verifying a dial against a 200 ms sleep is a race I lost four times in
+  one run (2C5).** `performRefreshDiag()` publishes a `memcpy`'d copy of the
+  table and `scheduleRefreshDiag()` `return`s without deferring when called
+  inside 250 ms (2ez's fix for a refresh that held the IOService lock
+  continuously - **it stays**). So four of seven `tickset` calls reported
+  MISMATCH while `tick_sets` read **7 for 7 invocations**: every write had
+  landed and the reader was one snapshot behind. **Rule 31's other half: a
+  dial's verification must wait on something MONOTONIC, never on the dialled
+  value, which cannot distinguish "not yet published" from "the write was
+  lost".** `tickset` and `drainset` now poll the set-counter past its pre-set
+  value (up to 3 s) - userspace, no reinstall. `drainset`'s own comment had
+  asserted in writing that the key "publishes immediately", which was never
+  true and was never checked against the publish path in the same file.
+  **It does NOT explain 2C2's drain bug and is not claimed to**:
+  `vblret_drain` has a second writer (`rbgpu_retire_publish_2zd()`, several
+  times a second from the live global), so a stale read of that key could not
+  have persisted across three attempts and a later `ioreg`. What boot 414 does
+  contribute is a narrowing - **the `setProperties` path works, 7 writes for 7
+  calls** - so the drain bug is drain-specific, still open, and still the job
+  of `drain_recv`/`drain_want`/`drain_sets`.
 - **The wedge**, an independent second defect: work submitted that never
   retires, on GFX/SDMA/compute user queues. **2wt's `--queues 4` trigger no
   longer fires** - 14-49 ms where it cost 6.1-10.2 s - but boot 409 logged a

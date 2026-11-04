@@ -168,17 +168,44 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Verify from the registry, not from kr (2A3). The setter publishes
-     * immediately, so one short sleep covers the round trip. */
-    usleep(200000);
-    const long now  = diagNum(peer, @"tick_us",   -1);
-    const long nset = diagNum(peer, @"tick_sets", -1);
+    /* Verify from the registry, not from kr (2A3) - but WAIT FOR A FRESH
+     * SNAPSHOT, which is what the first version of this tool got wrong.
+     *
+     * `RBGPUDiag` is not the live table: `performRefreshDiag()` publishes a
+     * memcpy'd SNAPSHOT, and `scheduleRefreshDiag()` allows at most one
+     * refresh per 250 ms and **drops** a request inside that window rather
+     * than deferring it (2ez - the unthrottled version held the IOService
+     * lock continuously and was indistinguishable from a wedge, so the
+     * throttle stays). A single 200 ms sleep therefore reads INSIDE the
+     * throttle window and returns the previous value - which on boot 414
+     * made four of seven sets report MISMATCH while `tick_sets` proved all
+     * seven writes had landed.
+     *
+     * So poll the monotonic counter until it passes the value read before
+     * the set. That is strictly better than a longer sleep: it proves the
+     * snapshot is FRESH as well as proving the call arrived, and the two are
+     * what a stale read cannot distinguish. */
+    long now = -1, nset = sets;
+    for (int i = 0; i < 30 && nset <= sets; i++) {   /* up to ~3 s */
+        usleep(100000);
+        nset = diagNum(peer, @"tick_sets", -1);
+    }
+    now = diagNum(peer, @"tick_us", -1);
+    if (nset <= sets) {
+        fprintf(stderr,
+                "`tick_sets` did not advance past %ld in 3 s. The set did not\n"
+                "arrive, or the diag snapshot is not refreshing at all.\n", sets);
+        IOObjectRelease(peer);
+        return 3;
+    }
     printf("tick_us now reads %ld us   (sets %ld)\n", now, nset);
     if (now != want) {
         fprintf(stderr,
-                "MISMATCH: the setter succeeded and the table reports %ld.\n"
-                "`tick_sets` %ld -> %ld says whether the call arrived at all.\n"
-                "Do not run an A/B against this.\n", now, sets, nset);
+                "MISMATCH: the setter succeeded, `tick_sets` advanced %ld -> %ld\n"
+                "so the call DID arrive, and the fresh snapshot still reports\n"
+                "%ld us. That is a real disagreement, not the stale-snapshot\n"
+                "race this tool used to report. Do not run an A/B against it.\n",
+                sets, nset, now);
         IOObjectRelease(peer);
         return 3;
     }

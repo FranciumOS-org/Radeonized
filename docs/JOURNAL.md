@@ -55890,3 +55890,117 @@ that fails in both directions when the bounds are deleted (grepped for
 
 This install also carries 2C3, so the `adv_calls` reading is available on the
 same boot and costs nothing extra.
+
+---
+
+## 2C5 — the tick IS the quantum: halving it halved the ladder, 2.00x for 2.00x (boot 414)
+
+**Boot 414, plugin 379F6FE4 confirmed loaded. The prediction 2C4 wrote down
+before this boot is the result.**
+
+### The measurement
+
+`metal_probe --queues 8`, `vblret_src` 0 (timer-driven, the 60 Hz mode):
+
+| `tick_us` | 8-queue spread |
+|---|---|
+| **6944** | **55.456 ms** |
+| **3472** | **27.798 ms** |
+| **3472** | **24.406 ms** |
+
+`55.456 / 27.798` = **1.995** against a tick ratio of **2.000**. The first B
+run tracks the halved tick to **0.25 %**.
+
+Corroboration for the A side, so it is not one sample: **56.009 ms** earlier
+on this same boot (read before any dial existed, 2C4), and **55.295-56.308 ms**
+across six runs on boot 410 at native. The A side has now been measured
+nine-plus times across two boots and two retirement drivers and has never
+left a ±0.9 % band. The B side is at **half** of it. The effect is two orders
+larger than the noise it has to clear.
+
+**2C4's question is answered and 2C2's conclusion is reversed.** The quantum
+is the retire occasion, the occasion rate is `tick_us` whenever the timer
+drives, and **the concurrency latency the user feels is a dial this project
+owns.** 2C2 wrote "the serialisation is on the submit side, which no dial of
+ours reaches"; it is not.
+
+### Two things deliberately NOT derived from this
+
+- **The per-queue step.** The command grepped only the `spread` line, and
+  `spread` is last-minus-first over seven intervals, which boot 409 showed is
+  inflated by a large FIRST gap (its `--queues 4` run had 20.7 ms to queue 1
+  and then ~7 ms each). So `spread / 7` is not the step and is not computed
+  here. The spread is what was measured on both sides and the spread is what
+  halved.
+- **Why run 3 (24.406) beat run 2 (27.798).** B's second run is 12 % faster
+  than its first, which pushes `A/B` to 2.27. That is the direction of the
+  known first-run transient (2A4: run 1 of a phase reads low; 2B0: run 1 is
+  more contended in *every* counter), so it is consistent with it and is not
+  attributed to it - nothing here measures that.
+
+### The MISMATCH reports were my instrument, and the diagnosis is exact
+
+Four of seven `tickset` calls printed "MISMATCH: the setter succeeded and the
+table reports <the other value>". **All seven writes landed**: `tick_sets`
+reads **7** against exactly seven invocations, and the kext increments that
+counter only on the accepted path after the clamp.
+
+The cause is in the reader, and it is specific:
+
+- `RBGPUDiag` is **not the live table**. `performRefreshDiag()` publishes a
+  `memcpy`'d **snapshot** (`s_snapDiags`).
+- `scheduleRefreshDiag()` permits **at most one refresh per 250 ms** and
+  **drops** a request that arrives inside that window - `return`, with nothing
+  deferred. That throttle is 2ez's fix: unthrottled, the refresh ran
+  continuously under `g_diagLock`, held the IOService lock and was
+  indistinguishable from a wedge. **It stays.**
+- The tool slept **200 ms** and read. 200 < 250, so it read the previous
+  snapshot, and the reported value lagged the write by exactly one set.
+
+Fixed in the reader, which needs no reinstall: both `tickset` and `drainset`
+now **poll the monotonic set-counter until it passes its pre-set value**
+(up to 3 s), then compare. That is strictly better than a longer sleep,
+because it proves the snapshot is **fresh** as well as proving the call
+arrived - and those are the two things a stale read cannot tell apart. The
+MISMATCH text now says the counter advanced, so a surviving mismatch is a
+real disagreement rather than this race.
+
+**General shape, and it is rule 31's other half:** rule 31 says a periodic
+publish is stale by design and must be read twice. The corollary this cost a
+verdict to learn is that **a dial's verification must wait on something
+MONOTONIC, not on the dialled value itself** - the dialled value is
+indistinguishable between "not yet published" and "the write was lost", and a
+counter is not.
+
+My own comment in `drainset` had asserted the opposite in writing - "the peer
+publishes this key immediately on the set, so no publish-interval wait is
+needed" - which was never true and was never checked against the publish path
+sitting in the same file.
+
+### What this does NOT settle: 2C2's drain bug
+
+Tempting and refused. It would be tidy to call boot 410's stuck
+`vblret_drain` the same race, but **it does not fit**: `vblret_drain` has a
+second writer, `rbgpu_retire_publish_2zd()`, which republishes it from the
+live global several times a second, so a stale read of *that* key could not
+have persisted across three attempts and a later direct `ioreg`. The drain
+bug stays **open**, and `drain_recv`/`drain_want`/`drain_sets` are still what
+settles it - now installed and still unexercised.
+
+What boot 414 *does* contribute is a real narrowing: **the `setProperties`
+path itself works, 7 writes for 7 calls**, so whatever the drain bug is, it is
+drain-specific and not the dial mechanism.
+
+And 2C2's negative is unaffected either way - its A and B both measured
+55-56 ms, and the side that provably drained is the side indistinguishable
+from the side that did not.
+
+### Hand-over
+
+No install and no boot. Both tools are userspace and rebuilt. The clean
+interleaved A/B/A/B that rule 44 wants is now one command, and the A side has
+a boot-410 prior to be checked against.
+
+The cost side is **unmeasured here** and 2zc says it is real: 2000 µs cost a
+third of the frame rate. `tools/paired.sh` is the instrument and the ladder
+must not be left fast on the strength of the ladder alone.
