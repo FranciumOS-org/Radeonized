@@ -56197,3 +56197,99 @@ a genuine two-sided optimum and where this dial is inert while the vblank
 drives - so a changed literal would be wrong in the other mode. **The right
 change is to derive the default from the live vblank period**, which is the
 milestone this opens, and it should not be smuggled in as a constant edit.
+
+---
+
+## 2C8 — the law holds over 6x, the CPU cost does not appear, and the ladder collapses to one frame at vbl/8 (boot 414)
+
+Seven ticks, one boot, 60 Hz, `vblret_src` 0:
+
+| tick µs | occ/s | spread ms | spread/tick | `sets/s` | `fed` | idle |
+|---|---|---|---|---|---|---|
+| 8334 | 120 | 66.540 | 7.984 | 57.59 | 95.0 | - |
+| 6944 | 144 | 55.853 | 8.043 | 58.96 | 98.2 | 97.54 |
+| 5556 | 180 | 44.040 | 7.927 | 59.73 | 97.6 | - |
+| 4167 | 240 | 33.273 | 7.985 | 59.76 | 97.6 | - |
+| 3472 | 288 | 27.921 | 8.042 | 57.02 | 96.9 | 98.40 |
+| **2084** | 480 | **16.676** | 8.002 | 59.69 | 98.4 | 98.24 |
+| **1389** | 720 | **11.094** | 7.987 | 59.46 | 98.1 | 98.14 |
+
+**`spread / tick` = 7.996 ± 0.037 (sd 0.5 %) across a 6.0x range of tick.**
+Seven points, one parameter, no curvature, no drift in the residual. The
+lattice is the tick and nothing else.
+
+**The shipping behaviour is 55.9 ms. At 1389 µs it is 11.1 ms - 5.0x.**
+
+### The threshold worth naming: tick = vbl/8
+
+Since `spread = 8 x tick`, setting `tick = vbl/8` makes the eight-queue
+spread exactly one display frame. At 60 Hz that is **2084 µs**, and the
+measured spread is **16.676 ms** against a vblank period of **16.669 ms**.
+Below that tick the entire eight-queue serialisation fits inside a single
+frame, so multi-queue work stops costing extra frames to first paint - which
+is the shape of the user's symptom. It is a consequence of the law rather
+than a new measurement, and it is worth a name because it is the point where
+the quantity stops mattering.
+
+### The CPU cost did not appear - and the instrument cannot prove it absent
+
+`idle` reads 97.54 / 98.40 / 98.24 / 98.14 % at 144 / 288 / 480 / 720
+occasions a second, and `sys` went **1.90 -> 1.60 -> 1.55 -> 1.50 %** - i.e.
+the *coarsest* tick had the lowest idle and the highest sys, which is
+backwards from any cost story and therefore noise. Five times the call rate
+produced no measurable change.
+
+**Rule 14, stated rather than skipped: this is not "no CPU cost".** 720 calls
+a second of a short function is on the order of a few milliseconds of CPU a
+second - well under 0.1 % of one core, and this machine has sixteen threads
+at ~98 % idle sampled for one second. **The instrument cannot resolve the
+cost it was pointed at**, so what is established is the absence of a GROSS
+regression (nothing in the 5-10 % range), not the absence of a cost. And the
+cost the user actually cares about is **idle-state residency**: a
+`thread_call` at 720/s prevents deep package idle, which `idle %` cannot see
+at all. `powermetrics` is the instrument for that and has not been run.
+
+### 2zc does NOT reappear, and must not be extrapolated to native
+
+No downturn in `sets/s` anywhere down to 1389 µs; the 3472 row's 57.02 comes
+with `vbl/s` 58.85 (**-1.9 %**) and `fed` 96.9, so the DISPLAY ran slow in
+that window and the row is suspect rather than the tick (the guard
+`paired.sh` exists for). **At 60 Hz the tick is one-sided over the whole
+measured range.**
+
+**At native it is not, and that is measured, not feared:** 2zc put native
+timer-driven at 2000 µs = 51.33 `sets/s` against 6944 = 74.6, a **-34 %**.
+Where 2C7's refuted phase story would have explained that, nothing replaces
+it - the two-sided curve at native is an observation standing on its own
+boot, and the one-sided curve at 60 Hz is another. **Do not derive a native
+tick from this data.**
+
+What makes the practical recommendation safe anyway: `-rbgpuretirevbl` is in
+boot-args, so **at native the vblank drives and the dial is inert** - a tick
+left at 2084 does nothing there rather than doing harm. The dangerous
+combination is `-rbgpunoretirevbl` at native with a fine tick, and nothing
+proposes it.
+
+### THE MEASUREMENT THAT MATTERS HAS NOT BEEN TAKEN - rule 45
+
+Every number here is a counter. The deliverable is **"icons in settings load
+every time and it's slow, same for iMessage animations or the wifi menu being
+laggy"** - a thing a human observes, which rule 45 says is a measurement like
+any other and needs its own instrument, control and repeat. The brightness
+line cost six milestones and ten boots to that exact gap.
+
+`metal_probe --queues 8` is a synthetic eight-queue burst. Whether a 5x
+collapse of that lattice is what the Settings icon path pays is **an
+assumption**, and 2A6 is what it cost last time to let a benchmark stand in
+for a workload. **The next step is use, not a counter:** set 2084, open and
+close Settings repeatedly, open the wifi menu, trigger iMessage animations,
+and report whether it changed. A null there retires the whole line no matter
+how clean the lattice is.
+
+### Still unexplained: the coefficient is 8 where seven intervals predict 7
+
+Asked for twice, discarded twice by `grep spread`. The per-queue
+`commit->GPUstart` column at two ticks settles whether the FIRST gap scales
+with the tick (so first-paint latency scales too) or is fixed (a floor on
+what any tick can buy). Boot 409's native `--queues 4` showed that first gap
+at ~3 ticks against ~1 per queue afterwards.
