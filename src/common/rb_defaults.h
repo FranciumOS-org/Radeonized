@@ -60,6 +60,24 @@ static const char *const rb_default_on_tokens[] = {
      * the failure mode is the behaviour of every boot before it. Read-only
      * registers; no new write surface. */
     "-rbgpufbgpuname",
+    /* 2CE: the Metal name. `ATY,FamilyName`/`ATY,DeviceName` on IGPU@0, which
+     * Apple's `AMDRadeonX6000MTLDriver` reassembles into `[MTLDevice name]`
+     * and `SPDisplaysReporter` then pairs by that name - so this one token is
+     * what makes System Information read `AMD Radeon 680M` AND
+     * `Metal Support: Metal 3` instead of the two fallback strings
+     * concatenated (2CB/2CD). Opt-in until now for a named reason: both
+     * property names also appear in `AMDRadeonX6000Framebuffer`, so Apple's
+     * kexts read them too and that consumer is unread (2q9/2qa).
+     *
+     * Default-on now because the standard this table asks for is MEASURED
+     * BOOTS, and it has two: 417 and 418, both reading `gpuname_cc_raw`
+     * 0xFFF80001 -> 12 CU -> "AMD Radeon 680M", `aty_ok` 1, `RBFBModelSrc`
+     * "derived", with an accelerated desktop on top of it (rule 44 - and the
+     * unread consumer has now had two boots to misbehave in and has not).
+     * The strings are DERIVED from the silicon, so the failure mode is
+     * `rb_gpu_aty_split()` refusing and publishing nothing, which is the
+     * behaviour of every boot before 2CB. */
+    "-rbgpumtlname",
     /* brightness, measured working on this OS across consecutive boots:
      * 2xs the duty cycle (boot 249), 2xy the AppleBacklightDisplay match
      * (boot 250), 2y1 the full-length parameter name (boot 252), 2y2 the
