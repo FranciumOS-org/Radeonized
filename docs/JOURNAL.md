@@ -56582,3 +56582,152 @@ absent from it.
 we look, which decides whether the harvest half works at all. A `why` of 2
 means it is not, and then the name is the fallback while the 4096 MB is still
 derived.
+
+## 2CB — the Metal name is two IOKit properties, and that is also "Metal: 3"
+
+The user asked whether other projects (WhateverGreen, NootedGreen, Cobalt64)
+show Metal 3 and how. They were not needed: the mechanism is in Apple's own
+binaries and is now read out of them. **2C9's central claim about this is
+WRONG and is withdrawn.**
+
+### 2C9 said there was a device-id table. There is not.
+
+2C9 recorded: "the marketing name lives in a device-id -> string table inside
+Apple's driver and 1002:1681 is not in it - that lookup failing IS the Metal
+name". `AMDRadeonX6000MTLDriver` has no such table. It has two tiny accessors,
+at unslid `0x7ffb111e7916` and `0x7ffb111e7961`:
+
+```
+familyName() = lookup(@"ATY,FamilyName") ?: @"Radeon HD"
+deviceName() = lookup(@"ATY,DeviceName") ?: @"GFX10 Family Unknown Prototype"
+```
+
+and `lookup` at `0x7ffb110f52ed` is, **decoded byte-exactly** — both call
+targets read as `ff 25` stubs, their displacements followed to GOT slots
+`0x7ffb40015298` and `0x7ffb400152d0`, and both slots resolved against
+IOKit's own `dyld_info -exports` table (base `0x7FF806C54000`, offsets `0x2268`
+and `0x3B8B`):
+
+```c
+IORegistryEntryGetParentEntry(accel_entry, "IOService", &parent);
+return IORegistryEntryCreateCFProperty(parent, key, kCFAllocatorDefault, 0);
+```
+
+So the Metal name is `"AMD " + family + " " + device`, and the observed
+**"AMD Radeon HD GFX10 Family Unknown Prototype" is both fallbacks
+concatenated** — the two properties simply do not exist on this machine,
+because `RBAMDFramebuffer` displaced the Apple framebuffer that publishes
+them (`AMDRadeonX6000Framebuffer` contains both strings). Nothing is missing
+from a table; two properties are missing from a node.
+
+`GetParentEntry`, **not** `SearchCFProperty`: the lookup is one level and not
+recursive, so the properties must sit on that exact node. Verified on the live
+registry — the MTLDevice's `registryID` **0x100000507** *is* the
+`AMDRadeonX6000_AMDNavi21GraphicsAccelerator` node, and its single IOService
+parent is the `IGPU@0` IOPCIDevice. Our framebuffer and our peer are
+**siblings** of the accelerator, so publishing there would be invisible.
+
+(Also: the registryID is **not stable across boots** — 2C9 recorded
+0x100000523, today it reads 0x100000507. Do not treat it as a constant.)
+
+### And the same reading explains "Metal: Supported"
+
+`SPDisplaysReporter.spreporter` pairs each MTLDevice to a GPU dictionary **by
+name**, disassembled at `0xa50d`-`0xa64c`, four tests ORed:
+
+1. `[sppci_model caseInsensitiveCompare:[dev name]] == NSOrderedSame`
+2. `[dev name]` contains `@"Intel"`
+3. `[dev name]` contains (`sppci_model` with `@"AMD"` removed)
+4. `[dev name]` contains `@"Apple"`
+
+**All four fail here, measured on the real strings** by running the reporter's
+own four comparisons against the live device. On failure it branches to
+`0xaeba` and writes **none** of its per-device keys. On success it
+`removeObjectForKey:`s `spdisplays_metal` *and* `spdisplays_metalfamily` and
+writes `spdisplays_mtlgpufamilysupport` = metal4/metal3/metal2, chosen by
+`supportsFamily:` **0x138A (5002)** then **0x1389 (5001)**.
+
+**Two more 2C9 errors follow from this.** It asked "what is the condition for
+writing `spdisplays_metalfamily`" — a key the modern path *deletes*; the
+modern key is `spdisplays_mtlgpufamilysupport`. And it reported the reporter
+"omits `spdisplays_metalfamily` entirely" when our dict is missing **six**
+keys, not one: `spdisplays_metal_slot`, `_headless`, `_peer_group`,
+`_peer_index`, `_removable` and the family. All six come from the one loop, so
+**the six-key signature is the test**: a fix that works makes them appear
+together.
+
+**And 2C9's discarded inference was right.** It formed "it pairs by `name`",
+discarded it because `registryID` is in the selector table, and recorded "no
+mechanism". Both selectors are in the table; `registryID` serves a different
+key. **The presence of a selector in a selector table is not evidence about
+which comparison gates a path** — that is what cost 2C9 the answer it was one
+step from.
+
+Measured on this machine: `supportsFamily:5001` **YES**, `5002` **no**, so a
+successful pairing writes exactly `spdisplays_metal3`.
+
+### One fix serves both asks
+
+Publish the two properties so that Apple's reassembly returns our `model`
+byte-identically; then test 1 matches exactly. `rb_gpu_aty_split()` requires
+the `"AMD "` prefix (Apple prepends that word unconditionally) and cuts the
+remainder at its **first** space: `"AMD Radeon 680M"` -> `Radeon` + `680M`;
+`"AMD Radeon Graphics (Rembrandt, 12 CU)"` -> `Radeon` + `Graphics
+(Rembrandt, 12 CU)`. A model that cannot round-trip is **refused with both
+buffers emptied**, because a Metal name that disagrees with `model` is the
+defect being fixed, not a partial improvement.
+
+`RembrandtGPUPeer::publishAtyName2CB()` does the publish on `pciDevice`.
+**Not a new write surface**: `start()` already publishes `@0,name`,
+`ATY,bin_image` and `RBGPULoad` on that same node by that same call, so only
+the two keys are new. **OSString deliberately** — the driver returns the
+property straight where a CFString is expected, so an OSData would arrive as
+a CFData. The **readback decides**, not the store (rules 13/20): the properties
+are re-read, type-checked with `OSDynamicCast` and compared, with `aty_why`
+carrying 1 no pciDevice / 2 derivation refused / 3 model cannot round-trip /
+4 did not read back.
+
+**OPT-IN (`-rbgpumtlname`), and the reason is a consumer not yet read:** both
+strings also appear in `AMDRadeonX6000Framebuffer`, so Apple's kexts read them
+too and what they do with "Radeon"/"680M" is unestablished. One consumer read
+is not the consumer set (2q9/2qa).
+
+### 2CA's cache corrected in passing
+
+`rbgpu_gpuname_derive_2CA()` latched its result on first call, including the
+"register aperture not up yet" refusal — and `g_hw.ctx` comes up with the
+accelerator's SMU slot init, **later** than the peer's `start()`. A cached
+transient looks permanent, which is 2A3's defect in another costume. Now only
+real readings latch; `gpuname_early` counts the early calls and the periodic
+publish retries until one publish succeeds.
+
+### Tested
+
+Hosttest green; `make kext tools`, `make plugin`, `make fbkext` clean; plugin
+resolves **0** from `SystemKernelExtensions.kc`; plugin UUID **52ECC8FB**,
+framebuffer unchanged at **DFBFF2A7** (2CB is plugin-only).
+
+**A break-it check caught its own test being wrong, which is the method
+working.** Moving the cut to the *last* space was caught — but by an unrelated
+buffer assertion, i.e. it passed for the wrong reason (2BC's lesson, second
+instance). The round trip is **invariant to the cut position** (join is
+`family + " " + device` whichever space was chosen) and `"AMD Radeon 680M"`
+has only one space, so neither existing assertion could discriminate. Added a
+multi-space case; the break now fails with `'Radeon Graphics (Rembrandt, 12'`
+/ `'CU)'`, for the right reason.
+
+### Not done
+
+**No boot has read it**, and no claim is made that the name or the Metal line
+changes. The prediction, written down first so it is falsifiable: with
+`-rbgpumtlname` armed, `aty_ok` 1, `[MTLDevice name]` becomes exactly
+`"AMD Radeon 680M"`, and System Information gains **all six** per-device keys
+with `spdisplays_mtlgpufamilysupport = spdisplays_metal3`. If the name changes
+and the six keys do not, the pairing has a condition beyond the four tests and
+this reading is incomplete.
+
+Also not addressed: the other projects. **NootedGreen is a ChefKiss project
+and is off-limits under this card's hard rule** — not read, not analysed, and
+anything from it has to come from the user in their own words. WhateverGreen
+(Acidanthera, BSD) was readable and turned out unnecessary. Cobalt64 could not
+be confirmed by search and nothing is claimed about it.

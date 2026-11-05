@@ -268,6 +268,126 @@ static inline int rb_gpu_name(uint32_t cu, char *out, uint32_t outlen)
     return 0;
 }
 
+/* ===================================================================== 2CB
+ * THE METAL NAME IS TWO IOKit PROPERTIES, NOT A DEVICE-ID TABLE - and that
+ * is also how "Metal: 3" gets into System Information.
+ *
+ * 2C9 recorded "the marketing name lives in a device-id -> string table
+ * inside Apple's driver and 1002:1681 is not in it". That is WRONG, and
+ * AMDRadeonX6000MTLDriver says so in two functions:
+ *
+ *   familyName()  = lookup(@"ATY,FamilyName") ?: @"Radeon HD"
+ *   deviceName()  = lookup(@"ATY,DeviceName") ?: @"GFX10 Family Unknown Prototype"
+ *
+ * where `lookup` is, byte-exactly (both stubs decoded to their GOT slots and
+ * both slots resolved against IOKit's own export table):
+ *
+ *   IORegistryEntryGetParentEntry(accel_entry, "IOService", &parent)
+ *   IORegistryEntryCreateCFProperty(parent, key, kCFAllocatorDefault, 0)
+ *
+ * So the name is `"AMD " + family + " " + device` - which is exactly the
+ * observed "AMD Radeon HD GFX10 Family Unknown Prototype", both halves being
+ * the FALLBACKS because neither property exists. There is no table and
+ * nothing to patch: the two properties are read from **the accelerator's
+ * single parent in the IOService plane**, which on this machine is the
+ * `IGPU@0` IOPCIDevice (verified: the MTLDevice's registryID 0x100000507 IS
+ * the accelerator node, and its parent is IGPU@0).
+ *
+ * `GetParentEntry`, NOT `SearchCFProperty` - the lookup is ONE level and not
+ * recursive, so the properties must sit on IGPU@0 exactly. Publishing them
+ * on our own framebuffer or on the peer would be invisible, and both are
+ * siblings of the accelerator rather than ancestors.
+ *
+ * WHY THIS ALSO ANSWERS "Metal: 3". SPDisplaysReporter pairs each MTLDevice
+ * to a GPU dictionary by NAME, four tests (disassembled at 0xa50d-0xa64c):
+ *   1  [sppci_model caseInsensitiveCompare:[dev name]] == NSOrderedSame
+ *   2  [dev name] contains @"Intel"
+ *   3  [dev name] contains (sppci_model with @"AMD" removed)
+ *   4  [dev name] contains @"Apple"
+ * All four fail here, measured on the real strings, so the reporter bails
+ * and writes NONE of its six per-device keys. Make the Metal name equal our
+ * `model` and test 1 matches exactly, which is why one fix serves both asks.
+ *
+ * So the split has to RECONSTRUCT our own model string through Apple's
+ * format. `"AMD " + family + " " + device` must come back byte-identical to
+ * `model`, which means: require the "AMD " prefix, then cut the remainder at
+ * its FIRST space. "AMD Radeon 680M" -> "Radeon" + "680M"; the generic
+ * "AMD Radeon Graphics (Rembrandt, 12 CU)" -> "Radeon" + "Graphics
+ * (Rembrandt, 12 CU)". A model that does not start with "AMD " is REFUSED
+ * rather than published, because Apple prepends that word unconditionally
+ * and publishing anything else would make the name disagree with `model` -
+ * which is the exact failure this is fixing.
+ * ===================================================================== */
+
+/* Split `model` the way AMDRadeonX6000MTLDriver will reassemble it. Returns
+ * 1 on success with both buffers NUL-terminated, 0 on refusal with both
+ * buffers emptied - a caller must publish nothing on 0 rather than publish
+ * one half (rule 14; half a name is a name that does not match). */
+static inline int rb_gpu_aty_split(const char *model,
+                                   char *family, uint32_t flen,
+                                   char *device, uint32_t dlen)
+{
+    static const char kPrefix[] = "AMD ";
+    uint32_t i, j, cut;
+
+    if (!family || !device || flen < 2u || dlen < 2u) {
+        return 0;
+    }
+    family[0] = '\0';
+    device[0] = '\0';
+    if (!model) {
+        return 0;
+    }
+    /* Apple prepends "AMD " itself, so our model must carry it or the
+     * reassembled name cannot equal `model`. */
+    for (i = 0; kPrefix[i]; i++) {
+        if (model[i] != kPrefix[i]) { return 0; }
+    }
+    /* Cut the remainder at its first space: everything before is the family,
+     * everything after is the device, and the separator is the single space
+     * Apple puts back. */
+    cut = 0u;
+    for (j = i; model[j]; j++) {
+        if (model[j] == ' ') { cut = j; break; }
+    }
+    if (cut == 0u || cut == i) {
+        return 0;   /* no space, or an empty family - nothing to split */
+    }
+    if (model[cut + 1u] == '\0') {
+        return 0;   /* trailing space, so the device half would be empty */
+    }
+    if ((cut - i) + 1u > flen) {
+        return 0;
+    }
+    for (j = 0; i + j < cut; j++) { family[j] = model[i + j]; }
+    family[j] = '\0';
+    for (j = 0; model[cut + 1u + j]; j++) {
+        if (j + 1u >= dlen) { family[0] = '\0'; device[0] = '\0'; return 0; }
+        device[j] = model[cut + 1u + j];
+    }
+    device[j] = '\0';
+    return 1;
+}
+
+/* What Apple will build from those two halves, so the hosttest can check the
+ * round trip rather than trust the split. Returns 1 on success. */
+static inline int rb_gpu_aty_join(const char *family, const char *device,
+                                  char *out, uint32_t outlen)
+{
+    static const char kPre[] = "AMD ";
+    uint32_t i = 0, j;
+
+    if (!out || outlen < 2u || !family || !device) { return 0; }
+    out[0] = '\0';
+    for (j = 0; kPre[j]; j++)   { if (i + 1u >= outlen) { return 0; } out[i++] = kPre[j]; }
+    for (j = 0; family[j]; j++) { if (i + 1u >= outlen) { return 0; } out[i++] = family[j]; }
+    if (i + 1u >= outlen) { return 0; }
+    out[i++] = ' ';
+    for (j = 0; device[j]; j++) { if (i + 1u >= outlen) { return 0; } out[i++] = device[j]; }
+    out[i] = '\0';
+    return 1;
+}
+
 /* The carve-out size in MB, as the chip reports it, with the same refusal
  * discipline `rb_probe.c` already applies to this register: 0xFFFFFFFF is an
  * unmapped read and 0 is a chip that has not been told its own size. Returns
