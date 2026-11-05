@@ -52,7 +52,8 @@ struct rb_retire {
     uint64_t subPeriodNs;  /* the vblank period the framebuffer last reported */
     uint64_t subRetires;   /* interior retires, cumulative */
     uint64_t subSkipped;   /* interior fires that found the run already full */
-    uint64_t subLate;      /* interior arms whose slot was already past */
+    uint64_t subFull;      /* arms that found the run complete - ONE PER FRAME */
+    uint64_t subLate;      /* arms whose slot was already past - a real miss */
 };
 
 /* 2zf: IS THIS MODE ONE THE VBLANK CAN CARRY?
@@ -98,6 +99,7 @@ static inline void rb_retire_reset(struct rb_retire *r, uint32_t armed)
     r->subPeriodNs  = 0u;
     r->subRetires   = 0u;
     r->subSkipped   = 0u;
+    r->subFull      = 0u;
     r->subLate      = 0u;
 }
 
@@ -391,16 +393,46 @@ static inline int rb_retire_sub_should(struct rb_retire *r)
  * anchor is a timestamp taken on another thread, so a late fire is ordinary
  * rather than exceptional. The caller falls back to the watchdog arm and the
  * next vblank re-anchors everything. */
+#define RB_SUB_ARM_OK    0u   /* a deadline was produced */
+#define RB_SUB_ARM_FULL  1u   /* the run is complete - the next one is the VBLANK */
+#define RB_SUB_ARM_LATE  2u   /* the slot is already past - a real miss */
+#define RB_SUB_ARM_OFF   3u   /* interior occasions are not in use */
+
+/* 2D0: ONE COUNTER FOR TWO CAUSES IS RULE 14, AND 2CF SHIPPED IT.
+ *
+ * The first version returned 0 for "the run is complete" and for "the slot is
+ * already past", and the caller counted both as `subLate`. Boot 424 then read
+ * `vblret_sublate` climbing at **146/s - exactly once per vblank** - which is
+ * the run completing, the ordinary and expected case, indistinguishable in
+ * that key from a subdivision missing its slots. `subret` duly printed it as
+ * the thing to check when it wrongly thought the mechanism was inert, so the
+ * misnamed counter was the headline suspect for a defect that was in the tool.
+ * A header whose every other refusal is a distinct code had the one place it
+ * mattered merged into a bool. */
+static inline uint32_t rb_retire_sub_arm(const struct rb_retire *r,
+                                         uint64_t sub_period_abs,
+                                         uint64_t now,
+                                         uint64_t *out)
+{
+    uint64_t d;
+
+    if (out) { *out = 0u; }
+    if (!rb_retire_sub_active(r) || !sub_period_abs) { return RB_SUB_ARM_OFF; }
+    if (r->subRun + 1u >= r->sub) { return RB_SUB_ARM_FULL; }
+    d = r->lastVbl + sub_period_abs * (uint64_t)(r->subRun + 1u);
+    if (d <= now) { return RB_SUB_ARM_LATE; }
+    if (out) { *out = d; }
+    return RB_SUB_ARM_OK;
+}
+
+/* Kept as the deadline-or-zero form the call site and the hosttest already
+ * use; the CAUSE comes from rb_retire_sub_arm(). */
 static inline uint64_t rb_retire_sub_deadline(const struct rb_retire *r,
                                               uint64_t sub_period_abs,
                                               uint64_t now)
 {
-    uint64_t d;
-
-    if (!rb_retire_sub_active(r) || !sub_period_abs) { return 0u; }
-    if (r->subRun + 1u >= r->sub) { return 0u; }      /* run is full */
-    d = r->lastVbl + sub_period_abs * (uint64_t)(r->subRun + 1u);
-    if (d <= now) { return 0u; }
+    uint64_t d = 0u;
+    (void)rb_retire_sub_arm(r, sub_period_abs, now, &d);
     return d;
 }
 

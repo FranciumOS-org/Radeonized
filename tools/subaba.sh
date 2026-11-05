@@ -42,6 +42,9 @@ PROBE=build/out/metal_probe
 RUNS=${1:-3}
 
 [ -x "$SUB" ]   || { echo "no $SUB - make subret" >&2; exit 2; }
+# And on a signal: a SIGPIPE from piping this into `head` is what first left
+# the dial off its default, so the restore is a trap, not a final line.
+trap '"$SUB" 1 >/dev/null 2>&1; echo; echo "(interrupted - restored sub=1)"; exit 130' INT TERM PIPE
 [ -x "$PROBE" ] || { echo "no $PROBE - make metal_probe" >&2; exit 2; }
 
 # Rule 39/34, enforced: the dial is inert unless the VBLANK drives, and a null
@@ -78,7 +81,15 @@ while [ "$i" -le "$RUNS" ]; do
     # mechanism inert. A failure here must abort rather than measure.
     if ! "$SUB" "$s" > /tmp/.subaba.$$ 2>&1; then
       echo "  SUBRET FAILED - not measuring this run:"; sed 's/^/    /' /tmp/.subaba.$$
-      rm -f /tmp/.subaba.$$; exit 3
+      rm -f /tmp/.subaba.$$
+      # 2D0: RESTORE ON THIS PATH TOO. The first version exited here without
+      # restoring, so boot 424 was left sitting on the B side after an abort -
+      # and the next thing typed would have measured B while believing it was
+      # A. Rule 34: a dial's state at the start of an experiment is part of
+      # its arm, and that applies to the state a FAILURE leaves behind.
+      "$SUB" 1 >/dev/null 2>&1
+      echo "  (restored sub=1)"
+      exit 3
     fi
     grep -E 'interior retires|vblret_sub now' /tmp/.subaba.$$ | sed 's/^/  /'
     rm -f /tmp/.subaba.$$
