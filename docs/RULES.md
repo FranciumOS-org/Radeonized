@@ -1005,6 +1005,43 @@ table and refuses to install one that does not match the running kernel;
   the ladder and watch for 2zc's two-sided curve.
   The other route is unchanged and costs something: `-rbgpunoretirevbl` at
   native gives up 2zg's variance collapse (+-3.5 % -> +-20 %).
+  **2D0 RAN IT AND IT WORKS (boot 424, native, interleaved): eight-queue
+  spread 55.344 -> 14.582 ms and FIRST PAINT 13.877 -> 3.514 ms, a 3.95x
+  against the 4.0 written down first.** The mechanism is corroborated
+  independently of the ladder - `vblret_subret` +438/s against an expected
+  3 x 146, `vblret_subns` 1738126 = period/4 exactly, `subskip` 0 - and the
+  ladder steps by the placed spacing (1.852 measured vs 1.738 ns).
+  **2C7's OPEN QUESTION IS ANSWERED THE GOOD WAY: the first gap SCALES.** In
+  quanta the steady gap is 1.00 and the first is 2.00 **at both quanta 4x
+  apart**, so boot 409's multi-tick startup is a fixed number of OCCASIONS,
+  not a fixed time - no floor the dial cannot buy. **And that explains the
+  coefficient 2C7 recorded as "NOT explained": the queue 0 -> 1 interval is
+  also 2 quanta and every later one is 1, so `spread = 2 + 6 x 1 = 8`.** It
+  needed no experiment, only keeping the per-queue column instead of grepping
+  `spread`.
+  **NOT a configuration claim: ONE usable B window** (the second was aborted
+  by my own tool, below), so rule 44 is unsatisfied; the FRAME RATE is
+  **unmeasured** - the interleaved `paired.sh` pass has not been run, and
+  2zc's two-sided curve is the shape to watch for; and rule 45's human
+  observation of the actual complaint has not been taken.
+  **Three instrument defects, all mine, all shapes this card already
+  records.** (1) **`subret` reported the mechanism DEAD while it ran at
+  438/s** and aborted the run: the effect check slept 600 ms and compared two
+  reads of `RBGPUDiag`, a snapshot on a 250 ms throttle that **drops**
+  refreshes (2ez) - rule 31, and **the same defect 2C5 fixed in the DIAL check
+  of that very file, reintroduced fifteen lines later in the EFFECT check**.
+  It polls a monotonic counter now. (2) **`rb_retire_sub_deadline()` returned
+  0 for both "run complete" and "slot already past"**, so `vblret_sublate`
+  climbed at **146/s - once per vblank, every run completing normally** - and
+  the tool printed that innocent key as the headline suspect. Rule 14 in the
+  file whose comments argue for rule 14; split into `rb_retire_sub_arm()` with
+  `RB_SUB_ARM_OK/FULL/LATE/OFF` and `vblret_subfull` published apart.
+  (3) **`subaba.sh`'s abort path left the dial on the B side** - 2B6's method
+  error again - now restored on failure and in a `trap` for INT/TERM/PIPE.
+  Plugin **0C96F646**, **framebuffer unchanged at 2CE724E1 and VERIFIED so**
+  (all nine objects recompiled on the header touch and the binary is
+  byte-identical, because the additions are uncalled inlines there and
+  `rb_retire_vbl_suits()` takes no struct) - **plugin-only reinstall.**
   **AND THE TICK IS A RUNTIME DIAL (2C4).** `{"RBGPUTickUs": N}` via
   `build/out/tickset`;
   `rbgpu_2xg_arm_next()` recomputes its period from the global on every arm,
@@ -2232,7 +2269,9 @@ VBLANK period, default 1. The 2C5-2C8 ladder lever at NATIVE refresh, where
 `tickset` is inert; interior occasions are anchored on `lastVbl` and
 re-anchored every frame, so this is one period subdivided and not 2zc's two
 beating timers. Refuses when `vblret_src` is 0 - use `tickset` there - and
-exits 6 if `vblret_subret` is not climbing. NO BOOT HAS READ IT.)**
+exits 6 if `vblret_subret` is not climbing - by POLLING it, never by
+sleeping and comparing two snapshot reads, which is how 2D0's run was
+aborted. **2D0 measured it: first paint 13.9 -> 3.5 ms at sub 4.**)**
 **`{"RBFBTriple": 0|1}` via `build/out/tripleset` (2B1 - DCN's SECOND pending
 flip slot, `SURFACE_TRIPLE_BUFFER_ENABLE`, which reads 0 on every boot since
 216. OFF by default and a new hardware-write surface in the display path:
