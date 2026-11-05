@@ -524,6 +524,82 @@ int retire_tests(void)
             }
         }
 
+        /* 2D0: THE TWO ARM REFUSALS ARE DISTINCT, and boot 424 is why.
+         * `vblret_sublate` climbed at 146/s - one per vblank, i.e. every run
+         * COMPLETING - and read as "slots missed" because one counter carried
+         * both causes. A header whose every other refusal is a code had this
+         * one merged into a deadline-or-zero. */
+        {
+            struct rb_retire r;
+            const uint64_t L = 1000000u, P = 400u;
+            uint64_t d = 1234u;
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u; r.subPeriodNs = native;
+            (void)rb_retire_vbl_offer(&r, L, native);
+
+            if (rb_retire_sub_arm(&r, P, L, &d) != RB_SUB_ARM_OK ||
+                d != L + P) {
+                printf("FAIL 2D0: a placeable slot must report OK with its "
+                       "deadline\n"); bad++;
+            }
+            /* The run completing: the ordinary end of a frame. */
+            r.subRun = 3u; d = 1234u;
+            if (rb_retire_sub_arm(&r, P, L, &d) != RB_SUB_ARM_FULL || d != 0u) {
+                printf("FAIL 2D0: a complete run must report FULL, not "
+                       "LATE - 146/s of FULL read as a fault on boot 424\n");
+                bad++;
+            }
+            /* A slot genuinely missed. */
+            r.subRun = 0u; d = 1234u;
+            if (rb_retire_sub_arm(&r, P, L + 10u * P, &d) != RB_SUB_ARM_LATE ||
+                d != 0u) {
+                printf("FAIL 2D0: a past slot must report LATE\n"); bad++;
+            }
+            /* Not in use at all is a third answer, not a miss. */
+            r.sub = 1u; d = 1234u;
+            if (rb_retire_sub_arm(&r, P, L, &d) != RB_SUB_ARM_OFF || d != 0u) {
+                printf("FAIL 2D0: sub=1 must report OFF, not FULL or LATE\n");
+                bad++;
+            }
+            /* FULL and LATE must not be the same value, or the split is
+             * cosmetic and the plugin's two counters are one again. */
+            if (RB_SUB_ARM_FULL == RB_SUB_ARM_LATE ||
+                RB_SUB_ARM_OK == RB_SUB_ARM_FULL ||
+                RB_SUB_ARM_OFF == RB_SUB_ARM_LATE) {
+                printf("FAIL 2D0: the arm codes collide\n"); bad++;
+            }
+        }
+
+        /* 2D0: BOOT 424's OWN LADDER, as arithmetic rather than as a story.
+         * The per-queue column measured 1 quantum per queue with the FIRST
+         * interval costing 2, at both quanta - which is where 2C7's
+         * unexplained coefficient 8 comes from: 2 + 6 x 1. Pinned here so a
+         * later change to the subdivision cannot quietly stop reproducing the
+         * measurement that justified it. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.src = RB_RETIRE_SRC_VBL; r.sub = 4u; r.subPeriodNs = native;
+            /* The interior quantum IS what the ladder stepped by: boot 424
+             * read 1.852 ms steady against this 1.738 ms spacing. */
+            if (rb_retire_sub_period_ns(&r) != 1738126u) {
+                printf("FAIL 2D0: sub=4 at native must be boot 424's measured "
+                       "1738126 ns, got %llu\n",
+                       (unsigned long long)rb_retire_sub_period_ns(&r)); bad++;
+            }
+            /* 8 quanta of spread: the first interval 2, the next six 1 each. */
+            {
+                const uint64_t q = rb_retire_sub_period_ns(&r);
+                const uint64_t spread = 2u * q + 6u * q;
+                /* boot 424 measured 14.582 ms; allow 10 % for scheduling. */
+                if (spread < 13000000u || spread > 16000000u) {
+                    printf("FAIL 2D0: 8 quanta at sub=4 should be boot 424's "
+                           "~14.6 ms spread, got %llu ns\n",
+                           (unsigned long long)spread); bad++;
+                }
+            }
+        }
+
         /* THE WATCHDOG STILL OWNS A DEAD VBLANK. Interior fires must not
          * refresh `lastVbl`, or a stopped vblank looks live forever and 2xe's
          * one-frame-per-ten-seconds desktop comes back with no way out. */
@@ -595,6 +671,6 @@ int retire_tests(void)
 
     printf("retire: the 2zd handover - unarmed decline, single handoff, the "
            "watchdog takeback, a non-advancing clock, role-dependent period "
-           "and 200 interleaved frames, plus 2zf's mode gate, 2C2's drain clamp and 2C4's tick dial and 2CF's sub-vblank occasions%s\n", bad ? " FAILED" : ": passed");
+           "and 200 interleaved frames, plus 2zf's mode gate, 2C2's drain clamp and 2C4's tick dial and 2CF's sub-vblank occasions and 2D0's split arm codes against boot 424's ladder%s\n", bad ? " FAILED" : ": passed");
     return bad;
 }

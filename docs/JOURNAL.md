@@ -57108,3 +57108,132 @@ timer drives, so `tickset 2084` is live with no install and no reboot, and then
 opening iMessage, Settings and the wifi menu is the reading. A null there
 retires the line however clean the lattice is, and it decides whether 2CF was
 worth building before 2CF is ever installed.
+
+## 2D0 - IT WORKS: first paint 13.9 -> 3.5 ms, and 2C7's coefficient 8 is EXPLAINED
+
+Boot 424, native (143898 mHz, `RBFBVBLPeriodNs` 6952507), `vblret_src` 1,
+plugin 4904198B / framebuffer 2CE724E1 - the 2CF binaries, verified by
+`kextstat` against the build (rule 15). `tools/subaba.sh` interleaved
+`sub 1` / `sub 4` run by run.
+
+**THE LADDER, with the per-queue column 2C7 asked for and nobody had kept:**
+
+```
+            A1 (sub 1)   A2 (sub 1)    B (sub 4)
+queue 0         14.127       13.626        3.514
+queue 1         28.006       27.390        6.984
+queue 2         35.049       34.491        8.885
+queue 3         41.993       42.085       10.628
+queue 4         48.963       48.315       12.274
+queue 5         55.198       56.017       14.430
+queue 6         62.883       62.536       16.236
+queue 7         69.090       69.351       18.096
+spread          54.963       55.725       14.582
+```
+
+**spread 55.344 (A mean) -> 14.582, ratio 3.795. FIRST PAINT 13.877 ->
+3.514, ratio 3.949.** The prediction written down before the reading was 4.0,
+and first paint hits it to 1.3 %.
+
+**2C7's OPEN QUESTION IS ANSWERED, AND WITH THE GOOD ANSWER: the first gap
+scales.** It named this "cheap and decisive" and said every run so far had
+grepped `spread` and discarded the column. Expressed in quanta - the vblank
+period for A, the interior spacing 1738126 ns for B:
+
+```
+steady gap:   A 0.985 / 1.006 vblank periods     B 1.066 interior periods
+first gap:    A 1.996 vblank periods             B 2.022 interior periods
+```
+
+Same structure at two quanta 4x apart, three runs. So the multi-quantum
+startup boot 409 saw is a fixed number of **OCCASIONS**, not a fixed TIME -
+there is no floor the dial cannot buy, and the user's first-paint latency
+scales with the subdivision.
+
+**AND IT EXPLAINS THE COEFFICIENT 2C7 RECORDED AS "NOT explained".** That
+milestone fitted `spread = 8.036 x tick` and said `queues_on()` creates `nq`
+queues so eight span SEVEN intervals, leaving 8 unaccounted. The column shows
+why: the queue 0 -> queue 1 interval is also **2 quanta** (13.879 / 13.764 /
+3.470 ms) and every later one is 1, so `spread = 2 + 6 x 1 = 8 quanta`. One
+account, three runs, two quanta - and it needed no new experiment, only
+keeping a column.
+
+**THE EFFECT IS PROVEN DIRECTLY, not only through the ladder.** Live with
+`sub` 4, sampled three times a second apart: `vblret_vbl` +146/s,
+`vblret_subret` **+438/s** against an expected 3 x 146 = 438, `vblret_subns`
+**1738126** = 6952507/4 exactly, `vblret_subskip` 0. The interior occasions
+fire at the designed rate and the ladder steps by their spacing (1.852 ms
+measured against 1.738 ms placed).
+
+### Two instrument defects, both mine, both of the kind this card keeps recording
+
+**(1) `subret` REPORTED THE MECHANISM DEAD WHILE IT RAN AT 438/s, and aborted
+the experiment it exists to protect.** Run 2's B side printed "interior
+retires are NOT climbing ... the subdivision is armed and inert". The effect
+check slept 600 ms and compared two reads of `RBGPUDiag` - a memcpy'd
+SNAPSHOT on a 250 ms throttle that **DROPS** requests rather than deferring
+them (2ez) - and with nothing generating activity both reads returned the same
+stale snapshot. Rule 31 exactly: *a counter that has not moved YET is not a
+counter that did not move.*
+
+The galling part is that **2C5 fixed this same defect in the DIAL check of
+this very file, and I wrote the EFFECT check fifteen lines later as
+sleep-then-compare** - having quoted 2C5's lesson in the comment above it. The
+dial check was right because it polls a monotonic counter past a known value;
+the effect check now does the same, with a timeout reported as a timeout
+rather than as a verdict.
+
+**(2) ONE COUNTER FOR TWO CAUSES, AND IT MADE THE INNOCENT CASE THE HEADLINE
+SUSPECT.** `rb_retire_sub_deadline()` returned 0 both for "the run is
+complete" and "the slot is already past", and the caller counted both as
+`subLate`. Boot 424 read `vblret_sublate` climbing at **146/s - exactly once
+per vblank**, which is every run completing normally, and `subret` printed
+that key as the thing to check when it wrongly believed the mechanism inert.
+**A header in which every other refusal is a distinct code had the one place
+it mattered merged into a deadline-or-zero** - rule 14, in the file whose
+comments argue for rule 14. Split into `rb_retire_sub_arm()` returning
+`RB_SUB_ARM_OK`/`FULL`/`LATE`/`OFF`, with `vblret_subfull` and
+`vblret_sublate` published apart and `subret` printing "runs completed"
+beside "slots MISSED".
+
+**(3) The abort path left the dial on the B side.** `subaba.sh` exited 3
+without restoring, so the machine sat at `sub` 4 after the failure and the
+next command typed would have measured B while believing it was A. That is
+2B6's method error, which this project has already paid for once with
+`holdaba.sh`. Restoring is now on the failure path and in a `trap` for
+INT/TERM/PIPE - the `PIPE` case because piping this script into `head` is what
+first left the dial off its default.
+
+Also corrected: both tools claimed "needs root". Measured false - the
+`setProperties` write takes as the console user and `vblret_subsets` advances.
+`subret` had inherited the line from `tickset`'s banner without it being
+checked.
+
+### What is and is not claimed
+
+**Claimed:** the subdivision works as designed, at the designed rate, and the
+ladder scales with it - two A runs bracketing one B run, interleaved, in one
+boot, with the mechanism independently corroborated by its own counters and by
+the step size matching the placed spacing. 2C7's coefficient is explained.
+
+**NOT claimed:** that this is a configuration. **Rule 44 wants two boots per
+side, and there is ONE usable B window** - the second was aborted by defect
+(1). The frame-rate side is entirely unmeasured here: these are extra
+`checkTimestamps()` calls in the regime 2zg measured as the quiet one, and
+2zc's two-sided curve is the shape to watch for, so the interleaved
+`paired.sh` pass has still not been run. **And rule 45 above all: the
+deliverable is "iMessage animations are so laggy", which a human observes.
+`metal_probe --queues 8` standing for that path is an assumption - 2A6 is
+what letting a benchmark stand in for a workload cost.**
+
+Plugin **0C96F646**; **framebuffer UNCHANGED at 2CE724E1**, verified rather
+than assumed - `make fbkext` recompiled all nine objects on the header touch
+(2y3's depfile fix working) and emitted a byte-identical binary, because the
+additions are `static inline` functions the framebuffer never calls and
+`rb_retire_vbl_suits()` takes no struct. **Plugin-only reinstall.**
+
+Hosttested with three break-it checks, each caught by its own assertion: a
+complete run reported as LATE, FULL and LATE given the same code, and sub=1
+reported as a completed run. Boot 424's own quantum (1738126 ns) and its
+8-quanta spread are pinned as arithmetic so a later change cannot quietly stop
+reproducing the measurement that justified this.

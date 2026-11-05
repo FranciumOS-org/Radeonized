@@ -14511,13 +14511,19 @@ static void rbgpu_2xg_arm_next(void) {
             uint64_t sub_abs = 0;
             clock_interval_to_absolutetime_interval(
                 static_cast<uint32_t>(sub_ns), kNanosecondScale, &sub_abs);
-            const uint64_t d = rb_retire_sub_deadline(&g_rb_2zd, sub_abs, now);
-            if (d) {
+            uint64_t d = 0;
+            const uint32_t why = rb_retire_sub_arm(&g_rb_2zd, sub_abs, now, &d);
+            if (why == RB_SUB_ARM_OK) {
                 g_rb_2xg_deadline = d;
                 thread_call_enter_delayed(g_rb_2xg_call, d);
                 return;
             }
-            g_rb_2zd.subLate++;
+            /* 2D0: FULL is the ordinary end of a run - the next occasion is
+             * the vblank itself - and LATE is a slot we actually missed. Boot
+             * 424 read these merged at 146/s, which is one per frame and
+             * therefore all FULL, and the merged key read as a fault. */
+            if (why == RB_SUB_ARM_FULL) { g_rb_2zd.subFull++; }
+            else if (why == RB_SUB_ARM_LATE) { g_rb_2zd.subLate++; }
         }
     }
 
@@ -14911,6 +14917,7 @@ void rbgpu_retire_publish_2zd(void) {
     rbgpu_diag_set_num("vblret_subsets", g_rb_2CF_sets);
     rbgpu_diag_set_num("vblret_subret",  g_rb_2zd.subRetires);
     rbgpu_diag_set_num("vblret_subskip", g_rb_2zd.subSkipped);
+    rbgpu_diag_set_num("vblret_subfull", g_rb_2zd.subFull);
     rbgpu_diag_set_num("vblret_sublate", g_rb_2zd.subLate);
     rbgpu_diag_set_num("vblret_subns",   rb_retire_sub_period_ns(&g_rb_2zd));
 }

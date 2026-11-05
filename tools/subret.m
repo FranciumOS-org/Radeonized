@@ -90,6 +90,7 @@ int main(int argc, char **argv)
     const long subns  = diagNum(peer, @"vblret_subns",   -1);
     const long subret = diagNum(peer, @"vblret_subret",  -1);
     const long sublat = diagNum(peer, @"vblret_sublate", -1);
+    const long subfull = diagNum(peer, @"vblret_subfull", -1);
     const long tick   = diagNum(peer, @"tick_us",        -1);
 
     if (live < 0) {
@@ -111,8 +112,14 @@ int main(int argc, char **argv)
            src == 0 ? "the TIMER (vblret_src 0) - use tickset instead" :
                       "UNKNOWN (vblret_src absent)");
     if (sets >= 0)   { printf("sets so far: %ld\n", sets); }
-    if (subret >= 0) { printf("interior retires: %ld   slots missed: %ld\n",
-                              subret, sublat < 0 ? 0 : sublat); }
+    if (subret >= 0) {
+        printf("interior retires: %ld   slots MISSED: %ld", subret,
+               sublat < 0 ? 0 : sublat);
+        /* 2D0: printed apart, because merged they read as a fault. A run
+         * completing is the ordinary end of a frame's subdivision. */
+        if (subfull >= 0) { printf("   runs completed: %ld", subfull); }
+        printf("\n");
+    }
     if (tick > 0)    { printf("(the timer's own period is %ld us, unused while "
                               "the vblank drives)\n", tick); }
 
@@ -223,21 +230,48 @@ int main(int argc, char **argv)
      * thing that says so. A dial that reads 4 with no interior retires is the
      * 2A9 shape - the feature on and the mechanism inert. */
     if (want > 1) {
-        const long before = diagNum(peer, @"vblret_subret", -1);
-        usleep(600000);
-        const long after = diagNum(peer, @"vblret_subret", -1);
-        printf("interior retires %ld -> %ld over ~0.6 s", before, after);
-        if (after > before) {
-            printf("   (%ld/s)\n", (after - before) * 10 / 6);
+        /* 2D0: POLL FOR A CHANGE, NEVER SLEEP-THEN-COMPARE.
+         *
+         * The first version slept 600 ms and compared two reads of
+         * `RBGPUDiag`. That dictionary is a memcpy'd SNAPSHOT on a 250 ms
+         * throttle that DROPS requests rather than deferring them (2ez), and
+         * nothing in a quiet moment schedules a refresh - so on boot 424 both
+         * reads returned the SAME stale snapshot and this printed
+         * "NOT climbing" while `vblret_subret` was in fact advancing at
+         * 438/s, exactly 3 per vblank. It reported the mechanism dead and
+         * aborted a run of the experiment it exists to protect.
+         *
+         * That is rule 31 - "a counter that has not moved YET is not a
+         * counter that did not move" - and it is the same defect 2C5 fixed in
+         * the DIAL check of this very file, reintroduced fifteen lines later
+         * in the EFFECT check. The dial check was right because it polls a
+         * monotonic counter until it passes a known value; so does this now,
+         * and a timeout is reported as a timeout rather than as a verdict. */
+        const long t0 = diagNum(peer, @"vblret_subret", -1);
+        long t1 = t0;
+        int ms = 0;
+        for (int i = 0; i < 40 && t1 <= t0; i++) {   /* up to ~4 s */
+            usleep(100000);
+            ms += 100;
+            t1 = diagNum(peer, @"vblret_subret", -1);
+        }
+        if (t1 > t0) {
+            printf("interior retires %ld -> %ld in %d ms   (climbing)\n",
+                   t0, t1, ms);
         } else {
-            printf("\n");
             fprintf(stderr,
-                    "\nWARNING: the dial reads %ld and interior retires are\n"
-                    "NOT climbing. The subdivision is armed and inert - check\n"
-                    "`vblret_sublate` (slots arriving already past) and\n"
-                    "`vblret_subns` (a zero means the framebuffer reported no\n"
-                    "vblank period, which an older fbkext build does). Do not\n"
-                    "read a ladder against this.\n", want);
+                    "\nWARNING: the dial reads %ld and `vblret_subret` did not\n"
+                    "advance in 4 s. Either the subdivision is inert or the\n"
+                    "diag snapshot is not refreshing at all - and those are\n"
+                    "NOT the same thing, so check both before believing it:\n"
+                    "  `vblret_subns`  zero = the framebuffer reported no\n"
+                    "                  vblank period (an older fbkext build);\n"
+                    "                  nonzero = the subdivision is placed.\n"
+                    "  `vblret_sublate` counts slots genuinely MISSED.\n"
+                    "  `vblret_subfull` counts runs COMPLETING - about one per\n"
+                    "                  vblank is correct and not a fault.\n"
+                    "Do not read a ladder against a dial you could not\n"
+                    "verify.\n", want);
             IOObjectRelease(peer);
             return 6;
         }
