@@ -7002,6 +7002,7 @@ void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
 // there executes, and it has 27 runs of >= 200 zero bytes.
 #include "rb_osver.h"
 #include "rb_retire.h"   /* 2zd: who drives frame retirement */
+#include "rb_gpuname.h" /* 2CA: the chip's own name and carve-out size */
 #include "rbgpu_mtlcave.h"
 
 // 2xz: WHICH PATCH ROW, AND WHAT HAPPENS WHEN THERE IS NONE.
@@ -14527,6 +14528,173 @@ void rbgpu_tick_us_set_2C4(uint32_t want) {
 }
 uint32_t rbgpu_tick_us_get_2C4(void) { return g_rb_2xg_us; }
 uint64_t rbgpu_tick_sets_get_2C4(void) { return g_rb_2C4_sets; }
+
+/* ===================================================================== 2CA
+ * THE GPU'S NAME AND CARVE-OUT SIZE, READ FROM THE CHIP.
+ *
+ * 2C9 established that the "AMD Radeon 680M / 4 GB" in System Information is
+ * not an OpenCore spoof but two literals in `RBAMDFramebuffer::start()`, and
+ * built `rb_gpuname.h` to derive them instead. This is the half that touches
+ * hardware: the framebuffer runs no discovery, holds no GC info and gets its
+ * `ATY,fb_size` from a boot-arg, so the plugin has to do the reads and hand
+ * the answers across the collection boundary.
+ *
+ * WHAT IS READ LIVE AND WHAT IS A DIE CONSTANT, stated because the
+ * difference is the whole honesty of the thing:
+ *   - LIVE: the harvest masks (efuse + VBIOS), `GRBM_GFX_INDEX` as their
+ *     precondition, and `RCC_CONFIG_MEMSIZE`. These are what distinguish one
+ *     Rembrandt SKU from another and what differ between boards.
+ *   - CONSTANT: the shader geometry, 1 SE x 2 SA x 3 WGP. It is a property of
+ *     the DIE, not the SKU, and the plugin has no discovery table to read it
+ *     from (`g_disc` is a hand-built two-IP structure for MP1). The constant
+ *     is pinned by the hosttest against the discovery data captured from this
+ *     machine, which is the only reason it is allowed to be a constant.
+ *
+ * THE PRECONDITION IS CHECKED, NOT ASSUMED (rule 47's shape, and 2CA's own
+ * reading of `gfx_v10_0.c`): the harvest mask is PER SHADER ARRAY and Linux
+ * selects each array with a `GRBM_GFX_INDEX` write before reading it. We do
+ * not write that register - the accelerator is live and owns it, and a stray
+ * selection would make every subsequent GC read in Apple's driver answer for
+ * the wrong array. So we read it, and if it is not in full broadcast the
+ * derivation REFUSES with a code rather than naming the chip off one array's
+ * mask.
+ *
+ * All four raw words are published beside the verdict, because publishing
+ * raw beside summary has now caught three wrong verdicts (2B0's bucket, 2B4's
+ * sign-extended HPD word, 2B9's AUX_HPD_SEL) - and because a 660M owner's
+ * reading of these keys is the only way the second table row ever gets
+ * confirmed on hardware.
+ *
+ * Read once and cached: these are strap and efuse values that do not change
+ * while the machine runs, and the consumer is a one-shot call from the
+ * framebuffer's setup path, not the frame path.
+ * ===================================================================== */
+static int      g_rb_2CA_done = 0;
+static uint32_t g_rb_2CA_cu   = 0;
+static uint32_t g_rb_2CA_mb   = 0;
+static uint32_t g_rb_2CA_why  = 0;   /* 0 ok, 1 no aperture, 2 not broadcast,
+                                      * 3 geometry/mask refused */
+static char     g_rb_2CA_name[RB_GPUNAME_MAX];
+
+static void rbgpu_gpuname_derive_2CA(void)
+{
+    /* GC segment bases measured on this chip four independent ways (2fd/2fg
+     * and the card's chip-facts section). seg0 carries the two shader-array
+     * config registers (BASE_IDX 0); GRBM_GFX_INDEX is BASE_IDX **1**, a
+     * different segment - conflating them would read a shader register and
+     * call it an index. */
+    const uint32_t kSeg0 = 0x1260;
+    const uint32_t kSeg1 = 0xa000;
+    uint32_t cc = 0, user = 0, idx = 0, memsize = 0, mask = 0;
+    uint32_t highest;
+
+    if (g_rb_2CA_done) {
+        return;
+    }
+    g_rb_2CA_done = 1;
+    g_rb_2CA_name[0] = '\0';
+
+    if (!g_hw.ctx || !g_hw.rreg) {
+        g_rb_2CA_why = 1;
+        rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
+        return;
+    }
+
+    /* Read nothing outside the window Apple mapped - a read past the end of
+     * the BAR mapping is a fault, not a diagnostic (the 2di rule, applied to
+     * a new register block). GRBM_GFX_INDEX in seg1 is the highest of the
+     * four. */
+    highest = ((kSeg1 + RB_GC_DW_GRBM_GFX_INDEX) * 4u) + 4u;
+    if (g_hw.mmio_len != 0 && highest > g_hw.mmio_len) {
+        g_rb_2CA_why = 1;
+        rbgpu_diag_set_num("gpuname_oow", 1);
+        rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
+        return;
+    }
+
+    cc      = g_hw.rreg(g_hw.ctx, (kSeg0 + RB_GC_DW_CC_SHADER_ARRAY_CONFIG)   * 4u);
+    user    = g_hw.rreg(g_hw.ctx, (kSeg0 + RB_GC_DW_USER_SHADER_ARRAY_CONFIG) * 4u);
+    idx     = g_hw.rreg(g_hw.ctx, (kSeg1 + RB_GC_DW_GRBM_GFX_INDEX)           * 4u);
+    memsize = g_hw.rreg(g_hw.ctx, RB_GPU_DW_RCC_CONFIG_MEMSIZE * 4u);
+
+    /* Raw first, always, whatever the verdict turns out to be. */
+    rbgpu_diag_set_num("gpuname_cc_raw",   cc);
+    rbgpu_diag_set_num("gpuname_user_raw", user);
+    rbgpu_diag_set_num("gpuname_grbm_idx", idx);
+    rbgpu_diag_set_num("gpuname_memsz_raw", memsize);
+
+    /* The carve-out is independent of the shader geometry and of the
+     * broadcast precondition, so it is decided on its own: a refused name
+     * must not cost us a correct memory size. */
+    g_rb_2CA_mb = rb_gpu_vram_mb(memsize);
+    rbgpu_diag_set_num("gpuname_mb", g_rb_2CA_mb);
+
+    if (!rb_gpu_harvest_read_valid(idx)) {
+        /* One array's mask cannot stand for the chip, and we will not write
+         * the register that would let us ask properly. Say so with a code
+         * (rule 14) - this is NOT "no harvest". */
+        g_rb_2CA_why = 2;
+        rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
+        return;
+    }
+
+    mask = rb_gpu_harvest_per_sa(rb_gpu_inactive_wgps(cc),
+                                 rb_gpu_inactive_wgps(user),
+                                 RB_REMBRANDT_NUM_WGP_PER_SA);
+    rbgpu_diag_set_num("gpuname_harvest", mask);
+
+    g_rb_2CA_cu = rb_gpu_cu_count(RB_REMBRANDT_NUM_SE,
+                                  RB_REMBRANDT_NUM_SA_PER_SE,
+                                  RB_REMBRANDT_NUM_WGP_PER_SA, mask);
+    rbgpu_diag_set_num("gpuname_cu", g_rb_2CA_cu);
+
+    {
+        const int rc = rb_gpu_name(g_rb_2CA_cu, g_rb_2CA_name,
+                                   (uint32_t)sizeof(g_rb_2CA_name));
+        if (rc < 0) {
+            g_rb_2CA_cu  = 0;
+            g_rb_2CA_why = 3;
+        } else {
+            /* 1 = a marketing name this project has established, 0 = the
+             * derived generic form carrying the measured CU count. Both are
+             * publishable; they are distinguished so a boot can say which it
+             * handed over. */
+            g_rb_2CA_why = 0;
+            rbgpu_diag_set_num("gpuname_known", rc ? 1 : 0);
+        }
+    }
+    rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
+    rbgpu_log("2CA: cc=0x%08X user=0x%08X grbm_idx=0x%08X -> harvest 0x%x, "
+              "%u CU, '%s'; memsize=0x%08X -> %u MB",
+              cc, user, idx, mask, g_rb_2CA_cu,
+              g_rb_2CA_name[0] ? g_rb_2CA_name : "(refused)",
+              memsize, g_rb_2CA_mb);
+}
+
+/* The handover. Returns 1 if anything was filled in. `name` must be at least
+ * RB_GPUNAME_MAX bytes and is left as an empty string when the derivation
+ * refused, so a caller that ignores the return code publishes nothing rather
+ * than a stale or truncated name. `mb` is answered independently of the name,
+ * because the two readings refuse for different reasons. */
+int rbgpu_gpuname_get_2CA(char *name, uint32_t namelen, uint32_t *mb,
+                          uint32_t *cu, uint32_t *why)
+{
+    uint32_t i;
+
+    rbgpu_gpuname_derive_2CA();
+    if (name && namelen >= RB_GPUNAME_MAX) {
+        for (i = 0; i + 1u < namelen && g_rb_2CA_name[i]; i++) {
+            name[i] = g_rb_2CA_name[i];
+        }
+        name[i] = '\0';
+    } else if (name && namelen) {
+        name[0] = '\0';
+    }
+    if (mb)  { *mb  = g_rb_2CA_mb; }
+    if (cu)  { *cu  = g_rb_2CA_cu; }
+    if (why) { *why = g_rb_2CA_why; }
+    return (g_rb_2CA_name[0] || g_rb_2CA_mb) ? 1 : 0;
+}
 
 void rbgpu_retire_drain_set_2C2(uint32_t want) {
     g_rb_2C2_drain = rb_retire_drain_clamp(want);

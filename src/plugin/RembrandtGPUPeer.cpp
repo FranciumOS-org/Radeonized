@@ -15,6 +15,7 @@
 #include "rb_defaults.h"
 #include "rb_osver.h"
 #include "rb_retire.h"   /* 2C2: RB_RETIRE_DRAIN_MAX for the dial's bound */
+#include "rb_gpuname.h"  /* 2CA: RB_GPUNAME_MAX for the handover buffer */
 
 // 2xx: the one-time migration off the pre-2xw consume-by-overwrite values.
 // Defined with the rest of the arming gate, far below; called from start()
@@ -103,6 +104,12 @@ extern uint32_t rbgpu_retire_drain_get_2C2(void);
 extern void rbgpu_tick_us_set_2C4(uint32_t want);
 extern uint32_t rbgpu_tick_us_get_2C4(void);
 extern uint64_t rbgpu_tick_sets_get_2C4(void);
+/* 2CA: the chip's own name and carve-out size, read from the shader-array
+ * config and RCC_CONFIG_MEMSIZE in kern_start.cpp (which owns the aperture).
+ * The framebuffer cannot do these reads - it runs no discovery and its
+ * `ATY,fb_size` is a boot-arg - so they cross the collection boundary here. */
+extern int rbgpu_gpuname_get_2CA(char *name, uint32_t namelen, uint32_t *mb,
+                                 uint32_t *cu, uint32_t *why);
 extern volatile int g_rb_2gn_in1b;
 extern void rbgpu_2gx_req(uint32_t req, int refused);
 extern void rbgpu_2gx_flush(void);
@@ -2843,6 +2850,26 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
         const bool did = rbgpu_retire_from_vbl_2zd();
         if (p1) { *reinterpret_cast<uint32_t *>(p1) = did ? 1u : 0u; }
         return did ? kIOReturnSuccess : kIOReturnNotReady;
+    }
+
+    /* 2CA: THE NAME AND MEMORY SIZE HANDOVER. Called ONCE from the
+     * framebuffer's setup path, never from the frame path - the reads are of
+     * strap and efuse registers that do not change while the machine runs,
+     * and the plugin caches them, so this is cheap even though it is not on
+     * a hot path.
+     *
+     * p1 is a char buffer of at least RB_GPUNAME_MAX, p2 a uint32_t for the
+     * carve-out in MB, p3 a uint32_t for the CU count and p4 a uint32_t for
+     * the refusal code. Every out-parameter is optional and each is answered
+     * independently, because the name and the size refuse for different
+     * reasons: an unreadable harvest mask must not cost a correct 4096 MB. */
+    if (functionName && functionName->isEqualTo("RBGPUGpuName")) {
+        const int any = rbgpu_gpuname_get_2CA(reinterpret_cast<char *>(p1),
+                                              RB_GPUNAME_MAX,
+                                              reinterpret_cast<uint32_t *>(p2),
+                                              reinterpret_cast<uint32_t *>(p3),
+                                              reinterpret_cast<uint32_t *>(p4));
+        return any ? kIOReturnSuccess : kIOReturnNotFound;
     }
 
     if (functionName && symSpecialAMDKey && functionName->isEqualTo(symSpecialAMDKey)) {

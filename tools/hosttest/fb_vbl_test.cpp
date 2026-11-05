@@ -49,7 +49,18 @@ int main() {
     assert(fb.registerForInterruptType(kIOFBVBLInterruptType,fbCallback,&fb,&counts,&own)==0);
     assert(own && timer.queued && fb.vblRunning);
     assert(timer.deadline>6950000 && timer.deadline<6960000);
+    // 2CA: the name lookup runs from HERE, in an ordinary IOService context,
+    // and not from the vblank - the plugin's aperture is not up at our
+    // start(), so this is the first safe place after the accelerator is
+    // alive. Pinned because the whole derivation is unreachable if the call
+    // site is wrong, and a wrong call site would look exactly like a plugin
+    // that refused (rule 14).
+    assert(fb.gpuNameSetupCalls==1);
     tick(fb,timer);
+    // ...and NOT again per vblank: the reads are strap and efuse values and
+    // the plugin caches them, but a per-vblank call would still be a
+    // cross-collection virtual call at 144 Hz (rule 31).
+    assert(fb.gpuNameSetupCalls==1);
     assert(counts.fb==1 && counts.pipe==0);
     assert(fb.properties.at("RBFBVBL0Fires")==1);
     assert(fb.properties.at("RBFBVBL0Self")==1);

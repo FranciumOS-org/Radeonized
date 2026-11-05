@@ -1062,7 +1062,55 @@ table and refuses to install one that does not match the running kernel;
   announces itself. Refusals are distinct codes (1 known / 0 derived / -1
   nothing sayable, buffer emptied) and a short buffer refuses rather than
   truncating a name into a different name.
-  **WIRING COSTS A FRAMEBUFFER INSTALL and is NOT done:** `RBAMDFramebuffer`
+  **2CA WIRES IT - built and hosttested, NO BOOT HAS READ IT.** The plugin
+  reads four registers once and caches them (GC seg0 0x1260 + 0x100f and
+  0x1010 for the efuse and VBIOS harvest masks, GC seg1 0xa000 + 0x2200 for
+  `GRBM_GFX_INDEX`, and the fixed BAR dword 0xde3 for `RCC_CONFIG_MEMSIZE`,
+  **aliased** to `rb_regs.h` with the hosttest asserting the alias), publishes
+  all four raw words as `gpuname_*` diag keys, and answers `RBGPUGpuName` over
+  2zd's cross-collection channel. `RBAMDFramebuffer::gpuNameSetup()` does its
+  OWN peer lookup - not `vblRetSetup`'s, which is gated on `-rbgpuretirevbl`
+  and would make the GPU's name depend on which timer retires frames - from
+  `registerForInterruptType`, because the plugin's aperture comes up with the
+  accelerator, which is LATER than our `start()`. `start()`'s two literals
+  stay as the rule-38 fallback and `RBFBModelSrc` reads
+  `derived`/`derived-generic`/`fallback` so a boot says which it used;
+  `RBFBModelWhy` is the refusal code (1 no aperture, 2 not broadcast, 3
+  geometry refused, 16 no peer). **Default-on** (`-rbgpufbgpuname`), which is
+  justified narrowly: on a 680M the derived name is BYTE-IDENTICAL to the
+  literal, the registers are read-only, and the fallback is built in.
+  **2C9's CU ARITHMETIC WAS WRONG AND READING THE CONSUMER FOUND IT.**
+  `gfx_v10_0.c:gfx_v10_0_get_wgp_active_bitmap_per_sh()` says the mask is
+  **PER SHADER ARRAY** and `max_cu_per_sh >> 1` bits wide (2C9 popcounted it
+  against the chip's TOTAL WGP count), that the harvest is `CC_GC_... |
+  GC_USER_...` (2C9 read only the efuse, so a firmware-harvested part would
+  have read as unharvested), and that Linux reads it once per (SE, SA) behind
+  a **`GRBM_GFX_INDEX` write**. We do NOT write that register - the
+  accelerator is live and owns the selection every subsequent GC read answers
+  for - so `rb_gpu_harvest_read_valid()` refuses unless it reads full
+  broadcast, leaving one mask and the assumption that the harvest is
+  symmetric. **The consequence is the finding: a symmetric harvest kills a
+  multiple of `num_se x num_sa_per_se` WGPs, so on 1 x 2 x 3 the reachable
+  counts are 12, 8, 4 and a refusal - and 6 CU is UNREACHABLE.** 2C9 reached
+  "660M" from a mask of 0x7, which is **an array with every WGP dead**; that
+  row was reachable only by the defect. The 660M now stands on GEOMETRY
+  (1 x 1 x 3) and the hosttest sweeps all eight masks to pin that no mask
+  produces it. A 660M reading 8 or 4 CU here is the signature of an
+  ASYMMETRIC harvest this derivation cannot see, and the generic name will
+  carry the measured count rather than a confident wrong SKU.
+  **The geometry is a DIE constant, not a live read, and the difference is
+  stated on purpose**: every Rembrandt part is this die harvested, the plugin
+  has no discovery table (`g_disc` is two IPs for MP1, `g_hw.fb_read` is
+  NULL), and the constant is pinned by the hosttest against this machine's
+  captured discovery data. Only the harvest - the part that distinguishes
+  SKUs - is read live.
+  **The reading to take:** `gpuname_cc_raw`, `gpuname_user_raw`,
+  `gpuname_grbm_idx`, `gpuname_cu`, `gpuname_mb`, `gpuname_why`,
+  `RBFBModelSrc`. Whether `GRBM_GFX_INDEX` is in broadcast on a live
+  accelerated desktop decides whether the harvest half works at all; `why` 2
+  says it is not, and then the name is the fallback while the 4096 MB is
+  still derived. Plugin **27C19F13**, framebuffer **DFBFF2A7**.
+  **WHAT 2C9 SAID BEFORE 2CA, and still true of the SOURCES:** `RBAMDFramebuffer`
   runs no discovery, holds no GC info, and its `ATY,fb_size` comes from the
   `rbgpufbatymb` boot-arg, not the carve-out; the plugin's `g_disc` is a
   hand-built two-IP structure for MP1. So the plugin must grow both register

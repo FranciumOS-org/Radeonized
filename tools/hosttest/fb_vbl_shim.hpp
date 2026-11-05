@@ -148,6 +148,15 @@ public:
     uint64_t vblRetModeSkips{0};  /* 2zf */
     void vblRetSetup(void) {}
     void vblRetOffer(void) {}
+    /* 2CA: the name lookup needs an IOService registry, so it is stubbed -
+     * but COUNTED, so the hosttest can pin that registerForInterruptType
+     * reaches it exactly once per registration rather than per vblank. A
+     * stub that records nothing would make the wiring untestable, which is
+     * the shape rule 14 keeps catching. */
+    uint32_t gpuNameLookups{0};
+    uint32_t gpuNameDerived{0};
+    uint32_t gpuNameSetupCalls{0};
+    void gpuNameSetup(void) { gpuNameSetupCalls++; }
     bool     hubpDeferPend=false; /* 2xm */
     uint64_t hubpDeferrals=0;     /* 2xm */
     uint32_t hubpOtgCtl1=0;       /* 2xp */
