@@ -2625,12 +2625,20 @@ void RembrandtGPUPeer::publishAtyName2CB() {
     if (atyNameDone) {
         return;
     }
-    /* OPT-IN, and the reason is a consumer we have NOT read: the strings
-     * `ATY,FamilyName` and `ATY,DeviceName` also appear in
-     * `AMDRadeonX6000Framebuffer`, so Apple's own kexts read them too and
-     * what they do with "Radeon"/"680M" is unestablished. One consumer read
-     * is not the consumer set (2q9/2qa: find the consumer before writing to
-     * a field - here there are at least two and only one is read). */
+    /* DEFAULT-ON since 2CE, disarmed by `-rbgpunomtlname` - the negative is
+     * derived by `rb_off_token()` and honoured by `rbgpu_arg()` because the
+     * token is in `rb_default_on_tokens`, so this call site did not change
+     * when the default did.
+     *
+     * It was opt-in for 2CB-2CD because of a consumer we have NOT read: the
+     * strings `ATY,FamilyName` and `ATY,DeviceName` also appear in
+     * `AMDRadeonX6000Framebuffer`, so Apple's own kexts read them too (2q9/
+     * 2qa: find the consumer before writing to a field - here there are at
+     * least two and only one is read). That is still true; what changed is
+     * that boots 417 and 418 both ran an accelerated desktop with the
+     * properties published and nothing anywhere behaved differently, which is
+     * the two measured boots rule 44 asks for. The unread consumer is a
+     * reason to keep watching, not a reason to keep the chip nameless. */
     if (!rbgpu_arg("-rbgpumtlname")) {
         atyNameDone = 1;
         return;

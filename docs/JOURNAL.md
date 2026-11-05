@@ -56945,3 +56945,51 @@ Still **opt-in** behind `-rbgpumtlname`, and that has not changed: both
 way, and one working boot is not a licence to default it on (rule 44 wants two
 boots per side before a configuration claim, and this is a configuration
 claim).
+
+## 2CE - the Metal name is DEFAULT-ON, on two measured boots
+
+Boot 418, before any change, independently reproduces boot 417 in every key
+the derivation publishes:
+
+```
+gpuname_cc_raw   4294443009   (0xFFF80001)
+gpuname_user_raw 0
+gpuname_grbm_idx 0            gpuname_grbm_idx2 0   (no move - code 5 never fired)
+gpuname_harvest  0            gpuname_cu 12         gpuname_known 1
+gpuname_mb       4096         gpuname_why 0
+aty_ok 1   aty_why 0   aty_tries 17
+RBFBModelSrc "derived"   RBFBModelCu 12   RBFBModelMb 4096   RBFBModelWhy 0
+```
+
+and `system_profiler` reads `Chipset Model: AMD Radeon 680M`, `VRAM (Total):
+4 GB`, **`Metal Support: Metal 3`**, with `ATY,FamilyName`/`ATY,DeviceName`
+"Radeon"/"680M" on `IGPU@0`. **Two boots per side, which is what rule 44 asks
+for**, so `-rbgpumtlname` joins `rb_default_on_tokens` and the table goes 50 ->
+51. Disarmed by `-rbgpunomtlname`, derived by `rb_off_token()` and honoured by
+`rbgpu_arg()` - the call site in `publishAtyName2CB()` did not change when the
+default did, which is the whole point of 2xw's table.
+
+**The reason it was opt-in has not gone away and is not claimed to.** Both
+property names also live in `AMDRadeonX6000Framebuffer`, so Apple's kexts read
+them too and what they do with "Radeon"/"680M" is still unread (2q9/2qa). What
+changed is that two accelerated boots have now run with the properties
+published and nothing anywhere behaved differently - an unread consumer that
+has had two boots to misbehave in. The failure mode remains
+`rb_gpu_aty_split()` refusing and publishing nothing, which is the behaviour of
+every boot before 2CB.
+
+`-rbgpumtlname` can come out of boot-args with `sudo tools/efi.sh defaults`
+(it now matches the table by name), and leaving it in is redundant rather than
+wrong.
+
+Plugin **DFCEB339**, framebuffer **171CC2FF** - the framebuffer rebuilt because
+`rb_defaults.h` is shared, so both halves answer the arming question
+identically (rule 38).
+
+Noted in passing, not a defect: `./build/out/hosttest` run by hand reports
+`smu13: FAIL needs tests/data/rembrandt-680m-tufa15.bin` and exits 1, because
+the Makefile passes the fixture as an ARGUMENT
+(`@$(OUT)/hosttest $(wildcard tests/data/*.bin)`) rather than letting the test
+find it. `make kext` says `hosttest: all passed`. Checked against the change
+stashed, which reports the same 1 FAILED - rule 26's control, since a
+pre-existing failure read as a new one is how a clean change gets reverted.
