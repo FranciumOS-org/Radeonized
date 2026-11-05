@@ -48,7 +48,9 @@
  * two-sided curve is the shape to watch for. Nothing here writes to the chip,
  * and `subret 1` or a reboot restores today's behaviour.
  *
- * Needs root.
+ * Does not need root: boot 424 took the setProperties write as the console
+ * user and `vblret_subsets` advanced. Checked rather than copied from
+ * `tickset`'s banner.
  */
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
