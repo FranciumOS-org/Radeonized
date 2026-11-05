@@ -1929,8 +1929,17 @@ void RBAMDFramebuffer::vblRetOffer(void)
     }
     uint32_t drove = 0;
     vblRetCalls++;
+    /* 2CF: hand the plugin THIS mode's vblank period, so it can place interior
+     * retire occasions inside the frame at native refresh - where `tickset` is
+     * inert because the vblank owns the quantum (rule 39, which is why that
+     * tool refuses rather than measuring). The value is the one the VBL clock
+     * itself runs on, re-derived per mode from the panel's own line count
+     * (2y6), so a mode switch moves the subdivision on the very next offer and
+     * there is no second copy of the rate to drift. A zero here is honest -
+     * the plugin then places none, which is pre-2CF behaviour. */
+    uint64_t periodNs = vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast;
     const IOReturn r = vblRetPeer->callPlatformFunction(vblRetSym, false,
-                                                        &drove, nullptr,
+                                                        &drove, &periodNs,
                                                         nullptr, nullptr);
     if (r == kIOReturnSuccess && drove) {
         vblRetDrove++;

@@ -92,7 +92,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext fbkext tools plugin fbperf fbpresent blset mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext fbkext tools plugin subret fbperf fbpresent blset mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -563,6 +563,12 @@ $(OUT)/drainset: tools/drainset.m | $(OUT)
 # boot 413 at 60 Hz has the same ladder with a 2.4x longer vblank, so the
 # quantum is the retire occasion and when the timer drives, this is its
 # period. Same instrument: metal_probe's queue ladder.
+subret: $(OUT)/subret
+$(OUT)/subret: tools/subret.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework IOKit -framework CoreFoundation -framework Foundation
+	@echo "  TOOL  $@"
+
 tickset: $(OUT)/tickset
 $(OUT)/tickset: tools/tickset.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \

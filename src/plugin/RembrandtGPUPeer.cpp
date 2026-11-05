@@ -93,8 +93,12 @@ extern uint64_t g_guard_calls;
 /* 2zd: the vblank-driven retire. rbgpu_retire_from_vbl_2zd() is what the
  * framebuffer reaches through callPlatformFunction below; the publisher is
  * called from the periodic refresh because the vblank must not take a lock. */
-extern bool rbgpu_retire_from_vbl_2zd(void);
+extern bool rbgpu_retire_from_vbl_2zd(uint64_t vbl_period_ns);
 extern void rbgpu_retire_publish_2zd(void);
+/* 2CF: occasions per vblank period, defined beside the arm that uses it. */
+extern void     rbgpu_retire_sub_set_2CF(uint32_t want);
+extern uint32_t rbgpu_retire_sub_get_2CF(void);
+extern uint64_t rbgpu_retire_sub_sets_2CF(void);
 /* 2C2: the retire-drain dial, defined in kern_start.cpp beside the loop that
  * reads it. */
 static uint64_t g_rbgpu_drain_sets = 0;   /* 2C3 */
@@ -2926,6 +2930,24 @@ IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
         }
     }
 
+    /* 2CF: occasions per vblank period, 1..8. Refused rather than clamped,
+     * for the reason 2C4 states: a clamp lets an A/B silently run the A side
+     * twice while both calls report success. */
+    OSNumber *sn = OSDynamicCast(OSNumber, dict->getObject("RBGPURetireSub"));
+    if (sn) {
+        const uint32_t swant = sn->unsigned32BitValue();
+        handled++;
+        rbgpu_diag_set_num("vblret_subrecv", swant);
+        if (swant < RB_RETIRE_SUB_MIN || swant > RB_RETIRE_SUB_MAX) {
+            rbgpu_diag_set_num("vblret_subrefuse", swant);
+            rc = kIOReturnBadArgument;
+        } else {
+            rbgpu_retire_sub_set_2CF(swant);
+            rbgpu_diag_set_num("vblret_sub",     rbgpu_retire_sub_get_2CF());
+            rbgpu_diag_set_num("vblret_subsets", rbgpu_retire_sub_sets_2CF());
+        }
+    }
+
     OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBGPURetireDrain"));
     if (!n) { return handled ? rc : kIOReturnUnsupported; }
     handled++;
@@ -2978,7 +3000,21 @@ IOReturn RembrandtGPUPeer::callPlatformFunction(const OSSymbol *functionName,
      * the framebuffer can count refusals on its own side rather than assuming
      * the call did something (rule 13 - a return code is not a result). */
     if (functionName && functionName->isEqualTo("RBGPURetireNow")) {
-        const bool did = rbgpu_retire_from_vbl_2zd();
+        /* 2CF: p2, when non-NULL, carries the framebuffer's LIVE vblank
+         * period in nanoseconds - `RBFBVBLPeriodNs`, re-derived per mode from
+         * the panel's own clock (2y6). Passed on every offer rather than
+         * cached at setup, because the mode changes at runtime without a
+         * reboot (2z1) and because one rate per mode is the invariant 2y6
+         * bought; a second copy here is a second thing to drift.
+         *
+         * A NULL or a zero means "the framebuffer did not say", and then
+         * `rb_retire_sub_active()` refuses to place interior occasions at
+         * all - which is pre-2CF behaviour, so an older framebuffer paired
+         * with this plugin is simply the A side (rule 38: the two halves are
+         * separately installed and must each be safe alone). */
+        const uint64_t period_ns =
+            p2 ? *reinterpret_cast<const uint64_t *>(p2) : 0ull;
+        const bool did = rbgpu_retire_from_vbl_2zd(period_ns);
         if (p1) { *reinterpret_cast<uint32_t *>(p1) = did ? 1u : 0u; }
         return did ? kIOReturnSuccess : kIOReturnNotReady;
     }

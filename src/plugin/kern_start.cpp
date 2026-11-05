@@ -14488,10 +14488,42 @@ static void rbgpu_2xg_arm_next(void) {
      * period has already been missed (arming into the past fires a catch-up
      * burst). The resync is counted, not hidden. */
     uint64_t period = 0;
+    uint64_t now = mach_absolute_time();
+
+    /* 2CF: AN INTERIOR OCCASION IS ANCHORED ON THE VBLANK, NOT ON THIS ARM.
+     *
+     * While the vblank drives and `sub` > 1, the next deadline is
+     * `lastVbl + k * (vblPeriod / sub)` - computed from the display's own
+     * timestamp every time, so the interior occasions cannot drift away from
+     * the frame boundary and there is no second period to beat against the
+     * first. That is the one structural difference from 2zc's configuration,
+     * which ran two independent periodic timers and cost a third of the frame
+     * rate.
+     *
+     * A zero means there is nothing to place - the run is full, or the slot is
+     * already past - and then this falls through to the watchdog arm below,
+     * which is exactly pre-2CF behaviour. Deliberately NOT clamped forward
+     * into the future: arming into the past fires a catch-up burst (2xe), and
+     * a burst of retires is the 2zc configuration in miniature. */
+    {
+        const uint64_t sub_ns = rb_retire_sub_period_ns(&g_rb_2zd);
+        if (sub_ns) {
+            uint64_t sub_abs = 0;
+            clock_interval_to_absolutetime_interval(
+                static_cast<uint32_t>(sub_ns), kNanosecondScale, &sub_abs);
+            const uint64_t d = rb_retire_sub_deadline(&g_rb_2zd, sub_abs, now);
+            if (d) {
+                g_rb_2xg_deadline = d;
+                thread_call_enter_delayed(g_rb_2xg_call, d);
+                return;
+            }
+            g_rb_2zd.subLate++;
+        }
+    }
+
     clock_interval_to_absolutetime_interval(
         rb_retire_timer_period_us(&g_rb_2zd, g_rb_2xg_us, RB_2ZD_WATCH_US),
         kMicrosecondScale, &period);
-    uint64_t now = mach_absolute_time();
     if (g_rb_2xg_deadline == 0) {
         g_rb_2xg_deadline = now + period;
     } else {
@@ -14521,6 +14553,21 @@ static uint64_t g_rb_2C2_extra = 0;   /* polls beyond the first, cumulative */
  * is distinguishable from "it ran and nothing moved", which is the exact
  * ambiguity 2C2's drain bug spent a milestone in. */
 static uint64_t g_rb_2C4_sets = 0;
+
+/* 2CF: occasions per vblank period. Written by setProperties, read on the
+ * vblank and timer thread_calls - a single aligned u32, as 2C2's drain is, so
+ * a torn read is not possible and the worst a race costs is one frame placed
+ * at the old subdivision. `sets` separates "the call never arrived" from "it
+ * arrived and nothing moved", which is the ambiguity 2C2's drain bug spent a
+ * milestone in. */
+static uint64_t g_rb_2CF_sets = 0;
+
+void rbgpu_retire_sub_set_2CF(uint32_t want) {
+    g_rb_2zd.sub = rb_retire_sub_clamp(want);
+    g_rb_2CF_sets++;
+}
+uint32_t rbgpu_retire_sub_get_2CF(void) { return g_rb_2zd.sub; }
+uint64_t rbgpu_retire_sub_sets_2CF(void) { return g_rb_2CF_sets; }
 
 void rbgpu_tick_us_set_2C4(uint32_t want) {
     g_rb_2xg_us = rb_tick_us_clamp(want);
@@ -14784,9 +14831,23 @@ static bool rbgpu_2zd_retire_once(void) {
  *
  * Runs on the framebuffer's vblank thread_call: it allocates nothing, logs
  * nothing and blocks on nothing (rule 31), exactly as the timer action did. */
-bool rbgpu_retire_from_vbl_2zd(void) {
+bool rbgpu_retire_from_vbl_2zd(uint64_t vbl_period_ns) {
     if (g_rb_2xg_stopped) { return false; }
-    if (!rb_retire_vbl_offer(&g_rb_2zd, mach_absolute_time())) { return false; }
+    if (!rb_retire_vbl_offer(&g_rb_2zd, mach_absolute_time(), vbl_period_ns)) {
+        return false;
+    }
+    /* 2CF: re-anchor the interior occasions on THIS vblank. The timer is
+     * already pending at a deadline computed from the previous frame, so
+     * without this the first interior slot of each frame keeps the old
+     * anchor - which is the drift this design exists to avoid. Cancelling and
+     * re-arming is two calls on a thread_call we own, allocates nothing and
+     * blocks on nothing (rule 31). Only when interior occasions are actually
+     * in use: an unarmed or sub=1 boot does not touch the timer from here,
+     * so its behaviour is byte-identical to pre-2CF. */
+    if (g_rb_2xg_call && !g_rb_2xg_stopped && rb_retire_sub_active(&g_rb_2zd)) {
+        thread_call_cancel(g_rb_2xg_call);
+        rbgpu_2xg_arm_next();
+    }
     return rbgpu_2zd_retire_once();
 }
 
@@ -14840,6 +14901,18 @@ void rbgpu_retire_publish_2zd(void) {
      * the boot value and an A/B reading it back is reading a constant. */
     rbgpu_diag_set_num("tick_us", g_rb_2xg_us);
     rbgpu_diag_set_num("tick_sets", g_rb_2C4_sets);
+    /* 2CF: the arm, its effect and its two refusals - so a boot can say which
+     * side it ran (rule 34), a zero `subret` separates "sub is 1" from "sub is
+     * 4 and no vblank ever offered" (rule 14), and `sublate` says whether the
+     * interior slots are being placed or missed. `subns` is the spacing the
+     * framebuffer's own live period produced, published because a wrong period
+     * would otherwise look exactly like a wrong dial. */
+    rbgpu_diag_set_num("vblret_sub",     g_rb_2zd.sub);
+    rbgpu_diag_set_num("vblret_subsets", g_rb_2CF_sets);
+    rbgpu_diag_set_num("vblret_subret",  g_rb_2zd.subRetires);
+    rbgpu_diag_set_num("vblret_subskip", g_rb_2zd.subSkipped);
+    rbgpu_diag_set_num("vblret_sublate", g_rb_2zd.subLate);
+    rbgpu_diag_set_num("vblret_subns",   rb_retire_sub_period_ns(&g_rb_2zd));
 }
 
 static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
@@ -14851,6 +14924,12 @@ static void rbgpu_2xg_action(thread_call_param_t a, thread_call_param_t b) {
      * takes the job back only when the vblank has gone quiet. */
     if (rb_retire_timer_should(&g_rb_2zd, mach_absolute_time(),
                                g_rb_2zd_quiet_abs)) {
+        (void)rbgpu_2zd_retire_once();
+    } else if (rb_retire_sub_should(&g_rb_2zd)) {
+        /* 2CF: an INTERIOR occasion. Reached only when the vblank is driving
+         * and the watchdog declined, so this is not the two-drivers
+         * configuration 2zc measured - it is one driver's period subdivided,
+         * and the subdivision is re-anchored by every vblank. */
         (void)rbgpu_2zd_retire_once();
     }
     if (g_rb_2xg_stopped) { return; }
@@ -14932,6 +15011,26 @@ void rbgpu_schedtick_start_2xg(void) {
     clock_interval_to_absolutetime_interval(RB_2ZD_QUIET_US, kMicrosecondScale,
                                             &g_rb_2zd_quiet_abs);
     rbgpu_diag_set_num("vblret_armed", g_rb_2zd.armed);
+    /* 2CF: occasions per vblank period. Default 1 = pre-2CF exactly, so this
+     * build's unchanged behaviour is the A side and needs no argument to
+     * reach. Rule 40: a numeric boot-arg comes back as a binary int, which is
+     * what `rbgpu_boot_argn_u32` encodes - 2xm is the boot that read a char[]
+     * loop and silently ran the default. */
+    {
+        uint32_t want = 0, bad = 0;
+        if (rbgpu_boot_argn_u32("rbgpuretiresub", RB_RETIRE_SUB_MIN,
+                                RB_RETIRE_SUB_MAX, &want, &bad)) {
+            g_rb_2zd.sub = rb_retire_sub_clamp(want);
+            rbgpu_log("2CF: %u retire occasions per vblank period",
+                      g_rb_2zd.sub);
+        } else if (bad) {
+            rbgpu_diag_set_num("vblret_subrefuse", bad);
+            rbgpu_log("2CF: rbgpuretiresub=%u is outside %u..%u - staying at "
+                      "%u (rule 19: the refused value is published)",
+                      bad, RB_RETIRE_SUB_MIN, RB_RETIRE_SUB_MAX, g_rb_2zd.sub);
+        }
+    }
+    rbgpu_diag_set_num("vblret_sub", g_rb_2zd.sub);
 
     g_rb_2xg_call = thread_call_allocate(rbgpu_2xg_action, nullptr);
     if (!g_rb_2xg_call) {

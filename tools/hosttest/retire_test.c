@@ -12,6 +12,13 @@
 
 #define QUIET 1000u   /* abstract units; the kext passes an absolute-time gap */
 
+/* 2CF: `rb_retire_vbl_offer()` now also carries the framebuffer's live vblank
+ * period, because the interior occasions are placed inside it. The existing
+ * cases pass the measured native period so none of them is accidentally in
+ * the "the framebuffer did not say" branch - the one case that exercises a
+ * zero says so by name. */
+#define VBLNS 6952507u
+
 int retire_tests(void)
 {
     int bad = 0;
@@ -22,7 +29,7 @@ int retire_tests(void)
     {
         struct rb_retire r;
         rb_retire_reset(&r, 0u);
-        if (rb_retire_vbl_offer(&r, 100u) != 0) {
+        if (rb_retire_vbl_offer(&r, 100u, VBLNS) != 0) {
             printf("FAIL retire: unarmed vblank took over\n"); bad++;
         }
         if (r.vblDeclined != 1u || r.vblRetires != 0u || r.handoffs != 0u ||
@@ -40,11 +47,11 @@ int retire_tests(void)
     {
         struct rb_retire r;
         rb_retire_reset(&r, 1u);
-        if (!rb_retire_vbl_offer(&r, 1000u) || r.handoffs != 1u ||
+        if (!rb_retire_vbl_offer(&r, 1000u, VBLNS) || r.handoffs != 1u ||
             r.src != RB_RETIRE_SRC_VBL) {
             printf("FAIL retire: first vblank did not hand over\n"); bad++;
         }
-        if (!rb_retire_vbl_offer(&r, 1100u) || r.handoffs != 1u) {
+        if (!rb_retire_vbl_offer(&r, 1100u, VBLNS) || r.handoffs != 1u) {
             printf("FAIL retire: handoff counted twice\n"); bad++;
         }
         /* A tick inside the quiet window must not retire. */
@@ -65,7 +72,7 @@ int retire_tests(void)
     {
         struct rb_retire r;
         rb_retire_reset(&r, 1u);
-        (void)rb_retire_vbl_offer(&r, 1000u);
+        (void)rb_retire_vbl_offer(&r, 1000u, VBLNS);
         if (!rb_retire_timer_should(&r, 1000u + QUIET, QUIET) ||
             r.takebacks != 1u || r.src != RB_RETIRE_SRC_TIMER) {
             printf("FAIL retire: timer did not take back a dead vblank\n");
@@ -81,7 +88,7 @@ int retire_tests(void)
         }
         /* And the vblank can come back - a mode switch disables and re-enables
          * it, which is a thing boot 259 did on purpose. */
-        if (!rb_retire_vbl_offer(&r, 20000u) || r.handoffs != 2u ||
+        if (!rb_retire_vbl_offer(&r, 20000u, VBLNS) || r.handoffs != 2u ||
             r.src != RB_RETIRE_SRC_VBL) {
             printf("FAIL retire: vblank could not resume after a takeback\n");
             bad++;
@@ -99,7 +106,7 @@ int retire_tests(void)
          * QUIET to 0xffffff..ff00 and landed BEHIND lastVbl, so it was the
          * assertion that overflowed and not the code under it. */
         const uint64_t hi = 0xffffffffffff0000ull;
-        (void)rb_retire_vbl_offer(&r, hi);
+        (void)rb_retire_vbl_offer(&r, hi, VBLNS);
         if (rb_retire_timer_should(&r, hi, QUIET) != 0 ||
             rb_retire_timer_should(&r, 10u, QUIET) != 0) {
             printf("FAIL retire: a non-advancing clock read as a huge gap\n");
@@ -120,7 +127,7 @@ int retire_tests(void)
         if (rb_retire_timer_period_us(&r, 6944u, 50000u) != 6944u) {
             printf("FAIL retire: timer-driven period\n"); bad++;
         }
-        (void)rb_retire_vbl_offer(&r, 100u);
+        (void)rb_retire_vbl_offer(&r, 100u, VBLNS);
         if (rb_retire_timer_period_us(&r, 6944u, 50000u) != 50000u) {
             printf("FAIL retire: watchdog period\n"); bad++;
         }
@@ -134,8 +141,12 @@ int retire_tests(void)
      * state was never set up. */
     {
         rb_retire_reset(NULL, 1u);
-        if (rb_retire_vbl_offer(NULL, 1u) != 0 ||
-            rb_retire_timer_should(NULL, 1u, QUIET) != 0) {
+        if (rb_retire_vbl_offer(NULL, 1u, VBLNS) != 0 ||
+            rb_retire_timer_should(NULL, 1u, QUIET) != 0 ||
+            rb_retire_sub_active(NULL) != 0 ||
+            rb_retire_sub_period_ns(NULL) != 0u ||
+            rb_retire_sub_should(NULL) != 0 ||
+            rb_retire_sub_deadline(NULL, 100u, 0u) != 0u) {
             printf("FAIL retire: NULL args not safe\n"); bad++;
         }
     }
@@ -150,7 +161,7 @@ int retire_tests(void)
         rb_retire_reset(&r, 1u);
         for (i = 0; i < 200u; i++) {
             t += QUIET / 4u;
-            (void)rb_retire_vbl_offer(&r, t);
+            (void)rb_retire_vbl_offer(&r, t, VBLNS);
             t += QUIET / 4u;
             (void)rb_retire_timer_should(&r, t, QUIET);
         }
@@ -334,8 +345,256 @@ int retire_tests(void)
         }
     }
 
+    /* 2CF: SUB-VBLANK RETIRE OCCASIONS.
+     *
+     * The thing these cases exist to protect is not the feature, it is the A
+     * side: `sub` 1 must be pre-2CF byte for byte, because that is the
+     * shipping configuration and the control for every reading taken against
+     * it (rule 39). Everything else is arithmetic that 2C5-2C8 already fixed
+     * on hardware, and the one genuinely new claim - that the occasions are
+     * anchored on the DISPLAY rather than on the previous arm - is pinned by
+     * the deadline cases, because that anchor is the entire difference from
+     * 2zc's two beating timers. */
+    {
+        const uint64_t native = 6952507u;   /* the measured native period */
+        const uint64_t sixty  = 16669443u;  /* boot 413's 60 Hz period */
+
+        /* THE A SIDE. Default 1, inert everywhere, and no interior occasion
+         * can be taken however the state machine is driven. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            if (r.sub != 1u) {
+                printf("FAIL 2CF: the default must be 1 - a build that "
+                       "subdivides by default has no A side\n"); bad++;
+            }
+            (void)rb_retire_vbl_offer(&r, 1000u, native);
+            if (rb_retire_sub_active(&r) || rb_retire_sub_period_ns(&r) ||
+                rb_retire_sub_should(&r) ||
+                rb_retire_sub_deadline(&r, 100u, 0u)) {
+                printf("FAIL 2CF: sub=1 placed an interior occasion\n"); bad++;
+            }
+            if (r.subRetires || r.subSkipped) {
+                printf("FAIL 2CF: sub=1 moved an interior counter\n"); bad++;
+            }
+        }
+
+        /* INERT IN THE TIMER-DRIVEN REGIME. Below native the tick dial owns
+         * the quantum (2C5-2C8 measured it there), and two mechanisms for one
+         * job is how 2zc's beat happened. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u;
+            r.subPeriodNs = sixty;
+            if (r.src != RB_RETIRE_SRC_TIMER) {
+                printf("FAIL 2CF: reset must start in TIMER\n"); bad++;
+            }
+            if (rb_retire_sub_active(&r) || rb_retire_sub_should(&r)) {
+                printf("FAIL 2CF: interior occasions placed while the TIMER "
+                       "drives - that is 2zc's configuration\n"); bad++;
+            }
+        }
+
+        /* INERT UNARMED, and inert when the framebuffer reported no period.
+         * The second is the one that matters in the field: an older
+         * framebuffer paired with this plugin passes no period, and that must
+         * read as "place none", never as "place them at zero" - a zero
+         * interval thread_call is a spin. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 0u);
+            r.sub = 4u; r.src = RB_RETIRE_SRC_VBL; r.subPeriodNs = native;
+            if (rb_retire_sub_active(&r)) {
+                printf("FAIL 2CF: unarmed build placed interior occasions\n");
+                bad++;
+            }
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u; r.src = RB_RETIRE_SRC_VBL; r.subPeriodNs = 0u;
+            if (rb_retire_sub_active(&r) || rb_retire_sub_period_ns(&r) ||
+                rb_retire_sub_deadline(&r, 100u, 0u)) {
+                printf("FAIL 2CF: a zero vblank period must place NOTHING, "
+                       "not an occasion every zero nanoseconds\n"); bad++;
+            }
+        }
+
+        /* 2C8's THRESHOLD, REPRODUCED BY THE DIAL RATHER THAN RETYPED.
+         * `tick = vbl/8` is where the eight-queue spread is exactly one frame,
+         * measured at 60 Hz as 2084 us against a 16669443 ns period. sub=8
+         * must land on that number from the period alone - if it does not, the
+         * dial is not the quantity 2C5-2C8 measured. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.src = RB_RETIRE_SRC_VBL; r.sub = 8u; r.subPeriodNs = sixty;
+            if (rb_retire_sub_period_ns(&r) != 2083680u) {
+                printf("FAIL 2CF: sub=8 at 60 Hz must be 2C8's vbl/8 "
+                       "threshold (2083680 ns), got %llu\n",
+                       (unsigned long long)rb_retire_sub_period_ns(&r)); bad++;
+            }
+            r.subPeriodNs = native;
+            if (rb_retire_sub_period_ns(&r) != 869063u) {
+                printf("FAIL 2CF: sub=8 at native must be 869063 ns\n"); bad++;
+            }
+            /* And sub=4 is half the subdivision, not a quarter of it - the
+             * off-by-one a reader would most plausibly introduce. */
+            r.sub = 4u;
+            if (rb_retire_sub_period_ns(&r) != native / 4u) {
+                printf("FAIL 2CF: sub=4 must divide the period by 4\n"); bad++;
+            }
+        }
+
+        /* THE RUN: `sub` occasions per period, of which the VBLANK IS THE
+         * FIRST. sub=4 therefore yields exactly three interior retires and
+         * then COUNTS the refusals - a full run is what a vblank that stopped
+         * arriving looks like from inside the timer, and it must be
+         * distinguishable from an interior occasion that never ran (rule 14).
+         * Counting the vblank again would retire twice at the same phase. */
+        {
+            struct rb_retire r;
+            int i, got = 0;
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u;
+            (void)rb_retire_vbl_offer(&r, 1000u, native);
+            for (i = 0; i < 10; i++) {
+                if (rb_retire_sub_should(&r)) { got++; }
+            }
+            if (got != 3) {
+                printf("FAIL 2CF: sub=4 gave %d interior retires, want 3 "
+                       "(the vblank is the first of the four)\n", got); bad++;
+            }
+            if (r.subRetires != 3u || r.subSkipped != 7u) {
+                printf("FAIL 2CF: run accounting %llu/%llu, want 3/7\n",
+                       (unsigned long long)r.subRetires,
+                       (unsigned long long)r.subSkipped); bad++;
+            }
+            /* The next vblank re-opens the run - otherwise the subdivision
+             * works for exactly one frame after boot. */
+            (void)rb_retire_vbl_offer(&r, 1000u + native, native);
+            if (r.subRun != 0u || !rb_retire_sub_should(&r)) {
+                printf("FAIL 2CF: the vblank did not re-open the run\n");
+                bad++;
+            }
+        }
+
+        /* THE ANCHOR, which is the whole design. Deadline k must be
+         * `lastVbl + k * (period/sub)` - measured from the DISPLAY's own
+         * timestamp, never walked forward from the previous arm. Two
+         * independent periods is 2zc, which cost a third of the frame rate;
+         * one period subdivided and re-anchored every frame cannot drift by
+         * construction. */
+        {
+            struct rb_retire r;
+            const uint64_t L = 1000000u;
+            const uint64_t P = 400u;          /* abstract abs units */
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u; r.subPeriodNs = native;
+            (void)rb_retire_vbl_offer(&r, L, native);
+            if (rb_retire_sub_deadline(&r, P, L) != L + P) {
+                printf("FAIL 2CF: first interior slot is not lastVbl + "
+                       "period/sub\n"); bad++;
+            }
+            r.subRun = 1u;
+            if (rb_retire_sub_deadline(&r, P, L) != L + 2u * P) {
+                printf("FAIL 2CF: second interior slot is not anchored on "
+                       "lastVbl - that is a free-running timer (2zc)\n");
+                bad++;
+            }
+            r.subRun = 2u;
+            if (rb_retire_sub_deadline(&r, P, L) != L + 3u * P) {
+                printf("FAIL 2CF: third interior slot misplaced\n"); bad++;
+            }
+            /* The run's last slot is the next VBLANK, so there is nothing
+             * left for the timer to arm. */
+            r.subRun = 3u;
+            if (rb_retire_sub_deadline(&r, P, L) != 0u) {
+                printf("FAIL 2CF: a full run must arm NOTHING - the next "
+                       "occasion is the vblank itself\n"); bad++;
+            }
+            /* A SLOT ALREADY PAST ARMS NOTHING. Arming a thread_call into the
+             * past fires a catch-up burst - the drift defect 2xe fixed once in
+             * this same timer - and a burst of retires is 2zc in miniature.
+             * The anchor is a timestamp taken on the vblank thread, so a late
+             * fire is ordinary here, not exceptional. */
+            r.subRun = 0u;
+            if (rb_retire_sub_deadline(&r, P, L + P) != 0u ||
+                rb_retire_sub_deadline(&r, P, L + 10u * P) != 0u) {
+                printf("FAIL 2CF: a slot in the past must refuse, not clamp "
+                       "forward (2xe's catch-up burst)\n"); bad++;
+            }
+        }
+
+        /* THE WATCHDOG STILL OWNS A DEAD VBLANK. Interior fires must not
+         * refresh `lastVbl`, or a stopped vblank looks live forever and 2xe's
+         * one-frame-per-ten-seconds desktop comes back with no way out. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u;
+            (void)rb_retire_vbl_offer(&r, 1000u, native);
+            (void)rb_retire_sub_should(&r);
+            (void)rb_retire_sub_should(&r);
+            if (r.lastVbl != 1000u) {
+                printf("FAIL 2CF: an interior occasion moved lastVbl - the "
+                       "watchdog can never fire again\n"); bad++;
+            }
+            if (!rb_retire_timer_should(&r, 1000u + QUIET, QUIET) ||
+                r.src != RB_RETIRE_SRC_TIMER || r.takebacks != 1u) {
+                printf("FAIL 2CF: the watchdog did not take back a dead "
+                       "vblank\n"); bad++;
+            }
+            if (rb_retire_sub_active(&r)) {
+                printf("FAIL 2CF: interior occasions survived the "
+                       "takeback\n"); bad++;
+            }
+        }
+
+        /* A MODE SWITCH MOVES THE SUBDIVISION ON THE NEXT OFFER, with nothing
+         * to invalidate - the period arrives with every offer precisely so
+         * that 2z1's runtime mode change needs no second code path. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.sub = 4u;
+            (void)rb_retire_vbl_offer(&r, 1000u, native);
+            if (rb_retire_sub_period_ns(&r) != native / 4u) {
+                printf("FAIL 2CF: native subdivision wrong\n"); bad++;
+            }
+            (void)rb_retire_vbl_offer(&r, 2000u, sixty);
+            if (rb_retire_sub_period_ns(&r) != sixty / 4u) {
+                printf("FAIL 2CF: the subdivision did not follow the mode\n");
+                bad++;
+            }
+        }
+
+        /* The clamp, and that it REFUSES nothing silently at the edges. */
+        {
+            if (rb_retire_sub_clamp(0u) != RB_RETIRE_SUB_MIN ||
+                rb_retire_sub_clamp(1u) != 1u ||
+                rb_retire_sub_clamp(8u) != RB_RETIRE_SUB_MAX ||
+                rb_retire_sub_clamp(9u) != RB_RETIRE_SUB_MAX ||
+                rb_retire_sub_clamp(0xFFFFFFFFu) != RB_RETIRE_SUB_MAX) {
+                printf("FAIL 2CF: sub clamp\n"); bad++;
+            }
+            /* sub above the bound must be inert rather than trusted, because
+             * the global is written by setProperties and read on two threads:
+             * a value that got past the setter must still not place 600
+             * occasions in a frame. */
+            {
+                struct rb_retire r;
+                rb_retire_reset(&r, 1u);
+                r.src = RB_RETIRE_SRC_VBL;
+                r.sub = 600u; r.subPeriodNs = native;
+                if (rb_retire_sub_active(&r)) {
+                    printf("FAIL 2CF: an out-of-range sub was honoured\n");
+                    bad++;
+                }
+            }
+        }
+    }
+
     printf("retire: the 2zd handover - unarmed decline, single handoff, the "
            "watchdog takeback, a non-advancing clock, role-dependent period "
-           "and 200 interleaved frames, plus 2zf's mode gate, 2C2's drain clamp and 2C4's tick dial%s\n", bad ? " FAILED" : ": passed");
+           "and 200 interleaved frames, plus 2zf's mode gate, 2C2's drain clamp and 2C4's tick dial and 2CF's sub-vblank occasions%s\n", bad ? " FAILED" : ": passed");
     return bad;
 }
