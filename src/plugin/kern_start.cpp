@@ -14585,7 +14585,7 @@ static void rbgpu_gpuname_derive_2CA(void)
      * call it an index. */
     const uint32_t kSeg0 = 0x1260;
     const uint32_t kSeg1 = 0xa000;
-    uint32_t cc = 0, user = 0, idx = 0, memsize = 0, mask = 0;
+    uint32_t cc = 0, user = 0, idx = 0, idx_after = 0, memsize = 0, mask = 0;
     uint32_t highest;
 
     if (g_rb_2CA_done) {
@@ -14621,15 +14621,25 @@ static void rbgpu_gpuname_derive_2CA(void)
         return;
     }
 
+    /* 2CC: BRACKET THE CONFIG READS WITH THE INDEX, because Apple's driver
+     * owns `GRBM_GFX_INDEX` and writes it around its own accesses. Reading
+     * the index once and the config once would attribute the harvest to
+     * whatever array happened to be selected at the first read, which is not
+     * necessarily the one that answered the second. Read it before AND
+     * after: if it moved, the config reads cannot be attributed to an array
+     * and the derivation refuses - and because it does not latch that
+     * refusal, the periodic publish simply tries again. */
+    idx     = g_hw.rreg(g_hw.ctx, (kSeg1 + RB_GC_DW_GRBM_GFX_INDEX)           * 4u);
     cc      = g_hw.rreg(g_hw.ctx, (kSeg0 + RB_GC_DW_CC_SHADER_ARRAY_CONFIG)   * 4u);
     user    = g_hw.rreg(g_hw.ctx, (kSeg0 + RB_GC_DW_USER_SHADER_ARRAY_CONFIG) * 4u);
-    idx     = g_hw.rreg(g_hw.ctx, (kSeg1 + RB_GC_DW_GRBM_GFX_INDEX)           * 4u);
+    idx_after = g_hw.rreg(g_hw.ctx, (kSeg1 + RB_GC_DW_GRBM_GFX_INDEX)         * 4u);
     memsize = g_hw.rreg(g_hw.ctx, RB_GPU_DW_RCC_CONFIG_MEMSIZE * 4u);
 
     /* Raw first, always, whatever the verdict turns out to be. */
     rbgpu_diag_set_num("gpuname_cc_raw",   cc);
     rbgpu_diag_set_num("gpuname_user_raw", user);
     rbgpu_diag_set_num("gpuname_grbm_idx", idx);
+    rbgpu_diag_set_num("gpuname_grbm_idx2", idx_after);
     rbgpu_diag_set_num("gpuname_memsz_raw", memsize);
 
     /* The carve-out is independent of the shader geometry and of the
@@ -14638,14 +14648,30 @@ static void rbgpu_gpuname_derive_2CA(void)
     g_rb_2CA_mb = rb_gpu_vram_mb(memsize);
     rbgpu_diag_set_num("gpuname_mb", g_rb_2CA_mb);
 
-    if (!rb_gpu_harvest_read_valid(idx)) {
-        /* One array's mask cannot stand for the chip, and we will not write
-         * the register that would let us ask properly. Say so with a code
-         * (rule 14) - this is NOT "no harvest". */
+    /* 2CC: the selection must have held across the config reads, and must
+     * name an array inside the geometry we are about to assume. A moved
+     * index is a DIFFERENT refusal from an unusable one, because the first
+     * is transient and worth retrying and the second is not (rule 14). */
+    if (idx != idx_after) {
+        g_rb_2CA_why = 5;
+        g_rb_2CA_done = 0;   /* transient: Apple was mid-access, try again */
+        rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
+        rbgpu_diag_inc("gpuname_idx_moved");
+        return;
+    }
+    if (!rb_gpu_harvest_sel_valid(idx, RB_REMBRANDT_NUM_SE,
+                                  RB_REMBRANDT_NUM_SA_PER_SE)) {
+        /* A broadcast read (what it returns is not established by any header
+         * here), a non-zero instance, or an array outside the die. NOT "no
+         * harvest". */
         g_rb_2CA_why = 2;
         rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
         return;
     }
+    /* Say WHICH array the harvest came from, since the symmetric assumption
+     * is explicitly "this array stands for all of them". */
+    rbgpu_diag_set_num("gpuname_sel_se", rb_grbm_se(idx));
+    rbgpu_diag_set_num("gpuname_sel_sa", rb_grbm_sa(idx));
 
     mask = rb_gpu_harvest_per_sa(rb_gpu_inactive_wgps(cc),
                                  rb_gpu_inactive_wgps(user),

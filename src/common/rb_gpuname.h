@@ -202,17 +202,93 @@ static inline uint32_t rb_gpu_cu_count(uint32_t num_se, uint32_t num_sa_per_se,
     return arrays * live_per_sa * RB_CU_PER_WGP;
 }
 
-/* GRBM_GFX_INDEX must be in broadcast for a single harvest read to stand for
- * the chip (2CA). Linux selects each (SE, SA) before reading; we refuse
- * instead of writing that register, because the accelerator is live and owns
- * it. `gc_10_3_0_sh_mask.h`: SA_BROADCAST_WRITES bit 29, INSTANCE_BROADCAST
- * bit 30, SE_BROADCAST_WRITES bit 31 - all three, read not recalled. */
-#define RB_GRBM_GFX_INDEX_BCAST_MASK 0xE0000000u
+/* ===================================================================== 2CC
+ * WHICH ARRAY DID THAT HARVEST READ ANSWER FOR? 2CA ASKED THE WRONG FIELD.
+ *
+ * 2CA required `GRBM_GFX_INDEX` to read FULL BROADCAST before trusting a
+ * single harvest read, and boot 416 refused on exactly that: the register
+ * reads **0**, so `gpuname_why` was 2 and no name was ever published. The
+ * check was wrong twice over, and both the header and Linux say so:
+ *
+ *   (1) THE BITS GOVERN WRITES. They are named `SA_BROADCAST_WRITES`,
+ *       `INSTANCE_BROADCAST_WRITES`, `SE_BROADCAST_WRITES`. A READ is
+ *       answered by whichever array the INDEX FIELDS name; the broadcast
+ *       bits say what a WRITE fans out to. 2CA used a write-behaviour field
+ *       as the precondition for a read - the mirror of rule 46, asked of a
+ *       field instead of a method.
+ *   (2) ZERO IS THE CANONICAL SELECTION, NOT AN INVALID STATE.
+ *       `gfx_v10_0_select_se_sh(adev, se_num=0, sh_num=0, instance=0)`
+ *       builds its word from `REG_SET_FIELD(0, ...)` with no broadcast bit
+ *       set, so selecting (SE0, SA0, instance 0) writes **exactly 0**. The
+ *       value boot 416 refused is the value Linux writes to ask the question
+ *       we are asking.
+ *
+ * And 2CA had it backwards in the other direction too: a specific selection
+ * is the WELL-DEFINED case. What a read returns with a broadcast bit set is
+ * **not established** by any header in this tree - so that is what refuses
+ * now, as "not established" rather than as "wrong".
+ *
+ * So the real precondition is: the index fields must name an array INSIDE
+ * the geometry we are about to assume, and the derivation must record WHICH
+ * array it read - because the symmetric assumption is then explicitly "SA0
+ * of SE0 stands for all of them" rather than a vague "the chip".
+ *
+ * Boot 416 also showed why this matters more than it looks:
+ * `CC_GC_SHADER_ARRAY_CONFIG` read **0xFFF80001**, i.e. INACTIVE_WGPS
+ * **0xFFF8** - every bit ABOVE the array's three WGPs set and bits 2:0
+ * clear. That is Linux's `disabled_mask` initial value showing through, and
+ * it is 2CA's per-array narrowing being load-bearing on real silicon: masked
+ * to three bits it is 0 (nothing harvested, 12 CU, 680M), while 2C9's
+ * popcount of the whole field would have counted **13** dead WGPs out of 6
+ * and refused. The correction was not theoretical.
+ * ===================================================================== */
 
-static inline int rb_gpu_harvest_read_valid(uint32_t grbm_gfx_index)
+#define RB_GRBM_INSTANCE_INDEX_SHIFT  0u
+#define RB_GRBM_INSTANCE_INDEX_MASK   0x000000FFu
+#define RB_GRBM_SA_INDEX_SHIFT        8u
+#define RB_GRBM_SA_INDEX_MASK         0x0000FF00u
+#define RB_GRBM_SE_INDEX_SHIFT        16u
+#define RB_GRBM_SE_INDEX_MASK         0x00FF0000u
+/* All three *_BROADCAST_WRITES bits: 29, 30, 31. */
+#define RB_GRBM_BCAST_ANY_MASK        0xE0000000u
+
+static inline uint32_t rb_grbm_instance(uint32_t idx)
 {
-    return (grbm_gfx_index & RB_GRBM_GFX_INDEX_BCAST_MASK) ==
-           RB_GRBM_GFX_INDEX_BCAST_MASK;
+    return (idx & RB_GRBM_INSTANCE_INDEX_MASK) >> RB_GRBM_INSTANCE_INDEX_SHIFT;
+}
+static inline uint32_t rb_grbm_sa(uint32_t idx)
+{
+    return (idx & RB_GRBM_SA_INDEX_MASK) >> RB_GRBM_SA_INDEX_SHIFT;
+}
+static inline uint32_t rb_grbm_se(uint32_t idx)
+{
+    return (idx & RB_GRBM_SE_INDEX_MASK) >> RB_GRBM_SE_INDEX_SHIFT;
+}
+
+/* 1 if a harvest read taken under `grbm_gfx_index` answers for one known
+ * array of a `num_se` x `num_sa_per_se` die. Refuses a broadcast read
+ * (what it returns is not established), a non-zero instance index, and any
+ * selection outside the geometry. */
+static inline int rb_gpu_harvest_sel_valid(uint32_t grbm_gfx_index,
+                                           uint32_t num_se,
+                                           uint32_t num_sa_per_se)
+{
+    if (num_se == 0u || num_sa_per_se == 0u) {
+        return 0;
+    }
+    if (grbm_gfx_index & RB_GRBM_BCAST_ANY_MASK) {
+        return 0;
+    }
+    if (rb_grbm_instance(grbm_gfx_index) != 0u) {
+        return 0;
+    }
+    if (rb_grbm_se(grbm_gfx_index) >= num_se) {
+        return 0;
+    }
+    if (rb_grbm_sa(grbm_gfx_index) >= num_sa_per_se) {
+        return 0;
+    }
+    return 1;
 }
 
 /* The marketing name for a CU count, or NULL when this project has not
