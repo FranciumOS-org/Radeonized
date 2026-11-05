@@ -56849,3 +56849,99 @@ so whether `"AMD " + family + " " + device` reassembles to `AMD Radeon 680M`
 and whether the six reporter keys then appear are both still open. The
 prediction stands unchanged and `tools/mtlname` is the instrument — it already
 confirmed the whole chain *up to* the publish from userspace on this boot.
+
+## 2CD — IT WORKS: "AMD Radeon 680M" and Metal Support: Metal 3 (boot 417)
+
+User-visible, `system_profiler SPDisplaysDataType`:
+
+```
+AMD Radeon 680M:
+  Chipset Model: AMD Radeon 680M
+  VRAM (Total): 4 GB
+  Device ID: 0x1681
+  Metal Support: Metal 3
+```
+
+Boot 417, plugin **A3D78808** and framebuffer **DFBFF2A7** checked against
+`kextstat` first (rule 15). `tools/mtlname`:
+
+```
+name              "AMD Radeon 680M"
+ATY,FamilyName    Radeon
+ATY,DeviceName    680M
+test 1 equals device name   MATCH
+test 3 name contains ...    MATCH
+```
+
+So the whole 2CB chain is confirmed end to end on hardware: the two properties
+published on `IGPU@0`, Apple reassembling them as `"AMD " + family + " " +
+device` to **exactly** our `model`, the reporter's name pairing matching, the
+legacy `spdisplays_metal` **removed**, and
+`spdisplays_mtlgpufamilysupport = spdisplays_metal3` written. One change served
+both asks, as 2CB predicted.
+
+### But 2CB's "six-key signature" was WRONG, and it is measured wrong
+
+2CB said the six keys come from one loop, so "the six-key signature is the
+test that a fix worked". The dict carries **one** of them —
+`spdisplays_mtlgpufamilysupport`. `spdisplays_metal_slot`, `_headless`,
+`_peer_group`, `_peer_index` and `_removable` are **absent**, with the pairing
+provably succeeding.
+
+**The mechanism was already in the disassembly I had quoted.** Immediately
+after the family store at `0xa6c6`:
+
+```
+a6d9: movq %r14, %rdi            ; the MTLDevice
+a6dc: movq -0x618(%rbp), %rsi    ; selector `location`
+a6e3: callq *%rbx
+a6e5: testq %rax, %rax
+a6e8: je 0xaeba                  ; location == 0 -> bail
+```
+
+and `[device location]` reads **0** here, `MTLDeviceLocationBuiltIn` (measured;
+`locationNumber` 1, `isHeadless` 0, `isRemovable` 0, `peerGroupID` 0). So the
+reporter writes the Metal family key and then **bails on a built-in GPU**,
+skipping the five slot/peer keys — which are discrete/external concepts and
+have nothing to say about an iGPU. Their absence is **expected**, not a partial
+failure.
+
+I had disassembled that exact `je` and transcribed it into 2CB's own comment
+block, then built a prediction that contradicted it. **Reading an instruction
+is not the same as carrying it into the claim** — the same shape as 2CC's
+"reading the consumer of the value is not reading the consumer of the guard",
+one step further out: *reading the branch is not reading what it skips.*
+
+### And the instrument reported the OPPOSITE of the truth about the key that matters
+
+`tools/mtlname`'s summary grepped
+`spdisplays_(mtlgpufamilysupport|metalfamily|metal|metal_slot|…)` **unanchored**
+over the XML. The *value* `spdisplays_metal3` matched the bare `metal` branch
+and printed as `spdisplays_metal` — **the legacy key whose removal proves the
+mechanism.** So the first reading of a working boot said the legacy key had
+survived, which is exactly backwards, and on boot 416 the same bug made the
+pre-fix output look tidier than it was.
+
+**Rule 26 twice in one expression**: an unanchored match, and an alternation
+ordered so a longer token can never win. The card already records that trap
+(`rbgpu-diag` matching `rbgpu-diag-prev`) and I wrote it again anyway, in a
+tool built to be the instrument for this very question. Now anchored on
+`<key>`, printing the **value** beside the key so the family level is read
+rather than inferred from a key's presence, and printing `location` with the
+reason the five keys are absent so a reader is not left to wonder.
+
+Fixed too: the tool's own VERDICT line claimed "all six per-device keys".
+
+### What is now true, and what it cost
+
+Two asks, one change, and the shipping behaviour is better in a way the user
+can see without a counter: the GPU names itself from the silicon
+(12 CU -> 680M, derived) and System Information reports Metal 3.
+
+Still **opt-in** behind `-rbgpumtlname`, and that has not changed: both
+`ATY,FamilyName` and `ATY,DeviceName` also appear in
+`AMDRadeonX6000Framebuffer`, so Apple's kexts read them and what they do with
+"Radeon"/"680M" is still unread. Nothing observed on this boot argues either
+way, and one working boot is not a licence to default it on (rule 44 wants two
+boots per side before a configuration claim, and this is a configuration
+claim).

@@ -1212,12 +1212,36 @@ table and refuses to install one that does not match the running kernel;
   the break-it check (reinstating the broadcast requirement) fails four
   assertions. Plugin **A3D78808**, framebuffer unchanged - **plugin-only, no
   framebuffer reinstall.**
-  **The 2CB prediction is UNTESTED, not refuted** - nothing reached the
-  publish. It stands unchanged:**armed, `aty_ok` 1,
-  `[MTLDevice name]` == "AMD Radeon 680M", and System Information gains all
-  six keys with `spdisplays_mtlgpufamilysupport = spdisplays_metal3`. **Name
-  changes but six keys do not = the pairing has a condition beyond the four
-  tests and this reading is incomplete.**
+  **2CD: IT WORKS ON HARDWARE (boot 417). `Chipset Model: AMD Radeon 680M`,
+  `VRAM (Total): 4 GB`, `Metal Support: Metal 3`.** `[MTLDevice name]` ==
+  **"AMD Radeon 680M"**, `ATY,FamilyName` **Radeon** / `ATY,DeviceName`
+  **680M** on `IGPU@0`, reporter tests 1 AND 3 both MATCH, legacy
+  `spdisplays_metal` **removed**, `spdisplays_mtlgpufamilysupport` =
+  **`spdisplays_metal3`**. One change served both asks.
+  **BUT 2CB's "six-key signature" IS MEASURED WRONG.** Only ONE of the six
+  appears; `spdisplays_metal_slot`/`_headless`/`_peer_group`/`_peer_index`/
+  `_removable` are ABSENT with the pairing provably succeeding - and the
+  mechanism was in the disassembly 2CB itself quoted: right after the family
+  store, `[device location]` then `testq/je` **bails when location is 0**,
+  and `location` reads **0** here (`MTLDeviceLocationBuiltIn`; measured, with
+  `locationNumber` 1, `isHeadless` 0, `isRemovable` 0, `peerGroupID` 0). The
+  five are discrete/external concepts and their absence on an iGPU is
+  **EXPECTED**. I transcribed that `je` into 2CB's comment and then predicted
+  against it: **reading the branch is not reading what it SKIPS** - 2CC's
+  lesson one step out.
+  **AND THE INSTRUMENT REPORTED THE OPPOSITE OF THE TRUTH.**
+  `tools/mtlname` grepped `spdisplays_(...|metal|metal_slot|...)`
+  **unanchored**, so the VALUE `spdisplays_metal3` matched the bare `metal`
+  branch and printed as `spdisplays_metal` - the legacy key whose REMOVAL
+  proves the mechanism. Rule 26 twice in one expression (unanchored match;
+  alternation ordered so a longer token can never win - the trap this card
+  already records for `rbgpu-diag` vs `rbgpu-diag-prev`), in the tool built
+  to be the instrument for this question. Anchored on `<key>` now, printing
+  the VALUE beside the key and `location` with the reason the five are
+  absent.
+  **Still OPT-IN and that has not changed**: both strings also live in
+  `AMDRadeonX6000Framebuffer` and that consumer is still unread, and one
+  working boot is not two (rule 44).
   Also corrected here: 2CA's derivation **latched** its "aperture not up yet"
   refusal, and `g_hw.ctx` arrives with the accelerator's SMU init, LATER than
   the peer's `start()` - a cached transient looks permanent (2A3 in another
