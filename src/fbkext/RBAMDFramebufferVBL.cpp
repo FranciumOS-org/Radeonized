@@ -932,6 +932,12 @@ IOReturn RBAMDFramebuffer::registerForInterruptType(IOSelect interruptType,
          * taking locks and matching services is safe - and it must happen
          * before armVBL() starts delivering. */
         vblRetSetup();
+        /* 2CA: and ask the chip its own name from the same safe context. The
+         * plugin's register aperture comes up with the accelerator, which is
+         * later than our start(), so this cannot be done where the literals
+         * are published - it has to be somewhere ordinary that runs after
+         * the accelerator is alive, and this is that place. */
+        gpuNameSetup();
         if (!vblRunning) {
             armVBL();
         }

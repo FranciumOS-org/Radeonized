@@ -40,6 +40,7 @@ extern "C" {
 #include "rb_retire.h"
 #include "rb_dmub.h"
 #include "rb_frametime.h"
+#include "rb_gpuname.h"
 }
 
 #include <IOKit/graphics/IOFramebuffer.h>
@@ -335,6 +336,14 @@ private:
     uint64_t        vblRetDrove{0};
     uint64_t        vblRetRefused{0};
     uint64_t        vblRetModeSkips{0}; /* 2zf: offers the mode gate declined */
+
+    /* 2CA: the chip's own name and carve-out size, fetched once from the
+     * plugin. gpuNameLookups makes it one attempt whether or not it worked,
+     * so a missing plugin is not retried every vblank; gpuNameDerived says
+     * whether the `model` property on this node is the chip's answer or
+     * start()'s literal. */
+    uint32_t        gpuNameLookups{0};
+    uint32_t        gpuNameDerived{0};
     bool               hubpDeferPend;  /* 2xm: -rbgpufbflippend */
     /* 2B1: SURFACE_TRIPLE_BUFFER_ENABLE, the second pending flip slot.
      * hubpTripleOrig is the word read BEFORE anything is written, so the
@@ -901,6 +910,7 @@ private:
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
      * when a transaction tells us. See RBAMDFramebufferHUBP.cpp. */
     void hubpPoll(void);
+    void gpuNameSetup(void);
     void vblRetSetup(void);
     void vblRetOffer(void);
 

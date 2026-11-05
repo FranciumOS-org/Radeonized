@@ -4,7 +4,9 @@
  * UNKNOWN part is named as unknown rather than rounded to a known row. */
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include "rb_gpuname.h"
+#include "rb_regs.h"
 
 int gpuname_tests(void);
 
@@ -15,8 +17,18 @@ int gpuname_tests(void)
 
     /* THE REAL CHIP. The discovery table captured from this machine
      * (tests/data/rembrandt-680m-*.bin, asserted in hosttest.c) gives
-     * NUM_SE 1, NUM_SA_PER_SE 2, NUM_WGP0_PER_SA 3, and nothing harvested. */
-    if (rb_gpu_cu_count(1, 2, 3, 0) != 12u) {
+     * NUM_SE 1, NUM_SA_PER_SE 2, NUM_WGP0_PER_SA 3, and nothing harvested -
+     * which is what the RB_REMBRANDT_* die constants carry, so the constants
+     * the kext uses are pinned against the captured data here rather than
+     * written down twice. */
+    if (RB_REMBRANDT_NUM_SE != 1u || RB_REMBRANDT_NUM_SA_PER_SE != 2u ||
+        RB_REMBRANDT_NUM_WGP_PER_SA != 3u) {
+        printf("FAIL gpuname: the Rembrandt die geometry must stay 1 x 2 x 3, "
+               "which is what the captured discovery table reads\n");
+        bad++;
+    }
+    if (rb_gpu_cu_count(RB_REMBRANDT_NUM_SE, RB_REMBRANDT_NUM_SA_PER_SE,
+                        RB_REMBRANDT_NUM_WGP_PER_SA, 0) != 12u) {
         printf("FAIL gpuname: 1 SE x 2 SA x 3 WGP with no harvest is 12 CU, "
                "got %u\n", rb_gpu_cu_count(1, 2, 3, 0));
         bad++;
@@ -26,15 +38,100 @@ int gpuname_tests(void)
         printf("FAIL gpuname: 12 CU must be the 680M, got '%s'\n", buf);
         bad++;
     }
-    /* The 660M is half the CUs, and it is the ONLY other established row. */
-    if (rb_gpu_cu_count(1, 2, 3, 0x7) != 6u) {
-        printf("FAIL gpuname: three WGPs harvested off six leaves 6 CU, "
-               "got %u\n", rb_gpu_cu_count(1, 2, 3, 0x7));
+
+    /* 2CA: THE MASK IS PER SHADER ARRAY, so one dead WGP costs TWO on this
+     * geometry - one in each array. 2C9 popcounted the mask against the
+     * chip's total and would have called this 10 CU. */
+    if (rb_gpu_cu_count(1, 2, 3, 0x1) != 8u) {
+        printf("FAIL gpuname: a per-array mask of one WGP kills one in EACH "
+               "array, leaving 8 CU, got %u\n", rb_gpu_cu_count(1, 2, 3, 0x1));
+        bad++;
+    }
+    if (rb_gpu_cu_count(1, 2, 3, 0x3) != 4u) {
+        printf("FAIL gpuname: two WGPs per array leaves 4 CU, got %u\n",
+               rb_gpu_cu_count(1, 2, 3, 0x3));
+        bad++;
+    }
+    /* AND THE CONSEQUENCE, PINNED: a symmetric per-array harvest can only
+     * kill a multiple of (num_se x num_sa_per_se) WGPs, so on 1 x 2 x 3 the
+     * reachable counts are 12, 8, 4 and a refusal. 6 CU - the 660M - is
+     * UNREACHABLE from a harvest mask, and this assertion is what stops a
+     * later change quietly making it reachable by the wrong arithmetic. */
+    {
+        uint32_t m, hit6 = 0;
+        for (m = 0; m < 8u; m++) {
+            if (rb_gpu_cu_count(1, 2, 3, m) == 6u) { hit6 = 1; }
+        }
+        if (hit6) {
+            printf("FAIL gpuname: 6 CU must NOT be reachable from a "
+                   "symmetric per-array harvest on a 1 x 2 x 3 die - if it "
+                   "is, the arithmetic is per-chip again (2CA)\n");
+            bad++;
+        }
+    }
+    /* The 660M's row is reached by GEOMETRY instead: one array (or engine)
+     * disabled, which the discovery table reports and no harvest register
+     * does. It is still the only other established row. */
+    if (rb_gpu_cu_count(1, 1, 3, 0) != 6u) {
+        printf("FAIL gpuname: 1 SE x 1 SA x 3 WGP is 6 CU, got %u\n",
+               rb_gpu_cu_count(1, 1, 3, 0));
         bad++;
     }
     if (rb_gpu_name(6u, buf, sizeof(buf)) != 1 ||
         strcmp(buf, "AMD Radeon 660M") != 0) {
         printf("FAIL gpuname: 6 CU must be the 660M, got '%s'\n", buf);
+        bad++;
+    }
+
+    /* THE EFUSE AND THE VBIOS MASKS BOTH COUNT, ORed as gfx_v10_0.c ORs
+     * them - a part harvested only in firmware must not read as unharvested
+     * (2CA (2)). And the field extraction must take bits 31:16. */
+    if (rb_gpu_inactive_wgps(0x00030000u) != 0x3u ||
+        rb_gpu_inactive_wgps(0x0000FFFFu) != 0u) {
+        printf("FAIL gpuname: INACTIVE_WGPS is bits 31:16 and nothing "
+               "below them\n");
+        bad++;
+    }
+    if (rb_gpu_harvest_per_sa(0x1u, 0x2u, 3u) != 0x3u) {
+        printf("FAIL gpuname: the efuse and VBIOS masks must OR\n");
+        bad++;
+    }
+    /* Bits above the array's own width are not WGPs. The register's field is
+     * 16 bits wide on a 3-WGP array, so this is the common case, not an
+     * edge one - it is what made 2C9's popcount wrong. */
+    if (rb_gpu_harvest_per_sa(0xFFF8u, 0u, 3u) != 0u) {
+        printf("FAIL gpuname: bits above the array's WGP count must NOT "
+               "read as harvested WGPs\n");
+        bad++;
+    }
+    if (rb_gpu_harvest_per_sa(0x1u, 0u, 0u) != 0u ||
+        rb_gpu_harvest_per_sa(0x1u, 0u, 32u) != 0u) {
+        printf("FAIL gpuname: an unusable array width must refuse\n");
+        bad++;
+    }
+
+    /* THE PRECONDITION FOR READING THE MASK AT ALL (2CA (3)): Linux selects
+     * each array with GRBM_GFX_INDEX before reading, and we refuse rather
+     * than write that register on a live accelerator. So a single read
+     * stands for the chip only in broadcast - all three bits. */
+    if (!rb_gpu_harvest_read_valid(0xE0000000u)) {
+        printf("FAIL gpuname: full broadcast must be accepted\n");
+        bad++;
+    }
+    if (rb_gpu_harvest_read_valid(0x00000000u) ||
+        rb_gpu_harvest_read_valid(0xC0000000u) ||
+        rb_gpu_harvest_read_valid(0xA0000000u) ||
+        rb_gpu_harvest_read_valid(0x60000000u)) {
+        printf("FAIL gpuname: a GRBM_GFX_INDEX missing ANY broadcast bit "
+               "means the read answers for one array, not the chip\n");
+        bad++;
+    }
+    /* The low bits are indices and must not affect the verdict when all
+     * three broadcast bits are set - a control, so the check cannot be
+     * passing by comparing the whole word. */
+    if (!rb_gpu_harvest_read_valid(0xE0010203u)) {
+        printf("FAIL gpuname: the index fields must not change the "
+               "broadcast verdict\n");
         bad++;
     }
     /* THE POINT OF THE WHOLE HEADER: an unestablished CU count must NOT be
@@ -77,8 +174,11 @@ int gpuname_tests(void)
                "than produce a confident CU count\n");
         bad++;
     }
-    if (rb_gpu_cu_count(1, 2, 3, 0xFFFFFFFFu) != 0u) {
-        printf("FAIL gpuname: every WGP harvested must refuse\n");
+    if (rb_gpu_cu_count(1, 2, 3, 0xFFFFFFFFu) != 0u ||
+        rb_gpu_cu_count(1, 2, 3, 0x7u) != 0u) {
+        printf("FAIL gpuname: an array with every WGP harvested must refuse "
+               "- 0x7 on a 3-WGP array is an empty array, which 2C9 read as "
+               "the 660M\n");
         bad++;
     }
     if (rb_gpu_name(0u, buf, sizeof(buf)) != -1 || buf[0] != '\0') {
@@ -96,6 +196,16 @@ int gpuname_tests(void)
                    "truncate\n");
             bad++;
         }
+    }
+
+    /* The carve-out register offset is ALIASED, not retyped: rb_probe.c and
+     * the plugin must read the same dword or one of them is measuring
+     * something else (2C4's lesson about bounds in three places). */
+    if (RB_GPU_DW_RCC_CONFIG_MEMSIZE != RB_mmRCC_CONFIG_MEMSIZE) {
+        printf("FAIL gpuname: the memsize register alias has drifted from "
+               "rb_regs.h - 0x%x vs 0x%x\n",
+               RB_GPU_DW_RCC_CONFIG_MEMSIZE, RB_mmRCC_CONFIG_MEMSIZE);
+        bad++;
     }
 
     /* THE CARVE-OUT. 4096 is what this machine really has - Metal's
@@ -126,8 +236,10 @@ int gpuname_tests(void)
         bad++;
     }
 
-    printf("gpuname: 12 CU -> 680M, 6 CU -> 660M, an unestablished count "
-           "names itself, every refusal path refuses, and the carve-out "
-           "comes from the register%s\n", bad ? " FAILED" : ": passed");
+    printf("gpuname: 12 CU -> 680M, 6 CU -> 660M by geometry (never by a "
+           "harvest mask), the mask is per-array and needs broadcast, an "
+           "unestablished count names itself, every refusal path refuses, "
+           "and the carve-out comes from the register%s\n",
+           bad ? " FAILED" : ": passed");
     return bad;
 }

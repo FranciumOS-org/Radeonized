@@ -56432,3 +56432,153 @@ separately armed halves must check each other).
 That is a **framebuffer change**, so it costs an install and a boot - which
 is why the logic lands first, decided and tested, with nothing claimed about
 hardware.
+
+## 2CA — the name is wired, and reading the consumer corrected 2C9's arithmetic
+
+Goal: hand `rb_gpuname.h`'s derived name and carve-out size to
+`RBAMDFramebuffer` so System Information reads the chip instead of two
+literals. Built, hosttested, **NOT RUN** — no boot has taken a reading.
+
+### The correction, found before any wiring
+
+2C9 derived CU as `2 x (total_wgp - popcount(INACTIVE_WGPS))`. Reading the
+consumer — `gfx_v10_0.c:gfx_v10_0_get_wgp_active_bitmap_per_sh()` — says
+that is wrong three ways:
+
+1. **The mask is PER SHADER ARRAY**, `max_cu_per_sh >> 1` bits wide. On a
+   3-WGP array only bits 2:0 are WGPs; everything above is `disabled_mask`'s
+   initial all-ones and not a harvest reading at all. 2C9 popcounted a
+   per-array mask against a per-chip count.
+2. **The harvest is `CC_GC_SHADER_ARRAY_CONFIG | GC_USER_SHADER_ARRAY_CONFIG`**
+   — an efuse mask ORed with a VBIOS mask. 2C9 read only the efuse, so a part
+   harvested in firmware would have read as unharvested, which is a plausible
+   way to build a lower SKU off one die.
+3. **Linux reads it once per (SE, SA) behind a `GRBM_GFX_INDEX` write.**
+
+Point 3 bounds what this project can derive at all. `GRBM_GFX_INDEX` selects
+which array every subsequent GC read answers for, and Apple's accelerator is
+live and owns it, so we do not write it — we **read** it and refuse unless it
+is in full broadcast (`SA|INSTANCE|SE_BROADCAST_WRITES`, bits 31:29, read from
+`gc_10_3_0_sh_mask.h`). That leaves one mask for the whole chip, i.e. the
+assumption that the harvest is symmetric.
+
+**The consequence is stated rather than hidden, and it is the interesting
+part.** A symmetric harvest can only kill a multiple of
+`num_se * num_sa_per_se` WGPs, so on this die's 1 x 2 x 3 geometry the
+reachable counts are **12, 8, 4 and a refusal — and 6 CU is UNREACHABLE.**
+2C9's arithmetic reached "660M" from a mask of `0x7`, which under the correct
+per-array semantics is **an array with every WGP dead** — a refusal, not a
+SKU. So the one row 2C9 added beyond this machine's own was reachable only by
+the defect. The 660M's row now stands on **geometry** (1 SE x 1 SA x 3 WGP, an
+array or engine disabled, which the discovery table reports and no harvest
+register does), and the hosttest sweeps all eight masks to assert 6 CU cannot
+be produced from one.
+
+If a 660M ever reads 8 or 4 CU here, that is the signature of an **asymmetric**
+harvest this derivation cannot see, and the generic name will carry the
+measured count rather than a confident wrong SKU.
+
+### What is read live and what is a die constant
+
+- **LIVE:** both harvest masks, `GRBM_GFX_INDEX` as their precondition, and
+  `RCC_CONFIG_MEMSIZE`. These distinguish SKUs and differ between boards.
+- **CONSTANT:** the geometry, 1 SE x 2 SA x 3 WGP. It is a property of the
+  **die**, not the SKU, and the plugin has no discovery table (`g_disc` is a
+  hand-built two-IP structure for MP1, and `g_hw.fb_read` is NULL so the
+  carve-out cannot be read either). The constant is pinned by the hosttest
+  against the discovery data captured from this machine, which is the only
+  reason it is allowed to be a constant.
+
+Making the plugin parse real discovery would mean mapping the carve-out — a
+much larger change for a value that cannot vary within the die.
+
+### The wiring
+
+`rbgpu_gpuname_derive_2CA()` in `kern_start.cpp` reads four registers once and
+caches them: `CC_GC_SHADER_ARRAY_CONFIG` and `GC_USER_SHADER_ARRAY_CONFIG` at
+GC seg0 0x1260 + 0x100f/0x1010, `GRBM_GFX_INDEX` at GC seg1 0xa000 + 0x2200
+(**BASE_IDX 1** — a different segment, and conflating them would read a shader
+register and call it an index), and `RCC_CONFIG_MEMSIZE` at the fixed BAR dword
+0xde3, **aliased** to `rb_regs.h`'s definition with the hosttest asserting the
+alias so the plugin and `rb_probe.c` cannot drift (2C4's pattern). The aperture
+bound is checked against `g_hw.mmio_len` before any read, since a read past the
+BAR mapping is a fault and not a diagnostic.
+
+All four raw words publish as diag keys beside the verdict. Publishing raw
+beside summary has now caught three wrong verdicts (2B0's bucket 3, 2B4's
+sign-extended HPD word, 2B9's `AUX_HPD_SEL`) — and a 660M owner's reading of
+`gpuname_cc_raw`/`gpuname_user_raw` is the only route by which the second table
+row ever gets confirmed on hardware.
+
+`RembrandtGPUPeer::callPlatformFunction` answers `RBGPUGpuName` over the same
+cross-collection channel 2zd opened. Every out-parameter is optional and each
+is answered **independently**, because the name and the size refuse for
+different reasons: an unreadable harvest mask must not cost a correct 4096 MB.
+
+On the framebuffer side `gpuNameSetup()` does **its own** peer lookup rather
+than reusing `vblRetSetup`'s, which is gated on `-rbgpuretirevbl` — reusing it
+would make the GPU's name depend on which timer drives frame retirement.
+
+### Where it runs, and why the literals stay
+
+`start()` still publishes `VRAM,totalMB` 4096 and `model` "AMD Radeon 680M",
+now labelled `RBFBModelSrc = fallback`. Two reasons: IOFramebuffer
+registration is in flight and WindowServer may look at the node at any point
+(2xx is what a WindowServer that dislikes its framebuffer costs), and the
+plugin's register aperture comes up with the accelerator, which is **later
+than our start()** — so a derived value is not available that early. The
+derivation therefore runs from `registerForInterruptType`, an ordinary
+IOService context after the accelerator is alive, and overwrites both
+properties. System Profiler reads the registry at query time, so a later
+overwrite is what it sees.
+
+That makes the literals the **fallback** rule 38 asks for from a half that can
+be armed separately: plugin absent, disarmed or older than this build and the
+node carries exactly what every boot before 2CA carried. `RBFBModelSrc` reads
+`derived`, `derived-generic` or `fallback`, so a boot says which it used
+instead of leaving a reader to compare strings, and `RBFBModelWhy` carries the
+refusal code (1 no aperture, 2 not broadcast, 3 geometry/mask refused, 16 no
+peer at all).
+
+**Default-on** (`-rbgpufbgpuname`, 50th entry in `rb_defaults.h`), which is
+unusual for an unbooted feature and justified narrowly: on this machine the
+derived name is **byte-identical** to the literal it replaces, so the only
+observable change on a 680M is the new keys; the registers are read-only with
+no new write surface; and the fallback is built in. Disarm with
+`-rbgpunofbgpuname`.
+
+### Tested
+
+Hosttest green, with break-it checks in both halves:
+
+- Reinstating 2C9's arithmetic fails **four** assertions, including the
+  unreachability sweep and the "an empty array is not the 660M" case.
+- Deleting the `gpuNameSetup()` call from `registerForInterruptType` fails the
+  VBL test, because the shim **counts** the stub rather than swallowing it — a
+  stub that records nothing would make the call site untestable, and a wrong
+  call site looks exactly like a plugin that refused (rule 14). The same
+  assertion pins that it does **not** run per vblank.
+- The alias check fails if `RB_GPU_DW_RCC_CONFIG_MEMSIZE` drifts from
+  `RB_mmRCC_CONFIG_MEMSIZE`.
+- `make osrange` agrees, plugin resolves **0** from
+  `SystemKernelExtensions.kc` (the 2oz trap), `grep -c IOGraphicsFamily
+  src/plugin/Info.plist` is **0**.
+- Both UUIDs moved: plugin **27C19F13**, framebuffer **DFBFF2A7** (live were
+  379F6FE4 and 13533FFA).
+
+### What this does NOT do
+
+Nothing about **Metal: 3**. 2C9 established the capability is there
+(`supportsFamily:MTLGPUFamilyMetal3` = YES) and that the reporter's condition
+for writing `spdisplays_metalfamily` is **not established**; no mechanism was
+found this milestone either and none is claimed. Nothing about the Metal
+device **name** — that is Apple's device-id -> string table, and 1002:1681 is
+absent from it.
+
+**Costs a framebuffer install and a boot.** The reading that matters is
+`gpuname_cc_raw`, `gpuname_user_raw`, `gpuname_grbm_idx`, `gpuname_cu`,
+`gpuname_mb`, `gpuname_why` and `RBFBModelSrc` — and in particular whether
+`GRBM_GFX_INDEX` is in broadcast on a live accelerated desktop at the moment
+we look, which decides whether the harvest half works at all. A `why` of 2
+means it is not, and then the name is the fallback while the 4096 MB is still
+derived.

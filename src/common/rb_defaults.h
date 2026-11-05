@@ -53,6 +53,13 @@ static const char *const rb_default_on_tokens[] = {
     "-rbgpuagdccaps", "-rbgpuownfb", "-rbgpufbaty", "-rbgpufbamtr",
     "-rbgpufbhubp", "-rbgpufbflipall", "-rbgpufbflippend", "-rbgpufbnotready",
     "-rbgpufbotgany", "-rbgpufbretire", "-rbgpufbpoll", "-rbgpuschedtick",
+    /* 2CA: the GPU's name and carve-out size read from the chip instead of
+     * hardcoded. Default-on because on this machine the derived answer is
+     * byte-identical to the literal it replaces, so the only observable
+     * change is the new keys - and because a fallback is built in (rule 38),
+     * the failure mode is the behaviour of every boot before it. Read-only
+     * registers; no new write surface. */
+    "-rbgpufbgpuname",
     /* brightness, measured working on this OS across consecutive boots:
      * 2xs the duty cycle (boot 249), 2xy the AppleBacklightDisplay match
      * (boot 250), 2y1 the full-length parameter name (boot 252), 2y2 the

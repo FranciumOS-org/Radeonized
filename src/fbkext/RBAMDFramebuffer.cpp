@@ -751,10 +751,23 @@ bool RBAMDFramebuffer::start(IOService *provider)
     }
     crumb(6);   /* IOFramebuffer::start accepted */
 
-    /* The labels System Profiler reads. Values measured, not invented: the
-     * 4096 MB is what the plugin publishes from the real carve-out size. */
+    /* The labels System Profiler reads. 2CA replaces both with values the
+     * CHIP reports - see gpuNameSetup() below - but they are published here
+     * first, unconditionally, for two reasons. IOFramebuffer registration is
+     * in flight and WindowServer is entitled to look at this node at any
+     * point (2xx is what a WindowServer that dislikes its framebuffer
+     * costs), and the plugin may not have brought the accelerator's register
+     * aperture up yet, so a derived value is not available this early.
+     *
+     * These two literals are therefore the FALLBACK, which is what rule 38
+     * asks for from a half that can be armed separately: if the plugin is
+     * absent, disarmed or older than this build, the node still carries the
+     * numbers every boot before 2CA carried. Both are true of this machine
+     * (Metal's own recommendedMaxWorkingSetSize reads 4096 MB), so a refused
+     * derivation is a loss of generality, not a regression. */
     setProperty("VRAM,totalMB", 4096ULL, 32);
     setProperty("model", "AMD Radeon 680M");
+    setProperty("RBFBModelSrc", "fallback");
 
     /* 2w9: THE TWO PROPERTIES THE ACCELERATOR READS OFF THE FRAMEBUFFER.
      *
@@ -1763,6 +1776,101 @@ IOReturn RBAMDFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
  *
  * The OSSymbol is created here too, because creating it per vblank would be
  * an allocation at 144 Hz. */
+/* 2CA: REPLACE THE TWO LITERALS WITH WHAT THE CHIP SAYS.
+ *
+ * 2C9 found that "AMD Radeon 680M / 4 GB" in System Information is not an
+ * OpenCore spoof - `DeviceProperties/Add` carries only `acpi-wake-type` and
+ * `built-in` - but two literals in start() above, so the fix is ours to
+ * make. The plugin does the register reads (it owns the aperture; this kext
+ * runs no discovery and its `ATY,fb_size` comes from a boot-arg) and hands
+ * the answers over by name, the same cross-collection route 2zd opened.
+ *
+ * ITS OWN LOOKUP, deliberately not vblRetSetup's. That one is gated on
+ * `-rbgpuretirevbl` and would make the GPU's name depend on which timer
+ * drives frame retirement, which is an unrelated configuration - exactly
+ * the kind of coupling rule 34 asks you to notice before an experiment
+ * reads the wrong thing. copyMatchingService and not waitForMatchingService
+ * for 2zd's reason: a null peer is a configuration, not an error.
+ *
+ * WHAT A FAILURE LOOKS LIKE, so it cannot be confused with a success: the
+ * literals above stay, `RBFBModelSrc` keeps reading `fallback`, and
+ * `RBFBModelWhy` carries the plugin's refusal code. A derived name sets
+ * `RBFBModelSrc` to `derived` or `derived-generic` and publishes the CU
+ * count it was derived from, so the boot says WHICH of the two it used
+ * rather than leaving a reader to compare strings.
+ *
+ * On this machine the derived name is byte-identical to the literal, which
+ * is why this is safe to have on by default: the only observable change on
+ * a 680M is the new keys. `-rbgpunofbgpuname` turns it off. */
+void RBAMDFramebuffer::gpuNameSetup(void)
+{
+    char     name[RB_GPUNAME_MAX];
+    uint32_t mb = 0, cu = 0, why = 0;
+
+    if (gpuNameLookups) {
+        return;
+    }
+    gpuNameLookups++;
+    if (!argOn("-rbgpufbgpuname")) {
+        return;
+    }
+
+    OSDictionary *match = IOService::serviceMatching("RembrandtGPUPeer");
+    if (!match) {
+        return;
+    }
+    IOService *peer = IOService::copyMatchingService(match);
+    match->release();
+    if (!peer) {
+        LOG("2CA: RembrandtGPUPeer not found - the start() literals keep the "
+            "job and RBFBModelSrc stays 'fallback'");
+        setProperty("RBFBModelWhy", 16ULL, 32);   /* 16: no peer at all */
+        return;
+    }
+
+    const OSSymbol *sym = OSSymbol::withCString("RBGPUGpuName");
+    if (!sym) {
+        peer->release();
+        return;
+    }
+    name[0] = '\0';
+    const IOReturn r = peer->callPlatformFunction(sym, false, name, &mb,
+                                                  &cu, &why);
+    sym->release();
+    peer->release();
+
+    /* The return code is read, and so is each out-parameter, because they
+     * answer independently: an unreadable harvest mask must not cost a
+     * correct carve-out size (rule 13 - a return code is not a result). */
+    setProperty("RBFBModelWhy", static_cast<unsigned long long>(why), 32);
+    setProperty("RBFBModelCu",  static_cast<unsigned long long>(cu), 32);
+    setProperty("RBFBModelMb",  static_cast<unsigned long long>(mb), 32);
+
+    if (r != kIOReturnSuccess) {
+        LOG("2CA: the peer answered 0x%x - literals keep the job", r);
+        return;
+    }
+
+    const uint32_t vmb = rb_gpu_vram_mb(mb);
+    if (vmb) {
+        setProperty("VRAM,totalMB", static_cast<unsigned long long>(vmb), 32);
+    }
+    if (name[0] && cu) {
+        setProperty("model", name);
+        /* `derived` vs `derived-generic` is the difference between a
+         * marketing name this project has established on two sources and a
+         * name carrying only the measured CU count. A reader must be able to
+         * tell those apart without re-deriving them. */
+        setProperty("RBFBModelSrc",
+                    rb_gpu_name_known(cu) ? "derived" : "derived-generic");
+        gpuNameDerived = 1;
+    }
+    LOG("2CA: chip says '%s' (%u CU), %u MB -> model %s, VRAM %s",
+        name[0] ? name : "(refused)", cu, vmb,
+        gpuNameDerived ? "DERIVED" : "fallback",
+        vmb ? "DERIVED" : "fallback");
+}
+
 void RBAMDFramebuffer::vblRetSetup(void)
 {
     if (vblRetPeer || vblRetLookups) {
