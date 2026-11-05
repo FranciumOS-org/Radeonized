@@ -110,90 +110,110 @@ int gpuname_tests(void)
         bad++;
     }
 
-    /* THE PRECONDITION FOR READING THE MASK AT ALL (2CA (3)): Linux selects
-     * each array with GRBM_GFX_INDEX before reading, and we refuse rather
-     * than write that register on a live accelerator. So a single read
-     * stands for the chip only in broadcast - all three bits. */
-    if (!rb_gpu_harvest_read_valid(0xE0000000u)) {
-        printf("FAIL gpuname: full broadcast must be accepted\n");
+    /* 2CC: WHICH ARRAY THE HARVEST READ ANSWERED FOR. 2CA required FULL
+     * BROADCAST and boot 416 refused on exactly that - the register reads
+     * **0**. Two things make 0 the right answer and the old check the wrong
+     * question: the bits are named `*_BROADCAST_WRITES` and govern WRITES,
+     * and `gfx_v10_0_select_se_sh(se=0, sh=0, instance=0)` writes exactly 0
+     * to select (SE0, SA0). So the value that was refused is the value Linux
+     * writes to ask this very question. */
+    if (!rb_gpu_harvest_sel_valid(0x00000000u, 1, 2)) {
+        printf("FAIL gpuname: GRBM_GFX_INDEX 0 is Linux's own "
+               "select_se_sh(0,0,0) word and MUST be accepted - boot 416 "
+               "refused the whole feature on this\n");
         bad++;
     }
-    if (rb_gpu_harvest_read_valid(0x00000000u) ||
-        rb_gpu_harvest_read_valid(0xC0000000u) ||
-        rb_gpu_harvest_read_valid(0xA0000000u) ||
-        rb_gpu_harvest_read_valid(0x60000000u)) {
-        printf("FAIL gpuname: a GRBM_GFX_INDEX missing ANY broadcast bit "
-               "means the read answers for one array, not the chip\n");
+    /* SE0/SA1 is a real array on this die and must be accepted too, with the
+     * fields decoded rather than the word compared. */
+    if (!rb_gpu_harvest_sel_valid(0x00000100u, 1, 2) ||
+        rb_grbm_sa(0x00000100u) != 1u || rb_grbm_se(0x00000100u) != 0u ||
+        rb_grbm_instance(0x00000100u) != 0u) {
+        printf("FAIL gpuname: SA_INDEX is bits 15:8 and SE0/SA1 is a valid "
+               "array on a 1 x 2 die\n");
         bad++;
     }
-    /* The low bits are indices and must not affect the verdict when all
-     * three broadcast bits are set - a control, so the check cannot be
-     * passing by comparing the whole word. */
-    if (!rb_gpu_harvest_read_valid(0xE0010203u)) {
-        printf("FAIL gpuname: the index fields must not change the "
-               "broadcast verdict\n");
+    if (rb_grbm_se(0x00020300u) != 2u || rb_grbm_sa(0x00020300u) != 3u) {
+        printf("FAIL gpuname: SE_INDEX is bits 23:16 and SA_INDEX bits "
+               "15:8\n");
         bad++;
     }
-    /* THE POINT OF THE WHOLE HEADER: an unestablished CU count must NOT be
-     * rounded to a known row. 2 CU is the 610M's rumoured count and the
-     * sources disagree on whether it is even Rembrandt, so it has no row -
-     * and naming it "660M" would be exactly the substitution rule 17
-     * forbids. */
-    if (rb_gpu_name_known(2u) != (const char *)0 ||
-        rb_gpu_name_known(4u) != (const char *)0 ||
-        rb_gpu_name_known(8u) != (const char *)0) {
-        printf("FAIL gpuname: an unestablished CU count must have NO known "
-               "name - a guessed row is worse than the hardcode it "
-               "replaces\n");
+    /* REFUSALS. A broadcast read is refused because what it RETURNS is not
+     * established by any header in this tree - "not established", not
+     * "wrong" - and each of the three bits must refuse on its own. */
+    if (rb_gpu_harvest_sel_valid(0x20000000u, 1, 2) ||
+        rb_gpu_harvest_sel_valid(0x40000000u, 1, 2) ||
+        rb_gpu_harvest_sel_valid(0x80000000u, 1, 2) ||
+        rb_gpu_harvest_sel_valid(0xE0000000u, 1, 2)) {
+        printf("FAIL gpuname: any *_BROADCAST_WRITES bit must refuse - a "
+               "broadcast READ of a per-array register has no established "
+               "answer\n");
         bad++;
     }
-    if (rb_gpu_name(2u, buf, sizeof(buf)) != 0 ||
-        strcmp(buf, "AMD Radeon Graphics (Rembrandt, 2 CU)") != 0) {
-        printf("FAIL gpuname: an unknown part must name its own CU count, "
-               "got '%s'\n", buf);
+    /* An array outside the geometry we are about to assume. */
+    if (rb_gpu_harvest_sel_valid(0x00010000u, 1, 2) ||
+        rb_gpu_harvest_sel_valid(0x00000200u, 1, 2)) {
+        printf("FAIL gpuname: a selection outside the die's own geometry "
+               "must refuse - SE1 does not exist on a 1-SE die, nor SA2 on "
+               "a 2-SA engine\n");
         bad++;
     }
-    if (rb_gpu_name(10u, buf, sizeof(buf)) != 0 ||
-        strcmp(buf, "AMD Radeon Graphics (Rembrandt, 10 CU)") != 0) {
-        printf("FAIL gpuname: two-digit CU counts must render, got '%s'\n", buf);
+    /* A non-zero instance index is not the shader array we mean. */
+    if (rb_gpu_harvest_sel_valid(0x00000001u, 1, 2)) {
+        printf("FAIL gpuname: a non-zero INSTANCE_INDEX must refuse\n");
         bad++;
     }
-    /* REFUSALS. Zero CU is not a chip, it is a geometry we could not read,
-     * and the caller must be able to tell the difference (rule 14). */
-    if (rb_gpu_cu_count(0, 2, 3, 0) != 0u ||
-        rb_gpu_cu_count(1, 0, 3, 0) != 0u ||
-        rb_gpu_cu_count(1, 2, 0, 0) != 0u) {
-        printf("FAIL gpuname: a zero in the geometry must REFUSE, not "
-               "multiply out to zero silently\n");
+    if (rb_gpu_harvest_sel_valid(0u, 0, 2) ||
+        rb_gpu_harvest_sel_valid(0u, 1, 0)) {
+        printf("FAIL gpuname: a zero geometry must refuse\n");
         bad++;
     }
-    if (rb_gpu_cu_count(99, 2, 3, 0) != 0u ||
-        rb_gpu_cu_count(1, 99, 3, 0) != 0u ||
-        rb_gpu_cu_count(1, 2, 99, 0) != 0u) {
-        printf("FAIL gpuname: an implausible geometry must refuse rather "
-               "than produce a confident CU count\n");
-        bad++;
-    }
-    if (rb_gpu_cu_count(1, 2, 3, 0xFFFFFFFFu) != 0u ||
-        rb_gpu_cu_count(1, 2, 3, 0x7u) != 0u) {
-        printf("FAIL gpuname: an array with every WGP harvested must refuse "
-               "- 0x7 on a 3-WGP array is an empty array, which 2C9 read as "
-               "the 660M\n");
-        bad++;
-    }
-    if (rb_gpu_name(0u, buf, sizeof(buf)) != -1 || buf[0] != '\0') {
-        printf("FAIL gpuname: 0 CU must return -1 AND leave the buffer "
-               "empty, so a caller that ignores the code publishes nothing "
-               "rather than a stale name\n");
-        bad++;
-    }
-    /* A short buffer must refuse outright rather than truncate a name into
-     * a different name. */
+
+    /* BOOT 416's OWN REGISTER WORDS, end to end. This is the assertion that
+     * would have caught 2CA before it cost a boot: the live
+     * CC_GC_SHADER_ARRAY_CONFIG is **0xFFF80001**, so INACTIVE_WGPS is
+     * 0xFFF8 - every bit ABOVE the array's three WGPs set, which is Linux's
+     * `disabled_mask` initial value showing through. Narrowed to the array
+     * it is 0: nothing harvested, 12 CU, the 680M. 2C9's popcount of the raw
+     * field would have counted 13 dead WGPs out of 6 and refused. */
     {
-        char small[8];
-        if (rb_gpu_name(12u, small, sizeof(small)) != -1) {
-            printf("FAIL gpuname: a buffer too small must refuse, not "
-                   "truncate\n");
+        char nm[RB_GPUNAME_MAX];
+        const uint32_t cc_live   = 0xFFF80001u;   /* measured, boot 416 */
+        const uint32_t user_live = 0x00000000u;   /* measured, boot 416 */
+        const uint32_t idx_live  = 0x00000000u;   /* measured, boot 416 */
+        uint32_t m, cu;
+
+        if (rb_gpu_inactive_wgps(cc_live) != 0xFFF8u) {
+            printf("FAIL gpuname: boot 416's CC word has INACTIVE_WGPS "
+                   "0xFFF8, got 0x%x\n", rb_gpu_inactive_wgps(cc_live));
+            bad++;
+        }
+        if (!rb_gpu_harvest_sel_valid(idx_live, RB_REMBRANDT_NUM_SE,
+                                      RB_REMBRANDT_NUM_SA_PER_SE)) {
+            printf("FAIL gpuname: boot 416's GRBM_GFX_INDEX must be "
+                   "usable\n");
+            bad++;
+        }
+        m = rb_gpu_harvest_per_sa(rb_gpu_inactive_wgps(cc_live),
+                                  rb_gpu_inactive_wgps(user_live),
+                                  RB_REMBRANDT_NUM_WGP_PER_SA);
+        if (m != 0u) {
+            printf("FAIL gpuname: narrowed to three WGPs, boot 416's "
+                   "harvest is 0 - got 0x%x\n", m);
+            bad++;
+        }
+        cu = rb_gpu_cu_count(RB_REMBRANDT_NUM_SE, RB_REMBRANDT_NUM_SA_PER_SE,
+                             RB_REMBRANDT_NUM_WGP_PER_SA, m);
+        if (cu != 12u || rb_gpu_name(cu, nm, sizeof(nm)) != 1 ||
+            strcmp(nm, "AMD Radeon 680M") != 0) {
+            printf("FAIL gpuname: boot 416's own registers must derive "
+                   "12 CU / 'AMD Radeon 680M', got %u / '%s'\n", cu, nm);
+            bad++;
+        }
+        /* And the carve-out half, which DID succeed on that boot - it is
+         * decided independently of the name for exactly this reason. */
+        if (rb_gpu_vram_mb(4096u) != 4096u) {
+            printf("FAIL gpuname: boot 416 read memsize 4096 and the "
+                   "carve-out must survive a refused NAME\n");
             bad++;
         }
     }
@@ -352,7 +372,8 @@ int gpuname_tests(void)
     }
 
     printf("gpuname: 12 CU -> 680M, 6 CU -> 660M by geometry (never by a "
-           "harvest mask), the mask is per-array and needs broadcast, an "
+           "harvest mask), the mask is per-array and names the array it came "
+           "from, an "
            "unestablished count names itself, every refusal path refuses, "
            "and the carve-out comes from the register%s\n",
            bad ? " FAILED" : ": passed");

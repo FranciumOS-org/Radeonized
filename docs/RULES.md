@@ -1175,7 +1175,45 @@ table and refuses to install one that does not match the running kernel;
   `AMDRadeonX6000Framebuffer`, so Apple's kexts read them too and what they
   do with "Radeon"/"680M" is unread.** One consumer read is not the consumer
   set (2q9/2qa). Plugin **52ECC8FB**; framebuffer unchanged.
-  **The falsifiable prediction, written before the boot:** armed, `aty_ok` 1,
+  **2CC: BOOT 416 REFUSED, AND THE PRECONDITION WAS THE WRONG FIELD.** Both
+  new binaries loaded and `-rbgpumtlname` armed, yet `gpuname_why` **2** with
+  `gpuname_grbm_idx` **0**, `aty_why` 2, `RBFBModelSrc` "fallback" - no name
+  published. 2CA required `GRBM_GFX_INDEX` to read **full broadcast**, and
+  **(1) those bits govern WRITES** (`SA_BROADCAST_WRITES`,
+  `INSTANCE_BROADCAST_WRITES`, `SE_BROADCAST_WRITES` - a READ is answered by
+  whichever array the INDEX FIELDS name), and **(2) ZERO IS THE CANONICAL
+  SELECTION**: `gfx_v10_0_select_se_sh(se=0, sh=0, instance=0)` writes
+  **exactly 0**. The value 2CA refused is the value Linux writes to ask this
+  question. Backwards the other way too - a SPECIFIC selection is the
+  well-defined case and a broadcast READ has **no established answer**, so
+  that is what refuses now. **Same error as 2CA's own correction one level
+  in: reading the consumer of the VALUE is not reading the consumer of the
+  GUARD.**
+  **The live words vindicate 2CA's arithmetic:** `CC_GC_SHADER_ARRAY_CONFIG`
+  = **0xFFF80001**, `INACTIVE_WGPS` **0xFFF8** - every bit ABOVE the array's
+  three WGPs set, Linux's `disabled_mask` initial value showing through.
+  Narrowed to the array it is **0** -> 12 CU -> 680M, while **2C9's popcount
+  of the raw field would have counted 13 dead WGPs out of 6 and refused.**
+  The per-array narrowing is what makes this chip derivable at all.
+  **What worked by design:** `gpuname_mb` **4096** -> `RBFBModelMb` 4096, the
+  carve-out decided INDEPENDENTLY of the name so an unusable harvest read
+  cannot cost a correct 4 GB. And `gpuname_early` **16** / `aty_tries` **450**
+  say 2CB's non-latching retry worked, so the refusal is a verdict and not a
+  missed call.
+  **Fixed:** `rb_gpu_harvest_sel_valid(idx, num_se, num_sa_per_se)` refuses
+  any broadcast bit, a non-zero `INSTANCE_INDEX`, or an array outside the
+  geometry; `gpuname_sel_se`/`_sa` publish WHICH array, so the symmetric
+  assumption is explicitly "SA0 of SE0 stands for all". **And the reads are
+  BRACKETED** - Apple owns `GRBM_GFX_INDEX` and writes it around its own
+  accesses, so the index is read before AND after the config reads, a move is
+  code **5**, does not latch, and counts `gpuname_idx_moved`. 2CA had no such
+  guard and its reading would have been unattributable even had the check
+  passed. Hosttest pinned to **boot 416's own register words** end to end;
+  the break-it check (reinstating the broadcast requirement) fails four
+  assertions. Plugin **A3D78808**, framebuffer unchanged - **plugin-only, no
+  framebuffer reinstall.**
+  **The 2CB prediction is UNTESTED, not refuted** - nothing reached the
+  publish. It stands unchanged:**armed, `aty_ok` 1,
   `[MTLDevice name]` == "AMD Radeon 680M", and System Information gains all
   six keys with `spdisplays_mtlgpufamilysupport = spdisplays_metal3`. **Name
   changes but six keys do not = the pairing has a condition beyond the four

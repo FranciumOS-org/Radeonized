@@ -56731,3 +56731,121 @@ and is off-limits under this card's hard rule** — not read, not analysed, and
 anything from it has to come from the user in their own words. WhateverGreen
 (Acidanthera, BSD) was readable and turned out unnecessary. Cobalt64 could not
 be confirmed by search and nothing is claimed about it.
+
+## 2CC — boot 416 refused, and the precondition was the wrong field
+
+2CB's prediction was falsifiable and it **failed on the half I had bounded
+least carefully**. Boot 416, both new binaries loaded (plugin **52ECC8FB**,
+framebuffer **DFBFF2A7**, checked against `kextstat` first — rule 15) and
+`-rbgpumtlname` present in boot-args:
+
+```
+gpuname_why        2      (not in broadcast)
+gpuname_grbm_idx   0
+gpuname_cc_raw     4294443009 = 0xFFF80001
+gpuname_user_raw   0
+gpuname_memsz_raw  4096
+gpuname_mb         4096
+aty_why            2      (derivation refused)
+aty_tries          450
+gpuname_early      16
+RBFBModelSrc       "fallback"
+```
+
+`[MTLDevice name]` unchanged, `ATY,FamilyName`/`ATY,DeviceName` still absent,
+all four reporter tests still failing. No name was ever published.
+
+### The check was wrong twice, and both the header and Linux said so
+
+2CA required `GRBM_GFX_INDEX` to read **full broadcast** before trusting a
+single harvest read. It reads **0**.
+
+**(1) The bits govern WRITES.** They are named `SA_BROADCAST_WRITES`,
+`INSTANCE_BROADCAST_WRITES`, `SE_BROADCAST_WRITES` — right there in
+`gc_10_3_0_sh_mask.h`, which 2CA quoted while building the check. A *read* is
+answered by whichever array the **index fields** name; the broadcast bits say
+what a *write* fans out to. I used a write-behaviour field as the precondition
+for a read — rule 46's shape asked of a field instead of a method.
+
+**(2) Zero is the canonical selection, not an invalid state.**
+`gfx_v10_0_select_se_sh(adev, se_num=0, sh_num=0, instance=0)` builds its word
+from `REG_SET_FIELD(0, ...)` with no broadcast bit set, so selecting
+(SE0, SA0, instance 0) writes **exactly 0**. The value boot 416 refused is the
+value Linux writes to ask the question we are asking.
+
+And it was backwards in the other direction too: a *specific* selection is the
+well-defined case. What a read returns with a broadcast bit set is **not
+established** by any header in this tree — so that is what refuses now, as
+"not established" rather than as "wrong".
+
+**This is the same error as 2CA's own correction, one level in.** 2CA found
+2C9 reading a per-array mask as per-chip by going to the consumer; it then
+built the *precondition* for that read without going to the consumer of the
+index register. The lesson generalises: **reading the consumer of the VALUE is
+not the same as reading the consumer of the GUARD.**
+
+### What the live registers show, and why 2CA's correction was load-bearing
+
+`CC_GC_SHADER_ARRAY_CONFIG` = **0xFFF80001**, so `INACTIVE_WGPS` = **0xFFF8**:
+every bit *above* the array's three WGPs set and bits 2:0 clear. That is
+Linux's `disabled_mask` initial value showing through the register. Narrowed to
+the array it is **0** — nothing harvested, 12 CU, the 680M.
+
+**2C9's popcount of the raw field would have counted 13 dead WGPs out of 6 and
+refused.** The per-array narrowing was not a theoretical tidy-up; it is what
+makes this chip derivable at all, and the live word proves it.
+
+### What already worked, by design
+
+`gpuname_memsz_raw` 4096 → `gpuname_mb` 4096 → `RBFBModelMb` 4096. The
+carve-out is decided **independently** of the name, precisely so an unusable
+harvest read cannot cost a correct 4 GB — and that is exactly what happened.
+The one half that could succeed did.
+
+Also working: `gpuname_early` **16** and `aty_tries` **450** say the
+non-latching retry from 2CB did its job — the derivation was called early and
+often, so the refusal is a real verdict and not a missed call. That
+distinction cost 2C2 a milestone and here it was free.
+
+### The fix, and a race 2CA did not consider
+
+`rb_gpu_harvest_sel_valid(idx, num_se, num_sa_per_se)` replaces
+`rb_gpu_harvest_read_valid(idx)`: refuses any broadcast bit (not established),
+a non-zero `INSTANCE_INDEX`, and any `SE_INDEX`/`SA_INDEX` outside the
+geometry about to be assumed. The derivation now publishes
+`gpuname_sel_se`/`gpuname_sel_sa`, so the symmetric assumption is explicitly
+"SA0 of SE0 stands for all of them" rather than a vague "the chip".
+
+**And the reads are now bracketed.** Apple's driver owns `GRBM_GFX_INDEX` and
+writes it around its own accesses, so reading the index once and the config
+once attributes the harvest to whatever array was selected at the *first* read,
+which need not be the one that answered the second. The index is read before
+**and** after; a move is refusal code **5**, does **not** latch, and increments
+`gpuname_idx_moved` so a transient is distinguishable from an unusable
+selection (rule 14). 2CA had no such guard and its reading would have been
+unattributable even if the broadcast check had passed.
+
+### Tested
+
+Hosttest green. The new cases are pinned to **boot 416's own register words** —
+`0xFFF80001` / `0` / `0` end to end through narrowing, CU count and name — so
+the assertion that would have caught 2CA before it cost a boot now exists.
+Each of the three broadcast bits refuses on its own, SE1 and SA2 refuse on a
+1x2 die, a non-zero instance refuses, and the field decode is checked against
+`0x00020300` rather than by comparing whole words.
+
+**Break-it check: reinstating 2CA's broadcast requirement fails four
+assertions**, including "boot 416's GRBM_GFX_INDEX must be usable".
+
+`make kext tools`, `make plugin`, `make fbkext` clean; plugin resolves **0**
+from `SystemKernelExtensions.kc`; `make osrange` agrees. Plugin
+**A3D78808**; framebuffer unchanged at **DFBFF2A7** (2CC is plugin-only, so
+**no framebuffer reinstall is needed**).
+
+### Still not measured
+
+The 2CB prediction is **untested**, not refuted: nothing reached the publish,
+so whether `"AMD " + family + " " + device` reassembles to `AMD Radeon 680M`
+and whether the six reporter keys then appear are both still open. The
+prediction stands unchanged and `tools/mtlname` is the instrument — it already
+confirmed the whole chain *up to* the publish from userspace on this boot.
