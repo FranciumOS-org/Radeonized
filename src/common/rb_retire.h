@@ -46,6 +46,13 @@ struct rb_retire {
     uint64_t vblDeclined;  /* vblank offers refused because not armed */
     uint64_t handoffs;     /* timer -> vblank transitions */
     uint64_t takebacks;    /* vblank -> timer, the watchdog firing */
+    /* 2CF: sub-vblank retire occasions. See the block comment below. */
+    uint32_t sub;          /* occasions per vblank period; 1 = off (pre-2CF) */
+    uint32_t subRun;       /* interior fires since the last vblank */
+    uint64_t subPeriodNs;  /* the vblank period the framebuffer last reported */
+    uint64_t subRetires;   /* interior retires, cumulative */
+    uint64_t subSkipped;   /* interior fires that found the run already full */
+    uint64_t subLate;      /* interior arms whose slot was already past */
 };
 
 /* 2zf: IS THIS MODE ONE THE VBLANK CAN CARRY?
@@ -86,12 +93,19 @@ static inline void rb_retire_reset(struct rb_retire *r, uint32_t armed)
     r->vblDeclined  = 0u;
     r->handoffs     = 0u;
     r->takebacks    = 0u;
+    r->sub          = 1u;
+    r->subRun       = 0u;
+    r->subPeriodNs  = 0u;
+    r->subRetires   = 0u;
+    r->subSkipped   = 0u;
+    r->subLate      = 0u;
 }
 
 /* The vblank offers to retire. Returns 1 if it should go ahead - which is the
  * only thing that moves the driver to VBL, so an unarmed build keeps the timer
  * and the offer is counted rather than silently dropped (rule 14). */
-static inline int rb_retire_vbl_offer(struct rb_retire *r, uint64_t now)
+static inline int rb_retire_vbl_offer(struct rb_retire *r, uint64_t now,
+                                      uint64_t vbl_period_ns)
 {
     if (!r) { return 0; }
     if (!r->armed) { r->vblDeclined++; return 0; }
@@ -101,6 +115,14 @@ static inline int rb_retire_vbl_offer(struct rb_retire *r, uint64_t now)
     }
     r->lastVbl = now;
     r->vblRetires++;
+    /* 2CF: the framebuffer's own live period, carried on every offer rather
+     * than cached at setup, because the mode changes at runtime and without a
+     * reboot (2z1) and because `RBFBVBLPeriodNs` is re-derived per mode from a
+     * spread-spectrum clock (2y6) - so there is ONE rate per mode and no
+     * second copy of it here to drift. A zero means the framebuffer did not
+     * say, and then the interior slots cannot be placed at all. */
+    r->subPeriodNs = vbl_period_ns;
+    r->subRun      = 0u;
     return 1;
 }
 
@@ -247,6 +269,139 @@ static inline uint32_t rb_tick_us_verdict(uint32_t want)
     if (want < RB_TICK_US_MIN) { return RB_TICK_TOO_FAST; }
     if (want > RB_TICK_US_MAX) { return RB_TICK_TOO_SLOW; }
     return RB_TICK_OK;
+}
+
+/* 2CF: SUB-VBLANK RETIRE OCCASIONS - THE SAME LEVER AT NATIVE REFRESH.
+ *
+ * WHAT IS ESTABLISHED, and this rests on five measured boots rather than a
+ * model. 2C5 halved the retire tick and the eight-queue ladder halved with it
+ * (1.995x for a 2.000x tick change); 2C7 fitted five ticks to
+ * `spread = 8.036 x tick - 0.20 ms` with residuals inside +-1.0 %; 2C8 held
+ * `spread/tick` at 7.996 +- 0.037 over SEVEN ticks across a 6x range. So the
+ * quantum that paces concurrent queues is the RETIRE OCCASION and its period
+ * is the whole of it. 2C8 named the threshold: at `tick = vbl/8` the
+ * eight-queue spread is exactly one frame, which is where multi-queue work
+ * stops costing extra frames to first paint.
+ *
+ * WHY THAT LEVER IS UNREACHABLE AT NATIVE TODAY. With `-rbgpuretirevbl` the
+ * vblank drives retirement (`vblret_src` 1) and `rb_retire_timer_period_us()`
+ * demotes this timer to a 50 ms watchdog, so `tickset` is inert - it refuses
+ * rather than measuring, which is rule 39 enforced. One occasion per vblank
+ * is 6.95 ms at 143.8 Hz, so eight queues span ~56 ms however the tick is
+ * set. The choice has therefore been: native refresh and a coarse quantum, or
+ * a sub-native mode where the timer drives and the quantum is buyable.
+ *
+ * AND WHY THE OBVIOUS FIXES ARE BOTH DEAD. Polling harder inside one occasion
+ * is MEASURED DEAD - 2C2 ran `checkTimestamps()` up to 8 times per offer and
+ * six interleaved runs gave 55.295-56.308 ms with `vblret_extra` 50897
+ * proving the polls ran. Occasions need to be spread in TIME, not stacked.
+ * And simply running both drivers at once is 2zc's configuration, which cost
+ * a third of the frame rate: two independent periodic timers BEAT, and 2zg
+ * then measured the beat as the noise source behind every variance surprise
+ * from 2zb onward.
+ *
+ * SO THE OCCASIONS ARE PHASE-LOCKED BY CONSTRUCTION. `sub` is how many
+ * occasions one vblank period carries: 1 is today's behaviour exactly, 4 puts
+ * three interior occasions between consecutive vblanks. The interior deadlines
+ * are computed from `lastVbl`, the timestamp of the last vblank-driven retire,
+ * NEVER walked forward from the previous arm - so there are not two periods
+ * that can drift apart, there is one period subdivided, re-anchored every
+ * frame by the display itself. That is the difference from 2zc, and it is a
+ * property of the arithmetic rather than a tuning.
+ *
+ * WHAT IS DELIBERATELY NOT CLAIMED. The law was fitted with the TIMER driving
+ * in a sub-native mode. Whether an occasion supplied this way is worth the
+ * same as one from a free-running timer is UNMEASURED, and there is a named
+ * reason it might not be: an interior occasion runs on a thread_call the
+ * display did not wake, at a phase inside the frame that the timer-driven
+ * regime never held fixed. `sub` is therefore a runtime dial, default 1, so
+ * the A/B is interleaved inside one boot - rule 44, which 2B5-2B7 paid for.
+ *
+ * The frame-rate side is the risk and the hosttest cannot see it: these are
+ * extra `checkTimestamps()` calls in the regime 2zg measured as the quiet one,
+ * so read `tools/paired.sh` and `ftbudget` as well as the ladder, and 2zc's
+ * two-sided curve is the shape to watch for.
+ */
+#define RB_RETIRE_SUB_MIN 1u
+#define RB_RETIRE_SUB_MAX 8u
+
+static inline uint32_t rb_retire_sub_clamp(uint32_t want)
+{
+    if (want < RB_RETIRE_SUB_MIN) { return RB_RETIRE_SUB_MIN; }
+    if (want > RB_RETIRE_SUB_MAX) { return RB_RETIRE_SUB_MAX; }
+    return want;
+}
+
+/* 1 when interior occasions should be placed at all.
+ *
+ * Every term is a refusal someone has paid for. `armed`/`src` keep this inert
+ * in the timer-driven regime, where `tickset` already owns the quantum and two
+ * mechanisms for one job is how 2zc happened. `sub > 1` is the dial. And a
+ * zero period means the framebuffer did not report one, which must read as
+ * "cannot place them" and never as "place them at zero" - a zero interval
+ * thread_call is a spin (rule 16: the instrument is a suspect, and so is the
+ * dial). */
+static inline int rb_retire_sub_active(const struct rb_retire *r)
+{
+    if (!r) { return 0; }
+    if (!r->armed) { return 0; }
+    if (r->src != RB_RETIRE_SRC_VBL) { return 0; }
+    if (r->sub < 2u || r->sub > RB_RETIRE_SUB_MAX) { return 0; }
+    if (!r->subPeriodNs) { return 0; }
+    return 1;
+}
+
+/* The interior spacing in nanoseconds, or 0 when there is none to place.
+ * Derived from the period the framebuffer reported, so a mode switch moves it
+ * on the next vblank with nothing to invalidate. */
+static inline uint64_t rb_retire_sub_period_ns(const struct rb_retire *r)
+{
+    if (!rb_retire_sub_active(r)) { return 0u; }
+    return r->subPeriodNs / (uint64_t)r->sub;
+}
+
+/* Should THIS timer fire be taken as an interior retire occasion?
+ *
+ * Called only after `rb_retire_timer_should()` has declined, so the vblank is
+ * driving and this fire is not the watchdog taking the job back. A run holds
+ * `sub - 1` interior occasions: the vblank itself is the first of the `sub`,
+ * and counting it again would retire twice at the same phase.
+ *
+ * The full-run case is COUNTED rather than silently dropped (rule 14): it is
+ * what a vblank that stopped arriving looks like from in here, and it must be
+ * distinguishable from an interior occasion that never ran at all. */
+static inline int rb_retire_sub_should(struct rb_retire *r)
+{
+    if (!rb_retire_sub_active(r)) { return 0; }
+    if (r->subRun + 1u >= r->sub) { r->subSkipped++; return 0; }
+    r->subRun++;
+    r->subRetires++;
+    return 1;
+}
+
+/* The absolute deadline of the next interior occasion, or 0 if there is none
+ * to arm - which includes the case where the slot is ALREADY PAST.
+ *
+ * `sub_period_abs` is `rb_retire_sub_period_ns()` converted by the caller,
+ * because this header is freestanding and knows nothing of mach timebase.
+ *
+ * Returning 0 for a slot in the past is the point of this function rather than
+ * an edge case. Arming a thread_call into the past fires a catch-up burst -
+ * the drift defect 2xe already fixed once in this same timer - and here the
+ * anchor is a timestamp taken on another thread, so a late fire is ordinary
+ * rather than exceptional. The caller falls back to the watchdog arm and the
+ * next vblank re-anchors everything. */
+static inline uint64_t rb_retire_sub_deadline(const struct rb_retire *r,
+                                              uint64_t sub_period_abs,
+                                              uint64_t now)
+{
+    uint64_t d;
+
+    if (!rb_retire_sub_active(r) || !sub_period_abs) { return 0u; }
+    if (r->subRun + 1u >= r->sub) { return 0u; }      /* run is full */
+    d = r->lastVbl + sub_period_abs * (uint64_t)(r->subRun + 1u);
+    if (d <= now) { return 0u; }
+    return d;
 }
 
 #endif /* RB_RETIRE_H */

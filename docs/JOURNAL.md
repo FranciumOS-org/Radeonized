@@ -56993,3 +56993,118 @@ the Makefile passes the fixture as an ARGUMENT
 find it. `make kext` says `hosttest: all passed`. Checked against the change
 stashed, which reports the same 1 FAILED - rule 26's control, since a
 pre-existing failure read as a new one is how a clean change gets reverted.
+
+## 2CF - sub-vblank retire occasions: 2C5-2C8's lever at NATIVE refresh
+
+**The state of the live boot is half the finding.** Boot 418, read before any
+change:
+
+```
+RBFBModeCur 105   RBFBModeCurMhz 60001   RBFBModeCurLines 2706
+RBFBVBLPeriodNs 16666386        (and modeset lists id=100 at 144.000 Hz)
+vblret_src 0      tick_us 6944      tick_sets 0
+RBFBAmtrNotReady Yes
+```
+
+so **a 143.8 Hz panel is being driven at 60 Hz** - macOS restored a remembered
+mode selection through `setDisplayMode` before anything asked, which is 2z1's
+finding showing up as a daily-driver configuration rather than an experiment.
+Below native `rb_retire_vbl_suits()` hands retirement back to the timer, so
+`vblret_src` 0 and **`tickset` is live on this boot**, which is also the regime
+2C5-2C8 fitted the law in.
+
+**WHAT THE LAW SAYS AND WHERE IT CANNOT REACH.** The quantum pacing concurrent
+Metal queues is the retire occasion: 2C5 halved the tick and the eight-queue
+ladder halved with it (1.995x for 2.000x), 2C7 fitted five ticks to
+`spread = 8.036 x tick - 0.20 ms` inside +-1.0 %, 2C8 held `spread/tick` at
+7.996 +- 0.037 over seven ticks across a 6x range, and 2C8 named `tick = vbl/8`
+as where the eight-queue spread is exactly one frame. But at NATIVE the vblank
+drives, `rb_retire_timer_period_us()` demotes the timer to a 50 ms watchdog, and
+`tickset` refuses rather than measuring (rule 39, enforced). One occasion per
+vblank is 6.95 ms, so eight queues span ~56 ms however the tick is set. **The
+standing choice has been native refresh with a coarse quantum, or a sub-native
+mode where the quantum is buyable** - which is exactly the trade the user is
+sitting on without having chosen it.
+
+**THE TWO OBVIOUS FIXES ARE BOTH ALREADY DEAD.** Polling harder inside one
+occasion is MEASURED dead (2C2: up to 8 `checkTimestamps()` per offer, six
+interleaved runs at 55.295-56.308 ms with `vblret_extra` 50897 proving the polls
+ran) - occasions must be spread in TIME, not stacked. And running both drivers
+at once is 2zc's configuration, which cost a third of the frame rate, with 2zg
+later identifying the beat as the noise source behind every variance surprise
+from 2zb onward.
+
+**SO THE OCCASIONS ARE PHASE-LOCKED BY CONSTRUCTION, AND THAT IS THE WHOLE
+DESIGN.** `sub` is how many retire occasions one vblank period carries; 1 is
+pre-2CF byte for byte. Interior deadlines are `lastVbl + k * (vblPeriod / sub)`
+- computed from the DISPLAY's own timestamp on every arm, never walked forward
+from the previous arm - and `rbgpu_retire_from_vbl_2zd()` cancels and re-arms
+the timer on each vblank so the anchor is refreshed every frame. There are not
+two periods that can drift apart; there is one period subdivided. **That is
+arithmetic, not tuning**, which is why it is not 2zc.
+
+The period crosses the collection boundary as p2 of the existing
+`RBGPURetireNow` platform call, carried on every offer rather than cached at
+setup - because the mode changes at runtime without a reboot (2z1) and because
+2y6 bought one rate per mode, so a second copy here would be a second thing to
+drift. A NULL or zero reads as "place none", which is pre-2CF behaviour, so an
+older framebuffer paired with this plugin is simply the A side (rule 38).
+
+**WHAT IS DELIBERATELY NOT CLAIMED.** The law was fitted with the TIMER driving
+in a sub-native mode. Whether an occasion supplied THIS way is worth the same
+is UNMEASURED, and there is a named reason it might not be: an interior occasion
+runs on a thread_call the display did not wake, at a phase inside the frame the
+timer-driven regime never held fixed. **Said before the reading, so it can be
+wrong: if they are equivalent, `sub` 4 divides the eight-queue spread by 4,
+~56 ms to ~14 ms. If the spread does not move, an interior occasion is not
+equivalent - a different answer, not a null one.** The frame-rate side is the
+risk the hosttest cannot see: these are extra `checkTimestamps()` calls in the
+regime 2zg measured as the quiet one, so 2zc's two-sided curve is the shape to
+watch for and `paired.sh`/`ftbudget` must be read beside the ladder.
+
+Default **1**, so the shipping configuration is the A side and needs no argument
+to reach. Runtime dial `{"RBGPURetireSub": N}` via `build/out/subret`, plus
+`rbgpuretiresub=<1..8>`, so the A/B is INTERLEAVED inside one boot - rule 44,
+which 2B5-2B7 paid for. `subret` REFUSES when `vblret_src` is 0, the mirror of
+`tickset`'s refusal, and it checks the EFFECT as well as the dial (rule 20):
+`vblret_subret` must be climbing, or it reports the 2A9 shape - the feature on
+and the mechanism inert - and exits 6 rather than letting a ladder be read
+against it.
+
+Published: `vblret_sub`, `vblret_subsets`, `vblret_subret`, `vblret_subskip`,
+`vblret_sublate`, `vblret_subns`, `vblret_subrecv`, `vblret_subrefuse` - the
+arm, its effect and both refusals, because a zero `subret` with `sub` 4 and a
+zero `subns` are three different failures and one bool would merge them
+(rule 14).
+
+**Hosttested, with four break-it checks, each caught by the assertion written
+for it** rather than by an unrelated one (2BC's "a case that passes for the
+wrong reason is not coverage") - and the builds checked for `error:` as well as
+`FAIL`, which is 2BC's other trap:
+
+- deadline anchored on `now` instead of `lastVbl` (a free-running timer, 2zc)
+  -> "second interior slot is not anchored on lastVbl"
+- the vblank not counted as the first of the `sub` -> "sub=4 gave 4 interior
+  retires, want 3", run accounting 4/6 against 3/7
+- a past slot clamped forward instead of refused -> "a slot in the past must
+  refuse, not clamp forward (2xe's catch-up burst)"
+- interior occasions allowed while the TIMER drives -> "that is 2zc's
+  configuration", and the takeback case too
+
+The 2C8 threshold is reproduced by the dial from the period alone rather than
+retyped: `sub` 8 at boot 413's 16669443 ns gives **2083680 ns**, which is 2C8's
+measured 2084 us. A dial that did not land on that number would not be the
+quantity 2C5-2C8 measured.
+
+Plugin **4904198B**, framebuffer **2CE724E1** - both halves, because the period
+now crosses between them.
+
+**AND THE MEASUREMENT THAT MATTERS IS STILL NOT TAKEN (rule 45).** Every number
+above is a counter. The deliverable is "iMessage animations are so laggy", which
+a human observes, and `metal_probe --queues 8` standing for the iMessage
+animation path is an ASSUMPTION - 2A6 is what letting a benchmark stand in for a
+workload cost last time. **On this boot that measurement costs nothing**: the
+timer drives, so `tickset 2084` is live with no install and no reboot, and then
+opening iMessage, Settings and the wifi menu is the reading. A null there
+retires the line however clean the lattice is, and it decides whether 2CF was
+worth building before 2CF is ever installed.
