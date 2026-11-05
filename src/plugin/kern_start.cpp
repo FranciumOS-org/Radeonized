@@ -14591,14 +14591,23 @@ static void rbgpu_gpuname_derive_2CA(void)
     if (g_rb_2CA_done) {
         return;
     }
-    g_rb_2CA_done = 1;
     g_rb_2CA_name[0] = '\0';
 
+    /* 2CB: DO NOT LATCH ON "no aperture yet". `g_hw.ctx` comes up with the
+     * accelerator's SMU slot init, which is LATER than the peer's start(),
+     * so the first caller can easily arrive before the registers are
+     * readable - and caching that refusal would make a transient look
+     * permanent, which is 2A3's defect wearing a different hat (a value
+     * that can only be read once can only report the first attempt). Every
+     * other outcome is a strap or efuse reading that will not change while
+     * the machine runs, so those DO latch. */
     if (!g_hw.ctx || !g_hw.rreg) {
         g_rb_2CA_why = 1;
         rbgpu_diag_set_num("gpuname_why", g_rb_2CA_why);
+        rbgpu_diag_inc("gpuname_early");
         return;
     }
+    g_rb_2CA_done = 1;
 
     /* Read nothing outside the window Apple mapped - a read past the end of
      * the BAR mapping is a fault, not a diagnostic (the 2di rule, applied to

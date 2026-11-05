@@ -94,6 +94,16 @@ private:
     static void postRegisterAction(thread_call_param_t param0, thread_call_param_t param1);
     static void refreshDiagAction(thread_call_param_t param0, thread_call_param_t param1);
 
+    /* 2CB: the Metal name, published on `pciDevice` (IGPU@0) because that is
+     * the accelerator's single IOService parent and the only node
+     * AMDRadeonX6000MTLDriver's one-level lookup can see. `atyNameDone`
+     * makes it one successful publish; `atyNameTries` counts the attempts,
+     * so "the aperture was never up" is distinguishable from "it was never
+     * called" - 2C2's drain bug spent a milestone in that gap. */
+    uint32_t         atyNameDone{0};
+    uint32_t         atyNameTries{0};
+    void publishAtyName2CB();
+
     void handlePostRegister();
     void performRefreshDiag();
     // 2cu: persist a compact summary into NVRAM (`nvram rbgpu-diag`), so a

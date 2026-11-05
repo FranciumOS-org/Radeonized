@@ -2501,6 +2501,12 @@ void RembrandtGPUPeer::performRefreshDiag() {
      * IOLock is not recursive - publishing from inside here would deadlock
      * the refresh thread_call on its own lock. */
     rbgpu_retire_publish_2zd();
+    /* 2CB: and retry the Metal name here, for the same reason and with the
+     * same lock discipline. `handlePostRegister` can run before the register
+     * aperture is up, and the derivation deliberately does not latch that
+     * case - so this is what eventually publishes it. One successful publish
+     * and `atyNameDone` stops the retries; it is not a periodic write. */
+    publishAtyName2CB();
 
     IOLockLock(g_diagLock);
     rbgpu_diag_set_num_locked("guard_calls", g_guard_calls);
@@ -2577,8 +2583,125 @@ volatile uint32_t g_rb_peer_stage = 0;
 volatile uint32_t g_rb_peer_ret06 = 0xFFFFFFFF;
 volatile uint32_t g_rb_peer_ret1B = 0xFFFFFFFF;
 
+/* ===================================================================== 2CB
+ * PUBLISH THE METAL NAME WHERE THE METAL DRIVER ACTUALLY LOOKS.
+ *
+ * AMDRadeonX6000MTLDriver builds `[MTLDevice name]` as
+ * `"AMD " + ATY,FamilyName + " " + ATY,DeviceName`, with the two properties
+ * read by `IORegistryEntryGetParentEntry(accel, "IOService", &parent)` then
+ * `IORegistryEntryCreateCFProperty(parent, key, ...)` - decoded byte-exactly
+ * from the two stubs and their GOT slots against IOKit's export table. With
+ * neither property present it falls back to "Radeon HD" and "GFX10 Family
+ * Unknown Prototype", which is precisely the name this machine reports.
+ *
+ * `GetParentEntry`, not `SearchCFProperty`: ONE level, not recursive. The
+ * accelerator's single IOService parent is our `pciDevice` (IGPU@0) - the
+ * MTLDevice's registryID is the accelerator node and its parent is that
+ * IOPCIDevice - so this is the only node where the properties are visible.
+ * Our framebuffer and this peer are SIBLINGS of the accelerator and would be
+ * invisible.
+ *
+ * NOT A NEW WRITE SURFACE: start() already publishes `@0,name`,
+ * `ATY,bin_image` and `RBGPULoad` on this same node by this same call, so
+ * the mechanism is the established one and only the two keys are new.
+ *
+ * OSString DELIBERATELY: the driver hands the property straight back where a
+ * CFString is expected (its fallbacks are CFString literals), so an OSData
+ * would arrive as a CFData and be formatted as something else entirely.
+ * `setProperty(const char *, const char *)` makes an OSString.
+ *
+ * AND IT IS WHAT MAKES SYSTEM INFORMATION SAY "Metal: 3": SPDisplaysReporter
+ * pairs an MTLDevice to a GPU dictionary by name, and its first test is
+ * `[sppci_model caseInsensitiveCompare:[dev name]] == NSOrderedSame`. The
+ * split reconstructs our own `model` through Apple's format, so the match is
+ * exact; on failure the reporter writes none of its six per-device keys,
+ * which is why the Metal family line is missing today.
+ * ===================================================================== */
+void RembrandtGPUPeer::publishAtyName2CB() {
+    char     name[RB_GPUNAME_MAX];
+    char     family[RB_GPUNAME_MAX], device[RB_GPUNAME_MAX];
+    uint32_t mb = 0, cu = 0, why = 0;
+
+    if (atyNameDone) {
+        return;
+    }
+    /* OPT-IN, and the reason is a consumer we have NOT read: the strings
+     * `ATY,FamilyName` and `ATY,DeviceName` also appear in
+     * `AMDRadeonX6000Framebuffer`, so Apple's own kexts read them too and
+     * what they do with "Radeon"/"680M" is unestablished. One consumer read
+     * is not the consumer set (2q9/2qa: find the consumer before writing to
+     * a field - here there are at least two and only one is read). */
+    if (!rbgpu_arg("-rbgpumtlname")) {
+        atyNameDone = 1;
+        return;
+    }
+    atyNameTries++;
+    rbgpu_diag_set_num("aty_tries", atyNameTries);
+
+    /* Establish the node is what the conclusion assumes before writing to
+     * it (rule 47 asked of a write): the lookup is one level up from the
+     * accelerator, and if our provider is not that IOPCIDevice then these
+     * properties land somewhere the driver will never read and the boot
+     * would report a success that changed nothing. */
+    if (!pciDevice) {
+        rbgpu_diag_set_num("aty_why", 1);
+        return;
+    }
+
+    name[0] = '\0';
+    if (!rbgpu_gpuname_get_2CA(name, RB_GPUNAME_MAX, &mb, &cu, &why) ||
+        !name[0] || !cu) {
+        /* 2CA refused - most likely the register aperture is not up yet, in
+         * which case it does NOT latch and the next call retries. */
+        rbgpu_diag_set_num("aty_why", 2);
+        rbgpu_diag_set_num("aty_gpuname_why", why);
+        return;
+    }
+
+    if (!rb_gpu_aty_split(name, family, sizeof(family),
+                          device, sizeof(device))) {
+        /* A model Apple's format cannot reassemble byte-identically. Publish
+         * NOTHING: a Metal name that disagrees with `model` is the defect
+         * this is fixing, not a partial improvement. */
+        rbgpu_diag_set_num("aty_why", 3);
+        atyNameDone = 1;
+        rbgpu_log("2CB: '%s' cannot round-trip through Apple's "
+                  "\"AMD \" + family + \" \" + device - publishing nothing",
+                  name);
+        return;
+    }
+
+    pciDevice->setProperty("ATY,FamilyName", family);
+    pciDevice->setProperty("ATY,DeviceName", device);
+
+    /* The readback decides, not the store (rules 13/20). An OSString that is
+     * not there, or not a string, is a failure however the setter returned -
+     * and this is the node another kext owns, so a refusal is possible. */
+    {
+        OSString *f = OSDynamicCast(OSString, pciDevice->getProperty("ATY,FamilyName"));
+        OSString *d = OSDynamicCast(OSString, pciDevice->getProperty("ATY,DeviceName"));
+        const bool ok = f && d && f->isEqualTo(family) && d->isEqualTo(device);
+        rbgpu_diag_set_num("aty_ok", ok ? 1 : 0);
+        rbgpu_diag_set_num("aty_why", ok ? 0 : 4);
+        if (!ok) {
+            rbgpu_log("2CB: the ATY name properties did NOT read back - "
+                      "family %s, device %s",
+                      f ? "present" : "absent", d ? "present" : "absent");
+            return;
+        }
+    }
+    atyNameDone = 1;
+    rbgpu_log("2CB: published ATY,FamilyName='%s' ATY,DeviceName='%s' on %s "
+              "-> Metal should name it 'AMD %s %s'",
+              family, device, pciDevice->getName(), family, device);
+}
+
 void RembrandtGPUPeer::handlePostRegister() {
     g_rb_peer_stage |= 2;
+    /* 2CB: the accelerator exists by now, so its parent chain is final and
+     * the register aperture is usually up. Retried from the periodic publish
+     * if it is not (the derivation does not latch that case). */
+    publishAtyName2CB();
     if (!accelerator || !symSpecialAMDKey) {
         rbgpu_log("handlePostRegister: missing accelerator or symbol reference");
         return;

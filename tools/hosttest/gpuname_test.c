@@ -198,6 +198,121 @@ int gpuname_tests(void)
         }
     }
 
+    /* 2CB: THE ATY NAME SPLIT. The whole value is that Apple's reassembly
+     * returns our model BYTE-IDENTICALLY - otherwise SPDisplaysReporter's
+     * first test (a caseInsensitiveCompare against sppci_model) still fails
+     * and we have changed the Metal name without gaining "Metal: 3". So the
+     * assertion is the ROUND TRIP, not the halves. */
+    {
+        char fam[RB_GPUNAME_MAX], dev[RB_GPUNAME_MAX], back[RB_GPUNAME_MAX * 2];
+        static const char *const models[] = {
+            "AMD Radeon 680M",
+            "AMD Radeon 660M",
+            "AMD Radeon Graphics (Rembrandt, 12 CU)",
+            "AMD Radeon Graphics (Rembrandt, 8 CU)",
+        };
+        unsigned m;
+        for (m = 0; m < sizeof(models) / sizeof(models[0]); m++) {
+            if (!rb_gpu_aty_split(models[m], fam, sizeof(fam),
+                                  dev, sizeof(dev))) {
+                printf("FAIL gpuname: '%s' must split\n", models[m]);
+                bad++;
+                continue;
+            }
+            if (!rb_gpu_aty_join(fam, dev, back, sizeof(back)) ||
+                strcmp(back, models[m]) != 0) {
+                printf("FAIL gpuname: '%s' -> '%s' + '%s' -> '%s', which is "
+                       "NOT the model back\n", models[m], fam, dev, back);
+                bad++;
+            }
+        }
+        /* And the halves themselves for the one that matters, so a reader
+         * can see what lands in the registry. */
+        if (!rb_gpu_aty_split("AMD Radeon 680M", fam, sizeof(fam),
+                              dev, sizeof(dev)) ||
+            strcmp(fam, "Radeon") != 0 || strcmp(dev, "680M") != 0) {
+            printf("FAIL gpuname: ATY,FamilyName must be 'Radeon' and "
+                   "ATY,DeviceName '680M', got '%s' / '%s'\n", fam, dev);
+            bad++;
+        }
+        /* AND A MODEL WITH SEVERAL SPACES, which is what actually pins the
+         * CUT POSITION. "AMD Radeon 680M" has one space, so cutting at the
+         * first or the last gives the same answer there - and the round trip
+         * is invariant to the cut altogether, since join is family + " " +
+         * device whichever space was chosen. A break-it check that moved the
+         * cut to the last space was caught only by an unrelated buffer
+         * assertion, i.e. it passed for the wrong reason (2BC). */
+        if (!rb_gpu_aty_split("AMD Radeon Graphics (Rembrandt, 12 CU)",
+                              fam, sizeof(fam), dev, sizeof(dev)) ||
+            strcmp(fam, "Radeon") != 0 ||
+            strcmp(dev, "Graphics (Rembrandt, 12 CU)") != 0) {
+            printf("FAIL gpuname: the cut is the FIRST space - family must "
+                   "be 'Radeon' and device 'Graphics (Rembrandt, 12 CU)', "
+                   "got '%s' / '%s'\n", fam, dev);
+            bad++;
+        }
+        /* REFUSALS. Apple prepends "AMD " unconditionally, so a model
+         * without it cannot round-trip and must not be published at all -
+         * publishing one half is a name that does not match (rule 14). */
+        {
+            static const char *const bogus[] = {
+                "Radeon 680M",          /* no "AMD " prefix */
+                "AMD",                  /* prefix absent, too short */
+                "AMD ",                 /* nothing after the prefix */
+                "AMD Radeon",           /* no space to split on */
+                "AMD  680M",            /* empty family */
+                "AMD Radeon ",          /* empty device */
+                (const char *)0,
+            };
+            unsigned b;
+            for (b = 0; b < sizeof(bogus) / sizeof(bogus[0]); b++) {
+                if (rb_gpu_aty_split(bogus[b], fam, sizeof(fam),
+                                     dev, sizeof(dev)) != 0) {
+                    printf("FAIL gpuname: '%s' must REFUSE to split\n",
+                           bogus[b] ? bogus[b] : "(null)");
+                    bad++;
+                }
+                if (fam[0] != '\0' || dev[0] != '\0') {
+                    printf("FAIL gpuname: a refused split must leave BOTH "
+                           "buffers empty, so a caller that ignores the "
+                           "code publishes nothing\n");
+                    bad++;
+                }
+            }
+        }
+        /* A device half that does not fit must refuse and empty BOTH, not
+         * leave a correct family beside a truncated device. */
+        {
+            char tiny[6];
+            if (rb_gpu_aty_split("AMD Radeon Graphics (Rembrandt, 12 CU)",
+                                 fam, sizeof(fam), tiny, sizeof(tiny)) != 0 ||
+                fam[0] != '\0' || tiny[0] != '\0') {
+                printf("FAIL gpuname: a device half that does not fit must "
+                       "refuse and empty both halves\n");
+                bad++;
+            }
+        }
+        /* The join must refuse rather than truncate, for the same reason. */
+        {
+            char small[8];
+            if (rb_gpu_aty_join("Radeon", "680M", small, sizeof(small)) != 0) {
+                printf("FAIL gpuname: the join must refuse a short buffer\n");
+                bad++;
+            }
+        }
+        /* THE REGRESSION THIS GUARDS: Apple's own fallbacks. "Radeon HD" +
+         * "GFX10 Family Unknown Prototype" is what the driver produces with
+         * neither property set, and it is what this machine reads today -
+         * so the join must reproduce the string we actually measured. */
+        if (!rb_gpu_aty_join("Radeon HD", "GFX10 Family Unknown Prototype",
+                             back, sizeof(back)) ||
+            strcmp(back, "AMD Radeon HD GFX10 Family Unknown Prototype") != 0) {
+            printf("FAIL gpuname: the join must reproduce the MEASURED "
+                   "fallback name, got '%s'\n", back);
+            bad++;
+        }
+    }
+
     /* The carve-out register offset is ALIASED, not retyped: rb_probe.c and
      * the plugin must read the same dword or one of them is measuring
      * something else (2C4's lesson about bounds in three places). */
