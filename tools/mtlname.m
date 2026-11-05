@@ -108,23 +108,48 @@ int main(void)
             printf("  4 name contains \"Apple\"       %s\n", t4 ? "MATCH" : "no");
             printf("\n  VERDICT: %s\n",
                    (t1 || t2 || t3 || t4)
-                     ? "PAIRED - System Information should carry all six "
-                       "per-device keys including the Metal family"
-                     : "NOT PAIRED - the reporter writes NONE of its six "
+                     ? "PAIRED - System Information should carry "
+                       "spdisplays_mtlgpufamilysupport (and NOT the legacy "
+                       "spdisplays_metal, which the modern path removes)"
+                     : "NOT PAIRED - the reporter writes none of its "
                        "per-device keys, so it falls back to "
                        "\"Metal: Supported\"");
         }
-        /* And the outcome, independently of our prediction of it: the six
-         * keys the pairing loop writes. Absence of all six is the signature
-         * (2CB); a partial set would mean the reading is incomplete. */
-        printf("\nWhat System Information actually carries now:\n");
+        /* And the outcome, independently of our prediction of it.
+         *
+         * 2CD: THIS SECTION USED AN UNANCHORED ALTERNATION AND REPORTED THE
+         * OPPOSITE OF THE TRUTH. It grepped for
+         * `spdisplays_(...|metal|metal_slot|...)` without anchoring to
+         * `<key>`, so the VALUE `spdisplays_metal3` matched the bare `metal`
+         * branch and printed as `spdisplays_metal` - which is the LEGACY key
+         * the modern path removes. The one key whose disappearance proves
+         * the mechanism was reported as still present. Rule 26 twice in one
+         * expression: an unanchored match, and an alternation ordered so a
+         * longer token can never win (the card already records that trap for
+         * `rbgpu-diag` vs `rbgpu-diag-prev`).
+         *
+         * Anchored on `<key>` now, and printing the VALUE beside the key so
+         * the family level is read rather than inferred from the key's
+         * presence. */
+        printf("\nWhat System Information actually carries now "
+               "(keys only, anchored):\n");
         fflush(stdout);
         system("/usr/sbin/system_profiler -xml SPDisplaysDataType 2>/dev/null "
-               "| /usr/bin/sed -n '/<key>_items/,/<\\/array>/p' "
-               "| /usr/bin/grep -oE "
-               "'spdisplays_(mtlgpufamilysupport|metalfamily|metal|metal_slot|"
-               "metal_headless|metal_peer_group|metal_peer_index|metal_removable)' "
-               "| /usr/bin/sort -u | /usr/bin/sed 's/^/  /'");
+               "| /usr/bin/sed -n '/<key>_items<\\/key>/,/^\\t\\t<key>_parentDataType/p' "
+               "| /usr/bin/grep -A1 -E '<key>spdisplays_(metal|mtlgpufamilysupport)[a-z_]*</key>' "
+               "| /usr/bin/sed -e 's/^[[:space:]]*//' -e 's/^/  /'");
+        /* The five keys the pairing loop writes AFTER the family one are
+         * gated on `[device location]` being non-zero - `testq %rax,%rax;
+         * je` immediately after the family store, measured at the
+         * disassembly and confirmed by `location` reading 0
+         * (MTLDeviceLocationBuiltIn) on this iGPU. So an integrated GPU gets
+         * the family key and NOT the slot/peer set, and their absence is
+         * EXPECTED rather than a partial failure. */
+        printf("\n  location = %lu: 0 is MTLDeviceLocationBuiltIn, and the\n"
+               "  reporter bails right after the family key when it is 0, so\n"
+               "  spdisplays_metal_slot/_headless/_peer_group/_peer_index/\n"
+               "  _removable are EXPECTED to be absent on an iGPU.\n",
+               (unsigned long)[[devs firstObject] location]);
     }
     return 0;
 }
