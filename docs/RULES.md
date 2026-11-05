@@ -973,12 +973,38 @@ table and refuses to install one that does not match the running kernel;
   two-sided optimum, and the real design question - whether the default should
   be a function of the live vblank period rather than a constant - deserves
   its own milestone, not a changed literal.
-  **And the practical ceiling: `-rbgpuretirevbl` is in boot-args, so at native
-  the vblank drives and `tickset` exits 5. Today this is a 60 Hz win only.**
-  Reaching native means `-rbgpunoretirevbl` and giving up 2zg's variance
-  collapse (+-3.5 % -> +-20 %), **or** a retire occasion armed *from the vblank
-  handler* at a fraction of its period - phase-locked by construction, so NOT
-  2zc's two independent beating timers.
+  **2CF IS THAT SECOND OPTION, BUILT AND UNREAD BY ANY BOOT.** `tickset` is
+  inert at native (exits 5) because the vblank owns the quantum, so the
+  ladder had only ever been improved in a sub-native mode. `sub` subdivides
+  the vblank period instead: interior occasions at
+  `lastVbl + k * (vblPeriod / sub)`, computed from the DISPLAY's own
+  timestamp on every arm and re-anchored by every vblank (the offer path
+  cancels and re-arms the timer), so there is **one period subdivided rather
+  than two periods that beat** - arithmetic, not tuning, which is the whole
+  difference from 2zc. The framebuffer carries its live `RBFBVBLPeriodNs` as
+  **p2 of the existing `RBGPURetireNow` call**, so 2z1's runtime mode change
+  needs no second path and a pre-2CF framebuffer (which passes nothing) is
+  simply the A side (rule 38).
+  **Default 1 = pre-2CF byte for byte.** `{"RBGPURetireSub": 1..8}` via
+  `build/out/subret`, which is the MIRROR of `tickset`'s rule-39 refusal (it
+  refuses when `vblret_src` is 0) and checks the EFFECT as well as the dial -
+  `vblret_subret` must be climbing or it reports the 2A9 shape, feature on
+  and mechanism inert, and exits 6. `sub` 8 reproduces 2C8's `vbl/8`
+  threshold from the period alone (2083680 ns at 60 Hz = the measured
+  2084 us), which is the hosttest's check that the dial is the quantity
+  2C5-2C8 measured.
+  **NOT CLAIMED: that an occasion supplied this way is worth one from a
+  free-running timer.** The law was fitted with the timer driving below
+  native; an interior occasion runs on a thread_call the display did not wake,
+  at a frame phase the timer regime never held fixed. Said before the reading
+  so it can be wrong: `sub` 4 should divide the eight-queue spread by 4
+  (~56 -> ~14 ms); if it does not, interior occasions are not equivalent,
+  which is a different answer and not a null one. The frame-rate side is the
+  risk the hosttest cannot see - extra `checkTimestamps()` calls in the regime
+  2zg measured as the quiet one - so read `paired.sh` and `ftbudget` beside
+  the ladder and watch for 2zc's two-sided curve.
+  The other route is unchanged and costs something: `-rbgpunoretirevbl` at
+  native gives up 2zg's variance collapse (+-3.5 % -> +-20 %).
   **AND THE TICK IS A RUNTIME DIAL (2C4).** `{"RBGPUTickUs": N}` via
   `build/out/tickset`;
   `rbgpu_2xg_arm_next()` recomputes its period from the global on every arm,
@@ -1239,9 +1265,16 @@ table and refuses to install one that does not match the running kernel;
   to be the instrument for this question. Anchored on `<key>` now, printing
   the VALUE beside the key and `location` with the reason the five are
   absent.
-  **Still OPT-IN and that has not changed**: both strings also live in
-  `AMDRadeonX6000Framebuffer` and that consumer is still unread, and one
-  working boot is not two (rule 44).
+  **2CE: DEFAULT-ON.** Boot 418 reproduced 417 in every key
+  (`gpuname_cc_raw` 0xFFF80001, 12 CU, 4096 MB, `aty_ok` 1, `RBFBModelSrc`
+  "derived", `Metal Support: Metal 3`), so rule 44's two boots per side are
+  in hand and `-rbgpumtlname` joined `rb_default_on_tokens` (50 -> 51),
+  disarmed by the derived `-rbgpunomtlname`. The reason it WAS opt-in has
+  not gone away and is not claimed to: both strings also live in
+  `AMDRadeonX6000Framebuffer` and that consumer is still unread - what
+  changed is that it has had two accelerated boots to misbehave in. The
+  failure mode is still `rb_gpu_aty_split()` refusing and publishing
+  nothing, which is every pre-2CB boot's behaviour.
   Also corrected here: 2CA's derivation **latched** its "aperture not up yet"
   refusal, and `g_hw.ctx` arrives with the accelerator's SMU init, LATER than
   the peer's `start()` - a cached transient looks permanent (2A3 in another
@@ -2194,6 +2227,12 @@ retirement, which is what 2C2 mistook for the vblank period; `tickset` exits
 5 rather than measuring when `vblret_src` is 1, because the dial is inert
 while the vblank drives. 2zc's dose-response is the cost: both directions off
 6944 cost about a third of the frame rate.)**
+**`{"RBGPURetireSub": 1..8}` via `build/out/subret` (2CF - retire occasions per
+VBLANK period, default 1. The 2C5-2C8 ladder lever at NATIVE refresh, where
+`tickset` is inert; interior occasions are anchored on `lastVbl` and
+re-anchored every frame, so this is one period subdivided and not 2zc's two
+beating timers. Refuses when `vblret_src` is 0 - use `tickset` there - and
+exits 6 if `vblret_subret` is not climbing. NO BOOT HAS READ IT.)**
 **`{"RBFBTriple": 0|1}` via `build/out/tripleset` (2B1 - DCN's SECOND pending
 flip slot, `SURFACE_TRIPLE_BUFFER_ENABLE`, which reads 0 on every boot since
 216. OFF by default and a new hardware-write surface in the display path:
@@ -2214,7 +2253,9 @@ the ceiling; keep the default),
 `rbgpuschedtickus=<500..1000000>` (**6944 is a measured
 interior optimum** - 2xn/2zb/2zc put 2000, 6944 and 13888 at 51.33, 74.6 and
 49.2 sets/s, so both directions cost a third of the frame rate; do not change
-it without reading 2zc), `rbgpuvblhz=<millihertz>` (20000-400000),
+it without reading 2zc), `rbgpuretiresub=<1..8>` (2CF - occasions per vblank period at native,
+default 1; the boot-arg form of `subret`, refused out of range with the value
+published), `rbgpuvblhz=<millihertz>` (20000-400000),
 `rbgpufbvrammb=<256..16384>`, `rbgpufbvramrangemb=<8..256>`,
 `rbgpufbhubpmax=<N>` (0 = unlimited), `rbgpufbatymb=<1..3072>`,
 `rbgpufbblfloor=`, `rbgpumtlkscope=` / `rbgpumtlkexclude=` (exclude wins),
