@@ -58134,3 +58134,36 @@ Our own code is NOT a confounder: `blSetLevel()` is called only from a
 parameter set (`RBAMDBacklightParams.cpp:281`, `RBAMDFramebuffer.cpp:1419`)
 and never periodically, so a DMUB write to BL_PWM_CNTL would persist rather
 than being stomped by the next publish.
+
+--------------------------------------------------------------------------------
+2D9 addendum 2 - boot 432 WAS HYBRID, and my own prescription omitted the check
+--------------------------------------------------------------------------------
+
+The user, 2026-11-05: "my 4050 was on ... cu my brightness wasnt working but
+now it is." So boot 432 - the boot 2D9's prescription was run against - was in
+HYBRID mode. Boot 433 is Eco: NVIDIA `vendor-id` <de100000> count **0** with
+the AMD <02100000> control reading **2** (rule 26: the first form of this check
+returned 0 for BOTH, a broken pattern caught before it was reported as a mode),
+and brightness works, which is the user's own corroboration.
+
+Nothing was sent on either boot - every counter still 0 on 433.
+
+**THE ERROR IS MINE AND IT IS THE MILESTONE'S OWN SUBJECT.** 2D9 exists
+because 2zu took its null in hybrid mode; its entire finding is rule 47 applied
+backwards through the record. And the prescription it handed over - add the
+boot-arg, reboot, run `dmubbl` - **did not include "verify Eco mode first"**,
+on a machine where the user switches that mode from Windows and where this card
+already says the firmware mode is part of the configuration a reading comes
+from. Had the user pulled the trigger on 432, the result would have been 2zu's
+confound reproduced exactly, one milestone after writing it down.
+
+Nothing was lost, and only by accident: the arming check (rule 34) is what
+surfaced it, because reading WHY nothing happened is what exposed the
+configuration. **An experiment's arm includes the firmware mode, not just the
+boot-arg and the binary UUIDs.**
+
+So as of boot 433, for the first time in this project's history, the DMUB
+backlight test is arrivable in a configuration that can show its effect:
+Eco mode, `-rbgpufbdmubbl` armed, framebuffer carrying the route, the panel
+measured as reachable by the block type 0 targets, and nothing of ours
+re-writing BL_PWM_CNTL periodically. No send has been made.
