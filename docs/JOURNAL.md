@@ -59011,3 +59011,231 @@ before filling the field.
 been sent, and no domain has been gated.** What is established is only that
 the bring-up path is writable from vendored source and that the execution
 question has a zero-risk instrument.
+
+---
+
+## 2E1 — the Type-C port is UNIPHY_C, and the whole transmitter payload is now determined
+
+2E0 ended with one instruction: read the `command_table_helper` translations
+before filling a payload field, because `hpdsel` looked like an off-by-one
+waiting to happen. Read them. **It was an off-by-one, and reading them turned
+out to answer a question 2BF had closed as unanswerable.**
+
+### The four translations, each read rather than recalled
+
+Vendored: `command_table_helper.c`, `command_table_helper2_dce112.c`,
+`command_table_helper2.c`, `command_table_helper_struct.h`, `atombios.h`,
+`grph_object_defs.h`, `grph_object_id.h`, `ObjectID.h`,
+`bios_parser_common.c`, `link_factory.c`, `dcn10_link_encoder.c`,
+`dcn20_link_encoder.c`, `dc_dp_types.h`, `link_service_types.h`.
+`docs/linux-ref/UPSTREAM.md` has the paths and the per-file notes.
+
+**Rule 46 discharged first, by source.** `command_table_helper2.c`'s
+`dal_bios_parser_init_cmd_tbl_helper2` lists `DCN_VERSION_3_1` in the case
+block returning `dal_cmd_tbl_helper_dce112_get_table2()` - together with
+every DCN from 1.0 to 4.2. So "dce112" in the filename is not the 2xs/2zl
+trap repeating; it is the only helper table any DCN uses. And
+`phy_id_to_atom` is not in that file at all - it is the shared one in
+`command_table_helper.c`, reached through `../command_table_helper.h`, which
+is why a grep of the dce112 file for it finds only the function-pointer
+assignment.
+
+1. **`phy_id_to_atom` is the identity.** `TRANSMITTER_UNIPHY_A..G` ->
+   `ATOM_PHY_ID_UNIPHYA..G`; `atombios.h:1496` makes those **0..6** and
+   `grph_object_defs.h:81` has `TRANSMITTER_UNKNOWN = -1` followed by
+   `TRANSMITTER_UNIPHY_A`, so 0. No conversion. And
+   `dcn31_resource.c:419`'s `link_regs(0, A) .. link_regs(4, E)` each carry
+   `DPCS_DCN31_REG_LIST(id)`, so **RDPCSTX instance i IS transmitter i IS
+   atom phyid i** - 2C1's PHY0..4 survey is addressable from the command
+   with no index convention left to guess.
+
+2. **`hpd_sel_to_atom` adds one.** `grph_object_defs.h:45` is
+   `HPD_SOURCEID1 = 0`; `command_table_helper2_dce112.c:63` maps
+   `HPD_SOURCEID<n>` to `ATOM_TRANSMITTER_V6_HPD<n>_SEL`, which
+   `atomfirmware.h:4417` defines as n. `dcn31_resource.c:1178` indexes
+   `link_enc_hpd_regs[enc_init_data->hpd_source]` with that same enum and
+   that array is `hpd_regs(0) .. hpd_regs(4)` - the DCN HPD block instances.
+   So **DCN HPD instance N -> hpd_src N -> atom hpdsel N+1.** 2B4 measured
+   the Type-C port on HPD instance **2**, so its byte is **3**. A command
+   built on `dmub_cmd.h`'s "=2: HPD2" would have been well-formed and about
+   HPD instance 1 - the other DisplayPort connector on this die. (In the same
+   construct the DDC channel is already 1-based:
+   `link_enc_aux_regs[enc_init_data->channel - 1]`. Two neighbouring fields,
+   two conventions.)
+
+3. **`dig_encoder_sel_to_atom` returns 0 unconditionally** - no switch, and
+   the comment says why: "On any ASIC after DCE80, we manually program the
+   DIG_FE selection (see connect_dig_be_to_fe function of the link encoder),
+   so translation should always return 0 (no FE)". That is not a free field,
+   it is a **missing step**: the VBIOS command does not connect the DIG front
+   end to the back end, `dcn10_link_encoder_connect_dig_be_to_fe` does,
+   through `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT`. A register write of ours.
+
+4. **`signal_type_to_atom_dig_mode`** gives
+   `ATOM_TRANSMITTER_DIGMODE_V6_DP` = **0** for `SIGNAL_TYPE_DISPLAY_PORT`
+   (`atombios.h:1588`; DVI 2, HDMI 3, DP_MST 5), agreeing with
+   `atomfirmware.h`'s `atom_encode_mode_def`.
+
+### 2BF's negative is OVERTURNED - the mapping was in ROM we already have
+
+2BF established by exhaustion that no register holds the HPD-to-PHY mapping
+and concluded it "comes from the VBIOS display-object table, which is ROM, not
+a register". Both halves are true. What nobody asked is whether **we have the
+ROM** - and we do: `firmware/680m-vbios.rom`, 44 544 bytes, dumped on
+2026-10-05, already compiled into the plugin as `vbios_data[]` and published
+as `ATY,bin_image` since 2ks. Reading it costs no boot, no write and no risk.
+
+`tools/re/vbios_dispobj.py` parses the display-object-info table, every
+structure and every translation citing the vendored file it came from. Boot
+nothing; it reads a file on disk.
+
+    rom header 0x0190 'ATOM'   master data 0x0214   displayobjectinfo 0x2294
+    rev 1.4   supporteddevices 0x0eca   paths 6
+
+| path | connector | encoder | transmitter | phyid | HPD inst | hpdsel | i2c | USB_C |
+|---|---|---|---|---|---|---|---|---|
+| 0 | eDP enum1 | UNIPHY enum1 | UNIPHY_A | 0 | 0 | 1 | 0x90 | 0 |
+| 1 | DP enum1 | UNIPHY enum2 | UNIPHY_B | 1 | 1 | 2 | 0x91 | 0 |
+| 2 | **DP enum2** | **UNIPHY1 enum1** | **UNIPHY_C** | **2** | **2** | **3** | **0x92** | **1** |
+| 3 | DP enum3 | UNIPHY1 enum2 | UNIPHY_D | 3 | 3 | 4 | 0x93 | 1 |
+| 4 | DP enum4 | UNIPHY2 enum1 | UNIPHY_E | 4 | 4 | 5 | 0x94 | 1 |
+| 5 | GENERIC:0x03 | none | - | - | none | - | - | - |
+
+**Path 2 is the Type-C port, and three independent hardware measurements say
+so without any of them being used to derive it.** 2B4 measured the sink bit
+following the cable on HPD instance **2**; 2B9 measured `AUX_HPD_SEL` = 2 on
+AUX engine **2**, and path 2's `atom_i2c_record` id is **0x92**, low nibble
+**2**; and 2C1 measured PHY**0** as the only lit PHY on the die
+(`0x00194444`, four MPLLs on, PSTATE 0 on every lane), which is path 0, the
+eDP panel, on UNIPHY_A. The table was parsed from ROM with no reference to
+any of those readings and lands on all three.
+
+**It also refutes the inference 2C1 declined to make.** 2C1 noted PHY1 as the
+odd one out among the dark four - `DPALT_DISABLE` asserted and *not* acked,
+against PHY2-4 with both - and wrote "NOT identified and not guessed: which
+PHY is Type-C", because HPD and AUX both said 2 while the PHY index said 1.
+PHY1 is **UNIPHY_B, path 1, the other DisplayPort connector**. Had 2C1 taken
+the hint it would have aimed every subsequent command at the wrong PHY, and
+the reason it did not is that it refused a one-sample index inference
+(rule 18). The PHY numbering never disagreed with HPD and AUX; there was
+simply no reason for an unrelated connector's state to match.
+
+**And `DP_IS_USB_C` is now read, not inferred.** 2C1 recorded `DPALT_DISABLE`
+clear as ambiguous between "active alt mode" and "not a Type-C PHY at all",
+and added an explicit `ALT_AMBIGUOUS` member for it. The flag comes from
+`bp_cap_info.DP_IS_USB_C` (`dcn31_dio_link_encoder.c:491`), which
+`bios_parser2.c` reads out of the **encoder** object's
+`atom_encoder_caps_record` bit `0x100` - not from the connector object id, and
+not from a register. Paths 2, 3 and 4 all have it set; paths 0 and 1 do not.
+So the ambiguity is resolved for every instance at once, and
+`dcn20_link_encoder_is_in_alt_mode` would return a meaningful answer on
+UNIPHY_C. (Unexplained and recorded as such: path 2's caps are **0x213f**
+where paths 3 and 4 are **0x013f** - bit 13, `0x2000`, is in no
+`atom_encoder_caps_def` member. Not needed for anything here.)
+
+Connector object ids are plain `CONNECTOR_OBJECT_ID_DISPLAYPORT` (0x13), not
+`CONNECTOR_OBJECT_ID_USBC` (0x17), on all four external paths - so a search
+for a USB-C *connector* would have found nothing on a board with three of
+them.
+
+### The trap in the parse, and why it cost nothing
+
+The first run printed **TRANSMITTER_UNKNOWN on all five display paths** while
+decoding every connector correctly. dc's `enum encoder_id` is a dense 0..21
+list; ATOM's `ENCODER_OBJECT_ID_*` is sparse - UNIPHY **0x1E**, UNIPHY1
+**0x20**, UNIPHY2 **0x21**, UNIPHY3 **0x25** (`ObjectID.h:86-91`) against
+dc's 13/15/16/20 - and `bios_parser_common.c:encoder_id_from_bios_object_id`
+is a translation **switch**, not a cast. The CONNECTOR ids go the other way
+and are deliberately identical (`DISPLAYPORT` 0x13 == `CONNECTOR_ID_DISPLAY_PORT`
+19, eDP 0x14 == 20), so **the same dump decodes one field of the structure
+correctly off the wrong table and the other not at all.** What saved it is
+that the wrong answer was absurd rather than plausible: five display paths
+with no transmitter cannot be what a shipping driver sees. Had the sparse ids
+happened to land inside dc's range, this would have printed a wrong
+transmitter with no sign of trouble. **Rule 17's shape in a parser: two fields
+of one structure can have two different translation disciplines, and only one
+of them announces a mistake.**
+
+### The payload, complete
+
+For the Type-C port, reading `dcn10_link_encoder_enable_dp_output` field by
+field and pushing each value through the helper above:
+
+    dmub_dig_transmitter_control_data_v1_7
+      phyid                      2        TRANSMITTER_UNIPHY_C
+      action                     1        TRANSMITTER_CONTROL_ENABLE
+      mode_laneset.digmode       0        ATOM_TRANSMITTER_DIGMODE_V6_DP
+      lanenum                    2        LANE_COUNT_TWO  (2BB's DPCD)
+      hpdsel                     3        HPD instance 2 + 1
+      digfe_sel                  0        always, by the helper
+      connobj_id                 0        never assigned; cntl is `{ 0 }`
+      HPO_instance             244        see below
+      symclk_units.symclk_10khz 54000     0x14 * 27000 / 10
+
+`LINK_RATE_HIGH2 = 0x14` (`dc_dp_types.h`) and
+`LINK_RATE_REF_FREQ_IN_KHZ = 27000` (`link_service_types.h:52`) give
+`pixel_clock` 540 000 kHz, and `transmitter_control_v1_7` assigns
+`symclk_10khz = cntl->pixel_clock / 10`.
+
+**`HPO_instance` is 244 and that is not a mistake in this transcription.**
+`transmitter_control_v1_7` computes
+`hpo_instance = (uint8_t)cntl->hpo_engine_id - ENGINE_ID_HPO_DP_0` whenever
+`dc_is_dp_signal(signal)`, `dcn10_link_encoder_enable_dp_output` never
+assigns `hpo_engine_id`, and `cntl` is initialised `{ 0 }` -
+`ENGINE_ID_DIGA` is 0 and `ENGINE_ID_HPO_DP_0` is 12
+(`grph_object_id.h:177`), so the byte is `(uint8_t)(0 - 12)` = **244**. That
+is what Linux sends on every non-HPO DP enable on this generation, so the
+firmware must ignore the field at `digmode` DP. **Reproduce it rather than
+normalise it to 0**: a "tidied" payload is a different command from the one
+with field evidence behind it, and if 244 turns out to matter the difference
+would be invisible in the result.
+
+### The enable sequence is Linux's DEFAULT path
+
+`dcn31_link_encoder_enable_dp_output` delegates to
+`dcn20_link_encoder_enable_dp_output`, whose first statement is
+`if (!enc->ctx->dc->debug.avoid_vbios_exec_table) { dcn10_link_encoder_enable_dp_output(...); return; }`.
+So on DCN 3.1, enabling a DP output **is** the VBIOS transmitter command and
+nothing else unless a debug flag is set. The register-only path below it
+(`update_cfg_data` + `enc1_configure_encoder` + `dcn10_link_encoder_setup`) is
+the opt-out, not the norm. Before the command, `enc1_configure_encoder` does
+two writes on link encoder instance 2: `DP_CONFIG.DP_UDI_LANES` =
+`lane_count - LANE_COUNT_ONE` = 1, and
+`DP_DPHY_SCRAM_CNTL.DPHY_SCRAMBLER_ADVANCE` = 1.
+
+Two readings of ours are corroborated by their consumers on the way:
+`dcn20_link_encoder_get_max_link_cap` reads
+`RDPCSTX_PHY_CNTL6.RDPCS_PHY_DPALT_DP4` and clamps the lane count to 2 when
+it is clear, so 2C1's "DP4 is a four-lane flag, not an alt-mode flag" is
+confirmed by the only code that uses it; and `is_in_alt_mode` gates the
+`DPALT_DISABLE` read behind `DP_IS_USB_C`, which is 2C1's recorded ambiguity
+seen from the other side.
+
+### What is established and what is not
+
+Established: the transmitter command can be aimed, with every byte read from
+a vendored file or measured on this chip, and **no unknown remains on the
+input side of the Type-C port.** Wired (2B4), engine bound (2B9), our own AUX
+transactions carried (2BB), full capability and timing set read (2BD), PHY
+identified and its register block addressable (2C1 + this), payload complete.
+
+**NOT established, and nothing here changes it: whether this firmware
+executes a `DMUB_CMD__VBIOS` command at all.** 2DB spent four instruments on
+that question, 2DC built the fifth and 2DF showed its subject was already
+powered, so three boots have refused before a send. The transmitter command
+is now both the sixth instrument and step one of the bring-up: it targets a
+PHY driving nothing, so the panel cannot be lost, and its product is
+`RDPCSTX2_PHY_CNTL6` with 2C1's PHY0 (`0x00194444`) as a measured positive
+control and PHY2's own dark `0x00063333` as the before-state.
+
+**NOTHING IS BUILT AND NOTHING HAS BEEN SENT.** Source and a userspace
+parser only; no kext object changed, so no reinstall and no boot is implied by
+this milestone.
+
+Remaining, in order, each its own step: send the transmitter ENABLE and read
+the PHY (v1_7 first, v1_6 if nothing moves - two arms, one register for a
+product); `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` to connect the DIG; link
+training, which 2BE established is **ours** over the AUX channel already
+proven; `SET_PIXEL_CLOCK` (`DMUB_CMD__VBIOS` sub-type 2) for the pixel clock
+this card long called unlocated; a second OTG and HUBP; and a second
+`IOFramebuffer`, since `getDisplayModeCount()` has returned 1 since 2sl.

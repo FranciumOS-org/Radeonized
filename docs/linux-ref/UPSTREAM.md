@@ -420,7 +420,13 @@ commands need and that 2DC/2DF recorded as unwritable:
 payload "comes in two layouts chosen by the atom table revision in ROM" and
 `ATOM_TRANSMITER_ACTION_*` was "only inside a comment". The first half was
 about the REGISTER path - `command_table2.c:init_transmitter_control` picks by
-crev - and the DMUB path pins its own version in the ABI:
+crev - and that applies to the DMUB path too (CORRECTED in 2E0's own
+journal entry: `command_table2.c` has TWO DMUB senders,
+`transmitter_control_dmcub` for the union's v1_6 arm and
+`transmitter_control_dmcub_v1_7`, and `init_transmitter_control` selects
+between their callers on the ROM crev). What is gone is only the part that
+mattered: BOTH layouts are vendored, so nothing is recalled, and which one
+this ROM wants is a two-arm experiment with a register for a product.
 `dmub_dig_transmitter_control_data_v1_7` is defined field-for-field inside
 `dmub_cmd.h` itself (line 3106), with `phyid`, `action`, `lanenum`, `hpdsel`
 ("=2: HPD2"), `digfe_sel` and `symclk_10khz`. The second half is now a read
@@ -443,3 +449,144 @@ rather than assumed, and the `DISABLE_OUTPUT 8 / ENABLE_OUTPUT 9` pair of the
 ATOM enum is `DEACTIVATE / ACTIAVATE` in dc's, so the names do NOT line up
 even where the numbers do. Also carries `struct bp_transmitter_control`,
 which is the input side of the payload fill.
+
+
+---
+
+**The command-table helpers** (2E1, fetched 2026-11-06 from
+`15bdd0eaaf927c70f92e84280cb4268576f8e81a`; all unmodified, AMD's MIT
+headers):
+
+| File | Upstream path |
+|---|---|
+| command_table_helper.c | drivers/gpu/drm/amd/display/dc/bios/command_table_helper.c |
+| command_table_helper2_dce112.c | drivers/gpu/drm/amd/display/dc/bios/dce112/command_table_helper2_dce112.c |
+| command_table_helper_struct.h | drivers/gpu/drm/amd/display/dc/bios/command_table_helper_struct.h |
+| grph_object_defs.h | drivers/gpu/drm/amd/display/include/grph_object_defs.h |
+| atombios.h | drivers/gpu/drm/amd/include/atombios.h |
+| dcn10_link_encoder.c | drivers/gpu/drm/amd/display/dc/dio/dcn10/dcn10_link_encoder.c |
+| dcn20_link_encoder.c | drivers/gpu/drm/amd/display/dc/dio/dcn20/dcn20_link_encoder.c |
+
+Vendored because 2E0 recorded that three fields of
+`dmub_dig_transmitter_control_data_v1_7` are NOT the raw dc values - they go
+through `cmd->phy_id_to_atom()`, `cmd->hpd_sel_to_atom()` and
+`cmd->dig_encoder_sel_to_atom()`, which were in no vendored file. All three
+are now read.
+
+**Rule 46 discharged by source, not by reasoning:** DCN 3.1 really does use
+the DCE112 helper table. `command_table_helper2.c:dal_bios_parser_init_cmd_tbl_helper2`
+lists `DCN_VERSION_3_1` in the case block that returns
+`dal_cmd_tbl_helper_dce112_get_table2()`, together with every DCN from 1.0 to
+4.2 - so "dce112" in the filename is not a version mismatch, it is the only
+table any DCN uses. `phy_id_to_atom` is not in the dce112 file at all; it is
+the shared one in `command_table_helper.c`, reached through
+`../command_table_helper.h`.
+
+**`phyid` is the identity on this chip.** `phy_id_to_atom` maps
+`TRANSMITTER_UNIPHY_A..G` to `ATOM_PHY_ID_UNIPHYA..G`, and `atombios.h:1496`
+defines those as **0..6** while `grph_object_defs.h:81` has
+`TRANSMITTER_UNKNOWN = -1` followed by `TRANSMITTER_UNIPHY_A`, i.e. 0. So
+transmitter index == atom phyid, with no conversion. And
+`dcn31_resource.c:419` ties that index to the register block:
+`link_regs(0, A) ... link_regs(4, E)`, each row carrying
+`DPCS_DCN31_REG_LIST(id)` - **so RDPCSTX instance i IS transmitter i IS atom
+phyid i**, which is what makes 2C1's PHY0..4 survey addressable from the
+command.
+
+**`hpdsel` IS off by one, exactly as 2E0 predicted.**
+`grph_object_defs.h:45` is `HPD_SOURCEID1 = 0`, and
+`command_table_helper2_dce112.c:63` maps `HPD_SOURCEID1 -> 0x01`,
+`HPD_SOURCEID2 -> 0x02`, and so on (`ATOM_TRANSMITTER_V6_HPD<n>_SEL`,
+`atomfirmware.h:4417`, = n). `dcn31_resource.c:1178` indexes
+`link_enc_hpd_regs[enc_init_data->hpd_source]` with that same enum, and that
+array is `hpd_regs(0) .. hpd_regs(4)` - the DCN HPD block instances. So the
+chain is **DCN HPD instance N -> hpd_source_id value N -> atom hpdsel N+1**.
+2B4 measured the Type-C port as HPD instance **2**, so its payload byte is
+**3**, not the 2 the `dmub_cmd.h` comment's "=2: HPD2" invites. A command
+built on the comment would have been perfectly well-formed and about the
+wrong connector. (For contrast, the DDC channel in the same construct is
+1-based already: `link_enc_aux_regs[enc_init_data->channel - 1]`.)
+
+**`digfe_sel` is ALWAYS 0, and that is a missing step rather than a free
+field.** `dig_encoder_sel_to_atom` has no switch - it returns 0 with the
+comment "On any ASIC after DCE80, we manually program the DIG_FE selection
+(see connect_dig_be_to_fe function of the link encoder), so translation should
+always return 0 (no FE)". So the VBIOS command does NOT connect the DIG
+front end to the back end; `dcn10_link_encoder_connect_dig_be_to_fe` does,
+through `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT`. A register write of ours, not a
+command.
+
+**`digmode` for DP is 0**, from `signal_type_to_atom_dig_mode`:
+`SIGNAL_TYPE_DISPLAY_PORT`/`_EDP` -> `ATOM_TRANSMITTER_DIGMODE_V6_DP`, which
+`atombios.h:1588` defines as 0 (DVI 2, HDMI 3, DP_MST 5) - agreeing with
+`atomfirmware.h`'s `atom_encode_mode_def`.
+
+**And the enable sequence is Linux's DEFAULT path, which is the one we can
+reach.** `dcn31_link_encoder_enable_dp_output` delegates to
+`dcn20_link_encoder_enable_dp_output`, whose FIRST branch is
+`if (!dc->debug.avoid_vbios_exec_table) { dcn10_link_encoder_enable_dp_output(...); return; }`
+- so unless that debug flag is set, enabling a DP output on this generation is
+the VBIOS transmitter command and nothing else. `dcn10_link_encoder_enable_dp_output`
+fills `bp_transmitter_control` with `action = TRANSMITTER_CONTROL_ENABLE`,
+`transmitter = enc->transmitter`, `signal = SIGNAL_TYPE_DISPLAY_PORT`,
+`lanes_number = link_settings->lane_count`, `hpd_sel = enc->hpd_source`,
+`pixel_clock = link_rate * LINK_RATE_REF_FREQ_IN_KHZ`, and runs
+`enc1_configure_encoder()` first - two register writes,
+`DP_CONFIG.DP_UDI_LANES = lane_count - 1` and
+`DP_DPHY_SCRAM_CNTL.DPHY_SCRAMBLER_ADVANCE = 1`.
+
+**Corroborations of readings already taken.**
+`dcn20_link_encoder_get_max_link_cap` reads
+`RDPCSTX_PHY_CNTL6.RDPCS_PHY_DPALT_DP4` and clamps the lane count to 2 when it
+is clear - so 2C1's reading of `DPALT_DP4` as "four-lane configuration" rather
+than an alt-mode flag is confirmed by its only consumer. And
+`dcn20_link_encoder_is_in_alt_mode` gates the whole `DPALT_DISABLE` read
+behind `enc->features.flags.bits.DP_IS_USB_C`, which comes from VBIOS and not
+from a register - which is 2C1's recorded ambiguity (`ALT_AMBIGUOUS`) seen
+from the consumer's side.
+
+**Still NOT established, and it is now the only unknown left on the input
+side: WHICH transmitter carries HPD2.** 2BF established by exhaustion that no
+register holds the HPD-to-PHY mapping; it comes from the VBIOS display-object
+table. The payload needs `phyid`, so this has to be settled before a
+transmitter command can be aimed.
+
+
+**The object-table chain** (2E1, same commit, all unmodified):
+
+| File | Upstream path |
+|---|---|
+| ObjectID.h | drivers/gpu/drm/amd/amdgpu/ObjectID.h |
+| bios_parser_common.c | drivers/gpu/drm/amd/display/dc/bios/bios_parser_common.c |
+| command_table_helper2.c | drivers/gpu/drm/amd/display/dc/bios/command_table_helper2.c |
+| link_factory.c | drivers/gpu/drm/amd/display/dc/link/link_factory.c |
+| grph_object_id.h | drivers/gpu/drm/amd/display/include/grph_object_id.h |
+| grph_object_defs.h | drivers/gpu/drm/amd/display/include/grph_object_defs.h |
+| dc_dp_types.h | drivers/gpu/drm/amd/display/dc/dc_dp_types.h |
+| link_service_types.h | drivers/gpu/drm/amd/display/include/link_service_types.h |
+
+`ObjectID.h` is NOT in `amd/include` where the other atom headers are - it
+lives under `amd/amdgpu/`, and a search of `amd/include` for it comes back
+empty, which is rule 26's trap with the file genuinely elsewhere.
+
+**The trap this chain contains, and it is the one that would have produced a
+confidently wrong answer:** dc's `enum encoder_id` is a dense 0..21 list
+while ATOM's `ENCODER_OBJECT_ID_*` is sparse - `INTERNAL_UNIPHY` is **0x1E**,
+`UNIPHY1` **0x20**, `UNIPHY2` **0x21**, `UNIPHY3` **0x25** (`ObjectID.h:86-91`)
+against dc's 13, 15, 16, 20. `bios_parser_common.c:encoder_id_from_bios_object_id`
+is a translation SWITCH, not a cast. Reading the ROM's encoder field against
+dc's enum makes every UNIPHY an unknown encoder - which is exactly what the
+first run of `tools/re/vbios_dispobj.py` printed, and the only reason it was
+caught is that "TRANSMITTER_UNKNOWN on all five display paths" is absurd
+rather than plausible. **The CONNECTOR ids go the other way and are
+deliberately identical** (`CONNECTOR_OBJECT_ID_DISPLAYPORT` 0x13 ==
+`CONNECTOR_ID_DISPLAY_PORT` 19, eDP 0x14 == 20), so the same dump decodes
+connectors correctly off the wrong table and encoders not at all. Two fields
+of one structure, two different translation disciplines.
+
+`LINK_RATE_REF_FREQ_IN_KHZ = 27000` is in `link_service_types.h:52`, and
+`dc_dp_types.h` has `LINK_RATE_HIGH2 = 0x14` (HBR2) and
+`enum dc_lane_count` (`LANE_COUNT_TWO = 2`). `grph_object_id.h` gives the
+objid bit layout (`dal_graphics_object_id_to_uint`: id bits 0-7, enum_id
+8-11, type 12-15) and `enum engine_id` with `ENGINE_ID_DIGA = 0` and
+`ENGINE_ID_HPO_DP_0 = 12`.
