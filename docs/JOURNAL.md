@@ -57961,3 +57961,121 @@ WHAT IS STILL OPEN - unchanged by any of this, and it is the user's goal:
   step is a DMUB_CMD__VBIOS sub-type because dcn31_resource.c:934 sets
   .dmub_command_table = true. That needs re-examining before any of the
   bring-up is built.
+
+================================================================================
+2D9  THE DMUB BLOCKER IS NARROWER THAN 2C0 RECORDED, AND THE ONE NULL THAT
+     CLOSED IT WAS TAKEN IN THE CONFIGURATION RULE 47 FORBIDS
+     A source read and a re-reading of boots 275-279. NOTHING MEASURED.
+================================================================================
+
+2C0 recorded the DMUB route as blocked: "this firmware does not answer an
+inbox command (boot 275's QUERY_FEATURE_CAPS came back byte-identical with
+ret_status still set), so that route needs re-examining before any of it is
+built." This is that re-examination, and it splits the claim in two.
+
+(1) THE REPLY PATH IS THE CONTRACT OF EXACTLY ONE OF THE SEVEN VBIOS
+    SUB-TYPES, AND IT IS NOT ONE OF THE BRING-UP STEPS.
+
+  Read off `docs/linux-ref/dmub_cmd.h`, `enum dmub_cmd_vbios_type` and each
+  command's own struct:
+
+    0   DIGX_ENCODER_CONTROL       header + payload, no reply
+    1   DIG1_TRANSMITTER_CONTROL   header + payload, no reply
+    2   SET_PIXEL_CLOCK            header + payload, no reply
+    3   ENABLE_DISP_POWER_GATING   header + payload, no reply
+    15  LVTMA_CONTROL              header + payload, no reply
+    28  DOMAIN_CONTROL             header + payload, no reply
+    26  TRANSMITTER_QUERY_DP_ALT   header + payload READ BACK IN PLACE
+
+  `ret_status` is documented in the header as "1 if returned data, 0
+  otherwise". A query's whole product is that returned data. A bring-up
+  command's product is a REGISTER CHANGE on the display engine; the slot it
+  was written into is spent either way.
+
+  So boot 275's reading - our bytes intact, no reply, `ret_status` uncleared -
+  is a measurement of the REPLY path. It is decisive against the sweep 2BF
+  designed (QUERY_DP_ALT, which is nothing but a reply) and 2C0 was right to
+  cancel that. It is NOT a measurement of whether the firmware EXECUTES a
+  command, because for six of the seven sub-types execution leaves no trace in
+  the ring at all. 2C0 generalised from the one sub-type that needs a reply to
+  the six that do not.
+
+  Rule 13's shape, on a bus instead of a function: the absence of a return
+  value is not the absence of an effect.
+
+(2) 2zr's THREE EXPLANATIONS ARE STILL UNDISCRIMINATED, AND ONLY ONE OF THEM
+    WOULD BLOCK THE BRING-UP.
+
+  2zr listed them and declined to choose:
+    1. the firmware does not implement command 6 and discarded it;
+    2. the DMCUB reads a DIFFERENT inbox base, so it consumed a zeroed slot;
+    3. the DMCUB is not processing inbox commands at all.
+
+  (3) is measured FALSE in the sense that matters: 2zs got a GPINT round trip,
+  so the firmware is alive and servicing requests - through one register, with
+  no memory, no window, no mapping and no ring.
+  (1) is specific to command 6 and says nothing about sub-types 0/1/2/3.
+  (2) is the one that would block everything, and it is an ADDRESS question -
+  not a liveness question, which is how 2C0's wording reads it.
+
+  A command whose effect is observable discriminates (2) from (1) with no
+  reply path involved: the effect appears, or it does not.
+
+(3) AND THAT EXPERIMENT HAS ALREADY BEEN BUILT, RUN, AND ITS NULL IS
+    CONFOUNDED BY THE MUX MODE.
+
+  2zu, boot 279: `dmubbl pipe` then SET_BACKLIGHT at all three
+  `backlight_control_type` values, ABM bound to OTG0, every send accepted and
+  acked, no refusals, no timeouts - **and the panel did not move.** 2zu
+  concluded "the DMUB ABM command route is exhausted at the command level."
+
+  **Boot 279 was in HYBRID mode.** Eco mode was not discovered until boot 282
+  (2zw/2zx), and what 2zx established is that in hybrid mode the 680M's
+  backlight drives NOTHING on this chassis - a write that lands, reads back
+  bit-identical and is contested by nobody is the expected reading of a
+  working block with nothing attached. The direct PWM write (2xs) read exactly
+  that way for six milestones and turned out to be correct all along.
+
+  So "the panel did not move" on boot 279 is the same null, from the same
+  cause, on the same chassis, one instrument over - and it has NEVER BEEN
+  RE-TAKEN since the mode was fixed. Rule 47 in its own words: a measurement
+  of a defect taken in a configuration that cannot exhibit the effect does not
+  locate the defect. The firmware mode is part of the configuration a reading
+  comes from, and nobody went back through the readings it invalidated.
+
+  That makes the DMUB backlight command the cheapest available probe of
+  whether this firmware executes inbox commands at all - and the only one
+  whose effect A HUMAN CAN SEE (rule 45), on hardware whose wiring is now
+  measured rather than assumed.
+
+WHAT THE EXPERIMENT COSTS AND WHAT EACH OUTCOME MEANS:
+
+  No build. `src/fbkext/RBAMDFramebufferDMUB.cpp` and `tools/dmubbl.m` are in
+  the tree and in the installed framebuffer; the route is opt-in behind
+  `-rbgpufbdmubbl` and even armed sends nothing until `dmubbl` names a level
+  (2zn's shape). One EFI boot-arg add, one reboot, three commands.
+
+    PANEL MOVES   -> the firmware executes inbox commands. 2zr's explanation
+                     (2) is dead, the inbox base is right, and the whole
+                     DMUB_CMD__VBIOS bring-up path (encoder, transmitter,
+                     pixel clock, power gating) is AVAILABLE for the external
+                     display. 2zu's conclusion is withdrawn. This is the good
+                     outcome and it unblocks the largest piece of work left.
+    PANEL DOES NOT MOVE -> now a real null, in a configuration that could
+                     have shown the effect, with the direct PWM write as a
+                     positive control in the same session (2zw: the slider
+                     moves the panel in this mode). The bring-up must then be
+                     done by register writes with no VBIOS table, which is a
+                     different and much larger project - but it would be known
+                     rather than assumed.
+
+  The risk, stated: both routes write the same backlight hardware. If ABM
+  takes the PWM over, the slider may stop responding until a reboot. Nothing
+  is written outside the panel's own backlight block, and a reboot restores
+  it - the same reversibility 2zn was armed with.
+
+NOT CLAIMED: that the firmware does execute. Three boots' worth of readings
+on this surface have each had their discriminator share a suspect (2zq/2zr),
+and this one does not - it takes the reply path, the address arithmetic and
+the ring read-back out of the verdict entirely and replaces them with the
+panel. That is why it is worth one boot.
