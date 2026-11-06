@@ -2940,6 +2940,47 @@ this chassis, and it does NOT resolve the 2BB/2BD tension); `dis` **0** means
 `RDPCSTX2` is the wrong register and the bring-up continues with the FE
 connection and the pixel clock; **nothing answering** reproduces 2zr at the
 right address and closes the reply route as a result rather than an inference),
+**2EB RAN IT AND IT IS THE STRONG ANSWER: THE REPLY PATH WORKS AND DP ALT
+MODE IS GRANTED ON PHY2 (boot 449, AFC2BA4A, five sends, every refusal 0,
+verdict 3 = ROM_MATCH).** `is_usb` = **0,0,1,1,1** across phy 0..4 - 2E1's
+VBIOS `DP_IS_USB_C` read bit for bit from an independent source - with
+**three further corroborations nothing was designed to produce**: `is_dp4`
+**0 on phy 2** is 2BB's two lanes from the sink's own DPCD and 2E7's
+`DP_CONFIG` 1; `is_dp4` **1 on phy 0** is 2C1's four MPLLs and 2E7's
+`DP_CONFIG` 3 on the panel; and **phys 3/4 are USB-C with `alt_disable` 1
+while the cabled phy 2 reads 0** - three USB-C ports, only the cabled one
+granted. `alt_disable` 1 on phys 0/1 is NOT a reading (not USB-C; Linux
+returns false before looking, and `rb_dpaltq_dp_granted()` returns -1).
+**So 2zr's null, 2C0's refusal built on it and 2BF's unbuilt sweep are all
+CLOSED** - the reply path had only ever been tried at CW4.
+**The 2BB/2BD tension is RESOLVED in the AUX instruments' favour** and
+`RDPCSTX2_PHY_CNTL6` is the odd one out. **Reading the source settles the
+STANDING rather than the cause:** `dcn31_link_encoder_is_in_alt_mode()` tries
+`has_query_dp_alt()` **FIRST and returns on the DMUB answer before any
+register read**, with the register path commented "Legacy path, avoid if
+possible". FW 4.0.15.47 passes that gate, so this is **the answer Linux itself
+would take on this chip**, not a second opinion - and the register read for
+five milestones is the fallback it reaches for only when DMCUB is absent.
+**WHY the register disagrees is UNEXPLAINED and does not need settling:** the
+`YELLOW_CARP_B0` branch is the leading candidate, `hw_internal_rev` is unread,
+and 2DD's aliasing means reading `RDPCSPIPE` would give a plausible wrong
+number. **Consequence for 2E4: its STILL was the wrong LAYER (2E9) and quite
+possibly the wrong ADDRESS too** - two reasons found a milestone apart.
+**`RBFBDpAltQRetCleared` 0 IS THE RESULT THAT NEARLY ATE THE RUN: the firmware
+wrote the payload and left `RET_STATUS` SET**, so Linux's own
+`dc_dmub_srv_query_caps_cmd` criterion (accept only if CLEARED) would have
+**discarded this valid, ROM-matching, four-ways-corroborated reply.** 2EA
+publishing that bit separately instead of folding it into the verdict is the
+whole reason the reading is readable - **fifth instance of raw beside summary
+paying for itself** (2B0, 2B4, 2B9, 2E6, this), and 2E7's "a conjunction can
+be correct while one term is inert" except the inert term would have been
+actively WRONG. It also measures one of 2zr's two stated reasons false:
+`ret_status` still set is NOT evidence of no reply on this firmware.
+**WHAT IS LEFT, with a granted link under it at last:**
+`DIG_FE_SOURCE_SELECT` (ours, one-hot, `DIGC` = **0x4** onto DIG2) and the
+pixel clock (**sub-type 2**, another inbox command of the kind now proved both
+to execute AND to answer). Then link training over AUX2 (driver-side, 2BE), a
+second OTG and HUBP, and a second `IOFramebuffer`.
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other
