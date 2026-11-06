@@ -2662,7 +2662,60 @@ REACHED.** Still not reproduced, and named so a STILL cannot be over-read:
 returning 0 unconditionally as a **missing step, not a free field**) and the
 pixel clock (VBIOS sub-type 2). Framebuffer **C99666B0** - 2E2, 2E3 and 2E5
 install as ONE binary, since 2E3's 6CB9945A reached the collection and never
-booted.),
+booted.
+**2E6 RAN IT (boot 444) AND THE HEADLINE IS THE BEFORE-WORDS, NOT THE
+VERDICT: BOTH ENCODER WRITES WERE NO-OPS.** `DP_CONFIG` read **0x00000001**
+and `DP_DPHY_SCRAM_CNTL` **0x0101FF10** BEFORE our write and identically
+after - decoded with **every bit accounted for and none left over**
+(`SCRAMBLER_DIS` 0, **`ADVANCE` 1**, `BS_COUNT` 511, `KCODE` 1), and
+`DP_UDI_LANES` **1 is 2 lanes**, the Type-C sink's own count from 2BB. Link
+encoder 2 was already in exactly the state `enc1_configure_encoder(2 lanes)`
+would store. **So 2E2's "live alternative" was never a DIFFERENCE and 2E4's
+STILL already carried a configured encoder** - the caveat is discharged by
+measurement rather than by change, which is stronger in one way (two boots,
+same chip state, same verdict) and weaker in another, since **our write path
+is UNVERIFIED by this reading.** Both halves are true and neither is the
+other.
+**`RBFBEncApplied` 1 HAS NO CONTROL, and that was my instrument defect.**
+`rb_enc_applied()` checks the readback equals the target, so with
+before == after == target it returns 1 whether the store landed, was dropped
+or was never issued - **rule 20's shape: a readback that agrees with the
+target is not evidence of a write when the target was already present.** Only
+visible because 2E5 published the BEFORE words beside the verdict (publishing
+raw beside summary paying for itself a fourth time - 2B0, 2B4, 2B9, this).
+`RBFBEncChanged` is the missing derived bit and is published now.
+**NOT ESTABLISHED: who configured it.** 0x1 / 0x0101FF10 is either the
+block's reset state or the firmware's own setup of that connector, and one
+instance cannot say (rule 18). **The discriminator is the other four and
+costs nothing new:** `encSurvey()` reads all five
+`DP_CONFIG`/`DP_DPHY_SCRAM_CNTL` pairs (`RBFBEncCfg0..4`,
+`RBFBEncScram0..4`, `RBFBEncSurveyMask`), read-only, inside the aperture
+`dpaltFits` already bounds. **Mask 0x05 - instances 0 and 2 only - is the
+pair 2B4's HPD sink mask and 2B9's `AUX_EN` mask independently name**, which
+would make the firmware's bring-up of the Type-C encoder a third agreeing
+instrument; **0x1f is a reset default and says nothing.** Latched at the
+first periodic publish so the words are pristine, and **only a REAL reading
+latches** (2CA's defect, 2CE's correction). `dmubbl dig survey` reports it
+and sends nothing.
+**THE ACK DID NOT REPRODUCE, in the good direction:** boot 443 timed out at
+1 ms and the command was consumed anyway, boot 444 **acked** on a
+byte-identical payload. Two n=1 samples pointing opposite ways is variance,
+**not a mechanism** (rule 17) - so 2E4's "it justifies a longer spin" is
+weakened and nothing changed.
+**AND THE SURVEY TOOL REPORTED THE OPPOSITE OF THE TRUTH ON ITS FIRST RUN.**
+Against the loaded C99666B0, which does not publish the new keys, `num()`
+returned -1 for each - **0xffffffff in the low word** - and an all-ones word
+satisfies both field tests, so **absence decoded as all five configured**:
+rule 14 at the tool boundary, 2CD's shape exactly. Fixed in BOTH halves -
+`rb_enc_looks_configured()` refuses an all-ones word before decoding it
+(2DD's refusal-25 shape, with a hosttest control proving it does not swallow
+a real configuration beside unmapped ones), and the tool tests for the key's
+ABSENCE and names rule 15 as the cause instead of printing words.
+**What is left is now the whole list**, both named in advance:
+`DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` and the pixel clock (sub-type 2). A
+transmitter with no clock and no front end may have nothing to light, so
+**"the firmware discards VBIOS commands" is NOT the reading** - it is one of
+two live candidates and the cheaper to refute. Framebuffer **A3B246E1**.),
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other

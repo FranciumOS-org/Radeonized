@@ -112,6 +112,12 @@ void RBAMDFramebuffer::dmubInit(void)
     encScramBefore = 0;
     encScramAfter = 0;
     encApplied = 0;
+    encChanged = 0;
+    encSurveyMask = 0;
+    encSurveyDone = false;
+    for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
+        encSurveyCfg[i] = 0; encSurveyScram[i] = 0;
+    }
     pgSamples = 0;
     for (unsigned i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
         pgStatus[i] = 0; pgConfig[i] = 0; pgBefore[i] = 0; pgAfter[i] = 0;
@@ -700,6 +706,28 @@ uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
  * Every word either side is published, so a null is attributable.
  *
  * Runs from setProperties, never the frame path (rule 31). */
+/* 2E6: read all five link encoders ONCE, before any send can perturb one of
+ * them, and latch. Read-only, no setter, and every register is inside the
+ * aperture `dpaltFits` already bounds - so this adds no write surface and no
+ * new mapping.
+ *
+ * Latched, but only a REAL reading latches: with the aperture not yet up this
+ * returns without setting `encSurveyDone`, so the periodic publish retries.
+ * Caching an early transient as though it were permanent is 2CA's defect and
+ * 2CE's correction. */
+void RBAMDFramebuffer::encSurvey(void)
+{
+    if (encSurveyDone) { return; }
+    if (!hubpRegs || !dpaltReady) { return; }
+
+    for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
+        encSurveyCfg[i]   = hubpRegs[kRbDmuSeg2Dmub + rb_enc_dw_config(i)];
+        encSurveyScram[i] = hubpRegs[kRbDmuSeg2Dmub + rb_enc_dw_scram(i)];
+    }
+    encSurveyMask = rb_enc_configured_mask(encSurveyCfg, encSurveyScram);
+    encSurveyDone = true;
+}
+
 uint32_t RBAMDFramebuffer::encConfigure(uint32_t inst, uint32_t lanes)
 {
     encInst = inst;
@@ -733,6 +761,8 @@ uint32_t RBAMDFramebuffer::encConfigure(uint32_t inst, uint32_t lanes)
     encScramAfter = hubpRegs[kRbDmuSeg2Dmub + scrDw];
     encApplied    = (uint32_t)rb_enc_applied(encCfgAfter, encScramAfter,
                                              lanes);
+    encChanged    = (uint32_t)rb_enc_changed(encCfgBefore, encCfgAfter,
+                                             encScramBefore, encScramAfter);
     encRan++;
     return encRefuse = RB_ENC_OK;
 }
@@ -787,6 +817,7 @@ uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
     } else {
         encRefuse = RB_ENC_REFUSE_DISARMED;
         encApplied = 0u;
+        encChanged = 0u;
     }
 
     rb_dig_build_transmitter(cmd, &p);
@@ -1137,6 +1168,19 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBEncCfgAfter", (uint64_t)encCfgAfter, 64);
     setProperty("RBFBEncScramBefore", (uint64_t)encScramBefore, 64);
     setProperty("RBFBEncScramAfter", (uint64_t)encScramAfter, 64);
+    setProperty("RBFBEncChanged", (uint64_t)encChanged, 32);
+    /* 2E6's survey. Sampled here so the first periodic publish latches the
+     * PRISTINE words - a send only ever happens from setProperties, later. */
+    encSurvey();
+    setProperty("RBFBEncSurveyDone", encSurveyDone);
+    setProperty("RBFBEncSurveyMask", (uint64_t)encSurveyMask, 32);
+    for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
+        char k[32];
+        snprintf(k, sizeof(k), "RBFBEncCfg%u", i);
+        setProperty(k, (uint64_t)encSurveyCfg[i], 64);
+        snprintf(k, sizeof(k), "RBFBEncScram%u", i);
+        setProperty(k, (uint64_t)encSurveyScram[i], 64);
+    }
     {
         /* Raw beside any summary, which has paid for itself four times now
          * (2B0, 2B4, 2B9, 2DA): every verdict here rests on a comparison

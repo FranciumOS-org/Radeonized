@@ -59795,3 +59795,142 @@ Plugin unchanged. `dmubbl` rebuilt. Hosttest clean.
 
 **Nothing has been read.** The encoder writes have never executed; boot 443
 ran 433B39D3, which has no `encConfigure`.
+
+
+## 2E6 — the encoder was ALREADY configured, so there was never a difference to reproduce (boot 444)
+
+Boot **444**, framebuffer **C99666B0** loaded and verified (`kextstat` UUID ==
+`dwarfdump --uuid` of the build — rules 8 and 15, both read before anything was
+interpreted). `dmubbl dig 2` with the encoder half armed:
+
+```
+RBFBDigEnc        Yes      RBFBEncInst        2
+RBFBEncRefuse     0        RBFBEncRan         1
+RBFBEncCfgBefore  1        RBFBEncCfgAfter    1
+RBFBEncScramBefore 16908048  RBFBEncScramAfter 16908048
+RBFBEncApplied    1
+RBFBDigRefuse     0        RBFBDigSends       1   RBFBDigRan   1
+RBFBDigBefore     406323   RBFBDigAfter       406323
+RBFBDigRefWord    1655876  RBFBDigVerdict     0  (STILL)
+RBFBDmubWptr      2432     RBFBDmubRptr       2432  RptrMoves 1
+RBFBDmubSendsOk   1        RBFBDmubAcks       1     AckTimeouts 0
+```
+
+**THE HEADLINE IS NOT THE VERDICT, IT IS THE BEFORE-WORDS. BOTH WRITES WERE
+NO-OPS.** `DP_CONFIG` read **0x00000001** before our write and 0x00000001
+after; `DP_DPHY_SCRAM_CNTL` read **0x0101FF10** before and after. Decoded
+against `dcn_3_1_2_sh_mask.h`, with **every bit accounted for and none left
+over**: `DPHY_SCRAMBLER_DIS` 0, **`DPHY_SCRAMBLER_ADVANCE` 1** (bit 4 — the
+exact field 2E5 was built to set), `DPHY_SCRAMBLER_BS_COUNT` 511,
+`DPHY_SCRAMBLER_KCODE` 1. And `DP_UDI_LANES` **1 means 2 lanes**
+(`lane_count - LANE_COUNT_ONE`, `LANE_COUNT_ONE` = 1).
+
+So link encoder 2 was already in exactly the state
+`enc1_configure_encoder(2 lanes)` would put it in, before this project wrote a
+word to it.
+
+**Two consequences, and the second is the one that matters.**
+
+**(1) `RBFBEncApplied` 1 HAS NO CONTROL, and that is my instrument defect.**
+`rb_enc_applied()` checks the readback equals the target. When
+before == after == target it returns 1 whether the write landed, was dropped,
+or was never issued — the three are indistinguishable by that readback. It is a
+true statement about the register's state and **not** evidence about our write
+path. Rule 20's shape: a registration that reports success is not evidence that
+a patch applied; here, a readback that agrees with the target is not evidence of
+a write when the target was already present. 2E5 published
+`EncCfgBefore`/`EncScramBefore` beside the verdict, which is the only reason
+this is visible at all — publishing raw beside summary paying for itself a
+fourth time (2B0, 2B4, 2B9, this). What is missing is the derived bit:
+`encChanged`, i.e. before != after, which is the quantity a reader actually
+wants and which no key currently carries.
+
+**(2) 2E2's "live alternative" WAS NEVER A DIFFERENCE, so 2E4's STILL was
+already an encoder-configured reading.** 2E5 was built because
+`enc1_configure_encoder`'s two writes were the one step
+`dcn10_link_encoder_enable_dp_output` performs that 2E4 did not reproduce, and
+2E4 said in advance that a STILL verdict therefore meant "no effect with the
+encoder unconfigured" rather than "the firmware discards VBIOS commands". That
+caveat is now **discharged, but by measurement rather than by change**: the
+encoder was configured on boot 443 too, so 2E4's own STILL already carried it.
+The elimination is stronger than planned in one way — two boots, same chip
+state, same verdict — and weaker in another, since our write path is
+unverified by this reading. Both halves are true and neither is the other.
+
+**NOT ESTABLISHED: who configured it.** 0x1 / 0x0101FF10 is either the block's
+reset state or the firmware's own setup of that connector. One instance cannot
+say (rule 18), and the discriminator is the other four: if DP0 and DP2 are
+configured while DP1, DP3 and DP4 are not, that is the firmware having brought
+up exactly the two connectors **2B9's `AUX_EN` mask 0x05 and 2B4's HPD sink
+mask 0x05 already name** — two independent instruments, a third agreeing, and
+the 2 lanes matching what 2BB read from the sink's own DPCD. If all five read
+alike it is a reset default and says nothing. That read costs nothing new: the
+registers are in an aperture already mapped, read-only, with no setter and no
+write surface.
+
+**The ack did NOT reproduce, in the good direction.** Boot 443 timed out at
+1 ms (`Acks` 0, `AckTimeouts` 1) and the command was consumed anyway; boot 444
+**acked** (`Acks` 1, `AckTimeouts` 0) with a byte-identical payload. So 2E4's
+"it does justify a longer spin" is weakened — the 1 ms spin was adequate here.
+Two n=1 samples on two boots pointing opposite ways is variance, **not a
+mechanism** (rule 17, which is exactly how 2E4 recorded the timeout in the
+first place). Nothing changes on this.
+
+**WHERE THE BRING-UP ACTUALLY STANDS.** This firmware accepts a
+`DMUB_CMD__VBIOS` `DIG1_TRANSMITTER_CONTROL`, advances RPTR over our slot
+(2E4 — eliminating 2zr's "the DMCUB reads a different inbox base", the one of
+its three explanations 2D9 named as blocking this path), acks it (2E6), and
+`RDPCSTX2_PHY_CNTL6` does not move: **0x00063333 -> 0x00063333**, with PHY0
+reading **0x00194444** lit as the control in the same sample, so refusal 37 did
+not fire and the instrument was valid.
+
+Two steps named in advance remain unreproduced, and they are now the whole
+list:
+
+- **`DIG_BE_CNTL.DIG_FE_SOURCE_SELECT`** — the DIG front-end-to-back-end
+  connection. 2E1 recorded `dig_encoder_sel_to_atom()` returning **0
+  unconditionally** as a **missing step, not a free field**, and
+  `dcn10_link_encoder_connect_dig_be_to_fe` is the write. A transmitter with no
+  front end attached has nothing to carry.
+- **The pixel clock** — VBIOS sub-type **2** (`SET_PIXEL_CLOCK`). 2E2
+  established this board has **no atom bytecode** for the transmitter, the
+  encoder *or* the pixel clock, so there is no register-level fallback to
+  retreat to and the clock must come over the same inbox.
+
+A transmitter enabled with no clock and no front end may simply have nothing to
+light, which is why "this firmware discards VBIOS commands" is **still not the
+reading** — it is one of two live candidates and the cheaper one to refute.
+
+**BUILT, AND IT IS A READ.** `rb_enc_changed()` publishes `RBFBEncChanged`
+beside `applied`, so the gap this milestone found cannot recur silently. And
+`encSurvey()` reads all five link encoders - `DP_CONFIG` and
+`DP_DPHY_SCRAM_CNTL` on instances 0..4, published as `RBFBEncCfg0..4` /
+`RBFBEncScram0..4` with `rb_enc_configured_mask()` as `RBFBEncSurveyMask`.
+Read-only, no setter, every register inside the aperture `dpaltFits` already
+bounds, so **no new mapping and no new write surface**. Sampled at the first
+periodic publish - a send only ever happens from `setProperties`, later - and
+**latched, but only a REAL reading latches**: with the aperture not up it
+returns without setting `encSurveyDone`, so the publish retries. Caching an
+early transient as permanent is 2CA's defect and 2CE's correction.
+`dmubbl dig survey` reports it and **SENDS NOTHING**, because the survey is the
+independent finding and should not need the experiment armed to be read.
+
+**AND THE TOOL REPORTED THE OPPOSITE OF THE TRUTH ON ITS FIRST RUN.** Against
+the loaded C99666B0, which does not publish the new keys, `num()` returned -1
+for each - **0xffffffff in the low word** - and all five printed as
+`CONFIG ffffffff SCRAM ffffffff   configured`, mask
+0xffffffffffffffff. An all-ones word satisfies both field tests, so **absence
+decoded as the strongest possible positive**: rule 14 at the tool boundary, and
+2CD's shape exactly (an instrument built for one question answering it
+backwards). Fixed in both halves, which is why there are two:
+`rb_enc_looks_configured()` now refuses an all-ones word before decoding it
+(2DD's refusal-25 shape, with a hosttest control proving the refusal does not
+swallow a real configuration beside unmapped ones), and the tool checks for the
+key's **absence** and names rule 15 as the cause rather than printing words.
+
+Hosttest: three break-it checks fired on exactly the right assertions with
+**0 compile errors** each, read from `grep -c 'error:'` rather than the exit
+status - 2BC's lesson, since `make hosttest` fails the target when a test
+fails and the exit code cannot tell "did not compile" from "the break worked".
+
+Framebuffer **A3B246E1**. Plugin unchanged. **No boot has read the survey.**

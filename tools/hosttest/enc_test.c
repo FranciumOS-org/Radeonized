@@ -151,6 +151,81 @@ int enc_tests(void)
           "an all-ones read - the signature of an unmapped or powered-down "
           "block - does not pass for one lane");
 
+    /* --- 2E6: the change bit, which `applied` cannot supply ------------ */
+    /* Boot 444's own words: before == after == target. */
+    CHECK(rb_enc_applied(1u, 0x0101FF10u, 2u),
+          "boot 444's AFTER words read as applied");
+    CHECK(!rb_enc_changed(1u, 1u, 0x0101FF10u, 0x0101FF10u),
+          "boot 444: applied AND unchanged - the encoder was already in the "
+          "target state, so `applied` says nothing about our write");
+    CHECK(rb_enc_changed(0u, 1u, 0x0101FF00u, 0x0101FF10u),
+          "a write that moved both registers reads as changed");
+    CHECK(rb_enc_changed(0u, 1u, 0x0101FF10u, 0x0101FF10u),
+          "either register moving on its own is a change");
+    CHECK(rb_enc_changed(1u, 1u, 0x0101FF00u, 0x0101FF10u),
+          "...in either order");
+
+    /* --- 2E6: the survey ------------------------------------------------ */
+    {
+        uint32_t cfg[RB_ENC_COUNT], scr[RB_ENC_COUNT];
+        unsigned i;
+
+        /* Boot 444 read instance 2 as 0x1 / 0x0101FF10. The hypothesis under
+         * test is the firmware having brought up exactly instances 0 and 2 -
+         * 2B4's HPD sink mask and 2B9's AUX_EN mask, both 0x05. */
+        for (i = 0; i < RB_ENC_COUNT; i++) { cfg[i] = 0u; scr[i] = 0u; }
+        cfg[0] = 1u; scr[0] = 0x0101FF10u;
+        cfg[2] = 1u; scr[2] = 0x0101FF10u;
+        CHECK(rb_enc_configured_mask(cfg, scr) == 0x05u,
+              "instances 0 and 2 configured is mask 0x05 - the same pair "
+              "2B4's HPD and 2B9's AUX_EN masks name");
+
+        /* The control: the mask is not a constant. All five alike - the
+         * reset-default outcome - must read 0x1f, and all five untouched 0. */
+        for (i = 0; i < RB_ENC_COUNT; i++) {
+            cfg[i] = 1u; scr[i] = 0x0101FF10u;
+        }
+        CHECK(rb_enc_configured_mask(cfg, scr) == 0x1Fu,
+              "all five alike reads 0x1f, so the 0x05 case is not a constant");
+        for (i = 0; i < RB_ENC_COUNT; i++) { cfg[i] = 0u; scr[i] = 0u; }
+        CHECK(rb_enc_configured_mask(cfg, scr) == 0u,
+              "five untouched encoders read 0");
+
+        /* "Configured" is the CONJUNCTION, and each half alone is not it. */
+        CHECK(!rb_enc_looks_configured(0u, 0x0101FF10u),
+              "the advance bit without a lane count is not configured - a "
+              "one-lane link stores 0 there, indistinguishable from untouched");
+        CHECK(!rb_enc_looks_configured(1u, 0x0101FF00u),
+              "a lane count without the advance bit is not configured");
+        CHECK(rb_enc_looks_configured(1u, 0x0101FF10u),
+              "boot 444's instance 2 reads configured");
+
+        /* An absent registry key reads back as -1, which is 0xffffffff in
+         * the low word - and before this check that satisfied BOTH field
+         * tests and reported all five configured, which is the opposite of
+         * the truth. Rule 14 at the tool boundary. */
+        CHECK(!rb_enc_looks_configured(0xFFFFFFFFu, 0xFFFFFFFFu),
+              "an all-ones pair is an unmapped block, not a configuration");
+        CHECK(!rb_enc_looks_configured(0xFFFFFFFFu, 0x0101FF10u),
+              "all-ones in either register alone is refused");
+        CHECK(!rb_enc_looks_configured(1u, 0xFFFFFFFFu),
+              "...in either position");
+        for (i = 0; i < RB_ENC_COUNT; i++) {
+            cfg[i] = 0xFFFFFFFFu; scr[i] = 0xFFFFFFFFu;
+        }
+        CHECK(rb_enc_configured_mask(cfg, scr) == 0u,
+              "five unmapped encoders read 0, NOT 0x1f");
+        /* The control, so the refusal is not swallowing real readings: a
+         * configured instance beside unmapped ones still shows. */
+        cfg[2] = 1u; scr[2] = 0x0101FF10u;
+        CHECK(rb_enc_configured_mask(cfg, scr) == 0x04u,
+              "the all-ones refusal does not swallow a real configuration");
+
+        CHECK(rb_enc_configured_mask(NULL, scr) == 0u
+              && rb_enc_configured_mask(cfg, NULL) == 0u,
+              "a NULL survey is 0, not a read through NULL");
+    }
+
 #undef CHECK
     return bad;
 }
