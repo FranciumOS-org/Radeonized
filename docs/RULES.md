@@ -1019,11 +1019,72 @@ table and refuses to install one that does not match the running kernel;
   also 2 quanta and every later one is 1, so `spread = 2 + 6 x 1 = 8`.** It
   needed no experiment, only keeping the per-queue column instead of grepping
   `spread`.
-  **NOT a configuration claim: ONE usable B window** (the second was aborted
-  by my own tool, below), so rule 44 is unsatisfied; the FRAME RATE is
-  **unmeasured** - the interleaved `paired.sh` pass has not been run, and
-  2zc's two-sided curve is the shape to watch for; and rule 45's human
-  observation of the actual complaint has not been taken.
+  **2D2/2D3 MEASURED THE FRAME RATE AND IT IS THE OTHER HALF OF THE WIN:
+  +94 %, INTERLEAVED, WITH THE HOLD ON (boot 426).** `sudo tools/subrate.sh 3`
+  alternates sides at single-window granularity (2B7's requirement), verifies
+  the dial per run and restores `sub` 1 in a trap: **`sub` 1 = 70.98 sets/s
+  (69.80-71.96, `fed` 48.0 %) against `sub` 4 = 137.83 (127.37-143.97, `fed`
+  92.3 %)** - ranges **disjoint by 55.4 sets/s**, within-side spread 3.1 % of
+  the between-side difference, where 2B6 died on a drift the size of its
+  effect. **The best B window is 143.97 at `fed` 97.1 % with
+  `RBFBAmtrNotReady` Yes**, which is 2A4's 141.24 and 2B0's 139.24/139.60 -
+  rates this project had only ever reached by turning the 2xo protection OFF -
+  **reached with the hold ARMED.** So 2A7's closure ("the hold stays
+  default-on, 141 is not available, and ~91 with a correct desktop is the
+  shipping behaviour") priced the hold **at one retire occasion per vblank**,
+  which was the only configuration that existed when it was written.
+  **This REFUTES 2A1's conclusion** ("the ceiling is upstream of this kext and
+  no dial of ours can move it") while leaving 2A1's measurement intact: `ours`
+  really is 0.044 ms of 10.470 (0.4 %). The constraint was never our CPU time
+  inside a frame but **WHEN retirement happens relative to the vblank**, which
+  a time-tiling budget structurally cannot see - and it explains the seven dead
+  dials better than 2A1 did, since not one of them changed occasions per
+  vblank, because `-rbgpuretirevbl` pins it at 1.
+  **THE LATCH DID NOT MOVE: `mean vblanks` 1.038 vs 1.037** across a 94 % rate
+  change, so **2A8 and 2B0 are untouched** - every flip still needs the whole
+  period and there is still no middle setting for the hold. **That withdraws
+  2D2's own "the latch moved" note** (1.000 -> 1.218, bin2+ 0.0 -> 21.6 %):
+  interleaved, bin2+ reads 9.0/0.3/0.0/10.4/2.3/0.3 % with the two largest one
+  per side, so it does not order by the dial - 2B7's lesson, broken one
+  milestone after writing it into this card. `preempt` 5.3 vs 7.7 is likewise
+  **not interpreted** (2B7 saw +2 -> +121 inside a fixed configuration).
+  `fed` 48 -> 92 % is 2A0's "a transaction only on every second vblank" going
+  away, which is **consistent with** the mechanism and does not establish it.
+  Caveat in the instrument, not side-ordered so the A/B stands: `vbl/s` read
+  +1.5 % to +4.9 % above the mode's 143903 mHz in all six windows, inside
+  `paired.sh`'s 5 % guard but close to it - a +4.9 % row is one to re-take
+  rather than quote.
+  **STILL NOT A FINDING, AND THE REASON IS NOW ONLY ONE: 2D2 AND 2D3 ARE THE
+  SAME BOOT (426), so rule 44's two boots per side is unsatisfied** - and 2zg
+  exists because boot 267's internally consistent six samples did not survive
+  boot 268. 2D0 is boot 424, a different quantity on a different boot, so it
+  corroborates the mechanism and is not a second boot for this measurement.
+  **The bar is explicit: one more boot's interleaved `subrate.sh` reproducing
+  a disjoint-range win makes `rbgpuretiresub=4` a candidate for
+  `rb_default_on_tokens`, and nothing less does.** 2A4 and 2B2 each cost a
+  milestone for taking good news on one boot, and this is better news than
+  either.
+  **AND RULE 45 IS STILL THE DELIVERABLE AND STILL UNTAKEN.** Every number in
+  2D0/2D2/2D3 is a counter; the ask was "iMessage animations are so laggy".
+  `subret 4`, then use iMessage, Settings and the wifi menu - 2A6 is what
+  letting a benchmark stand for a workload cost the last time the counters
+  looked this good.
+  **2D1: NOTHING REFRESHES `RBGPUDiag`, which is why 2C5's prescription was
+  not enough.** `scheduleRefreshDiag()` drops a request inside its 250 ms
+  window **without re-arming** (2ez's fix for a lock-holding refresh storm -
+  it stays), and `performRefreshDiag()` is the **only** caller of
+  `rbgpu_retire_publish_2zd()`, whose own key writes are then dropped in turn -
+  so the chain terminates and the snapshot can be arbitrarily stale on a quiet
+  desktop. That is how `subret 4` on boot 426 reported "the set did not arrive"
+  while `vblret_subrecv` 4 / `vblret_sub` 4 / `subret` 22991 proved it had
+  landed, and the `&&` killed the `paired.sh` behind it. **It also refutes
+  2C5's reason for dismissing the 2C2 drain bug** - "a second writer, several
+  times a second from the live global" describes ONE call site, inside the
+  refresh - and that false claim sat in a kext comment on the line it was
+  about. Fixed with `refreshDiagSoon()` (claims the next slot and re-arms
+  instead of dropping), called on every dial exit path including the refusals,
+  plus a userspace re-issue kick in `subret`. **The 2C2 drain bug now has a
+  live candidate cause and is still open.** Plugin **1BDF6979**.
   **Three instrument defects, all mine, all shapes this card already
   records.** (1) **`subret` reported the mechanism DEAD while it ran at
   438/s** and aborted the run: the effect check slept 600 ms and compared two
@@ -2271,7 +2332,10 @@ re-anchored every frame, so this is one period subdivided and not 2zc's two
 beating timers. Refuses when `vblret_src` is 0 - use `tickset` there - and
 exits 6 if `vblret_subret` is not climbing - by POLLING it, never by
 sleeping and comparing two snapshot reads, which is how 2D0's run was
-aborted. **2D0 measured it: first paint 13.9 -> 3.5 ms at sub 4.**)**
+aborted. **2D0 measured it: first paint 13.9 -> 3.5 ms at sub 4, and 2D3
+measured the frame rate interleaved at +94 % WITH THE HOLD ON - 70.98 -> 137.83
+sets/s, ranges disjoint, `fed` 48 -> 92 %. One boot, so the default is still
+1.**)**
 **`{"RBFBTriple": 0|1}` via `build/out/tripleset` (2B1 - DCN's SECOND pending
 flip slot, `SURFACE_TRIPLE_BUFFER_ENABLE`, which reads 0 on every boot since
 216. OFF by default and a new hardware-write surface in the display path:
