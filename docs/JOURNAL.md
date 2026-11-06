@@ -58167,3 +58167,117 @@ backlight test is arrivable in a configuration that can show its effect:
 Eco mode, `-rbgpufbdmubbl` armed, framebuffer carrying the route, the panel
 measured as reachable by the block type 0 targets, and nothing of ours
 re-writing BL_PWM_CNTL periodically. No send has been made.
+
+================================================================================
+2DA  THE PANEL NULL IS EXPLAINED AND IT IS NOT ABOUT DMUB: EVERY COMMAND WENT
+     TO CW4, WHICH THIS PROJECT RULED OUT IN 2zs. REGION4 IS TRIPLE-CORROBORATED.
+     boot 433, Eco mode confirmed, GPINT round trip taken.
+================================================================================
+
+The sequence ran: `gpint`, `pipe`, `type 0`, `65536`. Pushes all returned OK,
+`sends ok 2`, `acks 2`, `timeouts 0`, `refused 0`, and **neither the panel nor
+the monitor moved**.
+
+THAT NULL CARRIES NO INFORMATION ABOUT WHETHER DMCUB EXECUTES A COMMAND,
+because every send went to the wrong address. The tool's own header says it:
+
+    mailbox          CW4
+    selector         4
+    ...
+    the inbox base the FIRMWARE wrote: 0x80000000
+      -> OUTSIDE region 3 (CW0..CW6 span 0x60000000..0x66ffffff).
+         This firmware wrote something else, so CW4 is NOT the mailbox -
+         and boot 275's unanswered caps query was a correct reading
+         of a wrong address.
+
+**So 2zr's explanation (2) - "the DMCUB reads a different inbox base" - is the
+live one, and 2zs had already established it.** `src/common/rb_dmub.h:238-260`
+says in writing that the mailbox is not in CW4 on this machine and that one of
+regions 4/5/6 is the aperture at 0x80000000. 2zu's boot 279 output records
+`selector 7 (REGION4)`. **Boot 433 ran with selector 4.**
+
+THREE INDEPENDENT FACTS PUT THE RING IN REGION4, and only the first was
+previously argued:
+
+ 1. The firmware's own `DMCUB_INBOX1_BASE_ADDRESS` is **0x80000000**, and
+    REGION4 reads `top 0x8000ffff` - a hardware base of 0x80000000 with a
+    64 KB window. The bases of regions 4/5/6 are fixed in hardware; only
+    OFFSET and TOP are programmable, which is why
+    `dmub_dcn31_setup_windows` programs REGION5_OFFSET/_TOP and never a base.
+ 2. **REGION4 is the ONLY one of the three that is enabled**, and its offset
+    resolves: `0xf4_1fe00000`, an MC address inside the carve-out, by the same
+    range test the CW windows use. REGION5 and REGION6 read offset 0 / top 0.
+ 3. **ITS MEMORY SCAN IS THE BEST OF ANY WINDOW: `run 37, bad 0`.** Every CW
+    window with a meaningful run count also carries implausible slots -
+    CW0 bad 98, CW1 run 13 bad 115, CW3 run 1 bad 67, CW5 run 79 bad 49,
+    CW6 bad 7 - while CW4, the window we pushed into, reads `run 0, bad 0`,
+    i.e. EMPTY. REGION4 has 37 plausible command slots and not one bad.
+    **That is byte-level evidence from memory**, and it is exactly the
+    quantity 2zr could not get: that milestone's note says "37 commands sit at
+    bring-up was an inference from the POINTER and never from memory" - the
+    number 37 now appears in a MEMORY SCAN of a different window.
+
+WHAT IS GENUINELY ESTABLISHED ON THIS BOOT, and it is not small:
+
+ - **Eco mode, verified**: NVIDIA `vendor-id` <de100000> count 0 with the AMD
+   <02100000> control reading 2, and the user's brightness works. The first
+   time any DMUB backlight attempt has been made in a configuration that
+   could show its effect.
+ - **THE GPINT ROUND TRIP REPRODUCES ON A THIRD BOOT**: sent 0x10010000, back
+   0x00010000, `acked 1`, and **SCRATCH7 MOVED 0x00000001 -> 0x04001547**.
+   The firmware is alive and answering, with no memory, no window and no
+   `mc2pa` in the path. So the microcontroller is not the problem.
+ - **The ABM writes stick**: `verdict 2 UNCHANGED - our bytes, untouched`,
+   with the SET_PIPE slot reading `42 01 00 08 00 00 01 00 ...` and the
+   SET_BACKLIGHT slot `42 02 00 20 00 00 00 00 00 00 01 00 01 01 ...` -
+   level 0x00010000 = 65536 at offset 8, version 1, panel_mask 1. Our store
+   reaches that memory and persists. Which says the WRITE works and nothing
+   about the ADDRESS, exactly as the tool prints.
+
+A CORRECTION TO A CHIP FACT, from the firmware's own mouth. This card and the
+journal say "DMCUB 4.0.15.47 running (4.0.21.71 on ROM)". On boot 433
+`GET_FW_VERSION` over GPINT - the firmware answering the question directly -
+returns **0x04001547 = 4.0.21.71** in SCRATCH7, while **SCRATCH0 reads
+0x00000002**, which is not a version at all. The "4.0.15.47 running" value came
+from a level-2 probe reading SCRATCH0 at a different time. **The authoritative
+instrument is the one that asks**, and it says 4.0.21.71. Not promoted to a
+chip fact on one boot, but the two readings disagree and the GPINT one has the
+better provenance. It also means 2BE's `has_query_dp_alt()` reasoning (which
+excludes only 4.0.0-4.0.10) holds either way.
+
+THE METHOD ERROR IS MINE AND IT IS THE THIRD IN THREE MILESTONES OF THE SAME
+FAMILY. 2D8: the physical configuration. 2D9 addendum 2: the firmware MUX
+mode. Now: **the window selector**, which the tool prints as the second line
+of its own header and then contradicts twenty lines later in the same screen.
+I wrote the command sequence from 2D9's prose instead of from the instrument's
+output, and the instrument already contained both halves of the answer. Rule
+34 says an experiment's arm must be verified before anything is interpreted -
+and `selector 4` is part of that arm as surely as the boot-arg and the UUIDs.
+**Read the instrument's own header before prescribing a sequence to run
+through it.**
+
+A REAL DEFECT, NOT JUST A METHOD ERROR: the DEFAULT selector is 4. The locate
+picks the layout-identified CW4, and 2zs's conclusion that CW4 is not the
+mailbox was written into the comments of the same file without changing that
+default. So the default target is the window this project's own source says is
+wrong, and the only thing standing between a reader and a misleading null is
+remembering to type `win 7`. The default should be the firmware-identified
+aperture - resolved from `DMCUB_INBOX1_BASE_ADDRESS` against the three region
+bases - with CW4 reachable only by an explicit `win 4`.
+
+NEXT, AND IT NEEDS NO BUILD AND NO BOOT:
+
+    dmubbl win 7      point the push at REGION4
+    dmubbl caps       QUERY_FEATURE_CAPS - READ-ONLY on the chip, and the
+                      ONLY command whose reply the firmware writes back into
+                      our own slot, so it is the byte-level discriminator
+    dmubbl pipe / type 0 / 65536     only if caps answers
+
+`caps` is the right first command at a new address for the reason 2zr named:
+an ABM command never sets `ret_status`, so an ABM null cannot tell a wrong
+address from an unimplemented command, while a caps reply with `ret_status`
+CLEARED and a payload is conclusive. If caps answers at REGION4, the inbox is
+identified byte-level for the first time in this project, 2zr's ambiguity is
+resolved, and the whole `DMUB_CMD__VBIOS` bring-up path for the external
+display becomes available. If it does not, the remaining candidates are
+0 1 3 5 6 and `win <n>` sweeps them in one session.
