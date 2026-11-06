@@ -327,7 +327,8 @@ static const char *domWhy(long c)
     case 21: return "instance outside the 6-bit payload field";
     case 22: return "no register mapping (hubpSetup refused this boot)";
     case 23: return "DOMAIN0 named by hand, or an instance past DOMAIN3";
-    case 24: return "no domain differs from DOMAIN0 - nothing to power up";
+    case 24: return "no domain differs from DOMAIN0 - nothing to power up "
+                    "(boot 437: all seven domains in one state)";
     case 25: return "the DOMAIN block read as eight ZERO words - the sample "
                     "is unreadable, so this is an INSTRUMENT failure and not "
                     "a reading of the chip";
@@ -338,11 +339,30 @@ static const char *domWhy(long c)
 /* Wait on something MONOTONIC, never on the value being interpreted: the
  * properties publish every 500 ms, so a read straight after the set can
  * return the previous verdict and look exactly like a lost write (2C5). */
+/* 2DE: the DOMAIN NUMBER each slot carries, in the kext's table order. */
+#define DOM_SLOTS 7
+static const unsigned domNums[DOM_SLOTS] = { 0, 1, 2, 3, 16, 17, 18 };
+
+static void domRow(const char *label, const uint32_t *w, int haveIt)
+{
+    int i;
+
+    printf("  %-14s", label);
+    if (!haveIt) {
+        printf("not sampled - the refusal came before the snapshot\n");
+        return;
+    }
+    for (i = 0; i < DOM_SLOTS; i++) { printf(" %08x", w[i]); }
+    printf("\n");
+}
+
 static void domVerdict(io_service_t fb, long callsBefore)
 {
-    uint32_t before[4] = {0}, after[4] = {0}, st[4] = {0}, cf[4] = {0};
+    uint32_t before[DOM_SLOTS] = {0}, after[DOM_SLOTS] = {0};
+    uint32_t st[DOM_SLOTS] = {0}, cf[DOM_SLOTS] = {0};
     long calls = callsBefore;
     int spins;
+    int i;
 
     for (spins = 0; spins < 60; spins++) {
         calls = num(fb, "RBFBDmubDomCalls");
@@ -362,22 +382,31 @@ static void domVerdict(io_service_t fb, long callsBefore)
     const long moved  = num(fb, "RBFBDmubDomMoved");
     const long ran    = num(fb, "RBFBDmubDomRan");
     const long inst   = num(fb, "RBFBDmubDomInst");
-    words(fb, "RBFBPgBefore", before, 4);
-    words(fb, "RBFBPgAfter",  after,  4);
-    words(fb, "RBFBPgStatus", st,     4);
-    words(fb, "RBFBPgConfig", cf,     4);
+    const long cand = num(fb, "RBFBPgCandidate");
+    words(fb, "RBFBPgBefore", before, DOM_SLOTS);
+    words(fb, "RBFBPgAfter",  after,  DOM_SLOTS);
+    words(fb, "RBFBPgStatus", st,     DOM_SLOTS);
+    words(fb, "RBFBPgConfig", cf,     DOM_SLOTS);
 
     printf("\nverdict (read back after the call the kext counted)\n");
     printf("  refusal        %ld  %s\n", refuse, domWhy(refuse));
     printf("  domain         %ld   ran %ld   moved 0x%lx\n", inst, ran, moved);
-    printf("  live STATUS    %08x %08x %08x %08x\n",
-           st[0], st[1], st[2], st[3]);
-    printf("  live CONFIG    %08x %08x %08x %08x\n",
-           cf[0], cf[1], cf[2], cf[3]);
-    printf("  before STATUS  %08x %08x %08x %08x\n",
-           before[0], before[1], before[2], before[3]);
-    printf("  after  STATUS  %08x %08x %08x %08x\n",
-           after[0], after[1], after[2], after[3]);
+    printf("  candidate      ");
+    if (cand < 0) {
+        printf("none - every domain is in DOMAIN0's state\n");
+    } else {
+        printf("DOMAIN%ld\n", cand);
+    }
+    printf("  %-14s", "domain");
+    for (i = 0; i < DOM_SLOTS; i++) { printf(" %8u", domNums[i]); }
+    printf("   <- DOMAIN NUMBERS, not slots\n");
+    domRow("live STATUS", st, 1);
+    domRow("live CONFIG", cf, 1);
+    /* ran 0 means the experiment refused before sampling, and four zero
+     * words there would read exactly like a chip answer (2DD's lesson about
+     * this very field). */
+    domRow("before STATUS", before, ran > 0);
+    domRow("after  STATUS", after,  ran > 0);
 
     if (refuse == 0 && moved != 0) {
         printf("  -> THE FIRMWARE EXECUTED AN INBOX COMMAND. A DOMAIN_PG_STATUS\n"
@@ -643,6 +672,9 @@ int main(int argc, char **argv)
          * selected first, nothing needs the previous command to have landed,
          * and no reboot can split it: four sessions in a row were lost to a
          * two-step handover where the first step had quietly reverted. */
+        /* A DOMAIN NUMBER, not a slot: 0..3 are the pipes and 16..18 the
+         * other blocks, which is what the command's `inst` field means
+         * (dmub_cmd.h:3150). 4..15 do not exist and the kext refuses them. */
         long inst = (argc > 2) ? atol(argv[2]) : -1;
         long gate = (argc > 3) ? atol(argv[3]) : 0;
 

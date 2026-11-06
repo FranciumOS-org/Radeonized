@@ -37,10 +37,27 @@
  * and dword 0x80 is FAR below rb_hpd_dw_max(), so this adds **no mapping, no
  * aperture growth and no write surface**. There is no setter here.
  *
- * THE STRIDE DOES NOT CONTINUE. regDOMAIN16_PG_CONFIG is 0x0089, not 0x0088,
- * so DOMAIN16/17/18 are NOT reachable by extending the loop - 0x88 is
- * something else. Only DOMAIN0..3 are exposed, which are the four pipes, and
- * those are what this question needs. Do not raise RB_PG_DOMAIN_COUNT.
+ * THE STRIDE DOES NOT CONTINUE, which is why there is a TABLE and not a loop.
+ * regDOMAIN16_PG_CONFIG is 0x0089, not 0x0088 - 0x88 is something else - so
+ * DOMAIN16/17/18 can only be reached by writing their offsets down from the
+ * header, one row each. 2DE does exactly that and nothing else:
+ *
+ *   DOMAIN16 0x0089/0x008a, DOMAIN17 0x008b/0x008c, DOMAIN18 0x008d/0x008e
+ *
+ * 2DC exposed DOMAIN0..3 only and said "those are what this question needs".
+ * Boot 437 measured that false: all four read **0x10000000, identically**, so
+ * every pipe is in the same state as the one scanning the panel and a
+ * power-UP has nothing to act on - refusal 24, correctly. DOMAIN16..18 are
+ * separate blocks the firmware has no reason to have brought up, so they are
+ * where a gated domain can actually be, and finding one costs a read rather
+ * than a power-DOWN of a working pipe.
+ *
+ * An INSTANCE here is the DOMAIN NUMBER, which is what the command carries:
+ * dmub_cmd.h:3150 says `inst : 6` is the "DOMAIN instance to control", and 6
+ * bits reach 18 comfortably. A SLOT is this file's array index. They differ
+ * past slot 3 and conflating them sends a command to the wrong block, so the
+ * conversion is explicit in both directions and no caller may do arithmetic
+ * on either.
  *
  * THE POLARITY OF DOMAIN_PGFSM_PWR_STATUS IS DELIBERATELY NOT WRITTEN DOWN.
  * Linux's wait on it lives in dcn20_hwseq.c, which is NOT vendored, so
@@ -63,15 +80,20 @@
 
 #include <stdint.h>
 
-/* dcn_3_1_2_offset.h, BASE_IDX 2, dword offsets. */
+/* dcn_3_1_2_offset.h, BASE_IDX 2, dword offsets. Kept as named constants
+ * because the hosttest pins the first row against them. */
 #define RB_PG_DW_DOMAIN0_PG_CONFIG   0x0080u
 #define RB_PG_DW_DOMAIN0_PG_STATUS   0x0081u
 #define RB_PG_DOMAIN_STRIDE          0x0002u
 
-/* DOMAIN0..3 only - see the stride note above. */
-#define RB_PG_DOMAIN_COUNT           4u
+/* Every domain this file reads: DOMAIN0..3 (the pipes) then DOMAIN16..18.
+ * A SLOT index, 0..6. Not a domain number past slot 3. */
+#define RB_PG_DOMAIN_COUNT           7u
+#define RB_PG_PIPE_SLOTS             4u
 
-/* The pipe whose domain is known powered, because it is scanning the panel. */
+/* The pipe whose domain is known powered, because it is scanning the panel.
+ * Slot 0 and DOMAIN 0 - the one place the two numbers coincide by luck, so
+ * it is used only as a SLOT. */
 #define RB_PG_DOMAIN_REFERENCE       0u
 
 /* dcn_3_1_2_sh_mask.h */
@@ -82,14 +104,41 @@
 #define RB_PG_CONFIG_FORCEON_MASK    0x00000001u
 #define RB_PG_CONFIG_GATE_MASK       0x00000100u
 
-static inline uint32_t rb_pg_config_dw(uint32_t inst)
+/* The table. Every offset written down from dcn_3_1_2_offset.h; the first
+ * four happen to be an arithmetic run and are still listed, because a reader
+ * who sees a formula here will extend it past DOMAIN3 and land on 0x0088. */
+#define RB_PG_SLOT_BAD               0xffffffffu
+
+static inline uint32_t rb_pg_slot_inst(uint32_t slot)
 {
-    return RB_PG_DW_DOMAIN0_PG_CONFIG + inst * RB_PG_DOMAIN_STRIDE;
+    static const uint32_t inst[RB_PG_DOMAIN_COUNT] =
+        { 0u, 1u, 2u, 3u, 16u, 17u, 18u };
+    return slot < RB_PG_DOMAIN_COUNT ? inst[slot] : RB_PG_SLOT_BAD;
 }
 
-static inline uint32_t rb_pg_status_dw(uint32_t inst)
+/* The inverse, and the only way a DOMAIN NUMBER becomes an index. */
+static inline int rb_pg_slot_for_inst(uint32_t domainInst)
 {
-    return RB_PG_DW_DOMAIN0_PG_STATUS + inst * RB_PG_DOMAIN_STRIDE;
+    uint32_t slot;
+
+    for (slot = 0; slot < RB_PG_DOMAIN_COUNT; slot++) {
+        if (rb_pg_slot_inst(slot) == domainInst) { return (int)slot; }
+    }
+    return -1;
+}
+
+static inline uint32_t rb_pg_config_dw(uint32_t slot)
+{
+    static const uint32_t dw[RB_PG_DOMAIN_COUNT] =
+        { 0x0080u, 0x0082u, 0x0084u, 0x0086u, 0x0089u, 0x008bu, 0x008du };
+    return slot < RB_PG_DOMAIN_COUNT ? dw[slot] : RB_PG_SLOT_BAD;
+}
+
+static inline uint32_t rb_pg_status_dw(uint32_t slot)
+{
+    static const uint32_t dw[RB_PG_DOMAIN_COUNT] =
+        { 0x0081u, 0x0083u, 0x0085u, 0x0087u, 0x008au, 0x008cu, 0x008eu };
+    return slot < RB_PG_DOMAIN_COUNT ? dw[slot] : RB_PG_SLOT_BAD;
 }
 
 /* The highest dword this file reads, so an aperture bound can be checked
@@ -158,9 +207,11 @@ static inline uint32_t rb_pg_moved_mask(const uint32_t *before,
  * request is a no-op whose null would mean nothing (rule 39: a measurement
  * taken where the effect cannot appear does not locate anything).
  *
- * Returns the instance, or -1 when every domain already matches the
- * reference - in which case this test is NOT AVAILABLE on this boot and must
- * say so rather than picking one anyway. */
+ * Returns a SLOT, or -1 when every domain already matches the reference - in
+ * which case this test is NOT AVAILABLE on this boot and must say so rather
+ * than picking one anyway. The caller converts the slot to the DOMAIN NUMBER
+ * with rb_pg_slot_inst(); boot 437 is why that matters, since the first
+ * candidate that can exist on this chip is slot 4 = DOMAIN16. */
 static inline int rb_pg_candidate(const uint32_t *status)
 {
     uint32_t i;
@@ -189,10 +240,16 @@ static inline int rb_pg_candidate(const uint32_t *status)
 #define RB_PG_SEL_OUT_OF_RANGE 1u
 #define RB_PG_SEL_IS_REFERENCE 2u
 
-static inline uint32_t rb_pg_sel_refuse(uint32_t inst)
+/* 2DE: the argument is a DOMAIN NUMBER, not a slot, because that is what a
+ * human types and what the command carries. A number with no row is refused
+ * rather than clamped - 4..15 are not domains on this chip and `inst` 4 would
+ * otherwise read DOMAIN16's words while the command named something else. */
+static inline uint32_t rb_pg_sel_refuse(uint32_t domainInst)
 {
-    if (inst >= RB_PG_DOMAIN_COUNT) { return RB_PG_SEL_OUT_OF_RANGE; }
-    if (inst == RB_PG_DOMAIN_REFERENCE) { return RB_PG_SEL_IS_REFERENCE; }
+    if (rb_pg_slot_for_inst(domainInst) < 0) { return RB_PG_SEL_OUT_OF_RANGE; }
+    if (domainInst == rb_pg_slot_inst(RB_PG_DOMAIN_REFERENCE)) {
+        return RB_PG_SEL_IS_REFERENCE;
+    }
     return RB_PG_SEL_OK;
 }
 

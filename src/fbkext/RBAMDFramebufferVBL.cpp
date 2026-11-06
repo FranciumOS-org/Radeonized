@@ -1203,14 +1203,16 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
                         "chip answer");
                     return kIOReturnNotPermitted;
                 }
-                const int cand = rb_pg_candidate(st);
+                const int cand = rb_pg_candidate(st);   /* a SLOT */
                 if (cand < 0) {
                     dmubDomRefuse = 24u;
                     LOG("RBFBDmubDomain auto -> refuse 24, no domain differs "
                         "from DOMAIN0 so a power-up cannot show anything");
                     return kIOReturnNotPermitted;
                 }
-                inst = (uint32_t)cand;
+                /* 2DE: slot -> DOMAIN NUMBER. The experiment and the
+                 * command both take the number, never the index. */
+                inst = rb_pg_slot_inst((uint32_t)cand);
             } else {
                 inst = (uint32_t)want;
             }

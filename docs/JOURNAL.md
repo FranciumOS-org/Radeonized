@@ -58738,3 +58738,103 @@ discards them, and the bring-up is register writes with no atom table; refusal
 **24** means no domain was gated on this boot, which is a third outcome and
 not a null. Refusal **25** is now a fourth, and it means the instrument is
 broken rather than anything about the chip.
+
+
+## 2DE - the fix worked, and every pipe domain is already in the panel's state
+
+Boot 437, the 2DD framebuffer (EB0DEF94) installed. `pgSample()` now reads
+the right dwords and the block answers:
+
+```
+live STATUS    10000000 10000000 10000000 10000000
+live CONFIG    00000000 00000000 00000000 00000000
+refusal        24   no domain differs from DOMAIN0
+before/after   (not sampled - the refusal came first)
+```
+
+**The instrument is fixed and the experiment is still unavailable, this time
+for a reason about the chip.** `0x10000000` is `DOMAIN_DESIRED_PWR_STATE` set
+with `DOMAIN_PGFSM_PWR_STATUS` 00, `CONFIG` 0 - no FORCEON, no GATE - and all
+four read it **identically**. Polarity is still deliberately unrecorded and
+still not needed: DOMAIN0 is the pipe scanning the live panel, so whatever
+that word means, **every pipe domain is in the same state as the one driving a
+display.** A power-UP has nothing to act on, refusal 24 is a true statement
+about the hardware, and 2DC's guard did exactly its job.
+
+That also answers something nobody asked: **the external display's pipe does
+not need powering up.** OTG1-3 read 0x300 (2B9, cable in) while their domains
+read powered, so "power the pipe" comes off the output-side list.
+
+### Where a gated domain can be, and the cheap half
+
+2DC wrote: "**Only DOMAIN0..3 are exposed, which are the four pipes, and those
+are what this question needs. Do not raise RB_PG_DOMAIN_COUNT.**" Boot 437
+measures that false. The header has three more rows:
+
+```
+regDOMAIN16_PG_CONFIG 0x0089 / _PG_STATUS 0x008a
+regDOMAIN17_          0x008b              0x008c
+regDOMAIN18_          0x008d              0x008e
+```
+
+Separate blocks, not pipes, and nothing has established the firmware brought
+them up. They are where a gated domain can actually be - and reading them
+costs a read, against the alternative, which is a power-**DOWN** of a working
+pipe to manufacture a difference. 2DC named `power_gate = 1` as the one
+direction that can take something away and the tool refuses it; this avoids
+having to revisit that.
+
+**So the stride note becomes a TABLE.** Seven rows, every offset written down
+from `dcn_3_1_2_offset.h`, including the four that happen to be an arithmetic
+run - because a reader who sees a formula extends it past DOMAIN3 and lands on
+**0x0088**, which is a different register. The hosttest asserts that
+explicitly: `rb_pg_config_dw(4) != 0x0080 + 4*2`, that the value it would have
+landed on **is** 0x0088, and that the table gives 0x0089. Breaking the table
+back into the stride fails it.
+
+**SLOT versus DOMAIN NUMBER is the new trap and it is handled once.** The
+command's field is the domain number - `dmub_cmd.h:3150`, "`inst : 6`, DOMAIN
+instance to control", read rather than assumed - and 6 bits reach 18
+comfortably. This file's array index is a slot. They coincide through slot 3
+and part company after, so **slot 4 is DOMAIN16**: an unconverted candidate
+would have sent `inst 4`, a domain that does not exist on this chip, and
+judged it by DOMAIN16's status word. `rb_pg_slot_inst()` and
+`rb_pg_slot_for_inst()` are the only conversions, `rb_pg_sel_refuse()` now
+takes the NUMBER (so DOMAIN4 is refused rather than silently read as slot 4),
+`rb_pg_candidate()` returns a slot and says so in its comment, and
+`dmubDomainExperiment()` converts once at the top. `RBFBPgCandidate` publishes
+the NUMBER, because that is what a human types into `dmubbl dom <n>`.
+
+### The reading to take, written down first
+
+`dmubbl dom` prints all seven words with the domain numbers above them. Three
+outcomes, and the third is new:
+
+- **A DOMAIN16..18 word differs from DOMAIN0's** - the candidate is that
+  domain, the power-up has something to act on, and `RBFBDmubDomMoved`
+  non-zero means this firmware EXECUTES inbox commands and the external
+  display's whole VBIOS bring-up path is available. 0 with refusal 0 means it
+  accepts and discards them.
+- **All seven identical** - refusal 24 again, and then no domain on this chip
+  is gated. The power-up direction is exhausted and the only remaining test is
+  a power-DOWN of an unused pipe (DOMAIN1-3, whose OTGs read 0x300),
+  recoverable by a reboot at worst. **That is the user's decision and the tool
+  still refuses to take it.**
+- **Refusal 25** - the block read as zeros again, i.e. an instrument fault.
+
+Hosttested on boot 437's own sample: seven words of 0x10000000 must give
+candidate -1, and one gated DOMAIN16 must give slot 4 -> number 16 -> an inst
+the hand-named selector also accepts, so the auto path cannot choose something
+the manual path would refuse. A nearer gated pipe still wins, and the encoder
+packs 16 as 0x10, inside the 6-bit field and clear of the gate bit at 0x40.
+Two break-it checks: continuing the stride fails six assertions, and clamping
+a domain number into a slot fails four.
+
+Framebuffer **9C785FA7-43DD-3249-8E90-87BE8D5A3521** (was EB0DEF94), zero
+warnings, `hosttest: all passed`, plugin untouched. The aperture bound is
+unchanged - 0x34c0 + 0x8e is far under the HPD block's 0x34c0 + 0x1f36, which
+`hubpSetup()` already requires.
+
+**STILL NO BOOT HAS SENT A DOMAIN_CONTROL COMMAND.** Two boots have now
+refused before the send, both correctly, for two different reasons - one a
+defect of mine and one a fact about the chip.

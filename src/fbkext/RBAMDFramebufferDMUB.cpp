@@ -583,6 +583,14 @@ uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
         return 23u;
     }
 
+    /* 2DE: `inst` is the DOMAIN NUMBER the command carries; the status words
+     * are indexed by SLOT, and the two part company past DOMAIN3. Converting
+     * here, once, is what stops a DOMAIN16 command being judged by DOMAIN0's
+     * word. */
+    const int slotI = rb_pg_slot_for_inst(inst);
+    if (slotI < 0) { dmubDomRefuse = 23u; dmubDomInst = inst; return 23u; }
+    const uint32_t slot = (uint32_t)slotI;
+
     pgSample(pgBefore, pgConfig);
 
     /* 2DD: eight zero words is an unreadable block, not a chip answer. This
@@ -599,7 +607,7 @@ uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
     /* A power-UP asked of a domain already in the reference state cannot
      * show anything, and its null would be unreadable (rule 39). Refuse
      * rather than measure where the effect cannot appear. */
-    if (!gate && rb_pg_like_reference(pgBefore[inst],
+    if (!gate && rb_pg_like_reference(pgBefore[slot],
                                       pgBefore[RB_PG_DOMAIN_REFERENCE])) {
         dmubDomRefuse = 24u;
         dmubDomInst = inst;
@@ -935,8 +943,17 @@ void RBAMDFramebuffer::dmubPublish(void)
         if (bf) { setProperty("RBFBPgBefore", bf); bf->release(); }
         OSData *af = OSData::withBytes(pgAfter, sizeof(pgAfter));
         if (af) { setProperty("RBFBPgAfter", af); af->release(); }
-        setProperty("RBFBPgCandidate",
-                    (uint64_t)(int64_t)rb_pg_candidate(pgStatus), 32);
+        /* 2DE: published as the DOMAIN NUMBER, which is what `dmubbl dom
+         * <n>` takes and what the command carries - a slot index here would
+         * read 4 and name DOMAIN16, and a reader would type 4. -1 is "no
+         * domain differs", still the honest third outcome. */
+        {
+            const int cand = rb_pg_candidate(pgStatus);
+            setProperty("RBFBPgCandidate",
+                        (uint64_t)(int64_t)(cand < 0 ? -1 :
+                            (int)rb_pg_slot_inst((uint32_t)cand)), 32);
+            setProperty("RBFBPgSlots", (uint64_t)RB_PG_DOMAIN_COUNT, 32);
+        }
     }
     setProperty("RBFBDmubScanBytes", (uint64_t)dmubScanBytes, 32);
     /* The writes. */
