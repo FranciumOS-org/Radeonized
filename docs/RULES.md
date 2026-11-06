@@ -1487,6 +1487,30 @@ table and refuses to install one that does not match the running kernel;
   says our retire tick polled 125 thousand times while that stamp never
   advanced**, which retires the "nothing polls it" family for the wedge as
   2xe did for the display. Not the display blocker (2x0, rule 39).
+- **THE TYPE-C SUBSYSTEM ON THIS CHASSIS CAN DIE, AND ONLY A 30-SECOND
+  POWER-KEY HOLD CLEARS IT (user, 2026-11-05; 2D8).** "sometimes my laptops
+  USB C stops working completley across reboots and powerwash... i have to
+  hold my power key for 30 sec for the entire motherboard to reset to
+  firmware then it comes back". It survives a reboot **and** a reinstall, it
+  is invisible to every register this kext can read, and no software can clear
+  it - it is an EC / firmware power-rail state below the OS and below the PCI
+  bus. **Three milestones (2D6, 2D7, and an unwritten "it was the other port")
+  were spent explaining a null whose cause was this**, and every instrument
+  reading in all three was CORRECT: HPD1-4 status 0, AUX1-4 `AUX_EN` clear at
+  `dphy` 0x00004500, PHY mask 0x01, OTG1-3 0x300, `dpcdread` refusal 3. The
+  chip saw nothing because the chassis presented nothing.
+  **So rule 47's "configuration a reading comes from" has a SECOND firmware
+  term on this machine**: the MUX mode (2zw) *and* whether Type-C is alive.
+  **The cheap proxy is `ioreg -p IOUSB`** - a port that enumerates nothing on
+  a data-carrying cable says the subsystem is down, which no DCN register can.
+  **If HPD2 reads 0 on a cable the user says is in, the first question is not
+  "what changed in our code" and not "which port" - it is "has the machine had
+  a 30-second power-key hold since it last worked?"** After the hold the whole
+  chain came back on the first read, byte-for-byte: `sink mask` 0x05 with
+  `at setup` 0x05 (2B4), AUX2 `0x01240101` / `dphy 0x00016400` bound to HPD2
+  (2B9), the DPCD reply **byte-identical to 2BB**, and the full EDID (2BD).
+  A byte-identical DPCD across a dead-and-revived subsystem is the strongest
+  available statement that nothing in our code or the OS moved.
 - **A USB4 TYPE-C PORT ON THIS CHASSIS CARRIES DP ALT MODE FROM THE iGPU
   (user, 2026-11-02) - which the HDMI-A bullet below does NOT cover.** It is a
   different connector from the HDMI-A jack, so "HDMI needs hybrid mode" is a
@@ -2281,6 +2305,12 @@ The numbering is cited all over the journal — **keep the numbers**.
     with switchable graphics the answer changes without a line of code
     changing, so **the firmware setup mode is part of the configuration a
     reading comes from** - rule 39 one level out from software. [2zw]
+    **And "firmware" is more than the setup menu (2D8):** this chassis' Type-C
+    subsystem can enter a dead state that survives a reboot and a reinstall
+    and is cleared only by a 30-second power-key hold, which cost three
+    milestones of software explanations for a correct null. A reading's
+    configuration includes the **power state of the port**, not just the mode
+    the firmware was set to. [2zw, 2D8]
 
 **The recurring error, stated once.** Thirty-odd recorded instances of reading
 a value without first establishing what makes it meaningful. The practice that
