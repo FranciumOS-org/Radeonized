@@ -1181,6 +1181,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
     {
         OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDmubDomain"));
         if (w) {
+            dmubDomCalls++;   /* 2DD: monotonic, before any refusal path */
             const int32_t want = (int32_t)w->unsigned32BitValue();
             OSNumber *g = OSDynamicCast(OSNumber,
                                         dict->getObject("RBFBDmubDomainGate"));
@@ -1190,6 +1191,18 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             if (want < 0) {
                 uint32_t st[RB_PG_DOMAIN_COUNT], cf[RB_PG_DOMAIN_COUNT];
                 pgSample(st, cf);
+                /* 2DD: an unreadable block makes rb_pg_candidate() answer -1
+                 * for the wrong reason, so it is refused before it is asked.
+                 * Distinct code, because "the instrument is reading the wrong
+                 * dwords" and "no domain is gated" are different answers and
+                 * boot 436 could not tell them apart (rule 14). */
+                if (!rb_pg_sample_readable(st, cf)) {
+                    dmubDomRefuse = 25u;
+                    LOG("RBFBDmubDomain auto -> refuse 25, the DOMAIN block "
+                        "read as eight zero words - unreadable sample, not a "
+                        "chip answer");
+                    return kIOReturnNotPermitted;
+                }
                 const int cand = rb_pg_candidate(st);
                 if (cand < 0) {
                     dmubDomRefuse = 24u;

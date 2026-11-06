@@ -238,6 +238,52 @@ int pg_tests(void)
               "our own DOMAIN_CONTROL reads as a plausible command header");
     }
 
+    /* 2DD: the sample-readable guard, which exists because boot 436 read
+     * eight zero words off a wrong address and the reference check turned
+     * them into refusal 24 - "no domain differs from DOMAIN0", true of the
+     * words and false of the chip. */
+    {
+        uint32_t st[RB_PG_DOMAIN_COUNT];
+        uint32_t cf[RB_PG_DOMAIN_COUNT];
+        uint32_t i;
+
+        for (i = 0; i < RB_PG_DOMAIN_COUNT; i++) { st[i] = 0u; cf[i] = 0u; }
+        CHECK(rb_pg_sample_readable(st, cf) == 0,
+              "all eight words zero is an UNREADABLE sample - boot 436's "
+              "exact reading from pgSample() without the DMU segment base");
+
+        /* One bit anywhere is enough: the guard's job is to catch a block
+         * that is not being read at all, not to judge any field. */
+        st[RB_PG_DOMAIN_COUNT - 1] = 0x00000001u;
+        CHECK(rb_pg_sample_readable(st, cf) == 1,
+              "a single set bit in the LAST status word makes the sample "
+              "readable - the loop covers every domain, not just DOMAIN0");
+        st[RB_PG_DOMAIN_COUNT - 1] = 0u;
+        cf[RB_PG_DOMAIN_COUNT - 1] = 0x00000001u;
+        CHECK(rb_pg_sample_readable(st, cf) == 1,
+              "CONFIG alone also makes it readable - both arrays are read");
+        cf[RB_PG_DOMAIN_COUNT - 1] = 0u;
+
+        /* The control: a sample this project has actually seen from a live
+         * block must pass. DOMAIN0 scans the panel, so a powered reference
+         * with one gated neighbour is the shape the experiment wants, and
+         * the guard must not refuse it. */
+        st[0] = 0x40000000u;   /* reference, PGFSM 01 */
+        st[1] = 0x80000000u;   /* unlike it, PGFSM 10 */
+        st[2] = 0x40000000u;
+        st[3] = 0x40000000u;
+        CHECK(rb_pg_sample_readable(st, cf) == 1,
+              "a plausible live sample passes - the guard is not a constant 0");
+        CHECK(rb_pg_candidate(st) == 1,
+              "and the candidate is still DOMAIN1, so the guard does not "
+              "disturb the verdict it protects");
+
+        CHECK(rb_pg_sample_readable(0, cf) == 0,
+              "a NULL array is unreadable rather than a dereference");
+        CHECK(rb_pg_sample_readable(st, 0) == 0,
+              "either NULL refuses");
+    }
+
 #undef CHECK
     return bad;
 }

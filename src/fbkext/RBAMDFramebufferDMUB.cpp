@@ -87,6 +87,7 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubDomGate = 0;
     dmubDomMoved = 0;
     dmubDomRan = 0;
+    dmubDomCalls = 0;
     pgSamples = 0;
     for (unsigned i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
         pgStatus[i] = 0; pgConfig[i] = 0; pgBefore[i] = 0; pgAfter[i] = 0;
@@ -521,9 +522,17 @@ void RBAMDFramebuffer::pgSample(uint32_t *status, uint32_t *config)
 {
     if (!hubpRegs || !status || !config) { return; }
 
+    /* 2DD: kRbDmuSeg2Dmub is the whole fix. The DOMAIN offsets are
+     * BASE_IDX 2, exactly like the HUBP, OTG, HPD and AUX blocks this kext
+     * already reads, and every one of those indexes as `kRbDmuSeg2* + dword`.
+     * 2DC omitted it here and read dwords 0x80..0x87 of the mapping - a
+     * readable address inside BAR5 that is not this block, so it answered
+     * eight zeros with no error and the auto-candidate guard refused on them.
+     * Never index this array with a dword offset read off a vendored header
+     * without the segment base. */
     for (uint32_t i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
-        status[i] = hubpRegs[rb_pg_status_dw(i)];
-        config[i] = hubpRegs[rb_pg_config_dw(i)];
+        status[i] = hubpRegs[kRbDmuSeg2Dmub + rb_pg_status_dw(i)];
+        config[i] = hubpRegs[kRbDmuSeg2Dmub + rb_pg_config_dw(i)];
     }
     pgSamples++;
 }
@@ -575,6 +584,17 @@ uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
     }
 
     pgSample(pgBefore, pgConfig);
+
+    /* 2DD: eight zero words is an unreadable block, not a chip answer. This
+     * refusal goes BEFORE the reference check, because otherwise an
+     * unreadable sample arrives at it as "every domain matches DOMAIN0" and
+     * comes back as 24 - a true statement about the words and a false one
+     * about the chip, which is what boot 436 reported. */
+    if (!rb_pg_sample_readable(pgBefore, pgConfig)) {
+        dmubDomRefuse = 25u;
+        dmubDomInst = inst;
+        return 25u;
+    }
 
     /* A power-UP asked of a domain already in the reference state cannot
      * show anything, and its null would be unreadable (rule 39). Refuse
@@ -892,6 +912,7 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubDomArmed", dmubDomArmed);
     setProperty("RBFBDmubDomSends", (uint64_t)dmubDomSends, 32);
     setProperty("RBFBDmubDomRan", (uint64_t)dmubDomRan, 32);
+    setProperty("RBFBDmubDomCalls", (uint64_t)dmubDomCalls, 32);
     setProperty("RBFBDmubDomRefuse", (uint64_t)dmubDomRefuse, 32);
     setProperty("RBFBDmubDomInst", (uint64_t)dmubDomInst, 32);
     setProperty("RBFBDmubDomGate", (uint64_t)dmubDomGate, 32);
