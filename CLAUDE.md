@@ -1874,8 +1874,32 @@ table and refuses to install one that does not match the running kernel;
   unambiguous in the useful direction: that word is not ours to write.
   Hosttested with both break-it checks fired (the `HPD_INST + 1` chain, which
   `dmub_cmd.h`'s "=2: HPD2" invites getting wrong, fails four assertions; the
-  verdict losing its transition term fails one). Framebuffer **433B39D3**,
-  plugin unchanged. **NOTHING HAS BEEN SENT - no boot has run `dmubbl dig`.**
+  verdict losing its transition term fails one). Plugin unchanged.
+  **2E3: THE GATE REFUSED ITS OWN SEND, and the cause is RULE 31 FOR THE
+  THIRD TIME.** Boot 437 printed "selector reads 4 after asking for 7 -
+  refusing to send": `RBFBDmubWinSel` is published only from
+  `dmubPublish()` inside `publishVBLState()`, which the `RBFBPubMs` throttle
+  holds to one publish in **500 ms**, so the tool set the property and read
+  back the previous snapshot - the boot's startup 4. **2C5's four false
+  MISMATCHes, 2D1's aborted `subret` run, now this** - and it was written
+  into 2E2's own entry as the thing to avoid, then committed fifteen lines
+  away in the PRECONDITION rather than the dial. **Knowing a rule and
+  applying it to the dial you are thinking about does not apply it to the
+  check you wrote to protect it.**
+  Fixed in the kext and not per dial: **`dmubPublish()` now runs on the way
+  out of EVERY DMUB `setProperties` handler**, refusal paths included, so a
+  dial's own state is readable the instant its call returns and the next tool
+  need not know about the throttle. Safe where the frame path is not: 2zz
+  measured `publishVBLState()` at **227/s** from `setInterruptState` and the
+  throttle is what keeps that off the frame path, while these handlers run
+  from `setProperties` at HUMAN frequency - rule 16's cost argument does not
+  reach them, and the 500 ms default stands. `RBFBDmubSelSets` is the
+  monotonic counter and `dmubbl dig` polls it past its pre-set value for 6 s.
+  **Not claimed: that boot 437's select landed** - consistent with a stale
+  snapshot, which is the only candidate the code offers, and nothing was
+  published to say so, which is the defect. Framebuffer **6CB9945A** (433B39D3
+  was never installed, so 2E2 and 2E3 install as ONE binary).
+  **NOTHING HAS BEEN SENT - no boot has run `dmubbl dig`.**
   **2BE SPLITS THE OUTPUT SIDE, AS A SOURCE READ WITH NOTHING MEASURED.**
   Asked whether DMCUB can train the link for us, the answer is no *and* the
   better half is yes. **Training is ours**: `link_dp_training.c` and

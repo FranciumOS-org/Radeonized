@@ -860,6 +860,7 @@ int main(int argc, char **argv)
          * side is a single call). */
         {
             const long selBefore = num(fb, "RBFBDmubWinSel");
+            const long setsBefore = num(fb, "RBFBDmubSelSets");
             if (selBefore != 7) {
                 printf("\nselector is %ld; REGION4 is the identified mailbox "
                        "(2DA), selecting 7\nfirst so the command does not go "
@@ -875,8 +876,31 @@ int main(int argc, char **argv)
                 }
                 /* Read it BACK rather than trusting the return code: a
                  * kern_return_t says the setter ran, not that the state took
-                 * (rule 13, and 2A3 is what trusting it costs). */
-                const long selNow = num(fb, "RBFBDmubWinSel");
+                 * (rule 13, and 2A3 is what trusting it costs).
+                 *
+                 * 2E3: but POLL, and poll the monotonic counter first. Every
+                 * DMUB key is published on a 500 ms throttle, so the first
+                 * version of this read the stale 4 back immediately after a
+                 * successful set and refused its own send - rule 31, third
+                 * instance. RBFBDmubSelSets counts accepted selects and only
+                 * ever rises, so waiting for it past its pre-set value
+                 * separates "not published yet" from "the write was lost",
+                 * which the dialled value alone cannot. */
+                long selNow = -1;
+                for (int i = 0; i < 60; i++) {
+                    if (num(fb, "RBFBDmubSelSets") > setsBefore) {
+                        selNow = num(fb, "RBFBDmubWinSel");
+                        break;
+                    }
+                    usleep(100000);
+                }
+                if (selNow < 0) {
+                    printf("RBFBDmubSelSets never moved past %ld in 6 s - the "
+                           "select did not\narrive (or this framebuffer "
+                           "predates 2E3). Refusing to send.\n", setsBefore);
+                    IOObjectRelease(fb);
+                    return 2;
+                }
                 if (selNow != 7) {
                     printf("selector reads %ld after asking for 7 - refusing "
                            "to send.\n", selNow);

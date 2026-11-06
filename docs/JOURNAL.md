@@ -59429,3 +59429,78 @@ Framebuffer **433B39D3** (was 9C785FA7), `dmubbl` rebuilt. Opt-in
 **NOTHING HAS BEEN SENT.** No boot has run `dmubbl dig`, and the question
 2DB-2DF could not close - does this firmware execute a `DMUB_CMD__VBIOS`
 command - is still open with no reading either way.
+
+---
+
+## 2E3 — the dig send refused itself, and the cause is rule 31 for the third time
+
+Boot 437, `dmubbl dig 2`, with 2E2's tool (userspace, so it ran against the
+installed pre-2E2 framebuffer, whose `RBFBDmubSel` handler is unchanged since
+2DA):
+
+    selector is 4; REGION4 is the identified mailbox (2DA), selecting 7
+    first so the command does not go into CW4 - which rb_dmub.h itself
+    rules out.
+    selector reads 4 after asking for 7 - refusing to send.
+
+**The select was almost certainly accepted and the read-back was stale.**
+`RBFBDmubWinSel` is published from `dmubPublish()`, which is called only from
+`publishVBLState()`, which the `RBFBPubMs` throttle holds to one publish in
+**500 ms**. The tool set the property and read the key back in the same
+breath, so it read the previous snapshot - and the previous snapshot is the
+boot's own startup value, 4.
+
+**Rule 31, and the THIRD recorded instance of this exact shape:**
+ - **2C5**: four of seven `tickset` calls reported MISMATCH while `tick_sets`
+   read 7 for 7 invocations.
+ - **2D1**: `subret` reported the mechanism DEAD while it ran at 438/s, and
+   the `&&` killed the `paired.sh` behind it.
+ - **this**: the gate refused its own send.
+
+It was written into 2E2's own journal entry as the thing to avoid -
+"`digCalls` is bumped FIRST ... so the tool can poll something monotonic
+instead of sleeping and comparing two reads of the value it wants to
+interpret" - and then committed fifteen lines away in the selector check of
+the same function. **Knowing a rule and applying it to the dial you are
+thinking about does not apply it to the PRECONDITION you wrote to protect
+it.** 2D1 recorded the same split (the fix landed in that file's DIAL check
+and the EFFECT check reintroduced it); this is the same error one level out.
+
+### Fixed structurally, in the kext, not per dial
+
+`dmubPublish()` is now called on the way out of **every** DMUB
+`setProperties` handler - BlType, Bl, Sel, Gpint, Caps, Pipe, Domain, Dig -
+including the refusal paths. So a DMUB dial's own state is readable the
+instant its call returns, and the next tool that wants a read-back does not
+have to know about the throttle.
+
+**Why this is safe where the throttle is not negotiable in the frame path:**
+2zk/2zz measured `publishVBLState()` running **227 times a second** from
+`setInterruptState`, ~110 `setProperty` calls each, and the throttle is what
+keeps that off the frame path. These handlers run from `setProperties` on a
+userspace thread **at human frequency** - a few calls per experiment - so
+rule 16's cost argument does not reach them. The throttle's default stays
+500 ms.
+
+`dmubSelSets` is the monotonic counter (`RBFBDmubSelSets`), bumped on every
+accepted select, and `dmubbl dig` polls it past its pre-set value for up to
+6 s instead of reading the dialled value once. That is the distinction rule
+31's other half asks for: a counter separates "not published yet" from "the
+write was lost", and the value cannot.
+
+**One thing the kern_return_t does say here, read rather than assumed
+(rule 13):** the handler returns `kIOReturnBadArgument` on a bad index and
+`kIOReturnNotPermitted` exactly when `dmubSelect()` returns false, so SUCCESS
+means `dmubWinSel` is 7 in kernel memory. The poll is corroboration of a
+fact the return code already carries - which is why the gate stays a gate
+rather than becoming advisory.
+
+**Not claimed: that the selector set on boot 437 landed.** The reading is
+consistent with a stale snapshot and that is the only candidate the code
+offers, but nothing was published to say so at the time, which is the whole
+defect. The next boot settles it in one line: `RBFBDmubSelSets` moving at all
+means the handler ran.
+
+Framebuffer **6CB9945A** (was 433B39D3 - never installed, so 2E2 and 2E3
+install as one binary). Hosttest unchanged and passing; `dmubbl` rebuilt.
+**Still nothing sent.**

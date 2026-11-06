@@ -1115,6 +1115,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             dmubBlTypeSets++;
             LOG("RBFBDmubBlType -> %u, aux_inst %u (no command sent)",
                 dmubBlType, dmubBlAuxInst);
+            dmubPublish();                       /* 2E3 */
             return kIOReturnSuccess;
         }
     }
@@ -1130,6 +1131,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             const uint32_t rc = dmubSendBacklight((uint32_t)want);
             LOG("RBFBDmubBl %ld -> refuse %u, wptr %#x, acks %llu",
                 want, rc, dmubSendWptr, dmubAcks);
+            dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
@@ -1139,7 +1141,26 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             const long n = (long)w->unsigned32BitValue();
             if (!rb_dmub_winsel_ok(n)) { return kIOReturnBadArgument; }
             const bool ok = dmubSelect((uint32_t)n);
+            dmubSelSets++;
             LOG("RBFBDmubSel %ld -> %s", n, ok ? "selected" : "unavailable");
+            /* 2E3: publish BEFORE returning, so the caller's read-back is
+             * this call's state and not the last periodic snapshot's.
+             *
+             * Every DMUB key is published from publishVBLState(), which the
+             * RBFBPubMs throttle holds to one in 500 ms - so `dmubbl dig`
+             * asked for window 7, got SUCCESS, read the selector back
+             * immediately, saw the stale 4 and refused its own send. Rule 31,
+             * and the THIRD time this shape has been paid for: 2C5's four
+             * false MISMATCHes, 2D1's aborted subret run, now this - written
+             * into 2E2's journal entry as the thing to avoid and then done
+             * fifteen lines away.
+             *
+             * The general fix rather than a per-dial one: a DMUB dial
+             * publishes the DMUB state on its way out. These handlers run
+             * from setProperties on a userspace thread at human frequency,
+             * never the frame path, so rule 16's cost argument for the
+             * throttle does not reach them. */
+            dmubPublish();
             return ok ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
@@ -1148,18 +1169,21 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         LOG("RBFBDmubGpint -> refuse %u, sent %#x, back %#x, acked %u, "
             "scratch7 %#x -> %#x", rc, dmubGpintSent, dmubGpintBack,
             dmubGpintAcked, dmubScratch7Pre, dmubScratch7);
+        dmubPublish();                           /* 2E3 */
         return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
     }
     if (dict->getObject("RBFBDmubCaps")) {
         const uint32_t rc = dmubSendCaps();
         LOG("RBFBDmubCaps -> refuse %u, wptr %#x, verdict %u",
             rc, dmubSendWptr, dmubReplyVerdict);
+        dmubPublish();                           /* 2E3 */
         return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
     }
     if (dict->getObject("RBFBDmubPipe")) {
         const uint32_t rc = dmubSendPipe();
         LOG("RBFBDmubPipe -> refuse %u, wptr %#x, acks %llu",
             rc, dmubSendWptr, dmubAcks);
+        dmubPublish();                           /* 2E3 */
         return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
     }
     /* 2DC: DOMAIN_CONTROL, as ONE call that samples, sends and samples.
@@ -1201,6 +1225,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
                     LOG("RBFBDmubDomain auto -> refuse 25, the DOMAIN block "
                         "read as eight zero words - unreadable sample, not a "
                         "chip answer");
+                    dmubPublish();               /* 2E3 */
                     return kIOReturnNotPermitted;
                 }
                 const int cand = rb_pg_candidate(st);   /* a SLOT */
@@ -1208,6 +1233,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
                     dmubDomRefuse = 24u;
                     LOG("RBFBDmubDomain auto -> refuse 24, no domain differs "
                         "from DOMAIN0 so a power-up cannot show anything");
+                    dmubPublish();               /* 2E3 */
                     return kIOReturnNotPermitted;
                 }
                 /* 2DE: slot -> DOMAIN NUMBER. The experiment and the
@@ -1221,6 +1247,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             LOG("RBFBDmubDomain %u gate %u -> refuse %u, moved %#x, wptr %#x, "
                 "acks %llu", inst, gate, rc, dmubDomMoved, dmubSendWptr,
                 dmubAcks);
+            dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
@@ -1249,6 +1276,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
                 "ref %#x, verdict %u, wptr %#x, acks %llu",
                 phyid, rc, digBefore, digAfter, digRefWord, digVerdict,
                 dmubSendWptr, dmubAcks);
+            dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
     }
