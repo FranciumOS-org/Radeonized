@@ -2715,7 +2715,54 @@ ABSENCE and names rule 15 as the cause instead of printing words.
 `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` and the pixel clock (sub-type 2). A
 transmitter with no clock and no front end may have nothing to light, so
 **"the firmware discards VBIOS commands" is NOT the reading** - it is one of
-two live candidates and the cheaper to refute. Framebuffer **A3B246E1**.),
+two live candidates and the cheaper to refute. Framebuffer **A3B246E1**.
+**2E7 TOOK THE SURVEY AND THE FIRMWARE CONFIGURED THE TYPE-C ENCODER (boot
+446, A3B246E1, `DigSends` 0 so the words are pristine).** `DP_CONFIG` reads
+**3 / 0 / 1 / 0 / 0** on DP0..DP4 - **mask 0x05, which is 2B4's HPD sink mask
+and 2B9's `AUX_EN` mask, a THIRD agreeing instrument** - and the three
+connectors never brought up read **0**, so both non-zero words are WRITES and
+the only candidate that ran before us is the firmware. **The lane counts are
+per-connector correct, which is what makes it more than a mask:** DP0 is
+`3` = **4 lanes** (the eDP panel, independently reproducing 2C1's four-MPLL
+PHY0 reading) and DP2 is `1` = **2 lanes**, exactly what 2BB read from the
+Type-C sink's own DPCD. So the firmware did not merely probe that connector -
+**it read the sink's capability and configured the link encoder to it.**
+**2E6's two no-ops had DIFFERENT causes and 2E6 conflated them:**
+`DP_DPHY_SCRAM_CNTL` is **0x0101FF10 on ALL FIVE** instances, so
+`DPHY_SCRAMBLER_ADVANCE` is a **RESET DEFAULT** that 2E5 could never have
+changed on any instance, while `DP_CONFIG` was a no-op because the firmware
+really had set it. **Consequence for my own verdict function: the conjunction
+is right and its stated reason was wrong** - the ADVANCE term carries no
+information here and **the lane count is the entire discriminator**, so the
+hosttest case "a lane count without the advance bit" describes a state that
+cannot occur on this part. **A conjunction can be correct while one term is
+inert, and a passing suite says nothing about which term did the work.**
+Unchanged: the verdict is STILL, and **our write path to these registers is
+UNVERIFIED** - every write this project has issued to them was a no-op
+(`RBFBEncChanged` 0 for the third time).
+**AND IT TURNED THE NEXT STEP INTO A FREE READ. 2E1's one named missing step
+is now an instrument, not a write:** `DIG_BE_CNTL` is **0x20b0 + i*0x100**,
+BASE_IDX 2, max **0x24b0** - the same stride as the encoder block and BELOW
+`rb_enc_dw_max()`'s 0x251e, so no new mapping and no write surface - and
+**`DIG_FE_SOURCE_SELECT` (bits 14:8) is a ONE-HOT MASK, NOT AN INDEX**
+(`dcn10_link_encoder.c:54-58`: INVALID **0x0**, DIGA 0x1, DIGB 0x2, DIGC 0x4,
+DIGD 0x8), so **0 means the step is genuinely undone and non-zero means the
+firmware did it and that candidate collapses with no write at all.**
+`DIG_MODE` (18:16) decodes beside it from `dcn10_link_encoder_setup`'s own
+switch: 0 DP/eDP SST, 1 LVDS, 2 TMDS-DVI, 3 TMDS-HDMI, 5 DP MST. Read
+`RBFBDigBe0..4` / `RBFBDigBeMask` / `RBFBDigBeDone`, or
+**`dmubbl dig survey`**, which sends nothing.
+**And a guard of mine was DEAD, found by a break that fired NOTHING.**
+`rb_digbe_word_plausible()` (reject all-ones) was written by analogy with
+`rb_enc`, where 2E6 measured it load-bearing; here `FE_SEL` 0x7f is not
+one-hot and `DIG_MODE` 7 is not a mode, so **both specific-value tests
+already reject it** and two breaks changed no assertion. I kept it once and
+wrote a comment claiming the mode path was not subsumed - the second break
+refuted that at once, and **the test asserting it had PASSED with its stated
+reason wrong** (2BC). Deleted. **The same defensive check is load-bearing in
+one decoder and inert in another, so run a break per guard and treat one that
+fires nothing as a RESULT** (rule 6's "redundant and inert differ", asked of a
+guard). Framebuffer **B83E1382**.),
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other

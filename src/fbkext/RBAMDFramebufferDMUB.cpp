@@ -115,6 +115,9 @@ void RBAMDFramebuffer::dmubInit(void)
     encChanged = 0;
     encSurveyMask = 0;
     encSurveyDone = false;
+    digbeMask = 0;
+    digbeDone = false;
+    for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) { digbeWord[i] = 0; }
     for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
         encSurveyCfg[i] = 0; encSurveyScram[i] = 0;
     }
@@ -728,6 +731,26 @@ void RBAMDFramebuffer::encSurvey(void)
     encSurveyDone = true;
 }
 
+/* 2E7: DIG_BE_CNTL on all five instances, once, latched. Read-only, no
+ * setter, and 0x24b0 is below the bound `dpaltFits` already checks - so no
+ * new mapping and no new write surface, exactly as encSurvey().
+ *
+ * The reading is the whole point: DIG_FE_SOURCE_SELECT 0 on instance 2 means
+ * 2E1's "MISSING STEP" really is undone and the write is still to make;
+ * non-zero means the firmware did it - as 2E7 found it had configured the
+ * link encoder - and that candidate collapses with no write at all. */
+void RBAMDFramebuffer::digbeSurvey(void)
+{
+    if (digbeDone) { return; }
+    if (!hubpRegs || !dpaltReady) { return; }
+
+    for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) {
+        digbeWord[i] = hubpRegs[kRbDmuSeg2Dmub + rb_digbe_dw(i)];
+    }
+    digbeMask = rb_digbe_connected_mask(digbeWord);
+    digbeDone = true;
+}
+
 uint32_t RBAMDFramebuffer::encConfigure(uint32_t inst, uint32_t lanes)
 {
     encInst = inst;
@@ -1174,6 +1197,14 @@ void RBAMDFramebuffer::dmubPublish(void)
     encSurvey();
     setProperty("RBFBEncSurveyDone", encSurveyDone);
     setProperty("RBFBEncSurveyMask", (uint64_t)encSurveyMask, 32);
+    digbeSurvey();
+    setProperty("RBFBDigBeDone", digbeDone);
+    setProperty("RBFBDigBeMask", (uint64_t)digbeMask, 32);
+    for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) {
+        char k[32];
+        snprintf(k, sizeof(k), "RBFBDigBe%u", i);
+        setProperty(k, (uint64_t)digbeWord[i], 64);
+    }
     for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
         char k[32];
         snprintf(k, sizeof(k), "RBFBEncCfg%u", i);

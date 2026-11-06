@@ -195,8 +195,18 @@ int enc_tests(void)
         CHECK(!rb_enc_looks_configured(0u, 0x0101FF10u),
               "the advance bit without a lane count is not configured - a "
               "one-lane link stores 0 there, indistinguishable from untouched");
+        /* 2E7: this state CANNOT OCCUR on this chip - the advance bit is a
+         * reset default on all five instances. Kept as logic coverage, and
+         * labelled so it is not mistaken for a measured case. */
         CHECK(!rb_enc_looks_configured(1u, 0x0101FF00u),
-              "a lane count without the advance bit is not configured");
+              "a lane count without the advance bit is not configured "
+              "(hypothetical on this part: ADVANCE resets set)");
+        /* The terms that DID discriminate on boot 446. */
+        CHECK(rb_enc_looks_configured(3u, 0x0101FF10u),
+              "boot 446 DP0: 4 lanes, the eDP panel - configured");
+        CHECK(!rb_enc_looks_configured(0u, 0x0101FF10u),
+              "boot 446 DP1/3/4: the advance bit set and NO lane count is "
+              "NOT configured - the lane field is the whole discriminator");
         CHECK(rb_enc_looks_configured(1u, 0x0101FF10u),
               "boot 444's instance 2 reads configured");
 

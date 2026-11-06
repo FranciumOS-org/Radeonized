@@ -452,6 +452,50 @@ static void encSurveyReport(io_service_t fb)
     } else {
         printf("-> neither 0x05 nor 0x1f; read the words above.\n");
     }
+    /* 2E7: DIG_BE_CNTL beside it - the one named missing step, asked with a
+     * read. DIG_FE_SOURCE_SELECT is a ONE-HOT mask (0 = INVALID), never an
+     * index. */
+    if (num(fb, "RBFBDigBeMask") < 0 || num(fb, "RBFBDigBe0") < 0) {
+        /* Rule 14: absence says something. Silence here would read as "the
+         * block was not surveyed" when the cause is an older binary. */
+        printf("\n  DIG_BE_CNTL - NOT PUBLISHED by the loaded framebuffer.\n"
+               "    This reading needs the 2E7 binary; check kextstat against "
+               "the\n    UUID the build printed (rule 15).\n");
+    } else {
+        const long bem = num(fb, "RBFBDigBeMask");
+        printf("\n  DIG_BE_CNTL - is the DIG front end connected? (2E1's "
+               "missing step)\n");
+        for (int i = 0; i < 5; i++) {
+            char k[32];
+            snprintf(k, sizeof(k), "RBFBDigBe%d", i);
+            const long w = num(fb, k);
+            const unsigned long sel = ((unsigned long)w & 0x7f00UL) >> 8;
+            const unsigned long md  = ((unsigned long)w & 0x70000UL) >> 16;
+            const char *fe = sel == 0 ? "INVALID (unconnected)"
+                           : sel == 1 ? "DIGA" : sel == 2 ? "DIGB"
+                           : sel == 4 ? "DIGC" : sel == 8 ? "DIGD"
+                           : "not one-hot - NOT a front end";
+            const char *mo = md == 0 ? "DP/eDP SST" : md == 1 ? "LVDS"
+                           : md == 2 ? "TMDS-DVI" : md == 3 ? "TMDS-HDMI"
+                           : md == 5 ? "DP MST" : "not a mode Linux writes";
+            printf("    DIG%d  %08lx   FE_SEL %#lx %-30s  MODE %lu %s\n",
+                   i, (unsigned long)w & 0xffffffffUL, sel, fe, md, mo);
+        }
+        printf("    mask %#lx  ", bem);
+        if (bem & 0x04L) {
+            printf("-> INSTANCE 2 IS CONNECTED. The firmware made the\n"
+                   "               FE-to-BE connection as well as configuring "
+                   "the encoder\n               (2E7), so 2E1's missing step "
+                   "is NOT missing and the only\n               remaining "
+                   "candidate is the pixel clock (VBIOS sub-type 2).\n");
+        } else {
+            printf("-> instance 2 is NOT connected, so 2E1's missing step is\n"
+                   "               real and DIG_BE_CNTL.DIG_FE_SOURCE_SELECT "
+                   "is a write\n               still to make - one of the two "
+                   "remaining candidates.\n");
+        }
+    }
+
     if (!done) {
         printf("    RBFBEncSurveyDone is NO - the aperture was not ready, so\n"
                "    these words are not a reading. -rbgpufbdig or "

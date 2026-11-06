@@ -42,6 +42,7 @@ extern "C" {
 #include "rb_pg.h"
 #include "rb_dig.h"
 #include "rb_enc.h"
+#include "rb_digbe.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -631,6 +632,11 @@ private:
     uint32_t           encSurveyScram[RB_ENC_COUNT];  /* SCRAM_CNTL, all 5  */
     uint32_t           encSurveyMask;    /* rb_enc_configured_mask()        */
     bool               encSurveyDone;    /* latched - only REAL readings do */
+    /* 2E7: DIG_BE_CNTL on all five, read-only. The one named missing step
+     * (DIG_FE_SOURCE_SELECT) asked with a read instead of a write. */
+    uint32_t           digbeWord[RB_DIGBE_COUNT];
+    uint32_t           digbeMask;        /* rb_digbe_connected_mask()       */
+    bool               digbeDone;        /* latched - only REAL readings do */
     uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
     uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
     uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];
@@ -993,6 +999,7 @@ private:
      * it judges by is dpaltSample(), which runs unarmed. */
     uint32_t dmubDigExperiment(uint32_t phyid);
     void     encSurvey(void);
+    void     digbeSurvey(void);
     uint32_t encConfigure(uint32_t inst, uint32_t lanes);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);

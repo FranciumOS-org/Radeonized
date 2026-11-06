@@ -59934,3 +59934,125 @@ status - 2BC's lesson, since `make hosttest` fails the target when a test
 fails and the exit code cannot tell "did not compile" from "the break worked".
 
 Framebuffer **A3B246E1**. Plugin unchanged. **No boot has read the survey.**
+
+
+## 2E7 — the firmware configured the Type-C link encoder, and the two no-ops had DIFFERENT causes (boot 446)
+
+Boot **446**, framebuffer **A3B246E1** loaded and `dwarfdump`-identical to the
+build (rules 8 and 15). `RBFBEncSurveyDone` **Yes** with `RBFBDigSends` **0**
+and `RBFBEncRan` **0** - nothing was sent on this boot, so the latched words
+are pristine and 2E6's "sampled before any send" held.
+
+```
+DP0  CONFIG 00000003  SCRAM 0101ff10   configured
+DP1  CONFIG 00000000  SCRAM 0101ff10   -
+DP2  CONFIG 00000001  SCRAM 0101ff10   configured
+DP3  CONFIG 00000000  SCRAM 0101ff10   -
+DP4  CONFIG 00000000  SCRAM 0101ff10   -
+mask 0x5
+```
+
+**MASK 0x05 - instances 0 and 2 ONLY - which is 2B4's HPD sink mask and 2B9's
+`AUX_EN` mask, neither derived from the other and now a THIRD agreeing
+instrument.** 2E6's hypothesis is confirmed and the reset-default alternative
+is dead: DP1, DP3 and DP4 read `DP_CONFIG` **0** while DP0 and DP2 do not, so
+both non-zero words are WRITES, by something, and the only candidate that ran
+before us is the firmware.
+
+**AND THE LANE COUNTS ARE PER-CONNECTOR CORRECT, WHICH IS WHAT MAKES IT MORE
+THAN A MASK.** `DP_UDI_LANES` is `lane_count - 1`, so:
+
+- **DP0 reads 3 = FOUR lanes** - the eDP panel. That independently reproduces
+  2C1's PHY0 reading (all four MPLLs on) and corroborates 2C1's conclusion
+  that `DPALT_DP4` "reads four-lane configuration" rather than anything about
+  alt mode. **Two unrelated register blocks, same lane count, same connector.**
+- **DP2 reads 1 = TWO lanes** - exactly what 2BB read from the Type-C sink's
+  own DPCD, and what DP alt mode leaves after USB 3 keeps two pairs.
+
+So the firmware did not merely probe that connector (2B9's sticky
+`AUX_SW_DONE` with a reply count of 1). **It read the sink's capability and
+configured the link encoder to the sink's actual lane count.** That is new
+information about how far the firmware got, and it is why `enc1_configure_encoder`
+had nothing to do.
+
+**THE TWO NO-OPS OF 2E6 HAD DIFFERENT CAUSES, AND 2E6 CONFLATED THEM.** It
+recorded "the encoder was already in the target state", which is true of both
+words and explains only one:
+
+- `DP_DPHY_SCRAM_CNTL` is **0x0101FF10 on ALL FIVE INSTANCES**, the three
+  never brought up included. `DPHY_SCRAMBLER_ADVANCE` is therefore a **RESET
+  DEFAULT** and has nothing to do with the firmware. 2E5's write there could
+  never have changed a bit on any instance.
+- `DP_CONFIG` was a no-op **because the firmware really had configured it**,
+  which is a fact about this connector and not about the silicon's reset
+  state.
+
+**CONSEQUENCE FOR MY OWN VERDICT FUNCTION: the conjunction is right and its
+stated reason is wrong.** `rb_enc_looks_configured()` requires the advance bit
+AND a non-zero lane count, and the comment justifies the lane term ("ADVANCE
+alone... a one-lane link stores 0 there"). Measured, it is the **ADVANCE term
+that carries no information** - set on all five - so **the lane count is the
+entire discriminator** and the mask is correct for a reason I did not write
+down. The hosttest case `!rb_enc_looks_configured(1u, 0x0101FF00u)` ("a lane
+count without the advance bit is not configured") describes a state that
+**cannot occur on this chip**. Not wrong, but it was coverage of a
+hypothetical. **General shape: a conjunction can be correct while one of its
+terms is inert, and a test suite that passes says nothing about which term is
+doing the work.** The fix is not to drop the term - a different part may reset
+differently - but to record which one discriminated HERE.
+
+**WHAT IT DOES NOT CHANGE.** The verdict is still STILL, the remaining list is
+still exactly two, and 2E6's weaker half stands: **our write path to these
+registers is UNVERIFIED**, because every write this project has issued to them
+was a no-op. `RBFBEncChanged` **0** on this boot says so for the third time.
+
+**AND IT NARROWS THE NEXT STEP TO A FREE READ.** If the firmware configured the
+link encoder for this connector, the obvious question is whether it also made
+the DIG front-end-to-back-end connection - 2E1's named "MISSING STEP, not a
+free field". `DIG_BE_CNTL` is **0x20b0 + i * 0x100**, BASE_IDX 2, five
+instances, max **0x24b0** - the SAME stride as the encoder registers and
+**below** `rb_enc_dw_max()`'s 0x251e, so it is inside an aperture already
+mapped and needs no new surface. And the field reads the answer directly
+rather than needing interpretation: `DIG_FE_SOURCE_SELECT` (bits 14:8) is a
+**ONE-HOT MASK, not an index** - `DCN10_DIG_FE_SOURCE_SELECT_DIGA` 0x1,
+DIGB 0x2, DIGC 0x4, DIGD 0x8, and **0x0 is INVALID**, i.e. unconnected. So a
+zero on instance 2 means the step is genuinely not done, and a non-zero means
+the firmware did it and that candidate collapses too. `DIG_MODE` (bits 18:16)
+decodes beside it: **0 = DP/eDP SST**, 1 LVDS, 2 TMDS-DVI, 3 TMDS-HDMI, 5 DP
+MST, read from `dcn10_link_encoder_setup`'s own switch and matching 2E1's
+`signal_type_to_atom_dig_mode` DP = 0.
+
+**BUILT: `src/common/rb_digbe.h` + `digbeSurvey()`, read-only, and the
+instrument found a defect in ITSELF before any boot.** `DIG_BE_CNTL` on all
+five instances, published as `RBFBDigBe0..4` / `RBFBDigBeMask` /
+`RBFBDigBeDone`, latched at the first periodic publish with **only a real
+reading latching** (2CA/2CE), no setter, inside the aperture `dpaltFits`
+already bounds. `dmubbl dig survey` decodes `FE_SEL` and `DIG_MODE` by name
+and says which of the two outcomes it is; when the keys are absent it SAYS SO
+and names rule 15, rather than printing words (2E6's defect, not repeated).
+
+**THE DEFECT: a defensive guard that no break could make matter.** I wrote
+`rb_digbe_word_plausible()` - reject 0xFFFFFFFF before decoding - by analogy
+with `rb_enc`, where 2E6 measured it load-bearing. **Two break-it checks fired
+NOTHING**: removing it changed no assertion, because an all-ones word gives
+`FE_SEL` **0x7f** (not one-hot) and `DIG_MODE` **7** (not a mode Linux
+writes), so both specific-value tests already reject it. Dead in both call
+sites. Worse, after the first null I kept it and wrote a comment claiming the
+mode path was not subsumed, plus a test asserting it - **the second break
+refuted the claim at once, and that test had PASSED with its stated reason
+wrong**, which is 2BC's "a case that passes for the wrong reason is not
+coverage" found by a break rather than by rereading. Deleted; the all-ones
+assertions stay as coverage of the tests that DO reject it, relabelled.
+**General: the same defensive check is load-bearing in one decoder and inert
+in another, and only a break-it check distinguishes them - so run one per
+guard, and treat a break that fires nothing as a RESULT, not a formality**
+(rule 6's "redundant and inert differ", asked of a guard).
+
+Two more, cheap: break 1 (reading the one-hot `FE_SEL` as an index) fails six
+assertions, break 3 (stride 0x80 for 0x100) fails five, break 4
+(`mode_valid` accepting 0-7) fails three - all with **0 compile errors**, read
+from `grep -c 'error:'` and not the exit status (2BC). And a test case of mine
+was wrong in a way the suite caught: `0xFFFF8FFF` for "bits outside 14:8" still
+sets bits 11:8; `~0x7F00` is **0xFFFF80FF**.
+
+Framebuffer **B83E1382**. Plugin unchanged. **Nothing has read DIG_BE_CNTL.**
