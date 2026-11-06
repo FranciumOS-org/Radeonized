@@ -181,9 +181,18 @@ static inline int rb_enc_changed(uint32_t cfg_before, uint32_t cfg_after,
  * 2BB read from the sink's own DPCD. All five alike is a reset default and
  * says nothing.
  *
- * "Configured" is deliberately the CONJUNCTION of the two fields
- * enc1_configure_encoder writes, not either one: DP_UDI_LANES alone is 0 for
- * a one-lane link, which is indistinguishable from an untouched register. */
+ * "Configured" is the CONJUNCTION of the two fields enc1_configure_encoder
+ * writes. 2E7 MEASURED which term does the work, and it is not the one this
+ * comment used to name: DP_DPHY_SCRAM_CNTL reads 0x0101FF10 on ALL FIVE
+ * instances on boot 446, the three never brought up included, so
+ * DPHY_SCRAMBLER_ADVANCE is a RESET DEFAULT carrying no information - the
+ * LANE COUNT is the entire discriminator here (DP0 3 = 4 lanes, DP2 1 = 2
+ * lanes, DP1/3/4 0). The term stays, because another part may reset
+ * differently; what is recorded is that a conjunction can be correct while
+ * one term is inert, and a passing test says nothing about which term
+ * discriminated. The original reason - DP_UDI_LANES is 0 for a ONE-lane link
+ * and so indistinguishable from untouched - is still true and is why the lane
+ * term cannot stand alone either. */
 static inline int rb_enc_looks_configured(uint32_t cfg, uint32_t scram)
 {
     /* An all-ones word is an unmapped or powered-down block, not a
