@@ -58079,3 +58079,58 @@ on this surface have each had their discriminator share a suspect (2zq/2zr),
 and this one does not - it takes the reply path, the address arithmetic and
 the ring read-back out of the verdict entirely and replaces them with the
 panel. That is why it is worth one boot.
+
+--------------------------------------------------------------------------------
+2D9 addendum - boot 432: the arg is armed and NOTHING WAS SENT
+--------------------------------------------------------------------------------
+
+Boot 432, plugin 9FE31A5A, framebuffer 2CE724E1 (the 2D5 pair, which carries
+the DMUB code). `-rbgpufbdmubbl` IS in boot-args and `RBFBDmubBlArmed` reads
+Yes. And:
+
+    RBFBDmubSendsOk       0
+    RBFBDmubBlSends       0
+    RBFBDmubPipeSends     0
+    RBFBDmubGpintSends    0
+    RBFBDmubSendsRefused  0      <- not refused either
+    RBFBDmubBlLast        0xFFFFFFFFFFFFFFFF   (never set)
+    RBFBDmubBlTypeSets    0
+    RBFBDmubWptr/Rptr     2368 / 2368, WptrMoves 0, Acks 0
+
+So the user's "nothing much happened" is the reading of a boot in which no
+inbox command was ever produced. 2zn's design is that arming the route sends
+NOTHING until `dmubbl` names a level; the reboot armed it and the trigger was
+never pulled. **The panel not moving here carries no information** - rule 14,
+in the same session that spent a milestone on exactly this shape (2D8). A
+reboot is not an experiment.
+
+Recorded so a future session does not re-add the boot-arg: it is already
+there, on this machine, as of boot 432.
+
+ONE REFINEMENT TO 2D9's PRESCRIPTION, from re-reading 2zu against Eco mode.
+2zu tried all three `backlight_control_type` values and treated them as three
+arms of one experiment. In Eco mode they are NOT equivalent:
+
+  type 0 PWM       - DMUB writes the panel's own BL_PWM block, which is the
+                     block 2zw/2zx measured as driving this panel in this
+                     mode. **This is the only arm whose target is known to
+                     reach the panel**, so it is the only one where a null is
+                     a statement about DMUB rather than about the panel.
+  type 1 VESA_AUX  - brightness over eDP AUX to the sink. Whether this panel
+  type 2 AMD_AUX     implements it is UNREAD, so a null is ambiguous even in
+                     Eco mode - 2zw's shape again, one layer in.
+
+So the re-take should lead with **type 0**, which 2zu lists third and which
+its own hybrid-mode confound made indistinguishable from the other two.
+
+And the in-session positive control is free: `dmubbl gpint` sends
+GET_FW_VERSION through DMCUB_GPINT_DATAIN1 - one register, no memory, no ring,
+no address arithmetic (2zr's route) - so an ack establishes the firmware is
+alive and servicing requests ON THIS BOOT before any backlight verdict is
+read. 2zs measured that round trip on boot 276/277; it has not been taken on
+432, and `RBFBDmubGpintSends` 0 says so.
+
+Our own code is NOT a confounder: `blSetLevel()` is called only from a
+parameter set (`RBAMDBacklightParams.cpp:281`, `RBAMDFramebuffer.cpp:1419`)
+and never periodically, so a DMUB write to BL_PWM_CNTL would persist rather
+than being stomped by the next publish.
