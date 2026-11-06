@@ -1804,6 +1804,31 @@ table and refuses to install one that does not match the running kernel;
   failure. **GPINT cannot substitute** - 45 `DMUB_GPINT__*` commands, none for
   DP alt. So the register it is, and the hang Linux warns of is conditioned on
   DMCUB not running, which is **measured false** here (2zs's round trip).
+  **2D9 NARROWS THIS AND IT MATTERS FOR THE EXTERNAL DISPLAY: 2C0's blocker
+  is a REPLY-PATH result generalised to six commands that have no reply.** Of
+  the seven `DMUB_CMD__VBIOS` sub-types only `QUERY_DP_ALT` (26) has returned
+  data as its contract; **0 DIGX_ENCODER_CONTROL, 1 DIG1_TRANSMITTER_CONTROL,
+  2 SET_PIXEL_CLOCK, 3 ENABLE_DISP_POWER_GATING, 15 LVTMA, 28 DOMAIN_CONTROL
+  are header + payload and their product is a REGISTER CHANGE** - `ret_status`
+  is documented as "1 if returned data", so execution leaves no ring trace at
+  all. Boot 275 is decisive against 2BF's sweep and SILENT on the bring-up
+  path (rule 13 on a bus: the absence of a return value is not the absence of
+  an effect). 2zr's three explanations stand undiscriminated and only **"the
+  DMCUB reads a different inbox base"** would block the bring-up - an ADDRESS
+  question, not a liveness one, since GPINT round-trips.
+  **And the discriminating experiment is already built, already run, and its
+  null is CONFOUNDED: 2zu sent SET_BACKLIGHT at all three control types on
+  boot 279 and "the panel did not move" - in HYBRID MODE**, four boots before
+  2zw/2zx found that the 680M's backlight drives nothing there. Never
+  re-taken. **Rule 47 applied BACKWARDS through the record: nobody went back
+  through the readings the mode invalidated.** The re-take costs no build
+  (`-rbgpufbdmubbl` + `dmubbl`, in the installed framebuffer, sends nothing
+  until a level is named), has the working slider as a positive control in the
+  same session, and is the only inbox command whose effect A HUMAN CAN SEE.
+  **Panel moves -> the whole VBIOS bring-up path is available and 2zu is
+  withdrawn. Panel does not move -> 2zu's null becomes real** and the bring-up
+  is register writes with no VBIOS table. Risk: both routes write the same PWM
+  block, so the slider may stop responding until a reboot.
   **Rule 46 in the resource file a third time:** `dcn31_resource.c:86` includes
   **`dpcs_4_2_0_offset.h`** - DCN 3.1.2 uses **DPCS 4.2.0**, and `RDPCS`
   appears ZERO times in `dcn_3_1_2_offset.h`, so a guess at `dpcs_3_1_4` (which
