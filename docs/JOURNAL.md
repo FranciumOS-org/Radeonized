@@ -57661,3 +57661,86 @@ rule 44 biting and the derivation is what to suspect first.**
 Plugin **9FE31A5A**. Framebuffer **2CE724E1, UNCHANGED and verified so** - the
 additions are uncalled inlines there, the same reason 2D0 was plugin-only.
 **Plugin-only reinstall.**
+
+
+## 2D6 - THE FIRMWARE CONFIGURED AUX2, NOT US, AND IT IS GONE ON THIS BOOT
+
+Boot 428, Eco mode (zero 0x10de), plugin **9FE31A5A** and framebuffer
+**2CE724E1** both loaded and current, `-rbgpufbaux` and `-rbgpufbdpalt` both in
+boot-args. The user has the monitor on the **USB4 Type-C port** - the iGPU one,
+not the Thunderbolt port wired to the RTX 4050 - and asked to continue the
+external-display line.
+
+**FOUR INDEPENDENT INSTRUMENTS ALL SAY NOTHING EXTERNAL IS ATTACHED TO THIS
+CHIP'S DISPLAY ENGINE:**
+
+```
+  HPD      HPD0 0x14000012 SINK PRESENT (the panel); HPD1-4 status 0x00000000
+           sink mask 0x01, at setup 0x01, transitions 0, enabled mask 0x1f
+  AUX      AUX0 ctl 0x01040101 dphy 0x00016400 - enabled, bound to HPD0
+           AUX1-4 ctl 0x01040000 dphy 0x00004500 - AUX_EN CLEAR
+  PHY      active mask 0x01, transitions 0
+  OTG      OTG0 0x00011201 running; OTG1-3 0x00000300 off
+  dpcdread refusal 3 - NO AUX ENGINE IS BOUND TO THAT HPD BLOCK, and it
+           reports "AUX5", outside the five instances, so AUX_HPD_SEL names
+           nothing
+```
+
+**AUX2's `dphy` is 0x00004500. On boot 293 it was 0x00016400** - 2B9 recorded
+that as "BIT-IDENTICAL to the panel's AUX0" against "0x00004500 on the three
+never brought up". **So the engine 2BB and 2BD transacted on is, this boot, in
+the never-brought-up state.**
+
+**THE REFRAME, AND IT IS THE REAL RESULT: WE NEVER CONFIGURED THAT ENGINE -
+THE FIRMWARE DID, AND ONLY WHEN THE CABLE WAS THERE AT POWER-ON.** 2B9 read a
+configured AUX2 and wrote "the firmware probed that connector", which was
+right; what it did not ask is **what makes that true on a given boot**. 2BA
+then built a transaction that explicitly declines to bring a dark engine up
+("A dark engine is refused, not enabled"), and 2BB/2BD succeeded **because
+they inherited firmware state**, not because anything in this project
+established it. Three milestones of real results - ACK, 16 bytes of DPCD, a
+128-byte EDID reading "MSI MP2412C" - all rest on a precondition nobody
+recorded. **Rule 34 one level out: the arm of an experiment includes what the
+FIRMWARE set up before the OS loaded, and that is not visible in boot-args or
+in any key we publish.** Rule 47's shape again - the configuration a reading
+comes from extends outside software - and 2zw is what that cost last time.
+
+**NOT established and not guessed: WHY HPD2 sees no sink.** `transitions 0`
+with `enabled mask 0x1f` says no plug event was detected this whole boot on
+any of the five blocks, and all five are enabled, so a "no sink" here is a
+real reading rather than a disabled instrument (2B3 built that distinction for
+exactly this). Three candidates and nothing yet discriminates them: the cable
+is in the Thunderbolt port that goes to the 4050 rather than the USB4 one; the
+monitor is asleep or off; or HPD detection itself depends on the same
+firmware-time configuration AUX2 does. **The discriminator is free and the
+user has to run it: unplug and replug while `RBFBHpdSink` is watched.** A bit
+moving on any instance says the port is right and the block works; nothing
+moving on all five says the cable does not reach this chip at all in its
+current position.
+
+**AND THE PRE-BOOT MEASUREMENT IS NOW HALF-ANSWERED BY EVIDENCE ALREADY IN
+HAND, which is 2C0's lesson about reading the journal first.** This card has
+named "plug the display in before power-on and watch for the OpenCore picker"
+as a free measurement since 2C1 and nobody has run it - but boot 293 *did*
+have a firmware-probed AUX2 **and read OTG1-3 at 0x300 anyway**. So on a boot
+where the firmware demonstrably probed that connector, **it still lit no
+pipe.** That is as close to the answer as an unrun experiment gets: the
+firmware does AUX and EDID and stops. The picker observation is still worth
+taking because it is a different claim (a trained link and a scanned-out
+image, not a probed channel), but the expectation should now be NO image, and
+link training being ours.
+
+**Next, in cost order.** (1) The replug watch, which costs nothing and
+settles whether the cable reaches this chip. (2) A boot with the monitor
+plugged in at power-on, which restores the AUX2 state 2BB/2BD needed and
+answers the picker question in the same boot. (3) Only then is the output
+side - link training, a second OTG and HUBP, a DIG encoder, a second
+`IOFramebuffer` - the thing to work on; `getDisplayModeCount()` has returned 1
+since 2sl.
+
+**One thing to fix in this project rather than on hardware: `RBFBHpdSetup`
+and `RBFBAuxEn` should be read as the FIRMWARE's handover state, and nothing
+says so.** `at setup 0x01` is already published and is exactly the fact rule
+34 wants; it was sitting in `hpdlook.sh`'s output through all of 2B9-2BD being
+described as "whatever cable state THAT boot had" rather than as the
+precondition the AUX work depends on.
