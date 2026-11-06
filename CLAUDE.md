@@ -2762,7 +2762,66 @@ refuted that at once, and **the test asserting it had PASSED with its stated
 reason wrong** (2BC). Deleted. **The same defensive check is load-bearing in
 one decoder and inert in another, so run a break per guard and treat one that
 fires nothing as a RESULT** (rule 6's "redundant and inert differ", asked of a
-guard). Framebuffer **B83E1382**.),
+guard). Framebuffer **B83E1382**.
+**2E8 TOOK THE READ AND THE ANSWER IS THE OTHER ONE: `FE_SEL` is 0 on DIG2
+(mask **0x01**, against `0x1` DIGA on the panel's DIG0 as the control in the
+same sample), so 2E1's missing step is REAL (boot 447, `DigSends` 0 so the
+words are pristine).** And it could never have been otherwise:
+`command_table_helper2_dce112.c:94` on `dig_encoder_sel_to_atom` says "On any
+ASIC after DCE80, we **manually program** the DIG_FE selection (see
+connect_dig_be_to_fe...), so translation should always return 0 (no FE)" - the
+VBIOS transmitter command carries no front end **by design** and the FE
+connection is the DRIVER's write. So the firmware's bring-up is as complete as
+the atom path can make it and **the candidate is localised, not collapsed**.
+**Two fields the first decoder skipped carried the rest.** `DIG_HPD_SELECT`
+(bits 30:28) reads **2 on DIG2** - the `0x20000000` that printed as an
+undecoded word - and `dcn10_link_encoder.c:563` writes it as `hpd_source` with
+`HPD_SOURCEID1 = 0`, so it is the **0-based DCN instance**, 2E1's atom hpdsel
+MINUS one (`dcn31_dio_link_encoder.c:601` agrees: atom 6 is "set to 5
+(hpdsel - 1)"). A **FOURTH** instrument naming the Type-C port after 2B4, 2B9
+and 2E7 - and its writer `hpd_initialize()` is called from
+`dcn10_link_encoder_hw_init()` right after `dcn10_aux_initialize()`, which
+makes 2B9's live AUX2 and this HPD association **one firmware action**, not
+two coincidences. **Its zero is AMBIGUOUS and gets no derived bit**: HPD
+instance 0 IS the panel, so DIG0's 0 is correct and DIG1/3/4's 0 is unwritten
+and the word cannot separate them (rule 14); `FE_SEL` is the only field here
+whose zero is unambiguous, because 0 is a documented INVALID enum value rather
+than a default. A `rb_digbe_touched()` would have had to call the panel
+untouched, so none was written. `DIG_MODE` partitions **exactly** as 2E7's
+`DP_CONFIG` did (DP SST on 0 and 2, LVDS on 1/3/4), so **1 is the untouched
+value** - established by cross-register agreement, which one register could not
+have given - and **all five decode to a VALID mode**, LVDS included on a board
+with no LVDS, so `DIG_MODE` alone can never say whether an instance was
+configured.
+**AND A SECOND PRODUCT OF 2E4'S COMMAND WAS NEVER SAMPLED.**
+`DIG_BE_EN_CNTL` (**0x20b1**, same 0x100 stride, `DIG_ENABLE` bit 0,
+`DIG_SYMCLK_BE_ON` bit 8) is **read-only to the driver** -
+`dcn10_is_dig_enabled()` at `dcn10_link_encoder.c:540` is its single reference
+in all of `docs/linux-ref/`, no writer anywhere - so whatever sets it is the
+firmware's transmitter path, which makes it **Linux's own "is this transmitter
+up" test**. 2E4 judged `DIG1_TRANSMITTER_CONTROL` on `RDPCSTX2_PHY_CNTL6`
+alone. Built read-only with `rb_digbe_diff_mask()` and a **post-send
+resample** (`RBFBDigBeDiff`/`RBFBDigBeEnDiff`, with `RBFBDigBePostDone`
+separating "sent and nothing moved" from "nothing was sent", since both
+publish 0 - rule 14); `rb_digbe_dw_max()` is now COMPUTED over both blocks
+(0x24b1, still under `rb_enc_dw_max()`'s 0x251e) so there is no new mapping
+and no new write surface. **The all-ones guard 2E7 measured DEAD in the
+`DIG_BE_CNTL` decoder is LOAD-BEARING in this one and its break fires** - no
+one-hot and no enum to fall back on, so without it an unmapped block reads as
+five enabled transmitters. Third instance of that split, which is why the rule
+is a break per guard rather than reasoning about need. **`-Werror` trap, FOURTH
+time** (2B1, 2BC, 2E7, this): `return w == w` is `-Wtautological-compare`, the
+build died, and `make hosttest` ran the PREVIOUS binary with zero FAIL lines -
+indistinguishable from a guard that does not matter. The harness greps
+`error:` as well as `FAIL`; the exit status cannot tell them apart.
+**The reading to take, one boot, two commands:** `dmubbl dig survey` for
+`DIG_ENABLE` on instance 2 (set = the firmware enabled that back end too and
+2E4's STILL was a PHY-only null on a partly-up transmitter; clear = a bare
+`FE_SOURCE_SELECT` write would have had nothing to feed), then `dmubbl dig 2`
+with both products read - `RBFBDigBeEnDiff` non-zero means the firmware
+executes this command with a VISIBLE product and 2E4 read the wrong register.
+Both diffs 0 is a stronger null than 2E4's and still not "the firmware
+discards VBIOS commands". Framebuffer **A55CBCC2**.),
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other

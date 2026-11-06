@@ -478,8 +478,10 @@ static void encSurveyReport(io_service_t fb)
             const char *mo = md == 0 ? "DP/eDP SST" : md == 1 ? "LVDS"
                            : md == 2 ? "TMDS-DVI" : md == 3 ? "TMDS-HDMI"
                            : md == 5 ? "DP MST" : "not a mode Linux writes";
-            printf("    DIG%d  %08lx   FE_SEL %#lx %-30s  MODE %lu %s\n",
-                   i, (unsigned long)w & 0xffffffffUL, sel, fe, md, mo);
+            const unsigned long hs = ((unsigned long)w & 0x70000000UL) >> 28;
+            printf("    DIG%d  %08lx  FE_SEL %#lx %-28s MODE %lu %-11s "
+                   "HPD_SEL %lu\n",
+                   i, (unsigned long)w & 0xffffffffUL, sel, fe, md, mo, hs);
         }
         printf("    mask %#lx  ", bem);
         if (bem & 0x04L) {
@@ -493,6 +495,76 @@ static void encSurveyReport(io_service_t fb)
                    "               real and DIG_BE_CNTL.DIG_FE_SOURCE_SELECT "
                    "is a write\n               still to make - one of the two "
                    "remaining candidates.\n");
+        }
+
+        /* 2E8: HPD_SELECT is 0-based (dcn10_link_encoder.c:563 writes
+         * hpd_source, HPD_SOURCEID1 = 0), so it is 2E1's atom hpdsel MINUS
+         * one. 0 is ambiguous between "HPD instance 0" and "never written",
+         * so it is reported and not judged. */
+        {
+            const long w2 = num(fb, "RBFBDigBe2");
+            const unsigned long hs2 = ((unsigned long)w2 & 0x70000000UL) >> 28;
+            if (w2 >= 0 && hs2 != 0) {
+                printf("    HPD_SEL %lu on DIG2 = DCN HPD instance %lu "
+                       "(atom hpdsel %lu, 2E1's +1).\n"
+                       "               The firmware associated this back end "
+                       "with the port 2B4,\n               2B9 and 2E7 "
+                       "already name - a FOURTH agreeing instrument.\n",
+                       hs2, hs2, hs2 + 1);
+            }
+        }
+
+        /* DIG_BE_EN_CNTL - the driver never writes it (dcn10_is_dig_enabled()
+         * is its only reference in all of docs/linux-ref/), so it is the
+         * firmware's own "is this transmitter up" bit and a SECOND product of
+         * the DIG1_TRANSMITTER_CONTROL command 2E4 judged on the PHY alone. */
+        if (num(fb, "RBFBDigBeEn0") < 0) {
+            printf("\n  DIG_BE_EN_CNTL - NOT PUBLISHED by the loaded "
+                   "framebuffer.\n    This reading needs the 2E8 binary "
+                   "(rule 15).\n");
+        } else {
+            printf("\n  DIG_BE_EN_CNTL - Linux's own is-this-DIG-enabled "
+                   "test\n");
+            for (int i = 0; i < 5; i++) {
+                char k[32];
+                snprintf(k, sizeof(k), "RBFBDigBeEn%d", i);
+                const long w = num(fb, k);
+                const unsigned long u = (unsigned long)w & 0xffffffffUL;
+                printf("    DIG%d  %08lx   DIG_ENABLE %d   SYMCLK_BE_ON %d\n",
+                       i, u, (u & 0x1UL) ? 1 : 0, (u & 0x100UL) ? 1 : 0);
+            }
+            printf("    mask %#lx", num(fb, "RBFBDigBeEnMask"));
+            if (num(fb, "RBFBDigBeEnMask") == 0x05L) {
+                printf("  -> 0 and 2, the pair every other instrument "
+                       "names.\n");
+            } else {
+                printf("\n");
+            }
+
+            /* The before/after. postDone is what separates "sent and nothing
+             * moved" from "nothing was sent" - both publish a 0 diff. */
+            if (num(fb, "RBFBDigBePostDone") <= 0) {
+                printf("    no send on this boot yet, so no before/after "
+                       "(RBFBDigSends %ld).\n", num(fb, "RBFBDigSends"));
+            } else {
+                const long d  = num(fb, "RBFBDigBeDiff");
+                const long de = num(fb, "RBFBDigBeEnDiff");
+                printf("    after the send: DIG_BE_CNTL diff %#lx, "
+                       "EN_CNTL diff %#lx\n", d, de);
+                if (d == 0 && de == 0) {
+                    printf("               -> the DIG back end did not move "
+                           "either, so the\n               command's effect "
+                           "is absent in BOTH of its products, not\n"
+                           "               just the PHY (2E4 read only the "
+                           "PHY).\n");
+                } else {
+                    printf("               -> THE BACK END MOVED. The "
+                           "firmware DOES execute this\n               "
+                           "command with a visible product; compare "
+                           "RBFBDigBePost* with\n               "
+                           "RBFBDigBe* to see which field.\n");
+                }
+            }
         }
     }
 
