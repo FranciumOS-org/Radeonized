@@ -57333,3 +57333,76 @@ Merged into the old single counter that would have been invisible beside 38 509
 run completions.
 
 Plugin **1BDF6979**; framebuffer unchanged.
+
+## 2D2 - THE FRAME RATE WENT UP 64 %, in the direction named as the RISK
+
+Boot 426, native (143.903 Hz), hold **ON**, plugin 0C96F646. Two
+`paired.sh 20` windows:
+
+```
+            sub 1 (A)      sub 4 (B)
+sets/s        70.90         116.62        +64.5 %
+fed           48.4 %         81.2 %
+mean vblanks   1.000          1.218
+bin2+          0.0 %         21.6 %
+latch hist   1:1437        1:1857 2:511
+latch ceiling 146.5 /s      117.9 /s
+actual/ceil     48 %           99 %
+preempt         +3             +7
+vbl/s        146.48 (+1.8 %) 143.68 (-0.2 %)   both inside paired.sh's 5 % guard
+held/gets     40.1 %         38.5 %
+```
+
+**2CF named the frame rate as the RISK SIDE** - extra `checkTimestamps()`
+calls in the regime 2zg measured as the quiet one, with 2zc's two-sided curve
+as the shape to watch for. It went the other way by two thirds, **with the
+hold still ON**, so there is no flicker trade in it at all.
+
+**AND IT LANDS ON THE FRONTIER THIS CARD HAS CALLED OPEN SINCE 2zd.** `fed`
+48.4 % is 2A0's reframing exactly - the compositor hands us a transaction only
+on every second vblank - and that is the ~73 ceiling seven models died on. Four
+retire occasions per frame takes it to 81.2 % and **pins B at 99 % of its own
+latch ceiling where A sits at 48 %.** The mechanism is one sentence: with one
+occasion per vblank, a frame's work is not retired in time for the next
+vblank's transaction, so the compositor skips one.
+
+**IT REFUTES 2A1's CONCLUSION, and 2A1's MEASUREMENT still stands.** That
+milestone tiled the interval, found `ours` **0.044 ms of 10.470 ms (0.4 %)**
+and concluded "the ceiling is upstream of this kext and no dial of ours can
+move it" - which "explains all seven dead models at once instead of adding an
+eighth". A dial of ours just moved it 64 %. The 44 microseconds are real; the
+constraint was never our CPU TIME inside a frame, it is **WHEN retirement
+happens relative to the vblank**, which a time-tiling budget cannot see. And it
+explains the seven dead dials better than 2A1 did: tick up, tick down, the
+timer beat, the latch, the workload, the HUBP backlog, the publish cost -
+**not one of them changed the number of retire occasions per vblank**, because
+`-rbgpuretirevbl` pins it at exactly 1. 2zc's two-sided curve was measured
+TIMER-driven, where the tick set the occasion rate *and* beat against the
+vblank; 2CF's occasions are phase-locked, so there is no beat to pay for.
+
+**NOT A FINDING YET, and the reason is specific.** n=1 per side and **NOT
+INTERLEAVED** - two commands typed in sequence, B then A, which is the exact
+shape that made 2B6 unattributable (A1->A2 drift +15.1 % against a +15.9 %
+effect). What makes it very likely anyway: the effect is **4.3x** the worst
+drift this project has recorded inside a boot, and **1.8x** it even measured
+against the best hold-ON reading ever taken (~92 on three boots, 2A3/2A4/2B0) -
+B's 116.62 is higher than ANY hold-ON window in the record. Note also that
+**this boot's A is 70.90, the 70-75 band of the 2zb-2zz era rather than the
+~92 of 2A3/2A4/2B0**, so part of the 64 % may be a slow A; +27 % against the
+best-ever A is the conservative read and is still outside the band.
+
+`tools/subrate.sh` is the repeat: alternating sides at single-window
+granularity, the dial verified per run, per-side means AND ranges printed so an
+overlap is visible, and sub=1 restored in a trap. Rule 44 wants two boots per
+side as well.
+
+**Two things to read there besides the rate, neither claimed here.** The latch
+moved (1.000 -> 1.218, bin2+ 0.0 -> 21.6 %), which is expected rather than
+alarming - more occasions per frame means more flips in flight - and `preempt`
+went +3 -> +7 where 2B0/2B6 recorded +0/+2 with the hold on. **2B7 is the
+warning: `preempt` does not order by a dial in a non-interleaved comparison**,
+and that is exactly what this was.
+
+**The default still does not move.** Two large wins now point at `sub` > 1
+(2D0's first paint 13.9 -> 3.5 ms, this +64 %), and both are one boot, one
+window a side. The decision wants the interleaved repeat and a second boot.
