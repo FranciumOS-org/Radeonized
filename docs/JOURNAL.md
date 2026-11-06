@@ -57846,3 +57846,118 @@ the PD controller at all. The lane count 2BB read - **2 lanes** - is
 consistent with alt mode and tells us nothing about today. **Each of those is
 a question for the user and none of them is answerable from the registry**,
 which is where this stops until they answer.
+
+================================================================================
+2D8  THE NULL WAS THE CHASSIS' USB-C SUBSYSTEM, AND IT NEEDED AN EC RESET
+     boot 430 -> a 30-second power-key hold -> the whole chain back
+================================================================================
+
+THE CAUSE, IN THE USER'S OWN WORDS (2026-11-05):
+
+  "the port is still the same USB 4.. sometimes my laptops USB C stops working
+   completley across reboots and powerwash... i have to hold my power key for
+   30 sec for the entire motherboard to reset to firmware then it comes back"
+
+So the Type-C subsystem on this chassis can enter a state where it is dead to
+everything, survives a reboot AND a reinstall, and is cleared only by a
+30-second power-key hold - an EC / firmware power-rail reset, below the OS and
+below the PCI bus. Nothing in software can see it and nothing in software can
+clear it. After the hold, the same port, the same cable and the same monitor
+produced the full chain on the first read.
+
+WHAT IS RESTORED, AND IT IS EXACT - every value reproduces an earlier
+milestone's, which is what makes this a restoration and not a new reading:
+
+  HPD2 status      0xff0b3013   sink present, latched, unserviced
+  sink mask        0x05         = 2B4's mask, HPD0 (panel) + HPD2 (Type-C)
+  at setup         0x05         the sink was already there at setup
+  enabled mask     0x1f         all five blocks on, so every 0 is a real 0
+  AUX2 ctl         0x01240101   AUX_EN set, AUX_HPD_SEL = 2 (2B9's field)
+  AUX2 dphy        0x00016400   bit-identical to the panel's AUX0 (2B9)
+  AUX_EN mask      0x05         second instrument, same pair, not derived
+  DPCD refusal     0            no refusal
+  DPCD reply       ACK, 16 bytes:
+                   12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00
+                   BYTE-IDENTICAL to 2BB. DP 1.2, HBR2, 2 lanes.
+  EDID             128 bytes, header OK, checksum OK - MSI MP2412C, EDID 1.3,
+                   product 0x40a9, all four descriptors:
+                     0x36  1920x1080 @ 60.00 Hz (148.5 MHz, preferred)
+                     0x48  1920x1080 @ 99.65 Hz (228 MHz)
+                     0x5a  name
+                     0x6c  range limits, V 48-100 Hz, H 30-115 kHz, 230 MHz
+                   Fastest mode needs 5.47 Gbps against ~8.64 usable - it FITS.
+  OTG1..3          0x00000300   still off. No pipe is lit, as expected.
+
+A byte-identical DPCD reply across a dead-and-revived subsystem is the
+strongest possible statement that nothing in our code or in the OS moved: the
+sink is answering the same words to the same engine on the same port.
+
+THREE EXPLANATIONS WERE OFFERED FOR THIS NULL AND ALL THREE WERE WRONG.
+
+  2D6  "the firmware enters alt mode and probes at power-on - that is what
+        boot 293 inherited, and this boot booted without the cable."
+        REFUTED BY ITS OWN EXPERIMENT (2D7): the user rebooted WITH the cable
+        attached and `at setup` read 0x01 with AuxEn 0x01. A story fitted to
+        the one difference I could name.
+
+  2D7  searched for a regression - our code, the OS version, hybrid mode, a
+        dead port, a dead controller - and eliminated all of them, correctly.
+        It then had a null with every software cause excluded and kept looking
+        in software.
+
+  mine, this session, unwritten until now: "the cable was in the other Type-C
+        port." The user switched ports, the chain came back, and I attributed
+        the recovery to the port. It was not the port - the user says so
+        plainly and the port is the same USB4 port it always was. What the
+        unplug-and-replug did was nothing; what fixed it was the power-key
+        hold. I had a post-hoc ordering and read it as a cause, which is the
+        same error as 2D6 one layer out: THE RECOVERY'S TRUE CAUSE AND THE
+        LAST THING I TOUCHED BEFORE IT ARE DIFFERENT FACTS.
+
+WHAT THE INSTRUMENTS DID RIGHT, AND IT IS WORTH SAYING:
+
+  Four of them, on boots 428/429/430, all said the same thing: HPD1-4 status
+  0, AUX1-4 AUX_EN clear at dphy 0x00004500, PHY active mask 0x01, OTG1-3
+  0x300, dpcdread refusal 3 (no engine bound to that HPD). Every reading was
+  CORRECT. The chip really saw nothing, because nothing reached it. Not one
+  instrument lied and not one reading has to be withdrawn - only the stories
+  built on top of them. That is 2B8's design paying off: an enabled mask
+  published beside every sense bit, so "no sink" was never confusable with
+  "the instrument is off".
+
+RULE 47, ONE NOTCH MORE LITERAL. The rule says: before concluding a register
+is the wrong control surface, establish the output is WIRED to this chip right
+now. Brightness cost six milestones to the firmware's MUX mode. This cost
+three milestones to the firmware's USB-C power state - a DIFFERENT firmware
+fact about the same chassis, invisible to every register we can read, and
+clearable only by a hardware reset the OS cannot issue.
+
+  So the configuration a reading comes from now includes: the MUX mode (2zw),
+  AND whether the Type-C subsystem is alive. The second one needs a power-key
+  hold to establish, and the cheap proxy is `ioreg -p IOUSB`: if the port
+  enumerates nothing on a cable that carries data, the subsystem is down and
+  no amount of DCN register reading will say so.
+
+PRACTICAL CONSEQUENCE, STATED SO THE NEXT NULL IS CHEAP: if HPD2 reads 0 with
+a cable the user says is plugged in, the FIRST question is not "what changed
+in our code" and not "which port is it in" - it is "does the port enumerate
+USB at all, and has the machine had a 30-second power-key hold since it last
+worked?" Three milestones went into the gap between "the chip sees nothing"
+and "the chassis is not presenting anything to the chip".
+
+WHAT IS STILL OPEN - unchanged by any of this, and it is the user's goal:
+
+  OTG1..3 read 0x300. No pipe is lit. Everything upstream of the output is
+  established end to end - wired (2B4), engine configured and bound (2B9), our
+  own transactions carried (2BB), full capability and timing set readable
+  (2BD), and all of it reproduced byte-for-byte here. Every remaining step is
+  OUTPUT-side: link training (ours - link_dp_training.c has zero dmub
+  references, 2BE), a second OTG and HUBP, a DIG encoder, and a second
+  IOFramebuffer - getDisplayModeCount() has returned 1 since 2sl.
+
+  And 2C0's measurement stands in the way of the DMUB route: this firmware
+  does not answer an inbox command (boot 275's QUERY_FEATURE_CAPS came back
+  byte-identical with ret_status still set), while every hardware bring-up
+  step is a DMUB_CMD__VBIOS sub-type because dcn31_resource.c:934 sets
+  .dmub_command_table = true. That needs re-examining before any of the
+  bring-up is built.
