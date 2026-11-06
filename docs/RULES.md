@@ -2619,7 +2619,50 @@ name in both halves, and a send is refused unless PHY0 reads LIT as a control.
 Read `RBFBDigVerdict` (0 STILL / 1 MOVED / 2 LIT) with `RBFBDigBefore`,
 `RBFBDigAfter` and `RBFBDigRefWord`. **STILL means "no effect with
 `enc1_configure_encoder` not reproduced", not "the firmware discards VBIOS
-commands".**),
+commands".**
+**2E4 SENT IT (boot 443) AND THE FIRMWARE CONSUMED IT.** refusal 0, the wire
+format byte-exact to 2E1's derivation (hpdsel **3** not 2, HPO_instance **244**
+not 0), and **RPTR advanced 2368 -> 2432 over our slot** - which **eliminates
+2zr's "the DMCUB reads a different inbox base"**, the one of its three
+explanations 2D9 named as blocking the bring-up path. The address question is
+closed **by the firmware's own pointer**, not by our write sticking, which is
+all 2DA had. The slot came back unchanged, which is the **contract** (2D9: of
+the seven sub-types only `QUERY_DP_ALT` returns data) and not 2zr's silence.
+PHY2 byte-identical with PHY0 reading lit as the control, so verdict STILL.
+The ack **timed out at 1 ms** and the command was consumed anyway: recorded as
+a timing difference, **not a mechanism** - one sample, a different command type
+from 2DA's acked ABM sends, a different boot (rule 17). It does justify a
+longer spin.
+**2E5 BUILT THE ENCODER HALF, the one alternative left.**
+`enc1_configure_encoder`'s two writes on link encoder 2, run inside the same
+call before the send: `DP_CONFIG` **0x210b** is a **REG_SET with init 0** (the
+whole word - safe ONLY because it has exactly one field, `DP_UDI_LANES` bits
+1:0, which was checked) and `DP_DPHY_SCRAM_CNTL` **0x211e** is a
+**REG_UPDATE**, an RMW that must preserve BS_COUNT and KCODE. Stride 0x100,
+five instances, BASE_IDX 2, max 0x251e **below** `rb_dpalt_dw_max()`'s 0x2ca6
+so no new mapping - **pinned by the hosttest, not trusted** (2DD is what a
+readable wrong address costs). Instance 0 is the panel's encoder, refused by
+name; the dcn302/dcn312 deny list is re-checked on the machine. The
+**readback** decides (`RBFBEncApplied`), so "the configure did not take" stays
+separable from "it took and the PHY still did not move". `{"RBFBDigEnc": 0|1}`
+with `dmubbl dig 2 noenc` as 2E4's arm, both keys in ONE `setProperties` call.
+Read `RBFBEnc{Inst,Refuse,Ran,Applied,CfgBefore,CfgAfter,ScramBefore,ScramAfter}`.
+**RULE 46, A NEAR MISS: DCN 3.1 has its OWN `enable_dp_output`** and 2E1
+reasoned from DCN 2.0's. `dcn31_link_encoder_enable_dp_output` branches on
+`link_enc_cfg_is_transmitter_mappable()`, and the `else` arm is a DIFFERENT
+command - `DPIA_DIG1_CONTROL`, keyed on `enc_id`, `lanenum` = lane_count (NOT
+-1), **hpdsel hardcoded 6**. This port takes the first arm because it is DP
+**alt mode** and not **DPIA** (DP tunnelled over USB4): 2BB read native-AUX
+DPCD, 2B9 bound AUX2 to HPD2, 2BE found no USB4 router. **`DP_IS_USB_C` does
+not decide it** - "USB-C connector" and "tunnelled link" are two facts and one
+bit reads as both. 2E1's conclusion survives; its stated reason did not exist.
+Generalisation: **checking that a delegate exists is not checking that it is
+REACHED.** Still not reproduced, and named so a STILL cannot be over-read:
+`DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` (2E1 recorded `dig_encoder_sel_to_atom`
+returning 0 unconditionally as a **missing step, not a free field**) and the
+pixel clock (VBIOS sub-type 2). Framebuffer **C99666B0** - 2E2, 2E3 and 2E5
+install as ONE binary, since 2E3's 6CB9945A reached the collection and never
+booted.),
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other
