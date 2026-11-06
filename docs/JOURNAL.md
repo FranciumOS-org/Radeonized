@@ -57744,3 +57744,40 @@ says so.** `at setup 0x01` is already published and is exactly the fact rule
 34 wants; it was sitting in `hpdlook.sh`'s output through all of 2B9-2BD being
 described as "whatever cable state THAT boot had" rather than as the
 precondition the AUX work depends on.
+
+**2D6 ADDENDUM - THE REPLUG IS A MEASURED NULL, ON ALL FIVE BLOCKS.** The user
+unplugged and replugged the monitor on the USB4 port. After it: HPD1-4 status
+**0x00000000**, sink mask **0x01**, `transitions` **0**, enabled mask 0x1f, and
+AUX1-4 still `AUX_EN` CLEAR at dphy 0x00004500. **No block saw the event**, and
+because all five are enabled and `RBFBHpdSinkEver` ORs every sample while
+`RBFBHpdChanges` counts transitions, a cable that went in and out between two
+publishes would still have left a trace. It left none. That is a real null, not
+an unread one (2B3 built both of those guards for exactly this reading).
+
+**One number did move and it is NOT the event: HPD0 went 0x14000012 ->
+0x16000012.** Bits 24-31 are
+`DC_HPD_INT_STATUS__DC_HPD_TOGGLE_FILT_DISCON_TIMER_VAL` (shift 0x18 in
+`dcn_3_1_2_sh_mask.h`) - a disconnect-filter TIMER field, free-running, on the
+INTERNAL panel's block, which was never unplugged. Read the field definition
+before reading the number; 2B9's lesson in the smaller direction, and without
+it this looks like the panel reacting to an external replug.
+
+**What the null points at, and it is 2D6's own finding one step further.** The
+AUX engine is not configured and now the HPD block does not see a plug event
+either, so the thing missing is upstream of both: nothing has routed that
+connector to this chip's display engine on this boot. Two mechanisms would give
+exactly this and are not yet distinguished - (a) the `DC_GPIO_HPD*` PAD is not
+routed to the HPD block, a separate register group 2BF already identified by
+name while looking for something else, so `DC_HPD_EN` being set says nothing
+about whether the pin reaches it; and (b) **DP alt mode was never entered**,
+since the lanes and the HPD signal are switched by the Type-C PD controller and
+this card has recorded since the USB4 bullet that no OS driver does that -
+so with alt mode unentered there is no HPD at the GPU pin to detect, which is
+the SAME reason AUX2 is dark.
+
+**Both collapse to one experiment, which is the one already named: boot with
+the cable in.** The firmware enters alt mode and probes at power-on - that is
+what boot 293 inherited - so a boot with the monitor attached restores the
+state 2BB/2BD needed AND answers the picker question in the same boot. A
+hot-plug after boot is, on this evidence, simply not detected by anything in
+this machine's software, ours included.
