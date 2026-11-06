@@ -43,6 +43,7 @@ extern "C" {
 #include "rb_dig.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
+#include "rb_dpaltq.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -601,6 +602,7 @@ private:
      * The target is PHY2 (2E1's ROM-derived UNIPHY_C), which drives nothing,
      * and PHY0 - the live panel - is refused by name. */
     bool               digArmed;         /* -rbgpufbdig */
+    bool               dpaltqArmed;      /* -rbgpufbaltq (2EA) */
     uint32_t           digCalls;         /* every handler entry, monotonic */
     uint32_t           digSends;         /* pushes that reached the ring   */
     uint32_t           digRan;           /* experiments that sampled after */
@@ -645,6 +647,17 @@ private:
      * Linux's own "is this transmitter up" test - was never sampled. */
     uint32_t           digbePost[RB_DIGBE_COUNT];
     uint32_t           digbeEnPost[RB_DIGBE_COUNT];
+    /* 2EA: the chip's own answer to "is DP granted on this PHY", swept over
+     * all five. Read-only - every field but phy_id is an output. The ROM's
+     * DP_IS_USB_C pattern (2E1) is the control and lives in rb_dpaltq.h. */
+    struct rb_dpaltq_reply dpaltqReply[RB_DPALTQ_PHY_COUNT];
+    uint32_t           dpaltqRefuse[RB_DPALTQ_PHY_COUNT];
+    uint32_t           dpaltqVerdict;
+    uint32_t           dpaltqUsbMask;
+    uint32_t           dpaltqFill;
+    uint32_t           dpaltqRetCleared; /* bitmask: firmware cleared RET   */
+    uint64_t           dpaltqCalls;      /* monotonic, bumped before any    */
+    uint32_t           dpaltqSends;
     uint32_t           digbeDiffMask;    /* rb_digbe_diff_mask() on CNTL    */
     uint32_t           digbeEnDiffMask;  /* ... and on EN_CNTL              */
     bool               digbePostDone;
@@ -1012,6 +1025,7 @@ private:
     void     encSurvey(void);
     void     digbeSurvey(void);
     void     digbeResample(void);
+    uint32_t dmubDpAltQuery(uint32_t fill);
     uint32_t encConfigure(uint32_t inst, uint32_t lanes);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);

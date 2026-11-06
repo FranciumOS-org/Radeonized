@@ -60333,3 +60333,190 @@ be able to read off, not reconstruct.
 
 Framebuffer **A55CBCC2** unchanged (this is a reading of the 2E8 binary, not a
 new one); `dmubbl` rebuilt, userspace only.
+
+---
+
+## 2EA — the chip's own answer: QUERY_DP_ALT, built because 2C0's refusal was measured at the wrong address
+
+**Status: built and hosttested. NO BOOT HAS RUN IT.** Framebuffer
+**AFC2BA4A**.
+
+### Why this, and not the FE write the user's go authorised
+
+The ask is "just make my USB C HDMI work". The next step on the written list
+was `DIG_FE_SOURCE_SELECT` — 2E8 established it is genuinely undone and
+Linux says no firmware could ever have made it — plus the pixel clock
+(VBIOS sub-type 2), and 2E9 proved both have a working mechanism underneath.
+Front-loading the static read before spending a boot (the standing
+instruction) moved the order, for one reason:
+
+**PHY2's `RDPCSTX2_PHY_CNTL6` reads `0x00063333` — `DPALT_DISABLE` asserted
+AND acked — on boots 443, 444, 447 and 448, with a live sink on the cable.**
+`dcn31_link_encoder_is_in_alt_mode()` returns `dp_alt_mode_disable == 0`.
+By that register DP is **not granted on this PHY**, and if that is right then
+the FE write, the pixel clock, the OTG and the link training are all futile —
+a PHY with no DP lanes handed to it cannot light whatever we connect to it.
+
+**Against it, equally solid:** 2BB read a full DPCD and 2BD a full EDID over
+**AUX2**, and on a Type-C connector the AUX pair only exists *as AUX* once DP
+alt mode has been negotiated by the PD controller. So the CONNECTOR is in alt
+mode. Two instruments, both carefully taken, and they disagree. Two candidate
+resolutions:
+
+- **(a) the register is right.** The PD controller granted USB only, and the
+  external display is a chassis/firmware matter like 2zw's MUX mode and 2D8's
+  dead Type-C subsystem — **rule 47 for the third time on this machine.**
+- **(b) the register is the wrong one for this part.**
+  `dcn31_link_encoder_is_in_alt_mode` is not what Linux reads on a
+  `YELLOW_CARP_B0`: there UNIPHY_A/B/E read `RDPCSTX_PHY_CNTL6` and
+  **everything else, UNIPHY_C included, reads `RDPCSPIPE_PHY_CNTL6`.**
+  `YELLOW_CARP_B0` is `0x20`, `hw_internal_rev` — **not** our PCI rev `0x0a`
+  (2BE's warning), and whether this chip is B0 is **not established.**
+  `RDPCSPIPE` is not a way out either: `dpcs_4_2_0_offset.h` gives PIPE0/2/4
+  the same offset `0x2d73` and PIPE1/3 the same `0x2e4b`, so "RDPCSPIPE2" IS
+  PIPE0's address and reading it would be **2DD's trap** — a plausible answer
+  from a register that is not the instance asked about.
+
+**So the register route cannot settle its own question, and the chip can.**
+`..._TRANSMITTER_QUERY_DP_ALT` (`DMUB_CMD__VBIOS` sub-type **26**) takes
+`phy_id` in and returns `is_usb`, `is_dp_alt_disable` and `is_dp4`. That is
+2B9's lesson where no register can serve it: ask the field that names the
+fact.
+
+### 2C0's refusal is withdrawn, and the reason is rule 39 in reverse
+
+2BF named this command as the way to identify the USB-C PHY with no
+index-convention inference. **2C0 then refused to build it**, because 2zr had
+measured this firmware *not* answering an inbox query — boot 275's
+`QUERY_FEATURE_CAPS` came back byte-identical with `ret_status` still set — so
+a sweep "would reproduce a known failure".
+
+**That reading was taken at CW4.** 2DA identified the ring as **REGION4** on
+two independent quantities agreeing on the integer 37, and **2E9 proved a
+command sent there EXECUTES** (`DIG_ENABLE` 0 → 1 on the targeted instance
+alone). So the reply path has never been exercised at the right address, and
+2C0's "it would reproduce a known failure" is a statement about a different
+address. **A null taken in a configuration that cannot exhibit the effect does
+not establish the effect's absence** — rule 39's usual direction is "do not
+promote such a reading to a frontier"; this is the same rule used to *reopen*
+a line that was closed on one.
+
+Worth stating plainly because it recurs: **2BF → 2C0 → 2EA is the third time
+a line was closed on a reading whose configuration was later invalidated**
+(2zu's backlight null taken in hybrid mode, 2D6/2D7's Type-C nulls taken on a
+dead port, this). Nobody went back through the record after 2DA.
+
+### The one deliberate deviation from Linux, and why the null needs it
+
+`query_dp_alt_from_dmub()` memsets the command to zero and sends `phy_id` in;
+the other three bytes are outputs. **If the firmware does not answer, the slot
+comes back as we wrote it — three zeros — which is indistinguishable from a
+real reply of "not USB, alt not disabled, not DP4".** That is the exact shape
+of rule 14 at the firmware boundary.
+
+So the three OUT bytes are pre-filled with **0xFF**, which is not a valid
+value for any of them: "unchanged" is visibly unchanged and "answered" is
+visibly 0 or 1. It is a deviation, so it is made **testable** rather than
+argued — `rb_dpaltq_build()` takes the fill byte and `dmubbl dpaltq zero`
+sends Linux-exact zeros as the control.
+
+**And the hosttest refuted the comment that introduced it.** The first draft
+wrote that under the zero fill the NO_REPLY branch "cannot fire". **It fires** —
+the check compares against `fill`, so with `fill` 0 a *genuine* reply of three
+zeros is reported as NO_REPLY. The ambiguity does not go away under the zero
+fill; it only changes which label it wears. The sentinel's actual value is
+that under it the NO_REPLY label is a **true** statement. Both the header and
+the test case now say so, and the case asserts both directions. **A comment is
+not a test**, written one milestone after 2E7 found a hosttest case passing
+with its stated reason wrong.
+
+### What is built
+
+`src/common/rb_dpaltq.h` — the builder, the decode and the sweep verdict.
+
+- `payload_bytes` is **4**, not the transmitter command's 60: Linux sizes this
+  one off `sizeof(cmd->query_dp_alt.data)` and not off the union (2E2). The two
+  commands really do declare different sizes, so a copied constant would have
+  been wrong. Pinned.
+- Refusals are **codes** numbered clear of rb_pg's 20-25 and rb_dig's 30-37:
+  50 not armed, 51 bad phy, 52 push refused, **53 NO_REPLY**, 54 a byte that is
+  neither 0 nor 1, 55 the reply names a different phy. `NO_REPLY` is decided
+  **before** the 0/1 range test so it keeps its own code; the phy echo is
+  checked **last** and only to catch a reply written for another phy, because
+  `phy_id` is an IN field and is therefore no evidence of a reply on its own.
+- **The control is the ROM, and it is an independent source.** 2E1 parsed
+  `firmware/680m-vbios.rom` and read `atom_encoder_caps_record` bit 0x100,
+  `DP_IS_USB_C`: **set on display paths 2/3/4, clear on 0/1.** So a live reply
+  must give `is_usb` = 0,0,1,1,1 across `phy_id` 0..4 — four bits of agreement
+  with a source this command did not derive from. `RB_DPALTQ_ROM_USB_MASK`
+  0x1C, pinned against the journal rather than against this file's prose.
+- **2BF's own stated control is the refusal:** uniform `is_usb` across the
+  phys that answered carries no information, because the panel's PHY is known
+  not to be USB-C — so all-set and all-clear both return `V_UNIFORM`, and a
+  single answered phy is uniform by construction.
+- `rb_dpaltq_dp_granted()` returns **-1** where it cannot say, never a
+  plausible 0 or 1 (rule 14).
+- Per-phy refusals are kept **per instance, not last-wins**: "phy 2 answered
+  and phys 0,1 did not" is the shape of a working reply path and a scalar
+  cannot express it. 2E9's instance-level diff is why that mattered there too.
+
+The panel's PHY is deliberately **not** refused here, unlike every write path
+in this kext: the command changes nothing, and phy 0 is the control the
+verdict needs.
+
+**Nine break-it checks, one per guard, and `break5` fired NOTHING** — the
+"answered == all five" term in `ROM_MATCH` was inert. 2E7's rule applied
+(a break that changes no assertion is a result about the guard): the case that
+makes it load-bearing is a **four-of-five** answer, reachable because `usb`
+can only name answered phys, so `usb` 0x1C needs phys 2,3,4 answered and with
+phy 0 answering too the set is 0x1D — non-uniform and incomplete. ROM_MATCH is
+a claim about all five, so four agreeing is a reading and not the
+verification. Added; the term now fires.
+
+Kext side: `dmubDpAltQuery(fill)` sweeps phy 0..4 in **one** `setProperties`
+call. The reply is decoded out of `dmubReplyGot`, which `dmubPush` already
+copies back from the slot after its own bounded ack wait **for every command** —
+so the reply costs nothing new and nothing is re-read from the ring (a second
+read would be a different sample from the one the ack bounded, 2zp).
+`RBFBDpAltQCalls` is monotonic and bumped **before** any refusal, so the tool
+polls it past its own pre-set value instead of sleeping on a snapshot — rule
+31 at a dial's verification, which has now been paid for three times (2C5's
+four false MISMATCHes, 2D1's aborted `subret` run, 2E3's refused send).
+
+### Rule 30 bit for real, rather than being checked and cleared
+
+The obvious token `-rbgpufbdpaltq` has **`-rbgpufbdpalt` — the line directly
+above it in `start()` — as a strict prefix**, which is the one arrangement
+rule 30 names. The kernel's own parse is exact so it would have worked there;
+what breaks is every shell grep in `tools/` and `efi.sh`'s report of which
+rbgpu tokens it kept. The token is **`-rbgpufbaltq`**, which diverges from the
+whole `-rbgpufba` family (`-rbgpufbaux`, `-rbgpufbaccel`, `rbgpufbatymb`) at
+the next character. Checked by hand because an opt-in token is not in
+`rb_defaults.h`'s table and its hosttest therefore does not cover it — the gap
+2BA's comment records. Verified mechanically over every real `argOn()` token
+in `src/`: **21 tokens, no prefix pairs.**
+
+It arms its own dependency (`dmubBlArmed`), like `-rbgpufbdig`, because
+otherwise `dmubPush` refuses with code 1 for a reason that looks nothing like
+its cause — rule 34 made structural, which is what 2DA lost two sessions to.
+The tool's REGION4 precondition is now a shared `ensureRegion4()` rather than
+a copy, for the same reason.
+
+### Said before the reading, so it can be wrong
+
+- **`is_usb` = 0,0,1,1,1 and `is_dp_alt_disable` = 1 on phy 2** → the register
+  was right all along, DP is not granted, and the external display is a PD /
+  firmware matter on this chassis. Rule 47 for the third time. **It would NOT
+  resolve the tension with 2BB/2BD** — two instruments would still disagree
+  about whether alt mode is negotiated, and that becomes the next question.
+- **`is_dp_alt_disable` = 0 on phy 2** → `RDPCSTX2_PHY_CNTL6` is the wrong
+  register for this part, the `YELLOW_CARP_B0` branch applies, and the bring-up
+  continues with the FE connection and the pixel clock.
+- **Nothing answers** → 2zr's reading reproduced at the **right** address,
+  which makes it a result rather than 2C0's inference: REGION4 executes
+  commands and returns no data. The reply route closes and the question stays
+  with the register.
+- **Uniform `is_usb`** → refused by 2BF's own control; the bytes are ours, not
+  the firmware's.
+
+One command: `sudo env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dpaltq`.
