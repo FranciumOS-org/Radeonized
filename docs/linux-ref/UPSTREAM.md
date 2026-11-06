@@ -383,6 +383,7 @@ raw.githubusercontent.com was reset by the network in use):
 | link_dp_dpia.c | drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_dpia.c |
 | link_detection.c | drivers/gpu/drm/amd/display/dc/link/link_detection.c |
 | dal_asic_id.h | drivers/gpu/drm/amd/display/include/dal_asic_id.h |
+| atomfirmware.h | drivers/gpu/drm/amd/include/atomfirmware.h |
 
 `dmub_cmd.h` is the authoritative DMUB command surface; 2BE reads the
 `DMUB_CMD__VBIOS` sub-types out of it and `command_table2.c` for which BIOS
@@ -391,3 +392,36 @@ for the NEGATIVE result - they contain no DMUB reference, which is what
 establishes that native DP training is driver-side. The DPIA pair is vendored
 for contrast only: DPIA is USB4-tunnelled DP and needs a USB4 router, which
 macOS does not expose on this machine (2B4).
+
+
+**atomfirmware.h** (2E0, fetched 2026-11-06; last upstream commit touching it
+`15bdd0eaaf927c70f92e84280cb4268576f8e81a`, 2026-03-13; unmodified, 4642
+lines, AMD's own MIT header). `dmub_cmd.h:43` **includes** this file, so it is
+not a new dependency - it is the one dmub_cmd.h already had and this tree was
+missing. It carries every payload definition the `DMUB_CMD__VBIOS` bring-up
+commands need and that 2DC/2DF recorded as unwritable:
+
+- `ATOM_TRANSMITTER_ACTION_*` - **spelled with TWO Ts in the enum** while
+  `dmub_cmd.h`'s own comment says `ATOM_TRANSMITER_ACTION_xxx` with one.
+  DISABLE 0, ENABLE 1, LCD_BLOFF 2, LCD_BLON 3, BL_BRIGHTNESS_CONTROL 4,
+  SELFTEST_START 5, SELFTEST_STOP 6, INIT 7, DISABLE_OUTPUT 8, ENABLE_OUTPUT
+  9, SETUP 10, SETUP_VSEMPH 11, POWER_ON 12, POWER_OFF 13. Rule 5's shape on
+  a constant name rather than a mangled symbol - a grep for the one-T spelling
+  finds the comment and not the values.
+- `enum atom_encode_mode_def` - DP/DP_SST **0**, LVDS 1, DVI 2, HDMI 3,
+  DP_AUDIO/DP_MST 5, CRT 15, DVO 16.
+- `struct dig_transmitter_control_parameters_v1_6`,
+  `union dig_encoder_control_parameters_v1_5`,
+  `struct set_pixel_clock_parameter_v1_7`,
+  `struct enable_disp_power_gating_parameters_v2_1`.
+
+**What this changes:** 2DC declined the transmitter command because its
+payload "comes in two layouts chosen by the atom table revision in ROM" and
+`ATOM_TRANSMITER_ACTION_*` was "only inside a comment". The first half was
+about the REGISTER path - `command_table2.c:init_transmitter_control` picks by
+crev - and the DMUB path pins its own version in the ABI:
+`dmub_dig_transmitter_control_data_v1_7` is defined field-for-field inside
+`dmub_cmd.h` itself (line 3106), with `phyid`, `action`, `lanenum`, `hpdsel`
+("=2: HPD2"), `digfe_sel` and `symclk_10khz`. The second half is now a read
+rather than a recollection. So the transmitter IS writable, with no guessed
+constant and no ROM access.
