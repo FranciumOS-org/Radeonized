@@ -120,6 +120,7 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubReplySlot = 0;
     dmubConfirms = 0;
     dmubWinSel = 0;
+    dmubSelSets = 0;
     dmubInboxInR3 = 0;
     for (unsigned i = 0; i < 9u; i++) { dmubRegRegs[i] = 0; dmubRegScan[i] = 0; }
     for (unsigned i = 0; i < RB_DMUB_WINSEL_COUNT; i++) {
@@ -1101,6 +1102,7 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubScratch7", (uint64_t)dmubScratch7, 32);
     setProperty("RBFBDmubDataout", (uint64_t)dmubDataout, 32);
     setProperty("RBFBDmubWinSel", (uint64_t)dmubWinSel, 32);
+    setProperty("RBFBDmubSelSets", (uint64_t)dmubSelSets, 32);
     setProperty("RBFBDmubInboxInR3", (uint64_t)dmubInboxInR3, 32);
     {
         OSData *d = OSData::withBytes(dmubRegRegs, sizeof(dmubRegRegs));

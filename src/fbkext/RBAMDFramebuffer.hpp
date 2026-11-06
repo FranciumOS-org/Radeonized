@@ -633,6 +633,7 @@ private:
     };
     RBDmubCand         dmubCand[RB_DMUB_WINSEL_COUNT];
     uint32_t           dmubWinSel;
+    uint32_t           dmubSelSets;      /* 2E3: monotonic select count */
     uint32_t           dmubInboxInR3;
     uint32_t           dmubRegRegs[9];   /* r4/r5/r6: off_lo, off_hi, top */
     uint32_t           dmubRegScan[9];   /* r4/r5/r6: run, bad, abm */
