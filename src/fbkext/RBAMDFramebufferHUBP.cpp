@@ -183,8 +183,16 @@ bool RBAMDFramebuffer::hubpSetup(void)
     if (!regs) { hubpRefuse = 3; map->release(); return false; }
 
     /* Armed AND the aperture covers it. Both halves are required and both are
-     * published, so "no reading" can be told from "refused" (rule 14). */
-    dpaltReady = dpaltArmed && dpaltFits;
+     * published, so "no reading" can be told from "refused" (rule 14).
+     *
+     * 2E2: `digArmed` arms the same block, because the DIG1 transmitter
+     * experiment's PRODUCT is RDPCSTX_PHY_CNTL6. It is ORed in rather than
+     * left as a second boot-arg the user has to remember: an experiment that
+     * needs two tokens in the right combination is one that will be run with
+     * one of them missing, and its refusal would then look like a chip
+     * answer (rule 34, the same reason dmubDigExperiment is a single call).
+     * The aperture half is unchanged and still fails only itself. */
+    dpaltReady = (dpaltArmed || digArmed) && dpaltFits;
 
     /* Gate 1: are we addressing DCN at all? 2oq's signature, now decided by
      * rb_hubp_otg_gate() so the hosttest owns it and the HDMI case is

@@ -31,6 +31,7 @@ int otg_tests(void);
 int hubp_tests(void);
 int hpd_tests(void);
 int pg_tests(void);
+int dig_tests(void);
 int aux_tests(void);
 int dpcd_tests(void);
 int dpalt_tests(void);
@@ -864,6 +865,7 @@ int main(int argc, char **argv)
     failures += hubp_tests();
     failures += hpd_tests();
     failures += pg_tests();
+    failures += dig_tests();
     failures += aux_tests();
     failures += dpcd_tests();
     failures += dpalt_tests();

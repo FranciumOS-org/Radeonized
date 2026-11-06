@@ -88,6 +88,16 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubDomMoved = 0;
     dmubDomRan = 0;
     dmubDomCalls = 0;
+    /* 2E2 */
+    digCalls = 0;
+    digSends = 0;
+    digRan = 0;
+    digRefuse = 0;
+    digPhy = 0;
+    digBefore = 0;
+    digAfter = 0;
+    digRefWord = 0;
+    digVerdict = 0;
     pgSamples = 0;
     for (unsigned i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
         pgStatus[i] = 0; pgConfig[i] = 0; pgBefore[i] = 0; pgAfter[i] = 0;
@@ -636,6 +646,88 @@ uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
     return 0u;
 }
 
+/* 2E2: THE DIG1 TRANSMITTER EXPERIMENT - sample, send, sample, in one call.
+ *
+ * Same single-call shape as dmubDomainExperiment above, for the reason
+ * recorded there: an experiment whose arm and action are separate commands
+ * is one that will be run in the wrong order, or split by a reboot that
+ * resets the ring selector, and will then read a stale published value as
+ * its own precondition (rule 34, made structural).
+ *
+ * TWO words are read, and the second one is the point. `digBefore`/`digAfter`
+ * are the TARGET PHY's RDPCSTX_PHY_CNTL6; `digRefWord` is PHY0's, the live
+ * panel's, which 2C1 measured at 0x00194444 and which must still read lit for
+ * the comparison to mean anything. A PHY_CNTL6 block that has stopped
+ * answering the way the one measured reading says it does would give a
+ * difference nobody can interpret - and a reading taken from a block that is
+ * not answering is exactly what cost 2zw six milestones. So the control is
+ * read FIRST and a dark control refuses before anything is sent.
+ *
+ * What is deliberately NOT done: `enc1_configure_encoder`'s two link-encoder
+ * writes (`DP_CONFIG.DP_UDI_LANES`, `DP_DPHY_SCRAM_CNTL.DPHY_SCRAMBLER_ADVANCE`).
+ * They are a block this kext has never written, and the question here is
+ * whether the FIRMWARE executes the command. Their absence is why a STILL
+ * verdict is not on its own "this firmware discards VBIOS commands"
+ * (rb_dig.h says the same at length, and rule 14 is why it is said twice).
+ */
+uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
+{
+    struct rb_dig_params p;
+    uint8_t cmd[RB_DMUB_CMD_SIZE];
+
+    digPhy = phyid;
+
+    /* The target's parameters are the derived Type-C set with the phyid
+     * overridden, so a caller can aim elsewhere but cannot assemble a
+     * half-derived payload - rb_dig.h has the only producer. */
+    rb_dig_typec_enable(&p);
+    p.phyid = phyid;
+
+    /* The control, read before the refusal that depends on it. hubpRegs is
+     * the same BAR5 window the OTG, HPD, AUX and PG reads come from; the
+     * RDPCSTX block sits inside it when dpaltFits (RBAMDFramebufferHUBP.cpp
+     * grows the aperture bound by rb_dpalt_dw_max()). */
+    const int haveRegs = (hubpRegs != nullptr) && dpaltReady;
+    if (haveRegs) {
+        digRefWord = hubpRegs[kRbDmuSeg2Dmub + rb_dpalt_dw(RB_DIG_PHY_PANEL)];
+    } else {
+        digRefWord = 0u;
+    }
+
+    const uint32_t why = rb_dig_refuse(&p, digArmed ? 1 : 0, haveRegs,
+                                       rb_dig_phy_lit(digRefWord));
+    if (why != RB_DIG_OK) { return digRefuse = why; }
+
+    digBefore = hubpRegs[kRbDmuSeg2Dmub + rb_dpalt_dw(phyid)];
+    digAfter = digBefore;
+    digVerdict = RB_DIG_V_STILL;
+
+    rb_dig_build_transmitter(cmd, &p);
+
+    const uint32_t rc = dmubPush(cmd);
+    if (rc != 0u) { return digRefuse = rc; }
+    digSends++;
+
+    /* Bringing a PHY up is not instantaneous - it is PLL lock. Linux waits
+     * on the DMUB command completing and then on its own register polls
+     * elsewhere; neither bound is vendored here, so this reproduces the
+     * SHAPE used for the DOMAIN FSM rather than inventing a number: poll
+     * until the word moves, with a bound, so a command that executed slowly
+     * does not read as one that did nothing (rule 14). 2000 x 10 us = 20 ms,
+     * which is two decimal orders above a PLL lock and still far short of
+     * anything a user would notice; this runs from setProperties, never the
+     * frame path (rule 31). */
+    for (uint32_t spin = 0; spin < 2000u; spin++) {
+        digAfter = hubpRegs[kRbDmuSeg2Dmub + rb_dpalt_dw(phyid)];
+        if (digAfter != digBefore) { break; }
+        IODelay(10);
+    }
+
+    digVerdict = rb_dig_verdict(digBefore, digAfter);
+    digRan++;
+    return digRefuse = RB_DIG_OK;
+}
+
 void RBAMDFramebuffer::dmubTeardown(void)
 {
     dmubRing = nullptr;
@@ -926,6 +1018,25 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubDomGate", (uint64_t)dmubDomGate, 32);
     setProperty("RBFBDmubDomMoved", (uint64_t)dmubDomMoved, 32);
     setProperty("RBFBPgSamples", (uint64_t)pgSamples, 32);
+
+    /* 2E2: the DIG1 transmitter experiment. `digCalls` is monotonic over
+     * every handler entry INCLUDING refusals, so a reader waits on it rather
+     * than on the value it is about to interpret - 2C5's lesson, and the
+     * reason boot 437's dmubbl could report a verdict at all. The two PHY
+     * words are published RAW beside the verdict (2B0/2B4/2B9/2DA: four
+     * times now that has been what let a wrong summary be re-read), at 64
+     * bits because a 32-bit OSNumber with bit 31 set renders as a
+     * sign-extended decimal (2B4). */
+    setProperty("RBFBDigArmed", digArmed);
+    setProperty("RBFBDigCalls", (uint64_t)digCalls, 32);
+    setProperty("RBFBDigSends", (uint64_t)digSends, 32);
+    setProperty("RBFBDigRan", (uint64_t)digRan, 32);
+    setProperty("RBFBDigRefuse", (uint64_t)digRefuse, 32);
+    setProperty("RBFBDigPhy", (uint64_t)digPhy, 32);
+    setProperty("RBFBDigVerdict", (uint64_t)digVerdict, 32);
+    setProperty("RBFBDigBefore", (uint64_t)digBefore, 64);
+    setProperty("RBFBDigAfter", (uint64_t)digAfter, 64);
+    setProperty("RBFBDigRefWord", (uint64_t)digRefWord, 64);
     {
         /* Raw beside any summary, which has paid for itself four times now
          * (2B0, 2B4, 2B9, 2DA): every verdict here rests on a comparison

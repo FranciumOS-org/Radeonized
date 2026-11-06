@@ -40,6 +40,7 @@ extern "C" {
 #include "rb_retire.h"
 #include "rb_dmub.h"
 #include "rb_pg.h"
+#include "rb_dig.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -589,6 +590,24 @@ private:
      * cannot distinguish "not published yet" from "the write was lost"
      * (2C5). */
     uint32_t           dmubDomCalls;
+
+    /* 2E2: the DIG1 transmitter command for the Type-C port - the first real
+     * bring-up step for the external display, and the sixth instrument for
+     * "does this firmware execute a VBIOS command". Same shape as the DOMAIN
+     * experiment above and for the same reason: one call that samples,
+     * sends and samples, so the arm and the action cannot come apart.
+     * The target is PHY2 (2E1's ROM-derived UNIPHY_C), which drives nothing,
+     * and PHY0 - the live panel - is refused by name. */
+    bool               digArmed;         /* -rbgpufbdig */
+    uint32_t           digCalls;         /* every handler entry, monotonic */
+    uint32_t           digSends;         /* pushes that reached the ring   */
+    uint32_t           digRan;           /* experiments that sampled after */
+    uint32_t           digRefuse;        /* the last refusal's code        */
+    uint32_t           digPhy;           /* the phyid last asked for       */
+    uint32_t           digBefore;        /* target PHY_CNTL6 before        */
+    uint32_t           digAfter;         /* ...and after                   */
+    uint32_t           digRefWord;       /* the CONTROL PHY's word         */
+    uint32_t           digVerdict;       /* rb_dig_verdict()               */
     uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
     uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
     uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];
@@ -945,6 +964,10 @@ private:
     void     pgSample(uint32_t *status, uint32_t *config);
     uint32_t dmubSendDomain(uint32_t inst, uint32_t gate);
     uint32_t dmubDomainExperiment(uint32_t inst, uint32_t gate);
+    /* 2E2. Reads the target's and the control's RDPCSTX_PHY_CNTL6 either
+     * side of one DIG1 transmitter ENABLE. Armed half only; the PHY survey
+     * it judges by is dpaltSample(), which runs unarmed. */
+    uint32_t dmubDigExperiment(uint32_t phyid);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only
