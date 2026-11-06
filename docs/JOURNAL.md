@@ -58838,3 +58838,94 @@ unchanged - 0x34c0 + 0x8e is far under the HPD block's 0x34c0 + 0x1f36, which
 **STILL NO BOOT HAS SENT A DOMAIN_CONTROL COMMAND.** Two boots have now
 refused before the send, both correctly, for two different reasons - one a
 defect of mine and one a fact about the chip.
+
+
+## 2DF - all seven domains are in one state: the power-up direction is EXHAUSTED
+
+Boot 437 (continued), the 2DE framebuffer:
+
+```
+domain          0        1        2        3       16       17       18
+live STATUS  10000000 10000000 10000000 10000000 10000000 10000000 10000000
+live CONFIG  00000000 00000000 00000000 00000000 00000000 00000000 00000000
+refusal 24   candidate: none - every domain is in DOMAIN0's state
+```
+
+**The outcome 2DE wrote down as the second of three.** Reading the extra three
+rows was the cheap half and it came back negative: nothing on this chip is
+power-gated. DOMAIN0 scans the live panel, so all seven are in the state of a
+domain driving a display, `CONFIG` is 0 everywhere (no FORCEON, no GATE
+requested), and **a DOMAIN_CONTROL power-up has nothing to act on anywhere.**
+Refusal 24 is right for the third boot running.
+
+**The table is independently corroborated by the driver's own register list.**
+`dcn31_resource.c:753-766` - vendored - enumerates exactly
+`DOMAIN0/1/2/3/16/17/18_PG_CONFIG` and the same seven `_PG_STATUS`, and the
+mask list under it names `DOMAIN_POWER_FORCEON`, `DOMAIN_POWER_GATE` and
+`DOMAIN_PGFSM_PWR_STATUS` per instance. Seven rows, no eighth, matching 2DE's
+hand-built table row for row. That is the strongest statement available that
+the table is complete, and it was in the tree the whole time - 2B9's lesson
+again (read the definition before designing an experiment), found one
+milestone late because 2DC went to the offset header and never to the resource
+file.
+
+**And DOMAIN_CONTROL is the ONLY VBIOS command this project can write.**
+Checked rather than assumed, for all of them:
+
+| sub-type | payload struct | defined in a vendored file? |
+|---|---|---|
+| 0 DIGX_ENCODER_CONTROL | `dig_encoder_stream_setup_parameters_v1_5` | **no** |
+| 1 DIG1_TRANSMITTER_CONTROL | v1_6 / v1_7, chosen by ROM crev | **no** (2DC) |
+| 2 SET_PIXEL_CLOCK | `set_pixel_clock_parameter_v1_7` | **no** |
+| 3 ENABLE_DISP_POWER_GATING | `enable_disp_power_gating_parameters_v2_1` | **no** |
+| 15 LVTMA_CONTROL | `dmub_cmd_lvtma_control_data` | yes - but it is the **eDP panel's** transmitter |
+| 26 QUERY_DP_ALT | reply path, dead since 2zr/boot 275 | - |
+| 28 DOMAIN_CONTROL | `dmub_rb_cmd_domain_control_data` | **yes** |
+
+Every one of those `atomfirmware.h` structs is outside what is vendored, so
+writing any of them means recalling a layout - rule 17's mirror, and 2DC
+already declined the transmitter on exactly that ground. LVTMA is defined, and
+it drives the panel the user is looking at. **So there is no safer substitute
+command to test execution with; the alternatives are a power-DOWN or
+nothing.**
+
+### What a power-DOWN would be, and what is NOT established
+
+The remaining test is `power_gate = 1` on a domain that is idle, then reading
+whether its STATUS word moved. The tool refuses that today by design (2DC) and
+this is the user's decision.
+
+**NOT ESTABLISHED, and it is the whole risk: which block each DOMAIN is.**
+`dcn31_hwseq.c` is not vendored and no vendored file maps them. What there is:
+
+- **Seven domains for four pipes.** Linux's DCN 2.x pattern splits DPP and
+  HUBP (`DOMAIN0/2/4/6` for DPP0-3, `DOMAIN1/3/5/7` for HUBP0-3) and would
+  need **eight**; this chip has DOMAIN0..3 and then jumps to 16. So dcn31 is
+  not that pattern, and one domain per pipe plus three others is the reading
+  that fits. **An inference from a register count, not a source read.**
+- DOMAIN0 is powering a pipe that is scanning, which is measured.
+- OTG1-3 read **0x300** - off - with the cable in (2B9), so pipes 1-3 are idle.
+- DOMAIN16..18 are **unidentified**. They could be DSC, HPO, DWB or something
+  the live display path needs, and nothing here bounds that, so they are worse
+  targets than an idle pipe despite being further from DOMAIN0.
+
+If the one-domain-per-pipe reading is wrong, gating the wrong domain blacks
+out the panel until a reboot. It is not a panic - the kext keeps running and
+SSH stays up - but it ends the session's display.
+
+**The design that shrinks the window, if this is taken: gate and restore in
+ONE call.** `dmubDomainExperiment()` already samples, sends and re-samples
+inside a single `setProperties`; a gate run would sample, send
+`power_gate = 1`, sample, immediately send `power_gate = 0`, and sample again,
+with all three snapshots published. A domain that executes is then down for
+one DMUB round trip rather than until a reboot, and the verdict - **did any
+STATUS word move** - is unchanged. The failure mode left is the restore not
+taking, which costs a reboot.
+
+**The safest target is DOMAIN3, not DOMAIN1**: it is the highest idle pipe
+domain, so an off-by-one in the mapping lands on another idle pipe rather than
+on pipe 0's.
+
+**NOTHING IS BUILT AND NOTHING IS CLAIMED.** Three boots have now refused
+before a send - 436 on my own addressing defect, 437 twice on the chip's own
+uniform state - and no DOMAIN_CONTROL command has been sent.
