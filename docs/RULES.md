@@ -2469,7 +2469,18 @@ four. Even armed nothing is sent until `dmubbl dom` runs. The readback -
 in an aperture already mapped, with no setter. DOMAIN0 is refused by name
 because it is the pipe scanning the panel, a power-UP is refused unless that
 domain already differs from DOMAIN0's state, and the tool refuses
-`power_gate = 1` outright),
+`power_gate = 1` outright. **2DD: boot 436 refused with code 24 BEFORE
+sending anything, because `pgSample()` read the DOMAIN block WITHOUT the
+`kRbDmuSeg2` base and got eight zero words** - a readable wrong address inside
+BAR5, which answers plausibly with no error, so "no domain differs from
+DOMAIN0" was true of the words and false of the chip. Fixed; refusal **25**
+rejects an all-zero sample before the reference check so 24 keeps its meaning,
+and `dmubbl dom` now polls the monotonic `RBFBDmubDomCalls` and prints the
+decoded refusal with the before/after words instead of a raw IOReturn.
+**STILL NO BOOT HAS SENT A DOMAIN_CONTROL COMMAND.** General: never index
+`hubpRegs` with a dword offset read off a vendored header without the segment
+base - HUBP, OTG, HPD and AUX all add it, and a wrong address that is
+READABLE is rule 14 at the hardware boundary),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbdmubbl` (2zn - producing on
 DMCUB's inbox 1 is a new hardware-write surface, and even armed nothing is
 sent until `build/out/dmubbl` names a level; the locate and the bring-up scan
