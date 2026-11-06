@@ -1264,6 +1264,21 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
      * poll something monotonic instead of sleeping and comparing two reads of
      * the value it wants to interpret - which is how 2C5's four false
      * MISMATCHes and 2D1's aborted run both happened. */
+    /* 2E5: the encoder dial, ahead of RBFBDigPhy so one setProperties call
+     * carrying both lands the dial before the send it governs. A named value
+     * pins it for the boot in the only sense that matters here - nothing else
+     * writes it - and it is published on the way out (2E3) so the tool reads
+     * the state it just set rather than the previous snapshot. */
+    {
+        OSNumber *e = OSDynamicCast(OSNumber, dict->getObject("RBFBDigEnc"));
+        if (e) {
+            digEnc = e->unsigned32BitValue() != 0u;
+            LOG("RBFBDigEnc -> %d", digEnc ? 1 : 0);
+            dmubPublish();
+            if (!dict->getObject("RBFBDigPhy")) { return kIOReturnSuccess; }
+        }
+    }
+
     {
         OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDigPhy"));
         if (w) {
@@ -1273,9 +1288,12 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
                                             : (uint32_t)want;
             const uint32_t rc = dmubDigExperiment(phyid);
             LOG("RBFBDigPhy %u -> refuse %u, before %#x, after %#x, "
-                "ref %#x, verdict %u, wptr %#x, acks %llu",
+                "ref %#x, verdict %u, wptr %#x, acks %llu; enc %d "
+                "refuse %u applied %u cfg %#x->%#x scram %#x->%#x",
                 phyid, rc, digBefore, digAfter, digRefWord, digVerdict,
-                dmubSendWptr, dmubAcks);
+                dmubSendWptr, dmubAcks, digEnc ? 1 : 0, encRefuse,
+                encApplied, encCfgBefore, encCfgAfter, encScramBefore,
+                encScramAfter);
             dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
