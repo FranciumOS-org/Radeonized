@@ -491,6 +491,14 @@ int main(int argc, char **argv)
                "  dmubbl gpint        GET_FW_VERSION over GPINT - ONE register\n"
                "                      write, no address anywhere. Answers\n"
                "                      whether the DMCUB talks to us at all.\n"
+               "  dmubbl dom [inst]   DOMAIN_CONTROL power-up, the 2DC\n"
+               "                      execution test. ONE call: the kext\n"
+               "                      samples the four DOMAIN_PG_STATUS\n"
+               "                      words, sends, and samples again.\n"
+               "                      RBFBDmubDomMoved non-zero means the\n"
+               "                      firmware EXECUTED it, which no other\n"
+               "                      instrument here can show. Needs\n"
+               "                      -rbgpufbdmubdom.\n"
                "  dmubbl win <0..9>   point the push at a window: 0..6 are\n"
                "                      CW0..CW6, 7/8/9 are REGION4/5/6. Then\n"
                "                      `dmubbl caps` tests THAT address.\n");
@@ -548,6 +556,45 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "pipe") == 0) {
         d = @{ @"RBFBDmubPipe": @(1) };
         printf("\nsending SET_PIPE (bind ABM to OTG0)...\n");
+    } else if (strcmp(argv[1], "dom") == 0) {
+        /* 2DC: the DOMAIN_CONTROL experiment, which is ONE setProperties
+         * call - the kext samples the four DOMAIN_PG_STATUS words, sends the
+         * command and samples them again. Nothing here needs a window
+         * selected first, nothing needs the previous command to have landed,
+         * and no reboot can split it: four sessions in a row were lost to a
+         * two-step handover where the first step had quietly reverted. */
+        long inst = (argc > 2) ? atol(argv[2]) : -1;
+        long gate = (argc > 3) ? atol(argv[3]) : 0;
+
+        if (gate != 0 && gate != 1) {
+            printf("usage: dmubbl dom [inst [0=power up|1=power gate]]\n"
+                   "       inst omitted or negative = let the kext pick the\n"
+                   "       one domain whose state differs from DOMAIN0's\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+        if (gate == 1) {
+            printf("\nREFUSING to pass power_gate=1 from this tool.\n"
+                   "Powering a display domain DOWN is the one direction that\n"
+                   "can take something away; the test only needs a power-UP,\n"
+                   "and the kext refuses DOMAIN0 either way. Edit the kext if\n"
+                   "a gate is ever genuinely wanted.\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+        d = @{ @"RBFBDmubDomain": @((int32_t)inst),
+               @"RBFBDmubDomainGate": @(0) };
+        if (inst < 0) {
+            printf("\nsending DOMAIN_CONTROL power-up to the kext's own\n"
+                   "candidate (the first domain unlike DOMAIN0)...\n");
+        } else {
+            printf("\nsending DOMAIN_CONTROL power-up to DOMAIN%ld...\n", inst);
+        }
+        printf("this is the FIRST DMUB_CMD__VBIOS command this project has\n"
+               "ever sent. The verdict is RBFBDmubDomMoved - a bitmask of\n"
+               "which DOMAIN_PG_STATUS words changed across the send. Any\n"
+               "non-zero value means the firmware EXECUTED an inbox command,\n"
+               "which no other instrument here can show (2DB).\n");
     } else {
         long want = atol(argv[1]);
         d = @{ @"RBFBDmubBl": @(want) };

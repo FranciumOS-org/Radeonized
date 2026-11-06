@@ -1162,6 +1162,53 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             rc, dmubSendWptr, dmubAcks);
         return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
     }
+    /* 2DC: DOMAIN_CONTROL, as ONE call that samples, sends and samples.
+     *
+     * Not three keys, and that is the point. Four sessions in a row were
+     * spent reading a null whose cause was state that moved between the arm
+     * and the action - the wrong physical port, the wrong firmware MUX mode,
+     * the wrong ring window, and that window again after a reboot silently
+     * reset it. Every one of those was a handover that needed two things to
+     * be true at once and only checked one. An experiment that is a single
+     * call cannot be run out of order, cannot be split by a reboot, and
+     * cannot mistake a stale published value for its own precondition
+     * (rule 34 made structural rather than advisory).
+     *
+     * The value is the DOMAIN instance; a negative one means "pick the
+     * candidate yourself", which is what rb_pg_candidate() is for, and it
+     * refuses rather than guessing when no domain is in a state a power-up
+     * could change. */
+    {
+        OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDmubDomain"));
+        if (w) {
+            const int32_t want = (int32_t)w->unsigned32BitValue();
+            OSNumber *g = OSDynamicCast(OSNumber,
+                                        dict->getObject("RBFBDmubDomainGate"));
+            const uint32_t gate = g ? (g->unsigned32BitValue() ? 1u : 0u) : 0u;
+            uint32_t inst;
+
+            if (want < 0) {
+                uint32_t st[RB_PG_DOMAIN_COUNT], cf[RB_PG_DOMAIN_COUNT];
+                pgSample(st, cf);
+                const int cand = rb_pg_candidate(st);
+                if (cand < 0) {
+                    dmubDomRefuse = 24u;
+                    LOG("RBFBDmubDomain auto -> refuse 24, no domain differs "
+                        "from DOMAIN0 so a power-up cannot show anything");
+                    return kIOReturnNotPermitted;
+                }
+                inst = (uint32_t)cand;
+            } else {
+                inst = (uint32_t)want;
+            }
+
+            const uint32_t rc = dmubDomainExperiment(inst, gate);
+            LOG("RBFBDmubDomain %u gate %u -> refuse %u, moved %#x, wptr %#x, "
+                "acks %llu", inst, gate, rc, dmubDomMoved, dmubSendWptr,
+                dmubAcks);
+            return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+        }
+    }
 
     /* 2A0: the frame-time instrument's own dial, ahead of RBFBPubMs because
      * it is the newer one and the two are independent. Setting it RESETS the

@@ -559,6 +559,25 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * prefixes the other and the derived negatives -rbgpunofbdmubbl /
          * -rbgpunofbdrr are distinct for the same reason. */
         dmubBlArmed = argOn("-rbgpufbdmubbl");
+        /* 2DC: DOMAIN_CONTROL - the first DMUB_CMD__VBIOS command this
+         * project sends, and the only remaining test of whether this
+         * firmware EXECUTES an inbox command (2DB retired the other four
+         * instruments). Opt-in and the user's decision, by the same
+         * precedent 2BA set for the first write outside the panel's pipe.
+         *
+         * Rule 30: the longest token it shares a prefix with is
+         * -rbgpufbdmubbl, and the two diverge at the character after
+         * `-rbgpufbdmub` (d against b), so neither prefixes the other and
+         * the derived negatives -rbgpunofbdmubdom / -rbgpunofbdmubbl are
+         * distinct for the same reason. rb_defaults.h's hosttest does not
+         * cover opt-in tokens, so this was checked by hand (2BA).
+         *
+         * What it can change on the chip: the power state of ONE display
+         * DOMAIN that is not the pipe driving the panel - rb_pg_sel_refuse()
+         * refuses DOMAIN0 outright - and a power-UP is refused unless that
+         * domain is currently in a different state from DOMAIN0's, so the
+         * armed default direction turns nothing off. */
+        dmubDomArmed = argOn("-rbgpufbdmubdom");
         /* 2BA: the DPCD read. Opt-in, and the user's decision - it is the
          * first write this project makes to a display block outside the
          * panel's own pipe. Even armed, NOTHING is sent until a userspace
