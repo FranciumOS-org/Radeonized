@@ -57781,3 +57781,68 @@ what boot 293 inherited - so a boot with the monitor attached restores the
 state 2BB/2BD needed AND answers the picker question in the same boot. A
 hot-plug after boot is, on this evidence, simply not detected by anything in
 this machine's software, ours included.
+
+## 2D7 - THE CABLE-AT-POWER-ON EXPLANATION IS REFUTED BY ITS OWN EXPERIMENT
+
+Boot **430** (`rbgpu-boot` 430, uptime 5.9 min at the reading - rule 33, and
+the earlier reads this session were attributed to 428 when two boots had in
+fact happened). The user rebooted **with the monitor attached to the USB4
+port**, which is the experiment 2D6 named.
+
+**It did not restore anything.** `at setup` **0x01**, `RBFBAuxEn` **0x01**,
+`RBFBHpdSetupEn` 0x1f, HPD1-4 status 0x00000000, `transitions` 0, AUX1-4
+`AUX_EN` CLEAR at dphy 0x00004500, OTG1-3 0x300.
+
+**So 2D6's mechanism is wrong.** It said "the firmware enters alt mode and
+probes at power-on - that is what boot 293 inherited", and the cable was there
+at power-on this time and the firmware probed nothing. What differs between
+boot 293 and boot 430 is **not** the cable's presence when the firmware runs.
+Recorded as my own error one milestone after writing it: 2D6's null was real
+and its explanation was a story fitted to a single difference I could name,
+which is rule 17's shape applied to a precondition instead of a value.
+
+**What IS established, over two boots and four instruments, is narrow and
+worth keeping:** on boots 428/429/430 nothing external reaches this chip's
+display engine - no HPD sense on any of five ENABLED blocks, no AUX engine
+configured or bound, no PHY active beyond the panel's, no second pipe - and a
+hotplug is detected by nothing. Against boot 293's AUX2 at dphy 0x00016400
+with a sink on HPD2, **something regressed outside this project's code**: the
+plugin and framebuffer are current (9FE31A5A / 2CE724E1), Eco mode is
+confirmed two ways with the rule-26 control run (the vendor-id pattern finds
+the AMD iGPU, 2 hits, and NVIDIA 0), and macOS is the same 26.7.2 / 25G332.
+
+**Also checked rather than assumed: the port's controller is alive.**
+`system_profiler SPUSBDataType` returns EMPTY on this machine, which is a
+quirk of this setup and not a reading - `ioreg -p IOUSB` shows five
+`AppleUSBXHCIPCI` controllers with the webcam, Bluetooth, a hub, a keyboard, a
+receiver and a headset enumerated. Rule 26: the empty output was validated
+against a known-present case before being read as anything, and it meant
+nothing.
+
+**AND THE PHRASE "IT USED TO WORK" NEEDS A CORRECTION THAT IS NOT PEDANTRY.**
+This port has **never** produced a picture. What worked on boots 293-295 was
+the AUX/EDID PROBE - the channel reaching the sink, 16 bytes of DPCD, a
+128-byte EDID. OTG1-3 read 0x300 on boot 293 too, so no pipe was ever lit and
+no image was ever scanned. The regression is of the probe, not of a display.
+Worth stating because "it used to work" sets the target at the wrong place and
+2zw is what a wrong premise about an output costs.
+
+**THE UNREAD REGISTER GROUP IS THE ONE LEAD, and 2BF named it while looking
+for something else.** `DC_HPD_EN` is set on all five blocks, but the HPD
+*pad* is a separate group - `DC_GPIO_HPD*` pad control, which 2BF enumerated
+when it established there is no HPD-to-PHY register. **This project does not
+read it.** With the pad unrouted, `DC_HPD_EN` being set says nothing about
+whether the pin reaches the block, so "enabled mask 0x1f" may be exactly the
+2B3 trap one level down: an instrument reporting itself on while the signal
+never arrives. That is a read-only survey of the same BASE_IDX 2 aperture the
+HPD and AUX reads already use, so it costs no new write surface - the same
+shape as 2B3 and 2B8.
+
+**Not established and not to be guessed at:** whether the monitor is reached
+by a USB-C-to-DP cable or by an active USB-C-to-HDMI adapter (the MP2412C's
+own inputs are not recorded anywhere in this journal), whether the monitor is
+powered and on the right input, and whether DP alt mode is being entered by
+the PD controller at all. The lane count 2BB read - **2 lanes** - is
+consistent with alt mode and tells us nothing about today. **Each of those is
+a question for the user and none of them is answerable from the registry**,
+which is where this stops until they answer.
