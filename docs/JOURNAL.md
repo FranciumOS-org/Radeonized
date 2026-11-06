@@ -60520,3 +60520,112 @@ a copy, for the same reason.
   the firmware's.
 
 One command: `sudo env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dpaltq`.
+
+---
+
+## 2EB — THE REPLY PATH WORKS, DP ALT MODE IS GRANTED, AND THE ROM MATCHED EXACTLY (boot 449)
+
+**Boot 449, AFC2BA4A loaded == built, `RBFBDpAltQArmed` Yes, `DpAltQSends` 5,
+every `Refuse` 0, `Verdict` 3 = ROM_MATCH, `DigSends` 0.**
+
+```
+ phy  is_usb  alt_disable  is_dp4  echo
+  0     0         1          1      0
+  1     0         1          1      1
+  2     1         0          0      2   <== Type-C
+  3     1         1          0      3
+  4     1         1          0      4
+```
+
+**THIS FIRMWARE ANSWERS AN INBOX COMMAND.** 2zr's null, 2C0's refusal built on
+it, and 2BF's unbuilt sweep are all closed: the reply path works and it had
+only ever been tried at CW4. The sentinel did its job — three 0xFF bytes went
+out and 0/1 came back on all five phys, so "answered" is not an inference.
+
+### Four independent corroborations, not one
+
+1. **`is_usb` mask 0x1C == 2E1's ROM read** of `atom_encoder_caps_record` bit
+   0x100 across display paths 0..4. Four bits of agreement with a source this
+   command did not derive from, and the verdict was pinned against the journal
+   before the run.
+2. **`is_dp4` 0 on phy 2 == 2 lanes**, which is what 2BB read from the Type-C
+   sink's own DPCD and 2E7 read from `DP_CONFIG` = 1.
+3. **`is_dp4` 1 on phy 0 == 4 lanes** on the eDP panel, reproducing 2C1's
+   four-MPLL `PHY_CNTL6` and 2E7's `DP_CONFIG` = 3.
+4. **Phys 3 and 4 are USB-C with `alt_disable` 1 while phy 2 reads 0** — three
+   USB-C ports and only the cabled one has DP granted. A control inside the
+   sample that nothing was designed to produce.
+
+`alt_disable` 1 on phys 0/1 is **not** a reading: they are not USB-C, Linux's
+own function returns false before looking, and `rb_dpaltq_dp_granted()`
+returns -1 there rather than a plausible 0 (rule 14 paying off at the one
+place a wrong answer would have been believable).
+
+### The 2BB/2BD tension is RESOLVED, and the register was the odd one out
+
+2EA named both branches in advance. The answer is **`dis` 0 — DP alt mode IS
+granted on PHY2** — so the AUX instruments were right all along: a Type-C AUX
+pair that carries DPCD and EDID is one whose alt mode was negotiated, and
+`RDPCSTX2_PHY_CNTL6`'s asserted-and-acked `DPALT_DISABLE` is the reading that
+does not fit.
+
+**And reading the source settles the standing rather than the cause.**
+`dcn31_link_encoder_is_in_alt_mode()` tries `has_query_dp_alt()` FIRST and
+**returns on the DMUB answer before any register read**, with the register
+path commented "Legacy path, avoid if possible. Avoids hanging the RDCPSPIPE".
+FW 4.0.15.47 passes that gate. So this is not a second opinion that happens to
+disagree — **it is the answer Linux itself would take on this chip, and the
+register we had been reading for five milestones is the fallback it reaches
+for only when DMCUB is absent.**
+
+**NOT established: WHY the register disagrees.** The `YELLOW_CARP_B0` branch
+(UNIPHY_C reads `RDPCSPIPE_PHY_CNTL6`, not `RDPCSTX_PHY_CNTL6`) is the leading
+candidate and `hw_internal_rev` is still unread here; "the bit latches a
+request rather than a state" and "it means something else on a DPCS 4.2.0
+part" are not excluded. **It does not need settling** — the authoritative path
+answers, and 2DD's aliasing trap means reading `RDPCSPIPE` would produce a
+plausible wrong number. Recorded as unexplained rather than resolved.
+
+**Consequence for 2E4:** its STILL verdict was measuring a register that is
+both the wrong LAYER (2E9: the command's product is the DIG back end) and,
+on this part, quite possibly the wrong ADDRESS. Two separate reasons, found
+one milestone apart.
+
+### `RBFBDpAltQRetCleared` is 0, and that is the result that nearly ate the run
+
+**The firmware wrote the payload and left `RET_STATUS` SET.** Linux's
+`dc_dmub_srv_query_caps_cmd` accepts a reply only if the firmware CLEARED that
+bit — so **by that criterion this valid, ROM-matching, four-ways-corroborated
+reply would have been discarded.**
+
+2EA exposed `rb_dpaltq_ret_cleared()` as its own published fact instead of
+folding it into the verdict, on the stated grounds that "a cleared bit with
+unchanged payload and a set bit with real payload bytes are two different
+findings about the reply path". That decision is what made the reading
+readable; the conjunction the Linux source invites would have returned a null
+on five answered phys. **Fifth instance of publishing the raw beside the
+summary paying for itself** (2B0, 2B4, 2B9, 2E6, this) and the third of 2E7's
+"a conjunction can be correct while one term is inert" — except here the
+inert term would have been actively wrong.
+
+It also weakens 2zr's own criterion retrospectively: `ret_status` still set is
+**not** evidence of no reply on this firmware. 2zr's caps slot was
+byte-identical in the payload too, so the address remains the likely cause
+there — but one of its two stated reasons is now measured false.
+
+### What this unblocks
+
+Every downstream write is no longer futile. The remaining list is unchanged
+and now has a granted link under it:
+
+- **`DIG_FE_SOURCE_SELECT`** — ours to write (2E8: the atom path carries no
+  front end by design), a one-hot mask, `DIGC` = 0x4 onto DIG2.
+- **The pixel clock** — `DMUB_CMD__VBIOS` sub-type **2**, SET_PIXEL_CLOCK,
+  another inbox command of exactly the kind 2E9 proved executes and 2EB proved
+  can even answer.
+
+Then link training over AUX2 (driver-side per 2BE), a second OTG and HUBP, and
+a second `IOFramebuffer`.
+
+No code changed. Framebuffer **AFC2BA4A** unchanged — this is a reading of the
+2EA binary.
