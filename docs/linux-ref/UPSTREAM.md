@@ -384,6 +384,7 @@ raw.githubusercontent.com was reset by the network in use):
 | link_detection.c | drivers/gpu/drm/amd/display/dc/link/link_detection.c |
 | dal_asic_id.h | drivers/gpu/drm/amd/display/include/dal_asic_id.h |
 | atomfirmware.h | drivers/gpu/drm/amd/include/atomfirmware.h |
+| bios_parser_types.h | drivers/gpu/drm/amd/display/include/bios_parser_types.h |
 
 `dmub_cmd.h` is the authoritative DMUB command surface; 2BE reads the
 `DMUB_CMD__VBIOS` sub-types out of it and `command_table2.c` for which BIOS
@@ -425,3 +426,20 @@ crev - and the DMUB path pins its own version in the ABI:
 ("=2: HPD2"), `digfe_sel` and `symclk_10khz`. The second half is now a read
 rather than a recollection. So the transmitter IS writable, with no guessed
 constant and no ROM access.
+
+
+**bios_parser_types.h** (2E0, fetched 2026-11-06; unmodified). Vendored for
+ONE enum, because the field it fills is not what `dmub_cmd.h`'s comment says.
+`dmub_dig_transmitter_control_data_v1_7.action` is documented as "Defined as
+ATOM_TRANSMITER_ACTION_xxx", but `command_table2.c:transmitter_control_v1_7`
+assigns `(uint8_t)cntl->action`, which is dc's own
+`enum bp_transmitter_control_action` with **no translation applied**. The two
+agree numerically by construction and the source says so in a comment -
+"direct VBIOS translation! Just to simplify the translation" - DISABLE 0,
+**ENABLE 1**, BACKLIGHT_OFF 2, ... INIT 7, DEACTIVATE 8, ACTIAVATE 9 (sic),
+SETUP 10, SET_VOLTAGE_AND_PREEMPASIS 11, POWER_ON 12, POWER_OFF 13. That
+matches `ATOM_TRANSMITTER_ACTION_*` value for value - but it is now READ
+rather than assumed, and the `DISABLE_OUTPUT 8 / ENABLE_OUTPUT 9` pair of the
+ATOM enum is `DEACTIVATE / ACTIAVATE` in dc's, so the names do NOT line up
+even where the numbers do. Also carries `struct bp_transmitter_control`,
+which is the input side of the payload fill.

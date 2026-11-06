@@ -58929,3 +58929,85 @@ on pipe 0's.
 **NOTHING IS BUILT AND NOTHING IS CLAIMED.** Three boots have now refused
 before a send - 436 on my own addressing defect, 437 twice on the chip's own
 uniform state - and no DOMAIN_CONTROL command has been sent.
+
+
+## 2E0 - the transmitter command is writable, and my own correction to it
+
+The user's answer to 2DF's question was "whatever makes my USB C HDMI work",
+which is a direction and not one of the three options. Reading two more files
+says the option list was missing the one that serves it, so **the power-DOWN
+is off the table** and nothing was gated.
+
+**`dmub_cmd.h:43` is `#include "atomfirmware.h"`.** The header holding every
+definition 2DC and 2DF recorded as unwritable is the include this tree was
+missing, not a new dependency. Vendored (4642 lines, unmodified, AMD's MIT
+header, upstream `15bdd0eaaf927c70f92e84280cb4268576f8e81a`): the
+`ATOM_TRANSMITTER_ACTION_*` values, `atom_encode_mode_def`, and the v1_6
+transmitter / v1_5 encoder / v1_7 pixel-clock / v2_1 power-gating structs.
+
+**And the v1_7 transmitter payload was in the tree the whole time** -
+`dmub_dig_transmitter_control_data_v1_7`, `dmub_cmd.h:3106, field by field:
+`phyid`, `action`, `mode_laneset`, `lanenum`, `symclk_units`, **`hpdsel` with
+the comment "=2: HPD2"** - which is the Type-C port 2B4 identified - plus
+`digfe_sel`, `connobj_id`, `HPO_instance`.
+
+### CORRECTION, mine, inside the same milestone
+
+The 2E0 commit message says "the DMUB path pins its version in the ABI". That
+is **wrong** and `command_table2.c` says so twenty lines from the code I had
+already read: there are **two** DMUB senders, `transmitter_control_dmcub`
+(which assigns the union's **v1_6** arm) and `transmitter_control_dmcub_v1_7`
+(the v1_7 arm), and `init_transmitter_control` picks between their callers on
+the **ROM crev** exactly as 2DC said. The union has two arms *because* both
+are sent over DMUB. **2DC's blocker was real and I overstated its removal in
+a commit message - rule 17's shape on a source read, caught by continuing to
+read the same file rather than by anything on hardware.**
+
+**What actually changed is still decisive, and it is smaller than I claimed.**
+2DC declined because writing the command meant RECALLING a layout. Both
+layouts are now vendored, so nothing is recalled; what is unknown is which of
+two fully-defined structs this ROM wants. That is not a guess with an
+unreadable outcome - it is a **two-arm experiment whose product is a
+register**: send v1_7, read `RDPCSTX_PHY_CNTL6`; if nothing moved, send v1_6
+and read again. 2C1 already measured that block on this chip, with PHY0 (the
+live panel) reading `0x00194444` - four MPLLs on, PSTATE 0 on every lane - as
+the positive control for what an enabled PHY looks like, and PHY1-4 dark at
+PSTATE 3 with MPLLs off.
+
+**That makes the transmitter a BETTER execution test than the power-DOWN on
+every axis:** it targets a PHY driving nothing, so the panel cannot be lost;
+its product is a register block this project already reads with a measured
+positive control; and unlike gating a domain it is **step one of the actual
+bring-up** rather than a diagnostic detour. 2DF's power-DOWN needed an
+unestablished DOMAIN-to-block mapping and could have blacked out the panel to
+learn one bit.
+
+**A second trap read rather than assumed.** `dmub_cmd.h` documents `action` as
+`ATOM_TRANSMITER_ACTION_xxx`, but `transmitter_control_v1_7` assigns
+`(uint8_t)cntl->action` with **no translation** - that is dc's own
+`enum bp_transmitter_control_action` from `bios_parser_types.h` (now
+vendored), which is numerically identical by construction and says so:
+"direct VBIOS translation! Just to simplify the translation". ENABLE is **1**
+in both. The NAMES diverge where the numbers do not - ATOM's
+`DISABLE_OUTPUT 8 / ENABLE_OUTPUT 9` are dc's `DEACTIVATE / ACTIAVATE` - so
+quoting an action by name across the two enums is its own way to be wrong.
+And the enum spelling differs from the comment: **two Ts** in
+`ATOM_TRANSMITTER_ACTION_*`, one in `dmub_cmd.h`'s prose, so a grep for the
+comment's spelling finds the comment and none of the values (rule 5 / rule 26
+on a constant name).
+
+### Still to read before anything is built
+
+`dig_v1_7.phyid`, `hpdsel` and `digfe_sel` are not the raw dc values - they go
+through `cmd->phy_id_to_atom()`, `cmd->hpd_sel_to_atom()` and
+`cmd->dig_encoder_sel_to_atom()`, the `command_table_helper` translations,
+which are in neither vendored file. **HPD2 is almost certainly not the byte
+2**: the payload comment is 1-based ("=1: HPD1, =2: HPD2") while dc's
+`hpd_source_id` is its own enum, and that is precisely the kind of off-by-one
+that would send a correct command about the wrong connector. Read the helper
+before filling the field.
+
+**NOTHING IS BUILT. No DOMAIN_CONTROL command and no transmitter command has
+been sent, and no domain has been gated.** What is established is only that
+the bring-up path is writable from vendored source and that the execution
+question has a zero-risk instrument.
