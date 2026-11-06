@@ -58350,3 +58350,66 @@ the external display is available. Panel does not move -> the remaining
 candidates must be swept with an EFFECT, not with caps, and the only effect
 this project can observe on demand is the backlight, so it is `win <n>` +
 `pipe` + a level per window, five windows, one session, no reboots.
+
+--------------------------------------------------------------------------------
+2DA addendum 2 - the selector is PER-BOOT, and WPTR independently says 37
+--------------------------------------------------------------------------------
+
+"didnt work still" was taken on boot **435**, up 4 minutes. The caps test was
+boot **433**. Two reboots in between, and `RBFBDmubWinSel` reads **4**: the
+window selector is runtime state with no persistence, so it reverted to the
+locate path's default. `RBFBDmubSendsOk` went 3 -> 2 and `Acks` 3 -> 2, which
+is the tell - **counters do not decrease inside a boot** (rule 8/33, caught by
+arithmetic rather than by remembering to look).
+
+So the `pipe` + `6553` pair went to **CW4**, the window this project's source
+already rules out. REGION4 has still never received an ABM command.
+
+**FOURTH CONSECUTIVE MILESTONE WHERE THE ARM, NOT THE DIAL, WAS WRONG** - 2D8
+the physical port, 2D9 the MUX mode, 2DA the selector, now the selector AGAIN
+across a reboot I did not check for. And 2DA named this exact defect in
+writing ("the only thing standing between a reader and a misleading null is
+remembering to type `win 7`") one entry before handing over a sequence that
+depended on remembering it. **Naming a trap is not avoiding it.** A handover
+must either verify the arm in the same breath as the action, or not depend on
+state that a reboot can silently reset - which here means chaining the
+selector to the send in ONE command, and fixing the default.
+
+WHAT THE SAME READING ESTABLISHED FOR FREE, AND IT IS THE BYTE-LEVEL
+IDENTIFICATION 2zr SAID WAS THE ONLY WAY TO CONFIRM THE ADDRESS:
+
+`RB_DMUB_CMD_SIZE` is **64** bytes. Boot 435's WPTR before our two sends was
+**0x940 = 2368 = 37 x 64**, i.e. the firmware's bring-up left the write pointer
+at **slot 37** - and 2zr recorded the same 2368 on boot 275, so it reproduces.
+After our two sends WPTR reads **2496 = 2368 + 2 x 64**, which confirms the
+arithmetic.
+
+**REGION4's memory scan reads `run 37, bad 0`.** Exactly 37 plausible command
+slots, followed by empty, with no implausible ones - against CW4's `run 0`.
+
+So a REGISTER says 37 commands were written and a MEMORY SCAN of REGION4 finds
+exactly 37 plausible command slots, two independent quantities agreeing on the
+same integer, in a window whose aperture also covers the firmware's own
+`DMCUB_INBOX1_BASE_ADDRESS` of 0x80000000 (REGION4 `top 0x8000ffff`). 2zr's
+note - "'37 commands sit at bring-up' was an inference from the POINTER and
+never from memory" - is now answered: the memory agrees, in a different window
+from the one 2zr was looking at. **REGION4 is the ring.**
+
+WHICH SHIFTS THE REMAINING DOUBT OFF THE ADDRESS AND ONTO ABM. If REGION4 is
+the ring and DMCUB consumes from it (RPTR follows WPTR on every send), then an
+ABM SET_BACKLIGHT placed there should execute - and the thing most likely to
+make it do nothing is that **ABM was never initialised on this chip**. Apple's
+driver does not use DMUB ABM, so there has been no `abm_init`, no ABM config
+and no PWM parameters handed to the firmware; `dmub_abm_set_backlight` writing
+a level into an uninitialised ABM instance is a plausible no-op. **Said before
+the reading so it can be wrong:** the REGION4 ABM test may come back null for
+that reason and not because of the address, in which case the backlight is a
+bad effect-instrument for this question too and the next effect must be a
+VBIOS sub-type whose register change we can read.
+
+NEXT, AS ONE COMMAND SO NO REBOOT CAN SPLIT IT:
+
+    build/out/dmubbl win 7 && build/out/dmubbl pipe && build/out/dmubbl 6553
+
+Verify `selector 7` and `mailbox REGION4` in the LAST invocation's header
+before reading the panel, since that is the one that carries the send.
