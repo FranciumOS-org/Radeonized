@@ -1064,11 +1064,32 @@ table and refuses to install one that does not match the running kernel;
   `rb_default_on_tokens`, and nothing less does.** 2A4 and 2B2 each cost a
   milestone for taking good news on one boot, and this is better news than
   either.
-  **AND RULE 45 IS STILL THE DELIVERABLE AND STILL UNTAKEN.** Every number in
-  2D0/2D2/2D3 is a counter; the ask was "iMessage animations are so laggy".
-  `subret 4`, then use iMessage, Settings and the wifi menu - 2A6 is what
-  letting a benchmark stand for a workload cost the last time the counters
-  looked this good.
+  **2D4: RULE 45'S MEASUREMENT IS TAKEN AND IT IS POSITIVE. The user, on boot
+  426 at `sub` 4 with the hold ON, unprompted: "yup all lags fixed, damn".**
+  That is the deliverable - the ask was "icons in settings load every time and
+  it's slow... iMessage animations... the wifi menu being laggy", and every
+  number in 2C5-2D3 was a benchmark standing in for it, which each of those
+  milestones flagged as an assumption. **The assumption held, and the
+  prediction was published first**: 2C2 named the affected class as "work
+  needing SEVERAL units of GPU work finished before anything can be drawn -
+  Settings' icon loads, menu blurs, animation first frames", which is the
+  user's own three symptoms, and 2D0 measured first paint 13.877 -> 3.514 ms
+  against a 4.0x written down before the run.
+  **NOT a finding: one session, one observer, NO CONTROL AND NO REPEAT** -
+  and rule 45's own text demands all three. 2A1's "lowkey way smoother" was
+  unprompted and agreed with a counter too, and boot 284 showed it was
+  boot-to-boot variance. **The control is one command: `subret 1`, use the
+  same three paths, `subret 4` again** - if the lag returns and leaves, the
+  observation is attributed to the dial inside one session, which is what
+  2zj's four dead brightness milestones never had.
+  **The wedge stays open regardless** (2C2's channel-52 GFX stall, "the random
+  lag", 3.5 s): independent defect, no reason for `sub` to touch it, and one
+  quiet session is 2A6's "a rare event did not occur is not it cannot".
+  **Three independent quantities now point one way** - first paint 3.95x (boot
+  424), rate +94 % interleaved (boot 426), the human observation (boot 426) -
+  and two of the three are the same boot. The 2D3 bar is unchanged. What is new
+  is that **`sub` resets to 1 on reboot, so the next boot is a blind A side the
+  user will feel immediately** - a control nobody has to run on purpose.
   **2D1: NOTHING REFRESHES `RBGPUDiag`, which is why 2C5's prescription was
   not enough.** `scheduleRefreshDiag()` drops a request inside its 250 ms
   window **without re-arming** (2ez's fix for a lock-holding refresh storm -

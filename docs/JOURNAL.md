@@ -57492,3 +57492,58 @@ laggy"; what has been measured is `metal_probe --queues 8` and `paired.sh`.
 A 94 % frame rate with first paint 3.95x faster is the most promising pair of
 numbers this line has produced, and 2A6 is what letting a benchmark stand for
 a workload cost the last time it looked this good.
+
+## 2D4 - RULE 45'S MEASUREMENT, TAKEN AT LAST: "all lags fixed"
+
+Boot 426, `sub` 4, hold ON. The user, unprompted, after using the machine:
+**"yup all lags fixed, damn"**.
+
+**This is the deliverable.** The ask that opened this whole line was "icons in
+settings load every time and it's slow... iMessage animations... the wifi menu
+being laggy" (2C8 recorded it verbatim and then measured counters for six
+milestones). Every number in 2C5-2D3 is `metal_probe --queues 8` or
+`paired.sh` standing in for that, and 2C8/2D0/2D2/2D3 each said in writing
+that the substitution was an assumption. **The assumption held.**
+
+**The counters predicted this shape in advance, which is what separates it
+from 2A1.** 2D0 measured first paint 13.877 -> 3.514 ms against a 4.0x written
+down before the run, and 2C2 had already named the mechanism: the price of one
+retire occasion per vblank "falls entirely on work needing SEVERAL units of
+GPU work finished before anything can be drawn - Settings' icon loads, menu
+blurs, animation first frames". Those are the three things the user named, and
+they are the three things that got better. The prediction was published, the
+observation matched it, and the match is on the class of workload rather than
+on one instance of it.
+
+**WHAT IT IS NOT.** One session, one boot, one observer, **no control and no
+repeat** - and rule 45's own text demands all three ("that observation is a
+measurement like any other and needs its own instrument, control and repeat").
+2A1 is the precedent that matters: "lowkey way smoother", unprompted, agreeing
+with a counter, and boot 284 showed it had been boot-to-boot variance. The
+difference here is that 2A1's feeling was attached to an n=1 `sets/s` reading
+while this one is attached to an interleaved A/B with disjoint ranges and a
+3.95x first-paint measurement - but a stronger counter does not make a human
+observation repeated.
+
+**THE CONTROL IS ONE COMMAND AND COSTS NOTHING**: `subret 1`, use the same
+three paths, then `subret 4` again. If the lag comes back and goes away, the
+observation is attributed to the dial inside one session - the human-side
+equivalent of what `subrate.sh` does for the rate, and the thing 2zj's four
+dead milestones never had. If it does NOT come back, the fix is something else
+about this boot and the counters are a coincidence of configuration.
+
+**Also unresolved and deliberately not folded in: "all" covers three distinct
+symptoms** plus the "residual wifi-menu lag" this card carries separately and
+the 2C2 wedge ("the random lag the user reports", channel 52 GFX, 3.5 s). The
+wedge is an independent defect with its own mechanism and `sub` has no reason
+to touch it; a rare event not occurring in one session is 2A6's exact shape
+("a rare event did not occur is not it cannot"). So the wedge stays open.
+
+**The default: this is now three independent quantities pointing one way** -
+first paint 3.95x (boot 424), frame rate +94 % interleaved (boot 426), and the
+human observation (boot 426). It is still **one boot for two of the three**,
+and rule 44 is counted in boots. The bar from 2D3 is unchanged: one more
+boot's interleaved `subrate.sh`. What 2D4 adds is that the reboot is now cheap
+to interpret in the other direction too - **`sub` resets to 1 on boot, so the
+next boot is a blind A side the user will feel immediately**, which is a
+control nobody has to run on purpose.
