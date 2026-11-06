@@ -1225,6 +1225,34 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         }
     }
 
+    /* 2E2: the DIG1 transmitter ENABLE for the Type-C port.
+     *
+     * Same single-call shape and the same reason as the DOMAIN handler
+     * above. The value is the phyid; a negative one means "the port 2E1
+     * derived", which is PHY2 - so the ordinary invocation names no magic
+     * number and cannot name the wrong one. PHY0 is the live panel and
+     * rb_dig_refuse() declines it by name whatever is asked.
+     *
+     * `digCalls` is bumped FIRST, before every refusal path, so the tool can
+     * poll something monotonic instead of sleeping and comparing two reads of
+     * the value it wants to interpret - which is how 2C5's four false
+     * MISMATCHes and 2D1's aborted run both happened. */
+    {
+        OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDigPhy"));
+        if (w) {
+            digCalls++;
+            const int32_t want = (int32_t)w->unsigned32BitValue();
+            const uint32_t phyid = want < 0 ? RB_DIG_TYPEC_PHYID
+                                            : (uint32_t)want;
+            const uint32_t rc = dmubDigExperiment(phyid);
+            LOG("RBFBDigPhy %u -> refuse %u, before %#x, after %#x, "
+                "ref %#x, verdict %u, wptr %#x, acks %llu",
+                phyid, rc, digBefore, digAfter, digRefWord, digVerdict,
+                dmubSendWptr, dmubAcks);
+            return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+        }
+    }
+
     /* 2A0: the frame-time instrument's own dial, ahead of RBFBPubMs because
      * it is the newer one and the two are independent. Setting it RESETS the
      * accumulators either way, including when the value is unchanged, so

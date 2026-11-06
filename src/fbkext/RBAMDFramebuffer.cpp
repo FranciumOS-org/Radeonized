@@ -578,6 +578,33 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * domain is currently in a different state from DOMAIN0's, so the
          * armed default direction turns nothing off. */
         dmubDomArmed = argOn("-rbgpufbdmubdom");
+        /* 2E2: the DIG1 transmitter ENABLE. Opt-in for the same reason as
+         * the two above - it produces on DMCUB's inbox, which is a hardware
+         * write surface - and even armed NOTHING is sent until `dmubbl dig`
+         * runs. Token checked by hand against the other `-rbgpufb*` names
+         * (rule 30): it diverges from `-rbgpufbdmubdom` and `-rbgpufbdpalt`
+         * at the sixth character and prefixes none of them.
+         *
+         * What it can change on the chip: it asks DMCUB to bring up ONE
+         * UNIPHY transmitter. The default target is PHY2, which 2E1 derived
+         * from the VBIOS object table as the Type-C port and which 2C1
+         * measured dark, and `rb_dig_refuse()` declines PHY0 by name because
+         * that is the eDP panel this desktop is running on. */
+        digArmed = argOn("-rbgpufbdig");
+        /* And it ARMS ITS OWN DEPENDENCY. The command goes over dmubPush,
+         * which refuses with code 1 unless the ring half is armed, so
+         * `-rbgpufbdig` alone would otherwise refuse for a reason that looks
+         * nothing like its cause - and an experiment needing two tokens in
+         * combination is one that gets run with one of them missing (rule
+         * 34; 2DA lost two sessions to exactly this shape, and 2E2's kext
+         * and tool sides are both single calls for the same reason).
+         *
+         * Widening the ring arm is safe in the only direction that matters:
+         * `dmubBlArmed` maps and locates the ring and permits a push, and
+         * every sender behind it is inert until a userspace trigger names
+         * something - no level, no pipe, no caps query and no transmitter is
+         * sent by arming anything. */
+        if (digArmed) { dmubBlArmed = true; }
         /* 2BA: the DPCD read. Opt-in, and the user's decision - it is the
          * first write this project makes to a display block outside the
          * panel's own pipe. Even armed, NOTHING is sent until a userspace

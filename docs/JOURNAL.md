@@ -59239,3 +59239,193 @@ training, which 2BE established is **ours** over the AUX channel already
 proven; `SET_PIXEL_CLOCK` (`DMUB_CMD__VBIOS` sub-type 2) for the pixel clock
 this card long called unlocated; a second OTG and HUBP; and a second
 `IOFramebuffer`, since `getDisplayModeCount()` has returned 1 since 2sl.
+
+---
+
+## 2E2 — the ROM decides the payload layout, and the transmitter sender is built
+
+2E1 left one design question: v1_7 or v1_6, which 2E0 had framed as a two-arm
+experiment with `RDPCSTX_PHY_CNTL6` for a product. **Both halves of that
+framing were wrong, and the ROM settles it.**
+
+### The two layouts differ in ONE byte for an ENABLE
+
+`dmub_dig_transmitter_control_data_v1_7` (dmub_cmd.h:3106) and
+`dig_transmitter_control_parameters_v1_6` (atomfirmware.h:4358) are
+byte-identical through offset 10: phyid, action, digmode, lanenum,
+`symclk_10khz` at 4, hpdsel/digfe_sel/connobj_id at 8/9/10. At offset **11**
+v1_7 has `HPO_instance` and v1_6 has `reserved`. Everything past that is
+reserved in both. And `payload_bytes` matches too, because
+`transmitter_control_dmcub` and `transmitter_control_dmcub_v1_7` both compute
+it as `sizeof(cmd.dig1_transmitter_control) - sizeof(header)` from the same
+union - **60 either way**, the larger arm's size.
+
+So "two arms, one register for a product" was a misdescription of a one-byte
+difference. Worth recording because the next reader will otherwise re-derive
+the arms from the union's existence, as 2E0 did.
+
+### And the ROM says v1_7, which no experiment could have said as cleanly
+
+2DC declined the transmitter partly because "its payload comes in two layouts
+and `init_transmitter_control` chooses between them on the atom BIOS
+command-table revision read from ROM; **this project cannot read that ROM**."
+The second clause was an oversight, not an inference - the same oversight 2E1
+found in 2BF. `firmware/680m-vbios.rom` has been on disk since 2026-10-05.
+
+`tools/re/vbios_dispobj.py --cmdtable` reads it, transcribing
+`atom.c:amdgpu_atom_parse_cmd_header` exactly (`cmd_table = CU16(rom+0x1E)`,
+`idx = CU16(cmd_table + 4 + 2*index)`, `crev = CU8(idx+3)`) with the index
+counted field by field out of `atom_master_list_of_command_functions_v2_1`:
+
+    declared image size 44544 bytes, file 44544 bytes
+    cmd_table 0xa480  header size 166  rev 2.1  -> 81 entries
+        0 asic_init              table 0xa526  frev 2  crev 1
+        4 digxencodercontrol     ABSENT
+        6 (internal)             table 0xa55a  frev 1  crev 1
+       10 setengineclock         ABSENT
+       11 setmemoryclock         ABSENT
+       12 setpixelclock          ABSENT
+       13 enabledisppowergating  table 0xaaf8  frev 2  crev 1
+       19 (internal)             table 0xa5ce  frev 1  crev 2
+       22 (internal)             table 0xa5a6  frev 2  crev 1
+       34 blankcrtc              ABSENT
+       35 enablecrtc             ABSENT
+       41 getsmuclockinfo        table 0xab66  frev 3  crev 1
+       53 (internal)             table 0xad24  frev 3  crev 3
+       66 (internal)             table 0xa622  frev 1  crev 2
+       76 dig1transmittercontrol ABSENT
+
+**Eight of eighty-one entries are non-zero and every display bring-up
+function is absent** - the transmitter, the encoder, the pixel clock, both
+CRTC functions. So `BIOS_CMD_TABLE_REVISION` returns false with `crev` left
+at **0**, `init_transmitter_control`'s switch takes `default`, and
+`transmitter_control_fallback` is four lines:
+
+    if (dmub_srv && dc->debug.dmub_command_table)
+            return transmitter_control_v1_7(bp, cntl);
+    return BP_RESULT_FAILURE;
+
+`dcn31_resource.c:934` sets `.dmub_command_table = true` (2BE read it). **The
+layout is v1_7, decided by this board's own ROM.**
+
+**Three checks that the walk is right, none of them fitted to:** the declared
+image size equals the file size, so the dump is complete and absence is not
+truncation; index 13 reads **frev 2 crev 1**, which is exactly
+`enable_disp_power_gating_parameters_v2_1`'s name in atomfirmware.h; and the
+populated entries are precisely the ones a DMUB-driven part still needs the
+driver to execute as bytecode (asic_init, power gating, the SMU clock query)
+while every function DMCUB owns is empty.
+
+**The stronger half of the finding cuts the other way: with no atom table for
+the transmitter, the encoder or the pixel clock, the DMUB VBIOS sub-types are
+the ONLY route to a display output on this board.** There is no
+register-level atom fallback to retreat to if the firmware turns out not to
+execute them. That raises the stakes on 2DB's open question and also explains
+why it has to be answered rather than worked around.
+
+### Built: src/common/rb_dig.h and the kext half
+
+`rb_dig.h` builds the 64-byte command byte by byte (no struct layout crosses
+the boundary to firmware), carries the Type-C parameter set as the only
+producer so no caller can assemble a half-derived one, and owns the refusals
+as distinct codes **30-37**, numbered clear of rb_pg.h's 20-25 so a code read
+from the wrong key cannot decode plausibly against the wrong table.
+
+**PHY0 is refused by name**, exactly as rb_pg.h refuses DOMAIN0: it is 2E1's
+display path 0 on UNIPHY_A and 2C1's only lit PHY, i.e. the panel this
+desktop is running on. The tool refuses it too, so there are two checks.
+
+**Refusal 37 is the one that matters most and is the least obvious.** The
+verdict is a difference in a dark PHY's `PHY_CNTL6` across the send, and that
+is only interpretable if the block is still answering the way the one measured
+reading says it does. So PHY0's word is read FIRST as a control and a send is
+refused if it does not read lit - the same discipline `rb_aux.h` applies to
+its own reference instance, and the discipline whose absence cost 2zw six
+milestones and ten boots.
+
+`rb_dig_phy_lit()` is deliberately **not** a polarity claim about one bit. 2C1
+measured one lit PHY and four dark ones, and the groups differ in every field
+at once (0x00194444: ref clock enabled, four MPLLs on, PSTATE 0 everywhere;
+against 0x000x3333: clock off, MPLLs off, PSTATE 3). "Lit" is that
+conjunction, which is what the reading supports.
+
+`rb_dig_verdict()` has **three** outcomes, because they point at three next
+steps: LIT (the firmware executes VBIOS commands and the transmitter is up),
+MOVED (the firmware acted but the PHY is not up - read the word), STILL
+(byte-identical). And it requires a TRANSITION, so a PHY that was already up
+when we found it cannot satisfy it.
+
+`dmubDigExperiment()` is one call - sample control, sample target, send,
+re-sample - for the reason the DOMAIN experiment records: four sessions were
+lost to state that moved between the arm and the action.
+
+### Three dependency traps closed inside the invocation rather than documented
+
+Each is the shape 2DA lost two sessions to, and documenting a prerequisite is
+what makes it get skipped (rule 34).
+
+1. **`-rbgpufbdig` arms the ring it needs.** `dmubPush` refuses with code 1
+   unless the DMUB half is armed, so `-rbgpufbdig` alone would have refused
+   for a reason looking nothing like its cause. The arm site sets
+   `dmubBlArmed` too. Safe in the only direction that matters: that flag maps
+   and locates the ring and permits a push, and every sender behind it is
+   inert until a userspace trigger names something.
+2. **`digArmed` arms the PHY aperture.** `dpaltReady` was
+   `dpaltArmed && dpaltFits`; it is now `(dpaltArmed || digArmed) &&
+   dpaltFits`, because the experiment's PRODUCT is that register block. The
+   aperture half is unchanged and still fails only itself (rule 16).
+3. **`dmubbl dig` selects REGION4 itself.** The push goes to whatever window
+   `RBFBDmubSel` last named, the default is CW4, and this project's own
+   `rb_dmub.h` rules CW4 out - the firmware wrote its INBOX1 base as
+   0x80000000, inside REGION4's top of 0x8000ffff and outside region 3
+   entirely. 2DA lost one session to that default and a second to a reboot
+   resetting the selector after it had been set by hand. The tool now selects
+   7, **reads the selector back** rather than trusting the `kern_return_t`
+   (rule 13; 2A3 is what trusting it costs), and refuses to send otherwise.
+   The live boot's `dmubbl` output confirms the trap was still live: selector
+   reads **4**.
+
+### What is deliberately NOT reproduced, said before the reading
+
+`enc1_configure_encoder`'s two link-encoder writes -
+`DP_CONFIG.DP_UDI_LANES = lane_count - 1` and
+`DP_DPHY_SCRAM_CNTL.DPHY_SCRAMBLER_ADVANCE = 1` - which
+`dcn10_link_encoder_enable_dp_output` performs **before** the command. They
+are a register block this kext has never written, and the question here is
+whether the FIRMWARE executes the command.
+
+**The consequence for reading the result is stated now so the null cannot be
+over-read (rule 14): a STILL verdict means "no effect with the encoder
+unconfigured", NOT "this firmware discards VBIOS commands".** The tool prints
+that sentence itself rather than leaving it in a journal nobody re-reads at
+the moment of the reading. A MOVED or LIT verdict, by contrast, is
+unambiguous in the useful direction: that word is not ours to write.
+
+### Hosttest
+
+`tools/hosttest/dig_test.c`, wired into the suite. Every constant against the
+file it came from, the five derived values against 2E1's parse, every refusal
+code against its own case, the full wire format byte by byte, and the verdict
+against **2C1's own measured words** (0x00194444 lit, 0x00063333 and
+0x00023333 dark) rather than against invented ones.
+
+Break-it checks, both run:
+ - `RB_DIG_TYPEC_HPDSEL` changed from `HPD_INST + 1` to `HPD_INST` - the exact
+   plausible mistake `dmub_cmd.h`'s "=2: HPD2" invites - **fails four
+   assertions**, including "byte 8 is hpdsel 3, NOT 2".
+ - `rb_dig_verdict` losing its `!rb_dig_phy_lit(before)` term - **fails the
+   transition assertion**, so an already-lit PHY cannot be read as a success.
+
+`-Werror` did not eat either one this time; both breaks were value changes
+rather than deletions, which is the lesson from 2B1 and 2BC applied rather
+than re-paid.
+
+### State
+
+Framebuffer **433B39D3** (was 9C785FA7), `dmubbl` rebuilt. Opt-in
+`-rbgpufbdig`, token checked by hand against every `-rbgpufb*` name (rule 30;
+`rb_defaults.h`'s hosttest does not cover opt-in tokens). Plugin unchanged.
+
+**NOTHING HAS BEEN SENT.** No boot has run `dmubbl dig`, and the question
+2DB-2DF could not close - does this firmware execute a `DMUB_CMD__VBIOS`
+command - is still open with no reading either way.

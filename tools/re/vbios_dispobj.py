@@ -26,7 +26,18 @@ So the two payload bytes are, for a given connector:
     hpdsel = hpd_int_record.pin_id          (because pin_id-1 is hpd_src and
                                              hpd_sel_to_atom adds one back)
 
-Usage: tools/re/vbios_dispobj.py firmware/680m-vbios.rom
+Usage: tools/re/vbios_dispobj.py firmware/680m-vbios.rom [--cmdtable]
+
+--cmdtable prints the atom COMMAND table instead, which is what decides the
+transmitter payload layout. 2E2 reads it:
+
+  atom.c:amdgpu_atom_parse_cmd_header is
+      idx  = CU16(cmd_table + 4 + 2*index)      cmd_table = CU16(rom+0x1E)
+      frev = CU8(idx + 2)   crev = CU8(idx + 3)
+  with index from GET_INDEX_INTO_MASTER_TABLE(command, dig1transmittercontrol),
+  i.e. the field's position in atom_master_list_of_command_functions_v2_1,
+  which is 76 (atomfirmware.h:272 counted field by field; digxencodercontrol
+  is 4, setpixelclock 12, enabledisppowergating 13).
 """
 
 import struct
@@ -99,10 +110,58 @@ def decode_objid(v):
     return v & 0xFF, (v >> 8) & 0xF, (v >> 12) & 0xF
 
 
+# atom_master_list_of_command_functions_v2_1 (atomfirmware.h:272), only the
+# entries this project has a reason to ask about. Counted field by field from
+# the vendored struct; the internal cmd_functionN slots are unnamed there and
+# are printed by index.
+CMD_INDEX = {0: "asic_init", 4: "digxencodercontrol", 10: "setengineclock",
+             11: "setmemoryclock", 12: "setpixelclock",
+             13: "enabledisppowergating", 34: "blankcrtc", 35: "enablecrtc",
+             41: "getsmuclockinfo", 76: "dig1transmittercontrol"}
+
+
+def cmdtable(rom):
+    """The atom COMMAND table, which decides the transmitter payload layout."""
+    rom_hdr = struct.unpack_from("<H", rom, 0x48)[0]
+    # atom.h ATOM_ROM_CMD_PTR 0x1E / ATOM_ROM_DATA_PTR 0x20, which are
+    # masterhwfunction_offset and masterdatatable_offset of
+    # atom_rom_header_v2_2 counted field by field.
+    cmd = struct.unpack_from("<H", rom, rom_hdr + 0x1E)[0]
+    size, frev, crev = struct.unpack_from("<HBB", rom, cmd)
+    n = (size - 4) // 2
+    print(f"declared image size {rom[2] * 512} bytes, file {len(rom)} bytes"
+          + ("" if rom[2] * 512 == len(rom) else "   !! TRUNCATED"))
+    print(f"cmd_table 0x{cmd:04x}  header size {size}  rev {frev}.{crev}"
+          f"  -> {n} entries")
+    ents = struct.unpack_from(f"<{n}H", rom, cmd + 4)
+    print()
+    for i, off in enumerate(ents):
+        name = CMD_INDEX.get(i)
+        if off == 0:
+            if name:
+                print(f"  {i:3d} {name:<24s} ABSENT - master table entry is 0,"
+                      f" so amdgpu_atom_parse_cmd_header returns false and"
+                      f" crev stays 0")
+            continue
+        tsize, tfrev, tcrev = struct.unpack_from("<HBB", rom, off)
+        print(f"  {i:3d} {name or '(internal)':<24s} table 0x{off:04x}"
+              f"  size {tsize:<5d} frev {tfrev}  crev {tcrev}")
+    print()
+    print("A zero entry means there is no atom bytecode for that function on")
+    print("this board, so the driver's crev is 0 and command_table2.c's")
+    print("switch falls to the *_fallback function. For the transmitter that")
+    print("fallback is four lines and hardcodes v1_7 over DMUB.")
+    return 0
+
+
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
         sys.exit(__doc__)
     rom = open(sys.argv[1], "rb").read()
+    if len(sys.argv) == 3:
+        if sys.argv[2] != "--cmdtable":
+            sys.exit(__doc__)
+        return cmdtable(rom)
 
     # atomfirmware.h:217 OFFSET_TO_ATOM_ROM_HEADER_POINTER = 0x48
     rom_hdr = struct.unpack_from("<H", rom, 0x48)[0]

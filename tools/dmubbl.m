@@ -356,6 +356,113 @@ static void domRow(const char *label, const uint32_t *w, int haveIt)
     printf("\n");
 }
 
+/* 2E2: the DIG1 transmitter refusal codes. Numbered above the DOMAIN ones
+ * (20-25) on purpose, so a code read out of the wrong key cannot be decoded
+ * against the wrong table and come back plausible. */
+static const char *digWhy(long c)
+{
+    switch (c) {
+    case 0:  return "no refusal - the command was sent";
+    /* 1..5 are dmubPush's own, shared with every other send here. */
+    case 1:  return "the DMUB half is not armed (-rbgpufbdmubbl missing)";
+    case 2:  return "no ring mapping or no register window";
+    case 3:  return "the ring address was never identified this boot";
+    case 4:  return "WPTR or RPTR outside the ring";
+    case 5:  return "the ring is full";
+    case 30: return "not armed (-rbgpufbdig missing from boot-args)";
+    case 31: return "no RDPCSTX mapping - the product cannot be read, so a "
+                    "send would be unjudgeable";
+    case 32: return "that phyid is PHY0, the eDP PANEL (2E1's display path 0 "
+                    "on UNIPHY_A, and 2C1's only lit PHY). Refused by name";
+    case 33: return "phyid outside 0..5, or outside the five RDPCSTX "
+                    "instances this chip has";
+    case 34: return "action is not ENABLE or DISABLE";
+    case 35: return "lanenum is not 1, 2 or 4";
+    case 36: return "hpdsel outside 1..6 (0 is 'HPD not assigned')";
+    case 37: return "the CONTROL PHY (PHY0, the panel) does not read LIT. "
+                    "2C1 measured it at 0x00194444; if it is not answering "
+                    "that way now, a difference read from this block is "
+                    "uninterpretable - this is an INSTRUMENT refusal";
+    default: return "unknown";
+    }
+}
+
+static const char *digVerdictName(long v)
+{
+    switch (v) {
+    case 0:  return "STILL - byte-identical across the send";
+    case 1:  return "MOVED - the word changed but the PHY is not lit";
+    case 2:  return "LIT - the PHY came up";
+    default: return "unknown";
+    }
+}
+
+/* The same monotonic-counter wait as domVerdict, for the same reason (2C5):
+ * the properties publish every 500 ms, so reading the verdict straight after
+ * the set can return the previous one and look exactly like a lost write. */
+static void digVerdictPrint(io_service_t fb, long callsBefore)
+{
+    long calls = callsBefore;
+    int spins;
+
+    for (spins = 0; spins < 60; spins++) {
+        calls = num(fb, "RBFBDigCalls");
+        if (calls > callsBefore) { break; }
+        usleep(100 * 1000);
+    }
+    if (calls <= callsBefore) {
+        printf("\nthe kext never recorded the call (RBFBDigCalls still %ld "
+               "after 6 s).\nThat is NOT a refusal - either this framebuffer "
+               "predates 2E2 or the\nset never reached the handler. Check the "
+               "loaded UUID first (rule 15).\n", callsBefore);
+        return;
+    }
+
+    const long refuse  = num(fb, "RBFBDigRefuse");
+    const long ran     = num(fb, "RBFBDigRan");
+    const long sends   = num(fb, "RBFBDigSends");
+    const long phy     = num(fb, "RBFBDigPhy");
+    const long verdict = num(fb, "RBFBDigVerdict");
+    const long before  = num(fb, "RBFBDigBefore");
+    const long after   = num(fb, "RBFBDigAfter");
+    const long ref     = num(fb, "RBFBDigRefWord");
+
+    printf("\nverdict (read back after the call the kext counted)\n");
+    printf("  refusal        %ld  %s\n", refuse, digWhy(refuse));
+    printf("  target         PHY%ld   sends %ld   ran %ld\n", phy, sends, ran);
+    printf("  control  PHY0  %08lx  %s\n", ref & 0xffffffffL,
+           ref == 0 ? "NOT READ" : "(2C1 measured 0x00194444 on this chip)");
+    if (ran == 0) {
+        printf("  before / after not sampled - the refusal came before the "
+               "snapshot\n");
+        return;
+    }
+    printf("  before   PHY%ld  %08lx\n", phy, before & 0xffffffffL);
+    printf("  after    PHY%ld  %08lx\n", phy, after & 0xffffffffL);
+    printf("  verdict        %ld  %s\n", verdict, digVerdictName(verdict));
+
+    if (verdict == 2) {
+        printf("\n  -> THE FIRMWARE EXECUTES DMUB_CMD__VBIOS COMMANDS, and "
+               "the external\n     display's transmitter is UP. 2DB spent "
+               "four instruments on the\n     first half of that and 2DC-2DF "
+               "never got to send anything. Next:\n     "
+               "DIG_BE_CNTL.DIG_FE_SOURCE_SELECT, then link training.\n");
+    } else if (verdict == 1) {
+        printf("\n  -> the firmware ACTED - that word is not ours to write "
+               "and it moved.\n     So VBIOS commands execute. The PHY is "
+               "not lit by the conjunction\n     rb_dig.h uses, which points "
+               "at the encoder setup this experiment\n     deliberately "
+               "omits (DP_CONFIG / DP_DPHY_SCRAM_CNTL). Read the word.\n");
+    } else {
+        printf("\n  -> sent and NOTHING moved. This is NOT yet 'the firmware "
+               "discards\n     VBIOS commands': enc1_configure_encoder's two "
+               "link-encoder writes\n     are deliberately not reproduced "
+               "here, so 'no effect with the\n     encoder unconfigured' is a "
+               "live alternative (rule 14). The raw\n     words above are the "
+               "evidence either way.\n");
+    }
+}
+
 static void domVerdict(io_service_t fb, long callsBefore)
 {
     uint32_t before[DOM_SLOTS] = {0}, after[DOM_SLOTS] = {0};
@@ -707,6 +814,97 @@ int main(int argc, char **argv)
                "which DOMAIN_PG_STATUS words changed across the send. Any\n"
                "non-zero value means the firmware EXECUTED an inbox command,\n"
                "which no other instrument here can show (2DB).\n");
+    } else if (strcmp(argv[1], "dig") == 0) {
+        /* 2E2: the DIG1 transmitter ENABLE for the Type-C port. ONE
+         * setProperties call - the kext reads the control PHY, reads the
+         * target PHY, sends, and reads the target again - for the reason the
+         * `dom` path records: a two-step handover is one that gets run with
+         * the first step quietly reverted.
+         *
+         * The argument is a phyid, and omitting it means PHY2, which 2E1
+         * derived from this board's own VBIOS display-object table as the
+         * Type-C port (UNIPHY_C) and which 2B4's HPD instance 2, 2B9's
+         * AUX_HPD_SEL 2 and 2C1's dark 0x00063333 all corroborate. There is
+         * no reason to pass one by hand. */
+        long phy = (argc > 2) ? atol(argv[2]) : -1;
+
+        if (phy == 0) {
+            printf("\nREFUSING to pass phyid 0 from this tool.\n"
+                   "PHY0 is the eDP PANEL this desktop is running on - 2E1's\n"
+                   "display path 0 on UNIPHY_A, and the only lit PHY 2C1\n"
+                   "measured. The kext refuses it by name as well; this is\n"
+                   "the outer of the two checks.\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+        if (phy > 5) {
+            printf("usage: dmubbl dig [phyid]\n"
+                   "       phyid omitted = PHY2, the Type-C port (2E1)\n"
+                   "       the payload documents 0=UNIPHYA .. 5=UNIPHYF\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+
+        /* 2DA's trap, closed inside the invocation rather than documented.
+         *
+         * The push goes to whatever window RBFBDmubSel last named, the
+         * default is CW4, and this project's own rb_dmub.h rules CW4 out -
+         * the firmware wrote its INBOX1 base as 0x80000000, which is inside
+         * REGION4's top of 0x8000ffff and outside region 3 entirely. 2DA
+         * lost one session to that default and a SECOND to a reboot resetting
+         * the selector after it had been set by hand. So this does not
+         * document the prerequisite, it performs it: select REGION4, read the
+         * selector back, and refuse to send if it is not 7. An experiment
+         * whose precondition is a previous command is one that gets run
+         * without it (rule 34, made structural - the same reason the kext
+         * side is a single call). */
+        {
+            const long selBefore = num(fb, "RBFBDmubWinSel");
+            if (selBefore != 7) {
+                printf("\nselector is %ld; REGION4 is the identified mailbox "
+                       "(2DA), selecting 7\nfirst so the command does not go "
+                       "into CW4 - which rb_dmub.h itself\nrules out.\n",
+                       selBefore);
+                kern_return_t ksel = IORegistryEntrySetCFProperties(
+                    fb, (__bridge CFDictionaryRef)@{ @"RBFBDmubSel": @(7) });
+                if (ksel != KERN_SUCCESS) {
+                    printf("selecting REGION4 failed (0x%x) - refusing to "
+                           "send into an unknown window.\n", ksel);
+                    IOObjectRelease(fb);
+                    return 2;
+                }
+                /* Read it BACK rather than trusting the return code: a
+                 * kern_return_t says the setter ran, not that the state took
+                 * (rule 13, and 2A3 is what trusting it costs). */
+                const long selNow = num(fb, "RBFBDmubWinSel");
+                if (selNow != 7) {
+                    printf("selector reads %ld after asking for 7 - refusing "
+                           "to send.\n", selNow);
+                    IOObjectRelease(fb);
+                    return 2;
+                }
+                printf("selector now 7 (REGION4).\n");
+            }
+        }
+
+        d = @{ @"RBFBDigPhy": @((int32_t)phy) };
+        if (phy < 0) {
+            printf("\nsending DIG1_TRANSMITTER_CONTROL ENABLE to PHY2, the\n"
+                   "Type-C port (TRANSMITTER_UNIPHY_C)...\n");
+        } else {
+            printf("\nsending DIG1_TRANSMITTER_CONTROL ENABLE to PHY%ld...\n",
+                   phy);
+        }
+        printf("payload v1_7, which this board's ROM decides and not a guess:\n"
+               "  its atom command table has NO dig1transmittercontrol entry,\n"
+               "  so crev is 0 and transmitter_control_fallback is hardcoded\n"
+               "  to v1_7 over DMUB (2E2). phyid 2, action 1, digmode 0,\n"
+               "  lanenum 2, hpdsel 3 (NOT 2 - the payload comment is 1-based),\n"
+               "  symclk_10khz 54000.\n"
+               "The verdict is RBFBDigBefore vs RBFBDigAfter - PHY2's own\n"
+               "RDPCSTX_PHY_CNTL6 either side of the send, with PHY0 as the\n"
+               "measured control. This is both the first bring-up step for the\n"
+               "external display AND the test 2DB-2DF never got to run.\n");
     } else {
         long want = atol(argv[1]);
         d = @{ @"RBFBDmubBl": @(want) };
@@ -716,11 +914,15 @@ int main(int argc, char **argv)
 
     const int isDom = (strcmp(argv[1], "dom") == 0);
     const long domCallsBefore = isDom ? num(fb, "RBFBDmubDomCalls") : 0;
+    const int isDig = (strcmp(argv[1], "dig") == 0);
+    const long digCallsBefore = isDig ? num(fb, "RBFBDigCalls") : 0;
 
     kern_return_t kr = IORegistryEntrySetCFProperties(
         fb, (__bridge CFDictionaryRef)d);
     printf("-> 0x%x%s\n", kr, kr == KERN_SUCCESS ? " (the push returned OK)" : "");
-    if (isDom) {
+    if (isDig) {
+        digVerdictPrint(fb, digCallsBefore);
+    } else if (isDom) {
         /* The IOReturn is a yes/no over every refusal path at once, so the
          * tool reads the code itself rather than making the user decode an
          * errno-shaped number. */
