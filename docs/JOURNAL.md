@@ -59504,3 +59504,124 @@ means the handler ran.
 Framebuffer **6CB9945A** (was 433B39D3 - never installed, so 2E2 and 2E3
 install as one binary). Hosttest unchanged and passing; `dmubbl` rebuilt.
 **Still nothing sent.**
+
+---
+
+## 2E4 — THE FIRMWARE CONSUMED A `DMUB_CMD__VBIOS` COMMAND. Boot 443, the first one this project has ever sent, and the PHY did not move
+
+`dmubbl dig 2` on boot 443, cable in, Eco mode. **refusal 0, `digSends` 1,
+`digRan` 1 — the command was built, pushed and counted.**
+
+### The wire format is byte-exact to 2E1's derivation
+
+`RBFBDmubReplySent` read back off the ring:
+
+    80 01 00 3c  02 01 00 02  f0 d2 00 00  03 00 00 f4
+
+    header   type 0x80 = 128 DMUB_CMD__VBIOS, sub_type 0x01 =
+             DIG1_TRANSMITTER_CONTROL, payload_bytes 0x3c = 60
+    payload  phyid 2, action 1 ENABLE, digmode 0 DP, lanenum 2,
+             symclk_10khz 0xd2f0 = 54000, hpdsel 3, digfe_sel 0,
+             connobj_id 0, HPO_instance 0xf4 = 244
+
+Every field is the value 2E1 derived from the ROM and the four helper
+translations, including the two that invite being got wrong: **hpdsel 3, not
+2** (`hpd_sel_to_atom` adds one, so `dmub_cmd.h`'s "=2: HPD2" names the wrong
+connector) and **HPO_instance 244, not 0** (`(uint8_t)(0 -
+ENGINE_ID_HPO_DP_0)`, reproduced rather than normalised). The layout is v1_7,
+which 2E2 decided from this board's own atom command table rather than from
+the DCN version.
+
+### THE RESULT: RPTR ADVANCED OVER OUR SLOT
+
+    RBFBDmubWptr      2368 -> 2432      WptrMoves 1
+    RBFBDmubRptr      2368 -> 2432      RptrMoves 1
+    RBFBDmubSendWptr  2432
+
+One 64-byte slot, and **the firmware's own read pointer caught up to it.**
+
+**This eliminates 2zr's third explanation, which 2D9 named as the only one of
+the three that would have blocked the external display's bring-up path: "the
+DMCUB reads a different inbox base".** It does not. It reads REGION4, and the
+evidence is no longer that our write stuck — which is all 2DA had, and which
+only ever proved our own mapping — but that **the consumer moved its own
+pointer past a command we wrote there.** The address question is closed by the
+firmware.
+
+### The slot came back unchanged, and that is the CONTRACT, not a null
+
+`RBFBDmubReplyGot` is byte-identical to `RBFBDmubReplySent`, verdict 2.
+**Expected, and 2D9 said so in advance:** of the seven `DMUB_CMD__VBIOS`
+sub-types only `QUERY_DP_ALT` has returned data as its contract;
+DIG1_TRANSMITTER_CONTROL is header + payload and its product is a register
+change, with `ret_status` documented as "1 if returned data". An unchanged
+slot here is the documented behaviour of a command that returns nothing — not
+the silence 2zr's caps query met.
+
+### The verdict is STILL, with the control passing
+
+    control  PHY0  0x00194444   lit (2C1's own measured word)
+    before   PHY2  0x00063333
+    after    PHY2  0x00063333
+    verdict  0     STILL
+
+`rb_dig_phy_lit()` read PHY0 as lit, so refusal 37 did not fire and the
+instrument was answering as the one measured reading says it does. PHY2 is
+byte-identical across the send.
+
+**So: the firmware ACCEPTED and CONSUMED the command, and the PHY did not come
+up.** Those are two separate facts and the second does not undo the first.
+
+### What is NOT established, stated as 2E2 wrote it down in advance
+
+**STILL is not "this firmware discards VBIOS commands".**
+`enc1_configure_encoder`'s two link-encoder writes —
+`DP_CONFIG.DP_UDI_LANES = lane_count - 1` and
+`DP_DPHY_SCRAM_CNTL.DPHY_SCRAMBLER_ADVANCE = 1`, which
+`dcn10_link_encoder_enable_dp_output` performs **before** the command — are
+deliberately not reproduced, so "no effect with the encoder unconfigured" is a
+live alternative and remains the one to eliminate. 2E2 printed that sentence
+in the tool itself rather than leaving it in a journal nobody re-reads at the
+moment of the reading, and that is why this null is bounded.
+
+### The ack TIMED OUT and the command was consumed anyway — NOT a mechanism
+
+`RBFBDmubAcks` **0**, `RBFBDmubAckTimeouts` **1**, with RPTR equal to WPTR
+when read afterwards. The ack spin is **1 ms** (1000 turns of `IODelay(1)`),
+so consumption took longer than that.
+
+2DA's ABM sends on boot 435 reported `Acks` 4 — they acked inside the same
+1 ms window and moved nothing. It is tempting to read "slow to consume" as
+"did work", since a PHY bring-up is PLL locks and an ABM backlight write is
+not. **That is rule 17's shape and it is refused here**: one sample, a
+different command type, a different boot, and nothing measures what the
+firmware spent the time on. Recorded as a timing difference, not a mechanism.
+What it does justify is a longer spin, because a bounded poll declaring
+absence where the thing arrived later is rule 31 at the hardware boundary —
+the ack is a real signal this protocol has and 1 ms is too short to read it.
+
+### Rule 15, and the one thing that made this boot work without a reinstall
+
+**The reading was taken on framebuffer `433B39D3` (2E2), not the installed
+`6CB9945A` (2E3)** — `kextstat` against the collection, which carries
+6CB9945A for the next boot. Valid anyway, and checked rather than assumed:
+`git diff beccdfb b6f9a35 -- src/common/rb_dig.h` is **zero lines** and 2E3
+touched nothing in the send path, only publish timing and `dmubSelSets`.
+
+And 2E3's own fix was never exercised, because `RBFBDmubWinSel` **already read
+7** on this boot and the gate's `selBefore == 7` fast path skips the poll
+entirely. The structure was right for a reason that was not the one it was
+written for: a precondition already satisfied needs no waiting.
+
+### Next
+
+One step, and it discriminates the two surviving explanations: reproduce
+`enc1_configure_encoder`'s two writes on link encoder **2** and re-send.
+Located, in a mapping this kext already holds, no new aperture —
+`regDP0_DP_CONFIG` **0x210b** and `regDP0_DP_DPHY_SCRAM_CNTL` **0x211e**,
+stride **0x100**, five instances, both **BASE_IDX 2**, the same base HUBP, OTG,
+HPD and AUX already read through. `DP_UDI_LANES` is bits 1:0 and
+`DPHY_SCRAMBLER_ADVANCE` is bit 4.
+
+It is a WRITE to a block this kext has never written, on link encoder 2, whose
+PHY drives nothing — the same bounding as the send itself.
