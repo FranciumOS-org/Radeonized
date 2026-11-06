@@ -126,6 +126,9 @@ public:
                                   void *p3, void *p4) override;
 
     void scheduleRefreshDiag();
+    /* 2D1: publish within one throttle window, DEFERRING instead of dropping.
+     * For a runtime dial, whose whole verification is a fresh read. */
+    void refreshDiagSoon();
 };
 
 #endif // REMBRANDTGPU_PEER_HPP

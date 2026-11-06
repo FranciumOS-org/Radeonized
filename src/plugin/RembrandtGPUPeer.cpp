@@ -816,6 +816,58 @@ void RembrandtGPUPeer::scheduleRefreshDiag() {
     thread_call_enter(refreshDiagCall);
 }
 
+/* 2D1: A DIAL'S WRITE MUST PUBLISH, AND `scheduleRefreshDiag()` CANNOT
+ * PROMISE THAT.
+ *
+ * That function DROPS a request inside the 250 ms window - 2ez's fix for a
+ * refresh that ran back to back under `g_diagLock` and was indistinguishable
+ * from a wedge, and it stays. But nothing re-arms a dropped request, and the
+ * refresh is the ONLY thing that calls `rbgpu_retire_publish_2zd()`, whose own
+ * key writes land inside their own window and are dropped in turn. So on a
+ * quiet desktop the chain TERMINATES: no log line, no refresh, and
+ * `RBGPUDiag` can be arbitrarily stale.
+ *
+ * Boot 426 is what that costs. `subret 4` landed - `vblret_subrecv` 4,
+ * `vblret_sub` 4, the subdivision running at 3 interior retires per frame -
+ * and the tool's own 3 s poll of `vblret_subsets` saw a frozen snapshot,
+ * reported "the set did not arrive", exited 3, and the `&&` took
+ * `paired.sh` with it. Boot 424 had probes logging throughout and the same
+ * poll passed, which is why 2C5's "poll the set-counter" prescription looked
+ * strictly better than a sleep: it is the SAME premise with a loop around it,
+ * and the premise - that something refreshes the snapshot - was never
+ * established.
+ *
+ * So this defers to the end of the current window instead of dropping, and
+ * CLAIMS that slot so a second dial write defers to the one after. The
+ * throttle's guarantee is unchanged - never more than one refresh per 250 ms -
+ * and there is no steady-state cost, because only a userspace dial write calls
+ * this. A log line still uses `scheduleRefreshDiag()` and is still dropped;
+ * that is the case 2ez is about.
+ *
+ * NOT CLAIMED, but now a live candidate: this is the shape of 2C2's
+ * undiagnosed drain bug, where `drainset 1` returned SUCCESS three times and
+ * `vblret_drain` kept reading 8. That was excluded because the key "has a
+ * second writer, several times a second from the live global" - and
+ * `rbgpu_retire_publish_2zd()` has exactly ONE call site, inside the refresh.
+ * The dismissal rested on a false premise about its frequency. Settling it
+ * means re-running that A/B on a build with this fix, not reasoning further.
+ */
+void RembrandtGPUPeer::refreshDiagSoon() {
+    if (!refreshDiagCall) {
+        return;
+    }
+    uint64_t now = mach_absolute_time();
+    uint64_t interval = 0;
+    nanoseconds_to_absolutetime(250ull * 1000ull * 1000ull, &interval);
+    if (g_lastRefreshAt && (now - g_lastRefreshAt) < interval) {
+        g_lastRefreshAt += interval;        /* claim the next slot */
+        thread_call_enter_delayed(refreshDiagCall, g_lastRefreshAt);
+        return;
+    }
+    g_lastRefreshAt = now;
+    thread_call_enter(refreshDiagCall);
+}
+
 void RembrandtGPUPeer::refreshDiagAction(thread_call_param_t param0, thread_call_param_t param1) {
     auto self = static_cast<RembrandtGPUPeer *>(param0);
     if (self) {
@@ -2949,7 +3001,14 @@ IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
     }
 
     OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("RBGPURetireDrain"));
-    if (!n) { return handled ? rc : kIOReturnUnsupported; }
+    if (!n) {
+        /* 2D1: a dial that landed must PUBLISH, or its verification reads a
+         * snapshot that nothing will refresh (boot 426). Only when something
+         * was actually handled, so a stray setProperties cannot drive the
+         * refresh. */
+        if (handled) { refreshDiagSoon(); }
+        return handled ? rc : kIOReturnUnsupported;
+    }
     handled++;
 
     /* 2C3: SAY WHAT ARRIVED, NOT JUST WHAT WAS DECIDED.
@@ -2973,15 +3032,26 @@ IOReturn RembrandtGPUPeer::setProperties(OSObject *properties) {
     rbgpu_diag_set_num("drain_want", want);
     if (want < 1 || want > RB_RETIRE_DRAIN_MAX) {
         rbgpu_diag_set_num("drain_refused", want);
+        refreshDiagSoon();   /* 2D1: a refusal must be readable too (rule 19) */
         return kIOReturnBadArgument;
     }
     rbgpu_retire_drain_set_2C2(want);
     g_rbgpu_drain_sets++;
     rbgpu_diag_set_num("drain_sets", g_rbgpu_drain_sets);
-    /* Publish immediately as well as periodically: the dial's own value is
-     * not a frame-path counter and the caller should not have to wait a
-     * publish interval to see the arm it just set (rule 31's other side). */
+    /* 2D1: THIS COMMENT USED TO SAY "publish immediately as well as
+     * periodically", AND NEITHER HALF WAS TRUE. `rbgpu_diag_set_num()` writes
+     * the in-kernel table and schedules a refresh that the 250 ms throttle
+     * then DROPS, and the refresh is the only caller of
+     * `rbgpu_retire_publish_2zd()`, so there is no "periodically" either -
+     * on a quiet desktop nothing refreshes `RBGPUDiag` at all. 2C5 corrected
+     * this claim in `drainset`'s comment and left it standing here, in the
+     * code it was a claim about.
+     *
+     * `refreshDiagSoon()` is what makes it true: it defers to the end of the
+     * throttle window instead of dropping. 2C2's drain bug had exactly this
+     * symptom and was excluded on the strength of the sentence above. */
     rbgpu_diag_set_num("vblret_drain", rbgpu_retire_drain_get_2C2());
+    refreshDiagSoon();
     return rc;
 }
 
