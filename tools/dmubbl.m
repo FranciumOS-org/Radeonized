@@ -960,6 +960,217 @@ static void dump(io_service_t fb)
     dumpRegions(fb);
 }
 
+/* 2DA's trap, closed inside the invocation rather than documented - and
+ * SHARED, because 2EA needs the identical precondition. Returns 0 when the
+ * push is pointed at REGION4 and non-zero when it refuses; a caller that
+ * ignores it would be the exact mistake this exists to prevent. */
+/* ---- 2EA: the QUERY_DP_ALT sweep ----
+ *
+ * The verdict is computed from the RAW per-phy keys, never from the kext's
+ * own summary: 2B0 is what a summary that answers a different question than
+ * the consumer asks costs, and this tool is the consumer. */
+static const char *dpaltqWhy(long c)
+{
+    switch (c) {
+    case 0:  return "OK";
+    case 50: return "the experiment is not armed (-rbgpufbdpaltq)";
+    case 51: return "phy out of range";
+    case 52: return "the inbox push itself refused";
+    case 53: return "NO REPLY - the OUT bytes came back as we wrote them";
+    case 54: return "a reply byte that is neither 0 nor 1";
+    case 55: return "the reply names a DIFFERENT phy";
+    default: return "?";
+    }
+}
+
+static void dpaltqReport(io_service_t fb, long callsBefore)
+{
+    long calls = -1;
+    int i;
+
+    if (num(fb, "RBFBDpAltQCalls") < 0) {
+        printf("\nRBFBDpAltQCalls is ABSENT. This framebuffer predates 2EA -\n"
+               "rule 15: check the loaded UUID against the one the build\n"
+               "printed. Nothing is reported rather than decoding keys that\n"
+               "are not there (2E6's tool read -1 as all-ones and said the\n"
+               "opposite of the truth).\n");
+        return;
+    }
+    for (int t = 0; t < 60; t++) {
+        if (num(fb, "RBFBDpAltQCalls") > callsBefore) {
+            calls = num(fb, "RBFBDpAltQCalls");
+            break;
+        }
+        usleep(100000);
+    }
+    if (calls < 0) {
+        printf("\nRBFBDpAltQCalls never moved past %ld in 6 s - the call did\n"
+               "not arrive. Polled, not slept on: a snapshot read would be\n"
+               "rule 31 for the fourth time.\n", callsBefore);
+        return;
+    }
+
+    printf("\nQUERY_DP_ALT sweep (fill 0x%02lx, %ld sends)\n",
+           num(fb, "RBFBDpAltQFill"), num(fb, "RBFBDpAltQSends"));
+    printf("  phy  is_usb  alt_disable  is_dp4  echo  refusal\n");
+
+    unsigned usb = 0, answered = 0;
+    for (i = 0; i < 5; i++) {
+        char k[40];
+        snprintf(k, sizeof(k), "RBFBDpAltQRefuse%d", i);
+        const long why = num(fb, k);
+        snprintf(k, sizeof(k), "RBFBDpAltQUsb%d", i);
+        const long u = num(fb, k);
+        snprintf(k, sizeof(k), "RBFBDpAltQDis%d", i);
+        const long dd = num(fb, k);
+        snprintf(k, sizeof(k), "RBFBDpAltQDp4%d", i);
+        const long f = num(fb, k);
+        snprintf(k, sizeof(k), "RBFBDpAltQEcho%d", i);
+        const long e = num(fb, k);
+
+        if (why == 0) {
+            answered |= (1u << i);
+            if (u) { usb |= (1u << i); }
+            printf("   %d     %ld         %ld          %ld      %ld   %s%s\n",
+                   i, u, dd, f, e, dpaltqWhy(why),
+                   i == 2 ? "   <== the Type-C port (2E1)" : "");
+        } else {
+            printf("   %d     -         -          -      -   %ld: %s\n",
+                   i, why, dpaltqWhy(why));
+        }
+    }
+
+    printf("\nis_usb mask 0x%02x over the %u phys that answered; the ROM says "
+           "0x1C\n(DP_IS_USB_C on display paths 2/3/4 - 2E1, an independent "
+           "source).\n", usb, __builtin_popcount(answered));
+
+    if (answered == 0) {
+        printf("\nNOTHING ANSWERED. That is 2zr's reading reproduced at the\n"
+               "RIGHT address this time, which makes it a real result rather\n"
+               "than 2C0's inference: REGION4 executes commands (2E9) and\n"
+               "still returns no data. Then this route is closed and the\n"
+               "DPALT_DISABLE question stays with RDPCSTX2_PHY_CNTL6.\n");
+        return;
+    }
+    if (usb == 0 || usb == answered) {
+        printf("\nUNIFORM is_usb across the phys that answered - 2BF's own\n"
+               "control, and it refuses: the panel's PHY is known NOT to be\n"
+               "USB-C, so a uniform answer carries no information about\n"
+               "whether the reply is the firmware's or our own bytes.\n");
+        return;
+    }
+    if (answered == 0x1f && usb == 0x1C) {
+        printf("\nROM MATCH. The reply pattern equals 2E1's VBIOS read on all\n"
+               "five paths, from a source this command did not derive from -\n"
+               "so the reply path WORKS and the answers below are the chip's.\n");
+    } else {
+        printf("\nAnswered and non-uniform, but NOT the ROM's pattern. The\n"
+               "reply path produced something; what it produced is not\n"
+               "verified against an independent source, so read the bytes\n"
+               "and not the verdict.\n");
+    }
+
+    {
+        char k[40];
+        snprintf(k, sizeof(k), "RBFBDpAltQDis%d", 2);
+        const long dis = num(fb, k);
+        snprintf(k, sizeof(k), "RBFBDpAltQUsb%d", 2);
+        const long u2 = num(fb, k);
+        snprintf(k, sizeof(k), "RBFBDpAltQRefuse%d", 2);
+        if (num(fb, k) != 0 || !u2) {
+            printf("\nPHY2 did not answer as a USB-C phy, so the question\n"
+                   "this sweep exists for is unanswered.\n");
+        } else if (dis) {
+            printf("\n==> DP ALT MODE IS NOT GRANTED on PHY2. That AGREES with\n"
+                   "RDPCSTX2_PHY_CNTL6's 0x00063333 (2C1), so that register was\n"
+                   "right all along and the external display is a PD / firmware\n"
+                   "matter on this chassis - rule 47 for the third time (2zw's\n"
+                   "MUX, 2D8's dead Type-C, this). No write of ours can light a\n"
+                   "PHY the PD controller has not handed DP lanes to.\n"
+                   "NOTE the tension this does NOT resolve: 2BB read a full DPCD\n"
+                   "and 2BD a full EDID over AUX2, which on Type-C needs alt\n"
+                   "mode negotiated. Two instruments still disagree.\n");
+        } else {
+            printf("\n==> DP ALT MODE IS GRANTED on PHY2. Then\n"
+                   "RDPCSTX2_PHY_CNTL6 is the WRONG REGISTER for this part -\n"
+                   "Linux reads RDPCSPIPE_PHY_CNTL6 for UNIPHY_C on\n"
+                   "YELLOW_CARP_B0 - and the bring-up continues: the FE\n"
+                   "connection (DIG_FE_SOURCE_SELECT, ours to write per 2E8)\n"
+                   "and the pixel clock (VBIOS sub-type 2).\n");
+        }
+    }
+}
+
+static int ensureRegion4(io_service_t fb)
+{
+    /* 2DA's trap, closed inside the invocation rather than documented.
+     *
+     * The push goes to whatever window RBFBDmubSel last named, the
+     * default is CW4, and this project's own rb_dmub.h rules CW4 out -
+     * the firmware wrote its INBOX1 base as 0x80000000, which is inside
+     * REGION4's top of 0x8000ffff and outside region 3 entirely. 2DA
+     * lost one session to that default and a SECOND to a reboot resetting
+     * the selector after it had been set by hand. So this does not
+     * document the prerequisite, it performs it: select REGION4, read the
+     * selector back, and refuse to send if it is not 7. An experiment
+     * whose precondition is a previous command is one that gets run
+     * without it (rule 34, made structural - the same reason the kext
+     * side is a single call). */
+    {
+        const long selBefore = num(fb, "RBFBDmubWinSel");
+        const long setsBefore = num(fb, "RBFBDmubSelSets");
+        if (selBefore != 7) {
+            printf("\nselector is %ld; REGION4 is the identified mailbox "
+                   "(2DA), selecting 7\nfirst so the command does not go "
+                   "into CW4 - which rb_dmub.h itself\nrules out.\n",
+                   selBefore);
+            kern_return_t ksel = IORegistryEntrySetCFProperties(
+                fb, (__bridge CFDictionaryRef)@{ @"RBFBDmubSel": @(7) });
+            if (ksel != KERN_SUCCESS) {
+                printf("selecting REGION4 failed (0x%x) - refusing to "
+                       "send into an unknown window.\n", ksel);
+                IOObjectRelease(fb);
+                return 2;
+            }
+            /* Read it BACK rather than trusting the return code: a
+             * kern_return_t says the setter ran, not that the state took
+             * (rule 13, and 2A3 is what trusting it costs).
+             *
+             * 2E3: but POLL, and poll the monotonic counter first. Every
+             * DMUB key is published on a 500 ms throttle, so the first
+             * version of this read the stale 4 back immediately after a
+             * successful set and refused its own send - rule 31, third
+             * instance. RBFBDmubSelSets counts accepted selects and only
+             * ever rises, so waiting for it past its pre-set value
+             * separates "not published yet" from "the write was lost",
+             * which the dialled value alone cannot. */
+            long selNow = -1;
+            for (int i = 0; i < 60; i++) {
+                if (num(fb, "RBFBDmubSelSets") > setsBefore) {
+                    selNow = num(fb, "RBFBDmubWinSel");
+                    break;
+                }
+                usleep(100000);
+            }
+            if (selNow < 0) {
+                printf("RBFBDmubSelSets never moved past %ld in 6 s - the "
+                       "select did not\narrive (or this framebuffer "
+                       "predates 2E3). Refusing to send.\n", setsBefore);
+                IOObjectRelease(fb);
+                return 2;
+            }
+            if (selNow != 7) {
+                printf("selector reads %ld after asking for 7 - refusing "
+                       "to send.\n", selNow);
+                IOObjectRelease(fb);
+                return 2;
+            }
+            printf("selector now 7 (REGION4).\n");
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     io_service_t fb = findFB();
@@ -990,6 +1201,13 @@ int main(int argc, char **argv)
                "                      firmware EXECUTED it, which no other\n"
                "                      instrument here can show. Needs\n"
                "                      -rbgpufbdmubdom.\n"
+               "  dmubbl dpaltq [zero]  QUERY_DP_ALT over phy 0..4 - the\n"
+               "                      chip's own answer to whether DP alt\n"
+               "                      mode is granted on the Type-C PHY,\n"
+               "                      which every bring-up write depends on.\n"
+               "                      READ-ONLY on the chip. Needs\n"
+               "                      -rbgpufbdpaltq. `zero` is the\n"
+               "                      Linux-exact fill control.\n"
                "  dmubbl win <0..9>   point the push at a window: 0..6 are\n"
                "                      CW0..CW6, 7/8/9 are REGION4/5/6. Then\n"
                "                      `dmubbl caps` tests THAT address.\n");
@@ -1089,6 +1307,40 @@ int main(int argc, char **argv)
                "which DOMAIN_PG_STATUS words changed across the send. Any\n"
                "non-zero value means the firmware EXECUTED an inbox command,\n"
                "which no other instrument here can show (2DB).\n");
+    } else if (strcmp(argv[1], "dpaltq") == 0) {
+        /* 2EA: five QUERY_DP_ALT commands in ONE setProperties call - the
+         * kext sweeps phy 0..4 and decodes each reply out of the slot
+         * dmubPush already reads back. Read-only on the chip: every field
+         * but phy_id is an output.
+         *
+         * The ARGUMENT is the fill byte, not a phy: `zero` sends Linux's
+         * byte-exact memset(0) and anything else (the default) sends the
+         * 0xFF sentinel. The sentinel is the instrument - under a zero fill
+         * an unanswered slot and a genuine all-zero reply are the same four
+         * bytes - and the zero run is the control that keeps the deviation
+         * testable rather than merely argued. */
+        if (ensureRegion4(fb) != 0) { IOObjectRelease(fb); return 2; }
+
+        long fill = 1;              /* non-zero = the 0xFF sentinel */
+        if (argc > 2 && strcmp(argv[2], "zero") == 0) { fill = 0; }
+        else if (argc > 2) {
+            printf("usage: dmubbl dpaltq [zero]\n"
+                   "       default = the 0xFF sentinel fill (the instrument)\n"
+                   "       zero     = Linux's byte-exact memset(0) control\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+
+        d = @{ @"RBFBDpAltQ": @(fill) };
+        printf("\nsweeping QUERY_DP_ALT (sub-type 26) over phy 0..4, fill %s...\n",
+               fill ? "0xFF (sentinel)" : "0x00 (Linux-exact control)");
+        printf("read-only: phy_id is the only input and the command changes no\n"
+               "hardware state. 2C0 refused to build this because 2zr measured\n"
+               "no inbox reply - but 2zr's reading was taken at CW4, 2DA found\n"
+               "the ring is REGION4 and 2E9 proved a command sent there\n"
+               "EXECUTES. So the reply path has never been tried at the right\n"
+               "address. What it decides: whether DP alt mode is granted on\n"
+               "PHY2 at all, which every downstream write depends on.\n");
     } else if (strcmp(argv[1], "dig") == 0) {
         /* 2E2: the DIG1 transmitter ENABLE for the Type-C port. ONE
          * setProperties call - the kext reads the control PHY, reads the
@@ -1137,71 +1389,7 @@ int main(int argc, char **argv)
             return 2;
         }
 
-        /* 2DA's trap, closed inside the invocation rather than documented.
-         *
-         * The push goes to whatever window RBFBDmubSel last named, the
-         * default is CW4, and this project's own rb_dmub.h rules CW4 out -
-         * the firmware wrote its INBOX1 base as 0x80000000, which is inside
-         * REGION4's top of 0x8000ffff and outside region 3 entirely. 2DA
-         * lost one session to that default and a SECOND to a reboot resetting
-         * the selector after it had been set by hand. So this does not
-         * document the prerequisite, it performs it: select REGION4, read the
-         * selector back, and refuse to send if it is not 7. An experiment
-         * whose precondition is a previous command is one that gets run
-         * without it (rule 34, made structural - the same reason the kext
-         * side is a single call). */
-        {
-            const long selBefore = num(fb, "RBFBDmubWinSel");
-            const long setsBefore = num(fb, "RBFBDmubSelSets");
-            if (selBefore != 7) {
-                printf("\nselector is %ld; REGION4 is the identified mailbox "
-                       "(2DA), selecting 7\nfirst so the command does not go "
-                       "into CW4 - which rb_dmub.h itself\nrules out.\n",
-                       selBefore);
-                kern_return_t ksel = IORegistryEntrySetCFProperties(
-                    fb, (__bridge CFDictionaryRef)@{ @"RBFBDmubSel": @(7) });
-                if (ksel != KERN_SUCCESS) {
-                    printf("selecting REGION4 failed (0x%x) - refusing to "
-                           "send into an unknown window.\n", ksel);
-                    IOObjectRelease(fb);
-                    return 2;
-                }
-                /* Read it BACK rather than trusting the return code: a
-                 * kern_return_t says the setter ran, not that the state took
-                 * (rule 13, and 2A3 is what trusting it costs).
-                 *
-                 * 2E3: but POLL, and poll the monotonic counter first. Every
-                 * DMUB key is published on a 500 ms throttle, so the first
-                 * version of this read the stale 4 back immediately after a
-                 * successful set and refused its own send - rule 31, third
-                 * instance. RBFBDmubSelSets counts accepted selects and only
-                 * ever rises, so waiting for it past its pre-set value
-                 * separates "not published yet" from "the write was lost",
-                 * which the dialled value alone cannot. */
-                long selNow = -1;
-                for (int i = 0; i < 60; i++) {
-                    if (num(fb, "RBFBDmubSelSets") > setsBefore) {
-                        selNow = num(fb, "RBFBDmubWinSel");
-                        break;
-                    }
-                    usleep(100000);
-                }
-                if (selNow < 0) {
-                    printf("RBFBDmubSelSets never moved past %ld in 6 s - the "
-                           "select did not\narrive (or this framebuffer "
-                           "predates 2E3). Refusing to send.\n", setsBefore);
-                    IOObjectRelease(fb);
-                    return 2;
-                }
-                if (selNow != 7) {
-                    printf("selector reads %ld after asking for 7 - refusing "
-                           "to send.\n", selNow);
-                    IOObjectRelease(fb);
-                    return 2;
-                }
-                printf("selector now 7 (REGION4).\n");
-            }
-        }
+        if (ensureRegion4(fb) != 0) { IOObjectRelease(fb); return 2; }
 
         /* Both keys in ONE setProperties call: VBL.cpp handles RBFBDigEnc
          * first, so the dial is in place before the send it governs - a
@@ -1240,12 +1428,16 @@ int main(int argc, char **argv)
     const long domCallsBefore = isDom ? num(fb, "RBFBDmubDomCalls") : 0;
     const int isDig = (strcmp(argv[1], "dig") == 0);
     const long digCallsBefore = isDig ? num(fb, "RBFBDigCalls") : 0;
+    const int isDpAltQ = (strcmp(argv[1], "dpaltq") == 0);
+    const long dpaltqCallsBefore = isDpAltQ ? num(fb, "RBFBDpAltQCalls") : 0;
 
     kern_return_t kr = IORegistryEntrySetCFProperties(
         fb, (__bridge CFDictionaryRef)d);
     printf("-> 0x%x%s\n", kr, kr == KERN_SUCCESS ? " (the push returned OK)" : "");
     if (isDig) {
         digVerdictPrint(fb, digCallsBefore);
+    } else if (isDpAltQ) {
+        dpaltqReport(fb, dpaltqCallsBefore);
     } else if (isDom) {
         /* The IOReturn is a yes/no over every refusal path at once, so the
          * tool reads the code itself rather than making the user decode an

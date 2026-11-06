@@ -1280,6 +1280,24 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
     }
 
     {
+        /* 2EA: the QUERY_DP_ALT sweep. The VALUE is the fill byte, so the
+         * Linux-exact control (0) and the sentinel run (0xFF) are the same
+         * code path with one byte different - a deviation that can be A/B'd
+         * is a deviation that can be wrong. 0xFF is the default for a bare
+         * ask because its null is the interpretable one. */
+        OSNumber *q = OSDynamicCast(OSNumber, dict->getObject("RBFBDpAltQ"));
+        if (q) {
+            const uint32_t v = q->unsigned32BitValue();
+            const uint32_t fill = (v == 0u) ? RB_DPALTQ_FILL_LINUX
+                                            : RB_DPALTQ_FILL;
+            const uint32_t rc = dmubDpAltQuery(fill);
+            LOG("RBFBDpAltQ fill=0x%02x -> rc %u verdict %u usb 0x%02x",
+                fill, rc, dpaltqVerdict, dpaltqUsbMask);
+            dmubPublish();              /* 2E3: readable on return */
+            return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+        }
+    }
+    {
         OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDigPhy"));
         if (w) {
             digCalls++;

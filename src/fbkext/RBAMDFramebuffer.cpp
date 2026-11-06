@@ -632,6 +632,31 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * calls the path "Legacy path, avoid if possible". A boot that does
          * not pass this reads exactly what every boot before it read. */
         dpaltArmed = argOn("-rbgpufbdpalt");
+        /* 2EA: the QUERY_DP_ALT sweep, and the TOKEN NAME is rule 30 biting
+         * for real rather than being checked and cleared. The obvious
+         * `-rbgpufbdpaltq` has `-rbgpufbdpalt` - the line directly above -
+         * as a strict PREFIX, which is the one arrangement rule 30 names.
+         * The kernel's own parse is exact so it would have worked there;
+         * what breaks is every shell grep in tools/, and `efi.sh` reporting
+         * which rbgpu tokens it kept. So it is `-rbgpufbaltq`, which
+         * diverges from the whole `-rbgpufba` family (-rbgpufbaux,
+         * -rbgpufbaccel, rbgpufbatymb) at the next character and prefixes
+         * nothing. Checked by hand because an opt-in token is not in
+         * rb_defaults.h's table and its hosttest therefore does not cover
+         * it - the same gap 2BA's comment records.
+         *
+         * What it can change on the chip: NOTHING. Every field of this
+         * command but phy_id is an output and no register is written; the
+         * only write is the inbox push 2E9 measured safe. It is opt-in all
+         * the same because producing on the DMUB inbox is a write surface
+         * (2BA's standard), and because the sweep sends five commands where
+         * every other experiment here sends one. */
+        dpaltqArmed = argOn("-rbgpufbaltq");
+        /* The same self-arm as `-rbgpufbdig`, for the same reason: without
+         * it dmubPush refuses with code 1 and the refusal looks nothing
+         * like its cause (rule 34). Nothing is sent until the userspace
+         * trigger names a fill byte. */
+        if (dpaltqArmed) { dmubBlArmed = true; }
         /* rbgpufbblfloor=<N>, in Linux's u16.16 units where 0x10000 is full
          * scale. Rule 40: the value comes back as a BINARY INT of the
          * caller's width, so this is an int and not a char buffer - the bug

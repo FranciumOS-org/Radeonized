@@ -90,6 +90,20 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubDomMoved = 0;
     dmubDomRan = 0;
     dmubDomCalls = 0;
+    /* 2EA */
+    dpaltqVerdict = 0;
+    dpaltqUsbMask = 0;
+    dpaltqFill = 0;
+    dpaltqRetCleared = 0;
+    dpaltqCalls = 0;
+    dpaltqSends = 0;
+    for (unsigned i = 0; i < RB_DPALTQ_PHY_COUNT; i++) {
+        dpaltqRefuse[i] = RB_DPALTQ_NOT_ARMED;
+        dpaltqReply[i].phy_id = 0;
+        dpaltqReply[i].is_usb = 0;
+        dpaltqReply[i].is_dp_alt_disable = 0;
+        dpaltqReply[i].is_dp4 = 0;
+    }
     /* 2E2 */
     digCalls = 0;
     digSends = 0;
@@ -905,6 +919,68 @@ uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
     return digRefuse = RB_DIG_OK;
 }
 
+/* 2EA: the sweep. phy_id 0..4, one command each, decoded from the slot
+ * dmubPush already reads back for every command - so the reply costs nothing
+ * new and the only write is the inbox push 2E9 measured safe.
+ *
+ * Every phy gets its own refusal code, kept per instance rather than
+ * last-wins: "phy 2 answered and phys 0,1 did not" is the shape of a reply
+ * path that works, and a single scalar cannot express it (rule 14, and 2E9's
+ * instance-level diff is why that mattered there too).
+ *
+ * The panel's PHY is NOT refused here, unlike every write path in this kext:
+ * this command changes nothing, and phy 0 is the control the verdict needs -
+ * the ROM says it is not USB-C, so is_usb 0 there against 1 on phy 2 is the
+ * agreement that makes a reply believable. */
+uint32_t RBAMDFramebuffer::dmubDpAltQuery(uint32_t fill)
+{
+    uint8_t cmd[RB_DMUB_CMD_SIZE];
+
+    dpaltqCalls++;
+    dpaltqFill = fill;
+    dpaltqRetCleared = 0u;
+
+    if (!dpaltqArmed || !dmubBlArmed) {
+        for (unsigned i = 0; i < RB_DPALTQ_PHY_COUNT; i++) {
+            dpaltqRefuse[i] = RB_DPALTQ_NOT_ARMED;
+        }
+        dpaltqVerdict = RB_DPALTQ_V_NONE;
+        dpaltqUsbMask = 0u;
+        return RB_DPALTQ_NOT_ARMED;
+    }
+
+    for (unsigned i = 0; i < RB_DPALTQ_PHY_COUNT; i++) {
+        rb_dpaltq_build(cmd, i, (uint8_t)fill);
+
+        const uint32_t rc = dmubPush(cmd);
+        if (rc != 0u) {
+            dpaltqRefuse[i] = RB_DPALTQ_PUSH_FAILED;
+            dpaltqReply[i].phy_id = i;
+            dpaltqReply[i].is_usb = 0u;
+            dpaltqReply[i].is_dp_alt_disable = 0u;
+            dpaltqReply[i].is_dp4 = 0u;
+            continue;
+        }
+        dpaltqSends++;
+
+        /* dmubPush's step 5 has already copied the slot into dmubReplyGot,
+         * after its own bounded wait on RPTR. Nothing is re-read from the
+         * ring here: a second read would be a different sample from the one
+         * the ack bounded (2zp - do not compare a reading with itself, and
+         * do not silently take a later one either). */
+        if (rb_dpaltq_ret_cleared(dmubReplyGot)) {
+            dpaltqRetCleared |= (1u << i);
+        }
+        dpaltqRefuse[i] = (uint32_t)rb_dpaltq_decode(dmubReplyGot, i,
+                                                     (uint8_t)fill,
+                                                     &dpaltqReply[i]);
+    }
+
+    dpaltqVerdict = (uint32_t)rb_dpaltq_verdict(dpaltqReply, dpaltqRefuse);
+    dpaltqUsbMask = rb_dpaltq_usb_mask(dpaltqReply, dpaltqRefuse);
+    return RB_DPALTQ_OK;
+}
+
 void RBAMDFramebuffer::dmubTeardown(void)
 {
     dmubRing = nullptr;
@@ -1250,6 +1326,30 @@ void RBAMDFramebuffer::dmubPublish(void)
         setProperty(k, (uint64_t)digbePost[i], 64);
         snprintf(k, sizeof(k), "RBFBDigBeEnPost%u", i);
         setProperty(k, (uint64_t)digbeEnPost[i], 64);
+    }
+    /* 2EA. dpaltqCalls is monotonic and bumped BEFORE any refusal, so a
+     * tool can poll it past its own pre-set value instead of sleeping on a
+     * snapshot - 2C5/2D1/2E3's defect, three times paid for. */
+    setProperty("RBFBDpAltQArmed", dpaltqArmed);
+    setProperty("RBFBDpAltQCalls", dpaltqCalls, 64);
+    setProperty("RBFBDpAltQSends", (uint64_t)dpaltqSends, 32);
+    setProperty("RBFBDpAltQFill", (uint64_t)dpaltqFill, 32);
+    setProperty("RBFBDpAltQVerdict", (uint64_t)dpaltqVerdict, 32);
+    setProperty("RBFBDpAltQUsbMask", (uint64_t)dpaltqUsbMask, 32);
+    setProperty("RBFBDpAltQRomMask", (uint64_t)RB_DPALTQ_ROM_USB_MASK, 32);
+    setProperty("RBFBDpAltQRetCleared", (uint64_t)dpaltqRetCleared, 32);
+    for (unsigned i = 0; i < RB_DPALTQ_PHY_COUNT; i++) {
+        char k[40];
+        snprintf(k, sizeof(k), "RBFBDpAltQRefuse%u", i);
+        setProperty(k, (uint64_t)dpaltqRefuse[i], 32);
+        snprintf(k, sizeof(k), "RBFBDpAltQUsb%u", i);
+        setProperty(k, (uint64_t)dpaltqReply[i].is_usb, 32);
+        snprintf(k, sizeof(k), "RBFBDpAltQDis%u", i);
+        setProperty(k, (uint64_t)dpaltqReply[i].is_dp_alt_disable, 32);
+        snprintf(k, sizeof(k), "RBFBDpAltQDp4%u", i);
+        setProperty(k, (uint64_t)dpaltqReply[i].is_dp4, 32);
+        snprintf(k, sizeof(k), "RBFBDpAltQEcho%u", i);
+        setProperty(k, (uint64_t)dpaltqReply[i].phy_id, 32);
     }
     for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
         char k[32];
