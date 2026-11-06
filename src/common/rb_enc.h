@@ -159,4 +159,55 @@ static inline int rb_enc_applied(uint32_t cfg_back, uint32_t scram_back,
     return (scram_back & RB_ENC_SCRAM_ADVANCE) != 0u;
 }
 
+/* 2E6: `rb_enc_applied()` ALONE HAS NO CONTROL, and boot 444 is why. Link
+ * encoder 2 read DP_CONFIG 0x00000001 and SCRAM_CNTL 0x0101FF10 BEFORE our
+ * write - already exactly what enc1_configure_encoder(2 lanes) would store -
+ * so both writes were no-ops and `applied` read 1 whether the store landed,
+ * was dropped, or was never issued. A readback that agrees with the target is
+ * not evidence of a write when the target was already present (rule 20's
+ * shape). This is the quantity a reader actually wants beside it. */
+static inline int rb_enc_changed(uint32_t cfg_before, uint32_t cfg_after,
+                                 uint32_t scram_before, uint32_t scram_after)
+{
+    return (cfg_before != cfg_after) || (scram_before != scram_after);
+}
+
+/* The survey, 2E6's open question: 0x1 / 0x0101FF10 on instance 2 is either
+ * the block's reset state or the FIRMWARE's own setup of that connector, and
+ * one instance cannot say (rule 18). The discriminator is the other four. If
+ * instances 0 and 2 are configured and 1, 3 and 4 are not, that is the
+ * firmware having brought up exactly the pair 2B4's HPD sink mask 0x05 and
+ * 2B9's AUX_EN mask 0x05 independently name - and the 2 lanes agree with what
+ * 2BB read from the sink's own DPCD. All five alike is a reset default and
+ * says nothing.
+ *
+ * "Configured" is deliberately the CONJUNCTION of the two fields
+ * enc1_configure_encoder writes, not either one: DP_UDI_LANES alone is 0 for
+ * a one-lane link, which is indistinguishable from an untouched register. */
+static inline int rb_enc_looks_configured(uint32_t cfg, uint32_t scram)
+{
+    /* An all-ones word is an unmapped or powered-down block, not a
+     * configuration - and it would otherwise satisfy both field tests and
+     * report every instance configured. 2DD's shape: reject an implausible
+     * sample before decoding it, rather than decoding it plausibly. */
+    if (cfg == 0xFFFFFFFFu || scram == 0xFFFFFFFFu) { return 0; }
+    if ((scram & RB_ENC_SCRAM_ADVANCE) == 0u)       { return 0; }
+    return (cfg & RB_ENC_UDI_LANES_MASK) != 0u;
+}
+
+/* A bitmask over the five instances, so one key carries the whole survey and
+ * the comparison against 0x05 is a single read. */
+static inline uint32_t rb_enc_configured_mask(const uint32_t *cfg,
+                                              const uint32_t *scram)
+{
+    uint32_t m = 0u;
+    uint32_t i;
+
+    if (!cfg || !scram) { return 0u; }
+    for (i = 0u; i < RB_ENC_COUNT; i++) {
+        if (rb_enc_looks_configured(cfg[i], scram[i])) { m |= (1u << i); }
+    }
+    return m;
+}
+
 #endif /* RB_ENC_H */

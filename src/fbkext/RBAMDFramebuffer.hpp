@@ -624,6 +624,13 @@ private:
     uint32_t           encScramBefore;   /* DP_DPHY_SCRAM_CNTL before      */
     uint32_t           encScramAfter;    /* ...and read BACK after         */
     uint32_t           encApplied;       /* rb_enc_applied() on the reads  */
+    /* 2E6: `encApplied` with before == after == target cannot tell a landed
+     * write from a dropped one, so the change bit is published beside it. */
+    uint32_t           encChanged;       /* rb_enc_changed() on the reads   */
+    uint32_t           encSurveyCfg[RB_ENC_COUNT];    /* DP_CONFIG, all 5   */
+    uint32_t           encSurveyScram[RB_ENC_COUNT];  /* SCRAM_CNTL, all 5  */
+    uint32_t           encSurveyMask;    /* rb_enc_configured_mask()        */
+    bool               encSurveyDone;    /* latched - only REAL readings do */
     uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
     uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
     uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];
@@ -985,6 +992,7 @@ private:
      * side of one DIG1 transmitter ENABLE. Armed half only; the PHY survey
      * it judges by is dpaltSample(), which runs unarmed. */
     uint32_t dmubDigExperiment(uint32_t phyid);
+    void     encSurvey(void);
     uint32_t encConfigure(uint32_t inst, uint32_t lanes);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);

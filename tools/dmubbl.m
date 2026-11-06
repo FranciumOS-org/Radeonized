@@ -402,6 +402,63 @@ static const char *digVerdictName(long v)
  * the set can return the previous one and look exactly like a lost write. */
 /* 2E5: rb_enc.h's refusal codes, 40-45. Numbered clear of rb_dig's 30-37 so
  * a code read against the wrong table cannot decode plausibly. */
+/* 2E6: the five-encoder survey. Shared by `dmubbl dig` and the read-only
+ * `dmubbl dig survey`, so the reading is the same text either way. */
+static void encSurveyReport(io_service_t fb)
+{
+    const long encMask = num(fb, "RBFBEncSurveyMask");
+    const long done    = num(fb, "RBFBEncSurveyDone");
+
+    /* RULE 15 AT THE TOOL BOUNDARY. `num()` returns -1 for an ABSENT key,
+     * which is 0xffffffff in the low word - and before this check the five
+     * words printed as ffffffff and every instance decoded as "configured",
+     * which is the opposite of the truth on a kext that simply does not
+     * publish them. The kext refuses an all-ones word now too; this is the
+     * outer of the two checks, and it names the real cause. */
+    if (num(fb, "RBFBEncSurveyMask") < 0 || num(fb, "RBFBEncCfg0") < 0) {
+        printf("\n  survey of all five link encoders\n"
+               "    NOT PUBLISHED by the loaded framebuffer - this reading "
+               "needs the\n    2E6 binary. `kextstat | grep rembrandt` "
+               "against the UUID the build\n    printed (rule 15); an absent "
+               "key is not an absent configuration.\n");
+        return;
+    }
+
+    /* 2E6's survey: which of the five link encoders look configured. The
+     * hypothesis is 0x05 - instances 0 and 2 - which is the pair 2B4's HPD
+     * sink mask and 2B9's AUX_EN mask independently name. */
+    printf("\n  survey of all five link encoders (read-only, latched before "
+           "any send)\n");
+    for (int i = 0; i < 5; i++) {
+        char kc[32], ks[32];
+        snprintf(kc, sizeof(kc), "RBFBEncCfg%d", i);
+        snprintf(ks, sizeof(ks), "RBFBEncScram%d", i);
+        const long c = num(fb, kc), sc = num(fb, ks);
+        printf("    DP%d  CONFIG %08lx  SCRAM %08lx   %s\n", i,
+               c & 0xffffffffL, sc & 0xffffffffL,
+               (encMask & (1L << i)) ? "configured" : "-");
+    }
+    printf("    mask %#lx  ", encMask);
+    if (encMask == 0x05L) {
+        printf("-> 0 and 2 ONLY, which is 2B4's HPD sink mask and 2B9's\n"
+               "               AUX_EN mask: the FIRMWARE configured the "
+               "Type-C encoder.\n");
+    } else if (encMask == 0x1fL) {
+        printf("-> all five alike, so 0x1/0x0101FF10 is the block's RESET\n"
+               "               state and says nothing about the firmware.\n");
+    } else if (encMask == 0L) {
+        printf("-> none configured (check RBFBEncSurveyDone - an unready\n"
+               "               aperture reads as this).\n");
+    } else {
+        printf("-> neither 0x05 nor 0x1f; read the words above.\n");
+    }
+    if (!done) {
+        printf("    RBFBEncSurveyDone is NO - the aperture was not ready, so\n"
+               "    these words are not a reading. -rbgpufbdig or "
+               "-rbgpufbdpalt\n    arms the mapping.\n");
+    }
+}
+
 static const char *encWhy(long c)
 {
     switch (c) {
@@ -469,6 +526,7 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
     const long cfgA     = num(fb, "RBFBEncCfgAfter");
     const long scrB     = num(fb, "RBFBEncScramBefore");
     const long scrA     = num(fb, "RBFBEncScramAfter");
+    const long encChg   = num(fb, "RBFBEncChanged");
 
     printf("\nencoder (enc1_configure_encoder on link encoder %ld)\n", phy);
     printf("  configured     %s   ran %ld\n", encOn ? "yes" : "NO", encRan);
@@ -478,8 +536,15 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
     printf("  SCRAM_CNTL     %08lx -> %08lx   (bit 4 ADVANCE set, the other "
            "three fields kept)\n", scrB & 0xffffffffL, scrA & 0xffffffffL);
     printf("  applied        %ld  %s\n", encAppl,
-           encAppl ? "the READBACK agrees - both writes took"
+           encAppl ? "the READBACK agrees with the target"
                    : "the readback does NOT agree");
+    printf("  changed        %ld  %s\n", encChg,
+           encChg ? "our write MOVED a register, so the write path works"
+                  : "NEITHER register moved - the encoder was ALREADY in the "
+                    "target\n                     state, so `applied` says "
+                    "nothing about our write (2E6)");
+
+    encSurveyReport(fb);
 
     if (verdict == 2) {
         printf("\n  -> THE FIRMWARE EXECUTES DMUB_CMD__VBIOS COMMANDS, and "
@@ -494,7 +559,24 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
                "at the encoder setup this experiment\n     deliberately "
                "omits (DP_CONFIG / DP_DPHY_SCRAM_CNTL). Read the word.\n");
     } else {
-        if (encAppl) {
+        if (encAppl && !encChg) {
+            printf("\n  -> sent, and THE ENCODER WAS ALREADY IN THE TARGET "
+                   "STATE - neither write\n     moved a bit. So 2E2's live "
+                   "alternative was never a DIFFERENCE: the\n     "
+                   "encoder was configured on boot 443 too, and 2E4's STILL "
+                   "already\n     carried it. The caveat is discharged by "
+                   "measurement rather than by\n     change - and our write "
+                   "path is UNVERIFIED by this reading (2E6).\n\n     Two "
+                   "steps named in advance are still not reproduced and are "
+                   "now\n     the whole list: DIG_BE_CNTL.DIG_FE_SOURCE_SELECT"
+                   " (which\n     dig_encoder_sel_to_atom returns 0 for, and "
+                   "2E1 recorded as a MISSING\n     STEP, not a free field) "
+                   "and the pixel clock (VBIOS sub-type 2).\n     A "
+                   "transmitter with no clock and no front end may have "
+                   "nothing to\n     light, so \"the firmware discards VBIOS "
+                   "commands\" is NOT yet the\n     reading - it is one of "
+                   "two live candidates, and the cheaper to refute.\n");
+        } else if (encAppl) {
             printf("\n  -> sent, THE ENCODER IS CONFIGURED AND VERIFIED BY "
                    "READBACK, and the PHY\n     still did not move. 2E2's "
                    "live alternative is now ELIMINATED, so the\n     "
@@ -889,6 +971,17 @@ int main(int argc, char **argv)
         int wantEnc = 1;
         if (argc > 3 && strcmp(argv[3], "noenc") == 0) { wantEnc = 0; }
         if (argc > 2 && strcmp(argv[2], "noenc") == 0) { wantEnc = 0; phy = -1; }
+        /* 2E6: report the five-encoder survey and SEND NOTHING. The survey
+         * is the independent finding (did the firmware configure the Type-C
+         * encoder, or is 0x1/0x0101FF10 a reset default?) and it should not
+         * need the experiment armed to be read. It is latched pristine at the
+         * first periodic publish, so a send would not spoil it either - this
+         * just makes the reading free. */
+        if (argc > 2 && strcmp(argv[2], "survey") == 0) {
+            encSurveyReport(fb);
+            IOObjectRelease(fb);
+            return 0;
+        }
 
         if (phy == 0) {
             printf("\nREFUSING to pass phyid 0 from this tool.\n"
