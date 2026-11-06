@@ -2480,7 +2480,26 @@ decoded refusal with the before/after words instead of a raw IOReturn.
 **STILL NO BOOT HAS SENT A DOMAIN_CONTROL COMMAND.** General: never index
 `hubpRegs` with a dword offset read off a vendored header without the segment
 base - HUBP, OTG, HPD and AUX all add it, and a wrong address that is
-READABLE is rule 14 at the hardware boundary),
+READABLE is rule 14 at the hardware boundary.
+**2DE: THE FIX WORKED AND EVERY PIPE DOMAIN IS ALREADY IN THE PANEL'S STATE -
+boot 437 reads DOMAIN0..3 all `0x10000000`, CONFIG 0, identically**, so a
+power-UP has nothing to act on and refusal 24 is now a true statement about
+the chip. Polarity still unrecorded and still not needed. **Consequence worth
+carrying: the external display's pipe does not need powering up** - OTG1-3
+read 0x300 with their domains powered, so that comes off the output-side list.
+2DC's "do not raise RB_PG_DOMAIN_COUNT" is withdrawn: `DOMAIN16/17/18`
+(0x0089/0x008a, 0x008b/0x008c, 0x008d/0x008e) are separate blocks that may be
+gated, and reading them costs a read where the alternative is a power-DOWN of
+a working pipe. **The stride note is now a seven-row TABLE** and the hosttest
+pins that slot 4 is NOT `0x0080 + 4*2` = 0x0088 but DOMAIN16's 0x0089.
+**SLOT vs DOMAIN NUMBER is the live trap:** `inst` in the command is the
+domain number (`dmub_cmd.h:3150`), the array index is a slot, they part
+company past 3, and slot 4 IS DOMAIN16 - `rb_pg_slot_inst()` /
+`rb_pg_slot_for_inst()` are the only conversions and `rb_pg_sel_refuse()`
+takes the number, so DOMAIN4 is refused rather than read as slot 4. If all
+seven read alike, the power-up direction is EXHAUSTED and the only remaining
+test is a power-DOWN of an unused pipe - **the user's decision, and the tool
+still refuses `power_gate = 1`**),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbdmubbl` (2zn - producing on
 DMCUB's inbox 1 is a new hardware-write surface, and even armed nothing is
 sent until `build/out/dmubbl` names a level; the locate and the bring-up scan

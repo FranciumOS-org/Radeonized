@@ -34,31 +34,58 @@ int pg_tests(void)
      * formula checked against itself proves nothing (rule 26 for arithmetic,
      * the shape hpd_test.c records). */
     {
-        static const uint32_t want_cfg[4] = { 0x0080, 0x0082, 0x0084, 0x0086 };
-        static const uint32_t want_sts[4] = { 0x0081, 0x0083, 0x0085, 0x0087 };
+        /* 2DE: seven rows, each written down from the header. DOMAIN16..18
+         * are NOT on the DOMAIN0..3 stride - 0x0089 where the formula would
+         * say 0x0088 - which is the whole reason this is a table. */
+        static const uint32_t want_cfg[7] =
+            { 0x0080, 0x0082, 0x0084, 0x0086, 0x0089, 0x008b, 0x008d };
+        static const uint32_t want_sts[7] =
+            { 0x0081, 0x0083, 0x0085, 0x0087, 0x008a, 0x008c, 0x008e };
+        static const uint32_t want_inst[7] = { 0, 1, 2, 3, 16, 17, 18 };
         uint32_t i;
 
-        CHECK(RB_PG_DOMAIN_COUNT == 4u, "DOMAIN0..3 are the exposed block");
+        CHECK(RB_PG_DOMAIN_COUNT == 7u,
+              "DOMAIN0..3 and DOMAIN16..18 are the exposed rows");
         for (i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
             CHECK(rb_pg_config_dw(i) == want_cfg[i],
                   "DOMAINn_PG_CONFIG matches the vendored offset header");
             CHECK(rb_pg_status_dw(i) == want_sts[i],
                   "DOMAINn_PG_STATUS matches the vendored offset header");
+            CHECK(rb_pg_slot_inst(i) == want_inst[i],
+                  "the slot carries the DOMAIN NUMBER the command needs");
+            CHECK(rb_pg_slot_for_inst(want_inst[i]) == (int)i,
+                  "and the inverse round-trips, so neither direction is "
+                  "arithmetic");
         }
 
-        /* The bound an aperture check uses must be the real highest dword,
-         * so it is asserted against the literal rather than recomputed. */
-        CHECK(rb_pg_dw_max() == 0x0087u,
-              "rb_pg_dw_max is DOMAIN3_PG_STATUS, the highest dword read");
+        /* THE FORMULA IS WRONG PAST SLOT 3, asserted explicitly: the naive
+         * 0x0080 + slot*2 gives 0x0088 at slot 4, which is a DIFFERENT
+         * register, and the table gives DOMAIN16's real 0x0089. This case is
+         * what fails if anyone replaces the table with a loop. */
+        CHECK(rb_pg_config_dw(4u) != (RB_PG_DW_DOMAIN0_PG_CONFIG +
+                                      4u * RB_PG_DOMAIN_STRIDE),
+              "slot 4 is NOT where continuing the stride would land");
+        CHECK((RB_PG_DW_DOMAIN0_PG_CONFIG + 4u * RB_PG_DOMAIN_STRIDE)
+                  == 0x0088u,
+              "...and the value it would have landed on is 0x0088");
+        CHECK(rb_pg_config_dw(4u) == 0x0089u, "DOMAIN16_PG_CONFIG is 0x0089");
 
-        /* THE STRIDE MUST NOT BE EXTENDED. regDOMAIN16_PG_CONFIG is 0x0089
-         * and continuing the stride would reach 0x0088, which is a different
-         * register. This asserts the file does NOT claim to reach it, so
-         * raising the count later fails here instead of reading the wrong
-         * address on a chip. */
-        CHECK(rb_pg_config_dw(RB_PG_DOMAIN_COUNT) == 0x0088u,
-              "one past the block is 0x0088, which is NOT DOMAIN16 (0x0089) "
-              "- the stride is broken there and the count must stay 4");
+        /* The bound an aperture check uses must be the real highest dword. */
+        CHECK(rb_pg_dw_max() == 0x008eu,
+              "rb_pg_dw_max is DOMAIN18_PG_STATUS, the highest dword read");
+
+        /* A slot off the end is REFUSED with a value no aperture contains,
+         * not clamped to a plausible row (rule 14). */
+        CHECK(rb_pg_config_dw(RB_PG_DOMAIN_COUNT) == RB_PG_SLOT_BAD,
+              "a slot past the table refuses rather than computing one");
+        CHECK(rb_pg_status_dw(RB_PG_DOMAIN_COUNT) == RB_PG_SLOT_BAD,
+              "...both accessors");
+        CHECK(rb_pg_slot_inst(RB_PG_DOMAIN_COUNT) == RB_PG_SLOT_BAD,
+              "...and the instance lookup");
+        CHECK(rb_pg_slot_for_inst(4u) == -1,
+              "DOMAIN4 does not exist on this chip and has no slot");
+        CHECK(rb_pg_slot_for_inst(RB_PG_SLOT_BAD) == -1,
+              "the refusal value itself is not a domain number");
     }
 
     /* The fields, against docs/linux-ref/dcn_3_1_2_sh_mask.h:
@@ -95,9 +122,13 @@ int pg_tests(void)
      * polarity the hardware actually uses. Both are exercised. */
     {
         /* Polarity A: suppose "powered" reads 0 in the FSM field. */
-        uint32_t a[4] = { 0x00000000u, 0x80000000u, 0x80000000u, 0x00000000u };
+        uint32_t a[7] = { 0x00000000u, 0x80000000u, 0x80000000u,
+                          0x00000000u, 0x00000000u, 0x00000000u,
+                          0x00000000u };
         /* Polarity B: suppose "powered" reads 2. Same shape, inverted. */
-        uint32_t b[4] = { 0x80000000u, 0x00000000u, 0x00000000u, 0x80000000u };
+        uint32_t b[7] = { 0x80000000u, 0x00000000u, 0x00000000u,
+                          0x80000000u, 0x80000000u, 0x80000000u,
+                          0x80000000u };
 
         CHECK(rb_pg_like_reference(a[3], a[RB_PG_DOMAIN_REFERENCE]) == 1,
               "a domain matching the reference reads as powered (polarity A)");
@@ -120,7 +151,8 @@ int pg_tests(void)
          * anyway. If every domain already matches the reference there is no
          * gated domain to power up on this boot. */
         {
-            uint32_t all_same[4] = { 0x11u, 0x11u, 0x11u, 0x11u };
+            uint32_t all_same[7] = { 0x11u, 0x11u, 0x11u, 0x11u,
+                                     0x11u, 0x11u, 0x11u };
             CHECK(rb_pg_candidate(all_same) == -1,
                   "every domain already in the reference state means the test "
                   "is NOT AVAILABLE, not that domain 1 will do");
@@ -138,8 +170,9 @@ int pg_tests(void)
          * against a hand-named instance by rb_pg_sel_refuse() below, which
          * does fail when broken. */
         {
-            uint32_t ref_unlike_all[4] =
-                { 0xc0000000u, 0x00000000u, 0x00000000u, 0x00000000u };
+            uint32_t ref_unlike_all[7] =
+                { 0xc0000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+                  0x00000000u, 0x00000000u, 0x00000000u };
             CHECK(rb_pg_like_reference(ref_unlike_all[RB_PG_DOMAIN_REFERENCE],
                                        ref_unlike_all[RB_PG_DOMAIN_REFERENCE])
                       == 1,
@@ -161,18 +194,28 @@ int pg_tests(void)
               "DOMAIN0 is refused as the live panel's domain, with its own "
               "code");
         CHECK(rb_pg_sel_refuse(4u) == RB_PG_SEL_OUT_OF_RANGE,
-              "DOMAIN4 is outside the block this file can address");
-        CHECK(rb_pg_sel_refuse(16u) == RB_PG_SEL_OUT_OF_RANGE,
-              "DOMAIN16 is refused: its offset is not on this stride");
+              "DOMAIN4 does not exist on this chip - refused, NOT read as "
+              "slot 4, which is DOMAIN16");
+        CHECK(rb_pg_sel_refuse(16u) == RB_PG_SEL_OK,
+              "DOMAIN16 is selectable since 2DE wrote its offsets down");
+        CHECK(rb_pg_sel_refuse(18u) == RB_PG_SEL_OK, "DOMAIN18 too");
+        CHECK(rb_pg_sel_refuse(19u) == RB_PG_SEL_OUT_OF_RANGE,
+              "DOMAIN19 is past the header's last row");
+        CHECK(rb_pg_sel_refuse(63u) == RB_PG_SEL_OUT_OF_RANGE,
+              "the payload field's maximum is still not a domain");
     }
 
     /* THE VERDICT IS A DIFFERENCE, and it is a MASK so two changes cannot
      * cancel into a count of zero. */
     {
-        uint32_t before[4] = { 0x00u, 0x80000000u, 0x80000000u, 0x80000000u };
-        uint32_t same[4]   = { 0x00u, 0x80000000u, 0x80000000u, 0x80000000u };
-        uint32_t one[4]    = { 0x00u, 0x00000000u, 0x80000000u, 0x80000000u };
-        uint32_t two[4]    = { 0x00u, 0x00000000u, 0x00000000u, 0x80000000u };
+        uint32_t before[7] = { 0x00u, 0x80000000u, 0x80000000u, 0x80000000u,
+                               0x80000000u, 0x80000000u, 0x80000000u };
+        uint32_t same[7]   = { 0x00u, 0x80000000u, 0x80000000u, 0x80000000u,
+                               0x80000000u, 0x80000000u, 0x80000000u };
+        uint32_t one[7]    = { 0x00u, 0x00000000u, 0x80000000u, 0x80000000u,
+                               0x80000000u, 0x80000000u, 0x80000000u };
+        uint32_t two[7]    = { 0x00u, 0x00000000u, 0x00000000u, 0x80000000u,
+                               0x80000000u, 0x80000000u, 0x80000000u };
 
         CHECK(rb_pg_moved_mask(before, same) == 0u,
               "nothing moved is an empty mask - the firmware did not execute");
@@ -282,6 +325,60 @@ int pg_tests(void)
               "a NULL array is unreadable rather than a dereference");
         CHECK(rb_pg_sample_readable(st, 0) == 0,
               "either NULL refuses");
+    }
+
+    /* 2DE: BOOT 437's OWN SAMPLE, which is why this milestone exists.
+     * All four pipe domains read 0x10000000 identically - DESIRED set, PGFSM
+     * 00 - so there is no gated pipe and a power-UP has nothing to act on.
+     * The test must stay unavailable on that sample and become available the
+     * moment a DOMAIN16..18 row differs. */
+    {
+        uint32_t st[RB_PG_DOMAIN_COUNT];
+        uint32_t cf[RB_PG_DOMAIN_COUNT];
+        uint32_t i;
+
+        for (i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
+            st[i] = 0x10000000u;
+            cf[i] = 0x00000000u;
+        }
+        CHECK(rb_pg_sample_readable(st, cf) == 1,
+              "boot 437's sample is readable - 0x10000000 is a real word");
+        CHECK(rb_pg_candidate(st) == -1,
+              "with every domain in the reference state the test is NOT "
+              "AVAILABLE, which is exactly refusal 24 on boot 437");
+
+        /* One gated DOMAIN16 and the whole thing becomes available - with no
+         * power-DOWN of a working pipe, which is the alternative 2DE exists
+         * to avoid. */
+        st[4] = 0x40000000u;
+        CHECK(rb_pg_candidate(st) == 4,
+              "a DOMAIN16 unlike the reference is found, at SLOT 4");
+        CHECK(rb_pg_slot_inst((uint32_t)rb_pg_candidate(st)) == 16u,
+              "and the command carries DOMAIN NUMBER 16, not the slot 4 - "
+              "the conflation this file is built to prevent");
+        CHECK(rb_pg_sel_refuse(
+                  rb_pg_slot_inst((uint32_t)rb_pg_candidate(st)))
+                  == RB_PG_SEL_OK,
+              "the number the candidate produces survives the hand-named "
+              "selector, so the auto path cannot pick something the manual "
+              "path would refuse");
+
+        /* A pipe gated as well: the FIRST unlike domain wins, and it is a
+         * pipe, so DOMAIN16 is not preferred over a nearer candidate. */
+        st[2] = 0x40000000u;
+        CHECK(rb_pg_candidate(st) == 2,
+              "the first unlike domain in slot order is still the answer");
+
+        /* The encoder must carry 16 as 16. */
+        {
+            uint8_t buf[RB_DMUB_CMD_SIZE];
+            rb_dmub_build_domain_control(buf, 16u, 0u);
+            CHECK(buf[4] == 0x10u,
+                  "DOMAIN16 power-up packs as 0x10 - inside the 6-bit field "
+                  "and clear of the power_gate bit at 0x40");
+            CHECK(rb_dmub_domain_inst_valid(18u) == 1,
+                  "DOMAIN18 fits the payload field");
+        }
     }
 
 #undef CHECK
