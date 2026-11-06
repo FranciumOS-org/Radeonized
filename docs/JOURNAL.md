@@ -60056,3 +60056,164 @@ was wrong in a way the suite caught: `0xFFFF8FFF` for "bits outside 14:8" still
 sets bits 11:8; `~0x7F00` is **0xFFFF80FF**.
 
 Framebuffer **B83E1382**. Plugin unchanged. **Nothing has read DIG_BE_CNTL.**
+
+---
+
+## 2E8 — the FE connection is genuinely absent, and Linux says no firmware could ever have made it (boot 447)
+
+Rules 8 and 15 first: `rbgpu-boot` **447**, loaded framebuffer
+**B83E1382-220F-375D-AF21-70C5CE9B7300** == the built UUID == the UUID inside
+`AuxiliaryKernelExtensions.kc`, plugin 9FE31A5A (2D5's). `RBFBDigSends` **0**,
+so the words are pristine - nothing this project sent has touched them.
+
+`DIG_BE_CNTL`, all five instances, read back out of the registry rather than
+off the tool's own summary:
+
+| | word | `FE_SEL` | `DIG_MODE` | `HPD_SELECT` |
+|---|---|---|---|---|
+| DIG0 | `0x00000100` | `0x1` DIGA | 0 DP SST | 0 |
+| DIG1 | `0x00010000` | 0 INVALID | 1 LVDS | 0 |
+| DIG2 | `0x20000000` | **0 INVALID** | **0 DP SST** | **2** |
+| DIG3 | `0x00010000` | 0 INVALID | 1 LVDS | 0 |
+| DIG4 | `0x00010000` | 0 INVALID | 1 LVDS | 0 |
+
+`RBFBDigBeMask` **0x01**. So the answer is the other one of the two 2E7 named:
+**instance 2 has no front end connected, 2E1's missing step is real, and
+`DIG_FE_SOURCE_SELECT` is a write still to make.** DIG0 carrying `0x1` DIGA is
+the positive control in the same sample - the panel's back end IS connected,
+so a zero is a reading and not a dark block.
+
+### The reading is EXPECTED, and that is the finding
+
+2E7 took this as a free read on the chance that the firmware had made the
+connection too, which would have collapsed the candidate with no write. It had
+not - and `command_table_helper2_dce112.c:94` says it never could, on
+`dig_encoder_sel_to_atom`:
+
+> On any ASIC after DCE80, we manually program the DIG_FE selection (see
+> connect_dig_be_to_fe function of the link encoder), so translation should
+> always return 0 (no FE).
+
+**The VBIOS transmitter command carries no front end BY DESIGN and the FE
+connection is the driver's own write.** 2E1 recorded that unconditional 0 as
+"a MISSING STEP, not a free field" from the helper's return value alone; the
+comment explaining *why* it returns 0, and the register confirming the field
+is still 0 on hardware, are the two halves that make it certain. So the
+firmware's bring-up of that connector is not partial by accident - it is as
+complete as the atom path can make it, and the one field left is the one every
+AMD driver since DCE80 has owned. **The candidate does not collapse; it is
+localised exactly.**
+
+### Two fields the first decoder skipped carried the rest of the answer
+
+**`DIG_HPD_SELECT` (bits 30:28) reads 2 on DIG2 and 0 on the other four.**
+That is the `0x20000000` the tool printed as part of an undecoded word.
+`dcn10_link_encoder.c:563` writes it as `hpd_source`, an `enum hpd_source_id`
+where `HPD_SOURCEID1 = 0`, so the field is the **0-based DCN HPD instance**,
+*not* 2E1's atom hpdsel, which is that instance plus one.
+`dcn31_dio_link_encoder.c:601` agrees from the other side, calling DPIA's atom
+hpdsel 6 "DIG_HPD_SELECT set to 5 (hpdsel - 1)". So the firmware associated
+**HPD instance 2** with this back end - a **FOURTH independent instrument
+naming the Type-C port**, after 2B4's cable-following sink bit, 2B9's
+`AUX_HPD_SEL` and 2E7's encoder mask. And the writer is `hpd_initialize()`,
+called from `dcn10_link_encoder_hw_init()` immediately after
+`dcn10_aux_initialize()` - which ties 2B9's "AUX2 enabled with `dphy`
+bit-identical to the panel's" and this HPD association into **one firmware
+action on that connector**, not two coincidences.
+
+**Its zero is AMBIGUOUS and gets no derived bit.** HPD instance 0 *is* the
+panel, so DIG0's 0 is a correct association and DIG1/3/4's 0 is an unwritten
+field, and nothing in the word separates them (rule 14). DIG2's 2 is readable
+as the firmware's work only because three other instruments already name that
+instance. `FE_SEL` is the one field in this register whose zero is unambiguous,
+because 0 is a documented `INVALID` enum value rather than a default - which is
+why it is the only one with a predicate. **No `rb_digbe_touched()` was
+written**: it would have had to read HPD_SELECT 0 as "untouched" and been wrong
+about the panel.
+
+**`DIG_MODE` partitions EXACTLY as 2E7's `DP_CONFIG` did** - DP SST on
+instances 0 and 2, LVDS on 1/3/4 - so the untouched value is **1** and the
+firmware wrote DP mode on both connectors it brought up. That cross-register
+agreement is what establishes which value is the default; one register could
+not have said. **And every one of the five decodes to a VALID mode**, LVDS
+included, on a board with no LVDS panel - so `DIG_MODE` alone can never say
+whether an instance was configured, and the hosttest asserts that for all five
+rather than only for the interesting ones.
+
+### A second product of 2E4's command was never sampled
+
+`DIG_BE_EN_CNTL` (0x20b1, same 0x100 stride) carries `DIG_ENABLE` bit 0 and
+`DIG_SYMCLK_BE_ON` bit 8. **The driver only ever READS it**:
+`dcn10_is_dig_enabled()` at `dcn10_link_encoder.c:540` is its single reference
+in all of `docs/linux-ref/`, with no writer anywhere. So whatever sets it is
+the firmware's own transmitter path - which makes it **Linux's own test for
+"is this transmitter up", and a second product of the
+`DIG1_TRANSMITTER_CONTROL` command 2E4 sent.** 2E4 judged that command on
+`RDPCSTX2_PHY_CNTL6` alone and called the verdict STILL. The PHY was one of at
+least two places the effect could have shown, and the other was never read.
+
+### BUILT
+
+`src/common/rb_digbe.h` grows `DIG_HPD_SELECT`, the `DIG_BE_EN_CNTL` block and
+`rb_digbe_diff_mask()`. Read-only, no setter; `rb_digbe_dw_max()` is now
+computed as the max of the two blocks (0x24b1) rather than written down, still
+below `rb_enc_dw_max()`'s 0x251e, so **no new mapping and no new write
+surface** - the hosttest pins the relation and both instances' offsets against
+`dcn_3_1_2_offset.h:9959`/`:10227`.
+
+`digbeSurvey()` samples both blocks and still latches only a real reading;
+**`digbeResample()` re-reads both after a send**, from the path that produced
+on the ring and never from a refusal, so `RBFBDigBeDiff` / `RBFBDigBeEnDiff`
+being 0 means "the command ran and the back end did not move" rather than
+"nothing was sent" - `RBFBDigBePostDone` is what separates them, because 0 is
+also the initial value (rule 14). The pristine side stays latched and the post
+side does not, since it is the pristine words that must not be spoiled.
+
+**The all-ones guard 2E7 measured DEAD in the `DIG_BE_CNTL` decoder is
+LOAD-BEARING in this one**, and its break fires: `DIG_BE_EN_CNTL` has no
+one-hot and no enum to fall back on, so without it an unmapped block reads as
+**five enabled transmitters** - 2E6's tool-boundary defect, in the kext. That
+is now three instances of the same split (`rb_enc` load-bearing, `rb_digbe`
+CNTL dead, `rb_digbe` EN load-bearing), which is why the rule is to run a
+break per guard rather than to reason about whether one is needed.
+
+**The `-Werror` trap fired a FOURTH time** (2B1, 2BC, 2E7, this): the first
+break-1 was `return w == w`, which is `-Wtautological-compare`, so the build
+died and `make hosttest` ran the previous binary - zero FAIL lines, which
+reads exactly like a guard that does not matter. Caught in one step because
+the break harness greps `error:` as well as `FAIL` instead of reading the exit
+status, which cannot tell the two apart. Redone as a wrong constant
+(`!= 0xFFFFFFFEu`), which keeps the parameter used and fires four assertions.
+Breaks 2-4 (`dw_max` ignoring the EN block, `DIG_ENABLE` reading the symclk
+bit, `HPD_SELECT` shifted by 29) fire 2, 5 and 3.
+
+`dmubbl dig survey` prints `HPD_SEL` as a column, decodes it to the DCN
+instance and the atom hpdsel beside it, prints the EN block, and prints the
+before/after after a send. It names rule 15 for an absent key rather than
+printing words.
+
+### The reading to take
+
+One boot, two commands, and the second is a send:
+
+1. `dmubbl dig survey` - the pristine `DIG_BE_EN_CNTL`. **`DIG_ENABLE` on
+   instance 2 is the question**: set means the firmware enabled that back end
+   as well as configuring its encoder and associating its HPD, and 2E4's STILL
+   was a PHY-only null on a transmitter that was already partly up; clear means
+   the back end is down and a bare `FE_SOURCE_SELECT` write would have had
+   nothing to feed. Mask **0x05** would be the pair every other instrument
+   names; **0x01** says the firmware stopped short of enabling it.
+2. `dmubbl dig 2` - the 2E4 command again, now with both products read.
+   `RBFBDigBeEnDiff` non-zero means **the firmware executes this command with
+   a visible product** and 2E4's STILL was measuring the wrong register, which
+   would be the strongest result available from this line. Both diffs 0 means
+   the effect is absent in both products, which is a stronger null than 2E4's
+   and still not "the firmware discards VBIOS commands" - the pixel clock
+   (sub-type 2) remains unreproduced.
+
+**Not claimed:** nothing about `DIG_ENABLE`'s value has been read. This entry
+establishes where the field is, that the driver never writes it, and that it
+was never sampled.
+
+Framebuffer **A55CBCC2** (was B83E1382). Plugin unchanged - plugin-only
+reinstall is not available here, the framebuffer is what moved.

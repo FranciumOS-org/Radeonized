@@ -635,8 +635,19 @@ private:
     /* 2E7: DIG_BE_CNTL on all five, read-only. The one named missing step
      * (DIG_FE_SOURCE_SELECT) asked with a read instead of a write. */
     uint32_t           digbeWord[RB_DIGBE_COUNT];
+    uint32_t           digbeEnWord[RB_DIGBE_COUNT];
     uint32_t           digbeMask;        /* rb_digbe_connected_mask()       */
+    uint32_t           digbeEnMask;      /* rb_digbe_enabled_mask()         */
     bool               digbeDone;        /* latched - only REAL readings do */
+    /* 2E8: the same two blocks re-read AFTER a send, so the transmitter
+     * command's effect on the DIG back end is a before/after inside ONE boot.
+     * 2E4 judged that command on RDPCSTX_PHY_CNTL6 alone and DIG_ENABLE -
+     * Linux's own "is this transmitter up" test - was never sampled. */
+    uint32_t           digbePost[RB_DIGBE_COUNT];
+    uint32_t           digbeEnPost[RB_DIGBE_COUNT];
+    uint32_t           digbeDiffMask;    /* rb_digbe_diff_mask() on CNTL    */
+    uint32_t           digbeEnDiffMask;  /* ... and on EN_CNTL              */
+    bool               digbePostDone;
     uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
     uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
     uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];
@@ -1000,6 +1011,7 @@ private:
     uint32_t dmubDigExperiment(uint32_t phyid);
     void     encSurvey(void);
     void     digbeSurvey(void);
+    void     digbeResample(void);
     uint32_t encConfigure(uint32_t inst, uint32_t lanes);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);

@@ -116,8 +116,17 @@ void RBAMDFramebuffer::dmubInit(void)
     encSurveyMask = 0;
     encSurveyDone = false;
     digbeMask = 0;
+    digbeEnMask = 0;
     digbeDone = false;
-    for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) { digbeWord[i] = 0; }
+    digbeDiffMask = 0;
+    digbeEnDiffMask = 0;
+    digbePostDone = false;
+    for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) {
+        digbeWord[i] = 0;
+        digbeEnWord[i] = 0;
+        digbePost[i] = 0;
+        digbeEnPost[i] = 0;
+    }
     for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
         encSurveyCfg[i] = 0; encSurveyScram[i] = 0;
     }
@@ -745,10 +754,33 @@ void RBAMDFramebuffer::digbeSurvey(void)
     if (!hubpRegs || !dpaltReady) { return; }
 
     for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) {
-        digbeWord[i] = hubpRegs[kRbDmuSeg2Dmub + rb_digbe_dw(i)];
+        digbeWord[i]   = hubpRegs[kRbDmuSeg2Dmub + rb_digbe_dw(i)];
+        digbeEnWord[i] = hubpRegs[kRbDmuSeg2Dmub + rb_digbe_en_dw(i)];
     }
-    digbeMask = rb_digbe_connected_mask(digbeWord);
+    digbeMask   = rb_digbe_connected_mask(digbeWord);
+    digbeEnMask = rb_digbe_enabled_mask(digbeEnWord);
     digbeDone = true;
+}
+
+/* Re-read both blocks after a send. Called from dmubDigExperiment() on the
+ * path that actually produced on the ring, never from a refusal, so a
+ * published diff mask of 0 means "the command ran and the back end did not
+ * move" and not "nothing was sent" (rule 14 - and `digbePostDone` is what
+ * separates them, because 0 is also the initial value).
+ *
+ * NOT latched, unlike the pristine survey: each send gets its own after-state,
+ * since the pristine side is the one that must stay unspoiled. */
+void RBAMDFramebuffer::digbeResample(void)
+{
+    if (!hubpRegs || !dpaltReady) { return; }
+
+    for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) {
+        digbePost[i]   = hubpRegs[kRbDmuSeg2Dmub + rb_digbe_dw(i)];
+        digbeEnPost[i] = hubpRegs[kRbDmuSeg2Dmub + rb_digbe_en_dw(i)];
+    }
+    digbeDiffMask   = rb_digbe_diff_mask(digbeWord, digbePost);
+    digbeEnDiffMask = rb_digbe_diff_mask(digbeEnWord, digbeEnPost);
+    digbePostDone = true;
 }
 
 uint32_t RBAMDFramebuffer::encConfigure(uint32_t inst, uint32_t lanes)
@@ -865,6 +897,10 @@ uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
     }
 
     digVerdict = rb_dig_verdict(digBefore, digAfter);
+    /* 2E8: the PHY word is one product of this command; the DIG back end is
+     * another, and Linux's own dcn10_is_dig_enabled() reads it. Sampled after
+     * the PHY poll so a late-landing effect is still caught. */
+    digbeResample();
     digRan++;
     return digRefuse = RB_DIG_OK;
 }
@@ -1200,10 +1236,20 @@ void RBAMDFramebuffer::dmubPublish(void)
     digbeSurvey();
     setProperty("RBFBDigBeDone", digbeDone);
     setProperty("RBFBDigBeMask", (uint64_t)digbeMask, 32);
+    setProperty("RBFBDigBeEnMask", (uint64_t)digbeEnMask, 32);
+    setProperty("RBFBDigBePostDone", digbePostDone);
+    setProperty("RBFBDigBeDiff", (uint64_t)digbeDiffMask, 32);
+    setProperty("RBFBDigBeEnDiff", (uint64_t)digbeEnDiffMask, 32);
     for (unsigned i = 0; i < RB_DIGBE_COUNT; i++) {
         char k[32];
         snprintf(k, sizeof(k), "RBFBDigBe%u", i);
         setProperty(k, (uint64_t)digbeWord[i], 64);
+        snprintf(k, sizeof(k), "RBFBDigBeEn%u", i);
+        setProperty(k, (uint64_t)digbeEnWord[i], 64);
+        snprintf(k, sizeof(k), "RBFBDigBePost%u", i);
+        setProperty(k, (uint64_t)digbePost[i], 64);
+        snprintf(k, sizeof(k), "RBFBDigBeEnPost%u", i);
+        setProperty(k, (uint64_t)digbeEnPost[i], 64);
     }
     for (unsigned i = 0; i < RB_ENC_COUNT; i++) {
         char k[32];

@@ -23,10 +23,130 @@ int digbe_tests(void)
     CHECK(rb_digbe_dw(2) == 0x22b0u, "regDIG2_DIG_BE_CNTL");
     CHECK(rb_digbe_dw(3) == 0x23b0u, "regDIG3_DIG_BE_CNTL");
     CHECK(rb_digbe_dw(4) == 0x24b0u, "regDIG4_DIG_BE_CNTL");
-    CHECK(rb_digbe_dw_max() == 0x24b0u, "the highest dword is DIG4's");
+    CHECK(rb_digbe_dw_max() == 0x24b1u,
+          "the highest dword is DIG4's EN_CNTL, not its DIG_BE_CNTL");
+
+    /* regDIG0_DIG_BE_EN_CNTL 0x20b1 / DIG1 0x21b1, dcn_3_1_2_offset.h:9959
+     * and :10227 - the same 0x100 stride, verified on two instances rather
+     * than assumed from one. */
+    CHECK(rb_digbe_en_dw(0) == 0x20b1u, "regDIG0_DIG_BE_EN_CNTL");
+    CHECK(rb_digbe_en_dw(1) == 0x21b1u, "regDIG1_DIG_BE_EN_CNTL");
+    CHECK(rb_digbe_en_dw(4) == 0x24b1u, "regDIG4_DIG_BE_EN_CNTL");
+    CHECK(rb_digbe_en_dw(0) == rb_digbe_dw(0) + 1u,
+          "EN_CNTL sits one dword above DIG_BE_CNTL");
 
     /* The aperture relation, not a remembered number: this block has to sit
      * inside what is already mapped or the reads land outside it. */
+    /* ---- boot 447's own five words, the 2E8 reading ----
+     * DIG0 0x00000100, DIG1/3/4 0x00010000, DIG2 0x20000000. */
+    {
+        uint32_t w[RB_DIGBE_COUNT];
+        uint32_t p[RB_DIGBE_COUNT];
+        uint32_t i;
+
+        w[0] = 0x00000100u; w[1] = 0x00010000u; w[2] = 0x20000000u;
+        w[3] = 0x00010000u; w[4] = 0x00010000u;
+
+        CHECK(rb_digbe_fe_sel(w[0]) == RB_DIGBE_FE_DIGA,
+              "boot 447: the panel's DIG0 is connected to DIG FE A");
+        CHECK(rb_digbe_connected(w[0]) == 1,
+              "boot 447: DIG0 connected - the positive control");
+        CHECK(rb_digbe_connected(w[2]) == 0,
+              "boot 447: DIG2 NOT connected, so 2E1's missing step is real");
+        CHECK(rb_digbe_connected_mask(w) == 0x01u,
+              "boot 447: only the panel's back end has a front end");
+
+        /* DIG_MODE partitions EXACTLY as 2E7's DP_CONFIG did: DP SST on the
+         * two the firmware brought up, LVDS on the three it did not. That is
+         * what makes 1 the untouched value rather than 0 - three instances
+         * agreeing, cross-checked against another register. */
+        CHECK(rb_digbe_mode(w[0]) == RB_DIGBE_MODE_DP_SST, "DIG0 is DP SST");
+        CHECK(rb_digbe_mode(w[2]) == RB_DIGBE_MODE_DP_SST, "DIG2 is DP SST");
+        CHECK(rb_digbe_mode(w[1]) == RB_DIGBE_MODE_LVDS,
+              "DIG1 reads LVDS - the untouched value, not a configuration");
+        CHECK(rb_digbe_mode(w[3]) == RB_DIGBE_MODE_LVDS, "DIG3 untouched");
+        CHECK(rb_digbe_mode(w[4]) == RB_DIGBE_MODE_LVDS, "DIG4 untouched");
+        /* ... and every one of them is a VALID mode, which is the point of
+         * rule 14 here: LVDS decodes cleanly on a board with no LVDS, so
+         * DIG_MODE alone cannot say whether an instance was configured. */
+        for (i = 0u; i < RB_DIGBE_COUNT; i++) {
+            CHECK(rb_digbe_mode_valid(w[i]) == 1,
+                  "all five decode to a mode Linux writes");
+        }
+
+        /* DIG_HPD_SELECT - the field the first decoder skipped, where the
+         * rest of the answer was. 0-based DCN instance, so 2 IS the Type-C
+         * port named by 2B4, 2B9 and 2E7. */
+        CHECK(rb_digbe_hpd_sel(w[2]) == 2u,
+              "boot 447: DIG2 is associated with HPD instance 2");
+        CHECK(rb_digbe_hpd_sel(w[0]) == 0u,
+              "boot 447: DIG0 is HPD instance 0 - the panel");
+        CHECK(rb_digbe_hpd_sel(w[1]) == 0u,
+              "an unwritten field reads 0, indistinguishable from HPD0");
+        /* 2E1's atom hpdsel is this plus one: HPD instance 2 -> hpdsel 3,
+         * which is the byte 2E4 actually sent. Pinned so the two
+         * conventions cannot drift back together. */
+        CHECK(rb_digbe_hpd_sel(w[2]) + 1u == 3u,
+              "register field + 1 == the atom hpdsel 2E4 sent");
+
+        /* The diff mask, with a control: identical arrays must give 0, and a
+         * single changed instance must name only itself. */
+        for (i = 0u; i < RB_DIGBE_COUNT; i++) { p[i] = w[i]; }
+        CHECK(rb_digbe_diff_mask(w, p) == 0u,
+              "nothing moved -> an empty diff mask");
+        p[2] = 0x20000100u;
+        CHECK(rb_digbe_diff_mask(w, p) == 0x04u,
+              "DIG2 moving names instance 2 and nothing else");
+        CHECK(rb_digbe_connected_mask(p) == 0x05u,
+              "and that word would make DIG2 connected to DIG FE A");
+        CHECK(rb_digbe_diff_mask(NULL, p) == 0u, "NULL is safe");
+        CHECK(rb_digbe_diff_mask(w, NULL) == 0u, "NULL is safe");
+    }
+
+    /* ---- DIG_BE_EN_CNTL ---- */
+    {
+        uint32_t e[RB_DIGBE_COUNT];
+        uint32_t i;
+
+        for (i = 0u; i < RB_DIGBE_COUNT; i++) { e[i] = 0u; }
+        CHECK(rb_digbe_enabled_mask(e) == 0u, "nothing enabled -> 0");
+
+        e[0] = RB_DIGBE_EN_DIG_ENABLE | RB_DIGBE_EN_SYMCLK_ON;
+        CHECK(rb_digbe_en_enabled(e[0]) == 1, "DIG_ENABLE is bit 0");
+        CHECK(rb_digbe_en_symclk_on(e[0]) == 1, "DIG_SYMCLK_BE_ON is bit 8");
+        CHECK(rb_digbe_enabled_mask(e) == 0x01u, "only instance 0 enabled");
+
+        /* The two fields are independent: a back end can be enabled with its
+         * symclk off, and nothing may assume the pair moves together. */
+        e[2] = RB_DIGBE_EN_DIG_ENABLE;
+        CHECK(rb_digbe_en_symclk_on(e[2]) == 0, "enabled with symclk off");
+        CHECK(rb_digbe_enabled_mask(e) == 0x05u,
+              "the mask 2E4's command would have to produce on instance 2");
+        e[3] = RB_DIGBE_EN_SYMCLK_ON;
+        CHECK(rb_digbe_en_enabled(e[3]) == 0, "symclk on without DIG_ENABLE");
+        CHECK(rb_digbe_enabled_mask(e) == 0x05u,
+              "and that does NOT count as enabled");
+
+        /* The all-ones guard is LOAD-BEARING here and was DEAD in the
+         * DIG_BE_CNTL decoder - this register has no one-hot or enum test to
+         * fall back on, so without it an unmapped block reads as five
+         * enabled transmitters (2E6's defect at the tool boundary, in the
+         * kext). Its break fires. */
+        CHECK(rb_digbe_en_word_plausible(0xFFFFFFFFu) == 0,
+              "an all-ones word is not a reading of this register");
+        for (i = 0u; i < RB_DIGBE_COUNT; i++) { e[i] = 0xFFFFFFFFu; }
+        CHECK(rb_digbe_enabled_mask(e) == 0u,
+              "an unmapped block is not five enabled transmitters");
+        /* ... with a control proving the guard does not swallow a real
+         * reading that sits beside unmapped ones. */
+        e[0] = RB_DIGBE_EN_DIG_ENABLE;
+        CHECK(rb_digbe_enabled_mask(e) == 0x01u,
+              "a real enable beside all-ones words still reads");
+        CHECK(rb_digbe_en_word_plausible(0xFFFFFFFEu) == 1,
+              "and the guard rejects only all-ones");
+        CHECK(rb_digbe_enabled_mask(NULL) == 0u, "NULL is safe");
+    }
+
     CHECK(rb_digbe_dw_max() <= rb_enc_dw_max(),
           "DIG_BE_CNTL is below rb_enc_dw_max(), so no new mapping");
     CHECK(rb_digbe_dw_max() <= rb_dpalt_dw_max(),
