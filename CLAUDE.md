@@ -2821,7 +2821,62 @@ indistinguishable from a guard that does not matter. The harness greps
 with both products read - `RBFBDigBeEnDiff` non-zero means the firmware
 executes this command with a VISIBLE product and 2E4 read the wrong register.
 Both diffs 0 is a stronger null than 2E4's and still not "the firmware
-discards VBIOS commands". Framebuffer **A55CBCC2**.),
+discards VBIOS commands". Framebuffer **A55CBCC2**.
+**2E9 IS THE ANSWER AND IT IS THE STRONG ONE: THE FIRMWARE EXECUTES A
+`DMUB_CMD__VBIOS` COMMAND. `DIG_BE_EN_CNTL` on instance 2 went
+`0x00000100` -> `0x00000101` - `DIG_ENABLE` 0 -> 1 - ON THE TARGETED INSTANCE
+ALONE, with the other four byte-identical as controls in the same sample
+(boot 448, A55CBCC2, `DigSends` 1, refusal 0, ack 1, `WinSel` 7,
+`DigBeEnDiff` **0x04**, `DigBeDiff` 0).** That closes the question 2zr opened
+and 2C0/2D9/2DA-2DF/2E2/2E4 all spent instruments on, **with a register
+product**: the external display's bring-up path is AVAILABLE, and 2E2's "the
+DMUB VBIOS sub-types are the ONLY route" now names a route that WORKS rather
+than the only one left.
+**It is an attribution, not a coincidence:** `phyid` 2 was in the payload and
+DIG2's back end is what came up; **nothing else writes this register**
+(`dcn10_is_dig_enabled()` is its only reference in `docs/linux-ref/`, no
+writer), `rb_digbe.h` has no setter, and nothing in macOS knows that connector
+exists (2B4: HPD2 latched and unserviced). **One caveat stated not smoothed
+over:** the pristine side is latched at the first periodic publish, so the
+window to the resample is the whole boot - a re-latched baseline and a second
+send would close it, and the instance-level diff is why that is small rather
+than load-bearing.
+**2E4's STILL WAS MEASURING THE WRONG REGISTER.** The PHY word reproduces
+byte-identically across boots 443 and 448 (`0x00063333`, PHY0's `0x00194444`
+the control), so that reading was CORRECT and simply not this command's
+product - the DIG back end is one layer above the RDPCSTX PHY and the command
+reaches that layer and stops. **And 2E8's prediction was right with its stated
+reason wrong**: it offered "set = the firmware enabled it too" or "clear = a
+bare FE write has nothing to feed", and the answer is **clear before, set
+after OUR OWN command** - neither branch.
+**`DIG_SYMCLK_BE_ON` is a RESET DEFAULT - 1 on all five, the three dark ones
+included - which is 2E7's `ADVANCE` lesson reproduced in the companion
+register of the same block one milestone later.** `rb_digbe_en_enabled()`
+tests `DIG_ENABLE` alone, so the pristine mask read **0x01** correctly; the
+conjunction the field name invites would have read all five enabled and lost
+the whole reading. Inversion worth keeping: 2E7's hosttest case "a lane count
+without the advance bit" describes a state that CANNOT occur here, while the
+analogous "symclk on without DIG_ENABLE" is the MEASURED state of four
+instances - same shape of case, hypothetical in one register and real in the
+other, and only the hardware says which.
+**The remaining list is two items with a working mechanism under both:**
+`DIG_FE_SOURCE_SELECT` is OURS to write (2E8: the atom path carries no FE by
+design) and the pixel clock is **sub-type 2**, another inbox command of the
+kind just proved to execute. A back end enabled with no front end and no clock
+still has nothing to light, so **STILL on the PHY stays the expected reading
+until both are done.**
+**INSTRUMENT DEFECT: `make tools` DOES NOT BUILD `dmubbl`.** The first survey
+ran against a binary with NONE of 2E8's code (`strings -a | grep -c HPD_SEL`
+**0** against seven in the source), printing the pre-2E8 format with no
+`DIG_BE_EN_CNTL` block at all; `$(OUT)/dmubbl` is its own target
+(`Makefile:536`) and a `touch` plus `make tools` rebuilt nothing. **`make
+dmubbl` is the command** - and this is the "`make kext tools` does NOT rebuild
+the plugin" rule in a THIRD costume, i.e. rule 15 asked of the instrument:
+a tool is an artifact the reading depends on and needs the same
+which-binary-is-this check as a kext. Caught only because the output's shape
+was known in advance. The verdict now NAMES the instance that moved and prints
+the other four as `(control)` rather than asking a human to compare
+`RBFBDigBe*` against `RBFBDigBePost*` by hand.),
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other

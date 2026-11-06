@@ -559,10 +559,31 @@ static void encSurveyReport(io_service_t fb)
                            "PHY).\n");
                 } else {
                     printf("               -> THE BACK END MOVED. The "
-                           "firmware DOES execute this\n               "
-                           "command with a visible product; compare "
-                           "RBFBDigBePost* with\n               "
-                           "RBFBDigBe* to see which field.\n");
+                           "firmware DOES execute this command\n"
+                           "               with a visible register "
+                           "product.\n");
+                    /* Name what moved. The instances that did NOT move are
+                     * the control, so they are printed too - a diff on the
+                     * targeted instance alone is the whole attribution. */
+                    for (int i = 0; i < 5; i++) {
+                        char ka[40], kb[40], kc[40], kd[40];
+                        snprintf(ka, sizeof(ka), "RBFBDigBe%d", i);
+                        snprintf(kb, sizeof(kb), "RBFBDigBePost%d", i);
+                        snprintf(kc, sizeof(kc), "RBFBDigBeEn%d", i);
+                        snprintf(kd, sizeof(kd), "RBFBDigBeEnPost%d", i);
+                        const unsigned long a = (unsigned long)num(fb, ka) & 0xffffffffUL;
+                        const unsigned long b = (unsigned long)num(fb, kb) & 0xffffffffUL;
+                        const unsigned long c = (unsigned long)num(fb, kc) & 0xffffffffUL;
+                        const unsigned long e = (unsigned long)num(fb, kd) & 0xffffffffUL;
+                        const int moved = (a != b) || (c != e);
+                        printf("                  DIG%d  CNTL %08lx -> %08lx   "
+                               "EN %08lx -> %08lx  %s\n",
+                               i, a, b, c, e,
+                               moved ? "<== MOVED" : "(control)");
+                    }
+                    printf("               A diff naming only the instance "
+                           "the command targeted is\n               the "
+                           "attribution; the other four are the control.\n");
                 }
             }
         }

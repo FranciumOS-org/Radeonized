@@ -60217,3 +60217,119 @@ was never sampled.
 
 Framebuffer **A55CBCC2** (was B83E1382). Plugin unchanged - plugin-only
 reinstall is not available here, the framebuffer is what moved.
+
+---
+
+## 2E9 — THE FIRMWARE EXECUTES A `DMUB_CMD__VBIOS` COMMAND. `DIG_ENABLE` 0 -> 1 on the targeted instance alone (boot 448)
+
+Rules 8 and 15: `rbgpu-boot` **448**, loaded framebuffer
+**A55CBCC2-765F-3453-99B9-879881FF1261** == the built UUID. `RBFBDigSends`
+**1**, `RBFBDigRefuse` **0**, `RBFBDmubSendsOk` 1, `RBFBDmubAcks` **1**,
+`RBFBDmubWinSel` **7** (REGION4, 2DA's identified ring), `RBFBDigBePostDone`
+**Yes**.
+
+`DIG_BE_EN_CNTL` across the send:
+
+| | `DIG_BE_CNTL` | `DIG_BE_EN_CNTL` | |
+|---|---|---|---|
+| DIG0 | `00000100` -> `00000100` | `00000101` -> `00000101` | control |
+| DIG1 | `00010000` -> `00010000` | `00000100` -> `00000100` | control |
+| DIG2 | `20000000` -> `20000000` | **`00000100` -> `00000101`** | **MOVED** |
+| DIG3 | `00010000` -> `00010000` | `00000100` -> `00000100` | control |
+| DIG4 | `00010000` -> `00010000` | `00000100` -> `00000100` | control |
+
+`RBFBDigBeEnDiff` **0x04** - instance 2 and nothing else - and
+`RBFBDigBeDiff` **0**.
+
+**`DIG1_TRANSMITTER_CONTROL` ENABLE set `DIG_ENABLE` on the DIG back end of
+the exact instance it was aimed at.** That answers, with a register product,
+the question 2zr opened and 2C0, 2D9, 2DA-2DF, 2E2 and 2E4 all worked on:
+**this firmware executes inbox VBIOS commands.** The external display's
+bring-up path is available, and 2E2's "with no atom table for the transmitter,
+the encoder or the pixel clock, the DMUB VBIOS sub-types are the ONLY route to
+a display output on this board" now names a route that works rather than a
+route that is merely the only one left.
+
+### Why this is an attribution and not a coincidence
+
+**The instance that moved is the instance the payload named, and the other
+four are controls in the same sample.** `phyid` 2 was in the command; DIG2's
+back end is what came up. No timing argument has to carry the claim.
+
+Three further things make it tight. **Nothing else writes this register**:
+`dcn10_is_dig_enabled()` at `dcn10_link_encoder.c:540` is its only reference
+in all of `docs/linux-ref/` and there is no writer, so the driver side cannot
+have done it. **`rb_digbe.h` has no setter**, so this project did not write it
+either. And **nothing in macOS knows that connector exists** - 2B4 measured
+HPD2's interrupt status latched and unserviced.
+
+**The one caveat, stated rather than smoothed over:** the pristine side is
+latched at the first periodic publish and the resample runs after the send, so
+the window between them is the whole boot. A re-latched baseline and a second
+send would close it. The instance-level diff is what makes that caveat small
+rather than load-bearing.
+
+### What it does to 2E4's verdict
+
+**2E4's STILL was measuring the wrong register.** Boot 443 sent this command,
+read `RDPCSTX2_PHY_CNTL6` and recorded no change; boot 448 sends it and the
+PHY word is *still* byte-identical (`RBFBDigBefore` == `RBFBDigAfter` ==
+`0x00063333`, with PHY0's `0x00194444` as the measured control) - so that
+reading reproduces across two boots and was correct. It was simply not the
+command's product. The DIG back end is one layer up from the RDPCSTX PHY, and
+the command reaches that layer and stops there.
+
+**So 2E8's own prediction was right and its stated reason was wrong.** 2E8
+asked `DIG_ENABLE` as "set means the firmware enabled that back end too and
+2E4's STILL was a PHY-only null on a partly-up transmitter; clear means a bare
+`FE_SOURCE_SELECT` write would have had nothing to feed". The answer is
+**clear before and set after our own command** - neither branch. The firmware
+had *not* enabled it, and 2E4's STILL *was* a PHY-only null, for a reason
+neither branch anticipated: the command we sent is what enables it.
+
+### `DIG_SYMCLK_BE_ON` is a reset default, which is 2E7's lesson again
+
+It reads **1 on all five instances**, including the three never brought up.
+So it carries no information on this part, exactly as `DPHY_SCRAMBLER_ADVANCE`
+turned out to in 2E7 - **the same shape in the companion register of the same
+block, one milestone later.** `rb_digbe_en_enabled()` tests `DIG_ENABLE`
+alone, so the mask was right, and the pristine `RBFBDigBeEnMask` **0x01**
+answered 2E8's question correctly. Had the predicate been the conjunction the
+name invites, every instance would have read enabled and the whole reading
+would have been lost.
+
+Worth recording as an inversion: 2E7 wrote a hosttest case
+(`a lane count without the advance bit`) for a state that **cannot occur** on
+this part. The analogous case here (`symclk on without DIG_ENABLE`) is the
+**measured state of four instances**. Same shape of case, hypothetical in one
+register and real in the other, and only the hardware says which.
+
+### The remaining list, now two items with a working mechanism under both
+
+`DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` is **ours to write** (2E8: the atom path
+carries no FE by design, `command_table_helper2_dce112.c:94`), and the pixel
+clock is **VBIOS sub-type 2** - another inbox command of the kind just proved
+to execute. A transmitter with its back end enabled, no front end and no
+clock still has nothing to light, so STILL on the PHY remains the expected
+reading until both are done.
+
+### Instrument defect: `make tools` does not build `dmubbl`
+
+The survey was read against a `dmubbl` binary with **none** of 2E8's code in
+it - `strings -a build/out/dmubbl | grep -c HPD_SEL` was **0** while the
+source had seven matches - so it printed the pre-2E8 format and showed no
+`DIG_BE_EN_CNTL` block at all. `make tools` does not cover it;
+`$(OUT)/dmubbl` is its own target (`Makefile:536`) and a `touch` plus
+`make tools` rebuilt nothing. **This is the CLAUDE.md workflow rule ("`make
+kext tools` does NOT rebuild the plugin") in a third costume, and rule 15 at
+the tool boundary**: the instrument is an artifact the reading depends on, so
+it needs the same which-binary-is-this check as a kext. Caught only because
+the output's shape was known in advance. `make dmubbl` is the command.
+
+The verdict now **names which instance moved and prints the other four as
+`(control)`**, instead of telling the reader to go and compare `RBFBDigBe*`
+against `RBFBDigBePost*` by hand - the attribution is the thing a human should
+be able to read off, not reconstruct.
+
+Framebuffer **A55CBCC2** unchanged (this is a reading of the 2E8 binary, not a
+new one); `dmubbl` rebuilt, userspace only.
