@@ -41,6 +41,7 @@ extern "C" {
 #include "rb_dmub.h"
 #include "rb_pg.h"
 #include "rb_dig.h"
+#include "rb_enc.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -608,6 +609,21 @@ private:
     uint32_t           digAfter;         /* ...and after                   */
     uint32_t           digRefWord;       /* the CONTROL PHY's word         */
     uint32_t           digVerdict;       /* rb_dig_verdict()               */
+
+    /* 2E5: enc1_configure_encoder's two writes, which precede the DIG1
+     * transmitter command in dcn10_link_encoder_enable_dp_output and which
+     * 2E2 deliberately did not reproduce. `digEnc` is the A/B dial, default
+     * on: 2E4 IS the A side, but having it reachable in the SAME boot is
+     * what 2B7 cost a milestone to learn. */
+    bool               digEnc;           /* configure before sending       */
+    uint32_t           encInst;          /* link encoder last configured   */
+    uint32_t           encRefuse;        /* rb_enc_refuse()                */
+    uint32_t           encRan;           /* configures that wrote          */
+    uint32_t           encCfgBefore;     /* DP_CONFIG before               */
+    uint32_t           encCfgAfter;      /* ...and read BACK after         */
+    uint32_t           encScramBefore;   /* DP_DPHY_SCRAM_CNTL before      */
+    uint32_t           encScramAfter;    /* ...and read BACK after         */
+    uint32_t           encApplied;       /* rb_enc_applied() on the reads  */
     uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
     uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
     uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];
@@ -969,6 +985,7 @@ private:
      * side of one DIG1 transmitter ENABLE. Armed half only; the PHY survey
      * it judges by is dpaltSample(), which runs unarmed. */
     uint32_t dmubDigExperiment(uint32_t phyid);
+    uint32_t encConfigure(uint32_t inst, uint32_t lanes);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only

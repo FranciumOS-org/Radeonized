@@ -400,6 +400,22 @@ static const char *digVerdictName(long v)
 /* The same monotonic-counter wait as domVerdict, for the same reason (2C5):
  * the properties publish every 500 ms, so reading the verdict straight after
  * the set can return the previous one and look exactly like a lost write. */
+/* 2E5: rb_enc.h's refusal codes, 40-45. Numbered clear of rb_dig's 30-37 so
+ * a code read against the wrong table cannot decode plausibly. */
+static const char *encWhy(long c)
+{
+    switch (c) {
+    case 0:  return "applied, or not attempted";
+    case 40: return "the encoder half was OFF for this run (the 2E4 arm)";
+    case 41: return "no writable aperture - blRegs or the PHY block";
+    case 42: return "instance 0 is the PANEL's link encoder, refused by name";
+    case 43: return "instance outside link_enc_regs[0..4]";
+    case 44: return "lane count not 1, 2 or 4";
+    case 45: return "the dword is on the dcn302/dcn312 danger list";
+    default: return "unknown code";
+    }
+}
+
 static void digVerdictPrint(io_service_t fb, long callsBefore)
 {
     long calls = callsBefore;
@@ -441,6 +457,30 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
     printf("  after    PHY%ld  %08lx\n", phy, after & 0xffffffffL);
     printf("  verdict        %ld  %s\n", verdict, digVerdictName(verdict));
 
+    /* 2E5. Printed BEFORE the interpretation, because which explanation a
+     * STILL verdict leaves alive depends entirely on whether these two
+     * writes took - and 2B0 is what deriving a verdict from the wrong
+     * summary costs when the raw is not beside it. */
+    const long encOn    = num(fb, "RBFBDigEnc");
+    const long encRef   = num(fb, "RBFBEncRefuse");
+    const long encAppl  = num(fb, "RBFBEncApplied");
+    const long encRan   = num(fb, "RBFBEncRan");
+    const long cfgB     = num(fb, "RBFBEncCfgBefore");
+    const long cfgA     = num(fb, "RBFBEncCfgAfter");
+    const long scrB     = num(fb, "RBFBEncScramBefore");
+    const long scrA     = num(fb, "RBFBEncScramAfter");
+
+    printf("\nencoder (enc1_configure_encoder on link encoder %ld)\n", phy);
+    printf("  configured     %s   ran %ld\n", encOn ? "yes" : "NO", encRan);
+    printf("  refusal        %ld  %s\n", encRef, encWhy(encRef));
+    printf("  DP_CONFIG      %08lx -> %08lx   (DP_UDI_LANES, want 1 for "
+           "2 lanes)\n", cfgB & 0xffffffffL, cfgA & 0xffffffffL);
+    printf("  SCRAM_CNTL     %08lx -> %08lx   (bit 4 ADVANCE set, the other "
+           "three fields kept)\n", scrB & 0xffffffffL, scrA & 0xffffffffL);
+    printf("  applied        %ld  %s\n", encAppl,
+           encAppl ? "the READBACK agrees - both writes took"
+                   : "the readback does NOT agree");
+
     if (verdict == 2) {
         printf("\n  -> THE FIRMWARE EXECUTES DMUB_CMD__VBIOS COMMANDS, and "
                "the external\n     display's transmitter is UP. 2DB spent "
@@ -454,12 +494,28 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
                "at the encoder setup this experiment\n     deliberately "
                "omits (DP_CONFIG / DP_DPHY_SCRAM_CNTL). Read the word.\n");
     } else {
-        printf("\n  -> sent and NOTHING moved. This is NOT yet 'the firmware "
-               "discards\n     VBIOS commands': enc1_configure_encoder's two "
-               "link-encoder writes\n     are deliberately not reproduced "
-               "here, so 'no effect with the\n     encoder unconfigured' is a "
-               "live alternative (rule 14). The raw\n     words above are the "
-               "evidence either way.\n");
+        if (encAppl) {
+            printf("\n  -> sent, THE ENCODER IS CONFIGURED AND VERIFIED BY "
+                   "READBACK, and the PHY\n     still did not move. 2E2's "
+                   "live alternative is now ELIMINATED, so the\n     "
+                   "remaining reading is that this firmware accepts a "
+                   "DMUB_CMD__VBIOS\n     command, advances RPTR over it "
+                   "(2E4) and DISCARDS it.\n\n     Before concluding that, "
+                   "two things are NOT reproduced and are named\n     here "
+                   "rather than in a journal: DIG_BE_CNTL.DIG_FE_SOURCE_SELECT "
+                   "(the\n     DIG FE-to-BE connection, which "
+                   "dig_encoder_sel_to_atom returns 0 for\n     and which "
+                   "2E1 recorded as a MISSING STEP, not a free field), and "
+                   "the\n     pixel clock (VBIOS sub-type 2). A transmitter "
+                   "enabled with no clock\n     and no front-end attached "
+                   "may have nothing to light.\n");
+        } else {
+            printf("\n  -> sent and NOTHING moved, AND the encoder configure "
+                   "did not take -\n     so this run cannot separate the two. "
+                   "Read the refusal above; a\n     code 40 means the "
+                   "encoder half was off, which is 2E4's arm and\n     "
+                   "reproduces 2E4 rather than advancing on it.\n");
+        }
     }
 }
 
@@ -827,6 +883,12 @@ int main(int argc, char **argv)
          * AUX_HPD_SEL 2 and 2C1's dark 0x00063333 all corroborate. There is
          * no reason to pass one by hand. */
         long phy = (argc > 2) ? atol(argv[2]) : -1;
+        /* 2E5: the A side, reachable in the SAME boot. 2B7 is why - an A/B
+         * across boots cannot tell a dial from a drift, and 2B6 died on
+         * exactly that. `noenc` reproduces 2E4's arm byte for byte. */
+        int wantEnc = 1;
+        if (argc > 3 && strcmp(argv[3], "noenc") == 0) { wantEnc = 0; }
+        if (argc > 2 && strcmp(argv[2], "noenc") == 0) { wantEnc = 0; phy = -1; }
 
         if (phy == 0) {
             printf("\nREFUSING to pass phyid 0 from this tool.\n"
@@ -911,7 +973,15 @@ int main(int argc, char **argv)
             }
         }
 
-        d = @{ @"RBFBDigPhy": @((int32_t)phy) };
+        /* Both keys in ONE setProperties call: VBL.cpp handles RBFBDigEnc
+         * first, so the dial is in place before the send it governs - a
+         * two-call handover is what rule 34 and 2DA warn about, and here it
+         * is avoidable entirely. */
+        d = @{ @"RBFBDigEnc": @(wantEnc),
+               @"RBFBDigPhy": @((int32_t)phy) };
+        printf("\nencoder half: %s\n", wantEnc
+               ? "ON - enc1_configure_encoder's two writes run first (2E5)"
+               : "OFF - reproducing 2E4's arm exactly (the A side)");
         if (phy < 0) {
             printf("\nsending DIG1_TRANSMITTER_CONTROL ENABLE to PHY2, the\n"
                    "Type-C port (TRANSMITTER_UNIPHY_C)...\n");

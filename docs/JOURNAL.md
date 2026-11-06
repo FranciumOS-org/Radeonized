@@ -59625,3 +59625,173 @@ HPD and AUX already read through. `DP_UDI_LANES` is bits 1:0 and
 
 It is a WRITE to a block this kext has never written, on link encoder 2, whose
 PHY drives nothing — the same bounding as the send itself.
+
+---
+
+## 2E5 — the encoder half, built. And DCN 3.1 has its OWN enable_dp_output, which 2E1 did not read
+
+2E4's verdict was STILL with one named alternative left alive:
+`enc1_configure_encoder`'s two writes, which 2E2 deliberately did not
+reproduce. This builds them, so the next reading discriminates "the firmware
+discards VBIOS commands" from "no effect with the encoder unconfigured".
+
+### RULE 46 AGAIN, and this one was a near miss
+
+2E1 recorded: "this is Linux's DEFAULT path, not an exotic one -
+`dcn20_link_encoder_enable_dp_output`'s first statement delegates to
+`dcn10_link_encoder_enable_dp_output` unless `debug.avoid_vbios_exec_table` is
+set, so on DCN 3.1 enabling a DP output IS the VBIOS transmitter command."
+
+**That read the DCN 2.0 function on a DCN 3.1 chip.** `dcn31_link_enc_funcs`
+maps `.enable_dp_output = dcn31_link_encoder_enable_dp_output`, which exists
+and **branches**:
+
+    if (!link_enc_cfg_is_transmitter_mappable(enc->ctx->dc, enc))
+            dcn20_link_encoder_enable_dp_output(...);   /* the VBIOS command */
+    else
+            ... link_dpia_control(ctx, &dpia_control);  /* a DIFFERENT one */
+
+The `else` arm is a different command with a **different payload**:
+`DPIA_DIG1_CONTROL`, keyed on `enc_id` rather than a phyid, with
+`lanenum = lane_count` (**not** `lane_count - 1`) and **`hpdsel` hardcoded to
+6** because the HPD pin is "unused by DPIA". Had this port taken that branch,
+every byte 2E1 derived would have been aimed at the wrong command.
+
+**It does not, and the reason had to be established rather than assumed.** The
+mappable branch is DPIA - DisplayPort *tunnelled over USB4*. This port is DP
+alt mode, which is a different thing: 2BB read real DPCD over the **native**
+AUX channel, 2B9 found AUX2 bound to HPD2 through `AUX_HPD_SEL`, and 2BE
+recorded `SPThunderboltDataType` as "No hardware was found" - no USB4 router
+at all. Alt mode switches lanes in the Type-C PD controller and the DP leaves
+the GPU natively; DPIA needs a router to tunnel through.
+
+**And `DP_IS_USB_C` does NOT decide it.** 2E1 read that bit (encoder caps
+0x100, set on paths 2/3/4) and it is about the *connector*. "This is a USB-C
+connector" and "this link is tunnelled" are two facts, and one bit is easy to
+read as both. So 2E1's conclusion survives intact while its stated reason did
+not exist.
+
+**The generalisation, which is rule 46 one notch finer than 2zl's:** checking
+that a *delegate* exists is not checking that it is *reached*. `dcn20_...`
+really does delegate to `dcn10_...`, and that sentence is true and was not the
+question. The question was which function `dcn31_link_enc_funcs` names.
+
+Both branches call `enc1_configure_encoder`, so the two writes are needed
+either way - which is why this was a near miss and not a lost milestone.
+
+### The two writes are NOT the same kind
+
+From `dcn10_link_encoder.c`, read not recalled:
+
+    REG_SET(DP_CONFIG, 0, DP_UDI_LANES, lane_count - LANE_COUNT_ONE);
+    REG_UPDATE(DP_DPHY_SCRAM_CNTL, DPHY_SCRAMBLER_ADVANCE, 1);
+
+`REG_SET` takes an **init value of 0**: dc's `generic_reg_set_ex` assigns the
+init value, applies the fields and writes, so every other bit of `DP_CONFIG`
+goes to zero. **That is only safe because `DP_CONFIG` has exactly ONE field**
+in `dcn_3_1_2_sh_mask.h` - `DP_UDI_LANES`, bits 1:0 - so there is no
+"everything else" to clobber. Checked, not assumed: the identical pattern on
+the scrambler would destroy three fields, because
+`DP_DPHY_SCRAM_CNTL` has **four** (`SCRAMBLER_DIS`, `ADVANCE`, `BS_COUNT`,
+`KCODE`). `REG_UPDATE` is an RMW and preserving the live word there is
+required, not a courtesy.
+
+`LANE_COUNT_ONE` is **1** (`dc_dp_types.h:34`), so two lanes write **1**.
+
+### The instance is the phyid, from the table and not inferred
+
+`dcn31_link_encoder_create` passes
+`&link_enc_regs[enc_init_data->transmitter]`, and that table is
+
+    link_regs(0, A), link_regs(1, B), link_regs(2, C), link_regs(3, D),
+    link_regs(4, E)
+
+whose body is `LE_DCN31_REG_LIST(id)` + `UNIPHY_DCN2_REG_LIST(phyid)` +
+`DPCS_DCN31_REG_LIST(id)`. **One index serves the DIO block, the UNIPHY and
+the DPCS block**, so link encoder 2 IS `DP2_*` IS `RDPCSTX2` IS `UNIPHY_C` -
+exactly 2E1's Type-C transmitter, reached four ways that do not derive from
+each other. Instance 0 is the panel's encoder and is **refused by name**, as
+`rb_dig.h` refuses PHY0 and `rb_pg.h` refuses DOMAIN0.
+
+### Costs no new mapping, and that is checked rather than stated
+
+`regDP0_DP_CONFIG` **0x210b** and `regDP0_DP_DPHY_SCRAM_CNTL` **0x211e**,
+stride **0x100**, five instances, both **BASE_IDX 2** - the same base HUBP,
+OTG, HPD, AUX and the PG domains already go through. The highest dword is
+DP4's **0x251e**, which is **below** `rb_dpalt_dw_max()`'s 0x2ca6, so the
+aperture 2C0 already checks separately covers these too.
+
+**The hosttest pins that relation** (`rb_enc_dw_max() <= rb_dpalt_dw_max()`)
+rather than the code trusting it, because 2DD is what a *readable* wrong
+address costs: eight zero words that answered plausibly with no error.
+
+**And the dcn302/dcn312 deny list is re-checked on the machine**, the shape
+`blSetup`'s gate 3 uses, so a future edit here cannot bypass it. All ten
+encoder dwords are allowed; the hosttest also asserts that 0x288b and
+`DIG0_DIG_LANE_ENABLE` ARE denied, so the passing lookup is not a dead one
+(rule 26 on a search).
+
+### The readback decides, and the A side is reachable in the same boot
+
+`rb_enc_applied()` requires the lane field to read back the value asked for
+**and** the advance bit to be set - either alone is a half configure whose
+null would be unattributable. `encApplied` is that verdict and `encRefuse` is
+the code, so a boot can tell **"the configure did not take"** from **"the
+configure took and the PHY still did not move"**, which a single flag would
+merge (rule 14).
+
+`{"RBFBDigEnc": 0|1}`, default **on**, and `dmubbl dig 2 noenc` reproduces
+2E4's arm byte for byte. 2E4 is already the A side in the record, but 2B7 is
+why it also has to be reachable inside one boot: an A/B across boots cannot
+tell a dial from a drift, and 2B6 died on exactly that. Both keys go in **one**
+`setProperties` call, handled dial-first, so there is no two-step handover to
+skip (rule 34).
+
+### The STILL branch no longer blames the encoder once the encoder is set
+
+The tool printed, for every STILL verdict, "enc1_configure_encoder's two
+link-encoder writes are deliberately not reproduced here". With 2E5 installed
+that sentence would be **false and reassuring**, which is worse than no text.
+It now branches on `encApplied`: configured-and-verified STILL says the
+alternative is eliminated, and then names the two things that are *still* not
+reproduced rather than letting the reader infer there is nothing left -
+`DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` (2E1 recorded `dig_encoder_sel_to_atom`
+returning 0 unconditionally as a **missing step, not a free field**) and the
+pixel clock (VBIOS sub-type 2). A transmitter with no clock and no front end
+attached may have nothing to light.
+
+### Hosttest
+
+`tools/hosttest/enc_test.c`, wired into the suite. Three break-it checks, each
+with the **compile-error count checked** before the FAIL count was read:
+
+ - the lane `-1` dropped: 0 compile errors, fires on the three lane
+   assertions plus both readback cases.
+ - the scrambler written as a bare field value (the `REG_SET` shape on an RMW
+   register): fires on **BS_COUNT preserved, KCODE preserved, nothing else
+   changes**, and the explicit "NOT written as a bare field value" case.
+ - the stride changed to 0x10: fires on six offset assertions plus the
+   Type-C-instance identity and `dw_max`.
+
+**`-Werror` ate the first attempt at break 2 and I nearly recorded a wrong
+result - third instance** (2B1, 2BC, this). The first version returned a
+constant, leaving the `live` parameter unused, so the build died; `make
+hosttest` then ran the **previous** binary, which still carried break 1, and
+printed five FAIL lines that looked exactly like break 2 working. Caught by
+checking whether the build had succeeded at all, which is precisely what 2BC
+said to do and which I did not do on the first pass. The break was rewritten
+to keep `live` referenced while discarding the fields.
+
+**Second thing worth recording about the harness:** `make hosttest` runs the
+suite and fails the target when a test fails, so a non-zero `make` is
+ambiguous between "did not compile" and "compiled and the break fired". The
+discriminator is `grep -c 'error:'` on the log, not the exit status.
+
+### State
+
+Framebuffer **C99666B0** (was 6CB9945A, which was installed in the live
+collection and never booted - so 2E2, 2E3 and 2E5 install as ONE binary).
+Plugin unchanged. `dmubbl` rebuilt. Hosttest clean.
+
+**Nothing has been read.** The encoder writes have never executed; boot 443
+ran 433B39D3, which has no `encConfigure`.

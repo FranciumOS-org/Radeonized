@@ -46,6 +46,8 @@
 
 #include "RBAMDFramebuffer.hpp"
 #include "rb_dmub.h"
+#include "rb_dpalt.h"
+#include "rb_dcn_deny.h"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -98,6 +100,18 @@ void RBAMDFramebuffer::dmubInit(void)
     digAfter = 0;
     digRefWord = 0;
     digVerdict = 0;
+    /* 2E5. digEnc defaults ON: 2E4 already took the no-encoder reading, so
+     * the useful default is the configured one, with `subret`-style A/B
+     * reachable in the same boot via RBFBDigEnc. */
+    digEnc = true;
+    encInst = 0;
+    encRefuse = 0;
+    encRan = 0;
+    encCfgBefore = 0;
+    encCfgAfter = 0;
+    encScramBefore = 0;
+    encScramAfter = 0;
+    encApplied = 0;
     pgSamples = 0;
     for (unsigned i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
         pgStatus[i] = 0; pgConfig[i] = 0; pgBefore[i] = 0; pgAfter[i] = 0;
@@ -671,6 +685,58 @@ uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
  * verdict is not on its own "this firmware discards VBIOS commands"
  * (rb_dig.h says the same at length, and rule 14 is why it is said twice).
  */
+/* 2E5: enc1_configure_encoder, transcribed.
+ *
+ * Two writes, and they are NOT the same kind - DP_CONFIG is a REG_SET with an
+ * init value of 0 (the whole word) and the scrambler is a REG_UPDATE (an RMW
+ * that must preserve BS_COUNT and KCODE). rb_enc.h owns both shapes and the
+ * hosttest pins that they differ.
+ *
+ * This is a WRITE to a block this kext has never written, so it is bounded
+ * the way the send is: instance 0 - the panel's own link encoder - is refused
+ * by name, the dcn302/dcn312 deny list is re-checked on the machine so a
+ * future edit here cannot bypass it (the shape blSetup's gate 3 uses), and
+ * the READBACK decides whether it took rather than the store (rules 13/20).
+ * Every word either side is published, so a null is attributable.
+ *
+ * Runs from setProperties, never the frame path (rule 31). */
+uint32_t RBAMDFramebuffer::encConfigure(uint32_t inst, uint32_t lanes)
+{
+    encInst = inst;
+
+    /* blRegs is the WRITABLE mapping of the same BAR5 window hubpRegs reads
+     * through; dmubPush already writes INBOX1_WPTR through it. The encoder
+     * dwords top out at DP4's 0x251e, below rb_dpalt_dw_max()'s 0x2ca6, so
+     * the aperture 2C0 checks separately covers them - asserted in the
+     * hosttest rather than trusted here. */
+    const int haveRegs = (blRegs != nullptr) && (hubpRegs != nullptr)
+                         && dpaltReady;
+
+    /* Clamped only so the deny-list lookup cannot index out of range before
+     * rb_enc_refuse() gets to reject the instance itself. */
+    const uint32_t safe  = (inst < RB_ENC_COUNT) ? inst : 0u;
+    const uint32_t cfgDw = rb_enc_dw_config(safe);
+    const uint32_t scrDw = rb_enc_dw_scram(safe);
+    const int denied = rb_dcn_is_denied(cfgDw) || rb_dcn_is_denied(scrDw);
+
+    const uint32_t why = rb_enc_refuse(inst, lanes, digArmed ? 1 : 0,
+                                       haveRegs, denied);
+    if (why != RB_ENC_OK) { return encRefuse = why; }
+
+    encCfgBefore   = hubpRegs[kRbDmuSeg2Dmub + cfgDw];
+    encScramBefore = hubpRegs[kRbDmuSeg2Dmub + scrDw];
+
+    blRegs[kRbDmuSeg2Dmub + cfgDw] = rb_enc_dp_config_word(lanes);
+    blRegs[kRbDmuSeg2Dmub + scrDw] = rb_enc_scram_word(encScramBefore);
+
+    encCfgAfter   = hubpRegs[kRbDmuSeg2Dmub + cfgDw];
+    encScramAfter = hubpRegs[kRbDmuSeg2Dmub + scrDw];
+    encApplied    = (uint32_t)rb_enc_applied(encCfgAfter, encScramAfter,
+                                             lanes);
+    encRan++;
+    return encRefuse = RB_ENC_OK;
+}
+
 uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
 {
     struct rb_dig_params p;
@@ -702,6 +768,26 @@ uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
     digBefore = hubpRegs[kRbDmuSeg2Dmub + rb_dpalt_dw(phyid)];
     digAfter = digBefore;
     digVerdict = RB_DIG_V_STILL;
+
+    /* 2E5: configure the encoder FIRST, inside the same call, because
+     * dcn10_link_encoder_enable_dp_output does it before the command and
+     * because a precondition that is a previous command is one that gets
+     * skipped (rule 34 - 2DA lost two sessions to exactly that).
+     *
+     * The link encoder instance IS the phyid: link_regs(2, C) hands the same
+     * index to LE_DCN31_REG_LIST, UNIPHY_DCN2_REG_LIST and
+     * DPCS_DCN31_REG_LIST, so DP2_*, RDPCSTX2 and UNIPHY_C are one port.
+     *
+     * A refusal here does NOT stop the send: `digEnc` off reproduces 2E4's
+     * arm exactly, and a configure that refused while the send went anyway
+     * is still a reading - as long as the boot can say which it was, which
+     * is what encRefuse and encApplied are for (rule 14). */
+    if (digEnc) {
+        encConfigure(phyid, p.lanenum);
+    } else {
+        encRefuse = RB_ENC_REFUSE_DISARMED;
+        encApplied = 0u;
+    }
 
     rb_dig_build_transmitter(cmd, &p);
 
@@ -1038,6 +1124,19 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDigBefore", (uint64_t)digBefore, 64);
     setProperty("RBFBDigAfter", (uint64_t)digAfter, 64);
     setProperty("RBFBDigRefWord", (uint64_t)digRefWord, 64);
+    /* 2E5: the encoder configure, every word either side. `encApplied` is
+     * the READBACK's verdict and not the store's, so a boot can tell "the
+     * configure did not take" from "the configure took and the PHY still did
+     * not move" - two findings a single flag would merge (rule 14). */
+    setProperty("RBFBDigEnc", digEnc);
+    setProperty("RBFBEncInst", (uint64_t)encInst, 32);
+    setProperty("RBFBEncRefuse", (uint64_t)encRefuse, 32);
+    setProperty("RBFBEncRan", (uint64_t)encRan, 32);
+    setProperty("RBFBEncApplied", (uint64_t)encApplied, 32);
+    setProperty("RBFBEncCfgBefore", (uint64_t)encCfgBefore, 64);
+    setProperty("RBFBEncCfgAfter", (uint64_t)encCfgAfter, 64);
+    setProperty("RBFBEncScramBefore", (uint64_t)encScramBefore, 64);
+    setProperty("RBFBEncScramAfter", (uint64_t)encScramAfter, 64);
     {
         /* Raw beside any summary, which has paid for itself four times now
          * (2B0, 2B4, 2B9, 2DA): every verdict here rests on a comparison
