@@ -1085,6 +1085,63 @@ table and refuses to install one that does not match the running kernel;
   **The wedge stays open regardless** (2C2's channel-52 GFX stall, "the random
   lag", 3.5 s): independent defect, no reason for `sub` to touch it, and one
   quiet session is 2A6's "a rare event did not occur is not it cannot".
+  **2D4's CONTROL RAN AND IT ORDERED: the lag RETURNS at `sub` 1 and is GONE
+  at 4**, same session, same three paths (user, 2026-11-05). That is rule 45's
+  control and repeat satisfied on the deliverable itself - what brightness
+  never got across four milestones and ten boots.
+  **2D5 IS THE DEFAULT CHANGE, AND THE TWO MEASURED VALUES TURNED OUT TO BE
+  ONE.** `sub` 4 at native is `6952507 / 4 = 1738126 ns` (2D0's own
+  `vblret_subns`, read off the chip) and 2C8's `vbl/8` at 60 Hz is
+  `16669443 / 8 = 2083680 ns` - **1738 us and 2084 us at refreshes 2.4x
+  apart.** 2C8's law is `spread = 8.0 x tick` with `tick` an **absolute**
+  quantum, so the spread never knew what the refresh was: the quantity to hold
+  fixed is the quantum and the occasion count is whatever the live period
+  needs. **`occasions = ceil(period / 2084000)`, clamped 1..8, returns 4 at
+  6952507 and 8 at 16669443 - both measured defaults out of ONE constant,
+  neither fitted to**, with the hosttest pinning both periods and both
+  realised quanta and the **break-it check failing BOTH** when the constant
+  moves. **That is 2C8's own "the real design question - whether the default
+  should be a function of the live vblank period rather than a constant",
+  answered**; two literals would have been silent on every other period this
+  kext runs, and 2z0's ladder plus 2BD's **100 Hz** sink are real ones (that
+  sink gets 5 occasions at a 2000 us quantum with nobody measuring it).
+  The constant is the **60 Hz** value deliberately - the slower of the two, so
+  the derivation never places more occasions than the fastest configuration
+  measured good, and rounding the count up keeps the realised quantum at or
+  under the target at every period.
+  **2zc's -34 % IS THE ONE REFUSAL.** `-rbgpunoretirevbl` at native runs the
+  timer at the native period, where 2zc measured 2000 us at 51.33 sets/s
+  against 6944's 74.6, so `rb_retire_tick_auto_ok()` declines any period at or
+  under 8 ms and `rb_retire_tick_us_auto()` returns **0** - a refusal the
+  caller must reject, not a plausible 1738 (rule 14), tested both sides of the
+  bound with a control.
+  **A NAMED VALUE IS FINAL, and that is load-bearing:** `rbgpuretiresub=`,
+  `rbgpuschedtickus=`, `subret` and `tickset` each pin their dial for the boot,
+  because otherwise `subret 1` would be undone by the next vblank - the dial
+  reporting success while the mechanism came straight back, **2A3's defect with
+  the arrow reversed**, and the A side of every future A/B unreachable. A
+  REFUSED boot-arg does not pin it, or a typo would hold the boot at 6944.
+  Derived **before** the offer, since a DECLINED offer is exactly the
+  sub-native mode where the tick is the dial; re-derived on a period CHANGE,
+  not once at setup, because 2z1 found macOS restores a remembered mode before
+  anything asks. Reads `vblret_autons` / `vblret_autodrv` /
+  `vblret_subnamed` / `vblret_ticknamed`.
+  **THE UNMEASURED COST IS IDLE-STATE RESIDENCY, and it is the one real
+  argument against this default.** A default boot now arms interior
+  thread_calls at **576/s** at native where the timer was previously demoted to
+  the 50 ms watchdog. 2C8 said it plainly: `idle %` 97.5-98.4 % from 144 to 720
+  occasions/s with `sys` DECREASING is "the instrument cannot resolve what it
+  was pointed at", not "no CPU cost", and a timer at 576/s preventing deep
+  package idle is invisible to `idle %` entirely. **`powermetrics` is that
+  instrument and has still never been run.**
+  **RULE 44 IS UNSATISFIED AND THE DEFAULT CHANGED ANYWAY** - `sub` 4 rests on
+  boots 424 and 426, the 60 Hz tick on 2C7/2C8's one-boot sweeps (seven points,
+  sd 0.5 %, 6x range). The user asked for it after running the control
+  themselves, the failure mode is "slower" rather than a flicker or a panic,
+  and the reversal is `rbgpuretiresub=1` or one `subret 1`. **If a later boot
+  feels laggy with no dial touched, that is rule 44 biting and the derivation
+  is the first suspect.** Plugin **9FE31A5A**, framebuffer **2CE724E1
+  UNCHANGED and verified so** - plugin-only reinstall.
   **Three independent quantities now point one way** - first paint 3.95x (boot
   424), rate +94 % interleaved (boot 426), the human observation (boot 426) -
   and two of the three are the same boot. The 2D3 bar is unchanged. What is new
@@ -2347,7 +2404,7 @@ retirement, which is what 2C2 mistook for the vblank period; `tickset` exits
 while the vblank drives. 2zc's dose-response is the cost: both directions off
 6944 cost about a third of the frame rate.)**
 **`{"RBGPURetireSub": 1..8}` via `build/out/subret` (2CF - retire occasions per
-VBLANK period, default 1. The 2C5-2C8 ladder lever at NATIVE refresh, where
+VBLANK period, **default DERIVED since 2D5** - 4 at native, see below. The 2C5-2C8 ladder lever at NATIVE refresh, where
 `tickset` is inert; interior occasions are anchored on `lastVbl` and
 re-anchored every frame, so this is one period subdivided and not 2zc's two
 beating timers. Refuses when `vblret_src` is 0 - use `tickset` there - and
@@ -2374,7 +2431,8 @@ insertions a second inside the call that gates every frame, and the one
 suspect in the frame path that six dead models of the ~73 sets/s ceiling never
 examined - and **2zz measured it at -1.4 %**, so the cost is real and is not
 the ceiling; keep the default),
-`rbgpuschedtickus=<500..1000000>` (**6944 is a measured
+`rbgpuschedtickus=<500..1000000>` (**DERIVED since 2D5** below native -
+2083 us in the 60 Hz mode - and **6944 is a measured
 interior optimum** - 2xn/2zb/2zc put 2000, 6944 and 13888 at 51.33, 74.6 and
 49.2 sets/s, so both directions cost a third of the frame rate; do not change
 it without reading 2zc), `rbgpuretiresub=<1..8>` (2CF - occasions per vblank period at native,
