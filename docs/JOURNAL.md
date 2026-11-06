@@ -58413,3 +58413,101 @@ NEXT, AS ONE COMMAND SO NO REBOOT CAN SPLIT IT:
 
 Verify `selector 7` and `mailbox REGION4` in the LAST invocation's header
 before reading the panel, since that is the one that carries the send.
+
+================================================================================
+2DB  THE ABM COMMAND REACHED REGION4 AND THE PANEL DID NOT MOVE - THE PREDICTED
+     NULL, SO THE BACKLIGHT IS A DEAD EFFECT-INSTRUMENT FOR THIS QUESTION
+     boot 435, selector verified 7 from the LIVE registry
+================================================================================
+
+`dmubbl win 7 && dmubbl pipe && dmubbl 6553`, one boot, chained so no reboot
+could split it. Live registry after the publish interval:
+
+    RBFBDmubWinSel     7        <- REGION4
+    RBFBDmubSendsOk    4        (was 2)
+    RBFBDmubPipeSends  2        (was 1)
+    RBFBDmubBlSends    2        (was 1)
+    RBFBDmubAcks       4        timeouts 0, refused 0
+    RBFBDmubWptr/Rptr  2624 / 2624     = 2496 + 2 x 64
+
+So SET_PIPE and SET_BACKLIGHT 6553 both went into REGION4 and both were
+consumed. **Neither the panel nor the monitor moved.**
+
+THE THREE HEADERS ALL PRINTED `selector 4`, AND THAT WAS STALE, NOT WRONG.
+`&&` runs the three invocations in milliseconds while these properties publish
+every `RBFBPubMs` = 500 ms, so each header showed the state from before the
+chain - including the third one, which is why it also showed `sends ok 2` and
+the previous run's `last level 6553`. The tool's own footer says exactly this.
+**Rule 31 on a verification: a dial checked faster than the publish interval
+reads the previous value, and chaining with `&&` is what makes it certain.** A
+chained sequence is immune to reboots and exposed to staleness; the fix for
+both is to read the LIVE registry afterwards, which is what settled it here.
+The byte payload corroborates independently: the send slot carries
+`42 02 00 20 00 00 00 00 99 19 00 00 01 01` and **0x1999 = 6553**.
+
+THIS NULL WAS PREDICTED IN WRITING BEFORE THE RUN, which is the only reason it
+costs nothing. 2DA addendum 2: "the REGION4 ABM test may come back null
+because ABM was never initialised and not because of the address, in which
+case the backlight is a bad effect-instrument for this question too." Apple's
+driver does not use DMUB ABM, so there has been no `abm_init`, no ABM config
+and no PWM parameters handed to the firmware. `dmub_abm_set_backlight` writing
+a level into an uninitialised ABM instance is a no-op that is
+INDISTINGUISHABLE from a wrong address.
+
+**So the backlight is retired as the discriminator, and with it the last
+effect this project can observe on demand.** The instrument inventory for
+"does DMCUB execute an inbox command" now reads:
+  - caps (a query): spent - unanswered at CW4 and REGION4 alike, and an
+    unimplemented command 6 answers nowhere (2DA addendum).
+  - the ack (RPTR following WPTR): necessary, never sufficient - it advances
+    whatever the slot contained.
+  - the ring read-back: says our bytes stuck, nothing about the address.
+  - the panel via ABM: dead for the reason above.
+Four instruments, none of which can answer it. That is the state, stated
+plainly rather than papered over with a fifth attempt of the same kind.
+
+WHAT IS STILL STRONG, AND UNAFFECTED BY THIS NULL: REGION4 is the ring on two
+independent quantities agreeing on the integer 37 (WPTR 0x940 = 2368 = 37 x 64
+at boot, reproducing 2zr's boot 275; REGION4 memory `run 37, bad 0` against
+CW4's `run 0`), inside the only aperture covering the firmware's own
+`DMCUB_INBOX1_BASE_ADDRESS` of 0x80000000. Nothing measured since has
+weakened it.
+
+TWO THINGS ARE WORTH BUILDING AND THEY BELONG IN ONE BUILD.
+
+**(1) READ-ONLY, AND IT CAN SETTLE THE ADDRESS AT BYTE LEVEL.** The
+scan/signature/dump block runs once in the locate path with `dmubWin` 4 and is
+never recomputed when the selector moves (2DA addendum), so `RBFBDmubRingDump`
+has only ever shown CW4's zeros. Recompute it on a selector change and
+REGION4's 37 slots become readable - and a DMUB command has a recognisable
+header (type, sub-type, payload length), so 37 slots that DECODE as real
+commands is the byte-level identification 2zr named as the only conclusive
+test. No new write surface, no new hardware access: the mapping and the scan
+already exist and only the trigger changes.
+
+**(2) AN EFFECT WHOSE REGISTER CHANGE WE CAN READ - and it is on the path we
+actually want.** The only remaining way to test execution is a command whose
+product is a register, which is 2D9's whole finding. The best candidate is
+`DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL` (sub-type 1) or
+`DIGX_ENCODER_CONTROL` (sub-type 0) aimed at a DARK PHY, because:
+  - the readback instrument EXISTS and is confirmed on hardware - 2C1 measured
+    `RDPCSTX_PHY_CNTL6` at 0x2946 + i*0xd8 with PHY0 active (0x00194444) and
+    PHY1-4 dark (0x00023333 / 0x00063333), and `-rbgpufbdpalt` is armed on
+    this very boot;
+  - it touches **nothing the live desktop uses** - PHY0 drives the panel and
+    is not the target;
+  - a change from 0x000x3333 to anything with MPLLs on or PSTATE moved is
+    unambiguous and needs no human observer (rule 45 not engaged);
+  - and if it works it is not a detour - it is the first bring-up step for the
+    external display, which is the actual goal.
+It is also the FIRST `DMUB_CMD__VBIOS` command this project would send, and a
+new hardware-write surface in 2BA's sense, so it is the user's decision. What
+it changes on the chip: a transmitter enable on a PHY that is currently
+powered down and driving nothing; the failure modes Linux documents for this
+area are a hang of the RDCPSPIPE (conditioned on DMCUB not running, measured
+false by three GPINT round trips) and, if the command is malformed, no effect
+at all. The panel's own PHY is never named.
+
+NOT PROPOSED: sweeping windows 0/1/3/5/6 with the backlight. With ABM
+uninitialised that sweep returns five nulls that mean nothing, which is
+exactly the mistake this milestone just finished paying for.
