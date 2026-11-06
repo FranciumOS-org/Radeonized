@@ -57406,3 +57406,89 @@ and that is exactly what this was.
 **The default still does not move.** Two large wins now point at `sub` > 1
 (2D0's first paint 13.9 -> 3.5 ms, this +64 %), and both are one boot, one
 window a side. The decision wants the interleaved repeat and a second boot.
+
+## 2D3 - the interleaved repeat: +94 %, ranges disjoint, AND THE HOLD IS ON
+
+`sudo tools/subrate.sh 3` on boot 426, alternating at single-window
+granularity, dial verified per run, `RBFBAmtrNotReady` **Yes** in the banner:
+
+```
+  sub   n   sets/s mean    range          fed %   mean vbl  preempt
+  1     3     70.98    69.80-71.96    48.0    1.038     5.3
+  4     3    137.83   127.37-143.97   92.3    1.037     7.7
+```
+
+**B/A = 1.942, +94.2 %, and the ranges do not come close to overlapping** -
+A spans 69.80-71.96 (+-1.5 %), B spans 127.37-143.97, and the gap between
+A's best and B's worst is **55.4 sets/s**. 2B6's failure mode was a drift the
+size of the effect; here the within-side spread is 3.1 % of the between-side
+difference. **This is the measurement 2D2 needed and it came back larger than
+2D2's own non-interleaved estimate**, not smaller - the direction a drift
+artifact does not usually go.
+
+**THE NUMBER THAT MATTERS MOST IS 143.97 AT `fed` 97.1 %, WITH THE HOLD
+ARMED.** That is 2A4's 141.24 and 2B0's 139.24/139.60 - the rates this project
+has only ever reached by turning the 2xo flicker protection OFF - reached here
+with `RBFBAmtrNotReady` **Yes**. The whole configuration question 2A7 closed
+("the hold stays default-on, 141 is not available, and ~91 with a correct
+desktop is the shipping behaviour") rested on those being alternatives.
+**On this boot they are not.** 2A7's premise was that the hold's ~36 % is the
+price of a correct desktop; what it actually priced was the hold **at one
+retire occasion per vblank**, which is the only configuration that existed
+when it was written.
+
+**WHAT DID NOT MOVE IS THE LATCH, AND THAT IS THE STRONGEST STRUCTURAL
+READING: `mean vblanks` 1.038 (A) vs 1.037 (B).** Identical to three decimal
+places across a 94 % rate change. So this is **not** a latch effect, and
+2A8/2B0 are untouched - every flip still needs essentially the whole vblank
+period and there is still no middle setting for the hold. What changed is how
+soon after that latch the frame RETIRES, which is the one thing none of the
+eight dead models of the ~73 ceiling ever varied.
+**This also WITHDRAWS 2D2's "the latch moved" note** (1.000 -> 1.218,
+bin2+ 0.0 -> 21.6 %): interleaved, the latch is flat and bin2+ lands 9.0/0.3/
+0.0/10.4/2.3/0.3 % with **no ordering by side at all** - the two largest are
+one per side. 2D2 read a non-interleaved pair and 2B7 is the rule that says
+not to. Recorded as my own error, one milestone after writing 2B7's lesson
+into the same card.
+
+**`fed` is the mechanism-consistent quantity**: 48.0 % -> 92.3 %, with B's
+best window at 97.1 %. 2A0's reframing says `fed` 48 % means the compositor
+hands us a transaction only on every second vblank; four occasions per period
+takes it to feeding nearly every one. **Consistent with, not established** -
+the causal step (that retirement completing earlier in the period is what
+makes Apple's next transaction arrive on the following vblank rather than the
+one after) is an inference from two counters, which is exactly the shape
+2A6/2B2/2B7 cost a milestone each.
+
+**`preempt` 5.3 vs 7.7 is NOT interpreted.** 2B7 measured this counter at
++15, +5, +2, +121 inside a fixed configuration; it does not order by a dial
+and a 2.4-count difference is noise against that.
+
+**One caveat in the instrument, and it does not bias the comparison:**
+`vbl/s` read +1.5 % to +4.9 % above the mode's 143903 mHz in all six windows,
+passing `paired.sh`'s 5 % guard but close to it on run 3B. It is high on both
+sides and in no side-ordered way, so the A/B stands; what it means for the
+absolute rates is unestablished, and a row at +4.9 % is a row to re-take
+rather than to quote.
+
+**STILL NOT A FINDING, AND THE REASON IS NOW ONLY ONE: THIS IS BOOT 426,
+AGAIN.** 2D2 and 2D3 are the same boot, so rule 44's "at least two boots per
+side" is unsatisfied, and 2zg exists because boot 267's internally consistent
+six samples did not survive boot 268. What 2D3 adds over 2D2 is that the
+within-boot comparison is now valid (2B7), not that the boot is no longer
+n=1. **2D0's ladder result is also boot 424** - a different boot and a
+different quantity pointing the same way, which is corroboration of the
+mechanism and not a second boot for this measurement.
+
+**The default therefore still does not move, and the bar is now explicit:**
+one more boot's interleaved `subrate.sh` reproducing a disjoint-range win
+makes `sub` 4 (or 8) a candidate for `rb_default_on_tokens` by way of
+`rbgpuretiresub=`, and nothing less does. 2A4 and 2B2 each cost a milestone
+for taking good news on one boot, and this is much better news than either.
+
+**AND RULE 45 IS STILL THE DELIVERABLE AND STILL UNTAKEN.** Every number in
+2D0, 2D2 and 2D3 is a counter. The ask was "iMessage animations are so
+laggy"; what has been measured is `metal_probe --queues 8` and `paired.sh`.
+A 94 % frame rate with first paint 3.95x faster is the most promising pair of
+numbers this line has produced, and 2A6 is what letting a benchmark stand for
+a workload cost the last time it looked this good.
