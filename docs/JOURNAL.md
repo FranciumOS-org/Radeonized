@@ -58281,3 +58281,72 @@ identified byte-level for the first time in this project, 2zr's ambiguity is
 resolved, and the whole `DMUB_CMD__VBIOS` bring-up path for the external
 display becomes available. If it does not, the remaining candidates are
 0 1 3 5 6 and `win <n>` sweeps them in one session.
+
+--------------------------------------------------------------------------------
+2DA addendum - REGION4 answers caps EXACTLY AS CW4 DID, so caps is spent
+--------------------------------------------------------------------------------
+
+`dmubbl win 7` took (`RBFBDmubWinSel` 7, header "mailbox REGION4", window mem
+0xf41fe00000), and `dmubbl caps` was sent there. Result:
+
+    RBFBDmubCapsSends   1
+    RBFBDmubAcks        3        (RPTR followed WPTR to 2560)
+    RBFBDmubConfirms    0
+    RBFBDmubReplyVerdict 2       UNCHANGED
+    sent  06 00 01 0e 00 00 ...
+    got   06 00 01 0e 00 00 ...
+
+Byte 2 is 0x01: **`ret_status` still set, no payload** - byte-for-byte the same
+answer boot 275 got at CW4. So the address change did not change the result.
+
+WHICH MEANS CAPS IS NOW A SPENT INSTRUMENT, FOR 2D9'S OWN REASON. `caps` is a
+QUERY, so if this firmware does not implement command 6 it will answer nowhere,
+and sweeping the remaining windows (0 1 3 5 6) with it cannot distinguish
+"wrong address" from "unimplemented command". That is **2zr's recorded failure
+mode with the terms swapped**: 2zr wrote "a test that depends on the address
+cannot clear the address", and this is a test that depends on the command and
+cannot clear the command. `dmub_cmd.h` shows no version gate on command 6, and
+that is not evidence this firmware implements it.
+
+AND THE SIGNATURE EVIDENCE FOR REGION4 SURVIVES, which matters because the
+tool's own output appears to contradict it. On the `win 7` run the header reads
+"mailbox REGION4" while two lines later "signature 0 of 128 slots, 0 ABM ->
+ABSENT" and `RBFBDmubRingDump` is all zeros. **Those are CW4's bytes.** The
+scan/signature/dump block runs in the LOCATE path - once at setup, with
+`dmubWin` 4 - and is never recomputed when the selector moves, so
+`RBFBDmubScanPlaus` reads 0 and `RBFBDmubSigOk` 0 about a window we are no
+longer pushing into. What IS a reading of REGION4 is `RBFBDmubRegScan[0]` =
+0x25 = **37**, published as that aperture's `run` with `bad 0`, and
+`rb_dmub_sig_ok(37, 0, 128)` returns **1** - run >= 2, bad == 0, run < slots.
+By this project's own test REGION4's memory looks like a command ring and
+CW4's does not.
+
+`RBAMDFramebufferDMUB.cpp:415` records that boot 279 hit this same
+contradiction through a DIFFERENT defect (indexing `dmubWinScan` out of bounds
+for win 7 and publishing the garbage as a signature). That bug was fixed; the
+"recompute when the selector moves" half was not, so the same two numbers
+still disagree on screen for a new reason. **Rule 31 on a derived reading: a
+value computed at setup is stale for every dial that can move afterwards** -
+2A3's defect, in the scan rather than in a published scalar. It is a display
+defect only, and nothing measured is withdrawn.
+
+Also cosmetic, noted so it is not read as a finding: with REGION4 selected the
+tool prints `ring pa 0x87fe00000  (carve-out + 0x1fe40000)`. The address is
+right and the parenthetical is a fixed string carrying CW4's offset; REGION4's
+is 0x1fe00000.
+
+NEXT, AND IT IS ONE COMMAND, EFFECT-BASED, NO REPLY NEEDED: send the ABM
+backlight at REGION4. That is 2D9's whole point applied to our own instrument -
+an ABM command's product is the panel, not a ring byte, so it works even if
+this firmware answers no queries at all. SET_PIPE must go first because the
+earlier bind went to CW4.
+
+    dmubbl pipe        (re-bind ABM to OTG0, now at REGION4)
+    dmubbl 6553        (10 % - far from where the slider sits)
+
+Panel moves -> REGION4 is the ring AND the firmware executes inbox commands:
+both answers at once, 2zu withdrawn, and the DMUB_CMD__VBIOS bring-up path for
+the external display is available. Panel does not move -> the remaining
+candidates must be swept with an EFFECT, not with caps, and the only effect
+this project can observe on demand is the backlight, so it is `win <n>` +
+`pipe` + a level per window, five windows, one session, no reboots.
