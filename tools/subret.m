@@ -199,18 +199,58 @@ int main(int argc, char **argv)
      * `tickset` calls report MISMATCH while the writes had all landed (2C5).
      * Polling the counter proves the snapshot is FRESH as well as proving the
      * call arrived, and a stale read cannot distinguish those. */
+    /* 2D1: POLLING IS NOT ENOUGH, AND THAT IS NOT A TOOL BUG - IT IS THE
+     * SNAPSHOT NEVER REFRESHING.
+     *
+     * `RBGPUDiag` is republished only by `performRefreshDiag()`, which runs
+     * only when something calls `scheduleRefreshDiag()` - and that drops a
+     * request inside its 250 ms window without re-arming (2ez's throttle,
+     * which stays). The refresh is also the ONLY caller of
+     * `rbgpu_retire_publish_2zd()`, so its own key writes are dropped in turn
+     * and the chain terminates. On a quiet desktop nothing refreshes at all.
+     *
+     * Boot 426: `subret 4` LANDED (`vblret_subrecv` 4, `vblret_sub` 4, the
+     * subdivision running at 3 interior retires per frame) and this poll read
+     * a frozen snapshot for 3 s, reported "the set did not arrive" and took
+     * `paired.sh` down with it through the `&&`. Boot 424 passed only because
+     * probes were logging. So 2C5's "poll the set-counter, strictly better
+     * than a longer sleep" is the SAME premise with a loop around it.
+     *
+     * The kext fix is `refreshDiagSoon()`, which defers instead of dropping.
+     * This is the USERSPACE half, so the tool works against a plugin that
+     * predates it: re-issue the SAME value once the throttle window has
+     * certainly passed. A second write more than 250 ms after the first is
+     * not dropped, so it publishes - and re-setting a dial to the value it
+     * already holds changes nothing on the chip, only the monotonic counter
+     * this is waiting on. Harmless by construction, which is why it is safe
+     * to do inside a verification. */
     long nset = sets, now = -1;
-    for (int i = 0; i < 30 && nset <= sets; i++) {   /* up to ~3 s */
+    int kicks = 0;
+    for (int i = 0; i < 60 && nset <= sets; i++) {   /* up to ~6 s */
         usleep(100000);
         nset = diagNum(peer, @"vblret_subsets", -1);
+        if (nset <= sets && (i % 4) == 3 && kicks < 10) {
+            /* >=400 ms since the last write: past the 250 ms window. */
+            (void)IORegistryEntrySetCFProperties(
+                peer, (__bridge CFDictionaryRef)set);
+            kicks++;
+        }
     }
     if (nset <= sets) {
         fprintf(stderr,
-                "`vblret_subsets` did not advance past %ld in 3 s. The set\n"
-                "did not arrive, or the diag snapshot is not refreshing.\n",
-                sets);
+                "`vblret_subsets` did not advance past %ld in 6 s, after %d\n"
+                "re-issues of the same value to force a publish. The set did\n"
+                "not arrive, or the diag snapshot is not refreshing at all.\n"
+                "Check `vblret_subrecv` - if it reads %ld the call DID arrive\n"
+                "and only the publish is stuck, so the dial is armed and a\n"
+                "measurement against it is valid.\n", sets, kicks, want);
         IOObjectRelease(peer);
         return 3;
+    }
+    if (kicks) {
+        printf("(took %d re-issue%s to force a publish - the diag snapshot\n"
+               " only refreshes when something schedules it; 2D1)\n",
+               kicks, kicks == 1 ? "" : "s");
     }
     now = diagNum(peer, @"vblret_sub", -1);
     printf("vblret_sub now reads %ld   (sets %ld)\n", now, nset);
@@ -249,11 +289,18 @@ int main(int argc, char **argv)
          * and a timeout is reported as a timeout rather than as a verdict. */
         const long t0 = diagNum(peer, @"vblret_subret", -1);
         long t1 = t0;
-        int ms = 0;
-        for (int i = 0; i < 40 && t1 <= t0; i++) {   /* up to ~4 s */
+        int ms = 0, ekicks = 0;
+        for (int i = 0; i < 60 && t1 <= t0; i++) {   /* up to ~6 s */
             usleep(100000);
             ms += 100;
             t1 = diagNum(peer, @"vblret_subret", -1);
+            /* 2D1 again, for the same reason: the interior retires are real
+             * but unpublished until something schedules a refresh. */
+            if (t1 <= t0 && (i % 4) == 3 && ekicks < 10) {
+                (void)IORegistryEntrySetCFProperties(
+                    peer, (__bridge CFDictionaryRef)set);
+                ekicks++;
+            }
         }
         if (t1 > t0) {
             printf("interior retires %ld -> %ld in %d ms   (climbing)\n",

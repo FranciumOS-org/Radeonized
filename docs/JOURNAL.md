@@ -57237,3 +57237,99 @@ complete run reported as LATE, FULL and LATE given the same code, and sub=1
 reported as a completed run. Boot 424's own quantum (1738126 ns) and its
 8-quanta spread are pinned as arithmetic so a later change cannot quietly stop
 reproducing the measurement that justified this.
+
+## 2D1 - NOTHING REFRESHES `RBGPUDiag`, and 2C5's prescription rested on that
+
+Boot 426, plugin 0C96F646 (the 2D0 build, `kextstat` checked). `subret 4`
+printed its own failure:
+
+```
+set RBGPURetireSub(4) -> 0x0
+`vblret_subsets` did not advance past 1 in 3 s. The set
+did not arrive, or the diag snapshot is not refreshing.
+```
+
+and the `&&` took `sudo tools/paired.sh 20` down with it.
+
+**THE SET HAD LANDED.** Read straight after: `vblret_subrecv` **4**,
+`vblret_sub` **4**, `vblret_subsets` **2**, `vblret_subret` **22991**,
+`vblret_subfull` **7663**, `vblret_sublate` **0**, `vblret_subns` 1738126.
+`subret/subfull` = **3.0003**, exactly three interior retires per run
+completion - the subdivision was running perfectly while the tool declared it
+absent.
+
+**THE MECHANISM, read out of the source rather than inferred.** Every caller
+of `scheduleRefreshDiag()` is a logging or key-write path, and that function
+**DROPS** a request inside its 250 ms window **without re-arming** - 2ez's fix
+for a refresh that ran back to back under `g_diagLock` and was
+indistinguishable from a wedge, and it stays. And:
+
+```
+performRefreshDiag()  ->  rbgpu_retire_publish_2zd()    [the ONLY call site]
+scheduleRefreshDiag() <-  rbgpu_log, rbgpu_diag_set_num, start()   [all of them]
+```
+
+so the refresh is the only thing that publishes the retire keys, and its own
+`rbgpu_diag_set_num()` writes land inside their own window and are dropped in
+turn. **The chain terminates.** On a quiet desktop nothing refreshes
+`RBGPUDiag` at all, and it can be arbitrarily stale. Boot 424 passed the same
+poll only because probes were logging throughout.
+
+**So 2C5's prescription was the same premise with a loop around it.** It
+replaced a 200 ms sleep with "poll the set-counter past its pre-set value" and
+called that *strictly* better, because it proves the snapshot is FRESH as well
+as that the call arrived. It proves neither when no refresh is ever scheduled.
+Rule 31 one level down: *a counter that has not moved yet is not a counter that
+did not move* - and a counter nothing will ever publish does not move either.
+
+**AND 2C2's DRAIN BUG WAS EXCLUDED ON A FALSE PREMISE.** That milestone
+recorded `drainset 1` returning SUCCESS three times with `vblret_drain` stuck
+at 8, and dismissed the stale-snapshot explanation because the key "has a
+second writer (`rbgpu_retire_publish_2zd()`, several times a second from the
+live global), so a stale read of that key could not have persisted across
+three attempts". That function has **exactly one call site, inside the
+refresh**. There is no "several times a second". **The dismissal rested on a
+belief about a call frequency that was never checked against the call graph**,
+and the shape of 2C2's bug is now the shape of this one. Not claimed as the
+diagnosis - settling it means re-running that A/B on a build with the fix, not
+reasoning further.
+
+The same false claim was written in the kext, in a comment on the line it was
+a claim about: "Publish immediately as well as periodically". Neither half was
+true. 2C5 corrected that sentence in `drainset`'s comment and left it standing
+here.
+
+### The fix, in two halves
+
+**Kext: `refreshDiagSoon()`** - for a dial write, DEFER to the end of the
+throttle window instead of dropping, claiming that slot so a second write
+defers to the one after. The throttle's guarantee is untouched (never more than
+one refresh per 250 ms) and there is **no steady-state cost**, because only a
+userspace dial write calls it; a log line still uses `scheduleRefreshDiag()`
+and is still dropped, which is the case 2ez is about. Called on every path out
+of the dial handlers including the refusals (rule 19: a refused value must be
+readable).
+
+**Userspace: `subret` re-issues the same value** every 400 ms while waiting, up
+to ten times, on both the dial check and the effect check. A second write more
+than 250 ms after the first is not dropped, so it publishes; and re-setting a
+dial to the value it already holds changes nothing on the chip, only the
+monotonic counter being waited on - harmless by construction, which is what
+makes it safe inside a verification. **This half works against a plugin that
+predates the kext fix**, which is the build the machine is running, so the
+experiment is unblocked without a reinstall. Verified on boot 426: both sides
+now verify and exit 0, `sub` 1 -> 4 with "interior retires 115671 -> 115780 in
+200 ms (climbing)".
+
+The timeout message now also says what to check and what it would mean:
+`vblret_subrecv` reading the asked-for value means the call arrived and only
+the publish is stuck, **so the dial is armed and a measurement against it is
+valid** - which is exactly the state boot 426 was in when the tool said the
+opposite.
+
+Also visible once the counters were split (2D0): `vblret_sublate` **2** against
+`vblret_subret` 115546 - two genuinely missed slots in 115 thousand, 0.0017 %.
+Merged into the old single counter that would have been invisible beside 38 509
+run completions.
+
+Plugin **1BDF6979**; framebuffer unchanged.
