@@ -583,6 +583,12 @@ private:
     uint32_t           dmubDomGate;      /* ...and whether it was a gate */
     uint32_t           dmubDomMoved;     /* rb_pg_moved_mask's bitmask */
     uint32_t           dmubDomRan;       /* experiments that reached a send */
+    /* 2DD: every ENTRY to the RBFBDmubDomain handler, refusals included, so a
+     * reader can wait on something monotonic instead of on the value it is
+     * about to interpret - RBGPUDiag-style snapshots and the 500 ms publish
+     * cannot distinguish "not published yet" from "the write was lost"
+     * (2C5). */
+    uint32_t           dmubDomCalls;
     uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
     uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
     uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];

@@ -196,4 +196,42 @@ static inline uint32_t rb_pg_sel_refuse(uint32_t inst)
     return RB_PG_SEL_OK;
 }
 
+/* 2DD: is a SAMPLE of this block usable at all?
+ *
+ * Boot 436 read all four STATUS and all four CONFIG words as 0x00000000,
+ * 685 samples deep, and the auto-candidate guard refused with code 24 - "no
+ * domain differs from DOMAIN0" - which was a TRUE statement about eight zero
+ * words and a false statement about the chip. The cause was one missing
+ * term: every DCN register in this kext is addressed as
+ * `hubpRegs[kRbDmuSeg2 + dword]` (0x34c0, the DMU segment-2 base), and 2DC's
+ * pgSample() indexed `hubpRegs[dword]`. 0x80..0x87 is well INSIDE the
+ * mapping, so there is no fault and no error - it reads some other block's
+ * zeros, which is rule 14's shape at the hardware boundary: a wrong address
+ * that happens to be readable answers plausibly and says nothing.
+ *
+ * So the plausibility check cannot be about polarity (deliberately not
+ * recorded - see the header comment) and cannot be about any one field. What
+ * it can be is this: DOMAIN0 is the pipe scanning the live panel, so SOMETHING
+ * in this block must be non-zero while the desktop is up. Eight identically
+ * zero words is the signature of reading the wrong dwords, and the experiment
+ * refuses on it rather than producing a verdict from them.
+ *
+ * It is not a proof of correct addressing - a block of plausible-looking
+ * garbage would pass - which is why the raw words are published beside every
+ * verdict and why the reference-instance method compares against DOMAIN0
+ * rather than against any written-down constant. */
+static inline int rb_pg_sample_readable(const uint32_t *status,
+                                        const uint32_t *config)
+{
+    uint32_t i;
+    uint32_t any = 0u;
+
+    if (!status || !config) { return 0; }
+    for (i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
+        any |= status[i];
+        any |= config[i];
+    }
+    return any != 0u ? 1 : 0;
+}
+
 #endif /* RB_PG_H */

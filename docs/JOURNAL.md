@@ -58637,3 +58637,104 @@ VBIOS commands, and the external display's bring-up is register writes with no
 atom table, which is a much larger project. Refusal **24** is a third outcome
 and not a null: it means no domain was gated on this boot and the test did not
 run.
+
+
+## 2DD - the DOMAIN block read as eight zeros, and the defect was one missing term
+
+Boot 436 ran `dmubbl dom` on the 2DC framebuffer (62EE2CDC loaded and
+verified, `-rbgpufbdmubdom` in boot-args - rule 15 and rule 34 both satisfied
+before anything was interpreted). The tool printed `-> 0xe00002e2` and the
+registry says what that is:
+
+```
+RBFBDmubDomArmed = Yes      RBFBDmubDomSends  = 0
+RBFBDmubDomRefuse = 24      RBFBDmubDomRan    = 0
+RBFBDmubDomMoved  = 0       RBFBPgCandidate   = -1
+RBFBPgSamples    = 685
+RBFBPgStatus = <00000000 00000000 00000000 00000000>
+RBFBPgConfig = <00000000 00000000 00000000 00000000>
+```
+
+**No DOMAIN_CONTROL was sent, so this is not a reading about the firmware at
+all.** Refusal 24 is the guard 2DC wrote - "no domain differs from DOMAIN0, so
+a power-up cannot show anything" - and it fired on a sample of eight zero
+words. The statement was TRUE of the words and FALSE of the chip.
+
+**The cause is one missing term, and it is mine.** Every DCN register this kext
+reads is addressed as `hubpRegs[kRbDmuSeg2 + dword]` - 0x34c0, the DMU
+segment-2 base. HUBP does it, the OTG reads do it, `rb_hpd` does it, and
+`RBAMDFramebufferAux.cpp` does it on six registers in a row
+(`kRbDmuSeg2Aux + rb_aux_dw(...)`). 2DC's `pgSample()` indexed
+`hubpRegs[rb_pg_status_dw(i)]`, so it read dwords 0x80..0x87 of the mapping
+rather than 0x3540..0x3547. **That address is well inside BAR5**, so there is
+no fault, no error and no refusal: it reads some other block's zeros and
+answers plausibly.
+
+That is rule 14 at the hardware boundary rather than at a function's return:
+**a wrong address that happens to be readable is indistinguishable from a
+chip that answered.** The register offsets were right (read from
+`dcn_3_1_2_offset.h`, BASE_IDX 2, verified again here), the field masks were
+right, the stride was right, the hosttest pinned all of them - and the one
+quantity no hosttest could see was how the .cpp turns a dword offset into an
+array index. 2xs/2zl's shape with the terms moved once more: right offsets,
+right method, **wrong base**.
+
+**What went right is the whole reason this cost no milestone.** Three things:
+the refusal is a CODE and not a bool, so "the test did not run" was separable
+from "nothing moved"; the raw words are published beside the verdict, so
+eight zeros were visible instead of being summarised away (2B0's lesson paying
+for itself a fourth time); and 2DC wrote down refusal 24 as a third outcome
+*before* the run, so the reading arrived already labelled "not a null". Had
+the auto-candidate guard not existed, `dmubbl dom` would have sent
+DOMAIN_CONTROL to some instance, read `moved 0` off the same wrong address,
+and this journal would now record **"this firmware accepts and discards VBIOS
+commands"** - a false negative on the only remaining test of whether the
+external display's bring-up path exists.
+
+### What changed
+
+**The fix** is `kRbDmuSeg2Dmub + ` in `pgSample()`, with a comment in the loop
+saying never to index that array with a header's dword offset again.
+
+**The guard the defect earned**: `rb_pg_sample_readable()` in `rb_pg.h`, and
+refusal **25**, taken BEFORE the reference check on both paths (the handler's
+auto-candidate and `dmubDomainExperiment()` itself). DOMAIN0 is the pipe
+scanning the live panel, so something in this block must be non-zero while the
+desktop is up, and eight identically zero words is the signature of reading
+the wrong dwords. It is deliberately NOT a proof of correct addressing - a
+block of plausible-looking garbage passes it - which is why the raw words stay
+published and why the verdict is still a DIFFERENCE against DOMAIN0 rather
+than against any written-down constant. The polarity of
+`DOMAIN_PGFSM_PWR_STATUS` is still not recorded anywhere in this tree.
+
+**The tool reads the verdict now.** `-> 0xe00002e2` is the IOReturn of
+`IORegistryEntrySetCFProperties`, which is one yes/no over every refusal path
+at once - rule 13, on the instrument built for this question. `dmubbl dom`
+polls the new monotonic `RBFBDmubDomCalls` past its pre-send value (2C5's
+rule: wait on something monotonic, never on the value you are about to
+interpret, because the 500 ms publish cannot distinguish "not yet published"
+from "the write was lost"), then prints the decoded refusal, the live/before/
+after STATUS and CONFIG words, and the verdict. If the counter never moves it
+says so and points at the loaded UUID rather than inventing a refusal.
+
+**`-Werror` fired on the break-it check for the third time.** The first break
+(`return 1;`) left `any` set-but-unused, the build died, and
+`grep -E "FAIL|error:"` showed an `error:` line instead of a `FAIL` - which is
+exactly why 2BC added `error:` to that grep. Broken a second way
+(`any != 0u ? 1 : 1`) the case fails loudly. The plausible-sample control
+fails nothing when broken, as intended: it exists so the guard cannot be a
+constant 0.
+
+Framebuffer **EB0DEF94-F02D-3B7E-8864-000918826810** (was 62EE2CDC), zero
+warnings, `hosttest: all passed`, plugin untouched at 457E7DEB (only
+`src/fbkext` includes `rb_pg.h`).
+
+**NOTHING IS CLAIMED ABOUT THE FIRMWARE. No boot has sent a DOMAIN_CONTROL
+command yet** - boot 436 refused before the send, and the refusal was correct.
+2DC's three written-down outcomes stand unchanged and unmeasured: `DomMoved`
+non-zero means the firmware executes inbox commands and the external display's
+whole VBIOS bring-up path is available; 0 with refusal 0 means it accepts and
+discards them, and the bring-up is register writes with no atom table; refusal
+**24** means no domain was gated on this boot, which is a third outcome and
+not a null. Refusal **25** is now a fourth, and it means the instrument is
+broken rather than anything about the chip.

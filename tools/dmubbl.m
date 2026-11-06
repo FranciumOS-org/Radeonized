@@ -316,6 +316,86 @@ static int words(io_service_t fb, const char *key, uint32_t *out, int n)
     return got;
 }
 
+/* 2DD: the dom refusal codes, decoded. Boot 436 printed "-> 0xe00002e2" and
+ * that is the IOReturn of the setProperties call, which says the handler
+ * refused and nothing about WHY (rule 13). */
+static const char *domWhy(long c)
+{
+    switch (c) {
+    case 0:  return "no refusal - the command was sent";
+    case 20: return "not armed (-rbgpufbdmubdom missing from boot-args)";
+    case 21: return "instance outside the 6-bit payload field";
+    case 22: return "no register mapping (hubpSetup refused this boot)";
+    case 23: return "DOMAIN0 named by hand, or an instance past DOMAIN3";
+    case 24: return "no domain differs from DOMAIN0 - nothing to power up";
+    case 25: return "the DOMAIN block read as eight ZERO words - the sample "
+                    "is unreadable, so this is an INSTRUMENT failure and not "
+                    "a reading of the chip";
+    default: return "unknown";
+    }
+}
+
+/* Wait on something MONOTONIC, never on the value being interpreted: the
+ * properties publish every 500 ms, so a read straight after the set can
+ * return the previous verdict and look exactly like a lost write (2C5). */
+static void domVerdict(io_service_t fb, long callsBefore)
+{
+    uint32_t before[4] = {0}, after[4] = {0}, st[4] = {0}, cf[4] = {0};
+    long calls = callsBefore;
+    int spins;
+
+    for (spins = 0; spins < 60; spins++) {
+        calls = num(fb, "RBFBDmubDomCalls");
+        if (calls > callsBefore) { break; }
+        usleep(100 * 1000);
+    }
+    if (calls <= callsBefore) {
+        printf("\nthe kext never recorded the call (RBFBDmubDomCalls still "
+               "%ld after 6 s).\n"
+               "That is NOT a refusal - either this framebuffer predates 2DD "
+               "or the\nset never reached the handler. Check the loaded UUID "
+               "first (rule 15).\n", callsBefore);
+        return;
+    }
+
+    const long refuse = num(fb, "RBFBDmubDomRefuse");
+    const long moved  = num(fb, "RBFBDmubDomMoved");
+    const long ran    = num(fb, "RBFBDmubDomRan");
+    const long inst   = num(fb, "RBFBDmubDomInst");
+    words(fb, "RBFBPgBefore", before, 4);
+    words(fb, "RBFBPgAfter",  after,  4);
+    words(fb, "RBFBPgStatus", st,     4);
+    words(fb, "RBFBPgConfig", cf,     4);
+
+    printf("\nverdict (read back after the call the kext counted)\n");
+    printf("  refusal        %ld  %s\n", refuse, domWhy(refuse));
+    printf("  domain         %ld   ran %ld   moved 0x%lx\n", inst, ran, moved);
+    printf("  live STATUS    %08x %08x %08x %08x\n",
+           st[0], st[1], st[2], st[3]);
+    printf("  live CONFIG    %08x %08x %08x %08x\n",
+           cf[0], cf[1], cf[2], cf[3]);
+    printf("  before STATUS  %08x %08x %08x %08x\n",
+           before[0], before[1], before[2], before[3]);
+    printf("  after  STATUS  %08x %08x %08x %08x\n",
+           after[0], after[1], after[2], after[3]);
+
+    if (refuse == 0 && moved != 0) {
+        printf("  -> THE FIRMWARE EXECUTED AN INBOX COMMAND. A DOMAIN_PG_STATUS\n"
+               "     word changed across one DMUB_CMD__VBIOS send, which no "
+               "other\n     instrument in this tool can show (2DB spent all "
+               "four). The whole\n     VBIOS bring-up path for the external "
+               "display is available.\n");
+    } else if (refuse == 0) {
+        printf("  -> sent, acked, and NO domain moved. On its own that reads "
+               "as\n     'this firmware accepts and discards VBIOS commands' "
+               "- but the\n     before/after words above are the evidence for "
+               "that, not this line.\n");
+    } else {
+        printf("  -> REFUSED, so nothing was sent and this is not a reading "
+               "about\n     the firmware at all.\n");
+    }
+}
+
 static const char *sendWhy(long c)
 {
     switch (c) {
@@ -602,13 +682,23 @@ int main(int argc, char **argv)
                want, (double)want * 100.0 / 65536.0);
     }
 
+    const int isDom = (strcmp(argv[1], "dom") == 0);
+    const long domCallsBefore = isDom ? num(fb, "RBFBDmubDomCalls") : 0;
+
     kern_return_t kr = IORegistryEntrySetCFProperties(
         fb, (__bridge CFDictionaryRef)d);
     printf("-> 0x%x%s\n", kr, kr == KERN_SUCCESS ? " (the push returned OK)" : "");
-    printf("\nthe kext logged the refusal code and the WPTR it wrote. Rule 31:\n"
-           "the counters above are published periodically, so re-run with no\n"
-           "argument in a second or two rather than reading an unchanged\n"
-           "number as a failure.\n");
+    if (isDom) {
+        /* The IOReturn is a yes/no over every refusal path at once, so the
+         * tool reads the code itself rather than making the user decode an
+         * errno-shaped number. */
+        domVerdict(fb, domCallsBefore);
+    } else {
+        printf("\nthe kext logged the refusal code and the WPTR it wrote. Rule 31:\n"
+               "the counters above are published periodically, so re-run with no\n"
+               "argument in a second or two rather than reading an unchanged\n"
+               "number as a failure.\n");
+    }
 
     IOObjectRelease(fb);
     return kr == KERN_SUCCESS ? 0 : 1;
