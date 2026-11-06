@@ -1829,6 +1829,36 @@ table and refuses to install one that does not match the running kernel;
   withdrawn. Panel does not move -> 2zu's null becomes real** and the bring-up
   is register writes with no VBIOS table. Risk: both routes write the same PWM
   block, so the slider may stop responding until a reboot.
+  **2DA-2DC RAN IT AND THE ADDRESS QUESTION IS SETTLED WHILE THE EXECUTION ONE
+  IS NOT.** Boot 433/435, Eco mode verified: `pipe` + `6553` reached **REGION4**
+  (`WinSel` 7, `SendsOk` 4, `Acks` 4, the slot carrying 0x1999 = 6553) and
+  **nothing moved**. **REGION4 IS THE RING on two independent quantities
+  agreeing on the integer 37** - WPTR at boot is `0x940` = 2368 = **37 x 64**
+  (reproducing 2zr's boot 275) and REGION4's memory scan reads **`run 37,
+  bad 0`** against CW4's `run 0`, inside the only aperture covering the
+  firmware's own `DMCUB_INBOX1_BASE_ADDRESS` of **0x80000000** (`top
+  0x8000ffff`). 2zr's "37 was an inference from the POINTER and never from
+  memory" is answered - in a different window from the one it was looking at.
+  **The default selector is still CW4, which this project's own
+  `rb_dmub.h:238` rules out**, and the selector does NOT survive a reboot.
+  **All four instruments for "does DMCUB execute" are spent**: caps is a query
+  and answers at no window (so sweeping windows with it cannot separate a wrong
+  address from an unimplemented command - 2zr's trap with the terms swapped);
+  an ack advances over whatever the slot held; the ring read-back only proves
+  our write stuck; and the ABM backlight is a no-op whenever **`abm_init` was
+  never called**, which is expected under a driver that does not use DMUB ABM.
+  **Do not sweep the remaining windows with the backlight** - five nulls that
+  mean nothing. **2DC is the fifth instrument and it is a REGISTER**
+  (`-rbgpufbdmubdom`, above), built and hosttested with no boot having sent
+  one. Said first so it can be wrong: `RBFBDmubDomMoved` non-zero means the
+  firmware executes VBIOS commands and the external display's bring-up path is
+  available; **0 with refusal 0 means this firmware accepts and DISCARDS them**,
+  and the bring-up is register writes with no atom table. Refusal **24** is a
+  third outcome, not a null: no domain was gated, so the test did not run.
+  **And the transmitter command is NOT writable from what is in the tree** -
+  `command_table2.c:init_transmitter_control` picks its payload layout from the
+  **atom table revision in ROM**, not the DCN version, and
+  `ATOM_TRANSMITER_ACTION_*` exists in `dmub_cmd.h` only inside a comment.
   **Rule 46 in the resource file a third time:** `dcn31_resource.c:86` includes
   **`dpcs_4_2_0_offset.h`** - DCN 3.1.2 uses **DPCS 4.2.0**, and `RDPCS`
   appears ZERO times in `dcn_3_1_2_offset.h`, so a guess at `dpcs_3_1_4` (which
@@ -2431,6 +2461,15 @@ failure mode is a **hang**: Linux marks the path "Legacy path, avoid if
 possible". The hang is conditioned on DMCUB not running and 2zs measured it
 running, so the condition is measured false rather than assumed - which is an
 argument for trying it, not for defaulting it on),
+`-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
+`DMUB_CMD__VBIOS` command this project sends and the only remaining test of
+whether this firmware EXECUTES an inbox command, since 2DB spent the other
+four. Even armed nothing is sent until `dmubbl dom` runs. The readback -
+`DOMAIN0..3_PG_CONFIG/_PG_STATUS`, 0x0080 stride 2, BASE_IDX 2 - is read-only
+in an aperture already mapped, with no setter. DOMAIN0 is refused by name
+because it is the pipe scanning the panel, a power-UP is refused unless that
+domain already differs from DOMAIN0's state, and the tool refuses
+`power_gate = 1` outright),
 `-rbgpuagdcearly` (**wedges the desktop**, 2rz), `-rbgpufbdmubbl` (2zn - producing on
 DMCUB's inbox 1 is a new hardware-write surface, and even armed nothing is
 sent until `build/out/dmubbl` names a level; the locate and the bring-up scan
