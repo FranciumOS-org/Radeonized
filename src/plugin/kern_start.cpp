@@ -14568,8 +14568,53 @@ static uint64_t g_rb_2C4_sets = 0;
  * milestone in. */
 static uint64_t g_rb_2CF_sets = 0;
 
+/* 2D5: THE DEFAULT IS DERIVED FROM THE LIVE PERIOD, AND A NAMED VALUE WINS.
+ *
+ * `rb_retire_sub_auto()` turns the display's own period into an occasion
+ * count at a fixed quantum, reproducing BOTH measured defaults (sub 4 at
+ * native, tick 2084 at 60 Hz) from one constant - see rb_retire.h. These two
+ * flags are what keep it a default rather than a policy: a `rbgpuretiresub=`
+ * boot-arg or a `subret`/`tickset` write sets the matching flag and the
+ * derivation never touches that dial again for the rest of the boot.
+ *
+ * Why that matters beyond politeness: without it, `subret 1` would be undone
+ * by the next vblank and the A side of every future A/B would be
+ * unreachable - the dial would report success and the mechanism would come
+ * straight back, which is 2A3's defect with the arrow reversed. 2D4's control
+ * (`subret 1`, feel the lag, `subret 4`) is the measurement that attributed
+ * this effect at all, and it has to keep working. */
+static uint32_t g_rb_2D5_named_sub  = 0;
+static uint32_t g_rb_2D5_named_tick = 0;
+static uint64_t g_rb_2D5_seen_ns    = 0;
+static uint64_t g_rb_2D5_derives    = 0;
+
+static void rbgpu_retire_auto_2D5(uint64_t period_ns) {
+    /* Only on a period we have not derived for: this runs on the vblank
+     * thread_call, so the steady state must be two compares and a return
+     * (rule 31 asked of our own default-setting). A mode change (2z1 - macOS
+     * restores a remembered mode before anything asks) moves it and is the
+     * reason this is not a one-shot at setup. */
+    if (!period_ns || period_ns == g_rb_2D5_seen_ns) { return; }
+    g_rb_2D5_seen_ns = period_ns;
+    g_rb_2D5_derives++;
+
+    if (!g_rb_2D5_named_sub) {
+        g_rb_2zd.sub = rb_retire_sub_clamp(rb_retire_sub_auto(period_ns));
+    }
+    if (!g_rb_2D5_named_tick) {
+        /* 0 is the refusal, and it means "native or faster" - 2zc measured a
+         * fine timer costing a third of the frame rate there, so that period
+         * gets the 2rn constant and not a derived value. Assigning the
+         * fallback rather than leaving the last mode's tick behind matters on
+         * the way BACK up the ladder. */
+        const uint32_t us = rb_retire_tick_us_auto(period_ns);
+        g_rb_2xg_us = us ? rb_tick_us_clamp(us) : RB_2XG_DEFAULT_US;
+    }
+}
+
 void rbgpu_retire_sub_set_2CF(uint32_t want) {
     g_rb_2zd.sub = rb_retire_sub_clamp(want);
+    g_rb_2D5_named_sub = 1u;
     g_rb_2CF_sets++;
 }
 uint32_t rbgpu_retire_sub_get_2CF(void) { return g_rb_2zd.sub; }
@@ -14577,6 +14622,7 @@ uint64_t rbgpu_retire_sub_sets_2CF(void) { return g_rb_2CF_sets; }
 
 void rbgpu_tick_us_set_2C4(uint32_t want) {
     g_rb_2xg_us = rb_tick_us_clamp(want);
+    g_rb_2D5_named_tick = 1u;
     g_rb_2C4_sets++;
 }
 uint32_t rbgpu_tick_us_get_2C4(void) { return g_rb_2xg_us; }
@@ -14839,6 +14885,12 @@ static bool rbgpu_2zd_retire_once(void) {
  * nothing and blocks on nothing (rule 31), exactly as the timer action did. */
 bool rbgpu_retire_from_vbl_2zd(uint64_t vbl_period_ns) {
     if (g_rb_2xg_stopped) { return false; }
+    /* 2D5: BEFORE the offer, because a DECLINED offer is exactly the
+     * sub-native mode where the derived TICK is the dial (2zf's mode gate
+     * hands those back to the timer). Deriving after the early return would
+     * leave 60 Hz on the native constant - the configuration 2C6/2C7/2C8
+     * measured as costing 2x the ladder. */
+    rbgpu_retire_auto_2D5(vbl_period_ns);
     if (!rb_retire_vbl_offer(&g_rb_2zd, mach_absolute_time(), vbl_period_ns)) {
         return false;
     }
@@ -14862,6 +14914,13 @@ bool rbgpu_retire_from_vbl_2zd(uint64_t vbl_period_ns) {
  * vblank thread_call is exactly the kind of cost this milestone exists to
  * remove. Rule 31 applies to our own instrument too. */
 void rbgpu_retire_publish_2zd(void) {
+    /* 2D5: say what was derived and what was named, so a boot can be read.
+     * `autons` is the period it derived FOR, which is the thing a wrong
+     * answer would be wrong about (rule 19: publish the input). */
+    rbgpu_diag_set_num("vblret_autons",  g_rb_2D5_seen_ns);
+    rbgpu_diag_set_num("vblret_autodrv", g_rb_2D5_derives);
+    rbgpu_diag_set_num("vblret_subnamed",  g_rb_2D5_named_sub);
+    rbgpu_diag_set_num("vblret_ticknamed", g_rb_2D5_named_tick);
     rbgpu_diag_set_num("vblret_src",   g_rb_2zd.src);
     rbgpu_diag_set_num("vblret_vbl",   g_rb_2zd.vblRetires);
     rbgpu_diag_set_num("vblret_timer", g_rb_2zd.timerRetires);
@@ -14957,8 +15016,16 @@ void rbgpu_schedtick_start_2xg(void) {
      * behaviour; tick_us_refused publishes a rejected value so the next boot
      * can tell "out of range" from "never parsed" (rule 14). */
     uint32_t tick_refused = 0;
-    if (!rbgpu_boot_argn_u32("rbgpuschedtickus", RB_2XG_MIN_US, RB_2XG_MAX_US,
-                             &g_rb_2xg_us, &tick_refused) && tick_refused) {
+    /* 2D5: a named tick is FINAL - the derivation never touches it again. A
+     * REFUSED value is not a named one: letting the refusal arm the flag
+     * would pin the whole boot to 6944 on a typo, which is the opposite of
+     * what rule 14's distinct codes are for. */
+    if (rbgpu_boot_argn_u32("rbgpuschedtickus", RB_2XG_MIN_US, RB_2XG_MAX_US,
+                            &g_rb_2xg_us, &tick_refused)) {
+        g_rb_2D5_named_tick = 1u;
+        rbgpu_log("2xg: rbgpuschedtickus=%u (named, so 2D5 will not derive "
+                  "one)", g_rb_2xg_us);
+    } else if (tick_refused) {
         rbgpu_log("2xg: rbgpuschedtickus=%u REFUSED (outside %u-%u us); "
                   "keeping %u us", tick_refused, (unsigned)RB_2XG_MIN_US,
                   (unsigned)RB_2XG_MAX_US, g_rb_2xg_us);
@@ -15028,8 +15095,9 @@ void rbgpu_schedtick_start_2xg(void) {
         if (rbgpu_boot_argn_u32("rbgpuretiresub", RB_RETIRE_SUB_MIN,
                                 RB_RETIRE_SUB_MAX, &want, &bad)) {
             g_rb_2zd.sub = rb_retire_sub_clamp(want);
-            rbgpu_log("2CF: %u retire occasions per vblank period",
-                      g_rb_2zd.sub);
+            g_rb_2D5_named_sub = 1u;   /* 2D5: a named value is final */
+            rbgpu_log("2CF: %u retire occasions per vblank period (named, so "
+                      "2D5 will not derive one)", g_rb_2zd.sub);
         } else if (bad) {
             rbgpu_diag_set_num("vblret_subrefuse", bad);
             rbgpu_log("2CF: rbgpuretiresub=%u is outside %u..%u - staying at "

@@ -669,6 +669,110 @@ int retire_tests(void)
         }
     }
 
+    /* ---- 2D5: ONE QUANTUM DERIVES BOTH MEASURED DEFAULTS ---------------
+     *
+     * The whole claim of 2D5 is that `sub` 4 at native and `tick` 2084 at
+     * 60 Hz are one constant seen twice. These two assertions are that claim,
+     * pinned to the periods the two boots actually reported, and they are the
+     * reason this is not a changed literal: break the constant and BOTH fail.
+     */
+    {
+        const uint64_t native = 6952507ull;   /* boot 424/426, measured */
+        const uint64_t hz60   = 16669443ull;  /* boot 413, measured */
+
+        /* 2D0 read `vblret_subns` 1738126 off the chip at sub 4. The
+         * derivation must reproduce the COUNT and the realised quantum. */
+        if (rb_retire_sub_auto(native) != 4u ||
+            (native / rb_retire_sub_auto(native)) != 1738126ull) {
+            printf("FAIL 2D5: native does not derive sub 4 / 1738126 ns "
+                   "(got %u / %llu)\n",
+                   rb_retire_sub_auto(native),
+                   (unsigned long long)(native / rb_retire_sub_auto(native)));
+            bad++;
+        }
+
+        /* 2C8's vbl/8 threshold, and 2CF already hosttests 2083680 as the
+         * 60 Hz value. The DERIVED tick must land on the measured 2084 us. */
+        if (rb_retire_sub_auto(hz60) != 8u ||
+            (hz60 / rb_retire_sub_auto(hz60)) != 2083680ull ||
+            rb_retire_tick_us_auto(hz60) != 2083u) {
+            printf("FAIL 2D5: 60 Hz does not derive 8 / 2083680 ns / 2083 us "
+                   "(got %u / %llu / %u)\n",
+                   rb_retire_sub_auto(hz60),
+                   (unsigned long long)(hz60 / rb_retire_sub_auto(hz60)),
+                   rb_retire_tick_us_auto(hz60));
+            bad++;
+        }
+
+        /* THE REALISED QUANTUM IS NEVER LARGER THAN THE TARGET. The constant
+         * is the slower of the two measured quanta and the division rounds
+         * the COUNT up, so every period must come out at or under it - that
+         * is what makes a never-measured mode safe rather than hopeful. */
+        {
+            uint64_t ps[6] = { 6952507ull, 10000000ull, 13333333ull,
+                               16669443ull, 20000000ull, 1000000ull };
+            unsigned i;
+            for (i = 0; i < 6u; i++) {
+                uint32_t occ = rb_retire_sub_auto(ps[i]);
+                uint64_t q = ps[i] / occ;
+                if (!occ) { printf("FAIL 2D5: zero occasions\n"); bad++; continue; }
+                /* The clamp at 8 is the one case that may exceed it, and it
+                 * must be exactly the case where 8 is not enough. */
+                if (q > RB_RETIRE_QUANTUM_NS && occ != RB_RETIRE_SUB_MAX) {
+                    printf("FAIL 2D5: period %llu quantum %llu over target "
+                           "with occ %u below the clamp\n",
+                           (unsigned long long)ps[i],
+                           (unsigned long long)q, occ);
+                    bad++;
+                }
+            }
+        }
+
+        /* A ZERO PERIOD IS PRE-2CF, BYTE FOR BYTE - the framebuffer did not
+         * say, so place nothing. This is the rule-38 A side: an old
+         * framebuffer passes no period and must not get a derived default. */
+        if (rb_retire_sub_auto(0ull) != 1u ||
+            rb_retire_tick_us_auto(0ull) != 0u ||
+            rb_retire_tick_auto_ok(0ull) != 0) {
+            printf("FAIL 2D5: a zero period does not fall back to pre-2CF\n");
+            bad++;
+        }
+
+        /* 2zc's REFUSAL: no derived tick at native or faster. -rbgpunoretirevbl
+         * at native is the dangerous combination and 2000 us cost -34 % there,
+         * so the derivation must decline and say so with a 0 rather than
+         * return a plausible 1738. */
+        if (rb_retire_tick_auto_ok(native) != 0 ||
+            rb_retire_tick_us_auto(native) != 0u ||
+            rb_retire_tick_us_auto(6000000ull) != 0u) {
+            printf("FAIL 2D5: a native period got a derived tick (2zc)\n");
+            bad++;
+        }
+        /* ...and the control, so that refusal cannot be a constant 0: just
+         * past the bound it must derive. */
+        if (rb_retire_tick_auto_ok(8000001ull) != 1 ||
+            rb_retire_tick_us_auto(8000001ull) == 0u) {
+            printf("FAIL 2D5: the tick refusal is unconditional\n");
+            bad++;
+        }
+
+        /* The derived sub must survive the setter it will be handed to, and
+         * `rb_retire_sub_active()` must accept it at both measured periods -
+         * a default that the activity gate then refuses is 2A9's shape. */
+        {
+            struct rb_retire r;
+            rb_retire_reset(&r, 1u);
+            r.src = RB_RETIRE_SRC_VBL;
+            r.sub = rb_retire_sub_clamp(rb_retire_sub_auto(native));
+            r.subPeriodNs = native;
+            if (r.sub != 4u || !rb_retire_sub_active(&r) ||
+                rb_retire_sub_period_ns(&r) != 1738126ull) {
+                printf("FAIL 2D5: the derived native default is not active\n");
+                bad++;
+            }
+        }
+    }
+
     printf("retire: the 2zd handover - unarmed decline, single handoff, the "
            "watchdog takeback, a non-advancing clock, role-dependent period "
            "and 200 interleaved frames, plus 2zf's mode gate, 2C2's drain clamp and 2C4's tick dial and 2CF's sub-vblank occasions and 2D0's split arm codes against boot 424's ladder%s\n", bad ? " FAILED" : ": passed");

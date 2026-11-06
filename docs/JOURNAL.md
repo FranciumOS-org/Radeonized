@@ -57547,3 +57547,117 @@ boot's interleaved `subrate.sh`. What 2D4 adds is that the reboot is now cheap
 to interpret in the other direction too - **`sub` resets to 1 on boot, so the
 next boot is a blind A side the user will feel immediately**, which is a
 control nobody has to run on purpose.
+
+## 2D5 - THE DEFAULT IS A QUANTUM IN TIME, AND ONE CONSTANT DERIVES BOTH
+
+2D4's control ran and it ORDERED: the user reports the lag **returns at
+`sub` 1 and is gone at 4**, same session, same three paths. That is rule 45's
+"own instrument, control and repeat" satisfied on the deliverable itself -
+the thing brightness never had across four milestones and ten boots - and it
+is what makes a default change arguable at all. The user then asked for both
+measured values to become defaults: `sub` 4 at native, and 2C8's tick at
+60 Hz.
+
+**THEY ARE NOT TWO VALUES. They are one quantum measured twice:**
+
+```
+  sub 4  at native  6952507 / 4 = 1738126 ns   (2D0, read off the chip as
+                                                `vblret_subns`)
+  tick   at 60 Hz  16669443 / 8 = 2083680 ns   (2C8's vbl/8, seven-tick sweep)
+```
+
+1738 us and 2084 us at refreshes **2.4x apart**. 2C8's own law is
+`spread = 8.0 x tick` with `spread/tick` 7.996 +- 0.037 over a 6x range, and
+`tick` there is an **absolute** quantum - the spread never knew what the
+refresh was. So the quantity to hold fixed is the quantum and the occasion
+count is whatever the live period needs:
+
+```
+  occasions = ceil(period / 2084000), clamped 1..8
+```
+
+**which returns 4 at 6952507 and 8 at 16669443 - both measured defaults out of
+one constant, neither fitted to.** The hosttest pins both periods and the
+realised quanta (1738126 and 2083680 exactly), and the **break-it check moves
+the constant to 3000000 and BOTH assertions fail** (sub 3 / 2317502 and 6 /
+2778240), so the constant is shown load-bearing rather than asserted - which
+is what 2A1's invented 2.0x threshold and 2B0's bucket 3 cost.
+
+**This is 2C8's own open design question, answered.** It said: "the real
+design question - whether the default should be a function of the live vblank
+period rather than a constant - deserves its own milestone, not a changed
+literal." A changed literal is what the user asked for and it would have been
+wrong twice over: two literals for two modes, both silent on every OTHER
+period this kext can run. 2z0 builds a ladder from the panel (eight modes on
+boot 258) and 2BD read a **100 Hz** external sink - that mode gets 5 occasions
+at a 2000 us quantum with nobody measuring it, and a 48 Hz ladder entry gets
+the clamp at 8 rather than a quantum derived off the wrong period.
+
+**The constant is the 60 Hz value, not the native one, on purpose.** It is the
+SLOWER of the two measured quanta, so the derivation can only ever place
+fewer occasions than the fastest configuration measured good; rounding the
+count UP then makes the realised quantum smaller than the target, never
+larger. The hosttest asserts that over six periods, with the clamp at 8 as the
+one permitted exception and a check that it IS the clamp.
+
+**2zc'S REFUSAL IS KEPT AND IS THE ONE PLACE THE DERIVATION DECLINES.**
+`-rbgpunoretirevbl` at native runs the timer at the native period, where 2zc
+measured 2000 us at **51.33 sets/s against 6944's 74.6, -34 %**. 2C7 removed
+the story that linked that to the 60 Hz sweep but not the measurement, so
+`rb_retire_tick_auto_ok()` refuses any period at or under 8 ms and
+`rb_retire_tick_us_auto()` returns **0** there - a refusal a caller must
+reject, not a plausible 1738 (rule 14). Tested both sides of the bound with a
+control, so the refusal cannot be a constant 0.
+
+**A NAMED VALUE IS FINAL, and this is not politeness.** `rbgpuretiresub=`,
+`rbgpuschedtickus=`, `subret` and `tickset` each set a flag the derivation
+then never overrides. Without it `subret 1` would be undone by the next
+vblank: the dial would report success and the mechanism would come straight
+back, so **the A side of every future A/B would be unreachable** - 2A3's
+defect with the arrow reversed. 2D4's control is the measurement that
+attributed this effect at all and it has to keep working. A **REFUSED**
+boot-arg does not arm the flag, or a typo would pin the boot to 6944.
+
+**Placed BEFORE the offer, which is a correctness point and not a style
+one:** a DECLINED `rb_retire_vbl_offer()` is exactly the sub-native mode where
+the derived TICK is the dial (2zf's mode gate hands those back to the timer),
+so deriving after the early return would leave 60 Hz on the native constant -
+the configuration 2C6/2C7/2C8 measured as costing 2x the ladder. It runs on
+the vblank thread_call, so the steady state is two compares and a return, and
+it re-derives on a period CHANGE rather than once at setup because 2z1 found
+macOS restores a remembered mode through `setDisplayMode` before anything
+asks.
+
+Published so a boot can be read: `vblret_autons` (the period it derived FOR -
+the input a wrong answer would be wrong about), `vblret_autodrv`,
+`vblret_subnamed`, `vblret_ticknamed`.
+
+**WHAT IS STILL NOT MEASURED, AND IT IS THE REAL COST OF DEFAULTING THIS:
+IDLE-STATE RESIDENCY.** A default boot now arms interior thread_calls at
+576/s at native where it previously left the timer demoted to the 50 ms
+watchdog. 2C8 looked at this and said so honestly: `idle %` 97.5-98.4 across
+144 to 720 occasions/s with `sys` DECREASING, which is "the instrument cannot
+resolve what it was pointed at", NOT "no CPU cost" - and the cost that matters
+on a laptop is a timer at 576/s preventing deep package idle, which `idle %`
+cannot see at all. **`powermetrics` is that instrument and has still never
+been run.** This is the one argument against the default that no counter in
+this journal addresses, and it is the user's machine and their standing
+concern.
+
+**RULE 44 IS STILL UNSATISFIED AND THE DEFAULT IS CHANGED ANYWAY - stated
+plainly rather than buried.** `sub` 4 rests on boot 424 (ladder, first paint)
+and boot 426 (rate interleaved, the human observation and its control); the
+60 Hz tick rests on 2C7/2C8's sweeps on one boot, though seven points at
+sd 0.5 % over a 6x range is far stronger than a pair. **The user asked for it
+after running the control themselves**, the failure mode is "slower" rather
+than a flicker or a panic, and the reversal is one boot-arg
+(`rbgpuretiresub=1`) or one runtime command (`subret 1`). 2A4 and 2B2 each
+cost a milestone for taking good news on one boot - the difference here is
+that the mechanism predicted the result's shape in advance (2C2 named the
+affected workload class, 2D0 hit a 4.0x prediction) and the human observation
+has a control. **If the next boot feels laggy with no dial touched, that is
+rule 44 biting and the derivation is what to suspect first.**
+
+Plugin **9FE31A5A**. Framebuffer **2CE724E1, UNCHANGED and verified so** - the
+additions are uncalled inlines there, the same reason 2D0 was plugin-only.
+**Plugin-only reinstall.**

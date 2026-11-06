@@ -334,6 +334,96 @@ static inline uint32_t rb_retire_sub_clamp(uint32_t want)
     return want;
 }
 
+
+/* 2D5: THE DEFAULT IS A QUANTUM IN TIME, NOT A COUNT PER PERIOD.
+ *
+ * Two values were measured and they are the SAME NUMBER expressed twice:
+ *
+ *   `sub` 4 at native   - 6952507 / 4 = 1738126 ns  (2D0, boot 424: this is
+ *                         `vblret_subns` read back off the chip, and 2D2/2D3
+ *                         measured +94 % and 2D4 is the user seeing it)
+ *   `tick` 2084 at 60 Hz - 16669443 / 8 = 2083680 ns (2C8's `vbl/8`, the
+ *                         threshold where the eight-queue spread becomes one
+ *                         frame; 2C7/2C8 swept seven ticks to get it)
+ *
+ * 1738 us and 2084 us at refreshes 2.4x apart. That is not two constants -
+ * 2C8's law is `spread = 8.0 x tick` with `spread/tick` 7.996 +- 0.037 over a
+ * 6x range, and `tick` there is an ABSOLUTE quantum. The spread never knew
+ * what the refresh was. So the quantity to hold fixed is the quantum, and the
+ * occasion count per period is whatever that takes at the live period:
+ *
+ *   occasions = ceil(period / RB_RETIRE_QUANTUM_NS), clamped to 1..8
+ *
+ * which returns **4** at 6952507 and **8** at 16669443 - both measured values
+ * out of one constant, neither fitted to. That is 2C8's "the real design
+ * question - whether the default should be a function of the live vblank
+ * period rather than a constant", answered, and it is why this is not a
+ * changed literal: a 100 Hz external sink (2BD's MSI MP2412C) gets 5
+ * occasions at a 2000 us quantum without anyone measuring that mode, and a
+ * 48 Hz ladder entry gets 8 (the clamp) rather than a quantum derived off the
+ * wrong period.
+ *
+ * The constant itself is 2C8's 60 Hz value and NOT the native one, on purpose:
+ * it is the SLOWER quantum of the two, so the derivation can only ever place
+ * fewer occasions than the fastest configuration measured good. Rounding up
+ * then makes the realised quantum smaller than the target, never larger, so
+ * the ladder is at least as good as the measurement at every period.
+ *
+ * WHAT THIS DOES NOT AUTHORISE, and it is the one dangerous combination this
+ * card names: `-rbgpunoretirevbl` at NATIVE runs the timer at the native
+ * period, and 2zc measured 2000 us there at 51.33 sets/s against 6944's 74.6,
+ * **-34 %**. 2C7 removed the story that linked that to the 60 Hz sweep but
+ * not the measurement, so `rb_retire_tick_auto_ok()` refuses to derive a tick
+ * for any period short enough to be native. Below native the derivation is in
+ * the regime 2C6/2C7/2C8 actually measured.
+ */
+#define RB_RETIRE_QUANTUM_NS  2084000ull
+
+/* The shortest period for which a DERIVED tick is refused: anything at or
+ * under this is "native or faster", where 2zc measured a fine timer costing a
+ * third of the frame rate. 8 ms covers 125 Hz and up; the 100 Hz sink and
+ * every ladder entry below it sit above it. */
+#define RB_RETIRE_TICK_AUTO_MIN_NS  8000000ull
+
+/* How many retire occasions one period of `period_ns` should hold.
+ *
+ * A zero period is "the framebuffer did not say", which must read as 1 - the
+ * pre-2CF behaviour, byte for byte - and never as a division by zero. */
+static inline uint32_t rb_retire_sub_auto(uint64_t period_ns)
+{
+    uint64_t occ;
+    if (!period_ns) { return 1u; }
+    occ = (period_ns + (RB_RETIRE_QUANTUM_NS - 1ull)) / RB_RETIRE_QUANTUM_NS;
+    if (occ < 1ull) { occ = 1ull; }
+    if (occ > (uint64_t)RB_RETIRE_SUB_MAX) { occ = (uint64_t)RB_RETIRE_SUB_MAX; }
+    return (uint32_t)occ;
+}
+
+/* 1 when a tick may be DERIVED for this period. Zero period: no (nothing is
+ * sayable). Native or faster: no (2zc). */
+static inline int rb_retire_tick_auto_ok(uint64_t period_ns)
+{
+    if (!period_ns) { return 0; }
+    return (period_ns > RB_RETIRE_TICK_AUTO_MIN_NS) ? 1 : 0;
+}
+
+/* The timer period, in microseconds, that puts this period's quantum at the
+ * target. Returns 0 when the derivation is refused, so a caller that forgets
+ * `rb_retire_tick_auto_ok()` gets a value it must reject rather than a
+ * plausible one (rule 14: the refusal is distinguishable). */
+static inline uint32_t rb_retire_tick_us_auto(uint64_t period_ns)
+{
+    uint64_t us;
+    uint32_t occ;
+    if (!rb_retire_tick_auto_ok(period_ns)) { return 0u; }
+    occ = rb_retire_sub_auto(period_ns);
+    if (!occ) { return 0u; }
+    us = (period_ns / (uint64_t)occ) / 1000ull;
+    if (us < (uint64_t)RB_TICK_US_MIN) { return RB_TICK_US_MIN; }
+    if (us > (uint64_t)RB_TICK_US_MAX) { return RB_TICK_US_MAX; }
+    return (uint32_t)us;
+}
+
 /* 1 when interior occasions should be placed at all.
  *
  * Every term is a refusal someone has paid for. `armed`/`src` keep this inert
