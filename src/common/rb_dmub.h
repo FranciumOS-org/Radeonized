@@ -842,6 +842,56 @@ static inline void rb_dmub_build_query_caps(uint8_t *buf)
                           RB_DMUB_HDR_RET_STATUS);
 }
 
+/* DMUB_CMD__VBIOS / DOMAIN_CONTROL - 2DC.
+ *
+ * dmub_cmd.h: `DMUB_CMD__VBIOS` = 128 and `DMUB_CMD__VBIOS_DOMAIN_CONTROL` =
+ * 28. The payload is `struct dmub_rb_cmd_domain_control_data`, which that
+ * header defines completely:
+ *
+ *     uint8_t inst : 6;        DOMAIN instance to control
+ *     uint8_t power_gate : 1;  1 = power gate, 0 = power up
+ *     uint8_t reserved[3];
+ *
+ * so the payload is FOUR bytes and both fields live in the first one. That
+ * completeness is the reason this sub-type was chosen over the transmitter
+ * (rb_pg.h says why at length): no atom enum, no ROM-revision-dependent
+ * struct, nothing recalled.
+ *
+ * NO ret_status. It is a command, not a query - 2D9's whole point is that
+ * five of the seven VBIOS sub-types have no reply and their product is a
+ * register change, so setting the bit would ask for an answer the ABI never
+ * promised and then read its absence as a failure (rule 14).
+ *
+ * Built byte by byte like every other command here, so no struct layout is
+ * trusted across the boundary to firmware, and the bitfield packing is
+ * written out explicitly rather than left to a compiler's choice. */
+#define RB_DMUB_CMD_VBIOS                 128u
+#define RB_DMUB_CMD_VBIOS_DOMAIN_CONTROL   28u
+#define RB_DMUB_DOMAIN_PAYLOAD              4u
+#define RB_DMUB_DOMAIN_INST_BITS         0x3fu   /* inst is 6 bits */
+#define RB_DMUB_DOMAIN_GATE_BIT          0x40u   /* power_gate is bit 6 */
+
+static inline int rb_dmub_domain_inst_valid(uint32_t inst)
+{
+    return inst <= RB_DMUB_DOMAIN_INST_BITS ? 1 : 0;
+}
+
+static inline void rb_dmub_build_domain_control(uint8_t *buf, uint32_t inst,
+                                                uint32_t gate)
+{
+    uint32_t i;
+
+    for (i = 0; i < RB_DMUB_CMD_SIZE; i++) { buf[i] = 0u; }
+
+    rb_dmub_put32(buf, 0, rb_dmub_hdr(RB_DMUB_CMD_VBIOS,
+                                      RB_DMUB_CMD_VBIOS_DOMAIN_CONTROL,
+                                      RB_DMUB_DOMAIN_PAYLOAD));
+
+    buf[4] = (uint8_t)((inst & RB_DMUB_DOMAIN_INST_BITS) |
+                       (gate ? RB_DMUB_DOMAIN_GATE_BIT : 0u));
+    /* buf[5..7] are reserved[3] and stay zero. */
+}
+
 /* What the slot read back after the ack MEANS.
  *
  * The four answers are deliberately separate, because they point at four

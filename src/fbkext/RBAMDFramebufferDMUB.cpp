@@ -78,6 +78,19 @@ void RBAMDFramebuffer::dmubInit(void)
     dmubScanSlots = 0;
     dmubScanPlaus = 0;
     dmubScanAbm = 0;
+    dmubScanBad = 0;
+    dmubScanWin = -1;
+    /* 2DC */
+    dmubDomSends = 0;
+    dmubDomRefuse = 0;
+    dmubDomInst = 0;
+    dmubDomGate = 0;
+    dmubDomMoved = 0;
+    dmubDomRan = 0;
+    pgSamples = 0;
+    for (unsigned i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
+        pgStatus[i] = 0; pgConfig[i] = 0; pgBefore[i] = 0; pgAfter[i] = 0;
+    }
     dmubScanBytes = 0;
     dmubSendsOk = 0;
     dmubSendsRefused = 0;
@@ -460,7 +473,139 @@ bool RBAMDFramebuffer::dmubSelect(uint32_t n)
     dmubAddrKind = dmubCand[n].kind;
     dmubLocRefuse = RB_DMUB_LOC_OK;
     dmubWin = (int)n;
+
+    /* 2DA addendum: RE-READ the window we just pointed at.
+     *
+     * The scan, the signature and the ring dump were computed once in the
+     * locate path with dmubWin == 4 and never recomputed here, so after a
+     * `win 7` the tool printed "mailbox REGION4" beside CW4's signature and
+     * CW4's all-zero dump - two numbers about a window no longer being
+     * pushed into, in the same screen as the heading that contradicted them.
+     * Boot 279 hit the identical contradiction through a different defect
+     * (RBAMDFramebufferDMUB.cpp's out-of-bounds dmubWinScan index); that one
+     * was fixed and this half was not. **Rule 31 for a DERIVED reading: a
+     * value computed at setup is stale for every dial that can move
+     * afterwards** - 2A3's defect in a scan rather than in a scalar.
+     *
+     * This runs from setProperties, never the frame path, so the IOMalloc in
+     * dmubScan() is allowed (rule 31 not engaged). */
+    {
+        uint32_t run = 0, bad = 0, abm = 0;
+        const uint32_t slots = dmubCap / RB_DMUB_CMD_SIZE;
+
+        dmubScanRun(dmubRing, dmubCap, &run, &bad, &abm);
+        dmubScanSlots = slots;
+        dmubScanPlaus = run;
+        dmubScanBad   = bad;
+        dmubScanAbm   = abm;
+        dmubScanBytes = dmubCap;
+        dmubSigOk = rb_dmub_sig_ok(run, bad, slots) ? 1u : 0u;
+        dmubScanWin = (int)n;        /* WHICH window these four describe */
+        dmubScan();                  /* republish RBFBDmubRingDump */
+    }
     return true;
+}
+
+/* 2DC: the DOMAIN power-gating words, read-only.
+ *
+ * Four statuses and four configs out of the aperture hubpRegs already maps -
+ * dword 0x80..0x87, BASE_IDX 2, far below rb_hpd_dw_max() - so there is no
+ * new mapping, no aperture growth and no write. Unarmed: a boot reads its
+ * baseline whether or not the sender is armed, which is 2BA's division
+ * between a free survey and an opt-in transaction.
+ *
+ * pgSamples counts the reads, because four zero words from a block that was
+ * never sampled and four zero words read off the chip are the same bytes
+ * (rule 14). */
+void RBAMDFramebuffer::pgSample(uint32_t *status, uint32_t *config)
+{
+    if (!hubpRegs || !status || !config) { return; }
+
+    for (uint32_t i = 0; i < RB_PG_DOMAIN_COUNT; i++) {
+        status[i] = hubpRegs[rb_pg_status_dw(i)];
+        config[i] = hubpRegs[rb_pg_config_dw(i)];
+    }
+    pgSamples++;
+}
+
+/* 2DC: one DOMAIN_CONTROL command. */
+uint32_t RBAMDFramebuffer::dmubSendDomain(uint32_t inst, uint32_t gate)
+{
+    uint8_t cmd[RB_DMUB_CMD_SIZE];
+
+    if (!dmubDomArmed) { return dmubDomRefuse = 20u; }
+    if (!rb_dmub_domain_inst_valid(inst)) { return dmubDomRefuse = 21u; }
+
+    rb_dmub_build_domain_control(cmd, inst, gate);
+    const uint32_t rc = dmubPush(cmd);
+    if (rc == 0u) { dmubDomSends++; }
+    dmubDomRefuse = rc;
+    return rc;
+}
+
+/* 2DC: THE WHOLE EXPERIMENT IN ONE CALL - sample, send, sample.
+ *
+ * Deliberately not three keys. Four sessions in a row were spent on a null
+ * whose cause was state that moved between the arm and the action, and the
+ * last two were the ring selector: once because the default points at the
+ * window this project's own source rules out, and once because a reboot
+ * reset it and nothing in the handover checked the boot. An experiment whose
+ * arm and action are one call cannot be run in the wrong order, cannot be
+ * split by a reboot, and cannot read a stale published value as its own
+ * precondition (rule 34, made structural instead of advisory).
+ *
+ * The verdict is the DIFFERENCE across the send, which needs no claim about
+ * the polarity of DOMAIN_PGFSM_PWR_STATUS - a field whose meaning lives in a
+ * Linux file this project has not vendored. rb_pg.h says why at length.
+ *
+ * Refusal codes are distinct (rule 14): 20 not armed, 21 inst out of the
+ * 6-bit field, 22 no register aperture, 23 the named instance is refused by
+ * rb_pg_sel_refuse, 24 no gated domain exists so the test is NOT AVAILABLE
+ * on this boot, and anything under 20 is dmubPush's own. */
+uint32_t RBAMDFramebuffer::dmubDomainExperiment(uint32_t inst, uint32_t gate)
+{
+    if (!dmubDomArmed) { return dmubDomRefuse = 20u; }
+    if (!hubpRegs)     { return dmubDomRefuse = 22u; }
+
+    const uint32_t sel = rb_pg_sel_refuse(inst);
+    if (sel != RB_PG_SEL_OK) {
+        dmubDomRefuse = 23u;
+        dmubDomInst = inst;
+        return 23u;
+    }
+
+    pgSample(pgBefore, pgConfig);
+
+    /* A power-UP asked of a domain already in the reference state cannot
+     * show anything, and its null would be unreadable (rule 39). Refuse
+     * rather than measure where the effect cannot appear. */
+    if (!gate && rb_pg_like_reference(pgBefore[inst],
+                                      pgBefore[RB_PG_DOMAIN_REFERENCE])) {
+        dmubDomRefuse = 24u;
+        dmubDomInst = inst;
+        return 24u;
+    }
+
+    dmubDomInst = inst;
+    dmubDomGate = gate;
+
+    const uint32_t rc = dmubSendDomain(inst, gate);
+    if (rc != 0u) { return rc; }
+
+    /* The power-gating FSM is not instantaneous; Linux waits on this field
+     * with a 1 us poll and a 1000-iteration bound in the path that is not
+     * vendored here, so the bound is reproduced rather than the polarity.
+     * A command that executed slowly must not read as one that did nothing. */
+    for (uint32_t spin = 0; spin < 1000u; spin++) {
+        pgSample(pgAfter, pgConfig);
+        if (rb_pg_moved_mask(pgBefore, pgAfter) != 0u) { break; }
+        IODelay(1);
+    }
+
+    dmubDomMoved = rb_pg_moved_mask(pgBefore, pgAfter);
+    dmubDomRan++;
+    dmubDomRefuse = 0u;
+    return 0u;
 }
 
 void RBAMDFramebuffer::dmubTeardown(void)
@@ -735,6 +880,43 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDmubScanSlots", (uint64_t)dmubScanSlots, 32);
     setProperty("RBFBDmubScanPlaus", (uint64_t)dmubScanPlaus, 32);
     setProperty("RBFBDmubScanAbm", (uint64_t)dmubScanAbm, 32);
+    setProperty("RBFBDmubScanBad", (uint64_t)dmubScanBad, 32);
+    /* WHICH window the four scan numbers above describe. Published because
+     * 2DA's screen showed CW4's signature under a REGION4 heading and the
+     * only way to read that output correctly was to know the scan had not
+     * been recomputed (rule 39: an instrument must say which configuration
+     * its reading comes from). -1 means the locate path's own window. */
+    setProperty("RBFBDmubScanWin", (uint64_t)(int64_t)dmubScanWin, 32);
+
+    /* 2DC: DOMAIN_CONTROL and its readback. */
+    setProperty("RBFBDmubDomArmed", dmubDomArmed);
+    setProperty("RBFBDmubDomSends", (uint64_t)dmubDomSends, 32);
+    setProperty("RBFBDmubDomRan", (uint64_t)dmubDomRan, 32);
+    setProperty("RBFBDmubDomRefuse", (uint64_t)dmubDomRefuse, 32);
+    setProperty("RBFBDmubDomInst", (uint64_t)dmubDomInst, 32);
+    setProperty("RBFBDmubDomGate", (uint64_t)dmubDomGate, 32);
+    setProperty("RBFBDmubDomMoved", (uint64_t)dmubDomMoved, 32);
+    setProperty("RBFBPgSamples", (uint64_t)pgSamples, 32);
+    {
+        /* Raw beside any summary, which has paid for itself four times now
+         * (2B0, 2B4, 2B9, 2DA): every verdict here rests on a comparison
+         * against DOMAIN0, and if that reasoning is ever wrong the words
+         * themselves must still be in the registry to re-read. Published at
+         * 64 bits because a 32-bit OSNumber with bit 31 set renders as a
+         * sign-extended decimal (2B4), and PGFSM_PWR_STATUS is bits 31:30 -
+         * so every one of these words can have bit 31 set. */
+        pgSample(pgStatus, pgConfig);
+        OSData *st = OSData::withBytes(pgStatus, sizeof(pgStatus));
+        if (st) { setProperty("RBFBPgStatus", st); st->release(); }
+        OSData *cf = OSData::withBytes(pgConfig, sizeof(pgConfig));
+        if (cf) { setProperty("RBFBPgConfig", cf); cf->release(); }
+        OSData *bf = OSData::withBytes(pgBefore, sizeof(pgBefore));
+        if (bf) { setProperty("RBFBPgBefore", bf); bf->release(); }
+        OSData *af = OSData::withBytes(pgAfter, sizeof(pgAfter));
+        if (af) { setProperty("RBFBPgAfter", af); af->release(); }
+        setProperty("RBFBPgCandidate",
+                    (uint64_t)(int64_t)rb_pg_candidate(pgStatus), 32);
+    }
     setProperty("RBFBDmubScanBytes", (uint64_t)dmubScanBytes, 32);
     /* The writes. */
     setProperty("RBFBDmubSendsOk", dmubSendsOk, 64);

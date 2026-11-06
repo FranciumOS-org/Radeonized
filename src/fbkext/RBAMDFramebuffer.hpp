@@ -39,6 +39,7 @@ extern "C" {
 #include "rb_hubp.h"
 #include "rb_retire.h"
 #include "rb_dmub.h"
+#include "rb_pg.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -563,6 +564,32 @@ private:
     uint32_t           dmubGpintSends, dmubGpintRefuse;
     uint32_t           dmubGpintSent, dmubGpintBack, dmubGpintAcked;
     uint32_t           dmubGpintSpins;
+
+    /* 2DC: DOMAIN_CONTROL, the one remaining test of whether this firmware
+     * EXECUTES an inbox command (2DB retired every other instrument), and
+     * the DOMAIN power-gating words that are its readback.
+     *
+     * The whole experiment is ONE setProperties call - sample, send, sample -
+     * because four sessions in a row were lost to state that drifted between
+     * the arm and the action: the wrong physical port (2D8), the wrong
+     * firmware MUX mode (2D9), the wrong ring window (2DA), and that window
+     * again after a reboot reset it (2DA addendum 2). A handover that needs
+     * two commands in the right order with nothing rebooting in between is a
+     * handover that will be run wrong. */
+    bool               dmubDomArmed;     /* -rbgpufbdmubdom */
+    uint32_t           dmubDomSends;
+    uint32_t           dmubDomRefuse;    /* the last refusal's code */
+    uint32_t           dmubDomInst;      /* the instance last asked for */
+    uint32_t           dmubDomGate;      /* ...and whether it was a gate */
+    uint32_t           dmubDomMoved;     /* rb_pg_moved_mask's bitmask */
+    uint32_t           dmubDomRan;       /* experiments that reached a send */
+    uint32_t           pgStatus[RB_PG_DOMAIN_COUNT];
+    uint32_t           pgConfig[RB_PG_DOMAIN_COUNT];
+    uint32_t           pgBefore[RB_PG_DOMAIN_COUNT];
+    uint32_t           pgAfter[RB_PG_DOMAIN_COUNT];
+    uint32_t           pgSamples;        /* so a zeroed sample is not a read */
+    uint32_t           dmubScanBad;      /* implausible slots, published apart */
+    int                dmubScanWin;      /* WHICH window the scan describes */
     uint32_t           dmubScratch0, dmubScratch7, dmubDataout;
     uint32_t           dmubScratch0Pre, dmubScratch7Pre;
     /* 2zs: every candidate window, mapped and selectable. INBOX1_BASE_ADDRESS
@@ -905,6 +932,13 @@ private:
     uint32_t dmubSendPipe(void);
     uint32_t dmubSendCaps(void);
     uint32_t dmubGpint(uint32_t code);
+    /* 2DC. pgSample is read-only and runs UNARMED, so a boot can read the
+     * baseline without arming anything (2BA's shape: the survey is free, the
+     * transaction is opt-in). dmubDomainExperiment is the armed half and is
+     * the whole test in one call. */
+    void     pgSample(uint32_t *status, uint32_t *config);
+    uint32_t dmubSendDomain(uint32_t inst, uint32_t gate);
+    uint32_t dmubDomainExperiment(uint32_t inst, uint32_t gate);
     bool dmubSelect(uint32_t n);
     void     dmubPublish(void);
     /* 2x3: follow the compositor's swap chain at vblank rate instead of only

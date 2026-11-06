@@ -58511,3 +58511,129 @@ at all. The panel's own PHY is never named.
 NOT PROPOSED: sweeping windows 0/1/3/5/6 with the backlight. With ABM
 uninitialised that sweep returns five nulls that mean nothing, which is
 exactly the mistake this milestone just finished paying for.
+
+================================================================================
+2DC  THE EXECUTION TEST, BUILT: DMUB_CMD__VBIOS / DOMAIN_CONTROL WITH A
+     REGISTER FOR A READBACK. Hosttested, NOT RUN - no boot has sent one.
+================================================================================
+
+2DB ended with four instruments and no answer to "does this firmware EXECUTE
+an inbox command": the caps query is a query and answers at no window; an ack
+is RPTR advancing over whatever the slot held; the ring read-back only says our
+own bytes stuck; and the ABM backlight is a no-op whenever ABM was never
+initialised, which is the expected state under a driver that does not use it.
+2D9's finding is what is left - five of the seven `DMUB_CMD__VBIOS` sub-types
+have no reply and their product is a REGISTER CHANGE - so the instrument has to
+be a register.
+
+WHY NOT THE TRANSMITTER, WHICH IS WHAT I SET OUT TO BUILD. It looked strictly
+better: it is the first real bring-up step for the external display rather than
+a detour. **It is not writable from what is in the tree.** Reading
+`command_table2.c` (vendored) instead of recalling it:
+  - `init_transmitter_control` chooses between TWO payload layouts on the
+    **atom BIOS command-table revision read from ROM** - crev 6 -> v1_6,
+    crev 7 -> v1_7 - **not** on the DCN version. This project cannot read that
+    ROM, so which struct this firmware expects is not derivable.
+  - the `action` field is `ATOM_TRANSMITER_ACTION_xxx`, and those values appear
+    in `dmub_cmd.h` only inside the words of a comment. Nothing vendored
+    defines them.
+Writing it would mean recalling a struct layout AND two constants, which is
+2BA's "every constant is read, not recalled" and rule 17's mirror. **Stopped
+before the first line of code, by reading the method rather than the offsets -
+rule 46 doing its job prospectively for once.**
+
+DOMAIN_CONTROL instead, and it is better on every axis that matters here:
+  - **the payload is complete in the vendored header**:
+    `struct dmub_rb_cmd_domain_control_data { uint8_t inst : 6;
+     uint8_t power_gate : 1; uint8_t reserved[3]; }` - four bytes, both fields
+    in the first. No atom table behind it, no ROM revision, nothing recalled.
+  - **the readback already exists in an aperture already mapped**:
+    `regDOMAIN0_PG_CONFIG` 0x0080 / `_PG_STATUS` 0x0081, stride 2, BASE_IDX 2 -
+    the base the OTG, HUBP, HPD and AUX reads come from, and dword 0x80 is far
+    below `rb_hpd_dw_max()`. **No new mapping, no aperture growth, no write
+    surface for the readback, and no setter.**
+  - **a power-UP takes nothing away.**
+  - **DOMAIN0 is a positive control inside the sample**, because it is the
+    pipe scanning the panel.
+
+THE POLARITY IS DELIBERATELY NOT WRITTEN DOWN, AND THAT IS THE DESIGN.
+Whether `DOMAIN_PGFSM_PWR_STATUS` reads 0 or 2 for "powered" is decided in
+Linux's `dcn20_hwseq.c`, which is NOT vendored - so it cannot be established
+from the tree, and recalling it is how a backwards verdict gets printed
+confidently. It is not needed twice over: DOMAIN0 is powered by observation,
+so its own value DEFINES powered and every other domain is classified against
+it (2B8's reference-instance method, applied before the fact); and the verdict
+is a DIFFERENCE across one send, which no polarity enters. The hosttest
+exercises BOTH polarities and reaches the identical conclusion under each.
+
+THE WHOLE EXPERIMENT IS ONE `setProperties` CALL - sample, send, sample - AND
+THAT IS THE REAL LESSON OF THE LAST FOUR SESSIONS. Each of 2D8, 2D9, 2DA and
+2DA addendum 2 was a null whose cause was state that moved between the arm and
+the action: the wrong physical port, the wrong firmware MUX mode, the wrong
+ring window, and that window again after a reboot silently reset it. Every one
+was a handover needing two things true at once that checked one. **Rule 34 made
+structural instead of advisory: an experiment that is a single call cannot be
+run out of order, cannot be split by a reboot, and cannot mistake a stale
+published value for its own precondition.** `dmubbl dom` takes no setup and
+depends on nothing surviving.
+
+Refusals are distinct codes (rule 14): 20 not armed, 21 inst outside the 6-bit
+field, 22 no aperture, 23 the instance is refused (DOMAIN0 by name), **24 no
+domain differs from DOMAIN0, so the test is NOT AVAILABLE on this boot** -
+which is rule 39 enforced in code: a power-up asked of a domain already in the
+reference state cannot show anything, so it is refused rather than measured.
+The verdict `RBFBDmubDomMoved` is a BITMASK, not a count, so two changes cannot
+cancel and "which domain" stays answerable.
+The tool refuses to pass `power_gate = 1` at all; the test only needs a
+power-up, and powering a display domain DOWN is the one direction in this
+family that can take something away.
+
+ALSO FIXED HERE (2DA addendum's defect): `dmubSelect()` now RE-READS the window
+it just pointed at - scan, signature and ring dump - and publishes
+`RBFBDmubScanWin` saying which window those four numbers describe. They were
+computed once in the locate path with `dmubWin` 4 and never recomputed, which
+is why a `win 7` run printed "mailbox REGION4" above CW4's signature and CW4's
+all-zero dump. Boot 279 hit the same contradiction through a different,
+since-fixed defect. **Rule 31 for a DERIVED reading: a value computed at setup
+is stale for every dial that can move afterwards** - 2A3 in a scan rather than
+in a scalar. `RBFBDmubScanBad` is published apart, since 2DA's whole REGION4
+argument rests on `bad == 0` and a summary that merges it cannot carry that.
+
+A HOSTTEST CASE THAT PASSED FOR THE WRONG REASON, caught by the break-it check
+and worth recording because it is 2BC's lesson repeating. I asserted that
+`rb_pg_candidate()` never returns the reference domain, and deleting the
+`continue` that skips it changed nothing: **the reference is compared against
+ITSELF, so it always matches and could never be returned.** The branch is
+structurally unreachable by value and the test was vacuous. Replaced with the
+PROPERTY that makes it unreachable, plus the guard that does the real work
+(`rb_pg_sel_refuse`), which fails when broken. Four guards were broken
+deliberately - the register stride, the gate-bit position, the DOMAIN0 refusal
+and the moved-mask verdict - and all four produced FAILs; `error:` was grepped
+alongside `FAIL` (2BC's second instance).
+
+BUILD: framebuffer **62EE2CDC** (was 2CE724E1), zero warnings, hosttests pass,
+plugin untouched - only `src/fbkext` includes `rb_dmub.h`/`rb_pg.h`.
+
+AND A REFINEMENT TO RULE 15, found incidentally and NOT fully established.
+This tree's plugin builds to **457E7DEB** while the RUNNING plugin is
+**9FE31A5A**, with no plugin or `src/common` commit since 2D5 and nothing in
+today's edits reaching it. Two readings say the source is nevertheless the
+same: the build is **byte-identical across a forced rebuild** in this
+environment, and the loaded and built images have the **same total vmsize,
+0x254000**. So the likeliest account is that the UUID is stable within a build
+environment and not across them (path, toolchain state, time), rather than that
+the running plugin is from different source. **Which means: UUID equality
+proves the binary you just built is the one loaded, but UUID INEQUALITY does
+not prove the source differs.** The card leans hard on this check - 2xx cost
+nine boots to it - so the asymmetry matters. Not promoted to a rule: the
+mechanism is unestablished and a size match is weak evidence. Flagged.
+
+NOTHING IS CLAIMED. No boot has sent a DOMAIN_CONTROL command. Stated before
+the reading so it can be wrong: if `RBFBDmubDomMoved` comes back non-zero the
+firmware executes inbox commands and the whole VBIOS bring-up path for the
+external display is available; if it comes back 0 with refusal 0 - the command
+sent, acked, and no domain moved - then this firmware accepts and discards
+VBIOS commands, and the external display's bring-up is register writes with no
+atom table, which is a much larger project. Refusal **24** is a third outcome
+and not a null: it means no domain was gated on this boot and the test did not
+run.
