@@ -1780,7 +1780,7 @@ int main(int argc, char **argv)
                        "       (its 100 Hz mode is 228000)\n"
                        "       pipe omitted = 1, the first pipe that is NOT "
                        "the panel's\n"
-                       "       srcsel omitted = 1, which is Linux's value "
+                       "       srcsel omitted = 0, which boot 468 MEASURED "
                        "(the firmware\n"
                        "       left pipe 0's at 0 - the A side, interleavable "
                        "in one boot)\n");
@@ -1849,9 +1849,9 @@ int main(int argc, char **argv)
                "reference never has to be known -\n           which is also "
                "what Linux does (one dp_dto_ref_khz per pipe).\n");
         printf("  PIXEL_RATE_CNTL: DP_DTO_ENABLE 1, PIPE_DTO_SRC_SEL %ld%s\n",
-               srcsel < 0 ? 1L : (srcsel ? 1L : 0L),
-               srcsel < 0 ? "  <- Linux's value; the firmware left pipe 0's "
-                            "at 0" : "");
+               srcsel < 0 ? 0L : (srcsel ? 1L : 0L),
+               srcsel < 0 ? "  <- boot 468 MEASURED 0 as the value this DTO "
+                            "honours; Linux writes 1" : "");
         printf("\nin Linux's order (PHASE, MODULO, then the enable), as an "
                "RMW that\nkeeps DTBCLK_DTO_DIV and the error bits - which is "
                "what REG_UPDATE_2\ncompiles to (2EE quoted the sequence).\n");
