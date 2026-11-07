@@ -412,9 +412,11 @@ register is the suspect as much as the PHY: it is the legacy fallback Linux
 reads only when DMCUB is absent and it already disagreed with `QUERY_DP_ALT` on
 all five PHYs, so `dig` needs a verdict register that is not this one.
 **Still not done:** `enc31_map_stream_to_link` (no stream mapped to DIG2), OTG
-timing on pipe 1 (`OTG1_CONTROL` still `0x300`; **2FA built it and it has
-never run** — `-rbgpufbraster`, `tools/otgprog.m`, verdict is
-`OTG1_FRAME_COUNT` advancing), a surface, and a second
+timing on pipe 1 (`OTG1_CONTROL` still `0x300`; **2FA built it; boot 462 failed its
+positive control and wrote nothing** — `-rbgpufbraster`, `tools/otgprog.m`,
+verdict is `OTG1_FRAME_COUNT` advancing. The offsets are BASE_IDX 2 and need
+`+ 0x34c0`; the panel scanning is now refusal **48**, checked before the
+dark-pipe test), a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl). A clock
 with no raster and no stream has nothing to send, so the `0x00` lane status is
 not yet evidence against the transmitter. **Order:** FE connect → configure
