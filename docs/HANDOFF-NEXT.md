@@ -1,96 +1,57 @@
 # HANDOFF — where this is, and what to do next
 
-**Written 2026-11-07, after 2F7. Read `CLAUDE.md` first, then this, then
-`docs/EXTERNAL-DISPLAY.md` for the external-display record in full.**
+**Written 2026-11-07, after 2F8. Read `CLAUDE.md` first, then this, then
+`docs/EXTERNAL-DISPLAY.md`.**
 
 ---
 
-## Current state, as measured
+## Read this before touching the monitor
 
-- **Boot 459 is still the live boot** (`kern.boottime` Sat Nov 7 01:26:17 2026,
-  `rbgpu-boot` 459). 2F7 ran entirely inside it, no reboot.
-- **`build/out/RBAMDFramebuffer.kext` is now `A50B24F4-D737-38CE-8940-580772405B3E`**
-  — the **2F6** build, built for the first time in 2F7. The **live** collection
-  still carries `89A6F41C` (2F5). **They no longer agree**, so boot 459's
-  readings belong to 2F5 and nothing new should be read against them.
-- `make kext tools`, `make fbkext`, `make dptrain` all clean. Hosttest **all
-  passed** — and note it needs the capture table as an argument
+**`dptrain go tps=3` degrades this sink and the only recovery is a reboot.**
+2F8 measured it in two boots. The tool now refuses `tps=3`/`tps=4` with exit 3
+(`force` overrides). **Use `tps=2`.** All of 2F7 — "the sink's DPCD reads zero",
+both of its hypotheses and both of their funerals — was the aftermath of two
+`tps=3` runs at the top of boot 459.
+
+**The sink is degraded right now.** Boot 460 ended with `0x202` DEFERring, caps
+reading `00 00 00 81 00 00 00 00 00 00 00 00 00 00 84 00` and the EDID header
+BAD. **Nothing sink-side can be measured until a reboot.**
+
+## Current state
+
+- **Boot 460**, boottime Sat Nov 7 02:08:51 2026.
+- Live collection **`89A6F41C`** = the **2F5** build. `build/out` holds
+  **`A50B24F4`** = **2F6**. `sudo tools/fbinstall.sh` has not been run.
+- `-rbgpufbtrain`, `-rbgpufbaux`, `-rbgpufbdto` are in boot-args.
+- No `0x10de` on the PCI bus, so the chassis is in iGPU-only mode.
+- `make kext tools`, `make fbkext`, `make dptrain` clean. Hosttest **all
+  passed** — it needs the capture table as an argument
   (`./build/out/hosttest tests/data/rembrandt-680m-tufa15.bin`); run bare it
-  reports 2 FAILs that are its own missing input, not defects.
-- `-rbgpufbtrain` is in boot-args and arms the AUX half itself.
+  reports 2 FAILs that are its own missing input.
 
-### What 2F7 settled
+### What is established about this sink
 
-- **Both DPCD-store hypotheses are DEAD.** The "stores only when the
-  transmitter just moved" one was killed by its own pre-registered test: `TP_SEL
-  0x1 → 0x2 CHANGED, moved 1 observable 1` and the sink **ACKed `0x03` and
-  stored nothing**. The replacement "only `0x02` stores" died minutes later to a
-  bare `dpcdwrite 0x102 0x02` that also did not store.
-- **The control fired exactly as predicted**: the second `tps=3` gave
-  `moved 0 observable 0`, `VERDICT 4 NO-OP`.
-- **The sink's whole DPCD now reads zero.** `0x000..0x003` ACKs with
-  `00 00 00 80` (revision 0, max rate 0, max lanes 0 — no sink reports that);
-  `0x100` reads `00 00` where **boot 457 read `0x06` then `0x14`**; `0x202`
-  DEFERs on every attempt; `0x600 = 0x01` ACKs and stores nothing.
-- **Therefore an ACK is not a reading**, and every `ACK_IGNORED` / `changed 0`
-  verdict is computed from these same reads. 2F6's "three outcomes at one DPCD
-  address" stands as a reading of its moment but **cannot be reproduced**.
-- The sink is still there: `RBFBHpd2Status` = `0xFF0FF013` (`INT_STATUS`,
-  `SENSE`, `SENSE_DELAYED` all set), and a DEFER is the sink declining an
-  address, which is proof the channel reaches it.
+- Healthy, it reads **byte-identical to 2D8 and 2BB**:
+  `12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00` — revision 1.2, HBR2,
+  2 lanes — with EDID header and checksum OK.
+- A fresh boot leaves `0x100` = `0x06` (untrained), `0x102` = `0x00`,
+  `0x202` = `0x00` and readable, `0x600` = `0x01` already D0. Our boot-457
+  `0x100` = `0x14` does **not** survive a reboot.
+- `dptrain go tps=2` gives the first honest **PATTERN SET**: `TP_SEL 0 -> 1
+  CHANGED`, `moved 1 observable 1`, and both lane-status reads succeeding.
+- DPCD `0x102`: stores `0x02` **only** when written inside `dptrain`'s own call
+  (n=2 boots); a separate-call write of the same value with the TX unmoved does
+  **not** store (in-boot control). `0x01` drives the byte to `0x00`, `0x03`
+  never stores — both reproduced in two boots. **Transmitter movement is not
+  the discriminator; same-call proximity is.**
+- One EDID read needed **16 defers** and still succeeded, which is the sink's
+  own argument for 2F6's retry bound.
 
 ---
 
-## STEP 1 — get the sink answering again. This is the blocker.
+## STEP 1 — reboot, then install 2F6 in the same trip
 
-Nothing sink-side means anything until this is fixed, so it sits **in front of**
-the atom transmitter ENABLE.
-
-**2F7a narrowed it.** After a monitor power-cycle `dpcdread 0x0 4 2` still read
-`00 00 00 80`, and the **EDID over I2C-over-AUX** — a different endpoint on the
-same AUX engine, which read `MSI MP2412C` in 2BD — now returns **128 bytes of
-`0x00`**, `header BAD`. Both endpoints zero rules out the DP receiver's own
-state as the sole cause. Caveat: `RBFBHpdChanges` is **0** for the whole boot,
-so the HPD line is not known to have moved and the power-cycle is a weaker arm
-than intended.
-
-What is left, in order of what to test:
-
-1. **The Type-C port or the AUX channel.** CLAUDE.md's rule 47 already records
-   this symptom shape: this chassis' Type-C subsystem can die in a way that
-   survives a reboot and a reinstall and is cleared only by a **30-second
-   power-key hold**.
-2. **We did it.** Boot 457 read both endpoints correctly. Since then we wrote
-   `0x100` = `0x14` (HBR2) into a receiver whose caps now read rate 0, wrote
-   training patterns to `0x102`, and moved `TP_SEL` on DP2 three times. Not an
-   established mechanism, but the first candidate that is ours.
-3. **Our read path**, which would have to be zeroing *both* the native and the
-   I2C paths to explain this.
-
-### The run that settles it
-
-Do these in this order, and do not let step 3 happen before step 2.
-
-1. Shut down, then hold the power key for 30 seconds (rule 47's recovery).
-2. Boot, and **read the EDID before writing anything**:
-   `build/out/edidread`.
-3. Only then anything else.
-
-- **EDID reads `MSI MP2412C`** → this boot's zeros were a state the port or our
-  writes entered. Candidate 2 goes to the front, and every write since boot 457
-  is a suspect. Re-read `dpcdread 0x0 4 2` immediately after, before any write,
-  to get a clean caps reading this project has never had.
-- **EDID still zero** → the port is the suspect, no sink-side reading is
-  available, and nothing further in the external-display chain can be verified
-  until it comes back.
-
-**Do not** re-run `dpcdwrite 0x600 0x01` as a D3/ordering probe. 2F5's ordering
-hypothesis is withdrawn and 2F7 already ran that write for a different reason:
-it ACKed, stored nothing, and changed neither `0x000` nor `0x100`.
-
-## STEP 2 — install the 2F6 build
-
-`build/out` now holds it and the UUID has moved off `89A6F41C`.
+The sink needs the reboot anyway, so spend it once.
 
 ```bash
 sudo tools/fbinstall.sh
@@ -103,20 +64,23 @@ kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show
 Expect **`A50B24F4-D737-38CE-8940-580772405B3E`** inside the collection, then
 reboot and confirm it again from the running system (rule 15).
 
-2F6 earns its install now for a **measured** reason, not tidiness: `0x202`
-DEFERs on every attempt and the 2F5 build is single-shot on it. After that boot
-the DPCD paths retry a DEFER 8 times at 1 ms and publish
-`RBFBAuxDpcdDefers` / `RBFBAuxWDefers`, so a recovered defer, an exhausted
-bound and a single NACK become three readings instead of one. It also prints
-**`ACK + OTHER`** when the sink moves a byte to a value of its own.
+After that boot, verify the sink is healthy **before** writing anything:
+
+```bash
+build/out/edidread
+```
+
+`header OK   checksum OK` is the gate. If it is BAD on a fresh boot, stop and
+say so — that would be new.
 
 ---
 
-## STEP 3 — the atom transmitter ENABLE at the link rate
+## STEP 2 — the atom transmitter ENABLE at the link rate
 
 Still the next thing that **does not exist**, and still the step between "a
-pattern is set on our side" and "lanes are driving". It is now **behind** step 1,
-because its verdict would have to come from the sink.
+pattern is set on our side" and "lanes are driving". The sink side is now
+instrumented well enough to give it a verdict: `0x202` reads on a healthy sink,
+so `CR_DONE` is finally observable.
 
 What must be respected:
 
@@ -133,6 +97,8 @@ What must be respected:
   did for `.dp_set_phy_pattern`.
 - Rule 47 asked of a write: establish the live word decodes as the register the
   conclusion assumes **before** writing it.
+- **Budget one reboot per sink-degrading mistake.** That is now a known price,
+  not a surprise.
 
 After the ENABLE: link training over AUX2 (driver-side — zero `dmub` references
 in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG and HUBP,
@@ -144,6 +110,11 @@ and a second `IOFramebuffer`.
 
 ## Open, not on the critical path
 
+- The surviving DPCD-store question: **why does `0x102` store only from inside
+  the same call?** The honest shape is proximity in time; nothing establishes
+  the mechanism, and 2F8's attempt to separate movement from proximity was
+  **void** because the sink was already degrading from the `tps=3` that arm
+  used. Re-run it on a healthy sink with `tps=2` only.
 - The **wedge**: work submitted that never retires — channel-52 GFX, 3.5 s, the
   "random lag". `stamp_ticks` 125666 retires the "nothing polls it" family.
 - `powermetrics` has **never been run** against the default 576 interior
@@ -157,14 +128,15 @@ and a second `IOFramebuffer`.
 
 ## Withdrawn, so they are not re-tried
 
-1. **The D3 / ordering hypothesis** (2F5). Boot 459 killed it: nothing about
-   ordering differed between the two boots.
+1. **The D3 / ordering hypothesis** (2F5). Boot 459 killed it; 2F8 adds that
+   `0x600` already reads `0x01` on a fresh boot with nothing of ours setting it.
 2. **2F4's "a training pattern on the wire".** Boot 458's four writes moved not
-   one bit; `applied 1` was honest because every target state was already
-   present on a dark transmitter (rule 20's own defect).
-3. **"The sink stores `0x102` only when the transmitter just moved"** (2F6's
-   hypothesis). 2F7 produced the direct counterexample.
-4. **"Only `0x02` stores at `0x102`"** (2F7's own replacement, same day).
-   A bare `dpcdwrite 0x102 0x02` did not store.
-5. Any claim resting on `changed` or `before`/`after` at a DPCD address **while
-   the DPCD reads zero**. That is the whole `ACK_IGNORED` family.
+   one bit on a dark transmitter (rule 20's own defect).
+3. **"The sink stores `0x102` only when the transmitter just moved"** (2F6).
+   Dead — but 2F7's counterexample was right for the wrong reason, since that
+   boot's reads were the TPS3 aftermath. 2F8 killed it properly, with a control.
+4. **"Only `0x02` stores at `0x102`"** as a *value* rule. `0x02` also fails to
+   store from a separate call.
+5. **2F7 and 2F7a/b's sink-side readings as statements about the sink.** They
+   were taken while the sink was degraded by our own `tps=3`. The port and
+   read-path eliminations in 2F7b stand, because both rested on controls.

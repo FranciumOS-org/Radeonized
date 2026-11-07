@@ -121,7 +121,7 @@ static void laneLine(const char *tag, long ok, long byte, long lanes)
 int main(int argc, char **argv)
 {
     unsigned long inst = 2, tps = 1, hpd = 2, lanes = 2;
-    int haveGo = 0;
+    int haveGo = 0, force = 0;
 
     for (int a = 1; a < argc; a++) {
         if (strncmp(argv[a], "inst=", 5) == 0) {
@@ -134,6 +134,8 @@ int main(int argc, char **argv)
             lanes = strtoul(argv[a] + 6, NULL, 0); haveGo = 1;
         } else if (strcmp(argv[a], "go") == 0) {
             haveGo = 1;
+        } else if (strcmp(argv[a], "force") == 0) {
+            force = 1; haveGo = 1;
         } else {
             printf("usage: dptrain go [inst=N] [tps=1..4] [hpd=N] "
                    "[lanes=1..2]\n"
@@ -147,9 +149,40 @@ int main(int argc, char **argv)
                    "  lanes default 2 - this SINK's lane count (2BB read it\n"
                    "        from its DPCD). It decides what CR_DONE means.\n"
                    "\n"
+                   "  force pass this to allow tps=3 or tps=4, which 2F8\n"
+                   "        measured DEGRADING this sink - see below.\n"
+                   "\n"
                    "With no arguments this prints the block read-only.\n");
             return 2;
         }
+    }
+
+    /* 2F8: TPS3 DEGRADES THIS SINK, and the recovery is a REBOOT.
+     *
+     * Measured in two boots. Boot 460 had a healthy sink before the run -
+     * EDID header and checksum OK, DPCD 0x000 byte-identical to 2D8 and 2BB -
+     * and immediately after `dptrain go tps=3` the caps collapsed to
+     * 00 00 00 81 ... 84 00 (zeros with only bytes 3 and 14 surviving, at
+     * their TRUE values) and 0x202 went back to DEFER. Going back to tps=2
+     * did NOT recover it; `dpcdwrite 0x102 0x00` then DEFERred, `0x600 0x01`
+     * got no ACK at all, and reads stopped answering. Boot 459's whole
+     * "the sink's DPCD reads zero" milestone (2F7) was this, caused by two
+     * tps=3 runs at the top of that boot and diagnosed for hours afterwards.
+     *
+     * So this is not a warning, it is a refusal with an override. A dial that
+     * costs a reboot every time it is used must say so before it is used, not
+     * in a journal entry written after. */
+    if (tps >= 3 && !force) {
+        printf("REFUSED: tps=%lu degrades this sink.\n\n"
+               "2F8 measured it in two boots: a healthy sink (EDID header and\n"
+               "checksum OK, DPCD 0x000 byte-identical to 2D8) goes to\n"
+               "00 00 00 81 ... 84 00 with 0x202 DEFERring, immediately after\n"
+               "one `dptrain go tps=3`. tps=2 does not bring it back, nor does\n"
+               "DPCD 0x102=0x00, nor 0x600=0x01. THE RECOVERY IS A REBOOT, and\n"
+               "boot 459 spent a whole milestone diagnosing the aftermath.\n\n"
+               "tps=2 moves TP_SEL and is the pattern to use. If you really\n"
+               "want TPS3 and have a reboot to spend, add `force`.\n", tps);
+        return 3;
     }
 
     io_service_t fb = IOServiceGetMatchingService(

@@ -62441,3 +62441,122 @@ the proof the replug happened, and the thing 2F7a's power-cycle lacked. Then
 and every write since boot 457 is a suspect. If it stays zero through a replug
 that HPD witnessed, the channel or the receiver is the fault and no sink-side
 reading is available.
+
+## 2F8 — TPS3 DEGRADES THIS SINK, AND THAT WAS 2F7's WHOLE MILESTONE (boot 460)
+
+Preconditions, read before anything was touched (rules 8, 15, 33, 34):
+
+- `rbgpu-boot` = **460**, boottime Sat Nov 7 02:08:51 2026, 42 minutes after
+  boot 459. The user had rebooted; `RBFBDpTxCalls` reading **0** against boot
+  459's 3 was the first sign, and that is what the counter is for.
+- Live collection: still **`89A6F41C`** (the 2F5 build). `sudo tools/fbinstall.sh`
+  was **not** run, so 2F6 is still not installed and `build/out` holds
+  `A50B24F4`. Every reading below is the 2F5 build's.
+- `boot-args` carry `-rbgpufbtrain`, `-rbgpufbaux`, `-rbgpufbdto`.
+- **No `0x10de` on the PCI bus**, so macOS sees no dGPU and the chassis is in
+  iGPU-only mode. The user reported "my 4050 was on" for some part of the gap,
+  which is a configuration fact that was never checked during boot 459, and
+  rule 39 says to go back through what it invalidated — that is this entry.
+
+### The sink was healthy, and it was healthy byte for byte
+
+```
+edidread        128 bytes, header OK, checksum OK   (defers 16, and it still
+                                                      succeeded - see below)
+dpcdread 0x0 16 12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00
+                BYTE-IDENTICAL to 2D8, which was byte-identical to 2BB.
+                revision 1.2, max link rate 0x14 (HBR2), max lanes 2
+0x100   0x06    the untrained default - our boot-457 0x14 did NOT survive
+0x102   0x00
+0x202   0x00    READS. Not a DEFER.
+0x600   0x01    already D0, with nothing of ours having set it
+TP_SEL  DP0 2 (panel), DP1-4 all 0,  DpTxCalls 0
+```
+
+The EDID read took **16 defers** and still succeeded, which is the first
+measured argument for 2F6's defer-retry bound arriving from the sink rather
+than from tidiness.
+
+### So boot 459's zeros were neither of 2F7's surviving candidates
+
+- **Not 2D8's dead Type-C subsystem.** That one survives reboots and needs a
+  30-second power-key hold. This cleared on an ordinary reboot. 2F7b had
+  already shown HPD2, the enable mask, the sink mask and the refusal code all
+  reading the opposite of 2D8's signature.
+- **Not our read path.** 2F7b's control was the panel's own AUX0 through
+  identical code (`12 0a c4 c1 …`, revision 1.2, HBR, 4 lanes).
+
+### The first honest PATTERN_SET
+
+`dptrain go tps=2`: `TP_SEL 0x000000 -> 0x000001 CHANGED`,
+`applied 1 clean 1 moved 1 observable 1`, and **the sink's lane status read
+successfully before AND after** (`0x00` / `0x00`) for the first time in this
+project. `VERDICT 1 PATTERN SET`. Boot 458 reached that verdict by falling
+through two defects; this one reached it on its merits.
+
+### The DPCD store, with a paired in-boot control at last
+
+| arm | TX | `0x102` before | wrote | after | stored? |
+|---|---|---|---|---|---|
+| inside `dptrain go tps=2` | moved 0→1 | `0x00` | `0x02` | **`0x02`** | **yes** |
+| separate `dpcdwrite`, TX unmoved at 1 | — | `0x00` | `0x02` | `0x00` | no |
+| separate `dpcdwrite`, TX unmoved | — | `0x02` | `0x01` | **`0x00`** | no, and the byte MOVED |
+| separate `dpcdwrite`, TX unmoved | — | `0x00` | `0x03` | `0x00` | no |
+
+The storing arm is now **n=2 boots** (459 and 460) and the non-storing arm has
+an in-boot control at the same address, same value, same engine, with the only
+difference being whether the write happened inside `dptrain`'s own call about
+100 µs after the four register writes.
+
+**So 2F6's hypothesis as stated — "it stores only when the transmitter side has
+just moved" — is DEAD, and 2F7's counterexample was right for the wrong
+reason.** What survives is narrower and about *proximity*: the write stores only
+when it is issued inside the same call, microseconds after the register writes.
+A fourth arm was attempted to separate movement from proximity (move the TX with
+`tps=3`, then write `0x02` from a separate call; it did not store) but that arm
+is **contaminated** — see below, the sink was already degrading from the TPS3
+run. It is recorded as void, not as evidence.
+
+Reproduced across boots 459 and 460: **`0x01` drives the byte to `0x00`** —
+`changed 1` with the written value never appearing, which is 2F6's `ACK_OTHER`
+and which this 2F5 build mislabels `ACK + IGNORED` exactly as 2F6 predicted —
+and **`0x03` never stores**.
+
+### THE FINDING: TPS3 DEGRADES THE SINK, AND THE RECOVERY IS A REBOOT
+
+With the sink measured healthy minutes earlier, one `dptrain go tps=3`:
+
+```
+before   12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00   0x202 reads 0x00
+after    00 00 00 81 00 00 00 00 00 00 00 00 00 00 84 00   0x202 DEFERs
+```
+
+Zeros everywhere except bytes 3 and 14, which survive at their **true** values
+(`0x81`, `0x84`). That is the same shape boot 459 read all evening
+(`00 00 00 80 … 04 00`), and **boot 459 began with two `tps=3` runs.** So 2F7's
+entire "the sink's DPCD reads zero" milestone, both of its hypotheses and both
+of their funerals were the aftermath of a dial this project pulled itself.
+
+Recovery was then tried and **nothing short of a reboot worked**:
+
+- `dptrain go tps=2` — `TP_SEL 2 -> 1 CHANGED`, caps still `00 00 00 81`, EDID
+  **header BAD**;
+- `dpcdwrite 0x102 0x00` (the DP spec's own end-of-training) — **DEFER**, no
+  ACK;
+- `dpcdwrite 0x600 0x01` — **no ACK at all**, and reads stopped answering.
+
+It gets worse under further writes, which is why the order above matters.
+
+### The guard, because a journal entry is not a guard
+
+`dptrain` now **refuses `tps=3` and `tps=4`** with exit code 3, printing the
+measurement and what it costs, overridable with a literal `force` argument.
+Verified: `tps=3` and `tps=4` both refuse with the right number in the message
+(a first cut printed `tps=0` from a `%lu` with no argument — caught and fixed),
+`tps=3 force` runs, `tps=2` is untouched.
+
+### State left behind
+
+**The sink is degraded right now and needs a reboot.** `0x202` DEFERs, caps read
+`00 00 00 81 …`, the EDID header is BAD. `TP_SEL` on DP2 is 1. Nothing
+sink-side can be measured until the next boot.
