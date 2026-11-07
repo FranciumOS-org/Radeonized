@@ -62226,3 +62226,120 @@ so 2F5 reports `NO_OP`; predicts the DPCD write does **not** store). An
 interleaved A/B at single-call granularity, which is what rule 44 asks for.
 Then the atom transmitter ENABLE at the link rate, still the thing that does
 not exist.
+
+## 2F7 — THE HYPOTHESIS IS DEAD, AND SO IS THE SINK'S DPCD (boot 459, no reboot)
+
+Preconditions checked first, because the whole run depends on them (rules 8, 15,
+34):
+
+- `rbgpu-boot` = **459**, `kern.boottime` Sat Nov 7 01:26:17 2026 — the same
+  boot 2F6's handoff was written in, so this is not a new boot's reading.
+- The live `AuxiliaryKernelExtensions.kc` carries
+  **`89A6F41C-C283-37D0-BA8D-C86C17820ED9`**, byte-identical to
+  `build/out/RBAMDFramebuffer.kext`, which has deliberately not been rebuilt.
+  So the 2F5 build is what ran, exactly as the handoff said.
+- Pre-run state matched the handoff: `RBFBDpTx2TpSel` = **1**, and the last AUX
+  write was `0x102` = `0x00` with `ReplyCode 2` (DEFER), `AuxWCalls 4`.
+- `-rbgpufbtrain` was already in boot-args and arms the AUX half itself.
+
+### The pre-registered test, and its two results
+
+The handoff wrote both predictions down before the run. They split.
+
+**Call 1, `dptrain go tps=3`.** The transmitter half came out exactly as
+predicted: `TP_SEL` **0x1 → 0x2 CHANGED**, `applied 1 clean 1 moved 1
+observable 1`, with the four-instance in-boot control intact (DP1/DP3/DP4 still
+`TP_SEL 0`, the panel's DP0 untouched at 2, every `LINK_CNTL`/`DPHY_CNTL`/`PRBS`
+unchanged). The sink half was **falsified**: the DPCD `0x102` write of `0x03`
+was **ACKed and not stored** — `AuxWValue 3`, `AuxWAfter 0`, `AuxWChanged 0`,
+`AuxWAcked 1`, `ReplyCode 0`, `Verdict 2`. The prediction was `ACK_STORED`.
+
+**Call 2, `dptrain go tps=3` again** — the control. Exactly as predicted:
+`TP_SEL 0x2 → 0x2 unchanged`, `moved 0 observable 0`, **`VERDICT 4 NO-OP`**.
+2F5's verdict did its job, and its rank above `CR_DONE` was the right call.
+That call's own `0x102` write (`AuxWCalls 6`, before `0x00` this time, so the
+before-read was good) also ACKed and stored nothing.
+
+**So the "the sink stores `0x102` only when the transmitter side has just
+moved" hypothesis is DEAD.** Call 1 is a direct counterexample: the TX moved,
+and the sink did not store. One in-boot run killed it, which is what writing
+the prediction down bought.
+
+### The second hypothesis died in the same minute
+
+With the TX story gone, the obvious replacement was a **value** story: across
+all of boot 459's observations the only stored value was `0x02`, with `0x01`
+and `0x03` landing as `0x00`. Free test, no TX movement at all:
+`dpcdwrite 0x102 0x02`. Result — `before 0x00`, `after 0x00`, `changed 0`,
+`VERDICT 2`. **Not stored.** Dead too.
+
+### What is actually wrong: an ACK is not a reading
+
+Both hypotheses were built on the assumption that these before/after reads mean
+something. They do not, right now:
+
+| address | now | boot 457/459 |
+|---|---|---|
+| `0x000..0x003` | ACK, bytes `00 00 00 80` | — |
+| `0x100` (LINK_BW_SET) | ACK, bytes `00 00` | read `0x06`, then `0x14` after our write |
+| `0x102` | ACK, byte `00` | read `0x02` after the one store |
+| `0x202` (lane status) | **DEFER**, repeatedly | read OK in boot 459 |
+| `0x600` = `0x01` | ACK, `before 0x00 after 0x00`, not stored | — |
+
+`0x000` reading **revision 0, max link rate 0, max lane count 0** is a value no
+sink reports (DP 1.0 to 1.4 all have a non-zero revision), and `0x100` reading
+`0x00` contradicts boot 457's own measured `0x14` **in the same boot**. So:
+
+- **Every `ACK_IGNORED` and every `changed 0` is computed from these reads**,
+  which makes the whole family suspect as a statement about the sink. This is
+  rule 20's mirror: a readback that **disagrees** is no more evidence than one
+  that agrees, when the readback itself is not established.
+- 2F6's "three outcomes at one DPCD address" was measured when `0x100` and
+  `0x102` still read real values, so it stands as a reading **of that moment**.
+  It cannot be reproduced now, and what changed in between is not established.
+- The channel is not dead: `0x202`'s **DEFER** is the sink declining an address,
+  which is itself proof the AUX path reaches it, and the writes are ACKed.
+- The cable is in and the sink is sensed: `RBFBHpd2Status` =
+  **`0xFF0FF013`** — `INT_STATUS`, `SENSE` and `SENSE_DELAYED` all set — against
+  the panel's `0x14000012` and `0` on HPD1/3/4.
+
+Three candidates, **none established**, and they are not narrowed by anything in
+this run: (a) the sink's DP receiver has entered a state where it answers AUX
+and reads back zeros; (b) our native read path has a defect that returns ACK
+with zeroed data under some condition the tool's own stuck-index check does not
+catch (it did fire on `0x100`'s two identical bytes — and `0x000`'s four bytes
+are *not* identical, which argues against a stuck index); (c) the sink was
+power-cycled or renegotiated between boot 457 and now.
+
+`dpcdwrite 0x600 0x01` was run — not as 2F5's withdrawn D3/ordering probe,
+which stays withdrawn, but because "all registers read zero" is independent
+evidence about receiver **state** and `0x600` is already allowlisted. It ACKed,
+stored nothing, and `0x000`/`0x100` read identically afterwards. So the
+receiver is not merely asleep in a way one SET_POWER write fixes.
+
+### One instrument defect, found and fixed
+
+`dptrain`'s `SINK BLIND` branch printed **"The before-read succeeded, so the
+AUX engine was working at the start of the call"** unconditionally. In call 1
+`RBFBDpTxSinkBeforeOk` was **0** — both reads failed — and it printed that
+anyway, narrating an instrument failure as a bounded one. The two cases are
+different readings: with a good before-read the window really is the `0x102`
+write plus the 100 µs wait; with neither read good, nothing is bounded at all.
+Now conditional on `sbOk`, and **verified against the live failing state** by a
+third `dptrain go tps=2` (which moved `TP_SEL 2 → 1`, so verdict 5 was reached
+with `sbOk` 0) — it printed the FAILED-TOO branch. Rule 14, at the tool
+boundary again.
+
+### `0x202`'s DEFER is the first measured motivation for 2F6
+
+2F6's defer retry bound (`RB_AUX_DEFER_RETRIES` 8 × 1 ms) was committed as
+robustness with nothing demanding it. `0x202` now DEFERs on every attempt under
+the 2F5 build, which is **single-shot** on it. That is the reading 2F6 was
+written for, arriving after the commit.
+
+### Not done, and said plainly
+
+Nothing here puts a picture on the monitor, and nothing here is progress toward
+one — it is two hypotheses removed and a prerequisite discovered. **The sink's
+DPCD has to be got answering again before any sink-side verdict means
+anything**, and that now sits in front of the atom transmitter ENABLE.
