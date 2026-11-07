@@ -61343,3 +61343,214 @@ Nothing was written. `DIO_FIFO_ERROR` reads 3 on all three dark pipes and 0 on
 pipe 0; it has not been checked against a pipe that is being brought up, so it
 is not yet usable as a verdict register. The ~0.2 % reference question is open
 and is not on the critical path.
+
+## 2F1 — the three DTO writes are BUILT, and boot 453 re-confirmed the base before a line of them ran
+
+Nothing has been written. This milestone builds `dcn31_program_pix_clk`'s DP
+branch for one dark pipe, with the gate that makes it safe measured on a
+**second** boot first.
+
+### Boot 453 reproduces boot 452's DTO read, byte for byte
+
+Read before building anything (rule 8: `rbgpu-boot` = **453**), same
+configuration, framebuffer `6B64DDD5` still the installed one:
+
+```
+RBFBDtoBase 0 CONFIRMED      RBFBDtoPipe 0        RBFBDtoRefSrc 1 (measured)
+RBFBDto0Phase  343 000 000   RBFBDtoRefHz 600 000 000
+RBFBDto{1,2,3}Rate 0x8000c000 (identical, dark)   RBFBDto1Phase 0
+RBFBDtoAlias  0, 0x10000000, 0, 0x10000000
+RBFBDtoHTotal 2106   RBFBDtoVTotal 1129   RBFBDtoRefreshMhz 143833
+```
+
+Every number 2F0 reported is here again: the round 343.000000 MHz PHASE, the
+exactly-round 600 MHz reference, the three byte-identical dark pipes, and the
+alias control reading `DOMAIN0/1_PG_STATUS` as `0x10000000` at BASE_IDX 2
+exactly as 2DE measured them. **So rule 44's two boots per side are in hand for
+2F0's read**, which matters more than usual here: the base confirmation is what
+the write's safety rests on, and 2F0 was n=1.
+
+One difference, and it is the panel's own spread rather than a finding:
+`RBFBDtoExpectedHz` is **341 987 984** this boot against 342 287 571 on 452, a
+0.09 % move in the measured raster clock — the shape 2y5/2z0 already recorded
+for this panel's DP spread-spectrum timing. Both are inside the 0.5 % window,
+so PHASE used 42 % of it on 452 and 29 % here. A changed value is not a
+finding; it is the reason the window is 0.5 % and not 0.01 % (2F0).
+
+### What is built
+
+`src/common/rb_dpdto.h` grows the write half; `RBAMDFramebuffer::dtoProgram()`
+performs it; `build/out/dmubbl dto` drives it. Framebuffer **C2AC37B9**
+(6B64DDD5 is installed), plugin unchanged.
+
+The sequence is Linux's, unrearranged — PHASE, then MODULO, then the enable:
+
+```
+    REG_WRITE(PHASE[inst],  actual_pix_clk_100hz * 100);   // Hz
+    REG_WRITE(MODULO[inst], dp_dto_ref_khz * 1000);        // Hz
+    REG_UPDATE_2(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1,
+                                        PIPE0_DTO_SRC_SEL, 1);
+```
+
+**MODULO IS COPIED OFF THE CHIP, NOT WRITTEN DOWN.** It is read from pipe 0,
+where the firmware put its own `dprefclk`. Because PHASE/MODULO is a **ratio**,
+reusing the firmware's reference makes pipe 1 as accurate as the panel's
+without the true reference ever being known — which is exactly what Linux does,
+with one `dp_dto_ref_khz` for every pipe. **2F0's open ~0.2 % question about
+the real DPREFCLK therefore does not block this and is not on its path**, which
+is the useful consequence of it being a ratio rather than an absolute.
+
+### The gate is THIS BOOT'S OWN base verdict, and that is the whole safety case
+
+A write at the other candidate base lands on the DOMAIN power gating of the
+pipe scanning the panel. So `rb_dpdto_write_refuse()` takes the live
+`rb_dpdto_base_verdict()` and declines anything but `CONFIRMED` — not 2F0's
+number, not a constant, but the verdict computed from PHASE[0] against the live
+raster within the same call. `dtoProgram()` re-samples the block itself rather
+than trusting whenever the last periodic publish happened, so the base verdict
+and the target pipe's live word come from one sample (rule 31, and rule 44's
+shape for a control: one measured in a different window is not a control).
+
+That is **rule 47 asked of a write** with the answer measured rather than
+argued, and it is the gate the hosttest exercises hardest: all six non-CONFIRMED
+base codes are swept, not just one.
+
+Pipe 0 is refused **by name**, in the header and again in the tool, for the
+reason PHY0 and DIGA are. A pipe whose DTO is already enabled is refused too —
+which refuses pipe 0 a second time, independently. **Nothing touches the domain
+power gating and it does not need to**: 2DE read DOMAIN0..3 all `0x10000000`,
+identical, so pipe 1's registers are already powered. That is why this write
+can be first.
+
+### The verdict reads a bit we did not write
+
+`DPDTO_ENABLE_STATUS` (bit 7), and the reasoning is stated before any reading:
+
+- **PHASE is not a readback.** 2F0 measured pipe 0's as a round 343.000000 MHz
+  against a raster wanting 342.29 — the clock the firmware *asked* for, with DRR
+  extension ruled out by measurement. So finding our own number there is rule
+  20's defect in its purest form: **we know in advance it will agree.** It is
+  published raw and read by nothing.
+- **`DP_DTO_ENABLE` is the bit we wrote**, so it has the same defect.
+- **`DPDTO_ENABLE_STATUS` is the hardware's own answer**, and 2F0 attested
+  *both* its states on this chip beforehand — set on the driving pipe, clear on
+  all three dark ones. `rb_dpdto_prog_verdict()` requires a **transition**
+  (`WAS_ON` is its own code), the same requirement `rb_dig_verdict()` has.
+- **`OTG_DIO_FIFO_ERROR` is still not usable as one.** It reads 3 on every dark
+  pipe and 0 on pipe 0, which looks like a second instrument, but it has never
+  been read on a pipe *being brought up* — whether it clears on a clock alone or
+  needs a running OTG and a stream is unknown. Published raw, read by nothing
+  (rule 18).
+
+The 2EC triple is published beside it: `applied` (weak — our own bits),
+`changed` (a dark pipe reading `0x8000c000` **must** move, so this cannot be a
+no-op mistaken for a success), `clean` (nothing outside the two fields moved,
+with the status bit excluded because its moving *is* the verdict).
+
+### `PIPE0_DTO_SRC_SEL`: decided, not left to a default
+
+2F0 left this open: Linux writes 1 in the same `REG_UPDATE_2` as the enable, the
+firmware left pipe 0's at **0**, and the panel has scanned out for 453 boots.
+
+**The default here is 1 — Linux's value — and the reason is that the two are
+not evidence about the same thing.** The firmware brought eDP up through atom
+bytecode; `dcn31_program_pix_clk` is the **driver** path for a DP pipe being
+programmed from scratch, which is exactly this situation. Rule 46 asks which
+file the method comes from, and normalising one of its two field writes to the
+other path's value would be reproducing neither. It is a **dial** (`srcsel=0`)
+so the firmware's value can be tried interleaved in one boot (rule 44).
+
+What the field *selects* is deliberately not stated: its meaning is not in the
+vendored headers beyond its name, and inventing a mechanism for it would be
+rule 17.
+
+### The deny list is the wrong instrument, and that is pinned rather than
+### commented
+
+`rb_dcn_deny.h` declares `RB_DCN_DENY_BASE_IDX 2` and lists BASE_IDX **2**
+dword offsets; these writes are BASE_IDX **1**. Calling
+`rb_dcn_is_denied(0x85)` returns 0 because the list starts at 0x89 — so the
+call would **pass for the wrong reason** and read exactly like a check that had
+been done. Worse than inapplicable. The hosttest asserts all three facts (the
+list's base index, that a DTO offset passes it, and that 0x89 *is* denied as the
+control), so the next person to reach for it finds the answer instead of the
+trap. Rule 26 on an instrument, rule 14 on its answer.
+
+### The default clock is 148.5 MHz, which is a deliberate divergence from the
+### handoff
+
+2ED's handoff named 2BD's **228 MHz / 100 Hz** mode. `dmubbl dto` defaults to
+**148500 kHz** instead — the **preferred** timing in the EDID this project read
+off this sink over I2C-over-AUX on boot 295, which is the mode `dc` would pick
+and the one the monitor is guaranteed to accept. Stated as a choice rather than
+slipped in: nothing downstream of the clock exists yet, so the value cannot be
+observably wrong either way, and the one carrying fewer assumptions is the
+preferred one. Both are accepted and both are pinned by the hosttest, along
+with the panel's own 343 MHz as the fastest clock this chip is known to drive.
+
+The **ceiling is not a constant**: it is pipe 0's live MODULO, because a DTO
+divides PHASE by MODULO and a PHASE at or above the reference is not a ratio
+this block can make. The written-down part is only the floor (VESA's 25.175 MHz)
+and a deliberately wide reference band whose job is to exclude a zero or a
+stray word — and the hosttest states explicitly that `0x10000000`, the impostor
+2F0 actually found in the alias slot, **is inside that band**, so the base
+verdict and not this bound is what excludes it.
+
+### Nine break-it checks, and the ninth is a result
+
+One per guard (rule 48). Eight fire: the base gate (6 assertions), the
+already-live pipe, the ceiling-is-the-live-reference, the pixel-clock floor, the
+reference band, the RMW's field preservation, the verdict's transition
+requirement and its reading STATUS rather than the enable, and the aperture
+inequality.
+
+**The ninth fired nothing, and it was mine.** The first draft's comment claimed
+the panel-pipe check sits "ahead of the range check so pipe 0 cannot be refused
+as merely out of range" — swapping the two changed no assertion, because pipe 0
+passes `inst >= RB_DPDTO_COUNT` either way and the panel check fires whichever
+comes first. **An ordering guarantee that guards nothing**, written as though it
+did. The comment is corrected in place and the assertion kept, because what it
+actually pins is worth pinning: pipe 0 gets `PANEL_PIPE` and not `PIPE_RANGE`,
+so a log naming the refusal names a decision and not an off-by-one.
+
+**And the `-Werror` trap fired four times in one run** — the base gate, the
+already-live pipe, the RMW and the reference band each left an argument unused
+when broken, so the build died and `make hosttest` reported **0 FAIL lines**,
+which reads exactly like "the test does not catch it". All four were redone as
+breaks that compile (`== 0x7fff`, `== 2`, `& 0u`, `!= 0xdeadbeef`) and all four
+then fired. Rule 48 records this five times; this is the sixth, and it is why
+the check greps `error:` as well as `^FAIL`.
+
+### What `-rbgpufbdto` now means, said rather than left to be discovered
+
+2EF's token was read-only. It now arms a **write** as well, and no new token
+was added on purpose: `-rbgpufbdtoprog` would have `-rbgpufbdto` as a prefix,
+which is the shape rule 30 forbids and which has bitten three times. What keeps
+it honest is the 2zn pattern — **even armed, nothing is written until
+`dmubbl dto` names a clock** — plus the base gate, pipe 0 refused twice, and a
+refusal for every path out.
+
+### The aperture question was already answered, and the answer is an inequality
+
+`rb_dpdto_write_dw_max()` is `0xc0 + 0x8f = 0x14f`, **below**
+`RB_DPDTO_SEG2_CONTROL` (0x34c0) — the segment every mapping in this kext has
+had to clear to be usable at all. So no mapping that works can be too short for
+this write. The hosttest asserts the inequality rather than the call site
+asserting it in a comment.
+
+### What a reading will and will not establish
+
+Said before the boot so neither outcome can be explained after the fact (2EC's
+practice):
+
+- **STARTED** means the DTO makes a clock. **It does not mean a picture**, and a
+  dark monitor is the **expected** reading: there is no OTG timing on pipe 1, no
+  trained link, no stream mapped to the encoder and no surface. All four are
+  later steps, and the tool prints that sentence itself.
+- **STILL** — the enable reading back with the hardware's status bit not
+  following — is a real negative about this block and not a failed write, since
+  `changed` says the word moved. Candidates, none measured: the DTO needs
+  something else enabled (DISPCLK to the pipe, `OTG_PIXEL_RATE_SOURCE`), or
+  SRC_SEL is the wrong way round, which is one interleaved command away in the
+  same boot.
+- **Refusal 42** means nothing was written and the gate worked.

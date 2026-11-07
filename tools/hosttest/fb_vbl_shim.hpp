@@ -326,6 +326,22 @@ public:
     int dtoPipeVerdict=RB_DPDTO_PIPE_NOT_SAMPLED;
     bool dtoArmed=false, dtoReady=false;
     void dtoSample(void) {}
+    /* 2F1: the write side. dtoPublish() and dtoProgram() both live in
+     * RBAMDFramebufferHUBP.cpp, so both are stubbed - but the fields are
+     * here because the setProperties path under test stores into them before
+     * it ever reaches the write, and `dtoProgInst` starts at the FIRST FREE
+     * pipe rather than 0, which is the panel's and would make a bare
+     * RBFBDtoPixHz target it. */
+    uint32_t dtoProgInst=RB_DPDTO_FIRST_FREE_PIPE;
+    uint32_t dtoProgPixHz=0, dtoProgRefHz=0, dtoProgSrcSel=1;
+    uint32_t dtoProgRefuse=RB_DPDTO_W_OK;
+    uint32_t dtoProgApplied=0, dtoProgChanged=0, dtoProgClean=0;
+    uint32_t dtoRateBefore=0, dtoRateAfter=0;
+    uint32_t dtoPhaseAfter=0, dtoModuloAfter=0;
+    uint32_t dtoProgCalls=0, dtoProgRan=0;
+    int dtoProgVerdict=RB_DPDTO_PROG_NOT_RUN;
+    void dtoPublish(void) {}
+    uint32_t dtoProgram(uint32_t, uint32_t, int) { return RB_DPDTO_W_OK; }
     /* 2BA, mirrored - the hosttest compiles RBAMDFramebufferVBL.cpp. */
     bool auxDpcdArmed=false, auxDpcdSuspect=false;
     uint64_t auxDpcdAttempts=0, auxDpcdOks=0;

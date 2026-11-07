@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "rb_dpdto.h"
+#include "rb_dcn_deny.h"
 #include "rb_drr.h"
 #include "rb_regs.h"
 #include "rb_discovery.h"
@@ -380,6 +381,203 @@ int dpdto_tests(const struct rb_disc *real)
         CHECK(rb_dpdto_pipe_verdict(0x00000008u) ==
               RB_DPDTO_PIPE_OTHER_SOURCE,
               "DTBCLK's enable is somewhere else by this block's reckoning");
+    }
+
+    /* ================= 2F1: THE WRITE SIDE =============================
+     *
+     * Every number here is boot 452's own, read off the chip: pipe 0's rate
+     * word 0x80000090, the three dark pipes' 0x8000c000, MODULO 600 000 000.
+     * The point of pinning them is that the refusals and the verdict are
+     * being checked against the words the hardware actually returns, not
+     * against invented ones (2CC's practice). */
+    {
+        const uint32_t dark = 0x8000c000u;   /* pipes 1-3, boot 452         */
+        const uint32_t live = 0x80000090u;   /* pipe 0, enable + status     */
+        const uint32_t ref  = 600000000u;    /* MODULO[0], boot 452         */
+        const uint32_t pix  = 148500000u;    /* 2BD's preferred timing      */
+
+        /* ----------------------------------------------- the gate that matters
+         *
+         * An unproven base must refuse, because the other candidate base is
+         * the power gating of the pipe scanning the panel. Checked for EVERY
+         * base code, not just one, since the write is only allowed on the
+         * single value CONFIRMED. */
+        CHECK(rb_dpdto_write_refuse(1, pix, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_OK,
+              "a confirmed base, a dark pipe and a plausible clock is allowed");
+        {
+            const int codes[] = { RB_DPDTO_BASE_NOT_SAMPLED,
+                                  RB_DPDTO_BASE_PHASE_ZERO,
+                                  RB_DPDTO_BASE_PHASE_WRONG,
+                                  RB_DPDTO_BASE_MODULO_BAD,
+                                  RB_DPDTO_BASE_ALIASED,
+                                  RB_DPDTO_BASE_NO_EXPECTED };
+            unsigned k;
+            for (k = 0; k < sizeof(codes) / sizeof(codes[0]); k++) {
+                CHECK(rb_dpdto_write_refuse(1, pix, ref, dark, 1, 1, codes[k])
+                      == RB_DPDTO_W_BASE_UNPROVEN,
+                      "every base verdict but CONFIRMED refuses the write");
+            }
+        }
+
+        /* The panel's pipe, by name.
+         *
+         * The break-it run found the ORDER of this check and the range check
+         * to be INERT - swapping them changed no assertion, because pipe 0
+         * passes `inst >= RB_DPDTO_COUNT` either way, so the panel check
+         * fires whichever comes first. Recorded rather than dressed up: a
+         * break that fires nothing is a result (rule 48), and the first
+         * draft's comment claimed an ordering guarantee that guards nothing.
+         * The CHECK stays, because what it pins is the one that matters -
+         * pipe 0 gets PANEL_PIPE and not PIPE_RANGE, so a log naming the
+         * refusal names a decision and not an off-by-one. */
+        CHECK(rb_dpdto_write_refuse(0, pix, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PANEL_PIPE,
+              "pipe 0 is the panel and is refused BY NAME");
+        CHECK(RB_DPDTO_FIRST_FREE_PIPE != RB_DPDTO_PANEL_PIPE,
+              "the default target is not the panel's pipe");
+        CHECK(rb_dpdto_write_refuse(4, pix, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PIPE_RANGE,
+              "a pipe past the fourth is out of range, not the panel");
+
+        /* A pipe whose DTO is already running is a clock something may be
+         * using. Pipe 0's own live word is the case, which is a second,
+         * independent refusal of the panel. */
+        CHECK(rb_dpdto_write_refuse(1, pix, ref, live, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PIPE_LIVE,
+              "a pipe whose DP DTO is already enabled is refused");
+
+        CHECK(rb_dpdto_write_refuse(1, pix, ref, dark, 0, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_NOT_ARMED, "an unarmed boot writes nothing");
+        CHECK(rb_dpdto_write_refuse(1, pix, ref, dark, 1, 0,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_NO_REGS, "and so does one with no mapping");
+
+        /* The reference about to be COPIED. 0x10000000 is the impostor 2F0
+         * actually found in the alias slot, and it is inside the wide
+         * reference band - so this is not what catches a wrong base, which is
+         * exactly why the base verdict is a separate gate ahead of it. */
+        CHECK(rb_dpdto_write_refuse(1, pix, 0, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_REF_BAD, "a zero reference cannot be copied");
+        CHECK(rb_dpdto_write_refuse(1, pix, 1000u, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_REF_BAD, "nor can one below the reference band");
+        CHECK(rb_dpdto_ref_usable(ref), "600 MHz is a usable reference");
+        CHECK(rb_dpdto_ref_usable(0x10000000u),
+              "0x10000000 IS inside the band - the base gate is what "
+              "excludes it, not this one");
+
+        /* The asked clock. The ceiling is the live reference rather than a
+         * constant, which is the half that is actually load-bearing: a PHASE
+         * at or above MODULO is not a ratio this block can make. */
+        CHECK(rb_dpdto_write_refuse(1, 1000000u, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PIX_RANGE, "1 MHz is below any DP pixel clock");
+        CHECK(rb_dpdto_write_refuse(1, ref, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PIX_RANGE,
+              "a clock equal to the reference is a ratio of 1, not a mode");
+        CHECK(rb_dpdto_write_refuse(1, ref + 1u, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PIX_RANGE, "and above it is not a clock at all");
+        /* Both of this sink's own timings, from the EDID 2BD read off it, and
+         * the panel's own clock, must all be accepted - a bound that refused
+         * one of the modes it exists for would be useless. */
+        CHECK(rb_dpdto_write_refuse(1, 148500000u, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED) == RB_DPDTO_W_OK,
+              "2BD's preferred timing, 148.5 MHz, is allowed");
+        CHECK(rb_dpdto_write_refuse(1, 228000000u, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED) == RB_DPDTO_W_OK,
+              "and its 100 Hz mode, 228 MHz");
+        CHECK(rb_dpdto_write_refuse(1, 343000000u, ref, dark, 1, 1,
+                                    RB_DPDTO_BASE_CONFIRMED) == RB_DPDTO_W_OK,
+              "and the panel's own PHASE, which is the fastest clock this "
+              "chip is known to drive");
+
+        /* ------------------------------------------------------ the RMW word
+         *
+         * Reproducing REG_UPDATE_2: the two fields placed, everything else as
+         * read. The dark pipes' 0x8000c000 carries DTBCLK_DTO_DIV 8 in the top
+         * nibble and DIO_FIFO_ERROR 3 at bits 14-15, and BOTH must survive -
+         * losing the divider would be programming a different register. */
+        CHECK(rb_dpdto_rate_word(dark, 1) == 0x8000d010u,
+              "the enable and SRC_SEL go in and the divider and error bits "
+              "survive");
+        CHECK(rb_dpdto_rate_word(dark, 0) == 0x8000c010u,
+              "SRC_SEL 0 reproduces the firmware's own value instead");
+        CHECK((rb_dpdto_rate_word(dark, 1) & 0xf0000000u) ==
+              (dark & 0xf0000000u),
+              "DTBCLK_DTO_DIV is preserved, not rewritten");
+        CHECK(rb_dpdto_rate_word(dark, 1) != dark,
+              "a real write MUST move a dark pipe's word, which is what makes "
+              "`changed` worth publishing beside `applied`");
+
+        /* ------------------------------------------------------- the triple */
+        CHECK(rb_dpdto_rate_applied(0x8000d010u, 1),
+              "enable set and SRC_SEL where asked is applied");
+        CHECK(!rb_dpdto_rate_applied(0x8000c010u, 1),
+              "SRC_SEL missing is not applied, even with the enable set");
+        CHECK(!rb_dpdto_rate_applied(0x8000d000u, 1),
+              "nor is SRC_SEL alone with no enable");
+        CHECK(rb_dpdto_rate_applied(0x8000c010u, 0),
+              "and asking for SRC_SEL 0 is satisfied by its being 0");
+        CHECK(rb_dpdto_rate_changed(dark, 0x8000d010u), "the word moved");
+        CHECK(!rb_dpdto_rate_changed(dark, dark), "and an unmoved word has not");
+        CHECK(rb_dpdto_rate_clean(dark, 0x8000d010u),
+              "nothing outside the two fields moved");
+        CHECK(rb_dpdto_rate_clean(dark, 0x8000d090u),
+              "and the hardware's own status bit changing is not dirt - it is "
+              "the verdict");
+        CHECK(!rb_dpdto_rate_clean(dark, 0x9000d010u),
+              "but the divider changing under us is");
+
+        /* ------------------------------------------------------- the verdict
+         *
+         * It reads DPDTO_ENABLE_STATUS, a bit we do not write, and it needs a
+         * TRANSITION - so a pipe already reporting a clock cannot satisfy it
+         * (rb_dig_verdict()'s requirement, for the same reason). */
+        CHECK(rb_dpdto_prog_verdict(dark, 0x8000d090u) ==
+              RB_DPDTO_PROG_STARTED,
+              "the status bit going 0 -> 1 is a clock, and it is a bit we did "
+              "not write");
+        CHECK(rb_dpdto_prog_verdict(dark, 0x8000d010u) == RB_DPDTO_PROG_STILL,
+              "the enable we wrote reading back alone is NOT the verdict");
+        CHECK(rb_dpdto_prog_verdict(live, live) == RB_DPDTO_PROG_WAS_ON,
+              "a pipe whose status was already set cannot satisfy it");
+        CHECK(RB_DPDTO_PROG_NOT_RUN < 0,
+              "never programmed is its own code, never a verdict");
+
+        /* ------------------------------------------- the aperture inequality
+         *
+         * The relation that makes the aperture question already answered: the
+         * highest dword this write touches is below the segment every mapping
+         * in this kext has had to clear. Asserted here instead of stated in a
+         * comment at the call site. */
+        CHECK(rb_dpdto_write_dw_max() < RB_DPDTO_SEG2_CONTROL,
+              "every dword the write touches is below the segment the rest of "
+              "this kext works at, so no mapping that works can be too short");
+        CHECK(rb_dpdto_write_dw_max() == RB_DPDTO_SEG1 + 0x8fu,
+              "and that highest dword is 0xc0 + 0x8f, as the comment says");
+
+        /* THE DENY LIST IS THE WRONG INSTRUMENT HERE, and this pins why
+         * rather than leaving it to a comment: it is a BASE_IDX 2 list, and
+         * asking it about a BASE_IDX 1 offset returns 0 for the wrong reason
+         * - which would read exactly like a check that had been done (rule
+         * 26 on an instrument, and rule 14 on its answer). */
+        CHECK(RB_DCN_DENY_BASE_IDX == 2u,
+              "the deny list is indexed by BASE_IDX 2 offsets");
+        CHECK(!rb_dcn_is_denied(rb_dpdto_dw(1, RB_DPDTO_REG_PHASE)),
+              "so it passes a DTO offset for the wrong reason, and the base "
+              "verdict is the check that counts");
+        CHECK(rb_dcn_is_denied(0x89u),
+              "while the list itself is non-empty - the control for the line "
+              "above");
     }
 
 #undef CHECK

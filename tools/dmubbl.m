@@ -877,6 +877,122 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
     }
 }
 
+/* ===================== 2F1: the DP pixel-clock DTO write ================= */
+
+static const char *dtoWhy(long c)
+{
+    switch (c) {
+    case 0:  return "OK - the three writes ran";
+    case 40: return "not armed (-rbgpufbdto absent)";
+    case 41: return "no register mapping";
+    case 42: return "THIS BOOT did not confirm BASE_IDX 1 - read RBFBDtoBase";
+    case 43: return "pipe 0 is the PANEL, refused by name";
+    case 44: return "pipe out of range (0..3)";
+    case 45: return "that pipe's DP DTO is already enabled";
+    case 46: return "pipe 0's MODULO is not usable as a reference";
+    case 47: return "the asked clock is outside 25 MHz .. the live reference";
+    default: return "unknown";
+    }
+}
+
+static const char *dtoVerdictName(long v)
+{
+    switch (v) {
+    case -1: return "NOT RUN";
+    case 0:  return "STILL - the hardware's status bit did not follow";
+    case 1:  return "STARTED - status went 0 -> 1: the DTO makes a clock";
+    case 2:  return "WAS ON - already set, so no transition to attribute";
+    default: return "unknown";
+    }
+}
+
+static void dtoVerdictPrint(io_service_t fb, long callsBefore)
+{
+    long calls = callsBefore;
+    int spins;
+
+    /* Rule 31, and the fifth recorded instance of getting this wrong: poll a
+     * MONOTONIC counter past its pre-set value rather than sleeping and
+     * comparing two reads of the dialled value, which cannot tell "not
+     * published yet" from "the write was lost". */
+    for (spins = 0; spins < 60; spins++) {
+        calls = num(fb, "RBFBDtoProgCalls");
+        if (calls > callsBefore) { break; }
+        usleep(100 * 1000);
+    }
+    if (calls <= callsBefore) {
+        printf("\nRBFBDtoProgCalls never moved past %ld in 6 s.\n"
+               "That is NOT a refusal. Either this framebuffer predates 2F1 "
+               "(the key\nwould then be ABSENT and read as -1), or the set "
+               "never reached the\nhandler. Check the loaded UUID inside the "
+               "collection first (rule 15):\n  kmutil inspect -B "
+               "/Library/KernelCollections/AuxiliaryKernelExtensions.kc \\\n"
+               "    --show-kext-uuids | grep -i rembrandt\n", callsBefore);
+        return;
+    }
+
+    const long refuse  = num(fb, "RBFBDtoProgRefuse");
+    const long ran     = num(fb, "RBFBDtoProgRan");
+    const long inst    = num(fb, "RBFBDtoProgInst");
+    const long pix     = num(fb, "RBFBDtoProgPixHz");
+    const long ref     = num(fb, "RBFBDtoProgRefHz");
+    const long srcsel  = num(fb, "RBFBDtoProgSrcSel");
+    const long applied = num(fb, "RBFBDtoProgApplied");
+    const long changed = num(fb, "RBFBDtoProgChanged");
+    const long clean   = num(fb, "RBFBDtoProgClean");
+    const long before  = num(fb, "RBFBDtoRateBefore");
+    const long after   = num(fb, "RBFBDtoRateAfter");
+    const long phase   = num(fb, "RBFBDtoPhaseAfter");
+    const long modulo  = num(fb, "RBFBDtoModuloAfter");
+    const long verdict = num(fb, "RBFBDtoProgVerdict");
+    const long base    = num(fb, "RBFBDtoBase");
+
+    printf("\nverdict (read back after the call the kext counted)\n");
+    printf("  base verdict   %ld  %s\n", base,
+           base == 0 ? "CONFIRMED this boot" : "NOT confirmed this boot");
+    printf("  refusal        %ld  %s\n", refuse, dtoWhy(refuse));
+    printf("  pipe           %ld   ran %ld   srcsel %ld\n", inst, ran, srcsel);
+    printf("  asked clock    %ld Hz  (%.6f MHz)\n", pix, (double)pix / 1e6);
+    printf("  reference      %ld Hz  (%.6f MHz) - COPIED from pipe 0\n",
+           ref, (double)ref / 1e6);
+    printf("  PIXEL_RATE_CNTL 0x%08lx -> 0x%08lx\n", before, after);
+    printf("  applied %ld  changed %ld  clean %ld\n", applied, changed, clean);
+    printf("  PHASE/MODULO readback  %ld / %ld\n", phase, modulo);
+    printf("                 ^ raw only. 2F0 measured PHASE as the clock the\n"
+           "                   firmware ASKED for, not the achieved one, so\n"
+           "                   our own number coming back here says nothing\n"
+           "                   (rule 20) and is known in advance to agree.\n");
+    printf("  VERDICT        %ld  %s\n", verdict, dtoVerdictName(verdict));
+
+    if (refuse == 0 && verdict == 1) {
+        printf("\n  -> DPDTO_ENABLE_STATUS went 0 -> 1 on a pipe that was "
+               "dark.\n     That bit is the hardware's answer and not one we "
+               "wrote, and 2F0\n     attested both its states on this chip "
+               "beforehand. The pixel\n     clock for the external display's "
+               "pipe exists.\n");
+        printf("     NOT established by this: a picture. There is no OTG "
+               "timing on\n     this pipe, no trained link, no stream mapped "
+               "to the encoder and\n     no surface - all four are later "
+               "steps, and a dark monitor is\n     the EXPECTED reading.\n");
+    } else if (refuse == 0 && verdict == 0) {
+        printf("\n  -> the three writes ran, the enable read back, and the "
+               "hardware's\n     own status bit did NOT follow. That is a "
+               "real negative about this\n     block and not a failed write - "
+               "`changed 1` says the word moved.\n     Candidates, none "
+               "measured: the DTO needs something else enabled\n     "
+               "(DISPCLK to the pipe, OTG_PIXEL_RATE_SOURCE), or SRC_SEL is "
+               "the\n     wrong way round - try the other side with `srcsel "
+               "0` in THIS boot,\n     interleaved (rule 44).\n");
+    } else if (refuse == 42) {
+        printf("\n  -> nothing was written, and that is the gate working. The "
+               "write is\n     at BASE_IDX 1, whose offsets collide with the "
+               "DOMAIN power gating\n     of the pipe scanning the panel, so "
+               "it is refused unless THIS boot's\n     own sample reproduced "
+               "the panel's pixel clock at that base.\n     Read RBFBDtoBase, "
+               "RBFBDtoExpectedHz and RBFBDto0Phase.\n");
+    }
+}
+
 static void domVerdict(io_service_t fb, long callsBefore)
 {
     uint32_t before[DOM_SLOTS] = {0}, after[DOM_SLOTS] = {0};
@@ -1593,6 +1709,101 @@ int main(int argc, char **argv)
                "RDPCSTX_PHY_CNTL6 either side of the send, with PHY0 as the\n"
                "measured control. This is both the first bring-up step for the\n"
                "external display AND the test 2DB-2DF never got to run.\n");
+    } else if (strcmp(argv[1], "dto") == 0) {
+        /* 2F1: the three writes of `dcn31_program_pix_clk`'s DP branch on one
+         * dark pipe. A REGISTER write, not a DMUB command - it lives in this
+         * tool because the dial plumbing and the refusal decoding are here,
+         * and it needs REGION4 for nothing.
+         *
+         * The clock is an argument in kHz and DEFAULTS TO 2BD's preferred
+         * timing, with its provenance printed: 148.5 MHz is the first
+         * detailed timing descriptor of the EDID this project read off this
+         * sink over I2C-over-AUX on boot 295, which is the mode `dc` would
+         * pick and the one the monitor is guaranteed to accept. Its 100 Hz
+         * mode (228000) is the other measured option and both fit the
+         * ~8.64 Gbps link 2BB measured. The handoff named 228000; the
+         * preferred timing is chosen instead, deliberately and for that
+         * reason - nothing downstream of the clock exists yet, so the value
+         * cannot be observably wrong either way, and the one with fewer
+         * assumptions is the preferred one. */
+        long khz = 148500;
+        long pipe = -1;
+        long srcsel = -1;
+        for (int a = 2; a < argc; a++) {
+            if (strncmp(argv[a], "pipe=", 5) == 0) {
+                pipe = strtol(argv[a] + 5, NULL, 0);
+            } else if (strncmp(argv[a], "srcsel=", 7) == 0) {
+                srcsel = strtol(argv[a] + 7, NULL, 0);
+            } else if (strcmp(argv[a], "help") == 0) {
+                printf("usage: dmubbl dto [kHz] [pipe=N] [srcsel=0|1]\n"
+                       "       kHz omitted = 148500, 2BD's preferred timing\n"
+                       "       (its 100 Hz mode is 228000)\n"
+                       "       pipe omitted = 1, the first pipe that is NOT "
+                       "the panel's\n"
+                       "       srcsel omitted = 1, which is Linux's value "
+                       "(the firmware\n"
+                       "       left pipe 0's at 0 - the A side, interleavable "
+                       "in one boot)\n");
+                IOObjectRelease(fb);
+                return 2;
+            } else {
+                khz = strtol(argv[a], NULL, 0);
+            }
+        }
+
+        if (pipe == 0) {
+            printf("\nREFUSING to pass pipe 0 from this tool.\n"
+                   "Pipe 0 is the eDP PANEL this desktop is running on - "
+                   "OTG0_CONTROL\n0x00011201 with OTG1-3 at 0x300 (2oq), and "
+                   "2F0 measured its DTO\ndriving it. The kext refuses it by "
+                   "name as well; this is the outer\nof the two checks.\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+        if (pipe > 3) {
+            printf("usage: dmubbl dto [kHz] [pipe=1..3] [srcsel=0|1]  "
+                   "(`dto help`)\n");
+            IOObjectRelease(fb);
+            return 2;
+        }
+
+        /* All three keys in ONE setProperties call: VBL.cpp reads the pipe and
+         * SRC_SEL before the clock that triggers the write, so both dials are
+         * in place before the write they govern. A two-call handover is what
+         * rule 34 and 2DA warn about and it is avoidable here. */
+        NSMutableDictionary *m = [NSMutableDictionary dictionary];
+        if (pipe >= 0) { m[@"RBFBDtoPipe1"] = @((uint32_t)pipe); }
+        if (srcsel >= 0) { m[@"RBFBDtoSrcSel"] = @((uint32_t)(srcsel ? 1 : 0)); }
+        m[@"RBFBDtoPixHz"] = @((uint32_t)(khz * 1000));
+        d = m;
+
+        printf("\nprogramming the DP pixel-clock DTO on pipe %ld:\n",
+               pipe < 0 ? 1 : pipe);
+        printf("  PHASE  = %ld Hz  (%.6f MHz)%s\n", khz * 1000,
+               (double)khz / 1000.0,
+               khz == 148500 ? "  <- 2BD's preferred timing, off this sink's "
+                               "own EDID" : "");
+        printf("  MODULO = pipe 0's own live value, COPIED, not written down.\n"
+               "           2F0 read 600 000 000 there. PHASE/MODULO is a "
+               "RATIO, so\n           reusing the firmware's reference makes "
+               "this pipe as accurate\n           as the panel's and the TRUE "
+               "reference never has to be known -\n           which is also "
+               "what Linux does (one dp_dto_ref_khz per pipe).\n");
+        printf("  PIXEL_RATE_CNTL: DP_DTO_ENABLE 1, PIPE_DTO_SRC_SEL %ld%s\n",
+               srcsel < 0 ? 1L : (srcsel ? 1L : 0L),
+               srcsel < 0 ? "  <- Linux's value; the firmware left pipe 0's "
+                            "at 0" : "");
+        printf("\nin Linux's order (PHASE, MODULO, then the enable), as an "
+               "RMW that\nkeeps DTBCLK_DTO_DIV and the error bits - which is "
+               "what REG_UPDATE_2\ncompiles to (2EE quoted the sequence).\n");
+        printf("\nTHE VERDICT IS DPDTO_ENABLE_STATUS, a bit we do NOT write, "
+               "whose two\nstates 2F0 attested on this chip before anything "
+               "was programmed. PHASE\nis NOT the verdict: 2F0 measured it as "
+               "the clock the firmware ASKED\nfor, so reading our own number "
+               "back there would be rule 20's defect.\n");
+        printf("\nThe write is refused unless THIS boot confirmed BASE_IDX 1 "
+               "- at the\nother candidate base these offsets are the DOMAIN "
+               "power gating of the\npipe scanning the panel.\n");
     } else {
         long want = atol(argv[1]);
         d = @{ @"RBFBDmubBl": @(want) };
@@ -1606,6 +1817,8 @@ int main(int argc, char **argv)
     const long digCallsBefore = isDig ? num(fb, "RBFBDigCalls") : 0;
     const int isDpAltQ = (strcmp(argv[1], "dpaltq") == 0);
     const long dpaltqCallsBefore = isDpAltQ ? num(fb, "RBFBDpAltQCalls") : 0;
+    const int isDto = (strcmp(argv[1], "dto") == 0);
+    const long dtoCallsBefore = isDto ? num(fb, "RBFBDtoProgCalls") : 0;
 
     kern_return_t kr = IORegistryEntrySetCFProperties(
         fb, (__bridge CFDictionaryRef)d);
@@ -1614,6 +1827,8 @@ int main(int argc, char **argv)
         digVerdictPrint(fb, digCallsBefore);
     } else if (isDpAltQ) {
         dpaltqReport(fb, dpaltqCallsBefore);
+    } else if (isDto) {
+        dtoVerdictPrint(fb, dtoCallsBefore);
     } else if (isDom) {
         /* The IOReturn is a yes/no over every refusal path at once, so the
          * tool reads the code itself rather than making the user decode an

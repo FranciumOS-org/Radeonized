@@ -621,6 +621,27 @@ private:
     uint32_t           dtoRefHz;         /* MODULO[0], iff the base is good  */
     int                dtoBaseVerdict;
     int                dtoPipeVerdict;
+
+    /* 2F1: the write. `dtoProgInst` is the pipe asked for, which is published
+     * even on a refusal so a boot says WHAT it declined (rule 14), and
+     * `dtoProgCalls` is the monotonic counter a tool polls past its pre-set
+     * value rather than sleeping on a throttled snapshot (rule 31). */
+    uint32_t           dtoProgInst;
+    uint32_t           dtoProgPixHz;
+    uint32_t           dtoProgRefHz;     /* MODULO copied from pipe 0        */
+    uint32_t           dtoProgSrcSel;    /* the one field Linux and the      */
+                                         /* firmware disagree on (2F0)       */
+    uint32_t           dtoProgRefuse;    /* RB_DPDTO_W_*                     */
+    uint32_t           dtoProgApplied;
+    uint32_t           dtoProgChanged;
+    uint32_t           dtoProgClean;
+    uint32_t           dtoRateBefore;
+    uint32_t           dtoRateAfter;
+    uint32_t           dtoPhaseAfter;    /* raw, and NOT the verdict (2F0)   */
+    uint32_t           dtoModuloAfter;
+    uint32_t           dtoProgCalls;     /* monotonic, including refusals    */
+    uint32_t           dtoProgRan;       /* writes that actually happened    */
+    int                dtoProgVerdict;   /* RB_DPDTO_PROG_*                  */
     uint32_t           digFe;            /* the FE one-hot the dial asked */
 
     /* 2EC: DIG_FE_SOURCE_SELECT, the FIRST write this project makes to the
@@ -997,6 +1018,12 @@ private:
      * BASE_IDX 1 is a real address before anything is written there. Same
      * mapping as hpdSample(); gated on dtoArmed. */
     void dtoSample(void);
+
+    /* 2F1: the three writes of `dcn31_program_pix_clk`'s DP branch on one
+     * dark pipe. Refuses unless THIS boot's dtoSample() confirmed BASE_IDX 1,
+     * and refuses pipe 0 by name. Returns an RB_DPDTO_W_* code. */
+    uint32_t dtoProgram(uint32_t inst, uint32_t pixHz, int srcSel);
+    void dtoPublish(void);
     /* 2BA: a native AUX read of the sink's DPCD on the engine bound to `hpd`.
      * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
      * bounded; refuses rather than racing when the DMCUB owns the engine. */

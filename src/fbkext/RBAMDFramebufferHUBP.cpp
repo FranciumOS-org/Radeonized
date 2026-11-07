@@ -85,6 +85,25 @@ bool RBAMDFramebuffer::hubpSetup(void)
     dtoRefHz = 0;
     dtoBaseVerdict = RB_DPDTO_BASE_NOT_SAMPLED;
     dtoPipeVerdict = RB_DPDTO_PIPE_NOT_SAMPLED;
+    /* 2F1: the write side. The verdict starts at NOT_RUN so a boot that never
+     * programmed anything cannot be read as one that did and found nothing
+     * (rule 14), and the refusal starts at OK only because dtoProgCalls 0 is
+     * what separates "never called" from "called and allowed". */
+    dtoProgInst = RB_DPDTO_FIRST_FREE_PIPE;
+    dtoProgPixHz = 0;
+    dtoProgRefHz = 0;
+    dtoProgSrcSel = 1u;   /* Linux's value; see rb_dpdto.h */
+    dtoProgRefuse = RB_DPDTO_W_OK;
+    dtoProgApplied = 0;
+    dtoProgChanged = 0;
+    dtoProgClean = 0;
+    dtoRateBefore = 0;
+    dtoRateAfter = 0;
+    dtoPhaseAfter = 0;
+    dtoModuloAfter = 0;
+    dtoProgCalls = 0;
+    dtoProgRan = 0;
+    dtoProgVerdict = RB_DPDTO_PROG_NOT_RUN;
     for (unsigned i = 0; i < RB_DPDTO_COUNT; i++) {
         dtoAlias[i] = 0;
         for (unsigned r = 0; r < RB_DPDTO_REG_COUNT; r++) {
@@ -831,4 +850,139 @@ void RBAMDFramebuffer::dtoSample(void)
     dtoBaseVerdict = rb_dpdto_base_verdict(dtoWord[0], dtoAlias, dtoExpectedHz);
     dtoPipeVerdict = rb_dpdto_pipe_verdict(dtoWord[0][RB_DPDTO_REG_RATE_CNTL]);
     dtoRefHz = rb_dpdto_ref_hz(dtoWord[0], dtoBaseVerdict);
+}
+
+/* 2F1: PROGRAM ONE DARK PIPE'S DP PIXEL-CLOCK DTO.
+ *
+ * `dcn31_program_pix_clk`'s DP branch, in its own order: PHASE, then MODULO,
+ * then the enable in PIXEL_RATE_CNTL. 2EE established this is the path on this
+ * chip for this signal (the VBIOS `set_pixel_clock` command is reached only in
+ * the HDMI/DVI `else`), and 2F0 confirmed the base on hardware.
+ *
+ * THE GATE IS THIS BOOT'S OWN BASE VERDICT, not 2F0's number. dtoSample() is
+ * re-run on every periodic publish, so the verdict this refusal consumes was
+ * computed from the chip within the last publish interval - and it is computed
+ * from PHASE[0] against the live raster, which no wrong address can satisfy. A
+ * write at the other candidate base lands on DOMAIN2/3's power gating, so this
+ * is rule 47 asked of a write with the answer measured rather than argued.
+ *
+ * It is re-sampled HERE rather than trusted from whenever the last publish
+ * happened, because a dial must not rest on a snapshot (rule 31) - and because
+ * the target pipe's live word is needed anyway, to refuse a pipe whose DTO is
+ * already running.
+ *
+ * `blRegs` is the writable mapping of the same BAR5 window `hubpRegs` reads
+ * through, as feConnect() and encConfigure() already use. No new mapping and
+ * no new aperture question: these dwords top out at 0x14f, BELOW the 0x34c0
+ * segment every mapping in this kext has had to clear to be usable at all -
+ * an inequality the hosttest pins rather than this comment asserting it.
+ *
+ * NOT reproduced, and said here before any reading so a null cannot be
+ * over-read: everything downstream of the clock. There is no OTG timing on
+ * pipe 1, no trained link, no stream mapped to the encoder and no surface. So
+ * a STARTED verdict means "the DTO makes a clock", which is the whole claim -
+ * nothing here should put a picture on the monitor, and the absence of one is
+ * not evidence against the write.
+ */
+/* 2F1: publish the write side. Called from publishVBLState() AND from the way
+ * out of the dial's own setProperties handler, so a tool's read-back is that
+ * call's state and not the previous snapshot's - 2E3's structural fix,
+ * applied here before a tool could be written against the stale path. These
+ * run from setProperties at human frequency, so rule 16's cost argument for
+ * the RBFBPubMs throttle does not reach them. */
+void RBAMDFramebuffer::dtoPublish(void)
+{
+    /* 2F1: the write side. `RBFBDtoProgCalls` is the monotonic counter a tool
+     * polls past its pre-set value, because RBGPUDiag-style verification by
+     * sleeping on the dialled value is the mistake rule 31 has now recorded
+     * five times. Every field is published whichever way the refusal fell. */
+    setProperty("RBFBDtoProgCalls", (uint64_t)dtoProgCalls, 32);
+    setProperty("RBFBDtoProgRan", (uint64_t)dtoProgRan, 32);
+    setProperty("RBFBDtoProgRefuse", (uint64_t)dtoProgRefuse, 32);
+    setProperty("RBFBDtoProgInst", (uint64_t)dtoProgInst, 32);
+    setProperty("RBFBDtoProgPixHz", (uint64_t)dtoProgPixHz, 64);
+    setProperty("RBFBDtoProgRefHz", (uint64_t)dtoProgRefHz, 64);
+    setProperty("RBFBDtoProgSrcSel", (uint64_t)dtoProgSrcSel, 32);
+    setProperty("RBFBDtoProgApplied", (uint64_t)dtoProgApplied, 32);
+    setProperty("RBFBDtoProgChanged", (uint64_t)dtoProgChanged, 32);
+    setProperty("RBFBDtoProgClean", (uint64_t)dtoProgClean, 32);
+    setProperty("RBFBDtoRateBefore", (uint64_t)dtoRateBefore, 64);
+    setProperty("RBFBDtoRateAfter", (uint64_t)dtoRateAfter, 64);
+    /* Raw, and NOT the verdict: 2F0 measured PHASE as the clock the firmware
+     * ASKED for rather than a readback of the achieved one, so finding our own
+     * number here is rule 20's defect and is known in advance to happen. */
+    setProperty("RBFBDtoPhaseAfter", (uint64_t)dtoPhaseAfter, 64);
+    setProperty("RBFBDtoModuloAfter", (uint64_t)dtoModuloAfter, 64);
+    /* The verdict reads DPDTO_ENABLE_STATUS - a bit we did not write, whose
+     * two states 2F0 attested on this chip before anything was programmed. */
+    setProperty("RBFBDtoProgVerdict", (uint64_t)dtoProgVerdict, 32);
+}
+
+uint32_t RBAMDFramebuffer::dtoProgram(uint32_t inst, uint32_t pixHz, int srcSel)
+{
+    dtoProgCalls++;
+    dtoProgInst = inst;
+    dtoProgPixHz = pixHz;
+    dtoProgSrcSel = srcSel ? 1u : 0u;
+    dtoProgApplied = 0;
+    dtoProgChanged = 0;
+    dtoProgClean = 0;
+    dtoProgVerdict = RB_DPDTO_PROG_NOT_RUN;
+
+    const int haveRegs = (blRegs != nullptr) && (hubpRegs != nullptr)
+                         && dtoReady;
+
+    /* Re-read the whole block, so the base verdict and the target pipe's live
+     * word come from the SAME sample as each other (rule 44's shape for a
+     * control: one measured in a different window is not one). */
+    if (haveRegs) { dtoSample(); }
+
+    /* Clamped only so the live read below cannot index out of range before
+     * rb_dpdto_write_refuse() gets to reject the instance itself - the same
+     * shape feConnect() uses, and the refusal still names the pipe asked
+     * for because dtoProgInst was stored above. */
+    const uint32_t safe = (inst < RB_DPDTO_COUNT) ? inst : 0u;
+
+    dtoRateBefore = haveRegs ? dtoWord[safe][RB_DPDTO_REG_RATE_CNTL] : 0u;
+    dtoRateAfter = dtoRateBefore;
+    dtoPhaseAfter = haveRegs ? dtoWord[safe][RB_DPDTO_REG_PHASE] : 0u;
+    dtoModuloAfter = haveRegs ? dtoWord[safe][RB_DPDTO_REG_MODULO] : 0u;
+
+    /* The reference is pipe 0's own MODULO, read off the chip rather than
+     * written down - 2F0 found 600 000 000 there and Linux uses one
+     * `dp_dto_ref_khz` for every pipe, so copying it makes pipe 1's ratio as
+     * accurate as the panel's without the true reference ever being known. */
+    dtoProgRefHz = haveRegs ? dtoWord[RB_DPDTO_PANEL_PIPE][RB_DPDTO_REG_MODULO]
+                            : 0u;
+
+    const uint32_t why = rb_dpdto_write_refuse(inst, pixHz, dtoProgRefHz,
+                                               dtoRateBefore,
+                                               dtoArmed ? 1 : 0, haveRegs,
+                                               dtoBaseVerdict);
+    if (why != RB_DPDTO_W_OK) { return dtoProgRefuse = why; }
+
+    const uint32_t phaseDw = RB_DPDTO_SEG1 + rb_dpdto_dw(inst,
+                                                 RB_DPDTO_REG_PHASE);
+    const uint32_t moduloDw = RB_DPDTO_SEG1 + rb_dpdto_dw(inst,
+                                                 RB_DPDTO_REG_MODULO);
+    const uint32_t rateDw = RB_DPDTO_SEG1 + rb_dpdto_dw(inst,
+                                                 RB_DPDTO_REG_RATE_CNTL);
+
+    /* Linux's order, unrearranged: the divider's two terms are in place
+     * before the enable that starts it. */
+    blRegs[phaseDw] = pixHz;
+    blRegs[moduloDw] = dtoProgRefHz;
+    blRegs[rateDw] = rb_dpdto_rate_word(dtoRateBefore, srcSel);
+
+    dtoRateAfter = hubpRegs[rateDw];
+    dtoPhaseAfter = hubpRegs[phaseDw];
+    dtoModuloAfter = hubpRegs[moduloDw];
+
+    dtoProgApplied = (uint32_t)rb_dpdto_rate_applied(dtoRateAfter, srcSel);
+    dtoProgChanged = (uint32_t)rb_dpdto_rate_changed(dtoRateBefore,
+                                                     dtoRateAfter);
+    dtoProgClean = (uint32_t)rb_dpdto_rate_clean(dtoRateBefore, dtoRateAfter);
+    dtoProgVerdict = rb_dpdto_prog_verdict(dtoRateBefore, dtoRateAfter);
+    dtoProgRan++;
+    return dtoProgRefuse = RB_DPDTO_W_OK;
 }
