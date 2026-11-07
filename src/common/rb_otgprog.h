@@ -380,6 +380,23 @@ static inline int rb_otgprog_build(uint32_t inst,
 #define RB_OTGPROG_W_NOCLOCK     45u  /* that pipe's DP DTO is not running  */
 #define RB_OTGPROG_W_MODE        46u  /* the mode itself was refused        */
 #define RB_OTGPROG_W_CLOCKMISS   47u  /* the mode does not match the clock  */
+#define RB_OTGPROG_W_NOPANEL     48u  /* OTG0 is not scanning: wrong address */
+/* 48, paid for in boot 462. The panel's own OTG0 does not read as a scanning
+ * generator, so this instrument is not addressing the OTG block at all and
+ * nothing read from it means anything - least of all W_RUNNING below, which
+ * would read a wrong address as "this pipe is dark, go ahead".
+ *
+ * The first armed run read 0x00000000 from all four OTGn_CONTROL, because the
+ * kext indexed its BAR5 map with the raw BASE_IDX 2 dword and never added
+ * this chip's DMU segment 2 base of 0x34c0. Every other reader in that file
+ * adds it. A readable wrong address, which is rule 47 asked of a write: the
+ * sixteen writes would have gone to dwords 0x1b2a.. , inside whatever block
+ * sits at the bottom of BAR5.
+ *
+ * The panel scanning was ALREADY the stated positive control for this
+ * instrument - and it was a thing a human had to notice in a survey. Rule 45:
+ * when the deliverable depends on an observation, the observation needs to be
+ * an instrument. So it is a gate, checked before the dark-pipe test. */
 
 /* How far the mode's implied clock may sit from the clock already programmed
  * into that pipe's DP DTO, in parts per thousand. 2F0 measured the panel's
@@ -420,7 +437,8 @@ static inline uint32_t rb_otgprog_write_refuse(uint32_t inst,
                                                uint32_t live_control,
                                                uint32_t dto_phase_hz,
                                                int armed,
-                                               int have_regs)
+                                               int have_regs,
+                                               uint32_t panel_control)
 {
     struct rb_otgprog_write w[RB_OTGPROG_MAX_WRITES];
     uint32_t n = 0, mode_hz;
@@ -430,6 +448,16 @@ static inline uint32_t rb_otgprog_write_refuse(uint32_t inst,
     if (!have_regs || !m) return RB_OTGPROG_W_NOREGS;
     if (inst == 0) return RB_OTGPROG_W_PANEL;
     if (inst >= RB_OTGPROG_COUNT) return RB_OTGPROG_W_INST;
+
+    /* Before anything read from this block is believed, including the
+     * dark-pipe check below. See RB_OTGPROG_W_NOPANEL. Deliberately NOT a
+     * check that the word equals 0x00011201: the panel's derived refresh
+     * ladder moves V_TOTAL and the card records OTG0_CONTROL as a word that
+     * changes. MASTER_EN is the bit that cannot be set on a generator that is
+     * not running, and the bit a wrong address cannot fake - a wrong address
+     * gave 0. */
+    if (!(panel_control & RB_OTGPROG_M_MASTER_EN))
+        return RB_OTGPROG_W_NOPANEL;
 
     /* Nothing in this project turns a running OTG off, and rewriting the
      * raster of a generator that is already scanning is the one way this

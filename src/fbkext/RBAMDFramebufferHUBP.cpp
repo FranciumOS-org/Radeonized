@@ -345,7 +345,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
          * today's BAR5 of 512 KB, written out so a later BAR change is not
          * silent. */
         const uint32_t otgNeeded =
-            RB_OTGPROG_DW_FRAME_COUNT(RB_OTGPROG_COUNT - 1u);
+            kRbDmuSeg2 + RB_OTGPROG_DW_FRAME_COUNT(RB_OTGPROG_COUNT - 1u);
         otgApertureOk =
             length >= ((uint64_t)otgNeeded + 1) * sizeof(uint32_t);
     }
@@ -1128,8 +1128,8 @@ void RBAMDFramebuffer::otgSample(void)
     if (!otgApertureOk) { return; }
 
     for (uint32_t i = 0; i < RB_OTGPROG_COUNT; i++) {
-        otgControl[i] = hubpRegs[RB_OTGPROG_DW_CONTROL(i)];
-        otgFrames[i]  = hubpRegs[RB_OTGPROG_DW_FRAME_COUNT(i)];
+        otgControl[i] = hubpRegs[kRbDmuSeg2 + RB_OTGPROG_DW_CONTROL(i)];
+        otgFrames[i]  = hubpRegs[kRbDmuSeg2 + RB_OTGPROG_DW_FRAME_COUNT(i)];
     }
     otgReady = true;
 }
@@ -1181,7 +1181,8 @@ uint32_t RBAMDFramebuffer::otgProgram(uint32_t inst, uint32_t refreshHz,
     const uint32_t why = rb_otgprog_write_refuse(inst, mode, refreshHz,
                                                  otgCallLive, otgCallDtoHz,
                                                  otgArmed ? 1 : 0,
-                                                 (haveRegs && otgReady) ? 1 : 0);
+                                                 (haveRegs && otgReady) ? 1 : 0,
+                                                 otgControl[0]);
     /* The only state a refusal leaves: the otgCall* set and the monotonic
      * counter (rule 14 - a refusal publishes what it refused, by code). */
     if (why != RB_OTGPROG_W_OK) { return otgCallRefuse = why; }
@@ -1207,18 +1208,24 @@ uint32_t RBAMDFramebuffer::otgProgram(uint32_t inst, uint32_t refreshHz,
      * and swapping them leaves the generator disabled, which is why the list
      * is replayed in index order and never sorted or de-duplicated. */
     for (uint32_t i = 0; i < n; i++) {
+        /* kRbDmuSeg2. rb_otgprog.h's dwords are BASE_IDX 2 offsets, which is
+         * what every Linux header in this tree gives; this chip's DMU
+         * segment 2 base is 0x34c0 and the map starts at BAR5 offset 0. The
+         * first armed run omitted it on the READS and got 0 from all four
+         * generators - see RB_OTGPROG_W_NOPANEL. */
+        const unsigned idx = kRbDmuSeg2 + w[i].dw;
         if (w[i].whole) {
-            blRegs[w[i].dw] = w[i].value;
+            blRegs[idx] = w[i].value;
         } else {
-            const uint32_t cur = hubpRegs[w[i].dw];
-            blRegs[w[i].dw] = (cur & ~w[i].mask) | w[i].value;
+            const uint32_t cur = hubpRegs[idx];
+            blRegs[idx] = (cur & ~w[i].mask) | w[i].value;
         }
     }
     otgProgWrites = n;
 
-    otgAfter = hubpRegs[RB_OTGPROG_DW_CONTROL(inst)];
-    otgHTotalAfter = hubpRegs[RB_OTGPROG_DW_H_TOTAL(inst)];
-    otgVTotalAfter = hubpRegs[RB_OTGPROG_DW_V_TOTAL(inst)];
+    otgAfter = hubpRegs[kRbDmuSeg2 + RB_OTGPROG_DW_CONTROL(inst)];
+    otgHTotalAfter = hubpRegs[kRbDmuSeg2 + RB_OTGPROG_DW_H_TOTAL(inst)];
+    otgVTotalAfter = hubpRegs[kRbDmuSeg2 + RB_OTGPROG_DW_V_TOTAL(inst)];
 
     /* The counter, read AFTER the enable. One read is enough for a verdict
      * only because the caller polls otgProgCalls and reads the published
@@ -1226,7 +1233,7 @@ uint32_t RBAMDFramebuffer::otgProgram(uint32_t inst, uint32_t refreshHz,
      * microseconds apart would report STILL on a raster that is fine, since
      * 1080p60 is one frame every 16.7 ms. So STILL here is NOT a failure
      * verdict, and the tool says so. */
-    otgFramesAfter = hubpRegs[RB_OTGPROG_DW_FRAME_COUNT(inst)];
+    otgFramesAfter = hubpRegs[kRbDmuSeg2 + RB_OTGPROG_DW_FRAME_COUNT(inst)];
 
     otgProgVerdict = rb_otgprog_verdict(otgAfter, otgFramesBefore,
                                         otgFramesAfter);
@@ -1245,6 +1252,11 @@ void RBAMDFramebuffer::otgPublish(void)
     setProperty("RBFBOtgRArmed", otgArmed);
     setProperty("RBFBOtgRReady", otgReady);
     setProperty("RBFBOtgRAperture", otgApertureOk);
+    /* The gate's own positive-control input, published by name so the tool
+     * states it rather than a reader deriving it from OTG0's word (rule 34 -
+     * an experiment's arm is part of the experiment). */
+    setProperty("RBFBOtgRPanelOk",
+                (otgControl[0] & RB_OTGPROG_M_MASTER_EN) ? true : false);
     for (uint32_t i = 0; i < RB_OTGPROG_COUNT; i++) {
         char k[32];
         snprintf(k, sizeof(k), "RBFBOtgR%uCtl", (unsigned)i);

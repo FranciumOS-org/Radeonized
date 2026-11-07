@@ -300,36 +300,61 @@ int otgprog_tests(void)
     /* --- the write gate --------------------------------------------- */
     {
         const uint32_t DTO = 148500000u;   /* what boot 461 programmed */
-        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 1),
+        /* The panel's OTG0 as every case below sees it: scanning. Boot 462
+         * read 0x00000000 here, off a wrong segment base. */
+        const uint32_t PANEL = 0x00011201u;
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 1, PANEL),
              RB_OTGPROG_W_OK, "pipe 1, 1080p60, dark, clock matching");
-        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 0, 1),
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 0, 1, PANEL),
              RB_OTGPROG_W_UNARMED, "unarmed outranks everything");
-        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 0),
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 0, PANEL),
              RB_OTGPROG_W_NOREGS, "no register window");
-        ck_u(rb_otgprog_write_refuse(1u, NULL, 60u, 0x300u, DTO, 1, 1),
+        ck_u(rb_otgprog_write_refuse(1u, NULL, 60u, 0x300u, DTO, 1, 1, PANEL),
              RB_OTGPROG_W_NOREGS, "a NULL mode is NOREGS, not a crash");
-        ck_u(rb_otgprog_write_refuse(0u, &m, 60u, 0x300u, DTO, 1, 1),
+        ck_u(rb_otgprog_write_refuse(0u, &m, 60u, 0x300u, DTO, 1, 1, PANEL),
              RB_OTGPROG_W_PANEL, "pipe 0 refused by name at the gate too");
-        ck_u(rb_otgprog_write_refuse(4u, &m, 60u, 0x300u, DTO, 1, 1),
+        ck_u(rb_otgprog_write_refuse(4u, &m, 60u, 0x300u, DTO, 1, 1, PANEL),
              RB_OTGPROG_W_INST, "instance 4");
         /* 0x00011201 is the panel's own live OTG0_CONTROL, measured in 2oq.
          * Used here as the "already scanning" word so the test uses a real
          * one rather than a bit set by hand. */
-        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x00011201u, DTO, 1, 1),
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x00011201u, DTO, 1, 1, PANEL),
              RB_OTGPROG_W_RUNNING, "a pipe already scanning is refused");
-        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, 0u, 1, 1),
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, 0u, 1, 1, PANEL),
              RB_OTGPROG_W_NOCLOCK, "no DTO clock on that pipe");
+
+        /* 48: the positive control as a GATE. A panel word of 0 is what a
+         * wrong segment base gave in boot 462, and it must refuse BEFORE the
+         * dark-pipe check, which would read the same wrong address as "pipe 1
+         * is dark, go ahead". */
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 1, 0u),
+             RB_OTGPROG_W_NOPANEL, "panel word 0 refused: not addressing OTG");
+        /* Ordering is the whole point: NOPANEL must win over RUNNING, since
+         * on a wrong address the target pipe's word is garbage too. */
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x00011201u, DTO, 1, 1, 0u),
+             RB_OTGPROG_W_NOPANEL, "NOPANEL precedes RUNNING");
+        /* It does not fire on the panel's OTHER real words - the derived
+         * refresh ladder moves V_TOTAL, so OTG0_CONTROL is not a constant. */
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 1,
+                                     0x00011301u),
+             RB_OTGPROG_W_OK, "a different scanning word still passes");
+        /* And what this gate CANNOT do, stated so it is not credited with
+         * more than it does: 0xffffffff is the other wrong-address shape
+         * (rule 14's own - an absent read), and it has MASTER_EN set. */
+        ck_u(rb_otgprog_write_refuse(1u, &m, 60u, 0x300u, DTO, 1, 1,
+                                     0xffffffffu),
+             RB_OTGPROG_W_OK, "all-ones panel passes: this gate is one-sided");
         {
             struct rb_otgprog_mode bad = m;
             bad.h_sync_width = 0;
-            ck_u(rb_otgprog_write_refuse(1u, &bad, 60u, 0x300u, DTO, 1, 1),
+            ck_u(rb_otgprog_write_refuse(1u, &bad, 60u, 0x300u, DTO, 1, 1, PANEL),
                  RB_OTGPROG_W_MODE, "a mode the builder refuses");
         }
         /* The clock agreement. 2BD's other mode, 1920x1080 at ~100 Hz, needs
          * 228 MHz - against a DTO holding 148.5 MHz that is a 54 % miss, and
          * it is the realistic version of this mistake: the right monitor,
          * the right sink, the wrong one of its two timings. */
-        ck_u(rb_otgprog_write_refuse(1u, &m, 100u, 0x300u, DTO, 1, 1),
+        ck_u(rb_otgprog_write_refuse(1u, &m, 100u, 0x300u, DTO, 1, 1, PANEL),
              RB_OTGPROG_W_CLOCKMISS, "1080p at 100 Hz against a 148.5 MHz DTO");
         ck(!rb_otgprog_clock_agrees(0u, DTO), "a zero mode clock never agrees");
         ck(!rb_otgprog_clock_agrees(DTO, 0u), "a zero DTO phase never agrees");
