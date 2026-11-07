@@ -402,15 +402,22 @@ link is **three register writes of ours** and not the VBIOS command (2EE read
 the caller: `dcn31_program_pix_clk` programs `DP_DTO*_PHASE`/`MODULO`/
 `PIXEL_RATE_CNTL` itself and reaches `set_pixel_clock` only for HDMI/DVI).
 Those registers are **BASE_IDX 1 = 0xc0**, whose offsets collide with the
-DOMAIN power-gating block at BASE_IDX 2 — and boot 452 **CONFIRMED** the base
-on the chip (2F0), with the alias control reading `DOMAIN0/1_PG_STATUS` as
+DOMAIN power-gating block at BASE_IDX 2 — and boots 452 and 453 both
+**CONFIRMED** the base on the chip (2F0/2F1, so rule 44 is satisfied for it), with the alias control reading `DOMAIN0/1_PG_STATUS` as
 `0x10000000` there. From that boot: **`dprefclk` = 600 MHz exactly**
 (`MODULO[0]`, never located before); the panel's DTO does drive the panel
 (enable and status both set); pipes 1-3 are dark and byte-identical. Two
 cautions for the write: `PIPE0_DTO_SRC_SEL` is **0** where Linux writes 1 and
 the panel works anyway, and **PHASE is the requested clock, not a readback**
 (343.000000 MHz against a raster wanting 342.288, DRR ruled out) so it cannot
-be the verdict register. Then link training over AUX2 (driver-side — zero `dmub`
+be the verdict register. **2F1 BUILT those three writes and no boot has run them**: `dmubbl dto`, on a
+dark pipe, refused unless *this boot's own* sample confirmed the base, with
+MODULO **copied off pipe 0** (PHASE/MODULO is a ratio, so the true reference
+never has to be known) and the verdict taken from `DPDTO_ENABLE_STATUS` — a bit
+we do not write, whose two states 2F0 attested here first. `SRC_SEL` defaults
+to Linux's **1** with the firmware's 0 as an interleavable dial. A STARTED
+verdict means a clock, **not a picture**: nothing downstream exists yet.
+Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
 since 2sl). **Order matters:** FE connect → configure encoder → transmitter
@@ -447,8 +454,12 @@ which is measured false), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
 each arms its own dependencies and sends nothing until `build/out/dmubbl` names
 a target; **PHY0 / DIG0 / front end DIGA are the panel's and are refused by
 name**), `-rbgpufbaux` (native AUX DPCD read),
-`-rbgpufbdto` (2EF's DP DTO read - read-only, writes and sends nothing; opt-in
-because the offsets collide with the DOMAIN block at the base this kext holds),
+`-rbgpufbdto` (2EF's DP DTO read **and 2F1's write** - opt-in because the
+offsets collide with the DOMAIN block at the base this kext holds. No second
+token was added: `-rbgpufbdtoprog` would have this one as a prefix, the shape
+rule 30 forbids. Even armed **nothing is written until `dmubbl dto` names a
+clock**, pipe 0 is refused by name in both halves, and the write is declined
+unless THIS boot's own sample reproduced the panel's pixel clock at BASE_IDX 1),
 `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,

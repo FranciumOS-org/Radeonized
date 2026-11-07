@@ -369,4 +369,278 @@ static inline uint32_t rb_dpdto_mhz_from_period_ns(uint64_t period_ns)
  * is load-bearing for a DIFFERENT reason: that function's callers
  * distinguish its 0 from a refusal code.) */
 
+
+/* ===================== 2F1: THE WRITE, and what bounds it =================
+ *
+ * 2F0 confirmed BASE_IDX 1 on the chip (boot 452): PHASE[0] reproduced the
+ * live raster to 0.208 % of a 0.5 % window, the alias control read
+ * `DOMAIN0/1_PG_STATUS` as 0x10000000 at BASE_IDX 2 exactly as 2DE measured
+ * them, and pipes 1-3 came back byte-identical and dark. So the address is
+ * established, and the three writes `dcn31_program_pix_clk` makes on a DP
+ * pipe are the next step in the external display's bring-up.
+ *
+ * THE SEQUENCE, in Linux's order (2EE quoted it; the order is reproduced, not
+ * rearranged - rule 46 is about the METHOD):
+ *
+ *     REG_WRITE(PHASE[inst],  actual_pix_clk_100hz * 100);   // Hz
+ *     REG_WRITE(MODULO[inst], dp_dto_ref_khz * 1000);        // Hz
+ *     REG_UPDATE_2(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1,
+ *                                         PIPE0_DTO_SRC_SEL, 1);
+ *
+ * PHASE/MODULO IS A RATIO, which is what makes this cheap and accurate at the
+ * same time. MODULO is not a number this header knows: it is read off pipe 0,
+ * where the firmware put its own `dprefclk` (2F0: 600 000 000 exactly), and
+ * handed back in. Linux does the same thing - one `dp_dto_ref_khz` for every
+ * pipe - so pipe 1's ratio lands as accurately as the panel's and the TRUE
+ * reference never has to be known. 2F0's open ~0.2 % question about the real
+ * DPREFCLK therefore does not block this and is not on its path.
+ *
+ * ------------------------------------------------- what must NOT be the verdict
+ *
+ * PHASE IS NOT A READBACK. 2F0 measured pipe 0's PHASE as a round
+ * 343.000000 MHz against a raster wanting 342.287571 - the clock the firmware
+ * ASKED for, not the one the hardware achieved, with DRR extension ruled out
+ * by measurement (V_TOTAL_MIN/MAX/MID/CNTL all 0). So reading PHASE back and
+ * finding our own number there is rule 20's defect in its purest form: we
+ * know IN ADVANCE that it will agree, and its agreeing says nothing.
+ *
+ * The same objection applies to `DP_DTO_ENABLE`: it is the bit we wrote.
+ *
+ * THE VERDICT IS A DIFFERENT BIT FROM THE ONE WRITTEN. `DPDTO0_ENABLE_STATUS`
+ * (bit 7) is the hardware's own answer, and 2F0 measured it TRACKING the
+ * enable on pipe 0 and clear on all three dark pipes - so its two states are
+ * both attested on this chip before anything is written. That is the whole
+ * reason rb_dpdto_pipe_verdict() publishes `DTO_ASKED` apart from `DTO`.
+ *
+ * WHAT IS STILL NOT USABLE AS ONE: `OTG_DIO_FIFO_ERROR` reads 3 on every dark
+ * pipe and 0 on pipe 0, which looks like a second instrument - but it has
+ * never been read on a pipe BEING BROUGHT UP, so whether it clears on a clock
+ * alone or needs a running OTG and a stream is unknown. It is published raw
+ * and read by nothing (rule 18: one sample on one pipe is not a reading).
+ *
+ * ------------------------------------------------------- PIPE0_DTO_SRC_SEL
+ *
+ * The one place this project's two sources of truth DISAGREE, and it is
+ * decided here rather than left to the caller's default.
+ *
+ * Linux writes it to 1 in the same REG_UPDATE_2 as the enable. The firmware
+ * left pipe 0's at 0 and the panel has scanned out for 452 boots, so 0 is
+ * sufficient ON THAT PIPE, by existence proof.
+ *
+ * The default is 1 - LINUX's value - because the two are not evidence about
+ * the same thing: the firmware brought eDP up through atom bytecode, and
+ * `dcn31_program_pix_clk` is the DRIVER path for a DP pipe being programmed
+ * from scratch, which is exactly the situation here. Rule 46 asks which file
+ * the method comes from; this method comes from that function, and
+ * normalising one of its two field writes to the other path's value would be
+ * reproducing neither.
+ *
+ * It is a DIAL, default 1, so both can be tried interleaved in one boot
+ * (rule 44 - an A/B across boots cannot tell a dial from a drift). What it
+ * selects is NOT stated here: the field's meaning is not in the vendored
+ * headers beyond its name, and inventing a mechanism for it would be rule 17.
+ *
+ * ------------------------------------------------------------- what bounds it
+ *
+ * The gate that matters is THIS BOOT'S OWN base confirmation. A write at the
+ * wrong one of these two bases lands on the power gating of the pipe scanning
+ * the panel, so `rb_dpdto_write_refuse()` takes the live base verdict and
+ * declines anything but RB_DPDTO_BASE_CONFIRMED. Not a constant, not a
+ * previous milestone's number: the verdict computed from the chip in the same
+ * boot. That is rule 47 asked of a write, with the answer measured rather
+ * than argued.
+ *
+ * Pipe 0 is refused BY NAME, in this header and again in the tool, for the
+ * reason PHY0 and DIGA are: it is the panel this desktop is running on.
+ *
+ * A pipe whose DTO is ALREADY enabled is refused too - that is a clock
+ * something may be using, and the three dark pipes are the targets this
+ * milestone has a control for.
+ *
+ * NOTHING HERE TOUCHES THE DOMAIN POWER GATING, and it does not need to:
+ * 2DE read DOMAIN0..3 all `0x10000000`, identical, so pipe 1's registers are
+ * already powered. That is why this write can be first.
+ *
+ * AND THE DENY LIST IS DELIBERATELY NOT CONSULTED. `rb_dcn_deny.h` declares
+ * `RB_DCN_DENY_BASE_IDX 2` and lists BASE_IDX 2 dword offsets; these writes
+ * are BASE_IDX 1. Worse than inapplicable, it would be actively misleading:
+ * `rb_dcn_is_denied(0x84)` returns 0 because the list starts at 0x89, so the
+ * call would PASS for the wrong reason and read like a check that had been
+ * done. The applicable check is the base verdict above, and the segment the
+ * write uses is published beside the result.
+ * ======================================================================== */
+
+/* Refusal codes, numbered clear of rb_pg's 20-25 and rb_dig's 30-37 so a
+ * number in a log names one block (rule 14 - a refusal is a code). */
+#define RB_DPDTO_W_OK                0u
+#define RB_DPDTO_W_NOT_ARMED        40u
+#define RB_DPDTO_W_NO_REGS          41u
+#define RB_DPDTO_W_BASE_UNPROVEN    42u  /* this boot did not confirm 0xc0  */
+#define RB_DPDTO_W_PANEL_PIPE       43u  /* pipe 0 - by name                */
+#define RB_DPDTO_W_PIPE_RANGE       44u
+#define RB_DPDTO_W_PIPE_LIVE        45u  /* its DTO is already enabled      */
+#define RB_DPDTO_W_REF_BAD          46u  /* pipe 0's MODULO is unusable     */
+#define RB_DPDTO_W_PIX_RANGE        47u  /* asked clock outside the band    */
+
+/* Pipe 0 is the panel: OTG0_CONTROL 0x00011201 with OTG1-3 at 0x300 (2oq),
+ * 2F0's `RBFBDtoPipe` 0, and every HUBP write this kext makes. Named so the
+ * refusal reads as a decision rather than an off-by-one. */
+#define RB_DPDTO_PANEL_PIPE          0u
+
+/* The default target, and what it is NOT. Pipe 1 is simply the first pipe
+ * that is not the panel's: DCN does not bind a pipe to a connector, `dc`
+ * assigns a free one per stream, and 2F0 found pipes 1-3 byte-identical and
+ * dark. So this is "the first free pipe" and emphatically not a derived
+ * pipe-to-Type-C mapping - the four instruments that agree on HPD2 / AUX2 /
+ * phyid 2 / DIG2 say nothing about which PIPE will carry it. Naming it after
+ * the port would be asserting a binding this project has not established. */
+#define RB_DPDTO_FIRST_FREE_PIPE     1u
+
+/* 2BD read this sink's EDID: preferred timing 1920x1080 @ 60.00 Hz at
+ * 148.5 MHz, a second descriptor at 1920x1080 @ 99.65 Hz / 228 MHz, and a
+ * range-limits descriptor capping the pixel clock at 230 MHz. The floor is
+ * VESA's lowest defined pixel clock (640x480 @ 60, 25.175 MHz).
+ *
+ * The CEILING IS NOT A CONSTANT: it is pipe 0's live MODULO, because a DTO
+ * divides PHASE by MODULO and a PHASE above the reference is not a clock this
+ * block can make. So the bound that actually matters is read off the chip and
+ * the written-down part only has to exclude a zero or a stray word. */
+#define RB_DPDTO_PIX_HZ_MIN   25000000u
+
+static inline int rb_dpdto_pix_plausible(uint32_t pix_hz, uint32_t modulo_hz)
+{
+    if (pix_hz < RB_DPDTO_PIX_HZ_MIN) { return 0; }
+    if (!modulo_hz) { return 0; }
+    /* Strictly below the reference. Equal would be a ratio of 1, which is
+     * not a mode this sink has and not a DTO configuration Linux ever
+     * programs. */
+    return pix_hz < modulo_hz;
+}
+
+/* Is the reference we are about to COPY from pipe 0 usable as one? Same bound
+ * the read side applies to MODULO, asked again here because the read's
+ * verdict was about an ADDRESS and this one is about a VALUE we are going to
+ * write somewhere else. */
+static inline int rb_dpdto_ref_usable(uint32_t modulo_hz)
+{
+    return modulo_hz >= RB_DPDTO_REF_HZ_MIN
+        && modulo_hz <= RB_DPDTO_REF_HZ_MAX;
+}
+
+/* The whole write-side refusal, in one place so the hosttest owns it.
+ *
+ * `base_verdict` is this boot's own rb_dpdto_base_verdict() answer, `live` is
+ * the target pipe's PIXEL_RATE_CNTL as read a moment ago, and `modulo_hz` is
+ * pipe 0's MODULO - the reference about to be copied. Every argument is a
+ * live reading; none is a recalled number. */
+static inline uint32_t rb_dpdto_write_refuse(uint32_t inst, uint32_t pix_hz,
+                                             uint32_t modulo_hz,
+                                             uint32_t live,
+                                             int armed, int have_regs,
+                                             int base_verdict)
+{
+    if (!armed)     { return RB_DPDTO_W_NOT_ARMED; }
+    if (!have_regs) { return RB_DPDTO_W_NO_REGS; }
+
+    /* The base comes first: every other field below was read through it, so
+     * if it is unproven none of them mean anything (the alias control's own
+     * ordering, for the same reason). */
+    if (base_verdict != RB_DPDTO_BASE_CONFIRMED) {
+        return RB_DPDTO_W_BASE_UNPROVEN;
+    }
+
+    if (inst == RB_DPDTO_PANEL_PIPE) { return RB_DPDTO_W_PANEL_PIPE; }
+    if (inst >= RB_DPDTO_COUNT)      { return RB_DPDTO_W_PIPE_RANGE; }
+
+    if (rb_dpdto_enabled(live))      { return RB_DPDTO_W_PIPE_LIVE; }
+
+    if (!rb_dpdto_ref_usable(modulo_hz)) { return RB_DPDTO_W_REF_BAD; }
+    if (!rb_dpdto_pix_plausible(pix_hz, modulo_hz)) {
+        return RB_DPDTO_W_PIX_RANGE;
+    }
+
+    return RB_DPDTO_W_OK;
+}
+
+/* The PIXEL_RATE_CNTL word to store: an RMW that sets DP_DTO_ENABLE and
+ * places SRC_SEL, keeping every other field as read - which is exactly what
+ * `REG_UPDATE_2` compiles to. The status and error fields therefore go back
+ * as they came, deliberately: Linux does not mask them and this is the same
+ * read-modify-write, so a difference here would be a divergence from the
+ * method rather than a precaution (rule 46). */
+static inline uint32_t rb_dpdto_rate_word(uint32_t live, int src_sel)
+{
+    uint32_t w = live & ~(RB_DPDTO_DP_DTO_ENABLE | RB_DPDTO_SRC_SEL);
+    w |= RB_DPDTO_DP_DTO_ENABLE;
+    if (src_sel) { w |= RB_DPDTO_SRC_SEL; }
+    return w;
+}
+
+/* --------------------------------------------------------- the three answers
+ *
+ * Published separately because they fail for different reasons, which is the
+ * triple 2EC's FE connect settled on and 2ED measured all three of.
+ *
+ *   applied - the fields we asked for read back as asked. This is the WEAK
+ *             one: it is our own bits coming back (rule 20).
+ *   changed - the word moved at all. On a dark pipe reading 0x8000c000 a real
+ *             write MUST move it, so a 1 here cannot be a no-op mistaken for
+ *             a success - which is what makes it worth publishing beside
+ *             `applied` rather than folded into it (rule 20's second half:
+ *             a readback agreeing with the target is not evidence of a write
+ *             when the target was already present).
+ *   clean   - nothing OUTSIDE the two fields moved. A 0 is a finding about
+ *             this register, not a failure of the write.
+ */
+static inline int rb_dpdto_rate_applied(uint32_t after, int src_sel)
+{
+    const int en = (after & RB_DPDTO_DP_DTO_ENABLE) ? 1 : 0;
+    const int ss = (after & RB_DPDTO_SRC_SEL) ? 1 : 0;
+    return en && (ss == (src_sel ? 1 : 0));
+}
+
+static inline int rb_dpdto_rate_changed(uint32_t before, uint32_t after)
+{
+    return before != after;
+}
+
+static inline int rb_dpdto_rate_clean(uint32_t before, uint32_t after)
+{
+    const uint32_t keep = ~(RB_DPDTO_DP_DTO_ENABLE | RB_DPDTO_SRC_SEL
+                            | RB_DPDTO_DP_DTO_STATUS);
+    return (before & keep) == (after & keep);
+}
+
+/* THE VERDICT, and it reads a bit we did not write.
+ *
+ * `DPDTO_ENABLE_STATUS` is the hardware's own answer; 2F0 measured it set on
+ * the driving pipe and clear on all three dark ones, so both of its states
+ * are attested on this chip before anything was written here. STARTED
+ * requires it to have gone 0 -> 1, so a pipe whose status was already set
+ * cannot satisfy it - the same transition requirement rb_dig_verdict() has,
+ * for the same reason. */
+#define RB_DPDTO_PROG_NOT_RUN     (-1)
+#define RB_DPDTO_PROG_STILL         0  /* enable asked, hardware did not     */
+#define RB_DPDTO_PROG_STARTED       1  /* status went 0 -> 1: a clock        */
+#define RB_DPDTO_PROG_WAS_ON        2  /* status was already set             */
+
+static inline int rb_dpdto_prog_verdict(uint32_t before, uint32_t after)
+{
+    const int b = rb_dpdto_enable_status(before);
+    const int a = rb_dpdto_enable_status(after);
+    if (b && a) { return RB_DPDTO_PROG_WAS_ON; }
+    if (!b && a) { return RB_DPDTO_PROG_STARTED; }
+    return RB_DPDTO_PROG_STILL;
+}
+
+/* The highest dword this header writes, relative to a segment base, so the
+ * caller can assert the relation that makes the aperture question already
+ * answered: it is below RB_DPDTO_SEG2_CONTROL, and every mapping in this kext
+ * has had to cover offsets ABOVE that segment to be usable at all. The
+ * hosttest pins the inequality rather than a comment asserting it. */
+static inline uint32_t rb_dpdto_write_dw_max(void)
+{
+    return RB_DPDTO_SEG1 + rb_dpdto_dw_max();
+}
+
 #endif /* RB_DPDTO_H */

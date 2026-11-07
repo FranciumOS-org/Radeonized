@@ -304,6 +304,10 @@ void RBAMDFramebuffer::publishVBLState(void)
         snprintf(key, sizeof(key), "RBFBDtoAlias%u", r);
         setProperty(key, (uint64_t)dtoAlias[r], 64);
     }
+    /* 2F1: the write side, in one helper so the periodic publish and the dial's
+     * own exit path cannot drift apart - 2E3 is what a dial whose state is
+     * only published periodically costs (rule 31, and the fifth instance). */
+    dtoPublish();
     /* 2B8: the AUX engines and the LIVE OTG words. */
     auxSample();
     setProperty("RBFBAuxEn", (uint64_t)auxEnMask, 32);
@@ -1393,6 +1397,49 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
+    }
+
+    /* 2F1: PROGRAM A DARK PIPE'S DP PIXEL-CLOCK DTO - the three writes of
+     * `dcn31_program_pix_clk`'s DP branch, which 2EE established is the path
+     * on this chip for this signal and 2F0 confirmed the base for on hardware.
+     *
+     * ALL THREE KEYS IN ONE CALL, and the pixel clock is REQUIRED rather than
+     * defaulted: `RBFBDtoPixHz` is what triggers the write, so an armed boot
+     * that nobody has run the tool on has written nothing - 2zn's shape, and
+     * the same reason `dmubbl` sends no backlight command until a level is
+     * named. The pipe and SRC_SEL are read FIRST so both dials are in place
+     * before the write they govern (rule 34; a two-call handover is one that
+     * gets run with the first call quietly reverted).
+     *
+     * SRC_SEL defaults to 1 - Linux's value - and is a dial so the firmware's
+     * 0 can be tried interleaved in the same boot (rule 44). 2F0 recorded the
+     * divergence; rb_dpdto.h records why the driver path's value is the one
+     * reproduced. */
+    {
+        OSNumber *pi = OSDynamicCast(OSNumber, dict->getObject("RBFBDtoPipe1"));
+        if (pi) { dtoProgInst = pi->unsigned32BitValue(); }
+        OSNumber *ss = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBDtoSrcSel"));
+        if (ss) { dtoProgSrcSel = ss->unsigned32BitValue() ? 1u : 0u; }
+        OSNumber *hz = OSDynamicCast(OSNumber, dict->getObject("RBFBDtoPixHz"));
+        if (hz) {
+            const uint32_t rc = dtoProgram(dtoProgInst,
+                                           hz->unsigned32BitValue(),
+                                           (int)dtoProgSrcSel);
+            LOG("RBFBDtoPixHz pipe %u hz %u ref %u srcsel %u -> refuse %u, "
+                "rate %#x->%#x, phase %u, modulo %u, applied %u changed %u "
+                "clean %u, verdict %d",
+                dtoProgInst, dtoProgPixHz, dtoProgRefHz, dtoProgSrcSel, rc,
+                dtoRateBefore, dtoRateAfter, dtoPhaseAfter, dtoModuloAfter,
+                dtoProgApplied, dtoProgChanged, dtoProgClean, dtoProgVerdict);
+            dtoPublish();
+            return rc == RB_DPDTO_W_OK ? kIOReturnSuccess
+                                       : kIOReturnNotPermitted;
+        }
+        /* A pipe or SRC_SEL named with no clock is the dial being set up for
+         * the call that follows, so it publishes and succeeds rather than
+         * falling through to an unrelated handler. */
+        if (pi || ss) { dtoPublish(); return kIOReturnSuccess; }
     }
 
     /* 2A0: the frame-time instrument's own dial, ahead of RBFBPubMs because
