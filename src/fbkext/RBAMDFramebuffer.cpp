@@ -691,6 +691,34 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * documenting it is what 2E2 and 2B6 paid for. */
         dptxArmed = argOn("-rbgpufbtrain");
         if (dptxArmed) { auxDpcdArmed = true; }
+
+        /* 2FA: the SECOND RASTER, optc1_program_timing plus
+         * optc31_enable_crtc on a dark pipe. A new write surface on the OTG
+         * block, which this project has only ever read, and the one surface
+         * here that could take a display down if it were pointed at the
+         * wrong instance - so it gets its own opt-in and refuses pipe 0 by
+         * name in both halves.
+         *
+         * RULE 30 BY HAND, because rb_defaults.h's hosttest covers only the
+         * tokens in its own table and this is not one. Scanned over every
+         * quoted "-rbgpu*" literal in src/ and tools/ in BOTH directions,
+         * with `-rbgpufbdtox` as the known-colliding control so the scan
+         * itself was verified (rule 26).
+         *
+         * THE OBVIOUS NAME IS REFUSED. `-rbgpufbotg` would have
+         * **`-rbgpufbotgany`** - an existing HUBP dial - as an extension of
+         * it, which is the shape rule 30 forbids and which has now bitten
+         * four times. `-rbgpufbraster` is neither a prefix of any existing
+         * token nor extended by one, and nothing later may extend it with a
+         * suffix.
+         *
+         * RULE 34: this one does NOT arm a dependency, deliberately. Its
+         * gate refuses unless that pipe's DP DTO is already running, and the
+         * DTO is its own opt-in with its own verdict. Arming `-rbgpufbdto`
+         * from here would hide the step whose success this one depends on,
+         * and the refusal code (RB_OTGPROG_W_NOCLOCK 45) says exactly which
+         * step is missing instead. */
+        otgArmed = argOn("-rbgpufbraster");
         /* 2C0. Rule 30 by hand again, for the same reason: this is an
          * opt-in token and rb_defaults.h's hosttest only covers its own
          * table. The kernel's parse is exact (token_len == strlen), so a

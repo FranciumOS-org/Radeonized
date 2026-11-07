@@ -590,3 +590,50 @@ of one structure, two different translation disciplines.
 objid bit layout (`dal_graphics_object_id_to_uint`: id bits 0-7, enum_id
 8-11, type 12-15) and `enum engine_id` with `ENGINE_ID_DIGA = 0` and
 `ENGINE_ID_HPO_DP_0 = 12`.
+
+## 2026-11-07 — the OTG timing path, for 2FA (`src/common/rb_otgprog.h`)
+
+Fetched from kernel.org torvalds/linux `plain/`, tag **v6.12**, and vendored
+here unmodified:
+
+| File | Upstream path | sha256 (first 16) |
+|---|---|---|
+| dcn31_optc.c | drivers/gpu/drm/amd/display/dc/optc/dcn31/dcn31_optc.c | `165bbc4d3b3dcb42` |
+| dcn10_optc.c | drivers/gpu/drm/amd/display/dc/optc/dcn10/dcn10_optc.c | `ebd9f31f41e3cfc5` |
+| dcn10_optc.h | drivers/gpu/drm/amd/display/dc/optc/dcn10/dcn10_optc.h | `0b4b3c15e12b8cb8` |
+
+**The path matters and cost a 404.** These are not under
+`dc/dcn31/`, where every other DCN31 block in this directory lives; the OPTC
+files were moved to `dc/optc/dcn<ver>/` upstream. A fetch of
+`dc/dcn31/dcn31_optc.c` returns 404, which under rule 26 reads exactly like
+"this chip has no OPTC file" — the search was the instrument, not the answer.
+
+**Rule 46 discharged here, by source, not by reasoning.** The question was
+which `dc` would program a timing generator on this chip:
+
+- `dcn31_resource.c:1145` → `dcn31_timing_generator_init`, so the OPTC
+  functions below are the ones this chip's `dc` reaches.
+- `dcn31_optc.c:250` → `.program_timing = optc1_program_timing`. The timing
+  programming is **DCN10's**, in `dcn10_optc.c`, not DCN31's. `rb_otgprog.h`
+  follows that function, field for field, in its write order.
+- `dcn31_optc.c:255` → `.enable_crtc = optc31_enable_crtc`. The enable **is**
+  DCN31's own, so the two halves of this one operation come from two different
+  files, and reading either alone gives a wrong sequence.
+
+**Three different register strides live in this one function**, which is the
+other thing only the source says:
+
+- `OTGn_*` — stride **0x80** (`H_TOTAL` dword `0x1b2a` at instance 0).
+- `VTGn_CONTROL` — stride **1** (`0x052d`, `0x052e`, `0x052f`, `0x0530`).
+- `ODMn_OPTC_DATA_SOURCE_SELECT` — stride **0x10** (`0x1acb`, `0x1adb`,
+  `0x1aeb`, `0x1afb`).
+
+All three are BASE_IDX 2 on this chip. Deriving any one of them from another —
+the natural thing to do, since they are programmed together for one pipe —
+puts writes inside a neighbouring block at a readable wrong address, which is
+rule 47 asked of a write. `tools/hosttest/otgprog_test.c` pins all three for
+all four instances and asserts they differ.
+
+Also read, not vendored (no code follows them, they only confirmed the above):
+`dc/inc/hw/timing_generator.h` for the `program_timing` signature and
+`dc_crtc_timing`'s field names, and `dcn31_resource.c`'s pipe/OPTC counts.

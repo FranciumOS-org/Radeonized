@@ -45,6 +45,7 @@ extern "C" {
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
 #include "rb_dptx.h"
+#include "rb_otgprog.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -728,6 +729,53 @@ private:
     uint32_t           dtoProgRan;       /* writes that actually happened    */
     int                dtoProgVerdict;   /* RB_DPDTO_PROG_*                  */
     uint32_t           digFe;            /* the FE one-hot the dial asked */
+
+    /* 2FA: the SECOND RASTER. optc1_program_timing plus optc31_enable_crtc
+     * on the pipe whose DP DTO boot 461 started. Opt-in behind
+     * `-rbgpufbraster`, which is a new WRITE surface on a block this project
+     * has only ever read.
+     *
+     * The call/prog split is 2F2's and for 2F2's measured reason: the write
+     * is refused on a pipe that is already scanning, so a second invocation
+     * in one boot goes down the refusal path, and a single field set would
+     * republish the successful run as NOT RUN. `otgCall*` is what the most
+     * recent call asked for and saw; `otgProg*` and `otgBefore/After` are the
+     * record of the last call that WROTE.
+     *
+     * The verdict is `otgFramesBefore` vs `otgFramesAfter` - OTGn_FRAME_COUNT,
+     * a monotonic hardware counter, sampled either side of the writes. It is
+     * not a readback of anything we wrote, which OTG_MASTER_EN reading back 1
+     * would be (rule 20). */
+    bool               otgArmed;          /* -rbgpufbraster */
+    bool               otgApertureOk;     /* the BAR covers OTG3_FRAME_COUNT */
+    bool               otgReady;          /* a sample exists this boot */
+    uint32_t           otgControl[RB_OTGPROG_COUNT];   /* OTGn_CONTROL, live */
+    uint32_t           otgFrames[RB_OTGPROG_COUNT];    /* OTGn_FRAME_COUNT   */
+    uint32_t           otgCallInst;
+    uint32_t           otgCallRefreshHz;
+    uint32_t           otgCallModeHz;     /* h x v x refresh, as computed     */
+    uint32_t           otgCallDtoHz;      /* that pipe's DP_DTO PHASE, now    */
+    uint32_t           otgCallLive;       /* the target's OTGn_CONTROL, now   */
+    uint32_t           otgCallRefuse;     /* RB_OTGPROG_W_*                   */
+    uint32_t           otgProgInst;
+    uint32_t           otgProgModeHz;
+    uint32_t           otgProgWrites;     /* how many of the 16 ran           */
+    uint32_t           otgProgHTotal;     /* the raster actually programmed   */
+    uint32_t           otgProgVTotal;
+    uint32_t           otgProgVFrontPorch; /* AFTER Linux's floor             */
+    uint32_t           otgBefore;         /* OTGn_CONTROL before the writes   */
+    uint32_t           otgAfter;          /* and after                        */
+    uint32_t           otgFramesBefore;
+    uint32_t           otgFramesAfter;
+    uint32_t           otgHTotalAfter;    /* raw readbacks, NOT the verdict   */
+    uint32_t           otgVTotalAfter;
+    uint32_t           otgProgCalls;      /* monotonic, including refusals    */
+    uint32_t           otgProgRan;        /* writes that actually happened    */
+    int                otgProgVerdict;    /* RB_OTGPROG_V_*                   */
+    void               otgSample(void);
+    void               otgPublish(void);
+    uint32_t           otgProgram(uint32_t inst, uint32_t refreshHz,
+                                  const struct rb_otgprog_mode *mode);
 
     /* 2EC: DIG_FE_SOURCE_SELECT, the FIRST write this project makes to the
      * DIG back end. `feClean` is the check that the RMW disturbed no other
