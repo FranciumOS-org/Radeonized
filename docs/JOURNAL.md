@@ -61078,3 +61078,138 @@ The framebuffer runs no discovery and must not grow a second guessed constant.
 
 **Nothing is built and no boot has read anything.** What this milestone changes
 is the next step's identity, which was wrong in five consecutive entries.
+
+## 2EF — BASE_IDX 1 is **0xc0**, read off this machine's own discovery table; the DP DTO sampler built, with the alias control and four break-it findings (nothing booted)
+
+2EE ended by planning to plumb the DMU IP's `base[1]` from the plugin to the
+framebuffer over 2zd's `callPlatformFunction` channel. **That plan was wrong
+in a way that was free to find out:** the plugin runs no discovery either —
+`g_disc` is a hand-built two-IP stub for MP1, which 2CA's own comment says —
+so the handover would have carried a constant from one file to another and
+called the trip evidence.
+
+The honest source was already committed. `tests/data/rembrandt-680m-tufa15.bin`
+is **this machine's own IP discovery table**, captured and in the tree since
+October, and `build/out/rbdump` prints it:
+
+```
+DMU         271    0  3.1.3.0     0x12 0xc0 0x34c0 0x9000 0x2403c00
+GC           11    0  10.3.3.0    0x1260 0xa000 0x2402c00
+```
+
+**base[1] = 0xc0, and base[2] = 0x34c0 in the next slot of the same array** —
+the segment every hardware reading this kext has ever taken has come through.
+That is the control built in: the array that yields the new number yields the
+known one beside it. The vendored `dcn_3_1_2_offset.h` carries the same five
+values independently, since Linux's segment table for this IP is the same
+table. So `regOTG0_PIXEL_RATE_CNTL` 0x0080 at BASE_IDX 1 is dword **0x140**,
+PHASE 0x141, MODULO 0x142, PHYPLL 0x143, stride 4 — all four confirmed per
+instance against the header rather than extrapolated, and all far below the
+0x34c0-based dwords the aperture bound already covers.
+
+### What was built: `src/common/rb_dpdto.h` and a read-only sampler, opt-in
+
+`-rbgpufbdto` (rule 30 by hand over every quoted `-rbgpu*` literal in `src/`
+and `tools/`, in both directions, **with `-rbgpufbdigx` as a known-colliding
+control so the scan itself was verified** — rule 26; the `-rbgpufbd` family is
+crowded: dig, dmubbl, dmubdom, dpalt, drr). It arms nothing else and writes
+nothing: no register, no command, nothing on any ring. Opt-in anyway, because
+the offsets collide with the DOMAIN power-gating block at the base this kext
+already holds, so a boot that reads them is a boot establishing an address.
+
+**Two questions, answered separately, each with its own codes** (rule 14):
+
+1. **Is BASE_IDX 1 a real address?** PHASE is the pixel clock *in hertz* —
+   `REG_WRITE(PHASE[inst], actual_pix_clk_100hz * 100)` — so pipe 0's own
+   register has to reproduce the panel's clock, derived in the same boot. Plus
+   **the alias control**: the same four offsets read at BASE_IDX 2 in the same
+   sample. If both bases return bit-identical words the segment arithmetic did
+   nothing and what was read is `DOMAIN0_PG_CONFIG`/`STATUS` and
+   `DOMAIN1_PG_CONFIG`/`STATUS`. The alias check outranks everything, including
+   a PHASE that would otherwise confirm.
+2. **Is pipe 0 actually driven by this DTO?** `DP_DTO0_ENABLE` bit 4 against
+   `DPDTO0_ENABLE_STATUS` bit 7 — what was asked against what the hardware
+   says. If the firmware brought the panel up on a PHYPLL, PHASE[0] can be
+   zero at a base that is perfectly correct, and that gets its own code rather
+   than reading as a bad address.
+
+**All three outcomes are written down before the boot** (2EC's practice):
+CONFIRMED, PHASE_ZERO (correct base, DTO not in use), or PHASE_WRONG /
+ALIASED (the address is not what we think). A wrong base's most plausible
+impostor is the power-gating word 2DE measured, `0x10000000` = 268 MHz, which
+is 21 % from the panel's clock against a 0.5 % window.
+
+### Four things the construction itself caught, before any boot
+
+**1. `modeClkHz` is zero on an ordinary boot.** The sampler first compared
+against it — the best pixel clock this project has, measured on an
+`OTG0_FRAME_COUNT` edge. But `modeSetup()` returns at
+`if (!argEnabled("-rbgpufbmodes"))` **before** computing it, so an unarmed
+boot would have published `NO_EXPECTED` and measured nothing; and depending on
+`-rbgpufbmodes` drags in a second display mode and is mutually exclusive with
+`-rbgpufbdrr`. Rule 34 exactly. Now there are two sources and the boot
+publishes **which it used** (`RBFBDtoRefSrc`): the measured clock when mode
+setup ran, else OTG0's live `H_TOTAL × V_TOTAL` — read by the sampler itself,
+so it depends on no other setup path — times the rate the vblank clock is
+actually running at.
+
+**2. A duplicate pixel-clock derivation, deleted.** The header grew its own
+`rb_dpdto_expected_hz()`. `rb_drr.h` has formed exactly that product since 2y6
+(`rb_drr_clk_from_mhz`), and the framebuffer already keeps its answer as
+`modeClkHz`. The two differed on day one — rb_drr rounds, the copy truncated.
+The copy is gone; this header only compares.
+
+**3. Two zero guards that fired NOTHING, which is a result** (rule 48). The
+break-it run deleted `if (!h_total || !v_total || !refresh_mhz) return 0;` and
+nothing failed. The obvious reading was "the `!clock` check below covers it",
+so `!clock` was deleted too — and **that** failed nothing either. The real
+reason is arithmetic, not a guard: any zero factor makes the product zero, and
+returning a zero product *is* returning zero. Neither term could ever change
+an answer. The hosttest's zero cases survive, relabelled as a **contract pin
+rather than guard coverage**, so a later reader does not count them as a guard
+that is tested.
+
+**4. The panel's refresh is 143.832 992 6 Hz, not 143.830.** A test case
+assumed 143.830 because that is what this journal and the reference card round
+it to, and failed. `kRefreshRate1616` is `0x008fd53f` = 9 426 239 / 65 536, so
+`kVBLPeriodNsFast` is 6 952 507 ns. The constant had to be **read rather than
+recalled** — the recurring error in its smallest possible form, caught by a
+test instead of a boot. The payoff could not have been arranged: the raster at
+143 833 mHz gives `2106 × 1129 × 143833 / 1000` = **341 987 984 Hz**, which is
+the figure this project measured directly, **to the hertz**. Two independent
+paths to the panel's pixel clock now agree exactly.
+
+### The break-it run, in full
+
+Twenty-two guards broken one at a time, each a full hosttest rebuild.
+**Nineteen were caught by a `FAIL dpdto` line.** Four hit `-Werror` instead —
+breaking the alias loop, the not-sampled guard, the MODULO bound and the
+`ref_hz` gate each left a variable unused — which is rule 48's `-Werror` trap
+for the **sixth** time; a build error is a caught break but it is not the guard
+firing, so all four were re-broken in forms that compile and all four then
+fired. One fired nothing, twice, and that is finding 3 above.
+
+Two instrument defects in the run itself, both rule 26: the first prefix scan
+matched `-rbgpufbd` and `-rbgpufb` out of **comment prose** and reported three
+collisions that do not exist; and every break-it row read `+1 FAIL elsewhere`,
+which was `printf("hosttest: %d FAILED")` matching my own grep for `FAIL`.
+
+### Published keys
+
+`RBFBDtoArmed`, `RBFBDtoReady`, `RBFBDtoSeg1`, `RBFBDtoBase`, `RBFBDtoPipe`,
+`RBFBDtoExpectedHz`, `RBFBDtoRefSrc`, `RBFBDtoHTotal`, `RBFBDtoVTotal`,
+`RBFBDtoRefreshMhz`, `RBFBDtoRefHz`, `RBFBDto{0..3}{Rate,Phase,Modulo,PhyPll}`
+and `RBFBDtoAlias{0..3}` — every raw word beside every verdict, 64-bit for
+2B4's sign-extension reason.
+
+### What this does NOT establish
+
+**No boot has read anything.** The base is pinned against a table on disk and
+against Linux's own, and the arithmetic that would establish it on the chip is
+built and hosttested — it has not run. `MODULO[0]` is the `dprefclk` this
+project has never located; it is read, not assumed, and it is reported only
+when the base check passes, because a MODULO read at an unproven address is
+not a reference clock. The three writes for the external display's own pipe
+are a later milestone and are deliberately not built.
+
+Framebuffer UUID `6B64DDD5-19B3-368B-8F26-A43326F2050D`.

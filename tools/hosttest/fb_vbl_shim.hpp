@@ -9,6 +9,7 @@ extern "C" {
 #include "rb_retire.h"
 #include "rb_dmub.h"
 #include "rb_frametime.h"
+#include "rb_dpdto.h"
 }
 #include <map>
 #include <string>
@@ -309,6 +310,22 @@ public:
     int dpaltSweep=0;
     bool dpaltSampled=false, dpaltArmed=false, dpaltReady=false;
     void dpaltSample(void) {}
+    /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives
+     * in RBAMDFramebufferHUBP.cpp, which this executable does not compile.
+     * The FIELDS still have to exist here, because the publish path under
+     * test reads them, and the verdicts start at their NOT_SAMPLED codes
+     * rather than at zero: zero is RB_DPDTO_BASE_CONFIRMED, and a shim that
+     * initialised them to "confirmed" would be a default this project has
+     * been bitten by before (rule 14 - an enum 0 is a value). */
+    uint32_t dtoWord[4][4]={{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}};
+    uint32_t dtoAlias[4]={0,0,0,0};
+    uint32_t dtoExpectedHz=0, dtoRefHz=0;
+    uint32_t dtoRefSrc=RB_DPDTO_REF_SRC_NONE;
+    uint32_t dtoHTotal=0, dtoVTotal=0, dtoRefreshMhz=0;
+    int dtoBaseVerdict=RB_DPDTO_BASE_NOT_SAMPLED;
+    int dtoPipeVerdict=RB_DPDTO_PIPE_NOT_SAMPLED;
+    bool dtoArmed=false, dtoReady=false;
+    void dtoSample(void) {}
     /* 2BA, mirrored - the hosttest compiles RBAMDFramebufferVBL.cpp. */
     bool auxDpcdArmed=false, auxDpcdSuspect=false;
     uint64_t auxDpcdAttempts=0, auxDpcdOks=0;

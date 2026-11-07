@@ -603,6 +603,24 @@ private:
      * and PHY0 - the live panel - is refused by name. */
     bool               digArmed;         /* -rbgpufbdig */
     bool               feArmed;          /* -rbgpufbfe (2EC) */
+    bool               dtoArmed;         /* -rbgpufbdto (2EF) */
+    bool               dtoReady;         /* the aperture covered BASE_IDX 1 */
+    /* 2EF: the four pipes' register groups, read at BASE_IDX 1 - and pipe 0's
+     * four offsets read at BASE_IDX 2 as well, which is the alias control.
+     * Both published raw whichever way the verdict falls (2B0/2B4/2B9). */
+    uint32_t           dtoWord[4][4];
+    uint32_t           dtoAlias[4];
+    /* What PHASE[0] was compared against: `modeClkHz`, the live raster times
+     * the measured refresh, formed by rb_drr.h's one definition of that
+     * product. Published so a boot can be read without re-deriving it. */
+    uint32_t           dtoExpectedHz;
+    uint32_t           dtoRefSrc;        /* RB_DPDTO_REF_SRC_*               */
+    uint32_t           dtoHTotal;        /* OTG0's live raster, read here    */
+    uint32_t           dtoVTotal;
+    uint32_t           dtoRefreshMhz;
+    uint32_t           dtoRefHz;         /* MODULO[0], iff the base is good  */
+    int                dtoBaseVerdict;
+    int                dtoPipeVerdict;
     uint32_t           digFe;            /* the FE one-hot the dial asked */
 
     /* 2EC: DIG_FE_SOURCE_SELECT, the FIRST write this project makes to the
@@ -975,6 +993,10 @@ private:
      * block this project has never read and Linux's own comment warns the
      * access can hang when DMCUB is not running. */
     void dpaltSample(void);
+    /* 2EF: pipe 0's live DP pixel-clock DTO, read-only - and the check that
+     * BASE_IDX 1 is a real address before anything is written there. Same
+     * mapping as hpdSample(); gated on dtoArmed. */
+    void dtoSample(void);
     /* 2BA: a native AUX read of the sink's DPCD on the engine bound to `hpd`.
      * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
      * bounded; refuses rather than racing when the DMCUB owns the engine. */
