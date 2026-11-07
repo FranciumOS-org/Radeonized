@@ -408,14 +408,19 @@ design**.
 training is ours. **PHY0 / DIG0 / front end DIGA are the panel's and are
 refused by name** in every half of every one of these experiments.
 
-**2F7: the sink's whole DPCD now reads ZERO** — `0x000..0x003` ACKs with
-`00 00 00 80` (revision 0, max rate 0, max lanes 0, which no sink reports),
-`0x100` reads `00 00` where boot 457 read `0x06` then `0x14`, `0x202`
-persistently DEFERs, and every write ACKs and stores nothing. HPD2 still senses
-the sink (`0xFF0FF013`). **So an ACK is not a reading, and every
-`ACK_IGNORED`/`changed 0` verdict is computed from these same reads** — the
-2F6 "three outcomes at one DPCD address" cannot be reproduced and both
-hypotheses built on it are dead.
+**2F8: `dptrain go tps=3` DEGRADES THIS SINK and the recovery is a REBOOT.**
+Two boots. A sink measured healthy (EDID header and checksum OK, DPCD `0x000`
+byte-identical to 2D8/2BB, `0x202` reading) goes to `00 00 00 81 ... 84 00` with
+`0x202` DEFERring, immediately after one run. `tps=2` does not bring it back,
+nor DPCD `0x102`=`0x00`, nor `0x600`=`0x01`; further writes make it worse. **All
+of 2F7 was the aftermath of this**, so its two dead hypotheses were killed by
+invalid data. `dptrain` now **refuses `tps=3`/`tps=4`** (exit 3, `force`
+overrides). **Use `tps=2`.** What survives of the DPCD-store question is
+narrower and about *proximity*, not transmitter movement: `0x102` stores only
+when written inside `dptrain`'s own call, ~100 µs after the register writes
+(n=2 boots), and not from a separate call with the TX unmoved (in-boot control,
+same address and value). `0x01` drives the byte to `0x00` and `0x03` never
+stores, both reproduced in two boots.
 ---
 
 ## Boot-args and dials
@@ -457,7 +462,8 @@ clock at BASE_IDX 1), `-rbgpufbtrain` (the DP training pattern on the wire;
 arms `-rbgpufbaux` itself, since its verdict comes from the sink. Nothing is
 written until `dptrain go`; the panel's transmitter is refused by name and the
 write is declined unless the panel's own DP0 reads as a trained link.
-**`tps=1` is a no-op on a dark instance** — use `tps=2` or higher),
+**`tps=1` is a no-op on a dark instance** and **`tps=3`/`tps=4`
+DEGRADE the sink, costing a reboot — the tool refuses them. Use `tps=2`),
 `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,
@@ -509,9 +515,9 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. The blocker is the
-**atom transmitter ENABLE at the link rate**, and 2F7 added a prerequisite:
-**the sink's DPCD reads zero and must be got answering again** before any
-sink-side verdict means anything. Also open: the **wedge** (work submitted that
+**atom transmitter ENABLE at the link rate**, and 2F8 added a cost: `tps=3`
+**degrades the sink until a reboot**, which is what 2F7 spent a milestone
+diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666
 retires the "nothing polls it" family); `powermetrics` has **never been run**
 against the default 576 interior thread_calls/s, the one real argument against
