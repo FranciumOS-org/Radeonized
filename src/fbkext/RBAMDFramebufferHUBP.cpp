@@ -142,6 +142,31 @@ bool RBAMDFramebuffer::hubpSetup(void)
     auxDpcdBytes = 0;
     auxDpcdSuspect = false;
     auxDpcdHpd = 2;   /* 2B4: the Type-C port */
+    /* 2F4: the transmitter. dptxReady stays false until a sample succeeds, so
+     * every published word is either measured or declared absent (rule 14). */
+    dptxReady = false;
+    for (unsigned i = 0; i < RB_DPTX_COUNT; i++) {
+        for (unsigned r = 0; r < RB_DPTX_REG_COUNT; r++) {
+            dptxWord[i][r] = 0;
+        }
+    }
+    dptxCalls = 0;
+    dptxRan = 0;
+    dptxRefuse = RB_DPTX_W_OK;
+    dptxInst = 2;      /* DIG2, the Type-C port's - never 0, the panel's */
+    dptxTps = RB_DPTX_TPS1;
+    dptxLanes = 2;     /* 2BB read this sink's DPCD: two lanes */
+    dptxTpBefore = 0; dptxTpAfter = 0;
+    dptxLcBefore = 0; dptxLcAfter = 0;
+    dptxDcBefore = 0; dptxDcAfter = 0;
+    dptxPcBefore = 0; dptxPcAfter = 0;
+    dptxApplied = 0;
+    dptxClean = 0;
+    dptxSinkBefore = 0xffffffffu; dptxSinkBeforeOk = 0;
+    dptxSinkAfter = 0xffffffffu; dptxSinkAfterOk = 0;
+    dptxDpcdRefuse = 0;
+    dptxDpcdSet = 0;
+    dptxVerdict = RB_DPTX_V_NOT_RUN;
     /* 2F3: the write's state. The address defaults to NOTHING writable, so a
      * bare arm cannot write: the dial has to name an address. */
     auxDpcdWCalls = 0;

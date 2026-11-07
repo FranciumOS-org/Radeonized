@@ -339,6 +339,8 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAuxDpcdBytes", (uint64_t)auxDpcdBytes, 64);
     setProperty("RBFBAuxDpcdSuspect", auxDpcdSuspect);
     auxWPublish();                      /* 2F3 */
+    dptxSample();                       /* 2F4, read-only */
+    dptxPublish();
     /* The payload as raw bytes. Published individually rather than as one
      * packed word for 2B0's reason: the summary (revision, link rate, lanes)
      * is a reading OF this, and a wrong decode has to be refutable from the
@@ -1570,6 +1572,48 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
                                       : kIOReturnNotPermitted;
         }
         if (wh || wa) { auxWPublish(); return kIOReturnSuccess; }
+    }
+
+    /* 2F4: the training-pattern trigger - the PHY side.
+     *
+     * FOUR keys, and the one that runs it is RBFBDpTxGo, so an armed boot
+     * where nobody writes RBFBDpTxGo has put no pattern on any wire. The
+     * instance defaults to 2 (DIG2, the Type-C port) and the panel's 0 is
+     * refused by name in the kext and again in the tool.
+     *
+     * The lane count is a dial rather than a constant because it is the SINK's
+     * property - 2BB read two lanes out of this one's DPCD - and a different
+     * sink would have a different answer. It feeds rb_dptx_cr_done(), so
+     * getting it wrong would make a 1-lane CR read as a 2-lane failure. */
+    {
+        OSNumber *ti = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBDpTxInst"));
+        if (ti) { dptxInst = ti->unsigned32BitValue(); }
+        OSNumber *tp = OSDynamicCast(OSNumber, dict->getObject("RBFBDpTxTps"));
+        if (tp) { dptxTps = tp->unsigned32BitValue(); }
+        OSNumber *tl = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBDpTxLanes"));
+        if (tl) { dptxLanes = tl->unsigned32BitValue(); }
+        OSNumber *tg = OSDynamicCast(OSNumber, dict->getObject("RBFBDpTxGo"));
+        if (tg) {
+            const uint32_t hpd = tg->unsigned32BitValue();
+            const uint32_t rc = dptxTrain(dptxInst, dptxTps, hpd, dptxLanes);
+            LOG("RBFBDpTxGo inst %u tps %u hpd %u lanes %u -> refuse %u; "
+                "tp %#x->%#x lc %#x->%#x dc %#x->%#x pc %#x->%#x "
+                "applied %u clean %u; sink %#x(ok %u) -> %#x(ok %u) "
+                "dpcdset %u dpcdrefuse %u, verdict %d",
+                dptxInst, dptxTps, hpd, dptxLanes, rc,
+                dptxTpBefore, dptxTpAfter, dptxLcBefore, dptxLcAfter,
+                dptxDcBefore, dptxDcAfter, dptxPcBefore, dptxPcAfter,
+                dptxApplied, dptxClean,
+                dptxSinkBefore, dptxSinkBeforeOk,
+                dptxSinkAfter, dptxSinkAfterOk,
+                dptxDpcdSet, dptxDpcdRefuse, dptxVerdict);
+            dptxPublish();
+            return rc == RB_DPTX_W_OK ? kIOReturnSuccess
+                                      : kIOReturnNotPermitted;
+        }
+        if (ti || tp || tl) { dptxPublish(); return kIOReturnSuccess; }
     }
 
     /* 2BC: the EDID trigger. Its own key, because an EDID read is a different

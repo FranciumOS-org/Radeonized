@@ -35,6 +35,7 @@ int dig_tests(void);
 int enc_tests(void);
 int digbe_tests(void);
 int dpdto_tests(const struct rb_disc *real);
+int dptx_tests(void);
 int dpaltq_tests(void);
 int aux_tests(void);
 int dpcd_tests(void);
@@ -873,6 +874,7 @@ int main(int argc, char **argv)
     failures += enc_tests();
     failures += digbe_tests();
     failures += dpdto_tests(have_real ? &real_disc : NULL);
+    failures += dptx_tests();
     failures += dpaltq_tests();
     failures += aux_tests();
     failures += dpcd_tests();

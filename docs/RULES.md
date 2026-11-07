@@ -43,7 +43,7 @@ means hybrid).
   `rb_discovery.c`, `rb_probe.c` (read-only), `rb_regs.h` (every offset cites
   its Linux header), `rb_smu*.c`, `rb_otg.h`, `rb_agdc.h`, `rb_hubp.h`,
   `rb_backlight.h`, `rb_hpd.h`, `rb_aux.h`, `rb_dpcd.h`, `rb_dig.h`,
-  `rb_digbe.h`, `rb_dpalt.h`, `rb_dpdto.h`, `rb_enc.h`, `rb_drr.h`, `rb_frametime.h`,
+  `rb_digbe.h`, `rb_dpalt.h`, `rb_dpdto.h`, `rb_dptx.h`, `rb_enc.h`, `rb_drr.h`, `rb_frametime.h`,
   `rb_gpuname.h`, `rb_osver.h`, **`rb_defaults.h`** (the default-on tokens).
 - `src/kext/` — `RembrandtProbe`, read-only, publishes `RBProbe*`, unmaps.
 - `src/fbkext/` — `RBAMDFramebuffer`, the `IOFramebuffer` for the
@@ -435,15 +435,33 @@ the display plugged in before power-on nothing appears - this chassis' OpenCore
 picker is the text-mode one, and the user reports no pre-boot external output
 through the 4050 under Windows either - and the sink's LED never leaves standby
 through macOS boot. So training is **ours**, not an assumption.
-**2F3 BUILT THE NATIVE DPCD WRITE and no boot has run it.** `auxTransact` was
-already a writer (2BD's EDID offset byte); one equality test excluded
-`DP_WRITE` 0x80 and would have encoded it with the READ length and no payload,
-silently. `build/out/dpcdwrite <addr> <val>`: the panel refused by name **three
-times** (tool by HPD, kext by HPD, kext by AUX engine), the address
-**allowlisted** to the link-config block only (0x100-0x108, 0x600 - `drm_dp.h`'s
-by line), and the verdict from two things we do not write - the sink's **ACK**
-and a read-after against a read-**before**, so `changed` says it STORED the
-byte. Four verdicts, because a sink can ACK a field it ignores.
+**THE SINK TAKES WRITES** (2F3, boot 457). `dpcdwrite 0x100 0x14` on AUX2:
+ACK, `before 0x06` (`DP_LINK_BW_1_62`, the untrained default) -> `after 0x14`
+(HBR2, this sink's own maximum), `applied 1 changed 1`. The before value is not
+the one written, so no rule-20 defect; the ACK is separately the sink's own
+reply. **The first write this project has landed on a sink** - 2BD's EDID
+offset byte goes to the monitor's DDC EEPROM, not its DP receiver. The fix was
+one equality test that excluded `DP_WRITE` 0x80 and would have encoded it with
+the READ length and no payload, silently. `dpcdwrite` refuses the panel by name
+**three times** (tool by HPD, kext by HPD, kext by AUX engine) and
+**allowlists** the address to the link-config block (0x100-0x108, 0x600,
+`drm_dp.h`'s by line).
+**2F4 BUILT THE TRANSMITTER HALF and no boot has run it** - `rb_dptx.h` plus
+`build/out/dptrain`, the four writes of
+`dcn10_link_encoder_set_dp_phy_pattern_training_pattern` (rule 46 discharged in
+`dcn31_resource.c`: `.dp_set_phy_pattern` IS `dcn10_...`). Registers 0x2108 /
+0x210c / 0x2117 / 0x2118 / 0x211d, stride 0x100, **BASE_IDX 2** (NOT the DTO's
+BASE_IDX 1), and the aperture is discharged by 2E7 having already read
+`rb_enc.h`'s 0x251e on all five instances. **The identification is the panel's
+own DP0 reading as a trained link** - the firmware trained it and it is
+scanning out now - and the write is refused (code 64) without it.
+**THE TWO PATTERN ENCODINGS DIFFER:** the hardware register takes 0..3 for
+TPS1..TPS4, DPCD 0x102 takes 1/2/3/**7**, and the two zeros mean opposite
+things (DPCD 0 = training off, hardware 0 = TPS1). Everything speaks TPSn and
+`rb_dptx.h` converts. Verdict = **the sink's own lane status** at DPCD 0x202,
+read before AND after. `PATTERN_SET` is the **expected** reading until the
+transmitter is enabled at the link rate. Needs **`-rbgpufbtrain`**, which arms
+the AUX half itself (rule 34).
 Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
@@ -491,6 +509,12 @@ token was added: `-rbgpufbdtoprog` would have this one as a prefix, the shape
 rule 30 forbids. Even armed **nothing is written until `dmubbl dto` names a
 clock**, pipe 0 is refused by name in both halves, and the write is declined
 unless THIS boot's own sample reproduced the panel's pixel clock at BASE_IDX 1),
+`-rbgpufbtrain` (2F4's DP training pattern on the wire - a new write surface,
+so its own token; rule 30 scanned by hand both ways, and nothing may extend
+this name with a suffix. It ARMS `-rbgpufbaux` itself, since its verdict comes
+from the sink over AUX. Nothing is written until `dptrain go`; the panel's
+transmitter is refused by name in both halves and the write is declined unless
+the panel's own DP0 reads as a trained link),
 `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,
@@ -540,9 +564,10 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 (`rbgpuretiredrain`, measured dead); **efficiency/power** (moved to
 `~/Developer/Econized`).
 
-**Open:** the rest of the external-display chain above - the pixel clock is
-DONE (boot 455, `DPDTO_ENABLE_STATUS` 0 → 1 on pipe 1), and link training over
-AUX2 is next;
+**Open:** the rest of the external-display chain above. The pixel clock is DONE
+(boot 455) and the sink takes DPCD writes (boot 457); **2F4's training pattern
+is built and unrun**, and after it the atom transmitter ENABLE at the link rate
+is the next thing that does not exist;
 the **wedge** (work submitted that never retires — channel-52 GFX, 3.5 s, the
 "random lag"; `stamp_ticks` 125666 retires the "nothing polls it" family);
 `powermetrics` has **never been run** against the default 576 interior

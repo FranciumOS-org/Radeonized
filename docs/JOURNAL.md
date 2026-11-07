@@ -61824,3 +61824,170 @@ No new boot-arg: `-rbgpufbaux` arms it, because `-rbgpufbauxw` would have had
 times. Even armed, nothing is written until the tool names an **address**,
 which has no writable default.
 
+
+---
+
+## 2F3 result (boot 457) — the sink took a write
+
+`rbgpu-boot` = 457. The collection carries **493497B1**, exactly the UUID 2F3
+built (rule 15, checked inside the collection and not in
+`/Library/Extensions`).
+
+```
+build/out/dpcdwrite 0x100 0x14
+  engine     AUX2        (from AUX_HPD_SEL, not assumed - 2B9)
+  refusal    0
+  reply      0 (ACK)   acked 1
+  before     0x06
+  after      0x14
+  applied 1  changed 1
+  VERDICT    1  ACK + STORED
+```
+
+`RBFBAuxWCalls` 1, `RBFBAuxWOks` 1 — one transaction, one ACK.
+
+**The before value is the whole reason this is clean.** `0x06` is
+`DP_LINK_BW_1_62` (`drm_dp.h:589`) — RBR, the untrained default — and `0x14` is
+HBR2, this sink's own maximum as 2BB read from its DPCD. So the byte that came
+back is **not** the byte that was there, `changed 1` carries real information,
+and none of rule 20's defect applies. The ACK is separately the sink's own
+reply, which we do not compose.
+
+**The first write this project has landed on a sink.** Everything before it
+wrote to this chip; 2BD's EDID offset byte goes to the monitor's DDC EEPROM,
+not to its DP receiver.
+
+Not established: anything about a trained link. The sink has been told to
+expect HBR2 and will act on it only once a training pattern arrives.
+
+---
+
+## 2F4 — the DP transmitter's link block, built: a training pattern on the wire
+
+2F3 made the sink half work. This is the other half, and it is the step that
+turns "the sink will listen" into "this chip is driving something at it".
+
+### The block, and why rule 46 is discharged in the resource file
+
+`dcn31_resource.c` builds its link encoders with `dcn31_link_encoder_create()`,
+whose `.dp_set_phy_pattern` is `dcn10_link_encoder_dp_set_phy_pattern`
+(`dcn31_dio_link_encoder.c:354`, identical to `dcn20_link_encoder.c:369`). So
+**the DCN10 link encoder is this chip's link encoder for this operation** — the
+same relationship 2B8 found for the DCE110 AUX engine and 2B1 for the HUBP
+triple-buffer writer. Checked in the resource file by source, not reasoned
+about from the version number.
+
+Five registers, instance 0, stride 0x100, five instances, **BASE_IDX 2** —
+which is DMU segment 0x34c0, the mapping HPD, AUX, OTG, HUBP and the DIG
+blocks already use, so no new aperture. It is **not** the BASE_IDX 1 the DTO
+lives at, and `rb_dptx.h` says so in capitals because confusing the two is how
+a write lands on the DOMAIN power gating.
+
+**The aperture is discharged by a measurement that already happened.**
+`rb_enc.h` owns two registers of this same block — `DP_CONFIG` 0x210b and
+`DP_DPHY_SCRAM_CNTL` 0x211e — and 2E7 read the latter on **all five instances**
+off this chip. 0x211e + 4×0x100 = 0x251e is therefore a proven-mapped dword,
+and `rb_dptx_dw_max()` is 0x251d, below it. Asserted as
+`rb_dptx_dw_max() < rb_enc_dw_max()` rather than stated. The two headers are
+also checked against **each other** for the shared offsets and the stride, so a
+second opinion about either is a build failure.
+
+### The identification is the best this project has had
+
+The firmware **trained the eDP panel**, which is running this desktop right
+now. So DP0's `DP_LINK_CNTL` must read `DP_LINK_TRAINING_COMPLETE` **and**
+`DP_LINK_STATUS` set, on this silicon, at this firmware revision. That is
+rule 47 asked of a write — the live word decodes as the register the conclusion
+assumes — discharged against a **working link** rather than a datasheet.
+`rb_dptx_ref_trained()` is that check and the write is refused without it
+(code 64). Both bits are required and each alone is asserted insufficient,
+because a conjunction can be correct while one term carries no information
+(rule 48) — and `TRAINING_COMPLETE` in particular is a bit a *driver* writes,
+so it can be set with no link behind it.
+
+### The trap that would have cost a boot and been misread
+
+**The two pattern encodings are not the same number.** The hardware register
+takes 0..3 for TPS1..TPS4 (`dcn10_link_encoder_dp_set_phy_pattern`'s switch);
+DPCD 0x102 takes 1, 2, 3, **7** (`drm_dp.h:603-609`). And the two zeros mean
+*opposite* things: DPCD 0 is training OFF, the hardware's 0 is TPS1.
+
+Substituting one for the other sets a **different pattern on each side of the
+link**, which looks exactly like a sink that cannot achieve clock recovery —
+a wrong answer that would have been believed and chased. `rb_dptx_hw_pattern()`
+and `rb_dptx_dpcd_pattern()` convert, everything above them speaks in TPSn, and
+the hosttest asserts both directions, asserts they **differ for every
+pattern**, and asserts the two zeros against `rb_dpcd.h`'s own names.
+
+### The sequence, and the verdict
+
+Linux's order, unrearranged, with its register semantics kept — the first is a
+**plain whole-register write** and the other three are read-modify-writes:
+
+```
+REG_WRITE (DP_DPHY_TRAINING_PATTERN_SEL, index);
+REG_UPDATE(DP_LINK_CNTL,      DP_LINK_TRAINING_COMPLETE, 0);
+REG_UPDATE(DP_DPHY_CNTL,      DPHY_BYPASS,               0);
+REG_UPDATE(DP_DPHY_PRBS_CNTL, DPHY_PRBS_EN,              0);
+```
+
+`clean` is published beside `applied` and each RMW is asserted to clear its own
+field and **nothing else** — `LINK_STATUS` and `EMBEDDED_PANEL_MODE` on
+LINK_CNTL, `FEC_EN` and `SCRAMBLER_SEL` on DPHY_CNTL, `PRBS_SEL` on PRBS_CNTL,
+all named explicitly, because 2EC's lesson was a disturbed neighbour rather
+than a lost store.
+
+**The verdict is the sink's own lane status** — DPCD 0x202, a register this
+project does not write at all, read over AUX2 **before as well as after**. "CR
+not done" is the state the sink is already in, so only a *change* in that byte
+is evidence the pattern reached it. Same shape as `DPDTO_ENABLE_STATUS` in
+2F0/2F2. Five verdicts: `NOT_RUN`, `NO_STORE`, `PATTERN_SET`, `SINK_MOVED`,
+`CR_DONE`.
+
+`rb_dptx_cr_done()` refuses to answer for zero lanes — a vacuous "all lanes
+done" would report clock recovery on a link with no lanes — and refuses three,
+since one status byte covers two. The lane count is a **dial**, not a constant,
+because it is the sink's property (2BB read two) and a wrong value would make a
+1-lane CR read as a 2-lane failure.
+
+### What a negative here will and will not mean
+
+**`PATTERN_SET` is the EXPECTED reading** and the tool says so before the run.
+The transmitter has not been enabled at the link rate — that is the atom
+transmitter command over DMUB, which 2E9 proved executes and 2ED reproduced —
+so the lanes are not driving at HBR2 and the sink has nothing to lock to. A
+`PATTERN_SET` is still the first training pattern this project has put on a
+wire. A `CR_DONE` would be more than this step is owed and the tool says to
+re-run before believing it (rule 44).
+
+`NO_STORE` is the one reading that would condemn the block, and it makes the
+address the first suspect rather than the sink.
+
+### Arming
+
+New opt-in **`-rbgpufbtrain`**, because this is a new write surface. Rule 30 by
+hand, both directions, over every `-rbgpu*` literal in `src/`: no existing
+token starts with `-rbgpufbt` and this one prefixes nothing. Anything extending
+it later needs a new name, not a suffix.
+
+**Rule 34: it arms its own dependency.** `dptxTrain()` takes its verdict from
+the sink over AUX, so `-rbgpufbtrain` sets `auxDpcdArmed` too — without the
+DPCD half it could write a pattern and have nothing to read, which is an
+experiment whose B side cannot be instrumented (rule 39). Armed inside the
+code rather than documented, which is what 2E2 and 2B6 paid for.
+
+### Checks
+
+Sixteen break-it checks, **sixteen fired**; three hit the `-Werror` trap first
+and were redone as breaks that compile — the **eighth and ninth** recorded
+instances. The ones worth naming: the hardware encoding off by one fired 5
+assertions, `TPS4 → 4` instead of 7 fired 1, each RMW clobbering a named
+neighbour fired 2-3, `cr_done` going vacuous on zero lanes fired 1, and
+`cr_done` checking only lane 0 fired 1.
+
+And one defect of my own, in `dptrain` itself: the five-instance table printed
+an **absent** ioreg key (read as -1) as `0x00000000`, indistinguishable from a
+real zero word — rule 14's trap at the tool boundary, in the very tool whose
+kext-side publisher carries a comment warning about it. Absent keys now print
+as absent.
+

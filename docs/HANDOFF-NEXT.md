@@ -1,6 +1,6 @@
 # HANDOFF — next step
 
-**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F3 — the pixel clock RUNS; the DPCD write is built.** `docs/RULES.md` is the reference card:
+**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F4 — the clock RUNS, the sink TAKES WRITES, the training pattern is built.** `docs/RULES.md` is the reference card:
 standing rules, chip facts, the boot-arg contract. `docs/JOURNAL.md` is the
 evidence record, grepped by milestone tag. **This file is only what is in
 flight.**
@@ -34,10 +34,11 @@ still armed** (2D3's `sub` 4, derived by default since 2D5 — the user's own
 
 ## IN FLIGHT: the external display, and what the next command is
 
-**Where it stands:** the clock is running on pipe 1 (boot 455), and the
-firmware is measured NOT to train this link (2F3), so training is ours. The
-next step is **the DPCD write**, built and unrun — item 1 under "Then, in
-order".
+**Where it stands:** the clock runs on pipe 1 (boot 455), the firmware is
+measured NOT to train this link (2F3) so training is ours, and the sink takes
+DPCD writes (boot 457). The next step is **2F4's training pattern on the
+wire**, built and unrun — item 1 under "Then, in order". It needs an EFI edit
+for `-rbgpufbtrain` as well as an install.
 
 ### Established end to end, each by measurement
 
@@ -140,46 +141,57 @@ of the next write.
    the CR/EQ loops, the DPCD writes and the lane settings are ours, over the
    channel 2BB/2BD proved end to end.
 
-   **2F3 built the first piece: the native DPCD WRITE, and no boot has run
-   it.** `auxTransact` was already a writer — 2BD's EDID read writes an offset
-   byte over AUX — and one equality test excluded `DP_WRITE` 0x80, which would
-   have encoded it with the READ length and **no payload**, silently, since the
-   engine ACKs a well-formed request that writes nothing.
+   **2F3's DPCD write WORKS** (boot 457): `dpcdwrite 0x100 0x14` on AUX2
+   ACKed, with `before 0x06` — `DP_LINK_BW_1_62`, the untrained default — and
+   `after 0x14`, HBR2. `applied 1 changed 1`, so the byte that came back is
+   not the byte that was there and no rule-20 defect applies. The sink is now
+   told to expect HBR2.
+
+   **2F4 built the TRANSMITTER half and no boot has run it.** This is the step
+   that turns "the sink will listen" into "this chip is driving something".
+
+   `-rbgpufbtrain` is **not** in this machine's boot-args, so this one needs an
+   EFI edit first (rule 43 — `nvram` is overwritten from OpenCore's plist):
+
+   ```bash
+   sudo tools/efi.sh bootarg add -rbgpufbtrain
+   ```
 
    ```bash
    sudo tools/fbinstall.sh
    ```
 
-   Reboot, confirm **493497B1** inside the collection (rule 15), then:
+   Reboot, confirm **6A8AE92D** inside the collection (rule 15), then read the
+   block before writing anything:
 
    ```bash
-   build/out/dpcdwrite 0x100 0x14
+   build/out/dptrain
    ```
 
-   That writes `DP_LINK_BW_SET` = HBR2 — the sink's own maximum (2BB) — and
-   does nothing on its own: no rate takes effect until `0x102` sets a training
-   pattern. `dpcdwrite` with no arguments lists the whole allowlist.
+   **Check `panel DP0 reads as a TRAINED link: YES` first.** That is the whole
+   identification — the firmware trained the panel and it is scanning out, so
+   its `DP_LINK_CNTL` must show both `TRAINING_COMPLETE` and `DP_LINK_STATUS`.
+   A `NO` there means the block is not what we think it is and the write will
+   refuse with code 64; nothing else in the output would be worth reading.
 
-   **How to read it**, written down first. `ACK + STORED` with `changed 1`
-   means the sink answered a reply we do not compose **and** stored a byte that
-   differs from the read-before — the mechanism training is made of, and not a
-   trained link. `ACK + STORED` with `changed 0` means the byte already held
-   that value, so `applied` carries no evidence of our store (rule 20) — write
-   a different value to the same address. `ACK + IGNORED` is a real outcome:
-   the receiver answered and ignored the field. `ACK + BLIND` means the
-   read-after failed and the write must not be recorded as successful. `NO
-   ANSWER` splits by reply code into a NACK (the channel works, the sink
-   declines the address) and silence, which are different findings.
+   Then:
 
-   What bounds it: the panel refused by name **three times independently**
-   (tool by HPD, kext by HPD, kext by AUX engine — 2B9 read `AUX_HPD_SEL` off
-   the hardware, so those are two different facts), and the address
-   **allowlisted** to the link-configuration block alone, enforced in the tool,
-   in `rb_dpcd_write_refuse()` and again in the encoder.
+   ```bash
+   build/out/dptrain go
+   ```
 
-   After that comes the transmitter side, which is untouched: the PHY output,
-   `DP_LINK_CNTL`, the atom transmitter ENABLE, and the training pattern on the
-   wire. A DPCD write is the sink half only.
+   **How to read it, written down first.** `PATTERN_SET` is the **expected**
+   verdict: our four registers took cleanly and the sink's lane status did not
+   move, which is what should happen while the transmitter is not yet driving
+   at the link rate. `SINK_MOVED` means the receiver changed state after our
+   pattern — re-run to see if it repeats. `CR_DONE` is more than this step is
+   owed and must be re-run before it is believed (rule 44). `NO_STORE` is the
+   only reading that condemns the block, and it makes the address the first
+   suspect rather than the sink — `clean 0` in particular means an RMW
+   disturbed a neighbour, which is 2EC's failure.
+
+   A dark monitor remains the expected reading throughout.
+
 2. **`enc31_map_stream_to_link`** (`link_hwss_dio.c:63`) — a second FE-to-link
    register, not located. Named in 2EC as not reproduced.
 3. **A second OTG and HUBP.** The pipe domains need no powering up — 2DE read
