@@ -63232,3 +63232,159 @@ instrument. Re-run individually, that break fires correctly.
 The read costs nothing extra: it is armed by the token boot 465 will already
 carry. `tools/diolook.sh` with the cable in, beside the `H_TOTAL` experiment
 the 2FB handoff specifies.
+
+---
+
+## 2FD — boot 467: the raster honours its timing, so the CLOCK is wrong
+
+**Boot 467** (`rbgpu-boot` 467, boottime Sat Nov 7 18:37:37 2026). Framebuffer
+**2C01EFBD** verified inside the live collection, not in `/Library/Extensions`
+(rule 15). Cable in at boot. Arm verified from the running system before any
+reading (rule 34): `wdt=-1`, `-rbgpufbaux`, `-rbgpufbdpalt`, `-rbgpufbdig`,
+`-rbgpufbfe`, `-rbgpufbdto`, `-rbgpufbtrain`, `-rbgpufbraster`.
+
+**Sink healthy before the experiment**, which 2F8 made a precondition: EDID on
+engine AUX2, 128 bytes, refusal 0, header OK, checksum OK, `MSI MP2412C`;
+DPCD `0x0` = `12 14 c2 81`, byte-identical to 2D8 and 2BB; `0x202` = `0x00`.
+
+### 1. The experiment the 2FB handoff specified, with its arithmetic corrected
+
+**The handoff's own mode was impossible** and would have cost the boot:
+`htotal=1100` with `hactive=1920`. H_TOTAL cannot be below the active raster.
+Swapping the totals to hold the product (2250 × 1100) is equally useless — the
+product is the quantity under test.
+
+The form actually run holds the clock and **doubles** the product, by asking
+for 30 Hz instead of 60 so the clock-agreement gate stays honest
+(4400 × 1125 × 30 = 148 500 000, so refusal 47 does not fire):
+
+```
+dmubbl dto 148500
+otgprog go pipe=1 refresh=30 hactive=1920 hfront=88 hsync=44 \
+        htotal=4400 vactive=1080 vfront=4 vsync=5 vtotal=1125
+```
+
+**Only H_TOTAL changed** — 2200 → 4400. Clock, V_TOTAL, active raster and both
+porches held. The DTO started as in 464 (`PIXEL_RATE_CNTL`
+`0x8000c000 -> 0x8000d090`, `DPDTO_ENABLE_STATUS` 0 -> 1); the raster came up
+(`OTG1_CONTROL` `0x300 -> 0x00011201`, `H_TOTAL` readback `0x112f` = 4399,
+`V_TOTAL` 1124).
+
+**Measured over 25.074 s, both counters latched in one periodic sample against
+wall time:**
+
+```
+  OTG0 panel   3628 frames    144.69 Hz     (the DRR ladder, at native)
+  OTG1 pipe 1  6115 frames    243.88 Hz
+  implied pixel clock at 4400 x 1125 = 1207.19 MHz
+```
+
+**THE RATE HALVED.** Predicted 248.18 Hz if the OTG honours its own timing;
+measured 243.88, 1.7 % low. 2FB's 496.35 Hz at the half-size product is the
+other point.
+
+**So OTG1 DOES honour its own H_TOTAL and V_TOTAL, and the clock is what is
+wrong.** That is the first of the two branches the 2FB handoff named, and it
+closes the second: the counter *is* driven by our raster, so section 2 of 2FB
+does not need re-reading.
+
+**The ~1.2 GHz candidate is now n=2 at two different rasters** — 1228.47 MHz
+and 1207.19 MHz, 1.7 % apart, bracketing 2 × the 600 MHz `dprefclk`. Still a
+candidate and not an identification (rule 18), but no longer one point.
+
+### 2. The handoff pointed at two fields and BOTH are identical to the panel
+
+It said to look at `PIPE_DTO_SRC_SEL` and `DTBCLK_DTO_DIV`. All four pipes'
+`PIXEL_RATE_CNTL`, decoded against `dcn_3_1_2_sh_mask.h:925-940`:
+
+| field | pipe0 PANEL | pipe1 OURS | pipe2 dark | pipe3 dark |
+|---|---|---|---|---|
+| PIXEL_RATE_SOURCE | 0 | 0 | 0 | 0 |
+| DTBCLK_DTO_ENABLE | 0 | 0 | 0 | 0 |
+| DP_DTO_ENABLE | 1 | 1 | 0 | 0 |
+| DPDTO_ENABLE_STATUS | 1 | 1 | 0 | 0 |
+| DISPOUT_HALF_RATE_EN | 0 | 0 | 0 | 0 |
+| **PIPE_DTO_SRC_SEL** | **0** | **1** | 0 | 0 |
+| DIO_FIFO_ERROR | 0 | 3 | 3 | 3 |
+| DTBCLK_DTO_DIV | 8 | 8 | 8 | 8 |
+
+**`DTBCLK_DTO_DIV` is 8 on the working panel pipe too, and
+`PIXEL_RATE_SOURCE` is 0 on all four.** Neither distinguishes our pipe from
+one that clocks correctly, so neither is the difference, and the handoff's
+suggestion is spent. `DISPOUT_HALF_RATE_EN` is 0 everywhere, so it is not a
+hidden factor-of-two either.
+
+**The ONLY programmable field that differs from a pipe known to clock
+correctly is `PIPE_DTO_SRC_SEL`** — and it differs because *we chose* it.
+`rb_dpdto.h` set it to 1 deliberately and argued it well from source: Linux's
+`dcn31_program_pix_clk` writes 1 in the same `REG_UPDATE_2` as the enable, and
+the firmware's 0 on pipe 0 came from atom bytecode on eDP, which is a
+different path. **That argument is still correct about the source and is not
+being withdrawn.** What boot 467 adds is evidence it did not have: the pipe at
+SRC_SEL 1 clocks at ~8× its request, and the pipe at SRC_SEL 0 clocks right.
+That makes it the live suspect on *measurement* grounds rather than source
+grounds, which is a different and weaker claim — and the next boot settles it,
+because `dmubbl dto` already takes `srcsel=0`.
+
+### 3. `DIO_FIFO_ERROR` on a pipe BEING BROUGHT UP, the reading rb_dpdto.h asked for
+
+`rb_dpdto.h` recorded this as explicitly unusable: "reads 3 on every dark pipe
+and 0 on pipe 0 ... but it has never been read on a pipe BEING BROUGHT UP, so
+whether it clears on a clock alone or needs a running OTG and a stream is
+unknown."
+
+**Now it has been.** Pipe 1 with the DTO running and the raster scanning:
+still **3**, before and after our write. So it does **not** clear on a clock
+plus a running OTG. What is still untested is a stream. It remains published
+raw and read by nothing.
+
+### 4. 2FC's read, run on hardware: the DIO mux line is CLOSED
+
+`tools/diolook.sh`, before any write and again after the DTO and the raster:
+
+```
+  LINKA 0x00000000   <- the panel's
+  LINKC 0x00000000   <- ours (HPD2 = AUX2 = phyid 2 = DIG2)
+  LINKB/D/E/F 0x00000000      nonzero mask 0x00      SWEEP UNIFORM
+```
+
+All six zero, unmoved by our writes. **The negative, stated as a negative:**
+the mux is not carrying a value that steers DIG2's symbols away from PHY2. It
+is **not** "the mux is confirmed on DIG" — `ENCODER_TYPE_DIG` is zero and so
+is an unprogrammed register.
+
+**The in-boot base control passed**, which is what makes the zeros a reading
+at all: `dpaltlook.sh` in the same boot read PHY0 `0x00194444` (four MPLLs,
+ref clock on, active mask 0x01) out of the same `kRbDmuSeg2` aperture, so the
+segment decodes and non-zero words come back from it. What is still **not**
+independently confirmed is the six specific offsets 0x1f04..0x1f09, which have
+no non-zero value anywhere to attest them; they come from
+`dcn_3_1_2_offset.h:11737-11747`, the same header every working offset in this
+project came from. Said plainly rather than glossed.
+
+Also in that control, consistent with what the card already records: PHY2
+reads `0x00063333` — `DPALT_DISABLE` asserted *and* acked — with the cable in
+and the sink answering on AUX2. `PHY_CNTL6` has disagreed with
+`QUERY_DP_ALT` on all five PHYs since 2EB, so this is that known disagreement
+and not a new finding.
+
+### What boot 467 did NOT do
+
+No `dig fe`, no `dptrain`. With the clock established as the wrong thing,
+re-running the steps 461 and 464 already ran at a rate ~8× the sink's
+expectation would have produced a third `0x202` = `0x00` and no information.
+
+### Next, and it is one boot
+
+```
+dmubbl dto 148500 pipe=1 srcsel=0
+otgprog go 1080p60 pipe=1
+```
+
+then the same 25 s two-counter measurement. **Prediction if `PIPE_DTO_SRC_SEL`
+is the factor: 60 Hz.** If the rate is still ~496, SRC_SEL is not it and the
+clock OTG1 is actually on has to be found another way — `DTBCLK_DTO_DIV` 8 is
+the same on a working pipe, so the next place to look is what feeds the DTO
+itself rather than the fields beside it. The DTO refuses a second write on a
+live pipe, so this cannot be an in-boot A/B and the pipe must be dark at the
+start.
