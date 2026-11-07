@@ -43,7 +43,7 @@ means hybrid).
   `rb_discovery.c`, `rb_probe.c` (read-only), `rb_regs.h` (every offset cites
   its Linux header), `rb_smu*.c`, `rb_otg.h`, `rb_agdc.h`, `rb_hubp.h`,
   `rb_backlight.h`, `rb_hpd.h`, `rb_aux.h`, `rb_dpcd.h`, `rb_dig.h`,
-  `rb_digbe.h`, `rb_dpalt.h`, `rb_enc.h`, `rb_drr.h`, `rb_frametime.h`,
+  `rb_digbe.h`, `rb_dpalt.h`, `rb_dpdto.h`, `rb_enc.h`, `rb_drr.h`, `rb_frametime.h`,
   `rb_gpuname.h`, `rb_osver.h`, **`rb_defaults.h`** (the default-on tokens).
 - `src/kext/` — `RembrandtProbe`, read-only, publishes `RBProbe*`, unmaps.
 - `src/fbkext/` — `RBAMDFramebuffer`, the `IOFramebuffer` for the
@@ -346,7 +346,9 @@ documented in files already in the tree).
 - **GC seg0 = 0x1260** (four ways), seg1 = 0xa000. Apple's encoded register ids
   are `(dword offset << 32) | 11`, 11 = GC_HWID; byte address is
   `(seg + dword) * 4`. Offsets from `gc_10_3_0_offset.h`. **DMU segment 2 =
-  0x34c0**; BAR5 is 512 KB.
+  0x34c0**, and **DMU BASE_IDX 1 = 0xc0** (2EF, off this machine's own
+  `tests/data/rembrandt-680m-tufa15.bin`, with `base[2]` in the same array as
+  the control; `build/out/rbdump` prints it). BAR5 is 512 KB.
 - Accessor slots on `pm4+0x30` / `hw->0x368`: `[0x148]` id → dword offset,
   `[0x118]` **read**, `[0x120]` **write**. [2fd, 2fg]
 - Carve-out MC `0xF4_0000_0000`, system-physical `0x7_8000_0000`
@@ -395,8 +397,14 @@ legacy fallback Linux only reads when DMCUB is absent). **The firmware executes
 instance alone, two boots) **and answers them** (the reply path works at
 REGION4; `ret_status` stays SET, which Linux's own criterion would discard).
 The firmware configured that encoder (`DP_CONFIG` = 2 lanes on DIG2, 4 on the
-panel's DIG0, 0 on the three never brought up). Remaining: the **pixel clock**
-(VBIOS sub-type **2**), then link training over AUX2 (driver-side — zero `dmub`
+panel's DIG0, 0 on the three never brought up). Remaining: the **pixel clock**, which on a DP
+link is **three register writes of ours** and not the VBIOS command (2EE read
+the caller: `dcn31_program_pix_clk` programs `DP_DTO*_PHASE`/`MODULO`/
+`PIXEL_RATE_CNTL` itself and reaches `set_pixel_clock` only for HDMI/DVI).
+Those registers are **BASE_IDX 1**, whose offsets collide with the DOMAIN
+power-gating block at BASE_IDX 2, so 2EF built the read-only check first:
+pipe 0's own PHASE must reproduce the panel's clock, with the same offsets at
+BASE_IDX 2 as an alias control. Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
 since 2sl). **Order matters:** FE connect → configure encoder → transmitter
@@ -433,6 +441,8 @@ which is measured false), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
 each arms its own dependencies and sends nothing until `build/out/dmubbl` names
 a target; **PHY0 / DIG0 / front end DIGA are the panel's and are refused by
 name**), `-rbgpufbaux` (native AUX DPCD read),
+`-rbgpufbdto` (2EF's DP DTO read - read-only, writes and sends nothing; opt-in
+because the offsets collide with the DOMAIN block at the base this kext holds),
 `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,
@@ -482,7 +492,8 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 (`rbgpuretiredrain`, measured dead); **efficiency/power** (moved to
 `~/Developer/Econized`).
 
-**Open:** the pixel clock and the rest of the external-display chain (above);
+**Open:** the pixel clock (built as a READ, not yet booted) and the rest of
+the external-display chain (above);
 the **wedge** (work submitted that never retires — channel-52 GFX, 3.5 s, the
 "random lag"; `stamp_ticks` 125666 retires the "nothing polls it" family);
 `powermetrics` has **never been run** against the default 576 interior
