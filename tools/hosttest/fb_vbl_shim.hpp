@@ -313,6 +313,14 @@ public:
     uint64_t dpaltChanges=0;
     int dpaltSweep=0;
     bool dpaltSampled=false, dpaltArmed=false, dpaltReady=false;
+    /* 2FC: mirrored here the moment they were added to the kext, which is
+     * the 2B1 lesson - a shim that lags the class compiles and tests the
+     * wrong object. */
+    uint32_t dioWord[6]={0,0,0,0,0,0};
+    uint32_t dioNonzeroMask=0;
+    int dioSweep=0;
+    bool dioReady=false;
+    void dioSample(void) {}
     void dpaltSample(void) {}
     /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives
      * in RBAMDFramebufferHUBP.cpp, which this executable does not compile.

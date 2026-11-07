@@ -44,7 +44,7 @@ means hybrid).
   `rb_discovery.c`, `rb_probe.c` (read-only), `rb_regs.h` (every offset cites
   its Linux header), `rb_smu*.c`, `rb_otg.h`, `rb_agdc.h`, `rb_hubp.h`,
   `rb_backlight.h`, `rb_hpd.h`, `rb_aux.h`, `rb_dpcd.h`, `rb_dig.h`,
-  `rb_digbe.h`, `rb_dpalt.h`, `rb_dpdto.h`, `rb_dptx.h`, `rb_enc.h`, `rb_drr.h`, `rb_frametime.h`,
+  `rb_digbe.h`, `rb_dio.h`, `rb_dpalt.h`, `rb_dpdto.h`, `rb_dptx.h`, `rb_enc.h`, `rb_drr.h`, `rb_frametime.h`,
   `rb_gpuname.h`, `rb_osver.h`, **`rb_defaults.h`** (the default-on tokens).
 - `src/kext/` — `RembrandtProbe`, read-only, publishes `RBProbe*`, unmaps.
 - `src/fbkext/` — `RBAMDFramebuffer`, the `IOFramebuffer` for the
@@ -437,10 +437,22 @@ at boot: engine **AUX2**, 128 bytes, refusal 0, `RBFBAuxEn` mask **5**. Rule 47
 with a new clause: **so is WHEN the port came up.** (`RBFBAuxEn` and
 `RBFBHpdSink` are **masks**, not indexes — rule 33's shape, cost two misreads.)
 
-**Still not done:** `enc31_map_stream_to_link` (no stream mapped to DIG2), a
-surface, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
-since 2sl). **Order:** FE connect → configure encoder → transmitter ENABLE;
-the atom transmitter command carries no front end **by design**.
+**Still not done:** a **stream** on DIG2, a surface, and a second
+`IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
+**Order:** FE connect → configure encoder → transmitter ENABLE; the atom
+transmitter command carries no front end **by design**.
+**2FC corrected the name:** `enc31_map_stream_to_link` is the **HPO DP**
+(128b/132b) encoder's and our 8b/10b link never goes through it. This chip's
+DIO stream encoder is `dcn30_dio_stream_encoder_construct` over DCN10's
+register struct (`dcn31_resource.c:1323`, `:361`) — DCN30 code on DCN10
+registers, 2FA's two-file split again. Our connect was
+`dcn10_link_encoder_connect_dig_be_to_fe`, **done in 2EC**.
+**2FC also built the mux read 459/461/464 never took:** `DIO_LINK{A..F}_CNTL`
+(0x1f04..0x1f09, BASE_IDX 2, stride 1) selects which KIND of encoder drives
+each link. `ENCODER_TYPE_DIG` is **zero**, so a zero word cannot be told from
+unprogrammed, and the only finding available is a **non-zero** `ENC_TYPE_SEL`
+on LINKC. `tools/diolook.sh`; read-only, no setter, and the caller that
+programs it is **not** identified.
 
 **The firmware does NOT train this link** (2F3, measured with a control), so
 training is ours. **PHY0 / DIG0 / front end DIGA are the panel's and are
@@ -485,7 +497,8 @@ with no SSH window).
 `-rbgpufbmodes` (a second display mode; mutually exclusive with
 `-rbgpufbdrr`), `-rbgpufbdpalt` (the RDPCSTX PHY read — read-only, but Linux
 marks the path "avoid if possible", hang conditioned on DMCUB not running,
-which is measured false), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
+which is measured false; **2FC's `DIO_LINK*_CNTL` read shares this arm, and
+`-rbgpufbdig` / `-rbgpufbfe`, with no new token**), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
 `-rbgpufbdig` / `-rbgpufbaltq` / `-rbgpufbfe` (the DMUB and DIG experiments —
 each arms its own dependencies and sends nothing until `build/out/dmubbl` names
 a target; **PHY0 / DIG0 / front end DIGA are the panel's and are refused by

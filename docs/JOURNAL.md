@@ -63089,3 +63089,146 @@ already disagreed with `QUERY_DP_ALT` on all five PHYs).
 `enc31_map_stream_to_link` remains unwritten, no surface is attached, and
 `getDisplayModeCount()` has returned 1 since 2sl. A dark monitor is still the
 expected reading, and every tool said so in its own output.
+
+---
+
+## 2FC — the DIO encoder-type mux: the register three boots never read
+
+**Static, 2026-11-07. No boot. Built on top of boot 464's state.**
+
+Boots 459, 461 and 464 each programmed the DTO, the raster, the DIG front end
+and a training pattern on DIG2, read every write back changed, and got
+DPCD `0x202` = `0x00` with `RDPCSTX2_PHY_CNTL6` unmoved at `0x00063333`. Every
+link in the chain verified and the chain dead is rule 45's exact shape, and the
+question it forces is what sits between a verified write and the lane.
+
+### The finding, by source, not by reasoning
+
+`grep -rn "DIO_LINK" src/` returned **nothing**. This kext has never read
+`DIO_LINK{A..F}_CNTL`, and that register is a per-UNIPHY mux selecting **which
+kind of encoder drives the link**.
+
+- `docs/linux-ref/dcn31_dio_link_encoder.c:381` —
+  `.set_dio_phy_mux = dcn31_link_encoder_set_dio_phy_mux` sits in
+  `dcn31_link_enc_funcs`, and `dcn31_resource.c` builds this chip's link
+  encoders from that table. **Rule 46 discharged in the funcs table**: this is
+  the function this chip's `dc` reaches.
+- `docs/linux-ref/dcn31_dio_link_encoder.c:145` — the body: one
+  `DIO_LINK<x>_CNTL` per `enum transmitter`, writing `ENC_TYPE_SEL` always and
+  the two `HPO_*_ENC_SEL` fields only for FRL and for 128b/132b.
+- `dcn_3_1_2_offset.h:11737-11747` — `regDIO_LINK{A..F}_CNTL` =
+  **0x1f04..0x1f09**, all **BASE_IDX 2**, stride **1 dword**.
+- `dcn_3_1_2_sh_mask.h:44278-44283` — `ENC_TYPE_SEL` `0x3`,
+  `HPO_HDMI_ENC_SEL` `0x70`, `HPO_DP_ENC_SEL` `0x700`. Identical on every
+  instance.
+- `link_encoder.h:129` (fetched from kernel.org, **not** vendored — no code
+  follows it) — `ENCODER_TYPE_DIG = 0`, `ENCODER_TYPE_HDMI_FRL = 1`,
+  `ENCODER_TYPE_DP_128B132B = 2`.
+
+### What this read can and cannot settle, written before the reading exists
+
+**`ENCODER_TYPE_DIG` is zero.** So a zero word is indistinguishable from an
+unprogrammed register, a gated aperture and a wrong address. And our link is
+HBR2 8b/10b — neither FRL nor 128b/132b — so zero is *also* the value Linux
+would program for it.
+
+That makes the **expected** outcome of this read the uninterpretable one, and
+it is 2zw's shape and `DPALT_DISABLE`'s over again. Stated as the two
+asymmetric outcomes:
+
+- `ENC_TYPE_SEL` on **LINKC** reads 1 or 2 → **the finding.** Three boots were
+  writing DIG2 correctly into a path with no exit, which is precisely what
+  "every readback agreed and the sink saw nothing" looks like.
+- It reads 0 → the line is **closed**, and that is a negative, not a
+  confirmation. "The mux is confirmed on DIG" is not a reading this register
+  can produce from one sample.
+
+LINKA, the panel's, is a **weak** control and is labelled as one: the panel
+works, so its value must be workable, but if it too reads 0 then 0 is simply
+the working value and nothing is distinguished. The only verdict here that is
+a real control is **DIFFERS** — two links disagreeing proves the six words are
+the six registers.
+
+### Also settled, and it corrects the handoff
+
+**`enc31_map_stream_to_link` is the wrong name for our next step**, and the
+handoff after 2FB listed it first. `dcn31_resource.c:1323` builds stream
+encoders with **`dcn30_dio_stream_encoder_construct`** over
+`dcn10_stream_enc_registers` / `se_shift` / `se_mask` (`:361`, `:369`,
+`:373`) — so on this chip the DIO stream encoder is **DCN30's code on DCN10's
+register struct**, the same two-file split 2FA found in the OPTC path.
+`enc31_map_stream_to_link` belongs to the **HPO DP** link encoder
+(`dcn31_hpo_dp_link_encoder.c`), a parallel encoder for DP 128b/132b that our
+8b/10b link never goes through. Our path's connect is
+`dcn10_link_encoder_connect_dig_be_to_fe`, which **2EC already did** —
+`DIG_BE_CNTL` `FE_SEL 0 -> 0x4`, boot 464.
+
+Also read and worth recording: `dcn31_link_encoder_enable_dp_output`
+(`:573`) branches on `link_enc_cfg_is_transmitter_mappable`. Non-mappable goes
+to `dcn20_link_encoder_enable_dp_output` — the atom transmitter path, ours.
+Mappable goes to a DMUB `dig1_dpia_control`, which is **USB4 DPIA tunnelling**,
+not Type-C DP alt mode. Our port is a plain UNIPHY in alt mode, so the atom
+path is the right one and `dmubbl dig` has not been on the wrong branch.
+
+### Built
+
+- **`src/common/rb_dio.h`** — six offsets, three fields, read-only, **no
+  setter**. `RB_DIO_SEL_DIG_OR_UNSET` is named for the ambiguity rather than
+  for the flattering half of it. `RB_DIO_SWEEP_UNIFORM` is explicitly not an
+  error and explicitly not a pass; `NOT_SAMPLED` is 0 so a birth value can
+  never read as a result (2C0's own defect, caught before it shipped).
+- **`tools/hosttest/dio_test.c`** — offsets pinned per instance, not derived
+  from base + i·stride; each field checked in isolation so a swapped pair
+  cannot pass; bits outside the three fields checked not to leak into one; the
+  zero ambiguity pinned by name; bad args refused.
+- **`src/fbkext`** — `dioSample()`, read-only, no writer, called after
+  `dpaltSample()`. It shares dpalt's arm set (`-rbgpufbdpalt`, `-rbgpufbdig`,
+  `-rbgpufbfe`) with **no new boot-arg**: it is the verdict register
+  `-rbgpufbdig` has been missing, so it must be live in exactly the boots that
+  run that experiment (rule 34), and the `-rbgpufbdig` family is already the
+  crowded one for rule 30. Its aperture bound is kept **out of `needed`** so
+  it can never refuse `hubpSetup()` and take the panel with it (rule 16), and
+  the bound is labelled as one that cannot fail at today's aperture, since
+  0x1f09 is below dpalt's 0x2ca6 (rule 48).
+- **`tools/diolook.sh`** — prints the sweep verdict before any value, refuses
+  an unrecognised one, and does **not** recompute the verdict: that was 2C0's
+  defect, where `dpaltlook.sh` reimplemented `rb_dpalt_verdict()` in a shell
+  heredoc and left hosttested logic correct while what a human read was wrong.
+  Zero is printed with **both** of its readings, never only one.
+
+Framebuffer UUID **2C01EFBD**.
+
+### Rule 48, and it found two things
+
+Seven breaks, one per guard, each built and run:
+
+| Break | Result |
+|---|---|
+| `rb_dio_dw` bound off by one | caught — `dw(6) = 0x1f0a want INVALID` |
+| stride 1 → 2 | caught — two offsets wrong |
+| `RESERVED` default → `DIG_OR_UNSET` | caught |
+| `nonzero_mask` field mask → all bits | caught |
+| `sweep` `first = w[0] & fields` → `w[0]` | **FIRED NOTHING** |
+| `sweep` count bound removed | caught |
+| `hpo_dp` shift → hdmi's | caught |
+
+**The uncaught one was a real coverage hole and it is the interesting part.**
+The sweep compares every instance against `w[0]`, and my "an undecoded bit
+must not make the sweep DIFFER" case put that bit on `w[3]`, leaving `w[0]`
+zero — so it passed whether or not `w[0]` was masked. Rule 48's "a test that
+passes for the wrong reason is not coverage", in the one guard where the
+asymmetry between instance 0 and the rest is the whole mechanism. Fixed by
+moving the stray bit onto instance 0 and adding a second case so the fix
+cannot pass by making every verdict UNIFORM; the break now fires.
+
+**And my break-it harness lied once.** It grepped for `error:` before `FAIL`,
+matched build chatter, and reported the `nonzero_mask` break as a `-Werror`
+build failure when the break was in fact caught. Rule 26 applied to the
+break-it runner itself: the check written to protect a guard was the broken
+instrument. Re-run individually, that break fires correctly.
+
+### Next
+
+The read costs nothing extra: it is armed by the token boot 465 will already
+carry. `tools/diolook.sh` with the cable in, beside the `H_TOTAL` experiment
+the 2FB handoff specifies.

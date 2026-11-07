@@ -1,6 +1,6 @@
 # Handoff — next step
 
-**Written 2026-11-07, after 2FB. Last boot: 464.**
+**Written 2026-11-07, after 2FC. Last boot: 464 (2FC took none).**
 
 Read `docs/RULES.md` first, then this. `docs/EXTERNAL-DISPLAY.md` has the full
 state of the goal; `docs/JOURNAL.md` under `2FB` has boot 464 in detail.
@@ -116,14 +116,42 @@ a=$(r); t0=$(python3 -c 'import time;print(time.time())'); sleep 20; b=$(r); t1=
 
 ---
 
+## 2FC: one more thing to read on boot 465, and it costs nothing
+
+`tools/diolook.sh`. 2FC built a read-only survey of `DIO_LINK{A..F}_CNTL`
+(0x1f04..0x1f09, BASE_IDX 2, stride 1) — the per-UNIPHY mux that selects
+**which kind of encoder drives the link**. Three boots wrote DIG2 correctly
+and the sink saw nothing; a mux pointing that link elsewhere produces exactly
+that. It is armed by `-rbgpufbdig`, which boot 465 carries anyway, so there is
+no extra token and no extra boot.
+
+**Read its verdict line first, and read the asymmetry honestly.**
+`ENCODER_TYPE_DIG` is **zero**, so a zero word is indistinguishable from an
+unprogrammed register, a gated aperture and a wrong address — and zero is also
+what Linux would program for an 8b/10b link. So:
+
+- `ENC_TYPE_SEL` on **LINKC** reads 1 or 2 → **the finding**, and the next
+  step changes.
+- It reads 0 → the line is **closed**. That is a negative. It is **not** "the
+  mux is confirmed on DIG", and LINKA is a weak control, not a strong one.
+
+Framebuffer UUID to install for it: **2C01EFBD** (`sudo tools/fbinstall.sh`).
+
+---
+
 ## After that
 
 In order. Each is a thing that does not exist yet:
 
-1. **`enc31_map_stream_to_link`** — no stream is mapped to DIG2. Discharge
-   rule 46 by source in `dcn31_resource.c` first, as 2FA did for the OTG path.
-   The OPTC split there (timing from DCN10, enable from DCN31) says not to
-   assume the DIO functions all come from one file either.
+1. **A stream on DIG2.** 2FC discharged rule 46 here by source and the
+   handoff's old name was wrong: `enc31_map_stream_to_link` belongs to the
+   **HPO DP** 128b/132b encoder, which our 8b/10b link never goes through.
+   This chip builds stream encoders with `dcn30_dio_stream_encoder_construct`
+   over `dcn10_stream_enc_registers` (`dcn31_resource.c:1323`, `:361`) —
+   DCN30 code on DCN10 registers, the same two-file split 2FA found in OPTC,
+   so read `dcn30_dio_stream_encoder.c` and *not* a dcn31 file. The connect
+   that old name implied is `dcn10_link_encoder_connect_dig_be_to_fe`, which
+   **2EC already did** (`DIG_BE_CNTL` `FE_SEL 0 -> 0x4`, boot 464).
 2. **A surface** on pipe 1 — HUBP, address, swizzle.
 3. **A second `IOFramebuffer`.** `getDisplayModeCount()` has returned 1 since
    2sl.

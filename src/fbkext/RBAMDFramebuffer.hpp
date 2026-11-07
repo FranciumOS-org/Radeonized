@@ -41,6 +41,7 @@ extern "C" {
 #include "rb_dmub.h"
 #include "rb_pg.h"
 #include "rb_dig.h"
+#include "rb_dio.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
@@ -503,6 +504,14 @@ private:
     bool               dpaltSampled;   /* a sample has been taken: see below */
     bool               dpaltArmed;     /* -rbgpufbdpalt                      */
     bool               dpaltReady;     /* the aperture covered the registers */
+    /* 2FC: the DIO per-link encoder-type mux, DIO_LINK{A..F}_CNTL. Six
+     * words, read-only, no writer. Armed by the same set as dpaltWord and
+     * bounded separately; rb_dio.h argues why a uniform zero sweep is the
+     * ONE reading this block cannot interpret, and dioSweep carries that. */
+    uint32_t           dioWord[6];     /* RB_DIO_COUNT, last raw words       */
+    uint32_t           dioNonzeroMask; /* instances with a programmed field  */
+    int                dioSweep;       /* enum rb_dio_sweep: the control     */
+    bool               dioReady;       /* the aperture covered the registers */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -1147,6 +1156,7 @@ private:
      * block this project has never read and Linux's own comment warns the
      * access can hang when DMCUB is not running. */
     void dpaltSample(void);
+    void dioSample(void);
     /* 2EF: pipe 0's live DP pixel-clock DTO, read-only - and the check that
      * BASE_IDX 1 is a real address before anything is written there. Same
      * mapping as hpdSample(); gated on dtoArmed. */
