@@ -62381,3 +62381,63 @@ anything**. If it reads `MSI MP2412C` on a cold boot, this boot's zeros were a
 state we or the port entered, and the writes since boot 457 are the suspects.
 If it still reads zero after the power-key hold, the port is the suspect and no
 sink-side reading is available at all.
+
+### 2F7b — the port is ALIVE, the read path is FINE, and both were settled by controls
+
+Two candidates from 2F7a are now eliminated, neither by reasoning.
+
+**It is not 2D8's dead Type-C subsystem, so the 30-second power-key hold is the
+wrong tool here.** 2D8 recorded that failure's signature exactly: HPD1-4 status
+**0**, AUX1-4 `AUX_EN` clear at dphy `0x00004500`, PHY active mask `0x01`,
+`dpcdread` refusal **3** (no engine bound to that HPD). This boot reads the
+opposite on every one of them:
+
+| | 2D8's dead state | now |
+|---|---|---|
+| HPD2 status | `0` | **`0xff0ff013`** (INT, SENSE, SENSE_DELAYED all set) |
+| enabled mask | — | `0x1f`, so every 0 would be a real 0 |
+| sink mask / at setup | — | `0x05` / `0x05` |
+| `dpcdread` refusal | 3 | **0**, engine AUX2 bound from `AUX_HPD_SEL` |
+| reply | none | **ACK, length-correct** |
+
+The chassis is presenting the port to the chip. `RBFBHpdChanges` is still 0,
+which also means the monitor power-cycle never moved the HPD line - so no
+physical replug has actually been instrumented yet this boot.
+
+**It is not our read path.** The control is the panel's own AUX0, a working
+trained link read through the identical code in the same boot:
+
+```
+dpcdread 0x0 16 0  ->  12 0a c4 c1 00 00 01 c0 02 00 02 00 00 0b 80 00
+                       revision 1.2, max link rate 0x0a (HBR), max lanes 4
+```
+
+Sensible, self-consistent, and consistent with `DP_CONFIG` reading 4 lanes on
+the panel's DIG0. The same tool on AUX2 returns, for the same 16 bytes:
+
+```
+AUX2     00 00 00 80 00 00 00 00 00 00 00 00 00 00 04 00
+healthy  12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00   (2D8, byte-identical to 2BB)
+```
+
+Not a shift and not a stuck index - nonzero only at bytes 3 and 14, with the
+length always correct and the reply always an ACK. So the native read path
+extracts real data when there is real data to extract, and candidate 3 is out.
+
+**What is left is two candidates, both about AUX2 or the sink:**
+
+1. the sink's DP receiver and its DDC EEPROM are both behind an AUX channel
+   that is delivering near-zero payload - a channel or receiver fault that
+   leaves HPD and the ACK handshake intact;
+2. **we did it** - boot 457 read both endpoints correctly, and since then this
+   project wrote `0x100` = `0x14` (HBR2) into a receiver whose caps now read
+   rate 0, wrote training patterns to `0x102`, and moved `TP_SEL` on DP2 three
+   times.
+
+**The next measurement is physical and has never actually been taken:** unplug
+the Type-C cable, wait, replug it, and watch `RBFBHpdChanges` move - which is
+the proof the replug happened, and the thing 2F7a's power-cycle lacked. Then
+`build/out/edidread`. If the EDID comes back, candidate 2 moves to the front
+and every write since boot 457 is a suspect. If it stays zero through a replug
+that HPD witnessed, the channel or the receiver is the fault and no sink-side
+reading is available.
