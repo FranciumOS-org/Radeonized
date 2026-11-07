@@ -376,7 +376,7 @@ public:
     uint32_t dptxLcBefore=0, dptxLcAfter=0;
     uint32_t dptxDcBefore=0, dptxDcAfter=0;
     uint32_t dptxPcBefore=0, dptxPcAfter=0;
-    uint32_t dptxApplied=0, dptxClean=0;
+    uint32_t dptxApplied=0, dptxClean=0, dptxMoved=0, dptxObservable=0;
     uint32_t dptxSinkBefore=0xffffffffu, dptxSinkBeforeOk=0;
     uint32_t dptxSinkAfter=0xffffffffu, dptxSinkAfterOk=0;
     uint32_t dptxDpcdRefuse=0, dptxDpcdSet=0;

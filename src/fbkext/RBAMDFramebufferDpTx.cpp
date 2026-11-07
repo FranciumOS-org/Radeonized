@@ -85,12 +85,19 @@ void RBAMDFramebuffer::dptxPublish(void)
     setProperty("RBFBDpTxPcAfter", (uint64_t)dptxPcAfter, 64);
     setProperty("RBFBDpTxApplied", (uint64_t)dptxApplied, 32);
     setProperty("RBFBDpTxClean", (uint64_t)dptxClean, 32);
+    setProperty("RBFBDpTxMoved", (uint64_t)dptxMoved, 32);
+    setProperty("RBFBDpTxObservable", (uint64_t)dptxObservable, 32);
     /* THE SINK'S OWN BYTES - the part of this we do not write. */
     setProperty("RBFBDpTxSinkBefore", (uint64_t)dptxSinkBefore, 32);
     setProperty("RBFBDpTxSinkAfter", (uint64_t)dptxSinkAfter, 32);
     setProperty("RBFBDpTxSinkBeforeOk", (uint64_t)dptxSinkBeforeOk, 32);
     setProperty("RBFBDpTxSinkAfterOk", (uint64_t)dptxSinkAfterOk, 32);
     setProperty("RBFBDpTxDpcdRefuse", (uint64_t)dptxDpcdRefuse, 32);
+    /* 2F5: the DPCD 0x102 write's own code. 2F4 stored this in a field and
+     * published nothing, so boot 458's ACK_IGNORED - the sink ACKing the
+     * training pattern and NOT storing it, the one real hardware reading the
+     * run produced - reached no tool at all. */
+    setProperty("RBFBDpTxDpcdSet", (uint64_t)dptxDpcdSet, 32);
     setProperty("RBFBDpTxVerdict", (uint64_t)dptxVerdict, 32);
 }
 
@@ -164,6 +171,11 @@ uint32_t RBAMDFramebuffer::dptxTrain(uint32_t inst, uint32_t tps,
                    !rb_dptx_trained(dptxLcAfter) &&
                    !rb_dptx_bypass(dptxDcAfter) &&
                    !rb_dptx_prbs_on(dptxPcAfter)) ? 1u : 0u;
+    dptxObservable = (uint32_t)rb_dptx_pattern_observable(tps, dptxTpBefore);
+    dptxMoved = (uint32_t)rb_dptx_moved(dptxTpBefore, dptxTpAfter,
+                                        dptxLcBefore, dptxLcAfter,
+                                        dptxDcBefore, dptxDcAfter,
+                                        dptxPcBefore, dptxPcAfter);
     dptxClean = (rb_dptx_rmw_clean(dptxLcBefore, dptxLcAfter,
                                    RB_DPTX_TRAINING_COMPLETE) &&
                  rb_dptx_rmw_clean(dptxDcBefore, dptxDcAfter,
@@ -182,6 +194,7 @@ uint32_t RBAMDFramebuffer::dptxTrain(uint32_t inst, uint32_t tps,
     dptxSinkAfter = dptxSinkAfterOk ? auxDpcdData[0] : 0xffffffffu;
 
     dptxVerdict = rb_dptx_verdict((int)dptxApplied, (int)dptxClean,
+                                  (int)dptxMoved,
                                   dptxSinkAfterOk && dptxSinkBeforeOk,
                                   dptxSinkBefore, dptxSinkAfter, lanes);
     dptxRan++;

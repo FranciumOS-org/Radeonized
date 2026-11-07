@@ -164,6 +164,8 @@ bool RBAMDFramebuffer::hubpSetup(void)
     dptxClean = 0;
     dptxSinkBefore = 0xffffffffu; dptxSinkBeforeOk = 0;
     dptxSinkAfter = 0xffffffffu; dptxSinkAfterOk = 0;
+    dptxMoved = 0;
+    dptxObservable = 0;
     dptxDpcdRefuse = 0;
     dptxDpcdSet = 0;
     dptxVerdict = RB_DPTX_V_NOT_RUN;

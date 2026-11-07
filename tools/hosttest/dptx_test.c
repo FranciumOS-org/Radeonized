@@ -252,30 +252,92 @@ int dptx_tests(void)
               "CR_DONE is satisfied with EQ and SYMBOL_LOCKED both clear, "
               "which is exactly the state the CR phase ends in");
 
-        CHECK(rb_dptx_verdict(0, 1, 1, 0u, 0x11u, 2u) == RB_DPTX_V_NO_STORE,
+        CHECK(rb_dptx_verdict(0, 1, 1, 1, 0u, 0x11u, 2u)
+              == RB_DPTX_V_NO_STORE,
               "if our own registers did not take, the verdict is NO_STORE "
               "whatever the sink says");
-        CHECK(rb_dptx_verdict(1, 0, 1, 0u, 0x11u, 2u) == RB_DPTX_V_NO_STORE,
+        CHECK(rb_dptx_verdict(1, 0, 1, 1, 0u, 0x11u, 2u)
+              == RB_DPTX_V_NO_STORE,
               "and an UNCLEAN write is NO_STORE too - a write that disturbed "
               "a neighbour is not a success");
-        CHECK(rb_dptx_verdict(1, 1, 1, 0u, 0x11u, 2u) == RB_DPTX_V_CR_DONE,
-              "clean, applied and CR on every lane is CR_DONE");
-        CHECK(rb_dptx_verdict(1, 1, 1, 0u, 0x44u, 2u) == RB_DPTX_V_SINK_MOVED,
+        CHECK(rb_dptx_verdict(1, 1, 1, 1, 0u, 0x11u, 2u)
+              == RB_DPTX_V_CR_DONE,
+              "clean, applied, something MOVED and CR on every lane is "
+              "CR_DONE");
+        CHECK(rb_dptx_verdict(1, 1, 1, 1, 0u, 0x44u, 2u)
+              == RB_DPTX_V_SINK_MOVED,
               "a sink status that CHANGED without CR is SINK_MOVED - which "
               "is still evidence the pattern reached it");
-        CHECK(rb_dptx_verdict(1, 1, 1, 0x44u, 0x44u, 2u)
+        CHECK(rb_dptx_verdict(1, 1, 1, 1, 0x44u, 0x44u, 2u)
               == RB_DPTX_V_PATTERN_SET,
               "an unchanged sink status is PATTERN_SET - our side only");
-        CHECK(rb_dptx_verdict(1, 1, 0, 0u, 0x11u, 2u)
-              == RB_DPTX_V_PATTERN_SET,
-              "and a FAILED sink read can never produce CR_DONE or "
-              "SINK_MOVED, however the stale bytes compare");
+
+        /* ---- 2F5: the two readings boot 458 was reported as PATTERN_SET -- */
+        CHECK(rb_dptx_verdict(1, 1, 1, 0, 0u, 0x11u, 2u)
+              == RB_DPTX_V_SINK_BLIND,
+              "a FAILED sink read is SINK_BLIND, NOT the expected reading - "
+              "2F4 returned PATTERN_SET here and boot 458's after-read DID "
+              "fail, so the run's own instrument failure printed as its "
+              "expected outcome");
+        CHECK(rb_dptx_verdict(1, 1, 0, 1, 0u, 0x11u, 2u)
+              == RB_DPTX_V_NO_OP,
+              "and a write where NOT ONE BIT MOVED is NO_OP even with CR "
+              "done on every lane - rule 17: a write that wrote nothing "
+              "cannot be credited with the sink's state");
+        CHECK(rb_dptx_verdict(0, 1, 0, 1, 0u, 0x11u, 2u)
+              == RB_DPTX_V_NO_STORE,
+              "NO_STORE still outranks NO_OP: registers that did not take "
+              "is the worse fact");
+
+        /* ---- 2F5: boot 458's OWN four words, verbatim ------------------- */
+        {
+            /* dptrain go, boot 458, from ioreg: every before == after. */
+            const uint32_t tp_b = 0x00000000u, tp_a = 0x00000000u;
+            const uint32_t lc_b = 0x00000000u, lc_a = 0x00000000u;
+            const uint32_t dc_b = 0x00000000u, dc_a = 0x00000000u;
+            const uint32_t pc_b = 0x7fffff00u, pc_a = 0x7fffff00u;
+
+            CHECK(!rb_dptx_moved(tp_b, tp_a, lc_b, lc_a, dc_b, dc_a,
+                                 pc_b, pc_a),
+                  "boot 458's four measured word pairs moved NOTHING");
+            CHECK(rb_dptx_pattern(tp_a) == rb_dptx_hw_pattern(RB_DPTX_TPS1) &&
+                  !rb_dptx_trained(lc_a) && !rb_dptx_bypass(dc_a) &&
+                  !rb_dptx_prbs_on(pc_a),
+                  "and `applied` was nonetheless HONEST on all four - every "
+                  "target state was already present on a dark transmitter, "
+                  "which is precisely the rule-20 defect");
+            CHECK(!rb_dptx_pattern_observable(RB_DPTX_TPS1, tp_b),
+                  "TPS1 is UNOBSERVABLE in a TP_SEL that reads 0, because "
+                  "TPS1 encodes as hardware pattern 0 - the one pattern the "
+                  "dial defaulted to");
+            CHECK(rb_dptx_pattern_observable(RB_DPTX_TPS2, tp_b) &&
+                  rb_dptx_pattern_observable(RB_DPTX_TPS3, tp_b) &&
+                  rb_dptx_pattern_observable(RB_DPTX_TPS4, tp_b),
+                  "TPS2/3/4 encode as 1/2/3 and ARE observable against the "
+                  "same dark register");
+            CHECK(!rb_dptx_pattern_observable(RB_DPTX_TPS2, 0x1u),
+                  "and observability is against the LIVE word, not the "
+                  "pattern: TPS2 into a TP_SEL already reading 1 is a no-op "
+                  "too");
+            CHECK(!rb_dptx_pattern_observable(0u, tp_b) &&
+                  !rb_dptx_pattern_observable(5u, tp_b),
+                  "an invalid TPS is never observable, whatever the live "
+                  "word");
+        }
+
+        /* `moved` fires on each of the four independently. */
+        CHECK(rb_dptx_moved(0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u) &&
+              rb_dptx_moved(0u, 0u, 0u, 1u, 0u, 0u, 0u, 0u) &&
+              rb_dptx_moved(0u, 0u, 0u, 0u, 0u, 1u, 0u, 0u) &&
+              rb_dptx_moved(0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u),
+              "a change in ANY of the four registers alone is `moved`");
     }
 
 #undef CHECK
     printf("dptx: 2F4's DP link block - the offsets against rb_enc's shared "
            "ones, the two pattern encodings, the panel reference, the "
-           "refusals, the three RMWs and the sink-side verdict%s\n",
+           "refusals, the three RMWs, the sink-side verdict and 2F5's "
+           "moved/observable terms%s\n",
            bad ? " FAILED" : ": passed");
     return bad;
 }

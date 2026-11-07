@@ -283,27 +283,70 @@ static inline int rb_dptx_cr_done(uint32_t byte, uint32_t lanes)
     return 1;
 }
 
+/* ---- 2F5: did any BIT actually move? (rule 20, paid for again) --------
+ *
+ * Boot 458 ran `dptrain go` and every one of the four registers read back
+ * before == after: TP_SEL 0 -> 0, LINK_CNTL 0 -> 0, DPHY_CNTL 0 -> 0,
+ * PRBS_CNTL 0x7fffff00 -> 0x7fffff00. `applied` was 1 and `clean` was 1 and
+ * BOTH were honest, because every target state was ALREADY PRESENT on a dark
+ * transmitter: TPS1 converts to hardware pattern 0, and the three RMWs each
+ * clear a bit that a dark instance does not have set. So the whole Linux TPS1
+ * sequence is a NO-OP here, and `applied 1` was exactly the defect rule 20
+ * names - a readback agreeing with a target that was already there.
+ *
+ * `moved` is the missing term. It is NOT a success criterion (a correct write
+ * of a value that is already present legitimately moves nothing); it is the
+ * term that stops such a write being reported as evidence about the sink.
+ */
+static inline int rb_dptx_moved(uint32_t tp_b, uint32_t tp_a,
+                                uint32_t lc_b, uint32_t lc_a,
+                                uint32_t dc_b, uint32_t dc_a,
+                                uint32_t pc_b, uint32_t pc_a)
+{
+    return (tp_b != tp_a || lc_b != lc_a ||
+            dc_b != dc_a || pc_b != pc_a) ? 1 : 0;
+}
+
+/* Whether THIS pattern can be distinguished from the dark state at all. The
+ * register's dark value is 0 and TPS1 encodes as 0, so a TPS1 write is
+ * unobservable in TP_SEL by construction - the one pattern the dial defaulted
+ * to. TPS2/3/4 encode as 1/2/3 and are observable. */
+static inline int rb_dptx_pattern_observable(uint32_t tps, uint32_t tp_live)
+{
+    if (!rb_dptx_tps_valid(tps)) { return 0; }
+    return (rb_dptx_pattern(tp_live) != rb_dptx_hw_pattern(tps)) ? 1 : 0;
+}
+
 /* What the transmitter write established, as a code. CR_DONE is the prize and
  * is NOT expected until the transmitter is also enabled at the link rate -
- * saying so here is what keeps a negative from being read as a broken block. */
+ * saying so here is what keeps a negative from being read as a broken block.
+ *
+ * 2F5 added NO_OP and SINK_BLIND, both of which boot 458 was misreported as
+ * PATTERN_SET: nothing moved on our side, AND the sink's after-read failed,
+ * and the 2F4 verdict absorbed both into the reading it called "expected".
+ */
 #define RB_DPTX_V_NOT_RUN       (-1)
 #define RB_DPTX_V_NO_STORE        0   /* our own registers did not take   */
 #define RB_DPTX_V_PATTERN_SET     1   /* they did; the sink shows nothing */
 #define RB_DPTX_V_SINK_MOVED      2   /* the sink's status byte CHANGED   */
 #define RB_DPTX_V_CR_DONE         3   /* clock recovery on every lane     */
+#define RB_DPTX_V_NO_OP           4   /* took, but not one bit moved      */
+#define RB_DPTX_V_SINK_BLIND      5   /* our side took; the sink unread   */
 
-static inline int rb_dptx_verdict(int applied, int clean,
+static inline int rb_dptx_verdict(int applied, int clean, int moved,
                                   int sink_read_ok,
                                   uint32_t sink_before, uint32_t sink_after,
                                   uint32_t lanes)
 {
     if (!applied || !clean) { return RB_DPTX_V_NO_STORE; }
-    if (sink_read_ok && rb_dptx_cr_done(sink_after, lanes)) {
-        return RB_DPTX_V_CR_DONE;
-    }
-    if (sink_read_ok && sink_after != sink_before) {
-        return RB_DPTX_V_SINK_MOVED;
-    }
+    /* Before anything about the sink: a write that moved no bit cannot be
+     * credited with the sink's state, whatever that state is. Rule 17 - two
+     * numbers are not a mechanism, and here one of them is not even a
+     * change. So NO_OP wins over CR_DONE deliberately. */
+    if (!moved) { return RB_DPTX_V_NO_OP; }
+    if (!sink_read_ok) { return RB_DPTX_V_SINK_BLIND; }
+    if (rb_dptx_cr_done(sink_after, lanes)) { return RB_DPTX_V_CR_DONE; }
+    if (sink_after != sink_before) { return RB_DPTX_V_SINK_MOVED; }
     return RB_DPTX_V_PATTERN_SET;
 }
 

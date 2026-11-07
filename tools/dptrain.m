@@ -79,6 +79,25 @@ static const char *verdictName(long v)
                     "move";
     case 2:  return "SINK MOVED - the sink's lane status CHANGED";
     case 3:  return "CR DONE - clock recovery on every lane";
+    case 4:  return "NO-OP - the writes took, and NOT ONE BIT MOVED";
+    case 5:  return "SINK BLIND - our side took; the sink could not be read";
+    default: return "unknown";
+    }
+}
+
+/* The code the DPCD 0x102 write itself returned - 2F3's write refusals and
+ * verdicts, which 2F4 captured into a field and never published. */
+static const char *dpcdSetName(long v)
+{
+    switch (v) {
+    case 0:  return "OK - the write ran";
+    case 20: return "NOT ARMED";
+    case 21: return "NO REGS";
+    case 22: return "PANEL HPD - refused by name";
+    case 23: return "PANEL AUX ENGINE - refused by name";
+    case 24: return "NO SUCH AUX ENGINE";
+    case 25: return "ADDRESS NOT ALLOWLISTED";
+    case 26: return "VALUE OUT OF RANGE";
     default: return "unknown";
     }
 }
@@ -190,8 +209,13 @@ int main(int argc, char **argv)
            "   reading as a verdict. DP0 is the panel's.)\n");
 
     if (!haveGo) {
-        printf("\nRead-only. `dptrain go` puts TPS1 on DIG2; `dptrain` with\n"
-               "any bad argument prints the usage.\n");
+        printf("\nRead-only. `dptrain go` defaults to TPS1, which boot 458\n"
+               "measured as a NO-OP on this block: TPS1 encodes as hardware\n"
+               "pattern 0 and a dark TP_SEL already reads 0. Use\n"
+               "`dptrain go tps=2` for a write that CAN move the register -\n"
+               "note DP0, a live trained link, reads TP_SEL 0x2 itself, so\n"
+               "this register does hold non-zero values in practice.\n"
+               "`dptrain` with any bad argument prints the usage.\n");
         IOObjectRelease(fb);
         return 0;
     }
@@ -280,18 +304,37 @@ int main(int argc, char **argv)
     const long sb   = rdnum(fb, "RBFBDpTxSinkBefore");
     const long sa   = rdnum(fb, "RBFBDpTxSinkAfter");
     const long dset = rdnum(fb, "RBFBDpTxDpcdRefuse");
+    const long mov  = rdnum(fb, "RBFBDpTxMoved");
+    const long obs  = rdnum(fb, "RBFBDpTxObservable");
+    const long dpat = rdnum(fb, "RBFBDpTxDpcdSet");
     const long verd = rdnum(fb, "RBFBDpTxVerdict");
 
     printf("\n  our four registers, in Linux's order\n");
-    printf("    TP_SEL      0x%06lx -> 0x%06lx   (a WHOLE-register write)\n",
-           tpB, tpA);
-    printf("    LINK_CNTL   0x%08lx -> 0x%08lx (TRAINING_COMPLETE off)\n",
-           lcB, lcA);
-    printf("    DPHY_CNTL   0x%08lx -> 0x%08lx (BYPASS off)\n", dcB, dcA);
-    printf("    PRBS_CNTL   0x%06lx -> 0x%06lx   (PRBS_EN off)\n", pcB, pcA);
-    printf("    applied %ld  clean %ld\n", app, cln);
+    printf("    TP_SEL      0x%06lx -> 0x%06lx   %s (a WHOLE-register write)\n",
+           tpB, tpA, tpB == tpA ? "unchanged" : "CHANGED  ");
+    printf("    LINK_CNTL   0x%08lx -> 0x%08lx %s (TRAINING_COMPLETE off)\n",
+           lcB, lcA, lcB == lcA ? "unchanged" : "CHANGED  ");
+    printf("    DPHY_CNTL   0x%08lx -> 0x%08lx %s (BYPASS off)\n",
+           dcB, dcA, dcB == dcA ? "unchanged" : "CHANGED  ");
+    printf("    PRBS_CNTL   0x%06lx -> 0x%06lx   %s (PRBS_EN off)\n",
+           pcB, pcA, pcB == pcA ? "unchanged" : "CHANGED  ");
+    printf("    applied %ld  clean %ld  moved %ld  observable %ld\n",
+           app, cln, mov, obs);
     printf("      ^ `clean` is the check that the three read-modify-writes\n"
-           "        disturbed no neighbouring field. 2EC paid for that one.\n");
+           "        disturbed no neighbouring field. 2EC paid for that one.\n"
+           "        `moved` is whether ANY bit changed, and `observable` is\n"
+           "        whether the requested pattern COULD have moved TP_SEL at\n"
+           "        all. Boot 458 had applied 1 and clean 1 honestly with\n"
+           "        moved 0 - every target state was already present on a\n"
+           "        dark transmitter, which is rule 20's own defect.\n");
+
+    printf("\n  THE SINK'S DPCD 0x102, the pattern's other half\n");
+    printf("    write code   %ld - %s\n", dpat, dpcdSetName(dpat));
+    printf("    the ACK and whether the sink STORED it are in the AUX write\n"
+           "    record, which is a separate reading:\n"
+           "      ioreg -rl -c RBAMDFramebuffer | grep RBFBAuxW\n"
+           "    Verdict 1 = ACK_STORED, 2 = ACK_IGNORED (the sink answered\n"
+           "    and kept its old byte), 3 = ACK_BLIND, 0 = no answer.\n");
 
     printf("\n  THE SINK'S OWN LANE STATUS (DPCD 0x202) - we never write it\n");
     laneLine("before", sbOk, sb, (long)lanes);
@@ -322,6 +365,29 @@ int main(int argc, char **argv)
                "     DMUB (2E9 proved that path executes) carrying the rate\n"
                "     the sink was just told to expect.\n"
                "     A dark monitor is still the expected reading.\n");
+    } else if (verd == 5) {
+        printf("\n  -> SINK BLIND. Our four registers took, and the sink's\n"
+               "     lane status could NOT be read afterwards, so this run\n"
+               "     says nothing about the sink either way. The before-read\n"
+               "     succeeded, so the AUX engine was working at the start of\n"
+               "     the call - which makes the DPCD 0x102 write and the\n"
+               "     100 us wait the only things that happened in between.\n"
+               "     Check whether the sink is still answering at all with\n"
+               "     `dpcdread 0x202 1`, then `dpcdread 0 1`. If 0x000 reads\n"
+               "     and 0x202 does not, the receiver is awake and the\n"
+               "     status register is the problem; if neither reads, the\n"
+               "     AUX channel is.\n");
+    } else if (verd == 4) {
+        printf("\n  -> NO-OP. The writes took and NOT ONE BIT MOVED, so this\n"
+               "     run put nothing new on the wire and nothing about the\n"
+               "     sink may be attributed to it. With `observable 0` the\n"
+               "     cause is the pattern itself: TPS1 encodes as hardware\n"
+               "     pattern 0 and a dark TP_SEL already reads 0, so TPS1 is\n"
+               "     invisible in this register by construction - and the\n"
+               "     three read-modify-writes each clear a bit a dark\n"
+               "     instance does not have set. Run `dptrain go tps=2`,\n"
+               "     which encodes as 1 and CAN move TP_SEL. That is the\n"
+               "     write that tests whether this block answers us at all.\n");
     } else if (verd == 0) {
         printf("\n  -> OUR OWN REGISTERS DID NOT TAKE. `applied 0` means a\n"
                "     field did not read back; `clean 0` means one of the\n"
