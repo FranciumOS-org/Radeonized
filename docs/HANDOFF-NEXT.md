@@ -1,142 +1,162 @@
-# HANDOFF — where this is, and what to do next
+# Handoff — next step
 
-**Written 2026-11-07, after 2F8. Read `docs/RULES.md` first, then this, then
-`docs/EXTERNAL-DISPLAY.md`.**
+**Written 2026-11-07, after 2FA. Last boot: 461 (2F9).**
 
----
-
-## Read this before touching the monitor
-
-**`dptrain go tps=3` degrades this sink and the only recovery is a reboot.**
-2F8 measured it in two boots. The tool now refuses `tps=3`/`tps=4` with exit 3
-(`force` overrides). **Use `tps=2`.** All of 2F7 — "the sink's DPCD reads zero",
-both of its hypotheses and both of their funerals — was the aftermath of two
-`tps=3` runs at the top of boot 459.
-
-**The sink is degraded right now.** Boot 460 ended with `0x202` DEFERring, caps
-reading `00 00 00 81 00 00 00 00 00 00 00 00 00 00 84 00` and the EDID header
-BAD. **Nothing sink-side can be measured until a reboot.**
-
-## Current state
-
-- **Boot 460**, boottime Sat Nov 7 02:08:51 2026.
-- Live collection **`89A6F41C`** = the **2F5** build. `build/out` holds
-  **`A50B24F4`** = **2F6**. `sudo tools/fbinstall.sh` has not been run.
-- `-rbgpufbtrain`, `-rbgpufbaux`, `-rbgpufbdto` are in boot-args.
-- No `0x10de` on the PCI bus, so the chassis is in iGPU-only mode.
-- `make kext tools`, `make fbkext`, `make dptrain` clean. Hosttest **all
-  passed** — it needs the capture table as an argument
-  (`./build/out/hosttest tests/data/rembrandt-680m-tufa15.bin`); run bare it
-  reports 2 FAILs that are its own missing input.
-
-### What is established about this sink
-
-- Healthy, it reads **byte-identical to 2D8 and 2BB**:
-  `12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00` — revision 1.2, HBR2,
-  2 lanes — with EDID header and checksum OK.
-- A fresh boot leaves `0x100` = `0x06` (untrained), `0x102` = `0x00`,
-  `0x202` = `0x00` and readable, `0x600` = `0x01` already D0. Our boot-457
-  `0x100` = `0x14` does **not** survive a reboot.
-- `dptrain go tps=2` gives the first honest **PATTERN SET**: `TP_SEL 0 -> 1
-  CHANGED`, `moved 1 observable 1`, and both lane-status reads succeeding.
-- DPCD `0x102`: stores `0x02` **only** when written inside `dptrain`'s own call
-  (n=2 boots); a separate-call write of the same value with the TX unmoved does
-  **not** store (in-boot control). `0x01` drives the byte to `0x00`, `0x03`
-  never stores — both reproduced in two boots. **Transmitter movement is not
-  the discriminator; same-call proximity is.**
-- One EDID read needed **16 defers** and still succeeded, which is the sink's
-  own argument for 2F6's retry bound.
+Read `docs/RULES.md` first, then this. `docs/EXTERNAL-DISPLAY.md` has the full
+state of the one open goal; `docs/JOURNAL.md` under tag `2FA` has the detail
+behind everything below.
 
 ---
 
-## STEP 1 — reboot, then install 2F6 in the same trip
+## Two warnings before you touch anything
 
-The sink needs the reboot anyway, so spend it once.
+1. **`dptrain go tps=3` DEGRADES THIS SINK and the recovery is a REBOOT.**
+   2F8, two boots, with a healthy before-and-after control. A sink with a good
+   EDID and a readable DPCD goes to `00 00 00 81 ... 84 00` with `0x202`
+   DEFERring, immediately after one run. `tps=2` does not bring it back, nor
+   `0x102`=`0x00`, nor `0x600`=`0x01`; further writes make it worse. All of
+   2F7 was the aftermath of this, and its two dead hypotheses were killed by
+   invalid data. The tool now refuses `tps=3`/`tps=4` (exit 3). **Use
+   `tps=2`.**
 
-```bash
+2. **Check the sink is healthy before every experiment**, with
+   `./build/out/edidread` — header OK and checksum OK — and `dpcdread 0x0 4`
+   reading `12 14 c2 81`. A degraded sink looks exactly like a failing
+   transmitter. The user's dGPU being powered on also blanks these reads
+   (chassis must be in iGPU-only / Eco mode, rule 47).
+
+---
+
+## The state of the chain
+
+Boot 461 (2F9) ran **the whole of the rest of the chain in one boot**, each
+step with its own in-boot control, and **the sink saw nothing**:
+
+- `dmubbl dig fe` — DIG2's back end enabled, front end connected
+  (`DIG_BE_CNTL` `0x00010000 -> 0x20000000`, `DIG_BE_EN_CNTL` `0x100 -> 0x101`;
+  DIG0/1/3/4 byte-identical as controls).
+- `dmubbl dto 148500` — pixel clock running (`PIXEL_RATE_CNTL`
+  `0x8000c000 -> 0x8000d090`, `DPDTO_ENABLE_STATUS` `0 -> 1`). **kHz, not Hz** —
+  the tool now refuses an argument over 1 000 000.
+- `dptrain go tps=2` — `TP_SEL 0 -> 1` on DP2.
+- **DPCD `0x202` read `0x00` before and after.** No clock recovery.
+- `RDPCSTX2_PHY_CNTL6` never moved, and re-sending the transmitter ENABLE
+  *after* the clock was running did not move it either, so **order is not the
+  missing thing**.
+
+**The atom transmitter ENABLE at the link rate already exists.** `dmubbl dig`
+carries `RB_DIG_TYPEC_SYMCLK` 54000 = HBR2 and has executed since 2E2. An
+earlier handoff of mine called it the blocker without reading the tool that
+sends it. Do not repeat that: read the tool before naming a blocker.
+
+---
+
+## Why the next step is the raster, not the transmitter
+
+`0x202` reading `0x00` is **not** evidence against the transmitter or the PHY.
+There is no raster on pipe 1 (`OTG1_CONTROL` `0x300` = off, in every boot
+since this line opened, against OTG0's `0x00011201`) and no stream mapped to
+DIG2. A clock with no raster and no stream has nothing to send, so `0x00` is
+the expected reading — rule 47 in its general form.
+
+It is also the only remaining step with a **monotonic** verdict available
+(rule 31): `OTG1_FRAME_COUNT` advancing, rather than a readback a working
+block with nothing attached would produce identically.
+
+---
+
+## 2FA is built and never run. Do this.
+
+`src/common/rb_otgprog.h` + the kext fields/writes/dial + `tools/otgprog.m`.
+`make hosttest` green, fbkext UUID **`22977266-BB99-3D16-B151-0DA3BB6DF416`**.
+
+**The arm is `-rbgpufbraster`.** Not `-rbgpufbotg` — that is refused, because
+`-rbgpufbotgany` already exists and would have it as a prefix (rule 30; the
+scan was verified with `-rbgpufbdtox` as a known-colliding control). The dial
+does **not** arm `-rbgpufbdto` for you: refusal 45 names the missing clock
+instead, deliberately.
+
+### The two commands for the user
+
+```
+sudo tools/efi.sh bootarg add -rbgpufbraster
+```
+
+```
 sudo tools/fbinstall.sh
 ```
 
-```bash
+Then verify the UUID **inside the collection**, not in `/Library/Extensions`
+(rule 15 — 2xx cost nine boots to this exact gap):
+
+```
 kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
 ```
 
-Expect **`A50B24F4-D737-38CE-8940-580772405B3E`** inside the collection, then
-reboot and confirm it again from the running system (rule 15).
+Expect `22977266`. Then reboot.
 
-After that boot, verify the sink is healthy **before** writing anything:
+### In the armed boot, in this order
 
-```bash
-build/out/edidread
-```
+1. **Rule 8 first**: `rbgpu-boot` must have increased, or nothing in NVRAM is
+   this boot's. Then `rbgpu-boot`, `kern.boottime`, and the UUID again.
+2. `./build/out/otgprog` with no arguments — the survey. **OTG0 must read
+   `0x00011201` with `MASTER_EN` and a frame count that ADVANCES across two
+   samples.** That is the positive control for the entire instrument. If the
+   tool prints "the LOADED kext does not publish RBFBOtgR\*", the install did
+   not take and nothing below means anything.
+   (That line exists because the first smoke run printed `MASTER_EN` for all
+   four pipes off absent keys read as `-1` — rule 14's named trap, in a tool
+   written with the rule in front of me.)
+3. Check the sink is healthy (above) and `-rbgpufbdto` is armed, or
+   `otgprog` will refuse 45.
+4. `dmubbl dto 148500` — the clock first, because the raster's write gate
+   wants it.
+5. `./build/out/otgprog 1080p60 pipe=1 go` — the raster. Pipe 0 is refused by
+   name in the tool and in the kext.
+6. **The verdict is `RBFBOtgR1Frames` advancing across periodic samples**, not
+   the register readback and not a sleep-and-compare of the dialled value
+   (rule 31, which has cost four false MISMATCHes). The tool polls it.
 
-`header OK   checksum OK` is the gate. If it is BAD on a fresh boot, stop and
-say so — that would be new.
+### What a null would and would not mean
 
----
-
-## STEP 2 — the atom transmitter ENABLE at the link rate
-
-Still the next thing that **does not exist**, and still the step between "a
-pattern is set on our side" and "lanes are driving". The sink side is now
-instrumented well enough to give it a verdict: `0x202` reads on a healthy sink,
-so `CR_DONE` is finally observable.
-
-What must be respected:
-
-- **Order matters:** FE connect → configure encoder → transmitter ENABLE. The
-  atom transmitter command carries **no front end, by design**.
-- The DMUB `DMUB_CMD__VBIOS` path **executes** (`DIG_BE_EN_CNTL.DIG_ENABLE`
-  0→1 on the targeted instance alone, two boots) **and answers** (reply at
-  REGION4; `ret_status` stays SET, which Linux's own criterion would discard).
-  2E9 paid for that.
-- **PHY0 / DIG0 / front end DIGA are the panel's and are refused by name** in
-  every half of every one of these experiments. Keep it that way.
-- Rule 46 before anything is written: discharge the **method's** version
-  grouping in `dcn31_resource.c` by source, not by reasoning, exactly as 2F4
-  did for `.dp_set_phy_pattern`.
-- Rule 47 asked of a write: establish the live word decodes as the register the
-  conclusion assumes **before** writing it.
-- **Budget one reboot per sink-degrading mistake.** That is now a known price,
-  not a surprise.
-
-After the ENABLE: link training over AUX2 (driver-side — zero `dmub` references
-in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG and HUBP,
-and a second `IOFramebuffer`.
-
-**A dark monitor is still the expected reading** at every step above.
+If the writes land, read back, and `OTG1_FRAME_COUNT` **does not advance**,
+that is a real finding and it is about the enable, not the timing — check
+`otgProgVerdict` against `V_NOT_ENABLED` and read `OTG1_CONTROL`'s
+`MASTER_EN` bit in the after-sample. If the frame count **does** advance, the
+raster exists and the next question is the stream.
 
 ---
 
-## Open, not on the critical path
+## After the raster
 
-- The surviving DPCD-store question: **why does `0x102` store only from inside
-  the same call?** The honest shape is proximity in time; nothing establishes
-  the mechanism, and 2F8's attempt to separate movement from proximity was
-  **void** because the sink was already degrading from the `tps=3` that arm
-  used. Re-run it on a healthy sink with `tps=2` only.
-- The **wedge**: work submitted that never retires — channel-52 GFX, 3.5 s, the
-  "random lag". `stamp_ticks` 125666 retires the "nothing polls it" family.
-- `powermetrics` has **never been run** against the default 576 interior
-  thread_calls/s, the one real argument against the 2D5 default.
-- `rb_osver.h` claims **nothing** for Ventura or Sonoma.
-- **Owed:** `docs/UPSTREAM.md` entries for the Linux files read across 2F3-2F6
-  (`drm_dp.h`, `dcn10_link_encoder.c`, `dcn31_dio_link_encoder.c`,
-  `dce_aux.c`).
+In order, and each is a thing that does not exist yet:
+
+1. **`enc31_map_stream_to_link`** — no stream is mapped to DIG2. Discharge
+   rule 46 by source in `dcn31_resource.c` first, as 2FA did for the OTG
+   path; the OPTC split (timing from DCN10, enable from DCN31) says not to
+   assume the DIO functions all come from one file either.
+2. **A surface** on pipe 1 — HUBP, address, swizzle.
+3. **A second `IOFramebuffer`.** `getDisplayModeCount()` has returned 1 since
+   2sl.
+
+**PHY0 / DIG0 / front end DIGA are the panel's and are refused by name** in
+every half of every one of these experiments. Keep it that way.
 
 ---
 
-## Withdrawn, so they are not re-tried
+## Open, off the critical path
 
-1. **The D3 / ordering hypothesis** (2F5). Boot 459 killed it; 2F8 adds that
-   `0x600` already reads `0x01` on a fresh boot with nothing of ours setting it.
-2. **2F4's "a training pattern on the wire".** Boot 458's four writes moved not
-   one bit on a dark transmitter (rule 20's own defect).
-3. **"The sink stores `0x102` only when the transmitter just moved"** (2F6).
-   Dead — but 2F7's counterexample was right for the wrong reason, since that
-   boot's reads were the TPS3 aftermath. 2F8 killed it properly, with a control.
-4. **"Only `0x02` stores at `0x102`"** as a *value* rule. `0x02` also fails to
-   store from a separate call.
-5. **2F7 and 2F7a/b's sink-side readings as statements about the sink.** They
-   were taken while the sink was degraded by our own `tps=3`. The port and
-   read-path eliminations in 2F7b stand, because both rested on controls.
+- **Why DPCD `0x102` stores only from inside `dptrain`'s own call** (~100 µs
+  after the register writes, n=2 boots) and not from a separate call with the
+  TX unmoved. The arm that was meant to separate movement from proximity is
+  **void** — it used `tps=3` and the sink was already degrading. Re-run on a
+  healthy sink with `tps=2` only.
+- **`RDPCSTX*_PHY_CNTL6` needs replacing as `dig`'s verdict register.** It is
+  the legacy fallback Linux reads only when DMCUB is absent, and it already
+  disagreed with `QUERY_DP_ALT` on all five PHYs. It is as much a suspect as
+  the PHY is.
+- **The wedge** — work submitted that never retires, channel-52 GFX, 3.5 s,
+  the "random lag".
+- **`powermetrics` has never been run** against the default 576 interior
+  thread_calls/s, which is the one real argument against the 2D5 default.
+- **Ventura and Sonoma claim nothing** in `rb_osver.h`.

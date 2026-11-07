@@ -62655,3 +62655,185 @@ naming the mistake. The tool now refuses any value above 1 000 000 kHz with
 that explanation. Verified: `148500000` refuses with the new message,
 `148500` passes the guard and then hits refusal **45**, the pre-existing
 "that pipe's DP DTO is already enabled" check, correctly.
+
+---
+
+## 2FA — the second raster, built: OTG timing on pipe 1
+
+2026-11-07. No boot. This entry is a build, and says so: nothing below is a
+reading of this machine, and the one tool run in it is a smoke test against a
+kext that does not publish the keys.
+
+### Why this and not the transmitter
+
+2F9 ran the whole of the rest of the chain in one boot (461), each step with
+its own in-boot control, and the sink saw nothing. DPCD `0x202` read `0x00`
+before and after. The temptation is to read that as evidence against the
+transmitter or the PHY, and it is not: a clock with no raster and no stream
+mapped has nothing to send, so `0x00` is the **expected** reading. That is
+rule 47 in its general form — before concluding a block is the wrong control
+surface, establish the thing it drives is actually there. The raster is not
+there. `OTG1_CONTROL` has read `0x300` (off) in every boot since this line
+opened, against OTG0's `0x00011201`.
+
+So: build the raster. It is also the only remaining step with a **monotonic**
+verdict available (rule 31) — `OTG1_FRAME_COUNT` advancing — rather than a
+register readback that a working block with nothing attached would produce
+identically.
+
+### Rule 46, discharged by source
+
+The card's rule 46 says to check the version grouping of the METHOD, not the
+offsets, and to discharge it in the resource file by source rather than by
+reasoning. Done, and it found a split I would have got wrong:
+
+- `dcn31_resource.c:1145` → `dcn31_timing_generator_init`. This chip's `dc`
+  reaches the DCN31 OPTC function table.
+- `dcn31_optc.c:250` → `.program_timing = optc1_program_timing`. The timing
+  programming is **DCN10's**, in `dcn10_optc.c`.
+- `dcn31_optc.c:255` → `.enable_crtc = optc31_enable_crtc`. The enable **is**
+  DCN31's own.
+
+Two halves of one operation, two files. Reading either alone gives a wrong
+sequence. `rb_otgprog.h` follows `optc1_program_timing` field for field in its
+write order, then `optc31_enable_crtc`.
+
+**The path 404'd first.** These files are under
+`drivers/gpu/drm/amd/display/dc/optc/dcn31/`, not `dc/dcn31/` where every
+other DCN31 block lives — OPTC was moved upstream. A fetch of `dc/dcn31/`
+returns 404, which under rule 26 reads exactly like "this chip has no OPTC
+file". The search was the instrument. All three files are now vendored in
+`docs/linux-ref/` with sha256 prefixes and the three cited line numbers
+re-verified against the vendored copies, not against the fetch.
+
+### Three register strides in one function
+
+The thing only the source says, and the thing that would have put writes
+inside someone else's block:
+
+| Register | Stride | Instance 0 dword |
+|---|---|---|
+| `OTGn_*` | **0x80** | `H_TOTAL` `0x1b2a` |
+| `VTGn_CONTROL` | **1** | `0x052d` |
+| `ODMn_OPTC_DATA_SOURCE_SELECT` | **0x10** | `0x1acb` |
+
+All three BASE_IDX 2. These are programmed together, for one pipe, inside one
+function, which is exactly the setting in which deriving one stride from
+another feels safe. It is not: `VTG` at stride 0x80 lands at `0x05ad`, and
+`ODM` at stride 1 lands at `0x1acc`. Both are readable wrong addresses, and a
+write to a readable wrong address does something (rule 47 asked of a write).
+`tools/hosttest/otgprog_test.c` pins all three for all four instances **and
+asserts they differ**, plus OTG1's offsets against `rb_reg_defs[]` by name
+with `base_idx == 2`.
+
+### Rule 30 caught a collision before a boot did
+
+`-rbgpufbotg` is **refused**. `-rbgpufbotgany` already exists — an existing
+HUBP dial at `RBAMDFramebuffer.cpp:513` — and would have the new token as a
+prefix, which is the failure that has now bitten three times
+(`-rbgpufbdpaltq`, `-rbgpufbdigfe`). The hand scan found it. **And the scan
+itself was verified** (rule 26): run with `-rbgpufbdtox` as a known-colliding
+control, which it correctly flagged; a first pass false-positived on a bare
+`-rbgpu` prefix literal in source, filtered, control still firing.
+
+The arm is **`-rbgpufbraster`**, clean in both directions.
+
+**Rule 34 is deliberately NOT applied here.** The dial does not arm
+`-rbgpufbdto` for you. Refusal code 45 (`W_NOCLOCK`) names the missing pixel
+clock instead, because a dial that silently arms its own dependency hides
+which step is missing — and this chain's whole difficulty has been knowing
+which step is missing.
+
+### Rule 14 at the tool boundary, in the form the card names
+
+The first smoke run of `tools/otgprog.m`, against the kext that is actually
+loaded (2F6, `A50B24F4`, which publishes no `RBFBOtgR*` key at all):
+
+```
+second raster is NOT ARMED   sampled no   aperture NO
+
+  all four timing generators, live
+    pipe  OTG_CONTROL  FRAME_COUNT
+    OTG0  0xffffffffffffffff   -1         MASTER_EN  <- the PANEL, the positive control
+    OTG1  0xffffffffffffffff   -1         MASTER_EN
+    OTG2  0xffffffffffffffff   -1         MASTER_EN
+    OTG3  0xffffffffffffffff   -1         MASTER_EN
+```
+
+`MASTER_EN` on all four, including two generators that are off and one that
+does not matter, because `rdnum()` returns `-1` for an absent key and
+`-1 & MASTER_EN` is 1. This is rule 14's **named** tool-boundary trap — "a
+missing ioreg key read as `-1` is `0xffffffff`, which passes most field
+tests" — and the tool fell into it with the sentence sitting in the card.
+Worth recording plainly: having the rule written down did not prevent it. What
+caught it was running the tool before trusting it.
+
+Fixed: `rdnum2()` reports `found`; the survey prints "(key absent — the LOADED
+kext does not publish it)" per pipe; an absent `RBFBOtgRArmed` prints the
+rule-15 UUID command and the sentence **"Nothing below is a reading of this
+machine."** After the fix, the same run against the same kext prints exactly
+that and no register values.
+
+The two tool-side refusals fired correctly in the same run: pipe 0 refused by
+name, and a trigger with no mode refused with "a raster is eight numbers and
+this tool defaults none of them".
+
+### Two break-it checks fired NOTHING, and both are results
+
+Rule 48, one break per guard, and the rule's own second clause — a break that
+fires nothing is a RESULT:
+
+1. Removing the `h_tot_m1 > RB_OTGPROG_FIELD_MAX` term from the field-overflow
+   guard changed no test. The OR chain's `h_blank_start` term catches the same
+   mode. A **conjunction correct while one term carries no information** —
+   which is 2E7's finding restated. Discriminating case added:
+   `h_total = 32769, h_front_porch = 2`, whose blank start is exactly 32767
+   and fits, so only the `h_total` term can refuse it.
+2. Making the frame-count comparison signed changed no test, because the wrap
+   case I had written (`0xffffffff` → `0`) gives the same answer either way.
+   Added `verdict(0x301, 0, 0x80000000)`, which a signed compare reads as
+   *backwards*.
+
+Both were caught because I grepped `error:` as well as `FAIL` — the `-Werror`
+trap for the sixth time, in its exact documented form: two compile errors in
+`otgprog_test.c` (`rb_reg_def_count` for `RB_NREG_DEFS`, `.dword` for `.reg`)
+left `make hosttest` running the **previous** binary, which printed
+"hosttest: all passed".
+
+### What is built
+
+`src/common/rb_otgprog.h` (committed separately as `68e7531`) is the logic:
+the mode struct, the clock arithmetic with an overflow guard, Linux's
+front-porch floor of 1, the sixteen writes in Linux's order, twelve build
+refusals and nine write refusals — all **codes**, not bools (rule 14) — and a
+verdict helper using unsigned subtraction so a frame-counter wrap reads as
+advanced rather than as stalled.
+
+The kext half: `otgArmed` off `-rbgpufbraster`; `otgApertureOk` computed where
+`length` is live, against `OTG3_FRAME_COUNT` as the highest dword touched;
+`otgSample()` reading all four `OTGn_CONTROL` and `OTGn_FRAME_COUNT` together;
+`otgProgram()` mirroring `dtoProgram()`'s call/prog split, re-sampling both
+blocks before it decides, then replaying the write list in index order;
+`otgPublish()` publishing every input, every refusal and both before/after
+samples. The dial takes the whole mode as nine keys plus two polarities in one
+`setProperties` call and refuses an incomplete mode with code 46.
+
+`tools/hosttest/otgprog_test.c`: 16 writes pinned by offset, mask, value and
+position; the three strides; the mode against its clock
+(`2200 × 1125 × 60 == 148500000` exactly); every write checked to be inside
+OTG1/VTG1/ODM1 and within its own mask; all twelve build refusals; all nine
+gate refusals; the 0.5 % clock window at both edges and one hertz past each;
+and 2F0's own 0.208 % pair (343000000 against 342287571) asserted INSIDE the
+window, because that is the pair the panel actually produced.
+
+`make hosttest` green: `otgprog: all passed (16 writes pinned)`.
+fbkext UUID **22977266-BB99-3D16-B151-0DA3BB6DF416**.
+
+### What this does not establish
+
+Nothing about the hardware. `-rbgpufbraster` has never been in boot-args, the
+built framebuffer has never been installed, and `otgProgram()` has never run.
+The next boot's first job is the survey with the absent-key path no longer
+able to lie: OTG0 reading `0x00011201` with a frame count that advances is the
+positive control for the whole instrument, and if that does not appear, no
+refusal or verdict below it means anything.

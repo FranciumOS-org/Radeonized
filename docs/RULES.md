@@ -412,7 +412,9 @@ register is the suspect as much as the PHY: it is the legacy fallback Linux
 reads only when DMCUB is absent and it already disagreed with `QUERY_DP_ALT` on
 all five PHYs, so `dig` needs a verdict register that is not this one.
 **Still not done:** `enc31_map_stream_to_link` (no stream mapped to DIG2), OTG
-timing on pipe 1 (`OTG1_CONTROL` still `0x300`), a surface, and a second
+timing on pipe 1 (`OTG1_CONTROL` still `0x300`; **2FA built it and it has
+never run** — `-rbgpufbraster`, `tools/otgprog.m`, verdict is
+`OTG1_FRAME_COUNT` advancing), a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl). A clock
 with no raster and no stream has nothing to send, so the `0x00` lane status is
 not yet evidence against the transmitter. **Order:** FE connect → configure
@@ -479,7 +481,12 @@ written until `dptrain go`; the panel's transmitter is refused by name and the
 write is declined unless the panel's own DP0 reads as a trained link.
 **`tps=1` is a no-op on a dark instance** and **`tps=3`/`tps=4`
 DEGRADE the sink, costing a reboot — the tool refuses them. Use `tps=2`),
-`-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
+`-rbgpufbraster` (the second raster — OTG timing on pipe 1, 2FA. Nothing is
+written until `otgprog ... go` names a mode, pipe 0 is refused by name in both
+halves, and the write is declined unless this boot's own sample shows the pixel
+clock running on that pipe — refusal 45 names it rather than arming
+`-rbgpufbdto` silently. **NOT `-rbgpufbotg`**: `-rbgpufbotgany` exists and
+would have it as a prefix, rule 30), `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,
 `-rbgpusdmahook`, `-rbgpustampraw`, `-rbgpuregdump`, `-rbgpubeat`.
