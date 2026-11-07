@@ -529,7 +529,7 @@ fbpresent:
 # rebuild of the executable inside it. **A rebuild still rewrites the bundle,
 # so re-sign is part of the target, not a manual step** (2x5 lost framepump's
 # grant to exactly this).
-.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset drainset tickset mtlname dpcdread edidread
+.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset drainset tickset mtlname dpcdread dpcdwrite edidread
 # 2zn: the DMCUB inbox oracle - reads the locate and the bring-up scan, and
 # sends ONE ABM command by name. See tools/dmubbl.m for why it is a tool and
 # not the slider.
@@ -584,6 +584,12 @@ $(OUT)/mtlname: tools/mtlname.m | $(OUT)
 
 dpcdread: $(OUT)/dpcdread
 $(OUT)/dpcdread: tools/dpcdread.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework IOKit -framework CoreFoundation -framework Foundation
+	@echo "  TOOL  $@"
+
+dpcdwrite: $(OUT)/dpcdwrite
+$(OUT)/dpcdwrite: tools/dpcdwrite.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
 	      -framework IOKit -framework CoreFoundation -framework Foundation
 	@echo "  TOOL  $@"

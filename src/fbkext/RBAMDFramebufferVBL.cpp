@@ -338,6 +338,7 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAuxDpcdReply", (uint64_t)auxDpcdReplyCode, 64);
     setProperty("RBFBAuxDpcdBytes", (uint64_t)auxDpcdBytes, 64);
     setProperty("RBFBAuxDpcdSuspect", auxDpcdSuspect);
+    auxWPublish();                      /* 2F3 */
     /* The payload as raw bytes. Published individually rather than as one
      * packed word for 2B0's reason: the summary (revision, link rate, lanes)
      * is a reading OF this, and a wrong decode has to be refutable from the
@@ -1534,6 +1535,43 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             return kIOReturnSuccess;
         }
     }
+    /* 2F3: the DPCD WRITE trigger - the first write this project makes to the
+     * SINK rather than to this chip.
+     *
+     * THREE keys, and the one that runs the transaction is the VALUE, so an
+     * armed boot where nobody writes RBFBAuxWValue has written nothing to any
+     * sink - the same property 2BA's arming promises for reads and 2F1's for
+     * the DTO. The address is read first and has no writable default, so a
+     * bare RBFBAuxWValue cannot land anywhere: it is refused ADDR_DENIED.
+     *
+     * The panel is refused by HPD *and* by engine inside the kext, and the
+     * tool refuses HPD 0 again on its own - the outer of three checks. */
+    {
+        OSNumber *wh = OSDynamicCast(OSNumber, dict->getObject("RBFBAuxWHpd"));
+        if (wh) { auxDpcdWHpd = wh->unsigned32BitValue(); }
+        OSNumber *wa = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBAuxWAddr"));
+        if (wa) { auxDpcdWAddr = wa->unsigned32BitValue(); }
+        OSNumber *wv = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBAuxWValue"));
+        if (wv) {
+            const uint32_t rc = auxDpcdWrite(auxDpcdWHpd, auxDpcdWAddr,
+                                             wv->unsigned32BitValue());
+            LOG("RBFBAuxWValue hpd %u inst %u addr %#x val %#x -> refuse %u, "
+                "reply %u acked %u, before %#x(ok %u) after %#x(ok %u), "
+                "applied %u changed %u, verdict %d",
+                auxDpcdWHpd, auxDpcdWInst, auxDpcdWAddr, auxDpcdWValue, rc,
+                auxDpcdWReplyCode, auxDpcdWAcked,
+                auxDpcdWBefore, auxDpcdWBeforeOk,
+                auxDpcdWAfter, auxDpcdWAfterOk,
+                auxDpcdWApplied, auxDpcdWChanged, auxDpcdWVerdict);
+            auxWPublish();
+            return rc == RB_DPCD_W_OK ? kIOReturnSuccess
+                                      : kIOReturnNotPermitted;
+        }
+        if (wh || wa) { auxWPublish(); return kIOReturnSuccess; }
+    }
+
     /* 2BC: the EDID trigger. Its own key, because an EDID read is a different
      * transaction type (I2C-over-AUX with MOT) and a shared key would make
      * "which protocol ran" unreadable afterwards. */

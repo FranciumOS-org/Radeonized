@@ -75,6 +75,7 @@
  * several AUX transactions, which is how a 128-byte EDID is read 16 bytes at
  * a time from one I2C read. */
 #define RB_DPCD_ACTION_READ         0x90u   /* DP_READ                     */
+#define RB_DPCD_ACTION_WRITE        0x80u   /* DP_WRITE  (2F3)             */
 #define RB_I2C_ACTION_WRITE         0x00u   /* I2C_WRITE                   */
 #define RB_I2C_ACTION_READ          0x10u   /* I2C_READ                    */
 #define RB_I2C_ACTION_WRITE_MOT     0x40u   /* I2C_WRITE_MOT               */
@@ -96,6 +97,162 @@
 #define RB_DPCD_REPLY_DEFER         0x2u
 
 #define RB_DPCD_MAX_READ            16u
+
+/* ===================== 2F3: THE NATIVE DPCD WRITE =======================
+ *
+ * THE FIRST WRITE THIS PROJECT MAKES TO THE SINK. Everything before it wrote
+ * to this chip; an EDID read writes an offset byte over AUX (2BD), but that
+ * goes to the monitor's DDC EEPROM and not to its DP receiver. These
+ * addresses change the receiver's own state, and link training is nothing but
+ * a sequence of them.
+ *
+ * WHAT MAKES IT BOUNDED. Three things, each a refusal with its own code:
+ *   - The engine is the one bound to HPD2, which drives nothing this desktop
+ *     depends on. The PANEL's engine is refused BY NAME, twice over - by HPD
+ *     and by instance - because a DPCD write on the link the display is
+ *     running on is the way to lose it. Same shape as pipe 0 in rb_dpdto.h.
+ *   - The ADDRESS IS ALLOWLISTED. Not "refuse the dangerous ones" - only the
+ *     link-configuration block below is writable at all, and everything else
+ *     in the 20-bit space is refused, including the read-only capability and
+ *     status blocks. A NACK from the sink would be the fallback; a refusal
+ *     here is cheaper and says which address it was.
+ *   - Nothing in the allowlist does anything on its own. 0x100/0x101 set a
+ *     rate and a lane count the sink only acts on once a training pattern is
+ *     set; 0x103..0x106 are drive settings; and the sink is not displaying
+ *     anything in any case, because no boot of this machine has ever trained
+ *     this link (2F2's measurement: the firmware's GOP lights no external
+ *     display on this chassis, on either GPU, and the sink's LED never leaves
+ *     standby).
+ *
+ * THE VERDICT IS THE SINK'S OWN ACK, which is a reply we do not compose -
+ * rule 20's requirement, since a readback of a byte we just wrote is a value
+ * known in advance to agree. The read-after-write is published beside it with
+ * `changed` against the byte read BEFORE, so the pair says whether the sink
+ * stored it as well as whether it answered.
+ *
+ * ADDRESSES ARE drm_dp.h's, BY LINE, not from memory:
+ *   0x100 DP_LINK_BW_SET (588), 0x101 DP_LANE_COUNT_SET (598),
+ *   0x102 DP_TRAINING_PATTERN_SET (603), 0x103..0x106 DP_TRAINING_LANE0..3_SET
+ *   (628-631), 0x107 DP_DOWNSPREAD_CTRL (652),
+ *   0x108 DP_MAIN_LINK_CHANNEL_CODING_SET (657), 0x600 DP_SET_POWER (1023).
+ */
+#define RB_DPCD_LINK_BW_SET            0x100u
+#define RB_DPCD_LANE_COUNT_SET         0x101u
+#define RB_DPCD_TRAINING_PATTERN_SET   0x102u
+#define RB_DPCD_TRAINING_LANE0_SET     0x103u
+#define RB_DPCD_TRAINING_LANE3_SET     0x106u
+#define RB_DPCD_DOWNSPREAD_CTRL        0x107u
+#define RB_DPCD_LINK_CODING_SET        0x108u
+#define RB_DPCD_SET_POWER              0x600u
+
+/* Values, also drm_dp.h's. Named because the hosttest asserts the allowlist
+ * accepts what training actually sends, which a bare number could not say. */
+#define RB_DPCD_LINK_BW_1_62           0x06u
+#define RB_DPCD_LINK_BW_2_7            0x0au
+#define RB_DPCD_LINK_BW_5_4            0x14u
+#define RB_DPCD_TRAIN_PATTERN_DISABLE  0x00u
+#define RB_DPCD_TRAIN_PATTERN_1        0x01u
+#define RB_DPCD_TRAIN_PATTERN_2        0x02u
+#define RB_DPCD_LANE_COUNT_MASK        0x0fu
+#define RB_DPCD_ENHANCED_FRAME_EN      0x80u
+#define RB_DPCD_SET_ANSI_8B10B         0x01u
+#define RB_DPCD_SET_POWER_D0           0x01u
+#define RB_DPCD_SET_POWER_D3           0x02u
+
+/* Read-only blocks, named so the hosttest can assert they are refused rather
+ * than merely absent from the allowlist - a test that passes because a number
+ * happens not to be listed is rule 48's "right answer for the wrong reason". */
+#define RB_DPCD_REV_ADDR               0x000u
+#define RB_DPCD_MAX_LINK_RATE_ADDR     0x001u
+#define RB_DPCD_LANE0_1_STATUS         0x202u
+#define RB_DPCD_LANE_ALIGN_STATUS      0x204u
+#define RB_DPCD_ADJUST_REQUEST_LANE0_1 0x206u
+
+/* The one and only set of addresses this project will write to a sink.
+ * Everything not named here is refused, including every address above the
+ * 20-bit AUX space. */
+static inline int rb_dpcd_write_allowed(uint32_t address)
+{
+    if (address >= RB_DPCD_TRAINING_LANE0_SET &&
+        address <= RB_DPCD_TRAINING_LANE3_SET) {
+        return 1;
+    }
+    switch (address) {
+    case RB_DPCD_LINK_BW_SET:
+    case RB_DPCD_LANE_COUNT_SET:
+    case RB_DPCD_TRAINING_PATTERN_SET:
+    case RB_DPCD_DOWNSPREAD_CTRL:
+    case RB_DPCD_LINK_CODING_SET:
+    case RB_DPCD_SET_POWER:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Which actions carry a payload, and therefore count it into
+ * AUX_SW_WR_BYTES. 2BA's auxTransact tested two I2C forms by equality and so
+ * would have encoded a native DP write with the READ length and no data -
+ * silently, since the engine would have ACKed a well-formed 4-byte request
+ * that wrote nothing. This predicate is the fix and the thing the hosttest
+ * pins. */
+static inline int rb_aux_action_is_write(uint32_t action)
+{
+    return action == RB_I2C_ACTION_WRITE ||
+           action == RB_I2C_ACTION_WRITE_MOT ||
+           action == RB_DPCD_ACTION_WRITE;
+}
+
+/* THE WRITE'S REFUSALS. Codes, not a bool (rule 14), and numbered clear of
+ * auxDpcdRefuse's 1..9 so one field can carry either and a reader can tell
+ * which half refused. */
+#define RB_DPCD_W_OK              0u
+#define RB_DPCD_W_NOT_ARMED      20u
+#define RB_DPCD_W_NO_REGS        21u
+#define RB_DPCD_W_PANEL_HPD      22u  /* HPD 0 - the panel, by name        */
+#define RB_DPCD_W_PANEL_ENGINE   23u  /* AUX 0 - the panel, independently  */
+#define RB_DPCD_W_NO_ENGINE      24u  /* no engine serves that HPD         */
+#define RB_DPCD_W_ADDR_DENIED    25u  /* not in the allowlist              */
+#define RB_DPCD_W_VALUE_RANGE    26u  /* not a byte                        */
+
+#define RB_DPCD_PANEL_HPD         0u
+#define RB_DPCD_PANEL_AUX         0u
+
+static inline uint32_t rb_dpcd_write_refuse(uint32_t hpd, uint32_t inst,
+                                            uint32_t address, uint32_t value,
+                                            int armed, int have_regs,
+                                            uint32_t aux_count)
+{
+    if (!armed)     { return RB_DPCD_W_NOT_ARMED; }
+    if (!have_regs) { return RB_DPCD_W_NO_REGS; }
+    /* The panel twice, by two different facts, so neither alone is load
+     * bearing: the connector it is on and the engine that serves it. */
+    if (hpd == RB_DPCD_PANEL_HPD)       { return RB_DPCD_W_PANEL_HPD; }
+    if (inst == RB_DPCD_PANEL_AUX)      { return RB_DPCD_W_PANEL_ENGINE; }
+    if (inst >= aux_count)              { return RB_DPCD_W_NO_ENGINE; }
+    if (!rb_dpcd_write_allowed(address)) { return RB_DPCD_W_ADDR_DENIED; }
+    if (value > 0xffu)                  { return RB_DPCD_W_VALUE_RANGE; }
+    return RB_DPCD_W_OK;
+}
+
+/* The verdict. The sink's ACK is the part we do not compose; `changed` is the
+ * part that says it STORED the byte rather than merely answering. Separate,
+ * because a sink can ACK a write to a field it ignores - which is a real and
+ * reportable outcome, not a failure to be smoothed over. */
+#define RB_DPCD_W_V_NOT_RUN     (-1)
+#define RB_DPCD_W_V_NO_ANSWER     0   /* no ACK                            */
+#define RB_DPCD_W_V_ACK_STORED    1   /* ACK, and the byte reads back      */
+#define RB_DPCD_W_V_ACK_IGNORED   2   /* ACK, and it does not              */
+#define RB_DPCD_W_V_ACK_BLIND     3   /* ACK, and the read-back failed     */
+
+static inline int rb_dpcd_write_verdict(int acked, int read_ok,
+                                        uint32_t wrote, uint32_t after)
+{
+    if (!acked)  { return RB_DPCD_W_V_NO_ANSWER; }
+    if (!read_ok) { return RB_DPCD_W_V_ACK_BLIND; }
+    return (after == wrote) ? RB_DPCD_W_V_ACK_STORED
+                            : RB_DPCD_W_V_ACK_IGNORED;
+}
 
 static inline uint32_t rb_aux_arb_owner(uint32_t arb)
 { return (arb & RB_AUX_ARB_RW_STATUS_MASK) >> RB_AUX_ARB_RW_STATUS_SHIFT; }
@@ -153,6 +310,19 @@ static inline uint32_t rb_dpcd_read_request(uint32_t address, uint32_t length,
     if (length == 0u) { return 0; }
     if (out_len < 4u) { return 0; }
     return rb_aux_request_bytes(RB_DPCD_ACTION_READ, address, length,
+                                out, out_len);
+}
+
+/* A DPCD write request: the 4-byte header, then the payload. Returns the
+ * header length, as rb_aux_request_bytes does - the caller adds `length` to
+ * get AUX_SW_WR_BYTES, which is exactly what dce_aux.c does. */
+static inline uint32_t rb_dpcd_write_request(uint32_t address, uint32_t length,
+                                             uint8_t *out, uint32_t out_len)
+{
+    if (length == 0u) { return 0; }
+    if (out_len < 4u) { return 0; }
+    if (!rb_dpcd_write_allowed(address)) { return 0; }
+    return rb_aux_request_bytes(RB_DPCD_ACTION_WRITE, address, length,
                                 out, out_len);
 }
 

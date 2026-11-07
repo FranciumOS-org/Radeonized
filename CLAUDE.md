@@ -430,6 +430,20 @@ first, because nothing turns a live DTO off. A second `dmubbl dto` is refused
 status bit. 2F2 split the published fields in two (`dtoCall*` = this call,
 `dtoProg*` = the last call that WROTE) because 2F1's single set let that
 refusal republish the successful write as `verdict -1 NOT RUN`.
+**THE FIRMWARE DOES NOT TRAIN THIS LINK** (2F3, measured with a control): with
+the display plugged in before power-on nothing appears - this chassis' OpenCore
+picker is the text-mode one, and the user reports no pre-boot external output
+through the 4050 under Windows either - and the sink's LED never leaves standby
+through macOS boot. So training is **ours**, not an assumption.
+**2F3 BUILT THE NATIVE DPCD WRITE and no boot has run it.** `auxTransact` was
+already a writer (2BD's EDID offset byte); one equality test excluded
+`DP_WRITE` 0x80 and would have encoded it with the READ length and no payload,
+silently. `build/out/dpcdwrite <addr> <val>`: the panel refused by name **three
+times** (tool by HPD, kext by HPD, kext by AUX engine), the address
+**allowlisted** to the link-config block only (0x100-0x108, 0x600 - `drm_dp.h`'s
+by line), and the verdict from two things we do not write - the sink's **ACK**
+and a read-after against a read-**before**, so `changed` says it STORED the
+byte. Four verdicts, because a sink can ACK a field it ignores.
 Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
@@ -466,7 +480,10 @@ which is measured false), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
 `-rbgpufbdig` / `-rbgpufbaltq` / `-rbgpufbfe` (the DMUB and DIG experiments —
 each arms its own dependencies and sends nothing until `build/out/dmubbl` names
 a target; **PHY0 / DIG0 / front end DIGA are the panel's and are refused by
-name**), `-rbgpufbaux` (native AUX DPCD read),
+name**), `-rbgpufbaux` (native AUX DPCD read **and 2F3's DPCD write** - no second token,
+since `-rbgpufbauxw` would have this one as a prefix, the shape rule 30
+forbids. Even armed nothing is written until `dpcdwrite` names an **address**,
+which has no writable default),
 `-rbgpufbdto` (2EF's DP DTO read and 2F1's write, **which boot 455 ran** -
 opt-in because the
 offsets collide with the DOMAIN block at the base this kext holds. No second

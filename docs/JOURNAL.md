@@ -61708,3 +61708,119 @@ a fourth place for the same number to live.
 — a `%ld` with no argument in the new refusal-45 paragraph — caught by the
 build, not by a test.
 
+
+---
+
+## 2F3 — the native DPCD write, and the firmware does NOT train this link
+
+### The free measurement, taken, with a control
+
+The user plugged the display in before power-on. **Nothing appears** — not the
+OpenCore picker, not the Apple logo — and the sink's LED never leaves standby
+through the whole of macOS boot. The user also reports the same chassis lights
+no external display pre-boot **through the 4050 under Windows**, which is the
+control that matters: this is the chassis firmware's behaviour, not something
+about the 680M or about our code.
+
+The OpenCore picker on this machine is the text-mode one, so there is no
+graphical pre-boot output to look for in the first place.
+
+**So nothing upstream of us has ever trained this link**, and link training is
+ours. That was item 1 on the handoff's list as an assumption; it is now a
+measurement with a control. It also retires the hope that the eDP panel's
+route — 2wh wrote HUBP surface addresses onto a pipe the firmware had already
+lit, and trained nothing — is available here.
+
+### What was actually in hand, and what was not
+
+Reading before designing (the recurring error's first variant): `rb_aux.h`
+says in capitals that it contains no writer, which is true of that header and
+misleading about the project. `auxTransact()` already composes payload bytes,
+already counts them into `AUX_SW_WR_BYTES`, and its reply handler already
+carries the comment *"a write ACKs with no payload, which is success"*. 2BD's
+EDID read has been writing an offset byte over AUX since boot 295.
+
+So the writer existed and had run on hardware. **One line excluded native DP:**
+
+```c
+const bool isWrite = (action == RB_I2C_ACTION_WRITE ||
+                      action == RB_I2C_ACTION_WRITE_MOT);
+```
+
+`DP_WRITE` is 0x80 (`dc_ddc_types.h:43`) and is in neither term, so a native
+DPCD write would have been encoded with the READ length and **no payload** —
+and silently, because the engine ACKs a well-formed four-byte request that
+writes nothing. That is the failure this milestone would have reported as a
+sink problem. The predicate now lives in `rb_dpcd.h` as
+`rb_aux_action_is_write()` and the hosttest owns it.
+
+### The write, and what bounds it
+
+`auxDpcdWrite(hpd, address, value)`. The first write this project makes **to
+the sink** rather than to this chip — the EDID offset byte goes to the
+monitor's DDC EEPROM, not to its DP receiver.
+
+Three bounds, each a refusal with its own code (20..26, numbered clear of the
+read's 1..9 so one reader can tell which half refused):
+
+- **The panel is refused by name three times independently** — in the tool by
+  HPD, in the kext by HPD, and in the kext again by **AUX engine**, which is a
+  different fact (2B9 read `AUX_HPD_SEL` off the hardware). Same shape as pipe
+  0 in `rb_dpdto.h`. The hosttest pins that the panel is refused *as the
+  panel* even when the address would also have been denied, so it is not
+  refused incidentally.
+- **The address is ALLOWLISTED, not blocklisted.** Only the link
+  configuration block is writable: 0x100, 0x101, 0x102, 0x103-0x106, 0x107,
+  0x108, 0x600, every one of them `drm_dp.h`'s by line number rather than from
+  memory. The capability block training *reads* and the whole status block are
+  refused, and so is everything else in the 20-bit space. Enforced in three
+  places — the tool, `rb_dpcd_write_refuse()` and the encoder — so none is
+  load-bearing alone.
+- **Nothing in the list acts on its own.** A rate and a lane count do nothing
+  until a training pattern is set, and the sink is displaying nothing in any
+  case, per the measurement above.
+
+### The verdict reads two things we did not write
+
+- **The sink's own ACK**, a reply we do not compose.
+- **A read-AFTER against a read-BEFORE**, so `changed` says the receiver
+  *stored* the byte rather than merely answering the transaction.
+
+They can disagree, and the disagreement is a reportable outcome rather than a
+failure — a sink may ACK a write to a field it ignores. Hence four verdicts and
+not a bool: `NO_ANSWER`, `ACK_STORED`, `ACK_IGNORED`, `ACK_BLIND`. `applied` is
+published beside `changed` because a byte already holding the target makes a
+readback agree for free (rule 20, 2E6's shape), and the tool says so in that
+case instead of claiming a write.
+
+A refused read publishes `0xffffffff`, which is **not** the byte `0xff`; the
+`*Ok` flags are published alongside and the tool reads them first, because a
+missing value that passes a field test is rule 14's trap at the tool boundary.
+
+### Checks
+
+Thirty-odd new hosttest assertions on the allowlist's bounds at both ends,
+the encoder's byte layout against `dce_aux.c`'s COMPOSE macros, each refusal
+firing for its own reason with an allowed call as the control, the value bound
+being on the ninth bit rather than on `0xff`, and all four verdicts — including
+that a refused read-back is `ACK_BLIND` and never silently `ACK_STORED`.
+
+**Rule 48: thirteen break-it checks, thirteen fired.** Three of them hit the
+`-Werror` trap first (removing a check leaves its argument unused, the build
+dies, and `make hosttest` then runs the previous binary with zero FAIL lines)
+and were redone as breaks that compile — the **sixth and seventh** recorded
+instances, which is why the check greps `error:` as well as `^FAIL`.
+
+### What this does NOT establish
+
+Nothing has been written to any sink yet: 2F3 is built and unrun. And even a
+clean `ACK + STORED` would be the *mechanism* link training is made of, not a
+trained link — no training pattern on the wire, no CR or EQ loop, no symbol
+lock, and the transmitter side (the PHY output, `DP_LINK_CNTL`, the atom
+transmitter ENABLE) untouched.
+
+No new boot-arg: `-rbgpufbaux` arms it, because `-rbgpufbauxw` would have had
+`-rbgpufbaux` as a prefix, the shape rule 30 forbids and which has bitten three
+times. Even armed, nothing is written until the tool names an **address**,
+which has no writable default.
+

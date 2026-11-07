@@ -406,6 +406,27 @@ private:
     uint8_t            auxDpcdData[16];
     bool               auxDpcdSuspect;
     uint32_t           auxDpcdHpd;     /* which HPD block to target, def 2 */
+
+    /* 2F3: the write. Codes 20..26 so one reader can tell a write refusal
+     * from auxDpcdRefuse's 1..9. `auxDpcdWAcked` is the sink's own answer and
+     * `auxDpcdWChanged` is whether it STORED the byte - separate, because a
+     * sink can ACK a write to a field it ignores. */
+    uint64_t           auxDpcdWCalls;   /* monotonic, including refusals    */
+    uint64_t           auxDpcdWOks;
+    uint32_t           auxDpcdWRefuse;
+    uint32_t           auxDpcdWHpd;
+    uint32_t           auxDpcdWInst;
+    uint32_t           auxDpcdWAddr;
+    uint32_t           auxDpcdWValue;
+    uint32_t           auxDpcdWBefore;
+    uint32_t           auxDpcdWBeforeOk;
+    uint32_t           auxDpcdWAfter;
+    uint32_t           auxDpcdWAfterOk;
+    uint32_t           auxDpcdWReplyCode;
+    uint32_t           auxDpcdWAcked;
+    uint32_t           auxDpcdWApplied;
+    uint32_t           auxDpcdWChanged;
+    int                auxDpcdWVerdict;
     /* 2BC: the EDID. auxEdidRefuse shares 1-9 with the DPCD codes and adds
      * 10 (the offset write never ACKed) and 11 (a chunk read failed), and
      * auxEdidBytes says how far it got, because a partial block is a
@@ -1044,6 +1065,9 @@ private:
      * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
      * bounded; refuses rather than racing when the DMCUB owns the engine. */
     bool auxDpcdRead(uint32_t hpd, uint32_t address, uint32_t length);
+    uint32_t auxDpcdWrite(uint32_t hpd, uint32_t address,
+                          uint32_t value);
+    void auxWPublish(void);
     /* 2BC: one AUX transaction of any of the five actions, and one 128-byte
      * EDID block over I2C-over-AUX (the MOT protocol). */
     bool auxTransact(unsigned inst, uint32_t action, uint32_t address,
