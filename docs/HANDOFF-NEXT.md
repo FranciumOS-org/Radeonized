@@ -1,6 +1,17 @@
 # Handoff — next step
 
-**Written 2026-11-07, after 2FA. Last boot: 461 (2F9).**
+**Written 2026-11-07, after 2FA-a. Last boot: 462.**
+
+**Boot 462 failed its positive control and established nothing about the
+hardware.** `otgSample()` read `0x00000000` from all four `OTGn_CONTROL` in a
+boot whose panel was lit and scanning: the kext indexed its BAR5 map with the
+raw BASE_IDX 2 dword and never added DMU segment 2's `0x34c0`. Fixed at all
+five sites, and the panel-scanning control is now a **gate** (refusal 48,
+`W_NOPANEL`) rather than a line a human reads in a table. Nothing was written.
+**Reinstall: fbkext UUID `C1701F13-C5A4-3C71-B69B-1F0A17BDFC1B`.** The arm is
+already in boot-args, so `sudo tools/fbinstall.sh` and reboot is the whole
+step. First thing to read in the next boot is one line of
+`./build/out/otgprog`: **`PANEL CONTROL OK`**.
 
 Read `CLAUDE.md` first, then this. `docs/EXTERNAL-DISPLAY.md` has the full
 state of the one open goal; `docs/JOURNAL.md` under tag `2FA` has the detail
@@ -68,7 +79,8 @@ block with nothing attached would produce identically.
 ## 2FA is built and never run. Do this.
 
 `src/common/rb_otgprog.h` + the kext fields/writes/dial + `tools/otgprog.m`.
-`make hosttest` green, fbkext UUID **`22977266-BB99-3D16-B151-0DA3BB6DF416`**.
+`make hosttest` green, fbkext UUID **`C1701F13-C5A4-3C71-B69B-1F0A17BDFC1B`**
+(the `22977266` build is the one whose addresses were wrong — do not reuse it).
 
 **The arm is `-rbgpufbraster`.** Not `-rbgpufbotg` — that is refused, because
 `-rbgpufbotgany` already exists and would have it as a prefix (rule 30; the
@@ -76,15 +88,16 @@ scan was verified with `-rbgpufbdtox` as a known-colliding control). The dial
 does **not** arm `-rbgpufbdto` for you: refusal 45 names the missing clock
 instead, deliberately.
 
-### The two commands for the user
+### The commands for the user
 
-```
-sudo tools/efi.sh bootarg add -rbgpufbraster
-```
+`-rbgpufbraster` is **already in boot-args** as of boot 462, so unless
+`sudo tools/efi.sh defaults` has been run since, this is the only one:
 
 ```
 sudo tools/fbinstall.sh
 ```
+
+(If the arm is gone: `sudo tools/efi.sh bootarg add -rbgpufbraster`.)
 
 Then verify the UUID **inside the collection**, not in `/Library/Extensions`
 (rule 15 — 2xx cost nine boots to this exact gap):
@@ -93,7 +106,7 @@ Then verify the UUID **inside the collection**, not in `/Library/Extensions`
 kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
 ```
 
-Expect `22977266`. Then reboot.
+Expect `C1701F13`. Then reboot.
 
 ### In the armed boot, in this order
 
@@ -107,6 +120,10 @@ Expect `22977266`. Then reboot.
    (That line exists because the first smoke run printed `MASTER_EN` for all
    four pipes off absent keys read as `-1` — rule 14's named trap, in a tool
    written with the rule in front of me.)
+   **The tool now prints `PANEL CONTROL OK` or `*** PANEL CONTROL FAILED ***`
+   as its own line**, and `go` refuses 48 if the panel is not scanning. That
+   is boot 462's whole lesson: read that line and nothing else matters if it
+   is bad.
 3. Check the sink is healthy (above) and `-rbgpufbdto` is armed, or
    `otgprog` will refuse 45.
 4. `dmubbl dto 148500` — the clock first, because the raster's write gate
