@@ -401,10 +401,16 @@ panel's DIG0, 0 on the three never brought up). Remaining: the **pixel clock**, 
 link is **three register writes of ours** and not the VBIOS command (2EE read
 the caller: `dcn31_program_pix_clk` programs `DP_DTO*_PHASE`/`MODULO`/
 `PIXEL_RATE_CNTL` itself and reaches `set_pixel_clock` only for HDMI/DVI).
-Those registers are **BASE_IDX 1**, whose offsets collide with the DOMAIN
-power-gating block at BASE_IDX 2, so 2EF built the read-only check first:
-pipe 0's own PHASE must reproduce the panel's clock, with the same offsets at
-BASE_IDX 2 as an alias control. Then link training over AUX2 (driver-side — zero `dmub`
+Those registers are **BASE_IDX 1 = 0xc0**, whose offsets collide with the
+DOMAIN power-gating block at BASE_IDX 2 — and boot 452 **CONFIRMED** the base
+on the chip (2F0), with the alias control reading `DOMAIN0/1_PG_STATUS` as
+`0x10000000` there. From that boot: **`dprefclk` = 600 MHz exactly**
+(`MODULO[0]`, never located before); the panel's DTO does drive the panel
+(enable and status both set); pipes 1-3 are dark and byte-identical. Two
+cautions for the write: `PIPE0_DTO_SRC_SEL` is **0** where Linux writes 1 and
+the panel works anyway, and **PHASE is the requested clock, not a readback**
+(343.000000 MHz against a raster wanting 342.288, DRR ruled out) so it cannot
+be the verdict register. Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
 since 2sl). **Order matters:** FE connect → configure encoder → transmitter
@@ -492,8 +498,8 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 (`rbgpuretiredrain`, measured dead); **efficiency/power** (moved to
 `~/Developer/Econized`).
 
-**Open:** the pixel clock (built as a READ, not yet booted) and the rest of
-the external-display chain (above);
+**Open:** the pixel clock (base CONFIRMED on boot 452; the three writes are
+next) and the rest of the external-display chain (above);
 the **wedge** (work submitted that never retires — channel-52 GFX, 3.5 s, the
 "random lag"; `stamp_ticks` 125666 retires the "nothing polls it" family);
 `powermetrics` has **never been run** against the default 576 interior
