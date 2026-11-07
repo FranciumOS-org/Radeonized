@@ -1269,6 +1269,25 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
      * pins it for the boot in the only sense that matters here - nothing else
      * writes it - and it is published on the way out (2E3) so the tool reads
      * the state it just set rather than the previous snapshot. */
+    /* 2EC: the FE dial, ahead of RBFBDigPhy for the same reason RBFBDigEnc
+     * is - one setProperties call carrying both lands the dial before the
+     * send it governs. The VALUE is the front end's ONE-HOT bit, not an
+     * index: 4 is DIGC, and 0 (the default) is the documented INVALID, which
+     * rb_digbe_fe_refuse() declines - so an armed boot writes nothing until
+     * a front end is named. A negative value means "the front end 2EC
+     * derived for the Type-C back end", DIGC, so the ordinary invocation
+     * names no magic number and cannot name the wrong one. */
+    {
+        OSNumber *f = OSDynamicCast(OSNumber, dict->getObject("RBFBDigFe"));
+        if (f) {
+            const int32_t want = (int32_t)f->unsigned32BitValue();
+            digFe = want < 0 ? RB_DIGBE_TYPEC_FE : (uint32_t)want;
+            LOG("RBFBDigFe -> 0x%x", digFe);
+            dmubPublish();
+            if (!dict->getObject("RBFBDigPhy")) { return kIOReturnSuccess; }
+        }
+    }
+
     {
         OSNumber *e = OSDynamicCast(OSNumber, dict->getObject("RBFBDigEnc"));
         if (e) {
@@ -1307,11 +1326,14 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             const uint32_t rc = dmubDigExperiment(phyid);
             LOG("RBFBDigPhy %u -> refuse %u, before %#x, after %#x, "
                 "ref %#x, verdict %u, wptr %#x, acks %llu; enc %d "
-                "refuse %u applied %u cfg %#x->%#x scram %#x->%#x",
+                "refuse %u applied %u cfg %#x->%#x scram %#x->%#x; "
+                "fe 0x%x inst %u refuse %u applied %u changed %u clean %u "
+                "%#x->%#x",
                 phyid, rc, digBefore, digAfter, digRefWord, digVerdict,
                 dmubSendWptr, dmubAcks, digEnc ? 1 : 0, encRefuse,
                 encApplied, encCfgBefore, encCfgAfter, encScramBefore,
-                encScramAfter);
+                encScramAfter, digFe, feInst, feRefuse, feApplied,
+                feChanged, feClean, feBefore, feAfter);
             dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }

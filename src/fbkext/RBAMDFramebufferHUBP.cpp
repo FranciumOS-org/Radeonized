@@ -192,7 +192,9 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * one of them missing, and its refusal would then look like a chip
      * answer (rule 34, the same reason dmubDigExperiment is a single call).
      * The aperture half is unchanged and still fails only itself. */
-    dpaltReady = (dpaltArmed || digArmed) && dpaltFits;
+    /* 2EC: `feArmed` ORs in too - the DIG_BE_CNTL dwords this write
+     * touches top out at 0x24b1, inside the same bound. */
+    dpaltReady = (dpaltArmed || digArmed || feArmed) && dpaltFits;
 
     /* Gate 1: are we addressing DCN at all? 2oq's signature, now decided by
      * rb_hubp_otg_gate() so the hosttest owns it and the HDMI case is
