@@ -1,6 +1,6 @@
 # HANDOFF — next step
 
-**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2EF.** `CLAUDE.md` is the reference card:
+**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F0, boot 452.** `CLAUDE.md` is the reference card:
 standing rules, chip facts, the boot-arg contract. `docs/JOURNAL.md` is the
 evidence record, grepped by milestone tag. **This file is only what is in
 flight.**
@@ -27,7 +27,7 @@ still armed** (2D3's `sub` 4, derived by default since 2D5 — the user's own
 | GPU name / 4 GB / Metal 3 | **DONE** (2C9-2CE, default-on) |
 | the frame-rate ceiling | **CLOSED** — eight models died; it was our own hold, and the lever was retire occasions per vblank (2D0-2D5) |
 | efficiency / power | **MOVED OUT** → `~/Developer/Econized` |
-| **the external display** | **IN FLIGHT — the pixel-clock READ is built and unbooted (2EF)** |
+| **the external display** | **IN FLIGHT — base CONFIRMED on boot 452; the three DTO writes are next (2F0)** |
 | the wedge | **OPEN**, independent defect |
 
 ---
@@ -62,51 +62,55 @@ own `firmware/680m-vbios.rom` (2E1).
   `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` 0 → 0x4, applied/changed/clean all 1.
   **The first verified write this project has made to this block.**
 
-### THE NEXT STEP: boot the DP DTO READ (2EF built it; nothing has run)
+### THE NEXT STEP: the three DTO writes on pipe 1 (the read came back CONFIRMED)
 
-**Install the framebuffer and boot with `-rbgpufbdto`.** The read is opt-in,
-writes nothing, sends nothing and arms nothing else.
+2EF built the read and **boot 452 confirmed it** (2F0): `RBFBDtoBase` = 0,
+`RBFBDtoSeg1` = 0xc0, `RBFBDtoPipe` = 0. **BASE_IDX 1 = 0xc0 is established on
+the chip**, and the alias control read `DOMAIN0/1_PG_STATUS` as `0x10000000` at
+BASE_IDX 2 — the value 2DE measured, so the collision was real and is now
+demonstrated, not argued.
 
-Why this and not `DMUB_CMD__VBIOS` sub-type 2, which five entries in a row
-named: **2EE read the caller and the VBIOS command is the HDMI/DVI branch.** On
-a DP link `dcn31_program_pix_clk` writes `DP_DTO*_PHASE`, `MODULO` and
-`PIXEL_RATE_CNTL` in registers itself, with Linux's own comment saying so, and
-reaches `set_pixel_clock` only in the `else`. Our port is DP alt mode three
-independent ways, so **the pixel clock is three writes of ours** — the same
-shape as the FE connect that just worked, rather than an inbox command whose
-execution has to be inferred.
+What the boot handed over:
 
-The obstacle is the ADDRESS, and 2EF settled where it comes from: those
-registers are **BASE_IDX 1 = 0xc0**, off this machine's own captured discovery
-table (`build/out/rbdump tests/data/rembrandt-680m-tufa15.bin`), with
-`base[2] = 0x34c0` in the next slot of the same array as the built-in control.
-The hazard is that `0x0080..0x0083` at **BASE_IDX 2** — the only base this kext
-has ever used — are `DOMAIN0/1_PG_CONFIG` and `_PG_STATUS`, so a wrong base
-reads a plausible-looking power-gating word and **a wrong write would hit the
-power gating of the pipe scanning the panel.**
+- **`dprefclk` = 600 000 000 Hz exactly** (`MODULO[0]`), read from the chip.
+  Linux takes it from the SMU and this project had never located it.
+- **The panel's DTO drives the panel** — `DP_DTO0_ENABLE` and
+  `DPDTO0_ENABLE_STATUS` both set, which confirms 2EE's source read by
+  measurement rather than by reading `dc`.
+- **Pipes 1-3 are byte-identical and dark** (`0x8000c000`, PHASE and MODULO 0),
+  so pipe 1 is a clean target with a three-instance control already taken.
 
-So the read comes first and it answers two questions separately:
+### The write, and the two things 2F0 says about it
 
-- **`RBFBDtoBase`** — 0 CONFIRMED, 1 PHASE_ZERO, 2 PHASE_WRONG, 3 MODULO_BAD,
-  4 ALIASED, 5 NO_EXPECTED. CONFIRMED means pipe 0's own `PHASE` reproduced the
-  panel's pixel clock within 0.5 %, and the four offsets read at BASE_IDX 2
-  (`RBFBDtoAlias*`, the alias control) were NOT identical to the DTO group.
-- **`RBFBDtoPipe`** — 0 the DTO drives pipe 0 (`DP_DTO0_ENABLE` set and
-  `DPDTO0_ENABLE_STATUS` agreeing), 1 asked but the status bit disagrees,
-  2 another source entirely.
+Three registers at **BASE_IDX 1 = 0xc0**, pipe 1 (dwords `0x84`/`0x85`/`0x86`
+before the base), for the sink's mode from 2BD's EDID:
 
-**All three outcomes were written down before the boot.** CONFIRMED → the three
-writes on pipe 1 for the sink's 228 MHz / 100 Hz mode are next, and
-`RBFBDtoRefHz` is the `dprefclk` this project has never located, read from the
-chip. PHASE_ZERO → the base is probably fine but the firmware did not use the
-DTO for the panel, so the reference has to come from somewhere else before any
-write. PHASE_WRONG or ALIASED → the address is not what the discovery table
-says it is, and nothing gets written at it.
+1. `DP_DTO1_PHASE`  = the mode's pixel clock in Hz.
+2. `DP_DTO1_MODULO` = **600 000 000** — the firmware's own value for the panel.
+   PHASE/MODULO is a RATIO, so reusing it makes pipe 1 as accurate as pipe 0
+   and the true reference never has to be known. Linux does the same: one
+   `dp_dto_ref_khz` for every pipe.
+3. `OTG1_PIXEL_RATE_CNTL`: set `DP_DTO1_ENABLE` (bit 4).
 
-Also read `RBFBDtoRefSrc`: 1 means the comparison used the clock measured on an
-`OTG0_FRAME_COUNT` edge, 2 means the live raster times the vblank clock's rate
-(the ordinary case, since `modeClkHz` is only computed when `-rbgpufbmodes` is
-armed), 0 means there was no reference and the verdict is NO_EXPECTED.
+**`PIPE1_DTO_SRC_SEL` (bit 12) is the open decision.**
+`dcn31_program_pix_clk` writes it to 1 alongside the enable. The firmware left
+pipe 0's at **0** and the panel has scanned out for 452 boots, so 0 is
+sufficient on this chip by existence proof. Evidence is on the side of copying
+the firmware; decide it explicitly, and if both are tried, interleaved.
+
+**Do NOT use PHASE as the verdict register.** 2F0 measured pipe 0's PHASE as a
+round 343.000000 MHz against a raster wanting 342.288 MHz — 0.208 %, with DRR
+extension ruled out (`V_TOTAL_MIN/MAX/MID/CNTL` all 0). PHASE is the clock the
+firmware *requested*, not a readback of what the hardware achieved, so a
+readback agreeing with what we wrote is rule 20's defect and we know in advance
+it would agree. Candidate verdict registers instead: `DPDTO1_ENABLE_STATUS`
+(the hardware's own answer, which pipe 0 shows tracking the enable) and
+`OTG1_DIO_FIFO_ERROR`, which reads 3 on every dark pipe and 0 on the live one —
+**untested against a pipe being brought up, so establish it before trusting
+it.**
+
+The write needs a target dial the way every write in this kext does, and the
+mode is 2BD's: **MSI MP2412C, 228 MHz, 100 Hz, 2 lanes.**
 
 Why the PHY still reads `STILL` and why that is not an obstacle: a transmitter
 with an enabled back end and a connected front end but no clock has nothing to
