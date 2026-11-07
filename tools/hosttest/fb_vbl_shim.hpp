@@ -12,6 +12,7 @@ extern "C" {
 #include "rb_dpdto.h"
 #include "rb_aux.h"
 #include "rb_dpcd.h"
+#include "rb_dptx.h"
 }
 #include <map>
 #include <string>
@@ -365,6 +366,25 @@ public:
     uint32_t auxDpcdWApplied=0, auxDpcdWChanged=0;
     int auxDpcdWVerdict=RB_DPCD_W_V_NOT_RUN;
     void auxWPublish(void) {}
+    /* 2F4: the DP transmitter. */
+    bool dptxArmed=false, dptxReady=false;
+    uint32_t dptxWord[RB_DPTX_COUNT][RB_DPTX_REG_COUNT]={{0}};
+    uint64_t dptxCalls=0, dptxRan=0;
+    uint32_t dptxRefuse=RB_DPTX_W_OK, dptxInst=2;
+    uint32_t dptxTps=RB_DPTX_TPS1, dptxLanes=2;
+    uint32_t dptxTpBefore=0, dptxTpAfter=0;
+    uint32_t dptxLcBefore=0, dptxLcAfter=0;
+    uint32_t dptxDcBefore=0, dptxDcAfter=0;
+    uint32_t dptxPcBefore=0, dptxPcAfter=0;
+    uint32_t dptxApplied=0, dptxClean=0;
+    uint32_t dptxSinkBefore=0xffffffffu, dptxSinkBeforeOk=0;
+    uint32_t dptxSinkAfter=0xffffffffu, dptxSinkAfterOk=0;
+    uint32_t dptxDpcdRefuse=0, dptxDpcdSet=0;
+    int dptxVerdict=RB_DPTX_V_NOT_RUN;
+    void dptxSample(void) {}
+    void dptxPublish(void) {}
+    uint32_t dptxTrain(uint32_t, uint32_t, uint32_t, uint32_t)
+    { return RB_DPTX_W_OK; }
     uint32_t auxDpcdWrite(uint32_t, uint32_t, uint32_t)
     { return RB_DPCD_W_OK; }
     unsigned char auxDpcdData[16]={0};

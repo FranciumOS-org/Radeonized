@@ -44,6 +44,7 @@ extern "C" {
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
+#include "rb_dptx.h"
 #include "rb_frametime.h"
 #include "rb_gpuname.h"
 }
@@ -406,6 +407,32 @@ private:
     uint8_t            auxDpcdData[16];
     bool               auxDpcdSuspect;
     uint32_t           auxDpcdHpd;     /* which HPD block to target, def 2 */
+
+    /* 2F4: the DP transmitter. Refusals 60..66, clear of the DPCD write's
+     * 20..26 and the read's 1..9, so one reader can tell which half refused. */
+    bool               dptxArmed;
+    bool               dptxReady;
+    uint32_t           dptxWord[RB_DPTX_COUNT][RB_DPTX_REG_COUNT];
+    uint64_t           dptxCalls;      /* monotonic, including refusals     */
+    uint64_t           dptxRan;
+    uint32_t           dptxRefuse;
+    uint32_t           dptxInst;
+    uint32_t           dptxTps;
+    uint32_t           dptxLanes;
+    uint32_t           dptxTpBefore, dptxTpAfter;
+    uint32_t           dptxLcBefore, dptxLcAfter;
+    uint32_t           dptxDcBefore, dptxDcAfter;
+    uint32_t           dptxPcBefore, dptxPcAfter;
+    uint32_t           dptxApplied;
+    uint32_t           dptxClean;
+    /* The sink's own lane status, before and after - the only part of this
+     * verdict we do not write. 0xffffffff is "the read refused" and is NOT
+     * the byte 0xff, so the *Ok flags are published beside it (rule 14). */
+    uint32_t           dptxSinkBefore, dptxSinkBeforeOk;
+    uint32_t           dptxSinkAfter, dptxSinkAfterOk;
+    uint32_t           dptxDpcdRefuse;
+    uint32_t           dptxDpcdSet;    /* the DPCD 0x102 write's own code   */
+    int                dptxVerdict;
 
     /* 2F3: the write. Codes 20..26 so one reader can tell a write refusal
      * from auxDpcdRefuse's 1..9. `auxDpcdWAcked` is the sink's own answer and
@@ -1064,6 +1091,16 @@ private:
     /* 2BA: a native AUX read of the sink's DPCD on the engine bound to `hpd`.
      * Opt-in (-rbgpufbaux) and triggered only from setProperties; every poll
      * bounded; refuses rather than racing when the DMCUB owns the engine. */
+    /* 2F4: the DP transmitter's link block. dptxSample() is read-only and
+     * reads ALL FIVE instances, so the panel's reference word and the
+     * target's live word come from one sample. dptxTrain() puts a training
+     * pattern on the wire and takes its verdict from the SINK's own lane
+     * status over AUX - a register this project does not write. */
+    void dptxSample(void);
+    void dptxPublish(void);
+    uint32_t dptxTrain(uint32_t inst, uint32_t tps, uint32_t hpd,
+                       uint32_t lanes);
+
     bool auxDpcdRead(uint32_t hpd, uint32_t address, uint32_t length);
     uint32_t auxDpcdWrite(uint32_t hpd, uint32_t address,
                           uint32_t value);

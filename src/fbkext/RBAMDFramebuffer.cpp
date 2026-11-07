@@ -673,6 +673,24 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * prefix property for tokens IN its table, and an opt-in token is not
          * in the table - so this one is checked by hand, here. */
         auxDpcdArmed = argOn("-rbgpufbaux");
+        /* 2F4: the DP transmitter's link block - the PHY side of link
+         * training, and a NEW WRITE SURFACE, so it gets its own opt-in rather
+         * than riding on the AUX one.
+         *
+         * Rule 30 BY HAND, because rb_defaults.h's hosttest only covers the
+         * tokens in its own table and this is not one of them: no existing
+         * token starts with `-rbgpufbt`, and `-rbgpufbtrain` is a prefix of
+         * nothing. Scanned both directions over every "-rbgpu*" literal in
+         * src/ before being chosen. Anything later wanting to extend this
+         * needs a NEW name, not a suffix on this one.
+         *
+         * RULE 34: it arms its own dependency. dptxTrain() takes its verdict
+         * from the sink's lane status over AUX, so without the DPCD half it
+         * could write a pattern and then have nothing to read - an experiment
+         * whose B side cannot be instrumented. Arming it here rather than
+         * documenting it is what 2E2 and 2B6 paid for. */
+        dptxArmed = argOn("-rbgpufbtrain");
+        if (dptxArmed) { auxDpcdArmed = true; }
         /* 2C0. Rule 30 by hand again, for the same reason: this is an
          * opt-in token and rb_defaults.h's hosttest only covers its own
          * table. The kernel's parse is exact (token_len == strlen), so a
