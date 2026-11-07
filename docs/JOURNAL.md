@@ -62560,3 +62560,98 @@ Verified: `tps=3` and `tps=4` both refuse with the right number in the message
 **The sink is degraded right now and needs a reboot.** `0x202` DEFERs, caps read
 `00 00 00 81 …`, the EDID header is BAD. `TP_SEL` on DP2 is 1. Nothing
 sink-side can be measured until the next boot.
+
+## 2F9 — THE WHOLE CHAIN RAN IN ONE BOOT, AND THE SINK SAW NOTHING (boot 461)
+
+Preconditions (rules 8, 15, 33, 34):
+
+- `rbgpu-boot` = **461**, boottime Sat Nov 7 02:18:10 2026.
+- Live collection **`A50B24F4-D737-38CE-8940-580772405B3E`** — the **2F6**
+  build, installed by the user and verified inside the collection. `build/out`
+  agrees. First boot of 2F6.
+- `-rbgpufbdig`, `-rbgpufbfe`, `-rbgpufbdto`, `-rbgpufbtrain`, `-rbgpufbaux`
+  all in `boot-args`.
+- **The sink is healthy**, and gated on before anything was written:
+  `edidread` header OK and checksum OK, `dpcdread 0x0 16` =
+  `12 14 c2 81 01 1d 01 81 02 00 04 04 3e 00 84 00`, byte-identical to 2D8 and
+  2BB. 2F6's new counters publish: `RBFBEdidDefers` **16** on that one EDID
+  read, which is the sink's own argument for the retry bound.
+- Pre-state: PHY0 `CNTL6` `0x00194444` (the lit panel), PHY1 `0x00023333`,
+  PHY2/3/4 `0x00063333` (dark); `DIG_BE_EN_CNTL` DIG0 `0x101`, DIG1-4 `0x100`;
+  `DIG_BE_CNTL` DIG0 `0x100`, DIG1-4 `0x10000` with `FE_SEL 0 INVALID`.
+
+### First: a claim of mine that was simply wrong
+
+2F8's handoff said the atom transmitter ENABLE at the link rate "DOES NOT
+EXIST" and called it the blocker. **It exists and has since 2E2.**
+`dmubbl dig` sends `DIG1_TRANSMITTER_CONTROL` with
+`RB_DIG_TYPEC_SYMCLK` = **54000**, which `rb_dig.h` derives as
+`LINK_RATE_HIGH2 0x14 × LINK_RATE_REF_FREQ_IN_KHZ 27000 / 10` — HBR2, the
+link rate — alongside phyid 2, action 1 ENABLE, digmode 0 DP, lanenum 2,
+hpdsel 3, each cited to a vendored file. I wrote a blocker into the handoff
+without reading the tool that already does it.
+
+### The chain, in order, in one boot
+
+| step | command | product |
+|---|---|---|
+| FE connect + transmitter ENABLE | `dmubbl dig fe` | `DIG_BE_CNTL` DIG2 `0x00010000 -> 0x20000000`, `DIG_BE_EN_CNTL` DIG2 `0x100 -> 0x101` |
+| pixel clock on pipe 1 | `dmubbl dto 148500` | `PIXEL_RATE_CNTL` `0x8000c000 -> 0x8000d090`, `DPDTO_ENABLE_STATUS` **0 -> 1**, verdict 1 STARTED |
+| training pattern | `dptrain go tps=2` | `TP_SEL 0x000000 -> 0x000001 CHANGED`, `applied 1 clean 1 moved 1 observable 1` |
+
+Every step carried its in-boot control. The `dig` send moved **only** DIG2;
+DIG0/1/3/4 came back byte-identical either side. The DTO write left pipes 2-3
+holding the dark word with PHASE and MODULO 0, and pipe 0 untouched — the panel
+kept scanning. The `dptrain` write left DP1/DP3/DP4 at `TP_SEL 0` and the
+panel's DP0 at 2.
+
+So for the first time this project has, simultaneously and verified by
+readback: **the DIG back end enabled on the Type-C instance, its front end
+connected, a pixel clock running on that pipe, and a training pattern on the
+transmitter.**
+
+### And the sink saw nothing
+
+DPCD `0x202` read **before and after**: `0x00`, `lane0[] lane1[]` empty. No
+clock recovery, no symbol lock. `VERDICT 1 PATTERN SET`, which is the expected
+reading — but it is now expected with four more things true than it was in 2F8.
+
+### THE PHY NEVER MOVES, AND THE VERDICT REGISTER IS THE SUSPECT
+
+`RDPCSTX2_RDPCSTX_PHY_CNTL6` read `0x00063333` before the ENABLE and
+`0x00063333` after, with PHY0's `0x00194444` unchanged beside it as the
+control. Then an ordering test, free and in-boot: Linux programs the clock
+before `enable_dp_output`, and I had sent the ENABLE first, so the ENABLE was
+**re-sent with the DTO running**. Still `0x00063333`. `RBFBDpaltChanges` 0.
+**Order was not the missing thing.**
+
+But `dig`'s whole verdict rests on that register, and CLAUDE.md already records
+why that is weak: `RDPCSTX*_PHY_CNTL6` is the **legacy fallback Linux reads
+only when DMCUB is absent**, and it already **disagreed with DMUB
+`QUERY_DP_ALT` on all five PHYs** — the ROM agreed with the DMUB answer, not
+with this register. So "the PHY did not move" may mean the PHY did not move, or
+may mean this register does not report a DMCUB-managed PHY's live state. Rule
+46, asked of a read: the register is real and readable and has a different
+owner. **The `dig` experiment needs a verdict register that is not this one**,
+and `DIG_BE_CNTL`/`DIG_BE_EN_CNTL` moving is the only register product that
+has ever been attributable to the command.
+
+The end-to-end verdict is the sink's lane status, and it is `0x00`.
+
+### What is left, named
+
+`enc31_map_stream_to_link` (no stream is mapped to DIG2), OTG timing on pipe 1
+(`OTG1_CONTROL` still `0x300`), a surface, and a second `IOFramebuffer`. A
+clock with no raster and no stream has nothing to send, so the `0x00` lane
+status is not yet evidence against the transmitter.
+
+### One tool defect, paid for in this boot
+
+`dmubbl dto` takes **kHz**. `dmubbl dto 148500000` passed Hz; 148.5 GHz does not
+fit the kext's uint32 Hz field and arrived as **2471111936**, refused **47**
+(outside 25 MHz .. the live reference). The refusal was correct and caught it,
+which is rule 14 working — but it named a clock nobody asked for instead of
+naming the mistake. The tool now refuses any value above 1 000 000 kHz with
+that explanation. Verified: `148500000` refuses with the new message,
+`148500` passes the guard and then hits refusal **45**, the pre-existing
+"that pipe's DP DTO is already enabled" check, correctly.

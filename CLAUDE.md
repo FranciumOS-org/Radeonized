@@ -396,13 +396,28 @@ DP DTO (boot 455, `DP_DTO*_PHASE`/`MODULO`/`PIXEL_RATE_CNTL` at **BASE_IDX 1 =
 the sink taking a native DPCD write (boot 457, `0x100` `0x06 -> 0x14`); the DP
 **transmitter block answering our writes** (boot 459, `TP_SEL 0 -> 1` on DP2,
 with a four-instance in-boot control). **It is a clock, NOT a picture.**
-**Not done:** the atom transmitter ENABLE at the link rate — the blocker and
-the next thing that does not exist — then link training over AUX2 (driver-side:
-zero `dmub` references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a
-second OTG + HUBP, a second `IOFramebuffer` (`getDisplayModeCount()` has
-returned 1 since 2sl). **Order matters:** FE connect → configure encoder →
-transmitter ENABLE; the atom transmitter command carries no front end **by
-design**.
+**2F9 ran the whole chain in one boot (461) and the sink saw nothing.** The
+atom transmitter ENABLE at the link rate **already existed** — `dmubbl dig`
+carries `RB_DIG_TYPEC_SYMCLK` 54000 = HBR2 and has executed since 2E2; an
+earlier handoff of mine called it the blocker without reading the tool. In one
+boot, each step with its in-boot control: `dmubbl dig fe` moved DIG2's
+`DIG_BE_CNTL` `0x00010000 -> 0x20000000` and `DIG_BE_EN_CNTL` `0x100 -> 0x101`
+(DIG0/1/3/4 byte-identical); `dmubbl dto 148500` took `PIXEL_RATE_CNTL`
+`0x8000c000 -> 0x8000d090` with `DPDTO_ENABLE_STATUS` 0 -> 1; `dptrain go
+tps=2` moved `TP_SEL 0 -> 1`. **DPCD `0x202` read `0x00` before and after** —
+no clock recovery. **`RDPCSTX2_PHY_CNTL6` never moved** (`0x00063333`, PHY0's
+`0x00194444` as control), and re-sending the ENABLE *after* the clock was
+running did not move it either, so **order is not the missing thing**. That
+register is the suspect as much as the PHY: it is the legacy fallback Linux
+reads only when DMCUB is absent and it already disagreed with `QUERY_DP_ALT` on
+all five PHYs, so `dig` needs a verdict register that is not this one.
+**Still not done:** `enc31_map_stream_to_link` (no stream mapped to DIG2), OTG
+timing on pipe 1 (`OTG1_CONTROL` still `0x300`), a surface, and a second
+`IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl). A clock
+with no raster and no stream has nothing to send, so the `0x00` lane status is
+not yet evidence against the transmitter. **Order:** FE connect → configure
+encoder → transmitter ENABLE; the atom transmitter command carries no front end
+**by design**.
 
 **The firmware does NOT train this link** (2F3, measured with a control), so
 training is ours. **PHY0 / DIG0 / front end DIGA are the panel's and are

@@ -1791,6 +1791,25 @@ int main(int argc, char **argv)
             }
         }
 
+        /* 2F9: the units trap, paid for on boot 461. `dmubbl dto 148500000`
+         * passed Hz into a kHz argument; 148.5 GHz does not fit the kext's
+         * uint32 Hz field and arrived as 2471111936, which the kext refused
+         * 47 (outside 25 MHz .. the live reference). The refusal was correct
+         * and caught it - rule 14 working - but the refusal names a clock
+         * nobody asked for, which is a worse message than naming the
+         * mistake. 1 000 000 kHz is 1 THz: no pixel clock is near it, and
+         * 2BD's own two modes are 148500 and 228000. */
+        if (khz > 1000000) {
+            printf("\nREFUSING %ld: this argument is in kHz, and that looks "
+                   "like Hz.\n"
+                   "Divide by 1000. 2BD's preferred timing is 148500 and its "
+                   "100 Hz\nmode is 228000. Passing Hz overflows the kext's "
+                   "uint32 Hz field and\nis then refused 47 against a clock "
+                   "nobody asked for (boot 461).\n", khz);
+            IOObjectRelease(fb);
+            return 2;
+        }
+
         if (pipe == 0) {
             printf("\nREFUSING to pass pipe 0 from this tool.\n"
                    "Pipe 0 is the eDP PANEL this desktop is running on - "
