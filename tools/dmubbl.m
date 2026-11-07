@@ -726,23 +726,34 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
     } else {
         printf("  asked for      0x%lx  %s\n", feWant, feName(feWant));
         printf("  refusal        %ld  %s\n", feRef, feWhy(feRef));
-        if (feRan == 0) {
-            printf("  nothing was written (ran 0)\n");
-        }
         printf("  DIG_BE_CNTL    %08lx -> %08lx   FE_SEL %#lx -> %#lx\n",
                feB & 0xffffffffL, feA & 0xffffffffL,
                (feB >> 8) & 0x7fL, (feA >> 8) & 0x7fL);
-        printf("  applied        %ld  %s\n", feAppl,
-               feAppl ? "the front end's bit READS BACK set"
-                      : "the readback does NOT carry it");
-        printf("  changed        %ld  %s\n", feChg,
-               feChg ? "the word MOVED - evidence of the store itself"
-                     : "the word did not move");
-        printf("  clean          %ld  %s\n", feCln,
-               feCln ? "every bit outside FE_SEL survived (DIG_MODE, "
-                       "HPD_SELECT)"
-                     : "SOMETHING ELSE IN THE WORD CHANGED - the RMW or the "
-                       "address is wrong");
+        /* 2ED. The three derived bits are only COMPUTED on the write path, so
+         * on a refusal they are their initialisers and interpreting them is
+         * rule 14 at the tool boundary - the A side of 2EC printed
+         * "SOMETHING ELSE IN THE WORD CHANGED" over a word that had not been
+         * touched, which is an alarming false statement about the address.
+         * Guard on `ran`, which is the only key that says a write happened. */
+        if (feRan == 0) {
+            printf("  applied/changed/clean   NOT COMPUTED - nothing was "
+                   "written (ran 0),\n                          so these "
+                   "three keys are their initialisers and\n"
+                   "                          mean nothing. Read the refusal "
+                   "above.\n");
+        } else {
+            printf("  applied        %ld  %s\n", feAppl,
+                   feAppl ? "the front end's bit READS BACK set"
+                          : "the readback does NOT carry it");
+            printf("  changed        %ld  %s\n", feChg,
+                   feChg ? "the word MOVED - evidence of the store itself"
+                         : "the word did not move");
+            printf("  clean          %ld  %s\n", feCln,
+                   feCln ? "every bit outside FE_SEL survived (DIG_MODE, "
+                           "HPD_SELECT)"
+                         : "SOMETHING ELSE IN THE WORD CHANGED - the RMW or "
+                           "the address is wrong");
+        }
     }
 
     /* 2E5. Printed BEFORE the interpretation, because which explanation a
@@ -766,14 +777,22 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
            "2 lanes)\n", cfgB & 0xffffffffL, cfgA & 0xffffffffL);
     printf("  SCRAM_CNTL     %08lx -> %08lx   (bit 4 ADVANCE set, the other "
            "three fields kept)\n", scrB & 0xffffffffL, scrA & 0xffffffffL);
-    printf("  applied        %ld  %s\n", encAppl,
-           encAppl ? "the READBACK agrees with the target"
-                   : "the readback does NOT agree");
-    printf("  changed        %ld  %s\n", encChg,
-           encChg ? "our write MOVED a register, so the write path works"
-                  : "NEITHER register moved - the encoder was ALREADY in the "
-                    "target\n                     state, so `applied` says "
-                    "nothing about our write (2E6)");
+    /* 2ED, same guard as the FE block above: both derived bits are computed
+     * on the write path only, so on a refusal they are initialisers. */
+    if (encRan == 0) {
+        printf("  applied/changed NOT COMPUTED - the configure did not run, "
+               "so both keys\n                  are initialisers. Read the "
+               "refusal above.\n");
+    } else {
+        printf("  applied        %ld  %s\n", encAppl,
+               encAppl ? "the READBACK agrees with the target"
+                       : "the readback does NOT agree");
+        printf("  changed        %ld  %s\n", encChg,
+               encChg ? "our write MOVED a register, so the write path works"
+                      : "NEITHER register moved - the encoder was ALREADY in "
+                        "the target\n                     state, so `applied` "
+                        "says nothing about our write (2E6)");
+    }
 
     encSurveyReport(fb);
 

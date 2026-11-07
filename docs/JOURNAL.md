@@ -60830,3 +60830,152 @@ Said before the reading so it can be wrong:
 `enc31_map_stream_to_link` (`link_hwss_dio.c:63` — a second register tying the
 front end to the link, which this project has not located) and the pixel
 clock. Both sit between a connected front end and a scanning pipe.
+
+---
+
+## 2ED — the FE connect LANDED: the first verified write to the DIG back end, and 2E9 reproduced on a second boot (boot 451)
+
+**Artifacts.** `rbgpu-boot` **451**, plugin `9FE31A5A`, framebuffer
+**`D6B93717`** — 2EC's binary, confirmed loaded by `kextstat` (rule 15, read
+before anything was interpreted; rule 8 read before the boot was named, which
+2B5 is the cost of skipping).
+
+Two commands, A side first because there is no disconnect path:
+
+```
+sudo env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dig 2        # A: 2E6's arm
+sudo env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dig 2 fe     # B: + the FE connect
+```
+
+### 1. THE WRITE LANDED, AND IT IS THE FIRST VERIFIED WRITE THIS PROJECT HAS MADE TO THIS BLOCK
+
+Live keys, read from the registry after the run:
+
+| key | value |
+|---|---|
+| `RBFBDigFeArmed` | Yes |
+| `RBFBDigFeWant` / `RBFBDigFeMask` | 4 (DIGC) |
+| `RBFBDigFeInst` | 2 |
+| `RBFBDigFeRefuse` | **0** |
+| `RBFBDigFeRan` | 1 |
+| `RBFBDigFeBefore` | 536870912 = **0x20000000** |
+| `RBFBDigFeAfter` | 536871936 = **0x20000400** |
+| `RBFBDigFeApplied` | **1** |
+| `RBFBDigFeChanged` | **1** |
+| `RBFBDigFeClean` | **1** |
+
+`FE_SEL` **0 -> 0x4**. The word moved, the front end's bit reads back set, and
+**every bit outside `FE_SEL` survived** — `DIG_MODE` 0 (DP/eDP SST) and
+`HPD_SELECT` 2 both carried through the RMW, which is what `clean` exists to
+check and what makes the address and the read-modify-write both right rather
+than merely plausible.
+
+**Against what came before: `RBFBEncChanged` reads 0 for the FOURTH time.**
+Every write this project had issued to the DIG/DIO blocks until now (2E5's
+`DP_CONFIG` and `DP_DPHY_SCRAM_CNTL` pair, across 2E6 and 2E7) was a no-op,
+because the firmware had already left those registers in the target state — so
+the write path was explicitly recorded as **UNVERIFIED** three milestones
+running, with 2E6 noting that a readback agreeing with an already-present
+target is no evidence of a store (rule 20). **It is verified now, by a register
+that moved.**
+
+### 2. 2E9 REPRODUCED ON A SECOND BOOT — rule 44's two boots per side, for "the firmware executes a `DMUB_CMD__VBIOS` command"
+
+The A run's post-send resample of `DIG_BE_EN_CNTL`:
+
+```
+RBFBDigBeEn0  = 257 = 0x101      <- the panel, DIG_ENABLE set (pristine control)
+RBFBDigBeEn1..4 = 256 = 0x100    <- pristine, DIG_ENABLE clear
+RBFBDigBeEnMask = 1
+RBFBDigBeEnPost2 = 257 = 0x101   <- DIG2's DIG_ENABLE 0 -> 1
+RBFBDigBeEnPost0 = 257           (unchanged)
+RBFBDigBeEnPost1/3/4 = 256       (unchanged, byte-identical controls)
+RBFBDigBeEnDiff = 0x4            <- instance 2 alone
+```
+
+`DIG_ENABLE` **0 -> 1 on the targeted instance alone**, with the other four
+byte-identical in the same sample. Boot 448 measured exactly this; boot 451 is
+the second. The attribution is unchanged and is not a coincidence: `phyid` 2 was
+in the payload, `rb_digbe.h` has no setter, `dcn10_is_dig_enabled()` is the only
+reference to this register in all of `docs/linux-ref/` and there is **no
+writer** anywhere, and nothing in macOS knows that connector exists (2B4: HPD2
+latched and unserviced).
+
+### 3. THE PHY VERDICT IS STILL — WHICH IS THE READING NAMED IN ADVANCE
+
+`RBFBDigVerdict` **0** (STILL). PHY2's `RDPCSTX2_PHY_CNTL6` reads `0x00063333`
+on both sides, with PHY0's `0x00194444` lit as the control — byte-identical to
+boots 443, 444, 447 and 448. 2EC wrote down three outcomes before the run and
+this is the second of them:
+
+> changed + clean with STILL is the expected reading and leaves exactly *one*
+> item from 2E6's list — the pixel clock, `DMUB_CMD__VBIOS` sub-type 2.
+
+So that is where the line stands. A transmitter with an enabled back end and a
+connected front end but **no pixel clock** still has nothing to light, and
+"the firmware discards VBIOS commands" is not merely unproven but **measured
+false** (2E9, now twice). Two further reasons the PHY register may be the wrong
+instrument entirely are already on the record: 2E9 found this command's product
+is one layer above the RDPCSTX PHY, and 2EB found `RDPCSTX2_PHY_CNTL6`
+contradicting the chip's own `QUERY_DP_ALT` answer about alt mode, making it the
+legacy fallback Linux reads only when DMCUB is absent.
+
+### Not smoothed over: the pristine baseline's window
+
+`DIG_BE_CNTL` and `DIG_BE_EN_CNTL`'s pristine words are latched at the **first
+periodic publish**, before any send (2CA's defect, 2CE's correction — only a
+real reading latches). So the window from that latch to the resample is the
+whole boot, and the survey block still prints `DIG2 20000000 FE_SEL 0` in the B
+run **by design**: it is the pre-send state, not a contradiction of the write.
+What makes this small rather than load-bearing is that the diff is
+**per-instance** and the four untargeted instances are byte-identical controls
+in the same sample. A re-latched baseline and a second send would close it
+outright.
+
+### Instrument defect, mine, found in the user's own output — rule 14 at the tool boundary
+
+The A run (a refusal: front end 0 = `RB_DIGBE_REFUSE_FE_ZERO`, code 64,
+`ran 0`, nothing written) printed:
+
+```
+  clean          0  SOMETHING ELSE IN THE WORD CHANGED - the RMW or the address is wrong
+```
+
+over a word whose own printed before/after were **identical**
+(`20000000 -> 20000000`). `feApplied`/`feChanged`/`feClean` are initialised to 0
+and **computed only on the write path**, so on every refusal the tool was
+interpreting three fields that had never been written — and it chose the most
+alarming interpretation available, one that says the address is wrong on a run
+where no address was touched. 2CD and 2E6 are the same shape at the same
+boundary: **a key that was never computed is not a key that read false.**
+
+Fixed in `tools/dmubbl.m`, guarded on `ran` — the only key that says a write
+happened — and the same guard added to the encoder block, which had it too.
+Userspace only, **no reinstall**.
+
+### What is left
+
+One named item with a working mechanism under it, and then the output chain:
+
+1. **The pixel clock — `DMUB_CMD__VBIOS` sub-type 2 (SET_PIXEL_CLOCK)** — an
+   inbox command of the kind now proved both to **execute** (2E9, two boots)
+   and to **answer** (2EB).
+2. Link training over AUX2 — driver-side (zero `dmub` references in
+   `link_dp_training*.c`), over the channel 2BB and 2BD proved end to end.
+3. `enc31_map_stream_to_link` (`link_hwss_dio.c:63`), still not located.
+4. A second OTG and HUBP, and a second `IOFramebuffer` —
+   `getDisplayModeCount()` has returned 1 since 2sl.
+
+### Also in this commit: docs/RULES.md trimmed, for the third time
+
+The reference card had reached **221 KB (~55 000 tokens), loaded on every
+turn** — milestone narrative again, which its own header forbids in capitals
+having already happened twice. Trimmed to **30 KB**. Tag coverage was verified
+in this journal for every milestone the card narrated before a line was cut, so
+nothing is lost: 2C2 and 2D8 were checked individually by content rather than by
+heading, since neither has a `##` heading of its own. Three things were
+*gained* in the compression — the scattered prose about break-it checks became
+**rule 48**, rule 39 grew its reverse direction (go back through the readings an
+invalidated configuration invalidated — three lines were closed on such nulls),
+and the external-display path is now stated once as a measured chain instead of
+across fourteen interleaved bullets.
