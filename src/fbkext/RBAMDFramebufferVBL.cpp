@@ -15,6 +15,7 @@
 #include "rb_hpd.h"
 #include "rb_aux.h"
 #include "rb_dpalt.h"
+#include "rb_dio.h"
 #include "rb_dpcd.h"
 #include "rb_dpdto.h"
 
@@ -248,6 +249,28 @@ void RBAMDFramebuffer::publishVBLState(void)
         /* 64 bits for the same 2B4 reason as the HPD words above. */
         snprintf(key, sizeof(key), "RBFBDpalt%uCntl6", i);
         setProperty(key, (uint64_t)dpaltWord[i], 64);
+    }
+
+    /* 2FC: the DIO encoder-type mux, one word per UNIPHY link. Published
+     * whichever way the sweep falls, raw beside the summary, for the reason
+     * that has now paid three times (2B0, 2B4, 2B9): the raw words refuted
+     * this project's own verdict each time.
+     *
+     * RBFBDioSweep IS THE CONTROL AND IS READ FIRST. Only DIFFERS proves
+     * these six words are the six registers; UNIFORM is what a reset block,
+     * a wrong address and a correctly-on-DIG mux all produce, because
+     * ENCODER_TYPE_DIG is zero (link_encoder.h:129). A reader who takes a
+     * uniform zero as "the mux is fine" has read nothing. */
+    dioSample();
+    setProperty("RBFBDioReady", dioReady);
+    setProperty("RBFBDioSweep", (uint64_t)dioSweep, 32);
+    setProperty("RBFBDioNonzero", (uint64_t)dioNonzeroMask, 32);
+    for (unsigned i = 0; i < RB_DIO_COUNT; i++) {
+        char key[24];
+        /* 64 bits for the same 2B4 sign-extension reason as every other raw
+         * word in this function. */
+        snprintf(key, sizeof(key), "RBFBDioLink%uCntl", i);
+        setProperty(key, (uint64_t)dioWord[i], 64);
     }
     /* 2EF: pipe 0's live DP pixel-clock DTO at BASE_IDX 1, with the same four
      * offsets at BASE_IDX 2 as the alias control. dtoSample() returns

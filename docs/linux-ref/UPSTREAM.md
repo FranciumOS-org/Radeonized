@@ -637,3 +637,21 @@ all four instances and asserts they differ.
 Also read, not vendored (no code follows them, they only confirmed the above):
 `dc/inc/hw/timing_generator.h` for the `program_timing` signature and
 `dc_crtc_timing`'s field names, and `dcn31_resource.c`'s pipe/OPTC counts.
+
+## 2FC — read, NOT vendored
+
+No code in this tree follows these, so they are recorded rather than copied in.
+Fetched 2026-11-07 from
+`git.kernel.org/.../torvalds/linux.git/plain/drivers/gpu/drm/amd/display/dc/`:
+
+| File | Upstream path | Used for |
+|---|---|---|
+| link_encoder.h | `inc/hw/link_encoder.h` | `enum encoder_type_select` at :129 — `ENCODER_TYPE_DIG = 0`, the whole ambiguity `rb_dio.h` is built around |
+| link_hwss_dio.c | `link/hwss/link_hwss_dio.c` | checked for a `set_dio_phy_mux` caller — **none** |
+| link_hwss_hpo_dp.c | `link/hwss/link_hwss_hpo_dp.c` | same, **none** |
+
+**The caller of `set_dio_phy_mux` was NOT found and is not claimed.** Neither
+hwss file calls it, and cgit cannot be grepped, so "who programs this mux and
+when" is open. It does not block 2FC, because 2FC only READS the register; it
+would have to be answered before anything writes it (rule 46, and the recurring
+error's "find the consumer before writing to a field").

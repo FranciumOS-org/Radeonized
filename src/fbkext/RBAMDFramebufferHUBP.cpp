@@ -316,6 +316,28 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * touches top out at 0x24b1, inside the same bound. */
     dpaltReady = (dpaltArmed || digArmed || feArmed) && dpaltFits;
 
+    /* 2FC: the DIO encoder-type mux shares dpalt's arm set, deliberately and
+     * with no new boot-arg. It is the register `-rbgpufbdig` has been missing
+     * a verdict for - DIG2's symbols reach PHY2 through this mux - so it must
+     * be live in exactly the boots that run that experiment, and a token the
+     * user has to remember alongside another is a token that will be left off
+     * (rule 34, and rule 30: the -rbgpufbdig family is already the crowded
+     * one and a new name here would be a prefix hazard).
+     *
+     * ITS OWN BOUND, AND WHAT THAT BOUND CAN AND CANNOT DO. The highest dword
+     * is 0x1f09, BELOW dpalt's 0x2ca6, so at any aperture that passed
+     * `dpaltFits` this comparison cannot fail, and a check that cannot fail
+     * is not a check (rule 48). It is here and labelled anyway for the reason
+     * 2EF gave for the DTO's: `length` is read from the live BAR at runtime
+     * and the one thing that must never happen is a dereference outside it
+     * (rule 19). It is kept OUT of `needed` for 2C0's reason - an opt-in read
+     * must never be able to refuse hubpSetup() and take the panel with it
+     * (rule 16). */
+    const uint32_t dioNeeded = kRbDmuSeg2 + rb_dio_dw_max();
+    const bool dioFits =
+        length >= ((uint64_t)dioNeeded + 1) * sizeof(uint32_t);
+    dioReady = (dpaltArmed || digArmed || feArmed) && dioFits;
+
     /* 2EF: the DP DTO's own bound, separate for the same reason 2C0 kept the
      * PHY blocks out of `needed`: an opt-in read must not be able to refuse
      * hubpSetup() and take the panel with it (rule 16).
@@ -420,6 +442,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hpdSample();
     auxSample();
     dpaltSample();
+    dioSample();
     hpdSetupMask   = hpdSinkMask;
     hpdSetupEnMask = hpdEnMask;
     hpdChanges     = 0;
@@ -846,6 +869,51 @@ void RBAMDFramebuffer::dpaltSample(void)
     dpaltEverNotDisabled |= nd;
 
     dpaltSweep = (int)rb_dpalt_sweep_verdict(dpaltWord, RB_DPALT_COUNT);
+}
+
+/* 2FC: THE DIO PER-LINK ENCODER-TYPE MUX - DIO_LINK{A..F}_CNTL.
+ *
+ * Read-only, no writer. Six words, one per UNIPHY link, each selecting which
+ * kind of encoder drives that PHY: ordinary DIG (8b/10b DP and TMDS), HDMI
+ * FRL, or DP 128b/132b. Until now this kext had never read them.
+ *
+ * WHY, after boots 459, 461 and 464. Each programmed the DTO, the raster, the
+ * DIG front end and a training pattern on DIG2, read every write back
+ * changed, and the sink still reported no clock recovery with
+ * RDPCSTX2_PHY_CNTL6 unmoved at 0x00063333. A mux pointing DIG2's link
+ * somewhere other than the DIO encoder would produce precisely that: our
+ * writes land, the readbacks agree, the symbols never reach the lane. This is
+ * where that mux lives, so it is read before anything further is built - and
+ * read on a boot that is happening anyway, which is what makes it cheap.
+ *
+ * WHAT IT CANNOT DO, AND THE EXPECTED OUTCOME IS THE UNINTERPRETABLE ONE.
+ * ENCODER_TYPE_DIG is zero (link_encoder.h:129), so a zero word is
+ * indistinguishable from an unprogrammed register, a gated aperture and a
+ * wrong address - 2zw's shape, and DPALT_DISABLE's. Our link is HBR2 8b/10b,
+ * neither FRL nor 128b/132b, so the value Linux would program for it is also
+ * zero. A NON-zero ENC_TYPE_SEL on our link is therefore the only finding
+ * available here; a uniform zero closes the line and must not be reported as
+ * a confirmation. rb_dio.h owns that judgement, which is why the hosttest
+ * owns it too, and dioSweep carries it: only DIFFERS is a control.
+ *
+ * Nothing is decided here. Every raw word is published whichever way the
+ * verdict falls.
+ */
+void RBAMDFramebuffer::dioSample(void)
+{
+    if (!dioReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_DIO_COUNT; i++) {
+        const uint32_t dw = rb_dio_dw(i);
+        /* Cannot happen for i < RB_DIO_COUNT, but dword 0 of the segment is
+         * another block entirely, so it is refused rather than trusted
+         * (rule 19). */
+        if (dw == RB_DIO_DW_INVALID) { continue; }
+        dioWord[i] = hubpRegs[kRbDmuSeg2 + dw];
+    }
+
+    dioNonzeroMask = rb_dio_nonzero_mask(dioWord, RB_DIO_COUNT);
+    dioSweep       = (int)rb_dio_sweep_verdict(dioWord, RB_DIO_COUNT);
 }
 
 /* 2EF: PIPE 0'S LIVE DP PIXEL-CLOCK DTO, AND THE SEGMENT CHECK.
