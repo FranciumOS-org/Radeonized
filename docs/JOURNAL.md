@@ -63388,3 +63388,110 @@ the same on a working pipe, so the next place to look is what feeds the DTO
 itself rather than the fields beside it. The DTO refuses a second write on a
 live pipe, so this cannot be an in-boot A/B and the pipe must be dark at the
 start.
+
+---
+
+## 2FE — boot 468: PIPE_DTO_SRC_SEL was the factor, and it was not the blocker
+
+**Boot 468** (`rbgpu-boot` 468, boottime Sat Nov 7 18:47:22 2026). Framebuffer
+**2C01EFBD**. Cable in at boot. Arm verified: all four of `-rbgpufbdto`,
+`-rbgpufbraster`, `-rbgpufbaux`, `-rbgpufbdig` present. Sink healthy before
+anything: EDID on AUX2, refusal 0, header and checksum OK, `MSI MP2412C`;
+DPCD `0x0` = `12 14 c2 81`; `0x202` = `0x00`. OTG1 dark at the start
+(`0x300`, counter 0), which this experiment requires — the DTO refuses a
+second write on a live pipe, so it cannot be an in-boot A/B.
+
+### 1. The clock, settled
+
+```
+dmubbl dto 148500 pipe=1 srcsel=0      PIXEL_RATE_CNTL 0x8000c000 -> 0x8000c090
+                                       DPDTO_ENABLE_STATUS 0 -> 1
+otgprog go 1080p60 pipe=1              OTG1_CONTROL 0x300 -> 0x00011201
+                                       H_TOTAL readback 0x897 = 2199, V_TOTAL 1124
+```
+
+Measured over 25.074 s, both counters in one periodic sample against wall
+time:
+
+```
+  OTG0 panel   3612 frames   144.05 Hz
+  OTG1 pipe 1  1504 frames    59.98 Hz      asked 60
+  implied clock at 2200 x 1125 = 148.46 MHz   asked 148.50   (0.03 % low)
+  ratio to asked = 0.9997
+```
+
+**`PIPE_DTO_SRC_SEL` was the whole 8.27x factor.** Three boots, two on each
+side of the one field:
+
+| boot | SRC_SEL | asked | measured | ratio |
+|---|---|---|---|---|
+| 464 | 1 | 60 Hz | 496.35 Hz | 8.2726 |
+| 467 | 1 | 30 Hz | 243.88 Hz | 8.1293 |
+| **468** | **0** | **60 Hz** | **59.98 Hz** | **0.9997** |
+
+A ratio of 0.9997 is not a near miss that needs interpreting, and the panel's
+own pipe has scanned at SRC_SEL 0 for 468 boots. **The 2 x 600 MHz candidate
+is dead as a mechanism** — it was never a clock source, it was this field, and
+2FB and 2FD were right to refuse to write it down (rule 18 paid off twice).
+
+**The default is now 0** (`RBAMDFramebufferHUBP.cpp:125`), and `dmubbl dto`'s
+omitted value and printed help with it. **`rb_dpdto.h`'s argument for 1 is NOT
+withdrawn and is still correct about the source**: `dcn31_program_pix_clk`
+does write 1, and rule 46 asks which file the method comes from. What that
+argument could not know is which value this chip's DTO honours. The dial stays
+both ways (rule 44). Framebuffer UUID **F004AF7C**.
+
+### 2. The chain re-run at the right clock, and the sink still sees nothing
+
+The whole point of fixing the clock was that 461 and 464 had run the chain at
+8.27x the rate the sink was told to expect, which made their `0x202` = `0x00`
+uninformative. So it was run again, this boot, at 59.98 Hz:
+
+| step | result |
+|---|---|
+| `dmubbl dig fe` | `DIG_BE_CNTL 0x20000000 -> 0x20000400`, `FE_SEL 0 -> 0x4`, applied 1 **changed 1** clean 1 |
+| `dptrain go tps=2` | `TP_SEL 0x0 -> 0x1` CHANGED, applied/clean/moved/observable all 1 |
+| **DPCD `0x202`** | **`0x00` before, `0x00` after.** Tool's own verdict 4, NO-OP |
+| `RDPCSTX2_PHY_CNTL6` | `0x00063333` — **unmoved, fourth boot** |
+
+**So the wrong clock was NOT the blocker.** It was a real defect, it is fixed,
+and the symptom did not move. That is worth as much as a positive: it retires
+the hypothesis cleanly, which three boots at the wrong clock could not do.
+
+**One new byte.** `dpcdread 0x202 4` returned `00 00 80 00`, so **DPCD `0x204`
+= `0x80`**. Against `drm_dp.h:822-829` that is `DP_LINK_STATUS_UPDATED`
+(bit 7) with `DP_INTERLANE_ALIGN_DONE` (bit 0) **clear**. The sink is saying
+its link status registers have been refreshed since last read — it is
+noticing something — while reporting no alignment and no clock recovery.
+Rule 33: that is a sticky "it changed", not a statement about now, and it is
+n=1. Recorded, not built on.
+
+### 3. The blocker, stated as sharply as the evidence allows
+
+`dpaltlook.sh`, this boot, with the cable in and the sink answering on AUX2:
+
+```
+  PHY0  0x00194444   4 MPLLs on (TX0-3), DPALT_DP4 1, ref_clk en 1 req 1
+  PHY2  0x00063333   no MPLL, no ref clock, pstate 3 3 3 3,
+                     DPALT_DISABLE asserted AND acked
+```
+
+**The digital transmitter answers every write we make and the analog PHY is
+off.** `TP_SEL`, `DIG_BE_CNTL`, the DTO and the OTG all move; PHY2 has no
+reference clock, not one enabled MPLL, and all four lanes at pstate 3. PHY0
+is the in-boot control and shows what an active PHY looks like on this chip.
+Four boots (459, 461, 464, 468) have left `0x00063333` untouched.
+
+That is the next question, and it is a different one from everything 2E2-2FE
+asked: **not "did our write land" but "what powers up an RDPCSTX lane".** The
+atom transmitter ENABLE has executed since 2E2 and does not do it.
+
+**Two cautions on that register before anyone designs the experiment.**
+`PHY_CNTL6` is the legacy fallback Linux reads only when DMCUB is absent, and
+it has disagreed with `QUERY_DP_ALT` on all five PHYs since 2EB — 2EB measured
+alt mode GRANTED on PHY2 while this register says `DPALT_DISABLE` asserted and
+acked. One of the two is wrong and which is not established. And `rb_dpalt.h`
+has **no setter** by design; Linux marks the write path "avoid if possible".
+So the first move is a verdict register that is not this one, which the
+handoff has been asking for since 2F9 and which 2FC's `DIO_LINK*_CNTL` did not
+turn out to be.

@@ -122,7 +122,20 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * what separates "never called" from "called and allowed". */
     dtoCallInst = RB_DPDTO_FIRST_FREE_PIPE;
     dtoCallPixHz = 0;
-    dtoCallSrcSel = 1u;
+    /* 2FE: 0, NOT Linux's 1, and the reason is a measurement rather than a
+     * reading of the source. Boots 464 and 467 ran this pipe with SRC_SEL 1
+     * and its raster scanned at 8.27x and 8.28x the clock asked for; boot 468
+     * ran it with SRC_SEL 0 and the rate came out 59.98 Hz against 60 asked,
+     * an implied 148.46 MHz against 148.50 - 0.03 %. Two boots on one side,
+     * one quantitatively exact boot on the other, and the panel's own pipe has
+     * scanned at SRC_SEL 0 for 468 boots.
+     *
+     * rb_dpdto.h's argument for 1 is still CORRECT ABOUT THE SOURCE and is
+     * not withdrawn: `dcn31_program_pix_clk` does write 1, and rule 46 asks
+     * which file the method comes from. What that argument could not know is
+     * which value this chip's DTO actually honours. The measurement decides,
+     * and the dial remains so the other side can be retried (rule 44). */
+    dtoCallSrcSel = 0u;
     dtoCallRefHz = 0;
     dtoCallLive = 0;
     dtoProgInst = RB_DPDTO_FIRST_FREE_PIPE;
