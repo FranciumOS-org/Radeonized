@@ -10,6 +10,7 @@ extern "C" {
 #include "rb_dmub.h"
 #include "rb_frametime.h"
 #include "rb_dpdto.h"
+#include "rb_otgprog.h"
 #include "rb_aux.h"
 #include "rb_dpcd.h"
 #include "rb_dptx.h"
@@ -350,6 +351,27 @@ public:
     int dtoProgVerdict=RB_DPDTO_PROG_NOT_RUN;
     void dtoPublish(void) {}
     uint32_t dtoProgram(uint32_t, uint32_t, int) { return RB_DPDTO_W_OK; }
+    /* 2FA: the second raster, stubbed for the same reason - otgSample(),
+     * otgPublish() and otgProgram() live in RBAMDFramebufferHUBP.cpp, which
+     * is NOT part of the hosttest, but VBL.cpp calls all three. The verdict
+     * starts at NOT_RUN and NOT at 0, which is SCANNING. */
+    bool otgArmed=false, otgApertureOk=false, otgReady=false;
+    uint32_t otgControl[RB_OTGPROG_COUNT]={0};
+    uint32_t otgFrames[RB_OTGPROG_COUNT]={0};
+    uint32_t otgCallInst=1, otgCallRefreshHz=0, otgCallModeHz=0;
+    uint32_t otgCallDtoHz=0, otgCallLive=0;
+    uint32_t otgCallRefuse=RB_OTGPROG_W_OK;
+    uint32_t otgProgInst=1, otgProgModeHz=0, otgProgWrites=0;
+    uint32_t otgProgHTotal=0, otgProgVTotal=0, otgProgVFrontPorch=0;
+    uint32_t otgBefore=0, otgAfter=0;
+    uint32_t otgFramesBefore=0, otgFramesAfter=0;
+    uint32_t otgHTotalAfter=0, otgVTotalAfter=0;
+    uint32_t otgProgCalls=0, otgProgRan=0;
+    int otgProgVerdict=RB_OTGPROG_V_NOT_RUN;
+    void otgSample(void) {}
+    void otgPublish(void) {}
+    uint32_t otgProgram(uint32_t, uint32_t, const struct rb_otgprog_mode *)
+    { return RB_OTGPROG_W_OK; }
     /* 2BA, mirrored - the hosttest compiles RBAMDFramebufferVBL.cpp. */
     bool auxDpcdArmed=false, auxDpcdSuspect=false;
     uint64_t auxDpcdAttempts=0, auxDpcdOks=0;

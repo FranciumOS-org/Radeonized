@@ -86,6 +86,36 @@ bool RBAMDFramebuffer::hubpSetup(void)
     dtoRefHz = 0;
     dtoBaseVerdict = RB_DPDTO_BASE_NOT_SAMPLED;
     dtoPipeVerdict = RB_DPDTO_PIPE_NOT_SAMPLED;
+    /* 2FA: the second raster. The verdict starts at NOT_RUN for 2F1's
+     * reason - a boot that never programmed anything must not read as one
+     * that did and found nothing (rule 14). */
+    otgReady = false;
+    otgApertureOk = false;
+    for (uint32_t i = 0; i < RB_OTGPROG_COUNT; i++) {
+        otgControl[i] = 0;
+        otgFrames[i] = 0;
+    }
+    otgCallInst = 1u;
+    otgCallRefreshHz = 0;
+    otgCallModeHz = 0;
+    otgCallDtoHz = 0;
+    otgCallLive = 0;
+    otgCallRefuse = RB_OTGPROG_W_OK;
+    otgProgInst = 1u;
+    otgProgModeHz = 0;
+    otgProgWrites = 0;
+    otgProgHTotal = 0;
+    otgProgVTotal = 0;
+    otgProgVFrontPorch = 0;
+    otgBefore = 0;
+    otgAfter = 0;
+    otgFramesBefore = 0;
+    otgFramesAfter = 0;
+    otgHTotalAfter = 0;
+    otgVTotalAfter = 0;
+    otgProgCalls = 0;
+    otgProgRan = 0;
+    otgProgVerdict = RB_OTGPROG_V_NOT_RUN;
     /* 2F1: the write side. The verdict starts at NOT_RUN so a boot that never
      * programmed anything cannot be read as one that did and found nothing
      * (rule 14), and the refusal starts at OK only because dtoProgCalls 0 is
@@ -306,6 +336,18 @@ bool RBAMDFramebuffer::hubpSetup(void)
         const uint32_t hi = dtoNeeded > aliasNeeded ? dtoNeeded : aliasNeeded;
         dtoReady = dtoArmed &&
                    length >= ((uint64_t)hi + 1) * sizeof(uint32_t);
+
+        /* 2FA: the same question for the OTG block, decided HERE because
+         * `length` is the live BAR size and is only in scope in this
+         * function. The highest dword the raster writes touch is
+         * OTG3_FRAME_COUNT; VTG3_CONTROL and ODM3 are both lower. Like the
+         * DTO's, this is an assertion about the mapping that cannot fail at
+         * today's BAR5 of 512 KB, written out so a later BAR change is not
+         * silent. */
+        const uint32_t otgNeeded =
+            RB_OTGPROG_DW_FRAME_COUNT(RB_OTGPROG_COUNT - 1u);
+        otgApertureOk =
+            length >= ((uint64_t)otgNeeded + 1) * sizeof(uint32_t);
     }
 
     /* Gate 1: are we addressing DCN at all? 2oq's signature, now decided by
@@ -1060,4 +1102,175 @@ uint32_t RBAMDFramebuffer::dtoProgram(uint32_t inst, uint32_t pixHz, int srcSel)
     dtoProgVerdict = rb_dpdto_prog_verdict(dtoRateBefore, dtoRateAfter);
     dtoProgRan++;
     return dtoProgRefuse = RB_DPDTO_W_OK;
+}
+
+
+/* 2FA: the OTG sample. Four instances' OTGn_CONTROL and OTGn_FRAME_COUNT,
+ * read together so the control word and the counter a verdict compares come
+ * from the SAME window (rule 44's shape: a control measured in a different
+ * window is not one).
+ *
+ * All four instances every time, including the panel's, because the panel is
+ * the positive control for what a scanning OTG looks like: OTG0_CONTROL
+ * reads 0x00011201 with OTG_MASTER_EN set and its FRAME_COUNT advances at
+ * 143.83 Hz. A dark pipe reading 0x300 beside it is then a real 0 and not an
+ * instrument that is off (2B8's design).
+ *
+ * Read-only. The writes are in otgProgram(). */
+void RBAMDFramebuffer::otgSample(void)
+{
+    if (!hubpRegs) { return; }
+
+    /* The aperture was decided against the live BAR size in the setup
+     * function, where `length` is in scope. Every offset here is BASE_IDX 2,
+     * the base this kext maps, and the highest dword touched is
+     * OTG3_FRAME_COUNT; VTG3 and ODM3 are both lower. */
+    if (!otgApertureOk) { return; }
+
+    for (uint32_t i = 0; i < RB_OTGPROG_COUNT; i++) {
+        otgControl[i] = hubpRegs[RB_OTGPROG_DW_CONTROL(i)];
+        otgFrames[i]  = hubpRegs[RB_OTGPROG_DW_FRAME_COUNT(i)];
+    }
+    otgReady = true;
+}
+
+/* 2FA: program a second raster and start it.
+ *
+ * The call/prog split is 2F2's, for 2F2's measured reason: a second call in
+ * one boot is REFUSED by the already-scanning guard, and a single field set
+ * would then republish this call's success as NOT RUN.
+ *
+ * The verdict is OTGn_FRAME_COUNT either side of the writes - a monotonic
+ * hardware counter. OTG_MASTER_EN reading back 1 is NOT the verdict; it is
+ * our own bit coming back, which is rule 20's defect. */
+uint32_t RBAMDFramebuffer::otgProgram(uint32_t inst, uint32_t refreshHz,
+                                      const struct rb_otgprog_mode *mode)
+{
+    struct rb_otgprog_write w[RB_OTGPROG_MAX_WRITES];
+    uint32_t n = 0;
+
+    otgProgCalls++;
+
+    otgCallInst = inst;
+    otgCallRefreshHz = refreshHz;
+    otgCallModeHz = 0;
+    otgCallDtoHz = 0;
+    otgCallLive = 0;
+    otgCallRefuse = RB_OTGPROG_W_OK;
+
+    const int haveRegs = (blRegs != nullptr) && (hubpRegs != nullptr);
+
+    /* Re-sample both blocks now, so the OTG word and the DTO PHASE the gate
+     * compares are from this call and not from whenever the periodic publish
+     * last ran (rule 31: what you read from ioreg is stale by design). */
+    if (haveRegs) { otgSample(); dtoSample(); }
+
+    /* Clamped only so the reads below cannot index out of range before the
+     * gate rejects the instance itself - feConnect()'s and dtoProgram()'s
+     * shape, and the refusal still names the pipe asked for. */
+    const uint32_t safe = (inst < RB_OTGPROG_COUNT) ? inst : 0u;
+
+    otgCallLive = (haveRegs && otgReady) ? otgControl[safe] : 0u;
+    /* The DTO's PHASE on the SAME pipe. 2F0 established PHASE is the clock
+     * ASKED for rather than one achieved, which is the right thing to
+     * compare a requested raster against: both sides are requests. */
+    otgCallDtoHz = (haveRegs && dtoReady)
+                   ? dtoWord[safe][RB_DPDTO_REG_PHASE] : 0u;
+    otgCallModeHz = mode ? rb_otgprog_clock_hz(mode, refreshHz) : 0u;
+
+    const uint32_t why = rb_otgprog_write_refuse(inst, mode, refreshHz,
+                                                 otgCallLive, otgCallDtoHz,
+                                                 otgArmed ? 1 : 0,
+                                                 (haveRegs && otgReady) ? 1 : 0);
+    /* The only state a refusal leaves: the otgCall* set and the monotonic
+     * counter (rule 14 - a refusal publishes what it refused, by code). */
+    if (why != RB_OTGPROG_W_OK) { return otgCallRefuse = why; }
+
+    if (rb_otgprog_build(inst, mode, w, RB_OTGPROG_MAX_WRITES, &n)
+        != RB_OTGPROG_OK) {
+        /* Unreachable: the gate built the same list to decide. Kept because
+         * an unreachable path that returns silently and one that says which
+         * code it took are different facts (rule 14). */
+        return otgCallRefuse = RB_OTGPROG_W_MODE;
+    }
+
+    /* Past the gate, so this call owns the run record. */
+    otgProgInst = inst;
+    otgProgModeHz = otgCallModeHz;
+    otgProgHTotal = mode->h_total;
+    otgProgVTotal = mode->v_total;
+    otgProgVFrontPorch = rb_otgprog_v_front_porch(mode);
+    otgBefore = otgCallLive;
+    otgFramesBefore = otgFrames[safe];
+
+    /* Linux's order, unrearranged. The two VTG0_ENABLE writes are 0 then 1
+     * and swapping them leaves the generator disabled, which is why the list
+     * is replayed in index order and never sorted or de-duplicated. */
+    for (uint32_t i = 0; i < n; i++) {
+        if (w[i].whole) {
+            blRegs[w[i].dw] = w[i].value;
+        } else {
+            const uint32_t cur = hubpRegs[w[i].dw];
+            blRegs[w[i].dw] = (cur & ~w[i].mask) | w[i].value;
+        }
+    }
+    otgProgWrites = n;
+
+    otgAfter = hubpRegs[RB_OTGPROG_DW_CONTROL(inst)];
+    otgHTotalAfter = hubpRegs[RB_OTGPROG_DW_H_TOTAL(inst)];
+    otgVTotalAfter = hubpRegs[RB_OTGPROG_DW_V_TOTAL(inst)];
+
+    /* The counter, read AFTER the enable. One read is enough for a verdict
+     * only because the caller polls otgProgCalls and reads the published
+     * OTGn_FRAME_COUNT again from the periodic sample - a single pair taken
+     * microseconds apart would report STILL on a raster that is fine, since
+     * 1080p60 is one frame every 16.7 ms. So STILL here is NOT a failure
+     * verdict, and the tool says so. */
+    otgFramesAfter = hubpRegs[RB_OTGPROG_DW_FRAME_COUNT(inst)];
+
+    otgProgVerdict = rb_otgprog_verdict(otgAfter, otgFramesBefore,
+                                        otgFramesAfter);
+    otgProgRan++;
+    return otgCallRefuse = RB_OTGPROG_W_OK;
+}
+
+
+/* 2FA: the raster's published record. Everything 64-bit for 2B4's
+ * sign-extension reason. Called from the periodic publish and again right
+ * after a dial write, so a tool that polls `RBFBOtgProgCalls` past its
+ * pre-set value sees this call's own numbers rather than a throttled
+ * snapshot (rule 31). */
+void RBAMDFramebuffer::otgPublish(void)
+{
+    setProperty("RBFBOtgRArmed", otgArmed);
+    setProperty("RBFBOtgRReady", otgReady);
+    setProperty("RBFBOtgRAperture", otgApertureOk);
+    for (uint32_t i = 0; i < RB_OTGPROG_COUNT; i++) {
+        char k[32];
+        snprintf(k, sizeof(k), "RBFBOtgR%uCtl", (unsigned)i);
+        setProperty(k, (uint64_t)otgControl[i], 64);
+        snprintf(k, sizeof(k), "RBFBOtgR%uFrames", (unsigned)i);
+        setProperty(k, (uint64_t)otgFrames[i], 64);
+    }
+    setProperty("RBFBOtgRCallInst", (uint64_t)otgCallInst, 32);
+    setProperty("RBFBOtgRCallRefreshHz", (uint64_t)otgCallRefreshHz, 64);
+    setProperty("RBFBOtgRCallModeHz", (uint64_t)otgCallModeHz, 64);
+    setProperty("RBFBOtgRCallDtoHz", (uint64_t)otgCallDtoHz, 64);
+    setProperty("RBFBOtgRCallLive", (uint64_t)otgCallLive, 64);
+    setProperty("RBFBOtgRCallRefuse", (uint64_t)otgCallRefuse, 32);
+    setProperty("RBFBOtgRProgInst", (uint64_t)otgProgInst, 32);
+    setProperty("RBFBOtgRProgModeHz", (uint64_t)otgProgModeHz, 64);
+    setProperty("RBFBOtgRProgWrites", (uint64_t)otgProgWrites, 32);
+    setProperty("RBFBOtgRProgHTotal", (uint64_t)otgProgHTotal, 32);
+    setProperty("RBFBOtgRProgVTotal", (uint64_t)otgProgVTotal, 32);
+    setProperty("RBFBOtgRProgVFront", (uint64_t)otgProgVFrontPorch, 32);
+    setProperty("RBFBOtgRBefore", (uint64_t)otgBefore, 64);
+    setProperty("RBFBOtgRAfter", (uint64_t)otgAfter, 64);
+    setProperty("RBFBOtgRFramesBefore", (uint64_t)otgFramesBefore, 64);
+    setProperty("RBFBOtgRFramesAfter", (uint64_t)otgFramesAfter, 64);
+    setProperty("RBFBOtgRHTotalAfter", (uint64_t)otgHTotalAfter, 64);
+    setProperty("RBFBOtgRVTotalAfter", (uint64_t)otgVTotalAfter, 64);
+    setProperty("RBFBOtgRProgCalls", (uint64_t)otgProgCalls, 32);
+    setProperty("RBFBOtgRProgRan", (uint64_t)otgProgRan, 32);
+    setProperty("RBFBOtgRProgVerdict", (uint64_t)(int64_t)otgProgVerdict, 64);
 }

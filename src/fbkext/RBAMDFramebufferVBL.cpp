@@ -263,6 +263,7 @@ void RBAMDFramebuffer::publishVBLState(void)
      * Each of those three outcomes was written down before the boot (2EF),
      * so whichever comes back was predicted rather than explained. */
     dtoSample();
+    otgSample();
     setProperty("RBFBDtoArmed", dtoArmed);
     setProperty("RBFBDtoReady", dtoReady);
     setProperty("RBFBDtoSeg1", (uint64_t)RB_DPDTO_SEG1, 32);
@@ -308,6 +309,7 @@ void RBAMDFramebuffer::publishVBLState(void)
      * own exit path cannot drift apart - 2E3 is what a dial whose state is
      * only published periodically costs (rule 31, and the fifth instance). */
     dtoPublish();
+    otgPublish();
     /* 2B8: the AUX engines and the LIVE OTG words. */
     auxSample();
     setProperty("RBFBAuxEn", (uint64_t)auxEnMask, 32);
@@ -1402,6 +1404,90 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
             dmubPublish();                       /* 2E3 */
             return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
         }
+    }
+
+    /* 2FA: PROGRAM A SECOND RASTER AND START IT - optc1_program_timing plus
+     * optc31_enable_crtc on the pipe whose DP DTO is already running.
+     *
+     * ALL THE KEYS IN ONE CALL, and `RBFBOtgRGo` is what triggers it, so an
+     * armed boot nobody has run the tool on has written nothing - 2zn's
+     * shape. The mode is REQUIRED in full rather than defaulted: a raster is
+     * eight numbers and a default for any of them would be a timing nobody
+     * chose, on a pipe whose clock is live. The gate then refuses unless the
+     * mode multiplies out to that pipe's DP DTO PHASE.
+     *
+     * Rule 34: every field is read BEFORE the trigger, so the whole mode is
+     * in place before the write it governs. A partial mode is refused by the
+     * builder rather than completed from somewhere. */
+    {
+        struct rb_otgprog_mode mo;
+        bzero(&mo, sizeof(mo));
+        uint32_t refreshHz = 0;
+        bool haveAll = true;
+        struct { const char *k; uint32_t *v; } fields[] = {
+            { "RBFBOtgRHActive",   &mo.h_addressable },
+            { "RBFBOtgRHFront",    &mo.h_front_porch },
+            { "RBFBOtgRHSync",     &mo.h_sync_width },
+            { "RBFBOtgRHTotal",    &mo.h_total },
+            { "RBFBOtgRVActive",   &mo.v_addressable },
+            { "RBFBOtgRVFront",    &mo.v_front_porch },
+            { "RBFBOtgRVSync",     &mo.v_sync_width },
+            { "RBFBOtgRVTotal",    &mo.v_total },
+            { "RBFBOtgRRefreshHz", &refreshHz },
+        };
+        for (unsigned f = 0; f < sizeof(fields) / sizeof(fields[0]); f++) {
+            OSNumber *num = OSDynamicCast(OSNumber,
+                                          dict->getObject(fields[f].k));
+            if (num) { *fields[f].v = num->unsigned32BitValue(); }
+            else { haveAll = false; }
+        }
+        /* The sync polarities default to POSITIVE, which is what 2BD read in
+         * this sink's own EDID detailed timing and what 1080p60 is in every
+         * standard. A default here is safe in a way a raster default is not:
+         * it programs one bit, the sink reports a polarity mismatch as no
+         * lock rather than as a wrong picture, and the value is published so
+         * a reader sees what was used. */
+        mo.h_sync_positive = 1u;
+        mo.v_sync_positive = 1u;
+        OSNumber *hp = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBOtgRHSyncPos"));
+        if (hp) { mo.h_sync_positive = hp->unsigned32BitValue() ? 1u : 0u; }
+        OSNumber *vp = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBOtgRVSyncPos"));
+        if (vp) { mo.v_sync_positive = vp->unsigned32BitValue() ? 1u : 0u; }
+        OSNumber *pipe = OSDynamicCast(OSNumber,
+                                       dict->getObject("RBFBOtgRPipe"));
+        if (pipe) { otgCallInst = pipe->unsigned32BitValue(); }
+
+        OSNumber *go = OSDynamicCast(OSNumber, dict->getObject("RBFBOtgRGo"));
+        if (go) {
+            if (!haveAll) {
+                /* A trigger with an incomplete mode is a REFUSAL with its own
+                 * code, not a silent return and not a completed mode (rule
+                 * 14). RB_OTGPROG_W_MODE is the same code the builder would
+                 * give, which is the honest one: the mode is what is wrong. */
+                otgProgCalls++;
+                otgCallRefuse = RB_OTGPROG_W_MODE;
+                LOG("RBFBOtgRGo: incomplete mode, refused %u",
+                    otgCallRefuse);
+                otgPublish();
+                return kIOReturnNotPermitted;
+            }
+            const uint32_t rc = otgProgram(otgCallInst, refreshHz, &mo);
+            LOG("RBFBOtgRGo pipe %u %ux%u total %ux%u refresh %u mode %u Hz "
+                "dto %u live %#x -> refuse %u; last run: ctl %#x->%#x, "
+                "frames %u->%u, writes %u, verdict %d, ran %u",
+                otgCallInst, mo.h_addressable, mo.v_addressable,
+                mo.h_total, mo.v_total, refreshHz, otgCallModeHz,
+                otgCallDtoHz, otgCallLive, rc,
+                otgBefore, otgAfter, otgFramesBefore, otgFramesAfter,
+                otgProgWrites, otgProgVerdict, otgProgRan);
+            otgPublish();
+            return rc == RB_OTGPROG_W_OK ? kIOReturnSuccess
+                                         : kIOReturnNotPermitted;
+        }
+        /* A mode or pipe named with no trigger is the dial being set up, and
+         * the pipe is remembered for the call that follows. */
     }
 
     /* 2F1: PROGRAM A DARK PIPE'S DP PIXEL-CLOCK DTO - the three writes of
