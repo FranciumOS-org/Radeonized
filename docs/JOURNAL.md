@@ -61213,3 +61213,133 @@ not a reference clock. The three writes for the external display's own pipe
 are a later milestone and are deliberately not built.
 
 Framebuffer UUID `6B64DDD5-19B3-368B-8F26-A43326F2050D`.
+
+## 2F0 — BASE_IDX 1 CONFIRMED on hardware (boot 452): `dprefclk` is **600 MHz**, the panel's DTO says **343.000000 MHz** exactly, and PHASE is NOT a readback of the achieved clock
+
+Boot **452** (`rbgpu-boot` read first, rule 8). Framebuffer UUID
+`6B64DDD5-19B3-368B-8F26-A43326F2050D` — built and **inside the live
+collection**, checked there and not in `/Library/Extensions` (rule 15).
+`-rbgpufbdto` present in `boot-args`, and `-rbgpufbmodes` is in this machine's
+standing args, which is why the reference came from the measured path.
+
+```
+RBFBDtoBase = 0        CONFIRMED          RBFBDtoSeg1 = 192 (0xc0)
+RBFBDtoPipe = 0        the DTO drives pipe 0
+RBFBDtoRefSrc = 1      measured on an OTG0_FRAME_COUNT edge
+RBFBDtoExpectedHz = 342 287 571   (== RBFBModeClkHz, 143.959 Hz x 2106 x 1129)
+
+           Rate          Phase        Modulo      PhyPll
+pipe 0   0x80000090   343 000 000   600 000 000      0
+pipe 1   0x8000c000             0             0      0
+pipe 2   0x8000c000             0             0      0
+pipe 3   0x8000c000             0             0      0
+
+alias (same four offsets at BASE_IDX 2):  0, 0x10000000, 0, 0x10000000
+```
+
+### BASE_IDX 1 = 0xc0 is established on the chip, and the alias control earned its place
+
+The alias words are `DOMAIN0_PG_CONFIG`, `DOMAIN0_PG_STATUS`,
+`DOMAIN1_PG_CONFIG`, `DOMAIN1_PG_STATUS` — and the two status registers read
+**`0x10000000`, exactly the value 2DE measured for them.** So the collision is
+not hypothetical: at the base this kext has always used, those four offsets are
+the power-gating block, verbatim; at 0xc0 they are a DTO. Not aliased, and the
+proof came from the same sample rather than from a previous milestone's numbers.
+
+**The impostor named in advance showed up.** `rb_dpdto.h`'s tolerance comment
+and the hosttest both wrote down `0x10000000` = 268 MHz, 21 % from the panel's
+clock, as the plausible-looking word a PHASE read at the wrong base would
+return. It is sitting in `RBFBDtoAlias1`. Predicted, then observed.
+
+**Three dark pipes are a control inside one sample.** Pipes 1-3 are
+byte-identical to each other (`0x8000c000`: `OTG_DIO_FIFO_ERROR` both bits set,
+no `DP_DTO_ENABLE`, no clock) and differ from pipe 0 exactly where the live
+pipe should differ. That is better than the alias control alone: a wrong base
+would have to produce one distinguished word and three identical others, at the
+one offset group whose live pipe is known from outside this block.
+
+### `dprefclk` = 600 000 000 Hz
+
+`MODULO[0]`, read from the chip. Linux takes this from
+`clk_mgr->dprefclk_khz`, which comes from the SMU, and **this project had never
+located it** — 2EE recorded it as a constant we would otherwise have had to
+invent. It is exactly round.
+
+### `RBFBDtoPipe` = 0: the DTO drives the panel, which confirms 2EE's source read
+
+`DP_DTO0_ENABLE` set **and** `DPDTO0_ENABLE_STATUS` agreeing — the bit asked
+for and the hardware's own answer, published separately for 2E6's reason. The
+panel's pixel clock genuinely comes from this DTO, which is independent
+confirmation of 2EE's reading that `dcn31_program_pix_clk` takes the DP branch
+and programs these registers itself. The VBIOS `set_pixel_clock` command is not
+in this path on this chip, as measured, not as argued.
+
+### `PIPE0_DTO_SRC_SEL` is **0**, where Linux writes 1
+
+`dcn31_program_pix_clk`'s DP branch is
+`REG_UPDATE_2(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1, PIPE0_DTO_SRC_SEL, 1)`
+— **both** to 1. The firmware set the enable and left `SRC_SEL` at 0, and the
+panel has been scanning out for 452 boots. So 0 is **sufficient on this chip**,
+by existence proof. Recorded as a divergence to decide rather than resolved:
+when pipe 1 is programmed, the firmware's working configuration and the
+driver's differ on exactly one bit, and the question of which to copy is now a
+question with evidence on one side.
+
+### The arithmetic passed at 0.208 %, and the judgement call made before the data is what saved it
+
+PHASE is **343 000 000 Hz exactly** — `actual_pix_clk_100hz * 100` with
+`actual_pix_clk_100hz` = 3 430 000, so the firmware asked for a round
+343.00 MHz. The measured raster wants 342 287 571 Hz. The difference is
+**712 429 Hz = 0.208 %**, against a 0.5 % window: CONFIRMED, but having used
+42 % of the window, which is stated rather than rounded to "it matched".
+
+**A 0.01 % tolerance would have reported PHASE_WRONG and this milestone would
+have concluded the base was wrong.** `rb_dpdto.h`'s comment argued the window
+before any data existed: "the quantity being excluded is a DIFFERENT REGISTER,
+not a slightly different clock… a tolerance tight enough to reject a rounding
+difference would buy nothing and could refuse a correct base." That reasoning
+is now paid for.
+
+### Why the 0.208 % gap is NOT what it first looks like, and what is ruled out
+
+Three refresh figures for one panel:
+
+| from | refresh |
+|---|---|
+| PHASE / (H_TOTAL x V_TOTAL) | 144.2586 Hz |
+| measured this boot (`RBFBModeBaseMhz`) | 143.9590 Hz |
+| the registry's 16.16 constant | 143.8330 Hz |
+
+**DRR extension is ruled out, by measurement.** The obvious absorber was a
+longer effective frame: 343.000 MHz reconciles with 143.959 Hz at V_TOTAL
+1131.35, about 2.4 lines more than the register says. But `RBFBOtgVTotal` is
+1129 and **`V_TOTAL_MIN`, `V_TOTAL_MAX`, `V_TOTAL_MID` and `V_TOTAL_CONTROL`
+are all 0** — nothing is extending anything, and `RBFBModeCurLines` agrees at
+1129. That explanation is dead rather than untested.
+
+What is left is a hypothesis and is labelled one, because two numbers are not a
+mechanism (rule 17): PHASE/MODULO is a **ratio**, and the absolute output
+depends on the true reference. `MODULO` is what the *driver* writes as its
+nominal `dprefclk_khz * 1000`; if the real DPREFCLK is ~598.75 MHz rather than
+600.000, every number here reconciles. **Nothing in this boot measures the
+reference independently**, so that stays a hypothesis.
+
+**The actionable conclusion, which does not depend on resolving it:** PHASE is
+the clock the firmware *requested*, not a readback of what the hardware
+achieved. So PHASE must **not** be used as the verification instrument for the
+pipe-1 write — a readback agreeing with what we wrote would be rule 20's
+defect, and here we know in advance it would agree while the achieved clock
+differs by ~0.2 %.
+
+And the write itself is unaffected, which is the useful part: because it is a
+ratio, pipe 1 gets `PHASE` = the sink's own pixel clock and `MODULO` =
+**600 000 000, the same value the firmware used for the panel** — exactly what
+Linux does, which uses one `dp_dto_ref_khz` for every pipe. The ratio will land
+as accurately as the panel's does, and the true reference never has to be known.
+
+### What this does not establish
+
+Nothing was written. `DIO_FIFO_ERROR` reads 3 on all three dark pipes and 0 on
+pipe 0; it has not been checked against a pipe that is being brought up, so it
+is not yet usable as a verdict register. The ~0.2 % reference question is open
+and is not on the critical path.
