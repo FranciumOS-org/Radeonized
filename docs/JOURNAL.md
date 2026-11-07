@@ -60979,3 +60979,102 @@ heading, since neither has a `##` heading of its own. Three things were
 invalidated configuration invalidated — three lines were closed on such nulls),
 and the external-display path is now stated once as a measured chain instead of
 across fourteen interleaved bullets.
+
+---
+
+## 2EE — the pixel clock is NOT the VBIOS command on a DP link: it is three register writes of OURS (source read, nothing built)
+
+**Rule 46, caught before a line was written.** 2BE, 2E6, 2E8, 2E9 and 2ED all
+named the remaining step as "the pixel clock, `DMUB_CMD__VBIOS` sub-type 2
+(SET_PIXEL_CLOCK)". The command is real, the route to it is real, and **it is
+the HDMI/DVI branch.** On a DisplayPort link the driver programs the DTO itself.
+
+### The chain, read not recalled
+
+`dcn31_resource.c:2205` creates the DP clock source with
+**`dcn31_clock_source_create(..., CLOCK_SOURCE_ID_DP_DTO, ...)`**, which is
+`dcn31_clk_src_construct` → **`dcn31_clk_src_funcs.program_pix_clk =
+dcn31_program_pix_clk`** (`dce_clock_source.c:1409-1411`). The PLLs 0-4 are
+created by `dcn30_clock_source_create` → `dcn3_program_pix_clk`, a different
+function — so picking the right one matters and `dce112_program_pix_clk`, which
+calls `set_pixel_clock` unconditionally, is **not** this chip's DP path.
+
+`dcn31_program_pix_clk` branches on the signal type, with Linux's own comment:
+
+```c
+// For these signal types Driver to program DP_DTO without calling VBIOS Command table
+if (dc_is_dp_signal(pix_clk_params->signal_type) || dc_is_virtual_signal(...)) {
+        REG_WRITE(PHASE[inst],  pll_settings->actual_pix_clk_100hz * 100);
+        REG_WRITE(MODULO[inst], dp_dto_ref_khz * 1000);
+        REG_UPDATE_2(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1,
+                                            PIPE0_DTO_SRC_SEL, 1);
+} else {
+        ... bp->funcs->set_pixel_clock(...)   /* the DMUB VBIOS command */
+}
+```
+
+`set_pixel_clock` is reached **only in the `else`**. Our port is DP alt mode,
+established three independent ways — 2BB read native-AUX DPCD (not DPIA/USB4
+tunnelling, and 2BE found no USB4 router), 2E7 read `DP_CONFIG` = 2 lanes on
+DIG2, 2EB got `is_usb` 1 with alt mode **granted** on phy 2 — so it takes the
+DP branch. **The pixel clock is ours to write, like the FE connect that 2ED
+just verified, and not an inbox command whose execution has to be inferred.**
+
+This is 2zl's shape in a new place: the command exists, the sub-type is right,
+the layout is derivable (`set_pixel_clock_parameter_v1_7`, 16 bytes, and
+`set_pixel_clock_fallback` routes to v7 over DMUB exactly as the transmitter
+did, so 2E2's zero `setpixelclock` ROM entry would not have blocked it) — and
+this chip's `dc` would never call it for this signal. **Four milestones carried
+the wrong next step, written as a bare sub-type number with the calling
+condition never read.**
+
+### The registers, and the trap that is sitting right beside them
+
+From `dce_clock_source.h`'s `CS_COMMON_REG_LIST_DCN3_0` (which
+`dcn31_resource.c:212` uses): `SRII(PHASE, DP_DTO, i)`,
+`SRII(MODULO, DP_DTO, i)`, `SRII(PIXEL_RATE_CNTL, OTG, i)`. From our vendored
+`dcn_3_1_2_offset.h`, **all BASE_IDX 1**, stride **4**:
+
+| register | offset | per-instance |
+|---|---|---|
+| `regOTG0_PIXEL_RATE_CNTL` | **0x0080** | +4*i |
+| `regDP_DTO0_PHASE` | **0x0081** | +4*i |
+| `regDP_DTO0_MODULO` | **0x0082** | +4*i |
+| `regOTG0_PHYPLL_PIXEL_RATE_CNTL` | 0x0083 | +4*i |
+
+Masks (`dcn_3_1_2_sh_mask.h`): `DP_DTO0_ENABLE` bit 4 (`0x10`),
+`PIPE0_DTO_SRC_SEL` bit 12 (`0x1000`), `OTG0_PIXEL_RATE_SOURCE` bits 1:0.
+
+**BASE_IDX 1 is a base this kext has never touched** — HUBP, OTG, HPD, AUX,
+DIG, the encoder block and the DOMAIN block are all BASE_IDX **2** at the one
+known DMU segment `0x34c0`, which is all the framebuffer holds.
+
+**And the collision is already in the header: `regDOMAIN1_PG_STATUS` is ALSO
+0x0083, and the DOMAIN block starts at 0x0080 too, BASE_IDX 2.** So reading
+0x0080-0x0083 at the base we *do* have does not fault and does not read as
+garbage — it reads the power-gating block, which 2DE measured as
+**`0x10000000`, non-zero and perfectly plausible as a `PIXEL_RATE_CNTL`**.
+That is 2DD's trap with a concrete worked example twelve offsets away, and
+**a WRITE there would hit the power gating of the pipe scanning the panel.**
+
+### So the address must be established by the chip, not by a constant
+
+The planned instrument, before any write: **read pipe 0's live DTO.** OTG0 is a
+DP/eDP signal the firmware brought up, so its DTO is programmed, and
+`PHASE[0] / MODULO[0]` is the pixel-clock-to-reference ratio. The panel's pixel
+clock is known four ways (~341 987 984 Hz measured, 342 011 761 Hz derived from
+boot 255's own raster), so a candidate base is **correct only if pipe 0's own
+registers reproduce it** — the arithmetic is the address check, and a wrong
+base cannot pass it. The same read yields `dp_dto_ref_khz` from the chip
+instead of a written-down constant (`clk_mgr->dprefclk_khz` comes from SMU in
+Linux and this project has never located it — rule 17's mirror).
+
+`rb_discovery.c` already captures every segment (`ip->base[base_idx]`, with
+`rb_disc_reg()` adding `base[base_idx] + reg`), so the honest source for
+BASE_IDX 1 is the DMU IP's own `base[1]` — handed from the plugin over 2zd's
+`callPlatformFunction` channel as 2CA/2CB do for the GPU name, with `base[2]`
+coming out as `0x34c0` as the **built-in control** that the handover works.
+The framebuffer runs no discovery and must not grow a second guessed constant.
+
+**Nothing is built and no boot has read anything.** What this milestone changes
+is the next step's identity, which was wrong in five consecutive entries.
