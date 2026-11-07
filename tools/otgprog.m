@@ -78,6 +78,10 @@ static const char *refusal(long c)
                "close)";
     case RB_OTGPROG_W_CLOCKMISS:
         return "the mode does not multiply out to that pipe's DTO clock";
+    case RB_OTGPROG_W_NOPANEL:
+        return "the panel's own OTG0 is not scanning, so the kext is NOT "
+               "addressing the OTG block - nothing read from it means "
+               "anything, and no write will land where it is aimed";
     default:                     return "unknown";
     }
 }
@@ -120,6 +124,29 @@ static void survey(io_service_t fb)
     printf("    (0x300 is a dark pipe. The panel's 0x00011201 with its\n"
            "     counter advancing is what a scanning OTG looks like, so a\n"
            "     0 beside it is a real 0 and not an instrument that is off.)\n");
+
+    /* 2FA, boot 462: this is the gate's own input, and the first armed run
+     * failed exactly here - all four generators read 0x00000000 because the
+     * kext indexed its BAR5 map with the raw BASE_IDX 2 dword and never
+     * added DMU segment 2's 0x34c0. Printed as a verdict rather than left
+     * for a reader to notice in the table above (rule 45). */
+    {
+        int havePanel = 0;
+        const long ok = rdnum2(fb, "RBFBOtgRPanelOk", &havePanel);
+        if (!havePanel) {
+            printf("\n  PANEL CONTROL: the kext does not publish it.\n");
+        } else if (ok == 1) {
+            printf("\n  PANEL CONTROL OK: OTG0 reads as a scanning "
+                   "generator,\n  so this instrument is addressing the OTG "
+                   "block.\n");
+        } else {
+            printf("\n  *** PANEL CONTROL FAILED ***\n"
+                   "  OTG0 does not read as scanning. The panel IS lit, so\n"
+                   "  this is the instrument, not the hardware: the kext is\n"
+                   "  not addressing the OTG block. Every number above is a\n"
+                   "  reading of the wrong address. `go` will REFUSE 48.\n");
+        }
+    }
 }
 
 int main(int argc, char **argv)

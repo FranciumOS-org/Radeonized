@@ -62837,3 +62837,105 @@ The next boot's first job is the survey with the absent-key path no longer
 able to lie: OTG0 reading `0x00011201` with a frame count that advances is the
 positive control for the whole instrument, and if that does not appear, no
 refusal or verdict below it means anything.
+
+---
+
+## 2FA-a — boot 462: the positive control failed, and that is the whole result
+
+2026-11-07, boot 462. `-rbgpufbraster` in boot-args, fbkext `22977266` verified
+inside the collection. First armed run of `tools/otgprog.m`, read-only, no
+`go`, nothing written.
+
+```
+second raster is ARMED   sampled yes   aperture ok
+
+  all four timing generators, live
+    pipe  OTG_CONTROL  FRAME_COUNT
+    OTG0  0x00000000   0           <- the PANEL, the positive control
+    OTG1  0x00000000   0
+    OTG2  0x00000000   0
+    OTG3  0x00000000   0
+```
+
+**OTG0 must read `0x00011201`.** The panel is lit, scanning, at 143.83 Hz, in
+this very boot. It reads `0x00000000`. So does every other generator. The
+arm is right, the aperture is right, the sample ran — and every number in it
+is a reading of the wrong address.
+
+### The defect
+
+`otgSample()` indexed `hubpRegs[RB_OTGPROG_DW_CONTROL(i)]`. **Every other
+reader in that same file** indexes `hubpRegs[kRbDmuSeg2 + dword]`.
+`kRbDmuSeg2` is `0x34c0`, this chip's DMU segment 2 base, established in 2EF.
+`rb_otgprog.h`'s dwords are BASE_IDX 2 offsets, which is what the Linux
+headers give, and the base was never added. Five sites: the two sample reads,
+the three after-reads, and — this is the one that matters — the sixteen
+**writes**, plus the aperture calculation, which was therefore also computed
+against the wrong number and passed for the wrong reason (rule 48).
+
+A `go` would have written `H_TOTAL`, `V_TOTAL`, the sync words, `VTG1_CONTROL`
+and `OTG1_CONTROL`'s `MASTER_EN` to dwords `0x052d`, `0x1acb`, `0x1b2a..` —
+BAR5 offsets `0x14b4`, `0x6b2c`, `0x6ca8..`, inside whatever block sits at the
+bottom of the aperture. **Rule 47 asked of a write, in its exact form: a write
+to a readable wrong address does something.** The DTO's own convention is what
+confused it — `RB_DPDTO_DW_*` offsets are BASE_IDX 1 (`0xc0`) and take no
+segment base, and that code sits forty lines above the new code in the same
+file.
+
+What makes this a cheap boot rather than an expensive one is that the panel's
+own generator was in the sample. The run cost nothing because **the control
+was read in the same window as the measurement** (2B8's design, rule 44's
+shape). Had `otgSample()` read only pipes 1-3, all four zeros would have been
+"three dark pipes, as expected" and the writes would have gone out.
+
+### The fix, and the part worth more than the fix
+
+Base added at all five sites and in the aperture calculation, with a comment
+at the write loop naming this boot.
+
+But the positive control was a thing a **human had to notice in a table**, and
+that is rule 45: when the deliverable depends on an observation, the
+observation needs its own instrument. So it is now a **gate**.
+
+`RB_OTGPROG_W_NOPANEL` = **48**: refused unless `panel_control` has
+`OTG_MASTER_EN`. Checked **before** the dark-pipe `W_RUNNING` test, because on
+a wrong address the target pipe's word is garbage too, and `W_RUNNING` would
+read `0x00000000` as "pipe 1 is dark, go ahead" — the guard most likely to be
+read as a safety check is the one the defect defeats first.
+
+Deliberately **not** a check that the word equals `0x00011201`. The panel's
+derived refresh ladder moves `V_TOTAL`, so `OTG0_CONTROL` is not a constant;
+`MASTER_EN` is the bit that cannot be set on a generator that is not running,
+and the bit a wrong address cannot fake, since a wrong address gave 0.
+
+**And what the gate cannot do, pinned as a test rather than left unsaid:** the
+*other* wrong-address shape is `0xffffffff` — rule 14's own, an absent read —
+and it has `MASTER_EN` set, so this gate passes it. One-sided, asserted as
+such, so the gate is not credited with more than it does.
+
+### Break-it, per guard (rule 48)
+
+- Guard removed entirely → **3 FAILs**.
+- Guard moved to *after* the `W_RUNNING` check → **exactly 1 FAIL**, and it is
+  the ordering case: `NOPANEL precedes RUNNING - got 0x2c want 0x30`. The
+  ordering assertion carries real information, which is not something the
+  first version of this test could have claimed.
+
+### Also fixed in the tool
+
+`otgprog` now prints the gate's input as a verdict — `PANEL CONTROL OK`, or
+`*** PANEL CONTROL FAILED ***` with the sentence "The panel IS lit, so this is
+the instrument, not the hardware" — rather than leaving it in the table. Run
+against the kext that is still loaded, which publishes `RBFBOtgR*` but not the
+new `RBFBOtgRPanelOk`, it prints "the kext does not publish it" (rule 14 at
+the tool boundary, the fix from the first smoke run doing its job on a second,
+different absent key).
+
+fbkext UUID **`C1701F13-C5A4-3C71-B69B-1F0A17BDFC1B`**. `make hosttest` green.
+
+### What boot 462 establishes about the hardware
+
+Nothing. No raster was programmed and no register in the OTG block was read.
+`OTG1_CONTROL` has still never been read by this instrument. The next boot
+repeats the survey, and the thing to look at first is one line:
+`PANEL CONTROL OK`.
