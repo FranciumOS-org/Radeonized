@@ -1,157 +1,119 @@
 # Handoff — next step
 
-**Written 2026-11-07, after 2FC. Last boot: 464 (2FC took none).**
+**Written 2026-11-07, after 2FD. Last boot: 467.**
 
-Read `CLAUDE.md` first, then this. `docs/EXTERNAL-DISPLAY.md` has the full
-state of the goal; `docs/JOURNAL.md` under `2FB` has boot 464 in detail.
+Read `CLAUDE.md` first, then this. `docs/JOURNAL.md` under `2FD` has boot 467
+in detail; `docs/EXTERNAL-DISPLAY.md` has the full state of the goal.
 
 ---
 
 ## Three things before you touch anything
 
 1. **PLUG THE TYPE-C CABLE IN BEFORE BOOTING.** The firmware enables the AUX
-   engines on a connect path that runs at boot, and we never write `AUX_EN`.
-   Plug in afterwards and every AUX read returns **refusal 3** on engine
-   "AUX5" (= `RB_AUX_COUNT`, none), with `AUX_EN` clear on AUX1-4 and
-   `HPD2_STATUS` reading `0xff000013` instead of `0xff0ff013`. HPD still
-   senses, because HPD is a raw pin, so this looks like a dead port and is
-   not. 2FB.
+   engines on a connect path that runs at boot and we never write `AUX_EN`.
+   Plugged in afterwards, every AUX read returns refusal 3 on engine "AUX5"
+   (= `RB_AUX_COUNT`, none) and it looks like a dead port. 2FB.
 
 2. **`dptrain go tps=3` DEGRADES THIS SINK and the recovery is a REBOOT**
    (2F8, two boots, with a healthy before/after control). The tool refuses
    `tps=3`/`tps=4`. **Use `tps=2`.**
 
 3. **Check the sink before every experiment.** `./build/out/edidread` (header
-   OK, checksum OK) and `dpcdread 0x0 4` reading `12 14 c2 81`. A degraded
-   sink looks exactly like a failing transmitter. The chassis must be in
-   iGPU-only / Eco mode.
+   OK, checksum OK, `MSI MP2412C`) and `dpcdread 0x0 4` reading
+   `12 14 c2 81`. A degraded sink looks exactly like a failing transmitter.
+   The chassis must be in iGPU-only / Eco mode.
 
 ---
 
-## Where the chain actually is
+## Where the chain is after boot 467
 
-Everything on our side of the link now takes its writes and reads them back,
-and **the sink still sees no symbols.** Boot 464, one boot, each step with its
-own verdict:
+**The raster honours its own timing. The CLOCK is what is wrong.** 2FD ran the
+discriminating experiment: only H_TOTAL changed, 2200 -> 4400, clock held at
+148500, refresh asked as 30 so the clock-agreement gate stays honest.
 
-| Step | Result |
-|---|---|
-| `dmubbl dto 148500` | `PIXEL_RATE_CNTL 0x8000c000 -> 0x8000d090`, **`DPDTO_ENABLE_STATUS 0 -> 1`** |
-| `otgprog go 1080p60 pipe=1` | **`OTG1_CONTROL 0x300 -> 0x00011201`**, 16/16 writes, counter advancing |
-| `dmubbl dig fe` | `DIG_BE_CNTL 0x20000000 -> 0x20000400`, `FE_SEL 0 -> 0x4` |
-| `dptrain go tps=2` | `TP_SEL 0 -> 1`, applied/clean/moved/observable all 1 |
-| **DPCD `0x202`** | **`0x00` before and after. No clock recovery.** |
-| `RDPCSTX2_PHY_CNTL6` | `0x00063333`, **unmoved, third boot** |
+```
+  product 2 475 000 (2FB)   496.35 Hz    implied 1228.47 MHz
+  product 4 950 000 (2FD)   243.88 Hz    implied 1207.19 MHz
+  predicted 248.18 if the OTG honours its timing
+```
 
-**2F9's defence of that `0x00` is spent.** It said "a clock with no raster and
-no stream has nothing to send". There is now a raster, and the answer did not
-change. Do not re-run that argument.
+The rate halved. So the counter *is* driven by our raster — section 2 of 2FB
+needs no re-reading — and ~1.2 GHz (2 x the 600 MHz `dprefclk`) is now n=2 at
+two different rasters. Still a candidate, not an identification (rule 18).
+
+**Both fields the old handoff pointed at are dead.** All four pipes'
+`PIXEL_RATE_CNTL`: `PIXEL_RATE_SOURCE` 0 and `DTBCLK_DTO_DIV` 8 **on the
+working panel pipe too**, and `DISPOUT_HALF_RATE_EN` 0 everywhere. Neither
+distinguishes our pipe from one that clocks correctly.
+
+**The only programmable field that differs from the panel's pipe is
+`PIPE_DTO_SRC_SEL`** — panel 0, ours 1 — and it differs because `rb_dpdto.h`
+chose Linux's value. That argument is still right about the source and is not
+withdrawn; what is new is measurement against it.
 
 ---
 
-## The one new measurement, and the next experiment
+## The next experiment, and it costs one boot
 
-**The raster runs at 8.2726× its programmed timing.** Measured against wall
-time over 20.064 s, both counters latched in the same periodic sample:
-
-```
-  panel OTG0 =  61.40 Hz      (the DRR ladder, at 60 - NOT 143.83)
-  OTG1       = 496.35 Hz
-  implied pixel clock = 1228.47 MHz   (programmed 148.50)
-```
-
-The live registers hold `H_TOTAL` 2199 (= 2200), `V_TOTAL` 1124 (= 1125),
-`PHASE` 148 500 000, `MODULO` 600 000 000, `PIXEL_RATE_CNTL 0x8000d090`. So
-the timing is programmed, the DTO is programmed, and the rate matches neither.
-
-**This supports exactly one claim: OTG1 is not being clocked by the DTO we
-programmed.** It does not name a mechanism. 2 × the 600 MHz reference is
-1200 MHz, 2.3 % away and inside the measurement's own error, which makes it a
-candidate and not an identification (rule 18). **Do not write that down as the
-answer.**
-
-### The experiment that settles it, and it costs one boot
-
-The in-boot A/B is **not available**: `dmubbl dto` refuses a second write on a
-live pipe by design, and nothing turns a DTO off. So:
-
-**Reboot (cable in), run the DTO at 148500 as usual, then program a raster
-with a DIFFERENT `H_TOTAL × V_TOTAL`** — not a different clock. `otgprog`
-takes the mode piecewise, so:
+The DTO refuses a second write on a live pipe, so this cannot be an in-boot
+A/B: the pipe must be dark at the start. Cable in, then:
 
 ```bash
-./build/out/otgprog go pipe=1 refresh=60 hactive=1920 hfront=88 hsync=44 htotal=1100 vactive=1080 vfront=4 vsync=5 vtotal=1125
+./build/out/edidread && ./build/out/dpcdread 0x0 4
+./build/out/dmubbl dto 148500 pipe=1 srcsel=0
+./build/out/otgprog go 1080p60 pipe=1
 ```
 
-Half the H_TOTAL, same everything else. Then measure the rate the same way.
-
-- Rate **doubles** → the OTG honours its own timing and the *clock* is wrong.
-  The next question is which clock OTG1 is on, and `PIPE_DTO_SRC_SEL` /
-  `DTBCLK_DTO_DIV` in `PIXEL_RATE_CNTL` are where to look.
-- Rate **does not move** → the counter is not driven by our raster at all,
-  and section 2 of 2FB has to be re-read with that in mind.
-
-The mode will fail the clock-agreement gate (refusal **47**) because
-1100 × 1125 × 60 ≠ 148.5 MHz. That gate exists for a reason; **either pick a
-clock that matches the new product (`dmubbl dto 74250` for 1100 × 1125 × 60 =
-74.25 MHz) — which keeps the gate honest and still changes the product — or
-decide deliberately to widen it, and say so in the journal.** Changing the
-clock *and* the product does not separate them, so prefer: keep the clock at
-148500 and pick a product that matches it, e.g. `htotal=1100 vtotal=2250`
-(1100 × 2250 × 60 = 148.5 MHz). **That changes H_TOTAL and V_TOTAL while
-holding the clock and the frame rate, which is the clean form.**
-
-### How to measure the rate
-
-Both counters in one periodic sample, against wall time, over ≥20 s. The
-panel's rate is **not** 143.83 at the moment of reading — the DRR ladder moves
-it, and 2FB got this wrong on its first pass. Use wall time, not a ratio to
-the panel.
+then measure both counters over >= 20 s against wall time:
 
 ```bash
 cd /Users/ehsan/Developer/RembrandtGPU
 r() { ioreg -rl -c RBAMDFramebuffer | grep -oE '"RBFBOtgR[01]Frames" = [0-9]+' | grep -oE '[0-9]+$' | tr '\n' ' '; }
-a=$(r); t0=$(python3 -c 'import time;print(time.time())'); sleep 20; b=$(r); t1=$(python3 -c 'import time;print(time.time())'); echo "$a | $b | $t0 $t1"
+a=$(r); t0=$(python3 -c 'import time;print(repr(time.time()))'); sleep 25; b=$(r); t1=$(python3 -c 'import time;print(repr(time.time()))'); echo "$a | $b | $t0 $t1"
 ```
 
----
+- **60 Hz** → `PIPE_DTO_SRC_SEL` is the factor. Then `rb_dpdto.h`'s default
+  changes, with 2FD and this boot as the reason, and the chain can be re-run
+  at a rate the sink was told to expect.
+- **still ~496 Hz** → SRC_SEL is not it. `DTBCLK_DTO_DIV` 8 is the same on a
+  working pipe, so the next place to look is what *feeds* the DTO rather than
+  the fields beside it.
 
-## 2FC: one more thing to read on boot 465, and it costs nothing
+**Do not re-run `dig fe` or `dptrain` until the clock is right.** 461 and 464
+both produced DPCD `0x202` = `0x00`, and a third one at ~8x the sink's
+expected rate carries no information. That is why boot 467 did not run them.
 
-`tools/diolook.sh`. 2FC built a read-only survey of `DIO_LINK{A..F}_CNTL`
-(0x1f04..0x1f09, BASE_IDX 2, stride 1) — the per-UNIPHY mux that selects
-**which kind of encoder drives the link**. Three boots wrote DIG2 correctly
-and the sink saw nothing; a mux pointing that link elsewhere produces exactly
-that. It is armed by `-rbgpufbdig`, which boot 465 carries anyway, so there is
-no extra token and no extra boot.
+### How to measure the rate
 
-**Read its verdict line first, and read the asymmetry honestly.**
-`ENCODER_TYPE_DIG` is **zero**, so a zero word is indistinguishable from an
-unprogrammed register, a gated aperture and a wrong address — and zero is also
-what Linux would program for an 8b/10b link. So:
-
-- `ENC_TYPE_SEL` on **LINKC** reads 1 or 2 → **the finding**, and the next
-  step changes.
-- It reads 0 → the line is **closed**. That is a negative. It is **not** "the
-  mux is confirmed on DIG", and LINKA is a weak control, not a strong one.
-
-Framebuffer UUID to install for it: **2C01EFBD** (`sudo tools/fbinstall.sh`).
+Both counters in one periodic sample, against wall time, over >= 20 s. **The
+panel's rate is not a constant** — the DRR ladder moves it, and it read
+144.69 Hz in boot 467 against 61.40 in boot 464. Use wall time, never a ratio
+to the panel. 2FB got this wrong on its first pass.
 
 ---
 
-## After that
+## Closed in 2FC / 2FD — do not re-open
+
+- **The DIO encoder-type mux.** All six `DIO_LINK{A..F}_CNTL` read zero, before
+  and after our writes, with an in-boot base control (PHY0 `0x00194444` out of
+  the same aperture). The mux is not steering DIG2 away from PHY2. It is **not**
+  "confirmed on DIG": `ENCODER_TYPE_DIG` is zero. `tools/diolook.sh`.
+- **`enc31_map_stream_to_link` as the next step.** Wrong name: it is the HPO DP
+  128b/132b encoder's and our 8b/10b link never goes through it. This chip's
+  DIO stream encoder is `dcn30_dio_stream_encoder_construct` over DCN10's
+  register struct (`dcn31_resource.c:1323`, `:361`). The connect that name
+  implied was `dcn10_link_encoder_connect_dig_be_to_fe`, **done in 2EC**.
+- **`PIXEL_RATE_SOURCE` and `DTBCLK_DTO_DIV` as the clock difference.**
+  Identical on the working panel pipe.
+
+---
+
+## After the clock
 
 In order. Each is a thing that does not exist yet:
 
-1. **A stream on DIG2.** 2FC discharged rule 46 here by source and the
-   handoff's old name was wrong: `enc31_map_stream_to_link` belongs to the
-   **HPO DP** 128b/132b encoder, which our 8b/10b link never goes through.
-   This chip builds stream encoders with `dcn30_dio_stream_encoder_construct`
-   over `dcn10_stream_enc_registers` (`dcn31_resource.c:1323`, `:361`) —
-   DCN30 code on DCN10 registers, the same two-file split 2FA found in OPTC,
-   so read `dcn30_dio_stream_encoder.c` and *not* a dcn31 file. The connect
-   that old name implied is `dcn10_link_encoder_connect_dig_be_to_fe`, which
-   **2EC already did** (`DIG_BE_CNTL` `FE_SEL 0 -> 0x4`, boot 464).
+1. **A stream on DIG2** — read `dcn30_dio_stream_encoder.c`, **not** a dcn31
+   file (2FC discharged rule 46 here; the two-file split is 2FA's again).
 2. **A surface** on pipe 1 — HUBP, address, swizzle.
 3. **A second `IOFramebuffer`.** `getDisplayModeCount()` has returned 1 since
    2sl.
@@ -161,31 +123,41 @@ every half of every one of these experiments. Keep it that way.
 
 ---
 
-## Tool notes from 2FB
+## Tool notes
 
-- `RBFBAuxEn` and `RBFBHpdSink` are **masks**, not indexes. I read both as
-  scalars in one investigation (`AuxEn` = 1 as "enabled yes"; `HpdSink` = 5 as
-  "engine 5"). Rule 33's shape: an index is not a count, and a mask is
-  neither. Print values in hex beside their names; that is what caught it.
-- `./build/out/pubms` is **not built** by `make tools` — `make pubms`. Rule 15
-  applies to tools.
-- `dmubbl dto` takes **kHz**. Hz overflows the field and the tool refuses
-  anything over 1 000 000.
+- `RBFBAuxEn` and `RBFBHpdSink` are **masks**, not indexes (2FB, rule 33).
+- `./build/out/pubms` is **not built** by `make tools` — `make pubms`. Nor is
+  `dmubbl` — `make dmubbl`. Rule 15 applies to tools.
+- `dmubbl dto` takes **kHz** and refuses anything over 1 000 000.
+- `otgprog` takes all eight timings piecewise (`hactive= hfront= hsync=
+  htotal= vactive= vfront= vsync= vtotal=` with `refresh=`), and its gate
+  (refusal **47**) needs `htotal x vtotal x refresh` to equal the live DTO
+  PHASE within 0.5 %. **Check your mode is possible before spending the
+  boot**: `htotal` must exceed `hactive + hfront + hsync`. The 2FB handoff
+  shipped a mode that failed this and would have cost boot 467.
 - `otgprog` prints `PANEL CONTROL OK` as its own line. If it says FAILED, the
-  kext is not addressing the OTG block and nothing else in the output means
+  kext is not addressing the OTG block and nothing else in its output means
   anything (2FA-a, refusal 48).
 
 ---
 
 ## Open, off the critical path
 
-- **Why DPCD `0x102` stores only from inside `dptrain`'s own call** (~100 µs
+- **`OTG_DIO_FIFO_ERROR`** reads 3 on dark pipes, 0 on the panel's, and 2FD
+  established it stays **3** on a pipe with the DTO running and the raster
+  scanning. So it does not clear on a clock plus an OTG. A stream is untested.
+  Published raw, read by nothing.
+- **Why DPCD `0x102` stores only from inside `dptrain`'s own call** (~100 us
   after the register writes, n=2 boots). The arm meant to separate movement
   from proximity is **void** — it used `tps=3` and the sink was degrading.
   Re-run on a healthy sink with `tps=2` only.
 - **`RDPCSTX*_PHY_CNTL6` needs replacing as `dig`'s verdict register.** It is
-  the legacy fallback Linux reads only when DMCUB is absent, and it already
-  disagreed with `QUERY_DP_ALT` on all five PHYs.
+  the legacy fallback Linux reads only when DMCUB is absent and it has
+  disagreed with `QUERY_DP_ALT` on all five PHYs since 2EB. 2FC's
+  `DIO_LINK*_CNTL` is **not** a replacement — it is all zeros.
+- **The caller of `set_dio_phy_mux` is not identified.** Neither
+  `link_hwss_dio.c` nor `link_hwss_hpo_dp.c` calls it. Must be answered before
+  anything writes that register.
 - **The wedge** — work submitted that never retires, channel-52 GFX, 3.5 s.
 - **`powermetrics` has never been run** against the default 576 interior
   thread_calls/s, the one real argument against the 2D5 default.
