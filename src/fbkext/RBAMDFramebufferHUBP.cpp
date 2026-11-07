@@ -24,6 +24,7 @@
 #include "rb_hubp.h"
 #include "rb_hpd.h"
 #include "rb_aux.h"
+#include "rb_dpcd.h"
 #include "rb_dpalt.h"
 #include "rb_dpdto.h"
 #include "rb_drr.h"
@@ -141,6 +142,24 @@ bool RBAMDFramebuffer::hubpSetup(void)
     auxDpcdBytes = 0;
     auxDpcdSuspect = false;
     auxDpcdHpd = 2;   /* 2B4: the Type-C port */
+    /* 2F3: the write's state. The address defaults to NOTHING writable, so a
+     * bare arm cannot write: the dial has to name an address. */
+    auxDpcdWCalls = 0;
+    auxDpcdWOks = 0;
+    auxDpcdWRefuse = RB_DPCD_W_OK;
+    auxDpcdWHpd = 2;
+    auxDpcdWInst = RB_AUX_COUNT;
+    auxDpcdWAddr = 0;
+    auxDpcdWValue = 0;
+    auxDpcdWBefore = 0xffffffffu;
+    auxDpcdWBeforeOk = 0;
+    auxDpcdWAfter = 0xffffffffu;
+    auxDpcdWAfterOk = 0;
+    auxDpcdWReplyCode = 0xff;
+    auxDpcdWAcked = 0;
+    auxDpcdWApplied = 0;
+    auxDpcdWChanged = 0;
+    auxDpcdWVerdict = RB_DPCD_W_V_NOT_RUN;
     auxEdidAttempts = 0;
     auxEdidOks = 0;
     auxEdidRefuse = 0;

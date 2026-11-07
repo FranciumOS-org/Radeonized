@@ -10,6 +10,8 @@ extern "C" {
 #include "rb_dmub.h"
 #include "rb_frametime.h"
 #include "rb_dpdto.h"
+#include "rb_aux.h"
+#include "rb_dpcd.h"
 }
 #include <map>
 #include <string>
@@ -353,6 +355,18 @@ public:
     uint32_t auxDpcdRefuse=0, auxDpcdInst=0, auxDpcdArbSeen=0;
     uint32_t auxDpcdStatus=0, auxDpcdReplyCode=0, auxDpcdBytes=0;
     uint32_t auxDpcdHpd=2;
+    /* 2F3: the DPCD write's state and publisher. */
+    uint64_t auxDpcdWCalls=0, auxDpcdWOks=0;
+    uint32_t auxDpcdWRefuse=RB_DPCD_W_OK, auxDpcdWHpd=2;
+    uint32_t auxDpcdWInst=RB_AUX_COUNT, auxDpcdWAddr=0, auxDpcdWValue=0;
+    uint32_t auxDpcdWBefore=0xffffffffu, auxDpcdWBeforeOk=0;
+    uint32_t auxDpcdWAfter=0xffffffffu, auxDpcdWAfterOk=0;
+    uint32_t auxDpcdWReplyCode=0xff, auxDpcdWAcked=0;
+    uint32_t auxDpcdWApplied=0, auxDpcdWChanged=0;
+    int auxDpcdWVerdict=RB_DPCD_W_V_NOT_RUN;
+    void auxWPublish(void) {}
+    uint32_t auxDpcdWrite(uint32_t, uint32_t, uint32_t)
+    { return RB_DPCD_W_OK; }
     unsigned char auxDpcdData[16]={0};
     bool auxDpcdRead(uint32_t, uint32_t, uint32_t) { return false; }
     /* 2BC, mirrored. */

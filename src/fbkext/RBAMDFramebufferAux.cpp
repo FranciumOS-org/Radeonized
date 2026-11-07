@@ -66,8 +66,11 @@ bool RBAMDFramebuffer::auxTransact(unsigned inst, uint32_t action,
     if (gotOut)   { *gotOut = 0; }
     if (inst >= RB_AUX_COUNT || !hubpRegs) { auxDpcdRefuse = 2; return false; }
 
-    const bool isWrite = (action == RB_I2C_ACTION_WRITE ||
-                          action == RB_I2C_ACTION_WRITE_MOT);
+    /* 2F3: was an equality test against the two I2C write forms, which would
+     * have encoded a native DP write with the READ length and no payload -
+     * and silently, because the engine ACKs a well-formed request that writes
+     * nothing. The predicate lives in rb_dpcd.h so the hosttest owns it. */
+    const bool isWrite = rb_aux_action_is_write(action) ? true : false;
 
     uint8_t req[4];
     const uint32_t hdr = rb_aux_request_bytes(action, address,
@@ -184,6 +187,73 @@ bool RBAMDFramebuffer::auxDpcdRead(uint32_t hpd, uint32_t address,
     return ok;
 }
 
+/* 2F3: ONE NATIVE DPCD WRITE, read-before and read-after.
+ *
+ * THE FIRST WRITE THIS PROJECT MAKES TO THE SINK rather than to this chip.
+ * rb_dpcd.h carries the safety case; what this function adds is that the
+ * verdict is taken from TWO independent things, neither of which is the value
+ * we wrote:
+ *
+ *   - the sink's own ACK, a reply we do not compose;
+ *   - a read-after against a read-BEFORE, so `changed` says the receiver
+ *     stored the byte rather than merely answering the transaction.
+ *
+ * They can disagree, and that disagreement is a reportable outcome rather
+ * than a failure: a sink may ACK a write to a field it ignores. Hence four
+ * verdicts and not a bool (rule 14), and `applied` published beside `changed`
+ * because a byte that already held the target value makes a readback agree
+ * for free (rule 20, 2E6's shape).
+ *
+ * The read halves go through auxDpcdRead's own engine, so a refusal there is
+ * visible as read_ok 0 and reported as ACK_BLIND - never as a failed write.
+ */
+uint32_t RBAMDFramebuffer::auxDpcdWrite(uint32_t hpd, uint32_t address,
+                                        uint32_t value)
+{
+    auxDpcdWCalls++;
+    auxDpcdWHpd = hpd;
+    auxDpcdWAddr = address;
+    auxDpcdWValue = value;
+
+    const int haveRegs = (hpdReady && hubpRegs != nullptr) ? 1 : 0;
+    const unsigned inst = haveRegs ? auxEngineFor(hpd) : RB_AUX_COUNT;
+    auxDpcdWInst = inst;
+
+    const uint32_t why = rb_dpcd_write_refuse(hpd, inst, address, value,
+                                              auxDpcdArmed ? 1 : 0, haveRegs,
+                                              RB_AUX_COUNT);
+    if (why != RB_DPCD_W_OK) { return auxDpcdWRefuse = why; }
+
+    /* BEFORE. A failure here does not stop the write - it makes `changed`
+     * uninterpretable and is published as such, which is the honest shape:
+     * the write still has the ACK to report. */
+    const int beforeOk = auxDpcdRead(hpd, address, 1) ? 1 : 0;
+    auxDpcdWBefore = beforeOk ? auxDpcdData[0] : 0xffffffffu;
+    auxDpcdWBeforeOk = (uint32_t)beforeOk;
+
+    const uint8_t payload = (uint8_t)value;
+    uint32_t code = 0xff, got = 0;
+    const bool acked = auxTransact(inst, RB_DPCD_ACTION_WRITE, address,
+                                   &payload, 1, nullptr, 0, &code, &got);
+    auxDpcdWReplyCode = code;
+    auxDpcdWAcked = acked ? 1u : 0u;
+
+    /* AFTER. Read regardless of the ACK: a sink that stored the byte without
+     * answering, and one that answered without storing it, are different
+     * findings and both are worth having. */
+    const int afterOk = auxDpcdRead(hpd, address, 1) ? 1 : 0;
+    auxDpcdWAfter = afterOk ? auxDpcdData[0] : 0xffffffffu;
+    auxDpcdWAfterOk = (uint32_t)afterOk;
+
+    auxDpcdWApplied = (afterOk && auxDpcdWAfter == value) ? 1u : 0u;
+    auxDpcdWChanged = (beforeOk && afterOk &&
+                       auxDpcdWBefore != auxDpcdWAfter) ? 1u : 0u;
+    auxDpcdWVerdict = rb_dpcd_write_verdict(acked ? 1 : 0, afterOk,
+                                            value, auxDpcdWAfter);
+    if (acked) { auxDpcdWOks++; }
+    return auxDpcdWRefuse = RB_DPCD_W_OK;
+}
+
 /* 2BC: one 128-byte EDID block over I2C-over-AUX.
  *
  * THE PROTOCOL, and why it is three kinds of transaction rather than one.
@@ -265,4 +335,32 @@ bool RBAMDFramebuffer::auxEdidRead(uint32_t hpd, uint32_t block)
     auxEdidSumOk = rb_edid_checksum_ok(auxEdidData, auxEdidBytes) ? true : false;
     if (auxEdidHeaderOk && auxEdidSumOk) { auxEdidOks++; }
     return auxEdidHeaderOk && auxEdidSumOk;
+}
+
+/* 2F3: every field of the write, in one place, so the periodic publish and
+ * the dial's exit path cannot drift apart - the structural fix 2E3 paid for
+ * and 2F1 applied to the DTO. */
+void RBAMDFramebuffer::auxWPublish(void)
+{
+    setProperty("RBFBAuxWCalls", auxDpcdWCalls, 64);
+    setProperty("RBFBAuxWOks", auxDpcdWOks, 64);
+    setProperty("RBFBAuxWRefuse", (uint64_t)auxDpcdWRefuse, 32);
+    setProperty("RBFBAuxWHpd", (uint64_t)auxDpcdWHpd, 32);
+    setProperty("RBFBAuxWInst", (uint64_t)auxDpcdWInst, 32);
+    setProperty("RBFBAuxWAddr", (uint64_t)auxDpcdWAddr, 32);
+    setProperty("RBFBAuxWValue", (uint64_t)auxDpcdWValue, 32);
+    /* 0xffffffff is "the read refused", which is NOT the byte 0xff - the two
+     * must stay distinguishable, because a missing value that passes a field
+     * test is rule 14's trap at the tool boundary. The *Ok flags are the
+     * answer and the tool reads them first. */
+    setProperty("RBFBAuxWBefore", (uint64_t)auxDpcdWBefore, 32);
+    setProperty("RBFBAuxWBeforeOk", (uint64_t)auxDpcdWBeforeOk, 32);
+    setProperty("RBFBAuxWAfter", (uint64_t)auxDpcdWAfter, 32);
+    setProperty("RBFBAuxWAfterOk", (uint64_t)auxDpcdWAfterOk, 32);
+    /* The sink's own answer - the part of this we do not compose. */
+    setProperty("RBFBAuxWReplyCode", (uint64_t)auxDpcdWReplyCode, 32);
+    setProperty("RBFBAuxWAcked", (uint64_t)auxDpcdWAcked, 32);
+    setProperty("RBFBAuxWApplied", (uint64_t)auxDpcdWApplied, 32);
+    setProperty("RBFBAuxWChanged", (uint64_t)auxDpcdWChanged, 32);
+    setProperty("RBFBAuxWVerdict", (uint64_t)auxDpcdWVerdict, 32);
 }

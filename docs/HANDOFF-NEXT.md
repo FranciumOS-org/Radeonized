@@ -1,6 +1,6 @@
 # HANDOFF — next step
 
-**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F2, boot 455 — the pixel clock RUNS.** `docs/RULES.md` is the reference card:
+**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F3 — the pixel clock RUNS; the DPCD write is built.** `docs/RULES.md` is the reference card:
 standing rules, chip facts, the boot-arg contract. `docs/JOURNAL.md` is the
 evidence record, grepped by milestone tag. **This file is only what is in
 flight.**
@@ -34,8 +34,10 @@ still armed** (2D3's `sub` 4, derived by default since 2D5 — the user's own
 
 ## IN FLIGHT: the external display, and what the next command is
 
-**Where it stands:** the clock is running on pipe 1 (boot 455). The next step
-is **link training over AUX2**, item 1 under "Then, in order".
+**Where it stands:** the clock is running on pipe 1 (boot 455), and the
+firmware is measured NOT to train this link (2F3), so training is ours. The
+next step is **the DPCD write**, built and unrun — item 1 under "Then, in
+order".
 
 ### Established end to end, each by measurement
 
@@ -137,6 +139,47 @@ of the next write.
    and `link_dp_training_8b_10b.c` contain **zero** `dmub` references (2BE), so
    the CR/EQ loops, the DPCD writes and the lane settings are ours, over the
    channel 2BB/2BD proved end to end.
+
+   **2F3 built the first piece: the native DPCD WRITE, and no boot has run
+   it.** `auxTransact` was already a writer — 2BD's EDID read writes an offset
+   byte over AUX — and one equality test excluded `DP_WRITE` 0x80, which would
+   have encoded it with the READ length and **no payload**, silently, since the
+   engine ACKs a well-formed request that writes nothing.
+
+   ```bash
+   sudo tools/fbinstall.sh
+   ```
+
+   Reboot, confirm **493497B1** inside the collection (rule 15), then:
+
+   ```bash
+   build/out/dpcdwrite 0x100 0x14
+   ```
+
+   That writes `DP_LINK_BW_SET` = HBR2 — the sink's own maximum (2BB) — and
+   does nothing on its own: no rate takes effect until `0x102` sets a training
+   pattern. `dpcdwrite` with no arguments lists the whole allowlist.
+
+   **How to read it**, written down first. `ACK + STORED` with `changed 1`
+   means the sink answered a reply we do not compose **and** stored a byte that
+   differs from the read-before — the mechanism training is made of, and not a
+   trained link. `ACK + STORED` with `changed 0` means the byte already held
+   that value, so `applied` carries no evidence of our store (rule 20) — write
+   a different value to the same address. `ACK + IGNORED` is a real outcome:
+   the receiver answered and ignored the field. `ACK + BLIND` means the
+   read-after failed and the write must not be recorded as successful. `NO
+   ANSWER` splits by reply code into a NACK (the channel works, the sink
+   declines the address) and silence, which are different findings.
+
+   What bounds it: the panel refused by name **three times independently**
+   (tool by HPD, kext by HPD, kext by AUX engine — 2B9 read `AUX_HPD_SEL` off
+   the hardware, so those are two different facts), and the address
+   **allowlisted** to the link-configuration block alone, enforced in the tool,
+   in `rb_dpcd_write_refuse()` and again in the encoder.
+
+   After that comes the transmitter side, which is untouched: the PHY output,
+   `DP_LINK_CNTL`, the atom transmitter ENABLE, and the training pattern on the
+   wire. A DPCD write is the sink half only.
 2. **`enc31_map_stream_to_link`** (`link_hwss_dio.c:63`) — a second FE-to-link
    register, not located. Named in 2EC as not reproduced.
 3. **A second OTG and HUBP.** The pipe domains need no powering up — 2DE read
@@ -145,14 +188,18 @@ of the next write.
    2sl and every boot has been read against that; 2xx is what a WindowServer
    that dislikes its framebuffer costs, so this is the step to stage carefully.
 
-### Free measurement nobody has taken
+### The free measurement, TAKEN (2F3): the firmware does not train this link
 
-**Plug the display in before power-on** and watch for the OpenCore picker or
-the Apple logo on it. The firmware's GOP drives whatever it is wired to, so an
-image there says the firmware trained the link — which is the whole reason the
-internal panel was tractable (2wh wrote HUBP surface addresses onto a pipe the
-firmware had already lit, and never trained anything). No image means training
-is ours, which is item 1 above.
+With the display plugged in **before power-on**, nothing appears on it — and
+this chassis' OpenCore picker is the **text-mode** one, so there was no
+graphical pre-boot output to look for. The user reports the same chassis lights
+no external display pre-boot **through the 4050 under Windows**, which is the
+control: it is the chassis firmware's behaviour, not the 680M's and not ours.
+The sink's LED never leaves standby through macOS boot.
+
+**So link training is ours.** The eDP panel's route is not available here: 2wh
+wrote HUBP surface addresses onto a pipe the firmware had already lit and
+trained nothing.
 
 ### Two chassis traps that have each cost milestones
 

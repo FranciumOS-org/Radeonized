@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include "rb_aux.h"
 #include "rb_dpcd.h"
 
 int dpcd_tests(void);
@@ -322,9 +323,194 @@ int dpcd_tests(void)
         }
     }
 
+    /* ============== 2F3: THE NATIVE DPCD WRITE =========================
+     *
+     * The first write this project makes to the SINK. These cases carry the
+     * safety case, so each is a refusal that must fire for its OWN reason -
+     * a write refused incidentally by a later gate is rule 48's "passes for
+     * the wrong reason" and would read like a check that had been done.
+     */
+#define WCHK(cond, msg) do { if (!(cond)) { \
+        printf("FAIL dpcd/2F3: %s\n", (msg)); bad++; } } while (0)
+    {
+        /* ---------------- THE BUG THAT WAS THERE ----------------------
+         *
+         * auxTransact tested `action == I2C_WRITE || action ==
+         * I2C_WRITE_MOT` by equality, so a native DP write would have been
+         * encoded with the READ length and NO payload - and silently, since
+         * the engine ACKs a well-formed 4-byte request that writes nothing.
+         * This predicate is the fix; these five lines are why it exists. */
+        WCHK(rb_aux_action_is_write(RB_DPCD_ACTION_WRITE),
+             "a native DP write is a write - the whole point of 2F3");
+        WCHK(!rb_aux_action_is_write(RB_DPCD_ACTION_READ),
+             "a native DP read is not");
+        WCHK(rb_aux_action_is_write(RB_I2C_ACTION_WRITE) &&
+             rb_aux_action_is_write(RB_I2C_ACTION_WRITE_MOT),
+             "both I2C write forms still are - 2BC's EDID offset byte "
+             "depends on it");
+        WCHK(!rb_aux_action_is_write(RB_I2C_ACTION_READ) &&
+             !rb_aux_action_is_write(RB_I2C_ACTION_READ_MOT),
+             "and neither I2C read form is");
+
+        /* ---------------- THE ALLOWLIST -------------------------------
+         *
+         * Named addresses, so the test says WHICH register it accepted
+         * rather than which number (rule 17's shape: a bare constant cannot
+         * say what it is). Everything training sends must pass. */
+        WCHK(rb_dpcd_write_allowed(RB_DPCD_LINK_BW_SET) &&
+             rb_dpcd_write_allowed(RB_DPCD_LANE_COUNT_SET) &&
+             rb_dpcd_write_allowed(RB_DPCD_TRAINING_PATTERN_SET) &&
+             rb_dpcd_write_allowed(RB_DPCD_DOWNSPREAD_CTRL) &&
+             rb_dpcd_write_allowed(RB_DPCD_LINK_CODING_SET) &&
+             rb_dpcd_write_allowed(RB_DPCD_SET_POWER),
+             "every register link training writes is allowed");
+        for (uint32_t a = RB_DPCD_TRAINING_LANE0_SET;
+             a <= RB_DPCD_TRAINING_LANE3_SET; a++) {
+            WCHK(rb_dpcd_write_allowed(a),
+                 "all four TRAINING_LANEn_SET are allowed");
+        }
+        /* The read-only blocks, by name. A sink would NACK these; being
+         * refused HERE is what makes the allowlist the instrument. */
+        WCHK(!rb_dpcd_write_allowed(RB_DPCD_REV_ADDR) &&
+             !rb_dpcd_write_allowed(RB_DPCD_MAX_LINK_RATE_ADDR),
+             "the receiver capability block is NOT writable");
+        WCHK(!rb_dpcd_write_allowed(RB_DPCD_LANE0_1_STATUS) &&
+             !rb_dpcd_write_allowed(RB_DPCD_LANE_ALIGN_STATUS) &&
+             !rb_dpcd_write_allowed(RB_DPCD_ADJUST_REQUEST_LANE0_1),
+             "nor is the link status block training READS");
+        /* The addresses either side of the allowed run, so the bounds are
+         * pinned rather than the interior only. */
+        WCHK(!rb_dpcd_write_allowed(0x0ffu) &&
+             !rb_dpcd_write_allowed(0x109u),
+             "the allowed run is bounded at both ends - 0x0ff and 0x109 are "
+             "refused");
+        WCHK(!rb_dpcd_write_allowed(RB_DPCD_SET_POWER - 1u) &&
+             !rb_dpcd_write_allowed(RB_DPCD_SET_POWER + 1u),
+             "and SET_POWER is a single address, not a run");
+        WCHK(!rb_dpcd_write_allowed(0xfffffu) &&
+             !rb_dpcd_write_allowed(0x700u),
+             "the eDP block and the top of the 20-bit space are refused");
+
+        /* ---------------- THE ENCODER ---------------------------------
+         *
+         * dce_aux.c's COMPOSE macros, for a one-byte write to LINK_BW_SET.
+         * The action's low nibble must be clear or it would corrupt the
+         * address, which rb_aux_request_bytes already refuses - asserted
+         * here against the real action byte rather than assumed. */
+        {
+            uint8_t req[4] = { 0, 0, 0, 0 };
+            const uint32_t n = rb_dpcd_write_request(RB_DPCD_LINK_BW_SET, 1u,
+                                                     req, sizeof(req));
+            WCHK(n == 4u, "a one-byte DPCD write composes a four-byte header");
+            WCHK(req[0] == (uint8_t)RB_DPCD_ACTION_WRITE,
+                 "byte 0 is the DP_WRITE action, address bits 19:16 being 0");
+            WCHK(req[1] == 0x01u && req[2] == 0x00u,
+                 "bytes 1-2 are the address, 0x100, big-endian");
+            WCHK(req[3] == 0x00u, "byte 3 is length - 1");
+            WCHK((RB_DPCD_ACTION_WRITE & 0x0fu) == 0u,
+                 "and the action's low nibble is clear, so it cannot corrupt "
+                 "the address");
+        }
+        /* The encoder refuses a denied address on its own, so the allowlist
+         * is enforced in TWO independent places and neither is load-bearing
+         * alone. */
+        {
+            uint8_t req[4] = { 0xaa, 0xaa, 0xaa, 0xaa };
+            WCHK(rb_dpcd_write_request(RB_DPCD_LANE0_1_STATUS, 1u, req,
+                                       sizeof(req)) == 0u,
+                 "the encoder refuses a denied address independently of "
+                 "rb_dpcd_write_refuse");
+            WCHK(rb_dpcd_write_request(RB_DPCD_LINK_BW_SET, 0u, req,
+                                       sizeof(req)) == 0u,
+                 "and refuses a zero-length write, which has no payload to "
+                 "carry");
+        }
+
+        /* ---------------- THE REFUSALS, each for its own reason -------- */
+        const uint32_t okHpd = 2u, okInst = 2u;
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LINK_BW_SET,
+                                  RB_DPCD_LINK_BW_5_4, 1, 1, RB_AUX_COUNT)
+             == RB_DPCD_W_OK,
+             "HBR2 to LINK_BW_SET on HPD2/AUX2 is allowed - the control for "
+             "every refusal below");
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LINK_BW_SET, 0x14u,
+                                  0, 1, RB_AUX_COUNT)
+             == RB_DPCD_W_NOT_ARMED, "unarmed is refused");
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LINK_BW_SET, 0x14u,
+                                  1, 0, RB_AUX_COUNT)
+             == RB_DPCD_W_NO_REGS, "no register mapping is refused");
+        /* THE PANEL, twice, by two different facts. */
+        WCHK(rb_dpcd_write_refuse(RB_DPCD_PANEL_HPD, okInst,
+                                  RB_DPCD_LINK_BW_SET, 0x14u, 1, 1,
+                                  RB_AUX_COUNT) == RB_DPCD_W_PANEL_HPD,
+             "the panel's HPD is refused by name");
+        WCHK(rb_dpcd_write_refuse(okHpd, RB_DPCD_PANEL_AUX,
+                                  RB_DPCD_LINK_BW_SET, 0x14u, 1, 1,
+                                  RB_AUX_COUNT) == RB_DPCD_W_PANEL_ENGINE,
+             "and the panel's ENGINE is refused separately, so neither check "
+             "is load-bearing alone");
+        /* ...and the panel wins over a denied address, so it is refused for
+         * being the panel and not incidentally. */
+        WCHK(rb_dpcd_write_refuse(RB_DPCD_PANEL_HPD, okInst,
+                                  RB_DPCD_LANE0_1_STATUS, 0x14u, 1, 1,
+                                  RB_AUX_COUNT) == RB_DPCD_W_PANEL_HPD,
+             "the panel is refused AS THE PANEL even when the address would "
+             "also have been denied");
+        WCHK(rb_dpcd_write_refuse(okHpd, RB_AUX_COUNT, RB_DPCD_LINK_BW_SET,
+                                  0x14u, 1, 1, RB_AUX_COUNT)
+             == RB_DPCD_W_NO_ENGINE,
+             "an HPD no engine serves is refused - rb_aux_for_hpd's own "
+             "out-of-range answer");
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LANE_ALIGN_STATUS,
+                                  0x00u, 1, 1, RB_AUX_COUNT)
+             == RB_DPCD_W_ADDR_DENIED, "a denied address is refused");
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LINK_BW_SET, 0x100u,
+                                  1, 1, RB_AUX_COUNT)
+             == RB_DPCD_W_VALUE_RANGE,
+             "a value that is not a byte is refused - AUX_SW_DATA carries "
+             "eight bits and the rest would be dropped silently");
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LINK_BW_SET, 0xffu,
+                                  1, 1, RB_AUX_COUNT) == RB_DPCD_W_OK,
+             "while 0xff - the largest byte - is allowed, so the bound is on "
+             "the ninth bit and not on 0xff itself");
+
+        /* The values training actually sends, through the full refusal. */
+        WCHK(rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LANE_COUNT_SET,
+                                  2u | RB_DPCD_ENHANCED_FRAME_EN, 1, 1,
+                                  RB_AUX_COUNT) == RB_DPCD_W_OK &&
+             rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_TRAINING_PATTERN_SET,
+                                  RB_DPCD_TRAIN_PATTERN_1, 1, 1,
+                                  RB_AUX_COUNT) == RB_DPCD_W_OK &&
+             rb_dpcd_write_refuse(okHpd, okInst, RB_DPCD_LINK_CODING_SET,
+                                  RB_DPCD_SET_ANSI_8B10B, 1, 1,
+                                  RB_AUX_COUNT) == RB_DPCD_W_OK,
+             "2 lanes with enhanced framing, training pattern 1 and 8b/10b "
+             "coding all pass - this sink is 2 lanes HBR2 (2BB)");
+
+        /* ---------------- THE VERDICT ---------------------------------
+         *
+         * Four outcomes, not a bool: a sink can ACK a write to a field it
+         * ignores, and that is a finding rather than a failure. */
+        WCHK(rb_dpcd_write_verdict(0, 1, 0x14u, 0x14u)
+             == RB_DPCD_W_V_NO_ANSWER,
+             "no ACK is NO_ANSWER even when the byte reads back - which is "
+             "what a stale readback of an already-set field looks like");
+        WCHK(rb_dpcd_write_verdict(1, 1, 0x14u, 0x14u)
+             == RB_DPCD_W_V_ACK_STORED, "ACK and the byte reads back");
+        WCHK(rb_dpcd_write_verdict(1, 1, 0x14u, 0x0au)
+             == RB_DPCD_W_V_ACK_IGNORED,
+             "ACK and it does not - a real outcome with its own code");
+        WCHK(rb_dpcd_write_verdict(1, 0, 0x14u, 0xffffffffu)
+             == RB_DPCD_W_V_ACK_BLIND,
+             "ACK with no read-back is BLIND, never silently STORED - the "
+             "refused read's 0xffffffff must not be compared as a byte");
+    }
+#undef WCHK
+
     printf("dpcd: 2BA's request layout, the DMCUB arbitration refusal, the "
-           "reply decode, the stuck-index signature, and 2BC's I2C/MOT "
-           "encoding and EDID checks%s\n",
+           "reply decode, the stuck-index signature, 2BC's I2C/MOT "
+           "encoding and EDID checks and 2F3's write allowlist, encoder, "
+           "panel refusals and verdict%s\n",
            bad ? " FAILED" : ": passed");
     return bad;
 }
