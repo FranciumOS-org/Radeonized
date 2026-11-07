@@ -425,13 +425,26 @@ private:
     uint32_t           dptxPcBefore, dptxPcAfter;
     uint32_t           dptxApplied;
     uint32_t           dptxClean;
+    /* 2F5: `applied` says the target state is present, which on a dark
+     * transmitter it ALREADY WAS for all four registers (boot 458). `moved`
+     * is whether any bit changed, and `observable` is whether the requested
+     * pattern COULD have moved TP_SEL at all - TPS1 encodes as 0 and a dark
+     * TP_SEL reads 0, so TPS1 cannot be seen in this register by
+     * construction. Neither is a success criterion; both stop a no-op being
+     * reported as evidence about the sink (rule 20). */
+    uint32_t           dptxMoved;
+    uint32_t           dptxObservable;
     /* The sink's own lane status, before and after - the only part of this
      * verdict we do not write. 0xffffffff is "the read refused" and is NOT
      * the byte 0xff, so the *Ok flags are published beside it (rule 14). */
     uint32_t           dptxSinkBefore, dptxSinkBeforeOk;
     uint32_t           dptxSinkAfter, dptxSinkAfterOk;
     uint32_t           dptxDpcdRefuse;
-    uint32_t           dptxDpcdSet;    /* the DPCD 0x102 write's own code   */
+    uint32_t           dptxDpcdSet;    /* the DPCD 0x102 write's own code -
+                                         * 2F4 captured it and never
+                                         * PUBLISHED it, so boot 458's
+                                         * ACK_IGNORED was invisible to the
+                                         * tool (rule 14 at the boundary) */
     int                dptxVerdict;
 
     /* 2F3: the write. Codes 20..26 so one reader can tell a write refusal

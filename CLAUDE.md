@@ -446,7 +446,29 @@ the READ length and no payload, silently. `dpcdwrite` refuses the panel by name
 **three times** (tool by HPD, kext by HPD, kext by AUX engine) and
 **allowlists** the address to the link-config block (0x100-0x108, 0x600,
 `drm_dp.h`'s by line).
-**2F4 BUILT THE TRANSMITTER HALF and no boot has run it** - `rb_dptx.h` plus
+**2F4 BUILT THE TRANSMITTER HALF; BOOT 458 RAN IT AND IT MOVED NOTHING** (2F5).
+All four of Linux's TPS1 writes are **no-ops on a dark transmitter** and
+`applied 1` was honest every time, because every target state was already
+present: TPS1 encodes as hardware pattern **0** and a dark `TP_SEL` reads 0,
+and the three RMWs each clear a bit a dark instance does not have set. So
+`applied` was exactly **rule 20's** defect and 2F4's "a training pattern on the
+wire" is **withdrawn**. Two more defects in the same run: the sink's lane-status
+after-read FAILED and 2F4's verdict fell through to `PATTERN_SET`, printing the
+run's own instrument failure as its expected outcome; and the DPCD 0x102 write's
+code was captured and never published. 2F5 added `moved` and `observable`
+(neither a success criterion - they stop a no-op being read as evidence about
+the sink), verdicts `NO_OP` 4 and `SINK_BLIND` 5, with **`NO_OP` outranking
+`CR_DONE`** on purpose (rule 17). **THE ONE REAL READING** had to be dug out of
+`RBFBAuxW`: the sink **ACKed `TRAINING_PATTERN_SET` and did not store it**
+(`before 0x00 -> after 0x00`, `changed 0`, verdict 2 `ACK_IGNORED`) - against
+2F3's own 0x100 `0x06 -> 0x14` which DID store, same engine, same sink. Leading
+hypothesis is **ordering**: DPCD `0x600` was never set to D0 and 0x100/0x101 are
+back at their defaults after the reboot, and that is testable with **no kext
+change and no boot** because `-rbgpufbtrain` arms the AUX half. Also recorded:
+the panel's own live `TP_SEL` reads **0x2**, so this register does hold non-zero
+values on this chip. **Use `dptrain go tps=2`** - hardware 1, which CAN move the
+register.
+2F4's build - `rb_dptx.h` plus
 `build/out/dptrain`, the four writes of
 `dcn10_link_encoder_set_dp_phy_pattern_training_pattern` (rule 46 discharged in
 `dcn31_resource.c`: `.dp_set_phy_pattern` IS `dcn10_...`). Registers 0x2108 /
@@ -460,8 +482,9 @@ TPS1..TPS4, DPCD 0x102 takes 1/2/3/**7**, and the two zeros mean opposite
 things (DPCD 0 = training off, hardware 0 = TPS1). Everything speaks TPSn and
 `rb_dptx.h` converts. Verdict = **the sink's own lane status** at DPCD 0x202,
 read before AND after. `PATTERN_SET` is the **expected** reading until the
-transmitter is enabled at the link rate. Needs **`-rbgpufbtrain`**, which arms
-the AUX half itself (rule 34).
+transmitter is enabled at the link rate - but boot 458 got it for the wrong
+reasons twice over, so read `moved` and `observable` beside it. Needs
+**`-rbgpufbtrain`**, which arms the AUX half itself (rule 34).
 Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
@@ -514,7 +537,8 @@ so its own token; rule 30 scanned by hand both ways, and nothing may extend
 this name with a suffix. It ARMS `-rbgpufbaux` itself, since its verdict comes
 from the sink over AUX. Nothing is written until `dptrain go`; the panel's
 transmitter is refused by name in both halves and the write is declined unless
-the panel's own DP0 reads as a trained link),
+the panel's own DP0 reads as a trained link. **`tps=1` is a no-op on a dark
+instance** - boot 458 measured it - so use `dptrain go tps=2`),
 `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,
@@ -565,9 +589,11 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 `~/Developer/Econized`).
 
 **Open:** the rest of the external-display chain above. The pixel clock is DONE
-(boot 455) and the sink takes DPCD writes (boot 457); **2F4's training pattern
-is built and unrun**, and after it the atom transmitter ENABLE at the link rate
-is the next thing that does not exist;
+(boot 455) and the sink takes DPCD writes (boot 457); **boot 458 ran 2F4's
+training pattern and it moved not one bit** (2F5), so the open items are the
+DPCD ordering probe (`0x600` = D0 then re-try `0x102`, free - no boot),
+`dptrain go tps=2` on the 2F5 framebuffer, and then the atom transmitter
+ENABLE at the link rate, still the next thing that does not exist;
 the **wedge** (work submitted that never retires — channel-52 GFX, 3.5 s, the
 "random lag"; `stamp_ticks` 125666 retires the "nothing polls it" family);
 `powermetrics` has **never been run** against the default 576 interior

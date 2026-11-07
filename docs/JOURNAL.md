@@ -61991,3 +61991,101 @@ real zero word — rule 14's trap at the tool boundary, in the very tool whose
 kext-side publisher carries a comment warning about it. Absent keys now print
 as absent.
 
+
+---
+
+## 2F5 — boot 458 ran the training pattern, and it moved nothing
+
+**The run.** `-rbgpufbtrain` armed, boot 458, collection carrying 2F4's
+`6A8AE92D`. `dptrain` identified the block (`panel DP0 reads as a TRAINED
+link: YES`), `dptrain go` refused nothing (`refusal 0`, `calls 1`, `ran 1`),
+and reported `applied 1 clean 1 VERDICT 1 PATTERN SET - the EXPECTED reading`.
+
+**That reading was wrong, and the numbers underneath it say so.** From ioreg:
+
+```
+RBFBDpTxTpBefore 0           RBFBDpTxTpAfter 0
+RBFBDpTxLcBefore 0           RBFBDpTxLcAfter 0
+RBFBDpTxDcBefore 0           RBFBDpTxDcAfter 0
+RBFBDpTxPcBefore 2147483392  RBFBDpTxPcAfter 2147483392   (0x7fffff00)
+RBFBDpTxApplied 1  RBFBDpTxClean 1
+```
+
+**Not one bit moved.** All four of Linux's TPS1 writes are no-ops on a dark
+transmitter, and `applied 1` was *honest* every time because every target state
+was already present:
+
+- TPS1 converts to **hardware pattern 0**, and a dark `TP_SEL` reads **0**. The
+  dial defaulted to the single pattern that cannot be distinguished from the
+  dark state in this register.
+- `TRAINING_COMPLETE` (0x10) is already clear in a `LINK_CNTL` of 0.
+- `DPHY_BYPASS` (0x10000) is already clear in a `DPHY_CNTL` of 0.
+- `PRBS_EN` (0x1) is already clear in `0x7fffff00`.
+
+So `applied` is exactly the defect **rule 20** names — a readback agreeing with
+a target that was already there — and it was committed in 2F4 with rule 20
+written on the reference card and already paid for in 2E6. The journal's "the
+first training pattern this project has put on a wire" claim is **withdrawn**:
+nothing was put on anything.
+
+**Two further instrument defects in the same run.**
+
+1. `RBFBDpTxSinkAfterOk` = **0** — the sink's lane-status read *failed* after
+   the write, while the before-read succeeded (`SinkBeforeOk 1`, `SinkBefore
+   0x00`). 2F4's verdict function fell through `sink_read_ok` to
+   `PATTERN_SET`, so **the run's own instrument failure printed as its expected
+   outcome**. Rule 14's shape at the verdict rather than at a key.
+2. `dptxDpcdSet` — the code the DPCD 0x102 write returned — was captured into a
+   field and **never published**. The tool could not see it.
+
+**The one real hardware reading the run produced** was therefore invisible to
+`dptrain` and had to be dug out of the AUX write record:
+
+```
+RBFBAuxWAddr 258 (0x102)   RBFBAuxWValue 1 (TPS1)   RBFBAuxWInst 2
+RBFBAuxWAcked 1            RBFBAuxWBefore 0   RBFBAuxWAfter 0
+RBFBAuxWApplied 0          RBFBAuxWChanged 0  RBFBAuxWVerdict 2
+```
+
+**The sink ACKed `TRAINING_PATTERN_SET` and did not store it** — verdict 2,
+`ACK_IGNORED`, the case 2F3 built the field for precisely because a sink can
+ACK a write to a field it ignores. Note the contrast with 2F3's own boot-457
+result, where 0x100 went `0x06 -> 0x14` and stored. Same engine, same sink, two
+different outcomes by address.
+
+**The leading hypothesis is ordering, not the block.** Nothing had powered the
+receiver up or set the link parameters this boot: DPCD `0x600` (SET_POWER) was
+never written to D0, and 0x100/0x101 are back at their defaults after the
+reboot. A receiver in D3 answering link-config writes and discarding them is
+ordinary. That is testable **with no kext change and no boot** — `dpcdwrite`
+is armed in this boot because `-rbgpufbtrain` arms the AUX half (rule 34).
+
+**Also recorded, not pursued:** `DP0_DP_DPHY_TRAINING_PATTERN_SEL` on the
+panel's live trained link reads **0x2**, so this register does hold non-zero
+values in practice on this chip.
+
+**Fixed.** `rb_dptx.h` gained `rb_dptx_moved()` (did any bit change) and
+`rb_dptx_pattern_observable()` (could the requested pattern have moved `TP_SEL`
+at all, against the *live* word). Neither is a success criterion — a correct
+write of an already-present value legitimately moves nothing; they are the
+terms that stop such a write being reported as evidence about the sink. Two new
+verdicts, both of which boot 458 was reported as `PATTERN_SET`:
+`RB_DPTX_V_NO_OP` (4) and `RB_DPTX_V_SINK_BLIND` (5). **`NO_OP` outranks
+`CR_DONE` deliberately** (rule 17: a write that wrote nothing cannot be
+credited with the sink's state, whatever that state is), and `NO_STORE` still
+outranks `NO_OP`. `RBFBDpTxMoved`, `RBFBDpTxObservable` and `RBFBDpTxDpcdSet`
+are published; `dptrain` prints per-register `unchanged`/`CHANGED`, the DPCD
+0x102 code by name, and points at the `RBFBAuxW` record for the ACK.
+
+**Hosttest:** the four measured word pairs asserted to move nothing, `applied`
+asserted honest on all four anyway, TPS1 asserted unobservable against a
+`TP_SEL` of 0 while TPS2/3/4 are observable, observability asserted against the
+live word rather than the pattern, `moved` asserted to fire on each of the four
+registers independently, and all six verdicts including both new ones. **Four
+break-it checks, one per new guard, all four fired** (1, 2, 1, 1 failures).
+
+**Next, in order.** (a) The free measurement above: `0x600` = D0, then re-try
+`0x102`. (b) `dptrain go tps=2`, which encodes as hardware 1 and *can* move
+`TP_SEL` — the write that tests whether this block answers us at all. Needs
+the 2F5 framebuffer (`89A6F41C`) for the verdict to be readable. (c) The atom
+transmitter ENABLE at the link rate, still the thing that does not exist.
