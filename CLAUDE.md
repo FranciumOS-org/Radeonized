@@ -414,19 +414,28 @@ running did not move it either, so **order is not the missing thing**. That
 register is the suspect as much as the PHY: it is the legacy fallback Linux
 reads only when DMCUB is absent and it already disagreed with `QUERY_DP_ALT` on
 all five PHYs, so `dig` needs a verdict register that is not this one.
-**2FB (boot 464): the second raster SCANS — `OTG1_CONTROL 0x300 ->
-0x00011201`, 16 writes of 16, frame counter advancing — AND IT WAS NOT THE
-MISSING THING.** With the raster and the clock both live, `dig fe` moved
-`DIG_BE_CNTL 0x20000000 -> 0x20000400` (`FE_SEL 0 -> 0x4`) and `dptrain go
-tps=2` moved `TP_SEL 0 -> 1`, and **DPCD `0x202` still read `0x00` before and
-after**; `PHY_CNTL6` still `0x00063333`, third boot unmoved. So 2F9's defence
-of that `0x00` is spent. **And the raster runs at 8.2726× its programmed
-timing** — 496.35 Hz over 20 s, implying 1228.47 MHz where 148.50 was
-programmed, with the live registers holding H_TOTAL 2200 / V_TOTAL 1125. **So
-OTG1 is not clocked by the DTO we programmed**; the mechanism is open (2× the
-600 MHz reference is a candidate, not an identification). The DTO refuses a
-second write on a live pipe, so settling it costs a boot, and the
-discriminating form is a different `H_TOTAL × V_TOTAL`, not a different clock.
+**2FB-2FE settled the raster and the clock, and neither was the blocker.**
+The second raster scans (`OTG1_CONTROL 0x300 -> 0x00011201`, boot 464) and the
+8.27x rate it ran at was **`PIPE_DTO_SRC_SEL`**: boot 468 at `srcsel=0`
+measured 59.98 Hz against 60 asked, ratio **0.9997**, against 8.2726 (boot
+464) and 8.1293 (boot 467) at `srcsel=1`. The default is now **0** and the
+2 x 600 MHz candidate is **dead as a mechanism**. `rb_dpdto.h`'s argument for
+Linux's 1 stands on source grounds and is not withdrawn; the dial keeps both.
+With the clock right, boot 468 re-ran the whole chain — `dig fe` moved
+`FE_SEL 0 -> 0x4`, `dptrain tps=2` moved `TP_SEL 0 -> 1` — and **DPCD `0x202`
+still read `0x00` before and after**.
+
+**THE BLOCKER: the digital transmitter answers every write and the ANALOG PHY
+IS OFF.** PHY2 `0x00063333` — no reference clock, not one enabled MPLL, all
+four lanes at pstate 3 — against PHY0's `0x00194444` (four MPLLs, ref_clk en
+and req) as the in-boot control, **four boots unmoved** (459, 461, 464, 468).
+The question is **what powers up an RDPCSTX lane**, not whether our writes
+land; the atom transmitter ENABLE has run since 2E2 and does not do it.
+`PHY_CNTL6` is a **suspect, not a witness** — it is the legacy fallback Linux
+reads only when DMCUB is absent and it has contradicted `QUERY_DP_ALT` on all
+five PHYs since 2EB, so `dig` still needs a verdict register that is not this
+one (2FC's `DIO_LINK*_CNTL` was tried: all zeros). `rb_dpalt.h` has **no
+setter** and Linux marks that write path "avoid if possible".
 
 **THE CABLE MUST BE PLUGGED IN AT BOOT (2FB).** Plugged in afterwards, every
 AUX read returns **refusal 3** on engine "AUX5" (= `RB_AUX_COUNT`, none):
