@@ -60629,3 +60629,204 @@ a second `IOFramebuffer`.
 
 No code changed. Framebuffer **AFC2BA4A** unchanged — this is a reading of the
 2EA binary.
+
+---
+
+## 2EC — DIG_FE_SOURCE_SELECT: the one remaining step that is ours, written
+
+**Built and hosttested. NOTHING HAS BEEN WRITTEN — no boot has run it.**
+Framebuffer **D6B93717** (from 2EA/2EB's AFC2BA4A).
+
+### Why this and why now
+
+2EB closed the question underneath it. The reply path works at REGION4, DP
+alt mode **is** granted on PHY2, and `is_usb` matched 2E1's ROM bit for bit
+across all five phys. So there is a granted link under this step for the
+first time, and 2E8 had already established that the step is genuinely
+undone and genuinely ours:
+
+* `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` reads **0 on DIG2** against **0x1
+  DIGA** on the panel's DIG0 in the same sample (boot 447, `DigSends` 0, so
+  the words were pristine).
+* `command_table_helper2_dce112.c:94` on `dig_encoder_sel_to_atom`: "On any
+  ASIC after DCE80, we **manually program** the DIG_FE selection (see
+  connect_dig_be_to_fe...), so translation should always return 0 (no FE)."
+  The atom transmitter command carries no front end **by design**, so no
+  firmware bring-up could ever have made this connection. 2E7's hope that
+  the read would collapse the candidate was worth testing and the answer was
+  no.
+
+`rb_digbe.h` said twice that it had no write surface and that 2E1's write,
+"if it is still wanted after the reading, is its own decision". The reading
+was taken; the decision is the user's standing instruction to make the
+Type-C display work.
+
+### What Linux does, read not recalled
+
+`dcn10_link_encoder.c:1353-1372`:
+
+```c
+if (engine != ENGINE_ID_UNKNOWN) {
+    REG_GET(DIG_BE_CNTL, DIG_FE_SOURCE_SELECT, &field);
+    if (connect) field |=  get_frontend_source(engine);
+    else         field &= ~get_frontend_source(engine);
+    REG_UPDATE(DIG_BE_CNTL, DIG_FE_SOURCE_SELECT, field);
+}
+```
+
+An **OR into the live field, inside an RMW of the live word**. The field
+accumulates because one back end can be fed by more than one front end
+(MST). `rb_digbe_fe_word()` reproduces that exactly and carries through
+DIG_MODE, 2E8's `DIG_HPD_SELECT` 2 and every undocumented bit. This is
+rb_enc's `REG_UPDATE` half, not its `REG_SET` half, and the difference
+matters for the same reason it did there: a whole-word store would destroy
+fields this project has measured as the firmware's own work.
+
+### THE FRONT END IS NOT THE BACK END'S INDEX
+
+Established from the caller, not inferred from the numbering.
+`link_hwss_dio.c:54-55` passes `pipe_ctx->stream_res.stream_enc->id` — the
+**stream** encoder the resource allocator happened to hand this pipe, not
+the link encoder's own instance. `dcn31_resource.c:876` gives
+`num_stream_encoder = 5`, so the legal masks are DIGA..DIGE and **any free
+front end may drive DIG2**. The default is **DIGC (0x4)**, which mirrors the
+index for readability and for nothing else.
+
+The field is a **one-hot mask, not an index** (`dcn10_link_encoder.c:53-60`:
+INVALID 0x0, DIGA 0x1, DIGB 0x2, DIGC 0x4, DIGD 0x8, DIGE 0x10), so `feName()`
+prints the name beside the number — reading 0x4 as "front end 4" is 2E1's
+hpdsel trap with the arrow reversed.
+
+### AND THE ORDER IS READ OFF LINUX RATHER THAN CHOSEN
+
+`link_dpms.c:2527`, in its own words: "Have to setup DSC before DIG FE and BE
+are connected (**which happens before the link training**)." The FE connect
+lives in `setup_dio_stream_encoder`; `enable_dp_output` —
+`enc1_configure_encoder` plus the VBIOS transmitter command — runs **inside**
+link training, reached through `dp_enable_link_phy`.
+
+**So 2E4 and 2E6 both sent the transmitter ENABLE with the front end
+unconnected, which is the inverse of Linux's sequence.** That is a second
+reason their STILL verdicts were not evidence about this firmware, alongside
+2E9's finding that they read the wrong register layer. The sequence is now
+**FE connect -> configure encoder -> transmitter ENABLE**, all inside one
+`setProperties` call, because a precondition that is a previous command is one
+that gets skipped (rule 34; 2DA lost two sessions to that shape).
+
+The back-end instance is the phyid for the reason 2E5 recorded —
+`link_regs(2, C)` hands one index to `LE_DCN31_REG_LIST`,
+`UNIPHY_DCN2_REG_LIST` and `DPCS_DCN31_REG_LIST`, so DP2_*, RDPCSTX2 and
+UNIPHY_C are one port. The **front** end is not that index and is not derived
+from it.
+
+### Two refusals by name, and one that is new in kind
+
+* **Back end 0** — the panel's, 2E8's FE_SEL 0x1 / HPD_SELECT 0.
+* **Front end DIGA** — that same panel's stream encoder. The field
+  **accumulates** rather than replaces, so ORing DIGA into DIG2 would put the
+  live desktop's stream encoder onto a second back end with no pipe, no clock
+  and no timing behind it. That is the one way this write can reach the
+  working display, so it is declined by name and not by arithmetic. DIGE is
+  accepted, which the hosttest pins — the refusal is about DIGA, not about
+  "any front end but DIGC".
+* **RULE 47 ASKED OF A WRITE.** Every guard in this header until now existed
+  to stop a wrong address being READ as a finding (2DD: a readable wrong
+  address answers plausibly). A write to a wrong address inside a mapped
+  aperture *does something*. So `rb_digbe_mode_valid()` on the **live** word
+  is now a refusal rather than a decode: if the dword does not already decode
+  to one of the five modes `dcn10_link_encoder_setup` writes, it is not
+  `DIG_BE_CNTL` and nothing is stored. Establish the register is the one the
+  conclusion assumes **before acting on it**, not after.
+
+Refusal codes are **60-69**, clear of rb_dig's 30-37, rb_enc's 40-45 and
+rb_dpaltq's 50-55, and the bad-front-end cases get **three** codes rather than
+one, because 0 (the documented INVALID), 0x6 (two bits) and 0x20 (a sixth
+front end this part does not have) are three different mistakes and one code
+could not say which (rule 14).
+
+### The readback decides, and `applied` has two companions
+
+`rb_digbe_fe_applied()` is the front end's bit reading back set.
+
+* **`feChanged`** — the word moved at all. 2E6 is why: on rb_enc,
+  `before == after == target` made `applied` read 1 whether the store landed,
+  was dropped or was never issued, and only publishing the BEFORE words beside
+  it found that. Here 2E8 measured DIG2's FE_SEL as 0, so a real write **must**
+  move the word, and `changed` is the half carrying evidence of the store.
+* **`feClean`** — no bit outside FE_SEL moved. This is the first write this
+  header makes, so a store landing on a neighbouring dword, or a REG_SET where
+  an RMW was meant, shows up here and nowhere else. The hosttest proves it can
+  fail, so it is not a constant 1.
+
+Raw `feBefore`/`feAfter` are published beside all three — publishing raw
+beside summary has now paid for itself six times (2B0, 2B4, 2B9, 2E6, 2EB,
+and `feClean` means nothing without them).
+
+### Rule 30 bit again, two milestones after it bit
+
+`-rbgpufbdigfe` has **`-rbgpufbdig`** as a strict prefix — exactly the
+arrangement rule 30 names, and exactly what 2EA hit with `-rbgpufbdpaltq`
+against `-rbgpufbdpalt`. The kernel's own parse is exact so it would have
+worked there; what breaks is every shell grep in `tools/` and `efi.sh`'s token
+report. Hence **`-rbgpufbfe`**, checked mechanically over all **21** real
+`argOn()` tokens in `src/`, both directions, no pairs.
+
+It arms its own dependencies (rule 34): the DMUB ring, because the FE connect
+is sequenced inside the transmitter experiment, and the PHY aperture, because
+these dwords live in the block `dpaltFits` bounds (0x24b0 is under
+`rb_enc_dw_max()`'s 0x251e and so under `rb_dpalt_dw_max()`'s 0x2ca6 — the
+hosttest pins the relation rather than the comment asserting it). **Even armed
+nothing is written until a front end is named**: the dial defaults to 0, which
+is the documented INVALID and is refused, so `-rbgpufbfe` alone reproduces
+2E6's arm exactly.
+
+### Eleven guards, eleven breaks, and the -Werror trap for the fifth time
+
+Every guard got its own break-it check and **all eleven fire** — the OR
+becoming a replace, the RMW becoming a REG_SET (3 assertions), the live-word
+check, the DIGA refusal, the back-end-0 refusal, one-hot, range, FE 0,
+`clean` as a constant, `changed` as a constant, and `applied` testing
+non-zero-ness instead of the bit. 2E7's rule is why each was run separately
+rather than reasoned about: the same defensive check is load-bearing in one
+decoder and dead in another.
+
+The live-word break **broke the build** on the first attempt — deleting the
+line left `rb_digbe_mode_valid()` unused and `-Werror` killed it, so
+`make hosttest` ran the previous binary and reported **zero FAIL lines**,
+which reads exactly like a guard that does not matter. **Fifth instance**
+(2B1, 2BC, 2E7, 2E8, this), caught only by grepping `error:` as well as
+`FAIL`. Re-run as `if (0 && ...)`, it fires two assertions.
+
+### The reading to take, one boot, and the A side must come first
+
+```
+sudo tools/efi.sh bootarg add -rbgpufbfe
+# reboot, then:
+sudo env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dig 2          # A
+sudo env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dig 2 fe       # B
+```
+
+**There is no disconnect path, so A must be run first in a boot** — once the
+front end is connected it stays connected until reboot. The tool says so in
+its own banner.
+
+Said before the reading so it can be wrong:
+
+* **`RBFBDigFeChanged` 1 with `RBFBDigFeClean` 1 and the PHY verdict MOVED or
+  LIT** — the FE connection was the missing step, and the external display's
+  bring-up continues at the pixel clock with a transmitter that is up.
+* **Changed and clean with the PHY STILL** — the expected reading, and still
+  **not** "the firmware discards VBIOS commands": of the two steps 2E6 named
+  as unreproduced, **one is left**, the pixel clock (`DMUB_CMD__VBIOS`
+  sub-type **2**), another inbox command of the kind 2E9 proved executes and
+  2EB proved answers. A transmitter with a front end and no clock still has
+  nothing to light.
+* **Not clean** — the address or the RMW is wrong and the whole run is
+  suspect, including the PHY verdict. The tool refuses to interpret it.
+* **Applied without changed** — would contradict 2E8's FE_SEL 0 on DIG2 and
+  is worth reading twice rather than celebrating.
+
+**What is NOT reproduced, named here rather than discovered later:**
+`enc31_map_stream_to_link` (`link_hwss_dio.c:63` — a second register tying the
+front end to the link, which this project has not located) and the pixel
+clock. Both sit between a connected front end and a scanning pipe.
