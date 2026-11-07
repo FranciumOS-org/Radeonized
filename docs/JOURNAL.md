@@ -61554,3 +61554,157 @@ practice):
   SRC_SEL is the wrong way round, which is one interleaved command away in the
   same boot.
 - **Refusal 42** means nothing was written and the gate worked.
+
+---
+
+## 2F2 — the DP DTO is running on pipe 1 (boot 455), and the instrument erased its own result
+
+**Boot 455.** `rbgpu-boot` = 455, `kern.boottime` Fri Nov 6 21:55:04 2026.
+Rule 8 first: this boot is armed and the framebuffer loaded is 2F1's.
+
+### What happened
+
+`dmubbl dto` was run **twice** in this boot. `RBFBDtoProgCalls` = 2,
+`RBFBDtoProgRan` = **1**. The first invocation wrote; the second was refused
+by the already-live guard with code **45**, and the refusal is what was
+captured in the transcript.
+
+The second invocation printed `VERDICT -1 NOT RUN` and
+`PIXEL_RATE_CNTL 0x8000d090 -> 0x8000d090`, `changed 0`, `applied 0`. **None
+of that is a reading of the write.** It is 2F1's instrument destroying the
+record of the only run it was built for — see "the instrument" below.
+
+### The finding, from a bit we do not write
+
+`OTG1_PIXEL_RATE_CNTL`, pipe 1:
+
+| | word | decode |
+|---|---|---|
+| before (2F0 **and** 2F1, two boots, pipes 1-3 byte-identical) | `0x8000c000` | `DIO_FIFO_ERROR` 3, `DTBCLK_DTO_DIV` 8 |
+| the word this kext writes, `rb_dpdto_rate_word(0x8000c000, 1)` | `0x8000d010` | + `DP_DTO_ENABLE`, + `PIPE_DTO_SRC_SEL` |
+| after | **`0x8000d090`** | + **`DPDTO_ENABLE_STATUS`** |
+
+`0x8000d090 ^ 0x8000d010 == 0x80`. **One bit, and it is bit 7,
+`DPDTO_ENABLE_STATUS`** — which `rb_dpdto_rate_word()` does not set and
+cannot set, since it only ever touches `DP_DTO_ENABLE` and `SRC_SEL`. 2F0
+attested both of that bit's states on this chip before anything was
+programmed (set on the pipe scanning the panel, clear on all three dark
+ones), in two boots.
+
+So the verdict is **STARTED**, and it is derived from the hardware's own bit
+rather than read out of `RBFBDtoProgVerdict` — which the refused second call
+had already overwritten. That is the stronger of the two paths, not a
+fallback: it rests on 2F0's measured baseline plus one bit of difference, and
+owes nothing to a field this kext computes.
+
+`DTBCLK_DTO_DIV` (8) and `DIO_FIFO_ERROR` (3) came through untouched, which
+is the RMW's duty and is now asserted against the **measured** word rather
+than the modelled one.
+
+### The in-boot control, which is better than the write path's readback
+
+From the **periodic** sample in the same window — not the write path, so not
+our own store read back (rule 20), and not a comparison across boots
+(rule 44):
+
+```
+RBFBDto0Rate 0x80000090  panel, exactly 2F0's word      PHASE 343000000  MODULO 600000000
+RBFBDto1Rate 0x8000d090  OURS                           PHASE 148500000  MODULO 600000000
+RBFBDto2Rate 0x8000c000  still dark, byte-identical     PHASE 0          MODULO 0
+RBFBDto3Rate 0x8000c000  still dark, byte-identical     PHASE 0          MODULO 0
+```
+
+**The change is confined to the pipe the dial named.** Pipes 2 and 3 still
+hold the dark word to the byte and their PHASE/MODULO are still zero; the
+panel's pipe 0 is untouched in all three registers. That is what makes "our
+write did this" a reading rather than a sequence of events, and it is the
+control 2F1's own readback could never have been.
+
+The safety case is discharged by observation as well: the panel kept
+scanning throughout, so nothing landed on the DOMAIN power gating that shares
+these offsets at the other candidate base.
+
+`RBFBDtoExpectedHz` reads 342 125 890 this boot against 341 987 984 and
+342 287 571 in the two before. All three are inside the 0.5 % window and this
+is the panel's known DP spread-spectrum shape. **Not a finding**, recorded so
+it is not mistaken for one later.
+
+### What this does NOT establish
+
+**A picture.** There is no OTG timing on pipe 1, no trained link, no stream
+mapped to the encoder and no surface. A dark monitor is the **expected**
+reading and says nothing against the clock. Rule 45: the deliverable is
+something a human observes, and this is not it.
+
+Nor does it establish what `PIPE_DTO_SRC_SEL` selects. Linux's 1 was written
+and the DTO started; the firmware's 0 is on the panel's pipe and that works
+too. Two words are not a mechanism (rule 17). The `srcsel=0` dial exists for
+whenever there is something downstream to tell the two apart — and on a live
+pipe it now needs a reboot first, because nothing here turns a DTO off.
+
+`DIO_FIFO_ERROR` stayed **3** on a pipe whose DTO had just been started, so
+it does not clear on the DTO alone. A reading, not an interpretation; nothing
+consumes it as a verdict.
+
+### The instrument (rule 16, and it cost the reading it was built for)
+
+2F1 published **one** field set for both "what this call asked for" and "what
+the write did", and `dtoProgram()` reset the second set at entry:
+
+```c
+dtoProgApplied = 0; dtoProgChanged = 0; dtoProgClean = 0;
+dtoProgVerdict = RB_DPDTO_PROG_NOT_RUN;
+...
+dtoRateBefore = ...; dtoRateAfter = dtoRateBefore;
+...
+if (why != RB_DPDTO_W_OK) { return dtoProgRefuse = why; }
+```
+
+A second invocation therefore republished a **successful** write as
+`verdict -1 NOT RUN`, `before == after == 0x8000d090`, `changed 0`,
+`applied 0`. `RBFBDtoRateBefore` now reads `0x8000d090` — the word that was
+*after*, stored as *before*. Only the monotonic `dtoProgRan` survived to say
+a write had happened at all, and that was luck rather than design.
+
+The galling part: the second invocation was refused by the guard that is
+*supposed* to fire there. The guard worked perfectly and the instrument threw
+away the result it was protecting.
+
+**2F2 splits the two.** `dtoCall*` is what the most recent call asked for and
+saw (`dtoCallInst`, `PixHz`, `SrcSel`, `RefHz`, and `dtoCallLive`, the
+target's live word). `dtoProg*`/`dtoRate*` are the record of the last call
+that actually **wrote**, and a refusal now touches nothing but
+`dtoProgCalls`, `dtoProgRefuse` and the `dtoCall*` set. The tool prints the
+two under separate headings with `calls` and `ran` both visible — 2F1 polled
+`RBFBDtoProgCalls` for monotonicity and then never printed it, so "two calls,
+one write" was invisible at the tool boundary (rule 14's shape there).
+
+The dial's selector moved to `dtoCallInst`/`dtoCallSrcSel` for the same
+reason: it had been sharing storage with the run record.
+
+`dmubbl dto` also grew the case it hit: a refusal 45 whose live word carries
+`DPDTO_ENABLE_STATUS` now prints what that means — the guard doing its job
+**and** an independent confirmation of the write, taken from a bit we do not
+write — and says a further write needs a reboot.
+
+### Checks
+
+Ten new hosttest cases, all pinned to **boot 455's own words** rather than to
+a model: the XOR being exactly the status bit, the 0→1 transition, the
+verdict over it, `DTBCLK_DTO_DIV` and `DIO_FIFO_ERROR` surviving the RMW,
+`applied` **and** `changed` together, the second call refusing as `PIPE_LIVE`
+*with the same call against the dark word allowed as its control* (so
+`PIPE_LIVE` is demonstrably the live word's doing and not another gate's),
+the in-boot control's decode, and the SRC_SEL divergence between two measured
+words.
+
+`RB_DPDTO_FIFO_ERROR` and `RB_DPDTO_DTBCLK_DIV` are named in `rb_dpdto.h`
+now, because the RMW's duty is asserted against a measured word and these are
+the two fields it must carry through — a field nothing reads would have been
+a fourth place for the same number to live.
+
+**Rule 48: ten break-it checks, ten fired, none hit the `-Werror` trap**
+(each break was written to compile). One `-Wformat` slip of my own on the way
+— a `%ld` with no argument in the new refusal-45 paragraph — caught by the
+build, not by a test.
+

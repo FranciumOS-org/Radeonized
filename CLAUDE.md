@@ -410,13 +410,26 @@ DOMAIN power-gating block at BASE_IDX 2 — and boots 452 and 453 both
 cautions for the write: `PIPE0_DTO_SRC_SEL` is **0** where Linux writes 1 and
 the panel works anyway, and **PHASE is the requested clock, not a readback**
 (343.000000 MHz against a raster wanting 342.288, DRR ruled out) so it cannot
-be the verdict register. **2F1 BUILT those three writes and no boot has run them**: `dmubbl dto`, on a
-dark pipe, refused unless *this boot's own* sample confirmed the base, with
-MODULO **copied off pipe 0** (PHASE/MODULO is a ratio, so the true reference
-never has to be known) and the verdict taken from `DPDTO_ENABLE_STATUS` — a bit
-we do not write, whose two states 2F0 attested here first. `SRC_SEL` defaults
-to Linux's **1** with the firmware's 0 as an interleavable dial. A STARTED
-verdict means a clock, **not a picture**: nothing downstream exists yet.
+be the verdict register. **THE PIXEL CLOCK IS RUNNING** (2F1 built the writes, boot 455 ran them).
+Pipe 1's `OTG1_PIXEL_RATE_CNTL` went `0x8000c000` → **`0x8000d090`**: our RMW
+(`DP_DTO_ENABLE` + `PIPE_DTO_SRC_SEL`, `DTBCLK_DTO_DIV` 8 and
+`DIO_FIFO_ERROR` 3 carried through) **plus exactly one bit we do not write,
+`DPDTO_ENABLE_STATUS`**, whose two states 2F0 attested here first in two boots.
+PHASE 148 500 000 (the sink's own preferred timing), MODULO **copied off
+pipe 0** — PHASE/MODULO is a ratio, so the true reference never has to be
+known. The in-boot control is better than the write path's readback: in the
+same periodic sample pipes 2-3 still hold the dark word **byte-identical**
+with PHASE/MODULO 0, and the panel's pipe 0 is untouched, so the change is
+confined to the pipe the dial named. The panel kept scanning, which discharges
+the DOMAIN-collision safety case by observation. **It is a clock, NOT a
+picture** — no OTG timing on that pipe, no trained link, no stream mapped, no
+surface. `SRC_SEL` is Linux's 1 where the firmware left pipe 0's at 0; what it
+selects is still not established and the `srcsel=0` dial now needs a reboot
+first, because nothing turns a live DTO off. A second `dmubbl dto` is refused
+**45** by the already-live guard, which is also an independent reading of the
+status bit. 2F2 split the published fields in two (`dtoCall*` = this call,
+`dtoProg*` = the last call that WROTE) because 2F1's single set let that
+refusal republish the successful write as `verdict -1 NOT RUN`.
 Then link training over AUX2 (driver-side — zero `dmub`
 references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
@@ -454,7 +467,8 @@ which is measured false), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
 each arms its own dependencies and sends nothing until `build/out/dmubbl` names
 a target; **PHY0 / DIG0 / front end DIGA are the panel's and are refused by
 name**), `-rbgpufbaux` (native AUX DPCD read),
-`-rbgpufbdto` (2EF's DP DTO read **and 2F1's write** - opt-in because the
+`-rbgpufbdto` (2EF's DP DTO read and 2F1's write, **which boot 455 ran** -
+opt-in because the
 offsets collide with the DOMAIN block at the base this kext holds. No second
 token was added: `-rbgpufbdtoprog` would have this one as a prefix, the shape
 rule 30 forbids. Even armed **nothing is written until `dmubbl dto` names a
@@ -509,8 +523,9 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 (`rbgpuretiredrain`, measured dead); **efficiency/power** (moved to
 `~/Developer/Econized`).
 
-**Open:** the pixel clock (base CONFIRMED on boot 452; the three writes are
-next) and the rest of the external-display chain (above);
+**Open:** the rest of the external-display chain above - the pixel clock is
+DONE (boot 455, `DPDTO_ENABLE_STATUS` 0 → 1 on pipe 1), and link training over
+AUX2 is next;
 the **wedge** (work submitted that never retires — channel-52 GFX, 3.5 s, the
 "random lag"; `stamp_ticks` 125666 retires the "nothing polls it" family);
 `powermetrics` has **never been run** against the default 576 interior
