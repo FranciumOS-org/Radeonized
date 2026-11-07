@@ -62343,3 +62343,41 @@ Nothing here puts a picture on the monitor, and nothing here is progress toward
 one — it is two hypotheses removed and a prerequisite discovered. **The sink's
 DPCD has to be got answering again before any sink-side verdict means
 anything**, and that now sits in front of the atom transmitter ENABLE.
+
+### 2F7a — the EDID reads zero too, so it is the channel or the port, not the receiver
+
+After the monitor was power-cycled, `dpcdread 0x0 4 2` still read
+`00 00 00 80`. So candidate 3 (a power-cycle or renegotiation explains it) is
+out, with one caveat recorded: **`RBFBHpdChanges` is still 0 for the whole
+boot**, and the periodic sample is 500 ms against a replug that takes seconds,
+so the HPD line is not known to have moved at all. A monitor power-cycle that
+never dropped HPD is a weaker arm than intended (rule 34).
+
+The control that settles the rest: **the EDID over I2C-over-AUX**, a *different
+endpoint* on the *same* AUX engine, which read `MSI MP2412C` in 2BD.
+`build/out/edidread` now returns **128 bytes of 0x00**, `header BAD`,
+`defers 0`, return `0xe00002ca`.
+
+**Both endpoints are zero.** That rules the DP receiver's own state out as the
+sole cause, because the DDC EEPROM is a separate device behind the same
+channel. What is left:
+
+1. the AUX channel or the Type-C port itself;
+2. our native read path, which would have to be returning zeros for *both* the
+   native and the I2C paths.
+
+And a third that 2F7 did not consider: **we may have done this.** Boot 457 read
+both endpoints correctly. Since then this project has written `0x100` = `0x14`
+(HBR2) into a receiver whose caps now read rate 0, written training patterns to
+`0x102`, and moved `TP_SEL` on DP2 three times. "The link was told to expect
+HBR2 and nothing drives it" is not an established mechanism, but it is the
+first candidate that is *ours*.
+
+**docs/RULES.md's rule 47 already describes this symptom shape** — "this chassis'
+Type-C subsystem can die in a way that survives a reboot and a reinstall and is
+cleared only by a 30-second power-key hold." That makes the recovery known and
+the next boot's first read the measurement: **read the EDID before writing
+anything**. If it reads `MSI MP2412C` on a cold boot, this boot's zeros were a
+state we or the port entered, and the writes since boot 457 are the suspects.
+If it still reads zero after the power-key hold, the port is the suspect and no
+sink-side reading is available at all.
