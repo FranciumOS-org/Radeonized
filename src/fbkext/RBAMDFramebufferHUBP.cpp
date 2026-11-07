@@ -25,6 +25,8 @@
 #include "rb_hpd.h"
 #include "rb_aux.h"
 #include "rb_dpalt.h"
+#include "rb_dpdto.h"
+#include "rb_drr.h"
 #include "rb_dcn_deny.h"
 #include "rb_regs.h"
 #include <IOKit/pci/IOPCIDevice.h>
@@ -74,6 +76,21 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpTripleReadback = 0;
     hpdReady = false;
     dpaltReady = false;
+    dtoReady = false;
+    dtoExpectedHz = 0;
+    dtoRefSrc = RB_DPDTO_REF_SRC_NONE;
+    dtoHTotal = 0;
+    dtoVTotal = 0;
+    dtoRefreshMhz = 0;
+    dtoRefHz = 0;
+    dtoBaseVerdict = RB_DPDTO_BASE_NOT_SAMPLED;
+    dtoPipeVerdict = RB_DPDTO_PIPE_NOT_SAMPLED;
+    for (unsigned i = 0; i < RB_DPDTO_COUNT; i++) {
+        dtoAlias[i] = 0;
+        for (unsigned r = 0; r < RB_DPDTO_REG_COUNT; r++) {
+            dtoWord[i][r] = 0;
+        }
+    }
     hpdSinkMask = 0;
     hpdSinkEver = 0;
     hpdEnMask = 0;
@@ -195,6 +212,28 @@ bool RBAMDFramebuffer::hubpSetup(void)
     /* 2EC: `feArmed` ORs in too - the DIG_BE_CNTL dwords this write
      * touches top out at 0x24b1, inside the same bound. */
     dpaltReady = (dpaltArmed || digArmed || feArmed) && dpaltFits;
+
+    /* 2EF: the DP DTO's own bound, separate for the same reason 2C0 kept the
+     * PHY blocks out of `needed`: an opt-in read must not be able to refuse
+     * hubpSetup() and take the panel with it (rule 16).
+     *
+     * SAY WHAT THIS CHECK CAN AND CANNOT DO. BASE_IDX 1 is 0xc0, so the
+     * highest dword here is 0xc0 + 0x8f = 0x14f - FAR BELOW the 0x34c0-based
+     * dwords `needed` already bounds, and BAR5 is 512 KB (0x20000 dwords).
+     * At today's aperture this comparison cannot fail, and a check that
+     * cannot fail is not a check (rule 48). It is here anyway, and labelled,
+     * because it is an assertion about the APERTURE rather than about our
+     * arithmetic: `length` is read from the live BAR at runtime, and the one
+     * thing that must never happen is a dereference outside it (rule 19).
+     * What it is NOT is evidence the base is right - that comes from the
+     * chip, below. */
+    {
+        const uint32_t dtoNeeded = RB_DPDTO_SEG1 + rb_dpdto_dw_max();
+        const uint32_t aliasNeeded = RB_DPDTO_SEG2_CONTROL + rb_dpdto_dw_max();
+        const uint32_t hi = dtoNeeded > aliasNeeded ? dtoNeeded : aliasNeeded;
+        dtoReady = dtoArmed &&
+                   length >= ((uint64_t)hi + 1) * sizeof(uint32_t);
+    }
 
     /* Gate 1: are we addressing DCN at all? 2oq's signature, now decided by
      * rb_hubp_otg_gate() so the hosttest owns it and the HDMI case is
@@ -694,3 +733,102 @@ void RBAMDFramebuffer::dpaltSample(void)
     dpaltSweep = (int)rb_dpalt_sweep_verdict(dpaltWord, RB_DPALT_COUNT);
 }
 
+/* 2EF: PIPE 0'S LIVE DP PIXEL-CLOCK DTO, AND THE SEGMENT CHECK.
+ *
+ * Read-only, no writer, and the reason it exists at all is that the WRITE it
+ * precedes would be the first this kext makes at BASE_IDX 1 - a segment whose
+ * offsets 0x0080..0x0083 collide with the DOMAIN power-gating registers at
+ * BASE_IDX 2, where this kext does all its work. A write at the wrong one of
+ * those two bases would hit the power gating of the pipe scanning the panel.
+ * So the address is established first, by arithmetic the chip itself has to
+ * satisfy (rule 47 asked of a write: establish the live word decodes as the
+ * register the conclusion assumes).
+ *
+ * Nothing here decides anything - rb_dpdto.h owns every judgement so the
+ * hosttest owns it too - and every raw word is published whichever way the
+ * verdict falls, which has now refuted three wrong verdicts of this
+ * project's own (2B0, 2B4, 2B9).
+ *
+ * The expected pixel clock is `modeClkHz`: the live raster times the refresh
+ * measured on an OTG0_FRAME_COUNT edge, formed by rb_drr.h. It is read here
+ * rather than recomputed because one product computed twice is two products
+ * (and 0 means mode setup never got a measurement, which is its own verdict
+ * code and not a wrong address).
+ */
+void RBAMDFramebuffer::dtoSample(void)
+{
+    if (!dtoReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_DPDTO_COUNT; i++) {
+        for (unsigned r = 0; r < RB_DPDTO_REG_COUNT; r++) {
+            const uint32_t dw = rb_dpdto_dw(i, r);
+            /* Cannot happen for these bounds, but a dword 0 of a segment is
+             * a read of another block entirely, so it is refused rather than
+             * trusted (rule 19, and dpaltSample()'s own shape). */
+            if (dw == RB_DPDTO_DW_INVALID) { continue; }
+            dtoWord[i][r] = hubpRegs[RB_DPDTO_SEG1 + dw];
+        }
+    }
+
+    /* THE ALIAS CONTROL: pipe 0's four offsets read at the segment this kext
+     * already uses. There they are DOMAIN0_PG_CONFIG, DOMAIN0_PG_STATUS,
+     * DOMAIN1_PG_CONFIG and DOMAIN1_PG_STATUS - rb_pg.h's own registers. If
+     * the two bases return the same four words, the segment arithmetic did
+     * nothing and what was read above is the power-gating block. Taken in the
+     * SAME sample as the words it controls, because a control measured in a
+     * different window is not a control (rule 44). */
+    for (unsigned r = 0; r < RB_DPDTO_REG_COUNT; r++) {
+        const uint32_t dw = rb_dpdto_dw(0, r);
+        if (dw == RB_DPDTO_DW_INVALID) { continue; }
+        dtoAlias[r] = hubpRegs[RB_DPDTO_SEG2_CONTROL + dw];
+    }
+
+    /* THE REFERENCE THE ARITHMETIC IS CHECKED AGAINST, and the first draft of
+     * this got it wrong in a way that would have cost a boot.
+     *
+     * It used `modeClkHz` - the panel's pixel clock measured on an
+     * OTG0_FRAME_COUNT edge, which is the best number this project has. But
+     * `modeSetup()` returns at `if (!argEnabled("-rbgpufbmodes"))` BEFORE it
+     * computes that field, so on an ordinary boot `modeClkHz` is 0 and this
+     * whole read would have published RB_DPDTO_BASE_NO_EXPECTED and measured
+     * nothing. Worse, the obvious fix - depend on `-rbgpufbmodes` - drags in a
+     * second display mode and is mutually exclusive with -rbgpufbdrr. That is
+     * rule 34 exactly: a dial's state at the start is part of the arm, and an
+     * experiment that needs two tokens in the right combination will be run
+     * with one of them missing.
+     *
+     * So there are two sources and the boot SAYS WHICH IT USED (rule 17 - a
+     * reading taken against a measured rate and one taken against a registry
+     * constant are not the same reading):
+     *   MEASURED: modeClkHz, when mode setup actually ran and measured.
+     *   RASTER:   OTG0's live H_TOTAL x V_TOTAL - read right here, from the
+     *             chip, so this does not depend on any other setup path -
+     *             times the rate the vblank clock is actually running at.
+     *             That rate starts as this panel's measured 16.16 constant
+     *             and is retuned per mode, so it is a measured constant
+     *             rather than a live measurement, which is why it is labelled
+     *             and not called derived.
+     * Either way the comparison window is 0.5 %, three orders of magnitude
+     * wider than the spread between this project's own three derivations of
+     * the panel's clock - the reference only has to be good enough to exclude
+     * a DIFFERENT REGISTER, which is the failure this read exists to catch. */
+    dtoHTotal = hubpRegs[kRbDmuSeg2 + RB_DPDTO_DW_OTG0_H_TOTAL] &
+                RB_DPDTO_TOTAL_MASK;
+    dtoVTotal = hubpRegs[kRbDmuSeg2 + RB_DPDTO_DW_OTG0_V_TOTAL] &
+                RB_DPDTO_TOTAL_MASK;
+    dtoRefreshMhz = rb_dpdto_mhz_from_period_ns(
+        vblPeriodNs ? vblPeriodNs : kVBLPeriodNsFast);
+    if (modeClkHz) {
+        dtoExpectedHz = modeClkHz;
+        dtoRefSrc = RB_DPDTO_REF_SRC_MEASURED;
+    } else {
+        dtoExpectedHz = rb_drr_clk_from_mhz(dtoRefreshMhz, dtoHTotal,
+                                            dtoVTotal);
+        dtoRefSrc = dtoExpectedHz ? RB_DPDTO_REF_SRC_RASTER
+                                  : RB_DPDTO_REF_SRC_NONE;
+    }
+
+    dtoBaseVerdict = rb_dpdto_base_verdict(dtoWord[0], dtoAlias, dtoExpectedHz);
+    dtoPipeVerdict = rb_dpdto_pipe_verdict(dtoWord[0][RB_DPDTO_REG_RATE_CNTL]);
+    dtoRefHz = rb_dpdto_ref_hz(dtoWord[0], dtoBaseVerdict);
+}

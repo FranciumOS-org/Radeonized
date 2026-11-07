@@ -632,6 +632,33 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * INVALID and is refused. */
         feArmed = argOn("-rbgpufbfe");
         if (feArmed) { dmubBlArmed = true; }
+        /* 2EF: the DP DTO pixel-clock READ. Opt-in, and it arms NOTHING
+         * else - unlike every DMUB experiment beside it, this writes no
+         * register, sends no command and produces nothing on any ring. It is
+         * four MMIO reads per pipe at a segment this kext has never
+         * addressed, plus the same four offsets at the segment it has, as the
+         * alias control.
+         *
+         * WHY OPT-IN ANYWAY, when it is read-only: the offsets COLLIDE with
+         * the DOMAIN power-gating block at the base this kext already holds
+         * (0x0080..0x0083 at BASE_IDX 2 are DOMAIN0/1's config and status),
+         * so a boot that reads them is a boot establishing an address, and
+         * every boot before it should read exactly what it read. The WRITE
+         * those addresses are for is a later milestone and must not be built
+         * until this read comes back from hardware.
+         *
+         * TOKEN NAME, rule 30, checked mechanically over every quoted
+         * `-rbgpu*` literal in src/ and tools/ in both directions, with
+         * `-rbgpufbdigx` as a known-colliding control so the scan itself was
+         * verified (rule 26 - a search is an instrument). The `-rbgpufbd`
+         * family is the crowded one: -rbgpufbdig, -rbgpufbdmubbl,
+         * -rbgpufbdmubdom, -rbgpufbdpalt and -rbgpufbdrr. `-rbgpufbdto`
+         * diverges from all five at the character after `d` and prefixes
+         * none of them, and the derived negative -rbgpunofbdto is distinct
+         * for the same reason. An opt-in token is not in rb_defaults.h's
+         * table, so its hosttest does not cover this - hence by hand, here,
+         * which is the gap 2BA and 2EA's comments both record. */
+        dtoArmed = argOn("-rbgpufbdto");
         /* 2BA: the DPCD read. Opt-in, and the user's decision - it is the
          * first write this project makes to a display block outside the
          * panel's own pipe. Even armed, NOTHING is sent until a userspace

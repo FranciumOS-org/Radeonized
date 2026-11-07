@@ -16,6 +16,7 @@
 #include "rb_aux.h"
 #include "rb_dpalt.h"
 #include "rb_dpcd.h"
+#include "rb_dpdto.h"
 
 /* -- the vblank ---------------------------------------------------------- */
 
@@ -247,6 +248,61 @@ void RBAMDFramebuffer::publishVBLState(void)
         /* 64 bits for the same 2B4 reason as the HPD words above. */
         snprintf(key, sizeof(key), "RBFBDpalt%uCntl6", i);
         setProperty(key, (uint64_t)dpaltWord[i], 64);
+    }
+    /* 2EF: pipe 0's live DP pixel-clock DTO at BASE_IDX 1, with the same four
+     * offsets at BASE_IDX 2 as the alias control. dtoSample() returns
+     * immediately unless the boot armed -rbgpufbdto, so an unarmed boot pays
+     * nothing - and publishes its refusal rather than falling silent, because
+     * "not armed", "the aperture refused" and "read and found nothing" are
+     * three different facts (rule 14).
+     *
+     * THE TWO VERDICTS ARE PUBLISHED SEPARATELY ON PURPOSE. "Is BASE_IDX 1 a
+     * real address?" and "is pipe 0 actually driven by this DTO?" fail for
+     * different reasons, and if the firmware brought the panel up on a PHYPLL
+     * instead then PHASE[0] can be zero at a base that is perfectly correct.
+     * Each of those three outcomes was written down before the boot (2EF),
+     * so whichever comes back was predicted rather than explained. */
+    dtoSample();
+    setProperty("RBFBDtoArmed", dtoArmed);
+    setProperty("RBFBDtoReady", dtoReady);
+    setProperty("RBFBDtoSeg1", (uint64_t)RB_DPDTO_SEG1, 32);
+    setProperty("RBFBDtoBase", (uint64_t)dtoBaseVerdict, 32);
+    setProperty("RBFBDtoPipe", (uint64_t)dtoPipeVerdict, 32);
+    /* What PHASE[0] was compared against, and what it would have to be for
+     * the comparison to mean anything. A refusal must publish the value it
+     * refused on (rule 19). */
+    setProperty("RBFBDtoExpectedHz", (uint64_t)dtoExpectedHz, 64);
+    /* WHICH reference the comparison used - measured on a FRAME_COUNT edge,
+     * or the live raster times the rate the vblank clock runs at. Two
+     * readings taken against different references are two readings. */
+    setProperty("RBFBDtoRefSrc", (uint64_t)dtoRefSrc, 32);
+    setProperty("RBFBDtoHTotal", (uint64_t)dtoHTotal, 32);
+    setProperty("RBFBDtoVTotal", (uint64_t)dtoVTotal, 32);
+    setProperty("RBFBDtoRefreshMhz", (uint64_t)dtoRefreshMhz, 32);
+    setProperty("RBFBDtoRefHz", (uint64_t)dtoRefHz, 64);
+    for (unsigned i = 0; i < RB_DPDTO_COUNT; i++) {
+        char key[28];
+        /* 64 bits for the same 2B4 reason as the HPD words above - a 32-bit
+         * OSNumber with bit 31 set prints sign-extended, and a PHASE of
+         * 342 MHz is comfortably inside 31 bits but a garbage word at a wrong
+         * base is exactly the thing that would not be. */
+        snprintf(key, sizeof(key), "RBFBDto%uRate", i);
+        setProperty(key, (uint64_t)dtoWord[i][RB_DPDTO_REG_RATE_CNTL], 64);
+        snprintf(key, sizeof(key), "RBFBDto%uPhase", i);
+        setProperty(key, (uint64_t)dtoWord[i][RB_DPDTO_REG_PHASE], 64);
+        snprintf(key, sizeof(key), "RBFBDto%uModulo", i);
+        setProperty(key, (uint64_t)dtoWord[i][RB_DPDTO_REG_MODULO], 64);
+        snprintf(key, sizeof(key), "RBFBDto%uPhyPll", i);
+        setProperty(key, (uint64_t)dtoWord[i][RB_DPDTO_REG_PHYPLL], 64);
+    }
+    /* The alias control's own four words, published raw: if these equal the
+     * pipe-0 group above, the "DTO" being read is the DOMAIN block. They are
+     * also readable against rb_pg.h's own publish of the same registers in a
+     * boot that arms both, which is a second, independent way to see it. */
+    for (unsigned r = 0; r < RB_DPDTO_REG_COUNT; r++) {
+        char key[28];
+        snprintf(key, sizeof(key), "RBFBDtoAlias%u", r);
+        setProperty(key, (uint64_t)dtoAlias[r], 64);
     }
     /* 2B8: the AUX engines and the LIVE OTG words. */
     auxSample();
