@@ -62939,3 +62939,153 @@ Nothing. No raster was programmed and no register in the OTG block was read.
 `OTG1_CONTROL` has still never been read by this instrument. The next boot
 repeats the survey, and the thing to look at first is one line:
 `PANEL CONTROL OK`.
+
+---
+
+## 2FB — boot 464: the second raster scans, and it was not the missing thing
+
+2026-11-07, boot 464 (`rbgpu-boot` 464, `kern.boottime` Sat Nov 7 03:27:18).
+fbkext `C1701F13` (established by the presence of `RBFBOtgRPanelOk`, a key no
+earlier build publishes). Arms present and verified before anything ran:
+`-rbgpufbaux`, `-rbgpufbdto`, `-rbgpufbraster`.
+
+Four things, in the order they were established.
+
+### 1. A new configuration fact: the cable must be in AT BOOT
+
+Worth stating first because it would otherwise cost boots repeatedly.
+
+With the Type-C cable plugged in **after** boot, `edidread` and `dpcdread`
+both returned **refusal 3**, "no AUX engine is bound to that HPD block", on
+engine "AUX5" - which is `RB_AUX_COUNT`, i.e. none. Two fields said why:
+
+- `RBFBAuxEn` = **1**: the AUX enable mask, so only AUX0 (the panel's) was
+  enabled. `Aux1..4Ctl` all read `0x01040000` with `AUX_EN` clear, against
+  AUX0's `0x01040101`.
+- `RBFBHpd2Status` = **`0xff000013`** against boot 459's **`0xff0ff013`**. The
+  missing `0x000ff000` is a programmed delay/timer field, not a status bit -
+  so a *configuration* that was written in 459 was absent here.
+
+**We never write `AUX_EN`** - grepped, no site in the kext touches it. So the
+firmware enables those engines, and it does so on a connect path that runs at
+boot. HPD2 still sensed (`0x13` low bits set, and the sink mask included it),
+because HPD is a raw pin; the AUX engine behind it was simply never brought
+up. Refusal 3 was honest, not a defect.
+
+Rebooted with the cable already in: engine **AUX2**, **128 bytes**, header OK,
+checksum OK, **refusal 0**. `RBFBAuxEn` = **5** = AUX0 + AUX2, exactly the
+right pair. Caps `12 14 c2 81`, byte-identical to 2D8/2BB. `0x202` = `00 00`.
+
+**This is rule 47's recorded form - "the power state of the port is part of
+the configuration" - with a new clause: so is WHEN the port came up.**
+
+**And my own error, recorded because it is rule 33 in a shape the card does
+not have.** I read `RBFBHpdSink` = 5 as an engine *index* and said the binding
+was "being derived from something that moved". It is a **mask**: `0b101`, HPD0
+and HPD2 sensing, which was the cable being correctly detected. I did the same
+with `RBFBAuxEn` = 1, calling it "enabled, yes" when it meant "engine 0 only".
+Two masks read as a scalar in one reading. **An index is not a count (rule 33),
+and a MASK is neither.** Both were corrected inside the same investigation,
+by printing the values in hex beside their names, which is the cheap habit
+that caught it.
+
+### 2. The second raster scans
+
+The chain, in one boot, each step with its own verdict:
+
+- `dmubbl dto 148500` (kHz): `PIXEL_RATE_CNTL 0x8000c000 -> 0x8000d090`,
+  applied 1, changed 1, clean 1, **`DPDTO_ENABLE_STATUS 0 -> 1`** - a bit we
+  do not write.
+- `otgprog go 1080p60 pipe=1`: **16 writes of 16**, H_TOTAL 2200, V_TOTAL
+  1125, v front porch 4 after Linux's floor. **`OTG_CONTROL 0x00000300 ->
+  0x00011201`.**
+- **`RBFBOtgR1Frames` 0 -> 21 across two periodic samples**, then advancing
+  continuously.
+
+**`OTG1_CONTROL` has read `0x300` in every boot in this project's history.**
+The verdict is the hardware's own frame counter, which we never write, polled
+across periodic samples rather than compared within one call (rule 31). The
+in-call pair read `0 -> 0` and the tool correctly called that EXPECTED, since
+the two reads are microseconds apart.
+
+The panel's OTG0 was the positive control in the same sample window
+throughout, reading `0x00011201` with its counter advancing.
+
+### 3. But the raster runs at 8.27x the programmed timing
+
+Measured against wall time over a 20.064 s window, both counters latched in
+the same periodic sample:
+
+```
+  panel OTG0 =  61.40 Hz      (the DRR ladder, at 60)
+  OTG1       = 496.35 Hz
+  implied OTG1 pixel clock = 1228.47 MHz   (programmed 148.50)
+  factor over programmed   = 8.2726
+```
+
+The ratio to the panel was 8.05-8.17 across eleven shorter intervals before
+this, so the figure is reproducible and not a sampling artefact. **The first
+pass of this measurement was wrong in a way worth recording**: I converted the
+ratio using 143.83 Hz, the panel's native rate from the card, and reported
+~1160 Hz. The panel was at 61.40 Hz - the DRR ladder had moved it. **A
+constant from the card is not a constant at the moment of the reading** (rule
+41's shape, applied to our own measured value rather than an Apple address).
+
+The live registers hold what was written: `H_TOTAL` 2199 (= 2200), `V_TOTAL`
+1124 (= 1125), `OTG_CONTROL 0x00011201`, DTO `PHASE` 148 500 000 /
+`MODULO` 600 000 000, `PIXEL_RATE_CNTL 0x8000d090`. So the timing is
+programmed, the DTO is programmed, and the raster's rate matches neither.
+
+**The mechanism is open and is NOT being named here.** 2 x the 600 MHz DTO
+reference is 1200 MHz, 2.3 % from the measured 1228.47 and inside the
+measurement's own error - which makes it a candidate and not an
+identification (rule 18). What the number does support, without a mechanism:
+**OTG1 is not being clocked by the DTO we programmed.**
+
+The in-boot A/B that would settle it - halve the DTO and see whether the rate
+halves - **is not available**: `dmubbl dto` refuses a second write on a live
+pipe by design, and nothing here turns a DTO off. It costs a boot, and the
+discriminating form is to program a *different* H_TOTAL x V_TOTAL: if the rate
+tracks the product, the OTG honours its timing and the clock is wrong; if it
+does not move, the counter is not driven by our raster at all.
+
+### 4. The raster was not the missing thing
+
+This was the whole argument for building it. 2F9 read DPCD `0x202` as `0x00`
+and this journal defended that reading: "a clock with no raster and no stream
+has nothing to send, so the `0x00` lane status is not yet evidence against the
+transmitter." **That defence is now spent.** With the raster scanning and the
+clock running, in the same boot:
+
+- `dmubbl dig fe`: **`DIG_BE_CNTL 0x20000000 -> 0x20000400`**, `FE_SEL 0 ->
+  0x4` - DIGC's front end connected to DIG2's back end. applied 1, changed 1,
+  clean 1, refusal 0.
+- `dptrain go tps=2`: **`TP_SEL 0x000000 -> 0x000001` CHANGED**, applied 1,
+  clean 1, moved 1, observable 1, refusal 0.
+- **DPCD `0x202` read `0x00` before and after.** Lane0 and lane1 both empty.
+  No clock recovery.
+- `RDPCSTX2_PHY_CNTL6` (`RBFBDigBefore` / `RBFBDigAfter`) **`0x00063333`,
+  unmoved** - the third boot it has not moved, now with the raster, the clock
+  and the front end all live.
+
+So the field narrows rather than widens: a raster exists, our four register
+groups all take their writes and read them back, the sink is healthy and
+talking on AUX, and **the sink still sees no symbols**. The two surviving
+candidates are the ones the measurement in section 3 points at - **OTG1 is not
+on the DP clock domain**, which would mean no valid stream clock reaches the
+link whatever the transmitter does - and the PHY itself, where
+`PHY_CNTL6` remains a suspect as a *verdict register* rather than as evidence
+(it is the legacy fallback Linux reads only when DMCUB is absent, and it
+already disagreed with `QUERY_DP_ALT` on all five PHYs).
+
+### What boot 464 establishes
+
+- The second raster exists and scans. New.
+- Its rate does not match its programmed timing, by a reproducible factor.
+  New, and unexplained.
+- The missing raster was **not** why the sink saw nothing. A closed line.
+- The cable must be in at boot. New, and reusable.
+
+`enc31_map_stream_to_link` remains unwritten, no surface is attached, and
+`getDisplayModeCount()` has returned 1 since 2sl. A dark monitor is still the
+expected reading, and every tool said so in its own output.
