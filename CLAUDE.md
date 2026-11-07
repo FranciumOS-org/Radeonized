@@ -461,13 +461,35 @@ the sink), verdicts `NO_OP` 4 and `SINK_BLIND` 5, with **`NO_OP` outranking
 `CR_DONE`** on purpose (rule 17). **THE ONE REAL READING** had to be dug out of
 `RBFBAuxW`: the sink **ACKed `TRAINING_PATTERN_SET` and did not store it**
 (`before 0x00 -> after 0x00`, `changed 0`, verdict 2 `ACK_IGNORED`) - against
-2F3's own 0x100 `0x06 -> 0x14` which DID store, same engine, same sink. Leading
-hypothesis is **ordering**: DPCD `0x600` was never set to D0 and 0x100/0x101 are
-back at their defaults after the reboot, and that is testable with **no kext
-change and no boot** because `-rbgpufbtrain` arms the AUX half. Also recorded:
+2F3's own 0x100 `0x06 -> 0x14` which DID store, same engine, same sink. 2F5's
+ordering hypothesis (a receiver in D3, `0x600` never set) is **WITHDRAWN** by
+boot 459: nothing about ordering differed between the two boots.
+**THE DP TRANSMITTER BLOCK ANSWERS OUR WRITES** (2F6, boot 459).
+`dptrain go tps=2` moved DP2's `TP_SEL` **0 -> 1** with
+`applied 1 clean 1 moved 1 observable 1` - TPS2 encodes as hardware 1 against a
+dark 0, so unlike TPS1 it could be seen. The in-boot control is the periodic
+five-instance sample: DP1/DP3/DP4 still read `TP_SEL` 0 byte-identical and the
+panel's DP0 is untouched at 2, so the change is confined to the instance
+addressed. The three RMWs stay no-ops for 2F5's reason. **THREE OUTCOMES AT
+DPCD 0x102 IN ONE BOOT:** that run's own write stored (`0x00 -> 0x02`,
+ACK_STORED); a bare `dpcdwrite 0x102 0x01` **CLEARED** the field
+(`0x02 -> 0x00`, `changed 1` - the byte MOVED, and not to what we wrote, which
+2F6 gave its own verdict `ACK_OTHER` 4 because the old code printed "the byte
+did not change" beside a published `changed 1`); a bare `dpcdwrite 0x102 0x02`
+did not move it; and `0x102 0x00` came back **DEFER**. The pattern across all
+four: **the only write that stored is the only one where the TX side had just
+moved** - a HYPOTHESIS at n=1 for the storing case, falsifiable in-boot by
+`dptrain go tps=3` (TX moves, predicts STORED) then the same again (`moved 0`
+-> `NO_OP`, predicts not stored). **BOTH NATIVE DPCD PATHS WERE SINGLE-SHOT ON
+DEFER** - boot 458 on the read, boot 459 on the write, while the I2C path in
+the same file has retried since 2BD - so 2F6 bounded both at
+`RB_AUX_DEFER_RETRIES` 8 x `RB_AUX_DEFER_DELAY_US` 1000, **deliberately tighter
+in time than Linux's 50 ms** (`dce_aux.c:822-827` needs 7 retries AND 50 ms;
+ours is the count alone, because every caller is a dial and `IODelay` spins).
+Boot 459's own lane-status reads both succeeded, so the read defer was
+transient and this fix explains nothing - it is robustness. Also recorded:
 the panel's own live `TP_SEL` reads **0x2**, so this register does hold non-zero
-values on this chip. **Use `dptrain go tps=2`** - hardware 1, which CAN move the
-register.
+values on this chip.
 2F4's build - `rb_dptx.h` plus
 `build/out/dptrain`, the four writes of
 `dcn10_link_encoder_set_dp_phy_pattern_training_pattern` (rule 46 discharged in
@@ -538,7 +560,8 @@ this name with a suffix. It ARMS `-rbgpufbaux` itself, since its verdict comes
 from the sink over AUX. Nothing is written until `dptrain go`; the panel's
 transmitter is refused by name in both halves and the write is declined unless
 the panel's own DP0 reads as a trained link. **`tps=1` is a no-op on a dark
-instance** - boot 458 measured it - so use `dptrain go tps=2`),
+instance** - boot 458 measured it - so use `dptrain go tps=2` or higher,
+which boot 459 confirmed DOES move `TP_SEL`),
 `-rbgpuagdcearly` (**wedges the desktop**), `-rbgpufbmatch` (**kills the
 accelerator**), `-rbgpumcreg` (failure mode is a **hang** — user's decision),
 `-rbgpupdefix`, `-rbgpufbvramrange`, `-rbgpumcnew`, `-rbgpunodisppanic`,
@@ -591,8 +614,8 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 **Open:** the rest of the external-display chain above. The pixel clock is DONE
 (boot 455) and the sink takes DPCD writes (boot 457); **boot 458 ran 2F4's
 training pattern and it moved not one bit** (2F5), so the open items are the
-DPCD ordering probe (`0x600` = D0 then re-try `0x102`, free - no boot),
-`dptrain go tps=2` on the 2F5 framebuffer, and then the atom transmitter
+TX-side hypothesis test (`dptrain go tps=3` twice, free - no boot, and the
+second call is the `moved 0` control), and then the atom transmitter
 ENABLE at the link rate, still the next thing that does not exist;
 the **wedge** (work submitted that never retires — channel-52 GFX, 3.5 s, the
 "random lag"; `stamp_ticks` 125666 retires the "nothing polls it" family);

@@ -336,6 +336,8 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBAuxDpcdArbSeen", (uint64_t)auxDpcdArbSeen, 64);
     setProperty("RBFBAuxDpcdStatus", (uint64_t)auxDpcdStatus, 64);
     setProperty("RBFBAuxDpcdReply", (uint64_t)auxDpcdReplyCode, 64);
+    setProperty("RBFBAuxDpcdDefers", (uint64_t)auxDpcdDefers, 32);
+    setProperty("RBFBAuxDpcdDeferV", (uint64_t)auxDpcdDeferVerdict, 32);
     setProperty("RBFBAuxDpcdBytes", (uint64_t)auxDpcdBytes, 64);
     setProperty("RBFBAuxDpcdSuspect", auxDpcdSuspect);
     auxWPublish();                      /* 2F3 */
