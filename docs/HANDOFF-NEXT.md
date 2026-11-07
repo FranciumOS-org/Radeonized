@@ -41,42 +41,52 @@
 
 ---
 
-## STEP 1 — get the sink's DPCD answering again. This is now the blocker.
+## STEP 1 — get the sink answering again. This is the blocker.
 
 Nothing sink-side means anything until this is fixed, so it sits **in front of**
 the atom transmitter ENABLE.
 
-Three candidates, none established, and 2F7 did not narrow them:
+**2F7a narrowed it.** After a monitor power-cycle `dpcdread 0x0 4 2` still read
+`00 00 00 80`, and the **EDID over I2C-over-AUX** — a different endpoint on the
+same AUX engine, which read `MSI MP2412C` in 2BD — now returns **128 bytes of
+`0x00`**, `header BAD`. Both endpoints zero rules out the DP receiver's own
+state as the sole cause. Caveat: `RBFBHpdChanges` is **0** for the whole boot,
+so the HPD line is not known to have moved and the power-cycle is a weaker arm
+than intended.
 
-1. the sink's DP receiver is in a state where it answers AUX and reads zeros;
-2. **our native read path** has a defect returning ACK with zeroed data (the
-   stuck-`AUX_SW_DATA`-index check fired on `0x100`'s two identical bytes, but
-   `0x000`'s four bytes are *not* identical, which argues against it);
-3. the sink was power-cycled or renegotiated between boot 457 and now.
+What is left, in order of what to test:
 
-**Do (3) first — it is free and physical.** Ask the user to power-cycle the
-monitor, or unplug and replug the Type-C cable, then:
+1. **The Type-C port or the AUX channel.** CLAUDE.md's rule 47 already records
+   this symptom shape: this chassis' Type-C subsystem can die in a way that
+   survives a reboot and a reinstall and is cleared only by a **30-second
+   power-key hold**.
+2. **We did it.** Boot 457 read both endpoints correctly. Since then we wrote
+   `0x100` = `0x14` (HBR2) into a receiver whose caps now read rate 0, wrote
+   training patterns to `0x102`, and moved `TP_SEL` on DP2 three times. Not an
+   established mechanism, but the first candidate that is ours.
+3. **Our read path**, which would have to be zeroing *both* the native and the
+   I2C paths to explain this.
 
-```bash
-build/out/dpcdread 0x0 4 2
-```
+### The run that settles it
 
-- **Caps come back real** (a non-zero revision, a real max rate, 2 or 4 lanes)
-  → candidate 1 or 3, the read path is fine, and the receiver drops into this
-  dead state on its own. That is a finding and it goes in the journal.
-- **Caps stay `00 00 00 80`** → candidate 2 moves to the front, and the next
-  work is in our own read path, not the sink. The control that settles it is the
-  **EDID over I2C-over-AUX** (2BD), a *different endpoint on the same AUX
-  engine*: if the EDID still reads `MSI MP2412C` while native DPCD reads zeros,
-  the engine works and the native read path or the DP receiver is the problem.
-  `RBFBEdidAttempts` is **0** this boot, so that path needs arming first.
+Do these in this order, and do not let step 3 happen before step 2.
+
+1. Shut down, then hold the power key for 30 seconds (rule 47's recovery).
+2. Boot, and **read the EDID before writing anything**:
+   `build/out/edidread`.
+3. Only then anything else.
+
+- **EDID reads `MSI MP2412C`** → this boot's zeros were a state the port or our
+  writes entered. Candidate 2 goes to the front, and every write since boot 457
+  is a suspect. Re-read `dpcdread 0x0 4 2` immediately after, before any write,
+  to get a clean caps reading this project has never had.
+- **EDID still zero** → the port is the suspect, no sink-side reading is
+  available, and nothing further in the external-display chain can be verified
+  until it comes back.
 
 **Do not** re-run `dpcdwrite 0x600 0x01` as a D3/ordering probe. 2F5's ordering
-hypothesis is withdrawn and 2F7 already ran the write for the *different*
-reason (all registers reading zero): it ACKed, stored nothing, and changed
-neither `0x000` nor `0x100`.
-
----
+hypothesis is withdrawn and 2F7 already ran that write for a different reason:
+it ACKed, stored nothing, and changed neither `0x000` nor `0x100`.
 
 ## STEP 2 — install the 2F6 build
 
