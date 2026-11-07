@@ -2981,6 +2981,60 @@ actively WRONG. It also measures one of 2zr's two stated reasons false:
 pixel clock (**sub-type 2**, another inbox command of the kind now proved both
 to execute AND to answer). Then link training over AUX2 (driver-side, 2BE), a
 second OTG and HUBP, and a second `IOFramebuffer`.
+`-rbgpufbfe` (2EC - `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT`, the FIRST write this
+project makes to the DIG back end, and the one step 2E8 established is
+genuinely ours: the atom transmitter command carries no front end BY DESIGN
+(`command_table_helper2_dce112.c:94`), so no firmware bring-up could have made
+it, and 2E8 read FE_SEL **0 on DIG2** against 0x1 DIGA on the panel's DIG0.
+**An OR into the live field inside an RMW** (`dcn10_link_encoder.c:1353`) - the
+field accumulates because one back end can take several front ends (MST) - so
+DIG_MODE and 2E8's HPD_SELECT 2 are carried through.
+**THE FRONT END IS NOT THE BACK END'S INDEX**: `link_hwss_dio.c:55` passes
+`stream_res.stream_enc->id`, whichever of the five (`num_stream_encoder = 5`)
+the allocator handed the pipe, so DIGC (0x4) is a readability choice and the
+dial takes any one-hot.
+**AND THE ORDER IS READ OFF LINUX**: `link_dpms.c:2527` says the FE/BE connect
+happens "before the link training", and `enable_dp_output` - the encoder
+configure plus the transmitter command - runs INSIDE link training. **So 2E4
+and 2E6 both sent the transmitter with the front end unconnected, the inverse
+of the sequence** - a second reason their STILL verdicts said nothing, beside
+2E9's wrong-layer finding. Now FE -> encoder -> transmitter in ONE
+`setProperties` call.
+Back end 0 (the panel's) and front end **DIGA** (that same panel's stream
+encoder - the field ACCUMULATES, so ORing it elsewhere would put the live
+desktop's encoder on a second back end) are refused BY NAME; DIGE is accepted,
+so the refusal is about DIGA and not about "anything but DIGC".
+**RULE 47 ASKED OF A WRITE:** every guard in `rb_digbe.h` until now stopped a
+wrong address being READ as a finding (2DD), and a write to a readable wrong
+address *does something* - so the LIVE word must already decode to a DIG_MODE
+this part writes or nothing is stored. Refusals **60-69**, with three separate
+codes for a bad front end because 0, two bits and a sixth FE are three
+mistakes (rule 14).
+The readback decides, and `applied` gets TWO companions: **`feChanged`** (the
+word moved at all - 2E6's defect, where before == after == target made
+`applied` 1 with no control) and **`feClean`** (no bit outside FE_SEL moved -
+the first write this header makes, so a neighbouring dword or a REG_SET where
+an RMW was meant shows up only here). Raw before/after beside all three; that
+practice has now paid six times (2B0, 2B4, 2B9, 2E6, 2EB, this).
+**Rule 30 bit for the second time in three milestones:** `-rbgpufbdigfe` has
+`-rbgpufbdig` as a strict prefix. Checked mechanically over all 21 `argOn()`
+tokens, both directions. Arms the ring and the PHY aperture itself (rule 34)
+and writes NOTHING until a front end is named - the dial defaults to 0, the
+documented INVALID, so `-rbgpufbfe` alone reproduces 2E6's arm.
+Eleven guards, eleven breaks, **all eleven fire** - and the first attempt at
+one broke the BUILD (`-Werror`, unused function), which greps as zero FAIL
+lines: **fifth instance**, caught only by grepping `error:` too.
+**The reading, one boot, and THE A SIDE MUST COME FIRST because there is no
+disconnect path:** `dmubbl dig 2` then `dmubbl dig 2 fe`. Read
+`RBFBDigFe{Refuse,Ran,Applied,Changed,Clean,Before,After}`. Changed + clean
+with the PHY MOVED or LIT means the FE was the missing step; changed + clean
+with STILL is the expected reading and leaves **one** item from 2E6's list -
+the pixel clock, sub-type 2 - not "the firmware discards VBIOS commands". Not
+clean means the address or the RMW is wrong and the run is suspect. Also NOT
+reproduced and named in advance: `enc31_map_stream_to_link`
+(`link_hwss_dio.c:63`, a second FE-to-link register this project has not
+located). Framebuffer **D6B93717**. **BUILT AND HOSTTESTED; NOTHING HAS BEEN
+WRITTEN.**),
 `-rbgpufbdmubdom` (2DC - DOMAIN_CONTROL, the FIRST
 `DMUB_CMD__VBIOS` command this project sends and the only remaining test of
 whether this firmware EXECUTES an inbox command, since 2DB spent the other
