@@ -77,8 +77,9 @@ static const char *wverdict(long v)
     case -1: return "NOT RUN";
     case 0:  return "NO ANSWER - the sink did not ACK";
     case 1:  return "ACK + STORED - it answered and the byte reads back";
-    case 2:  return "ACK + IGNORED - it answered and the byte did not change";
+    case 2:  return "ACK + IGNORED - it answered and the byte did not move";
     case 3:  return "ACK + BLIND - it answered, the read-back failed";
+    case 4:  return "ACK + OTHER - the byte MOVED, and not to what we wrote";
     default: return "unknown";
     }
 }
@@ -259,16 +260,35 @@ int main(int argc, char **argv)
                "     answered the AUX request and ignored the field. Worth\n"
                "     checking the address against drm_dp.h before concluding\n"
                "     anything about the channel.\n");
+    } else if (verd == 4) {
+        printf("\n  -> THE SINK MOVED THE BYTE, AND NOT TO WHAT WE WROTE.\n"
+               "     Read the before and after above: the receiver took the\n"
+               "     write, answered it, and landed on a value of its OWN\n"
+               "     choosing. That is the most informative of the three ACK\n"
+               "     outcomes, because the value it chose is a reading of the\n"
+               "     sink's own state machine rather than of ours. Boot 459\n"
+               "     saw 0x102 go 0x02 -> 0x00 on a write of 0x01: the sink\n"
+               "     CLEARED the field instead of storing TPS1. Until 2F6\n"
+               "     this printed as IGNORED, whose text claims the byte did\n"
+               "     not change, beside a published `changed 1`.\n");
     } else if (verd == 3) {
         printf("\n  -> ACK, but the read-AFTER failed, so whether it stored\n"
                "     the byte is unknown. Do not record this as a successful\n"
                "     write. Re-run; a DEFER on the read half is routine.\n");
     } else if (verd == 0) {
-        printf("\n  -> No ACK. The reply code above says whether the sink\n"
-               "     NACKed (it is declining this address - the channel\n"
-               "     works) or said nothing at all (refusal 8/9 territory on\n"
-               "     the read side). A NACK and silence are different\n"
-               "     findings and must not be merged.\n");
+        printf("\n  -> No ACK. THREE different things reach this line and\n"
+               "     the reply code above tells them apart.\n"
+               "       reply 1 (NACK)  - the sink is declining this address.\n"
+               "                         The channel works.\n"
+               "       reply 2 (DEFER) - FLOW CONTROL, not a refusal: the\n"
+               "                         sink said \"not yet\". The correct\n"
+               "                         response is to wait and ask again,\n"
+               "                         and before 2F6 this path did not,\n"
+               "                         so a busy sink printed as a silent\n"
+               "                         one. Re-run it.\n"
+               "       anything else   - silence, which is refusal 8/9\n"
+               "                         territory on the read side.\n"
+               "     These are different findings and must not be merged.\n");
     }
 
     IOObjectRelease(fb);

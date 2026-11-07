@@ -406,6 +406,13 @@ private:
     uint32_t           auxDpcdBytes;
     uint8_t            auxDpcdData[16];
     bool               auxDpcdSuspect;
+    /* 2F6: how many times the sink DEFERRED before this read's outcome, and
+     * what that came to. A DEFER is flow control, so `defers > 0, ok` is a
+     * normal recovery and `defers == bound, !ok` is a DIFFERENT failure from
+     * a single NACK - the two were indistinguishable to every reader until
+     * boot 458 mistook one for the sink going silent (rule 14). */
+    uint32_t           auxDpcdDefers;
+    uint32_t           auxDpcdDeferVerdict;
     uint32_t           auxDpcdHpd;     /* which HPD block to target, def 2 */
 
     /* 2F4: the DP transmitter. Refusals 60..66, clear of the DPCD write's
@@ -454,6 +461,7 @@ private:
     uint64_t           auxDpcdWCalls;   /* monotonic, including refusals    */
     uint64_t           auxDpcdWOks;
     uint32_t           auxDpcdWRefuse;
+    uint32_t           auxDpcdWDefers;  /* 2F6: defers before the outcome   */
     uint32_t           auxDpcdWHpd;
     uint32_t           auxDpcdWInst;
     uint32_t           auxDpcdWAddr;

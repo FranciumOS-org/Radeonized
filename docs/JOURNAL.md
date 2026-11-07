@@ -62089,3 +62089,140 @@ break-it checks, one per new guard, all four fired** (1, 2, 1, 1 failures).
 `TP_SEL` — the write that tests whether this block answers us at all. Needs
 the 2F5 framebuffer (`89A6F41C`) for the verdict to be readable. (c) The atom
 transmitter ENABLE at the link rate, still the thing that does not exist.
+
+---
+
+## 2F6 — boot 459: the transmitter block answers us, and three outcomes at one DPCD address
+
+**Boot 459, collection UUID `89A6F41C` — the 2F5 build exactly** (rule 15), with
+no part of the uncommitted 2F6 work in it. Four readings, all from one boot.
+
+### 1. `dptrain go tps=2` — the first observable write to the DP link block
+
+```
+TP_SEL      0x000000 -> 0x000001   CHANGED
+LINK_CNTL   0x00000000 -> 0x00000000 unchanged
+DPHY_CNTL   0x00000000 -> 0x00000000 unchanged
+PRBS_CNTL   0x7fffff00 -> 0x7fffff00 unchanged
+applied 1  clean 1  moved 1  observable 1
+```
+
+TPS2 encodes as hardware pattern 1 against a dark `TP_SEL` of 0, so unlike
+2F5's TPS1 this write *could* be seen — and was. `moved 1` and `observable 1`
+are 2F5's own terms doing their job on the first run after they were added.
+
+**The in-boot control is stronger than the write path's readback**, same shape
+as 2F2's: from the periodic five-instance sample in the same boot,
+
+```
+DP0 TpSel 2   (the panel's trained link, untouched)
+DP1 TpSel 0   DP3 TpSel 0   DP4 TpSel 0   (dark, byte-identical)
+DP2 TpSel 1   <- the only instance the dial named
+```
+
+Three dark siblings held their value and the panel kept scanning. **The DP
+transmitter block at BASE_IDX 2 answers our writes, on the instance addressed
+and no other.** The three RMWs stayed no-ops for 2F5's reason (a dark instance
+does not have those bits set), which is why only one of the four shows CHANGED.
+
+### 2. The same run's DPCD write STORED
+
+```
+RBFBAuxWAddr 258 (0x102)  Value 2  Inst 2
+Acked 1  Before 0x00 -> After 0x02  Applied 1  Changed 1  Verdict 1 ACK_STORED
+```
+
+### 3. THE ORDERING HYPOTHESIS IS WRONG — withdrawn
+
+2F5 recorded the leading explanation for boot 458's `ACK_IGNORED` as **ordering**:
+a receiver left in D3 with `0x600` never set to D0. **That is dead.** Nothing
+about ordering differed between boots 458 and 459 — no `0x600` write, no
+`0x100`/`0x101`, same engine, same sink, same `0x00` starting byte. 2F5's
+recommended `dpcdwrite 0x600 0x01` probe was never run and is **not** the
+experiment to run.
+
+### 4. Three outcomes at DPCD 0x102, in one boot, same engine
+
+Run bare through `dpcdwrite`, with no transmitter write in between:
+
+| # | write | before | after | reply | reading |
+|---|---|---|---|---|---|
+| a | `0x01` | `0x02` | `0x00` | ACK | **moved, to a third value** |
+| b | `0x02` | `0x00` | `0x00` | ACK | did not move |
+| c | `0x00` | `0x00` | — | **DEFER** | no ACK, read-after failed |
+
+Together with run 2 (`0x02`, `0x00 -> 0x02`, stored), **one address produced
+three different ACK outcomes in one boot.**
+
+**(a) is the informative one and the tool misreported it.** `applied 0
+changed 1` — the byte *moved*, from `0x02` to `0x00`, which is neither "stored"
+nor "ignored": on a write of TPS1 the sink **CLEARED the field**. The verdict
+function collapsed that into `ACK_IGNORED`, whose printed text reads "the byte
+did not change", **directly beside a published `changed 1`**. The tool
+contradicted its own fields in the same paragraph.
+
+**The pattern across all four observations.** The only write that stored is the
+only one where the transmitter side had just been programmed and actually
+moved:
+
+| run | TX side moved? | DPCD value | DPCD outcome |
+|---|---|---|---|
+| boot 458 `dptrain go` | **no** (moved 0) | 1 | `0x00 -> 0x00` ignored |
+| boot 459 `dptrain go tps=2` | **yes** (TP_SEL 0->1) | 2 | `0x00 -> 0x02` **STORED** |
+| boot 459 `dpcdwrite 0x102 1` | no | 1 | `0x02 -> 0x00` cleared |
+| boot 459 `dpcdwrite 0x102 2` | no | 2 | `0x00 -> 0x00` ignored |
+
+That is a **hypothesis, at n=1 for the storing case** — not a finding (rules 18
+and 44). It is sharply falsifiable inside one boot, which is the next
+measurement rather than a new build.
+
+### 5. The DEFER is real and the native paths were single-shot
+
+Boot 458's `dpcdread 0x202 1` returned `reply 2 (DEFER)`; boot 459's third
+write returned `reply 2 (DEFER)` and was printed as `NO ANSWER - the sink did
+not ACK`. **Two independent observations, one on each half.** Both native DPCD
+paths took a single shot and treated flow control as an answer, while the
+I2C-over-AUX path twenty lines away in the same file has retried defers since
+2BD, with a comment warning about exactly this mistake. A DEFER is not a NACK
+and not silence; `dpcdwrite`'s no-ACK narrative named only the latter two.
+
+Boot 459's own `dptrain` run read the sink's lane status successfully at both
+ends (`SinkBeforeOk 1`, `SinkAfterOk 1`, `AuxDpcdAttempts 4 / Oks 4`), so boot
+458's read defer was **transient** — the fix is robustness, and it explains
+none of the storing behaviour above.
+
+### What 2F6 changed
+
+- **`RB_DPCD_W_V_ACK_OTHER` (4)** — ACK, the byte moved, and not to what we
+  wrote. Takes `before` and `before_ok`; **without a valid before-read it stays
+  at `ACK_IGNORED`**, the weaker claim, rather than guessing (rule 14).
+- **Defer retry on both native paths**, bounded by `rb_aux_defer_retry()` at
+  `RB_AUX_DEFER_RETRIES` (8) spaced `RB_AUX_DEFER_DELAY_US` (1000) apart, with
+  `rb_aux_defer_verdict()` distinguishing NONE / RECOVERED / EXHAUSTED and
+  `RBFBAuxDpcdDefers` / `RBFBAuxWDefers` published. The EDID path's two
+  hand-written bounds now use the same constants.
+  **Deliberate divergence from Linux**, recorded in the header:
+  `dce_aux.c:822-827` bounds a native defer by a *conjunction* —
+  `aux_defer_retries >= 7` **and** `defer_time_in_ms >= 50` — inside an outer
+  `AUX_MAX_RETRIES` 7 loop. Ours is the count alone, ~8 ms against Linux's
+  50 ms ceiling: **tighter in time, on purpose**, because every caller is a
+  `setProperties` dial and `IODelay` is a spin, not a sleep. The 50 ms term is
+  **not** implemented, since a guard that can never fire is not a guard
+  (rule 48); if a sink is ever seen to need longer, the change is to the delay
+  or to `IOSleep`, as a decision with a reason.
+- `dpcdwrite` names DEFER explicitly in the no-ACK narrative, and prints the
+  ACK_OTHER case for what it is.
+
+**Hosttest:** boot 459's three writes asserted to produce three *different*
+verdicts at one address, the no-before-read case asserted to stay at the weaker
+claim, and the defer policy asserted to retry only flow control, to stop at the
+bound, and to tell a recovered defer from an exhausted one. **Five break-it
+checks, one per new guard, all five fired.**
+
+**Next.** The falsifiable test of the TX-side hypothesis, free and in-boot:
+`dptrain go tps=3` (TP_SEL 1 -> 2, so the TX side moves; predicts the DPCD
+write STORES `0x03`), then `dptrain go tps=3` again (TP_SEL 2 -> 2, `moved 0`,
+so 2F5 reports `NO_OP`; predicts the DPCD write does **not** store). An
+interleaved A/B at single-call granularity, which is what rule 44 asks for.
+Then the atom transmitter ENABLE at the link rate, still the thing that does
+not exist.

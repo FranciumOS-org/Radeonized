@@ -489,21 +489,67 @@ int dpcd_tests(void)
 
         /* ---------------- THE VERDICT ---------------------------------
          *
-         * Four outcomes, not a bool: a sink can ACK a write to a field it
-         * ignores, and that is a finding rather than a failure. */
-        WCHK(rb_dpcd_write_verdict(0, 1, 0x14u, 0x14u)
+         * FIVE outcomes, not a bool: a sink can ACK a write to a field it
+         * ignores, and it can also ACK and land on a THIRD value, and each
+         * is a finding rather than a failure. */
+        WCHK(rb_dpcd_write_verdict(0, 1, 1, 0x14u, 0x14u, 0x14u)
              == RB_DPCD_W_V_NO_ANSWER,
              "no ACK is NO_ANSWER even when the byte reads back - which is "
              "what a stale readback of an already-set field looks like");
-        WCHK(rb_dpcd_write_verdict(1, 1, 0x14u, 0x14u)
+        WCHK(rb_dpcd_write_verdict(1, 1, 1, 0x14u, 0x06u, 0x14u)
              == RB_DPCD_W_V_ACK_STORED, "ACK and the byte reads back");
-        WCHK(rb_dpcd_write_verdict(1, 1, 0x14u, 0x0au)
+        WCHK(rb_dpcd_write_verdict(1, 1, 1, 0x14u, 0x0au, 0x0au)
              == RB_DPCD_W_V_ACK_IGNORED,
-             "ACK and it does not - a real outcome with its own code");
-        WCHK(rb_dpcd_write_verdict(1, 0, 0x14u, 0xffffffffu)
+             "ACK, and the byte did not MOVE - a real outcome with its own "
+             "code");
+        WCHK(rb_dpcd_write_verdict(1, 0, 1, 0x14u, 0x06u, 0xffffffffu)
              == RB_DPCD_W_V_ACK_BLIND,
              "ACK with no read-back is BLIND, never silently STORED - the "
              "refused read's 0xffffffff must not be compared as a byte");
+
+        /* ---- 2F6: boot 459's own three writes to DPCD 0x102 ------------ */
+        WCHK(rb_dpcd_write_verdict(1, 1, 1, 0x01u, 0x02u, 0x00u)
+             == RB_DPCD_W_V_ACK_OTHER,
+             "`dpcdwrite 0x102 0x01` took the sink 0x02 -> 0x00: it neither "
+             "stored nor ignored, it CLEARED, and that is ACK_OTHER - until "
+             "2F6 this printed as ACK_IGNORED, whose text says the byte did "
+             "not change, beside a published `changed 1`");
+        WCHK(rb_dpcd_write_verdict(1, 1, 1, 0x02u, 0x00u, 0x00u)
+             == RB_DPCD_W_V_ACK_IGNORED,
+             "and `dpcdwrite 0x102 0x02` from 0x00 to 0x00 IS a genuine "
+             "ACK_IGNORED - the same address and the same boot, so the two "
+             "codes are distinguishing real behaviours and not a relabelling");
+        WCHK(rb_dpcd_write_verdict(1, 1, 1, 0x02u, 0x00u, 0x02u)
+             == RB_DPCD_W_V_ACK_STORED,
+             "while `dptrain go tps=2`'s own write, 0x00 -> 0x02, stored - "
+             "three outcomes at one address in one boot");
+        WCHK(rb_dpcd_write_verdict(1, 1, 0, 0x01u, 0xffffffffu, 0x00u)
+             == RB_DPCD_W_V_ACK_IGNORED,
+             "WITHOUT a valid before-read, 'moved' cannot be established, so "
+             "the verdict stays at the WEAKER claim rather than guessing "
+             "ACK_OTHER (rule 14: a refused read is not a value)");
+
+        /* ---- 2F6: the defer policy ------------------------------------- */
+        WCHK(rb_aux_defer_retry(RB_DPCD_REPLY_DEFER, 0) &&
+             rb_aux_defer_retry(RB_DPCD_REPLY_DEFER,
+                                RB_AUX_DEFER_RETRIES - 1u),
+             "a DEFER inside the bound earns a retry - boot 458's 0x202 read "
+             "and boot 459's 0x102 write were both single-shot and both "
+             "printed as the sink saying nothing");
+        WCHK(!rb_aux_defer_retry(RB_DPCD_REPLY_DEFER, RB_AUX_DEFER_RETRIES),
+             "and the bound stops it, because the mirror of that mistake is "
+             "spinning on a sink that always defers");
+        WCHK(!rb_aux_defer_retry(RB_DPCD_REPLY_NACK, 0) &&
+             !rb_aux_defer_retry(RB_DPCD_REPLY_ACK, 0),
+             "a NACK is NEVER retried - the sink has answered - and neither "
+             "is an ACK; only flow control earns another ask");
+        WCHK(rb_aux_defer_verdict(0, 1) == RB_AUX_DEFER_V_NONE &&
+             rb_aux_defer_verdict(3, 1) == RB_AUX_DEFER_V_RECOVERED &&
+             rb_aux_defer_verdict(RB_AUX_DEFER_RETRIES, 0)
+                 == RB_AUX_DEFER_V_EXHAUSTED,
+             "and a defer that recovered is a different reading from one "
+             "that exhausted the bound, which is a different reading from a "
+             "single NACK (rule 14)");
     }
 #undef WCHK
 

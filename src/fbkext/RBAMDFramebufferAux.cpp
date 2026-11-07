@@ -177,8 +177,22 @@ bool RBAMDFramebuffer::auxDpcdRead(uint32_t hpd, uint32_t address,
     auxDpcdInst = inst;
 
     uint32_t code = 0xff, got = 0;
-    const bool ok = auxTransact(inst, RB_DPCD_ACTION_READ, address,
-                                nullptr, 0, auxDpcdData, length, &code, &got);
+    /* 2F6: RETRY ON DEFER. This was a single shot until boot 458, where a
+     * DEFER on DPCD 0x202 returned false and the training verdict read it as
+     * the sink going silent - while the EDID path twenty lines below had
+     * been retrying defers since 2BD. A DEFER is flow control, not an
+     * answer; a NACK is an answer and is NOT retried. */
+    bool ok = false;
+    auxDpcdDefers = 0;
+    for (;;) {
+        ok = auxTransact(inst, RB_DPCD_ACTION_READ, address,
+                         nullptr, 0, auxDpcdData, length, &code, &got);
+        if (ok) { break; }
+        if (!rb_aux_defer_retry(code, auxDpcdDefers)) { break; }
+        auxDpcdDefers++;
+        IODelay(RB_AUX_DEFER_DELAY_US);
+    }
+    auxDpcdDeferVerdict = rb_aux_defer_verdict(auxDpcdDefers, ok ? 1 : 0);
     auxDpcdReplyCode = code;
     auxDpcdBytes = got;
     auxDpcdSuspect = rb_dpcd_reply_suspect_norepeat(auxDpcdData, got)
@@ -233,8 +247,20 @@ uint32_t RBAMDFramebuffer::auxDpcdWrite(uint32_t hpd, uint32_t address,
 
     const uint8_t payload = (uint8_t)value;
     uint32_t code = 0xff, got = 0;
-    const bool acked = auxTransact(inst, RB_DPCD_ACTION_WRITE, address,
-                                   &payload, 1, nullptr, 0, &code, &got);
+    /* 2F6: RETRY ON DEFER here as well. Boot 459's `dpcdwrite 0x102 0x00`
+     * came back `reply 2 (DEFER) acked 0` and was reported as NO_ANSWER -
+     * the sink saying "not yet" printed as the sink saying nothing, in the
+     * WRITE path this time. Same bound and same reason as the read. */
+    bool acked = false;
+    auxDpcdWDefers = 0;
+    for (;;) {
+        acked = auxTransact(inst, RB_DPCD_ACTION_WRITE, address,
+                            &payload, 1, nullptr, 0, &code, &got);
+        if (acked) { break; }
+        if (!rb_aux_defer_retry(code, auxDpcdWDefers)) { break; }
+        auxDpcdWDefers++;
+        IODelay(RB_AUX_DEFER_DELAY_US);
+    }
     auxDpcdWReplyCode = code;
     auxDpcdWAcked = acked ? 1u : 0u;
 
@@ -248,8 +274,9 @@ uint32_t RBAMDFramebuffer::auxDpcdWrite(uint32_t hpd, uint32_t address,
     auxDpcdWApplied = (afterOk && auxDpcdWAfter == value) ? 1u : 0u;
     auxDpcdWChanged = (beforeOk && afterOk &&
                        auxDpcdWBefore != auxDpcdWAfter) ? 1u : 0u;
-    auxDpcdWVerdict = rb_dpcd_write_verdict(acked ? 1 : 0, afterOk,
-                                            value, auxDpcdWAfter);
+    auxDpcdWVerdict = rb_dpcd_write_verdict(acked ? 1 : 0, afterOk, beforeOk,
+                                            value, auxDpcdWBefore,
+                                            auxDpcdWAfter);
     if (acked) { auxDpcdWOks++; }
     return auxDpcdWRefuse = RB_DPCD_W_OK;
 }
@@ -311,7 +338,7 @@ bool RBAMDFramebuffer::auxEdidRead(uint32_t hpd, uint32_t block)
         if (ok) { break; }
         if (!rb_dpcd_reply_is_defer(code)) { break; }
         auxEdidDefers++;
-        IODelay(500);
+        IODelay(RB_AUX_DEFER_DELAY_US);
     }
     if (!ok) { auxEdidRefuse = 10; return false; }
 
@@ -325,7 +352,7 @@ bool RBAMDFramebuffer::auxEdidRead(uint32_t hpd, uint32_t block)
             if (ok) { break; }
             if (!rb_dpcd_reply_is_defer(code)) { break; }
             auxEdidDefers++;
-            IODelay(500);
+            IODelay(RB_AUX_DEFER_DELAY_US);
         }
         if (!ok) { auxEdidRefuse = 11; auxEdidBytes = c * chunk; return false; }
         auxEdidBytes = c * chunk + got;
@@ -345,6 +372,7 @@ void RBAMDFramebuffer::auxWPublish(void)
     setProperty("RBFBAuxWCalls", auxDpcdWCalls, 64);
     setProperty("RBFBAuxWOks", auxDpcdWOks, 64);
     setProperty("RBFBAuxWRefuse", (uint64_t)auxDpcdWRefuse, 32);
+    setProperty("RBFBAuxWDefers", (uint64_t)auxDpcdWDefers, 32);
     setProperty("RBFBAuxWHpd", (uint64_t)auxDpcdWHpd, 32);
     setProperty("RBFBAuxWInst", (uint64_t)auxDpcdWInst, 32);
     setProperty("RBFBAuxWAddr", (uint64_t)auxDpcdWAddr, 32);

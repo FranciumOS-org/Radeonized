@@ -91,6 +91,33 @@
  * spinning forever on a sink that always defers. */
 #define RB_AUX_DEFER_RETRIES        8u
 
+/* 2F6: THE SAME IS TRUE OF A NATIVE DPCD TRANSACTION, and until 2F6 this
+ * project only believed it of the I2C path. `auxDpcdRead` was SINGLE-SHOT:
+ * one transaction, and a DEFER reply returned false. Boot 458's
+ * `dptrain go` reported `SinkAfterOk 0` and 2F4 called it the sink going
+ * silent; boot 458's `dpcdread 0x202 1` then came back
+ * `reply 2 (DEFER)` - so what the verdict read as silence was a sink saying
+ * "not yet" exactly once, with the EDID path's own comment about that
+ * mistake sitting twenty lines away in the same file.
+ *
+ * DEFER AND NACK ARE DIFFERENT ANSWERS. A NACK is the sink declining; a DEFER
+ * is flow control, and the correct response to flow control is to wait and
+ * ask again. `dpcdread`'s text conflated them too.
+ *
+ * WHERE THIS DIVERGES FROM LINUX, deliberately. dce_aux.c:822-827 bounds a
+ * native defer with a CONJUNCTION - give up only when
+ * `aux_defer_retries >= AUX_MIN_DEFER_RETRIES` (7) *AND*
+ * `defer_time_in_ms >= AUX_MAX_DEFER_TIMEOUT_MS` (50), inside an outer
+ * `AUX_MAX_RETRIES` (7) loop, so in practice the count binds first there
+ * too. Ours is the count alone at RB_AUX_DEFER_DELAY_US apart, which is
+ * ~8 ms rather than Linux's 50 ms ceiling: TIGHTER IN TIME, and on purpose,
+ * because every caller here is a setProperties dial and this is a spin, not
+ * a sleep. The 50 ms term is therefore NOT implemented - a guard that could
+ * never fire is not a guard (rule 48) - and if a sink is ever seen to need
+ * longer than 8 ms, the change is to the delay or to IOSleep, as a decision
+ * with a reason and not a quiet widening. */
+#define RB_AUX_DEFER_DELAY_US       1000u
+
 /* dc_ddc_types.h: enum aux_transaction_reply, after the >> 4. */
 #define RB_DPCD_REPLY_ACK           0x0u
 #define RB_DPCD_REPLY_NACK          0x1u
@@ -242,16 +269,31 @@ static inline uint32_t rb_dpcd_write_refuse(uint32_t hpd, uint32_t inst,
 #define RB_DPCD_W_V_NOT_RUN     (-1)
 #define RB_DPCD_W_V_NO_ANSWER     0   /* no ACK                            */
 #define RB_DPCD_W_V_ACK_STORED    1   /* ACK, and the byte reads back      */
-#define RB_DPCD_W_V_ACK_IGNORED   2   /* ACK, and it does not              */
+#define RB_DPCD_W_V_ACK_IGNORED   2   /* ACK, and the byte did not MOVE    */
 #define RB_DPCD_W_V_ACK_BLIND     3   /* ACK, and the read-back failed     */
+/* 2F6: ACK, the byte MOVED, and not to what we wrote. Until boot 459 this
+ * collapsed into ACK_IGNORED, whose text says "the byte did not change" -
+ * and the run it was printed for had `changed 1` beside it, so the tool
+ * contradicted its own fields in the same paragraph. `dpcdwrite 0x102 0x01`
+ * took the sink from 0x02 to 0x00: it neither stored nor ignored, it
+ * CLEARED. That is a third behaviour and the most informative of the three,
+ * since the value it lands on is the sink's own choice. */
+#define RB_DPCD_W_V_ACK_OTHER     4   /* ACK, moved, to a THIRD value      */
 
 static inline int rb_dpcd_write_verdict(int acked, int read_ok,
-                                        uint32_t wrote, uint32_t after)
+                                        int before_ok,
+                                        uint32_t wrote, uint32_t before,
+                                        uint32_t after)
 {
     if (!acked)  { return RB_DPCD_W_V_NO_ANSWER; }
     if (!read_ok) { return RB_DPCD_W_V_ACK_BLIND; }
-    return (after == wrote) ? RB_DPCD_W_V_ACK_STORED
-                            : RB_DPCD_W_V_ACK_IGNORED;
+    if (after == wrote) { return RB_DPCD_W_V_ACK_STORED; }
+    /* Not what we wrote. Whether that is "unchanged" or "changed to
+     * something else" needs the BEFORE, and without a valid before-read the
+     * two cannot be told apart - so it stays ACK_IGNORED, which is the
+     * weaker claim, rather than guessing. */
+    if (before_ok && after != before) { return RB_DPCD_W_V_ACK_OTHER; }
+    return RB_DPCD_W_V_ACK_IGNORED;
 }
 
 static inline uint32_t rb_aux_arb_owner(uint32_t arb)
@@ -337,6 +379,29 @@ static inline uint32_t rb_edid_read_action(uint32_t chunk, uint32_t chunks)
 
 static inline int rb_dpcd_reply_is_defer(uint32_t code)
 { return code == RB_DPCD_REPLY_DEFER; }
+
+/* 2F6: should the caller ask again? Only a DEFER earns a retry, and only
+ * while the bound holds. A NACK must NOT be retried - the sink has answered -
+ * and neither must a transaction that failed without a reply at all, which is
+ * the engine's problem and not the sink's. */
+static inline int rb_aux_defer_retry(uint32_t code, uint32_t tries)
+{
+    if (!rb_dpcd_reply_is_defer(code)) { return 0; }
+    return (tries < RB_AUX_DEFER_RETRIES) ? 1 : 0;
+}
+
+/* How a bounded-out defer differs from every other failure, as a code the
+ * tool can print. `defers` is the count, so a read that exhausted the bound
+ * is distinguishable from one that was NACKed once (rule 14). */
+#define RB_AUX_DEFER_V_NONE         0   /* no defer happened                */
+#define RB_AUX_DEFER_V_RECOVERED    1   /* deferred, then answered          */
+#define RB_AUX_DEFER_V_EXHAUSTED    2   /* deferred to the bound and lost   */
+
+static inline uint32_t rb_aux_defer_verdict(uint32_t defers, int ok)
+{
+    if (!defers) { return RB_AUX_DEFER_V_NONE; }
+    return ok ? RB_AUX_DEFER_V_RECOVERED : RB_AUX_DEFER_V_EXHAUSTED;
+}
 
 /* EDID block 0 sanity, before any field of it is believed: the eight-byte
  * header is fixed by the standard, and the whole 128-byte block sums to zero

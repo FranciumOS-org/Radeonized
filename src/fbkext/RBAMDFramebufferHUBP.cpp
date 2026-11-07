@@ -139,6 +139,8 @@ bool RBAMDFramebuffer::hubpSetup(void)
     auxDpcdArbSeen = 0;
     auxDpcdStatus = 0;
     auxDpcdReplyCode = 0xff;
+    auxDpcdDefers = 0;
+    auxDpcdDeferVerdict = 0;
     auxDpcdBytes = 0;
     auxDpcdSuspect = false;
     auxDpcdHpd = 2;   /* 2B4: the Type-C port */
@@ -174,6 +176,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     auxDpcdWCalls = 0;
     auxDpcdWOks = 0;
     auxDpcdWRefuse = RB_DPCD_W_OK;
+    auxDpcdWDefers = 0;
     auxDpcdWHpd = 2;
     auxDpcdWInst = RB_AUX_COUNT;
     auxDpcdWAddr = 0;
