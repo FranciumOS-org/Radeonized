@@ -367,7 +367,10 @@ documented in files already in the tree).
   The `_X` family is the swizzle defect; **why is still not established.**
 - **`getPDEValue` returns flags only** — the address is ORed in by its caller.
   Never hook it to correct an address. [2ko]
-- The panel: 1920x1080, `H_TOTAL` 2106, `V_TOTAL` 1129, **143.83 Hz**, pixel
+- The panel: 1920x1080, `H_TOTAL` 2106, `V_TOTAL` 1129, **143.83 Hz** native —
+  **but the DRR ladder moves it, and 2FB misconverted a measurement by taking
+  143.83 as true at the moment of the reading when the panel was at 61.40**;
+  pixel
   clock ~342 011 761 Hz (derived; the DP PLL has never been located).
   `V_BLANK_START_END` 1311820 (start 1100, end 20) is why V_TOTAL can change
   without touching the active raster. OTG0 runs (`OTG0_CONTROL 0x00011201`),
@@ -411,17 +414,33 @@ running did not move it either, so **order is not the missing thing**. That
 register is the suspect as much as the PHY: it is the legacy fallback Linux
 reads only when DMCUB is absent and it already disagreed with `QUERY_DP_ALT` on
 all five PHYs, so `dig` needs a verdict register that is not this one.
-**Still not done:** `enc31_map_stream_to_link` (no stream mapped to DIG2), OTG
-timing on pipe 1 (`OTG1_CONTROL` still `0x300`; **2FA built it; boot 462 failed its
-positive control and wrote nothing** — `-rbgpufbraster`, `tools/otgprog.m`,
-verdict is `OTG1_FRAME_COUNT` advancing. The offsets are BASE_IDX 2 and need
-`+ 0x34c0`; the panel scanning is now refusal **48**, checked before the
-dark-pipe test), a surface, and a second
-`IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl). A clock
-with no raster and no stream has nothing to send, so the `0x00` lane status is
-not yet evidence against the transmitter. **Order:** FE connect → configure
-encoder → transmitter ENABLE; the atom transmitter command carries no front end
-**by design**.
+**2FB (boot 464): the second raster SCANS — `OTG1_CONTROL 0x300 ->
+0x00011201`, 16 writes of 16, frame counter advancing — AND IT WAS NOT THE
+MISSING THING.** With the raster and the clock both live, `dig fe` moved
+`DIG_BE_CNTL 0x20000000 -> 0x20000400` (`FE_SEL 0 -> 0x4`) and `dptrain go
+tps=2` moved `TP_SEL 0 -> 1`, and **DPCD `0x202` still read `0x00` before and
+after**; `PHY_CNTL6` still `0x00063333`, third boot unmoved. So 2F9's defence
+of that `0x00` is spent. **And the raster runs at 8.2726× its programmed
+timing** — 496.35 Hz over 20 s, implying 1228.47 MHz where 148.50 was
+programmed, with the live registers holding H_TOTAL 2200 / V_TOTAL 1125. **So
+OTG1 is not clocked by the DTO we programmed**; the mechanism is open (2× the
+600 MHz reference is a candidate, not an identification). The DTO refuses a
+second write on a live pipe, so settling it costs a boot, and the
+discriminating form is a different `H_TOTAL × V_TOTAL`, not a different clock.
+
+**THE CABLE MUST BE PLUGGED IN AT BOOT (2FB).** Plugged in afterwards, every
+AUX read returns **refusal 3** on engine "AUX5" (= `RB_AUX_COUNT`, none):
+AUX1-4 read `AUX_EN` **clear** and `HPD2_STATUS` reads `0xff000013` against a
+healthy `0xff0ff013`, the missing `0x000ff000` being a programmed delay field.
+We never write `AUX_EN` — the firmware's connect path does, at boot. Cable in
+at boot: engine **AUX2**, 128 bytes, refusal 0, `RBFBAuxEn` mask **5**. Rule 47
+with a new clause: **so is WHEN the port came up.** (`RBFBAuxEn` and
+`RBFBHpdSink` are **masks**, not indexes — rule 33's shape, cost two misreads.)
+
+**Still not done:** `enc31_map_stream_to_link` (no stream mapped to DIG2), a
+surface, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
+since 2sl). **Order:** FE connect → configure encoder → transmitter ENABLE;
+the atom transmitter command carries no front end **by design**.
 
 **The firmware does NOT train this link** (2F3, measured with a control), so
 training is ours. **PHY0 / DIG0 / front end DIGA are the panel's and are
