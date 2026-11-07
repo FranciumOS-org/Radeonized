@@ -1417,21 +1417,27 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
      * reproduced. */
     {
         OSNumber *pi = OSDynamicCast(OSNumber, dict->getObject("RBFBDtoPipe1"));
-        if (pi) { dtoProgInst = pi->unsigned32BitValue(); }
+        if (pi) { dtoCallInst = pi->unsigned32BitValue(); }
         OSNumber *ss = OSDynamicCast(OSNumber,
                                      dict->getObject("RBFBDtoSrcSel"));
-        if (ss) { dtoProgSrcSel = ss->unsigned32BitValue() ? 1u : 0u; }
+        if (ss) { dtoCallSrcSel = ss->unsigned32BitValue() ? 1u : 0u; }
         OSNumber *hz = OSDynamicCast(OSNumber, dict->getObject("RBFBDtoPixHz"));
         if (hz) {
-            const uint32_t rc = dtoProgram(dtoProgInst,
+            /* 2F2: the selector lives in the dtoCall* set, which dtoProgram
+             * rewrites at entry either way - the dtoProg* set it used to
+             * share is now the run record and must survive a refusal. */
+            const uint32_t rc = dtoProgram(dtoCallInst,
                                            hz->unsigned32BitValue(),
-                                           (int)dtoProgSrcSel);
-            LOG("RBFBDtoPixHz pipe %u hz %u ref %u srcsel %u -> refuse %u, "
-                "rate %#x->%#x, phase %u, modulo %u, applied %u changed %u "
-                "clean %u, verdict %d",
-                dtoProgInst, dtoProgPixHz, dtoProgRefHz, dtoProgSrcSel, rc,
-                dtoRateBefore, dtoRateAfter, dtoPhaseAfter, dtoModuloAfter,
-                dtoProgApplied, dtoProgChanged, dtoProgClean, dtoProgVerdict);
+                                           (int)dtoCallSrcSel);
+            LOG("RBFBDtoPixHz pipe %u hz %u ref %u srcsel %u live %#x -> "
+                "refuse %u; last run: pipe %u rate %#x->%#x, phase %u, "
+                "modulo %u, applied %u changed %u clean %u, verdict %d, "
+                "ran %u",
+                dtoCallInst, dtoCallPixHz, dtoCallRefHz, dtoCallSrcSel,
+                dtoCallLive, rc,
+                dtoProgInst, dtoRateBefore, dtoRateAfter, dtoPhaseAfter,
+                dtoModuloAfter, dtoProgApplied, dtoProgChanged, dtoProgClean,
+                dtoProgVerdict, dtoProgRan);
             dtoPublish();
             return rc == RB_DPDTO_W_OK ? kIOReturnSuccess
                                        : kIOReturnNotPermitted;

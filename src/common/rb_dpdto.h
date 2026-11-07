@@ -153,6 +153,20 @@ static inline uint32_t rb_dpdto_dw_max(void)
 #define RB_DPDTO_DTBCLK_STATUS         0x00000040u
 #define RB_DPDTO_DP_DTO_STATUS         0x00000080u
 #define RB_DPDTO_SRC_SEL               0x00001000u
+/* OTG*_DIO_FIFO_ERROR, shift 0xe, two bits. Named in 2F2 because the
+ * RMW's duty is now asserted against a MEASURED word rather than a
+ * modelled one, and this is one of the two fields it must carry
+ * through. 2F0 read 3 on every dark pipe and 0 on the panel's; 2F2
+ * read 3 still on a pipe whose DTO had just been started, so it does
+ * NOT clear on the DTO alone. What it means is still not established
+ * and nothing reads it as a verdict. */
+#define RB_DPDTO_FIFO_ERROR            0x0000c000u
+#define RB_DPDTO_DTBCLK_DIV            0xf0000000u
+
+static inline uint32_t rb_dpdto_fifo_error(uint32_t rate_cntl)
+{
+    return (rate_cntl & RB_DPDTO_FIFO_ERROR) >> 14;
+}
 
 static inline uint32_t rb_dpdto_rate_source(uint32_t rate_cntl)
 {

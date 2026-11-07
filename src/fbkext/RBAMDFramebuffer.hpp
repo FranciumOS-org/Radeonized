@@ -622,10 +622,26 @@ private:
     int                dtoBaseVerdict;
     int                dtoPipeVerdict;
 
-    /* 2F1: the write. `dtoProgInst` is the pipe asked for, which is published
-     * even on a refusal so a boot says WHAT it declined (rule 14), and
-     * `dtoProgCalls` is the monotonic counter a tool polls past its pre-set
-     * value rather than sleeping on a throttled snapshot (rule 31). */
+    /* 2F1: the write. `dtoProgCalls` is the monotonic counter a tool polls
+     * past its pre-set value rather than sleeping on a throttled snapshot
+     * (rule 31).
+     *
+     * 2F2 SPLIT THESE IN TWO, because 2F1's single set cost the only reading
+     * of the write that mattered. The `dtoCall*` fields are what the MOST
+     * RECENT call asked for and saw; the `dtoProg*`/`dtoRate*` fields are the
+     * record of the last call that actually WROTE. 2F1 reset the second set
+     * at entry and then returned through the refusal, so a second invocation
+     * in the same boot - the one the already-live guard is there to refuse -
+     * republished the successful run as `verdict -1 NOT RUN` with
+     * `before == after`. Only the monotonic `dtoProgRan` survived to say a
+     * write had happened at all. A refusal now touches nothing but
+     * `dtoProgCalls`, `dtoProgRefuse` and the `dtoCall*` set (rule 16: the
+     * instrument is a suspect, and this one erased its own result). */
+    uint32_t           dtoCallInst;      /* the pipe this call asked for     */
+    uint32_t           dtoCallPixHz;
+    uint32_t           dtoCallSrcSel;
+    uint32_t           dtoCallRefHz;     /* pipe 0's MODULO, as sampled now  */
+    uint32_t           dtoCallLive;      /* the target's live word, now      */
     uint32_t           dtoProgInst;
     uint32_t           dtoProgPixHz;
     uint32_t           dtoProgRefHz;     /* MODULO copied from pipe 0        */

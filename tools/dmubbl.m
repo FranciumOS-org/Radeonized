@@ -888,7 +888,7 @@ static const char *dtoWhy(long c)
     case 42: return "THIS BOOT did not confirm BASE_IDX 1 - read RBFBDtoBase";
     case 43: return "pipe 0 is the PANEL, refused by name";
     case 44: return "pipe out of range (0..3)";
-    case 45: return "that pipe's DP DTO is already enabled";
+    case 45: return "that pipe's DP DTO is already enabled";   /* read the live word */
     case 46: return "pipe 0's MODULO is not usable as a reference";
     case 47: return "the asked clock is outside 25 MHz .. the live reference";
     default: return "unknown";
@@ -947,11 +947,32 @@ static void dtoVerdictPrint(io_service_t fb, long callsBefore)
     const long verdict = num(fb, "RBFBDtoProgVerdict");
     const long base    = num(fb, "RBFBDtoBase");
 
-    printf("\nverdict (read back after the call the kext counted)\n");
+    /* 2F2's split: what THIS call asked for and saw, kept apart from the
+     * record of the last call that actually wrote. 2F1 published one set for
+     * both, so the refused second invocation republished the successful write
+     * as "NOT RUN" with before == after. */
+    const long cInst   = num(fb, "RBFBDtoCallInst");
+    const long cPix    = num(fb, "RBFBDtoCallPixHz");
+    const long cSrcSel = num(fb, "RBFBDtoCallSrcSel");
+    const long cRef    = num(fb, "RBFBDtoCallRefHz");
+    const long cLive   = num(fb, "RBFBDtoCallLive");
+
+    printf("\nTHIS CALL  (calls %ld, the counter polled above)\n", calls);
     printf("  base verdict   %ld  %s\n", base,
            base == 0 ? "CONFIRMED this boot" : "NOT confirmed this boot");
     printf("  refusal        %ld  %s\n", refuse, dtoWhy(refuse));
-    printf("  pipe           %ld   ran %ld   srcsel %ld\n", inst, ran, srcsel);
+    printf("  asked          pipe %ld  %ld Hz  (%.6f MHz)  srcsel %ld\n",
+           cInst, cPix, (double)cPix / 1e6, cSrcSel);
+    printf("  reference      %ld Hz  (%.6f MHz) - sampled off pipe 0 now\n",
+           cRef, (double)cRef / 1e6);
+    printf("  live PIXEL_RATE_CNTL on pipe %ld  0x%08lx%s\n", cInst, cLive,
+           cLive & 0x80L ? "   <- DPDTO_ENABLE_STATUS SET" : "");
+
+    printf("\nTHE LAST CALL THAT WROTE  (ran %ld)\n", ran);
+    if (ran == 0) {
+        printf("  none in this boot - nothing below is a reading.\n");
+    }
+    printf("  pipe           %ld   srcsel %ld\n", inst, srcsel);
     printf("  asked clock    %ld Hz  (%.6f MHz)\n", pix, (double)pix / 1e6);
     printf("  reference      %ld Hz  (%.6f MHz) - COPIED from pipe 0\n",
            ref, (double)ref / 1e6);
@@ -964,7 +985,26 @@ static void dtoVerdictPrint(io_service_t fb, long callsBefore)
            "                   (rule 20) and is known in advance to agree.\n");
     printf("  VERDICT        %ld  %s\n", verdict, dtoVerdictName(verdict));
 
-    if (refuse == 0 && verdict == 1) {
+    if (refuse == 45 && (cLive & 0x80L)) {
+        printf("\n  -> REFUSED because pipe %ld's DP DTO IS ALREADY RUNNING, "
+               "and the live\n     word says who started it. "
+               "DPDTO_ENABLE_STATUS (bit 7) is SET on a\n     pipe 2F0 and "
+               "2F1 both measured dark (0x8000c000, byte-identical\n     "
+               "across pipes 1-3 in two boots), and that bit is the "
+               "hardware's\n     own - our three writes never touch it.\n",
+               cInst);
+        printf("     0x%08lx minus bit 7 is the RMW this kext performs: "
+               "DP_DTO_ENABLE\n     and PIPE_DTO_SRC_SEL set, "
+               "DTBCLK_DTO_DIV and the error bits carried\n     through "
+               "untouched - which is the word the hosttest pins.\n", cLive);
+        printf("     So this refusal is the already-live guard doing its job "
+               "AND an\n     independent confirmation of the write, taken "
+               "from a bit we do not\n     write. It is still NOT a "
+               "picture: no OTG timing on this pipe, no\n     trained link, "
+               "no stream mapped to the encoder, no surface.\n");
+        printf("     To write again, reboot - the guard refuses a live pipe "
+               "by design,\n     and nothing here turns a DTO back off.\n");
+    } else if (refuse == 0 && verdict == 1) {
         printf("\n  -> DPDTO_ENABLE_STATUS went 0 -> 1 on a pipe that was "
                "dark.\n     That bit is the hardware's answer and not one we "
                "wrote, and 2F0\n     attested both its states on this chip "

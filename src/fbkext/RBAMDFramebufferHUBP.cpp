@@ -89,6 +89,11 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * programmed anything cannot be read as one that did and found nothing
      * (rule 14), and the refusal starts at OK only because dtoProgCalls 0 is
      * what separates "never called" from "called and allowed". */
+    dtoCallInst = RB_DPDTO_FIRST_FREE_PIPE;
+    dtoCallPixHz = 0;
+    dtoCallSrcSel = 1u;
+    dtoCallRefHz = 0;
+    dtoCallLive = 0;
     dtoProgInst = RB_DPDTO_FIRST_FREE_PIPE;
     dtoProgPixHz = 0;
     dtoProgRefHz = 0;
@@ -899,6 +904,15 @@ void RBAMDFramebuffer::dtoPublish(void)
     setProperty("RBFBDtoProgCalls", (uint64_t)dtoProgCalls, 32);
     setProperty("RBFBDtoProgRan", (uint64_t)dtoProgRan, 32);
     setProperty("RBFBDtoProgRefuse", (uint64_t)dtoProgRefuse, 32);
+    /* 2F2: what the MOST RECENT call asked for and saw, which on a
+     * refusal is the only thing that call established. Kept apart from
+     * the run record below so a refused second invocation cannot
+     * overwrite the reading of the write that did run. */
+    setProperty("RBFBDtoCallInst", (uint64_t)dtoCallInst, 32);
+    setProperty("RBFBDtoCallPixHz", (uint64_t)dtoCallPixHz, 64);
+    setProperty("RBFBDtoCallSrcSel", (uint64_t)dtoCallSrcSel, 32);
+    setProperty("RBFBDtoCallRefHz", (uint64_t)dtoCallRefHz, 64);
+    setProperty("RBFBDtoCallLive", (uint64_t)dtoCallLive, 64);
     setProperty("RBFBDtoProgInst", (uint64_t)dtoProgInst, 32);
     setProperty("RBFBDtoProgPixHz", (uint64_t)dtoProgPixHz, 64);
     setProperty("RBFBDtoProgRefHz", (uint64_t)dtoProgRefHz, 64);
@@ -921,13 +935,16 @@ void RBAMDFramebuffer::dtoPublish(void)
 uint32_t RBAMDFramebuffer::dtoProgram(uint32_t inst, uint32_t pixHz, int srcSel)
 {
     dtoProgCalls++;
-    dtoProgInst = inst;
-    dtoProgPixHz = pixHz;
-    dtoProgSrcSel = srcSel ? 1u : 0u;
-    dtoProgApplied = 0;
-    dtoProgChanged = 0;
-    dtoProgClean = 0;
-    dtoProgVerdict = RB_DPDTO_PROG_NOT_RUN;
+
+    /* 2F2: THIS CALL's own fields. The run record (dtoProg*, dtoRate*,
+     * dtoPhaseAfter, dtoModuloAfter) is deliberately NOT touched here - 2F1
+     * reset it at entry and a later refusal then republished a successful
+     * write as "NOT RUN", destroying the only reading of it. */
+    dtoCallInst = inst;
+    dtoCallPixHz = pixHz;
+    dtoCallSrcSel = srcSel ? 1u : 0u;
+    dtoCallRefHz = 0;
+    dtoCallLive = 0;
 
     const int haveRegs = (blRegs != nullptr) && (hubpRegs != nullptr)
                          && dtoReady;
@@ -943,23 +960,32 @@ uint32_t RBAMDFramebuffer::dtoProgram(uint32_t inst, uint32_t pixHz, int srcSel)
      * for because dtoProgInst was stored above. */
     const uint32_t safe = (inst < RB_DPDTO_COUNT) ? inst : 0u;
 
-    dtoRateBefore = haveRegs ? dtoWord[safe][RB_DPDTO_REG_RATE_CNTL] : 0u;
-    dtoRateAfter = dtoRateBefore;
-    dtoPhaseAfter = haveRegs ? dtoWord[safe][RB_DPDTO_REG_PHASE] : 0u;
-    dtoModuloAfter = haveRegs ? dtoWord[safe][RB_DPDTO_REG_MODULO] : 0u;
+    const uint32_t live = haveRegs ? dtoWord[safe][RB_DPDTO_REG_RATE_CNTL]
+                                   : 0u;
+    dtoCallLive = live;
 
     /* The reference is pipe 0's own MODULO, read off the chip rather than
      * written down - 2F0 found 600 000 000 there and Linux uses one
      * `dp_dto_ref_khz` for every pipe, so copying it makes pipe 1's ratio as
      * accurate as the panel's without the true reference ever being known. */
-    dtoProgRefHz = haveRegs ? dtoWord[RB_DPDTO_PANEL_PIPE][RB_DPDTO_REG_MODULO]
-                            : 0u;
+    const uint32_t refHz = haveRegs
+                           ? dtoWord[RB_DPDTO_PANEL_PIPE][RB_DPDTO_REG_MODULO]
+                           : 0u;
+    dtoCallRefHz = refHz;
 
-    const uint32_t why = rb_dpdto_write_refuse(inst, pixHz, dtoProgRefHz,
-                                               dtoRateBefore,
+    const uint32_t why = rb_dpdto_write_refuse(inst, pixHz, refHz, live,
                                                dtoArmed ? 1 : 0, haveRegs,
                                                dtoBaseVerdict);
+    /* The ONLY state a refusal leaves behind, besides the dtoCall* set and
+     * the monotonic counter: what it refused, by code (rule 14). */
     if (why != RB_DPDTO_W_OK) { return dtoProgRefuse = why; }
+
+    /* Past the gate, so this call is a write and owns the run record. */
+    dtoProgInst = inst;
+    dtoProgPixHz = pixHz;
+    dtoProgSrcSel = srcSel ? 1u : 0u;
+    dtoProgRefHz = refHz;
+    dtoRateBefore = live;
 
     const uint32_t phaseDw = RB_DPDTO_SEG1 + rb_dpdto_dw(inst,
                                                  RB_DPDTO_REG_PHASE);

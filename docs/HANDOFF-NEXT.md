@@ -1,6 +1,6 @@
 # HANDOFF — next step
 
-**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F1, boot 453.** `docs/RULES.md` is the reference card:
+**Rewritten 2026-11-06 at boot 451 (2ED); next step updated at 2F2, boot 455 — the pixel clock RUNS.** `docs/RULES.md` is the reference card:
 standing rules, chip facts, the boot-arg contract. `docs/JOURNAL.md` is the
 evidence record, grepped by milestone tag. **This file is only what is in
 flight.**
@@ -34,6 +34,9 @@ still armed** (2D3's `sub` 4, derived by default since 2D5 — the user's own
 
 ## IN FLIGHT: the external display, and what the next command is
 
+**Where it stands:** the clock is running on pipe 1 (boot 455). The next step
+is **link training over AUX2**, item 1 under "Then, in order".
+
 ### Established end to end, each by measurement
 
 The port is **HPD instance 2 = AUX engine 2 = UNIPHY_C / phyid 2 = DIG2**, and
@@ -62,85 +65,71 @@ own `firmware/680m-vbios.rom` (2E1).
   `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` 0 → 0x4, applied/changed/clean all 1.
   **The first verified write this project has made to this block.**
 
-### THE NEXT STEP: run the write. It is built; no boot has executed it.
+### DONE: the pixel clock runs. Boot 455 executed the write.
 
-2EF built the read, boot 452 confirmed it (2F0) and **boot 453 reproduced that
-read byte for byte** — PHASE[0] 343.000000 MHz, MODULO 600 000 000 exactly,
-pipes 1-3 byte-identical at `0x8000c000`, the alias control reading
-`DOMAIN0/1_PG_STATUS` as `0x10000000` at BASE_IDX 2. So **rule 44 is satisfied
-for the base confirmation the write's safety rests on.**
+2EF built the read, boots 452 and 453 confirmed the base and reproduced each
+other byte for byte (rule 44 satisfied), 2F1 built the three writes, and
+**boot 455 ran them.** `OTG1_PIXEL_RATE_CNTL` on pipe 1:
 
-**2F1 built the three writes and ran none of them.** Framebuffer
-**C2AC37B9**; `6B64DDD5` is what is installed. `-rbgpufbdto` is already in this
-machine's boot-args, so this is an install and a reboot, nothing else:
+| | word |
+|---|---|
+| before — 2F0 **and** 2F1, two boots, pipes 1-3 byte-identical | `0x8000c000` |
+| the word this kext writes, `rb_dpdto_rate_word(0x8000c000, 1)` | `0x8000d010` |
+| after | **`0x8000d090`** |
 
-```bash
-sudo tools/fbinstall.sh
-```
+The difference is **exactly `0x80`** — `DPDTO_ENABLE_STATUS`, which
+`rb_dpdto_rate_word()` cannot set because it only touches `DP_DTO_ENABLE` and
+`SRC_SEL`. 2F0 attested both of that bit's states on this chip beforehand.
+PHASE 148 500 000, MODULO 600 000 000 copied off pipe 0; `DTBCLK_DTO_DIV` 8 and
+`DIO_FIFO_ERROR` 3 carried through the RMW untouched.
 
-Then reboot, confirm the loaded binary **inside the collection** (rule 15):
+**The in-boot control** — from the periodic sample, same window, so neither our
+own store read back (rule 20) nor a cross-boot comparison (rule 44): pipes 2
+and 3 still hold `0x8000c000` byte-identical with PHASE/MODULO 0, and pipe 0 is
+untouched in all three registers. **The change is confined to the pipe the dial
+named.** The panel kept scanning, which discharges the DOMAIN-collision safety
+case by observation rather than by argument.
 
-```bash
-kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
-```
+**It is a clock, NOT a picture.** No OTG timing on pipe 1, no trained link, no
+stream mapped to the encoder, no surface. A dark monitor is the expected
+reading and is not evidence against any of this (rule 45).
 
-It must read **C2AC37B9**. Then:
+### What is NOT established, so it does not get assumed later
 
-```bash
-build/out/dmubbl dto
-```
+- **What `PIPE_DTO_SRC_SEL` selects.** Linux's 1 was written and the DTO
+  started; the firmware's 0 is on the panel's pipe and that works too. Two
+  words are not a mechanism (rule 17). `srcsel=0` is still the A/B, but on a
+  live pipe it needs a **reboot** first — nothing here turns a DTO off.
+- **PHASE as a verdict.** 2F0 measured pipe 0's as a round 343.000000 MHz
+  against a raster wanting 342.29, DRR ruled out: PHASE is the clock the
+  firmware *requested*. Ours coming back is rule 20's defect and was known in
+  advance to agree. Published raw, read by nothing.
+- **`DIO_FIFO_ERROR`.** It stayed **3** through the DTO starting, so it does
+  not clear on the DTO alone. A reading; nothing consumes it.
 
-That programs pipe 1 — the first pipe that is **not** the panel's, and *not* a
-derived pipe-to-Type-C mapping, which this project has never established — with
-2BD's preferred timing (148.5 MHz, off this sink's own EDID; its 100 Hz mode is
-`dmubbl dto 228000`). `dto help` lists `pipe=` and `srcsel=`.
+### If you need to write again
 
-### What the write does, and what bounds it
+A second `dmubbl dto` in the same boot is refused **45** — "that pipe's DP DTO
+is already enabled" — which is the guard working *and* an independent reading
+of the status bit. **Reboot to write again.**
 
-Three registers at **BASE_IDX 1 = 0xc0**, in Linux's own order (PHASE, MODULO,
-then the enable, as an RMW that keeps `DTBCLK_DTO_DIV` and the error bits —
-what `REG_UPDATE_2` compiles to):
+2F2 split the published fields in two, because 2F1's single set let that
+refusal republish the successful write as `verdict -1 NOT RUN` with
+`before == after`:
 
-1. `DP_DTO1_PHASE` = the mode's pixel clock in Hz.
-2. `DP_DTO1_MODULO` = **copied off pipe 0**, not written down. PHASE/MODULO is a
-   **ratio**, so reusing the firmware's own reference makes pipe 1 as accurate
-   as the panel's and **the true reference never has to be known** — which is
-   also why 2F0's open ~0.2 % DPREFCLK question does not block this.
-3. `OTG1_PIXEL_RATE_CNTL`: `DP_DTO1_ENABLE`, plus `PIPE1_DTO_SRC_SEL`.
+- `RBFBDtoCall*` — what the **most recent call** asked for and saw, including
+  `RBFBDtoCallLive`, the target pipe's live word. On a refusal this is the only
+  thing that call established.
+- `RBFBDtoProg*` / `RBFBDtoRate*` — the record of the last call that actually
+  **wrote**. A refusal touches none of it.
 
-**The gate is THIS BOOT'S OWN base verdict**, re-sampled inside the call: the
-write is refused unless PHASE[0] reproduces the live raster at 0xc0. At the
-other candidate base these offsets are the power gating of the pipe scanning
-the panel. Pipe 0 is refused by name in the kext *and* the tool; a pipe whose
-DTO is already enabled is refused independently.
+`RBFBDtoProgCalls` and `RBFBDtoProgRan` are both printed now, so "two calls,
+one write" is visible at the tool boundary (rule 14).
 
-**`SRC_SEL` is decided, not defaulted away.** Linux writes 1, the firmware left
-pipe 0's at 0 and the panel works. The default is **1**, because
-`dcn31_program_pix_clk` is the *driver* path for a DP pipe programmed from
-scratch — this situation — while the firmware's 0 came from atom bytecode on
-eDP. `srcsel=0` tries the other side, interleaved in the same boot (rule 44).
-
-### How to read the result — written down before the boot
-
-- **STARTED** (`RBFBDtoProgVerdict` 1): `DPDTO_ENABLE_STATUS` went 0 → 1. That
-  is the hardware's own bit, not one we wrote, and 2F0 attested both its states
-  on this chip first. **It means a clock, NOT a picture** — there is no OTG
-  timing on pipe 1, no trained link, no stream mapped to the encoder and no
-  surface, so a dark monitor is the **expected** reading.
-- **STILL** (0): the enable read back and the status bit did not follow, with
-  `changed` 1 saying the word moved. A real negative about this block.
-  Candidates, none measured: something else needs enabling (DISPCLK to the
-  pipe, `OTG_PIXEL_RATE_SOURCE`), or `SRC_SEL` is the wrong way round — one
-  interleaved command away.
-- **Refusal 42**: nothing was written and the gate worked. Read `RBFBDtoBase`,
-  `RBFBDtoExpectedHz`, `RBFBDto0Phase`.
-
-**Do NOT read PHASE back as the verdict.** 2F0 measured pipe 0's as a round
-343.000000 MHz against a raster wanting 342.29, DRR ruled out — PHASE is the
-clock the firmware *requested*, so our own number coming back is rule 20's
-defect and is known in advance to happen. It is published raw and read by
-nothing. `OTG_DIO_FIFO_ERROR` is likewise still unusable: 3 on every dark pipe
-and 0 on pipe 0, never read on a pipe being brought up.
+**Framebuffer 981AD563** is 2F2; `C2AC37B9` is 2F1 and is what boot 455 ran.
+2F2 changes no register and adds no write — it is the instrument fix plus ten
+hosttest cases — so installing it is optional and only buys a correct readout
+of the next write.
 
 ### Then, in order
 

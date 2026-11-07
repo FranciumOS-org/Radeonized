@@ -332,6 +332,11 @@ public:
      * it ever reaches the write, and `dtoProgInst` starts at the FIRST FREE
      * pipe rather than 0, which is the panel's and would make a bare
      * RBFBDtoPixHz target it. */
+    uint32_t dtoCallInst = RB_DPDTO_FIRST_FREE_PIPE;
+    uint32_t dtoCallPixHz = 0;
+    uint32_t dtoCallSrcSel = 1u;
+    uint32_t dtoCallRefHz = 0;
+    uint32_t dtoCallLive = 0;
     uint32_t dtoProgInst=RB_DPDTO_FIRST_FREE_PIPE;
     uint32_t dtoProgPixHz=0, dtoProgRefHz=0, dtoProgSrcSel=1;
     uint32_t dtoProgRefuse=RB_DPDTO_W_OK;

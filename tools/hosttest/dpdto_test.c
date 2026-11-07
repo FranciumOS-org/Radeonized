@@ -580,6 +580,92 @@ int dpdto_tests(const struct rb_disc *real)
               "above");
     }
 
+    /* ================= 2F2: THE WORD THE CHIP RETURNED ===================
+     *
+     * Boot 455 ran the write and these are its OWN numbers, not a model.
+     * `dmubbl dto` was invoked twice; the second invocation was refused by
+     * the already-live guard, and the word it refused on is what pins the
+     * first one's effect.
+     *
+     *   pipe 1 before (2F0 and 2F1, two boots, pipes 1-3 byte-identical):
+     *       0x8000c000
+     *   pipe 1 after:
+     *       0x8000d090
+     *
+     * The whole finding is the arithmetic below, which is why it is an
+     * assertion and not a sentence in the journal. */
+    {
+        const uint32_t dark = 0x8000c000u;   /* measured, two boots          */
+        const uint32_t now  = 0x8000d090u;   /* measured, after the write    */
+        const uint32_t wrote = rb_dpdto_rate_word(dark, 1);
+
+        /* THE VERDICT. The live word differs from the word this kext writes
+         * by EXACTLY DPDTO_ENABLE_STATUS - one bit, which rb_dpdto_rate_word
+         * does not set and cannot set, since it only ever touches
+         * DP_DTO_ENABLE and SRC_SEL. Anything else in this difference would
+         * mean something besides our store moved the register, and that is
+         * the reading this assertion exists to catch. */
+        CHECK((now ^ wrote) == RB_DPDTO_DP_DTO_STATUS,
+              "the live word is the word we wrote plus the hardware's own "
+              "status bit, and nothing else moved");
+        CHECK(!rb_dpdto_enable_status(dark) && rb_dpdto_enable_status(now),
+              "and that bit went 0 -> 1, which 2F0 attested both states of "
+              "on this chip before anything was programmed");
+        CHECK(rb_dpdto_prog_verdict(dark, now) == RB_DPDTO_PROG_STARTED,
+              "so the verdict over that transition is STARTED");
+
+        /* The RMW's duty, in the measured word rather than the modelled one:
+         * the divider and the error bits came through untouched. */
+        CHECK((now & RB_DPDTO_DTBCLK_DIV) == (dark & RB_DPDTO_DTBCLK_DIV),
+              "DTBCLK_DTO_DIV survived the read-modify-write");
+        CHECK(rb_dpdto_fifo_error(now) == rb_dpdto_fifo_error(dark) &&
+              rb_dpdto_fifo_error(now) == 3u,
+              "and so did DIO_FIFO_ERROR, which stayed 3 across a DTO being "
+              "started - so it does not clear on the DTO alone");
+        CHECK(rb_dpdto_rate_applied(now, 1) && rb_dpdto_rate_changed(dark, now),
+              "applied AND changed, so the readback carries evidence of the "
+              "store rather than agreeing with a value already present "
+              "(rule 20)");
+
+        /* WHY THE SECOND INVOCATION WAS REFUSED, and that it was refused for
+         * THIS reason and not another. The arguments are boot 454's: base
+         * CONFIRMED, armed, regs present, pipe 1, 148.5 MHz, ref 600 MHz. */
+        CHECK(rb_dpdto_write_refuse(1u, 148500000u, 600000000u, now,
+                                    1, 1, RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_PIPE_LIVE,
+              "a second write to the pipe we just started is refused as "
+              "PIPE_LIVE");
+        CHECK(rb_dpdto_write_refuse(1u, 148500000u, 600000000u, dark,
+                                    1, 1, RB_DPDTO_BASE_CONFIRMED)
+              == RB_DPDTO_W_OK,
+              "and the same call against the dark word it replaced is "
+              "allowed - so PIPE_LIVE is the live word's doing, not another "
+              "gate's");
+
+        /* ------------------------------------- THE IN-BOOT CONTROL
+         *
+         * Taken from the PERIODIC sample rather than the write path, in the
+         * same window, so it is not our own store read back (rule 20) and
+         * not a comparison across boots (rule 44): the two pipes we did NOT
+         * name still hold the dark word byte for byte, and the panel's holds
+         * exactly what 2F0 measured. The change is confined to the pipe the
+         * dial named, which is what makes "our write did this" a reading
+         * rather than a sequence of events. */
+        CHECK(rb_dpdto_enable_status(0x80000090u) &&
+              !rb_dpdto_enable_status(0x8000c000u),
+              "boot 455's other three pipes decode as the panel driving and "
+              "two still dark - the control for the pipe that moved");
+
+        /* The divergence we chose, in the chip's own word: SRC_SEL is 1 here
+         * where the firmware left pipe 0's at 0. Stated as a difference
+         * between two measured words; what the field SELECTS is still not
+         * established (rule 17). */
+        CHECK((now & RB_DPDTO_SRC_SEL) &&
+              !(0x80000090u & RB_DPDTO_SRC_SEL),
+              "SRC_SEL is set on the pipe we programmed and clear on the "
+              "panel's, which is Linux's value against the firmware's");
+    }
+
 #undef CHECK
     return bad;
 }
