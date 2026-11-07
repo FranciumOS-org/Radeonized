@@ -368,15 +368,32 @@ int main(int argc, char **argv)
     } else if (verd == 5) {
         printf("\n  -> SINK BLIND. Our four registers took, and the sink's\n"
                "     lane status could NOT be read afterwards, so this run\n"
-               "     says nothing about the sink either way. The before-read\n"
-               "     succeeded, so the AUX engine was working at the start of\n"
-               "     the call - which makes the DPCD 0x102 write and the\n"
-               "     100 us wait the only things that happened in between.\n"
-               "     Check whether the sink is still answering at all with\n"
+               "     says nothing about the sink either way.\n");
+        /* 2F7: this sentence used to be printed unconditionally and said
+         * the before-read succeeded. In boot 459 BOTH reads failed and it
+         * printed that anyway, which narrated an instrument failure as a
+         * bounded one. The two cases are different readings: with a good
+         * before-read the window is the 0x102 write and the 100 us wait;
+         * with neither read good the AUX path was already not answering
+         * this address and the run bounds nothing. Rule 14 - every path
+         * out must say something, and it must say the true thing. */
+        if (sbOk)
+            printf("     The before-read succeeded, so the AUX engine was\n"
+                   "     working at the start of the call - which makes the\n"
+                   "     DPCD 0x102 write and the 100 us wait the only things\n"
+                   "     that happened in between.\n");
+        else
+            printf("     The before-read FAILED TOO, so nothing is bounded:\n"
+                   "     this address was not answering before the writes\n"
+                   "     either, and the run says nothing about what our\n"
+                   "     writes did or did not do to the sink.\n");
+        printf("     Check whether the sink is still answering at all with\n"
                "     `dpcdread 0x202 1`, then `dpcdread 0 1`. If 0x000 reads\n"
                "     and 0x202 does not, the receiver is awake and the\n"
                "     status register is the problem; if neither reads, the\n"
-               "     AUX channel is.\n");
+               "     AUX channel is. Boot 459 took the second branch and\n"
+               "     0x000 read back 00 00 00 80 - an ACK carrying a\n"
+               "     revision no sink reports, so an ACK is not a reading.\n");
     } else if (verd == 4) {
         printf("\n  -> NO-OP. The writes took and NOT ONE BIT MOVED, so this\n"
                "     run put nothing new on the wire and nothing about the\n"
