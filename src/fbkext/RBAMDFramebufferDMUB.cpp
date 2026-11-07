@@ -129,6 +129,19 @@ void RBAMDFramebuffer::dmubInit(void)
     encChanged = 0;
     encSurveyMask = 0;
     encSurveyDone = false;
+    /* 2EC. digFe defaults 0 = RB_DIGBE_FE_INVALID, which rb_digbe_fe_refuse
+     * declines - so an armed boot that names no front end writes nothing,
+     * and `-rbgpufbfe` alone reproduces 2E6's arm exactly. */
+    digFe = RB_DIGBE_FE_INVALID;
+    feInst = 0;
+    feMask = 0;
+    feRefuse = RB_DIGBE_REFUSE_DISARMED;
+    feRan = 0;
+    feApplied = 0;
+    feChanged = 0;
+    feClean = 0;
+    feBefore = 0;
+    feAfter = 0;
     digbeMask = 0;
     digbeEnMask = 0;
     digbeDone = false;
@@ -797,6 +810,56 @@ void RBAMDFramebuffer::digbeResample(void)
     digbePostDone = true;
 }
 
+/* 2EC: connect the DIG front end to the back end -
+ * `dcn10_link_encoder_connect_dig_be_to_fe`, the one step 2E8 established no
+ * firmware bring-up could have made (the atom transmitter command carries no
+ * front end BY DESIGN, `command_table_helper2_dce112.c:94`).
+ *
+ * `blRegs` is the WRITABLE mapping of the same BAR5 window `hubpRegs` reads
+ * through, as encConfigure() already uses; DIG_BE_CNTL tops out at 0x24b0,
+ * under rb_enc_dw_max()'s 0x251e and so under rb_dpalt_dw_max()'s 0x2ca6 that
+ * `dpaltFits` checks - no new mapping, and the hosttest pins the relation
+ * rather than this comment asserting it.
+ *
+ * The live word is read, refused on, written and read back, in that order.
+ * The refusal CONSUMES the live word (rb_digbe_fe_refuse takes it), because a
+ * dword that does not already decode to a DIG_MODE this part writes is not
+ * this register and must not be stored to - 2DD read a plausible wrong
+ * address, and this would write one. */
+uint32_t RBAMDFramebuffer::feConnect(uint32_t inst, uint32_t fe)
+{
+    feInst = inst;
+    feMask = fe;
+    feApplied = 0;
+    feChanged = 0;
+    feClean = 0;
+
+    const int haveRegs = (blRegs != nullptr) && (hubpRegs != nullptr)
+                         && dpaltReady;
+
+    /* Clamped only so the live read and the deny lookup cannot index out of
+     * range before rb_digbe_fe_refuse() gets to reject the instance. */
+    const uint32_t safe = (inst < RB_DIGBE_COUNT) ? inst : 0u;
+    const uint32_t dw   = rb_digbe_dw(safe);
+
+    feBefore = haveRegs ? hubpRegs[kRbDmuSeg2Dmub + dw] : 0u;
+    feAfter  = feBefore;
+
+    const uint32_t why = rb_digbe_fe_refuse(inst, fe, feBefore,
+                                            feArmed ? 1 : 0, haveRegs,
+                                            rb_dcn_is_denied(dw));
+    if (why != RB_DIGBE_OK) { return feRefuse = why; }
+
+    blRegs[kRbDmuSeg2Dmub + dw] = rb_digbe_fe_word(feBefore, fe);
+
+    feAfter   = hubpRegs[kRbDmuSeg2Dmub + dw];
+    feApplied = (uint32_t)rb_digbe_fe_applied(feAfter, fe);
+    feChanged = (uint32_t)rb_digbe_fe_changed(feBefore, feAfter);
+    feClean   = (uint32_t)rb_digbe_fe_clean(feBefore, feAfter);
+    feRan++;
+    return feRefuse = RB_DIGBE_OK;
+}
+
 uint32_t RBAMDFramebuffer::encConfigure(uint32_t inst, uint32_t lanes)
 {
     encInst = inst;
@@ -881,6 +944,29 @@ uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
      * arm exactly, and a configure that refused while the send went anyway
      * is still a reading - as long as the boot can say which it was, which
      * is what encRefuse and encApplied are for (rule 14). */
+    /* 2EC: THE FE CONNECTION COMES FIRST, and the order is read off Linux
+     * rather than chosen. `link_hwss_dio.c:49` does the connect inside
+     * `setup_dio_stream_encoder`, and `link_dpms.c:2527` says in its own
+     * words that this happens "before the link training" - while
+     * `enable_dp_output`, which is `enc1_configure_encoder` plus the VBIOS
+     * transmitter command, runs INSIDE link training (`dp_enable_link_phy`).
+     * So the sequence is FE connect -> configure encoder -> transmitter
+     * ENABLE, and 2E4 and 2E6 both sent the transmitter with the front end
+     * unconnected - the inverse of it.
+     *
+     * The back-end instance is the phyid for the same reason the link
+     * encoder instance is (2E5's comment): link_regs(2, C) hands one index
+     * to LE_DCN31_REG_LIST, UNIPHY_DCN2_REG_LIST and DPCS_DCN31_REG_LIST.
+     * The FRONT end is not that index and is not inferred from it -
+     * `link_hwss_dio.c:55` passes `stream_res.stream_enc->id`, whichever
+     * stream encoder the allocator handed the pipe - so it is the dial's
+     * value, defaulting to DIGC only for readability.
+     *
+     * A refusal here does not stop the send, for the same reason encConfigure
+     * does not: `digFe` 0 reproduces 2E6's arm exactly, and a boot can say
+     * which happened from `feRefuse` (rule 14). */
+    feConnect(phyid, digFe);
+
     if (digEnc) {
         encConfigure(phyid, p.lanenum);
     } else {
@@ -1304,6 +1390,21 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBEncScramBefore", (uint64_t)encScramBefore, 64);
     setProperty("RBFBEncScramAfter", (uint64_t)encScramAfter, 64);
     setProperty("RBFBEncChanged", (uint64_t)encChanged, 32);
+
+    /* 2EC: the FE connection. `Before`/`After` are published raw beside the
+     * three derived bits - which has paid for itself five times now (2B0,
+     * 2B4, 2B9, 2E6, 2EB), and `Clean` only means anything next to them. */
+    setProperty("RBFBDigFeArmed", feArmed);
+    setProperty("RBFBDigFeWant", (uint64_t)digFe, 32);
+    setProperty("RBFBDigFeInst", (uint64_t)feInst, 32);
+    setProperty("RBFBDigFeMask", (uint64_t)feMask, 32);
+    setProperty("RBFBDigFeRefuse", (uint64_t)feRefuse, 32);
+    setProperty("RBFBDigFeRan", (uint64_t)feRan, 32);
+    setProperty("RBFBDigFeApplied", (uint64_t)feApplied, 32);
+    setProperty("RBFBDigFeChanged", (uint64_t)feChanged, 32);
+    setProperty("RBFBDigFeClean", (uint64_t)feClean, 32);
+    setProperty("RBFBDigFeBefore", (uint64_t)feBefore, 64);
+    setProperty("RBFBDigFeAfter", (uint64_t)feAfter, 64);
     /* 2E6's survey. Sampled here so the first periodic publish latches the
      * PRISTINE words - a send only ever happens from setProperties, later. */
     encSurvey();

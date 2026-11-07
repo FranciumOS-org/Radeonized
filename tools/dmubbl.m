@@ -359,6 +359,57 @@ static void domRow(const char *label, const uint32_t *w, int haveIt)
 /* 2E2: the DIG1 transmitter refusal codes. Numbered above the DOMAIN ones
  * (20-25) on purpose, so a code read out of the wrong key cannot be decoded
  * against the wrong table and come back plausible. */
+/* The one-hot names, from dcn10_link_encoder.c:53-60. Printed rather than the
+ * bare number because reading 0x4 as "front end 4" instead of DIGC is 2E1's
+ * hpdsel trap with the arrow reversed. */
+static const char *feName(long m)
+{
+    switch (m) {
+    case 0x00: return "INVALID - no front end";
+    case 0x01: return "DIGA (the panel's; refused)";
+    case 0x02: return "DIGB";
+    case 0x04: return "DIGC";
+    case 0x08: return "DIGD";
+    case 0x10: return "DIGE";
+    default:   return "not a one-hot front end";
+    }
+}
+
+/* 2EC: DIG_FE_SOURCE_SELECT's refusals, 60-69, numbered clear of rb_dig's
+ * 30-37, rb_enc's 40-45 and rb_dpaltq's 50-55. Three separate codes for a bad
+ * front-end mask, because 0, two bits and a sixth front end are three
+ * different mistakes (rule 14). */
+static const char *feWhy(long c)
+{
+    switch (c) {
+    case 0:  return "no refusal - the connection was written";
+    case 60: return "not armed (-rbgpufbfe missing from boot-args)";
+    case 61: return "no writable BAR5 window, or the aperture does not cover "
+                    "the DIG block";
+    case 62: return "back end 0 - the PANEL's (2E8 read FE_SEL 0x1 DIGA on "
+                    "DIG0). Refused by name";
+    case 63: return "back-end instance outside 0..4";
+    case 64: return "front end 0 - DCN10_DIG_FE_SOURCE_SELECT_INVALID, i.e. "
+                    "no front end named. This is the DEFAULT, so an armed "
+                    "boot that names none writes nothing";
+    case 65: return "the front-end value is not one-hot. The field is a MASK "
+                    "(DIGA 0x1, DIGB 0x2, DIGC 0x4, DIGD 0x8, DIGE 0x10), "
+                    "never an index";
+    case 66: return "a front end above DIGE - this part has five "
+                    "(num_stream_encoder = 5)";
+    case 67: return "front end DIGA - the PANEL's own stream encoder, and "
+                    "this field ACCUMULATES rather than replaces, so ORing "
+                    "it elsewhere would put the live desktop's encoder on a "
+                    "second back end. Refused by name";
+    case 68: return "the live word does not decode to a DIG_MODE this part "
+                    "writes, so that dword is NOT DIG_BE_CNTL - refused "
+                    "BEFORE the store (2DD read a plausible wrong address; "
+                    "this would have written one)";
+    case 69: return "the dword is on the dcn302/dcn312 deny list";
+    default: return "unknown";
+    }
+}
+
 static const char *digWhy(long c)
 {
     switch (c) {
@@ -651,6 +702,49 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
     printf("  after    PHY%ld  %08lx\n", phy, after & 0xffffffffL);
     printf("  verdict        %ld  %s\n", verdict, digVerdictName(verdict));
 
+    /* 2EC. Printed before the encoder block because it runs before it on
+     * the chip: link_hwss_dio.c does the FE connect inside
+     * setup_dio_stream_encoder and link_dpms.c:2527 says in its own words
+     * that this is "before the link training", which is where
+     * enc1_configure_encoder and the transmitter command both live. */
+    const long feWant  = num(fb, "RBFBDigFeWant");
+    const long feRef   = num(fb, "RBFBDigFeRefuse");
+    const long feRan   = num(fb, "RBFBDigFeRan");
+    const long feInst  = num(fb, "RBFBDigFeInst");
+    const long feAppl  = num(fb, "RBFBDigFeApplied");
+    const long feChg   = num(fb, "RBFBDigFeChanged");
+    const long feCln   = num(fb, "RBFBDigFeClean");
+    const long feB     = num(fb, "RBFBDigFeBefore");
+    const long feA     = num(fb, "RBFBDigFeAfter");
+
+    printf("\nfront end -> back end (DIG_BE_CNTL.DIG_FE_SOURCE_SELECT on "
+           "DIG%ld)\n", feInst);
+    if (feRef == -1 || feWant == -1) {
+        printf("  the RBFBDigFe* keys are ABSENT from this framebuffer, so "
+               "it predates\n  2EC. That is rule 15, not a reading - check "
+               "the loaded UUID.\n");
+    } else {
+        printf("  asked for      0x%lx  %s\n", feWant, feName(feWant));
+        printf("  refusal        %ld  %s\n", feRef, feWhy(feRef));
+        if (feRan == 0) {
+            printf("  nothing was written (ran 0)\n");
+        }
+        printf("  DIG_BE_CNTL    %08lx -> %08lx   FE_SEL %#lx -> %#lx\n",
+               feB & 0xffffffffL, feA & 0xffffffffL,
+               (feB >> 8) & 0x7fL, (feA >> 8) & 0x7fL);
+        printf("  applied        %ld  %s\n", feAppl,
+               feAppl ? "the front end's bit READS BACK set"
+                      : "the readback does NOT carry it");
+        printf("  changed        %ld  %s\n", feChg,
+               feChg ? "the word MOVED - evidence of the store itself"
+                     : "the word did not move");
+        printf("  clean          %ld  %s\n", feCln,
+               feCln ? "every bit outside FE_SEL survived (DIG_MODE, "
+                       "HPD_SELECT)"
+                     : "SOMETHING ELSE IN THE WORD CHANGED - the RMW or the "
+                       "address is wrong");
+    }
+
     /* 2E5. Printed BEFORE the interpretation, because which explanation a
      * STILL verdict leaves alive depends entirely on whether these two
      * writes took - and 2B0 is what deriving a verdict from the wrong
@@ -735,6 +829,32 @@ static void digVerdictPrint(io_service_t fb, long callsBefore)
                    "encoder half was off, which is 2E4's arm and\n     "
                    "reproduces 2E4 rather than advancing on it.\n");
         }
+    }
+
+    /* 2EC: what the FE outcome does to the list above. Said here rather than
+     * folded into the three paragraphs, because those record what was named
+     * in advance and that record should not move. */
+    if (feRan > 0 && feRef == 0 && feAppl && feChg && feCln) {
+        printf("\n  -> AND THE FRONT END IS NOW CONNECTED (FE_SEL %#lx -> "
+               "%#lx on DIG%ld,\n     the word moved and nothing else in it "
+               "did). So of the two steps 2E6\n     named as not reproduced, "
+               "ONE IS LEFT: the pixel clock, VBIOS\n     sub-type 2 - "
+               "another inbox command of the kind 2E9 proved executes\n     "
+               "and 2EB proved answers. A transmitter with a front end and "
+               "no clock\n     still has nothing to light, so a STILL "
+               "verdict here is STILL not\n     \"the firmware discards "
+               "VBIOS commands\".\n",
+               (feB >> 8) & 0x7fL, (feA >> 8) & 0x7fL, feInst);
+    } else if (feRan > 0 && feRef == 0 && !feCln) {
+        printf("\n  -> THE WRITE WAS NOT CLEAN: a bit outside FE_SEL moved. "
+               "Treat the whole\n     reading as suspect and the address as "
+               "the first suspect - do NOT\n     interpret the PHY verdict "
+               "off this run.\n");
+    } else if (feRan > 0 && feRef == 0 && !feChg) {
+        printf("\n  -> the FE write landed on a word that was ALREADY "
+               "connected, so\n     `applied` carries no evidence of our "
+               "store (2E6's shape). That\n     contradicts 2E8's FE_SEL 0 "
+               "on DIG2 and is worth reading twice.\n");
     }
 }
 
@@ -1358,8 +1478,22 @@ int main(int argc, char **argv)
          * across boots cannot tell a dial from a drift, and 2B6 died on
          * exactly that. `noenc` reproduces 2E4's arm byte for byte. */
         int wantEnc = 1;
-        if (argc > 3 && strcmp(argv[3], "noenc") == 0) { wantEnc = 0; }
-        if (argc > 2 && strcmp(argv[2], "noenc") == 0) { wantEnc = 0; phy = -1; }
+        /* 2EC: the FE connection, OFF unless asked. 0 is the documented
+         * INVALID and is what the kext refuses, so this is both the dial and
+         * the A side; -1 asks for the derived front end (DIGC) so the
+         * ordinary invocation names no magic number. An explicit one-hot is
+         * accepted for a deliberate A/B against another front end. */
+        long wantFe = 0;
+        for (int a = 2; a < argc; a++) {
+            if (strcmp(argv[a], "noenc") == 0) { wantEnc = 0; }
+            else if (strcmp(argv[a], "fe") == 0) { wantFe = -1; }
+            else if (strncmp(argv[a], "fe=", 3) == 0) {
+                wantFe = strtol(argv[a] + 3, NULL, 0);
+            }
+        }
+        if (argc > 2 && (strcmp(argv[2], "noenc") == 0
+                         || strcmp(argv[2], "fe") == 0
+                         || strncmp(argv[2], "fe=", 3) == 0)) { phy = -1; }
         /* 2E6: report the five-encoder survey and SEND NOTHING. The survey
          * is the independent finding (did the firmware configure the Type-C
          * encoder, or is 0x1/0x0101FF10 a reset default?) and it should not
@@ -1382,8 +1516,9 @@ int main(int argc, char **argv)
             return 2;
         }
         if (phy > 5) {
-            printf("usage: dmubbl dig [phyid]\n"
+            printf("usage: dmubbl dig [phyid] [fe|fe=MASK] [noenc]\n"
                    "       phyid omitted = PHY2, the Type-C port (2E1)\n"
+                   "       fe  = also connect front end DIGC (2EC)\n"
                    "       the payload documents 0=UNIPHYA .. 5=UNIPHYF\n");
             IOObjectRelease(fb);
             return 2;
@@ -1395,11 +1530,33 @@ int main(int argc, char **argv)
          * first, so the dial is in place before the send it governs - a
          * two-call handover is what rule 34 and 2DA warn about, and here it
          * is avoidable entirely. */
-        d = @{ @"RBFBDigEnc": @(wantEnc),
+        /* All three keys in ONE setProperties call: VBL.cpp handles
+         * RBFBDigFe and RBFBDigEnc before RBFBDigPhy, so both dials are in
+         * place before the send they govern (rule 34). */
+        d = @{ @"RBFBDigFe": @((int32_t)wantFe),
+               @"RBFBDigEnc": @(wantEnc),
                @"RBFBDigPhy": @((int32_t)phy) };
         printf("\nencoder half: %s\n", wantEnc
                ? "ON - enc1_configure_encoder's two writes run first (2E5)"
                : "OFF - reproducing 2E4's arm exactly (the A side)");
+        if (wantFe == 0) {
+            printf("FE connect:   OFF - no front end named, so nothing is "
+                   "written to\n              DIG_BE_CNTL. This is 2E6's arm "
+                   "and the A side; pass `fe`\n              to connect "
+                   "DIGC, which 2E8 measured ABSENT on DIG2.\n");
+        } else if (wantFe < 0) {
+            printf("FE connect:   ON - DIGC (0x4) into the target back end's "
+                   "FE_SEL,\n              an OR inside an RMW, with "
+                   "DIG_MODE and HPD_SELECT kept.\n              2E8 read "
+                   "FE_SEL 0 there, so a real write MUST move the word.\n");
+            printf("              NOTE: there is no disconnect path, so the "
+                   "A side (`dig 2`\n              with no `fe`) must be run "
+                   "FIRST in a boot. Once the FE is\n              "
+                   "connected it stays connected until reboot.\n");
+        } else {
+            printf("FE connect:   ON - front end 0x%lx (%s)\n",
+                   wantFe, feName(wantFe));
+        }
         if (phy < 0) {
             printf("\nsending DIG1_TRANSMITTER_CONTROL ENABLE to PHY2, the\n"
                    "Type-C port (TRANSMITTER_UNIPHY_C)...\n");

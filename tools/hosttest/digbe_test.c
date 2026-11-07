@@ -250,6 +250,130 @@ int digbe_tests(void)
               "a NULL survey is 0, not a read through NULL");
     }
 
+    /* ================================================================= *
+     * 2EC: the WRITE. One case per guard, and a break per guard - 2E7
+     * found one of this file's own guards dead by breaking it, so a guard
+     * that no break can make matter is a result and not a formality.
+     * ================================================================= */
+
+    /* The word itself: an OR into the live field, inside an RMW. */
+    {
+        /* 2E8's own reading of DIG2: FE_SEL 0, DIG_MODE 0 (DP SST),
+         * HPD_SELECT 2. Writing DIGC must leave the other two alone. */
+        const uint32_t live = 0x20000000u;
+        const uint32_t out  = rb_digbe_fe_word(live, RB_DIGBE_FE_DIGC);
+
+        CHECK(rb_digbe_fe_sel(out) == RB_DIGBE_FE_DIGC,
+              "DIGC lands in FE_SEL as 0x4, the one-hot - not as index 4");
+        CHECK(out == 0x20000400u,
+              "the word is boot 447's DIG2 with 0x400 ORed in, nothing else");
+        CHECK(rb_digbe_hpd_sel(out) == 2u,
+              "HPD_SELECT 2 survives the write - the firmware's own field, "
+              "which a REG_SET would have destroyed");
+        CHECK(rb_digbe_mode(out) == RB_DIGBE_MODE_DP_SST,
+              "DIG_MODE survives too");
+        CHECK(rb_digbe_fe_clean(live, out),
+              "every bit outside FE_SEL is identical");
+
+        /* It ACCUMULATES, as Linux's |= does. */
+        CHECK(rb_digbe_fe_sel(rb_digbe_fe_word(0x20000400u,
+                                               RB_DIGBE_FE_DIGB)) == 0x6u,
+              "a second front end ORs in - the field accumulates (MST), it "
+              "does not replace");
+        /* And the panel's live word is untouched by a write of its own FE,
+         * which is the idempotence a retry depends on. */
+        CHECK(rb_digbe_fe_word(0x00000100u, RB_DIGBE_FE_DIGA) == 0x00000100u,
+              "ORing a bit already set is a no-op on the whole word");
+    }
+
+    /* The refusals, in the order rb_digbe_fe_refuse() tests them. */
+    {
+        const uint32_t ok_word = 0x20000000u;   /* boot 447's DIG2 */
+        const uint32_t inst = RB_DIGBE_TYPEC_INST;
+        const uint32_t fe   = RB_DIGBE_TYPEC_FE;
+
+        CHECK(rb_digbe_fe_refuse(inst, fe, ok_word, 1, 1, 0) == RB_DIGBE_OK,
+              "the derived Type-C arm is accepted - the control, so the "
+              "refusals below are not a function that always refuses");
+
+        CHECK(rb_digbe_fe_refuse(inst, fe, ok_word, 0, 1, 0)
+              == RB_DIGBE_REFUSE_DISARMED, "disarmed refuses");
+        CHECK(rb_digbe_fe_refuse(inst, fe, ok_word, 1, 0, 0)
+              == RB_DIGBE_REFUSE_NOREGS, "no writable aperture refuses");
+        CHECK(rb_digbe_fe_refuse(RB_DIGBE_PANEL_INST, fe, ok_word, 1, 1, 0)
+              == RB_DIGBE_REFUSE_PANEL,
+              "instance 0 is the live panel's back end and is refused BY "
+              "NAME, before any range test can let it through");
+        CHECK(rb_digbe_fe_refuse(RB_DIGBE_COUNT, fe, ok_word, 1, 1, 0)
+              == RB_DIGBE_REFUSE_INST, "instance 5 is out of range");
+        CHECK(rb_digbe_fe_refuse(inst, RB_DIGBE_FE_INVALID, ok_word, 1, 1, 0)
+              == RB_DIGBE_REFUSE_FE_ZERO,
+              "FE 0 is the documented INVALID, and gets its own code rather "
+              "than reading as 'not one-hot'");
+        CHECK(rb_digbe_fe_refuse(inst, 0x6u, ok_word, 1, 1, 0)
+              == RB_DIGBE_REFUSE_FE_HOT, "two bits name no front end");
+        CHECK(rb_digbe_fe_refuse(inst, 0x20u, ok_word, 1, 1, 0)
+              == RB_DIGBE_REFUSE_FE_RANGE,
+              "a sixth front end: one-hot but this part has five "
+              "(num_stream_encoder = 5)");
+        CHECK(rb_digbe_fe_refuse(inst, RB_DIGBE_PANEL_FE, ok_word, 1, 1, 0)
+              == RB_DIGBE_REFUSE_FE_PANEL,
+              "DIGA is the panel's own front end (2E8: FE_SEL 0x1 on DIG0) "
+              "and the field ACCUMULATES, so ORing it onto DIG2 would put "
+              "the live desktop's stream encoder on a second back end");
+        CHECK(rb_digbe_fe_refuse(inst, RB_DIGBE_FE_DIGE, ok_word, 1, 1, 0)
+              == RB_DIGBE_OK,
+              "DIGE is legal - the refusal above is about DIGA, not about "
+              "'any front end but DIGC'");
+
+        /* The one that is new in this header: check the target BEFORE
+         * writing it. 2DD read a plausible wrong address; this would WRITE
+         * one. */
+        CHECK(rb_digbe_fe_refuse(inst, fe, 0xFFFFFFFFu, 1, 1, 0)
+              == RB_DIGBE_REFUSE_WORD,
+              "an all-ones live word is an unmapped block, not DIG_BE_CNTL: "
+              "refused before the store, not decoded after it");
+        CHECK(rb_digbe_fe_refuse(inst, fe, 0x00040000u, 1, 1, 0)
+              == RB_DIGBE_REFUSE_WORD,
+              "DIG_MODE 4 is not a mode dcn10_link_encoder_setup writes, so "
+              "the dword is not this register");
+        CHECK(rb_digbe_fe_refuse(inst, fe, 0x00010000u, 1, 1, 0)
+              == RB_DIGBE_OK,
+              "DIG_MODE 1 (LVDS) is a value this part really reads on the "
+              "three dark instances, so the guard must not reject it");
+
+        CHECK(rb_digbe_fe_refuse(inst, fe, ok_word, 1, 1, 1)
+              == RB_DIGBE_REFUSE_DENIED, "a denied dword refuses");
+    }
+
+    /* The readback, and why `applied` needs `changed` beside it. */
+    {
+        CHECK(rb_digbe_fe_applied(0x20000400u, RB_DIGBE_FE_DIGC),
+              "DIGC set in the readback is applied");
+        CHECK(!rb_digbe_fe_applied(0x20000000u, RB_DIGBE_FE_DIGC),
+              "FE_SEL 0 is not applied");
+        CHECK(!rb_digbe_fe_applied(0x20000200u, RB_DIGBE_FE_DIGC),
+              "DIGB set is not DIGC applied - the bit is tested, not "
+              "non-zero-ness");
+        CHECK(rb_digbe_fe_changed(0x20000000u, 0x20000400u),
+              "the word moved: this is the half that is evidence of a store");
+        CHECK(!rb_digbe_fe_changed(0x20000400u, 0x20000400u),
+              "a word that did not move did not move, whatever `applied` "
+              "says - 2E6's defect, where before == after == target made "
+              "applied 1 with no control");
+        /* Both together: the pair a boot must read. On DIG2 the before is 0
+         * (2E8), so a genuine write is applied AND changed, and applied
+         * without changed means the connection was already there. */
+        CHECK(rb_digbe_fe_applied(0x20000400u, RB_DIGBE_FE_DIGC)
+              && !rb_digbe_fe_changed(0x20000400u, 0x20000400u),
+              "applied-but-unchanged is expressible, which is the whole "
+              "reason there are two keys");
+
+        CHECK(!rb_digbe_fe_clean(0x20000000u, 0x30000400u),
+              "a store that moved HPD_SELECT is NOT clean - the check can "
+              "fail, so it is not a constant 1");
+    }
+
 #undef CHECK
     return bad;
 }

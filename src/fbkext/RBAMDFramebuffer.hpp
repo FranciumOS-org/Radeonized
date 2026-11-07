@@ -602,6 +602,22 @@ private:
      * The target is PHY2 (2E1's ROM-derived UNIPHY_C), which drives nothing,
      * and PHY0 - the live panel - is refused by name. */
     bool               digArmed;         /* -rbgpufbdig */
+    bool               feArmed;          /* -rbgpufbfe (2EC) */
+    uint32_t           digFe;            /* the FE one-hot the dial asked */
+
+    /* 2EC: DIG_FE_SOURCE_SELECT, the FIRST write this project makes to the
+     * DIG back end. `feClean` is the check that the RMW disturbed no other
+     * field, and `feChanged` is the one carrying evidence of the store -
+     * `feApplied` alone has no control (2E6). */
+    uint32_t           feInst;
+    uint32_t           feMask;
+    uint32_t           feRefuse;
+    uint32_t           feRan;
+    uint32_t           feApplied;
+    uint32_t           feChanged;
+    uint32_t           feClean;
+    uint32_t           feBefore;
+    uint32_t           feAfter;
     bool               dpaltqArmed;      /* -rbgpufbaltq (2EA) */
     uint32_t           digCalls;         /* every handler entry, monotonic */
     uint32_t           digSends;         /* pushes that reached the ring   */
@@ -1025,6 +1041,7 @@ private:
     void     encSurvey(void);
     void     digbeSurvey(void);
     void     digbeResample(void);
+    uint32_t feConnect(uint32_t inst, uint32_t fe);
     uint32_t dmubDpAltQuery(uint32_t fill);
     uint32_t encConfigure(uint32_t inst, uint32_t lanes);
     bool dmubSelect(uint32_t n);

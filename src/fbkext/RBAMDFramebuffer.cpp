@@ -605,6 +605,33 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * something - no level, no pipe, no caps query and no transmitter is
          * sent by arming anything. */
         if (digArmed) { dmubBlArmed = true; }
+        /* 2EC: the FE connection, DIG_BE_CNTL.DIG_FE_SOURCE_SELECT - the one
+         * step 2E8 established is genuinely ours to write, and the first
+         * write this kext makes to the DIG back end.
+         *
+         * What it can change on the chip: it ORs one front end's bit into
+         * one back end's selection field. Instance 0 (the panel's back end,
+         * 2E8's FE_SEL 0x1) and front end DIGA (that same panel's stream
+         * encoder - the field ACCUMULATES, so ORing it elsewhere would put
+         * the live desktop's encoder on a second back end) are both refused
+         * BY NAME in `rb_digbe_fe_refuse()`, and the live word must already
+         * decode to a DIG_MODE Linux writes or nothing is stored - rule 47
+         * asked of a write instead of a read.
+         *
+         * TOKEN NAME: `-rbgpufbdigfe` would have had `-rbgpufbdig` as a
+         * strict prefix, which is exactly rule 30 - two milestones after
+         * 2EA hit the same thing with `-rbgpufbdpaltq`. Checked mechanically
+         * over all 21 argOn() tokens in src/, both directions.
+         *
+         * It arms its own dependencies for the same reason `-rbgpufbdig`
+         * does (rule 34): the ring, because the FE connect is sequenced
+         * inside the transmitter experiment, and the PHY aperture, because
+         * these dwords live in the block `dpaltFits` bounds. Even armed
+         * NOTHING is written until `build/out/dmubbl dig <phy> fe` names a
+         * front end - the dial defaults to 0, which is the documented
+         * INVALID and is refused. */
+        feArmed = argOn("-rbgpufbfe");
+        if (feArmed) { dmubBlArmed = true; }
         /* 2BA: the DPCD read. Opt-in, and the user's decision - it is the
          * first write this project makes to a display block outside the
          * panel's own pipe. Even armed, NOTHING is sent until a userspace
