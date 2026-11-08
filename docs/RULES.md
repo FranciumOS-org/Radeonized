@@ -535,22 +535,48 @@ the state that makes PHY2 drivable is **in none of the registers we read**,
 five of ~35 in the block. RDPCSPIPE also reproduced boot 471 exactly (rule
 44's second sample, free).
 **309 added four registers named for the question**, read-only, no setter, all
-45 offsets script-verified: **`RDPCSTX_DPALT_CONTROL_REG` `0x2956` —
-`RDPCS_ALLOW_DRIVER_ACCESS` / `RDPCS_DRIVER_ACCESS_BLOCKED`**, "who owns this"
-asked of the hardware, and a blocked interface would account for `PHY_RESET`
-never clearing, the atom ENABLE moving nothing **and `DP_VID_M` refusing a
-store** with no new mechanism; `RDPCSTX_DMCU_DPALT_DIS_BLOCK_REG` `0x293c`
-(`FORCE_TX_CLK_DIS`); `RDPCSTX_DMCU_DPALT_PHY_CNTL6` `0x2955`, a **third**
-source on `DPALT_DISABLE` beside RDPCSPIPE's and 301's retired RDPCSTX read;
-`RDPCSTX_CNTL2` `0x2939` (`PHY_ENC_TYPE_SEL`). **All UNATTRIBUTED because
-their writer is DMCU** — neither party the ANSWERED/DRIVEN split separates.
-**308's lesson is structural now:** every instance publishes **two** diffs,
-against the panel and against **`RB_DPCSPHY_DARK_USBC_INST` = PHY3**; only a
-difference holding against **both** is PHY2's own, and the hosttest encodes
-308's dead candidate as a failing case. Ten break-it guards; the one that
-fired nothing was **invalid** (a cross-register mask, which the per-register
-disjointness check correctly permits) — recorded in the header. Framebuffer
-UUID **16CB216D**.
+45 offsets script-verified: `RDPCSTX_DPALT_CONTROL_REG` `0x2956`
+(`ALLOW_DRIVER_ACCESS` / `DRIVER_ACCESS_BLOCKED`, "who owns this" asked of the
+hardware), `RDPCSTX_DMCU_DPALT_DIS_BLOCK_REG` `0x293c` (`FORCE_TX_CLK_DIS`),
+`RDPCSTX_DMCU_DPALT_PHY_CNTL6` `0x2955` (a **third** source on
+`DPALT_DISABLE`), `RDPCSTX_CNTL2` `0x2939` (`PHY_ENC_TYPE_SEL`). **All
+UNATTRIBUTED because their writer is DMCU** — neither party the
+ANSWERED/DRIVEN split separates. **308's lesson is structural now:** every
+instance publishes **two** diffs, against the panel and against
+**`RB_DPCSPHY_DARK_USBC_INST` = PHY3**; only a difference holding against
+**both** is PHY2's own, and the hosttest encodes 308's dead candidate as a
+failing case. Ten break-it guards; the one that fired nothing was **invalid**
+(a cross-register mask, which the per-register disjointness check correctly
+permits). Framebuffer UUID **16CB216D**.
+
+**309b / BOOT 482: THE OWNERSHIP CANDIDATE IS DEAD, AND THE SURVEY IS DEAD AS
+A METHOD.** `RDPCSTX_DPALT_CONTROL_REG` reads **`0x00000000` on all five
+instances, the live working panel included** — `ALLOW_DRIVER_ACCESS` 0 and
+`DRIVER_ACCESS_BLOCKED` 0 everywhere. **The panel drives a 1080p link right
+now with ALLOW clear**, so the field cannot mean what its name says on this
+part, and the positive control is what establishes it. `DIS_BLOCK` is 0 on all
+five too, so `FORCE_TX_CLK_DIS` is **not** why PHY2 has no `TX_CLOCK_ON`.
+**`DMCU_DPALT_PHY_CNTL6` retires `0x00063333` a SECOND way:** PHY2 reads it
+(PSTATE 3 x4, `MPLL_EN` 0, `DPALT_DISABLE`+ACK) agreeing with 301's retired
+RDPCSTX read and contradicting `QUERY_DP_ALT` — **but PHY2, PHY3 and PHY4 read
+it IDENTICALLY** while the query separates them, so **a register that reads
+the same on a granted port and a disabled port is not per-port grant state**
+(every field `_RESERVED` upstream). PSTATE 3 is **USB-C-ness, not
+working-ness** — dark non-USB-C PHY1 reads 0. `CNTL2`'s `CR_CONVERT_FIFO_EMPTY`
+splits USB-C from not, again; `ENC_TYPE_SEL` is 0 on all five and 2FC already
+established DIG **is** zero, so no finding was available. **The extended A/B:
+the atom ENABLE moves NONE of the nine** (307 could only see three), four
+instances as control.
+**Nothing in nine registers distinguishes PHY2 from PHY3** — `AccessDiffDark`
+**0**, the only non-zero diff against the panel and shared by PHY1 and PHY4.
+**Three surveys of this block have now failed the same way** (five registers,
+then nine); the only instrument that separates PHY2 from PHY3 is still
+ROM-attested `QUERY_DP_ALT`. **Reading more of this file is not the next
+step.** Two places are left: the PHY's **internal** registers behind
+`RDPCS_TX_CR_ADDR`/`CR_DATA` (Cobalt64 reads `CR_ADDR` and deliberately does
+**not** read `CR_DATA`, suspecting the read is itself a trigger — a hazard,
+not a free read), and **DMCUB's image**, which services both the command and
+the query.
 
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
