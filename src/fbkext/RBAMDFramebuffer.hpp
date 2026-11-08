@@ -561,6 +561,34 @@ private:
     uint32_t           strencDerived[2][4];
     uint32_t           strencMsaMismatch;
 
+    /* 305: the stream write on DIG2. rb_strprog.h holds the list and the
+     * refusals; these are the run record, reset on every call so a refusal
+     * cannot be read as the previous run's result. */
+    bool               strmArmed;
+    uint32_t           strmCalls;
+    uint32_t           strmRefuse;
+    uint32_t           strmRan;
+    uint32_t           strmWrites;
+    uint32_t           strmApplied;
+    uint32_t           strmChangedMask;
+    uint32_t           strmInstUsed;
+    uint32_t           strmOtgUsed;
+    uint32_t           strmPixKhzUsed;
+    uint32_t           strmLinkUsed;
+    uint32_t           strmMVid;
+    uint32_t           strmCntlBefore;
+    uint32_t           strmCntlAfter;
+    uint32_t           strmStatusOff;
+    int                strmVerdict;
+    uint32_t           strmMsaAfter[4];
+    uint32_t           strmSteerAfter;
+    uint32_t           strmFeAfter;
+    /* The dials the tool sets before it triggers (rule 34). */
+    uint32_t           strmCallInst;
+    uint32_t           strmCallOtg;
+    uint32_t           strmCallPixKhz;
+    uint32_t           strmCallLink;
+
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -1216,6 +1244,9 @@ private:
     void dioSample(void);
     void dpcspipeSample(void);
     void strencSample(void);
+    uint32_t strmProgram(uint32_t inst, uint32_t tgInst,
+                         uint32_t pixKhz, uint32_t linkRate);
+    void strmPublish(void);
     /* 2EF: pipe 0's live DP pixel-clock DTO, read-only - and the check that
      * BASE_IDX 1 is a real address before anything is written there. Same
      * mapping as hpdSample(); gated on dtoArmed. */

@@ -99,7 +99,7 @@ all: kext tools
 # rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
 # docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
 # freestanding; nothing links it yet.
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
@@ -364,7 +364,7 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 # check_imports.py's 0-from-SystemKernelExtensions rule does NOT apply here -
 # this kext is REQUIRED to resolve against the system collection.
 FBKEXT_SRC    := $(PROJ_ROOT)/src/fbkext
-FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/RBAMDFramebufferHUBP.o $(BUILD_DIR)/fbkext/RBAMDFramebufferBacklight.o $(BUILD_DIR)/fbkext/RBAMDBacklightParams.o $(BUILD_DIR)/fbkext/RBAMDFramebufferDRR.o $(BUILD_DIR)/fbkext/RBAMDFramebufferModes.o $(BUILD_DIR)/fbkext/RBAMDFramebufferDMUB.o $(BUILD_DIR)/fbkext/RBAMDFramebufferAux.o $(BUILD_DIR)/fbkext/RBAMDFramebufferDpTx.o $(BUILD_DIR)/fbkext/kmod_info.o
+FBKEXT_OBJS   := $(BUILD_DIR)/fbkext/RBAMDFramebuffer.o $(BUILD_DIR)/fbkext/RBAMDFramebufferVBL.o $(BUILD_DIR)/fbkext/RBAMDFramebufferHUBP.o $(BUILD_DIR)/fbkext/RBAMDFramebufferBacklight.o $(BUILD_DIR)/fbkext/RBAMDBacklightParams.o $(BUILD_DIR)/fbkext/RBAMDFramebufferDRR.o $(BUILD_DIR)/fbkext/RBAMDFramebufferModes.o $(BUILD_DIR)/fbkext/RBAMDFramebufferDMUB.o $(BUILD_DIR)/fbkext/RBAMDFramebufferAux.o $(BUILD_DIR)/fbkext/RBAMDFramebufferDpTx.o $(BUILD_DIR)/fbkext/RBAMDFramebufferStrm.o $(BUILD_DIR)/fbkext/kmod_info.o
 FBKEXT_BUNDLE := $(OUT)/RBAMDFramebuffer.kext
 FBKEXT_BIN    := $(FBKEXT_BUNDLE)/Contents/MacOS/RBAMDFramebuffer
 
@@ -529,7 +529,7 @@ fbpresent:
 # rebuild of the executable inside it. **A rebuild still rewrites the bundle,
 # so re-sign is part of the target, not a manual step** (2x5 lost framepump's
 # grant to exactly this).
-.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset drainset tickset mtlname dpcdread dpcdwrite dptrain edidread otgprog
+.PHONY: dstream animtest modeset pubms dmubbl ftbudget holdset tripleset drainset tickset mtlname dpcdread dpcdwrite dptrain edidread otgprog strencprog
 # 2zn: the DMCUB inbox oracle - reads the locate and the bring-up scan, and
 # sends ONE ABM command by name. See tools/dmubbl.m for why it is a tool and
 # not the slider.
@@ -591,6 +591,12 @@ $(OUT)/dpcdread: tools/dpcdread.m | $(OUT)
 dptrain: $(OUT)/dptrain
 $(OUT)/dptrain: tools/dptrain.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
+	      -framework IOKit -framework CoreFoundation -framework Foundation
+	@echo "  TOOL  $@"
+
+strencprog: $(OUT)/strencprog
+$(OUT)/strencprog: tools/strencprog.m | $(OUT)
+	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -Isrc/common -o $@ $< \
 	      -framework IOKit -framework CoreFoundation -framework Foundation
 	@echo "  TOOL  $@"
 
