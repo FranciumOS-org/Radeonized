@@ -1624,7 +1624,14 @@ static void fsmReport(io_service_t fb, long callsBefore)
     if (refuse != 0) { return; }
 
     printf("\n=== 1. DID THE FIRMWARE ANSWER? ===\n");
-    printf("  decode %ld   status 0x%08lx\n", decode, status);
+    /* num() returns a signed long, so a 32-bit word with bit 31 set
+     * prints sign-extended (status read 0xffffffffffffffff in boot 485
+     * when the real value was the 32-bit sentinel 0xffffffff). The
+     * kext's own compare was on the 32-bit value, so only the PRINT
+     * was wrong - but a journal reader cannot tell those apart, which
+     * is why rule 16 calls the instrument a suspect. Same mask as the
+     * dig/dto reporters use. */
+    printf("  decode %ld   status 0x%08lx\n", decode, status & 0xffffffffL);
     if (decode == 77) {
         printf("  NO_REPLY - the status field came back as the sentinel we\n"
                "  wrote. DMCUB consumed the slot and wrote nothing into it.\n"
@@ -1676,7 +1683,8 @@ static void fsmReport(io_service_t fb, long callsBefore)
             snprintf(k, sizeof(k), "RBFBFsm%uGot%s", i, regs[r]);
             got = num(fb, k);
             printf("    %-10s 0x%08lx -> 0x%08lx%s\n", regs[r],
-                   was, got, was != got ? "   CHANGED" : "");
+                   was & 0xffffffffL, got & 0xffffffffL,
+                   was != got ? "   CHANGED" : "");
         }
     }
 

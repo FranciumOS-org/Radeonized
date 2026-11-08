@@ -579,79 +579,68 @@ not a free read), and **DMCUB's image**, which services both the command and
 the query.
 
 
-**310: THE COMMAND THAT DRIVES THE PHY FSM EXISTS, HAS A STATUS FIELD, AND WE
-HAVE NEVER SENT IT — ZERO BOOTS.**
-**`DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`**, in the same VBIOS family as
-the atom ENABLE (1, moves nothing) and `QUERY_DP_ALT` (26, the only instrument
-that tells PHY2 from PHY3). Doc comment: *"Control PHY FSM"*. `enum
-dmub_phy_fsm_state`: 0 POWER_UP_DEFAULT, **1 RESET**, **2 RESET_RELEASED**,
-**3 SRAM_LOAD_DONE**, 4 INITIALIZED, 5 CALIBRATED, 9 PLL_EN, **10 TX_EN**.
-**307 measured PHY2 at state 1 and the live panel at state 10, and 308 spent a
-milestone on state 3** — three milestones surveyed this state machine's
-*output* register by register while the machine itself had a command.
-**`struct dmub_rb_cmd_transmitter_set_phy_fsm_data` is "passed in/out" and
-carries a `uint32_t status`** — the DMCUB execution evidence 307 said was
-missing, since command 1 has no reply field at all. Its `phy_id` comment is
-**verbatim** `query_dp_alt`'s (`2 = UNIPHYC`), and its union member sits
-**immediately after `query_dp_alt`'s** (7821 vs 7817) on the ring we already
-drive and read ROM-matching answers back from. **No caller exists anywhere** —
-not upstream, not ours (grep over `docs/linux-ref/`, `src/`, `tools/`;
-instrument checked). Upstream only ever sets `use_phy_fsm` inside PSR
-copy_settings, which is consistent with DCN31 NULLing every `dpcs_*` bringup:
-**the FSM is the firmware's and this is the one command into it.**
-**Not established:** that the firmware acts on it for a DP-alt port, that
-RESET -> RESET_RELEASED is legal without the ladder, or that DMCUB 4.0.15.47
-implements 29 at all. **Sending it is a WRITE of a new firmware command and
-therefore the user's decision.**
-**310b BUILT IT AND IT SENDS NOTHING** — `src/common/rb_phyfsm.h` +
-`dmubbl fsm`, build-only **by construction**: the verb returns before
-`findFB()`, so no path from it reaches a `setProperties` (deliberately the
-opposite of `dmubbl dig`/`dto`, which write with no argument). Payload **24**
-(query_dp_alt declares 4, the transmitter 60 — three commands, three sizes,
-one union), header `0x18001d80`. **The units are x100 and the field names
-differ — `symclk_10khz` 54000 vs `symclk_100Hz` 5400000 — and 310's own entry
-said "same name, factor of ten", wrong twice**; the conversion is now in
-`rb_phyfsm_symclk_from_10khz()` where a test pins it. `mode` 0 = DP is also
-what an unwritten byte looks like, so the builder has **no default** for it.
-`status` is prefilled `0xFFFFFFFF` so NO_REPLY has its own code. Target states
-are an **allowlist** (2,3,4,5,9,10): RESET and POWER_DOWN would undo the aim
-and **TX_EN_TEST_MODE is refused because 2F8 showed a pattern degrades this
-sink until a reboot**; PHY0 refused by name, dark PHY3 allowed so 309's control
-stays reachable. Refusals **70..79**. 22 break-it guards, **20 caught by a
-failing test and two RESULTS**: the name-table bound is held by **`-Werror`,
-not the test** (the trap for the **seventh** time), and writing `state` as one
-byte is **byte-identical on the wire** for every legal value, so that break
-carries no information in the builder (real only in the decoder). **The
-sweep's own instrument failed first** — a `perl` substitution choked on a `/`
-and made no edit, reporting FIRED NOTHING for a break that never happened.
-`dmubbl` UUID **ACDAA6D5**.
-**310c WROTE THE SEND — `-rbgpufbfsm`, `dmubbl fsm go <state>`, NOT RUN.**
-`src/fbkext/RBAMDFramebufferPhyFsm.cpp` + the `RBFBFsmGo` trigger. The token
-was prefix-scanned against all 122 `-rbgpu*` tokens with the known
-`-rbgpufbotg`/`-rbgpufbotgany` trap as the scan's control (rule 30/26); it
-**arms `-rbgpufbdpalt` itself** because the before/after survey IS the
-measurement — **and 305's trap fired on the first draft**, the arm written 155
-lines before `dpaltArmed`'s own plain assignment overwrote it, caught by a grep
-of every assigning line. **Nothing is written until `RBFBFsmGo` names a
-state, and the state has NO DEFAULT** (the ladder question is unsettled); in
-the tool `fsm` and `fsm <state>` return **before `findFB()`** and only the
-literal **`go`** reaches a send, unlike `dmubbl dig`/`dto`. **The verdict is
-two things, never one number:** did DMCUB ANSWER (`rb_phyfsm_decode`, where
-NO_REPLY is itself the first execution evidence this line has had) and did the
-PHY MOVE (nine registers, four instances as control). `rb_phyfsm_verdict()`
-checks the **controls before any success** — `V_CONTAMINATED`, not
-`V_RELEASED`. **The send is declined unless this call's own re-sample shows
-the live panel as a brought-up PHY** (`RBFBFsmPanelLicence` vs 0x7), with
-"survey did not run" (81) and "it ran and the panel reads dead" (82) as
-**different** codes. **`rb_phyfsm_verdict()` was in the tree with a type error
-and no caller** — `-Wall` caught what the hosttest could not, because **a
-function with no caller has no coverage** (rule 46's shape); the kext now
-calls it. 8 new break-it guards: six caught by assertion, **AB caught by
-ASan while my classifier reported FIRED NOTHING** (second instrument failure
-this milestone, after 310b's `perl`), and **W fires nothing because MY COMMENT
-WAS WRONG** — `ctlMoved` implies `anyMoved`, so the order is unobservable;
-corrected in place. The `-Werror` trap for the **eighth** time on W's first
-form. Framebuffer UUID **147D6474**, `dmubbl` **FAD8BBBD**, neither installed.
+**310 / 310d: THE COMMAND EXISTS, NOBODY HAD SENT IT, AND BOOT 485 SENT IT —
+THE FIRMWARE DOES NOT ANSWER.**
+**`DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`**, same VBIOS family as the
+atom ENABLE (1, moves nothing) and `QUERY_DP_ALT` (26, the only instrument
+that tells PHY2 from PHY3). *"Control PHY FSM"*. `enum dmub_phy_fsm_state`
+names **1 RESET** (307's measured PHY2), **2 RESET_RELEASED**, **3
+SRAM_LOAD_DONE** (308's milestone), **10 TX_EN** (the live panel) — three
+milestones surveyed this machine's *output* register by register while the
+machine itself had a command. Payload is **"passed in/out" with a `uint32_t
+status`**, the execution evidence command 1 structurally cannot give: its
+`transmitter_control_v1_7` returns `BP_RESULT_OK` **unconditionally**, so
+**`ran` is a MAILBOX ACK and Linux cannot tell either**. No caller anywhere,
+upstream included.
+**`src/common/rb_phyfsm.h` + `dmubbl fsm` + `RBAMDFramebufferPhyFsm.cpp`.**
+Payload **24** (query_dp_alt declares 4, the transmitter 60 — one union, three
+sizes), header `0x18001d80`. **Units: `symclk_10khz` 54000 on command 1 vs
+`symclk_100Hz` 5400000 here — a different FIELD NAME and a factor of 100**;
+310's own entry said "same name, factor of ten", wrong twice, and
+`rb_phyfsm_symclk_from_10khz()` now has a test pinning it. Target states are
+an **allowlist** (2,3,4,5,9,10): RESET and POWER_DOWN undo the aim and
+**TX_EN_TEST_MODE is refused because 2F8 showed a pattern degrades this sink
+until a reboot**. `status` prefilled `0xFFFFFFFF` so NO_REPLY has its own
+code; `mode` 0 = DP is also what an unwritten byte looks like, so **no
+default**. Refusals **70..79**. **`dmubbl fsm` and `fsm <state>` return before
+`findFB()` — only `fsm go <state>` sends**, deliberately unlike `dmubbl
+dig`/`dto`, which write with no argument. The verdict is **two things, never
+one number**: did DMCUB ANSWER and did the PHY MOVE (nine registers, four
+instances as control), with `rb_phyfsm_verdict()` checking the **controls
+before any success** (`V_CONTAMINATED`, not `V_RELEASED`). 30 break-it guards;
+**the `-Werror` trap fired for the seventh and eighth time**, one break was
+caught by **ASan while my classifier reported FIRED NOTHING**, and one fired
+nothing because **MY COMMENT WAS WRONG** (`ctlMoved` implies `anyMoved`).
+305's arm-ordering trap fired on the first draft, and `rb_phyfsm_verdict()`
+sat in the tree with a **type error and no caller** — `-Wall` caught what the
+hosttest could not, because **a function with no caller has no coverage**.
+
+**BOOT 485: FOUR SENDS, STATES 2 / 3 / 10 / 2, `refusal 0` EACH — `decode 77
+NO_REPLY` EVERY TIME, SUBJECT MASK 0, CONTROL MASK 0.** The fixed printer says
+more than the status field: **`reply slot 0xc80 verdict 2 UNCHANGED - our
+bytes, untouched`**, so DMCUB wrote nothing into the **whole 64-byte slot**.
+**And the negative is bracketed in the same boot**: the ring **drained**
+(`Rptr == Wptr == 2432`, 1 ack — DMCUB consumed it), and `dmubbl dpaltq`
+returned `is_usb` mask `0x1c` with `alt_disable` 0 on PHY2 alone, **ROM MATCH**
+against 2E1 — so a sibling command on the same ring in the same boot **does**
+reply, and the reply is the chip's. **DMCUB 4.0.15.47 does not act on
+sub-type 29.** Not separated: unimplemented vs implemented-and-rejects-phyid-2
+with no status either way; both are "does not act on it". `phylook` after all
+four: PHY2 **byte-identical to where 307 found it** and still to dark PHY3.
+DPCD unchanged — `0x202` `0x00`, `0x204` `0x80`, `0x205` `0x00`.
+**The state axis is not the variable** — state is cumulative, so 2 -> 3 -> 10
+was itself a ladder and it moved nothing. **310's candidate is dead, and it
+retires 307's open question**: the execution evidence has now been asked for
+with a command that can give it, and this firmware answers neither.
+Instrument defect recorded: `fsmReport()` printed
+`status 0xffffffffffffffff` because `num()` returns a signed long and the
+`%08lx` sites did not mask. **The kext's compare was on the 32-bit value and
+`decode 77` was sound** — a *display* defect, but one a journal reader cannot
+tell from a measurement defect, which is the whole of rule 16. Fixed with the
+`& 0xffffffffL` the `dig`/`dto` reporters already use. Also:
+`RBFBFsmArmed`/`RBFBFsmCalls` are absent from ioreg until the first
+`RBFBFsmGo` — a **publish gap, not a wrong kext**.
+
 **And the CR window is NOT A READ.** `RDPCS_TX_CR_ADDR` (0x2934 + n*0xd8) /
 `CR_DATA` (+1) are plain 16-bit value fields — no busy, no trigger, no status —
 with a second name for the same address (`DPCSSYS_CR<n>_*`) and **no vendored
@@ -902,7 +891,8 @@ unless THIS call's own re-sample shows the MSA derivation reproducing the live
 panel and the target pipe holding a raster. The phase defaults to the
 configure half, which leaves the stream disabled so `dptrain` can run —
 boot 477's refusal 66),
-`-rbgpufbfsm` (**THE SET_PHY_FSM SEND on PHY2**, 310c — arms `-rbgpufbdpalt`
+`-rbgpufbfsm` (**THE SET_PHY_FSM SEND on PHY2**, 310c, **run in boot 485 and
+the firmware does not answer — 310d**; arms `-rbgpufbdpalt`
 itself for the before/after survey, and that arm is applied AFTER
 `dpaltArmed`'s own assignment, 305's trap. Nothing is written until
 `RBFBFsmGo` names a **state**, which has **no default**; PHY0 is refused by
@@ -973,17 +963,23 @@ downstream — no clock recovery, DPCD `0x202` `0x00`, `0x205` bit 0 clear,
 `DP_VID_M` refusing a store — follows from that. The open question is no
 longer a register on our side: the driver has **no** PHY bringup on DCN31, the
 VBIOS table is the only mechanism, our payload is verified field by field, and
-`ran` is only a mailbox ack. What is needed is **DMCUB's own execution
-evidence** and what else the firmware wants before it acts on phyid 2 — and
-**310 found it: `DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`**, whose
-`dmub_phy_fsm_state` enum names RESET (PHY2's measured state), RESET_RELEASED,
-SRAM_LOAD_DONE and TX_EN (the panel's), and whose payload is **"passed in/out"
-with a `uint32_t status`** — the execution evidence command 1 cannot give.
-**Nobody has ever sent it, upstream included.** Sending it is a new firmware
-command and so the **user's decision**. 308's SRAM candidate and 309's
-ownership registers are both **dead**, and 309b closed the register survey as
-a method: nine registers cannot tell PHY2 from PHY3 while `QUERY_DP_ALT` can.
-The CR window is **not a read** (310) and is deprioritised.
+`ran` is only a mailbox ack. **310 found the one command into the FSM
+(`SET_PHY_FSM` = 29) and 310d SENT IT in boot 485 — the firmware does not
+answer.** Four sends, states 2 / 3 / 10 / 2, `refusal 0` each: the reply slot
+came back **bit-for-bit as we left it**, PHY2 moved **nothing**, all four
+controls held still — while the ring **drained** and `QUERY_DP_ALT` on the
+same ring in the same boot returned a **ROM MATCH**. So **DMCUB 4.0.15.47
+does not act on sub-type 29**, and the execution evidence this line needed has
+now been asked for with the one command that could give it. **Every candidate
+on our side of the mailbox is dead**: 308's SRAM handshake, 309's ownership
+registers, 309b's survey as a method (nine registers cannot tell PHY2 from
+PHY3 while `QUERY_DP_ALT` can), and now the FSM command itself. The CR window
+is **not a read** (310) and is deprioritised. **What is left is not a register
+and not a command we can name**: DMCUB's own image (4.0.15.47, CW0/CW1 — it
+services both the command that replies and the one that does not, and it is
+the only party that has ever moved this PHY), or evidence from a machine where
+this PHY *has* been brought up. Both are a different kind of work from
+anything 300-310 did, and neither has a boot spent on it.
 The things never attempted are a stream on a **trained** DIG2 link, a
 **surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
