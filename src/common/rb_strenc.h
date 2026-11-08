@@ -288,11 +288,10 @@ static inline enum rb_strenc_verdict rb_strenc_verdict(uint32_t cntl)
 
 /* --------------------------------- THE BASE CHECK, which gates everything else
  *
- * The one thing the chip itself has to satisfy. Instance 0 is the panel and the
- * panel's raster is known from hardware: H_TOTAL 2106, V_TOTAL 1129. If
- * instance 0's DP_MSA_TIMING_PARAM1 does not decode to those, the offsets are
- * wrong - and 2FA's three-strides-in-one-function is exactly how that happens
- * at an address that still reads something plausible.
+ * The one thing the chip itself has to satisfy. Instance 0 is the panel, so its
+ * DP_MSA_TIMING_PARAM1 must decode as the panel's live raster; if it does not,
+ * the offsets are wrong - and 2FA's three-strides-in-one-function is exactly
+ * how that happens at an address that still reads something plausible.
  *
  * The totals are PASSED IN rather than hardcoded, because the DRR ladder moves
  * V_TOTAL (that is the whole point of `V_BLANK_START_END` 1311820) and 2FB
@@ -303,6 +302,39 @@ static inline enum rb_strenc_verdict rb_strenc_verdict(uint32_t cntl)
  *
  * H_TOTAL is the strict half: it does not move with DRR. V_TOTAL is allowed a
  * window for exactly that reason, and the window is NAMED rather than silent.
+ *
+ * ------------------------------------------- THE OFF-BY-ONE, PAID FOR IN BOOT 472
+ *
+ * **THE TWO REGISTERS DO NOT HOLD THE SAME NUMBER.** This check's first draft
+ * compared them raw and boot 472 refused with `BASE_HTOTAL_BAD` - instance 0
+ * read H_TOTAL 2107 / V_TOTAL 1130 against a live OTG0 of 2106 / 1129. Exactly
+ * +1 on both, which is a convention and not an address fault:
+ *
+ *   dcn10_optc.c:191-193   `/` `* CRTC_H_TOTAL = vesa.h_total - 1 *` `/`
+ *                          REG_SET(OTG_H_TOTAL, 0, OTG_H_TOTAL,
+ *                                  patched_crtc_timing.h_total - 1);
+ *   dcn10_stream_encoder.c:419-421
+ *                          REG_SET_2(DP_MSA_TIMING_PARAM1, 0,
+ *                                    DP_MSA_HTOTAL, hw_crtc_timing.h_total,
+ *                                    DP_MSA_VTOTAL, hw_crtc_timing.v_total);
+ *
+ * The OTG register holds `total - 1`; MSA holds the true total. So
+ * MSA == OTG + 1, on both axes, and the +1 below is upstream's arithmetic
+ * rather than a fudge to make a reading fit. The relation is asserted in the
+ * hosttest against boot 472's own measured word.
+ *
+ * It is worth saying what this near-miss was: the gate REFUSED, printed that
+ * nothing below was a reading, and exited - which is why one register's
+ * convention was found in minutes instead of becoming a wrong conclusion about
+ * five instances. An off-by-one that passes is 2FB's shape.
+ *
+ * AND THE CORROBORATION THAT COSTS NOTHING. `DP_MSA_TIMING_PARAM4` holds
+ * HWIDTH and VHEIGHT - the ACTIVE raster (dcn10_stream_encoder.c:458-462),
+ * which does NOT move with DRR at all, unlike either total. Boot 472 read
+ * 0x07800438 on instance 0 = 1920 x 1080, the panel exactly. That is a second,
+ * independent confirmation of the same addresses from the same sample, and
+ * `rb_strenc_active_agrees()` exists so a caller can publish it beside the
+ * base verdict rather than a human noticing it by eye.
  */
 #define RB_STRENC_VTOTAL_SLACK  512u   /* the DRR ladder's range, generously */
 
@@ -342,12 +374,68 @@ static inline enum rb_strenc_base rb_strenc_base_verdict(uint32_t param1_inst0,
     h = rb_strenc_htotal(param1_inst0);
     v = rb_strenc_vtotal(param1_inst0);
 
-    if (h != live_htotal) { return RB_STRENC_BASE_HTOTAL_BAD; }
+    /* +1: the OTG register holds `total - 1` and MSA holds the true total.
+     * See the header - this is upstream's arithmetic, cited, not a fit. */
+    if (h != live_htotal + 1u) { return RB_STRENC_BASE_HTOTAL_BAD; }
 
+    live_vtotal += 1u;
     dv = (v > live_vtotal) ? (v - live_vtotal) : (live_vtotal - v);
     if (dv > RB_STRENC_VTOTAL_SLACK) { return RB_STRENC_BASE_VTOTAL_ODD; }
 
     return RB_STRENC_BASE_CONFIRMED;
+}
+
+/* The live active raster, derived from OTG0's blank registers rather than from
+ * a constant - rule 25, read the machine. `OTG_H_BLANK_START_END` holds START
+ * in the low 15 bits and END in the high, and the blank WRAPS: on this panel
+ * the word is 0x007f07ff, which is START 2047 and END 127, and the active
+ * width is START - END = 1920 (rb_otg.h:23 records the same decode).
+ *
+ * So the subtraction is START minus END and not the other way round, which is
+ * the one thing about this register that looks wrong until the wrap is
+ * noticed. Returns 0 if the fields do not make a sane window, so the caller's
+ * "no reference" path takes over rather than a nonsense number being compared
+ * (rule 14). */
+/* dcn_3_1_2_offset.h: regOTG0_OTG_H_BLANK_START_END 0x1b2b,
+ * regOTG0_OTG_V_BLANK_START_END 0x1b36, both BASE_IDX 2 - the same segment and
+ * the same block rb_dpdto.h takes OTG0's totals from. */
+#define RB_STRENC_DW_OTG0_H_BLANK   0x1b2bu
+#define RB_STRENC_DW_OTG0_V_BLANK   0x1b36u
+
+#define RB_STRENC_BLANK_START_MASK  0x00007fffu
+#define RB_STRENC_BLANK_END_MASK    0x7fff0000u
+#define RB_STRENC_BLANK_END_SHIFT   16u
+
+static inline uint32_t rb_strenc_active_from_blank(uint32_t blank)
+{
+    const uint32_t start = blank & RB_STRENC_BLANK_START_MASK;
+    const uint32_t end   = (blank & RB_STRENC_BLANK_END_MASK) >>
+                           RB_STRENC_BLANK_END_SHIFT;
+
+    if (start == 0u || end >= start) { return 0; }
+    return start - end;
+}
+
+/* THE SECOND CHECK, and the one that cannot drift. DP_MSA_TIMING_PARAM4 holds
+ * the ACTIVE raster (HWIDTH, VHEIGHT - dcn10_stream_encoder.c:458-462), which
+ * the DRR ladder does not touch: V_BLANK_START_END is what moves, and the
+ * whole point of that register is that V_TOTAL changes without the active
+ * window changing. So this comparison needs no window and no slack at all,
+ * which makes it a better address check than either total - it just cannot be
+ * made against a number the kext measures per boot, so the panel's active size
+ * is the caller's to supply.
+ *
+ * Returns 1 on agreement, 0 on disagreement, and -1 for "nothing to compare",
+ * because a missing reference is not a failure (rule 14). */
+static inline int rb_strenc_active_agrees(uint32_t param4_inst0,
+                                          uint32_t active_w,
+                                          uint32_t active_h)
+{
+    if (active_w == 0u || active_h == 0u) { return -1; }
+    if (param4_inst0 == 0u) { return 0; }
+    return (((param4_inst0 & RB_STRENC_MSA_HTOTAL_MASK) >>
+             RB_STRENC_MSA_HTOTAL_SHIFT) == active_w &&
+            (param4_inst0 & RB_STRENC_MSA_VTOTAL_MASK) == active_h) ? 1 : 0;
 }
 
 /* ------------------------------------------------------------- the sweep */

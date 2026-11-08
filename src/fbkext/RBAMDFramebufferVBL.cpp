@@ -335,6 +335,14 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBStrencBase", (uint64_t)strencBase, 32);
     setProperty("RBFBStrencHTotal", (uint64_t)strencHTotal, 32);
     setProperty("RBFBStrencVTotal", (uint64_t)strencVTotal, 32);
+    /* The second address check: MSA's ACTIVE raster against OTG0's own blank
+     * words, from the same sample. Published beside the base verdict because
+     * the two fail for different reasons - the totals move with DRR and the
+     * active raster does not - and -1 means "no reference", not "disagrees"
+     * (rule 14). */
+    setProperty("RBFBStrencActiveW", (uint64_t)strencActiveW, 32);
+    setProperty("RBFBStrencActiveH", (uint64_t)strencActiveH, 32);
+    setProperty("RBFBStrencActiveAgree", (int64_t)strencActiveAgree, 32);
     setProperty("RBFBStrencSweep", (uint64_t)strencSweep, 32);
     setProperty("RBFBStrencEnMask", (uint64_t)strencEnMask, 32);
     setProperty("RBFBStrencStatusMask", (uint64_t)strencStatusMask, 32);

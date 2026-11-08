@@ -64156,3 +64156,157 @@ rather than printing words on `HTOTAL_BAD` or `BASE_ZERO`.
 `SWEEP: UNIFORM` here would be a **positive defect**, not an uninterpretable
 null as it is for the DIO mux: instance 0 runs a stream and the others do not,
 so five identical words mean the 0x100 instance arithmetic did nothing.
+
+---
+
+## 303 — boot 472: the gate refused for a CONVENTION, the addresses were right,
+## and DIG2's steer FIFO is held in reset
+
+Tag: `303`. Boot 472. UUID AC5E2C85 superseded; the boot ran the 302 build.
+
+### The gate refused, and that is what it was for
+
+`tools/strenclook.sh` printed `BASE REFUSED: H_TOTAL DISAGREES`, said nothing
+below was a reading, and **exited**. Instance 0 read H_TOTAL **2107** and
+V_TOTAL **1130** against a live OTG0 of **2106 / 1129** — exactly +1 on both.
+
+That is a convention, not an address fault, and upstream states it in two
+files:
+
+```
+dcn10_optc.c:191-193   /* CRTC_H_TOTAL = vesa.h_total - 1 */
+                       REG_SET(OTG_H_TOTAL, 0, OTG_H_TOTAL,
+                               patched_crtc_timing.h_total - 1);
+dcn10_stream_encoder.c:419-421
+                       REG_SET_2(DP_MSA_TIMING_PARAM1, 0,
+                                 DP_MSA_HTOTAL, hw_crtc_timing.h_total,
+                                 DP_MSA_VTOTAL, hw_crtc_timing.v_total);
+```
+
+The OTG register holds `total - 1`; MSA holds the true total. **The two
+registers do not hold the same number**, and 302's check compared them raw.
+
+**The near-miss is the point.** A gate that refuses and stops cost twenty
+minutes to diagnose one register's convention. The same error in a check that
+*passed* would have become a conclusion about five instances built on a
+reference that was wrong by one — 2FB's shape exactly, where 143.83 Hz was
+taken as true while the panel sat at 61.40. Boot 472's measured word
+`0x083b046a` is now pinned in the hosttest, with a case asserting that an MSA
+word *equal* to the OTG register does **not** confirm, so the +1 cannot be
+un-learned by an edit.
+
+### The addresses were right, confirmed twice more
+
+Two independent corroborations in the same sample, neither needed for the gate:
+
+- **`DP_MSA_TIMING_PARAM4` = `0x07800438` = 1920 x 1080.** The active raster,
+  the panel exactly. This is the **stronger** address check and 303 added it as
+  a published verdict: unlike either total it does **not** move with the DRR
+  ladder — that is the whole point of `V_BLANK_START_END` — so it needs no
+  window and no slack at all. It is derived from OTG0's own blank words in the
+  same sample rather than from the 1920x1080 constant two files away (rule 25),
+  and the blank **wraps**: START 2047, END 127, active = START − END.
+- **`DP_MSA_TIMING_PARAM2` = `0x007f0014`** — HSTART 127, VSTART **20**. The
+  card has recorded `V_BLANK_START_END` 1311820 as "start 1100, end **20**"
+  since long before this milestone, and HSTART 127 is the H blank END. Two
+  numbers this project measured elsewhere, years of boots apart, landing in a
+  register it had never read.
+
+### What the panel's instance says, and what DIG2's says
+
+`RBFBStrencBase` was the only failure. Everything else came back as 302 wrote
+down in advance: sweep **DIFFERS**, `EnMask` **0x01**, `StatusMask` **0x01**,
+`RunMask` **0x01** — the panel running, nothing else, and DIG2's MSA registers
+**all blank**, which is the positive identification of what is missing from the
+chain.
+
+| register | DIG0 (panel) | DIG1 / 3 / 4 | **DIG2** |
+|---|---|---|---|
+| `DP_PIXEL_FORMAT` | `0x01000000` | 0 | 0 |
+| `DP_MSA_COLORIMETRY` | `0x20000000` | 0 | 0 |
+| `DP_MSA_TIMING_PARAM1` | `0x083b046a` | 0 | 0 |
+| `DP_MSA_TIMING_PARAM2` | `0x007f0014` | 0 | 0 |
+| `DP_MSA_TIMING_PARAM3` | `0x003c8005` | 0 | 0 |
+| `DP_MSA_TIMING_PARAM4` | `0x07800438` | 0 | 0 |
+| `DP_SEC_FRAMING4` | `0x20000000` | `0x20000000` | `0x20000000` |
+| `DP_VID_STREAM_CNTL` | `0x00010201` | `0x00100200` | **`0x00100000`** |
+| `DP_STEER_FIFO` | 0 | 0 | **`0x00000001`** |
+| `DP_VID_TIMING` | `0x00000100` | 0 | 0 |
+| `DP_VID_N` | `0x00008000` | `0x00002000` | `0x00002000` |
+| `DP_VID_M` | `0x0000a2a6` | 0 | 0 |
+| `DIG_FE_CNTL` | `0x01000000` | 0 | 0 |
+
+`DP_PIXEL_FORMAT` `0x01000000`: `DP_COMPONENT_DEPTH` (0x07000000) = 1 = 8 bpc,
+`DP_PIXEL_ENCODING` = 0 = RGB444. `DIG_FE_CNTL` `0x01000000`:
+`DIG_SOURCE_SELECT` = **0** = OTG0, correct for the panel, and `DIG_START`
+(bit 10) **clear** — which matches upstream, since `dp_unblank` pulses it 1
+then back to 0 rather than leaving it set. `DP_VID_TIMING` `0x00000100` is
+`DP_VID_M_N_GEN_EN`, so the panel's M/N are hardware-generated; `VID_N` 32768
+and `VID_M` 0x0000a2a6 = 41638 against the other four instances' reset-value
+`VID_N` 8192 and `VID_M` 0.
+
+### TWO PER-INSTANCE DIFFERENCES ON DIG2, both with a four-instance control
+
+`DP_VID_STREAM_CNTL` decodes (`dcn_3_1_2_sh_mask.h`) as `ENABLE` 0x1,
+`DIS_DEFER` **0x300**, `STATUS` 0x10000, `CHANGE_KEEPOUT` 0x100000:
+
+| instance | ENABLE | DIS_DEFER | STATUS | KEEPOUT |
+|---|---|---|---|---|
+| DIG0 (panel) | 1 | **2** | 1 | 0 |
+| DIG1, DIG3, DIG4 | 0 | **2** | 0 | 1 |
+| **DIG2** | 0 | **0** | 0 | 1 |
+
+1. **`DP_STEER_FIFO_RESET` is SET on DIG2 and CLEAR on all four others.** The
+   steer FIFO is what carries the stream encoder's symbols toward the link, and
+   `enc2_stream_encoder_dp_unblank` pulses this bit 1 then 0 as part of
+   enabling a stream — so a resting value of 1 is a **held reset** on the exact
+   instance thirteen boots have been driving.
+2. **`DP_VID_STREAM_DIS_DEFER` is 0 on DIG2 and 2 on all four others**,
+   including the three that were never brought up. So 2 is this chip's reset
+   value and DIG2's 0 was **written by something** — the firmware, at boot,
+   on the instance with the cable attached.
+
+Both registers had never been read by this kext before this boot. Both are in
+the unblank path. Both differences are in-boot, same-sample, with four
+instances as the control.
+
+### What that does and does not establish
+
+It does **not** establish the blocker, and saying otherwise would be rule 18
+on n=1 plus rule 47 unasked. DIG2 is the only instance with a cable attached,
+so the firmware's connect path touching it differently is expected; "different
+from the other four" is not "the thing that stops the picture". And **no stream
+has ever been programmed on DIG2 at all**, so there is nothing for the steer
+FIFO to carry whether it is in reset or not. A held FIFO reset cannot be shown
+to block symbols that do not exist.
+
+What it does establish is narrower and still new: **the firmware did more on
+DIG2 at boot than this project had assumed**, in a block nobody had looked at,
+and the write set 302 derived from upstream now has two values in it that have
+to be *cleared* rather than set — which is exactly the kind of thing a write
+designed off upstream alone would have missed and a write designed off instance
+0's live words will not (rule 25).
+
+### What changed in the code
+
+- `rb_strenc_base_verdict()` applies upstream's +1 on both axes, cited, with
+  boot 472's own word pinned in the hosttest.
+- `rb_strenc_active_agrees()` and `rb_strenc_active_from_blank()`: the second
+  address check, DRR-immune, derived from OTG0's blank words in the same
+  sample. Published as `RBFBStrencActiveW/H/Agree`, where **-1 means "no
+  reference" and is not a disagreement** (rule 14).
+- `tools/strenclook.sh` prints the active check beside the base verdict and,
+  on `HTOTAL_BAD`, now says **check the off-by-one before concluding the
+  addresses are wrong**, naming boot 472 as the precedent. A tool that sends
+  the next session to rewrite correct offsets is worse than no tool.
+- Six more break-it checks, all caught by failing tests: the +1 removed on
+  either axis, the +1 become +2, the active halves swapped, a zero active word
+  allowed to agree, and the no-reference gate turned into `&&`.
+
+### Next
+
+The write set is unchanged in shape and now has live values for every field.
+Before any of it: `RBFBStrencBase` must read **CONFIRMED** and
+`RBFBStrencActiveAgree` must read **1** in the same boot (rule 47 asked of a
+write), which boot 473 is the test of — the build that was just corrected has
+never run.
