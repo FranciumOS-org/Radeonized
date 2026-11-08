@@ -1,113 +1,125 @@
 # HANDOFF — what to do now
 
-**State: 304 is built and not yet booted.** Framebuffer UUID
-**`4ADE62B7-8AF9-3895-970D-2A0737EF487F`**. Read-only. No setter exists, no new
-boot-arg token was added, and nothing on this line writes yet.
+**State: 305 is built and not yet booted.** Framebuffer UUID
+**`09AF971F-8D53-3911-854D-134A96C1BE91`**. This build can **write** the DP
+stream on DIG2 — the first write this project makes to that block — but only
+when armed, triggered, and licensed by its own sample.
+
+Boot 474 passed the gate 304 built: `RBFBStrencMsaMismatch` **0**, `Base`
+CONFIRMED, `ActiveAgree` 1, panel RUNNING, and PARAM3's sync and polarity
+inputs read rather than assumed.
 
 ---
 
-## Step 1 — install and boot it
+## Step 1 — add the arm, install, boot
 
 **The cable must be plugged in at boot** (2FB). Plugged in afterwards every
-AUX read returns refusal 3 and `AUX_EN` reads clear, because the firmware's
-connect path is what writes it, at boot.
+AUX read returns refusal 3 and `AUX_EN` reads clear.
 
+```bash
+sudo tools/efi.sh bootarg add -rbgpufbstrm
 ```
+
+```bash
 sudo tools/fbinstall.sh
 ```
 
-Then check the UUID **inside the collection**, not in `/Library/Extensions` —
-different facts, and 2xx cost nine boots to this exact gap (rule 15):
+Then the UUID **inside the collection**, not in `/Library/Extensions` (rule
+15, which cost nine boots in 2xx):
 
-```
+```bash
 kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
 ```
 
-It must read `4ADE62B7-8AF9-3895-970D-2A0737EF487F`. Reboot, then:
+It must read `09AF971F-8D53-3911-854D-134A96C1BE91`. Reboot, then verify the
+arm **from the running system** — a boot-arg that reads back is not one that
+survived (rule 43):
 
+```bash
+nvram boot-args | tr ' \t' '\n\n' | grep -qx -- '-rbgpufbstrm' && echo ARMED || echo NOT ARMED
 ```
-tools/strenclook.sh
+
+## Step 2 — the raster, in this same boot
+
+**The pipe 1 raster is not persistent.** Boot 474 read all eight of its OTG
+words as zero with `-rbgpufbraster` armed, because the arm only permits and
+`otgprog … go` is what writes. So it must be programmed in the same boot as
+the stream, or `strencprog` refuses with code 5 and names this step.
+
+```bash
+tools/strencprog
 ```
 
-## Step 2 — the one number this boot is for
+Read-only. It prints the licence first and writes nothing. Both must hold:
+`RBFBStrencMsaMismatch` **0** and pipe 1's `DeriveRc` **0**. If pipe 1 is not
+0, program its raster with `otgprog` (1920x1080 at 60, the sink's EDID
+preferred timing, 148500 kHz) and the DTO, then run `strencprog` again.
 
-**`RBFBStrencMsaMismatch`.** The tool prints it first and does not recompute
-it.
+## Step 3 — the stream
 
-- **0** — the derivation reproduced DIG0's four live MSA words bit for bit.
-  The arithmetic that would program DIG2 is correct on hardware that is
-  actually running a DP stream. **This is what licenses the write** (rule 47
-  asked of a write), and Step 3 may proceed.
-- **4 (PARAM3 alone)** — a **genuine finding, not a regression.** The
-  hosttest's sync-width and polarity inputs were back-derived from PARAM3's own
-  expected output, which is circular (rule 17), so this boot is the first real
-  check of those fields. Read `RBFBStrencP0Otg2/3/6/7` — the raw
-  `OTG_H_SYNC_A`, `OTG_H_SYNC_A_CNTL`, `OTG_V_SYNC_A`, `OTG_V_SYNC_A_CNTL`
-  words — and fix the derivation against them. Do not write anything until it
-  is 0.
-- **16** — the derivation was **refused**, not disagreed with. Read
-  `RBFBStrencP0DeriveRc`: 1 no args, 2 total zero, 3 blank zero, 4 blank
-  `END >= START`, 5 active zero, 6 active >= total, 7 sync width zero, 8 sync
-  START non-zero, 9 field overflow. "Could not derive" is not "derived and
-  agreed" (rule 14).
-- **1, 2 or 8** — before concluding the addresses are wrong, **check the
-  conventions**. Boot 472 refused the base check for the off-by-one alone: the
-  OTG register holds `total - 1`, MSA holds the true total.
+```bash
+sudo build/out/strencprog go
+```
 
-Also worth recording from the same sample, costing nothing: whether
-`RBFBStrencP1DeriveRc` is 0, i.e. whether **pipe 1 has a raster good enough to
-derive a stream from at all.** It has no control and must not be treated as
-one.
+Defaults are DIG2 from OTG1 at 148500 kHz over HBR2 (`rate=20`), which gives
+`m_vid` 9011 and `n_vid` `0x8000`. DIG0 and OTG0 are refused **by name** in
+both the tool and the kext.
 
-## Step 3 — the write, once the mismatch is 0
+**The verdict is `DP_VID_STREAM_CNTL` bit 16 `STATUS`, not bit 0 `ENABLE`.**
+Bit 0 is what we wrote; bit 16 is what the hardware answers, and upstream
+`REG_WAIT`s on it. The tool prints both separately:
 
-The write set is known, short, and every field now has either a live source in
-instance 0's own words or a formula validated against them.
+- **VERDICT 1 RUNNING** — ENABLE 1 and STATUS 1. The block says it is carrying
+  a stream. **This is not a picture** (see below).
+- **VERDICT 2 NO_STATUS** — we asked and the hardware did not answer. The most
+  informative single result this line could get: it would be the first time
+  the encoder has been asked for a stream and declined, and the refusal is
+  the hardware's, not ours.
+- **VERDICT 3 NOT_ENABLED** — the write did not take at all. Check
+  `RBFBStrmChanged`.
+- **refusal 54 STATUS_STUCK** — `STATUS` never cleared after `ENABLE` 0 and
+  the rest of the sequence was deliberately **not** sent.
 
-1. `setup_dio_stream_attribute` -> `enc1_stream_encoder_dp_set_stream_attribute`
-   (`dcn10_stream_encoder.c:245`): `DP_PIXEL_FORMAT` (RGB444 + 8bpc, as the
-   panel's `0x01000000`), `DP_MSA_COLORIMETRY` (MISC0 `0x20` = 8bpc sRGB, as
-   the panel's `0x20000000`), `DP_MSA_MISC`, and the four
-   `DP_MSA_TIMING_PARAM1..4` **from `rb_strenc_derive_msa()` on pipe 1**, plus
-   `enc2`'s one extra write, `DP_SEC_FRAMING4.DP_SST_SDP_SPLITTING`.
-2. `enc2_stream_encoder_dp_unblank` (`dcn20_stream_encoder.c:468`):
-   `DP_VID_M_N_GEN_EN` **0**, then `DP_VID_N` `0x8000` and `DP_VID_M`
-   **9011** (148500 kHz over HBR2), then `GEN_EN` back to **1** — M is
-   hardware-generated and the written value only **primes** it, which is why
-   the panel's own M drifted `0xa2a6` -> `0xa2a4` between boots and must never
-   be copied. Then `DP_VID_STREAM_ENABLE` 0 and **`REG_WAIT` on bit 16
-   `STATUS`, not bit 0** — that split is the witness this line has lacked
-   since 2EB. Then `DIG_FE_CNTL.DIG_START` 1, delay, 0. Then
-   `DP_STEER_FIFO_RESET` 1, delay, **0** — which is what clears DIG2's held
-   reset, by construction rather than as a special case. Then
-   `DP_VID_STREAM_ENABLE` 1 and read `STATUS` back.
-3. **Do not program `DP_VID_STREAM_DIS_DEFER`.** DIG2's 0 against everything
-   else's 2 is real and firmware-written, but `dcn20_stream_encoder.c:541`
-   says *"this register has no effect on enable transition"* and upstream
-   stopped writing it. It is retired as a candidate blocker.
+Also read, in the same output: `DP_STEER_FIFO` bit 0 must now be **0** (DIG2's
+held reset, set in boots 472/473/474, is cleared by the unblank's own pulse),
+and `DIG_FE_CNTL` bits 2:0 must now be **1**. That second one has **never been
+written before 305** — see the journal; it was the front-end-to-OTG mux, a
+different register from 2EC's one-hot BE→FE mux, and DIG2 had it pointed at
+the panel's pipe.
 
-**Arming it** (rule 30's scan is already done): `-rbgpufbstrm` is **clean** —
-not an existing token and not a prefix of one, and neither is the derived
-negative `-rbgpunofbstrm`. Opt-in tokens are not covered by
-`rb_defaults.h`'s hosttest, so that manual scan is the check. Nothing may be
-written until a tool names a target, pipe 0 / DIG0 / PHY0 / front end DIGA /
-DP0 are **refused by name in both halves**, and the write is declined unless
-**this boot's own sample** returned `RBFBStrencMsaMismatch` 0 — the arm is part
-of the experiment (rule 34).
+## Step 4 — ask the SINK, which is the only witness that counts
 
-## What is still missing after that
+Our own registers can only say our stores landed; taking that as the answer is
+rule 20's defect.
 
-A **surface** on pipe 1 (HUBP, address, swizzle) and a second
-`IOFramebuffer` — `getDisplayModeCount()` has returned 1 since 2sl. A stream
-with no surface carries blank pixels, which is a real intermediate result and
-should be read as one, not mistaken for failure.
+```bash
+sudo build/out/dptrain go tps=2
+```
 
-## Hazards on this line, unchanged
+Then read DPCD `0x202` over AUX2, **before and after**, since "CR not done" is
+the state it is already in and only a **change** is evidence. `0x202` has read
+`0x00` in every boot that has tried, and the blocker is still unnamed.
 
-- **`dptrain go tps=3`/`tps=4` DEGRADE this sink and the recovery is a
-  reboot** (2F8). The tool refuses them. Use `tps=2`.
+**`tps=3` and `tps=4` DEGRADE this sink and the recovery is a REBOOT** (2F8,
+two boots, and all of 2F7 was its aftermath). The tool refuses them. Use
+`tps=2`.
+
+## What a RUNNING stream does and does not mean
+
+**A stream is not a picture.** There is no surface on pipe 1 — no HUBP, no
+address, no swizzle — so even STATUS 1 means the encoder is carrying a raster
+whose pixels are whatever the unprogrammed HUBP feeds it. That is a real
+intermediate result and should be recorded as one, not as success and not as
+failure. A second `IOFramebuffer` is also still missing;
+`getDisplayModeCount()` has returned 1 since 2sl.
+
+## Rescue, if the boot goes wrong
+
+- `sudo nvram rbgpu-arm=0` — accelerator off next boot.
+- **`-rbgpuoff`** — the plugin loads and does nothing. The documented rescue.
+- The **boot sentinel** needs no command: a boot that does not survive 60 s
+  makes the next one stock.
+- **Never `kmutil unload` the framebuffer kext — it PANICS** (2sq). Reboot.
 - The Type-C subsystem can die in a way that survives a reboot and a
   reinstall, cleared only by a **30-second power-key hold** (2DD).
-- The chassis must be in **iGPU-only / Eco mode** (rule 47). `./build/out/blset`
-  reports the mode first.
-- **Never `kmutil unload` the framebuffer kext — it PANICS** (2sq). Reboot.
+- The chassis must be in **iGPU-only / Eco mode** (rule 47).
