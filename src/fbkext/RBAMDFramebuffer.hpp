@@ -44,6 +44,7 @@ extern "C" {
 #include "rb_dio.h"
 #include "rb_dpcspipe.h"
 #include "rb_strenc.h"
+#include "rb_strprog.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
@@ -571,6 +572,9 @@ private:
     uint32_t           strmWrites;
     uint32_t           strmApplied;
     uint32_t           strmChangedMask;
+    uint32_t           strmWas[RB_STRPROG_MAX_WRITES];
+    uint32_t           strmWant[RB_STRPROG_MAX_WRITES];
+    uint32_t           strmGot[RB_STRPROG_MAX_WRITES];
     uint32_t           strmPhaseUsed;
     uint32_t           strmInstUsed;
     uint32_t           strmOtgUsed;

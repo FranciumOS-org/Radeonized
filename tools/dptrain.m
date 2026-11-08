@@ -394,9 +394,15 @@ int main(int argc, char **argv)
                "     four registers took the writes cleanly; the sink's lane\n"
                "     status did not move, which is what should happen while\n"
                "     the transmitter is not yet driving at the link rate.\n"
-               "     The missing step is the atom transmitter ENABLE over\n"
-               "     DMUB (2E9 proved that path executes) carrying the rate\n"
-               "     the sink was just told to expect.\n"
+               "     THE MISSING STEP IS NOT NAMED. This text used to say it\n"
+               "     was the atom transmitter ENABLE over DMUB; that command\n"
+               "     carries RB_DIG_TYPEC_SYMCLK 54000 = HBR2 and has\n"
+               "     EXECUTED since 2E2, so naming it was this tool telling\n"
+               "     its reader a conclusion the tool itself disproves.\n"
+               "     What boot 478 adds: the sink's SINK_STATUS (DPCD 0x205)\n"
+               "     reads RECEIVE_PORT_0_STATUS clear - it detects no sync\n"
+               "     on the main link at all - while LINK_STATUS_UPDATED\n"
+               "     (0x204 bit 7) is SET, so the sink did notice something.\n"
                "     A dark monitor is still the expected reading.\n");
     } else if (verd == 5) {
         printf("\n  -> SINK BLIND. Our four registers took, and the sink's\n"

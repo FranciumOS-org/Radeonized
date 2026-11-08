@@ -319,20 +319,83 @@ int main(int argc, const char **argv)
                (unsigned long)cb, (unsigned long)ca);
         printf("  bit 0  ENABLE (what we wrote):      %ld\n", ca & 1);
         printf("  bit 16 STATUS (what the HW says):   %ld\n", (ca >> 16) & 1);
-        printf("  STATUS cleared after ENABLE 0:      %ld\n",
-               rdnum(fb, "RBFBStrmStatusOff"));
-        printf("VERDICT %ld = %s\n", vd, verdictStr(vd));
+        /* THIS CHECK IS VACUOUS WHEN STATUS WAS ALREADY 0 GOING IN, which
+         * is every run so far: "it cleared" says nothing about a bit that
+         * was never set. Say which it is rather than printing a 1 that
+         * carries no information. */
+        if ((cb >> 16) & 1) {
+            printf("  STATUS cleared after ENABLE 0:      %ld  (STATUS was 1 "
+                   "going in, so this is a real transition)\n",
+                   rdnum(fb, "RBFBStrmStatusOff"));
+        } else {
+            printf("  STATUS cleared after ENABLE 0:      %ld  - VACUOUS: "
+                   "STATUS was already 0 before the write\n",
+                   rdnum(fb, "RBFBStrmStatusOff"));
+        }
+        /* The verdict names the state of a register that only the UNBLANK
+         * half is trying to move. In the configure half, ENABLE 0 is the
+         * INTENDED outcome, and printing "the enable write did not even
+         * take" against it is the tool mis-reporting a success. */
+        if (phase == (unsigned)RB_STRPROG_PHASE_ATTRIBUTE) {
+            printf("VERDICT %ld = %s\n"
+                   "  ^ EXPECTED in this phase: the configure half leaves the "
+                   "stream DISABLED on purpose so dptrain can run. The "
+                   "verdict is only a result after `strencprog unblank`.\n",
+                   vd, verdictStr(vd));
+        } else {
+            printf("VERDICT %ld = %s\n", vd, verdictStr(vd));
+        }
 
         printf("\nMSA read back: %08lx %08lx %08lx %08lx\n",
                (unsigned long)rdnum(fb, "RBFBStrmMsaAfter1"),
                (unsigned long)rdnum(fb, "RBFBStrmMsaAfter2"),
                (unsigned long)rdnum(fb, "RBFBStrmMsaAfter3"),
                (unsigned long)rdnum(fb, "RBFBStrmMsaAfter4"));
-        printf("DP_STEER_FIFO after: 0x%08lx  (bit 0 RESET must now be 0)\n",
-               (unsigned long)rdnum(fb, "RBFBStrmSteerAfter"));
+        printf("DP_STEER_FIFO after: 0x%08lx%s\n",
+               (unsigned long)rdnum(fb, "RBFBStrmSteerAfter"),
+               phase == (unsigned)RB_STRPROG_PHASE_ATTRIBUTE
+                   ? "  (the configure half does NOT pulse it - a 1 here is "
+                     "DIG2's held reset, still held, as expected)"
+                   : "  (bit 0 RESET must now be 0)");
         printf("DIG_FE_CNTL after:   0x%08lx  (bits 2:0 DIG_SOURCE_SELECT "
                "must be %u)\n",
                (unsigned long)rdnum(fb, "RBFBStrmFeAfter"), otg);
+
+        /* THE PER-WRITE READBACK. Boot 478 had to infer "DP_VID_M refused
+         * the store" from a zero bit in the changed mask, which cannot tell
+         * a dropped store from a store of the value already there. */
+        printf("\nper write: was -> wanted -> got\n");
+        {
+            const long nw = rdnum(fb, "RBFBStrmWrites");
+            long dropped = 0;
+            for (long k = 0; k < nw; k++) {
+                char kw[48], kt[48], kg[48];
+                snprintf(kw, sizeof(kw), "RBFBStrmW%ldWas", k);
+                snprintf(kt, sizeof(kt), "RBFBStrmW%ldWant", k);
+                snprintf(kg, sizeof(kg), "RBFBStrmW%ldGot", k);
+                int fw = 0, ft = 0, fg = 0;
+                const long was  = rdnum2(fb, kw, &fw);
+                const long want = rdnum2(fb, kt, &ft);
+                const long got  = rdnum2(fb, kg, &fg);
+                if (!fw || !ft || !fg) {
+                    printf("  %2ld  (not published - an older kext)\n", k);
+                    continue;
+                }
+                const int took = (got == want);
+                if (!took) { dropped++; }
+                printf("  %2ld  0x%08lx -> 0x%08lx -> 0x%08lx  %s\n",
+                       k, (unsigned long)was, (unsigned long)want,
+                       (unsigned long)got,
+                       took ? (was == want ? "(already there)" : "took")
+                            : "*** DID NOT TAKE ***");
+            }
+            if (dropped) {
+                printf("  %ld store(s) DID NOT TAKE. That is a reading about "
+                       "the register, not about our arithmetic: the value "
+                       "read back differs from the value written, in the same "
+                       "instruction stream.\n", dropped);
+            }
+        }
 
         printf("\nHOW TO READ THIS\n\n"
                "A STREAM IS NOT A PICTURE. There is no surface on pipe 1, so "
