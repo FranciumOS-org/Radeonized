@@ -80,7 +80,15 @@ fi
 
 echo
 echo "RDPCSTX PHY status, per instance (dpcs_4_2_0_offset.h, BASE_IDX 2,"
-echo "stride 0xd8 - every offset confirmed against the header, not assumed)"
+echo "stride 0xd8 - all 45 offsets confirmed against the header, not assumed)"
+echo
+echo "309 ADDED THE OWNERSHIP REGISTERS BECAUSE THE FIRST FIVE COULD NOT TELL"
+echo "PHY2 FROM PHY3: boot 481 read them byte-identical on those two while"
+echo "ROM-attested QUERY_DP_ALT says PHY2 has DP alt GRANTED and PHY3 DISABLED."
+echo "Every instance now carries TWO comparisons - against the live panel and"
+echo "against PHY3, the dark USB-C PHY. Only a difference that holds against"
+echo "BOTH is this port own; one that holds against the panel alone is the"
+echo "signature of a PHY never brought up, which is what killed 308 candidate."
 echo
 for I in 0 1 2 3 4; do
   case $I in
@@ -162,6 +170,47 @@ for I in 0 1 2 3 4; do
         printf "        the panel and CLEAR TOGETHER here, so they are ONE\n"
         printf "        observation, not two independent ones.\n" ;;
     esac
+  fi
+  AL=$(get RBFBPhy${I}AllowDrvAccess); BL=$(get RBFBPhy${I}DrvAccessBlocked)
+  DB=$(get RBFBPhy${I}DmcuDisBlock);   FT=$(get RBFBPhy${I}ForceTxClkDis)
+  DD=$(get RBFBPhy${I}DmcuDpAltDisable); ET=$(get RBFBPhy${I}EncTypeSel)
+  AP=$(get RBFBPhy${I}AccessDiffPanel);  AD=$(get RBFBPhy${I}AccessDiffDark)
+  if [ -n "$AL" ]; then
+    printf "        OWNERSHIP           ALLOW_DRIVER_ACCESS %s  DRIVER_ACCESS_BLOCKED %s\n" "$AL" "$BL"
+    printf "        DMCU                DPALT_DIS_BLOCK %s  FORCE_TX_CLK_DIS %s  DPALT_DISABLE %s\n" "$DB" "$FT" "$DD"
+    printf "        ENC_TYPE_SEL        %s\n" "$ET"
+    nm() { M=$1; O=""
+      if [ $(( M & 1 ))  -ne 0 ]; then O="$O ALLOW"; fi
+      if [ $(( M & 2 ))  -ne 0 ]; then O="$O BLOCKED"; fi
+      if [ $(( M & 4 ))  -ne 0 ]; then O="$O DMCU_DIS_BLOCK"; fi
+      if [ $(( M & 8 ))  -ne 0 ]; then O="$O FORCE_TXCLK"; fi
+      if [ $(( M & 16 )) -ne 0 ]; then O="$O DMCU_DPALT"; fi
+      if [ $(( M & 32 )) -ne 0 ]; then O="$O ENC_TYPE"; fi
+      printf "%s" "$O"; }
+    case "$AP" in
+      18446744073709551614|-2) printf "        vs the live panel:  (this IS the panel)\n" ;;
+      0)  printf "        vs the live panel:  agrees\n" ;;
+      "") printf "        vs the live panel:  ABSENT - kext predates it (rule 15)\n" ;;
+      *)  printf "        vs the live panel:  DIFFERS:%s\n" "$(nm "$AP")" ;;
+    esac
+    case "$AD" in
+      18446744073709551614|-2) printf "        vs dark USB-C PHY3: (this IS the dark control)\n" ;;
+      0)  printf "        vs dark USB-C PHY3: AGREES - so any difference from the\n"
+          printf "                            panel is the generic 'never brought up'\n"
+          printf "                            signature, NOT this port's own. THIS IS\n"
+          printf "                            HOW 308'S CANDIDATE DIED.\n" ;;
+      "") printf "        vs dark USB-C PHY3: ABSENT\n" ;;
+      *)  printf "        vs dark USB-C PHY3: DIFFERS:%s\n" "$(nm "$AD")"
+          if [ "$I" = "2" ]; then
+            printf "                            *** A DIFFERENCE THAT IS THIS PORT'S OWN\n"
+            printf "                            - it does not hold for the USB-C PHY\n"
+            printf "                            nobody brought up. ***\n"
+          fi ;;
+    esac
+  else
+    printf "        OWNERSHIP           *** ABSENT - the loaded kext predates 309.\n"
+    printf "        That is not 'the port is not blocked' (rule 14): the keys are\n"
+    printf "        not published, so nothing here was read. Install 16CB216D. ***\n"
   fi
   if [ "$CV" = "1" ]; then
     printf "        clkdet result is BELIEVABLE (the detector is enabled)\n"
