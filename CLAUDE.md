@@ -462,6 +462,22 @@ with a new clause: **so is WHEN the port came up.** (`RBFBAuxEn` and
 
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
+**302 built the stream encoder READ** — `src/common/rb_strenc.h`,
+`tools/strenclook.sh`, 14 registers x 5 instances, BASE_IDX 2, stride 0x100,
+read-only. **The read is the experiment: DIG0 is the panel's live working DP
+stream**, so every field has a known-good value in the same sample as DIG2's
+and the three never brought up are the negative control. Gate: instance 0's
+`DP_MSA_TIMING_PARAM1` must decode as **this boot's own** OTG0 totals (not the
+card's — DRR moves V_TOTAL, 2FB). **The witness this line has lacked since
+2EB:** `DP_VID_STREAM_CNTL` bit 0 `ENABLE` (what a driver writes) vs bit 16
+`STATUS` (what the **hardware** answers, and what upstream `REG_WAIT`s on) —
+published as two masks, never one. Four files for one operation
+(`dcn31_resource.c:1323` construct DCN30 over a **DCN10** register struct;
+`.dp_set_stream_attribute`/`.dp_unblank` are **DCN20's**; `.dig_connect_to_otg`
+**DCN10's**), all vendored. **And `setup_dio_stream_encoder` is NOT the gap:**
+its `enable_stream` / `map_stream_to_link` / `set_input_mode` / `enable_fifo`
+are all **absent** from `dcn30_str_enc_funcs`, so it reduces to
+`connect_dig_be_to_fe`, done in 2EC.
 **Order:** FE connect → configure encoder → transmitter ENABLE; the atom
 transmitter command carries no front end **by design**.
 **2FC corrected the name:** `enc31_map_stream_to_link` is the **HPO DP**
