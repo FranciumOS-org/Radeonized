@@ -63672,3 +63672,179 @@ five boots.** If neither moves, hpdsel is not it either, and what remains is
 that the firmware is refusing the command for a reason it cannot tell us —
 at which point the next thing to find is a verdict register that is not
 `PHY_CNTL6`, which 2FC looked for and did not find in `DIO_LINK*_CNTL`.
+
+---
+
+## 300 — boot 469 settled three candidates, and then the tool said we had
+## been reading the wrong register for five boots
+
+Tag: `300`. Boot 469, then static work. One milestone, three results and one
+correction, and the correction is the one that matters.
+
+### What boot 469 settled
+
+**`hpdsel` is not the blocker.** The in-boot A/B built in 2FF ran both sides:
+
+| side | `RBFBDigHpdSelWant` | `Took` | `Sent` | `RBFBDmubAcks` | `AckTimeouts` | PHY2 `RDPCSTX2_PHY_CNTL6` |
+|---|---|---|---|---|---|---|
+| A (default) | 0 | 0 | 3 | 2 | 0 | `0x00063333` |
+| B (override) | 2 | 1 | 2 | 2 | 0 | `0x00063333` |
+
+Both sends were consumed by the DMCUB — `RBFBDmubRptr` = `RBFBDmubWptr` =
+2496, `RptrMoves` 2 — and the override took, so the experiment's own arm is
+attested (rule 34) and the null is a null about `hpdsel`, not about the send.
+Whatever `hpdsel` selects, it is not what powers a lane.
+
+**Power gating is not the blocker.** `RBFBPgCandidate` = -1 and `dmubbl dom`
+returned refusal 24: no domain differs from DOMAIN0 across DOMAIN0-3 and
+DOMAIN16-18. Nothing is gated that the panel's own pipe is not.
+
+**DP alt mode is GRANTED on PHY2.** `dmubbl dpaltq` reported, for PHY2,
+`is_usb` 1 and `alt_disable` **0**, with the `is_usb` mask `0x1c` — PHYs 2, 3
+and 4 — exactly equal to 2E1's independent VBIOS display-path read. That is a
+ROM MATCH on a value the command does not derive from, so the DMUB reply path
+is attested by something outside itself, and this is the second boot to
+reproduce it (2EB was the first).
+
+### The correction
+
+`dmubbl dpaltq` printed, as it has since 2EA:
+
+> `RDPCSTX2_PHY_CNTL6 is the WRONG REGISTER for this part - Linux reads
+> RDPCSPIPE_PHY_CNTL6 for UNIPHY_C on YELLOW_CARP_B0`
+
+Five boots — 459, 461, 464, 468, 469 — read `RDPCSTX2_RDPCSTX_PHY_CNTL6` as
+`0x00063333`, concluded PHY2's analog lane was dark, wrote that conclusion
+into `CLAUDE.md` and `docs/EXTERNAL-DISPLAY.md` as **the blocker, named**, and
+recorded the contradiction with `QUERY_DP_ALT` as unresolved while the tool
+that produced the contradiction was printing its resolution in the same
+output. This is the recurring error in its **"read the evidence already in
+hand before designing the next experiment"** form, and it is the most
+expensive instance recorded: five boots, and a handoff that sent the next
+session at the analog PHY.
+
+What upstream says, at `docs/linux-ref/dpcs_4_2_0_offset.h:11960`, as a
+comment in the generated header:
+
+```
+//[Note] Hack. RDPCSPIPE only has 2 instances.
+regRDPCSPIPE0_RDPCSPIPE_PHY_CNTL6  0x2d73   BASE_IDX 2
+regRDPCSPIPE1_RDPCSPIPE_PHY_CNTL6  0x2e4b   BASE_IDX 2
+regRDPCSPIPE2_RDPCSPIPE_PHY_CNTL6  0x2d73   <- instance 0 again
+regRDPCSPIPE3_RDPCSPIPE_PHY_CNTL6  0x2e4b   <- instance 1 again
+regRDPCSPIPE4_RDPCSPIPE_PHY_CNTL6  0x2d73   <- instance 0 again
+```
+
+**Two** real registers, 0xd8 apart — the RDPCSTX stride, which is how the two
+blocks come to be confusable — and the five-entry table exists only so
+`DPCS_DCN31_REG_LIST(id)` compiles for id 0..4.
+
+### And what the new register cannot do
+
+`dpcs_4_2_0_offset.h:11945-11957` defines **exactly three fields** for
+`RDPCSPIPE_PHY_CNTL6`: `RDPCS_PHY_DPALT_DP4` (0x10000), `DPALT_DISABLE`
+(0x20000), `DPALT_DISABLE_ACK` (0x40000). **No MPLL, no reference clock, no
+PSTATE.** RDPCSTX's `PHY_CNTL6` carries those as well, in the low 16 bits —
+which is why `0x00063333` read as a single verdict covering both questions.
+
+So this read answers **"is DP alt granted"** and says **nothing** about
+whether a lane is powered. The two questions were conflated for five boots and
+this file exists to stop that; the distinction is written into
+`src/common/rb_dpcspipe.h`'s header, into `tools/dpcspipelook.sh`'s output,
+and into the publish comment in `RBAMDFramebufferVBL.cpp`, because a reading
+whose limits live only in a journal entry is a reading that will be
+over-claimed.
+
+### What was built
+
+`src/common/rb_dpcspipe.h`, read-only, no setter. The offsets are pinned
+individually rather than derived: they are 0xd8 apart, so a formula would look
+right and be a coincidence. `rb_dpcspipe_dw()` **refuses indexes 2, 3 and 4** —
+the alias trap, because answering them would hand back one register's address
+under another's name, which is exactly the class of error that cost the five
+boots. The product is `rb_dpcspipe_agrees_with_dmub()`: an OR over both
+instances against `QUERY_DP_ALT`'s `alt_disable`, deliberately **not** an
+identification of which instance is UNIPHY_C. Three PHYs report as USB-C
+against two registers, so the mapping cannot be one-to-one, and one matching
+bit across two candidates is not an identification (rule 18).
+
+`tools/hosttest/dpcspipe_test.c`, registered in the `Makefile` and in
+`hosttest.c`. The rule-48 break-it run, seven guards, each broken alone and
+driven from Python rather than a shell loop (the `|` field-delimiter defect
+that lied twice in 2FF):
+
+| guard broken | caught by |
+|---|---|
+| alias index 2 answered | `an aliased index was answered` |
+| instance 1 offset off by one | `inst1 = 0x2e4c want 0x2e4b` (+2 more) |
+| `DISABLE` mask = `ACK`'s | `DISABLE alone decoded wrong` (+5 more) |
+| verdict's ack gate removed | `set-not-acked is not SETTLING` |
+| agreement reads instance 0 only | `an agreeing instance was not found` |
+| sweep's field mask dropped | `an undecoded bit made the sweep DIFFER` |
+| sweep's count bound dropped | `bad args not refused by the sweep` |
+
+Seven guards, seven breaks, zero that fired nothing, and `error:` grepped
+beside `FAIL` on every run (rule 48's `-Werror` trap, which has now cost five).
+
+`dpcspipeSample()` in `src/fbkext/RBAMDFramebufferHUBP.cpp`, called from
+`hubpSetup()` and from the periodic publish. It shares `-rbgpufbdpalt` /
+`-rbgpufbdig` / `-rbgpufbfe` with no new token (rule 34, and rule 30 — that
+family is the crowded one). **Its aperture bound is the first here that can
+really fail:** instance 1 is dword `0x2e4b`, above `dpalt`'s `0x2ca6` and
+above every other register this kext reads, so unlike `dioFits` this
+comparison is a check and not a label. It is kept out of `needed` for 2C0's
+reason: an opt-in read must never be able to refuse `hubpSetup()` and take the
+panel with it (rule 16).
+
+The agreement is computed **only** when `dpaltqRefuse[2] == RB_DPALTQ_OK` in
+this boot. A zero-initialised reply struct reads as `alt_disable` 0 and would
+agree with anything, so the unevaluated case keeps its own code and
+`tools/dpcspipelook.sh` says in words that 0 is **not** a disagreement
+(rule 14).
+
+### What this does and does not change about the blocker
+
+`CLAUDE.md` and `docs/EXTERNAL-DISPLAY.md` carried **"THE BLOCKER: the digital
+transmitter answers every write and the ANALOG PHY IS OFF"**, on the strength
+of `0x00063333` read four then five times with PHY0's `0x00194444` as the
+in-boot control. That claim is now **withdrawn as stated**: it rests on a
+register that upstream does not read for UNIPHY_C on this part, and rule 39's
+reverse clause applies — when a configuration is later found invalid, go back
+through the readings it invalidated.
+
+What survives is narrower and still real. The control was in-boot and
+byte-level: PHY0, the panel's working lane, read `0x00194444` at the same
+dword in the same sample where PHY2 read `0x00063333`. Two instances of one
+register block differing is a fact about that block whichever block it is. So
+the honest statement is: **`RDPCSTX2`'s `PHY_CNTL6` differs from `RDPCSTX0`'s
+in a way that would mean no MPLL and no reference clock IF those fields are
+what that address decodes as for this PHY — and that `if` is now open**, since
+the register upstream reads for this PHY is a different one.
+
+The lane-power question is therefore **not answered, in either direction**.
+Boot 470's reading of `RDPCSPIPE` cannot answer it either; it can only retire
+`0x00063333` as a misread of the wrong register, or produce the larger finding
+that two attested instruments disagree. What the chain still lacks is
+unchanged: a **stream** on DIG2 (`dcn30_dio_stream_encoder.c`, not a dcn31
+file), a **surface** on pipe 1, and a second `IOFramebuffer`.
+
+### Boot 470's arm, stated as an arm (rule 34)
+
+`-rbgpufbdig` **and** `-rbgpufbaltq`, both needed: the register read comes
+from the first, and the thing it is compared against comes from the second.
+Without `-rbgpufbaltq` the agreement publishes 0 and the boot produces raw
+words with nothing to test them against.
+
+```
+sudo tools/efi.sh bootarg add -rbgpufbdig -rbgpufbaltq
+```
+
+Then, in the armed boot, cable plugged in **at boot** (2FB):
+
+```
+build/out/dmubbl dpaltq
+tools/dpcspipelook.sh
+```
+
+In that order, because the agreement is only computed in a publish that
+happens after `dpaltq` has answered.

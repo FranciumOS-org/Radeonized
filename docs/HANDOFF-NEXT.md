@@ -1,177 +1,178 @@
-# Handoff — next step
+# HANDOFF — where this is, and what to do next
 
-**Written 2026-11-07, after 2FE. Last boot: 468.**
+**Last milestone: 300.** Boot 469 ran, three candidates died, and then the
+project's own tooling showed that the conclusion five boots had been building
+on was read off the wrong register.
 
-Read `CLAUDE.md` first, then this. `docs/JOURNAL.md` under `2FE` has boot 468.
-
----
-
-## Three things before you touch anything
-
-1. **PLUG THE TYPE-C CABLE IN BEFORE BOOTING.** The firmware enables the AUX
-   engines on a connect path that runs at boot and we never write `AUX_EN`.
-   Plugged in afterwards every AUX read returns refusal 3 on engine "AUX5"
-   (= `RB_AUX_COUNT`, none) and it looks like a dead port. 2FB.
-
-2. **`dptrain go tps=3` DEGRADES THIS SINK and the recovery is a REBOOT**
-   (2F8, two boots, with a healthy before/after control). The tool refuses
-   `tps=3`/`tps=4`. **Use `tps=2`.**
-
-3. **Check the sink before every experiment.** `./build/out/edidread` (header
-   OK, checksum OK, `MSI MP2412C`) and `dpcdread 0x0 4` reading
-   `12 14 c2 81`. A degraded sink looks exactly like a failing transmitter.
-   The chassis must be in iGPU-only / Eco mode.
-
-**Install the framebuffer first: UUID `F004AF7C`, `sudo tools/fbinstall.sh`.**
-It carries the SRC_SEL default 2FE measured. Without it, `dmubbl dto` with
-`srcsel` omitted still programs the old value.
+**Read this file, then `docs/EXTERNAL-DISPLAY.md`'s 300 section.** The journal
+under tag `300` has the full evidence.
 
 ---
 
-## THE BLOCKER, as sharply as the evidence allows
+## The state in one paragraph
 
-**The digital transmitter answers every write we make. The analog PHY is off.**
+An armed boot is an accelerated Mac and that half is done. The one open goal
+is a picture on the external display over Type-C DP alt mode. DP alt mode is
+granted on PHY2 (DMUB `QUERY_DP_ALT`, ROM-matched twice). The pixel clock
+runs on pipe 1's DP DTO at the right rate (2FE fixed `PIPE_DTO_SRC_SEL`;
+ratio 0.9997 at `srcsel=0`). The second raster scans. The DIG front end
+connects, the transmitter answers every write, the DMCUB consumes and acks
+every command we send it. **The sink still sees nothing** — DPCD `0x202`
+reads `0x00` before and after, five boots running.
+
+**The blocker is NOT named.** "The analog PHY is off" was withdrawn in 300.
+
+---
+
+## What 300 withdrew, and why it matters for what you do next
+
+Five boots (459, 461, 464, 468, 469) read `RDPCSTX2_RDPCSTX_PHY_CNTL6` =
+`0x00063333`, concluded PHY2's analog lane was dark, and wrote that into
+`CLAUDE.md` and `docs/EXTERNAL-DISPLAY.md` as the named blocker.
+
+`dmubbl dpaltq` has been printing, since 2EA:
+
+> `RDPCSTX2_PHY_CNTL6 is the WRONG REGISTER for this part - Linux reads
+> RDPCSPIPE_PHY_CNTL6 for UNIPHY_C on YELLOW_CARP_B0`
+
+Nobody ran `dpaltq` and read its output until boot 469. **Do not design the
+next experiment before reading what is already in hand** — this is the most
+expensive instance of that error in the record.
+
+What survives of the old claim: `RDPCSTX2` differs from `RDPCSTX0`
+(`0x00194444`) in an in-boot byte-level comparison, which is a real fact about
+that block. But it means "no MPLL, no reference clock" **only if those fields
+are what that address decodes as for this PHY**, and that is now open.
+**Lane power is unanswered in either direction, and no reading in boot 470
+will answer it.**
+
+---
+
+## STEP 1 — install and boot (this is the only step pending on hardware)
+
+The framebuffer is built and the hosttest passes, including the seven-guard
+rule-48 break-it run on the new decoder.
 
 ```
-  PHY0  0x00194444   4 MPLLs on (TX0-3), DPALT_DP4 1, ref_clk en 1 req 1
-  PHY2  0x00063333   no MPLL, no ref clock, pstate 3 3 3 3,
-                     DPALT_DISABLE asserted AND acked
+sudo tools/fbinstall.sh
 ```
 
-`TP_SEL`, `DIG_BE_CNTL.FE_SEL`, the DP DTO and the OTG all take our writes and
-read back changed. PHY2 has no reference clock, not one enabled MPLL, and all
-four lanes parked. PHY0 is the in-boot control and shows what an active PHY
-looks like on this chip. **Four boots — 459, 461, 464, 468 — have left
-`0x00063333` untouched.**
+Then check the UUID landed **inside the collection**, not in
+`/Library/Extensions` (rule 15 — 2xx cost nine boots to this):
 
-So the question has changed shape. It is no longer "did our write land" but
-**"what powers up an RDPCSTX lane"**. The atom transmitter ENABLE at the link
-rate has executed since 2E2 (`dmubbl dig` carries `RB_DIG_TYPEC_SYMCLK` 54000
-= HBR2) and does not do it.
+```
+kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
+  --show-kext-uuids | grep -i rembrandt
+```
 
-### Two cautions before designing that experiment
+### The arm, which is part of the experiment (rule 34)
 
-- **`PHY_CNTL6` is a suspect, not a witness.** It is the legacy fallback Linux
-  reads only when DMCUB is absent, and it has disagreed with `QUERY_DP_ALT` on
-  all five PHYs since 2EB — 2EB measured alt mode **granted** on PHY2 while
-  this register says `DPALT_DISABLE` asserted *and* acked. One of the two is
-  wrong and which is **not established**.
-- **`rb_dpalt.h` has no setter by design** and Linux marks that write path
-  "avoid if possible". Do not add one to test a hypothesis.
+**TWO tokens, both required:**
 
-**So the first move is a verdict register that is not `PHY_CNTL6`.** The
-handoff has asked for one since 2F9; 2FC's `DIO_LINK*_CNTL` was tried and is
-all zeros, so it is not it. Candidates not yet read, in `dpcs_4_2_0_offset.h`
-and `dcn_3_1_2_offset.h`: the rest of the `RDPCSTX2_*` block
-(`RDPCSTX_PHY_CNTL0..5`, `_PHY_FUSE*`, `_PLL_UPDATE_*`), and
-`DP_DPHY_INTERNAL_CTRL` / `DP_LINK_CNTL` on DIG2. Read before writing, and
-discharge rule 46 on whichever function Linux uses to power a lane —
-`enc31_hw_init`, `dcn10_link_encoder_setup`, `dpcs31_program_eq_setting` are
-in `dcn31_dio_link_encoder.c`, already vendored.
+```
+sudo tools/efi.sh bootarg add -rbgpufbdig -rbgpufbaltq
+```
+
+`-rbgpufbdig` arms the register read. `-rbgpufbaltq` arms `QUERY_DP_ALT`,
+which is **the thing the read is compared against**. With only the first, the
+agreement publishes 0 — which means "not evaluated", not "disagrees" — and the
+boot produces raw words with nothing to test them against.
+
+**The cable must be plugged in at boot (2FB).** Plugged in afterwards, every
+AUX read returns refusal 3 and `AUX_EN` reads clear; the firmware's connect
+path writes it, at boot, and we never do.
+
+Verify the arm **after** the boot, from the running system (rule 43), and read
+`rbgpu-boot` first — no increase means the boot was never armed and nothing in
+NVRAM is this boot's (rule 8).
 
 ---
 
-## Settled in 2FE — do not re-open
+## STEP 2 — in the armed boot, in this order
 
-- **The 8.27x raster rate was `PIPE_DTO_SRC_SEL`.** Boot 468 with `srcsel=0`:
-  59.98 Hz against 60 asked, implied 148.46 MHz against 148.50, ratio 0.9997.
-  Boots 464 and 467 at `srcsel=1`: 8.2726 and 8.1293. **The 2 x 600 MHz
-  candidate is dead as a mechanism** — it was never a clock source.
-- **The wrong clock was NOT the blocker.** The chain was re-run at 59.98 Hz
-  this boot: `dig fe` moved `FE_SEL 0 -> 0x4` (changed 1), `dptrain tps=2`
-  moved `TP_SEL 0 -> 1`, and DPCD `0x202` read `0x00` before and after. The
-  defect was real, it is fixed, and the symptom did not move.
-- **The DIO encoder-type mux.** All six `DIO_LINK{A..F}_CNTL` zero, before and
-  after our writes, with an in-boot base control. Not steering DIG2 away from
-  PHY2. **Not** "confirmed on DIG" — `ENCODER_TYPE_DIG` is zero.
-- **`enc31_map_stream_to_link` as the next step.** Wrong name: it is the HPO DP
-  128b/132b encoder's. This chip's DIO stream encoder is
-  `dcn30_dio_stream_encoder_construct` over DCN10's register struct
-  (`dcn31_resource.c:1323`, `:361`). The connect it implied was
-  `dcn10_link_encoder_connect_dig_be_to_fe`, **done in 2EC**.
-- **`PIXEL_RATE_SOURCE` and `DTBCLK_DTO_DIV`.** Identical on the working panel
-  pipe (0 and 8), so neither was ever the difference.
+```
+build/out/dmubbl dpaltq
+tools/dpcspipelook.sh
+```
+
+Order matters: the agreement is only computed in a publish that happens after
+`dpaltq` has answered, and the publish is periodic (`RBFBPubMs`, default
+500 ms), so give it a second.
+
+### What each outcome means, written down before the boot
+
+| `RBFBDpcsPipeAgree` | reading |
+|---|---|
+| **0** | `QUERY_DP_ALT` did not answer for PHY2 — **no comparison was made.** Not a disagreement. Check the arm. |
+| **1** | An instance's `DPALT_DISABLE` matches the DMUB. **The first corroboration in a register** that PHY2's DP-alt state is granted, from the block Linux actually reads for UNIPHY_C. It **retires `0x00063333`** as a misread of the wrong register. |
+| **2** | Neither matches. **The larger finding:** two attested instruments disagree, with the ROM match on the DMUB's side. Then the question is which instrument, and the next step is a *third* one — not another read of either of these two. |
+
+`RBFBDpcsPipeSweep` is the control: only **DIFFERS** proves these are two
+registers and not one address read twice, which matters more than usual
+because upstream's own table aliases indexes 2, 3 and 4 onto them.
+
+### What this read CANNOT do, and do not let a 1 suggest otherwise
+
+`RDPCSPIPE_PHY_CNTL6` defines **three** fields —
+`DPALT_DP4`, `DPALT_DISABLE`, `DPALT_DISABLE_ACK`
+(`dpcs_4_2_0_offset.h:11945-11957`). **No MPLL, no reference clock, no
+PSTATE.** "Is DP alt granted" and "is the MPLL running" are two questions, and
+treating them as one is precisely what made `0x00063333` look like a single
+verdict for five boots. Nothing in boot 470 says whether a lane is powered.
+
+Which instance is UNIPHY_C is **not** established and must not be claimed:
+three PHYs report as USB-C (`is_usb` mask `0x1c`) against two registers, so
+the mapping cannot be one-to-one. The agreement is an OR over both.
 
 ---
 
-## How to run the chain, once there is something to test
+## STEP 3 — where the chain actually goes next
 
-Cable in, sink checked, then:
+Independently of boot 470's verdict, three things are **absent** from the
+chain and at least one of them is probably the reason the sink sees nothing:
 
-```bash
-./build/out/dmubbl dto 148500 pipe=1
-./build/out/otgprog go 1080p60 pipe=1
-./build/out/dmubbl dig fe
-./build/out/dptrain go tps=2
-./build/out/dpcdread 0x202 4
-./tools/dpaltlook.sh
-```
-
-`srcsel` is now omitted on purpose — the default is the measured 0. The DTO
-refuses a second write on a live pipe, so the pipe must be dark at the start
-of the boot; `otgprog` with no `go` reports that.
-
-### How to measure a raster rate
-
-Both counters in one periodic sample, against wall time, over >= 20 s. **The
-panel's rate is not a constant** — the DRR ladder moves it: 144.05 Hz in boot
-468, 144.69 in 467, 61.40 in 464. Use wall time, never a ratio to the panel.
-
-```bash
-cd /Users/ehsan/Developer/RembrandtGPU
-r() { ioreg -rl -c RBAMDFramebuffer | grep -oE '"RBFBOtgR[01]Frames" = [0-9]+' | grep -oE '[0-9]+$' | tr '\n' ' '; }
-a=$(r); t0=$(python3 -c 'import time;print(repr(time.time()))'); sleep 25; b=$(r); t1=$(python3 -c 'import time;print(repr(time.time()))'); echo "$a | $b | $t0 $t1"
-```
-
-`otgprog` takes all eight timings piecewise with `refresh=`, and its gate
-(refusal **47**) needs `htotal x vtotal x refresh` to equal the live DTO PHASE
-within 0.5 %. **Check the mode is possible before spending the boot**:
-`htotal` must exceed `hactive + hfront + hsync`. The 2FB handoff shipped a
-mode that failed this.
-
----
-
-## After the PHY
-
-1. **A stream on DIG2** — read `dcn30_dio_stream_encoder.c`, **not** a dcn31
-   file (2FC discharged rule 46 here).
-2. **A surface** on pipe 1 — HUBP, address, swizzle.
+1. **A stream on DIG2.** There is no stream encoder programmed at all. This
+   chip's DIO stream encoder is built by
+   `dcn30_dio_stream_encoder_construct` over DCN10's register struct
+   (`dcn31_resource.c:1323`, `:361`) — **read `dcn30_dio_stream_encoder.c`,
+   not a dcn31 file.** 2FC corrected the earlier handoff here:
+   `enc31_map_stream_to_link` is the **HPO DP** (128b/132b) encoder's and our
+   8b/10b link never goes through it.
+2. **A surface on pipe 1** — HUBP, address, swizzle. Nothing is being scanned
+   out; the raster scans blanking.
 3. **A second `IOFramebuffer`.** `getDisplayModeCount()` has returned 1 since
    2sl.
 
-**PHY0 / DIG0 / front end DIGA are the panel's and are refused by name** in
-every half of every one of these experiments. Keep it that way.
+A link with no stream and no surface transmitting nothing the sink recognises
+is consistent with every reading taken so far, and it does not require a dark
+PHY to explain.
 
 ---
 
-## Tool notes
+## Hard constraints that have each cost a boot
 
-- `RBFBAuxEn` and `RBFBHpdSink` are **masks**, not indexes (2FB, rule 33).
-- `make pubms` and `make dmubbl` are their own targets — `make tools` builds
-  neither. Rule 15 applies to tools.
-- `dmubbl dto` takes **kHz** and refuses anything over 1 000 000.
-- `otgprog` prints `PANEL CONTROL OK` as its own line. If it says FAILED the
-  kext is not addressing the OTG block and nothing else in its output means
-  anything (2FA-a, refusal 48).
+- **`dptrain go tps=3` / `tps=4` DEGRADE this sink** and the recovery is a
+  **reboot** (2F8). The tool refuses them; `force` overrides. **Use `tps=2`.**
+  All of 2F7 was the aftermath of this, so its two dead hypotheses were killed
+  by invalid data.
+- **PHY0 / DIG0 / front end DIGA are the panel's** and are refused by name in
+  every half of every one of these experiments.
+- **The chassis must be in iGPU-only / Eco mode** (rule 47). A `vendor-id`
+  `0x10de` on the bus means hybrid; `./build/out/blset` reports the mode first.
+- `make plugin`, `make dmubbl` and `make pubms` are **their own targets** —
+  `make kext tools` builds none of them (2E9 lost a reading to this).
+- The Type-C subsystem on this chassis can die in a way that survives a reboot
+  and is cleared only by a **30-second power-key hold** (2DD).
 
 ---
 
-## Open, off the critical path
+## Also open, off the critical path
 
-- **DPCD `0x204` = `0x80`** (boot 468) = `DP_LINK_STATUS_UPDATED` with
-  `DP_INTERLANE_ALIGN_DONE` clear (`drm_dp.h:822-829`). The sink is noticing
-  something while reporting no CR. Sticky by definition (rule 33) and n=1.
-- **`OTG_DIO_FIFO_ERROR`** reads 3 on dark pipes, 0 on the panel's, and 2FD
-  established it stays 3 on a pipe with the DTO running and the raster
-  scanning. A stream is untested. Published raw, read by nothing.
-- **Why DPCD `0x102` stores only from inside `dptrain`'s own call** (~100 us
-  after the register writes, n=2 boots). The arm meant to separate movement
-  from proximity is **void** — it used `tps=3` on a degrading sink. Re-run on
-  a healthy sink with `tps=2` only.
-- **The caller of `set_dio_phy_mux` is not identified.** Neither
-  `link_hwss_dio.c` nor `link_hwss_hpo_dp.c` calls it. Must be answered before
-  anything writes that register.
-- **The wedge** — work submitted that never retires, channel-52 GFX, 3.5 s.
-- **`powermetrics` has never been run** against the default 576 interior
-  thread_calls/s, the one real argument against the 2D5 default.
-- **Ventura and Sonoma claim nothing** in `rb_osver.h`.
+DPCD `0x204` = `0x80` (`LINK_STATUS_UPDATED` with `INTERLANE_ALIGN_DONE`
+clear, n=1, sticky). `OTG_DIO_FIFO_ERROR` stays 3 on a pipe with the DTO
+running and the raster scanning — untested with a stream. Why DPCD `0x102`
+stores only from inside `dptrain`'s own call (the old arm is void: it used
+`tps=3`). The caller that programs `DIO_LINK*_CNTL` is not identified. The
+**wedge** (channel-52 GFX, 3.5 s, the "random lag"). `powermetrics` has never
+been run against the 576 interior thread_calls/s. Ventura and Sonoma claim
+nothing in `rb_osver.h`.

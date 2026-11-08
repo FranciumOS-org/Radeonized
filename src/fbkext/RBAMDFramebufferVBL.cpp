@@ -16,6 +16,7 @@
 #include "rb_aux.h"
 #include "rb_dpalt.h"
 #include "rb_dio.h"
+#include "rb_dpcspipe.h"
 #include "rb_dpcd.h"
 #include "rb_dpdto.h"
 
@@ -271,6 +272,41 @@ void RBAMDFramebuffer::publishVBLState(void)
          * word in this function. */
         snprintf(key, sizeof(key), "RBFBDioLink%uCntl", i);
         setProperty(key, (uint64_t)dioWord[i], 64);
+    }
+
+    /* 300: RDPCSPIPE_PHY_CNTL6, both instances, raw beside the verdicts.
+     *
+     * RBFBDpcsPipeAgree IS THE PRODUCT and the others are how it was reached.
+     * 0 means QUERY_DP_ALT did not answer for PHY2 in this boot, so there was
+     * nothing to agree with and NO comparison was made - it is not a
+     * disagreement (rule 14). 1 means an instance's DPALT_DISABLE matches the
+     * DMUB's alt_disable, which is the first corroboration in a register that
+     * PHY2's DP-alt state is what the DMUB says. 2 means neither does, which
+     * is the larger finding: two instruments disagreeing, with the ROM match
+     * on the DMUB's side.
+     *
+     * AND THE LINE A READER MUST NOT CROSS: these three bits are DPALT only.
+     * This register defines no MPLL, no reference clock and no PSTATE, so
+     * nothing published here says whether a lane is POWERED. That question is
+     * still open and RDPCSTX2's 0x00063333 is still not an answer to it. */
+    dpcspipeSample();
+    setProperty("RBFBDpcsPipeReady", dpcspipeReady);
+    setProperty("RBFBDpcsPipeAgree", (uint64_t)dpcspipeAgree, 32);
+    setProperty("RBFBDpcsPipeSweep", (uint64_t)dpcspipeSweep, 32);
+    for (unsigned i = 0; i < RB_DPCSPIPE_COUNT; i++) {
+        char key[32];
+        /* 64 bits for the same 2B4 sign-extension reason as every other raw
+         * word in this function. */
+        snprintf(key, sizeof(key), "RBFBDpcsPipe%uCntl6", i);
+        setProperty(key, (uint64_t)dpcspipeWord[i], 64);
+        snprintf(key, sizeof(key), "RBFBDpcsPipe%uVerdict", i);
+        setProperty(key, (uint64_t)dpcspipeVerdict[i], 32);
+        /* The dword each word came from, published beside it: two real
+         * registers 0xd8 apart whose upstream table aliases three more
+         * indexes onto them, so "which address was this" is part of the
+         * reading and not a detail (rule 33). */
+        snprintf(key, sizeof(key), "RBFBDpcsPipe%uDw", i);
+        setProperty(key, (uint64_t)rb_dpcspipe_dw(i), 32);
     }
     /* 2EF: pipe 0's live DP pixel-clock DTO at BASE_IDX 1, with the same four
      * offsets at BASE_IDX 2 as the alias control. dtoSample() returns

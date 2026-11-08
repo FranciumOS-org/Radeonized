@@ -42,6 +42,7 @@ extern "C" {
 #include "rb_pg.h"
 #include "rb_dig.h"
 #include "rb_dio.h"
+#include "rb_dpcspipe.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
@@ -512,6 +513,22 @@ private:
     uint32_t           dioNonzeroMask; /* instances with a programmed field  */
     int                dioSweep;       /* enum rb_dio_sweep: the control     */
     bool               dioReady;       /* the aperture covered the registers */
+    /* 300: RDPCSPIPE_PHY_CNTL6 - the OTHER DP-alt register, the one Linux
+     * reads for UNIPHY_C on YELLOW_CARP_B0 and the one five boots did NOT
+     * read while calling PHY2 dark off RDPCSTX2's word. TWO instances,
+     * because upstream's five-entry table is a compile hack by its own
+     * comment (rb_dpcspipe.h carries the quote). Read-only, no writer, and
+     * it has NO lane-power fields - so no reading here may be reported as
+     * one. dpcspipeAgree is the whole point: whether either instance's
+     * DPALT_DISABLE agrees with QUERY_DP_ALT, the independent ROM-matched
+     * instrument. */
+    uint32_t           dpcspipeWord[2];    /* RB_DPCSPIPE_COUNT, raw words  */
+    int                dpcspipeVerdict[2]; /* enum rb_dpcspipe_verdict      */
+    int                dpcspipeSweep;      /* enum rb_dpcspipe_sweep        */
+    /* 0 not evaluated (QUERY_DP_ALT did not answer for PHY2, so there is
+     * nothing to agree WITH), 1 agrees, 2 disagrees on both instances. */
+    int                dpcspipeAgree;
+    bool               dpcspipeReady;      /* the aperture covered them     */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -1165,6 +1182,7 @@ private:
      * access can hang when DMCUB is not running. */
     void dpaltSample(void);
     void dioSample(void);
+    void dpcspipeSample(void);
     /* 2EF: pipe 0's live DP pixel-clock DTO, read-only - and the check that
      * BASE_IDX 1 is a real address before anything is written there. Same
      * mapping as hpdSample(); gated on dtoArmed. */
