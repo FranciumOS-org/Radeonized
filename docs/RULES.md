@@ -518,6 +518,40 @@ displays under *"Not yet"* and has **no DPCS material**; **Cobalt64** (MIT,
 RDNA 4) reads the whole RDPCSTX block — ~35 registers against our five — but
 writes no reset release; **UnifiedRed** (BSD-3-Clause) is DCE 11 era.
 
+**309 / BOOT 481: 308'S CANDIDATE IS DEAD, AND THE SURVEY CANNOT SEE ITS OWN
+SUBJECT.** `EXT_LD_DONE` and `SRAM_BYPASS` are set on the live panel and
+**clear on ALL FOUR dark instances**, so they separate live from dark and say
+**nothing about PHY2** — the generic "never brought up" signature. `REF_RANGE`
+does not even do that (dark PHY4 reads the panel's 0) and `SRAM_INIT_DONE` is
+set on four of five. **The candidate died because the dark instances were in
+the same sample** — the one part of 308 that worked as designed. The licence
+gate is confirmed on hardware: **verdict 5 NO_LICENCE on every instance**,
+panel included.
+**The real finding: PHY2 and PHY3 are BYTE-IDENTICAL across all five
+registers** (`0x008f00f0`, `0x001019f0`, `0`, `0x03100000`, `0x10100605`)
+while ROM-attested `QUERY_DP_ALT` — re-run this boot, mask `0x1c` matching
+2E1 again — says **PHY2 `alt_disable` 0** against **PHY3 `alt_disable` 1**. So
+the state that makes PHY2 drivable is **in none of the registers we read**,
+five of ~35 in the block. RDPCSPIPE also reproduced boot 471 exactly (rule
+44's second sample, free).
+**309 added four registers named for the question**, read-only, no setter, all
+45 offsets script-verified: **`RDPCSTX_DPALT_CONTROL_REG` `0x2956` —
+`RDPCS_ALLOW_DRIVER_ACCESS` / `RDPCS_DRIVER_ACCESS_BLOCKED`**, "who owns this"
+asked of the hardware, and a blocked interface would account for `PHY_RESET`
+never clearing, the atom ENABLE moving nothing **and `DP_VID_M` refusing a
+store** with no new mechanism; `RDPCSTX_DMCU_DPALT_DIS_BLOCK_REG` `0x293c`
+(`FORCE_TX_CLK_DIS`); `RDPCSTX_DMCU_DPALT_PHY_CNTL6` `0x2955`, a **third**
+source on `DPALT_DISABLE` beside RDPCSPIPE's and 301's retired RDPCSTX read;
+`RDPCSTX_CNTL2` `0x2939` (`PHY_ENC_TYPE_SEL`). **All UNATTRIBUTED because
+their writer is DMCU** — neither party the ANSWERED/DRIVEN split separates.
+**308's lesson is structural now:** every instance publishes **two** diffs,
+against the panel and against **`RB_DPCSPHY_DARK_USBC_INST` = PHY3**; only a
+difference holding against **both** is PHY2's own, and the hosttest encodes
+308's dead candidate as a failing case. Ten break-it guards; the one that
+fired nothing was **invalid** (a cross-register mask, which the per-register
+disjointness check correctly permits) — recorded in the header. Framebuffer
+UUID **16CB216D**.
+
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
 **303 read the block; 304 derived what to write and gave the derivation a
@@ -822,9 +856,12 @@ longer a register on our side: the driver has **no** PHY bringup on DCN31, the
 VBIOS table is the only mechanism, our payload is verified field by field, and
 `ran` is only a mailbox ack. What is needed is **DMCUB's own execution
 evidence** and what else the firmware wants before it acts on phyid 2 — and
-308 names the one live candidate, the **SRAM-load handshake**
-(`SRAM_EXT_LD_DONE` / `SRAM_BYPASS` set on the panel, clear on PHY2), which
-needs a boot on framebuffer UUID **DDFF93EB** to read.
+**309 is the live question: is PHY2's register
+interface BLOCKED?** `RDPCSTX_DPALT_CONTROL_REG`'s
+`ALLOW_DRIVER_ACCESS` / `DRIVER_ACCESS_BLOCKED`, read against the panel AND
+against dark USB-C PHY3, needs a boot on framebuffer UUID **16CB216D**.
+308's SRAM candidate is **dead** — it separated live from dark, not PHY2 from
+anything.
 The things never attempted are a stream on a **trained** DIG2 link, a
 **surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
