@@ -1,0 +1,199 @@
+#!/bin/sh
+# 302: the DIO STREAM encoder - the block this project had never read or
+# written, across all thirteen boots of the external-display line.
+#
+# WHAT THIS IS FOR. The sink has seen nothing while every write we make reads
+# back changed. 301 retired the last explanation ("the analog PHY is off" was
+# read off a register that does not describe UNIPHY_C). A DP link carrying no
+# STREAM transmits nothing a sink recognises, and no stream encoder register
+# had ever been touched here.
+#
+# WHY THE PANEL IS THE POINT. Instance 0 is the panel's LIVE, WORKING DP
+# stream. Every field below therefore has a known-good value in the same
+# sample as DIG2's, which is the strongest in-boot positive control this
+# project has had for a write set. The three instances never brought up are
+# the negative control in that same sample.
+#
+# THE VERDICTS ARE NOT RECOMPUTED HERE. RBFBStrencBase, *Sweep and *Verdict
+# come from rb_strenc.h in the kext, so the hosttest owns the rule - 2C0's
+# defect, where dpaltlook.sh reimplemented a verdict in a shell heredoc and
+# left hosttested logic correct while what a human read was wrong.
+set -u
+
+IOREG=$(ioreg -rl -c RBAMDFramebuffer 2>/dev/null)
+
+read_key() {
+    printf '%s\n' "$IOREG" |
+        tr ',' '\n' | sed -n "s/.*\"$1\" = \([0-9][0-9]*\).*/\1/p" | head -1
+}
+
+base=$(read_key RBFBStrencBase)
+
+if [ -z "${base:-}" ]; then
+    echo "no RBFBStrenc* keys: this framebuffer build does not publish them."
+    echo "(rule 15: check the UUID in the COLLECTION, not the source tree:"
+    echo " kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \\"
+    echo "   --show-kext-uuids | grep -i rembrandt)"
+    exit 2
+fi
+
+if printf '%s\n' "$IOREG" | grep -q '"RBFBStrencReady" = No'; then
+    echo "NOT READY. This read shares -rbgpufbdpalt / -rbgpufbdig / -rbgpufbfe:"
+    echo "  sudo tools/efi.sh bootarg add -rbgpufbdig"
+    echo "...or the BAR5 aperture did not cover dword 0x254f. Check"
+    echo "RBFBHubpRefuse. Nothing below is a reading."
+    exit 3
+fi
+
+htotal=$(read_key RBFBStrencHTotal)
+vtotal=$(read_key RBFBStrencVTotal)
+
+# THE GATE FIRST. Nothing below it is a reading unless this confirms.
+case "${base:-0}" in
+  0) echo "BASE NOT SAMPLED - no sample yet. Published every RBFBPubMs"
+     echo "(default 500 ms); give it a second and re-run."
+     exit 3 ;;
+  1) echo "BASE CONFIRMED - instance 0's DP_MSA_TIMING_PARAM1 decodes as this"
+     echo "boot's own live OTG0 raster (H_TOTAL ${htotal:-?}, V_TOTAL ${vtotal:-?})."
+     echo "The offsets are right, by a check the chip had to satisfy rather"
+     echo "than by reasoning. Everything below is a real reading." ;;
+  2) echo "BASE REFUSED: H_TOTAL DISAGREES. Instance 0 does not decode as the"
+     echo "live raster, and H_TOTAL does not move with DRR - so this is an"
+     echo "ADDRESS fault, not a timing one. The offsets in rb_strenc.h are"
+     echo "wrong for this chip, or instance 0 is not the panel's."
+     echo "NOTHING BELOW IS A READING. Stop and fix the addresses."
+     exit 4 ;;
+  3) echo "BASE: V_TOTAL ODD - H_TOTAL agrees but V_TOTAL is outside the DRR"
+     echo "window. Weaker than an H_TOTAL mismatch and reported separately,"
+     echo "because that is what a DRR transition mid-sample looks like and it"
+     echo "is not an address fault. Re-run; if it persists, read 2FB before"
+     echo "concluding anything (143.83 Hz was once taken as true while the"
+     echo "panel sat at 61.40)." ;;
+  4) echo "BASE: instance 0's word is ZERO. That is what a dead aperture, a"
+     echo "gated block and a wrong segment all read, and it is NOT a"
+     echo "disagreement. NOTHING BELOW IS A READING."
+     exit 4 ;;
+  5) echo "BASE: NO REFERENCE - this boot has no live OTG0 raster to compare"
+     echo "against, so no check was made. Not a failure and not a pass. The"
+     echo "raw words below are still real reads of real addresses, but the"
+     echo "addresses are UNVERIFIED this boot."
+     ;;
+  *) echo "BASE: unrecognised verdict ${base}. Refusing to interpret." ; exit 4 ;;
+esac
+
+echo
+sweep=$(read_key RBFBStrencSweep)
+case "${sweep:-0}" in
+  0) echo "SWEEP NOT SAMPLED." ;;
+  1) echo "SWEEP: DIFFERS - the five instances are not identical, so these are"
+     echo "five register sets at five addresses and the 0x100 instance stride"
+     echo "did something." ;;
+  2) echo "SWEEP: UNIFORM - all five DP_VID_STREAM_CNTL words are identical."
+     echo
+     echo "THIS IS A DEFECT, NOT A NULL. Unlike the DIO mux, uniformity here"
+     echo "cannot be the truth: instance 0 is a RUNNING stream and the others"
+     echo "are not. Five identical words mean the instance arithmetic did"
+     echo "nothing. Treat the per-instance lines below as suspect." ;;
+  3) echo "SWEEP REFUSED: bad arguments inside the kext. A bug, not a reading." ;;
+  *) echo "SWEEP: unrecognised verdict ${sweep}." ;;
+esac
+
+en=$(read_key RBFBStrencEnMask)
+st=$(read_key RBFBStrencStatusMask)
+run=$(read_key RBFBStrencRunMask)
+
+echo
+printf "  ENABLE mask  0x%02x   what a driver WRITES  (DP_VID_STREAM_ENABLE)\n" "${en:-0}"
+printf "  STATUS mask  0x%02x   what the HARDWARE answers (DP_VID_STREAM_STATUS)\n" "${st:-0}"
+printf "  RUNNING mask 0x%02x   both\n" "${run:-0}"
+echo
+echo "  These are MASKS, not indexes or counts: bit 2 is DIG2. RBFBAuxEn and"
+echo "  RBFBHpdSink were masks read as indexes and that cost two misreads"
+echo "  (2FB, rule 33)."
+echo
+echo "  The gap between ENABLE and STATUS is the whole value of this block as"
+echo "  an instrument. Every other reading on this line either answered our"
+echo "  own writes or came from the wrong register."
+
+echo
+echo "DP stream encoder, per instance (dcn_3_1_2_offset.h, BASE_IDX 2)"
+echo
+
+i=0
+while [ "$i" -lt 5 ]; do
+    verdict=$(read_key "RBFBStrenc${i}Verdict")
+    words=""
+    r=0
+    while [ "$r" -lt 14 ]; do
+        w=$(read_key "$(printf 'RBFBStrenc%uR%02u' "$i" "$r")")
+        words="$words ${w:-0}"
+        r=$((r + 1))
+    done
+    python3 -I - "$i" "${verdict:-0}" $words <<'PY'
+import sys
+i = int(sys.argv[1]); v = int(sys.argv[2])
+w = [int(x) & 0xffffffff for x in sys.argv[3:]]
+
+# The ONE mapping from published index to register name. rb_strenc.h's enum is
+# the source; this list follows it and the kext publishes bare indexes so the
+# names live in exactly one place.
+NAMES = ["DP_PIXEL_FORMAT", "DP_MSA_COLORIMETRY", "DP_MSA_MISC",
+         "DP_MSA_TIMING_PARAM1", "DP_MSA_TIMING_PARAM2",
+         "DP_MSA_TIMING_PARAM3", "DP_MSA_TIMING_PARAM4", "DP_SEC_FRAMING4",
+         "DP_VID_STREAM_CNTL", "DP_STEER_FIFO", "DP_VID_TIMING",
+         "DP_VID_N", "DP_VID_M", "DIG_FE_CNTL"]
+BASE = [0x2109, 0x210a, 0x210e, 0x214c, 0x214d, 0x214e, 0x214f, 0x2130,
+        0x210c, 0x210d, 0x2110, 0x2111, 0x2112, 0x208b]
+
+tag = ""
+if i == 0:
+    tag = "   <-- THE PANEL. The positive control: this one must be RUNNING."
+elif i == 2:
+    tag = "   <-- the Type-C port (HPD2 = AUX2 = phyid 2 = DIG2)"
+else:
+    tag = "   <-- never brought up: the negative control"
+
+VERD = {
+    0: "0 = NOT SAMPLED - not a reading",
+    1: "1 = RUNNING (enable and status both set)",
+    2: "2 = ASKED, NOT RUNNING (enable set, status CLEAR) -- the state "
+       "upstream's own REG_WAIT exists for",
+    3: "3 = STATUS WITHOUT ENABLE - should not occur; suspect the word is "
+       "not this register",
+    4: "4 = OFF (both clear)",
+}
+
+print("  DIG%d / DP%d%s" % (i, i, tag))
+print("        verdict  %s" % VERD.get(v, "%d = unrecognised" % v))
+for n, (name, b) in enumerate(zip(NAMES, BASE)):
+    print("        %-22s 0x%08x   (dword 0x%x)" % (name, w[n], b + i * 0x100))
+
+# The two decodes a reader would otherwise do by eye and get wrong.
+p1 = w[3]
+print("        -> MSA H_TOTAL %d, V_TOTAL %d" % ((p1 >> 16) & 0xffff, p1 & 0xffff))
+fe = w[13]
+print("        -> DIG_SOURCE_SELECT %d (which OTG feeds this front end), "
+      "DIG_START %d" % (fe & 0x7, 1 if fe & 0x400 else 0))
+print()
+PY
+    i=$((i + 1))
+done
+
+echo "HOW TO READ THIS"
+echo
+echo "Instance 0 MUST come back RUNNING. It is the panel; it is lit; if it"
+echo "does not, the addresses are wrong whatever the base check said, and that"
+echo "is the first thing to fix."
+echo
+echo "For DIG2 the expected reading BEFORE any write of ours is OFF with its"
+echo "MSA registers blank, because nothing has ever programmed them. That is"
+echo "not a null result - it is the positive identification of what is"
+echo "missing from the chain, and the fields instance 0 has populated are the"
+echo "list of what a write would have to set."
+echo
+echo "If DIG2 instead comes back with MSA timing already programmed, the"
+echo "firmware did more at boot than this project has assumed, and the"
+echo "comparison against instance 0 says exactly which fields differ."
+echo
+echo "NOTHING HERE WRITES. There is no setter in rb_strenc.h and nothing in"
+echo "the tree may add one before a boot has confirmed the base."

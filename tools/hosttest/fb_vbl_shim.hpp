@@ -331,6 +331,15 @@ public:
     int dpcspipeAgree=0;
     bool dpcspipeReady=false;
     void dpcspipeSample(void) {}
+    /* 302: mirrored the moment the kext gained them (the 2B1 lesson). Every
+     * verdict starts at its own NOT_SAMPLED code, which is 0 for all three. */
+    uint32_t strencWord[5][14]={{0}};
+    uint32_t strencRunMask=0, strencEnMask=0, strencStatusMask=0;
+    int strencVerdict[5]={0,0,0,0,0};
+    int strencSweep=0, strencBase=0;
+    uint32_t strencHTotal=0, strencVTotal=0;
+    bool strencReady=false;
+    void strencSample(void) {}
     void dpaltSample(void) {}
     /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives
      * in RBAMDFramebufferHUBP.cpp, which this executable does not compile.

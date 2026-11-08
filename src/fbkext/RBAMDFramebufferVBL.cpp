@@ -17,6 +17,7 @@
 #include "rb_dpalt.h"
 #include "rb_dio.h"
 #include "rb_dpcspipe.h"
+#include "rb_strenc.h"
 #include "rb_dpcd.h"
 #include "rb_dpdto.h"
 
@@ -307,6 +308,50 @@ void RBAMDFramebuffer::publishVBLState(void)
          * reading and not a detail (rule 33). */
         snprintf(key, sizeof(key), "RBFBDpcsPipe%uDw", i);
         setProperty(key, (uint64_t)rb_dpcspipe_dw(i), 32);
+    }
+
+    /* 302: the DIO stream encoder, fourteen registers per instance, raw.
+     *
+     * RBFBStrencBase IS THE GATE AND IS READ FIRST. Instance 0 is the panel's
+     * live DP stream, so its DP_MSA_TIMING_PARAM1 must decode as this boot's
+     * own OTG0 H_TOTAL and V_TOTAL - published beside it as RBFBStrencHTotal
+     * and RBFBStrencVTotal, from the same sample (rule 44). Anything other
+     * than BASE_CONFIRMED means the offsets are wrong and NOTHING else below
+     * is a reading.
+     *
+     * THEN THE THREE MASKS, AND THEY ARE THREE ON PURPOSE. RBFBStrencEnMask is
+     * DP_VID_STREAM_ENABLE - what a driver writes. RBFBStrencStatusMask is
+     * DP_VID_STREAM_STATUS - what the hardware answers, and what upstream's
+     * own REG_WAIT treats as a real status bit. RBFBStrencRunMask is the
+     * conjunction. Publishing only the first would be 2E6's defect (`applied`
+     * without `changed`) in a new register, and the gap between the first two
+     * is the whole value of this block as an instrument.
+     *
+     * RBFBStrencSweep: unlike the DIO mux, UNIFORM here is a POSITIVE DEFECT.
+     * Instance 0 runs a stream and the others do not, so five identical words
+     * mean the 0x100 instance arithmetic did nothing. */
+    strencSample();
+    setProperty("RBFBStrencReady", strencReady);
+    setProperty("RBFBStrencBase", (uint64_t)strencBase, 32);
+    setProperty("RBFBStrencHTotal", (uint64_t)strencHTotal, 32);
+    setProperty("RBFBStrencVTotal", (uint64_t)strencVTotal, 32);
+    setProperty("RBFBStrencSweep", (uint64_t)strencSweep, 32);
+    setProperty("RBFBStrencEnMask", (uint64_t)strencEnMask, 32);
+    setProperty("RBFBStrencStatusMask", (uint64_t)strencStatusMask, 32);
+    setProperty("RBFBStrencRunMask", (uint64_t)strencRunMask, 32);
+    for (unsigned i = 0; i < RB_STRENC_COUNT; i++) {
+        char key[40];
+        snprintf(key, sizeof(key), "RBFBStrenc%uVerdict", i);
+        setProperty(key, (uint64_t)strencVerdict[i], 32);
+        for (unsigned r = 0; r < RB_STRENC_REG_COUNT; r++) {
+            /* 64 bits for the same 2B4 sign-extension reason as every other
+             * raw word in this function. The register INDEX is in the key
+             * rather than a name, and `tools/strenclook.sh` holds the one
+             * mapping from index to register - duplicating fourteen names
+             * here and there is how two sources of truth start. */
+            snprintf(key, sizeof(key), "RBFBStrenc%uR%02u", i, r);
+            setProperty(key, (uint64_t)strencWord[i][r], 64);
+        }
     }
     /* 2EF: pipe 0's live DP pixel-clock DTO at BASE_IDX 1, with the same four
      * offsets at BASE_IDX 2 as the alias control. dtoSample() returns

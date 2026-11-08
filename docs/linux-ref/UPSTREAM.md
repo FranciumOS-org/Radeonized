@@ -655,3 +655,44 @@ hwss file calls it, and cgit cannot be grepped, so "who programs this mux and
 when" is open. It does not block 2FC, because 2FC only READS the register; it
 would have to be answered before anything writes it (rule 46, and the recurring
 error's "find the consumer before writing to a field").
+
+## 302 — vendored
+
+Fetched 2026-11-07 from
+`git.kernel.org/.../torvalds/linux.git/plain/drivers/gpu/drm/amd/display/dc/`.
+`src/common/rb_strenc.h` follows these, so they are copied in rather than
+recorded.
+
+| File | Upstream path | Used for |
+|---|---|---|
+| dcn30_dio_stream_encoder.c | `dio/dcn30/dcn30_dio_stream_encoder.c` | `dcn30_str_enc_funcs` at :832 — the table this chip's `dc` builds (`dcn31_resource.c:1323`) |
+| dcn20_stream_encoder.c | `dio/dcn20/dcn20_stream_encoder.c` | `enc2_stream_encoder_dp_set_stream_attribute` :562, `enc2_stream_encoder_dp_unblank` :490 |
+| dcn10_stream_encoder.c | `dio/dcn10/dcn10_stream_encoder.c` | `enc1_stream_encoder_dp_set_stream_attribute` :245 (the eight MSA writes), `enc1_dig_connect_to_otg` :1491 |
+| link_hwss_dio.c | `link/hwss/link_hwss_dio.c` | `setup_dio_stream_encoder` :49, `setup_dio_stream_attribute` :116 — the call order |
+
+**THE PATHS MOVED.** These are under `dc/dio/dcn30/` and `dc/dio/dcn20/` in
+current master, not `dc/dcn30/`. Four fetches at the old paths returned 404,
+which looks exactly like "the file does not exist" — rule 26, a search is an
+instrument. The include line in `dcn30_dio_stream_encoder.h:32`
+(`#include "dcn20/dcn20_stream_encoder.h"`) gave the real names.
+
+**ONE OPERATION, FOUR FILES**, which is 2FA's two-file split one worse and the
+reason rule 46 is about the METHOD's version grouping and not the offsets:
+
+- the **construct** is DCN30's, over a **DCN10** register struct
+  (`dcn31_resource.c:361`, `struct dcn10_stream_enc_registers`);
+- `.dp_set_stream_attribute` and `.dp_unblank` in DCN30's table are **DCN20's**
+  functions;
+- `.dig_connect_to_otg` is **DCN10's**;
+- `enc2_stream_encoder_dp_set_stream_attribute` delegates its whole body to
+  `enc1_...` and adds exactly **one** write of its own
+  (`DP_SEC_FRAMING4.DP_SST_SDP_SPLITTING`).
+
+**And a correction to 2FC's handoff, from the same read.**
+`setup_dio_stream_encoder` (link_hwss_dio.c:49) calls `connect_dig_be_to_fe`,
+then `enable_stream`, `map_stream_to_link`, `set_input_mode` and `enable_fifo`,
+each guarded by `if (funcs->x)`. In `dcn30_str_enc_funcs` **all four of the
+last ones are absent** — checked by name, `grep -c '\.<name>'` = 0 for each.
+So on this chip that function reduces to `connect_dig_be_to_fe`, which 2EC
+already did. The stream does not come from there; it comes from
+`setup_dio_stream_attribute` and the unblank, and neither has ever run here.
