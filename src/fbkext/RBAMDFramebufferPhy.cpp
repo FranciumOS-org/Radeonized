@@ -59,7 +59,8 @@ void RBAMDFramebuffer::phySample(void)
 void RBAMDFramebuffer::phyPublish(void)
 {
     static const char *rn[RB_DPCSPHY_R_COUNT] = {
-        "Cntl", "ClockCntl", "Intr", "SramCntl", "PhyCntl0"
+        "Cntl", "ClockCntl", "Intr", "SramCntl", "PhyCntl0",
+        "Cntl2", "DisBlock", "DmcuCntl6", "DpAltCtrl"
     };
     char key[48];
     uint32_t i, r;
@@ -111,5 +112,51 @@ void RBAMDFramebuffer::phyPublish(void)
         setProperty(key, (uint64_t)(int64_t)
                     rb_dpcsphy_sram_diff(&phyInst[i],
                                          &phyInst[RB_DPCSPHY_PANEL_INST]), 32);
+
+        /* 309: the ownership read. Each field on its own key - a single
+         * "blocked?" verdict would answer the same whichever of them moved,
+         * and WHICH is the whole question. */
+        snprintf(key, sizeof(key), "RBFBPhy%uAllowDrvAccess", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_allow_driver_access(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uDrvAccessBlocked", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_driver_access_blocked(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uDmcuDisBlock", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_dmcu_dis_block(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uForceTxClkDis", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_force_tx_clk_dis(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uDmcuDpAltDisable", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_dmcu_dpalt_disable(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uEncTypeSel", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_enc_type_sel(&phyInst[i]), 32);
+
+        /* TWO DIFFS, AND THE SECOND IS 308'S LESSON MADE STRUCTURAL.
+         * Against the live panel, a difference may mean nothing more than
+         * "this PHY was never brought up" - that is exactly how 308's SRAM
+         * candidate looked like a finding for a day. Against PHY3, a USB-C
+         * PHY with DP alt DISABLED that read byte-identical to PHY2 across
+         * the whole earlier survey, a difference is PHY2's own. Publishing
+         * only the first would leave the reader unable to tell the two
+         * apart, so both go out and neither is called a verdict. */
+        snprintf(key, sizeof(key), "RBFBPhy%uAccessDiffPanel", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_access_diff(&phyInst[i],
+                                           &phyInst[RB_DPCSPHY_PANEL_INST]),
+                    32);
+        snprintf(key, sizeof(key), "RBFBPhy%uAccessDiffDark", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_access_diff(&phyInst[i],
+                                        &phyInst[RB_DPCSPHY_DARK_USBC_INST]),
+                    32);
+        snprintf(key, sizeof(key), "RBFBPhy%uSramDiffDark", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_sram_diff(&phyInst[i],
+                                        &phyInst[RB_DPCSPHY_DARK_USBC_INST]),
+                    32);
     }
 }

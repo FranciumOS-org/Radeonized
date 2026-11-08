@@ -70,11 +70,59 @@
 /* UNIPHY_C, the Type-C port: HPD2 = AUX2 = phyid 2 = DIG2. */
 #define RB_DPCSPHY_TYPEC_INST       2u
 
+/* THE DARK USB-C CONTROL, and 308's lesson as a constant. PHY3 is a USB-C
+ * PHY by ROM-attested QUERY_DP_ALT (is_usb mask 0x1c = PHYs 2, 3, 4) with DP
+ * alt mode DISABLED, where PHY2 has it GRANTED - and in boot 481 the two
+ * read byte-identical across all five registers then surveyed. So PHY3 is
+ * the control that asks the question the panel cannot: is a difference
+ * PHY2's OWN, or just the signature of a PHY nobody brought up? 308's SRAM
+ * candidate died on exactly that distinction, and died only because the
+ * dark instances were in the same sample. */
+#define RB_DPCSPHY_DARK_USBC_INST   3u
+
 #define RB_DPCSPHY_DW_CNTL          0x2930u  /* RDPCSTX_CNTL              */
 #define RB_DPCSPHY_DW_CLOCK_CNTL    0x2931u  /* RDPCSTX_CLOCK_CNTL        */
 #define RB_DPCSPHY_DW_INTERRUPT     0x2932u  /* RDPCSTX_INTERRUPT_CONTROL */
 #define RB_DPCSPHY_DW_SRAM_CNTL     0x2936u  /* RDPCS_TX_SRAM_CNTL        */
 #define RB_DPCSPHY_DW_PHY_CNTL0     0x2940u  /* RDPCSTX_PHY_CNTL0         */
+
+/* 309: FOUR MORE, ADDED BECAUSE THE FIVE ABOVE CANNOT TELL PHY2 FROM PHY3.
+ * Boot 481 read all five registers byte-identical on those two instances
+ * while ROM-attested QUERY_DP_ALT says PHY2 has DP alt GRANTED and PHY3 has
+ * it DISABLED. A survey that cannot separate the port we are driving from
+ * the one beside it is not a survey of the thing we care about, whatever
+ * else it reports. These four are named for that question.
+ *
+ * RDPCSTX_DPALT_CONTROL_REG is the one worth the boot:
+ * RDPCS_ALLOW_DRIVER_ACCESS and RDPCS_DRIVER_ACCESS_BLOCKED. "Who owns this"
+ * asked of the hardware rather than of a struct (rule 42's question, one
+ * level down). If PHY2 reads BLOCKED while the live panel reads ALLOWED, it
+ * accounts for the whole picture at once - PHY_RESET never clearing, the
+ * atom ENABLE moving nothing, and DP_VID_M refusing a store - without a
+ * new mechanism. If all five read alike it is not the answer, and the sweep
+ * says which.
+ *
+ * RDPCSTX_DMCU_DPALT_DIS_BLOCK_REG is DMCU's side of the same interface,
+ * and carries RDPCS_DMCU_DPALT_FORCE_TX_CLK_DIS - a forced TX clock
+ * disable, which is the state TX_CLOCK_ON already reports on PHY2.
+ *
+ * RDPCSTX_DMCU_DPALT_PHY_CNTL6 is DMCU's shadow of the DPALT fields, so it
+ * is a THIRD source on DPALT_DISABLE beside RDPCSPIPE's (what Linux reads)
+ * and RDPCSTX's (301's retired misread). 301 left that an OR over two
+ * registers; this makes it three, and three sources can disagree in a way
+ * that names the odd one out.
+ *
+ * RDPCSTX_CNTL2 carries RDPCS_PHY_ENC_TYPE_SEL, the per-PHY encoder type,
+ * which is 2FC's DIO_LINK*_CNTL question asked at the PHY end.
+ *
+ * ALL FOUR ARE READ-ONLY HERE. There is no setter in this file and the
+ * ownership register in particular must not get one: a driver that writes
+ * ALLOW_DRIVER_ACCESS to grant itself access is not a driver that was
+ * granted it. */
+#define RB_DPCSPHY_DW_CNTL2         0x2939u  /* RDPCSTX_CNTL2             */
+#define RB_DPCSPHY_DW_DIS_BLOCK     0x293cu  /* ..DMCU_DPALT_DIS_BLOCK_REG*/
+#define RB_DPCSPHY_DW_DMCU_CNTL6    0x2955u  /* ..DMCU_DPALT_PHY_CNTL6    */
+#define RB_DPCSPHY_DW_DPALT_CTRL    0x2956u  /* RDPCSTX_DPALT_CONTROL_REG */
 
 enum rb_dpcsphy_reg {
     RB_DPCSPHY_R_CNTL = 0,
@@ -82,6 +130,10 @@ enum rb_dpcsphy_reg {
     RB_DPCSPHY_R_INTERRUPT,
     RB_DPCSPHY_R_SRAM_CNTL,
     RB_DPCSPHY_R_PHY_CNTL0,
+    RB_DPCSPHY_R_CNTL2,
+    RB_DPCSPHY_R_DIS_BLOCK,
+    RB_DPCSPHY_R_DMCU_CNTL6,
+    RB_DPCSPHY_R_DPALT_CTRL,
     RB_DPCSPHY_R_COUNT
 };
 
@@ -118,6 +170,13 @@ enum rb_dpcsphy_reg {
 
 /* RDPCS_TX_SRAM_CNTL - the memory's power state, which the hardware sets. */
 #define RB_DPCSPHY_A_MEM_PWR_PWR_STATE  0x30000000u
+
+/* RDPCSTX_CNTL2. A FIFO's own occupancy is reported BY the FIFO - there is
+ * no other possible writer of "empty" and "full" - so these two are
+ * ANSWERED by construction rather than by a caller we read. Said here
+ * because it is the only new mask claiming a side without a source. */
+#define RB_DPCSPHY_A_CR_FIFO_EMPTY      0x00000001u
+#define RB_DPCSPHY_A_CR_FIFO_FULL       0x00000002u
 
 /* ===================================================================
  * DRIVEN - software writes these. A set bit here says only that software
@@ -176,6 +235,34 @@ enum rb_dpcsphy_reg {
 #define RB_DPCSPHY_U_SRAM_EXT_LD_DONE   0x20000000u
 #define RB_DPCSPHY_U_SRAM_BYPASS        0x80000000u
 
+/* 309's four registers are UNATTRIBUTED almost entirely, and for a reason
+ * sharper than "no caller": their writer is DMCU, which is NEITHER of the
+ * two parties the ANSWERED/DRIVEN split was built to separate. A bit DMCU
+ * sets is not our store and not the hardware reporting its own state - it
+ * is a third writer's. That is the clearest argument yet for the U set
+ * existing at all, and it is why none of these may be read as a verdict:
+ * on an interface whose point is that somebody ELSE owns the PHY, "who
+ * wrote this" is the question, not a detail.
+ *
+ * RDPCSTX_DPALT_CONTROL_REG. */
+#define RB_DPCSPHY_U_ALLOW_DRV_ACCESS   0x00000001u
+#define RB_DPCSPHY_U_DRV_ACCESS_BLOCKED 0x00000010u
+/* RDPCSTX_DMCU_DPALT_DIS_BLOCK_REG. */
+#define RB_DPCSPHY_U_DMCU_DIS_BLOCK     0x00000001u
+#define RB_DPCSPHY_U_DMCU_FORCE_TXCLKDIS 0x00000010u
+/* RDPCSTX_DMCU_DPALT_PHY_CNTL6 - DMCU's shadow of the DPALT fields. Every
+ * field in this register is named _RESERVED upstream, which is itself the
+ * statement that it is not the driver's to write. */
+#define RB_DPCSPHY_U_DMCU_DPALT_DP4     0x00010000u
+#define RB_DPCSPHY_U_DMCU_DPALT_DISABLE 0x00020000u
+#define RB_DPCSPHY_U_DMCU_DPALT_DIS_ACK 0x00040000u
+#define RB_DPCSPHY_U_DMCU_REF_CLK_EN    0x00080000u
+#define RB_DPCSPHY_U_DMCU_REF_CLK_REQ   0x00100000u
+/* RDPCSTX_CNTL2 - the encoder-type select. A mux input, so plausibly
+ * DRIVEN, but nothing in this tree writes it and 2FC could not name the
+ * caller of the DIO-side equivalent either, so it stays here. */
+#define RB_DPCSPHY_U_PHY_ENC_TYPE_SEL   0x0000000cu
+
 /* A whole instance's five words. */
 struct rb_dpcsphy_inst {
     uint32_t w[RB_DPCSPHY_R_COUNT];
@@ -189,6 +276,10 @@ static inline uint32_t rb_dpcsphy_reg_dw(enum rb_dpcsphy_reg r)
     case RB_DPCSPHY_R_INTERRUPT:   return RB_DPCSPHY_DW_INTERRUPT;
     case RB_DPCSPHY_R_SRAM_CNTL:   return RB_DPCSPHY_DW_SRAM_CNTL;
     case RB_DPCSPHY_R_PHY_CNTL0:   return RB_DPCSPHY_DW_PHY_CNTL0;
+    case RB_DPCSPHY_R_CNTL2:       return RB_DPCSPHY_DW_CNTL2;
+    case RB_DPCSPHY_R_DIS_BLOCK:   return RB_DPCSPHY_DW_DIS_BLOCK;
+    case RB_DPCSPHY_R_DMCU_CNTL6:  return RB_DPCSPHY_DW_DMCU_CNTL6;
+    case RB_DPCSPHY_R_DPALT_CTRL:  return RB_DPCSPHY_DW_DPALT_CTRL;
     default: break;
     }
     return 0u;
@@ -284,6 +375,116 @@ static inline int rb_dpcsphy_verdict(const struct rb_dpcsphy_inst *in)
  * it. The hosttest pins the bits with synthetic words instead. Separating
  * them needs a boot where one is set without the other.
  */
+/* Shared refusals for every *_diff() in this file. NEGATIVE, because 0 is
+ * the meaningful answer "they agree": a comparison that could not be made
+ * must not read as one that found nothing (rule 14). */
+#define RB_DPCSPHY_DIFF_E_NULL      (-1)
+#define RB_DPCSPHY_DIFF_E_SAME      (-2)   /* subject IS the control */
+
+/* 309's ownership read. Three separate accessors rather than one verdict,
+ * because the CLOCK_ON lesson applies here with force: a verdict folding
+ * ALLOW, BLOCKED and DMCU's DIS_BLOCK together would report the same answer
+ * whichever of them moved, and the whole point is WHICH. All return -1 on
+ * NULL (rule 14). */
+static inline int rb_dpcsphy_allow_driver_access(
+        const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_DPALT_CTRL] & RB_DPCSPHY_U_ALLOW_DRV_ACCESS)
+           ? 1 : 0;
+}
+
+static inline int rb_dpcsphy_driver_access_blocked(
+        const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_DPALT_CTRL] & RB_DPCSPHY_U_DRV_ACCESS_BLOCKED)
+           ? 1 : 0;
+}
+
+static inline int rb_dpcsphy_dmcu_dis_block(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_DIS_BLOCK] & RB_DPCSPHY_U_DMCU_DIS_BLOCK)
+           ? 1 : 0;
+}
+
+static inline int rb_dpcsphy_force_tx_clk_dis(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_DIS_BLOCK] & RB_DPCSPHY_U_DMCU_FORCE_TXCLKDIS)
+           ? 1 : 0;
+}
+
+/* DMCU's shadow of DPALT_DISABLE - the THIRD source on a question 301 left
+ * as an OR over two registers. Returned on its own so it can disagree. */
+static inline int rb_dpcsphy_dmcu_dpalt_disable(
+        const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_DMCU_CNTL6] & RB_DPCSPHY_U_DMCU_DPALT_DISABLE)
+           ? 1 : 0;
+}
+
+/* A multi-bit field, so a VALUE (0..3), never a flag. */
+static inline int rb_dpcsphy_enc_type_sel(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (int)((in->w[RB_DPCSPHY_R_CNTL2] & RB_DPCSPHY_U_PHY_ENC_TYPE_SEL)
+                 >> 2);
+}
+
+/* Which ownership fields differ from a CONTROL instance. Same shape and the
+ * same reasons as rb_dpcsphy_sram_diff(): the panel's PHY is the only one
+ * known to work, so a value on PHY2 means nothing without the live one's in
+ * the same sample, and a self-comparison refuses rather than reporting
+ * agreement.
+ *
+ * AND THE LESSON 308 PAID FOR, APPLIED IN ADVANCE: a difference here is
+ * only about the Type-C port if it does NOT also hold for the instances
+ * nobody brought up. 308's SRAM candidate died exactly there - it separated
+ * live from dark and said nothing about PHY2. So the consumer must diff
+ * PHY2 against the panel AND against PHY1/3/4, and this function is built
+ * to be called both ways round. */
+#define RB_DPCSPHY_ADIFF_ALLOW       0x1
+#define RB_DPCSPHY_ADIFF_BLOCKED     0x2
+#define RB_DPCSPHY_ADIFF_DIS_BLOCK   0x4
+#define RB_DPCSPHY_ADIFF_FORCE_TXCLK 0x8
+#define RB_DPCSPHY_ADIFF_DMCU_DPALT  0x10
+#define RB_DPCSPHY_ADIFF_ENC_TYPE    0x20
+
+static inline int rb_dpcsphy_access_diff(const struct rb_dpcsphy_inst *subject,
+                                         const struct rb_dpcsphy_inst *control)
+{
+    int m = 0;
+    if (!subject || !control) { return RB_DPCSPHY_DIFF_E_NULL; }
+    if (subject == control)   { return RB_DPCSPHY_DIFF_E_SAME; }
+    if (rb_dpcsphy_allow_driver_access(subject)
+        != rb_dpcsphy_allow_driver_access(control)) {
+        m |= RB_DPCSPHY_ADIFF_ALLOW;
+    }
+    if (rb_dpcsphy_driver_access_blocked(subject)
+        != rb_dpcsphy_driver_access_blocked(control)) {
+        m |= RB_DPCSPHY_ADIFF_BLOCKED;
+    }
+    if (rb_dpcsphy_dmcu_dis_block(subject)
+        != rb_dpcsphy_dmcu_dis_block(control)) {
+        m |= RB_DPCSPHY_ADIFF_DIS_BLOCK;
+    }
+    if (rb_dpcsphy_force_tx_clk_dis(subject)
+        != rb_dpcsphy_force_tx_clk_dis(control)) {
+        m |= RB_DPCSPHY_ADIFF_FORCE_TXCLK;
+    }
+    if (rb_dpcsphy_dmcu_dpalt_disable(subject)
+        != rb_dpcsphy_dmcu_dpalt_disable(control)) {
+        m |= RB_DPCSPHY_ADIFF_DMCU_DPALT;
+    }
+    if (rb_dpcsphy_enc_type_sel(subject) != rb_dpcsphy_enc_type_sel(control)) {
+        m |= RB_DPCSPHY_ADIFF_ENC_TYPE;
+    }
+    return m;
+}
+
 /* The three PHY_CNTL0 fields 308 found differing between the live panel and
  * PHY2, each with its own accessor so a caller cannot read one and narrate
  * another. All return -1 on NULL rather than 0 (rule 14): a refusal and a
@@ -322,9 +523,6 @@ static inline int rb_dpcsphy_ref_range(const struct rb_dpcsphy_inst *in)
 #define RB_DPCSPHY_DIFF_EXT_LD_DONE  0x1
 #define RB_DPCSPHY_DIFF_SRAM_BYPASS  0x2
 #define RB_DPCSPHY_DIFF_REF_RANGE    0x4
-#define RB_DPCSPHY_DIFF_E_NULL      (-1)
-#define RB_DPCSPHY_DIFF_E_SAME      (-2)   /* subject IS the control */
-
 static inline int rb_dpcsphy_sram_diff(const struct rb_dpcsphy_inst *subject,
                                        const struct rb_dpcsphy_inst *control)
 {
