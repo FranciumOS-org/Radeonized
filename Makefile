@@ -99,7 +99,7 @@ all: kext tools
 # rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
 # docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
 # freestanding; nothing links it yet.
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/phyfsm_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
@@ -534,8 +534,8 @@ fbpresent:
 # sends ONE ABM command by name. See tools/dmubbl.m for why it is a tool and
 # not the slider.
 dmubbl: $(OUT)/dmubbl
-$(OUT)/dmubbl: tools/dmubbl.m | $(OUT)
-	@$(CC) -Wall -Wextra -O2 -fobjc-arc -framework Foundation -framework IOKit $< -o $@
+$(OUT)/dmubbl: tools/dmubbl.m src/common/rb_phyfsm.h src/common/rb_dmub.h | $(OUT)
+	@$(CC) -Wall -Wextra -O2 -fobjc-arc -Isrc/common -framework Foundation -framework IOKit $< -o $@
 	@echo "  TOOL  $@"
 
 # 2A2: the 2xo hold as a runtime dial, so the A/B costs no reboot.

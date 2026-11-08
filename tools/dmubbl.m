@@ -20,6 +20,7 @@
  *
  * Needs root, because IORegistryEntrySetCFProperties on a driver does.
  */
+#include "rb_phyfsm.h"
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
 
@@ -1466,8 +1467,115 @@ static int ensureRegion4(io_service_t fb)
     return 0;
 }
 
+/* ---- 310: SET_PHY_FSM, BUILD ONLY ----
+ *
+ * Prints the command a send WOULD put on the ring and exits. It sends
+ * nothing, reaches no setProperties, and does not even look for the
+ * framebuffer, so it cannot touch the chip however it is invoked - which is
+ * the opposite of `dmubbl dig` and `dmubbl dto`, both of which WRITE with no
+ * argument (307 and boot 475 each paid for that).
+ *
+ * Sending sub-type 29 is a WRITE of a new command to the firmware and is the
+ * user's decision, so the send path is not written yet rather than written
+ * and gated. */
+static int fsmShow(int argc, char **argv)
+{
+    uint8_t buf[RB_DMUB_CMD_SIZE];
+    struct rb_phyfsm_req q;
+    uint32_t i, hdr;
+    int rc;
+
+    q.phy_id       = (argc > 3) ? (uint32_t)atol(argv[3]) : RB_PHYFSM_TYPEC_INST;
+    q.state        = (argc > 2) ? (uint32_t)atol(argv[2])
+                                : (uint32_t)RB_PHYFSM_RESET_RELEASED;
+    q.mode         = 0u;        /* ATOM_ENCODER_MODE_DP, and 0 is also what an
+                                 * unwritten byte looks like - named, never
+                                 * defaulted inside the builder */
+    q.lane_num     = 2u;        /* the MSI MP2412C */
+    q.symclk_100hz = rb_phyfsm_symclk_from_10khz(RB_PHYFSM_TYPEC_SYMCLK_10KHZ);
+    q.status_fill  = RB_PHYFSM_STATUS_SENTINEL;
+
+    printf("DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM (type %u, sub-type %u)\n"
+           "BUILD ONLY - this verb sends NOTHING.\n\n",
+           RB_DMUB_CMD_VBIOS, RB_DMUB_CMD_VBIOS_SET_PHY_FSM);
+
+    rc = rb_phyfsm_build(buf, &q);
+    if (rc != RB_PHYFSM_OK) {
+        printf("refused %d", rc);
+        switch (rc) {
+        case RB_PHYFSM_E_BAD_PHY:      printf("  phy must be 0..4\n"); break;
+        case RB_PHYFSM_E_PANEL:
+            printf("  PHY0 is the LIVE PANEL's - refused by name\n"); break;
+        case RB_PHYFSM_E_BAD_STATE:    printf("  state outside the enum\n"); break;
+        case RB_PHYFSM_E_STATE_DENIED:
+            printf("  state %u (%s) is real but off the allowlist\n",
+                   q.state, rb_phyfsm_state_name(q.state));
+            printf("        allowed: 2 RESET_RELEASED, 3 SRAM_LOAD_DONE,\n"
+                   "                 4 INITIALIZED, 5 CALIBRATED,\n"
+                   "                 9 PLL_EN, 10 TX_EN\n");
+            break;
+        default:                       printf("\n"); break;
+        }
+        return 1;
+    }
+
+    printf("  phy_id        %u   (2 = UNIPHYC, our Type-C port;\n"
+           "                      the comment is VERBATIM query_dp_alt's,\n"
+           "                      which is ROM-attested on five boots)\n",
+           q.phy_id);
+    printf("  mode          %u   ATOM_ENCODER_MODE_DP\n", q.mode);
+    printf("  lane_num      %u\n", q.lane_num);
+    printf("  symclk_100Hz  %u   HBR2. The atom command's field is\n"
+           "                      symclk_10khz = %u - a DIFFERENT name in\n"
+           "                      DIFFERENT units, x%u, not x10\n",
+           q.symclk_100hz, RB_PHYFSM_TYPEC_SYMCLK_10KHZ,
+           RB_PHYFSM_SYMCLK_PER_10KHZ);
+    printf("  state         %u   %s\n", q.state,
+           rb_phyfsm_state_name(q.state));
+    printf("                      PHY2 measures as %u %s (307);\n"
+           "                      the live panel as %u %s\n",
+           (unsigned)RB_PHYFSM_RESET,
+           rb_phyfsm_state_name((uint32_t)RB_PHYFSM_RESET),
+           (unsigned)RB_PHYFSM_TX_EN,
+           rb_phyfsm_state_name((uint32_t)RB_PHYFSM_TX_EN));
+    printf("  status        0x%08x  the OUT field, pre-filled with a\n"
+           "                      sentinel so \"never written\" has its own\n"
+           "                      code and is not read as a status of 0\n",
+           q.status_fill);
+
+    hdr = rb_dmub_get32(buf, 0);
+    printf("\nheader 0x%08x  type %u sub %u payload %u ret %u\n",
+           hdr, rb_dmub_hdr_type(hdr), rb_dmub_hdr_sub(hdr),
+           rb_dmub_hdr_payload(hdr), rb_dmub_hdr_ret(hdr));
+    printf("payload %u bytes (query_dp_alt declares 4, the transmitter 60 -\n"
+           "        three commands, three sizes, one union)\n",
+           RB_PHYFSM_PAYLOAD);
+
+    printf("\nthe %u-byte slot:\n", RB_DMUB_CMD_SIZE);
+    for (i = 0u; i < RB_DMUB_CMD_SIZE; i++) {
+        if ((i % 16u) == 0u) { printf("  %02u:", i); }
+        printf(" %02x", buf[i]);
+        if ((i % 16u) == 15u) { printf("\n"); }
+    }
+
+    printf("\nNOT ESTABLISHED, and it must be said wherever this is\n"
+           "reported: that DMCUB 4.0.15.47 implements sub-type 29 at all\n"
+           "(our image is one build, the header is upstream's); that the\n"
+           "firmware acts on it for a DP-alt port; and that RESET ->\n"
+           "RESET_RELEASED is a legal DIRECT transition rather than one\n"
+           "step of a ladder. The status word is what would answer the\n"
+           "first two, and no caller exists anywhere - upstream included.\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    /* Before findFB: a verb that sends nothing needs no hardware, and
+     * putting it first means no path from it can reach a send. */
+    if (argc > 1 && strcmp(argv[1], "fsm") == 0) {
+        return fsmShow(argc, argv);
+    }
+
     io_service_t fb = findFB();
     if (!fb) {
         fprintf(stderr, "no RBAMDFramebuffer - is the framebuffer armed?\n");
@@ -1503,6 +1611,13 @@ int main(int argc, char **argv)
                "                      READ-ONLY on the chip. Needs\n"
                "                      -rbgpufbdpaltq. `zero` is the\n"
                "                      Linux-exact fill control.\n"
+               "  dmubbl fsm [state] [phy]  SET_PHY_FSM (29) - BUILD\n"
+               "                      ONLY, sends NOTHING, needs no arm.\n"
+               "                      Prints the slot a send would push.\n"
+               "                      state defaults to 2 RESET_RELEASED,\n"
+               "                      phy to 2 (UNIPHYC). PHY0 refused by\n"
+               "                      name. Sending 29 is a new firmware\n"
+               "                      command and the USER'S DECISION.\n"
                "  dmubbl win <0..9>   point the push at a window: 0..6 are\n"
                "                      CW0..CW6, 7/8/9 are REGION4/5/6. Then\n"
                "                      `dmubbl caps` tests THAT address.\n");

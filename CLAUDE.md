@@ -601,11 +601,30 @@ copy_settings, which is consistent with DCN31 NULLing every `dpcs_*` bringup:
 **the FSM is the firmware's and this is the one command into it.**
 **Not established:** that the firmware acts on it for a DP-alt port, that
 RESET -> RESET_RELEASED is legal without the ladder, or that DMCUB 4.0.15.47
-implements 29 at all. **`symclk_100Hz` shares a NAME with the atom payload's
-field and is a different ABI — read the source, not this card** (a factor of
-ten is a wrong PLL rate). **Sending it is a WRITE of a new firmware command and
-therefore the user's decision**; adding the struct and the status decode to
-`dmubbl` without sending costs nothing.
+implements 29 at all. **Sending it is a WRITE of a new firmware command and
+therefore the user's decision.**
+**310b BUILT IT AND IT SENDS NOTHING** — `src/common/rb_phyfsm.h` +
+`dmubbl fsm`, build-only **by construction**: the verb returns before
+`findFB()`, so no path from it reaches a `setProperties` (deliberately the
+opposite of `dmubbl dig`/`dto`, which write with no argument). Payload **24**
+(query_dp_alt declares 4, the transmitter 60 — three commands, three sizes,
+one union), header `0x18001d80`. **The units are x100 and the field names
+differ — `symclk_10khz` 54000 vs `symclk_100Hz` 5400000 — and 310's own entry
+said "same name, factor of ten", wrong twice**; the conversion is now in
+`rb_phyfsm_symclk_from_10khz()` where a test pins it. `mode` 0 = DP is also
+what an unwritten byte looks like, so the builder has **no default** for it.
+`status` is prefilled `0xFFFFFFFF` so NO_REPLY has its own code. Target states
+are an **allowlist** (2,3,4,5,9,10): RESET and POWER_DOWN would undo the aim
+and **TX_EN_TEST_MODE is refused because 2F8 showed a pattern degrades this
+sink until a reboot**; PHY0 refused by name, dark PHY3 allowed so 309's control
+stays reachable. Refusals **70..79**. 22 break-it guards, **20 caught by a
+failing test and two RESULTS**: the name-table bound is held by **`-Werror`,
+not the test** (the trap for the **seventh** time), and writing `state` as one
+byte is **byte-identical on the wire** for every legal value, so that break
+carries no information in the builder (real only in the decoder). **The
+sweep's own instrument failed first** — a `perl` substitution choked on a `/`
+and made no edit, reporting FIRED NOTHING for a break that never happened.
+`dmubbl` UUID **ACDAA6D5**.
 **And the CR window is NOT A READ.** `RDPCS_TX_CR_ADDR` (0x2934 + n*0xd8) /
 `CR_DATA` (+1) are plain 16-bit value fields — no busy, no trigger, no status —
 with a second name for the same address (`DPCSSYS_CR<n>_*`) and **no vendored
