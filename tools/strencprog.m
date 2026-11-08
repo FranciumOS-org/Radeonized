@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/sysctl.h>
 
 static long rdnum2(io_service_t fb, const char *name, int *found)
 {
@@ -119,7 +120,50 @@ int main(int argc, const char **argv)
         const long mm = rdnum2(fb, "RBFBStrencMsaMismatch", &haveMm);
         const long p1rc = rdnum(fb, "RBFBStrencP1DeriveRc");
 
-        printf("arm -rbgpufbstrm: %s\n", armed ? "yes" : "NO");
+        /* THE ARM IS CROSS-CHECKED AGAINST THE KERNEL'S OWN BOOT-ARGS.
+         * Boot 475 had `-rbgpufbstrm` in kern.bootargs and RBFBStrmArmed
+         * still read 0, because hubpSetup() re-initialised the flag AFTER
+         * start() had parsed it. "Armed" and "the kext thinks it is armed"
+         * are two different facts, and a tool that reads only the second
+         * cannot tell a missing token from a clobbered one (rule 34, and
+         * rule 14's shape: two causes, one symptom). */
+        int tokenInArgs = 0;
+        {
+            char buf[4096];
+            size_t len = sizeof(buf);
+            if (sysctlbyname("kern.bootargs", buf, &len, NULL, 0) == 0) {
+                const char *needle = "-rbgpufbstrm";
+                const size_t nl = strlen(needle);
+                for (const char *p = buf; (p = strstr(p, needle)) != NULL; p++) {
+                    const char before = (p == buf) ? ' ' : p[-1];
+                    const char after  = p[nl];
+                    /* whole token only - the kernel's parse is exact and our
+                     * string search is not (rule 30) */
+                    if ((before == ' ' || before == '\t') &&
+                        (after == 0 || after == ' ' || after == '\t')) {
+                        tokenInArgs = 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        printf("arm -rbgpufbstrm: %s  (kernel boot-args: %s)\n",
+               armed ? "yes" : "NO", tokenInArgs ? "present" : "absent");
+        if (tokenInArgs && !armed) {
+            printf("\n  *** THE TOKEN IS IN THE KERNEL'S BOOT-ARGS BUT THE "
+                   "KEXT READS NOT ARMED. ***\n"
+                   "  That is not a missing boot-arg - it is the flag being "
+                   "cleared after it was parsed,\n"
+                   "  which is what happened in boot 475 (hubpSetup() ran "
+                   "after start()). Do not re-add\n"
+                   "  the boot-arg; find what writes the flag last.\n\n");
+        }
+        if (!tokenInArgs && armed) {
+            printf("\n  *** THE KEXT READS ARMED WITH NO TOKEN IN BOOT-ARGS. "
+                   "***\n  Stale publish, or a different arm path. Do not "
+                   "write on this.\n\n");
+        }
         printf("licence RBFBStrencMsaMismatch: ");
         if (!haveMm) {
             printf("ABSENT\n");
