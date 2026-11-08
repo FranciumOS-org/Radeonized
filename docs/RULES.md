@@ -392,7 +392,17 @@ documented in files already in the tree).
 **Full record: `docs/EXTERNAL-DISPLAY.md`.** The card keeps only the shape.
 
 Port = **HPD2 = AUX2 = UNIPHY_C/phyid 2 = DIG2**, four independent instruments.
-Sink **MSI MP2412C**, DP 1.2, HBR2, 2 lanes, native 100 Hz. **Done:** DP alt
+Sink **MSI MP2412C**, DP 1.2, HBR2, 2 lanes, native 100 Hz — **reached through
+an ACTIVE USB-C-to-HDMI ADAPTER (310e)**, which is what answers our AUX: DPCD
+`0x005` `0x1d` has `DWN_STRM_PORT_PRESENT` **1** with type **DVI/HDMI** and
+`FORMAT_CONVERSION`, `0x080` says port type **3 = HDMI** at **340 MHz TMDS**,
+and `0x500` carries a **branch device** OUI `00-10-fa` / `"cHDMIb"` while the
+sink block `0x400` is all zero. So **"try a USB-C-to-HDMI dongle" is the
+configuration every boot of this line already ran in**, 2FB included. It does
+not touch the blocker (a held PHY reset is upstream of any conversion behind
+it). **The one cheap untested axis is the SINK** — n=1 across ~30 boots; a
+plain USB-C-to-DP cable into the monitor's own DP input is one boot and no
+code, with **no mechanism proposed** and not a candidate. **Done:** DP alt
 mode granted; EDID over I2C-over-AUX; the **pixel clock running** on pipe 1's
 DP DTO (boot 455, `DP_DTO*_PHASE`/`MODULO`/`PIXEL_RATE_CNTL` at **BASE_IDX 1 =
 0xc0**, whose offsets collide with the DOMAIN power-gating block at BASE_IDX 2);
