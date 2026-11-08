@@ -91,11 +91,10 @@ enum rb_dpcsphy_reg {
 
 /* RDPCSTX_PHY_CNTL0. REF_CLKDET_RESULT is the reference-clock detector's
  * own output: the most direct statement available of whether the PHY has a
- * clock at all. SRAM_INIT_DONE and EXT_LD_DONE say whether its firmware
- * image is in place. RTUNE_ACK is the PHY acknowledging a tune request. */
+ * clock at all. SRAM_INIT_DONE says the PHY's own SRAM init finished.
+ * RTUNE_ACK is the PHY acknowledging a tune request. */
 #define RB_DPCSPHY_A_REF_CLKDET_RESULT  0x02000000u
 #define RB_DPCSPHY_A_SRAM_INIT_DONE     0x10000000u
-#define RB_DPCSPHY_A_SRAM_EXT_LD_DONE   0x20000000u
 #define RB_DPCSPHY_A_RTUNE_ACK          0x00040000u
 
 /* RDPCSTX_CLOCK_CNTL. The three CLOCK_ON bits are the hardware saying the
@@ -140,6 +139,42 @@ enum rb_dpcsphy_reg {
 #define RB_DPCSPHY_D_PHY_RESET          0x00000001u
 #define RB_DPCSPHY_D_TEST_POWERDOWN     0x00000008u
 #define RB_DPCSPHY_D_PHY_REF_RANGE      0x00003e00u
+
+/* ===================================================================
+ * UNATTRIBUTED - RDPCSTX_PHY_CNTL0's SRAM-load handshake. These are in a
+ * SET OF THEIR OWN BECAUSE NOTHING IN THIS TREE ESTABLISHES WHO WRITES
+ * THEM, and 308 found SRAM_EXT_LD_DONE sitting in the ANSWERED set on
+ * nothing but its name. No vendored Linux .c mentions either field: the
+ * only source we have for them is `dpcs_4_2_0_sh_mask.h`, which gives the
+ * bit and not the owner. Upstream's DCN20-era DPCS init writes EXT_LD_DONE
+ * from software, which would make it DRIVEN, but that code is not in this
+ * tree and this chip's DCN31 NULLs every dpcs_* hook, so we have no caller
+ * to read (rule 46 - check the version grouping of the METHOD). Calling
+ * them ANSWERED would make a 0 read as "the hardware says not loaded";
+ * calling them DRIVEN would make it read as "we never wrote it". Both are
+ * claims, so the file makes neither and publishes them under their own
+ * name until a source says otherwise.
+ *
+ * WHY THEY MATTER: 308's field-by-field decode of the live panel against
+ * PHY2 - the first time these words were compared per FIELD and not as
+ * hex - found that EXT_LD_DONE and BYPASS are the ONLY PHY_CNTL0 bits that
+ * differ besides PHY_RESET itself and REF_RANGE. The panel has both SET and
+ * its PHY out of reset; PHY2 has both CLEAR and its PHY held. That is a
+ * candidate mechanism and NOT a mechanism: a correlation on n=1 per side,
+ * with no caller identified and no second lit instance to check it against
+ * (rule 18). It is recorded as the thing to measure, not as the answer.
+ *
+ * AND THE TWO BITS ARE NOT INDEPENDENT EVIDENCE. In boot 479's words they
+ * are SET TOGETHER on the panel (0xb0100004) and CLEAR TOGETHER on PHY2
+ * (0x10100605), so the comparison is ONE observation about the SRAM
+ * handshake and not two. The break-it sweep is what established that:
+ * swapping the sram_bypass accessor to read EXT_LD_DONE fired nothing
+ * against the real data. The hosttest pins each accessor to its own bit
+ * with synthetic words; separating them on hardware needs a sample where
+ * one is set without the other.
+ * =================================================================== */
+#define RB_DPCSPHY_U_SRAM_EXT_LD_DONE   0x20000000u
+#define RB_DPCSPHY_U_SRAM_BYPASS        0x80000000u
 
 /* A whole instance's five words. */
 struct rb_dpcsphy_inst {
@@ -249,6 +284,66 @@ static inline int rb_dpcsphy_verdict(const struct rb_dpcsphy_inst *in)
  * it. The hosttest pins the bits with synthetic words instead. Separating
  * them needs a boot where one is set without the other.
  */
+/* The three PHY_CNTL0 fields 308 found differing between the live panel and
+ * PHY2, each with its own accessor so a caller cannot read one and narrate
+ * another. All return -1 on NULL rather than 0 (rule 14): a refusal and a
+ * cleared bit must not look alike. */
+static inline int rb_dpcsphy_sram_ext_ld_done(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_PHY_CNTL0] & RB_DPCSPHY_U_SRAM_EXT_LD_DONE)
+           ? 1 : 0;
+}
+
+static inline int rb_dpcsphy_sram_bypass(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_PHY_CNTL0] & RB_DPCSPHY_U_SRAM_BYPASS) ? 1 : 0;
+}
+
+/* REF_RANGE is a multi-bit field, so it is returned as its VALUE, not a
+ * flag. The panel reads 0 and PHY2 reads 3; which is correct for a USB-C
+ * PHY's reference clock is not established here. */
+static inline int rb_dpcsphy_ref_range(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (int)((in->w[RB_DPCSPHY_R_PHY_CNTL0] & RB_DPCSPHY_D_PHY_REF_RANGE)
+                 >> 9);
+}
+
+/* Which of the SRAM-handshake / range fields differ between a subject
+ * instance and a CONTROL instance, as a bit mask. The control is the whole
+ * point: on this chip the panel's PHY is the only one known to be working,
+ * so "PHY2 has EXT_LD_DONE clear" means nothing without "and the live one
+ * has it set" in the same sample (rule 39).
+ *
+ * Returns a negative refusal, never 0, when it cannot compare - because 0
+ * is the meaningful answer "they agree". */
+#define RB_DPCSPHY_DIFF_EXT_LD_DONE  0x1
+#define RB_DPCSPHY_DIFF_SRAM_BYPASS  0x2
+#define RB_DPCSPHY_DIFF_REF_RANGE    0x4
+#define RB_DPCSPHY_DIFF_E_NULL      (-1)
+#define RB_DPCSPHY_DIFF_E_SAME      (-2)   /* subject IS the control */
+
+static inline int rb_dpcsphy_sram_diff(const struct rb_dpcsphy_inst *subject,
+                                       const struct rb_dpcsphy_inst *control)
+{
+    int m = 0;
+    if (!subject || !control) { return RB_DPCSPHY_DIFF_E_NULL; }
+    if (subject == control)   { return RB_DPCSPHY_DIFF_E_SAME; }
+    if (rb_dpcsphy_sram_ext_ld_done(subject)
+        != rb_dpcsphy_sram_ext_ld_done(control)) {
+        m |= RB_DPCSPHY_DIFF_EXT_LD_DONE;
+    }
+    if (rb_dpcsphy_sram_bypass(subject) != rb_dpcsphy_sram_bypass(control)) {
+        m |= RB_DPCSPHY_DIFF_SRAM_BYPASS;
+    }
+    if (rb_dpcsphy_ref_range(subject) != rb_dpcsphy_ref_range(control)) {
+        m |= RB_DPCSPHY_DIFF_REF_RANGE;
+    }
+    return m;
+}
+
 static inline int rb_dpcsphy_in_reset(const struct rb_dpcsphy_inst *in)
 {
     if (!in) { return -1; }

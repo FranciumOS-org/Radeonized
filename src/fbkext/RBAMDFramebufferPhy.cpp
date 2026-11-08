@@ -84,5 +84,32 @@ void RBAMDFramebuffer::phyPublish(void)
          * "no clock" is the recurring error in one bit. */
         snprintf(key, sizeof(key), "RBFBPhy%uClkDetValid", i);
         setProperty(key, (uint64_t)phyClkDetValid[i], 32);
+
+        /* 308: the SRAM-load handshake, decoded per FIELD rather than left
+         * in a hex word. These three are the only PHY_CNTL0 fields besides
+         * PHY_RESET itself that differ between the live panel and PHY2, and
+         * the hex words hid that for a whole milestone. Published as values,
+         * not flags, for REF_RANGE - 3 and 1 must not read alike. */
+        snprintf(key, sizeof(key), "RBFBPhy%uExtLdDone", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_sram_ext_ld_done(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uSramBypass", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_sram_bypass(&phyInst[i]), 32);
+        snprintf(key, sizeof(key), "RBFBPhy%uRefRange", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_ref_range(&phyInst[i]), 32);
+
+        /* AND THE DIFF AGAINST THE ONE INSTANCE KNOWN TO WORK. A field's
+         * value on PHY2 means nothing without the live panel's in the same
+         * sample (rule 39), so the comparison is published rather than left
+         * for a reader to do by eye off two hex words - which is exactly how
+         * these two bits went unnoticed. PHY0 against itself refuses
+         * (E_SAME = -2) rather than reporting agreement, so the panel's own
+         * row cannot be mistaken for a control for itself. */
+        snprintf(key, sizeof(key), "RBFBPhy%uSramDiff", i);
+        setProperty(key, (uint64_t)(int64_t)
+                    rb_dpcsphy_sram_diff(&phyInst[i],
+                                         &phyInst[RB_DPCSPHY_PANEL_INST]), 32);
     }
 }
