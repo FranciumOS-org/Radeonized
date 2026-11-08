@@ -1,114 +1,84 @@
-# HANDOFF — one install, one boot, two answers
+# HANDOFF — where this is, and what to do now
 
-## Install
+**Read `CLAUDE.md` first, then this. `docs/EXTERNAL-DISPLAY.md` has the full
+record of the one open goal.**
 
-Framebuffer UUID **99122618-EC61-3E7B-B428-6CD5D0044DDC**.
+## State
 
-```bash
-sudo tools/fbinstall.sh
-```
+Boot 479 is the last hardware boot. Framebuffer UUID **99122618**, installed
+and verified inside the live auxiliary collection. Nothing is pending an
+install: **307 spent no new boots and needs none to be understood.**
 
-Reboot **with the Type-C cable plugged in before boot** (2FB — plugged in
-afterwards, every AUX read refuses on a nonexistent engine).
+**THE BLOCKER IS NAMED. PHY2 — the Type-C port's RDPCSTX PHY — IS HELD IN
+RESET**, with the live panel's PHY0 as the positive control in the same
+sample:
 
-```bash
-kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
-```
+| | PHY0 (panel, live) | PHY2 (the subject) |
+|---|---|---|
+| `PHY_RESET` | 0 — released | **1 — HELD** |
+| `TX_CLOCK_ON` | set | clear |
+| `SRAMCLK_CLOCK_ON` | set | clear |
+| `TX_FIFO_EN` | set | clear |
+| `SRAM_INIT_DONE` | set | **set** — firmware loaded |
 
-```bash
-sysctl -n kern.bootargs | tr ' \t' '\n\n' | grep -E '^-rbgpu'
-```
+PHY2 is byte-identical to PHY3, which nobody has touched. Everything
+downstream follows: no symbol clock, so DPCD `0x202` reads `0x00`, `0x205`
+bit 0 is clear, and `DP_VID_M` will not take a store.
 
-## Question 1 — is the PHY alive? Read-only, costs nothing
+**And the atom transmitter ENABLE does not release it.** In-boot A/B, four
+other instances as the control: sent twice at phyid 2 / action 1 / digmode 0 /
+lanenum 2 / symclk 54000, `refusal 0`, `ran 2` — PHY2's three words unchanged
+to the bit.
 
-```bash
-bash tools/phylook.sh
-```
+**But `ran` is a mailbox ack, not execution.** `transmitter_control_v1_7`
+calls `transmitter_control_dmcub` (a `void`) and then
+`return BP_RESULT_OK` unconditionally. **Linux cannot tell whether the atom
+table ran either.** So PHY2 unmoved does *not* mean the table is the wrong
+mechanism.
 
-**PHY0 is the positive control**: UNIPHY_A carries the panel's live DP link, so
-every hardware-answered bit has a known-good value in the same sample.
-PHY1/3/4 were never brought up. **PHY2 is the subject.**
+## What is already excluded, so do not re-open it
 
-Read the SWEEP line first: UNIFORM means the 0xd8 stride did nothing and
-nothing below is a finding. Then PHY2's verdict:
+- **A driver-side PHY bringup.** DCN31 NULLs `dpcs_initialize_phy`,
+  `dpcs_configure_phypll`, `dpcs_configure_dpcs`, `dpcs_enable_dpcs` and
+  `set_phy_source`. There is nothing of ours missing.
+- **The `avoid_vbios_exec_table` path.** Debug-only, default false, and it
+  needs exactly those NULLs. **The VBIOS table is the only mechanism.**
+- **Our payload.** Every field verified against the source: symclk 54000 =
+  20 x 27000 / 10; `digfe_sel` 0 unconditionally by the helper; `connobj_id`
+  0 on a `cntl = {0}`; and **`pll_id` is not in the v1.7 payload at all**.
+- **The DIO PHY mux** (`set_dio_phy_mux` is HPO-only), **a DP-alt acquire**
+  (none exists in the driver), the encoder side entirely (306), and
+  `DIS_DEFER`, the held FIFO, the DPIA branch, the RDPCSPIPE instance.
 
-- **ALIVE** — reference clock detected and firmware loaded. The PHY is up and
-  the blocker is narrower than the PHY itself.
-- **CLOCKLESS** — firmware loaded, the detector says no clock. That would be
-  the first positive identification of the blocker this line has had.
-- **NO_SRAM** — a clock but no firmware image.
-- **DEAD** — neither.
+## Do this next
 
-Check `clkdet result is BELIEVABLE` on the same instance. With
-`REF_CLKDET_EN` clear a 0 result means nothing, and the tool says so in words
-rather than letting the verdict stand on it.
+1. **Get DMCUB's own execution evidence for the DIG1 transmitter control.**
+   An ack says the slot was consumed; it has said nothing since boot 273. The
+   question is whether the table runs and what it returns. `dmubbl`'s reply
+   slot and verdict already exist for the caps command — the same treatment
+   for `dig` is the reading, and it is **unbooted work**.
+2. **Then: what else does the firmware want before it acts on phyid 2.** The
+   port is in DP alt mode (`QUERY_DP_ALT`, ROM-attested on four boots, PHY2
+   the only USB-C PHY with `alt_disable` 0), the cable was in at boot, AUX2
+   works, EDID read. Something between that and the PHY release is missing,
+   and it is the firmware's side of the line.
 
-## Question 2 — does `DP_VID_M` really refuse a store?
+**Do not write `PHY_RESET`.** `rb_dpcsphy.h` is read-only by design: on this
+chip the bit's owner is the firmware, and on the panel the firmware is what
+released it.
 
-Boot 478 inferred it from a zero bit in a changed mask, which cannot tell a
-dropped store from a store of the value already present. The kext now
-publishes `was -> want -> got` per write and the tool prints it. Same boot,
-this order; the raster and clock are not persistent:
+## Traps this milestone paid for
 
-```bash
-env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dto 148500
-```
-
-```bash
-env -u DYLD_INSERT_LIBRARIES ./build/out/otgprog go 1080p60
-```
-
-```bash
-env -u DYLD_INSERT_LIBRARIES ./build/out/strencprog go
-```
-
-```bash
-env -u DYLD_INSERT_LIBRARIES ./build/out/dptrain go tps=2
-```
-
-```bash
-env -u DYLD_INSERT_LIBRARIES ./build/out/strencprog unblank
-```
-
-Look for `*** DID NOT TAKE ***` in the per-write table. If `DP_VID_M` shows
-`0x00000000 -> 0x00002333 -> 0x00000000`, the store is dropped and that is a
-register-level fact about DIG2. If it shows `-> 0x00002333`, boot 478's
-changed-mask reading was wrong and this says so.
-
-`strencprog go` leaves the stream disabled on purpose so `dptrain` can run —
-boot 477's refusal 66. **Never `tps=3` or `tps=4`: they degrade the sink until
-a reboot** (2F8), and the tool refuses them.
-
-## What is already excluded, so nothing re-tests it
-
-DP-alt disable (301 and 306's elimination), **lane count and scrambler**
-(DIG2 already correct, read in boot 478), the back-end enable (477), the held
-steer FIFO (477, and in-boot A/B in 478), `DP_VID_STREAM_DIS_DEFER` (source
-grounds), the raster and pixel clock (2FB-2FE), `PIPE_DTO_SRC_SEL` (468),
-hpdsel and power gating (469), the stream/training order (305b, boot 478), and
-the **DPIA branch** (USB4-only, source grounds).
-
-The sink has stated the blocker directly: DPCD `0x205` = `0x00`,
-`RECEIVE_PORT_0_STATUS` clear — no sync on the main link — with `0x204` bit 7
-`LINK_STATUS_UPDATED` set, so it is awake and reacting. DPCD `0x202` has read
-`0x00` in six boots (459, 461, 464, 468, 469, 478).
-
-## If the PHY reads ALIVE
-
-The remaining untried surface is **lane power / MPLL**, which has never been
-located. 301 established that `RDPCSPIPE_PHY_CNTL6` carries only DPALT_DP4 /
-DISABLE / DISABLE_ACK — no MPLL, no reference clock, no PSTATE — and that
-conflating those questions is what made `0x00063333` look like a verdict for
-five boots. `dpcs_4_2_0_offset.h` has `RDPCSTX_PHY_CNTL1..17`,
-`RDPCS_TX_CR_ADDR`/`DATA` and `RDPCS_TX_PLL_UPDATE_*` unread; the PHY is
-programmed by firmware through the atom table, so expect to *read* these, not
-write them.
-
-## Rules this step stands on
-
-- **Rule 15** — the UUID that matters is inside the collection.
-- **Rule 26** — a search is an instrument: 306 lost a conclusion to a grep
-  pattern that listed six tokens when seventeen were present. Read the
-  unfiltered value.
-- **Rule 20** — `changed` beside `applied`, and now `got` beside `want`.
-- **Rule 47** — Eco / iGPU-only mode, cable in at boot.
+- **`dmubbl dig` WRITES WITH NO ARGUMENT** — phyid defaults to PHY2. A bare
+  run typed to read the usage performs the atom ENABLE. This is boot 475's
+  `dmubbl dto` trap with a different verb; both are now named on the card.
+- **`tps=3` / `tps=4` degrade the sink until a reboot.** Use `tps=2`.
+- **The cable must be plugged in at boot.**
+- `tools/phylook.sh` prints hex with an ANSWERED/DRIVEN decode, and `ABSENT`
+  rather than `0` for a key the loaded kext does not publish.
+- A non-5 verdict on the live panel means **the loaded kext predates the
+  licence gate** — read the raw words, not the verdict.
+- Boot 479's words **cannot separate** `TX_CLOCK_ON` from `TX_CLK_EN`, nor
+  `TX_FIFO_EN` from the per-lane enables: each pair moves together there. The
+  hosttest pins the bits synthetically; hardware separation needs a boot where
+  one is set without the other.

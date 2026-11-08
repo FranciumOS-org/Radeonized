@@ -460,6 +460,38 @@ at boot: engine **AUX2**, 128 bytes, refusal 0, `RBFBAuxEn` mask **5**. Rule 47
 with a new clause: **so is WHEN the port came up.** (`RBFBAuxEn` and
 `RBFBHpdSink` are **masks**, not indexes — rule 33's shape, cost two misreads.)
 
+**307: THE PHY IS HELD IN RESET, AND THE ATOM ENABLE DOES NOT RELEASE IT.**
+`src/common/rb_dpcsphy.h` + `tools/phylook.sh` read the RDPCSTX PHY with the
+live panel as the positive control in the same sample. **PHY0: `PHY_RESET`
+0, `TX_CLOCK_ON` + `SRAMCLK_CLOCK_ON` set, `TX_FIFO_EN` set. PHY2:
+`PHY_RESET` 1, no clock, no FIFO, `SRAM_INIT_DONE` SET** — so the block is
+powered with its firmware loaded and simply never released, and PHY2 is
+**byte-identical to PHY3, which nobody has touched**. Then, **in the same
+boot with a four-instance control**, the atom transmitter ENABLE (phyid 2,
+action 1, digmode 0, lanenum 2, symclk 54000) was sent twice, `refusal 0`,
+`ran 2` — and PHY2's three words did not change one bit. **But `ran` is a
+MAILBOX ACK:** `transmitter_control_v1_7` calls `transmitter_control_dmcub`
+and **`return BP_RESULT_OK` unconditionally**, so *Linux cannot tell whether
+the table ran either* (rule 13 upstream). "The ENABLE has executed since 2E2"
+was only ever "DMCUB consumed the slot".
+**Four candidates died from source with no boots:** DCN31 NULLs **all** of
+`dpcs_initialize_phy` / `dpcs_configure_phypll` / `dpcs_configure_dpcs` /
+`dpcs_enable_dpcs` / `set_phy_source`, so **there is no driver-side PHY
+bringup to be missing**; `dcn20`'s own sequence runs only under
+`debug.avoid_vbios_exec_table` (default false, and needs those NULLs), so
+**the VBIOS table is the only mechanism that exists**; every payload field is
+now verified against the source (54000 = 20 x 27000 / 10; `digfe_sel` 0
+unconditionally by the helper; `connobj_id` 0 on a `cntl = {0}`) and
+**`pll_id` is not in the v1.7 payload at all**, killing "we omit the clock
+source"; and `set_dio_phy_mux` is called **only by the HPO path**, so 2FC's
+mux is not the gap. **No DP-alt acquire exists in the driver** — ownership is
+the firmware's.
+**Boot 478's DIG1/DIG3 conclusion is WITHDRAWN**: `DP_VID_N`'s `0x2000` was
+already there going in on DIG2 too, so "they retain no stores" was a misread
+and there is **no per-instance power discrimination**. What stands is uniform:
+`DP_VID_M`/`DP_VID_N` stores do not stick on any instance tried, which sits
+downstream of a PHY in reset.
+
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
 **303 read the block; 304 derived what to write and gave the derivation a
@@ -666,9 +698,13 @@ marks the path "avoid if possible", hang conditioned on DMCUB not running,
 which is measured false; **2FC's `DIO_LINK*_CNTL` read shares this arm, and
 `-rbgpufbdig` / `-rbgpufbfe`, with no new token**), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /
 `-rbgpufbdig` / `-rbgpufbaltq` / `-rbgpufbfe` (the DMUB and DIG experiments —
-each arms its own dependencies and sends nothing until `build/out/dmubbl` names
-a target; **PHY0 / DIG0 / front end DIGA are the panel's and are refused by
-name**), `-rbgpufbaux` (native AUX DPCD read **and** write; one token, because
+each arms its own dependencies; **PHY0 / DIG0 / front end DIGA are the panel's
+and are refused by name**. **`dmubbl dig` WRITES WITH NO ARGUMENT**, like
+`dmubbl dto`: phyid defaults to **PHY2**, so a bare run typed to read the
+usage performs the atom transmitter ENABLE — 307 did exactly that, `sends 2
+ran 2`. This card claimed a "names a target first" gate for `dig` until 307;
+there is none, and the two verbs that write unprompted are now both named
+here), `-rbgpufbaux` (native AUX DPCD read **and** write; one token, because
 `-rbgpufbauxw` would have it as a prefix — rule 30. Nothing is written until
 `dpcdwrite` names an **address**, which has no writable default),
 `-rbgpufbdto` (the DP DTO read **and** write, boot 455; opt-in because the
@@ -750,14 +786,18 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 `~/Developer/Econized`).
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
-for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
-named** (301 retired "the analog PHY is off"); everything
-downstream is blocked on **clock recovery**, which boot 478 had the sink state
-outright (`0x205` bit 0 clear). 306 excluded the encoder side entirely, so
-**the next reading is the PHY's own status** (`tools/phylook.sh`, unbooted).
+for the state, `docs/HANDOFF-NEXT.md` for the next step. **THE BLOCKER IS
+NAMED: PHY2 IS HELD IN RESET** (307 — `PHY_RESET` 1 against the live panel's
+0, no clock, no FIFO, firmware loaded), and **the atom transmitter ENABLE does
+not release it**, in an in-boot A/B with a four-instance control. Everything
+downstream — no clock recovery, DPCD `0x202` `0x00`, `0x205` bit 0 clear,
+`DP_VID_M` refusing a store — follows from that. The open question is no
+longer a register on our side: the driver has **no** PHY bringup on DCN31, the
+VBIOS table is the only mechanism, our payload is verified field by field, and
+`ran` is only a mailbox ack. What is needed is **DMCUB's own execution
+evidence** and what else the firmware wants before it acts on phyid 2.
 The things never attempted are a stream on a **trained** DIG2 link, a
-**surface** on pipe 1 and a second `IOFramebuffer`; also open, `DP_VID_M`
-refusing a store on DIG2. 2F8 added a cost: `tps=3`
+**surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666

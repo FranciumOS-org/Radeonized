@@ -65126,3 +65126,113 @@ PHY can be the blocker while the PHY is in reset.** The next question is not
 on this chip, and whose job is it** — firmware's, as on the panel, or the
 driver's. `rb_dpcsphy.h` is read-only by design and stays that way until that
 is answered from source.
+
+---
+
+## 307 / boot 479, same boot — THE ATOM ENABLE IS SENT AND PHY2 DOES NOT MOVE
+
+Boot 479 stayed up. The correction above said the atom ENABLE and the
+`PHY_RESET` read had never been in the same boot. **They are now**, and the
+missing half cost no reboot.
+
+### How it got sent, which is a trap worth the entry on its own
+
+`./build/out/dmubbl dig` with **no argument SENDS**. Its target defaults to
+PHY2, so a bare run invoked to read the usage text performed the atom
+transmitter ENABLE — `sends 2 ran 2 refusal 0 target PHY2`. **This card
+claimed `dmubbl dig` had a "nothing sent until it names a target" gate. It
+does not.** This is **boot 475's `dmubbl dto` trap repeated verbatim with a
+different verb**: the same class, the same cause (a default that is a live
+target), the same discovery route (reading the usage). The card is corrected
+for `dig` in the same change that records this.
+
+No harm: the arm was present, the target is the non-panel PHY, and this is the
+gated experiment that was about to be handed over anyway. But it was not a
+decision — it was a default.
+
+### The A/B, in one boot, with a four-instance control
+
+PHY2 before (captured in the Q1 survey above) and after two ENABLEs:
+
+| | before | after |
+|---|---|---|
+| `RDPCSTX_PHY_CNTL0` | `0x10100605` | **`0x10100605`** |
+| `RDPCSTX_CLOCK_CNTL` | `0x001019f0` | **`0x001019f0`** |
+| `RDPCSTX_CNTL` | `0x008f00f0` | **`0x008f00f0`** |
+
+**Byte-identical.** `PHY_RESET` still **1**, `TX_CLOCK_ON` still clear,
+`TX_FIFO_EN` still clear. The control: PHY0 (the live panel), PHY1, PHY3 and
+PHY4 are all unmoved too, so this is not a sample where everything changed or
+nothing could be read. `RBFBDigPhy` 2, `RBFBDigRefuse` **0** — the kext's own
+gate did not decline, and `RBFBDigBefore` == `RBFBDigAfter` == `0x00063333`,
+the retired RDPCSTX2_PHY_CNTL6 word, unmoved as it has been since 459.
+
+**So: the atom transmitter ENABLE at phyid 2 / action 1 / digmode 0 /
+lanenum 2 / symclk_10khz 54000 is accepted by DMCUB's mailbox and does not
+release PHY2's reset, start its clock, or enable its FIFO.**
+
+### AND THE CEILING ON THAT SENTENCE, FROM SOURCE
+
+`command_table2.c`'s `transmitter_control_v1_7` ends:
+
+```c
+	if (bp->base.ctx->dc->ctx->dmub_srv &&
+	    bp->base.ctx->dc->debug.dmub_command_table) {
+		transmitter_control_dmcub(bp->base.ctx->dmub_srv, &ps.param);
+		return BP_RESULT_OK;
+	}
+```
+
+**`BP_RESULT_OK` unconditionally.** `transmitter_control_dmcub` is `void`, and
+`dc_wake_and_execute_dmub_cmd(..., DM_DMUB_WAIT_TYPE_WAIT)` waits for the ring
+to drain, not for the table to succeed. **Linux cannot tell whether the atom
+table ran either** — rule 13 in upstream's own code. So "the ENABLE has
+executed since 2E2" was never stronger than "DMCUB consumed the slot", and
+`ran 2` is that same ack, which the `dmubbl` usage text has warned about for
+the mailbox since boot 273. PHY2 unmoved is therefore **not** proof the table
+is the wrong mechanism; it is proof that *this invocation* produces no PHY
+change, with the table's own execution unobserved.
+
+### FOUR MORE CANDIDATES KILLED FROM SOURCE, NO BOOTS
+
+- **The driver never programs the DPCS PHY on this chip.**
+  `dcn31_dio_link_encoder.c:372` — `dpcstx_set_order_invert_18_bit`,
+  `set_phy_source`, **`dpcs_initialize_phy`**, **`dpcs_configure_phypll`**,
+  **`dpcs_configure_dpcs`**, **`dpcs_enable_dpcs`** are **all NULL** in
+  `dcn31_link_enc_funcs`. Only `prog_eq_setting`, `get_txffe`, `set_txffe`
+  survive. There is no driver-side PHY bringup to be missing, which is why
+  `rb_dpcsphy.h` having no setter is correct rather than cautious.
+- **The alternative path is debug-only and unimplemented here.**
+  `dcn20_link_encoder_enable_dp_output` runs its own
+  `dpcssys_phy_seq_cfg` sequence **only** `if (dc->debug.avoid_vbios_exec_table)`;
+  otherwise it tail-calls `dcn10_link_encoder_enable_dp_output`, the atom
+  table. Default false, and on DCN31 the hooks that sequence needs are the
+  NULLs above. **The VBIOS table is the only mechanism that exists.**
+- **Every field of our payload is now verified against the source**, not
+  argued: `symclk_10khz = cntl->pixel_clock/10` with
+  `pixel_clock = link_rate * LINK_RATE_REF_FREQ_IN_KHZ` = 20 x 27000 = 540000,
+  so **54000 is right**; `digfe_sel = dig_encoder_sel_to_atom(engine_id)` which
+  `command_table_helper2_dce112.c` **returns 0 unconditionally** ("we manually
+  program the DIG_FE selection"), so **0 is right**; `connobj_id =
+  cntl->connector_obj_id.id` on a `cntl = {0}` that `dcn10_link_encoder_enable_dp_output`
+  never assigns, so **0 is right**. And **`pll_id` is not in the v1.7 payload
+  at all** — `cntl.pll_id = clock_source` is set by the caller and never
+  reaches the struct, so "we omit the clock source" is **dead as a candidate**.
+- **The DIO PHY mux is confirmed not our gap.** 2FC could not name the caller
+  of `DIO_LINK*_CNTL`; it is `dcn31_link_encoder_set_dio_phy_mux`, and
+  `link_hwss_dio.c` **never calls it** — only the HPO (128b/132b) path does.
+  For `ENCODER_TYPE_DIG` it would write `ENC_TYPE_SEL = 0` anyway.
+- **There is no DP-alt acquire in the driver.** `dcn31_dio_link_encoder.c` has
+  `is_in_alt_mode` and `get_max_link_cap` reading `QUERY_DP_ALT`, and nothing
+  that *takes* the PHY. Ownership is the firmware's, consistent with
+  `rb_dpalt.h` having no setter.
+
+### Where that leaves it
+
+Everything the driver would do, we have done; the one thing that brings a
+USB-C PHY out of reset on this chip lives in firmware, we are invoking it with
+a payload now verified field by field, and the PHY does not move. The next
+question is therefore **not** another register on our side. It is whether the
+table executes at all — which needs DMCUB's own execution evidence, not a
+mailbox ack — and what else the firmware requires before it will act on
+phyid 2.
