@@ -66051,3 +66051,118 @@ installed.** The log line and the tool both print, every single invocation,
 the three things this cannot establish: that DMCUB 4.0.15.47 implements
 sub-type 29 at all, that the firmware acts on it for a DP-alt port, and that
 RESET -> RESET_RELEASED is legal without the ladder.
+
+---
+
+## 310d — boot 485: THE FIRMWARE DOES NOT ANSWER SUB-TYPE 29, AND THE REPLY PATH WAS PROVEN IN THE SAME BOOT
+
+Tag `310d`. Boot **485**, framebuffer collection UUID **147D6474**, tool
+**FAD8BBBD** for the four sends and **A35C08DA** after the printer fix.
+`-rbgpufbfsm` and `-rbgpufbdpalt` both present as whole tokens, `wdt=-1`
+present, `RBFBAuxEn` mask **5** so the cable was in at boot (2FB's licence).
+`RBFBFsmPanelLicence` **7** — the live panel re-sampled as a brought-up PHY in
+every call, so no send was declined.
+
+### The result
+
+Four sends, `refusal 0` each: states **2** RESET_RELEASED, **3**
+SRAM_LOAD_DONE, **10** TX_EN, then 2 again to validate the fixed printer.
+Every one of them:
+
+- **`decode 77 NO_REPLY`** — the status field came back carrying the sentinel
+  we wrote. The re-run with the fixed printer says more than the status field
+  does: **`reply slot 0xc80 verdict 2 UNCHANGED - our bytes, untouched`**, so
+  DMCUB wrote nothing into the **whole 64-byte slot**, not merely into
+  `status`.
+- **subject PHY2 changed mask 0** — nothing moved in the nine registers.
+- **control instances changed mask 0** — all four controls held still, so the
+  sample is clean and a subject change would have been attributable.
+
+`phylook.sh` after all four: PHY2 still `D:PHY_RESET` set, no `TX_CLOCK_ON`,
+no FIFO, `A:SRAM_INIT_DONE` set — **byte-identical to where 307 found it**,
+and still byte-identical to dark PHY3. The panel unchanged at
+`A:TX_CLOCK_ON A:SRAMCLK_CLOCK_ON` with `EXT_LD_DONE 1 SRAM_BYPASS 1`.
+Downstream unchanged too: DPCD over AUX2, engine **AUX2**, refusal 0, 16 bytes
+each — `0x202` **`0x00`**, `0x203` `0x00`, `0x204` **`0x80`**
+(`LINK_STATUS_UPDATED`, exactly as in boot 478), `0x205` **`0x00`**. No clock
+recovery, no sync on the main link, no change from before the sends.
+
+### The in-boot positive control, which is what makes NO_REPLY a result
+
+A silent reply slot and a broken reply path look identical (rule 14), and the
+instrument is a suspect (rule 16). So the same boot, same ring, same tool:
+
+- **Ring consumption.** `RBFBDmubWptr` 2432, `RBFBDmubRptr` **2432**,
+  `RBFBDmubWptrMoves` 1, `RBFBDmubRptrMoves` **1**, `RBFBDmubAcks` 1. The ring
+  drained — **DMCUB consumed the slot.** This is not "the command was never
+  delivered".
+- **`dmubbl dpaltq`, read-only, five sends.** `QUERY_DP_ALT` (sub-type **26**,
+  whose union member sits immediately before 29's) came back with
+  `is_usb` mask **`0x1c`**, `alt_disable` **0 on PHY2 alone**, echo correct on
+  all five paths — **ROM MATCH** against 2E1's independent VBIOS read. So on
+  this boot, on this ring, a VBIOS-family command **does** write a reply, and
+  the reply is the chip's.
+
+So the negative is bracketed on both sides: the slot is consumed, a sibling
+command in the same family replies correctly in the same boot, and 29's slot
+comes back bit-for-bit as we left it. **DMCUB 4.0.15.47 does not act on
+`DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM`.** What is *not* separated: a
+firmware that does not implement sub-type 29 at all from one that implements
+it, rejects phyid 2, and writes no status either way. Both readings are "the
+firmware does not act on it", which is what the next step depends on, so the
+ambiguity costs nothing here.
+
+### What this closes
+
+**310's candidate is dead, and it died the best way available** — the command
+exists, its enum names PHY2's measured state and the panel's, its payload is
+documented "passed in/out" with a status field, and the firmware on this part
+simply does not service it. It also **retires 307's open question**: the
+execution evidence command 1 structurally cannot give has now been asked for
+with a command that can, and the answer is that this firmware answers neither.
+"DMCUB consumed the slot" remains all we can ever say about the atom ENABLE,
+and now about 29 as well.
+
+The state axis is **not** the variable: three legal targets, including the
+RESET_RELEASED that is one step from PHY2's measured RESET and the TX_EN the
+panel sits at, are indistinguishable at the register level and at the sink.
+State is cumulative on the hardware, so the order 2 -> 3 -> 10 was itself a
+ladder, and it moved nothing.
+
+### The instrument defect, and why it is recorded
+
+Boot 485 first printed `status 0xffffffffffffffff` and
+`PhyCntl0 0xffffffffb0100004`. `num()` returns a signed long and the `%08lx`
+sites in `fsmReport()` did not mask, so any word with bit 31 set printed
+sign-extended. **The kext's own comparison was on the 32-bit value and
+`decode 77` was sound**, and `fsmChanged` was computed in the kext, so this
+was a **display** defect and not a measurement defect — but a journal reader
+cannot tell those two apart from the output alone, which is the whole of rule
+16. Fixed with the `& 0xffffffffL` mask the `dig`/`dto` reporters already use;
+the re-send confirms `status 0xffffffff`. Tool UUID moved
+`FAD8BBBD -> A35C08DA`.
+
+Also recorded: `RBFBFsmArmed`/`RBFBFsmCalls` are absent from ioreg until the
+first `RBFBFsmGo`, because `phyFsmPublish()` only runs from that handler. That
+is a **publish gap, not a wrong kext** — established before the send by the
+kext carrying 21 `RBFBFsm` strings and both `phyFsm` symbols, with
+`RBFBDigArmed` present as the grep's own control (rule 26).
+
+### Where this leaves the line
+
+The blocker is unchanged and now better bounded: **PHY2 is held in reset, and
+nothing we can send releases it.** The driver has no PHY bringup on DCN31
+(all five `dpcs_*` hooks NULL), the VBIOS table is the only mechanism that
+exists, our payload is verified field by field, `ran` on command 1 is a
+mailbox ack, and the one command that could have given execution evidence
+returns none. Three register surveys of the RDPCSTX block (five words, then
+nine) cannot tell PHY2 from PHY3 while ROM-attested `QUERY_DP_ALT` can, so the
+state that makes PHY2 drivable is in none of the ~41 registers we can name.
+
+What is left, with no boots spent on any of it: **DMCUB's own image**
+(4.0.15.47, CW0/CW1 — it services both the command that works and the one that
+does not, and it is the only party that has ever moved this PHY), and the PHY's
+internal registers behind `RDPCS_TX_CR_ADDR`/`CR_DATA`, which 310 reclassified
+as **not a read** — choosing a target means writing somebody else's latched
+cursor mid-sequence. Neither is a register to read next; both are a different
+kind of work.

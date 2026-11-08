@@ -213,3 +213,79 @@ disagreement. Cable plugged in at boot (2FB). Then, in that order:
 **Still absent from the chain, unchanged:** a **stream** on DIG2
 (`dcn30_dio_stream_encoder.c`, not a dcn31 file), a **surface** on pipe 1, and
 a second `IOFramebuffer`.
+
+---
+
+## 310d — the FSM command was sent, and the firmware does not answer (boot 485)
+
+`DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM` (sub-type **29**) is the one command
+into the PHY's state machine: its `dmub_phy_fsm_state` enum names **1 RESET**
+(where 307 measured PHY2), **2 RESET_RELEASED**, **3 SRAM_LOAD_DONE** (308's
+whole milestone) and **10 TX_EN** (the live panel), and its payload is
+documented "passed in/out" with a `uint32_t status` — the execution evidence
+command 1 structurally cannot give, since `transmitter_control_v1_7` returns
+`BP_RESULT_OK` unconditionally. No caller exists anywhere, upstream included.
+
+Boot 485, framebuffer **147D6474**, `-rbgpufbfsm` + `-rbgpufbdpalt` armed,
+cable in at boot (`RBFBAuxEn` mask 5), `RBFBFsmPanelLicence` **7** so no send
+was declined. Four sends — states **2**, **3**, **10**, then 2 again —
+`refusal 0` each. Every one:
+
+| what was asked | what came back |
+|---|---|
+| the firmware's answer | **`decode 77 NO_REPLY`**; the whole 64-byte reply slot `verdict 2 UNCHANGED - our bytes, untouched` |
+| PHY2's nine registers | **changed mask 0** — nothing moved |
+| the four control instances | **changed mask 0** — all held still |
+
+**The negative is bracketed in the same boot**, which is what makes it a
+result rather than a silence (rules 14 and 16):
+
+- **The slot was consumed.** `RBFBDmubWptr` 2432, `RBFBDmubRptr` **2432**,
+  `RBFBDmubAcks` 1 — the ring drained. This is not an undelivered command.
+- **The reply path works.** `dmubbl dpaltq` (`QUERY_DP_ALT`, sub-type **26**,
+  whose union member sits immediately *before* 29's) returned `is_usb` mask
+  **`0x1c`** with `alt_disable` **0 on PHY2 alone** and correct echoes on all
+  five paths — a **ROM MATCH** against 2E1's independent VBIOS read.
+
+So: **DMCUB 4.0.15.47 does not act on sub-type 29.** Not separated — and it
+does not matter for the next step — is an unimplemented sub-type from one that
+is implemented, rejects phyid 2, and writes no status either way.
+
+`phylook.sh` after all four sends: PHY2 still `D:PHY_RESET`,
+`A:SRAM_INIT_DONE` set, no clock, no FIFO — **byte-identical to where 307
+found it, and still byte-identical to dark PHY3**. The panel unchanged with
+`A:TX_CLOCK_ON A:SRAMCLK_CLOCK_ON`, `EXT_LD_DONE 1`, `SRAM_BYPASS 1`. DPCD
+over AUX2 (engine AUX2, refusal 0, 16 bytes): `0x202` **`0x00`**, `0x203`
+`0x00`, `0x204` **`0x80`** (`LINK_STATUS_UPDATED`, as in 478), `0x205`
+**`0x00`**. Nothing downstream moved, which is what a PHY in reset predicts.
+
+**The state axis is not the variable.** State is cumulative on the hardware,
+so 2 -> 3 -> 10 was itself a ladder, and the ladder moved nothing.
+
+### What it closes
+
+310's candidate is dead, and it **retires 307's open question**: the
+execution evidence the atom ENABLE cannot give has now been asked for with a
+command that can, and this firmware answers neither. Every candidate on our
+side of the mailbox is now eliminated — 308's SRAM handshake, 308b's ROM,
+309's ownership registers, 309b's survey as a method, and the FSM command
+itself. What remains is DMCUB's own image, or evidence from a machine where
+this PHY has been brought up.
+
+### Instrument note
+
+`fsmReport()` first printed `status 0xffffffffffffffff` and
+`PhyCntl0 0xffffffffb0100004`: `num()` returns a signed long and the `%08lx`
+sites did not mask, so any word with bit 31 set printed sign-extended. The
+kext's own comparison was on the 32-bit value and `decode 77` was sound, and
+`fsmChanged` was computed in the kext — a **display** defect, not a
+measurement defect. But the output alone does not let a reader tell those
+apart, which is the whole of rule 16, so it is recorded. Fixed with the
+`& 0xffffffffL` mask the `dig`/`dto` reporters already use; tool UUID
+`FAD8BBBD -> A35C08DA`.
+
+`RBFBFsmArmed`/`RBFBFsmCalls` are absent from ioreg until the first
+`RBFBFsmGo`, because `phyFsmPublish()` only runs from that handler — a
+**publish gap, not a wrong kext**, established before the send by the kext
+carrying 21 `RBFBFsm` strings and both `phyFsm` symbols, with `RBFBDigArmed`
+present as the grep's own control (rule 26).
