@@ -8,80 +8,81 @@ Read this, then `docs/EXTERNAL-DISPLAY.md`. The journal under tags `300`,
 
 ---
 
-## STEP 1 — install, arm, boot
+## STEP 1 — install and boot 473
+
+Boot 472 read the block and the addresses are **confirmed**. It refused on a
+convention (MSA holds the true total, the OTG register holds `total - 1`), that
+is fixed, and **the corrected build has never run**.
 
 ```
 sudo tools/fbinstall.sh
 ```
 
-Then check the UUID landed **inside the collection** (rule 15 — boot 470 was
-lost to exactly this, and 2xx cost nine boots to it):
+Check the UUID **inside the collection** (rule 15 — boot 470 was lost to
+exactly this):
 
 ```
 kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
   --show-kext-uuids | grep -i rembrandt
 ```
 
-The built UUID is **8220AD09-3191-38BB-8D10-4AB3EE94BB57**.
+Built UUID: **D4D18678-93E7-3CB3-9360-CD48C6406A0F**.
 
-**The arm is already set** from boot 471 — `-rbgpufbdpalt`, `-rbgpufbdig`,
-`-rbgpufbaltq`, `-rbgpufbfe`, `wdt=-1`. The stream read shares that set and
-needs no new token. Verify it after the boot, from the running system
-(rule 43), and read `rbgpu-boot` first (rule 8).
-
-Cable plugged in **at boot** (2FB).
-
----
-
-## STEP 2 — read the stream encoder
+The arm is already set — `-rbgpufbdpalt`, `-rbgpufbdig`, `-rbgpufbaltq`,
+`-rbgpufbfe`, `wdt=-1`. Cable in **at boot** (2FB). Read `rbgpu-boot` first
+(rule 8).
 
 ```
 tools/strenclook.sh
 ```
 
-It prints the **gate** before any value and **exits** on `HTOTAL_BAD` or
-`BASE_ZERO` rather than printing words under a wrong address.
+**Two things must both hold before anything is written** (rule 47 asked of a
+write): `RBFBStrencBase` = **CONFIRMED** and `RBFBStrencActiveAgree` = **1**,
+in the same boot. The second is the stronger of the two — DRR cannot move the
+active raster, so it needs no window.
 
-### Written down before the boot
+---
 
-- **Instance 0 must come back RUNNING, and the base must CONFIRM.** DIG0 is
-  the panel: lit, composited, 143.83 Hz native. If either fails, the offsets
-  in `rb_strenc.h` are wrong and **nothing else in the sample is a reading** —
-  fix the addresses first.
-- **DIG2 is expected OFF with blank MSA registers.** Nothing has ever
-  programmed them; `grep -rn DP_VID_STREAM src/` found nothing before 302.
-  That is **not a null result** — it is the positive identification of what is
-  missing from the chain, and instance 0's populated fields are the list of
-  what a write would have to set.
-- **If DIG2 reads with MSA timing already programmed**, the firmware did more
-  at boot than this project has assumed, and the diff against instance 0 names
-  exactly which fields differ.
-- `SWEEP: UNIFORM` is a **positive defect** here, not an uninterpretable null
-  as it is for the DIO mux: instance 0 runs a stream and the others do not, so
-  five identical words mean the 0x100 instance arithmetic did nothing.
+## STEP 2 — what boot 472 already established
 
-### The witness, and why it matters more than the values
+| | |
+|---|---|
+| addresses | **confirmed** three ways: the totals at +1, `MSA_PARAM4` = 1920x1080, `MSA_PARAM2` VSTART 20 |
+| panel instance | **RUNNING**; `En`/`Status`/`Run` masks all `0x01`; sweep DIFFERS |
+| DIG2's MSA registers | **all blank** — nothing has ever programmed a stream there |
 
-`DP_VID_STREAM_CNTL` carries `DP_VID_STREAM_ENABLE` (bit 0, what a driver
-writes) and `DP_VID_STREAM_STATUS` (bit 16, what the **hardware** answers).
-`enc2_stream_encoder_dp_unblank` writes the first then `REG_WAIT`s on the
-second, which is upstream stating in its own code that the second is not a
-readback of the first.
+And **two per-instance differences on DIG2**, each with a four-instance
+in-boot control, on registers this kext had never read:
 
-**This is the first verdict register this line has had.** Everything before it
-either answered our own writes — `DIG_BE_CNTL`, `TP_SEL`, `PIXEL_RATE_CNTL`, a
-block agreeing with itself — or was the wrong register (`RDPCSTX2_PHY_CNTL6`,
-retired in 301). `RBFBStrencEnMask` and `RBFBStrencStatusMask` are published
-**separately**, never collapsed: `applied` without `changed` is not evidence
-(2E6).
+| register | DIG0 (panel) | DIG1/3/4 | **DIG2** |
+|---|---|---|---|
+| `DP_STEER_FIFO_RESET` | 0 | 0 | **1** |
+| `DP_VID_STREAM_DIS_DEFER` | 2 | 2 | **0** |
+
+The steer FIFO carries the stream encoder's symbols toward the link, and
+`enc2_stream_encoder_dp_unblank` pulses that bit 1 then 0 — so a resting 1 is a
+**held reset** on the exact instance thirteen boots have been driving.
+`DIS_DEFER` = 2 is the reset value (three never-brought-up instances read it),
+so DIG2's 0 was **written by the firmware at boot**.
+
+**Neither is established as the blocker, and do not write it down as one.**
+DIG2 is the only instance with a cable attached, so a different firmware path
+there is expected (rule 47), and **no stream has ever been programmed on DIG2
+at all** — a held FIFO reset cannot be shown to block symbols that do not
+exist (rule 18 on n=1). What it does establish: the firmware did more on DIG2
+at boot than this project assumed, and the write set now has two values to
+**clear** rather than set — which is what a write designed off instance 0's
+live words catches and one designed off upstream alone would not (rule 25).
 
 ---
 
 ## STEP 3 — the write, and what has to be true first
 
 `rb_strenc.h` has **no setter** and nothing may add one until a boot has
-returned `BASE_CONFIRMED` with instance 0 `RUNNING` (rule 47 asked of a
-write). Once it has, the write set is known and short:
+returned `BASE_CONFIRMED`, `ActiveAgree` **1**, and instance 0 `RUNNING`
+(rule 47 asked of a write). Boot 472 gave the third and the addresses; boot 473
+is the test of the first two. Once they hold, the write set is known and short,
+and **every field now has a live source in instance 0's own words**:
 
 1. **`setup_dio_stream_attribute`** → `enc1_stream_encoder_dp_set_stream_attribute`
    (`dcn10_stream_encoder.c:245`): eight registers — `DP_PIXEL_FORMAT`,
@@ -95,6 +96,13 @@ Every value has a live source: instance 0's own words for the shape, and the
 sink's EDID preferred timing (148 500 kHz, already used by `dmubbl dto`) for
 the numbers. **DP0/DIGA is the panel's and must be refused by name** in both
 halves, as in every experiment on this line.
+
+**And two values on DIG2 have to be CLEARED, not set** — boot 472's finding,
+and neither is in upstream's write list because upstream never inherits a
+firmware-touched instance: `DP_STEER_FIFO_RESET` (held at 1) and whatever
+`DP_VID_STREAM_DIS_DEFER` 0 implies against everything else's 2. The unblank
+sequence pulses the FIFO reset anyway, so step 2 covers the first by
+construction; the second needs deciding before it is written, not during.
 
 **`setup_dio_stream_encoder` is NOT part of this.** Its `enable_stream`,
 `map_stream_to_link`, `set_input_mode` and `enable_fifo` are all absent from

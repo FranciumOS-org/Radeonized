@@ -462,6 +462,26 @@ with a new clause: **so is WHEN the port came up.** (`RBFBAuxEn` and
 
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
+**303: boot 472 READ IT.** Addresses **confirmed** — but the gate first refused
+because **MSA holds the TRUE total and the OTG register holds `total - 1`**
+(`dcn10_optc.c:191` vs `dcn10_stream_encoder.c:419`), so MSA = OTG **+1** on
+both axes: instance 0 read 2107/1130 against a live 2106/1129. Corroborated
+twice more in the same sample: `MSA_PARAM4` = `0x07800438` = **1920x1080** (the
+active raster — the **stronger** check, DRR cannot move it, now published as
+`RBFBStrencActiveAgree` and derived from OTG0's blank words, which **wrap**:
+START 2047, END 127, active = START − END), and `MSA_PARAM2` VSTART **20** =
+the V blank end already in this card. Panel instance **RUNNING**, masks all
+`0x01`, sweep DIFFERS, **DIG2's MSA registers all blank** — the positive
+identification of what is missing. **TWO per-instance differences on DIG2,
+four-instance control, registers never read before:
+`DP_STEER_FIFO_RESET` **set** on DIG2 and clear on all four others (a **held
+reset**; `dp_unblank` pulses it 1→0), and `DP_VID_STREAM_DIS_DEFER` **0** on
+DIG2 against **2** everywhere else, so 2 is the reset value and DIG2's 0 was
+**written by the firmware at boot**. **Neither is established as the blocker**
+— DIG2 is the only instance with a cable, and no stream exists for the FIFO to
+carry. What it does establish: the firmware did more on DIG2 than assumed, and
+the write set has two values to **clear**, not set.
+
 **302 built the stream encoder READ** — `src/common/rb_strenc.h`,
 `tools/strenclook.sh`, 14 registers x 5 instances, BASE_IDX 2, stride 0x100,
 read-only. **The read is the experiment: DIG0 is the panel's live working DP
