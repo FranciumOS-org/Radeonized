@@ -568,6 +568,45 @@ The kext now publishes **`RBFBStrmW<n>Was`/`Want`/`Got`** per write so a
 dropped store is read directly, not inferred from a changed mask. Framebuffer
 UUID **27BF9539**, not installed.
 
+**306 KILLED FOUR CANDIDATES WITH ZERO BOOTS AND BUILT THE PHY'S OWN STATUS
+READ.** Spent the live boot before asking for another.
+**`enc1_configure_encoder` is NOT the gap** — 2E5 did it (`rb_enc.h`,
+`-rbgpufbfe`) and boot 478's published survey shows **DIG2 already carries
+`DP_CONFIG` 1 = the sink's 2 lanes** (panel 3 = 4 lanes, dark instances 0) with
+a `DP_DPHY_SCRAM_CNTL` `0x01020010` byte-identical to the panel's, `EncRan` 0
+so they are the firmware's. **The DPIA branch is dead on source grounds**
+(`DISPLAY_ENDPOINT_USB4_DPIA` is USB4 tunnelling; plain DP alt mode takes the
+atom table we already run). **THE RDPCSPIPE INSTANCE IS SETTLED BY
+ELIMINATION**: `dcn31_resource.c:404` is `link_regs(id, phyid)` with
+`DPCS_DCN31_REG_LIST(**id**)`, DIG2 is id 2, the header aliases index 2 onto
+`0x2d73` = **instance 0**, and the other direction would make UNIPHY_C read
+DISABLED+acked and contradict ROM-attested `QUERY_DP_ALT`. **DP alt is not
+disabled on our PHY, from two sources.** (My own arm scan lied first: a
+six-token grep said `-rbgpufbfe` absent when seventeen are present — rule 26.)
+
+**`src/common/rb_dpcsphy.h` — the PHY status, READ-ONLY, no setter**, sharing
+`-rbgpufbdpalt` with **no new token**. Five registers x five instances,
+BASE_IDX 2, **stride 0xd8** derived from two header offsets, all 25 offsets
+script-verified against `dpcs_4_2_0_offset.h`: `RDPCSTX_CNTL` `0x2930`,
+`CLOCK_CNTL` `0x2931`, `INTERRUPT_CONTROL` `0x2932`, `RDPCS_TX_SRAM_CNTL`
+`0x2936`, `PHY_CNTL0` `0x2940`. **The file's subject is WHO ANSWERS EACH BIT**
+— **ANSWERED** masks are the readings, **DRIVEN** masks say only that software
+wrote them, and the hosttest proves the sets disjoint **at runtime**. Witnesses:
+`PHY_CNTL0` `0x02000000` **REF_CLKDET_RESULT**, `0x10000000`
+**SRAM_INIT_DONE**, `CLOCK_CNTL`'s three **CLOCK_ON** bits, `INTERRUPT`'s
+sticky `0xf0` **TX FIFO_ERROR**. The clkdet result carries its own licence
+(`rb_dpcsphy_clkdet_valid()` — a 0 with the detector off means nothing).
+`tools/phylook.sh`. **Twelve break-it guards, all caught by a failing test,
+none by `-Werror` — after three rounds that each found a defect in MY OWN
+checks**: breaking the verdict's CLOCK_ON term **fired nothing** (it carried
+no information, so those bits are now published raw); emptying one mask
+**fired nothing** (the check tested a group's OR, the same defect one level
+up); and the ANSWERED/DRIVEN overlap check **was never coverage** —
+constant-folded, so `-Werror` killed the build instead of the test failing,
+**the `-Werror` trap for the sixth time**. Also new:
+**`RBFBStrmW<n>Was`/`Want`/`Got` per write**, so boot 478's `DP_VID_M` finding
+is read directly rather than inferred. Framebuffer UUID **99122618**.
+
 **302 built the stream encoder READ** — `src/common/rb_strenc.h`, 14 registers
 x 5 instances, BASE_IDX 2, stride 0x100. **The read is the experiment: DIG0 is
 the panel's live working DP stream**, so every field has a known-good value in
@@ -714,10 +753,11 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
 named** (301 retired "the analog PHY is off"); everything
 downstream is blocked on **clock recovery**, which boot 478 had the sink state
-outright (`0x205` bit 0 clear). The things never attempted are a stream on a
-**trained** DIG2 link (the encoder side is done and refuses with STATUS 0 on
-an untrained link), a **surface** on pipe 1 and a second `IOFramebuffer`; also
-open, `DP_VID_M` refusing a store on DIG2. 2F8 added a cost: `tps=3`
+outright (`0x205` bit 0 clear). 306 excluded the encoder side entirely, so
+**the next reading is the PHY's own status** (`tools/phylook.sh`, unbooted).
+The things never attempted are a stream on a **trained** DIG2 link, a
+**surface** on pipe 1 and a second `IOFramebuffer`; also open, `DP_VID_M`
+refusing a store on DIG2. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666

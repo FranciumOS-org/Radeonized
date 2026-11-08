@@ -1,58 +1,54 @@
-# HANDOFF — where this is now, and what to do next
+# HANDOFF — one install, one boot, two answers
 
-## State after boot 478
+## Install
 
-**The encoder side is finished and the split is proved.** `strencprog go` ->
-`dptrain go tps=2` -> `strencprog unblank` ran end to end with no refusal 66:
-the pixel clock starts, OTG1 scans, the MSA words are programmed and verified
-against the live panel, `DIG_FE_CNTL.DIG_SOURCE_SELECT` points at OTG1, DIG2's
-three-boot held `DP_STEER_FIFO` reset is cleared, and `DP_VID_STREAM_ENABLE`
-is set.
-
-**`DP_VID_STREAM_STATUS` stays 0, and the reason is upstream of the encoder.**
-DPCD `0x202` has read `0x00` in six boots now (459, 461, 464, 468, 469, 478):
-no clock recovery. Boot 478 got the sink to say it directly —
-**`0x205` = `0x00`, `RECEIVE_PORT_0_STATUS` clear: it detects no sync on the
-main link** — while **`0x204` bit 7 `LINK_STATUS_UPDATED` is set**, so the
-sink is awake and reacting.
-
-**The blocker is still not named.** 301 retired "the analog PHY is off". The
-split was a real defect and fixing it changed nothing about the link, so it is
-not a candidate either.
-
-## Open and unexplained, from boot 478
-
-**`DP_VID_M` on DIG2 will not take a store.** It reads `0x00000000` after
-9011 (`0x2333`) is written, while `DP_VID_N` in the same loop, same instance,
-same 24-bit mask shape takes its `0x8000` and reads back. The readback is in
-the same instruction stream as the store, so it is not a later overwrite.
-Eliminated in-boot: the **held FIFO reset** (A/B in both FIFO states, both
-refuse). **Not** isolated: DIG1 and DIG3 as a four-instance control — they
-retain no stores at all (`0x8000` comes back `0x2000`, the ENABLE bit does not
-survive to the next read), so they are in a different power state and do not
-answer the question.
-
-The instrument for this now exists and did not in 478: the kext publishes
-**`RBFBStrmW<n>Was` / `Want` / `Got`** per write and `strencprog` prints the
-table and names a store that **DID NOT TAKE**. Read that before theorising.
-
-## Do this next
-
-**1. Install and boot.** Framebuffer UUID
-**27BF9539-A203-3D7C-9C3D-8927CAD60EC0**.
+Framebuffer UUID **99122618-EC61-3E7B-B428-6CD5D0044DDC**.
 
 ```bash
 sudo tools/fbinstall.sh
 ```
 
-Reboot **with the Type-C cable plugged in before boot** (2FB).
+Reboot **with the Type-C cable plugged in before boot** (2FB — plugged in
+afterwards, every AUX read refuses on a nonexistent engine).
 
 ```bash
-sysctl -n kern.bootargs | tr ' \t' '\n\n' | grep -qx -- -rbgpufbstrm && echo ARMED || echo NOT ARMED
+kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
 ```
 
-**2. Re-run the chain and read the new per-write table.** Same boot, this
-order; the raster and the clock are not persistent.
+```bash
+sysctl -n kern.bootargs | tr ' \t' '\n\n' | grep -E '^-rbgpu'
+```
+
+## Question 1 — is the PHY alive? Read-only, costs nothing
+
+```bash
+bash tools/phylook.sh
+```
+
+**PHY0 is the positive control**: UNIPHY_A carries the panel's live DP link, so
+every hardware-answered bit has a known-good value in the same sample.
+PHY1/3/4 were never brought up. **PHY2 is the subject.**
+
+Read the SWEEP line first: UNIFORM means the 0xd8 stride did nothing and
+nothing below is a finding. Then PHY2's verdict:
+
+- **ALIVE** — reference clock detected and firmware loaded. The PHY is up and
+  the blocker is narrower than the PHY itself.
+- **CLOCKLESS** — firmware loaded, the detector says no clock. That would be
+  the first positive identification of the blocker this line has had.
+- **NO_SRAM** — a clock but no firmware image.
+- **DEAD** — neither.
+
+Check `clkdet result is BELIEVABLE` on the same instance. With
+`REF_CLKDET_EN` clear a 0 result means nothing, and the tool says so in words
+rather than letting the verdict stand on it.
+
+## Question 2 — does `DP_VID_M` really refuse a store?
+
+Boot 478 inferred it from a zero bit in a changed mask, which cannot tell a
+dropped store from a store of the value already present. The kext now
+publishes `was -> want -> got` per write and the tool prints it. Same boot,
+this order; the raster and clock are not persistent:
 
 ```bash
 env -u DYLD_INSERT_LIBRARIES ./build/out/dmubbl dto 148500
@@ -74,34 +70,45 @@ env -u DYLD_INSERT_LIBRARIES ./build/out/dptrain go tps=2
 env -u DYLD_INSERT_LIBRARIES ./build/out/strencprog unblank
 ```
 
-The question for this boot is narrow: **does the per-write table confirm
-`DP_VID_M`'s store is dropped**, with `was -> wanted -> got` read directly
-rather than inferred? If it is confirmed, that is a register-level fact about
-DIG2 worth its own line of work. If the table shows it taking, then boot 478's
-changed-mask reading was wrong and says so.
+Look for `*** DID NOT TAKE ***` in the per-write table. If `DP_VID_M` shows
+`0x00000000 -> 0x00002333 -> 0x00000000`, the store is dropped and that is a
+register-level fact about DIG2. If it shows `-> 0x00002333`, boot 478's
+changed-mask reading was wrong and this says so.
 
-**3. The blocker itself.** Nothing on the encoder side will move it. The
-remaining untried surfaces, in the order their evidence is strongest:
+`strencprog go` leaves the stream disabled on purpose so `dptrain` can run —
+boot 477's refusal 66. **Never `tps=3` or `tps=4`: they degrade the sink until
+a reboot** (2F8), and the tool refuses them.
 
-- **Which RDPCSPIPE instance is UNIPHY_C.** Boot 471 left this an **OR**:
-  RDPCSPIPE0 reads NOT DISABLED, RDPCSPIPE1 reads DISABLED+acked, and with
-  three USB-C PHYs over two registers (upstream's own
-  `//[Note] Hack. RDPCSPIPE only has 2 instances.`) rule 18 refuses the
-  identification. `QUERY_DP_ALT` is ROM-attested on three boots and only PHY2
-  reads `alt_disable` 0. Naming the instance would turn an OR into a reading.
-- **The lane power / MPLL question, which has never been asked.** 301
-  established that `RDPCSPIPE_PHY_CNTL6` carries **only** DPALT_DP4 / DISABLE /
-  DISABLE_ACK — **no MPLL, no reference clock, no PSTATE** — and that
-  conflating the two questions is what made `0x00063333` look like a verdict
-  for five boots. Whatever powers the lanes is a different register and has
-  not been located.
+## What is already excluded, so nothing re-tests it
 
-## Rules this step is standing on
+DP-alt disable (301 and 306's elimination), **lane count and scrambler**
+(DIG2 already correct, read in boot 478), the back-end enable (477), the held
+steer FIFO (477, and in-boot A/B in 478), `DP_VID_STREAM_DIS_DEFER` (source
+grounds), the raster and pixel clock (2FB-2FE), `PIPE_DTO_SRC_SEL` (468),
+hpdsel and power gating (469), the stream/training order (305b, boot 478), and
+the **DPIA branch** (USB4-only, source grounds).
 
-- **Rule 15** — the UUID that matters is the one inside the collection:
-  `kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt`
+The sink has stated the blocker directly: DPCD `0x205` = `0x00`,
+`RECEIVE_PORT_0_STATUS` clear — no sync on the main link — with `0x204` bit 7
+`LINK_STATUS_UPDATED` set, so it is awake and reacting. DPCD `0x202` has read
+`0x00` in six boots (459, 461, 464, 468, 469, 478).
+
+## If the PHY reads ALIVE
+
+The remaining untried surface is **lane power / MPLL**, which has never been
+located. 301 established that `RDPCSPIPE_PHY_CNTL6` carries only DPALT_DP4 /
+DISABLE / DISABLE_ACK — no MPLL, no reference clock, no PSTATE — and that
+conflating those questions is what made `0x00063333` look like a verdict for
+five boots. `dpcs_4_2_0_offset.h` has `RDPCSTX_PHY_CNTL1..17`,
+`RDPCS_TX_CR_ADDR`/`DATA` and `RDPCS_TX_PLL_UPDATE_*` unread; the PHY is
+programmed by firmware through the atom table, so expect to *read* these, not
+write them.
+
+## Rules this step stands on
+
+- **Rule 15** — the UUID that matters is inside the collection.
+- **Rule 26** — a search is an instrument: 306 lost a conclusion to a grep
+  pattern that listed six tokens when seventeen were present. Read the
+  unfiltered value.
 - **Rule 20** — `changed` beside `applied`, and now `got` beside `want`.
-- **Rule 39** — DIG1/DIG3 as a control is the live example: a control in a
-  configuration that differs in an uncontrolled way settles nothing.
 - **Rule 47** — Eco / iGPU-only mode, cable in at boot.
-- `dptrain tps=3`/`tps=4` **degrade this sink until a reboot** (2F8).
