@@ -492,6 +492,32 @@ and there is **no per-instance power discrimination**. What stands is uniform:
 `DP_VID_M`/`DP_VID_N` stores do not stick on any instance tried, which sits
 downstream of a PHY in reset.
 
+**308: THE SRAM-LOAD HANDSHAKE IS THE ONE LIVE CANDIDATE, AND IT WAS IN OUR
+OWN HEADER.** Decoding boot 479's `PHY_CNTL0` words per FIELD instead of as
+hex — the first time — against `dpcs_4_2_0_sh_mask.h`'s sixteen fields: the
+live panel (`0xb0100004`) has **`SRAM_EXT_LD_DONE` 1, `SRAM_BYPASS` 1,
+`REF_RANGE` 0** with `PHY_RESET` 0; PHY2 (`0x10100605`) has **both SRAM bits
+0, `REF_RANGE` 3** with `PHY_RESET` 1. **`SRAM_INIT_DONE` is set on BOTH**, so
+307's "the firmware is loaded" was the term carrying no information.
+`SRAM_BYPASS` was **not in `rb_dpcsphy.h` at all**. Candidate, **not** a
+mechanism: n=1 per side, no caller, and **the two SRAM bits move together in
+that sample, so they are ONE observation** (the break-it sweep found that —
+third pair this file's own data cannot separate). **`SRAM_EXT_LD_DONE` had
+been in the ANSWERED set on nothing but its name** — no vendored `.c` names
+it — so there is now a third **`RB_DPCSPHY_U_*` UNATTRIBUTED** set, pairwise
+disjoint per register, and **no setter**. `rb_dpcsphy_sram_diff()` compares
+against the panel and refuses **-2** when the subject *is* the control.
+**308b: THE ROM IS ELIMINATED.** `firmware/680m-vbios.rom`'s master command
+table (`0xa480`, rev 2.1, 81 entries) has slot 39 `dig1transmittercontrol` =
+**`0x0000`**, with every display-encoder entry 0 — so the firmware servicing
+our command is **DMCUB's image** (4.0.15.47, CW0/CW1), not the ROM. `dmubbl`
+had printed this since 2E2 and a handoff of mine said to read the ROM anyway.
+**And no sibling project has the answer:** **nullarc** (780M, Phoenix, DCN
+3.1.4 — the nearest chip to ours, MIT/GPL-2.0 + PolyForm-NC) lists external
+displays under *"Not yet"* and has **no DPCS material**; **Cobalt64** (MIT,
+RDNA 4) reads the whole RDPCSTX block — ~35 registers against our five — but
+writes no reset release; **UnifiedRed** (BSD-3-Clause) is DCE 11 era.
+
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
 **303 read the block; 304 derived what to write and gave the derivation a
@@ -795,7 +821,10 @@ downstream — no clock recovery, DPCD `0x202` `0x00`, `0x205` bit 0 clear,
 longer a register on our side: the driver has **no** PHY bringup on DCN31, the
 VBIOS table is the only mechanism, our payload is verified field by field, and
 `ran` is only a mailbox ack. What is needed is **DMCUB's own execution
-evidence** and what else the firmware wants before it acts on phyid 2.
+evidence** and what else the firmware wants before it acts on phyid 2 — and
+308 names the one live candidate, the **SRAM-load handshake**
+(`SRAM_EXT_LD_DONE` / `SRAM_BYPASS` set on the panel, clear on PHY2), which
+needs a boot on framebuffer UUID **DDFF93EB** to read.
 The things never attempted are a stream on a **trained** DIG2 link, a
 **surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone

@@ -77,13 +77,28 @@ PHY does something other than release reset. Start there, and note that
 
 Two directions, neither of which needs a boot to begin:
 
-1. **Read the VBIOS atom table itself.** `firmware/680m-vbios.rom` is on disk
-   and `tools/re/vbios_dispobj.py` already parses its display-object table.
-   The `dig1transmittercontrol` command table is in the same ROM. Its own code
-   is the only remaining statement of what the firmware requires for phyid 2 —
-   and the `dmubbl` text notes this ASIC's atom table has **no**
-   `dig1transmittercontrol` entry, which is why 2E2 went to v1_7 over DMUB.
-   **Establish what DMCUB runs for this sub-command before sending it again.**
+1. **The SRAM-load handshake — the one live candidate (308).** Decoded per
+   field, the live panel has `SRAM_EXT_LD_DONE` **1** and `SRAM_BYPASS` **1**
+   with its PHY out of reset; PHY2 has both **0** with its PHY held.
+   `SRAM_INIT_DONE` is set on **both**, so it carries no information.
+   `rb_dpcsphy_sram_diff()` publishes the comparison against the panel, and
+   `tools/phylook.sh` names which fields differ. **It needs a boot to read on
+   the installed kext (UUID `DDFF93EB`) — that is the next reading.** Hold the
+   two caveats: the bits are **one observation, not two** (they move together
+   in boot 479's words), and **nothing in this tree says who writes them**,
+   which is why they sit in their own UNATTRIBUTED set with no setter.
+   **Do not write them** until a source names the owner.
+
+   **The ROM is eliminated as a place to look (308b).** Slot 39
+   `dig1transmittercontrol` in the master command table at `0xa480` is
+   **`0x0000`** — absent, along with every other display-encoder entry. The
+   firmware servicing this command is **DMCUB's own image** (4.0.15.47, in
+   CW0/CW1), not the ROM.
+
+   **No sibling project has the answer (308).** nullarc — Radeon 780M,
+   Phoenix, DCN 3.1.4, the nearest chip to ours — lists external displays
+   under "Not yet" and has no DPCS material. Cobalt64 is RDNA 4 and reads the
+   block without writing a reset release. UnifiedRed is DCE 11 era.
 2. **Find the precondition from the other side.** The port reports DP alt
    granted and two lanes, AUX2 works, the cable was in at boot, EDID read, the
    DTO runs, the raster scans. What a USB-C PHY release needs beyond that —

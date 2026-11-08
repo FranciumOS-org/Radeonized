@@ -65412,3 +65412,33 @@ other.
 Framebuffer UUID **DDFF93EB**, not installed. `tools/phylook.sh` prints the
 handshake, names which fields differ, and says in prose that the two SRAM bits
 are not independent.
+
+### 308b — the ROM cannot be read for this, and the handoff that said to was wrong
+
+Handoff direction 1 was "read the VBIOS atom table itself — the
+`dig1transmittercontrol` command table is in the same ROM". **It is not**, and
+the ROM says so in four lines. `firmware/680m-vbios.rom`, 44 544 bytes,
+`ATOM` signature at `0x190`, master command table at `0xa480`, rev 2.1, 81
+entries. Slot **39**, `dig1transmittercontrol`: **`0x0000`.**
+
+The whole table is nearly empty — of 81 slots only `asic_init` (`0xa526`),
+`setpixelclock` (`0xa5a6`), `getsmuclockinfo` (`0xa5ce`),
+`processauxchannel` (`0xab66`) and four unnamed functions carry an offset.
+Every display-encoder entry — `digxencodercontrol`, `setcrtc_timing`,
+`enablecrtc`, `selectcrtc_source`, `enabledispppll`,
+`externalencodercontrol` — is **0**.
+
+**`dmubbl`'s own usage text has said "its atom command table has NO
+dig1transmittercontrol entry, which is why 2E2 went to v1_7 over DMUB" since
+2E2.** I wrote a next step that contradicted an instrument's printed output,
+in the same session in which I had read that output. The recurring error's
+"read the evidence already in hand" form, and the second time this milestone
+(the first being 307's atom-ENABLE attribution, caught by `RBFBDigCalls`).
+
+**What it means for the line, which is more than a correction.** There is no
+ROM-side code for this command on this part; the firmware that services
+`DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL` is **DMCUB's own image**, in CW0 /
+CW1, version 4.0.15.47. So "what does the firmware require before it will act
+on phyid 2" is a question about the DMCUB image and not about the ROM — and
+the ROM is eliminated as a place to look, cheaply, before a boot was spent on
+it.
