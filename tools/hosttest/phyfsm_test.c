@@ -262,6 +262,89 @@ int phyfsm_tests(void)
         }
     }
 
+    /* ---- 310c: the verdict, whose whole point is the CONTROLS ---- */
+    {
+        const uint32_t N = (uint32_t)RB_DPCSPHY_R_COUNT;
+        uint32_t b[RB_DPCSPHY_COUNT * RB_DPCSPHY_R_COUNT];
+        uint32_t a[RB_DPCSPHY_COUNT * RB_DPCSPHY_R_COUNT];
+        const uint32_t SUBJ = RB_PHYFSM_TYPEC_INST;
+        const uint32_t RSTREG = SUBJ * N + RB_PHYFSM_VERDICT_REG;
+
+        ck(RB_PHYFSM_VERDICT_REG == RB_DPCSPHY_R_PHY_CNTL0,
+           "the verdict rests on PHY_CNTL0, where PHY_RESET lives");
+
+        /* the real shape: PHY2 in reset, nothing else moving */
+        for (i = 0u; i < RB_DPCSPHY_COUNT * N; i++) { b[i] = 0u; a[i] = 0u; }
+        b[RSTREG] = RB_DPCSPHY_D_PHY_RESET;
+        a[RSTREG] = RB_DPCSPHY_D_PHY_RESET;
+        ck(rb_phyfsm_moved(&b[SUBJ * N], &a[SUBJ * N]) == 0u,
+           "nothing changed is an empty mask");
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_NOTHING,
+           "not one bit anywhere is V_NOTHING - 309b's own result");
+
+        /* the release we are after */
+        a[RSTREG] = 0u;
+        ck(rb_phyfsm_moved(&b[SUBJ * N], &a[SUBJ * N])
+               == (1u << RB_PHYFSM_VERDICT_REG),
+           "the mask names WHICH register moved, not just that one did");
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_RELEASED,
+           "1 -> 0 on the subject with the controls still is V_RELEASED");
+
+        /* THE WHOLE POINT: the same release with a control moving too */
+        a[RB_PHYFSM_PANEL_INST * N + RB_DPCSPHY_R_CNTL] = 0xdeadu;
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_CONTAMINATED,
+           "a release is CONTAMINATED when a control moved - rule 17, and "
+           "this must NOT read as V_RELEASED");
+        a[RB_PHYFSM_PANEL_INST * N + RB_DPCSPHY_R_CNTL] = 0u;
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_RELEASED,
+           "and it goes back to V_RELEASED when the control is clean, so "
+           "the contamination check is not simply always on");
+
+        /* a dark control moving contaminates too, not only the panel */
+        a[RB_DPCSPHY_DARK_USBC_INST * N + RB_DPCSPHY_R_CNTL2] = 1u;
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_CONTAMINATED,
+           "the DARK USB-C control contaminates as much as the panel does");
+        a[RB_DPCSPHY_DARK_USBC_INST * N + RB_DPCSPHY_R_CNTL2] = 0u;
+
+        /* moved but not released */
+        a[RSTREG] = RB_DPCSPHY_D_PHY_RESET;
+        a[SUBJ * N + RB_DPCSPHY_R_CLOCK_CNTL] = 0x400u;
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_MOVED,
+           "the subject changed with PHY_RESET still set is V_MOVED, a "
+           "DIFFERENT verdict from V_RELEASED");
+
+        /* reset going the WRONG way must never read as released */
+        for (i = 0u; i < RB_DPCSPHY_COUNT * N; i++) { b[i] = 0u; a[i] = 0u; }
+        b[RSTREG] = 0u;
+        a[RSTREG] = RB_DPCSPHY_D_PHY_RESET;
+        ck(rb_phyfsm_verdict(b, a, SUBJ) != RB_PHYFSM_V_RELEASED,
+           "0 -> 1 is the PHY being PUT in reset and is not a release");
+
+        /* a subject already out of reset cannot be 'released' by this */
+        for (i = 0u; i < RB_DPCSPHY_COUNT * N; i++) { b[i] = 0u; a[i] = 0u; }
+        a[SUBJ * N + RB_DPCSPHY_R_CLOCK_CNTL] = 0x400u;
+        ck(rb_phyfsm_verdict(b, a, SUBJ) == RB_PHYFSM_V_MOVED,
+           "a subject that was never in reset reports MOVED, not RELEASED");
+
+        ck(rb_phyfsm_verdict(NULL, a, SUBJ) == RB_PHYFSM_V_UNKNOWN,
+           "NULL before is UNKNOWN, not NOTHING");
+        ck(rb_phyfsm_verdict(b, NULL, SUBJ) == RB_PHYFSM_V_UNKNOWN,
+           "NULL after is UNKNOWN");
+        ck(rb_phyfsm_verdict(b, a, RB_DPCSPHY_COUNT) == RB_PHYFSM_V_UNKNOWN,
+           "a subject outside the instance range is UNKNOWN");
+        ck(rb_phyfsm_moved(NULL, a) == 0u, "NULL to moved() is an empty mask");
+        ck(rb_phyfsm_moved(b, NULL) == 0u, "NULL to moved() either way");
+    }
+
+    /* ---- the send path's own refusal codes ---- */
+    ck(RB_PHYFSM_E_NOT_ARMED  == 80, "NOT_ARMED is 80");
+    ck(RB_PHYFSM_E_NO_SURVEY  == 81, "NO_SURVEY is 81");
+    ck(RB_PHYFSM_E_NO_LICENCE == 82, "NO_LICENCE is 82");
+    ck(RB_PHYFSM_E_NO_SURVEY != RB_PHYFSM_E_NO_LICENCE,
+       "\"the survey did not run\" and \"it ran and the panel reads dead\" "
+       "are DIFFERENT codes - absence is not a result");
+    ck(RB_PHYFSM_TYPEC_LANES == 2u, "the sink is 2 lanes");
+
     if (fails == 0) { printf("phyfsm: ok\n"); }
     return fails;
 }

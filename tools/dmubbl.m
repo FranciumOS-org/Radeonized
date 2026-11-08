@@ -1568,11 +1568,140 @@ static int fsmShow(int argc, char **argv)
     return 0;
 }
 
+/* 310c: the reply and the effect, reported as TWO independent things.
+ *
+ * Rule 31: RBFBFsm* are published periodically, so the call counter is
+ * latched before the send and polled until it moves rather than slept on -
+ * a counter that has not moved YET is not one that did not move, and that
+ * mistake has cost four false MISMATCHes in this project. */
+static void fsmReport(io_service_t fb, long callsBefore)
+{
+    static const char *const regs[] = {
+        "Cntl", "ClockCntl", "Intr", "SramCntl", "PhyCntl0",
+        "Cntl2", "DisBlock", "DmcuCntl6", "DpAltCtrl"
+    };
+    const unsigned nregs = (unsigned)(sizeof(regs) / sizeof(regs[0]));
+    long refuse, decode, status, changed, ctl, lic, phy, state;
+    unsigned i, r;
+
+    for (i = 0; i < 40u; i++) {
+        if (num(fb, "RBFBFsmCalls") != callsBefore) { break; }
+        usleep(100000);
+    }
+    if (num(fb, "RBFBFsmCalls") == callsBefore) {
+        printf("\nRBFBFsmCalls has not moved. The kext did not reach the\n"
+               "experiment - check the loaded framebuffer UUID and that\n"
+               "-rbgpufbfsm is in THIS boot\'s args (rule 15).\n");
+        return;
+    }
+
+    refuse = num(fb, "RBFBFsmRefuse");
+    decode = num(fb, "RBFBFsmDecode");
+    status = num(fb, "RBFBFsmStatus");
+    changed = num(fb, "RBFBFsmChanged");
+    ctl = num(fb, "RBFBFsmCtlChanged");
+    lic = num(fb, "RBFBFsmPanelLicence");
+    phy = num(fb, "RBFBFsmPhyWant");
+    state = num(fb, "RBFBFsmStateWant");
+
+    printf("\n=== refusal ===\n  %ld", refuse);
+    switch (refuse) {
+    case 0:  printf("  sent\n"); break;
+    case 80: printf("  NOT ARMED - -rbgpufbfsm absent from this boot\n"); break;
+    case 81: printf("  the PHY survey did not run this call, so there is\n"
+                    "      no before/after to read (not \"nothing moved\")\n");
+             break;
+    case 82: printf("  DECLINED: the survey ran and the LIVE PANEL does not\n"
+                    "      read as a brought-up PHY (licence %#lx of 0x7:\n"
+                    "      bit0 reset-clear, bit1 clock-on, bit2 fifo-en).\n"
+                    "      A before/after on PHY%ld would mean nothing.\n",
+                    lic, phy);
+             break;
+    case 72: printf("  PHY0 is the live panel\'s - refused by name\n"); break;
+    default: printf("  see rb_phyfsm.h; 70-79 are the builder\'s,\n"
+                    "      80-82 the experiment\'s\n"); break;
+    }
+    if (refuse != 0) { return; }
+
+    printf("\n=== 1. DID THE FIRMWARE ANSWER? ===\n");
+    printf("  decode %ld   status 0x%08lx\n", decode, status);
+    if (decode == 77) {
+        printf("  NO_REPLY - the status field came back as the sentinel we\n"
+               "  wrote. DMCUB consumed the slot and wrote nothing into it.\n"
+               "  That is a REAL answer and the first direct execution\n"
+               "  evidence this line has had: command 1 has no reply field\n"
+               "  at all, so it could never be asked.\n");
+    } else if (decode == 0) {
+        printf("  ANSWERED. DMCUB wrote the status field, so sub-type 29 is\n"
+               "  implemented in 4.0.15.47 and reached phyid %ld. The status\n"
+               "  word itself is reported, not judged - its meaning is not\n"
+               "  established anywhere we can read.\n", phy);
+    } else if (decode == 78 || decode == 79) {
+        printf("  ECHO MISMATCH (%s) - the slot came back naming something\n"
+               "  other than what was sent, so the reply is not ours.\n",
+               decode == 78 ? "phy" : "state");
+    }
+
+    printf("\n=== 2. DID THE PHY MOVE? ===\n");
+    printf("  subject PHY%ld changed mask %#lx", phy, changed);
+    if (changed == 0) {
+        printf("   NOTHING MOVED\n");
+    } else {
+        printf("\n");
+        for (r = 0; r < nregs; r++) {
+            if (changed & (1L << r)) { printf("    %s moved\n", regs[r]); }
+        }
+    }
+    printf("  control instances changed mask %#lx", ctl);
+    if (ctl == 0) {
+        printf("   all four held still - so a subject change is the\n"
+               "      subject\'s own (309b\'s structure)\n");
+    } else {
+        printf("\n    *** A CONTROL MOVED. The whole sample is suspect:\n"
+               "        something other than this command is writing the\n"
+               "        block, and rule 17 applies - two numbers are not a\n"
+               "        mechanism. ***\n");
+    }
+
+    printf("\nper instance, the nine words, both sides:\n");
+    for (i = 0; i < 5u; i++) {
+        char k[64];
+        printf("  PHY%u%s\n", i,
+               i == (unsigned)phy ? "  <- the subject"
+                                  : (i == 0 ? "  <- the live panel" : ""));
+        for (r = 0; r < nregs; r++) {
+            long was, got;
+            snprintf(k, sizeof(k), "RBFBFsm%uWas%s", i, regs[r]);
+            was = num(fb, k);
+            snprintf(k, sizeof(k), "RBFBFsm%uGot%s", i, regs[r]);
+            got = num(fb, k);
+            printf("    %-10s 0x%08lx -> 0x%08lx%s\n", regs[r],
+                   was, got, was != got ? "   CHANGED" : "");
+        }
+    }
+
+    printf("\nstate asked: %ld %s\n", state,
+           rb_phyfsm_state_name((uint32_t)state));
+    printf("PHY2 measured as %u %s before any of this (307); the live panel\n"
+           "as %u %s.\n",
+           (unsigned)RB_PHYFSM_RESET,
+           rb_phyfsm_state_name((uint32_t)RB_PHYFSM_RESET),
+           (unsigned)RB_PHYFSM_TX_EN,
+           rb_phyfsm_state_name((uint32_t)RB_PHYFSM_TX_EN));
+}
+
 int main(int argc, char **argv)
 {
     /* Before findFB: a verb that sends nothing needs no hardware, and
-     * putting it first means no path from it can reach a send. */
-    if (argc > 1 && strcmp(argv[1], "fsm") == 0) {
+     * putting it first means no path from it can reach a send.
+     *
+     * `fsm` alone and `fsm <state>` are BUILD-ONLY and return here. Only
+     * `fsm go <state> [phy]` falls through to the send, and the literal `go`
+     * is required - the card names `dmubbl dig` and `dmubbl dto` as the two
+     * verbs that WRITE with no argument, each discovered by someone typing
+     * them to read the usage. This one cannot. */
+    if (argc > 1 && strcmp(argv[1], "fsm") == 0 &&
+        !(argc > 2 && strcmp(argv[2], "go") == 0)) {
         return fsmShow(argc, argv);
     }
 
@@ -1611,6 +1740,10 @@ int main(int argc, char **argv)
                "                      READ-ONLY on the chip. Needs\n"
                "                      -rbgpufbdpaltq. `zero` is the\n"
                "                      Linux-exact fill control.\n"
+               "  dmubbl fsm go <state> [phy]  SET_PHY_FSM (29) - THIS\n"
+               "                      SENDS. state REQUIRED, no default.\n"
+               "                      Needs -rbgpufbfsm, which arms\n"
+               "                      -rbgpufbdpalt itself for the survey.\n"
                "  dmubbl fsm [state] [phy]  SET_PHY_FSM (29) - BUILD\n"
                "                      ONLY, sends NOTHING, needs no arm.\n"
                "                      Prints the slot a send would push.\n"
@@ -1751,6 +1884,38 @@ int main(int argc, char **argv)
                "EXECUTES. So the reply path has never been tried at the right\n"
                "address. What it decides: whether DP alt mode is granted on\n"
                "PHY2 at all, which every downstream write depends on.\n");
+    } else if (strcmp(argv[1], "fsm") == 0) {
+        /* `fsm go <state> [phy]`. The state is REQUIRED: whether the
+         * firmware accepts RESET -> RESET_RELEASED directly or wants the
+         * ladder is not established, so a default would be a transition
+         * nobody chose. */
+        long st = argc > 3 ? atol(argv[3]) : -1;
+        long ph = argc > 4 ? atol(argv[4]) : RB_PHYFSM_TYPEC_INST;
+        if (st < 0) {
+            fprintf(stderr,
+                "dmubbl fsm go <state> [phy]   - the state is REQUIRED\n"
+                "  2 RESET_RELEASED  3 SRAM_LOAD_DONE  4 INITIALIZED\n"
+                "  5 CALIBRATED      9 PLL_EN         10 TX_EN\n"
+                "phy defaults to %u (UNIPHYC); PHY0 is the panel\'s and is\n"
+                "refused. `dmubbl fsm [state] [phy]` without `go` builds and\n"
+                "prints only.\n", RB_PHYFSM_TYPEC_INST);
+            IOObjectRelease(fb);
+            return 1;
+        }
+        if (!rb_phyfsm_state_allowed((uint32_t)st)) {
+            fprintf(stderr, "state %ld (%s) is off the allowlist - run\n"
+                            "`dmubbl fsm %ld` to see the refusal in full\n",
+                    st, rb_phyfsm_state_name((uint32_t)st), st);
+            IOObjectRelease(fb);
+            return 1;
+        }
+        d = @{ @"RBFBFsmPhy": @(ph), @"RBFBFsmGo": @(st) };
+        printf("\nSET_PHY_FSM (29) -> PHY%ld, state %ld %s\n"
+               "This SENDS. The verdict is two things and they are never one\n"
+               "number: whether DMCUB ANSWERED (the status field, which\n"
+               "command 1 does not have) and whether PHY%ld MOVED (nine\n"
+               "registers, four instances as control).\n",
+               ph, st, rb_phyfsm_state_name((uint32_t)st), ph);
     } else if (strcmp(argv[1], "dig") == 0) {
         /* 2E2: the DIG1 transmitter ENABLE for the Type-C port. ONE
          * setProperties call - the kext reads the control PHY, reads the
@@ -2014,6 +2179,8 @@ int main(int argc, char **argv)
     const long dpaltqCallsBefore = isDpAltQ ? num(fb, "RBFBDpAltQCalls") : 0;
     const int isDto = (strcmp(argv[1], "dto") == 0);
     const long dtoCallsBefore = isDto ? num(fb, "RBFBDtoProgCalls") : 0;
+    const int isFsm = (strcmp(argv[1], "fsm") == 0);
+    const long fsmCallsBefore = isFsm ? num(fb, "RBFBFsmCalls") : 0;
 
     kern_return_t kr = IORegistryEntrySetCFProperties(
         fb, (__bridge CFDictionaryRef)d);
@@ -2022,6 +2189,8 @@ int main(int argc, char **argv)
         digVerdictPrint(fb, digCallsBefore);
     } else if (isDpAltQ) {
         dpaltqReport(fb, dpaltqCallsBefore);
+    } else if (isFsm) {
+        fsmReport(fb, fsmCallsBefore);
     } else if (isDto) {
         dtoVerdictPrint(fb, dtoCallsBefore);
     } else if (isDom) {

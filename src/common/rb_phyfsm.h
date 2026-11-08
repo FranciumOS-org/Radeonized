@@ -84,6 +84,8 @@
 
 #include <stdint.h>
 #include "rb_dmub.h"
+#include "rb_dpcsphy.h"
+#include "rb_dpcsphy.h"
 
 #define RB_DMUB_CMD_VBIOS_SET_PHY_FSM   29u
 
@@ -135,6 +137,9 @@
 /* HBR2, derived not pasted: rb_dig.h's RB_DIG_TYPEC_SYMCLK is 54000 in
  * 10 kHz units. */
 #define RB_PHYFSM_TYPEC_SYMCLK_10KHZ 54000u
+/* The MSI MP2412C's lane count. Named rather than literal so the builder's
+ * caller and the hosttest cannot drift apart. */
+#define RB_PHYFSM_TYPEC_LANES        2u
 
 enum rb_phyfsm_state {
     RB_PHYFSM_POWER_UP_DEFAULT = 0,
@@ -171,7 +176,12 @@ enum rb_phyfsm_ret {
     RB_PHYFSM_E_NO_SYMCLK    = 76,  /* zero symbol clock                     */
     RB_PHYFSM_E_NO_REPLY     = 77,  /* status still the sentinel             */
     RB_PHYFSM_E_PHY_ECHO     = 78,  /* phy_id came back as another phy       */
-    RB_PHYFSM_E_STATE_ECHO   = 79   /* state came back as another state      */
+    RB_PHYFSM_E_STATE_ECHO   = 79,  /* state came back as another state      */
+    /* The send path's own, above the builder's so a code never leaves it in
+     * doubt whether the payload or the experiment refused (rule 14). */
+    RB_PHYFSM_E_NOT_ARMED    = 80,  /* -rbgpufbfsm absent                    */
+    RB_PHYFSM_E_NO_SURVEY    = 81,  /* the PHY survey did not run this call  */
+    RB_PHYFSM_E_NO_LICENCE   = 82   /* it ran, and the PANEL reads dead      */
 };
 
 /* The states we are willing to ask for. RESET and POWER_DOWN would undo the
@@ -285,6 +295,111 @@ static inline int rb_phyfsm_decode(const uint8_t *got,
     if (out->state  != sent->state)       { return RB_PHYFSM_E_STATE_ECHO; }
 
     return RB_PHYFSM_OK;
+}
+
+/* ---- 310c: the verdict, and WHY IT NEEDS THE CONTROLS IN THE SAME SAMPLE ----
+ *
+ * The thing this command is asked to do has a register that answers it:
+ * RDPCSTX PHY_CNTL0's PHY_RESET, 1 on PHY2 and 0 on the live panel (307). So
+ * the verdict is "did PHY2's PHY_RESET clear", and it is read from
+ * rb_dpcsphy.h's own accessor rather than a bit redefined here.
+ *
+ * But a reading on PHY2 alone cannot say the command did it. Rule 17: a
+ * counter that moves in a non-interleaved comparison has not been shown to
+ * move BECAUSE of the change. The four other instances are sampled in the
+ * same before/after pair, and if any of THEM moves, whatever happened was not
+ * per-port and the PHY2 reading is not attributable to a command that names
+ * phyid 2 - CONTAMINATED, which is a distinct verdict and not a success.
+ * 309b's extended A/B is the null this is measured against: the atom ENABLE
+ * moved none of the nine on any instance.
+ *
+ * `moved` is a MASK of which registers changed, not a bool, so "PHY2 changed"
+ * can be told from "PHY2's PHY_RESET changed" (rule 14's shape: a refusal is a
+ * code, and so is a result).
+ */
+
+/* The register index whose bit the verdict rests on. Named so the dependency
+ * on rb_dpcsphy.h is explicit rather than a bare 4. */
+#define RB_PHYFSM_VERDICT_REG   RB_DPCSPHY_R_PHY_CNTL0
+
+enum rb_phyfsm_verdict {
+    RB_PHYFSM_V_UNKNOWN      = 0,  /* not sampled                           */
+    RB_PHYFSM_V_NO_SEND      = 1,  /* refused before the push               */
+    RB_PHYFSM_V_NOTHING      = 2,  /* not one bit moved anywhere            */
+    RB_PHYFSM_V_RELEASED     = 3,  /* PHY2's PHY_RESET cleared, controls still */
+    RB_PHYFSM_V_MOVED        = 4,  /* PHY2 changed, PHY_RESET still set      */
+    RB_PHYFSM_V_CONTAMINATED = 5   /* a CONTROL moved - not per-port         */
+};
+
+/* A mask of which of the RB_DPCSPHY_R_COUNT registers differ for one
+ * instance. Bit r set means register r changed. */
+static inline uint32_t rb_phyfsm_moved(const uint32_t *before,
+                                       const uint32_t *after)
+{
+    uint32_t r, m = 0u;
+    if (!before || !after) { return 0u; }
+    for (r = 0u; r < (uint32_t)RB_DPCSPHY_R_COUNT; r++) {
+        if (before[r] != after[r]) { m |= (1u << r); }
+    }
+    return m;
+}
+
+/* before/after are RB_DPCSPHY_COUNT x RB_DPCSPHY_R_COUNT, flattened
+ * [inst * RB_DPCSPHY_R_COUNT + reg] - the layout the kext's phyInst[] array
+ * already has. `subject` is the instance the command named. */
+static inline int rb_phyfsm_verdict(const uint32_t *before,
+                                    const uint32_t *after,
+                                    uint32_t subject)
+{
+    const uint32_t stride = (uint32_t)RB_DPCSPHY_R_COUNT;
+    uint32_t i, subjMoved, anyMoved = 0u, ctlMoved = 0u;
+    int rstBefore, rstAfter;
+
+    if (!before || !after)                  { return RB_PHYFSM_V_UNKNOWN; }
+    if (subject >= RB_DPCSPHY_COUNT)        { return RB_PHYFSM_V_UNKNOWN; }
+
+    for (i = 0u; i < RB_DPCSPHY_COUNT; i++) {
+        const uint32_t m = rb_phyfsm_moved(&before[i * stride],
+                                           &after[i * stride]);
+        if (m) { anyMoved = 1u; }
+        if (m && i != subject) { ctlMoved = 1u; }
+    }
+    subjMoved = rb_phyfsm_moved(&before[subject * stride],
+                                &after[subject * stride]);
+
+    /* A subject that moved while a control moved too is not evidence about
+     * the subject (rule 17), so CONTAMINATED must win over any success.
+     *
+     * A first draft of this comment claimed the ORDER of these two lines was
+     * load-bearing - "the ordering is the finding, not a precedence
+     * convenience". The break-it sweep swapped them and fired NOTHING, and
+     * the sweep is right: ctlMoved implies anyMoved, so `!anyMoved` can never
+     * be true when a control moved and the order is unobservable. What is
+     * load-bearing is only that CONTAMINATED precedes the RELEASED test
+     * below, which the "release accepts reset either way" break covers.
+     * A comment is not a test, and this one was a claim the data refused. */
+    if (ctlMoved)   { return RB_PHYFSM_V_CONTAMINATED; }
+    if (!anyMoved)  { return RB_PHYFSM_V_NOTHING; }
+
+    /* The bit, off rb_dpcsphy.h's own mask rather than one redefined here.
+     * A first draft called rb_dpcsphy_in_reset() on `&before[...]`, which is
+     * a uint32_t* where that function wants a struct rb_dpcsphy_inst* - it
+     * compiled with a warning and would have read the wrong memory.
+     * `-Wall` caught it and the hosttest would not have: nothing called this
+     * function yet. A function with no caller has no coverage, whatever
+     * tests exist (rule 48, and rule 46's "a delegate that exists is not a
+     * delegate that is REACHED"). The kext now calls it. */
+    rstBefore = (before[subject * stride + RB_PHYFSM_VERDICT_REG] &
+                 RB_DPCSPHY_D_PHY_RESET) ? 1 : 0;
+    rstAfter  = (after[subject * stride + RB_PHYFSM_VERDICT_REG] &
+                 RB_DPCSPHY_D_PHY_RESET) ? 1 : 0;
+
+    /* A value outside 0/1 must never read as "released" (rule 14), so the
+     * test is for exactly 1 -> exactly 0 and everything else falls through. */
+    if (rstBefore != 1 || rstAfter != 0) {
+        return subjMoved ? RB_PHYFSM_V_MOVED : RB_PHYFSM_V_NOTHING;
+    }
+    return RB_PHYFSM_V_RELEASED;
 }
 
 #endif /* RB_PHYFSM_H */
