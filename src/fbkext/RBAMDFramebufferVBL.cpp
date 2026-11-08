@@ -332,6 +332,7 @@ void RBAMDFramebuffer::publishVBLState(void)
      * Instance 0 runs a stream and the others do not, so five identical words
      * mean the 0x100 instance arithmetic did nothing. */
     strencSample();
+    phyPublish();
     setProperty("RBFBStrencReady", strencReady);
     setProperty("RBFBStrencBase", (uint64_t)strencBase, 32);
     setProperty("RBFBStrencHTotal", (uint64_t)strencHTotal, 32);

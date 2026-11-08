@@ -64841,3 +64841,131 @@ rule 48 stated as cheaply as it ever gets.
 `tools/hosttest/strprog_test.c` and `tools/strencprog.m` build clean; new
 framebuffer UUID **5AA98CD9-8CFE-33D1-B0D8-A623843C5B29**. The next boot is
 the first chance to ask whether a **trained** link answers STATUS 1.
+
+---
+
+## 306 — four candidates killed with ZERO boots, and the PHY's own status finally built
+
+Boot 478 was still up, so this milestone spent the live boot before asking for
+another, and settled what the tree could settle.
+
+### Killed in the live boot, no restart
+
+**`enc1_configure_encoder` is NOT the gap, and DIG2 is already correct.**
+`dcn31_link_encoder_enable_dp_output` takes the not-mappable arm into
+`dcn10_link_encoder_enable_dp_output`, which calls `enc1_configure_encoder`
+BEFORE the atom transmitter ENABLE — two writes, `DP_CONFIG.DP_UDI_LANES` and
+`DP_DPHY_SCRAM_CNTL.DPHY_SCRAMBLER_ADVANCE`. I started to call that an
+untried step. 2E5 had already transcribed it (`src/common/rb_enc.h`,
+`-rbgpufbfe`), and boot 478's own published survey answers it outright:
+
+| | DIG0 panel | DIG1 | **DIG2** | DIG3 | DIG4 |
+|---|---|---|---|---|---|
+| `DP_CONFIG` | 3 = 4 lanes | 0 | **1 = 2 lanes** | 0 | 0 |
+| `DP_DPHY_SCRAM_CNTL` | `0x01020010` | same | **same** | same | same |
+
+`RBFBEncRan` 0, so those are the firmware's values. DIG2 carries the sink's
+correct **2 lanes** against the panel's 4 and 0 on the three dark instances,
+and a scrambler word byte-identical to the live panel's. Positive and negative
+control in one sample. **The recurring error's "read the evidence already in
+hand" form, caught before it cost a boot rather than after.**
+
+**My own arm scan lied to me first.** I read `kern.bootargs` through a grep
+pattern listing six tokens and concluded `-rbgpufbfe` was absent. It is
+present — the pattern was the instrument, and a search is an instrument too
+(rule 26). The unfiltered read has seventeen `-rbgpu*` tokens.
+
+**The DPIA branch is dead on source grounds.** `dcn31`'s other arm sends
+`DMUB_CMD__DPIA_DIG1_CONTROL` with `hpdsel = 6`, and it is taken only for
+`DISPLAY_ENDPOINT_USB4_DPIA` — USB4/Thunderbolt tunnelled DP. This is plain
+DP alt mode, so the atom table we already execute is the right command and
+the DPIA parameters are not a missing step.
+
+**THE RDPCSPIPE INSTANCE QUESTION IS SETTLED, BY ELIMINATION.**
+`rb_dpcspipe.h` refused to decide which instance is UNIPHY_C, rightly,
+because the header's five-entry table is a compile hack by its own comment.
+But `dcn31_resource.c:404` is `link_regs(id, phyid)` with
+`DPCS_DCN31_REG_LIST(id)` — **indexed by the link encoder id, not the phyid**.
+DIG2 is id 2, and the header aliases index 2 onto `0x2d73` = instance 0.
+Boot 471 read instance 0 NOT DISABLED and instance 1 DISABLED+acked, and
+ROM-attested `QUERY_DP_ALT` says only PHY2 of the three USB-C PHYs reads
+`alt_disable` 0. **If the alias ran the other way, UNIPHY_C would read
+DISABLED+acked and contradict the ROM instrument.** It does not. The
+alternative is contradicted by a reading, which is a different and better
+argument than trusting the table. **DP alt is not disabled on our PHY, now
+from two sources.**
+
+So the blocker is excluded from: DP-alt disable, lane count, scrambler, FE
+connect, BE enable, held steer FIFO, `DIS_DEFER`, raster, pixel clock,
+`PIPE_DTO_SRC_SEL`, hpdsel, power gating, stream/training order, and the DPIA
+branch. What has **never been read** is whether the PHY itself is alive.
+
+### 306's instrument: `src/common/rb_dpcsphy.h`
+
+Five registers x five instances, BASE_IDX 2, **stride 0xd8** — taken from
+`RDPCSTX1_RDPCSTX_CNTL 0x2a08` minus `RDPCSTX0_RDPCSTX_CNTL 0x2930` rather
+than assumed, and **all 25 offsets plus the BASE_IDX verified against
+`dpcs_4_2_0_offset.h` by script before any of them was trusted**:
+`RDPCSTX_CNTL` `0x2930`, `RDPCSTX_CLOCK_CNTL` `0x2931`,
+`RDPCSTX_INTERRUPT_CONTROL` `0x2932`, `RDPCS_TX_SRAM_CNTL` `0x2936`,
+`RDPCSTX_PHY_CNTL0` `0x2940`.
+
+**THE FILE'S SUBJECT IS WHO ANSWERS EACH BIT.** Every earlier reading on this
+line either answered our own stores or came from the wrong register, so the
+masks are split into **ANSWERED** (the hardware reports it — the reading) and
+**DRIVEN** (software wrote it — says only that software wrote it), and the
+hosttest proves the two sets disjoint per register. The witnesses that matter:
+
+- `PHY_CNTL0` `0x02000000` **REF_CLKDET_RESULT** — the reference-clock
+  detector's own output, the most direct statement available of whether the
+  PHY has a clock at all.
+- `PHY_CNTL0` `0x10000000` **SRAM_INIT_DONE** — the PHY's firmware image.
+- `CLOCK_CNTL` `0x400` / `0x4000` / `0x400000` **CLOCK_ON** — the clock is
+  *running*, as against the EN bits which say somebody asked.
+- `INTERRUPT_CONTROL` `0xf0` **TX0..3_FIFO_ERROR**, sticky — history, not
+  state (rule 33).
+
+**The clock-detector result carries its own licence.** A 0 result with
+`REF_CLKDET_EN` clear says nothing, and reading it as "no clock" would be the
+recurring error in one bit. `rb_dpcsphy_clkdet_valid()` is published BESIDE
+the verdict, and `tools/phylook.sh` prints in words that the reading means
+nothing when the detector is off. Read-only throughout: **no setter**, and it
+shares `-rbgpufbdpalt`'s arm with no new token, because the arm's documented
+hazard is about writes and there are none.
+
+### The break-it sweep found three defects in my own checks
+
+Twelve guards, **all now caught by a failing test and none by `-Werror`** —
+but it took three rounds, and each failure was a result:
+
+1. **Breaking the verdict's `on` term FIRED NOTHING.** Every branch `on` could
+   reach returned `DEAD` anyway: a term in a conjunction carrying no
+   information, rule 48's exact shape, in code I had just written. The three
+   CLOCK_ON bits are now published **raw** and the verdict is a two-input
+   function of the two bits whose meaning is established, rather than one
+   dressed up to look like it uses more.
+2. **Emptying one ANSWERED mask FIRED NOTHING**, because the "no empty mask"
+   check tested the OR of each group — a disjunction reported as coverage of
+   each term, the same defect it exists to catch, one level up. Now every one
+   of 29 masks is checked individually, through a runtime loop.
+3. **The ANSWERED/DRIVEN overlap check was NEVER COVERAGE.** Written as
+   `if ((a & d) || ...)` the compiler folds it to a constant and
+   `-Wconstant-logical-operand` kills the build on a break instead of failing
+   the test — **the `-Werror` trap for the sixth recorded time**, and this
+   time it had rendered a check incapable of ever failing at runtime. The
+   comparison now goes through a `volatile` array so it survives to run, and
+   the break then fires a FAIL.
+
+Also removed: `n < 2u` in the sweep, redundant against a loop that starts at 1
+and so unfalsifiable by any break.
+
+### Two instruments the next boot needs and 478 did not have
+
+- **`RBFBStrmW<n>Was` / `Want` / `Got`, per write.** Boot 478 had to infer
+  "`DP_VID_M` refused the store" from a zero bit in a changed mask, which
+  cannot distinguish a dropped store from a store of the value already there.
+  `strencprog` now prints the table and names a store that **DID NOT TAKE**.
+- **`RBFBPhy<i>*` and `tools/phylook.sh`** — the survey above.
+
+New framebuffer UUID **99122618-EC61-3E7B-B428-6CD5D0044DDC**, not installed.
+One restart now answers two questions that would otherwise have taken two.
