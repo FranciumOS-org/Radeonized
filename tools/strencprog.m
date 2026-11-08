@@ -12,8 +12,15 @@
  * this check is the courtesy, not the guard.
  *
  *   strencprog                 - read the licence and the state, write nothing
- *   strencprog go              - program DIG2 from OTG1 at 148500 kHz, HBR2
+ *   strencprog go              - ATTRIBUTE: configure DIG2 from OTG1 at
+ *                                148500 kHz HBR2, stream left DISABLED
+ *   strencprog unblank         - UNBLANK: turn the stream on
  *   strencprog go inst=2 otg=1 pixkhz=148500 rate=20
+ *
+ * THE ORDER IS go -> dptrain go tps=2 -> unblank. Upstream splits
+ * dp_set_stream_attribute from dp_unblank because link training happens
+ * between them, and boot 477 paid for collapsing them: with the stream
+ * enabled, dptrain refuses 66 STREAM_LIVE.
  *
  * DIG0 and OTG0 are the panel's and are refused BY NAME in the kext; this
  * tool refuses them again on the way in, because a refusal that only exists
@@ -25,6 +32,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/sysctl.h>
+#include "rb_strenc.h"
+#include "rb_strprog.h"
 
 static long rdnum2(io_service_t fb, const char *name, int *found)
 {
@@ -181,10 +190,29 @@ int main(int argc, const char **argv)
                                 "program it with otgprog first");
         printf("\n");
 
+        /* TWO PHASES, BECAUSE LINK TRAINING GOES BETWEEN THEM.
+         *
+         * `go` configures the encoder and leaves DP_VID_STREAM_ENABLE 0.
+         * `unblank` turns the stream on. Upstream splits these for exactly
+         * this reason - `enable_link_dp` trains the link between
+         * dp_set_stream_attribute and dp_unblank - and boot 477 proved why
+         * one list cannot do: with the stream enabled, dptrain refuses with
+         * RB_DPTX_W_STREAM_LIVE (66) and the chain locks out its own next
+         * step. */
         int wantGo = 0;
+        unsigned phase = (unsigned)RB_STRPROG_PHASE_ATTRIBUTE;
         unsigned inst = 2, otg = 1, pixkhz = 148500, rate = 20;
         for (int i = 1; i < argc; i++) {
-            if (!strcmp(argv[i], "go")) { wantGo = 1; continue; }
+            if (!strcmp(argv[i], "go")) {
+                wantGo = 1;
+                phase = (unsigned)RB_STRPROG_PHASE_ATTRIBUTE;
+                continue;
+            }
+            if (!strcmp(argv[i], "unblank")) {
+                wantGo = 1;
+                phase = (unsigned)RB_STRPROG_PHASE_UNBLANK;
+                continue;
+            }
             if (!strncmp(argv[i], "inst=", 5))   { inst   = (unsigned)strtoul(argv[i]+5, NULL, 0); continue; }
             if (!strncmp(argv[i], "otg=", 4))    { otg    = (unsigned)strtoul(argv[i]+4, NULL, 0); continue; }
             if (!strncmp(argv[i], "pixkhz=", 7)) { pixkhz = (unsigned)strtoul(argv[i]+7, NULL, 0); continue; }
@@ -197,7 +225,12 @@ int main(int argc, const char **argv)
         if (!wantGo) {
             printf("Read-only. Nothing was written.\n\n");
             printf("To program the stream, once the licence above reads 0 and "
-                   "pipe 1's rc is 0:\n  strencprog go\n");
+                   "pipe 1's rc is 0, IN THIS ORDER:\n"
+                   "  strencprog go            # configure; stream left OFF\n"
+                   "  dptrain go tps=2         # train the link\n"
+                   "  strencprog unblank       # turn the stream on\n\n"
+                   "`go` leaves DP_VID_STREAM_ENABLE 0 on purpose: with it "
+                   "set, dptrain refuses 66 STREAM_LIVE (boot 477).\n");
             IOObjectRelease(fb);
             return 0;
         }
@@ -238,13 +271,22 @@ int main(int argc, const char **argv)
             return 3;
         }
 
-        printf("writing: inst %u (DIG%u) from OTG%u, %u kHz, link rate %u\n",
+        printf("writing: phase %u (%s), inst %u (DIG%u) from OTG%u, "
+               "%u kHz, link rate %u\n", phase,
+               phase == (unsigned)RB_STRPROG_PHASE_ATTRIBUTE
+                   ? "ATTRIBUTE - configure, stream left OFF so the link can "
+                     "be trained"
+                   : "UNBLANK - turn the stream ON",
                inst, inst, otg, pixkhz, rate);
+        if (phase == (unsigned)RB_STRPROG_PHASE_UNBLANK) {
+            printf("  (this is the half that blocks dptrain: train FIRST)\n");
+        }
 
         /* Every key in ONE call: the dials and the trigger together, so the
          * kext can never run with a dial from a previous invocation (rule
          * 34). */
         NSDictionary *d = @{
+            @"RBFBStrmPhase":    @(phase),
             @"RBFBStrmInst":     @(inst),
             @"RBFBStrmOtg":      @(otg),
             @"RBFBStrmPixKhz":   @(pixkhz),

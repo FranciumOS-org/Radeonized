@@ -571,6 +571,7 @@ private:
     uint32_t           strmWrites;
     uint32_t           strmApplied;
     uint32_t           strmChangedMask;
+    uint32_t           strmPhaseUsed;
     uint32_t           strmInstUsed;
     uint32_t           strmOtgUsed;
     uint32_t           strmPixKhzUsed;
@@ -588,6 +589,7 @@ private:
     uint32_t           strmCallOtg;
     uint32_t           strmCallPixKhz;
     uint32_t           strmCallLink;
+    uint32_t           strmCallPhase;
 
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
@@ -1245,7 +1247,8 @@ private:
     void dpcspipeSample(void);
     void strencSample(void);
     uint32_t strmProgram(uint32_t inst, uint32_t tgInst,
-                         uint32_t pixKhz, uint32_t linkRate);
+                         uint32_t pixKhz, uint32_t linkRate,
+                         uint32_t phase);
     void strmPublish(void);
     /* 2EF: pipe 0's live DP pixel-clock DTO, read-only - and the check that
      * BASE_IDX 1 is a real address before anything is written there. Same
