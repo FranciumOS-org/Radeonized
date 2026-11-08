@@ -64680,3 +64680,35 @@ an n=1 reading.
 And pipe 1 read `DeriveRc` **2** again with `-rbgpufbraster` armed, confirming
 304's finding from the other side: the raster is **not persistent** and the
 arm only permits. It must be programmed in the same boot as the stream.
+
+### 305 — a false safety claim on the card, found by tripping it
+
+Boot 475, while waiting on a reinstall: `./build/out/dmubbl dto` was run with
+no argument **to read its usage**, on the strength of the card's own words —
+*"Nothing is written until `dmubbl dto` names a clock"*.
+
+**That claim is false and the run programmed pipe 1's DTO.**
+`tools/dmubbl.m:1791` is `long khz = 148500;`: the clock **defaults** to 2BD's
+preferred timing and the write is unconditional. `RBFBDtoProgRan` 1,
+`RBFBDtoProgApplied` 1, `RBFBDtoProgInst` 1, `RBFBDtoRateAfter` `0x8000d090`,
+verdict 1 STARTED — all of it caused by the reader, not by the user.
+
+Nothing was harmed: it is the same write 2F1 made deliberately in boot 455, on
+a dark pipe, and pipe 0 is refused by name in both halves. It is also the
+prerequisite the next step needs. **The defect is the documentation, and it is
+the dangerous kind** — a safety claim that makes a write look like a read. The
+card is corrected to say the opposite, with the line number.
+
+Worth stating as its own lesson, because the card is the thing most often
+trusted without checking: `dmubbl dig`, `dptrain`, `otgprog` and `strencprog`
+all genuinely refuse until a target is named, and `dmubbl dto` reads as though
+it belongs to that family and does not. **A gate documented for a family is
+not a gate implemented in every member** — the same shape as rule 46's "check
+the version grouping of the METHOD, not just the offsets", applied to our own
+tools rather than to Linux's.
+
+Rule 16 with the roles reversed, too. The rule says the instrument is a
+suspect; here the instrument was *fine* and the **description of it** was the
+defect, which no amount of reading the output would have caught. The only
+thing that caught it was checking `RBFBDtoProgRan` afterwards instead of
+assuming a read had read.
