@@ -20,7 +20,9 @@ connects, the transmitter answers every write, the DMCUB consumes and acks
 every command we send it. **The sink still sees nothing** — DPCD `0x202`
 reads `0x00` before and after, five boots running.
 
-**The blocker is NOT named.** "The analog PHY is off" was withdrawn in 300.
+**The blocker is NOT named.** "The analog PHY is off" was withdrawn in 300 and
+**retired as a misread in 301**, with positive evidence against it rather than
+suspicion.
 
 ---
 
@@ -48,88 +50,56 @@ will answer it.**
 
 ---
 
-## STEP 1 — install and boot (this is the only step pending on hardware)
+## STEP 1 — nothing is pending on hardware for the DP-alt question
 
-The framebuffer is built and the hosttest passes, including the seven-guard
-rule-48 break-it run on the new decoder.
+**Boot 471 answered it.** `tools/dpcspipelook.sh` reported **AGREES** with
+`RBFBDpcsPipeSweep` = **DIFFERS**, the control:
 
-```
-sudo tools/fbinstall.sh
-```
+| instance | dword | word | verdict |
+|---|---|---|---|
+| RDPCSPIPE0 | 0x2d73 | `0x00000000` | NOT DISABLED |
+| RDPCSPIPE1 | 0x2e4b | `0x00060000` | DISABLED, set and acked |
 
-Then check the UUID landed **inside the collection**, not in
-`/Library/Extensions` (rule 15 — 2xx cost nine boots to this):
+One instance agrees with `QUERY_DP_ALT` and the other actively disagrees, so
+the agreement discriminated rather than passing on a field that reads 0
+everywhere. In the same sample: RDPCSTX0 `0x00194444`, RDPCSTX1 `0x00023333`
+(DISABLE set, ACK clear — settling), RDPCSTX2-4 `0x00063333`.
 
-```
-kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \
-  --show-kext-uuids | grep -i rembrandt
-```
+**`0x00063333` is retired as a misread** — it contradicts both the ROM-attested
+`QUERY_DP_ALT` and the register Linux actually reads for UNIPHY_C, with an
+in-boot control on each side. Do not reopen it without new evidence.
 
-### The arm, which is part of the experiment (rule 34)
-
-**TWO tokens, both required:**
-
-```
-sudo tools/efi.sh bootarg add -rbgpufbdig -rbgpufbaltq
-```
-
-`-rbgpufbdig` arms the register read. `-rbgpufbaltq` arms `QUERY_DP_ALT`,
-which is **the thing the read is compared against**. With only the first, the
-agreement publishes 0 — which means "not evaluated", not "disagrees" — and the
-boot produces raw words with nothing to test them against.
-
-**The cable must be plugged in at boot (2FB).** Plugged in afterwards, every
-AUX read returns refusal 3 and `AUX_EN` reads clear; the firmware's connect
-path writes it, at boot, and we never do.
-
-Verify the arm **after** the boot, from the running system (rule 43), and read
-`rbgpu-boot` first — no increase means the boot was never armed and nothing in
-NVRAM is this boot's (rule 8).
+**Two things it does not establish, and neither may be claimed:** which
+`RDPCSPIPE` instance is UNIPHY_C (three USB-C PHYs against two registers,
+rule 18 — the agreement is an OR), and **whether a lane is powered**. That
+register defines `DPALT_DP4`, `DPALT_DISABLE` and `DPALT_DISABLE_ACK` and
+nothing else: no MPLL, no reference clock, no PSTATE.
 
 ---
 
-## STEP 2 — in the armed boot, in this order
+## STEP 2 — the candidate list, and what is left on it
 
-```
-build/out/dmubbl dpaltq
-tools/dpcspipelook.sh
-```
+Dead, each by measurement with a control:
 
-Order matters: the agreement is only computed in a publish that happens after
-`dpaltq` has answered, and the publish is periodic (`RBFBPubMs`, default
-500 ms), so give it a second.
-
-### What each outcome means, written down before the boot
-
-| `RBFBDpcsPipeAgree` | reading |
+| candidate | killed by |
 |---|---|
-| **0** | `QUERY_DP_ALT` did not answer for PHY2 — **no comparison was made.** Not a disagreement. Check the arm. |
-| **1** | An instance's `DPALT_DISABLE` matches the DMUB. **The first corroboration in a register** that PHY2's DP-alt state is granted, from the block Linux actually reads for UNIPHY_C. It **retires `0x00063333`** as a misread of the wrong register. |
-| **2** | Neither matches. **The larger finding:** two attested instruments disagree, with the ROM match on the DMUB's side. Then the question is which instrument, and the next step is a *third* one — not another read of either of these two. |
+| the second raster | 2FD — OTG1 honours its timing |
+| the pixel clock | 2FE — `PIPE_DTO_SRC_SEL`, ratio 0.9997 at `srcsel=0` |
+| the DIO encoder-type mux | 2FC — all six zero, closed as a negative |
+| `hpdsel` | 300 — in-boot A/B, both sides acked, PHY2 unmoved |
+| power gating | 300 — `RBFBPgCandidate` -1, `dmubbl dom` refusal 24 |
+| "the analog PHY is off" | 301 — the reading was the wrong register |
 
-`RBFBDpcsPipeSweep` is the control: only **DIFFERS** proves these are two
-registers and not one address read twice, which matters more than usual
-because upstream's own table aliases indexes 2, 3 and 4 onto them.
-
-### What this read CANNOT do, and do not let a 1 suggest otherwise
-
-`RDPCSPIPE_PHY_CNTL6` defines **three** fields —
-`DPALT_DP4`, `DPALT_DISABLE`, `DPALT_DISABLE_ACK`
-(`dpcs_4_2_0_offset.h:11945-11957`). **No MPLL, no reference clock, no
-PSTATE.** "Is DP alt granted" and "is the MPLL running" are two questions, and
-treating them as one is precisely what made `0x00063333` look like a single
-verdict for five boots. Nothing in boot 470 says whether a lane is powered.
-
-Which instance is UNIPHY_C is **not** established and must not be claimed:
-three PHYs report as USB-C (`is_usb` mask `0x1c`) against two registers, so
-the mapping cannot be one-to-one. The agreement is an OR over both.
+The atom transmitter ENABLE has executed since 2E2, the DMCUB consumes and
+acks every command, and the DIG front end connects. **Nothing on the old list
+survives.**
 
 ---
 
-## STEP 3 — where the chain actually goes next
+## STEP 3 — where the chain goes next, and this is now the whole of it
 
-Independently of boot 470's verdict, three things are **absent** from the
-chain and at least one of them is probably the reason the sink sees nothing:
+Three things are **absent** from the chain and **none has ever been
+attempted**. At least one of them is why the sink sees nothing:
 
 1. **A stream on DIG2.** There is no stream encoder programmed at all. This
    chip's DIO stream encoder is built by
@@ -143,9 +113,12 @@ chain and at least one of them is probably the reason the sink sees nothing:
 3. **A second `IOFramebuffer`.** `getDisplayModeCount()` has returned 1 since
    2sl.
 
-A link with no stream and no surface transmitting nothing the sink recognises
-is consistent with every reading taken so far, and it does not require a dark
-PHY to explain.
+A link carrying no stream and scanning out no surface is consistent with every
+reading taken across all thirteen boots of this line, and it requires no dark
+PHY to explain. **The sink's silence stops being evidence about the PHY the
+moment there is nothing for the PHY to carry.** Start with the stream: it is
+the only one of the three whose registers this kext has never touched, and
+`dcn30_dio_stream_encoder.c` has not been read yet.
 
 ---
 

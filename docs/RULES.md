@@ -425,29 +425,31 @@ With the clock right, boot 468 re-ran the whole chain — `dig fe` moved
 `FE_SEL 0 -> 0x4`, `dptrain tps=2` moved `TP_SEL 0 -> 1` — and **DPCD `0x202`
 still read `0x00` before and after**.
 
-**THE BLOCKER IS NOT NAMED. "The analog PHY is off" is WITHDRAWN (300)** —
-it was read off `RDPCSTX2_PHY_CNTL6` = `0x00063333` for five boots (459, 461,
-464, 468, 469) while `dmubbl dpaltq`'s own printed output said, since 2EA,
-that **Linux reads `RDPCSPIPE_PHY_CNTL6`, not RDPCSTX's, for UNIPHY_C on
-`YELLOW_CARP_B0`**. The recurring error's "read the evidence already in hand"
-form, and its most expensive instance. What survives: `RDPCSTX2` differs from
-`RDPCSTX0` (`0x00194444`, in-boot, byte-level) in a way that WOULD mean no
-MPLL and no ref clock **if those fields are what that address decodes as for
-this PHY** — and that `if` is open. Lane power is **unanswered in either
-direction**. `src/common/rb_dpcspipe.h` reads the right block: **two** real
-instances (`0x2d73`, `0x2e4b`, BASE_IDX 2; upstream's own comment is
+**THE BLOCKER IS NOT NAMED, and `0x00063333` IS RETIRED AS A MISREAD (300,
+301).** It was read off `RDPCSTX2_PHY_CNTL6` for five boots (459, 461, 464,
+468, 469) while `dmubbl dpaltq` had printed, since 2EA, that **Linux reads
+`RDPCSPIPE_PHY_CNTL6`, not RDPCSTX's, for UNIPHY_C on `YELLOW_CARP_B0`** — the
+recurring error's "read the evidence already in hand" form, its most expensive
+instance. `src/common/rb_dpcspipe.h` reads the right block: **two** real
+instances (`0x2d73`, `0x2e4b`, BASE_IDX 2; upstream's comment is
 `//[Note] Hack. RDPCSPIPE only has 2 instances.`, indexes 2/3/4 alias them and
-`rb_dpcspipe_dw()` refuses them), and it defines **only** DPALT_DP4 /
-DISABLE / DISABLE_ACK — **no MPLL, no ref clock, no PSTATE**, so it answers
-"is DP alt granted", never "is the lane powered". Conflating those two is what
-made `0x00063333` look like one verdict. `tools/dpcspipelook.sh`; the product
-is agreement with `QUERY_DP_ALT`, which is ROM-attested (2E1's VBIOS mask
-`0x1c`, reproduced boots 449 and 469) and says PHY2 `alt_disable` **0** =
-**granted**. Which instance is UNIPHY_C is **not** established: three USB-C
-PHYs, two registers. **Boot 469 also killed `hpdsel`** (in-boot A/B, Sent 3 vs
-Sent 2, both acked, PHY2 unmoved) **and power gating** (`RBFBPgCandidate` -1,
-`dmubbl dom` refusal 24). `rb_dpalt.h` has **no setter** and Linux marks that
-write path "avoid if possible".
+`rb_dpcspipe_dw()` **refuses** them). **Boot 471:** RDPCSPIPE0 `0x00000000`
+NOT DISABLED, RDPCSPIPE1 `0x00060000` DISABLED+acked, sweep **DIFFERS** (the
+control: two registers, not one address twice), **AGREES** with
+`QUERY_DP_ALT` — and non-vacuous, since the other instance disagrees. Same
+sample: RDPCSTX0 `0x00194444`, RDPCSTX1 `0x00023333` (settling), RDPCSTX2-4
+`0x00063333`. So RDPCSTX2 contradicts **both** the ROM-attested instrument and
+the register Linux reads, with a control each side. Which instance is UNIPHY_C
+is **not** established (three USB-C PHYs, two registers — rule 18); the
+agreement stays an **OR**. **LANE POWER IS UNTOUCHED** — this register defines
+only DPALT_DP4 / DISABLE / DISABLE_ACK, **no MPLL, no ref clock, no PSTATE**,
+and conflating those two questions is what made `0x00063333` look like one
+verdict. `tools/dpcspipelook.sh`. `QUERY_DP_ALT` is ROM-attested on three
+boots (2E1's mask `0x1c`; boots 449, 470, 471) and of the three USB-C PHYs
+**only PHY2 reads `alt_disable` 0**. **Boot 469 also killed `hpdsel`** (in-boot
+A/B, Sent 3 vs Sent 2, both acked, PHY2 unmoved) **and power gating**
+(`RBFBPgCandidate` -1, `dmubbl dom` refusal 24). `rb_dpalt.h` has **no setter**
+and Linux marks that write path "avoid if possible".
 
 **THE CABLE MUST BE PLUGGED IN AT BOOT (2FB).** Plugged in afterwards, every
 AUX read returns **refusal 3** on engine "AUX5" (= `RB_AUX_COUNT`, none):
@@ -592,7 +594,9 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
-named** (300 withdrew "the analog PHY is off"), and 2F8 added a cost: `tps=3`
+named** (301 retired "the analog PHY is off"); the three things never
+attempted are a **stream** on DIG2 (`dcn30_dio_stream_encoder.c`), a
+**surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666
