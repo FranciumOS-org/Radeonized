@@ -63495,3 +63495,180 @@ has **no setter** by design; Linux marks the write path "avoid if possible".
 So the first move is a verdict register that is not this one, which the
 handoff has been asking for since 2F9 and which 2FC's `DIO_LINK*_CNTL` did not
 turn out to be.
+
+---
+
+## 2FF — what powers an RDPCSTX lane: the driver does not, and every other candidate is now dead
+
+**Static, 2026-11-07, on top of boot 468. No boot.** Three things settled by
+source, two by boot 468's own ioreg, and one experiment built.
+
+### 1. Rule 46, and the answer is "nothing in the driver"
+
+`dcn31_link_enc_funcs` (`dcn31_dio_link_encoder.c:343-384`):
+
+```
+  .dpcstx_set_order_invert_18_bit = NULL
+  .set_phy_source                = NULL
+  .dpcs_initialize_phy            = NULL
+  .dpcs_configure_phypll          = NULL
+  .dpcs_configure_dpcs            = NULL
+  .dpcs_enable_dpcs               = NULL
+```
+
+**Every `dpcs_*` PHY entry point is NULL on this chip**, and `enc31_hw_init`
+(`:420`) writes only `TMDS_CTL_BITS.TMDS_CTL0` and calls
+`dcn10_aux_initialize`. So **there is no driver register sequence that powers
+an RDPCSTX lane on DCN 3.1.2** — nothing to port, nothing we have been
+missing. The PLL and the lane power are the transmitter command's job, and
+that command is a DMUB command on this board (2E2: ROM index 76
+`dig1transmittercontrol` is **zero**, so `init_transmitter_control` falls to
+`transmitter_control_fallback` -> `transmitter_control_v1_7`, which routes to
+`transmitter_control_dmcub_v1_7`).
+
+The path we take is also confirmed correct: `dcn20_link_encoder_enable_dp_output`
+(`dcn20_link_encoder.c`) returns straight to
+`dcn10_link_encoder_enable_dp_output` unless `avoid_vbios_exec_table` is set,
+and `dcn31_link_encoder_enable_dp_output`'s *other* branch is
+`link_enc_cfg_is_transmitter_mappable` -> `dig1_dpia_control`, which is
+**USB4 DPIA tunnelling** (`dpia_id = link->ddc_hw_inst`, `hpdsel = 6`), not
+Type-C DP alt mode. Our port is a plain UNIPHY in alt mode, so the atom
+branch is the right one.
+
+### 2. The payload, byte for byte against upstream
+
+`transmitter_control_v1_7` (`command_table2.c`) fills exactly nine fields.
+Ours fills the same nine at the same offsets, and the offsets are forced by
+the `uint32_t` union in the middle:
+
+| offset | field | upstream source | ours |
+|---|---|---|---|
+| 0 | phyid | `phy_id_to_atom(transmitter)`, identity | 2 |
+| 1 | action | `cntl->action` | 1 ENABLE |
+| 2 | mode_laneset.digmode | `signal_type_to_atom_dig_mode` | 0 DP |
+| 3 | lanenum | `cntl->lanes_number` | 2 |
+| 4..7 | symclk_units.symclk_10khz | `pixel_clock / 10` | 54000 |
+| 8 | hpdsel | `hpd_sel_to_atom(hpd_sel)` | **3** |
+| 9 | digfe_sel | `dig_encoder_sel_to_atom`, returns 0 **unconditionally** | 0 |
+| 10 | connobj_id | `cntl->connector_obj_id.id`, never assigned by dc | 0 |
+| 11 | HPO_instance | `hpo_engine_id - ENGINE_ID_HPO_DP_0`, cntl is `{0}` | 0 |
+
+`TxFFELaneSel`, `skip_phy_ssc_reduction`, `reserved2[2]` and `reserved3[11]`
+stay zero, which is what both senders' zero-init leaves them, and 12 + 48 =
+**60 = `RB_DIG_PAYLOAD`**. The payload is correct.
+
+### 3. Boot 468's ioreg kills the two remaining non-hpdsel candidates
+
+**The DMCUB CONSUMES the command.** `RBFBDmubAcks` 2, `RBFBDmubAckTimeouts`
+**0**, `RBFBDmubRptr` = `RBFBDmubWptr` = 2496, `RBFBDmubRptrMoves` 2. The
+firmware read our transmitter ENABLE out of the ring. It is not sitting
+unconsumed.
+
+**The encoder was already configured.** `rb_dig.h` has carried an explicit
+caveat since 2E2: it does not reproduce `enc1_configure_encoder`'s two writes,
+so "a null is 'no effect with the encoder unconfigured', not 'the firmware
+discards VBIOS commands'". Boot 468 retires that caveat — `dig` runs the
+encoder half by default (`RBFBEncRan` 2) and the registers were **already in
+the target state**:
+
+```
+  RBFBEncCfg2   1            DP2 DP_CONFIG.DP_UDI_LANES 1 = LANE_COUNT_TWO
+  RBFBEncScram2 0x01020010   bit 4 DPHY_SCRAMBLER_ADVANCE set
+  RBFBEncApplied 1  RBFBEncChanged 0   already there, so `applied` is not
+                                       evidence of our write (rule 20)
+  RBFBEncCfg0   3            the panel's DP0 at LANE_COUNT_FOUR - 1: the
+                             in-boot control that the field decodes right
+```
+
+So the ENABLE was sent with the encoder correctly configured, the FE
+connected (`FE_SEL 0 -> 0x4`, changed 1), the DTO and raster at the right
+rate (2FE), the DMUB consuming it — and PHY2 still `0x00063333`.
+
+### 4. What is left, and it is one field
+
+**`hpdsel` is the only field in the payload where this project's two sources
+disagree**, and `rb_dig.h` has said so in its own derivation since 2E2:
+
+- `hpd_sel_to_atom` (`command_table_helper2_dce112.c:63`) maps
+  `HPD_SOURCEID1` (= 0, `grph_object_defs.h:45`) to byte 1, and
+  `link_factory.c:603` is `hpd_src = pin_id - 1` against the VBIOS record's
+  `pin_id` 3. **That gives 3.**
+- `dmub_cmd.h`'s own comment on the field is "=1: HPD1, =2: HPD2, ..., =0:
+  HPD is not assigned", and our port is HPD2 by four independent hardware
+  readings. **That reads as 2.**
+
+Both cannot be right, and nothing has separated them, because **this firmware
+has no reply path** (2zr): a command it refuses and a command it accepts and
+ignores are byte-identical from our side. Every other explanation for the dead
+ENABLE is now eliminated on hardware, so this is what is left.
+
+### Built: the one-field override, as an IN-BOOT A/B
+
+`dig` may be re-sent inside a boot (`RBFBDigCalls` was 2 in 468), so this
+question can be asked in rule 44's preferred form — interleaved, single-send
+granularity — rather than as two boots.
+
+- **`rb_dig.h`: `rb_dig_set_hpdsel()`.** The bounds are **the same 1..6 the
+  gate applies**, so an override cannot smuggle a value past
+  `rb_dig_refuse()`; that is why it is a setter and not a bare assignment.
+  It **returns whether it took**, so a refused override is a code rather than
+  a silently kept default (rule 14). `rb_dig_typec_enable()` is untouched, so
+  a boot that sets nothing sends exactly what boot 468 sent.
+- **Kext**: `digHpdSelWant` (0 = use the derived value), `digHpdSelSent` and
+  `digHpdSelTook`, all three published. `RBFBDigHpdSel` is read in the **same
+  `setProperties` dictionary** as `RBFBDigPhy` and handled before it, so no
+  second round trip can land between the dial and the send it governs
+  (rule 34).
+- **Tool**: `dmubbl dig hpdsel=N`, which prints which side it is on and tells
+  the reader to check `RBFBDigHpdSelTook`.
+- **Hosttest**: the producer's default pinned; 2 and 6 accepted; 0, 7,
+  `0xffffffff` and NULL refused **without disturbing the set**; and a sweep
+  over 0..9 asserting that **every value the setter accepts passes the gate
+  and every value it refuses the gate would also refuse** — because the two
+  bounds are now written in two files and the failure mode is them drifting.
+
+### Rule 48, four breaks, and it found a defect in the test again
+
+| break | result |
+|---|---|
+| bound removed | caught, 7 fails |
+| assign before the check (half-applied) | caught |
+| zero allowed | caught, incl. the gate-agreement sweep |
+| over-6 allowed | caught |
+| always return 1 and assign | caught |
+
+**And the first run exposed shared state between cases.** Under the "zero
+allowed" break, the `0` case left `p.hpdsel` at 0, and the *next* case then
+failed for that reason rather than for anything about 7 — a case that can fail
+for a reason other than the one it names, which hides whichever guard it was
+written for. Each out-of-range case now re-produces the set. This is the
+second time in two milestones (2FC was the first) that the break-it run found
+the defect in the **test** rather than in the code, which is the argument for
+rule 48 in its strongest form.
+
+**Also, my break-it harness lied twice more**, both times the same way: a
+shell loop using `|` as a field delimiter silently truncated patterns
+containing `||`, producing `error: expected expression` that read exactly like
+a `-Werror` trap. Rule 26 on the runner, and the fix was to drive the whole
+sweep from Python. Noted because it has now happened in two consecutive
+milestones.
+
+Framebuffer UUID **09F04A54**.
+
+### Next
+
+Install, reboot with the cable in, then in ONE boot:
+
+```
+dmubbl dig fe                   # hpdsel omitted = the derived 3, the A side
+dpaltlook.sh                    # PHY2
+dmubbl dig fe hpdsel=2          # the B side, same boot
+dpaltlook.sh                    # PHY2 again
+```
+
+`RBFBDigHpdSelTook` must read 1 on the second send or the comparison is void.
+**If PHY2 moves off `0x00063333` on either side, that is the first movement in
+five boots.** If neither moves, hpdsel is not it either, and what remains is
+that the firmware is refusing the command for a reason it cannot tell us —
+at which point the next thing to find is a verdict register that is not
+`PHY_CNTL6`, which 2FC looked for and did not find in `DIO_LINK*_CNTL`.

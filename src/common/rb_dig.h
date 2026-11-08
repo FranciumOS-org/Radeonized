@@ -240,6 +240,46 @@ static inline void rb_dig_typec_enable(struct rb_dig_params *p)
     p->hpo_instance = RB_DIG_HPO_DP_NONE;      /* what Linux sends      */
 }
 
+/* 2FF: override hpdsel on a set rb_dig_typec_enable() already produced.
+ *
+ * WHY THIS ONE FIELD GETS AN OVERRIDE AND THE OTHERS DO NOT. It is the only
+ * field in the payload where this project's two sources DISAGREE, and
+ * rb_dig.h has said so since 2E2 in its own derivation:
+ *
+ *   - `hpd_sel_to_atom` (command_table_helper2_dce112.c:63) maps
+ *     HPD_SOURCEID1 (= 0, grph_object_defs.h:45) to byte 1, and
+ *     link_factory.c:603 is `hpd_src = pin_id - 1` against the VBIOS
+ *     record's pin_id 3. That derivation gives **3**.
+ *   - `dmub_cmd.h`'s own comment on the field is "=1: HPD1, =2: HPD2, ...",
+ *     and our port is HPD2 by four independent hardware readings, which
+ *     reads as **2**.
+ *
+ * Both cannot be right and no measurement has separated them, because the
+ * DMUB has no working reply path on this firmware (2zr) - a command it
+ * refuses and a command it accepts and ignores look identical. By boot 468
+ * every other candidate for the dead ENABLE had been eliminated on hardware:
+ * the payload is byte-correct against transmitter_control_v1_7, the DMCUB
+ * CONSUMES it (RPTR reached WPTR, acks 2, timeouts 0), the encoder was
+ * already configured (DP_CONFIG 1, SCRAM_CNTL bit 4 set, changed 0), the FE
+ * is connected, the DTO and the raster run at the right rate, and PHY2 has
+ * stayed 0x00063333 for four boots. This field is what is left.
+ *
+ * The bounds are the SAME ones rb_dig_refuse() applies, so an override
+ * cannot smuggle a value past the gate, and the default is untouched: a boot
+ * that sets nothing still sends the derived 3. That makes the comparison an
+ * in-boot A/B at single-send granularity (rule 44), which is the only form
+ * this question can be asked in - `dig` may be re-sent within a boot.
+ *
+ * It returns whether it took, so a refused override is a CODE and not a
+ * silently kept default (rule 14). */
+static inline int rb_dig_set_hpdsel(struct rb_dig_params *p, uint32_t hpdsel)
+{
+    if (!p) { return 0; }
+    if (hpdsel == 0u || hpdsel > 6u) { return 0; }
+    p->hpdsel = hpdsel;
+    return 1;
+}
+
 /* dc_dp_types.h enum dc_lane_count: 1, 2, 4 (and 8, which DP never uses -
  * LANE_COUNT_DP_MAX is LANE_COUNT_FOUR). */
 static inline int rb_dig_lanes_valid(uint32_t n)

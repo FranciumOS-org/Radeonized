@@ -681,6 +681,14 @@ private:
      * The target is PHY2 (2E1's ROM-derived UNIPHY_C), which drives nothing,
      * and PHY0 - the live panel - is refused by name. */
     bool               digArmed;         /* -rbgpufbdig */
+    /* 2FF: the hpdsel the next send should carry, and whether the override
+     * was accepted. 0 means "use rb_dig.h's derived value", so a boot that
+     * sets nothing is unchanged. digHpdSelTook is published because a refused
+     * override that silently kept the default would make the A/B a lie
+     * (rule 14). */
+    uint32_t           digHpdSelWant;
+    uint32_t           digHpdSelSent;
+    int                digHpdSelTook;
     bool               feArmed;          /* -rbgpufbfe (2EC) */
     bool               dtoArmed;         /* -rbgpufbdto (2EF) */
     bool               dtoReady;         /* the aperture covered BASE_IDX 1 */

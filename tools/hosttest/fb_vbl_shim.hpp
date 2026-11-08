@@ -313,6 +313,8 @@ public:
     uint64_t dpaltChanges=0;
     int dpaltSweep=0;
     bool dpaltSampled=false, dpaltArmed=false, dpaltReady=false;
+    uint32_t digHpdSelWant=0, digHpdSelSent=0;
+    int digHpdSelTook=0;
     /* 2FC: mirrored here the moment they were added to the kext, which is
      * the 2B1 lesson - a shim that lags the class compiles and tests the
      * wrong object. */

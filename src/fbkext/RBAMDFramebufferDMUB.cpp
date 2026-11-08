@@ -912,6 +912,18 @@ uint32_t RBAMDFramebuffer::dmubDigExperiment(uint32_t phyid)
     rb_dig_typec_enable(&p);
     p.phyid = phyid;
 
+    /* 2FF: the one-field override, applied through rb_dig.h's own setter so
+     * the bounds are the gate's bounds and this file cannot invent a value.
+     * 0 means "leave the derived hpdsel alone", so a boot that sets nothing
+     * sends exactly what every boot up to 468 sent. Both the value that went
+     * out and whether the override took are recorded, because a refused
+     * override that quietly kept the default would make the A/B a lie. */
+    digHpdSelTook = 0;
+    if (digHpdSelWant != 0u) {
+        digHpdSelTook = rb_dig_set_hpdsel(&p, digHpdSelWant);
+    }
+    digHpdSelSent = p.hpdsel;
+
     /* The control, read before the refusal that depends on it. hubpRegs is
      * the same BAR5 window the OTG, HPD, AUX and PG reads come from; the
      * RDPCSTX block sits inside it when dpaltFits (RBAMDFramebufferHUBP.cpp
@@ -1369,6 +1381,9 @@ void RBAMDFramebuffer::dmubPublish(void)
     setProperty("RBFBDigArmed", digArmed);
     setProperty("RBFBDigCalls", (uint64_t)digCalls, 32);
     setProperty("RBFBDigSends", (uint64_t)digSends, 32);
+    setProperty("RBFBDigHpdSelWant", (uint64_t)digHpdSelWant, 32);
+    setProperty("RBFBDigHpdSelSent", (uint64_t)digHpdSelSent, 32);
+    setProperty("RBFBDigHpdSelTook", (uint64_t)digHpdSelTook, 32);
     setProperty("RBFBDigRan", (uint64_t)digRan, 32);
     setProperty("RBFBDigRefuse", (uint64_t)digRefuse, 32);
     setProperty("RBFBDigPhy", (uint64_t)digPhy, 32);
