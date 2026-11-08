@@ -52,76 +52,84 @@ mechanism.
 
 ## Do this next
 
-**Everything between us and the firmware is now accounted for**, so do not
-spend a boot re-checking it:
+**Install `16CB216D` and read it. One boot, one question.**
 
-- **The payload is confirmed byte by byte in the memory DMCUB reads** —
-  `02 01 00 02 f0 d2 00 00 03 00 00 f4` = phyid 2, ENABLE, DP, 2 lanes,
-  symclk 54000, hpdsel 3, digfe 0, connobj 0, HPO 244.
-- **DMCUB consumed it** — `WPTR/RPTR 0x9c0/0x9c0`, acks 2/0.
-- **The reply slot cannot carry execution evidence, by design.**
-  `transmitter_control_dmcub_v1_7` uses `DM_DMUB_WAIT_TYPE_WAIT`;
-  `query_dp_alt_from_dmub` uses `WAIT_WITH_REPLY`. The DIG1 transmitter
-  control never asks for a reply, so there is no `ret_status` to fetch. **An
-  earlier draft of this file made that the next step. It does not exist.**
-- **The mailbox is eliminated, same boot, with a ROM cross-check.** The
-  `QUERY_DP_ALT` sweep round-trips on all five PHYs, the echo field matches
-  each phy_id, the `is_usb` mask `0x1c` matches the VBIOS ROM from 2E1, and
-  **PHY2 still reports `alt_disable` 0 / `is_dp4` 0** — DP alt granted, two
-  lanes, unchanged by the ENABLE.
+```
+sudo tools/fbinstall.sh
+```
+then reboot **with the cable plugged in**, and:
+```
+sh tools/phylook.sh
+```
 
-**So the gap is inside the firmware's handling of this command.** Either it
-declines on a precondition we have not identified, or what it runs for a USB-C
-PHY does something other than release reset. Start there, and note that
-**sending more of what we already send cannot answer it.**
+**The question: is PHY2's register interface BLOCKED?**
+`RDPCSTX_DPALT_CONTROL_REG` carries `RDPCS_ALLOW_DRIVER_ACCESS` and
+`RDPCS_DRIVER_ACCESS_BLOCKED`. If PHY2 reads BLOCKED where the live panel
+reads ALLOWED **and** dark USB-C PHY3 does not, it accounts for everything at
+once with no new mechanism: `PHY_RESET` never clearing, the atom ENABLE moving
+nothing, and **`DP_VID_M` refusing a store** — unexplained since boot 478 and
+exactly what a blocked register interface looks like.
 
-Two directions, neither of which needs a boot to begin:
+**Read both diffs, not one.** `RBFBPhy2AccessDiffPanel` and
+`RBFBPhy2AccessDiffDark`. A difference against the panel alone is the generic
+"never brought up" signature and means nothing — **that is precisely how 308's
+candidate died.** `phylook.sh` says which case it is in prose.
 
-1. **The SRAM-load handshake — the one live candidate (308).** Decoded per
-   field, the live panel has `SRAM_EXT_LD_DONE` **1** and `SRAM_BYPASS` **1**
-   with its PHY out of reset; PHY2 has both **0** with its PHY held.
-   `SRAM_INIT_DONE` is set on **both**, so it carries no information.
-   `rb_dpcsphy_sram_diff()` publishes the comparison against the panel, and
-   `tools/phylook.sh` names which fields differ. **It needs a boot to read on
-   the installed kext (UUID `DDFF93EB`) — that is the next reading.** Hold the
-   two caveats: the bits are **one observation, not two** (they move together
-   in boot 479's words), and **nothing in this tree says who writes them**,
-   which is why they sit in their own UNATTRIBUTED set with no setter.
-   **Do not write them** until a source names the owner.
+Three other readings come free in the same boot: DMCU's `FORCE_TX_CLK_DIS`,
+a **third** source on `DPALT_DISABLE` (`RDPCSTX_DMCU_DPALT_PHY_CNTL6`, beside
+RDPCSPIPE's and 301's retired RDPCSTX read — three sources can name an odd one
+out where 301's two could only be OR-ed), and `PHY_ENC_TYPE_SEL`.
 
-   **The ROM is eliminated as a place to look (308b).** Slot 39
-   `dig1transmittercontrol` in the master command table at `0xa480` is
-   **`0x0000`** — absent, along with every other display-encoder entry. The
-   firmware servicing this command is **DMCUB's own image** (4.0.15.47, in
-   CW0/CW1), not the ROM.
+**Do not write any of them.** There is no setter and the ownership register
+must not get one: a driver that writes `ALLOW_DRIVER_ACCESS` to grant itself
+access is not a driver that was granted it.
 
-   **No sibling project has the answer (308).** nullarc — Radeon 780M,
-   Phoenix, DCN 3.1.4, the nearest chip to ours — lists external displays
-   under "Not yet" and has no DPCS material. Cobalt64 is RDNA 4 and reads the
-   block without writing a reset release. UnifiedRed is DCE 11 era.
-2. **Find the precondition from the other side.** The port reports DP alt
-   granted and two lanes, AUX2 works, the cable was in at boot, EDID read, the
-   DTO runs, the raster scans. What a USB-C PHY release needs beyond that —
-   a USB-subsystem handoff, a PHY power state, a SMU/PMFW step — is not named
-   anywhere in the driver, which is itself the finding (there is no acquire in
-   `dcn31_dio_link_encoder.c`).
+**If PHY2 reads ALLOWED and unblocked**, the ownership line is closed too, and
+what remains unread is the other ~26 registers of the block — `PHY_CNTL1..17`,
+`PHY_FUSE0..3`, `RDPCS_TX_CR_ADDR`/`CR_DATA` (the indirect PHY window),
+`PLL_UPDATE_*`. Cobalt64's Navi 48 survey reads all of them; we read nine.
 
-**Do not write `PHY_RESET`.** `rb_dpcsphy.h` is read-only by design: on this
-chip the bit's owner is the firmware, and on the panel the firmware is what
-released it.
+## What is already excluded, so do not re-open it
+
+- **308's SRAM handshake.** `EXT_LD_DONE` / `SRAM_BYPASS` set on the panel and
+  clear on **all four** dark instances. Live-versus-dark, not PHY2.
+- **The ROM.** Slot 39 `dig1transmittercontrol` in the master command table at
+  `0xa480` is `0x0000`, with every display-encoder entry 0. The firmware
+  servicing our command is **DMCUB's image** (4.0.15.47, CW0/CW1).
+- **Every sibling project.** nullarc (780M, Phoenix, DCN 3.1.4 — the nearest
+  chip to ours) lists external displays under "Not yet" with no DPCS material;
+  Cobalt64 (RDNA 4) reads the block but writes no reset release; UnifiedRed is
+  DCE 11 era.
+- **A driver-side PHY bringup.** DCN31 NULLs `dpcs_initialize_phy`,
+  `dpcs_configure_phypll`, `dpcs_configure_dpcs`, `dpcs_enable_dpcs` and
+  `set_phy_source`. The `avoid_vbios_exec_table` path is debug-only and needs
+  exactly those NULLs.
+- **Our atom payload**, confirmed byte by byte in the memory DMCUB reads:
+  `02 01 00 02 f0 d2 00 00 03 00 00 f4`. And `pll_id` is not in the v1.7
+  payload at all.
+- **The mailbox.** `QUERY_DP_ALT` round-trips on all five PHYs with per-send
+  echo and a ROM match, in the same boots where the ENABLE moves nothing.
+- **The reply slot as execution evidence.** `transmitter_control_dmcub_v1_7`
+  uses `DM_DMUB_WAIT_TYPE_WAIT`, so no `ret_status` is ever written for this
+  command.
+- The DIO PHY mux (`set_dio_phy_mux` is HPO-only), a DP-alt acquire (none in
+  the driver), the encoder side entirely (306), `DIS_DEFER`, the held FIFO,
+  the DPIA branch, the RDPCSPIPE instance.
 
 ## Traps this milestone paid for
 
-- **`dmubbl dig` WRITES WITH NO ARGUMENT** — phyid defaults to PHY2. A bare
-  run typed to read the usage performs the atom ENABLE. This is boot 475's
-  `dmubbl dto` trap with a different verb; both are now named on the card.
+- **`dmubbl dig` WRITES WITH NO ARGUMENT** — phyid defaults to PHY2, so a bare
+  run typed to read the usage performs the atom ENABLE. Boot 475's `dmubbl
+  dto` trap with a different verb; both are named on the card.
 - **`tps=3` / `tps=4` degrade the sink until a reboot.** Use `tps=2`.
 - **The cable must be plugged in at boot.**
-- `tools/phylook.sh` prints hex with an ANSWERED/DRIVEN decode, and `ABSENT`
-  rather than `0` for a key the loaded kext does not publish.
-- A non-5 verdict on the live panel means **the loaded kext predates the
-  licence gate** — read the raw words, not the verdict.
-- Boot 479's words **cannot separate** `TX_CLOCK_ON` from `TX_CLK_EN`, nor
-  `TX_FIFO_EN` from the per-lane enables: each pair moves together there. The
-  hosttest pins the bits synthetically; hardware separation needs a boot where
-  one is set without the other.
+- A non-5 PHY verdict on the live panel means the loaded kext predates the
+  licence gate — read the raw words.
+- `phylook.sh` prints hex with an ANSWERED/DRIVEN decode and says **ABSENT**,
+  never `0`, for a key the loaded kext does not publish.
+- Three pairs this block's own data cannot separate:
+  `TX_CLOCK_ON`/`TX_CLK_EN`, `TX_FIFO_EN`/the lane enables, and
+  `EXT_LD_DONE`/`SRAM_BYPASS`. Each moves together in every sample so far;
+  the hosttest pins them with synthetic words.
+- A break that fires nothing because it **broke nothing** is not missing
+  coverage. The disjointness check is per register on purpose.
