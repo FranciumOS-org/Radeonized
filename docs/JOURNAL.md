@@ -64450,3 +64450,56 @@ the only instance with a cable attached (rule 47) and no stream has ever been
 programmed there, so a held FIFO reset cannot be shown to block symbols that do
 not exist. **Next:** boot this, and if `RBFBStrencMsaMismatch` is 0 the write
 set is both known and arithmetically validated.
+
+### 304 — boot 474: the gate passed, and PARAM3 got its real check
+
+**Boot 474**, framebuffer UUID `4ADE62B7-8AF9-3895-970D-2A0737EF487F` verified
+**inside the live collection** before anything was read (rule 15).
+
+**`RBFBStrencMsaMismatch` = 0.** All four MSA words derived from OTG0's eight
+registers equal DIG0's four live words, bit for bit, in one sample.
+`RBFBStrencBase` 1, `RBFBStrencActiveAgree` 1, `RBFBStrencRunMask` `0x01`,
+`RBFBStrencP0DeriveRc` 0.
+
+**This is PARAM3's first hardware check and it passed.** The hosttest could
+only back-derive the sync inputs from PARAM3's own expected output, which is
+circular (rule 17), so 304 refused to count it as coverage and said so in the
+test, the journal and the tool. Boot 474 **read** them:
+
+| | back-derived in the test | measured, boot 474 |
+|---|---|---|
+| `OTG_H_SYNC_A` | END 60, START 0 | `0x003c0000` — END 60, START 0 |
+| `OTG_H_SYNC_A_CNTL` | POL 0 | `0x00000000` |
+| `OTG_V_SYNC_A` | END 5, START 0 | `0x00050000` — END 5 |
+| `OTG_V_SYNC_A_CNTL` | POL 1 | `0x00000001` |
+
+All four guesses were right, and the derived PARAM3 `0x003c8005` equals the
+live word. The guesses being right is *not* what makes this a result — the
+inputs being **read instead of assumed** is.
+
+**DIG2's held FIFO reset is now in three boots** (472, 473, 474):
+`DP_STEER_FIFO` 1 on DIG2 and 0 on all four others, and
+`DP_VID_STREAM_CNTL` `0x00100000` (DIS_DEFER 0) against `0x00100200`
+elsewhere. `DP_SEC_FRAMING4` `0x20000000` uniform on all five.
+
+**`DP_VID_M` on instance 0 drifted a third time**: `0xa2a6` (472) ->
+`0xa2a4` (473) -> **`0xa2a7`** (474). Three distinct values in three boots with
+everything else on instance 0 stable, which settles `DP_VID_M_N_GEN_EN` as
+doing what its name says. M is a value to **prime**, never to copy, and the
+drift is also standing evidence the panel's stream is live rather than a
+static snapshot.
+
+**Pipe 1: `RBFBStrencP1DeriveRc` 2 = `TOTAL_ZERO`, all eight OTG words zero.**
+`-rbgpufbraster` **is** armed this boot, so this is not a refusal of the arm —
+the arm only permits, and `otgprog ... go` is what writes. Nothing ran it, so
+an unprogrammed pipe 1 is the expected reading (rule 34: the arm is part of
+the experiment, and so is whether the tool was actually invoked). Two things
+follow. First, the pipe 1 raster is **not persistent** — it is programmed per
+boot by our own tool, so any boot that wants a stream on DIG2 must program the
+raster in that same boot. Second, the hardware just executed one of the
+derivation's refusal paths for real: refusal 2 fired on an all-zero register
+block, which is the break-it check the machine performed itself.
+
+**The gate for the write is satisfied in one boot**: `Base` CONFIRMED,
+`ActiveAgree` 1, instance 0 `RUNNING`, and the derivation reproducing the
+panel exactly. The write set is both known and arithmetically validated.
