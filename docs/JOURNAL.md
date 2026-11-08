@@ -66166,3 +66166,85 @@ internal registers behind `RDPCS_TX_CR_ADDR`/`CR_DATA`, which 310 reclassified
 as **not a read** — choosing a target means writing somebody else's latched
 cursor mid-sequence. Neither is a register to read next; both are a different
 kind of work.
+
+---
+
+## 310e — the sink is reached through an ACTIVE USB-C-to-HDMI ADAPTER, and 2BF's open question is answered off the live boot
+
+Tag `310e`. Boot **485**, same armed boot as 310d, four DPCD reads over AUX2,
+engine AUX2, `refusal 0`, 16 bytes each. **No new code, no new write
+surface** — these addresses were always readable and nobody had read them.
+
+2BF left this explicitly open and called it unanswerable from the registry:
+*"whether the monitor is reached by a USB-C-to-DP cable or by an active
+USB-C-to-HDMI adapter (the MP2412C's own inputs are not recorded anywhere in
+this journal)"*. It is answerable, over AUX, in one command — the recurring
+error's "read the evidence already in hand" form again, except here the
+evidence was one unread address rather than a misread register.
+
+### The reading, two independent sources
+
+**DPCD `0x000`** = `12 14 c2 81 01 1d 01 81 ...`
+
+| addr | value | field |
+|---|---|---|
+| `0x000` | `0x12` | DP **1.2** |
+| `0x001` | `0x14` | MAX_LINK_RATE **HBR2** |
+| `0x002` | `0xc2` | **2 lanes**, TPS3_SUPPORTED, ENHANCED_FRAME_CAP |
+| `0x003` | `0x81` | MAX_DOWNSPREAD, TPS4_SUPPORTED |
+| **`0x005`** | **`0x1d`** | **`DWN_STRM_PORT_PRESENT` 1**, type bits `0b10` = **DVI/HDMI**, **`FORMAT_CONVERSION` 1**, `DETAILED_CAP_INFO_AVAILABLE` 1 |
+| `0x007` | `0x81` | DOWN_STREAM_PORT_COUNT **1**, OUI_SUPPORT |
+
+**A monitor's own DP receiver reports `DWN_STRM_PORT_PRESENT` 0.** A 1 means
+the thing answering our AUX transactions is not the panel — it is a
+converter, and the display is downstream of it.
+
+`DETAILED_CAP_INFO_AVAILABLE` 1 makes **`0x080`** valid, and it agrees:
+`0b 88 02 17` — port type **3 = HDMI**, HPD-aware, **max TMDS clock
+`0x88 x 2.5` = 340 MHz** (an HDMI 2.0 rate). A DP sink has no TMDS clock to
+report.
+
+**The second source, independent of the capability bits: `0x500`**, the branch
+device block — `00 10 fa | 63 48 44 4d 49 62 | 27 | 15 77`. IEEE OUI
+**`00-10-fa`**, device ID string **`"cHDMIb"`**, HW rev `0x27`, FW
+`0x15`.`0x77`. `0x400` (the *sink* OUI block) reads **all zero**. A branch
+device block is only populated by a device that is branching, so the two
+sources are a capability read and an identity read, and they agree.
+
+### What it changes
+
+**"Try a USB-C-to-HDMI dongle" is dead as a new experiment — it is the
+configuration every boot of this line has already run in.** 2FB's finding
+that the cable must be in at boot, 2BD's preferred timing 148500, the EDID
+over I2C-over-AUX, the `RBFBAuxEn` mask 5, all 11 boots of DPCD `0x202`
+`0x00` — every one of those was measured through this adapter.
+
+**It does not touch the blocker.** PHY2 is held in reset, which is upstream of
+DP alt mode and therefore upstream of any protocol conversion behind it. The
+adapter is a DP sink that needs the main link up; the main link needs the PHY
+out of reset. Nothing in 307-310d is re-opened or weakened by this.
+
+**What it does create is the one cheap untested axis left: the SINK ITSELF has
+never been varied.** n=1 on the sink across this entire line, ~30 boots. The
+firmware's boot-time connect path is what writes `AUX_EN` (2FB), so the
+firmware does look at this port at boot and does act on it — and it has only
+ever been shown one sink identity, that of a branch device. **A plain
+USB-C-to-DP cable straight into the MP2412C's DP input is a different
+boot-time configuration, costs one boot and zero code, and has never been
+tried.** Rule 47's clause that the configuration at boot is part of the
+measurement, applied to the one term nobody varied.
+
+**Stated honestly: no mechanism is proposed.** Nothing read in 300-310e says
+the sink's identity feeds the firmware's decision to release `PHY_RESET`. This
+is a cheap variation on an unvaried axis, not a candidate with an argument
+behind it, and it must not be written up as one. Its value is that everything
+with an argument behind it is now dead.
+
+### The other HDMI route, for the record
+
+The chassis **HDMI-A port is dGPU-wired** (rule 47), so in the Eco /
+iGPU-only mode this whole project requires it is not connected to the 680M at
+all. Reaching it needs hybrid mode, where the eDP backlight belongs to the
+dGPU and our brightness registers drive nothing — six milestones went into
+that gap. **So both HDMI routes are blocked, by two unrelated things**: the
+chassis port by the MUX wiring, and USB-C by PHY2's reset.
