@@ -138,6 +138,31 @@ for I in 0 1 2 3 4; do
              A:SRAM_EXT_LD_DONE=536870912 A:RTUNE_ACK=262144 \
              D:REF_CLKDET_EN=16777216 D:PHY_RESET=1 D:TEST_POWERDOWN=8 ;;
   esac
+  XL=$(get RBFBPhy${I}ExtLdDone); BY=$(get RBFBPhy${I}SramBypass)
+  RR=$(get RBFBPhy${I}RefRange);   SD=$(get RBFBPhy${I}SramDiff)
+  if [ -n "$XL" ]; then
+    printf "        SRAM handshake      EXT_LD_DONE %s  SRAM_BYPASS %s  REF_RANGE %s\n" \
+           "$XL" "$BY" "$RR"
+    case "$SD" in
+      18446744073709551614|-2)
+        printf "        (this IS the control instance - no self-comparison)\n" ;;
+      18446744073709551615|-1)
+        printf "        *** the comparison REFUSED - no sample to compare ***\n" ;;
+      0)
+        printf "        agrees with the live panel on all three\n" ;;
+      '')
+        printf "        diff ABSENT - the loaded kext predates it (rule 15)\n" ;;
+      *)
+        printf "        DIFFERS from the live panel:"
+        if [ $(( SD & 1 )) -ne 0 ]; then printf " EXT_LD_DONE"; fi
+        if [ $(( SD & 2 )) -ne 0 ]; then printf " SRAM_BYPASS"; fi
+        if [ $(( SD & 4 )) -ne 0 ]; then printf " REF_RANGE"; fi
+        printf "\n"
+        printf "        NOTE: EXT_LD_DONE and SRAM_BYPASS are SET TOGETHER on\n"
+        printf "        the panel and CLEAR TOGETHER here, so they are ONE\n"
+        printf "        observation, not two independent ones.\n" ;;
+    esac
+  fi
   if [ "$CV" = "1" ]; then
     printf "        clkdet result is BELIEVABLE (the detector is enabled)\n"
   else

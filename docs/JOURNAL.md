@@ -65301,3 +65301,114 @@ is **inside the firmware's handling of this command**: either it declines on a
 precondition we have not identified, or the table it runs for a USB-C PHY does
 something other than release reset. That is where the next milestone has to
 start, and it is **not** reachable by sending more of what we already send.
+
+---
+
+## 308 — THE SIBLING PROJECTS HAVE NO ANSWER, AND OUR OWN HEADER DOES
+
+The user named three non-ChefKiss projects to mine. Licences read first, code
+after: **Cobalt64** (Almosst-DEV, **MIT**, RDNA 4 / Navi 48 dGPU),
+**UnifiedRed** (CL0utM4N, **BSD-3-Clause**, Carrizo / Bristol / Stoney over
+Apple's Polaris drivers), **nullarc** (luuumi-dev, **multi**: MIT or
+GPL-2.0-only for its own code, PolyForm Noncommercial 1.0.0 for the parts
+derived from NullMoth, MIT for the Mesa patches — a *use* restriction, not a
+reading one, and this work is noncommercial). All three readable. Cloned
+shallow into isolated scratch directories; nothing from them was executed.
+
+### None of them has solved this
+
+- **nullarc is the closest sibling anyone has — Radeon 780M, Phoenix,
+  DCN 3.1.4, one minor version off our 3.1.2 — and its own README lists
+  "External displays (HDMI, USB-C)" under "Not yet".** It has **no DPCS or
+  RDPCSTX material at all**: it reaches Metal through Mesa RADV over the
+  firmware-lit panel, which is our own shape. So the nearest chip to ours has
+  the identical hole, and that is worth knowing rather than hoping.
+- **Cobalt64** touches RDPCSTX, but as a **read survey** on Navi 48, and its
+  `PHY_RESET`-shaped hits are all GFX/MEC/SDMA engine resets, not the DPCS
+  PHY. It writes no PHY reset release.
+- **UnifiedRed** is DCE 11 era; there is no DPCS block on those parts.
+
+**So no sibling project answers the blocker.** That is a result and it closes
+a line of enquiry rather than opening one.
+
+### But Cobalt64 said something useful about OUR instrument
+
+Its Navi 48 survey enumerates the **whole** RDPCSTX block — `PHY_CNTL0..17`,
+`PHY_FUSE0..3`, `CNTL2/3/4`, `DPALT_CNTL_SPARE`, `PATTERN_DETECT_CTRL`,
+`RDPCS_TX_CR_ADDR` / `CR_DATA` (the indirect PHY window), `PLL_UPDATE_*`,
+`RX_LD_VAL`, `SCRATCH0..2` — roughly 35 registers per instance. **We read
+five.** Different chip, different offsets, so none of its numbers transfer;
+what transferred is the question *how much of this block have you actually
+looked at*, and the answer was 14 %.
+
+### AND THE LEAD WAS IN OUR OWN HEADER ALL ALONG
+
+`dpcs_4_2_0_sh_mask.h` gives `RDPCSTX0_RDPCSTX_PHY_CNTL0` **sixteen** fields.
+Decoding boot 479's two words per FIELD instead of reading them as hex — the
+first time this was done — the live panel against PHY2:
+
+| `PHY_CNTL0` field | PHY0, the live panel | PHY2 |
+|---|---|---|
+| `RDPCS_PHY_RESET` | 0 | **1** |
+| `RDPCS_PHY_TCA_PHY_RESET` | 0 | 0 |
+| `RDPCS_PHY_TCA_APB_RESET_N` | 1 | 1 |
+| `RDPCS_PHY_TEST_POWERDOWN` | 0 | 0 |
+| `RDPCS_PHY_CR_PARA_SEL` | 1 | 1 |
+| `RDPCS_PHY_REF_CLKDET_EN` | 0 | 0 |
+| `RDPCS_PHY_REF_RANGE` | **0** | **3** |
+| `RDPCS_SRAM_INIT_DONE` | 1 | 1 |
+| `RDPCS_SRAM_EXT_LD_DONE` | **1** | **0** |
+| `RDPCS_SRAM_BYPASS` | **1** | **0** |
+
+(0xb0100004 and 0x10100605 account for exactly these, bit for bit.)
+
+**`SRAM_EXT_LD_DONE` and `SRAM_BYPASS` differ, and `SRAM_BYPASS` was not in
+`rb_dpcsphy.h` at all.** `SRAM_INIT_DONE` — the bit 307 cited as "the
+firmware is loaded" — is set on **both**, so it is the term in that sentence
+that carries no information. The panel's PHY has the SRAM-load handshake
+*completed* and its reset released; PHY2 has the handshake *not completed* and
+its reset held. The recurring error's own prescription, "read the register
+definition before designing an experiment to infer it", applied to a header
+that has been on disk since the start.
+
+**This is a candidate, not a mechanism.** n=1 per side, no caller identified,
+no second lit instance (rule 18) — and `rb_dpcsphy.h` says all of that in the
+file rather than in a commit message.
+
+### THE CLASSIFICATION WAS WRONG, AND IN MY OWN SPLIT
+
+`SRAM_EXT_LD_DONE` had been sitting in the **ANSWERED** set — asserted as a
+hardware report — on nothing but its name. **No vendored Linux `.c` mentions
+it, or `SRAM_BYPASS`, or `REF_RANGE`.** Upstream's DCN20-era DPCS init writes
+EXT_LD_DONE from software, which would make it DRIVEN, but that code is not in
+this tree and this chip NULLs every `dpcs_*` hook, so **there is no caller to
+read** (rule 46). Calling it ANSWERED makes a 0 mean "the hardware says not
+loaded"; calling it DRIVEN makes the same 0 mean "we never wrote it". Both are
+claims. So there is now a third set, **`RB_DPCSPHY_U_*` UNATTRIBUTED**, and
+the hosttest proves all three sets **pairwise** disjoint per register. The
+file makes no claim it cannot support — which is the point of the split and is
+exactly what it had failed to do.
+
+### The instrument, with its own control and its own limit
+
+`rb_dpcsphy_sram_diff(subject, control)` returns a **mask of which fields
+differ** from the live panel, refuses `-1` on NULL and **`-2` when the subject
+IS the control** — because 0 is the real answer "they agree", and a
+self-comparison is the absence of a control, not evidence of one. Published
+per instance as `RBFBPhy<i>ExtLdDone` / `SramBypass` / `RefRange` /
+`SramDiff`, so the comparison is in the data instead of left to a reader's eye
+on two hex words, which is how these two bits went unnoticed for a milestone.
+
+**Eight break-it guards; seven caught first time and the eighth found a limit
+of the data.** Swapping `sram_bypass` to read `EXT_LD_DONE` **FIRED
+NOTHING**: in boot 479's words the two bits are set together on the panel and
+clear together on PHY2, so **the comparison is ONE observation about the SRAM
+handshake and not two independent ones.** Third time this sweep has found a
+pair our own data cannot separate (after `TX_CLOCK_ON`/`TX_CLK_EN` and
+`TX_FIFO_EN`/the lane enables). The hosttest pins each accessor with synthetic
+words; separating them on hardware needs a sample where one is set without the
+other.
+
+Framebuffer UUID **DDFF93EB**, not installed. `tools/phylook.sh` prints the
+handshake, names which fields differ, and says in prose that the two SRAM bits
+are not independent.
